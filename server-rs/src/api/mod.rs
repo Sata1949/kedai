@@ -11,6 +11,7 @@ pub mod diagnostics;
 pub mod import_export;
 pub mod kaleido;
 pub mod macros;
+pub mod memory;
 pub mod plugins;
 pub mod prompt_inject;
 pub mod quick_replies;
@@ -132,6 +133,19 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/settings/prompt-preview",
             get(settings::prompt_preview),
+        )
+        // 跨会话记忆蒸馏(落地项 2):蒸馏 / 列表 / 手动添加 / 编辑 / 删除
+        .route(
+            "/api/memory/distill",
+            post(memory::distill),
+        )
+        .route(
+            "/api/memory",
+            get(memory::list).post(memory::create),
+        )
+        .route(
+            "/api/memory/{id}",
+            axum::routing::patch(memory::update).delete(memory::delete),
         )
         // Agent
         .route("/api/agent/plan", post(agent::plan))

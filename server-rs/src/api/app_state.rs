@@ -9,6 +9,7 @@ use crate::services::audio_service::AudioService;
 use crate::services::character_service::CharacterService;
 use crate::services::contract_changelog_service::ContractChangelogService;
 use crate::services::kaleido_state_service::KaleidoStateService;
+use crate::services::memory_service::MemoryService;
 use crate::services::prompt_inject_service::PromptInjectService;
 use crate::services::quick_reply_service::QuickReplyService;
 use crate::services::runtime_prompt_service::RuntimePromptService;
@@ -61,6 +62,8 @@ pub struct AppState {
     pub quick_replies: Arc<QuickReplyService>,
     /// 用户脚本(ScriptTree,阶段三):global 存 SQLite,character 存角色卡 extensions.tavern_helper
     pub user_scripts: Arc<UserScriptService>,
+    /// 跨会话记忆蒸馏(落地项 2):按角色维度共享的长期记忆条目
+    pub memory: Arc<MemoryService>,
     /// 任务模式(task 工作台):任务主表 + 子任务 + 后台执行引擎
     pub tasks: Arc<TaskService>,
     /// slash 命令注册表(阶段四 4a):脚本 triggerSlash 与 GET /api/slash/commands 共用
@@ -100,6 +103,8 @@ impl AppState {
             }
         }
         let agent_subtasks = Arc::new(AgentSubtaskService::new(db.clone()));
+        // 跨会话记忆蒸馏(落地项 2):记忆槽注入 / memory 工具写入 / 蒸馏 API 共用
+        let memory = Arc::new(MemoryService::new(db.clone()));
         // 快速回复(getqr 渲染数据源)
         let quick_replies = Arc::new(QuickReplyService::new(db.clone()));
         // 用户脚本(ScriptTree,阶段三)
@@ -149,6 +154,7 @@ impl AppState {
             settings: settings.clone(),
             connector: connector.clone(),
             data_dir: config.data_dir.clone(),
+            memory: memory.clone(),
         });
         crate::tools::register_builtin_tools(&tool_registry, deps);
 
@@ -241,6 +247,7 @@ impl AppState {
             slash.clone(),
             contract_registry.clone(),
             kaleido_state.clone(),
+            memory.clone(),
         ));
         let engine_model = engine.model();
 
@@ -268,6 +275,7 @@ impl AppState {
             audio,
             quick_replies,
             user_scripts,
+            memory,
             slash,
             runtime_prompt,
             flow,

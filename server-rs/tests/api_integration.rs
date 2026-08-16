@@ -2029,3 +2029,350 @@ async fn diagnostics_cache_reports_hit_rate_and_pricing() {
     assert_eq!(body["totals"]["count"], json!(1));
     assert_eq!(body["entries"][0]["hit"], json!(600));
 }
+
+// ===== 跨会话记忆蒸馏(落地项 2) =====
+
+/// 记忆库全流程:设置开关 → 蒸馏(mock [[reply:]] 钩子按行拆分)→ 列表 → 手动添加
+/// → 编辑 → 删除;默认未开启蒸馏时端点拒绝。
+#[tokio::test]
+async fn memory_distill_crud_flow() {
+    let app = test_app();
+    let (_, char) = upload_character(app, "记忆角色.json").await;
+    let cid = char["id"].as_str().unwrap().to_string();
+    let (_, session) = send_json(
+        app,
+        "POST",
+        "/api/chat/sessions",
+        json!({ "character_id": cid }),
+    )
+    .await;
+    let sid = session["id"].as_str().unwrap().to_string();
+
+    // 默认蒸馏关闭:端点拒绝并给出开启指引(先显式复位,规避并行用例的设置残留)
+    let _ = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({ "memory_distill_enabled": false }),
+    )
+    .await;
+    let (status, err) = send_json(
+        app,
+        "POST",
+        "/api/memory/distill",
+        json!({ "session_id": sid }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "未开启应 400: {err}");
+    assert!(err["error"].as_str().unwrap().contains("memory_distill_enabled"));
+
+    // 开启蒸馏
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({ "memory_distill_enabled": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // 导入带 [[reply:]] 钩子的历史:mock 连接器回显标记内文本 → 按行拆 2 条
+    let (status, _) = send_json(
+        app,
+        "POST",
+        "/api/import/chat",
+        json!({ "session_id": sid, "messages": [
+            { "role": "user", "content": "我们聊聊吧[[reply:用户喜欢下雪天\n角色害怕打雷]]" },
+            { "role": "assistant", "content": "好呀。" }
+        ] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = send_json(
+        app,
+        "POST",
+        "/api/memory/distill",
+        json!({ "session_id": sid }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "蒸馏失败: {body}");
+    assert_eq!(body["inserted"], json!(2), "应按行拆 2 条: {body}");
+    assert_eq!(body["character_id"], json!(cid));
+
+    // 列表:全字段(id/kind/source_session_id/content/usage_count/selected)
+    let (status, list) = send_json(
+        app,
+        "GET",
+        &format!("/api/memory?character_id={cid}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let memories = list["memories"].as_array().unwrap();
+    assert_eq!(memories.len(), 2);
+    let m0 = &memories[0];
+    assert!(m0["id"].is_i64());
+    assert_eq!(m0["character_id"], json!(cid));
+    assert_eq!(m0["kind"], json!("distilled"));
+    assert_eq!(m0["source_session_id"], json!(sid));
+    assert_eq!(m0["usage_count"], json!(0));
+    assert_eq!(m0["selected"], json!(true));
+    assert!(m0["created_at"].is_string());
+    let contents: Vec<&str> = memories
+        .iter()
+        .map(|m| m["content"].as_str().unwrap())
+        .collect();
+    assert!(contents.contains(&"用户喜欢下雪天"), "内容: {contents:?}");
+    assert!(contents.contains(&"角色害怕打雷"), "内容: {contents:?}");
+
+    // 手动添加
+    let (status, created) = send_json(
+        app,
+        "POST",
+        "/api/memory",
+        json!({ "character_id": cid, "content": "  用户养了一只猫  " }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "手动添加失败: {created}");
+    assert_eq!(created["memory"]["kind"], json!("manual"));
+    assert_eq!(created["memory"]["content"], json!("用户养了一只猫"));
+    let manual_id = created["memory"]["id"].as_i64().unwrap();
+
+    // 编辑:content 与 selected
+    let (status, updated) = send_json(
+        app,
+        "PATCH",
+        &format!("/api/memory/{manual_id}"),
+        json!({ "content": "用户养了两只猫", "selected": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "编辑失败: {updated}");
+    assert_eq!(updated["memory"]["content"], json!("用户养了两只猫"));
+    assert_eq!(updated["memory"]["selected"], json!(false));
+    // 空白 content 拒绝
+    let (status, _) = send_json(
+        app,
+        "PATCH",
+        &format!("/api/memory/{manual_id}"),
+        json!({ "content": "   " }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // 不存在的 id → 404
+    let (status, _) = send_json(app, "PATCH", "/api/memory/999999", json!({ "selected": true })).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // 删除:204;重复删除 404
+    let status = send_empty(app, "DELETE", &format!("/api/memory/{manual_id}")).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let status = send_empty(app, "DELETE", &format!("/api/memory/{manual_id}")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    // 删除后列表只剩 2 条蒸馏记忆
+    let (_, list) = send_json(
+        app,
+        "GET",
+        &format!("/api/memory?character_id={cid}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(list["memories"].as_array().unwrap().len(), 2);
+    // 还原蒸馏开关,避免污染并行用例
+    let _ = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({ "memory_distill_enabled": false }),
+    )
+    .await;
+}
+
+/// 记忆设置白名单透出:GET 默认 关闭/上限 8;PUT 可写,越界(>50)忽略、0 合法
+#[tokio::test]
+async fn memory_settings_exposed_and_clamped() {
+    let app = test_app();
+    let (status, s) = send_json(app, "GET", "/api/settings", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        s["memory_distill_enabled"].is_boolean(),
+        "设置应透出 memory_distill_enabled: {s}"
+    );
+    assert_eq!(s["memory_inject_limit"], json!(8), "注入上限默认 8: {s}");
+
+    // 越界值忽略(保持 8);0 合法(关闭注入)
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({ "memory_inject_limit": 999 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, s) = send_json(app, "GET", "/api/settings", json!({})).await;
+    assert_eq!(s["memory_inject_limit"], json!(8), "越界值应被忽略");
+
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({ "memory_inject_limit": 0 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, s) = send_json(app, "GET", "/api/settings", json!({})).await;
+    assert_eq!(s["memory_inject_limit"], json!(0), "0 应合法(关闭注入)");
+    // 还原注入上限默认,避免影响并行用例
+    let _ = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({ "memory_inject_limit": 8 }),
+    )
+    .await;
+}
+
+/// 端到端:记忆槽随 chat/send 注入消息数组([[floors]] 回显断言),响应完成后
+/// touch 回写 usage_count;inject_limit=0 时等价关闭注入。
+#[tokio::test]
+async fn memory_slot_injected_and_touched() {
+    let app = test_app();
+    let (_, char) = upload_character(app, "记忆注入角色.json").await;
+    let cid = char["id"].as_str().unwrap().to_string();
+    let (_, session) = send_json(
+        app,
+        "POST",
+        "/api/chat/sessions",
+        json!({ "character_id": cid }),
+    )
+    .await;
+    let sid = session["id"].as_str().unwrap().to_string();
+
+    // 手动添加一条记忆(默认 inject_limit=8 > 0,即注入)
+    let (status, created) = send_json(
+        app,
+        "POST",
+        "/api/memory",
+        json!({ "character_id": cid, "content": "用户偏爱雨天" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let memory_id = created["memory"]["id"].as_i64().unwrap();
+
+    // 发送一轮:[[floors]] 回显完整 LLM 消息数组 → 记忆槽应作为独立 system 消息出现
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/chat/send")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({ "session_id": sid, "character_id": cid, "message": "看记忆 [[floors]]" }).to_string(),
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&bytes).to_string();
+    let events: Vec<Value> = text
+        .split("\n\n")
+        .filter_map(|block| {
+            let block = block.trim();
+            if block.is_empty() {
+                return None;
+            }
+            let data_line = block.lines().find(|l| l.starts_with("data: "))?;
+            serde_json::from_str(&data_line[6..]).ok()
+        })
+        .collect();
+    let finish = events
+        .iter()
+        .find(|e| e["type"] == "finish")
+        .expect("应有 finish 事件");
+    let echoed = finish["content"].as_str().unwrap();
+    assert!(
+        echoed.contains("[system] 【角色长期记忆】"),
+        "回显应含记忆槽 system 消息: {}",
+        &echoed[..echoed.len().min(300)]
+    );
+    assert!(
+        echoed.contains("- 用户偏爱雨天"),
+        "记忆槽应逐条一行注入: {}",
+        &echoed[..echoed.len().min(300)]
+    );
+
+    // 响应完成后 touch 生效:usage_count+1、last_usage 落时间戳,content 不变
+    let (_, list) = send_json(
+        app,
+        "GET",
+        &format!("/api/memory?character_id={cid}"),
+        json!({}),
+    )
+    .await;
+    let entry = list["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"].as_i64() == Some(memory_id))
+        .expect("应能查到记忆条目");
+    assert_eq!(entry["usage_count"], json!(1), "注入后应回写计数: {entry}");
+    assert!(entry["last_usage"].is_string(), "last_usage 应有值: {entry}");
+
+    // inject_limit=0 等价关闭注入:新会话(避免上轮回显文本残留在历史)不再出现记忆槽
+    let _ = send_json(app, "PUT", "/api/settings", json!({ "memory_inject_limit": 0 })).await;
+    let (_, session2) = send_json(
+        app,
+        "POST",
+        "/api/chat/sessions",
+        json!({ "character_id": cid }),
+    )
+    .await;
+    let sid2 = session2["id"].as_str().unwrap().to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/chat/send")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({ "session_id": sid2, "character_id": cid, "message": "再看 [[floors]]" }).to_string(),
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&bytes).to_string();
+    let events: Vec<Value> = text
+        .split("\n\n")
+        .filter_map(|block| {
+            let block = block.trim();
+            if block.is_empty() {
+                return None;
+            }
+            let data_line = block.lines().find(|l| l.starts_with("data: "))?;
+            serde_json::from_str(&data_line[6..]).ok()
+        })
+        .collect();
+    let finish = events
+        .iter()
+        .find(|e| e["type"] == "finish")
+        .expect("应有 finish 事件");
+    let echoed2 = finish["content"].as_str().unwrap();
+    assert!(
+        !echoed2.contains("【角色长期记忆】"),
+        "limit=0 时不应注入记忆槽: {}",
+        &echoed2[..echoed2.len().min(300)]
+    );
+    // 计数不再增长(第二轮未注入)
+    let (_, list) = send_json(
+        app,
+        "GET",
+        &format!("/api/memory?character_id={cid}"),
+        json!({}),
+    )
+    .await;
+    let entry = list["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"].as_i64() == Some(memory_id))
+        .unwrap();
+    assert_eq!(entry["usage_count"], json!(1), "未注入不应回写计数");
+
+    // 还原设置,避免污染并行用例
+    let _ = send_json(app, "PUT", "/api/settings", json!({ "memory_inject_limit": 8 })).await;
+}

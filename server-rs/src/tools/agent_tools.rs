@@ -48,6 +48,8 @@ pub struct ToolDeps {
     pub settings: Arc<Mutex<RuntimeSettings>>,
     pub connector: Arc<RwLock<Connector>>,
     pub data_dir: PathBuf,
+    /// 跨会话记忆蒸馏(落地项 2):memory_write / memory_read 共用
+    pub memory: Arc<crate::services::memory_service::MemoryService>,
 }
 
 impl ToolDeps {
@@ -76,6 +78,7 @@ impl ToolDeps {
                 crate::connectors::mock::MockConnector::new(),
             ))),
             data_dir: dir,
+            memory: Arc::new(crate::services::memory_service::MemoryService::new(db)),
         }
     }
 }

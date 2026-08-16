@@ -7,6 +7,7 @@ pub mod cache_diagnostics;
 pub mod character_service;
 pub mod contract_changelog_service;
 pub mod kaleido_state_service;
+pub mod memory_service;
 pub mod prompt_inject_service;
 pub mod quick_reply_service;
 pub mod runtime_prompt_service;

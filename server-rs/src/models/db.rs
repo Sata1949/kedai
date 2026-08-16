@@ -229,6 +229,24 @@ CREATE TABLE IF NOT EXISTS kaleido_changelog (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_kaleido_changelog_session ON kaleido_changelog(session_id, seq);
+-- 跨会话记忆蒸馏(2026-08 落地项 2):按角色维度共享的长期记忆条目。
+-- kind: distilled(LLM 蒸馏)/ tool(agent memory_write 工具写入)/ manual(手动添加);
+-- selected: 是否参与注入候选(0/1);usage_count/last_usage 为衰减精选排序键。
+-- character_id 不设外键:记忆须活过会话生命周期由用户显式管理(删角色不级联清记忆),
+-- 与 agent_subtasks.character_id 同策略;source_session_id 记录来源会话(可空)。
+CREATE TABLE IF NOT EXISTS memory_entries (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  character_id      TEXT NOT NULL,
+  source_session_id TEXT,
+  kind              TEXT NOT NULL CHECK (kind IN ('distilled','tool','manual')),
+  content           TEXT NOT NULL,
+  usage_count       INTEGER NOT NULL DEFAULT 0,
+  last_usage        TEXT,
+  selected          INTEGER NOT NULL DEFAULT 1,
+  created_at        TEXT NOT NULL,
+  updated_at        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_memory_entries_character ON memory_entries(character_id, selected);
 "#;
 
 pub struct Db {

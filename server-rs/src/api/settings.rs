@@ -98,6 +98,12 @@ pub struct UpdateSettingsBody {
     /// LLM 请求快照开关(第四点·主题 A)
     #[serde(default)]
     pub llm_request_log: Option<bool>,
+    /// 跨会话记忆蒸馏开关(落地项 2)
+    #[serde(default)]
+    pub memory_distill_enabled: Option<bool>,
+    /// 记忆槽注入条数上限(0..=50;0 = 关闭注入)
+    #[serde(default)]
+    pub memory_inject_limit: Option<u32>,
 }
 
 /// 序列化运行期设置(API Key 脱敏)
@@ -128,6 +134,8 @@ fn settings_json(s: &RuntimeSettings) -> Value {
         "compaction_keep_recent": s.compaction_keep_recent,
         "compaction_snip_bytes": s.compaction_snip_bytes,
         "llm_request_log": s.llm_request_log,
+        "memory_distill_enabled": s.memory_distill_enabled,
+        "memory_inject_limit": s.memory_inject_limit,
     })
 }
 
@@ -325,6 +333,16 @@ pub async fn update_settings(
             // LLM 请求快照开关
             if let Some(v) = body.llm_request_log {
                 apply!(s, is_task, llm_request_log, v);
+            }
+            // 记忆蒸馏开关(落地项 2)
+            if let Some(v) = body.memory_distill_enabled {
+                apply!(s, is_task, memory_distill_enabled, v);
+            }
+            // 记忆注入上限(0..=50;0 = 关闭注入,越界忽略)
+            if let Some(v) = body.memory_inject_limit {
+                if v <= 50 {
+                    apply!(s, is_task, memory_inject_limit, v);
+                }
             }
         }
     }

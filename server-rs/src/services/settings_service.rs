@@ -82,6 +82,12 @@ pub struct ModeSettings {
     pub compaction_snip_bytes: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_request_log: Option<bool>,
+    /// 跨会话记忆蒸馏开关(落地项 2;默认关闭)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_distill_enabled: Option<bool>,
+    /// 记忆槽注入条数上限(0 = 关闭注入;默认 8,钳 0..=50)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_inject_limit: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -158,6 +164,12 @@ pub struct RuntimeSettings {
     /// (含 system/注入/工具消息,可回放调试;默认关闭避免占用磁盘)
     #[serde(default)]
     pub llm_request_log: bool,
+    /// 跨会话记忆蒸馏开关(落地项 2):开启后 /api/memory/distill 可用(默认关闭)
+    #[serde(default)]
+    pub memory_distill_enabled: bool,
+    /// 记忆槽注入条数上限(默认 8,钳 0..=50;0 = 等价关闭注入)
+    #[serde(default = "default_memory_inject_limit")]
+    pub memory_inject_limit: u32,
     /// 任务工作台的按模式覆盖项。扁平字段即角色扮演(roleplay)的权威值——引擎直接读
     /// 扁平字段,故 roleplay 不设覆盖层;task 用此覆盖层替换扁平字段的差异项。
     /// 旧 settings.json 无此字段,serde default 为空 = task 沿用扁平值。
@@ -205,6 +217,11 @@ fn default_compaction_snip_bytes() -> u32 {
     8192
 }
 
+/// 默认记忆槽注入条数上限(落地项 2)
+fn default_memory_inject_limit() -> u32 {
+    8
+}
+
 /// 默认搜索端点(DuckDuckGo HTML 免费接口,无需 API Key)
 pub const DEFAULT_SEARCH_ENDPOINT: &str = "https://html.duckduckgo.com/html/";
 
@@ -238,6 +255,8 @@ impl RuntimeSettings {
             compaction_keep_recent: default_compaction_keep_recent(),
             compaction_snip_bytes: default_compaction_snip_bytes(),
             llm_request_log: false,
+            memory_distill_enabled: false,
+            memory_inject_limit: default_memory_inject_limit(),
             task: ModeSettings::default(),
         }
     }
@@ -314,6 +333,12 @@ impl RuntimeSettings {
         if let Some(v) = ov.llm_request_log {
             out.llm_request_log = v;
         }
+        if let Some(v) = ov.memory_distill_enabled {
+            out.memory_distill_enabled = v;
+        }
+        if let Some(v) = ov.memory_inject_limit {
+            out.memory_inject_limit = v;
+        }
         out
     }
 
@@ -357,6 +382,10 @@ impl RuntimeSettings {
                 // snip 阈值钳制到 0..=1MB(0 = 禁用 snip;负数/超大值视为异常回退默认)
                 if s.compaction_snip_bytes > 1_048_576 {
                     s.compaction_snip_bytes = default_compaction_snip_bytes();
+                }
+                // 记忆注入上限钳制到 0..=50(0 = 关闭注入;旧配置缺省由 serde default 填 8)
+                if s.memory_inject_limit > 50 {
+                    s.memory_inject_limit = default_memory_inject_limit();
                 }
                 let was_plaintext =
                     !s.openai_api_key.is_empty() && !secret_store::is_protected(&s.openai_api_key);
@@ -614,5 +643,55 @@ mod tests {
         let loaded = RuntimeSettings::load(&dir, &test_cfg());
         assert!(!loaded.render_html, "旧配置缺省时 HTML 渲染必须关闭");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 记忆设置(落地项 2):默认 关闭蒸馏 / 注入上限 8;
+    /// 旧版 settings.json 缺字段时 serde default 补齐;越界值钳回默认;保存往返还原。
+    #[test]
+    fn memory_settings_defaults_clamp_and_roundtrip() {
+        let cfg = test_cfg();
+        let s = RuntimeSettings::from_config(&cfg);
+        assert!(!s.memory_distill_enabled, "蒸馏默认关闭");
+        assert_eq!(s.memory_inject_limit, 8, "注入上限默认 8");
+
+        // 旧版配置缺字段:serde default 补齐,行为与默认一致
+        let dir = tmp_dir("memory-legacy");
+        let mut json = serde_json::to_value(&s).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .remove("memory_distill_enabled");
+        json.as_object_mut().unwrap().remove("memory_inject_limit");
+        std::fs::write(
+            dir.join("settings.json"),
+            serde_json::to_string_pretty(&json).unwrap(),
+        )
+        .unwrap();
+        let loaded = RuntimeSettings::load(&dir, &cfg);
+        assert!(!loaded.memory_distill_enabled);
+        assert_eq!(loaded.memory_inject_limit, 8);
+
+        // 越界(>50)钳回默认;0 合法(等价关闭注入)
+        let dir2 = tmp_dir("memory-clamp");
+        let mut s2 = RuntimeSettings::from_config(&cfg);
+        s2.memory_distill_enabled = true;
+        s2.memory_inject_limit = 500;
+        s2.save(&dir2).unwrap();
+        let loaded2 = RuntimeSettings::load(&dir2, &cfg);
+        assert!(loaded2.memory_distill_enabled, "开关应保存往返还原");
+        assert_eq!(loaded2.memory_inject_limit, 8, "越界上限应钳回 8");
+
+        let dir3 = tmp_dir("memory-zero");
+        let mut s3 = RuntimeSettings::from_config(&cfg);
+        s3.memory_inject_limit = 0;
+        s3.save(&dir3).unwrap();
+        assert_eq!(
+            RuntimeSettings::load(&dir3, &cfg).memory_inject_limit,
+            0,
+            "0 是合法值(关闭注入)"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
+        let _ = std::fs::remove_dir_all(&dir3);
     }
 }

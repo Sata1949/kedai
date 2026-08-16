@@ -128,6 +128,25 @@ CREATE TABLE IF NOT EXISTS kaleido_changelog (
 );
 CREATE INDEX IF NOT EXISTS idx_kaleido_changelog_session ON kaleido_changelog(session_id, seq);
 "#;
+/// 跨会话记忆蒸馏表(落地项 2):memory_entries。合并前对两侧各补一次 DDL,
+/// 与 SCOPE_VARIABLES_DDL 同理(§4.3);索引不参与 schema 一致性比对。
+/// 正文只有 content 一列(蒸馏产物即短记忆行,无 raw/summary 拆分——若未来需要
+/// 保留原文,拆两条或 ALTER 补列,normalize_sql 已兼容表尾追加列)。
+const MEMORY_ENTRIES_DDL: &str = r#"
+CREATE TABLE IF NOT EXISTS memory_entries (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  character_id      TEXT NOT NULL,
+  source_session_id TEXT,
+  kind              TEXT NOT NULL CHECK (kind IN ('distilled','tool','manual')),
+  content           TEXT NOT NULL,
+  usage_count       INTEGER NOT NULL DEFAULT 0,
+  last_usage        TEXT,
+  selected          INTEGER NOT NULL DEFAULT 1,
+  created_at        TEXT NOT NULL,
+  updated_at        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_memory_entries_character ON memory_entries(character_id, selected);
+"#;
 
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct MergeReport {
@@ -310,6 +329,8 @@ fn merge_databases(baseline: &Path, source: &Path) -> Result<MergeReport, String
         .map_err(|e| format!("补齐基线库 contract_changelog 表失败: {e}"))?;
     conn.execute_batch(KALEIDO_STATE_DDL)
         .map_err(|e| format!("补齐基线库 kaleido 契约运行态表失败: {e}"))?;
+    conn.execute_batch(MEMORY_ENTRIES_DDL)
+        .map_err(|e| format!("补齐基线库 memory_entries 表失败: {e}"))?;
     let source_conn = Connection::open(source)
         .map_err(|e| format!("打开源快照补齐 schema 失败: {e}"))?;
     source_conn
@@ -332,6 +353,9 @@ fn merge_databases(baseline: &Path, source: &Path) -> Result<MergeReport, String
     source_conn
         .execute_batch(KALEIDO_STATE_DDL)
         .map_err(|e| format!("补齐源快照 kaleido 契约运行态表失败: {e}"))?;
+    source_conn
+        .execute_batch(MEMORY_ENTRIES_DDL)
+        .map_err(|e| format!("补齐源快照 memory_entries 表失败: {e}"))?;
     drop(source_conn);
     conn.execute("ATTACH DATABASE ?1 AS src", [source.to_string_lossy().as_ref()])
         .map_err(|e| format!("附加源快照失败: {e}"))?;

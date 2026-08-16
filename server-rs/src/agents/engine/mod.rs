@@ -51,8 +51,8 @@ use self::compaction::{
 use self::executor::{execute_generation, maybe_run_tool, run_tool_loop};
 use self::messages::{
     apply_inject_insertions, build_llm_messages_with_position, inject_reflect_advice,
-    insert_summary_slot, parse_inject_insertion, retreat_to_generating_step, step_params_for,
-    trim_to_context, with_step_prompt, InjectInsertion, InjectAt,
+    insert_memory_slot, insert_summary_slot, parse_inject_insertion, retreat_to_generating_step,
+    step_params_for, trim_to_context, with_step_prompt, InjectInsertion, InjectAt,
 };
 use self::mvu::{apply_mvu_patches, generate_mvu_status, strip_status_bar_tag};
 use self::reflector_integration::{generate_reflect_advice, reflect_with_tools};
@@ -163,6 +163,8 @@ pub struct AgentEngine {
     slash: Arc<crate::slash::SlashRegistry>,
     /// SQLite 句柄(Token 累计统计)
     db: Arc<Db>,
+    /// 跨会话记忆蒸馏(落地项 2):记忆槽注入与 touch 衰减回写
+    memory: Arc<crate::services::memory_service::MemoryService>,
     /// 契约注册表(character_id → Contract):与多步工具/API 写路径共享同一实例
     /// (AppState 构造注入),保证「改卡 → invalidate → 下轮重提取」的缓存一致性。
     pub(crate) contract_registry: Arc<crate::contracts::ContractRegistry>,
@@ -331,6 +333,7 @@ impl AgentEngine {
         slash: Arc<crate::slash::SlashRegistry>,
         contract_registry: Arc<crate::contracts::ContractRegistry>,
         kaleido_state: Arc<crate::services::kaleido_state_service::KaleidoStateService>,
+        memory: Arc<crate::services::memory_service::MemoryService>,
     ) -> Self {
         AgentEngine {
             connector,
@@ -346,6 +349,7 @@ impl AgentEngine {
             quick_replies,
             runtime_prompt,
             db,
+            memory,
             runs: Mutex::new(HashMap::new()),
             contract_registry,
             kaleido_state,
@@ -508,7 +512,7 @@ impl AgentEngine {
                 total_usage: &mut total_usage,
             };
             let ctx_data = self.collect_context(&req, &session_id, &mut rctx);
-            self.finalize_messages(&req, &session_id, &ctx_data, &mut rctx);
+            let memory_touched = self.finalize_messages(&req, &session_id, &ctx_data, &mut rctx);
 
             let tool_ctx = ToolContext {
                 session_id: session_id.clone(),
@@ -533,6 +537,17 @@ impl AgentEngine {
                     &mut rctx,
                 )
                 .await?;
+
+            // 记忆使用计数回写(落地项 2):生成主体已完成,本轮已注入内容不受影响;
+            // 只动 usage_count/last_usage,为下一轮精选衰减提供数据。失败仅告警。
+            if !memory_touched.is_empty() {
+                if let Err(e) = self.memory.touch(&memory_touched) {
+                    logger::warn(
+                        "记忆使用计数回写失败",
+                        &[("error", Value::String(e))],
+                    );
+                }
+            }
 
             // ===== 3. 收尾 =====
             if *abort_rx.borrow() {
@@ -1454,13 +1469,14 @@ impl AgentEngine {
     /// 注入运行时主提示词与 GENERATE/@INJECT 条目、按上下文窗口裁剪并统计发送侧
     /// 用量,最后把发送统计写入会话宏变量。结果写入 rctx.llm_messages。
     /// 对应 run_body 内「构建 LLM 消息」段的构建部分;L2 中层定位:上下文 → 可下发消息的转换。
+    /// 返回本轮注入记忆槽的条目 id(供响应后 touch 衰减回写;未注入为空)。
     fn finalize_messages(
         &self,
         req: &AgentRunRequest,
         session_id: &str,
         ctx: &CollectedCtx,
         rctx: &mut RunContext<'_>,
-    ) {
+    ) -> Vec<i64> {
         // 反思失败建议(位置0):本轮初始构建时恒为空(未失败/未生成),后续失败才注入
         let mut scopes_guard = rctx.scopes.lock().unwrap_or_else(|e| e.into_inner());
         let (messages, mut protected_tail) = build_llm_messages_with_position(
@@ -1515,6 +1531,23 @@ impl AgentEngine {
         if let Some(summary) = &ctx.history_summary {
             insert_summary_slot(&mut llm_messages, summary);
         }
+        // 跨会话记忆槽(落地项 2):摘要槽之后、历史之前注入精选记忆。
+        // inject_limit=0 等价关闭;character_id 为空或无选中记忆不插槽(与现状一致)。
+        // 记忆集合未变时槽内容逐字节稳定(select_for_injection 排序键确定性),
+        // touch 衰减回写延迟到响应主体生成之后,不影响本轮已构建内容。
+        let mut memory_touched: Vec<i64> = Vec::new();
+        let inject_limit = {
+            let s = self.settings.lock().unwrap_or_else(|e| e.into_inner());
+            s.memory_inject_limit as usize
+        };
+        if inject_limit > 0 && !req.character_id.trim().is_empty() {
+            let entries = self.memory.list(&req.character_id);
+            let picked = crate::services::memory_service::select_for_injection(&entries, inject_limit);
+            let contents: Vec<String> = picked.iter().map(|e| e.content.clone()).collect();
+            if insert_memory_slot(&mut llm_messages, &contents) {
+                memory_touched = picked.iter().map(|e| e.id).collect();
+            }
+        }
         // GENERATE 注入(ST-Prompt-Template 兼容):BEFORE 拼到 system 开头(角色内容之前,
         // 运行时主提示词之后,保持系统契约首位);AFTER 拼到 system 末尾(计入 protected_tail,
         // 防上下文裁剪先于注入被切掉)。
@@ -1564,6 +1597,7 @@ impl AgentEngine {
             session_id,
         );
         *rctx.llm_messages = llm_messages;
+        memory_touched
     }
 
     /// 阶段 3「步骤循环」:按计划顺序执行每个步骤(反思判定 / 工具循环 / 生成),

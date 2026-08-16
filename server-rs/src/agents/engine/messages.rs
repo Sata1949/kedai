@@ -779,14 +779,62 @@ pub(super) fn insert_summary_slot(messages: &mut Vec<LlmMessage>, summary: &str)
     true
 }
 
-/// 消息数组中受裁剪保护的头部条数:首条 system(恒保护)+ 摘要槽(存在则保护)。
-/// trim_to_context 从其后开始丢弃旧消息,摘要槽不会被裁掉。
+/// 消息数组中受裁剪保护的头部条数:首条 system(恒保护)+ 开头连续的
+/// 槽位 system 消息(摘要槽/记忆槽,存在则保护)。
+/// trim_to_context 从其后开始丢弃旧消息,摘要槽与记忆槽不会被裁掉。
 pub(super) fn protected_head_len(messages: &[LlmMessage]) -> usize {
     let mut n = usize::from(!messages.is_empty());
-    if messages.len() > 1 && messages[1].role == "system" {
-        n += 1;
+    for m in messages.iter().skip(1) {
+        if m.role == "system" {
+            n += 1;
+        } else {
+            break;
+        }
     }
     n
+}
+
+// ===== 记忆槽(跨会话记忆蒸馏·落地项 2) =====
+// 布局扩展为「system(静态)→ 摘要槽(半静态)→ 记忆槽(半静态)→ 尾部历史(只追加)」。
+// 记忆槽内容只由精选结果决定(select_for_injection 排序键确定性),同一记忆集合
+// 两次构建逐字节一致;touch 回写发生在响应之后,不影响本轮已构建内容。
+
+/// 记忆槽标记前缀:trim/测试据此识别记忆槽消息
+pub(super) const MEMORY_SLOT_MARKER: &str = "【角色长期记忆】";
+
+/// 把跨会话记忆插入为独立 system 消息槽:摘要槽之后(无摘要槽时紧跟首 system)、
+/// 其余消息之前。contents 为已精选排序的记忆正文,每条一行「- content」;
+/// 空列表或全空白不动数组(行为与无记忆现状一致)。返回是否插入。
+pub(super) fn insert_memory_slot(messages: &mut Vec<LlmMessage>, contents: &[String]) -> bool {
+    let lines: Vec<&str> = contents
+        .iter()
+        .map(|c| c.trim())
+        .filter(|c| !c.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return false;
+    }
+    let body = lines
+        .iter()
+        .map(|l| format!("- {l}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let slot = LlmMessage::plain("system", &format!("{MEMORY_SLOT_MARKER}\n{body}"));
+    // 插入点:摘要槽(SUMMARY_SLOT_MARKER 开头的 system 消息)之后;
+    // 无摘要槽时与 insert_summary_slot 同位(首条非 system 消息之前,正常布局为 1)
+    let at = match messages
+        .iter()
+        .position(|m| m.role == "system" && m.content.starts_with(SUMMARY_SLOT_MARKER))
+    {
+        Some(i) => i + 1,
+        None => messages
+            .iter()
+            .position(|m| m.role != "system")
+            .unwrap_or(messages.len())
+            .min(1),
+    };
+    messages.insert(at.min(messages.len()), slot);
+    true
 }
 
 #[cfg(test)]
@@ -2166,6 +2214,139 @@ mod tests {
                 .iter()
                 .map(|m| m.content.chars().take(20).collect::<String>())
                 .collect::<Vec<_>>()
+        );
+    }
+
+    // ===== 记忆槽(跨会话记忆蒸馏·落地项 2) =====
+
+    /// 记忆槽位于摘要槽之后、历史之前;每条一行「- content」;无摘要槽时紧跟 system
+    #[test]
+    fn memory_slot_lives_after_summary_slot() {
+        let history = vec![
+            ("user".to_string(), "旧对话".to_string()),
+            ("assistant".to_string(), "旧回复".to_string()),
+        ];
+        let mut msgs = {
+            let mut vars = HashMap::new();
+            build_prefix_case(&history, &mut vars)
+        };
+        let before = msgs.clone();
+        assert!(insert_summary_slot(&mut msgs, "早期剧情摘要"));
+        let contents = vec![
+            "用户与角色在图书馆初识".to_string(),
+            "角色承诺周末看画展".to_string(),
+        ];
+        assert!(insert_memory_slot(&mut msgs, &contents));
+        // 布局:system → 摘要槽 → 记忆槽 → 其余消息(逐字节不变,整体后移)
+        assert_eq!(msgs[0].role, "system");
+        assert!(msgs[1].content.starts_with(SUMMARY_SLOT_MARKER));
+        assert!(msgs[2].content.starts_with(MEMORY_SLOT_MARKER), "记忆槽应在摘要槽之后");
+        assert_eq!(msgs[2].role, "system");
+        assert_eq!(
+            msgs[2].content,
+            "【角色长期记忆】\n- 用户与角色在图书馆初识\n- 角色承诺周末看画展",
+            "记忆槽应逐条一行: {}",
+            msgs[2].content
+        );
+        assert_eq!(msgs.len(), before.len() + 2);
+        assert_eq!(
+            serde_json::to_string(&before[0]).unwrap(),
+            serde_json::to_string(&msgs[0]).unwrap(),
+            "首条 system 不得被改写"
+        );
+        for (i, m) in before.iter().enumerate().skip(1) {
+            assert_eq!(
+                serde_json::to_string(m).unwrap(),
+                serde_json::to_string(&msgs[i + 2]).unwrap(),
+                "原第 {i} 条消息不得被改写"
+            );
+        }
+
+        // 无摘要槽:记忆槽紧跟 system(位置 1)
+        let mut no_summary = before.clone();
+        assert!(insert_memory_slot(&mut no_summary, &contents));
+        assert!(no_summary[1].content.starts_with(MEMORY_SLOT_MARKER));
+        assert_eq!(no_summary[1].role, "system");
+
+        // 空列表 / 全空白:不插槽(行为与现状一致)
+        let mut empty = before.clone();
+        assert!(!insert_memory_slot(&mut empty, &[]));
+        assert!(!insert_memory_slot(&mut empty, &["  ".to_string()]));
+        assert_eq!(empty.len(), before.len());
+    }
+
+    /// 字节稳定回归:注入记忆槽后追加历史重建,公共前缀仍覆盖记忆槽
+    /// (记忆集合未变时记忆槽逐字节不变;历史只在尾部追加)
+    #[test]
+    fn appending_history_keeps_prefix_over_memory_slot() {
+        let memory = vec![
+            "用户与角色在图书馆初识".to_string(),
+            "角色承诺周末看画展".to_string(),
+        ];
+        let build = |history: &[(String, String)]| {
+            let mut msgs = {
+                let mut vars = HashMap::new();
+                build_prefix_case(history, &mut vars)
+            };
+            insert_summary_slot(&mut msgs, "早期剧情的增量摘要。");
+            insert_memory_slot(&mut msgs, &memory);
+            msgs
+        };
+        let old_history = vec![
+            ("user".to_string(), "第一句".to_string()),
+            ("assistant".to_string(), "回应一".to_string()),
+            ("user".to_string(), "第二句".to_string()),
+        ];
+        let mut new_history = old_history.clone();
+        new_history.push(("assistant".to_string(), "回应二".to_string()));
+        new_history.push(("user".to_string(), "第三句".to_string()));
+        let m_old = build(&old_history);
+        let m_new = build(&new_history);
+
+        // 记忆槽(位置 2)必须落在公共前缀内,且逐字节一致
+        assert!(m_old[2].content.starts_with(MEMORY_SLOT_MARKER));
+        assert_eq!(
+            serde_json::to_string(&m_old[2]).unwrap(),
+            serde_json::to_string(&m_new[2]).unwrap(),
+            "记忆集合未变时记忆槽必须逐字节稳定"
+        );
+        let prefix = common_prefix_len(&m_old, &m_new);
+        assert!(
+            prefix >= 3,
+            "公共前缀({prefix})必须覆盖 system+摘要槽+记忆槽"
+        );
+        // 其后允许变化的只有尾部注入转移区(≤2 条,与既有回归口径一致)
+        assert!(
+            prefix >= m_old.len().saturating_sub(2),
+            "公共前缀({prefix})应覆盖旧数组除尾部注入转移区外的全部(旧长 {})",
+            m_old.len()
+        );
+    }
+
+    /// trim_to_context 必须保护记忆槽:极小预算下摘要槽与记忆槽都不得被裁掉
+    #[test]
+    fn trim_never_removes_memory_slot() {
+        let mut ts = crate::services::token_service::TokenService::new();
+        let mut messages = vec![
+            LlmMessage::plain("system", "系统提示"),
+            LlmMessage::plain("system", "【早期对话摘要】\n早期剧情摘要。"),
+            LlmMessage::plain("system", "【角色长期记忆】\n- 用户害怕打雷"),
+            LlmMessage::plain("user", "较早消息"),
+            LlmMessage::plain("user", "最新消息"),
+        ];
+        assert_eq!(protected_head_len(&messages), 3, "system+摘要槽+记忆槽都应受保护");
+        trim_to_context(&mut messages, Some(30), &mut ts, "deepseek-v4-flash", 0);
+        assert!(
+            messages.iter().any(|m| m.content.starts_with(MEMORY_SLOT_MARKER)),
+            "极小预算下记忆槽也不得被裁掉: {:?}",
+            messages
+                .iter()
+                .map(|m| m.content.chars().take(15).collect::<String>())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            messages.iter().any(|m| m.content.starts_with(SUMMARY_SLOT_MARKER)),
+            "摘要槽保护不受记忆槽影响"
         );
     }
 }

@@ -46,7 +46,7 @@ pub fn register_builtin_tools(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
             },
         ),
     );
-    memory::register_memory_tools(registry, deps.sessions.clone());
+    memory::register_memory_tools(registry, deps.sessions.clone(), deps.memory.clone());
     variables::register_update_variables_tool(registry, deps.sessions.clone());
     censor::register_censor_tool(registry);
     revise::register_revise_passage_tool(registry);
