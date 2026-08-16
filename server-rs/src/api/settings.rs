@@ -89,6 +89,12 @@ pub struct UpdateSettingsBody {
     /// 上下文压缩触发阈值(0.5..=0.95)
     #[serde(default)]
     pub compaction_threshold: Option<f32>,
+    /// 压缩后保留的最近消息条数(2..=200)
+    #[serde(default)]
+    pub compaction_keep_recent: Option<u32>,
+    /// snip 零成本裁剪的消息长度阈值(字节;0 = 禁用,上限 1MB)
+    #[serde(default)]
+    pub compaction_snip_bytes: Option<u32>,
     /// LLM 请求快照开关(第四点·主题 A)
     #[serde(default)]
     pub llm_request_log: Option<bool>,
@@ -119,6 +125,8 @@ fn settings_json(s: &RuntimeSettings) -> Value {
         "render_html": s.render_html,
         "compaction_mode": s.compaction_mode,
         "compaction_threshold": s.compaction_threshold,
+        "compaction_keep_recent": s.compaction_keep_recent,
+        "compaction_snip_bytes": s.compaction_snip_bytes,
         "llm_request_log": s.llm_request_log,
     })
 }
@@ -301,6 +309,18 @@ pub async fn update_settings(
                         .with_status(StatusCode::BAD_REQUEST);
                 }
                 apply!(s, is_task, compaction_threshold, v);
+            }
+            // 压缩保留条数(缓存感知管线):2..=200,缺省保持不变
+            if let Some(v) = body.compaction_keep_recent {
+                if (2..=200).contains(&v) {
+                    apply!(s, is_task, compaction_keep_recent, v);
+                }
+            }
+            // snip 零成本裁剪阈值(字节):0 = 禁用,1MB 上限
+            if let Some(v) = body.compaction_snip_bytes {
+                if v <= 1_048_576 {
+                    apply!(s, is_task, compaction_snip_bytes, v);
+                }
             }
             // LLM 请求快照开关
             if let Some(v) = body.llm_request_log {

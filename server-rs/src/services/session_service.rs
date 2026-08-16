@@ -251,6 +251,65 @@ impl SessionService {
         Ok(())
     }
 
+    /// 记录一次 LLM 请求的 usage 缓存统计(缓存感知管线):
+    /// 已有该 (session_id, run_id, seq) 快照行时 UPDATE 缓存列(payload 不动);
+    /// 无既有行(快照开关关闭)时插入轻量行(payload 空串),保证缓存观测
+    /// 不依赖 llm_request_log 调试开关。失败由调用方决定是否告警。
+    #[allow(clippy::too_many_arguments)]
+    pub fn save_llm_cache_usage(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        seq: i64,
+        model: &str,
+        prompt_tokens: i64,
+        completion_tokens: i64,
+        cache_hit_tokens: i64,
+        cache_miss_tokens: i64,
+    ) -> Result<(), String> {
+        let conn = self.db.conn();
+        let updated = conn
+            .execute(
+                "UPDATE llm_requests SET
+                   prompt_cache_hit_tokens = ?4,
+                   prompt_cache_miss_tokens = ?5,
+                   prompt_tokens = ?6,
+                   completion_tokens = ?7
+                 WHERE session_id = ?1 AND run_id = ?2 AND seq = ?3",
+                params![
+                    session_id,
+                    run_id,
+                    seq,
+                    cache_hit_tokens,
+                    cache_miss_tokens,
+                    prompt_tokens,
+                    completion_tokens
+                ],
+            )
+            .map_err(|e| format!("更新 LLM 缓存统计失败: {e}"))?;
+        if updated == 0 {
+            conn.execute(
+                "INSERT INTO llm_requests
+                   (session_id, run_id, seq, payload, model, created_at,
+                    prompt_cache_hit_tokens, prompt_cache_miss_tokens, prompt_tokens, completion_tokens)
+                 VALUES (?1, ?2, ?3, '', ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    session_id,
+                    run_id,
+                    seq,
+                    model,
+                    now_iso(),
+                    cache_hit_tokens,
+                    cache_miss_tokens,
+                    prompt_tokens,
+                    completion_tokens
+                ],
+            )
+            .map_err(|e| format!("保存 LLM 缓存统计失败: {e}"))?;
+        }
+        Ok(())
+    }
+
     /// 裁剪会话的 LLM 请求快照,仅保留最近 keep 条(按 id 升序删最旧)。
     pub fn prune_llm_requests(&self, session_id: &str, keep: i64) -> Result<(), String> {
         if keep < 0 {
@@ -677,6 +736,62 @@ mod tests {
             .unwrap();
         assert_eq!(max_seq, 4);
         assert_eq!(min_seq, 3);
+        drop(conn);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// 缓存 usage 落库:已有请求快照行(seq 匹配)时 UPDATE 缓存列,payload 不被覆盖
+    #[test]
+    fn save_llm_cache_usage_updates_existing_row() {
+        let (svc, dir) = service();
+        svc.save_llm_request("s1", "run1", 0, r#"{"role":"system"}"#, "m").unwrap();
+        svc.save_llm_cache_usage("s1", "run1", 0, "m", 1000, 200, 700, 300)
+            .unwrap();
+
+        let db = svc.db.clone();
+        let conn = db.conn();
+        let (hit, miss, prompt, completion, payload): (i64, i64, i64, i64, String) = conn
+            .query_row(
+                "SELECT prompt_cache_hit_tokens, prompt_cache_miss_tokens, prompt_tokens, completion_tokens, payload
+                 FROM llm_requests WHERE session_id='s1' AND run_id='run1' AND seq=0",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!((hit, miss, prompt, completion), (700, 300, 1000, 200));
+        assert_eq!(payload, r#"{"role":"system"}"#, "缓存列更新不应覆盖 payload");
+        drop(conn);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// 缓存 usage 落库:快照开关关闭(无既有行)时插入轻量行(payload 为空串),
+    /// 保证缓存观测数据不依赖 llm_request_log 调试开关
+    #[test]
+    fn save_llm_cache_usage_inserts_light_row_when_missing() {
+        let (svc, dir) = service();
+        svc.save_llm_cache_usage("s1", "run2", 3, "m", 500, 80, 0, 500)
+            .unwrap();
+
+        let db = svc.db.clone();
+        let conn = db.conn();
+        let (hit, miss, payload): (i64, i64, String) = conn
+            .query_row(
+                "SELECT prompt_cache_hit_tokens, prompt_cache_miss_tokens, payload
+                 FROM llm_requests WHERE session_id='s1' AND run_id='run2' AND seq=3",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((hit, miss), (0, 500));
+        assert_eq!(payload, "", "无快照开关时应插入轻量行(payload 空)");
         drop(conn);
         std::fs::remove_dir_all(dir).ok();
     }

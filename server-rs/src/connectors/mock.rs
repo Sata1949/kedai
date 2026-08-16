@@ -62,6 +62,7 @@ impl MockConnector {
                     completion_tokens: 3,
                     total_tokens: 8,
                     prompt_cache_hit_tokens: 0,
+                    prompt_cache_miss_tokens: 0,
                 });
                 return Ok(chunks);
             }
@@ -72,6 +73,7 @@ impl MockConnector {
                 completion_tokens: reply.chars().count() as i64,
                 total_tokens: 5 + reply.chars().count() as i64,
                 prompt_cache_hit_tokens: 0,
+                prompt_cache_miss_tokens: 0,
             });
             return Ok(chunks);
         }
@@ -102,6 +104,7 @@ impl MockConnector {
                     total_tokens: (prompt_chars as f64 / 4.0).ceil() as i64
                         + (reply.chars().count() as f64 / 4.0).ceil() as i64,
                     prompt_cache_hit_tokens: 0,
+                    prompt_cache_miss_tokens: 0,
                 });
                 return Ok(chunks);
             }
@@ -120,6 +123,7 @@ impl MockConnector {
                 completion_tokens: 3,
                 total_tokens: 8,
                 prompt_cache_hit_tokens: 0,
+                prompt_cache_miss_tokens: 0,
             });
             return Ok(chunks);
         }
@@ -132,6 +136,7 @@ impl MockConnector {
                 completion_tokens: reply.chars().count() as i64,
                 total_tokens: 10 + reply.chars().count() as i64,
                 prompt_cache_hit_tokens: 0,
+                prompt_cache_miss_tokens: 0,
             });
             return Ok(chunks);
         }
@@ -148,6 +153,7 @@ impl MockConnector {
                 completion_tokens: 3,
                 total_tokens: 8,
                 prompt_cache_hit_tokens: 0,
+                prompt_cache_miss_tokens: 0,
             });
             return Ok(chunks);
         }
@@ -161,6 +167,7 @@ impl MockConnector {
                 completion_tokens: 0,
                 total_tokens: 3,
                 prompt_cache_hit_tokens: 0,
+                prompt_cache_miss_tokens: 0,
             });
             return Ok(chunks);
         }
@@ -184,6 +191,7 @@ impl MockConnector {
                 completion_tokens,
                 total_tokens: (prompt_chars as f64 / 4.0).ceil() as i64 + completion_tokens,
                 prompt_cache_hit_tokens: 0,
+                prompt_cache_miss_tokens: 0,
             });
             return Ok(chunks);
         }
@@ -205,6 +213,7 @@ impl MockConnector {
                 total_tokens: (prompt_chars as f64 / 4.0).ceil() as i64
                     + (reply.chars().count() as f64 / 4.0).ceil() as i64,
                 prompt_cache_hit_tokens: 0,
+                prompt_cache_miss_tokens: 0,
             });
             return Ok(chunks);
         }
@@ -223,6 +232,7 @@ impl MockConnector {
                 completion_tokens: 3,
                 total_tokens: 8,
                 prompt_cache_hit_tokens: 0,
+                prompt_cache_miss_tokens: 0,
             });
             return Ok(chunks);
         }
@@ -238,6 +248,7 @@ impl MockConnector {
                 total_tokens: (prompt_chars as f64 / 4.0).ceil() as i64
                     + (text.chars().count() as f64 / 4.0).ceil() as i64,
                 prompt_cache_hit_tokens: 0,
+                prompt_cache_miss_tokens: 0,
             });
             return Ok(chunks);
         }
@@ -262,6 +273,7 @@ impl MockConnector {
             completion_tokens,
             total_tokens: prompt_tokens + completion_tokens,
             prompt_cache_hit_tokens: 0,
+            prompt_cache_miss_tokens: 0,
         });
         Ok(chunks)
     }

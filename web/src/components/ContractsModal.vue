@@ -230,7 +230,7 @@ async function onRollback(entry: ContractChangeEntry): Promise<void> {
     <div class="sv-modal lg">
       <div class="sv-modal-head">
         <h2 class="flex items-center gap-2">
-          <span class="logo" /> 契约编辑
+          <span class="sv-supreme pink" style="width: 18px; height: 18px" /> 契约编辑
           <span v-if="characterId" class="sv-char-desc" style="font-size: 12px">
             {{ store.currentCharacterName }}
           </span>

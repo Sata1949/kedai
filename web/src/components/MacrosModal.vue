@@ -53,7 +53,7 @@ async function expandNow(): Promise<void> {
       <!-- 头部 -->
       <div class="sv-modal-head">
         <h2 class="flex items-center gap-2">
-          <span class="logo" /> 宏调试
+          <span class="sv-supreme pink" style="width: 18px; height: 18px" /> 宏调试
         </h2>
         <button class="sv-btn ghost sv-btn-square" @click="close">✕</button>
       </div>

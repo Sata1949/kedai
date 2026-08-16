@@ -51,6 +51,7 @@
   --sv-yellow-deep: #8a6203;    /* 深黄:黄系文字在浅底上的可读变体 */
   --sv-green: #16a34a;          /* 功能绿 */
   --sv-purple: #8e44ad;         /* 第 6 层/速查面板专用色标(收编自散落的 #9b59b6) */
+  --sv-orange: #e8842e;         /* 橙:构成主义用色(settings 引用,收编自硬编码) */
 
   /* ===== 语义别名(历史遗留变量,统一指向主 token) ===== */
   --sv-accent: var(--sv-pink-deep);   /* 强调色(slash 菜单等) */
@@ -61,21 +62,39 @@
 
   /* ===== 功能 ===== */
   --radius: 0;                  /* 绝对直角 */
+  /* 粉阴影的统一 RGB 分量(与 --sv-pink-deep #e06890 = rgb(224,104,144) 一致;
+     历史硬编码 rgba(232,104,144) 有 8 单位色差,统一从这里取) */
+  --sv-pink-deep-rgb: 224, 104, 144;
   --shadow-sm: 2px 2px 0 rgba(0, 0, 0, 0.06);
   --shadow-card: 3px 3px 0 rgba(0, 0, 0, 0.08);
-  --shadow-pink: 4px 4px 0 rgba(232, 104, 144, 0.15);
+  --shadow-pink: 3px 3px 0 rgba(var(--sv-pink-deep-rgb), 0.15);  /* 粉强调阴影(任务项 hover 等) */
   --shadow-hover: 5px 5px 0 rgba(0, 0, 0, 0.12);
+  --shadow-raise: 3px 3px 0 rgba(0, 0, 0, 0.12);  /* 按钮/面板 hover 上浮 */
+  --shadow-sunk: 3px 3px 0 rgba(0, 0, 0, 0.1);    /* 选中/按下(略沉于 raise) */
+  --shadow-card-soft: 4px 4px 0 rgba(0, 0, 0, 0.06); /* 大卡片轻投影(结果卡等) */
+  --shadow-modal: 8px 8px 0 rgba(0, 0, 0, 0.15);  /* 模态框 */
+  --shadow-ctx: 6px 6px 0 rgba(0, 0, 0, 0.15);    /* 右键菜单 */
   --shadow-press: 0 0 0 rgba(0, 0, 0, 0);  /* 按下态:阴影归零(画贴回画布) */
   --font-display: "Archivo Black", "Arial Black", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-body: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
 
   /* 字阶:全站只允许这些字号(偶发微调除外) */
+  --text-2xs: 10px;
   --text-xs: 11px;
   --text-sm: 12px;
   --text-base: 13px;
   --text-md: 14px;
   --text-lg: 16px;
   --text-xl: 20px;
+
+  /* 层叠阶梯(z-index 唯一来源;常量命名防裸值漂移) */
+  --z-base: 0;
+  --z-toggle: 40;      /* 右缘 AGENT 条 / 音频悬浮钮 */
+  --z-popover: 45;     /* slash 联想 / 快速回复等向上弹出层 */
+  --z-modal: 50;       /* 模态遮罩 */
+  --z-ctx: 60;         /* 右键菜单遮罩 */
+  --z-ctx-menu: 61;    /* 右键菜单本体 */
+  --z-splash: 100;     /* 启动动画 */
 
   /* 过渡 */
   --transition-fast: 0.1s ease;
@@ -100,6 +119,19 @@ body {
 ::-webkit-scrollbar-thumb:hover { background: var(--sv-ink-soft); }
 ::-webkit-scrollbar-track { background: transparent; }
 
+/* 键盘焦点:2px 印刷黑外描边 + 2px 偏移(构成主义硬边框,非柔和发光)。
+   按钮/输入/导航/开关统一可见;点击鼠标时不显示,仅键盘 Tab 时出现。 */
+:focus-visible {
+  outline: 2px solid var(--sv-ink);
+  outline-offset: 2px;
+}
+
+/* 文本选区:淡粉底 + 印刷黑字(与画布同色系,非默认蓝) */
+::selection {
+  background: var(--sv-pink);
+  color: var(--sv-ink);
+}
+
 /* ===== 至上主义装饰元件:纯粹几何 ===== */
 
 /* 黑方块 */
@@ -116,8 +148,41 @@ body {
 .sv-supreme.pink-deep { background: var(--sv-pink-deep); }
 .sv-supreme.green { background: var(--sv-green); }
 /* 橙(结构主义用色之一;settings 多处引用,须有定义而非回退黑色) */
-.sv-supreme.orange { background: #e8842e; }
+.sv-supreme.orange { background: var(--sv-orange); }
 .sv-supreme.purple { background: var(--sv-purple); }
+
+/* 对角线:构成主义第一签名(红斜线)。仅供装饰,不参与交互。 */
+.sv-diagonal {
+  display: inline-block;
+  width: 22px;
+  height: 3px;
+  background: var(--sv-red);
+  transform: rotate(-45deg);
+  flex-shrink: 0;
+}
+.sv-diagonal.sm { width: 16px; height: 2px; }
+.sv-diagonal.lg { width: 34px; height: 4px; }
+
+/* 标题前缀标记:收编散写的 ::before 装饰,统一为「方块/菱形/方块」三变体 */
+.sv-marker {
+  position: relative;
+  padding-left: 16px;
+}
+.sv-marker::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 10px;
+  height: 10px;
+  background: var(--sv-ink-supreme);
+}
+.sv-marker.diamond::before {
+  background: var(--sv-red);
+  transform: translateY(-50%) rotate(45deg);
+}
+.sv-marker.pink::before { background: var(--sv-pink); }
 
 /* ===== 布局:三栏 ===== */
 
@@ -177,7 +242,7 @@ body {
   right: 0;
   top: 50%;
   transform: translateY(-50%);
-  z-index: 40;
+  z-index: var(--z-toggle);
   writing-mode: vertical-lr;
   text-orientation: mixed;
   padding: 20px 8px;
@@ -199,13 +264,26 @@ body {
 }
 
 /* ===== 顶栏 ===== */
+/* 下边线:双细线(2px ink + 1px 粉线,经典构成主义 rule),右端红斜线装饰 */
 .sv-topbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 12px 20px;
   border-bottom: 2px solid var(--sv-ink);
+  box-shadow: 0 3px 0 0 var(--sv-line);
   background: var(--sv-surface);
+  position: relative;
+}
+.sv-topbar::after {
+  content: '';
+  position: absolute;
+  right: 18px;
+  top: 50%;
+  width: 16px;
+  height: 2px;
+  background: var(--sv-red);
+  transform: translateY(-50%) rotate(-45deg);
 }
 .sv-topbar-right { display: flex; align-items: center; gap: 12px; }
 .sv-topbar-title { font-size: 13px; font-weight: 800; letter-spacing: 0.04em; }
@@ -477,7 +555,7 @@ body {
 .sv-inputbox textarea::placeholder { color: var(--sv-ink-faint); }
 .sv-inputbox textarea:focus {
   border-color: var(--sv-pink-deep);
-  box-shadow: 3px 3px 0 rgba(232, 104, 144, 0.2);
+  box-shadow: 3px 3px 0 rgba(var(--sv-pink-deep-rgb), 0.2);
 }
 
 /* 发送按钮 */
@@ -836,7 +914,7 @@ body {
 .sv-modal-mask {
   position: fixed;
   inset: 0;
-  z-index: 50;
+  z-index: var(--z-modal);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -848,7 +926,7 @@ body {
   max-height: 84vh;
   background: var(--sv-surface);
   border: 3px solid var(--sv-ink);
-  box-shadow: 8px 8px 0 rgba(0, 0, 0, 0.15);
+  box-shadow: var(--shadow-modal);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -861,6 +939,18 @@ body {
   border-bottom: 3px solid var(--sv-ink);
   background: var(--sv-ink); /* 黑条头部:放大的黑方块,全站模态统一节奏 */
   color: var(--sv-white);
+  position: relative;
+}
+/* 红斜线角标:黑条头部右缘的构成主义签名(纯装饰,不遮关闭按钮) */
+.sv-modal-head::after {
+  content: '';
+  position: absolute;
+  right: 52px;
+  top: 50%;
+  width: 18px;
+  height: 2px;
+  background: var(--sv-red);
+  transform: translateY(-50%) rotate(-45deg);
 }
 .sv-modal-head h2 {
   margin: 0;
@@ -889,7 +979,13 @@ body {
   color: #fff;
   background: transparent;
 }
-.sv-modal-head .logo { width: 18px; height: 18px; background: var(--sv-pink); }
+/* 分区分隔线:构成主义双线(粗 ink + 细粉),替换模板内联 border-top */
+.sv-separator {
+  margin: 16px 0 12px;
+  padding-top: 12px;
+  border-top: 2px solid var(--sv-ink);
+  box-shadow: 0 3px 0 0 var(--sv-line);
+}
 .sv-modal-body { flex: 1; overflow-y: auto; padding: 20px; }
 .sv-modal-foot {
   padding: 14px 20px;
@@ -985,7 +1081,7 @@ body {
 }
 .sv-input:focus, .sv-select:focus {
   border-color: var(--sv-pink-deep);
-  box-shadow: 3px 3px 0 rgba(232, 104, 144, 0.2);
+  box-shadow: 3px 3px 0 rgba(var(--sv-pink-deep-rgb), 0.2);
 }
 .sv-input::placeholder { color: var(--sv-ink-faint); }
 
@@ -1102,7 +1198,7 @@ input[type="range"].sv-range::-moz-range-thumb {
 .sv-icon-btn:hover,
 .sv-agent-panel-close:hover {
   transform: translate(-1px, -1px);
-  box-shadow: 3px 3px 0 rgba(0, 0, 0, 0.12);
+  box-shadow: var(--shadow-raise);
 }
 .sv-btn:active:not(:disabled),
 .sv-btn-send:active:not(:disabled),
@@ -1435,7 +1531,7 @@ input[type="range"].sv-range::-moz-range-thumb {
 .sv-splash {
   position: fixed;
   inset: 0;
-  z-index: 100;
+  z-index: var(--z-splash);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1562,16 +1658,16 @@ input[type="range"].sv-range::-moz-range-thumb {
 .sv-ctx-mask {
   position: fixed;
   inset: 0;
-  z-index: 60;
+  z-index: var(--z-ctx);
   background: transparent;
 }
 .sv-ctx-menu {
   position: fixed;
   width: 164px;
-  z-index: 61;
+  z-index: var(--z-ctx-menu);
   background: var(--sv-white);
   border: 3px solid var(--sv-ink);
-  box-shadow: 6px 6px 0 rgba(0, 0, 0, 0.15);
+  box-shadow: var(--shadow-ctx);
   padding: 4px;
 }
 .sv-ctx-title {
@@ -2048,7 +2144,7 @@ input[type="range"].sv-range::-moz-range-thumb {
   position: fixed;
   right: 16px;
   bottom: 16px;
-  z-index: 40;
+  z-index: var(--z-toggle);
   width: 40px;
   height: 40px;
   border: 2px solid var(--sv-ink);
@@ -2076,7 +2172,7 @@ input[type="range"].sv-range::-moz-range-thumb {
   position: fixed;
   right: 16px;
   bottom: 16px;
-  z-index: 40;
+  z-index: var(--z-toggle);
 }
 .sv-audio-panel {
   width: 320px;
@@ -2445,11 +2541,11 @@ input[type="range"].sv-range::-moz-range-thumb {
 }
 .sv-task-item:hover {
   border-color: var(--sv-pink-deep);
-  box-shadow: 3px 3px 0 rgba(232, 104, 144, 0.15);
+  box-shadow: var(--shadow-pink);
 }
 .sv-task-item.active {
   border-color: var(--sv-ink);
-  box-shadow: 3px 3px 0 rgba(0, 0, 0, 0.1);
+  box-shadow: var(--shadow-sunk);
   background: var(--sv-pink-light);
 }
 .sv-task-item-title {
@@ -2607,7 +2703,7 @@ input[type="range"].sv-range::-moz-range-thumb {
   background: var(--sv-white);
   font-size: 14px;
   line-height: 1.8;
-  box-shadow: 4px 4px 0 rgba(0, 0, 0, 0.06);
+  box-shadow: var(--shadow-card-soft);
 }
 .sv-task-result h1,
 .sv-task-result h2,
@@ -2650,3 +2746,263 @@ input[type="range"].sv-range::-moz-range-thumb {
 .sv-tag.error { color: var(--sv-red-deep); border-color: var(--sv-red); }
 .sv-tag.pending { color: var(--sv-ink-faint); border-color: var(--sv-line-strong); }
 .sv-tag.sm { font-size: 9.5px; padding: 1px 6px; }
+
+/* ===== 构成主义深化:ChatInput 向上弹层公共类 ===== */
+.sv-popover {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  z-index: var(--z-popover);
+  border: 2px solid var(--sv-ink);
+  background: var(--sv-white);
+  box-shadow: var(--shadow-sunk);
+  max-height: 260px;
+  overflow-y: auto;
+}
+/* 右对齐变体(快速回复下拉:锚右缘 + 最小宽度) */
+.sv-popover-right {
+  left: auto;
+  min-width: 240px;
+}
+
+/* 模型选择:去原生外观 + 自绘直角黑三角下拉箭头 */
+.sv-model-select {
+  -webkit-appearance: none;
+  appearance: none;
+  border: 2px solid var(--sv-ink);
+  background: var(--sv-white);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8'%3E%3Cpolygon points='0,0 8,0 4,8' fill='%23141414'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 7px center;
+  padding: 5px 22px 5px 8px;
+  font-size: 12px;
+  color: var(--sv-ink);
+  border-radius: 0;
+  cursor: pointer;
+}
+
+/* 模式按钮编号色点 */
+.sv-mode-idx {
+  font-family: var(--font-display);
+  font-size: 9px;
+  color: var(--sv-pink-deep);
+  margin-right: 4px;
+  letter-spacing: 0.05em;
+}
+/* active(黑底)态:编号用淡粉,保证黑底上的可读性 */
+.sv-mode button.active .sv-mode-idx {
+  color: var(--sv-pink);
+}
+
+/* ===== 构成主义深化:AudioPlayer 线性图标 ===== */
+.sv-audio-btn svg,
+.sv-audio-mini svg {
+  width: 16px;
+  height: 16px;
+  display: inline-block;
+  vertical-align: -3px;
+}
+
+/* ============================================================
+   构成主义深化:AgentPanel
+   工具入参/出参折叠卡 + 状态徽章 + 时间线当前步脉动
+   ============================================================ */
+
+/* 工具入参/出参折叠卡:细线边框容器 + 小号直角 toggle 按钮 */
+.sv-tool-io {
+  border: 1px solid var(--sv-line-strong);
+  margin-top: 6px;
+}
+.sv-tool-io-toggle {
+  font-size: 10px;
+  color: var(--sv-ink-dim);
+  background: var(--sv-pink-light);
+  border: none;
+  padding: 2px 6px;
+  cursor: pointer;
+  font-weight: 700;
+}
+/* 用 .sv-tool-io .sv-tool-io-body 提升特异性,覆盖 .sv-tool-panel-card pre 的旧样式 */
+.sv-tool-io .sv-tool-io-body {
+  display: none;
+  max-height: 160px;
+  overflow: auto;
+  background: var(--sv-surface);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 8px;
+  margin: 0;
+}
+.sv-tool-io.open .sv-tool-io-body { display: block; }
+
+/* 状态徽章类族:细边框 + 当前颜色描边,替代内联状态小字 */
+.sv-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  padding: 1px 6px;
+  border: 1px solid currentColor;
+}
+.sv-badge.pending { color: var(--sv-yellow-deep); }
+.sv-badge.done { color: var(--sv-green); }
+.sv-badge.fail { color: var(--sv-red); }
+.sv-badge.run { color: var(--sv-pink-deep); }
+
+/* 时间线当前执行步:粉强调阴影 + 序号方块脉动(仅 transform) */
+.sv-timeline-item.running { box-shadow: var(--shadow-pink); }
+.sv-timeline-item.running::before {
+  animation: sv-tl-pulse 0.9s ease-in-out infinite;
+  transform-origin: center;
+}
+@keyframes sv-tl-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.15); }
+}
+
+/* ============================================================
+   构成主义深化:ChatWindow
+   swipe 方形切换按钮 + 顶栏控件分组
+   ============================================================ */
+
+/* swipe 版本切换:方形小按钮(硬偏移阴影按压联动,同 .sv-btn 纪律) */
+.sv-swipe-btn {
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--sv-ink);
+  background: var(--sv-white);
+  color: var(--sv-ink);
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+  transition: transform var(--transition-fast), box-shadow var(--transition-fast);
+}
+.sv-swipe-btn:hover:not(:disabled) {
+  transform: translate(-1px, -1px);
+  box-shadow: var(--shadow-raise);
+}
+.sv-swipe-btn:active:not(:disabled) {
+  transform: translate(1px, 1px);
+  box-shadow: none;
+}
+.sv-swipe-btn:disabled { opacity: 0.4; cursor: default; }
+.sv-swipe-count {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--sv-ink-dim);
+  padding: 0 4px;
+}
+
+/* 顶栏右侧控件分组:会话操作 / 渲染开关 两组,2px 左分隔线 */
+.sv-topbar-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 12px;
+  border-left: 2px solid var(--sv-line);
+}
+.sv-topbar-group:first-child {
+  border-left: none;
+  padding-left: 0;
+}
+
+/* ============================================================
+   构成主义深化:Sidebar
+   底部全宽按钮抽类 + Token 统计仪表感
+   ============================================================ */
+
+/* 底部三按钮:全宽 flex 居中,图标与文字 gap 对齐 */
+.sv-side-btn {
+  width: 100%;
+  padding: 12px;
+  font-size: 13px;
+  letter-spacing: 0.1em;
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+/* 第一个按钮(综合设置,primary)无上间距,其余按钮 8px 间距 */
+.sv-side-btn:first-child { margin-top: 0; }
+.sv-side-btn-ico {
+  display: inline-flex;
+  align-items: center;
+}
+.sv-side-btn-ico svg {
+  width: 16px;
+  height: 16px;
+  vertical-align: middle;
+}
+
+/* Token 数值:显示字体放大至 16px,仪表感 */
+.sv-tokens .sv-token-cell b {
+  font-family: var(--font-display);
+  font-size: 16px;
+  letter-spacing: 0.02em;
+}
+
+/* ============================================================
+   构成主义深化:TaskBoard
+   计划步骤竖向连线 + 最终成果黑顶线 + 错误文本卡式
+   ============================================================ */
+
+/* 计划步骤方块间竖向连线:从序号方块下端延续到下一项,表达进度 */
+.sv-task-step {
+  position: relative;
+}
+.sv-task-step::before {
+  content: '';
+  position: absolute;
+  top: 28px;
+  bottom: -8px;
+  left: 14px;
+  width: 2px;
+  background: var(--sv-line-strong);
+}
+.sv-task-step:last-child::before { display: none; }
+.sv-task-step.done::before { background: var(--sv-green); }
+.sv-task-step.error::before { background: var(--sv-red); }
+.sv-task-step.active::before {
+  background: var(--sv-pink-deep);
+  animation: sv-step-line 1s ease-in-out infinite;
+}
+@keyframes sv-step-line {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
+/* 最终成果卡:4px 印刷黑顶线强调 */
+.sv-task-result {
+  border-top: 4px solid var(--sv-ink);
+}
+
+/* 错误文本:带红左边线的卡片(构成主义警示节奏) */
+.sv-task-error {
+  padding: 6px 10px;
+  border-left: 3px solid var(--sv-red);
+  background: var(--sv-pink-light);
+  color: var(--sv-red-deep);
+}
+
+/* ===== 构成主义深化:列表入场 stagger(仅 transform/opacity,reduced-motion 已全局降级) ===== */
+@keyframes sv-list-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+/* 任务计划步骤:逐项延迟入场 */
+.sv-task-step { animation: sv-list-in 0.22s ease backwards; }
+.sv-task-step:nth-child(1) { animation-delay: 0ms; }
+.sv-task-step:nth-child(2) { animation-delay: 40ms; }
+.sv-task-step:nth-child(3) { animation-delay: 80ms; }
+.sv-task-step:nth-child(4) { animation-delay: 120ms; }
+.sv-task-step:nth-child(5) { animation-delay: 160ms; }
+/* Agent 时间线项:同款 stagger */
+.sv-timeline-item { animation: sv-list-in 0.22s ease backwards; }
+.sv-timeline-item:nth-child(1) { animation-delay: 0ms; }
+.sv-timeline-item:nth-child(2) { animation-delay: 40ms; }
+.sv-timeline-item:nth-child(3) { animation-delay: 80ms; }
+.sv-timeline-item:nth-child(4) { animation-delay: 120ms; }
+.sv-timeline-item:nth-child(5) { animation-delay: 160ms; }
+.sv-timeline-item:nth-child(6) { animation-delay: 200ms; }

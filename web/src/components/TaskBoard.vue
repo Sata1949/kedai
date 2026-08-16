@@ -108,6 +108,7 @@ async function removeTask(task: TaskRecord): Promise<void> {
               v-for="(s, i) in currentTask.task.plan"
               :key="i"
               class="sv-task-step"
+              :class="statusClass(s.status)"
             >
               <span class="sv-task-step-idx" :class="statusClass(s.status)">{{ i + 1 }}</span>
               <div class="sv-task-step-body">

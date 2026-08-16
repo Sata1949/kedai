@@ -564,13 +564,19 @@ impl SseParser {
             }
         }
         if let Some(usage) = v.get("usage") {
-            let (prompt_tokens, completion_tokens, total_tokens, prompt_cache_hit_tokens) =
-                parse_usage(usage);
+            let (
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
+                prompt_cache_hit_tokens,
+                prompt_cache_miss_tokens,
+            ) = parse_usage(usage);
             out.push(LlmStreamChunk::Usage {
                 prompt_tokens,
                 completion_tokens,
                 total_tokens,
                 prompt_cache_hit_tokens,
+                prompt_cache_miss_tokens,
             });
         }
         // 仅当 finish_reason == "tool_calls" 时 flush 工具调用:确保工具参数聚合完整。
@@ -681,24 +687,44 @@ fn to_openai_messages(messages: &[LlmMessage]) -> Vec<Value> {
         .collect()
 }
 
-/// 从 OpenAI 兼容 usage 对象解析计数,返回 (prompt, completion, total, cache_hit)。
-/// DeepSeek 系提供 prompt_cache_hit_tokens;缺失(其他提供商)时为 0。
-fn parse_usage(u: &Value) -> (i64, i64, i64, i64) {
+/// 从 OpenAI 兼容 usage 对象解析计数,返回 (prompt, completion, total, cache_hit, cache_miss)。
+/// 缓存字段两种风格取其一非空即可:
+///   - DeepSeek 系:prompt_cache_hit_tokens / prompt_cache_miss_tokens 原样透传(优先);
+///   - OpenAI 风格:prompt_tokens_details.cached_tokens 作为 hit,miss = prompt - cached 推导。
+/// 两者都缺失(无缓存观测的提供商)时 hit/miss 为 0。
+fn parse_usage(u: &Value) -> (i64, i64, i64, i64, i64) {
     let prompt_tokens = u.get("prompt_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
     let completion_tokens = u
         .get("completion_tokens")
         .and_then(|x| x.as_i64())
         .unwrap_or(0);
     let total_tokens = u.get("total_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
-    let prompt_cache_hit_tokens = u
+    let deepseek_hit = u
         .get("prompt_cache_hit_tokens")
         .and_then(|x| x.as_i64())
         .unwrap_or(0);
+    let deepseek_miss = u
+        .get("prompt_cache_miss_tokens")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(0);
+    let openai_cached = u
+        .pointer("/prompt_tokens_details/cached_tokens")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(0);
+    // DeepSeek 字段优先;缺失时回退 OpenAI 风格(cached_tokens 为 hit,miss 推导)
+    let (hit, miss) = if deepseek_hit > 0 || deepseek_miss > 0 {
+        (deepseek_hit, deepseek_miss)
+    } else if openai_cached > 0 {
+        (openai_cached, (prompt_tokens - openai_cached).max(0))
+    } else {
+        (0, 0)
+    };
     (
         prompt_tokens,
         completion_tokens,
         total_tokens,
-        prompt_cache_hit_tokens,
+        hit,
+        miss,
     )
 }
 
@@ -873,7 +899,7 @@ mod tests {
         assert_eq!(result.unwrap_err(), "生成已中断");
     }
 
-    /// usage 解析:DeepSeek 格式带 prompt_cache_hit_tokens(命中率数据源)
+    /// usage 解析:DeepSeek 格式带 prompt_cache_hit_tokens/prompt_cache_miss_tokens(命中率数据源)
     #[test]
     fn parse_usage_reads_cache_hit_tokens() {
         // DeepSeek 风格:prompt_tokens = hit + miss
@@ -884,18 +910,42 @@ mod tests {
             "prompt_cache_hit_tokens": 700,
             "prompt_cache_miss_tokens": 300,
         });
-        assert_eq!(parse_usage(&u), (1000, 200, 1200, 700));
+        assert_eq!(parse_usage(&u), (1000, 200, 1200, 700, 300));
 
-        // 无缓存字段的提供商(OpenAI 等)→ hit 为 0,不 panic
+        // 无缓存字段的提供商(OpenAI 等)→ hit/miss 为 0,不 panic
         let plain = serde_json::json!({
             "prompt_tokens": 500,
             "completion_tokens": 50,
             "total_tokens": 550,
         });
-        assert_eq!(parse_usage(&plain), (500, 50, 550, 0));
+        assert_eq!(parse_usage(&plain), (500, 50, 550, 0, 0));
 
         // 字段缺失/类型异常 → 全部回退 0
-        assert_eq!(parse_usage(&serde_json::json!({})), (0, 0, 0, 0));
+        assert_eq!(parse_usage(&serde_json::json!({})), (0, 0, 0, 0, 0));
+    }
+
+    /// usage 解析:OpenAI 风格 prompt_tokens_details.cached_tokens 兼容——
+    /// hit 取 cached_tokens,miss 由 prompt_tokens - cached 推导
+    #[test]
+    fn parse_usage_reads_openai_cached_tokens() {
+        let u = serde_json::json!({
+            "prompt_tokens": 1000,
+            "completion_tokens": 50,
+            "total_tokens": 1050,
+            "prompt_tokens_details": { "cached_tokens": 600 },
+        });
+        assert_eq!(parse_usage(&u), (1000, 50, 1050, 600, 400));
+
+        // 两种风格并存时 DeepSeek 字段优先
+        let both = serde_json::json!({
+            "prompt_tokens": 1000,
+            "completion_tokens": 50,
+            "total_tokens": 1050,
+            "prompt_cache_hit_tokens": 800,
+            "prompt_cache_miss_tokens": 200,
+            "prompt_tokens_details": { "cached_tokens": 600 },
+        });
+        assert_eq!(parse_usage(&both), (1000, 50, 1050, 800, 200));
     }
 
     /// 启动一个模拟上游:捕获请求体后返回固定 SSE 流;返回 (base_url, body 持有者)

@@ -90,7 +90,7 @@ const close = (): void => {
       <!-- 头部 -->
       <div class="sv-modal-head">
         <h2 class="flex items-center gap-2">
-          <span class="logo" /> 事件监控
+          <span class="sv-supreme pink" style="width: 18px; height: 18px" /> 事件监控
         </h2>
         <button class="sv-btn ghost sv-btn-square" @click="close">✕</button>
       </div>
@@ -129,8 +129,14 @@ const close = (): void => {
         <!-- 事件列表 -->
         <div class="sv-field">
           <div class="sv-field-label"><span class="sv-supreme yellow" /> 事件日志</div>
-          <div v-if="shown.length === 0" class="sv-empty" style="padding: 24px 12px">
-            <p style="font-size: 12px">暂无事件。发送消息后事件将在此实时出现。</p>
+          <div v-if="shown.length === 0" class="sv-empty" style="padding: 28px 12px">
+            <div class="sv-empty-geo" style="margin-bottom: 10px">
+              <span class="sq black" style="width: 14px; height: 14px" />
+              <span class="sq pink" />
+              <span class="sq deep" style="width: 6px; height: 6px" />
+            </div>
+            <p style="font-size: 12px">暂无事件</p>
+            <p style="font-size: 11px">发送消息后事件将在此实时出现</p>
           </div>
           <div v-else class="sv-datalist" style="max-height: 420px; overflow-y: auto">
             <div

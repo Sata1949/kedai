@@ -239,8 +239,7 @@ async function onModelChange(e: Event): Promise<void> {
       <!-- slash 命令联想下拉(向上弹出) -->
       <div
         v-if="slashMenuOpen && slashFiltered.length"
-        class="sv-slash-menu"
-        style="position: absolute; bottom: calc(100% + 6px); left: 0; right: 0; z-index: 40"
+        class="sv-slash-menu sv-popover"
       >
         <button
           v-for="(c, i) in slashFiltered"
@@ -263,7 +262,9 @@ async function onModelChange(e: Event): Promise<void> {
         title="停止生成"
         @click="store.stop()"
       >
-        ■
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
+          <rect x="6" y="6" width="12" height="12" />
+        </svg>
       </button>
       <button
         v-else
@@ -272,7 +273,9 @@ async function onModelChange(e: Event): Promise<void> {
         title="发送"
         @click="send()"
       >
-        ↑
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
+          <polygon points="5,3 19,12 5,21 5,3" />
+        </svg>
       </button>
     </div>
 
@@ -281,13 +284,13 @@ async function onModelChange(e: Event): Promise<void> {
       <!-- 模式选择(最左) -->
       <div class="sv-mode">
         <button
-          v-for="m in MODES"
+          v-for="(m, i) in MODES"
           :key="m.key"
           :class="{ active: agentMode === m.key }"
           :title="m.title"
           @click="store.agentMode = m.key"
         >
-          {{ m.label }}
+          <span class="sv-mode-idx">{{ (i + 1).toString().padStart(2, '0') }}</span>{{ m.label }}
         </button>
       </div>
 
@@ -314,8 +317,8 @@ async function onModelChange(e: Event): Promise<void> {
 
       <!-- 模型选择 -->
       <select
-        class="sv-select"
-        style="width: auto; min-width: 120px; font-size: 12px; padding: 5px 8px"
+        class="sv-select sv-model-select"
+        style="width: auto; min-width: 120px"
         :value="model"
         :disabled="switchingModel"
         @change="onModelChange"
@@ -338,8 +341,7 @@ async function onModelChange(e: Event): Promise<void> {
         <!-- 快速回复下拉(向上弹出) -->
         <div
           v-if="quickMenuOpen"
-          class="sv-slash-menu"
-          style="position: absolute; bottom: calc(100% + 6px); right: 0; left: auto; z-index: 40; min-width: 240px"
+          class="sv-slash-menu sv-popover sv-popover-right"
           @mousedown.stop.prevent
         >
           <button

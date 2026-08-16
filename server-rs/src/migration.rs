@@ -54,6 +54,40 @@ CREATE TABLE IF NOT EXISTS llm_requests (
   model       TEXT NOT NULL DEFAULT '',
   created_at  TEXT NOT NULL
 )"#;
+/// llm_requests 的 usage 缓存列(2026-08 缓存感知管线):(列名, DDL 片段)。
+/// 旧库经 ALTER ADD COLUMN 补齐;列追加在表尾,与新版 CREATE_TABLES 建出的
+/// schema normalize 后一致,保证跨库合并的 schema 一致性比对不冲突。
+const LLM_REQUESTS_USAGE_COLUMNS: [(&str, &str); 4] = [
+    ("prompt_cache_hit_tokens", "prompt_cache_hit_tokens INTEGER NOT NULL DEFAULT 0"),
+    ("prompt_cache_miss_tokens", "prompt_cache_miss_tokens INTEGER NOT NULL DEFAULT 0"),
+    ("prompt_tokens", "prompt_tokens INTEGER NOT NULL DEFAULT 0"),
+    ("completion_tokens", "completion_tokens INTEGER NOT NULL DEFAULT 0"),
+];
+
+/// 幂等 schema 升级:为 llm_requests 补 usage 缓存列(缺失才 ALTER,已存在跳过)。
+/// 启动时(Db::open)与跨库合并前(merge_databases 两侧)各执行一次。
+pub fn ensure_llm_requests_usage_columns(conn: &Connection) -> Result<(), String> {
+    let mut existing: Vec<String> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(llm_requests)")
+            .map_err(|e| format!("读取 llm_requests 列失败: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| format!("遍历 llm_requests 列失败: {e}"))?;
+        for name in rows.flatten() {
+            existing.push(name.to_lowercase());
+        }
+    }
+    for (name, ddl) in LLM_REQUESTS_USAGE_COLUMNS {
+        if existing.iter().any(|c| c == name) {
+            continue;
+        }
+        conn.execute(&format!("ALTER TABLE llm_requests ADD COLUMN {ddl}"), [])
+            .map_err(|e| format!("为 llm_requests 补列 {name} 失败: {e}"))?;
+    }
+    Ok(())
+}
 /// 契约变更历史表(阶段 C):append-only 审计 + 回滚源。合并前对两侧各补一次 DDL,
 /// 与 SCOPE_VARIABLES_DDL 同理,避免旧库与新库合并时因「基线缺少源表」停止(§4.3)。
 /// 索引不参与 schema 一致性比对(schema_map 仅读 type='table'),无需在此重复。
@@ -269,6 +303,9 @@ fn merge_databases(baseline: &Path, source: &Path) -> Result<MergeReport, String
         .map_err(|e| format!("补齐基线库 session_compactions 表失败: {e}"))?;
     conn.execute_batch(LLM_REQUESTS_DDL)
         .map_err(|e| format!("补齐基线库 llm_requests 表失败: {e}"))?;
+    // llm_requests usage 缓存列:旧库 ALTER 补齐,保证两侧 schema 一致(比对在 DDL 补齐之后)
+    ensure_llm_requests_usage_columns(&conn)
+        .map_err(|e| format!("补齐基线库 llm_requests 缓存列失败: {e}"))?;
     conn.execute_batch(CONTRACT_CHANGELOG_DDL)
         .map_err(|e| format!("补齐基线库 contract_changelog 表失败: {e}"))?;
     conn.execute_batch(KALEIDO_STATE_DDL)
@@ -287,6 +324,8 @@ fn merge_databases(baseline: &Path, source: &Path) -> Result<MergeReport, String
     source_conn
         .execute_batch(LLM_REQUESTS_DDL)
         .map_err(|e| format!("补齐源快照 llm_requests 表失败: {e}"))?;
+    ensure_llm_requests_usage_columns(&source_conn)
+        .map_err(|e| format!("补齐源快照 llm_requests 缓存列失败: {e}"))?;
     source_conn
         .execute_batch(CONTRACT_CHANGELOG_DDL)
         .map_err(|e| format!("补齐源快照 contract_changelog 表失败: {e}"))?;
@@ -560,8 +599,19 @@ fn schema_map(conn: &Connection, schema: &str) -> Result<BTreeMap<String, String
         .map_err(|e| format!("解析 {schema} schema 失败: {e}"))
 }
 
+/// schema 比对前的 SQL 归一:标点(逗号/括号)两侧空白归一 + 空白折叠 + 小写。
+/// 标点归一是为 ALTER TABLE ADD COLUMN 补列后的旧库与新版建表的 sql 兼容——
+/// SQLite 追加列时存储为「旧列定义 , 新列…新列定义)」,逗号/右括号前的空白
+/// 与新建表「旧列定义,\n新列…新列\n)」不同;把标点独立成 token 后两者一致。
+/// (schema sql 的字符串字面量仅见空串默认值 '',不含括号,替换无误伤。)
 fn normalize_sql(sql: &str) -> String {
-    sql.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+    sql.replace(',', " , ")
+        .replace('(', " ( ")
+        .replace(')', " ) ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 fn dependency_order(conn: &Connection, tables: Vec<String>) -> Result<Vec<String>, String> {
@@ -849,6 +899,106 @@ mod tests {
         let path = std::env::temp_dir().join(format!("kedai-migration-{tag}-{}", Uuid::new_v4()));
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    /// usage 缓存列迁移:旧版 llm_requests(无 usage 列)补列成功,且幂等可重复执行。
+    #[test]
+    fn ensure_llm_requests_usage_columns_adds_and_is_idempotent() {
+        let dir = temp_dir("usage-columns");
+        let db = dir.join(DATABASE_FILE);
+        let conn = Connection::open(&db).unwrap();
+        // 旧版表结构(2026-08 缓存感知管线之前):无 prompt_cache_hit_tokens 等列
+        conn.execute_batch(
+            "CREATE TABLE llm_requests (
+              id          INTEGER PRIMARY KEY AUTOINCREMENT,
+              session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+              run_id      TEXT NOT NULL,
+              seq         INTEGER NOT NULL,
+              payload     TEXT NOT NULL,
+              model       TEXT NOT NULL DEFAULT '',
+              created_at  TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+
+        ensure_llm_requests_usage_columns(&conn).unwrap();
+        let columns = table_columns(&conn, "main", "llm_requests")
+            .unwrap()
+            .into_iter()
+            .map(|c| c.name)
+            .collect::<Vec<_>>();
+        for expected in [
+            "prompt_cache_hit_tokens",
+            "prompt_cache_miss_tokens",
+            "prompt_tokens",
+            "completion_tokens",
+        ] {
+            assert!(
+                columns.iter().any(|c| c == expected),
+                "迁移后应包含列 {expected},实际: {columns:?}"
+            );
+        }
+        // 新列默认值 0(NOT NULL DEFAULT 0)
+        let hit: i64 = conn
+            .query_row(
+                "SELECT prompt_cache_hit_tokens FROM llm_requests LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        assert_eq!(hit, 0);
+
+        // 幂等:重复执行不报错、不产生重复列
+        ensure_llm_requests_usage_columns(&conn).unwrap();
+        let columns2 = table_columns(&conn, "main", "llm_requests")
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.name == "prompt_cache_hit_tokens")
+            .count();
+        assert_eq!(columns2, 1, "重复迁移不应产生重复列");
+        drop(conn);
+        fs::remove_dir_all(dir).ok();
+    }
+
+    /// 迁移后旧表 schema 应与新版 CREATE_TABLES 建出的表 normalize 后一致
+    /// (跨库合并 schema 一致性比对依赖这一点)。
+    #[test]
+    fn ensure_llm_requests_usage_columns_matches_fresh_schema() {
+        let dir = temp_dir("usage-schema");
+        let db = dir.join(DATABASE_FILE);
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE llm_requests (
+              id          INTEGER PRIMARY KEY AUTOINCREMENT,
+              session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+              run_id      TEXT NOT NULL,
+              seq         INTEGER NOT NULL,
+              payload     TEXT NOT NULL,
+              model       TEXT NOT NULL DEFAULT '',
+              created_at  TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        ensure_llm_requests_usage_columns(&conn).unwrap();
+        let migrated = normalize_sql(conn.query_row(
+            "SELECT sql FROM sqlite_schema WHERE type='table' AND name='llm_requests'",
+            [],
+            |r| r.get::<_, String>(0),
+        ).unwrap().as_str());
+
+        let fresh_conn = Connection::open_in_memory().unwrap();
+        fresh_conn.execute_batch(crate::models::db::create_tables_sql()).unwrap();
+        let fresh = normalize_sql(fresh_conn.query_row(
+            "SELECT sql FROM sqlite_schema WHERE type='table' AND name='llm_requests'",
+            [],
+            |r| r.get::<_, String>(0),
+        ).unwrap().as_str());
+        assert_eq!(
+            migrated, fresh,
+            "迁移后 schema 应与新建表 normalize 后一致(迁移: {migrated} / 新建: {fresh})"
+        );
+        drop(conn);
+        fs::remove_dir_all(dir).ok();
     }
 
     fn create_database(path: &Path, marker: &str) {

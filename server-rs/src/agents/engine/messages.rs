@@ -440,9 +440,10 @@ pub(super) fn build_llm_messages_with_position(
     (messages, protected_tail)
 }
 
-/// 按上下文窗口上限裁剪:始终保留 system(角色设定),从最旧的 user/assistant 起丢弃,
-/// 直到总 token 不超过预算;极端情况下(仅剩 system 仍超)截断 system 内容,
-/// 并优先保留尾部注入文本(protected_tail 字符),避免注入先于角色设定被切掉。
+/// 按上下文窗口上限裁剪:始终保留 system(角色设定)与摘要槽(独立 system 消息,
+/// 缓存感知管线·改造 A),从最旧的 user/assistant 起丢弃,直到总 token 不超过预算;
+/// 极端情况下(仅剩 system 仍超)截断 system 内容,并优先保留尾部注入文本
+/// (protected_tail 字符),避免注入先于角色设定被切掉。
 pub(super) fn trim_to_context(
     messages: &mut Vec<LlmMessage>,
     max_context: Option<u32>,
@@ -454,16 +455,18 @@ pub(super) fn trim_to_context(
     if budget == 0 || messages.len() <= 1 {
         return;
     }
+    // 受保护头部:首条 system + 摘要槽(存在时)——裁剪从其后开始
+    let head = protected_head_len(messages);
     let mut total: i64 = token_service.count_message_tokens(messages, model);
-    // 从最旧消息(messages[1] 起)丢弃,直到不超预算或仅剩 system;idx 保持 1(remove 后自动前移)
-    let idx = 1usize;
+    // 从最旧消息(head 起)丢弃,直到不超预算或仅剩受保护头部;idx 保持不变(remove 后自动前移)
+    let idx = head;
     while total > budget as i64 && idx < messages.len() {
         let cost = token_service.count_tokens(&messages[idx].content, model) + 4;
         messages.remove(idx);
         total -= cost;
     }
     // 仍超预算(极长角色设定):按预算约 80% 截断 system,保留尾部注入块
-    if total > budget as i64 && messages.len() == 1 {
+    if total > budget as i64 && messages.len() == head && head > 0 {
         let sys = &mut messages[0];
         let text = sys.content.clone();
         let n: usize = ((budget as f64 * 0.8) as usize).max(200);
@@ -747,6 +750,43 @@ pub(super) fn apply_inject_insertions(
         let at = full.min(messages.len());
         messages.insert(at, LlmMessage::plain(role, content));
     }
+}
+
+// ===== 摘要槽(缓存感知管线·改造 A) =====
+// 摘要不拼进首个 system(每次压缩改写 system = 前缀全 miss),改为 system 之后的
+// 独立 system 消息槽(DeepSeek 等支持多条 system 消息),分层固定为
+// 「system(静态)→ 摘要槽(半静态,增量追加)→ 尾部历史(只追加)」。
+
+/// 摘要槽标记前缀:trim/测试据此识别摘要槽消息
+pub(super) const SUMMARY_SLOT_MARKER: &str = "【早期对话摘要】";
+
+/// 把历史压缩摘要插入为独立 system 消息槽(首条 system 之后、其余消息之前)。
+/// 摘要为空时不动数组。返回是否插入。
+pub(super) fn insert_summary_slot(messages: &mut Vec<LlmMessage>, summary: &str) -> bool {
+    let summary = summary.trim();
+    if summary.is_empty() {
+        return false;
+    }
+    let slot = LlmMessage::plain("system", &format!("{SUMMARY_SLOT_MARKER}\n{summary}"));
+    // 插入点:首条非 system 消息之前(即紧跟 system 头;正常布局为 1);
+    // 无 system 头(异常布局)时置顶,保持「摘要位于数组前部」的分层
+    let at = messages
+        .iter()
+        .position(|m| m.role != "system")
+        .unwrap_or(messages.len())
+        .min(1);
+    messages.insert(at.min(messages.len()), slot);
+    true
+}
+
+/// 消息数组中受裁剪保护的头部条数:首条 system(恒保护)+ 摘要槽(存在则保护)。
+/// trim_to_context 从其后开始丢弃旧消息,摘要槽不会被裁掉。
+pub(super) fn protected_head_len(messages: &[LlmMessage]) -> usize {
+    let mut n = usize::from(!messages.is_empty());
+    if messages.len() > 1 && messages[1].role == "system" {
+        n += 1;
+    }
+    n
 }
 
 #[cfg(test)]
@@ -1914,5 +1954,218 @@ mod tests {
             ],
         );
         assert_eq!(msgs.len(), before, "无效插入应被跳过: {msgs:?}");
+    }
+
+    // ===== 前缀稳定化回归(缓存感知管线) =====
+    // DeepSeek 等前缀缓存按「消息数组逐字节前缀」命中:同一会话同样输入两次构建
+    // 必须产出完全一致的消息数组;历史追加后重建,除尾部转移的注入区外,
+    // 前面所有消息必须逐字节保持不变。
+
+    /// 逐条消息序列化后的公共前缀长度(role+content 等全部字段逐字节比较)
+    fn common_prefix_len(a: &[LlmMessage], b: &[LlmMessage]) -> usize {
+        let mut n = 0usize;
+        for (x, y) in a.iter().zip(b.iter()) {
+            if serde_json::to_string(x).unwrap() != serde_json::to_string(y).unwrap() {
+                break;
+            }
+            n += 1;
+        }
+        n
+    }
+
+    /// 典型全要素场景下的消息构建输入(system + 常态/激发世界书 + 历史 + 尾部注入)
+    fn prefix_case_history() -> Vec<(String, String)> {
+        vec![
+            ("user".to_string(), "第一句".to_string()),
+            ("assistant".to_string(), "回应一".to_string()),
+            ("user".to_string(), "第二句".to_string()),
+            ("assistant".to_string(), "回应二".to_string()),
+        ]
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_prefix_case(
+        history: &[(String, String)],
+        vars: &mut HashMap<String, String>,
+    ) -> Vec<LlmMessage> {
+        let constant = vec![inj("system", "常驻世界书A"), inj("assistant", "常驻补充B")];
+        let triggered = vec![inj("user", "激发世界书C")];
+        build_llm_messages_with_position(
+            "芽衣",
+            "兔族少女。",
+            "温柔",
+            "图书馆",
+            &constant,
+            &triggered,
+            history,
+            None,
+            None,
+            Some("预设尾部。"),
+            "user",
+            None,
+            "user",
+            vars,
+            &mut AssistantVars::new(),
+            None,
+        )
+        .0
+    }
+
+    /// 同一会话、同样输入,两次构建出的消息数组必须逐字节完全一致
+    /// (system 锚点 + 注入排序不得含时间戳/随机序等不稳定来源)
+    #[test]
+    fn rebuild_same_input_produces_identical_messages() {
+        let history = prefix_case_history();
+        let (m1, _) = {
+            let mut vars = HashMap::new();
+            (build_prefix_case(&history, &mut vars), ())
+        };
+        let m2 = {
+            let mut vars = HashMap::new();
+            build_prefix_case(&history, &mut vars)
+        };
+        assert_eq!(
+            serde_json::to_string(&m1).unwrap(),
+            serde_json::to_string(&m2).unwrap(),
+            "两次构建的消息数组必须逐字节一致(前缀缓存前提)"
+        );
+    }
+
+    /// 历史追加后重建:公共前缀必须覆盖旧数组的「尾部注入转移区」之前的全部
+    /// 消息——system/常态注入/早期历史逐字节不变;允许变化的只有尾部注入区
+    /// (被注入的旧最新 user 及其后消息:位置1 激发/位置0 预设尾部随新消息转移,
+    /// 这是缓存友好的有意设计,把字节变化限制在数组尾部)。
+    #[test]
+    fn appending_history_keeps_prefix_bytes_stable() {
+        // 场景 A:旧历史以 user 结尾(典型:用户刚发消息)——注入转移区仅旧最后一条
+        let history_user_tail = vec![
+            ("user".to_string(), "第一句".to_string()),
+            ("assistant".to_string(), "回应一".to_string()),
+            ("user".to_string(), "第二句".to_string()),
+        ];
+        let mut extended_a = history_user_tail.clone();
+        extended_a.push(("assistant".to_string(), "回应二".to_string()));
+        extended_a.push(("user".to_string(), "第三句".to_string()));
+        let m_old = {
+            let mut vars = HashMap::new();
+            build_prefix_case(&history_user_tail, &mut vars)
+        };
+        let m_new = {
+            let mut vars = HashMap::new();
+            build_prefix_case(&extended_a, &mut vars)
+        };
+        let prefix = common_prefix_len(&m_old, &m_new);
+        assert!(
+            prefix >= m_old.len().saturating_sub(1),
+            "user 结尾场景:公共前缀({prefix})应覆盖旧数组除最后一条外的全部(旧长 {})",
+            m_old.len()
+        );
+
+        // 场景 B:旧历史以 assistant 结尾(user 后还有回复)——注入转移区为
+        // 被注入的旧 user + 其后消息,最多 2 条
+        let old_history = prefix_case_history();
+        let mut new_history = old_history.clone();
+        new_history.push(("assistant".to_string(), "回应三".to_string()));
+        new_history.push(("user".to_string(), "第三句".to_string()));
+        let m_old = {
+            let mut vars = HashMap::new();
+            build_prefix_case(&old_history, &mut vars)
+        };
+        let m_new = {
+            let mut vars = HashMap::new();
+            build_prefix_case(&new_history, &mut vars)
+        };
+        let prefix = common_prefix_len(&m_old, &m_new);
+        assert!(
+            prefix >= m_old.len().saturating_sub(2),
+            "assistant 结尾场景:公共前缀({prefix})应覆盖旧数组除尾部注入转移区(≤2 条)外的全部(旧长 {})",
+            m_old.len()
+        );
+        // system 锚点必须逐字节稳定(第一条消息 = system)
+        assert_eq!(
+            serde_json::to_string(&m_old[0]).unwrap(),
+            serde_json::to_string(&m_new[0]).unwrap(),
+            "system 消息是缓存锚点,不得随历史追加变化"
+        );
+        // 新数组确实发生了追加(而非重建出不同布局)
+        assert!(m_new.len() >= m_old.len());
+    }
+
+    /// 摘要槽:摘要出现在独立 system 消息(第二条),而非拼进首个 system 内
+    #[test]
+    fn summary_lives_in_dedicated_system_slot() {
+        let history = vec![
+            ("user".to_string(), "旧对话".to_string()),
+            ("assistant".to_string(), "旧回复".to_string()),
+        ];
+        let mut msgs = {
+            let mut vars = HashMap::new();
+            build_prefix_case(&history, &mut vars)
+        };
+        let before = msgs.clone();
+        assert!(insert_summary_slot(&mut msgs, "早期剧情的摘要文本"));
+        // 独立第二条 system 消息承载摘要
+        assert_eq!(msgs[0].role, "system", "首条消息应仍为 system");
+        assert_eq!(msgs[1].role, "system", "摘要应为独立 system 消息");
+        assert!(
+            msgs[1].content.contains("早期剧情的摘要文本"),
+            "摘要槽内容: {}",
+            msgs[1].content
+        );
+        assert!(
+            msgs[1].content.starts_with(SUMMARY_SLOT_MARKER),
+            "摘要槽应以标记开头: {}",
+            msgs[1].content
+        );
+        // 首个 system 不再内嵌摘要
+        assert!(
+            !msgs[0].content.contains("早期剧情的摘要文本"),
+            "摘要不得拼进首个 system: {}",
+            msgs[0].content
+        );
+        // 其余消息逐字节不变(首条不动,其余整体后移一位)
+        assert_eq!(msgs.len(), before.len() + 1);
+        assert_eq!(
+            serde_json::to_string(&before[0]).unwrap(),
+            serde_json::to_string(&msgs[0]).unwrap(),
+            "首条 system 不得被改写"
+        );
+        for (i, m) in before.iter().enumerate().skip(1) {
+            assert_eq!(
+                serde_json::to_string(m).unwrap(),
+                serde_json::to_string(&msgs[i + 1]).unwrap(),
+                "原第 {i} 条消息不得被改写"
+            );
+        }
+        // 空摘要不插入
+        let mut empty = before.clone();
+        assert!(!insert_summary_slot(&mut empty, "  "));
+        assert_eq!(empty.len(), before.len());
+    }
+
+    /// trim_to_context 必须保护摘要槽:裁剪从摘要槽之后开始,不得删掉摘要
+    #[test]
+    fn trim_never_removes_summary_slot() {
+        let mut ts = crate::services::token_service::TokenService::new();
+        let mut messages = vec![
+            LlmMessage::plain("system", "系统提示"),
+            LlmMessage::plain("system", "【早期对话摘要】\n很长的早期剧情摘要。"),
+            LlmMessage::plain("user", "较早消息"),
+            LlmMessage::plain("assistant", "较早回复"),
+            LlmMessage::plain("user", "最新消息"),
+        ];
+        let head = protected_head_len(&messages);
+        assert_eq!(head, 2, "system + 摘要槽都应受保护");
+        trim_to_context(&mut messages, Some(30), &mut ts, "deepseek-v4-flash", 0);
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.content.contains("早期剧情摘要")),
+            "极小预算下摘要槽也不得被裁掉: {:?}",
+            messages
+                .iter()
+                .map(|m| m.content.chars().take(20).collect::<String>())
+                .collect::<Vec<_>>()
+        );
     }
 }

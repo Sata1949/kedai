@@ -15,6 +15,17 @@ const authorizing = ref<string | null>(null);
 const authMsg = ref<string>('');
 /** 已授权的工具调用(callId ?? name):授权成功后卡片转「已授权」态,不再重复请求 */
 const grantedCalls = ref<Set<string>>(new Set());
+/** 工具入参/出参折叠卡展开态(记录 key → 是否展开) */
+const openIos = ref<Set<string>>(new Set());
+function isIoOpen(key: string): boolean {
+  return openIos.value.has(key);
+}
+function toggleIo(key: string): void {
+  const next = new Set(openIos.value);
+  if (next.has(key)) next.delete(key);
+  else next.add(key);
+  openIos.value = next;
+}
 
 /** 工具调用唯一键:优先 callId,退化用 name+id 组合避免同名并发调用混淆 */
 function callKey(t: { callId?: string; name: string; id?: number }): string {
@@ -155,7 +166,7 @@ function subtaskStatusColor(status: string): string {
         <div>
           <div class="sv-agent-section-label">计划步骤({{ currentTask?.task.plan.length ?? 0 }})</div>
           <ol v-if="currentTask?.task.plan.length" class="sv-timeline">
-            <li v-for="(s, i) in currentTask.task.plan" :key="i" class="sv-timeline-item">
+            <li v-for="(s, i) in currentTask.task.plan" :key="i" class="sv-timeline-item" :class="{ running: taskStatusClass(s.status) === 'active' }">
               {{ s.name }}
               <span class="step-detail">{{ taskStatusLabel(s.status) }}</span>
             </li>
@@ -241,9 +252,12 @@ function subtaskStatusColor(status: string): string {
             <div class="tool-name">
               <span class="tool-status running">...</span>
               {{ t.name }}
-              <span style="margin-left: auto; font-size: 10px; color: var(--sv-yellow)">执行中</span>
+              <span class="sv-badge run" style="margin-left: auto">执行中</span>
             </div>
-            <pre>{{ JSON.stringify(t.input, null, 2) }}</pre>
+            <div class="sv-tool-io" :class="{ open: isIoOpen(callKey(t) + ':in') }">
+              <button type="button" class="sv-tool-io-toggle" @click="toggleIo(callKey(t) + ':in')">入参</button>
+              <pre class="sv-tool-io-body">{{ JSON.stringify(t.input, null, 2) }}</pre>
+            </div>
           </div>
         </template>
 
@@ -253,13 +267,16 @@ function subtaskStatusColor(status: string): string {
             <div class="tool-name">
               <span class="tool-status" :class="isGranted(t) ? 'done' : 'authorization_required'">{{ isGranted(t) ? '✓' : '!' }}</span>
               {{ t.name }}
-              <span v-if="isGranted(t)" style="margin-left: auto; font-size: 10px; color: var(--sv-green)">{{ t.risk }} · 已授权</span>
-              <span v-else style="margin-left: auto; font-size: 10px; color: var(--sv-red)">{{ t.risk }} · 等待授权</span>
+              <span v-if="isGranted(t)" class="sv-badge done" style="margin-left: auto">{{ t.risk }} · 已授权</span>
+              <span v-else class="sv-badge pending" style="margin-left: auto">{{ t.risk }} · 等待授权</span>
             </div>
-            <pre>{{ JSON.stringify(t.input, null, 2) }}</pre>
+            <div class="sv-tool-io" :class="{ open: isIoOpen(callKey(t) + ':in') }">
+              <button type="button" class="sv-tool-io-toggle" @click="toggleIo(callKey(t) + ':in')">入参</button>
+              <pre class="sv-tool-io-body">{{ JSON.stringify(t.input, null, 2) }}</pre>
+            </div>
             <p style="font-size: 11px; color: var(--sv-ink-dim); margin: 6px 0 0">{{ t.reason }}</p>
             <div v-if="!isGranted(t)" class="tool-auth-btns">
-              <button class="sv-btn primary" :disabled="!currentSessionId || authorizing !== null" @click="grant(t.name, t, 'once')">仅允许本次</button>
+              <button class="sv-btn primary sv-btn-sm" :disabled="!currentSessionId || authorizing !== null" @click="grant(t.name, t, 'once')">仅允许本次</button>
               <button class="sv-btn ghost" :disabled="!currentSessionId || authorizing !== null" @click="grant(t.name, t, 'session')">允许当前会话</button>
               <button class="sv-btn ghost" :disabled="!currentSessionId || authorizing !== null" @click="grant(t.name, t, 'role')">允许当前角色</button>
               <button class="sv-btn ghost" :disabled="!currentSessionId || authorizing !== null" @click="grant(t.name, t, 'deny')">拒绝</button>
@@ -278,8 +295,14 @@ function subtaskStatusColor(status: string): string {
               <span class="tool-status done">✓</span>
               {{ t.name }}
             </div>
-            <pre>{{ JSON.stringify(t.input, null, 2) }}</pre>
-            <pre v-if="t.output !== undefined" style="border-left: 2px solid var(--sv-green); margin-top: 4px">{{ JSON.stringify(t.output, null, 2) }}</pre>
+            <div class="sv-tool-io" :class="{ open: isIoOpen(callKey(t) + ':in') }">
+              <button type="button" class="sv-tool-io-toggle" @click="toggleIo(callKey(t) + ':in')">入参</button>
+              <pre class="sv-tool-io-body">{{ JSON.stringify(t.input, null, 2) }}</pre>
+            </div>
+            <div v-if="t.output !== undefined" class="sv-tool-io" :class="{ open: isIoOpen(callKey(t) + ':out') }">
+              <button type="button" class="sv-tool-io-toggle" @click="toggleIo(callKey(t) + ':out')">出参</button>
+              <pre class="sv-tool-io-body">{{ JSON.stringify(t.output, null, 2) }}</pre>
+            </div>
           </div>
         </template>
 
@@ -290,8 +313,14 @@ function subtaskStatusColor(status: string): string {
               <span class="tool-status error">✗</span>
               {{ t.name }}
             </div>
-            <pre>{{ JSON.stringify(t.input, null, 2) }}</pre>
-            <pre v-if="t.output !== undefined" style="border-left: 2px solid var(--sv-red); margin-top: 4px">{{ JSON.stringify(t.output, null, 2) }}</pre>
+            <div class="sv-tool-io" :class="{ open: isIoOpen(callKey(t) + ':in') }">
+              <button type="button" class="sv-tool-io-toggle" @click="toggleIo(callKey(t) + ':in')">入参</button>
+              <pre class="sv-tool-io-body">{{ JSON.stringify(t.input, null, 2) }}</pre>
+            </div>
+            <div v-if="t.output !== undefined" class="sv-tool-io" :class="{ open: isIoOpen(callKey(t) + ':out') }">
+              <button type="button" class="sv-tool-io-toggle" @click="toggleIo(callKey(t) + ':out')">出参</button>
+              <pre class="sv-tool-io-body">{{ JSON.stringify(t.output, null, 2) }}</pre>
+            </div>
           </div>
         </template>
 

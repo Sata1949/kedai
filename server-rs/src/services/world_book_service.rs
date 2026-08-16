@@ -164,11 +164,15 @@ impl WorldBookService {
             .unwrap_or(false)
     }
 
-    /// 指定角色的有效独立世界书:绑定到该角色 或 全局,且 enabled
+    /// 指定角色的有效独立世界书:绑定到该角色 或 全局,且 enabled。
+    /// 排序附带 id 作全序键(前缀缓存稳定化):created_at 相同(同批导入等)的
+    /// 多本书若无次级键,SQLite 返回顺序不确定 → 世界书注入顺序每轮可能漂移,
+    /// 破坏 system/常驻注入的前缀逐字节一致性。正常情况下 id 次级键不改变结果,
+    /// 只把原本不确定的并列顺序固定下来。
     pub fn enabled_for_character(&self, character_id: &str) -> Vec<WorldBookRecord> {
         let conn = self.db.conn();
         let mut stmt = conn
-            .prepare(&format!("{LIST_SQL} WHERE w.enabled = 1 AND (w.character_id = ?1 OR w.character_id IS NULL) ORDER BY w.created_at DESC"))
+            .prepare(&format!("{LIST_SQL} WHERE w.enabled = 1 AND (w.character_id = ?1 OR w.character_id IS NULL) ORDER BY w.created_at DESC, w.id"))
             .unwrap();
         stmt.query_map(params![character_id], |row| row_to_record(row, true))
             .unwrap()

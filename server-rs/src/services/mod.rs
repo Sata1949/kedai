@@ -3,6 +3,7 @@ pub mod agent_flow_service;
 pub mod audio_service;
 pub mod agent_session_service;
 pub mod agent_subtask_service;
+pub mod cache_diagnostics;
 pub mod character_service;
 pub mod contract_changelog_service;
 pub mod kaleido_state_service;

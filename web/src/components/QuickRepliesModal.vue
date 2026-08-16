@@ -105,7 +105,7 @@ async function load(): Promise<void> {
       <!-- 头部 -->
       <div class="sv-modal-head">
         <h2 class="flex items-center gap-2">
-          <span class="logo" /> 快速回复
+          <span class="sv-supreme pink" style="width: 18px; height: 18px" /> 快速回复
         </h2>
         <button class="sv-btn ghost sv-btn-square" @click="close">✕</button>
       </div>
@@ -130,8 +130,14 @@ async function load(): Promise<void> {
             <span class="sv-wb-count">{{ drafts.length }} 条(启用 {{ enabledCount }} 条)</span>
           </div>
           <div v-if="loadError" class="sv-feedback err" style="margin: 8px 0">{{ loadError }}</div>
-          <div v-else-if="drafts.length === 0" class="sv-empty" style="padding: 24px 12px">
-            <p style="font-size: 12px">暂无快速回复。点下方「＋ 新增」创建。</p>
+          <div v-else-if="drafts.length === 0" class="sv-empty" style="padding: 28px 12px">
+            <div class="sv-empty-geo" style="margin-bottom: 10px">
+              <span class="sq black" style="width: 14px; height: 14px" />
+              <span class="sq pink" />
+              <span class="sq deep" style="width: 6px; height: 6px" />
+            </div>
+            <p style="font-size: 12px">暂无快速回复</p>
+            <p style="font-size: 11px">点下方「＋ 新增」创建第一条</p>
           </div>
           <div v-else class="sv-datalist" style="max-height: 380px; overflow-y: auto">
             <div v-for="(d, i) in drafts" :key="`qr-${d.id}-${i}`" class="sv-data-row sv-wb-row" style="align-items: flex-start">

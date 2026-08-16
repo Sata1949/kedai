@@ -284,10 +284,10 @@ async function hydrateRemoteResources(): Promise<void> {
           const html = body.base_url ? `<base href="${escapeAttr(body.base_url)}">\n${body.html ?? ''}` : (body.html ?? '');
           win.postMessage({ channel: 'kedai-resource-frame-v1', nonce, type: 'boot', html }, '*');
         } else {
-          frame.srcdoc = `<div style="padding:16px;font-family:sans-serif;color:#c0392b">资源界面加载失败：${escapeAttr(body.error ?? '未知错误')}</div>`;
+          frame.srcdoc = `<div style="--sv-red:#e3342f;--font-body:'Segoe UI','PingFang SC','Microsoft YaHei',system-ui,sans-serif;padding:16px;font-family:var(--font-body);color:var(--sv-red)">资源界面加载失败：${escapeAttr(body.error ?? '未知错误')}</div>`;
         }
       } catch (e) {
-        frame.srcdoc = `<div style="padding:16px;font-family:sans-serif;color:#c0392b">资源界面加载失败：${escapeAttr(String((e as Error).message || '网络错误'))}</div>`;
+        frame.srcdoc = `<div style="--sv-red:#e3342f;--font-body:'Segoe UI','PingFang SC','Microsoft YaHei',system-ui,sans-serif;padding:16px;font-family:var(--font-body);color:var(--sv-red)">资源界面加载失败：${escapeAttr(String((e as Error).message || '网络错误'))}</div>`;
       }
     };
     const onMessage = (ev: MessageEvent): void => {
@@ -475,36 +475,39 @@ watch(
         <span v-if="model" class="sv-topbar-sub">{{ model }}</span>
       </span>
 
-      <!-- 会话切换 -->
-      <span v-if="sessions.length > 1" class="flex items-center gap-2">
-        <label class="sv-topbar-sub" for="session-select">会话</label>
-        <select
-          id="session-select"
-          class="sv-session-select"
-          :value="currentSessionId ?? ''"
-          @change="onSessionChange"
-        >
-          <option v-for="s in sessions" :key="s.id" :value="s.id">
-            {{ s.title }} · {{ new Date(s.updated_at).toLocaleString('zh-CN', { hour12: false }) }}
-          </option>
-        </select>
-        <button
-          class="sv-icon-btn"
-          title="新建会话(多开场角色可先选开场)"
-          @click="currentGreetings.length > 1 ? openGreetingPicker('new') : store.newSession()"
-        >＋</button>
-      </span>
-
       <span class="sv-topbar-right">
-        <!-- 开场切换(多开场角色:重置当前会话并以所选开场重新开始) -->
-        <button
-          v-if="currentGreetings.length > 1"
-          class="sv-btn ghost sv-btn-sm"
-          title="切换开场(清空当前会话并以所选开场重新开始)"
-          @click="openGreetingPicker('switch')"
-        >
-          开场
-        </button>
+        <!-- 会话操作:会话切换 + 开场切换 -->
+        <div class="sv-topbar-group">
+          <template v-if="sessions.length > 1">
+            <label class="sv-topbar-sub" for="session-select">会话</label>
+            <select
+              id="session-select"
+              class="sv-session-select"
+              :value="currentSessionId ?? ''"
+              @change="onSessionChange"
+            >
+              <option v-for="s in sessions" :key="s.id" :value="s.id">
+                {{ s.title }} · {{ new Date(s.updated_at).toLocaleString('zh-CN', { hour12: false }) }}
+              </option>
+            </select>
+            <button
+              class="sv-icon-btn"
+              title="新建会话(多开场角色可先选开场)"
+              @click="currentGreetings.length > 1 ? openGreetingPicker('new') : store.newSession()"
+            >＋</button>
+          </template>
+          <!-- 开场切换(多开场角色:重置当前会话并以所选开场重新开始) -->
+          <button
+            v-if="currentGreetings.length > 1"
+            class="sv-btn ghost sv-btn-sm"
+            title="切换开场(清空当前会话并以所选开场重新开始)"
+            @click="openGreetingPicker('switch')"
+          >
+            开场
+          </button>
+        </div>
+        <!-- 渲染开关:HTML 渲染 + JS 脚本授权 -->
+        <div class="sv-topbar-group">
         <!-- HTML 渲染开关(Toggle 样式;按角色卡记忆;常驻显示——无脚本的卡同样记忆开关状态,
              只是无脚本时开关不产生 scoped 渲染效果) -->
         <button
@@ -535,6 +538,7 @@ watch(
         >
           JS {{ currentScriptAuthorized ? '已授权' : '禁用' }}
         </button>
+        </div>
         <span class="sv-token-inline">
           CTX {{ store.contextTokens.toLocaleString() }}
           <span class="sv-supreme pink" style="width: 6px; height: 6px" />
@@ -621,14 +625,14 @@ watch(
                 <!-- 阶段六 6f:多版本切换(◀ n/N ▶)+ 生成新版本;单版本不显示切换 -->
                 <template v-if="swipeTotal(m) > 1">
                   <button
-                    class="sv-msg-action"
+                    class="sv-swipe-btn"
                     :disabled="swipePosition(m) <= 1"
                     title="上一个版本"
                     @click="store.swipeMessage(m.id, swipePosition(m) - 2)"
                   >◀</button>
-                  <span class="sv-msg-action-label">{{ swipePosition(m) }}/{{ swipeTotal(m) }}</span>
+                  <span class="sv-swipe-count">{{ swipePosition(m) }}/{{ swipeTotal(m) }}</span>
                   <button
-                    class="sv-msg-action"
+                    class="sv-swipe-btn"
                     :disabled="swipePosition(m) >= swipeTotal(m)"
                     title="下一个版本"
                     @click="store.swipeMessage(m.id, swipePosition(m))"

@@ -7,6 +7,7 @@ pub mod characters;
 pub mod chat;
 pub mod contracts;
 pub mod contract_history;
+pub mod diagnostics;
 pub mod import_export;
 pub mod kaleido;
 pub mod macros;
@@ -150,6 +151,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/token/count", post(tokens::count))
         .route("/api/token/session-total", get(tokens::session_total))
         .route("/api/token/global-total", get(tokens::global_total))
+        // 缓存诊断(缓存感知管线):命中率/费用节省/四级水位
+        .route("/api/diagnostics/cache", get(diagnostics::cache))
         .route("/api/export/chat", get(import_export::export_chat))
         .route("/api/import/chat", post(import_export::import_chat))
         // 世界书

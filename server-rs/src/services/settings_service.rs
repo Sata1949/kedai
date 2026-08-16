@@ -74,6 +74,12 @@ pub struct ModeSettings {
     pub compaction_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction_threshold: Option<f32>,
+    /// 压缩后保留的最近消息条数(缓存感知管线,默认 4)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_keep_recent: Option<u32>,
+    /// snip 零成本裁剪的消息长度阈值(字节;0 = 禁用 snip,默认 8192)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_snip_bytes: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_request_log: Option<bool>,
 }
@@ -142,6 +148,12 @@ pub struct RuntimeSettings {
     /// 上下文压缩触发阈值(0.5..=0.95,默认 0.8):auto 模式下历史 token 占比达到该值即压缩
     #[serde(default = "default_compaction_threshold")]
     pub compaction_threshold: f32,
+    /// 压缩后保留的最近消息条数(缓存感知管线;默认 4,钳制 >= 2)
+    #[serde(default = "default_compaction_keep_recent")]
+    pub compaction_keep_recent: u32,
+    /// snip 零成本裁剪的消息长度阈值(字节;默认 8192 = 8KB,0 = 禁用 snip)
+    #[serde(default = "default_compaction_snip_bytes")]
+    pub compaction_snip_bytes: u32,
     /// LLM 请求快照开关(第四点·主题 A):true = 每次下发前把完整消息数组落 llm_requests 表
     /// (含 system/注入/工具消息,可回放调试;默认关闭避免占用磁盘)
     #[serde(default)]
@@ -183,6 +195,16 @@ fn default_compaction_threshold() -> f32 {
     0.8
 }
 
+/// 默认压缩后保留的最近消息条数(缓存感知管线;沿用原 KEEP_RECENT_MESSAGES 常量值)
+fn default_compaction_keep_recent() -> u32 {
+    4
+}
+
+/// 默认 snip 零成本裁剪消息长度阈值(8KB)
+fn default_compaction_snip_bytes() -> u32 {
+    8192
+}
+
 /// 默认搜索端点(DuckDuckGo HTML 免费接口,无需 API Key)
 pub const DEFAULT_SEARCH_ENDPOINT: &str = "https://html.duckduckgo.com/html/";
 
@@ -213,6 +235,8 @@ impl RuntimeSettings {
             render_html: false,
             compaction_mode: default_compaction_mode(),
             compaction_threshold: default_compaction_threshold(),
+            compaction_keep_recent: default_compaction_keep_recent(),
+            compaction_snip_bytes: default_compaction_snip_bytes(),
             llm_request_log: false,
             task: ModeSettings::default(),
         }
@@ -281,6 +305,12 @@ impl RuntimeSettings {
         if let Some(v) = ov.compaction_threshold {
             out.compaction_threshold = v;
         }
+        if let Some(v) = ov.compaction_keep_recent {
+            out.compaction_keep_recent = v;
+        }
+        if let Some(v) = ov.compaction_snip_bytes {
+            out.compaction_snip_bytes = v;
+        }
         if let Some(v) = ov.llm_request_log {
             out.llm_request_log = v;
         }
@@ -319,6 +349,14 @@ impl RuntimeSettings {
                 // 压缩阈值钳制到 0.5..=0.95,旧配置缺省已由 serde default 填 0.8
                 if !(0.5..=0.95).contains(&s.compaction_threshold) {
                     s.compaction_threshold = default_compaction_threshold();
+                }
+                // 压缩保留条数钳制到 >= 2(0/1 会导致压缩后无上下文或永不触发),上限 200
+                if !(2..=200).contains(&s.compaction_keep_recent) {
+                    s.compaction_keep_recent = default_compaction_keep_recent();
+                }
+                // snip 阈值钳制到 0..=1MB(0 = 禁用 snip;负数/超大值视为异常回退默认)
+                if s.compaction_snip_bytes > 1_048_576 {
+                    s.compaction_snip_bytes = default_compaction_snip_bytes();
                 }
                 let was_plaintext =
                     !s.openai_api_key.is_empty() && !secret_store::is_protected(&s.openai_api_key);

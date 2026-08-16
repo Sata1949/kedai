@@ -234,7 +234,7 @@ onMounted(() => {
       <!-- 头部 -->
       <div class="sv-modal-head">
         <h2 class="flex items-center gap-2">
-          <span class="logo" /> 脚本管理
+          <span class="sv-supreme pink" style="width: 18px; height: 18px" /> 脚本管理
         </h2>
         <!-- 导出 / 导入(阶段六 6e) -->
         <div class="flex items-center gap-2" style="margin-right: 8px">

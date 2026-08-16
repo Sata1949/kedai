@@ -187,7 +187,11 @@ CREATE TABLE IF NOT EXISTS llm_requests (
   seq         INTEGER NOT NULL,
   payload     TEXT NOT NULL,
   model       TEXT NOT NULL DEFAULT '',
-  created_at  TEXT NOT NULL
+  created_at  TEXT NOT NULL,
+  prompt_cache_hit_tokens   INTEGER NOT NULL DEFAULT 0,
+  prompt_cache_miss_tokens  INTEGER NOT NULL DEFAULT 0,
+  prompt_tokens             INTEGER NOT NULL DEFAULT 0,
+  completion_tokens         INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_llm_requests_session ON llm_requests(session_id, seq);
 -- 契约变更历史(阶段 C):append-only 审计 + 回滚源。
@@ -231,6 +235,11 @@ pub struct Db {
     conn: Mutex<Connection>,
 }
 
+/// 暴露建表 SQL 供迁移一致性测试比对(旧库 ALTER 补列后应与新建表 schema normalize 一致)
+pub fn create_tables_sql() -> &'static str {
+    CREATE_TABLES
+}
+
 impl Db {
     pub fn open(db_path: &Path, data_dir: &Path) -> Result<Self, String> {
         if let Err(e) = std::fs::create_dir_all(data_dir) {
@@ -245,6 +254,9 @@ impl Db {
             .map_err(|e| format!("设置 busy_timeout 失败: {e}"))?;
         conn.execute_batch(CREATE_TABLES)
             .map_err(|e| format!("建表失败: {e}"))?;
+        // 幂等 schema 升级(2026-08 缓存感知管线):旧库 llm_requests 补 usage 缓存列
+        crate::migration::ensure_llm_requests_usage_columns(&conn)
+            .map_err(|e| format!("升级 llm_requests 缓存列失败: {e}"))?;
         backfill_scope_variables(&conn)?;
         Ok(Db {
             conn: Mutex::new(conn),

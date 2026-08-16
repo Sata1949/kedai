@@ -244,6 +244,10 @@ pub struct TokenUsage {
     /// 用于前端「当前命中率」展示;无缓存字段的提供商恒为 0)
     #[serde(default)]
     pub prompt_cache_hit_tokens: i64,
+    /// prompt 缓存未命中 token(DeepSeek prompt_cache_miss_tokens;OpenAI 风格由
+    /// prompt_tokens - cached_tokens 推导;无缓存字段的提供商恒为 0)
+    #[serde(default)]
+    pub prompt_cache_miss_tokens: i64,
 }
 
 // ---------- LLM ----------
@@ -324,6 +328,8 @@ pub enum LlmStreamChunk {
         total_tokens: i64,
         /// prompt 缓存命中 token(DeepSeek 等提供商;其余为 0)
         prompt_cache_hit_tokens: i64,
+        /// prompt 缓存未命中 token(DeepSeek 风格原样透传;OpenAI 风格由推导得出)
+        prompt_cache_miss_tokens: i64,
     },
 }
 

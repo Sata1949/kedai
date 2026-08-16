@@ -1946,3 +1946,86 @@ async fn render_frame_document_is_served() {
     assert!(html.contains("booted"), "宿主文档应含 boot 闩锁");
 }
 
+
+// ===== 缓存诊断端点(缓存感知管线) =====
+
+/// 直插 llm_requests 缓存统计行(绕过引擎,精确控制命中/未命中数据)
+fn insert_cache_rows(sid: &str) {
+    let db_path = std::env::temp_dir()
+        .join(format!("kedai-test-{}", std::process::id()))
+        .join("kedai.db");
+    let conn = rusqlite::Connection::open(&db_path).expect("打开测试库失败");
+    for (seq, hit, miss, prompt, completion) in [(1, 700, 300, 1000, 200), (2, 600, 400, 1000, 1000)] {
+        conn.execute(
+            "INSERT INTO llm_requests
+               (session_id, run_id, seq, payload, model, created_at,
+                prompt_cache_hit_tokens, prompt_cache_miss_tokens, prompt_tokens, completion_tokens)
+             VALUES (?1, 'run-diag', ?2, '', 'mock', ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![sid, seq, format!("2026-08-16T00:00:0{seq}Z"), hit, miss, prompt, completion],
+        )
+        .expect("插入缓存统计行失败");
+    }
+}
+
+#[tokio::test]
+async fn diagnostics_cache_reports_hit_rate_and_pricing() {
+    let app = test_app();
+    let (_, char) = upload_character(app, "缓存诊断.json").await;
+    let cid = char["id"].as_str().unwrap().to_string();
+    let (_, session) = send_json(
+        app,
+        "POST",
+        "/api/chat/sessions",
+        json!({ "character_id": cid, "title": "缓存诊断会话" }),
+    )
+    .await;
+    let sid = session["id"].as_str().unwrap().to_string();
+    insert_cache_rows(&sid);
+
+    let (_, body) = send_json(
+        app,
+        "GET",
+        &format!("/api/diagnostics/cache?session_id={sid}"),
+        json!({}),
+    )
+    .await;
+    let totals = &body["totals"];
+    assert_eq!(totals["count"], json!(2), "应统计 2 条: {body}");
+    assert_eq!(totals["total_hit"], json!(1300));
+    assert_eq!(totals["total_miss"], json!(700));
+    let rate = totals["hit_rate"].as_f64().expect("hit_rate 应为数值");
+    assert!((rate - 0.65).abs() < 1e-9, "加权命中率 0.65,实际 {rate}");
+    // 费用 = (1300*0.27 + 700*2 + 1200*8)/1e6 = 0.011351(默认 DeepSeek 参考价)
+    let cost = body["cost"].as_f64().unwrap();
+    assert!((cost - 0.011351).abs() < 1e-9, "费用估算: {cost}");
+    let saved = body["saved"].as_f64().unwrap();
+    assert!((saved - 0.002249).abs() < 1e-9, "节省估算: {saved}");
+    // 明细:时间正序(seq 1 在前),含 session/时间/hit/miss
+    let entries = body["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["hit"], json!(700));
+    assert_eq!(entries[1]["miss"], json!(400));
+    assert_eq!(entries[0]["session_id"], json!(sid));
+    // 单价结构体透出(每百万 token,不做货币换算)
+    assert_eq!(body["pricing"]["cache_hit_per_m"], json!(0.27));
+    assert_eq!(body["pricing"]["input_per_m"], json!(2.0));
+    assert_eq!(body["pricing"]["output_per_m"], json!(8.0));
+    // 水位报告字段齐全(档位合法集合;具体档位随并行测试的 settings 变化,不精确断言)
+    let level = body["watermark"]["level"].as_str().unwrap_or("");
+    assert!(
+        ["ok", "soft", "snip", "compact", "force", "unknown"].contains(&level),
+        "水位档位应合法: {body}"
+    );
+    assert!(body["watermark"]["max_context_tokens"].is_u64());
+
+    // 窗口过滤:window=1 只取最新一条(seq 2)
+    let (_, body) = send_json(
+        app,
+        "GET",
+        &format!("/api/diagnostics/cache?session_id={sid}&window=1"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(body["totals"]["count"], json!(1));
+    assert_eq!(body["entries"][0]["hit"], json!(600));
+}

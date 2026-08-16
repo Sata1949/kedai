@@ -56,11 +56,13 @@ pub(super) async fn reflect_with_llm(
                 completion_tokens,
                 total_tokens,
                 prompt_cache_hit_tokens,
+                prompt_cache_miss_tokens,
             } => {
                 usage.prompt_tokens += prompt_tokens;
                 usage.completion_tokens += completion_tokens;
                 usage.total_tokens += total_tokens;
                 usage.prompt_cache_hit_tokens += prompt_cache_hit_tokens;
+                usage.prompt_cache_miss_tokens += prompt_cache_miss_tokens;
             }
             _ => {}
         }
@@ -147,11 +149,13 @@ pub(super) async fn reflect_with_tools(
                     completion_tokens,
                     total_tokens,
                     prompt_cache_hit_tokens,
+                    prompt_cache_miss_tokens,
                 } => {
                     total_usage.prompt_tokens += prompt_tokens;
                     total_usage.completion_tokens += completion_tokens;
                     total_usage.total_tokens += total_tokens;
                     total_usage.prompt_cache_hit_tokens += prompt_cache_hit_tokens;
+                    total_usage.prompt_cache_miss_tokens += prompt_cache_miss_tokens;
                 }
                 _ => {}
             }
@@ -253,11 +257,13 @@ pub(super) async fn generate_reflect_advice(
                 completion_tokens,
                 total_tokens,
                 prompt_cache_hit_tokens,
+                prompt_cache_miss_tokens,
             } => {
                 usage.prompt_tokens += prompt_tokens;
                 usage.completion_tokens += completion_tokens;
                 usage.total_tokens += total_tokens;
                 usage.prompt_cache_hit_tokens += prompt_cache_hit_tokens;
+                usage.prompt_cache_miss_tokens += prompt_cache_miss_tokens;
             }
             _ => {}
         }

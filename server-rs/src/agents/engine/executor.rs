@@ -116,6 +116,8 @@ pub(super) async fn execute_generation(
 ) -> Result<ExecutorResult, String> {
     // LLM 请求快照(第四点·主题 A):开关开启时,把真正下发的完整消息数组落盘,
     // 供回放/调试「模型到底看到了什么」。失败仅告警,不阻塞生成。
+    // seq 总是分配:缓存观测(usage 落库)不依赖快照开关。
+    let seq = LLM_REQUEST_SEQ.fetch_add(1, Ordering::Relaxed);
     {
         let log_enabled = engine
             .settings
@@ -124,7 +126,6 @@ pub(super) async fn execute_generation(
             .llm_request_log;
         if log_enabled {
             if let Ok(payload) = serde_json::to_string(messages) {
-                let seq = LLM_REQUEST_SEQ.fetch_add(1, Ordering::Relaxed);
                 if let Err(e) = engine.sessions.save_llm_request(
                     session_id,
                     run_id,
@@ -184,6 +185,24 @@ pub(super) async fn execute_generation(
         return Err(e);
     }
 
+    // 缓存观测落库(缓存感知管线):每轮请求的命中/未命中 token 记入 llm_requests,
+    // 与快照开关解耦;失败仅告警,不影响生成结果。
+    if let Err(e) = engine.sessions.save_llm_cache_usage(
+        session_id,
+        run_id,
+        seq,
+        &engine.model(),
+        usage.prompt_tokens,
+        usage.completion_tokens,
+        usage.prompt_cache_hit_tokens,
+        usage.prompt_cache_miss_tokens,
+    ) {
+        logger::warn(
+            "LLM 缓存统计落库失败",
+            &[("error", Value::String(e))],
+        );
+    }
+
     Ok(ExecutorResult {
         content,
         usage,
@@ -239,11 +258,13 @@ async fn process_chunk(
             completion_tokens,
             total_tokens,
             prompt_cache_hit_tokens,
+            prompt_cache_miss_tokens,
         } => {
             usage.prompt_tokens += prompt_tokens;
             usage.completion_tokens += completion_tokens;
             usage.total_tokens += total_tokens;
             usage.prompt_cache_hit_tokens += prompt_cache_hit_tokens;
+            usage.prompt_cache_miss_tokens += prompt_cache_miss_tokens;
         }
     }
     Ok(false)
@@ -293,6 +314,7 @@ pub(super) async fn run_tool_loop(
         total_usage.completion_tokens += result.usage.completion_tokens;
         total_usage.total_tokens += result.usage.total_tokens;
         total_usage.prompt_cache_hit_tokens += result.usage.prompt_cache_hit_tokens;
+        total_usage.prompt_cache_miss_tokens += result.usage.prompt_cache_miss_tokens;
         if result.interrupted {
             return Ok(result);
         }

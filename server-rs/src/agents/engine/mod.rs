@@ -43,15 +43,16 @@ pub(crate) mod worldbook;
 pub(super) mod compaction;
 
 use self::compaction::{
-    compaction_split, compaction_system_prompt, compaction_user_text, project_history,
-    should_auto_compact, upto_message_id, ProjectedHistory,
+    compaction_split, compaction_system_prompt, compaction_user_text, incremental_segment,
+    merge_incremental_summary, project_history, should_auto_compact, should_snip, snip_tuples,
+    upto_message_id, DEFAULT_KEEP_RECENT_MESSAGES, ProjectedHistory,
 };
 
 use self::executor::{execute_generation, maybe_run_tool, run_tool_loop};
 use self::messages::{
     apply_inject_insertions, build_llm_messages_with_position, inject_reflect_advice,
-    parse_inject_insertion, retreat_to_generating_step, step_params_for, trim_to_context,
-    with_step_prompt, InjectInsertion, InjectAt,
+    insert_summary_slot, parse_inject_insertion, retreat_to_generating_step, step_params_for,
+    trim_to_context, with_step_prompt, InjectInsertion, InjectAt,
 };
 use self::mvu::{apply_mvu_patches, generate_mvu_status, strip_status_bar_tag};
 use self::reflector_integration::{generate_reflect_advice, reflect_with_tools};
@@ -297,6 +298,7 @@ async fn build_reflect_advice(
         total_usage.completion_tokens += u.completion_tokens;
         total_usage.total_tokens += u.total_tokens;
         total_usage.prompt_cache_hit_tokens += u.prompt_cache_hit_tokens;
+        total_usage.prompt_cache_miss_tokens += u.prompt_cache_miss_tokens;
         text.push_str("[反思反馈]\n");
         text.push_str(advice.trim());
     }
@@ -906,25 +908,41 @@ impl AgentEngine {
     /// 手动压缩(独立端点 /api/chat/compact 调用):对会话较早历史做一次摘要压缩。
     /// 原文消息不删、摘要 upsert 到 session_compactions(可逆);返回是否实际压缩。
     /// mode=off 时拒绝;历史不足 KEEP_RECENT_MESSAGES 条时返回 Ok(false) 无需压缩。
+    /// 增量摘要(缓存感知管线·改造 B):旧摘要冻结,只摘要上次截止点之后的新段,
+    /// 新行 = 旧摘要(原字节)+ 增量拼接;旧行保留在表中以便回溯。
     pub async fn compact_session(&self, session_id: &str) -> Result<bool, String> {
-        let mode = self
-            .settings
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .compaction_mode
-            .clone();
+        // 保留尾部条数:设置项 compaction_keep_recent(load 已钳制 2..=200),
+        // 此处再兜底 >= 2,防止异常配置导致压缩后无上下文
+        let (mode, keep_recent) = {
+            let s = self.settings.lock().unwrap_or_else(|e| e.into_inner());
+            (
+                s.compaction_mode.clone(),
+                (s.compaction_keep_recent as usize).max(DEFAULT_KEEP_RECENT_MESSAGES.max(2)),
+            )
+        };
         if mode == "off" {
             return Err("上下文压缩模式为 off,请先在设置中改为 manual 或 auto".into());
         }
         let history = self.sessions.get_messages(session_id);
-        let Some(to_compact) = compaction_split(&history) else {
+        let Some(to_compact) = compaction_split(&history, keep_recent) else {
             return Ok(false);
         };
         let Some(upto) = upto_message_id(&history, to_compact) else {
             return Ok(false);
         };
+        // 增量边界:已有摘要时只压缩 (upto_old, upto] 新段;无新内容跳过
+        let (upto_old, old_summary) = self
+            .sessions
+            .get_compaction(session_id)
+            .unwrap_or((0, String::new()));
+        if upto_old >= upto {
+            return Ok(false);
+        }
+        let segment = incremental_segment(&history, upto_old, upto);
+        if segment.is_empty() {
+            return Ok(false);
+        }
         let (abort, abort_rx) = AbortFlag::new();
-        let segment = &history[..to_compact];
         let messages = vec![
             LlmMessage::plain("system", compaction_system_prompt()),
             LlmMessage::plain("user", &compaction_user_text(segment)),
@@ -939,13 +957,14 @@ impl AgentEngine {
             tool_choice: crate::models::types::ToolChoice::Auto,
             parallel_tool_calls: None,
         };
-        let (summary, _usage) = self.generate_text(&messages, params, abort_rx).await?;
-        let summary = summary.trim().to_string();
-        if summary.is_empty() {
+        let (increment, _usage) = self.generate_text(&messages, params, abort_rx).await?;
+        let increment = increment.trim().to_string();
+        if increment.is_empty() {
             return Err("摘要生成返回空内容".into());
         }
+        let merged = merge_incremental_summary(&old_summary, &increment);
         self.sessions
-            .save_compaction(session_id, upto, &summary, &self.model())?;
+            .save_compaction(session_id, upto, &merged, &self.model())?;
         drop(abort);
         Ok(true)
     }
@@ -959,12 +978,13 @@ impl AgentEngine {
         tx: &mpsc::Sender<SseEvent>,
         abort: &watch::Receiver<bool>,
     ) {
-        let (mode, threshold, max_context) = {
+        let (mode, threshold, max_context, keep_recent) = {
             let s = self.settings.lock().unwrap_or_else(|e| e.into_inner());
             (
                 s.compaction_mode.clone(),
                 s.compaction_threshold,
                 s.max_context_tokens,
+                (s.compaction_keep_recent as usize).max(DEFAULT_KEEP_RECENT_MESSAGES.max(2)),
             )
         };
         if mode != "auto" {
@@ -985,12 +1005,24 @@ impl AgentEngine {
         if !should_auto_compact(tokens, max_context, threshold) {
             return;
         }
-        let Some(to_compact) = compaction_split(&history) else {
+        let Some(to_compact) = compaction_split(&history, keep_recent) else {
             return;
         };
         let Some(upto) = upto_message_id(&history, to_compact) else {
             return;
         };
+        // 增量边界(改造 B):已有摘要时只压缩 (upto_old, upto] 新段,无新内容跳过
+        let (upto_old, old_summary) = self
+            .sessions
+            .get_compaction(session_id)
+            .unwrap_or((0, String::new()));
+        if upto_old >= upto {
+            return;
+        }
+        let segment = incremental_segment(&history, upto_old, upto);
+        if segment.is_empty() {
+            return;
+        }
         let _ = tx
             .send(step_evt(
                 "压缩历史中…",
@@ -999,7 +1031,6 @@ impl AgentEngine {
                 None,
             ))
             .await;
-        let segment = &history[..to_compact];
         let messages = vec![
             LlmMessage::plain("system", compaction_system_prompt()),
             LlmMessage::plain("user", &compaction_user_text(segment)),
@@ -1015,12 +1046,13 @@ impl AgentEngine {
             parallel_tool_calls: None,
         };
         match self.generate_text(&messages, params, abort.clone()).await {
-            Ok((summary, _usage)) => {
-                let summary = summary.trim().to_string();
-                if !summary.is_empty() {
-                    if let Err(e) =
-                        self.sessions
-                            .save_compaction(session_id, upto, &summary, &self.model())
+            Ok((increment, _usage)) => {
+                let increment = increment.trim().to_string();
+                if !increment.is_empty() {
+                    let merged = merge_incremental_summary(&old_summary, &increment);
+                    if let Err(e) = self
+                        .sessions
+                        .save_compaction(session_id, upto, &merged, &self.model())
                     {
                         logger::warn(
                             "压缩摘要落库失败",
@@ -1055,6 +1087,34 @@ impl AgentEngine {
         // 历史压缩投影:读已存在的摘要(若曾压缩过),模型可见历史 = 摘要 + 截止点之后的原文。
         // 原文 history 保持不变,继续供 EJS 渲染与世界书分组读取完整历史。
         let projected: ProjectedHistory = project_history(&history, self.sessions.get_compaction(session_id));
+        // snip 零成本裁剪档(缓存感知管线):auto 模式且历史 token 达 SNIP_THRESHOLD(0.6,
+        // 先于 LLM 摘要档 0.8)时,把投影中陈旧的超长消息替换为占位符(尾部 2 条原文保留、
+        // 错误特征保留)。只影响模型可见投影,不改数据库原文,与可逆投影设计一致。
+        let (snip_mode, snip_bytes, snip_max_context) = {
+            let s = self.settings.lock().unwrap_or_else(|e| e.into_inner());
+            (
+                s.compaction_mode.clone(),
+                s.compaction_snip_bytes,
+                s.max_context_tokens,
+            )
+        };
+        let tuples = if snip_mode == "auto" && snip_bytes > 0 && !projected.tuples.is_empty() {
+            let history_tokens = {
+                let mut ts = self.token_service.lock().unwrap_or_else(|e| e.into_inner());
+                let mut total: i64 = 0;
+                for m in &history {
+                    total += ts.count_tokens(&m.content, &self.model()) + 4;
+                }
+                total + 2
+            };
+            if should_snip(history_tokens, snip_max_context) {
+                snip_tuples(&projected.tuples, snip_bytes as usize)
+            } else {
+                projected.tuples
+            }
+        } else {
+            projected.tuples
+        };
         // 角色名/描述(供消息构建与自定义流程步骤提示词的宏上下文)
         let chara_name = character
             .as_ref()
@@ -1294,7 +1354,9 @@ impl AgentEngine {
                 world.constant.push(block);
             }
         }
-        let history_tuples: Vec<(String, String)> = projected.tuples;
+        // 模型可见历史 = 投影(摘要截止点之后)经 snip 零成本裁剪后的视图;
+        // 原文 history(完整)继续供世界书/EJS 等读取
+        let history_tuples: Vec<(String, String)> = tuples;
         let history_summary = projected.summary;
         // 自定义 Agent 系统提示词(设置里编辑;为空则用内置默认)
         let settings_snapshot = self
@@ -1446,17 +1508,12 @@ impl AgentEngine {
                 &[("error", Value::String(error))],
             ),
         }
-        // 历史压缩摘要:拼入 system 作为早期历史回顾(替代被压缩的原文段)。
-        // 摘要一旦生成即固定(前缀缓存稳定);位于角色设定之后、GENERATE 注入之前。
+        // 历史压缩摘要:独立 system 消息槽(缓存感知管线·改造 A),插在首个 system
+        // 之后、其余消息之前——摘要更新只改写摘要槽自身,不再改写 system 锚点,
+        // system 与早期历史的前缀缓存得以保留。分层固定为
+        // 「system(静态)→ 摘要槽(半静态,增量追加)→ 尾部历史(只追加)」。
         if let Some(summary) = &ctx.history_summary {
-            let summary = summary.trim();
-            if !summary.is_empty() {
-                if let Some(s0) = llm_messages.first_mut() {
-                    if s0.role == "system" {
-                        s0.content.push_str(&format!("\n\n【早期对话摘要】\n{summary}"));
-                    }
-                }
-            }
+            insert_summary_slot(&mut llm_messages, summary);
         }
         // GENERATE 注入(ST-Prompt-Template 兼容):BEFORE 拼到 system 开头(角色内容之前,
         // 运行时主提示词之后,保持系统契约首位);AFTER 拼到 system 末尾(计入 protected_tail,
@@ -1698,6 +1755,7 @@ impl AgentEngine {
                             rctx.total_usage.completion_tokens += u.completion_tokens;
                             rctx.total_usage.total_tokens += u.total_tokens;
                             rctx.total_usage.prompt_cache_hit_tokens += u.prompt_cache_hit_tokens;
+                            rctx.total_usage.prompt_cache_miss_tokens += u.prompt_cache_miss_tokens;
                             // 模型自主修正的正文写回(保留 <UpdateVariable> 补丁块,
                             // 与既有禁词修正的 rebuild_content_keeping_blocks 同语义)
                             if let Some(revised_text) = revised {
@@ -2131,6 +2189,7 @@ impl AgentEngine {
             rctx.total_usage.completion_tokens += result.usage.completion_tokens;
             rctx.total_usage.total_tokens += result.usage.total_tokens;
             rctx.total_usage.prompt_cache_hit_tokens += result.usage.prompt_cache_hit_tokens;
+            rctx.total_usage.prompt_cache_miss_tokens += result.usage.prompt_cache_miss_tokens;
             idx += 1;
         }
         Ok((content, custom_vars_snapshot, custom_contract_entries, custom_contract_pending))
@@ -2281,11 +2340,13 @@ impl AgentEngine {
                     completion_tokens,
                     total_tokens,
                     prompt_cache_hit_tokens,
+                    prompt_cache_miss_tokens,
                 } => {
                     usage.prompt_tokens += prompt_tokens;
                     usage.completion_tokens += completion_tokens;
                     usage.total_tokens += total_tokens;
                     usage.prompt_cache_hit_tokens += prompt_cache_hit_tokens;
+                    usage.prompt_cache_miss_tokens += prompt_cache_miss_tokens;
                 }
                 _ => {}
             }
@@ -2319,11 +2380,13 @@ impl AgentEngine {
                                 completion_tokens,
                                 total_tokens,
                                 prompt_cache_hit_tokens,
+                                prompt_cache_miss_tokens,
                             } => {
                                 usage.prompt_tokens += prompt_tokens;
                                 usage.completion_tokens += completion_tokens;
                                 usage.total_tokens += total_tokens;
                                 usage.prompt_cache_hit_tokens += prompt_cache_hit_tokens;
+                                usage.prompt_cache_miss_tokens += prompt_cache_miss_tokens;
                             }
                             _ => {}
                         }
