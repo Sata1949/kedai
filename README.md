@@ -237,9 +237,9 @@ data: {"type":"finish","usage":{"prompt_tokens":166,"completion_tokens":35,"tota
 
 ```bash
 cd server-rs
-cargo test          # 单元测试 + API 集成测试(219 个)
+cargo test          # 单元测试 + API 集成测试(590+ 个)
 cd web
-npm test            # Vitest 前端测试(62 个)
+npm test            # Vitest 前端测试(200+ 个)
 ```
 
 覆盖:角色卡解析(V2/V3/未知字段/PNG tEXt/无效输入)、世界书解析(ST 导出/角色卡内嵌/正则条目/条目过滤)、世界书 API 集成(CRUD/绑定/预览)、世界书注入逻辑(常驻/关键词/正则/禁用)、正则脚本解析与占位符替换、Token 计数、状态机迁移、规划器/反思器、计算器工具、API 集成(CRUD/SSE/导入导出/Agent plan)、mvu 变量系统、EJS 渲染器、提示词注入、Agent 流程库。
@@ -249,12 +249,12 @@ npm test            # Vitest 前端测试(62 个)
 - [x] 世界书(World Info)按 key 注入
 - [x] Tauri 桌面化(安装包 + 窗口 + 品牌图标)
 - [ ] Oobabooga / KoboldAI 连接器适配
-- [ ] 智能上下文压缩(摘要/滑动窗口)
+- [x] 智能上下文压缩(可逆投影 + LLM 摘要,manual/auto 模式,`/api/chat/compact`)
 - [ ] LLM 原生 function calling 全链路
-- [ ] 自定义工具注册(OpenAI 格式 JSON 配置)
+- [x] 自定义工具注册(`data/plugins/tools/*.json` 白名单脚本工具)
 - [ ] 工具执行沙箱隔离
 - [ ] 知识库向量检索工具
-- [ ] SettingsModal.vue(58KB)拆分
+- [ ] SettingsModal.vue 拆分(已 81KB;SettingsHub + composables 拆分进行中)
 
 ## 示例模板(Skill 与工具插件)
 

@@ -153,20 +153,13 @@ git-fetch-with-cli = true
 
 ## 5. 启动与配置
 
-### 启动器(kedai.exe,推荐)
+### 启动器(start.ps1,推荐)
 
-C# 编译的本地 exe(源码 `launcher.cs`,Windows 自带 .NET Framework 编译器):
-1. 检测 `http://127.0.0.1:3001/api/health` → 已在运行则直接开浏览器退出
-2. 产物缺失 → 自动调用 `build.ps1`(首次编译 2~5 分钟)
-3. 启动 `server-rs\target\release\kedai-server.exe`(未配置 Key 时注入 CONNECTOR=mock)
-4. 轮询就绪(60s 超时)→ 自动打开浏览器 → 按 **Q** 关闭服务
-5. `--smoke`:启动→就绪→打印 `SMOKE_OK`→关闭(自动化验证用)
-
-> 重新编译启动器(改源码后):
-> ```
-> "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /codepage:65001 /out:kedai.exe launcher.cs
-> ```
-> PowerShell 版 `start.ps1 / 启动Kedai.bat` 为备用,逻辑相同。
+统一 PowerShell 启动脚本(旧 C# `kedai.exe` / `启动Kedai.bat` 已废弃删除):
+- 测试版(默认 `.\start.ps1`):启动 `server-rs\target\release\kedai-server.exe` 并自动打开浏览器;`-NoBrowser` 不开浏览器,`-Build` 强制先执行 `build.ps1`。
+- 正式版(`.\start.ps1 -Portable`):启动 `dist\Kedai-portable\Kedai.exe` 便携版桌面应用(数据存 `%APPDATA%\com.kedai.app`)。
+- 自动重建:启动前检测产品源码(web/src、server-rs/src、src-tauri/src 等)是否比可执行产物新,过期则自动重新构建;`-NoRebuild` 跳过。
+- 两版共用端口 3001 与同一数据目录,勿同时运行。Rust 启动器工程另见 `launcher/`。
 
 ### 配置(.env,复制自 `.env.example`)
 
@@ -364,9 +357,33 @@ cd server-rs && cargo test
 
 | 关注点 | 文件 |
 |---|---|
-| 启动 | `start.ps1` / `启动Kedai.bat` |
+| 启动 | `start.ps1`(统一启动器;Rust 启动器工程见 `launcher/`) |
 | 构建 | `build.ps1` |
 | 配置示例 | `.env.example` |
 | API 文档 | `API.md`(与代码基本一致;`/api/settings/info` 实际含 `models` 字段) |
 | 用户指南 | `README.md` |
 | 原 Node 后端(参照) | 已归档删除(历史版本存于代码历史,不在仓库内) |
+
+---
+
+## 14. 新模块速览(2026-08 补记)
+
+> 以下模块晚于本文档上次整理(2026-08-12)落地,此处补记维护入口;详细设计见 `docs/`。
+
+### 万花筒契约 DSL(contracts)
+
+- 位置:`server-rs/src/contracts/`(op / field / due_fields / observe / changelog / invariant / multi_step / render / state / validation / registry / extract / meta)。
+- 职责:变量系统唯一事实源——字段定义、更新策略、护栏、不变量、置信度门控、熔断指纹;HTTP 出口 `/api/variable/update|state|changelog`。
+- 配套服务:`services/kaleido_state_service.rs`(注意其中 FNV-64 为 SHA-256 占位,尚未兑现)、`services/variable_apply.rs`(统一写入出口)。
+- 前端:`components/ContractsModal.vue` + `contracts/contractDiff.ts`。
+- 预留未实现:M10+(achievements/ejs/runBoundary 等 Option 字段)、M13/M15/M16(plot/dice/memory 写者),见 `contracts/mod.rs`。
+
+### 任务工作台(task)
+
+- 位置:`services/task_service.rs`(planning → running(逐步派子智能体)→ done)、`api/` 任务路由、`web/src/components/TaskBoard.vue` + `api/tasks.ts`。
+
+### 上下文压缩(compaction)
+
+- 位置:`agents/engine/compaction.rs`(可逆投影 + LLM 摘要;原文消息永不删除,摘要存 `session_compactions` 表,删摘要行即恢复完整历史)。
+- 触发:manual(`/api/chat/compact`)或 auto(历史 token 超阈值);设置项 `compaction_mode` / `compaction_threshold`。
+- 2026-08 起配合「缓存感知压缩管线」升级(usage 缓存落库、四级水位、摘要槽增量式),设计见 `docs/learn-harness-2026-08.md`。
