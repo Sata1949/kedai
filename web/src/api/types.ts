@@ -311,6 +311,10 @@ export interface RuntimeSettings {
   compaction_mode: string;
   /** 上下文压缩触发阈值(0.5..=0.95,默认 0.8):auto 模式下历史 token 占比达到该值即压缩 */
   compaction_threshold: number;
+  /** 压缩后保留的最近消息条数(2..=200,默认 4;缓存感知管线) */
+  compaction_keep_recent: number;
+  /** snip 零成本裁剪的超长消息阈值(字节;0 = 禁用,上限 1MB,默认 8192) */
+  compaction_snip_bytes: number;
   /** LLM 请求快照开关(第四点·主题 A):true = 每次下发前把完整消息数组落库供回放调试 */
   llm_request_log: boolean;
 }
@@ -351,6 +355,8 @@ export interface RuntimeSettingsPatch {
   render_html?: boolean;
   compaction_mode?: string;
   compaction_threshold?: number;
+  compaction_keep_recent?: number;
+  compaction_snip_bytes?: number;
   llm_request_log?: boolean;
 }
 

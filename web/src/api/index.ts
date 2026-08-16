@@ -16,3 +16,4 @@ export * from './agent';
 export * from './chat';
 export * from './audio';
 export * from './tasks';
+export * from './diagnostics';

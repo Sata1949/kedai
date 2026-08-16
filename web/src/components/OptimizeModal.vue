@@ -11,6 +11,7 @@ import { useAppStore } from '../store';
 import * as api from '../api';
 import { useAgentPromptEditor } from '../composables/useAgentPromptEditor';
 import { computeHitRate, computeCompactionNeed, RECOMMENDED_SETTINGS, buildRecommendedPatch, type RecommendedSetting } from '../contextStats';
+import CacheHealthPanel from './CacheHealthPanel.vue';
 
 const store = useAppStore();
 const { lastUsage } = storeToRefs(store);
@@ -215,6 +216,9 @@ const close = (): void => {
             <p v-if="usageRows.length === 0" class="sv-script-meta" style="font-size: 11px">最近一次请求的 token 用量将在发送消息后显示。</p>
           </div>
         </div>
+
+        <!-- 缓存健康(近 N 轮加权命中率 / 费用估算 / 四级水位,数据来自 /api/diagnostics/cache) -->
+        <CacheHealthPanel />
 
         <!-- 上下文压缩 -->
         <div class="sv-field">

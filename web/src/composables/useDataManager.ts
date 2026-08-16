@@ -83,7 +83,10 @@ export function useDataManager() {
 
 export function useGenerationParams() {
   const store = useAppStore();
-  const { temperature, topP, maxTokens, maxContextTokens, maxToolRounds, compactionMode, compactionThreshold } = storeToRefs(store);
+  const {
+    temperature, topP, maxTokens, maxContextTokens, maxToolRounds,
+    compactionMode, compactionThreshold, compactionKeepRecent, compactionSnipBytes,
+  } = storeToRefs(store);
 
   const tempLabel = computed(() => `${Math.round(temperature.value * 100)}%`);
   const topPLabel = computed(() => `${Math.round(topP.value * 100)}%`);
@@ -106,6 +109,8 @@ export function useGenerationParams() {
         max_tool_rounds: maxToolRounds.value,
         compaction_mode: compactionMode.value,
         compaction_threshold: compactionThreshold.value,
+        compaction_keep_recent: compactionKeepRecent.value,
+        compaction_snip_bytes: compactionSnipBytes.value,
       });
       paramsMsg.value = '已保存为默认生成参数';
       setTimeout(() => (paramsMsg.value = ''), 2500);

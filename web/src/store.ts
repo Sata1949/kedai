@@ -72,6 +72,10 @@ export const useAppStore = defineStore('app', () => {
   const compactionMode = ref<'off' | 'manual' | 'auto'>('off');
   /** 上下文压缩触发阈值(0.5..=0.95;服务端默认 0.8) */
   const compactionThreshold = ref(0.8);
+  /** 压缩后保留的最近消息条数(2..=200;服务端默认 4,越界钳回默认) */
+  const compactionKeepRecent = ref(4);
+  /** snip 零成本裁剪的超长消息阈值(字节;0 = 禁用,上限 1MB;服务端默认 8192) */
+  const compactionSnipBytes = ref(8192);
   const model = ref('');
   const models = ref<string[]>([]);
   const searchQuery = ref('');
@@ -708,6 +712,8 @@ export const useAppStore = defineStore('app', () => {
       syncRenderHtmlToCurrent();
       compactionMode.value = (s.compaction_mode as 'off' | 'manual' | 'auto') ?? 'off';
       compactionThreshold.value = s.compaction_threshold ?? 0.8;
+      compactionKeepRecent.value = s.compaction_keep_recent ?? 4;
+      compactionSnipBytes.value = s.compaction_snip_bytes ?? 8192;
       if (!model.value) model.value = s.model;
     } catch {
       /* 忽略 */
@@ -738,6 +744,8 @@ export const useAppStore = defineStore('app', () => {
     syncRenderHtmlToCurrent();
     compactionMode.value = (s.compaction_mode as 'off' | 'manual' | 'auto') ?? 'off';
     compactionThreshold.value = s.compaction_threshold ?? 0.8;
+    compactionKeepRecent.value = s.compaction_keep_recent ?? 4;
+    compactionSnipBytes.value = s.compaction_snip_bytes ?? 8192;
   }
 
   // 手动压缩当前会话历史(阶段借鉴 harness):调用后端摘要,成功后刷新历史展示。
@@ -1192,6 +1200,8 @@ export const useAppStore = defineStore('app', () => {
     maxToolRounds,
     compactionMode,
     compactionThreshold,
+    compactionKeepRecent,
+    compactionSnipBytes,
     model,
     models,
     searchQuery,

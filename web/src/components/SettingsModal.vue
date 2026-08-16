@@ -72,7 +72,10 @@ const generationParams = useGenerationParams();
 const { tempLabel, topPLabel, ctxLabel, saveParams, paramsMsg, saveParamsNow } = generationParams;
 
 // ===== 生成参数(storeToRefs 直接绑定) =====
-const { temperature, topP, maxTokens, maxContextTokens, maxToolRounds, compactionMode, compactionThreshold } = storeToRefs(store);
+const {
+  temperature, topP, maxTokens, maxContextTokens, maxToolRounds,
+  compactionMode, compactionThreshold, compactionKeepRecent, compactionSnipBytes,
+} = storeToRefs(store);
 
 // ===== Agent 设置(storeToRefs 直接绑定) =====
 const { agentSystemPrompt, searchEndpoint, mvuVarsPosition, reflectPrompt } = storeToRefs(store);
@@ -1083,6 +1086,32 @@ function syncBannedPromptFromWords(): void {
               </div>
               <div class="sv-range-hints"><span>50% · 更早压缩</span><span>95% · 更晚压缩</span></div>
               <p class="sv-note">仅 auto 模式生效:历史 token 达到该占比时自动压缩。</p>
+            </div>
+            <div class="sv-inp-row">
+              <label class="sv-inp-tag">压缩保留条数</label>
+              <input
+                v-model.number="compactionKeepRecent"
+                type="number"
+                min="2"
+                max="200"
+                step="1"
+                class="sv-input inject-num"
+                title="压缩后仍保留的最近消息条数(2-200;默认 4,越界由后端钳回默认)"
+              />
+              <span class="sv-note">压缩后保留的最近消息条数(2-200,默认 4)</span>
+            </div>
+            <div class="sv-inp-row">
+              <label class="sv-inp-tag">超长裁剪阈值</label>
+              <input
+                v-model.number="compactionSnipBytes"
+                type="number"
+                min="0"
+                max="1048576"
+                step="1"
+                class="sv-input inject-num"
+                title="snip 零成本裁剪的超长消息长度阈值(字节;0 = 禁用,上限 1MB;默认 8192)"
+              />
+              <span class="sv-note">超长消息裁剪阈值(字节;0 = 禁用,默认 8192)</span>
             </div>
             <div class="sv-btn-row">
               <button class="sv-btn ghost sv-btn-fill" :disabled="saveParams" @click="saveParamsNow">
