@@ -76,6 +76,10 @@ export const useAppStore = defineStore('app', () => {
   const compactionKeepRecent = ref(4);
   /** snip 零成本裁剪的超长消息阈值(字节;0 = 禁用,上限 1MB;服务端默认 8192) */
   const compactionSnipBytes = ref(8192);
+  /** 跨会话记忆蒸馏开关(服务端默认 false;关闭时蒸馏端点返回 400 带指引) */
+  const memoryDistillEnabled = ref(false);
+  /** 每次注入提示词的记忆条数上限(0..=50;服务端默认 8) */
+  const memoryInjectLimit = ref(8);
   const model = ref('');
   const models = ref<string[]>([]);
   const searchQuery = ref('');
@@ -714,6 +718,8 @@ export const useAppStore = defineStore('app', () => {
       compactionThreshold.value = s.compaction_threshold ?? 0.8;
       compactionKeepRecent.value = s.compaction_keep_recent ?? 4;
       compactionSnipBytes.value = s.compaction_snip_bytes ?? 8192;
+      memoryDistillEnabled.value = s.memory_distill_enabled ?? false;
+      memoryInjectLimit.value = s.memory_inject_limit ?? 8;
       if (!model.value) model.value = s.model;
     } catch {
       /* 忽略 */
@@ -746,6 +752,8 @@ export const useAppStore = defineStore('app', () => {
     compactionThreshold.value = s.compaction_threshold ?? 0.8;
     compactionKeepRecent.value = s.compaction_keep_recent ?? 4;
     compactionSnipBytes.value = s.compaction_snip_bytes ?? 8192;
+    memoryDistillEnabled.value = s.memory_distill_enabled ?? false;
+    memoryInjectLimit.value = s.memory_inject_limit ?? 8;
   }
 
   // 手动压缩当前会话历史(阶段借鉴 harness):调用后端摘要,成功后刷新历史展示。
@@ -1202,6 +1210,8 @@ export const useAppStore = defineStore('app', () => {
     compactionThreshold,
     compactionKeepRecent,
     compactionSnipBytes,
+    memoryDistillEnabled,
+    memoryInjectLimit,
     model,
     models,
     searchQuery,

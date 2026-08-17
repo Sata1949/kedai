@@ -75,6 +75,7 @@ const { tempLabel, topPLabel, ctxLabel, saveParams, paramsMsg, saveParamsNow } =
 const {
   temperature, topP, maxTokens, maxContextTokens, maxToolRounds,
   compactionMode, compactionThreshold, compactionKeepRecent, compactionSnipBytes,
+  memoryDistillEnabled, memoryInjectLimit,
 } = storeToRefs(store);
 
 // ===== Agent 设置(storeToRefs 直接绑定) =====
@@ -1112,6 +1113,26 @@ function syncBannedPromptFromWords(): void {
                 title="snip 零成本裁剪的超长消息长度阈值(字节;0 = 禁用,上限 1MB;默认 8192)"
               />
               <span class="sv-note">超长消息裁剪阈值(字节;0 = 禁用,默认 8192)</span>
+            </div>
+            <div class="sv-inp-row">
+              <label class="sv-inp-tag">记忆蒸馏</label>
+              <label style="display: flex; gap: 6px; align-items: center; cursor: pointer" title="开启后允许在优化面板把当前会话蒸馏为角色跨会话记忆">
+                <input v-model="memoryDistillEnabled" type="checkbox" style="flex-shrink: 0" />
+                <span class="sv-note">开启跨会话记忆蒸馏(优化面板 → 记忆库)</span>
+              </label>
+            </div>
+            <div class="sv-inp-row">
+              <label class="sv-inp-tag">记忆注入条数</label>
+              <input
+                v-model.number="memoryInjectLimit"
+                type="number"
+                min="0"
+                max="50"
+                step="1"
+                class="sv-input inject-num"
+                title="每次注入提示词的记忆条数上限(0-50;0 = 不注入,默认 8,越界由后端钳回默认)"
+              />
+              <span class="sv-note">注入提示词的记忆条数上限(0-50,默认 8)</span>
             </div>
             <div class="sv-btn-row">
               <button class="sv-btn ghost sv-btn-fill" :disabled="saveParams" @click="saveParamsNow">

@@ -317,6 +317,10 @@ export interface RuntimeSettings {
   compaction_snip_bytes: number;
   /** LLM 请求快照开关(第四点·主题 A):true = 每次下发前把完整消息数组落库供回放调试 */
   llm_request_log: boolean;
+  /** 跨会话记忆蒸馏开关:true = 允许 POST /api/memory/distill 蒸馏会话为角色记忆 */
+  memory_distill_enabled: boolean;
+  /** 每次注入提示词的记忆条数上限(0..=50;0 = 不注入) */
+  memory_inject_limit: number;
 }
 
 export interface PromptPreviewLayer {
@@ -358,6 +362,8 @@ export interface RuntimeSettingsPatch {
   compaction_keep_recent?: number;
   compaction_snip_bytes?: number;
   llm_request_log?: boolean;
+  memory_distill_enabled?: boolean;
+  memory_inject_limit?: number;
 }
 
 // ===== 音频播放器(阶段五 5a;契约对齐酒馆助手 audio.d.ts) =====

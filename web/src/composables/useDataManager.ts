@@ -86,6 +86,7 @@ export function useGenerationParams() {
   const {
     temperature, topP, maxTokens, maxContextTokens, maxToolRounds,
     compactionMode, compactionThreshold, compactionKeepRecent, compactionSnipBytes,
+    memoryDistillEnabled, memoryInjectLimit,
   } = storeToRefs(store);
 
   const tempLabel = computed(() => `${Math.round(temperature.value * 100)}%`);
@@ -111,6 +112,8 @@ export function useGenerationParams() {
         compaction_threshold: compactionThreshold.value,
         compaction_keep_recent: compactionKeepRecent.value,
         compaction_snip_bytes: compactionSnipBytes.value,
+        memory_distill_enabled: memoryDistillEnabled.value,
+        memory_inject_limit: memoryInjectLimit.value,
       });
       paramsMsg.value = '已保存为默认生成参数';
       setTimeout(() => (paramsMsg.value = ''), 2500);
