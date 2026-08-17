@@ -20,9 +20,16 @@
   - 状态机驱动:`planning → executing ⇄ tool_call → reflecting → finished`,全程可观测、可中断
   - 两种模式:`fast`(单步直接生成)、`deep`(计划 → 执行 → 反思,质量更高)
   - 推理链通过 SSE 流式推送到前端,实时展示思考过程
+- 🧠 **上下文工程**(提示词缓存友好)
+  - **缓存感知压缩**:每轮 LLM usage(含 DeepSeek `prompt_cache_hit_tokens` / OpenAI `cached_tokens`)落库,`GET /api/diagnostics/cache` 报告命中率、费用估算与四级水位(soft/snip/compact/force);前端「优化」弹窗内置缓存健康面板
+  - **前缀分层**:消息组装固定为「system(静态)→ 摘要槽 → 记忆槽 → 尾部历史(只追加)」,摘要改追加式增量(旧摘要字节冻结),压缩后缓存只 miss 尾部;同会话两次构建公共前缀逐字节一致(有回归测试护航)
+  - **阶梯压缩**:LLM 摘要前先做零成本 snip(陈旧超长工具结果压占位符、错误特征保留、尾部 2 条原文保留),保留条数与 snip 阈值可配置
+  - **跨会话记忆蒸馏**:会话历史蒸馏为结构化记忆条目(`memory_entries` 表,人物关系/事件/伏笔取向),按使用次数与最近使用衰减精选,注入记忆槽;与 agent 主动写记忆(`memory_write`)同表同策略,前端记忆库面板可查看/编辑/手动蒸馏
 - 🔧 **工具系统**
   - 标准化 Tool 接口(OpenAI Function Calling 格式)
   - 内置:`calculator`(白名单解析,不使用 eval)、`memory_read/write`(会话长期记忆)
+  - **技能渐进披露**:技能清单仅预载 `name + description`(每技能几十 token),正文经 `read(type=skill)` 按需加载;支持 `allowed-tools` / `run-as-subagent` / `model` 元数据
+  - **子代理调度守卫**:递归深度(默认 2)与全局并发(默认 6)可配置,子代理结果超长自动截断为摘要回传,防上下文爆炸
 - ⚡ **流式体验**:token 逐字渲染 + Agent 步骤事件,首 Token 低延迟
 - 🔐 **隐私**:数据仅存本地(SQLite + 文件),API Key 只存服务端环境变量
 
@@ -237,12 +244,12 @@ data: {"type":"finish","usage":{"prompt_tokens":166,"completion_tokens":35,"tota
 
 ```bash
 cd server-rs
-cargo test          # 单元测试 + API 集成测试(590+ 个)
+cargo test          # 单元测试 + API 集成测试(640+ 个)
 cd web
-npm test            # Vitest 前端测试(200+ 个)
+npm test            # Vitest 前端测试(290+ 个)
 ```
 
-覆盖:角色卡解析(V2/V3/未知字段/PNG tEXt/无效输入)、世界书解析(ST 导出/角色卡内嵌/正则条目/条目过滤)、世界书 API 集成(CRUD/绑定/预览)、世界书注入逻辑(常驻/关键词/正则/禁用)、正则脚本解析与占位符替换、Token 计数、状态机迁移、规划器/反思器、计算器工具、API 集成(CRUD/SSE/导入导出/Agent plan)、mvu 变量系统、EJS 渲染器、提示词注入、Agent 流程库。
+覆盖:角色卡解析(V2/V3/未知字段/PNG tEXt/无效输入)、世界书解析(ST 导出/角色卡内嵌/正则条目/条目过滤)、世界书 API 集成(CRUD/绑定/预览)、世界书注入逻辑(常驻/关键词/正则/禁用)、正则脚本解析与占位符替换、Token 计数、状态机迁移、规划器/反思器、计算器工具、API 集成(CRUD/SSE/导入导出/Agent plan)、mvu 变量系统、EJS 渲染器、提示词注入、Agent 流程库、缓存诊断与四级水位、前缀一致性回归、记忆蒸馏与衰减排序、技能渐进披露清单、子代理深度/并发/截断守卫。
 
 ## Roadmap
 
@@ -250,6 +257,9 @@ npm test            # Vitest 前端测试(200+ 个)
 - [x] Tauri 桌面化(安装包 + 窗口 + 品牌图标)
 - [ ] Oobabooga / KoboldAI 连接器适配
 - [x] 智能上下文压缩(可逆投影 + LLM 摘要,manual/auto 模式,`/api/chat/compact`)
+- [x] 缓存感知压缩管线(usage 落库 + 四级水位诊断 `/api/diagnostics/cache` + 摘要槽增量化 + snip 零成本裁剪)
+- [x] 跨会话记忆蒸馏(`memory_entries` 表 + `/api/memory/*` 五端点 + 记忆库面板)
+- [x] 技能渐进披露(name+description 预载,正文按需加载)与子代理调度守卫(深度/并发/结果截断可配置)
 - [ ] LLM 原生 function calling 全链路
 - [x] 自定义工具注册(`data/plugins/tools/*.json` 白名单脚本工具)
 - [ ] 工具执行沙箱隔离

@@ -345,11 +345,10 @@ cd server-rs && cargo test
 ## 12. Roadmap(来自 README,未实现)
 
 - Oobabooga / KoboldAI 连接器适配(世界书按 key 注入、Tauri 桌面化已完成)
-- 智能上下文压缩(摘要/滑动窗口)
 - LLM 原生 function calling 全链路(当前工具为规则触发 + 部分 function calling)
-- 自定义工具注册(OpenAI 格式 JSON 配置)
 - 工具执行沙箱隔离(角色卡脚本已有 iframe 沙箱,工具侧未做)
 - 知识库向量检索工具
+- (2026-08 已完成项移出:智能上下文压缩、自定义工具注册、缓存感知压缩管线、跨会话记忆蒸馏、技能渐进披露与子代理调度守卫——见第 14 章)
 
 ---
 
@@ -387,3 +386,24 @@ cd server-rs && cargo test
 - 位置:`agents/engine/compaction.rs`(可逆投影 + LLM 摘要;原文消息永不删除,摘要存 `session_compactions` 表,删摘要行即恢复完整历史)。
 - 触发:manual(`/api/chat/compact`)或 auto(历史 token 超阈值);设置项 `compaction_mode` / `compaction_threshold`。
 - 2026-08 起配合「缓存感知压缩管线」升级(usage 缓存落库、四级水位、摘要槽增量式),设计见 `docs/learn-harness-2026-08.md`。
+
+### 缓存感知压缩管线(2026-08 新增)
+
+- 位置:`services/cache_diagnostics.rs`(命中率/费用/水位汇总)+ `api/diagnostics.rs`(`GET /api/diagnostics/cache`)+ `connectors/openai_compatible.rs`(usage 5 元组解析,DeepSeek `prompt_cache_hit_tokens` 优先、OpenAI `cached_tokens` 回退)。
+- 落库:`llm_requests` 表新增 usage 列(幂等迁移 `ensure_llm_requests_usage_columns`);轻量 usage 行恒落库,与请求快照开关解耦。
+- 前端:`components/CacheHealthPanel.vue` + `cacheHealth.ts`(「优化」弹窗内,缓存健康面板)。
+- 压缩升级:摘要槽独立(system → 摘要槽 → 记忆槽 → 历史,`messages.rs` 的 `insert_summary_slot` / `insert_memory_slot` / `protected_head_len`);摘要改追加式增量(旧段字节冻结);LLM 摘要前先 snip 超长陈旧工具结果(`compaction.rs` 的 `snip_tuples` / `should_snip`,错误特征保留、尾部 2 条原文保留);`compaction_keep_recent`(默认 4)与 `compaction_snip_bytes`(默认 8192)可配置。
+
+### 跨会话记忆蒸馏(2026-08 新增)
+
+- 位置:`services/memory_service.rs`(distill_session 以闭包注入 LLM,mock 可测)+ `api/memory.rs`(list/upsert/delete/distill/select 五端点)+ `tools/memory.rs`(agent 主动写记忆落同表)。
+- 表:`memory_entries`(character_id 维度、kind CHECK distilled|tool|manual、usage_count、last_usage、selected、索引)。
+- 注入:精选排序 usage_count DESC → last_usage DESC → id DESC,注入摘要槽之后的记忆槽;使用后在 step_loop 成功路径 touch。
+- 前端:`components/MemoryPanel.vue` + `memoryPanel.ts` + `composables/useMemoryPanel.ts`。
+
+### 技能渐进披露与子代理守卫(2026-08 新增)
+
+- 位置:`services/skill_service.rs`(manifest 固定格式清单,按 name 字节序稳定)+ skills 表新增 `allowed_tools` / `run_as_subagent` / `model` 三列。
+- 预载仅 name+description(设置 `skill_progressive_disclosure`,默认开;旧技能正文从未预载,关闭即回退零注入)。
+- 子代理:`tools/agent_tools_agent.rs` 深度守卫(`subagent_max_depth` 默认 2)、并发守卫(`subagent_max_concurrency` 默认 6)、结果截断(`subagent_result_max_chars` 默认 2000,截断附尾注)。
+- 工具治理:`tools/registry.rs` 错误文案带「下一步怎么做」指引;定义顺序按 name 稳定(有跨构建序列化一致性测试,保前缀缓存)。
