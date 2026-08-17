@@ -208,6 +208,7 @@ mod tests {
                 ToolContext {
                     session_id: "s".into(),
                     character_id: "c".into(),
+                    agent_depth: 0,
                 },
             )
             .await
@@ -229,6 +230,7 @@ mod tests {
                 ToolContext {
                     session_id: "s".into(),
                     character_id: "c".into(),
+                    agent_depth: 0,
                 },
             )
             .await
@@ -250,6 +252,7 @@ mod tests {
         let ctx = ToolContext {
             session_id: "s".into(),
             character_id: "c".into(),
+            agent_depth: 0,
         };
         for tool in ["write", "create"] {
             reg.permissions()
@@ -343,6 +346,7 @@ mod tests {
         let ctx = ToolContext {
             session_id: session.id.clone(),
             character_id: crate::services::character_service::BUILTIN_SYSTEM_ID.into(),
+            agent_depth: 0,
         };
         for tool in ["write", "replace"] {
             reg.permissions()
@@ -427,6 +431,7 @@ mod tests {
         let ctx = ToolContext {
             session_id: "s".into(),
             character_id: "c".into(),
+            agent_depth: 0,
         };
         for tool in ["write", "replace"] {
             reg.permissions()
@@ -498,5 +503,122 @@ mod tests {
         ).await.unwrap();
         let created: Value = serde_json::from_str(&created).unwrap();
         assert_eq!(created["results"][0]["ok"], true);
+    }
+
+    // ==================== 子智能体调度守卫(落地项 3) ====================
+
+    /// 深度守卫:agent_depth 达到上限时拒绝派发,提示主智能体直接处理
+    #[tokio::test]
+    async fn agentgo_rejects_when_depth_exceeds_limit() {
+        let deps = Arc::new(ToolDeps::dummy_for_test());
+        // 默认 subagent_max_depth = 2;模拟深度 2 的嵌套上下文
+        {
+            let mut s = deps.settings.lock().unwrap_or_else(|e| e.into_inner());
+            s.subagent_max_depth = 2;
+        }
+        let reg = ToolRegistry::new();
+        register_agentgo(&reg, deps.clone());
+        // agentgo 为敏感工具:先授权会话,避免权限层先拒导致守卫逻辑未走到;
+        // 子任务表 session_id 外键指向 sessions,先造真实会话行
+        deps.characters.seed_default_character();
+        let session = deps
+            .sessions
+            .create(crate::services::character_service::BUILTIN_SYSTEM_ID, None)
+            .unwrap();
+        reg.permissions().authorize("agentgo", "session", &session.id).unwrap();
+        let ctx = ToolContext {
+            session_id: session.id.clone(),
+            character_id: "c".into(),
+            agent_depth: 2,
+        };
+        let err = reg
+            .execute(
+                "agentgo",
+                r#"{"tasks":[{"name":"t","instruction":"i"}]}"#,
+                ctx.clone(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("子智能体嵌套超过 2 层"),
+            "深度守卫应拒绝: {err}"
+        );
+        // 深度 1(第二层)仍可派发
+        let ctx1 = ToolContext { agent_depth: 1, ..ctx };
+        let ok = reg
+            .execute("agentgo", r#"{"tasks":[{"name":"t","instruction":"i"}]}"#, ctx1)
+            .await;
+        assert!(ok.is_ok(), "深度 1 不应被拒: {:?}", ok.err());
+    }
+
+    /// 并发守卫:会话内 running 子任务数加本次派发超过上限时拒绝,不创建新任务
+    #[tokio::test]
+    async fn agentgo_rejects_when_concurrency_exhausted() {
+        let deps = Arc::new(ToolDeps::dummy_for_test());
+        {
+            let mut s = deps.settings.lock().unwrap_or_else(|e| e.into_inner());
+            s.subagent_max_concurrency = 2;
+        }
+        // 预置 2 个 running 子任务占满并发额度(先造角色与会话行满足外键)
+        deps.characters.seed_default_character();
+        let session = deps
+            .sessions
+            .create(crate::services::character_service::BUILTIN_SYSTEM_ID, None)
+            .unwrap();
+        let sid = session.id.as_str();
+        let t1 = deps.subtasks.create(sid, "c", "占位1", "i").unwrap();
+        let t2 = deps.subtasks.create(sid, "c", "占位2", "i").unwrap();
+        deps.subtasks.set_running(&t1.id);
+        deps.subtasks.set_running(&t2.id);
+
+        let reg = ToolRegistry::new();
+        register_agentgo(&reg, deps.clone());
+        // 敏感工具先授权会话,守卫断言才能命中并发上限逻辑
+        reg.permissions().authorize("agentgo", "session", sid).unwrap();
+        let ctx = ToolContext {
+            session_id: sid.to_string(),
+            character_id: "c".into(),
+            agent_depth: 0,
+        };
+        let err = reg
+            .execute("agentgo", r#"{"tasks":[{"name":"t","instruction":"i"}]}"#, ctx)
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("子智能体并发已满 2"),
+            "并发守卫应拒绝: {err}"
+        );
+        // 守卫拒绝时不创建新任务
+        assert_eq!(deps.subtasks.list_by_session(sid).len(), 2);
+    }
+
+    /// 结果截断:超 subagent_result_max_chars 的子任务结果保留前 N 字符并带原长尾注
+    #[tokio::test]
+    async fn subtask_result_truncates_with_marker() {
+        use crate::tools::agent_tools_agent::truncate_subtask_result_for_test;
+        let deps = Arc::new(ToolDeps::dummy_for_test());
+        {
+            let mut s = deps.settings.lock().unwrap_or_else(|e| e.into_inner());
+            s.subagent_result_max_chars = 10;
+        }
+        let long = "字".repeat(25);
+        let out = truncate_subtask_result_for_test(&deps, &long);
+        assert!(
+            out.contains("[子智能体结果已截断,原长 25 字符]"),
+            "应带原长尾注: {out}"
+        );
+        // 保留前 10 字符,截断在字符边界(首行恰为 max_chars 个字符)
+        assert!(
+            out.starts_with(&"字".repeat(10)),
+            "应保留前 10 字符: {out}"
+        );
+        assert_eq!(
+            out.lines().next().map(|l| l.chars().count()),
+            Some(10),
+            "首行应恰为 max_chars 个字符"
+        );
+        // 未超长:原样返回,不带尾注
+        let short = "短结果";
+        assert_eq!(truncate_subtask_result_for_test(&deps, short), short);
     }
 }

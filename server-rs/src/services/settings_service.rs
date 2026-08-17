@@ -88,6 +88,18 @@ pub struct ModeSettings {
     /// 记忆槽注入条数上限(0 = 关闭注入;默认 8,钳 0..=50)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_inject_limit: Option<u32>,
+    /// 技能渐进披露开关(落地项 3;默认 true)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_progressive_disclosure: Option<bool>,
+    /// 子智能体最大嵌套深度(默认 2,钳 1..=4;主 Agent 为第 0 层)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_max_depth: Option<u32>,
+    /// 子智能体并发上限(默认 6,钳 1..=16;顺序执行下为在飞计数守卫)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_max_concurrency: Option<u32>,
+    /// 子智能体结果最大字符数(默认 2000,钳 500..=8000;超出截断并附尾注)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_result_max_chars: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,6 +182,19 @@ pub struct RuntimeSettings {
     /// 记忆槽注入条数上限(默认 8,钳 0..=50;0 = 等价关闭注入)
     #[serde(default = "default_memory_inject_limit")]
     pub memory_inject_limit: u32,
+    /// 技能渐进披露开关(落地项 3;默认开启):system 只注入技能 name+description
+    /// 紧凑清单,正文按需 read(type=skill);关闭回退旧行为(不注入清单)
+    #[serde(default = "default_skill_progressive_disclosure")]
+    pub skill_progressive_disclosure: bool,
+    /// 子智能体最大嵌套深度(落地项 3;默认 2,钳 1..=4;主 Agent 为第 0 层)
+    #[serde(default = "default_subagent_max_depth")]
+    pub subagent_max_depth: u32,
+    /// 子智能体并发上限(落地项 3;默认 6,钳 1..=16;当前顺序派发,作为在飞计数守卫)
+    #[serde(default = "default_subagent_max_concurrency")]
+    pub subagent_max_concurrency: u32,
+    /// 子智能体结果最大字符数(落地项 3;默认 2000,钳 500..=8000;超出截断并附尾注)
+    #[serde(default = "default_subagent_result_max_chars")]
+    pub subagent_result_max_chars: u32,
     /// 任务工作台的按模式覆盖项。扁平字段即角色扮演(roleplay)的权威值——引擎直接读
     /// 扁平字段,故 roleplay 不设覆盖层;task 用此覆盖层替换扁平字段的差异项。
     /// 旧 settings.json 无此字段,serde default 为空 = task 沿用扁平值。
@@ -222,6 +247,26 @@ fn default_memory_inject_limit() -> u32 {
     8
 }
 
+/// 默认开启技能渐进披露(落地项 3)
+fn default_skill_progressive_disclosure() -> bool {
+    true
+}
+
+/// 默认子智能体最大嵌套深度(落地项 3)
+fn default_subagent_max_depth() -> u32 {
+    2
+}
+
+/// 默认子智能体并发上限(落地项 3)
+fn default_subagent_max_concurrency() -> u32 {
+    6
+}
+
+/// 默认子智能体结果最大字符数(落地项 3)
+fn default_subagent_result_max_chars() -> u32 {
+    2000
+}
+
 /// 默认搜索端点(DuckDuckGo HTML 免费接口,无需 API Key)
 pub const DEFAULT_SEARCH_ENDPOINT: &str = "https://html.duckduckgo.com/html/";
 
@@ -257,6 +302,10 @@ impl RuntimeSettings {
             llm_request_log: false,
             memory_distill_enabled: false,
             memory_inject_limit: default_memory_inject_limit(),
+            skill_progressive_disclosure: default_skill_progressive_disclosure(),
+            subagent_max_depth: default_subagent_max_depth(),
+            subagent_max_concurrency: default_subagent_max_concurrency(),
+            subagent_result_max_chars: default_subagent_result_max_chars(),
             task: ModeSettings::default(),
         }
     }
@@ -339,6 +388,18 @@ impl RuntimeSettings {
         if let Some(v) = ov.memory_inject_limit {
             out.memory_inject_limit = v;
         }
+        if let Some(v) = ov.skill_progressive_disclosure {
+            out.skill_progressive_disclosure = v;
+        }
+        if let Some(v) = ov.subagent_max_depth {
+            out.subagent_max_depth = v;
+        }
+        if let Some(v) = ov.subagent_max_concurrency {
+            out.subagent_max_concurrency = v;
+        }
+        if let Some(v) = ov.subagent_result_max_chars {
+            out.subagent_result_max_chars = v;
+        }
         out
     }
 
@@ -386,6 +447,17 @@ impl RuntimeSettings {
                 // 记忆注入上限钳制到 0..=50(0 = 关闭注入;旧配置缺省由 serde default 填 8)
                 if s.memory_inject_limit > 50 {
                     s.memory_inject_limit = default_memory_inject_limit();
+                }
+                // 落地项 3:子智能体调度参数钳制(深度 1..=4 / 并发 1..=16 / 结果 500..=8000,
+                // 越界回退默认;渐进披露开关为 bool 无需钳制)
+                if !(1..=4).contains(&s.subagent_max_depth) {
+                    s.subagent_max_depth = default_subagent_max_depth();
+                }
+                if !(1..=16).contains(&s.subagent_max_concurrency) {
+                    s.subagent_max_concurrency = default_subagent_max_concurrency();
+                }
+                if !(500..=8000).contains(&s.subagent_result_max_chars) {
+                    s.subagent_result_max_chars = default_subagent_result_max_chars();
                 }
                 let was_plaintext =
                     !s.openai_api_key.is_empty() && !secret_store::is_protected(&s.openai_api_key);
@@ -689,6 +761,79 @@ mod tests {
             0,
             "0 是合法值(关闭注入)"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
+        let _ = std::fs::remove_dir_all(&dir3);
+    }
+
+    /// 落地项 3 设置:渐进披露默认开启、子代理三参数取默认;旧版 settings.json
+    /// 缺字段时 serde default 补齐;越界值钳回默认;保存往返还原;task 覆盖层生效。
+    #[test]
+    fn harness_settings_defaults_clamp_roundtrip_and_mode_override() {
+        let cfg = test_cfg();
+        let s = RuntimeSettings::from_config(&cfg);
+        assert!(s.skill_progressive_disclosure, "渐进披露默认开启");
+        assert_eq!(s.subagent_max_depth, 2);
+        assert_eq!(s.subagent_max_concurrency, 6);
+        assert_eq!(s.subagent_result_max_chars, 2000);
+
+        // 旧版配置缺字段:serde default 补齐,行为与默认一致
+        let dir = tmp_dir("harness-legacy");
+        let mut json = serde_json::to_value(&s).unwrap();
+        for key in [
+            "skill_progressive_disclosure",
+            "subagent_max_depth",
+            "subagent_max_concurrency",
+            "subagent_result_max_chars",
+        ] {
+            json.as_object_mut().unwrap().remove(key);
+        }
+        std::fs::write(
+            dir.join("settings.json"),
+            serde_json::to_string_pretty(&json).unwrap(),
+        )
+        .unwrap();
+        let loaded = RuntimeSettings::load(&dir, &cfg);
+        assert!(loaded.skill_progressive_disclosure);
+        assert_eq!(loaded.subagent_max_depth, 2);
+        assert_eq!(loaded.subagent_max_concurrency, 6);
+        assert_eq!(loaded.subagent_result_max_chars, 2000);
+
+        // 越界钳回默认:深度 0/5 → 2;并发 0/17 → 6;结果 499/8001 → 2000
+        let dir2 = tmp_dir("harness-clamp");
+        let mut s2 = RuntimeSettings::from_config(&cfg);
+        s2.subagent_max_depth = 0;
+        s2.subagent_max_concurrency = 17;
+        s2.subagent_result_max_chars = 499;
+        s2.save(&dir2).unwrap();
+        let clamped = RuntimeSettings::load(&dir2, &cfg);
+        assert_eq!(clamped.subagent_max_depth, 2, "深度越界应钳回 2");
+        assert_eq!(clamped.subagent_max_concurrency, 6, "并发越界应钳回 6");
+        assert_eq!(clamped.subagent_result_max_chars, 2000, "结果上限越界应钳回 2000");
+
+        // 合法边界值通过;保存往返还原
+        let dir3 = tmp_dir("harness-roundtrip");
+        let mut s3 = RuntimeSettings::from_config(&cfg);
+        s3.skill_progressive_disclosure = false;
+        s3.subagent_max_depth = 4;
+        s3.subagent_max_concurrency = 1;
+        s3.subagent_result_max_chars = 8000;
+        s3.save(&dir3).unwrap();
+        let rt = RuntimeSettings::load(&dir3, &cfg);
+        assert!(!rt.skill_progressive_disclosure, "关闭渐进披露应还原");
+        assert_eq!(rt.subagent_max_depth, 4);
+        assert_eq!(rt.subagent_max_concurrency, 1);
+        assert_eq!(rt.subagent_result_max_chars, 8000);
+
+        // task 模式覆盖层:Some 覆盖扁平值,None 沿用
+        let mut s4 = RuntimeSettings::from_config(&cfg);
+        s4.task.subagent_max_depth = Some(1);
+        let task_view = s4.for_mode(AppMode::Task);
+        assert_eq!(task_view.subagent_max_depth, 1, "task 覆盖应生效");
+        assert_eq!(task_view.subagent_max_concurrency, 6, "未覆盖项沿用扁平值");
+        let rp_view = s4.for_mode(AppMode::Roleplay);
+        assert_eq!(rp_view.subagent_max_depth, 2, "roleplay 读扁平权威值");
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dir2);

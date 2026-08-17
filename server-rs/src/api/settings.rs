@@ -104,6 +104,18 @@ pub struct UpdateSettingsBody {
     /// 记忆槽注入条数上限(0..=50;0 = 关闭注入)
     #[serde(default)]
     pub memory_inject_limit: Option<u32>,
+    /// 技能渐进披露开关(true = system 只注入「name:description」清单,正文按需 read)
+    #[serde(default)]
+    pub skill_progressive_disclosure: Option<bool>,
+    /// 子智能体最大嵌套深度(1..=4)
+    #[serde(default)]
+    pub subagent_max_depth: Option<u32>,
+    /// 子智能体最大并发数(1..=16)
+    #[serde(default)]
+    pub subagent_max_concurrency: Option<u32>,
+    /// 子智能体结果最大字符数(500..=8000,超出截断带尾注)
+    #[serde(default)]
+    pub subagent_result_max_chars: Option<u32>,
 }
 
 /// 序列化运行期设置(API Key 脱敏)
@@ -136,6 +148,10 @@ fn settings_json(s: &RuntimeSettings) -> Value {
         "llm_request_log": s.llm_request_log,
         "memory_distill_enabled": s.memory_distill_enabled,
         "memory_inject_limit": s.memory_inject_limit,
+        "skill_progressive_disclosure": s.skill_progressive_disclosure,
+        "subagent_max_depth": s.subagent_max_depth,
+        "subagent_max_concurrency": s.subagent_max_concurrency,
+        "subagent_result_max_chars": s.subagent_result_max_chars,
     })
 }
 
@@ -343,6 +359,37 @@ pub async fn update_settings(
                 if v <= 50 {
                     apply!(s, is_task, memory_inject_limit, v);
                 }
+            }
+            // 技能渐进披露开关(落地项 3)
+            if let Some(v) = body.skill_progressive_disclosure {
+                apply!(s, is_task, skill_progressive_disclosure, v);
+            }
+            // 子智能体嵌套深度上限(1..=4,越界拒绝)
+            if let Some(v) = body.subagent_max_depth {
+                if !(1..=4).contains(&v) {
+                    return Json(json!({ "error": "subagent_max_depth 必须在 1..=4" }))
+                        .into_response()
+                        .with_status(StatusCode::BAD_REQUEST);
+                }
+                apply!(s, is_task, subagent_max_depth, v);
+            }
+            // 子智能体并发上限(1..=16,越界拒绝)
+            if let Some(v) = body.subagent_max_concurrency {
+                if !(1..=16).contains(&v) {
+                    return Json(json!({ "error": "subagent_max_concurrency 必须在 1..=16" }))
+                        .into_response()
+                        .with_status(StatusCode::BAD_REQUEST);
+                }
+                apply!(s, is_task, subagent_max_concurrency, v);
+            }
+            // 子智能体结果字符上限(500..=8000,越界拒绝)
+            if let Some(v) = body.subagent_result_max_chars {
+                if !(500..=8000).contains(&v) {
+                    return Json(json!({ "error": "subagent_result_max_chars 必须在 500..=8000" }))
+                        .into_response()
+                        .with_status(StatusCode::BAD_REQUEST);
+                }
+                apply!(s, is_task, subagent_result_max_chars, v);
             }
         }
     }

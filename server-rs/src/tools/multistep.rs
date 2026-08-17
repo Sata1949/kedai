@@ -181,6 +181,7 @@ mod tests {
         ToolContext {
             session_id: session_id.into(),
             character_id: character_id.into(),
+            agent_depth: 0,
         }
     }
 

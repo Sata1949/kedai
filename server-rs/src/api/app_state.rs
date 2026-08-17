@@ -248,6 +248,7 @@ impl AppState {
             contract_registry.clone(),
             kaleido_state.clone(),
             memory.clone(),
+            skills.clone(),
         ));
         let engine_model = engine.model();
 

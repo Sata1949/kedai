@@ -39,12 +39,39 @@ pub(super) fn register_agentgo(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
         Arc::new(move |args: Value, ctx: ToolContext| {
             let deps = deps.clone();
             Box::pin(async move {
+                // 读取调度限制(深度/并发):settings 已在 load 时钳制到合法区间,此处直接使用
+                let (max_depth, max_concurrency) = {
+                    let s = deps.settings.lock().unwrap_or_else(|e| e.into_inner());
+                    (s.subagent_max_depth, s.subagent_max_concurrency)
+                };
+                // 深度守卫:主 Agent 为 depth 0,子任务内再派发时 +1;
+                // 当前子任务生成不带工具(depth 恒 0),守卫为嵌套派发(落地项 3 预留)兜底
+                if ctx.agent_depth >= max_depth {
+                    return Err(format!(
+                        "子智能体嵌套超过 {max_depth} 层,请让主智能体直接处理"
+                    ));
+                }
                 let tasks = args.get("tasks").and_then(|v| v.as_array()).cloned().unwrap_or_default();
                 if tasks.is_empty() {
                     return Err("缺少 tasks 参数".into());
                 }
                 if tasks.len() > 5 {
                     return Err("一次最多排出 5 个子智能体".into());
+                }
+                // 并发守卫:统计本会话仍在 running 状态的子任务数;
+                // 顺序执行(tokio::spawn 后立即返回)下通常不超限,守卫防
+                // 多轮循环派发/异常重试把在跑任务堆满,拒绝时不创建新任务
+                let running = deps
+                    .subtasks
+                    .list_by_session(&ctx.session_id)
+                    .iter()
+                    .filter(|t| t.status == "running")
+                    .count();
+                if running + tasks.len() > max_concurrency as usize {
+                    return Err(format!(
+                        "子智能体并发已满 {max_concurrency}(在跑 {running} 个,本次再排 {} 个),请稍后重试或先用 todo 轮询已有任务",
+                        tasks.len()
+                    ));
                 }
                 let mut launched: Vec<Value> = Vec::new();
                 for t in &tasks {
@@ -133,7 +160,7 @@ async fn run_subtask(
             } else if content.trim().is_empty() {
                 let _ = deps.subtasks.set_error(&task_id, "子任务返回空内容");
             } else {
-                let _ = deps.subtasks.set_done(&task_id, content.trim());
+                let _ = deps.subtasks.set_done(&task_id, &truncate_subtask_result(&deps, content.trim()));
             }
         }
         Err(e) => {
@@ -143,6 +170,32 @@ async fn run_subtask(
         }
     }
     deps.subtasks.unregister_cancel(&task_id);
+}
+
+/// 子任务结果超长截断:超 subagent_result_max_chars 时保留前 N 字符并附尾注,
+/// 不静默丢内容(原长写入尾注,调用方可知全貌)。按字符截断,避开 UTF-8 边界问题。
+fn truncate_subtask_result(deps: &ToolDeps, content: &str) -> String {
+    let max_chars = {
+        let s = deps.settings.lock().unwrap_or_else(|e| e.into_inner());
+        s.subagent_result_max_chars as usize
+    };
+    truncate_subtask_result_with_limit(content, max_chars)
+}
+
+/// 截断纯函数(限长可注入,测试用)
+fn truncate_subtask_result_with_limit(content: &str, max_chars: usize) -> String {
+    let total = content.chars().count();
+    if total <= max_chars {
+        return content.to_string();
+    }
+    let clipped: String = content.chars().take(max_chars).collect();
+    format!("{clipped}\n[子智能体结果已截断,原长 {total} 字符]")
+}
+
+/// 测试入口:跨模块(agent_tools tests)验证截断行为
+#[cfg(test)]
+pub(super) fn truncate_subtask_result_for_test(deps: &ToolDeps, content: &str) -> String {
+    truncate_subtask_result(deps, content)
 }
 
 /// 常驻世界书文本(子任务上下文用:constant 且启用)

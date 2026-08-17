@@ -165,6 +165,8 @@ pub struct AgentEngine {
     db: Arc<Db>,
     /// 跨会话记忆蒸馏(落地项 2):记忆槽注入与 touch 衰减回写
     memory: Arc<crate::services::memory_service::MemoryService>,
+    /// 技能库(落地项 3 渐进披露):system 注入「name:description」紧凑清单
+    skills: Arc<crate::services::skill_service::SkillService>,
     /// 契约注册表(character_id → Contract):与多步工具/API 写路径共享同一实例
     /// (AppState 构造注入),保证「改卡 → invalidate → 下轮重提取」的缓存一致性。
     pub(crate) contract_registry: Arc<crate::contracts::ContractRegistry>,
@@ -334,6 +336,7 @@ impl AgentEngine {
         contract_registry: Arc<crate::contracts::ContractRegistry>,
         kaleido_state: Arc<crate::services::kaleido_state_service::KaleidoStateService>,
         memory: Arc<crate::services::memory_service::MemoryService>,
+        skills: Arc<crate::services::skill_service::SkillService>,
     ) -> Self {
         AgentEngine {
             connector,
@@ -350,6 +353,7 @@ impl AgentEngine {
             runtime_prompt,
             db,
             memory,
+            skills,
             runs: Mutex::new(HashMap::new()),
             contract_registry,
             kaleido_state,
@@ -517,6 +521,7 @@ impl AgentEngine {
             let tool_ctx = ToolContext {
                 session_id: session_id.clone(),
                 character_id: req.character_id.clone(),
+                agent_depth: 0,
             };
 
             // ===== 2. 执行阶段 =====
@@ -593,6 +598,7 @@ impl AgentEngine {
                             let ctx = ToolContext {
                                 session_id: session_id.clone(),
                                 character_id: req.character_id.clone(),
+                                agent_depth: 0,
                             };
                             let args = json!({ "text": clean_content, "entries": entries });
                             match self
@@ -1716,6 +1722,7 @@ impl AgentEngine {
                             let cctx = ToolContext {
                                 session_id: session_id.to_string(),
                                 character_id: req.character_id.clone(),
+                                agent_depth: 0,
                             };
                             let args = json!({ "text": reflect_text, "entries": entries });
                             match self
@@ -1773,6 +1780,7 @@ impl AgentEngine {
                     let reflect_tool_ctx = ToolContext {
                         session_id: session_id.to_string(),
                         character_id: req.character_id.clone(),
+                        agent_depth: 0,
                     };
                     match reflect_with_tools(
                         self,
@@ -2073,6 +2081,20 @@ impl AgentEngine {
                             "\n\n【可用工具】\n{}",
                             self.tool_registry.tool_guidance_for(&step_params.tools)
                         ));
+                        // 技能渐进披露(落地项 3):system 只注入「技能名:一句话用途」紧凑清单,
+                        // 正文按需 read(type=skill) 加载;清单按 name 排序,跨轮字节稳定(前缀缓存)。
+                        // skill_progressive_disclosure = false 时回退旧行为(完全不注入清单)。
+                        if self.settings.lock().unwrap_or_else(|e| e.into_inner())
+                            .skill_progressive_disclosure
+                        {
+                            let manifest =
+                                crate::services::skill_service::skill_manifest(&self.skills.list(true));
+                            if !manifest.is_empty() {
+                                s.content.push_str(&format!(
+                                    "\n\n【可用技能】(需要时用 read 工具 type=skill 按名读取正文)\n{manifest}"
+                                ));
+                            }
+                        }
                     }
                 }
             }

@@ -129,10 +129,13 @@ impl ToolRegistry {
     ) -> Result<String, String> {
         let tool = self
             .get(name)
-            .ok_or_else(|| format!("未注册的工具:{name}"))?;
+            .ok_or_else(|| format!("未注册的工具:{name}。请先用 todo 工具查看可用能力,或改用已注册的工具名(区分大小写)"))?;
         let decision = self.permissions.decide(name, &ctx);
         if !decision.allowed {
-            return Err(format!("工具 \"{name}\" 未执行:{}", decision.reason));
+            return Err(format!(
+                "工具 \"{name}\" 未执行:{}。下一步:在授权弹窗中允许,或改用无需授权的只读工具(如 read/todo)",
+                decision.reason
+            ));
         }
         self.run_tool(tool, args_json, ctx).await
     }
@@ -148,11 +151,14 @@ impl ToolRegistry {
         decision: &PermissionDecision,
     ) -> Result<String, String> {
         if !decision.allowed {
-            return Err(format!("工具 \"{name}\" 未执行:{}", decision.reason));
+            return Err(format!(
+                "工具 \"{name}\" 未执行:{}。下一步:检查步骤白名单配置,或改用白名单内的工具",
+                decision.reason
+            ));
         }
         let tool = self
             .get(name)
-            .ok_or_else(|| format!("未注册的工具:{name}"))?;
+            .ok_or_else(|| format!("未注册的工具:{name}。请先用 todo 工具查看可用能力,或改用已注册的工具名(区分大小写)"))?;
         self.run_tool(tool, args_json, ctx).await
     }
 
@@ -164,14 +170,20 @@ impl ToolRegistry {
         ctx: ToolContext,
     ) -> Result<String, String> {
         let name = tool.definition.name.clone();
-        let args: Value = serde_json::from_str(args_json)
-            .map_err(|_| format!("工具 \"{name}\" 参数解析失败:{args_json}"))?;
+        let args: Value = serde_json::from_str(args_json).map_err(|_| {
+            format!("工具 \"{name}\" 参数解析失败:{args_json}。下一步:改为合法 JSON 对象,键名与类型对照工具定义的 parameters")
+        })?;
         let fut = (tool.execute)(args, ctx);
         let timeout = self.tool_timeout;
         let output = match tokio::time::timeout(timeout, fut).await {
             Ok(Ok(s)) => s,
             Ok(Err(e)) => return Err(e),
-            Err(_) => return Err(format!("工具 \"{name}\" 执行超时({}s)", timeout.as_secs())),
+            Err(_) => {
+                return Err(format!(
+                    "工具 \"{name}\" 执行超时({}s)。下一步:缩小参数范围(如减少读取量)后重试,或改用 agentgo 后台执行",
+                    timeout.as_secs()
+                ))
+            }
         };
         // 超长结果截断(保留字节计数元数据,调用方按字符串回填模型/前端)
         if output.len() > MAX_TOOL_OUTPUT_BYTES {
@@ -242,6 +254,7 @@ mod tests {
         ToolContext {
             session_id: "s".into(),
             character_id: "c".into(),
+            agent_depth: 0,
         }
     }
 
@@ -504,6 +517,76 @@ mod tests {
             out.len() < 70 * 1024,
             "截断后应远小于原始 80KB: {}",
             out.len()
+        );
+    }
+
+    /// 工具治理:两次构建注册表,工具定义序列化逐字节一致——
+    /// HashMap 无序,若 list_definitions 不排序,下发给模型的工具定义数组顺序会跨启动漂移,
+    /// 击穿 DeepSeek 逐字节前缀缓存。此测试守护该顺序稳定性。
+    #[test]
+    fn tool_definitions_serialize_identically_across_builds() {
+        fn build_registry() -> ToolRegistry {
+            let reg = ToolRegistry::new();
+            // 注册顺序刻意乱序,验证输出不依赖插入顺序
+            for name in ["zeta", "alpha", "middle", "read", "write"] {
+                reg.register(
+                    ToolDefinition {
+                        name: name.into(),
+                        description: format!("{name} 工具"),
+                        parameters: serde_json::json!({"type":"object"}),
+                    },
+                    Arc::new(|_, _| Box::pin(async { Ok("ok".into()) })),
+                );
+            }
+            reg
+        }
+        let first = serde_json::to_string(&build_registry().list_definitions()).unwrap();
+        let second = serde_json::to_string(&build_registry().list_definitions()).unwrap();
+        assert_eq!(first, second, "两次构建的工具定义 JSON 必须逐字节一致");
+        assert!(first.contains("alpha"), "定义序列化应含工具名: {first}");
+    }
+
+    /// 工具治理:错误文案可操作化——裸错误一律附「下一步」指引,模型可直接照做
+    #[tokio::test]
+    async fn error_messages_carry_next_step_guidance() {
+        let reg = ToolRegistry::new().with_tool_timeout(Duration::from_millis(50));
+        reg.register(
+            ToolDefinition {
+                name: "write".into(),
+                description: "写入".into(),
+                parameters: serde_json::json!({}),
+            },
+            Arc::new(|_, _| {
+                Box::pin(async {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    Ok("不应到达".into())
+                })
+            }),
+        );
+        // 未注册工具:补「查看可用能力/核对工具名」指引
+        let missing = reg.execute("nope", "{}", ctx()).await.unwrap_err();
+        assert!(
+            missing.contains("todo") && missing.contains("区分大小写"),
+            "未注册错误应含指引: {missing}"
+        );
+        // 权限拒绝:补「授权或改用只读工具」指引
+        let denied = reg.execute("write", "{}", ctx()).await.unwrap_err();
+        assert!(
+            denied.contains("授权弹窗") && denied.contains("只读工具"),
+            "权限拒绝应含指引: {denied}"
+        );
+        // 参数解析失败:补「对照 parameters 修正 JSON」指引
+        reg.permissions().authorize("write", "session", "s").unwrap();
+        let bad_args = reg.execute("write", "不是json", ctx()).await.unwrap_err();
+        assert!(
+            bad_args.contains("合法 JSON") && bad_args.contains("parameters"),
+            "参数解析失败应含指引: {bad_args}"
+        );
+        // 超时:补「缩小范围重试/转后台」指引
+        let timeout_err = reg.execute("write", "{}", ctx()).await.unwrap_err();
+        assert!(
+            timeout_err.contains("缩小参数范围") && timeout_err.contains("agentgo"),
+            "超时错误应含指引: {timeout_err}"
         );
     }
 }

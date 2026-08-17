@@ -409,10 +409,16 @@ pub struct ToolDefinition {
 pub struct ToolContext {
     pub session_id: String,
     pub character_id: String,
+    /// 子智能体嵌套深度(主 Agent 为 0;子任务内再派发时 +1)。
+    /// 当前子任务生成不带工具、深度恒 0,字段为深度守卫预留(落地项 3)。
+    pub agent_depth: u32,
 }
 
 // ---------- Skill 库 ----------
-/// 提示词技能(skill):read 工具按名/关键词读取,可注入上下文
+/// 提示词技能(skill):read 工具按名/关键词读取,可注入上下文。
+/// 渐进披露(落地项 3):system 仅注入 name+description 紧凑清单,
+/// 正文按需经 read(type=skill) 读取;allowed_tools/run_as_subagent/model
+/// 为调度增强预留元数据(旧库缺列由迁移补默认)。
 #[derive(Debug, Clone, Serialize)]
 pub struct SkillRecord {
     pub id: String,
@@ -421,6 +427,12 @@ pub struct SkillRecord {
     pub content: String,
     pub enabled: bool,
     pub created_at: String,
+    /// 工具白名单(JSON 数组字符串;空数组 = 不限制)
+    pub allowed_tools: String,
+    /// 是否可作为子智能体技能派发(0/1;默认 false)
+    pub run_as_subagent: bool,
+    /// 可选模型名覆盖(空 = 用当前模型)
+    pub model: String,
 }
 
 // ---------- 子智能体任务(agentgo / agentend) ----------

@@ -68,7 +68,10 @@ CREATE TABLE IF NOT EXISTS skills (
   description TEXT NOT NULL DEFAULT '',
   content     TEXT NOT NULL DEFAULT '',
   enabled     INTEGER NOT NULL DEFAULT 1,
-  created_at  TEXT NOT NULL
+  created_at  TEXT NOT NULL,
+  allowed_tools TEXT NOT NULL DEFAULT '[]',
+  run_as_subagent INTEGER NOT NULL DEFAULT 0,
+  model       TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS agent_subtasks (
   id           TEXT PRIMARY KEY,
@@ -275,6 +278,9 @@ impl Db {
         // 幂等 schema 升级(2026-08 缓存感知管线):旧库 llm_requests 补 usage 缓存列
         crate::migration::ensure_llm_requests_usage_columns(&conn)
             .map_err(|e| format!("升级 llm_requests 缓存列失败: {e}"))?;
+        // 幂等 schema 升级(落地项 3 技能渐进披露):旧库 skills 补 allowed_tools 等列
+        crate::migration::ensure_skills_progressive_columns(&conn)
+            .map_err(|e| format!("升级 skills 渐进披露列失败: {e}"))?;
         backfill_scope_variables(&conn)?;
         Ok(Db {
             conn: Mutex::new(conn),

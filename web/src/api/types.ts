@@ -321,6 +321,14 @@ export interface RuntimeSettings {
   memory_distill_enabled: boolean;
   /** 每次注入提示词的记忆条数上限(0..=50;0 = 不注入) */
   memory_inject_limit: number;
+  /** 技能渐进披露开关(true = system 只注入「名称:用途」清单,正文按需 read;默认 true) */
+  skill_progressive_disclosure: boolean;
+  /** 子智能体最大嵌套深度(1..=4;默认 2) */
+  subagent_max_depth: number;
+  /** 子智能体最大并发数(1..=16;默认 6) */
+  subagent_max_concurrency: number;
+  /** 子智能体结果最大字符数(500..=8000;默认 2000,超出截断带尾注) */
+  subagent_result_max_chars: number;
 }
 
 export interface PromptPreviewLayer {
@@ -364,6 +372,10 @@ export interface RuntimeSettingsPatch {
   llm_request_log?: boolean;
   memory_distill_enabled?: boolean;
   memory_inject_limit?: number;
+  skill_progressive_disclosure?: boolean;
+  subagent_max_depth?: number;
+  subagent_max_concurrency?: number;
+  subagent_result_max_chars?: number;
 }
 
 // ===== 音频播放器(阶段五 5a;契约对齐酒馆助手 audio.d.ts) =====

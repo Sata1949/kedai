@@ -145,11 +145,15 @@ fn read_skill(deps: &ToolDeps, name: &str, keywords: &[String]) -> Result<String
     if !name.is_empty() {
         if let Some(s) = deps.skills.get_by_name(name) {
             if !s.enabled {
-                return Err(format!("skill「{name}」已停用"));
+                return Err(format!(
+                    "skill「{name}」已停用。下一步:在技能库中启用该技能,或改读其他已启用技能"
+                ));
             }
             return Ok(format!("[{}]\n{}", s.name, s.content.trim()));
         }
-        return Err(format!("skill「{name}」不存在"));
+        return Err(format!(
+            "skill「{name}」不存在。下一步:不带 name 调用 read(type=skill) 可列出全部可用技能,从中核对名称"
+        ));
     }
     let list = deps.skills.list(true);
     let mut parts: Vec<String> = Vec::new();
@@ -160,7 +164,9 @@ fn read_skill(deps: &ToolDeps, name: &str, keywords: &[String]) -> Result<String
         }
     }
     if parts.is_empty() {
-        return Err("未命中任何 skill".into());
+        return Err(
+            "未命中任何 skill。下一步:去掉 keywords 列出全部技能,或更换更宽泛的关键词".into(),
+        );
     }
     Ok(parts.join("\n\n"))
 }

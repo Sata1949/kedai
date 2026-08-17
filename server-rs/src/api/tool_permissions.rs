@@ -44,6 +44,7 @@ pub async fn list(
     let ctx = ToolContext {
         session_id: session.id.clone(),
         character_id: session.character_id.clone(),
+        agent_depth: 0,
     };
     let tools: Vec<_> = state
         .tool_registry

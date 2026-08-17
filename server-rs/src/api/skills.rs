@@ -30,6 +30,15 @@ pub struct UpdateSkillBody {
     pub description: Option<String>,
     #[serde(default)]
     pub content: Option<String>,
+    /// 工具白名单(JSON 数组字符串,空数组 = 不限制)
+    #[serde(default)]
+    pub allowed_tools: Option<String>,
+    /// 是否可作为子智能体技能派发
+    #[serde(default)]
+    pub run_as_subagent: Option<bool>,
+    /// 可选模型名覆盖(空 = 用当前模型)
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// GET /api/skills:全部技能(含已停用,前端按钮可切换)
@@ -66,6 +75,9 @@ pub async fn update(
         body.name.as_deref(),
         body.description.as_deref(),
         body.content.as_deref(),
+        body.allowed_tools.as_deref(),
+        body.run_as_subagent,
+        body.model.as_deref(),
     ) {
         Some(s) => Json(json!({ "ok": true, "skill": s })).into_response(),
         None => err_json("技能不存在"),

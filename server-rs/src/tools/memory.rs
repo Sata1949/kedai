@@ -124,6 +124,7 @@ mod tests {
         let ctx = ToolContext {
             session_id: "sessM".into(),
             character_id: "charM".into(),
+            agent_depth: 0,
         };
 
         // 写入:落新表(memory_write 为危险级工具,测试以已裁决放行路径执行)
@@ -170,6 +171,7 @@ mod tests {
         assert!(registry.execute("memory_write", r#"{"fact":"  "}"#, ToolContext {
             session_id: "sessM".into(),
             character_id: "charM".into(),
+            agent_depth: 0,
         })
         .await
         .is_err());

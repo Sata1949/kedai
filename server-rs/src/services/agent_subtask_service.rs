@@ -106,13 +106,16 @@ impl AgentSubtaskService {
         let existing = self.get(id)?;
         let new_result = result.map(|s| s.to_string()).unwrap_or(existing.result);
         let new_error = error.map(|s| s.to_string()).unwrap_or(existing.error);
-        let conn = self.db.conn();
-        let n = conn
-            .execute(
+        // conn 作用域收窄:UPDATE 执行后立即释放锁,避免末尾 self.get(id)
+        // 再次 lock 同一 Mutex<Connection> 造成自死锁(与 session_service 同型约定)
+        let n = {
+            let conn = self.db.conn();
+            conn.execute(
                 "UPDATE agent_subtasks SET status = ?1, result = ?2, error = ?3, updated_at = ?4 WHERE id = ?5",
                 params![status, new_result, new_error, now_iso(), id],
             )
-            .ok()?;
+            .ok()?
+        };
         if n == 0 {
             return None;
         }

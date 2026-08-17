@@ -76,6 +76,7 @@ const {
   temperature, topP, maxTokens, maxContextTokens, maxToolRounds,
   compactionMode, compactionThreshold, compactionKeepRecent, compactionSnipBytes,
   memoryDistillEnabled, memoryInjectLimit,
+  subagentMaxDepth, subagentMaxConcurrency, subagentResultMaxChars,
 } = storeToRefs(store);
 
 // ===== Agent 设置(storeToRefs 直接绑定) =====
@@ -1133,6 +1134,45 @@ function syncBannedPromptFromWords(): void {
                 title="每次注入提示词的记忆条数上限(0-50;0 = 不注入,默认 8,越界由后端钳回默认)"
               />
               <span class="sv-note">注入提示词的记忆条数上限(0-50,默认 8)</span>
+            </div>
+            <div class="sv-inp-row">
+              <label class="sv-inp-tag">子代理深度</label>
+              <input
+                v-model.number="subagentMaxDepth"
+                type="number"
+                min="1"
+                max="4"
+                step="1"
+                class="sv-input inject-num"
+                title="子智能体最大嵌套深度(1-4;默认 2,超限时提示主智能体直接处理)"
+              />
+              <span class="sv-note">子智能体嵌套深度上限(1-4,默认 2)</span>
+            </div>
+            <div class="sv-inp-row">
+              <label class="sv-inp-tag">子代理并发</label>
+              <input
+                v-model.number="subagentMaxConcurrency"
+                type="number"
+                min="1"
+                max="16"
+                step="1"
+                class="sv-input inject-num"
+                title="子智能体最大并发数(1-16;默认 6,占满时新派发被拒并提示稍后重试)"
+              />
+              <span class="sv-note">子智能体并发上限(1-16,默认 6)</span>
+            </div>
+            <div class="sv-inp-row">
+              <label class="sv-inp-tag">子代理结果上限</label>
+              <input
+                v-model.number="subagentResultMaxChars"
+                type="number"
+                min="500"
+                max="8000"
+                step="100"
+                class="sv-input inject-num"
+                title="子智能体结果最大字符数(500-8000;默认 2000,超出截断并附原长尾注)"
+              />
+              <span class="sv-note">子智能体结果字符上限(500-8000,默认 2000)</span>
             </div>
             <div class="sv-btn-row">
               <button class="sv-btn ghost sv-btn-fill" :disabled="saveParams" @click="saveParamsNow">

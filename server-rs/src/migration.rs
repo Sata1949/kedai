@@ -88,6 +88,44 @@ pub fn ensure_llm_requests_usage_columns(conn: &Connection) -> Result<(), String
     }
     Ok(())
 }
+
+/// skills 渐进披露列(落地项 3):(列名, DDL 片段)。旧库经 ALTER ADD COLUMN 补齐;
+/// 列追加在表尾,与新版 CREATE_TABLES 建出的 schema normalize 后一致。
+const SKILLS_PROGRESSIVE_COLUMNS: [(&str, &str); 3] = [
+    ("allowed_tools", "allowed_tools TEXT NOT NULL DEFAULT '[]'"),
+    ("run_as_subagent", "run_as_subagent INTEGER NOT NULL DEFAULT 0"),
+    ("model", "model TEXT NOT NULL DEFAULT ''"),
+];
+
+/// 幂等 schema 升级:为 skills 补渐进披露列(缺失才 ALTER,已存在跳过)。
+/// 启动时(Db::open)与跨库合并前(merge_databases 两侧)各执行一次。
+/// skills 表不存在(极旧库/测试手工建库)时零列返回,直接跳过——
+/// 建表由 create_tables_sql 或合并期 schema 比对负责,此处不能 ALTER 报错。
+pub fn ensure_skills_progressive_columns(conn: &Connection) -> Result<(), String> {
+    let mut existing: Vec<String> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(skills)")
+            .map_err(|e| format!("读取 skills 列失败: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| format!("遍历 skills 列失败: {e}"))?;
+        for name in rows.flatten() {
+            existing.push(name.to_lowercase());
+        }
+    }
+    if existing.is_empty() {
+        return Ok(());
+    }
+    for (name, ddl) in SKILLS_PROGRESSIVE_COLUMNS {
+        if existing.iter().any(|c| c == name) {
+            continue;
+        }
+        conn.execute(&format!("ALTER TABLE skills ADD COLUMN {ddl}"), [])
+            .map_err(|e| format!("为 skills 补列 {name} 失败: {e}"))?;
+    }
+    Ok(())
+}
 /// 契约变更历史表(阶段 C):append-only 审计 + 回滚源。合并前对两侧各补一次 DDL,
 /// 与 SCOPE_VARIABLES_DDL 同理,避免旧库与新库合并时因「基线缺少源表」停止(§4.3)。
 /// 索引不参与 schema 一致性比对(schema_map 仅读 type='table'),无需在此重复。
@@ -325,6 +363,9 @@ fn merge_databases(baseline: &Path, source: &Path) -> Result<MergeReport, String
     // llm_requests usage 缓存列:旧库 ALTER 补齐,保证两侧 schema 一致(比对在 DDL 补齐之后)
     ensure_llm_requests_usage_columns(&conn)
         .map_err(|e| format!("补齐基线库 llm_requests 缓存列失败: {e}"))?;
+    // skills 渐进披露列:旧库 ALTER 补齐,保证两侧 schema 一致(比对在 DDL 补齐之后)
+    ensure_skills_progressive_columns(&conn)
+        .map_err(|e| format!("补齐基线库 skills 渐进披露列失败: {e}"))?;
     conn.execute_batch(CONTRACT_CHANGELOG_DDL)
         .map_err(|e| format!("补齐基线库 contract_changelog 表失败: {e}"))?;
     conn.execute_batch(KALEIDO_STATE_DDL)
@@ -347,6 +388,8 @@ fn merge_databases(baseline: &Path, source: &Path) -> Result<MergeReport, String
         .map_err(|e| format!("补齐源快照 llm_requests 表失败: {e}"))?;
     ensure_llm_requests_usage_columns(&source_conn)
         .map_err(|e| format!("补齐源快照 llm_requests 缓存列失败: {e}"))?;
+    ensure_skills_progressive_columns(&source_conn)
+        .map_err(|e| format!("补齐源快照 skills 渐进披露列失败: {e}"))?;
     source_conn
         .execute_batch(CONTRACT_CHANGELOG_DDL)
         .map_err(|e| format!("补齐源快照 contract_changelog 表失败: {e}"))?;
@@ -986,6 +1029,83 @@ mod tests {
 
     /// 迁移后旧表 schema 应与新版 CREATE_TABLES 建出的表 normalize 后一致
     /// (跨库合并 schema 一致性比对依赖这一点)。
+    /// skills 渐进披露列迁移(落地项 3):旧版 skills(无 allowed_tools 等列)补列成功、
+    /// 默认值生效、幂等可重复执行,且迁移后 schema 与新版 CREATE_TABLES 一致。
+    #[test]
+    fn ensure_skills_progressive_columns_adds_defaults_and_matches_fresh_schema() {
+        let dir = temp_dir("skills-columns");
+        let db = dir.join(DATABASE_FILE);
+        let conn = Connection::open(&db).unwrap();
+        // 旧版表结构(落地项 3 之前):无 allowed_tools / run_as_subagent / model
+        conn.execute_batch(
+            "CREATE TABLE skills (
+              id          TEXT PRIMARY KEY,
+              name        TEXT NOT NULL UNIQUE,
+              description TEXT NOT NULL DEFAULT '',
+              content     TEXT NOT NULL DEFAULT '',
+              enabled     INTEGER NOT NULL DEFAULT 1,
+              created_at  TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO skills (id, name, description, content, enabled, created_at) \
+             VALUES ('s1', '旧技能', '旧描述', '正文', 1, '2026-01-01')",
+            [],
+        )
+        .unwrap();
+
+        ensure_skills_progressive_columns(&conn).unwrap();
+        // 新列默认值:'[]' / 0 / ''(旧行不受影响)
+        let (tools, as_sub, model): (String, i64, String) = conn
+            .query_row(
+                "SELECT allowed_tools, run_as_subagent, model FROM skills WHERE id = 's1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(tools, "[]");
+        assert_eq!(as_sub, 0);
+        assert_eq!(model, "");
+
+        // 幂等:重复执行不报错、不产生重复列
+        ensure_skills_progressive_columns(&conn).unwrap();
+        let dup = table_columns(&conn, "main", "skills")
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.name == "allowed_tools")
+            .count();
+        assert_eq!(dup, 1, "重复迁移不应产生重复列");
+
+        // 迁移后 schema 与新版 CREATE_TABLES 建出的表 normalize 后一致(合并比对依赖)
+        let migrated = normalize_sql(
+            conn.query_row(
+                "SELECT sql FROM sqlite_schema WHERE type='table' AND name='skills'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap()
+            .as_str(),
+        );
+        let fresh_conn = Connection::open_in_memory().unwrap();
+        fresh_conn
+            .execute_batch(crate::models::db::create_tables_sql())
+            .unwrap();
+        let fresh = normalize_sql(
+            fresh_conn
+                .query_row(
+                    "SELECT sql FROM sqlite_schema WHERE type='table' AND name='skills'",
+                    [],
+                    |r| r.get::<_, String>(0),
+                )
+                .unwrap()
+                .as_str(),
+        );
+        assert_eq!(migrated, fresh, "迁移后 skills schema 应与新建库一致");
+        drop(conn);
+        fs::remove_dir_all(dir).ok();
+    }
+
     #[test]
     fn ensure_llm_requests_usage_columns_matches_fresh_schema() {
         let dir = temp_dir("usage-schema");

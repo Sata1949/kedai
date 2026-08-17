@@ -80,6 +80,14 @@ export const useAppStore = defineStore('app', () => {
   const memoryDistillEnabled = ref(false);
   /** 每次注入提示词的记忆条数上限(0..=50;服务端默认 8) */
   const memoryInjectLimit = ref(8);
+  /** 技能渐进披露开关(服务端默认 true):system 只注入「名称:用途」清单,正文按需 read */
+  const skillProgressiveDisclosure = ref(true);
+  /** 子智能体最大嵌套深度(1..=4;服务端默认 2) */
+  const subagentMaxDepth = ref(2);
+  /** 子智能体最大并发数(1..=16;服务端默认 6) */
+  const subagentMaxConcurrency = ref(6);
+  /** 子智能体结果最大字符数(500..=8000;服务端默认 2000,超出截断带尾注) */
+  const subagentResultMaxChars = ref(2000);
   const model = ref('');
   const models = ref<string[]>([]);
   const searchQuery = ref('');
@@ -720,6 +728,10 @@ export const useAppStore = defineStore('app', () => {
       compactionSnipBytes.value = s.compaction_snip_bytes ?? 8192;
       memoryDistillEnabled.value = s.memory_distill_enabled ?? false;
       memoryInjectLimit.value = s.memory_inject_limit ?? 8;
+      skillProgressiveDisclosure.value = s.skill_progressive_disclosure ?? true;
+      subagentMaxDepth.value = s.subagent_max_depth ?? 2;
+      subagentMaxConcurrency.value = s.subagent_max_concurrency ?? 6;
+      subagentResultMaxChars.value = s.subagent_result_max_chars ?? 2000;
       if (!model.value) model.value = s.model;
     } catch {
       /* 忽略 */
@@ -754,6 +766,10 @@ export const useAppStore = defineStore('app', () => {
     compactionSnipBytes.value = s.compaction_snip_bytes ?? 8192;
     memoryDistillEnabled.value = s.memory_distill_enabled ?? false;
     memoryInjectLimit.value = s.memory_inject_limit ?? 8;
+    skillProgressiveDisclosure.value = s.skill_progressive_disclosure ?? true;
+    subagentMaxDepth.value = s.subagent_max_depth ?? 2;
+    subagentMaxConcurrency.value = s.subagent_max_concurrency ?? 6;
+    subagentResultMaxChars.value = s.subagent_result_max_chars ?? 2000;
   }
 
   // 手动压缩当前会话历史(阶段借鉴 harness):调用后端摘要,成功后刷新历史展示。
@@ -1212,6 +1228,10 @@ export const useAppStore = defineStore('app', () => {
     compactionSnipBytes,
     memoryDistillEnabled,
     memoryInjectLimit,
+    skillProgressiveDisclosure,
+    subagentMaxDepth,
+    subagentMaxConcurrency,
+    subagentResultMaxChars,
     model,
     models,
     searchQuery,
