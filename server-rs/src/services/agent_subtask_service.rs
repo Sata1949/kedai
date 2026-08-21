@@ -49,7 +49,7 @@ impl AgentSubtaskService {
         let id = Uuid::new_v4().to_string();
         let (tx, _rx) = watch::channel(false);
         self.cancels.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), tx);
-        let conn = self.db.conn();
+        let conn = self.db.write();
         if let Err(error) = conn.execute(
             "INSERT INTO agent_subtasks (id, session_id, character_id, name, instruction, status, result, error, created_at, updated_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, 'pending', '', '', ?6, ?6)",
@@ -73,7 +73,7 @@ impl AgentSubtaskService {
     }
 
     pub fn get(&self, id: &str) -> Option<AgentSubtaskRecord> {
-        let conn = self.db.conn();
+        let conn = self.db.read().ok()?;
         conn.query_row(
             "SELECT id, session_id, character_id, name, instruction, status, result, error, created_at, updated_at FROM agent_subtasks WHERE id = ?1",
             params![id],
@@ -85,7 +85,7 @@ impl AgentSubtaskService {
     }
 
     pub fn list_by_session(&self, session_id: &str) -> Vec<AgentSubtaskRecord> {
-        let conn = self.db.conn();
+        let conn = self.db.read().expect("获取只读连接失败");
         let mut stmt = conn
             .prepare("SELECT id, session_id, character_id, name, instruction, status, result, error, created_at, updated_at FROM agent_subtasks WHERE session_id = ?1 ORDER BY created_at ASC")
             .unwrap();
@@ -109,7 +109,7 @@ impl AgentSubtaskService {
         // conn 作用域收窄:UPDATE 执行后立即释放锁,避免末尾 self.get(id)
         // 再次 lock 同一 Mutex<Connection> 造成自死锁(与 session_service 同型约定)
         let n = {
-            let conn = self.db.conn();
+            let conn = self.db.write();
             conn.execute(
                 "UPDATE agent_subtasks SET status = ?1, result = ?2, error = ?3, updated_at = ?4 WHERE id = ?5",
                 params![status, new_result, new_error, now_iso(), id],

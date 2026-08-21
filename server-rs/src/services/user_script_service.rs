@@ -40,7 +40,7 @@ impl UserScriptService {
     }
 
     fn get_global(&self, owner_id: &str) -> Result<Value, String> {
-        let conn = self.db.conn();
+        let conn = self.db.read()?;
         let raw: Option<String> = conn
             .query_row(
                 "SELECT data_json FROM user_scripts WHERE scope = 'global' AND owner_id = ?1",
@@ -60,7 +60,7 @@ impl UserScriptService {
     fn save_global(&self, owner_id: &str, trees: &Value) -> Result<(), String> {
         let raw = serde_json::to_string(trees).map_err(|e| format!("序列化脚本失败: {e}"))?;
         let now = now_iso();
-        let conn = self.db.conn();
+        let conn = self.db.write();
         conn.execute(
             "INSERT INTO user_scripts (id, scope, owner_id, data_json, updated_at)
              VALUES (?1, 'global', ?2, ?3, ?4)
@@ -72,7 +72,7 @@ impl UserScriptService {
     }
 
     fn read_character_raw(&self, character_id: &str) -> Result<Value, String> {
-        let conn = self.db.conn();
+        let conn = self.db.read()?;
         let raw: Option<String> = conn
             .query_row(
                 "SELECT data_raw FROM characters WHERE id = ?1",
@@ -90,7 +90,7 @@ impl UserScriptService {
             serde_json::to_string(raw).map_err(|e| format!("序列化角色卡失败: {e}"))?;
         // conn 作用域收窄:UPDATE 语句执行后立即释放锁(与 quick_reply_service 一致)
         {
-            let conn = self.db.conn();
+            let conn = self.db.write();
             conn.execute(
                 "UPDATE characters SET data_raw = ?1 WHERE id = ?2",
                 params![raw_str, character_id],

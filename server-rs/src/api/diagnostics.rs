@@ -25,7 +25,12 @@ pub async fn cache(State(state): State<Arc<AppState>>, Query(q): Query<CacheQuer
     let window = q.window.unwrap_or(20).clamp(1, 500);
     // 近 N 条请求(时间正序返回,便于前端画趋势)
     let rows: Vec<CacheUsageRow> = {
-        let conn = state.db.conn();
+        let conn = match state.db.read() {
+            Ok(c) => c,
+            Err(e) => {
+                return Json(json!({ "error": e })).into_response();
+            }
+        };
         let sql = if q.session_id.is_some() {
             "SELECT session_id, created_at, prompt_tokens, completion_tokens,
                     prompt_cache_hit_tokens, prompt_cache_miss_tokens

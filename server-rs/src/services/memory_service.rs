@@ -124,7 +124,9 @@ impl MemoryService {
 
     /// 角色全部记忆(最新在前),供列表 API
     pub fn list(&self, character_id: &str) -> Vec<MemoryEntry> {
-        let conn = self.db.conn();
+        let Ok(conn) = self.db.read() else {
+            return Vec::new();
+        };
         let Ok(mut stmt) = conn.prepare(&format!(
             "SELECT {ENTRY_COLUMNS} FROM memory_entries WHERE character_id = ?1 ORDER BY id DESC"
         )) else {
@@ -136,7 +138,7 @@ impl MemoryService {
     }
 
     pub fn get(&self, id: i64) -> Option<MemoryEntry> {
-        let conn = self.db.conn();
+        let conn = self.db.read().ok()?;
         conn.query_row(
             &format!("SELECT {ENTRY_COLUMNS} FROM memory_entries WHERE id = ?1"),
             params![id],
@@ -166,7 +168,7 @@ impl MemoryService {
             return Err(format!("非法记忆类型: {kind}"));
         }
         let now = now_iso();
-        let conn = self.db.conn();
+        let conn = self.db.write();
         conn.execute(
             "INSERT INTO memory_entries
                (character_id, source_session_id, kind, content, usage_count, last_usage, selected, created_at, updated_at)
@@ -220,7 +222,7 @@ impl MemoryService {
             id
         );
         {
-            let conn = self.db.conn();
+            let conn = self.db.write();
             let n = conn
                 .execute(sql.as_str(), rusqlite::params_from_iter(values.iter().map(|v| v.as_ref())))
                 .ok()?;
@@ -232,7 +234,7 @@ impl MemoryService {
     }
 
     pub fn delete(&self, id: i64) -> bool {
-        let conn = self.db.conn();
+        let conn = self.db.write();
         conn.execute("DELETE FROM memory_entries WHERE id = ?1", params![id])
             .map(|n| n > 0)
             .unwrap_or(false)
@@ -255,7 +257,7 @@ impl MemoryService {
         for id in ids {
             params_vec.push(Box::new(*id));
         }
-        let conn = self.db.conn();
+        let conn = self.db.write();
         conn.execute(sql.as_str(), rusqlite::params_from_iter(params_vec.iter().map(|v| v.as_ref())))
             .map_err(|e| format!("记忆使用计数回写失败: {e}"))?;
         Ok(())
@@ -367,7 +369,7 @@ mod tests {
     #[test]
     fn memory_table_created_on_open() {
         let (memory, _, dir) = service();
-        let conn = memory.db.conn();
+        let conn = memory.db.read().unwrap();
         let mut columns: Vec<String> = Vec::new();
         {
             let mut stmt = conn.prepare("PRAGMA table_info(memory_entries)").unwrap();

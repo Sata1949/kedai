@@ -77,7 +77,7 @@ impl CharacterService {
 
     /// 列表不含 data_raw,按 created_at DESC
     pub fn list(&self) -> Vec<CharacterRecord> {
-        let conn = self.db.conn();
+        let conn = self.db.read().expect("获取只读连接失败");
         let mut stmt = conn
             .prepare("SELECT id, name, chara_name, description, file_path, avatar_path, data_raw, created_at FROM characters ORDER BY created_at DESC")
             .unwrap();
@@ -88,7 +88,7 @@ impl CharacterService {
     }
 
     pub fn get(&self, id: &str) -> Option<CharacterRecord> {
-        let conn = self.db.conn();
+        let conn = self.db.read().ok()?;
         conn.query_row(
             "SELECT id, name, chara_name, description, file_path, avatar_path, data_raw, created_at FROM characters WHERE id = ?1",
             params![id],
@@ -121,7 +121,7 @@ impl CharacterService {
             serde_json::to_vec_pretty(&data_raw).unwrap_or_default(),
         );
         let data_raw_str = serde_json::to_string(&data_raw).unwrap_or_else(|_| "{}".into());
-        let _ = self.db.conn().execute(
+        let _ = self.db.write().execute(
             "INSERT INTO characters (id, name, chara_name, description, file_path, avatar_path, data_raw, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 BUILTIN_SYSTEM_ID,
@@ -141,7 +141,7 @@ impl CharacterService {
     /// 从 data 子对象补全并同步 description/chara_name 列。二次运行:顶层已补全 → 无变更。
     pub fn reflatten_v3_cards(&self) {
         use crate::parsing::character_card::flatten_v3_data;
-        let conn = self.db.conn();
+        let conn = self.db.write();
         let mut ids = Vec::new();
         if let Ok(mut stmt) = conn.prepare("SELECT id FROM characters") {
             if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
@@ -235,7 +235,7 @@ impl CharacterService {
         let data_raw = serde_json::to_string(&parsed.data).unwrap_or_else(|_| "{}".into());
         let created_at = now_iso();
 
-        let conn = self.db.conn();
+        let conn = self.db.write();
         conn.execute(
             "INSERT INTO characters (id, name, chara_name, description, file_path, avatar_path, data_raw, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
@@ -345,7 +345,7 @@ impl CharacterService {
         let data_raw_str = serde_json::to_string(&data_raw).unwrap_or_else(|_| "{}".into());
         // 注意:conn(MutexGuard)必须在再次调用 self.get 之前释放,避免 Mutex 重入死锁
         {
-            let conn = self.db.conn();
+            let conn = self.db.write();
             let n = conn
                 .execute(
                     "UPDATE characters SET chara_name = ?1, description = ?2, data_raw = ?3 WHERE id = ?4",
@@ -397,7 +397,7 @@ impl CharacterService {
             }
         }
         let data_raw_str = serde_json::to_string(&data_raw).unwrap_or_else(|_| "{}".into());
-        let conn = self.db.conn();
+        let conn = self.db.write();
         let n = conn
             .execute(
                 "UPDATE characters SET data_raw = ?1 WHERE id = ?2",
@@ -416,7 +416,7 @@ impl CharacterService {
         let Some(rec) = self.get(id) else {
             return false;
         };
-        let conn = self.db.conn();
+        let conn = self.db.write();
         if conn
             .execute("DELETE FROM characters WHERE id = ?1", params![id])
             .map(|n| n > 0)

@@ -179,7 +179,7 @@ impl TaskService {
         let id = Uuid::new_v4().to_string();
         let now = now_iso();
         let cid = character_id.map(|s| s.to_string());
-        let conn = self.db.conn();
+        let conn = self.db.write();
         conn.execute(
             "INSERT INTO tasks (id, title, status, plan, result, error, character_id, created_at, updated_at) \
              VALUES (?1, ?2, 'pending', '[]', '', '', ?3, ?4, ?4)",
@@ -200,9 +200,9 @@ impl TaskService {
     }
 
     pub fn list(&self) -> Vec<TaskRecord> {
-        let conn = self.db.conn();
+        let conn = self.db.read().expect("获取只读连接失败");
         let mut stmt = conn
-            .prepare(&format!("SELECT {TASK_COLS} FROM tasks ORDER BY created_at DESC"))
+            .prepare_cached(&format!("SELECT {TASK_COLS} FROM tasks ORDER BY created_at DESC"))
             .unwrap();
         stmt.query_map([], row_to_task)
             .unwrap()
@@ -212,7 +212,8 @@ impl TaskService {
 
     pub fn get(&self, id: &str) -> Option<TaskRecord> {
         self.db
-            .conn()
+            .read()
+            .ok()?
             .query_row(
                 &format!("SELECT {TASK_COLS} FROM tasks WHERE id = ?1"),
                 params![id],
@@ -234,7 +235,7 @@ impl TaskService {
         self.signal_cancel(id);
         self.remove_cancel_entry(id);
         self.db
-            .conn()
+            .write()
             .execute("DELETE FROM tasks WHERE id = ?1", params![id])
             .map(|n| n > 0)
             .unwrap_or(false)
@@ -276,7 +277,7 @@ impl TaskService {
     // ===== 状态写入(内部) =====
 
     fn reset_task(&self, id: &str) -> bool {
-        let conn = self.db.conn();
+        let conn = self.db.write();
         conn.execute(
             "UPDATE tasks SET status = 'planning', plan = '[]', result = '', error = '', updated_at = ?1 WHERE id = ?2",
             params![now_iso(), id],
@@ -286,7 +287,7 @@ impl TaskService {
     }
 
     fn set_status(&self, id: &str, status: &str) -> bool {
-        let conn = self.db.conn();
+        let conn = self.db.write();
         conn.execute(
             "UPDATE tasks SET status = ?1, updated_at = ?2 WHERE id = ?3",
             params![status, now_iso(), id],
@@ -297,7 +298,7 @@ impl TaskService {
 
     fn set_plan(&self, id: &str, plan: &[TaskStep]) -> bool {
         let json = serde_json::to_string(plan).unwrap_or_else(|_| "[]".into());
-        let conn = self.db.conn();
+        let conn = self.db.write();
         conn.execute(
             "UPDATE tasks SET plan = ?1, updated_at = ?2 WHERE id = ?3",
             params![json, now_iso(), id],
@@ -307,7 +308,7 @@ impl TaskService {
     }
 
     fn set_result(&self, id: &str, result: &str) -> bool {
-        let conn = self.db.conn();
+        let conn = self.db.write();
         conn.execute(
             "UPDATE tasks SET result = ?1, status = 'done', updated_at = ?2 WHERE id = ?3",
             params![result, now_iso(), id],
@@ -317,7 +318,7 @@ impl TaskService {
     }
 
     fn set_error(&self, id: &str, error: &str) -> bool {
-        let conn = self.db.conn();
+        let conn = self.db.write();
         conn.execute(
             "UPDATE tasks SET error = ?1, status = 'error', updated_at = ?2 WHERE id = ?3",
             params![error, now_iso(), id],
@@ -331,7 +332,7 @@ impl TaskService {
     fn create_subtask(&self, task_id: &str, name: &str, instruction: &str) -> Result<String, String> {
         let id = Uuid::new_v4().to_string();
         let now = now_iso();
-        let conn = self.db.conn();
+        let conn = self.db.write();
         conn.execute(
             "INSERT INTO task_subtasks (id, task_id, name, instruction, status, result, error, created_at, updated_at) \
              VALUES (?1, ?2, ?3, ?4, 'running', '', '', ?5, ?5)",
@@ -348,7 +349,7 @@ impl TaskService {
         result: Option<&str>,
         error: Option<&str>,
     ) -> bool {
-        let conn = self.db.conn();
+        let conn = self.db.write();
         // 保持未提供字段不变:先读旧值
         let existing = conn
             .query_row(
@@ -371,9 +372,9 @@ impl TaskService {
     }
 
     fn list_subtasks(&self, task_id: &str) -> Vec<TaskSubtaskRecord> {
-        let conn = self.db.conn();
+        let conn = self.db.read().expect("获取只读连接失败");
         let mut stmt = conn
-            .prepare(
+            .prepare_cached(
                 "SELECT id, task_id, name, instruction, status, result, error, created_at, updated_at \
                  FROM task_subtasks WHERE task_id = ?1 ORDER BY created_at ASC",
             )

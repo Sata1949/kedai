@@ -529,6 +529,14 @@ impl WithStatus for Response {
     }
 }
 
+/// DB 阻塞任务失败统一 500 响应(2026-08 DB 并发改造:
+/// spawn_blocking JoinError / 连接池错误 / 服务内 String 错误)
+pub(crate) fn db_err(e: &str) -> Response {
+    Json(json!({ "error": e }))
+        .into_response()
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+}
+
 #[cfg(test)]
 mod resource_frame_tests {
     /// 资源界面宿主文档须为沙箱 iframe(无 allow-same-origin)提供 Cache API 兼容层。

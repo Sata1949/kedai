@@ -76,7 +76,7 @@ impl SkillService {
     }
 
     pub fn list(&self, only_enabled: bool) -> Vec<SkillRecord> {
-        let conn = self.db.conn();
+        let conn = self.db.read().expect("获取只读连接失败");
         let sql = if only_enabled {
             "SELECT id, name, description, content, enabled, created_at, allowed_tools, run_as_subagent, model FROM skills WHERE enabled = 1 ORDER BY name ASC"
         } else {
@@ -91,7 +91,7 @@ impl SkillService {
 
     /// 按名称查找(大小写不敏感,启用优先)
     pub fn get_by_name(&self, name: &str) -> Option<SkillRecord> {
-        let conn = self.db.conn();
+        let conn = self.db.read().ok()?;
         conn.query_row(
             "SELECT id, name, description, content, enabled, created_at, allowed_tools, run_as_subagent, model FROM skills WHERE lower(name) = lower(?1) LIMIT 1",
             params![name],
@@ -103,7 +103,7 @@ impl SkillService {
     }
 
     pub fn get(&self, id: &str) -> Option<SkillRecord> {
-        let conn = self.db.conn();
+        let conn = self.db.read().ok()?;
         conn.query_row(
             &format!("SELECT {SKILL_COLS} FROM skills WHERE id = ?1"),
             params![id],
@@ -116,7 +116,7 @@ impl SkillService {
 
     /// 导入(同名覆盖):返回导入/更新条数
     pub fn import(&self, items: Vec<SkillImport>) -> Result<usize, String> {
-        let conn = self.db.conn();
+        let conn = self.db.write();
         let mut count = 0usize;
         for it in items {
             let name = it.name.trim().to_string();
@@ -177,7 +177,7 @@ impl SkillService {
         let new_model = model
             .map(|s| s.trim().to_string())
             .unwrap_or(existing.model);
-        let conn = self.db.conn();
+        let conn = self.db.write();
         let n = conn
             .execute(
                 "UPDATE skills SET name = ?1, description = ?2, content = ?3, enabled = ?4, \
@@ -205,7 +205,7 @@ impl SkillService {
 
     pub fn delete(&self, id: &str) -> bool {
         self.db
-            .conn()
+            .write()
             .execute("DELETE FROM skills WHERE id = ?1", params![id])
             .map(|n| n > 0)
             .unwrap_or(false)

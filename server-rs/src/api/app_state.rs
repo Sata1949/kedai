@@ -295,4 +295,50 @@ impl AppState {
     pub fn clear_all_contracts(&self) {
         self.engine.contract_registry.clear();
     }
+
+    /// 在阻塞线程池执行只读 DB 闭包(2026-08 DB 并发改造:把同步 rusqlite 调用
+    /// 移出 tokio worker,避免阻塞事件循环)。闭包收到只读池连接;
+    /// 闭包内亦可调用持 Db 的 services 只读方法(它们各自从池取连接,互不冲突)。
+    pub async fn db_read<T, F>(&self, f: F) -> Result<T, String>
+    where
+        T: Send + 'static,
+        F: FnOnce(&rusqlite::Connection) -> Result<T, String> + Send + 'static,
+    {
+        let db = self.db.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = db.read()?;
+            f(&conn)
+        })
+        .await
+        .map_err(|e| format!("只读任务执行失败: {e}"))?
+    }
+
+    /// 在阻塞线程池执行写 DB 闭包。注意:闭包执行期间持有唯一写连接,
+    /// 不得再调用会重新获取写锁的 services 写方法(Mutex 非重入,会自死锁);
+    /// services 写方法请用 db_call(连接由服务内部按需获取)。
+    pub async fn db_write<T, F>(&self, f: F) -> Result<T, String>
+    where
+        T: Send + 'static,
+        F: FnOnce(&rusqlite::Connection) -> Result<T, String> + Send + 'static,
+    {
+        let db = self.db.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = db.write();
+            f(&conn)
+        })
+        .await
+        .map_err(|e| format!("写库任务执行失败: {e}"))?
+    }
+
+    /// 在阻塞线程池执行任意持 Db 的 services 同步调用(读或写不限;
+    /// 连接由服务方法内部按需获取,故无 db_write 的重入死锁约束)。
+    pub async fn db_call<T, F>(&self, f: F) -> Result<T, String>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> T + Send + 'static,
+    {
+        tokio::task::spawn_blocking(f)
+            .await
+            .map_err(|e| format!("DB 任务执行失败: {e}"))
+    }
 }

@@ -85,7 +85,7 @@ impl QuickReplyService {
 
     /// 列表(启用优先,按 name/position/sort_order 排序)
     pub fn list(&self, only_enabled: bool) -> Vec<QuickReplyRecord> {
-        let conn = self.db.conn();
+        let conn = self.db.read().expect("获取只读连接失败");
         let sql = if only_enabled {
             format!("SELECT {SELECT_COLS} FROM quick_replies WHERE enabled = 1 ORDER BY name, position, sort_order, id")
         } else {
@@ -112,7 +112,8 @@ impl QuickReplyService {
 
     pub fn get(&self, id: i64) -> Option<QuickReplyRecord> {
         self.db
-            .conn()
+            .read()
+            .ok()?
             .query_row(
                 &format!("SELECT {SELECT_COLS} FROM quick_replies WHERE id = ?1"),
                 params![id],
@@ -132,7 +133,7 @@ impl QuickReplyService {
         let now = now_iso();
         let id = self
             .db
-            .conn()
+            .write()
             .execute(
                 "INSERT INTO quick_replies (name, label, content, enabled, position, sort_order, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![r.name, r.label, r.content, r.enabled, r.position, r.sort_order, now, now],
@@ -160,7 +161,7 @@ impl QuickReplyService {
         // conn 作用域收窄:UPDATE 语句执行后立即释放锁,
         // 避免末尾 self.get(id) 再次 lock 同一 Mutex 造成自死锁
         let n = {
-            let conn = self.db.conn();
+            let conn = self.db.write();
             conn.execute(
                 "UPDATE quick_replies SET name = ?1, label = ?2, content = ?3, enabled = ?4, position = ?5, sort_order = ?6, updated_at = ?7 WHERE id = ?8",
                 params![name, r.label, r.content, r.enabled, r.position, r.sort_order, now, id],
@@ -175,7 +176,7 @@ impl QuickReplyService {
 
     pub fn delete(&self, id: i64) -> bool {
         self.db
-            .conn()
+            .write()
             .execute("DELETE FROM quick_replies WHERE id = ?1", params![id])
             .map(|n| n > 0)
             .unwrap_or(false)

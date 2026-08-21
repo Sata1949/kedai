@@ -515,7 +515,7 @@ impl AgentEngine {
                 llm_messages: &mut llm_messages,
                 total_usage: &mut total_usage,
             };
-            let ctx_data = self.collect_context(&req, &session_id, &mut rctx);
+            let ctx_data = self.collect_context(&req, &session_id, &mut rctx).await;
             let memory_touched = self.finalize_messages(&req, &session_id, &ctx_data, &mut rctx);
 
             let tool_ctx = ToolContext {
@@ -852,7 +852,7 @@ impl AgentEngine {
                 // 记入会话宏变量,下一轮模板可用 {{getvar::LAST_RECEIVE_TOKENS}} 读取。
                 self.record_receive_stats(&session_id, total_usage.completion_tokens, &clean_content);
                 // Token 累计统计:会话 + 全局
-                self.record_usage(&session_id, &total_usage);
+                self.record_usage(&session_id, &total_usage).await;
                 logger::agent_step(
                     &session_id,
                     "finish",
@@ -944,7 +944,16 @@ impl AgentEngine {
         if mode == "off" {
             return Err("上下文压缩模式为 off,请先在设置中改为 manual 或 auto".into());
         }
-        let history = self.sessions.get_messages(session_id);
+        // 同步 SQLite 读取挪进阻塞线程池(DB 并发改造),避免占用 tokio worker
+        let (history, compaction) = {
+            let sessions = self.sessions.clone();
+            let sid = session_id.to_string();
+            tokio::task::spawn_blocking(move || {
+                (sessions.get_messages(&sid), sessions.get_compaction(&sid))
+            })
+            .await
+            .map_err(|e| format!("读取会话历史失败: {e}"))?
+        };
         let Some(to_compact) = compaction_split(&history, keep_recent) else {
             return Ok(false);
         };
@@ -952,10 +961,7 @@ impl AgentEngine {
             return Ok(false);
         };
         // 增量边界:已有摘要时只压缩 (upto_old, upto] 新段;无新内容跳过
-        let (upto_old, old_summary) = self
-            .sessions
-            .get_compaction(session_id)
-            .unwrap_or((0, String::new()));
+        let (upto_old, old_summary) = compaction.unwrap_or((0, String::new()));
         if upto_old >= upto {
             return Ok(false);
         }
@@ -1011,7 +1017,19 @@ impl AgentEngine {
         if mode != "auto" {
             return;
         }
-        let history = self.sessions.get_messages(session_id);
+        // 同步 SQLite 读取挪进阻塞线程池(DB 并发改造)
+        let (history, compaction) = {
+            let sessions = self.sessions.clone();
+            let sid = session_id.to_string();
+            match tokio::task::spawn_blocking(move || {
+                (sessions.get_messages(&sid), sessions.get_compaction(&sid))
+            })
+            .await
+            {
+                Ok(v) => v,
+                Err(_) => return,
+            }
+        };
         if history.is_empty() {
             return;
         }
@@ -1033,10 +1051,7 @@ impl AgentEngine {
             return;
         };
         // 增量边界(改造 B):已有摘要时只压缩 (upto_old, upto] 新段,无新内容跳过
-        let (upto_old, old_summary) = self
-            .sessions
-            .get_compaction(session_id)
-            .unwrap_or((0, String::new()));
+        let (upto_old, old_summary) = compaction.unwrap_or((0, String::new()));
         if upto_old >= upto {
             return;
         }
@@ -1094,7 +1109,7 @@ impl AgentEngine {
     /// CollectedCtx 供消息构建、步骤循环与收尾使用;变量树初始化/渲染副作用就地生效
     /// (rctx.assistant_vars 为可变,条目分离与状态块注入同步更新)。
     /// 对应 run_body 内「构建 LLM 消息」段的收集部分;L2 中层定位:消息构建前的数据装配。
-    fn collect_context(
+    async fn collect_context(
         &self,
         req: &AgentRunRequest,
         session_id: &str,
@@ -1103,11 +1118,24 @@ impl AgentEngine {
         // 构建 LLM 消息(系统提示 + 历史;与 Node 版一致,history 不带 extra → system 全部跳过)
         // 开场白(first_mes)由 create_session/ensure_session 作为首条 assistant 消息写入会话,
         // 历史中天然包含,不再重复注入 system(避免同一段文本出现两次)
-        let character = self.characters.get(&req.character_id);
-        let history = self.sessions.get_messages(session_id);
+        // 同步 SQLite 读取(角色/历史/压缩摘要)合并挪进阻塞线程池(DB 并发改造)
+        let (character, history, compaction) = {
+            let characters = self.characters.clone();
+            let sessions = self.sessions.clone();
+            let character_id = req.character_id.clone();
+            let sid = session_id.to_string();
+            tokio::task::spawn_blocking(move || {
+                let character = characters.get(&character_id);
+                let history = sessions.get_messages(&sid);
+                let compaction = sessions.get_compaction(&sid);
+                (character, history, compaction)
+            })
+            .await
+            .unwrap_or((None, Vec::new(), None))
+        };
         // 历史压缩投影:读已存在的摘要(若曾压缩过),模型可见历史 = 摘要 + 截止点之后的原文。
         // 原文 history 保持不变,继续供 EJS 渲染与世界书分组读取完整历史。
-        let projected: ProjectedHistory = project_history(&history, self.sessions.get_compaction(session_id));
+        let projected: ProjectedHistory = project_history(&history, compaction);
         // snip 零成本裁剪档(缓存感知管线):auto 模式且历史 token 达 SNIP_THRESHOLD(0.6,
         // 先于 LLM 摘要档 0.8)时,把投影中陈旧的超长消息替换为占位符(尾部 2 条原文保留、
         // 错误特征保留)。只影响模型可见投影,不改数据库原文,与可逆投影设计一致。
@@ -1152,10 +1180,17 @@ impl AgentEngine {
         if let Some(raw) = character.as_ref().and_then(|c| c.data_raw.as_ref()) {
             entries.extend(crate::parsing::world_book::character_book_entries(raw));
         }
-        entries.extend(
-            self.world_books
-                .collect_entries_for_character(&req.character_id),
-        );
+        // 世界书条目读取(同步 SQLite)挪进阻塞线程池(DB 并发改造)
+        let world_entries_for_char = {
+            let world_books = self.world_books.clone();
+            let character_id = req.character_id.clone();
+            tokio::task::spawn_blocking(move || {
+                world_books.collect_entries_for_character(&character_id)
+            })
+            .await
+            .unwrap_or_default()
+        };
+        entries.extend(world_entries_for_char);
         // 酒馆助手变量树:会话级持久化;空则从 [InitVar] 条目初始化并落库
         if rctx.assistant_vars.is_empty() {
             *rctx.assistant_vars = collect_init_vars(&entries);
@@ -1170,7 +1205,15 @@ impl AgentEngine {
                     crate::parsing::assistant::AssistantVars::from_value(tree);
             }
             if !rctx.assistant_vars.is_empty() {
-                if let Err(e) = self.sessions.save_assistant_vars(session_id, rctx.assistant_vars) {
+                // 初始变量树落库(同步 SQLite 写)挪进阻塞线程池(DB 并发改造)
+                let save_result = {
+                    let sessions = self.sessions.clone();
+                    let sid = session_id.to_string();
+                    let vars = rctx.assistant_vars.clone();
+                    tokio::task::spawn_blocking(move || sessions.save_assistant_vars(&sid, &vars))
+                        .await
+                };
+                if let Ok(Err(e)) | Err(e) = save_result.map_err(|e| e.to_string()) {
                     logger::warn(
                         "初始变量树落库失败",
                         &[
@@ -2555,10 +2598,22 @@ impl AgentEngine {
     /// Token 累计统计落库:会话级 session_usage 累加 + 全局 global_usage 累加,
     /// 与 Node 版 usage 持久化语义一致。
     /// 对应 run_body 内「Token 累计统计」段;L2 中层定位:落库侧的单一职责封装。
-    fn record_usage(&self, session_id: &str, total_usage: &TokenUsage) {
+    /// 同步 SQLite 写入经 spawn_blocking 挪进阻塞线程池(DB 并发改造),逻辑不变。
+    async fn record_usage(&self, session_id: &str, total_usage: &TokenUsage) {
+        let db = self.db.clone();
+        let session_id = session_id.to_string();
+        let usage = total_usage.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            Self::record_usage_sync(&db, &session_id, &usage);
+        })
+        .await;
+    }
+
+    /// record_usage 的同步实现(阻塞线程内执行)
+    fn record_usage_sync(db: &Db, session_id: &str, total_usage: &TokenUsage) {
         let total = total_usage.prompt_tokens + total_usage.completion_tokens;
         let now = crate::models::db::now_iso();
-        let conn = self.db.conn();
+        let conn = db.write();
         let _ = conn.execute(
             "INSERT INTO session_usage (session_id, total_prompt, total_completion, total_tokens, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5)

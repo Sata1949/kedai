@@ -88,16 +88,27 @@ pub async fn plan(State(state): State<Arc<AppState>>, Json(body): Json<PlanBody>
         .map(|t| t.name.clone())
         .collect();
 
-    // 若有 session_id 且存在 Agent 会话记录,附上历史状态
-    let history = body.session_id.as_ref().and_then(|sid| {
-        state.agent_sessions.find_by_session(sid).map(|a| {
-            json!({
-                "state": a.state,
-                "plan": a.plan,
-                "step_index": a.step_index,
-            })
-        })
-    });
+    // 若有 session_id 且存在 Agent 会话记录,附上历史状态(同步 DB 读走阻塞线程池)
+    let history = match &body.session_id {
+        Some(sid) => {
+            let svc = state.agent_sessions.clone();
+            let sid = sid.clone();
+            state
+                .db_call(move || {
+                    svc.find_by_session(&sid).map(|a| {
+                        json!({
+                            "state": a.state,
+                            "plan": a.plan,
+                            "step_index": a.step_index,
+                        })
+                    })
+                })
+                .await
+                .ok()
+                .flatten()
+        }
+        None => None,
+    };
 
     Json(json!({
         "plan": plan,

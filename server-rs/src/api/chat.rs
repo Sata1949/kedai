@@ -1,7 +1,7 @@
 // 聊天路由(核心):/api/chat/send(SSE)、/api/chat/stop
 use crate::agents::engine::AgentRunRequest;
 use crate::api::app_state::AppState;
-use crate::api::WithStatus;
+use crate::api::{db_err, WithStatus};
 use crate::models::types::{GenerationParams, PlanStep, SseEvent};
 use crate::services::prompt_inject_service::{output_budget_for_word_count, InjectMode};
 use crate::utils::logger;
@@ -70,13 +70,21 @@ pub async fn send(State(state): State<Arc<AppState>>, Json(body): Json<SendBody>
                     .into_response()
                     .with_status(StatusCode::BAD_REQUEST);
             };
-            match state.sessions.ensure_session(cid) {
-                Ok(s) => {
-                    // 无会话直接发消息的路径:同样补上角色开场白(若有且会话为空)
-                    crate::api::sessions::seed_first_message(&state, &s.id, cid, 0);
-                    s.id
-                }
-                Err(e) => return err_json(&e, StatusCode::INTERNAL_SERVER_ERROR),
+            // 无会话直接发消息的路径:ensure_session + 补开场白一并挪进阻塞线程(DB 并发改造)
+            let svc = state.sessions.clone();
+            let characters = state.characters.clone();
+            let cid = cid.clone();
+            match state
+                .db_call(move || {
+                    let s = svc.ensure_session(&cid)?;
+                    crate::api::sessions::seed_first_message(&characters, &svc, &s.id, &cid, 0);
+                    Ok::<_, String>(s)
+                })
+                .await
+            {
+                Err(e) => return db_err(&e),
+                Ok(Ok(s)) => s.id,
+                Ok(Err(e)) => return err_json(&e, StatusCode::INTERNAL_SERVER_ERROR),
             }
         }
     };

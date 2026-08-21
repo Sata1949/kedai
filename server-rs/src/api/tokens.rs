@@ -44,7 +44,14 @@ pub async fn session_total(
     State(state): State<Arc<AppState>>,
     Query(q): Query<SessionTotalQuery>,
 ) -> Response {
-    let conn = state.db.conn();
+    let conn = match state.db.read() {
+        Ok(c) => c,
+        Err(e) => {
+            return Json(json!({ "error": e }))
+                .into_response()
+                .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    };
     let row: Option<(i64, i64, i64)> = conn
         .query_row(
             "SELECT total_prompt, total_completion, total_tokens FROM session_usage WHERE session_id = ?1",
@@ -72,7 +79,14 @@ pub async fn session_total(
 
 /// GET /api/token/global-total:返回全局累计 token
 pub async fn global_total(State(state): State<Arc<AppState>>) -> Response {
-    let conn = state.db.conn();
+    let conn = match state.db.read() {
+        Ok(c) => c,
+        Err(e) => {
+            return Json(json!({ "error": e }))
+                .into_response()
+                .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    };
     let row: Option<(i64, i64, i64)> = conn
         .query_row(
             "SELECT total_prompt, total_completion, total_tokens FROM global_usage WHERE id = 1",
@@ -100,7 +114,7 @@ pub async fn global_total(State(state): State<Arc<AppState>>) -> Response {
 pub fn accumulate_usage(state: &AppState, session_id: &str, prompt: i64, completion: i64) {
     let total = prompt + completion;
     let now = crate::models::db::now_iso();
-    let conn = state.db.conn();
+    let conn = state.db.write();
     // 会话累计
     let _ = conn.execute(
         "INSERT INTO session_usage (session_id, total_prompt, total_completion, total_tokens, updated_at)

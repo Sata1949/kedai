@@ -5,7 +5,7 @@
 //   PATCH  /api/memory/:id       编辑 content / selected
 //   DELETE /api/memory/:id       删除
 use crate::api::app_state::AppState;
-use crate::api::WithStatus;
+use crate::api::{db_err, WithStatus};
 use crate::models::types::{GenerationParams, LlmMessage, ToolChoice};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -102,7 +102,11 @@ pub async fn list(State(state): State<Arc<AppState>>, Query(query): Query<ListQu
             .into_response()
             .with_status(StatusCode::BAD_REQUEST);
     }
-    let memories = state.memory.list(&character_id);
+    let svc = state.memory.clone();
+    let memories = match state.db_call(move || svc.list(&character_id)).await {
+        Ok(v) => v,
+        Err(e) => return db_err(&e),
+    };
     Json(json!({ "memories": memories })).into_response()
 }
 
@@ -119,11 +123,17 @@ pub async fn create(State(state): State<Arc<AppState>>, Json(body): Json<CreateB
             .into_response()
             .with_status(StatusCode::BAD_REQUEST);
     }
-    match state.memory.create_manual(&character_id, &body.content) {
-        Ok(entry) => Json(json!({ "ok": true, "memory": entry }))
+    let svc = state.memory.clone();
+    let content = body.content.clone();
+    match state
+        .db_call(move || svc.create_manual(&character_id, &content))
+        .await
+    {
+        Err(e) => db_err(&e),
+        Ok(Ok(entry)) => Json(json!({ "ok": true, "memory": entry }))
             .into_response()
             .with_status(StatusCode::CREATED),
-        Err(e) => Json(json!({ "error": e }))
+        Ok(Err(e)) => Json(json!({ "error": e }))
             .into_response()
             .with_status(StatusCode::BAD_REQUEST),
     }
@@ -142,12 +152,14 @@ pub async fn update(
                 .with_status(StatusCode::BAD_REQUEST);
         }
     }
-    match state
-        .memory
-        .update(id, body.content.as_deref(), body.selected)
-    {
-        Some(entry) => Json(json!({ "ok": true, "memory": entry })).into_response(),
-        None => Json(json!({ "error": format!("记忆 {id} 不存在或更新被拒绝") }))
+    let svc = state.memory.clone();
+    let updated = state
+        .db_call(move || svc.update(id, body.content.as_deref(), body.selected))
+        .await;
+    match updated {
+        Err(e) => db_err(&e),
+        Ok(Some(entry)) => Json(json!({ "ok": true, "memory": entry })).into_response(),
+        Ok(None) => Json(json!({ "error": format!("记忆 {id} 不存在或更新被拒绝") }))
             .into_response()
             .with_status(StatusCode::NOT_FOUND),
     }
@@ -155,11 +167,12 @@ pub async fn update(
 
 /// DELETE /api/memory/:id
 pub async fn delete(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> Response {
-    if state.memory.delete(id) {
-        StatusCode::NO_CONTENT.into_response()
-    } else {
-        Json(json!({ "error": format!("记忆 {id} 不存在") }))
+    let svc = state.memory.clone();
+    match state.db_call(move || svc.delete(id)).await {
+        Err(e) => db_err(&e),
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => Json(json!({ "error": format!("记忆 {id} 不存在") }))
             .into_response()
-            .with_status(StatusCode::NOT_FOUND)
+            .with_status(StatusCode::NOT_FOUND),
     }
 }

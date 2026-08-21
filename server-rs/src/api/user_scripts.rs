@@ -2,7 +2,7 @@
 // scope=global(owner_id 恒为空)或 character(需 character_id 指定角色卡)。
 // 角色级脚本存于角色卡 data_raw.extensions.tavern_helper(随卡导出),兼容 ST 卡格式。
 use crate::api::app_state::AppState;
-use crate::api::WithStatus;
+use crate::api::{db_err, WithStatus};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -41,9 +41,16 @@ pub async fn get_tree(
                 .with_status(StatusCode::BAD_REQUEST)
         }
     };
-    match state.user_scripts.get_tree(scope, owner) {
-        Ok(trees) => Json(json!({ "scope": scope, "trees": trees })).into_response(),
-        Err(e) => Json(json!({ "error": e }))
+    let svc = state.user_scripts.clone();
+    let scope_owned = scope.to_string();
+    let owner_owned = owner.to_string();
+    match state
+        .db_call(move || svc.get_tree(&scope_owned, &owner_owned))
+        .await
+    {
+        Err(e) => db_err(&e),
+        Ok(Ok(trees)) => Json(json!({ "scope": scope, "trees": trees })).into_response(),
+        Ok(Err(e)) => Json(json!({ "error": e }))
             .into_response()
             .with_status(StatusCode::NOT_FOUND),
     }
@@ -77,9 +84,17 @@ pub async fn save_tree(
                 .with_status(StatusCode::BAD_REQUEST)
         }
     };
-    match state.user_scripts.save_tree(scope, owner, &body.trees) {
-        Ok(()) => Json(json!({ "ok": true, "scope": scope })).into_response(),
-        Err(e) => Json(json!({ "error": e }))
+    let svc = state.user_scripts.clone();
+    let scope_owned = scope.to_string();
+    let owner_owned = owner.to_string();
+    let trees = body.trees.clone();
+    match state
+        .db_call(move || svc.save_tree(&scope_owned, &owner_owned, &trees))
+        .await
+    {
+        Err(e) => db_err(&e),
+        Ok(Ok(())) => Json(json!({ "ok": true, "scope": scope })).into_response(),
+        Ok(Err(e)) => Json(json!({ "error": e }))
             .into_response()
             .with_status(StatusCode::BAD_REQUEST),
     }

@@ -39,7 +39,7 @@ impl KaleidoStateService {
         &self,
         session_id: &str,
     ) -> Result<Option<(u32, KaleidoMeta)>, String> {
-        let conn = self.db.conn();
+        let conn = self.db.read()?;
         let row = conn
             .query_row(
                 "SELECT contract_version, meta_json FROM kaleido_state WHERE session_id = ?1",
@@ -69,7 +69,7 @@ impl KaleidoStateService {
         &self,
         session_id: &str,
     ) -> Result<Option<KaleidoStateRow>, String> {
-        let conn = self.db.conn();
+        let conn = self.db.read()?;
         let row = conn
             .query_row(
                 "SELECT contract_version, stat_data, meta_json, revision_seq, revision_hash, updated_at \
@@ -114,7 +114,7 @@ impl KaleidoStateService {
         meta: &KaleidoMeta,
         entries: &mut [ChangelogEntry],
     ) -> Result<(), String> {
-        let mut conn = self.db.conn();
+        let mut conn = self.db.write();
         let tx = conn
             .transaction()
             .map_err(|e| format!("开启契约运行态事务失败: {e}"))?;
@@ -205,7 +205,7 @@ impl KaleidoStateService {
     /// 供会话删除 API 清理孤儿数据(kaleido 两表无 FK 级联,须显式清理)。
     /// 两 DELETE 同事务:半清理(日志空而 state 残留)会让 recover 重放语义失真。
     pub fn delete_for_session(&self, session_id: &str) -> Result<(), String> {
-        let mut conn = self.db.conn();
+        let mut conn = self.db.write();
         let tx = conn
             .transaction()
             .map_err(|e| format!("开启契约运行态清理事务失败: {e}"))?;
@@ -231,7 +231,7 @@ impl KaleidoStateService {
         limit: usize,
     ) -> Result<Vec<ChangelogEntry>, String> {
         let limit = limit.clamp(1, 1000) as i64;
-        let conn = self.db.conn();
+        let conn = self.db.read()?;
         let mut stmt = conn
             .prepare(
                 "SELECT entry_json FROM kaleido_changelog WHERE session_id = ?1 \

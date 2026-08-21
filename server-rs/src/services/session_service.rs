@@ -54,7 +54,7 @@ impl SessionService {
         let now = now_iso();
         let id = Uuid::new_v4().to_string();
         let title = title.unwrap_or("新会话");
-        let conn = self.db.conn();
+        let conn = self.db.write();
         conn.execute(
             "INSERT INTO sessions (id, character_id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)",
             params![id, character_id, title, now],
@@ -70,9 +70,9 @@ impl SessionService {
     }
 
     pub fn list_by_character(&self, character_id: &str) -> Vec<SessionRecord> {
-        let conn = self.db.conn();
+        let conn = self.db.read().expect("获取只读连接失败");
         let mut stmt = conn
-            .prepare("SELECT id, character_id, title, created_at, updated_at FROM sessions WHERE character_id = ?1 ORDER BY updated_at DESC")
+            .prepare_cached("SELECT id, character_id, title, created_at, updated_at FROM sessions WHERE character_id = ?1 ORDER BY updated_at DESC")
             .unwrap();
         stmt.query_map(params![character_id], row_to_session)
             .unwrap()
@@ -82,7 +82,7 @@ impl SessionService {
 
     /// 全部会话(联表角色名),按 updated_at DESC —— 聊天记录面板
     pub fn list_all(&self) -> Vec<SessionWithCharacter> {
-        let conn = self.db.conn();
+        let conn = self.db.read().expect("获取只读连接失败");
         let mut stmt = conn
             .prepare(
                 "SELECT s.id, s.character_id, s.title, s.created_at, s.updated_at, c.chara_name \
@@ -99,7 +99,8 @@ impl SessionService {
     /// 会话消息数量(聊天记录面板显示)
     pub fn message_count(&self, session_id: &str) -> i64 {
         self.db
-            .conn()
+            .read()
+            .expect("获取只读连接失败")
             .query_row(
                 "SELECT COUNT(*) FROM messages WHERE session_id = ?1",
                 params![session_id],
@@ -109,7 +110,7 @@ impl SessionService {
     }
 
     pub fn get(&self, id: &str) -> Option<SessionRecord> {
-        let conn = self.db.conn();
+        let conn = self.db.read().ok()?;
         conn.query_row(
             "SELECT id, character_id, title, created_at, updated_at FROM sessions WHERE id = ?1",
             params![id],
@@ -121,7 +122,7 @@ impl SessionService {
     }
 
     pub fn touch(&self, id: &str) {
-        let conn = self.db.conn();
+        let conn = self.db.write();
         let _ = conn.execute(
             "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
             params![now_iso(), id],
@@ -129,7 +130,7 @@ impl SessionService {
     }
 
     pub fn delete(&self, id: &str) -> bool {
-        let conn = self.db.conn();
+        let conn = self.db.write();
         conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])
             .map(|n| n > 0)
             .unwrap_or(false)
@@ -155,7 +156,7 @@ impl SessionService {
         let extra_str = serde_json::to_string(&extra).unwrap_or_else(|_| "{}".to_string());
         // 注意:conn(MutexGuard)必须在调用 self.touch(再取锁)之前释放
         let id = {
-            let conn = self.db.conn();
+            let conn = self.db.write();
             conn.execute(
                 "INSERT INTO messages (session_id, role, content, extra, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![session_id, role, content, extra_str, now],
@@ -175,9 +176,9 @@ impl SessionService {
     }
 
     pub fn get_messages(&self, session_id: &str) -> Vec<MessageRecord> {
-        let conn = self.db.conn();
+        let conn = self.db.read().expect("获取只读连接失败");
         let mut stmt = conn
-            .prepare("SELECT id, session_id, role, content, extra, created_at FROM messages WHERE session_id = ?1 ORDER BY id ASC")
+            .prepare_cached("SELECT id, session_id, role, content, extra, created_at FROM messages WHERE session_id = ?1 ORDER BY id ASC")
             .unwrap();
         stmt.query_map(params![session_id], row_to_message)
             .unwrap()
@@ -194,7 +195,7 @@ impl SessionService {
         summary: &str,
         model: &str,
     ) -> Result<(), String> {
-        let conn = self.db.conn();
+        let conn = self.db.write();
         conn.execute(
             "INSERT INTO session_compactions (session_id, upto_message_id, summary, model, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)
@@ -210,7 +211,7 @@ impl SessionService {
 
     /// 读取该会话最新一条压缩摘要(按 upto_message_id 最大),返回 (upto_message_id, summary)。
     pub fn get_compaction(&self, session_id: &str) -> Option<(i64, String)> {
-        let conn = self.db.conn();
+        let conn = self.db.read().ok()?;
         conn.query_row(
             "SELECT upto_message_id, summary FROM session_compactions WHERE session_id = ?1 ORDER BY upto_message_id DESC LIMIT 1",
             params![session_id],
@@ -223,7 +224,7 @@ impl SessionService {
 
     /// 删除会话的压缩摘要(可逆:删摘要即恢复完整原文历史)。
     pub fn delete_compaction(&self, session_id: &str) -> Result<(), String> {
-        let conn = self.db.conn();
+        let conn = self.db.write();
         conn.execute(
             "DELETE FROM session_compactions WHERE session_id = ?1",
             params![session_id],
@@ -241,7 +242,7 @@ impl SessionService {
         payload: &str,
         model: &str,
     ) -> Result<(), String> {
-        let conn = self.db.conn();
+        let conn = self.db.write();
         conn.execute(
             "INSERT INTO llm_requests (session_id, run_id, seq, payload, model, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -267,7 +268,7 @@ impl SessionService {
         cache_hit_tokens: i64,
         cache_miss_tokens: i64,
     ) -> Result<(), String> {
-        let conn = self.db.conn();
+        let conn = self.db.write();
         let updated = conn
             .execute(
                 "UPDATE llm_requests SET
@@ -315,7 +316,7 @@ impl SessionService {
         if keep < 0 {
             return Ok(());
         }
-        let conn = self.db.conn();
+        let conn = self.db.write();
         conn.execute(
             "DELETE FROM llm_requests WHERE session_id = ?1 AND id NOT IN (
                SELECT id FROM llm_requests WHERE session_id = ?1 ORDER BY id DESC LIMIT ?2
@@ -344,7 +345,7 @@ impl SessionService {
         let extra_str = serde_json::to_string(&Value::Object(extra)).ok()?;
         // 注意:conn(MutexGuard)必须在再次调用 self.get_message 之前释放,避免重入死锁
         let affected = {
-            let conn = self.db.conn();
+            let conn = self.db.write();
             conn.execute(
                 "UPDATE messages SET content = ?1, extra = ?2 WHERE session_id = ?3 AND id = ?4",
                 params![content, extra_str, session_id, id],
@@ -366,7 +367,7 @@ impl SessionService {
         content: &str,
     ) -> Option<MessageRecord> {
         let affected = {
-            let conn = self.db.conn();
+            let conn = self.db.write();
             conn.execute(
                 "UPDATE messages SET content = ?1 WHERE session_id = ?2 AND id = ?3",
                 params![content, session_id, id],
@@ -390,7 +391,7 @@ impl SessionService {
     ) -> Option<MessageRecord> {
         let extra_str = serde_json::to_string(&extra).ok()?;
         let affected = {
-            let conn = self.db.conn();
+            let conn = self.db.write();
             conn.execute(
                 "UPDATE messages SET content = ?1, extra = ?2 WHERE session_id = ?3 AND id = ?4",
                 params![content, extra_str, session_id, id],
@@ -404,7 +405,7 @@ impl SessionService {
     }
 
     pub fn get_message(&self, session_id: &str, id: i64) -> Option<MessageRecord> {
-        let conn = self.db.conn();
+        let conn = self.db.read().ok()?;
         conn.query_row(
             "SELECT id, session_id, role, content, extra, created_at FROM messages WHERE session_id = ?1 AND id = ?2",
             params![session_id, id],
@@ -432,7 +433,7 @@ impl SessionService {
         }
         let extra_str = serde_json::to_string(&extra).ok()?;
         {
-            let conn = self.db.conn();
+            let conn = self.db.write();
             let n = conn
                 .execute(
                     "UPDATE messages SET extra = ?1 WHERE session_id = ?2 AND id = ?3",
@@ -447,7 +448,7 @@ impl SessionService {
     }
 
     pub fn delete_message(&self, session_id: &str, id: i64) -> bool {
-        let conn = self.db.conn();
+        let conn = self.db.write();
         conn.execute(
             "DELETE FROM messages WHERE session_id = ?1 AND id = ?2",
             params![session_id, id],
@@ -459,7 +460,7 @@ impl SessionService {
     /// 截断:删除该会话中 id 大于 anchor_id 的全部消息(anchor 本身保留)。
     /// 用于「编辑用户消息后重发」:保留被编辑消息、丢弃其后的所有上下文。
     pub fn truncate_messages_after(&self, session_id: &str, anchor_id: i64) -> usize {
-        let conn = self.db.conn();
+        let conn = self.db.write();
         conn.execute(
             "DELETE FROM messages WHERE session_id = ?1 AND id > ?2",
             params![session_id, anchor_id],
@@ -468,7 +469,7 @@ impl SessionService {
     }
 
     pub fn clear_messages(&self, session_id: &str) {
-        let conn = self.db.conn();
+        let conn = self.db.write();
         let _ = conn.execute(
             "DELETE FROM messages WHERE session_id = ?1",
             params![session_id],
@@ -511,7 +512,10 @@ impl SessionService {
 
     /// 读取会话全部变量 → HashMap
     pub fn load_session_vars(&self, session_id: &str) -> HashMap<String, String> {
-        let conn = self.db.conn();
+        let conn = match self.db.read() {
+            Ok(c) => c,
+            Err(_) => return HashMap::new(),
+        };
         let mut stmt =
             match conn.prepare("SELECT key, value FROM session_vars WHERE session_id = ?1") {
                 Ok(s) => s,
@@ -532,7 +536,7 @@ impl SessionService {
 
     /// 全量覆写会话变量(宏展开后由引擎调用);返回写入条数
     pub fn save_session_vars(&self, session_id: &str, vars: &HashMap<String, String>) -> usize {
-        let conn = self.db.conn();
+        let conn = self.db.write();
         let now = now_iso();
         let _ = conn.execute(
             "DELETE FROM session_vars WHERE session_id = ?1",
@@ -553,7 +557,7 @@ impl SessionService {
 
     /// 删除会话全部变量
     pub fn clear_session_vars(&self, session_id: &str) {
-        let conn = self.db.conn();
+        let conn = self.db.write();
         let _ = conn.execute(
             "DELETE FROM session_vars WHERE session_id = ?1",
             params![session_id],
@@ -567,7 +571,9 @@ impl SessionService {
         &self,
         session_id: &str,
     ) -> crate::parsing::assistant::AssistantVars {
-        let conn = self.db.conn();
+        let Ok(conn) = self.db.read() else {
+            return crate::parsing::assistant::AssistantVars::new();
+        };
         let raw: Option<String> = conn
             .query_row(
                 "SELECT data_raw FROM session_assistant_vars WHERE session_id = ?1",
@@ -589,7 +595,7 @@ impl SessionService {
         session_id: &str,
         vars: &crate::parsing::assistant::AssistantVars,
     ) -> Result<(), String> {
-        let conn = self.db.conn();
+        let conn = self.db.write();
         let now = now_iso();
         conn.execute(
             "INSERT OR REPLACE INTO session_assistant_vars (session_id, data_raw, updated_at) VALUES (?1, ?2, ?3)",
@@ -601,7 +607,7 @@ impl SessionService {
 
     /// 删除会话酒馆助手变量树
     pub fn clear_assistant_vars(&self, session_id: &str) {
-        let conn = self.db.conn();
+        let conn = self.db.write();
         let _ = conn.execute(
             "DELETE FROM session_assistant_vars WHERE session_id = ?1",
             params![session_id],
@@ -612,7 +618,7 @@ impl SessionService {
 
     /// 读取指定作用域原始数据(JSON);无记录返回 None。
     pub fn load_scope_variables(&self, scope: &str, scope_id: &str) -> Option<serde_json::Value> {
-        let conn = self.db.conn();
+        let conn = self.db.read().ok()?;
         let raw: Option<String> = conn
             .query_row(
                 "SELECT data_raw FROM scope_variables WHERE scope = ?1 AND scope_id = ?2",
@@ -625,7 +631,7 @@ impl SessionService {
 
     /// 保存指定作用域原始数据(整树覆写;INSERT OR REPLACE)。
     pub fn save_scope_variables(&self, scope: &str, scope_id: &str, data: &serde_json::Value) {
-        let conn = self.db.conn();
+        let conn = self.db.write();
         let now = now_iso();
         let _ = conn.execute(
             "INSERT OR REPLACE INTO scope_variables (scope, scope_id, data_raw, updated_at) VALUES (?1, ?2, ?3, ?4)",
@@ -638,7 +644,7 @@ impl SessionService {
         &self,
         entries: Vec<(String, String, String)>,
     ) -> usize {
-        let conn = self.db.conn();
+        let conn = self.db.write();
         let now = now_iso();
         let mut count = 0;
         for (scope, scope_id, data_raw) in entries {
@@ -655,7 +661,7 @@ impl SessionService {
 
     /// 删除指定作用域记录(作用域数据重置)。
     pub fn clear_scope_variables(&self, scope: &str, scope_id: &str) {
-        let conn = self.db.conn();
+        let conn = self.db.write();
         let _ = conn.execute(
             "DELETE FROM scope_variables WHERE scope = ?1 AND scope_id = ?2",
             params![scope, scope_id],
@@ -675,7 +681,7 @@ mod tests {
         let svc = SessionService::new(db);
         // llm_requests/session_compactions 均外键引用 sessions,测试需先建 character + session
         {
-            let conn = svc.db.conn();
+            let conn = svc.db.write();
             conn.execute(
                 "INSERT INTO characters (id, name, chara_name, description, file_path, data_raw, created_at)
                  VALUES ('c1', 'c', 'c', '', '', '{}', '')",
@@ -698,7 +704,7 @@ mod tests {
         svc.save_llm_request("s1", "run1", 0, r#"{"role":"system"}"#, "m").unwrap();
 
         let db = svc.db.clone();
-        let conn = db.conn();
+        let conn = db.write();
         let (payload, model): (String, String) = conn
             .query_row(
                 "SELECT payload, model FROM llm_requests WHERE session_id='s1' AND seq=0",
@@ -722,7 +728,7 @@ mod tests {
         svc.prune_llm_requests("s1", 2).unwrap();
 
         let db = svc.db.clone();
-        let conn = db.conn();
+        let conn = db.write();
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM llm_requests WHERE session_id='s1'", [], |r| r.get(0))
             .unwrap();
@@ -749,7 +755,7 @@ mod tests {
             .unwrap();
 
         let db = svc.db.clone();
-        let conn = db.conn();
+        let conn = db.write();
         let (hit, miss, prompt, completion, payload): (i64, i64, i64, i64, String) = conn
             .query_row(
                 "SELECT prompt_cache_hit_tokens, prompt_cache_miss_tokens, prompt_tokens, completion_tokens, payload
@@ -781,7 +787,7 @@ mod tests {
             .unwrap();
 
         let db = svc.db.clone();
-        let conn = db.conn();
+        let conn = db.write();
         let (hit, miss, payload): (i64, i64, String) = conn
             .query_row(
                 "SELECT prompt_cache_hit_tokens, prompt_cache_miss_tokens, payload

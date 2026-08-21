@@ -110,7 +110,7 @@ mod tests {
 
     /// 直接插入/更新带契约的角色卡(经测试自持 Db 句柄,不动生产代码)。
     fn upsert_character(db: &Db, id: &str, contract: Option<&str>) {
-        let conn = db.conn();
+        let conn = db.write();
         let extensions = contract.map(|c| {
             json!({ "nlkaleido": serde_json::from_str::<serde_json::Value>(c).unwrap() })
         });

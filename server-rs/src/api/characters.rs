@@ -1,6 +1,7 @@
 // 角色卡路由:/api/characters(列表/上传/详情/更新/删除)
+// services 同步 DB 调用均经 state.db_call 挪进阻塞线程池(DB 并发改造)
 use crate::api::app_state::AppState;
-use crate::api::WithStatus;
+use crate::api::{db_err, WithStatus};
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -23,7 +24,11 @@ pub struct UpdateBody {
 }
 
 pub async fn list(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let chars = state.characters.list();
+    let svc = state.characters.clone();
+    let chars = state
+        .db_call(move || svc.list())
+        .await
+        .expect("读取角色列表任务失败");
     Json(json!({ "characters": chars }))
 }
 
@@ -55,13 +60,18 @@ pub async fn upload(
             .into_response()
             .with_status(StatusCode::BAD_REQUEST);
     }
-    match state.characters.upload(&file_bytes, &file_name) {
-        Ok(c) => {
+    let svc = state.characters.clone();
+    let upload_result = state
+        .db_call(move || svc.upload(&file_bytes, &file_name))
+        .await;
+    match upload_result {
+        Err(e) => db_err(&e),
+        Ok(Ok(c)) => {
             // 契约缓存失效:上传即覆盖同名片,data_raw(契约来源)可能变化
             state.invalidate_contracts_for_character(&c.id);
             Json(c).into_response().with_status(StatusCode::CREATED)
         }
-        Err(e) => Json(json!({ "error": e }))
+        Ok(Err(e)) => Json(json!({ "error": e }))
             .into_response()
             .with_status(StatusCode::BAD_REQUEST),
     }
@@ -154,8 +164,11 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 pub async fn get(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
-    match state.characters.get(&id) {
-        Some(mut c) => {
+    let svc = state.characters.clone();
+    let found = state.db_call(move || svc.get(&id)).await;
+    match found {
+        Err(e) => db_err(&e),
+        Ok(Some(mut c)) => {
             // 角色卡内嵌插件检测(酒馆助手等):基于 data_raw 的 character_book
             if let Some(raw) = c.data_raw.as_ref() {
                 let plugins = crate::parsing::assistant::detect_card_plugins(raw);
@@ -167,7 +180,7 @@ pub async fn get(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> 
             }
             Json(c).into_response()
         }
-        None => Json(json!({ "error": "角色卡不存在" }))
+        Ok(None) => Json(json!({ "error": "角色卡不存在" }))
             .into_response()
             .with_status(StatusCode::NOT_FOUND),
     }
@@ -178,30 +191,41 @@ pub async fn update(
     Path(id): Path<String>,
     Json(body): Json<UpdateBody>,
 ) -> Response {
-    match state.characters.update(
-        &id,
-        body.chara_name.as_deref(),
-        body.description.as_deref(),
-        body.first_mes.as_deref(),
-        body.alternate_greetings.as_deref(),
-    ) {
-        Some(c) => {
-            state.invalidate_contracts_for_character(&id);
+    let svc = state.characters.clone();
+    let updated = state
+        .db_call(move || {
+            svc.update(
+                &id,
+                body.chara_name.as_deref(),
+                body.description.as_deref(),
+                body.first_mes.as_deref(),
+                body.alternate_greetings.as_deref(),
+            )
+        })
+        .await;
+    match updated {
+        Err(e) => db_err(&e),
+        Ok(Some(c)) => {
+            state.invalidate_contracts_for_character(&c.id);
             Json(c).into_response()
         }
-        None => Json(json!({ "error": "角色卡不存在" }))
+        Ok(None) => Json(json!({ "error": "角色卡不存在" }))
             .into_response()
             .with_status(StatusCode::NOT_FOUND),
     }
 }
 
 pub async fn delete(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
-    if state.characters.delete(&id) {
-        state.invalidate_contracts_for_character(&id);
-        StatusCode::NO_CONTENT.into_response()
-    } else {
-        Json(json!({ "error": "角色卡不存在" }))
+    let svc = state.characters.clone();
+    let del_id = id.clone();
+    match state.db_call(move || svc.delete(&del_id)).await {
+        Err(e) => db_err(&e),
+        Ok(true) => {
+            state.invalidate_contracts_for_character(&id);
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => Json(json!({ "error": "角色卡不存在" }))
             .into_response()
-            .with_status(StatusCode::NOT_FOUND)
+            .with_status(StatusCode::NOT_FOUND),
     }
 }

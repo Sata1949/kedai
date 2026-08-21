@@ -5,7 +5,7 @@
 //   GET  /api/variable/state        运行态整行(stat_data/meta/revision)
 //   GET  /api/variable/changelog    逐 op 变更流水(最新在前)
 use crate::api::app_state::AppState;
-use crate::api::WithStatus;
+use crate::api::{db_err, WithStatus};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -63,19 +63,27 @@ pub async fn update(
     if body.patches.is_empty() {
         return bad_request("patches 不能为空");
     }
-    // 会话 → 角色(契约按角色加载)
-    let Some(session) = state.sessions.get(&body.session_id) else {
-        return not_found("会话不存在");
-    };
+    // 会话 → 角色(契约按角色加载);会话读取与 apply 落库合并进同一阻塞任务(DB 并发改造)
     let apply = crate::services::variable_apply::VariableApplyService::new(
         state.sessions.clone(),
         state.contract_registry.clone(),
         state.kaleido_state.clone(),
     );
-    let writer = body.writer.unwrap_or_else(|| "external".into());
-    match apply.apply(&body.session_id, &session.character_id, &body.patches, &writer) {
-        Err(e) => bad_request(&e),
-        Ok(outcome) => {
+    let sessions = state.sessions.clone();
+    let sid = body.session_id.clone();
+    let patches = body.patches.clone();
+    let writer = body.writer.clone().unwrap_or_else(|| "external".into());
+    let applied = state
+        .db_call(move || {
+            let session = sessions.get(&sid)?;
+            Some(apply.apply(&sid, &session.character_id, &patches, &writer))
+        })
+        .await;
+    match applied {
+        Err(e) => db_err(&e),
+        Ok(None) => not_found("会话不存在"),
+        Ok(Some(Err(e))) => bad_request(&e),
+        Ok(Some(Ok(outcome))) => {
             let mut resp = json!({
                 "ok": outcome.ok,
                 "stat_data": outcome.tree,
@@ -101,15 +109,23 @@ pub async fn get_state(
     let Some(sid) = q.session_id else {
         return bad_request("缺少 session_id 查询参数");
     };
-    if state.sessions.get(&sid).is_none() {
-        return not_found("会话不存在");
-    }
-    match state.kaleido_state.load_state(&sid) {
-        Err(e) => Json(json!({ "error": e }))
+    let sessions = state.sessions.clone();
+    let kaleido = state.kaleido_state.clone();
+    let sid_c = sid.clone();
+    let loaded = state
+        .db_call(move || {
+            sessions.get(&sid_c)?;
+            Some(kaleido.load_state(&sid_c))
+        })
+        .await;
+    match loaded {
+        Err(e) => db_err(&e),
+        Ok(None) => not_found("会话不存在"),
+        Ok(Some(Err(e))) => Json(json!({ "error": e }))
             .into_response()
             .with_status(StatusCode::INTERNAL_SERVER_ERROR),
-        Ok(None) => not_found("该会话尚无契约运行态"),
-        Ok(Some(row)) => {
+        Ok(Some(Ok(None))) => not_found("该会话尚无契约运行态"),
+        Ok(Some(Ok(Some(row)))) => {
             // 库内 JSON 损坏属异常态,显式 500 让前端可排查(静默空对象会掩盖)
             let parse = |raw: &str, field: &str| -> Result<Value, String> {
                 serde_json::from_str(raw)
@@ -148,14 +164,23 @@ pub async fn changelog(
     let Some(sid) = q.session_id else {
         return bad_request("缺少 session_id 查询参数");
     };
-    if state.sessions.get(&sid).is_none() {
-        return not_found("会话不存在");
-    }
-    match state.kaleido_state.list_entries(&sid, q.limit.unwrap_or(50)) {
-        Err(e) => Json(json!({ "error": e }))
+    let sessions = state.sessions.clone();
+    let kaleido = state.kaleido_state.clone();
+    let sid_c = sid.clone();
+    let limit = q.limit.unwrap_or(50);
+    let listed = state
+        .db_call(move || {
+            sessions.get(&sid_c)?;
+            Some(kaleido.list_entries(&sid_c, limit))
+        })
+        .await;
+    match listed {
+        Err(e) => db_err(&e),
+        Ok(None) => not_found("会话不存在"),
+        Ok(Some(Err(e))) => Json(json!({ "error": e }))
             .into_response()
             .with_status(StatusCode::INTERNAL_SERVER_ERROR),
-        Ok(entries) => {
+        Ok(Some(Ok(entries))) => {
             // 单条序列化失败跳过该条而非整表清空(ChangelogEntry 实际不会失败)
             let items = entries
                 .iter()
@@ -216,7 +241,7 @@ mod tests {
         let data_raw = json!({ "extensions": { "nlkaleido": contract }, "name": "契约角色" });
         // 单连接 Mutex 非重入:insert 的守卫须在调 session 服务前释放(防死锁)
         {
-            let conn = state.db.conn();
+            let conn = state.db.write();
             conn.execute(
                 "INSERT INTO characters (id, name, chara_name, description, file_path, data_raw, created_at) \
                  VALUES (?1, ?2, ?2, '', '', ?3, ?4)",
@@ -378,7 +403,7 @@ mod tests {
         let (router, state) = app();
         let cid = uuid::Uuid::new_v4().to_string();
         {
-            let conn = state.db.conn();
+            let conn = state.db.write();
             conn.execute(
                 "INSERT INTO characters (id, name, chara_name, description, file_path, data_raw, created_at) \
                  VALUES (?1, ?2, ?2, '', '', '{}', ?3)",

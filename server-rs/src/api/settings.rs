@@ -624,7 +624,31 @@ pub async fn prompt_preview(
     }
 
     if let Some(character_id) = query.character_id.as_deref() {
-        if let Some(character) = state.characters.get(character_id) {
+        // 角色卡 + 世界书条目读取(同步 SQLite)合并进同一阻塞任务(DB 并发改造)
+        let cid = character_id.to_string();
+        let characters = state.characters.clone();
+        let world_books = state.world_books.clone();
+        let character = state
+            .db_call(move || {
+                let character = characters.get(&cid);
+                let entries = character
+                    .as_ref()
+                    .map(|_| world_books.collect_entries_for_character(&cid))
+                    .unwrap_or_default();
+                (character, entries)
+            })
+            .await
+            .unwrap_or((None, Vec::new()));
+        if let (Some(character), wb_entries) = character {
+            let entries = {
+                let mut v = character
+                    .data_raw
+                    .as_ref()
+                    .map(crate::parsing::world_book::character_book_entries)
+                    .unwrap_or_default();
+                v.extend(wb_entries);
+                v
+            };
             push_preview_layer(
                 &mut layers,
                 "character_card",
@@ -634,16 +658,6 @@ pub async fn prompt_preview(
                     "角色名：{}\n角色描述：{}",
                     character.chara_name, character.description
                 ),
-            );
-            let mut entries = character
-                .data_raw
-                .as_ref()
-                .map(crate::parsing::world_book::character_book_entries)
-                .unwrap_or_default();
-            entries.extend(
-                state
-                    .world_books
-                    .collect_entries_for_character(character_id),
             );
             let summary = entries
                 .iter()
@@ -673,9 +687,14 @@ pub async fn prompt_preview(
     }
 
     if let Some(session_id) = query.session_id.as_deref() {
-        let summary = state
-            .sessions
-            .get_messages(session_id)
+        // 历史摘要读取(同步 SQLite)挪进阻塞线程池(DB 并发改造)
+        let sessions = state.sessions.clone();
+        let sid = session_id.to_string();
+        let history = state
+            .db_call(move || sessions.get_messages(&sid))
+            .await
+            .unwrap_or_default();
+        let summary = history
             .iter()
             .map(|message| {
                 format!(
