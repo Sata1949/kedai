@@ -3,15 +3,17 @@
 import { ref, nextTick, watch, computed, onMounted, onBeforeUnmount } from 'vue';
 import { storeToRefs } from 'pinia';
 import { useAppStore } from '../store';
-import { renderScopedScripts, stripHiddenPlaceholders, hasStatusPlaceholderScript, buildMessageRenderText, extractBodyLoadUrl, buildRemoteResourceHtml } from '../render';
-import { renderMarkdown } from '../markdown';
+import { renderScopedScripts, hasStatusPlaceholderScript, buildMessageRenderText } from '../render';
 import { installMvuGlobals } from '../mvu/host';
 import { ScriptRunner } from '../scriptRunner';
 import { executeCurrentMessageScripts as scheduleCurrentMessageScripts } from '../chatMessageScriptScheduler';
-import { isRenderCodeBlock, buildRenderDocument, RENDER_PANEL_CHANNEL } from '../renderPanel';
+import { buildRenderDocument, RENDER_PANEL_CHANNEL } from '../renderPanel';
 import { authorizedFetch, BASE } from '../api/client';
 import { computeHitRate } from '../contextStats';
+import { useVirtualMessages } from '../composables/useVirtualMessages';
+import type { UiMessage } from '../sseReducer';
 import ChatInput from './ChatInput.vue';
+import ChatMessageItem from './ChatMessageItem.vue';
 
 const store = useAppStore();
 const {
@@ -41,18 +43,6 @@ function statusBar(m: { extra?: Record<string, unknown> }): string | null {
   return typeof bar === 'string' && bar.trim() ? bar : null;
 }
 
-/** 当前 swipe 版本序号(1-based;无多版本返回 0,供角标与切换按钮) */
-function swipePosition(m: { extra?: Record<string, unknown> }): number {
-  const idx = m.extra?.swipe_id;
-  return typeof idx === 'number' && Number.isInteger(idx) ? idx + 1 : 0;
-}
-
-/** swipe 版本总数(无多版本返回 0,隐藏切换 UI) */
-function swipeTotal(m: { extra?: Record<string, unknown> }): number {
-  const arr = m.extra?.swipes;
-  return Array.isArray(arr) ? arr.length : 0;
-}
-
 /**
  * 消息渲染文本:正文 + 状态栏占位符。
  * 带状态栏(extra.status_bar)且角色卡存在 HTML 状态栏脚本时,追加 <StatusPlaceHolderImpl/>
@@ -61,6 +51,34 @@ function swipeTotal(m: { extra?: Record<string, unknown> }): number {
  */
 function renderTextFor(m: { id: number; content: string; content_display?: string; extra?: Record<string, unknown> }): string {
   return buildMessageRenderText(displayText(m), statusBar(m), hasStatusScript.value);
+}
+
+/**
+ * 脚本块解析缓存(流式性能优化):调度器触发时会为每条历史 assistant 消息执行
+ * renderScopedScripts(全量正则 + sanitize,重活),流式期间每个 token 触发一次,
+ * 历史消息解析结果却不变。按 (scopeId + scriptHash + 渲染文本) 记忆结果,
+ * 历史消息零重算;消息数组被替换(会话切换/刷新历史)或脚本数组引用变化时整体失效。
+ */
+let scriptBlocksCache = new Map<string, ReturnType<typeof renderScopedScripts>>();
+let scriptBlocksOwner: unknown = null;
+let scriptBlocksScripts: unknown = null;
+
+function renderScriptsCached(
+  text: string,
+  scripts: Parameters<typeof renderScopedScripts>[1],
+  scopeId: string,
+): ReturnType<typeof renderScopedScripts> {
+  if (scriptBlocksOwner !== messages.value || scriptBlocksScripts !== scripts) {
+    scriptBlocksCache = new Map();
+    scriptBlocksOwner = messages.value;
+    scriptBlocksScripts = scripts;
+  }
+  const key = `${scopeId}\n${currentScriptHash.value}\n${text}`;
+  const hit = scriptBlocksCache.get(key);
+  if (hit !== undefined || scriptBlocksCache.has(key)) return hit ?? null;
+  const scoped = renderScopedScripts(text, scripts, scopeId);
+  scriptBlocksCache.set(key, scoped);
+  return scoped;
 }
 
 // 脚本执行:非流式 assistant 消息渲染完成后,按 scopeId 定位容器并执行脚本
@@ -78,7 +96,7 @@ async function executeCurrentMessageScripts(): Promise<void> {
     getScrollArea: () => scrollArea.value,
     afterRender: nextTick,
     renderText: renderTextFor,
-    renderScripts: renderScopedScripts,
+    renderScripts: renderScriptsCached,
     runMessageScripts: (...args) => scriptRunner.runMessageScripts(...args),
   });
 }
@@ -100,35 +118,7 @@ onBeforeUnmount(() => {
 });
 
 /**
- * 消息渲染面板占位 HTML(TH-render 等价物,阶段五 5b):消息正文含整页 HTML
- * 代码块(含 <html 与 <head/<body 标记)时,包面板壳(标题栏 + 折叠按钮 +
- * iframe 宿主文档 + 说明),面板 HTML 由 hydrateRenderPanels 经 postMessage 投递。
- * code 存入 data-kd-render-code 属性(HTML 转义),宿主用 textContent 取回原文。
- * seed 用于生成稳定容器 id(同一消息重渲染复用,避免 iframe 重复创建)。
- */
-function buildRenderPanelHtml(code: string, seed: string): string {
-  const id = `sv-rp-${seed}`;
-  const escCode = code
-    .replace(/&/g, '&amp;')
-    .replace(/"/g, '&quot;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-  // 随机 nonce 放 URL fragment(不随 HTTP 请求发送),宿主文档 ready/boot 双向认证
-  const nonce = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
-  return (
-    `<div class="sv-render-panel" id="${escapeAttr(id)}" data-kd-render-panel="1" data-kd-render-nonce="${escapeAttr(nonce)}" data-kd-render-code="${escCode}">` +
-    `<div class="sv-render-panel-head">` +
-    `<span class="sv-render-panel-title">渲染面板</span>` +
-    `<button type="button" class="sv-render-panel-toggle" title="折叠回代码块">收起 ▾</button>` +
-    `</div>` +
-    `<iframe class="sv-render-panel-frame" data-kd-render-frame="1" sandbox="allow-scripts" ` +
-    `referrerpolicy="no-referrer" src="/render-frame.html#${escapeAttr(nonce)}" title="渲染面板"></iframe>` +
-    `<div class="sv-render-panel-note">面板 HTML 由消息正文代码块渲染,已隔离加载(无网络、无宿主访问)。</div>` +
-    `</div>`
-  );
-}
-
-/**
+ * 渲染面板占位 HTML 已随消息渲染迁入 ChatMessageItem(渲染缓存)。
  * 渲染面板投递(阶段五 5b):面板 iframe 加载后,宿主经 postMessage 投递面板 HTML,
  * 宿主文档 appendChild 注入执行(仿 hydrateRemoteResources 的 ready/boot 双向认证 +
  * 超时兜底;面板 HTML 直接内嵌于 data-kd-render-code,无后端代理)。
@@ -317,18 +307,59 @@ async function hydrateRemoteResources(): Promise<void> {
   }
 }
 
+/**
+ * 消息列表变更纪元:中部消息被编辑保存 / swipe 切换(经子组件 mutated 事件)时 +1。
+ * O(1) 签名只跟踪尾部消息,中部内容变更借纪元显式触发脚本重跑与滚动,语义与原全量签名一致。
+ */
+const listEpoch = ref(0);
+
+/** 编辑中的消息 id(单编辑语义;编辑文本由子组件本地管理,击键不触发列表重渲染) */
+const editingId = ref<number | null>(null);
+
 // 消息变化时自动滚到底部
+// 签名 O(1):仅读「长度 + 最后一条消息 + 生成态 + 编辑态 + 纪元」,
+// 替代原 messages.map(displayText).join('|') 的全量遍历(流式每 token 拼全量字符串)。
 watch(
-  () => messages.value.map((m) => displayText(m)).join('|') + generating.value,
+  () => {
+    const arr = messages.value;
+    const last = arr[arr.length - 1];
+    return [
+      arr.length,
+      last?.id ?? 0,
+      last?.streaming ? 1 : 0,
+      typeof last?.extra?.swipe_id === 'number' ? last.extra.swipe_id : -1,
+      last ? displayText(last) : '',
+      generating.value,
+      editingId.value ?? 0,
+      listEpoch.value,
+    ].join('\u0001');
+  },
   async () => {
     await nextTick();
     if (scrollArea.value) scrollArea.value.scrollTop = scrollArea.value.scrollHeight;
   },
 );
 
+// 渲染后副作用(脚本执行 + 资源卡片/渲染面板投递)
+// 签名同样 O(1):最后一条消息渲染文本 + HTML 开关 + 脚本版本(hash/长度/授权)+ 编辑态 + 纪元;
+// 历史消息内容不可变(编辑/swipe 走纪元),脚本列表变化经 hash/长度捕获。
 watch(
-  () =>
-    messages.value.map((m) => renderTextFor(m)).join('|') + renderHtml.value + currentScripts.value.length + currentScriptHash.value + currentScriptAuthorized.value,
+  () => {
+    const arr = messages.value;
+    const last = arr[arr.length - 1];
+    return [
+      arr.length,
+      last?.id ?? 0,
+      last?.streaming ? 1 : 0,
+      last ? renderTextFor(last) : '',
+      renderHtml.value,
+      currentScripts.value.length,
+      currentScriptHash.value,
+      currentScriptAuthorized.value,
+      editingId.value ?? 0,
+      listEpoch.value,
+    ].join('\u0001');
+  },
   async () => {
     await nextTick();
     await Promise.allSettled([executeCurrentMessageScripts(), hydrateRemoteResources(), hydrateRenderPanels()]);
@@ -378,41 +409,8 @@ const avatarUrl = computed(() => {
   return `/api/avatars/${c.avatar_path.split(/[\\/]/).pop()}`;
 });
 
-/**
- * assistant 消息渲染:
- *  - 远程资源界面优先:消息含 `$('body').load('https://…')`(作者下载资源界面,
- *    如「板板鸭」模板开场)→ 渲染为沙箱 iframe 资源卡片,独立于 HTML 开关
- *    (iframe 隔离加载,不执行到主页面,安全性与 markdown 相当)。
- *  - HTML 渲染开启:脚本命中走 scoped HTML(样式作用域化 + 脚本受控执行);
- *    未命中走 markdown。UpdateVariable 块由 renderScopedScripts 内剥离。
- *  - HTML 渲染关闭:先剥隐藏占位符(<StatusPlaceHolderImpl/> 等),再 markdown。
- */
-function assistantHtml(m: { id: number; content: string; content_display?: string; extra?: Record<string, unknown> }): string {
-  const text = renderTextFor(m);
-  const resourceUrl = extractBodyLoadUrl(text);
-  if (resourceUrl) {
-    return buildRemoteResourceHtml(resourceUrl, `m${m.id}`);
-  }
-  // 渲染面板(TH-render 等价物):消息正文含整页 HTML 代码块(<html + <head/<body)
-  // 时优先于 scoped 注入(两者互斥;面板独立 iframe 隔离执行,不依赖 HTML 渲染开关)
-  if (isRenderCodeBlock(text)) {
-    return buildRenderPanelHtml(text, `m${m.id}`);
-  }
-  if (renderHtml.value && currentScripts.value.length > 0) {
-    const scoped = renderScopedScripts(text, currentScripts.value, `msg-${m.id}`);
-    if (scoped) return scoped.html;
-  }
-  const clean = stripHiddenPlaceholders(text, currentScripts.value);
-  return renderMarkdown(clean);
-}
-
-/** 状态栏是否以纯文本气泡展示:HTML 渲染开启且角色卡有状态栏脚本时,
- *  状态栏已由 HTML 卡片承载,隐藏纯文本气泡避免重复。 */
-function statusBarVisible(m: { extra?: Record<string, unknown> }): boolean {
-  if (!statusBar(m)) return false;
-  if (renderHtml.value && hasStatusScript.value) return false;
-  return true;
-}
+// assistant 消息 HTML 渲染逻辑已迁入 ChatMessageItem(按消息 computed 缓存);
+// 本组件仅保留列表编排、脚本调度与滚动行为。
 
 function confirmScriptAuthorization(): void {
   if (currentScriptAuthorized.value) {
@@ -430,33 +428,26 @@ function confirmScriptAuthorization(): void {
   if (accepted) store.authorizeCurrentCharacterScripts();
 }
 
-/** 纯文本展示(用户消息 / system) */
-function messagePlain(content: string): string {
-  return content || ' ';
+/** 进入编辑态(编辑文本在 ChatMessageItem 本地维护,进入时用消息原文初始化) */
+function startEdit(m: UiMessage): void {
+  editingId.value = m.id;
 }
 
-/** 编辑消息 */
-const editingId = ref<number | null>(null);
-const editingText = ref('');
-function startEdit(m: { id: number; content: string }): void {
-  editingId.value = m.id;
-  editingText.value = m.content;
-}
-async function saveEdit(resend = false): Promise<void> {
-  if (editingId.value === null || !currentSessionId.value) return;
-  const id = editingId.value;
-  const text = editingText.value;
+/** 保存编辑:resend=true 时保存并丢弃其后所有消息重新生成;成功后推进列表纪元(触发脚本重跑) */
+async function saveEdit(payload: { id: number; text: string; resend: boolean }): Promise<void> {
+  if (!currentSessionId.value) return;
   try {
-    if (resend) {
-      await store.resendMessage(id, text);
+    if (payload.resend) {
+      await store.resendMessage(payload.id, payload.text);
     } else {
-      await store.updateMessage(id, text);
+      await store.updateMessage(payload.id, payload.text);
     }
   } catch (err) {
     alert(`编辑失败:${(err as Error).message}`);
     return;
   }
   editingId.value = null;
+  listEpoch.value += 1;
 }
 
 // 切换会话/角色时清空消息编辑草稿:ChatWindow 常驻挂载,若不清除,
@@ -465,9 +456,24 @@ watch(
   [currentSessionId, currentCharacterId],
   () => {
     editingId.value = null;
-    editingText.value = '';
   },
 );
+
+/**
+ * 消息列表虚拟滚动(轻量实现,无依赖):长会话(>80 条)时视口缓冲区外的消息
+ * 渲染为等高占位 div(实测高度缓存/角色估算),进入缓冲区再真实挂载;
+ * 尾部 30 条常驻真实挂载,流式自动吸底行为不变。行挂载状态变化后补跑
+ * 脚本执行与资源/面板水合(新挂载的消息可能含脚本容器或 iframe)。
+ */
+const vm = useVirtualMessages({
+  messages,
+  scrollArea,
+  pinnedId: editingId,
+  resetKey: currentSessionId,
+  onRowsChanged: () => {
+    void Promise.allSettled([executeCurrentMessageScripts(), hydrateRemoteResources(), hydrateRenderPanels()]);
+  },
+});
 </script>
 
 <template>
@@ -571,92 +577,30 @@ watch(
         </p>
       </div>
 
-      <!-- 消息列表 -->
-      <template v-for="m in messages" :key="m.id">
-        <div v-if="m.role === 'user'" class="sv-msg user">
-          <!-- 编辑态 -->
-          <div v-if="editingId === m.id" class="sv-edit-box">
-            <div class="sv-edit-label">编辑用户消息</div>
-            <textarea v-model="editingText" rows="5"></textarea>
-            <div class="sv-edit-actions">
-              <button class="sv-btn ghost sv-btn-sm" @click="editingId = null">取消</button>
-              <button class="sv-btn ghost sv-btn-sm" @click="saveEdit()">保存</button>
-              <button class="sv-btn primary sv-btn-sm" title="保存修改并丢弃其后所有消息,重新生成" @click="saveEdit(true)">
-                保存并重发
-              </button>
-            </div>
-          </div>
-          <!-- 展示态 -->
-          <template v-else>
-            <div class="sv-msg-bubble" :class="{ 'sv-stream-cursor': m.streaming }">
-              {{ messagePlain(displayText(m)) }}
-            </div>
-            <div v-if="!m.streaming" class="sv-msg-actions">
-              <button class="sv-msg-action" @click="startEdit(m)">编辑</button>
-              <button class="sv-msg-action" title="丢弃其后所有消息,以本条内容重新生成" @click="store.resendMessage(m.id)">
-                重发
-              </button>
-              <button class="sv-msg-action" @click="store.removeMessage(m.id)">删除</button>
-            </div>
-          </template>
-        </div>
-        <div v-else-if="m.role === 'assistant'" class="sv-msg assistant">
-          <span class="sv-avatar char">
-            <img v-if="avatarUrl" :src="avatarUrl" alt="" />
-            <template v-else>{{ currentCharacterName.charAt(0) }}</template>
-          </span>
-          <div class="min-w-0">
-            <div class="sv-msg-name">{{ currentCharacterName }}</div>
-
-            <!-- 编辑态 -->
-            <div v-if="editingId === m.id" class="sv-edit-box">
-              <div class="sv-edit-label">编辑消息 · {{ currentCharacterName }}</div>
-              <textarea v-model="editingText" rows="6"></textarea>
-              <div class="sv-edit-actions">
-                <button class="sv-btn ghost sv-btn-sm" @click="editingId = null">取消</button>
-                <button class="sv-btn primary sv-btn-sm" @click="saveEdit()">保存</button>
-              </div>
-            </div>
-
-            <!-- 展示态 -->
-            <template v-else>
-              <div
-                class="sv-msg-bubble sv-msg-md"
-                :class="{ 'sv-stream-cursor': m.streaming }"
-                v-html="assistantHtml(m)"
-              ></div>
-              <div v-if="statusBarVisible(m)" class="sv-status-bar">{{ statusBar(m) }}</div>
-              <div v-if="!m.streaming" class="sv-msg-actions">
-                <!-- 阶段六 6f:多版本切换(◀ n/N ▶)+ 生成新版本;单版本不显示切换 -->
-                <template v-if="swipeTotal(m) > 1">
-                  <button
-                    class="sv-swipe-btn"
-                    :disabled="swipePosition(m) <= 1"
-                    title="上一个版本"
-                    @click="store.swipeMessage(m.id, swipePosition(m) - 2)"
-                  >◀</button>
-                  <span class="sv-swipe-count">{{ swipePosition(m) }}/{{ swipeTotal(m) }}</span>
-                  <button
-                    class="sv-swipe-btn"
-                    :disabled="swipePosition(m) >= swipeTotal(m)"
-                    title="下一个版本"
-                    @click="store.swipeMessage(m.id, swipePosition(m))"
-                  >▶</button>
-                </template>
-                <button
-                  class="sv-msg-action"
-                  title="保留本条,生成新版本(原内容并入版本列表)"
-                  @click="store.regenerateMessage(m.id)"
-                >生成新版本</button>
-                <button class="sv-msg-action" @click="startEdit(m)">编辑</button>
-                <button class="sv-msg-action" @click="store.removeMessage(m.id)">删除</button>
-              </div>
-            </template>
-          </div>
-        </div>
-        <div v-else class="sv-msg system">
-          <div class="sv-msg-bubble">{{ displayText(m) }}</div>
-        </div>
+      <!-- 消息列表(渲染缓存:每条消息独立子组件,流式仅重算当前消息;
+           props 未变的子组件在父重渲染时自动跳过;长会话虚拟滚动:缓冲区外渲染等高占位) -->
+      <template v-for="(m, i) in messages" :key="m.id">
+        <div
+          v-if="!vm.isActive(m.id, i)"
+          class="sv-msg-ph"
+          :style="vm.placeholderStyle(m)"
+          :ref="(el) => vm.bindRow(m.id, el)"
+        ></div>
+        <ChatMessageItem
+          v-else
+          :ref="(inst) => vm.bindRow(m.id, inst)"
+          :m="m"
+          :editing="editingId === m.id"
+          :avatar-url="avatarUrl"
+          :character-name="currentCharacterName"
+          :render-html="renderHtml"
+          :scripts="currentScripts"
+          :script-hash="currentScriptHash"
+          @start-edit="startEdit"
+          @save-edit="saveEdit"
+          @cancel-edit="editingId = null"
+          @mutated="listEpoch += 1"
+        />
       </template>
 
       <!-- 思考中占位 -->

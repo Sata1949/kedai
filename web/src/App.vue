@@ -1,25 +1,31 @@
 <script setup lang="ts">
 // 根组件:左侧功能区 + 中间消息区 + 右侧 Agent 抽屉 + 启动动画
-import { onMounted, onUnmounted, watch } from 'vue';
+// 弹窗懒加载(前端性能优化):13 个弹窗/浮层组件改 defineAsyncComponent,
+// 首屏 bundle 不再包含其实现,首次打开对应弹窗时才加载 chunk;
+// <Transition name="sv-modal"> 包裹与 v-if 条件保持不变(开合过渡语义不变)。
+import { defineAsyncComponent, onMounted, onUnmounted, watch } from 'vue';
 import { useAppStore } from './store';
 import Sidebar from './components/Sidebar.vue';
 import ChatWindow from './components/ChatWindow.vue';
 import TaskBoard from './components/TaskBoard.vue';
 import AgentPanel from './components/AgentPanel.vue';
 import SplashScreen from './components/SplashScreen.vue';
-import SettingsHub from './components/SettingsHub.vue';
-import WorldBooksModal from './components/WorldBooksModal.vue';
-import ChatRecords from './components/ChatRecords.vue';
-import PluginsModal from './components/PluginsModal.vue';
-import SkillsModal from './components/SkillsModal.vue';
-import ContractsModal from './components/ContractsModal.vue';
-import PromptManager from './components/PromptManager.vue';
-import ScriptsModal from './components/ScriptsModal.vue';
-import MacrosModal from './components/MacrosModal.vue';
-import DevToolsModal from './components/DevToolsModal.vue';
-import OptimizeModal from './components/OptimizeModal.vue';
-import QuickRepliesModal from './components/QuickRepliesModal.vue';
-import AudioPlayer from './components/AudioPlayer.vue';
+
+// ===== 懒加载弹窗(各自/分组拆 chunk,见 vite.config.ts manualChunks) =====
+const SettingsHub = defineAsyncComponent(() => import('./components/SettingsHub.vue'));
+const WorldBooksModal = defineAsyncComponent(() => import('./components/WorldBooksModal.vue'));
+const ChatRecords = defineAsyncComponent(() => import('./components/ChatRecords.vue'));
+const PluginsModal = defineAsyncComponent(() => import('./components/PluginsModal.vue'));
+const SkillsModal = defineAsyncComponent(() => import('./components/SkillsModal.vue'));
+const ContractsModal = defineAsyncComponent(() => import('./components/ContractsModal.vue'));
+const PromptManager = defineAsyncComponent(() => import('./components/PromptManager.vue'));
+const ScriptsModal = defineAsyncComponent(() => import('./components/ScriptsModal.vue'));
+const MacrosModal = defineAsyncComponent(() => import('./components/MacrosModal.vue'));
+const DevToolsModal = defineAsyncComponent(() => import('./components/DevToolsModal.vue'));
+const OptimizeModal = defineAsyncComponent(() => import('./components/OptimizeModal.vue'));
+const QuickRepliesModal = defineAsyncComponent(() => import('./components/QuickRepliesModal.vue'));
+// 音频播放器:右下角浮层,非首屏(默认收起为开关按钮),一并懒加载
+const AudioPlayer = defineAsyncComponent(() => import('./components/AudioPlayer.vue'));
 
 const store = useAppStore();
 
@@ -40,13 +46,21 @@ function onHashChange(): void {
 }
 
 onMounted(() => {
-  void store.loadCharacters();
-  void store.testConnection();
-  void store.loadModel();
-  void store.loadModels();
-  void store.loadSettings();
-  // 刷新后停留在任务模式时,补齐任务列表加载(loadSettings 已按 appMode 读对应设置)
-  if (store.appMode === 'task') void store.loadTasks();
+  // 启动加载竞态修复:loadTasks 依赖 loadSettings 按 appMode 写入的运行期设置,
+  // 显式串行(loadSettings 完成后再 loadTasks),消除「并行发射后不管」的时序竞争。
+  // 其余 4 个 load 保持并行;聚合错误提示:任一失败在 console 汇总(连接失败同时由
+  // testConnection 落入 connStatus,UI 已有展示机制,不新增 UI),不阻塞其余加载。
+  const parallelLoads = [store.loadCharacters(), store.testConnection(), store.loadModel(), store.loadModels()];
+  void Promise.allSettled(parallelLoads).then((results) => {
+    const failed = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+    if (failed.length > 0) {
+      console.error(`[kedai] 启动加载 ${failed.length}/${parallelLoads.length} 项失败`, failed.map((f) => f.reason));
+    }
+  });
+  void store.loadSettings().then(() => {
+    // 刷新后停留在任务模式时,补齐任务列表加载(loadSettings 已按 appMode 读对应设置)
+    if (store.appMode === 'task') void store.loadTasks();
+  });
   if (shouldOpenSettings()) store.settingsOpen = true;
   window.addEventListener('hashchange', onHashChange);
 });
