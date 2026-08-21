@@ -1,5 +1,5 @@
 // SSE 流式聊天(streamChat)
-import { BASE, authorizedFetch, request } from './client';
+import { BASE, apiErrorMessage, authorizedFetch, request } from './client';
 import type { AgentMode, SseEvent, TokenUsage } from './types';
 
 export type SseHandler = (event: SseEvent) => void;
@@ -118,9 +118,11 @@ export function streamChat(
         signal: controller.signal,
       });
       if (!res.ok || !res.body) {
-        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        const body = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
         // 失败必须发 finish(空 content),否则 store 的 generating 永远不复位,UI 卡在生成中
-        onEvent({ type: 'step', step: '请求失败', detail: body.error ?? `HTTP ${res.status}` });
+        // 提示口径与 request() 一致:按结构化 code 分类(见 client.ts apiErrorMessage)
+        const code = body.code ?? (res.status === 401 ? 'UNAUTHORIZED' : undefined);
+        onEvent({ type: 'step', step: '请求失败', detail: apiErrorMessage(res.status, code, body.error) });
         onEvent({ type: 'finish', usage: emptyUsage(), content: '' });
         return;
       }

@@ -1,6 +1,7 @@
 // API 路由组装 + health + 头像静态服务 + SPA 回退
 // 路由表按域拆至 routes/ 子模块;静态文档与 SPA 回退在 static_files.rs;
-// 响应工具(WithStatus/db_err)在 util.rs,经下方再导出保持 crate::api::* 路径不变。
+// 响应工具(WithStatus/db_err)在 util.rs,经下方再导出保持 crate::api::* 路径不变;
+// 结构化错误码(ErrorCode/err_with_code)在 errors.rs,同样经下方再导出。
 pub mod agent;
 pub mod agent_flows;
 pub mod app_state;
@@ -32,9 +33,11 @@ pub mod world_books;
 
 pub(crate) mod routes;
 pub(crate) mod static_files;
+mod errors;
 mod util;
 
 pub use util::WithStatus;
+pub(crate) use errors::{code_for_status, err_with_code, ErrorCode};
 pub(crate) use util::db_err;
 
 use crate::api::app_state::AppState;

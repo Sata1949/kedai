@@ -1,6 +1,7 @@
 // 子智能体任务服务(agentgo / agentend / todo / read 轮询)
 // 状态:pending → running → done | error | ended(agentend 取消)
 // 取消机制:内存 watch channel,后台生成任务把它作为 abort 信号
+use super::log_query_failure;
 use crate::models::db::{now_iso, Db};
 use crate::models::types::AgentSubtaskRecord;
 use rusqlite::{params, OptionalExtension};
@@ -86,13 +87,17 @@ impl AgentSubtaskService {
 
     pub fn list_by_session(&self, session_id: &str) -> Vec<AgentSubtaskRecord> {
         let conn = self.db.read().expect("获取只读连接失败");
-        let mut stmt = conn
+        let mut stmt = match conn
             .prepare("SELECT id, session_id, character_id, name, instruction, status, result, error, created_at, updated_at FROM agent_subtasks WHERE session_id = ?1 ORDER BY created_at ASC")
-            .unwrap();
-        stmt.query_map(params![session_id], row_to_subtask)
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .collect()
+        {
+            Ok(s) => s,
+            Err(e) => return log_query_failure("子任务列表 prepare", e),
+        };
+        let query = stmt.query_map(params![session_id], row_to_subtask);
+        match query {
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(e) => log_query_failure("子任务列表 query_map", e),
+        }
     }
 
     /// 更新状态 + 可选结果/错误;返回更新后的记录

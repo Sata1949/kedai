@@ -2,6 +2,7 @@
 // 渐进披露(落地项 3):system 只注入 name+description 紧凑清单(skill_manifest),
 // 正文按需经 read(type=skill) 读取;allowed_tools/run_as_subagent/model 为
 // 子智能体调度增强预留元数据(旧库缺列由迁移补默认)。
+use super::log_query_failure;
 use crate::models::db::{now_iso, Db};
 use crate::models::types::SkillRecord;
 use rusqlite::{params, OptionalExtension};
@@ -82,11 +83,15 @@ impl SkillService {
         } else {
             "SELECT id, name, description, content, enabled, created_at, allowed_tools, run_as_subagent, model FROM skills ORDER BY name ASC"
         };
-        let mut stmt = conn.prepare(sql).unwrap();
-        stmt.query_map([], row_to_skill)
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .collect()
+        let mut stmt = match conn.prepare(sql) {
+            Ok(s) => s,
+            Err(e) => return log_query_failure("技能列表 prepare", e),
+        };
+        let query = stmt.query_map([], row_to_skill);
+        match query {
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(e) => log_query_failure("技能列表 query_map", e),
+        }
     }
 
     /// 按名称查找(大小写不敏感,启用优先)

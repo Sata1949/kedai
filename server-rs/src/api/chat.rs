@@ -1,7 +1,7 @@
 // 聊天路由(核心):/api/chat/send(SSE)、/api/chat/stop
 use crate::agents::engine::AgentRunRequest;
 use crate::api::app_state::AppState;
-use crate::api::{db_err, WithStatus};
+use crate::api::db_err;
 use crate::models::types::{GenerationParams, PlanStep, SseEvent};
 use crate::services::prompt_inject_service::{output_budget_for_word_count, InjectMode};
 use crate::utils::logger;
@@ -56,9 +56,7 @@ pub struct CompactBody {
 pub async fn send(State(state): State<Arc<AppState>>, Json(body): Json<SendBody>) -> Response {
     let message = body.message.unwrap_or_default().trim().to_string();
     if message.is_empty() {
-        return Json(json!({ "error": "消息不能为空" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return err_json("消息不能为空", StatusCode::BAD_REQUEST);
     }
 
     // 定位会话(指定 session_id 或按角色取首个)
@@ -66,9 +64,7 @@ pub async fn send(State(state): State<Arc<AppState>>, Json(body): Json<SendBody>
         Some(sid) => sid.clone(),
         None => {
             let Some(cid) = &body.character_id else {
-                return Json(json!({ "error": "缺少 session_id 或 character_id" }))
-                    .into_response()
-                    .with_status(StatusCode::BAD_REQUEST);
+                return err_json("缺少 session_id 或 character_id", StatusCode::BAD_REQUEST);
             };
             // 无会话直接发消息的路径:ensure_session + 补开场白一并挪进阻塞线程(DB 并发改造)
             let svc = state.sessions.clone();
@@ -90,16 +86,10 @@ pub async fn send(State(state): State<Arc<AppState>>, Json(body): Json<SendBody>
     };
     let session = match state.sessions.get(&session_id) {
         Some(s) => s,
-        None => {
-            return Json(json!({ "error": "会话不存在" }))
-                .into_response()
-                .with_status(StatusCode::NOT_FOUND)
-        }
+        None => return err_json("会话不存在", StatusCode::NOT_FOUND),
     };
     if state.engine.is_active(&session_id) {
-        return Json(json!({ "error": "该会话正在生成中" }))
-            .into_response()
-            .with_status(StatusCode::CONFLICT);
+        return err_json("该会话正在生成中", StatusCode::CONFLICT);
     }
 
     let mode = match body.agent_mode.as_deref() {
@@ -169,22 +159,23 @@ pub async fn send(State(state): State<Arc<AppState>>, Json(body): Json<SendBody>
             Some(f) => f.clone(),
             // 流程库为空或未选中(仅删除全部流程后出现)
             None => {
-                return Json(
-                    json!({ "error": "未选择执行流程:请先在设置中新建或选择一个 Agent 执行流程" }),
-                )
-                .into_response()
-                .with_status(StatusCode::BAD_REQUEST);
+                return err_json(
+                    "未选择执行流程:请先在设置中新建或选择一个 Agent 执行流程",
+                    StatusCode::BAD_REQUEST,
+                );
             }
         };
         if !flow.enabled || flow.steps.is_empty() {
-            return Json(json!({ "error": "自定义模式需要先在设置中启用并保存执行流程" }))
-                .into_response()
-                .with_status(StatusCode::BAD_REQUEST);
+            return err_json(
+                "自定义模式需要先在设置中启用并保存执行流程",
+                StatusCode::BAD_REQUEST,
+            );
         }
         if let Err(e) = state.flow.lock().unwrap_or_else(|e| e.into_inner()).validate(&flow) {
-            return Json(json!({ "error": format!("执行流程配置无效:{e}") }))
-                .into_response()
-                .with_status(StatusCode::BAD_REQUEST);
+            return err_json(
+                &format!("执行流程配置无效:{e}"),
+                StatusCode::BAD_REQUEST,
+            );
         }
         flow_steps = flow.steps.into_iter().filter(|s| s.enabled).collect();
     }
@@ -323,14 +314,10 @@ pub async fn send(State(state): State<Arc<AppState>>, Json(body): Json<SendBody>
 
 pub async fn stop(State(state): State<Arc<AppState>>, Json(body): Json<StopBody>) -> Response {
     let Some(sid) = body.session_id else {
-        return Json(json!({ "error": "缺少 session_id" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return err_json("缺少 session_id", StatusCode::BAD_REQUEST);
     };
     if sid.trim().is_empty() {
-        return Json(json!({ "error": "缺少 session_id" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return err_json("缺少 session_id", StatusCode::BAD_REQUEST);
     }
     if let Some(cancel) = state.pending_runs.lock().unwrap_or_else(|e| e.into_inner()).get(&sid) {
         let _ = cancel.send(true);
@@ -379,8 +366,7 @@ pub async fn clear_compact(
     }
 }
 
-fn err_json(msg: &str, code: StatusCode) -> Response {
-    Json(json!({ "error": msg }))
-        .into_response()
-        .with_status(code)
+/// 本模块统一错误响应:按状态码自动附带结构化错误码(见 api/errors.rs)。
+fn err_json(msg: impl AsRef<str>, status: StatusCode) -> Response {
+    crate::api::err_with_code(crate::api::code_for_status(status), msg, status)
 }

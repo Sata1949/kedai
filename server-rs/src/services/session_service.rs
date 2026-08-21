@@ -1,4 +1,5 @@
 // 会话与消息服务(与 Node 版 session.service.ts 对齐)
+use super::log_query_failure;
 use crate::models::db::{now_iso, Db};
 use crate::models::types::{MessageRecord, SessionRecord, SessionWithCharacter, StMessage};
 use rusqlite::{params, OptionalExtension};
@@ -71,29 +72,37 @@ impl SessionService {
 
     pub fn list_by_character(&self, character_id: &str) -> Vec<SessionRecord> {
         let conn = self.db.read().expect("获取只读连接失败");
-        let mut stmt = conn
+        // prepare/参数绑定失败属 schema 级异常:记 warn 回退空列表,不在阻塞线程 panic
+        // (与 filter_map 丢弃坏行的既有 best-effort 语义一致)
+        let mut stmt = match conn
             .prepare_cached("SELECT id, character_id, title, created_at, updated_at FROM sessions WHERE character_id = ?1 ORDER BY updated_at DESC")
-            .unwrap();
-        stmt.query_map(params![character_id], row_to_session)
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .collect()
+        {
+            Ok(s) => s,
+            Err(e) => return log_query_failure("会话列表(按角色) prepare", e),
+        };
+        let query = stmt.query_map(params![character_id], row_to_session);
+        match query {
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(e) => log_query_failure("会话列表(按角色) query_map", e),
+        }
     }
 
     /// 全部会话(联表角色名),按 updated_at DESC —— 聊天记录面板
     pub fn list_all(&self) -> Vec<SessionWithCharacter> {
         let conn = self.db.read().expect("获取只读连接失败");
-        let mut stmt = conn
-            .prepare(
-                "SELECT s.id, s.character_id, s.title, s.created_at, s.updated_at, c.chara_name \
+        let mut stmt = match conn.prepare(
+            "SELECT s.id, s.character_id, s.title, s.created_at, s.updated_at, c.chara_name \
                  FROM sessions s LEFT JOIN characters c ON c.id = s.character_id \
                  ORDER BY s.updated_at DESC",
-            )
-            .unwrap();
-        stmt.query_map([], row_to_session_with_char)
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .collect()
+        ) {
+            Ok(s) => s,
+            Err(e) => return log_query_failure("会话列表(全部) prepare", e),
+        };
+        let query = stmt.query_map([], row_to_session_with_char);
+        match query {
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(e) => log_query_failure("会话列表(全部) query_map", e),
+        }
     }
 
     /// 会话消息数量(聊天记录面板显示)
@@ -177,13 +186,17 @@ impl SessionService {
 
     pub fn get_messages(&self, session_id: &str) -> Vec<MessageRecord> {
         let conn = self.db.read().expect("获取只读连接失败");
-        let mut stmt = conn
+        let mut stmt = match conn
             .prepare_cached("SELECT id, session_id, role, content, extra, created_at FROM messages WHERE session_id = ?1 ORDER BY id ASC")
-            .unwrap();
-        stmt.query_map(params![session_id], row_to_message)
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .collect()
+        {
+            Ok(s) => s,
+            Err(e) => return log_query_failure("会话消息列表 prepare", e),
+        };
+        let query = stmt.query_map(params![session_id], row_to_message);
+        match query {
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(e) => log_query_failure("会话消息列表 query_map", e),
+        }
     }
 
     /// 保存/覆盖会话的上下文压缩摘要(按 (session_id, upto_message_id) 幂等 upsert)。

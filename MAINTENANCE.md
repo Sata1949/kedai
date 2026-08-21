@@ -12,6 +12,8 @@
 关键纪律:
 - **改 L1 契约**须先写失败测试、声明兼容影响、过评审;协议翻译集中在中层。
 - **Mutex 纪律**:全项目锁中毒一律恢复(`.lock().unwrap_or_else(|e| e.into_inner())`),不 panic;**禁止持 std::sync::Mutex guard 跨 `.await`**(Clippy `await_holding_lock` 防护)。
+- **DB 并发纪律**:api handler 的同步 DB 调用必须经 `db_call/db_read/db_write`(spawn_blocking),禁止 async 上下文直接持锁;细则见 §7「DB 并发纪律」。
+- **渲染性能纪律(前端)**:消息渲染必须走 ChatMessageItem 的缓存 computed,禁止在 v-for 里直接调渲染方法。
 - **跨端协议**(前后端 mvu)以 `docs/mvu-protocol.md` 锁定双端一致,防行为漂移。
 - 新能力默认进 L3 隔离验证,成熟后按晋升通道(测试通过 + 不破坏协议 + 评审)升级。
 
@@ -19,8 +21,8 @@
 
 | 能力 | 当前代际 | 状态 |
 |---|---|---|
-| GENERATE/RENDER 内容注入([GENERATE:BEFORE/AFTER]、{idx}、REGEX) | L3 → 拟 L2 | 已在 engine 挂载,测试覆盖;协议文档待补 |
-| @INJECT 精确消息插入(pos/target/regex) | L3 | messages.rs 9 个测试;待沉淀协议文档 |
+| GENERATE/RENDER 内容注入([GENERATE:BEFORE/AFTER]、{idx}、REGEX) | L3 → 拟 L2 | 已在 engine 挂载,测试覆盖;协议文档见 docs/generate-render-protocol.md |
+| @INJECT 精确消息插入(pos/target/regex) | L3 | messages/inject.rs 测试覆盖;协议文档见 docs/inject-protocol.md |
 | @@ 装饰器解析(parse_decorators/EntryDecorators) | L1 | 已入 world_book.rs 兼容解析 |
 | EJS 读取 API(getwi/getchar/injectPrompt 等 15 个) | L3 | ejs 层 10 个测试;injectPrompt 为兼容占位(engine 注入清单未接入) |
 | LAST_SEND/LAST_RECEIVE 统计变量 | L2 | engine 收尾写入会话宏,测试覆盖 |
@@ -40,15 +42,18 @@ kedai/
 │   │   ├── main.rs             # 命令行入口(健康自检 + run_server)
 │   │   ├── lib.rs              # 库入口(run_server 供 main/Tauri 复用,build_test_app)
 │   │   ├── config.rs           # 配置加载(环境变量 + .env,支持 DATA_DIR/LOG_DIR 注入)
-│   │   ├── api/                # 路由层(mod.rs 路由组装/头像/静态/SPA 回退,CORS 仅放行本机)
+│   │   ├── api/                # 路由层:mod.rs(组装/CORS/SPA 回退)+ routes/ 五域(chat/settings/agent/content/misc)
+│   │   │   │                   #   + static_files.rs(静态文档/SPA 回退)+ util.rs(WithStatus/db_err)
+│   │   │   │                   #   + errors.rs(结构化错误码 ErrorCode/err_with_code)
 │   │   ├── agents/
-│   │   │   ├── engine/         # 目录模块(拆分自原 engine.rs):mod.rs(主流程)+ messages/worldbook/executor/mvu/reflector_integration
+│   │   │   ├── engine/         # 目录模块(拆分自原 engine.rs):mod.rs(主流程)+ run_loop/run_finish/run_scripts
+│   │   │   │                   #   + messages/ 目录(build/inject/trim)+ worldbook/executor/mvu/compaction/reflector_integration
 │   │   │   ├── state_machine.rs# 8 状态 + 迁移表(幂等迁移)
 │   │   │   ├── planner.rs      # fast/deep 计划 + 算式识别
 │   │   │   └── reflector.rs    # 质量反思(空/截断/未答疑问 3 规则)
-│   │   ├── connectors/         # LLM 后端适配(openai_compatible / mock)
+│   │   ├── connectors/         # LLM 后端适配(openai_compatible/ 目录模块 + mock)
 │   │   ├── tools/              # 工具系统(registry / calculator / memory / agent_tools)
-│   │   ├── models/             # db.rs(SQLite 建表)/ types.rs(契约类型)
+│   │   ├── models/             # db/ 目录(schema 建表/backfill 迁移)/ types.rs(契约类型)
 │   │   ├── parsing/            # character_card.rs + assistant/(ejs/ 目录模块:mvu 变量渲染)
 │   │   ├── services/           # character / session / agent_session / token 服务
 │   │   └── utils/logger.rs     # pino 风格结构化 JSON 日志(按天归档)
@@ -56,10 +61,12 @@ kedai/
 ├── web/                        # 前端:Vue 3 + Vite + Tailwind v4 + Pinia
 │   └── src/
 │       ├── api/                # 目录模块(拆分自 api.ts):client/types/characters/sessions/worldbooks/... + index 聚合
-│       ├── store.ts            # Pinia 全局状态(setup store,单一)
+│       ├── stores/             # Pinia 七子 store(character/chat/genSettings/modelConn/resources/task/uiPrefs)
+│       ├── store.ts            # 全局状态门面(facade,聚合七子 store 保持原引用路径)
 │       ├── sseReducer.ts       # SSE 事件纯函数(拆分自 store)
 │       ├── mvu/                # 前端 mvu 变量系统(parser/variables/host/mvuStore)
 │       └── components/         # Sidebar / ChatWindow / ChatInput / AgentDock / SettingsModal
+│           └── settings/       # 设置弹窗九 section(Api/Connection/GenParams/PromptInject/Agent/AgentFlow/PresetImportExport/DataManagement/Ui)
 ├── src-tauri/                  # Tauri 2 桌面壳:窗口加载 http://127.0.0.1:3001,进程内复用 run_server
 │   ├── src/lib.rs              # 数据目录注入(%APPDATA%\com.kedai.app)+ 服务自检/启动
 │   └── tauri.conf.json         # 窗口 1280×800、NSIS 打包、图标
@@ -92,7 +99,7 @@ kedai/
 | 一键启动(桌面) | `.\start.ps1` | 优先启动 Tauri 桌面应用(带 logo 窗口);未构建桌面产物时回退浏览器模式 |
 | 桌面安装包 | `.\build.ps1 -Tauri` | 前端 + Rust release + NSIS 安装程序(需 `@tauri-apps/cli`);安装后从开始菜单启动 |
 | 一键构建 | `.\build.ps1` | 前端 web/dist + Rust release;`-Dev` 仅前端 `-NoWeb` 仅 Rust `-Tauri` 追加桌面打包 |
-| 后端测试 | `cd server-rs && cargo test` | 约 241 个测试(约 175 单测 + 66 集成),**需在 vcvars64 环境** |
+| 后端测试 | `cd server-rs && cargo test` | 658 个测试(546 单测 + 112 集成),**需在 vcvars64 环境**;前端 `npm test -w web` 317 个 |
 | 开发模式 | `cd server-rs && cargo run` + `npm run dev -w web` | 后端 3001 / 前端 5173(代理到 3001) |
 | 前端构建 | `npm run build -w web` | 产出 web/dist(编译进 exe 用) |
 
@@ -228,7 +235,7 @@ data: {"type":"finish","usage":{prompt_tokens,completion_tokens,total_tokens,con
 
 ### 约定
 
-- 错误响应统一 `{"error":"消息"}`
+- 错误响应统一 `{"error":"消息"}`;已接入结构化错误码的端点附带 `"code"`(如 `{"error":"会话不存在","code":"NOT_FOUND"}`,码表见 `server-rs/src/api/errors.rs`:VALIDATION/UNAUTHORIZED/NOT_FOUND/CONFLICT/DB/UPSTREAM/INTERNAL,前端按 code 分类提示)
 - 400 缺参/校验失败,404 资源不存在,409 会话生成中,204 删除成功,201 创建成功
 - 全部时间字段为 ISO 8601 字符串
 
@@ -256,7 +263,14 @@ rusqlite(bundled,零原生依赖),**WAL 模式 + foreign_keys ON**。5 张表:
 
 - **数据兼容**:表结构与原 Node 版完全一致,旧 `kedai.db` 可直接使用(已验证)
 - **备份**:复制 `data/` 目录即可(SQLite WAL 模式建议先停服再拷,或同时拷 `-wal`/`-shm`)
-- **⭐ 代码约定**:`services/*.rs` 中 `self.db.conn()` 返回 `MutexGuard`,**必须在其作用域结束后再调用 `self.get()/self.touch()` 等其他取锁方法**,否则 std::sync::Mutex 重入死锁(曾踩坑,详见 §10)
+- **⭐ 代码约定**:`Db::write()` 返回 `MutexGuard<Connection>`,**必须在其作用域结束后再调用其他取写锁方法**,否则 std::sync::Mutex 重入死锁(曾踩坑,详见 §10);只读查询用 `Db::read()`(连接池,无此约束)
+
+### DB 并发纪律(2026-08 改造)
+
+- **两类句柄**:`Db::read()` 返回只读连接池句柄(`PooledRead`),**SELECT 专用**,可并发多连接;`Db::write()` 返回全局唯一写连接的 `MutexGuard`,一切写 SQL 与「读+写同事务」的混合场景走它。
+- **handler 必须过阻塞池**:api handler 禁止在 async 上下文直接执行同步 DB 调用(会卡住 tokio worker);一律经 `AppState::db_call`(任意 services 同步方法)/ `db_read`(只读闭包)/ `db_write`(写闭包),三者内部均为 `spawn_blocking`。
+- **db_write 非重入**:闭包执行期间已持有唯一写连接,**闭包内不得再调用会重新获取写锁的 services 写方法**(Mutex 非重入 → 自死锁);需要走 services 写方法时用 `db_call`(连接由服务内部按需获取)。
+- **失败出口**:阻塞任务 JoinError / 连接池错误 / 服务内 String 错误统一由 api 层 `db_err` 转 500 + `code: "DB"`;锁中毒一律恢复(`.lock().unwrap_or_else(|e| e.into_inner())`),不 panic。
 
 ---
 
@@ -275,7 +289,7 @@ rusqlite(bundled,零原生依赖),**WAL 模式 + foreign_keys ON**。5 张表:
 |---|---|
 | 换 LLM 后端 | 改 `.env` 的 OPENAI_BASE_URL / API_KEY,重启 |
 | 换默认模型 | 改 OPENAI_MODEL;或运行中在设置界面切换(持久化于内存,重启失效) |
-| 改默认系统提示词 | 改 `data/settings.json` 的 `agent_system_prompt`(优先级最高,保存即生效);运行中的服务需重启才读取;代码内置兜底模板在 `server-rs/src/agents/engine/messages.rs`(build_llm_messages_with_position),需重编译 |
+| 改默认系统提示词 | 改 `data/settings.json` 的 `agent_system_prompt`(优先级最高,保存即生效);运行中的服务需重启才读取;代码内置兜底模板在 `server-rs/src/agents/engine/messages/build.rs`(build_llm_messages_with_position),需重编译 |
 | 演示模式 | CONNECTOR=mock 或清空 API Key,启动即演示 |
 | 端口被占 | `netstat -ano \| findstr ":3001"` → `taskkill /f /pid <pid>`;注意可能残留 Node 旧服务 |
 | 前端改了没生效 | 需重新 `.\build.ps1`(exe 内嵌的是编译期快照;开发期则靠 web/dist 磁盘优先) |
@@ -336,8 +350,9 @@ rusqlite(bundled,零原生依赖),**WAL 模式 + foreign_keys ON**。5 张表:
 cd server-rs && cargo test
 ```
 
-- 单元测试(源文件内 `#[test]`/`#[tokio::test]`,约 320 个):状态机迁移、planner(fast/deep/算式识别)、reflector(3 规则)、calculator(白名单解析)、censor(禁词同义替换)、token 编码映射与估算、工具注册表、世界书转换、世界书注入、提示词注入(含禁词库)、mvu 变量系统(含 JSONPatch 转义/reason/delta 容错)、EJS 渲染器(含读取 API 与 escape-ejs)、角色卡解析、正则脚本、@INJECT 解析/应用、GENERATE 注入
-- API 集成测试(`tests/` 7 个文件,约 66 个,mock 连接器 + 临时数据目录):api_integration、assistant、agent_flows、prompt_inject、world_books、settings_connector、security——health、角色 CRUD(multipart 上传)、会话/消息/导入导出、设置与 token、agent plan、SSE 聊天流、计算器工具 SSE、世界书/角色卡、提示词注入与酒馆预设导入、鉴权
+- 单元测试(源文件内 `#[test]`/`#[tokio::test]`,546 个):状态机迁移、planner(fast/deep/算式识别)、reflector(3 规则)、calculator(白名单解析)、censor(禁词同义替换)、token 编码映射与估算、工具注册表、世界书转换、世界书注入、提示词注入(含禁词库)、mvu 变量系统(含 JSONPatch 转义/reason/delta 容错)、EJS 渲染器(含读取 API 与 escape-ejs)、角色卡解析、正则脚本、@INJECT 解析/应用、GENERATE 注入、结构化错误码(api/errors.rs)
+- API 集成测试(`tests/` 7 个文件,112 个,mock 连接器 + 临时数据目录):api_integration、assistant、agent_flows、prompt_inject、world_books、settings_connector、security——health、角色 CRUD(multipart 上传)、会话/消息/导入导出、设置与 token、agent plan、SSE 聊天流、计算器工具 SSE、世界书/角色卡、提示词注入与酒馆预设导入、鉴权
+- 前端 `npm test -w web`(Vitest,317 个):stores、api client(含 ApiError 错误码分类)、组件与 composables
 - 新增接口建议同步补集成测试;测试环境变量 `CONNECTOR=mock` 强制隔离
 
 ---
@@ -392,7 +407,7 @@ cd server-rs && cargo test
 - 位置:`services/cache_diagnostics.rs`(命中率/费用/水位汇总)+ `api/diagnostics.rs`(`GET /api/diagnostics/cache`)+ `connectors/openai_compatible.rs`(usage 5 元组解析,DeepSeek `prompt_cache_hit_tokens` 优先、OpenAI `cached_tokens` 回退)。
 - 落库:`llm_requests` 表新增 usage 列(幂等迁移 `ensure_llm_requests_usage_columns`);轻量 usage 行恒落库,与请求快照开关解耦。
 - 前端:`components/CacheHealthPanel.vue` + `cacheHealth.ts`(「优化」弹窗内,缓存健康面板)。
-- 压缩升级:摘要槽独立(system → 摘要槽 → 记忆槽 → 历史,`messages.rs` 的 `insert_summary_slot` / `insert_memory_slot` / `protected_head_len`);摘要改追加式增量(旧段字节冻结);LLM 摘要前先 snip 超长陈旧工具结果(`compaction.rs` 的 `snip_tuples` / `should_snip`,错误特征保留、尾部 2 条原文保留);`compaction_keep_recent`(默认 4)与 `compaction_snip_bytes`(默认 8192)可配置。
+- 压缩升级:摘要槽独立(system → 摘要槽 → 记忆槽 → 历史,`messages/inject.rs` 的 `insert_summary_slot` / `insert_memory_slot`、`messages/trim.rs` 的 `protected_head_len`);摘要改追加式增量(旧段字节冻结);LLM 摘要前先 snip 超长陈旧工具结果(`compaction.rs` 的 `snip_tuples` / `should_snip`,错误特征保留、尾部 2 条原文保留);`compaction_keep_recent`(默认 4)与 `compaction_snip_bytes`(默认 8192)可配置。
 
 ### 跨会话记忆蒸馏(2026-08 新增)
 

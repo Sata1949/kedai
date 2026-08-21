@@ -104,9 +104,7 @@ pub async fn list_sessions(
         return Json(json!({ "sessions": all })).into_response();
     };
     if cid.trim().is_empty() {
-        return Json(json!({ "error": "缺少 character_id 查询参数" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return err_json("缺少 character_id 查询参数", StatusCode::BAD_REQUEST);
     }
     let svc = state.sessions.clone();
     let sessions = match state.db_call(move || svc.list_by_character(&cid)).await {
@@ -121,14 +119,10 @@ pub async fn create_session(
     Json(body): Json<CreateSessionBody>,
 ) -> Response {
     let Some(cid) = body.character_id else {
-        return Json(json!({ "error": "缺少 character_id" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return err_json("缺少 character_id", StatusCode::BAD_REQUEST);
     };
     if cid.trim().is_empty() {
-        return Json(json!({ "error": "缺少 character_id" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return err_json("缺少 character_id", StatusCode::BAD_REQUEST);
     }
     let svc = state.sessions.clone();
     let characters = state.characters.clone();
@@ -146,9 +140,7 @@ pub async fn create_session(
     {
         Err(e) => db_err(&e),
         Ok(Ok(s)) => Json(s).into_response().with_status(StatusCode::CREATED),
-        Ok(Err(e)) => Json(json!({ "error": e }))
-            .into_response()
-            .with_status(StatusCode::INTERNAL_SERVER_ERROR),
+        Ok(Err(e)) => err_json(e, StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
@@ -222,9 +214,7 @@ pub async fn regreet(
     match found {
         Err(e) => return db_err(&e),
         Ok(None) => {
-            return Json(json!({ "error": "会话不存在" }))
-                .into_response()
-                .with_status(StatusCode::NOT_FOUND)
+            return err_json("会话不存在", StatusCode::NOT_FOUND)
         }
         Ok(Some(())) => {}
     }
@@ -261,9 +251,7 @@ pub async fn delete_session(
             }
             StatusCode::NO_CONTENT.into_response()
         }
-        Ok(None) => Json(json!({ "error": "会话不存在" }))
-            .into_response()
-            .with_status(StatusCode::NOT_FOUND),
+        Ok(None) => err_json("会话不存在", StatusCode::NOT_FOUND),
     }
 }
 
@@ -272,14 +260,10 @@ pub async fn history(
     Query(q): Query<MessageQuery>,
 ) -> Response {
     let Some(sid) = q.session_id else {
-        return Json(json!({ "error": "缺少 session_id 查询参数" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return err_json("缺少 session_id 查询参数", StatusCode::BAD_REQUEST);
     };
     if sid.trim().is_empty() {
-        return Json(json!({ "error": "缺少 session_id 查询参数" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return err_json("缺少 session_id 查询参数", StatusCode::BAD_REQUEST);
     }
     let svc = state.sessions.clone();
     let characters = state.characters.clone();
@@ -297,9 +281,7 @@ pub async fn history(
     let (_session, messages, character, session_vars, assistant_vars) = match loaded {
         Err(e) => return db_err(&e),
         Ok(None) => {
-            return Json(json!({ "error": "会话不存在" }))
-                .into_response()
-                .with_status(StatusCode::NOT_FOUND)
+            return err_json("会话不存在", StatusCode::NOT_FOUND)
         }
         Ok(Some(v)) => v,
     };
@@ -378,19 +360,13 @@ pub async fn update_message(
     Json(body): Json<UpdateMessageBody>,
 ) -> Response {
     let Some(sid) = q.session_id else {
-        return Json(json!({ "error": "缺少 session_id 或 id" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return err_json("缺少 session_id 或 id", StatusCode::BAD_REQUEST);
     };
     let Some(content) = body.content else {
-        return Json(json!({ "error": "缺少 content" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return err_json("缺少 content", StatusCode::BAD_REQUEST);
     };
     if sid.trim().is_empty() {
-        return Json(json!({ "error": "缺少 session_id 或 id" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return err_json("缺少 session_id 或 id", StatusCode::BAD_REQUEST);
     }
     let svc = state.sessions.clone();
     match state
@@ -399,9 +375,7 @@ pub async fn update_message(
     {
         Err(e) => db_err(&e),
         Ok(Some(m)) => Json(m).into_response(),
-        Ok(None) => Json(json!({ "error": "消息不存在" }))
-            .into_response()
-            .with_status(StatusCode::NOT_FOUND),
+        Ok(None) => err_json("消息不存在", StatusCode::NOT_FOUND),
     }
 }
 
@@ -415,14 +389,10 @@ pub async fn swipe_message(
     Json(body): Json<SwipeBody>,
 ) -> Response {
     let Some(sid) = q.session_id else {
-        return Json(json!({ "error": "缺少 session_id 或 id" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return err_json("缺少 session_id 或 id", StatusCode::BAD_REQUEST);
     };
     if sid.trim().is_empty() {
-        return Json(json!({ "error": "缺少 session_id 或 id" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return err_json("缺少 session_id 或 id", StatusCode::BAD_REQUEST);
     }
     let svc = state.sessions.clone();
     let sid_c = sid.clone();
@@ -430,25 +400,19 @@ pub async fn swipe_message(
         Err(e) => return db_err(&e),
         Ok(Some(m)) => m,
         Ok(None) => {
-            return Json(json!({ "error": "消息不存在" }))
-                .into_response()
-                .with_status(StatusCode::NOT_FOUND)
+            return err_json("消息不存在", StatusCode::NOT_FOUND)
         }
     };
     let swipes = match msg.extra.get("swipes").and_then(|s| s.as_array()) {
         Some(arr) if !arr.is_empty() => arr,
         _ => {
-            return Json(json!({ "error": "该消息没有可切换的版本" }))
-                .into_response()
-                .with_status(StatusCode::BAD_REQUEST)
+            return err_json("该消息没有可切换的版本", StatusCode::BAD_REQUEST)
         }
     };
     let swipe = match swipes.get(body.swipe_id) {
         Some(v) => v,
         None => {
-            return Json(json!({ "error": "swipe_id 越界" }))
-                .into_response()
-                .with_status(StatusCode::BAD_REQUEST)
+            return err_json("swipe_id 越界", StatusCode::BAD_REQUEST)
         }
     };
     let content = swipe
@@ -470,9 +434,7 @@ pub async fn swipe_message(
     match written {
         Err(e) => return db_err(&e),
         Ok(None) => {
-            return Json(json!({ "error": "消息不存在" }))
-                .into_response()
-                .with_status(StatusCode::NOT_FOUND)
+            return err_json("消息不存在", StatusCode::NOT_FOUND)
         }
         Ok(Some(())) => {}
     }
@@ -486,35 +448,25 @@ pub async fn delete_message(
     Query(q): Query<MessageQuery>,
 ) -> Response {
     let Some(sid) = q.session_id else {
-        return Json(json!({ "error": "缺少 session_id 或 id" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return err_json("缺少 session_id 或 id", StatusCode::BAD_REQUEST);
     };
     if sid.trim().is_empty() {
-        return Json(json!({ "error": "缺少 session_id 或 id" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return err_json("缺少 session_id 或 id", StatusCode::BAD_REQUEST);
     }
     let svc = state.sessions.clone();
     match state.db_call(move || svc.delete_message(&sid, id)).await {
         Err(e) => db_err(&e),
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => Json(json!({ "error": "消息不存在" }))
-            .into_response()
-            .with_status(StatusCode::NOT_FOUND),
+        Ok(false) => err_json("消息不存在", StatusCode::NOT_FOUND),
     }
 }
 
 pub async fn clear(State(state): State<Arc<AppState>>, Json(body): Json<ClearBody>) -> Response {
     let Some(sid) = body.session_id else {
-        return Json(json!({ "error": "缺少 session_id" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return err_json("缺少 session_id", StatusCode::BAD_REQUEST);
     };
     if sid.trim().is_empty() {
-        return Json(json!({ "error": "缺少 session_id" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return err_json("缺少 session_id", StatusCode::BAD_REQUEST);
     }
     let svc = state.sessions.clone();
     if let Err(e) = state.db_call(move || svc.clear_messages(&sid)).await {
@@ -533,9 +485,7 @@ pub async fn truncate_messages(
     if body.anchor_id <= 0 {
         // 负/零 id 是流式临时消息标记或非法值;按 id>anchor 语义会把整段历史删光。
         // 防御任何调用方误传(重发锚点必须是落库后的真实 id)。
-        return Json(json!({ "error": "截断锚点无效:必须是落库消息的正 id" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return err_json("截断锚点无效:必须是落库消息的正 id", StatusCode::BAD_REQUEST);
     }
     let svc = state.sessions.clone();
     let anchor_id = body.anchor_id;
@@ -547,9 +497,7 @@ pub async fn truncate_messages(
         .await;
     match deleted {
         Err(e) => db_err(&e),
-        Ok(None) => Json(json!({ "error": "会话不存在" }))
-            .into_response()
-            .with_status(StatusCode::NOT_FOUND),
+        Ok(None) => err_json("会话不存在", StatusCode::NOT_FOUND),
         Ok(Some(deleted)) => Json(json!({ "ok": true, "deleted": deleted })).into_response(),
     }
 }
@@ -562,9 +510,7 @@ pub async fn save_variables(
     Json(body): Json<SaveVariablesBody>,
 ) -> Response {
     let Some(sid) = q.session_id else {
-        return Json(json!({ "error": "缺少 session_id 或 id" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return err_json("缺少 session_id 或 id", StatusCode::BAD_REQUEST);
     };
     let mut patch = serde_json::Map::new();
     if let Some(sd) = body.stat_data {
@@ -574,9 +520,7 @@ pub async fn save_variables(
         patch.insert("display_data".into(), dd);
     }
     if patch.is_empty() {
-        return Json(json!({ "error": "缺少变量数据" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return err_json("缺少变量数据", StatusCode::BAD_REQUEST);
     }
     let patch = serde_json::Value::Object(patch);
     let svc = state.sessions.clone();
@@ -586,9 +530,7 @@ pub async fn save_variables(
     {
         Err(e) => db_err(&e),
         Ok(Some(m)) => Json(m).into_response(),
-        Ok(None) => Json(json!({ "error": "消息不存在" }))
-            .into_response()
-            .with_status(StatusCode::NOT_FOUND),
+        Ok(None) => err_json("消息不存在", StatusCode::NOT_FOUND),
     }
 }
 
@@ -615,14 +557,10 @@ pub async fn save_assistant_vars(
     match saved {
         Err(e) => return db_err(&e),
         Ok(None) => {
-            return Json(json!({ "error": "会话不存在" }))
-                .into_response()
-                .with_status(StatusCode::NOT_FOUND)
+            return err_json("会话不存在", StatusCode::NOT_FOUND)
         }
         Ok(Some(Err(e))) => {
-            return Json(json!({ "error": e }))
-                .into_response()
-                .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+            return err_json(e, StatusCode::INTERNAL_SERVER_ERROR)
         }
         Ok(Some(Ok(()))) => {}
     }
@@ -635,9 +573,7 @@ pub async fn init_vars(
     Query(q): Query<SessionsQuery>,
 ) -> Response {
     let Some(cid) = q.character_id else {
-        return Json(json!({ "error": "缺少 character_id 查询参数" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return err_json("缺少 character_id 查询参数", StatusCode::BAD_REQUEST);
     };
     // 角色卡内嵌 character_book + 独立世界书(绑定该角色或全局),读取合并进同一阻塞任务
     let characters = state.characters.clone();
@@ -670,4 +606,9 @@ pub async fn init_vars(
         }
     }
     Json(json!({ "character_id": cid, "entries": vars })).into_response()
+}
+
+/// 本模块统一错误响应:按状态码自动附带结构化错误码(见 api/errors.rs)。
+fn err_json(msg: impl AsRef<str>, status: StatusCode) -> Response {
+    crate::api::err_with_code(crate::api::code_for_status(status), msg, status)
 }

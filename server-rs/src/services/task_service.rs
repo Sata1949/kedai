@@ -2,6 +2,7 @@
 // 执行流程:planning(LLM 规划拆解)→ running(逐步派子智能体执行)→ done(LLM 汇总);
 // 出错 → error;stop → ended。子任务存 task_subtasks 表(独立于 agent_subtasks,
 // 因后者的 session_id 外键指向 sessions 表,而任务 id 不在其中)。
+use super::log_query_failure;
 use crate::connectors::Connector;
 use crate::models::db::{now_iso, Db};
 use crate::models::types::{
@@ -201,13 +202,17 @@ impl TaskService {
 
     pub fn list(&self) -> Vec<TaskRecord> {
         let conn = self.db.read().expect("获取只读连接失败");
-        let mut stmt = conn
+        let mut stmt = match conn
             .prepare_cached(&format!("SELECT {TASK_COLS} FROM tasks ORDER BY created_at DESC"))
-            .unwrap();
-        stmt.query_map([], row_to_task)
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .collect()
+        {
+            Ok(s) => s,
+            Err(e) => return log_query_failure("任务列表 prepare", e),
+        };
+        let query = stmt.query_map([], row_to_task);
+        match query {
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(e) => log_query_failure("任务列表 query_map", e),
+        }
     }
 
     pub fn get(&self, id: &str) -> Option<TaskRecord> {

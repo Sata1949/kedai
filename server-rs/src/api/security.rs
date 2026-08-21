@@ -164,6 +164,15 @@ fn is_loopback_name(host: &str) -> bool {
 }
 
 fn reject(status: StatusCode, message: &str) -> Response {
+    // 401 附带结构化错误码 UNAUTHORIZED(前端据此提示重新加载页面,见 api/errors.rs);
+    // 其余拒绝(403 loopback / 429 限频)保持裸 { error } 契约不变。
+    if status == StatusCode::UNAUTHORIZED {
+        return secure_headers(crate::api::err_with_code(
+            crate::api::ErrorCode::Unauthorized,
+            message,
+            status,
+        ));
+    }
     secure_headers((status, Json(json!({ "error": message }))).into_response())
 }
 

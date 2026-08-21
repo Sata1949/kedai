@@ -1,4 +1,5 @@
 // 角色卡服务(与 Node 版 character.service.ts 对齐):上传/CRUD/文件落盘
+use super::log_query_failure;
 use crate::models::db::{now_iso, Db};
 use crate::models::types::CharacterRecord;
 use crate::parsing::character_card::{parse_character_card, safe_file_name};
@@ -78,13 +79,17 @@ impl CharacterService {
     /// 列表不含 data_raw,按 created_at DESC
     pub fn list(&self) -> Vec<CharacterRecord> {
         let conn = self.db.read().expect("获取只读连接失败");
-        let mut stmt = conn
+        let mut stmt = match conn
             .prepare("SELECT id, name, chara_name, description, file_path, avatar_path, data_raw, created_at FROM characters ORDER BY created_at DESC")
-            .unwrap();
-        stmt.query_map([], |row| row_to_character(row, false))
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .collect()
+        {
+            Ok(s) => s,
+            Err(e) => return log_query_failure("角色列表 prepare", e),
+        };
+        let query = stmt.query_map([], |row| row_to_character(row, false));
+        match query {
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(e) => log_query_failure("角色列表 query_map", e),
+        }
     }
 
     pub fn get(&self, id: &str) -> Option<CharacterRecord> {

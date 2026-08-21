@@ -5,7 +5,7 @@
 //   GET  /api/variable/state        运行态整行(stat_data/meta/revision)
 //   GET  /api/variable/changelog    逐 op 变更流水(最新在前)
 use crate::api::app_state::AppState;
-use crate::api::{db_err, WithStatus};
+use crate::api::db_err;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -39,15 +39,16 @@ pub struct StateQuery {
 }
 
 fn bad_request(msg: &str) -> Response {
-    Json(json!({ "error": msg }))
-        .into_response()
-        .with_status(StatusCode::BAD_REQUEST)
+    err_json(msg, StatusCode::BAD_REQUEST)
 }
 
 fn not_found(msg: &str) -> Response {
-    Json(json!({ "error": msg }))
-        .into_response()
-        .with_status(StatusCode::NOT_FOUND)
+    err_json(msg, StatusCode::NOT_FOUND)
+}
+
+/// 本模块统一错误响应:按状态码自动附带结构化错误码(见 api/errors.rs)。
+fn err_json(msg: impl AsRef<str>, status: StatusCode) -> Response {
+    crate::api::err_with_code(crate::api::code_for_status(status), msg, status)
 }
 
 /// POST /api/variable/update — 契约引擎统一写入出口。
@@ -121,9 +122,7 @@ pub async fn get_state(
     match loaded {
         Err(e) => db_err(&e),
         Ok(None) => not_found("会话不存在"),
-        Ok(Some(Err(e))) => Json(json!({ "error": e }))
-            .into_response()
-            .with_status(StatusCode::INTERNAL_SERVER_ERROR),
+        Ok(Some(Err(e))) => err_json(e, StatusCode::INTERNAL_SERVER_ERROR),
         Ok(Some(Ok(None))) => not_found("该会话尚无契约运行态"),
         Ok(Some(Ok(Some(row)))) => {
             // 库内 JSON 损坏属异常态,显式 500 让前端可排查(静默空对象会掩盖)
@@ -137,9 +136,7 @@ pub async fn get_state(
             ) {
                 (Ok(s), Ok(m)) => (s, m),
                 (Err(e), _) | (_, Err(e)) => {
-                    return Json(json!({ "error": e }))
-                        .into_response()
-                        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+                    return err_json(e, StatusCode::INTERNAL_SERVER_ERROR)
                 }
             };
             Json(json!({
@@ -177,9 +174,7 @@ pub async fn changelog(
     match listed {
         Err(e) => db_err(&e),
         Ok(None) => not_found("会话不存在"),
-        Ok(Some(Err(e))) => Json(json!({ "error": e }))
-            .into_response()
-            .with_status(StatusCode::INTERNAL_SERVER_ERROR),
+        Ok(Some(Err(e))) => err_json(e, StatusCode::INTERNAL_SERVER_ERROR),
         Ok(Some(Ok(entries))) => {
             // 单条序列化失败跳过该条而非整表清空(ChangelogEntry 实际不会失败)
             let items = entries
@@ -299,7 +294,8 @@ mod tests {
         (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
     }
 
-    /// 出口校验:未知会话 404、空 patches 400、缺 session_id 400。
+    /// 出口校验:未知会话 404、空 patches 400、缺 session_id 400;
+    /// 错误响应须带与状态码匹配的结构化 code(errors.rs 收尾)。
     #[tokio::test]
     async fn update_rejects_invalid_requests() {
         let (router, state) = app();
@@ -312,6 +308,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+        assert_eq!(body["code"], "NOT_FOUND", "body: {body}");
 
         let (status, body) = post(
             &router,
@@ -320,9 +317,11 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        assert_eq!(body["code"], "VALIDATION", "body: {body}");
 
-        let (status, _) = get(&router, "/api/variable/state").await;
+        let (status, body) = get(&router, "/api/variable/state").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "VALIDATION", "body: {body}");
     }
 
     /// 主路径:external 写者经所有权校验写入 → 留痕 → state/changelog 可读;

@@ -1,4 +1,5 @@
 // Agent 会话服务(与 Node 版 agent-session.service.ts 对齐)
+use super::log_query_failure;
 use crate::models::db::{now_iso, Db};
 use crate::models::types::{AgentSessionRecord, ToolCallRecord};
 use rusqlite::{params, OptionalExtension};
@@ -159,13 +160,17 @@ impl AgentSessionService {
 
     pub fn list_tool_calls(&self, agent_session_id: &str) -> Vec<ToolCallRecord> {
         let conn = self.db.read().expect("获取只读连接失败");
-        let mut stmt = conn
+        let mut stmt = match conn
             .prepare("SELECT id, agent_session_id, name, input, output, duration_ms, created_at FROM tool_calls WHERE agent_session_id = ?1 ORDER BY created_at ASC")
-            .unwrap();
-        stmt.query_map(params![agent_session_id], row_to_tool_call)
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .collect()
+        {
+            Ok(s) => s,
+            Err(e) => return log_query_failure("工具调用列表 prepare", e),
+        };
+        let query = stmt.query_map(params![agent_session_id], row_to_tool_call);
+        match query {
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(e) => log_query_failure("工具调用列表 query_map", e),
+        }
     }
 
     pub fn delete_by_session(&self, session_id: &str) {
