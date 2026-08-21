@@ -72,7 +72,7 @@ const activeLabel = computed(() => sections.value.find((s) => s.key === activeSe
     <div class="sv-modal sv-hub-modal">
       <div class="sv-modal-head">
         <h2 class="flex items-center gap-2">
-          <span class="sv-supreme pink" style="width: 18px; height: 18px" /> 综合设置
+          <span class="sv-supreme pink" /> 综合设置
         </h2>
         <button class="sv-btn ghost sv-btn-square" @click="close">✕</button>
       </div>
@@ -81,24 +81,25 @@ const activeLabel = computed(() => sections.value.find((s) => s.key === activeSe
         <!-- 左侧导航 -->
         <div class="sv-hub-nav">
           <button
-            v-for="s in sections"
+            v-for="(s, idx) in sections"
             :key="s.key"
             class="sv-hub-nav-item"
             :class="{ active: activeSection === s.key }"
             @click="activeSection = s.key"
           >
+            <span class="sv-hub-nav-idx">{{ String(idx + 1).padStart(2, '0') }}</span>
             <span class="sv-supreme" :class="s.dot" style="width: 10px; height: 10px; flex: none" />
             <span>{{ s.label }}</span>
           </button>
 
-          <!-- 快速操作分隔 -->
-          <div style="border-top: 1px solid var(--sv-line); margin: 10px 4px; padding-top: 10px">
-            <div style="font-size: 10px; color: var(--sv-ink-faint); letter-spacing: 0.1em; padding: 0 12px 6px">快速操作</div>
+          <!-- 快速操作分隔(构成主义双细线) -->
+          <div class="sv-separator tight">
+            <div style="font-size: var(--text-2xs); color: var(--sv-ink-faint); letter-spacing: 0.1em; padding: 0 12px 6px">快速操作</div>
             <button
               v-for="a in quickActions"
               :key="a.key"
               class="sv-hub-nav-item"
-              style="font-size: 12px"
+              style="font-size: var(--text-sm)"
               @click="a.action"
             >
               <span class="sv-supreme" :class="a.dot" style="width: 10px; height: 10px; flex: none" />
@@ -109,11 +110,7 @@ const activeLabel = computed(() => sections.value.find((s) => s.key === activeSe
 
         <!-- 右侧内容区:嵌入 SettingsModal(完整设置功能) -->
         <div class="sv-hub-content">
-          <div style="margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--sv-line)">
-            <h3 style="margin: 0; font-family: var(--font-display); font-size: 14px; letter-spacing: 0.08em">
-              {{ activeLabel }}
-            </h3>
-          </div>
+          <h3 class="sv-hub-content-title">{{ activeLabel }}</h3>
 
           <!-- 嵌入原 SettingsModal 全部内容 -->
           <SettingsModal embedded :active-section="activeSection" />

@@ -152,10 +152,11 @@ async function removeTask(task: TaskRecord): Promise<void> {
         </template>
 
         <div v-else class="sv-task-empty" style="height: 100%">
-          <div class="sv-empty-geo" style="margin-bottom: 14px">
+          <div class="sv-empty-geo mb14">
             <span class="sq black" style="width: 22px; height: 22px" />
             <span class="sq pink" />
             <span class="sq deep" />
+          <i class="diag" />
           </div>
           <p style="font-size: 14px">选择或创建一个任务</p>
           <p style="font-size: 12px">在左侧栏输入目标,系统会拆解计划、派子智能体执行并汇总结果</p>

@@ -354,7 +354,7 @@ function syncBannedPromptFromWords(): void {
           <div v-if="agentMsg" class="sv-feedback ok sv-feedback-flex">{{ agentMsg }}</div>
         </div>
 
-        <div style="margin-top: 16px; border-top: 1px solid var(--sv-line); padding-top: 12px">
+        <div class="sv-separator">
           <div class="sv-field-label sub">主 Agent 提示词(运行时,注入模型)</div>
           <textarea
             v-model="agentPromptMd"
@@ -383,7 +383,7 @@ function syncBannedPromptFromWords(): void {
           </div>
         </div>
 
-        <div style="margin-top: 16px; border-top: 1px solid var(--sv-line); padding-top: 12px">
+        <div class="sv-separator">
           <div class="sv-field-label sub">最终提示词预览（脱敏）</div>
           <p class="sv-note">按 source / role / layer / order 展示。历史仅显示角色、长度与哈希，不返回聊天正文或 API Key。</p>
           <button class="sv-btn ghost sv-btn-fill" :disabled="previewLoading" @click="loadPromptPreview">
@@ -920,7 +920,7 @@ function syncBannedPromptFromWords(): void {
       <!-- 头部 -->
       <div class="sv-modal-head">
         <h2 class="flex items-center gap-2">
-          <span class="sv-supreme pink" style="width: 18px; height: 18px" /> 设置
+          <span class="sv-supreme pink" /> 设置
         </h2>
         <button class="sv-btn ghost sv-btn-square" @click="close">✕</button>
       </div>
@@ -1249,7 +1249,7 @@ function syncBannedPromptFromWords(): void {
               <div v-if="agentMsg" class="sv-feedback ok sv-feedback-flex">{{ agentMsg }}</div>
             </div>
 
-            <div style="margin-top: 16px; border-top: 1px solid var(--sv-line); padding-top: 12px">
+            <div class="sv-separator">
               <div class="sv-field-label sub">主 Agent 提示词(运行时,注入模型)</div>
               <textarea
                 v-model="agentPromptMd"

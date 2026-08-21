@@ -154,7 +154,9 @@ watch(
         class="sv-audio-toggle"
         title="音频播放器"
         @click="store.audioOpen = true"
-      >♪</button>
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M9 18V6l10-2v12" /><circle cx="6.5" cy="18" r="2.5" /><circle cx="16.5" cy="16" r="2.5" /></svg>
+      </button>
     </template>
     <AudioPlayer v-else class="sv-audio-float" />
   </div>

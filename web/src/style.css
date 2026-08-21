@@ -86,6 +86,7 @@
   --text-md: 14px;
   --text-lg: 16px;
   --text-xl: 20px;
+  --text-2xl: 28px;
 
   /* 层叠阶梯(z-index 唯一来源;常量命名防裸值漂移) */
   --z-base: 0;
@@ -345,6 +346,10 @@ body {
   background: var(--sv-red);
   transform: rotate(-45deg);
 }
+/* 空态组合下缘距变体(替代模板内联 margin-bottom) */
+.sv-empty-geo.mb8 { margin-bottom: 8px; }
+.sv-empty-geo.mb10 { margin-bottom: 10px; }
+.sv-empty-geo.mb14 { margin-bottom: 14px; }
 .sv-empty .big {
   font-family: var(--font-display);
   font-size: 22px;
@@ -724,6 +729,7 @@ body {
   font-size: 11.5px;
   color: var(--sv-ink);
   max-width: 200px;
+  box-shadow: var(--shadow-sm); /* 激活闲置令牌:小尺寸芯片的轻投影 */
 }
 .sv-attach-chip .name {
   overflow: hidden;
@@ -959,6 +965,8 @@ body {
   letter-spacing: 0.1em;
   color: var(--sv-white);
 }
+/* 模态头色点:统一 18px,替代各模板的内联尺寸 */
+.sv-modal-head .sv-supreme { width: 18px; height: 18px; flex: none; }
 .sv-modal-head .sv-wb-count { color: rgba(255, 255, 255, 0.65); }
 /* 黑条头部内的次要文字(角色名/说明/标签):白字降透明度保证可读 */
 .sv-modal-head .sv-char-desc,
@@ -986,6 +994,8 @@ body {
   border-top: 2px solid var(--sv-ink);
   box-shadow: 0 3px 0 0 var(--sv-line);
 }
+/* 窄容器变体(如设置 Hub 左侧导航内) */
+.sv-separator.tight { margin: 10px 4px; padding-top: 10px; }
 .sv-modal-body { flex: 1; overflow-y: auto; padding: 20px; }
 .sv-modal-foot {
   padding: 14px 20px;
@@ -1287,6 +1297,24 @@ input[type="range"].sv-range::-moz-range-thumb {
 .sv-data-row .info { font-size: 12.5px; }
 .sv-data-row .info b { display: block; font-size: 13px; }
 .sv-data-row .info span { color: var(--sv-ink-faint); font-size: 11px; }
+/* 开场选择器行:整行按钮化 + 预览文本限高滚动(收编模板内联) */
+.sv-greet-row {
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  align-items: flex-start;
+  font-family: var(--font-body);
+}
+.sv-greet-row .info { min-width: 0; }
+.sv-greet-row .info b { display: flex; align-items: center; gap: 8px; }
+.sv-greet-row .preview {
+  display: block;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 110px;
+  overflow-y: auto;
+  margin-top: 4px;
+}
 /* 脚本/会话元信息小字(脚本管理、优化面板、DevTools 共用) */
 .sv-script-meta {
   color: var(--sv-ink-faint);
@@ -1351,12 +1379,41 @@ input[type="range"].sv-range::-moz-range-thumb {
   color: var(--sv-white);
   border-color: var(--sv-ink);
 }
+/* 导航序号:构成主义数字(display 字体,同 .sv-mode-idx 节奏) */
+.sv-hub-nav-idx {
+  font-family: var(--font-display);
+  font-size: 9px;
+  color: var(--sv-pink-deep);
+  letter-spacing: 0.05em;
+  flex-shrink: 0;
+}
+.sv-hub-nav-item.active .sv-hub-nav-idx { color: var(--sv-pink); }
+/* active 态右缘红斜线指向(纯装饰) */
+.sv-hub-nav-item.active::after {
+  content: '';
+  width: 14px;
+  height: 2px;
+  background: var(--sv-red);
+  transform: rotate(-45deg);
+  margin-left: auto;
+  flex-shrink: 0;
+}
 .sv-hub-content {
   flex: 1;
   min-width: 0;
   overflow-y: auto;
   padding: 20px;
   background: var(--sv-surface);
+}
+/* 右区当前分区标题(display 字体 + 构成主义双线下缘) */
+.sv-hub-content-title {
+  margin: 0 0 16px;
+  padding-bottom: 12px;
+  border-bottom: 2px solid var(--sv-ink);
+  box-shadow: 0 3px 0 0 var(--sv-line);
+  font-family: var(--font-display);
+  font-size: var(--text-md);
+  letter-spacing: 0.08em;
 }
 
 /* ===== Agent 面板内容 ===== */
@@ -1584,6 +1641,25 @@ input[type="range"].sv-range::-moz-range-thumb {
 .sv-splash-geo.f1 { width: 24px; height: 24px; top: -40px; left: -50px; animation: sv-splash-float 3s ease-in-out infinite; }
 .sv-splash-geo.f2 { width: 16px; height: 16px; bottom: -30px; right: -40px; animation: sv-splash-float 2.5s ease-in-out infinite 0.5s; }
 .sv-splash-geo.f3 { width: 12px; height: 12px; top: 15px; right: -60px; animation: sv-splash-float 3.5s ease-in-out infinite 1s; }
+
+/* 红斜线一次性扫过(构成主义签名,仅 transform/opacity;reduced-motion 全局降级后瞬时结束不可见) */
+.sv-splash-diag {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 170px;
+  height: 4px;
+  background: var(--sv-red);
+  opacity: 0; /* 基态不可见:动画与 reduced-motion 降级两态都安全 */
+  transform: rotate(-45deg);
+  animation: sv-splash-diag-sweep 0.8s cubic-bezier(0.2, 0.7, 0.3, 1) 0.35s both;
+  pointer-events: none;
+}
+@keyframes sv-splash-diag-sweep {
+  0% { opacity: 0; transform: translate(-46vw, 26vw) rotate(-45deg); }
+  25%, 75% { opacity: 1; }
+  100% { opacity: 0; transform: translate(46vw, -26vw) rotate(-45deg); }
+}
 
 /* 主界面淡入 */
 .sv-app-enter {
@@ -2150,12 +2226,14 @@ input[type="range"].sv-range::-moz-range-thumb {
   border: 2px solid var(--sv-ink);
   background: var(--sv-ink);
   color: var(--sv-white);
-  font-size: 18px;
-  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   cursor: pointer;
   box-shadow: var(--shadow-card);
   transition: transform var(--transition-fast), box-shadow var(--transition-fast), background var(--transition-fast);
 }
+.sv-audio-toggle svg { width: 18px; height: 18px; }
 .sv-audio-toggle:hover {
   background: var(--sv-pink-deep);
   border-color: var(--sv-ink);
@@ -2198,7 +2276,11 @@ input[type="range"].sv-range::-moz-range-thumb {
 }
 .sv-audio-title {
   font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
 }
+.sv-audio-title svg { width: 13px; height: 13px; }
 .sv-audio-mini {
   border: none;
   background: transparent;
@@ -2811,9 +2893,12 @@ input[type="range"].sv-range::-moz-range-thumb {
 
 /* 工具入参/出参折叠卡:细线边框容器 + 小号直角 toggle 按钮 */
 .sv-tool-io {
+  position: relative; /* 底部渐隐遮罩的定位上下文 */
   border: 1px solid var(--sv-line-strong);
   margin-top: 6px;
 }
+/* toggle + 复制按钮行 */
+.sv-tool-io-bar { display: flex; align-items: stretch; }
 .sv-tool-io-toggle {
   font-size: 10px;
   color: var(--sv-ink-dim);
@@ -2823,10 +2908,24 @@ input[type="range"].sv-range::-moz-range-thumb {
   cursor: pointer;
   font-weight: 700;
 }
+.sv-tool-io-toggle:hover { color: var(--sv-ink); background: var(--sv-pink); }
+/* 复制按钮:复制完整 JSON(截断渐隐时不丢数据) */
+.sv-tool-io-copy {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--sv-ink-dim);
+  background: transparent;
+  border: none;
+  border-left: 1px solid var(--sv-line-strong);
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.sv-tool-io-copy:hover { color: var(--sv-ink); background: var(--sv-pink-light); }
 /* 用 .sv-tool-io .sv-tool-io-body 提升特异性,覆盖 .sv-tool-panel-card pre 的旧样式 */
 .sv-tool-io .sv-tool-io-body {
   display: none;
-  max-height: 160px;
+  max-height: 280px;
   overflow: auto;
   background: var(--sv-surface);
   font-family: var(--font-mono);
@@ -2835,6 +2934,28 @@ input[type="range"].sv-range::-moz-range-thumb {
   margin: 0;
 }
 .sv-tool-io.open .sv-tool-io-body { display: block; }
+/* 内容溢出可滚时的底部渐隐(滚到底由 JS 移除;遮罩不拦截滚动) */
+.sv-tool-io.has-scroll::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 22px;
+  background: linear-gradient(transparent, var(--sv-surface));
+  pointer-events: none;
+}
+
+/* 面板内小字说明(状态详情/错误/空态提示):收编模板内联 10-11px */
+.sv-note-mini { font-size: var(--text-xs); font-weight: 500; color: var(--sv-ink-dim); }
+.sv-note-mini.err { color: var(--sv-red); }
+/* 状态总览「详情」行:value 字号降级(长错误文案可读性) */
+.sv-agent-summary-row .value.detail { font-family: var(--font-body); font-size: var(--text-xs); font-weight: 500; }
+/* 子任务状态字:色值逻辑集中进 CSS(替代模板内联色函数) */
+.sv-subtask-status { margin-left: auto; flex-shrink: 0; font-size: var(--text-2xs); font-weight: 700; color: var(--sv-ink-faint); }
+.sv-subtask-status.active { color: var(--sv-yellow-deep); }
+.sv-subtask-status.done { color: var(--sv-green); }
+.sv-subtask-status.error { color: var(--sv-red); }
 
 /* 状态徽章类族:细边框 + 当前颜色描边,替代内联状态小字 */
 .sv-badge {
@@ -2934,6 +3055,21 @@ input[type="range"].sv-range::-moz-range-thumb {
   width: 16px;
   height: 16px;
   vertical-align: middle;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.sv-ctx-item svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 /* Token 数值:显示字体放大至 16px,仪表感 */

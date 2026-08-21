@@ -348,7 +348,10 @@ onBeforeUnmount(() => {
   <div class="sv-audio-panel" :class="{ collapsed }">
     <!-- 标题栏 -->
     <div class="sv-audio-head">
-      <span class="sv-audio-title">♪ 播放器</span>
+      <span class="sv-audio-title">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M9 18V6l10-2v12" /><circle cx="6.5" cy="18" r="2.5" /><circle cx="16.5" cy="16" r="2.5" /></svg>
+        播放器
+      </span>
       <button class="sv-audio-mini" :title="collapsed ? '展开' : '折叠'" @click="collapsed = !collapsed">
         <svg v-if="collapsed" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">
           <path d="M9 5l-6 7 6 7" />
@@ -488,10 +491,15 @@ onBeforeUnmount(() => {
           <div v-for="(t, i) in editorTracks" :key="i" class="sv-audio-editor-row">
             <input v-model="t.title" class="sv-audio-input" placeholder="标题" />
             <input v-model="t.url" class="sv-audio-input" placeholder="https://…" />
-            <button class="sv-audio-btn" title="删除" @click="removeEditorRow(i)">✕</button>
+            <button class="sv-audio-btn" title="删除" @click="removeEditorRow(i)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+            </button>
           </div>
           <div class="sv-audio-row sv-audio-actions">
-            <button class="sv-audio-btn" @click="addEditorRow">＋ 新增</button>
+            <button class="sv-audio-btn" @click="addEditorRow">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+              新增
+            </button>
             <button class="sv-audio-btn sv-audio-save" @click="savePlaylist">保存</button>
             <button class="sv-audio-btn" @click="closeEditor">取消</button>
           </div>

@@ -25,6 +25,48 @@ function toggleIo(key: string): void {
   if (next.has(key)) next.delete(key);
   else next.add(key);
   openIos.value = next;
+  // 展开渲染完成后标记内容溢出的卡片(驱动底部渐隐遮罩)
+  requestAnimationFrame(() => {
+    document.querySelectorAll<HTMLElement>('.sv-tool-io.open').forEach((box) => {
+      const body = box.querySelector<HTMLElement>('.sv-tool-io-body');
+      if (body) box.classList.toggle('has-scroll', body.scrollHeight > body.clientHeight);
+    });
+  });
+}
+
+/** 折叠卡滚到底时移除渐隐遮罩(提示后面还有内容才显示) */
+function ioScroll(e: Event): void {
+  const el = e.target as HTMLElement;
+  const box = el.closest<HTMLElement>('.sv-tool-io');
+  if (!box) return;
+  box.classList.toggle('has-scroll', el.scrollTop + el.clientHeight < el.scrollHeight - 4);
+}
+
+/** 工具入参/出参序列化(展示与复制共用同一份文本) */
+function ioText(v: unknown): string {
+  return JSON.stringify(v, null, 2);
+}
+
+/** 最近一次复制成功的折叠卡 key(短暂显示「已复制」) */
+const copiedKey = ref<string | null>(null);
+let copiedTimer: ReturnType<typeof setTimeout> | null = null;
+async function copyIo(key: string, text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    // 非安全上下文兜底:临时 textarea + execCommand
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    ta.remove();
+  }
+  copiedKey.value = key;
+  if (copiedTimer) clearTimeout(copiedTimer);
+  copiedTimer = setTimeout(() => { copiedKey.value = null; }, 1200);
 }
 
 /** 工具调用唯一键:优先 callId,退化用 name+id 组合避免同名并发调用混淆 */
@@ -115,14 +157,6 @@ function subtaskDot(status: string): { cls: string; icon: string } {
   return { cls: '', icon: '·' };
 }
 
-/** 任务模式:子任务状态文字颜色 */
-function subtaskStatusColor(status: string): string {
-  const c = taskStatusClass(status);
-  if (c === 'active') return 'var(--sv-yellow-deep)';
-  if (c === 'done') return 'var(--sv-green)';
-  if (c === 'error') return 'var(--sv-red)';
-  return 'var(--sv-ink-faint)';
-}
 </script>
 
 <template>
@@ -158,7 +192,7 @@ function subtaskStatusColor(status: string): string {
           </div>
           <div class="sv-agent-summary-row" v-if="currentTask?.task.error">
             <span class="label">详情</span>
-            <span class="value" style="font-size: 11px; font-weight: 500">{{ currentTask.task.error }}</span>
+            <span class="value detail">{{ currentTask.task.error }}</span>
           </div>
         </div>
 
@@ -172,7 +206,7 @@ function subtaskStatusColor(status: string): string {
             </li>
           </ol>
           <div v-else class="sv-empty" style="padding: 16px">
-            <p style="font-size: 11px">创建并执行任务后,计划步骤将在此展示</p>
+            <p class="sv-note-mini">创建并执行任务后,计划步骤将在此展示</p>
           </div>
         </div>
 
@@ -189,15 +223,15 @@ function subtaskStatusColor(status: string): string {
               <div class="tool-name">
                 <span class="tool-status" :class="subtaskDot(st.status).cls">{{ subtaskDot(st.status).icon }}</span>
                 {{ st.name }}
-                <span :style="{ marginLeft: 'auto', fontSize: '10px', color: subtaskStatusColor(st.status) }">
+                <span class="sv-subtask-status" :class="taskStatusClass(st.status)">
                   {{ taskStatusLabel(st.status) }}
                 </span>
               </div>
-              <p v-if="st.error" style="font-size: 11px; color: var(--sv-red); margin: 6px 0 0">{{ st.error }}</p>
+              <p v-if="st.error" class="sv-note-mini err" style="margin: 6px 0 0">{{ st.error }}</p>
             </div>
           </template>
           <div v-else class="sv-empty" style="padding: 16px">
-            <p style="font-size: 11px">暂无子任务</p>
+            <p class="sv-note-mini">暂无子任务</p>
           </div>
         </div>
       </template>
@@ -224,7 +258,7 @@ function subtaskStatusColor(status: string): string {
         </div>
         <div class="sv-agent-summary-row" v-if="agent.detail">
           <span class="label">详情</span>
-          <span class="value" style="font-size: 11px; font-weight: 500">{{ agent.detail }}</span>
+          <span class="value detail">{{ agent.detail }}</span>
         </div>
       </div>
 
@@ -238,7 +272,7 @@ function subtaskStatusColor(status: string): string {
           </li>
         </ol>
         <div v-else class="sv-empty" style="padding: 16px">
-          <p style="font-size: 11px">发送消息后,Agent 推理步骤将在此展示</p>
+          <p class="sv-note-mini">发送消息后,Agent 推理步骤将在此展示</p>
         </div>
       </div>
 
@@ -255,8 +289,11 @@ function subtaskStatusColor(status: string): string {
               <span class="sv-badge run" style="margin-left: auto">执行中</span>
             </div>
             <div class="sv-tool-io" :class="{ open: isIoOpen(callKey(t) + ':in') }">
-              <button type="button" class="sv-tool-io-toggle" @click="toggleIo(callKey(t) + ':in')">入参</button>
-              <pre class="sv-tool-io-body">{{ JSON.stringify(t.input, null, 2) }}</pre>
+              <div class="sv-tool-io-bar">
+                <button type="button" class="sv-tool-io-toggle" @click="toggleIo(callKey(t) + ':in')">入参</button>
+                <button type="button" class="sv-tool-io-copy" @click="copyIo(callKey(t), ioText(t.input))">{{ copiedKey === callKey(t) ? '已复制' : '复制' }}</button>
+              </div>
+              <pre class="sv-tool-io-body" @scroll="ioScroll">{{ ioText(t.input) }}</pre>
             </div>
           </div>
         </template>
@@ -271,10 +308,13 @@ function subtaskStatusColor(status: string): string {
               <span v-else class="sv-badge pending" style="margin-left: auto">{{ t.risk }} · 等待授权</span>
             </div>
             <div class="sv-tool-io" :class="{ open: isIoOpen(callKey(t) + ':in') }">
-              <button type="button" class="sv-tool-io-toggle" @click="toggleIo(callKey(t) + ':in')">入参</button>
-              <pre class="sv-tool-io-body">{{ JSON.stringify(t.input, null, 2) }}</pre>
+              <div class="sv-tool-io-bar">
+                <button type="button" class="sv-tool-io-toggle" @click="toggleIo(callKey(t) + ':in')">入参</button>
+                <button type="button" class="sv-tool-io-copy" @click="copyIo(callKey(t), ioText(t.input))">{{ copiedKey === callKey(t) ? '已复制' : '复制' }}</button>
+              </div>
+              <pre class="sv-tool-io-body" @scroll="ioScroll">{{ ioText(t.input) }}</pre>
             </div>
-            <p style="font-size: 11px; color: var(--sv-ink-dim); margin: 6px 0 0">{{ t.reason }}</p>
+            <p class="sv-note-mini" style="margin: 6px 0 0">{{ t.reason }}</p>
             <div v-if="!isGranted(t)" class="tool-auth-btns">
               <button class="sv-btn primary sv-btn-sm" :disabled="!currentSessionId || authorizing !== null" @click="grant(t.name, t, 'once')">仅允许本次</button>
               <button class="sv-btn ghost" :disabled="!currentSessionId || authorizing !== null" @click="grant(t.name, t, 'session')">允许当前会话</button>
@@ -296,12 +336,18 @@ function subtaskStatusColor(status: string): string {
               {{ t.name }}
             </div>
             <div class="sv-tool-io" :class="{ open: isIoOpen(callKey(t) + ':in') }">
-              <button type="button" class="sv-tool-io-toggle" @click="toggleIo(callKey(t) + ':in')">入参</button>
-              <pre class="sv-tool-io-body">{{ JSON.stringify(t.input, null, 2) }}</pre>
+              <div class="sv-tool-io-bar">
+                <button type="button" class="sv-tool-io-toggle" @click="toggleIo(callKey(t) + ':in')">入参</button>
+                <button type="button" class="sv-tool-io-copy" @click="copyIo(callKey(t), ioText(t.input))">{{ copiedKey === callKey(t) ? '已复制' : '复制' }}</button>
+              </div>
+              <pre class="sv-tool-io-body" @scroll="ioScroll">{{ ioText(t.input) }}</pre>
             </div>
             <div v-if="t.output !== undefined" class="sv-tool-io" :class="{ open: isIoOpen(callKey(t) + ':out') }">
-              <button type="button" class="sv-tool-io-toggle" @click="toggleIo(callKey(t) + ':out')">出参</button>
-              <pre class="sv-tool-io-body">{{ JSON.stringify(t.output, null, 2) }}</pre>
+              <div class="sv-tool-io-bar">
+                <button type="button" class="sv-tool-io-toggle" @click="toggleIo(callKey(t) + ':out')">出参</button>
+                <button type="button" class="sv-tool-io-copy" @click="copyIo(callKey(t), ioText(t.output))">{{ copiedKey === callKey(t) ? '已复制' : '复制' }}</button>
+              </div>
+              <pre class="sv-tool-io-body" @scroll="ioScroll">{{ ioText(t.output) }}</pre>
             </div>
           </div>
         </template>
@@ -314,19 +360,25 @@ function subtaskStatusColor(status: string): string {
               {{ t.name }}
             </div>
             <div class="sv-tool-io" :class="{ open: isIoOpen(callKey(t) + ':in') }">
-              <button type="button" class="sv-tool-io-toggle" @click="toggleIo(callKey(t) + ':in')">入参</button>
-              <pre class="sv-tool-io-body">{{ JSON.stringify(t.input, null, 2) }}</pre>
+              <div class="sv-tool-io-bar">
+                <button type="button" class="sv-tool-io-toggle" @click="toggleIo(callKey(t) + ':in')">入参</button>
+                <button type="button" class="sv-tool-io-copy" @click="copyIo(callKey(t), ioText(t.input))">{{ copiedKey === callKey(t) ? '已复制' : '复制' }}</button>
+              </div>
+              <pre class="sv-tool-io-body" @scroll="ioScroll">{{ ioText(t.input) }}</pre>
             </div>
             <div v-if="t.output !== undefined" class="sv-tool-io" :class="{ open: isIoOpen(callKey(t) + ':out') }">
-              <button type="button" class="sv-tool-io-toggle" @click="toggleIo(callKey(t) + ':out')">出参</button>
-              <pre class="sv-tool-io-body">{{ JSON.stringify(t.output, null, 2) }}</pre>
+              <div class="sv-tool-io-bar">
+                <button type="button" class="sv-tool-io-toggle" @click="toggleIo(callKey(t) + ':out')">出参</button>
+                <button type="button" class="sv-tool-io-copy" @click="copyIo(callKey(t), ioText(t.output))">{{ copiedKey === callKey(t) ? '已复制' : '复制' }}</button>
+              </div>
+              <pre class="sv-tool-io-body" @scroll="ioScroll">{{ ioText(t.output) }}</pre>
             </div>
           </div>
         </template>
 
         <!-- 空态 -->
         <div v-if="!agent.toolCalls.length && !agent.pendingTool" class="sv-empty" style="padding: 16px">
-          <p style="font-size: 11px">暂无工具调用</p>
+          <p class="sv-note-mini">暂无工具调用</p>
         </div>
       </div>
       </template>

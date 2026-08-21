@@ -25,6 +25,8 @@ const letters = 'KEDAI'.split('');
     <div class="sv-splash-geo pink f1" />
     <div class="sv-splash-geo deep f2" />
     <div class="sv-splash-geo soft f3" />
+    <!-- 构成主义签名:红斜线一次性扫过 -->
+    <div class="sv-splash-diag" />
 
     <div class="sv-splash-content">
       <img class="sv-splash-logo" src="/logo.png" alt="Kedai" draggable="false" />

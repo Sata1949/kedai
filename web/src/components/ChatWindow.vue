@@ -277,6 +277,11 @@ async function hydrateRemoteResources(): Promise<void> {
     const inject = async (): Promise<void> => {
       if (injected) return;
       injected = true;
+      /** iframe 不继承宿主 CSS 变量:运行时读取令牌拼 srcdoc 兜底样式,避免硬编码色值漂移 */
+      const fallbackStyle = (): string => {
+        const red = getComputedStyle(document.documentElement).getPropertyValue('--sv-red').trim() || '#e3342f';
+        return `--sv-red:${red};--font-body:'Segoe UI','PingFang SC','Microsoft YaHei',system-ui,sans-serif;padding:16px;font-family:var(--font-body);color:var(--sv-red)`;
+      };
       try {
         const res = await authorizedFetch(`${BASE}/resource/proxy?url=${encodeURIComponent(url)}`, undefined, false);
         const body = (await res.json().catch(() => ({}))) as { ok?: boolean; html?: string; base_url?: string; error?: string };
@@ -284,10 +289,10 @@ async function hydrateRemoteResources(): Promise<void> {
           const html = body.base_url ? `<base href="${escapeAttr(body.base_url)}">\n${body.html ?? ''}` : (body.html ?? '');
           win.postMessage({ channel: 'kedai-resource-frame-v1', nonce, type: 'boot', html }, '*');
         } else {
-          frame.srcdoc = `<div style="--sv-red:#e3342f;--font-body:'Segoe UI','PingFang SC','Microsoft YaHei',system-ui,sans-serif;padding:16px;font-family:var(--font-body);color:var(--sv-red)">资源界面加载失败：${escapeAttr(body.error ?? '未知错误')}</div>`;
+          frame.srcdoc = `<div style="${fallbackStyle()}">资源界面加载失败：${escapeAttr(body.error ?? '未知错误')}</div>`;
         }
       } catch (e) {
-        frame.srcdoc = `<div style="--sv-red:#e3342f;--font-body:'Segoe UI','PingFang SC','Microsoft YaHei',system-ui,sans-serif;padding:16px;font-family:var(--font-body);color:var(--sv-red)">资源界面加载失败：${escapeAttr(String((e as Error).message || '网络错误'))}</div>`;
+        frame.srcdoc = `<div style="${fallbackStyle()}">资源界面加载失败：${escapeAttr(String((e as Error).message || '网络错误'))}</div>`;
       }
     };
     const onMessage = (ev: MessageEvent): void => {
@@ -677,7 +682,7 @@ watch(
       <div class="sv-modal sm">
         <div class="sv-modal-head">
           <h2 class="flex items-center gap-2">
-            <span class="sv-supreme pink-deep" style="width: 18px; height: 18px" />
+            <span class="sv-supreme pink-deep" />
             {{ greetingPickerMode === 'new' ? '选择开场 · 新建会话' : '选择开场 · 重置当前会话' }}
           </h2>
           <button class="sv-btn ghost sv-btn-square" @click="greetingPickerOpen = false">✕</button>
@@ -692,18 +697,15 @@ watch(
             <button
               v-for="(g, i) in currentGreetings"
               :key="i"
-              class="sv-data-row"
-              style="width: 100%; text-align: left; cursor: pointer; align-items: flex-start; font-family: var(--font-body)"
+              class="sv-data-row sv-greet-row"
               @click="pickGreeting(i)"
             >
-              <div class="info" style="min-width: 0">
-                <b style="display: flex; align-items: center; gap: 8px">
+              <div class="info">
+                <b>
                   {{ i === 0 ? '主开场' : `备用 ${i}` }}
                   <span v-if="i === 0" class="sv-tag sv-tag-on">默认</span>
                 </b>
-                <span
-                  style="display: block; white-space: pre-wrap; word-break: break-word; max-height: 110px; overflow-y: auto; margin-top: 4px"
-                >{{ g }}</span>
+                <span class="preview">{{ g }}</span>
               </div>
             </button>
           </div>

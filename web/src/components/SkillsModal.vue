@@ -64,7 +64,7 @@ onMounted(() => void store.loadSkills());
     <div class="sv-modal md">
       <div class="sv-modal-head">
         <h2 class="flex items-center gap-2">
-          <span class="sv-supreme pink" style="width: 18px; height: 18px" /> 技能库
+          <span class="sv-supreme pink" /> 技能库
         </h2>
         <button class="sv-btn ghost sv-btn-square" @click="close">✕</button>
       </div>
@@ -117,10 +117,11 @@ onMounted(() => void store.loadSkills());
             </div>
           </div>
           <div v-if="skills.length === 0" class="sv-empty" style="padding: 20px 8px">
-            <div class="sv-empty-geo" style="margin-bottom: 8px">
-              <span class="sq black" style="width: 12px; height: 12px" />
+            <div class="sv-empty-geo mb8">
+              <span class="sq black" />
               <span class="sq pink" />
-              <span class="sq deep" style="width: 5px; height: 5px" />
+              <span class="sq deep" />
+            <i class="diag" />
             </div>
             <p style="font-size: 12px">技能库为空</p>
             <p style="font-size: 11px">点击「导入技能」选择 JSON 文件</p>

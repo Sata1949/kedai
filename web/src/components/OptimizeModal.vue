@@ -139,7 +139,7 @@ const close = (): void => {
       <!-- 头部 -->
       <div class="sv-modal-head">
         <h2 class="flex items-center gap-2">
-          <span class="sv-supreme pink" style="width: 18px; height: 18px" /> 优化面板
+          <span class="sv-supreme pink" /> 优化面板
         </h2>
         <button class="sv-btn ghost sv-btn-square" @click="close">✕</button>
       </div>
@@ -216,7 +216,16 @@ const close = (): void => {
               <b style="font-size: 12px; width: 120px">{{ r.label }}</b>
               <span class="sv-script-meta" style="font-size: 12px">{{ r.value }}</span>
             </div>
-            <p v-if="usageRows.length === 0" class="sv-script-meta" style="font-size: 11px">最近一次请求的 token 用量将在发送消息后显示。</p>
+            <div v-if="usageRows.length === 0" class="sv-empty" style="padding: 14px 0 4px">
+              <div class="sv-empty-geo mb8">
+                <span class="sq black" />
+                <span class="sq pink" />
+                <span class="sq deep" />
+                <i class="diag" />
+              </div>
+              <p style="font-size: 12px">暂无用量数据</p>
+              <p style="font-size: 11px">最近一次请求的 token 用量将在发送消息后显示</p>
+            </div>
           </div>
         </div>
 
