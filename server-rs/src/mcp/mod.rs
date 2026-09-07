@@ -75,20 +75,17 @@ impl McpManager {
                         .attach(cfg.name.clone(), client, Some(process), registry)
                         .await
                     {
-                        Ok(n) => crate::utils::logger::info(
-                            "MCP 服务器已装配",
-                            &[("server", Value::from(tag)), ("tools", Value::from(n))],
-                        ),
-                        Err(e) => crate::utils::logger::warn(
-                            "MCP 服务器装配失败,已禁用该服务器",
-                            &[("server", Value::from(tag)), ("error", Value::from(e))],
+                        Ok(n) => tracing::info!(server = tag, tools = n, "MCP 服务器已装配"),
+                        Err(e) => tracing::warn!(
+                            server = tag,
+                            error = e,
+                            "MCP 服务器装配失败,已禁用该服务器"
                         ),
                     }
                 }
-                Err(e) => crate::utils::logger::warn(
-                    "MCP 服务器启动失败,已禁用该服务器",
-                    &[("server", Value::from(tag)), ("error", Value::from(e))],
-                ),
+                Err(e) => {
+                    tracing::warn!(server = tag, error = e, "MCP 服务器启动失败,已禁用该服务器")
+                }
             }
         }
     }

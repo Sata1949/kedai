@@ -27,7 +27,6 @@ use crate::services::character_service::CharacterService;
 use crate::services::prompt_inject_service::PromptInjectService;
 use crate::services::settings_service::{AppMode, RuntimeSettings};
 use crate::services::world_book_service::WorldBookService;
-use crate::utils::logger;
 use rusqlite::{params, OptionalExtension};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -308,13 +307,7 @@ fn read_or_log(db: &Db, op: &str) -> Option<PooledRead> {
     match db.read() {
         Ok(conn) => Some(conn),
         Err(e) => {
-            logger::warn(
-                "DB 只读连接获取失败,回退空列表",
-                &[
-                    ("op", serde_json::Value::from(op)),
-                    ("error", serde_json::Value::from(e)),
-                ],
-            );
+            tracing::warn!(op = op, error = e, "DB 只读连接获取失败,回退空列表");
             None
         }
     }

@@ -22,12 +22,10 @@ pub(super) async fn apply_mvu_patches(
                 .sessions
                 .save_assistant_vars(session_id, assistant_vars)
             {
-                logger::warn(
-                    "酒馆助手变量树落库失败",
-                    &[
-                        ("session_id", Value::String(session_id.to_string())),
-                        ("error", Value::String(e)),
-                    ],
+                tracing::warn!(
+                    session_id = session_id.to_string(),
+                    error = e,
+                    "酒馆助手变量树落库失败"
                 );
             }
             let tree = assistant_vars.tree().clone();
@@ -43,12 +41,10 @@ pub(super) async fn apply_mvu_patches(
             Some(tree)
         }
         Err(e) => {
-            logger::warn(
-                "酒馆助手变量补丁应用失败",
-                &[
-                    ("session_id", Value::String(session_id.to_string())),
-                    ("error", Value::String(e)),
-                ],
+            tracing::warn!(
+                session_id = session_id.to_string(),
+                error = e,
+                "酒馆助手变量补丁应用失败"
             );
             None
         }
@@ -334,12 +330,10 @@ pub(super) async fn generate_mvu_status(
                         contract, &patches, "agent",
                     );
                     if !gated.rejected.is_empty() || !gated.pending.is_empty() {
-                        logger::warn(
-                            "契约门控过滤了部分变量补丁",
-                            &[
-                                ("rejected", json!(gated.rejected.len())),
-                                ("pending", json!(gated.pending.len())),
-                            ],
+                        tracing::warn!(
+                            rejected = gated.rejected.len(),
+                            pending = gated.pending.len(),
+                            "契约门控过滤了部分变量补丁"
                         );
                     }
                     if contract.is_some() && !gated.applied.is_empty() {
@@ -391,10 +385,7 @@ pub(super) async fn generate_mvu_status(
                         status_bar = apply_status_bar_update(engine, session_id, history, &text);
                     }
                 }
-                other => logger::warn(
-                    "未知的 mvu 状态工具调用",
-                    &[("name", Value::String(other.to_string()))],
-                ),
+                other => tracing::warn!(name = other.to_string(), "未知的 mvu 状态工具调用"),
             }
         }
     } else {
@@ -404,12 +395,10 @@ pub(super) async fn generate_mvu_status(
         let gated =
             crate::contracts::gate_assistant_patches_detailed(contract, &raw_patches, "agent");
         if !gated.rejected.is_empty() || !gated.pending.is_empty() {
-            logger::warn(
-                "契约门控过滤了部分文本协议补丁",
-                &[
-                    ("rejected", json!(gated.rejected.len())),
-                    ("pending", json!(gated.pending.len())),
-                ],
+            tracing::warn!(
+                rejected = gated.rejected.len(),
+                pending = gated.pending.len(),
+                "契约门控过滤了部分文本协议补丁"
             );
         }
         if contract.is_some() && !gated.applied.is_empty() {

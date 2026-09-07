@@ -379,7 +379,7 @@ impl TaskService {
                         if tools_given {
                             tool_calls.push(call);
                         } else {
-                            logger::warn("任务模式 LLM 流出现非预期 ToolCall 块(generate_text 未注册工具,已忽略)", &[])
+                            tracing::warn!("任务模式 LLM 流出现非预期 ToolCall 块(generate_text 未注册工具,已忽略)")
                         }
                     }
                 }
@@ -411,19 +411,11 @@ impl TaskService {
         let (res, model, connector_type) = match timed {
             Ok(v) => v,
             Err(_) => {
-                logger::warn(
-                    "任务模式 LLM 生成超时(看门狗触发)",
-                    &[
-                        (
-                            "timeout_s",
-                            serde_json::Value::from(TASK_LLM_TOTAL_TIMEOUT.as_secs()),
-                        ),
-                        ("max_tokens", serde_json::Value::from(max_tokens)),
-                        (
-                            "elapsed_ms",
-                            serde_json::Value::from(started.elapsed().as_millis() as u64),
-                        ),
-                    ],
+                tracing::warn!(
+                    timeout_s = TASK_LLM_TOTAL_TIMEOUT.as_secs(),
+                    max_tokens = max_tokens,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "任务模式 LLM 生成超时(看门狗触发)"
                 );
                 let err = format!(
                     "模型调用超过 {}s 未完成(上游停滞或接口占用),已中止;可重新执行任务",
@@ -486,41 +478,41 @@ impl TaskService {
             started.elapsed(),
             status,
         );
-        let log_fields: &[(&str, serde_json::Value)] = &[
-            ("model", serde_json::Value::String(model)),
-            ("connector", serde_json::Value::String(connector_type)),
-            ("max_tokens", serde_json::Value::from(max_tokens)),
-            ("temperature", serde_json::Value::from(temperature)),
-            ("top_p", serde_json::Value::from(top_p)),
-            ("chars", serde_json::Value::from(out.text.chars().count())),
-            (
-                "finish_reason",
-                serde_json::Value::from(out.finish_reason.as_deref().unwrap_or("")),
-            ),
-            ("prompt_tokens", serde_json::Value::from(out.prompt_tokens)),
-            (
-                "completion_tokens",
-                serde_json::Value::from(out.completion_tokens),
-            ),
-            (
-                "reasoning_tokens",
-                serde_json::Value::from(out.reasoning_tokens),
-            ),
-            (
-                "reasoning_chars",
-                serde_json::Value::from(out.reasoning_chars),
-            ),
-            (
-                "elapsed_ms",
-                serde_json::Value::from(started.elapsed().as_millis() as u64),
-            ),
-        ];
+        // D-4:字段表由切片改为宏实参,warn/info 两路各写一份(tracing 宏不支持字段表复用)
         if out.text.trim().is_empty() && out.tool_calls.is_empty() {
             // 空内容是任务模式最常见的失败形态,提升为 warn 便于日志扫描定位
             // (带 tool_calls 的侦察轮不算空:工具请求即本轮产出,与落库 status 同口径)
-            logger::warn("任务模式 LLM 返回空内容", log_fields);
+            tracing::warn!(
+                model = model.as_str(),
+                connector = connector_type.as_str(),
+                max_tokens = max_tokens,
+                temperature = temperature,
+                top_p = top_p,
+                chars = out.text.chars().count(),
+                finish_reason = out.finish_reason.as_deref().unwrap_or(""),
+                prompt_tokens = out.prompt_tokens,
+                completion_tokens = out.completion_tokens,
+                reasoning_tokens = out.reasoning_tokens,
+                reasoning_chars = out.reasoning_chars,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "任务模式 LLM 返回空内容"
+            );
         } else {
-            logger::info("任务模式 LLM 生成完成", log_fields);
+            tracing::info!(
+                model = model.as_str(),
+                connector = connector_type.as_str(),
+                max_tokens = max_tokens,
+                temperature = temperature,
+                top_p = top_p,
+                chars = out.text.chars().count(),
+                finish_reason = out.finish_reason.as_deref().unwrap_or(""),
+                prompt_tokens = out.prompt_tokens,
+                completion_tokens = out.completion_tokens,
+                reasoning_tokens = out.reasoning_tokens,
+                reasoning_chars = out.reasoning_chars,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "任务模式 LLM 生成完成"
+            );
         }
         Ok(out)
     }
@@ -675,10 +667,7 @@ impl TaskService {
                     if give_tools {
                         // 侦察轮失败不沉规划(侦察是增强环节):回退无工具最终轮,
                         // 与旧版单次规划行为等价;失败行已由统一出口落库(status=error)
-                        logger::warn(
-                            "规划器侦察轮调用失败,回退无工具直接规划",
-                            &[("error", serde_json::Value::from(e))],
-                        );
+                        tracing::warn!(error = e, "规划器侦察轮调用失败,回退无工具直接规划");
                         scout_round = PLANNER_SCOUT_MAX_ROUNDS;
                         continue;
                     }
@@ -1048,14 +1037,12 @@ pub(crate) async fn plan_task_retry(
             Err(e) => last_err = e,
         }
         let reason = out.finish_reason.as_deref().unwrap_or("");
-        logger::warn(
-            "任务模式规划输出解析失败,准备重试",
-            &[
-                ("attempt", serde_json::Value::from(attempt)),
-                ("finish_reason", serde_json::Value::from(reason)),
-                ("max_tokens", serde_json::Value::from(max_tokens)),
-                ("error", serde_json::Value::from(last_err.clone())),
-            ],
+        tracing::warn!(
+            attempt = attempt,
+            finish_reason = reason,
+            max_tokens = max_tokens,
+            error = last_err.clone(),
+            "任务模式规划输出解析失败,准备重试"
         );
         if reason == "length" || out.text.trim().is_empty() {
             max_tokens = (max_tokens.saturating_mul(2)).min(RETRY_MAX_TOKENS_CAP);
@@ -1093,14 +1080,12 @@ async fn plan_revise_retry(
             Err(e) => last_err = e,
         }
         let reason = out.finish_reason.as_deref().unwrap_or("");
-        logger::warn(
-            "规划对话修订输出解析失败,准备重试",
-            &[
-                ("attempt", serde_json::Value::from(attempt)),
-                ("finish_reason", serde_json::Value::from(reason)),
-                ("max_tokens", serde_json::Value::from(max_tokens)),
-                ("error", serde_json::Value::from(last_err.clone())),
-            ],
+        tracing::warn!(
+            attempt = attempt,
+            finish_reason = reason,
+            max_tokens = max_tokens,
+            error = last_err.clone(),
+            "规划对话修订输出解析失败,准备重试"
         );
         if reason == "length" || out.text.trim().is_empty() {
             max_tokens = (max_tokens.saturating_mul(2)).min(RETRY_MAX_TOKENS_CAP);

@@ -21,17 +21,11 @@ pub(super) fn recover_orphan_tasks(db: &Db) -> Vec<String> {
         }) {
         Ok(Ok(ids)) => ids,
         Ok(Err(e)) => {
-            logger::warn(
-                "孤儿任务恢复查询失败",
-                &[("error", serde_json::Value::from(e.to_string()))],
-            );
+            tracing::warn!(error = e.to_string(), "孤儿任务恢复查询失败");
             return Vec::new();
         }
         Err(e) => {
-            logger::warn(
-                "孤儿任务恢复 prepare 失败",
-                &[("error", serde_json::Value::from(e.to_string()))],
-            );
+            tracing::warn!(error = e.to_string(), "孤儿任务恢复 prepare 失败");
             return Vec::new();
         }
     };
@@ -45,9 +39,9 @@ pub(super) fn recover_orphan_tasks(db: &Db) -> Vec<String> {
         )
         .unwrap_or(0);
     if changed > 0 {
-        logger::info(
-            "服务启动:遗留执行中任务已标记中断(孤儿恢复)",
-            &[("count", serde_json::Value::from(changed))],
+        tracing::info!(
+            count = changed,
+            "服务启动:遗留执行中任务已标记中断(孤儿恢复)"
         );
     }
     ids
@@ -278,12 +272,10 @@ impl TaskService {
             ],
         );
         if let Err(e) = result {
-            crate::utils::logger::warn(
-                "任务 usage 落库失败",
-                &[
-                    ("op", serde_json::Value::from("task_usage insert")),
-                    ("error", serde_json::Value::from(e.to_string())),
-                ],
+            tracing::warn!(
+                op = "task_usage insert",
+                error = e.to_string(),
+                "任务 usage 落库失败"
             );
         } else {
             self.emit_event(
@@ -357,12 +349,10 @@ impl TaskService {
             ],
         );
         if let Err(e) = result {
-            crate::utils::logger::warn(
-                "任务 LLM 调用追踪落库失败",
-                &[
-                    ("op", serde_json::Value::from("task_llm_calls insert")),
-                    ("error", serde_json::Value::from(e.to_string())),
-                ],
+            tracing::warn!(
+                op = "task_llm_calls insert",
+                error = e.to_string(),
+                "任务 LLM 调用追踪落库失败"
             );
         } else {
             let step = step_index

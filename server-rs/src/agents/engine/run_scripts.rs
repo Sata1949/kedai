@@ -221,13 +221,11 @@ impl AgentEngine {
                 crate::scripts::runtime::EvalOutcome::Error("脚本执行任务被取消".into())
             });
             if let crate::scripts::runtime::EvalOutcome::Error(msg) = outcome {
-                logger::warn(
-                    "角色脚本执行失败",
-                    &[
-                        ("character_id", Value::String(character_id.to_string())),
-                        ("script", Value::String(script.name)),
-                        ("error", Value::String(msg)),
-                    ],
+                tracing::warn!(
+                    character_id = character_id.to_string(),
+                    script = script.name,
+                    error = msg,
+                    "角色脚本执行失败"
                 );
             }
         }

@@ -18,7 +18,6 @@ use crate::parsing::assistant::{
 };
 use crate::parsing::world_book::WorldEntry;
 use crate::services::prompt_inject_service::PromptInjectConfig;
-use crate::utils::logger;
 use serde_json::Value;
 
 use super::{
@@ -161,12 +160,10 @@ impl AgentEngine {
                         .await
                 };
                 if let Ok(Err(e)) | Err(e) = save_result.map_err(|e| e.to_string()) {
-                    logger::warn(
-                        "初始变量树落库失败",
-                        &[
-                            ("session_id", Value::String(session_id.to_string())),
-                            ("error", Value::String(e)),
-                        ],
+                    tracing::warn!(
+                        session_id = session_id.to_string(),
+                        error = e,
+                        "初始变量树落库失败"
                     );
                 }
             }
@@ -487,9 +484,9 @@ impl AgentEngine {
                 }
             }
             Ok(None) => {}
-            Err(error) => logger::warn(
-                "运行时主 Agent 提示词读取失败，已回退其余提示词层",
-                &[("error", Value::String(error))],
+            Err(error) => tracing::warn!(
+                error = error,
+                "运行时主 Agent 提示词读取失败，已回退其余提示词层"
             ),
         }
         // 历史压缩摘要:独立 system 消息槽(缓存感知管线·改造 A),插在首个 system

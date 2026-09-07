@@ -6,8 +6,6 @@
 // 可见性说明:trim_to_context 原 pub(super)(= 对 engine 可见)改为
 // pub(in crate::agents::engine),供 messages/mod.rs 以相同可见性再导出,范围不变。
 use crate::models::types::LlmMessage;
-use crate::utils::logger;
-use serde_json::json;
 
 /// R3b:已摘要 tool 消息的幂等标记前缀(替换内容以此开头;
 /// 再次扫描时凭此前缀跳过,不重复摘要、不占 keep_rounds 名额)。
@@ -57,16 +55,14 @@ pub(in crate::agents::engine) fn trim_to_context(
             let head: String = text.chars().take(max_head).collect();
             let tail: String = text.chars().skip(total_chars - keep_tail).collect();
             sys.content = format!("{head}\n\n[上下文裁剪：中间非核心内容已省略]\n\n{tail}");
-            logger::warn(
-                "上下文超限:系统提示词被截断(保留尾部注入块)",
-                &[
-                    ("budget", json!(budget)),
-                    ("protected_chars", json!(keep_tail)),
-                ],
+            tracing::warn!(
+                budget = budget,
+                protected_chars = keep_tail,
+                "上下文超限:系统提示词被截断(保留尾部注入块)"
             );
         } else {
             sys.content = text.chars().take(n).collect();
-            logger::warn("上下文超限:系统提示词被截断", &[("budget", json!(budget))]);
+            tracing::warn!(budget = budget, "上下文超限:系统提示词被截断");
         }
     }
 }

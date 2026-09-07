@@ -39,6 +39,11 @@ r2d2 = "0.8.10"
 r2d2_sqlite = "0.35.0"
 # 资源页代理按 charset 解码(GBK 等中文编码的作者页面,from_utf8_lossy 会乱码)
 encoding_rs = "0.8"
+# D-4:日志迁移到 tracing 生态——热路径不再持全局锁,文件/stdout 双写走 non-blocking channel;
+# json 特性保留(结构化输出能力),实际行格式由自定义 PinoFormat 保证与旧 logger 逐字段一致
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+tracing-appender = "0.2"
 
 # Windows DPAPI:API Key 静态加密(CryptProtectData / CryptUnprotectData)
 # 版本与传递依赖(tokio/rustix/schannel 等)对齐到 0.61,消除 Cargo.lock 中 0.59/0.61 双版本并存

@@ -1,8 +1,6 @@
 // 提示词注入服务:简单模式(字数/转述/对话/视角)+ 复杂模式楼层系统
 // 持久化到 data/prompt_floors.json;全局作用域,所有会话生效。
-use crate::utils::logger;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 /// 简单模式「字数要求」→ 输出预算下限(纯函数,供 chat/send 协调 max_tokens):
@@ -285,18 +283,18 @@ impl PromptInjectConfig {
             Ok(text) => match serde_json::from_str::<PromptInjectConfig>(&text) {
                 Ok(cfg) => cfg,
                 Err(e) => {
-                    logger::error(
-                        "提示词注入配置解析失败,已回退默认配置",
-                        &[("error", Value::String(e.to_string()))],
+                    tracing::error!(
+                        error = e.to_string(),
+                        "提示词注入配置解析失败,已回退默认配置"
                     );
                     PromptInjectConfig::default()
                 }
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => PromptInjectConfig::default(),
             Err(e) => {
-                logger::error(
-                    "提示词注入配置读取失败,已回退默认配置",
-                    &[("error", Value::String(e.to_string()))],
+                tracing::error!(
+                    error = e.to_string(),
+                    "提示词注入配置读取失败,已回退默认配置"
                 );
                 PromptInjectConfig::default()
             }

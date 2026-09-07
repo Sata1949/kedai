@@ -51,7 +51,7 @@ impl AgentEngine {
             flag,
         )
         .await?;
-        logger::agent_step(session_id, "plan", Some(&plan.summary));
+        logging::agent_step(session_id, "plan", Some(&plan.summary));
         check_aborted(abort)?;
         Ok(plan)
     }

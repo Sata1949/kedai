@@ -9,7 +9,6 @@
 // 注意:kill 只杀直接子进程;若服务器命令是 cmd/sh 包装再启孙进程,孙进程不保证回收
 // (v1 保守语义,注释留痕;如需进程组级清理另起批次)。
 use crate::services::settings_service::McpServerConfig;
-use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
@@ -57,15 +56,10 @@ impl McpProcess {
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    crate::utils::logger::warn(
-                        "MCP 服务器 stderr",
-                        &[
-                            ("server", Value::from(tag.clone())),
-                            (
-                                "line",
-                                Value::from(line.chars().take(500).collect::<String>()),
-                            ),
-                        ],
+                    tracing::warn!(
+                        server = tag.clone(),
+                        line = line.chars().take(500).collect::<String>(),
+                        "MCP 服务器 stderr"
                     );
                 }
             })
@@ -106,10 +100,7 @@ impl Drop for McpProcess {
         // kill_on_drop(true) 下 Child 析构已会 start_kill;这里显式再调一次是
         // 幂等保险(进程已退出时 start_kill 返回 Err,忽略)。
         let _ = self.child.start_kill();
-        crate::utils::logger::info(
-            "MCP 服务器进程已终止",
-            &[("server", Value::from(self.name.clone()))],
-        );
+        tracing::info!(server = self.name.clone(), "MCP 服务器进程已终止");
     }
 }
 

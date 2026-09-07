@@ -74,8 +74,6 @@ fn secure_test_app(token: &str, strict_client_header: bool) -> Result<axum::Rout
 /// - Tauri 壳:`tauri::async_runtime::spawn` 本函数,进程退出即服务停止
 ///   (Windows GUI 进程收不到 Ctrl+C,serve 将持续运行,无副作用)。
 pub async fn run_server(config: config::AppConfig) -> Result<(), String> {
-    use serde_json::Value;
-
     let loopback = matches!(config.host.as_str(), "127.0.0.1" | "localhost" | "::1");
     if !loopback && !config.allow_remote {
         return Err("非 loopback 监听必须显式设置 KEDAI_ALLOW_REMOTE=1".into());
@@ -84,26 +82,22 @@ pub async fn run_server(config: config::AppConfig) -> Result<(), String> {
         return Err("非 loopback 监听要求由环境或启动器注入至少 32 字符的 KEDAI_API_TOKEN".into());
     }
 
-    // 初始化日志(双写:控制台 + logs/kedai-YYYY-MM-DD.log)
-    utils::logger::init(&config.log_level, &config.log_dir);
+    // 初始化日志(tracing,non-blocking 双写:控制台 + logs/kedai-YYYY-MM-DD.log);
+    // guard 持有到 run_server 返回,保证优雅关闭时 non-blocking 缓冲落盘
+    let _log_guards = utils::logging::init(&config.log_level, &config.log_dir);
 
-    utils::logger::info(
-        "Kedai server starting",
-        &[
-            ("version", Value::String(env!("CARGO_PKG_VERSION").into())),
-            ("host", Value::String(config.host.clone())),
-            ("port", Value::Number(config.port.into())),
-            (
-                "data_dir",
-                Value::String(config.data_dir.to_string_lossy().to_string()),
-            ),
-            ("connector", Value::String(config.connector.clone())),
-            ("model", Value::String(config.openai_model.clone())),
-        ],
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        host = config.host.as_str(),
+        port = config.port,
+        data_dir = config.data_dir.to_string_lossy().as_ref(),
+        connector = config.connector.as_str(),
+        model = config.openai_model.as_str(),
+        "Kedai server starting"
     );
 
     let state = api::app_state::AppState::new(config).map_err(|e| {
-        utils::logger::error("初始化失败", &[("error", Value::String(e.clone()))]);
+        tracing::error!(error = e.as_str(), "初始化失败");
         format!("初始化失败: {e}")
     })?;
 
@@ -113,12 +107,10 @@ pub async fn run_server(config: config::AppConfig) -> Result<(), String> {
 
     let addr = format!("{}:{}", state.config.host, state.config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
-        utils::logger::error(
-            "端口绑定失败",
-            &[
-                ("addr", Value::String(addr.clone())),
-                ("error", Value::String(e.to_string())),
-            ],
+        tracing::error!(
+            addr = addr.as_str(),
+            error = e.to_string().as_str(),
+            "端口绑定失败"
         );
         format!("无法监听 {addr}: {e}")
     })?;
@@ -131,12 +123,10 @@ pub async fn run_server(config: config::AppConfig) -> Result<(), String> {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    utils::logger::info(
-        "Kedai 已启动",
-        &[
-            ("url", Value::String(format!("http://{addr}/"))),
-            ("model", Value::String(effective_model)),
-        ],
+    tracing::info!(
+        url = format!("http://{addr}/").as_str(),
+        model = effective_model.as_str(),
+        "Kedai 已启动"
     );
     println!("[OK] Kedai 已启动 → http://{addr}/");
 
@@ -156,5 +146,5 @@ pub async fn run_server(config: config::AppConfig) -> Result<(), String> {
 /// 优雅关闭:Ctrl+C(命令行场景)。GUI 进程无控制台信号,此 future 不会完成。
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
-    utils::logger::info("收到退出信号,正在关闭", &[]);
+    tracing::info!("收到退出信号,正在关闭");
 }

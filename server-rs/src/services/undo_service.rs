@@ -366,9 +366,9 @@ impl UndoService {
                     .ok()
                     .and_then(|out| out.get("message_id").and_then(|v| v.as_i64()));
                 let Some(mid) = mid else {
-                    crate::utils::logger::warn(
-                        "回退快照丢弃:write 气泡输出缺 message_id",
-                        &[("session_id", json!(session_id))],
+                    tracing::warn!(
+                        session_id = session_id,
+                        "回退快照丢弃:write 气泡输出缺 message_id"
                     );
                     return;
                 };
@@ -381,9 +381,9 @@ impl UndoService {
                     .unwrap_or(0);
                 let inserted = self.new_memory_id_after(&session_id, before);
                 let Some(inserted) = inserted else {
-                    crate::utils::logger::warn(
-                        "回退快照丢弃:memory_write 后未找到新记忆行",
-                        &[("session_id", json!(session_id))],
+                    tracing::warn!(
+                        session_id = session_id,
+                        "回退快照丢弃:memory_write 后未找到新记忆行"
                     );
                     return;
                 };
@@ -408,9 +408,9 @@ impl UndoService {
             ],
         );
         if let Err(e) = r {
-            crate::utils::logger::warn(
-                "回退快照落库失败(不影响工具执行结果)",
-                &[("error", json!(e.to_string()))],
+            tracing::warn!(
+                error = e.to_string(),
+                "回退快照落库失败(不影响工具执行结果)"
             );
         }
     }

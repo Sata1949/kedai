@@ -30,12 +30,6 @@ pub mod world_book_service;
 /// 列表函数本就按 filter_map 丢弃坏行的 best-effort 语义工作,prepare/参数绑定失败
 /// (schema 级异常)同样不回传 panic——阻塞线程 panic 会经 JoinError 放大为 500。
 pub(crate) fn log_query_failure<T>(op: &str, e: rusqlite::Error) -> Vec<T> {
-    crate::utils::logger::warn(
-        "DB 列表查询失败,回退空列表",
-        &[
-            ("op", serde_json::json!(op)),
-            ("error", serde_json::json!(e.to_string())),
-        ],
-    );
+    tracing::warn!(op = op, error = e.to_string(), "DB 列表查询失败,回退空列表");
     Vec::new()
 }

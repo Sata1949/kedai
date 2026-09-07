@@ -1,9 +1,7 @@
 // 音频服务:bgm/ambient 双通道播放器状态,持久化到 data/audio.json
 // 契约对齐酒馆助手 @types/function/audio.d.ts(setAudioSettings 为部分字段合并,
 // volume clamp 0-100,replace/append 播放列表 URL 协议白名单)。
-use crate::utils::logger;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 /// 播放模式(与酒馆助手 audio.d.ts 的 AudioSettings.mode 对齐)
@@ -167,19 +165,13 @@ impl AudioState {
             Ok(text) => match serde_json::from_str::<AudioState>(&text) {
                 Ok(state) => state,
                 Err(e) => {
-                    logger::error(
-                        "音频配置解析失败,已回退默认配置",
-                        &[("error", Value::String(e.to_string()))],
-                    );
+                    tracing::error!(error = e.to_string(), "音频配置解析失败,已回退默认配置");
                     AudioState::default()
                 }
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => AudioState::default(),
             Err(e) => {
-                logger::error(
-                    "音频配置读取失败,已回退默认配置",
-                    &[("error", Value::String(e.to_string()))],
-                );
+                tracing::error!(error = e.to_string(), "音频配置读取失败,已回退默认配置");
                 AudioState::default()
             }
         }

@@ -36,7 +36,7 @@ use crate::services::token_service::TokenService;
 use crate::services::user_script_service::UserScriptService;
 use crate::services::world_book_service::WorldBookService;
 use crate::tools::registry::ToolRegistry;
-use crate::utils::logger;
+use crate::utils::logging;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -231,7 +231,7 @@ impl AgentEngine {
             .get(session_id)
         {
             run.flag.abort();
-            logger::agent_step(session_id, "interrupt", Some("用户请求停止生成"));
+            logging::agent_step(session_id, "interrupt", Some("用户请求停止生成"));
         }
     }
 
@@ -276,7 +276,7 @@ impl AgentEngine {
         let agent_session = match self.agent_sessions.create(&session_id, &req.mode) {
             Ok(a) => a,
             Err(e) => {
-                logger::error("Agent 会话初始化失败", &[("error", Value::String(e))]);
+                tracing::error!(error = e, "Agent 会话初始化失败");
                 self.finish_run(&session_id, run_id);
                 return None;
             }
@@ -382,7 +382,7 @@ impl AgentEngine {
             // 只动 usage_count/last_usage,为下一轮精选衰减提供数据。失败仅告警。
             if !memory_touched.is_empty() {
                 if let Err(e) = self.memory.touch(&memory_touched) {
-                    logger::warn("记忆使用计数回写失败", &[("error", Value::String(e))]);
+                    tracing::warn!(error = e, "记忆使用计数回写失败");
                 }
             }
 
@@ -397,7 +397,7 @@ impl AgentEngine {
                     None,
                 );
                 send_event(SseEvent::Interrupted, &tx, &abort_rx, &flag).await?;
-                logger::agent_step(&session_id, "interrupted", Some("生成被中止"));
+                logging::agent_step(&session_id, "interrupted", Some("生成被中止"));
             } else {
                 let _ = state_machine.transition(AgentState::Finished, &session_id);
                 let _ = self.agent_sessions.update(
@@ -449,10 +449,7 @@ impl AgentEngine {
                                     }
                                 }
                                 Err(e) => {
-                                    logger::warn(
-                                        "禁词替换工具调用失败,保留原文",
-                                        &[("error", Value::String(e))],
-                                    );
+                                    tracing::warn!(error = e, "禁词替换工具调用失败,保留原文");
                                 }
                             }
                         }
@@ -476,12 +473,10 @@ impl AgentEngine {
                         "agent",
                     );
                     if !gated.rejected.is_empty() || !gated.pending.is_empty() {
-                        logger::warn(
-                            "契约门控过滤了部分正文变量补丁",
-                            &[
-                                ("rejected", json!(gated.rejected.len())),
-                                ("pending", json!(gated.pending.len())),
-                            ],
+                        tracing::warn!(
+                            rejected = gated.rejected.len(),
+                            pending = gated.pending.len(),
+                            "契约门控过滤了部分正文变量补丁"
                         );
                     }
                     contract_pending.extend(gated.pending);
@@ -549,7 +544,7 @@ impl AgentEngine {
                             contract_pending.extend(pending);
                         }
                         Err(e) => {
-                            logger::warn("变量+状态栏生成失败", &[("error", Value::String(e))])
+                            tracing::warn!(error = e, "变量+状态栏生成失败")
                         }
                     }
                 }
@@ -606,7 +601,7 @@ impl AgentEngine {
                             }
                         }
                         Err(e) => {
-                            logger::warn("assistant 消息落库失败", &[("error", Value::String(e))]);
+                            tracing::warn!(error = e, "assistant 消息落库失败");
                         }
                     }
                     // 阶段三 3b-3:角色卡后端脚本执行(消息生成完成后)。
@@ -639,10 +634,7 @@ impl AgentEngine {
                         Ok(Some((_, meta))) => meta,
                         Ok(None) => crate::contracts::KaleidoMeta::default(),
                         Err(e) => {
-                            logger::warn(
-                                "契约运行态 meta 读取失败,按空 meta 继续",
-                                &[("error", Value::String(e))],
-                            );
+                            tracing::warn!(error = e, "契约运行态 meta 读取失败,按空 meta 继续");
                             crate::contracts::KaleidoMeta::default()
                         }
                     };
@@ -671,12 +663,10 @@ impl AgentEngine {
                         &meta,
                         &mut entries,
                     ) {
-                        logger::warn(
-                            "契约运行态提交失败(生成结果不受影响)",
-                            &[
-                                ("session_id", Value::String(session_id.clone())),
-                                ("error", Value::String(e)),
-                            ],
+                        tracing::warn!(
+                            session_id = session_id.clone(),
+                            error = e,
+                            "契约运行态提交失败(生成结果不受影响)"
                         );
                     }
                 }
@@ -699,7 +689,7 @@ impl AgentEngine {
                 );
                 // Token 累计统计:会话 + 全局
                 self.record_usage(&session_id, &total_usage).await;
-                logger::agent_step(
+                logging::agent_step(
                     &session_id,
                     "finish",
                     Some(&format!("total_tokens={}", total_usage.total_tokens)),
@@ -752,14 +742,14 @@ impl AgentEngine {
                             retryable,
                         })
                         .await;
-                    logger::agent_step(&session_id, "error", Some(&e));
+                    logging::agent_step(&session_id, "error", Some(&e));
                 }
             }
         }
         self.finish_run(&session_id, run_id);
         // LLM 请求快照保留策略(第四点·主题 A):每次 run 结束裁剪,仅保留最近 50 条。
         if let Err(e) = self.sessions.prune_llm_requests(&session_id, 50) {
-            logger::warn("LLM 请求快照裁剪失败", &[("error", Value::String(e))]);
+            tracing::warn!(error = e, "LLM 请求快照裁剪失败");
         }
         final_out
     }

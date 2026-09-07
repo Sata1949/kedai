@@ -145,9 +145,10 @@ impl VariableApplyService {
                         &meta,
                         &mut Vec::new(),
                     ) {
-                        crate::utils::logger::warn(
-                            "低置信提议入队失败(未写入任何变更)",
-                            &[("session_id", session_id.into()), ("error", e.into())],
+                        tracing::warn!(
+                            session_id = session_id,
+                            error = e.as_str(),
+                            "低置信提议入队失败(未写入任何变更)"
                         );
                     }
                 }
@@ -212,9 +213,10 @@ impl VariableApplyService {
                 &mut round_entries,
             ) {
                 Ok(()) => entries = round_entries,
-                Err(e) => crate::utils::logger::warn(
-                    "补丁已生效但契约留痕失败",
-                    &[("session_id", session_id.into()), ("error", e.into())],
+                Err(e) => tracing::warn!(
+                    session_id = session_id,
+                    error = e.as_str(),
+                    "补丁已生效但契约留痕失败"
                 ),
             }
         }

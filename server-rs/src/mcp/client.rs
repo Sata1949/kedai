@@ -259,12 +259,9 @@ async fn read_loop(reader: Box<BoxedReader>, shared: Arc<Shared>) {
             continue;
         }
         let Ok(msg) = serde_json::from_str::<Value>(trimmed) else {
-            crate::utils::logger::warn(
-                "MCP 收到无法解析的行,已跳过",
-                &[(
-                    "line_preview",
-                    Value::from(trimmed.chars().take(120).collect::<String>()),
-                )],
+            tracing::warn!(
+                line_preview = trimmed.chars().take(120).collect::<String>(),
+                "MCP 收到无法解析的行,已跳过"
             );
             continue;
         };

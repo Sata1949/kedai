@@ -152,17 +152,14 @@ impl AgentEngine {
                                         flag,
                                     )
                                     .await?;
-                                    logger::agent_step(
+                                    logging::agent_step(
                                         session_id,
                                         "censor",
                                         Some(&format!("反思修正禁词:{words_text}")),
                                     );
                                 }
                                 Ok(_) => {}
-                                Err(e) => logger::warn(
-                                    "反思禁词修正失败,保留原文",
-                                    &[("error", Value::String(e))],
-                                ),
+                                Err(e) => tracing::warn!(error = e, "反思禁词修正失败,保留原文"),
                             }
                         }
                     }
@@ -238,7 +235,7 @@ impl AgentEngine {
                         min_chars,
                     )
                 };
-                logger::agent_step(session_id, "reflect", Some(&verdict.reason));
+                logging::agent_step(session_id, "reflect", Some(&verdict.reason));
                 if verdict.passed {
                     send_event(
                         step_evt(
@@ -608,12 +605,10 @@ impl AgentEngine {
                     "agent",
                 );
                 if !gated.rejected.is_empty() || !gated.pending.is_empty() {
-                    logger::warn(
-                        "契约门控过滤了部分自定义模式正文补丁",
-                        &[
-                            ("rejected", json!(gated.rejected.len())),
-                            ("pending", json!(gated.pending.len())),
-                        ],
+                    tracing::warn!(
+                        rejected = gated.rejected.len(),
+                        pending = gated.pending.len(),
+                        "契约门控过滤了部分自定义模式正文补丁"
                     );
                 }
                 custom_contract_pending.extend(gated.pending);

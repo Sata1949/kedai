@@ -362,15 +362,12 @@ impl AgentEngine {
                         self.sessions
                             .save_compaction(session_id, upto, &merged, &self.model())
                     {
-                        logger::warn("压缩摘要落库失败", &[("error", Value::String(e))]);
+                        tracing::warn!(error = e, "压缩摘要落库失败");
                     }
                 }
             }
             Err(e) => {
-                logger::warn(
-                    "压缩摘要生成失败,本轮跳过压缩",
-                    &[("error", Value::String(e))],
-                );
+                tracing::warn!(error = e, "压缩摘要生成失败,本轮跳过压缩");
             }
         }
     }

@@ -1,5 +1,4 @@
 // 生成请求自动重试:退避计算 / 可中断等待 / 重试日志(自 openai_compatible.rs 迁入)
-use serde_json::Value;
 use std::time::Duration;
 use tokio::sync::watch;
 
@@ -41,11 +40,5 @@ pub(super) async fn wait_retry(
 
 /// 记录重试日志(不向 SSE 流注入事件——LlmStreamChunk 无提示通道,避免协议侵入)
 pub(super) fn log_retry(msg: &str, attempt: usize) {
-    crate::utils::logger::info(
-        "模型请求重试",
-        &[
-            ("message", Value::String(msg.to_string())),
-            ("attempt", Value::from(attempt)),
-        ],
-    );
+    tracing::info!(message = msg.to_string(), attempt = attempt, "模型请求重试");
 }

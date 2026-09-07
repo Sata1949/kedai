@@ -168,16 +168,11 @@ impl TaskEngine {
             Ok(outcome) => {
                 // 完成日志(对齐引擎 finish 口径:整轮 token 累计;任务侧 usage 面板
                 // 数据源为 task_llm_calls,本日志仅供排障)
-                crate::utils::logger::info(
-                    "任务模式执行完成",
-                    &[
-                        ("task_id", serde_json::Value::from(task.id.clone())),
-                        ("mode", serde_json::Value::from(task.task_mode.as_str())),
-                        (
-                            "total_tokens",
-                            serde_json::Value::from(outcome.usage.total_tokens),
-                        ),
-                    ],
+                tracing::info!(
+                    task_id = task.id.clone(),
+                    mode = task.task_mode.as_str(),
+                    total_tokens = outcome.usage.total_tokens,
+                    "任务模式执行完成"
                 );
                 match on_success {
                     // plan 计划产出轮:计划清单文本落 result 后清理执行登记(批次 R1)

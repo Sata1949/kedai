@@ -4,14 +4,13 @@ use crate::api::app_state::AppState;
 use crate::api::db_err;
 use crate::models::types::{GenerationParams, PlanStep, SseEvent};
 use crate::services::prompt_inject_service::{output_budget_for_word_count, InjectMode};
-use crate::utils::logger;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response, Sse};
 use axum::Json;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::json;
 use std::convert::Infallible;
 use std::sync::Arc;
 
@@ -135,13 +134,11 @@ pub async fn send(State(state): State<Arc<AppState>>, Json(body): Json<SendBody>
             params.max_tokens =
                 output_budget_for_word_count(inj.simple.word_count, params.max_tokens);
             if params.max_tokens != before {
-                logger::info(
-                    "简单模式字数注入:输出预算自动上调",
-                    &[
-                        ("word_count", Value::from(inj.simple.word_count)),
-                        ("max_tokens_before", Value::from(before)),
-                        ("max_tokens_after", Value::from(params.max_tokens)),
-                    ],
+                tracing::info!(
+                    word_count = inj.simple.word_count,
+                    max_tokens_before = before,
+                    max_tokens_after = params.max_tokens,
+                    "简单模式字数注入:输出预算自动上调"
                 );
             }
         }
@@ -542,20 +539,14 @@ pub async fn generate_raw(
     State(state): State<Arc<AppState>>,
     Json(body): Json<GenerateRawBody>,
 ) -> Response {
-    crate::utils::logger::info(
-        "generate_raw_call",
-        &[
-            ("messages", serde_json::Value::from(body.messages.len())),
-            (
-                "total_chars",
-                serde_json::Value::from(
-                    body.messages
-                        .iter()
-                        .map(|m| m.content.len() as u64)
-                        .sum::<u64>(),
-                ),
-            ),
-        ],
+    tracing::info!(
+        messages = body.messages.len(),
+        total_chars = body
+            .messages
+            .iter()
+            .map(|m| m.content.len() as u64)
+            .sum::<u64>(),
+        "generate_raw_call"
     );
     const MAX_MESSAGES: usize = 200;
     const MAX_MSG_LEN: usize = 64 * 1024;
@@ -610,12 +601,10 @@ pub async fn generate_raw(
         };
         injected = inject_worldbook_for_raw(&entries, &mut messages);
         if !injected.is_empty() {
-            crate::utils::logger::info(
-                "generate_raw_worldbook_inject",
-                &[
-                    ("character_id", serde_json::Value::from(cid)),
-                    ("injected", serde_json::Value::from(injected.len())),
-                ],
+            tracing::info!(
+                character_id = cid,
+                injected = injected.len(),
+                "generate_raw_worldbook_inject"
             );
         }
     }

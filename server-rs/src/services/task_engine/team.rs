@@ -116,23 +116,18 @@ fn parse_team_topology(text: &str) -> Result<Vec<TeamMain>, String> {
         for m in tail {
             mains[TEAM_MAX_MAINS - 1].goals.extend(m.goals);
         }
-        crate::utils::logger::warn(
-            "team 规划主 agent 超编,已归并进末位主 agent",
-            &[("merged_goals", serde_json::Value::from(merged))],
+        tracing::warn!(
+            merged_goals = merged,
+            "team 规划主 agent 超编,已归并进末位主 agent"
         );
     }
     // 每主子目标超编截断(保留前 TEAM_MAX_GOALS_PER_MAIN)
     for (i, m) in mains.iter_mut().enumerate() {
         if m.goals.len() > TEAM_MAX_GOALS_PER_MAIN {
-            crate::utils::logger::warn(
-                "team 规划子目标超编,已截断",
-                &[
-                    ("main", serde_json::Value::from(i + 1)),
-                    (
-                        "dropped",
-                        serde_json::Value::from(m.goals.len() - TEAM_MAX_GOALS_PER_MAIN),
-                    ),
-                ],
+            tracing::warn!(
+                main = i + 1,
+                dropped = m.goals.len() - TEAM_MAX_GOALS_PER_MAIN,
+                "team 规划子目标超编,已截断"
             );
             m.goals.truncate(TEAM_MAX_GOALS_PER_MAIN);
         }
@@ -152,13 +147,13 @@ fn parse_team_topology(text: &str) -> Result<Vec<TeamMain>, String> {
             total -= drop;
             dropped += drop;
         }
-        crate::utils::logger::warn(
-            "team 规划子目标全局超编,已按 ≤15 封顶截断",
-            &[("dropped", serde_json::Value::from(dropped))],
+        tracing::warn!(
+            dropped = dropped,
+            "team 规划子目标全局超编,已按 ≤15 封顶截断"
         );
     }
     if mains.len() == 1 {
-        crate::utils::logger::warn("team 规划仅产出 1 个主 agent,按降级拓扑执行", &[]);
+        tracing::warn!("team 规划仅产出 1 个主 agent,按降级拓扑执行");
     }
     Ok(mains)
 }
@@ -188,12 +183,9 @@ fn parse_audit(text: &str, mains_count: usize) -> AuditVerdict {
         // 与纯文本回复区别对待:前者结论段给干净说明——半截 JSON 原样进
         // result「## 审计结论」卡既难看又误导;原文记 warn 字段备查
         if stripped.starts_with('{') {
-            crate::utils::logger::warn(
-                "team 审计输出为截断 JSON,按通过兜底",
-                &[(
-                    "head",
-                    serde_json::Value::from(stripped.chars().take(120).collect::<String>()),
-                )],
+            tracing::warn!(
+                head = stripped.chars().take(120).collect::<String>(),
+                "team 审计输出为截断 JSON,按通过兜底"
             );
             return AuditVerdict {
                 pass: true,
@@ -201,7 +193,7 @@ fn parse_audit(text: &str, mains_count: usize) -> AuditVerdict {
                 conclusion: "(审计输出不完整,按通过兜底)".to_string(),
             };
         }
-        crate::utils::logger::warn("team 审计输出非 JSON,按通过兜底", &[]);
+        tracing::warn!("team 审计输出非 JSON,按通过兜底");
         return fallback();
     };
     let pass = v.get("通过").and_then(|b| b.as_bool()).unwrap_or(true);
@@ -225,17 +217,14 @@ fn parse_audit(text: &str, mains_count: usize) -> AuditVerdict {
                 let idx = main - 1;
                 // 同一主重复打回只保留首条(补做轮每主一个 spawn,重复条目会并发复用同一虚拟 session)
                 if kickbacks.iter().any(|(m, _)| *m == idx) {
-                    crate::utils::logger::warn(
-                        "team 审计打回条目与既有条目同主,已保留首条",
-                        &[("main", serde_json::Value::from(main))],
-                    );
+                    tracing::warn!(main = main, "team 审计打回条目与既有条目同主,已保留首条");
                     continue;
                 }
                 kickbacks.push((idx, instruction));
             } else {
-                crate::utils::logger::warn(
-                    "team 审计打回条目无效(序号越界或指令为空),已丢弃",
-                    &[("main", serde_json::Value::from(main))],
+                tracing::warn!(
+                    main = main,
+                    "team 审计打回条目无效(序号越界或指令为空),已丢弃"
                 );
             }
         }
@@ -294,13 +283,11 @@ async fn generate_text_healed(
     let Some(retry_budget) = trunc_heal_budget(out.finish_reason.as_deref(), max_tokens) else {
         return Ok(out);
     };
-    crate::utils::logger::warn(
-        "team 纯生成调用截断,输出上限翻倍重发",
-        &[
-            ("phase", serde_json::Value::from(phase)),
-            ("max_tokens", serde_json::Value::from(max_tokens)),
-            ("retry_max_tokens", serde_json::Value::from(retry_budget)),
-        ],
+    tracing::warn!(
+        phase = phase,
+        max_tokens = max_tokens,
+        retry_max_tokens = retry_budget,
+        "team 纯生成调用截断,输出上限翻倍重发"
     );
     svc.emit_event(
         "agent_status",
@@ -386,13 +373,11 @@ impl TeamExecutor {
                 Err(e) => last_err = e,
             }
             let reason = out.finish_reason.as_deref().unwrap_or("");
-            crate::utils::logger::warn(
-                "team 规划输出解析失败,准备重试",
-                &[
-                    ("attempt", serde_json::Value::from(attempt)),
-                    ("finish_reason", serde_json::Value::from(reason)),
-                    ("error", serde_json::Value::from(last_err.clone())),
-                ],
+            tracing::warn!(
+                attempt = attempt,
+                finish_reason = reason,
+                error = last_err.clone(),
+                "team 规划输出解析失败,准备重试"
             );
             if reason == "length" || out.text.trim().is_empty() {
                 max_tokens = (max_tokens.saturating_mul(2)).min(TEAM_RETRY_MAX_TOKENS_CAP);
@@ -608,7 +593,7 @@ impl TeamExecutor {
             }
             let conclusion = review_out.text.trim();
             if conclusion.is_empty() {
-                crate::utils::logger::warn("team 终审返回空内容,审计结论段回退为首次审计结论", &[]);
+                tracing::warn!("team 终审返回空内容,审计结论段回退为首次审计结论");
             } else {
                 final_conclusion = conclusion.to_string();
             }
@@ -746,10 +731,7 @@ impl TeamExecutor {
                     // JoinError(panic 等):按该主失败处理,不中断其余主;JoinError 不携带
                     // 业务下标,无法反查是哪一主 panic——保守地把本轮 batch 中仍 running 的
                     // 步骤统一置 error 并置 had_error(终态至少 partial,不留永远 running)
-                    crate::utils::logger::warn(
-                        "team 主 agent 任务异常终止",
-                        &[("error", serde_json::Value::from(e.to_string()))],
-                    );
+                    tracing::warn!(error = e.to_string(), "team 主 agent 任务异常终止");
                     fail_batch_running_steps(plan, &batch_idx, step_ranges, had_error);
                     svc.set_plan(&ctx.task_id, plan);
                     continue;

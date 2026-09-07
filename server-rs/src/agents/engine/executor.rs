@@ -134,7 +134,7 @@ pub(crate) async fn execute_generation(
                     &payload,
                     &engine.model(),
                 ) {
-                    logger::warn("LLM 请求快照落库失败", &[("error", Value::String(e))]);
+                    tracing::warn!(error = e, "LLM 请求快照落库失败");
                 }
             }
         }
@@ -202,7 +202,7 @@ pub(crate) async fn execute_generation(
             usage.prompt_cache_hit_tokens,
             usage.prompt_cache_miss_tokens,
         ) {
-            logger::warn("LLM 缓存统计落库失败", &[("error", Value::String(e))]);
+            tracing::warn!(error = e, "LLM 缓存统计落库失败");
         }
     }
 
@@ -428,14 +428,12 @@ pub(crate) async fn run_tool_loop(
             }
             let after = summarized_count(llm_messages);
             if after > before {
-                logger::info(
-                    "工具循环历史回灌截断(旧轮 tool 结果已摘要化)",
-                    &[
-                        ("session_id", Value::String(session_id.to_string())),
-                        ("newly_summarized", Value::from(after - before)),
-                        ("keep_rounds", Value::from(keep_rounds)),
-                        ("budget_tokens", Value::from(budget_tokens)),
-                    ],
+                tracing::info!(
+                    session_id = session_id.to_string(),
+                    newly_summarized = after - before,
+                    keep_rounds = keep_rounds,
+                    budget_tokens = budget_tokens,
+                    "工具循环历史回灌截断(旧轮 tool 结果已摘要化)"
                 );
             }
         }
@@ -476,14 +474,12 @@ pub(crate) async fn run_tool_loop(
                     if res.interrupted {
                         break Ok(res);
                     }
-                    logger::info(
-                        "工具循环单轮截断,提高输出上限原样重发(截断自愈)",
-                        &[
-                            ("session_id", Value::String(session_id.to_string())),
-                            ("cause", Value::String(cause.clone())),
-                            ("max_tokens", Value::from(attempt_params.max_tokens)),
-                            ("retry_max_tokens", Value::from(next_budget)),
-                        ],
+                    tracing::info!(
+                        session_id = session_id.to_string(),
+                        cause = cause.clone(),
+                        max_tokens = attempt_params.max_tokens,
+                        retry_max_tokens = next_budget,
+                        "工具循环单轮截断,提高输出上限原样重发(截断自愈)"
                     );
                     let _ = send_event(
                         step_evt(
@@ -514,13 +510,11 @@ pub(crate) async fn run_tool_loop(
                     if !is_truncated_tool_call_error(&e) {
                         break Err(e);
                     }
-                    logger::info(
-                        "工具调用参数 JSON 截断,提高输出上限原样重发(截断自愈)",
-                        &[
-                            ("session_id", Value::String(session_id.to_string())),
-                            ("max_tokens", Value::from(attempt_params.max_tokens)),
-                            ("retry_max_tokens", Value::from(next_budget)),
-                        ],
+                    tracing::info!(
+                        session_id = session_id.to_string(),
+                        max_tokens = attempt_params.max_tokens,
+                        retry_max_tokens = next_budget,
+                        "工具调用参数 JSON 截断,提高输出上限原样重发(截断自愈)"
                     );
                     let _ = send_event(
                         step_evt(
@@ -633,17 +627,12 @@ pub(crate) async fn run_tool_loop(
                     bypass_mode,
                     bypass_blacklisted,
                 );
-                crate::utils::logger::info(
-                    "tool_permission",
-                    &[
-                        ("tool", Value::String(call.name.clone())),
-                        (
-                            "risk",
-                            Value::String(format!("{:?}", permission.risk).to_lowercase()),
-                        ),
-                        ("allowed", Value::Bool(permission.allowed)),
-                        ("result", Value::String(permission.reason.clone())),
-                    ],
+                tracing::info!(
+                    tool = call.name.clone(),
+                    risk = format!("{:?}", permission.risk).to_lowercase(),
+                    allowed = permission.allowed,
+                    result = permission.reason.clone(),
+                    "tool_permission"
                 );
                 ExecutedTool {
                     call: call.clone(),

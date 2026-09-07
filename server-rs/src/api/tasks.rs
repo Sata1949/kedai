@@ -128,10 +128,7 @@ pub async fn events(State(state): State<Arc<AppState>>) -> Response {
                     yield Ok::<Event, Infallible>(Event::default().data(json_str));
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                    crate::utils::logger::debug(
-                        "任务事件 SSE 接收滞后,跳过积压事件",
-                        &[("skipped", serde_json::Value::from(skipped))],
-                    );
+                    tracing::debug!(skipped = skipped, "任务事件 SSE 接收滞后,跳过积压事件");
                     continue;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,

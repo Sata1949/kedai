@@ -45,9 +45,9 @@ pub(super) fn parse_plan(text: &str) -> Result<Vec<TaskStep>, String> {
     }
     let salvaged = salvage_step_objects(t);
     if !salvaged.is_empty() {
-        logger::info(
-            "任务模式计划 JSON 被截断,已打捞完整步骤对象",
-            &[("steps", serde_json::Value::from(salvaged.len()))],
+        tracing::info!(
+            steps = salvaged.len(),
+            "任务模式计划 JSON 被截断,已打捞完整步骤对象"
         );
         return Ok(salvaged);
     }

@@ -544,10 +544,7 @@ impl TaskRunMode {
             "team" => Self::Team,
             "custom" => Self::Custom,
             _ => {
-                crate::utils::logger::warn(
-                    "未知 task_mode,回退 legacy",
-                    &[("value", serde_json::Value::from(s))],
-                );
+                tracing::warn!(value = s, "未知 task_mode,回退 legacy");
                 Self::Legacy
             }
         }
@@ -619,12 +616,10 @@ impl TaskStatus {
             "error" => Self::Error,
             "ended" => Self::Ended,
             _ => {
-                crate::utils::logger::warn(
-                    "任务状态未知值,回退 pending",
-                    &[
-                        ("type", serde_json::Value::from("task_status")),
-                        ("value", serde_json::Value::from(s)),
-                    ],
+                tracing::warn!(
+                    r#type = "task_status",
+                    value = s,
+                    "任务状态未知值,回退 pending"
                 );
                 Self::Pending
             }
@@ -660,12 +655,10 @@ impl TaskStepStatus {
             "done" => Self::Done,
             "error" => Self::Error,
             _ => {
-                crate::utils::logger::warn(
-                    "任务状态未知值,回退 pending",
-                    &[
-                        ("type", serde_json::Value::from("task_step_status")),
-                        ("value", serde_json::Value::from(s)),
-                    ],
+                tracing::warn!(
+                    r#type = "task_step_status",
+                    value = s,
+                    "任务状态未知值,回退 pending"
                 );
                 Self::Pending
             }
@@ -704,12 +697,10 @@ impl TaskSubtaskStatus {
             "error" => Self::Error,
             "ended" => Self::Ended,
             _ => {
-                crate::utils::logger::warn(
-                    "任务状态未知值,回退 pending",
-                    &[
-                        ("type", serde_json::Value::from("task_subtask_status")),
-                        ("value", serde_json::Value::from(s)),
-                    ],
+                tracing::warn!(
+                    r#type = "task_subtask_status",
+                    value = s,
+                    "任务状态未知值,回退 pending"
                 );
                 Self::Pending
             }

@@ -215,24 +215,7 @@ impl OpenAiCompatibleConnector {
             .iter()
             .map(|tool| Value::String(tool.name.clone()))
             .collect();
-        crate::utils::logger::info(
-            "provider_round_start",
-            &[
-                ("mode", Value::String("stream".into())),
-                ("model", Value::String(self.model.clone())),
-                (
-                    "provider_host",
-                    Value::String(provider_host(&self.base_url)),
-                ),
-                ("step", Value::String("generate".into())),
-                ("tool_names", Value::Array(tool_names)),
-                ("tool_count", Value::from(params.tools.len())),
-                (
-                    "tool_choice",
-                    Value::String(format!("{:?}", params.tool_choice)),
-                ),
-            ],
-        );
+        tracing::info!(mode = "stream", model = self.model.clone(), provider_host = provider_host(&self.base_url), step = "generate", tool_names = %crate::utils::logging::JsonField(serde_json::Value::Array(tool_names)), tool_count = params.tools.len(), tool_choice = format!("{:?}", params.tool_choice), "provider_round_start");
         let mut body = json!({
             "model": self.model,
             "messages": to_openai_messages(messages),
@@ -356,13 +339,7 @@ impl OpenAiCompatibleConnector {
                 }
                 _ = tokio::time::sleep(STREAM_IDLE_TIMEOUT) => {
                     let waited_ms = read_started.elapsed().as_millis() as u64;
-                    crate::utils::logger::warn(
-                        "SSE 流空闲超时触发",
-                        &[
-                            ("waited_ms", serde_json::Value::from(waited_ms)),
-                            ("timeout_s", serde_json::Value::from(STREAM_IDLE_TIMEOUT.as_secs())),
-                        ],
-                    );
+                    tracing::warn!(waited_ms = waited_ms, timeout_s = STREAM_IDLE_TIMEOUT.as_secs(), "SSE 流空闲超时触发");
                     return Err(format!(
                         "上游流停滞超时({}s 未收到任何数据),已中止本次生成",
                         STREAM_IDLE_TIMEOUT.as_secs()

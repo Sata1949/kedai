@@ -244,10 +244,7 @@ pub async fn delete_session(
         Err(e) => db_err(&e),
         Ok(Some(cleanup_err)) => {
             if let Some(e) = cleanup_err {
-                crate::utils::logger::warn(
-                    "会话契约运行态清理失败",
-                    &[("session_id", json!(id)), ("error", json!(e))],
-                );
+                tracing::warn!(session_id = id, error = e, "会话契约运行态清理失败");
             }
             StatusCode::NO_CONTENT.into_response()
         }

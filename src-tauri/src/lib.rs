@@ -36,7 +36,7 @@ pub fn run() {
             let config = kedai_server::config::AppConfig::from_env();
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                if let Err(error) = start_and_wait_ready(config, app_handle.clone()).await {
+                if let Err(error) = start_and_wait_ready(config, app_handle.clone(), log_dir.clone()).await {
                     write_start_error(&log_dir, &error);
                     eprintln!("[错误] {error}");
                     app_handle.exit(1);
@@ -53,6 +53,7 @@ pub fn run() {
 async fn start_and_wait_ready(
     config: kedai_server::config::AppConfig,
     app: tauri::AppHandle,
+    log_dir: PathBuf,
 ) -> Result<(), String> {
     let service_url = service_url(&config);
 
@@ -75,19 +76,32 @@ async fn start_and_wait_ready(
     let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
     while tokio::time::Instant::now() < deadline {
         if let Ok(error) = server_error_rx.try_recv() {
+            // 双启动竞态(TOCTOU):health_ok 通过后另一实例抢先绑定端口,本进程 run_server
+            // 绑定失败(os error 10048)但服务实际健康 → 复用已有实例照常显示窗口,不退出。
+            if health_ok(&config).await {
+                // 复用前校验数据目录:运行中的实例若指向另一套库(如浏览器版用的项目目录),
+                // 静默复用会把桌面版挂到错误的库上——一边写的聊天另一边不可见。
+                // 旧版服务无 data_dir 字段时无法校验,维持复用(竞态的另一方几乎必为桌面版自身)。
+                if let Some(dir) = health_data_dir(&config).await {
+                    if !same_data_dir(&dir, &config.data_dir) {
+                        return Err(format!(
+                            "已在运行的 Kedai 实例数据目录与桌面版不一致:\n运行中实例: {dir}\n桌面版: {}\n请先关闭该实例再启动桌面版,否则聊天记录会写到另一套数据库",
+                            config.data_dir.display()
+                        ));
+                    }
+                }
+                tracing::info!(bind_error = error.as_str(), "检测到已有 Kedai 实例,直接复用");
+                eprintln!("[信息] 检测到已有 Kedai 实例,直接复用");
+                show_main_window(&app, &service_url)?;
+                clear_start_error(&log_dir);
+                return Ok(());
+            }
             return Err(format!("Kedai 后端启动失败: {error}"));
         }
         if health_ok(&config).await {
-            let window = app
-                .get_webview_window("main")
-                .ok_or_else(|| "找不到主窗口".to_string())?;
-            window
-                .navigate(url::Url::parse(&service_url).map_err(|e| format!("服务地址非法: {e}"))?)
-                .map_err(|e| format!("主窗口导航失败: {e}"))?;
-            window.show().map_err(|e| format!("主窗口显示失败: {e}"))?;
-            window
-                .set_focus()
-                .map_err(|e| format!("主窗口聚焦失败: {e}"))?;
+            show_main_window(&app, &service_url)?;
+            // 启动成功:清掉历史失败留下的陈旧错误日志,避免误导排查
+            clear_start_error(&log_dir);
             return Ok(());
         }
         tokio::time::sleep(READY_INTERVAL).await;
@@ -97,6 +111,26 @@ async fn start_and_wait_ready(
         "Kedai 后端在 {} 秒内未就绪: {service_url}",
         READY_TIMEOUT.as_secs()
     ))
+}
+
+/// 导航到服务地址并展示/聚焦主窗口(启动成功与复用已有实例两条路径共用)。
+fn show_main_window(app: &tauri::AppHandle, service_url: &str) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "找不到主窗口".to_string())?;
+    window
+        .navigate(url::Url::parse(service_url).map_err(|e| format!("服务地址非法: {e}"))?)
+        .map_err(|e| format!("主窗口导航失败: {e}"))?;
+    window.show().map_err(|e| format!("主窗口显示失败: {e}"))?;
+    window
+        .set_focus()
+        .map_err(|e| format!("主窗口聚焦失败: {e}"))?;
+    Ok(())
+}
+
+/// 删除陈旧的启动错误日志(仅在启动成功/复用成功后调用;失败路径由 write_start_error 重写)。
+fn clear_start_error(log_dir: &Path) {
+    let _ = std::fs::remove_file(log_dir.join("tauri-start-error.log"));
 }
 
 fn service_url(config: &kedai_server::config::AppConfig) -> String {
@@ -123,6 +157,23 @@ async fn health_ok(config: &kedai_server::config::AppConfig) -> bool {
         ),
         _ => false,
     }
+}
+
+/// 取运行中实例的数据目录(健康响应的 data_dir 字段;旧版服务无此字段返回 None)
+async fn health_data_dir(config: &kedai_server::config::AppConfig) -> Option<String> {
+    let url = format!("{}api/health", service_url(config));
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(1200))
+        .build()
+        .ok()?;
+    let body: serde_json::Value = client.get(url).send().await.ok()?.json().await.ok()?;
+    body.get("data_dir")?.as_str().map(|s| s.to_string())
+}
+
+/// Windows 路径宽松比较:忽略大小写与正反斜杠、尾部分隔符差异
+fn same_data_dir(a: &str, b: &Path) -> bool {
+    let norm = |s: &str| s.replace('/', "\\").trim_end_matches('\\').to_lowercase();
+    norm(a) == norm(&b.to_string_lossy())
 }
 
 fn find_project_data_dir() -> Option<PathBuf> {
