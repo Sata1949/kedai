@@ -123,6 +123,8 @@ const FORBIDDEN=new Set(['__proto__','constructor','prototype']);
 const pathGet=(obj,path)=>{if(path==='')return obj;const segs=path.split('.');if(segs.some(s=>FORBIDDEN.has(s)))return undefined;let cur=obj;for(const seg of segs){if(cur===null||cur===undefined)return undefined;if(typeof cur!=='object')return undefined;cur=cur[seg];}return cur;};
 const pathSet=(obj,path,value)=>{if(path===''){if(typeof value==='object'&&value!==null)Object.assign(obj,value);return;}const segs=path.split('.');if(segs.some(s=>FORBIDDEN.has(s)))return;let cur=obj;for(let i=0;i<segs.length-1;i++){const seg=segs[i];const next=cur[seg];const isIndex=/^\\d+$/.test(segs[i+1]);if(typeof next!=='object'||next===null){const created=isIndex?[]:{};cur[seg]=created;cur=created;}else{cur=next;}}cur[segs[segs.length-1]]=value;};
 // ---- lodash 子集(stat_data 叶子为 [新值,原因],_.get 自动取 [0]) ----
+// 镜像:此处 _.get 的解包段(Array.isArray(v)&&v.length>=1 → v[0])与
+// mvu/unwrap.ts 的 unwrapStatLeaf 语义同步,改动必须双侧同改。
 const _=Object.freeze({get:(obj,path,def)=>{let v=pathGet(obj,path);if(Array.isArray(v)&&v.length>=1)v=v[0];return v===undefined||v===null?def:v;},set:(obj,path,value)=>{pathSet(obj,path,value);return obj;}});
 // ---- 兼容 API ----
 const waitGlobalInitialized=()=>Promise.resolve();
@@ -417,6 +419,9 @@ const $=jq;
 //      (wuwa 浪潮状态栏等)按裸值直接属性读(String(u.是否是漂泊者)==='true'、
 //      u.性别||'男')。门面对外返回解包视图:叶子 [x,原因字符串] 取 x,嵌套递归;
 //      裸值与真实数组(长度≠2 或第二元素非字符串)原样保留。_.get 对裸值兼容。 ----
+// 镜像:__kdUnwrap 是 mvu/unwrap.ts 的 unwrapStatTree 的沙箱内联副本(字符串注入无法 import),
+// 语义同步,改动必须双侧同改。源函数 SHA-256 短哈希:6ccd4bda787e(口径见 unwrap.ts,
+// 两侧哈希不一致即漂移)。
 const __kdUnwrap=function(v){
   if(Array.isArray(v)){
     if(v.length===2&&typeof v[1]==='string')return v[0];
