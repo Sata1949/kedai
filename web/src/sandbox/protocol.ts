@@ -1,0 +1,111 @@
+// protocol.ts — 沙箱通信协议:频道名/消息字节上限/消息类型定义与宿主-沙箱公共契约类型
+import type { MvuVariables } from '../mvu/variables';
+
+const CHANNEL = 'kedai-character-script-v1';
+
+/**
+ * 沙箱 boot 消息上限。角色卡开场/状态栏脚本动辄几十 KB(如 WuWa 状态栏 107KB,
+ * 开场 40KB),64KB 会把它们整段拒掉 → 协议弹窗/悬浮球/状态栏永不显示。
+ * postMessage 跨窗口传输无浏览器级硬上限(与内存一致),这里放宽到 1MB 防内存压力。
+ */
+const MAX_MESSAGE_BYTES = 1024 * 1024;
+
+interface JqOperation {
+  ref:
+    | { kind: 'selector'; value: string }
+    | { kind: 'target'; id: number }
+    | { kind: 'selector-index'; value: string; index: number };
+  method: string;
+  args: unknown[];
+}
+
+/** $('<div>') 游离元素规格:沙箱侧记录 HTML/事件/子元素,append 时宿主统一落 DOM */
+interface CreatedElementSpec {
+  kind: 'created';
+  html: string;
+  handlers: Array<{ evt: string; jqId: number }>;
+  children: CreatedElementSpec[];
+  addClass?: string;
+  text?: string;
+  innerHtml?: string;
+}
+
+interface SandboxRequest {
+  channel: typeof CHANNEL;
+  nonce: string;
+  type: 'ready' | 'rpc' | 'batch' | 'done' | 'error' | 'warn' | 'jq-event' | 'audio' | 'local-storage';
+  id?: number;
+  op?: string;
+  args?: unknown[];
+  ops?: JqOperation[];
+  value?: unknown;
+  message?: string;
+  jqId?: number;
+  key?: string;
+}
+
+/** inline 事件降级桥支持的事件名(data-kd-on<name> 属性 → 真实监听) */
+const INLINE_EVENT_NAMES = [
+  'click', 'dblclick', 'input', 'change', 'submit',
+  'mousedown', 'mouseup', 'mouseover', 'mouseout',
+  'keydown', 'keyup', 'focus', 'blur',
+] as const;
+
+/** 宿主容器几何镜像(沙箱内 window/document.body/frameElement 的映射源) */
+interface ContainerGeo {
+  top: number;
+  left: number;
+  width: number;
+  height: number;
+  scrollHeight: number;
+  scrollWidth: number;
+  hostH: number;
+  hostW: number;
+}
+
+export interface SandboxExecutionContext {
+  container: HTMLElement;
+  variables: MvuVariables;
+  /** 角色 id:沙箱全局变量(getVariables({type:'global'}))按角色持久化到宿主 localStorage */
+  characterId?: string;
+  /** 启动时下发的全局变量快照(脚本 loadSettings 同步读;见 readCardGlobals) */
+  globals?: Record<string, unknown>;
+  /** 主世界书名(角色卡内嵌 character_book.name):随 boot 注入,TavernHelper 世界书 API 的同步数据源 */
+  lorebookName?: string | null;
+  /**
+   * 异步 RPC 扩展点(可选):处理内置 audio-snapshot/applyRpc 之外的纯数据 op
+   * (卡级脚本的世界书读写、聊天消息读取——需 fetch,走不了同步分发)。
+   * 返回 handled=true 时 value 直接回包;handled=false 回退内置同步分发。
+   */
+  rpcExtensions?: (op: string, args: unknown[]) => Promise<{ handled: boolean; value?: unknown }>;
+}
+
+export interface SandboxEnvironment {
+  document: Pick<Document, 'createElement' | 'body'>;
+  window: Pick<Window, 'addEventListener' | 'removeEventListener'>;
+  timeoutMs?: number;
+}
+
+export type SandboxCleanup = () => void;
+
+export const MAX_BOOT_MESSAGE_BYTES = MAX_MESSAGE_BYTES;
+
+function cloneData<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function utf8Bytes(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).byteLength;
+}
+
+export {
+  CHANNEL,
+  MAX_MESSAGE_BYTES,
+  INLINE_EVENT_NAMES,
+  cloneData,
+  utf8Bytes,
+  type JqOperation,
+  type CreatedElementSpec,
+  type SandboxRequest,
+  type ContainerGeo,
+};
