@@ -3,20 +3,12 @@ node_modules/
 dist/
 server-rs/target/
 
-# 本地环境与密钥(API Key 经 .env 或 data/settings.json 提供,均不入库)
+# 本地环境与密钥(API Key 经 .env 或 <数据目录>/settings.json 提供,均不入库)
 .env
 .DS_Store
 *.log
 
-# 运行期用户数据:data/ 默认全部忽略,仅白名单放行仓库自带内容
-data/*
-!data/AGENTS_RUNTIME.md
-!data/agent_flows.json
-!data/characters/
-data/characters/*
-!data/characters/builtin-system.json
-!data/plugins/
-data/plugins/*
-!data/plugins/tools/
-data/plugins/tools/*
-!data/plugins/tools/greeting.json
+# 运行期用户数据:数据目录默认在 %APPDATA%\com.kedai.app\(见 README 目录结构一节);
+# 仅当 DATA_DIR 指回项目根时才会出现 data/,一律忽略
+data/
+data.retired-*/
