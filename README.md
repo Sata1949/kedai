@@ -255,7 +255,7 @@ data: {"type":"finish","usage":{"prompt_tokens":166,"completion_tokens":35,"tota
 
 ```bash
 cd server-rs
-cargo test          # 单元测试 + API 集成测试(819 个:648 单测 + 171 集成,2026-09-07 实测)
+cargo test          # 单元测试 + API 集成测试(825 个:654 单测 + 171 集成,2026-09-08 实测)
 cd web
 npm test            # Vitest 前端测试(527 个)
 npm run typecheck   # vue-tsc 模板/脚本类型检查
