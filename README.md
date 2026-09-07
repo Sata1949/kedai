@@ -156,6 +156,8 @@ kedai/
 ├── build.ps1               # 一键构建:默认双端同步(前端 + Rust release + 便携版)
 ├── tools/build-portable.ps1# 便携目录构建脚本(被 build.ps1 接续调用)
 ├── tools/bump-version.ps1  # 统一修改全仓库版本号(npm run version:bump -- x.y.z)
+├── tools/perf-baseline.mjs # 端点性能基线压测(npm run perf;需服务运行中,输出 p50/p95/吞吐)
+├── tools/inspect-card.mjs  # 角色卡结构检查(npm run inspect:card -- <卡片文件> [--full])
 └── logs/                   # 运行日志(按天归档 kedai-YYYY-MM-DD.log,自动清理 3 天前)
 ```
 
@@ -253,9 +255,9 @@ data: {"type":"finish","usage":{"prompt_tokens":166,"completion_tokens":35,"tota
 
 ```bash
 cd server-rs
-cargo test          # 单元测试 + API 集成测试(805 个:636 单测 + 169 集成,2026-09-07 实测)
+cargo test          # 单元测试 + API 集成测试(819 个:648 单测 + 171 集成,2026-09-07 实测)
 cd web
-npm test            # Vitest 前端测试(485 个)
+npm test            # Vitest 前端测试(527 个)
 npm run typecheck   # vue-tsc 模板/脚本类型检查
 npm run check       # 仓库根:一键全量检查(tools/check-all.ps1)
 ```

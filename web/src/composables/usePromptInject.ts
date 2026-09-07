@@ -2,6 +2,7 @@
 import { ref } from 'vue';
 import { useAppStore } from '../store';
 import * as api from '../api';
+import { downloadBlob } from '../exportFile';
 
 export const FLOOR_ROLE_LABELS: Record<api.FloorRole, string> = {
   system: '系统提示词',
@@ -164,13 +165,11 @@ export function usePromptInject() {
       simple: cur.simple,
       floors: cur.floors,
     };
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `kedai-inject-${new Date().toISOString().slice(0, 10)}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+    // 直接下载,不弹保存对话框(统一走 downloadBlob,延时回收 ObjectURL)
+    downloadBlob(
+      `kedai-inject-${new Date().toISOString().slice(0, 10)}.json`,
+      new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }),
+    );
     injectMsg.value = '注入配置已导出';
     setTimeout(() => (injectMsg.value = ''), 2500);
   }

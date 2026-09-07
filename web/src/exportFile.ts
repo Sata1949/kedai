@@ -13,6 +13,24 @@ declare global {
 import { isTauri } from '@tauri-apps/api/core';
 
 /**
+ * 浏览器常规下载(不弹保存对话框,位置由浏览器决定):
+ * 临时 a[download] 触发点击;ObjectURL 延时 1s 回收(立即 revoke 在部分浏览器会截断下载)。
+ */
+export function downloadBlob(fileName: string, blob: Blob): void {
+  const url = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+}
+
+/**
  * 保存导出文件,返回是否成功保存。
  * - 返回 false = 用户在保存对话框点了「取消」(调用方不应提示成功/失败);
  * - 抛出异常 = 保存失败(调用方提示错误)。
@@ -48,16 +66,6 @@ export async function saveExportFile(fileName: string, content: string): Promise
       console.warn('保存对话框不可用,回退常规下载', e);
     }
   }
-  const url = URL.createObjectURL(blob);
-  try {
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = fileName;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-  } finally {
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }
+  downloadBlob(fileName, blob);
   return true;
 }

@@ -102,7 +102,7 @@ kedai/
 | 一键构建 | `.\build.ps1` | **默认双端同步产出**:前端 web/dist + Rust release(测试版)+ 便携版;`-TestOnly` 仅测试版快速通道 `-Dev` debug 构建 `-NoWeb` 仅 Rust `-Tauri` 追加 NSIS 打包 |
 | 兼容别名 | `npm run build:all` / `npm run build:rs` | 均等价 `.\build.ps1`(双端同步);`npm run build:test` 等价 `.\build.ps1 -TestOnly` |
 | 统一改版本号 | `npm run version:bump -- x.y.z` | 7 处版本号一次改全(2 个 package.json、3 个 Cargo.toml、tauri.conf.json、本文档版本行);支持 `-DryRun` 预览 |
-| 后端测试 | `cd server-rs && cargo test` | 805 个测试(636 单测 + 169 集成,2026-09-07 实测),**需在 vcvars64 环境**;前端 `npm test -w web` 485 个 |
+| 后端测试 | `cd server-rs && cargo test` | 819 个测试(648 单测 + 171 集成,2026-09-07 实测),**需在 vcvars64 环境**;前端 `npm test -w web` 527 个 |
 | 全量检查(本地 CI) | `npm run check` | `tools/check-all.ps1`:fmt → clippy → cargo test → vue-tsc(警告档)→ vitest → vite build;`-StrictTypecheck` 切硬门禁 |
 | 开发模式 | `cd server-rs && cargo run` + `npm run dev -w web` | 后端 3001 / 前端 5173(代理到 3001) |
 | 前端构建 | `npm run build -w web` | 产出 web/dist(编译进 exe 用) |
@@ -378,9 +378,9 @@ rusqlite(bundled,零原生依赖),**WAL 模式 + foreign_keys ON**。5 张表:
 cd server-rs && cargo test
 ```
 
-- 单元测试(源文件内 `#[test]`/`#[tokio::test]`,636 个,2026-09-07 实测):状态机迁移、planner(fast/deep/算式识别)、reflector(3 规则)、calculator(白名单解析)、censor(禁词同义替换)、token 编码映射与估算、工具注册表、世界书转换、世界书注入、提示词注入(含禁词库)、mvu 变量系统(含 JSONPatch 转义/reason/delta 容错)、EJS 渲染器(含读取 API 与 escape-ejs)、角色卡解析、正则脚本、@INJECT 解析/应用、GENERATE 注入、结构化错误码(api/errors.rs)
-- API 集成测试(`tests/` 18 个文件,169 个,mock 连接器 + 临时数据目录):api_integration、assistant、agent_flows、tasks、task_events、prompt_inject、world_books、settings_connector、security、contracts_e2e、scripts_e2e、scripts_import、swipe_regenerate、undo、user_scripts、variables_scopes、db_concurrency、macros——health、角色 CRUD(multipart 上传)、会话/消息/导入导出、设置与 token、agent plan、SSE 聊天流、任务引擎六模式、计算器工具 SSE、世界书/角色卡、提示词注入与酒馆预设导入、鉴权
-- 前端 `npm test -w web`(Vitest,485 个,2026-09-07 实测):stores、api client(含 ApiError 错误码分类)、组件与 composables;类型门禁 `npm run typecheck -w web`(vue-tsc,存量清单见 docs/优化实施方案-2026-09.md 附录 D)
+- 单元测试(源文件内 `#[test]`/`#[tokio::test]`,648 个,2026-09-07 实测):状态机迁移、planner(fast/deep/算式识别)、reflector(3 规则)、calculator(白名单解析)、censor(禁词同义替换)、token 编码映射与估算、工具注册表、世界书转换、世界书注入、提示词注入(含禁词库)、mvu 变量系统(含 JSONPatch 转义/reason/delta 容错)、EJS 渲染器(含读取 API 与 escape-ejs)、角色卡解析、正则脚本、@INJECT 解析/应用、GENERATE 注入、结构化错误码(api/errors.rs)
+- API 集成测试(`tests/` 18 个文件,171 个,mock 连接器 + 临时数据目录):api_integration、assistant、agent_flows、tasks、task_events、prompt_inject、world_books、settings_connector、security、contracts_e2e、scripts_e2e、scripts_import、swipe_regenerate、undo、user_scripts、variables_scopes、db_concurrency、macros——health、角色 CRUD(multipart 上传)、会话/消息/导入导出、设置与 token、agent plan、SSE 聊天流、任务引擎六模式、计算器工具 SSE、世界书/角色卡、提示词注入与酒馆预设导入、鉴权
+- 前端 `npm test -w web`(Vitest,527 个 / 58 文件,2026-09-07 实测):stores、api client(含 ApiError 错误码分类)、组件与 composables;类型门禁 `npm run typecheck -w web`(vue-tsc,存量清单见 docs/优化实施方案-2026-09.md 附录 D)
 - 新增接口建议同步补集成测试;测试环境变量 `CONNECTOR=mock` 强制隔离
 
 ---

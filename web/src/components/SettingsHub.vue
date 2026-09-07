@@ -1,11 +1,31 @@
 <script setup lang="ts">
 // 综合设置弹窗:左侧分类导航 + 右侧内容区(嵌入 SettingsModal 全部功能)
 // 整合原左侧栏 9 个工具按钮的功能入口
-import { ref, computed, watch } from 'vue';
+import { ref, computed, watch, onMounted } from 'vue';
 import { useAppStore } from '../store';
+import { health, type HealthInfo } from '../api/health';
 import SettingsModal from './SettingsModal.vue';
 
 const store = useAppStore();
+
+// 版本与构建指纹:展示在导航底部,测试版/便携版的指纹一致即两版同步(服务端编译期注入)
+const buildInfo = ref<HealthInfo | null>(null);
+onMounted(async () => {
+  try {
+    buildInfo.value = await health();
+  } catch {
+    buildInfo.value = null; // 服务不可达时不显示,不影响设置功能
+  }
+});
+
+const buildInfoText = computed(() => {
+  const b = buildInfo.value;
+  if (!b?.version) return '';
+  const time = b.build_time
+    ? new Date(Number(b.build_time) * 1000).toLocaleString('zh-CN', { hour12: false })
+    : '未知时间';
+  return `v${b.version} · 构建 ${time} · 指纹 ${b.build_id ? b.build_id.slice(0, 8) : '--------'}`;
+});
 
 const close = (): void => {
   store.settingsOpen = false;
@@ -19,6 +39,7 @@ const allSections = [
   { key: 'prompt', label: '提示词注入', dot: 'orange' },
   { key: 'flow', label: '执行流程', dot: 'orange' },
   { key: 'preset', label: '预设导入', dot: 'yellow' },
+  { key: 'mcp', label: 'MCP 服务', dot: 'blue' },
   { key: 'data', label: '数据管理', dot: 'blue' },
   { key: 'ui', label: '界面', dot: 'yellow' },
 ] as const;
@@ -48,7 +69,9 @@ watch(
 
 /** 快速操作(原工具条功能;统一黑色方块区分层级) */
 const quickActions = [
-  { key: 'upload', label: '上传角色卡', dot: '', action: () => document.querySelector<HTMLInputElement>('.sv-sidebar input[type=file]')?.click() },
+  // 上传角色卡:自增 uiPrefs 计数器请求上传,由 Sidebar watch 后触发自身 file input
+  // (不再用 document.querySelector 跨组件戳 DOM)
+  { key: 'upload', label: '上传角色卡', dot: '', action: () => { store.characterUploadRequested++; } },
   { key: 'records', label: '聊天记录', dot: '', action: () => { store.chatRecordsOpen = true; close(); } },
   { key: 'worldbooks', label: '世界书', dot: '', action: () => { store.worldBooksOpen = true; close(); } },
   { key: 'contracts', label: '契约编辑', dot: '', action: () => { store.contractsOpen = true; close(); } },
@@ -106,6 +129,13 @@ const activeLabel = computed(() => sections.value.find((s) => s.key === activeSe
               <span>{{ a.label }}</span>
             </button>
           </div>
+
+          <!-- 版本与构建指纹:测试版/便携版指纹一致即两版同步 -->
+          <div
+            v-if="buildInfoText"
+            :title="'构建指纹 = 内嵌前端的内容哈希;两端一致即同步'"
+            style="margin-top: auto; padding: 8px 12px 10px; font-size: var(--text-2xs); color: var(--sv-ink-faint); letter-spacing: 0.02em; user-select: text"
+          >{{ buildInfoText }}</div>
         </div>
 
         <!-- 右侧内容区:嵌入 SettingsModal(完整设置功能) -->

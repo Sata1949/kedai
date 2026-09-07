@@ -1,9 +1,10 @@
 <script setup lang="ts">
 // 左侧功能区:品牌 + Token 统计 + 模式切换 + (角色列表 | 任务工作台) + 综合设置入口
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { useAppStore } from '../store';
 import { storeToRefs } from 'pinia';
 import { taskStatusClass as statusClass, taskStatusLabel as statusLabel } from '../taskStatus';
+import TaskModeSelect from './TaskModeSelect.vue';
 import type { CharacterRecord, TaskRecord } from '../api';
 
 const store = useAppStore();
@@ -11,10 +12,20 @@ const {
   filteredCharacters, characters, currentCharacterId, connStatus,
   contextTokens, lastUsage, currentSessionId,
   sessionTotalTokens, globalTotalTokens, cacheZeroStreak, appMode, tasks, currentTaskId,
+  currentTaskUsage, globalTaskUsage,
 } = storeToRefs(store);
 
 const fileInput = ref<HTMLInputElement | null>(null);
 const uploadError = ref('');
+
+// 上传角色卡请求(SettingsHub 快速操作等发起方自增 uiPrefs.characterUploadRequested):
+// 在本组件内响应,触发自身隐藏 file input;消除跨组件 document.querySelector 耦合
+watch(
+  () => store.characterUploadRequested,
+  (n, prev) => {
+    if (n !== prev) fileInput.value?.click();
+  },
+);
 
 // 头像文件名
 function avatarFile(avatarPath: string | null): string {
@@ -38,6 +49,17 @@ const connLabel = computed(() => {
     case 'fail': return '未连接';
     default: return '检测中';
   }
+});
+
+/** 任务模式统计块数据源:当前任务/全部任务累计 token(prompt + completion)。
+ *  聊天统计来自 SSE usage 链路,任务模式无此数据源,改由任务详情/全局接口轮询带出。 */
+const currentTaskTotalTokens = computed(() => {
+  const u = currentTaskUsage.value;
+  return u ? u.prompt_tokens + u.completion_tokens : 0;
+});
+const globalTaskTotalTokens = computed(() => {
+  const u = globalTaskUsage.value;
+  return u ? u.prompt_tokens + u.completion_tokens : 0;
 });
 
 /** 缓存命中率:连续两次为 0 则不显示 */
@@ -179,43 +201,62 @@ async function removeTask(task: TaskRecord): Promise<void> {
       <div class="sv-brand">
         <img class="logo" src="/logo.png" alt="Kedai" draggable="false" />
         <h1>KEDAI</h1>
-        <span class="sv-supreme" style="width: 10px; height: 10px" aria-hidden="true" />
-        <span class="sv-conn" style="margin-left: auto">
+        <span class="sv-supreme sm" aria-hidden="true" />
+        <span class="sv-conn sv-ml-auto">
           <span class="dot" :class="connColor" />
           {{ connLabel }}
         </span>
       </div>
 
-      <!-- Token 统计区:会话累计 / 全局累计 / 上下文 / 缓存命中率 -->
+      <!-- Token 统计区:角色扮演 = 会话累计/全局累计/上下文/缓存命中率;
+           任务模式 = 当前任务累计/全部任务累计(无上下文与命中率数据源,两格隐藏) -->
       <div class="sv-tokens">
-        <div class="sv-token-cell">
-          <span class="sv-supreme pink" />
-          <div>
-            <b>{{ sessionTotalTokens.toLocaleString() }}</b>
-            <span>本会话累计</span>
+        <template v-if="appMode === 'task'">
+          <div class="sv-token-cell">
+            <span class="sv-supreme pink" />
+            <div>
+              <b class="sv-tnum">{{ currentTaskTotalTokens.toLocaleString() }}</b>
+              <span>当前任务累计</span>
+            </div>
           </div>
-        </div>
-        <div class="sv-token-cell">
-          <span class="sv-supreme pink-deep" />
-          <div>
-            <b>{{ globalTotalTokens.toLocaleString() }}</b>
-            <span>全局累计</span>
+          <div class="sv-token-cell">
+            <span class="sv-supreme pink-deep" />
+            <div>
+              <b class="sv-tnum">{{ globalTaskTotalTokens.toLocaleString() }}</b>
+              <span>全部任务累计</span>
+            </div>
           </div>
-        </div>
-        <div class="sv-token-cell">
-          <span class="sv-supreme blue" />
-          <div>
-            <b>{{ contextTokens.toLocaleString() }}</b>
-            <span>上下文 TOKEN</span>
+        </template>
+        <template v-else>
+          <div class="sv-token-cell">
+            <span class="sv-supreme pink" />
+            <div>
+              <b class="sv-tnum">{{ sessionTotalTokens.toLocaleString() }}</b>
+              <span>本会话累计</span>
+            </div>
           </div>
-        </div>
-        <div v-if="hitRate !== null" class="sv-token-cell">
-          <span class="sv-supreme green" />
-          <div>
-            <b>{{ hitRate }}%</b>
-            <span>缓存命中率</span>
+          <div class="sv-token-cell">
+            <span class="sv-supreme pink-deep" />
+            <div>
+              <b class="sv-tnum">{{ globalTotalTokens.toLocaleString() }}</b>
+              <span>全局累计</span>
+            </div>
           </div>
-        </div>
+          <div class="sv-token-cell">
+            <span class="sv-supreme blue" />
+            <div>
+              <b class="sv-tnum">{{ contextTokens.toLocaleString() }}</b>
+              <span>上下文 TOKEN</span>
+            </div>
+          </div>
+          <div v-if="hitRate !== null" class="sv-token-cell">
+            <span class="sv-supreme green" />
+            <div>
+              <b class="sv-tnum">{{ hitRate }}%</b>
+              <span>缓存命中率</span>
+            </div>
+          </div>
+        </template>
       </div>
     </div>
 
@@ -248,15 +289,15 @@ async function removeTask(task: TaskRecord): Promise<void> {
             class="sv-search"
           />
 
-          <div v-if="characters.length === 0" class="sv-empty" style="padding: 40px 12px">
+          <div v-if="characters.length === 0" class="sv-empty compact">
             <div class="sv-empty-geo mb10">
               <span class="sq black" />
               <span class="sq pink" />
               <span class="sq deep" />
             <i class="diag" />
             </div>
-            <p style="font-size: 12px">暂无角色</p>
-            <p style="font-size: 11px">点击下方「综合设置」→「上传角色卡」开始</p>
+            <p class="sub">暂无角色</p>
+            <p class="hint">点击下方「综合设置」→「上传角色卡」开始</p>
           </div>
 
           <div class="min-h-0 flex-1 overflow-y-auto pr-1">
@@ -292,8 +333,10 @@ async function removeTask(task: TaskRecord): Promise<void> {
               placeholder="描述要完成的任务,例如:帮我写一篇 2000 字的科幻短篇并列出大纲…"
               spellcheck="false"
             />
+            <!-- 执行模式(批次 4 六模式;独立子组件,选择持久化在 task store) -->
+            <TaskModeSelect />
             <!-- 执行者人设(可选):默认通用执行者 -->
-            <select v-model="personaId" class="sv-select" style="width: 100%; margin-top: 8px">
+            <select v-model="personaId" class="sv-select">
               <option value="">执行者:通用执行者</option>
               <option v-for="c in characters" :key="c.id" :value="c.id">
                 执行者:{{ c.chara_name }}
@@ -301,7 +344,6 @@ async function removeTask(task: TaskRecord): Promise<void> {
             </select>
             <button
               class="sv-btn primary"
-              style="width: 100%; margin-top: 10px"
               :disabled="creatingTask || !taskTitle.trim()"
               @click="createAndRun"
             >
@@ -319,18 +361,18 @@ async function removeTask(task: TaskRecord): Promise<void> {
               :class="{ active: t.id === currentTaskId }"
               @click="store.selectTask(t.id)"
             >
-              <span class="sv-supreme" :class="statusClass(t.status)" style="width: 9px; height: 9px" />
+              <span class="sv-supreme xs" :class="statusClass(t.status)" />
               <span class="sv-task-item-title">{{ t.title }}</span>
               <span class="sv-task-item-meta">{{ statusLabel(t.status) }}</span>
               <span class="sv-task-item-del" title="删除任务" @click.stop="removeTask(t)">✕</span>
             </button>
-            <div v-if="tasks.length === 0" class="sv-empty-geo mb10">
-              <span class="sq black" style="width: 10px; height: 10px" />
-              <span class="sq pink" style="width: 8px; height: 8px" />
+            <div v-if="tasks.length === 0" class="sv-empty-geo sm mb10">
+              <span class="sq black" />
+              <span class="sq pink" />
               <span class="sq deep" />
-              <span class="diag" style="top: -8px; right: calc(50% - 22px); width: 20px; height: 2px" />
+              <span class="diag" />
             </div>
-            <p v-if="tasks.length === 0" style="font-size: 11px; color: var(--sv-ink-faint); padding: 0 2px 10px; margin: 0">
+            <p v-if="tasks.length === 0" class="sv-task-list-empty">
               暂无任务,输入目标创建第一个任务
             </p>
           </div>
@@ -340,7 +382,7 @@ async function removeTask(task: TaskRecord): Promise<void> {
 
     <!-- 底部:综合设置入口 -->
     <div class="sv-side-foot">
-      <div v-if="uploadError" class="sv-feedback err" style="margin: 0 0 8px">{{ uploadError }}</div>
+      <div v-if="uploadError" class="sv-feedback err">{{ uploadError }}</div>
       <button
         class="sv-btn primary sv-side-btn"
         @click="store.settingsOpen = true"
@@ -427,47 +469,44 @@ async function removeTask(task: TaskRecord): Promise<void> {
             <textarea
               v-model="promptEdit.text"
               rows="16"
-              class="sv-input"
-              style="resize: vertical; min-height: 320px; line-height: 1.7"
+              class="sv-input sv-area xl"
               placeholder="角色提示词(角色设定)。留空表示无提示词,直接以助手身份回复。"
               spellcheck="false"
             ></textarea>
-            <div class="sv-field-label" style="margin-top: 14px">
+            <div class="sv-field-label sv-mt14">
               <span class="sv-supreme pink-deep" /> 开场白(First Message)
             </div>
             <textarea
               v-model="promptEdit.first_mes"
               rows="5"
-              class="sv-input"
-              style="resize: vertical; min-height: 130px; line-height: 1.7"
+              class="sv-input sv-area md"
               placeholder="主开场:新建会话时作为角色的第一句话(自动发送)。留空表示无主开场。"
               spellcheck="false"
             ></textarea>
-            <p class="sv-note" style="margin-top: 6px">
+            <p class="sv-note sv-mt6">
               主开场之外可添加备用开场,新建会话时可在多个开场之间选择。
             </p>
 
             <!-- 备用开场列表 -->
-            <div v-for="(g, i) in promptEdit.alts" :key="i" style="margin-top: 12px">
-              <div class="flex items-center gap-2" style="margin-bottom: 6px">
+            <div v-for="(g, i) in promptEdit.alts" :key="i" class="sv-mt12">
+              <div class="flex items-center gap-2 sv-mb6">
                 <span class="sv-tag">备用 {{ i + 1 }}</span>
-                <span style="flex: 1" />
+                <span class="sv-flex-1" />
                 <button class="sv-btn ghost sv-btn-sm" @click="removeAlternateGreeting(i)">删除</button>
               </div>
               <textarea
                 v-model="promptEdit.alts[i]"
                 rows="4"
-                class="sv-input"
-                style="resize: vertical; min-height: 96px; line-height: 1.7"
+                class="sv-input sv-area sm"
                 placeholder="备用开场内容(留空保存时自动忽略)。"
                 spellcheck="false"
               ></textarea>
             </div>
 
-            <button class="sv-btn ghost sv-btn-sm" style="margin-top: 12px" @click="addAlternateGreeting">
+            <button class="sv-btn ghost sv-btn-sm sv-mt12" @click="addAlternateGreeting">
               ＋ 添加备用开场
             </button>
-            <p class="sv-note" style="margin-top: 8px">
+            <p class="sv-note sv-mt8">
               提示词作为角色的系统设定注入每次对话;开场白在新建会话时作为角色的第一句话(自动识别角色卡内嵌开场白)。
             </p>
           </div>
@@ -476,7 +515,7 @@ async function removeTask(task: TaskRecord): Promise<void> {
           </div>
         </div>
         <div class="sv-modal-foot">
-          <button class="sv-btn ghost" style="margin-right: 8px" @click="promptEdit = null">取消</button>
+          <button class="sv-btn ghost sv-mr8" @click="promptEdit = null">取消</button>
           <button class="sv-btn primary" :disabled="savingPrompt" @click="savePrompt">
             {{ savingPrompt ? '保存中...' : '保存' }}
           </button>

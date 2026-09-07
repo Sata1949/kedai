@@ -12,7 +12,6 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
   const settingsOpen = ref(false);
   /** 提示词顺序管理面板开关 */
   const promptsOpen = ref(false);
-  const agentDockOpen = ref(true);
   /** 右侧 Agent 面板开关(默认收起) */
   const agentPanelOpen = ref(false);
   const worldBooksOpen = ref(false);
@@ -30,6 +29,37 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
   const chatRecordsOpen = ref(false);
   /** 启动动画是否完成 */
   const splashDone = ref(false);
+  /** 弹窗懒加载失败提示(defineAsyncComponent onError 写入;flag 为重试所需的面板开关键) */
+  const modalLoadError = ref<{ name: string; flag: string } | null>(null);
+  /** 启动/切换时的数据加载失败提示(角色/会话/历史加载 catch 写入;下次加载成功时清除) */
+  const dataLoadError = ref<string | null>(null);
+  /**
+   * 上传角色卡请求计数器(跨组件通信,取代 document.querySelector 戳 Sidebar 内部 DOM):
+   * 发起方(如 SettingsHub 快速操作)自增;Sidebar watch 本计数器触发自身隐藏 file input 的 click。
+   * 计数器语义而非布尔开关:连续点两次也要各触发一次,不丢请求。
+   */
+  const characterUploadRequested = ref(0);
+
+  // ===== 合并面板内部分区记忆(原为批次 3 L3 独立「调用情况」面板开关;面板合并后改作 tab 记忆) =====
+  // localStorage 键保持不变(kedai.call-trace-open.v1),旧偏好平滑迁移:
+  // 之前开着调用面板的用户,升级后打开合并面板落在「调用情况」tab。
+  const CALL_TRACE_KEY = 'kedai.call-trace-open.v1';
+  /** Agent 合并面板内部分区:true = 打开面板时落在「调用情况」tab;false = 「Agent 状态」tab */
+  const callTraceOpen = ref<boolean>(readStoredCallTrace());
+  function readStoredCallTrace(): boolean {
+    try {
+      return localStorage.getItem(CALL_TRACE_KEY) === '1';
+    } catch {
+      return false;
+    }
+  }
+  watch(callTraceOpen, (v) => {
+    try {
+      localStorage.setItem(CALL_TRACE_KEY, v ? '1' : '0');
+    } catch {
+      /* 忽略 */
+    }
+  });
 
   // ===== 安全 HTML 渲染开关 =====
   /**
@@ -106,7 +136,6 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
   return {
     settingsOpen,
     promptsOpen,
-    agentDockOpen,
     agentPanelOpen,
     worldBooksOpen,
     quickRepliesOpen,
@@ -120,6 +149,10 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
     optimizeOpen,
     chatRecordsOpen,
     splashDone,
+    modalLoadError,
+    dataLoadError,
+    characterUploadRequested,
+    callTraceOpen,
     renderHtml,
     defaultRenderHtml,
     renderHtmlOverrides,

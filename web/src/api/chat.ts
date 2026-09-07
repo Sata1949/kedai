@@ -1,5 +1,6 @@
 // SSE 流式聊天(streamChat)
 import { BASE, apiErrorMessage, authorizedFetch, request } from './client';
+import { createSseFrameParser } from './sseParser';
 import type { AgentMode, SseEvent, TokenUsage } from './types';
 
 export type SseHandler = (event: SseEvent) => void;
@@ -54,19 +55,17 @@ export interface SseParser {
   finish(): boolean;
 }
 
-/** 增量 SSE 解析器:兼容 CRLF/LF、跨 chunk 分隔符和 UTF-8，多 data 行按规范以换行拼接。 */
+/**
+ * 聊天流 SSE 解析器:帧解析委托 sseParser.ts 共享层(兼容 CRLF/LF、跨 chunk 分隔符和
+ * UTF-8,多 data 行按规范以换行拼接),本层只保留聊天专属语义:
+ * - data 文本 JSON.parse 为 SseEvent 后回调(单个坏事件不阻断后续);
+ * - 终态判定:finish / interrupted / error(error 也是服务端错误终态)收到后,
+ *   finish() 返回 true,streamChat 不再补合成 finish。
+ */
 export function createSseParser(onEvent: SseHandler): SseParser {
-  const decoder = new TextDecoder();
-  let buffer = '';
   let terminalReceived = false;
 
-  const dispatch = (block: string): void => {
-    const data = block
-      .split(/\r\n|\n|\r/)
-      .filter((line) => line.startsWith('data:'))
-      .map((line) => line.slice(5).replace(/^ /, ''))
-      .join('\n');
-    if (!data) return;
+  const frames = createSseFrameParser((data) => {
     try {
       const event = JSON.parse(data) as SseEvent;
       onEvent(event);
@@ -75,30 +74,12 @@ export function createSseParser(onEvent: SseHandler): SseParser {
     } catch {
       // 单个坏事件不应阻断后续事件。
     }
-  };
-
-  const drain = (atEof = false): void => {
-    const separator = /\r\n\r\n|\n\n|\r\r/;
-    let match = separator.exec(buffer);
-    while (match) {
-      dispatch(buffer.slice(0, match.index));
-      buffer = buffer.slice(match.index + match[0].length);
-      match = separator.exec(buffer);
-    }
-    if (atEof && buffer) {
-      dispatch(buffer);
-      buffer = '';
-    }
-  };
+  });
 
   return {
-    push(chunk) {
-      buffer += decoder.decode(chunk, { stream: true });
-      drain();
-    },
-    finish() {
-      buffer += decoder.decode();
-      drain(true);
+    push: (chunk) => frames.push(chunk),
+    finish: () => {
+      frames.finish();
       return terminalReceived;
     },
   };
