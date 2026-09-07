@@ -349,7 +349,9 @@ export function applyJq(
       } else if (value === undefined) {
         return first ? (first as HTMLInputElement)[name as keyof HTMLInputElement] : undefined;
       } else {
-        for (const el of els) (el as HTMLInputElement)[name as keyof HTMLInputElement] = value as never;
+        // name 为脚本传入的动态属性名:keyof HTMLInputElement 的键集含 DOM lib 只读属性,直接索引赋值触发 TS2540;
+        // 断言为可变视图仅是类型层面放行(对齐项目内 as unknown as Record 惯例),运行时仍是 el[name] = value
+        for (const el of els) (el as unknown as Record<string, unknown>)[name] = value;
       }
       return true;
     }
