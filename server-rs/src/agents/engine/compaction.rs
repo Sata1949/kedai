@@ -4,7 +4,9 @@
 //   - 投影(读):存在摘要时,模型可见历史 = [摘要] + 摘要截止点之后的原文。
 //   - 生成(写):mode=manual 且请求带 compact 标记,或 mode=auto 且历史 token 超阈值,
 //     把「较早历史」压成一条摘要,保留最近 KEEP_RECENT_MESSAGES 条原文。
-// 本模块只提供纯函数与提示词文本;LLM 调用与落库由 engine 完成(见 maybe_compact)。
+// 本模块上半为纯函数与提示词文本;引擎侧 LLM 调用与落库方法
+// (clear_compaction/compact_session/maybe_compact)自 engine/mod.rs 拆分迁入文件尾 impl 块。
+use super::*;
 use crate::models::types::MessageRecord;
 
 /// 压缩后保留的最近消息条数默认值(约等于最近 2 轮对话),避免摘要后模型丢失当前语境。
@@ -180,6 +182,198 @@ fn looks_like_error(content: &str) -> bool {
     ["error", "exception", "failed", "panic"]
         .iter()
         .any(|kw| lower.contains(kw))
+}
+
+// ===== 引擎侧压缩方法(自 engine/mod.rs 拆分迁入,纯代码移动,逻辑不变)=====
+// maybe_compact 原为 engine/mod.rs 私有方法,此处为 pub(super)(= 对 engine 可见),
+// 可见范围与拆分前一致;clear_compaction/compact_session 本就 pub,未变。
+impl AgentEngine {
+    /// 阶段 2「上下文收集」:装载字符卡/历史/世界书/变量树与设置快照,产出只读上下文
+    /// 清除会话的压缩摘要(撤销压缩,恢复完整原文历史)。返回是否确有摘要被清除。
+    pub fn clear_compaction(&self, session_id: &str) -> Result<bool, String> {
+        let had = self.sessions.get_compaction(session_id).is_some();
+        self.sessions.delete_compaction(session_id)?;
+        Ok(had)
+    }
+
+    /// 手动压缩(独立端点 /api/chat/compact 调用):对会话较早历史做一次摘要压缩。
+    /// 原文消息不删、摘要 upsert 到 session_compactions(可逆);返回是否实际压缩。
+    /// mode=off 时拒绝;历史不足 KEEP_RECENT_MESSAGES 条时返回 Ok(false) 无需压缩。
+    /// 增量摘要(缓存感知管线·改造 B):旧摘要冻结,只摘要上次截止点之后的新段,
+    /// 新行 = 旧摘要(原字节)+ 增量拼接;旧行保留在表中以便回溯。
+    pub async fn compact_session(&self, session_id: &str) -> Result<bool, String> {
+        // 保留尾部条数:设置项 compaction_keep_recent(load 已钳制 2..=200),
+        // 此处再兜底 >= 2,防止异常配置导致压缩后无上下文
+        // (设置快照:不留锁跨 await)
+        let (mode, keep_recent) = {
+            let s = self.settings_snapshot();
+            (
+                s.compaction_mode.clone(),
+                (s.compaction_keep_recent as usize).max(DEFAULT_KEEP_RECENT_MESSAGES.max(2)),
+            )
+        };
+        if mode == "off" {
+            return Err("上下文压缩模式为 off,请先在设置中改为 manual 或 auto".into());
+        }
+        // 同步 SQLite 读取挪进阻塞线程池(DB 并发改造),避免占用 tokio worker
+        let (history, compaction) = {
+            let sessions = self.sessions.clone();
+            let sid = session_id.to_string();
+            tokio::task::spawn_blocking(move || {
+                (sessions.get_messages(&sid), sessions.get_compaction(&sid))
+            })
+            .await
+            .map_err(|e| format!("读取会话历史失败: {e}"))?
+        };
+        let Some(to_compact) = compaction_split(&history, keep_recent) else {
+            return Ok(false);
+        };
+        let Some(upto) = upto_message_id(&history, to_compact) else {
+            return Ok(false);
+        };
+        // 增量边界:已有摘要时只压缩 (upto_old, upto] 新段;无新内容跳过
+        let (upto_old, old_summary) = compaction.unwrap_or((0, String::new()));
+        if upto_old >= upto {
+            return Ok(false);
+        }
+        let segment = incremental_segment(&history, upto_old, upto);
+        if segment.is_empty() {
+            return Ok(false);
+        }
+        let (abort, abort_rx) = AbortFlag::new();
+        let messages = vec![
+            LlmMessage::plain("system", compaction_system_prompt()),
+            LlmMessage::plain("user", &compaction_user_text(segment)),
+        ];
+        let params = GenerationParams {
+            temperature: 0.3,
+            top_p: 1.0,
+            max_tokens: 512,
+            stop: None,
+            tools: Vec::new(),
+            max_tool_rounds: None,
+            tool_choice: crate::models::types::ToolChoice::Auto,
+            parallel_tool_calls: None,
+        };
+        let (increment, _usage) = self.generate_text(&messages, params, abort_rx).await?;
+        let increment = increment.trim().to_string();
+        if increment.is_empty() {
+            return Err("摘要生成返回空内容".into());
+        }
+        let merged = merge_incremental_summary(&old_summary, &increment);
+        self.sessions
+            .save_compaction(session_id, upto, &merged, &self.model())?;
+        drop(abort);
+        Ok(true)
+    }
+
+    /// auto 压缩决策(生成主流程内):mode=auto 且历史 token 达到阈值时触发摘要。
+    /// mode=manual 由前端独立端点 /api/chat/compact 触发,不经本方法。
+    /// 摘要经 generate_text 非流式生成,失败仅告警并跳过,不阻塞生成主流程。
+    pub(super) async fn maybe_compact(
+        &self,
+        session_id: &str,
+        tx: &mpsc::Sender<SseEvent>,
+        abort: &watch::Receiver<bool>,
+    ) {
+        let (mode, threshold, max_context, keep_recent) = {
+            // 设置快照:不留锁跨 await
+            let s = self.settings_snapshot();
+            (
+                s.compaction_mode.clone(),
+                s.compaction_threshold,
+                s.max_context_tokens,
+                (s.compaction_keep_recent as usize).max(DEFAULT_KEEP_RECENT_MESSAGES.max(2)),
+            )
+        };
+        if mode != "auto" {
+            return;
+        }
+        // 同步 SQLite 读取挪进阻塞线程池(DB 并发改造)
+        let (history, compaction) = {
+            let sessions = self.sessions.clone();
+            let sid = session_id.to_string();
+            match tokio::task::spawn_blocking(move || {
+                (sessions.get_messages(&sid), sessions.get_compaction(&sid))
+            })
+            .await
+            {
+                Ok(v) => v,
+                Err(_) => return,
+            }
+        };
+        if history.is_empty() {
+            return;
+        }
+        let tokens = {
+            let mut ts = self.token_service.lock().unwrap_or_else(|e| e.into_inner());
+            let mut total: i64 = 0;
+            for m in &history {
+                total += ts.count_tokens(&m.content, &self.model()) + 4;
+            }
+            total + 2
+        };
+        if !should_auto_compact(tokens, max_context, threshold) {
+            return;
+        }
+        let Some(to_compact) = compaction_split(&history, keep_recent) else {
+            return;
+        };
+        let Some(upto) = upto_message_id(&history, to_compact) else {
+            return;
+        };
+        // 增量边界(改造 B):已有摘要时只压缩 (upto_old, upto] 新段,无新内容跳过
+        let (upto_old, old_summary) = compaction.unwrap_or((0, String::new()));
+        if upto_old >= upto {
+            return;
+        }
+        let segment = incremental_segment(&history, upto_old, upto);
+        if segment.is_empty() {
+            return;
+        }
+        let _ = tx
+            .send(step_evt(
+                "压缩历史中…",
+                Some("正在把较早对话压成摘要,原文仍保留可恢复".to_string()),
+                None,
+                None,
+            ))
+            .await;
+        let messages = vec![
+            LlmMessage::plain("system", compaction_system_prompt()),
+            LlmMessage::plain("user", &compaction_user_text(segment)),
+        ];
+        let params = GenerationParams {
+            temperature: 0.3,
+            top_p: 1.0,
+            max_tokens: 512,
+            stop: None,
+            tools: Vec::new(),
+            max_tool_rounds: None,
+            tool_choice: crate::models::types::ToolChoice::Auto,
+            parallel_tool_calls: None,
+        };
+        match self.generate_text(&messages, params, abort.clone()).await {
+            Ok((increment, _usage)) => {
+                let increment = increment.trim().to_string();
+                if !increment.is_empty() {
+                    let merged = merge_incremental_summary(&old_summary, &increment);
+                    if let Err(e) =
+                        self.sessions
+                            .save_compaction(session_id, upto, &merged, &self.model())
+                    {
+                        logger::warn("压缩摘要落库失败", &[("error", Value::String(e))]);
+                    }
+                }
+            }
+            Err(e) => {
+                logger::warn(
+                    "压缩摘要生成失败,本轮跳过压缩",
+                    &[("error", Value::String(e))],
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]

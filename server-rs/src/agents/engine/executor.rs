@@ -976,6 +976,52 @@ async fn execute_call(
     (out, start.elapsed().as_millis() as i64)
 }
 
+// ===== 非流式静默生成(自 engine/mod.rs 拆分迁入,纯代码移动,逻辑不变)=====
+impl AgentEngine {
+    /// 阶段六 6g-1:非流式静默生成(复刻 generate_reflect_advice 模式)。
+    /// 供后端脚本 TavernHelper.generate 与外部调用;不入聊天记录、不推 SSE。
+    pub async fn generate_text(
+        &self,
+        messages: &[LlmMessage],
+        params: GenerationParams,
+        abort: watch::Receiver<bool>,
+    ) -> Result<(String, TokenUsage), String> {
+        if *abort.borrow() {
+            return Err("生成已中断".into());
+        }
+        let connector = self.connector.read().await;
+        let chunks = connector.generate(messages, params, abort).await?;
+        drop(connector);
+        let mut out = String::new();
+        let mut usage = TokenUsage::default();
+        for chunk in chunks {
+            match chunk {
+                LlmStreamChunk::Token(t) => out.push_str(&t),
+                LlmStreamChunk::Usage {
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens,
+                    prompt_cache_hit_tokens,
+                    prompt_cache_miss_tokens,
+                    ..
+                } => {
+                    usage.prompt_tokens += prompt_tokens;
+                    usage.completion_tokens += completion_tokens;
+                    usage.total_tokens += total_tokens;
+                    usage.prompt_cache_hit_tokens += prompt_cache_hit_tokens;
+                    usage.prompt_cache_miss_tokens += prompt_cache_miss_tokens;
+                }
+                _ => {}
+            }
+        }
+        if out.trim().is_empty() {
+            Err("生成返回空内容".into())
+        } else {
+            Ok((out, usage))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

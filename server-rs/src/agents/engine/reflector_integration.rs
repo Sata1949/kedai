@@ -291,3 +291,41 @@ fn truncate_str(s: &str, max_chars: usize) -> String {
         trimmed.chars().take(max_chars).collect()
     }
 }
+
+// ===== 反思失败建议组装(自 engine/mod.rs 拆分迁入,纯代码移动,逻辑不变)=====
+// 原为 engine/mod.rs 私有函数,此处为 pub(super)(= 对 engine 可见),范围一致。
+/// 生成反思失败建议并拼为注入文本(位置0 内容,自动而非用户决定):
+/// 调用 LLM 产出 ≤200 token 的针对性改进建议(失败/空则仅保留用户补充说明),
+/// 可选的用户补充说明附加在其后;建议与补充均为空时返回 None(不注入)。
+/// 生成产生的 usage 累加进 total_usage。注入边(user/assistant)由构建期
+/// reflect_advice_role 决定,与本函数无关。
+pub(super) async fn build_reflect_advice(
+    engine: &AgentEngine,
+    reason: &str,
+    user_input: &str,
+    draft: &str,
+    supplement: &str,
+    abort: &watch::Receiver<bool>,
+    total_usage: &mut TokenUsage,
+) -> Option<String> {
+    let mut text = String::new();
+    if let Some((advice, u)) =
+        generate_reflect_advice(engine, reason, user_input, draft, abort).await
+    {
+        total_usage.prompt_tokens += u.prompt_tokens;
+        total_usage.completion_tokens += u.completion_tokens;
+        total_usage.total_tokens += u.total_tokens;
+        total_usage.prompt_cache_hit_tokens += u.prompt_cache_hit_tokens;
+        total_usage.prompt_cache_miss_tokens += u.prompt_cache_miss_tokens;
+        text.push_str("[反思反馈]\n");
+        text.push_str(advice.trim());
+    }
+    let supplement = supplement.trim();
+    if !supplement.is_empty() {
+        if !text.is_empty() {
+            text.push_str("\n\n[补充要求]\n");
+        }
+        text.push_str(supplement);
+    }
+    (!text.is_empty()).then_some(text)
+}
