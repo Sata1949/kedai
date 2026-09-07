@@ -1,7 +1,7 @@
 # Kedai 维护指南(MAINTENANCE)
 
 > 面向后续维护者的技术文档。涵盖架构、构建、启动、API 契约、数据库、日志与已知坑位。
-> 版本:v0.2.0(前端 Vue3 + 后端 Rust + Tauri 桌面壳) 最后更新:2026-08-12
+> 版本:v0.2.0(前端 Vue3 + 后端 Rust + Tauri 桌面壳) 最后更新:2026-09-07
 
 ---
 
@@ -71,8 +71,9 @@ kedai/
 │   ├── src/lib.rs              # 数据目录注入(%APPDATA%\com.kedai.app)+ 服务自检/启动
 │   └── tauri.conf.json         # 窗口 1280×800、NSIS 打包、图标
 ├── tools/make-icons.ps1        # 品牌图标生成脚本(圆角 + 透明背景,零依赖)
-├── start.ps1                   # 智能启动:优先 Tauri 桌面应用,回退浏览器模式
-├── build.ps1                   # 一键构建(前端 + Rust release;-Tauri 追加桌面打包)
+├── start.ps1                   # 智能启动:默认测试版(浏览器模式),-Portable 启动便携版;过期/漂移自动双端重建
+├── build.ps1                   # 一键构建(默认双端同步:前端 + Rust release + 便携版;-TestOnly 仅测试版;-Tauri 追加 NSIS)
+├── Kedai.exe / Kedai.lnk       # 图形启动器(双击正式入口;源码在 launcher/,由 build.ps1 幂等维护)
 ├── logs/                       # 运行日志(自动清理 3 天前;桌面场景在 %APPDATA%\com.kedai.app\logs)
 ├── data/                       # SQLite + 角色卡原图 + avatars(勿删)
 └── docs/                       # 技术文档(如 kedai-agent-coordination.md)
@@ -96,10 +97,13 @@ kedai/
 
 | 操作 | 命令 | 说明 |
 |---|---|---|
-| 一键启动(桌面) | `.\start.ps1` | 优先启动 Tauri 桌面应用(带 logo 窗口);未构建桌面产物时回退浏览器模式 |
-| 桌面安装包 | `.\build.ps1 -Tauri` | 前端 + Rust release + NSIS 安装程序(需 `@tauri-apps/cli`);安装后从开始菜单启动 |
-| 一键构建 | `.\build.ps1` | 前端 web/dist + Rust release;`-Dev` 仅前端 `-NoWeb` 仅 Rust `-Tauri` 追加桌面打包 |
-| 后端测试 | `cd server-rs && cargo test` | 658 个测试(546 单测 + 112 集成),**需在 vcvars64 环境**;前端 `npm test -w web` 317 个 |
+| 一键启动(桌面) | 双击 `Kedai.lnk` 或 `.\start.ps1 -Portable` | lnk 指向项目根 `Kedai.exe` 图形启动器(过期/漂移自动询问重建);`.\start.ps1` 默认启动测试版浏览器模式 |
+| 桌面安装包 | `.\build.ps1 -Tauri` | 双端同步之外追加 NSIS 安装程序(需 `@tauri-apps/cli`);安装后从开始菜单启动 |
+| 一键构建 | `.\build.ps1` | **默认双端同步产出**:前端 web/dist + Rust release(测试版)+ 便携版;`-TestOnly` 仅测试版快速通道 `-Dev` debug 构建 `-NoWeb` 仅 Rust `-Tauri` 追加 NSIS 打包 |
+| 兼容别名 | `npm run build:all` / `npm run build:rs` | 均等价 `.\build.ps1`(双端同步);`npm run build:test` 等价 `.\build.ps1 -TestOnly` |
+| 统一改版本号 | `npm run version:bump -- x.y.z` | 7 处版本号一次改全(2 个 package.json、3 个 Cargo.toml、tauri.conf.json、本文档版本行);支持 `-DryRun` 预览 |
+| 后端测试 | `cd server-rs && cargo test` | 805 个测试(636 单测 + 169 集成,2026-09-07 实测),**需在 vcvars64 环境**;前端 `npm test -w web` 485 个 |
+| 全量检查(本地 CI) | `npm run check` | `tools/check-all.ps1`:fmt → clippy → cargo test → vue-tsc(警告档)→ vitest → vite build;`-StrictTypecheck` 切硬门禁 |
 | 开发模式 | `cd server-rs && cargo run` + `npm run dev -w web` | 后端 3001 / 前端 5173(代理到 3001) |
 | 前端构建 | `npm run build -w web` | 产出 web/dist(编译进 exe 用) |
 
@@ -138,19 +142,42 @@ git-fetch-with-cli = true
 
 ### 单二进制原理
 
-`kedai-server.exe` 通过 `include_dir!` **内嵌** `web/dist`(编译期快照)。启动时:
-1. 若磁盘存在 `web/dist` → 优先读盘(便于开发调试)
-2. 否则回退内嵌版本
+`kedai-server.exe` 通过 `include_dir!` **内嵌** `web/dist`(编译期快照,见 `server-rs/src/api/static_files.rs`)。
+运行时默认只服务内嵌版本;仅显式设置环境变量 `KEDAI_WEB_DIST` 指向磁盘目录时才用磁盘版覆盖
+(开发调试用,见 `server-rs/src/config.rs`)。
 
-因此**每次改前端后必须重新构建 exe** 才会带上新界面。
+因此**每次改前端后必须重新构建 exe** 才会带上新界面;`server-rs/build.rs` 的
+`rerun-if-changed=../web/dist` 保证 cargo 感知前端变化,构建脚本另有 mtime 兜底检测。
 
 ### 构建流程
 
 ```powershell
-.\build.ps1          # = npm run build -w web  +  cargo build --release
+.\build.ps1          # 默认双端同步:前端 + cargo build --release + 便携版
+.\build.ps1 -TestOnly  # 快速迭代:只产出测试版(结尾会警告便携版未同步)
 ```
 
-产物:`server-rs\target\release\kedai-server.exe`(约 20~30MB,单文件,含 LTO 优化,编译约 2~5 分钟)。
+> **本机环境提示(2026-08 批次构建时验证)**:裸 shell 里没有 cargo——MSVC toolchain 需先
+> `call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"`,
+> 再在同一 shell 里执行 build.ps1(脚本内部直接调 cargo/npm,继承环境)。
+> Git Bash 里用 `cmd //c "<包装.bat>"` 嵌套调用。另外:构建只跑 debug 不代表 exe 版已更新,
+> 交付前必须跑 `.\build.ps1`(详见 AGENTS.md「构建提醒」)。
+
+产物:`dist\kedai-server.exe`(测试版)+ `dist\Kedai-portable\Kedai.exe`(便携版),各自约 20~30MB。
+双端全量构建约 5~10 分钟(便携版含 Tauri 全量编译);快速迭代用 `-TestOnly` 或 `-Dev`。
+
+### 两版同步机制(构建指纹)
+
+测试版与便携版是两条独立编译链,各自把编译那一刻的 `web/dist` 冻结进二进制——分开构建必然漂移。
+根治手段是「默认双端同步 + 指纹可查 + 启动对齐」三层:
+
+1. **构建层**:`build.ps1` 默认一次产出两端;每个 dist 产物旁边写 `<exe>.build.json`
+   (`{version, build_time, dist_hash}`,算法见 `tools/Write-BuildStamp.ps1`)。
+2. **运行时层**:`server-rs/build.rs` 把 `KEDAI_DIST_HASH`/`KEDAI_BUILD_TIME` 编进二进制,
+   `GET /api/health` 返回 `{ok, ts, version, build_id, build_time}`;设置中心底部常驻显示
+   「版本 · 构建时间 · 指纹前 8 位」,两端各开一次对比即可肉眼确认同步。
+3. **启动层**:`start.ps1` 与图形启动器(`Kedai.exe`,源码 `launcher/`)启动前比对两端
+   sidecar 的 `dist_hash`,不一致自动执行 `build.ps1` 双端重建;`Kedai.lnk` 指向图形启动器,
+   双击自带过期/漂移检测(直接双击 dist 里的裸便携版 exe 没有这层保障)。
 
 ### 部署方式
 
@@ -163,10 +190,11 @@ git-fetch-with-cli = true
 ### 启动器(start.ps1,推荐)
 
 统一 PowerShell 启动脚本(旧 C# `kedai.exe` / `启动Kedai.bat` 已废弃删除):
-- 测试版(默认 `.\start.ps1`):启动 `server-rs\target\release\kedai-server.exe` 并自动打开浏览器;`-NoBrowser` 不开浏览器,`-Build` 强制先执行 `build.ps1`。
-- 正式版(`.\start.ps1 -Portable`):启动 `dist\Kedai-portable\Kedai.exe` 便携版桌面应用(数据存 `%APPDATA%\com.kedai.app`)。
-- 自动重建:启动前检测产品源码(web/src、server-rs/src、src-tauri/src 等)是否比可执行产物新,过期则自动重新构建;`-NoRebuild` 跳过。
-- 两版共用端口 3001 与同一数据目录,勿同时运行。Rust 启动器工程另见 `launcher/`。
+- 测试版(默认 `.\start.ps1`):启动 `dist\kedai-server.exe` 并自动打开浏览器;`-NoBrowser` 不开浏览器,`-Build` 强制先执行 `build.ps1`。
+- 正式版(`.\start.ps1 -Portable`):启动 `dist\Kedai-portable\Kedai.exe` 便携版桌面应用(数据存 `%APPDATA%\com.kedai.app`);双击入口是项目根 `Kedai.lnk`(指向 `Kedai.exe` 图形启动器,自带过期/漂移询问重建)。
+- 自动重建:启动前检测产品源码(web/src、server-rs/src、src-tauri/src 等)是否比可执行产物新,过期则自动执行 `build.ps1`(默认双端同步);`-NoRebuild` 跳过。
+- **同步纪律**:测试版与便携版是两条独立编译链的产物,`build.ps1` 默认双端同步产出;只有 `-TestOnly`/`-Dev` 快速通道会只刷新测试版。两端 sidecar 指纹(`<exe>.build.json`)不一致时,启动脚本与图形启动器都会自动触发双端重建,无需人工记忆。
+- 两版共用端口 3001 与同一数据目录,勿同时运行。
 
 ### 配置(.env,复制自 `.env.example`)
 
@@ -350,9 +378,9 @@ rusqlite(bundled,零原生依赖),**WAL 模式 + foreign_keys ON**。5 张表:
 cd server-rs && cargo test
 ```
 
-- 单元测试(源文件内 `#[test]`/`#[tokio::test]`,546 个):状态机迁移、planner(fast/deep/算式识别)、reflector(3 规则)、calculator(白名单解析)、censor(禁词同义替换)、token 编码映射与估算、工具注册表、世界书转换、世界书注入、提示词注入(含禁词库)、mvu 变量系统(含 JSONPatch 转义/reason/delta 容错)、EJS 渲染器(含读取 API 与 escape-ejs)、角色卡解析、正则脚本、@INJECT 解析/应用、GENERATE 注入、结构化错误码(api/errors.rs)
-- API 集成测试(`tests/` 7 个文件,112 个,mock 连接器 + 临时数据目录):api_integration、assistant、agent_flows、prompt_inject、world_books、settings_connector、security——health、角色 CRUD(multipart 上传)、会话/消息/导入导出、设置与 token、agent plan、SSE 聊天流、计算器工具 SSE、世界书/角色卡、提示词注入与酒馆预设导入、鉴权
-- 前端 `npm test -w web`(Vitest,317 个):stores、api client(含 ApiError 错误码分类)、组件与 composables
+- 单元测试(源文件内 `#[test]`/`#[tokio::test]`,636 个,2026-09-07 实测):状态机迁移、planner(fast/deep/算式识别)、reflector(3 规则)、calculator(白名单解析)、censor(禁词同义替换)、token 编码映射与估算、工具注册表、世界书转换、世界书注入、提示词注入(含禁词库)、mvu 变量系统(含 JSONPatch 转义/reason/delta 容错)、EJS 渲染器(含读取 API 与 escape-ejs)、角色卡解析、正则脚本、@INJECT 解析/应用、GENERATE 注入、结构化错误码(api/errors.rs)
+- API 集成测试(`tests/` 18 个文件,169 个,mock 连接器 + 临时数据目录):api_integration、assistant、agent_flows、tasks、task_events、prompt_inject、world_books、settings_connector、security、contracts_e2e、scripts_e2e、scripts_import、swipe_regenerate、undo、user_scripts、variables_scopes、db_concurrency、macros——health、角色 CRUD(multipart 上传)、会话/消息/导入导出、设置与 token、agent plan、SSE 聊天流、任务引擎六模式、计算器工具 SSE、世界书/角色卡、提示词注入与酒馆预设导入、鉴权
+- 前端 `npm test -w web`(Vitest,485 个,2026-09-07 实测):stores、api client(含 ApiError 错误码分类)、组件与 composables;类型门禁 `npm run typecheck -w web`(vue-tsc,存量清单见 docs/优化实施方案-2026-09.md 附录 D)
 - 新增接口建议同步补集成测试;测试环境变量 `CONNECTOR=mock` 强制隔离
 
 ---

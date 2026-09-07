@@ -20,6 +20,10 @@
   - 状态机驱动:`planning → executing ⇄ tool_call → reflecting → finished`,全程可观测、可中断
   - 两种模式:`fast`(单步直接生成)、`deep`(计划 → 执行 → 反思,质量更高)
   - 推理链通过 SSE 流式推送到前端,实时展示思考过程
+- 🗂️ **任务模式**(与角色扮演平级的顶层模式)
+  - 独立任务引擎:plan(LLM 拆解 2~5 步)→ execute(逐步派子任务)→ summarize(LLM 汇总),状态落 SQLite 三表(tasks/task_subtasks/task_usage),全程可中断、可重跑
+  - 进度经 **SSE 实时推送**(`GET /api/tasks/events`,任务生命周期事件 created/status/plan/subtask/usage/deleted),前端事件驱动刷新,无轮询;断线指数退避重连 + 低频兜底
+  - 提示词与角色扮演模式**类型级隔离、按模式独立存储互不影响**,外部文本统一 `<UNTRUSTED_PROMPT_SOURCE>` 边界包裹;机制详见 [docs/模式提示词边界.md](docs/模式提示词边界.md) 与 [docs/任务模式重构-变更说明.md](docs/任务模式重构-变更说明.md)
 - 🧠 **上下文工程**(提示词缓存友好)
   - **缓存感知压缩**:每轮 LLM usage(含 DeepSeek `prompt_cache_hit_tokens` / OpenAI `cached_tokens`)落库,`GET /api/diagnostics/cache` 报告命中率、费用估算与四级水位(soft/snip/compact/force);前端「优化」弹窗内置缓存健康面板
   - **前缀分层**:消息组装固定为「system(静态)→ 摘要槽 → 记忆槽 → 尾部历史(只追加)」,摘要改追加式增量(旧摘要字节冻结),压缩后缓存只 miss 尾部;同会话两次构建公共前缀逐字节一致(有回归测试护航)
@@ -38,14 +42,14 @@
 | 层 | 选型 |
 |---|---|
 | 桌面壳 | **Tauri 2**(窗口加载本地服务,NSIS 安装包,`src-tauri/`) |
-| 前端 | Vue 3 + Vite + Tailwind CSS v4 + Pinia(极简黑白至上主义) |
+| 前端 | Vue 3 + Vite + Tailwind CSS v4 + Pinia(淡粉画布 × 至上主义/构成主义设计系统) |
 | 后端 | **Rust + axum + tokio** |
 | 数据库 | SQLite(rusqlite,bundled 零原生依赖) |
 | 流式 | SSE(Server-Sent Events) |
 | Token 计数 | tiktoken-rs(按模型自动选分词器) |
 | 测试 | cargo test(单测 + API 集成)+ Vitest(前端单测,`npm test -w web`) |
 
-> 原 Node.js + TypeScript + Fastify 后端已重写为 Rust(见 `server-rs/`),原代码归档于 `_archive/node-server/`;原 C# 启动器被 Tauri 桌面壳取代,归档于 `_archive/csharp-launcher/`。
+> 原 Node.js + TypeScript + Fastify 后端已重写为 Rust(见 `server-rs/`);原 C# 启动器被 Tauri 桌面壳取代。历史代码不随仓库归档,需溯源请查 git 历史。
 
 ## 快速启动
 
@@ -76,9 +80,10 @@ cargo build
 ### Windows 便携版(正式交付)
 
 ```powershell
-# 构建前端、Tauri release,并组装独立便携目录
-npm run build:portable
-# 正式入口:dist\Kedai-portable\Kedai.exe
+# 一键双端同步构建:测试版 kedai-server.exe + 便携版 Kedai.exe(发布/交付用这条)
+.\build.ps1            # 等价 npm run build:all / build:rs
+# 正式入口(项目内双击):Kedai.lnk → 项目根 Kedai.exe 图形启动器(自带过期/漂移检测)
+# 交付产物入口:dist\Kedai-portable\Kedai.exe
 ```
 
 把整个 `dist\Kedai-portable\` 目录复制给用户即可;运行时不需要 Node.js、Rust 或项目源码。系统需要 Microsoft Edge WebView2 Runtime(Windows 10/11 通常已内置)。
@@ -95,14 +100,15 @@ npm run build:portable
 ### 浏览器模式(仅开发/调试)
 
 ```powershell
-# 一键构建:前端 web/dist + Rust release 单文件
-.\build.ps1
+# 快速迭代只构建测试版(不刷新便携版,会提示未同步):
+.\build.ps1 -TestOnly
 # 启动服务并自动打开浏览器
 .\start.ps1              # 始终使用浏览器开发/调试模式
 .\start.ps1 -NoBrowser   # 加 -NoBrowser 不自动开浏览器
 ```
 
 > 也可直接双击 `server-rs\target\release\kedai-server.exe` 启动;服务已在运行时再启动会自检并复用,不重复开端口。
+> 测试版与便携版各带构建指纹(`<exe>.build.json` + `/api/health` 的 build_id),设置中心底部可见;两端指纹一致即同步,不一致时启动器会自动双端重建。
 
 ### 配置(可选)
 
@@ -110,7 +116,7 @@ npm run build:portable
 无 Key 也能跑:将 `CONNECTOR` 设为 `mock` 使用演示模式(未配置 Key 时自动进入 mock)。
 
 > 💡 也可直接在应用内「设置」中编辑 API 地址 / Key / 模型,以及温度、Top-P、最大生成长度、最大上下文窗口;
-> 保存后写入 `data/settings.json` 并立即生效(优先级高于 `.env`,Key 仅存本地服务端、不回显明文)。Windows 使用当前用户 DPAPI 加密。非 Windows 在没有系统凭据后端时默认拒绝持久化非空 Key;只有明确接受明文风险并设置 `KEDAI_ALLOW_INSECURE_PLAINTEXT_SECRETS=1` 才允许写入 `plain:v1:` 值,更推荐通过环境变量提供 Key。
+> 保存后写入 `<数据目录>/settings.json` 并立即生效(优先级高于 `.env`,Key 仅存本地服务端、不回显明文;数据目录解析规则见「目录结构」一节)。Windows 使用当前用户 DPAPI 加密。非 Windows 在没有系统凭据后端时默认拒绝持久化非空 Key;只有明确接受明文风险并设置 `KEDAI_ALLOW_INSECURE_PLAINTEXT_SECRETS=1` 才允许写入 `plain:v1:` 值,更推荐通过环境变量提供 Key。
 
 ### 试跑演示
 
@@ -132,31 +138,34 @@ kedai/
 │   │   ├── tools/          # 工具系统(registry / calculator / memory / agent_tools)
 │   │   ├── models/         # 类型 + SQLite 表结构
 │   │   ├── parsing/        # 角色卡 V2 解析 + assistant/ejs/(mvu 变量渲染)
-│   │   ├── services/       # 角色/会话/Agent会话/Token 服务
+│   │   ├── services/       # 角色/会话/Agent会话/Token/任务引擎 等业务服务
 │   │   └── utils/          # 结构化 JSON 日志(按天归档)
 │   └── tests/              # API 集成测试
 ├── web/                    # 前端(Vue 3 + Pinia + Tailwind v4)
 │   └── src/
-│       ├── api/            # REST + SSE 流式客户端(按域拆分,index 聚合)
-│       ├── store.ts        # Pinia 全局状态
-│       ├── sseReducer.ts   # SSE 事件纯函数
-│       └── components/     # Sidebar / ChatWindow / ChatInput / AgentDock / SettingsModal
+│       ├── api/            # REST + SSE 流式客户端(按域拆分)
+│       ├── stores/         # Pinia 七子 store(chat/character/modelConn/...),store.ts 门面聚合
+│       ├── mvu/            # 变量系统 + mini-jquery 沙箱
+│       └── components/     # Sidebar / ChatWindow / TaskBoard / AgentPanel + 13 弹窗
+├── docs/                   # 协议锁定文档(活文档)与过程交接文档,索引见 docs/README.md
 ├── tools/make-icons.ps1    # 品牌图标生成(圆角 + 透明背景)
-├── launcher/               # 旧项目目录启动器源码(兼容保留,非正式入口)
-├── dist/Kedai-portable/    # 正式 Windows 便携目录(npm run build:portable 生成)
-├── start.ps1               # 浏览器开发/调试启动器
-├── build.ps1               # 后端/前端与可选 NSIS 构建
-├── tools/build-portable.ps1# 便携目录构建脚本
-├── logs/                   # 运行日志(按天归档 kedai-YYYY-MM-DD.log,自动清理 3 天前)
-├── data/                   # 运行时生成:SQLite + 角色卡原图 + avatars
-└── _archive/               # 历史物归档(node-server / csharp-launcher)
+├── launcher/               # 图形启动器源码(双击正式入口,产物为项目根 Kedai.exe)
+├── Kedai.exe / Kedai.lnk   # 图形启动器与快捷方式(过期/漂移自动询问重建,由 build.ps1 维护)
+├── dist/Kedai-portable/    # 正式 Windows 便携目录(build.ps1 默认同步产出)
+├── start.ps1               # 启动脚本:默认浏览器测试版,-Portable 启动便携版
+├── build.ps1               # 一键构建:默认双端同步(前端 + Rust release + 便携版)
+├── tools/build-portable.ps1# 便携目录构建脚本(被 build.ps1 接续调用)
+├── tools/bump-version.ps1  # 统一修改全仓库版本号(npm run version:bump -- x.y.z)
+└── logs/                   # 运行日志(按天归档 kedai-YYYY-MM-DD.log,自动清理 3 天前)
 ```
+
+> **数据目录**(不进仓库):优先级 `DATA_DIR` 环境变量 > `%APPDATA%\com.kedai.app\data\`(已含用户数据时,与桌面版同目录)> 项目根 `data\`。内容:SQLite(kedai.db)+ 角色卡原图 + avatars + JSON sidecar(settings/prompt_floors/audio/agent_flows/tool_permissions)。下文凡写 `<数据目录>` 均指此。
 
 ## 日志与维护
 
 - 运行日志双写:控制台 + `logs/kedai-YYYY-MM-DD.log`(按天归档;桌面应用场景在 `%APPDATA%\com.kedai.app\logs\`)。
 - 自动清理:启动时删除 3 天前的过期日志。
-- 数据库:`data/kedai.db`(WAL 模式,10 张表;桌面场景在 `%APPDATA%\com.kedai.app\data\`)。
+- 数据库:`<数据目录>/kedai.db`(WAL 模式,28 张表;桌面版与已有用户数据的场景固定在 `%APPDATA%\com.kedai.app\data\`)。
 
 ## API 概览
 
@@ -210,14 +219,14 @@ data: {"type":"finish","usage":{"prompt_tokens":166,"completion_tokens":35,"tota
 - **自动转换**:上传(独立世界书与角色卡内嵌)时自动规范化酒馆变体——关键词兼容 `keys/key/keywords/keyword` 字段名与逗号分隔字符串、`constant` 兼容字符串/数字形态并支持缺失时自动判定(无关键词无正则 → 常驻)、`role` 缺失即「自动」(按 常驻→system、激发→user 分配)。上传响应附带转换统计 `conversion`。
 - **自动分配机制自检**:世界书窗口「检查自动分配机制」按钮(或 `GET /api/world-books/auto-assign-check`)可一键验证条目解析、属性自动分配、转换链路是否可用。
 - **管理**:侧边栏「世界书」按钮打开管理界面——上传、查看条目(含正则标记)、绑定角色(空=全局)、启用/停用、删除。
-- **持久化**:`data/kedai.db` 的 `world_books` 表,原始 JSON 无损保留(`data_raw`)。
+- **持久化**:`<数据目录>/kedai.db` 的 `world_books` 表,原始 JSON 无损保留(`data_raw`)。
 
 ## 提示词注入
 
 - **简单模式**:字数 / 转述 / 对话 / 视角 四项,启用项按可调顺序合成一条注入提示词拼入系统提示词末尾,对所有会话生效(支持酒馆宏)。
 - **禁词库**(简单模式):自由编辑「禁词 → 替换词」映射表。输出含禁词时,**所有模式**(fast/deep/agent/custom)先注入自省提示词要求换用更得体表达;deep/agent/custom 模式另由引擎在生成收尾调用 `censor_text` 工具做同义替换兜底(替换后同时作用于落库与前端显示),fast 模式无工具、仅靠提示词预防。替换词留空 = 直接删除该词。
 - **复杂模式(楼层)**:仿 SillyTavern Prompt Manager 的楼层系统——角色/位置/深度/拖拽排序,可导入酒馆预设(`examples/presets/` 示范)。
-- **管理**:设置 → 提示词注入,或「提示词管理」弹窗;配置持久化到 `data/prompt_floors.json`。
+- **管理**:设置 → 提示词注入,或「提示词管理」弹窗;配置持久化到 `<数据目录>/prompt_floors.json`。
 
 ## 消息 HTML 渲染
 
@@ -244,9 +253,11 @@ data: {"type":"finish","usage":{"prompt_tokens":166,"completion_tokens":35,"tota
 
 ```bash
 cd server-rs
-cargo test          # 单元测试 + API 集成测试(640+ 个)
+cargo test          # 单元测试 + API 集成测试(805 个:636 单测 + 169 集成,2026-09-07 实测)
 cd web
-npm test            # Vitest 前端测试(290+ 个)
+npm test            # Vitest 前端测试(485 个)
+npm run typecheck   # vue-tsc 模板/脚本类型检查
+npm run check       # 仓库根:一键全量检查(tools/check-all.ps1)
 ```
 
 覆盖:角色卡解析(V2/V3/未知字段/PNG tEXt/无效输入)、世界书解析(ST 导出/角色卡内嵌/正则条目/条目过滤)、世界书 API 集成(CRUD/绑定/预览)、世界书注入逻辑(常驻/关键词/正则/禁用)、正则脚本解析与占位符替换、Token 计数、状态机迁移、规划器/反思器、计算器工具、API 集成(CRUD/SSE/导入导出/Agent plan)、mvu 变量系统、EJS 渲染器、提示词注入、Agent 流程库、缓存诊断与四级水位、前缀一致性回归、记忆蒸馏与衰减排序、技能渐进披露清单、子代理深度/并发/截断守卫。
@@ -260,8 +271,9 @@ npm test            # Vitest 前端测试(290+ 个)
 - [x] 缓存感知压缩管线(usage 落库 + 四级水位诊断 `/api/diagnostics/cache` + 摘要槽增量化 + snip 零成本裁剪)
 - [x] 跨会话记忆蒸馏(`memory_entries` 表 + `/api/memory/*` 五端点 + 记忆库面板)
 - [x] 技能渐进披露(name+description 预载,正文按需加载)与子代理调度守卫(深度/并发/结果截断可配置)
+- [x] 任务模式全面重构(task_service 目录模块化 + 状态枚举化 + 任务事件 SSE 实时推送取代轮询 + 提示词管线整合与双模式提示词类型级隔离,见 [docs/任务模式重构-变更说明.md](docs/任务模式重构-变更说明.md))
 - [ ] LLM 原生 function calling 全链路
-- [x] 自定义工具注册(`data/plugins/tools/*.json` 白名单脚本工具)
+- [x] 自定义工具注册(`<数据目录>/plugins/tools/*.json` 白名单脚本工具)
 - [ ] 工具执行沙箱隔离
 - [ ] 知识库向量检索工具
 - [ ] SettingsModal.vue 拆分(已 81KB;SettingsHub + composables 拆分进行中)
