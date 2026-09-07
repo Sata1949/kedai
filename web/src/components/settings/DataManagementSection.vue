@@ -18,6 +18,7 @@ const props = withDefaults(defineProps<{
 const {
   importInput, importError, exportMsg, clearMsg,
   onImportFile, clearAllData, exportChat,
+  undoEnabled, undoMsg, saveUndoEnabled,
 } = props.state;
 
 const { currentSessionId } = storeToRefs(useAppStore());
@@ -48,10 +49,21 @@ const { currentSessionId } = storeToRefs(useAppStore());
         </div>
         <button class="sv-btn danger" :disabled="!currentSessionId" @click="clearAllData">清空</button>
       </div>
+      <div class="sv-data-row">
+        <div class="info">
+          <b>回退快照(undo)</b>
+          <span>写工具(写文件/改变量等)执行前自动存档,可在 Agent 面板回退到该次修改前</span>
+        </div>
+        <label style="display: flex; gap: 6px; align-items: center; cursor: pointer" title="开启后写工具执行前自动保存快照,Agent 面板工具调用项出现「回退到此处」入口">
+          <input v-model="undoEnabled" type="checkbox" style="flex-shrink: 0" @change="saveUndoEnabled" />
+          <span class="sv-note">{{ undoEnabled ? '已开启' : '已关闭' }}</span>
+        </label>
+      </div>
     </div>
     <div v-if="importError" class="sv-feedback err">{{ importError }}</div>
     <div v-if="exportMsg" class="sv-feedback ok">{{ exportMsg }}</div>
     <div v-if="clearMsg" class="sv-feedback ok">{{ clearMsg }}</div>
+    <div v-if="undoMsg" class="sv-feedback" :class="undoMsg.startsWith('保存失败') ? 'err' : 'ok'">{{ undoMsg }}</div>
     <input ref="importInput" type="file" accept=".json,application/json" class="hidden" @change="onImportFile" />
     <p class="sv-note">
       导入格式与 SillyTavern 兼容:<code>[{"role":"user","content":"..."}]</code>

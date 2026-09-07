@@ -16,6 +16,10 @@ export interface CharacterRecord {
   regex_scripts?: RegexScript[];
   /** 角色卡内嵌插件检测结果(酒馆助手等;仅详情接口返回) */
   card_plugins?: CardPluginInfo[];
+  /** 卡元数据(远程资源页 TavernHelper shim 口令推导用;列表/详情均携带) */
+  creator?: string;
+  character_version?: string;
+  creator_notes?: string;
   created_at: string;
 }
 
@@ -47,6 +51,10 @@ export interface RegexScript {
   replace_string: string;
   markdown_only: boolean;
   enabled: boolean;
+  /** 酒馆楼层深度下限:仅对深度 >= min_depth 的消息生效(0 = 最新一条);缺省不限 */
+  min_depth?: number | null;
+  /** 酒馆楼层深度上限:仅对深度 <= max_depth 的消息生效;缺省不限 */
+  max_depth?: number | null;
 }
 
 export interface SessionInfo {
@@ -74,6 +82,35 @@ export interface ChatMessage {
   created_at: string;
 }
 
+/** 任务事件分类(WP4 后端推送):创建 / 状态变化 / 计划 / 子任务 / token 累计 / 删除 / LLM 调用落库
+ *  批次 4 六模式追加:agent_status(主/子 agent 状态迁移)/ approval_required(plan 模式计划待批准)
+ *  批次 R4 流式输出追加:delta(LLM 正文攒批增量,暂态不落库;权威数据以 llm_call 落库行为准) */
+export type TaskEventKind = 'created' | 'status' | 'plan' | 'subtask' | 'usage' | 'deleted' | 'llm_call' | 'agent_status' | 'approval_required' | 'delta';
+
+/**
+ * 任务模式(task 工作台)事件(对齐 server-rs SseEvent::Task):
+ * WP5 起由 GET /api/tasks/events 真实 SSE 推送,取代前端 1s REST 轮询与本地合成伪事件。
+ * 除 task_id 外全部可选;kind 缺失(旧服务端/未知分类)时仅透传事件监控面板,不触发刷新。
+ */
+export type TaskEvent = {
+  type: 'task';
+  task_id: string;
+  kind?: TaskEventKind;
+  title?: string;
+  /** 任务状态(snake_case,见 TaskStatus) */
+  status?: string;
+  /** 简短中文说明(事件监控面板展示用);kind=delta 时为攒批后的正文增量文本 */
+  detail?: string;
+  /** 上游 finish_reason(仅 kind=llm_call 且成功调用携带,可观测性问题①截断标记;
+   *  'length' = max_tokens 截断;缺省 = 不适用/未知,旧客户端直接忽略) */
+  finish_reason?: string;
+  /** 调用归属阶段(批次 R4;仅 kind=delta/llm_call 携带,与 task_llm_calls.phase 同口径;
+   *  流式缓冲 key 前半:`${phase}:${step_index ?? ''}`) */
+  phase?: string;
+  /** 调用归属步骤下标(0 起;仅步骤类调用携带;流式缓冲 key 后半) */
+  step_index?: number;
+};
+
 export type SseEvent =
   | { type: 'token'; text: string }
   | { type: 'step'; step: string; detail?: string; index?: number; total?: number }
@@ -84,8 +121,7 @@ export type SseEvent =
   | { type: 'interrupted' }
   | { type: 'error'; code: string; message: string; retryable: boolean }
   | { type: 'finish'; usage: TokenUsage; content: string }
-  /** 任务模式合成事件(REST 轮询路径,仅进事件监控,无 reducer 副作用) */
-  | { type: 'task'; task_id: string; title?: string; status?: string; detail?: string };
+  | TaskEvent;
 
 export type ToolRisk = 'safe' | 'sensitive' | 'dangerous';
 
@@ -329,6 +365,26 @@ export interface RuntimeSettings {
   subagent_max_concurrency: number;
   /** 子智能体结果最大字符数(500..=8000;默认 2000,超出截断带尾注) */
   subagent_result_max_chars: number;
+  /** 回退快照(undo)开关(批次 6.1b;默认 true):开时写工具执行前自动存档,可回退 */
+  undo_enabled: boolean;
+  /** MCP stdio 客户端总开关(批次 6.2;默认 false;仅启动时装配,改后重启生效) */
+  mcp_enabled: boolean;
+  /** MCP 服务器列表(stdio 托管子进程;默认空) */
+  mcp_servers: McpServerConfig[];
+  /** 执行者人设完整开关(R3a;默认 false = 精简:仅 description+personality;true = 完整:再加 scenario+mes_example)。仅任务模式生效 */
+  task_persona_full: boolean;
+}
+
+/** MCP 服务器配置(批次 6.2):name 会 sanitize 为工具名前缀段([a-z0-9_]) */
+export interface McpServerConfig {
+  /** 服务器名(工具注册为 mcp_{name}_{tool}) */
+  name: string;
+  /** 可执行命令(如 npx / node / 某个 exe) */
+  command: string;
+  /** 命令行参数 */
+  args: string[];
+  /** 是否启用(默认 true;false = 保留配置但不装配) */
+  enabled: boolean;
 }
 
 export interface PromptPreviewLayer {
@@ -376,6 +432,11 @@ export interface RuntimeSettingsPatch {
   subagent_max_depth?: number;
   subagent_max_concurrency?: number;
   subagent_result_max_chars?: number;
+  undo_enabled?: boolean;
+  mcp_enabled?: boolean;
+  mcp_servers?: McpServerConfig[];
+  /** 执行者人设完整开关(R3a;仅任务模式生效) */
+  task_persona_full?: boolean;
 }
 
 // ===== 音频播放器(阶段五 5a;契约对齐酒馆助手 audio.d.ts) =====
@@ -593,17 +654,27 @@ export interface MacroExpandResult {
 
 // ===== 任务模式(task 工作台) =====
 
+/**
+ * 任务计划步骤状态(与 server-rs task_service 实际写入值对齐):
+ * pending=待执行(parse 时 serde 默认值) / running=执行中 / done=完成 / error=失败
+ * 写入点:executor.rs 步骤循环(running→done|error)、mod.rs/parse.rs(初始 pending)
+ */
+export type TaskStepStatus = 'pending' | 'running' | 'done' | 'error';
+
 /** 任务计划步骤 */
 export interface TaskStep {
   name: string;
   goal: string;
-  /** pending | running | done | error */
-  status: string;
+  status: TaskStepStatus;
   result: string;
 }
 
-/** 任务状态:待执行/规划中/执行中/完成/出错/已停止 */
-export type TaskStatus = 'pending' | 'planning' | 'running' | 'done' | 'error' | 'ended';
+/** 任务状态:待执行/规划中/执行中/计划待批准(plan 模式)/完成/部分完成(含失败步骤但成果已产出)/出错/已停止 */
+export type TaskStatus = 'pending' | 'planning' | 'running' | 'planned' | 'done' | 'partial' | 'error' | 'ended';
+
+/** 任务执行模式(批次 4 六模式,对齐 server-rs TaskRunMode):
+ *  legacy 三段式(默认) / solo 单主工具循环 / multi 多agent / plan 先规划后批准 / team 多主+审计 / custom 自定义流程 */
+export type TaskRunMode = 'legacy' | 'solo' | 'multi' | 'plan' | 'team' | 'custom';
 
 /** 任务记录 */
 export interface TaskRecord {
@@ -616,7 +687,16 @@ export interface TaskRecord {
   character_id?: string | null;
   created_at: string;
   updated_at: string;
+  /** 执行模式(批次 4;旧服务端不带此字段,消费侧按 legacy 处理) */
+  task_mode?: TaskRunMode;
 }
+
+/**
+ * 任务子任务状态(与 server-rs task_service 实际写入值对齐):
+ * running=执行中(create_subtask 插入即 running) / done=完成 / error=失败 / ended=已停止(取消)
+ * pending=待执行:当前无写入点,但 cancel 逻辑对其做防御性判断,保留在值域内
+ */
+export type TaskSubtaskStatus = 'pending' | 'running' | 'done' | 'error' | 'ended';
 
 /** 任务子任务 */
 export interface TaskSubtask {
@@ -624,16 +704,74 @@ export interface TaskSubtask {
   task_id: string;
   name: string;
   instruction: string;
-  /** pending | running | done | error | ended */
-  status: string;
+  status: TaskSubtaskStatus;
   result: string;
   error: string;
   created_at: string;
   updated_at: string;
 }
 
-/** 任务详情(含子任务) */
+/** 任务 token 累计(规划/步骤/汇总各次 LLM 调用落库聚合) */
+export interface TaskUsageTotal {
+  prompt_tokens: number;
+  completion_tokens: number;
+  reasoning_tokens: number;
+}
+
+/** 任务消息角色(批次 R2):user=用户指令 / assistant=执行者产出 */
+export type TaskMessageRole = 'user' | 'assistant';
+
+/**
+ * 任务消息种类(批次 R2;对齐 server-rs task_messages.kind):
+ * normal=普通(旧行默认值) / followup=终态追加指令(R2a) / plan_chat=批准环节规划对话(R2b)
+ */
+export type TaskMessageKind = 'normal' | 'followup' | 'plan_chat';
+
+/** 任务消息(批次 R2 多轮用户输入;详情响应 messages 数组,created_at 升序) */
+export interface TaskMessage {
+  id: string;
+  task_id: string;
+  role: TaskMessageRole;
+  kind: TaskMessageKind;
+  content: string;
+  created_at: string;
+}
+
+/** 任务详情(含子任务与该任务 token 累计;批次 R2 起携 messages 用户指令历史) */
 export interface TaskDetail {
   task: TaskRecord;
   subtasks: TaskSubtask[];
+  usage_total: TaskUsageTotal;
+  /** 用户指令历史(followup 追加 / plan_chat 规划对话);旧服务端无此字段,读取须容错 */
+  messages?: TaskMessage[];
+}
+
+/**
+ * 任务单次 LLM 调用记录(批次 3 L3 调用追踪;GET /api/tasks/{id}/calls,按 created_at,id 升序)。
+ * phase:planner=规划 / step=步骤 / summarize=汇总 / agent=主Agent / subagent=子Agent / audit=审计;
+ * status:ok=正常 / empty=空响应 / error=错误。
+ */
+export interface TaskLlmCall {
+  id: string;
+  task_id: string;
+  phase: string;
+  /** step 阶段的步骤序号(0 起,展示时 +1);其余阶段为 null */
+  step_index: number | null;
+  model: string;
+  /** 提示词摘要(面板展开查看) */
+  prompt_summary: string;
+  /** 响应摘要(面板展开查看) */
+  response_summary: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  reasoning_tokens: number;
+  elapsed_ms: number;
+  status: string;
+  /**
+   * 上游 finish_reason(stop / length / content_filter 等;可观测性问题①截断标记)。
+   * 'length' = max_tokens 截断(响应为半截文本);'' = 未知/未下发(旧行兼容值)。
+   * 旧服务端无此列,字段可能缺省,读取须容错。
+   */
+  finish_reason?: string;
+  created_at: string;
 }

@@ -6,13 +6,30 @@ import * as api from '../api';
 
 export function useDataManager() {
   const store = useAppStore();
-  const { currentSessionId } = storeToRefs(store);
+  const { currentSessionId, undoEnabled } = storeToRefs(store);
 
   const importInput = ref<HTMLInputElement | null>(null);
   const importError = ref('');
   const clearMsg = ref('');
   /** 导出成功提示(成功 3 秒后自动清除) */
   const exportMsg = ref('');
+  /** 回退快照(undo)开关保存反馈(成功/失败,3 秒后自动清除) */
+  const undoMsg = ref('');
+
+  /** 切换回退快照(undo)开关:立即保存到服务端设置(批次 6.1b) */
+  async function saveUndoEnabled(): Promise<void> {
+    undoMsg.value = '';
+    try {
+      await store.saveSettings({ undo_enabled: undoEnabled.value });
+      undoMsg.value = undoEnabled.value ? '已开启回退快照' : '已关闭回退快照';
+    } catch (e) {
+      // 保存失败:回滚本地开关,避免 UI 与服务端状态分叉
+      undoEnabled.value = !undoEnabled.value;
+      undoMsg.value = `保存失败:${(e as Error).message}`;
+    } finally {
+      setTimeout(() => (undoMsg.value = ''), 3000);
+    }
+  }
 
   function characterLabel(id: string): string {
     const character = store.characters.find((item) => item.id === id);
@@ -78,6 +95,7 @@ export function useDataManager() {
   return {
     importInput, importError, exportMsg, clearMsg, characterLabel, confirmRevokeScriptAuthorization,
     onImportFile, clearAllData, exportChat,
+    undoEnabled, undoMsg, saveUndoEnabled,
   };
 }
 
@@ -88,6 +106,7 @@ export function useGenerationParams() {
     compactionMode, compactionThreshold, compactionKeepRecent, compactionSnipBytes,
     memoryDistillEnabled, memoryInjectLimit,
     subagentMaxDepth, subagentMaxConcurrency, subagentResultMaxChars,
+    undoEnabled,
   } = storeToRefs(store);
 
   const tempLabel = computed(() => `${Math.round(temperature.value * 100)}%`);
@@ -118,6 +137,7 @@ export function useGenerationParams() {
         subagent_max_depth: subagentMaxDepth.value,
         subagent_max_concurrency: subagentMaxConcurrency.value,
         subagent_result_max_chars: subagentResultMaxChars.value,
+        undo_enabled: undoEnabled.value,
       });
       paramsMsg.value = '已保存为默认生成参数';
       setTimeout(() => (paramsMsg.value = ''), 2500);

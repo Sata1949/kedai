@@ -39,6 +39,12 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
   const subagentMaxConcurrency = ref(6);
   /** 子智能体结果最大字符数(500..=8000;服务端默认 2000,超出截断带尾注) */
   const subagentResultMaxChars = ref(2000);
+  /** 回退快照(undo)开关(批次 6.1b;服务端默认 true):开时写工具执行前自动存档 */
+  const undoEnabled = ref(true);
+  /** MCP stdio 客户端总开关(批次 6.2;服务端默认 false;仅启动时装配,改后重启生效) */
+  const mcpEnabled = ref(false);
+  /** MCP 服务器列表(全量替换语义;服务端默认空) */
+  const mcpServers = ref<api.McpServerConfig[]>([]);
   /** 授权模式:false=授权(高位操作需授权), true=放行(除黑名单外不弹授权) */
   const bypassMode = ref(false);
 
@@ -57,6 +63,9 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
   const reflectAdvicePrompt = ref('');
   /** 反思失败建议注入角色(user / assistant) */
   const reflectAdviceRole = ref<'user' | 'assistant'>('user');
+  /** 执行者人设完整开关(R3a;服务端默认 false = 精简:仅 description+personality)。
+   *  仅任务模式执行者人设注入生效;角色扮演模式下修改的是 task 覆盖层 None 时的沿用值 */
+  const taskPersonaFull = ref(false);
 
   // ===== 提示词注入(简单模式 + 楼层系统;全局配置) =====
   const promptInject = ref<api.PromptInjectConfig | null>(null);
@@ -81,6 +90,7 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
       presetTailRole.value = s.preset_tail_role === 'assistant' ? 'assistant' : 'user';
       reflectAdvicePrompt.value = s.reflect_advice_prompt ?? '';
       reflectAdviceRole.value = s.reflect_advice_role === 'assistant' ? 'assistant' : 'user';
+      taskPersonaFull.value = s.task_persona_full ?? false;
       bypassMode.value = s.bypass_mode ?? false;
       const uiPrefs = useUiPrefsStore();
       uiPrefs.defaultRenderHtml = s.render_html ?? false;
@@ -96,6 +106,9 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
       subagentMaxDepth.value = s.subagent_max_depth ?? 2;
       subagentMaxConcurrency.value = s.subagent_max_concurrency ?? 6;
       subagentResultMaxChars.value = s.subagent_result_max_chars ?? 2000;
+      undoEnabled.value = s.undo_enabled ?? true;
+      mcpEnabled.value = s.mcp_enabled ?? false;
+      mcpServers.value = Array.isArray(s.mcp_servers) ? s.mcp_servers : [];
       const modelConn = useModelConnStore();
       if (!modelConn.model) modelConn.model = s.model;
     } catch {
@@ -122,6 +135,7 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     presetTailRole.value = s.preset_tail_role === 'assistant' ? 'assistant' : 'user';
     reflectAdvicePrompt.value = s.reflect_advice_prompt ?? '';
     reflectAdviceRole.value = s.reflect_advice_role === 'assistant' ? 'assistant' : 'user';
+    taskPersonaFull.value = s.task_persona_full ?? false;
     bypassMode.value = s.bypass_mode ?? false;
     const uiPrefs = useUiPrefsStore();
     uiPrefs.defaultRenderHtml = s.render_html ?? false;
@@ -136,6 +150,9 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     subagentMaxDepth.value = s.subagent_max_depth ?? 2;
     subagentMaxConcurrency.value = s.subagent_max_concurrency ?? 6;
     subagentResultMaxChars.value = s.subagent_result_max_chars ?? 2000;
+    undoEnabled.value = s.undo_enabled ?? true;
+    mcpEnabled.value = s.mcp_enabled ?? false;
+    mcpServers.value = Array.isArray(s.mcp_servers) ? s.mcp_servers : [];
   }
 
   // 设置写入统一串行,避免 renderHtml 自动保存与设置面板保存交错回写旧响应。
@@ -205,6 +222,9 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     subagentMaxDepth,
     subagentMaxConcurrency,
     subagentResultMaxChars,
+    undoEnabled,
+    mcpEnabled,
+    mcpServers,
     bypassMode,
     agentSystemPrompt,
     searchEndpoint,
@@ -214,6 +234,7 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     presetTailRole,
     reflectAdvicePrompt,
     reflectAdviceRole,
+    taskPersonaFull,
     promptInject,
     agentFlowLibrary,
     loadSettings,

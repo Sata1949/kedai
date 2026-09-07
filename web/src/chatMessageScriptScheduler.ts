@@ -16,6 +16,8 @@ export interface MessageScriptSchedulerOptions<TMessage extends SchedulableMessa
   scriptHash: string;
   initVarEntries: Record<string, string>;
   mvuVariables: MvuVariables;
+  /** 角色名(initvar 内容 {{char}} 宏展开用,透传 ScriptRunContext) */
+  charName?: string;
   isAuthorized: ScriptRunContext['isAuthorized'];
   getScrollArea: () => HTMLElement | null;
   afterRender: () => Promise<unknown>;
@@ -49,6 +51,7 @@ export async function executeCurrentMessageScripts<TMessage extends SchedulableM
         isAuthorized: options.isAuthorized,
         initVarEntries: options.initVarEntries,
         mvuVariables: { ...options.mvuVariables },
+        charName: options.charName,
       });
     } catch (err) {
       console.warn('[kedai-mvu] 脚本执行异常', err);

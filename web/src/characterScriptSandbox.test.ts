@@ -6,7 +6,7 @@
 // 状态栏永远停在卡片自带的「加载中」静态文案。故此处锁定「生成物必须可解析」。
 import { describe, expect, it } from 'vitest';
 import vm from 'node:vm';
-import { sandboxScript } from './characterScriptSandbox';
+import { sandboxAttributes, sandboxScript } from './characterScriptSandbox';
 
 describe('sandboxScript', () => {
   const script = sandboxScript('const x = 1;', 'nonce-1', {
@@ -60,12 +60,96 @@ describe('sandboxScript', () => {
     expect(() => new vm.Script(out)).not.toThrow();
   });
 
-  it('沙箱提供内存 localStorage shim(作者脚本读协议状态不抛错)', () => {
-    const out = sandboxScript('x();', 'nonce-ls', { stat_data: {}, display_data: {} });
+  it('沙箱 localStorage 持久化到宿主、sessionStorage 保持会话级且两者独立(协议状态互不污染)', () => {
+    const out = sandboxScript('x();', 'nonce-ls', { stat_data: {}, display_data: {} }, {}, { kk: 'vv' });
     expect(out).toContain('__kdMemoryStorage');
     expect(out).toContain('getItem: function');
     expect(out).not.toContain('localStorage=undefined');
+    // localStorage 带宿主持久化桥:boot 注入已存快照,写操作同步 local-storage 消息
+    expect(out).toContain('__kdSavedLocal=JSON.parse("{\\"kk\\":\\"vv\\"}")');
+    expect(out).toContain('__kdMakeStorage(__kdSavedLocal,true)');
+    // 回归:此前 localStorage/sessionStorage 共用同一内存对象
+    expect(out).toContain('__kdSessionStorage=__kdMakeStorage(null,false)');
+    expect(out).toContain('sessionStorage=__kdSessionStorage');
+    expect(out).not.toContain('sessionStorage=__kdMemoryStorage');
     expect(() => new vm.Script(out)).not.toThrow();
+  });
+
+  it('沙箱 iframe 允许模态(allow-modals:作者脚本的 alert/confirm 不被浏览器拒)', () => {
+    expect(sandboxAttributes().sandbox).toContain('allow-modals');
+  });
+
+  it('getter 从宿主状态镜像读真值(开场协议勾选/确认按钮场景)', async () => {
+    // 协议脚本模式:勾选复选框 → 点确认 → 回调里读 $('#agree').prop('checked') 与按钮文本。
+    // 早期 getter 全是假值桩(永远 false/''),协议确认永远读不到勾选 → 开场流程卡死。
+    const user = [
+      "$('#btn').on('click', function(){",
+      "  const agreed=$('#agree').prop('checked');",
+      "  const label=$(this).text();",
+      "  warn('agreed='+agreed+';label='+label);",
+      "});",
+    ].join('\n');
+    const nonce = 'nonce-mirror';
+    const script = sandboxScript(user, nonce, { stat_data: {}, display_data: {} });
+    const messages: Array<Record<string, unknown>> = [];
+    const listeners: Array<(ev: { data: unknown }) => void> = [];
+    const sandboxGlobal = {
+      parent: { postMessage: (m: Record<string, unknown>) => void messages.push(m) },
+      addEventListener: (_type: string, fn: (ev: { data: unknown }) => void) => void listeners.push(fn),
+      console,
+      structuredClone: (v: unknown) => JSON.parse(JSON.stringify(v)),
+      queueMicrotask,
+      Promise,
+    };
+    vm.createContext(sandboxGlobal);
+    new vm.Script(script).runInContext(sandboxGlobal);
+    const dispatch = (m: Record<string, unknown>): void => {
+      for (const fn of listeners) fn({ data: m });
+    };
+    // 主流程:on() 绑定入队 → flush 发出 batch → 宿主 ack(无镜像)
+    await new Promise((r) => setTimeout(r, 10));
+    for (const m of messages.filter((x) => x.type === 'batch')) {
+      dispatch({ channel: 'kedai-character-script-v1', nonce, type: 'rpc-result', id: m.id, ok: true, value: true });
+    }
+    await new Promise((r) => setTimeout(r, 10));
+    // 宿主派发点击:回包携带事件目标 state(按钮文本)与表单控件镜像(#agree 已勾选)
+    dispatch({
+      channel: 'kedai-character-script-v1',
+      nonce,
+      type: 'jq-event',
+      jqId: 1,
+      event: { type: 'click' },
+      target: { kind: 'target', id: 1, data: {}, state: { text: '确认', val: '', checked: false, disabled: false, classes: [] } },
+      mirror: { controls: [{ id: 'agree', tag: 'input', val: '', checked: true, disabled: false }] },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    const warn = messages.find(
+      (m) => m.type === 'warn' && typeof m.message === 'string' && m.message.includes('agreed='),
+    );
+    expect(warn?.message).toContain('agreed=true');
+    expect(warn?.message).toContain('label=确认');
+  });
+
+  it('未命中镜像的选择器 getter 会 enqueue probe(下一批回包后可读到真值)', async () => {
+    const user = "$('#later').prop('checked');"; // getter miss → probe 入队
+    const nonce = 'nonce-probe';
+    const script = sandboxScript(user, nonce, { stat_data: {}, display_data: {} });
+    const messages: Array<Record<string, unknown>> = [];
+    const listeners: Array<(ev: { data: unknown }) => void> = [];
+    const sandboxGlobal = {
+      parent: { postMessage: (m: Record<string, unknown>) => void messages.push(m) },
+      addEventListener: (_type: string, fn: (ev: { data: unknown }) => void) => void listeners.push(fn),
+      console,
+      structuredClone: (v: unknown) => JSON.parse(JSON.stringify(v)),
+      queueMicrotask,
+      Promise,
+    };
+    vm.createContext(sandboxGlobal);
+    new vm.Script(script).runInContext(sandboxGlobal);
+    await new Promise((r) => setTimeout(r, 10));
+    const batch = messages.find((m) => m.type === 'batch');
+    const ops = (batch?.ops ?? []) as Array<{ method?: string; ref?: { value?: string } }>;
+    expect(ops.some((op) => op.method === 'probe' && op.ref?.value === '#later')).toBe(true);
   });
 
   it('沙箱提供 toastr stub(作者脚本 window.parent.toastr 桥接失败时仍可用)', () => {
@@ -73,5 +157,492 @@ describe('sandboxScript', () => {
     expect(out).toContain('toastr');
     expect(out).toContain('info:');
     expect(() => new vm.Script(out)).not.toThrow();
+  });
+});
+
+describe('sandboxScript(wuwa 状态栏兼容面)', () => {
+  // wuwa MVU 浪潮状态栏(161KB)实测依赖链:init 里 $('.nav-btn').first()、
+  // toggleClass、$('<div id="opt-list">') 创建元素、eventOn(Mvu.events…)、
+  // getVariables({type:'global'}) 设置持久化。任一缺失 → init 抛 TypeError →
+  // 宿主 finish(error) 拆除沙箱,用户看到「状态栏加载失败」。
+  const out = sandboxScript('x();', 'nonce-wuwa', { stat_data: {}, display_data: {} }, { statusBarSettings: { isDarkMode: true } });
+
+  it('jq 子集补齐 toggleClass/first/last/eq/click/each/length/数字索引', () => {
+    for (const marker of [
+      'coll.toggleClass=', 'coll.first=', 'coll.last=', 'coll.eq=',
+      'coll.click=', 'coll.each=',
+      "Object.defineProperty(coll,'length'",
+    ]) {
+      expect(out).toContain(marker);
+    }
+    expect(() => new vm.Script(out)).not.toThrow();
+  });
+
+  it('$("<div>") 创建判定正则的反斜杠必须保留(模板字面量会消化 \s)', () => {
+    // 退化为 /^s</ 会把以 s 开头的选择器误判为创建语法
+    expect(out).toContain(String.raw`/^\s*</`);
+  });
+
+  it('window 挂载 eventOn/Mvu.events/变量 API(状态栏检查 window.eventOn && window.Mvu 才订阅更新)', () => {
+    for (const marker of [
+      'globalThis.eventOn=eventOn', 'globalThis.Mvu=Mvu',
+      'globalThis.getVariables=getVariables', 'globalThis.replaceVariables=replaceVariables',
+      "VARIABLE_UPDATE_ENDED:'mag_variable_updated'",
+    ]) {
+      expect(out).toContain(marker);
+    }
+    expect(() => new vm.Script(out)).not.toThrow();
+  });
+
+  it('宿主 mvu-event 广播在沙箱内合并变量并触发本地订阅', async () => {
+    const user = [
+      "let seen=null;",
+      "eventOn(Mvu.events.VARIABLE_UPDATE_ENDED,(vars)=>{seen=vars&&vars.stat_data?vars.stat_data:null;});",
+      "setTimeout(()=>{warn('seen='+JSON.stringify(seen));},30);",
+    ].join('\n');
+    const nonce = 'nonce-mvu';
+    const script = sandboxScript(user, nonce, { stat_data: { 旧: 1 }, display_data: {} }, {});
+    const messages: Array<Record<string, unknown>> = [];
+    const listeners: Array<(ev: { data: unknown }) => void> = [];
+    const sandboxGlobal = {
+      parent: { postMessage: (m: Record<string, unknown>) => void messages.push(m) },
+      addEventListener: (_type: string, fn: (ev: { data: unknown }) => void) => void listeners.push(fn),
+      console,
+      structuredClone: (v: unknown) => JSON.parse(JSON.stringify(v)),
+      queueMicrotask,
+      Promise,
+      setTimeout,
+    };
+    vm.createContext(sandboxGlobal);
+    new vm.Script(script).runInContext(sandboxGlobal);
+    // 宿主广播变量更新
+    for (const fn of listeners) {
+      fn({
+        data: {
+          channel: 'kedai-character-script-v1',
+          nonce,
+          type: 'mvu-event',
+          event: 'mag_variable_updated',
+          payload: { stat_data: { 新值: 42 }, display_data: {} },
+          variables: { stat_data: { 新值: 42 }, display_data: {} },
+        },
+      });
+    }
+    await new Promise((r) => setTimeout(r, 60));
+    const warn = messages.find(
+      (m) => m.type === 'warn' && typeof m.message === 'string' && m.message.includes('seen='),
+    );
+    expect(warn?.message).toContain('新值');
+    expect(warn?.message).toContain('42');
+  });
+
+  it('getVariables({type:"global"}) 读启动下发的全局快照;replaceVariables 触发 global-save RPC', async () => {
+    const user = [
+      "const g=getVariables({type:'global'});",
+      "warn('dark='+JSON.stringify(g.statusBarSettings&&g.statusBarSettings.isDarkMode));",
+      "replaceVariables({statusBarSettings:{isDarkMode:false}},{type:'global'}).then(()=>{",
+      "  warn('after='+JSON.stringify(getVariables({type:'global'}).statusBarSettings.isDarkMode));",
+      "});",
+    ].join('\n');
+    const nonce = 'nonce-globals';
+    const script = sandboxScript(user, nonce, { stat_data: {}, display_data: {} }, { statusBarSettings: { isDarkMode: true } });
+    const messages: Array<Record<string, unknown>> = [];
+    const listeners: Array<(ev: { data: unknown }) => void> = [];
+    const sandboxGlobal = {
+      parent: { postMessage: (m: Record<string, unknown>) => void messages.push(m) },
+      addEventListener: (_type: string, fn: (ev: { data: unknown }) => void) => void listeners.push(fn),
+      console,
+      structuredClone: (v: unknown) => JSON.parse(JSON.stringify(v)),
+      queueMicrotask,
+      Promise,
+      setTimeout,
+    };
+    vm.createContext(sandboxGlobal);
+    new vm.Script(script).runInContext(sandboxGlobal);
+    await new Promise((r) => setTimeout(r, 20));
+    // 应答 global-save rpc
+    for (const m of messages.filter((x) => x.type === 'rpc')) {
+      for (const fn of listeners) {
+        fn({ data: { channel: 'kedai-character-script-v1', nonce, type: 'rpc-result', id: m.id, ok: true, value: true } });
+      }
+    }
+    await new Promise((r) => setTimeout(r, 20));
+    const warns = messages.filter((m) => m.type === 'warn').map((m) => String(m.message));
+    expect(warns.some((w) => w.includes('dark=true'))).toBe(true);
+    expect(warns.some((w) => w.includes('after=false'))).toBe(true);
+    expect(messages.some((m) => m.type === 'rpc' && m.op === 'global-save')).toBe(true);
+  });
+
+  it('事件回调异常仅告警,不再拆沙箱(此前 send(error) 会触发宿主拆除)', () => {
+    // jq-event 分支的 catch 须 send warn 而非 error
+    const jqBranch = out.slice(out.indexOf("m.type==='jq-event'"), out.indexOf("m.type==='mvu-event'"));
+    expect(jqBranch).toContain("send('warn'");
+    expect(jqBranch).not.toContain("send('error'");
+  });
+});
+
+describe('sandboxScript(inline 事件降级桥沙箱半)', () => {
+  it('inline-event 消息用 new Function 求值作者代码,this 为状态门面(classList/value/dataset)', async () => {
+    const nonce = 'nonce-inline';
+    const script = sandboxScript('', nonce, { stat_data: {}, display_data: {} });
+    const messages: Array<Record<string, unknown>> = [];
+    const listeners: Array<(ev: { data: unknown }) => void> = [];
+    const sandboxGlobal = {
+      parent: { postMessage: (m: Record<string, unknown>) => void messages.push(m) },
+      addEventListener: (_type: string, fn: (ev: { data: unknown }) => void) => void listeners.push(fn),
+      console,
+      structuredClone: (v: unknown) => JSON.parse(JSON.stringify(v)),
+      queueMicrotask,
+      Promise,
+      setTimeout,
+    };
+    vm.createContext(sandboxGlobal);
+    // new Function 处理器的全局必须是 vm Realm 自身(与浏览器沙箱一致:只能看到
+    // globalThis 上挂载的全局,看不到 boot 脚本的 const 闭包变量)
+    (sandboxGlobal as Record<string, unknown>).Function = vm.runInContext('Function', sandboxGlobal);
+    new vm.Script(script).runInContext(sandboxGlobal);
+    for (const fn of listeners) {
+      fn({
+        data: {
+          channel: 'kedai-character-script-v1',
+          nonce,
+          type: 'inline-event',
+          code: "globalThis.__kdInline=this.classList.contains('ready')+'|'+this.value+'|'+this.dataset.page+'|'+event.type;event.preventDefault();",
+          event: { type: 'click' },
+          target: {
+            kind: 'target',
+            id: 1,
+            data: { page: 'opt' },
+            state: { classes: ['ready'], val: 'hello' },
+          },
+        },
+      });
+    }
+    await new Promise((r) => setTimeout(r, 20));
+    expect((sandboxGlobal as Record<string, unknown>).__kdInline).toBe('true|hello|opt|click');
+    expect(messages.some((m) => m.type === 'error')).toBe(false);
+  });
+
+  it('inline 代码语法错误只告警不拆沙箱', async () => {
+    const nonce = 'nonce-inline-bad';
+    const script = sandboxScript('', nonce, { stat_data: {}, display_data: {} });
+    const messages: Array<Record<string, unknown>> = [];
+    const listeners: Array<(ev: { data: unknown }) => void> = [];
+    const sandboxGlobal = {
+      parent: { postMessage: (m: Record<string, unknown>) => void messages.push(m) },
+      addEventListener: (_type: string, fn: (ev: { data: unknown }) => void) => void listeners.push(fn),
+      console,
+      structuredClone: (v: unknown) => JSON.parse(JSON.stringify(v)),
+      queueMicrotask,
+      Promise,
+      setTimeout,
+      Function,
+    };
+    vm.createContext(sandboxGlobal);
+    new vm.Script(script).runInContext(sandboxGlobal);
+    for (const fn of listeners) {
+      fn({ data: { channel: 'kedai-character-script-v1', nonce, type: 'inline-event', code: 'if({', event: { type: 'click' }, target: { kind: 'target', id: 1 } } });
+    }
+    await new Promise((r) => setTimeout(r, 20));
+    expect(messages.some((m) => m.type === 'warn' && String(m.message).includes('内联事件代码解析失败'))).toBe(true);
+    expect(messages.some((m) => m.type === 'error')).toBe(false);
+  });
+});
+
+describe('沙箱协议流支持(wuwa 开场协议:滚动解锁/定位/localStorage)', () => {
+  /** 与浏览器沙箱等价的 vm 沙箱:window/document 提供最小几何桩(模板会覆写其访问器) */
+  function makeSandbox(nonce: string, script: string) {
+    const messages: Array<Record<string, unknown>> = [];
+    const listeners: Array<(ev: { data: unknown }) => void> = [];
+    const sandboxGlobal: Record<string, unknown> = {
+      parent: { postMessage: (m: Record<string, unknown>) => void messages.push(m) },
+      addEventListener: (_type: string, fn: (ev: { data: unknown }) => void) => void listeners.push(fn),
+      console,
+      structuredClone: (v: unknown) => JSON.parse(JSON.stringify(v)),
+      queueMicrotask,
+      Promise,
+      setTimeout,
+      window: {},
+      document: { body: {}, documentElement: {} },
+    };
+    vm.createContext(sandboxGlobal);
+    (sandboxGlobal as Record<string, unknown>).Function = vm.runInContext('Function', sandboxGlobal as never);
+    new vm.Script(script).runInContext(sandboxGlobal as never);
+    const dispatch = (m: Record<string, unknown>): void => {
+      for (const fn of listeners) fn({ data: m });
+    };
+    return { messages, dispatch, sandboxGlobal };
+  }
+
+  it('几何镜像:window.innerHeight/frameElement/document.body 映射宿主容器,geometry 消息实时更新', async () => {
+    const nonce = 'nonce-geo';
+    const script = sandboxScript('', nonce, { stat_data: {}, display_data: {} }, {}, {}, {
+      top: 63, left: 260, width: 1017, height: 2190, scrollHeight: 2190, scrollWidth: 1017, hostH: 720, hostW: 1280,
+    });
+    const { dispatch, sandboxGlobal } = makeSandbox(nonce, script);
+    const read = (expr: string): unknown => vm.runInContext(expr, sandboxGlobal as never);
+    // boot 注入的初始几何
+    expect(read('window.innerHeight')).toBe(2190);
+    expect(read('window.innerWidth')).toBe(1017);
+    expect(read('window.frameElement.getBoundingClientRect().top')).toBe(63);
+    expect(read('window.frameElement.getBoundingClientRect().height')).toBe(2190);
+    // 父窗口门面:innerHeight 是宿主视口而非容器高度(作者 positionOverlay 的 parentH)
+    expect(read('window.parent.innerHeight')).toBe(720);
+    expect(read('document.body.getBoundingClientRect().top')).toBe(0);
+    expect(read('document.body.scrollHeight')).toBe(2190);
+    expect(read('document.documentElement.scrollWidth')).toBe(1017);
+    // 聊天滚动后宿主推送新几何:容器顶部滚出视口
+    dispatch({
+      channel: 'kedai-character-script-v1', nonce, type: 'geometry',
+      geo: { top: -1639, left: 260, width: 1017, height: 2190, scrollHeight: 2190, scrollWidth: 1017, hostH: 720, hostW: 1280 },
+    });
+    expect(read('window.frameElement.getBoundingClientRect().top')).toBe(-1639);
+    expect(read('window.innerHeight')).toBe(2190);
+    expect(read('window.parent.innerHeight')).toBe(720);
+    await new Promise((r) => setTimeout(r, 5));
+  });
+
+  it('localStorage 写入同步 local-storage 消息,boot 注入的已存快照可同步读', async () => {
+    const nonce = 'nonce-ls2';
+    const user = [
+      "warn('accepted='+localStorage.getItem('ww_agreement_accepted_v1'));",
+      "localStorage.setItem('ww_agreement_accepted_v1','1');",
+      "localStorage.setItem('k','v');",
+      "localStorage.removeItem('k');",
+      "sessionStorage.setItem('s','1');", // sessionStorage 不应产生同步消息
+    ].join('\n');
+    const script = sandboxScript(user, nonce, { stat_data: {}, display_data: {} }, {}, { ww_agreement_accepted_v1: '0' });
+    const { messages } = makeSandbox(nonce, script);
+    await new Promise((r) => setTimeout(r, 10));
+    const warn = messages.find((m) => m.type === 'warn' && String(m.message).startsWith('accepted='));
+    expect(warn?.message).toBe('accepted=0');
+    const ops = messages.filter((m) => m.type === 'local-storage');
+    expect(ops).toContainEqual(expect.objectContaining({ op: 'set', key: 'ww_agreement_accepted_v1', value: '1' }));
+    expect(ops).toContainEqual(expect.objectContaining({ op: 'set', key: 'k', value: 'v' }));
+    expect(ops).toContainEqual(expect.objectContaining({ op: 'remove', key: 'k' }));
+    expect(ops.some((m) => m.key === 's')).toBe(false);
+  });
+
+  it('事件回包的 target.state 按 id 合入镜像,$card[0] 直读滚动度量(checkBottom 场景)', async () => {
+    const nonce = 'nonce-scroll';
+    // wuwa 协议卡 checkBottom 模式:scroll/wheel 回调里读 $card[0] 的滚动度量判断到底
+    const user = [
+      "$('#ww-agreement-card').on('scroll wheel', function(){",
+      "  const el=$('#ww-agreement-card')[0];",
+      "  const atBottom=el.scrollHeight<=el.clientHeight+2||el.scrollTop+el.clientHeight>=el.scrollHeight-8;",
+      "  warn('bottom='+atBottom+'|'+el.scrollTop+'/'+el.clientHeight+'/'+el.scrollHeight);",
+      "});",
+    ].join('\n');
+    const script = sandboxScript(user, nonce, { stat_data: {}, display_data: {} });
+    const { messages, dispatch } = makeSandbox(nonce, script);
+    await new Promise((r) => setTimeout(r, 10));
+    // on 入队的 batch 先 ack(镜像无滚动度量,模拟 boot 时卡片未滚动)
+    for (const m of messages.filter((x) => x.type === 'batch')) {
+      dispatch({ channel: 'kedai-character-script-v1', nonce, type: 'rpc-result', id: m.id, ok: true, value: true });
+    }
+    await new Promise((r) => setTimeout(r, 10));
+    // 宿主派发 wheel 事件:target.state 带事件当时的滚动真值(已滚到底 183+380>=564-8)
+    dispatch({
+      channel: 'kedai-character-script-v1', nonce, type: 'jq-event', jqId: 1, event: { type: 'wheel' },
+      target: { kind: 'target', id: 1, data: {}, state: { id: 'ww-agreement-card', classes: [], scrollTop: 183, clientHeight: 380, scrollHeight: 564 } },
+      mirror: { controls: [] },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    const warn = messages.find((m) => m.type === 'warn' && String(m.message).startsWith('bottom='));
+    expect(warn?.message).toBe('bottom=true|183/380/564');
+  });
+
+  it('outerHeight 从镜像 offsetHeight 读真值(positionOverlay 的 overlayH)', async () => {
+    const nonce = 'nonce-oh';
+    // 读取放在事件回调里:回调触发时镜像已随 batch ack 到达,outerHeight 须读到真值
+    const user = [
+      "$('#ww-agreement-overlay').on('click', function(){",
+      "  warn('oh='+$('#ww-agreement-overlay').outerHeight());",
+      "});",
+    ].join('\n');
+    const script = sandboxScript(user, nonce, { stat_data: {}, display_data: {} });
+    const { messages, dispatch } = makeSandbox(nonce, script);
+    await new Promise((r) => setTimeout(r, 10));
+    // ack 携带选择器镜像(on 批的 buildStateMirror 会采 #ww-agreement-overlay)
+    for (const m of messages.filter((x) => x.type === 'batch')) {
+      dispatch({
+        channel: 'kedai-character-script-v1', nonce, type: 'rpc-result', id: m.id, ok: true, value: true,
+        mirror: { selectors: { '#ww-agreement-overlay': { n: 1, offsetHeight: 486, classes: [] } }, controls: [] },
+      });
+    }
+    await new Promise((r) => setTimeout(r, 10));
+    dispatch({
+      channel: 'kedai-character-script-v1', nonce, type: 'jq-event', jqId: 1, event: { type: 'click' },
+      target: { kind: 'target', id: 1, data: {}, state: { classes: [] } }, mirror: { controls: [] },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    const warn = messages.find((m) => m.type === 'warn' && String(m.message).startsWith('oh='));
+    expect(warn?.message).toBe('oh=486');
+  });
+
+  it('变量门面返回裸值视图([值,原因] 叶子解包,wuwa 状态栏直接属性读)', async () => {
+    // wuwa 浪潮状态栏按裸值读:String(u.是否是漂泊者)==='true'、u.性别||'男'、
+    // safe(sd.当前时间) 直接进 HTML。门面若给 [v,'初始'] 数组,时间显示带「,初始」尾巴、
+    // 布尔判断全部错位。叶子 [x, 原因字符串] 解包为 x;真实数组值经包裹后同样还原。
+    const nonce = 'nonce-unwrap';
+    const user = [
+      'const sd = getAllVariables().stat_data;',
+      "warn('time=' + sd.当前时间 + ';drifter=' + String(sd.主角信息.是否是漂泊者) + ';log=' + JSON.stringify(sd.女性角色.守岸人.私密资料.性爱日志));",
+      "warn('mvu=' + Mvu.getMvuData().stat_data.当前时间 + ';gv=' + Mvu.getVariables().stat_data.主角信息.是否是漂泊者);",
+    ].join('\n');
+    const script = sandboxScript(user, nonce, {
+      stat_data: {
+        当前时间: ['第1年 10月13日 周日 14:00', '初始'],
+        主角信息: { 是否是漂泊者: [true, '初始'] },
+        女性角色: { 守岸人: { 私密资料: { 性爱日志: [[], '初始'] } } },
+      },
+      display_data: {},
+    });
+    const { messages } = makeSandbox(nonce, script);
+    await new Promise((r) => setTimeout(r, 10));
+    const w = messages.filter((m) => m.type === 'warn').map((m) => String(m.message));
+    expect(w.some((x) => x.includes('time=第1年 10月13日 周日 14:00;drifter=true;log=[]'))).toBe(true);
+    expect(w.some((x) => x.includes('mvu=第1年 10月13日 周日 14:00;gv=true'))).toBe(true);
+  });
+
+  it("attr('id') 复合类选择器经反向索引回查(wuwa render 的 activeTabId)", async () => {
+    // wuwa 状态栏 render():$('.tab-page').removeClass('active') + $('#page-user').addClass('active')
+    // 之后读 $('.tab-page.active').attr('id') 决定渲染哪个 tab 页;attr 读恒 '' 时
+    // doRenderTab 永不执行,所有 tab 页停在骨架 '--'。
+    // 真实时序:init 到 render() 全是 microtask,任何 batch ack(postMessage 宏任务)都来不及,
+    // 故 id 轻量表必须随 boot 注入,addClass 的本地补丁合入同一 state 对象。
+    const nonce = 'nonce-attr';
+    const user = [
+      "$('.tab-page').removeClass('active');",
+      "$('#page-user').addClass('active');",
+      "warn('tab=' + $('.tab-page.active').attr('id'));",
+    ].join('\n');
+    const script = sandboxScript(
+      user,
+      nonce,
+      { stat_data: {}, display_data: {} },
+      {},
+      {},
+      undefined,
+      { '#page-user': { id: 'page-user', classes: ['tab-page'], n: 1 } },
+    );
+    const { messages } = makeSandbox(nonce, script);
+    await new Promise((r) => setTimeout(r, 10));
+    const warn = messages.find((m) => m.type === 'warn' && String(m.message).startsWith('tab='));
+    expect(warn?.message).toBe('tab=page-user');
+  });
+});
+
+describe('sandboxScript(卡级脚本兼容面:tavern_events/TavernHelper 世界书/消息)', () => {
+  const out = sandboxScript('x();', 'nonce-card', { stat_data: {}, display_data: {} }, {}, {}, undefined, {}, '主世界书');
+
+  it('tavern_events 常量定义并挂载 globalThis(TDZ 安全:挂在 const 定义之后)', () => {
+    expect(out).toContain("MESSAGE_SWIPED:'message_swiped'");
+    expect(out).toContain('globalThis.tavern_events=tavern_events');
+    // 挂载必须出现在 const tavern_events 定义之后,否则 TDZ ReferenceError
+    expect(out.indexOf('globalThis.tavern_events=tavern_events')).toBeGreaterThan(
+      out.indexOf('const tavern_events='),
+    );
+    expect(() => new vm.Script(out)).not.toThrow();
+  });
+
+  it('TavernHelper 扩展方法:事件/世界书/聊天消息', () => {
+    for (const marker of [
+      'errorCatched:errorCatched', 'eventOn:eventOn', 'eventOff:eventOff', 'eventEmit:eventEmit',
+      'getCurrentCharPrimaryLorebook:function()', 'getLorebookEntries:function(name)',
+      'setLorebookEntries:function(name,list)', 'getChatMessages:function(id,opts)',
+    ]) {
+      expect(out).toContain(marker);
+    }
+    expect(() => new vm.Script(out)).not.toThrow();
+  });
+
+  it('主世界书名随 boot 注入(__KD_LOREBOOK__),缺省为 null', () => {
+    expect(out).toContain('const __KD_LOREBOOK__="主世界书";');
+    const bare = sandboxScript('x();', 'nonce-bare', { stat_data: {}, display_data: {} });
+    expect(bare).toContain('const __KD_LOREBOOK__=null;');
+  });
+
+  /** 与浏览器沙箱等价的 vm 沙箱(与上方 makeSandbox 同款,本 describe 自包含) */
+  function makeCardSandbox(nonce: string, script: string) {
+    const messages: Array<Record<string, unknown>> = [];
+    const listeners: Array<(ev: { data: unknown }) => void> = [];
+    const sandboxGlobal: Record<string, unknown> = {
+      parent: { postMessage: (m: Record<string, unknown>) => void messages.push(m) },
+      addEventListener: (_type: string, fn: (ev: { data: unknown }) => void) => void listeners.push(fn),
+      console,
+      structuredClone: (v: unknown) => JSON.parse(JSON.stringify(v)),
+      queueMicrotask,
+      Promise,
+      setTimeout,
+      window: {},
+      document: { body: {}, documentElement: {} },
+    };
+    vm.createContext(sandboxGlobal);
+    (sandboxGlobal as Record<string, unknown>).Function = vm.runInContext('Function', sandboxGlobal as never);
+    new vm.Script(script).runInContext(sandboxGlobal as never);
+    const dispatch = (m: Record<string, unknown>): void => {
+      for (const fn of listeners) fn({ data: m });
+    };
+    return { messages, dispatch };
+  }
+
+  it('宿主 card-event 广播经事件总线派发到 eventOn 订阅者(舰娘卡 MESSAGE_SWIPED 链路)', async () => {
+    const nonce = 'nonce-swipe';
+    const user = [
+      "eventOn(tavern_events.MESSAGE_SWIPED,(id)=>{warn('swiped='+id);});",
+    ].join('\n');
+    const script = sandboxScript(user, nonce, { stat_data: {}, display_data: {} });
+    const { messages, dispatch } = makeCardSandbox(nonce, script);
+    dispatch({ channel: 'kedai-character-script-v1', nonce, type: 'card-event', name: 'message_swiped', payload: 0 });
+    await new Promise((r) => setTimeout(r, 20));
+    const warn = messages.find((m) => m.type === 'warn' && String(m.message).startsWith('swiped='));
+    expect(warn?.message).toBe('swiped=0');
+  });
+
+  it('getLorebookEntries 名称不符直接 resolve null 且不发 RPC;相符走 lorebook-entries RPC', async () => {
+    const nonce = 'nonce-lb';
+    const user = [
+      "TavernHelper.getLorebookEntries('别的书').then((v)=>warn('mismatch='+JSON.stringify(v)));",
+      "TavernHelper.getLorebookEntries('主书').then((v)=>warn('match='+JSON.stringify(v)));",
+      "TavernHelper.setLorebookEntries('别的书',[]).then((v)=>warn('setmis='+JSON.stringify(v)));",
+    ].join('\n');
+    const script = sandboxScript(user, nonce, { stat_data: {}, display_data: {} }, {}, {}, undefined, {}, '主书');
+    const { messages, dispatch } = makeCardSandbox(nonce, script);
+    await new Promise((r) => setTimeout(r, 10));
+    // 只有名称相符的那一路发出 RPC(过滤启动时的 audio-snapshot 预拉取)
+    const rpcs = messages.filter((m) => m.type === 'rpc' && m.op !== 'audio-snapshot');
+    expect(rpcs.length).toBe(1);
+    expect(rpcs[0].op).toBe('lorebook-entries');
+    // 应答该 RPC
+    dispatch({
+      channel: 'kedai-character-script-v1', nonce, type: 'rpc-result', id: rpcs[0].id,
+      ok: true, value: [{ uid: 99, comment: '条目', enabled: true }],
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    const warns = messages.filter((m) => m.type === 'warn').map((m) => String(m.message));
+    expect(warns.some((w) => w === 'mismatch=null')).toBe(true);
+    expect(warns.some((w) => w === 'setmis=false')).toBe(true);
+    expect(warns.some((w) => w.includes('match=[{"uid":99'))).toBe(true);
+  });
+
+  it('getChatMessages 走 chat-messages RPC(带楼层序号与 include_swipe 选项)', async () => {
+    const nonce = 'nonce-chatmsg';
+    const user = [
+      "TavernHelper.getChatMessages(0,{include_swipe:true}).then((v)=>warn('msgs='+JSON.stringify(v)));",
+    ].join('\n');
+    const script = sandboxScript(user, nonce, { stat_data: {}, display_data: {} });
+    const { messages, dispatch } = makeCardSandbox(nonce, script);
+    await new Promise((r) => setTimeout(r, 10));
+    const rpc = messages.find((m) => m.type === 'rpc' && m.op === 'chat-messages');
+    expect(rpc).toBeTruthy();
+    expect((rpc?.args as unknown[])[0]).toBe(0);
+    dispatch({
+      channel: 'kedai-character-script-v1', nonce, type: 'rpc-result', id: rpc?.id,
+      ok: true, value: [{ role: 'assistant', content: '开场', swipes: ['开场'], swipe_id: 0 }],
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    const warn = messages.find((m) => m.type === 'warn' && String(m.message).startsWith('msgs='));
+    expect(String(warn?.message)).toContain('swipe_id":0');
   });
 });

@@ -15,6 +15,7 @@ import {
   buildMessageRenderText,
   extractBodyLoadUrl,
   buildRemoteResourceHtml,
+  stableFrameNonce,
 } from '../render';
 import { renderMarkdown } from '../markdown';
 import { isRenderCodeBlock } from '../renderPanel';
@@ -31,6 +32,8 @@ const props = defineProps<{
   renderHtml: boolean;
   /** 当前角色正则脚本(渲染依赖;引用替换或字段变化都会使 computed 失效) */
   scripts: RegexScript[];
+  /** 消息楼层深度(0 = 最新一条):脚本 min_depth/max_depth 过滤依据;缺省不过滤 */
+  depth?: number;
   /** 正则脚本内容版本 hash:作为缓存失效兜底依赖(脚本变化时必变) */
   scriptHash: string;
 }>();
@@ -99,8 +102,9 @@ function buildRenderPanelHtml(code: string, seed: string): string {
     .replace(/"/g, '&quot;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
-  // 随机 nonce 放 URL fragment(不随 HTTP 请求发送),宿主文档 ready/boot 双向认证
-  const nonce = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+  // 稳定 nonce(放 URL fragment,不随 HTTP 请求发送):同一消息重渲染产出相同 HTML,
+  // v-html 不变则 iframe 不被重建(随机 nonce 会导致每次重算都重建面板)
+  const nonce = stableFrameNonce(`panel${seed}`);
   return (
     `<div class="sv-render-panel" id="${escapeAttr(id)}" data-kd-render-panel="1" data-kd-render-nonce="${escapeAttr(nonce)}" data-kd-render-code="${escCode}">` +
     `<div class="sv-render-panel-head">` +
@@ -136,10 +140,14 @@ const html = computed<string>(() => {
     return buildRenderPanelHtml(text, `m${props.m.id}`);
   }
   if (props.renderHtml && props.scripts.length > 0) {
-    const scoped = renderScopedScripts(text, props.scripts, `msg-${props.m.id}`);
+    // 脚本替换串新引入的 {{user}}/{{char}} 宏随渲染展开(对齐 ST substituteParams;
+    // userName 缺省「用户」,与后端 content_display 展开一致)
+    const scoped = renderScopedScripts(text, props.scripts, `msg-${props.m.id}`, props.depth, {
+      charName: store.currentCharacterName,
+    });
     if (scoped) return scoped.html;
   }
-  const clean = stripHiddenPlaceholders(text, props.scripts);
+  const clean = stripHiddenPlaceholders(text, props.scripts, props.depth);
   return renderMarkdown(clean);
 });
 

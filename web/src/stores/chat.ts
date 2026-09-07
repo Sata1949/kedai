@@ -8,6 +8,7 @@ import { ref } from 'vue';
 import * as api from '../api';
 import { emitMvuEvent } from '../mvu/host';
 import { parseUpdateVariable } from '../mvu/parser';
+import { broadcastCardEvent, broadcastMvuUpdate } from '../characterScriptSandbox';
 // SSE 事件纯函数化 + mvu 状态纯函数(经 '../api' 类型依赖)
 import { idleAgent, reduceSseEvent } from '../sseReducer';
 import { applyMvuCommands, replayMvuVariables } from '../mvu/mvuStore';
@@ -15,6 +16,7 @@ import type { MvuVars } from '../mvu/mvuStore';
 import type { AgentActivity, UiMessage } from '../sseReducer';
 import { createChatStreamService } from '../chatStreamService';
 import { saveExportFile } from '../exportFile';
+import { writeLastSessionId } from '../lastPosition';
 import type { ApiEventLogEntry } from '../devTools';
 import { useCharacterStore } from './character';
 import { useGenSettingsStore } from './genSettings';
@@ -63,6 +65,7 @@ export const useChatStore = defineStore('app.chat', () => {
     const session = await api.createSession(cid, undefined, greetingIndex);
     sessions.value.unshift(session);
     currentSessionId.value = session.id;
+    writeLastSessionId(cid, session.id);
     lastUsage.value = null;
     agent.value = idleAgent();
     await loadHistory(session.id);
@@ -82,6 +85,8 @@ export const useChatStore = defineStore('app.chat', () => {
   async function switchSession(id: string): Promise<void> {
     if (generating.value) return;
     currentSessionId.value = id;
+    const cid = useCharacterStore().currentCharacterId;
+    if (cid) writeLastSessionId(cid, id);
     await loadHistory(id);
   }
 
@@ -95,6 +100,9 @@ export const useChatStore = defineStore('app.chat', () => {
       void loadTokenTotals(sessionId);
     } catch (e) {
       console.error('加载历史失败', e);
+      // 历史加载失败必须可见:静默失败 + sendMessage 自动新建会话会把旧会话「藏」起来,
+      // 表现为聊天记录丢失
+      useUiPrefsStore().dataLoadError = `加载聊天记录失败:${(e as Error).message ?? e}`;
     }
   }
 
@@ -114,13 +122,16 @@ export const useChatStore = defineStore('app.chat', () => {
   /** 消息完成时更新变量树并持久化快照(assistant 消息,解析 UpdateVariable) */
   async function applyMvuUpdate(m: { id: number; content: string; extra?: Record<string, unknown> }): Promise<void> {
     const parsed = parseUpdateVariable(m.content);
-    if (parsed.commands.length === 0) return;
-    mvuVariables.value = applyMvuCommands(mvuVariables.value, parsed.commands);
+    if (parsed.commands.length === 0 && !parsed.initvar) return;
+    // initvar 仅在变量树为空时播种(开场初始化),随后按序应用 _.set/JSONPatch 命令
+    mvuVariables.value = applyMvuCommands(mvuVariables.value, parsed.commands, parsed.initvar);
     // 兼容原版 MagVarUpdate:变量更新后触发 mag_variable_updated 事件
     emitMvuEvent('mag_variable_updated', {
       stat_data: mvuVariables.value.stat_data,
       display_data: mvuVariables.value.display_data,
     });
+    // 广播给存活的角色卡脚本沙箱(wuwa 状态栏 eventOn 订阅随之重渲染)
+    broadcastMvuUpdate(mvuVariables.value);
     // 持久化快照到该消息 extra.mvu
     if (currentSessionId.value && m.id > 0) {
       try {
@@ -240,6 +251,7 @@ export const useChatStore = defineStore('app.chat', () => {
       }
       await api.saveAssistantVars(sid, snap?.stat_data ?? {});
       mvuVariables.value = replayMvuVariables(kept);
+      broadcastMvuUpdate(mvuVariables.value);
     } catch (e) {
       console.warn('回滚变量树失败(仅影响变量状态,不影响重发)', e);
     }
@@ -302,6 +314,7 @@ export const useChatStore = defineStore('app.chat', () => {
       }
       await api.saveAssistantVars(sid, snap?.stat_data ?? {});
       mvuVariables.value = replayMvuVariables(kept);
+      broadcastMvuUpdate(mvuVariables.value);
     } catch (e) {
       console.warn('回滚变量树失败(仅影响变量状态,不影响重生成)', e);
     }
@@ -324,6 +337,11 @@ export const useChatStore = defineStore('app.chat', () => {
         const m = messages.value[idx];
         messages.value[idx] = { ...m, content: res.content, extra: { ...m.extra, swipe_id: res.swipe_id } };
         delete messages.value[idx].content_display;
+        // 卡级脚本事件流:广播 swipe 切换,payload 为楼层序号(0-based 数组下标,
+        // 对齐酒馆 MESSAGE_SWIPED 的 message_id 语义——舰娘卡「随开场白切换世界书」
+        // 脚本判定 messageId===0 即第一条开场白)。切会话/历史加载后的状态漂移由
+        // 脚本自带的轮询兜底,事件只保证即时性。
+        broadcastCardEvent('message_swiped', idx);
       }
     } catch (e) {
       console.warn('切换 swipe 版本失败', e);

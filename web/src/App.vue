@@ -3,8 +3,9 @@
 // 弹窗懒加载(前端性能优化):13 个弹窗/浮层组件改 defineAsyncComponent,
 // 首屏 bundle 不再包含其实现,首次打开对应弹窗时才加载 chunk;
 // <Transition name="sv-modal"> 包裹与 v-if 条件保持不变(开合过渡语义不变)。
-import { defineAsyncComponent, onMounted, onUnmounted, watch } from 'vue';
+import { nextTick, onMounted, onUnmounted, watch } from 'vue';
 import { useAppStore } from './store';
+import { lazyModal } from './asyncModal';
 import Sidebar from './components/Sidebar.vue';
 import ChatWindow from './components/ChatWindow.vue';
 import TaskBoard from './components/TaskBoard.vue';
@@ -12,22 +13,41 @@ import AgentPanel from './components/AgentPanel.vue';
 import SplashScreen from './components/SplashScreen.vue';
 
 // ===== 懒加载弹窗(各自/分组拆 chunk,见 vite.config.ts manualChunks) =====
-const SettingsHub = defineAsyncComponent(() => import('./components/SettingsHub.vue'));
-const WorldBooksModal = defineAsyncComponent(() => import('./components/WorldBooksModal.vue'));
-const ChatRecords = defineAsyncComponent(() => import('./components/ChatRecords.vue'));
-const PluginsModal = defineAsyncComponent(() => import('./components/PluginsModal.vue'));
-const SkillsModal = defineAsyncComponent(() => import('./components/SkillsModal.vue'));
-const ContractsModal = defineAsyncComponent(() => import('./components/ContractsModal.vue'));
-const PromptManager = defineAsyncComponent(() => import('./components/PromptManager.vue'));
-const ScriptsModal = defineAsyncComponent(() => import('./components/ScriptsModal.vue'));
-const MacrosModal = defineAsyncComponent(() => import('./components/MacrosModal.vue'));
-const DevToolsModal = defineAsyncComponent(() => import('./components/DevToolsModal.vue'));
-const OptimizeModal = defineAsyncComponent(() => import('./components/OptimizeModal.vue'));
-const QuickRepliesModal = defineAsyncComponent(() => import('./components/QuickRepliesModal.vue'));
+// 统一经 lazyModal 包装:chunk 加载失败自动重试一次,仍失败显示全局错误条(可手动重试),
+// 不再静默「点了没反应」。第二参数为面板名,第三参数为 uiPrefs 中对应的开关 ref 名。
+const SettingsHub = lazyModal(() => import('./components/SettingsHub.vue'), '综合设置', 'settingsOpen');
+const WorldBooksModal = lazyModal(() => import('./components/WorldBooksModal.vue'), '世界书', 'worldBooksOpen');
+const ChatRecords = lazyModal(() => import('./components/ChatRecords.vue'), '聊天记录', 'chatRecordsOpen');
+const PluginsModal = lazyModal(() => import('./components/PluginsModal.vue'), '插件', 'pluginsOpen');
+const SkillsModal = lazyModal(() => import('./components/SkillsModal.vue'), '技能库', 'skillsOpen');
+const ContractsModal = lazyModal(() => import('./components/ContractsModal.vue'), '契约编辑', 'contractsOpen');
+const PromptManager = lazyModal(() => import('./components/PromptManager.vue'), '提示词管理', 'promptsOpen');
+const ScriptsModal = lazyModal(() => import('./components/ScriptsModal.vue'), '脚本管理', 'scriptsOpen');
+const MacrosModal = lazyModal(() => import('./components/MacrosModal.vue'), '宏调试', 'macrosOpen');
+const DevToolsModal = lazyModal(() => import('./components/DevToolsModal.vue'), '事件监控', 'eventsOpen');
+const OptimizeModal = lazyModal(() => import('./components/OptimizeModal.vue'), '优化面板', 'optimizeOpen');
+const QuickRepliesModal = lazyModal(() => import('./components/QuickRepliesModal.vue'), '快速回复', 'quickRepliesOpen');
 // 音频播放器:右下角浮层,非首屏(默认收起为开关按钮),一并懒加载
-const AudioPlayer = defineAsyncComponent(() => import('./components/AudioPlayer.vue'));
+const AudioPlayer = lazyModal(() => import('./components/AudioPlayer.vue'), '音频播放器', 'audioOpen');
 
 const store = useAppStore();
+
+/** 弹窗懒加载失败后的手动重试:关掉再重开对应面板开关,触发 chunk 重新加载 */
+async function retryModalLoad(): Promise<void> {
+  const err = store.modalLoadError;
+  if (!err) return;
+  store.modalLoadError = null;
+  const flags = store as unknown as Record<string, unknown>;
+  flags[err.flag] = false;
+  await nextTick();
+  flags[err.flag] = true;
+}
+
+/** 数据加载失败后的手动重试:重新拉角色列表(内部会级联恢复会话与历史) */
+async function retryDataLoad(): Promise<void> {
+  store.dataLoadError = null;
+  await store.loadCharacters();
+}
 
 /** Tauri(桌面/exe)环境检测:WebView2 中 location.hash 赋值会触发导航事件,
  * 深链接仅服务浏览器场景;桌面端跳过 hash 写入与清理。 */
@@ -58,8 +78,12 @@ onMounted(() => {
     }
   });
   void store.loadSettings().then(() => {
-    // 刷新后停留在任务模式时,补齐任务列表加载(loadSettings 已按 appMode 读对应设置)
-    if (store.appMode === 'task') void store.loadTasks();
+    // 刷新后停留在任务模式时,补齐任务列表加载(loadSettings 已按 appMode 读对应设置),
+    // 并启动任务事件 SSE 订阅(WP5:取代轮询;setAppMode 路径同样会启动,此处幂等)
+    if (store.appMode === 'task') {
+      void store.loadTasks();
+      store.startTaskEvents();
+    }
   });
   if (shouldOpenSettings()) store.settingsOpen = true;
   window.addEventListener('hashchange', onHashChange);
@@ -87,6 +111,17 @@ watch(
 
   <!-- 主界面(启动动画结束后淡入) -->
   <div v-else class="sv-frame-col sv-app-enter">
+    <!-- 全局错误条:数据加载失败(角色/会话/历史)与弹窗懒加载失败,均可重试 -->
+    <div v-if="store.dataLoadError" class="sv-global-error" role="alert">
+      <span class="sv-global-error-text">{{ store.dataLoadError }}</span>
+      <button class="sv-btn ghost sv-btn-sm" @click="retryDataLoad">重试</button>
+      <button class="sv-btn ghost sv-btn-sm" @click="store.dataLoadError = null">关闭</button>
+    </div>
+    <div v-if="store.modalLoadError" class="sv-global-error" role="alert">
+      <span class="sv-global-error-text">「{{ store.modalLoadError.name }}」面板加载失败(可能是旧缓存残留)</span>
+      <button class="sv-btn ghost sv-btn-sm" @click="retryModalLoad">重试</button>
+      <button class="sv-btn ghost sv-btn-sm" @click="store.modalLoadError = null">关闭</button>
+    </div>
     <div class="sv-body">
       <!-- 左侧功能区(固定,不可关闭) -->
       <Sidebar />
@@ -98,7 +133,8 @@ watch(
           <TaskBoard v-else key="task" />
         </Transition>
       </div>
-      <!-- 右侧 Agent 区(抽屉,默认收起;两种模式共用,内容按模式映射:角色扮演 = 推理链/工具,任务 = 计划/子任务) -->
+      <!-- 右侧 Agent 区(抽屉,默认收起;两种模式共用,内容按模式映射:角色扮演 = 推理链/工具,任务 = 计划/子任务;
+           面板合并:原独立「调用情况」面板收编为其内部 tab,由 AgentPanel 内嵌 CallTracePanel 承载) -->
       <AgentPanel />
     </div>
 

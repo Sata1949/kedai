@@ -3,11 +3,18 @@ export const BASE = '/api';
 
 let tokenPromise: Promise<string> | undefined;
 
-export function resetApiTokenForTest(): void {
+/** 丢弃缓存 token(bootstrap 失败 / 401 重试前调用;测试经 resetApiTokenForTest 复用) */
+function forgetApiToken(): void {
   tokenPromise = undefined;
 }
 
+export function resetApiTokenForTest(): void {
+  forgetApiToken();
+}
+
 export async function apiToken(): Promise<string> {
+  // 失败不缓存:后端未就绪等瞬态失败若缓存 rejected promise,之后所有 API 调用
+  // 会永久连带失败(整个应用空数据,只能手动刷新)。失败即丢弃,下次调用重新引导。
   tokenPromise ??= fetch(`${BASE}/bootstrap`, {
     cache: 'no-store',
     credentials: 'same-origin',
@@ -18,6 +25,10 @@ export async function apiToken(): Promise<string> {
       const body = await res.json() as { token?: string };
       if (!body.token) throw new Error('API 初始化响应缺少 token');
       return body.token;
+    })
+    .catch((e: unknown) => {
+      forgetApiToken();
+      throw e;
     });
   return tokenPromise;
 }
@@ -87,8 +98,21 @@ export function apiErrorMessage(status: number, code?: string, detail?: string):
   }
 }
 
-export async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const res = await authorizedFetch(`${BASE}${path}`, init);
+export async function request<T>(path: string, init: RequestInit = {}, isRetry = false): Promise<T> {
+  let res = await authorizedFetch(`${BASE}${path}`, init);
+  if (res.status === 401 && !isRetry) {
+    // 服务端重启后 bearer token 轮换:丢弃缓存 token 重新引导,原样重试一次;
+    // 重新引导失败(后端未就绪)或重试仍 401 才按 token 失效报错。
+    forgetApiToken();
+    let refreshed = false;
+    try {
+      await apiToken();
+      refreshed = true;
+    } catch {
+      /* 重新引导失败:按原响应的 401 处理 */
+    }
+    if (refreshed) res = await authorizedFetch(`${BASE}${path}`, init);
+  }
   if (!res.ok) {
     let body: ApiErrorBody = {};
     try {

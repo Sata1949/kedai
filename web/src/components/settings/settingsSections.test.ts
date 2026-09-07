@@ -5,7 +5,9 @@ import { createPinia, setActivePinia } from 'pinia';
 import { useApiSettings } from '../../composables/useApiSettings';
 import { usePromptInject } from '../../composables/usePromptInject';
 import ConnectionSection from './ConnectionSection.vue';
+import McpSection from './McpSection.vue';
 import PresetImportExportSection from './PresetImportExportSection.vue';
+import AgentSettingsSection from './AgentSettingsSection.vue';
 import SettingsModal from '../SettingsModal.vue';
 
 // 设置区组件冒烟测试:项目无 jsdom / @vue/test-utils,沿用 CacheHealthPanel.test.ts 的
@@ -75,5 +77,42 @@ describe('SettingsModal(壳)', () => {
     expect(html).toContain('sv-settings-embedded');
     // 数据管理区可见;API 设置区应被 v-show 隐藏
     expect(html).toContain('数据管理');
+  });
+
+  it('装配:MCP 分区挂进壳(standalone 渲染;embedded 挂载不炸)', async () => {
+    const standalone = await render(SettingsModal, { embedded: false });
+    expect(standalone).toContain('MCP 服务');
+    expect(standalone).toContain('重启后生效');
+
+    const embedded = await render(SettingsModal, { embedded: true, activeSection: 'mcp' });
+    expect(embedded).toContain('sv-settings-embedded');
+    expect(embedded).toContain('MCP 服务');
+  });
+});
+
+describe('McpSection(MCP 服务区,批次 6.2)', () => {
+  it('渲染总开关/新增表单/「重启后生效」提示(默认关)', async () => {
+    const html = await render(McpSection);
+    expect(html).toContain('MCP 服务');
+    expect(html).toContain('启用 MCP 服务');
+    expect(html).toContain('已关闭'); // 默认 mcp_enabled=false
+    expect(html).toContain('新增服务器');
+    expect(html).toContain('重启后生效');
+    expect(html).toContain('保存 MCP 设置');
+  });
+
+  it('show=false 时根节点 display:none(embedded 模式按 activeSection 切换)', async () => {
+    const html = await render(McpSection, { show: false });
+    expect(html).toMatch(/display:\s*none/);
+  });
+});
+
+describe('AgentSettingsSection(Agent 设置区)', () => {
+  it('渲染执行者人设精简/完整选择器(R3a;常显,仅任务模式生效说明)', async () => {
+    const html = await render(AgentSettingsSection);
+    expect(html).toContain('执行者人设');
+    expect(html).toContain('精简(默认)');
+    expect(html).toContain('完整');
+    expect(html).toContain('仅任务模式生效');
   });
 });

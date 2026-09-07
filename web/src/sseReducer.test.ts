@@ -170,6 +170,23 @@ describe('reduceSseEvent', () => {
     expect(changes).toMatchObject({ generating: false, reloadHistory: true });
     expect(current.messages.length).toBe(0);
   });
+
+  it('task 事件不产生任何状态变更(仅供事件监控消费)', () => {
+    const current = state();
+    current.messages.push({ id: 7, role: 'assistant', content: '既有消息', extra: {}, streaming: false });
+    const before = JSON.stringify(current);
+
+    const changes = reduceSseEvent(current, {
+      type: 'task',
+      task_id: 't1',
+      title: '写一首诗',
+      status: 'running',
+      detail: '计划步骤 1/3',
+    });
+
+    expect(changes).toEqual({});
+    expect(JSON.stringify(current)).toBe(before);
+  });
 });
 
 describe('swipe 版本纯函数(阶段六 6f)', () => {

@@ -9,8 +9,9 @@
 
 import type { MvuVariables } from './mvu/variables';
 import { collectInitVars, deepMerge } from './mvu/initvar';
+import { expandDisplayMacros } from './render';
 import { setMvuHostContext, flushJqReady } from './mvu/host';
-import { executeSandboxedCharacterScript, type SandboxCleanup } from './characterScriptSandbox';
+import { executeSandboxedCharacterScript, readCardGlobals, type SandboxCleanup } from './characterScriptSandbox';
 
 export interface ScriptBlock {
   scopeId: string;
@@ -28,6 +29,8 @@ export interface ScriptRunContext {
   initVarEntries: Record<string, string>;
   /** 当前会话变量树(消息快照回放值) */
   mvuVariables: MvuVariables;
+  /** 角色名(initvar 内容 {{char}} 宏展开用;缺省不展开 char) */
+  charName?: string;
 }
 
 /** 深拷贝(avoid structuredClone on Vue reactive Proxy) */
@@ -59,10 +62,16 @@ export class ScriptRunner {
 
   /** [InitVar] 解析结果缓存:key = 角色 id + 条目内容指纹;角色切换/条目变化时自动失效 */
   private cachedInitVars(ctx: ScriptRunContext): MvuVariables {
-    const key = `${ctx.characterId}:${JSON.stringify(ctx.initVarEntries)}`;
+    const key = `${ctx.characterId}:${JSON.stringify(ctx.initVarEntries)}:${ctx.charName ?? ''}`;
     if (this.initVarCacheKey === key && this.initVarCache) return this.initVarCache;
+    // 宏展开:initvar 值里的 {{user}}/{{char}}(如碧蓝卡 `name: "{{user}}"`)
+    // 在解析前展开,否则变量树里存字面量、状态栏直接显示 {{user}}
+    const macroCtx = { charName: ctx.charName ?? '' };
     const vars = collectInitVars(
-      Object.entries(ctx.initVarEntries).map(([comment, content]) => ({ comment, content })),
+      Object.entries(ctx.initVarEntries).map(([comment, content]) => ({
+        comment,
+        content: expandDisplayMacros(content, macroCtx),
+      })),
     );
     this.initVarCache = { stat_data: vars.stat_data, display_data: vars.display_data };
     this.initVarCacheKey = key;
@@ -109,6 +118,7 @@ export class ScriptRunner {
 
     const execution = (async (): Promise<void> => {
       const vars = this.scriptVariables(ctx);
+      const globals = readCardGlobals(ctx.characterId);
       for (let index = 0; index < blocks.length; index += 1) {
         const block = blocks[index];
         const container = containers[index];
@@ -117,7 +127,12 @@ export class ScriptRunner {
         setMvuHostContext({ container, variables: vars });
         try {
           for (const code of block.scripts) {
-            const result = await this.execute(code, { container, variables: deepCopy(vars) });
+            const result = await this.execute(code, {
+              container,
+              variables: deepCopy(vars),
+              characterId: ctx.characterId,
+              globals,
+            });
             if (typeof result === 'function') blockCleanups.push(result as SandboxCleanup);
           }
           // 保留宿主自身 ready 队列兼容,角色卡代码只通过 iframe RPC 修改白名单 DOM。

@@ -59,3 +59,32 @@ describe('角色卡脚本授权', () => {
     expect(reloaded.list()).toEqual([]);
   });
 });
+
+describe('授权哈希纳入卡级脚本(th-script)', () => {
+  const cardScript = { id: 'cs-1', name: '随开场白切换世界书', content: 'eventOn("message_swiped",()=>{});', enabled: true };
+
+  it('含卡级脚本时哈希变化(新执行代码需重新授权)', async () => {
+    const regexOnly = await hashRegexScripts(scripts);
+    const withCard = await hashRegexScripts(scripts, [cardScript]);
+    expect(withCard).not.toBe(regexOnly);
+    const auth = new LocalScriptAuthorizationStore(new MemoryStorage());
+    auth.grant('character-a', regexOnly);
+    expect(auth.isAuthorized('character-a', withCard)).toBe(false);
+  });
+
+  it('卡级脚本正文变化哈希随之变化;enabled 翻转也变化', async () => {
+    const base = await hashRegexScripts(scripts, [cardScript]);
+    const edited = await hashRegexScripts(scripts, [{ ...cardScript, content: 'eventOn("x",()=>{});' }]);
+    const toggled = await hashRegexScripts(scripts, [{ ...cardScript, enabled: false }]);
+    expect(edited).not.toBe(base);
+    expect(toggled).not.toBe(base);
+  });
+
+  it('无卡级脚本(缺省/空数组)时哈希与旧行为逐字节一致(老卡不抖动)', async () => {
+    const legacy = await hashRegexScripts(scripts);
+    const omitted = await hashRegexScripts(scripts);
+    const empty = await hashRegexScripts(scripts, []);
+    expect(omitted).toBe(legacy);
+    expect(empty).toBe(legacy);
+  });
+});

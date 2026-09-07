@@ -62,11 +62,13 @@ export async function saveAgentPromptMd(content: string): Promise<{ ok: boolean;
   return request('/settings/agent-prompt', { method: 'PUT', body: JSON.stringify({ content }) });
 }
 
-/** GET /api/settings/prompt-preview：按来源、角色、层级与顺序查看最终提示词；历史正文已脱敏。 */
-export async function getPromptPreview(sessionId?: string, characterId?: string): Promise<PromptPreview> {
+/** GET /api/settings/prompt-preview：按来源、角色、层级与顺序查看最终提示词；历史正文已脱敏。
+ *  mode 指定按哪个模式的合并设置预览(task 走 for_mode 覆盖层并追加三层固定提示词)。 */
+export async function getPromptPreview(sessionId?: string, characterId?: string, mode?: 'roleplay' | 'task'): Promise<PromptPreview> {
   const query = new URLSearchParams();
   if (sessionId) query.set('session_id', sessionId);
   if (characterId) query.set('character_id', characterId);
+  if (mode) query.set('mode', mode);
   return request(`/settings/prompt-preview${query.size ? `?${query}` : ''}`);
 }
 

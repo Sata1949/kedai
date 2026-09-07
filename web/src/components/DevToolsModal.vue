@@ -101,7 +101,8 @@ const close = (): void => {
           <div class="sv-field-label"><span class="sv-supreme blue" /> 说明</div>
           <p class="sv-note" style="margin: 0; line-height: 1.8">
             SSE 事件日志:全部事件在 <code>store.onSseEvent</code> 一处采集(含本地合成事件,
-            如手动中断;任务模式的创建/执行/轮询状态变化合成「任务」事件,<b>会话过滤下始终可见</b>),
+            如手动中断;任务模式的创建/执行/状态变化由后端 <code>/api/tasks/events</code> 实时推送
+            「任务」事件,<b>会话过滤下始终可见</b>),
             <b>cap 500 条丢最旧</b>。<br />
             <b>刷新页面后日志清空</b>(仅当前会话期内有效);后端 recent API 留扩展位。
             长载荷(完成正文/工具输出)默认折叠,点击行展开。

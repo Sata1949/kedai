@@ -2,7 +2,7 @@
 // 设置区:Agent 设置(系统提示词/搜索端点/变量注入位置/反思提示词 + 主 Agent 提示词 + 最终提示词预览)。
 // 从 SettingsModal.vue 双模板合并而来:取 embedded 超集版本(standalone 分支缺失
 // 「最终提示词预览」块,属模板漂移,合并后 standalone 一并补上)。
-import { onMounted } from 'vue';
+import { computed, onMounted, watch } from 'vue';
 import { useAppStore } from '../../store';
 import { storeToRefs } from 'pinia';
 import { useAgentSettings } from '../../composables/useAgentSettings';
@@ -16,8 +16,20 @@ withDefaults(defineProps<{
 });
 
 const store = useAppStore();
-// Agent 设置直接绑定 store(storeToRefs),与 useAgentSettings 保存逻辑读写同一 store
-const { agentSystemPrompt, searchEndpoint, mvuVarsPosition, reflectPrompt } = storeToRefs(store);
+// Agent 设置直接绑定 store(storeToRefs),与 useAgentSettings 保存逻辑读写同一 store;
+// appMode 用于「系统提示词按模式独立存储」的 UI 标注(徽标/说明/按钮文案随模式即时切换)
+const { agentSystemPrompt, searchEndpoint, mvuVarsPosition, reflectPrompt, taskPersonaFull, appMode } = storeToRefs(store);
+
+/** 模式徽标文案:标注当前编辑的是哪个模式的提示词,避免误以为两模式共用一份 */
+const modeBadgeText = computed(() => (appMode.value === 'task' ? '任务模式专属' : '角色扮演专属'));
+/** 占位符按模式区分空值回退语义:task 模式回退内置任务默认词,roleplay 回退内置角色扮演人设词 */
+const promptPlaceholder = computed(() =>
+  appMode.value === 'task'
+    ? '留空使用内置默认任务提示词。'
+    : '留空使用内置默认角色扮演提示词。支持占位符:{{character_name}} {{character_description}} {{world_info}}',
+);
+/** 「恢复默认」按钮文案:task 模式点明恢复的是任务模式默认词(与角色扮演默认词不同) */
+const resetPromptLabel = computed(() => (appMode.value === 'task' ? '恢复任务模式默认提示词' : '恢复默认提示词'));
 
 const { agentSaving, agentMsg, resetAgentPrompt, saveAgentNow } = useAgentSettings();
 
@@ -31,20 +43,28 @@ onMounted(async () => {
   await loadAgentPromptMd();
   await loadPromptPreview();
 });
+
+// 预览按模式取 for_mode 合并值(task 追加三层固定提示词):切模式即重拉,与徽标/占位符同步
+watch(appMode, () => void loadPromptPreview());
 </script>
 
 <template>
   <div v-show="show" class="sv-field">
     <div class="sv-field-label"><span class="sv-supreme blue" /> Agent</div>
     <div class="sv-stack">
-      <div class="sv-field-label sub">系统提示词(Agent 模式)</div>
+      <!-- 模式徽标:标注当前编辑的是哪个模式的提示词(两模式独立存储),随 appMode 即时切换 -->
+      <div class="sv-field-label sub">
+        系统提示词(Agent 模式)
+        <span class="sv-tag">{{ modeBadgeText }}</span>
+      </div>
       <textarea
         v-model="agentSystemPrompt"
         rows="6"
         class="sv-input"
-        placeholder="留空使用内置默认角色扮演提示词。支持占位符:{{character_name}} {{character_description}} {{world_info}}"
+        :placeholder="promptPlaceholder"
         spellcheck="false"
       />
+      <p class="sv-note">该提示词按模式独立存储,互不影响。</p>
       <p class="sv-note">
         <b>Custom Prompt 会完整替换内置模板，不是追加。</b>占位符替换为当前角色与已命中的世界书内容。不写
         <code v-pre>{{world_info}}</code> 时世界书不会自动注入。可用工具清单与「何时调用」由引擎在
@@ -89,12 +109,24 @@ onMounted(async () => {
         草稿是否满足人设、字数、格式等要求,判定输出须以 <code>PASS</code> 或 <code>FAIL</code> 开头,失败自动重新生成
         (最多 3 次)。模型输出无法解析时自动回退内置规则,不影响流程。
       </p>
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">执行者人设</label>
+        <select v-model="taskPersonaFull" class="sv-input">
+          <option :value="false">精简(默认)</option>
+          <option :value="true">完整</option>
+        </select>
+      </div>
+      <p class="sv-note">
+        仅任务模式生效:任务执行者绑定角色卡时注入的「写作风格参考」人设段。<b>精简</b>只注入人设描述与人格两段(去掉
+        情境与文风示例,显著省 token);<b>完整</b>为旧行为,注入角色卡全部四段。角色扮演模式下修改将作为任务模式未单独
+        设置时的沿用值。
+      </p>
       <div class="sv-btn-row">
         <button class="sv-btn primary sv-btn-fill" :disabled="agentSaving" @click="saveAgentNow">
           {{ agentSaving ? '保存中...' : '保存 Agent 设置' }}
         </button>
         <button class="sv-btn ghost sv-btn-fill" :disabled="agentSaving" @click="resetAgentPrompt">
-          恢复默认提示词
+          {{ resetPromptLabel }}
         </button>
         <div v-if="agentMsg" class="sv-feedback ok sv-feedback-flex">{{ agentMsg }}</div>
       </div>

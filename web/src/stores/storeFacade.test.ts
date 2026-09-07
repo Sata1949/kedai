@@ -30,14 +30,15 @@ vi.stubGlobal('localStorage', {
 const STATE_KEYS = [
   'characters', 'currentCharacterId', 'currentSessionId', 'sessions', 'messages', 'generating',
   'agent', 'connStatus', 'connMessage', 'lastUsage', 'contextTokens',
-  'settingsOpen', 'promptsOpen', 'agentDockOpen', 'agentPanelOpen', 'agentMode', 'bypassMode',
+  'settingsOpen', 'promptsOpen', 'agentPanelOpen', 'agentMode', 'bypassMode',
   'cacheZeroStreak', 'sessionTotalTokens', 'globalTotalTokens', 'splashDone',
   'temperature', 'topP', 'maxTokens', 'maxContextTokens', 'maxToolRounds',
   'compactionMode', 'compactionThreshold', 'compactionKeepRecent', 'compactionSnipBytes',
   'memoryDistillEnabled', 'memoryInjectLimit', 'skillProgressiveDisclosure',
-  'subagentMaxDepth', 'subagentMaxConcurrency', 'subagentResultMaxChars',
+  'subagentMaxDepth', 'subagentMaxConcurrency', 'subagentResultMaxChars', 'undoEnabled',
   'model', 'models', 'searchQuery',
-  'appMode', 'tasks', 'currentTaskId', 'currentTask',
+  'appMode', 'tasks', 'currentTaskId', 'currentTask', 'currentTaskUsage', 'globalTaskUsage',
+  'taskCalls', 'callTraceOpen', 'taskRunMode',
   'worldBooks', 'worldBooksOpen', 'quickReplies', 'quickRepliesOpen',
   'audio', 'audioOpen', 'pluginsOpen', 'skillsOpen', 'skills', 'contractsOpen', 'scriptsOpen',
   'macrosOpen', 'eventLog', 'eventsOpen', 'optimizeOpen',
@@ -64,8 +65,9 @@ const ACTION_KEYS = [
   'removeMessage', 'updateMessage', 'resendMessage', 'regenerateMessage', 'swipeMessage',
   'clearCurrentChat', 'exportCurrentChat',
   'loadWorldBooks', 'uploadWorldBook', 'updateWorldBook', 'deleteWorldBook',
-  'setAppMode', 'loadTasks', 'createTask', 'selectTask', 'loadTaskDetail',
-  'runTask', 'stopTask', 'deleteTask', 'startTaskPolling', 'stopTaskPolling',
+  'setAppMode', 'loadTasks', 'loadGlobalTaskUsage', 'createTask', 'selectTask', 'loadTaskDetail',
+  'runTask', 'stopTask', 'deleteTask', 'startTaskPolling', 'stopTaskPolling', 'loadTaskCalls',
+  'approveTask',
   'loadQuickReplies', 'loadAudio', 'saveAudioSettings', 'saveAudioPlaylist',
   'loadSkills', 'importSkillsFile', 'toggleSkill', 'removeSkill',
 ] as const;
@@ -127,5 +129,24 @@ describe('useAppStore 兼容门面', () => {
     expect(app.switchModel).toBe(useModelConnStore().switchModel);
     expect(app.setAppMode).toBe(useTaskStore().setAppMode);
     expect(app.loadWorldBooks).toBe(useResourcesStore().loadWorldBooks);
+  });
+
+  it('动态完整性:各子 store 实例的导出键在门面上全部存在(防新增动作漏转发,如 queueSettingsSave 事故)', () => {
+    const app = useAppStore() as unknown as Record<string, unknown>;
+    const subs: Array<[string, object]> = [
+      ['chat', useChatStore()],
+      ['character', useCharacterStore()],
+      ['modelConn', useModelConnStore()],
+      ['genSettings', useGenSettingsStore()],
+      ['task', useTaskStore()],
+      ['uiPrefs', useUiPrefsStore()],
+      ['resources', useResourcesStore()],
+    ];
+    for (const [name, sub] of subs) {
+      for (const key of Object.keys(sub)) {
+        if (key.startsWith('$') || key.startsWith('_')) continue; // 跳过 pinia 内置 $id/$state 等
+        expect(key in app, `${name} store 的「${key}」未在门面 useAppStore 暴露`).toBe(true);
+      }
+    }
   });
 });

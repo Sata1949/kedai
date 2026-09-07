@@ -135,8 +135,7 @@ onServerPrefetch(load);
   gap: 6px;
 }
 .memory-row {
-  border: 1px solid var(--sv-line, #ddd);
-  border-radius: 4px;
+  border: 1px solid var(--sv-line);
   padding: 6px 8px;
   display: flex;
   flex-direction: column;
@@ -153,7 +152,7 @@ onServerPrefetch(load);
   gap: 4px;
   align-items: center;
   font-size: 11px;
-  color: var(--sv-ink-dim, #5c5c5c);
+  color: var(--sv-ink-dim);
   cursor: pointer;
   flex-shrink: 0;
 }
@@ -178,25 +177,24 @@ onServerPrefetch(load);
 .kind-tag {
   font-size: 10px;
   padding: 1px 6px;
-  border-radius: 3px;
-  color: #fff;
+  color: var(--sv-white);
   flex-shrink: 0;
 }
 .kind-distilled {
-  background: var(--sv-blue, #1e3a8a);
+  background: var(--sv-blue);
 }
 .kind-tool {
-  background: var(--sv-yellow, #f5b301);
+  background: var(--sv-yellow);
 }
 .kind-manual {
-  background: var(--sv-green, #16a34a);
+  background: var(--sv-green);
 }
 .kind-unknown {
-  background: var(--sv-ink-faint, #8a8a8a);
+  background: var(--sv-ink-faint);
 }
 
 /* 删除按钮红色系(危险操作) */
 .memory-danger {
-  color: var(--sv-red, #e3342f);
+  color: var(--sv-red);
 }
 </style>

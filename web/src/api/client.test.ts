@@ -21,6 +21,46 @@ describe('API bearer token', () => {
     expect(headers.get('Content-Type')).toBe('application/json');
     expect(String(second[0])).not.toContain('test-secret');
   });
+
+  it('bootstrap 失败不缓存 rejected promise:下次调用重新引导', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockRejectedValueOnce(new Error('网络错误')) // 首次 bootstrap 失败
+      .mockResolvedValueOnce(new Response(JSON.stringify({ token: 't2' }), { status: 200 })) // 重新引导成功
+      .mockResolvedValueOnce(new Response('{}', { status: 200 })); // 目标请求
+
+    await expect(authorizedFetch('/api/chat/send', { method: 'POST', body: '{}' })).rejects.toThrow('网络错误');
+    await authorizedFetch('/api/chat/sessions');
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const third = fetchMock.mock.calls[2];
+    const headers = new Headers((third[1] as RequestInit).headers);
+    expect(headers.get('Authorization')).toBe('Bearer t2');
+  });
+
+  it('401 时丢弃缓存 token 重新引导并重试一次(服务端重启 token 轮换)', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ token: 'old' }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'unauthorized', code: 'UNAUTHORIZED' }), { status: 401 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ token: 'new' }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+
+    const res = await request<{ ok: boolean }>('/chat/sessions');
+
+    expect(res.ok).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    const last = fetchMock.mock.calls[3];
+    expect(new Headers((last[1] as RequestInit).headers).get('Authorization')).toBe('Bearer new');
+  });
+
+  it('重试后仍 401 才抛 UNAUTHORIZED(不无限重试)', async () => {
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ token: 'old' }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'x', code: 'UNAUTHORIZED' }), { status: 401 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ token: 'new' }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'x', code: 'UNAUTHORIZED' }), { status: 401 }));
+
+    await expect(request('/chat/sessions')).rejects.toMatchObject({ code: 'UNAUTHORIZED', status: 401 });
+  });
 });
 
 describe('结构化错误码(ApiError)', () => {

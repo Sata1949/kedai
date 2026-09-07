@@ -177,19 +177,17 @@ const entryRows = computed(() =>
   gap: 2px;
   height: 48px;
   padding: 2px 4px;
-  border: 1px solid var(--sv-line, #ddd);
-  border-radius: 4px;
+  border: 1px solid var(--sv-line);
   overflow: hidden;
 }
 .cache-trend-bar {
   flex: 1 1 0;
   min-width: 3px;
   max-width: 14px;
-  background: var(--sv-green, #4caf50);
-  border-radius: 1px 1px 0 0;
+  background: var(--sv-green);
 }
 .cache-trend-bar.empty {
-  background: var(--sv-ink-faint, #bbb);
+  background: var(--sv-ink-faint);
 }
 
 /* 四级水位横条:soft/snip/compact/force 各占一段,达标段点亮为档位色 */
@@ -202,36 +200,35 @@ const entryRows = computed(() =>
   text-align: center;
   font-size: 10px;
   padding: 3px 0;
-  border-radius: 3px;
-  border: 1px solid var(--sv-line, #ddd);
-  color: var(--sv-ink-faint, #999);
+  border: 1px solid var(--sv-line);
+  color: var(--sv-ink-faint);
 }
 .cache-wm-step.wm-soft.active {
-  background: var(--sv-green, #4caf50);
-  border-color: var(--sv-green, #4caf50);
-  color: #fff;
+  background: var(--sv-green);
+  border-color: var(--sv-green);
+  color: var(--sv-white);
 }
 .cache-wm-step.wm-snip.active {
-  background: var(--sv-yellow, #f5a623);
-  border-color: var(--sv-yellow, #f5a623);
-  color: #fff;
+  background: var(--sv-yellow);
+  border-color: var(--sv-yellow);
+  color: var(--sv-white);
 }
 .cache-wm-step.wm-compact.active {
-  background: var(--sv-orange, #ff8a3d);
-  border-color: var(--sv-orange, #ff8a3d);
-  color: #fff;
+  background: var(--sv-orange);
+  border-color: var(--sv-orange);
+  color: var(--sv-white);
 }
 .cache-wm-step.wm-force.active {
-  background: var(--sv-red, #e5484d);
-  border-color: var(--sv-red, #e5484d);
-  color: #fff;
+  background: var(--sv-red);
+  border-color: var(--sv-red);
+  color: var(--sv-white);
 }
 
 /* 明细表:四列等宽栅格(时间/命中/未命中/命中率) */
 .cache-entry-table {
   margin-top: 6px;
   font-size: 11px;
-  font-family: var(--sv-mono, monospace);
+  font-family: var(--font-mono);
 }
 .cache-entry-head,
 .cache-entry-row {
@@ -241,7 +238,7 @@ const entryRows = computed(() =>
   padding: 2px 4px;
 }
 .cache-entry-head {
-  color: var(--sv-ink-faint, #999);
-  border-bottom: 1px solid var(--sv-line, #ddd);
+  color: var(--sv-ink-faint);
+  border-bottom: 1px solid var(--sv-line);
 }
 </style>

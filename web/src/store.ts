@@ -46,6 +46,7 @@ export const useAppStore = defineStore('app', () => {
     revokeCharacterScripts: character.revokeCharacterScripts,
     isCharacterScriptAuthorized: character.isCharacterScriptAuthorized,
     updateCharacterPrompt: character.updateCharacterPrompt,
+    fetchCharacterDetail: character.fetchCharacterDetail,
     // 会话与消息
     loadSessions: chat.loadSessions,
     newSession: chat.newSession,
@@ -55,6 +56,7 @@ export const useAppStore = defineStore('app', () => {
     loadTokenTotals: chat.loadTokenTotals,
     updateContextTokens: chat.updateContextTokens,
     sendMessage: chat.sendMessage,
+    startStream: chat.startStream,
     onSseEvent: chat.onSseEvent,
     stop: chat.stop,
     removeMessage: chat.removeMessage,
@@ -74,6 +76,7 @@ export const useAppStore = defineStore('app', () => {
     // 运行期设置 / 提示词注入 / 执行流程
     loadSettings: genSettings.loadSettings,
     saveSettings: genSettings.saveSettings,
+    queueSettingsSave: genSettings.queueSettingsSave,
     loadPromptInject: genSettings.loadPromptInject,
     savePromptInjectConfig: genSettings.savePromptInjectConfig,
     loadAgentFlow: genSettings.loadAgentFlow,
@@ -83,14 +86,24 @@ export const useAppStore = defineStore('app', () => {
     // 任务模式
     setAppMode: task.setAppMode,
     loadTasks: task.loadTasks,
+    loadGlobalTaskUsage: task.loadGlobalTaskUsage,
+    loadTaskCalls: task.loadTaskCalls,
     createTask: task.createTask,
     selectTask: task.selectTask,
     loadTaskDetail: task.loadTaskDetail,
     runTask: task.runTask,
     stopTask: task.stopTask,
+    approveTask: task.approveTask,
+    followupTask: task.followupTask,
+    planChatTask: task.planChatTask,
     deleteTask: task.deleteTask,
+    startTaskEvents: task.startTaskEvents,
+    stopTaskEvents: task.stopTaskEvents,
     startTaskPolling: task.startTaskPolling,
     stopTaskPolling: task.stopTaskPolling,
+    // 界面偏好(渲染开关按角色记忆等动作)
+    syncRenderHtmlToCurrent: uiPrefs.syncRenderHtmlToCurrent,
+    removeRenderHtmlOverride: uiPrefs.removeRenderHtmlOverride,
     // 世界书
     loadWorldBooks: resources.loadWorldBooks,
     uploadWorldBook: resources.uploadWorldBook,
