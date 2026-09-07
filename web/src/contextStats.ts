@@ -59,7 +59,9 @@ export const RECOMMENDED_SETTINGS: RecommendedSetting[] = [
 export function buildRecommendedPatch(selected: RecommendedSetting[]): RuntimeSettingsPatch {
   const patch: RuntimeSettingsPatch = {};
   for (const s of selected) {
-    patch[s.key] = s.value;
+    // key/value 类型在 RecommendedSetting 上是联合(keyof Patch × Patch[union]),
+    // TS 无法对「键-值相关联合」的写入收窄,这里按 Record 写入(运行时语义不变)。
+    (patch as Record<string, unknown>)[s.key] = s.value;
   }
   return patch;
 }

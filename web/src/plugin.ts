@@ -6,7 +6,8 @@
 // 加载源:
 //  - 内置插件(代码内,默认启用)
 //  - web/public/plugins/*.js(随构建拷贝到 dist/plugins,运行时 fetch 加载)
-import type MarkdownIt from 'markdown-it';
+// markdown-it v15:实例类型走命名导出(默认导出仅是可调用值)
+import type { MarkdownIt } from 'markdown-it';
 import { registerMarkdownExtension } from './markdown';
 
 export interface MessageRenderCtx {

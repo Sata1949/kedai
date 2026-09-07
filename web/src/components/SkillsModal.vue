@@ -4,6 +4,7 @@
 import { ref, onMounted } from 'vue';
 import { useAppStore } from '../store';
 import { storeToRefs } from 'pinia';
+import type { SkillRecord } from '../api';
 
 const store = useAppStore();
 const { skills, skillsOpen } = storeToRefs(store);
@@ -30,7 +31,8 @@ async function onFilePicked(e: Event): Promise<void> {
   }
 }
 
-async function onToggle(s: { id: string; enabled: boolean }): Promise<void> {
+// 参数用完整 SkillRecord(store.toggleSkill 需要整条记录持久化,不止 id/enabled)
+async function onToggle(s: SkillRecord): Promise<void> {
   busyId.value = s.id;
   msg.value = null;
   try {

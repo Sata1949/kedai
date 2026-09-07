@@ -38,9 +38,16 @@ function deepCopy<T>(v: T): T {
   return JSON.parse(JSON.stringify(v)) as T;
 }
 
+// 执行上下文与沙箱 SandboxExecutionContext 对齐(其子集):characterId/globals 为可选,
+// 真实实现(executeSandboxedCharacterScript)消费二者做角色级全局变量持久化与同步下发。
 export type CharacterScriptExecutor = (
   code: string,
-  context: { container: HTMLElement; variables: MvuVariables },
+  context: {
+    container: HTMLElement;
+    variables: MvuVariables;
+    characterId?: string;
+    globals?: Record<string, unknown>;
+  },
 ) => Promise<unknown>;
 
 interface ActiveExecution {

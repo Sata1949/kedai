@@ -304,6 +304,14 @@ const vm = useVirtualMessages({
     void Promise.allSettled([executeCurrentMessageScripts(), frames.hydrate(), hydrateRenderPanels()]);
   },
 });
+
+// 模板 ref 回调参数被 Vue 推断为 Element | ComponentPublicInstance | null,
+// 与虚拟滚动 bindRow 期望的 RowRefTarget(HTMLElement 或带 rootEl 的组件暴露,
+// 未导出)不直接兼容;此处仅做类型收窄,运行时透传(resolveRowEl 内部读 rootEl)。
+type VmRowTarget = Parameters<typeof vm.bindRow>[1];
+function bindRowRef(id: number, target: unknown): void {
+  vm.bindRow(id, target as VmRowTarget);
+}
 </script>
 
 <template>
@@ -332,11 +340,11 @@ const vm = useVirtualMessages({
         <div
           v-if="!vm.isActive(m.id, i)"
           :style="vm.placeholderStyle(m)"
-          :ref="(el) => vm.bindRow(m.id, el)"
+          :ref="(el) => bindRowRef(m.id, el)"
         ></div>
         <ChatMessageItem
           v-else
-          :ref="(inst) => vm.bindRow(m.id, inst)"
+          :ref="(inst) => bindRowRef(m.id, inst)"
           :m="m"
           :editing="editingId === m.id"
           :avatar-url="avatarUrl"
