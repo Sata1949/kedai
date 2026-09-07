@@ -1,10 +1,13 @@
 ﻿# 构建正式 Windows 便携目录:dist\Kedai-portable\Kedai.exe
+# -NoWeb:跳过前端构建,复用现有 web/dist(供 build.ps1 接续调用,避免重复构建)
 param(
-    [string]$OutputDir = ""
+    [string]$OutputDir = "",
+    [switch]$NoWeb
 )
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+. (Join-Path $Root "tools\Write-BuildStamp.ps1")
 if ([string]::IsNullOrWhiteSpace($OutputDir)) {
     $OutputDir = Join-Path $Root "dist\Kedai-portable"
 } elseif (-not [System.IO.Path]::IsPathRooted($OutputDir)) {
@@ -12,15 +15,22 @@ if ([string]::IsNullOrWhiteSpace($OutputDir)) {
 }
 
 Write-Host "========== Kedai Portable Build ==========" -ForegroundColor Cyan
-Write-Host "[1/3] 构建前端 ..." -ForegroundColor Green
 Push-Location $Root
 try {
-    if (-not (Test-Path (Join-Path $Root "node_modules"))) {
-        npm install
-        if ($LASTEXITCODE -ne 0) { throw "npm install 失败(exit=$LASTEXITCODE)" }
+    if (-not $NoWeb) {
+        Write-Host "[1/3] 构建前端 ..." -ForegroundColor Green
+        if (-not (Test-Path (Join-Path $Root "node_modules"))) {
+            npm install
+            if ($LASTEXITCODE -ne 0) { throw "npm install 失败(exit=$LASTEXITCODE)" }
+        }
+        npm run build -w web
+        if ($LASTEXITCODE -ne 0) { throw "前端构建失败(exit=$LASTEXITCODE)" }
+    } else {
+        Write-Host "[1/3] 跳过前端构建(-NoWeb),复用现有 web/dist" -ForegroundColor Yellow
+        if (-not (Test-Path (Join-Path $Root "web\dist\index.html"))) {
+            throw "指定了 -NoWeb 但缺少 web\dist\index.html,请先执行前端构建"
+        }
     }
-    npm run build -w web
-    if ($LASTEXITCODE -ne 0) { throw "前端构建失败(exit=$LASTEXITCODE)" }
 
     Write-Host "[2/3] 编译 Tauri release 可执行文件 ..." -ForegroundColor Green
     # 前端新鲜度检测(同 build.ps1):kedai-server 编译期嵌入 web/dist,
@@ -38,8 +48,14 @@ try {
         }
     }
     # 独立二进制名避免已运行的开发版锁住 kedai-desktop.exe。
-    cargo build --release --manifest-path (Join-Path $Root "src-tauri\Cargo.toml") --bin kedai-portable
-    if ($LASTEXITCODE -ne 0) { throw "Tauri 编译失败(exit=$LASTEXITCODE)" }
+    # 与 build.ps1 同款处理:cargo 进度写 stderr,PS 5.1 在 EAP=Stop 下会包成
+    # NativeCommandError 中止脚本,且经 powershell -File 调用时退出码可能为 0(失败被吞)。
+    # 经 cmd 内联合并流,成败以退出码判断,保证失败如实传播。
+    $ErrorActionPreference = "Continue"
+    & $env:ComSpec /d /c "cargo build --release --manifest-path `"$(Join-Path $Root 'src-tauri\Cargo.toml')`" --bin kedai-portable 2>&1"
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = "Stop"
+    if ($code -ne 0) { throw "Tauri 编译失败(exit=$code)" }
 } finally {
     Pop-Location
 }
@@ -55,6 +71,11 @@ if (Test-Path $OutputDir) {
 }
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 Copy-Item $DesktopExe (Join-Path $OutputDir "Kedai.exe")
+
+# 构建指纹 sidecar:与 dist\kedai-server.exe.build.json 同算法,
+# start.ps1 / launcher 启动前比对两者 dist_hash 即可判断测试版与便携版是否同步
+$stampPath = Write-KedaiBuildStamp -Root $Root -ExePath (Join-Path $OutputDir "Kedai.exe")
+Write-Host "[指纹] 已写出 $(Split-Path $stampPath -Leaf)" -ForegroundColor Green
 
 $PortableReadme = @(
     "Kedai Windows 便携版",
