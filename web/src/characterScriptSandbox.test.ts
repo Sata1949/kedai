@@ -5,6 +5,10 @@
 // 抛 SyntaxError: Invalid regular expression flags,任何角色卡脚本都无法执行,
 // 状态栏永远停在卡片自带的「加载中」静态文案。故此处锁定「生成物必须可解析」。
 import { describe, expect, it } from 'vitest';
+// @types/node 未安装(tsconfig types 仅 vite/client),node:vm 无类型声明;
+// 运行时 vitest 走 node 环境可正常解析。此处压类型错误而非装依赖;
+// 若日后安装 @types/node,本行会因「未使用的 expect-error」报错提醒删除。
+// @ts-expect-error -- node:vm 缺少类型声明(见上)
 import vm from 'node:vm';
 import { sandboxAttributes, sandboxScript } from './characterScriptSandbox';
 

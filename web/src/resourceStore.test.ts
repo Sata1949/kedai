@@ -78,7 +78,9 @@ describe('applySyncToSnapshot(资源界面 shim 同步纯函数)', () => {
     applySyncToSnapshot(snap, { subtype: 'storage', which: 'nope' as 'local', op: 'set', key: 'a', value: 'b' });
     applySyncToSnapshot(snap, { subtype: 'storage', which: 'local', op: 'set' });
     applySyncToSnapshot(snap, { subtype: 'cache', op: 'put' });
-    applySyncToSnapshot(snap, { subtype: 'other' as 'storage' });
+    // subtype 不在联合内(运行时 'other'):不匹配 storage/cache 任何分支,静默忽略;
+    // op 是类型必填字段,补合法值满足类型(不影响运行时忽略路径)
+    applySyncToSnapshot(snap, { subtype: 'other' as 'storage', op: 'set' });
     expect(snap).toEqual(emptyResourceSnapshot());
   });
 

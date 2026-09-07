@@ -96,7 +96,7 @@ describe('TaskBoard 批次 R2a:追加指令条', () => {
   it('partial/error/ended 同为终态:输入条可用', async () => {
     for (const st of ['partial', 'error', 'ended'] as TaskStatus[]) {
       const html = await render(TaskBoard, (p) => seedCurrentTask(p, makeDetail(makeTask(st), [])));
-      expect(html).not.toMatch(/<textarea[^>]*\sdisabled/, `${st} 终态输入条不应禁用`);
+      expect(html, `${st} 终态输入条不应禁用`).not.toMatch(/<textarea[^>]*\sdisabled/);
       expect(html).not.toContain('sv-task-followup-hint');
     }
   });

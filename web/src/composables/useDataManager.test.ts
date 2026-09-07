@@ -66,7 +66,7 @@ describe('undo_enabled 装配(批次 6.1b)', () => {
     await saveParamsNow();
     const last = h.savedPatches.at(-1);
     expect(last).toBeDefined();
-    expect(last!.undo_enabled).toBe(false, '保存 patch 应携带当前 undo_enabled');
+    expect(last!.undo_enabled, '保存 patch 应携带当前 undo_enabled').toBe(false);
   });
 
   it('数据管理开关:saveUndoEnabled 立即保存;失败回滚本地开关', async () => {
@@ -80,13 +80,13 @@ describe('undo_enabled 装配(批次 6.1b)', () => {
     await saveUndoEnabled();
     expect(h.savedPatches.at(-1)).toEqual({ undo_enabled: false });
     expect(undoMsg.value).toContain('已关闭');
-    expect(store.undoEnabled).toBe(false, '保存成功不回滚');
+    expect(store.undoEnabled, '保存成功不回滚').toBe(false);
 
     // 保存失败 → 本地开关回滚,提示失败
     h.saveFail = true;
     undoEnabled.value = true;
     await saveUndoEnabled();
-    expect(undoEnabled.value).toBe(false, '保存失败应回滚本地开关');
+    expect(undoEnabled.value, '保存失败应回滚本地开关').toBe(false);
     expect(undoMsg.value).toContain('保存失败');
   });
 });

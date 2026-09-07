@@ -19,6 +19,8 @@ const scripts: RegexScript[] = [{
   find_regex: 'PH',
   replace_string: '<div>状态</div><script>document.body.dataset.ready = "1"</script>',
   enabled: true,
+  // 显示渲染类脚本(非隐藏剥除类),必填字段补 false
+  markdown_only: false,
 }];
 
 describe('角色卡脚本授权', () => {

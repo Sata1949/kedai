@@ -162,6 +162,8 @@ describe('renderScopedScripts', () => {
         find_regex: '<StatusPlaceHolderImpl/>',
         replace_string: '<div class="sb">状态</div>',
         enabled: true,
+        // 显示渲染类脚本(非隐藏剥除类),必填字段补 false
+        markdown_only: false,
       },
     ];
     const r = renderScopedScripts('前文 <StatusPlaceHolderImpl/> 后文', scripts, 'm9');
@@ -224,6 +226,7 @@ describe('renderScopedScripts', () => {
         find_regex: 'PH',
         replace_string: '<b>hit</b>',
         enabled: true,
+        markdown_only: false,
       },
     ];
     const text = '<UpdateVariable>_.set("a",1,2)</UpdateVariable> PH';
@@ -240,12 +243,14 @@ describe('renderScopedScripts', () => {
       find_regex: '<StatusPlaceHolderImpl\\/>',
       replace_string: '```\n<StatusPlaceHolderImpl/>\n```',
       enabled: true,
+      markdown_only: false,
     };
     const ui: RegexScript = {
       id: '9', script_name: 'ui',
       find_regex: '<StatusPlaceHolderImpl/>',
       replace_string: '<head><style>.ui-x{color:red}</style></head><body><div class="ui-x">手机界面</div><script>window.__ui = 1</script></body>',
       enabled: true,
+      markdown_only: false,
     };
     const r = renderScopedScripts('正文 <StatusPlaceHolderImpl/>', [wrap, ui], 'bl');
     expect(r).not.toBeNull();
@@ -264,6 +269,7 @@ describe('renderScopedScripts', () => {
       find_regex: '<StatusPlaceHolderImpl/>',
       replace_string: '```\n<StatusPlaceHolderImpl/>\n```',
       enabled: true,
+      markdown_only: false,
     };
     const r = renderScopedScripts('前文 <StatusPlaceHolderImpl/>', [wrap], 'bl2');
     // 正文仍渲染(前文),但不得出现空的 scoped 容器或围栏残留

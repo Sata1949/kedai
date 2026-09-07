@@ -170,7 +170,7 @@ describe('CallTracePanel(调用追踪内容,面板合并后为 AgentPanel「调�
     expect(html).toContain('流式中');
     // 伪行复用阶段标签契约(step_index 0 起展示 +1);SSR 插值锚点会隔断连续文本,分段断言
     expect(html).toContain('步骤 #2');
-    expect(html.match(/正在生成/g)).toHaveLength(2, '两条缓冲应各出一条伪行');
+    expect(html.match(/正在生成/g), '两条缓冲应各出一条伪行').toHaveLength(2);
     // 伪行在正式行之前(列表顶部)
     expect(html.indexOf('正在生成')).toBeLessThan(html.indexOf('步骤 #1'));
     // 展开区默认收起:流式文本不渲染

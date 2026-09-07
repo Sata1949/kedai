@@ -56,8 +56,10 @@ function sandboxHarness() {
       body: { appendChild: vi.fn() } as unknown as HTMLElement,
     },
     window: {
-      addEventListener: (type, callback) => { listeners.set(String(type), callback as (event: MessageEvent) => void); },
-      removeEventListener: (type) => { listeners.delete(String(type)); },
+      // SandboxEnvironment.window 是 Pick<Window, ...> 重载方法,对象字面量拿不到上下文
+      // 参数类型,显式标注;callback 存 listeners 时再收窄为 MessageEvent 派发
+      addEventListener: (type: string, callback: unknown) => { listeners.set(String(type), callback as (event: MessageEvent) => void); },
+      removeEventListener: (type: string) => { listeners.delete(String(type)); },
     },
     timeoutMs: 100,
   };

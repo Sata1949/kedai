@@ -205,11 +205,11 @@ describe('任务事件 SSE 订阅(WP5)', () => {
     h.emitEvent!({ type: 'task', task_id: 'other', kind: 'status', status: 'running' });
     await flush();
     expect(h.listFetchCount).toBe(baseList + 1);
-    expect(h.detailFetchCount).toBe(baseDetail, '非当前任务不应拉详情');
+    expect(h.detailFetchCount, '非当前任务不应拉详情').toBe(baseDetail);
 
     h.emitEvent!({ type: 'task', task_id: 't1', detail: '旧服务端事件无 kind' });
     await flush();
-    expect(h.listFetchCount).toBe(baseList + 1, 'kind 缺失不触发刷新');
+    expect(h.listFetchCount, 'kind 缺失不触发刷新').toBe(baseList + 1);
   });
 
   it('created 刷新列表;usage 刷新全局累计与当前详情;deleted 清空当前选中', async () => {
@@ -244,7 +244,7 @@ describe('任务事件 SSE 订阅(WP5)', () => {
     // 首次断线:兜底轮询启动,1s 后重连;此后订阅即被拒(autoFail)
     h.autoFailSubscribe = true;
     h.emitClose!(new Error('network down'));
-    expect(h.subscribeCalls).toBe(1, '断线瞬间不重连,等 1s 退避');
+    expect(h.subscribeCalls, '断线瞬间不重连,等 1s 退避').toBe(1);
 
     await vi.advanceTimersByTimeAsync(1000); // t=1s:重连→被拒→退避 2s
     expect(h.subscribeCalls).toBe(2);
@@ -253,7 +253,7 @@ describe('任务事件 SSE 订阅(WP5)', () => {
 
     const baseList = h.listFetchCount;
     await vi.advanceTimersByTimeAsync(2500); // t=5s:兜底轮询 tick;t=3s 已第二次重连失败(退避 4s)
-    expect(h.listFetchCount).toBe(baseList + 1, '兜底轮询 5s tick 应刷新列表');
+    expect(h.listFetchCount, '兜底轮询 5s tick 应刷新列表').toBe(baseList + 1);
     expect(h.subscribeCalls).toBe(3);
 
     await vi.advanceTimersByTimeAsync(3900); // t=8.9s:4s 退避(t=7s)应已重连
@@ -276,14 +276,14 @@ describe('任务事件 SSE 订阅(WP5)', () => {
     const baseDetail = h.detailFetchCount;
     const baseUsage = h.usageFetchCount;
     await vi.advanceTimersByTimeAsync(1600); // t=2.6s:settle(1500ms)触发全量补偿
-    expect(h.listFetchCount).toBe(baseList + 1, 'settle 后应补刷列表');
-    expect(h.detailFetchCount).toBe(baseDetail + 1, 'settle 后应补刷当前任务详情');
-    expect(h.usageFetchCount).toBe(baseUsage + 1, 'settle 后应补刷全局累计');
+    expect(h.listFetchCount, 'settle 后应补刷列表').toBe(baseList + 1);
+    expect(h.detailFetchCount, 'settle 后应补刷当前任务详情').toBe(baseDetail + 1);
+    expect(h.usageFetchCount, 'settle 后应补刷全局累计').toBe(baseUsage + 1);
 
     const listAfterSettle = h.listFetchCount;
     await vi.advanceTimersByTimeAsync(20000);
-    expect(h.listFetchCount).toBe(listAfterSettle, '兜底轮询已停,不再有周期请求');
-    expect(h.subscribeCalls).toBe(2, '连接稳定,不再重连');
+    expect(h.listFetchCount, '兜底轮询已停,不再有周期请求').toBe(listAfterSettle);
+    expect(h.subscribeCalls, '连接稳定,不再重连').toBe(2);
   });
 
   it('退出 task 模式后断线不再重连,订阅与定时器全部清理', async () => {
@@ -294,12 +294,12 @@ describe('任务事件 SSE 订阅(WP5)', () => {
     await vi.advanceTimersByTimeAsync(0);
 
     store.setAppMode('roleplay');
-    expect(h.closeCalls).toBe(1, '退出模式应主动关闭订阅');
+    expect(h.closeCalls, '退出模式应主动关闭订阅').toBe(1);
 
     // 退出后才收到断线回调(竞态):不得重连
     h.emitClose!();
     await vi.advanceTimersByTimeAsync(30000);
-    expect(h.subscribeCalls).toBe(1, '退出 task 模式后不得重连');
+    expect(h.subscribeCalls, '退出 task 模式后不得重连').toBe(1);
   });
 });
 
@@ -350,13 +350,13 @@ describe('llm_call 事件与调用追踪(批次 3 L3)', () => {
     // 面板关闭(默认):当前任务的 llm_call 也不拉取
     h.emitEvent!({ type: 'task', task_id: 't1', kind: 'llm_call' });
     await flush();
-    expect(h.callsFetchCount).toBe(0, '面板关闭不应拉取');
+    expect(h.callsFetchCount, '面板关闭不应拉取').toBe(0);
 
     // 面板打开但事件属于其他任务:不拉取
     uiPrefs.callTraceOpen = true;
     h.emitEvent!({ type: 'task', task_id: 'other', kind: 'llm_call' });
     await flush();
-    expect(h.callsFetchCount).toBe(0, '非当前任务不应拉取');
+    expect(h.callsFetchCount, '非当前任务不应拉取').toBe(0);
   });
 
   it('loadTaskCalls 失败静默(保持旧值);selectTask/deleteTask 清空 taskCalls', async () => {
@@ -377,7 +377,7 @@ describe('llm_call 事件与调用追踪(批次 3 L3)', () => {
     h.emitEvent!({ type: 'task', task_id: 't1', kind: 'llm_call' });
     await flush();
     expect(h.callsFetchCount).toBe(2);
-    expect(store.taskCalls).toHaveLength(1, '失败应保持旧值');
+    expect(store.taskCalls, '失败应保持旧值').toHaveLength(1);
 
     // 切换任务清空;删除当前任务清空
     await store.selectTask('t2');
@@ -385,7 +385,7 @@ describe('llm_call 事件与调用追踪(批次 3 L3)', () => {
 
     store.taskCalls = [makeCall('t2')];
     await store.deleteTask('t2');
-    expect(store.taskCalls).toHaveLength(0, '删除当前任务应清空调用记录');
+    expect(store.taskCalls, '删除当前任务应清空调用记录').toHaveLength(0);
   });
 });
 
@@ -426,7 +426,7 @@ describe('事件风暴签名去重(multi/team 卡顿修复)', () => {
     h.emitEvent!({ type: 'task', task_id: 't1', kind: 'usage' });
     await flush();
     expect(h.detailFetchCount).toBeGreaterThan(baseDetail);
-    expect(store.currentTask).toBe(refBefore, '数据未变时详情引用应保持,下游面板零重渲染');
+    expect(store.currentTask, '数据未变时详情引用应保持,下游面板零重渲染').toBe(refBefore);
   });
 
   it('详情内容变化时正常替换引用(状态推进可见)', async () => {
@@ -439,7 +439,7 @@ describe('事件风暴签名去重(multi/team 卡顿修复)', () => {
     h.backendStatus = 'running';
     h.emitEvent!({ type: 'task', task_id: 't1', kind: 'agent_status', detail: '子Agent-1 执行中' });
     await flush();
-    expect(store.currentTask).not.toBe(refBefore, '数据变化必须替换引用');
+    expect(store.currentTask, '数据变化必须替换引用').not.toBe(refBefore);
     expect(store.currentTask?.task.status).toBe('running');
   });
 
@@ -461,7 +461,7 @@ describe('事件风暴签名去重(multi/team 卡顿修复)', () => {
     h.emitEvent!({ type: 'task', task_id: 't2', kind: 'created', title: '新任务' });
     await flush();
     expect(h.listFetchCount).toBeGreaterThan(baseList);
-    expect(store.tasks).toBe(listBefore, '列表未变时引用应保持(侧栏零重渲染)');
+    expect(store.tasks, '列表未变时引用应保持(侧栏零重渲染)').toBe(listBefore);
 
     // 列表内容变化(后端状态推进)时替换
     h.backendStatus = 'running';
@@ -506,8 +506,8 @@ describe('批次 4 六模式:taskRunMode / approveTask / 新事件分支', () =>
     expect(memStorage.get('kedai.taskRunMode.v1')).toBe('plan');
 
     await store.createTask('目标');
-    expect(h.createTaskModes).toEqual(['plan'], 'createTask 应透传当前 taskRunMode');
-    expect(store.currentTaskId).toBe('t1', '创建后应选中新任务');
+    expect(h.createTaskModes, 'createTask 应透传当前 taskRunMode').toEqual(['plan']);
+    expect(store.currentTaskId, '创建后应选中新任务').toBe('t1');
   });
 
   it('localStorage 中的模式在 store 初始化时恢复;未知值回退 legacy', async () => {
@@ -517,7 +517,7 @@ describe('批次 4 六模式:taskRunMode / approveTask / 新事件分支', () =>
 
     memStorage.set('kedai.taskRunMode.v1', 'bogus');
     setActivePinia(createPinia());
-    expect(useTaskStore().taskRunMode).toBe('legacy', '未知模式值应回退 legacy');
+    expect(useTaskStore().taskRunMode, '未知模式值应回退 legacy').toBe('legacy');
   });
 
   it('approveTask 透传 (id, plan) 并在成功后刷新任务详情;不给 plan 时 plan 为 undefined', async () => {
@@ -528,10 +528,10 @@ describe('批次 4 六模式:taskRunMode / approveTask / 新事件分支', () =>
     const plan: TaskStep[] = [{ name: '步骤一', goal: '目标一', status: 'pending', result: '' }];
     await store.approveTask('t1', plan);
     expect(h.approveCalls[0]).toEqual({ id: 't1', plan });
-    expect(h.detailFetchCount).toBe(baseDetail + 1, '批准后应刷新详情');
+    expect(h.detailFetchCount, '批准后应刷新详情').toBe(baseDetail + 1);
 
     await store.approveTask('t1');
-    expect(h.approveCalls[1]).toEqual({ id: 't1', plan: undefined }, '按原计划批准不带 plan');
+    expect(h.approveCalls[1], '按原计划批准不带 plan').toEqual({ id: 't1', plan: undefined });
   });
 
   it('followupTask 透传 (id, content) 并在成功后刷新任务详情(批次 R2a)', async () => {
@@ -541,7 +541,7 @@ describe('批次 4 六模式:taskRunMode / approveTask / 新事件分支', () =>
 
     await store.followupTask('t1', '再补充一点秋色');
     expect(h.followupCalls).toEqual([{ id: 't1', content: '再补充一点秋色' }]);
-    expect(h.detailFetchCount).toBe(baseDetail + 1, '追加成功后应刷新详情(messages/result 随详情带出)');
+    expect(h.detailFetchCount, '追加成功后应刷新详情(messages/result 随详情带出)').toBe(baseDetail + 1);
   });
 
   it('planChatTask 透传 (id, message) 并在成功后刷新任务详情(批次 R2b)', async () => {
@@ -551,7 +551,7 @@ describe('批次 4 六模式:taskRunMode / approveTask / 新事件分支', () =>
 
     await store.planChatTask('t1', '把第二步换成先做竞品调研');
     expect(h.planChatCalls).toEqual([{ id: 't1', message: '把第二步换成先做竞品调研' }]);
-    expect(h.detailFetchCount).toBe(baseDetail + 1, '修订成功后应刷新详情(新计划 + 对话记录随详情带出)');
+    expect(h.detailFetchCount, '修订成功后应刷新详情(新计划 + 对话记录随详情带出)').toBe(baseDetail + 1);
   });
 
   it('approval_required 事件刷新列表与当前任务详情(plan 模式计划待批准)', async () => {
@@ -581,11 +581,11 @@ describe('批次 4 六模式:taskRunMode / approveTask / 新事件分支', () =>
     h.emitEvent!({ type: 'task', task_id: 't1', kind: 'agent_status', detail: '子Agent-1 执行中' });
     await flush();
     expect(h.detailFetchCount).toBe(baseDetail + 1);
-    expect(h.listFetchCount).toBe(baseList, 'agent_status 不刷新列表');
+    expect(h.listFetchCount, 'agent_status 不刷新列表').toBe(baseList);
 
     h.emitEvent!({ type: 'task', task_id: 'other', kind: 'agent_status', detail: '子Agent-2 完成' });
     await flush();
-    expect(h.detailFetchCount).toBe(baseDetail + 1, '非当前任务不拉详情');
+    expect(h.detailFetchCount, '非当前任务不拉详情').toBe(baseDetail + 1);
   });
 });
 
@@ -637,7 +637,7 @@ describe('plan 模式生命周期:planned → 批准 → done(签名去重不吞
     let ref = store.currentTask;
     expect(ref?.task.status).toBe('planned');
     expect(ref?.task.plan.map((s) => s.name)).toEqual(['构思大纲', '撰写正文']);
-    expect(ref?.task.plan[0].goal).toBe('产出三幕大纲', '目标必须随计划落库可见(批准前审阅内容)');
+    expect(ref?.task.plan[0].goal, '目标必须随计划落库可见(批准前审阅内容)').toBe('产出三幕大纲');
 
     // 修改后批准:后端整体替换计划(goal 变更)——签名含 plan 全字段,goal 变更不得吞
     h.backendPlan = [
@@ -646,7 +646,7 @@ describe('plan 模式生命周期:planned → 批准 → done(签名去重不吞
     ];
     h.emitEvent!({ type: 'task', task_id: 't1', kind: 'plan', detail: '执行计划已更新(共 2 步)' });
     await flush();
-    expect(store.currentTask).not.toBe(ref, '批准替换计划(goal 变更)必须替换引用');
+    expect(store.currentTask, '批准替换计划(goal 变更)必须替换引用').not.toBe(ref);
     expect(store.currentTask?.task.plan[0].goal).toBe('产出四幕大纲(用户修改)');
     ref = store.currentTask;
 
@@ -665,7 +665,7 @@ describe('plan 模式生命周期:planned → 批准 → done(签名去重不吞
     ];
     h.emitEvent!({ type: 'task', task_id: 't1', kind: 'plan' });
     await flush();
-    expect(store.currentTask).not.toBe(ref, '步骤 status 回写必须替换引用');
+    expect(store.currentTask, '步骤 status 回写必须替换引用').not.toBe(ref);
     expect(store.currentTask?.task.plan[0].status).toBe('running');
     ref = store.currentTask;
 
@@ -676,7 +676,7 @@ describe('plan 模式生命周期:planned → 批准 → done(签名去重不吞
     ];
     h.emitEvent!({ type: 'task', task_id: 't1', kind: 'plan' });
     await flush();
-    expect(store.currentTask).not.toBe(ref, '步骤 result 回写必须替换引用');
+    expect(store.currentTask, '步骤 result 回写必须替换引用').not.toBe(ref);
     expect(store.currentTask?.task.plan[0].result).toBe('大纲:起承转合');
     expect(store.currentTask?.task.plan[1].status).toBe('running');
     ref = store.currentTask;
@@ -734,11 +734,11 @@ describe('delta 流式缓冲(批次 R4 任务模式流式输出)', () => {
     h.emitEvent!({ type: 'task', task_id: 't1', kind: 'delta', phase: 'planner', detail: '计划' });
     await flush();
 
-    expect(store.liveBuffers.get('step:0')).toBe('第一段续写', '同 key 增量应就地拼接');
-    expect(store.liveBuffers.get('planner:')).toBe('计划', '缺 step_index 的阶段 key 尾段为空');
-    expect(h.listFetchCount).toBe(baseList, 'delta 不得触发列表重拉');
-    expect(h.detailFetchCount).toBe(baseDetail, 'delta 不得触发详情重拉(绕开 contentSignature 链)');
-    expect(h.callsFetchCount).toBe(baseCalls, 'delta 不得触发调用记录重拉');
+    expect(store.liveBuffers.get('step:0'), '同 key 增量应就地拼接').toBe('第一段续写');
+    expect(store.liveBuffers.get('planner:'), '缺 step_index 的阶段 key 尾段为空').toBe('计划');
+    expect(h.listFetchCount, 'delta 不得触发列表重拉').toBe(baseList);
+    expect(h.detailFetchCount, 'delta 不得触发详情重拉(绕开 contentSignature 链)').toBe(baseDetail);
+    expect(h.callsFetchCount, 'delta 不得触发调用记录重拉').toBe(baseCalls);
   });
 
   it('非当前任务/缺 phase/缺 detail 的 delta 忽略;llm_call 落库事件清对应缓冲', async () => {
@@ -762,8 +762,8 @@ describe('delta 流式缓冲(批次 R4 任务模式流式输出)', () => {
 
     h.emitEvent!({ type: 'task', task_id: 't1', kind: 'llm_call', phase: 'step', step_index: 0, detail: 'step #1 · mock · 5 tokens' });
     await flush();
-    expect(store.liveBuffers.has('step:0')).toBe(false, '落库调用的缓冲应清除');
-    expect(store.liveBuffers.get('step:1')).toBe('乙', '并行调用的缓冲不受影响');
+    expect(store.liveBuffers.has('step:0'), '落库调用的缓冲应清除').toBe(false);
+    expect(store.liveBuffers.get('step:1'), '并行调用的缓冲不受影响').toBe('乙');
 
     // 旧服务端 llm_call 无 phase 字段:不清缓冲(也不炸)
     h.emitEvent!({ type: 'task', task_id: 't1', kind: 'llm_call', detail: '旧格式' });
@@ -782,13 +782,13 @@ describe('delta 流式缓冲(批次 R4 任务模式流式输出)', () => {
     expect(store.liveBuffers.size).toBe(1);
 
     await store.selectTask('t2');
-    expect(store.liveBuffers.size).toBe(0, '切任务应清空旧任务缓冲');
+    expect(store.liveBuffers.size, '切任务应清空旧任务缓冲').toBe(0);
 
     h.emitEvent!({ type: 'task', task_id: 't2', kind: 'delta', phase: 'agent', detail: '再来' });
     await flush();
     expect(store.liveBuffers.size).toBe(1);
     h.emitEvent!({ type: 'task', task_id: 't2', kind: 'deleted' });
     await flush();
-    expect(store.liveBuffers.size).toBe(0, '删除当前任务应清缓冲');
+    expect(store.liveBuffers.size, '删除当前任务应清缓冲').toBe(0);
   });
 });

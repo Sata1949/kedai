@@ -21,7 +21,9 @@ function createHarness(authorized = true) {
     initVarEntries: {},
     mvuVariables: { stat_data: {}, display_data: {} },
     isAuthorized: vi.fn(() => authorized),
-    getScrollArea: vi.fn(() => root),
+    // 返回类型与 src options 契约对齐(() => HTMLElement | null):
+    // 不标注时 vi.fn(() => root) 推导为 () => HTMLElement,测试覆写返回 null 会报错
+    getScrollArea: vi.fn((): HTMLElement | null => root),
     afterRender: vi.fn().mockResolvedValue(undefined),
     renderText: vi.fn(() => '渲染正文'),
     renderScripts: vi.fn(() => ({ blocks: [{ scopeId: 'scope-a', scripts: ['work()'] }] })),

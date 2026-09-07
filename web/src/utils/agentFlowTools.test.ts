@@ -30,7 +30,7 @@ describe('stepToolMode(读回)', () => {
     expect(stepToolMode(step(undefined))).toBe('none');
     expect(stepToolMode(step([]))).toBe('all');
     expect(stepToolMode(step(['write']))).toBe('list');
-    expect(stepToolMode(step(['']))).toBe('list', '占位空串应视为 list(白名单输入中)');
+    expect(stepToolMode(step([''])), '占位空串应视为 list(白名单输入中)').toBe('list');
   });
 });
 

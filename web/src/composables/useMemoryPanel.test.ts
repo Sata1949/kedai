@@ -43,7 +43,9 @@ function mockFetch(...responses: Array<{ body: unknown; status?: number }>): Ret
   return spy;
 }
 
-function mountPanel(characterId = 'charA', sessionId: string | null = 's1') {
+// characterId 显式标注 string | null:src 入参本就允许 null(无角色场景),
+// 仅靠默认值推导会得到 string,传 null 报错
+function mountPanel(characterId: string | null = 'charA', sessionId: string | null = 's1') {
   return useMemoryPanel({
     characterId: () => characterId,
     sessionId: () => sessionId,
