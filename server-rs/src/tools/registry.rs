@@ -209,12 +209,25 @@ impl ToolRegistry {
             format!("工具 \"{name}\" 参数解析失败:{args_json}。下一步:改为合法 JSON 对象,键名与类型对照工具定义的 parameters")
         })?;
         // 批次 6.1 回退快照(两段式):写工具执行前取逆操作负载暂存;执行成功 commit
-        // 落库,失败 discard 丢弃。同步调用(无 .await 跨持锁),与工具闭包内同步 DB
-        // 访问同风格;undo_enabled 开关在 UndoService 内读取(全局开关,直接读基础值)。
-        let stager = self
-            .undo
-            .get()
-            .and_then(|undo| undo.snapshot_before(&name, &args, &ctx));
+        // 落库,失败 discard 丢弃。快照构建含角色文件区文件读取与同步 DB 查询,
+        // 经 spawn_blocking 挪出 tokio worker(B-1:消除 async 热路径同步 IO);
+        // 构建失败/任务取消返回 None——快照 best-effort,绝不挡工具执行。
+        // undo_enabled 开关在 UndoService 内读取(全局开关,直接读基础值)。
+        let stager = match self.undo.get() {
+            Some(undo) => {
+                let undo = undo.clone();
+                let snap_name = name.clone();
+                let snap_args = args.clone();
+                let snap_ctx = ctx.clone();
+                tokio::task::spawn_blocking(move || {
+                    undo.snapshot_before(&snap_name, &snap_args, &snap_ctx)
+                })
+                .await
+                .ok()
+                .flatten()
+            }
+            None => None,
+        };
         let fut = (tool.execute)(args, ctx);
         // 单工具自定义超时(MCP 等慢外部工具)优先,否则跟随注册表档(生产 30s)
         let timeout = tool.timeout.unwrap_or(self.tool_timeout);

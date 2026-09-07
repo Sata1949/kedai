@@ -627,26 +627,16 @@ impl RuntimeSettings {
     }
 
     /// 持久化到 data/settings.json;API Key 加密后写入,不落明文。
-    /// 先写同目录临时文件再替换,避免进程中断留下半截 JSON。
+    /// 统一走原子写(utils::fs_atomic:写临时文件 + 原子替换),
+    /// 进程中断不会留下半截 JSON;Windows 下 ReplaceFileW 替换,消除了旧实现
+    /// 「先删目标再 rename」的非原子窗口。
     pub fn save(&self, data_dir: &Path) -> Result<(), String> {
-        std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
         // 仅持久化副本加密,不改动内存中的明文 Key(连接器仍需直接使用)
         let mut persisted = self.clone();
         persisted.openai_api_key = secret_store::protect(&self.openai_api_key)?;
         let text = serde_json::to_string_pretty(&persisted).map_err(|e| e.to_string())?;
-        let target = data_dir.join("settings.json");
-        let temporary = data_dir.join(format!("settings.json.tmp-{}", uuid::Uuid::new_v4()));
-        std::fs::write(&temporary, text).map_err(|e| e.to_string())?;
-        if target.exists() {
-            std::fs::remove_file(&target).map_err(|e| {
-                let _ = std::fs::remove_file(&temporary);
-                e.to_string()
-            })?;
-        }
-        std::fs::rename(&temporary, &target).map_err(|e| {
-            let _ = std::fs::remove_file(&temporary);
-            e.to_string()
-        })
+        crate::utils::fs_atomic::write_atomic(&data_dir.join("settings.json"), text.as_bytes())
+            .map_err(|e| e.to_string())
     }
 
     /// API Key 脱敏展示(仅保留后 4 位)

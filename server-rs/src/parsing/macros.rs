@@ -72,7 +72,8 @@ pub fn expand_macros(text: &str, ctx: &mut MacroCtx<'_>) -> String {
             }
         }
         // 普通字符:按 UTF-8 字符整体输出,避免在字符中间切片(中文等多字节文本)
-        let ch = text[i..].chars().next().unwrap();
+        // 循环条件 i < bytes.len() 保证必有下一字符
+        let ch = text[i..].chars().next().expect("i 在界内,必有下一字符");
         out.push(ch);
         i += ch.len_utf8();
     }

@@ -83,12 +83,8 @@ pub async fn cache(State(state): State<Arc<AppState>>, Query(q): Query<CacheQuer
     let pricing = CachePricing::default();
     let summary = summarize(&rows, &pricing);
     // 水位:以窗口内最新一条请求的 prompt_tokens 为输入侧 token,
-    // 对照设置中的 max_context_tokens
-    let max_context = state
-        .settings
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .max_context_tokens;
+    // 对照设置中的 max_context_tokens(设置快照:不留锁跨 await)
+    let max_context = state.settings_snapshot().max_context_tokens;
     let latest_prompt = rows.last().map(|r| r.prompt_tokens).unwrap_or(0);
     let level = watermark(latest_prompt, max_context);
     Json(json!({

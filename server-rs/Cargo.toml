@@ -14,10 +14,13 @@ axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.32", features = ["bundled", "backup"] }
+rusqlite = { version = "0.40", features = ["bundled", "backup"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "native-tls"] }
-tiktoken-rs = "0.6"
-png = "0.17"
+# tiktoken-rs 0.12:get_bpe_from_model 已废弃(改名 bpe_for_model,返回 &'static 单例且下载失败会 panic),
+# 故 token_service 改用直接构造器(cl100k_base/o200k_base/p50k_base),保持「失败返回 Err 降级估算」语义
+tiktoken-rs = "0.12"
+# 注:png 依赖已移除——角色卡 PNG tEXt 解析(parsing/character_card.rs)为手工 chunk 解析,
+# 全仓无任何 png:: API 调用(grep `png::`/`use png` 无命中),属冗余依赖;无需升级到 0.18
 tower-http = { version = "0.6", features = ["cors", "fs", "set-header"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures = "0.3"
@@ -31,12 +34,16 @@ async-stream = "0.3"
 mime = "0.3"
 regex = "1.13"
 rquickjs = "0.12.2"
+# r2d2_sqlite 0.35 依赖 rusqlite ^0.40,两者必须同代升级
 r2d2 = "0.8.10"
-r2d2_sqlite = "0.25.0"
+r2d2_sqlite = "0.35.0"
+# 资源页代理按 charset 解码(GBK 等中文编码的作者页面,from_utf8_lossy 会乱码)
+encoding_rs = "0.8"
 
 # Windows DPAPI:API Key 静态加密(CryptProtectData / CryptUnprotectData)
+# 版本与传递依赖(tokio/rustix/schannel 等)对齐到 0.61,消除 Cargo.lock 中 0.59/0.61 双版本并存
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = [
+windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security_Cryptography",
     "Win32_Storage_FileSystem",
@@ -45,6 +52,8 @@ windows-sys = { version = "0.59", features = [
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+# test-util:暂停时钟(start_paused/time::advance),delta 攒批时间窗单测用(批次 R4)
+tokio = { version = "1", features = ["test-util"] }
 
 [profile.release]
 lto = true

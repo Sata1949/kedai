@@ -65,6 +65,16 @@ pub struct ToolDeps {
 }
 
 impl ToolDeps {
+    /// 运行期设置快照:lock 后立即 clone 返回,锁中毒时 into_inner 恢复取值。
+    /// 快照语义:不留锁跨 await —— 工具处理器多为 async,散点 .lock() 易把
+    /// 锁守卫带进 await 点;统一经本方法取独立副本(与 AppState/AgentEngine 同名同语义)。
+    pub fn settings_snapshot(&self) -> RuntimeSettings {
+        self.settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     /// 测试用空依赖(临时目录 + mock 连接器)
     #[cfg(test)]
     fn dummy_for_test() -> Self {

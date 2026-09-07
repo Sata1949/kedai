@@ -583,10 +583,12 @@ pub async fn init_vars(
         Ok(v) => v,
         Err(e) => return db_err(&e),
     };
-    // 过滤出 [InitVar] 条目(含禁用的——初始化约定允许禁用条目提供初始值)
+    // 过滤出 [InitVar] 条目(含禁用的——初始化约定允许禁用条目提供初始值);
+    // 判定与引擎 collect_init_vars 同一谓词(大小写不敏感 + [InitialVariables] 别名),
+    // 否则小写标签卡(如碧蓝卡 `[initvar]变量初始化`)前端变量源为空、状态栏全兜底值
     let mut vars = serde_json::json!({});
     for e in entries {
-        if !e.comment.contains("[InitVar]") {
+        if !crate::parsing::assistant::is_init_var_comment(&e.comment) {
             continue;
         }
         if let Some(obj) = vars.as_object_mut() {

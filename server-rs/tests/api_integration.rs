@@ -2439,3 +2439,70 @@ async fn memory_slot_injected_and_touched() {
     )
     .await;
 }
+
+// ==================== 工具插件文件名净化策略统一(优化项 B-4) ====================
+
+/// 上传入口:文件名经净化后与原始名不一致即拒绝(「..」路径穿越 / 非法字符);
+/// 合法名通过并注册成功。与删除入口同一 sanitize_plugin_filename 判定。
+#[tokio::test]
+async fn plugin_upload_sanitizes_filename() {
+    let app = test_app();
+    let _guard = test_lock().await;
+    let upload = |filename: &str| {
+        let body = format!(
+            "--BOUND\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: application/json\r\n\r\n{}\r\n--BOUND--\r\n",
+            json!({ "name": "b4_demo", "description": "B-4 测试插件", "script": "result = 1;" })
+        );
+        Request::builder()
+            .method("POST")
+            .uri("/api/plugins/tools/upload")
+            .header("content-type", "multipart/form-data; boundary=BOUND")
+            .body(Body::from(body))
+            .unwrap()
+    };
+
+    // 「..」路径穿越:净化删掉 '/' 后与原名不一致 → 400,不落盘
+    let resp = app.clone().oneshot(upload("../evil.json")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, ".. 路径穿越应被拒");
+    // 含非法字符(空格):净化后与原名不一致 → 400
+    let resp = app.clone().oneshot(upload("my tool.json")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "含空格文件名应被拒");
+
+    // 合法名通过:201 + 落盘注册;用唯一名避免与并行用例互踩
+    let resp = app
+        .clone()
+        .oneshot(upload("b4-demo_plugin.json"))
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    assert_eq!(status, StatusCode::CREATED, "合法文件名应通过: {json}");
+    assert_eq!(json["file"], json!("b4-demo_plugin.json"));
+    // 收尾删除(兼覆盖删除入口合法名路径)
+    let (status, _) = send_json(
+        app,
+        "DELETE",
+        "/api/plugins/tools/b4-demo_plugin.json",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "删除合法文件名应通过");
+}
+
+/// 删除入口:「..」与含非法字符名被拒(与上传同一净化函数);
+/// 净化允许的点号组合(如无分隔符的「..」开头)不在拒绝范围,故「..」用带分隔符形态构造。
+#[tokio::test]
+async fn plugin_delete_sanitizes_filename() {
+    let app = test_app();
+    let _guard = test_lock().await;
+    // 「..」路径穿越(URL 编码 %2E%2E%2F = ../):路径段解码后与原名不一致 → 400
+    let status = send_empty(app, "DELETE", "/api/plugins/tools/..%2Fevil.json").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, ".. 路径穿越应被拒");
+    // 含非法字符(空格 %20):净化后与原名不一致 → 400
+    let status = send_empty(app, "DELETE", "/api/plugins/tools/my%20tool.json").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "含空格文件名应被拒");
+    // 合法名通过(文件不存在也走完整校验后 200,删除语义幂等)
+    let status = send_empty(app, "DELETE", "/api/plugins/tools/nonexistent-b4.json").await;
+    assert_eq!(status, StatusCode::OK, "合法文件名应通过校验");
+}

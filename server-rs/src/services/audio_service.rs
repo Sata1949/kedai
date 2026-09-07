@@ -185,11 +185,11 @@ impl AudioState {
         }
     }
 
-    /// 持久化到 data/audio.json
+    /// 持久化到 data/audio.json(原子写:崩溃不留半截 JSON)
     pub fn save(&self, data_dir: &Path) -> Result<(), String> {
-        let _ = std::fs::create_dir_all(data_dir);
         let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(data_dir.join("audio.json"), text).map_err(|e| e.to_string())
+        crate::utils::fs_atomic::write_atomic(&data_dir.join("audio.json"), text.as_bytes())
+            .map_err(|e| e.to_string())
     }
 
     fn channel_mut(&mut self, channel: AudioChannel) -> &mut ChannelState {

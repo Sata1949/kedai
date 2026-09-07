@@ -151,20 +151,24 @@ async fn mutate_permission(state: &AppState, body: &PermissionBody, authorize: b
         "role" => session.character_id.as_str(),
         _ => return permission_error(StatusCode::BAD_REQUEST, "scope 仅支持 session 或 role"),
     };
-    let result = if authorize {
-        state
-            .tool_registry
-            .permissions()
-            .authorize(&body.tool, &body.scope, scope_id)
-    } else {
-        state
-            .tool_registry
-            .permissions()
-            .revoke(&body.tool, &body.scope, scope_id)
-    };
+    // B-1:authorize/revoke 内含同步 JSON 原子落盘(tool_permissions.json),挪阻塞线程池
+    let registry = state.tool_registry.clone();
+    let tool = body.tool.clone();
+    let scope = body.scope.clone();
+    let scope_id = scope_id.to_string();
+    let result = state
+        .db_call(move || {
+            if authorize {
+                registry.permissions().authorize(&tool, &scope, &scope_id)
+            } else {
+                registry.permissions().revoke(&tool, &scope, &scope_id)
+            }
+        })
+        .await;
     match result {
-        Ok(()) => Json(json!({ "ok": true })).into_response(),
-        Err(error) => permission_error(StatusCode::BAD_REQUEST, &error),
+        Err(e) => db_err(&e),
+        Ok(Ok(())) => Json(json!({ "ok": true })).into_response(),
+        Ok(Err(error)) => permission_error(StatusCode::BAD_REQUEST, &error),
     }
 }
 

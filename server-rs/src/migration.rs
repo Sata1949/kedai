@@ -949,7 +949,8 @@ fn count_rows(conn: &Connection, schema: &str, table: &str) -> Result<usize, Str
     conn.query_row(
         &format!("SELECT COUNT(*) FROM {schema}.{}", quote_ident(table)),
         [],
-        |row| row.get(0),
+        // rusqlite 0.34 起移除了 usize 的 FromSql 实现;COUNT(*) 恒为 INTEGER,读 i64 后转换
+        |row| row.get::<_, i64>(0).map(|n| n as usize),
     )
     .map_err(|e| format!("统计表 {table} 失败: {e}"))
 }

@@ -1,4 +1,7 @@
 // Kedai 后端库:供 main 与集成测试使用
+// 优化项 B-4:生产代码 unwrap 告警(锁中毒/None 解包等应显式处理);
+// not(test) 豁免 #[cfg(test)] 单测与 tests/ 集成测试(测试编译期 cfg(test) 生效,lint 关闭)。
+#![cfg_attr(not(test), warn(clippy::unwrap_used))]
 pub mod agents;
 pub mod api;
 pub mod config;

@@ -123,19 +123,18 @@ impl AppState {
         // 注入默认「系统助手」角色(无提示词)
         characters.seed_default_character();
 
-        // 运行期设置:优先 data/settings.json,否则回退环境配置
-        let settings = Arc::new(Mutex::new(RuntimeSettings::load(&config.data_dir, &config)));
+        // 运行期设置:优先 data/settings.json,否则回退环境配置。
+        // 构造期尚无并发,先持有值再入 Mutex,避免「刚创建即加锁读出」的往返
+        let loaded_settings = RuntimeSettings::load(&config.data_dir, &config);
 
         // 构建连接器:优先使用运行期设置(settings.json)中的 Base URL / Key / 模型,
         // 否则用户保存的 API 配置在重启后会丢失,界面模型显示回退为 .env 默认值。
-        let (base_url, api_key, initial_model) = {
-            let s = settings.lock().unwrap_or_else(|e| e.into_inner());
-            (
-                s.openai_base_url.clone(),
-                s.openai_api_key.clone(),
-                s.model.clone(),
-            )
-        };
+        let (base_url, api_key, initial_model) = (
+            loaded_settings.openai_base_url.clone(),
+            loaded_settings.openai_api_key.clone(),
+            loaded_settings.model.clone(),
+        );
+        let settings = Arc::new(Mutex::new(loaded_settings));
         // 关键:已保存非空 API 配置时,即使环境变量 CONNECTOR=mock(演示模式)也自动
         // 使用 openai-compatible,否则用户「退出演示模式」后一旦重启又回到 mock,
         // 设置里填的 API 配置永远不生效(与 PUT /settings 的自动切换逻辑保持一致)。
@@ -323,6 +322,17 @@ impl AppState {
         }))
     }
 
+    /// 运行期设置快照:lock 后立即 clone 返回,锁中毒时 into_inner 恢复取值。
+    /// 快照语义:不留锁跨 await —— 调用方拿到独立副本,锁在本函数内即释放,
+    /// async 读路径一律走本方法而不是散点 .lock();写路径仍由 settings.rs 的
+    /// settings_update 事务锁串行化后直接替换内存值。
+    pub fn settings_snapshot(&self) -> RuntimeSettings {
+        self.settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     /// 失效契约缓存(角色卡写路径调用:契约来源之一变化)。
     pub fn invalidate_contracts_for_character(&self, character_id: &str) {
         self.engine.invalidate_character_contract(character_id);
@@ -372,13 +382,11 @@ impl AppState {
     /// 不随请求模式切换;v1 仅启动时装配,PUT 改 mcp_* 后重启生效。
     /// 单台失败仅记 warn 并禁用该台,不 panic、不阻断启动;由 run_server 在 serve 之前调用。
     pub async fn start_mcp(&self) {
-        let snapshot = {
-            let s = self.settings.lock().unwrap_or_else(|e| e.into_inner());
-            if !s.mcp_enabled {
-                return;
-            }
-            s.clone()
-        };
+        // 快照语义:不留锁跨 await(读开关与服务器清单用同一快照,避免锁守卫进入异步装配)
+        let snapshot = self.settings_snapshot();
+        if !snapshot.mcp_enabled {
+            return;
+        }
         let n_before = self.tool_registry.list_definitions().len();
         self.mcp.start(&snapshot, &self.tool_registry).await;
         let servers = self.mcp.server_count();

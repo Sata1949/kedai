@@ -123,11 +123,8 @@ pub(crate) async fn execute_generation(
     // 虚拟 id 会 FK 失败刷 warn;任务侧调用追踪统一走 task_llm_calls(批次 3 起)。
     let is_task_run = session_id.starts_with("task:");
     {
-        let log_enabled = engine
-            .settings
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .llm_request_log;
+        // 设置快照:不留锁跨 await(锁在 settings_snapshot 内即释放)
+        let log_enabled = engine.settings_snapshot().llm_request_log;
         if log_enabled && !is_task_run {
             if let Ok(payload) = serde_json::to_string(messages) {
                 if let Err(e) = engine.sessions.save_llm_request(
@@ -408,7 +405,8 @@ pub(crate) async fn run_tool_loop(
         // compaction(compaction.rs)/protected_tail 注入语义不受影响(不同层)。
         if llm_messages.iter().any(|m| m.role == "tool") {
             let (keep_rounds, budget_tokens) = {
-                let s = engine.settings.lock().unwrap_or_else(|e| e.into_inner());
+                // 设置快照:不留锁跨 await
+                let s = engine.settings_snapshot();
                 (
                     s.tool_history_keep_rounds as usize,
                     s.tool_history_budget_tokens,
@@ -617,7 +615,8 @@ pub(crate) async fn run_tool_loop(
                     whitelist.is_empty() || whitelist.iter().any(|name| name == &call.name)
                 });
                 let (bypass_mode, bypass_blacklisted) = {
-                    let settings = engine.settings.lock().unwrap_or_else(|e| e.into_inner());
+                    // 设置快照:不留锁跨 await
+                    let settings = engine.settings_snapshot();
                     (
                         settings.bypass_mode,
                         settings

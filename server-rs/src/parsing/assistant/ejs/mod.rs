@@ -173,7 +173,8 @@ pub(crate) fn render_template_with_ctx(
             i = k;
             continue;
         }
-        let ch = escaped[i..].chars().next().unwrap();
+        // 外层循环条件 i < bytes.len() 保证必有下一字符
+        let ch = escaped[i..].chars().next().expect("i 在界内,必有下一字符");
         text.push(ch);
         i += ch.len_utf8();
     }
@@ -251,7 +252,8 @@ fn escape_ejs_blocks(template: &str) -> (String, Vec<String>) {
                 continue;
             }
         }
-        let ch = template[i..].chars().next().unwrap();
+        // 外层循环条件 i < bytes.len() 保证必有下一字符
+        let ch = template[i..].chars().next().expect("i 在界内,必有下一字符");
         out.push(ch);
         i += ch.len_utf8();
     }

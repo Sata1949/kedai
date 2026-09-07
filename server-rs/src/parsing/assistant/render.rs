@@ -62,10 +62,11 @@ pub fn render_assistant_content_with(text: &str, ctx: &mut RenderCtx<'_>) -> Str
 
 /// {{format_message_variable::path}} / {{get_message_variable::path}} 宏展开(大小写不敏感;path 可省略)
 fn expand_format_message_variable(text: &str, vars: &AssistantVars) -> String {
+    // 正则为写死字面量,编译必然成功
     let re = regex::Regex::new(
         r"(?i)\{\{\s*(?:format_message_variable|get_message_variable)\s*::\s*([^}]*?)\s*\}\}",
     )
-    .unwrap();
+    .expect("format_message_variable 宏正则为常量,编译必然成功");
     re.replace_all(text, |caps: &regex::Captures| {
         let p = caps
             .get(1)
@@ -78,7 +79,9 @@ fn expand_format_message_variable(text: &str, vars: &AssistantVars) -> String {
 
 /// 剥离 <status_current_variable> 起止标签(大小写不敏感;内部内容保留)
 fn strip_status_current_variable(text: &str) -> String {
-    let re = regex::Regex::new(r"(?i)</?\s*status_current_variable\s*>").unwrap();
+    // 正则为写死字面量,编译必然成功
+    let re = regex::Regex::new(r"(?i)</?\s*status_current_variable\s*>")
+        .expect("status_current_variable 剥离正则为常量,编译必然成功");
     re.replace_all(text, "").to_string()
 }
 

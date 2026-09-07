@@ -57,8 +57,9 @@ pub(super) fn register_agentgo(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
             let deps = deps.clone();
             Box::pin(async move {
                 // 读取调度限制(深度/并发):settings 已在 load 时钳制到合法区间,此处直接使用
+                // (设置快照:不留锁跨 await)
                 let (max_depth, max_concurrency) = {
-                    let s = deps.settings.lock().unwrap_or_else(|e| e.into_inner());
+                    let s = deps.settings_snapshot();
                     (s.subagent_max_depth, s.subagent_max_concurrency)
                 };
                 // 深度守卫:主 Agent 为 depth 0,子 agent 内以 agent_depth+1 运行
@@ -227,10 +228,8 @@ async fn run_subtask_with_tools(
         .into_iter()
         .filter(|d| whitelist.iter().any(|w| w == &d.name))
         .collect();
-    let max_rounds = {
-        let s = deps.settings.lock().unwrap_or_else(|e| e.into_inner());
-        s.max_tool_rounds
-    };
+    // 设置快照:不留锁跨 await
+    let max_rounds = deps.settings_snapshot().max_tool_rounds;
     let params = GenerationParams {
         temperature: 0.7,
         top_p: 0.9,
@@ -447,10 +446,8 @@ fn spawn_discard_sink() -> (mpsc::Sender<SseEvent>, tokio::task::JoinHandle<()>)
 /// 子任务结果超长截断:超 subagent_result_max_chars 时保留前 N 字符并附尾注,
 /// 不静默丢内容(原长写入尾注,调用方可知全貌)。按字符截断,避开 UTF-8 边界问题。
 fn truncate_subtask_result(deps: &ToolDeps, content: &str) -> String {
-    let max_chars = {
-        let s = deps.settings.lock().unwrap_or_else(|e| e.into_inner());
-        s.subagent_result_max_chars as usize
-    };
+    // 设置快照:不留锁跨 await
+    let max_chars = deps.settings_snapshot().subagent_result_max_chars as usize;
     truncate_subtask_result_with_limit(content, max_chars)
 }
 

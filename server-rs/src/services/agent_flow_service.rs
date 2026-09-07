@@ -82,11 +82,14 @@ impl AgentFlowService {
         self.save_library()
     }
 
-    /// 持久化流程库到 data/agent_flows.json
+    /// 持久化流程库到 data/agent_flows.json(原子写:崩溃不留半截 JSON)
     fn save_library(&self) -> Result<(), String> {
-        let _ = std::fs::create_dir_all(&self.data_dir);
         let text = serde_json::to_string_pretty(&self.library).map_err(|e| e.to_string())?;
-        std::fs::write(self.data_dir.join("agent_flows.json"), text).map_err(|e| e.to_string())
+        crate::utils::fs_atomic::write_atomic(
+            &self.data_dir.join("agent_flows.json"),
+            text.as_bytes(),
+        )
+        .map_err(|e| e.to_string())
     }
 }
 
@@ -204,11 +207,11 @@ impl AgentFlowLibrary {
         }
     }
 
-    /// 持久化流程库到 data/agent_flows.json
+    /// 持久化流程库到 data/agent_flows.json(原子写:崩溃不留半截 JSON)
     pub fn save(&self, data_dir: &Path) -> Result<(), String> {
-        let _ = std::fs::create_dir_all(data_dir);
         let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(data_dir.join("agent_flows.json"), text).map_err(|e| e.to_string())
+        crate::utils::fs_atomic::write_atomic(&data_dir.join("agent_flows.json"), text.as_bytes())
+            .map_err(|e| e.to_string())
     }
 }
 

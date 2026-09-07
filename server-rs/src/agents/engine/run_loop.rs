@@ -478,12 +478,8 @@ impl AgentEngine {
                         // 技能渐进披露(落地项 3):system 只注入「技能名:一句话用途」紧凑清单,
                         // 正文按需 read(type=skill) 加载;清单按 name 排序,跨轮字节稳定(前缀缓存)。
                         // skill_progressive_disclosure = false 时回退旧行为(完全不注入清单)。
-                        if self
-                            .settings
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .skill_progressive_disclosure
-                        {
+                        // (设置快照:不留锁跨 await)
+                        if self.settings_snapshot().skill_progressive_disclosure {
                             let manifest = crate::services::skill_service::skill_manifest(
                                 &self.skills.list(true),
                             );

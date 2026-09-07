@@ -53,8 +53,9 @@ impl PatchOp {
 ///   2. MagVarUpdate 格式:_.set('path', old, new);//原因
 pub fn parse_update_variable(text: &str) -> (String, Vec<PatchOp>) {
     let mut ops = Vec::new();
-    let re =
-        regex::Regex::new(r"(?is)<UpdateVariable\b[^>]*>([\s\S]*?)</UpdateVariable\s*>").unwrap();
+    // 正则为写死字面量,编译必然成功
+    let re = regex::Regex::new(r"(?is)<UpdateVariable\b[^>]*>([\s\S]*?)</UpdateVariable\s*>")
+        .expect("UpdateVariable 块正则为常量,编译必然成功");
     for cap in re.captures_iter(text) {
         let block = &cap[1];
         if let Some(p) = extract_json_patch(block) {
@@ -69,7 +70,9 @@ pub fn parse_update_variable(text: &str) -> (String, Vec<PatchOp>) {
 
 /// 提取块内 <JSONPatch> 数组并解析为操作;无该标签或解析失败返回 None
 fn extract_json_patch(block: &str) -> Option<Vec<PatchOp>> {
-    let re = regex::Regex::new(r"(?is)<JSONPatch\b[^>]*>([\s\S]*?)</JSONPatch\s*>").unwrap();
+    // 正则为写死字面量,编译必然成功
+    let re = regex::Regex::new(r"(?is)<JSONPatch\b[^>]*>([\s\S]*?)</JSONPatch\s*>")
+        .expect("JSONPatch 块正则为常量,编译必然成功");
     let body = re.captures(block)?.get(1)?.as_str().to_string();
     let v: Value = serde_json::from_str(&body).ok()?;
     parse_patch_array(&v)
@@ -144,7 +147,8 @@ pub fn parse_patch_array(v: &Value) -> Option<Vec<PatchOp>> {
 /// 被 initvar 模块([InitVar] 初始变量)复用,故为 pub(super)
 pub(super) fn parse_set_statements(block: &str) -> Vec<PatchOp> {
     let mut ops = Vec::new();
-    let re = regex::Regex::new(r"[_.]\s*set\s*\(").unwrap();
+    // 正则为写死字面量,编译必然成功
+    let re = regex::Regex::new(r"[_.]\s*set\s*\(").expect("set 语句正则为常量,编译必然成功");
     let mut i = 0usize;
     while let Some(m) = re.find(&block[i..]) {
         let open_idx = i + m.end() - 1; // '(' 位置

@@ -43,10 +43,8 @@ pub async fn distill(
     State(state): State<Arc<AppState>>,
     Json(body): Json<DistillBody>,
 ) -> Response {
-    let enabled = {
-        let s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
-        s.memory_distill_enabled
-    };
+    // 设置快照:不留锁跨 await
+    let enabled = state.settings_snapshot().memory_distill_enabled;
     if !enabled {
         return Json(json!({
             "error": "跨会话记忆蒸馏未开启,请先在设置中打开 memory_distill_enabled"

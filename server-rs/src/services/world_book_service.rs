@@ -40,11 +40,12 @@ impl WorldBookService {
     /// 列表(不含 data_raw),按 created_at DESC
     pub fn list(&self) -> Vec<WorldBookRecord> {
         let conn = self.db.read().expect("获取只读连接失败");
+        // SQL 为写死常量且表结构由 migration 保证,预编译必然成功
         let mut stmt = conn
             .prepare_cached(&format!("{LIST_SQL} ORDER BY w.created_at DESC"))
-            .unwrap();
+            .expect("世界书列表 SQL 为常量且 schema 由 migration 保证,预编译必然成功");
         stmt.query_map([], |row| row_to_record(row, false))
-            .unwrap()
+            .expect("世界书列表查询必然成功(常量 SQL + migration 保证 schema)")
             .filter_map(|r| r.ok())
             .collect()
     }
@@ -172,11 +173,12 @@ impl WorldBookService {
     /// 只把原本不确定的并列顺序固定下来。
     pub fn enabled_for_character(&self, character_id: &str) -> Vec<WorldBookRecord> {
         let conn = self.db.read().expect("获取只读连接失败");
+        // SQL 为写死常量且表结构由 migration 保证,预编译必然成功
         let mut stmt = conn
             .prepare(&format!("{LIST_SQL} WHERE w.enabled = 1 AND (w.character_id = ?1 OR w.character_id IS NULL) ORDER BY w.created_at DESC, w.id"))
-            .unwrap();
+            .expect("角色有效世界书 SQL 为常量且 schema 由 migration 保证,预编译必然成功");
         stmt.query_map(params![character_id], |row| row_to_record(row, true))
-            .unwrap()
+            .expect("角色有效世界书查询必然成功(常量 SQL + migration 保证 schema)")
             .filter_map(|r| r.ok())
             .collect()
     }

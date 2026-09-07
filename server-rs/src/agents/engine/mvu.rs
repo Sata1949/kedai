@@ -75,8 +75,9 @@ fn find_first_message_status_slot(history: &[MessageRecord]) -> Option<FirstMess
                 && m.extra.get("first_mes").and_then(|v| v.as_bool()) == Some(true)
         })
         .or_else(|| history.iter().find(|m| m.role == "assistant"))?;
+    // 正则为写死字面量,编译必然成功
     let has_placeholder = regex::Regex::new(r"(?i)<\s*StatusPlaceHolderImpl\s*\/?\s*>")
-        .unwrap()
+        .expect("StatusPlaceHolderImpl 占位符正则为常量,编译必然成功")
         .is_match(&first.content);
     let last = first
         .extra
@@ -300,12 +301,8 @@ pub(super) async fn generate_mvu_status(
     let mut p = params.clone();
     // G3:变量两步生成独立温度档。设置 mvu_temperature 非空时覆盖内置 0.3,
     // 允许与正文 default_temperature 解耦(变量调用单独降温度提高结构化遵循度)。
-    let mvu_temperature = engine
-        .settings
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .mvu_temperature
-        .unwrap_or(0.3);
+    // (设置快照:不留锁跨 await)
+    let mvu_temperature = engine.settings_snapshot().mvu_temperature.unwrap_or(0.3);
     p.temperature = mvu_temperature;
     p.tools = mvu_status_tools();
     let connector = engine.connector.read().await;
@@ -461,7 +458,9 @@ pub(super) async fn generate_mvu_status(
 /// 提取 <StatusBar>...</StatusBar> 中的状态栏文本(容错:无匹配返回 None)
 /// 剥离正文中的 <StatusBar>…</StatusBar> 协议标签(状态栏文本由两步生成单独落库)。
 pub(super) fn strip_status_bar_tag(text: &str) -> String {
-    let re = regex::Regex::new(r"(?is)<StatusBar\b[^>]*>[\s\S]*?</StatusBar\s*>").unwrap();
+    // 正则为写死字面量,编译必然成功
+    let re = regex::Regex::new(r"(?is)<StatusBar\b[^>]*>[\s\S]*?</StatusBar\s*>")
+        .expect("StatusBar 剥离正则为常量,编译必然成功");
     re.replace_all(text, "").to_string()
 }
 

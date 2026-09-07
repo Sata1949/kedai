@@ -347,7 +347,8 @@ fn call_builtin(
             let bytes = s.as_bytes();
             let mut seen_dot = false;
             while end < bytes.len() {
-                let c = s[end..].chars().next().unwrap();
+                // 循环条件保证 end 在界内,必有下一字符
+                let c = s[end..].chars().next().expect("end 在界内,必有下一字符");
                 if c.is_ascii_digit() {
                     end += 1;
                 } else if c == '.' && !seen_dot {

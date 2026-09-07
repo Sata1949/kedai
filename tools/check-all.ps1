@@ -2,11 +2,13 @@
 # 用法: npm run check  |  或 powershell -NoProfile -ExecutionPolicy Bypass -File tools/check-all.ps1
 # 参数: -SkipRust 跳过后端; -SkipWeb 跳过前端; -Quick 只跑 test 不跑 build;
 #       -StrictTypecheck 把 vue-tsc 从警告档切回硬门禁(附录 D 清偿完成后使用)
+#       -StrictAudit 把 cargo audit 从警告档切为硬门禁(默认仅警告不拦截)
 param(
     [switch]$SkipRust,
     [switch]$SkipWeb,
     [switch]$Quick,
-    [switch]$StrictTypecheck
+    [switch]$StrictTypecheck,
+    [switch]$StrictAudit
 )
 $ErrorActionPreference = 'Continue'
 $root = Split-Path -Parent $PSScriptRoot
@@ -63,7 +65,24 @@ if (-not $SkipRust) {
         try {
             Invoke-Stage 'cargo fmt --check'        { cargo fmt --check }
             Invoke-Stage 'cargo clippy'             { cargo clippy --all-targets -- -D warnings }
-            Invoke-Stage 'cargo test --workspace'   { cargo test --workspace }
+            # -j 2:本机并行链接曾撞 LNK1318/os error 1455(页面文件不足),限并发换稳定
+            Invoke-Stage 'cargo test --workspace'   { cargo test --workspace -j 2 }
+            # cargo audit:依赖漏洞扫描(RustSec advisory DB,需联网拉取)。
+            # 与 vue-tsc 同策略:默认警告档——发现漏洞/警告只打 Yellow WARN 不拦截,
+            # 避免历史漏洞阻塞日常开发;加 -StrictAudit 才走 Invoke-Stage 硬拦截(exit 非 0 即 FAIL)。
+            # 未安装 cargo-audit 时打印提示并跳过(安装:cargo install cargo-audit --locked)。
+            if (Get-Command cargo-audit -ErrorAction SilentlyContinue) {
+                if ($StrictAudit) {
+                    Invoke-Stage 'cargo audit'      { cargo audit }
+                } else {
+                    Write-Host "`n===== cargo audit(警告档;-StrictAudit 可切硬门禁)=====" -ForegroundColor Cyan
+                    cargo audit
+                    if ($LASTEXITCODE -ne 0) { Write-Host '[WARN] cargo audit 发现漏洞或警告(不拦截;-StrictAudit 可切硬门禁)' -ForegroundColor Yellow }
+                    else { Write-Host '[ OK ] cargo audit 无已知漏洞' -ForegroundColor Green }
+                }
+            } else {
+                Write-Host "`n===== cargo audit:未安装 cargo-audit,跳过(安装:cargo install cargo-audit --locked)=====" -ForegroundColor Yellow
+            }
         } finally { Pop-Location }
     }
 }

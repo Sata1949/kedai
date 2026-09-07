@@ -99,8 +99,9 @@ pub async fn send(State(state): State<Arc<AppState>>, Json(body): Json<SendBody>
         _ => "fast",
     };
     // 生成参数:请求体优先,否则回退运行期设置(前端可编辑)
+    // (设置快照:不留锁跨 await)
     let (mut params, max_context_tokens) = {
-        let s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
+        let s = state.settings_snapshot();
         (
             GenerationParams {
                 temperature: body.temperature.unwrap_or(s.default_temperature),
@@ -630,7 +631,8 @@ pub async fn generate_raw(
         })
         .collect();
     let params = {
-        let s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
+        // 设置快照:不留锁跨 await
+        let s = state.settings_snapshot();
         GenerationParams {
             temperature: body.temperature.unwrap_or(s.default_temperature),
             top_p: body.top_p.unwrap_or(s.default_top_p),

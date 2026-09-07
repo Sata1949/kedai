@@ -230,7 +230,8 @@ impl ToolPermissionManager {
         if item.session_id != session_id || item.tool != tool {
             return Err("待授权调用与会话或工具不匹配".into());
         }
-        let item = pending.remove(&key).unwrap();
+        // 上方 get 已确认键存在且持锁期间无并发移除,remove 必然为 Some
+        let item = pending.remove(&key).expect("键已确认存在,移除必然成功");
         item.sender
             .send(decision)
             .map_err(|_| "待授权调用已断开".to_string())
@@ -255,66 +256,11 @@ impl ToolPermissionManager {
         let Some(path) = &self.path else {
             return Ok(());
         };
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("创建权限配置目录失败: {e}"))?;
-        }
         let raw =
             serde_json::to_string_pretty(config).map_err(|e| format!("序列化权限配置失败: {e}"))?;
-        let file_name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("tool_permissions.json");
-        let temp_path = path.with_file_name(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()));
-        std::fs::write(&temp_path, raw).map_err(|e| format!("写入权限配置临时文件失败: {e}"))?;
-        if let Err(error) = replace_file(&temp_path, path) {
-            let _ = std::fs::remove_file(&temp_path);
-            return Err(format!("原子替换权限配置失败: {error}"));
-        }
-        Ok(())
-    }
-}
-
-#[cfg(not(windows))]
-fn replace_file(temp_path: &std::path::Path, path: &std::path::Path) -> std::io::Result<()> {
-    std::fs::rename(temp_path, path)
-}
-
-#[cfg(windows)]
-fn replace_file(temp_path: &std::path::Path, path: &std::path::Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use std::ptr;
-
-    #[link(name = "Kernel32")]
-    extern "system" {
-        fn ReplaceFileW(
-            replaced_file_name: *const u16,
-            replacement_file_name: *const u16,
-            backup_file_name: *const u16,
-            replace_flags: u32,
-            exclude: *mut std::ffi::c_void,
-            reserved: *mut std::ffi::c_void,
-        ) -> i32;
-    }
-
-    if !path.exists() {
-        return std::fs::rename(temp_path, path);
-    }
-    let replaced: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    let replacement: Vec<u16> = temp_path.as_os_str().encode_wide().chain(Some(0)).collect();
-    let ok = unsafe {
-        ReplaceFileW(
-            replaced.as_ptr(),
-            replacement.as_ptr(),
-            ptr::null(),
-            0,
-            ptr::null_mut(),
-            ptr::null_mut(),
-        )
-    };
-    if ok == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
+        // 统一原子写(utils::fs_atomic):写临时文件 + 原子替换,崩溃不留半截配置
+        crate::utils::fs_atomic::write_atomic(path, raw.as_bytes())
+            .map_err(|e| format!("保存权限配置失败: {e}"))
     }
 }
 

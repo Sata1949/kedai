@@ -185,7 +185,7 @@ pub async fn get_settings(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ModeQuery>,
 ) -> Json<Value> {
-    let s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
+    let s = state.settings_snapshot();
     let mode = query.app_mode();
     Json(settings_json(&s.for_mode(mode)))
 }
@@ -473,7 +473,24 @@ pub async fn update_settings(
         }
     }
 
-    if let Err(e) = candidate.save(&state.config.data_dir) {
+    // B-1:save 含 API Key 加密(DPAPI)+ 同步 JSON 落盘,挪阻塞线程池;
+    // candidate 所有权随闭包往返,后续连接器/模型比较逻辑不变
+    let data_dir = state.config.data_dir.clone();
+    let save_outcome = state
+        .db_call(move || {
+            let result = candidate.save(&data_dir);
+            (candidate, result)
+        })
+        .await;
+    let (candidate, save_result) = match save_outcome {
+        Ok(pair) => pair,
+        Err(e) => {
+            return Json(json!({ "error": format!("设置保存失败: {e}") }))
+                .into_response()
+                .with_status(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+    if let Err(e) = save_result {
         return Json(json!({ "error": format!("设置保存失败: {e}") }))
             .into_response()
             .with_status(StatusCode::INTERNAL_SERVER_ERROR);
@@ -671,11 +688,8 @@ pub async fn prompt_preview(
         Some("task") => AppMode::Task,
         _ => AppMode::Roleplay,
     };
-    let settings = state
-        .settings
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .for_mode(mode);
+    // 设置快照:不留锁跨 await(for_mode 为纯计算,锁在 snapshot 内即释放)
+    let settings = state.settings_snapshot().for_mode(mode);
     // agent_system_prompt 为 RoleplayPromptConfig(WP7),.0 取字符串
     if settings.agent_system_prompt.0.trim().is_empty() {
         // 空值回退文案按模式区分:roleplay 空 = 用内置人设模板;

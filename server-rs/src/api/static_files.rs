@@ -146,7 +146,7 @@ pub(crate) async fn spa_fallback(
         // 根路径或空路径 → 直接 index.html
         let target = if rel.is_empty() { "index.html" } else { rel };
         // 1) 实际静态文件(磁盘优先,回退内嵌)
-        if let Some(bytes) = read_file_or_embedded(&state, target) {
+        if let Some(bytes) = read_file_or_embedded(&state, target).await {
             let mime = guess_mime(target);
             // index.html 禁止缓存(no-cache):WebView2/浏览器会缓存旧的 index.html,
             // 导致加载旧 hash 的 JS/CSS,表现为「改了代码重启后还是旧界面」。
@@ -164,7 +164,7 @@ pub(crate) async fn spa_fallback(
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
         }
         // 2) SPA 回退:未命中一律返回 index.html(与 Node 版 setNotFoundHandler 一致)
-        if let Some(index) = read_file_or_embedded(&state, "index.html") {
+        if let Some(index) = read_file_or_embedded(&state, "index.html").await {
             return Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
@@ -183,10 +183,12 @@ pub(crate) async fn spa_fallback(
 }
 
 /// 读取前端资源。发布版默认只使用内嵌 dist；仅显式设置 KEDAI_WEB_DIST 时启用磁盘覆盖。
-fn read_file_or_embedded(state: &AppState, rel: &str) -> Option<Vec<u8>> {
+/// 磁盘分支用 tokio::fs(B-1:不在 tokio worker 上做同步文件 IO);
+/// 内嵌分支是编译期嵌入的内存数据,保持同步零开销。
+async fn read_file_or_embedded(state: &AppState, rel: &str) -> Option<Vec<u8>> {
     if let Some(web_dist) = &state.config.web_dist {
         let disk = web_dist.join(rel);
-        if let Ok(bytes) = std::fs::read(&disk) {
+        if let Ok(bytes) = tokio::fs::read(&disk).await {
             return Some(bytes);
         }
     }

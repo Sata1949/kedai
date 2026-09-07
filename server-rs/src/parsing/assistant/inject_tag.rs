@@ -94,7 +94,8 @@ fn inject_tag_regex() -> &'static regex::Regex {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     RE.get_or_init(|| {
         // 常量模式编译(一次性);模式为写死字面量,编译必然成功
-        regex::Regex::new(r"(?i)\[(generate|render)\s*:\s*([^\]]*)\]").unwrap()
+        regex::Regex::new(r"(?i)\[(generate|render)\s*:\s*([^\]]*)\]")
+            .expect("注入标签正则为写死字面量,编译必然成功")
     })
 }
 

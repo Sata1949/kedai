@@ -187,6 +187,11 @@ pub struct AgentEngine {
     pub(crate) contract_registry: Arc<crate::contracts::ContractRegistry>,
     /// 契约运行态服务(P5):收尾把 KaleidoState/changelog 提交到 SQLite
     kaleido_state: Arc<crate::services::kaleido_state_service::KaleidoStateService>,
+    /// 脚本 generate 调度请求的发送端(优化项 B-2):首次执行角色脚本时惰性
+    /// 建立常驻调度任务(装配期 AppState::new 是同步函数,不保证有 runtime 可
+    /// tokio::spawn;run_character_scripts 为 async,执行时必在 runtime 内)。
+    /// None = 尚未建立。
+    generate_dispatch: Mutex<Option<mpsc::Sender<run_scripts::GenerateRequest>>>,
     runs: Mutex<HashMap<String, RunHandle>>,
 }
 
@@ -369,6 +374,7 @@ impl AgentEngine {
             db,
             memory,
             skills,
+            generate_dispatch: Mutex::new(None),
             runs: Mutex::new(HashMap::new()),
             contract_registry,
             kaleido_state,
@@ -395,6 +401,17 @@ impl AgentEngine {
     /// 当前生效模型(settings 切换模型后立即生效)
     pub fn model(&self) -> String {
         self.current_model
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// 运行期设置快照:lock 后立即 clone 返回,锁中毒时 into_inner 恢复取值。
+    /// 快照语义:不留锁跨 await —— 调用方拿到独立副本,锁在本函数内即释放;
+    /// 引擎内各阶段(上下文收集/工具循环/压缩决策)一律经本方法读设置,
+    /// 不再散点 .lock()。写路径由 API 层 settings_update 事务串行化后替换内存值。
+    pub fn settings_snapshot(&self) -> RuntimeSettings {
+        self.settings
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
@@ -986,8 +1003,9 @@ impl AgentEngine {
     pub async fn compact_session(&self, session_id: &str) -> Result<bool, String> {
         // 保留尾部条数:设置项 compaction_keep_recent(load 已钳制 2..=200),
         // 此处再兜底 >= 2,防止异常配置导致压缩后无上下文
+        // (设置快照:不留锁跨 await)
         let (mode, keep_recent) = {
-            let s = self.settings.lock().unwrap_or_else(|e| e.into_inner());
+            let s = self.settings_snapshot();
             (
                 s.compaction_mode.clone(),
                 (s.compaction_keep_recent as usize).max(DEFAULT_KEEP_RECENT_MESSAGES.max(2)),
@@ -1058,7 +1076,8 @@ impl AgentEngine {
         abort: &watch::Receiver<bool>,
     ) {
         let (mode, threshold, max_context, keep_recent) = {
-            let s = self.settings.lock().unwrap_or_else(|e| e.into_inner());
+            // 设置快照:不留锁跨 await
+            let s = self.settings_snapshot();
             (
                 s.compaction_mode.clone(),
                 s.compaction_threshold,
@@ -1189,7 +1208,8 @@ impl AgentEngine {
         // 先于 LLM 摘要档 0.8)时,把投影中陈旧的超长消息替换为占位符(尾部 2 条原文保留、
         // 错误特征保留)。只影响模型可见投影,不改数据库原文,与可逆投影设计一致。
         let (snip_mode, snip_bytes, snip_max_context) = {
-            let s = self.settings.lock().unwrap_or_else(|e| e.into_inner());
+            // 设置快照:不留锁跨 await
+            let s = self.settings_snapshot();
             (
                 s.compaction_mode.clone(),
                 s.compaction_snip_bytes,
@@ -1438,13 +1458,12 @@ impl AgentEngine {
             .sync_chat_tree(rctx.assistant_vars);
         // 本轮初始变量树(两步生成状态栏 diff 的基准:对比本轮开始与结束时)
         let initial_vars_tree = rctx.assistant_vars.tree().clone();
+        // 设置快照(快照语义:不留锁跨 await):本阶段要连续读 mvu 注入位置、
+        // 自定义系统提示词、反思提示词、预设尾部等多个设置字段,取一次快照逐字段读,
+        // 避免逐字段重复加锁。
+        let settings_snap = self.settings_snapshot();
         // mvu 变量状态注入位置(system / user_tail,缓存友好模式见 build_llm_messages_with_position)
-        let mvu_vars_position = self
-            .settings
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .mvu_vars_position
-            .clone();
+        let mvu_vars_position = settings_snap.mvu_vars_position.clone();
         // 变量树自动注入:角色卡/世界书未提供 {{format_message_variable}} 状态条目时,
         // 模型看不到任何状态 → 不会输出 <UpdateVariable>。此处把 stat_data 与更新协议
         // 作为一条状态注入并入世界书(状态块位置跟随 mvu_vars_position:system → 常态组
@@ -1476,39 +1495,18 @@ impl AgentEngine {
         let history_summary = projected.summary;
         // 自定义 Agent 系统提示词(设置里编辑;为空则用内置默认)
         // 扁平字段类型为 RoleplayPromptConfig(WP7 模式隔离):roleplay 权威值,.0 取字符串
-        let settings_snapshot = self
-            .settings
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .agent_system_prompt
-            .0
-            .clone();
-        let custom_prompt = if settings_snapshot.trim().is_empty() {
+        let agent_system_prompt = settings_snap.agent_system_prompt.0.clone();
+        let custom_prompt = if agent_system_prompt.trim().is_empty() {
             None
         } else {
-            Some(settings_snapshot)
+            Some(agent_system_prompt)
         };
         // 反思提示词(空 = 机械规则检查;非空 = 反思步骤调用 LLM 判定)
-        let reflect_prompt = self
-            .settings
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .reflect_prompt
-            .clone();
+        let reflect_prompt = settings_snap.reflect_prompt.clone();
         // 反思失败建议的补充说明(可选;主体建议由引擎自动生成,见 reflect_integration):
         // 反思未通过放弃重试时,附在自动建议之后;注入角色(user/assistant;system 钳制为 user)
-        let reflect_advice_supplement = self
-            .settings
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .reflect_advice_prompt
-            .clone();
-        let reflect_advice_role = self
-            .settings
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .reflect_advice_role
-            .clone();
+        let reflect_advice_supplement = settings_snap.reflect_advice_prompt.clone();
+        let reflect_advice_role = settings_snap.reflect_advice_role.clone();
         // 提示词注入:配置快照已提前获取(inject_snapshot);角色卡个性/情景(供宏)
         let (personality, scenario) = match character.as_ref().and_then(|c| c.data_raw.as_ref()) {
             Some(raw) => (
@@ -1524,23 +1522,13 @@ impl AgentEngine {
             None => (String::new(), String::new()),
         };
         // 位置0 预设尾部提示词与注入角色(空 = 禁用;system 在尾部钳制为 user)
-        let preset_tail_snapshot = self
-            .settings
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .preset_tail_prompt
-            .clone();
+        let preset_tail_snapshot = settings_snap.preset_tail_prompt.clone();
         let preset_tail = if preset_tail_snapshot.trim().is_empty() {
             None
         } else {
             Some(preset_tail_snapshot)
         };
-        let preset_tail_role = self
-            .settings
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .preset_tail_role
-            .clone();
+        let preset_tail_role = settings_snap.preset_tail_role.clone();
         CollectedCtx {
             chara_name,
             chara_desc,
@@ -1637,10 +1625,8 @@ impl AgentEngine {
         // 记忆集合未变时槽内容逐字节稳定(select_for_injection 排序键确定性),
         // touch 衰减回写延迟到响应主体生成之后,不影响本轮已构建内容。
         let mut memory_touched: Vec<i64> = Vec::new();
-        let inject_limit = {
-            let s = self.settings.lock().unwrap_or_else(|e| e.into_inner());
-            s.memory_inject_limit as usize
-        };
+        // 设置快照:不留锁跨 await
+        let inject_limit = self.settings_snapshot().memory_inject_limit as usize;
         if inject_limit > 0 && !req.character_id.trim().is_empty() {
             let entries = self.memory.list(&req.character_id);
             let picked =
