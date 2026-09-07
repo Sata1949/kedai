@@ -12,11 +12,7 @@ use std::sync::Arc;
 
 /// GET /api/audio:返回双通道全量状态
 pub async fn get(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let audio = state
-        .audio
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get();
+    let audio = state.audio.lock().unwrap_or_else(|e| e.into_inner()).get();
     Json(json!({ "audio": audio }))
 }
 

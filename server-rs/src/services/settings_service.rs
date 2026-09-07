@@ -34,6 +34,44 @@ impl AppMode {
     }
 }
 
+/// 角色扮演 Agent 系统提示词(类型级模式隔离,WP7 抗多模式提示词混淆):
+/// RuntimeSettings 扁平字段的权威类型。serde transparent = 序列化为裸字符串,
+/// settings.json 与 /api/settings JSON 线格式逐字节不变。
+/// 语义:空串 = 使用内置默认角色扮演模板。
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(transparent)]
+pub struct RoleplayPromptConfig(pub String);
+
+/// 任务模式 Agent 系统提示词覆盖值(类型级模式隔离,WP7)。
+/// 仅出现在 task 覆盖层(`Option<TaskPromptConfig>`),三态语义与旧 Option<String> 同构:
+/// 缺字段/null → None(沿用,for_mode 注入内置任务向默认词);
+/// `""` → Some(空串)(显式清空,不注入);`"v"` → Some(v)(覆盖)。
+/// serde transparent = 序列化为裸字符串;None 由外层 Option 的 skip_serializing_if 省略,
+/// 不落 null,settings.json 与 API 线格式零变化。
+/// 与 RoleplayPromptConfig 类型不同源:task 覆盖值无法被误赋给 roleplay 扁平字段,
+/// 「task 不继承 roleplay 人设词」由类型系统而非注释约定保证(for_mode 是唯一转换点)。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(transparent)]
+pub struct TaskPromptConfig(pub String);
+
+/// MCP 服务器配置(批次 6.2,L3 隔离):stdio 托管子进程。
+/// v1 仅在启动时装配(改设置后重启生效,无热重连)。
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct McpServerConfig {
+    /// 服务器名(工具名前缀来源,装配时 sanitize 为 [a-z0-9_])
+    #[serde(default)]
+    pub name: String,
+    /// 可执行命令(如 npx / node / 某个 exe)
+    #[serde(default)]
+    pub command: String,
+    /// 命令行参数
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// 该服务器是否启用(默认 true;false = 保留配置但启动时不装配)
+    #[serde(default = "default_mcp_server_enabled")]
+    pub enabled: bool,
+}
+
 /// 按模式的设置覆盖项:所有字段 `Option`,`Some` 表示覆盖共享默认,`None` 表示沿用共享值。
 /// 仅覆盖生成参数与 Agent 配置;连接信息(openai_base_url/openai_api_key/model)始终共享。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -46,8 +84,9 @@ pub struct ModeSettings {
     pub default_max_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_context_tokens: Option<u32>,
+    /// task 覆盖层的 Agent 系统提示词(类型化为 TaskPromptConfig,与 roleplay 扁平值类型隔离)
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_system_prompt: Option<String>,
+    pub agent_system_prompt: Option<TaskPromptConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search_endpoint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -91,6 +130,9 @@ pub struct ModeSettings {
     /// 技能渐进披露开关(落地项 3;默认 true)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_progressive_disclosure: Option<bool>,
+    /// 回退快照开关(批次 6.1;默认 true):写工具执行前留逆操作快照,可「回退到此处」
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undo_enabled: Option<bool>,
     /// 子智能体最大嵌套深度(默认 2,钳 1..=4;主 Agent 为第 0 层)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_max_depth: Option<u32>,
@@ -100,6 +142,17 @@ pub struct ModeSettings {
     /// 子智能体结果最大字符数(默认 2000,钳 500..=8000;超出截断并附尾注)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_result_max_chars: Option<u32>,
+    /// MCP stdio 客户端总开关(批次 6.2;默认关,仅启动时装配,改后重启生效)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_enabled: Option<bool>,
+    /// MCP 服务器列表(覆盖语义与 bypass_blacklist 一致)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_servers: Option<Vec<McpServerConfig>>,
+    /// 执行者人设完整开关(R3a):None/false = 精简(description+personality 两段),
+    /// true = 完整(再加 scenario+mes_example)。仅任务模式人设拼装消费;
+    /// roleplay 引擎侧无人设注入点,扁平值仅作 task 覆盖层 None 时的沿用值。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_persona_full: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,9 +166,11 @@ pub struct RuntimeSettings {
     pub default_max_tokens: u32,
     /// 上下文窗口上限(token):历史超出后按时间裁剪
     pub max_context_tokens: u32,
-    /// Agent 系统提示词(空 = 使用内置默认模板;支持 {{character_name}} {{character_description}} {{world_info}} 占位符)
+    /// Agent 系统提示词(roleplay 权威值,类型化隔离;空 = 使用内置默认模板;
+    /// 支持 {{character_name}} {{character_description}} {{world_info}} 占位符)。
+    /// task 模式的有效值由 for_mode 经覆盖层计算,不直接读本字段。
     #[serde(default)]
-    pub agent_system_prompt: String,
+    pub agent_system_prompt: RoleplayPromptConfig,
     /// 联网搜索端点(search 工具;默认 DuckDuckGo HTML 接口,可换成自建 SearXNG 等)
     #[serde(default)]
     pub search_endpoint: String,
@@ -157,6 +212,14 @@ pub struct RuntimeSettings {
     /// 达到上限后停止调用工具并输出当前结果)
     #[serde(default = "default_max_tool_rounds")]
     pub max_tool_rounds: u32,
+    /// 工具循环历史保留的最近完整轮数(R3b;默认 4,钳 1..=32):
+    /// 超出后最老轮的 tool 结果原地替换为短摘要(配对不破坏),防止全量回灌无界膨胀
+    #[serde(default = "default_tool_history_keep_rounds")]
+    pub tool_history_keep_rounds: u32,
+    /// 工具循环历史 token 预算(R3b;默认 16384,钳 1024..=1M;0 = 禁用预算闸门,
+    /// 仅 keep_rounds 生效):估算超预算时从最老完整轮起继续摘要,保底最近 1 轮完整
+    #[serde(default = "default_tool_history_budget_tokens")]
+    pub tool_history_budget_tokens: u32,
     /// HTML 渲染开关(状态栏脚本执行前置条件):true = 开启(需用户主动授权脚本后再开启)
     #[serde(default)]
     pub render_html: bool,
@@ -186,6 +249,10 @@ pub struct RuntimeSettings {
     /// 紧凑清单,正文按需 read(type=skill);关闭回退旧行为(不注入清单)
     #[serde(default = "default_skill_progressive_disclosure")]
     pub skill_progressive_disclosure: bool,
+    /// 回退快照开关(批次 6.1;默认开启):写工具执行前把逆操作负载落 undo_snapshots 表,
+    /// Agent 面板「回退到此处」按快照逆序恢复;关闭后不再产生新快照(存量快照仍可恢复)
+    #[serde(default = "default_undo_enabled")]
+    pub undo_enabled: bool,
     /// 子智能体最大嵌套深度(落地项 3;默认 2,钳 1..=4;主 Agent 为第 0 层)
     #[serde(default = "default_subagent_max_depth")]
     pub subagent_max_depth: u32,
@@ -195,6 +262,19 @@ pub struct RuntimeSettings {
     /// 子智能体结果最大字符数(落地项 3;默认 2000,钳 500..=8000;超出截断并附尾注)
     #[serde(default = "default_subagent_result_max_chars")]
     pub subagent_result_max_chars: u32,
+    /// MCP stdio 客户端总开关(批次 6.2,L3 隔离;默认关闭):
+    /// 开启后启动时装配 mcp_servers 列出的 stdio 服务器,工具以 mcp_ 前缀注册;
+    /// v1 仅启动时装配,运行期改动重启后生效
+    #[serde(default)]
+    pub mcp_enabled: bool,
+    /// MCP 服务器列表(默认空 = 不装配任何服务器)
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerConfig>,
+    /// 执行者人设完整开关(R3a):false = 精简(默认,旧配置缺省由 serde default 填 false,
+    /// 零迁移),true = 完整(含 scenario+mes_example)。权威消费在任务模式人设拼装
+    /// (persona_style);task 覆盖层可覆盖,None 沿用本扁平值。
+    #[serde(default)]
+    pub task_persona_full: bool,
     /// 任务工作台的按模式覆盖项。扁平字段即角色扮演(roleplay)的权威值——引擎直接读
     /// 扁平字段,故 roleplay 不设覆盖层;task 用此覆盖层替换扁平字段的差异项。
     /// 旧 settings.json 无此字段,serde default 为空 = task 沿用扁平值。
@@ -205,6 +285,17 @@ pub struct RuntimeSettings {
 /// 默认工具循环轮次上限
 fn default_max_tool_rounds() -> u32 {
     32
+}
+
+/// 默认工具循环历史保留轮数(R3b):最近 4 轮完整,更早轮摘要化
+fn default_tool_history_keep_rounds() -> u32 {
+    4
+}
+
+/// 默认工具循环历史 token 预算(R3b):16K 估算 token,覆盖主流模型单轮工具结果规模;
+/// 实测膨胀形态(3 步 26K+)在此预算内被收敛到最近几轮
+fn default_tool_history_budget_tokens() -> u32 {
+    16_384
 }
 
 /// 默认放行模式黑名单
@@ -252,6 +343,11 @@ fn default_skill_progressive_disclosure() -> bool {
     true
 }
 
+/// 默认开启回退快照(批次 6.1)
+fn default_undo_enabled() -> bool {
+    true
+}
+
 /// 默认子智能体最大嵌套深度(落地项 3)
 fn default_subagent_max_depth() -> u32 {
     2
@@ -265,6 +361,20 @@ fn default_subagent_max_concurrency() -> u32 {
 /// 默认子智能体结果最大字符数(落地项 3)
 fn default_subagent_result_max_chars() -> u32 {
     2000
+}
+
+/// MCP 服务器条目默认启用(批次 6.2;显式 enabled:false 才跳过装配)
+fn default_mcp_server_enabled() -> bool {
+    true
+}
+
+/// 任务模式缺省 Agent 系统提示词(任务向,与 task_service 执行者指令互补)。
+/// 仅 task 覆盖层未显式设置(None)时使用;显式清空(Some(""))表示不注入。
+pub fn default_task_agent_prompt() -> String {
+    "你是高效的任务执行智能体,直接、准确地完成用户给出的目标。只输出结果本身:\
+     不复述指令、不模拟对话、不以角色扮演口吻写作;除非用户明确要求,不使用 Markdown 标题。\
+     输出语言跟随用户目标的语言。"
+        .into()
 }
 
 /// 默认搜索端点(DuckDuckGo HTML 免费接口,无需 API Key)
@@ -281,7 +391,7 @@ impl RuntimeSettings {
             default_top_p: cfg.default_top_p,
             default_max_tokens: cfg.default_max_tokens,
             max_context_tokens: cfg.default_max_context_tokens,
-            agent_system_prompt: String::new(),
+            agent_system_prompt: RoleplayPromptConfig(String::new()),
             search_endpoint: DEFAULT_SEARCH_ENDPOINT.to_string(),
             mvu_vars_position: "system".to_string(),
             mvu_temperature: None,
@@ -294,6 +404,8 @@ impl RuntimeSettings {
             bypass_mode: false,
             bypass_blacklist: default_bypass_blacklist(),
             max_tool_rounds: default_max_tool_rounds(),
+            tool_history_keep_rounds: default_tool_history_keep_rounds(),
+            tool_history_budget_tokens: default_tool_history_budget_tokens(),
             render_html: false,
             compaction_mode: default_compaction_mode(),
             compaction_threshold: default_compaction_threshold(),
@@ -303,9 +415,13 @@ impl RuntimeSettings {
             memory_distill_enabled: false,
             memory_inject_limit: default_memory_inject_limit(),
             skill_progressive_disclosure: default_skill_progressive_disclosure(),
+            undo_enabled: default_undo_enabled(),
             subagent_max_depth: default_subagent_max_depth(),
             subagent_max_concurrency: default_subagent_max_concurrency(),
             subagent_result_max_chars: default_subagent_result_max_chars(),
+            mcp_enabled: false,
+            mcp_servers: Vec::new(),
+            task_persona_full: false,
             task: ModeSettings::default(),
         }
     }
@@ -331,9 +447,14 @@ impl RuntimeSettings {
         if let Some(v) = ov.max_context_tokens {
             out.max_context_tokens = v;
         }
-        if let Some(v) = &ov.agent_system_prompt {
-            out.agent_system_prompt = v.clone();
-        }
+        // agent_system_prompt 不回退扁平值:扁平值(RoleplayPromptConfig)多为角色扮演人设词,
+        // 直接继承会污染任务执行;None 注入内置任务向默认词,Some("") 尊重用户显式留空。
+        // TaskPromptConfig → RoleplayPromptConfig 的显式构造是本隔离的唯一转换点(类型不同源,
+        // 绕过本 match 的隐式继承无法通过编译)。
+        out.agent_system_prompt = match &ov.agent_system_prompt {
+            Some(v) => RoleplayPromptConfig(v.0.clone()),
+            None => RoleplayPromptConfig(default_task_agent_prompt()),
+        };
         if let Some(v) = &ov.search_endpoint {
             out.search_endpoint = v.clone();
         }
@@ -391,6 +512,9 @@ impl RuntimeSettings {
         if let Some(v) = ov.skill_progressive_disclosure {
             out.skill_progressive_disclosure = v;
         }
+        if let Some(v) = ov.undo_enabled {
+            out.undo_enabled = v;
+        }
         if let Some(v) = ov.subagent_max_depth {
             out.subagent_max_depth = v;
         }
@@ -399,6 +523,15 @@ impl RuntimeSettings {
         }
         if let Some(v) = ov.subagent_result_max_chars {
             out.subagent_result_max_chars = v;
+        }
+        if let Some(v) = ov.mcp_enabled {
+            out.mcp_enabled = v;
+        }
+        if let Some(v) = &ov.mcp_servers {
+            out.mcp_servers = v.clone();
+        }
+        if let Some(v) = ov.task_persona_full {
+            out.task_persona_full = v;
         }
         out
     }
@@ -459,6 +592,23 @@ impl RuntimeSettings {
                 if !(500..=8000).contains(&s.subagent_result_max_chars) {
                     s.subagent_result_max_chars = default_subagent_result_max_chars();
                 }
+                // R3b:工具历史回灌参数钳制(保留轮数 1..=32;预算 0=禁用,否则 1024..=1M,
+                // 越界回退默认;旧配置缺省已由 serde default 填默认值)
+                if !(1..=32).contains(&s.tool_history_keep_rounds) {
+                    s.tool_history_keep_rounds = default_tool_history_keep_rounds();
+                }
+                if s.tool_history_budget_tokens != 0
+                    && !(1024..=1_048_576).contains(&s.tool_history_budget_tokens)
+                {
+                    s.tool_history_budget_tokens = default_tool_history_budget_tokens();
+                }
+                // MCP 服务器列表(批次 6.2):settings.json 可手改,启动装配前做一次卫生清理
+                // (trim 名称/命令,丢弃缺名或缺命令的不可用条目;与 PUT 校验同规则)
+                s.mcp_servers.retain_mut(|srv| {
+                    srv.name = srv.name.trim().to_string();
+                    srv.command = srv.command.trim().to_string();
+                    !srv.name.is_empty() && !srv.command.is_empty()
+                });
                 let was_plaintext =
                     !s.openai_api_key.is_empty() && !secret_store::is_protected(&s.openai_api_key);
                 s.openai_api_key = secret_store::unprotect(&s.openai_api_key);
@@ -810,7 +960,10 @@ mod tests {
         let clamped = RuntimeSettings::load(&dir2, &cfg);
         assert_eq!(clamped.subagent_max_depth, 2, "深度越界应钳回 2");
         assert_eq!(clamped.subagent_max_concurrency, 6, "并发越界应钳回 6");
-        assert_eq!(clamped.subagent_result_max_chars, 2000, "结果上限越界应钳回 2000");
+        assert_eq!(
+            clamped.subagent_result_max_chars, 2000,
+            "结果上限越界应钳回 2000"
+        );
 
         // 合法边界值通过;保存往返还原
         let dir3 = tmp_dir("harness-roundtrip");
@@ -835,8 +988,305 @@ mod tests {
         let rp_view = s4.for_mode(AppMode::Roleplay);
         assert_eq!(rp_view.subagent_max_depth, 2, "roleplay 读扁平权威值");
 
+        // task 模式 agent_system_prompt 不回退 roleplay 人设词:
+        // None → 内置任务向默认提示词;Some(v) → 覆盖;Some("") → 显式留空(注入方跳过)
+        let mut s5 = RuntimeSettings::from_config(&cfg);
+        s5.agent_system_prompt =
+            RoleplayPromptConfig("你是 {{char}} 的扮演者,与用户进行沉浸式角色扮演".into());
+        let task_default = s5.for_mode(AppMode::Task);
+        assert_eq!(
+            task_default.agent_system_prompt.0,
+            default_task_agent_prompt(),
+            "task 缺省应为内置任务向提示词,不得继承 roleplay 人设词"
+        );
+        assert!(
+            !task_default.agent_system_prompt.0.contains("{{char}}"),
+            "默认词不得含角色扮演宏"
+        );
+        s5.task.agent_system_prompt = Some(TaskPromptConfig("任务专用提示词".into()));
+        assert_eq!(
+            s5.for_mode(AppMode::Task).agent_system_prompt.0,
+            "任务专用提示词",
+            "task 覆盖层应优先"
+        );
+        s5.task.agent_system_prompt = Some(TaskPromptConfig(String::new()));
+        assert_eq!(
+            s5.for_mode(AppMode::Task).agent_system_prompt.0,
+            "",
+            "显式清空应保留空串"
+        );
+        assert!(
+            s5.for_mode(AppMode::Roleplay)
+                .agent_system_prompt
+                .0
+                .contains("{{char}}"),
+            "roleplay 扁平值不受 task 缺省词影响"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dir2);
         let _ = std::fs::remove_dir_all(&dir3);
+    }
+
+    /// MCP 设置(批次 6.2):默认 关/空列表;旧版 settings.json 缺字段时 serde default 补齐;
+    /// 保存往返还原;缺名/缺命令条目被清理;task 覆盖层生效。
+    #[test]
+    fn mcp_settings_defaults_sanitize_roundtrip_and_mode_override() {
+        let cfg = test_cfg();
+        let s = RuntimeSettings::from_config(&cfg);
+        assert!(!s.mcp_enabled, "MCP 默认关闭");
+        assert!(s.mcp_servers.is_empty(), "MCP 服务器列表默认空");
+
+        // 旧版配置缺字段:serde default 补齐,行为与默认一致
+        let dir = tmp_dir("mcp-legacy");
+        let mut json = serde_json::to_value(&s).unwrap();
+        json.as_object_mut().unwrap().remove("mcp_enabled");
+        json.as_object_mut().unwrap().remove("mcp_servers");
+        std::fs::write(
+            dir.join("settings.json"),
+            serde_json::to_string_pretty(&json).unwrap(),
+        )
+        .unwrap();
+        let loaded = RuntimeSettings::load(&dir, &cfg);
+        assert!(!loaded.mcp_enabled);
+        assert!(loaded.mcp_servers.is_empty());
+
+        // 保存往返还原 + 卫生清理(缺命令条目被丢弃,名称/命令 trim)
+        let dir2 = tmp_dir("mcp-roundtrip");
+        let mut s2 = RuntimeSettings::from_config(&cfg);
+        s2.mcp_enabled = true;
+        s2.mcp_servers = vec![
+            McpServerConfig {
+                name: " fs ".into(),
+                command: "npx".into(),
+                args: vec!["-y".into(), "@mcp/fs".into()],
+                enabled: true,
+            },
+            McpServerConfig {
+                name: "broken".into(),
+                command: String::new(),
+                args: Vec::new(),
+                enabled: true,
+            },
+        ];
+        s2.save(&dir2).unwrap();
+        let loaded2 = RuntimeSettings::load(&dir2, &cfg);
+        assert!(loaded2.mcp_enabled, "开关应保存往返还原");
+        assert_eq!(loaded2.mcp_servers.len(), 1, "缺命令条目应被清理");
+        assert_eq!(loaded2.mcp_servers[0].name, "fs", "名称应 trim");
+        assert_eq!(loaded2.mcp_servers[0].args.len(), 2);
+
+        // 缺省字段(旧客户端手写条目只给 name/command):args 默认空、enabled 默认 true
+        let partial: McpServerConfig =
+            serde_json::from_str(r#"{"name":"a","command":"b"}"#).unwrap();
+        assert!(partial.args.is_empty());
+        assert!(partial.enabled, "条目 enabled 缺省应为 true");
+
+        // task 覆盖层:Some 覆盖扁平值,None 沿用
+        let mut s3 = RuntimeSettings::from_config(&cfg);
+        s3.task.mcp_enabled = Some(true);
+        let task_view = s3.for_mode(AppMode::Task);
+        assert!(task_view.mcp_enabled, "task 覆盖应生效");
+        assert!(task_view.mcp_servers.is_empty(), "未覆盖项沿用扁平值");
+        assert!(
+            !s3.for_mode(AppMode::Roleplay).mcp_enabled,
+            "roleplay 读扁平权威值"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
+    }
+
+    /// 类型级模式隔离(WP7):RoleplayPromptConfig/TaskPromptConfig 的 serde 线格式
+    /// 与旧 String/Option<String> 逐字节一致——裸字符串、null→None、缺字段→None、
+    /// None 序列化时省略字段(不落 null)。
+    #[test]
+    fn prompt_config_serde_wire_format_unchanged() {
+        // roleplay 扁平字段:transparent = 裸字符串,与旧 String 线格式一致
+        let rp = RoleplayPromptConfig("扮演人设词".into());
+        assert_eq!(
+            serde_json::to_string(&rp).unwrap(),
+            "\"扮演人设词\"",
+            "RoleplayPromptConfig 应序列化为裸字符串"
+        );
+        let back: RoleplayPromptConfig =
+            serde_json::from_str("\"扮演人设词\"").expect("旧格式裸字符串应可反序列化");
+        assert_eq!(back, rp);
+
+        // task 覆盖层三态:缺字段 → None(沿用);null → None;"" → Some(空串,显式清空)
+        let missing: ModeSettings = serde_json::from_str("{}").unwrap();
+        assert!(
+            missing.agent_system_prompt.is_none(),
+            "缺字段应为 None(沿用)"
+        );
+        let null: ModeSettings = serde_json::from_str(r#"{"agent_system_prompt": null}"#).unwrap();
+        assert!(
+            null.agent_system_prompt.is_none(),
+            "null 应为 None(与旧 Option<String> 一致)"
+        );
+        let empty: ModeSettings = serde_json::from_str(r#"{"agent_system_prompt": ""}"#).unwrap();
+        assert_eq!(
+            empty.agent_system_prompt,
+            Some(TaskPromptConfig(String::new())),
+            "空串应为 Some(\"\")(显式清空)"
+        );
+        let value: ModeSettings =
+            serde_json::from_str(r#"{"agent_system_prompt": "任务专用"}"#).unwrap();
+        assert_eq!(
+            value.agent_system_prompt,
+            Some(TaskPromptConfig("任务专用".into()))
+        );
+
+        // 序列化:None 省略字段(不落 null),Some 落裸字符串——写回线格式与旧版一致
+        assert!(
+            !serde_json::to_string(&missing)
+                .unwrap()
+                .contains("agent_system_prompt"),
+            "None 应省略字段而不是落 null"
+        );
+        assert!(
+            serde_json::to_string(&value)
+                .unwrap()
+                .contains(r#""agent_system_prompt":"任务专用""#),
+            "Some 应落裸字符串"
+        );
+
+        // 完整 RuntimeSettings 旧格式往返:扁平字符串字段读入→写回,键与值类型不变
+        let cfg = test_cfg();
+        let dir = tmp_dir("prompt-wire");
+        let mut legacy = serde_json::to_value(RuntimeSettings::from_config(&cfg)).unwrap();
+        legacy["agent_system_prompt"] = serde_json::Value::from("旧版人设词 {{char}}");
+        legacy.as_object_mut().unwrap().remove("task");
+        std::fs::write(
+            dir.join("settings.json"),
+            serde_json::to_string_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+        let loaded = RuntimeSettings::load(&dir, &cfg);
+        assert_eq!(
+            loaded.agent_system_prompt,
+            RoleplayPromptConfig("旧版人设词 {{char}}".into()),
+            "旧格式扁平字符串应原样读入"
+        );
+        assert!(loaded.task.agent_system_prompt.is_none());
+        loaded.save(&dir).unwrap();
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            written["agent_system_prompt"],
+            serde_json::Value::from("旧版人设词 {{char}}"),
+            "写回应保持裸字符串形态"
+        );
+        assert!(
+            written["task"]
+                .as_object()
+                .unwrap()
+                .get("agent_system_prompt")
+                .is_none(),
+            "空覆盖层写回不得新增 agent_system_prompt 键"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 类型级模式隔离(WP7):for_mode(Roleplay) 恒等于扁平权威值;
+    /// for_mode(Task) 三分支——None 注入内置任务词 / Some("") 显式清空 / Some(v) 覆盖;
+    /// 且 roleplay 扁平值不受 task 覆盖层任何写动影响。
+    #[test]
+    fn for_mode_prompt_isolation_is_type_level_invariant() {
+        let cfg = test_cfg();
+        let mut s = RuntimeSettings::from_config(&cfg);
+        s.agent_system_prompt = RoleplayPromptConfig("RP 人设词".into());
+
+        // roleplay 恒等扁平值(task 覆盖层有无均不影响)
+        assert_eq!(
+            s.for_mode(AppMode::Roleplay).agent_system_prompt,
+            RoleplayPromptConfig("RP 人设词".into())
+        );
+        s.task.agent_system_prompt = Some(TaskPromptConfig("TASK 覆盖词".into()));
+        assert_eq!(
+            s.for_mode(AppMode::Roleplay).agent_system_prompt,
+            RoleplayPromptConfig("RP 人设词".into()),
+            "task 覆盖层不得污染 roleplay 扁平值"
+        );
+        assert_eq!(
+            s.for_mode(AppMode::Task).agent_system_prompt.0,
+            "TASK 覆盖词",
+            "Some(v) 应覆盖"
+        );
+
+        s.task.agent_system_prompt = Some(TaskPromptConfig(String::new()));
+        assert_eq!(
+            s.for_mode(AppMode::Task).agent_system_prompt.0,
+            "",
+            "Some(\"\") 显式清空"
+        );
+
+        s.task.agent_system_prompt = None;
+        assert_eq!(
+            s.for_mode(AppMode::Task).agent_system_prompt.0,
+            default_task_agent_prompt(),
+            "None 应注入内置任务向默认词,而非扁平 RP 人设词"
+        );
+    }
+
+    /// R3a:task_persona_full 默认精简(None/false 同义),旧配置零迁移;
+    /// 覆盖层 Some(true) = 完整人设(现状四段);serde 线格式 None 省略不落 null。
+    /// 口径见 docs/模式提示词边界.md 第一节。
+    #[test]
+    fn task_persona_full_defaults_slim_and_roundtrips() {
+        // 覆盖层 serde 三态:缺字段/null → None(沿用扁平);None 序列化省略字段
+        let missing: ModeSettings = serde_json::from_str("{}").unwrap();
+        assert!(
+            missing.task_persona_full.is_none(),
+            "缺字段应为 None(沿用扁平值)"
+        );
+        let null: ModeSettings = serde_json::from_str(r#"{"task_persona_full": null}"#).unwrap();
+        assert!(null.task_persona_full.is_none(), "null 应为 None");
+        let some: ModeSettings = serde_json::from_str(r#"{"task_persona_full": true}"#).unwrap();
+        assert_eq!(some.task_persona_full, Some(true));
+        assert!(
+            !serde_json::to_string(&missing)
+                .unwrap()
+                .contains("task_persona_full"),
+            "None 应省略字段而不是落 null"
+        );
+
+        let cfg = test_cfg();
+        // 旧版 settings.json:无 task 覆盖层、无扁平字段 → 读入后默认精简(false)
+        let dir = tmp_dir("persona-full");
+        let mut legacy = serde_json::to_value(RuntimeSettings::from_config(&cfg)).unwrap();
+        let obj = legacy.as_object_mut().unwrap();
+        obj.remove("task");
+        obj.remove("task_persona_full");
+        std::fs::write(
+            dir.join("settings.json"),
+            serde_json::to_string_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+        let loaded = RuntimeSettings::load(&dir, &cfg);
+        assert!(!loaded.task_persona_full, "旧配置缺省应为精简(false)");
+        assert!(
+            !loaded.for_mode(AppMode::Task).task_persona_full,
+            "None 覆盖层沿用扁平值 = 精简(旧配置兼容)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // 覆盖层三分支:Some(true)=完整;Some(false)/None=精简;roleplay 读扁平权威值
+        let mut s = RuntimeSettings::from_config(&cfg);
+        s.task.task_persona_full = Some(true);
+        assert!(
+            s.for_mode(AppMode::Task).task_persona_full,
+            "Some(true) = 完整人设"
+        );
+        assert!(
+            !s.for_mode(AppMode::Roleplay).task_persona_full,
+            "roleplay 读扁平权威值(false),task 覆盖层不得污染"
+        );
+        s.task.task_persona_full = Some(false);
+        assert!(
+            !s.for_mode(AppMode::Task).task_persona_full,
+            "Some(false) = 精简"
+        );
     }
 }

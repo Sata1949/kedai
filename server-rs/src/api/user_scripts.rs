@@ -20,10 +20,7 @@ pub struct TreeQuery {
 }
 
 /// GET /api/scripts/tree?scope=global|character&character_id=
-pub async fn get_tree(
-    State(state): State<Arc<AppState>>,
-    Query(q): Query<TreeQuery>,
-) -> Response {
+pub async fn get_tree(State(state): State<Arc<AppState>>, Query(q): Query<TreeQuery>) -> Response {
     let scope = q.scope.as_deref().unwrap_or("global");
     let owner = match scope {
         "global" => "",
@@ -36,9 +33,11 @@ pub async fn get_tree(
             }
         },
         other => {
-            return Json(json!({ "error": format!("未知脚本作用域: {other}(仅支持 global/character)") }))
-                .into_response()
-                .with_status(StatusCode::BAD_REQUEST)
+            return Json(
+                json!({ "error": format!("未知脚本作用域: {other}(仅支持 global/character)") }),
+            )
+            .into_response()
+            .with_status(StatusCode::BAD_REQUEST)
         }
     };
     let svc = state.user_scripts.clone();
@@ -79,9 +78,11 @@ pub async fn save_tree(
             }
         },
         other => {
-            return Json(json!({ "error": format!("未知脚本作用域: {other}(仅支持 global/character)") }))
-                .into_response()
-                .with_status(StatusCode::BAD_REQUEST)
+            return Json(
+                json!({ "error": format!("未知脚本作用域: {other}(仅支持 global/character)") }),
+            )
+            .into_response()
+            .with_status(StatusCode::BAD_REQUEST)
         }
     };
     let svc = state.user_scripts.clone();

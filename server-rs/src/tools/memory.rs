@@ -89,7 +89,12 @@ mod tests {
     use crate::tools::registry::ToolRegistry;
     use serde_json::json;
 
-    fn setup() -> (ToolRegistry, Arc<MemoryService>, Arc<SessionService>, std::path::PathBuf) {
+    fn setup() -> (
+        ToolRegistry,
+        Arc<MemoryService>,
+        Arc<SessionService>,
+        std::path::PathBuf,
+    ) {
         let dir = std::env::temp_dir().join(format!("kedai-memory-tool-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let db = Arc::new(Db::open(&dir.join("kedai.db"), &dir).unwrap());
@@ -134,26 +139,42 @@ mod tests {
             reason: "测试放行".into(),
         };
         let out = registry
-            .execute_with_decision("memory_write", r#"{"fact":"用户讨厌香菜"}"#, ctx.clone(), &decision)
+            .execute_with_decision(
+                "memory_write",
+                r#"{"fact":"用户讨厌香菜"}"#,
+                ctx.clone(),
+                &decision,
+            )
             .await
             .unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["ok"], json!(true));
         let entries = memory.list("charM");
-        assert_eq!(entries.len(), 1, "memory_write 应落 memory_entries: {entries:?}");
+        assert_eq!(
+            entries.len(),
+            1,
+            "memory_write 应落 memory_entries: {entries:?}"
+        );
         assert_eq!(entries[0].kind, "tool");
         assert_eq!(entries[0].content, "用户讨厌香菜");
         assert_eq!(entries[0].source_session_id.as_deref(), Some("sessM"));
         // 新路径不再写会话消息
         let msgs = sessions.get_messages("sessM");
         assert!(
-            !msgs.iter().any(|m| m.extra.get("kind").and_then(|k| k.as_str()) == Some("memory")),
+            !msgs
+                .iter()
+                .any(|m| m.extra.get("kind").and_then(|k| k.as_str()) == Some("memory")),
             "新写入不应再产生旧版会话消息记忆"
         );
 
         // 旧版数据兼容:会话内已有 system+kind=memory 消息 → 读取时与新表合并
         sessions
-            .add_message("sessM", "system", "旧版记忆:用户养了一只猫", json!({ "kind": "memory" }))
+            .add_message(
+                "sessM",
+                "system",
+                "旧版记忆:用户养了一只猫",
+                json!({ "kind": "memory" }),
+            )
             .unwrap();
         let out = registry.execute("memory_read", "{}", ctx).await.unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
@@ -168,13 +189,18 @@ mod tests {
         );
 
         // 空 fact 拒绝
-        assert!(registry.execute("memory_write", r#"{"fact":"  "}"#, ToolContext {
-            session_id: "sessM".into(),
-            character_id: "charM".into(),
-            agent_depth: 0,
-        })
-        .await
-        .is_err());
+        assert!(registry
+            .execute(
+                "memory_write",
+                r#"{"fact":"  "}"#,
+                ToolContext {
+                    session_id: "sessM".into(),
+                    character_id: "charM".into(),
+                    agent_depth: 0,
+                }
+            )
+            .await
+            .is_err());
 
         drop(registry);
         std::fs::remove_dir_all(dir).ok();

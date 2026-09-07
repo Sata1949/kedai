@@ -26,7 +26,12 @@ impl AgentEngine {
     /// 会话宏变量并落库,下一轮模板可用 {{getvar::LAST_RECEIVE_TOKENS}} 读取。
     /// 先重新加载最新宏表再写回,与运行时序保持一致。
     /// 对应 run_body 内「接收统计」段;L2 中层定位:SSE 链路旁路的状态落库封装。
-    pub(super) fn record_receive_stats(&self, session_id: &str, completion_tokens: i64, clean_content: &str) {
+    pub(super) fn record_receive_stats(
+        &self,
+        session_id: &str,
+        completion_tokens: i64,
+        clean_content: &str,
+    ) {
         let mut vars = self.sessions.load_session_vars(session_id);
         vars.insert(
             "LAST_RECEIVE_TOKENS".to_string(),
@@ -128,7 +133,11 @@ impl AgentEngine {
     }
 
     pub(super) fn finish_run(&self, session_id: &str, run_id: uuid::Uuid) {
-        finish_run_generation(&mut self.runs.lock().unwrap_or_else(|e| e.into_inner()), session_id, run_id);
+        finish_run_generation(
+            &mut self.runs.lock().unwrap_or_else(|e| e.into_inner()),
+            session_id,
+            run_id,
+        );
     }
 }
 

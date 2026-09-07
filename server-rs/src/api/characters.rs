@@ -23,13 +23,14 @@ pub struct UpdateBody {
     pub alternate_greetings: Option<Vec<String>>,
 }
 
-pub async fn list(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+pub async fn list(State(state): State<Arc<AppState>>) -> Response {
     let svc = state.characters.clone();
-    let chars = state
-        .db_call(move || svc.list())
-        .await
-        .expect("读取角色列表任务失败");
-    Json(json!({ "characters": chars }))
+    // 阻塞任务失败(线程池 JoinError 等)返回 500,不 expect panic——
+    // panic 会杀掉连接,前端只能看到「网络错误」,列表永远空白且无任何可读原因
+    match state.db_call(move || svc.list()).await {
+        Ok(chars) => Json(json!({ "characters": chars })).into_response(),
+        Err(e) => db_err(&e),
+    }
 }
 
 const MAX_UPLOAD: usize = 30 * 1024 * 1024;

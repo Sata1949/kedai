@@ -521,7 +521,10 @@ mod tests {
             "g={{get_global_variable::g}}|c={{get_character_variable::c}}|p={{get_preset_variable::p}}|m={{get_message_variable::m}}|ct={{get_chat_variable::ct}}|cf={{get_chat_variable::cf}}",
             &mut c,
         );
-        assert_eq!(out, "g=\"全局\"|c=\"角色\"|p=\"预设\"|m=\"消息\"|ct=\"树\"|cf=\"扁平\"");
+        assert_eq!(
+            out,
+            "g=\"全局\"|c=\"角色\"|p=\"预设\"|m=\"消息\"|ct=\"树\"|cf=\"扁平\""
+        );
         // message 缺失 → 强制回退 chat 树(兼容既有卡片 stat_data 读取)
         let mut c2 = ctx(&history, &mut vars);
         c2.scopes = Some(&mut sv);
@@ -534,7 +537,10 @@ mod tests {
             "[{{get_global_variable::nope}}]{{get_script_variable::x}}{{get_extension_variable::y}}",
             &mut c3,
         );
-        assert_eq!(out3, "[]{{get_script_variable::x}}{{get_extension_variable::y}}");
+        assert_eq!(
+            out3,
+            "[]{{get_script_variable::x}}{{get_extension_variable::y}}"
+        );
         // format 变体:YAML 风格
         let mut c4 = ctx(&history, &mut vars);
         c4.scopes = Some(&mut sv);

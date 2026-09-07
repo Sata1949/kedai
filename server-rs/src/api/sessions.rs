@@ -154,11 +154,7 @@ fn collect_greetings(rec: &crate::models::types::CharacterRecord) -> Vec<String>
         }
     }
     if let Some(alts) = &rec.alternate_greetings {
-        list.extend(
-            alts.iter()
-                .filter(|s| !s.trim().is_empty())
-                .cloned(),
-        );
+        list.extend(alts.iter().filter(|s| !s.trim().is_empty()).cloned());
     }
     list
 }
@@ -207,15 +203,19 @@ pub async fn regreet(
         .db_call(move || {
             let session = svc.get(&sid)?;
             svc.clear_messages(&sid);
-            seed_first_message(&characters, &svc, &sid, &session.character_id, greeting_index);
+            seed_first_message(
+                &characters,
+                &svc,
+                &sid,
+                &session.character_id,
+                greeting_index,
+            );
             Some(())
         })
         .await;
     match found {
         Err(e) => return db_err(&e),
-        Ok(None) => {
-            return err_json("会话不存在", StatusCode::NOT_FOUND)
-        }
+        Ok(None) => return err_json("会话不存在", StatusCode::NOT_FOUND),
         Ok(Some(())) => {}
     }
     Json(json!({ "ok": true, "greeting_index": body.greeting_index })).into_response()
@@ -280,9 +280,7 @@ pub async fn history(
         .await;
     let (_session, messages, character, session_vars, assistant_vars) = match loaded {
         Err(e) => return db_err(&e),
-        Ok(None) => {
-            return err_json("会话不存在", StatusCode::NOT_FOUND)
-        }
+        Ok(None) => return err_json("会话不存在", StatusCode::NOT_FOUND),
         Ok(Some(v)) => v,
     };
     // 显示层宏展开(只读):让宏在聊天气泡渲染时持续工作。
@@ -293,31 +291,30 @@ pub async fn history(
     // 返回 content_display(展开后文本,渲染用)+ 保持 content 原文(编辑消息用,不污染存储)
     let mut values = Vec::with_capacity(messages.len());
     if !messages.is_empty() {
-        let (name, description, personality, scenario) =
-            match &character {
-                Some(c) => (
-                    c.chara_name.clone(),
-                    c.description.clone(),
-                    c.data_raw
-                        .as_ref()
-                        .and_then(|raw| raw.get("personality"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    c.data_raw
-                        .as_ref()
-                        .and_then(|raw| raw.get("scenario"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                ),
-                None => (
-                    "角色".to_string(),
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                ),
-            };
+        let (name, description, personality, scenario) = match &character {
+            Some(c) => (
+                c.chara_name.clone(),
+                c.description.clone(),
+                c.data_raw
+                    .as_ref()
+                    .and_then(|raw| raw.get("personality"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                c.data_raw
+                    .as_ref()
+                    .and_then(|raw| raw.get("scenario"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            ),
+            None => (
+                "角色".to_string(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ),
+        };
         let mut vars = session_vars;
         // 酒馆助手变量树副本:{{format_message_variable}}/{{getvar::stat_data.…}} 显示用
         let mut assistant_vars = assistant_vars;
@@ -399,21 +396,15 @@ pub async fn swipe_message(
     let msg = match state.db_call(move || svc.get_message(&sid_c, id)).await {
         Err(e) => return db_err(&e),
         Ok(Some(m)) => m,
-        Ok(None) => {
-            return err_json("消息不存在", StatusCode::NOT_FOUND)
-        }
+        Ok(None) => return err_json("消息不存在", StatusCode::NOT_FOUND),
     };
     let swipes = match msg.extra.get("swipes").and_then(|s| s.as_array()) {
         Some(arr) if !arr.is_empty() => arr,
-        _ => {
-            return err_json("该消息没有可切换的版本", StatusCode::BAD_REQUEST)
-        }
+        _ => return err_json("该消息没有可切换的版本", StatusCode::BAD_REQUEST),
     };
     let swipe = match swipes.get(body.swipe_id) {
         Some(v) => v,
-        None => {
-            return err_json("swipe_id 越界", StatusCode::BAD_REQUEST)
-        }
+        None => return err_json("swipe_id 越界", StatusCode::BAD_REQUEST),
     };
     let content = swipe
         .get("content")
@@ -433,9 +424,7 @@ pub async fn swipe_message(
         .await;
     match written {
         Err(e) => return db_err(&e),
-        Ok(None) => {
-            return err_json("消息不存在", StatusCode::NOT_FOUND)
-        }
+        Ok(None) => return err_json("消息不存在", StatusCode::NOT_FOUND),
         Ok(Some(())) => {}
     }
     Json(json!({ "content": content, "swipe_id": body.swipe_id, "swipes_count": swipes_count }))
@@ -485,7 +474,10 @@ pub async fn truncate_messages(
     if body.anchor_id <= 0 {
         // 负/零 id 是流式临时消息标记或非法值;按 id>anchor 语义会把整段历史删光。
         // 防御任何调用方误传(重发锚点必须是落库后的真实 id)。
-        return err_json("截断锚点无效:必须是落库消息的正 id", StatusCode::BAD_REQUEST);
+        return err_json(
+            "截断锚点无效:必须是落库消息的正 id",
+            StatusCode::BAD_REQUEST,
+        );
     }
     let svc = state.sessions.clone();
     let anchor_id = body.anchor_id;
@@ -556,12 +548,8 @@ pub async fn save_assistant_vars(
         .await;
     match saved {
         Err(e) => return db_err(&e),
-        Ok(None) => {
-            return err_json("会话不存在", StatusCode::NOT_FOUND)
-        }
-        Ok(Some(Err(e))) => {
-            return err_json(e, StatusCode::INTERNAL_SERVER_ERROR)
-        }
+        Ok(None) => return err_json("会话不存在", StatusCode::NOT_FOUND),
+        Ok(Some(Err(e))) => return err_json(e, StatusCode::INTERNAL_SERVER_ERROR),
         Ok(Some(Ok(()))) => {}
     }
     Json(json!({ "ok": true })).into_response()

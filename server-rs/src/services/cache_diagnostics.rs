@@ -193,7 +193,10 @@ mod tests {
         assert_eq!(s.total_prompt, 2000);
         assert_eq!(s.total_completion, 1200);
         let rate = s.hit_rate.expect("有缓存数据应有命中率");
-        assert!((rate - 0.65).abs() < 1e-9, "加权命中率应为 0.65,实际 {rate}");
+        assert!(
+            (rate - 0.65).abs() < 1e-9,
+            "加权命中率应为 0.65,实际 {rate}"
+        );
         // 费用 = (1300*0.27 + 700*2 + 1200*8) / 1e6 = (351+1400+9600)/1e6
         assert!(
             (s.cost - 0.011351).abs() < 1e-9,

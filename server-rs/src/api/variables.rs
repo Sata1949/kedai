@@ -120,9 +120,11 @@ pub async fn put_variables(
     State(state): State<Arc<AppState>>,
     Json(body): Json<VariablesWriteBody>,
 ) -> Response {
-    let scope = match body.scope.as_deref().map(Scope::from_str).flatten() {
+    let scope = match body.scope.as_deref().and_then(Scope::from_str) {
         Some(s) => s,
-        None => return bad_request("scope 须为 global|chat|character|preset|message|script|extension"),
+        None => {
+            return bad_request("scope 须为 global|chat|character|preset|message|script|extension")
+        }
     };
     let scope_id = body.scope_id.clone().unwrap_or_default();
     // 存在性校验 + 写入(chat 分支含镜像同步)合并进同一阻塞任务(DB 并发改造)
@@ -166,9 +168,11 @@ pub async fn patch_variables(
     State(state): State<Arc<AppState>>,
     Json(body): Json<VariablesWriteBody>,
 ) -> Response {
-    let scope = match body.scope.as_deref().map(Scope::from_str).flatten() {
+    let scope = match body.scope.as_deref().and_then(Scope::from_str) {
         Some(s) => s,
-        None => return bad_request("scope 须为 global|chat|character|preset|message|script|extension"),
+        None => {
+            return bad_request("scope 须为 global|chat|character|preset|message|script|extension")
+        }
     };
     let Some(ops) = crate::parsing::assistant::parse_patch_array(&body.data) else {
         return bad_request("patch 须为 JSON Patch 数组(replace/set/insert/delta/remove/move)");

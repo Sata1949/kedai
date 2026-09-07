@@ -8,8 +8,8 @@ pub mod app_state;
 pub mod audio;
 pub mod characters;
 pub mod chat;
-pub mod contracts;
 pub mod contract_history;
+pub mod contracts;
 pub mod diagnostics;
 pub mod import_export;
 pub mod kaleido;
@@ -27,18 +27,19 @@ pub mod slash_commands;
 pub mod tasks;
 pub mod tokens;
 pub mod tool_permissions;
+pub mod undo;
 pub mod user_scripts;
 pub mod variables;
 pub mod world_books;
 
+mod errors;
 pub(crate) mod routes;
 pub(crate) mod static_files;
-mod errors;
 mod util;
 
-pub use util::WithStatus;
 pub(crate) use errors::{code_for_status, err_with_code, ErrorCode};
 pub(crate) use util::db_err;
+pub use util::WithStatus;
 
 use crate::api::app_state::AppState;
 use axum::extract::DefaultBodyLimit;
@@ -49,15 +50,26 @@ use std::sync::Arc;
 
 /// 组装全部路由(API + 头像 + 前端静态)
 pub fn build_router(state: Arc<AppState>) -> Router {
+    // 健康检查暴露数据目录:桌面壳/启动器复用已运行实例前据此校验指向同一数据目录,
+    // 防止静默挂到另一套库(双数据目录分叉期间「聊天记录丢失」的隐形放大器)
+    let health_data_dir = state.config.data_dir.to_string_lossy().to_string();
     Router::new()
-        // 健康检查
+        // 健康检查:顺带暴露构建指纹(version/build_id/build_time,均由 build.rs 在
+        // 编译期注入),测试版与便携版是否同步可经此端点直接比对,见 MAINTENANCE.md。
         .route(
             "/api/health",
-            get(|| async {
-                Json(json!({
-                    "ok": true,
-                    "ts": chrono::Utc::now().timestamp_millis(),
-                }))
+            get(move || {
+                let data_dir = health_data_dir.clone();
+                async move {
+                    Json(json!({
+                        "ok": true,
+                        "ts": chrono::Utc::now().timestamp_millis(),
+                        "version": env!("CARGO_PKG_VERSION"),
+                        "build_id": env!("KEDAI_DIST_HASH"),
+                        "build_time": env!("KEDAI_BUILD_TIME"),
+                        "data_dir": data_dir,
+                    }))
+                }
             }),
         )
         // 同源页面仅在 loopback Host/Origin 下引导内存 token;响应禁止缓存。
@@ -72,7 +84,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(static_files::resource_frame_document),
         )
         // 消息渲染面板宿主文档(TH-render 等价物:独立 CSP,断掉一切网络出口)
-        .route("/render-frame.html", get(static_files::render_frame_document))
+        .route(
+            "/render-frame.html",
+            get(static_files::render_frame_document),
+        )
         // 分域 API 路由(实现见 routes/ 子模块;merge 后统一 with_state,与原单链语义一致)
         .merge(routes::chat::chat_routes())
         .merge(routes::settings::settings_routes())

@@ -87,7 +87,11 @@ pub fn distill_user_text(history: &[MessageRecord]) -> String {
 pub fn parse_distilled_lines(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     for raw in text.lines() {
-        let line = raw.trim().trim_start_matches('-').trim_start_matches('*').trim();
+        let line = raw
+            .trim()
+            .trim_start_matches('-')
+            .trim_start_matches('*')
+            .trim();
         if line.is_empty() {
             continue;
         }
@@ -102,10 +106,7 @@ pub fn parse_distilled_lines(text: &str) -> Vec<String> {
 /// 注入候选精选(纯函数):selected=1 的条目按
 /// (usage_count DESC, last_usage DESC, id DESC) 排序取前 limit 条。
 /// id 作最终 tie-break 保证确定性——记忆集合未变时输出顺序逐字节稳定(前缀缓存前提)。
-pub fn select_for_injection<'a>(
-    entries: &'a [MemoryEntry],
-    limit: usize,
-) -> Vec<&'a MemoryEntry> {
+pub fn select_for_injection(entries: &[MemoryEntry], limit: usize) -> Vec<&MemoryEntry> {
     let mut picked: Vec<&MemoryEntry> = entries.iter().filter(|e| e.selected).collect();
     picked.sort_by(|a, b| {
         b.usage_count
@@ -182,11 +183,7 @@ impl MemoryService {
     }
 
     /// 手动添加(kind='manual')
-    pub fn create_manual(
-        &self,
-        character_id: &str,
-        content: &str,
-    ) -> Result<MemoryEntry, String> {
+    pub fn create_manual(&self, character_id: &str, content: &str) -> Result<MemoryEntry, String> {
         self.insert(character_id, None, "manual", content)
     }
 
@@ -224,7 +221,10 @@ impl MemoryService {
         {
             let conn = self.db.write();
             let n = conn
-                .execute(sql.as_str(), rusqlite::params_from_iter(values.iter().map(|v| v.as_ref())))
+                .execute(
+                    sql.as_str(),
+                    rusqlite::params_from_iter(values.iter().map(|v| v.as_ref())),
+                )
                 .ok()?;
             if n == 0 {
                 return None;
@@ -252,14 +252,16 @@ impl MemoryService {
             "UPDATE memory_entries SET usage_count = usage_count + 1, last_usage = ?1, updated_at = ?1 \
              WHERE id IN ({placeholders})"
         );
-        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> =
-            vec![Box::new(now)];
+        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(now)];
         for id in ids {
             params_vec.push(Box::new(*id));
         }
         let conn = self.db.write();
-        conn.execute(sql.as_str(), rusqlite::params_from_iter(params_vec.iter().map(|v| v.as_ref())))
-            .map_err(|e| format!("记忆使用计数回写失败: {e}"))?;
+        conn.execute(
+            sql.as_str(),
+            rusqlite::params_from_iter(params_vec.iter().map(|v| v.as_ref())),
+        )
+        .map_err(|e| format!("记忆使用计数回写失败: {e}"))?;
         Ok(())
     }
 
@@ -337,7 +339,12 @@ mod tests {
         (memory, sessions, dir)
     }
 
-    fn seed_session(_sessions: &SessionService, dir: &std::path::Path, character_id: &str, sid: &str) {
+    fn seed_session(
+        _sessions: &SessionService,
+        dir: &std::path::Path,
+        character_id: &str,
+        sid: &str,
+    ) {
         // SessionService.db 为私有,测试以独立连接播种(与 compaction.rs 测试同模式)
         let conn = rusqlite::Connection::open(dir.join("kedai.db")).unwrap();
         conn.execute(
@@ -406,7 +413,10 @@ mod tests {
                 idx_count += 1;
             }
         }
-        assert!(idx_count >= 1, "memory_entries 应建 character_id+selected 索引");
+        assert!(
+            idx_count >= 1,
+            "memory_entries 应建 character_id+selected 索引"
+        );
         // kind CHECK 约束:非法 kind 拒绝
         assert!(memory.insert("c1", None, "bogus", "x").is_err());
         drop(conn);
@@ -418,7 +428,7 @@ mod tests {
     #[test]
     fn select_orders_by_usage_recency_and_limit() {
         let entries = vec![
-            entry(1, 0, None, true),                 // 从未使用,排最后
+            entry(1, 0, None, true), // 从未使用,排最后
             entry(2, 5, Some("2026-08-01T00:00:00Z"), true),
             entry(3, 5, Some("2026-08-02T00:00:00Z"), true), // 同计数,更近使用在前
             entry(4, 9, Some("2026-07-01T00:00:00Z"), true), // 计数最高
@@ -427,13 +437,14 @@ mod tests {
         ];
         let picked = select_for_injection(&entries, 10);
         let ids: Vec<i64> = picked.iter().map(|e| e.id).collect();
-        assert_eq!(ids, vec![4, 6, 3, 2, 1], "排序应为 计数→最近使用→id(新在前): {ids:?}");
+        assert_eq!(
+            ids,
+            vec![4, 6, 3, 2, 1],
+            "排序应为 计数→最近使用→id(新在前): {ids:?}"
+        );
         // limit 截断
         let top2 = select_for_injection(&entries, 2);
-        assert_eq!(
-            top2.iter().map(|e| e.id).collect::<Vec<_>>(),
-            vec![4, 6]
-        );
+        assert_eq!(top2.iter().map(|e| e.id).collect::<Vec<_>>(), vec![4, 6]);
         // 确定性:同集合两次调用输出一致(逐字节稳定前提)
         let again = select_for_injection(&entries, 10);
         assert_eq!(picked.len(), again.len());
@@ -459,7 +470,10 @@ mod tests {
         // 全空白输出 → 空(调用方应报错)
         assert!(parse_distilled_lines("  \n \n").is_empty());
         // 超上限截断
-        let long = (0..100).map(|i| format!("记忆{i}")).collect::<Vec<_>>().join("\n");
+        let long = (0..100)
+            .map(|i| format!("记忆{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         assert_eq!(parse_distilled_lines(&long).len(), MAX_DISTILLED_LINES);
     }
 
@@ -479,7 +493,11 @@ mod tests {
         let outcome = memory
             .distill_session(&sessions, "s1", |messages| async move {
                 assert_eq!(messages[0].role, "system");
-                assert!(messages[1].content.contains("图书馆"), "蒸馏输入应含历史: {}", messages[1].content);
+                assert!(
+                    messages[1].content.contains("图书馆"),
+                    "蒸馏输入应含历史: {}",
+                    messages[1].content
+                );
                 Ok("用户与角色在图书馆初识\n角色承诺周末看画展\n\n- 用户害怕打雷".into())
             })
             .await
@@ -490,8 +508,13 @@ mod tests {
         let list = memory.list("charA");
         assert_eq!(list.len(), 3);
         assert!(list.iter().all(|e| e.kind == "distilled"));
-        assert!(list.iter().all(|e| e.source_session_id.as_deref() == Some("s1")));
-        assert!(list.iter().any(|e| e.content == "用户害怕打雷"), "- 前缀应被剥除");
+        assert!(list
+            .iter()
+            .all(|e| e.source_session_id.as_deref() == Some("s1")));
+        assert!(
+            list.iter().any(|e| e.content == "用户害怕打雷"),
+            "- 前缀应被剥除"
+        );
         assert!(list.iter().all(|e| e.usage_count == 0 && e.selected));
         std::fs::remove_dir_all(dir).ok();
     }
@@ -547,7 +570,9 @@ mod tests {
         assert_eq!(e.source_session_id, None);
 
         // 编辑:content + selected
-        let updated = memory.update(e.id, Some("用户喜欢洋甘菊茶"), Some(false)).unwrap();
+        let updated = memory
+            .update(e.id, Some("用户喜欢洋甘菊茶"), Some(false))
+            .unwrap();
         assert_eq!(updated.content, "用户喜欢洋甘菊茶");
         assert!(!updated.selected);
         // 空白 content → 404 语义(拒绝)

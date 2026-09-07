@@ -26,9 +26,7 @@ use crate::parsing::assistant::{
 use crate::parsing::macros::MacroCtx;
 use crate::services::agent_session_service::AgentSessionService;
 use crate::services::character_service::CharacterService;
-use crate::services::prompt_inject_service::{
-    InjectMode, PromptInjectConfig, PromptInjectService,
-};
+use crate::services::prompt_inject_service::{InjectMode, PromptInjectConfig, PromptInjectService};
 use crate::services::quick_reply_service::QuickReplyService;
 use crate::services::runtime_prompt_service::RuntimePromptService;
 use crate::services::session_service::SessionService;
@@ -43,12 +41,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, watch, RwLock};
 
-pub(super) mod executor;
+// executor 提为 pub(crate):任务引擎(services/task_engine)复用
+// execute_generation/run_tool_loop(docs/任务引擎六模式.md 第三节)
+pub(super) mod compaction;
+pub(crate) mod executor;
 pub(super) mod messages;
 pub(super) mod mvu;
 pub(super) mod reflector_integration;
 pub(crate) mod worldbook;
-pub(super) mod compaction;
 // 按职责拆分的子模块(纯代码移动):主状态机循环 / 角色脚本执行 / 收尾落库
 pub(super) mod run_finish;
 pub(super) mod run_loop;
@@ -57,14 +57,15 @@ pub(super) mod run_scripts;
 use self::compaction::{
     compaction_split, compaction_system_prompt, compaction_user_text, incremental_segment,
     merge_incremental_summary, project_history, should_auto_compact, should_snip, snip_tuples,
-    upto_message_id, DEFAULT_KEEP_RECENT_MESSAGES, ProjectedHistory,
+    upto_message_id, ProjectedHistory, DEFAULT_KEEP_RECENT_MESSAGES,
 };
 
 use self::executor::{execute_generation, maybe_run_tool, run_tool_loop};
 use self::messages::{
     apply_inject_insertions, build_llm_messages_with_position, inject_reflect_advice,
     insert_memory_slot, insert_summary_slot, parse_inject_insertion, retreat_to_generating_step,
-    step_params_for, trim_to_context, with_step_prompt, InjectInsertion, InjectAt,
+    step_params_for, trim_to_context, trim_tool_history, with_step_prompt, InjectAt,
+    InjectInsertion, TOOL_HISTORY_SUMMARY_PREFIX,
 };
 use self::mvu::{apply_mvu_patches, generate_mvu_status, strip_status_bar_tag};
 use self::reflector_integration::{generate_reflect_advice, reflect_with_tools};
@@ -79,7 +80,9 @@ pub struct AbortFlag {
 }
 
 impl AbortFlag {
-    fn new() -> (Arc<AbortFlag>, watch::Receiver<bool>) {
+    // pub(crate):任务引擎(task_engine)需自建中止标志(send_event 的断开置位用;
+    // 中断信号本体走任务取消通道,不用本 flag 的接收端)
+    pub(crate) fn new() -> (Arc<AbortFlag>, watch::Receiver<bool>) {
         let (tx, rx) = watch::channel(false);
         (Arc::new(AbortFlag { tx }), rx)
     }
@@ -377,7 +380,10 @@ impl AgentEngine {
     /// 惰性加载角色卡契约(角色卡 extensions.nlkaleido 优先,世界书条目兜底)。
     /// 未命中契约(存量卡)返回 None,引擎走既有兼容层路径(文档 D-2)。
     /// 缓存由共享 ContractRegistry 管理;作者改卡后经 API 写路径 invalidate 失效。
-    pub fn load_character_contract(&self, character_id: &str) -> Option<crate::contracts::Contract> {
+    pub fn load_character_contract(
+        &self,
+        character_id: &str,
+    ) -> Option<crate::contracts::Contract> {
         self.contract_registry.load(character_id)
     }
 
@@ -388,7 +394,23 @@ impl AgentEngine {
 
     /// 当前生效模型(settings 切换模型后立即生效)
     pub fn model(&self) -> String {
-        self.current_model.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.current_model
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// 工具注册表全量定义(与聊天 agent 模式 GenerationParams.tools 同一来源;
+    /// 任务引擎 solo 模式构建工具清单用,docs/任务引擎六模式.md 第三节)
+    pub(crate) fn tool_definitions(&self) -> Vec<ToolDefinition> {
+        self.tool_registry.list_definitions()
+    }
+
+    /// 工具注册表句柄(pub(crate):任务模式规划器只读侦察循环执行白名单工具用,
+    /// 问题②;与聊天引擎/任务执行器同一注册表,权限模型唯一——侦察循环经
+    /// execute_with_decision 预放行白名单内只读工具,绕开 UI 授权等待)
+    pub(crate) fn tool_registry(&self) -> Arc<ToolRegistry> {
+        self.tool_registry.clone()
     }
 
     /// 运行时切换模型(更新 connector 内的 model;异步避免阻塞 runtime)
@@ -400,14 +422,20 @@ impl AgentEngine {
 
     pub fn is_active(&self, session_id: &str) -> bool {
         self.runs
-            .lock().unwrap_or_else(|e| e.into_inner())
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .get(session_id)
             .map(|r| r.active)
             .unwrap_or(false)
     }
 
     pub fn stop(&self, session_id: &str) {
-        if let Some(run) = self.runs.lock().unwrap_or_else(|e| e.into_inner()).get(session_id) {
+        if let Some(run) = self
+            .runs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(session_id)
+        {
             run.flag.abort();
             logger::agent_step(session_id, "interrupt", Some("用户请求停止生成"));
         }
@@ -514,10 +542,11 @@ impl AgentEngine {
             // global 作用域:阶段三 3b 脚本跨轮累积读写的持久层(scope_variables 表,
             // scope_id 恒为空),启动时加载进共享容器;收尾 take_others 整树落库回写。
             if let Some(g) = self.sessions.load_scope_variables("global", "") {
-                scopes
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .with_scope(crate::parsing::scopes::Scope::Global, "", g);
+                scopes.lock().unwrap_or_else(|e| e.into_inner()).with_scope(
+                    crate::parsing::scopes::Scope::Global,
+                    "",
+                    g,
+                );
             }
             let mut llm_messages = Vec::new();
             let mut rctx = RunContext {
@@ -537,8 +566,8 @@ impl AgentEngine {
             };
 
             // ===== 2. 执行阶段 =====
-            let (content, custom_vars_snapshot, custom_contract_entries, custom_contract_pending) = self
-                .step_loop(
+            let (content, custom_vars_snapshot, custom_contract_entries, custom_contract_pending) =
+                self.step_loop(
                     &req,
                     &ctx_data,
                     &plan,
@@ -559,10 +588,7 @@ impl AgentEngine {
             // 只动 usage_count/last_usage,为下一轮精选衰减提供数据。失败仅告警。
             if !memory_touched.is_empty() {
                 if let Err(e) = self.memory.touch(&memory_touched) {
-                    logger::warn(
-                        "记忆使用计数回写失败",
-                        &[("error", Value::String(e))],
-                    );
+                    logger::warn("记忆使用计数回写失败", &[("error", Value::String(e))]);
                 }
             }
 
@@ -598,7 +624,12 @@ impl AgentEngine {
                 // 做同义替换(替换后同时作用于落库与 Finish.content,前端 finish 覆盖流式文本)。
                 // fast 模式不带工具,仅靠 simple_inject_text 注入的自省提示词预防。
                 if req.mode != "fast" && !clean_content.trim().is_empty() {
-                    let inject = self.prompt_inject.lock().unwrap_or_else(|e| e.into_inner()).get().clone();
+                    let inject = self
+                        .prompt_inject
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get()
+                        .clone();
                     if inject.simple.banned_words_enabled {
                         // 从禁词提示词(新格式)或词条表(旧格式)提取禁用词列表
                         let words: Vec<String> = inject.simple.banned_words_extract();
@@ -650,7 +681,7 @@ impl AgentEngine {
                         &patches,
                         "agent",
                     );
-                    if gated.rejected.len() > 0 || gated.pending.len() > 0 {
+                    if !gated.rejected.is_empty() || !gated.pending.is_empty() {
                         logger::warn(
                             "契约门控过滤了部分正文变量补丁",
                             &[
@@ -758,8 +789,12 @@ impl AgentEngine {
                             ts,
                         )
                     } else {
-                        self.sessions
-                            .add_message(&session_id, "assistant", &clean_content, extra.clone())
+                        self.sessions.add_message(
+                            &session_id,
+                            "assistant",
+                            &clean_content,
+                            extra.clone(),
+                        )
                     };
                     match stored {
                         Ok(rec) => {
@@ -784,7 +819,8 @@ impl AgentEngine {
                     // 读取角色卡 extensions.tavern_helper 脚本树,串行执行启用脚本;
                     // 脚本经 TavernHelper 兼容桥对 global/character/script 等作用域的
                     // 写回进入 rctx.scopes,由下方 take_others 一并落库。失败仅记日志。
-                    self.run_character_scripts(&character_id, &rctx.scopes).await;
+                    self.run_character_scripts(&character_id, &rctx.scopes)
+                        .await;
                     // 其余作用域(global/character/preset/script/extension)整树落库
                     let others = rctx
                         .scopes
@@ -862,7 +898,11 @@ impl AgentEngine {
                 .await?;
                 // 接收统计(ST-Prompt-Template 兼容):LAST_RECEIVE_TOKENS / LAST_RECEIVE_CHARS。
                 // 记入会话宏变量,下一轮模板可用 {{getvar::LAST_RECEIVE_TOKENS}} 读取。
-                self.record_receive_stats(&session_id, total_usage.completion_tokens, &clean_content);
+                self.record_receive_stats(
+                    &session_id,
+                    total_usage.completion_tokens,
+                    &clean_content,
+                );
                 // Token 累计统计:会话 + 全局
                 self.record_usage(&session_id, &total_usage).await;
                 logger::agent_step(
@@ -1098,14 +1138,11 @@ impl AgentEngine {
                 let increment = increment.trim().to_string();
                 if !increment.is_empty() {
                     let merged = merge_incremental_summary(&old_summary, &increment);
-                    if let Err(e) = self
-                        .sessions
-                        .save_compaction(session_id, upto, &merged, &self.model())
+                    if let Err(e) =
+                        self.sessions
+                            .save_compaction(session_id, upto, &merged, &self.model())
                     {
-                        logger::warn(
-                            "压缩摘要落库失败",
-                            &[("error", Value::String(e))],
-                        );
+                        logger::warn("压缩摘要落库失败", &[("error", Value::String(e))]);
                     }
                 }
             }
@@ -1213,8 +1250,7 @@ impl AgentEngine {
             if let Some(contract) = self.contract_registry.load(&req.character_id).as_ref() {
                 let mut tree = rctx.assistant_vars.tree().clone();
                 crate::contracts::apply_contract_defaults(contract, &mut tree);
-                *rctx.assistant_vars =
-                    crate::parsing::assistant::AssistantVars::from_value(tree);
+                *rctx.assistant_vars = crate::parsing::assistant::AssistantVars::from_value(tree);
             }
             if !rctx.assistant_vars.is_empty() {
                 // 初始变量树落库(同步 SQLite 写)挪进阻塞线程池(DB 并发改造)
@@ -1352,7 +1388,11 @@ impl AgentEngine {
                 }
                 crate::parsing::assistant::InjectTag::GenerateIndex { idx, before } => {
                     // 第 idx 条消息(0-based,非 system)的开头/结尾 = 该位置前/后插入
-                    let pos = if *before { *idx as i64 } else { *idx as i64 + 1 };
+                    let pos = if *before {
+                        *idx as i64
+                    } else {
+                        *idx as i64 + 1
+                    };
                     inject_insertions.push((
                         InjectInsertion::Pos {
                             pos,
@@ -1435,11 +1475,13 @@ impl AgentEngine {
         let history_tuples: Vec<(String, String)> = tuples;
         let history_summary = projected.summary;
         // 自定义 Agent 系统提示词(设置里编辑;为空则用内置默认)
+        // 扁平字段类型为 RoleplayPromptConfig(WP7 模式隔离):roleplay 权威值,.0 取字符串
         let settings_snapshot = self
             .settings
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .agent_system_prompt
+            .0
             .clone();
         let custom_prompt = if settings_snapshot.trim().is_empty() {
             None
@@ -1468,10 +1510,7 @@ impl AgentEngine {
             .reflect_advice_role
             .clone();
         // 提示词注入:配置快照已提前获取(inject_snapshot);角色卡个性/情景(供宏)
-        let (personality, scenario) = match character
-            .as_ref()
-            .and_then(|c| c.data_raw.as_ref())
-        {
+        let (personality, scenario) = match character.as_ref().and_then(|c| c.data_raw.as_ref()) {
             Some(raw) => (
                 raw.get("personality")
                     .and_then(|v| v.as_str())
@@ -1561,7 +1600,8 @@ impl AgentEngine {
         drop(scopes_guard);
         // 会话变量(session_vars 表):宏 {{setvar}}/{{addvar}} 写入、{{getvar}} 读取;
         // 展开过程中可能产生新变量,构建完成后写回持久化
-        self.sessions.save_session_vars(session_id, rctx.session_vars);
+        self.sessions
+            .save_session_vars(session_id, rctx.session_vars);
         let mut llm_messages = messages;
         // 运行时主 Agent 提示词(AGENTS_RUNTIME.md)注入到 system 消息开头,
         // 作为最高层约定(角色定位/创作原则/工具使用原则/输出纪律),其余内容随其后。
@@ -1603,7 +1643,8 @@ impl AgentEngine {
         };
         if inject_limit > 0 && !req.character_id.trim().is_empty() {
             let entries = self.memory.list(&req.character_id);
-            let picked = crate::services::memory_service::select_for_injection(&entries, inject_limit);
+            let picked =
+                crate::services::memory_service::select_for_injection(&entries, inject_limit);
             let contents: Vec<String> = picked.iter().map(|e| e.content.clone()).collect();
             if insert_memory_slot(&mut llm_messages, &contents) {
                 memory_touched = picked.iter().map(|e| e.id).collect();
@@ -1661,11 +1702,11 @@ impl AgentEngine {
         memory_touched
     }
 
-
     /// 规划阶段:状态机切入 Planning,更新 agent 会话状态为 planning,构建计划
     /// (custom 按配置步骤序列,其余模式按输入与模式生成),把 plan_goals 落库,
     /// 推送「计划中…」SSE 事件并检查中断。
     /// 对应 run_body 内「1. 规划阶段」段;L2 中层定位:引擎单阶段的编排封装。
+    #[allow(clippy::too_many_arguments)] // 编排函数参数即上下文,拆 struct 收益低
     async fn plan_phase(
         &self,
         state_machine: &mut StateMachine,
@@ -1712,7 +1753,6 @@ impl AgentEngine {
         Ok(plan)
     }
 
-
     /// 阶段六 6g-1:非流式静默生成(复刻 generate_reflect_advice 模式)。
     /// 供后端脚本 TavernHelper.generate 与外部调用;不入聊天记录、不推 SSE。
     pub async fn generate_text(
@@ -1738,6 +1778,7 @@ impl AgentEngine {
                     total_tokens,
                     prompt_cache_hit_tokens,
                     prompt_cache_miss_tokens,
+                    ..
                 } => {
                     usage.prompt_tokens += prompt_tokens;
                     usage.completion_tokens += completion_tokens;
@@ -1754,10 +1795,7 @@ impl AgentEngine {
             Ok((out, usage))
         }
     }
-
-
 }
-
 
 #[cfg(test)]
 mod run_generation_tests {
@@ -1780,7 +1818,8 @@ mod run_generation_tests {
     #[test]
     fn rebuild_content_keeping_blocks_handles_lowercase_and_no_block() {
         // 小写变体标签:仍应保留块
-        let lower = "正文。<updatevariable><JSONPatch>[{\"op\":\"add\"}]</JSONPatch></updatevariable>";
+        let lower =
+            "正文。<updatevariable><JSONPatch>[{\"op\":\"add\"}]</JSONPatch></updatevariable>";
         let rebuilt = rebuild_content_keeping_blocks(lower, "新正文。");
         assert!(rebuilt.starts_with("新正文。"));
         assert!(rebuilt.contains("<updatevariable>"), "{rebuilt}");

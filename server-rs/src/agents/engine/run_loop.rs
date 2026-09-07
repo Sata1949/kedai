@@ -324,13 +324,9 @@ impl AgentEngine {
                                 *rctx.assistant_vars = baseline;
                                 custom_vars_snapshot = None;
                                 let tree = rctx.assistant_vars.tree().clone();
-                                let _ = send_event(
-                                    SseEvent::Vars { stat_data: tree },
-                                    tx,
-                                    abort,
-                                    flag,
-                                )
-                                .await;
+                                let _ =
+                                    send_event(SseEvent::Vars { stat_data: tree }, tx, abort, flag)
+                                        .await;
                                 step_vars_baseline.retain(|&k, _| k <= target);
                             }
                         }
@@ -449,22 +445,22 @@ impl AgentEngine {
                 .map(|s| !s.trim().is_empty())
                 .unwrap_or(false)
             {
-            {
-                let mut scopes_guard = rctx.scopes.lock().unwrap_or_else(|e| e.into_inner());
-                let mut mctx = MacroCtx {
-                    character_name: &ctx.chara_name,
-                    character_description: &ctx.chara_desc,
-                    user_name: "用户",
-                    user_input,
-                    personality: &ctx.personality,
-                    scenario: &ctx.scenario,
-                    history: &ctx.history_tuples,
-                    vars: &mut *rctx.session_vars,
-                    assistant_vars: Some(&mut *rctx.assistant_vars),
-                    scopes: Some(&mut *scopes_guard),
-                };
-                step_msgs = with_step_prompt(rctx.llm_messages, step, &mut mctx);
-            }
+                {
+                    let mut scopes_guard = rctx.scopes.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut mctx = MacroCtx {
+                        character_name: &ctx.chara_name,
+                        character_description: &ctx.chara_desc,
+                        user_name: "用户",
+                        user_input,
+                        personality: &ctx.personality,
+                        scenario: &ctx.scenario,
+                        history: &ctx.history_tuples,
+                        vars: &mut *rctx.session_vars,
+                        assistant_vars: Some(&mut *rctx.assistant_vars),
+                        scopes: Some(&mut *scopes_guard),
+                    };
+                    step_msgs = with_step_prompt(rctx.llm_messages, step, &mut mctx);
+                }
             }
             // 先计算本步骤实际下发的工具,再按 effective tools 注入指南。
             // Custom 的 null/[]/白名单语义只影响能力与永久授权,不能只做可见性过滤。
@@ -482,11 +478,15 @@ impl AgentEngine {
                         // 技能渐进披露(落地项 3):system 只注入「技能名:一句话用途」紧凑清单,
                         // 正文按需 read(type=skill) 加载;清单按 name 排序,跨轮字节稳定(前缀缓存)。
                         // skill_progressive_disclosure = false 时回退旧行为(完全不注入清单)。
-                        if self.settings.lock().unwrap_or_else(|e| e.into_inner())
+                        if self
+                            .settings
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
                             .skill_progressive_disclosure
                         {
-                            let manifest =
-                                crate::services::skill_service::skill_manifest(&self.skills.list(true));
+                            let manifest = crate::services::skill_service::skill_manifest(
+                                &self.skills.list(true),
+                            );
                             if !manifest.is_empty() {
                                 s.content.push_str(&format!(
                                     "\n\n【可用技能】(需要时用 read 工具 type=skill 按名读取正文)\n{manifest}"
@@ -518,7 +518,8 @@ impl AgentEngine {
                 run_tool_loop(
                     self,
                     state_machine,
-                    agent_session,
+                    // 聊天路径恒有 agent_sessions 行,包 Some(行为不变;任务模式传 None)
+                    Some(agent_session),
                     session_id,
                     &mut step_msgs,
                     &effective,
@@ -533,14 +534,25 @@ impl AgentEngine {
                 .await?
             } else if req.mode == "custom" {
                 let r = if step_params.tools.is_empty() {
-                    execute_generation(self, session_id, &run_id.to_string(), &step_msgs, &step_params, tx, abort, flag).await?
+                    execute_generation(
+                        self,
+                        session_id,
+                        &run_id.to_string(),
+                        &step_msgs,
+                        &step_params,
+                        tx,
+                        abort,
+                        flag,
+                    )
+                    .await?
                 } else {
                     // custom 模式白名单:步骤配置了 tools 白名单时,名单内工具自动放行
                     let whitelist = step.tools.as_deref();
                     run_tool_loop(
                         self,
                         state_machine,
-                        agent_session,
+                        // 聊天路径恒有 agent_sessions 行,包 Some(行为不变;任务模式传 None)
+                        Some(agent_session),
                         session_id,
                         &mut step_msgs,
                         &step_params,
@@ -555,11 +567,22 @@ impl AgentEngine {
                     .await?
                 };
                 // 步骤提示词展开可能产生新变量:执行后写回持久化(与构建阶段一致)
-                self.sessions.save_session_vars(session_id, rctx.session_vars);
+                self.sessions
+                    .save_session_vars(session_id, rctx.session_vars);
                 r
             } else {
                 // deep / fast:应用步骤级消息视图([本步指令])与步骤级温度/输出上限(无工具)
-                execute_generation(self, session_id, &run_id.to_string(), &step_msgs, &step_params, tx, abort, flag).await?
+                execute_generation(
+                    self,
+                    session_id,
+                    &run_id.to_string(),
+                    &step_msgs,
+                    &step_params,
+                    tx,
+                    abort,
+                    flag,
+                )
+                .await?
             };
             if result.interrupted {
                 break;
@@ -588,7 +611,7 @@ impl AgentEngine {
                     &patches,
                     "agent",
                 );
-                if gated.rejected.len() > 0 || gated.pending.len() > 0 {
+                if !gated.rejected.is_empty() || !gated.pending.is_empty() {
                     logger::warn(
                         "契约门控过滤了部分自定义模式正文补丁",
                         &[
@@ -612,15 +635,13 @@ impl AgentEngine {
                     .await
                     {
                         custom_vars_snapshot = Some(tree.clone());
-                        custom_contract_entries.extend(
-                            crate::contracts::entries_from_applied(
-                                &tree_before,
-                                &tree,
-                                ctx.history.len() as u64,
-                                &gated.applied_ops,
-                                crate::contracts::ChangelogSource::Agent,
-                            ),
-                        );
+                        custom_contract_entries.extend(crate::contracts::entries_from_applied(
+                            &tree_before,
+                            &tree,
+                            ctx.history.len() as u64,
+                            &gated.applied_ops,
+                            crate::contracts::ChangelogSource::Agent,
+                        ));
                     }
                 } else {
                     if let Some(tree) = apply_mvu_patches(
@@ -646,6 +667,11 @@ impl AgentEngine {
             rctx.total_usage.prompt_cache_miss_tokens += result.usage.prompt_cache_miss_tokens;
             idx += 1;
         }
-        Ok((content, custom_vars_snapshot, custom_contract_entries, custom_contract_pending))
+        Ok((
+            content,
+            custom_vars_snapshot,
+            custom_contract_entries,
+            custom_contract_pending,
+        ))
     }
 }

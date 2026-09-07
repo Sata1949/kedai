@@ -240,6 +240,9 @@ impl OpenAiCompatibleConnector {
             "temperature": params.temperature,
             "top_p": params.top_p,
             "max_tokens": params.max_tokens,
+            // 让上游在流末尾下发 usage(OpenAI 需要;DeepSeek 默认下发,重复声明无副作用)。
+            // 无此字段时部分提供商流式不返回 usage,任务模式诊断/落库将拿不到 token 数
+            "stream_options": { "include_usage": true },
         });
         if let Some(stop) = &params.stop {
             if !stop.is_empty() {

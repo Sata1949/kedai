@@ -103,8 +103,9 @@ pub(super) async fn maybe_run_tool(
     Ok(())
 }
 /// 流式执行 LLM 生成(与 Node 版 executor.ts executeGeneration 对齐)
+/// pub(crate):任务引擎 custom 模式(批次 4.3b)按步骤直调;聊天路径行为不变。
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn execute_generation(
+pub(crate) async fn execute_generation(
     engine: &AgentEngine,
     session_id: &str,
     run_id: &str,
@@ -118,13 +119,16 @@ pub(super) async fn execute_generation(
     // 供回放/调试「模型到底看到了什么」。失败仅告警,不阻塞生成。
     // seq 总是分配:缓存观测(usage 落库)不依赖快照开关。
     let seq = LLM_REQUEST_SEQ.fetch_add(1, Ordering::Relaxed);
+    // 任务模式(session_id 带 task: 前缀)跳过 llm_requests 落库:该表 FK 到 sessions(id),
+    // 虚拟 id 会 FK 失败刷 warn;任务侧调用追踪统一走 task_llm_calls(批次 3 起)。
+    let is_task_run = session_id.starts_with("task:");
     {
         let log_enabled = engine
             .settings
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .llm_request_log;
-        if log_enabled {
+        if log_enabled && !is_task_run {
             if let Ok(payload) = serde_json::to_string(messages) {
                 if let Err(e) = engine.sessions.save_llm_request(
                     session_id,
@@ -133,10 +137,7 @@ pub(super) async fn execute_generation(
                     &payload,
                     &engine.model(),
                 ) {
-                    logger::warn(
-                        "LLM 请求快照落库失败",
-                        &[("error", Value::String(e))],
-                    );
+                    logger::warn("LLM 请求快照落库失败", &[("error", Value::String(e))]);
                 }
             }
         }
@@ -147,6 +148,9 @@ pub(super) async fn execute_generation(
     let mut tool_calls: Vec<ToolCallArgs> = Vec::new();
     // 思考模式推理内容(多轮工具调用需随 assistant 消息回传)
     let mut reasoning = String::new();
+    // 上游 finish_reason(stop/length 等;可观测性问题①):聚合到 ExecutorResult,
+    // 任务模式经 run_tool_loop 一路带到 task_llm_calls 落库点;聊天路径不消费本字段。
+    let mut finish_reason: Option<String> = None;
 
     let connector = engine.connector.read().await;
     let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel();
@@ -161,8 +165,8 @@ pub(super) async fn execute_generation(
             }
             chunk = chunk_rx.recv() => match chunk {
                 Some(chunk) => {
-                    if process_chunk(chunk, &mut content, &mut reasoning, &mut tool_calls, &mut usage, tx, abort, flag).await? {
-                        return Ok(ExecutorResult { content, usage, interrupted: true, tool_calls, reasoning });
+                    if process_chunk(chunk, &mut content, &mut reasoning, &mut tool_calls, &mut usage, &mut finish_reason, tx, abort, flag).await? {
+                        return Ok(ExecutorResult { content, usage, interrupted: true, tool_calls, reasoning, finish_reason, self_heals: Vec::new() });
                     }
                 }
                 None => break,
@@ -180,6 +184,8 @@ pub(super) async fn execute_generation(
                 interrupted: true,
                 tool_calls,
                 reasoning,
+                finish_reason,
+                self_heals: Vec::new(),
             });
         }
         return Err(e);
@@ -187,20 +193,20 @@ pub(super) async fn execute_generation(
 
     // 缓存观测落库(缓存感知管线):每轮请求的命中/未命中 token 记入 llm_requests,
     // 与快照开关解耦;失败仅告警,不影响生成结果。
-    if let Err(e) = engine.sessions.save_llm_cache_usage(
-        session_id,
-        run_id,
-        seq,
-        &engine.model(),
-        usage.prompt_tokens,
-        usage.completion_tokens,
-        usage.prompt_cache_hit_tokens,
-        usage.prompt_cache_miss_tokens,
-    ) {
-        logger::warn(
-            "LLM 缓存统计落库失败",
-            &[("error", Value::String(e))],
-        );
+    // 任务模式(task: 前缀)同样跳过:llm_requests FK 到 sessions 表,任务追踪走 task_llm_calls。
+    if !is_task_run {
+        if let Err(e) = engine.sessions.save_llm_cache_usage(
+            session_id,
+            run_id,
+            seq,
+            &engine.model(),
+            usage.prompt_tokens,
+            usage.completion_tokens,
+            usage.prompt_cache_hit_tokens,
+            usage.prompt_cache_miss_tokens,
+        ) {
+            logger::warn("LLM 缓存统计落库失败", &[("error", Value::String(e))]);
+        }
     }
 
     Ok(ExecutorResult {
@@ -209,6 +215,8 @@ pub(super) async fn execute_generation(
         interrupted: *abort.borrow(),
         tool_calls,
         reasoning,
+        finish_reason,
+        self_heals: Vec::new(),
     })
 }
 
@@ -219,6 +227,7 @@ async fn process_chunk(
     reasoning: &mut String,
     tool_calls: &mut Vec<ToolCallArgs>,
     usage: &mut TokenUsage,
+    finish_reason: &mut Option<String>,
     tx: &mpsc::Sender<SseEvent>,
     abort: &watch::Receiver<bool>,
     flag: &AbortFlag,
@@ -245,7 +254,8 @@ async fn process_chunk(
                     },
                     input: Value::String(call.arguments),
                     call_id: (!call.id.is_empty()).then_some(call.id),
-                    render_kind: crate::tools::registry::render_kind_for(&call.name).map(|s| s.to_string()),
+                    render_kind: crate::tools::registry::render_kind_for(&call.name)
+                        .map(|s| s.to_string()),
                 },
                 tx,
                 abort,
@@ -259,6 +269,7 @@ async fn process_chunk(
             total_tokens,
             prompt_cache_hit_tokens,
             prompt_cache_miss_tokens,
+            ..
         } => {
             usage.prompt_tokens += prompt_tokens;
             usage.completion_tokens += completion_tokens;
@@ -266,33 +277,111 @@ async fn process_chunk(
             usage.prompt_cache_hit_tokens += prompt_cache_hit_tokens;
             usage.prompt_cache_miss_tokens += prompt_cache_miss_tokens;
         }
+        // finish_reason 聚合到结果(可观测性问题①):任务模式据此落 task_llm_calls,
+        // 区分「正常收尾(stop)」与「max_tokens 截断(length)」;聊天引擎不据此动作
+        LlmStreamChunk::Finish { reason } => *finish_reason = Some(reason),
     }
     Ok(false)
 }
 
 /// 执行结果(executor 输出);content/usage/interrupted 由父模块 run() 主流程读取
-pub(super) struct ExecutorResult {
-    pub(super) content: String,
-    pub(super) usage: TokenUsage,
-    pub(super) interrupted: bool,
+/// pub(crate):任务引擎(task_engine)直调 run_tool_loop 后读取本结构(批次 4.2)。
+pub(crate) struct ExecutorResult {
+    pub(crate) content: String,
+    pub(crate) usage: TokenUsage,
+    pub(crate) interrupted: bool,
     /// 模型本轮请求的工具调用(AGENT 模式由 run_tool_loop 执行)
-    tool_calls: Vec<ToolCallArgs>,
+    pub(crate) tool_calls: Vec<ToolCallArgs>,
     /// 本轮思考模式推理内容(回传用)
-    reasoning: String,
+    pub(crate) reasoning: String,
+    /// 上游 finish_reason(stop/length 等;可观测性问题①):任务模式落库用,
+    /// 上游未下发/中断未完成时为 None;聊天路径不消费本字段
+    pub(crate) finish_reason: Option<String>,
+    /// 本轮内发生的截断自愈记录(问题①,2026-08-31 deepseek 实测修复):
+    /// 仅 run_tool_loop 的单轮自愈路径产出,其余构造点恒空;聊天路径不消费。
+    pub(crate) self_heals: Vec<SelfHealRecord>,
+}
+
+/// 截断自愈记录(问题①):单轮生成被 max_tokens 截断到不可用(空正文/半截
+/// tool_call JSON)时「翻倍预算原样重发一次」的留痕。供任务模式(run_agent_loop /
+/// custom 步骤)把被截断的那次调用补落 task_llm_calls,调用情况面板可见
+/// 「截断 → 提高预算重发 → 成功/失败」完整链路。
+pub(crate) struct SelfHealRecord {
+    /// 触发原因描述(落 response_summary;如「返回空内容(已达 token 上限)」
+    /// 「工具参数 JSON 截断(工具 "calculator")」)
+    pub(crate) note: String,
+    /// 被截断调用的 token 用量(Err 形态拿不到,记 0)
+    pub(crate) prompt_tokens: i64,
+    pub(crate) completion_tokens: i64,
+    /// 被截断调用的 finish_reason(Ok 形态恒 Some("length");
+    /// Err 形态 finish_reason 随连接器错误丢失,None)
+    pub(crate) finish_reason: Option<String>,
+    /// 重发使用的 max_tokens(翻倍后,上限 TRUNCATION_HEAL_MAX_TOKENS_CAP)
+    pub(crate) retried_max_tokens: u32,
+}
+
+/// 截断自愈重发的 max_tokens 上限(问题①):与 task_service 空输出重试同款
+/// 「翻倍+封顶」口径;单轮产出(一次 tool_call 或一段正文)8192 足够宽裕,
+/// 封顶防止异常上游把单轮预算顶到设置页上限(65536)空烧 token。
+const TRUNCATION_HEAL_MAX_TOKENS_CAP: u32 = 8192;
+
+/// 计算自愈重发的 max_tokens(翻倍+封顶);已封顶返回 None(重发无意义,走原错误路径)
+fn doubled_heal_budget(current: u32) -> Option<u32> {
+    let doubled = (current.saturating_mul(2)).min(TRUNCATION_HEAL_MAX_TOKENS_CAP);
+    (doubled > current).then_some(doubled)
+}
+
+/// Ok 形态的截断判定(问题①):finish_reason=length 且该轮产出不可用——
+/// 任一 tool_call 的 arguments 非空但非法 JSON(参数被预算切成半截,执行必败),
+/// 或空正文且无 tool_call(推理烧光预算,正文为零)。普通文本截断(非空正文、
+/// 无/合法工具调用)不算:半截文本也是产出,维持既有「截断仍 done」语义
+/// (task_llm_call_finish_reason_marks_length_truncation 锁定)。
+/// 空正文但带合法 tool_call 也不算:模型本轮只想调工具,工具调用本身就是产出
+/// (heal_cause_ignores_healthy_results 锁定),误触发自愈会白白重发一轮。
+fn truncation_heal_cause(res: &ExecutorResult) -> Option<String> {
+    if res.finish_reason.as_deref() != Some("length") {
+        return None;
+    }
+    // 先查半截 tool_call(成因更具体:正文为空也可能是预算被工具参数烧光)
+    if let Some(bad) = res.tool_calls.iter().find(|c| {
+        !c.arguments.trim().is_empty() && serde_json::from_str::<Value>(&c.arguments).is_err()
+    }) {
+        return Some(format!("工具参数 JSON 截断(工具 \"{}\")", bad.name));
+    }
+    if res.content.trim().is_empty() && res.tool_calls.is_empty() {
+        return Some("返回空内容(已达 token 上限)".into());
+    }
+    None
+}
+
+/// Err 形态的截断判定(问题①):真实连接器(openai_compatible)在 finish_reason=length
+/// 时把半截 tool_call 留到流尾 flush 校验,报「工具 "X" 的 arguments 不是合法 JSON」,
+/// finish_reason 随错误丢失,只能按该专属错误文案判定。
+/// (跨层文案耦合点:connectors/openai_compatible/sse_parser.rs flush_tool_calls,
+/// 该文案变更时此处须同步。)
+fn is_truncated_tool_call_error(err: &str) -> bool {
+    err.contains("arguments 不是合法 JSON")
 }
 
 /// AGENT 模式工具循环:生成 → 有 tool_calls 则逐个执行并回填消息 → 重新生成,
 /// 轮次上限默认 32(params.max_tool_rounds 可调,settings 页配置);无 tool_calls 时返回最终正文。
 /// 每轮 usage 已累加进 total_usage。
+/// 截断自愈(问题①):单轮生成被 max_tokens 截断到不可用(空正文 / 半截 tool_call
+/// JSON / 连接器流尾 flush 校验报错)时,本轮 max_tokens 翻倍(上限
+/// TRUNCATION_HEAL_MAX_TOKENS_CAP)原样重发一次,重发仍失败才透出原结果;
+/// 触发自愈的记录经 ExecutorResult.self_heals 透出(任务模式补落 task_llm_calls)。
 /// SSE 语义:模型发出调用时由 execute_generation 推送 ToolCall,执行完成后此处推送 ToolResult。
 /// 轮次语义(修复原 8 轮 off-by-one):第 N 轮(含 N=上限)生成的工具调用照常执行,
 /// 只是执行完后停止再发起新的模型请求——工具调用不会被静默丢弃,卡片不会无终态悬挂。
 /// 白名单模式:步骤配置了 tools 白名单时,名单内工具自动放行(不再弹授权框)。
+/// agent_session 为 None 表示任务模式(不建影子 agent_sessions 行,
+/// 跳过状态/工具调用落库;docs/任务引擎六模式.md 第三节);聊天路径恒 Some,行为不变。
+/// pub(crate):任务引擎 solo/custom 模式直调(批次 4.2 起)。
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn run_tool_loop(
+pub(crate) async fn run_tool_loop(
     engine: &AgentEngine,
     state_machine: &mut StateMachine,
-    agent_session: &AgentSessionRecord,
+    agent_session: Option<&AgentSessionRecord>,
     session_id: &str,
     llm_messages: &mut Vec<LlmMessage>,
     params: &GenerationParams,
@@ -308,15 +397,187 @@ pub(super) async fn run_tool_loop(
     // 轮次上限:缺省 32(settings 可调);至少 1 轮,防止配置异常导致死循环
     let max_rounds = params.max_tool_rounds.unwrap_or(32).max(1) as usize;
     let mut round = 0usize;
+    // 截断自愈留痕(问题①):各轮触发的自愈记录,随最终 ExecutorResult 透出;
+    // Err 传播(?)时丢弃——失败路径由调用方落 error 行,截断细节含在错误文案内
+    let mut self_heals: Vec<SelfHealRecord> = Vec::new();
     loop {
-        let result = execute_generation(engine, session_id, run_id, llm_messages, params, tx, abort, flag).await?;
+        // ===== 工具历史回灌上限(R3b,2026-09-02 实测修复:每轮全量回灌
+        // assistant/tool 交替历史,3 步任务 prompt 3,119→26,679 token 无界膨胀)=====
+        // 每轮生成前:最老轮 tool 结果原地摘要化(保留最近 K 轮完整 + token 预算
+        // 双闸门;配对不破坏、幂等)。仅存在工具循环历史时触发;聊天主链路
+        // compaction(compaction.rs)/protected_tail 注入语义不受影响(不同层)。
+        if llm_messages.iter().any(|m| m.role == "tool") {
+            let (keep_rounds, budget_tokens) = {
+                let s = engine.settings.lock().unwrap_or_else(|e| e.into_inner());
+                (
+                    s.tool_history_keep_rounds as usize,
+                    s.tool_history_budget_tokens,
+                )
+            };
+            let summarized_count = |msgs: &[LlmMessage]| {
+                msgs.iter()
+                    .filter(|m| m.content.starts_with(TOOL_HISTORY_SUMMARY_PREFIX))
+                    .count()
+            };
+            let before = summarized_count(llm_messages);
+            let model = engine.model();
+            {
+                let mut ts = engine
+                    .token_service
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                trim_tool_history(llm_messages, keep_rounds, budget_tokens, &mut ts, &model);
+            }
+            let after = summarized_count(llm_messages);
+            if after > before {
+                logger::info(
+                    "工具循环历史回灌截断(旧轮 tool 结果已摘要化)",
+                    &[
+                        ("session_id", Value::String(session_id.to_string())),
+                        ("newly_summarized", Value::from(after - before)),
+                        ("keep_rounds", Value::from(keep_rounds)),
+                        ("budget_tokens", Value::from(budget_tokens)),
+                    ],
+                );
+            }
+        }
+        // ===== 截断自愈(问题①,2026-08-31 deepseek 实测:max_tokens 被推理/长参数
+        // 烧光,tool_call 参数 JSON 被切成半截直接判步骤 error)=====
+        // 单轮内最多自愈一次:该轮被 max_tokens 截断到不可用时,把本轮 max_tokens 翻倍
+        // (上限 TRUNCATION_HEAL_MAX_TOKENS_CAP)原样重发;重发仍失败(同形态再现)
+        // 才透出原结果走既有错误路径。与 task_service 的空输出分级重试是同问题不同层:
+        // 那边管无工具纯生成(plan/step/summary),这边管工具循环内的单轮。
+        let mut attempt_params = params.clone();
+        let mut healed: Option<SelfHealRecord> = None;
+        let result = loop {
+            let one = execute_generation(
+                engine,
+                session_id,
+                run_id,
+                llm_messages,
+                &attempt_params,
+                tx,
+                abort,
+                flag,
+            )
+            .await;
+            // 已自愈过(重发仍失败)或预算已封顶:透出原结果,不再重发
+            if healed.is_some() {
+                break one;
+            }
+            let Some(next_budget) = doubled_heal_budget(attempt_params.max_tokens) else {
+                break one;
+            };
+            match one {
+                Ok(res) => {
+                    let Some(cause) = truncation_heal_cause(&res) else {
+                        break Ok(res);
+                    };
+                    // 中断轮不自愈(用户停止语义优先;interrupted 时 finish_reason
+                    // 也可能残留 length,不得误判)
+                    if res.interrupted {
+                        break Ok(res);
+                    }
+                    logger::info(
+                        "工具循环单轮截断,提高输出上限原样重发(截断自愈)",
+                        &[
+                            ("session_id", Value::String(session_id.to_string())),
+                            ("cause", Value::String(cause.clone())),
+                            ("max_tokens", Value::from(attempt_params.max_tokens)),
+                            ("retry_max_tokens", Value::from(next_budget)),
+                        ],
+                    );
+                    let _ = send_event(
+                        step_evt(
+                            "截断自愈",
+                            Some(format!(
+                                "{cause},输出上限 {}→{next_budget} 重发",
+                                attempt_params.max_tokens
+                            )),
+                            None,
+                            None,
+                        ),
+                        tx,
+                        abort,
+                        flag,
+                    )
+                    .await;
+                    healed = Some(SelfHealRecord {
+                        note: cause,
+                        prompt_tokens: res.usage.prompt_tokens,
+                        completion_tokens: res.usage.completion_tokens,
+                        finish_reason: res.finish_reason.clone(),
+                        retried_max_tokens: next_budget,
+                    });
+                    attempt_params.max_tokens = next_budget;
+                    continue;
+                }
+                Err(e) => {
+                    if !is_truncated_tool_call_error(&e) {
+                        break Err(e);
+                    }
+                    logger::info(
+                        "工具调用参数 JSON 截断,提高输出上限原样重发(截断自愈)",
+                        &[
+                            ("session_id", Value::String(session_id.to_string())),
+                            ("max_tokens", Value::from(attempt_params.max_tokens)),
+                            ("retry_max_tokens", Value::from(next_budget)),
+                        ],
+                    );
+                    let _ = send_event(
+                        step_evt(
+                            "截断自愈",
+                            Some(format!(
+                                "工具参数 JSON 截断,输出上限 {}→{next_budget} 重发",
+                                attempt_params.max_tokens
+                            )),
+                            None,
+                            None,
+                        ),
+                        tx,
+                        abort,
+                        flag,
+                    )
+                    .await;
+                    healed = Some(SelfHealRecord {
+                        note: "工具参数 JSON 截断".into(),
+                        prompt_tokens: 0,
+                        completion_tokens: 0,
+                        finish_reason: None,
+                        retried_max_tokens: next_budget,
+                    });
+                    attempt_params.max_tokens = next_budget;
+                    continue;
+                }
+            }
+        };
+        // Err 传播前包装截断错误文案(问题③):自愈重发仍失败时,错误带「截断」定性,
+        // 任务模式据此把可读的失败原因写进步骤 result(而非连接器原始半截 JSON)
+        let result = match result {
+            Ok(r) => r,
+            Err(e) => {
+                if let Some(h) = healed {
+                    self_heals.push(h);
+                    return Err(format!(
+                        "工具参数 JSON 截断(已达 token 上限,提高预算重发仍失败): {e}"
+                    ));
+                }
+                return Err(e);
+            }
+        };
+        if let Some(h) = healed {
+            self_heals.push(h);
+        }
         total_usage.prompt_tokens += result.usage.prompt_tokens;
         total_usage.completion_tokens += result.usage.completion_tokens;
         total_usage.total_tokens += result.usage.total_tokens;
         total_usage.prompt_cache_hit_tokens += result.usage.prompt_cache_hit_tokens;
         total_usage.prompt_cache_miss_tokens += result.usage.prompt_cache_miss_tokens;
         if result.interrupted {
-            return Ok(result);
+            return Ok(ExecutorResult {
+                self_heals: std::mem::take(&mut self_heals),
+                ..result
+            });
         }
         if result.tool_calls.is_empty() {
             return Ok(ExecutorResult {
@@ -325,6 +586,9 @@ pub(super) async fn run_tool_loop(
                 interrupted: false,
                 tool_calls: Vec::new(),
                 reasoning: String::new(),
+                // 末轮(无工具调用)的 finish_reason 透出:任务模式落库截断标记用
+                finish_reason: result.finish_reason,
+                self_heals: std::mem::take(&mut self_heals),
             });
         }
         round += 1;
@@ -439,6 +703,9 @@ pub(super) async fn run_tool_loop(
                         interrupted: true,
                         tool_calls: Vec::new(),
                         reasoning: String::new(),
+                        // 工具执行期中断:生成未完成,finish_reason 不适用
+                        finish_reason: None,
+                        self_heals: std::mem::take(&mut self_heals),
                     });
                 }
             }
@@ -447,37 +714,44 @@ pub(super) async fn run_tool_loop(
         //    ToolResult 与 ToolAuthorizationRequired 均在此按序推送,保证前端配对稳定。
         for e in &executed {
             let _ = state_machine.transition(AgentState::ToolCall, session_id);
-            let _ = engine.agent_sessions.update(
-                &agent_session.id,
-                Some("tool_call"),
-                None,
-                None,
-                None,
-            );
-            let input_val: Value = serde_json::from_str(&e.call.arguments)
-                .unwrap_or_else(|_| Value::String(e.call.arguments.clone()));
-            let _ = engine.agent_sessions.add_tool_call(
-                &agent_session.id,
-                &e.call.name,
-                input_val,
-                e.output.clone(),
-                e.duration_ms,
-            );
+            // 任务模式 agent_session=None(不建影子会话行):跳过 agent_sessions 落库;
+            // 聊天路径恒 Some,落库顺序与原实现逐字节一致。
+            if let Some(agent_session) = agent_session {
+                let _ = engine.agent_sessions.update(
+                    &agent_session.id,
+                    Some("tool_call"),
+                    None,
+                    None,
+                    None,
+                );
+                let input_val: Value = serde_json::from_str(&e.call.arguments)
+                    .unwrap_or_else(|_| Value::String(e.call.arguments.clone()));
+                let _ = engine.agent_sessions.add_tool_call(
+                    &agent_session.id,
+                    &e.call.name,
+                    input_val,
+                    e.output.clone(),
+                    e.duration_ms,
+                );
+            }
             let _ = state_machine.transition(AgentState::Executing, session_id);
-            let _ = engine.agent_sessions.update(
-                &agent_session.id,
-                Some("executing"),
-                None,
-                None,
-                None,
-            );
+            if let Some(agent_session) = agent_session {
+                let _ = engine.agent_sessions.update(
+                    &agent_session.id,
+                    Some("executing"),
+                    None,
+                    None,
+                    None,
+                );
+            }
             // 授权已在执行前等待;此处统一发送最终结果,允许与拒绝都按 call_id 收束状态。
             send_event(
                 SseEvent::ToolResult {
                     name: e.call.name.clone(),
                     output: e.output.clone(),
                     call_id: Some(e.call.id.clone()),
-                    render_kind: crate::tools::registry::render_kind_for(&e.call.name).map(|s| s.to_string()),
+                    render_kind: crate::tools::registry::render_kind_for(&e.call.name)
+                        .map(|s| s.to_string()),
                 },
                 tx,
                 abort,
@@ -515,6 +789,8 @@ pub(super) async fn run_tool_loop(
                 interrupted: false,
                 tool_calls: Vec::new(),
                 reasoning: String::new(),
+                finish_reason: result.finish_reason,
+                self_heals: std::mem::take(&mut self_heals),
             });
         }
     }
@@ -633,7 +909,8 @@ async fn execute_serial_tool(
                 );
             }
             Ok(crate::tools::permissions::PendingAuthorizationDecision::Deny) => {
-                e.output = json!({ "error": "用户拒绝工具调用", "code": "tool_authorization_denied" });
+                e.output =
+                    json!({ "error": "用户拒绝工具调用", "code": "tool_authorization_denied" });
                 return Ok(false);
             }
             Err((code, message)) => {
@@ -642,7 +919,8 @@ async fn execute_serial_tool(
             }
         }
     }
-    let (output, duration_ms) = execute_call(engine, &e.call, &e.permission, tool_ctx, tx, abort, flag).await;
+    let (output, duration_ms) =
+        execute_call(engine, &e.call, &e.permission, tool_ctx, tx, abort, flag).await;
     e.output = output;
     e.duration_ms = duration_ms;
     Ok(false)
@@ -728,5 +1006,99 @@ mod tests {
     #[test]
     fn split_parallel_groups_empty() {
         assert!(split_parallel_groups(&[]).is_empty());
+    }
+
+    // ===== 截断自愈(问题①)判定纯函数 =====
+
+    fn mk_result(
+        content: &str,
+        finish: Option<&str>,
+        tool_calls: Vec<(&str, &str)>,
+    ) -> ExecutorResult {
+        ExecutorResult {
+            content: content.into(),
+            usage: TokenUsage::default(),
+            interrupted: false,
+            tool_calls: tool_calls
+                .into_iter()
+                .map(|(name, arguments)| ToolCallArgs {
+                    id: "c1".into(),
+                    name: name.into(),
+                    arguments: arguments.into(),
+                })
+                .collect(),
+            reasoning: String::new(),
+            finish_reason: finish.map(|s| s.into()),
+            self_heals: Vec::new(),
+        }
+    }
+
+    /// 半截 tool_call JSON + finish=length → 触发,成因指向工具参数截断
+    #[test]
+    fn heal_cause_detects_truncated_tool_call() {
+        let r = mk_result(
+            "",
+            Some("length"),
+            vec![("calculator", "{\"expression\": \"12*3")],
+        );
+        let cause = truncation_heal_cause(&r).expect("半截 tool_call 应触发自愈");
+        assert!(cause.contains("工具参数 JSON 截断"), "{cause}");
+        assert!(cause.contains("calculator"), "{cause}");
+        // 正文非空但 tool_call 半截:同样触发(工具调用不可执行)
+        let r2 = mk_result(
+            "思考残余",
+            Some("length"),
+            vec![("agentgo", "{\"tasks\": [")],
+        );
+        assert!(truncation_heal_cause(&r2).is_some());
+    }
+
+    /// 空正文 + finish=length(推理烧光预算)→ 触发,成因为空内容
+    #[test]
+    fn heal_cause_detects_empty_content_length() {
+        let r = mk_result("", Some("length"), vec![]);
+        let cause = truncation_heal_cause(&r).unwrap();
+        assert!(cause.contains("空内容"), "{cause}");
+    }
+
+    /// 不自愈的形态:普通文本截断(半截文本也是产出,既有语义)、正常收尾、
+    /// 合法 tool_call、无 finish_reason
+    #[test]
+    fn heal_cause_ignores_healthy_results() {
+        // 半截文本截断:不触发(维持「截断仍 done」语义)
+        assert!(
+            truncation_heal_cause(&mk_result("这段成果被截断,后半", Some("length"), vec![]))
+                .is_none()
+        );
+        // 正常 stop:不触发
+        assert!(truncation_heal_cause(&mk_result("", Some("stop"), vec![])).is_none());
+        // length 但 tool_call 参数完整:正常执行,不触发
+        assert!(truncation_heal_cause(&mk_result(
+            "",
+            Some("length"),
+            vec![("calculator", "{\"expression\":\"1+1\"}")],
+        ))
+        .is_none());
+        // 无 finish_reason:不触发
+        assert!(truncation_heal_cause(&mk_result("", None, vec![])).is_none());
+    }
+
+    /// Err 形态判定:仅匹配连接器半截 tool_call flush 的专属文案
+    #[test]
+    fn heal_err_matches_connector_truncation_wording() {
+        assert!(is_truncated_tool_call_error(
+            "工具 \"agentgo\" 的 arguments 不是合法 JSON: {\"tasks\": ["
+        ));
+        assert!(!is_truncated_tool_call_error("上游连接超时"));
+        assert!(!is_truncated_tool_call_error("生成已中断"));
+    }
+
+    /// 预算翻倍+封顶:1024→2048;4096→8192 封顶;8192 不再重发(None)
+    #[test]
+    fn heal_budget_doubles_with_cap() {
+        assert_eq!(doubled_heal_budget(1024), Some(2048));
+        assert_eq!(doubled_heal_budget(4096), Some(8192));
+        assert_eq!(doubled_heal_budget(8192), None, "已封顶不重发");
+        assert_eq!(doubled_heal_budget(u32::MAX), None, "饱和相乘不得溢出");
     }
 }

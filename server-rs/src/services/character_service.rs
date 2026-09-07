@@ -53,6 +53,18 @@ fn row_to_character(row: &rusqlite::Row, with_data_raw: bool) -> rusqlite::Resul
         .as_ref()
         .map(crate::parsing::regex_script::extract_regex_scripts)
         .filter(|v| !v.is_empty());
+    // 卡元数据三件套(远程资源页口令推导用;列表也携带,体积小)
+    let pick_str = |key: &str| {
+        data_raw_value
+            .as_ref()
+            .and_then(|d| d.get(key))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.to_string())
+    };
+    let creator = pick_str("creator");
+    let character_version = pick_str("character_version");
+    let creator_notes = pick_str("creator_notes");
     Ok(CharacterRecord {
         id: row.get(0)?,
         name: row.get(1)?,
@@ -65,6 +77,9 @@ fn row_to_character(row: &rusqlite::Row, with_data_raw: bool) -> rusqlite::Resul
         alternate_greetings,
         regex_scripts,
         card_plugins: None,
+        creator,
+        character_version,
+        creator_notes,
         created_at: row.get(7)?,
     })
 }
@@ -150,10 +165,8 @@ impl CharacterService {
         let mut ids = Vec::new();
         if let Ok(mut stmt) = conn.prepare("SELECT id FROM characters") {
             if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
-                for r in rows {
-                    if let Ok(id) = r {
-                        ids.push(id);
-                    }
+                for id in rows.flatten() {
+                    ids.push(id);
                 }
             }
         }
@@ -269,6 +282,18 @@ impl CharacterService {
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
         let alternate_greetings = extract_alternate_greetings(&parsed.data);
+        // 卡元数据三件套(远程资源页口令推导用)
+        let pick_str = |key: &str| {
+            parsed
+                .data
+                .get(key)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.to_string())
+        };
+        let creator = pick_str("creator");
+        let character_version = pick_str("character_version");
+        let creator_notes = pick_str("creator_notes");
         Ok(CharacterRecord {
             id,
             name,
@@ -281,6 +306,9 @@ impl CharacterService {
             alternate_greetings,
             regex_scripts,
             card_plugins: None,
+            creator,
+            character_version,
+            creator_notes,
             created_at,
         })
     }

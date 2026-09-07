@@ -108,9 +108,21 @@ pub(in crate::agents::engine) enum InjectAt {
 /// @INJECT 插入规格(解析自条目 comment;content 为渲染后的条目内容)
 #[derive(Debug, Clone, PartialEq)]
 pub(in crate::agents::engine) enum InjectInsertion {
-    Pos { pos: i64, role: String },
-    Target { target_role: String, index: i64, at: InjectAt, role: String },
-    Regex { pattern: String, at: InjectAt, role: String },
+    Pos {
+        pos: i64,
+        role: String,
+    },
+    Target {
+        target_role: String,
+        index: i64,
+        at: InjectAt,
+        role: String,
+    },
+    Regex {
+        pattern: String,
+        at: InjectAt,
+        role: String,
+    },
 }
 
 impl InjectInsertion {}
@@ -203,11 +215,7 @@ pub(in crate::agents::engine) fn apply_inject_insertions(
         match spec {
             InjectInsertion::Pos { pos, role } => {
                 // pos=0 → 第一条非 system 前;pos=-1 → 最后一条后;负值从尾部数
-                let rel: i64 = if *pos < 0 {
-                    n as i64 + *pos + 1
-                } else {
-                    *pos
-                };
+                let rel: i64 = if *pos < 0 { n as i64 + *pos + 1 } else { *pos };
                 let rel = rel.clamp(0, n as i64) as usize;
                 let full = if rel == 0 {
                     non_system_idx[0]
@@ -491,8 +499,9 @@ mod tests {
 
     #[test]
     fn parse_inject_target_and_regex() {
-        let spec = parse_inject_insertion("@INJECT target=assistant,index=1,at=before,role=assistant")
-            .unwrap();
+        let spec =
+            parse_inject_insertion("@INJECT target=assistant,index=1,at=before,role=assistant")
+                .unwrap();
         assert_eq!(
             spec,
             InjectInsertion::Target {
@@ -567,7 +576,10 @@ mod tests {
             )],
         );
         let roles: Vec<&str> = msgs.iter().map(|m| m.role.as_str()).collect();
-        assert_eq!(roles, vec!["system", "user", "assistant", "assistant", "user"]);
+        assert_eq!(
+            roles,
+            vec!["system", "user", "assistant", "assistant", "user"]
+        );
         // 目标索引 1 的 assistant(回复一)之前应插入注入内容
         assert_eq!(msgs[2].content, "注入后回复");
         assert_eq!(msgs[3].content, "回复一");
@@ -618,7 +630,14 @@ mod tests {
         let contents: Vec<&str> = msgs.iter().map(|m| m.content.as_str()).collect();
         assert_eq!(
             contents,
-            vec!["系统提示", "头部注入", "第一条", "次位注入", "回复一", "第二条"],
+            vec![
+                "系统提示",
+                "头部注入",
+                "第一条",
+                "次位注入",
+                "回复一",
+                "第二条"
+            ],
             "从后往前插入语义: {contents:?}"
         );
     }
@@ -630,7 +649,13 @@ mod tests {
         apply_inject_insertions(
             &mut msgs,
             &[
-                (InjectInsertion::Pos { pos: 0, role: "user".into() }, "   ".into()),
+                (
+                    InjectInsertion::Pos {
+                        pos: 0,
+                        role: "user".into(),
+                    },
+                    "   ".into(),
+                ),
                 (
                     InjectInsertion::Regex {
                         pattern: "(".into(),

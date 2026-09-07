@@ -32,14 +32,8 @@ pub(crate) fn settings_routes() -> Router<Arc<AppState>> {
             get(settings::prompt_preview),
         )
         // 跨会话记忆蒸馏(落地项 2):蒸馏 / 列表 / 手动添加 / 编辑 / 删除
-        .route(
-            "/api/memory/distill",
-            post(memory::distill),
-        )
-        .route(
-            "/api/memory",
-            get(memory::list).post(memory::create),
-        )
+        .route("/api/memory/distill", post(memory::distill))
+        .route("/api/memory", get(memory::list).post(memory::create))
         .route(
             "/api/memory/{id}",
             axum::routing::patch(memory::update).delete(memory::delete),

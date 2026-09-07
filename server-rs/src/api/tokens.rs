@@ -28,7 +28,10 @@ pub async fn count(
     }
     let model = body.model.unwrap_or_else(|| state.engine.model());
     let total = {
-        let mut ts = state.token_service.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ts = state
+            .token_service
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         ts.count_message_tokens(&body.messages, &model)
     };
     Json(json!({ "total": total, "model": model })).into_response()

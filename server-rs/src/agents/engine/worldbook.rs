@@ -58,9 +58,7 @@ pub(crate) fn collect_world_text_grouped_with(
     history: &[crate::models::types::MessageRecord],
     ctx: &mut crate::parsing::assistant::RenderCtx<'_>,
 ) -> WorldText {
-    use crate::parsing::assistant::{
-        apply_entry_decorators, render_assistant_content_with,
-    };
+    use crate::parsing::assistant::{apply_entry_decorators, render_assistant_content_with};
     let mut world = WorldText::default();
     if entries.is_empty() {
         return world;
@@ -106,49 +104,16 @@ pub(crate) fn collect_world_text_grouped_with(
         if window.is_empty() {
             continue;
         }
-        // 命中判定:正则优先;否则 keys + 副关键词
-        let hit = if e.use_regex {
-            match e.regex.as_deref().map(regex::Regex::new) {
-                Some(Ok(pat)) => window.iter().any(|m| pat.is_match(m)),
-                _ => false,
-            }
-        } else {
-            // (needle, 是否大小写敏感);keys + 副关键词并列命中,大小写敏感按条目设置
-            let mut needles: Vec<(String, bool)> = Vec::new();
-            for k in e.keys.iter().chain(e.keys_secondary.iter()) {
-                let t = k.trim();
-                if t.is_empty() {
-                    continue;
-                }
-                if e.case_sensitive {
-                    needles.push((t.to_string(), true));
-                } else {
-                    needles.push((t.to_lowercase(), false));
-                }
-            }
-            if needles.is_empty() {
-                false
-            } else {
-                needles.iter().any(|(needle, sensitive)| {
-                    window.iter().any(|m| {
-                        if *sensitive {
-                            m.contains(needle)
-                        } else {
-                            m.to_lowercase().contains(needle)
-                        }
-                    })
-                })
-            }
-        };
+        // 命中判定(与 generate-raw 共用 entry_matches_texts):正则优先
+        // (无独立 regex 字段时 keys 按 ST 语义当正则);否则 keys + 副关键词子串
+        let owned: Vec<String> = window.iter().map(|s| (*s).clone()).collect();
+        let hit = crate::parsing::world_book::entry_matches_texts(e, &owned);
         if !hit {
             continue;
         }
         // 概率:use_probability 时按 probability% 随机决定(0 永不注入,100 恒注入)
-        if e.use_probability {
-            let roll = simple_roll();
-            if e.probability <= 0 || roll >= e.probability {
-                continue;
-            }
+        if !crate::parsing::world_book::entry_probability_pass(e, simple_roll()) {
+            continue;
         }
         if !e.content.trim().is_empty() {
             let rendered = render_assistant_content_with(&e.content, ctx);

@@ -57,10 +57,7 @@ fn err_json(msg: impl AsRef<str>, status: StatusCode) -> Response {
 /// 低置信入 pending)、kaleido_changelog 留痕、meta.pending 维护、熔断指纹。
 /// 部分被拦时 HTTP 200 + warnings(与工具的 Err 语义不同:外部调用方通常
 /// 需要拿到已生效部分,而非整批失败)。
-pub async fn update(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<UpdateBody>,
-) -> Response {
+pub async fn update(State(state): State<Arc<AppState>>, Json(body): Json<UpdateBody>) -> Response {
     if body.patches.is_empty() {
         return bad_request("patches 不能为空");
     }
@@ -127,17 +124,14 @@ pub async fn get_state(
         Ok(Some(Ok(Some(row)))) => {
             // 库内 JSON 损坏属异常态,显式 500 让前端可排查(静默空对象会掩盖)
             let parse = |raw: &str, field: &str| -> Result<Value, String> {
-                serde_json::from_str(raw)
-                    .map_err(|e| format!("运行态 {field} 损坏: {e}"))
+                serde_json::from_str(raw).map_err(|e| format!("运行态 {field} 损坏: {e}"))
             };
             let (stat_data, meta) = match (
                 parse(&row.stat_data, "stat_data"),
                 parse(&row.meta_json, "meta"),
             ) {
                 (Ok(s), Ok(m)) => (s, m),
-                (Err(e), _) | (_, Err(e)) => {
-                    return err_json(e, StatusCode::INTERNAL_SERVER_ERROR)
-                }
+                (Err(e), _) | (_, Err(e)) => return err_json(e, StatusCode::INTERNAL_SERVER_ERROR),
             };
             Json(json!({
                 "session_id": sid,
@@ -271,7 +265,10 @@ mod tests {
             .await
             .unwrap()
             .to_bytes();
-        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
     }
 
     async fn get(router: &axum::Router, path: &str) -> (StatusCode, Value) {
@@ -291,7 +288,10 @@ mod tests {
             .await
             .unwrap()
             .to_bytes();
-        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
     }
 
     /// 出口校验:未知会话 404、空 patches 400、缺 session_id 400;
@@ -351,7 +351,9 @@ mod tests {
         assert_eq!(body["stat_data"]["心之所向"]["好感度"], json!(5));
         let warnings = body["warnings"].as_array().cloned().unwrap_or_default();
         assert!(
-            warnings.iter().any(|w| w.as_str().unwrap_or("").contains("not_owner")),
+            warnings
+                .iter()
+                .any(|w| w.as_str().unwrap_or("").contains("not_owner")),
             "warnings: {warnings:?}"
         );
         let entries = body["entries"].as_array().cloned().unwrap_or_default();
@@ -366,8 +368,11 @@ mod tests {
         assert_eq!(srow["meta"]["lastContractVersion"], json!(1));
 
         // changelog:一条记录,source=agent(共享层以 Agent 来源留痕)
-        let (status, log) =
-            get(&router, &format!("/api/variable/changelog?session_id={sid}")).await;
+        let (status, log) = get(
+            &router,
+            &format!("/api/variable/changelog?session_id={sid}"),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK, "log: {log}");
         let log_items = log["entries"].as_array().cloned().unwrap_or_default();
         assert_eq!(log_items.len(), 1, "log: {log}");
@@ -388,7 +393,10 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "body: {body}");
         assert_eq!(body["ok"], json!(false), "低置信全拦应为 ok:false");
         let (_, srow) = get(&router, &format!("/api/variable/state?session_id={sid}")).await;
-        let pending = srow["meta"]["pending"].as_array().cloned().unwrap_or_default();
+        let pending = srow["meta"]["pending"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
         assert_eq!(pending.len(), 1, "pending 应入队: {srow}");
         assert_eq!(pending[0]["op"]["path"], json!("心之所向.好感度"));
         // 树未变

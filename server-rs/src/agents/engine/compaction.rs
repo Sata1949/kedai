@@ -27,6 +27,7 @@ pub(super) struct ProjectedHistory {
 /// 按已存在的压缩摘要投影历史:
 ///   - 无摘要:返回完整历史(role, content),行为与既有 history_tuples 一致。
 ///   - 有摘要(upto):返回 [摘要] + id > upto 的原文。
+///
 /// 摘要作为独立字段返回(不塞进 tuples),由消息构建层拼入 system,避免被历史循环跳过。
 pub(super) fn project_history(
     history: &[MessageRecord],
@@ -108,11 +109,11 @@ pub(super) fn compaction_user_text(history_segment: &[MessageRecord]) -> String 
 /// 增量摘要段(缓存感知管线·改造 B):取 (upto_old, upto_new] 区间的消息。
 /// upto_old 为 0 时等价于 [..upto_new](首次压缩兼容);upto_old >= upto_new
 /// 返回空段(无新内容,调用方跳过压缩)。
-pub(super) fn incremental_segment<'a>(
-    history: &'a [MessageRecord],
+pub(super) fn incremental_segment(
+    history: &[MessageRecord],
     upto_old: i64,
     upto_new: i64,
-) -> &'a [MessageRecord] {
+) -> &[MessageRecord] {
     if upto_new <= upto_old {
         return &[];
     }
@@ -153,18 +154,14 @@ pub(super) fn should_snip(history_tokens: i64, max_context: u32) -> bool {
 /// 「[该消息已裁剪:N字符]」(N = 原字符数);含错误特征
 /// (error/exception/failed/panic,大小写不敏感)的消息不裁(排障信息优先保留)。
 /// 纯投影:返回新 Vec,不修改输入;数据库原文永不动(与可逆投影设计一致)。
-pub(super) fn snip_tuples(
-    tuples: &[(String, String)],
-    max_bytes: usize,
-) -> Vec<(String, String)> {
+pub(super) fn snip_tuples(tuples: &[(String, String)], max_bytes: usize) -> Vec<(String, String)> {
     let n = tuples.len();
     tuples
         .iter()
         .enumerate()
         .map(|(i, (role, content))| {
-            let keep_original = i + SNIP_KEEP_TAIL >= n
-                || content.len() <= max_bytes
-                || looks_like_error(content);
+            let keep_original =
+                i + SNIP_KEEP_TAIL >= n || content.len() <= max_bytes || looks_like_error(content);
             if keep_original {
                 (role.clone(), content.clone())
             } else {
@@ -235,7 +232,10 @@ mod tests {
     fn compaction_split_keeps_recent_windows() {
         let history: Vec<MessageRecord> = (1..=6).map(|i| msg(i, "user", "x")).collect();
         // 6 条,保留 4 条(默认) → 待压缩 2 条
-        assert_eq!(compaction_split(&history, DEFAULT_KEEP_RECENT_MESSAGES), Some(2));
+        assert_eq!(
+            compaction_split(&history, DEFAULT_KEEP_RECENT_MESSAGES),
+            Some(2)
+        );
 
         let short: Vec<MessageRecord> = (1..=3).map(|i| msg(i, "user", "x")).collect();
         assert_eq!(compaction_split(&short, DEFAULT_KEEP_RECENT_MESSAGES), None);
@@ -276,7 +276,9 @@ mod tests {
     /// 二次压缩:新段只取 (upto_old, upto_new] 区间,已摘要过的消息不重复进入
     #[test]
     fn incremental_segment_only_covers_new_range() {
-        let history: Vec<MessageRecord> = (1..=6).map(|i| msg(i, "user", &format!("消息{i}"))).collect();
+        let history: Vec<MessageRecord> = (1..=6)
+            .map(|i| msg(i, "user", &format!("消息{i}")))
+            .collect();
         // 首次:upto_old=0 → 前 2 条(id 1、2)
         let first = incremental_segment(&history, 0, 2);
         assert_eq!(first.len(), 2);
@@ -343,7 +345,10 @@ mod tests {
 
         let (upto, latest) = svc.get_compaction("s1").expect("应能读到最新摘要");
         assert_eq!(upto, 4);
-        assert!(latest.starts_with(first), "最新摘要应以旧摘要为前缀: {latest}");
+        assert!(
+            latest.starts_with(first),
+            "最新摘要应以旧摘要为前缀: {latest}"
+        );
         assert!(latest.ends_with(increment));
         // 旧行仍在且字节未变(可回溯)
         let conn = rusqlite::Connection::open(dir.join("kedai.db")).unwrap();
@@ -369,7 +374,10 @@ mod tests {
     fn compaction_split_uses_configured_keep_recent() {
         let history: Vec<MessageRecord> = (1..=6).map(|i| msg(i, "user", "x")).collect();
         // 默认 4(设置缺省值):待压缩 2 条
-        assert_eq!(compaction_split(&history, DEFAULT_KEEP_RECENT_MESSAGES), Some(2));
+        assert_eq!(
+            compaction_split(&history, DEFAULT_KEEP_RECENT_MESSAGES),
+            Some(2)
+        );
         // 自定义 2:待压缩 4 条
         assert_eq!(compaction_split(&history, 2), Some(4));
         // 保留数 >= 历史条数 → 无需压缩
@@ -395,7 +403,11 @@ mod tests {
             "超长陈旧消息应替换为占位符: {}",
             snipped[0].1
         );
-        assert!(snipped[0].1.contains("100"), "占位符应含原字符数: {}", snipped[0].1);
+        assert!(
+            snipped[0].1.contains("100"),
+            "占位符应含原字符数: {}",
+            snipped[0].1
+        );
         assert_eq!(snipped[1].1, "短回复", "未超阈值的消息不裁");
         assert_eq!(snipped[2].1, snipped[0].1, "另一个超长陈旧消息同样替换");
         // 尾部 2 条原文保留
@@ -417,7 +429,10 @@ mod tests {
             ("user".to_string(), "尾部二".to_string()),
         ];
         let snipped = snip_tuples(&tuples, 100);
-        assert_eq!(snipped[0].1, tuples[0].1, "含 error/failed 的超长消息必须原文保留");
+        assert_eq!(
+            snipped[0].1, tuples[0].1,
+            "含 error/failed 的超长消息必须原文保留"
+        );
         assert_eq!(snipped[1].1, tuples[1].1, "含 panic 的超长消息必须原文保留");
     }
 
@@ -425,7 +440,10 @@ mod tests {
     #[test]
     fn snip_keeps_all_when_history_short() {
         let long = "长".repeat(100);
-        let tuples = vec![("user".to_string(), long.clone()), ("user".to_string(), long)];
+        let tuples = vec![
+            ("user".to_string(), long.clone()),
+            ("user".to_string(), long),
+        ];
         let snipped = snip_tuples(&tuples, 100);
         assert_eq!(snipped, tuples, "不超过尾部 2 条时全部原文保留");
     }

@@ -58,10 +58,19 @@ CREATE TABLE IF NOT EXISTS llm_requests (
 /// 旧库经 ALTER ADD COLUMN 补齐;列追加在表尾,与新版 CREATE_TABLES 建出的
 /// schema normalize 后一致,保证跨库合并的 schema 一致性比对不冲突。
 const LLM_REQUESTS_USAGE_COLUMNS: [(&str, &str); 4] = [
-    ("prompt_cache_hit_tokens", "prompt_cache_hit_tokens INTEGER NOT NULL DEFAULT 0"),
-    ("prompt_cache_miss_tokens", "prompt_cache_miss_tokens INTEGER NOT NULL DEFAULT 0"),
+    (
+        "prompt_cache_hit_tokens",
+        "prompt_cache_hit_tokens INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        "prompt_cache_miss_tokens",
+        "prompt_cache_miss_tokens INTEGER NOT NULL DEFAULT 0",
+    ),
     ("prompt_tokens", "prompt_tokens INTEGER NOT NULL DEFAULT 0"),
-    ("completion_tokens", "completion_tokens INTEGER NOT NULL DEFAULT 0"),
+    (
+        "completion_tokens",
+        "completion_tokens INTEGER NOT NULL DEFAULT 0",
+    ),
 ];
 
 /// 幂等 schema 升级:为 llm_requests 补 usage 缓存列(缺失才 ALTER,已存在跳过)。
@@ -93,7 +102,10 @@ pub fn ensure_llm_requests_usage_columns(conn: &Connection) -> Result<(), String
 /// 列追加在表尾,与新版 CREATE_TABLES 建出的 schema normalize 后一致。
 const SKILLS_PROGRESSIVE_COLUMNS: [(&str, &str); 3] = [
     ("allowed_tools", "allowed_tools TEXT NOT NULL DEFAULT '[]'"),
-    ("run_as_subagent", "run_as_subagent INTEGER NOT NULL DEFAULT 0"),
+    (
+        "run_as_subagent",
+        "run_as_subagent INTEGER NOT NULL DEFAULT 0",
+    ),
     ("model", "model TEXT NOT NULL DEFAULT ''"),
 ];
 
@@ -126,6 +138,72 @@ pub fn ensure_skills_progressive_columns(conn: &Connection) -> Result<(), String
     }
     Ok(())
 }
+/// 幂等 schema 升级(批次 4 六模式):为 tasks 补 task_mode 列(缺失才 ALTER,
+/// 已存在跳过)。启动时(Db::open)执行;旧行经 DEFAULT 'legacy' 零迁移成本。
+/// 列追加在表尾,与新版 CREATE_TABLES 建出的 schema normalize 后一致。
+pub fn ensure_tasks_task_mode_column(conn: &Connection) -> Result<(), String> {
+    let mut existing: Vec<String> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(tasks)")
+            .map_err(|e| format!("读取 tasks 列失败: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| format!("遍历 tasks 列失败: {e}"))?;
+        for name in rows.flatten() {
+            existing.push(name.to_lowercase());
+        }
+    }
+    // tasks 表不存在(极旧快照/手工建库)时零列返回,直接跳过——
+    // 建表由 CREATE_TABLES 或合并期 schema 比对负责,此处不能 ALTER 报错
+    if existing.is_empty() {
+        return Ok(());
+    }
+    if existing.iter().any(|c| c == "task_mode") {
+        return Ok(());
+    }
+    conn.execute(
+        "ALTER TABLE tasks ADD COLUMN task_mode TEXT NOT NULL DEFAULT 'legacy'",
+        [],
+    )
+    .map_err(|e| format!("为 tasks 补 task_mode 列失败: {e}"))?;
+    Ok(())
+}
+
+/// 幂等 schema 升级(可观测性问题①):为 task_llm_calls 补 finish_reason 列
+///(缺失才 ALTER,已存在跳过)。启动时(Db::open)与跨库合并前(merge_databases
+/// 两侧)各执行一次;旧行经 DEFAULT '' 零迁移成本('' = 未知/未下发,
+/// 不等于 stop,避免旧数据被误读为正常收尾)。
+/// 列追加在表尾,与新版 CREATE_TABLES 建出的 schema normalize 后一致。
+/// task_llm_calls 表不存在(极旧快照/手工建库)时零列返回,直接跳过——
+/// 建表由 create_tables_sql 或合并期 schema 比对负责,此处不能 ALTER 报错。
+pub fn ensure_task_llm_calls_finish_reason_column(conn: &Connection) -> Result<(), String> {
+    let mut existing: Vec<String> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(task_llm_calls)")
+            .map_err(|e| format!("读取 task_llm_calls 列失败: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| format!("遍历 task_llm_calls 列失败: {e}"))?;
+        for name in rows.flatten() {
+            existing.push(name.to_lowercase());
+        }
+    }
+    if existing.is_empty() {
+        return Ok(());
+    }
+    if existing.iter().any(|c| c == "finish_reason") {
+        return Ok(());
+    }
+    conn.execute(
+        "ALTER TABLE task_llm_calls ADD COLUMN finish_reason TEXT NOT NULL DEFAULT ''",
+        [],
+    )
+    .map_err(|e| format!("为 task_llm_calls 补 finish_reason 列失败: {e}"))?;
+    Ok(())
+}
+
 /// 契约变更历史表(阶段 C):append-only 审计 + 回滚源。合并前对两侧各补一次 DDL,
 /// 与 SCOPE_VARIABLES_DDL 同理,避免旧库与新库合并时因「基线缺少源表」停止(§4.3)。
 /// 索引不参与 schema 一致性比对(schema_map 仅读 type='table'),无需在此重复。
@@ -185,6 +263,47 @@ CREATE TABLE IF NOT EXISTS memory_entries (
 );
 CREATE INDEX IF NOT EXISTS idx_memory_entries_character ON memory_entries(character_id, selected);
 "#;
+/// 任务消息表(批次 R2 多轮用户输入):任务全程的用户输入(followup 追加指令 /
+/// plan_chat 批准环节对话)与助手产出按行落库,任务删除随外键级联清除。
+/// 合并前对两侧各补一次 DDL,与 SCOPE_VARIABLES_DDL 同理,
+/// 避免旧库与新库合并时因「基线缺少源表」停止(§4.3);索引不参与 schema 一致性比对。
+/// 文本与 models/db/schema.rs CREATE_TABLES 内的建表语句保持一致(normalize 比对依赖)。
+const TASK_MESSAGES_DDL: &str = r#"
+CREATE TABLE IF NOT EXISTS task_messages (
+  id         TEXT PRIMARY KEY,
+  task_id    TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  role       TEXT NOT NULL CHECK (role IN ('user','assistant')),
+  kind       TEXT NOT NULL DEFAULT 'normal',
+  content    TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_messages_task ON task_messages(task_id, created_at);
+"#;
+
+/// 幂等 schema 升级(批次 R2):task_messages 表缺失才建(PRAGMA table_info 探测,
+/// 已存在跳过),与 ensure_*_column 同款探测模式,只是对象从列升级为整表。
+/// 启动时(Db::open)与跨库合并前(merge_databases 两侧)各执行一次。
+pub fn ensure_task_messages_table(conn: &Connection) -> Result<(), String> {
+    let mut existing: Vec<String> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(task_messages)")
+            .map_err(|e| format!("读取 task_messages 列失败: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| format!("遍历 task_messages 列失败: {e}"))?;
+        for name in rows.flatten() {
+            existing.push(name);
+        }
+    }
+    // 表不存在时 PRAGMA 返回零行(与 ensure_skills_progressive_columns 同口径)
+    if !existing.is_empty() {
+        return Ok(());
+    }
+    conn.execute_batch(TASK_MESSAGES_DDL)
+        .map_err(|e| format!("创建 task_messages 表失败: {e}"))?;
+    Ok(())
+}
 
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct MergeReport {
@@ -234,8 +353,8 @@ pub fn snapshot_database(source: &Path, destination: &Path) -> Result<(), String
     source
         .busy_timeout(std::time::Duration::from_secs(30))
         .map_err(|e| format!("设置快照超时失败: {e}"))?;
-    let mut destination = Connection::open(destination)
-        .map_err(|e| format!("创建数据库快照失败: {e}"))?;
+    let mut destination =
+        Connection::open(destination).map_err(|e| format!("创建数据库快照失败: {e}"))?;
     let backup = Backup::new(&source, &mut destination)
         .map_err(|e| format!("初始化 SQLite backup 失败: {e}"))?;
     backup
@@ -273,7 +392,8 @@ pub fn merge_data_dirs(
         signatures.insert(source_signature);
         fs::write(
             &marker,
-            serde_json::to_vec_pretty(&signatures).map_err(|e| format!("序列化合并来源标记失败: {e}"))?,
+            serde_json::to_vec_pretty(&signatures)
+                .map_err(|e| format!("序列化合并来源标记失败: {e}"))?,
         )
         .map_err(|e| format!("写入合并来源标记失败: {e}"))?;
         report
@@ -295,16 +415,30 @@ fn logical_database_signature(db: &Path) -> Result<String, String> {
         hash_bytes(&mut hash, table.as_bytes());
         hash_bytes(&mut hash, sql.as_bytes());
         let columns = table_columns(&conn, "main", &table)?;
-        let names = columns.iter().map(|column| quote_ident(&column.name)).collect::<Vec<_>>().join(", ");
-        let order = columns.iter().filter(|column| column.pk_position > 0).map(|column| quote_ident(&column.name)).collect::<Vec<_>>();
+        let names = columns
+            .iter()
+            .map(|column| quote_ident(&column.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let order = columns
+            .iter()
+            .filter(|column| column.pk_position > 0)
+            .map(|column| quote_ident(&column.name))
+            .collect::<Vec<_>>();
         let mut query = format!("SELECT {names} FROM {}", quote_ident(&table));
         if !order.is_empty() {
             query.push_str(&format!(" ORDER BY {}", order.join(", ")));
         }
-        let mut stmt = conn.prepare(&query).map_err(|e| format!("读取表 {table} 计算签名失败: {e}"))?;
-        let rows = stmt.query_map([], |row| {
-            (0..columns.len()).map(|index| row.get::<_, Value>(index)).collect::<rusqlite::Result<Vec<_>>>()
-        }).map_err(|e| format!("遍历表 {table} 计算签名失败: {e}"))?;
+        let mut stmt = conn
+            .prepare(&query)
+            .map_err(|e| format!("读取表 {table} 计算签名失败: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                (0..columns.len())
+                    .map(|index| row.get::<_, Value>(index))
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .map_err(|e| format!("遍历表 {table} 计算签名失败: {e}"))?;
         for row in rows {
             for value in row.map_err(|e| format!("读取表 {table} 签名行失败: {e}"))? {
                 hash_bytes(&mut hash, value_key(&value).as_bytes());
@@ -366,14 +500,23 @@ fn merge_databases(baseline: &Path, source: &Path) -> Result<MergeReport, String
     // skills 渐进披露列:旧库 ALTER 补齐,保证两侧 schema 一致(比对在 DDL 补齐之后)
     ensure_skills_progressive_columns(&conn)
         .map_err(|e| format!("补齐基线库 skills 渐进披露列失败: {e}"))?;
+    // tasks task_mode 列(批次 4 六模式):旧库 ALTER 补齐,保证两侧 schema 一致
+    ensure_tasks_task_mode_column(&conn)
+        .map_err(|e| format!("补齐基线库 tasks task_mode 列失败: {e}"))?;
+    // task_llm_calls finish_reason 列(可观测性问题①):旧库 ALTER 补齐
+    ensure_task_llm_calls_finish_reason_column(&conn)
+        .map_err(|e| format!("补齐基线库 task_llm_calls finish_reason 列失败: {e}"))?;
     conn.execute_batch(CONTRACT_CHANGELOG_DDL)
         .map_err(|e| format!("补齐基线库 contract_changelog 表失败: {e}"))?;
     conn.execute_batch(KALEIDO_STATE_DDL)
         .map_err(|e| format!("补齐基线库 kaleido 契约运行态表失败: {e}"))?;
     conn.execute_batch(MEMORY_ENTRIES_DDL)
         .map_err(|e| format!("补齐基线库 memory_entries 表失败: {e}"))?;
-    let source_conn = Connection::open(source)
-        .map_err(|e| format!("打开源快照补齐 schema 失败: {e}"))?;
+    // 任务消息表(批次 R2):旧库缺失才建,保证两侧 schema 一致(比对在 DDL 补齐之后)
+    ensure_task_messages_table(&conn)
+        .map_err(|e| format!("补齐基线库 task_messages 表失败: {e}"))?;
+    let source_conn =
+        Connection::open(source).map_err(|e| format!("打开源快照补齐 schema 失败: {e}"))?;
     source_conn
         .execute_batch(SCOPE_VARIABLES_DDL)
         .map_err(|e| format!("补齐源快照 scope_variables 表失败: {e}"))?;
@@ -390,6 +533,10 @@ fn merge_databases(baseline: &Path, source: &Path) -> Result<MergeReport, String
         .map_err(|e| format!("补齐源快照 llm_requests 缓存列失败: {e}"))?;
     ensure_skills_progressive_columns(&source_conn)
         .map_err(|e| format!("补齐源快照 skills 渐进披露列失败: {e}"))?;
+    ensure_tasks_task_mode_column(&source_conn)
+        .map_err(|e| format!("补齐源快照 tasks task_mode 列失败: {e}"))?;
+    ensure_task_llm_calls_finish_reason_column(&source_conn)
+        .map_err(|e| format!("补齐源快照 task_llm_calls finish_reason 列失败: {e}"))?;
     source_conn
         .execute_batch(CONTRACT_CHANGELOG_DDL)
         .map_err(|e| format!("补齐源快照 contract_changelog 表失败: {e}"))?;
@@ -399,16 +546,23 @@ fn merge_databases(baseline: &Path, source: &Path) -> Result<MergeReport, String
     source_conn
         .execute_batch(MEMORY_ENTRIES_DDL)
         .map_err(|e| format!("补齐源快照 memory_entries 表失败: {e}"))?;
+    ensure_task_messages_table(&source_conn)
+        .map_err(|e| format!("补齐源快照 task_messages 表失败: {e}"))?;
     drop(source_conn);
-    conn.execute("ATTACH DATABASE ?1 AS src", [source.to_string_lossy().as_ref()])
-        .map_err(|e| format!("附加源快照失败: {e}"))?;
+    conn.execute(
+        "ATTACH DATABASE ?1 AS src",
+        [source.to_string_lossy().as_ref()],
+    )
+    .map_err(|e| format!("附加源快照失败: {e}"))?;
 
     let baseline_schema = schema_map(&conn, "main")?;
     let source_schema = schema_map(&conn, "src")?;
     for (table, sql) in &source_schema {
         match baseline_schema.get(table) {
             Some(existing) if normalize_sql(existing) != normalize_sql(sql) => {
-                return Err(format!("表 {table} 的 schema 冲突,已停止合并并保留两份原数据"));
+                return Err(format!(
+                    "表 {table} 的 schema 冲突,已停止合并并保留两份原数据"
+                ));
             }
             None => {
                 return Err(format!("基线缺少源表 {table},已停止合并并保留两份原数据"));
@@ -418,7 +572,9 @@ fn merge_databases(baseline: &Path, source: &Path) -> Result<MergeReport, String
     }
 
     let order = dependency_order(&conn, source_schema.keys().cloned().collect())?;
-    let tx = conn.transaction().map_err(|e| format!("开始合并事务失败: {e}"))?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("开始合并事务失败: {e}"))?;
     let mut report = MergeReport::default();
     let mut id_maps: HashMap<(String, String), HashMap<String, String>> = HashMap::new();
     for table in order {
@@ -452,7 +608,10 @@ fn merge_table(
         .collect::<Vec<_>>()
         .join(", ");
     let mut source_stmt = tx
-        .prepare(&format!("SELECT {quoted_columns} FROM src.{}", quote_ident(table)))
+        .prepare(&format!(
+            "SELECT {quoted_columns} FROM src.{}",
+            quote_ident(table)
+        ))
         .map_err(|e| format!("读取源表 {table} 失败: {e}"))?;
     let source_rows = source_stmt
         .query_map([], |row| {
@@ -496,7 +655,8 @@ fn merge_table(
                 stats.deduplicated += 1;
                 continue;
             }
-            if let Some(equivalent_key) = find_equivalent_key(tx, table, &columns, pk_index, &row)? {
+            if let Some(equivalent_key) = find_equivalent_key(tx, table, &columns, pk_index, &row)?
+            {
                 id_maps
                     .entry((table.to_string(), columns[pk_index].name.clone()))
                     .or_default()
@@ -559,10 +719,14 @@ fn remap_foreign_keys(
     id_maps: &HashMap<(String, String), HashMap<String, String>>,
 ) {
     for foreign_key in foreign_keys {
-        let Some(index) = columns.iter().position(|column| column.name == foreign_key.from) else {
+        let Some(index) = columns
+            .iter()
+            .position(|column| column.name == foreign_key.from)
+        else {
             continue;
         };
-        let Some(mapping) = id_maps.get(&(foreign_key.parent_table.clone(), foreign_key.to.clone()))
+        let Some(mapping) =
+            id_maps.get(&(foreign_key.parent_table.clone(), foreign_key.to.clone()))
         else {
             continue;
         };
@@ -591,14 +755,22 @@ fn find_equivalent_key(
     pk_index: usize,
     values: &[Value],
 ) -> Result<Option<String>, String> {
-    let non_key = (0..columns.len()).filter(|index| *index != pk_index).collect::<Vec<_>>();
+    let non_key = (0..columns.len())
+        .filter(|index| *index != pk_index)
+        .collect::<Vec<_>>();
     if non_key.is_empty() {
         return Ok(None);
     }
     let conditions = non_key
         .iter()
         .enumerate()
-        .map(|(position, index)| format!("{} IS ?{}", quote_ident(&columns[*index].name), position + 1))
+        .map(|(position, index)| {
+            format!(
+                "{} IS ?{}",
+                quote_ident(&columns[*index].name),
+                position + 1
+            )
+        })
         .collect::<Vec<_>>()
         .join(" AND ");
     let params = non_key.iter().map(|index| values[*index].clone());
@@ -607,10 +779,21 @@ fn find_equivalent_key(
         quote_ident(&columns[pk_index].name),
         quote_ident(table)
     );
-    let mut stmt = tx.prepare(&sql).map_err(|e| format!("检查表 {table} 等价行失败: {e}"))?;
-    let mut rows = stmt.query(params_from_iter(params)).map_err(|e| format!("查询表 {table} 等价行失败: {e}"))?;
-    match rows.next().map_err(|e| format!("读取表 {table} 等价行失败: {e}"))? {
-        Some(row) => scalar_text(&row.get::<_, Value>(0).map_err(|e| format!("读取表 {table} 等价主键失败: {e}"))?).map(Some),
+    let mut stmt = tx
+        .prepare(&sql)
+        .map_err(|e| format!("检查表 {table} 等价行失败: {e}"))?;
+    let mut rows = stmt
+        .query(params_from_iter(params))
+        .map_err(|e| format!("查询表 {table} 等价行失败: {e}"))?;
+    match rows
+        .next()
+        .map_err(|e| format!("读取表 {table} 等价行失败: {e}"))?
+    {
+        Some(row) => scalar_text(
+            &row.get::<_, Value>(0)
+                .map_err(|e| format!("读取表 {table} 等价主键失败: {e}"))?,
+        )
+        .map(Some),
         None => Ok(None),
     }
 }
@@ -630,7 +813,9 @@ fn select_by_key(
     let conditions = pk_indices
         .iter()
         .enumerate()
-        .map(|(position, index)| format!("{} = ?{}", quote_ident(&columns[*index].name), position + 1))
+        .map(|(position, index)| {
+            format!("{} = ?{}", quote_ident(&columns[*index].name), position + 1)
+        })
         .collect::<Vec<_>>()
         .join(" AND ");
     let params = pk_indices.iter().map(|index| values[*index].clone());
@@ -643,7 +828,10 @@ fn select_by_key(
     let mut rows = stmt
         .query(params_from_iter(params))
         .map_err(|e| format!("查询表 {table} 主键失败: {e}"))?;
-    match rows.next().map_err(|e| format!("读取表 {table} 主键失败: {e}"))? {
+    match rows
+        .next()
+        .map_err(|e| format!("读取表 {table} 主键失败: {e}"))?
+    {
         Some(row) => (0..columns.len())
             .map(|index| row.get::<_, Value>(index))
             .collect::<rusqlite::Result<Vec<_>>>()
@@ -660,7 +848,9 @@ fn schema_map(conn: &Connection, schema: &str) -> Result<BTreeMap<String, String
         ))
         .map_err(|e| format!("读取 {schema} schema 失败: {e}"))?;
     let rows = stmt
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
         .map_err(|e| format!("遍历 {schema} schema 失败: {e}"))?;
     rows.collect::<rusqlite::Result<BTreeMap<_, _>>>()
         .map_err(|e| format!("解析 {schema} schema 失败: {e}"))
@@ -718,7 +908,10 @@ fn dependency_order(conn: &Connection, tables: Vec<String>) -> Result<Vec<String
 
 fn table_columns(conn: &Connection, schema: &str, table: &str) -> Result<Vec<Column>, String> {
     let mut stmt = conn
-        .prepare(&format!("PRAGMA {schema}.table_info({})", quote_ident(table)))
+        .prepare(&format!(
+            "PRAGMA {schema}.table_info({})",
+            quote_ident(table)
+        ))
         .map_err(|e| format!("读取表 {table} 列失败: {e}"))?;
     let rows = stmt
         .query_map([], |row| {
@@ -734,7 +927,10 @@ fn table_columns(conn: &Connection, schema: &str, table: &str) -> Result<Vec<Col
 
 fn foreign_keys(conn: &Connection, schema: &str, table: &str) -> Result<Vec<ForeignKey>, String> {
     let mut stmt = conn
-        .prepare(&format!("PRAGMA {schema}.foreign_key_list({})", quote_ident(table)))
+        .prepare(&format!(
+            "PRAGMA {schema}.foreign_key_list({})",
+            quote_ident(table)
+        ))
         .map_err(|e| format!("读取表 {table} 外键失败: {e}"))?;
     let rows = stmt
         .query_map([], |row| {
@@ -764,7 +960,9 @@ fn copy_non_database_tree(
     merge: bool,
     report: &mut MergeReport,
 ) -> Result<(), String> {
-    for entry in fs::read_dir(source).map_err(|e| format!("读取目录 {} 失败: {e}", source.display()))? {
+    for entry in
+        fs::read_dir(source).map_err(|e| format!("读取目录 {} 失败: {e}", source.display()))?
+    {
         let entry = entry.map_err(|e| format!("读取目录项失败: {e}"))?;
         let name = entry.file_name();
         let name_text = name.to_string_lossy();
@@ -805,14 +1003,20 @@ fn merge_json_configs(
     work: &Path,
     report: &mut MergeReport,
 ) -> Result<(), String> {
-    for name in ["settings.json", "prompt_floors.json", "agent_flows.json", "tool_permissions.json"] {
+    for name in [
+        "settings.json",
+        "prompt_floors.json",
+        "agent_flows.json",
+        "tool_permissions.json",
+    ] {
         let baseline_file = baseline.join(name);
         let source_file = source.join(name);
         if !source_file.is_file() {
             continue;
         }
         if !baseline_file.is_file() {
-            fs::copy(&source_file, work.join(name)).map_err(|e| format!("复制配置 {name} 失败: {e}"))?;
+            fs::copy(&source_file, work.join(name))
+                .map_err(|e| format!("复制配置 {name} 失败: {e}"))?;
             continue;
         }
         let baseline_value: JsonValue = serde_json::from_slice(
@@ -826,14 +1030,19 @@ fn merge_json_configs(
         let merged = merge_json_values(baseline_value, source_value, report);
         fs::write(
             work.join(name),
-            serde_json::to_vec_pretty(&merged).map_err(|e| format!("序列化配置 {name} 失败: {e}"))?,
+            serde_json::to_vec_pretty(&merged)
+                .map_err(|e| format!("序列化配置 {name} 失败: {e}"))?,
         )
         .map_err(|e| format!("写入配置 {name} 失败: {e}"))?;
     }
     Ok(())
 }
 
-fn merge_json_values(baseline: JsonValue, source: JsonValue, report: &mut MergeReport) -> JsonValue {
+fn merge_json_values(
+    baseline: JsonValue,
+    source: JsonValue,
+    report: &mut MergeReport,
+) -> JsonValue {
     match (baseline, source) {
         (JsonValue::Object(mut baseline), JsonValue::Object(source)) => {
             for (key, value) in source {
@@ -864,7 +1073,12 @@ fn merge_json_values(baseline: JsonValue, source: JsonValue, report: &mut MergeR
     }
 }
 
-fn rewrite_known_paths(db: &Path, baseline: &Path, source: &Path, work: &Path) -> Result<(), String> {
+fn rewrite_known_paths(
+    db: &Path,
+    baseline: &Path,
+    source: &Path,
+    work: &Path,
+) -> Result<(), String> {
     let conn = Connection::open(db).map_err(|e| format!("打开工作数据库修正路径失败: {e}"))?;
     let columns = table_columns(&conn, "main", "characters")?;
     if !columns.iter().any(|column| column.name == "file_path")
@@ -900,7 +1114,10 @@ fn validate_database(db: &Path, report: &mut MergeReport) -> Result<(), String> 
         .map_err(|e| format!("读取 foreign_key_check 失败: {e}"))?
         .count();
     if report.foreign_key_errors != 0 {
-        return Err(format!("合并数据库存在 {} 个外键错误", report.foreign_key_errors));
+        return Err(format!(
+            "合并数据库存在 {} 个外键错误",
+            report.foreign_key_errors
+        ));
     }
     Ok(())
 }
@@ -914,7 +1131,10 @@ fn same_file(left: &Path, right: &Path) -> Result<bool, String> {
 fn collision_path(original: &Path, source: &Path) -> Result<PathBuf, String> {
     let bytes = fs::read(source).map_err(|e| format!("读取冲突文件失败: {e}"))?;
     let hash = stable_hash(&bytes);
-    let stem = original.file_stem().and_then(|value| value.to_str()).unwrap_or("file");
+    let stem = original
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("file");
     let extension = original.extension().and_then(|value| value.to_str());
     let name = match extension {
         Some(extension) => format!("{stem}.merged-{hash:016x}.{extension}"),
@@ -933,7 +1153,10 @@ fn stable_hash(bytes: &[u8]) -> u64 {
 }
 
 fn is_structured_config(name: &str) -> bool {
-    matches!(name, "settings.json" | "prompt_floors.json" | "agent_flows.json" | "tool_permissions.json")
+    matches!(
+        name,
+        "settings.json" | "prompt_floors.json" | "agent_flows.json" | "tool_permissions.json"
+    )
 }
 
 fn scalar_text(value: &Value) -> Result<String, String> {
@@ -1027,6 +1250,64 @@ mod tests {
         fs::remove_dir_all(dir).ok();
     }
 
+    /// task_mode 列迁移(批次 4 六模式):旧版 tasks(无 task_mode 列)补列成功、
+    /// 旧行默认 'legacy'、幂等可重复执行。
+    #[test]
+    fn ensure_tasks_task_mode_column_adds_and_is_idempotent() {
+        let dir = temp_dir("tasks-task-mode");
+        let db = dir.join(DATABASE_FILE);
+        let conn = Connection::open(&db).unwrap();
+        // 旧版表结构(批次 4 之前):无 task_mode 列
+        conn.execute_batch(
+            "CREATE TABLE tasks (
+              id           TEXT PRIMARY KEY,
+              title        TEXT NOT NULL,
+              status       TEXT NOT NULL DEFAULT 'pending',
+              plan         TEXT NOT NULL DEFAULT '[]',
+              result       TEXT NOT NULL DEFAULT '',
+              error        TEXT NOT NULL DEFAULT '',
+              character_id TEXT,
+              created_at   TEXT NOT NULL,
+              updated_at   TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, title, created_at, updated_at) VALUES ('t1', '旧行', 'c', 'u')",
+            [],
+        )
+        .unwrap();
+
+        ensure_tasks_task_mode_column(&conn).unwrap();
+        let columns = table_columns(&conn, "main", "tasks")
+            .unwrap()
+            .into_iter()
+            .map(|c| c.name)
+            .collect::<Vec<_>>();
+        assert!(
+            columns.iter().any(|c| c == "task_mode"),
+            "迁移后应包含 task_mode 列,实际: {columns:?}"
+        );
+        // 旧行零迁移成本:默认 'legacy'
+        let mode: String = conn
+            .query_row("SELECT task_mode FROM tasks WHERE id = 't1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(mode, "legacy", "旧行 task_mode 应默认 legacy");
+
+        // 幂等:重复执行不报错、不产生重复列
+        ensure_tasks_task_mode_column(&conn).unwrap();
+        let dup = table_columns(&conn, "main", "tasks")
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.name == "task_mode")
+            .count();
+        assert_eq!(dup, 1, "重复迁移不应产生重复列");
+        drop(conn);
+        fs::remove_dir_all(dir).ok();
+    }
+
     /// 迁移后旧表 schema 应与新版 CREATE_TABLES 建出的表 normalize 后一致
     /// (跨库合并 schema 一致性比对依赖这一点)。
     /// skills 渐进披露列迁移(落地项 3):旧版 skills(无 allowed_tools 等列)补列成功、
@@ -1106,6 +1387,183 @@ mod tests {
         fs::remove_dir_all(dir).ok();
     }
 
+    /// task_messages 表迁移(批次 R2 多轮用户输入):旧库(无此表)建表成功、
+    /// 幂等可重复执行、schema 与新版 CREATE_TABLES 建出的表 normalize 后一致
+    /// (合并比对依赖)、外键 ON DELETE CASCADE 生效(删任务级联清消息)。
+    #[test]
+    fn ensure_task_messages_table_creates_and_is_idempotent() {
+        let dir = temp_dir("task-messages");
+        let db = dir.join(DATABASE_FILE);
+        let conn = Connection::open(&db).unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        // 旧版库(批次 R2 之前):只有 tasks 表,无 task_messages
+        conn.execute_batch(
+            "CREATE TABLE tasks (
+              id TEXT PRIMARY KEY, title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+              plan TEXT NOT NULL DEFAULT '[]', result TEXT NOT NULL DEFAULT '',
+              error TEXT NOT NULL DEFAULT '', character_id TEXT,
+              created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        conn.execute("INSERT INTO tasks (id, title, created_at, updated_at) VALUES ('t1', '旧任务', 'c', 'u')", [])
+            .unwrap();
+
+        ensure_task_messages_table(&conn).unwrap();
+        // 建表后可插入/查询;列齐全(id/task_id/role/kind/content/created_at)
+        conn.execute(
+            "INSERT INTO task_messages (id, task_id, role, kind, content, created_at) \
+             VALUES ('m1', 't1', 'user', 'followup', '再补充一点', 'c')",
+            [],
+        )
+        .unwrap();
+        let kind: String = conn
+            .query_row("SELECT kind FROM task_messages WHERE id = 'm1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(kind, "followup");
+
+        // 幂等:重复执行不报错、数据保留
+        ensure_task_messages_table(&conn).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM task_messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "重复迁移不应丢数据");
+
+        // 迁移后 schema 与新版 CREATE_TABLES 建出的表 normalize 后一致(合并比对依赖)
+        let migrated = normalize_sql(
+            conn.query_row(
+                "SELECT sql FROM sqlite_schema WHERE type='table' AND name='task_messages'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap()
+            .as_str(),
+        );
+        let fresh_conn = Connection::open_in_memory().unwrap();
+        fresh_conn
+            .execute_batch(crate::models::db::create_tables_sql())
+            .unwrap();
+        let fresh = normalize_sql(
+            fresh_conn
+                .query_row(
+                    "SELECT sql FROM sqlite_schema WHERE type='table' AND name='task_messages'",
+                    [],
+                    |r| r.get::<_, String>(0),
+                )
+                .unwrap()
+                .as_str(),
+        );
+        assert_eq!(
+            migrated, fresh,
+            "迁移后 task_messages schema 应与新建库一致"
+        );
+
+        // 外键级联:删任务 → 消息一并删除(ON DELETE CASCADE)
+        conn.execute("DELETE FROM tasks WHERE id = 't1'", [])
+            .unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM task_messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "删除任务应级联清消息");
+        drop(conn);
+        fs::remove_dir_all(dir).ok();
+    }
+
+    /// finish_reason 列迁移(可观测性问题①):旧版 task_llm_calls(无 finish_reason 列)
+    /// 补列成功、旧行默认 ''(未知/未下发,而非误判 stop)、幂等可重复执行,
+    /// 且迁移后 schema 与新版 CREATE_TABLES 建出的表 normalize 后一致(合并比对依赖)。
+    #[test]
+    fn ensure_task_llm_calls_finish_reason_column_adds_and_is_idempotent() {
+        let dir = temp_dir("llm-calls-finish-reason");
+        let db = dir.join(DATABASE_FILE);
+        let conn = Connection::open(&db).unwrap();
+        // 旧版表结构(可观测性修复之前):无 finish_reason 列
+        conn.execute_batch(
+            "CREATE TABLE tasks (
+              id TEXT PRIMARY KEY, title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+              plan TEXT NOT NULL DEFAULT '[]', result TEXT NOT NULL DEFAULT '',
+              error TEXT NOT NULL DEFAULT '', character_id TEXT,
+              created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE task_llm_calls (
+              id                TEXT PRIMARY KEY,
+              task_id           TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+              phase             TEXT NOT NULL,
+              step_index        INTEGER,
+              model             TEXT NOT NULL,
+              prompt_summary    TEXT NOT NULL DEFAULT '',
+              response_summary  TEXT NOT NULL DEFAULT '',
+              prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+              completion_tokens INTEGER NOT NULL DEFAULT 0,
+              reasoning_tokens  INTEGER NOT NULL DEFAULT 0,
+              elapsed_ms        INTEGER NOT NULL DEFAULT 0,
+              status            TEXT NOT NULL DEFAULT 'ok',
+              created_at        TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        conn.execute("INSERT INTO tasks (id, title, created_at, updated_at) VALUES ('t1', '旧任务', 'c', 'u')", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO task_llm_calls (id, task_id, phase, model, created_at) VALUES ('c1', 't1', 'step', 'm', 'c')",
+            [],
+        )
+        .unwrap();
+
+        ensure_task_llm_calls_finish_reason_column(&conn).unwrap();
+        // 旧行零迁移成本:finish_reason 默认 ''(未知,不等于 stop,避免旧数据被误读为正常收尾)
+        let reason: String = conn
+            .query_row(
+                "SELECT finish_reason FROM task_llm_calls WHERE id = 'c1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(reason, "", "旧行 finish_reason 应默认空串(未知)");
+
+        // 幂等:重复执行不报错、不产生重复列
+        ensure_task_llm_calls_finish_reason_column(&conn).unwrap();
+        let dup = table_columns(&conn, "main", "task_llm_calls")
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.name == "finish_reason")
+            .count();
+        assert_eq!(dup, 1, "重复迁移不应产生重复列");
+
+        // 迁移后 schema 与新版 CREATE_TABLES 建出的表 normalize 后一致(合并比对依赖)
+        let migrated = normalize_sql(
+            conn.query_row(
+                "SELECT sql FROM sqlite_schema WHERE type='table' AND name='task_llm_calls'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap()
+            .as_str(),
+        );
+        let fresh_conn = Connection::open_in_memory().unwrap();
+        fresh_conn
+            .execute_batch(crate::models::db::create_tables_sql())
+            .unwrap();
+        let fresh = normalize_sql(
+            fresh_conn
+                .query_row(
+                    "SELECT sql FROM sqlite_schema WHERE type='table' AND name='task_llm_calls'",
+                    [],
+                    |r| r.get::<_, String>(0),
+                )
+                .unwrap()
+                .as_str(),
+        );
+        assert_eq!(
+            migrated, fresh,
+            "迁移后 task_llm_calls schema 应与新建库一致"
+        );
+        drop(conn);
+        fs::remove_dir_all(dir).ok();
+    }
+
     #[test]
     fn ensure_llm_requests_usage_columns_matches_fresh_schema() {
         let dir = temp_dir("usage-schema");
@@ -1124,19 +1582,30 @@ mod tests {
         )
         .unwrap();
         ensure_llm_requests_usage_columns(&conn).unwrap();
-        let migrated = normalize_sql(conn.query_row(
-            "SELECT sql FROM sqlite_schema WHERE type='table' AND name='llm_requests'",
-            [],
-            |r| r.get::<_, String>(0),
-        ).unwrap().as_str());
+        let migrated = normalize_sql(
+            conn.query_row(
+                "SELECT sql FROM sqlite_schema WHERE type='table' AND name='llm_requests'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap()
+            .as_str(),
+        );
 
         let fresh_conn = Connection::open_in_memory().unwrap();
-        fresh_conn.execute_batch(crate::models::db::create_tables_sql()).unwrap();
-        let fresh = normalize_sql(fresh_conn.query_row(
-            "SELECT sql FROM sqlite_schema WHERE type='table' AND name='llm_requests'",
-            [],
-            |r| r.get::<_, String>(0),
-        ).unwrap().as_str());
+        fresh_conn
+            .execute_batch(crate::models::db::create_tables_sql())
+            .unwrap();
+        let fresh = normalize_sql(
+            fresh_conn
+                .query_row(
+                    "SELECT sql FROM sqlite_schema WHERE type='table' AND name='llm_requests'",
+                    [],
+                    |r| r.get::<_, String>(0),
+                )
+                .unwrap()
+                .as_str(),
+        );
         assert_eq!(
             migrated, fresh,
             "迁移后 schema 应与新建表 normalize 后一致(迁移: {migrated} / 新建: {fresh})"
@@ -1154,9 +1623,15 @@ mod tests {
              CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES sessions(id), content TEXT NOT NULL);",
         )
         .unwrap();
-        conn.execute("INSERT INTO characters VALUES('same', ?1)", [marker]).unwrap();
-        conn.execute("INSERT INTO sessions VALUES('session', 'same')", []).unwrap();
-        conn.execute("INSERT INTO messages(id, session_id, content) VALUES(1, 'session', ?1)", [marker]).unwrap();
+        conn.execute("INSERT INTO characters VALUES('same', ?1)", [marker])
+            .unwrap();
+        conn.execute("INSERT INTO sessions VALUES('session', 'same')", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO messages(id, session_id, content) VALUES(1, 'session', ?1)",
+            [marker],
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1164,12 +1639,21 @@ mod tests {
         let dir = temp_dir("snapshot");
         let db = dir.join(DATABASE_FILE);
         let conn = Connection::open(&db).unwrap();
-        conn.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE t(id INTEGER PRIMARY KEY, value TEXT);").unwrap();
-        conn.execute("INSERT INTO t(value) VALUES('wal-data')", []).unwrap();
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; CREATE TABLE t(id INTEGER PRIMARY KEY, value TEXT);",
+        )
+        .unwrap();
+        conn.execute("INSERT INTO t(value) VALUES('wal-data')", [])
+            .unwrap();
         let snapshot = dir.join("snapshot.db");
         snapshot_database(&db, &snapshot).unwrap();
         let snapshot_conn = Connection::open(snapshot).unwrap();
-        assert_eq!(snapshot_conn.query_row("SELECT COUNT(*) FROM t", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+        assert_eq!(
+            snapshot_conn
+                .query_row("SELECT COUNT(*) FROM t", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
         drop(conn);
         fs::remove_dir_all(dir).ok();
     }
@@ -1186,15 +1670,40 @@ mod tests {
         let report = merge_data_dirs(&baseline, &source, &first).unwrap();
         assert_eq!(report.foreign_key_errors, 0);
         let conn = Connection::open(first.join(DATABASE_FILE)).unwrap();
-        assert_eq!(conn.query_row("SELECT COUNT(*) FROM characters", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
-        assert_eq!(conn.query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
-        assert_eq!(conn.query_row("SELECT COUNT(*) FROM messages", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM characters", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM sessions", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM messages", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
         drop(conn);
 
         merge_data_dirs(&first, &source, &second).unwrap();
         let conn = Connection::open(second.join(DATABASE_FILE)).unwrap();
-        assert_eq!(conn.query_row("SELECT COUNT(*) FROM characters", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
-        assert_eq!(conn.query_row("SELECT COUNT(*) FROM messages", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM characters", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM messages", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
 
         fs::remove_dir_all(baseline).ok();
         fs::remove_dir_all(source).ok();

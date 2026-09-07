@@ -29,9 +29,7 @@ pub async fn list(
     let records = match state.db_call(move || svc.list(&id, limit)).await {
         Err(e) => return db_err(&e),
         Ok(Ok(records)) => records,
-        Ok(Err(e)) => {
-            return err_json(e, StatusCode::INTERNAL_SERVER_ERROR)
-        }
+        Ok(Err(e)) => return err_json(e, StatusCode::INTERNAL_SERVER_ERROR),
     };
     let entries = match records
         .iter()
@@ -40,7 +38,10 @@ pub async fn list(
     {
         Ok(entries) => entries,
         Err(e) => {
-            return err_json(format!("序列化历史记录失败: {e}"), StatusCode::INTERNAL_SERVER_ERROR)
+            return err_json(
+                format!("序列化历史记录失败: {e}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
         }
     };
     Json(json!({ "entries": entries })).into_response()
@@ -65,12 +66,8 @@ pub async fn rollback(
     let record = match state.db_call(move || svc.get(&id_q, seq)).await {
         Err(e) => return db_err(&e),
         Ok(Ok(Some(record))) => record,
-        Ok(Ok(None)) => {
-            return err_json("历史记录不存在", StatusCode::NOT_FOUND)
-        }
-        Ok(Err(e)) => {
-            return err_json(e, StatusCode::INTERNAL_SERVER_ERROR)
-        }
+        Ok(Ok(None)) => return err_json("历史记录不存在", StatusCode::NOT_FOUND),
+        Ok(Err(e)) => return err_json(e, StatusCode::INTERNAL_SERVER_ERROR),
     };
     // 3. 该记录无可恢复内容(如 remove 记录)
     let Some(after) = record.after else {
@@ -162,10 +159,8 @@ mod tests {
     fn app() -> (axum::Router, Arc<AppState>) {
         let mut config = crate::config::AppConfig::from_env();
         config.auth_required = false;
-        let dir = std::env::temp_dir().join(format!(
-            "kedai-contract-history-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("kedai-contract-history-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         config.data_dir = dir;
         config.connector = "mock".into();
@@ -228,8 +223,13 @@ mod tests {
             .await
             .unwrap();
         let status = resp.status();
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
     }
 
     async fn get_history(router: &axum::Router, id: &str, limit: usize) -> (StatusCode, Value) {
@@ -237,15 +237,22 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/api/characters/{id}/contract/history?limit={limit}"))
+                    .uri(format!(
+                        "/api/characters/{id}/contract/history?limit={limit}"
+                    ))
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         let status = resp.status();
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
     }
 
     async fn post_rollback(router: &axum::Router, id: &str, body: &Value) -> (StatusCode, Value) {
@@ -262,8 +269,13 @@ mod tests {
             .await
             .unwrap();
         let status = resp.status();
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
     }
 
     /// 1+2:PUT 首次挂载记 contract_init;再次 PUT 记 manual,且 before 为上一版。
@@ -361,11 +373,7 @@ mod tests {
         assert_eq!(last.op_kind, "replace");
         assert_eq!(last.before.as_ref().unwrap(), &v2);
         assert_eq!(last.after.as_ref().unwrap(), &v2);
-        assert!(last
-            .rationale
-            .as_deref()
-            .unwrap()
-            .contains("回滚自 seq 2"));
+        assert!(last.rationale.as_deref().unwrap().contains("回滚自 seq 2"));
 
         // 缓存已失效:registry 直接读到恢复后的契约
         let loaded = state.engine.contract_registry.load("c-rb").unwrap();
@@ -431,7 +439,11 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         assert!(
-            state.contract_changelog.list("c-noc", 10).unwrap().is_empty(),
+            state
+                .contract_changelog
+                .list("c-noc", 10)
+                .unwrap()
+                .is_empty(),
             "无契约角色的 DELETE 不应落账"
         );
     }

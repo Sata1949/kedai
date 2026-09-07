@@ -13,7 +13,12 @@ fn test_app() -> &'static axum::Router {
     APP.get_or_init(|| build_test_app().expect("构建测试应用失败"))
 }
 
-async fn send_json(app: &axum::Router, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
+async fn send_json(
+    app: &axum::Router,
+    method: &str,
+    path: &str,
+    body: Value,
+) -> (StatusCode, Value) {
     let req = Request::builder()
         .method(method)
         .uri(path)
@@ -23,7 +28,10 @@ async fn send_json(app: &axum::Router, method: &str, path: &str, body: Value) ->
     let resp = app.clone().oneshot(req).await.unwrap();
     let status = resp.status();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
 }
 
 async fn upload_character(app: &axum::Router, name: &str) -> Value {
@@ -75,11 +83,20 @@ async fn concurrent_reads_all_succeed() {
         let app_h = app.clone();
         let sid_h = sid.clone();
         handles.push(tokio::spawn(async move {
-            send_json(&app_h, "GET", &format!("/api/chat/history?session_id={sid_h}"), json!({})).await.0
+            send_json(
+                &app_h,
+                "GET",
+                &format!("/api/chat/history?session_id={sid_h}"),
+                json!({}),
+            )
+            .await
+            .0
         }));
         let app_c = app.clone();
         handles.push(tokio::spawn(async move {
-            send_json(&app_c, "GET", "/api/characters", json!({})).await.0
+            send_json(&app_c, "GET", "/api/characters", json!({}))
+                .await
+                .0
         }));
     }
     for h in handles {
@@ -109,7 +126,14 @@ async fn reads_during_writes_stay_healthy() {
         let cid = cid.clone();
         readers.push(tokio::spawn(async move {
             let s1 = send_json(&app, "GET", "/api/characters", json!({})).await.0;
-            let s2 = send_json(&app, "GET", &format!("/api/chat/sessions?character_id={cid}"), json!({})).await.0;
+            let s2 = send_json(
+                &app,
+                "GET",
+                &format!("/api/chat/sessions?character_id={cid}"),
+                json!({}),
+            )
+            .await
+            .0;
             (s1, s2)
         }));
     }

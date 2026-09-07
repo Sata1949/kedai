@@ -4,8 +4,9 @@ pub mod api;
 pub mod config;
 pub mod connectors;
 pub mod contracts;
-pub mod models;
+pub mod mcp;
 pub mod migration;
+pub mod models;
 pub mod parsing;
 pub mod plugins;
 pub mod scripts;
@@ -103,6 +104,10 @@ pub async fn run_server(config: config::AppConfig) -> Result<(), String> {
         format!("初始化失败: {e}")
     })?;
 
+    // MCP stdio 服务器装配(批次 6.2,L3 隔离):mcp_enabled=false 时完全跳过;
+    // 单台握手最坏 30s 超时(有界),失败仅禁用该台,不阻断启动。
+    state.start_mcp().await;
+
     let addr = format!("{}:{}", state.config.host, state.config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
         utils::logger::error(
@@ -117,9 +122,18 @@ pub async fn run_server(config: config::AppConfig) -> Result<(), String> {
 
     let router = api::build_router(state.clone());
 
+    // 有效模型以合并 settings 后为准(「Kedai server starting」行的 env model 可能因设置页覆盖而失真)
+    let effective_model = state
+        .model
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     utils::logger::info(
         "Kedai 已启动",
-        &[("url", Value::String(format!("http://{addr}/")))],
+        &[
+            ("url", Value::String(format!("http://{addr}/"))),
+            ("model", Value::String(effective_model)),
+        ],
     );
     println!("[OK] Kedai 已启动 → http://{addr}/");
 
@@ -129,7 +143,11 @@ pub async fn run_server(config: config::AppConfig) -> Result<(), String> {
     )
     .with_graceful_shutdown(shutdown_signal())
     .await
-    .map_err(|e| format!("服务运行出错: {e}"))
+    .map_err(|e| format!("服务运行出错: {e}"))?;
+
+    // 优雅关闭兜底:显式关停 MCP 子进程(各句柄 kill_on_drop 双保险,防孤儿)
+    state.mcp.shutdown().await;
+    Ok(())
 }
 
 /// 优雅关闭:Ctrl+C(命令行场景)。GUI 进程无控制台信号,此 future 不会完成。

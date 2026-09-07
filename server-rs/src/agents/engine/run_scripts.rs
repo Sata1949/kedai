@@ -11,34 +11,34 @@ impl AgentEngine {
         let connector = self.connector.clone();
         Arc::new(move |messages, params, abort| {
             let connector = connector.clone();
-            tokio::runtime::Handle::current()
-                .block_on(async move {
-                    let conn = connector.read().await;
-                    let chunks = conn.generate(&messages, params, abort).await?;
-                    drop(conn);
-                    let mut out = String::new();
-                    let mut usage = TokenUsage::default();
-                    for chunk in chunks {
-                        match chunk {
-                            LlmStreamChunk::Token(t) => out.push_str(&t),
-                            LlmStreamChunk::Usage {
-                                prompt_tokens,
-                                completion_tokens,
-                                total_tokens,
-                                prompt_cache_hit_tokens,
-                                prompt_cache_miss_tokens,
-                            } => {
-                                usage.prompt_tokens += prompt_tokens;
-                                usage.completion_tokens += completion_tokens;
-                                usage.total_tokens += total_tokens;
-                                usage.prompt_cache_hit_tokens += prompt_cache_hit_tokens;
-                                usage.prompt_cache_miss_tokens += prompt_cache_miss_tokens;
-                            }
-                            _ => {}
+            tokio::runtime::Handle::current().block_on(async move {
+                let conn = connector.read().await;
+                let chunks = conn.generate(&messages, params, abort).await?;
+                drop(conn);
+                let mut out = String::new();
+                let mut usage = TokenUsage::default();
+                for chunk in chunks {
+                    match chunk {
+                        LlmStreamChunk::Token(t) => out.push_str(&t),
+                        LlmStreamChunk::Usage {
+                            prompt_tokens,
+                            completion_tokens,
+                            total_tokens,
+                            prompt_cache_hit_tokens,
+                            prompt_cache_miss_tokens,
+                            ..
+                        } => {
+                            usage.prompt_tokens += prompt_tokens;
+                            usage.completion_tokens += completion_tokens;
+                            usage.total_tokens += total_tokens;
+                            usage.prompt_cache_hit_tokens += prompt_cache_hit_tokens;
+                            usage.prompt_cache_miss_tokens += prompt_cache_miss_tokens;
                         }
+                        _ => {}
                     }
-                    Ok((out, usage))
-                })
+                }
+                Ok((out, usage))
+            })
         })
     }
 
@@ -50,37 +50,37 @@ impl AgentEngine {
         let prompt_inject = self.prompt_inject.clone();
         let sessions = self.sessions.clone();
         Arc::new(
-            move |kind: String, filename: String, content: String, session_id: String| {
-                match kind.as_str() {
-                    "character" => {
-                        let rec = characters.upload(content.as_bytes(), &filename)?;
-                        Ok(format!("已导入角色:{}", rec.id))
-                    }
-                    "worldbook" => {
-                        let rec = world_books.upload(content.as_bytes(), &filename, None)?;
-                        Ok(format!("已导入世界书:{}", rec.id))
-                    }
-                    "preset" => {
-                        let floors = crate::parsing::preset::parse_st_preset(&content)?;
-                        let mut svc = prompt_inject.lock().unwrap_or_else(|e| e.into_inner());
-                        let mut cfg = svc.get().clone();
-                        cfg.floors = floors.clone();
-                        svc.set(cfg)?;
-                        Ok(format!("已导入预设:{} 个楼层", floors.len()))
-                    }
-                    "chat" => {
-                        if session_id.trim().is_empty() {
-                            return Err("importRawChat 需指定会话(sessionId)".to_string());
-                        }
-                        let messages: Vec<crate::models::types::StMessage> =
-                            serde_json::from_str(&content)
-                                .map_err(|e| format!("解析聊天消息失败: {e}"))?;
-                        let n = sessions.import_chat(&session_id, messages)?;
-                        Ok(format!("已导入会话:{n} 条消息"))
-                    }
-                    "regex" => Err("importRawTavernRegex 暂不支持".to_string()),
-                    other => Err(format!("未知导入类型:{other}")),
+            move |kind: String, filename: String, content: String, session_id: String| match kind
+                .as_str()
+            {
+                "character" => {
+                    let rec = characters.upload(content.as_bytes(), &filename)?;
+                    Ok(format!("已导入角色:{}", rec.id))
                 }
+                "worldbook" => {
+                    let rec = world_books.upload(content.as_bytes(), &filename, None)?;
+                    Ok(format!("已导入世界书:{}", rec.id))
+                }
+                "preset" => {
+                    let floors = crate::parsing::preset::parse_st_preset(&content)?;
+                    let mut svc = prompt_inject.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut cfg = svc.get().clone();
+                    cfg.floors = floors.clone();
+                    svc.set(cfg)?;
+                    Ok(format!("已导入预设:{} 个楼层", floors.len()))
+                }
+                "chat" => {
+                    if session_id.trim().is_empty() {
+                        return Err("importRawChat 需指定会话(sessionId)".to_string());
+                    }
+                    let messages: Vec<crate::models::types::StMessage> =
+                        serde_json::from_str(&content)
+                            .map_err(|e| format!("解析聊天消息失败: {e}"))?;
+                    let n = sessions.import_chat(&session_id, messages)?;
+                    Ok(format!("已导入会话:{n} 条消息"))
+                }
+                "regex" => Err("importRawTavernRegex 暂不支持".to_string()),
+                other => Err(format!("未知导入类型:{other}")),
             },
         )
     }

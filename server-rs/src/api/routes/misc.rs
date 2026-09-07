@@ -39,17 +39,23 @@ pub(crate) fn misc_routes() -> Router<Arc<AppState>> {
         )
         // 角色卡远程资源界面代理(https + SSRF 防护)
         .route("/api/resource/proxy", get(resource::proxy))
-        // 任务模式(task 工作台):列表/新建/详情/执行/停止/删除
-        .route(
-            "/api/tasks",
-            get(tasks::list).post(tasks::create),
-        )
-        .route(
-            "/api/tasks/{id}",
-            get(tasks::get).delete(tasks::delete),
-        )
+        // 任务模式(task 工作台):列表/新建/详情/执行/停止/删除/全局 token 累计
+        .route("/api/tasks", get(tasks::list).post(tasks::create))
+        // 静态段优先于 {id} 参数段:全部任务 usage 累计(须在 {id} 之前注册,语义更清晰)
+        .route("/api/tasks/usage-total", get(tasks::usage_total))
+        // 任务事件 SSE 流(WP4):同为静态段,axum 静态段优先于 {id},不会被通配吃掉
+        .route("/api/tasks/events", get(tasks::events))
+        .route("/api/tasks/{id}", get(tasks::get).delete(tasks::delete))
         .route("/api/tasks/{id}/run", post(tasks::run))
         .route("/api/tasks/{id}/stop", post(tasks::stop))
+        // 计划批准(plan 模式;批次 4.3a):planned 态批准,可携修改后计划,solo 续跑
+        .route("/api/tasks/{id}/approve", post(tasks::approve))
+        // 终态追加指令(批次 R2a):done/partial/error/ended 可追加,solo 续跑续写成果
+        .route("/api/tasks/{id}/followup", post(tasks::followup))
+        // 批准环节规划对话(批次 R2b):planned 态按反馈修订计划,保持 planned 待重新批准
+        .route("/api/tasks/{id}/plan-chat", post(tasks::plan_chat))
+        // 任务 LLM 调用追踪(批次 3「调用情况」面板全量补拉)
+        .route("/api/tasks/{id}/calls", get(tasks::list_calls))
         // 音频播放器(bgm/ambient 双通道):读取 / 设置 / 播放列表
         .route("/api/audio", get(audio::get))
         .route("/api/audio/settings", put(audio::update_settings))

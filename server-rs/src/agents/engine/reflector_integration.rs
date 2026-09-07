@@ -57,6 +57,7 @@ pub(super) async fn reflect_with_llm(
                 total_tokens,
                 prompt_cache_hit_tokens,
                 prompt_cache_miss_tokens,
+                ..
             } => {
                 usage.prompt_tokens += prompt_tokens;
                 usage.completion_tokens += completion_tokens;
@@ -128,7 +129,10 @@ pub(super) async fn reflect_with_tools(
             parallel_tool_calls: None,
         };
         let connector = engine.connector.read().await;
-        let chunks = connector.generate(&messages, params, abort.clone()).await.ok()?;
+        let chunks = connector
+            .generate(&messages, params, abort.clone())
+            .await
+            .ok()?;
         drop(connector);
 
         let mut out = String::new();
@@ -150,6 +154,7 @@ pub(super) async fn reflect_with_tools(
                     total_tokens,
                     prompt_cache_hit_tokens,
                     prompt_cache_miss_tokens,
+                    ..
                 } => {
                     total_usage.prompt_tokens += prompt_tokens;
                     total_usage.completion_tokens += completion_tokens;
@@ -258,6 +263,7 @@ pub(super) async fn generate_reflect_advice(
                 total_tokens,
                 prompt_cache_hit_tokens,
                 prompt_cache_miss_tokens,
+                ..
             } => {
                 usage.prompt_tokens += prompt_tokens;
                 usage.completion_tokens += completion_tokens;

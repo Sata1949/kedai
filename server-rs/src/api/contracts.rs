@@ -91,7 +91,14 @@ pub async fn put(
             let body_c = body.clone();
             let warning = state
                 .db_call(move || {
-                    svc.append(&id_c, source, "replace", before.as_ref(), Some(&body_c), None)
+                    svc.append(
+                        &id_c,
+                        source,
+                        "replace",
+                        before.as_ref(),
+                        Some(&body_c),
+                        None,
+                    )
                 })
                 .await
                 .ok()
@@ -196,9 +203,7 @@ mod tests {
         let router = axum::Router::new()
             .route(
                 "/api/characters/{id}/contract",
-                axum::routing::get(get)
-                    .put(put)
-                    .delete(super::delete),
+                axum::routing::get(get).put(put).delete(super::delete),
             )
             .with_state(state.clone());
         (router, state)
@@ -243,8 +248,13 @@ mod tests {
             .await
             .unwrap();
         let status = resp.status();
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
     }
 
     async fn get_contract(router: &axum::Router, id: &str) -> (StatusCode, Value) {
@@ -259,8 +269,13 @@ mod tests {
             .await
             .unwrap();
         let status = resp.status();
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
     }
 
     /// PUT 写入 → GET 读回一致 → DELETE 清除后 GET 返回 null。
@@ -309,7 +324,8 @@ mod tests {
                     "name": "测试角色",
                     "description": "人设",
                     "extensions": { "tavern_helper": { "x": 1 } }
-                }).to_string()],
+                })
+                .to_string()],
             )
             .unwrap();
         }
@@ -343,7 +359,10 @@ mod tests {
 
         let (status, err) = put_contract(&router, "c-bad", &body).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert!(err["error"].as_str().unwrap().contains("dependencies cycle"));
+        assert!(err["error"]
+            .as_str()
+            .unwrap()
+            .contains("dependencies cycle"));
 
         let (_, got) = get_contract(&router, "c-bad").await;
         assert!(got["contract"].is_null(), "非法契约不应落库");

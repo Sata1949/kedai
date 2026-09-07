@@ -11,10 +11,25 @@ use serde_json::Value;
 /// Insert 已并入 Replace(前端 replace/set/insert 统一映射为 set,两者语义相同)。
 #[derive(Debug, Clone, PartialEq)]
 pub enum PatchOp {
-    Replace { path: String, value: Value, reason: Option<String> },
-    Delta { path: String, value: f64, reason: Option<String> },
-    Remove { path: String, reason: Option<String> },
-    Move { from: String, to: String, reason: Option<String> },
+    Replace {
+        path: String,
+        value: Value,
+        reason: Option<String>,
+    },
+    Delta {
+        path: String,
+        value: f64,
+        reason: Option<String>,
+    },
+    Remove {
+        path: String,
+        reason: Option<String>,
+    },
+    Move {
+        from: String,
+        to: String,
+        reason: Option<String>,
+    },
 }
 
 impl PatchOp {
@@ -182,7 +197,11 @@ fn parse_set_body(body: &str) -> Option<(String, Value, Option<String>)> {
     let mut code = body.to_string();
     let reason = if let Some(idx) = find_line_comment(&code) {
         // 先取注释内容为 owned 字符串,再截断代码(避免借用冲突)
-        let comment = code[idx + 2..].trim().trim_end_matches(';').trim().to_string();
+        let comment = code[idx + 2..]
+            .trim()
+            .trim_end_matches(';')
+            .trim()
+            .to_string();
         code.truncate(idx);
         if comment.is_empty() {
             None
@@ -381,7 +400,11 @@ mod tests {
     /// 关键:模型输出 'a\nb' 应还原为真实换行(此前只 strip_quotes 存字面两字符)。
     #[test]
     fn unescape_string_escapes() {
-        assert_eq!(parse_js_value(r"'a\nb'"), json!("a\nb"), "\\n 应还原为真实换行");
+        assert_eq!(
+            parse_js_value(r"'a\nb'"),
+            json!("a\nb"),
+            "\\n 应还原为真实换行"
+        );
         assert_eq!(parse_js_value(r"'a\rb'"), json!("a\rb"));
         assert_eq!(parse_js_value(r"'a\tb'"), json!("a\tb"));
         assert_eq!(parse_js_value(r"'a\\b'"), json!(r"a\b"));
@@ -438,7 +461,10 @@ mod tests {
     fn block_reason_extraction() {
         assert_eq!(find_block_reason("/* 原因 */"), Some("原因".to_string()));
         assert_eq!(find_block_reason("a /* b */ c"), Some("b".to_string()));
-        assert_eq!(find_block_reason("/* 多行\n注释 */"), Some("多行\n注释".to_string()));
+        assert_eq!(
+            find_block_reason("/* 多行\n注释 */"),
+            Some("多行\n注释".to_string())
+        );
         assert_eq!(find_block_reason("没有块注释"), None);
         assert_eq!(find_block_reason("/* */"), None, "空块注释无 reason");
     }
@@ -453,14 +479,31 @@ mod tests {
         ]);
         let ops = parse_patch_array(&arr).expect("应解析");
         assert_eq!(ops.len(), 1, "非数字 delta 应被跳过");
-        assert_eq!(ops[0], PatchOp::Replace { path: "/x".into(), value: json!(1), reason: None });
+        assert_eq!(
+            ops[0],
+            PatchOp::Replace {
+                path: "/x".into(),
+                value: json!(1),
+                reason: None
+            }
+        );
         // 缺 value → 跳过
         let arr2 = json!([{ "op": "delta", "path": "/好感度" }]);
-        assert!(parse_patch_array(&arr2).is_none(), "delta 缺 value 整批视为无效");
+        assert!(
+            parse_patch_array(&arr2).is_none(),
+            "delta 缺 value 整批视为无效"
+        );
         // 数字 delta 正常
         let arr3 = json!([{ "op": "delta", "path": "/好感度", "value": 2 }]);
         let ops3 = parse_patch_array(&arr3).expect("应解析");
-        assert_eq!(ops3[0], PatchOp::Delta { path: "/好感度".into(), value: 2.0, reason: None });
+        assert_eq!(
+            ops3[0],
+            PatchOp::Delta {
+                path: "/好感度".into(),
+                value: 2.0,
+                reason: None
+            }
+        );
     }
 
     /// 任务4:insert op 并入 Replace(reason 恒 None)。
@@ -484,7 +527,11 @@ mod tests {
         let ops = parse_set_statements("_.set('x', old, 'a\\nb');//原因");
         assert_eq!(ops.len(), 1);
         match &ops[0] {
-            PatchOp::Replace { path, value, reason } => {
+            PatchOp::Replace {
+                path,
+                value,
+                reason,
+            } => {
                 assert_eq!(path, "x");
                 assert_eq!(value, &json!("a\nb"), "语句值内 \\n 应还原为真实换行");
                 assert_eq!(reason, &Some("原因".into()));

@@ -116,13 +116,14 @@ pub struct GenerateEntry {
 ///     → 先 render_assistant_content 渲染内容,作为 GenerateEntry 收集
 ///   - [InitialVariables] / [InitVar] 标签条目不进收集(保持原 [InitVar] 语义)
 ///   - 其余条目(普通世界书注入 / 未启用 / 无标签)原样返回,走原注入链路
+///
 /// 排序:GenerateIndex 按 idx 升序(engine 层再按 before/after 分组);其余保持 entries 顺序。
 pub fn collect_generate_entries(
     entries: &[WorldEntry],
     vars: &mut AssistantVars,
 ) -> (Vec<GenerateEntry>, Vec<WorldEntry>) {
     let mut ctx = RenderCtx::new(vars);
-    collect_generate_entries_with(&entries, &mut ctx)
+    collect_generate_entries_with(entries, &mut ctx)
 }
 
 /// 带渲染上下文的收集变体(engine 层注入链路用):

@@ -95,8 +95,17 @@ impl ContractChangelogService {
             .map_err(|e| format!("查询契约变更记录失败: {e}"))?;
         let mut records = Vec::new();
         for row in rows {
-            let (seq, character_id, source, op_kind, path, before_json, after_json, rationale, created_at) =
-                row.map_err(|e| format!("读取契约变更记录失败: {e}"))?;
+            let (
+                seq,
+                character_id,
+                source,
+                op_kind,
+                path,
+                before_json,
+                after_json,
+                rationale,
+                created_at,
+            ) = row.map_err(|e| format!("读取契约变更记录失败: {e}"))?;
             records.push(build_record(
                 seq,
                 character_id,
@@ -195,15 +204,15 @@ fn build_record(
     created_at: String,
 ) -> Result<ContractChangeRecord, String> {
     let before = match before_json {
-        Some(raw) => Some(
-            serde_json::from_str(&raw).map_err(|e| format!("解析 before_json 失败: {e}"))?,
-        ),
+        Some(raw) => {
+            Some(serde_json::from_str(&raw).map_err(|e| format!("解析 before_json 失败: {e}"))?)
+        }
         None => None,
     };
     let after = match after_json {
-        Some(raw) => Some(
-            serde_json::from_str(&raw).map_err(|e| format!("解析 after_json 失败: {e}"))?,
-        ),
+        Some(raw) => {
+            Some(serde_json::from_str(&raw).map_err(|e| format!("解析 after_json 失败: {e}"))?)
+        }
         None => None,
     };
     Ok(ContractChangeRecord {

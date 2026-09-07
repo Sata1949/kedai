@@ -206,7 +206,11 @@ fn validate_audio_url(url: &str) -> Result<(), String> {
     if trimmed.is_empty() {
         return Err("音频 URL 不能为空".to_string());
     }
-    let scheme = trimmed.split("://").next().unwrap_or("").to_ascii_lowercase();
+    let scheme = trimmed
+        .split("://")
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
     if matches!(scheme.as_str(), "http" | "https") {
         Ok(())
     } else {
@@ -220,11 +224,7 @@ mod tests {
     use std::fs;
 
     fn temp_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "kedai-audio-{}-{}",
-            std::process::id(),
-            tag
-        ));
+        let dir = std::env::temp_dir().join(format!("kedai-audio-{}-{}", std::process::id(), tag));
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::create_dir_all(&dir);
         dir

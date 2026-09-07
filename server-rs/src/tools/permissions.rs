@@ -200,14 +200,17 @@ impl ToolPermissionManager {
         tool: &str,
     ) -> oneshot::Receiver<PendingAuthorizationDecision> {
         let (sender, receiver) = oneshot::channel();
-        self.pending.lock().unwrap_or_else(|e| e.into_inner()).insert(
-            (run_id.into(), call_id.into()),
-            PendingAuthorization {
-                session_id: session_id.into(),
-                tool: tool.into(),
-                sender,
-            },
-        );
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                (run_id.into(), call_id.into()),
+                PendingAuthorization {
+                    session_id: session_id.into(),
+                    tool: tool.into(),
+                    sender,
+                },
+            );
         receiver
     }
 
@@ -235,7 +238,8 @@ impl ToolPermissionManager {
 
     pub fn cancel_wait(&self, run_id: &str, call_id: &str) {
         self.pending
-            .lock().unwrap_or_else(|e| e.into_inner())
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .remove(&(run_id.to_string(), call_id.to_string()));
     }
 
@@ -316,9 +320,8 @@ fn replace_file(temp_path: &std::path::Path, path: &std::path::Path) -> std::io:
 
 fn default_risk(tool: &str) -> ToolRisk {
     match tool {
-        "calculator" | "memory_read" | "read" | "role" | "todo" | "censor_text" | "revise_passage" => {
-            ToolRisk::Safe
-        }
+        "calculator" | "memory_read" | "read" | "role" | "todo" | "censor_text"
+        | "revise_passage" => ToolRisk::Safe,
         "search" | "sleep" | "agentgo" => ToolRisk::Sensitive,
         "memory_write" | "update_variables" | "write" | "replace" | "create" | "agentend" => {
             ToolRisk::Dangerous

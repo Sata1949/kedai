@@ -22,7 +22,9 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 
 // 各功能域注册函数(register_agent_tools 聚合调用;测试经 use super::* 复用)
-use super::agent_tools_agent::{register_agentend, register_agentgo, register_sleep, register_todo};
+use super::agent_tools_agent::{
+    register_agentend, register_agentgo, register_sleep, register_todo,
+};
 use super::agent_tools_read::register_read;
 use super::agent_tools_search::register_search;
 #[cfg(test)]
@@ -32,6 +34,8 @@ use super::agent_tools_write::{register_create, register_replace, register_write
 
 // 保持原公共导出路径:crate::tools::agent_tools::character_file_root(shared 定义)
 pub use super::agent_tools_shared::character_file_root;
+// 批次 6.1:undo_service 恢复快照时复用同一路径安全规则(模块本身私有,经本文件重导出)
+pub(crate) use super::agent_tools_shared::safe_rel_path;
 // 保持原公共导出路径:crate::tools::agent_tools::resolve_public_http_url(search 定义)
 // 被 api/resource.rs 以 `use crate::tools::agent_tools::resolve_public_http_url` 引用;
 // 原可见性即为 pub(crate),故用 pub(crate) use re-export(crate 内可达)。
@@ -50,6 +54,14 @@ pub struct ToolDeps {
     pub data_dir: PathBuf,
     /// 跨会话记忆蒸馏(落地项 2):memory_write / memory_read 共用
     pub memory: Arc<crate::services::memory_service::MemoryService>,
+    /// 聊天引擎(批次 4.3b 子 agent 工具化:run_subtask 经 run_tool_loop 跑白名单
+    /// 工具循环)。构造时序:ToolDeps 先于 AgentEngine 创建(工具注册在引擎之前),
+    /// 故用 OnceLock + Weak 由 app_state 在引擎构造后注入,防循环引用;
+    /// 未注入(单测等)时子任务回退纯生成路径。
+    pub engine: std::sync::OnceLock<std::sync::Weak<crate::agents::engine::AgentEngine>>,
+    /// 任务服务(批次 4.3b:task: 前缀虚拟 session 的子 agent 进度经任务事件桥
+    /// 发 agent_status,并落 task_llm_calls/task_usage;Weak 防循环,缺省 = 非任务模式)
+    pub tasks: std::sync::OnceLock<std::sync::Weak<crate::services::task_service::TaskService>>,
 }
 
 impl ToolDeps {
@@ -79,6 +91,9 @@ impl ToolDeps {
             ))),
             data_dir: dir,
             memory: Arc::new(crate::services::memory_service::MemoryService::new(db)),
+            // 测试缺省不注入引擎/任务服务:子任务走纯生成回退路径
+            engine: std::sync::OnceLock::new(),
+            tasks: std::sync::OnceLock::new(),
         }
     }
 }
@@ -525,7 +540,9 @@ mod tests {
             .sessions
             .create(crate::services::character_service::BUILTIN_SYSTEM_ID, None)
             .unwrap();
-        reg.permissions().authorize("agentgo", "session", &session.id).unwrap();
+        reg.permissions()
+            .authorize("agentgo", "session", &session.id)
+            .unwrap();
         let ctx = ToolContext {
             session_id: session.id.clone(),
             character_id: "c".into(),
@@ -544,9 +561,16 @@ mod tests {
             "深度守卫应拒绝: {err}"
         );
         // 深度 1(第二层)仍可派发
-        let ctx1 = ToolContext { agent_depth: 1, ..ctx };
+        let ctx1 = ToolContext {
+            agent_depth: 1,
+            ..ctx
+        };
         let ok = reg
-            .execute("agentgo", r#"{"tasks":[{"name":"t","instruction":"i"}]}"#, ctx1)
+            .execute(
+                "agentgo",
+                r#"{"tasks":[{"name":"t","instruction":"i"}]}"#,
+                ctx1,
+            )
             .await;
         assert!(ok.is_ok(), "深度 1 不应被拒: {:?}", ok.err());
     }
@@ -574,20 +598,23 @@ mod tests {
         let reg = ToolRegistry::new();
         register_agentgo(&reg, deps.clone());
         // 敏感工具先授权会话,守卫断言才能命中并发上限逻辑
-        reg.permissions().authorize("agentgo", "session", sid).unwrap();
+        reg.permissions()
+            .authorize("agentgo", "session", sid)
+            .unwrap();
         let ctx = ToolContext {
             session_id: sid.to_string(),
             character_id: "c".into(),
             agent_depth: 0,
         };
         let err = reg
-            .execute("agentgo", r#"{"tasks":[{"name":"t","instruction":"i"}]}"#, ctx)
+            .execute(
+                "agentgo",
+                r#"{"tasks":[{"name":"t","instruction":"i"}]}"#,
+                ctx,
+            )
             .await
             .unwrap_err();
-        assert!(
-            err.contains("子智能体并发已满 2"),
-            "并发守卫应拒绝: {err}"
-        );
+        assert!(err.contains("子智能体并发已满 2"), "并发守卫应拒绝: {err}");
         // 守卫拒绝时不创建新任务
         assert_eq!(deps.subtasks.list_by_session(sid).len(), 2);
     }
@@ -608,10 +635,7 @@ mod tests {
             "应带原长尾注: {out}"
         );
         // 保留前 10 字符,截断在字符边界(首行恰为 max_chars 个字符)
-        assert!(
-            out.starts_with(&"字".repeat(10)),
-            "应保留前 10 字符: {out}"
-        );
+        assert!(out.starts_with(&"字".repeat(10)), "应保留前 10 字符: {out}");
         assert_eq!(
             out.lines().next().map(|l| l.chars().count()),
             Some(10),

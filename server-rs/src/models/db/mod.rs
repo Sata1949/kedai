@@ -43,17 +43,25 @@ impl Db {
         // 幂等 schema 升级(落地项 3 技能渐进披露):旧库 skills 补 allowed_tools 等列
         crate::migration::ensure_skills_progressive_columns(&conn)
             .map_err(|e| format!("升级 skills 渐进披露列失败: {e}"))?;
+        // 幂等 schema 升级(批次 4 六模式):旧库 tasks 补 task_mode 列
+        crate::migration::ensure_tasks_task_mode_column(&conn)
+            .map_err(|e| format!("升级 tasks task_mode 列失败: {e}"))?;
+        // 幂等 schema 升级(可观测性问题①):旧库 task_llm_calls 补 finish_reason 列
+        crate::migration::ensure_task_llm_calls_finish_reason_column(&conn)
+            .map_err(|e| format!("升级 task_llm_calls finish_reason 列失败: {e}"))?;
+        // 幂等 schema 升级(批次 R2 多轮用户输入):旧库补建 task_messages 表
+        crate::migration::ensure_task_messages_table(&conn)
+            .map_err(|e| format!("升级 task_messages 表失败: {e}"))?;
         backfill::backfill_scope_variables(&conn)?;
 
         // 只读连接池:READ_ONLY 标志防止读路径误写;busy_timeout/foreign_keys 与写连接对齐。
         // 写连接全程持有(WAL/-shm 存在),只读连 WAL 库在 SQLite ≥3.22 下安全。
         // 池大小取 CPU 核数(读多为短查询,更多连接只会争 IO)。
-        let pool_size =
-            std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(4);
+        let pool_size = std::thread::available_parallelism()
+            .map(|n| n.get() as u32)
+            .unwrap_or(4);
         let manager = SqliteConnectionManager::file(db_path)
-            .with_flags(
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )
+            .with_flags(OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
             .with_init(|c| {
                 c.busy_timeout(std::time::Duration::from_secs(5))?;
                 c.pragma_update(None, "foreign_keys", "ON")?;

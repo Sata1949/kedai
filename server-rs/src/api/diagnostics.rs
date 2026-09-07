@@ -2,9 +2,7 @@
 // 返回近 N 条请求的缓存命中率(加权 token 口径)、逐条明细、按可配置单价估算的
 // 费用与节省,以及输入 tokens 对照 max_context_tokens 的四级水位报告。
 use crate::api::app_state::AppState;
-use crate::services::cache_diagnostics::{
-    watermark, summarize, CachePricing, CacheUsageRow,
-};
+use crate::services::cache_diagnostics::{summarize, watermark, CachePricing, CacheUsageRow};
 use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -54,7 +52,8 @@ pub async fn cache(State(state): State<Arc<AppState>>, Query(q): Query<CacheQuer
             let mut stmt = match conn.prepare(sql) {
                 Ok(s) => s,
                 Err(e) => {
-                    return Json(json!({ "error": format!("读取缓存统计失败: {e}") })).into_response();
+                    return Json(json!({ "error": format!("读取缓存统计失败: {e}") }))
+                        .into_response();
                 }
             };
             stmt.query_map(rusqlite::params![sid, window as i64], map_row)
@@ -63,7 +62,8 @@ pub async fn cache(State(state): State<Arc<AppState>>, Query(q): Query<CacheQuer
             let mut stmt = match conn.prepare(sql) {
                 Ok(s) => s,
                 Err(e) => {
-                    return Json(json!({ "error": format!("读取缓存统计失败: {e}") })).into_response();
+                    return Json(json!({ "error": format!("读取缓存统计失败: {e}") }))
+                        .into_response();
                 }
             };
             stmt.query_map(rusqlite::params![window as i64], map_row)

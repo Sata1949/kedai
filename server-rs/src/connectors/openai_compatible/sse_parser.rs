@@ -17,7 +17,11 @@ pub(super) struct SseParser {
 pub(super) const MAX_BAD_JSON_EVENTS: usize = 20;
 
 impl SseParser {
-    pub(super) fn push(&mut self, bytes: &[u8], out: &mut Vec<LlmStreamChunk>) -> Result<(), String> {
+    pub(super) fn push(
+        &mut self,
+        bytes: &[u8],
+        out: &mut Vec<LlmStreamChunk>,
+    ) -> Result<(), String> {
         self.buffer.extend_from_slice(bytes);
         while let Some((end, separator_len)) = find_event_end(&self.buffer) {
             let event = self.buffer.drain(..end).collect::<Vec<_>>();
@@ -148,6 +152,7 @@ impl SseParser {
                 total_tokens,
                 prompt_cache_hit_tokens,
                 prompt_cache_miss_tokens,
+                reasoning_tokens,
             ) = parse_usage(usage);
             out.push(LlmStreamChunk::Usage {
                 prompt_tokens,
@@ -155,17 +160,24 @@ impl SseParser {
                 total_tokens,
                 prompt_cache_hit_tokens,
                 prompt_cache_miss_tokens,
+                reasoning_tokens,
             });
         }
-        // 仅当 finish_reason == "tool_calls" 时 flush 工具调用:确保工具参数聚合完整。
-        // 其他 finish_reason(stop/length 等)不提前 flush,避免半截工具调用被当作完整调用发出;
-        // 残留的 pending 由 finish() 在流结束时统一兜底。
-        if v.pointer("/choices/0/finish_reason")
+        // finish_reason:tool_calls 时 flush 工具调用,确保工具参数聚合完整;
+        // 其他非空值(stop/length/content_filter 等)产出 Finish 块供上层诊断
+        // (任务模式据此区分「真空响应」与「max_tokens 截断」);
+        // 不提前 flush 半截工具调用,残留的 pending 由 finish() 在流结束时统一兜底。
+        if let Some(reason) = v
+            .pointer("/choices/0/finish_reason")
             .and_then(Value::as_str)
-            .map(|r| r == "tool_calls")
-            .unwrap_or(false)
         {
-            self.flush_tool_calls(out)?;
+            if reason == "tool_calls" {
+                self.flush_tool_calls(out)?;
+            } else if !reason.is_empty() {
+                out.push(LlmStreamChunk::Finish {
+                    reason: reason.to_string(),
+                });
+            }
         }
         Ok(())
     }
@@ -221,18 +233,24 @@ pub(super) fn find_event_end(buffer: &[u8]) -> Option<(usize, usize)> {
     }
 }
 
-/// 从 OpenAI 兼容 usage 对象解析计数,返回 (prompt, completion, total, cache_hit, cache_miss)。
+/// 从 OpenAI 兼容 usage 对象解析计数,返回 (prompt, completion, total, cache_hit, cache_miss, reasoning)。
 /// 缓存字段两种风格取其一非空即可:
 ///   - DeepSeek 系:prompt_cache_hit_tokens / prompt_cache_miss_tokens 原样透传(优先);
 ///   - OpenAI 风格:prompt_tokens_details.cached_tokens 作为 hit,miss = prompt - cached 推导。
+///
 /// 两者都缺失(无缓存观测的提供商)时 hit/miss 为 0。
-pub(super) fn parse_usage(u: &Value) -> (i64, i64, i64, i64, i64) {
+/// reasoning 取自 completion_tokens_details.reasoning_tokens(推理模型;无此字段为 0)。
+pub(super) fn parse_usage(u: &Value) -> (i64, i64, i64, i64, i64, i64) {
     let prompt_tokens = u.get("prompt_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
     let completion_tokens = u
         .get("completion_tokens")
         .and_then(|x| x.as_i64())
         .unwrap_or(0);
     let total_tokens = u.get("total_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
+    let reasoning_tokens = u
+        .pointer("/completion_tokens_details/reasoning_tokens")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(0);
     let deepseek_hit = u
         .get("prompt_cache_hit_tokens")
         .and_then(|x| x.as_i64())
@@ -259,5 +277,6 @@ pub(super) fn parse_usage(u: &Value) -> (i64, i64, i64, i64, i64) {
         total_tokens,
         hit,
         miss,
+        reasoning_tokens,
     )
 }

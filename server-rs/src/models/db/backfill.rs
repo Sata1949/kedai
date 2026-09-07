@@ -199,8 +199,11 @@ mod tests {
                 [id1.to_string()],
             )
             .unwrap();
-            conn.execute("DELETE FROM backfill_meta WHERE key = 'message_scope_last_id'", [])
-                .unwrap();
+            conn.execute(
+                "DELETE FROM backfill_meta WHERE key = 'message_scope_last_id'",
+                [],
+            )
+            .unwrap();
         }
         let id2 = add_msg(&db, sid, extra); // 游标缺失后追加的消息
         drop(db);
@@ -209,7 +212,10 @@ mod tests {
         // 游标应直接初始化到 MAX(id),id2 不补扫(与旧版全量语义一致:不重复回填)
         assert_eq!(cursor_of(&db), Some(id2));
         // 既有行不被覆盖(INSERT OR IGNORE 语义保持)
-        assert_eq!(scope_row(&db, &id1.to_string()).as_deref(), Some(r#"{"hp":1}"#));
+        assert_eq!(
+            scope_row(&db, &id1.to_string()).as_deref(),
+            Some(r#"{"hp":1}"#)
+        );
         drop(db);
         std::fs::remove_dir_all(dir).ok();
     }

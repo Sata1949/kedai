@@ -1,6 +1,7 @@
 // 应用共享状态(axum State):汇聚 DB、服务、连接器、引擎、工具
 use crate::agents::engine::AgentEngine;
 use crate::config::AppConfig;
+use crate::mcp::McpManager;
 use crate::models::db::Db;
 use crate::services::agent_flow_service::AgentFlowService;
 use crate::services::agent_session_service::AgentSessionService;
@@ -18,6 +19,7 @@ use crate::services::settings_service::RuntimeSettings;
 use crate::services::skill_service::SkillService;
 use crate::services::task_service::TaskService;
 use crate::services::token_service::TokenService;
+use crate::services::undo_service::UndoService;
 use crate::services::user_script_service::UserScriptService;
 use crate::services::world_book_service::WorldBookService;
 use crate::tools::agent_tools::ToolDeps;
@@ -64,6 +66,12 @@ pub struct AppState {
     pub user_scripts: Arc<UserScriptService>,
     /// 跨会话记忆蒸馏(落地项 2):按角色维度共享的长期记忆条目
     pub memory: Arc<MemoryService>,
+    /// 回退快照(批次 6.1「undo」):写工具逆操作快照的暂存/列表/恢复
+    pub undo: Arc<UndoService>,
+    /// MCP stdio 客户端(批次 6.2,L3 隔离;默认关):mcp_enabled=true 时由
+    /// run_server 在 AppState::new 之后、serve 之前调 start_mcp 装配;
+    /// 未启用时保持空管理器(零进程、零注册)。
+    pub mcp: Arc<McpManager>,
     /// 任务模式(task 工作台):任务主表 + 子任务 + 后台执行引擎
     pub tasks: Arc<TaskService>,
     /// slash 命令注册表(阶段四 4a):脚本 triggerSlash 与 GET /api/slash/commands 共用
@@ -155,8 +163,23 @@ impl AppState {
             connector: connector.clone(),
             data_dir: config.data_dir.clone(),
             memory: memory.clone(),
+            // engine/tasks 尚不存在(构造顺序在其后),由下方 OnceLock 注入(批次 4.3b)
+            engine: std::sync::OnceLock::new(),
+            tasks: std::sync::OnceLock::new(),
         });
-        crate::tools::register_builtin_tools(&tool_registry, deps);
+        crate::tools::register_builtin_tools(&tool_registry, deps.clone());
+
+        // 回退快照(批次 6.1「undo」):与 SessionService 共用同一 Arc<Db> 句柄
+        // (ToolDeps 上没有 db 连接池,直接同源构造是最小侵入路径);注入注册表供
+        // run_tool 两段式收口(执行前快照/成功 commit/失败 discard),API 经 state.undo 访问。
+        let undo = Arc::new(UndoService::new(
+            db.clone(),
+            sessions.clone(),
+            memory.clone(),
+            settings.clone(),
+            config.data_dir.clone(),
+        ));
+        tool_registry.set_undo(undo.clone());
 
         // 契约注册表:引擎与多步工具共享同一实例(缓存一致;改卡后写路径 invalidate)
         let contract_registry = Arc::new(crate::contracts::ContractRegistry::new(
@@ -220,16 +243,8 @@ impl AppState {
             registered_tools,
         )));
 
-        // 任务模式(task 工作台):复用 connector/characters/db,独立于聊天引擎
-        let tasks = Arc::new(TaskService::new(
-            db.clone(),
-            characters.clone(),
-            connector.clone(),
-            settings.clone(),
-            world_books.clone(),
-            prompt_inject.clone(),
-        ));
-
+        // 聊天引擎:先于 TaskService 构造(engine 不依赖 tasks,无循环;
+        // 批次 4.2 起 TaskService 注入 Arc<AgentEngine> 供六模式执行器复用工具循环)
         let engine = Arc::new(AgentEngine::new(
             connector.clone(),
             characters.clone(),
@@ -251,6 +266,24 @@ impl AppState {
             skills.clone(),
         ));
         let engine_model = engine.model();
+        // 批次 4.3b:引擎弱引用注入 ToolDeps(子 agent 工具化经 run_tool_loop 跑
+        // 白名单工具循环);OnceLock 仅此处 set 一次,set 失败说明重复装配(不应发生)
+        let _ = deps.engine.set(Arc::downgrade(&engine));
+
+        // 任务模式(task 工作台):复用 connector/characters/db + 聊天引擎(六模式)
+        let tasks = Arc::new(TaskService::new(
+            db.clone(),
+            characters.clone(),
+            connector.clone(),
+            settings.clone(),
+            world_books.clone(),
+            prompt_inject.clone(),
+            engine.clone(),
+            flow.clone(),
+            agent_subtasks.clone(),
+        ));
+        // 任务服务弱引用注入 ToolDeps(任务模式子 agent 的事件桥/调用追踪/usage 落库)
+        let _ = deps.tasks.set(Arc::downgrade(&tasks));
 
         let token_service = Arc::new(Mutex::new(TokenService::new()));
 
@@ -277,6 +310,10 @@ impl AppState {
             quick_replies,
             user_scripts,
             memory,
+            undo,
+            // MCP 默认空管理器;AppState::new 是同步函数,进程装配(异步握手)
+            // 由 run_server 在 serve 之前调 start_mcp 完成(批次 6.2)
+            mcp: Arc::new(McpManager::empty()),
             slash,
             runtime_prompt,
             flow,
@@ -328,6 +365,27 @@ impl AppState {
         })
         .await
         .map_err(|e| format!("写库任务执行失败: {e}"))?
+    }
+
+    /// 装配 MCP stdio 服务器(批次 6.2,L3 隔离):mcp_enabled=false 时完全跳过
+    /// (零进程、零注册)。读扁平权威设置,不按模式合并——MCP 是进程级全局能力,
+    /// 不随请求模式切换;v1 仅启动时装配,PUT 改 mcp_* 后重启生效。
+    /// 单台失败仅记 warn 并禁用该台,不 panic、不阻断启动;由 run_server 在 serve 之前调用。
+    pub async fn start_mcp(&self) {
+        let snapshot = {
+            let s = self.settings.lock().unwrap_or_else(|e| e.into_inner());
+            if !s.mcp_enabled {
+                return;
+            }
+            s.clone()
+        };
+        let n_before = self.tool_registry.list_definitions().len();
+        self.mcp.start(&snapshot, &self.tool_registry).await;
+        let servers = self.mcp.server_count();
+        if servers > 0 {
+            let added = self.tool_registry.list_definitions().len() - n_before;
+            eprintln!("[MCP] 已装配 {servers} 台服务器,注册 {added} 个工具(mcp_ 前缀)");
+        }
     }
 
     /// 在阻塞线程池执行任意持 Db 的 services 同步调用(读或写不限;

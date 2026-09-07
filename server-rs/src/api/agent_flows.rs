@@ -23,7 +23,12 @@ fn flow_payload(lib: &AgentFlowLibrary) -> serde_json::Value {
 }
 
 pub async fn get_agent_flows(State(state): State<Arc<AppState>>) -> Response {
-    let lib = state.flow.lock().unwrap_or_else(|e| e.into_inner()).get_library().clone();
+    let lib = state
+        .flow
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_library()
+        .clone();
     Json(flow_payload(&lib)).into_response()
 }
 
@@ -40,10 +45,19 @@ pub async fn update_agent_flows(
 ) -> Response {
     // 显式 let 绑定 guard:match 内联临时 guard 会存活到 match 结束,
     // 分支内再次 lock() 会触发 std Mutex 重入死锁
-    let set_result = state.flow.lock().unwrap_or_else(|e| e.into_inner()).set(body.config);
+    let set_result = state
+        .flow
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .set(body.config);
     match set_result {
         Ok(()) => {
-            let lib = state.flow.lock().unwrap_or_else(|e| e.into_inner()).get_library().clone();
+            let lib = state
+                .flow
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get_library()
+                .clone();
             Json(flow_payload(&lib)).into_response()
         }
         Err(e) => Json(json!({ "error": e }))
@@ -62,10 +76,19 @@ pub async fn select_agent_flow(
     State(state): State<Arc<AppState>>,
     Json(body): Json<SelectFlowBody>,
 ) -> Response {
-    let select_result = state.flow.lock().unwrap_or_else(|e| e.into_inner()).select(&body.id);
+    let select_result = state
+        .flow
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .select(&body.id);
     match select_result {
         Ok(()) => {
-            let lib = state.flow.lock().unwrap_or_else(|e| e.into_inner()).get_library().clone();
+            let lib = state
+                .flow
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get_library()
+                .clone();
             Json(flow_payload(&lib)).into_response()
         }
         Err(e) => Json(json!({ "error": e }))
@@ -79,10 +102,19 @@ pub async fn delete_agent_flow(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Response {
-    let remove_result = state.flow.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+    let remove_result = state
+        .flow
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&id);
     match remove_result {
         Ok(()) => {
-            let lib = state.flow.lock().unwrap_or_else(|e| e.into_inner()).get_library().clone();
+            let lib = state
+                .flow
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get_library()
+                .clone();
             Json(flow_payload(&lib)).into_response()
         }
         Err(e) => Json(json!({ "error": e }))

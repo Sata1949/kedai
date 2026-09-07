@@ -95,7 +95,10 @@ CREATE TABLE IF NOT EXISTS tasks (
   error        TEXT NOT NULL DEFAULT '',
   character_id TEXT,
   created_at   TEXT NOT NULL,
-  updated_at   TEXT NOT NULL
+  updated_at   TEXT NOT NULL,
+  -- 执行模式(批次 4 六模式):legacy|solo|multi|plan|team|custom;旧库经
+  -- migration::ensure_tasks_task_mode_column 幂等补列,旧行默认 'legacy'
+  task_mode    TEXT NOT NULL DEFAULT 'legacy'
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
 CREATE TABLE IF NOT EXISTS task_subtasks (
@@ -110,6 +113,59 @@ CREATE TABLE IF NOT EXISTS task_subtasks (
   updated_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_task_subtasks_task ON task_subtasks(task_id);
+-- 任务模式 token 用量:每次 LLM 调用(规划/步骤/汇总)一行;任务删除随外键级联清除。
+-- 不复用 llm_requests 表:其 session_id 外键指向 sessions(id),任务 id 不在其中。
+CREATE TABLE IF NOT EXISTS task_usage (
+  id                TEXT PRIMARY KEY,
+  task_id           TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  phase             TEXT NOT NULL,
+  step_index        INTEGER,
+  model             TEXT NOT NULL,
+  prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+  completion_tokens INTEGER NOT NULL DEFAULT 0,
+  reasoning_tokens  INTEGER NOT NULL DEFAULT 0,
+  created_at        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_usage_task ON task_usage(task_id);
+-- 任务模式 LLM 调用追踪(批次 3「调用情况」面板):每次任务侧 LLM 调用一行
+--(planner/step/summarize/agent/subagent/audit),含提示词/响应摘要与耗时;
+-- 任务删除随外键级联清除。与 task_usage 并存:usage 管 token 口径,本表管可观测性。
+-- finish_reason(可观测性问题①):上游 finish_reason(stop/length/content_filter 等),
+-- '' = 未知/未下发(旧行默认值,避免旧数据被误读为正常 stop 收尾);
+-- length 即 max_tokens 截断的直接证据——修复前截断与正常完成在面板上无从区分。
+-- 旧库由 migration::ensure_task_llm_calls_finish_reason_column 幂等补列;
+-- 注意:列定义处不得写行内注释,否则 sqlite_schema 存储文本与 ALTER 补列的
+-- 旧库 normalize 后不一致,跨库合并 schema 比对会误报冲突。
+CREATE TABLE IF NOT EXISTS task_llm_calls (
+  id                TEXT PRIMARY KEY,
+  task_id           TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  phase             TEXT NOT NULL,
+  step_index        INTEGER,
+  model             TEXT NOT NULL,
+  prompt_summary    TEXT NOT NULL DEFAULT '',
+  response_summary  TEXT NOT NULL DEFAULT '',
+  prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+  completion_tokens INTEGER NOT NULL DEFAULT 0,
+  reasoning_tokens  INTEGER NOT NULL DEFAULT 0,
+  elapsed_ms        INTEGER NOT NULL DEFAULT 0,
+  status            TEXT NOT NULL DEFAULT 'ok',
+  created_at        TEXT NOT NULL,
+  finish_reason     TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_task_llm_calls_task ON task_llm_calls(task_id, created_at);
+-- 任务消息(批次 R2 多轮用户输入):任务全程的用户输入与助手产出按行落库。
+-- role: user | assistant;kind: normal | followup(终态追加指令)| plan_chat(批准环节对话);
+-- 任务删除随外键级联清除。旧库由 migration::ensure_task_messages_table 幂等建表;
+-- 注意:列定义处不得写行内注释(同 task_llm_calls 教训,跨库合并 schema 比对会误报)。
+CREATE TABLE IF NOT EXISTS task_messages (
+  id         TEXT PRIMARY KEY,
+  task_id    TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  role       TEXT NOT NULL CHECK (role IN ('user','assistant')),
+  kind       TEXT NOT NULL DEFAULT 'normal',
+  content    TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_messages_task ON task_messages(task_id, created_at);
 CREATE TABLE IF NOT EXISTS session_vars (
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   key        TEXT NOT NULL,
@@ -254,6 +310,21 @@ CREATE TABLE IF NOT EXISTS backfill_meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+-- 回退快照(批次 6.1「undo」):写工具(write/replace/create/update_variables/memory_write)
+-- 执行前取逆操作负载落本表,供「回退到此处」恢复。payload 为 JSON 逆操作集
+-- (文件原内容内嵌,单文件超 256KB 截断并标 truncated=true,restore 拒绝);
+-- anchor_message_id = 快照时该会话 max(messages.id)(无消息为 NULL)。
+-- 不设外键:快照生命周期独立于消息清理(truncate/删除),恢复语义由 undo_service 校验。
+CREATE TABLE IF NOT EXISTS undo_snapshots (
+  id                TEXT PRIMARY KEY,
+  session_id        TEXT NOT NULL,
+  anchor_message_id INTEGER,
+  tool_name         TEXT NOT NULL,
+  label             TEXT NOT NULL DEFAULT '',
+  payload           TEXT NOT NULL,
+  created_at        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_undo_snapshots_session ON undo_snapshots(session_id, created_at);
 "#;
 
 /// 暴露建表 SQL 供迁移一致性测试比对(旧库 ALTER 补列后应与新建表 schema normalize 一致)

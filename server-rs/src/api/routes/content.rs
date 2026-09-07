@@ -1,8 +1,6 @@
 // 世界书 / 契约 / 契约历史 / 变量引擎 / 提示词注入 / 快速回复路由(自 api/mod.rs build_router 迁入)
 use crate::api::app_state::AppState;
-use crate::api::{
-    contract_history, contracts, kaleido, prompt_inject, quick_replies, world_books,
-};
+use crate::api::{contract_history, contracts, kaleido, prompt_inject, quick_replies, world_books};
 use axum::routing::{get, post, put};
 use axum::Router;
 use std::sync::Arc;

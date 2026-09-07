@@ -1,4 +1,4 @@
-﻿// 酒馆助手变量(MVU)状态管理:补丁应用、首楼状态栏槽位、两步生成与 diff 状态栏
+// 酒馆助手变量(MVU)状态管理:补丁应用、首楼状态栏槽位、两步生成与 diff 状态栏
 use super::*;
 
 /// 应用 mvu <UpdateVariable> 补丁:应用到变量树 → 持久化 → SSE Vars 事件推送最新树。
@@ -18,7 +18,10 @@ pub(super) async fn apply_mvu_patches(
     }
     match assistant_vars.apply_patches(patches) {
         Ok(()) => {
-            if let Err(e) = engine.sessions.save_assistant_vars(session_id, assistant_vars) {
+            if let Err(e) = engine
+                .sessions
+                .save_assistant_vars(session_id, assistant_vars)
+            {
                 logger::warn(
                     "酒馆助手变量树落库失败",
                     &[
@@ -401,9 +404,8 @@ pub(super) async fn generate_mvu_status(
         // 回退:旧文本协议(<UpdateVariable> + <StatusBar>),兼容无 function calling 的模型
         let (_clean, raw_patches) = parse_update_variable(&out.text);
         // P5:契约门控(无契约原样放行)
-        let gated = crate::contracts::gate_assistant_patches_detailed(
-            contract, &raw_patches, "agent",
-        );
+        let gated =
+            crate::contracts::gate_assistant_patches_detailed(contract, &raw_patches, "agent");
         if !gated.rejected.is_empty() || !gated.pending.is_empty() {
             logger::warn(
                 "契约门控过滤了部分文本协议补丁",
@@ -624,7 +626,8 @@ mod tests {
     /// compute_first_message_update:含占位符 → None(占位符保留给前端脚本渲染);
     /// 无占位符 + 有 last → 首处替换;无槽位 → None
     #[test]
-    fn compute_first_message_update_variants() {        // 含占位符 → None:占位符由前端脚本渲染动态状态栏,服务端不替换
+    fn compute_first_message_update_variants() {
+        // 含占位符 → None:占位符由前端脚本渲染动态状态栏,服务端不替换
         let slot = FirstMessageStatusSlot {
             id: 1,
             content: "你好 <StatusPlaceHolderImpl/> 再见".into(),

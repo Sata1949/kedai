@@ -90,7 +90,9 @@ impl QuickReplyService {
         let sql = if only_enabled {
             format!("SELECT {SELECT_COLS} FROM quick_replies WHERE enabled = 1 ORDER BY name, position, sort_order, id")
         } else {
-            format!("SELECT {SELECT_COLS} FROM quick_replies ORDER BY name, position, sort_order, id")
+            format!(
+                "SELECT {SELECT_COLS} FROM quick_replies ORDER BY name, position, sort_order, id"
+            )
         };
         let mut stmt = match conn.prepare(&sql) {
             Ok(s) => s,
@@ -122,7 +124,7 @@ impl QuickReplyService {
             .query_row(
                 &format!("SELECT {SELECT_COLS} FROM quick_replies WHERE id = ?1"),
                 params![id],
-                |row| row_to_record(row),
+                row_to_record,
             )
             .optional()
             .ok()
@@ -144,10 +146,7 @@ impl QuickReplyService {
                 params![r.name, r.label, r.content, r.enabled, r.position, r.sort_order, now, now],
             )
             .map_err(|e| format!("写入数据库失败: {e}"))?;
-        Ok(QuickReplyRecord {
-            id: id as i64,
-            ..r
-        })
+        Ok(QuickReplyRecord { id: id as i64, ..r })
     }
 
     /// 更新指定字段;None 表示不变

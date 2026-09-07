@@ -479,12 +479,27 @@ mod tests {
         let parsed = parse_character_card(card.to_string().as_bytes(), "卡.json").unwrap();
         let d = &parsed.data;
         assert_eq!(d["spec"], "chara_card_v3", "spec 应保持 v3");
-        assert_eq!(d["description"], "背景设定在data子对象里", "V3 data.description 应补到顶层");
+        assert_eq!(
+            d["description"], "背景设定在data子对象里",
+            "V3 data.description 应补到顶层"
+        );
         assert_eq!(d["personality"], "性格在data里");
         assert_eq!(d["scenario"], "情景在data里");
-        assert_eq!(d["alternate_greetings"].as_array().unwrap().len(), 2, "备用开场白应补到顶层");
-        assert_eq!(d["extensions"]["tavern_helper"]["enabled"], json!(true), "扩展应补到顶层");
-        assert_eq!(d["character_book"]["entries"].as_array().unwrap().len(), 1, "世界书应补到顶层");
+        assert_eq!(
+            d["alternate_greetings"].as_array().unwrap().len(),
+            2,
+            "备用开场白应补到顶层"
+        );
+        assert_eq!(
+            d["extensions"]["tavern_helper"]["enabled"],
+            json!(true),
+            "扩展应补到顶层"
+        );
+        assert_eq!(
+            d["character_book"]["entries"].as_array().unwrap().len(),
+            1,
+            "世界书应补到顶层"
+        );
         // data 子对象保留(无损)
         assert_eq!(d["data"]["description"], "背景设定在data子对象里");
         // 顶层非空字段不被覆盖

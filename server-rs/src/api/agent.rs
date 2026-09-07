@@ -65,7 +65,12 @@ pub async fn plan(State(state): State<Arc<AppState>>, Json(body): Json<PlanBody>
                 .into_response()
                 .with_status(StatusCode::BAD_REQUEST);
         }
-        if let Err(e) = state.flow.lock().unwrap_or_else(|e| e.into_inner()).validate(&flow) {
+        if let Err(e) = state
+            .flow
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .validate(&flow)
+        {
             return Json(json!({ "error": e }))
                 .into_response()
                 .with_status(StatusCode::BAD_REQUEST);

@@ -154,6 +154,7 @@ impl SkillService {
     }
 
     /// 更新:enabled / name / description / content 及渐进披露元数据(仅提供者生效)
+    #[allow(clippy::too_many_arguments)] // 编排函数参数即上下文,拆 struct 收益低
     pub fn update(
         &self,
         id: &str,
@@ -337,11 +338,23 @@ mod tests {
         assert_eq!(fresh.allowed_tools, r#"["read","write"]"#);
         assert!(fresh.run_as_subagent);
         assert_eq!(fresh.model, "deepseek-chat");
-        assert_eq!(parse_allowed_tools(&fresh.allowed_tools), vec!["read", "write"]);
+        assert_eq!(
+            parse_allowed_tools(&fresh.allowed_tools),
+            vec!["read", "write"]
+        );
 
         // 更新:停用 + 改 model;未提供字段保持
         let updated = svc
-            .update(&fresh.id, Some(false), None, None, None, None, None, Some("other-model"))
+            .update(
+                &fresh.id,
+                Some(false),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("other-model"),
+            )
             .unwrap();
         assert!(!updated.enabled);
         assert_eq!(updated.model, "other-model");

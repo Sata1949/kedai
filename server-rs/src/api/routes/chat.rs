@@ -1,6 +1,6 @@
 // 会话 / 消息 / 变量 / 聊天(SSE)路由(自 api/mod.rs build_router 迁入)
 use crate::api::app_state::AppState;
-use crate::api::{chat, sessions, variables};
+use crate::api::{chat, sessions, undo, variables};
 use axum::routing::{get, post, put};
 use axum::Router;
 use std::sync::Arc;
@@ -20,10 +20,7 @@ pub(crate) fn chat_routes() -> Router<Arc<AppState>> {
             "/api/chat/sessions/{id}/truncate",
             post(sessions::truncate_messages),
         )
-        .route(
-            "/api/chat/sessions/{id}/regreet",
-            post(sessions::regreet),
-        )
+        .route("/api/chat/sessions/{id}/regreet", post(sessions::regreet))
         .route(
             "/api/chat/sessions/{id}/assistant-vars",
             axum::routing::put(sessions::save_assistant_vars),
@@ -51,8 +48,13 @@ pub(crate) fn chat_routes() -> Router<Arc<AppState>> {
         )
         .route("/api/chat/init-vars", get(sessions::init_vars))
         .route("/api/chat/clear", post(sessions::clear))
+        // 回退快照(批次 6.1「undo」):会话快照列表 / 按快照恢复
+        .route("/api/chat/sessions/{id}/undo", get(undo::list_snapshots))
+        .route("/api/undo/{id}/restore", post(undo::restore_snapshot))
         // 聊天(SSE)
         .route("/api/chat/send", post(chat::send))
+        // 角色卡资源页作者脚本的自由生成桥(吸血鬼卡开场白等;一次性、非流式、不写会话)
+        .route("/api/chat/generate-raw", post(chat::generate_raw))
         .route("/api/chat/stop", post(chat::stop))
         .route("/api/chat/compact", post(chat::compact))
         .route("/api/chat/compact/clear", post(chat::clear_compact))

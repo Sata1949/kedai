@@ -166,7 +166,7 @@ fn parse_usage_reads_cache_hit_tokens() {
         "prompt_cache_hit_tokens": 700,
         "prompt_cache_miss_tokens": 300,
     });
-    assert_eq!(parse_usage(&u), (1000, 200, 1200, 700, 300));
+    assert_eq!(parse_usage(&u), (1000, 200, 1200, 700, 300, 0));
 
     // 无缓存字段的提供商(OpenAI 等)→ hit/miss 为 0,不 panic
     let plain = serde_json::json!({
@@ -174,10 +174,10 @@ fn parse_usage_reads_cache_hit_tokens() {
         "completion_tokens": 50,
         "total_tokens": 550,
     });
-    assert_eq!(parse_usage(&plain), (500, 50, 550, 0, 0));
+    assert_eq!(parse_usage(&plain), (500, 50, 550, 0, 0, 0));
 
     // 字段缺失/类型异常 → 全部回退 0
-    assert_eq!(parse_usage(&serde_json::json!({})), (0, 0, 0, 0, 0));
+    assert_eq!(parse_usage(&serde_json::json!({})), (0, 0, 0, 0, 0, 0));
 }
 
 /// usage 解析:OpenAI 风格 prompt_tokens_details.cached_tokens 兼容——
@@ -190,7 +190,7 @@ fn parse_usage_reads_openai_cached_tokens() {
         "total_tokens": 1050,
         "prompt_tokens_details": { "cached_tokens": 600 },
     });
-    assert_eq!(parse_usage(&u), (1000, 50, 1050, 600, 400));
+    assert_eq!(parse_usage(&u), (1000, 50, 1050, 600, 400, 0));
 
     // 两种风格并存时 DeepSeek 字段优先
     let both = serde_json::json!({
@@ -201,7 +201,51 @@ fn parse_usage_reads_openai_cached_tokens() {
         "prompt_cache_miss_tokens": 200,
         "prompt_tokens_details": { "cached_tokens": 600 },
     });
-    assert_eq!(parse_usage(&both), (1000, 50, 1050, 800, 200));
+    assert_eq!(parse_usage(&both), (1000, 50, 1050, 800, 200, 0));
+}
+
+/// usage 解析:推理模型 completion_tokens_details.reasoning_tokens(诊断空输出的关键证据)
+#[test]
+fn parse_usage_reads_reasoning_tokens() {
+    let u = serde_json::json!({
+        "prompt_tokens": 800,
+        "completion_tokens": 10000,
+        "total_tokens": 10800,
+        "completion_tokens_details": { "reasoning_tokens": 10000 },
+    });
+    assert_eq!(parse_usage(&u), (800, 10000, 10800, 0, 0, 10000));
+}
+
+/// finish_reason:stop/length 产出 Finish 块;tool_calls 只 flush 工具调用,不产 Finish 块
+#[test]
+fn sse_parser_emits_finish_chunk() {
+    let mut parser = SseParser::default();
+    let mut out = Vec::new();
+    parser
+        .push(
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+            &mut out,
+        )
+        .unwrap();
+    assert!(
+        matches!(&out[..], [crate::models::types::LlmStreamChunk::Finish { reason }] if reason == "length"),
+        "length 应产出 Finish 块: {out:?}"
+    );
+
+    let mut parser2 = SseParser::default();
+    let mut out2 = Vec::new();
+    parser2
+        .push(
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            &mut out2,
+        )
+        .unwrap();
+    assert!(
+        !out2
+            .iter()
+            .any(|c| matches!(c, crate::models::types::LlmStreamChunk::Finish { .. })),
+        "tool_calls 不得产出 Finish 块: {out2:?}"
+    );
 }
 
 /// 启动一个模拟上游:捕获请求体后返回固定 SSE 流;返回 (base_url, body 持有者)
@@ -262,11 +306,20 @@ async fn tool_choice_and_parallel_flag_serialized_in_request_body() {
             .generate_stream(&[LlmMessage::plain("user", "hi")], params, abort_rx, tx)
             .await
             .unwrap();
-        let raw = body.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_default();
+        let raw = body
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .unwrap_or_default();
         let v: Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(v["tool_choice"], expect, "tool_choice 序列化错误: {raw}");
         assert_eq!(v["parallel_tool_calls"], json!(false));
         assert!(v["tools"].is_array(), "tools 应下发: {raw}");
+        assert_eq!(
+            v["stream_options"],
+            json!({ "include_usage": true }),
+            "流式请求应声明 include_usage 以拿到 usage: {raw}"
+        );
     }
 }
 
@@ -325,14 +378,17 @@ fn sse_parser_tolerates_bad_json_then_fails_at_threshold() {
 fn sse_parser_flushes_tool_calls_only_on_tool_calls_finish() {
     let mut parser = SseParser::default();
     let mut out = Vec::new();
-    // 先聚合一个工具调用,但 finish_reason=stop → 不应 flush
+    // 先聚合一个工具调用,但 finish_reason=stop → 不应 flush(stop 会产出 Finish 诊断块,但不产 ToolCall)
     parser
         .push(
             b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"q\\\":1}\"}}]},\"finish_reason\":\"stop\"}]}\n\n",
             &mut out,
         )
         .unwrap();
-    assert!(out.is_empty(), "非 tool_calls finish 不应 flush 工具调用");
+    assert!(
+        !out.iter().any(|c| matches!(c, LlmStreamChunk::ToolCall(_))),
+        "非 tool_calls finish 不应 flush 工具调用: {out:?}"
+    );
     // finish_reason=tool_calls → flush
     parser
         .push(
@@ -341,7 +397,8 @@ fn sse_parser_flushes_tool_calls_only_on_tool_calls_finish() {
         )
         .unwrap();
     assert!(
-        matches!(&out[0], LlmStreamChunk::ToolCall(c) if c.name == "read"),
+        out.iter()
+            .any(|c| matches!(c, LlmStreamChunk::ToolCall(c) if c.name == "read")),
         "tool_calls finish 应 flush 已聚合调用: {out:?}"
     );
 }

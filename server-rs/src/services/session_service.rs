@@ -653,10 +653,7 @@ impl SessionService {
     }
 
     /// 批量落库非 chat 作用域(引擎收尾;scope, scope_id, data_raw 元组)。
-    pub fn save_scope_variables_batch(
-        &self,
-        entries: Vec<(String, String, String)>,
-    ) -> usize {
+    pub fn save_scope_variables_batch(&self, entries: Vec<(String, String, String)>) -> usize {
         let conn = self.db.write();
         let now = now_iso();
         let mut count = 0;
@@ -714,7 +711,8 @@ mod tests {
     #[test]
     fn save_llm_request_persists_payload() {
         let (svc, dir) = service();
-        svc.save_llm_request("s1", "run1", 0, r#"{"role":"system"}"#, "m").unwrap();
+        svc.save_llm_request("s1", "run1", 0, r#"{"role":"system"}"#, "m")
+            .unwrap();
 
         let db = svc.db.clone();
         let conn = db.write();
@@ -743,15 +741,27 @@ mod tests {
         let db = svc.db.clone();
         let conn = db.write();
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM llm_requests WHERE session_id='s1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM llm_requests WHERE session_id='s1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(count, 2, "应仅保留最近 2 条");
         // 保留的应是 seq 最大的两条(3、4)
         let max_seq: i64 = conn
-            .query_row("SELECT MAX(seq) FROM llm_requests WHERE session_id='s1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT MAX(seq) FROM llm_requests WHERE session_id='s1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         let min_seq: i64 = conn
-            .query_row("SELECT MIN(seq) FROM llm_requests WHERE session_id='s1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT MIN(seq) FROM llm_requests WHERE session_id='s1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(max_seq, 4);
         assert_eq!(min_seq, 3);
@@ -763,7 +773,8 @@ mod tests {
     #[test]
     fn save_llm_cache_usage_updates_existing_row() {
         let (svc, dir) = service();
-        svc.save_llm_request("s1", "run1", 0, r#"{"role":"system"}"#, "m").unwrap();
+        svc.save_llm_request("s1", "run1", 0, r#"{"role":"system"}"#, "m")
+            .unwrap();
         svc.save_llm_cache_usage("s1", "run1", 0, "m", 1000, 200, 700, 300)
             .unwrap();
 
@@ -786,7 +797,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!((hit, miss, prompt, completion), (700, 300, 1000, 200));
-        assert_eq!(payload, r#"{"role":"system"}"#, "缓存列更新不应覆盖 payload");
+        assert_eq!(
+            payload, r#"{"role":"system"}"#,
+            "缓存列更新不应覆盖 payload"
+        );
         drop(conn);
         std::fs::remove_dir_all(dir).ok();
     }

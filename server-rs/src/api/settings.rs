@@ -2,7 +2,7 @@
 use crate::api::app_state::AppState;
 use crate::api::WithStatus;
 use crate::services::settings_service::{
-    normalize_base_url, AppMode, RuntimeSettings, DEFAULT_SEARCH_ENDPOINT,
+    normalize_base_url, AppMode, McpServerConfig, RuntimeSettings, DEFAULT_SEARCH_ENDPOINT,
 };
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -107,6 +107,9 @@ pub struct UpdateSettingsBody {
     /// 技能渐进披露开关(true = system 只注入「name:description」清单,正文按需 read)
     #[serde(default)]
     pub skill_progressive_disclosure: Option<bool>,
+    /// 回退快照开关(批次 6.1;true = 写工具执行前留快照,可回退)
+    #[serde(default)]
+    pub undo_enabled: Option<bool>,
     /// 子智能体最大嵌套深度(1..=4)
     #[serde(default)]
     pub subagent_max_depth: Option<u32>,
@@ -116,6 +119,22 @@ pub struct UpdateSettingsBody {
     /// 子智能体结果最大字符数(500..=8000,超出截断带尾注)
     #[serde(default)]
     pub subagent_result_max_chars: Option<u32>,
+    /// MCP stdio 客户端总开关(批次 6.2;仅启动时装配,改后重启生效)
+    #[serde(default)]
+    pub mcp_enabled: Option<bool>,
+    /// MCP 服务器列表(全量替换语义,与 bypass_blacklist 一致)
+    #[serde(default)]
+    pub mcp_servers: Option<Vec<McpServerConfig>>,
+    /// 执行者人设完整开关(R3a):true = 完整(含 scenario+mes_example),false = 精简;
+    /// 缺省保持不变
+    #[serde(default)]
+    pub task_persona_full: Option<bool>,
+    /// 工具循环历史保留的最近完整轮数(R3b;1..=32;缺省保持不变)
+    #[serde(default)]
+    pub tool_history_keep_rounds: Option<u32>,
+    /// 工具循环历史 token 预算(R3b;0 = 禁用预算闸门,否则 1024..=1M;缺省保持不变)
+    #[serde(default)]
+    pub tool_history_budget_tokens: Option<u32>,
 }
 
 /// 序列化运行期设置(API Key 脱敏)
@@ -149,9 +168,15 @@ fn settings_json(s: &RuntimeSettings) -> Value {
         "memory_distill_enabled": s.memory_distill_enabled,
         "memory_inject_limit": s.memory_inject_limit,
         "skill_progressive_disclosure": s.skill_progressive_disclosure,
+        "undo_enabled": s.undo_enabled,
         "subagent_max_depth": s.subagent_max_depth,
         "subagent_max_concurrency": s.subagent_max_concurrency,
         "subagent_result_max_chars": s.subagent_result_max_chars,
+        "mcp_enabled": s.mcp_enabled,
+        "mcp_servers": s.mcp_servers,
+        "task_persona_full": s.task_persona_full,
+        "tool_history_keep_rounds": s.tool_history_keep_rounds,
+        "tool_history_budget_tokens": s.tool_history_budget_tokens,
     })
 }
 
@@ -243,16 +268,27 @@ pub async fn update_settings(
                 apply!(s, is_task, default_max_tokens, v);
             }
             if let Some(v) = body.max_context_tokens {
-                if v < 65_536 || v > 1_048_576 {
-                    return Json(json!({ "error": "max_context_tokens 必须在 65536..=1048576(64K~1M)" }))
-                        .into_response()
-                        .with_status(StatusCode::BAD_REQUEST);
+                if !(65_536..=1_048_576).contains(&v) {
+                    return Json(
+                        json!({ "error": "max_context_tokens 必须在 65536..=1048576(64K~1M)" }),
+                    )
+                    .into_response()
+                    .with_status(StatusCode::BAD_REQUEST);
                 }
                 apply!(s, is_task, max_context_tokens, v);
             }
-            // Agent 系统提示词:允许清空(空 = 用内置默认)
+            // Agent 系统提示词:允许清空(空 = 用内置默认)。
+            // 类型级模式隔离(WP7):roleplay 写 RoleplayPromptConfig 扁平字段,
+            // task 写 Option<TaskPromptConfig> 覆盖层;两分支类型不同源,不走通用 apply! 宏。
             if let Some(v) = &body.agent_system_prompt {
-                apply!(s, is_task, agent_system_prompt, v.clone());
+                if is_task {
+                    s.task.agent_system_prompt = Some(
+                        crate::services::settings_service::TaskPromptConfig(v.clone()),
+                    );
+                } else {
+                    s.agent_system_prompt =
+                        crate::services::settings_service::RoleplayPromptConfig(v.clone());
+                }
             }
             // 搜索端点:允许清空(空 = 用默认 DDG 端点)
             if let Some(v) = &body.search_endpoint {
@@ -364,6 +400,10 @@ pub async fn update_settings(
             if let Some(v) = body.skill_progressive_disclosure {
                 apply!(s, is_task, skill_progressive_disclosure, v);
             }
+            // 回退快照开关(批次 6.1)
+            if let Some(v) = body.undo_enabled {
+                apply!(s, is_task, undo_enabled, v);
+            }
             // 子智能体嵌套深度上限(1..=4,越界拒绝)
             if let Some(v) = body.subagent_max_depth {
                 if !(1..=4).contains(&v) {
@@ -390,6 +430,45 @@ pub async fn update_settings(
                         .with_status(StatusCode::BAD_REQUEST);
                 }
                 apply!(s, is_task, subagent_result_max_chars, v);
+            }
+            // MCP 总开关(批次 6.2):仅启动时装配,运行期改动不回溯重连,重启后生效
+            if let Some(v) = body.mcp_enabled {
+                apply!(s, is_task, mcp_enabled, v);
+            }
+            // MCP 服务器列表(全量替换):卫生清理同 load(trim 名称/命令,丢弃不可用条目)
+            if let Some(v) = &body.mcp_servers {
+                let mut servers = v.clone();
+                servers.retain_mut(|srv| {
+                    srv.name = srv.name.trim().to_string();
+                    srv.command = srv.command.trim().to_string();
+                    !srv.name.is_empty() && !srv.command.is_empty()
+                });
+                apply!(s, is_task, mcp_servers, servers);
+            }
+            // 执行者人设完整开关(R3a;bool 免校验,task 模式写覆盖层)
+            if let Some(v) = body.task_persona_full {
+                apply!(s, is_task, task_persona_full, v);
+            }
+            // 工具历史回灌上限(R3b):扁平全局字段(引擎 run_tool_loop 直读扁平值,
+            // 不入模式覆盖层——任务/聊天工具循环共用同一上限,与 subagent 参数的
+            // 引擎侧消费口径一致);越界拒绝,与 load 钳制区间一致
+            if let Some(v) = body.tool_history_keep_rounds {
+                if !(1..=32).contains(&v) {
+                    return Json(json!({ "error": "tool_history_keep_rounds 必须在 1..=32" }))
+                        .into_response()
+                        .with_status(StatusCode::BAD_REQUEST);
+                }
+                s.tool_history_keep_rounds = v;
+            }
+            if let Some(v) = body.tool_history_budget_tokens {
+                if v != 0 && !(1024..=1_048_576).contains(&v) {
+                    return Json(
+                        json!({ "error": "tool_history_budget_tokens 须为 0(禁用)或 1024..=1048576" }),
+                    )
+                    .into_response()
+                    .with_status(StatusCode::BAD_REQUEST);
+                }
+                s.tool_history_budget_tokens = v;
             }
         }
     }
@@ -430,7 +509,8 @@ pub async fn update_settings(
         *state.model.lock().unwrap_or_else(|e| e.into_inner()) = model_name;
     }
 
-    Json(json!({ "ok": true, "settings": settings_json(&candidate.for_mode(mode)) })).into_response()
+    Json(json!({ "ok": true, "settings": settings_json(&candidate.for_mode(mode)) }))
+        .into_response()
 }
 
 /// POST /api/settings/refresh-models:向已保存的 API 请求可用模型列表(立即生效,不保存)
@@ -522,6 +602,8 @@ pub struct SaveAgentPromptBody {
 pub struct PromptPreviewQuery {
     pub session_id: Option<String>,
     pub character_id: Option<String>,
+    /// 预览按哪个模式的合并设置:roleplay(缺省,兼容旧客户端)| task
+    pub mode: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -582,26 +664,69 @@ pub async fn prompt_preview(
         }
     }
 
-    let settings = state.settings.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    if settings.agent_system_prompt.trim().is_empty() {
-        push_preview_layer(
-            &mut layers,
-            "default_template",
-            "system",
-            5,
-            "内置默认角色扮演 / 文学创作模板（运行时按角色展开）",
-        );
+    // 预览按模式走 for_mode 合并值(docs/模式提示词边界.md 第五节):
+    // 缺省/未知值按 roleplay(旧客户端零变化);task 为覆盖层合并后的有效设置,
+    // agent_system_prompt 经类型级隔离转换(None 已注入内置任务默认词)。
+    let mode = match query.mode.as_deref() {
+        Some("task") => AppMode::Task,
+        _ => AppMode::Roleplay,
+    };
+    let settings = state
+        .settings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .for_mode(mode);
+    // agent_system_prompt 为 RoleplayPromptConfig(WP7),.0 取字符串
+    if settings.agent_system_prompt.0.trim().is_empty() {
+        // 空值回退文案按模式区分:roleplay 空 = 用内置人设模板;
+        // task 走到这里 = 覆盖层 Some("") 显式清空(None 已被 for_mode 注入任务默认词)
+        let fallback = match mode {
+            AppMode::Task => "任务模式 Agent 系统提示词已显式清空,执行时仅注入下方三层固定提示词",
+            AppMode::Roleplay => "内置默认角色扮演 / 文学创作模板（运行时按角色展开）",
+        };
+        push_preview_layer(&mut layers, "default_template", "system", 5, fallback);
     } else {
         push_preview_layer(
             &mut layers,
             "custom_template",
             "system",
             5,
-            settings.agent_system_prompt.clone(),
+            settings.agent_system_prompt.0.clone(),
         );
     }
 
-    let inject = state.prompt_inject.lock().unwrap_or_else(|e| e.into_inner()).get().clone();
+    // task 模式追加规划器/执行者/汇总者三层固定提示词(单一来源 task_service/prompt.rs)
+    if matches!(mode, AppMode::Task) {
+        use crate::services::task_service::prompt as task_prompts;
+        push_preview_layer(
+            &mut layers,
+            "task_planner_prompt",
+            "system",
+            5,
+            task_prompts::PLANNER_PROMPT,
+        );
+        push_preview_layer(
+            &mut layers,
+            "task_executor_prompt",
+            "system",
+            5,
+            task_prompts::EXECUTOR_PROMPT,
+        );
+        push_preview_layer(
+            &mut layers,
+            "task_summarizer_prompt",
+            "system",
+            5,
+            task_prompts::SUMMARIZER_PROMPT,
+        );
+    }
+
+    let inject = state
+        .prompt_inject
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get()
+        .clone();
     match inject.mode {
         crate::services::prompt_inject_service::InjectMode::Simple => push_preview_layer(
             &mut layers,
@@ -709,7 +834,13 @@ pub async fn prompt_preview(
         push_preview_layer(&mut layers, "history_summary", "metadata", 2, summary);
     }
 
-    if let Some(flow) = state.flow.lock().unwrap_or_else(|e| e.into_inner()).get().filter(|flow| flow.enabled) {
+    if let Some(flow) = state
+        .flow
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get()
+        .filter(|flow| flow.enabled)
+    {
         for (index, step) in flow.steps.iter().filter(|step| step.enabled).enumerate() {
             if let Some(prompt) = step
                 .system_prompt

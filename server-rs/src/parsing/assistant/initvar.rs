@@ -18,8 +18,8 @@ pub fn collect_init_vars(entries: &[WorldEntry]) -> AssistantVars {
     let mut tree = json!({});
     for e in entries {
         let comment_upper = e.comment.to_uppercase();
-        let is_init_tag = comment_upper.contains("[INITVAR]")
-            || comment_upper.contains("[INITIALVARIABLES]");
+        let is_init_tag =
+            comment_upper.contains("[INITVAR]") || comment_upper.contains("[INITIALVARIABLES]");
         if !is_init_tag || e.content.trim().is_empty() {
             continue;
         }

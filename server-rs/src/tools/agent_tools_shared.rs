@@ -4,7 +4,8 @@
 //   - 无依赖随机源(Rng / random_u64)
 //   - role 工具(创建随机数/掷骰子):与 RNG 同源,故随共享件驻留
 // 可见性约定:供 read/write 域与 agent_tools.rs 聚合入口使用的项均 pub(super);
-// character_file_root 保持 pub(外部模块可能经 agent_tools.rs 重导出引用)。
+// character_file_root 保持 pub(外部模块可能经 agent_tools.rs 重导出引用);
+// safe_rel_path 为 pub(crate):批次 6.1 undo_service 恢复快照时复用同一路径安全规则。
 use crate::models::types::{ToolContext, ToolDefinition};
 use crate::tools::registry::ToolRegistry;
 use serde_json::{json, Value};
@@ -19,7 +20,7 @@ pub fn character_file_root(deps: &ToolDeps, character_id: &str) -> PathBuf {
 }
 
 /// 相对路径安全校验:规范化(反斜杠转正斜杠、去空段),拒绝绝对路径/盘符/上级目录/空
-pub(super) fn safe_rel_path(p: &str) -> Result<String, String> {
+pub(crate) fn safe_rel_path(p: &str) -> Result<String, String> {
     // 绝对路径(Unix 前缀 /、Windows 盘符 C: 或 UNC \\)直接拒绝,防止逃离角色文件区
     if p.starts_with('/') || p.starts_with('\\') || p.contains(':') {
         return Err(format!("非法路径(不允许绝对路径/盘符): {p}"));
@@ -40,7 +41,11 @@ pub(super) fn safe_rel_path(p: &str) -> Result<String, String> {
 }
 
 /// 读文件区文件(不存在返回 Err)
-pub(super) fn read_file_checked(deps: &ToolDeps, ctx: &ToolContext, rel: &str) -> Result<String, String> {
+pub(super) fn read_file_checked(
+    deps: &ToolDeps,
+    ctx: &ToolContext,
+    rel: &str,
+) -> Result<String, String> {
     let rel = safe_rel_path(rel)?;
     let path = character_file_root(deps, &ctx.character_id).join(&rel);
     std::fs::read_to_string(&path).map_err(|e| format!("读取文件 {rel} 失败: {e}"))

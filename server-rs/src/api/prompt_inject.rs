@@ -15,7 +15,12 @@ use std::sync::Arc;
 
 /// GET /api/prompt-inject:返回当前注入配置(简单模式 + 楼层列表)
 pub async fn get_prompt_inject(State(state): State<Arc<AppState>>) -> Response {
-    let cfg = state.prompt_inject.lock().unwrap_or_else(|e| e.into_inner()).get().clone();
+    let cfg = state
+        .prompt_inject
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get()
+        .clone();
     Json(json!({ "ok": true, "config": cfg })).into_response()
 }
 
@@ -30,7 +35,10 @@ pub async fn update_prompt_inject(
     State(state): State<Arc<AppState>>,
     Json(body): Json<UpdatePromptInjectBody>,
 ) -> Response {
-    let mut svc = state.prompt_inject.lock().unwrap_or_else(|e| e.into_inner());
+    let mut svc = state
+        .prompt_inject
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     match svc.set(body.config) {
         Ok(()) => {
             let cfg = svc.get().clone();
@@ -92,7 +100,10 @@ pub async fn import(
         .map(|p| String::from_utf8_lossy(&p.content).trim().to_lowercase())
         .unwrap_or_else(|| "replace".to_string());
 
-    let mut svc = state.prompt_inject.lock().unwrap_or_else(|e| e.into_inner());
+    let mut svc = state
+        .prompt_inject
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let mut cfg = svc.get().clone();
     if mode == "append" {
         // 追加:order 接续现有楼层;id 冲突时自动改名

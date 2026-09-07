@@ -39,7 +39,10 @@ pub struct UpdateBody {
 
 /// POST /api/memory/distill:对指定会话蒸馏记忆。
 /// LLM 走 engine 当前连接器(mock 可测);历史为空时直接返回 inserted=0 不调模型。
-pub async fn distill(State(state): State<Arc<AppState>>, Json(body): Json<DistillBody>) -> Response {
+pub async fn distill(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<DistillBody>,
+) -> Response {
     let enabled = {
         let s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
         s.memory_distill_enabled

@@ -36,7 +36,9 @@ pub(crate) async fn avatar_file(
     let path = state.config.data_dir.join("avatars").join(&file);
     match tokio::fs::read(&path).await {
         Ok(bytes) => {
-            let mime = guess_mime(&file);
+            // 头像真实字节嗅探优先:上传的头像一律存为 .png(历史行为),但 JSON 卡可能
+            // 携带 JPEG/WebP 头像,扩展名猜测会给出错误 Content-Type,nosniff 下无法显示
+            let mime = sniff_image_mime(&bytes).unwrap_or_else(|| guess_mime(&file));
             Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, mime)
@@ -44,6 +46,23 @@ pub(crate) async fn avatar_file(
                 .unwrap_or_else(|_| StatusCode::NOT_FOUND.into_response())
         }
         Err(_) => Json(json!({ "error": "Not Found" })).into_response(),
+    }
+}
+
+/// 按魔数嗅探图片真实格式(头像字节与扩展名不一致时纠正 Content-Type)
+fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF8") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else if bytes.starts_with(b"BM") {
+        Some("image/bmp")
+    } else {
+        None
     }
 }
 
@@ -243,9 +262,36 @@ mod resource_frame_tests {
 
     #[test]
     fn template_rewrites_author_caches_access() {
+        // \bcaches\b 一条规则同时覆盖裸 caches / window.caches / self.caches / globalThis.caches
+        // (__kdCaches 经 var 提升为全局对象属性,四种写法都解析到 shim)
         assert!(
-            TEMPLATE.contains(r"globalThis\.caches"),
-            "宿主文档应包含把 globalThis.caches 引用重写为 __kdCaches 的脚本重写规则(防沙箱 Cache API SecurityError)"
+            TEMPLATE.contains(r"\bcaches\b"),
+            "宿主文档应包含把 caches 引用(裸/window./self./globalThis.)重写为 __kdCaches 的脚本重写规则(防沙箱 Cache API SecurityError)"
+        );
+    }
+
+    #[test]
+    fn template_nonce_survives_reload() {
+        // 作者页面下载完成后 location.reload() 自举:reload 回来的是空宿主文档,
+        // nonce 必须跨 reload 存活(window.name 持有;hash 可能被 SPA 路由改写),
+        // 且每次文档加载都要发 ready,父页面才能以缓存 HTML + 存储快照重新 boot。
+        assert!(
+            TEMPLATE.contains("window.name"),
+            "宿主文档应把 nonce 存入 window.name 以在 reload 后恢复,否则作者页面自举后永远停在空白模板"
+        );
+    }
+
+    #[test]
+    fn template_syncs_shim_mutations_to_parent() {
+        // shim 持久化桥:localStorage/sessionStorage/Cache 变更须经 postMessage(store-sync)
+        // 同步到父页面持久化,否则 reload/重启后下载成果丢失,仍回到下载页。
+        assert!(
+            TEMPLATE.contains("store-sync"),
+            "宿主文档 shim 变更应发送 store-sync 消息供父页面持久化(下载→reload→命中缓存→进游戏界面链路)"
+        );
+        assert!(
+            TEMPLATE.contains("__prime"),
+            "宿主文档应支持 boot 快照恢复(__prime),否则重新 boot 后作者脚本读不到已下载的缓存"
         );
     }
 
@@ -261,7 +307,157 @@ mod resource_frame_tests {
 
     #[test]
     fn template_keeps_existing_storage_shims() {
-        assert!(TEMPLATE.contains("__kdMemoryStorage"), "localStorage shim 不应被移除");
-        assert!(TEMPLATE.contains("__kdSessionStorage"), "sessionStorage shim 不应被移除");
+        assert!(
+            TEMPLATE.contains("__kdMemoryStorage"),
+            "localStorage shim 不应被移除"
+        );
+        assert!(
+            TEMPLATE.contains("__kdSessionStorage"),
+            "sessionStorage shim 不应被移除"
+        );
+    }
+
+    #[test]
+    fn template_installs_tavern_helper_shim() {
+        // 酒馆助手式资源页(吸血鬼卡 v2.1)用 window.TavernHelper.getCharData("current").data
+        // 的 creator/character_version/creator_notes 推导资源包 AES 口令;
+        // kedai 环境没有 TavernHelper 全局,口令为空 → 解密必抛 OperationError,
+        // 96MB 下载完成后必然失败回下载页。宿主文档须在注入作者脚本前装好 shim,
+        // 数据源是 boot 消息携带的 charData(当前角色卡元数据)。
+        assert!(
+            TEMPLATE.contains("window.TavernHelper"),
+            "宿主文档应安装 window.TavernHelper 兼容 shim,否则作者页推导资源包口令失败、解密必然 OperationError"
+        );
+        assert!(
+            TEMPLATE.contains("getCharData"),
+            "TavernHelper shim 应提供 getCharData(作者页推导口令的入口)"
+        );
+        assert!(
+            TEMPLATE.contains("m.charData"),
+            "boot 消息应携带 charData(当前角色卡 creator/character_version/creator_notes)"
+        );
+        assert!(
+            TEMPLATE.contains("getVariables") && TEMPLATE.contains("insertOrAssignVariables"),
+            "TavernHelper shim 应提供变量读写(作者页设置/剧情变量持久化,经 storage shim 落地)"
+        );
+        // 吸血鬼卡 v2.1 完整 API 面:世界书(开场消息/设定来源)+ generate(开场白生成)
+        // + 预设/事件安全空值;缺任一项作者页落入「文本为空喵」等错误态
+        assert!(
+            TEMPLATE.contains("getCharWorldbookNames") && TEMPLATE.contains("getWorldbook"),
+            "TavernHelper shim 应提供世界书读接口(作者页开局消息/设定从角色世界书条目读取)"
+        );
+        assert!(
+            TEMPLATE.contains("normalizeEntry") && TEMPLATE.contains("e.comment"),
+            "世界书条目应做 name/comment 字段归一化(角色卡原始数据条目名在 comment,作者页按 m.name 查找,缺归一化则开局消息缺失)"
+        );
+        assert!(
+            TEMPLATE.contains("m.worldbook"),
+            "boot 消息应携带 worldbook(getCharWorldbookNames 是同步接口,只能随 boot 预发数据)"
+        );
+        assert!(
+            TEMPLATE.contains("tavern-call") && TEMPLATE.contains("tavern-result"),
+            "TavernHelper.generate 应经 postMessage RPC 桥(沙箱 iframe 无 token,须宿主转发)"
+        );
+        assert!(
+            TEMPLATE.contains("eventOn"),
+            "TavernHelper shim 应提供 eventOn 安全空值(作者页订阅酒馆事件,缺失会崩)"
+        );
+    }
+
+    #[test]
+    fn template_shims_parent_for_wide_mode() {
+        // 作者页(吸血鬼卡 v2.1)的宽屏机制读 window.parent.document 往父文档注入
+        // 撑满样式(为同源嵌入的酒馆设计);沙箱 iframe 下必抛 SecurityError,作者页
+        // alert「宿主不允许访问父页面样式,无法进入宽屏」并停在下载完成页,游戏界面
+        // 永不出现。宿主文档须在作者脚本执行前用代理遮蔽 window.parent(document 指向
+        // 自身文档,postMessage 转发真实父窗口);消息桥与来源校验改用 REAL_PARENT,
+        // 不受遮蔽影响。
+        assert!(
+            TEMPLATE.contains("var REAL_PARENT = window.parent"),
+            "宿主文档应在顶层抓住真实父窗口引用(REAL_PARENT),消息桥不依赖可被替换的 parent"
+        );
+        assert!(
+            TEMPLATE.contains("installParentShim") && TEMPLATE.contains("window.parent = proxy"),
+            "宿主文档应安装 window.parent 代理([Replaceable] 属性赋值遮蔽),否则作者页宽屏机制抛 SecurityError 卡在下载完成页"
+        );
+        assert!(
+            TEMPLATE.contains("event.source !== REAL_PARENT"),
+            "message 来源校验应使用 REAL_PARENT,否则代理遮蔽后宿主 boot 消息被拒收"
+        );
+    }
+
+    #[test]
+    fn template_shims_raf_for_occluded_oopif() {
+        // 沙箱 iframe(无 allow-same-origin)在站点隔离下是独立进程;宿主窗口被
+        // 遮挡/最小化或宿主 WebView 面板非激活时,rAF 会被无限期停发(实测窗口前台
+        // 但面板非激活时 23 秒才触发一次)。作者页(吸血鬼卡 v2.1)的下载进度、解密
+        // 分片、「进入游戏」初始化动画全挂在 rAF 上,表现为点击后撒花定格、游戏界面
+        // 永不出现。模板须把 rAF 映射到 setTimeout(遮挡下仅降频不停摆)。
+        assert!(
+            TEMPLATE.contains("window.requestAnimationFrame = function (cb)"),
+            "宿主文档应为作者页安装 rAF→setTimeout 兜底,否则宿主 WebView 不可见时初始化卡死"
+        );
+        assert!(
+            TEMPLATE.contains("window.cancelAnimationFrame = function (id)"),
+            "cancelAnimationFrame 应一并映射到 clearTimeout,避免作者页取消动画失效"
+        );
+        // 宿主宽屏切换改变 iframe 尺寸时,作者页不一定收到 resize(实测切换后舞台
+        // 按旧尺寸渲染缩在角落,需额外尺寸扰动才重排)。模板须轮询补发 resize。
+        assert!(
+            TEMPLATE.contains("__kdLastW")
+                && TEMPLATE.contains("dispatchEvent(new Event('resize'))"),
+            "宿主文档应轮询 innerWidth/innerHeight 并补发 resize,否则宽屏切换后作者页不重排"
+        );
+    }
+
+    #[test]
+    fn template_provides_real_preset_store() {
+        // 吸血鬼卡 v2.1 实测:作者页经 getPreset('in_use') 读流式开关(空值 → 误判流式
+        // 未关闭)、经 replacePreset 注入「防掉格式」提示词(空桩 → 注入永远失败,
+        // 模型回复不带 JSON 变量块 → 丢格式 + 变量不更新)。模板必须提供真实预设 store
+        // (内存 storage 经 store-sync 持久化),并把启用提示词并入 generate 请求。
+        assert!(
+            TEMPLATE.contains("kedai.tavern-preset.v1"),
+            "模板应提供预设持久化键(kedai.tavern-preset.v1)"
+        );
+        assert!(
+            TEMPLATE.contains("window.getPreset = getPresetImpl")
+                && TEMPLATE.contains("window.replacePreset = replacePresetImpl"),
+            "模板应把 getPreset/replacePreset 装为全局函数(作者页先查全局再查 TavernHelper)"
+        );
+        assert!(
+            TEMPLATE.contains("__preset_prompts"),
+            "generate 应并入预设启用的提示词(__preset_prompts),否则注入的提示永不生效"
+        );
+        assert!(
+            TEMPLATE.contains("should_stream: false"),
+            "默认预设应声明非流式(should_stream:false),作者页流式检测才不误报"
+        );
+    }
+}
+
+#[cfg(test)]
+mod avatar_mime_tests {
+    use super::sniff_image_mime;
+
+    #[test]
+    fn sniffs_real_format_over_extension() {
+        // 历史行为:头像一律存 .png,但字节可能是 JPEG/WebP —— 服务端按魔数纠正
+        assert_eq!(
+            sniff_image_mime(&[0x89, 0x50, 0x4E, 0x47, 0x0D]),
+            Some("image/png")
+        );
+        assert_eq!(
+            sniff_image_mime(&[0xFF, 0xD8, 0xFF, 0xE0]),
+            Some("image/jpeg")
+        );
+        assert_eq!(sniff_image_mime(b"GIF89a.."), Some("image/gif"));
+        assert_eq!(
+            sniff_image_mime(b"RIFF\x00\x00\x00\x00WEBPVP8 "),
+            Some("image/webp")
+        );
+        assert_eq!(sniff_image_mime(b"BMxxxx"), Some("image/bmp"));
+        assert_eq!(sniff_image_mime(b"{\"json\":true}"), None);
+        assert_eq!(sniff_image_mime(b""), None);
     }
 }
