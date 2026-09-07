@@ -1,7 +1,7 @@
 ﻿# check-all.ps1 — 本地 CI 一键检查:后端 fmt/clippy/test + 前端 typecheck/test/build
 # 用法: npm run check  |  或 powershell -NoProfile -ExecutionPolicy Bypass -File tools/check-all.ps1
 # 参数: -SkipRust 跳过后端; -SkipWeb 跳过前端; -Quick 只跑 test 不跑 build;
-#       -StrictTypecheck 把 vue-tsc 从警告档切回硬门禁(附录 D 清偿完成后使用)
+#       -StrictTypecheck 历史保留参数(2026-09-08 起 typecheck 已是硬门禁,此开关无差异)
 #       -StrictAudit 把 cargo audit 从警告档切为硬门禁(默认仅警告不拦截)
 param(
     [switch]$SkipRust,
@@ -90,14 +90,9 @@ if (-not $SkipRust) {
 if (-not $SkipWeb) {
     Push-Location $root
     try {
-        if ($StrictTypecheck) {
-            Invoke-Stage 'web: vue-tsc --noEmit'    { npm run typecheck -w web }
-        } else {
-            Write-Host "`n===== web: vue-tsc --noEmit(仅警告,存量清偿见 docs/优化实施方案-2026-09.md 附录 D)=====" -ForegroundColor Cyan
-            npm run typecheck -w web
-            if ($LASTEXITCODE -ne 0) { Write-Host '[WARN] vue-tsc 存在存量类型错误(不拦截;-StrictTypecheck 可切硬门禁)' -ForegroundColor Yellow }
-            else { Write-Host '[ OK ] vue-tsc 全绿' -ForegroundColor Green }
-        }
+        # 2026-09-08 附录 D 168 个存量错误已清偿归零,typecheck 恢复硬门禁;
+        # -StrictTypecheck 参数保留兼容(已无分支差异)
+        Invoke-Stage 'web: vue-tsc --noEmit'    { npm run typecheck -w web }
         Invoke-Stage 'web: vitest run'          { npm test -w web }
         if (-not $Quick) {
             Invoke-Stage 'web: vite build'      { npm run build -w web }
