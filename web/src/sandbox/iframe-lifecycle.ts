@@ -199,7 +199,14 @@ export async function executeSandboxedCharacterScript(
     let settled = false;
     let disposed = false;
     const targets = new Map<number, HTMLElement>();
-    const eventListeners: Array<{ element: HTMLElement; eventName: string; listener: EventListener }> = [];
+    // document/window 级监听也登记在此(EventTarget),cleanup 统一摘除;
+    // capture 必须随监听器记录:capture=true 注册的用默认 capture=false 摘不掉
+    const eventListeners: Array<{
+      element: EventTarget;
+      eventName: string;
+      listener: EventListener;
+      capture?: boolean;
+    }> = [];
     let targetId = 0;
     // 跨 realm 共享全局:同角色其余沙箱 publish 时实时推送本沙箱(全量快照);
     // cleanup 退订(挂在下方统一清理路径)
@@ -231,11 +238,22 @@ export async function executeSandboxedCharacterScript(
         clearTimeout(geoPushTimer);
         geoPushTimer = undefined;
       }
-      for (const { element, eventName, listener } of eventListeners) {
-        element.removeEventListener(eventName, listener);
+      for (const { element, eventName, listener, capture } of eventListeners) {
+        element.removeEventListener(eventName, listener, capture);
       }
       eventListeners.length = 0;
       targets.clear();
+      // 本次沙箱注入的 DOM(悬浮窗/面板/style 标签)一并摘除:cleanup 只负责
+      // 容器内带 data-kd-injected 的节点,不触碰消息渲染块自身结构
+      if (context.container && typeof context.container.querySelectorAll === 'function') {
+        try {
+          for (const el of Array.from(context.container.querySelectorAll<HTMLElement>('[data-kd-injected]'))) {
+            el.remove();
+          }
+        } catch {
+          /* 容器已卸载:忽略 */
+        }
+      }
       iframe.remove();
     };
     // 宿主容器几何镜像推送:聊天区滚动(scroll 不冒泡,capture 捕获)/窗口 resize 时节流推送,
@@ -417,7 +435,8 @@ export async function executeSandboxedCharacterScript(
                 nonce,
                 targets,
                 () => ++targetId,
-                (element, eventName, listener) => eventListeners.push({ element, eventName, listener }),
+                (element: EventTarget, eventName, listener, capture?: boolean) =>
+                  eventListeners.push({ element, eventName, listener, capture }),
               );
             } catch (error) {
               iframe.contentWindow?.postMessage({

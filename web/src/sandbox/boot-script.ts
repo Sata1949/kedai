@@ -224,6 +224,8 @@ const toastr=Object.freeze({info:function(m){console.info('[kedai-toastr]',m);},
 // 使开场协议勾选/确认($('#agree').prop('checked') 等)读到真实值而非假值桩。
 // 未命中的选择器 getter 会顺带 enqueue 一次 probe,下一批回包后同选择器即可读到真值。
 const jqHandlers=new Map();
+// 已应用 draggable 的选择器键集合:data('ui-draggable') 与 destroy 判定用
+const jqDraggableApplied={};
 const jqReadyQueue=[];
 let jqIdSeq=0;
 let ops=[];
@@ -324,6 +326,8 @@ const __kdRefKey=function(ref){return ref?(ref.kind==='selector'?ref.value:ref.k
 const probe=(ref)=>{const k=__kdRefKey(ref);if(k&&!__kdProbeQueue[k]){__kdProbeQueue[k]=1;enqueue({ref,method:'probe',args:[]});}};
 // $('<div …>') 创建游离元素:on 绑定与子元素先记在 spec 里,append 进真实容器时由宿主一并落 DOM
 function jqCreated(spec){
+  if(!spec.attrs)spec.attrs={};
+  if(!spec.css)spec.css={};
   const coll={};
   Object.defineProperty(coll,'__kdSpec',{get:function(){return spec;}});
   Object.defineProperty(coll,'length',{get:function(){return 1;}});
@@ -335,13 +339,23 @@ function jqCreated(spec){
   coll.toggleClass=function(){return coll;};
   coll.text=function(v){if(arguments.length===0)return '';spec.text=String(v??'');return coll;};
   coll.html=function(v){if(arguments.length===0)return spec.innerHtml||'';spec.innerHtml=String(v??'');return coll;};
-  coll.attr=function(){return arguments.length===1?'':coll;};
+  // attr 三种形态:两参写、一参对象合并、一参字符串 getter(游离元素无镜像,返回 '')
+  coll.attr=function(k,v){
+    if(arguments.length>=2){spec.attrs[String(k)]=String(v??'');return coll;}
+    if(k&&typeof k==='object'){for(const key in k)spec.attrs[key]=String(k[key]);return coll;}
+    return '';
+  };
   coll.prop=function(){return arguments.length===1?false:coll;};
-  coll.css=function(){return arguments.length===1?'':coll;};
+  // css 三种形态:两参写、一参对象合并、一参字符串读 spec(与真 jQuery 链式语义一致)
+  coll.css=function(k,v){
+    if(arguments.length>=2){spec.css[String(k)]=String(v??'');return coll;}
+    if(k&&typeof k==='object'){for(const key in k)spec.css[key]=String(k[key]);return coll;}
+    return spec.css[String(k)]??'';
+  };
   coll.val=function(){return arguments.length===0?'':coll;};
-  coll.data=function(){return '';};
+  coll.data=function(name){return String(name)==='ui-draggable'?!!(spec.draggable&&spec.draggable!=='destroy'):'';};
   coll.hasClass=function(){return false;};
-  coll.is=function(){return false;};
+  coll.is=function(q){if(q===':visible')return true;if(q===':hidden')return false;return false;};
   coll.find=function(){return coll;};
   coll.closest=function(){return coll;};
   coll.first=function(){return coll;};
@@ -354,12 +368,25 @@ function jqCreated(spec){
   coll.empty=function(){spec.children.length=0;spec.innerHtml='';return coll;};
   coll.show=function(){return coll;};
   coll.hide=function(){return coll;};
+  coll.toggle=function(show){if(typeof show==='boolean')return show?coll.show():coll.hide();return coll;};
   coll.fadeIn=function(){return coll;};
   coll.fadeOut=function(){return coll;};
   coll.slideDown=function(){return coll;};
   coll.slideUp=function(){return coll;};
+  coll.animate=function(){return coll;};
   coll.focus=function(){return coll;};
   coll.outerHeight=function(){return 0;};
+  // 游离元素记录 draggable 选项('destroy' 记录为字符串),宿主 appendCreated 落 DOM 时绑指针拖拽
+  coll.draggable=function(opts){
+    if(typeof opts==='string'){spec.draggable=opts;return coll;}
+    const o=opts&&typeof opts==='object'?opts:{};
+    const wire={};
+    for(const k of ['start','drag','stop']){if(typeof o[k]==='function'){const id=++jqIdSeq;jqHandlers.set(id,o[k]);wire[k]=id;}else wire[k]=0;}
+    for(const k of ['handle','cancel','containment','cursor']){if(typeof o[k]==='string')wire[k]=o[k];}
+    if(typeof o.distance==='number')wire.distance=o.distance;
+    spec.draggable=wire;
+    return coll;
+  };
   return coll;
 }
 function jq(sel){
@@ -367,6 +394,11 @@ function jq(sel){
   if(typeof sel==='string'&&/^\\s*</.test(sel))return jqCreated({kind:'created',html:sel,handlers:[],children:[]});
   if(sel&&sel.kind==='created')return jqCreated(sel);
   const ref=typeof sel==='string'?{kind:'selector',value:sel}
+    // $(document)/$(window):作者脚本以窗口为事件源($(window).on('unload', …));
+    // 放在 target/selector-index 判定之前(这两个是沙箱内真实对象,非引用句柄)。
+    // typeof 守卫:部分 vm 测试 harness 未提供 document 全局,直接引用会抛 ReferenceError。
+    :typeof document!=='undefined'&&sel===document?{kind:'document'}
+    :typeof window!=='undefined'&&sel===window?{kind:'window'}
     :sel&&sel.kind==='target'?{kind:'target',id:sel.id}
     :sel&&sel.kind==='selector-index'?{kind:'selector-index',value:sel.value,index:sel.index}
     :null;
@@ -378,16 +410,41 @@ function jq(sel){
   const coll={};
   coll.text=function(v){if(arguments.length===0){const st=readState();if(!st)probe(ref);return st&&typeof st.text==='string'?st.text:'';}if(ref)enqueue({ref,method:'text',args:[v]});__kdPatch(sel,{text:String(v??'')});return coll;};
   coll.html=function(v){if(arguments.length===0){const st=readState();if(!st)probe(ref);return st&&typeof st.html==='string'?st.html:'';}if(ref)enqueue({ref,method:'html',args:[v]});__kdPatch(sel,{html:String(v??'')});return coll;};
-  coll.css=function(p,v){if(arguments.length===1)return '';if(ref)enqueue({ref,method:'css',args:[p,v]});return coll;};
+  // css 四种形态:0 参返回 '';1 参字符串 getter(从镜像读真值,无镜像 probe 后返回 '');
+  // 1 参对象逐键 setter;2 参 setter(现行为)。对象形式此前被当 getter 吞掉,
+  // 悬浮球 .css({position:'fixed',zIndex:9999,…}) 全部丢失 → 无定位无层叠。
+  coll.css=function(p,v){
+    if(arguments.length===0)return '';
+    if(arguments.length===1){
+      if(p&&typeof p==='object'){
+        for(const k in p){if(ref)enqueue({ref,method:'css',args:[k,p[k]]});}
+        __kdPatch(sel,{css:Object.assign({},(readState()||{}).css||{},p)});
+        return coll;
+      }
+      const st=readState();
+      if(!st){probe(ref);return '';}
+      const cs=st.css&&typeof st.css==='object'?st.css:null;
+      return cs&&typeof cs[p]==='string'?cs[p]:(typeof st.style==='object'&&st.style&&typeof st.style[p]==='string'?st.style[p]:'');
+    }
+    if(ref)enqueue({ref,method:'css',args:[p,v]});
+    __kdPatch(sel,{css:Object.assign({},(readState()||{}).css||{},{[String(p)]:String(v??'')})});
+    return coll;
+  };
   coll.addClass=function(c){if(ref)enqueue({ref,method:'addClass',args:[c]});const st=readState();const cl=st&&Array.isArray(st.classes)?st.classes.slice():[];for(const x of String(c??'').split(/\\s+/).filter(Boolean))if(cl.indexOf(x)<0)cl.push(x);__kdPatch(sel,{classes:cl});return coll;};
   coll.removeClass=function(c){if(ref)enqueue({ref,method:'removeClass',args:[c]});const st=readState();const rm=String(c??'').split(/\\s+/).filter(Boolean);const cl=(st&&Array.isArray(st.classes)?st.classes:[]).filter(x=>rm.indexOf(x)<0);__kdPatch(sel,{classes:cl});return coll;};
   coll.hasClass=function(name){const st=readState();if(!st)probe(ref);const cl=st&&Array.isArray(st.classes)?st.classes:[];return cl.indexOf(String(name))>=0;};
-  coll.data=function(name){return localData[String(name)]??'';};
+  // data:ui-draggable 反映本集合是否已应用过 draggable(销毁钩子据此决定是否 destroy);
+  // 其余键沿用事件 target.data / 本地数据
+  coll.data=function(name){const n=String(name);if(n==='ui-draggable')return !!(refKey&&jqDraggableApplied[refKey]);return localData[n]??'';};
   coll.val=function(v){if(arguments.length===0){const c=__kdFindControl(sel);if(c&&typeof c.val==='string')return c.val;const st=readState();if(st&&typeof st.val==='string')return st.val;if(!st)probe(ref);return '';}if(ref)enqueue({ref,method:'val',args:[v]});__kdPatch(sel,{val:String(v??'')});return coll;};
   coll.on=function(evt,fn){if(ref){const id=++jqIdSeq;jqHandlers.set(id,fn);enqueue({ref,method:'on',args:[evt,id]});}return coll;};
   coll.off=function(evt){if(ref)enqueue({ref,method:'off',args:[evt]});return coll;};
-  coll.hide=function(){if(ref)enqueue({ref,method:'css',args:['display','none']});return coll;};
-  coll.show=function(){if(ref)enqueue({ref,method:'css',args:['display','']});return coll;};
+  coll.hide=function(){if(ref)enqueue({ref,method:'css',args:['display','none']});__kdPatch(sel,{css:Object.assign({},(readState()||{}).css||{},{display:'none'})});return coll;};
+  coll.show=function(){if(ref)enqueue({ref,method:'css',args:['display','']});__kdPatch(sel,{css:Object.assign({},(readState()||{}).css||{},{display:''})});return coll;};
+  // toggle:boolean 参走 show/hide,无参按 css display 现状翻转(镜像读当前值)
+  coll.toggle=function(show){if(typeof show==='boolean')return show?coll.show():coll.hide();const cur=coll.css('display');return cur==='none'?coll.show():coll.hide();};
+  // animate:仅 scrollTop/scrollLeft 有等价操作(直接置位,无动画);其余属性 no-op 返回 coll
+  coll.animate=function(props,ms,cb){if(props&&typeof props==='object'){for(const k in props){if(k==='scrollTop'||k==='scrollLeft'){if(ref)enqueue({ref,method:'css',args:[k,props[k]]});}}}if(typeof ms==='function')Promise.resolve().then(function(){ms();});else if(typeof cb==='function')Promise.resolve().then(function(){cb();});return coll;};
   // 开场界面脚本依赖的动画/属性方法:映射为等价操作(无动画,同步语义与 jQuery 一致)
   coll.slideDown=function(){if(ref)enqueue({ref,method:'css',args:['display','']});return coll;};
   coll.slideUp=function(){if(ref)enqueue({ref,method:'css',args:['display','none']});return coll;};
@@ -396,6 +453,13 @@ function jq(sel){
   coll.prop=function(name,value){if(arguments.length===1){const c=__kdFindControl(sel);const st=readState();if(!c&&!st)probe(ref);if(name==='checked')return c?!!c.checked:st?!!st.checked:false;if(name==='disabled')return c?!!c.disabled:st?!!st.disabled:false;if(name==='value')return c&&typeof c.val==='string'?c.val:st&&typeof st.val==='string'?st.val:'';return false;}if(ref)enqueue({ref,method:'prop',args:[name,value]});if(name==='checked')__kdPatch(sel,{checked:!!value});else if(name==='disabled')__kdPatch(sel,{disabled:!!value});else if(name==='value')__kdPatch(sel,{val:String(value??'')});return coll;};
   coll.attr=function(name,value){
     if(arguments.length===1){
+      // 1 参对象:逐键 setter(attr({id:'x',class:'y'}))
+      if(name&&typeof name==='object'){
+        for(const k in name){if(ref)enqueue({ref,method:'attr',args:[k,name[k]]});}
+        const patch={};for(const k in name){if(k==='id')patch.id=String(name[k]);else if(k==='class')patch.classes=String(name[k]).split(/\\s+/).filter(Boolean);}
+        if(Object.keys(patch).length)__kdPatch(sel,patch);
+        return coll;
+      }
       const st=readState();
       if(name==='id'){
         if(st&&typeof st.id==='string'&&st.id)return st.id;
@@ -410,13 +474,18 @@ function jq(sel){
       return '';
     }
     if(ref)enqueue({ref,method:'attr',args:[name,value]});
+    if(name==='id')__kdPatch(sel,{id:String(value??'')});
     return coll;
   };
   coll.trigger=function(evt){if(ref)enqueue({ref,method:'trigger',args:[evt]});return coll;};
   // append 支持 $('<div>') 游离元素(spec 经 appendCreated 由宿主落 DOM 并绑定延迟事件)
   coll.append=function(html){if(html&&html.__kdSpec){if(ref)enqueue({ref,method:'appendCreated',args:[html.__kdSpec]});return coll;}if(ref)enqueue({ref,method:'append',args:[String(html??'')]});return coll;};
   coll.focus=function(){if(ref)enqueue({ref,method:'focus',args:[]});return coll;};
-  coll.is=function(q){const c=__kdFindControl(sel);const st=readState();if(!c&&!st)probe(ref);if(q===':checked')return c?!!c.checked:st?!!st.checked:false;if(q===':disabled')return c?!!c.disabled:st?!!st.disabled:false;return false;};
+  coll.is=function(q){const c=__kdFindControl(sel);const st=readState();if(!c&&!st)probe(ref);if(q===':checked')return c?!!c.checked:st?!!st.checked:false;if(q===':disabled')return c?!!c.disabled:st?!!st.disabled:false;
+    // :visible/:hidden 从镜像 css.display 判定(wuwa 面板 $panel.is(':hidden') 决定展开);
+    // 镜像无 display 信息时按合理默认(:visible=false / :hidden=true),不抛错
+    if(q===':visible'||q===':hidden'){const cs=st&&st.css&&typeof st.css==='object'?st.css:null;const disp=cs&&typeof cs.display==='string'?cs.display:null;const hidden=disp===null?true:disp==='none';return q===':visible'?!hidden:hidden;}
+    return false;};
   coll.outerHeight=function(){const st=readState();if(st&&typeof st.offsetHeight==='number')return st.offsetHeight;if(!st)probe(ref);return 0;};
   coll.find=function(){return coll;};
   coll.closest=function(){return coll;};
@@ -456,6 +525,21 @@ function jq(sel){
     } else probe(r);
     return r;
   }});})(__i);
+  // draggable:字符串 'destroy' 解绑;对象把 start/drag/stop 换成 jqId,其余可序列化字段原样
+  // 入队。宿主在 pointermove/up 时以 jq-event 回发 event.ui.position(沙箱回调读它)。
+  coll.draggable=function(opts){
+    if(typeof opts==='string'){
+      if(ref&&opts==='destroy'){enqueue({ref,method:'draggable',args:['destroy']});if(refKey)delete jqDraggableApplied[refKey];}
+      return coll;
+    }
+    const o=opts&&typeof opts==='object'?opts:{};
+    const wire={};
+    for(const k of ['start','drag','stop']){if(typeof o[k]==='function'){const id=++jqIdSeq;jqHandlers.set(id,o[k]);wire[k]=id;}else wire[k]=0;}
+    for(const k of ['handle','cancel','containment','cursor']){if(typeof o[k]==='string')wire[k]=o[k];}
+    if(typeof o.distance==='number')wire.distance=o.distance;
+    if(ref){enqueue({ref,method:'draggable',args:[wire]});if(refKey)jqDraggableApplied[refKey]=1;}
+    return coll;
+  };
   return coll;
 }
 const $=jq;

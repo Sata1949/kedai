@@ -287,3 +287,98 @@ describe('ensureCardScriptSandbox(键控生命周期)', () => {
     expect(typeof ctx.rpcExtensions).toBe('function');
   });
 });
+
+describe('ensureOverlayRoot / cleanupCardScriptSandbox(卡级覆层根)', () => {
+  /** 最小 DOM 桩:querySelector 只认覆层根选择器,记录 append/remove */
+  function makeContainer() {
+    let root: Record<string, unknown> | null = null;
+    const created: Array<Record<string, unknown>> = [];
+    const container = {
+      attrs: {} as Record<string, string>,
+      setAttribute(name: string, value: string) {
+        this.attrs[name] = value;
+      },
+      removeAttribute(name: string) {
+        delete this.attrs[name];
+      },
+      querySelector(sel: string) {
+        return sel === '[data-kd-overlay-root]' ? root : null;
+      },
+      appendChild(node: Record<string, unknown>) {
+        root = node;
+        created.push(node);
+        return node;
+      },
+      ownerDocument: {
+        createElement() {
+          const el: Record<string, unknown> = {
+            attrs: {} as Record<string, string>,
+            style: { cssText: '' },
+            setAttribute(name: string, value: string) {
+              (this.attrs as Record<string, string>)[name] = value;
+            },
+            remove() {
+              if (root === el) root = null;
+            },
+          };
+          return el;
+        },
+      },
+    };
+    return { container, getRoot: () => root, created };
+  }
+
+  it('ensureInner 创建覆层根(data-kd-overlay-root + data-kd-scope),容器与根同名作用域', async () => {
+    mockedExec.mockResolvedValue(vi.fn());
+    const { container, getRoot } = makeContainer();
+    await ensureCardScriptSandbox({
+      characterId: 'c1',
+      scriptHash: 'h1',
+      scripts: [{ id: 'a', name: 'A', content: 'x();', enabled: true }],
+      container: container as unknown as HTMLElement,
+      lorebookName: null,
+      readMessages: () => [],
+    });
+    const root = getRoot() as { attrs: Record<string, string>; style: { cssText: string } };
+    expect(root).toBeTruthy();
+    expect(root.attrs['data-kd-overlay-root']).toBe('');
+    expect(root.attrs['data-kd-scope']).toBe('card-c1');
+    expect(container.attrs['data-kd-scope']).toBe('card-c1');
+    // 根自身不拦截指针,子节点由 dom-rpc 打注入标记时补 auto
+    expect(root.style.cssText).toContain('pointer-events:none');
+    expect(root.style.cssText).toContain('position:fixed');
+  });
+
+  it('cleanup 移除覆层根与容器 data-kd-scope(切卡/撤授权/卸载三路径共用)', async () => {
+    mockedExec.mockResolvedValue(vi.fn());
+    const { container, getRoot } = makeContainer();
+    await ensureCardScriptSandbox({
+      characterId: 'c1',
+      scriptHash: 'h1',
+      scripts: [{ id: 'a', name: 'A', content: 'x();', enabled: true }],
+      container: container as unknown as HTMLElement,
+      lorebookName: null,
+      readMessages: () => [],
+    });
+    expect(getRoot()).toBeTruthy();
+    cleanupCardScriptSandbox();
+    expect(getRoot()).toBeNull();
+    expect(container.attrs['data-kd-scope']).toBeUndefined();
+  });
+
+  it('同键 ensure 不重复创建覆层根(幂等)', async () => {
+    mockedExec.mockResolvedValue(vi.fn());
+    const { container, created } = makeContainer();
+    const base = {
+      characterId: 'c1',
+      scriptHash: 'h1',
+      scripts: [{ id: 'a', name: 'A', content: 'x();', enabled: true }],
+      container: container as unknown as HTMLElement,
+      lorebookName: null,
+      readMessages: () => [],
+    };
+    await ensureCardScriptSandbox(base);
+    await ensureCardScriptSandbox(base);
+    expect(created).toHaveLength(1);
+  });
+});

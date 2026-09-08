@@ -165,6 +165,8 @@ export function isEsmScript(content: string): boolean {
 interface ActiveCardSandboxes {
   key: string;
   cleanups: SandboxCleanup[];
+  /** 本次沙箱的容器:cleanup 时移除覆层根与 data-kd-scope 锚点 */
+  container?: HTMLElement;
 }
 
 let active: ActiveCardSandboxes | null = null;
@@ -182,12 +184,47 @@ export function cleanupCardScriptSandbox(): void {
       /* 单个沙箱清理失败不阻断其余 */
     }
   }
+  // 脚本注入的覆层根与容器作用域锚点一并摘除(防切卡后幽灵悬浮窗/样式残留)
+  const container = prev?.container;
+  if (container) {
+    try {
+      if (typeof container.querySelector === 'function') {
+        const root = container.querySelector<HTMLElement>('[data-kd-overlay-root]');
+        if (root && typeof root.remove === 'function') root.remove();
+      }
+      if (typeof container.removeAttribute === 'function') container.removeAttribute('data-kd-scope');
+    } catch {
+      /* 容器已被 Vue 重渲染移除:忽略 */
+    }
+  }
 }
 
 /** 卡级沙箱容器的作用域 id(data-kd-scope):运行期 <style> 通道的作用域锚点;
  *  characterId 净化为合法 CSS 标识符字符(scopeId 同时用于 keyframes 重命名前缀) */
 export function cardScopeId(characterId: string): string {
   return `card-${characterId.replace(/[^A-Za-z0-9_-]/g, '-')}`;
+}
+
+/**
+ * 卡级覆层根:悬浮窗脚本的 $('body')/$('html')/$('head') 映射目标(见 dom-rpc queryScoped)。
+ * 覆层脱离消息流,不随聊天区自动吸底滚动;根自身 pointer-events:none 不拦截聊天交互,
+ * 注入的顶层节点由 dom-rpc 打 data-kd-injected 时补 pointer-events:auto。幂等:已存在则复用。
+ */
+export function ensureOverlayRoot(container: HTMLElement, scopeId: string): HTMLElement | null {
+  if (typeof container.querySelector !== 'function' || typeof container.appendChild !== 'function') return null;
+  const existing = container.querySelector<HTMLElement>('[data-kd-overlay-root]');
+  if (existing) {
+    if (typeof existing.setAttribute === 'function') existing.setAttribute('data-kd-scope', scopeId);
+    return existing;
+  }
+  const doc = container.ownerDocument ?? (typeof document !== 'undefined' ? document : null);
+  if (!doc || typeof doc.createElement !== 'function') return null;
+  const root = doc.createElement('div');
+  root.setAttribute('data-kd-overlay-root', '');
+  root.setAttribute('data-kd-scope', scopeId);
+  root.style.cssText = 'position:fixed;top:0;left:0;width:0;height:0;overflow:visible;pointer-events:none';
+  container.appendChild(root);
+  return root;
 }
 
 async function ensureInner(opts: CardScriptHostOptions): Promise<void> {
@@ -205,12 +242,15 @@ async function ensureInner(opts: CardScriptHostOptions): Promise<void> {
   // 运行期 <style> 通道的作用域锚点:容器带上 data-kd-scope 后,脚本注入的样式段
   // 经声明级清洗 + 容器作用域化落 DOM(dom-rpc sanitizeForContainer;测试 mock 容器
   // 未必实现 setAttribute,缺失时跳过作用域化只清洗)
+  const scopeId = cardScopeId(opts.characterId);
   if (typeof opts.container.setAttribute === 'function') {
-    opts.container.setAttribute('data-kd-scope', cardScopeId(opts.characterId));
+    opts.container.setAttribute('data-kd-scope', scopeId);
   }
+  // 卡级覆层根:$('body')/$('html')/$('head') 的映射目标(悬浮窗脱离消息流)
+  ensureOverlayRoot(opts.container, scopeId);
   const rpcExtensions = makeCardScriptRpcExtensions(opts);
   const cleanups: SandboxCleanup[] = [];
-  active = { key, cleanups };
+  active = { key, cleanups, container: opts.container };
   // 全部可运行脚本合并进单个沙箱 realm(逐 <script> 注入,共享 window):
   // 同卡多脚本(MVU Edition 剧情数据库 → 界面脚本)靠 window 全局互相通信,
   // 逐脚本各一个 realm 会让后者读不到前者挂的共享数据

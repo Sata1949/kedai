@@ -1,12 +1,33 @@
 // dom-rpc.ts — DOM RPC 宿主端:选择器解析/jQuery 操作应用/状态镜像采集/游离元素落 DOM,及数据 op 分发(全局变量与 localStorage 持久化桥)
 import sanitizeHtml from 'sanitize-html';
 import { SCRIPT_HTML_WHITELIST, sanitizeScriptHtmlWithStyles } from './sanitize';
+import { applyDraggable, bindGlobalEvents, type DomEventContext } from './draggable';
 import {
   CHANNEL,
   type CreatedElementSpec,
   type JqOperation,
   type SandboxExecutionContext,
 } from './protocol';
+
+/** 卡级覆层根选择器:cardScriptHost 在容器内创建,承载脚本注入的悬浮层 DOM */
+const OVERLAY_ROOT_SELECTOR = '[data-kd-overlay-root]';
+
+/** 覆层根查找(消息级沙箱无覆层根时回退容器,行为不变) */
+export function overlayRootOf(container: HTMLElement): HTMLElement {
+  if (typeof container.querySelector !== 'function') return container;
+  const root = container.querySelector<HTMLElement>(OVERLAY_ROOT_SELECTOR);
+  return root ?? container;
+}
+
+/** 注入节点标记:cleanup 按此摘除本次沙箱注入的 DOM。
+ *  父为覆层根时补 pointer-events:auto(根自身 none,不拦截聊天交互,子节点仍需可点)。 */
+function markInjected(el: HTMLElement): void {
+  if (typeof el.setAttribute === 'function') el.setAttribute('data-kd-injected', '1');
+  const parent = el.parentElement;
+  const underOverlay =
+    !!parent && typeof parent.getAttribute === 'function' && parent.getAttribute('data-kd-overlay-root') !== null;
+  if (underOverlay && el.style) el.style.pointerEvents = 'auto';
+}
 
 function safeSelector(value: unknown): string {
   if (typeof value !== 'string' || value.length > 1024 || /[\0\r\n]/.test(value)) {
@@ -90,8 +111,11 @@ export function applyScriptLocalStorageOp(op: string, key: unknown, value: unkno
 
 function queryScoped(container: HTMLElement, selector: string): HTMLElement[] {
   const safe = safeSelector(selector);
-  // 作者脚本把容器当文档用:$('body')/html 指代整个状态栏容器(沙箱无真实 body 可管)
-  if (safe === 'body' || safe === 'html' || safe === 'html body') return [container];
+  // 作者脚本把容器当文档用:$('body')/html/head 指代整个状态栏容器(沙箱无真实 body/head 可管)。
+  // 卡级覆层根存在时映射到覆层根(脱离消息流,不随自动吸底滚动);消息级回退容器。
+  if (safe === 'body' || safe === 'html' || safe === 'html body' || safe === 'head') {
+    return [overlayRootOf(container)];
+  }
   const positional = /:(first|last)\s*$/.exec(safe);
   const base = positional ? safe.slice(0, positional.index).trim() : safe;
   if (!base) throw new Error('选择器无效');
@@ -111,6 +135,7 @@ function resolveRefElements(container: HTMLElement, ref: JqOperation['ref'], tar
     const el = idx >= 0 && idx < all.length ? all[idx] : undefined;
     return el ? [el] : [];
   }
+  // document/window 仅用于事件绑定路径;查询类方法一律空结果(避免误改全局 DOM)
   return [];
 }
 
@@ -128,6 +153,8 @@ export function elementState(el: HTMLElement): Record<string, unknown> {
     checked: !!inp.checked,
     disabled: !!inp.disabled,
     classes: Array.from(el.classList).slice(0, 64),
+    // 内联样式快照:沙箱 css getter 与 is(':visible'|':hidden') 的数据源
+    css: readInlineCss(el),
     // 滚动/几何度量:协议卡 checkBottom($card[0].scrollTop+clientHeight>=scrollHeight-8)
     // 与定位脚本 outerHeight 等读这些真值,缺了则 NaN 比较恒 false(勾选框永远 locked)
     scrollTop: el.scrollTop,
@@ -139,6 +166,21 @@ export function elementState(el: HTMLElement): Record<string, unknown> {
     offsetHeight: el.offsetHeight,
     offsetWidth: el.offsetWidth,
   };
+}
+
+/** 内联样式(仅显式声明项;camelCase → kebab 两种键都填,沙箱 getter 按传入键名读) */
+function readInlineCss(el: HTMLElement): Record<string, string> {
+  const out: Record<string, string> = {};
+  const style = el.style;
+  if (!style || typeof style.length !== 'number' || typeof style.item !== 'function') return out;
+  for (let i = 0; i < style.length && i < 64; i++) {
+    const prop = style.item(i);
+    if (!prop) continue;
+    const value = style.getPropertyValue(prop);
+    out[prop] = value;
+    out[prop.replace(/-([a-z])/g, (_m, c: string) => c.toUpperCase())] = value;
+  }
+  return out;
 }
 
 /** 集合元素快照(jQuery .each/数字索引 getter 真实化;上限 50 条、字段截断防巨型回包) */
@@ -245,13 +287,28 @@ function buildCreatedElement(
   nonce: string,
   targets: Map<number, HTMLElement>,
   nextTargetId: () => number,
-  registerEventListener: (element: HTMLElement, eventName: string, listener: EventListener) => void,
+  registerEventListener: (
+    element: EventTarget,
+    eventName: string,
+    listener: EventListener,
+    capture?: boolean,
+  ) => void,
   container: HTMLElement,
+  domCtx?: DomEventContext,
 ): HTMLElement {
-  const tmp = document.createElement('div');
+  const doc = container.ownerDocument;
+  if (!doc) throw new Error('容器缺少 ownerDocument');
+  const tmp = doc.createElement('div');
   tmp.innerHTML = sanitizeForContainer(container, String(spec.html ?? ''));
-  const el = (tmp.firstElementChild as HTMLElement | null) ?? document.createElement('div');
+  const el = (tmp.firstElementChild as HTMLElement | null) ?? doc.createElement('div');
   if (spec.addClass) el.classList.add(...String(spec.addClass).split(/\s+/).filter(Boolean));
+  // attr/css 记录的属性与内联样式落 DOM(悬浮球 id/position:fixed/z-index 由此生效)
+  if (spec.attrs && typeof spec.attrs === 'object') {
+    for (const [k, v] of Object.entries(spec.attrs)) el.setAttribute(k, String(v ?? ''));
+  }
+  if (spec.css && typeof spec.css === 'object' && el.style) {
+    for (const [k, v] of Object.entries(spec.css)) el.style.setProperty(cssPropName(k), String(v ?? ''));
+  }
   if (typeof spec.text === 'string') el.textContent = spec.text;
   else if (typeof spec.innerHtml === 'string') el.innerHTML = sanitizeForContainer(container, spec.innerHtml);
   for (const h of Array.isArray(spec.handlers) ? spec.handlers : []) {
@@ -284,10 +341,17 @@ function buildCreatedElement(
   }
   for (const child of Array.isArray(spec.children) ? spec.children : []) {
     if (child && child.kind === 'created') {
-      el.appendChild(buildCreatedElement(child, targetWindow, nonce, targets, nextTargetId, registerEventListener, container));
+      el.appendChild(buildCreatedElement(child, targetWindow, nonce, targets, nextTargetId, registerEventListener, container, domCtx));
     }
   }
+  // draggable 记录:宿主侧绑指针拖拽(游离元素无独立 RPC 通道,随落 DOM 一次应用)
+  if (spec.draggable && domCtx) applyDraggable(el, spec.draggable, domCtx);
   return el;
+}
+
+/** CSS 键名归一:JS 驼峰(zIndex)与 CSS 短横(z-index)都接受 */
+function cssPropName(key: string): string {
+  return /[A-Z]/.test(key) ? key.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`) : key;
 }
 
 /** jQuery 风格 DOM 操作(经 RPC 转发到宿主容器;事件 target 仅使用本次执行内的受控句柄) */
@@ -300,10 +364,27 @@ export function applyJq(
   nonce: string,
   targets: Map<number, HTMLElement>,
   nextTargetId: () => number,
-  registerEventListener: (element: HTMLElement, eventName: string, listener: EventListener) => void,
+  registerEventListener: (
+    element: EventTarget,
+    eventName: string,
+    listener: EventListener,
+    capture?: boolean,
+  ) => void,
 ): unknown {
   const els = resolveRefElements(container, ref, targets);
   const first = els[0];
+  // document/window 引用仅走事件绑定(见 on/off 分支);查询/写入类操作落在空集合上无副作用
+  const globalRef = ref.kind === 'document' || ref.kind === 'window' ? ref : null;
+  // 宿主全局只在需要事件绑定的分支读取:纯查询/属性操作在无 DOM 的测试环境下不触碰 window/document
+  const domCtx = (): DomEventContext => ({
+    hostDocument: (typeof document !== 'undefined' ? document : container.ownerDocument) as Document,
+    hostWindow: (typeof window !== 'undefined' ? window : ({} as Window)) as Window,
+    targetWindow,
+    nonce,
+    container,
+    controlsProvider: () => gatherControls(container),
+    registerEventListener,
+  });
   switch (method) {
     case 'count':
       return els.length;
@@ -319,12 +400,20 @@ export function applyJq(
       const html = safeText(args[0]);
       for (const el of els) {
         el.innerHTML = sanitizeForContainer(container, html);
+        markInjectedChildren(el);
       }
       return true;
     }
     case 'css':
-      if (args.length === 1) return first ? first.style.getPropertyValue(String(args[0])) : '';
-      for (const el of els) el.style.setProperty(String(args[0]), String(args[1] ?? ''));
+      if (args.length === 1) return first ? first.style.getPropertyValue(cssPropName(String(args[0]))) : '';
+      // scrollTop/scrollLeft 不是 CSS 属性:沙箱 animate({scrollTop}) 转发到真实滚动位置
+      if (String(args[0]) === 'scrollTop' || String(args[0]) === 'scrollLeft') {
+        const key = String(args[0]) as 'scrollTop' | 'scrollLeft';
+        const value = Number(args[1]);
+        if (Number.isFinite(value)) for (const el of els) el[key] = value;
+        return true;
+      }
+      for (const el of els) el.style.setProperty(cssPropName(String(args[0])), String(args[1] ?? ''));
       return true;
     case 'addClass':
       for (const el of els) el.classList.add(...String(args[0] ?? '').split(/\s+/).filter(Boolean));
@@ -378,10 +467,15 @@ export function applyJq(
       return true;
     }
     case 'append': {
-      // 追加 HTML(select 填充 option、容器追加节点等);与 innerHTML 一样经 sanitize 清洗
+      // 追加 HTML(select 填充 option、容器追加节点等);与 innerHTML 一样经 sanitize 清洗。
+      // insertAdjacentHTML 无法直接拿到新增节点,用前后 childNodes 差集打注入标记。
       const html = safeText(args[0]);
       for (const el of els) {
+        const before = new Set(Array.from(el.childNodes));
         el.insertAdjacentHTML('beforeend', sanitizeForContainer(container, html));
+        for (const node of Array.from(el.childNodes)) {
+          if (!before.has(node) && node.nodeType === 1) markInjected(node as HTMLElement);
+        }
       }
       return true;
     }
@@ -390,8 +484,17 @@ export function applyJq(
       const spec = args[0] as CreatedElementSpec;
       if (!spec || spec.kind !== 'created') return true;
       for (const el of els) {
-        el.appendChild(buildCreatedElement(spec, targetWindow, nonce, targets, nextTargetId, registerEventListener, container));
+        const created = buildCreatedElement(spec, targetWindow, nonce, targets, nextTargetId, registerEventListener, container, domCtx());
+        // 先入 DOM 再打标:markInjected 需读 parentElement 判断是否落在覆层根下
+        el.appendChild(created);
+        markInjected(created);
       }
+      return true;
+    }
+    case 'draggable': {
+      const opts = args[0] as (CreatedElementSpec['draggable'] | undefined);
+      if (!opts) return true;
+      for (const el of els) applyDraggable(el, opts, domCtx());
       return true;
     }
     case 'focus':
@@ -414,6 +517,11 @@ export function applyJq(
       const eventNames = String(args[0] ?? '').split(/\s+/).filter(Boolean);
       const jqId = Number(args[1]);
       if (!targetWindow || eventNames.length === 0 || !Number.isFinite(jqId)) return true;
+      // $(window)/$(document):绑宿主 window/document($(window).on('unload', …) 不再静默失效)
+      if (globalRef) {
+        bindGlobalEvents(globalRef, eventNames, jqId, domCtx());
+        return true;
+      }
       for (const el of els) {
         const targetId = nextTargetId();
         targets.set(targetId, el);
@@ -443,6 +551,13 @@ export function applyJq(
     }
     default:
       throw new Error(`不兼容的角色卡脚本操作: ${method}`);
+  }
+}
+
+/** 给元素的新增子节点打注入标记(innerHTML 后调用;覆层根直系子节点获得 pointer-events:auto) */
+function markInjectedChildren(parent: HTMLElement): void {
+  for (const node of Array.from(parent.childNodes)) {
+    if (node.nodeType === 1) markInjected(node as HTMLElement);
   }
 }
 

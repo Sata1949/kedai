@@ -663,6 +663,132 @@ describe('sandboxScript(卡级脚本兼容面:tavern_events/TavernHelper 世界�
   });
 });
 
+describe('sandboxScript(角色卡悬浮窗兼容面:head 映射/css 对象/attr 对象/draggable)', () => {
+  /** 与浏览器沙箱等价的 vm 沙箱(document/window 最小桩;window 是真实对象引用) */
+  function makeSandbox(nonce: string, script: string) {
+    const messages: Array<Record<string, unknown>> = [];
+    const listeners: Array<(ev: { data: unknown }) => void> = [];
+    const sandboxGlobal: Record<string, unknown> = {
+      parent: { postMessage: (m: Record<string, unknown>) => void messages.push(m) },
+      addEventListener: (_type: string, fn: (ev: { data: unknown }) => void) => void listeners.push(fn),
+      console,
+      structuredClone: (v: unknown) => JSON.parse(JSON.stringify(v)),
+      queueMicrotask,
+      Promise,
+      setTimeout,
+      window: {},
+      document: { body: {}, documentElement: {} },
+    };
+    vm.createContext(sandboxGlobal);
+    (sandboxGlobal as Record<string, unknown>).Function = vm.runInContext('Function', sandboxGlobal as never);
+    new vm.Script(script).runInContext(sandboxGlobal as never);
+    const dispatch = (m: Record<string, unknown>): void => {
+      for (const fn of listeners) fn({ data: m });
+    };
+    return { messages, dispatch, sandboxGlobal };
+  }
+
+  const batchOps = (messages: Array<Record<string, unknown>>): Array<Record<string, unknown>> =>
+    messages.filter((m) => m.type === 'batch').flatMap((m) => (m.ops as Array<Record<string, unknown>>) ?? []);
+
+  it("$('head').append('<style>…') 入队 batch op 且 ref 值为 head", async () => {
+    // 根因 2:$('head') 在 queryScoped 里 0 匹配导致 <style> 注入静默失败
+    const nonce = 'nonce-head';
+    const script = sandboxScript(
+      "$('head').append('<style id=\"style_x\">.a{color:red}</style>');",
+      nonce,
+      { stat_data: {}, display_data: {} },
+    );
+    const { messages } = makeSandbox(nonce, script);
+    await new Promise((r) => setTimeout(r, 10));
+    const op = batchOps(messages).find((o) => o.method === 'append');
+    expect(op?.ref).toEqual({ kind: 'selector', value: 'head' });
+    expect(String((op?.args as unknown[])[0])).toContain('style_x');
+  });
+
+  it("$('<div>').attr('id','x').css({position:'fixed',zIndex:9}) 的 created spec 含 attrs.id 与 css 键值", async () => {
+    // 根因 2 的 jqCreated 半:此前 attr/css 是 no-op,悬浮球连 id 都没设上
+    const nonce = 'nonce-created';
+    const script = sandboxScript(
+      "$('body').append($('<div>').attr('id','x').css({position:'fixed',zIndex:9}));",
+      nonce,
+      { stat_data: {}, display_data: {} },
+    );
+    const { messages } = makeSandbox(nonce, script);
+    await new Promise((r) => setTimeout(r, 10));
+    const op = batchOps(messages).find((o) => o.method === 'appendCreated');
+    const spec = (op?.args as Array<Record<string, unknown>>)[0];
+    expect(spec.attrs).toEqual({ id: 'x' });
+    expect(spec.css).toEqual({ position: 'fixed', zIndex: '9' });
+  });
+
+  it('.css({a:1,b:2}) 对象形式入队两个 css op(此前被当 getter 吞掉)', async () => {
+    const nonce = 'nonce-css-obj';
+    const script = sandboxScript(
+      "$('#fx').css({position:'fixed',zIndex:9999});",
+      nonce,
+      { stat_data: {}, display_data: {} },
+    );
+    const { messages } = makeSandbox(nonce, script);
+    await new Promise((r) => setTimeout(r, 10));
+    const cssOps = batchOps(messages).filter((o) => o.method === 'css');
+    expect(cssOps).toHaveLength(2);
+    expect(cssOps.map((o) => o.args)).toEqual(
+      expect.arrayContaining([['position', 'fixed'], ['zIndex', 9999]]),
+    );
+  });
+
+  it('.draggable({start,drag,stop,containment}) 入队 draggable op 且回调 jqId 为数字', async () => {
+    const nonce = 'nonce-drag';
+    const script = sandboxScript(
+      "$('#fx-floating-ball').draggable({containment:'window',distance:3,start:function(){},drag:function(){},stop:function(){}});",
+      nonce,
+      { stat_data: {}, display_data: {} },
+    );
+    const { messages } = makeSandbox(nonce, script);
+    await new Promise((r) => setTimeout(r, 10));
+    const op = batchOps(messages).find((o) => o.method === 'draggable');
+    expect(op?.ref).toEqual({ kind: 'selector', value: '#fx-floating-ball' });
+    const wire = (op?.args as Array<Record<string, unknown>>)[0];
+    expect(wire.containment).toBe('window');
+    expect(wire.distance).toBe(3);
+    expect(typeof wire.start).toBe('number');
+    expect(typeof wire.drag).toBe('number');
+    expect(typeof wire.stop).toBe('number');
+  });
+
+  it("$(window).on('unload',fn) 识别为 window 引用(此前对象形式 jq(window) → ref=null 静默失效)", async () => {
+    const nonce = 'nonce-win';
+    const script = sandboxScript(
+      "$(window).on('unload',function(){});",
+      nonce,
+      { stat_data: {}, display_data: {} },
+    );
+    const { messages } = makeSandbox(nonce, script);
+    await new Promise((r) => setTimeout(r, 10));
+    const op = batchOps(messages).find((o) => o.method === 'on');
+    expect(op?.ref).toEqual({ kind: 'window' });
+    expect((op?.args as unknown[])[0]).toBe('unload');
+  });
+
+  it("draggable('destroy') 入队 destroy op,data('ui-draggable') 随应用翻转", async () => {
+    const nonce = 'nonce-drag-destroy';
+    const script = sandboxScript(
+      "$('#fx').draggable({});warn('has='+$('#fx').data('ui-draggable'));$('#fx').draggable('destroy');warn('after='+$('#fx').data('ui-draggable'));",
+      nonce,
+      { stat_data: {}, display_data: {} },
+    );
+    const { messages } = makeSandbox(nonce, script);
+    await new Promise((r) => setTimeout(r, 10));
+    const ops = batchOps(messages).filter((o) => o.method === 'draggable');
+    expect(ops[0]?.args).toEqual([expect.objectContaining({ start: 0, drag: 0, stop: 0 })]);
+    expect(ops[1]?.args).toEqual(['destroy']);
+    const warns = messages.filter((m) => m.type === 'warn').map((m) => String(m.message));
+    expect(warns).toContain('has=true');
+    expect(warns).toContain('after=false');
+  });
+});
+
 describe('sandboxScript(多段单 realm:逐 <script> 注入共享 window)', () => {
   // boot 模板多段路径把每段包成独立 <script> 由 document.head.appendChild 注入;
   // vm 无真实 DOM,harness 的 appendChild 同步执行段文本(runInContext 同一 context →

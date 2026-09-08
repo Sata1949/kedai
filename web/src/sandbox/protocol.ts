@@ -14,9 +14,25 @@ interface JqOperation {
   ref:
     | { kind: 'selector'; value: string }
     | { kind: 'target'; id: number }
-    | { kind: 'selector-index'; value: string; index: number };
+    | { kind: 'selector-index'; value: string; index: number }
+    // $(document)/$(window):作者脚本以窗口为事件源(如 $(window).on('unload', …)),
+    // 宿主侧仅用于事件绑定/解绑,查询类操作一律空结果(避免误改全局 DOM)
+    | { kind: 'document' }
+    | { kind: 'window' };
   method: string;
   args: unknown[];
+}
+
+/** draggable 可序列化选项:回调函数已换成 jqId(0 表示未提供),宿主按 id 回发 jq-event */
+interface DraggableWire {
+  start?: number;
+  drag?: number;
+  stop?: number;
+  handle?: string;
+  cancel?: string;
+  containment?: string;
+  distance?: number;
+  cursor?: string;
 }
 
 /** $('<div>') 游离元素规格:沙箱侧记录 HTML/事件/子元素,append 时宿主统一落 DOM */
@@ -28,6 +44,12 @@ interface CreatedElementSpec {
   addClass?: string;
   text?: string;
   innerHtml?: string;
+  /** .attr(k,v)/.attr({…}) 记录的属性(宿主落 DOM 时 setAttribute) */
+  attrs?: Record<string, string>;
+  /** .css(k,v)/.css({…}) 记录的内联样式(宿主落 DOM 时写 style) */
+  css?: Record<string, string>;
+  /** .draggable(opts) 记录(宿主落 DOM 时绑 pointer 拖拽);'destroy' 表示解绑 */
+  draggable?: DraggableWire | string;
 }
 
 interface SandboxRequest {
@@ -123,6 +145,7 @@ export {
   utf8Bytes,
   type JqOperation,
   type CreatedElementSpec,
+  type DraggableWire,
   type SandboxRequest,
   type ContainerGeo,
 };
