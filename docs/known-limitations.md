@@ -41,6 +41,15 @@
 - **生态兼容考量**:多数 MCP 服务器(npx/uvx 直起)不是包装形态,影响面有限;但用户配置了
   批处理包装时,禁用服务器后孙进程可能残留占端口。
 
+## L4 世界书激发条目 role=system 钳制为 user(有意裁剪)
+  `role=system` 也会被钳制为 `user`(`server-rs/src/agents/engine/worldbook.rs:29`,
+  注释「role=system 在尾部钳制为 user」);只有**常驻**条目(位置 3)的 system 才真的
+  拼入 system 文本。
+- **判定**:**有意裁剪**。尾部消息流里夹 system 角色在多数 OpenAI 兼容端点上语义不明
+  (有的端点直接拒绝中段 system),钳制为 user 是兼容性最优解。
+- **生态兼容考量**:ST 生态里激发条目写 system 的卡较少;这些卡在 Kedai 中表现为
+  「注入仍然出现,只是角色是 user」,内容不丢。
+
 ## L5 跨 realm 共享全局桥只覆盖 JSON 子集(有意裁剪)
 
 - **现状行为**:沙箱「每脚本一个不透明源 iframe」下,同角色不同沙箱 realm 之间无法直读
@@ -59,16 +68,20 @@
 
 ---
 
-> 新增缺口时按同一模板登记:现状行为(带文件:行号)/ 判定(有意裁剪 or 待办)/
+## L6 沙箱 draggable 只实现定位与钳制(有意裁剪)
 
-- **现状行为**:激发(triggered)条目作独立消息注入尾部时,即使条目显式声明
-  `role=system` 也会被钳制为 `user`(`server-rs/src/agents/engine/worldbook.rs:29`,
-  注释「role=system 在尾部钳制为 user」);只有**常驻**条目(位置 3)的 system 才真的
-  拼入 system 文本。
-- **判定**:**有意裁剪**。尾部消息流里夹 system 角色在多数 OpenAI 兼容端点上语义不明
-  (有的端点直接拒绝中段 system),钳制为 user 是兼容性最优解。
-- **生态兼容考量**:ST 生态里激发条目写 system 的卡较少;这些卡在 Kedai 中表现为
-  「注入仍然出现,只是角色是 user」,内容不丢。
+- **现状行为**:宿主侧 `web/src/sandbox/draggable.ts` 复刻 jQuery UI `.draggable()`
+  的最小语义:支持 `handle`/`cancel`/`containment:'window'`/`distance`/`cursor` 与
+  `start`/`drag`/`stop` 回调(`event.ui.position` 经 jq-event 回发)。**未实现**
+  `helper`(克隆/代理元素)、`axis`、`grid`、`snap`/`snapMode`、`revert`、`stack`、
+  `zIndex` 管理,也不支持在 `drag` 回调里改写 `ui.position` 反写回宿主(回调是只读通知;
+  WuWa th-5 的手写边界钳制已由宿主按 `containment` 等价实现)。
+- **判定**:**有意裁剪**。生态悬浮窗脚本的拖拽诉求集中在「能拖、不跑出视口、位置能存」,
+  复杂选项在角色卡场景几乎不用;完整移植 jQuery UI 的收益与维护成本不成比例。
+- **补齐路径**:需要 `helper`/`axis` 等的卡可在此文件按同一模式扩展(pointer 事件已在
+  宿主侧,document 级跟踪与 cleanup 登记基建已就绪)。
+- **生态兼容考量**:th-3/th-4 有 `typeof .draggable === 'function'` 守卫,缺失时静默跳过;
+  th-5 无守卫——本实现补上后不再 TypeError 中断,是三窗能显示的前提。
 
 ---
 
