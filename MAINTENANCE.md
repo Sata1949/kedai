@@ -103,7 +103,7 @@ kedai/
 | 一键构建 | `.\build.ps1` | **默认双端同步产出**:前端 web/dist + Rust release(测试版)+ 便携版;`-TestOnly` 仅测试版快速通道 `-Dev` debug 构建 `-NoWeb` 仅 Rust `-Tauri` 追加 NSIS 打包 |
 | 兼容别名 | `npm run build:all` / `npm run build:rs` | 均等价 `.\build.ps1`(双端同步);`npm run build:test` 等价 `.\build.ps1 -TestOnly` |
 | 统一改版本号 | `npm run version:bump -- x.y.z` | 7 处版本号一次改全(2 个 package.json、3 个 Cargo.toml、tauri.conf.json、本文档版本行);支持 `-DryRun` 预览 |
-| 后端测试 | `cd server-rs && cargo test` | 825 个测试(654 单测 + 171 集成,2026-09-08 实测),**需在 vcvars64 环境**;前端 `npm test -w web` 527 个 |
+| 后端测试 | `cd server-rs && cargo test` | 825 个测试(654 单测 + 171 集成,2026-09-08 实测),**需在 vcvars64 环境**;前端 `npm test -w web` 550 个(60 文件,2026-09-08 实测) |
 | 全量检查(本地 CI) | `npm run check` | `tools/check-all.ps1`:fmt → clippy → cargo test → vue-tsc(**硬门禁**,2026-09-08 起)→ vitest → vite build |
 | 开发模式 | `cd server-rs && cargo run` + `npm run dev -w web` | 后端 3001 / 前端 5173(代理到 3001) |
 | 前端构建 | `npm run build -w web` | 产出 web/dist(编译进 exe 用) |
@@ -373,6 +373,7 @@ rusqlite(bundled,零原生依赖),**WAL 模式 + foreign_keys ON**。5 张表:
 11. **mvu 系统来源澄清(重要)**:本项目的 mvu 变量系统位于 `web/src/mvu/`(前端)+ `server-rs/src/parsing/assistant/`(后端),是 **MagVarUpdate**(原作者 MagicalAstrogy,`github.com/MagicalAstrogy/MagVarUpdate`,MIT)的独立兼容实现。曾有一份外部 AI 分析以某 SillyTavern 扩展的 `bundle.js`(含 `generation_id` 随机 UUID、`遵循<must>指令`、`兼容假流式`、`额外模型解析配置`、`ordered_prompts` 数组)为依据得出「缓存命中率极低 5 因素」结论——**这些代码在本项目全部不存在**,该分析不适用于 Kedai。Kedai 真实的缓存注意点:变量树经 `{{format_message_variable}}`/`{{getvar::stat_data…}}`/EJS 宏展开进 system 提示词,变量更新会使 system 前缀变化、前缀缓存失效;可用设置 `mvu_vars_position=user_tail` 把变量块挪到最新用户消息尾部以提升命中率(见 API 契约节)。
 12. **导入 ST 预设的空楼层过滤**:导入酒馆预设后,纯 `{{addvar}}` 累积宏的楼层展开为空字符串(宏自身输出空),engine 组装消息时已跳过空楼层/空注入(`agents/engine/messages/build.rs` build_llm_messages_with_position),不会产生空 user/assistant 消息;但这类楼层没有可注入的实质内容,若希望「累积宏 + 末尾 getvar 输出」的拼接语义生效,需把实际内容放在带 `{{getvar}}` 输出的楼层里(如「可待精华增强楼层」的写法)。
 13. **变量协议示例不要写进恒存在的 system 提示词**:`<UpdateVariable>` 输出协议示例只应由 `make_state_block` 在角色卡有变量树时注入。若把示例硬编码进默认/自定义 system 提示词,无变量树的普通卡也会看到协议:mock `[[floors]]` 回显 system 时示例会被 `parse_update_variable` 解析成真实补丁、空树建树并推送 vars 事件(曾有集成测试全红);真实场景下模型也可能模仿示例输出补丁、误激活变量系统。注意 `apply_mvu_patches` 允许空树建树(用户/模型显式输出补丁是合法语义,`pure_mvu_*` 测试依赖此行为),隔离靠「不暴露协议」而非「禁止空树应用」。
+14. **沙箱 realm 与酒馆不同:同卡脚本共享 window 需显式机制**(2026-09 修复记录,commit f2c10d1)。Kedai 每脚本一个不透明源 iframe,同卡多个 tavern_helper 脚本**互不可见 window 全局**——ST 生态脚本「th-A 挂 window.WuWaShared → th-B 读」的写法在这里会失效,直接裸读 `top`/`parent` 还抛 SecurityError(WuWa Solaris-3 卡崩溃根因)。两条通道(按需二选一,勿混):① **同卡同 realm**:卡级脚本已合并进单 iframe,靠逐 `<script>` 注入共享 window(web/src/cardScriptHost.ts + boot-script.ts 多段形态),同段组内的脚本可互读全局;② **跨 realm 共享桥**:不同沙箱(消息级脚本、不同时机起的卡级组)之间靠 shared-globals 快照桥(`web/src/sandbox/shared-globals.ts`),只同步合法键 + JSON 可序列化 ≤256KB 的 window 自有属性,函数/DOM 引用不共享(见 docs/known-limitations.md L5)。另:**运行期注入 `<style>` 会触发 dom-rpc 的声明级清洗 + 容器作用域化**——容器必须带 `data-kd-scope`(渲染块自带,卡级容器由 cardScriptHost 设 `cardScopeId`),否则样式段退回纯白名单仍被剥,界面裸渲染。
 
 ---
 
@@ -384,7 +385,7 @@ cd server-rs && cargo test
 
 - 单元测试(源文件内 `#[test]`/`#[tokio::test]`,654 个,2026-09-08 实测):状态机迁移、planner(fast/deep/算式识别)、reflector(3 规则)、calculator(白名单解析)、censor(禁词同义替换)、token 编码映射与估算、工具注册表、世界书转换、世界书注入、提示词注入(含禁词库)、mvu 变量系统(含 JSONPatch 转义/reason/delta 容错)、EJS 渲染器(含读取 API 与 escape-ejs)、角色卡解析、正则脚本、@INJECT 解析/应用、GENERATE 注入、结构化错误码(api/errors.rs)
 - API 集成测试(`tests/` 18 个文件,171 个,mock 连接器 + 临时数据目录):api_integration、assistant、agent_flows、tasks、task_events、prompt_inject、world_books、settings_connector、security、contracts_e2e、scripts_e2e、scripts_import、swipe_regenerate、undo、user_scripts、variables_scopes、db_concurrency、macros——health、角色 CRUD(multipart 上传)、会话/消息/导入导出、设置与 token、agent plan、SSE 聊天流、任务引擎六模式、计算器工具 SSE、世界书/角色卡、提示词注入与酒馆预设导入、鉴权
-- 前端 `npm test -w web`(Vitest,527 个 / 58 文件,2026-09-07 实测):stores、api client(含 ApiError 错误码分类)、组件与 composables;类型门禁 `npm run typecheck -w web`(vue-tsc,**硬门禁**,存量 168 已于 2026-09-08 清偿归零,清偿记录见 docs/优化实施方案-2026-09.md 附录 D)
+- 前端 `npm test -w web`(Vitest,550 个 / 60 文件,2026-09-08 实测):stores、api client(含 ApiError 错误码分类)、组件与 composables;类型门禁 `npm run typecheck -w web`(vue-tsc,**硬门禁**,存量 168 已于 2026-09-08 清偿归零,清偿记录见 docs/优化实施方案-2026-09.md 附录 D)
 - 新增接口建议同步补集成测试;测试环境变量 `CONNECTOR=mock` 强制隔离
 
 ---

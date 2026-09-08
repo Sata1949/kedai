@@ -41,7 +41,25 @@
 - **生态兼容考量**:多数 MCP 服务器(npx/uvx 直起)不是包装形态,影响面有限;但用户配置了
   批处理包装时,禁用服务器后孙进程可能残留占端口。
 
-## L4 世界书激发条目 role=system 钳制为 user(有意裁剪)
+## L5 跨 realm 共享全局桥只覆盖 JSON 子集(有意裁剪)
+
+- **现状行为**:沙箱「每脚本一个不透明源 iframe」下,同角色不同沙箱 realm 之间无法直读
+  window;共享桥(commit f2c10d1,`web/src/sandbox/shared-globals.ts` + `boot-script.ts`
+  内联镜像 `__kdShared*`)只同步**键为合法标识符且非黑名单、值 JSON 可序列化且 ≤256KB**
+  的 window 自有属性快照:卡级 realm diff 上报(shared-publish)→ 宿主按角色浅合并持久化
+  → 广播给同角色订阅沙箱(shared-update)。
+- **判定**:**有意裁剪**。函数/DOM 引用/循环结构/超大对象不跨 realm 共享(JSON.stringify
+  失败或超限即静默跳过),黑名单防覆写 window/document/location/fetch 等通信基建与 `__kd`
+  内部前缀。
+- **补齐路径**:需要真函数共享的脚本应改写为数据形态(存配置让对端按数据重建),或等
+  卡级合并单 realm(同段组共享 window)覆盖该场景后迁移到卡级脚本里。
+- **生态兼容考量**:ST 真实环境同页同 realm,脚本间可挂任意函数全局;Kedai 跨沙箱只保
+  证纯数据互通。多数生态脚本(状态栏数据、剧情数据库、消息级降级读)用的正是纯 JSON
+  对象(如 `window.WuWaShared = {STORY_MAP,…}`),在此子集内可工作。
+
+---
+
+> 新增缺口时按同一模板登记:现状行为(带文件:行号)/ 判定(有意裁剪 or 待办)/
 
 - **现状行为**:激发(triggered)条目作独立消息注入尾部时,即使条目显式声明
   `role=system` 也会被钳制为 `user`(`server-rs/src/agents/engine/worldbook.rs:29`,
