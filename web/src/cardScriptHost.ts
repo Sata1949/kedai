@@ -184,6 +184,12 @@ export function cleanupCardScriptSandbox(): void {
   }
 }
 
+/** 卡级沙箱容器的作用域 id(data-kd-scope):运行期 <style> 通道的作用域锚点;
+ *  characterId 净化为合法 CSS 标识符字符(scopeId 同时用于 keyframes 重命名前缀) */
+export function cardScopeId(characterId: string): string {
+  return `card-${characterId.replace(/[^A-Za-z0-9_-]/g, '-')}`;
+}
+
 async function ensureInner(opts: CardScriptHostOptions): Promise<void> {
   const key = `${opts.characterId}:${opts.scriptHash}`;
   if (active?.key === key) return;
@@ -196,26 +202,34 @@ async function ensureInner(opts: CardScriptHostOptions): Promise<void> {
     return true;
   });
   if (runnable.length === 0) return;
+  // 运行期 <style> 通道的作用域锚点:容器带上 data-kd-scope 后,脚本注入的样式段
+  // 经声明级清洗 + 容器作用域化落 DOM(dom-rpc sanitizeForContainer;测试 mock 容器
+  // 未必实现 setAttribute,缺失时跳过作用域化只清洗)
+  if (typeof opts.container.setAttribute === 'function') {
+    opts.container.setAttribute('data-kd-scope', cardScopeId(opts.characterId));
+  }
   const rpcExtensions = makeCardScriptRpcExtensions(opts);
   const cleanups: SandboxCleanup[] = [];
   active = { key, cleanups };
-  for (const script of runnable) {
-    try {
-      const cleanup = await executeSandboxedCharacterScript(script.content, {
-        container: opts.container,
-        variables: emptyVariables(),
-        characterId: opts.characterId,
-        lorebookName: opts.lorebookName,
-        rpcExtensions,
-      });
-      cleanups.push(cleanup);
-    } catch (error) {
-      // 单个脚本失败(语法不兼容/超时)不阻断其余脚本;错误提示已由沙箱挂到容器
-      console.error(
-        `[kedai-card-script] 卡级脚本执行失败: ${script.name || script.id}`,
-        error instanceof Error ? error.message : error,
-      );
-    }
+  // 全部可运行脚本合并进单个沙箱 realm(逐 <script> 注入,共享 window):
+  // 同卡多脚本(MVU Edition 剧情数据库 → 界面脚本)靠 window 全局互相通信,
+  // 逐脚本各一个 realm 会让后者读不到前者挂的共享数据
+  const segments = runnable.map((s) => ({ name: s.name || s.id, code: s.content }));
+  try {
+    const cleanup = await executeSandboxedCharacterScript(segments, {
+      container: opts.container,
+      variables: emptyVariables(),
+      characterId: opts.characterId,
+      lorebookName: opts.lorebookName,
+      rpcExtensions,
+    });
+    cleanups.push(cleanup);
+  } catch (error) {
+    // 整体失败(容器已卸载/启动超时):错误提示已由沙箱挂到容器
+    console.error(
+      `[kedai-card-script] 卡级脚本执行失败: ${segments.map((s) => s.name).join(', ')}`,
+      error instanceof Error ? error.message : error,
+    );
   }
   // 全部失败(如容器已卸载):立即清掉,不留空键占用导致下次 ensure 短路
   if (cleanups.length === 0 && active?.key === key) cleanupCardScriptSandbox();

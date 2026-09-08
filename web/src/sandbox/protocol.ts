@@ -33,7 +33,9 @@ interface CreatedElementSpec {
 interface SandboxRequest {
   channel: typeof CHANNEL;
   nonce: string;
-  type: 'ready' | 'rpc' | 'batch' | 'done' | 'error' | 'warn' | 'jq-event' | 'audio' | 'local-storage';
+  // shared-publish:沙箱 diff 上报 window 新增/变更的纯数据全局(跨 realm 共享桥,见 shared-globals.ts);
+  // 反向「宿主→沙箱」对应 type:'shared-update'(globals 全量快照,字面量 postMessage,与 mvu-event 同风格)
+  type: 'ready' | 'rpc' | 'batch' | 'done' | 'error' | 'warn' | 'jq-event' | 'audio' | 'local-storage' | 'shared-publish';
   id?: number;
   op?: string;
   args?: unknown[];
@@ -42,6 +44,7 @@ interface SandboxRequest {
   message?: string;
   jqId?: number;
   key?: string;
+  globals?: unknown;
 }
 
 /** inline 事件降级桥支持的事件名(data-kd-on<name> 属性 → 真实监听) */
@@ -63,6 +66,15 @@ interface ContainerGeo {
   hostW: number;
 }
 
+/**
+ * 卡级多脚本合并执行的段(单 realm 逐 <script> 注入):
+ * name 供错误上报前缀([卡脚本 段名])与日志定位;code 为脚本正文
+ */
+export interface ScriptSegment {
+  name: string;
+  code: string;
+}
+
 export interface SandboxExecutionContext {
   container: HTMLElement;
   variables: MvuVariables;
@@ -72,6 +84,11 @@ export interface SandboxExecutionContext {
   globals?: Record<string, unknown>;
   /** 主世界书名(角色卡内嵌 character_book.name):随 boot 注入,TavernHelper 世界书 API 的同步数据源 */
   lorebookName?: string | null;
+  /**
+   * 启动时注入 window 的跨 realm 共享全局快照(见 shared-globals.ts)。
+   * 未显式传入且 characterId 存在时,由执行器自动填 getCardSharedGlobals(characterId)。
+   */
+  sharedGlobals?: Record<string, unknown>;
   /**
    * 异步 RPC 扩展点(可选):处理内置 audio-snapshot/applyRpc 之外的纯数据 op
    * (卡级脚本的世界书读写、聊天消息读取——需 fetch,走不了同步分发)。

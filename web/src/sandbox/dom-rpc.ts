@@ -1,6 +1,6 @@
 // dom-rpc.ts — DOM RPC 宿主端:选择器解析/jQuery 操作应用/状态镜像采集/游离元素落 DOM,及数据 op 分发(全局变量与 localStorage 持久化桥)
 import sanitizeHtml from 'sanitize-html';
-import { SCRIPT_HTML_WHITELIST } from './sanitize';
+import { SCRIPT_HTML_WHITELIST, sanitizeScriptHtmlWithStyles } from './sanitize';
 import {
   CHANNEL,
   type CreatedElementSpec,
@@ -19,6 +19,18 @@ function safeText(value: unknown): string {
   // 状态栏脚本单次 html() 可达百余 KB(wuwa 状态栏 161KB),20KB 上限会整段拒掉 → 界面空白
   if (typeof value !== 'string' || value.length > 512_000) throw new Error('文本无效');
   return value;
+}
+
+/**
+ * 作者 HTML 进宿主 DOM 的清洗入口(html()/append()/appendCreated 共用):
+ * 容器带 data-kd-scope(渲染块自带,卡级宿主由 cardScriptHost 设置)时 <style> 段
+ * 经声明级清洗 + 容器作用域化后保留;无 scope 时退回纯白名单(不作用域化)。
+ */
+function sanitizeForContainer(container: HTMLElement, html: string): string {
+  const scopeId =
+    typeof container.getAttribute === 'function' ? container.getAttribute('data-kd-scope') : null;
+  if (scopeId) return sanitizeScriptHtmlWithStyles(html, scopeId);
+  return sanitizeHtml(html, SCRIPT_HTML_WHITELIST);
 }
 
 /** 按角色持久化的卡内全局变量(wuwa 状态栏 loadSettings/saveSettings 读写酒馆全局变量的落点) */
@@ -237,11 +249,11 @@ function buildCreatedElement(
   container: HTMLElement,
 ): HTMLElement {
   const tmp = document.createElement('div');
-  tmp.innerHTML = sanitizeHtml(String(spec.html ?? ''), SCRIPT_HTML_WHITELIST);
+  tmp.innerHTML = sanitizeForContainer(container, String(spec.html ?? ''));
   const el = (tmp.firstElementChild as HTMLElement | null) ?? document.createElement('div');
   if (spec.addClass) el.classList.add(...String(spec.addClass).split(/\s+/).filter(Boolean));
   if (typeof spec.text === 'string') el.textContent = spec.text;
-  else if (typeof spec.innerHtml === 'string') el.innerHTML = sanitizeHtml(spec.innerHtml, SCRIPT_HTML_WHITELIST);
+  else if (typeof spec.innerHtml === 'string') el.innerHTML = sanitizeForContainer(container, spec.innerHtml);
   for (const h of Array.isArray(spec.handlers) ? spec.handlers : []) {
     if (!targetWindow || !h || !Number.isFinite(h.jqId)) continue;
     const jqId = Number(h.jqId);
@@ -306,7 +318,7 @@ export function applyJq(
       if (args.length === 0) return first?.innerHTML ?? '';
       const html = safeText(args[0]);
       for (const el of els) {
-        el.innerHTML = sanitizeHtml(html, SCRIPT_HTML_WHITELIST);
+        el.innerHTML = sanitizeForContainer(container, html);
       }
       return true;
     }
@@ -369,7 +381,7 @@ export function applyJq(
       // 追加 HTML(select 填充 option、容器追加节点等);与 innerHTML 一样经 sanitize 清洗
       const html = safeText(args[0]);
       for (const el of els) {
-        el.insertAdjacentHTML('beforeend', sanitizeHtml(html, SCRIPT_HTML_WHITELIST));
+        el.insertAdjacentHTML('beforeend', sanitizeForContainer(container, html));
       }
       return true;
     }

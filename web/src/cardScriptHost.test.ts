@@ -234,15 +234,35 @@ describe('ensureCardScriptSandbox(键控生命周期)', () => {
     expect(cleanupA).toHaveBeenCalledTimes(1);
   });
 
-  it('cleanup 销毁全部脚本沙箱且幂等', async () => {
-    const cleanups = [vi.fn(), vi.fn()];
-    mockedExec.mockResolvedValueOnce(cleanups[0]).mockResolvedValueOnce(cleanups[1]);
+  it('cleanup 销毁沙箱且幂等(多脚本合并单 realm:一次执行一个 cleanup)', async () => {
+    const cleanup = vi.fn();
+    mockedExec.mockResolvedValueOnce(cleanup);
     await ensureCardScriptSandbox(opts({ scripts: [SCRIPT_A, SCRIPT_B] }));
-    expect(mockedExec).toHaveBeenCalledTimes(2);
+    expect(mockedExec).toHaveBeenCalledTimes(1);
     cleanupCardScriptSandbox();
-    for (const c of cleanups) expect(c).toHaveBeenCalledTimes(1);
+    expect(cleanup).toHaveBeenCalledTimes(1);
     cleanupCardScriptSandbox();
-    for (const c of cleanups) expect(c).toHaveBeenCalledTimes(1);
+    expect(cleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it('多脚本合并进单个 realm:一次调用,segments 按序携带全部段(名+正文)', async () => {
+    mockedExec.mockResolvedValue(vi.fn());
+    await ensureCardScriptSandbox(opts({ scripts: [SCRIPT_A, SCRIPT_B] }));
+    expect(mockedExec).toHaveBeenCalledTimes(1);
+    // 第一个参数从单段字符串变为段数组(沙箱侧逐 <script> 注入,共享 window)
+    const segments = mockedExec.mock.calls[0][0] as Array<{ name: string; code: string }>;
+    expect(segments).toEqual([
+      { name: 'A', code: SCRIPT_A.content },
+      { name: 'B', code: SCRIPT_B.content },
+    ]);
+  });
+
+  it('启动前给容器设 data-kd-scope(运行期 <style> 作用域锚点),characterId 净化为合法 CSS 标识符', async () => {
+    mockedExec.mockResolvedValue(vi.fn());
+    const setAttribute = vi.fn();
+    const container = { setAttribute } as unknown as HTMLElement;
+    await ensureCardScriptSandbox(opts({ characterId: 'c/1:xx', container }));
+    expect(setAttribute).toHaveBeenCalledWith('data-kd-scope', 'card-c-1-xx');
   });
 
   it('ESM 卡级脚本跳过执行(其余照常),空执行面不占用键', async () => {

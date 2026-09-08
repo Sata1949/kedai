@@ -13,8 +13,14 @@ import {
   type SandboxEnvironment,
   type SandboxExecutionContext,
   type SandboxRequest,
+  type ScriptSegment,
 } from './protocol';
 import { sandboxScript } from './boot-script';
+import {
+  getCardSharedGlobals,
+  publishCardSharedGlobals,
+  subscribeCardSharedGlobals,
+} from './shared-globals';
 import {
   applyJq,
   applyRpc,
@@ -178,7 +184,7 @@ function handleAudioRpc(op: string, args: unknown[]): void {
 }
 
 export async function executeSandboxedCharacterScript(
-  code: string,
+  code: string | ScriptSegment[],
   context: SandboxExecutionContext,
   environment: SandboxEnvironment = { document, window },
 ): Promise<SandboxCleanup> {
@@ -195,10 +201,29 @@ export async function executeSandboxedCharacterScript(
     const targets = new Map<number, HTMLElement>();
     const eventListeners: Array<{ element: HTMLElement; eventName: string; listener: EventListener }> = [];
     let targetId = 0;
+    // 跨 realm 共享全局:同角色其余沙箱 publish 时实时推送本沙箱(全量快照);
+    // cleanup 退订(挂在下方统一清理路径)
+    let unsubscribeShared: (() => void) | undefined;
+    if (context.characterId) {
+      const characterId = context.characterId;
+      unsubscribeShared = subscribeCardSharedGlobals(characterId, (globals) => {
+        if (disposed) return;
+        try {
+          iframe.contentWindow?.postMessage(
+            { channel: CHANNEL, nonce, type: 'shared-update', globals: cloneData(globals) },
+            '*',
+          );
+        } catch {
+          /* 沙箱已销毁:忽略 */
+        }
+      });
+    }
     const cleanup = (): void => {
       if (disposed) return;
       disposed = true;
       liveSandboxes.delete(nonce);
+      unsubscribeShared?.();
+      unsubscribeShared = undefined;
       environment.window.removeEventListener('message', onMessage as EventListener);
       environment.window.removeEventListener('scroll', scheduleGeoPush, true);
       environment.window.removeEventListener('resize', scheduleGeoPush);
@@ -329,6 +354,10 @@ export async function executeSandboxedCharacterScript(
               context.container ? readContainerGeo(context.container) : undefined,
               context.container ? gatherIdMap(context.container) : {},
               context.lorebookName ?? null,
+              // 跨 realm 共享全局:未显式传入时按角色自动注入宿主快照
+              // (消息级开场白沙箱借此读到卡级 realm 的 window.WuWaShared 等)
+              context.sharedGlobals ??
+                (context.characterId ? getCardSharedGlobals(context.characterId) : {}),
             ),
           };
           if (utf8Bytes(boot) > MAX_MESSAGE_BYTES) throw new Error('角色卡脚本启动消息过大');
@@ -345,6 +374,10 @@ export async function executeSandboxedCharacterScript(
         } else if (message.type === 'local-storage') {
           // 沙箱 localStorage 持久化桥:set/remove/clear 落宿主 localStorage(ST 源级语义)
           applyScriptLocalStorageOp(String(message.op ?? ''), message.key, message.value);
+        } else if (message.type === 'shared-publish') {
+          // 跨 realm 共享全局:沙箱 diff 上报的 window 纯数据全局,按角色持久化并
+          // 广播给同角色其余订阅沙箱(消息级 realm 的降级读源)
+          if (context.characterId) publishCardSharedGlobals(context.characterId, message.globals);
         } else if (message.type === 'rpc') {
           // audio-snapshot 是沙箱启动时的音频状态预拉取(非 DOM 操作),
           // 与 applyRpc 的 DOM 白名单并列分发。
@@ -418,8 +451,11 @@ export async function executeSandboxedCharacterScript(
         }
       }
     };
-    // 超时错误带上脚本指纹(长度+开头):多脚本同消息时能定位是哪一段没跑完
-    const codeFingerprint = `len=${code.length} head=${JSON.stringify(code.slice(0, 60))}`;
+    // 超时错误带上脚本指纹(长度+开头):多脚本同消息时能定位是哪一段没跑完;
+    // 多段(卡级合并单 realm)附带段数与各段名,便于定位卡在哪一段
+    const codeText = typeof code === 'string' ? code : code.map((s) => s.code).join('\n');
+    const segmentInfo = typeof code === 'string' ? '' : ` segs=${code.length} names=${JSON.stringify(code.map((s) => s.name))}`;
+    const codeFingerprint = `len=${codeText.length}${segmentInfo} head=${JSON.stringify(codeText.slice(0, 60))}`;
     const timer = setTimeout(() => finish(new Error(`角色卡脚本执行超时 (${codeFingerprint})`)), environment.timeoutMs ?? DEFAULT_TIMEOUT_MS);
     environment.window.addEventListener('message', onMessage as EventListener);
     environment.document.body.appendChild(iframe);

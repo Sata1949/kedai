@@ -1,6 +1,6 @@
 // boot-script.ts — 沙箱 boot 文档字符串生成(sandboxScript:变量快照/兼容 API/jQuery 子集/事件总线等沙箱内代码的代码生成)
 import type { MvuVariables } from '../mvu/variables';
-import { CHANNEL, cloneData, type ContainerGeo } from './protocol';
+import { CHANNEL, cloneData, type ContainerGeo, type ScriptSegment } from './protocol';
 
 /**
  * 沙箱 iframe 内容。除基本变量/通信外,内联补全 MagVarUpdate 生态脚本依赖的兼容 API:
@@ -9,9 +9,16 @@ import { CHANNEL, cloneData, type ContainerGeo } from './protocol';
  *   - waitGlobalInitialized / errorCatched
  *   - Mvu / getAllVariables / Dom
  * 沙箱是隔离窗口,看不到宿主 window 上的 installMvuGlobals,因此这里必须自带全部全局。
+ *
+ * code 两种形态:
+ *   - string:单段(消息级),用户代码包在 async IIFE 里尾部执行,现行为不变;
+ *   - ScriptSegment[]:多段(卡级合并单 realm),boot <script> 之后按序每段一个独立
+ *     <script> 标签注入——独立标签天然共享 window 与全局词法环境(语义与 SillyTavern
+ *     逐 <script> 加载一致),单段语法错误只废该段不拖垮其余段,段名经
+ *     window.__kdScriptName 附到错误上报前缀([卡脚本 段名])。
  */
 export function sandboxScript(
-  code: string,
+  code: string | ScriptSegment[],
   nonce: string,
   variables: MvuVariables,
   globals: Record<string, unknown> = {},
@@ -19,8 +26,10 @@ export function sandboxScript(
   geo: ContainerGeo | undefined = undefined,
   idMap: Record<string, unknown> = {},
   lorebookName: string | null = null,
+  sharedGlobals: Record<string, unknown> = {},
 ): string {
-  const escapedCode = code.replace(/<\/script/gi, '<\\/script');
+  const segments = typeof code === 'string' ? null : code;
+  const escapedCode = segments === null ? (code as string).replace(/<\/script/gi, '<\\/script') : '';
   const initialData = JSON.stringify(cloneData(variables)).replace(/</g, '\\u003c');
   const initialGlobals = JSON.stringify(cloneData(globals)).replace(/</g, '\\u003c');
   const initialStorage = JSON.stringify(cloneData(storage)).replace(/</g, '\\u003c');
@@ -28,6 +37,37 @@ export function sandboxScript(
   const initialMirror = JSON.stringify(cloneData(idMap)).replace(/</g, '\\u003c');
   const initialLorebook = JSON.stringify(lorebookName ?? null);
   const initialNonce = JSON.stringify(nonce);
+  const initialShared = JSON.stringify(cloneData(sharedGlobals)).replace(/</g, '\\u003c');
+  // 多段正文经 JSON 内联(< → < 转义双保险;段文本最终以 textContent 注入,不经 HTML 解析)
+  const segmentsJson = JSON.stringify(
+    (segments ?? []).map((s) => ({ name: String(s?.name ?? ''), code: String(s?.code ?? '') })),
+  ).replace(/</g, '\\u003c');
+  const runUserCode = segments === null
+    // 单段(消息级):现行为不变,仅在 done 前挂共享桥首次 diff
+    ? `(async()=>{try{${escapedCode}\n;await flush();__kdSharedStart();send('done')}catch(error){send('error',{message:error instanceof Error?(error.stack||error.message):String(error)})}})();`
+    // 多段(卡级合并单 realm):逐段独立 <script> 注入(appendChild 同步执行,语义对齐
+    // SillyTavern 逐 <script> 加载:共享 window 与全局词法环境,单段语法错误只废该段)。
+    // 错误三路径(window error / unhandledrejection / harness finish)统一带段名前缀。
+    : `window.__kdScriptName='';
+const __kdSegPrefix=function(){return window.__kdScriptName?'[卡脚本 '+window.__kdScriptName+'] ':'';};
+addEventListener('error',function(e){
+  const em=(e&&e.error&&(e.error.stack||e.error.message))||(e&&e.message)||'未知错误';
+  send('warn',{message:__kdSegPrefix()+em});
+});
+addEventListener('unhandledrejection',function(e){
+  const r=e?e.reason:null;
+  send('warn',{message:__kdSegPrefix()+'未处理的 Promise 拒绝: '+(r&&r.message?r.message:String(r))});
+});
+const __kdSegments=JSON.parse(${JSON.stringify(segmentsJson)});
+for(let __i=0;__i<__kdSegments.length;__i++){
+  const __seg=__kdSegments[__i];
+  const __s=document.createElement('script');
+  // 段开头标记当前段名,错误钩子据此加前缀;textContent 注入不触发 HTML 解析(无 </script> 闭合风险)
+  __s.textContent='window.__kdScriptName='+JSON.stringify(String(__seg.name||''))+';\\n'+__seg.code;
+  document.head.appendChild(__s);
+}
+window.__kdScriptName='';
+(async()=>{try{await flush();__kdSharedStart();send('done')}catch(error){send('error',{message:__kdSegPrefix()+(error instanceof Error?(error.stack||error.message):String(error))})}})();`;
   return `'use strict';
 const CHANNEL=${JSON.stringify(CHANNEL)}, NONCE=${initialNonce};
 const variables=JSON.parse(${JSON.stringify(initialData)});
@@ -84,6 +124,10 @@ addEventListener('message',(event)=>{
     // 宿主卡级事件广播(swipe 切换等):直接派发到事件总线,供 eventOn 订阅
     // (舰娘卡「swipe 切换自动开关世界书」脚本监听 tavern_events.MESSAGE_SWIPED)
     try{__kdFireEvent(m.name,m.payload);}catch(_e){/* boot 前到达的广播丢弃 */}
+  } else if(m.type==='shared-update'){
+    // 宿主共享全局广播(同角色其余沙箱 publish 的全量快照):合法键赋到 window
+    // 并并入基线防回声(自己注入的键不再 diff 上报回去)
+    try{__kdSharedApply(m.globals);}catch(_e){/* boot 前到达的广播丢弃(TDZ) */}
   }
 });
 const warn=(m)=>send('warn',{message:String(m)});
@@ -543,6 +587,42 @@ const TavernHelper=Object.freeze({
 globalThis.TavernHelper=TavernHelper;
 // tavern_events 在 TavernHelper 同区定义(后于上方事件总线挂载区),此处挂载避开 TDZ
 globalThis.tavern_events=tavern_events;
-(async()=>{try{${escapedCode}\n;await flush();send('done')}catch(error){send('error',{message:error instanceof Error?(error.stack||error.message):String(error)})}})();
+// ---- 跨 realm 共享全局桥(镜像:宿主 sandbox/shared-globals.ts 的键/值校验,语义同步,改动必须双侧同改) ----
+// 卡级脚本把纯数据全局挂 window(如 wuwa MVU 卡 window.WuWaShared={STORY_MAP,...}),
+// 其余 realm(消息级开场白沙箱)跨源直读不到;这里 diff window 自有可枚举键的
+// 新增/引用变化上报宿主(shared-publish),宿主按角色持久化并广播(shared-update)。
+const __kdSharedBadKeys=['window','document','top','parent','self','globalThis','frames','location','localStorage','sessionStorage','eval','Function','fetch','XMLHttpRequest','open','close'];
+const __kdSharedKeyOk=function(k){return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(k)&&__kdSharedBadKeys.indexOf(k)<0&&k.indexOf('__kd')!==0;};
+// 值粗筛:JSON 可序列化且序列化 ≤256KB(字符数口径,宿主侧按 UTF-8 字节精确复核)
+const __kdSharedJson=function(v){try{const s=JSON.stringify(v);if(typeof s!=='string')return null;if(s.length>262144)return null;return s;}catch(_e){return null;}};
+const __kdSharedBaseline=Object.create(null);
+// 注入宿主下发快照(先于用户代码,脚本同步可读);注入键并进基线防回声
+const __kdSharedInitial=JSON.parse(${JSON.stringify(initialShared)});
+for(const __sk in __kdSharedInitial){if(__kdSharedKeyOk(__sk)){try{window[__sk]=__kdSharedInitial[__sk];}catch(_e){}}}
+// 基线快照:用户代码运行前 window 自有可枚举键(boot 挂载的 $/Mvu 等收录,diff 不上报)
+for(const __bk of Object.keys(window)){try{__kdSharedBaseline[__bk]=window[__bk];}catch(_e){}}
+const __kdSharedApply=function(g){
+  if(!g||typeof g!=='object')return;
+  for(const k in g){if(!__kdSharedKeyOk(k))continue;try{window[k]=g[k];__kdSharedBaseline[k]=window[k];}catch(_e){}}
+};
+const __kdSharedDiff=function(){
+  const out={};let changed=false;
+  for(const k of Object.keys(window)){
+    if(!__kdSharedKeyOk(k))continue;
+    let v;try{v=window[k];}catch(_e){continue;}
+    if(Object.prototype.hasOwnProperty.call(__kdSharedBaseline,k)&&__kdSharedBaseline[k]===v)continue;
+    const s=__kdSharedJson(v);
+    if(s===null)continue; // 函数/循环引用/超大值:跳过(宿主侧同规则再校验一道)
+    out[k]=JSON.parse(s);
+    try{__kdSharedBaseline[k]=window[k];}catch(_e){}
+    changed=true;
+  }
+  if(changed)send('shared-publish',{globals:out});
+};
+let __kdSharedTimer=null;
+// done 时立即 diff 一次(同步段挂的全局即时上报),之后每 2s 周期 diff(异步挂载兜底);
+// 计时器无需显式 clear:沙箱 realm 随 iframe 销毁整体回收
+const __kdSharedStart=function(){__kdSharedDiff();if(__kdSharedTimer===null&&typeof setInterval==='function')__kdSharedTimer=setInterval(__kdSharedDiff,2000);};
+${runUserCode}
 `;
 }

@@ -104,6 +104,8 @@ describe('sandboxScript', () => {
       structuredClone: (v: unknown) => JSON.parse(JSON.stringify(v)),
       queueMicrotask,
       Promise,
+      // 共享桥注入/diff 读写 window(真实浏览器沙箱必有),harness 补齐对齐
+      window: {},
     };
     vm.createContext(sandboxGlobal);
     new vm.Script(script).runInContext(sandboxGlobal);
@@ -147,6 +149,8 @@ describe('sandboxScript', () => {
       structuredClone: (v: unknown) => JSON.parse(JSON.stringify(v)),
       queueMicrotask,
       Promise,
+      // 共享桥注入/diff 读写 window(真实浏览器沙箱必有),harness 补齐对齐
+      window: {},
     };
     vm.createContext(sandboxGlobal);
     new vm.Script(script).runInContext(sandboxGlobal);
@@ -216,6 +220,8 @@ describe('sandboxScript(wuwa 状态栏兼容面)', () => {
       queueMicrotask,
       Promise,
       setTimeout,
+      // 共享桥注入/diff 读写 window(真实浏览器沙箱必有),harness 补齐对齐
+      window: {},
     };
     vm.createContext(sandboxGlobal);
     new vm.Script(script).runInContext(sandboxGlobal);
@@ -260,6 +266,8 @@ describe('sandboxScript(wuwa 状态栏兼容面)', () => {
       queueMicrotask,
       Promise,
       setTimeout,
+      // 共享桥注入/diff 读写 window(真实浏览器沙箱必有),harness 补齐对齐
+      window: {},
     };
     vm.createContext(sandboxGlobal);
     new vm.Script(script).runInContext(sandboxGlobal);
@@ -299,6 +307,8 @@ describe('sandboxScript(inline 事件降级桥沙箱半)', () => {
       queueMicrotask,
       Promise,
       setTimeout,
+      // 共享桥注入/diff 读写 window(真实浏览器沙箱必有),harness 补齐对齐
+      window: {},
     };
     vm.createContext(sandboxGlobal);
     // new Function 处理器的全局必须是 vm Realm 自身(与浏览器沙箱一致:只能看到
@@ -341,6 +351,8 @@ describe('sandboxScript(inline 事件降级桥沙箱半)', () => {
       Promise,
       setTimeout,
       Function,
+      // 共享桥注入/diff 读写 window(真实浏览器沙箱必有),harness 补齐对齐
+      window: {},
     };
     vm.createContext(sandboxGlobal);
     new vm.Script(script).runInContext(sandboxGlobal);
@@ -648,5 +660,182 @@ describe('sandboxScript(卡级脚本兼容面:tavern_events/TavernHelper 世界�
     await new Promise((r) => setTimeout(r, 10));
     const warn = messages.find((m) => m.type === 'warn' && String(m.message).startsWith('msgs='));
     expect(String(warn?.message)).toContain('swipe_id":0');
+  });
+});
+
+describe('sandboxScript(多段单 realm:逐 <script> 注入共享 window)', () => {
+  // boot 模板多段路径把每段包成独立 <script> 由 document.head.appendChild 注入;
+  // vm 无真实 DOM,harness 的 appendChild 同步执行段文本(runInContext 同一 context →
+  // 与真实浏览器共享 window/全局词法环境一致);段错误(语法/运行时)捕获后派发
+  // window error 事件(对齐真实 HTML 逐 <script> 语义:该段作废,后续段照常执行),
+  // 沙箱 error 监听器据此上报带段名的 warn。
+  function makeSegmentSandbox(nonce: string, script: string) {
+    const messages: Array<Record<string, unknown>> = [];
+    const listeners: Array<{ type: string; fn: (e: Record<string, unknown>) => void }> = [];
+    const fire = (type: string, e: Record<string, unknown>): void => {
+      for (const l of listeners) {
+        if (l.type !== type) continue;
+        try {
+          l.fn(e);
+        } catch {
+          /* 监听器异常不扩散 */
+        }
+      }
+    };
+    const sandboxGlobal: Record<string, unknown> = {
+      parent: { postMessage: (m: Record<string, unknown>) => void messages.push(m) },
+      addEventListener: (type: string, fn: (e: Record<string, unknown>) => void) => void listeners.push({ type, fn }),
+      console,
+      structuredClone: (v: unknown) => JSON.parse(JSON.stringify(v)),
+      queueMicrotask,
+      Promise,
+      setTimeout,
+      window: {},
+      document: {
+        body: {},
+        documentElement: {},
+        createElement: () => ({ textContent: '' }),
+        // appendChild 捕获段错误并派发 error(该段作废不拖垮其余段)
+        head: {
+          appendChild: (node: { textContent?: string }) => {
+            const code = node?.textContent ?? '';
+            if (!code.trim()) return;
+            try {
+              new vm.Script(code).runInContext(sandboxGlobal as never);
+            } catch (error) {
+              fire('error', {
+                type: 'error',
+                error,
+                message: error instanceof Error ? error.message : String(error),
+              });
+            }
+          },
+        },
+      },
+    };
+    vm.createContext(sandboxGlobal as never);
+    (sandboxGlobal as Record<string, unknown>).Function = vm.runInContext('Function', sandboxGlobal as never);
+    new vm.Script(script).runInContext(sandboxGlobal as never);
+    return { messages };
+  }
+
+  it('段 1 挂 window 全局,段 2 同 realm 可读并写宿主可见结果(共享 window/全局词法环境)', async () => {
+    const nonce = 'nonce-seg-share';
+    const script = sandboxScript(
+      [
+        { name: '剧情逻辑', code: 'window.SharedInfo={mark:7};' },
+        { name: '界面脚本', code: "warn('got='+window.SharedInfo.mark);" },
+      ],
+      nonce,
+      { stat_data: {}, display_data: {} },
+    );
+    const { messages } = makeSegmentSandbox(nonce, script);
+    await new Promise((r) => setTimeout(r, 30));
+    const warn = messages.find((m) => m.type === 'warn' && String(m.message).startsWith('got='));
+    expect(warn?.message).toBe('got=7');
+    expect(messages.some((m) => m.type === 'done')).toBe(true);
+    expect(messages.some((m) => m.type === 'error')).toBe(false);
+  });
+
+  it('单段语法错误只废该段:已执行段副作用保留,整体仍 done 不炸', async () => {
+    const nonce = 'nonce-seg-bad';
+    const script = sandboxScript(
+      [
+        { name: '段1', code: "warn('one-ran');" },
+        { name: '段2', code: 'const = syntax error;' },
+      ],
+      nonce,
+      { stat_data: {}, display_data: {} },
+    );
+    const { messages } = makeSegmentSandbox(nonce, script);
+    await new Promise((r) => setTimeout(r, 30));
+    const warns = messages.filter((m) => m.type === 'warn').map((m) => String(m.message));
+    expect(warns.some((w) => w.includes('one-ran'))).toBe(true);
+    // 语法错误段整段不解析(含段首 __kdScriptName 注入),error 上报存在即可
+    expect(warns.length).toBeGreaterThanOrEqual(2);
+    expect(messages.some((m) => m.type === 'done')).toBe(true);
+    expect(messages.some((m) => m.type === 'error')).toBe(false);
+  });
+
+  it('段运行期 throw 不阻断后续段,错误上报带段名', async () => {
+    const nonce = 'nonce-seg-throw';
+    const script = sandboxScript(
+      [
+        { name: '剧情逻辑', code: "throw new Error('boom-seg1');" },
+        { name: '界面脚本', code: "warn('two-ran');" },
+      ],
+      nonce,
+      { stat_data: {}, display_data: {} },
+    );
+    const { messages } = makeSegmentSandbox(nonce, script);
+    await new Promise((r) => setTimeout(r, 30));
+    const warns = messages.filter((m) => m.type === 'warn').map((m) => String(m.message));
+    expect(warns.some((w) => w.includes('two-ran'))).toBe(true);
+    expect(warns.some((w) => w.includes('[卡脚本 剧情逻辑]') && w.includes('boom-seg1'))).toBe(true);
+    expect(messages.some((m) => m.type === 'done')).toBe(true);
+    expect(messages.some((m) => m.type === 'error')).toBe(false);
+  });
+});
+
+describe('sandboxScript(跨 realm 共享全局桥:注入/diff 上报/update 更新)', () => {
+  /** 与浏览器沙箱等价的 vm 沙箱(共享桥代码读写 window:{} 与消息监听) */
+  function makeSandbox(nonce: string, script: string) {
+    const messages: Array<Record<string, unknown>> = [];
+    const listeners: Array<(ev: { data: unknown }) => void> = [];
+    const sandboxGlobal: Record<string, unknown> = {
+      parent: { postMessage: (m: Record<string, unknown>) => void messages.push(m) },
+      addEventListener: (_type: string, fn: (ev: { data: unknown }) => void) => void listeners.push(fn),
+      console,
+      structuredClone: (v: unknown) => JSON.parse(JSON.stringify(v)),
+      queueMicrotask,
+      Promise,
+      setTimeout,
+      window: {},
+      document: { body: {}, documentElement: {} },
+    };
+    vm.createContext(sandboxGlobal as never);
+    (sandboxGlobal as Record<string, unknown>).Function = vm.runInContext('Function', sandboxGlobal as never);
+    new vm.Script(script).runInContext(sandboxGlobal as never);
+    const dispatch = (m: Record<string, unknown>): void => {
+      for (const fn of listeners) fn({ data: m });
+    };
+    return { messages, dispatch, sandboxGlobal };
+  }
+
+  it('沙箱内 window 新增纯数据全局 → done 前宿主收到 shared-publish(卡级挂载 → 宿主快照)', async () => {
+    const nonce = 'nonce-share-pub';
+    const script = sandboxScript(
+      'window.WuWaShared={ready:true,story:"S"};',
+      nonce,
+      { stat_data: {}, display_data: {} },
+    );
+    const { messages } = makeSandbox(nonce, script);
+    await new Promise((r) => setTimeout(r, 20));
+    const pub = messages.find((m) => m.type === 'shared-publish');
+    expect(pub).toBeTruthy();
+    expect((pub?.globals as { WuWaShared?: unknown })?.WuWaShared).toEqual({ ready: true, story: 'S' });
+  });
+
+  it('boot 注入的 sharedGlobals 沙箱内 window 同步可读(消息级 realm 降级读源)', async () => {
+    const nonce = 'nonce-share-inj';
+    const script = sandboxScript('', nonce, { stat_data: {}, display_data: {} }, {}, {}, undefined, {}, null, {
+      WuWaShared: { story: 'S' },
+    });
+    const { sandboxGlobal } = makeSandbox(nonce, script);
+    expect(vm.runInContext('window.WuWaShared', sandboxGlobal as never)).toEqual({ story: 'S' });
+  });
+
+  it('shared-update 后 window 全局更新并入基线(宿主实时推送注入)', async () => {
+    const nonce = 'nonce-share-upd';
+    const script = sandboxScript('', nonce, { stat_data: {}, display_data: {} });
+    const { dispatch, sandboxGlobal } = makeSandbox(nonce, script);
+    dispatch({
+      channel: 'kedai-character-script-v1',
+      nonce,
+      type: 'shared-update',
+      globals: { LiveInfo: { n: 2 } },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(vm.runInContext('window.LiveInfo', sandboxGlobal as never)).toEqual({ n: 2 });
   });
 });
