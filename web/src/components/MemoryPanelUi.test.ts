@@ -24,16 +24,17 @@ function memEntry(overrides: Partial<api.MemoryEntry> = {}): api.MemoryEntry {
     usage_count: 3,
     last_usage: '2026-08-15T10:30:00Z',
     selected: true,
+    pinned: false,
     created_at: '2026-08-14T08:00:00Z',
     updated_at: '2026-08-15T10:30:00Z',
     ...overrides,
   };
 }
 
-/** 三条样例:蒸馏(已选/有使用)、工具(未选/未使用)、手动(已选) */
+/** 三条样例:蒸馏(已选/有使用/置顶)、工具(未选/未使用)、手动(已选) */
 function sampleList(): api.MemoryEntry[] {
   return [
-    memEntry(),
+    memEntry({ pinned: true }),
     memEntry({ id: 8, kind: 'tool', content: '工具写入的记忆', selected: false, usage_count: 0, last_usage: null, source_session_id: null }),
     memEntry({ id: 9, kind: 'manual', content: '手动添加的记忆', source_session_id: null }),
   ];
@@ -127,5 +128,42 @@ describe('MemoryPanel(SSR 渲染)', () => {
       { body: { error: '数据库不可用' }, status: 500 },
     );
     expect(html).toContain('加载失败:数据库不可用');
+  });
+
+  it('搜索/筛选控件与清理入口常驻渲染(有角色时)', async () => {
+    const { html } = await renderPanel(
+      { characterId: 'charA', sessionId: 's1' },
+      { body: { memories: sampleList() } },
+    );
+    // 搜索框(占位文案 + type=search)
+    expect(html).toContain('搜索记忆内容');
+    expect(html).toMatch(/type="search"/);
+    // kind 筛选下拉:四项(全部类型 / 蒸馏 / 工具 / 手动)
+    expect(html).toContain('全部类型');
+    expect(html).toContain('蒸馏');
+    expect(html).toContain('工具');
+    expect(html).toContain('手动');
+    // 清理已归档(危险操作入口)
+    expect(html).toContain('清理已归档');
+  });
+
+  it('置顶条目:渲染「置顶」标记与「取消置顶」按钮;未置顶渲染「置顶」按钮', async () => {
+    const { html } = await renderPanel(
+      { characterId: 'charA', sessionId: 's1' },
+      { body: { memories: sampleList() } },
+    );
+    expect(html).toContain('memory-pinned'); // 置顶行样式钩子
+    expect(html).toContain('memory-pin-tag'); // 置顶标记
+    expect(html).toContain('取消置顶'); // 置顶行的按钮
+    expect(html.match(/>置顶<\/button>/g)).toHaveLength(2); // 两条未置顶行的按钮
+  });
+
+  it('空态:搜索/筛选无结果时提示调整条件;无筛选时提示暂无记忆', async () => {
+    const { html } = await renderPanel(
+      { characterId: 'charA', sessionId: 's1' },
+      { body: { memories: [] } },
+    );
+    expect(html).toContain('暂无记忆');
+    expect(html).toContain('搜索记忆内容'); // 空态下控件仍在
   });
 });

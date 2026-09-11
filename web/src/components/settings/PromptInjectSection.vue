@@ -166,7 +166,7 @@ onMounted(async () => {
           <select v-model="floor.role" class="sv-select floor-select" title="消息角色">
             <option v-for="(label, val) in FLOOR_ROLE_LABELS" :key="val" :value="val">{{ label }}</option>
           </select>
-          <select v-model="floor.position" class="sv-select floor-select" title="注入位置">
+          <select v-model="floor.position" class="sv-select floor-select" title="注入位置(before/after/depth 已废弃,引擎统一归位系统提示词;仅兼容导入的酒馆预设)">
             <option v-for="(label, val) in FLOOR_POS_LABELS" :key="val" :value="val">{{ label }}</option>
           </select>
           <input

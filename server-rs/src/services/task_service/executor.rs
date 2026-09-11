@@ -78,9 +78,13 @@ impl TaskService {
             }
         };
         let _ = self.set_status(id, TaskStatus::Planning);
-        // 续跑的整体上下文:目标 + 已批准计划(编号列表)
+        // 续跑的整体上下文:目标 + 已批准计划(编号列表)。
+        // 2026-09-10 实测修复(F4):原始目标里可能写了步骤数量(如「三步计划」),
+        // 而用户经 plan-chat 修订后计划步数已变——显式要求以已批准计划为准,
+        // 否则汇总会沿用原始目标的旧步数描述,出现「标题三步、正文两步」的矛盾。
         let mut goal = format!(
-            "用户目标:\n{}\n\n已批准的计划(请按计划执行并产出最终结果):\n",
+            "用户目标:\n{}\n\n已批准的计划(请按计划执行并产出最终结果;该计划可能经用户修订,\
+             步骤数量与内容一律以本清单为准,不要沿用目标描述中的步骤数量):\n",
             task.title
         );
         for (i, s) in steps.iter().enumerate() {
@@ -95,15 +99,23 @@ impl TaskService {
 
     /// 六模式(task_engine)后台执行的成功收尾:仅自己仍是当前执行时写结果终态,
     /// 随后按 token 清理取消条目(与 finalize_run 同款「旧执行让位」语义)。
+    /// 首轮产出同时落 assistant 消息(kind=result):任务模式的对话记录区按
+    /// user/assistant 逐轮气泡呈现,首轮成果必须是一条完整的 assistant 发言,
+    /// 否则用户指令历史里只有 followup 轮次、首轮产出无处可看(实跑问题 1)。
     pub(crate) fn complete_mode_run(
         &self,
         task_id: &str,
         token: u64,
         result: &str,
         status: TaskStatus,
+        error: Option<&str>,
     ) {
         if self.is_current_run(task_id, token) {
-            let _ = self.set_result(task_id, result, status);
+            let _ = self.set_result_with_error(task_id, result, status, error);
+            let text = result.trim();
+            if !text.is_empty() {
+                let _ = self.add_task_message(task_id, "assistant", "result", text);
+            }
         }
         self.remove_cancel_if(task_id, token);
     }
@@ -131,15 +143,21 @@ impl TaskService {
         self.remove_cancel_if(task_id, token);
     }
 
-    /// 终态追加指令(批次 R2a followup):仅 done/partial/error/ended 可追加,
+    /// 终态追加指令(批次 R2a followup;R2b+ 扩 mode):仅 done/partial/error/ended 可追加,
     /// running/planning/planned 由 API 层预检 409(此处复核兜底竞态)。
     /// 用户指令落 task_messages(kind=followup, role=user)→ 任务回 running,
     /// 以「原目标 + 上轮 result + 追加指令」solo 续跑(复用 run_agent_loop 单轮
-    /// 工具自循环,不重新规划)→ 产出落 assistant 消息并 append 进 result
-    ///(「追加 N」段,N = followup 序号)。取消/失败语义与 run 对齐:
-    /// stop 可中断(ended),失败落 error 文本。
-    /// 不经 TaskEngine 派发:收尾语义不同(append result 而非覆盖 + 写消息)。
-    pub fn followup(self: &Arc<Self>, id: &str, content: &str) -> Result<(), String> {
+    /// 工具自循环,不重新规划)→ 产出落 assistant 消息;`mode=append`(默认)以
+    /// 「追加 N」段附加进 result,`mode=replace` 用产出整体替换 result(段标「修订 N」),
+    /// 以支持「压缩 / 重写 / 改前面」类指令(实测 append 无法表达,压缩后原文仍在)。
+    /// 取消/失败语义与 run 对齐:stop 可中断(ended),失败落 error 文本。
+    /// 不经 TaskEngine 派发:收尾语义不同(改写 result + 写消息)。
+    pub fn followup(
+        self: &Arc<Self>,
+        id: &str,
+        content: &str,
+        mode: TaskFollowupMode,
+    ) -> Result<(), String> {
         let task = self.get(id).ok_or("任务不存在")?;
         if !matches!(
             task.status,
@@ -157,14 +175,25 @@ impl TaskService {
         // 用户指令先落库(第 N 次追加的 N 含本条:落库后计数即本轮序号)
         self.add_task_message(id, "user", "followup", content)?;
         let followup_no = self.followup_count(id);
-        // 续跑上下文:原目标 + 上轮结果 + 追加指令(沿用原人设/世界书,与 solo 同口径)
+        // 续跑上下文:原目标 + 上轮结果 + 追加指令(沿用原人设/世界书,与 solo 同口径)。
+        // replace 模式明确告知以本轮产出作为整体新版结果(旧结果仅作改写素材)。
         let mut goal = format!("用户目标:\n{}\n", task.title);
         if !task.result.trim().is_empty() {
             goal.push_str(&format!("\n已产出的结果:\n{}\n", task.result));
         }
-        goal.push_str(&format!(
-            "\n用户追加指令(第 {followup_no} 次追加):\n{content}\n\n请按追加指令在前述结果基础上继续,直接产出本轮追加的结果正文。"
-        ));
+        let tail = if mode == TaskFollowupMode::Replace {
+            format!(
+                "\n用户修订指令(第 {followup_no} 次修订):\n{content}\n\n\
+                 请按修订指令重写整份结果:直接输出修订后的完整结果正文,它将整体替换旧结果,\
+                 不要在输出中包含「修订」「追加」等字样的说明。"
+            )
+        } else {
+            format!(
+                "\n用户追加指令(第 {followup_no} 次追加):\n{content}\n\n\
+                 请按追加指令在前述结果基础上继续,直接产出本轮追加的结果正文。"
+            )
+        };
+        goal.push_str(&tail);
         let prev_partial = task.status == TaskStatus::Partial;
         let prev_result = task.result.clone();
         // 先登记新执行再写 running(2026-09-03 并发实测竞态):stop 后旧后台任务
@@ -185,6 +214,7 @@ impl TaskService {
                 followup_no,
                 prev_result,
                 prev_partial,
+                mode,
                 cancel,
                 token,
             )
@@ -678,6 +708,10 @@ impl TaskService {
                 // 模型未请求工具(直接产出计划,零侦察)或已是最终轮:正文 = 计划 JSON
                 return Ok(out);
             }
+            // 侦察轮入账(2026-09-10 实测修复):此前侦察轮只落 task_llm_calls 不落
+            // task_usage,导致 usage_total 与调用明细求和不等(实测 legacy/plan 各少计
+            // 800+ prompt token)。最终轮由调用方入账,此处只记非最终侦察轮,避免双记。
+            self.record_usage(task_id, "planner", None, &out);
             scout_round += 1;
             // 回填 OpenAI 标准结构:assistant(tool_calls) → 逐条 tool 结果
             // (与 run_tool_loop 回填同构;缺 tool 结果消息时严格后端对孤立
@@ -690,14 +724,27 @@ impl TaskService {
                 tool_call_id: None,
             });
             for call in &out.tool_calls {
-                // 白名单双保险:下发定义已是子集,执行时仍逐一核对(防模型幻觉工具名);
-                // 任务模式无 UI 授权上下文,白名单内只读工具预放行(与 run_tool_loop
-                // 的 step_whitelist 同一机制),否则会空等 300s 授权超时
-                let output = if PLANNER_SCOUT_TOOLS.contains(&call.name.as_str()) {
-                    let decision = crate::tools::permissions::PermissionDecision::allowed(
-                        crate::tools::permissions::ToolRisk::Safe,
-                        "规划器只读侦察白名单放行".into(),
-                    );
+                // 白名单双保险:下发定义已是子集,执行时仍逐一核对(防模型幻觉工具名)。
+                // 收口到统一裁决入口(批次授权改造):名单内 = custom_authorized 放行,
+                // 名单外直接拒绝。任务模式无 UI 授权上下文,不走等待授权分支。
+                let listed = PLANNER_SCOUT_TOOLS.contains(&call.name.as_str());
+                let decision = self.engine.tool_registry().permissions().decide_with_policy(
+                    &call.name,
+                    &tool_ctx,
+                    self.engine.tool_registry().get(&call.name).is_some(),
+                    listed,
+                    crate::tools::permissions::AuthorizationMode::Loose,
+                    &crate::tools::action_class::classify(
+                        &call.name,
+                        &call.arguments,
+                        self.engine
+                            .tool_registry()
+                            .origin_of(&call.name)
+                            .unwrap_or(crate::tools::action_class::ToolOrigin::Builtin),
+                    ),
+                    false,
+                );
+                let output = if listed && decision.allowed {
                     match self
                         .engine
                         .tool_registry()
@@ -788,7 +835,11 @@ impl TaskService {
                 crate::services::prompt_kit::untrusted_boundary("world_book", &world)
             ));
         }
-        let inject = self.inject_text();
+        let inject = if settings.task_prompt_inject_enabled {
+            self.inject_text()
+        } else {
+            String::new()
+        };
         if !inject.is_empty() {
             sys.push_str(&format!(
                 "\n\n{}",
@@ -870,7 +921,13 @@ impl TaskService {
                 crate::services::prompt_kit::untrusted_boundary("world_book", &world)
             ));
         }
-        let inject = self.inject_text();
+        // 提示词注入默认隔离(2026-09-10 实测修复,同 generate_step_with):
+        // 仅显式开启 task_prompt_inject_enabled 才继承 prompt_floors.json
+        let inject = if settings.task_prompt_inject_enabled {
+            self.inject_text()
+        } else {
+            String::new()
+        };
         if !inject.is_empty() {
             sys.push_str(&format!(
                 "\n\n{}",
@@ -947,6 +1004,9 @@ fn finalize_run(
 /// (plan_task_retry 不共用本骨架:多轮循环 + parse 判定 + 参数演进/日志规则不同。)
 async fn retry_if_empty_output<F, Fut>(
     deps: &TaskService,
+    task_id: &str,
+    phase: &str,
+    step_index: Option<usize>,
     label: &str,
     first: TaskGenOutput,
     cancel: &watch::Receiver<bool>,
@@ -959,6 +1019,9 @@ where
     if !first.text.trim().is_empty() {
         return Ok(first);
     }
+    // 首调空输出的那次调用仍应入账(2026-09-10 实测修复):此前只落 task_llm_calls,
+    // 重试成功后只记末次 out,首调 token 从 usage_total 丢失。
+    deps.record_usage(task_id, phase, step_index, &first);
     tokio::time::sleep(EMPTY_RETRY_BACKOFF).await;
     if *cancel.borrow() {
         return Err("任务已停止".into());
@@ -996,6 +1059,9 @@ async fn generate_step_retry(
     let first = deps.generate_step(task, step, step_index, cancel).await?;
     retry_if_empty_output(
         deps,
+        &task.id,
+        "step",
+        step_index,
         "子任务",
         first,
         cancel,
@@ -1036,6 +1102,9 @@ pub(crate) async fn plan_task_retry(
             Ok(_) => last_err = "规划器未产出有效步骤".into(),
             Err(e) => last_err = e,
         }
+        // 失败 attempt 仍是一次真实调用(已落 task_llm_calls):同步入账 usage,
+        // 否则重试场景下 usage_total 少于调用明细求和(2026-09-10 实测修复)。
+        deps.record_usage(task_id, "planner", None, &out);
         let reason = out.finish_reason.as_deref().unwrap_or("");
         tracing::warn!(
             attempt = attempt,
@@ -1079,6 +1148,8 @@ async fn plan_revise_retry(
             Ok(_) => last_err = "规划器未产出有效修订计划".into(),
             Err(e) => last_err = e,
         }
+        // 失败 attempt 同步入账 usage(口径同 plan_task_retry;2026-09-10 实测修复)
+        deps.record_usage(&task.id, "planner", None, &out);
         let reason = out.finish_reason.as_deref().unwrap_or("");
         tracing::warn!(
             attempt = attempt,
@@ -1104,9 +1175,18 @@ pub(crate) async fn summarize_task_retry(
     cancel: &watch::Receiver<bool>,
 ) -> Result<TaskGenOutput, String> {
     let first = deps.summarize_task(task, plan, cancel).await?;
-    retry_if_empty_output(deps, "汇总", first, cancel, |max_tokens, temperature| {
-        deps.summarize_task_with(task, plan, max_tokens, temperature, cancel)
-    })
+    retry_if_empty_output(
+        deps,
+        &task.id,
+        "summary",
+        None,
+        "汇总",
+        first,
+        cancel,
+        |max_tokens, temperature| {
+            deps.summarize_task_with(task, plan, max_tokens, temperature, cancel)
+        },
+    )
     .await
 }
 
@@ -1208,6 +1288,13 @@ async fn run_task_background(
                     TaskStatus::Done
                 };
                 let _ = deps.set_result(&task_id, out.text.trim(), status);
+                // 首轮成果落 assistant 消息(kind=result):与六模式
+                // complete_mode_run 同口径,供前端对话记录区逐轮气泡呈现
+                // (实跑问题 1:此前首轮产出只进 result,不进 messages)
+                let text = out.text.trim();
+                if !text.is_empty() {
+                    let _ = deps.add_task_message(&task_id, "assistant", "result", text);
+                }
             }
         }
         Err(e) => finalize_run(&deps, &task_id, token, *cancel.borrow(), Some(&e)),
@@ -1215,12 +1302,12 @@ async fn run_task_background(
     deps.remove_cancel_if(&task_id, token);
 }
 
-/// followup 追加指令的后台续跑主体(批次 R2a):solo 单轮 run_agent_loop
+/// followup 追加指令的后台续跑主体(批次 R2a;R2b+ 扩 mode):solo 单轮 run_agent_loop
 ///(工具全量,不重新规划;goal 已在入口组装为「原目标 + 上轮 result + 追加指令」)。
 /// 成功:usage 落库(phase=agent 与 solo 同口径)→ assistant 消息落库
-///(kind=followup)→ 「追加 N」段 append 进 result(不覆盖前轮成果,
-/// 指令概要截 80 字符)→ 终态映射:原 partial 保持 partial(失败步骤历史
-/// 不被抹平),done/error/ended 追加成功后回 done。
+///(kind=followup)→ `append` 模式以「追加 N」段附加进 result(不覆盖前轮成果,
+/// 指令概要截 80 字符),`replace` 模式以「修订 N」段整体替换 result → 终态映射:
+/// 原 partial 保持 partial(失败步骤历史不被抹平),done/error/ended 后回 done。
 /// 取消/失败与 run_task_background 同款 finalize_run 收尾(stop → ended,
 /// 其余 → error 文本落库);is_current_run 守门,旧执行让位语义不变。
 #[allow(clippy::too_many_arguments)]
@@ -1232,6 +1319,7 @@ async fn run_followup_background(
     followup_no: usize,
     prev_result: String,
     prev_partial: bool,
+    mode: TaskFollowupMode,
     cancel: watch::Receiver<bool>,
     token: u64,
 ) {
@@ -1280,14 +1368,23 @@ async fn run_followup_background(
                 } else {
                     brief
                 };
-                let section = format!("**追加 {followup_no}:**{brief}\n\n{text}");
-                // prev_result 为入口快照:追加期间仅本执行可写 result
-                //(is_current_run 守门;stop 只动状态不动 result),快照即当前
-                let prev = prev_result.trim_end();
-                let new_result = if prev.is_empty() {
+                let section = if mode == TaskFollowupMode::Replace {
+                    // replace:整体替换,段标「修订 N」,旧 result 不再保留
+                    format!("**修订 {followup_no}:**{brief}\n\n{text}")
+                } else {
+                    format!("**追加 {followup_no}:**{brief}\n\n{text}")
+                };
+                let new_result = if mode == TaskFollowupMode::Replace {
                     section
                 } else {
-                    format!("{prev}\n\n---\n\n{section}")
+                    // prev_result 为入口快照:追加期间仅本执行可写 result
+                    //(is_current_run 守门;stop 只动状态不动 result),快照即当前
+                    let prev = prev_result.trim_end();
+                    if prev.is_empty() {
+                        section
+                    } else {
+                        format!("{prev}\n\n---\n\n{section}")
+                    }
                 };
                 let status = if prev_partial {
                     TaskStatus::Partial

@@ -13,9 +13,29 @@ import { useUiPrefsStore } from './uiPrefs';
 const APP_MODE_KEY = 'kedai.appMode';
 /** 新建任务模式持久化键(批次 4 六模式):刷新后保持上次选择 */
 const TASK_RUN_MODE_KEY = 'kedai.taskRunMode.v1';
+/** 当前选中任务持久化键(实跑问题 4):重启后恢复上次查看的任务详情与调用记录 */
+const CURRENT_TASK_KEY = 'kedai.currentTaskId.v1';
 
 /** 任务模式可选值(写持久化前的白名单校验;未知值回退 legacy) */
 const TASK_RUN_MODES = new Set(['legacy', 'solo', 'multi', 'plan', 'team', 'custom']);
+
+function readStoredCurrentTaskId(): string | null {
+  try {
+    const v = localStorage.getItem(CURRENT_TASK_KEY);
+    return v && v.trim() ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+function persistCurrentTaskId(id: string | null): void {
+  try {
+    if (id) localStorage.setItem(CURRENT_TASK_KEY, id);
+    else localStorage.removeItem(CURRENT_TASK_KEY);
+  } catch {
+    /* 忽略 */
+  }
+}
 
 /** SSE 断线重连:退避起步 1s,指数翻倍,封顶 15s */
 const RECONNECT_BASE_MS = 1000;
@@ -254,6 +274,7 @@ export const useTaskStore = defineStore('app.task', () => {
 
   async function selectTask(id: string): Promise<void> {
     currentTaskId.value = id;
+    persistCurrentTaskId(id);
     // 切换任务时清空旧任务的调用记录(「调用情况」tab 由 watch/事件重新加载)
     // 与流式缓冲(批次 R4:旧任务的 delta 不带入新任务);
     // 同步重置内容签名,防止新任务首屏记录与旧任务签名碰巧相同而被去重跳过
@@ -263,11 +284,39 @@ export const useTaskStore = defineStore('app.task', () => {
     await loadTaskDetail(id);
   }
 
+  /** 清空当前任务选择(任务被删除/列表已无该 id 时;同步清持久化) */
+  function clearSelectedTask(): void {
+    currentTaskId.value = null;
+    currentTask.value = null;
+    currentTaskUsage.value = null;
+    taskCalls.value = [];
+    clearAllLiveDeltas();
+    persistCurrentTaskId(null);
+  }
+
+  /**
+   * 恢复上次选中的任务(实跑问题 4):重启后 currentTaskId 若仍是内存态,
+   * Agent 面板与调用记录将无入口加载,用户感知为「记录丢失」。
+   * 在任务列表加载完成后调用:仅当持久化的 id 仍在列表中才恢复,
+   * 否则清空(任务已被删除时不留下悬空选择)。
+   */
+  async function restoreSelectedTask(): Promise<void> {
+    if (currentTaskId.value) return; // 已有选择(会话内切换路径)不覆盖
+    const saved = readStoredCurrentTaskId();
+    if (!saved) return;
+    if (!tasks.value.some((t) => t.id === saved)) {
+      persistCurrentTaskId(null);
+      return;
+    }
+    await selectTask(saved);
+    await loadTaskCalls(saved);
+  }
+
   /** 切换顶层模式;进入任务模式时加载任务并启动 SSE 订阅,退出时停止订阅与兜底轮询 */
   function setAppMode(mode: 'roleplay' | 'task'): void {
     appMode.value = mode;
     if (mode === 'task') {
-      void loadTasks();
+      void loadTasks().then(() => restoreSelectedTask());
       void loadGlobalTaskUsage();
       useUiPrefsStore().agentPanelOpen = false;
       startTaskEvents();
@@ -432,6 +481,8 @@ export const useTaskStore = defineStore('app.task', () => {
 
   async function runTask(id: string): Promise<void> {
     await api.runTask(id);
+    // 任务开始执行时自动展开一次 Agent 面板(进度可见性);用户若已主动收起则不打扰
+    useUiPrefsStore().autoOpenAgentPanel();
     await loadTaskDetail(id);
   }
 
@@ -443,13 +494,20 @@ export const useTaskStore = defineStore('app.task', () => {
   /** 批准计划(plan 模式):plan 可选(修改后批准);成功后刷新该任务详情 */
   async function approveTask(id: string, plan?: api.TaskStep[]): Promise<void> {
     await api.approveTask(id, plan);
+    // 批准后任务进入执行:同样自动展开一次
+    useUiPrefsStore().autoOpenAgentPanel();
     await loadTaskDetail(id);
   }
 
-  /** 终态追加指令(批次 R2a):仅终态可调用(后端门禁 409);
-   *  成功后刷新详情(messages 指令历史 + result 追加段随详情带出) */
-  async function followupTask(id: string, content: string): Promise<void> {
-    await api.followupTask(id, content);
+  /** 终态追加指令(批次 R2a;R2b+ 扩 mode):仅终态可调用(后端门禁 409);
+   *  mode=append(缺省)追加进 result,mode=replace 整体替换(段标「修订 N」);
+   *  成功后刷新详情(messages 指令历史 + result 随详情带出) */
+  async function followupTask(
+    id: string,
+    content: string,
+    mode: 'append' | 'replace' = 'append',
+  ): Promise<void> {
+    await api.followupTask(id, content, mode);
     await loadTaskDetail(id);
   }
 
@@ -471,6 +529,7 @@ export const useTaskStore = defineStore('app.task', () => {
       taskCalls.value = [];
       callsSignature = contentSignature([]);
       clearAllLiveDeltas(); // 批次 R4:任务删除,其流式缓冲一并失效
+      persistCurrentTaskId(null); // 实跑问题 4:删除当前任务时同步清持久化选择
     }
   }
 
@@ -490,6 +549,8 @@ export const useTaskStore = defineStore('app.task', () => {
     loadTaskCalls,
     createTask,
     selectTask,
+    clearSelectedTask,
+    restoreSelectedTask,
     loadTaskDetail,
     runTask,
     stopTask,

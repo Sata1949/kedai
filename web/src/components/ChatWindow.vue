@@ -5,10 +5,10 @@ import { storeToRefs } from 'pinia';
 import { useAppStore } from '../store';
 import { renderScopedScripts, hasStatusPlaceholderScript, buildMessageRenderText } from '../render';
 import { installMvuGlobals } from '../mvu/host';
-import { ScriptRunner } from '../scriptRunner';
+import { ScriptRunner, type SandboxRpcExtensions } from '../scriptRunner';
 import { executeCurrentMessageScripts as scheduleCurrentMessageScripts } from '../chatMessageScriptScheduler';
 import { enabledCardScriptsOf } from '../cardScripts';
-import { cleanupCardScriptSandbox, ensureCardScriptSandbox } from '../cardScriptHost';
+import { cleanupCardScriptSandbox, ensureCardScriptSandbox, makeCardScriptRpcExtensions } from '../cardScriptHost';
 import { useVirtualMessages } from '../composables/useVirtualMessages';
 import { useResourceFrames } from '../composables/useResourceFrames';
 import type { UiMessage } from '../sseReducer';
@@ -72,21 +72,40 @@ function renderScriptsCached(
   text: string,
   scripts: Parameters<typeof renderScopedScripts>[1],
   scopeId: string,
+  depth: number,
 ): ReturnType<typeof renderScopedScripts> {
   if (scriptBlocksOwner !== messages.value || scriptBlocksScripts !== scripts) {
     scriptBlocksCache = new Map();
     scriptBlocksOwner = messages.value;
     scriptBlocksScripts = scripts;
   }
-  const key = `${scopeId}\n${currentScriptHash.value}\n${text}`;
+  // depth 参与缓存键:同一条消息在不同楼层深度下脚本适用性不同(实跑问题 7 R2)
+  const key = `${scopeId}\n${currentScriptHash.value}\n${depth}\n${text}`;
   const hit = scriptBlocksCache.get(key);
   if (hit !== undefined || scriptBlocksCache.has(key)) return hit ?? null;
-  // 流式消息恒为最新楼层(depth 0):带 min_depth 的远楼层脚本不应用于它
-  const scoped = renderScopedScripts(text, scripts, scopeId, 0, {
+  const scoped = renderScopedScripts(text, scripts, scopeId, depth, {
     charName: currentCharacter.value?.chara_name ?? currentCharacter.value?.name ?? '',
   });
   scriptBlocksCache.set(key, scoped);
   return scoped;
+}
+
+// 消息级沙箱只读 RPC 扩展(世界书读取 / 聊天消息读取),供首楼脚本获取聊天上下文。
+// 实跑问题 7 主因:此前不注入,数据 RPC 落到 DOM 白名单分发抛错 → 沙箱 cleanup
+// 摘除全部事件监听。复用卡级沙箱同一实现(opts 与卡级一致:一角色一内嵌世界书 +
+// 当前消息列表),不扩大写权限(消息级仍无世界书写入口)。
+function messageRpcExtensions(): SandboxRpcExtensions | undefined {
+  const id = currentCharacter.value?.id;
+  if (!id) return undefined;
+  const book = (currentCharacter.value?.data_raw as Record<string, unknown> | undefined)
+    ?.character_book as { name?: unknown } | undefined;
+  const lorebookName =
+    typeof book?.name === 'string' && book.name.trim() ? book.name : null;
+  return makeCardScriptRpcExtensions({
+    characterId: id,
+    lorebookName,
+    readMessages: () => messages.value,
+  });
 }
 
 // 脚本执行:非流式 assistant 消息渲染完成后,按 scopeId 定位容器并执行脚本
@@ -101,10 +120,12 @@ async function executeCurrentMessageScripts(): Promise<void> {
     initVarEntries: initVarEntries.value,
     mvuVariables: mvuVariables.value,
     charName: currentCharacter.value?.chara_name ?? currentCharacter.value?.name ?? '',
+    rpcExtensions: messageRpcExtensions(),
     isAuthorized: store.isCharacterScriptAuthorized,
     getScrollArea: () => scrollArea.value,
     afterRender: nextTick,
     renderText: renderTextFor,
+    depthOf: (_m, i, total) => total - 1 - i,
     renderScripts: renderScriptsCached,
     runMessageScripts: (...args) => scriptRunner.runMessageScripts(...args),
   });
@@ -203,7 +224,7 @@ watch(
 // 读写内嵌世界书(舰娘卡「随开场白切换世界书」)。只过 JS 授权门禁,不要求 renderHtml
 // 开关(它不是渲染)。键 = characterId:scriptHash(哈希含卡级脚本正文):换卡/卡更新
 // 脚本/授权变化→重建或销毁,由 ensureCardScriptSandbox 内部幂等处理。
-async function syncCardScriptSandbox(): Promise<void> {
+async function syncCardScriptSandbox(force = false): Promise<void> {
   const id = currentCharacterId.value;
   const authorized = currentScriptAuthorized.value;
   const hash = currentScriptHash.value;
@@ -230,11 +251,30 @@ async function syncCardScriptSandbox(): Promise<void> {
     container: scrollArea.value,
     lorebookName: typeof book?.name === 'string' && book.name.trim() ? book.name : null,
     readMessages: () => messages.value,
+    force,
   });
 }
 watch([currentCharacterId, currentScriptAuthorized, currentScriptHash], () => {
   void syncCardScriptSandbox();
 });
+
+// 实跑问题 7 R5:卡级脚本常在 boot 时扫描聊天历史注入界面。历史尚未就绪时启动会
+// 读到空列表且不再补跑 → 首屏空。这里在「历史首次变为非空」时为当前会话强制重建一次;
+// 会话切换后重置闩锁,下一次历史就绪同样补跑。
+let cardSandboxHistoryReady = false;
+watch(
+  () => `${currentSessionId.value ?? ''}\u0001${messages.value.length}`,
+  () => {
+    const hasHistory = messages.value.length > 0;
+    if (!hasHistory) {
+      cardSandboxHistoryReady = false;
+      return;
+    }
+    if (cardSandboxHistoryReady) return;
+    cardSandboxHistoryReady = true;
+    void syncCardScriptSandbox(true);
+  },
+);
 
 // ===== 多开场切换 =====
 /** 开场选择器:null=关闭;mode='new'=新建会话时选择开场,'switch'=当前会话内重置开场 */

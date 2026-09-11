@@ -42,8 +42,8 @@ const h = vi.hoisted(() => ({
   createTaskModes: [] as (string | undefined)[],
   /** approveTask 收到的 (id, plan) 参数序列(批次 4 批准断言用) */
   approveCalls: [] as Array<{ id: string; plan?: TaskStep[] }>,
-  /** followupTask 收到的 (id, content) 参数序列(批次 R2a 追加断言用) */
-  followupCalls: [] as Array<{ id: string; content: string }>,
+  /** followupTask 收到的 (id, content, mode) 参数序列(批次 R2a;R2b+ 扩 mode) */
+  followupCalls: [] as Array<{ id: string; content: string; mode?: string }>,
   /** planChatTask 收到的 (id, message) 参数序列(批次 R2b 规划对话断言用) */
   planChatCalls: [] as Array<{ id: string; message: string }>,
 }));
@@ -89,8 +89,8 @@ vi.mock('../api', async (importOriginal) => {
       h.approveCalls.push({ id, plan });
       return { ok: true };
     }),
-    followupTask: vi.fn(async (id: string, content: string) => {
-      h.followupCalls.push({ id, content });
+    followupTask: vi.fn(async (id: string, content: string, mode?: string) => {
+      h.followupCalls.push({ id, content, mode });
       return { ok: true };
     }),
     planChatTask: vi.fn(async (id: string, message: string) => {
@@ -539,9 +539,18 @@ describe('批次 4 六模式:taskRunMode / approveTask / 新事件分支', () =>
     await store.selectTask('t1');
     const baseDetail = h.detailFetchCount;
 
+    // 缺省 mode=append
     await store.followupTask('t1', '再补充一点秋色');
-    expect(h.followupCalls).toEqual([{ id: 't1', content: '再补充一点秋色' }]);
+    expect(h.followupCalls).toEqual([{ id: 't1', content: '再补充一点秋色', mode: 'append' }]);
     expect(h.detailFetchCount, '追加成功后应刷新详情(messages/result 随详情带出)').toBe(baseDetail + 1);
+
+    // replace 模式透传(2026-09-10 F5)
+    await store.followupTask('t1', '把全文压缩到 200 字', 'replace');
+    expect(h.followupCalls.at(-1)).toEqual({
+      id: 't1',
+      content: '把全文压缩到 200 字',
+      mode: 'replace',
+    });
   });
 
   it('planChatTask 透传 (id, message) 并在成功后刷新任务详情(批次 R2b)', async () => {

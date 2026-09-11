@@ -1,7 +1,7 @@
 # Kedai 维护指南(MAINTENANCE)
 
 > 面向后续维护者的技术文档。涵盖架构、构建、启动、API 契约、数据库、日志与已知坑位。
-> 版本:v0.2.0(前端 Vue3 + 后端 Rust + Tauri 桌面壳) 最后更新:2026-09-07
+> 版本:v0.2.0(前端 Vue3 + 后端 Rust + Tauri 桌面壳) 最后更新:2026-09-09
 
 ---
 
@@ -67,7 +67,7 @@ kedai/
 │       ├── sseReducer.ts       # SSE 事件纯函数(拆分自 store)
 │       ├── mvu/                # 前端 mvu 变量系统(parser/variables/host/mvuStore)
 │       └── components/         # Sidebar / ChatWindow / ChatInput / AgentDock / SettingsModal
-│           └── settings/       # 设置弹窗九 section(Api/Connection/GenParams/PromptInject/Agent/AgentFlow/PresetImportExport/DataManagement/Ui)
+│           └── settings/       # 设置弹窗十一 section(Api/Connection/GenParams/PromptInject/Agent/AgentFlow/PresetImportExport/DataManagement/Ui/Mcp/Embedding)
 ├── src-tauri/                  # Tauri 2 桌面壳:窗口加载 http://127.0.0.1:3001,进程内复用 run_server
 │   ├── src/lib.rs              # 数据目录注入(%APPDATA%\com.kedai.app)+ 服务自检/启动
 │   └── tauri.conf.json         # 窗口 1280×800、NSIS 打包、图标
@@ -103,7 +103,7 @@ kedai/
 | 一键构建 | `.\build.ps1` | **默认双端同步产出**:前端 web/dist + Rust release(测试版)+ 便携版;`-TestOnly` 仅测试版快速通道 `-Dev` debug 构建 `-NoWeb` 仅 Rust `-Tauri` 追加 NSIS 打包 |
 | 兼容别名 | `npm run build:all` / `npm run build:rs` | 均等价 `.\build.ps1`(双端同步);`npm run build:test` 等价 `.\build.ps1 -TestOnly` |
 | 统一改版本号 | `npm run version:bump -- x.y.z` | 7 处版本号一次改全(2 个 package.json、3 个 Cargo.toml、tauri.conf.json、本文档版本行);支持 `-DryRun` 预览 |
-| 后端测试 | `cd server-rs && cargo test` | 825 个测试(654 单测 + 171 集成,2026-09-08 实测),**需在 vcvars64 环境**;前端 `npm test -w web` 576 个(63 文件,2026-09-08 实测) |
+| 后端测试 | `cd server-rs && cargo test` | 825 个测试(654 单测 + 171 集成,2026-09-08 实测),**需在 vcvars64 环境**;前端 `npm test -w web` **663 个(67 文件,2026-09-11 实测)**;后端 lib 单测 **719 个(2026-09-11 实测)** |
 | 全量检查(本地 CI) | `npm run check` | `tools/check-all.ps1`:fmt → clippy → cargo test → vue-tsc(**硬门禁**,2026-09-08 起)→ vitest → vite build |
 | 开发模式 | `cd server-rs && cargo run` + `npm run dev -w web` | 后端 3001 / 前端 5173(代理到 3001) |
 | 前端构建 | `npm run build -w web` | 产出 web/dist(编译进 exe 用) |
@@ -123,6 +123,12 @@ kedai/
 | Rust 工具链 | 1.97.1 stable | `rustup`(本机经清华镜像安装) | rustup/cargo/rustc 在 `~/.cargo/bin`(可能不在 PATH,用全路径或加 PATH) |
 | VS2022 Build Tools | 17.14(C++ 工作负载) | winget | 提供 MSVC 链接器 `link.exe` 与 cl.exe(必需) |
 | Node.js | ≥ 18(验证 24) | 已有 | 仅前端构建需要;发布 exe 运行时**不需要** Node |
+
+### 原生依赖说明(Phase 3 起)
+
+| 依赖 | 形式 | 备注 |
+|---|---|---|
+| `sqlite-vec` 0.1.9 | C 源码静态编译(`cc` + `cl.exe`) | 记忆库向量检索的 `vec0` 虚拟表扩展;走 `sqlite3_auto_extension` 全局注册(`models/db/mod.rs::register_sqlite_vec`),产物仍为**单 exe**,便携版无需附带 dll。仅需已有 MSVC 工具链,不引入 cmake/clang/nasm。 |
 
 ### crates 国内镜像(已配置 `~/.cargo/config.toml`)
 
@@ -272,7 +278,7 @@ data: {"type":"finish","usage":{prompt_tokens,completion_tokens,total_tokens,con
 
 ## 7. 数据库(data/kedai.db)
 
-rusqlite(bundled,零原生依赖),**WAL 模式 + foreign_keys ON**。5 张表:
+rusqlite(bundled,零原生依赖),**WAL 模式 + foreign_keys ON**。共 28 张表(定义见 `server-rs/src/models/db/schema.rs`),核心表:
 
 | 表 | 关键字段/约束 |
 |---|---|
@@ -285,8 +291,13 @@ rusqlite(bundled,零原生依赖),**WAL 模式 + foreign_keys ON**。5 张表:
 | skills / agent_subtasks | 技能库 / Agent 子任务 |
 | session_vars / session_assistant_vars | 会话宏变量 / 酒馆助手变量树(stat_data) |
 | session_usage / global_usage | 会话级 / 全局 token 用量统计 |
+| tasks / task_subtasks / task_usage / task_llm_calls / task_messages | 任务模式:任务/子任务/token 用量/LLM 调用追踪/阶段消息 |
+| memory_entries | 跨会话记忆蒸馏条目(按角色维度,含 selected/pinned) |
+| scope_variables / backfill_meta | 7 作用域变量 / 增量回填游标 |
+| contract_changelog / kaleido_state / kaleido_changelog | 契约变更历史 / kaleido 状态与历史 |
+| llm_requests / session_compactions / undo_snapshots / user_scripts / quick_replies | LLM 请求缓存诊断 / 压缩记录 / 撤销快照 / 用户脚本 / 快速回复 |
 
-> 共 12 张表;迁移逻辑见 `server-rs/src/migration.rs`,表结构定义见 `server-rs/src/models/db.rs`。
+> 迁移逻辑见 `server-rs/src/migration/`(backup/conflict/ddl/merge/mod 目录模块),表结构定义见 `server-rs/src/models/db/`(mod/schema/backfill)。
 
 ### 维护注意
 
@@ -375,6 +386,8 @@ rusqlite(bundled,零原生依赖),**WAL 模式 + foreign_keys ON**。5 张表:
 13. **变量协议示例不要写进恒存在的 system 提示词**:`<UpdateVariable>` 输出协议示例只应由 `make_state_block` 在角色卡有变量树时注入。若把示例硬编码进默认/自定义 system 提示词,无变量树的普通卡也会看到协议:mock `[[floors]]` 回显 system 时示例会被 `parse_update_variable` 解析成真实补丁、空树建树并推送 vars 事件(曾有集成测试全红);真实场景下模型也可能模仿示例输出补丁、误激活变量系统。注意 `apply_mvu_patches` 允许空树建树(用户/模型显式输出补丁是合法语义,`pure_mvu_*` 测试依赖此行为),隔离靠「不暴露协议」而非「禁止空树应用」。
 14. **沙箱 realm 与酒馆不同:同卡脚本共享 window 需显式机制**(2026-09 修复记录,commit f2c10d1)。Kedai 每脚本一个不透明源 iframe,同卡多个 tavern_helper 脚本**互不可见 window 全局**——ST 生态脚本「th-A 挂 window.WuWaShared → th-B 读」的写法在这里会失效,直接裸读 `top`/`parent` 还抛 SecurityError(WuWa Solaris-3 卡崩溃根因)。两条通道(按需二选一,勿混):① **同卡同 realm**:卡级脚本已合并进单 iframe,靠逐 `<script>` 注入共享 window(web/src/cardScriptHost.ts + boot-script.ts 多段形态),同段组内的脚本可互读全局;② **跨 realm 共享桥**:不同沙箱(消息级脚本、不同时机起的卡级组)之间靠 shared-globals 快照桥(`web/src/sandbox/shared-globals.ts`),只同步合法键 + JSON 可序列化 ≤256KB 的 window 自有属性,函数/DOM 引用不共享(见 docs/known-limitations.md L5)。另:**运行期注入 `<style>` 会触发 dom-rpc 的声明级清洗 + 容器作用域化**——容器必须带 `data-kd-scope`(渲染块自带,卡级容器由 cardScriptHost 设 `cardScopeId`),否则样式段退回纯白名单仍被剥,界面裸渲染。
 15. **悬浮窗脚本依赖的 jQuery 面比想象宽**(2026-09 修复记录,commit 280e1cf)。WuWa 卡三个悬浮窗暴露了三类缺口,新增卡脚本报「悬浮球不显示/拖不动/切卡残留」时按此排查:① **jQuery UI `.draggable()` 沙箱没有**——th-5 无 `typeof` 守卫会直接 TypeError 中断整段脚本(连悬浮球都不挂);现在宿主侧 `web/src/sandbox/draggable.ts` 提供最小实现(handle/cancel/containment/distance + start/drag/stop 回调),能力边界见 known-limitations L6。② **`$('head')` 与 `.css({...})`**:`queryScoped` 只特判 body/html 时,`$('head').append('<style>…')` 零匹配静默丢失(面板失去 position:fixed/display:none → 落进消息流);`.css({k:v})` 对象形式若被当 getter 吞掉,`$('<div>').css({position:'fixed'})` 全部丢失;created 元素 `.attr('id',…)` 同理。③ **注入的 DOM 无人回收**:cleanup 原本只销毁 iframe/监听器/订阅,脚本 `$(window).on('unload')` 钩子在沙箱内静默失效 → 切卡后幽灵悬浮窗。现由 `data-kd-injected` 标记 + `data-kd-overlay-root` 覆层根统一清理;**capture 登记的监听器必须带 capture 摘除**(`removeEventListener` 的 capture 不匹配会摘不掉,拖拽中切卡残留 document 监听)。
+16. **改完必须重跑 `build.ps1` 才进 exe**(2026-09 实测八项修复复核)。`cargo test`/`npm run build` 只更新 `server-rs/target/` 与 `web/dist/`;`dist\kedai-server.exe`、`dist\Kedai-portable\Kedai.exe` 与项目根 `Kedai.exe` 都不会自动更新,交付前必须跑一次完整 `.\build.ps1`(前端 + release + 便携版 + 指纹 sidecar)。
+17. **16GB 内存 + 11GB 页面文件下禁止全并行 debug 链接**(2026-09 实测踩坑)。`cargo test`/`cargo build`(debug)全并行链接 `libkedai_server-*.rlib`(带 debuginfo 约 665MB)会触发 `os error 1455 页面文件太小`,rlib 被写坏后**后续所有编译持续报 E0786「invalid metadata files」**,表现为莫名其妙的全量失败。规避:`.shakedown/krun.bat` 已封装 `vcvars64 + CARGO_BUILD_JOBS=4 + debuginfo=0`;遇到 E0786 先删坏 rlib(`rm server-rs/target/debug/deps/libkedai_server-*.rlib`)再重建。**注意 release 构建(build.ps1)不受影响**(LTO + strip,产物小),但构建期间不要与前端 vitest/cargo test 并发跑,内存争用会让链接器崩(0xc0000409)。
 
 ---
 
@@ -386,7 +399,7 @@ cd server-rs && cargo test
 
 - 单元测试(源文件内 `#[test]`/`#[tokio::test]`,654 个,2026-09-08 实测):状态机迁移、planner(fast/deep/算式识别)、reflector(3 规则)、calculator(白名单解析)、censor(禁词同义替换)、token 编码映射与估算、工具注册表、世界书转换、世界书注入、提示词注入(含禁词库)、mvu 变量系统(含 JSONPatch 转义/reason/delta 容错)、EJS 渲染器(含读取 API 与 escape-ejs)、角色卡解析、正则脚本、@INJECT 解析/应用、GENERATE 注入、结构化错误码(api/errors.rs)
 - API 集成测试(`tests/` 18 个文件,171 个,mock 连接器 + 临时数据目录):api_integration、assistant、agent_flows、tasks、task_events、prompt_inject、world_books、settings_connector、security、contracts_e2e、scripts_e2e、scripts_import、swipe_regenerate、undo、user_scripts、variables_scopes、db_concurrency、macros——health、角色 CRUD(multipart 上传)、会话/消息/导入导出、设置与 token、agent plan、SSE 聊天流、任务引擎六模式、计算器工具 SSE、世界书/角色卡、提示词注入与酒馆预设导入、鉴权
-- 前端 `npm test -w web`(Vitest,576 个 / 63 文件,2026-09-08 实测):stores、api client(含 ApiError 错误码分类)、组件与 composables;类型门禁 `npm run typecheck -w web`(vue-tsc,**硬门禁**,存量 168 已于 2026-09-08 清偿归零,清偿记录见 docs/优化实施方案-2026-09.md 附录 D)
+- 前端 `npm test -w web`(Vitest,627 个 / 65 文件,2026-09-09 实测):stores、api client(含 ApiError 错误码分类)、组件与 composables;类型门禁 `npm run typecheck -w web`(vue-tsc,**硬门禁**,存量 168 已于 2026-09-08 清偿归零,清偿记录见 docs/优化实施方案-2026-09.md 附录 D)
 - 新增接口建议同步补集成测试;测试环境变量 `CONNECTOR=mock` 强制隔离
 
 ---
@@ -428,7 +441,7 @@ cd server-rs && cargo test
 
 ### 任务工作台(task)
 
-- 位置:`services/task_service.rs`(planning → running(逐步派子智能体)→ done)、`api/` 任务路由、`web/src/components/TaskBoard.vue` + `api/tasks.ts`。
+- 位置:`services/task_service/`(目录模块:mod/db/cancel/events/executor/parse/prompt,legacy 三段式 planning → running(逐步派子智能体)→ done)+ `services/task_engine/`(六模式底座:solo/multi/plan/team/custom,详见 [docs/任务引擎六模式.md](docs/任务引擎六模式.md))+ `api/` 任务路由 + `web/src/components/TaskBoard.vue` + `api/tasks.ts`。
 
 ### 上下文压缩(compaction)
 
@@ -438,15 +451,15 @@ cd server-rs && cargo test
 
 ### 缓存感知压缩管线(2026-08 新增)
 
-- 位置:`services/cache_diagnostics.rs`(命中率/费用/水位汇总)+ `api/diagnostics.rs`(`GET /api/diagnostics/cache`)+ `connectors/openai_compatible.rs`(usage 5 元组解析,DeepSeek `prompt_cache_hit_tokens` 优先、OpenAI `cached_tokens` 回退)。
+- 位置:`services/cache_diagnostics.rs`(命中率/费用/水位汇总)+ `api/diagnostics.rs`(`GET /api/diagnostics/cache`)+ `connectors/openai_compatible/`(目录模块:mod/retry/sse_parser/tests;usage 5 元组解析,DeepSeek `prompt_cache_hit_tokens` 优先、OpenAI `cached_tokens` 回退)。
 - 落库:`llm_requests` 表新增 usage 列(幂等迁移 `ensure_llm_requests_usage_columns`);轻量 usage 行恒落库,与请求快照开关解耦。
 - 前端:`components/CacheHealthPanel.vue` + `cacheHealth.ts`(「优化」弹窗内,缓存健康面板)。
 - 压缩升级:摘要槽独立(system → 摘要槽 → 记忆槽 → 历史,`messages/inject.rs` 的 `insert_summary_slot` / `insert_memory_slot`、`messages/trim.rs` 的 `protected_head_len`);摘要改追加式增量(旧段字节冻结);LLM 摘要前先 snip 超长陈旧工具结果(`compaction.rs` 的 `snip_tuples` / `should_snip`,错误特征保留、尾部 2 条原文保留);`compaction_keep_recent`(默认 4)与 `compaction_snip_bytes`(默认 8192)可配置。
 
 ### 跨会话记忆蒸馏(2026-08 新增)
 
-- 位置:`services/memory_service.rs`(distill_session 以闭包注入 LLM,mock 可测)+ `api/memory.rs`(list/upsert/delete/distill/select 五端点)+ `tools/memory.rs`(agent 主动写记忆落同表)。
-- 表:`memory_entries`(character_id 维度、kind CHECK distilled|tool|manual、usage_count、last_usage、selected、索引)。
+- 位置:`services/memory_service.rs`(distill_session 以闭包注入 LLM,mock 可测)+ `api/memory.rs`(distill/search/prune/list/create/update/delete 七端点)+ `tools/memory.rs`(agent 主动写记忆落同表)。
+- 表:`memory_entries`(character_id 维度、kind CHECK distilled|tool|manual、usage_count、last_usage、selected、pinned、索引)。
 - 注入:精选排序 usage_count DESC → last_usage DESC → id DESC,注入摘要槽之后的记忆槽;使用后在 step_loop 成功路径 touch。
 - 前端:`components/MemoryPanel.vue` + `memoryPanel.ts` + `composables/useMemoryPanel.ts`。
 

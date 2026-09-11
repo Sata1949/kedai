@@ -29,6 +29,7 @@ import {
   elementState,
   gatherControls,
   gatherIdMap,
+  type JqBinding,
   readScriptLocalStorage,
 } from './dom-rpc';
 
@@ -207,6 +208,8 @@ export async function executeSandboxedCharacterScript(
       listener: EventListener;
       capture?: boolean;
     }> = [];
+    // jQuery 事件绑定登记表(off() 真解绑所需;与 eventListeners 并行,后者供 cleanup)
+    const jqBindings: JqBinding[] = [];
     let targetId = 0;
     // 跨 realm 共享全局:同角色其余沙箱 publish 时实时推送本沙箱(全量快照);
     // cleanup 退订(挂在下方统一清理路径)
@@ -376,6 +379,8 @@ export async function executeSandboxedCharacterScript(
               // (消息级开场白沙箱借此读到卡级 realm 的 window.WuWaShared 等)
               context.sharedGlobals ??
                 (context.characterId ? getCardSharedGlobals(context.characterId) : {}),
+              // 表单控件快照:document.getElementById 门面读 select/input 真值的 boot 底
+              context.container ? gatherControls(context.container) : [],
             ),
           };
           if (utf8Bytes(boot) > MAX_MESSAGE_BYTES) throw new Error('角色卡脚本启动消息过大');
@@ -437,6 +442,7 @@ export async function executeSandboxedCharacterScript(
                 () => ++targetId,
                 (element: EventTarget, eventName, listener, capture?: boolean) =>
                   eventListeners.push({ element, eventName, listener, capture }),
+                jqBindings,
               );
             } catch (error) {
               iframe.contentWindow?.postMessage({

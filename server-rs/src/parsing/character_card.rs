@@ -2,7 +2,6 @@
 // 与 Node 版(png-chunks-extract + latin1)行为对齐
 use base64::Engine;
 use serde_json::Value;
-use std::io::Read;
 
 pub struct ParsedCard {
     /// 完整 V2 JSON 对象(含未知字段)
@@ -338,13 +337,6 @@ pub fn safe_file_name(name: &str) -> String {
             }
         })
         .collect()
-}
-
-/// 从任意 Reader 读取完整字节(用于上传)
-pub fn read_all<R: Read>(mut r: R) -> std::io::Result<Vec<u8>> {
-    let mut buf = Vec::new();
-    r.read_to_end(&mut buf)?;
-    Ok(buf)
 }
 
 #[cfg(test)]

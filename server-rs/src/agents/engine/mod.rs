@@ -194,6 +194,27 @@ impl AgentEngine {
             .clone()
     }
 
+    /// 记忆召回用的查询向量(Phase 3):embedding 未启用/未配置/调用失败一律返回 None,
+    /// 调用方据此降级为纯 Jaccard 召回——向量化是增强而非必需路径,绝不阻断对话。
+    async fn recall_query_vector(&self, req: &AgentRunRequest) -> Option<Vec<f32>> {
+        let settings = self.settings_snapshot();
+        if !settings.embedding_enabled || req.user_input.trim().is_empty() {
+            return None;
+        }
+        let svc = crate::services::embedding_service::EmbeddingService::new();
+        match svc.embed_one(&settings, &req.user_input).await {
+            Ok(v) if !v.is_empty() => Some(v),
+            Ok(_) => None,
+            Err(e) => {
+                tracing::warn!(
+                    error = e.to_string(),
+                    "记忆召回查询向量生成失败,降级为纯 Jaccard"
+                );
+                None
+            }
+        }
+    }
+
     /// 工具注册表全量定义(与聊天 agent 模式 GenerationParams.tools 同一来源;
     /// 任务引擎 solo 模式构建工具清单用,docs/任务引擎六模式.md 第三节)
     pub(crate) fn tool_definitions(&self) -> Vec<ToolDefinition> {
@@ -351,7 +372,16 @@ impl AgentEngine {
                 total_usage: &mut total_usage,
             };
             let ctx_data = self.collect_context(&req, &session_id, &mut rctx).await;
-            let memory_touched = self.finalize_messages(&req, &session_id, &ctx_data, &mut rctx);
+            // 记忆召回查询向量(Phase 3):在 async 上下文算好,传入同步的 finalize_messages。
+            // embedding 未启用或调用失败返回 None → 召回自动降级为纯 Jaccard。
+            let recall_query_vec = self.recall_query_vector(&req).await;
+            let memory_touched = self.finalize_messages(
+                &req,
+                &session_id,
+                &ctx_data,
+                &mut rctx,
+                recall_query_vec.as_deref(),
+            );
 
             let tool_ctx = ToolContext {
                 session_id: session_id.clone(),

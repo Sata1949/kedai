@@ -13,6 +13,16 @@ export async function testConnect(): Promise<{ ok: boolean; message: string; mod
   return request('/settings/connect', { method: 'POST', body: '{}' });
 }
 
+/** POST /api/settings/embedding/test:测试向量化连接(嵌入固定文本,回传实际维度与耗时) */
+export async function testEmbedding(): Promise<{
+  ok: boolean;
+  dim?: number;
+  latency_ms?: number;
+  message: string;
+}> {
+  return request('/settings/embedding/test', { method: 'POST', body: '{}' });
+}
+
 export async function settingsInfo(): Promise<ConnectorInfo> {
   return request('/settings/info');
 }

@@ -18,11 +18,11 @@
   - **内嵌插件识别**:打开「插件」窗口可查看当前角色卡内嵌插件(自动检测,含特性明细:初始变量/EJS 模板/变量系统/状态注入/输出协议),kedai 内置实现无需安装
 - 🤖 **Agent 引擎**
   - 状态机驱动:`planning → executing ⇄ tool_call → reflecting → finished`,全程可观测、可中断
-  - 两种模式:`fast`(单步直接生成)、`deep`(计划 → 执行 → 反思,质量更高)
+  - 四种模式:`fast`(单步直接生成)、`deep`(计划 → 执行 → 反思,质量更高)、`agent`(工具自循环)、`custom`(自定义流程)
   - 推理链通过 SSE 流式推送到前端,实时展示思考过程
 - 🗂️ **任务模式**(与角色扮演平级的顶层模式)
-  - 独立任务引擎:plan(LLM 拆解 2~5 步)→ execute(逐步派子任务)→ summarize(LLM 汇总),状态落 SQLite 三表(tasks/task_subtasks/task_usage),全程可中断、可重跑
-  - 进度经 **SSE 实时推送**(`GET /api/tasks/events`,任务生命周期事件 created/status/plan/subtask/usage/deleted),前端事件驱动刷新,无轮询;断线指数退避重连 + 低频兜底
+  - 独立任务引擎:六种运行模式(`legacy` 三段式 / `solo` / `multi` / `plan` / `team` / `custom`,见 [docs/任务引擎六模式.md](docs/任务引擎六模式.md));legacy 走 plan(LLM 拆解 2~5 步)→ execute(逐步派子任务)→ summarize(LLM 汇总),状态落 SQLite 五表(tasks/task_subtasks/task_usage/task_llm_calls/task_messages),全程可中断、可重跑
+  - 进度经 **SSE 实时推送**(`GET /api/tasks/events`,任务生命周期事件 created/status/plan/subtask/usage/llm_call/agent_status/approval_required/delta/deleted),前端事件驱动刷新,无轮询;断线指数退避重连 + 低频兜底
   - 提示词与角色扮演模式**类型级隔离、按模式独立存储互不影响**,外部文本统一 `<UNTRUSTED_PROMPT_SOURCE>` 边界包裹;机制详见 [docs/模式提示词边界.md](docs/模式提示词边界.md) 与 [docs/任务模式重构-变更说明.md](docs/任务模式重构-变更说明.md)
 - 🧠 **上下文工程**(提示词缓存友好)
   - **缓存感知压缩**:每轮 LLM usage(含 DeepSeek `prompt_cache_hit_tokens` / OpenAI `cached_tokens`)落库,`GET /api/diagnostics/cache` 报告命中率、费用估算与四级水位(soft/snip/compact/force);前端「优化」弹窗内置缓存健康面板
@@ -146,7 +146,7 @@ kedai/
 │       ├── api/            # REST + SSE 流式客户端(按域拆分)
 │       ├── stores/         # Pinia 七子 store(chat/character/modelConn/...),store.ts 门面聚合
 │       ├── mvu/            # 变量系统 + mini-jquery 沙箱
-│       └── components/     # Sidebar / ChatWindow / TaskBoard / AgentPanel + 13 弹窗
+│       └── components/     # Sidebar / ChatWindow / TaskBoard / AgentPanel + 12 弹窗
 ├── docs/                   # 协议锁定文档(活文档)与过程交接文档,索引见 docs/README.md
 ├── tools/make-icons.ps1    # 品牌图标生成(圆角 + 透明背景)
 ├── launcher/               # 图形启动器源码(双击正式入口,产物为项目根 Kedai.exe)
@@ -195,8 +195,18 @@ kedai/
 | PUT/DELETE | `/api/world-books/{id}` | 更新(启用/绑定/改名)/删除世界书 |
 | GET | `/api/world-books/{id}/entries` | 世界书条目预览 |
 | POST | `/api/agent/plan` | 预览行动计划(不执行) |
-| POST | `/api/agent/execute` | 手动执行步骤 |
+| POST | `/api/agent/execute` | 手动执行步骤(历史桩,返回 501) |
 | POST | `/api/agent/interrupt` | 中断 Agent |
+| GET/POST | `/api/tasks` | 任务列表/新建任务 |
+| GET/DELETE | `/api/tasks/{id}` | 任务详情/删除 |
+| POST | `/api/tasks/{id}/run`\|`stop`\|`approve`\|`followup`\|`plan-chat` | 运行/停止/批准/追问/计划对话 |
+| GET | `/api/tasks/{id}/calls` | 任务 LLM 调用追踪 |
+| GET | `/api/tasks/events` | **任务事件 SSE 流**(取代轮询) |
+| GET | `/api/tasks/usage-total` | 任务 token 用量汇总 |
+| GET/POST/PATCH/DELETE | `/api/memory*` | 记忆库列表/蒸馏/检索/精简/新增/编辑/删除(七端点) |
+| GET/PUT/DELETE | `/api/plugins/tools*` | 自定义工具插件管理 |
+| GET/POST/PUT/DELETE | `/api/skills*` | 技能库管理 |
+| GET | `/api/repo-index` | 仓库索引(开发辅助) |
 
 ### SSE 事件格式
 
@@ -212,12 +222,12 @@ data: {"type":"tool_result","name":"calculator","output":{"result":408}}
 data: {"type":"finish","usage":{"prompt_tokens":166,"completion_tokens":35,"total_tokens":201,"context_tokens":490},"content":"…"}
 ```
 
-事件类型:`token`(文本片段)、`step`(Agent 步骤)、`tool_call`/`tool_result`(工具调用)、`interrupted`(中断)、`finish`(结束,含 usage)。
+事件类型:`token`(文本片段)、`step`(Agent 步骤)、`tool_call`/`tool_result`(工具调用)、`tool_authorization_required`(工具未获授权,前端提供授权入口)、`vars`(变量树同步)、`interrupted`(中断)、`error`(错误终态,含 code/message/retryable)、`finish`(结束,含 usage)、`task`(任务模式事件)。
 
 ## 世界书(World Info)
 
 - **来源**:两种——独立上传(SillyTavern 导出格式,顶层 `entries` 对象/数组)与角色卡内嵌 `character_book.entries`(兼容 V2 顶层与 V3 `data.character_book` 两种布局)。
-- **注入规则**:常驻条目(`constant=true`,启用的)始终注入;非常驻条目按 `keys` 对最近 6 条用户消息做大小写不敏感子串匹配,或按条目 `regex`+`use_regex` 做正则匹配(优先于 keys),命中才注入;`enabled=false` / 非常驻且无 key 无 regex 的条目跳过。
+- **注入规则**:常驻条目(`constant=true`,启用的)始终注入;非常驻条目按 `keys` 对最近 `depth` 条用户消息做大小写不敏感子串匹配(`depth` 缺省 4,0 = 全部历史),或按条目 `regex`+`use_regex` 做正则匹配(优先于 keys),命中才注入;`enabled=false` / 非常驻且无 key 无 regex 的条目跳过。
 - **自动转换**:上传(独立世界书与角色卡内嵌)时自动规范化酒馆变体——关键词兼容 `keys/key/keywords/keyword` 字段名与逗号分隔字符串、`constant` 兼容字符串/数字形态并支持缺失时自动判定(无关键词无正则 → 常驻)、`role` 缺失即「自动」(按 常驻→system、激发→user 分配)。上传响应附带转换统计 `conversion`。
 - **自动分配机制自检**:世界书窗口「检查自动分配机制」按钮(或 `GET /api/world-books/auto-assign-check`)可一键验证条目解析、属性自动分配、转换链路是否可用。
 - **管理**:侧边栏「世界书」按钮打开管理界面——上传、查看条目(含正则标记)、绑定角色(空=全局)、启用/停用、删除。
@@ -257,7 +267,7 @@ data: {"type":"finish","usage":{"prompt_tokens":166,"completion_tokens":35,"tota
 cd server-rs
 cargo test          # 单元测试 + API 集成测试(825 个:654 单测 + 171 集成,2026-09-08 实测)
 cd web
-npm test            # Vitest 前端测试(527 个)
+npm test            # Vitest 前端测试(627 个 / 65 文件,2026-09-09 实测)
 npm run typecheck   # vue-tsc 模板/脚本类型检查
 npm run check       # 仓库根:一键全量检查(tools/check-all.ps1)
 ```
@@ -271,14 +281,15 @@ npm run check       # 仓库根:一键全量检查(tools/check-all.ps1)
 - [ ] Oobabooga / KoboldAI 连接器适配
 - [x] 智能上下文压缩(可逆投影 + LLM 摘要,manual/auto 模式,`/api/chat/compact`)
 - [x] 缓存感知压缩管线(usage 落库 + 四级水位诊断 `/api/diagnostics/cache` + 摘要槽增量化 + snip 零成本裁剪)
-- [x] 跨会话记忆蒸馏(`memory_entries` 表 + `/api/memory/*` 五端点 + 记忆库面板)
+- [x] 跨会话记忆蒸馏(`memory_entries` 表 + `/api/memory/*` 七端点 + 记忆库面板)
 - [x] 技能渐进披露(name+description 预载,正文按需加载)与子代理调度守卫(深度/并发/结果截断可配置)
 - [x] 任务模式全面重构(task_service 目录模块化 + 状态枚举化 + 任务事件 SSE 实时推送取代轮询 + 提示词管线整合与双模式提示词类型级隔离,见 [docs/任务模式重构-变更说明.md](docs/任务模式重构-变更说明.md))
-- [ ] LLM 原生 function calling 全链路
+- [x] 三档授权模式(严格/宽松/放行,按「操作类型 × 路径区域」判定;任务模式工具策略 `task_tool_policy`;授权管理面板可查看并撤销已授权限;见 [docs/授权模式.md](docs/授权模式.md))
+- [x] LLM 原生 function calling 全链路(角色扮演 agent/custom 与任务六模式均下发工具定义)
 - [x] 自定义工具注册(`<数据目录>/plugins/tools/*.json` 白名单脚本工具)
 - [ ] 工具执行沙箱隔离
 - [ ] 知识库向量检索工具
-- [ ] SettingsModal.vue 拆分(已 81KB;SettingsHub + composables 拆分进行中)
+- [x] SettingsModal.vue 拆分(5.8KB 薄壳;SettingsHub + components/settings/ 十 section + composables)
 
 ## 示例模板(Skill 与工具插件)
 

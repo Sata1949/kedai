@@ -18,8 +18,9 @@ const store = useAppStore();
 // 生成参数直接绑定 store(storeToRefs),与 useGenerationParams 内部保存逻辑读写同一 store
 const {
   temperature, topP, maxTokens, maxContextTokens, maxToolRounds,
+  toolHistoryKeepRounds, toolHistoryBudgetTokens,
   compactionMode, compactionThreshold, compactionKeepRecent, compactionSnipBytes,
-  memoryDistillEnabled, memoryInjectLimit,
+  memoryDistillEnabled, memoryInjectLimit, memoryInjectCharBudget, memoryMaxEntries,
   subagentMaxDepth, subagentMaxConcurrency, subagentResultMaxChars,
 } = storeToRefs(store);
 
@@ -27,6 +28,8 @@ const { tempLabel, topPLabel, ctxLabel, saveParams, paramsMsg, saveParamsNow } =
 
 onMounted(() => {
   maxToolRounds.value = maxToolRounds.value ?? 32;
+  toolHistoryKeepRounds.value = toolHistoryKeepRounds.value ?? 4;
+  toolHistoryBudgetTokens.value = toolHistoryBudgetTokens.value ?? 16384;
 });
 </script>
 
@@ -91,6 +94,32 @@ onMounted(() => {
           title="AGENT/CUSTOM 模式工具循环轮次上限(每轮可执行多个工具调用;默认 32)"
         />
         <span class="sv-note">AGENT/CUSTOM 工具循环轮次上限(1-200,默认 32)</span>
+      </div>
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">工具历史保留轮数</label>
+        <input
+          v-model.number="toolHistoryKeepRounds"
+          type="number"
+          min="1"
+          max="32"
+          step="1"
+          class="sv-input inject-num"
+          title="工具循环历史保留的最近完整轮数;超出后最老轮的 tool 结果原地替换为摘要,防止上下文无界膨胀"
+        />
+        <span class="sv-note">最近完整保留轮数(1-32,默认 4;超出部分摘要化)</span>
+      </div>
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">工具历史 token 预算</label>
+        <input
+          v-model.number="toolHistoryBudgetTokens"
+          type="number"
+          min="0"
+          max="1048576"
+          step="1024"
+          class="sv-input inject-num"
+          title="工具循环历史 token 预算;估算超预算时从最老完整轮起继续摘要,保底最近 1 轮完整。0 = 禁用预算闸门"
+        />
+        <span class="sv-note">0 = 禁用;否则 1024-1048576(默认 16384)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">压缩模式</label>
@@ -162,6 +191,32 @@ onMounted(() => {
           title="每次注入提示词的记忆条数上限(0-50;0 = 不注入,默认 8,越界由后端钳回默认)"
         />
         <span class="sv-note">注入提示词的记忆条数上限(0-50,默认 8)</span>
+      </div>
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">记忆字符预算</label>
+        <input
+          v-model.number="memoryInjectCharBudget"
+          type="number"
+          min="0"
+          max="20000"
+          step="100"
+          class="sv-input inject-num"
+          title="每次注入的记忆内容总字符预算(0-20000;0 = 不限制,默认 2000):按精选排序累积到预算即停"
+        />
+        <span class="sv-note">注入记忆的字符预算(0-20000,0 = 不限制,默认 2000)</span>
+      </div>
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">记忆容量上限</label>
+        <input
+          v-model.number="memoryMaxEntries"
+          type="number"
+          min="0"
+          max="10000"
+          step="10"
+          class="sv-input inject-num"
+          title="每角色记忆容量上限(0-10000;0 = 不淘汰,默认 200):超出后最低分条目置为已归档(不删除)"
+        />
+        <span class="sv-note">每角色记忆条数上限(0-10000,0 = 不限制,默认 200)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">子代理深度</label>

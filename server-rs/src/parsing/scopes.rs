@@ -96,10 +96,6 @@ impl ScopeVars {
         self.character_scope_id = id;
     }
 
-    pub fn set_preset_scope_id(&mut self, id: Option<String>) {
-        self.preset_scope_id = id;
-    }
-
     /// 当前消息作用域 id(供脚本桥读取;None 表示未指定)
     pub fn message_scope_id(&self) -> Option<&str> {
         self.message_scope_id.as_deref()

@@ -15,18 +15,11 @@ use tokio::sync::mpsc;
 
 use super::agent_tools::ToolDeps;
 
-/// 子 agent 工具白名单(批次 4.3b):读/搜索类安全工具;写类(write/replace/create/
-/// memory_write/update_variables)与编排类(agentgo/agentend——嵌套派发由深度守卫
-/// 与白名单双重排除;子 agent 不得再派子 agent)一律剔除。
-/// 语义:Some(&[...]) 显式列举,同时作为 run_tool_loop 的 step_whitelist 自动放行。
-const SUBAGENT_TOOL_WHITELIST: &[&str] = &[
-    "read",
-    "search",
-    "todo",
-    "sleep",
-    "calculator",
-    "memory_read",
-];
+// 子 agent 工具白名单(批次 4.3b):读/搜索类安全工具;写类(write/replace/create/
+// memory_write/update_variables)与编排类(agentgo/agentend——嵌套派发由深度守卫
+// 与白名单双重排除;子 agent 不得再派子 agent)一律剔除。
+// 常量本体在 `tools::tool_sets::SUBAGENT`(单一出处);语义:显式列举,
+// 同时作为 run_tool_loop 的闸门名单自动放行。
 
 // ==================== agentgo:排出子智能体(后台异步,read/todo 轮询) ====================
 pub(super) fn register_agentgo(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
@@ -197,7 +190,7 @@ async fn run_subtask(
     deps.subtasks.unregister_cancel(&task_id);
 }
 
-/// 子 agent 工具化路径:run_tool_loop + SUBAGENT_TOOL_WHITELIST 白名单。
+/// 子 agent 工具化路径:run_tool_loop + tool_sets::SUBAGENT 白名单(经 ToolGate::listed)。
 /// 事件出口:任务模式经任务事件桥(sink)发 agent_status;聊天路径丢弃
 ///(子任务原本不产生用户可见事件;drain 必须持续消费,rx 关闭会让引擎置 abort)。
 #[allow(clippy::too_many_arguments)]
@@ -218,16 +211,19 @@ async fn run_subtask_with_tools(
     use crate::agents::engine::AbortFlag;
     use crate::agents::state_machine::StateMachine;
 
-    // 白名单 ∩ 已注册工具(防御插件卸载等运行期变化)
-    let whitelist: Vec<String> = SUBAGENT_TOOL_WHITELIST
+    // 白名单 ∩ 已注册工具(防御插件卸载等运行期变化);
+    // 白名单常量单一出处见 tools::tool_sets::SUBAGENT
+    let whitelist: Vec<String> = crate::tools::tool_sets::SUBAGENT
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let tools: Vec<ToolDefinition> = engine
-        .tool_definitions()
-        .into_iter()
-        .filter(|d| whitelist.iter().any(|w| w == &d.name))
-        .collect();
+    let tools: Vec<ToolDefinition> = crate::tools::tool_sets::filter_by_const(
+        engine.tool_definitions(),
+        crate::tools::tool_sets::SUBAGENT,
+    );
+    // 子 agent 恒自动放行白名单工具(名单内视为已授权,与改造前一致);
+    // 名单外(模型臆造调用)立即拒绝——子 agent 无 UI 授权上下文。
+    let gate = crate::agents::engine::executor::ToolGate::listed(&whitelist);
     // 设置快照:不留锁跨 await
     let max_rounds = deps.settings_snapshot().max_tool_rounds;
     let params = GenerationParams {
@@ -283,7 +279,7 @@ async fn run_subtask_with_tools(
         &flag,
         &mut total_usage,
         &run_id,
-        Some(&whitelist),
+        gate,
     )
     .await;
     drop(tx);
@@ -319,6 +315,8 @@ async fn run_subtask_with_tools(
                     std::time::Duration::ZERO,
                     "error",
                 );
+                // 补落被截断那次调用的 usage(2026-09-10 实测修复,口径同 solo.rs)
+                svc.record_usage(tid, "subagent", None, &heal_out);
             }
         }
         let (response, out, status) = match &result {
@@ -467,19 +465,15 @@ pub(super) fn truncate_subtask_result_for_test(deps: &ToolDeps, content: &str) -
     truncate_subtask_result(deps, content)
 }
 
-/// 常驻世界书文本(子任务上下文用:constant 且启用)
+/// 常驻世界书文本(子任务上下文用:constant 且启用)。
+/// 过滤/排序/格式化统一走 prompt_kit 共享原语,勿在此复制实现(AGENTS.md 明文纪律)。
 fn collect_constant_world_text(deps: &ToolDeps, character_id: &str) -> String {
     let mut entries: Vec<crate::parsing::world_book::WorldEntry> = Vec::new();
     if let Some(raw) = deps.characters.get(character_id).and_then(|c| c.data_raw) {
         entries.extend(crate::parsing::world_book::character_book_entries(&raw));
     }
     entries.extend(deps.world_books.collect_entries_for_character(character_id));
-    entries
-        .iter()
-        .filter(|e| e.enabled && e.constant && !e.content.trim().is_empty())
-        .map(|e| format!("[{}]\n{}", e.comment, e.content.trim()))
-        .collect::<Vec<_>>()
-        .join("\n\n")
+    crate::services::prompt_kit::constant_world_body(&entries)
 }
 
 // ==================== sleep:等待 ====================

@@ -21,8 +21,8 @@ mod trim;
 pub(super) use build::build_llm_messages_with_position;
 pub(super) use context::CollectedCtx;
 pub(super) use inject::{
-    apply_inject_insertions, inject_reflect_advice, insert_memory_slot, insert_summary_slot,
-    parse_inject_insertion, InjectAt, InjectInsertion,
+    append_memory_notice, apply_inject_insertions, inject_reflect_advice, insert_memory_slot,
+    insert_recall_slot, insert_summary_slot, parse_inject_insertion, InjectAt, InjectInsertion,
 };
 pub(super) use steps::{retreat_to_generating_step, step_params_for, with_step_prompt};
 pub(super) use trim::{trim_to_context, trim_tool_history, TOOL_HISTORY_SUMMARY_PREFIX};

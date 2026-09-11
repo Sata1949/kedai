@@ -7,9 +7,11 @@ use std::path::Path;
 use super::connection::DEFAULT_SEARCH_ENDPOINT;
 use super::params::{
     default_compaction_keep_recent, default_compaction_mode, default_compaction_snip_bytes,
-    default_compaction_threshold, default_memory_inject_limit, default_subagent_max_concurrency,
-    default_subagent_max_depth, default_subagent_result_max_chars,
-    default_tool_history_budget_tokens, default_tool_history_keep_rounds,
+    default_compaction_threshold, default_memory_inject_char_budget, default_memory_inject_limit,
+    default_memory_max_entries, default_subagent_max_concurrency, default_subagent_max_depth,
+    default_subagent_result_max_chars, default_task_tool_policy,
+    default_tool_authorization_timeout_secs, default_tool_history_budget_tokens,
+    default_tool_history_keep_rounds, migrate_authorization_mode,
 };
 use super::RuntimeSettings;
 
@@ -20,6 +22,31 @@ impl RuntimeSettings {
         let path = data_dir.join("settings.json");
         if let Ok(text) = std::fs::read_to_string(&path) {
             if let Ok(mut s) = serde_json::from_str::<RuntimeSettings>(&text) {
+                // 授权模式迁移(批次授权改造):旧配置只有 bypass_mode 布尔值,没有
+                // authorization_mode 键。按旧值映射:true → Bypass(旧「除黑名单外全放行」),
+                // false → Strict(旧「非安全工具都需授权」最贴近且更安全)。
+                // 判据用原始 JSON 是否含该键,避免覆盖新装默认(loose)与用户已写值。
+                if !text.contains("\"authorization_mode\"") {
+                    s.authorization_mode = migrate_authorization_mode(s.bypass_mode);
+                }
+                // 旧「放行模式黑名单」默认值是四个不存在的工具名,迁移为空的
+                // 「始终需授权」清单;仅当内容全是旧假名时清空,保留用户自定义项。
+                let legacy_fake = ["delete_file", "format_disk", "modify_system", "registry_write"];
+                if !s.bypass_blacklist.is_empty()
+                    && s.bypass_blacklist
+                        .iter()
+                        .all(|n| legacy_fake.contains(&n.as_str()))
+                {
+                    s.bypass_blacklist.clear();
+                }
+                // 授权等待超时钳制 30..=1800 秒(越界回退默认,防 0 秒立即超时或长挂)
+                if !(30..=1800).contains(&s.tool_authorization_timeout_secs) {
+                    s.tool_authorization_timeout_secs = default_tool_authorization_timeout_secs();
+                }
+                // 任务工具策略仅接受三值,非法回退默认(与 API 校验同规则)
+                if !matches!(s.task_tool_policy.as_str(), "all" | "deny_dangerous" | "allowlist") {
+                    s.task_tool_policy = default_task_tool_policy();
+                }
                 // 旧版 settings.json 无 search_endpoint:回退默认搜索端点
                 if s.search_endpoint.trim().is_empty() {
                     s.search_endpoint = DEFAULT_SEARCH_ENDPOINT.to_string();
@@ -59,6 +86,19 @@ impl RuntimeSettings {
                 if s.memory_inject_limit > 50 {
                     s.memory_inject_limit = default_memory_inject_limit();
                 }
+                // 记忆槽字符预算钳制到 0..=20000(0 = 不限制;升级工作流 B2)
+                if s.memory_inject_char_budget > 20_000 {
+                    s.memory_inject_char_budget = default_memory_inject_char_budget();
+                }
+                // 每角色记忆容量上限钳制到 0..=10000(0 = 不淘汰;升级工作流 B3)
+                if s.memory_max_entries > 10_000 {
+                    s.memory_max_entries = default_memory_max_entries();
+                }
+                // embedding 向量维度钳制:0 = 未探测(首次调用回填),否则 16..=8192;
+                // 越界视为异常配置回退 0,由下次测试连接重新探测
+                if s.embedding_dim != 0 && !(16..=8192).contains(&s.embedding_dim) {
+                    s.embedding_dim = 0;
+                }
                 // 落地项 3:子智能体调度参数钳制(深度 1..=4 / 并发 1..=16 / 结果 500..=8000,
                 // 越界回退默认;渐进披露开关为 bool 无需钳制)
                 if !(1..=4).contains(&s.subagent_max_depth) {
@@ -90,8 +130,14 @@ impl RuntimeSettings {
                 let was_plaintext =
                     !s.openai_api_key.is_empty() && !secret_store::is_protected(&s.openai_api_key);
                 s.openai_api_key = secret_store::unprotect(&s.openai_api_key);
+                // embedding Key 同策略:解密到内存;旧版明文在下方统一触发一次写回迁移
+                let embedding_was_plaintext = !s.embedding_api_key.is_empty()
+                    && !secret_store::is_protected(&s.embedding_api_key);
+                s.embedding_api_key = secret_store::unprotect(&s.embedding_api_key);
                 // 旧版明文配置:立即重写为密文(一次性迁移,失败仅告警不影响启动)
-                if was_plaintext && !s.openai_api_key.is_empty() {
+                if (was_plaintext && !s.openai_api_key.is_empty())
+                    || (embedding_was_plaintext && !s.embedding_api_key.is_empty())
+                {
                     if let Err(e) = s.save(data_dir) {
                         eprintln!("[settings] API Key 加密迁移写回失败(下次保存设置时重试):{e}");
                     } else {
@@ -112,6 +158,7 @@ impl RuntimeSettings {
         // 仅持久化副本加密,不改动内存中的明文 Key(连接器仍需直接使用)
         let mut persisted = self.clone();
         persisted.openai_api_key = secret_store::protect(&self.openai_api_key)?;
+        persisted.embedding_api_key = secret_store::protect(&self.embedding_api_key)?;
         let text = serde_json::to_string_pretty(&persisted).map_err(|e| e.to_string())?;
         crate::utils::fs_atomic::write_atomic(&data_dir.join("settings.json"), text.as_bytes())
             .map_err(|e| e.to_string())

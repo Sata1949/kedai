@@ -1,11 +1,12 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { useMemoryPanel } from './useMemoryPanel';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { nextTick } from 'vue';
+import { SEARCH_DEBOUNCE_MS, useMemoryPanel } from './useMemoryPanel';
 import * as api from '../api';
 import { resetApiTokenForTest } from '../api/client';
 
 // 记忆库面板交互测试:直调 useMemoryPanel composable(纯 TS,无组件实例依赖),
-// 覆盖蒸馏 / 手动添加 / 行内编辑 / 注入开关 / 删除两段式确认的请求与状态反馈。
-// 渲染断言在 components/MemoryPanelUi.test.ts(SSR 通道)。
+// 覆盖蒸馏 / 手动添加 / 行内编辑 / 注入与置顶开关 / 删除两段式确认 / 搜索防抖 /
+// 清理归档的请求与状态反馈。渲染断言在 components/MemoryPanelUi.test.ts(SSR 通道)。
 
 /** 样例条目(与 api/memory.test.ts 同源字段) */
 function memEntry(overrides: Partial<api.MemoryEntry> = {}): api.MemoryEntry {
@@ -18,6 +19,7 @@ function memEntry(overrides: Partial<api.MemoryEntry> = {}): api.MemoryEntry {
     usage_count: 3,
     last_usage: '2026-08-15T10:30:00Z',
     selected: true,
+    pinned: false,
     created_at: '2026-08-14T08:00:00Z',
     updated_at: '2026-08-15T10:30:00Z',
     ...overrides,
@@ -60,6 +62,10 @@ function requestOf(calls: Array<[unknown, ...unknown[]]>, index: number): { url:
 beforeEach(() => {
   resetApiTokenForTest();
   vi.restoreAllMocks();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe('useMemoryPanel(加载)', () => {
@@ -225,6 +231,230 @@ describe('useMemoryPanel(行内编辑 content)', () => {
     p.cancelEdit();
     expect(p.editingId.value).toBeNull();
     expect(spy.mock.calls).toHaveLength(2);
+  });
+});
+
+describe('useMemoryPanel(搜索防抖与筛选)', () => {
+  it('空查询回退全量 listMemories;query 非空时防抖 250ms 后走 /memory/search', async () => {
+    vi.useFakeTimers();
+    const spy = mockFetch(
+      { body: { memories: sampleList() } }, // 初始 load
+      { body: { memories: [memEntry({ id: 9, content: '薄荷茶' })] } }, // 搜索
+    );
+    const p = mountPanel();
+    await p.load();
+    expect(requestOf(spy.mock.calls as Array<[unknown, ...unknown[]]>, 1).url).toBe(
+      '/api/memory?character_id=charA',
+    );
+
+    p.query.value = '薄荷';
+    await nextTick(); // 等 watch 回调入队
+    expect(spy.mock.calls).toHaveLength(2); // 防抖期内不发请求
+
+    await vi.advanceTimersByTimeAsync(SEARCH_DEBOUNCE_MS);
+    const search = requestOf(spy.mock.calls as Array<[unknown, ...unknown[]]>, 2);
+    expect(search.url).toBe('/api/memory/search?character_id=charA&q=%E8%96%84%E8%8D%B7&limit=20');
+    expect(p.rows.value.map((r) => r.id)).toEqual([9]);
+    expect(p.searching.value).toBe(false);
+  });
+
+  it('连续输入只发一次请求(防抖重置)', async () => {
+    vi.useFakeTimers();
+    const spy = mockFetch(
+      { body: { memories: sampleList() } },
+      { body: { memories: [] } },
+    );
+    const p = mountPanel();
+    await p.load();
+
+    p.query.value = '薄';
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(100);
+    p.query.value = '薄荷';
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(100);
+    p.query.value = '薄荷茶';
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(SEARCH_DEBOUNCE_MS);
+
+    expect(spy.mock.calls).toHaveLength(3); // bootstrap + 初始 load + 一次搜索
+    expect(String(spy.mock.calls[2][0])).toContain('q=%E8%96%84%E8%8D%B7%E8%8C%B6');
+  });
+
+  it('清空查询回退全量列表(防抖后再次 GET /api/memory)', async () => {
+    vi.useFakeTimers();
+    const spy = mockFetch(
+      { body: { memories: sampleList() } },
+      { body: { memories: [memEntry({ id: 9 })] } },
+      { body: { memories: sampleList() } },
+    );
+    const p = mountPanel();
+    await p.load();
+    p.query.value = '薄荷';
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(SEARCH_DEBOUNCE_MS);
+    p.query.value = '';
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(SEARCH_DEBOUNCE_MS);
+
+    expect(requestOf(spy.mock.calls as Array<[unknown, ...unknown[]]>, 3).url).toBe(
+      '/api/memory?character_id=charA',
+    );
+    expect(p.rows.value).toHaveLength(3);
+  });
+
+  it('搜索失败:error 文案带「搜索失败」前缀', async () => {
+    vi.useFakeTimers();
+    mockFetch(
+      { body: { memories: sampleList() } },
+      { body: { error: '缺少 q' }, status: 400 },
+    );
+    const p = mountPanel();
+    await p.load();
+    p.query.value = '薄荷';
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(SEARCH_DEBOUNCE_MS);
+    expect(p.error.value).toBe('搜索失败:缺少 q');
+  });
+
+  it('searchNow 立即检索并取消待执行的防抖;setKindFilter 纯本地过滤不发请求', async () => {
+    vi.useFakeTimers();
+    const spy = mockFetch(
+      { body: { memories: sampleList() } },
+      { body: { memories: [memEntry({ id: 9, kind: 'manual' })] } },
+    );
+    const p = mountPanel();
+    await p.load();
+    p.query.value = '薄荷';
+    await nextTick();
+    await p.searchNow(); // 不等防抖,直接发
+    expect(spy.mock.calls).toHaveLength(3);
+    await vi.advanceTimersByTimeAsync(SEARCH_DEBOUNCE_MS * 2);
+    expect(spy.mock.calls).toHaveLength(3); // 防抖已被取消,无重复请求
+
+    p.setKindFilter('tool');
+    expect(p.kindFilter.value).toBe('tool');
+    expect(p.shownRows.value).toEqual([]); // 搜索结果只有 manual,被本地筛掉
+    expect(spy.mock.calls).toHaveLength(3);
+  });
+});
+
+describe('useMemoryPanel(置顶 pinned)', () => {
+  it('置顶:PATCH /api/memory/:id 仅携带 pinned,成功本地更新并重排到最前', async () => {
+    const spy = mockFetch(
+      { body: { memories: sampleList() } },
+      { body: { ok: true, memory: memEntry({ id: 7, pinned: true }) } },
+    );
+    const p = mountPanel();
+    await p.load();
+    // rows 按 id 降序:rows[0] = id 9(manual)
+    const target = p.rows.value.find((r) => r.id === 7)!;
+    await p.togglePinned(target);
+    const patch = requestOf(spy.mock.calls as Array<[unknown, ...unknown[]]>, 2);
+    expect(patch.url).toBe('/api/memory/7');
+    expect(patch.init.method).toBe('PATCH');
+    expect(JSON.parse(String(patch.init.body))).toEqual({ pinned: true });
+    // 本地更新后 id 7 置顶排最前
+    expect(p.rows.value.map((r) => r.id)).toEqual([7, 9, 8]);
+    expect(p.rows.value[0].pinned).toBe(true);
+  });
+
+  it('取消置顶:pinned=false 后回落到 id 降序位置', async () => {
+    const spy = mockFetch(
+      { body: { memories: [memEntry({ id: 7, pinned: true }), memEntry({ id: 9, kind: 'manual' })] } },
+      { body: { ok: true, memory: memEntry({ id: 7, pinned: false }) } },
+    );
+    const p = mountPanel();
+    await p.load();
+    expect(p.rows.value.map((r) => r.id)).toEqual([7, 9]);
+    await p.togglePinned(p.rows.value[0]);
+    expect(JSON.parse(String(requestOf(spy.mock.calls as Array<[unknown, ...unknown[]]>, 2).init.body)))
+      .toEqual({ pinned: false });
+    expect(p.rows.value.map((r) => r.id)).toEqual([9, 7]);
+  });
+
+  it('失败:反馈错误并重拉列表回滚置顶状态', async () => {
+    const spy = mockFetch(
+      { body: { memories: sampleList() } },
+      { body: { error: '记忆 7 不存在或更新被拒绝' }, status: 404 },
+      { body: { memories: sampleList() } },
+    );
+    const p = mountPanel();
+    await p.load();
+    await p.togglePinned(p.rows.value.find((r) => r.id === 7)!);
+    expect(p.actionMsg.value?.kind).toBe('err');
+    expect(p.actionMsg.value?.text).toContain('记忆 7 不存在或更新被拒绝');
+    // 回滚:重拉后 id 7 仍未置顶
+    expect(p.rows.value.find((r) => r.id === 7)?.pinned).toBe(false);
+    expect(requestOf(spy.mock.calls as Array<[unknown, ...unknown[]]>, 3).url).toBe(
+      '/api/memory?character_id=charA',
+    );
+  });
+});
+
+describe('useMemoryPanel(清理已归档)', () => {
+  it('requestPrune 进入确认态,cancelPrune 不发请求', async () => {
+    const spy = mockFetch({ body: { memories: sampleList() } });
+    const p = mountPanel();
+    await p.load();
+    p.requestPrune();
+    expect(p.pendingPrune.value).toBe(true);
+    p.cancelPrune();
+    expect(p.pendingPrune.value).toBe(false);
+    expect(spy.mock.calls).toHaveLength(2);
+  });
+
+  it('确认清理:POST /api/memory/prune 携带 character_id,反馈条数并刷新', async () => {
+    const spy = mockFetch(
+      { body: { memories: sampleList() } },
+      { body: { ok: true, removed: 2 } },
+      { body: { memories: [memEntry({ id: 7 })] } },
+    );
+    const p = mountPanel();
+    await p.load();
+    p.requestPrune();
+    await p.pruneNow();
+    const post = requestOf(spy.mock.calls as Array<[unknown, ...unknown[]]>, 2);
+    expect(post.url).toBe('/api/memory/prune');
+    expect(post.init.method).toBe('POST');
+    expect(JSON.parse(String(post.init.body))).toEqual({ character_id: 'charA' });
+    expect(p.pendingPrune.value).toBe(false);
+    expect(p.actionMsg.value).toEqual({ kind: 'ok', text: '已清理 2 条归档记忆' });
+    expect(requestOf(spy.mock.calls as Array<[unknown, ...unknown[]]>, 3).url).toBe(
+      '/api/memory?character_id=charA',
+    );
+    expect(p.rows.value.map((r) => r.id)).toEqual([7]);
+  });
+
+  it('无可清理条目:反馈 0 条文案', async () => {
+    mockFetch(
+      { body: { memories: sampleList() } },
+      { body: { ok: true, removed: 0 } },
+      { body: { memories: sampleList() } },
+    );
+    const p = mountPanel();
+    await p.load();
+    await p.pruneNow();
+    expect(p.actionMsg.value).toEqual({ kind: 'ok', text: '没有可清理的归档记忆' });
+  });
+
+  it('失败:反馈「清理失败」文案', async () => {
+    mockFetch(
+      { body: { memories: sampleList() } },
+      { body: { error: '数据库不可用' }, status: 500 },
+    );
+    const p = mountPanel();
+    await p.load();
+    await p.pruneNow();
+    expect(p.actionMsg.value?.kind).toBe('err');
+    expect(p.actionMsg.value?.text).toBe('清理失败:数据库不可用');
+  });
+
+  it('无角色:直接返回不发请求', async () => {
+    const spy = mockFetch();
+    const p = mountPanel(null, null);
+    await p.pruneNow();
+    expect(spy.mock.calls).toHaveLength(0);
   });
 });
 

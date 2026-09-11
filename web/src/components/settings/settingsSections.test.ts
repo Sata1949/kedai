@@ -8,6 +8,7 @@ import ConnectionSection from './ConnectionSection.vue';
 import McpSection from './McpSection.vue';
 import PresetImportExportSection from './PresetImportExportSection.vue';
 import AgentSettingsSection from './AgentSettingsSection.vue';
+import GenParamsSection from './GenParamsSection.vue';
 import SettingsModal from '../SettingsModal.vue';
 
 // 设置区组件冒烟测试:项目无 jsdom / @vue/test-utils,沿用 CacheHealthPanel.test.ts 的
@@ -114,5 +115,28 @@ describe('AgentSettingsSection(Agent 设置区)', () => {
     expect(html).toContain('精简(默认)');
     expect(html).toContain('完整');
     expect(html).toContain('仅任务模式生效');
+  });
+
+  it('渲染任务继承提示词注入开关(2026-09-10 实跑修复;默认不继承)', async () => {
+    const html = await render(AgentSettingsSection);
+    expect(html).toContain('任务继承提示词注入');
+    expect(html).toContain('不继承(默认)');
+    expect(html).toContain('继承');
+  });
+});
+
+describe('GenParamsSection(生成参数区:记忆槽预算/容量上限)', () => {
+  it('渲染记忆字符预算与容量上限两个 number 输入(0 = 不限制说明)', async () => {
+    const html = await render(GenParamsSection);
+    expect(html).toContain('记忆字符预算');
+    expect(html).toContain('记忆容量上限');
+    expect(html).toContain('0 = 不限制');
+    expect(html).toMatch(/max="20000"/);
+    expect(html).toMatch(/max="10000"/);
+  });
+
+  it('show=false 时根节点 display:none(embedded 模式按 activeSection 切换)', async () => {
+    const html = await render(GenParamsSection, { show: false });
+    expect(html).toMatch(/display:\s*none/);
   });
 });

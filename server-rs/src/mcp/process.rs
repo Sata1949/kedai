@@ -9,8 +9,12 @@
 // 注意:kill 只杀直接子进程;若服务器命令是 cmd/sh 包装再启孙进程,孙进程不保证回收
 // (v1 保守语义,注释留痕;如需进程组级清理另起批次)。
 use crate::services::settings_service::McpServerConfig;
+// Android 上 spawn 被平台门控(直接返回 Err),这些仅桌面/服务端派生进程所需
+#[cfg(not(target_os = "android"))]
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, Command};
+#[cfg(not(target_os = "android"))]
+use tokio::process::Command;
+use tokio::process::Child;
 
 use super::client::McpClient;
 
@@ -26,6 +30,23 @@ pub struct McpProcess {
 impl McpProcess {
     /// 启动子进程并把 stdout/stdin 接到新 McpClient。
     /// spawn 失败(命令不存在等)直接 Err,由调用方记 warn 并禁用该服务器。
+    ///
+    /// Android 门控:移动端沙箱内没有 npx/uvx/node/python 等可执行环境,也没有可用的
+    /// 进程派生模型(spawn 必然失败),直接返回带明确说明的错误,避免用户只看到一句
+    /// 含义不明的 spawn 失败。MCP 在 Android 后续应改为内置执行器实现(见
+    /// docs/android-port-plan.md 的移动专项待办)。
+    #[cfg(target_os = "android")]
+    pub fn spawn(cfg: &McpServerConfig) -> Result<(Self, McpClient), String> {
+        Err(format!(
+            "MCP 服务器 \"{}\" 在 Android 上暂不支持:移动端无法派生外部命令({}),\
+             请改用内置工具或在桌面端使用 MCP。",
+            cfg.name, cfg.command
+        ))
+    }
+
+    /// 启动子进程并把 stdout/stdin 接到新 McpClient。
+    /// spawn 失败(命令不存在等)直接 Err,由调用方记 warn 并禁用该服务器。
+    #[cfg(not(target_os = "android"))]
     pub fn spawn(cfg: &McpServerConfig) -> Result<(Self, McpClient), String> {
         let mut cmd = Command::new(&cfg.command);
         cmd.args(&cfg.args)

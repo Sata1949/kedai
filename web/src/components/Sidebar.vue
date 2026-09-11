@@ -97,15 +97,78 @@ async function clearChat(): Promise<void> {
 // ===== 右键菜单(编辑提示词 / 删除) =====
 const ctxMenu = ref<{ x: number; y: number; char: CharacterRecord } | null>(null);
 
+/** 长按菜单的坐标基准:「右键」在触屏上不存在,以长按等价替代。
+ *  长按触发后需吞掉随后到来的 click,否则会连带选中该角色(用户本意只是开菜单)。 */
+let longPressTimer: ReturnType<typeof setTimeout> | null = null;
+let longPressOrigin: { x: number; y: number } | null = null;
+let suppressClick = false;
+
+const LONG_PRESS_MS = 500;
+/** 手指位移超过此阈值视为滚动/拖拽,取消长按(避免滑动列表时误弹菜单) */
+const LONG_PRESS_MOVE_TOLERANCE = 10;
+
+function openCtxMenuAt(x: number, y: number, c: CharacterRecord): void {
+  const clampedX = Math.min(x, window.innerWidth - 168);
+  const clampedY = Math.min(y, window.innerHeight - 96);
+  ctxMenu.value = { x: clampedX, y: clampedY, char: c };
+}
+
 function openCtxMenu(e: MouseEvent, c: CharacterRecord): void {
   e.preventDefault();
-  const x = Math.min(e.clientX, window.innerWidth - 168);
-  const y = Math.min(e.clientY, window.innerHeight - 96);
-  ctxMenu.value = { x, y, char: c };
+  openCtxMenuAt(e.clientX, e.clientY, c);
+}
+
+function cancelLongPress(): void {
+  if (longPressTimer) {
+    clearTimeout(longPressTimer);
+    longPressTimer = null;
+  }
+  longPressOrigin = null;
+}
+
+function onCharTouchStart(e: TouchEvent, c: CharacterRecord): void {
+  const touch = e.touches[0];
+  if (!touch) return;
+  longPressOrigin = { x: touch.clientX, y: touch.clientY };
+  cancelLongPressTimerOnly();
+  longPressTimer = setTimeout(() => {
+    longPressTimer = null;
+    const origin = longPressOrigin;
+    longPressOrigin = null;
+    if (!origin) return;
+    suppressClick = true;
+    openCtxMenuAt(origin.x, origin.y, c);
+  }, LONG_PRESS_MS);
+}
+
+function onCharTouchMove(e: TouchEvent): void {
+  if (!longPressTimer || !longPressOrigin) return;
+  const touch = e.touches[0];
+  if (!touch) return;
+  const moved = Math.abs(touch.clientX - longPressOrigin.x) + Math.abs(touch.clientY - longPressOrigin.y);
+  if (moved > LONG_PRESS_MOVE_TOLERANCE) cancelLongPressTimerOnly();
+}
+
+function cancelLongPressTimerOnly(): void {
+  if (longPressTimer) {
+    clearTimeout(longPressTimer);
+    longPressTimer = null;
+  }
+}
+
+/** 点击角色:长按已弹菜单时吞掉本次 click(仅吞一次) */
+function onCharClick(c: CharacterRecord): void {
+  if (suppressClick) {
+    suppressClick = false;
+    return;
+  }
+  void store.selectCharacter(c.id);
 }
 
 function closeCtx(): void {
   ctxMenu.value = null;
+  cancelLongPress();
+  suppressClick = false;
 }
 
 // ===== 编辑角色提示词 / 开场白 =====
@@ -195,7 +258,9 @@ async function removeTask(task: TaskRecord): Promise<void> {
 </script>
 
 <template>
-  <aside class="sv-sidebar" :class="{ wide: appMode === 'task' }">
+  <!-- open 类仅移动端生效(窄屏下 Sidebar 为覆盖式抽屉,见 style.css 移动端区块);
+       桌面端该断点不匹配,布局与此前完全一致。 -->
+  <aside class="sv-sidebar" :class="{ wide: appMode === 'task', open: store.sidebarOpen }">
     <!-- 顶部:品牌 + Token 状态区 -->
     <div class="sv-side-head">
       <div class="sv-brand">
@@ -206,6 +271,13 @@ async function removeTask(task: TaskRecord): Promise<void> {
           <span class="dot" :class="connColor" />
           {{ connLabel }}
         </span>
+        <!-- 抽屉关闭键:仅移动端显示(桌面端由 CSS 隐藏) -->
+        <button
+          class="sv-sidebar-close"
+          title="收起角色库"
+          aria-label="收起角色库"
+          @click="store.sidebarOpen = false"
+        >✕</button>
       </div>
 
       <!-- Token 统计区:角色扮演 = 会话累计/全局累计/上下文/缓存命中率;
@@ -306,8 +378,12 @@ async function removeTask(task: TaskRecord): Promise<void> {
               :key="c.id"
               class="sv-char-item"
               :class="{ active: c.id === currentCharacterId }"
-              @click="store.selectCharacter(c.id)"
+              @click="onCharClick(c)"
               @contextmenu="openCtxMenu($event, c)"
+              @touchstart.passive="onCharTouchStart($event, c)"
+              @touchmove.passive="onCharTouchMove($event)"
+              @touchend="cancelLongPress"
+              @touchcancel="cancelLongPress"
             >
               <span class="sv-avatar small char" :class="avatarClass(c.id)">
                 <img v-if="c.avatar_path" :src="`/api/avatars/${avatarFile(c.avatar_path)}`" alt="" />
@@ -380,7 +456,8 @@ async function removeTask(task: TaskRecord): Promise<void> {
       </Transition>
     </div>
 
-    <!-- 底部:综合设置入口 -->
+    <!-- 底部:仅保留综合设置入口(2026-09 入口整合:工具面板统一收进综合设置的二级分类,
+         原脚本管理/宏调试/记忆库/仓库索引 4 个按钮已移除,避免与 Hub 内入口重复) -->
     <div class="sv-side-foot">
       <div v-if="uploadError" class="sv-feedback err">{{ uploadError }}</div>
       <button
@@ -395,32 +472,6 @@ async function removeTask(task: TaskRecord): Promise<void> {
         </span>
         综合设置
       </button>
-      <!-- 脚本管理(阶段三):用户脚本 ScriptTree 管理 -->
-      <button
-        class="sv-btn ghost sv-side-btn"
-        @click="store.scriptsOpen = true"
-      >
-        <span class="sv-side-btn-ico">
-          <svg viewBox="0 0 24 24">
-            <polyline points="16 18 22 12 16 6" />
-            <polyline points="8 6 2 12 8 18" />
-          </svg>
-        </span>
-        脚本管理
-      </button>
-      <!-- 宏调试(阶段六 6b):模板 {{...}} 展开结果验证 -->
-      <button
-        class="sv-btn ghost sv-side-btn"
-        @click="store.macrosOpen = true"
-      >
-        <span class="sv-side-btn-ico">
-          <svg viewBox="0 0 24 24">
-            <polyline points="4 17 10 11 4 5" />
-            <line x1="12" y1="19" x2="20" y2="19" />
-          </svg>
-        </span>
-        宏调试
-      </button>
       <input
         ref="fileInput"
         type="file"
@@ -431,8 +482,13 @@ async function removeTask(task: TaskRecord): Promise<void> {
     </div>
 
     <!-- 右键菜单 -->
-    <div v-if="ctxMenu" class="sv-ctx-mask" @click="closeCtx" @contextmenu.prevent="closeCtx">
-      <div class="sv-ctx-menu" :style="{ left: `${ctxMenu.x}px`, top: `${ctxMenu.y}px` }" @click.stop>
+    <!-- 角色操作菜单(编辑提示词 / 删除)。
+         Teleport 到 body 是必需的:移动端侧栏抽屉带 transform + overflow-y:auto,
+         而 transform 祖先会成为 position:fixed 后代的包含块,导致菜单定位偏移、
+         遮罩只盖住侧栏、且被 overflow 裁切。挂到 body 后按视口坐标正常定位。 -->
+    <Teleport to="body">
+      <div v-if="ctxMenu" class="sv-ctx-mask" @click="closeCtx" @contextmenu.prevent="closeCtx">
+        <div class="sv-ctx-menu" :style="{ left: `${ctxMenu.x}px`, top: `${ctxMenu.y}px` }" @click.stop>
         <div class="sv-ctx-title">{{ ctxMenu.char.chara_name }}</div>
         <button class="sv-ctx-item" @click="openPromptEditor(ctxMenu.char)">
           <svg viewBox="0 0 24 24">
@@ -452,10 +508,12 @@ async function removeTask(task: TaskRecord): Promise<void> {
           删除角色
         </button>
       </div>
-    </div>
+      </div>
+    </Teleport>
 
-    <!-- 编辑角色提示词模态框 -->
-    <div v-if="promptEdit" class="sv-modal-mask" @click.self="promptEdit = null">
+    <!-- 编辑角色提示词模态框(同样 Teleport:见上,侧栏 transform 会破坏 fixed 定位) -->
+    <Teleport to="body">
+      <div v-if="promptEdit" class="sv-modal-mask" @click.self="promptEdit = null">
       <div class="sv-modal pm-edit">
         <div class="sv-modal-head">
           <h2 class="flex items-center gap-2">
@@ -521,6 +579,7 @@ async function removeTask(task: TaskRecord): Promise<void> {
           </button>
         </div>
       </div>
-    </div>
+      </div>
+    </Teleport>
   </aside>
 </template>

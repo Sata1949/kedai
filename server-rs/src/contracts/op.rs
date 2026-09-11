@@ -80,12 +80,6 @@ pub struct ValidationOutcome {
     pub rejected: Vec<RejectedOp>,
 }
 
-impl ValidationOutcome {
-    pub fn rejected_count(&self) -> usize {
-        self.rejected.len()
-    }
-}
-
 /// 置信度门控(§4.2/§7-F4)。
 ///
 /// 语义:guardrails.minConfidence 是「最低可写置信度」——Low 最宽松(默认,开箱即用),

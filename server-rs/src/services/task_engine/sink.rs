@@ -86,10 +86,33 @@ fn map_event(ev: &SseEvent, streamed_chars: usize, label: &str) -> Option<String
             _ => step.clone(),
         },
         SseEvent::ToolCall { name, .. } => format!("{label} 调用工具 {name}"),
-        SseEvent::ToolResult { name, .. } => format!("工具 {name} 已返回结果"),
-        // 任务模式 step_whitelist 恒 Some(全量或显式白名单)放行,正常不会走到;防御性映射
+        // 被任务策略拒绝的工具要与正常返回区分开:否则调用情况里只看到「已返回结果」,
+        // 用户不知道是策略拦截还是工具执行失败(tool_policy_denied 由闸门回灌)。
+        SseEvent::ToolResult { name, output, .. } => {
+            let denied = output
+                .as_object()
+                .and_then(|o| o.get("code"))
+                .and_then(|c| c.as_str())
+                .is_some_and(|code| code == "tool_policy_denied");
+            if denied {
+                let reason = output
+                    .as_object()
+                    .and_then(|o| o.get("error"))
+                    .and_then(|e| e.as_str())
+                    .unwrap_or("");
+                if reason.is_empty() {
+                    format!("工具 {name} 被任务策略拒绝")
+                } else {
+                    format!("工具 {name} 被任务策略拒绝:{reason}")
+                }
+            } else {
+                format!("工具 {name} 已返回结果")
+            }
+        }
+        // 任务模式已改走策略闸门(未放行工具直接拒绝为 tool_policy_denied),
+        // 正常不会产生授权请求;此映射仅作防御性兜底。
         SseEvent::ToolAuthorizationRequired { name, .. } => {
-            format!("工具 {name} 等待授权(任务模式不应出现)")
+            format!("工具 {name} 需要授权(任务模式按策略处理)")
         }
         SseEvent::Finish { .. } => format!("{label} 生成完成(流式输出 {streamed_chars} 字)"),
         SseEvent::Error { message, .. } => format!("{label} 出错:{message}"),
@@ -97,4 +120,36 @@ fn map_event(ev: &SseEvent, streamed_chars: usize, label: &str) -> Option<String
         _ => return None,
     };
     Some(detail.chars().take(DETAIL_MAX_CHARS).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// 策略拒绝的工具要与正常返回区分:调用情况里不能只显示「已返回结果」。
+    #[test]
+    fn policy_denied_tool_result_is_reported_as_rejected() {
+        let ev = SseEvent::ToolResult {
+            name: "write".into(),
+            output: json!({ "error": "写入角色文件 a.md(宽松模式需授权)", "code": "tool_policy_denied" }),
+            call_id: Some("c1".into()),
+            render_kind: None,
+        };
+        let detail = map_event(&ev, 0, "主 agent").unwrap();
+        assert!(detail.contains("被任务策略拒绝"), "实际:{detail}");
+        assert!(detail.contains("写入角色文件 a.md"), "应带上拒绝理由,实际:{detail}");
+    }
+
+    #[test]
+    fn normal_tool_result_keeps_original_copy() {
+        let ev = SseEvent::ToolResult {
+            name: "read".into(),
+            output: json!({ "ok": true }),
+            call_id: Some("c1".into()),
+            render_kind: None,
+        };
+        let detail = map_event(&ev, 0, "主 agent").unwrap();
+        assert_eq!(detail, "工具 read 已返回结果");
+    }
 }

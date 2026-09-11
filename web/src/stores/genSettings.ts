@@ -10,6 +10,13 @@ import { useModelConnStore } from './modelConn';
 import { useUiPrefsStore } from './uiPrefs';
 import { useTaskStore } from './task';
 
+/** 读取授权模式:新字段优先;旧配置只有 bypass_mode 时按 true→bypass / false→strict 映射 */
+function readAuthorizationMode(s: api.RuntimeSettings): api.AuthorizationMode {
+  const m = s.authorization_mode as api.AuthorizationMode | undefined;
+  if (m === 'strict' || m === 'loose' || m === 'bypass') return m;
+  return s.bypass_mode ? 'bypass' : 'strict';
+}
+
 export const useGenSettingsStore = defineStore('app.genSettings', () => {
   // ===== 生成参数 =====
   const temperature = ref(0.8);
@@ -19,6 +26,10 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
   const maxContextTokens = ref(65536);
   /** AGENT/CUSTOM 模式工具循环轮次上限(服务端默认 32,1..=200) */
   const maxToolRounds = ref(32);
+  /** 工具循环历史保留的最近完整轮数(服务端默认 4,1..=32) */
+  const toolHistoryKeepRounds = ref(4);
+  /** 工具循环历史 token 预算(服务端默认 16384;0 = 禁用预算闸门) */
+  const toolHistoryBudgetTokens = ref(16384);
   /** 上下文压缩模式(off / manual / auto;服务端默认 off) */
   const compactionMode = ref<'off' | 'manual' | 'auto'>('off');
   /** 上下文压缩触发阈值(0.5..=0.95;服务端默认 0.8) */
@@ -31,6 +42,10 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
   const memoryDistillEnabled = ref(false);
   /** 每次注入提示词的记忆条数上限(0..=50;服务端默认 8) */
   const memoryInjectLimit = ref(8);
+  /** 记忆槽字符预算(0..=20000;0 = 不限制;服务端默认 2000):按精选排序累积到预算即停 */
+  const memoryInjectCharBudget = ref(2000);
+  /** 每角色记忆容量上限(0..=10000;0 = 不淘汰;服务端默认 200):超出后最低分条目置 selected=0 */
+  const memoryMaxEntries = ref(200);
   /** 技能渐进披露开关(服务端默认 true):system 只注入「名称:用途」清单,正文按需 read */
   const skillProgressiveDisclosure = ref(true);
   /** 子智能体最大嵌套深度(1..=4;服务端默认 2) */
@@ -45,8 +60,16 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
   const mcpEnabled = ref(false);
   /** MCP 服务器列表(全量替换语义;服务端默认空) */
   const mcpServers = ref<api.McpServerConfig[]>([]);
-  /** 授权模式:false=授权(高位操作需授权), true=放行(除黑名单外不弹授权) */
-  const bypassMode = ref(false);
+  /** 授权模式三档(服务端默认 loose):strict=读/写/删都需授权;loose=读/写放行、删需授权;bypass=除系统路径写删外全放行 */
+  const authorizationMode = ref<api.AuthorizationMode>('loose');
+  /** 「始终需授权」清单(名单内工具在三档模式下都需授权) */
+  const authorizationAlwaysRequired = ref<string[]>([]);
+  /** 授权等待超时(秒;30..=1800) */
+  const toolAuthorizationTimeoutSecs = ref(300);
+  /** 任务模式工具策略 */
+  const taskToolPolicy = ref<'all' | 'deny_dangerous' | 'allowlist'>('deny_dangerous');
+  /** 任务模式工具白名单 */
+  const taskToolAllowlist = ref<string[]>([]);
 
   // ===== Agent 设置(编辑区草稿,保存时随 patch 提交) =====
   const agentSystemPrompt = ref('');
@@ -67,6 +90,11 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
    *  仅任务模式执行者人设注入生效;角色扮演模式下修改的是 task 覆盖层 None 时的沿用值 */
   const taskPersonaFull = ref(false);
 
+  /** 任务模式是否继承提示词注入(2026-09-10 实跑修复;服务端默认 false = 隔离)。
+   *  关闭时任务执行/汇总/追加轮不注入 prompt_floors.json(通常含角色扮演的
+   *  「1200 字/第三人称/禁词表」等文章要求,会与任务目标冲突);开启恢复旧行为。 */
+  const taskPromptInjectEnabled = ref(false);
+
   // ===== 提示词注入(简单模式 + 楼层系统;全局配置) =====
   const promptInject = ref<api.PromptInjectConfig | null>(null);
   // ===== 自定义 Agent 执行流程(custom 模式;全局配置) =====
@@ -82,6 +110,8 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
       maxTokens.value = s.default_max_tokens ?? 1024;
       maxContextTokens.value = s.max_context_tokens ?? 65536;
       maxToolRounds.value = s.max_tool_rounds ?? 32;
+      toolHistoryKeepRounds.value = s.tool_history_keep_rounds ?? 4;
+      toolHistoryBudgetTokens.value = s.tool_history_budget_tokens ?? 16384;
       agentSystemPrompt.value = s.agent_system_prompt ?? '';
       searchEndpoint.value = s.search_endpoint ?? '';
       mvuVarsPosition.value = (s.mvu_vars_position ?? 'system') as 'system' | 'user_tail';
@@ -91,7 +121,12 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
       reflectAdvicePrompt.value = s.reflect_advice_prompt ?? '';
       reflectAdviceRole.value = s.reflect_advice_role === 'assistant' ? 'assistant' : 'user';
       taskPersonaFull.value = s.task_persona_full ?? false;
-      bypassMode.value = s.bypass_mode ?? false;
+      taskPromptInjectEnabled.value = s.task_prompt_inject_enabled ?? false;
+      authorizationMode.value = readAuthorizationMode(s);
+      authorizationAlwaysRequired.value = Array.isArray(s.bypass_blacklist) ? s.bypass_blacklist : [];
+      toolAuthorizationTimeoutSecs.value = s.tool_authorization_timeout_secs ?? 300;
+      taskToolPolicy.value = s.task_tool_policy ?? 'deny_dangerous';
+      taskToolAllowlist.value = Array.isArray(s.task_tool_allowlist) ? s.task_tool_allowlist : [];
       const uiPrefs = useUiPrefsStore();
       uiPrefs.defaultRenderHtml = s.render_html ?? false;
       // 无角色卡记忆时,当前生效值跟随全局默认(角色卡记忆优先)
@@ -102,6 +137,8 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
       compactionSnipBytes.value = s.compaction_snip_bytes ?? 8192;
       memoryDistillEnabled.value = s.memory_distill_enabled ?? false;
       memoryInjectLimit.value = s.memory_inject_limit ?? 8;
+      memoryInjectCharBudget.value = s.memory_inject_char_budget ?? 2000;
+      memoryMaxEntries.value = s.memory_max_entries ?? 200;
       skillProgressiveDisclosure.value = s.skill_progressive_disclosure ?? true;
       subagentMaxDepth.value = s.subagent_max_depth ?? 2;
       subagentMaxConcurrency.value = s.subagent_max_concurrency ?? 6;
@@ -126,6 +163,8 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     maxTokens.value = s.default_max_tokens ?? 1024;
     maxContextTokens.value = s.max_context_tokens ?? 65536;
     maxToolRounds.value = s.max_tool_rounds ?? 32;
+    toolHistoryKeepRounds.value = s.tool_history_keep_rounds ?? 4;
+    toolHistoryBudgetTokens.value = s.tool_history_budget_tokens ?? 16384;
     useModelConnStore().model = s.model;
     agentSystemPrompt.value = s.agent_system_prompt ?? '';
     searchEndpoint.value = s.search_endpoint ?? '';
@@ -136,7 +175,12 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     reflectAdvicePrompt.value = s.reflect_advice_prompt ?? '';
     reflectAdviceRole.value = s.reflect_advice_role === 'assistant' ? 'assistant' : 'user';
     taskPersonaFull.value = s.task_persona_full ?? false;
-    bypassMode.value = s.bypass_mode ?? false;
+    taskPromptInjectEnabled.value = s.task_prompt_inject_enabled ?? false;
+    authorizationMode.value = readAuthorizationMode(s);
+    authorizationAlwaysRequired.value = Array.isArray(s.bypass_blacklist) ? s.bypass_blacklist : [];
+    toolAuthorizationTimeoutSecs.value = s.tool_authorization_timeout_secs ?? 300;
+    taskToolPolicy.value = s.task_tool_policy ?? 'deny_dangerous';
+    taskToolAllowlist.value = Array.isArray(s.task_tool_allowlist) ? s.task_tool_allowlist : [];
     const uiPrefs = useUiPrefsStore();
     uiPrefs.defaultRenderHtml = s.render_html ?? false;
     uiPrefs.syncRenderHtmlToCurrent();
@@ -146,6 +190,8 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     compactionSnipBytes.value = s.compaction_snip_bytes ?? 8192;
     memoryDistillEnabled.value = s.memory_distill_enabled ?? false;
     memoryInjectLimit.value = s.memory_inject_limit ?? 8;
+    memoryInjectCharBudget.value = s.memory_inject_char_budget ?? 2000;
+    memoryMaxEntries.value = s.memory_max_entries ?? 200;
     skillProgressiveDisclosure.value = s.skill_progressive_disclosure ?? true;
     subagentMaxDepth.value = s.subagent_max_depth ?? 2;
     subagentMaxConcurrency.value = s.subagent_max_concurrency ?? 6;
@@ -161,6 +207,18 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     const queued = settingsSaveQueue.then(() => saveSettings(patch));
     settingsSaveQueue = queued.catch(() => { /* 保持队列可继续使用 */ });
     return queued;
+  }
+
+  /** 切换授权模式并持久化(输入框底部三档开关;失败回滚本地值) */
+  async function setAuthorizationMode(mode: api.AuthorizationMode): Promise<void> {
+    const prev = authorizationMode.value;
+    if (prev === mode) return;
+    authorizationMode.value = mode;
+    try {
+      await queueSettingsSave({ authorization_mode: mode });
+    } catch {
+      authorizationMode.value = prev;
+    }
   }
 
   // ===== 提示词注入 =====
@@ -212,12 +270,16 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     maxTokens,
     maxContextTokens,
     maxToolRounds,
+    toolHistoryKeepRounds,
+    toolHistoryBudgetTokens,
     compactionMode,
     compactionThreshold,
     compactionKeepRecent,
     compactionSnipBytes,
     memoryDistillEnabled,
     memoryInjectLimit,
+    memoryInjectCharBudget,
+    memoryMaxEntries,
     skillProgressiveDisclosure,
     subagentMaxDepth,
     subagentMaxConcurrency,
@@ -225,7 +287,12 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     undoEnabled,
     mcpEnabled,
     mcpServers,
-    bypassMode,
+    authorizationMode,
+    authorizationAlwaysRequired,
+    toolAuthorizationTimeoutSecs,
+    taskToolPolicy,
+    taskToolAllowlist,
+    setAuthorizationMode,
     agentSystemPrompt,
     searchEndpoint,
     mvuVarsPosition,
@@ -235,6 +302,7 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     reflectAdvicePrompt,
     reflectAdviceRole,
     taskPersonaFull,
+    taskPromptInjectEnabled,
     promptInject,
     agentFlowLibrary,
     loadSettings,

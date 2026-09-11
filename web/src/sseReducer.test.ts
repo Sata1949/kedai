@@ -88,6 +88,7 @@ describe('reduceSseEvent', () => {
       total_tokens: 15,
       context_tokens: 12,
       prompt_cache_hit_tokens: 3,
+      prompt_cache_miss_tokens: 12,
     };
 
     const changes = reduceSseEvent(current, { type: 'finish', content: '最终正文', usage });

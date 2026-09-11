@@ -147,12 +147,16 @@ export function elementState(el: HTMLElement): Record<string, unknown> {
     // id/name 供沙箱侧事件 this 门面的 getAttribute 与选择器回查
     id: el.id || undefined,
     name: inp.name || undefined,
+    // tag:测试 mock 元素可能无 tagName,容错为空串
+    tag: typeof el.tagName === 'string' ? el.tagName.toLowerCase() : '',
     text: (el.textContent ?? '').slice(0, 100_000),
     html: el.innerHTML.slice(0, 100_000),
     val: typeof inp.value === 'string' ? inp.value.slice(0, 20_000) : '',
     checked: !!inp.checked,
     disabled: !!inp.disabled,
     classes: Array.from(el.classList).slice(0, 64),
+    // select 状态:作者脚本(getSelectedOrCustomText 型)读 selectedIndex/value/options[i].text
+    ...readSelectState(el),
     // 内联样式快照:沙箱 css getter 与 is(':visible'|':hidden') 的数据源
     css: readInlineCss(el),
     // 滚动/几何度量:协议卡 checkBottom($card[0].scrollTop+clientHeight>=scrollHeight-8)
@@ -166,6 +170,34 @@ export function elementState(el: HTMLElement): Record<string, unknown> {
     offsetHeight: el.offsetHeight,
     offsetWidth: el.offsetWidth,
   };
+}
+
+/** 单次快照内所有 select 选项的全局预算:选项明细随每次事件回包下发,卡内 select 多、
+ *  选项多时可能撑爆消息上限;超预算的 select 只留 selectedIndex(门面回退空 options)。 */
+const SELECT_OPTIONS_BUDGET = 400;
+
+/** <select> 的选项快照:selectedIndex + options[{value,text}](单项上限 100,另有全局预算)。
+ *  非 select 返回空对象(镜像字段不出现,沙箱门面回退 -1/[])。
+ *  `budget` 为调用方持有的剩余选项额度对象(跨元素累计递减)。 */
+function readSelectState(
+  el: HTMLElement,
+  budget?: { left: number },
+): Record<string, unknown> {
+  if (el.tagName !== 'SELECT') return {};
+  const sel = el as HTMLSelectElement;
+  const options: Array<{ value: string; text: string }> = [];
+  try {
+    const list = sel.options;
+    const cap = budget ? Math.min(100, budget.left) : 100;
+    for (let i = 0; i < list.length && i < cap; i++) {
+      const o = list[i];
+      options.push({ value: String(o.value ?? ''), text: String(o.text ?? '') });
+    }
+    if (budget) budget.left -= options.length;
+  } catch {
+    /* 非标准 select 实现:忽略选项明细 */
+  }
+  return { selectedIndex: sel.selectedIndex, options };
 }
 
 /** 内联样式(仅显式声明项;camelCase → kebab 两种键都填,沙箱 getter 按传入键名读) */
@@ -213,19 +245,24 @@ function gatherSelectorState(container: HTMLElement, selector: string): Record<s
   }
 }
 
-/** 容器内全部表单控件状态(协议勾选/输入读取的目标;上限 200 防巨型容器) */
+/** 容器内全部表单控件状态(协议勾选/输入读取的目标;上限 200 防巨型容器)。
+ *  容器缺 querySelectorAll(测试 mock/异常容器)时返回空表,与 gatherIdMap 同款防御。 */
 export function gatherControls(container: HTMLElement): Array<Record<string, unknown>> {
   const out: Array<Record<string, unknown>> = [];
+  if (typeof container?.querySelectorAll !== 'function') return out;
   const els = Array.from(container.querySelectorAll<HTMLElement>('input, select, textarea, button')).slice(0, 200);
+  const budget = { left: SELECT_OPTIONS_BUDGET };
   for (const el of els) {
     const inp = el as HTMLInputElement;
     out.push({
       id: el.id || undefined,
       name: inp.name || undefined,
-      tag: el.tagName.toLowerCase(),
+      tag: typeof el.tagName === 'string' ? el.tagName.toLowerCase() : '',
       val: typeof inp.value === 'string' ? inp.value.slice(0, 2000) : '',
       checked: !!inp.checked,
       disabled: !!inp.disabled,
+      // select 状态(见 readSelectState):沙箱 getElementById 门面读 value/selectedIndex/options
+      ...readSelectState(el, budget),
     });
   }
   return out;
@@ -370,6 +407,8 @@ export function applyJq(
     listener: EventListener,
     capture?: boolean,
   ) => void,
+  /** 事件绑定登记表(沙箱级,调用方持有):off() 真解绑所需 */
+  bindings?: JqBinding[],
 ): unknown {
   const els = resolveRefElements(container, ref, targets);
   const first = els[0];
@@ -384,6 +423,7 @@ export function applyJq(
     container,
     controlsProvider: () => gatherControls(container),
     registerEventListener,
+    elementStateProvider: elementState,
   });
   switch (method) {
     case 'count':
@@ -507,27 +547,59 @@ export function applyJq(
       for (const el of els) el.innerHTML = '';
       return true;
     case 'off': {
-      // 解绑事件:宿主监听器统一由 executeSandboxedCharacterScript 的 cleanup 在容器
-      // 卸载/切换时释放;此处仅确认操作合法,避免脚本重复绑定累积(每次执行容器独立)。
+      // jQuery 语义:off(evt) 解绑该事件名下的全部监听(含委托);off() 解绑全部。
+      // 旧实现是 no-op,重复绑定会不断累积(实跑问题 7 R3)。清理范围含 cleanup
+      // 统一登记表(bindings 由调用方持有;缺失时退回 no-op 不报错)。
+      const names = String(args[0] ?? '')
+        .split(/\s+/)
+        .map(stripEventNamespace)
+        .filter(Boolean);
+      if (bindings) {
+        for (let i = bindings.length - 1; i >= 0; i -= 1) {
+          const b = bindings[i];
+          if (names.length > 0 && !names.includes(b.eventName)) continue;
+          if (typeof (b.element as HTMLElement).removeEventListener === 'function') {
+            (b.element as HTMLElement).removeEventListener(b.eventName, b.listener, b.capture);
+          }
+          bindings.splice(i, 1);
+        }
+      }
       return true;
     }
     case 'on': {
-      // jQuery 语义:'scroll wheel' 这类空格分隔的多事件名要拆开逐个绑定
-      // (此前整串当单个事件名 addEventListener,永不触发,协议卡滚动解锁因此失效)
-      const eventNames = String(args[0] ?? '').split(/\s+/).filter(Boolean);
+      // jQuery 语义:'scroll wheel' 这类空格分隔的多事件名要拆开逐个绑定;
+      // 事件名可带命名空间('click.myNS',命名空间仅标识用途,绑定用基础名)。
+      // 三参写法 on(evt, selector, fn) = 事件委托:宿主只绑一个监听,事件到达时
+      // 用 closest(selector) 命中真正目标并回发其状态——动态弹窗/输入框最依赖此种
+      // 写法,旧实现把 selector 字符串当回调存,事件到来时 fn.call 抛 TypeError 被吞掉
+      // (实跑问题 7 R3)。
+      const eventNames = String(args[0] ?? '')
+        .split(/\s+/)
+        .map(stripEventNamespace)
+        .filter(Boolean);
       const jqId = Number(args[1]);
+      const selector = typeof args[2] === 'string' && args[2].trim() ? args[2].trim() : null;
       if (!targetWindow || eventNames.length === 0 || !Number.isFinite(jqId)) return true;
       // $(window)/$(document):绑宿主 window/document($(window).on('unload', …) 不再静默失效)
       if (globalRef) {
-        bindGlobalEvents(globalRef, eventNames, jqId, domCtx());
+        bindGlobalEvents(globalRef, eventNames, jqId, domCtx(), selector, bindings);
         return true;
       }
       for (const el of els) {
-        const targetId = nextTargetId();
-        targets.set(targetId, el);
         for (const eventName of eventNames) {
-          const listener = (): void => {
-            const data = Object.fromEntries(Object.entries(el.dataset));
+          const listener = (event: Event): void => {
+            // 委托:以 closest 命中的真实目标为准;未命中(或超出绑定元素)则忽略
+            let hit: HTMLElement | null = el;
+            if (selector) {
+              const raw = event.target as Element | null;
+              const found =
+                raw && typeof raw.closest === 'function' ? raw.closest(selector) : null;
+              if (!found || !(found === el || el.contains(found))) return;
+              hit = found as HTMLElement;
+            }
+            const targetId = nextTargetId();
+            targets.set(targetId, hit);
+            const data = Object.fromEntries(Object.entries(hit.dataset));
             targetWindow.postMessage(
               {
                 channel: CHANNEL,
@@ -536,7 +608,7 @@ export function applyJq(
                 jqId,
                 event: { type: eventName },
                 // 事件时刻的目标状态(getter 真实化:勾选/取值/滚动度量读到事件当时的真值)
-                target: { kind: 'target', id: targetId, data, state: elementState(el) },
+                target: { kind: 'target', id: targetId, data, state: elementState(hit) },
                 // 全量表单控件状态:协议脚本在回调里读其它控件($('#agree') 等)
                 mirror: { controls: gatherControls(container) },
               },
@@ -545,6 +617,7 @@ export function applyJq(
           };
           el.addEventListener(eventName, listener);
           registerEventListener(el, eventName, listener);
+          bindings?.push({ jqId, element: el, eventName, listener, selector, capture: undefined });
         }
       }
       return true;
@@ -552,6 +625,23 @@ export function applyJq(
     default:
       throw new Error(`不兼容的角色卡脚本操作: ${method}`);
   }
+}
+
+/** jQuery 事件命名空间剥离:'click.myNS' → 'click'(命名空间仅作标识,不参与绑定) */
+export function stripEventNamespace(name: string): string {
+  const i = name.indexOf('.');
+  return i < 0 ? name : name.slice(0, i);
+}
+
+/** 事件绑定登记(沙箱级):off() 真解绑与委托支持所需 */
+export interface JqBinding {
+  jqId: number;
+  element: EventTarget;
+  eventName: string;
+  listener: EventListener;
+  /** 委托选择器(null = 直接绑定) */
+  selector: string | null;
+  capture?: boolean;
 }
 
 /** 给元素的新增子节点打注入标记(innerHTML 后调用;覆层根直系子节点获得 pointer-events:auto) */
@@ -570,6 +660,24 @@ export function applyRpc(
   if (op === 'global-save') {
     writeCardGlobals(context.characterId, args[0]);
     return true;
+  }
+  // 剪贴板写入桥(实跑问题 7 R4):宿主页面持有真实用户手势与 clipboard-write 权限,
+  // 沙箱侧 navigator.clipboard 已被 boot 覆写为转发到此。仅放行文本写入,长度设限。
+  if (op === 'clipboard-write') {
+    const text = typeof args[0] === 'string' ? args[0] : String(args[0] ?? '');
+    if (text.length > 1_000_000) throw new Error('剪贴板文本过大');
+    const nav = typeof navigator !== 'undefined' ? navigator : undefined;
+    const clip = nav?.clipboard;
+    if (!clip?.writeText) return false;
+    // 返回 Promise:宿主页在用户手势上下文内调用 writeText(失败仅报 false,不拆沙箱)
+    return clip.writeText(text).then(() => true).catch(() => false);
+  }
+  // 纯数据 op(数据 RPC 未注入扩展点时的兜底):首参不是 CSS 选择器,不得走
+  // querySelector —— 旧实现会把楼层序号/世界书名当选择器,safeSelector 抛错 →
+  // RPC reject → 沙箱大清理摘除全部监听(实跑问题 7 主因之一)。返回空数据,
+  // 脚本读不到内容但不致界面死亡。
+  if (!isDomSelectorRpc(op)) {
+    return null;
   }
   const selector = safeSelector(args[0]);
   const target = context.container.querySelector<HTMLElement>(selector);
@@ -594,4 +702,11 @@ export function applyRpc(
     return true;
   }
   throw new Error(`不兼容的角色卡脚本操作: ${op}`);
+}
+
+/** DOM 选择器类 RPC 白名单:其余 op(chat-messages/lorebook-entries/clipboard-write 等
+ *  纯数据请求)不按选择器解析。数据 RPC 正常应由 rpcExtensions 或上方专用分支处理;
+ *  未注入时此处兜底返回 null。 */
+function isDomSelectorRpc(op: string): boolean {
+  return op === 'setText' || op === 'setHtml' || op === 'setAttribute';
 }

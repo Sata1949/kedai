@@ -124,18 +124,20 @@ describe('TaskBoard plan 模式:批准后/完成后计划清单持续可见(实�
     expect(html).toContain('输出报告初稿');
   });
 
-  it('done:计划清单(全部 done + 各步 result)与最终成果并存,互不顶掉', async () => {
+  it('done:计划清单(全部 done + 各步 result)与成果汇总并存,互不顶掉', async () => {
     const plan: TaskStep[] = [
       { ...planBase[0], status: 'done', result: '资料摘要……' },
       { ...planBase[1], status: 'done', result: '初稿……' },
     ];
+    // 实跑问题 1:「成果汇总」卡默认收起,断言其内容前先打开开关(持久化偏好)
+    memStorage.set('kedai.task-result-summary.v1', '1');
     const html = await render(TaskBoard, (p) =>
       seedCurrentTask(p, makeDetail(makeTask('done', 'plan', plan, '最终成果:完整季度报告'))),
     );
     expect(html).toContain('计划步骤');
     expect(html).toContain('资料摘要……');
     expect(html).toContain('初稿……');
-    expect(html).toContain('最终成果');
+    expect(html).toContain('成果汇总');
     expect(html).toContain('最终成果:完整季度报告');
   });
 
@@ -144,14 +146,25 @@ describe('TaskBoard plan 模式:批准后/完成后计划清单持续可见(实�
       { ...planBase[0], status: 'done', result: '资料摘要……' },
       { ...planBase[1], status: 'error', result: '模型超时,该步未完成' },
     ];
+    memStorage.set('kedai.task-result-summary.v1', '1');
     const html = await render(TaskBoard, (p) =>
       seedCurrentTask(p, makeDetail(makeTask('partial', 'plan', plan, '部分成果:仅有资料摘要'))),
     );
     expect(html).toContain('计划步骤');
     expect(html).toContain('出错');
     expect(html).toContain('模型超时,该步未完成');
-    expect(html).toContain('最终成果');
+    expect(html).toContain('成果汇总');
     expect(html).toContain('部分成果:仅有资料摘要');
+  });
+
+  it('partial:任务级 error 原因在状态行可见(实跑问题 2:不再只显示黄标不说话)', async () => {
+    const task = {
+      ...makeTask('partial', 'team', [], '成果正文\n\n## 审计结论\n审计未通过'),
+      error: '审计/终审未通过,未达交付标准(详见「审计结论」)',
+    };
+    const html = await render(TaskBoard, (p) => seedCurrentTask(p, makeDetail(task)));
+    expect(html).toContain('部分完成');
+    expect(html).toContain('审计/终审未通过,未达交付标准(详见「审计结论」)');
   });
 });
 
@@ -317,5 +330,52 @@ describe('TaskBoard 批次 R4:「正在生成」流式块', () => {
     expect(html).toContain('乙主的产出');
     expect(html).toContain('agent:0');
     expect(html).toContain('agent:1');
+  });
+});
+
+// ==================== 2026-09-10 六模式实跑修复:F7 子任务区去重 ====================
+
+/** 带子任务的详情(legacy 的 subtasks 与 plan 步骤同源;multi 为子 agent 记录) */
+function detailWithSubtasks(task: TaskRecord): TaskDetail {
+  return {
+    task,
+    subtasks: [
+      {
+        id: 'st1',
+        task_id: task.id,
+        name: '开场白',
+        instruction: '写开场白',
+        status: 'done',
+        result: '开场白成果',
+        error: '',
+        created_at: '2026-08-29T00:00:00.000Z',
+        updated_at: '2026-08-29T00:00:00.000Z',
+      },
+    ],
+    usage_total: { prompt_tokens: 0, completion_tokens: 0, reasoning_tokens: 0 },
+  };
+}
+
+describe('TaskBoard F7:legacy 子任务区去重', () => {
+  const plan: TaskStep[] = [
+    { name: '搜集资料', goal: '收集数据', status: 'done', result: '摘要' },
+  ];
+
+  it('legacy:子任务区不渲染(与计划步骤同源重复),计划步骤区保留', async () => {
+    const html = await render(TaskBoard, (p) =>
+      seedCurrentTask(p, detailWithSubtasks(makeTask('done', 'legacy', plan))),
+    );
+    expect(html).not.toContain('子任务执行');
+    // 计划步骤区仍在(信息以该区为准)
+    expect(html).toContain('计划步骤');
+    expect(html).toContain('搜集资料');
+  });
+
+  it('multi:子任务区照常渲染(子 agent 记录,不与计划步骤重复)', async () => {
+    const html = await render(TaskBoard, (p) =>
+      seedCurrentTask(p, detailWithSubtasks(makeTask('done', 'multi'))),
+    );
+    expect(html).toContain('子任务执行');
+    expect(html).toContain('开场白');
   });
 });

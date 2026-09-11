@@ -11,7 +11,8 @@ mod merge;
 
 pub use backup::snapshot_database;
 pub use ddl::{
-    ensure_llm_requests_usage_columns, ensure_skills_progressive_columns,
+    ensure_llm_requests_usage_columns, ensure_memory_entries_fts_backfill,
+    ensure_memory_entries_pinned_column, ensure_skills_progressive_columns,
     ensure_task_llm_calls_finish_reason_column, ensure_task_messages_table,
     ensure_tasks_task_mode_column,
 };
@@ -410,6 +411,117 @@ mod tests {
         assert_eq!(
             migrated, fresh,
             "迁移后 task_llm_calls schema 应与新建库一致"
+        );
+        drop(conn);
+        fs::remove_dir_all(dir).ok();
+    }
+
+    /// memory_entries 升级(升级工作流 B1+B2):旧库(无 pinned 列 / 无 FTS)补列建索引成功、
+    /// pinned 默认 0、FTS 索引经 rebuild 回填旧行、幂等可重复执行,且迁移后 schema 与
+    /// 新版 CREATE_TABLES 一致(合并比对依赖)。
+    #[test]
+    fn ensure_memory_entries_pinned_and_fts_upgrade_and_is_idempotent() {
+        let dir = temp_dir("memory-entries-upgrade");
+        let db = dir.join(DATABASE_FILE);
+        let conn = Connection::open(&db).unwrap();
+        // 旧版表结构(升级工作流之前):无 pinned 列、无 FTS 索引
+        conn.execute_batch(
+            "CREATE TABLE memory_entries (
+              id                INTEGER PRIMARY KEY AUTOINCREMENT,
+              character_id      TEXT NOT NULL,
+              source_session_id TEXT,
+              kind              TEXT NOT NULL CHECK (kind IN ('distilled','tool','manual')),
+              content           TEXT NOT NULL,
+              usage_count       INTEGER NOT NULL DEFAULT 0,
+              last_usage        TEXT,
+              selected          INTEGER NOT NULL DEFAULT 1,
+              created_at        TEXT NOT NULL,
+              updated_at        TEXT NOT NULL
+            );
+            CREATE TABLE backfill_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memory_entries (character_id, kind, content, created_at, updated_at) \
+             VALUES ('c1', 'manual', '旧库记忆:图书馆初识', 'c', 'u')",
+            [],
+        )
+        .unwrap();
+
+        ensure_memory_entries_pinned_column(&conn).unwrap();
+        conn.execute_batch(super::ddl::MEMORY_ENTRIES_FTS_DDL)
+            .unwrap();
+        ensure_memory_entries_fts_backfill(&conn).unwrap();
+
+        // pinned 列默认 0
+        let pinned: i64 = conn
+            .query_row("SELECT pinned FROM memory_entries LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(pinned, 0, "旧行 pinned 应默认 0");
+        // FTS rebuild 已回填旧行
+        let hit: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_entries_fts WHERE content MATCH '\"图书馆\"'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hit, 1, "rebuild 应把旧行灌进 FTS 索引");
+        // trigger 同步:插入新行后 FTS 可见
+        conn.execute(
+            "INSERT INTO memory_entries (character_id, kind, content, created_at, updated_at) \
+             VALUES ('c1', 'manual', '新行:美术馆', 'c', 'u')",
+            [],
+        )
+        .unwrap();
+        let hit2: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_entries_fts WHERE content MATCH '\"美术馆\"'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hit2, 1, "AFTER INSERT trigger 应同步索引");
+
+        // 幂等:重复执行不报错、不重复 rebuild(backfill_meta 标记)
+        ensure_memory_entries_pinned_column(&conn).unwrap();
+        ensure_memory_entries_fts_backfill(&conn).unwrap();
+        let dup = table_columns(&conn, "main", "memory_entries")
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.name == "pinned")
+            .count();
+        assert_eq!(dup, 1, "重复迁移不应产生重复列");
+
+        // 迁移后 schema 与新版 CREATE_TABLES 建出的表 normalize 后一致
+        let migrated = normalize_sql(
+            conn.query_row(
+                "SELECT sql FROM sqlite_schema WHERE type='table' AND name='memory_entries'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap()
+            .as_str(),
+        );
+        let fresh_conn = Connection::open_in_memory().unwrap();
+        fresh_conn
+            .execute_batch(crate::models::db::create_tables_sql())
+            .unwrap();
+        let fresh = normalize_sql(
+            fresh_conn
+                .query_row(
+                    "SELECT sql FROM sqlite_schema WHERE type='table' AND name='memory_entries'",
+                    [],
+                    |r| r.get::<_, String>(0),
+                )
+                .unwrap()
+                .as_str(),
+        );
+        assert_eq!(
+            migrated, fresh,
+            "迁移后 memory_entries schema 应与新建库一致"
         );
         drop(conn);
         fs::remove_dir_all(dir).ok();

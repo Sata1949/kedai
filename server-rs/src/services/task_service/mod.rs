@@ -17,9 +17,10 @@ use super::log_query_failure;
 use crate::connectors::Connector;
 use crate::models::db::{now_iso, Db, PooledRead};
 use crate::models::types::{
-    CharacterRecord, GenerationParams, LlmMessage, LlmStreamChunk, SseEvent, TaskLlmCallRecord,
-    TaskMessageRecord, TaskRecord, TaskRunMode, TaskStatus, TaskStep, TaskStepStatus,
-    TaskSubtaskRecord, TaskSubtaskStatus, ToolCallArgs, ToolChoice, ToolContext, ToolDefinition,
+    CharacterRecord, GenerationParams, LlmMessage, LlmStreamChunk, SseEvent, TaskFollowupMode,
+    TaskLlmCallRecord, TaskMessageRecord, TaskRecord, TaskRunMode, TaskStatus, TaskStep,
+    TaskStepStatus, TaskSubtaskRecord, TaskSubtaskStatus, ToolCallArgs, ToolChoice, ToolContext,
+    ToolDefinition,
 };
 use crate::services::agent_flow_service::AgentFlowService;
 use crate::services::agent_subtask_service::AgentSubtaskService;
@@ -71,7 +72,8 @@ const PLAN_MAX_ATTEMPTS: u32 = 3;
 /// 严禁写操作(write/replace/create/memory_write/update_variables)与编排类
 /// (agentgo/agentend)——写操作违背 plan 模式「只规划不执行」零副作用纪律,
 /// 编排类会把规划阶段变成实际执行。
-const PLANNER_SCOUT_TOOLS: &[&str] = &["read", "search", "memory_read", "calculator"];
+/// 常量本体收敛在 tools::tool_sets::READONLY_SCOUT(单一出处,避免多处漂移)。
+const PLANNER_SCOUT_TOOLS: &[&str] = crate::tools::tool_sets::READONLY_SCOUT;
 
 /// 规划器侦察轮上限:工具调用最多 2 轮,随后最终轮不带工具强制产出计划 JSON
 /// (计划契约不变);侦察是增强环节,轮数封底防模型沉迷收集迟迟不出计划。
@@ -175,13 +177,21 @@ impl TaskService {
         let id = Uuid::new_v4().to_string();
         let now = now_iso();
         let cid = character_id.map(|s| s.to_string());
-        let conn = self.db.write();
-        conn.execute(
-            "INSERT INTO tasks (id, title, status, plan, result, error, character_id, created_at, updated_at, task_mode) \
-             VALUES (?1, ?2, 'pending', '[]', '', '', ?3, ?4, ?4, ?5)",
-            params![id, title, cid, now, mode.as_str()],
-        )
-        .map_err(|e| format!("创建任务失败: {e}"))?;
+        {
+            // 写锁作用域:INSERT 完成后立即释放——下方 add_task_message 会再次取
+            // db.write(),若仍持锁则自死锁(非重入锁)
+            let conn = self.db.write();
+            conn.execute(
+                "INSERT INTO tasks (id, title, status, plan, result, error, character_id, created_at, updated_at, task_mode) \
+                 VALUES (?1, ?2, 'pending', '[]', '', '', ?3, ?4, ?4, ?5)",
+                params![id, title, cid, now, mode.as_str()],
+            )
+            .map_err(|e| format!("创建任务失败: {e}"))?;
+        }
+        // 用户目标落 task_messages(role=user,kind=goal):任务模式的对话记录区
+        // 按 user/assistant 逐轮气泡呈现,目标作为首条用户发言(实跑问题 1)。
+        // 落库失败不阻断创建(消息是展示层增强,任务本身已建好)。
+        let _ = self.add_task_message(&id, "user", "goal", title);
         self.emit_event(
             "created",
             &id,

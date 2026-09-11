@@ -39,6 +39,12 @@ export interface CardScriptHostOptions {
   lorebookName: string | null;
   /** 当前会话消息(按楼层 0-based 正序),供 TavernHelper.getChatMessages */
   readMessages: () => CardChatMessage[];
+  /**
+   * 强制重建(实跑问题 7 R5):卡级脚本常在 boot 时用 getChatMessages(0) 扫描首楼
+   * 注入界面;若启动早于历史加载完成,读到空列表后不会再跑。调用方在历史首次就绪
+   * 时置 true 重建一次,避免「首屏空、之后不补跑」。
+   */
+  force?: boolean;
 }
 
 // ---- 世界书条目形态映射:kedai WorldBookEntry → 酒馆助手条目 ----
@@ -229,7 +235,8 @@ export function ensureOverlayRoot(container: HTMLElement, scopeId: string): HTML
 
 async function ensureInner(opts: CardScriptHostOptions): Promise<void> {
   const key = `${opts.characterId}:${opts.scriptHash}`;
-  if (active?.key === key) return;
+  // force:历史就绪后的补跑——同键也重建,让读到空消息的 boot 重新执行一次
+  if (active?.key === key && !opts.force) return;
   cleanupCardScriptSandbox();
   const runnable = opts.scripts.filter((s) => {
     if (isEsmScript(s.content)) {

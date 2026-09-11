@@ -147,14 +147,15 @@ const hitRate = computed<number | null>(() => computeHitRate(store.lastUsage));
       </button>
       </div>
       <!-- Agent 面板开关(面板合并后原「调用情况」独立拨杆收编:与任务工作台顶栏同一入口,
-           开合并面板(Agent 状态 / 调用情况双 tab,tab 位置由 uiPrefs.callTraceOpen 记忆),两模式共用) -->
-      <div class="sv-topbar-group">
+           开合并面板(Agent 状态 / 调用情况双 tab,tab 位置由 uiPrefs.callTraceOpen 记忆),两模式共用)
+           类名 sv-topbar-agent 供移动端隐藏:窄屏顶栏空间不足,该入口已由底部导航「AGENT」承载 -->
+      <div class="sv-topbar-group sv-topbar-agent">
         <button
           type="button"
           class="sv-render-toggle-v2"
           :aria-pressed="store.agentPanelOpen"
           :title="store.agentPanelOpen ? 'Agent 面板已开启(含调用情况)' : 'Agent 面板已关闭(含调用情况)'"
-          @click="store.agentPanelOpen = !store.agentPanelOpen"
+          @click="store.toggleAgentPanel()"
         >
           <span class="toggle-track" :class="{ on: store.agentPanelOpen }">
             <span class="toggle-thumb" />

@@ -605,4 +605,33 @@ describe('demoteInlineHandlers(inline 事件降级桥)', () => {
     expect(html).toContain('data-kd-onclick="go(this)"');
     expect(html).not.toContain(' onclick=');
   });
+
+  it('赛马娘卡形态:select onchange / input oninput / button onclick 全部降级存活,尾部脚本被提取', () => {
+    // 实景:该卡首楼 HTML 由 regex 替换串给出(含内联事件 + 尾部 <script> 定义
+    // updateDictDesc/submitCreation)。此处锁定入口链:三类事件降级为 data-kd-on* 且
+    // 过白名单存活,脚本正文被 extractScripts 收入 scripts[](供沙箱求值)。
+    const cardHtml = [
+      '```html',
+      '<!DOCTYPE html><html><head><style>#scroll-container{position:relative}</style></head><body>',
+      '<select id="identity-select" onchange="updateDictDesc(\'identity\', this.value)">',
+      '<option value="">—</option><option value="trainer1">训练员</option></select>',
+      '<input type="text" id="identity-custom-input" oninput="updateDictDesc(\'identity\', \'custom\')">',
+      '<div class="description-box" id="identity-desc-box">欢迎</div>',
+      '<button class="start-btn" onclick="submitCreation()">开始你的特雷森物语</button>',
+      '<script>function submitCreation(){return getSelectedOrCustomText("identity-select","identity-custom-input");}</script>',
+      '</body></html>',
+      '```',
+    ].join('\n');
+    const scoped = buildScopedScriptHtml(cardHtml, 'uma1');
+    expect(scoped.html).toContain('data-kd-onchange=');
+    expect(scoped.html).toContain('data-kd-oninput=');
+    expect(scoped.html).toContain('data-kd-onclick="submitCreation()"');
+    // 真实 on* 属性一律不存活(宿主文档绝不执行卡内 inline 代码)
+    expect(scoped.html).not.toMatch(/\son(change|input|click)=/);
+    // 表单控件与 id 保留(脚本经 getElementById/#id 定位)
+    expect(scoped.html).toContain('id="identity-select"');
+    expect(scoped.html).toContain('id="identity-desc-box"');
+    // 尾部脚本被提取进 scripts[](沙箱执行面)
+    expect(scoped.scripts.join('\n')).toContain('function submitCreation()');
+  });
 });

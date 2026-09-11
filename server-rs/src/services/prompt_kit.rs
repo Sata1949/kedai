@@ -9,22 +9,30 @@ use crate::models::types::CharacterRecord;
 use crate::parsing::world_book::WorldEntry;
 use crate::services::prompt_inject_service::{FloorRole, InjectMode, PromptInjectConfig};
 
-/// 世界书常驻条目文本:过滤 enabled && constant 且内容非空,按 position→order→id 排序,
-/// 拼成「世界书设定」段落。任务模式 world_context 与引擎侧世界书拼装共用同一过滤/格式化口径。
-pub fn constant_world_text(entries: &[WorldEntry]) -> String {
+/// 世界书常驻条目正文(过滤 enabled && constant 且内容非空,按 position→order→id 排序,
+/// 拼成 `[comment]\ncontent` 段落,无「世界书设定:」前缀)。供需要自定义前缀的调用方复用
+/// (如子智能体上下文的「常驻世界书设定:」)。
+pub fn constant_world_body(entries: &[WorldEntry]) -> String {
     let mut constants: Vec<&WorldEntry> = entries
         .iter()
         .filter(|e| e.enabled && e.constant && !e.content.trim().is_empty())
         .collect();
     constants.sort_by_key(|e| (e.position, e.order, e.id));
-    let texts: Vec<String> = constants
+    constants
         .iter()
         .map(|e| format!("[{}]\n{}", e.comment, e.content.trim()))
-        .collect();
-    if texts.is_empty() {
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// 世界书常驻条目文本:过滤 enabled && constant 且内容非空,按 position→order→id 排序,
+/// 拼成「世界书设定」段落。任务模式 world_context 与引擎侧世界书拼装共用同一过滤/格式化口径。
+pub fn constant_world_text(entries: &[WorldEntry]) -> String {
+    let body = constant_world_body(entries);
+    if body.is_empty() {
         String::new()
     } else {
-        format!("世界书设定:\n{}", texts.join("\n\n"))
+        format!("世界书设定:\n{body}")
     }
 }
 

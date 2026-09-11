@@ -27,7 +27,11 @@ export function splitTaskResult(mode: TaskRunMode, result: string): TaskResultSp
   const out: TaskResultSplit = { main: result, audit: '', finalPlan: '' };
   const mark = mode === 'team' ? AUDIT_MARK : mode === 'plan' ? FINAL_PLAN_MARK : '';
   if (!mark) return out;
-  const idx = result.indexOf(mark);
+  // 取**最后**一处标记:后端把拆出段拼在 result 最末尾,正文里复述同名标题
+  // (审计结论原文会作为汇总输入下发,模型有概率在正文中复述该标题)不应截错位置。
+  // 用 indexOf 取首个会把正文中的复述标记当成段起点,导致主成果卡被截半、审计卡
+  // 混入正文——观感上就是「多版本/内容混乱仍在」(实跑问题 2 连带给修复)。
+  const idx = result.lastIndexOf(mark);
   if (idx < 0) return out;
   out.main = result.slice(0, idx).trimEnd();
   const section = result.slice(idx);

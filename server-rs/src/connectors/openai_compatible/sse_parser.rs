@@ -163,9 +163,13 @@ impl SseParser {
                 reasoning_tokens,
             });
         }
-        // finish_reason:tool_calls 时 flush 工具调用,确保工具参数聚合完整;
-        // 其他非空值(stop/length/content_filter 等)产出 Finish 块供上层诊断
-        // (任务模式据此区分「真空响应」与「max_tokens 截断」);
+        // finish_reason 处理:
+        // - tool_calls:flush 工具调用(确保参数聚合完整),并同样产出 Finish 块——
+        //   带工具轮此前 finish 无值,任务模式调用面板的 finish 列空白(2026-09-10
+        //   六模式实测修复 F6);Finish 块不进事件流,仅上层 process_chunk 消费,
+        //   且截断自愈只认 length,故不影响既有行为。
+        // - 其他非空值(stop/length/content_filter 等)产出 Finish 块供上层诊断
+        //   (任务模式据此区分「真空响应」与「max_tokens 截断」)。
         // 不提前 flush 半截工具调用,残留的 pending 由 finish() 在流结束时统一兜底。
         if let Some(reason) = v
             .pointer("/choices/0/finish_reason")
@@ -173,7 +177,8 @@ impl SseParser {
         {
             if reason == "tool_calls" {
                 self.flush_tool_calls(out)?;
-            } else if !reason.is_empty() {
+            }
+            if !reason.is_empty() {
                 out.push(LlmStreamChunk::Finish {
                     reason: reason.to_string(),
                 });

@@ -359,6 +359,67 @@ pub(in crate::agents::engine) fn insert_memory_slot(
     true
 }
 
+// ===== 召回槽(升级工作流 B2 通道 2) =====
+// 通道 1(记忆槽)是「常驻精选」,位于数组前部;通道 2 按当前用户输入做相关性召回,
+// 作为尾部追加的独立 system 消息——放在消息数组末尾,只影响尾部,不破坏
+// system/摘要槽/记忆槽/历史的既有前缀(前缀缓存前提)。
+
+/// 召回槽标记前缀:测试与调试据此识别通道 2 消息
+pub(in crate::agents::engine) const RECALL_SLOT_MARKER: &str = "【相关记忆召回】";
+
+/// 把按当前输入召回的记忆作为尾部独立 system 消息追加(数组末尾)。
+/// contents 为已按相关性排序的记忆正文,每条一行「- content」;
+/// 空列表或全空白不动数组(行为与无召回现状一致)。返回是否插入。
+/// `notice` 非空时追加一行显式提示(预算截断等),不静默丢弃。
+pub(in crate::agents::engine) fn insert_recall_slot(
+    messages: &mut Vec<LlmMessage>,
+    contents: &[String],
+    notice: Option<&str>,
+) -> bool {
+    let lines: Vec<&str> = contents
+        .iter()
+        .map(|c| c.trim())
+        .filter(|c| !c.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return false;
+    }
+    let mut body = lines
+        .iter()
+        .map(|l| format!("- {l}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if let Some(n) = notice.map(str::trim).filter(|n| !n.is_empty()) {
+        body.push('\n');
+        body.push_str(n);
+    }
+    let slot = LlmMessage::plain("system", &format!("{RECALL_SLOT_MARKER}\n{body}"));
+    // 尾部追加:通道 2 只在数组末尾生长,不打断已有公共前缀
+    messages.push(slot);
+    true
+}
+
+/// 预算截断提示兜底:在已插入的记忆槽/召回槽末尾追加一行显式提示
+/// (从后往前找,优先召回槽;找不到槽返回 false)。用于「通道 2 无可注入条目、
+/// 但通道 1 因预算被截断」的场景,保证截断不被静默丢弃。
+pub(in crate::agents::engine) fn append_memory_notice(
+    messages: &mut [LlmMessage],
+    notice: &str,
+) -> bool {
+    let notice = notice.trim();
+    if notice.is_empty() {
+        return false;
+    }
+    if let Some(slot) = messages.iter_mut().rev().find(|m| {
+        m.content.starts_with(MEMORY_SLOT_MARKER) || m.content.starts_with(RECALL_SLOT_MARKER)
+    }) {
+        slot.content.push('\n');
+        slot.content.push_str(notice);
+        return true;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

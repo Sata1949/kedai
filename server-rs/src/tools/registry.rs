@@ -2,6 +2,7 @@
 // 执行器为 async(sleep/agentgo/search 等工具需要异步能力),签名:
 //   Fn(Value, ToolContext) -> BoxFuture<Result<String, String>>
 use crate::models::types::{ToolContext, ToolDefinition};
+use crate::tools::action_class::ToolOrigin;
 use crate::tools::permissions::{PermissionDecision, ToolPermissionManager};
 use futures::future::BoxFuture;
 use serde_json::Value;
@@ -25,6 +26,9 @@ pub struct RegisteredTool {
     /// 该工具的执行超时;None = 跟随注册表 tool_timeout(默认 30s,测试可缩短)。
     /// MCP 等慢外部工具经 register_with_timeout 显式放宽(批次 6.2)。
     pub timeout: Option<Duration>,
+    /// 工具来源(内置/插件/MCP):三档授权模式据此判定路径区域可信度
+    /// (内置文件工具受角色文件区沙箱约束,外部工具的参数对引擎不透明)。
+    pub origin: ToolOrigin,
 }
 
 pub struct ToolRegistry {
@@ -82,6 +86,18 @@ impl ToolRegistry {
         execute: ToolExecutor,
         timeout: Option<Duration>,
     ) {
+        self.register_external(definition, execute, timeout, ToolOrigin::Builtin);
+    }
+
+    /// 带来源标记的注册:插件与 MCP 工具须经此登记 origin,
+    /// 否则三档授权模式会把外部工具误当作受沙箱约束的内置工具。
+    pub fn register_external(
+        &self,
+        definition: ToolDefinition,
+        execute: ToolExecutor,
+        timeout: Option<Duration>,
+        origin: ToolOrigin,
+    ) {
         let mut g = self.tools.lock().unwrap_or_else(|e| e.into_inner());
         g.insert(
             definition.name.clone(),
@@ -89,8 +105,23 @@ impl ToolRegistry {
                 definition,
                 execute,
                 timeout,
+                origin,
             },
         );
+    }
+
+    /// 工具来源;未注册返回 None。裁决时用于区分沙箱内外的路径可信度。
+    pub fn origin_of(&self, name: &str) -> Option<ToolOrigin> {
+        self.tools
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(name)
+            .map(|t| t.origin)
+    }
+
+    /// 是否内置工具(受角色文件区沙箱约束)
+    pub fn is_builtin(&self, name: &str) -> bool {
+        self.origin_of(name) == Some(ToolOrigin::Builtin)
     }
 
     pub fn unregister(&self, name: &str) {

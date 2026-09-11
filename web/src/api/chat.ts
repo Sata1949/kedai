@@ -47,7 +47,7 @@ export function clearCompactChat(sessionId: string): Promise<{ ok: boolean; clea
 
 /** 空 usage(错误分支兜底:保证 finish 事件结构完整,store 能安全复位) */
 function emptyUsage(): TokenUsage {
-  return { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, context_tokens: 0, prompt_cache_hit_tokens: 0 };
+  return { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, context_tokens: 0, prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: 0 };
 }
 
 export interface SseParser {

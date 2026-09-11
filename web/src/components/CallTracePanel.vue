@@ -116,6 +116,10 @@ function ensureLoaded(): void {
 }
 onMounted(ensureLoaded);
 watch(currentTaskId, ensureLoaded);
+// 实跑问题 4:启动时 appMode 已是 task(停在任务模式)而 currentTaskId 由
+// store.restoreSelectedTask 稍后异步恢复;此处 appMode 变化也补拉一次,
+// 避免 ensureLoaded 早于 currentTaskId 就绪而漏掉首屏加载。
+watch(appMode, ensureLoaded);
 // 合并面板内 tab 由 callTraceOpen 记忆(true = 落在「调用情况」tab):切入本 tab 时补拉一次
 watch(callTraceOpen, (open) => {
   if (open) ensureLoaded();

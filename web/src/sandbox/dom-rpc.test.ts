@@ -2,7 +2,7 @@
 // 覆盖:覆层根优先映射($('head')/$('body') → 覆层根)、注入节点 data-kd-injected、
 // 覆层根直系子节点 pointer-events:auto。
 import { describe, expect, it } from 'vitest';
-import { applyJq, overlayRootOf } from './dom-rpc';
+import { applyJq, applyRpc, overlayRootOf } from './dom-rpc';
 import type { JqOperation } from './protocol';
 
 class StubEl {
@@ -200,5 +200,108 @@ describe('注入节点标记(data-kd-injected)', () => {
     const created = root.children[0];
     expect(created.dataset.uiDraggable).toBe('1');
     expect(created.attrs['data-kd-injected']).toBe('1');
+  });
+});
+
+// ===== 实跑问题 7 R3:事件委托 / 命名空间 / off 真解绑(宿主端) =====
+describe('applyJq 事件绑定(on/off,实跑问题 7 R3)', () => {
+  /** 带监听器捕获的元素桩(closest 命中委托目标) */
+  class EvEl extends StubEl {
+    listeners: Array<{ type: string; fn: (ev: unknown) => void }> = [];
+    closestResult: EvEl | null = null;
+    addEventListenerFn(type: string, fn: (ev: unknown) => void): void {
+      this.listeners.push({ type, fn });
+    }
+    fire(type: string, target?: unknown): void {
+      for (const l of this.listeners.filter((x) => x.type === type)) l.fn({ type, target: target ?? this });
+    }
+  }
+
+  function setup(matches: EvEl[]) {
+    const doc = { createElement: (_t: string): StubEl => new StubEl(doc) };
+    const container = new StubEl(doc);
+    container.attrs['data-kd-scope'] = 'card-c1';
+    container.querySelector = () => null;
+    container.querySelectorAll = () => matches;
+    // EvEl 需要真实的 addEventListener 行为(getters 走镜像)
+    for (const m of matches) {
+      (m as unknown as { addEventListener: unknown }).addEventListener = m.addEventListenerFn.bind(m);
+      (m as unknown as { removeEventListener: unknown }).removeEventListener = (): void => {};
+      (m as unknown as { closest: unknown }).closest = (): EvEl | null => m.closestResult;
+    }
+    const posted: Array<Record<string, unknown>> = [];
+    const targetWindow = { postMessage: (m: Record<string, unknown>) => void posted.push(m) } as unknown as Window;
+    const bindings: Array<Record<string, unknown>> = [];
+    const run = (method: string, args: unknown[]): unknown =>
+      applyJq(
+        container as unknown as HTMLElement,
+        // 非 body 选择器:走 querySelectorAll(本桩返回 matches)
+        sel('.item'),
+        method,
+        args,
+        targetWindow,
+        'n1',
+        new Map(),
+        () => 1,
+        () => {},
+        bindings as never,
+      );
+    return { run, posted, bindings, matches };
+  }
+
+  it('命名空间剥离:on("click.myNS") 用基础事件名绑定', () => {
+    const el = new EvEl({} as never);
+    const { run } = setup([el]);
+    run('on', ['click.myNS', 7, null]);
+    expect(el.listeners.map((l) => l.type)).toEqual(['click']);
+  });
+
+  it('委托绑定:事件命中 closest(selector) 时回发该目标状态;未命中不回发', () => {
+    const el = new EvEl({} as never);
+    const hit = new EvEl({} as never);
+    hit.id = 'modal-btn';
+    const { run, posted } = setup([el]);
+    run('on', ['click', 9, '.modal-btn']);
+    // 未命中:目标元素 closest 返回 null → 忽略
+    el.closestResult = null;
+    el.fire('click', { closest: () => null });
+    expect(posted).toHaveLength(0);
+    // 命中:回发 jq-event,携带命中目标 id
+    el.closestResult = hit;
+    el.fire('click', { closest: () => hit });
+    const ev = posted.find((p) => p.type === 'jq-event');
+    expect(ev).toBeTruthy();
+    expect(ev?.jqId).toBe(9);
+    expect((ev?.target as { id: number })?.id).toBeGreaterThan(0);
+  });
+
+  it('off(evt) 真解绑已登记的该事件监听(旧实现 no-op,重复绑定累积)', () => {
+    const el = new EvEl({} as never);
+    const { run, bindings } = setup([el]);
+    run('on', ['click', 3, null]);
+    expect(bindings).toHaveLength(1);
+    run('off', ['click']);
+    expect(bindings).toHaveLength(0);
+  });
+
+  it('clipboard-write 交给宿主 navigator.clipboard(无 clipboard 时返回 false,不抛错)', () => {
+    const doc = { createElement: (_t: string): StubEl => new StubEl(doc) };
+    const container = new StubEl(doc);
+    const context = {
+      container: container as unknown as HTMLElement,
+      characterId: 'c1',
+    } as never;
+    const result = applyRpc(context, 'clipboard-write', ['要复制的文本']);
+    // node 环境无 navigator.clipboard:返回 false(Promise 或布尔都不抛错,不拆沙箱)
+    expect(result === false || result instanceof Promise).toBe(true);
+  });
+
+  it('纯数据 op 未注入扩展点时返回 null 而非抛选择器错误(实跑问题 7 主因兜底)', () => {
+    const doc = { createElement: (_t: string): StubEl => new StubEl(doc) };
+    const container = new StubEl(doc);
+    const context = { container: container as unknown as HTMLElement, characterId: 'c1' } as never;
+    // chat-messages 首参是楼层序号;旧实现把它当 CSS 选择器 → safeSelector 抛错 → 沙箱拆除
+    expect(applyRpc(context, 'chat-messages', [0])).toBeNull();
+    expect(applyRpc(context, 'lorebook-entries', ['主世界书'])).toBeNull();
   });
 });

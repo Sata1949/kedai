@@ -53,12 +53,28 @@ struct TeamMain {
     goals: Vec<TaskStep>,
 }
 
-/// 审计结论:通过/打回列表/结论文本(解析失败兜底 pass=true,审计不沉任务)
+/// 审计打回条目:定位粒度到「主 agent 的某个子目标」。
+/// `step` 为 1-based 的主内子目标序号(审计输出新增可选字段);缺省(None)= 审计未
+/// 指明子目标,退回整主补做,保持对旧审计输出的兼容。定位到具体子目标可避免
+/// 「打回一个子目标却重跑该主全部子目标、各再造一版」的版本爆炸(实跑问题 2)。
+#[derive(Debug, Clone, PartialEq)]
+struct Kickback {
+    /// 主 agent 序号(0-based)
+    main: usize,
+    /// 主内子目标序号(0-based;None = 整主)
+    step: Option<usize>,
+    /// 补做指令
+    instruction: String,
+}
+
+/// 审计结论:通过/打回列表/结论文本。
+/// 解析失败或输出截断时**按未通过兜底**(实跑问题 2:旧实现默认 pass=true,审计可
+/// 静默失效;审计是质量闸门,读不出明确通过就不应判定通过)——结论段给干净说明,
+/// 不把半截 JSON 原样灌进 result;打回为空时由调用方映射为 partial 终态。
 #[derive(Debug, Clone)]
 struct AuditVerdict {
     pass: bool,
-    /// (主 agent 序号 0-based, 补做指令)
-    kickbacks: Vec<(usize, String)>,
+    kickbacks: Vec<Kickback>,
     conclusion: String,
 }
 
@@ -158,16 +174,12 @@ fn parse_team_topology(text: &str) -> Result<Vec<TeamMain>, String> {
     Ok(mains)
 }
 
-/// 解析审计输出:{"通过":bool,"打回":[{"main":1-based 序号,"instruction":"..."}],"结论":"..."}。
-/// 解析失败兜底 pass=true、结论=原文(审计是增强环节,格式异常不应沉掉整个任务);
-/// 打回序号越界的条目丢弃(防 LLM 幻觉引用不存在的主 agent);同一主重复打回只保留
-/// 首条(防同一虚拟 session task:{id}:main:{n} 在补做轮被并发 spawn 两次)。
+/// 解析审计输出:{"通过":bool,"打回":[{"main":1-based 序号,"step":主内 1-based 子目标
+/// 序号(可选),"instruction":"..."}],"结论":"..."}。
+/// 解析失败/截断一律按**未通过**兜底(见 AuditVerdict 文档;实跑问题 2 修复);
+/// 打回序号越界的条目丢弃(防 LLM 幻觉引用不存在的主 agent);同一定位(主 + 子目标)
+/// 重复打回只保留首条(防同一虚拟 session 在补做轮被并发 spawn 两次)。
 fn parse_audit(text: &str, mains_count: usize) -> AuditVerdict {
-    let fallback = || AuditVerdict {
-        pass: true,
-        kickbacks: Vec::new(),
-        conclusion: text.trim().to_string(),
-    };
     let t = text.trim();
     let stripped = t
         .trim_start_matches("```json")
@@ -179,34 +191,39 @@ fn parse_audit(text: &str, mains_count: usize) -> AuditVerdict {
         _ => stripped,
     };
     let Ok(v) = serde_json::from_str::<serde_json::Value>(candidate) else {
-        // 腰斩 JSON(推理模型烧光预算的截断形态,自愈重发仍截断时的末层防线)
-        // 与纯文本回复区别对待:前者结论段给干净说明——半截 JSON 原样进
-        // result「## 审计结论」卡既难看又误导;原文记 warn 字段备查
-        if stripped.starts_with('{') {
-            tracing::warn!(
-                head = stripped.chars().take(120).collect::<String>(),
-                "team 审计输出为截断 JSON,按通过兜底"
-            );
-            return AuditVerdict {
-                pass: true,
-                kickbacks: Vec::new(),
-                conclusion: "(审计输出不完整,按通过兜底)".to_string(),
-            };
-        }
-        tracing::warn!("team 审计输出非 JSON,按通过兜底");
-        return fallback();
+        // 解析失败(含推理模型烧光预算的腰斩 JSON):审计质量闸门读不出明确通过,
+        // 按未通过处理;结论段给干净说明——半截 JSON 原样进 result「## 审计结论」
+        // 卡既难看又误导;原文记 warn 字段备查
+        tracing::warn!(
+            head = stripped.chars().take(120).collect::<String>(),
+            "team 审计输出无法解析,按未通过兜底"
+        );
+        let conclusion = if stripped.starts_with('{') {
+            "(审计输出不完整,无法确认通过)".to_string()
+        } else {
+            t.to_string()
+        };
+        return AuditVerdict {
+            pass: false,
+            kickbacks: Vec::new(),
+            conclusion,
+        };
     };
-    let pass = v.get("通过").and_then(|b| b.as_bool()).unwrap_or(true);
+    let pass = v.get("通过").and_then(|b| b.as_bool()).unwrap_or(false);
     let conclusion = v
         .get("结论")
         .and_then(|s| s.as_str())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| text.trim().to_string());
-    let mut kickbacks: Vec<(usize, String)> = Vec::new();
+        // JSON 合法但缺「结论」:回填固定文案,不把裸 JSON(整段原文是 `{"通过":…}`)
+        // 灌进 result 的「## 审计结论」卡——那既难看又误导(实跑问题 2 连带给修复)
+        .unwrap_or_else(|| "(审计未给出结论)".to_string());
+    let mut kickbacks: Vec<Kickback> = Vec::new();
     if let Some(arr) = v.get("打回").and_then(|a| a.as_array()) {
         for item in arr {
             let main = item.get("main").and_then(|n| n.as_u64()).unwrap_or(0) as usize;
+            // step 为可选的主内 1-based 子目标序号;缺省 = 整主补做(兼容旧输出)
+            let step = item.get("step").and_then(|n| n.as_u64()).map(|n| n as usize);
             let instruction = item
                 .get("instruction")
                 .and_then(|s| s.as_str())
@@ -215,12 +232,25 @@ fn parse_audit(text: &str, mains_count: usize) -> AuditVerdict {
                 .to_string();
             if main >= 1 && main <= mains_count && !instruction.is_empty() {
                 let idx = main - 1;
-                // 同一主重复打回只保留首条(补做轮每主一个 spawn,重复条目会并发复用同一虚拟 session)
-                if kickbacks.iter().any(|(m, _)| *m == idx) {
-                    tracing::warn!(main = main, "team 审计打回条目与既有条目同主,已保留首条");
+                // step 越界(0)视为未指明 → 整主补做,不错失问题上报;先归一到 0-based
+                // 再做去重比较(否则 1-based 与已存 0-based 不一致,去重失效)
+                let step0 = step.filter(|s| *s >= 1).map(|s| s - 1);
+                // 同一定位(主 + 子目标)重复打回只保留首条(补做轮每定位一个 spawn)
+                if kickbacks
+                    .iter()
+                    .any(|k| k.main == idx && k.step == step0)
+                {
+                    tracing::warn!(
+                        main = main,
+                        "team 审计打回条目与既有条目同定位,已保留首条"
+                    );
                     continue;
                 }
-                kickbacks.push((idx, instruction));
+                kickbacks.push(Kickback {
+                    main: idx,
+                    step: step0,
+                    instruction,
+                });
             } else {
                 tracing::warn!(
                     main = main,
@@ -372,6 +402,8 @@ impl TeamExecutor {
                 Ok(mains) => return Ok((mains, out)),
                 Err(e) => last_err = e,
             }
+            // 失败 attempt 同步入账 usage(口径同 plan_task_retry;2026-09-10 实测修复)
+            self.svc.record_usage(&ctx.task_id, "planner", None, &out);
             let reason = out.finish_reason.as_deref().unwrap_or("");
             tracing::warn!(
                 attempt = attempt,
@@ -393,6 +425,7 @@ impl TeamExecutor {
     /// agent 调用,同一主的多个子目标复用同一虚拟 session task:{id}:main:{n} 保持
     /// 人设一致)。返回 (主序号 0-based, 各子目标结果[全局步骤下标, 子目标名, 结果]),
     /// 由调用方逐个回写 plan 步骤并聚合进审计/汇总输入。
+    #[allow(clippy::too_many_arguments)]
     async fn run_main(
         &self,
         ctx: &TaskRunContext,
@@ -400,18 +433,35 @@ impl TeamExecutor {
         main: &TeamMain,
         step_idxs: &[usize],
         extra_instruction: Option<&str>,
+        goal_filter: Option<&[usize]>,
+        prior_seed: Vec<(String, String)>,
     ) -> (
         usize,
         Vec<(usize, String, Result<(String, TokenUsage), String>)>,
     ) {
         let n = main_index + 1;
-        let count = main.goals.len();
         let session_id = format!("task:{}:main:{}", ctx.task_id, n);
-        let mut results = Vec::with_capacity(count);
+        let mut results = Vec::with_capacity(main.goals.len());
+        // 本主已完成子目标的产出:(子目标名, 产出) —— 注入后续子目标,让同一主内各
+        // 子目标在彼此成果上衔接,而非各自重造一整份交付物(实跑问题 2 结构性根因)。
+        // 首轮为空、循环内自然累积;补做轮因跳过未点名子目标(见下方 continue),必须由
+        // 调用方经 prior_seed 显式种入该主既有产出,否则补做子目标既看不到同主其他成果,
+        // 也看不到自己被替换的旧版本,版本冲突会在打回场景原样复现。
+        let mut prior: Vec<(String, String)> = prior_seed;
         for (k, g) in main.goals.iter().enumerate() {
+            // 子目标粒度补做:仅重跑被点名的子目标(其余保留首轮产出);
+            // 被跳过的子目标仍要入 results(带既有产出)以便调用方统一回写/重建
+            if let Some(only) = goal_filter {
+                if !only.contains(&k) {
+                    continue;
+                }
+            }
             // 取消(含上一子目标被中断后):剩余子目标统一标记中断,保证每步都有终态
             if *ctx.cancel.borrow() {
                 for (k2, g2) in main.goals.iter().enumerate().skip(k) {
+                    if goal_filter.is_some_and(|only| !only.contains(&k2)) {
+                        continue;
+                    }
                     results.push((step_idxs[k2], g2.name.clone(), Err("任务已停止".into())));
                 }
                 break;
@@ -421,10 +471,20 @@ impl TeamExecutor {
                 ctx.goal,
                 main.name,
                 k + 1,
-                count,
+                main.goals.len(),
                 g.name,
                 g.goal
             );
+            // 同主前序产出:仅供衔接与保持一致,明确禁止整篇复述或另造版本
+            if !prior.is_empty() {
+                goal.push_str(
+                    "\n本主此前已完成子目标的产出(仅供衔接与保持一致;不要在本次产出中整篇复述或另起一版):\n",
+                );
+                for (name, text) in &prior {
+                    let brief: String = text.trim().chars().take(1200).collect();
+                    goal.push_str(&format!("- 「{name}」:{brief}\n"));
+                }
+            }
             if let Some(extra) = extra_instruction {
                 goal.push_str(&format!("\n审计补做指令:\n{extra}\n"));
             }
@@ -446,6 +506,10 @@ impl TeamExecutor {
                 ctx.cancel.clone(),
             )
             .await;
+            // 成功产出进 prior 供后续子目标衔接(失败不注入,避免把错误文本当参考)
+            if let Ok((text, _)) = &result {
+                prior.push((g.name.clone(), text.clone()));
+            }
             results.push((step_idxs[k], g.name.clone(), result));
         }
         (main_index, results)
@@ -487,24 +551,12 @@ impl TeamExecutor {
         svc.set_status(&ctx.task_id, TaskStatus::Running);
 
         // ===== b. 各主 agent 并行(JoinSet;独立 run_id/虚拟 session,cancel 同源) =====
-        let outputs: Vec<Option<String>> = vec![None; mains.len()];
-        let mut had_error = false;
-        let (outputs, cancelled) = self
-            .run_mains_parallel(
-                &ctx,
-                &mains,
-                &step_ranges,
-                &mut plan,
-                outputs,
-                &mut total,
-                &mut had_error,
-                None,
-            )
+        let (mut outputs, cancelled) = self
+            .run_mains_parallel(&ctx, &mains, &step_ranges, &mut plan, &mut total, None)
             .await;
         if cancelled {
             return Err("任务已停止".into());
         }
-        let mut outputs = outputs;
         if outputs.iter().all(|o| o.is_none()) {
             return Err("全部主 agent 执行失败,团队无产出".into());
         }
@@ -536,6 +588,9 @@ impl TeamExecutor {
         // 有打回 = 补做后的终审结论(修复:旧实现永远挂首次打回原文,任务 done
         // 而 result 结尾仍显示「需要补全」)
         let mut final_conclusion = verdict.conclusion.clone();
+        // 终态闸门(实跑问题 2):审计/终审未通过则任务不得判 done。
+        // 无打回时即首次审计结论;有打回时以补做后的终审裁定覆盖。
+        let mut final_pass = verdict.pass;
 
         // 打回补做:仅一轮,补做完成后追加终审(只产出结论文本,不再打回)
         if !verdict.pass && !verdict.kickbacks.is_empty() {
@@ -545,7 +600,7 @@ impl TeamExecutor {
                 None,
                 None,
                 Some(format!(
-                    "审计打回 {} 个主 agent 补做",
+                    "审计打回 {} 处补做",
                     verdict.kickbacks.len()
                 )),
             );
@@ -555,9 +610,7 @@ impl TeamExecutor {
                     &mains,
                     &step_ranges,
                     &mut plan,
-                    outputs,
                     &mut total,
-                    &mut had_error,
                     Some(&verdict.kickbacks),
                 )
                 .await;
@@ -591,16 +644,23 @@ impl TeamExecutor {
             if *ctx.cancel.borrow() {
                 return Err("任务已停止".into());
             }
-            let conclusion = review_out.text.trim();
-            if conclusion.is_empty() {
+            // 终审:基于补做后的最终产出做裁定(结构化 JSON);解析失败/空输出按未通过
+            // 兜底(终审是终态闸门,读不出明确通过就不判 done);结论段空输出时回退首次
+            // 审计结论,避免「## 审计结论」段空白
+            let review_verdict = parse_audit(&review_out.text, mains.len());
+            final_pass = review_verdict.pass;
+            if review_out.text.trim().is_empty() {
                 tracing::warn!("team 终审返回空内容,审计结论段回退为首次审计结论");
             } else {
-                final_conclusion = conclusion.to_string();
+                final_conclusion = review_verdict.conclusion;
             }
         }
 
         // ===== d. 升华整合:整合文本 + 审计结论段(前端拆卡契约) =====
-        let summary_input = build_audit_input(&ctx.goal, &mains, &outputs);
+        // 汇总输入携带审计结论与已选定版本,并要求「只整合、不另起一版」——旧实现
+        // 汇总与审计互不可见,汇总自由再生产一版,导致正文与审计结论不同源
+        //(实跑问题 2)。
+        let summary_input = build_summary_input(&ctx.goal, &mains, &outputs, &final_conclusion);
         let mut sum_sys = String::from(SUMMARIZER_PROMPT);
         let world = svc.world_context(ctx.character_id.as_deref());
         if !world.is_empty() {
@@ -648,13 +708,33 @@ impl TeamExecutor {
             return Err("团队汇总返回空内容".into());
         }
 
-        // ===== e. 收尾:有主失败但有产出 → partial(对齐 legacy partial 语义) =====
+        // ===== e. 收尾:终态失败步骤或审计/终审未通过 → partial;全部通过 → done =====
+        // 实跑问题 2:审计不通过(含解析失败兜底未通过、补做后终审仍不过)不得判定
+        // done——审计是质量闸门,其结论必须反映到终态;未通过时任务以 partial 交付,
+        // 由用户决定是否追加指令继续修。
+        // 失败步骤判定以 plan 终态为准(而非累加式 had_error):补做成功的步骤已被覆盖为
+        // Done,不应再拖累终态——旧实现 had_error 一旦置位永不复位,导致「失败 → 打回补做
+        // 成功 → 终审通过」仍判 partial 且 error 为空、用户无从解释(实跑问题 2)。
+        let failed_steps = error_step_labels(&plan);
+        let failed = has_error_steps(&plan);
         let text = format!(
             "{}\n\n## 审计结论\n{}",
             summary_out.text.trim(),
             final_conclusion
         );
-        let status = if had_error {
+        // partial 原因:优先说明失败子目标(具体可定位),否则归因于审计/终审未通过;
+        // Done 时为 None(complete_mode_run 写空串清掉上一轮残留 error)
+        let error = if failed {
+            Some(format!(
+                "以下子目标执行失败,成果不完整:{}",
+                failed_steps.join("、")
+            ))
+        } else if !final_pass {
+            Some("审计/终审未通过,未达交付标准(详见「审计结论」)".to_string())
+        } else {
+            None
+        };
+        let status = if error.is_some() {
             Some(TaskStatus::Partial)
         } else {
             None
@@ -663,12 +743,16 @@ impl TeamExecutor {
             text,
             usage: total,
             status,
+            error,
         })
     }
 
-    /// 并行跑一批主 agent(首轮 = 全部;补做轮 = kickbacks 指定子集,目标文本附补做指令)。
+    /// 并行跑一批主 agent(首轮 = 全部;补做轮 = 打回指定子集/子目标,目标文本附补做指令)。
     /// 主 agent 内按子目标逐个独立执行,每子目标完成即推进其 plan 步骤
     ///(running→done/error,写库成功才发事件由 set_plan 保证)。
+    /// 各主产出**在收尾时从 plan 统一重建**(而非就地拼接本轮 sections):plan 是子目标
+    /// 结果的唯一真相源,重建保证补做替换旧版本、未打回主保留原产出、不出现新旧并存
+    ///(实跑问题 2)。
     /// 返回 (各主产出, 是否被任务取消中断);某主部分子目标失败时产出保留成功部分
     ///(附失败说明供审计覆盖度判定),全部子目标失败才记 None。
     #[allow(clippy::too_many_arguments)]
@@ -678,32 +762,91 @@ impl TeamExecutor {
         mains: &[TeamMain],
         step_ranges: &[Vec<usize>],
         plan: &mut [TaskStep],
-        mut outputs: Vec<Option<String>>,
         total: &mut TokenUsage,
-        had_error: &mut bool,
-        kickbacks: Option<&[(usize, String)]>,
+        kickbacks: Option<&[Kickback]>,
     ) -> (Vec<Option<String>>, bool) {
         let svc = &self.svc;
-        // 确定本轮要跑的主 agent 子集
-        let batch: Vec<(usize, Option<String>)> = match kickbacks {
-            None => (0..mains.len()).map(|i| (i, None)).collect(),
-            Some(list) => list
-                .iter()
-                .map(|(i, ins)| (*i, Some(ins.clone())))
-                .collect(),
+        // 确定本轮要跑的主 agent 子集:(主序号, 补做指令, 限定的子目标下标集)。
+        // 子目标下标先按该主实际子目标数过滤:越界/为空 → 退回整主(审计 step 越界
+        // 或该主全部被点名时都不至于漏跑或空跑)。
+        let batch: Vec<(usize, Option<String>, Option<Vec<usize>>)> = match kickbacks {
+            None => (0..mains.len()).map(|i| (i, None, None)).collect(),
+            Some(list) => {
+                // 同一主的多个打回条目合并为一轮 spawn:step=None 视为整主(不设过滤),
+                // 有具体 step 的取并集(指令合并);避免同一虚拟 session 被并发 spawn。
+                let mut merged: Vec<(usize, Option<Vec<usize>>, Vec<String>)> = Vec::new();
+                for k in list {
+                    match merged.iter_mut().find(|(m, _, _)| *m == k.main) {
+                        Some((_, steps, ins)) => {
+                            match (&mut *steps, k.step) {
+                                // 任一条目未指明子目标 = 整主补做(放宽为不过滤)
+                                (s @ Some(_), None) => *s = None,
+                                (Some(s), Some(step)) => {
+                                    if !s.contains(&step) {
+                                        s.push(step);
+                                    }
+                                }
+                                (None, _) => {}
+                            }
+                            ins.push(k.instruction.clone());
+                        }
+                        None => merged.push((
+                            k.main,
+                            k.step.map(|s| vec![s]),
+                            vec![k.instruction.clone()],
+                        )),
+                    }
+                }
+                merged
+                    .into_iter()
+                    .map(|(i, steps, ins)| {
+                        // 过滤越界子目标:全部越界 → 整主(不设过滤),否则只跑命中项
+                        let filtered = steps.and_then(|s| {
+                            let max = mains[i].goals.len();
+                            let kept: Vec<usize> =
+                                s.into_iter().filter(|x| *x < max).collect();
+                            if kept.is_empty() {
+                                None
+                            } else {
+                                Some(kept)
+                            }
+                        });
+                        (i, Some(ins.join("\n")), filtered)
+                    })
+                    .collect()
+            }
         };
-        // 步骤置 running 并落库(事件随 set_plan 发射)
-        for (i, _) in &batch {
+        // 补做轮的 prior 种子在此快照:必须早于下方「置 running」——否则被打回子目标
+        // 自身已被置为 Running,会被 before_kickback_prior 的 Done 过滤跳过,补做者
+        // 看不到自己的旧版本(实测踩坑:只剩同门未打回子目标的产出)。
+        // 按 batch 顺序与 spawn 一一对应;整主/首轮为空 vec(首轮走循环内自然累积)。
+        let prior_seeds: Vec<Vec<(String, String)>> = batch
+            .iter()
+            .map(|(i, _, filter)| before_kickback_prior(step_ranges, plan, *i, filter.as_deref()))
+            .collect();
+        // 步骤置 running 并落库(事件随 set_plan 发射):只置本轮真正会跑的步骤——
+        // 子目标粒度补做时被跳过的步骤保持原终态,不得留 running(实跑问题 2)。
+        for (i, _, filter) in &batch {
             for &si in &step_ranges[*i] {
-                plan[si].status = TaskStepStatus::Running;
+                let will_run = match filter {
+                    None => true,
+                    Some(steps) => {
+                        // filter 存的是主内子目标下标;映射回全局步骤下标比对
+                        main_goal_index(step_ranges, *i, si)
+                            .is_some_and(|k| steps.contains(&k))
+                    }
+                };
+                if will_run {
+                    plan[si].status = TaskStepStatus::Running;
+                }
             }
         }
         svc.set_plan(&ctx.task_id, plan);
         // 本轮 batch 的主序号留底:JoinError 兜底置 error 时用(spawn 循环会消耗 batch)
-        let batch_idx: Vec<usize> = batch.iter().map(|(i, _)| *i).collect();
+        let batch_idx: Vec<usize> = batch.iter().map(|(i, _, _)| *i).collect();
 
         let mut join: JoinSet<MainJoinOutput> = JoinSet::new();
-        for (i, extra) in batch {
+        for ((i, extra, goal_filter), prior_seed) in batch.into_iter().zip(prior_seeds) {
             let this = Self {
                 svc: self.svc.clone(),
                 engine: self.engine.clone(),
@@ -718,29 +861,36 @@ impl TeamExecutor {
             let main = mains[i].clone();
             let step_idxs = step_ranges[i].clone();
             join.spawn(async move {
-                this.run_main(&ctx2, i, &main, &step_idxs, extra.as_deref())
-                    .await
+                this.run_main(
+                    &ctx2,
+                    i,
+                    &main,
+                    &step_idxs,
+                    extra.as_deref(),
+                    goal_filter.as_deref(),
+                    prior_seed,
+                )
+                .await
             });
         }
 
         let mut cancelled = false;
         while let Some(res) = join.join_next().await {
-            let (i, sub_results) = match res {
+            // 主序号不再参与聚合(产出统一从 plan 重建),仅供 JoinError 分支追溯留底
+            let (_i, sub_results) = match res {
                 Ok(v) => v,
                 Err(e) => {
                     // JoinError(panic 等):按该主失败处理,不中断其余主;JoinError 不携带
                     // 业务下标,无法反查是哪一主 panic——保守地把本轮 batch 中仍 running 的
-                    // 步骤统一置 error 并置 had_error(终态至少 partial,不留永远 running)
+                    // 步骤统一置 error(终态至少 partial,不留永远 running)
                     tracing::warn!(error = e.to_string(), "team 主 agent 任务异常终止");
-                    fail_batch_running_steps(plan, &batch_idx, step_ranges, had_error);
+                    fail_batch_running_steps(plan, &batch_idx, step_ranges);
                     svc.set_plan(&ctx.task_id, plan);
                     continue;
                 }
             };
-            // 逐子目标回写各自步骤;聚合该主产出(成功段 + 失败说明)
-            let mut sections: Vec<String> = Vec::new();
-            let mut succeeded = 0usize;
-            for (si, goal_name, result) in sub_results {
+            // 逐子目标回写各自步骤(未在本轮 results 中的子目标保持原状态/产出)
+            for (si, _goal_name, result) in sub_results {
                 match result {
                     Ok((text, usage)) => {
                         total.prompt_tokens += usage.prompt_tokens;
@@ -750,42 +900,133 @@ impl TeamExecutor {
                         // 子 agent 行在 run_subtask 内落)
                         svc.record_usage(&ctx.task_id, "agent", Some(si), &usage_as_output(&usage));
                         plan[si].status = TaskStepStatus::Done;
-                        plan[si].result = text.clone();
-                        sections.push(format!("子目标「{goal_name}」:\n{text}"));
-                        succeeded += 1;
+                        // 替换式回写:补做产出覆盖旧版本,杜绝新旧并存(实跑问题 2)
+                        plan[si].result = text;
                     }
                     Err(e) => {
                         if *ctx.cancel.borrow() {
                             cancelled = true;
                         }
-                        *had_error = true;
                         plan[si].status = TaskStepStatus::Error;
                         plan[si].result = e.clone();
-                        sections.push(format!("子目标「{goal_name}」:(执行失败:{e})"));
                     }
                 }
             }
-            // 补做轮某主全败时保留其首轮产出是有意的既定兜底:历史产出优于丢空,
-            // 审计/汇总仍可基于首轮内容判定覆盖度——此时该主步骤态(error)与送审内容
-            //(首轮产出)不一致,属既定兜底口径,不做对齐
-            if succeeded > 0 {
-                outputs[i] = Some(sections.join("\n\n"));
-            }
             svc.set_plan(&ctx.task_id, plan);
         }
-        (outputs, cancelled)
+        // 统一从 plan 重建各主产出(唯一真相源;补做已替换旧版本,未打回主保留原产出)
+        (rebuild_outputs(mains, step_ranges, plan), cancelled)
     }
 }
 
+/// 补做轮的 prior 种子:从 plan 取该主既有子目标产出,供补做子目标衔接并保持版本一致。
+/// 首轮 prior 为空、由 run_main 循环内自然累积;补做轮会跳过未点名子目标(goal_filter),
+/// 循环内累积不到任何东西 —— 必须在此显式种入,否则补做子目标既看不到同主其他成果,
+/// 也看不到自己被替换的旧版本,「多版本并存」会在打回场景原样复现(实跑问题 2)。
+/// 被打回子目标的旧版本特别标注「旧版本(本次产出将替换它)」,让模型明确是替换而非新增。
+/// 仅当本轮确为子目标粒度补做(goal_filter 有值)时种入;整主补做走首轮同构路径。
+fn before_kickback_prior(
+    step_ranges: &[Vec<usize>],
+    plan: &[TaskStep],
+    main_index: usize,
+    goal_filter: Option<&[usize]>,
+) -> Vec<(String, String)> {
+    let Some(only) = goal_filter else {
+        return Vec::new();
+    };
+    let Some(range) = step_ranges.get(main_index) else {
+        return Vec::new();
+    };
+    let mut seed = Vec::new();
+    for (k, &si) in range.iter().enumerate() {
+        let step = &plan[si];
+        // 只种入有产出的终态子目标(失败/未跑的没有可衔接内容)
+        if step.status != TaskStepStatus::Done {
+            continue;
+        }
+        let name = strip_main_prefix(&step.name).to_string();
+        if only.contains(&k) {
+            seed.push((
+                format!("{name}(旧版本,本次产出将替换它)"),
+                step.result.clone(),
+            ));
+        } else {
+            seed.push((name, step.result.clone()));
+        }
+    }
+    seed
+}
+
+/// 从 plan 重建各主 agent 产出:plan 是子目标结果唯一真相源。每主按子目标顺序拼接
+/// 「子目标 N「名」:产出」(N 为主内 1-based 序号)——编号是审计/终审输出 `step`
+/// 字段的定位契约:审计提示词要求回填「该主第几个子目标」,输入里显式编号模型才能
+/// 数对,避免靠猜序号导致打回重跑错子目标或误退整主(实跑问题 2)。
+/// 失败子目标附错误说明供审计判定覆盖度。**该主无任何 Done 子目标时返回 None**
+///(全败主不产生产出,维持「全部主失败 → 团队无产出」语义)。
+fn rebuild_outputs(
+    mains: &[TeamMain],
+    step_ranges: &[Vec<usize>],
+    plan: &[TaskStep],
+) -> Vec<Option<String>> {
+    mains
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            let mut sections: Vec<String> = Vec::new();
+            let mut any_done = false;
+            for (k, &si) in step_ranges[i].iter().enumerate() {
+                let step = &plan[si];
+                let name = strip_main_prefix(&step.name);
+                match step.status {
+                    TaskStepStatus::Done => {
+                        any_done = true;
+                        sections.push(format!("子目标 {}「{name}」:\n{}", k + 1, step.result));
+                    }
+                    TaskStepStatus::Error => {
+                        sections.push(format!(
+                            "子目标 {}「{name}」:(执行失败:{})",
+                            k + 1,
+                            step.result
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            if any_done {
+                Some(sections.join("\n\n"))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// 去掉 plan 步骤名的「【主Agent-N】」前缀(前端分工卡分组契约的前缀由执行器添加)
+fn strip_main_prefix(name: &str) -> &str {
+    match name.find('】') {
+        Some(i) => name[i + '】'.len_utf8()..].trim_start(),
+        None => name,
+    }
+}
+
+/// 全局步骤下标 → 该主内子目标下标(反查;不在该主范围内返回 None)
+fn main_goal_index(step_ranges: &[Vec<usize>], main: usize, step: usize) -> Option<usize> {
+    step_ranges
+        .get(main)?
+        .iter()
+        .position(|s| *s == step)
+}
+
 /// JoinError(panic 等)兜底:无法从 JoinError 反查是哪一主 panic(不携带业务下标),
-/// 保守地把本轮 batch 中仍 running 的步骤统一置 error 并置 had_error(任务终态至少
-/// partial,不留永远 running 的步骤)。其余主若仍在跑,其步骤会在完成回写时覆盖为
-/// 最终态,此处写的只是瞬时兜底;已终态步骤与 batch 外步骤不动。返回置 error 的步骤数。
+/// 保守地把本轮 batch 中仍 running 的步骤统一置 error(终态至少 partial,不留永远
+/// running 的步骤)。其余主若仍在跑,其步骤会在完成回写时覆盖为最终态,此处写的只是
+/// 瞬时兜底;已终态步骤与 batch 外步骤不动。返回置 error 的步骤数。
+/// 终态 partial 判定由收尾处扫描 plan 中残留的 Error 步骤承担(不再单独记 had_error,
+/// 避免「首轮失败 → 打回补做成功 → had_error 未复位 → 仍判 partial」的假阴性)。
 fn fail_batch_running_steps(
     plan: &mut [TaskStep],
     batch_idx: &[usize],
     step_ranges: &[Vec<usize>],
-    had_error: &mut bool,
 ) -> usize {
     let mut failed = 0usize;
     for &i in batch_idx {
@@ -797,10 +1038,33 @@ fn fail_batch_running_steps(
             }
         }
     }
-    if failed > 0 {
-        *had_error = true;
-    }
     failed
+}
+
+/// 收尾判定:plan 中是否残留终态 Error 的子目标步骤(补做成功的步骤已被覆盖为 Done,
+/// 不再拖累终态)→ 决定任务落 done 还是 partial。
+fn has_error_steps(plan: &[TaskStep]) -> bool {
+    plan.iter().any(|s| s.status == TaskStepStatus::Error)
+}
+
+/// 收集 plan 中终态 Error 的子目标名(带主 agent 序号,便于用户定位是哪个分工),
+/// 用于 partial 终态的原因文本。空 = 无失败步骤。
+fn error_step_labels(plan: &[TaskStep]) -> Vec<String> {
+    plan.iter()
+        .filter(|s| s.status == TaskStepStatus::Error)
+        .map(|s| {
+            // plan 步骤名前缀「【主Agent-N】」由执行器构造(前端分工卡分组契约),可靠
+            match s
+                .name
+                .strip_prefix("【主Agent-")
+                .and_then(|r| r.split('】').next())
+                .and_then(|n| n.parse::<usize>().ok())
+            {
+                Some(n) => format!("主 Agent-{n}「{}」", strip_main_prefix(&s.name)),
+                None => strip_main_prefix(&s.name).to_string(),
+            }
+        })
+        .collect()
 }
 
 /// 审计/汇总的输入文本:总体目标 + 各主产出(失败主保留错误文本,供覆盖度判定)
@@ -821,6 +1085,26 @@ fn build_audit_input(goal: &str, mains: &[TeamMain], outputs: &[Option<String>])
     user
 }
 
+/// 汇总的输入文本:总体目标 + 各主产出 + 审计结论,并要求「只整合已选定版本、
+/// 不得另起一版」。旧实现汇总输入不含审计结论,汇总者对审计认定的不一致毫不知情,
+/// 自由再生产一版,最终 result 正文与「## 审计结论」段不同源(实跑问题 2)。
+fn build_summary_input(
+    goal: &str,
+    mains: &[TeamMain],
+    outputs: &[Option<String>],
+    audit_conclusion: &str,
+) -> String {
+    let mut user = build_audit_input(goal, mains, outputs);
+    user.push_str("审计结论(必须遵守;若指出某主产出为旧版/有缺漏,以补做后的最终版本为准):\n");
+    user.push_str(audit_conclusion);
+    user.push_str(
+        "\n\n请只整合上述各主 agent 的最终产出,输出一份统一的最终成果:\
+         不要另起一版、不要改写或替换已通过审计的产出内容、不要新增未被要求的内容。\
+         若各主产出存在重复或前后不一致,以审计结论所指的最终版本为准。",
+    );
+    user
+}
+
 /// 终审的输入文本:补做后的各主产出 + 首轮审计意见(结论与打回清单),
 /// 供终审员判断首轮指出的问题是否已解决(终审只产出结论文本,不再打回)。
 fn build_final_review_input(
@@ -832,9 +1116,13 @@ fn build_final_review_input(
     let mut user = build_audit_input(goal, mains, outputs);
     user.push_str("首轮审计结论:\n");
     user.push_str(&verdict.conclusion);
-    user.push_str("\n\n首轮打回(均已完成补做):\n");
-    for (i, ins) in &verdict.kickbacks {
-        user.push_str(&format!("- 主 Agent-{}:{}\n", i + 1, ins));
+    user.push_str("\n\n首轮打回(均已完成补做,补做产出已替换旧版本):\n");
+    for k in &verdict.kickbacks {
+        let target = match k.step {
+            Some(s) => format!("主 Agent-{} 第 {} 个子目标", k.main + 1, s + 1),
+            None => format!("主 Agent-{}", k.main + 1),
+        };
+        user.push_str(&format!("- {target}:{}\n", k.instruction));
     }
     user
 }
@@ -927,7 +1215,8 @@ mod tests {
         .is_err());
     }
 
-    /// 审计输出:通过/打回/结论;序号 1-based 转 0-based;越界条目丢弃
+    /// 审计输出:通过/打回/结论;序号 1-based 转 0-based;越界条目丢弃;
+    /// step 可选(指明则打回粒度到子目标,缺省则整主)
     #[test]
     fn parse_audit_kickbacks() {
         let v = parse_audit(
@@ -937,20 +1226,46 @@ mod tests {
         assert!(!v.pass);
         assert_eq!(
             v.kickbacks,
-            vec![(1, "补数据".to_string())],
+            vec![Kickback {
+                main: 1,
+                step: None,
+                instruction: "补数据".to_string()
+            }],
             "越界与空指令条目应丢弃"
         );
         assert_eq!(v.conclusion, "主二缺数据");
 
         let ok = parse_audit(r#"{"通过":true,"打回":[],"结论":"覆盖完整"}"#, 2);
         assert!(ok.pass && ok.kickbacks.is_empty());
+
+        // step 指明时打回粒度到子目标(1-based → 0-based);step 越界(0)按整主
+        let scoped = parse_audit(
+            r#"{"通过":false,"打回":[{"main":1,"step":2,"instruction":"只补第二个子目标"},{"main":2,"step":0,"instruction":"step=0 无效按整主"}],"结论":"x"}"#,
+            2,
+        );
+        assert_eq!(
+            scoped.kickbacks,
+            vec![
+                Kickback {
+                    main: 0,
+                    step: Some(1),
+                    instruction: "只补第二个子目标".to_string()
+                },
+                Kickback {
+                    main: 1,
+                    step: None,
+                    instruction: "step=0 无效按整主".to_string()
+                },
+            ]
+        );
     }
 
-    /// 审计输出非 JSON:兜底通过、结论取原文(审计异常不沉任务)
+    /// 审计输出无法解析:按未通过兜底(实跑问题 2);结论不落半截 JSON
     #[test]
-    fn parse_audit_fallback_passes() {
+    fn parse_audit_fallback_not_passed() {
         let v = parse_audit("看起来都不错", 2);
-        assert!(v.pass);
+        assert!(!v.pass, "非 JSON 输出应兜底未通过(审计闸门不得静默失效)");
+        assert!(v.kickbacks.is_empty());
         assert_eq!(v.conclusion, "看起来都不错");
     }
 
@@ -966,12 +1281,12 @@ mod tests {
         assert_eq!(trunc_heal_budget(None, 1024), None);
     }
 
-    /// 腰斩 JSON 兜底(自愈重发仍截断的末层防线):按通过兜底,但结论段
+    /// 腰斩 JSON 兜底(自愈重发仍截断的末层防线):按未通过兜底,结论段
     /// 不落半截 JSON(原样进 result「## 审计结论」卡既难看又误导),给干净说明
     #[test]
     fn audit_truncated_json_fallback_clean_conclusion() {
         let v = parse_audit(r#"{"通过":false,"打回":[{"main":2"#, 2);
-        assert!(v.pass);
+        assert!(!v.pass, "截断审计输出应兜底未通过");
         assert!(v.kickbacks.is_empty());
         assert!(
             !v.conclusion.contains('{'),
@@ -980,25 +1295,86 @@ mod tests {
         );
     }
 
-    /// 审计打回按主序号去重:同一主重复打回只保留首条
-    ///(防同一虚拟 session task:{id}:main:{n} 在补做轮被并发 spawn 两次)
+    /// 审计打回按定位去重:同一主同一子目标重复打回只保留首条;
+    /// 「同主不同子目标」与「同主整主 + 具体子目标」均保留(粒度不同)
     #[test]
-    fn parse_audit_dedups_same_main() {
+    fn parse_audit_dedups_same_target() {
         let v = parse_audit(
-            r#"{"通过":false,"打回":[{"main":1,"instruction":"首条指令"},{"main":2,"instruction":"主二补做"},{"main":1,"instruction":"重复条目应丢弃"}],"结论":"x"}"#,
+            r#"{"通过":false,"打回":[{"main":1,"step":1,"instruction":"首条指令"},{"main":2,"instruction":"主二补做"},{"main":1,"step":1,"instruction":"重复条目应丢弃"},{"main":1,"step":2,"instruction":"同主不同子目标保留"}],"结论":"x"}"#,
             3,
         );
         assert!(!v.pass);
         assert_eq!(
             v.kickbacks,
-            vec![(0, "首条指令".to_string()), (1, "主二补做".to_string())],
-            "同一主重复打回应只保留首条"
+            vec![
+                Kickback {
+                    main: 0,
+                    step: Some(0),
+                    instruction: "首条指令".to_string()
+                },
+                Kickback {
+                    main: 1,
+                    step: None,
+                    instruction: "主二补做".to_string()
+                },
+                Kickback {
+                    main: 0,
+                    step: Some(1),
+                    instruction: "同主不同子目标保留".to_string()
+                },
+            ],
+            "同一主同一子目标重复打回应只保留首条"
         );
     }
 
+    /// 从 plan 重建各主产出:失败子目标附错误说明;全败主为 None;
+    /// 【主Agent-N】前缀被剥离
+    #[test]
+    fn rebuild_outputs_from_plan() {
+        let mains = vec![
+            TeamMain {
+                name: "甲".into(),
+                goals: vec![],
+            },
+            TeamMain {
+                name: "乙".into(),
+                goals: vec![],
+            },
+        ];
+        let step_ranges = vec![vec![0, 1], vec![2]];
+        let plan = vec![
+            TaskStep {
+                name: "【主Agent-1】子一".into(),
+                goal: String::new(),
+                status: TaskStepStatus::Done,
+                result: "产出甲一".into(),
+            },
+            TaskStep {
+                name: "【主Agent-1】子二".into(),
+                goal: String::new(),
+                status: TaskStepStatus::Error,
+                result: "上游抖动".into(),
+            },
+            TaskStep {
+                name: "【主Agent-2】子三".into(),
+                goal: String::new(),
+                status: TaskStepStatus::Error,
+                result: "也失败了".into(),
+            },
+        ];
+        let outputs = rebuild_outputs(&mains, &step_ranges, &plan);
+        let o0 = outputs[0].as_deref().unwrap_or("");
+        assert!(o0.contains("子目标 1「子一」"), "应带主内 1-based 编号且剥离前缀: {o0}");
+        assert!(o0.contains("产出甲一"), "应含成功产出: {o0}");
+        assert!(o0.contains("执行失败"), "失败子目标应附说明: {o0}");
+        assert!(outputs[1].is_none(), "全败主产出应为 None");
+        assert_eq!(strip_main_prefix("【主Agent-3】写作"), "写作");
+        assert_eq!(strip_main_prefix("无前缀"), "无前缀");
+    }
+
     /// JoinError(panic)兜底:无法从 JoinError 反查是哪一主 panic,保守地把本轮 batch 中
-    /// 仍 running 的步骤统一置 error 并置 had_error(任务终态至少 partial,不留永远
-    /// running 的步骤);已终态步骤与 batch 外步骤不动。
+    /// 仍 running 的步骤统一置 error(终态至少 partial,不留永远 running 的步骤);
+    /// 已终态步骤与 batch 外步骤不动。
     ///(集成侧不可注入:mock 链路无法让某一主 panic,故抽取 fail_batch_running_steps 单测覆盖。)
     #[test]
     fn fail_batch_running_steps_marks_running_error() {
@@ -1018,8 +1394,7 @@ mod tests {
         ];
         // 4 主各领 1 步;本轮 batch = 主 0/1/3(主 2 不在本轮)
         let step_ranges = vec![vec![0], vec![1], vec![2], vec![3]];
-        let mut had_error = false;
-        let failed = fail_batch_running_steps(&mut plan, &[0, 1, 3], &step_ranges, &mut had_error);
+        let failed = fail_batch_running_steps(&mut plan, &[0, 1, 3], &step_ranges);
         assert_eq!(failed, 1, "仅 batch 内仍 running 的步骤应置 error");
         assert_eq!(plan[0].status, TaskStepStatus::Done, "已终态步骤不动");
         assert_eq!(plan[1].status, TaskStepStatus::Error);
@@ -1030,13 +1405,83 @@ mod tests {
             TaskStepStatus::Pending,
             "非 running 步骤不动"
         );
-        assert!(had_error, "有步骤被置 error 时 had_error 应置位");
 
-        // 幂等:无 running 步骤时不重复置位、不污染 had_error 以外的状态
-        let mut had_error2 = false;
-        let failed2 = fail_batch_running_steps(&mut plan, &[0], &step_ranges, &mut had_error2);
+        // 幂等:无 running 步骤时不重复置位、不污染状态
+        let failed2 = fail_batch_running_steps(&mut plan, &[0], &step_ranges);
         assert_eq!(failed2, 0, "无 running 步骤应返回 0");
-        assert!(!had_error2, "无 running 步骤不应置 had_error");
         assert_eq!(plan[0].status, TaskStepStatus::Done);
+    }
+
+    /// 终态判定以 plan 终态为准:补做把步骤覆盖为 Done 后,不得再判 partial
+    ///(旧 had_error 累加标志永不复位 → 假 partial,实跑问题 2)
+    #[test]
+    fn terminal_error_steps_drive_partial() {
+        let mk = |name: &str, status: TaskStepStatus| TaskStep {
+            name: name.into(),
+            goal: String::new(),
+            status,
+            result: "r".into(),
+        };
+        let plan = vec![
+            mk("【主Agent-1】子一", TaskStepStatus::Done),
+            mk("【主Agent-2】子二", TaskStepStatus::Error),
+        ];
+        assert!(has_error_steps(&plan), "存在 Error 步骤应判失败");
+        assert_eq!(
+            error_step_labels(&plan),
+            vec!["主 Agent-2「子二」".to_string()],
+            "原因文本应带主序号与子目标名"
+        );
+        // 补做成功:同一位置覆盖为 Done → 不再有失败步骤(不应判 partial)
+        let mut healed = plan.clone();
+        healed[1].status = TaskStepStatus::Done;
+        assert!(!has_error_steps(&healed), "补做成功后不得再判 partial");
+        assert!(error_step_labels(&healed).is_empty());
+    }
+
+    /// 补做轮 prior 种子:子目标粒度补做时,种入该主既有 Done 产出;被打回子目标
+    /// 的旧版本特别标注「旧版本」;未打回的同门产出原样注入;整主补做/首轮为空
+    /// (实跑问题 2:补做轮跳过未点名子目标导致 prior 为空、版本冲突原样复现)
+    #[test]
+    fn kickback_prior_seeds_sibling_outputs() {
+        let plan = vec![
+            TaskStep {
+                name: "【主Agent-1】子一".into(),
+                goal: String::new(),
+                status: TaskStepStatus::Done,
+                result: "甲产出".into(),
+            },
+            TaskStep {
+                name: "【主Agent-1】子二".into(),
+                goal: String::new(),
+                status: TaskStepStatus::Done,
+                result: "旧乙产出".into(),
+            },
+            TaskStep {
+                name: "【主Agent-1】子三".into(),
+                goal: String::new(),
+                status: TaskStepStatus::Error,
+                result: "失败".into(),
+            },
+        ];
+        let step_ranges = vec![vec![0, 1, 2]];
+        // 只补做子目标下标 1(第 2 个):应种入子一(同门)+ 子二的旧版本;失败子三不种
+        let seed = before_kickback_prior(&step_ranges, &plan, 0, Some(&[1]));
+        assert_eq!(seed.len(), 2, "只种入 Done 产出: {seed:?}");
+        assert_eq!(seed[0].0, "子一", "未打回同门产出原样种入");
+        assert_eq!(seed[0].1, "甲产出");
+        assert_eq!(seed[1].0, "子二(旧版本,本次产出将替换它)");
+        assert_eq!(seed[1].1, "旧乙产出");
+        // 整主补做(goal_filter=None):不种,走首轮同构路径(循环内自然累积)
+        assert!(before_kickback_prior(&step_ranges, &plan, 0, None).is_empty());
+    }
+
+    /// 审计 JSON 合法但缺「结论」字段:不把裸 JSON 灌进「## 审计结论」卡
+    #[test]
+    fn parse_audit_missing_conclusion_uses_placeholder() {
+        let v = parse_audit(r#"{"通过":true,"打回":[]}"#, 2);
+        assert!(v.pass);
+        assert_eq!(v.conclusion, "(审计未给出结论)");
+        assert!(!v.conclusion.contains('{'), "不得回填裸 JSON");
     }
 }

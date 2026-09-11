@@ -140,7 +140,24 @@ describe('api/tasks REST 封装', () => {
       ([input, init]) => String(input) === '/api/tasks/t1/followup' && (init?.method ?? 'GET') === 'POST',
     );
     expect(call).toBeTruthy();
-    expect(JSON.parse(String(call?.[1]?.body))).toEqual({ content: '再补充一点秋色' });
+    // 缺省 mode=append(F5:显式携带 mode,兼容后端严格解析)
+    expect(JSON.parse(String(call?.[1]?.body))).toEqual({
+      content: '再补充一点秋色',
+      mode: 'append',
+    });
+
+    // replace 模式(2026-09-10 F5):body.mode 传 replace
+    await followupTask('t1', '把全文压缩到 200 字', 'replace');
+    const replaceCall = vi
+      .mocked(fetch)
+      .mock.calls.filter(
+        ([input, init]) => String(input) === '/api/tasks/t1/followup' && (init?.method ?? 'GET') === 'POST',
+      )
+      .at(-1);
+    expect(JSON.parse(String(replaceCall?.[1]?.body))).toEqual({
+      content: '把全文压缩到 200 字',
+      mode: 'replace',
+    });
   });
 
   it('planChatTask:POST /tasks/{id}/plan-chat,body 带 message 原文(批次 R2b),取响应 plan', async () => {

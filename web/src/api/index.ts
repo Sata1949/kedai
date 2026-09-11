@@ -18,4 +18,5 @@ export * from './audio';
 export * from './tasks';
 export * from './diagnostics';
 export * from './memory';
+export * from './repoIndex';
 export * from './undo';

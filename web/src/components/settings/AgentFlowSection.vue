@@ -4,6 +4,7 @@
 // 「工具策略 / 并行调用」行,属模板漂移,合并后 standalone 一并补上)。
 import { onMounted } from 'vue';
 import { useAgentFlow, TOOL_MODE_LABELS } from '../../composables/useAgentFlow';
+import { stepToolsWarnings } from '../../utils/agentFlowTools';
 
 withDefaults(defineProps<{
   /** 是否显示(embedded 模式按 activeSection 切换;standalone 恒 true) */
@@ -175,6 +176,19 @@ onMounted(async () => {
                 @change="setStepToolsText(step, ($event.target as HTMLInputElement).value)"
               />
             </div>
+            <!-- F8(2026-09-10 实跑修复):tools 三态语义易误配——「全部工具」会下发
+                 全部已注册工具(含编排/写类),分析规划类步骤不应选它。
+                 文案由 stepToolsWarnings 纯函数产出,便于单测覆盖 -->
+            <p
+              v-for="(warn, wi) in stepToolsWarnings(step)"
+              :key="wi"
+              class="sv-note flow-tool-warn"
+            >
+              {{ warn }}
+            </p>
+            <p v-if="stepToolMode(step) === 'none'" class="sv-note">
+              「不使用工具」= 本步骤纯生成,不下发任何工具。
+            </p>
             <div class="sv-inp-row">
               <label class="sv-inp-tag">工具策略</label>
               <select v-model="step.tool_choice" class="sv-select flow-select-wide">

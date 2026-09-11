@@ -24,6 +24,8 @@ export interface DomEventContext {
     listener: EventListener,
     capture?: boolean,
   ) => void;
+  /** 元素状态快照(委托事件回发目标状态用;由 dom-rpc 注入,避免模块循环依赖) */
+  elementStateProvider?: (el: HTMLElement) => Record<string, unknown>;
 }
 
 interface DragState {
@@ -59,8 +61,18 @@ function postEvent(
   jqId: number,
   type: string,
   ui?: { position: { left: number; top: number } },
+  delegateTargetId = 0,
 ): void {
   if (!ctx.targetWindow || !Number.isFinite(jqId) || jqId <= 0) return;
+  const delegate = delegateTargetId > 0 ? globalDelegateTargets.get(delegateTargetId) : undefined;
+  const target = delegate
+    ? {
+        kind: 'target',
+        id: delegateTargetId,
+        data: Object.fromEntries(Object.entries(delegate.dataset)),
+        state: elementStateFor(ctx, delegate),
+      }
+    : { kind: 'target', id: 0, data: {}, state: {} };
   ctx.targetWindow.postMessage(
     {
       channel: CHANNEL,
@@ -68,11 +80,26 @@ function postEvent(
       type: 'jq-event',
       jqId,
       event: ui ? { type, ui } : { type },
-      target: { kind: 'target', id: 0, data: {}, state: {} },
+      target,
       mirror: { controls: ctx.controlsProvider() },
     },
     '*',
   );
+}
+
+/** 委托目标的元素状态快照(elementStateProvider 由 dom-rpc 注入,缺失时退回最小字段) */
+function elementStateFor(ctx: DomEventContext, el: HTMLElement): Record<string, unknown> {
+  if (ctx.elementStateProvider) return ctx.elementStateProvider(el);
+  return {
+    n: 1,
+    id: el.id || undefined,
+    text: (el.textContent ?? '').slice(0, 100_000),
+    html: el.innerHTML.slice(0, 100_000),
+    val: typeof (el as HTMLInputElement).value === 'string' ? (el as HTMLInputElement).value : '',
+    checked: !!(el as HTMLInputElement).checked,
+    disabled: !!(el as HTMLInputElement).disabled,
+    classes: Array.from(el.classList).slice(0, 64),
+  };
 }
 
 function onPointerMove(ev: Event, el: HTMLElement, state: DragState, ctx: DomEventContext): void {
@@ -191,14 +218,44 @@ export function bindGlobalEvents(
   eventNames: string[],
   jqId: number,
   ctx: DomEventContext,
+  selector: string | null = null,
+  bindings?: Array<{
+    jqId: number;
+    element: EventTarget;
+    eventName: string;
+    listener: EventListener;
+    selector: string | null;
+    capture?: boolean;
+  }>,
 ): void {
   if (!ctx.targetWindow || eventNames.length === 0 || !Number.isFinite(jqId)) return;
   const target: EventTarget = ref.kind === 'window' ? ctx.hostWindow : ctx.hostDocument;
   for (const eventName of eventNames) {
-    const listener = (): void => {
+    const listener = (event: Event): void => {
+      // 委托写法 $(document).on('click', '.btn', fn):以 closest 命中的目标回发,
+      // 未被委托选择器命中则忽略(实跑问题 7 R3)
+      let hitId = 0;
+      if (selector) {
+        const raw = event.target as Element | null;
+        const found = raw && typeof raw.closest === 'function' ? raw.closest(selector) : null;
+        if (!found || !(found instanceof HTMLElement)) return;
+        hitId = bindDelegateTarget(found);
+        postEvent(ctx, jqId, eventName, undefined, hitId);
+        return;
+      }
       postEvent(ctx, jqId, eventName);
     };
     target.addEventListener(eventName, listener);
     ctx.registerEventListener(target, eventName, listener);
+    bindings?.push({ jqId, element: target, eventName, listener, selector, capture: undefined });
   }
+}
+
+/** 全局委托目标的临时句柄表(与元素级 targets 分开;仅按 id 回发状态) */
+const globalDelegateTargets = new Map<number, HTMLElement>();
+let globalDelegateSeq = 0;
+function bindDelegateTarget(el: HTMLElement): number {
+  const id = ++globalDelegateSeq;
+  globalDelegateTargets.set(id, el);
+  return id;
 }

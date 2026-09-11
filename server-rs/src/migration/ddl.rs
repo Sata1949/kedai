@@ -250,10 +250,91 @@ CREATE TABLE IF NOT EXISTS memory_entries (
   last_usage        TEXT,
   selected          INTEGER NOT NULL DEFAULT 1,
   created_at        TEXT NOT NULL,
-  updated_at        TEXT NOT NULL
+  updated_at        TEXT NOT NULL,
+  pinned            INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_memory_entries_character ON memory_entries(character_id, selected);
 "#;
+
+/// 记忆全文检索(升级工作流 B1):FTS5 外部内容表 + 3 个同步 trigger。
+/// 与 models/db/schema.rs CREATE_TABLES 内的文本保持一致(normalize 比对依赖);
+/// FTS 虚拟表与其影子表不参与合并比对(见 merge.rs is_fts_table)。
+pub(super) const MEMORY_ENTRIES_FTS_DDL: &str = r#"
+CREATE VIRTUAL TABLE IF NOT EXISTS memory_entries_fts USING fts5(
+  content,
+  content='memory_entries',
+  content_rowid='id',
+  tokenize='trigram'
+);
+CREATE TRIGGER IF NOT EXISTS memory_entries_ai AFTER INSERT ON memory_entries BEGIN
+  INSERT INTO memory_entries_fts(rowid, content) VALUES (new.id, new.content);
+END;
+CREATE TRIGGER IF NOT EXISTS memory_entries_ad AFTER DELETE ON memory_entries BEGIN
+  INSERT INTO memory_entries_fts(memory_entries_fts, rowid, content)
+    VALUES('delete', old.id, old.content);
+END;
+CREATE TRIGGER IF NOT EXISTS memory_entries_au AFTER UPDATE ON memory_entries BEGIN
+  INSERT INTO memory_entries_fts(memory_entries_fts, rowid, content)
+    VALUES('delete', old.id, old.content);
+  INSERT INTO memory_entries_fts(rowid, content) VALUES (new.id, new.content);
+END;
+"#;
+
+/// 幂等 schema 升级(B2 分层注入):为 memory_entries 补 pinned 列(缺失才 ALTER,
+/// 已存在跳过)。列追加在表尾,与新版 CREATE_TABLES 建出的 schema normalize 后一致。
+/// memory_entries 表不存在时零列返回直接跳过(建表由 CREATE_TABLES 负责)。
+pub fn ensure_memory_entries_pinned_column(conn: &Connection) -> Result<(), String> {
+    let mut existing: Vec<String> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(memory_entries)")
+            .map_err(|e| format!("读取 memory_entries 列失败: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| format!("遍历 memory_entries 列失败: {e}"))?;
+        for name in rows.flatten() {
+            existing.push(name.to_lowercase());
+        }
+    }
+    if existing.is_empty() || existing.iter().any(|c| c == "pinned") {
+        return Ok(());
+    }
+    conn.execute(
+        "ALTER TABLE memory_entries ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
+        [],
+    )
+    .map_err(|e| format!("为 memory_entries 补 pinned 列失败: {e}"))?;
+    Ok(())
+}
+
+/// 幂等回填(B1 检索底座):FTS5 外部内容表建好后执行一次 rebuild,把旧库已有记忆
+/// 灌进索引;backfill_meta 记标记避免每次启动重跑(rebuild 是 O(全表),不能进热启动路径)。
+/// 新建库(空表)rebuild 代价可忽略,同样只做一次。
+pub fn ensure_memory_entries_fts_backfill(conn: &Connection) -> Result<(), String> {
+    const KEY: &str = "memory_fts_rebuilt";
+    let done: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM backfill_meta WHERE key = ?1)",
+            [KEY],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|v| v == 1)
+        .unwrap_or(false);
+    if done {
+        return Ok(());
+    }
+    conn.execute(
+        "INSERT INTO memory_entries_fts(memory_entries_fts) VALUES('rebuild')",
+        [],
+    )
+    .map_err(|e| format!("记忆全文索引回填失败: {e}"))?;
+    conn.execute(
+        "INSERT OR REPLACE INTO backfill_meta (key, value) VALUES (?1, ?2)",
+        rusqlite::params![KEY, "1"],
+    )
+    .map_err(|e| format!("写入记忆索引回填标记失败: {e}"))?;
+    Ok(())
+}
 /// 任务消息表(批次 R2 多轮用户输入):任务全程的用户输入(followup 追加指令 /
 /// plan_chat 批准环节对话)与助手产出按行落库,任务删除随外键级联清除。
 /// 合并前对两侧各补一次 DDL,与 SCOPE_VARIABLES_DDL 同理,

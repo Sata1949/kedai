@@ -73,6 +73,7 @@ impl MockConnector {
                     prompt_cache_miss_tokens: 0,
                     reasoning_tokens: 0,
                 });
+                chunks.push(tool_calls_finish());
                 return Ok(chunks);
             }
             let reply = "（模拟回复）工具循环已完成,最终回复。";
@@ -143,6 +144,7 @@ impl MockConnector {
                 prompt_cache_miss_tokens: 0,
                 reasoning_tokens: 0,
             });
+            chunks.push(tool_calls_finish());
             return Ok(chunks);
         }
 
@@ -189,6 +191,7 @@ impl MockConnector {
                 prompt_cache_miss_tokens: 0,
                 reasoning_tokens: 0,
             });
+            chunks.push(tool_calls_finish());
             return Ok(chunks);
         }
 
@@ -231,6 +234,7 @@ impl MockConnector {
                 prompt_cache_miss_tokens: 0,
                 reasoning_tokens: 0,
             });
+            chunks.push(tool_calls_finish());
             return Ok(chunks);
         }
 
@@ -359,6 +363,7 @@ impl MockConnector {
                 prompt_cache_miss_tokens: 0,
                 reasoning_tokens: 0,
             });
+            chunks.push(tool_calls_finish());
             return Ok(chunks);
         }
 
@@ -431,6 +436,15 @@ impl MockConnector {
             reason: "stop".into(),
         });
         Ok(chunks)
+    }
+}
+
+/// 带工具调用轮次的 Finish 块(F6,2026-09-10):与真实连接器行为对齐——
+/// sse_parser 在 finish_reason=tool_calls 时也产出 Finish{tool_calls},
+/// 使任务模式调用面板的 finish 列不再为空。
+fn tool_calls_finish() -> LlmStreamChunk {
+    LlmStreamChunk::Finish {
+        reason: "tool_calls".into(),
     }
 }
 

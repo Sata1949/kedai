@@ -9,11 +9,14 @@ export const FLOOR_ROLE_LABELS: Record<api.FloorRole, string> = {
   user: '用户',
   assistant: '角色',
 };
+/** 楼层注入位置:引擎实现统一归位「系统提示词内」(system 角色进系统提示词,
+ *  user/assistant 角色紧随 system 按 order 排),before/after/depth 已废弃不生效,
+ *  仅保留字段与解析以兼容导入的酒馆预设(见 messages/build.rs 位置4 注释)。 */
 export const FLOOR_POS_LABELS: Record<api.FloorPosition, string> = {
   system: '系统提示词内',
-  before: '对话开头',
-  after: '最新消息后',
-  depth: '深度 N',
+  before: '对话开头(已废弃)',
+  after: '最新消息后(已废弃)',
+  depth: '深度 N(已废弃)',
 };
 
 /** 酒馆宏速查(楼层内容编辑参考) */

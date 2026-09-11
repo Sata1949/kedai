@@ -12,8 +12,19 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
   const settingsOpen = ref(false);
   /** 提示词顺序管理面板开关 */
   const promptsOpen = ref(false);
-  /** 右侧 Agent 面板开关(默认收起) */
+  /** 右侧 Agent 面板开关(默认收起;唯一可见性来源,不再由生成状态强行覆盖) */
   const agentPanelOpen = ref(false);
+  /**
+   * Agent 面板「本会话内不再自动展开」抑制标记(仅内存态,不持久化)。
+   * 用户主动收起后置位:本轮会话内生成不再自动弹出面板,尊重用户选择;
+   * 新建/切换会话时复位,恢复「生成开始时自动展开一次」的便利。
+   */
+  const agentPanelAutoSuppressed = ref(false);
+  /**
+   * 左侧功能区抽屉开关(仅移动端有效:窄屏下 Sidebar 由常驻栏改为覆盖式抽屉)。
+   * 桌面端恒为 false 且不影响布局——CSS 只在 max-width 断点内响应 .open 类。
+   */
+  const sidebarOpen = ref(false);
   const worldBooksOpen = ref(false);
   const quickRepliesOpen = ref(false);
   const audioOpen = ref(false);
@@ -25,6 +36,10 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
   const macrosOpen = ref(false);
   const eventsOpen = ref(false);
   const optimizeOpen = ref(false);
+  /** 记忆库弹窗开关(跨会话记忆检索/置顶/清理;侧边栏一级入口) */
+  const memoryOpen = ref(false);
+  /** 仓库索引面板开关(只读展示 .kedai-index 生成的代码索引) */
+  const repoIndexOpen = ref(false);
   /** 聊天记录面板开关 */
   const chatRecordsOpen = ref(false);
   /** 启动动画是否完成 */
@@ -56,6 +71,26 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
   watch(callTraceOpen, (v) => {
     try {
       localStorage.setItem(CALL_TRACE_KEY, v ? '1' : '0');
+    } catch {
+      /* 忽略 */
+    }
+  });
+
+  // ===== 任务模式「成果汇总」卡显示开关(实跑问题 1) =====
+  // 逐轮对话记录区成为任务产出的权威视图后,单一「成果汇总」卡默认关闭(避免与
+  // 各轮气泡重复);需要一眼看合并成果的用户可手动打开,选择持久化到 localStorage。
+  const TASK_RESULT_SUMMARY_KEY = 'kedai.task-result-summary.v1';
+  const taskResultSummaryOpen = ref<boolean>(readStoredTaskResultSummary());
+  function readStoredTaskResultSummary(): boolean {
+    try {
+      return localStorage.getItem(TASK_RESULT_SUMMARY_KEY) === '1';
+    } catch {
+      return false;
+    }
+  }
+  watch(taskResultSummaryOpen, (v) => {
+    try {
+      localStorage.setItem(TASK_RESULT_SUMMARY_KEY, v ? '1' : '0');
     } catch {
       /* 忽略 */
     }
@@ -133,10 +168,46 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
     }, 300);
   });
 
+  // ===== Agent 面板开合动作 =====
+  // 语义分层:一次性的自动展开(生成开始时)与用户显式开合分开,避免「生成中
+  // 面板被强行撑开、关闭按钮无效」的锁死体验(详见 AgentPanel.showPanel 与
+  // chat.startStream 的调用点)。
+  /** 用户显式展开:清除自动展开抑制(下一次生成仍可自动展开) */
+  function openAgentPanel(): void {
+    agentPanelOpen.value = true;
+    agentPanelAutoSuppressed.value = false;
+  }
+  /** 用户显式收起:记下抑制标记,本会话内生成不再自动展开 */
+  function collapseAgentPanel(): void {
+    agentPanelOpen.value = false;
+    agentPanelAutoSuppressed.value = true;
+  }
+  /** 切换开合(桌面右缘竖条 / 顶栏开关 / 底部导航共用) */
+  function toggleAgentPanel(): void {
+    if (agentPanelOpen.value) collapseAgentPanel();
+    else openAgentPanel();
+  }
+  /** 生成/任务开始时的自动展开:用户已收起过则不再打扰 */
+  function autoOpenAgentPanel(): void {
+    if (agentPanelAutoSuppressed.value) return;
+    agentPanelOpen.value = true;
+  }
+  /** 复位自动展开抑制(新建/切换会话时调用,语义为「本会话内不再自动弹」) */
+  function resetAgentPanelAutoSuppress(): void {
+    agentPanelAutoSuppressed.value = false;
+  }
+
   return {
     settingsOpen,
     promptsOpen,
     agentPanelOpen,
+    agentPanelAutoSuppressed,
+    openAgentPanel,
+    collapseAgentPanel,
+    toggleAgentPanel,
+    autoOpenAgentPanel,
+    resetAgentPanelAutoSuppress,
+    sidebarOpen,
     worldBooksOpen,
     quickRepliesOpen,
     audioOpen,
@@ -147,12 +218,15 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
     macrosOpen,
     eventsOpen,
     optimizeOpen,
+    memoryOpen,
+    repoIndexOpen,
     chatRecordsOpen,
     splashDone,
     modalLoadError,
     dataLoadError,
     characterUploadRequested,
     callTraceOpen,
+    taskResultSummaryOpen,
     renderHtml,
     defaultRenderHtml,
     renderHtmlOverrides,

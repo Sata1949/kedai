@@ -12,6 +12,10 @@ import { collectInitVars, deepMerge } from './mvu/initvar';
 import { expandDisplayMacros } from './render';
 import { setMvuHostContext, flushJqReady } from './mvu/host';
 import { executeSandboxedCharacterScript, readCardGlobals, type SandboxCleanup } from './characterScriptSandbox';
+import type { SandboxExecutionContext } from './sandbox/protocol';
+
+/** 消息级沙箱 RPC 扩展点类型(= 沙箱协议里的定义,供调用方构造只读实现) */
+export type SandboxRpcExtensions = NonNullable<SandboxExecutionContext['rpcExtensions']>;
 
 export interface ScriptBlock {
   scopeId: string;
@@ -31,6 +35,14 @@ export interface ScriptRunContext {
   mvuVariables: MvuVariables;
   /** 角色名(initvar 内容 {{char}} 宏展开用;缺省不展开 char) */
   charName?: string;
+  /**
+   * 消息级沙箱的 RPC 扩展点(世界书读取 / 聊天消息读取,只读)。
+   * 实跑问题 7 主因:此前消息级沙箱不注入扩展点,TavernHelper.getChatMessages /
+   * getLorebookEntries 发出的数据 RPC 落到 DOM 白名单分发,首参被当 CSS 选择器而
+   * 抛错;脚本 async 链尾 reject → 沙箱上送 error → 宿主 cleanup 摘除容器内全部
+   * 注入节点与监听,表现为「首楼界面渲染后按钮/弹窗/输入框全失效」。
+   */
+  rpcExtensions?: SandboxRpcExtensions;
 }
 
 /** 深拷贝(avoid structuredClone on Vue reactive Proxy) */
@@ -47,6 +59,8 @@ export type CharacterScriptExecutor = (
     variables: MvuVariables;
     characterId?: string;
     globals?: Record<string, unknown>;
+    rpcExtensions?: SandboxRpcExtensions;
+    lorebookName?: string;
   },
 ) => Promise<unknown>;
 
@@ -139,6 +153,7 @@ export class ScriptRunner {
               variables: deepCopy(vars),
               characterId: ctx.characterId,
               globals,
+              rpcExtensions: ctx.rpcExtensions,
             });
             if (typeof result === 'function') blockCleanups.push(result as SandboxCleanup);
           }

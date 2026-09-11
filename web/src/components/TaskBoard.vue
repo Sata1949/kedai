@@ -107,6 +107,9 @@ async function sendPlanChat(): Promise<void> {
 /** 追加指令输入草稿与发送中标记 */
 const followupDraft = ref('');
 const followupSending = ref(false);
+/** 追加模式(2026-09-10 实跑修复 F5):append=追加进成果,replace=整体重写成果。
+ *  append 无法表达「压缩 / 重写 / 改前面」类指令(原文仍在),故提供重写模式。 */
+const followupMode = ref<'append' | 'replace'>('append');
 
 /** 非终态时的禁用提示(按状态给出可操作的下一步) */
 const followupDisabledHint = computed(() => {
@@ -116,16 +119,48 @@ const followupDisabledHint = computed(() => {
   return '任务执行中:完成或停止后可追加指令';
 });
 
-/** 消息种类小标签(followup=追加 / plan_chat=规划对话;normal 旧行不显示标签) */
-const MESSAGE_KIND_LABELS: Record<string, string> = { followup: '追加', plan_chat: '规划对话' };
+/** 消息种类小标签(followup=追加 / plan_chat=规划对话 / goal=目标 /
+ *  result=首轮成果;normal 旧行不显示标签) */
+const MESSAGE_KIND_LABELS: Record<string, string> = {
+  goal: '目标',
+  result: '成果',
+  followup: '追加',
+  plan_chat: '规划对话',
+};
 function messageKindLabel(kind: string): string {
   return MESSAGE_KIND_LABELS[kind] ?? '';
 }
 
-/** assistant 消息概要(产出全文可能很长,历史区只显示截断概要;title 悬停见全文) */
-function assistantPreview(content: string): string {
-  const t = content.trim();
-  return t.length > 160 ? `${t.slice(0, 160)}…` : t;
+/** 助手发言的署名:优先任务绑定角色的名字,无绑定(如纯任务)回退「任务 Agent」 */
+const taskMessageAuthor = computed(() => {
+  const cid = currentTask.value?.task.character_id;
+  if (cid) {
+    const c = store.characters.find((x) => x.id === cid);
+    if (c?.chara_name) return c.chara_name;
+  }
+  return '任务 Agent';
+});
+
+/**
+ * 对话记录里 assistant 消息的 markdown 预渲染(与 planRendered 同款缓存口径):
+ * 依赖精确到 messages 数组引用——store 侧按内容签名去重保证数据未变时引用不换,
+ * 事件风暴中这里零重算;按消息 id 缓存避免同一列表反复渲染时重复跑 markdown。
+ */
+const messageHtmlCache = computed(() => {
+  const map = new Map<string, string>();
+  for (const m of currentTask.value?.messages ?? []) {
+    if (m.role === 'assistant') map.set(m.id, renderMarkdown(m.content));
+  }
+  return map;
+});
+function renderMessageHtml(m: { id: string; content: string }): string {
+  return messageHtmlCache.value.get(m.id) ?? '';
+}
+
+/** 成果汇总卡展开态(默认关闭;持久化在 uiPrefs,跨会话/重启记忆) */
+const summaryOpen = computed(() => store.taskResultSummaryOpen);
+function toggleSummary(): void {
+  store.taskResultSummaryOpen = !store.taskResultSummaryOpen;
 }
 
 /** 发送追加指令:成功后草稿清空(详情经 store.followupTask 内刷新带出 messages/result) */
@@ -135,8 +170,9 @@ async function sendFollowup(): Promise<void> {
   if (!id || !content || followupSending.value || !taskTerminal.value) return;
   followupSending.value = true;
   try {
-    await store.followupTask(id, content);
+    await store.followupTask(id, content, followupMode.value);
     followupDraft.value = '';
+    followupMode.value = 'append';
   } catch (err) {
     alert(`追加失败:${(err as Error).message}`);
   } finally {
@@ -277,7 +313,7 @@ const plannedPlanHtml = computed(() => {
 /** solo/multi 模式入口:打开 Agent 合并面板并落在「调用情况」tab(主/子 Agent 调用时间线) */
 function openCallTrace(): void {
   store.callTraceOpen = true; // tab 记忆指向「调用情况」
-  store.agentPanelOpen = true;
+  store.openAgentPanel();     // 用户显式展开:清除自动展开抑制
 }
 
 // ----- 批次 R4 流式输出:「正在生成」块 -----
@@ -352,14 +388,15 @@ async function removeTask(task: TaskRecord): Promise<void> {
       </span>
 
       <span class="sv-topbar-right">
-        <!-- Agent 面板开关(面板合并后原「调用情况」独立拨杆收编:与聊天顶栏同一入口,两模式共用) -->
-        <div class="sv-topbar-group">
+        <!-- Agent 面板开关(面板合并后原「调用情况」独立拨杆收编:与聊天顶栏同一入口,两模式共用)
+             sv-topbar-agent:移动端隐藏,该入口已由底部导航「AGENT」承载 -->
+        <div class="sv-topbar-group sv-topbar-agent">
           <button
             type="button"
             class="sv-render-toggle-v2"
             :aria-pressed="store.agentPanelOpen"
             :title="store.agentPanelOpen ? 'Agent 面板已开启(含调用情况)' : 'Agent 面板已关闭(含调用情况)'"
-            @click="store.agentPanelOpen = !store.agentPanelOpen"
+            @click="store.toggleAgentPanel()"
           >
             <span class="toggle-track" :class="{ on: store.agentPanelOpen }">
               <span class="toggle-thumb" />
@@ -482,8 +519,10 @@ async function removeTask(task: TaskRecord): Promise<void> {
                   <div v-if="m.role === 'user'" class="sv-msg user">
                     <div class="sv-msg-bubble">{{ m.content }}</div>
                   </div>
-                  <div v-else class="sv-task-msg-assistant">
-                    <span class="sv-task-msg-preview" :title="m.content">{{ assistantPreview(m.content) }}</span>
+                  <div v-else class="sv-msg assistant">
+                    <div class="min-w-0">
+                      <div class="sv-msg-bubble sv-msg-md" v-html="renderMessageHtml(m)" />
+                    </div>
                   </div>
                 </div>
               </div>
@@ -568,8 +607,13 @@ async function removeTask(task: TaskRecord): Promise<void> {
             </div>
           </div>
 
-          <!-- 子任务 -->
-          <div v-if="currentTask.subtasks.length" class="sv-task-section">
+          <!-- 子任务(multi 子 agent 记录)。legacy 不渲染:legacy 的 subtasks 与上方
+               「计划步骤」同源重复(每个步骤名会各出现一次),信息以计划步骤区为准
+               (2026-09-10 实跑修复 F7) -->
+          <div
+            v-if="currentTask.subtasks.length && taskMode !== 'legacy'"
+            class="sv-task-section"
+          >
             <div class="sv-task-section-title">子任务执行</div>
             <div
               v-for="st in currentTask.subtasks"
@@ -596,10 +640,21 @@ async function removeTask(task: TaskRecord): Promise<void> {
           </div>
 
           <!-- 最终结果(team 模式拆尾部「## 审计结论」、plan 模式拆尾部「## 最终计划」
-               各自单独成卡;批次 R1:仅终态 done/partial 渲染,过渡窗口不显示) -->
+               各自单独成卡;批次 R1:仅终态 done/partial 渲染,过渡窗口不显示)。
+               实跑问题 1:逐轮对话记录区已是产出的权威视图,本卡默认关闭(与气泡重复),
+               可经标题栏开关展开;team 审计结论 / plan 最终计划为独立信息,保持常显。 -->
           <div v-if="resultMainHtml" class="sv-task-section">
-            <div class="sv-task-section-title">最终成果</div>
-            <div class="sv-task-result" v-html="resultMainHtml" />
+            <div class="sv-task-section-title">
+              成果汇总
+              <button
+                class="sv-task-summary-toggle"
+                :title="summaryOpen ? '收起成果汇总(逐轮对话记录已含全部产出)' : '展开成果汇总(合并后的完整成果)'"
+                @click="toggleSummary"
+              >
+                {{ summaryOpen ? '收起' : '展开' }}
+              </button>
+            </div>
+            <div v-if="summaryOpen" class="sv-task-result" v-html="resultMainHtml" />
           </div>
           <div v-if="resultAuditHtml" class="sv-task-section">
             <div class="sv-task-section-title">审计结论</div>
@@ -610,42 +665,65 @@ async function removeTask(task: TaskRecord): Promise<void> {
             <div class="sv-task-result sv-task-final-plan" v-html="resultFinalPlanHtml" />
           </div>
 
-          <!-- 用户指令历史(批次 R2:followup 追加指令 / plan_chat 规划对话;
-               user 气泡样式搬 ChatMessageItem user 分支,assistant 行只显示截断概要) -->
+          <!-- 对话记录(实跑问题 1):任务目标与各轮产出按 user/assistant 逐轮气泡呈现,
+               与 chat 模式同款视觉(用户气泡右对齐、模型气泡左对齐完整 markdown)。
+               数据源 = 详情 messages 字段(kind: goal/result/followup/plan_chat);
+               plan_chat 在 planned 态由批准区专属渲染,此处跳过防同屏重复。 -->
           <div v-if="taskMessages.length" class="sv-task-section sv-task-messages">
-            <div class="sv-task-section-title">用户指令历史</div>
+            <div class="sv-task-section-title">对话记录</div>
             <div v-for="m in taskMessages" :key="m.id" class="sv-task-msg-row">
               <div v-if="m.role === 'user'" class="sv-msg user">
                 <div class="sv-msg-bubble">
                   <span v-if="messageKindLabel(m.kind)" class="sv-tag sm sv-task-msg-kind">{{ messageKindLabel(m.kind) }}</span>{{ m.content }}
                 </div>
               </div>
-              <div v-else class="sv-task-msg-assistant">
-                <span v-if="messageKindLabel(m.kind)" class="sv-tag sm sv-task-msg-kind">{{ messageKindLabel(m.kind) }}</span>
-                <span class="sv-task-msg-preview" :title="m.content">{{ assistantPreview(m.content) }}</span>
+              <div v-else class="sv-msg assistant">
+                <div class="min-w-0">
+                  <div class="sv-msg-name">
+                    {{ taskMessageAuthor }}
+                    <span v-if="messageKindLabel(m.kind)" class="sv-tag sm sv-task-msg-kind">{{ messageKindLabel(m.kind) }}</span>
+                  </div>
+                  <div class="sv-msg-bubble sv-msg-md" v-html="renderMessageHtml(m)" />
+                </div>
               </div>
             </div>
           </div>
 
-          <!-- 追加指令(批次 R2a):终态任务可继续下达,产出追加进成果;
-               执行中/待批准/未执行时禁用并给出下一步提示 -->
+          <!-- 追加指令(批次 R2a;R2b+ 扩 mode):终态任务可继续下达;
+               追加=在既有成果后附加新段(不改原文),重写=用新产出整体替换成果
+               (支持「压缩/重写/改前面」类指令);执行中/待批准/未执行时禁用 -->
           <div class="sv-task-section sv-task-followup">
-            <div class="sv-task-section-title">追加指令</div>
+            <div class="sv-task-section-title">
+              追加指令
+              <select
+                v-model="followupMode"
+                class="sv-task-followup-mode"
+                :disabled="!taskTerminal || followupSending"
+                title="追加:在成果后附加新段(保留原文);重写:用本轮产出整体替换成果"
+              >
+                <option value="append">追加</option>
+                <option value="replace">重写</option>
+              </select>
+            </div>
             <div class="sv-task-followup-bar">
               <textarea
                 v-model="followupDraft"
                 class="sv-input"
                 rows="2"
                 :disabled="!taskTerminal || followupSending"
-                :placeholder="taskTerminal ? '在既有成果基础上继续补充或修改,例如:再润色一遍结尾…' : followupDisabledHint"
+                :placeholder="taskTerminal ? (followupMode === 'replace' ? '用本轮产出整体替换成果,例如:把全文压缩到 200 字以内…' : '在既有成果基础上继续补充,例如:再润色一遍结尾…') : followupDisabledHint"
                 spellcheck="false"
               />
               <button
                 class="sv-btn primary sv-btn-sm"
                 :disabled="!taskTerminal || followupSending || !followupDraft.trim()"
-                :title="taskTerminal ? '发送追加指令,任务将继续执行' : followupDisabledHint"
+                :title="taskTerminal ? (followupMode === 'replace' ? '发送并整体替换成果' : '发送追加指令,任务将继续执行') : followupDisabledHint"
                 @click="sendFollowup"
               >{{ followupSending ? '发送中…' : '发送' }}</button>
+            </div>
+            <div class="sv-task-followup-hint">
+              <template v-if="followupMode === 'replace'">重写模式:本轮产出将<b>整体替换</b>现有成果,旧内容不再保留</template>
+              <template v-else>追加模式:新产出附加在成果末尾,<b>不会修改</b>原有内容;若要压缩或改写全文请切换到「重写」</template>
             </div>
             <div v-if="!taskTerminal" class="sv-task-followup-hint">{{ followupDisabledHint }}</div>
           </div>

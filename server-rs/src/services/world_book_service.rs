@@ -520,10 +520,4 @@ impl WorldBookService {
         .ok()?;
         Some(())
     }
-
-    /// 全部原始数据(供测试/调试)
-    #[allow(dead_code)]
-    pub fn raw_value(&self, id: &str) -> Option<Value> {
-        self.get(id)?.data_raw
-    }
 }

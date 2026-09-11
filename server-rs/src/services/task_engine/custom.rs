@@ -2,8 +2,9 @@
 // L2 既有资产)配轻量 step 执行器(批次 4.3b,docs/任务引擎六模式.md 第一节)。
 // 语义:逐 step 顺序执行,上一步输出作为下一步输入;只吃 steps+goal,
 // 不依赖角色卡/聊天历史(角色类占位符渲染为空,{{char}} 等宏原文不泄漏)。
-// 工具:step.tools=None 走 generate_text 纯生成;Some([]) = 全量工具,
-// Some(list) = 白名单,均经 run_tool_loop(step_whitelist 同一机制自动放行)。
+// 工具:step.tools=None 走 generate_text 纯生成;Some([]) = 按 task_tool_policy 编译的
+// 全部工具,Some(list) = 与步骤白名单取交(只能收窄);均经 run_tool_loop 的 ToolGate
+// 闸门,恒不等待授权(任务模式名单外工具立即拒绝)。
 // 反思步骤(action=reflect)按契约不携带用户 system_prompt,统一用内置
 // CUSTOM_REFLECT_PROMPT;首版不做 reflect 回退循环(判定结论作为文本流向下一步)。
 use super::context::TaskRunContext;
@@ -18,7 +19,9 @@ use crate::models::types::{
 };
 use crate::services::agent_flow_service::AgentFlowConfig;
 use crate::services::prompt_kit::untrusted_boundary;
-use crate::services::task_service::prompt::{CUSTOM_REFLECT_PROMPT, EXECUTOR_PROMPT};
+use crate::services::task_service::prompt::{
+    CUSTOM_REFLECT_PROMPT, EXECUTOR_PROMPT, TASK_INTERNAL_PLAN_PROMPT,
+};
 use crate::services::task_service::{TaskGenOutput, TaskService};
 use futures::future::BoxFuture;
 use std::sync::Arc;
@@ -52,11 +55,14 @@ impl CustomExecutor {
         Ok(cfg)
     }
 
-    /// 组装步骤 system:内置基础指令(direct=执行者 / reflect=内置反思)
-    /// + 步骤提示词(用户可编辑 → 宏渲染 + untrusted 包裹)+ 任务目标上下文(untrusted 包裹)。
+    /// 组装步骤 system:内置基础指令(direct 生成=执行者 / direct 非生成=内部规划 /
+    /// reflect=内置反思)+ 步骤提示词(用户可编辑 → 宏渲染 + untrusted 包裹)+ 任务目标上下文(untrusted 包裹)。
+    /// generates=false 的 direct 步骤用内部规划指令:其语义是「只做分析规划、不产出正文」,
+    /// 与步骤自身定位一致(此前复用执行者指令会吐出完整正文,2026-09-10 实测修复)。
     fn build_step_system(&self, step: &PlanStep, goal: &str) -> String {
         let mut sys = match step.action.as_str() {
             "reflect" => String::from(CUSTOM_REFLECT_PROMPT),
+            _ if step.generates == Some(false) => String::from(TASK_INTERNAL_PLAN_PROMPT),
             _ => String::from(EXECUTOR_PROMPT),
         };
         if let Some(prompt) = &step.system_prompt {
@@ -91,15 +97,26 @@ impl CustomExecutor {
         whitelist: &[String],
     ) -> Result<(String, TokenUsage), String> {
         let settings = &ctx.settings;
-        // Some([]) = 全量工具;Some(list) = 白名单 ∩ 已注册
-        let defs = self.engine.tool_definitions();
+        // 任务模式工具策略:先按策略编译候选集(默认拒绝危险工具、剔除元工具),
+        // 再与步骤白名单取交——步骤白名单只能收窄,不能突破任务策略放行危险工具。
+        let policy = super::tool_policy::compile(
+            &settings.task_tool_policy,
+            &settings.task_tool_allowlist,
+            &self.engine.tool_registry(),
+        );
+        // Some([]) = 策略全量集;Some(list) = 策略集 ∩ 步骤白名单
         let tools: Vec<_> = if whitelist.is_empty() {
-            defs
+            policy.defs
         } else {
-            defs.into_iter()
+            policy
+                .defs
+                .into_iter()
                 .filter(|d| whitelist.iter().any(|w| w == &d.name))
                 .collect()
         };
+        // 闸门名单与下发工具一致:名单外立即拒绝(任务模式无 UI 授权上下文)
+        let gate_list: Vec<String> = tools.iter().map(|d| d.name.clone()).collect();
+        let gate = crate::agents::engine::executor::ToolGate::listed(&gate_list);
         let tool_choice = match step.tool_choice.as_deref() {
             Some("none") => ToolChoice::None,
             Some("required") => ToolChoice::Required,
@@ -153,7 +170,7 @@ impl CustomExecutor {
             &flag,
             &mut total_usage,
             &run_id,
-            Some(whitelist),
+            gate,
         )
         .await;
         drop(tx);
@@ -189,6 +206,9 @@ impl CustomExecutor {
                         std::time::Duration::ZERO,
                         "error",
                     );
+                    // 补落被截断那次调用的 usage(2026-09-10 实测修复,口径同 solo.rs)
+                    self.svc
+                        .record_usage(&ctx.task_id, "step", Some(step_index), &heal_out);
                 }
                 let text = res.content.trim().to_string();
                 let status = if text.is_empty() { "empty" } else { "ok" };
@@ -351,7 +371,14 @@ impl CustomExecutor {
                         prev_output.clear();
                     } else {
                         plan[i].status = TaskStepStatus::Done;
-                        plan[i].result = text.clone();
+                        // generates=false 的内部规划步骤:产出仅供后续步骤参考,
+                        // 加标注区分于面向用户的成果(不参与 draft 选拔)。
+                        if step.action == "direct" && step.generates == Some(false) {
+                            plan[i].result = format!("(内部规划)\n{text}");
+                        } else {
+                            plan[i].result = text.clone();
+                        }
+                        // 仅「生成正文」的 direct 步骤产出进入最终成果
                         if step.action == "direct" && step.generates == Some(true) {
                             draft = text.clone();
                         }
@@ -384,6 +411,7 @@ impl CustomExecutor {
             text: draft,
             usage: total,
             status,
+            error: None,
         })
     }
 }

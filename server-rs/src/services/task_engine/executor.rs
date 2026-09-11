@@ -12,6 +12,11 @@ pub(crate) struct TaskOutcome {
     /// 成功终态覆盖:None = Done;team/custom 存在失败主/步骤但有产出时为
     /// Some(Partial)(对齐 legacy「有产出则 partial」语义,批次 4.3b)。
     pub status: Option<TaskStatus>,
+    /// partial 终态的可解释原因(如「以下子目标执行失败:…」「审计/终审未通过」)。
+    /// None = Done 或无补充说明。写入 tasks.error 供前端在状态行展示——旧实现
+    /// partial 时 error 恒为空,用户只看到一个与「执行中」同色的黄标、不知为何没完成
+    ///(实跑问题 2 观感残留)。仅成功收尾(complete_mode_run)消费。
+    pub error: Option<String>,
 }
 
 /// 模式执行器(solo/plan/multi/team/custom 共用同一缝)。

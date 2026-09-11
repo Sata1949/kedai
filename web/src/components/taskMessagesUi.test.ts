@@ -9,8 +9,8 @@ import type { TaskDetail, TaskMessage, TaskMessageKind, TaskMessageRole, TaskRec
 // 批次 R2 多轮用户输入 UI 冒烟:沿用 taskModeUi.test.ts 的 SSR 模式
 // (createSSRApp + renderToString + pinia 播种;无 jsdom/@vue/test-utils)。
 // 验证:① 追加指令条——终态可用、非终态(running/planned/pending)禁用并给提示;
-// ② 用户指令历史区——user 气泡(sv-msg user/sv-msg-bubble)+ assistant 截断概要
-// + kind 小标签;③ 旧服务端详情无 messages 字段时历史区不渲染、输入条照常(容错)。
+// ② 对话记录区(实跑问题 1)——user 气泡 + assistant 完整 markdown 气泡 + kind
+// 小标签;③ 成果汇总卡默认收起、开关可展开(持久化偏好);④ 旧服务端无 messages 容错。
 
 // node 环境无 localStorage(store 初始化即访问),补内存桩
 const memStorage = new Map<string, string>();
@@ -86,24 +86,27 @@ describe('TaskBoard 批次 R2a:追加指令条', () => {
   //(同 taskModeUi.test.ts 的「计划步骤</div>」先例)
   it('done 终态:输入条出现且可用(textarea/按钮无 disabled),禁用提示不出现', async () => {
     const html = await render(TaskBoard, (p) => seedCurrentTask(p, makeDetail(makeTask('done'), [])));
-    expect(html).toContain('追加指令</div>');
+    // 标题含格式选择器(2026-09-10 F5:追加 / 重写)
+    expect(html).toContain('sv-task-followup-mode');
+    expect(html).toContain('重写');
     // textarea 未禁用(SSR 对 disabled=true 输出 disabled 属性,false 时无该属性)
     expect(html).not.toMatch(/<textarea[^>]*\sdisabled/);
-    expect(html).not.toContain('sv-task-followup-hint');
-    expect(html).toContain('在既有成果基础上继续补充或修改');
+    // 默认追加模式提示:不会修改原有内容
+    expect(html).toContain('不会修改');
+    expect(html).toContain('在既有成果基础上继续补充');
   });
 
   it('partial/error/ended 同为终态:输入条可用', async () => {
     for (const st of ['partial', 'error', 'ended'] as TaskStatus[]) {
       const html = await render(TaskBoard, (p) => seedCurrentTask(p, makeDetail(makeTask(st), [])));
       expect(html, `${st} 终态输入条不应禁用`).not.toMatch(/<textarea[^>]*\sdisabled/);
-      expect(html).not.toContain('sv-task-followup-hint');
+      expect(html).toContain('sv-task-followup-mode');
     }
   });
 
   it('running:输入条禁用并提示「任务执行中」', async () => {
     const html = await render(TaskBoard, (p) => seedCurrentTask(p, makeDetail(makeTask('running'), [])));
-    expect(html).toContain('追加指令</div>');
+    expect(html).toContain('sv-task-followup-mode');
     expect(html).toMatch(/<textarea[^>]*\sdisabled/);
     expect(html).toContain('任务执行中');
   });
@@ -121,9 +124,9 @@ describe('TaskBoard 批次 R2a:追加指令条', () => {
   });
 });
 
-describe('TaskBoard 批次 R2:用户指令历史区', () => {
-  it('渲染 user 气泡(原文 + 「追加」标签)与 assistant 截断概要,按 created_at 升序', async () => {
-    const longOutput = '追加产出正文。' + '产'.repeat(200); // 超 160 字触发截断
+describe('TaskBoard 批次 R2 / 实跑问题 1:对话记录区', () => {
+  it('渲染 user 气泡与 assistant 完整 markdown 气泡(不再截断),按 created_at 升序', async () => {
+    const longOutput = '追加产出正文。' + '产'.repeat(200); // 旧版会截断为 160 字;新版必须完整呈现
     const messages: TaskMessage[] = [
       makeMsg('user', 'followup', '再补充一点秋色', 1),
       makeMsg('assistant', 'followup', longOutput, 2),
@@ -131,26 +134,62 @@ describe('TaskBoard 批次 R2:用户指令历史区', () => {
     ];
     const html = await render(TaskBoard, (p) => seedCurrentTask(p, makeDetail(makeTask('done'), messages)));
     // 标题 div 收尾精确匹配(防模板注释污染)
-    expect(html).toContain('用户指令历史</div>');
-    // user 气泡样式类(搬 ChatMessageItem user 分支)+ 指令原文
+    expect(html).toContain('对话记录</div>');
+    // user 气泡样式类 + 指令原文
     expect(html).toContain('sv-msg user');
     expect(html).toContain('sv-msg-bubble');
     expect(html).toContain('再补充一点秋色');
     expect(html).toContain('再润色一遍结尾');
     // kind 小标签(span 收尾精确匹配,防「追加指令」标题歧义)
     expect(html).toContain('>追加</span>');
-    // assistant 概要:截断为 160 字 + …,精确匹配 span 可见文本(> 前缀定位到标签
-    // 收尾,避免与 title 属性里的全文混淆——title 携带全文悬停可见,是预期形态)
-    const expectedPreview = `${longOutput.trim().slice(0, 160)}…`;
-    expect(html).toContain(`>${expectedPreview}</span>`);
-    expect(html).not.toContain(`>${longOutput.trim()}</span>`);
+    // assistant 完整气泡:走 markdown 渲染(200 字正文不再被截断)
+    expect(html).toContain(longOutput);
+    expect(html).not.toContain(`${longOutput.slice(0, 160)}…`);
+    // 升序:用户首条出现在末尾指令之前
+    expect(html.indexOf('再补充一点秋色')).toBeLessThan(html.indexOf('再润色一遍结尾'));
   });
 
-  it('旧服务端详情无 messages 字段:历史区不渲染,输入条照常可用(读取容错)', async () => {
+  it('目标(kind=goal)与首轮成果(kind=result)各成一条气泡', async () => {
+    const messages: TaskMessage[] = [
+      makeMsg('user', 'goal', '写一段关于秋天的短文', 1),
+      makeMsg('assistant', 'result', '秋天的短文正文', 2),
+    ];
+    const html = await render(TaskBoard, (p) => seedCurrentTask(p, makeDetail(makeTask('done'), messages)));
+    expect(html).toContain('对话记录</div>');
+    expect(html).toContain('写一段关于秋天的短文');
+    expect(html).toContain('秋天的短文正文');
+    // kind 小标签:目标 / 成果
+    expect(html).toContain('>目标</span>');
+    expect(html).toContain('>成果</span>');
+  });
+
+  it('旧服务端详情无 messages 字段:对话区不渲染,输入条照常可用(读取容错)', async () => {
     const html = await render(TaskBoard, (p) => seedCurrentTask(p, makeDetail(makeTask('done'))));
-    expect(html).not.toContain('用户指令历史</div>');
-    expect(html).toContain('追加指令</div>');
+    expect(html).not.toContain('对话记录</div>');
+    expect(html).toContain('sv-task-followup-mode');
     expect(html).not.toMatch(/<textarea[^>]*\sdisabled/);
+  });
+});
+
+describe('TaskBoard 实跑问题 1:成果汇总卡默认收起', () => {
+  // 用不与开关 title 文案重叠的唯一串,精确判断汇总正文是否进入 DOM
+  const SUMMARY_BODY = '汇总正文唯一标记串 ZQ';
+
+  it('终态默认收起:标题与开关出现,正文不渲染;开关可展开', async () => {
+    const html = await render(TaskBoard, (p) => seedCurrentTask(p, makeDetail(makeTask('done', SUMMARY_BODY), [])));
+    expect(html).toContain('成果汇总');
+    expect(html).toContain('sv-task-summary-toggle');
+    expect(html).toContain('展开');
+    // 默认收起:汇总正文不在 DOM(逐轮气泡才是权威视图)
+    expect(html).not.toContain(SUMMARY_BODY);
+  });
+
+  it('开关打开时渲染汇总正文(持久化偏好生效)', async () => {
+    memStorage.set('kedai.task-result-summary.v1', '1');
+    const html = await render(TaskBoard, (p) => seedCurrentTask(p, makeDetail(makeTask('done', SUMMARY_BODY), [])));
+    expect(html).toContain('成果汇总');
+    expect(html).toContain('收起');
+    expect(html).toContain(SUMMARY_BODY);
   });
 });
 
@@ -159,7 +198,7 @@ describe('TaskBoard 批次 R2b:批准区「与规划器对话」', () => {
     { name: '搜集资料', goal: '收集季度数据', status: 'pending', result: '' },
   ];
 
-  it('planned 态:批准区渲染对话输入框与 plan_chat 对话记录;底部历史区不重复显示 plan_chat', async () => {
+  it('planned 态:批准区渲染对话输入框与 plan_chat 对话记录;底部对话区不重复显示 plan_chat', async () => {
     const messages: TaskMessage[] = [
       makeMsg('user', 'plan_chat', '把步骤换成先做竞品调研', 1),
       makeMsg('assistant', 'plan_chat', '计划已修订,共 1 步:修订步骤甲', 2),
@@ -174,20 +213,20 @@ describe('TaskBoard 批次 R2b:批准区「与规划器对话」', () => {
     expect(html).toContain('计划已修订,共 1 步:修订步骤甲');
     // 反馈输入框 placeholder
     expect(html).toContain('对计划提出修改意见');
-    // planned 态 plan_chat 归批准区专属:底部历史区被过滤为空、整块不渲染
-    expect(html).not.toContain('用户指令历史</div>');
+    // planned 态 plan_chat 归批准区专属:底部对话区被过滤为空、整块不渲染
+    expect(html).not.toContain('对话记录</div>');
     // 反馈原文仅出现一次(批准区;无同屏重复)
     const occurrences = html.split('把步骤换成先做竞品调研').length - 1;
     expect(occurrences).toBe(1);
   });
 
-  it('done 态:plan_chat 历史回到底部历史区(带「规划对话」标签),批准区消失', async () => {
+  it('done 态:plan_chat 历史回到底部对话区(带「规划对话」标签),批准区消失', async () => {
     const messages: TaskMessage[] = [
       makeMsg('user', 'plan_chat', '把步骤换成先做竞品调研', 1),
       makeMsg('assistant', 'plan_chat', '计划已修订,共 1 步:修订步骤甲', 2),
     ];
     const html = await render(TaskBoard, (p) => seedCurrentTask(p, makeDetail(makeTask('done'), messages)));
-    expect(html).toContain('用户指令历史</div>');
+    expect(html).toContain('对话记录</div>');
     expect(html).toContain('把步骤换成先做竞品调研');
     // kind 小标签
     expect(html).toContain('>规划对话</span>');

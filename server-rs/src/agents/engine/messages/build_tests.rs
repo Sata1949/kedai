@@ -3,7 +3,8 @@
 // 摘要槽/记忆槽布局。私有兼容入口 build_llm_messages 的测试仍留 build.rs 内。
 // 经 messages/mod.rs 的 `#[cfg(test)] mod build_tests;` 挂载,测试名不变。
 use crate::agents::engine::messages::inject::{
-    insert_memory_slot, insert_summary_slot, MEMORY_SLOT_MARKER, SUMMARY_SLOT_MARKER,
+    append_memory_notice, insert_memory_slot, insert_recall_slot, insert_summary_slot,
+    MEMORY_SLOT_MARKER, RECALL_SLOT_MARKER, SUMMARY_SLOT_MARKER,
 };
 use crate::agents::engine::worldbook::WorldInjection;
 use crate::models::types::LlmMessage;
@@ -726,5 +727,138 @@ fn appending_history_keeps_prefix_over_memory_slot() {
         prefix >= m_old.len().saturating_sub(2),
         "公共前缀({prefix})应覆盖旧数组除尾部注入转移区外的全部(旧长 {})",
         m_old.len()
+    );
+}
+
+// ===== 召回槽(升级工作流 B2 通道 2) =====
+
+/// 召回槽追加在消息数组末尾(不动已有消息);空列表不插槽;
+/// 提示行附在槽内(预算截断时显式告知,不静默丢弃)
+#[test]
+fn recall_slot_appends_at_tail_with_optional_notice() {
+    let mut msgs = vec![
+        LlmMessage::plain("system", "系统"),
+        LlmMessage::plain("system", "【角色长期记忆】\n- 常驻记忆"),
+        LlmMessage::plain("user", "最新输入"),
+    ];
+    let before = msgs.clone();
+    let contents = vec!["用户偏爱雨天".to_string(), "角色怕黑".to_string()];
+    assert!(insert_recall_slot(&mut msgs, &contents, None));
+    assert_eq!(msgs.len(), before.len() + 1, "召回槽应追加为独立消息");
+    assert_eq!(msgs.last().unwrap().role, "system");
+    assert!(
+        msgs.last().unwrap().content.starts_with(RECALL_SLOT_MARKER),
+        "末尾应为召回槽: {}",
+        msgs.last().unwrap().content
+    );
+    assert_eq!(
+        msgs.last().unwrap().content,
+        "【相关记忆召回】\n- 用户偏爱雨天\n- 角色怕黑"
+    );
+    // 已有消息逐字节不变
+    for (i, m) in before.iter().enumerate() {
+        assert_eq!(
+            serde_json::to_string(m).unwrap(),
+            serde_json::to_string(&msgs[i]).unwrap(),
+            "已有第 {i} 条消息不得被改写"
+        );
+    }
+
+    // 截断提示:附在槽内末行
+    let mut with_notice = before.clone();
+    assert!(insert_recall_slot(
+        &mut with_notice,
+        &["用户偏爱雨天".to_string()],
+        Some("(记忆条目因字符预算超限被截断,未全部注入)")
+    ));
+    assert!(
+        with_notice
+            .last()
+            .unwrap()
+            .content
+            .contains("因字符预算超限被截断"),
+        "提示应显式写入槽内: {}",
+        with_notice.last().unwrap().content
+    );
+
+    // 空列表 / 全空白:不插槽
+    let mut empty = before.clone();
+    assert!(!insert_recall_slot(&mut empty, &[], None));
+    assert!(!insert_recall_slot(&mut empty, &["  ".to_string()], None));
+    assert_eq!(empty.len(), before.len());
+}
+
+/// 截断提示兜底:通道 2 无条目可注入时,提示写入已有记忆槽(不静默丢弃);
+/// 无任何槽位时返回 false
+#[test]
+fn memory_notice_fallback_writes_into_existing_slot() {
+    let mut msgs = vec![
+        LlmMessage::plain("system", "系统"),
+        LlmMessage::plain("system", "【角色长期记忆】\n- 常驻记忆"),
+        LlmMessage::plain("user", "输入"),
+    ];
+    assert!(append_memory_notice(
+        &mut msgs,
+        "(记忆条目因字符预算超限被截断,未全部注入)"
+    ));
+    assert!(
+        msgs[1].content.ends_with("未全部注入)"),
+        "提示应写入记忆槽末尾: {}",
+        msgs[1].content
+    );
+    assert_eq!(msgs.len(), 3, "兜底不应新增消息");
+    // 空提示 / 无槽位 → false
+    assert!(!append_memory_notice(&mut msgs, "   "));
+    let mut no_slot = vec![
+        LlmMessage::plain("system", "系统"),
+        LlmMessage::plain("user", "输入"),
+    ];
+    assert!(!append_memory_notice(&mut no_slot, "提示"));
+}
+
+/// 字节稳定回归:召回槽是尾部追加,不破坏 system/摘要槽/记忆槽的公共前缀
+#[test]
+fn recall_slot_keeps_prior_prefix_stable() {
+    let memory = vec!["常驻记忆A".to_string()];
+    let build = |history: &[(String, String)], recall: &[String]| {
+        let mut msgs = {
+            let mut vars = HashMap::new();
+            build_prefix_case(history, &mut vars)
+        };
+        insert_summary_slot(&mut msgs, "早期摘要。");
+        insert_memory_slot(&mut msgs, &memory);
+        insert_recall_slot(&mut msgs, recall, None);
+        msgs
+    };
+    let old_history = vec![
+        ("user".to_string(), "第一句".to_string()),
+        ("assistant".to_string(), "回应一".to_string()),
+    ];
+    let mut new_history = old_history.clone();
+    new_history.push(("user".to_string(), "第二句".to_string()));
+    let m_old = build(&old_history, &["召回条目".to_string()]);
+    let m_new = build(&new_history, &["召回条目".to_string()]);
+    // 头部三条(system+摘要槽+记忆槽)逐字节稳定
+    for i in 0..3 {
+        assert_eq!(
+            serde_json::to_string(&m_old[i]).unwrap(),
+            serde_json::to_string(&m_new[i]).unwrap(),
+            "第 {i} 条消息(槽位头部)必须逐字节稳定"
+        );
+    }
+    // 召回槽在旧数组末尾,新历史追加后其位置后移但内容不变
+    assert!(m_old
+        .last()
+        .unwrap()
+        .content
+        .starts_with(RECALL_SLOT_MARKER));
+    let recall_in_new = m_new
+        .iter()
+        .find(|m| m.content.starts_with(RECALL_SLOT_MARKER))
+        .expect("新数组应含召回槽");
+    assert_eq!(
+        serde_json::to_string(m_old.last().unwrap()).unwrap(),
+        serde_json::to_string(recall_in_new).unwrap(),
+        "召回槽内容应逐字节稳定"
     );
 }

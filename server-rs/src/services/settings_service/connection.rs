@@ -9,6 +9,11 @@ impl RuntimeSettings {
     pub fn masked_api_key(&self) -> String {
         mask_key(&self.openai_api_key)
     }
+
+    /// embedding API Key 脱敏展示(仅保留后 4 位;与聊天 Key 同策略)
+    pub fn masked_embedding_api_key(&self) -> String {
+        mask_key(&self.embedding_api_key)
+    }
 }
 
 /// 脱敏:非空时返回 `****xxxx`(保留后 4 位)

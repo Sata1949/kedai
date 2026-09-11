@@ -125,6 +125,12 @@ export type SseEvent =
 
 export type ToolRisk = 'safe' | 'sensitive' | 'dangerous';
 
+/** 授权模式三档(与后端 AuthorizationMode 一致)。
+ *  strict:读/写/删文件都需授权;
+ *  loose:读/写文件放行,删文件需授权(默认);
+ *  bypass:除「系统路径(C 盘)写/删」外一律放行。 */
+export type AuthorizationMode = 'strict' | 'loose' | 'bypass';
+
 export interface ToolPermission {
   name: string;
   description: string;
@@ -140,6 +146,8 @@ export interface TokenUsage {
   context_tokens: number;
   /** prompt 缓存命中 token(DeepSeek 等提供商;无缓存字段时为 0),用于计算当前命中率 */
   prompt_cache_hit_tokens: number;
+  /** prompt 缓存未命中 token(命中 + 未命中 = prompt_tokens) */
+  prompt_cache_miss_tokens: number;
 }
 
 export interface StMessage {
@@ -335,12 +343,24 @@ export interface RuntimeSettings {
   reflect_advice_prompt: string;
   /** 反思失败建议提示词注入角色(user / assistant) */
   reflect_advice_role: string;
-  /** 放行模式:true = 除黑名单工具外自动放行 */
+  /** 授权模式(三档):strict=读/写/删文件都需授权;loose=读/写放行、删需授权;bypass=除系统路径(C 盘)写/删外全放行 */
+  authorization_mode: AuthorizationMode;
+  /** @deprecated 旧放行模式开关;读 authorization_mode 代替。true 等价 bypass,false 等价 strict */
   bypass_mode: boolean;
-  /** 放行模式黑名单 */
+  /** 「始终需授权」清单:名单内工具在三档模式下都需授权 */
   bypass_blacklist: string[];
+  /** 授权等待超时(秒;30..=1800,默认 300) */
+  tool_authorization_timeout_secs: number;
+  /** 任务模式工具策略:all=全量、deny_dangerous=拒绝危险工具(默认)、allowlist=白名单 */
+  task_tool_policy: 'all' | 'deny_dangerous' | 'allowlist';
+  /** 任务模式工具白名单(task_tool_policy=allowlist 时生效) */
+  task_tool_allowlist: string[];
   /** AGENT/CUSTOM 模式工具循环轮次上限(默认 32) */
   max_tool_rounds: number;
+  /** 工具历史保留的最近完整轮数(1..=32;默认 4;超出后最老轮摘要化) */
+  tool_history_keep_rounds: number;
+  /** 工具历史 token 预算(0 = 禁用预算闸门;否则 1024..=1M,默认 16384) */
+  tool_history_budget_tokens: number;
   /** HTML 渲染开关(状态栏脚本执行前置条件):true = 开启安全 HTML 渲染 */
   render_html: boolean;
   /** 上下文压缩模式:off(不压缩)/ manual(手动触发)/ auto(token 超阈值自动压缩) */
@@ -357,6 +377,22 @@ export interface RuntimeSettings {
   memory_distill_enabled: boolean;
   /** 每次注入提示词的记忆条数上限(0..=50;0 = 不注入) */
   memory_inject_limit: number;
+  /** 记忆槽字符预算(0..=20000;0 = 不限制,默认 2000):按精选排序累积到预算即停 */
+  memory_inject_char_budget: number;
+  /** 每角色记忆容量上限(0..=10000;0 = 不淘汰,默认 200):超出后最低分条目置 selected=0 */
+  memory_max_entries: number;
+  /** 向量化(embedding)开关:开启后记忆写入生成向量、召回走「向量+Jaccard」混合打分 */
+  embedding_enabled: boolean;
+  /** embedding 服务地址(OpenAI 兼容 /embeddings;独立于聊天 Base URL) */
+  embedding_base_url: string;
+  /** embedding API Key 脱敏展示(仅后 4 位;不回显明文) */
+  embedding_api_key_masked: string;
+  /** 是否已配置 embedding API Key */
+  has_embedding_api_key: boolean;
+  /** embedding 模型名(如 text-embedding-3-small / embedding-3 / bge-m3) */
+  embedding_model: string;
+  /** 向量维度(0 = 由测试连接自动探测并回填) */
+  embedding_dim: number;
   /** 技能渐进披露开关(true = system 只注入「名称:用途」清单,正文按需 read;默认 true) */
   skill_progressive_disclosure: boolean;
   /** 子智能体最大嵌套深度(1..=4;默认 2) */
@@ -373,6 +409,8 @@ export interface RuntimeSettings {
   mcp_servers: McpServerConfig[];
   /** 执行者人设完整开关(R3a;默认 false = 精简:仅 description+personality;true = 完整:再加 scenario+mes_example)。仅任务模式生效 */
   task_persona_full: boolean;
+  /** 任务模式是否继承提示词注入(2026-09-10 实跑修复;默认 false = 隔离,不注入 prompt_floors.json)。仅任务模式生效 */
+  task_prompt_inject_enabled: boolean;
 }
 
 /** MCP 服务器配置(批次 6.2):name 会 sanitize 为工具名前缀段([a-z0-9_]) */
@@ -417,9 +455,23 @@ export interface RuntimeSettingsPatch {
   preset_tail_role?: string;
   reflect_advice_prompt?: string;
   reflect_advice_role?: string;
+  /** @deprecated 用 authorization_mode;true → bypass,false → strict */
   bypass_mode?: boolean;
+  /** 授权模式三档 */
+  authorization_mode?: AuthorizationMode;
+  /** 「始终需授权」清单 */
   bypass_blacklist?: string[];
+  /** 授权等待超时(秒;30..=1800) */
+  tool_authorization_timeout_secs?: number;
+  /** 任务模式工具策略 */
+  task_tool_policy?: 'all' | 'deny_dangerous' | 'allowlist';
+  /** 任务模式工具白名单 */
+  task_tool_allowlist?: string[];
   max_tool_rounds?: number;
+  /** 工具历史保留轮数(1..=32) */
+  tool_history_keep_rounds?: number;
+  /** 工具历史 token 预算(0 = 禁用;否则 1024..=1048576) */
+  tool_history_budget_tokens?: number;
   render_html?: boolean;
   compaction_mode?: string;
   compaction_threshold?: number;
@@ -428,6 +480,20 @@ export interface RuntimeSettingsPatch {
   llm_request_log?: boolean;
   memory_distill_enabled?: boolean;
   memory_inject_limit?: number;
+  /** 记忆槽字符预算(0..=20000;0 = 不限制) */
+  memory_inject_char_budget?: number;
+  /** 每角色记忆容量上限(0..=10000;0 = 不淘汰) */
+  memory_max_entries?: number;
+  /** 向量化开关 */
+  embedding_enabled?: boolean;
+  /** embedding 服务地址(自动补协议与 /v1) */
+  embedding_base_url?: string;
+  /** embedding API Key(留空 = 保持现有不变更) */
+  embedding_api_key?: string;
+  /** embedding 模型名 */
+  embedding_model?: string;
+  /** 向量维度(0 = 自动探测) */
+  embedding_dim?: number;
   skill_progressive_disclosure?: boolean;
   subagent_max_depth?: number;
   subagent_max_concurrency?: number;
@@ -437,6 +503,8 @@ export interface RuntimeSettingsPatch {
   mcp_servers?: McpServerConfig[];
   /** 执行者人设完整开关(R3a;仅任务模式生效) */
   task_persona_full?: boolean;
+  /** 任务模式是否继承提示词注入(2026-09-10 实跑修复;默认 false = 隔离) */
+  task_prompt_inject_enabled?: boolean;
 }
 
 // ===== 音频播放器(阶段五 5a;契约对齐酒馆助手 audio.d.ts) =====
@@ -567,6 +635,12 @@ export interface SkillRecord {
   content: string;
   enabled: boolean;
   created_at: string;
+  /** 技能工具白名单(空 = 不限);经 read(type=skill) 加载该技能时可用的工具集合 */
+  allowed_tools: string[];
+  /** 是否允许作为子智能体派发(agentgo 链路) */
+  run_as_subagent: boolean;
+  /** 技能级模型覆盖(空 = 沿用当前连接器模型) */
+  model: string;
 }
 
 export interface SkillImportItem {
@@ -723,9 +797,10 @@ export type TaskMessageRole = 'user' | 'assistant';
 
 /**
  * 任务消息种类(批次 R2;对齐 server-rs task_messages.kind):
- * normal=普通(旧行默认值) / followup=终态追加指令(R2a) / plan_chat=批准环节规划对话(R2b)
+ * goal=创建时的用户目标 / result=首轮成果(实跑问题 1 起落库)
+ * / normal=普通(旧行默认值) / followup=终态追加指令(R2a) / plan_chat=批准环节规划对话(R2b)
  */
-export type TaskMessageKind = 'normal' | 'followup' | 'plan_chat';
+export type TaskMessageKind = 'normal' | 'goal' | 'result' | 'followup' | 'plan_chat';
 
 /** 任务消息(批次 R2 多轮用户输入;详情响应 messages 数组,created_at 升序) */
 export interface TaskMessage {

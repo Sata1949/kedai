@@ -87,8 +87,12 @@ pub(super) async fn reflect_with_tools(
     if *abort.borrow() {
         return None;
     }
-    // 反思可用的文本修正工具:仅取已注册的(缺失时退回无工具反思)
-    let tools: Vec<ToolDefinition> = ["censor_text", "revise_passage"]
+    // 反思可用的工具:文本修正(禁词替换/定点修订)+ 只读检索(read,
+    // 供反思时查世界书/资料佐证判定);仅取已注册的(缺失时退回无工具反思)。
+    // 常量见 tools::tool_sets(REFLECT)。
+    let mut names: Vec<&str> = crate::tools::tool_sets::REFLECT.to_vec();
+    names.push("read");
+    let tools: Vec<ToolDefinition> = names
         .iter()
         .filter_map(|name| engine.tool_registry.get(name).map(|t| t.definition))
         .collect();
@@ -185,8 +189,11 @@ pub(super) async fn reflect_with_tools(
                 .execute(&call.name, &call.arguments, tool_ctx.clone())
                 .await
                 .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"));
-            // 文本修正类工具的输出即修正后的正文(最后一次调用胜出)
-            revised = Some(output.clone());
+            // 只有文本修正类工具的输出才是修正后的正文(read 是检索类,输出是资料,
+            // 混入会污染正文);修正类「最后一次调用胜出」。
+            if crate::tools::tool_sets::REFLECT.contains(&call.name.as_str()) {
+                revised = Some(output.clone());
+            }
             messages.push(LlmMessage {
                 role: "tool".into(),
                 content: output,

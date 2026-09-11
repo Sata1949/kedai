@@ -246,6 +246,11 @@ pub async fn delete_session(
             if let Some(e) = cleanup_err {
                 tracing::warn!(session_id = id, error = e, "会话契约运行态清理失败");
             }
+            // 会话删除后清理其显式授权,避免 session_grants 无限积累;
+            // 失败仅告警不阻断删除(残留授权指向已删会话,不会再被读取)。
+            if let Err(e) = state.tool_registry.permissions().revoke_scope("session", &id) {
+                tracing::warn!(session_id = id, error = e, "会话授权清理失败");
+            }
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(None) => err_json("会话不存在", StatusCode::NOT_FOUND),

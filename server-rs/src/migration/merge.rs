@@ -13,10 +13,11 @@ use super::conflict::{
     same_file, scalar_text, select_by_key, value_key,
 };
 use super::ddl::{
-    ensure_llm_requests_usage_columns, ensure_skills_progressive_columns,
-    ensure_task_llm_calls_finish_reason_column, ensure_task_messages_table,
-    ensure_tasks_task_mode_column, CONTRACT_CHANGELOG_DDL, KALEIDO_STATE_DDL, LLM_REQUESTS_DDL,
-    MEMORY_ENTRIES_DDL, SCOPE_VARIABLES_DDL, SESSION_COMPACTIONS_DDL, USER_SCRIPTS_DDL,
+    ensure_llm_requests_usage_columns, ensure_memory_entries_pinned_column,
+    ensure_skills_progressive_columns, ensure_task_llm_calls_finish_reason_column,
+    ensure_task_messages_table, ensure_tasks_task_mode_column, CONTRACT_CHANGELOG_DDL,
+    KALEIDO_STATE_DDL, LLM_REQUESTS_DDL, MEMORY_ENTRIES_DDL, MEMORY_ENTRIES_FTS_DDL,
+    SCOPE_VARIABLES_DDL, SESSION_COMPACTIONS_DDL, USER_SCRIPTS_DDL,
 };
 use super::{DATABASE_FILE, SKIPPED_SIDECARS};
 
@@ -202,6 +203,12 @@ fn merge_databases(baseline: &Path, source: &Path) -> Result<MergeReport, String
         .map_err(|e| format!("补齐基线库 kaleido 契约运行态表失败: {e}"))?;
     conn.execute_batch(MEMORY_ENTRIES_DDL)
         .map_err(|e| format!("补齐基线库 memory_entries 表失败: {e}"))?;
+    // 记忆 pinned 列(B2 分层注入)+ FTS 索引:旧库补齐,保证两侧 schema 一致
+    // (FTS 虚拟表本身不参与比对,但补齐后主表 trigger 才能同步索引)
+    ensure_memory_entries_pinned_column(&conn)
+        .map_err(|e| format!("补齐基线库 memory_entries pinned 列失败: {e}"))?;
+    conn.execute_batch(MEMORY_ENTRIES_FTS_DDL)
+        .map_err(|e| format!("补齐基线库 memory_entries FTS 索引失败: {e}"))?;
     // 任务消息表(批次 R2):旧库缺失才建,保证两侧 schema 一致(比对在 DDL 补齐之后)
     ensure_task_messages_table(&conn)
         .map_err(|e| format!("补齐基线库 task_messages 表失败: {e}"))?;
@@ -236,6 +243,11 @@ fn merge_databases(baseline: &Path, source: &Path) -> Result<MergeReport, String
     source_conn
         .execute_batch(MEMORY_ENTRIES_DDL)
         .map_err(|e| format!("补齐源快照 memory_entries 表失败: {e}"))?;
+    ensure_memory_entries_pinned_column(&source_conn)
+        .map_err(|e| format!("补齐源快照 memory_entries pinned 列失败: {e}"))?;
+    source_conn
+        .execute_batch(MEMORY_ENTRIES_FTS_DDL)
+        .map_err(|e| format!("补齐源快照 memory_entries FTS 索引失败: {e}"))?;
     ensure_task_messages_table(&source_conn)
         .map_err(|e| format!("补齐源快照 task_messages 表失败: {e}"))?;
     drop(source_conn);
@@ -381,6 +393,9 @@ fn merge_table(
 }
 
 fn schema_map(conn: &Connection, schema: &str) -> Result<BTreeMap<String, String>, String> {
+    // FTS5 虚拟表与其影子表不参与合并:旧库无索引表不应报「基线缺少源表」,
+    // 且逐行 INSERT 时由主表 trigger 自动同步索引,无需(也不应)按表搬运。
+    let skipped = non_mergeable_tables(conn, schema)?;
     let mut stmt = conn
         .prepare(&format!(
             "SELECT name, sql FROM {schema}.sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
@@ -391,8 +406,44 @@ fn schema_map(conn: &Connection, schema: &str) -> Result<BTreeMap<String, String
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })
         .map_err(|e| format!("遍历 {schema} schema 失败: {e}"))?;
-    rows.collect::<rusqlite::Result<BTreeMap<_, _>>>()
-        .map_err(|e| format!("解析 {schema} schema 失败: {e}"))
+    let all = rows
+        .collect::<rusqlite::Result<BTreeMap<_, _>>>()
+        .map_err(|e| format!("解析 {schema} schema 失败: {e}"))?;
+    Ok(all
+        .into_iter()
+        .filter(|(name, _)| !skipped.contains(name))
+        .collect())
+}
+
+/// 列出不应参与合并的表名:虚拟表(virtual)与其影子表(shadow)。
+/// 依赖 `PRAGMA table_list`(SQLite 3.37+,bundled 版本满足),按 schema 列过滤;
+/// 极旧引擎不支持该 pragma 时返回空集(退化为按建表 SQL 前缀跳过)。
+fn non_mergeable_tables(conn: &Connection, schema: &str) -> Result<HashSet<String>, String> {
+    let mut stmt = match conn.prepare("PRAGMA table_list") {
+        Ok(stmt) => stmt,
+        Err(_) => return Ok(HashSet::new()),
+    };
+    // 列序:schema, name, type, ncol, wr, strict
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|e| format!("遍历表清单失败: {e}"))?;
+    let mut out = HashSet::new();
+    for row in rows {
+        let (row_schema, name, kind) = row.map_err(|e| format!("解析表清单失败: {e}"))?;
+        if row_schema != schema {
+            continue;
+        }
+        if kind.eq_ignore_ascii_case("virtual") || kind.eq_ignore_ascii_case("shadow") {
+            out.insert(name);
+        }
+    }
+    Ok(out)
 }
 
 /// schema 比对前的 SQL 归一:标点(逗号/括号)两侧空白归一 + 空白折叠 + 小写。

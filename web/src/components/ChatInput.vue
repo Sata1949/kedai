@@ -10,7 +10,14 @@ import type { AgentMode } from '../api';
 import { filterCommands, wordBeforeCursor } from './slashSuggest';
 
 const store = useAppStore();
-const { generating, currentCharacterId, agentMode, bypassMode, model, models } = storeToRefs(store);
+const { generating, currentCharacterId, agentMode, authorizationMode, model, models } = storeToRefs(store);
+
+/** 授权三档:严格(读/写/删都需授权)/ 宽松(读/写放行,删需授权)/ 放行(仅系统路径写删需授权) */
+const AUTH_MODES = [
+  { key: 'strict' as const, label: '严格', title: '严格:读文件、写文件、删文件都需手动授权' },
+  { key: 'loose' as const, label: '宽松', title: '宽松:读/写文件自动放行,删文件需授权' },
+  { key: 'bypass' as const, label: '放行', title: '放行:仅写/删系统路径(如 C 盘)需授权,其余自动放行' },
+];
 const text = ref('');
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
 
@@ -303,23 +310,18 @@ async function onModelChange(e: Event): Promise<void> {
         </button>
       </div>
 
-      <!-- 授权模式 -->
+      <!-- 授权模式(三档) -->
       <div class="sv-auth-mode">
         <span class="sv-auth-mode-label">授权</span>
         <div class="sv-auth-toggle">
           <button
-            :class="{ active: !bypassMode }"
-            title="授权模式:执行高位操作需手动授权"
-            @click="store.bypassMode = false"
+            v-for="m in AUTH_MODES"
+            :key="m.key"
+            :class="{ active: authorizationMode === m.key }"
+            :title="m.title"
+            @click="store.setAuthorizationMode(m.key)"
           >
-            授权
-          </button>
-          <button
-            :class="{ active: bypassMode }"
-            title="放行模式:除黑名单操作外,其他操作自动放行"
-            @click="store.bypassMode = true"
-          >
-            放行
+            {{ m.label }}
           </button>
         </div>
       </div>

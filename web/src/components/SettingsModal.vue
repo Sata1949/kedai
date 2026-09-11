@@ -24,6 +24,7 @@ const PresetImportExportSection = lazyModal(() => import('./settings/PresetImpor
 const DataManagementSection = lazyModal(() => import('./settings/DataManagementSection.vue'), '设置区:数据管理', 'settingsOpen');
 const McpSection = lazyModal(() => import('./settings/McpSection.vue'), '设置区:MCP 服务', 'settingsOpen');
 const UiSection = lazyModal(() => import('./settings/UiSection.vue'), '设置区:界面', 'settingsOpen');
+const EmbeddingSection = lazyModal(() => import('./settings/EmbeddingSection.vue'), '设置区:向量化模型', 'settingsOpen');
 
 const props = withDefaults(defineProps<{
   embedded?: boolean;
@@ -75,6 +76,7 @@ const close = (): void => {
     <PresetImportExportSection v-if="visitedSections.has('preset')" :state="promptInject" :show="props.activeSection === 'preset'" />
     <DataManagementSection v-if="visitedSections.has('data')" :state="dataManager" :show="props.activeSection === 'data'" />
     <McpSection v-if="visitedSections.has('mcp')" :show="props.activeSection === 'mcp'" />
+    <EmbeddingSection v-if="visitedSections.has('embedding')" :show="props.activeSection === 'embedding'" />
     <UiSection v-if="visitedSections.has('ui')" :state="dataManager" :show="props.activeSection === 'ui'" />
   </div>
 
@@ -99,6 +101,7 @@ const close = (): void => {
         <PresetImportExportSection :state="promptInject" />
         <DataManagementSection :state="dataManager" />
         <McpSection />
+        <EmbeddingSection />
         <UiSection :state="dataManager" />
       </div>
 

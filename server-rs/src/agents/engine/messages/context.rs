@@ -21,8 +21,9 @@ use crate::services::prompt_inject_service::PromptInjectConfig;
 use serde_json::Value;
 
 use super::{
-    apply_inject_insertions, build_llm_messages_with_position, insert_memory_slot,
-    insert_summary_slot, parse_inject_insertion, trim_to_context, InjectAt, InjectInsertion,
+    append_memory_notice, apply_inject_insertions, build_llm_messages_with_position,
+    insert_memory_slot, insert_recall_slot, insert_summary_slot, parse_inject_insertion,
+    trim_to_context, InjectAt, InjectInsertion,
 };
 
 /// 阶段 2「上下文收集」的只读产物:字符卡/历史/世界书/设置快照等,
@@ -440,6 +441,7 @@ impl AgentEngine {
         session_id: &str,
         ctx: &CollectedCtx,
         rctx: &mut RunContext<'_>,
+        recall_query_vec: Option<&[f32]>,
     ) -> Vec<i64> {
         // 反思失败建议(位置0):本轮初始构建时恒为空(未失败/未生成),后续失败才注入
         let mut scopes_guard = rctx.scopes.lock().unwrap_or_else(|e| e.into_inner());
@@ -496,20 +498,77 @@ impl AgentEngine {
         if let Some(summary) = &ctx.history_summary {
             insert_summary_slot(&mut llm_messages, summary);
         }
-        // 跨会话记忆槽(落地项 2):摘要槽之后、历史之前注入精选记忆。
+        // 跨会话记忆槽(落地项 2 + 升级工作流 B2):摘要槽之后、历史之前注入精选记忆。
         // inject_limit=0 等价关闭;character_id 为空或无选中记忆不插槽(与现状一致)。
         // 记忆集合未变时槽内容逐字节稳定(select_for_injection 排序键确定性),
         // touch 衰减回写延迟到响应主体生成之后,不影响本轮已构建内容。
+        // B2 通道 2:按当前用户输入检索召回,作为尾部独立 system 消息追加(条数上限
+        // RECALL_LIMIT,且只注入通道 1 未包含的条目);字符预算超限时截断并在槽内
+        // 加一行显式提示(不静默丢弃)。
         let mut memory_touched: Vec<i64> = Vec::new();
-        // 设置快照:不留锁跨 await
-        let inject_limit = self.settings_snapshot().memory_inject_limit as usize;
+        let settings = self.settings_snapshot();
+        let inject_limit = settings.memory_inject_limit as usize;
+        let char_budget = settings.memory_inject_char_budget as usize;
         if inject_limit > 0 && !req.character_id.trim().is_empty() {
             let entries = self.memory.list(&req.character_id);
             let picked =
                 crate::services::memory_service::select_for_injection(&entries, inject_limit);
-            let contents: Vec<String> = picked.iter().map(|e| e.content.clone()).collect();
+            let picked_ids: Vec<i64> = picked.iter().map(|e| e.id).collect();
+            // 通道 1+2 合计字符预算:先按序收通道 1,再收通道 2,超预算截断
+            let mut used = 0usize;
+            let mut truncated = false;
+            let mut contents: Vec<String> = Vec::new();
+            for e in &picked {
+                if char_budget > 0 && used + e.content.chars().count() > char_budget {
+                    truncated = true;
+                    break;
+                }
+                used += e.content.chars().count();
+                contents.push(e.content.clone());
+            }
+            // 通道 2:预算剩余时召回(预算 0 = 不限制;截断后即停止,避免槽无限增长)
+            // Phase 3:查询向量由调用方(async 上下文)预先算好传入;
+            // 有向量则「向量×0.7 + Jaccard×0.3」混合打分,无则纯 Jaccard。
+            let mut recall_contents: Vec<String> = Vec::new();
+            let mut recall_ids: Vec<i64> = Vec::new();
+            if !truncated {
+                let entry_vecs: std::collections::HashMap<i64, Vec<f32>> = match recall_query_vec {
+                    Some(_) => {
+                        let ids: Vec<i64> = entries.iter().map(|e| e.id).collect();
+                        self.memory.get_vectors(&ids)
+                    }
+                    None => std::collections::HashMap::new(),
+                };
+                let recalled = crate::services::memory_service::select_recall_hybrid(
+                    &entries,
+                    &req.user_input,
+                    crate::services::memory_service::RECALL_LIMIT,
+                    &picked_ids,
+                    recall_query_vec,
+                    &entry_vecs,
+                );
+                for e in recalled {
+                    if char_budget > 0 && used + e.content.chars().count() > char_budget {
+                        truncated = true;
+                        break;
+                    }
+                    used += e.content.chars().count();
+                    recall_contents.push(e.content.clone());
+                    recall_ids.push(e.id);
+                }
+            }
+            let notice = truncated.then_some("(记忆条目因字符预算超限被截断,未全部注入)");
+            let mut memory_slot_inserted = false;
             if insert_memory_slot(&mut llm_messages, &contents) {
-                memory_touched = picked.iter().map(|e| e.id).collect();
+                memory_slot_inserted = true;
+                memory_touched = picked.iter().take(contents.len()).map(|e| e.id).collect();
+            }
+            // 通道 2 尾部追加:召回命中且通道 1 未包含的条目
+            if insert_recall_slot(&mut llm_messages, &recall_contents, notice) {
+                memory_touched.extend(recall_ids);
+            } else if truncated && memory_slot_inserted {
+                // 通道 2 无可注入条目但通道 1 被截断:提示兜底写入记忆槽,不静默丢弃
+                append_memory_notice(&mut llm_messages, notice.unwrap_or_default());
             }
         }
         // GENERATE 注入(ST-Prompt-Template 兼容):BEFORE 拼到 system 开头(角色内容之前,

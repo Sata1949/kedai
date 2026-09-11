@@ -148,12 +148,9 @@ pub async fn send(State(state): State<Arc<AppState>>, Json(body): Json<SendBody>
     // 不进正文默认列表——它们只服务于多步变量驱动器与显式白名单,泄漏进正文会
     // 诱导模型在正文轮里误用变量补丁通道。
     if mode == "agent" {
-        params.tools = state
-            .tool_registry
-            .list_definitions()
-            .into_iter()
-            .filter(|t| !matches!(t.name.as_str(), "get_state" | "apply_patch"))
-            .collect();
+        params.tools = crate::tools::tool_sets::exclude_meta(
+            state.tool_registry.list_definitions(),
+        );
     }
     // 自定义流程(custom 模式):校验启用与合法性,步骤快照随请求传入引擎
     let mut flow_steps: Vec<PlanStep> = Vec::new();

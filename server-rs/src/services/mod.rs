@@ -6,7 +6,18 @@ pub mod audio_service;
 pub mod cache_diagnostics;
 pub mod character_service;
 pub mod contract_changelog_service;
+// 向量化服务(Phase 3):OpenAI 兼容 /embeddings 客户端 + 余弦/归一化工具
+pub mod embedding_service;
 pub mod kaleido_state_service;
+// Android Keystore 桥接(JNI):API Key 加密存储,仅 android 目标编译
+#[cfg(target_os = "android")]
+pub mod keystore_android;
+// 共享 JNI 桥基础设施(VM/类缓存),仅 android 目标编译
+#[cfg(target_os = "android")]
+pub mod jni_bridge;
+// Android 原生能力桥接(外链/分享/前台服务保活),仅 android 目标编译
+#[cfg(target_os = "android")]
+pub mod native_bridge_android;
 pub mod memory_service;
 pub mod prompt_inject_service;
 pub mod prompt_kit;

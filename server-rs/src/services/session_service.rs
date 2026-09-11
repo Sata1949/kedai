@@ -568,15 +568,6 @@ impl SessionService {
         count
     }
 
-    /// 删除会话全部变量
-    pub fn clear_session_vars(&self, session_id: &str) {
-        let conn = self.db.write();
-        let _ = conn.execute(
-            "DELETE FROM session_vars WHERE session_id = ?1",
-            params![session_id],
-        );
-    }
-
     // ===== 酒馆助手变量树(assistant 插件 stat_data,会话级 JSON) =====
 
     /// 读取会话酒馆助手变量树;无记录返回空树
@@ -616,15 +607,6 @@ impl SessionService {
         )
         .map_err(|e| format!("保存变量树失败(session {session_id}): {e}"))?;
         Ok(())
-    }
-
-    /// 删除会话酒馆助手变量树
-    pub fn clear_assistant_vars(&self, session_id: &str) {
-        let conn = self.db.write();
-        let _ = conn.execute(
-            "DELETE FROM session_assistant_vars WHERE session_id = ?1",
-            params![session_id],
-        );
     }
 
     // ===== 7 作用域变量(计划二 · scope_variables 表) =====
@@ -667,15 +649,6 @@ impl SessionService {
             }
         }
         count
-    }
-
-    /// 删除指定作用域记录(作用域数据重置)。
-    pub fn clear_scope_variables(&self, scope: &str, scope_id: &str) {
-        let conn = self.db.write();
-        let _ = conn.execute(
-            "DELETE FROM scope_variables WHERE scope = ?1 AND scope_id = ?2",
-            params![scope, scope_id],
-        );
     }
 }
 

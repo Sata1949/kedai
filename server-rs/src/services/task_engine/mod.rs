@@ -22,6 +22,7 @@ pub(crate) mod plan;
 pub(crate) mod sink;
 pub(crate) mod solo;
 pub(crate) mod team;
+pub(crate) mod tool_policy;
 
 use crate::agents::engine::AgentEngine;
 use crate::models::types::{TaskRecord, TaskRunMode, TaskStatus, TaskStep};
@@ -186,6 +187,9 @@ impl TaskEngine {
                         outcome.text.trim(),
                         // 执行器可覆盖成功终态(team/custom 有失败主/步骤但有产出 → partial)
                         outcome.status.unwrap_or(TaskStatus::Done),
+                        // partial 的可解释原因(team 审计/终审未通过或子目标失败);
+                        // Done 时执行器给 None,写空串清掉上一轮残留 error
+                        outcome.error.as_deref(),
                     ),
                 }
             }

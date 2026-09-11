@@ -2,7 +2,7 @@
 use crate::agents::planner::{make_custom_plan, make_plan};
 use crate::api::app_state::AppState;
 use crate::api::WithStatus;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -148,4 +148,47 @@ pub async fn interrupt(
     }
     state.engine.stop(&sid);
     Json(json!({ "ok": true })).into_response()
+}
+
+/// GET /api/chat/sessions/{id}/agent/trace:读取角色扮演模式下该会话的
+/// Agent 记录(agent_sessions + tool_calls),供前端切会话/重启后恢复右侧
+/// Agent 面板的「工具调用记录」(实跑问题 4:此前只有内存态,刷新即丢)。
+/// 只读:不建会话、不改状态;无记录时返回 `null`,前端保持空闲态。
+/// 说明:推理链(chain)明细无持久层,不在本响应内,恢复后仅工具调用可见。
+pub async fn session_trace(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> Response {
+    if session_id.trim().is_empty() {
+        return Json(json!({ "error": "缺少 session_id" }))
+            .into_response()
+            .with_status(StatusCode::BAD_REQUEST);
+    }
+    let svc = state.agent_sessions.clone();
+    let sid = session_id.clone();
+    let loaded = state
+        .db_call(move || {
+            svc.find_by_session(&sid)
+                .map(|a| (a.id.clone(), a.state.clone(), a.plan.clone(), a.step_index))
+        })
+        .await;
+    let (agent_id, agent_state, plan, step_index) = match loaded {
+        Err(e) => return crate::api::db_err(&e),
+        Ok(None) => return Json(json!({ "trace": null })).into_response(),
+        Ok(Some(v)) => v,
+    };
+    let svc2 = state.agent_sessions.clone();
+    let calls = state
+        .db_call(move || svc2.list_tool_calls(&agent_id))
+        .await
+        .unwrap_or_default();
+    Json(json!({
+        "trace": {
+            "state": agent_state,
+            "plan": plan,
+            "step_index": step_index,
+            "tool_calls": calls,
+        }
+    }))
+    .into_response()
 }

@@ -138,6 +138,7 @@ impl ApprovedPlanExecutor {
             } else {
                 None
             },
+            error: None,
         })
     }
 }
@@ -249,6 +250,7 @@ impl ModeExecutor for PlanExecutor {
                     ..Default::default()
                 },
                 status: None,
+                error: None,
             })
         })
     }

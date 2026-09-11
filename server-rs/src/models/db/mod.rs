@@ -10,11 +10,34 @@ pub use schema::create_tables_sql;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, Once};
 
 /// 只读连接池 / 池化只读连接类型别名(简化调用点签名)
 pub type ReadPool = r2d2::Pool<SqliteConnectionManager>;
 pub type PooledRead = r2d2::PooledConnection<SqliteConnectionManager>;
+
+/// 注册 sqlite-vec 扩展(静态链接)。
+/// `sqlite3_auto_extension` 是进程级全局注册:注册一次后,之后打开的**所有**连接
+/// 自动加载 vec0 虚拟表模块,无需逐连接调用。必须在本进程打开任何连接之前完成,
+/// 故用 Once 幂等保护,并在 Db::open 最开头调用。
+///
+/// 安全性:sqlite_vec_init 是 sqlite-vec crate 导出的标准扩展入口,签名与
+/// SQLite 要求的 `sqlite3_extension_init` 一致;transmute 是官方文档给的用法。
+pub fn register_sqlite_vec() {
+    /// SQLite 扩展初始化函数指针类型(sqlite3_auto_extension 要求的签名)
+    type ExtInit = unsafe extern "C" fn(
+        *mut rusqlite::ffi::sqlite3,
+        *mut *mut std::os::raw::c_char,
+        *const rusqlite::ffi::sqlite3_api_routines,
+    ) -> std::os::raw::c_int;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| unsafe {
+        let init: ExtInit = std::mem::transmute::<*const (), ExtInit>(
+            sqlite_vec::sqlite3_vec_init as *const (),
+        );
+        rusqlite::ffi::sqlite3_auto_extension(Some(init));
+    });
+}
 
 pub struct Db {
     /// 唯一写连接:所有写 SQL 经此串行执行(沿用既有单连接语义)
@@ -25,6 +48,8 @@ pub struct Db {
 
 impl Db {
     pub fn open(db_path: &Path, data_dir: &Path) -> Result<Self, String> {
+        // 向量扩展必须最先注册:之后所有连接(写连接 + 池中只读连接)才能用 vec0
+        register_sqlite_vec();
         if let Err(e) = std::fs::create_dir_all(data_dir) {
             return Err(format!("创建数据目录失败: {e}"));
         }
@@ -52,6 +77,12 @@ impl Db {
         // 幂等 schema 升级(批次 R2 多轮用户输入):旧库补建 task_messages 表
         crate::migration::ensure_task_messages_table(&conn)
             .map_err(|e| format!("升级 task_messages 表失败: {e}"))?;
+        // 幂等 schema 升级(升级工作流 B2):旧库 memory_entries 补 pinned 列
+        crate::migration::ensure_memory_entries_pinned_column(&conn)
+            .map_err(|e| format!("升级 memory_entries pinned 列失败: {e}"))?;
+        // 幂等回填(升级工作流 B1):记忆全文索引首次建表后 rebuild 一次
+        crate::migration::ensure_memory_entries_fts_backfill(&conn)
+            .map_err(|e| format!("回填 memory_entries FTS 索引失败: {e}"))?;
         backfill::backfill_scope_variables(&conn)?;
 
         // 只读连接池:READ_ONLY 标志防止读路径误写;busy_timeout/foreign_keys 与写连接对齐。

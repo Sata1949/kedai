@@ -13,6 +13,8 @@
 // 保证 `services::settings_service::*` 对外路径不变。
 use serde::{Deserialize, Serialize};
 
+use crate::tools::permissions::AuthorizationMode;
+
 mod connection;
 mod params;
 mod secret;
@@ -26,11 +28,13 @@ pub use params::{
 // RuntimeSettings 字段的 serde(default = "...") 按名字在本模块作用域解析;
 // 默认值函数集中在 params.rs,在此引入保持属性文本不变。
 use params::{
-    default_bypass_blacklist, default_compaction_keep_recent, default_compaction_mode,
-    default_compaction_snip_bytes, default_compaction_threshold, default_max_tool_rounds,
-    default_memory_inject_limit, default_skill_progressive_disclosure,
+    default_authorization_mode, default_bypass_blacklist, default_compaction_keep_recent,
+    default_compaction_mode, default_compaction_snip_bytes, default_compaction_threshold,
+    default_max_tool_rounds, default_memory_inject_char_budget, default_memory_inject_limit,
+    default_memory_max_entries, default_skill_progressive_disclosure,
     default_subagent_max_concurrency, default_subagent_max_depth,
-    default_subagent_result_max_chars, default_tool_history_budget_tokens,
+    default_subagent_result_max_chars, default_task_tool_policy,
+    default_tool_authorization_timeout_secs, default_tool_history_budget_tokens,
     default_tool_history_keep_rounds, default_undo_enabled, default_user_role,
 };
 
@@ -109,12 +113,33 @@ pub struct RuntimeSettings {
     /// 反思失败建议注入角色(user / assistant;system 钳制为 user)
     #[serde(default = "default_user_role")]
     pub reflect_advice_role: String,
-    /// 放行模式:true = 除黑名单工具外自动放行,不弹授权框
+    /// 授权模式(三档,批次授权改造):strict/loose/bypass。
+    /// - strict:读/写/删文件都需授权;
+    /// - loose:读/写文件放行,删文件需授权(默认);
+    /// - bypass:除「系统路径(C 盘)写/删」外一律放行。
+    /// 旧配置无此字段时由 serde default 填 loose,再由 load 侧迁移按 bypass_mode 修正
+    /// (见 settings_service::migrate_authorization_mode)。
+    #[serde(default = "default_authorization_mode")]
+    pub authorization_mode: AuthorizationMode,
+    /// 旧版放行模式开关(deprecated):仅用于旧配置迁移,新代码读 authorization_mode。
+    /// 保留字段以保证旧 settings.json 与旧 API 调用方可解析(不落 null)。
     #[serde(default)]
     pub bypass_mode: bool,
-    /// 放行模式黑名单(即使放行模式开启,这些工具仍需要授权)
+    /// 「始终需授权」清单(重定义原放行模式黑名单):名单内工具在三档模式下都需授权,
+    /// 用于把高危工具钉死在授权之后。默认空(不额外拦截)。
     #[serde(default = "default_bypass_blacklist")]
     pub bypass_blacklist: Vec<String>,
+    /// 授权等待超时(秒;默认 300,钳 30..=1800):仅对需要授权的聊天路径生效,
+    /// 超时后回灌 authorization_timeout 错误并发出可见事件。
+    #[serde(default = "default_tool_authorization_timeout_secs")]
+    pub tool_authorization_timeout_secs: u32,
+    /// 任务模式工具策略(批次授权改造):all / deny_dangerous / allowlist。
+    /// 任务模式无 UI 授权上下文,未放行工具直接拒绝而非等待授权。
+    #[serde(default = "default_task_tool_policy")]
+    pub task_tool_policy: String,
+    /// 任务模式 allowlist 策略下的工具白名单(task_tool_policy=allowlist 时生效)
+    #[serde(default)]
+    pub task_tool_allowlist: Vec<String>,
     /// AGENT/CUSTOM 模式工具循环轮次上限(默认 32;每轮可执行多个工具调用,
     /// 达到上限后停止调用工具并输出当前结果)
     #[serde(default = "default_max_tool_rounds")]
@@ -152,6 +177,29 @@ pub struct RuntimeSettings {
     /// 记忆槽注入条数上限(默认 8,钳 0..=50;0 = 等价关闭注入)
     #[serde(default = "default_memory_inject_limit")]
     pub memory_inject_limit: u32,
+    /// 记忆槽字符预算(升级工作流 B2;通道 1+2 合计,默认 2000,钳 0..=20000;
+    /// 0 = 不限制;超预算截断并在槽内加显式提示)
+    #[serde(default = "default_memory_inject_char_budget")]
+    pub memory_inject_char_budget: u32,
+    /// 每角色记忆容量上限(升级工作流 B3;默认 200,钳 0..=10000;0 = 不淘汰):
+    /// 超限时把最低分条目置 selected=0 归档(只归档不删除)
+    #[serde(default = "default_memory_max_entries")]
+    pub memory_max_entries: u32,
+    /// 向量化(embedding)开关:开启且凭据齐全时,记忆写入同步生成向量、召回走混合打分
+    #[serde(default)]
+    pub embedding_enabled: bool,
+    /// embedding 服务地址(OpenAI 兼容 /embeddings;独立于聊天 Base URL)
+    #[serde(default)]
+    pub embedding_base_url: String,
+    /// embedding API Key:内存明文,落盘经 secret_store 加密(与 openai_api_key 同策略)
+    #[serde(default)]
+    pub embedding_api_key: String,
+    /// embedding 模型名(如 text-embedding-3-small / embedding-3 / bge-m3)
+    #[serde(default)]
+    pub embedding_model: String,
+    /// 向量维度(0 = 由首次调用探测并回填;非 0 时校验实际返回维度是否一致)
+    #[serde(default)]
+    pub embedding_dim: u32,
     /// 技能渐进披露开关(落地项 3;默认开启):system 只注入技能 name+description
     /// 紧凑清单,正文按需 read(type=skill);关闭回退旧行为(不注入清单)
     #[serde(default = "default_skill_progressive_disclosure")]
@@ -182,6 +230,13 @@ pub struct RuntimeSettings {
     /// (persona_style);task 覆盖层可覆盖,None 沿用本扁平值。
     #[serde(default)]
     pub task_persona_full: bool,
+    /// 任务模式是否继承提示词注入(2026-09-10 六模式实测修复;默认 false = 隔离)。
+    /// false:任务执行/汇总/追加轮不注入 `prompt_floors.json`(该配置通常承载角色扮演的
+    /// 文章要求,如「1200 字/第三人称/禁词表」,进任务模式会与任务目标冲突——实测
+    /// legacy 追加「压缩到 200 字」后结果反而变长)。true:沿用旧行为,与角色扮演共用注入源。
+    /// task 覆盖层可覆盖,None 沿用本扁平值。
+    #[serde(default)]
+    pub task_prompt_inject_enabled: bool,
     /// 任务工作台的按模式覆盖项。扁平字段即角色扮演(roleplay)的权威值——引擎直接读
     /// 扁平字段,故 roleplay 不设覆盖层;task 用此覆盖层替换扁平字段的差异项。
     /// 旧 settings.json 无此字段,serde default 为空 = task 沿用扁平值。
@@ -361,6 +416,8 @@ mod tests {
         let s = RuntimeSettings::from_config(&cfg);
         assert!(!s.memory_distill_enabled, "蒸馏默认关闭");
         assert_eq!(s.memory_inject_limit, 8, "注入上限默认 8");
+        assert_eq!(s.memory_inject_char_budget, 2000, "字符预算默认 2000");
+        assert_eq!(s.memory_max_entries, 200, "每角色容量默认 200");
 
         // 旧版配置缺字段:serde default 补齐,行为与默认一致
         let dir = tmp_dir("memory-legacy");
@@ -369,6 +426,10 @@ mod tests {
             .unwrap()
             .remove("memory_distill_enabled");
         json.as_object_mut().unwrap().remove("memory_inject_limit");
+        json.as_object_mut()
+            .unwrap()
+            .remove("memory_inject_char_budget");
+        json.as_object_mut().unwrap().remove("memory_max_entries");
         std::fs::write(
             dir.join("settings.json"),
             serde_json::to_string_pretty(&json).unwrap(),
@@ -377,25 +438,108 @@ mod tests {
         let loaded = RuntimeSettings::load(&dir, &cfg);
         assert!(!loaded.memory_distill_enabled);
         assert_eq!(loaded.memory_inject_limit, 8);
+        assert_eq!(loaded.memory_inject_char_budget, 2000);
+        assert_eq!(loaded.memory_max_entries, 200);
 
-        // 越界(>50)钳回默认;0 合法(等价关闭注入)
+        // 越界钳回默认;0 合法(关闭注入/不限制淘汰)
         let dir2 = tmp_dir("memory-clamp");
         let mut s2 = RuntimeSettings::from_config(&cfg);
         s2.memory_distill_enabled = true;
         s2.memory_inject_limit = 500;
+        s2.memory_inject_char_budget = 999_999;
+        s2.memory_max_entries = 999_999;
         s2.save(&dir2).unwrap();
         let loaded2 = RuntimeSettings::load(&dir2, &cfg);
         assert!(loaded2.memory_distill_enabled, "开关应保存往返还原");
         assert_eq!(loaded2.memory_inject_limit, 8, "越界上限应钳回 8");
+        assert_eq!(
+            loaded2.memory_inject_char_budget, 2000,
+            "越界预算应钳回 2000"
+        );
+        assert_eq!(loaded2.memory_max_entries, 200, "越界容量应钳回 200");
 
         let dir3 = tmp_dir("memory-zero");
         let mut s3 = RuntimeSettings::from_config(&cfg);
         s3.memory_inject_limit = 0;
+        s3.memory_inject_char_budget = 0;
+        s3.memory_max_entries = 0;
+        s3.save(&dir3).unwrap();
+        let loaded3 = RuntimeSettings::load(&dir3, &cfg);
+        assert_eq!(loaded3.memory_inject_limit, 0, "0 是合法值(关闭注入)");
+        assert_eq!(loaded3.memory_inject_char_budget, 0, "0 合法(不限制预算)");
+        assert_eq!(loaded3.memory_max_entries, 0, "0 合法(不淘汰)");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
+        let _ = std::fs::remove_dir_all(&dir3);
+    }
+
+    /// embedding 向量化配置:默认关闭且空;旧配置缺字段 serde default 补齐;
+    /// Key 落盘加密、load 解密还原;维度越界回退 0(自动探测);合法值往返。
+    #[test]
+    fn embedding_settings_defaults_clamp_and_roundtrip() {
+        let cfg = test_cfg();
+        let s = RuntimeSettings::from_config(&cfg);
+        assert!(!s.embedding_enabled, "向量化默认关闭");
+        assert!(s.embedding_base_url.is_empty());
+        assert!(s.embedding_api_key.is_empty());
+        assert!(s.embedding_model.is_empty());
+        assert_eq!(s.embedding_dim, 0, "维度默认 0 = 自动探测");
+
+        // 旧版 settings.json 缺 embedding 字段:serde default 补齐
+        let dir = tmp_dir("embedding-legacy");
+        let mut json = serde_json::to_value(&s).unwrap();
+        for k in [
+            "embedding_enabled",
+            "embedding_base_url",
+            "embedding_api_key",
+            "embedding_model",
+            "embedding_dim",
+        ] {
+            json.as_object_mut().unwrap().remove(k);
+        }
+        std::fs::write(
+            dir.join("settings.json"),
+            serde_json::to_string_pretty(&json).unwrap(),
+        )
+        .unwrap();
+        let loaded = RuntimeSettings::load(&dir, &cfg);
+        assert!(!loaded.embedding_enabled);
+        assert_eq!(loaded.embedding_dim, 0);
+
+        // 往返:Key 加密落盘但内存明文可还原;维度合法值保留
+        let dir2 = tmp_dir("embedding-roundtrip");
+        let mut s2 = RuntimeSettings::from_config(&cfg);
+        s2.embedding_enabled = true;
+        s2.embedding_base_url = "https://api.example.com/v1".into();
+        s2.embedding_api_key = "sk-embed-secret-1234".into();
+        s2.embedding_model = "text-embedding-3-small".into();
+        s2.embedding_dim = 1536;
+        s2.save(&dir2).unwrap();
+        // 落盘副本必须是密文(不出现明文 Key)
+        let raw = std::fs::read_to_string(dir2.join("settings.json")).unwrap();
+        assert!(
+            !raw.contains("sk-embed-secret-1234"),
+            "embedding Key 不应以明文落盘"
+        );
+        let loaded2 = RuntimeSettings::load(&dir2, &cfg);
+        assert!(loaded2.embedding_enabled, "开关往返还原");
+        assert_eq!(
+            loaded2.embedding_api_key, "sk-embed-secret-1234",
+            "Key 解密还原"
+        );
+        assert_eq!(loaded2.embedding_model, "text-embedding-3-small");
+        assert_eq!(loaded2.embedding_dim, 1536);
+
+        // 维度越界回退 0(自动探测)
+        let dir3 = tmp_dir("embedding-clamp");
+        let mut s3 = RuntimeSettings::from_config(&cfg);
+        s3.embedding_dim = 99_999;
         s3.save(&dir3).unwrap();
         assert_eq!(
-            RuntimeSettings::load(&dir3, &cfg).memory_inject_limit,
+            RuntimeSettings::load(&dir3, &cfg).embedding_dim,
             0,
-            "0 是合法值(关闭注入)"
+            "越界维度应回退 0"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -773,6 +917,61 @@ mod tests {
         assert!(
             !s.for_mode(AppMode::Task).task_persona_full,
             "Some(false) = 精简"
+        );
+    }
+
+    /// 2026-09-10 实跑修复:任务模式提示词注入默认隔离(false),旧配置零迁移;
+    /// 覆盖层 Some(true) 可恢复与角色扮演共用注入源的旧行为。
+    #[test]
+    fn task_prompt_inject_isolated_by_default_and_overridable() {
+        // 覆盖层 serde 三态:缺字段/null → None(沿用扁平);None 序列化省略字段
+        let missing: ModeSettings = serde_json::from_str("{}").unwrap();
+        assert!(
+            missing.task_prompt_inject_enabled.is_none(),
+            "缺字段应为 None(沿用扁平值)"
+        );
+        let null: ModeSettings =
+            serde_json::from_str(r#"{"task_prompt_inject_enabled": null}"#).unwrap();
+        assert!(null.task_prompt_inject_enabled.is_none(), "null 应为 None");
+        let some: ModeSettings =
+            serde_json::from_str(r#"{"task_prompt_inject_enabled": true}"#).unwrap();
+        assert_eq!(some.task_prompt_inject_enabled, Some(true));
+
+        let cfg = test_cfg();
+        // 旧版 settings.json:无 task 覆盖层、无扁平字段 → 读入后默认隔离(false)
+        let dir = tmp_dir("task-prompt-inject");
+        let mut legacy = serde_json::to_value(RuntimeSettings::from_config(&cfg)).unwrap();
+        let obj = legacy.as_object_mut().unwrap();
+        obj.remove("task");
+        obj.remove("task_prompt_inject_enabled");
+        std::fs::write(
+            dir.join("settings.json"),
+            serde_json::to_string_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+        let loaded = RuntimeSettings::load(&dir, &cfg);
+        assert!(
+            !loaded.task_prompt_inject_enabled,
+            "旧配置缺省应为隔离(false)"
+        );
+        assert!(
+            !loaded
+                .for_mode(AppMode::Task)
+                .task_prompt_inject_enabled,
+            "None 覆盖层沿用扁平值 = 隔离(旧配置兼容)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // 覆盖层分支:Some(true)=继承注入;roleplay 读扁平权威值,覆盖层不污染
+        let mut s = RuntimeSettings::from_config(&cfg);
+        s.task.task_prompt_inject_enabled = Some(true);
+        assert!(
+            s.for_mode(AppMode::Task).task_prompt_inject_enabled,
+            "Some(true) = 任务侧继承注入"
+        );
+        assert!(
+            !s.for_mode(AppMode::Roleplay).task_prompt_inject_enabled,
+            "roleplay 读扁平权威值(false),task 覆盖层不得污染"
         );
     }
 }

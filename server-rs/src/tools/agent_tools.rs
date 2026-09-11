@@ -530,6 +530,95 @@ mod tests {
         assert_eq!(created["results"][0]["ok"], true);
     }
 
+    /// replace action=remove:真正删除文件;delete 仍是清空内容(文件保留)。
+    /// 删除不存在的文件报错而非静默成功;bubble 不支持 remove。
+    #[tokio::test]
+    async fn test_replace_remove_file_ops() {
+        let deps = Arc::new(ToolDeps::dummy_for_test());
+        let reg = ToolRegistry::new();
+        register_write(&reg, deps.clone());
+        register_replace(&reg, deps.clone());
+        register_read(&reg, deps.clone());
+        let ctx = ToolContext {
+            session_id: "s".into(),
+            character_id: "c".into(),
+            agent_depth: 0,
+        };
+        for tool in ["write", "replace"] {
+            reg.permissions()
+                .authorize(tool, "session", &ctx.session_id)
+                .unwrap();
+        }
+        let root = character_file_root(&deps, &ctx.character_id);
+
+        reg.execute(
+            "write",
+            r#"{"target":"file","path":"keep.txt","content":"内容"}"#,
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+
+        // delete:清空内容,文件必须仍存在
+        let cleared = reg
+            .execute(
+                "replace",
+                r#"{"operations":[{"target":"file","path":"keep.txt","action":"delete"}]}"#,
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+        let cleared: Value = serde_json::from_str(&cleared).unwrap();
+        assert_eq!(cleared["results"][0]["ok"], true);
+        assert!(root.join("keep.txt").exists(), "delete 只清空内容,不应删除文件");
+        assert_eq!(std::fs::read_to_string(root.join("keep.txt")).unwrap(), "");
+
+        // remove:文件本身被删除
+        let removed = reg
+            .execute(
+                "replace",
+                r#"{"operations":[{"target":"file","path":"keep.txt","action":"remove"}]}"#,
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+        let removed: Value = serde_json::from_str(&removed).unwrap();
+        assert_eq!(removed["results"][0]["ok"], true);
+        assert!(!root.join("keep.txt").exists(), "remove 应删除文件本身");
+
+        // 重复 remove:明确报错,不静默成功
+        let again = reg
+            .execute(
+                "replace",
+                r#"{"operations":[{"target":"file","path":"keep.txt","action":"remove"}]}"#,
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+        let again: Value = serde_json::from_str(&again).unwrap();
+        assert_eq!(again["results"][0]["ok"], false);
+        assert!(again["results"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("不存在"));
+
+        // bubble 不支持 remove
+        let bubble = reg
+            .execute(
+                "replace",
+                r#"{"operations":[{"target":"bubble","id":1,"action":"remove"}]}"#,
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+        let bubble: Value = serde_json::from_str(&bubble).unwrap();
+        assert_eq!(bubble["results"][0]["ok"], false);
+        assert!(bubble["results"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("仅支持 target=file"));
+    }
+
     // ==================== 子智能体调度守卫(落地项 3) ====================
 
     /// 深度守卫:agent_depth 达到上限时拒绝派发,提示主智能体直接处理

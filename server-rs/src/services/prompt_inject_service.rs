@@ -53,17 +53,21 @@ fn validate_config(_cfg: &PromptInjectConfig) -> Result<(), String> {
 }
 
 /// 楼层注入位置(与 SillyTavern Prompt Manager 语义对齐)
+///
+/// **注意**:引擎注入路径已统一归位「系统提示词内」——`Before`/`After`/`Depth`
+/// 不再参与注入(见 `agents/engine/messages/build.rs` 位置4 注释)。三个变体仅保留
+/// 解析能力,用于兼容导入的酒馆预设(`parsing/preset.rs`),新配置应一律用 `System`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum FloorPosition {
     /// 拼入系统提示词末尾
     #[default]
     System,
-    /// 对话历史最前(开场白之前)
+    /// 对话历史最前(开场白之前)——已废弃,不参与注入
     Before,
-    /// 对话历史最后(最新消息之后)
+    /// 对话历史最后(最新消息之后)——已废弃,不参与注入
     After,
-    /// 深度:从历史末尾往前数第 N 条之后插入(0 = 最新消息后)
+    /// 深度:从历史末尾往前数第 N 条之后插入(0 = 最新消息后)——已废弃,不参与注入
     Depth,
 }
 

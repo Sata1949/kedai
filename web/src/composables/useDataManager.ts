@@ -103,8 +103,9 @@ export function useGenerationParams() {
   const store = useAppStore();
   const {
     temperature, topP, maxTokens, maxContextTokens, maxToolRounds,
+    toolHistoryKeepRounds, toolHistoryBudgetTokens,
     compactionMode, compactionThreshold, compactionKeepRecent, compactionSnipBytes,
-    memoryDistillEnabled, memoryInjectLimit,
+    memoryDistillEnabled, memoryInjectLimit, memoryInjectCharBudget, memoryMaxEntries,
     subagentMaxDepth, subagentMaxConcurrency, subagentResultMaxChars,
     undoEnabled,
   } = storeToRefs(store);
@@ -128,12 +129,16 @@ export function useGenerationParams() {
         default_max_tokens: maxTokens.value,
         max_context_tokens: maxContextTokens.value,
         max_tool_rounds: maxToolRounds.value,
+        tool_history_keep_rounds: toolHistoryKeepRounds.value,
+        tool_history_budget_tokens: toolHistoryBudgetTokens.value,
         compaction_mode: compactionMode.value,
         compaction_threshold: compactionThreshold.value,
         compaction_keep_recent: compactionKeepRecent.value,
         compaction_snip_bytes: compactionSnipBytes.value,
         memory_distill_enabled: memoryDistillEnabled.value,
         memory_inject_limit: memoryInjectLimit.value,
+        memory_inject_char_budget: memoryInjectCharBudget.value,
+        memory_max_entries: memoryMaxEntries.value,
         subagent_max_depth: subagentMaxDepth.value,
         subagent_max_concurrency: subagentMaxConcurrency.value,
         subagent_result_max_chars: subagentResultMaxChars.value,

@@ -55,6 +55,7 @@ impl ModeExecutor for MultiExecutor {
                 text,
                 usage,
                 status: None,
+                error: None,
             })
         })
     }

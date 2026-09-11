@@ -139,7 +139,13 @@ impl McpManager {
                     Box::pin(async move { call_client.call_tool(&remote_name, args).await })
                 },
             );
-            registry.register_with_timeout(definition, execute, Some(MCP_TOOL_TIMEOUT));
+            // MCP 工具标记为外部来源:参数对引擎不透明,三档授权模式按系统路径扫描处理
+            registry.register_external(
+                definition,
+                execute,
+                Some(MCP_TOOL_TIMEOUT),
+                crate::tools::action_class::ToolOrigin::Mcp,
+            );
             registered += 1;
         }
 

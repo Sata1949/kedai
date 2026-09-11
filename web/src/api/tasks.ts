@@ -48,14 +48,19 @@ export async function approveTask(id: string, plan?: TaskStep[]): Promise<{ ok: 
 }
 
 /**
- * 终态追加指令(批次 R2a):仅终态(done/partial/error/ended)可追加,
- * 空指令 400(VALIDATION)/ 非终态 409(CONFLICT);任务回 running 以
- * 「原目标 + 上轮结果 + 追加指令」solo 续跑,产出追加进 result 并落 messages。
+ * 终态追加指令(批次 R2a;R2b+ 扩 mode):仅终态(done/partial/error/ended)可追加,
+ * 空指令 400(VALIDATION)/ 非法 mode 400 / 非终态 409(CONFLICT);任务回 running
+ * 以「原目标 + 上轮结果 + 追加指令」solo 续跑,产出落 messages。
+ * mode=append(缺省)追加进 result;mode=replace 整体替换 result(段标「修订 N」)。
  */
-export async function followupTask(id: string, content: string): Promise<{ ok: boolean }> {
+export async function followupTask(
+  id: string,
+  content: string,
+  mode: 'append' | 'replace' = 'append',
+): Promise<{ ok: boolean }> {
   return request<{ ok: boolean }>(`/tasks/${id}/followup`, {
     method: 'POST',
-    body: JSON.stringify({ content }),
+    body: JSON.stringify({ content, mode }),
   });
 }
 

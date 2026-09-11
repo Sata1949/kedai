@@ -372,6 +372,49 @@ fn is_truncated_tool_call_error(err: &str) -> bool {
 /// 只是执行完后停止再发起新的模型请求——工具调用不会被静默丢弃,卡片不会无终态悬挂。
 /// 白名单模式:步骤配置了 tools 白名单时,名单内工具自动放行(不再弹授权框)。
 /// agent_session 为 None 表示任务模式(不建影子 agent_sessions 行,
+/// 工具授权闸门:替代裸白名单,把「名单内放行」与「名单外如何处理」分开表达。
+/// - `whitelist`:None = 非白名单模式(未放行工具走授权等待);
+///   Some([]) = 全量放行;Some(list) = 仅名单内工具放行。
+/// - `no_ui_authorization`:true = 未放行工具立即拒绝并回灌错误,不进入授权等待。
+///   任务模式没有 UI 授权上下文,若走等待会空等 300 秒超时,故必须置 true。
+#[derive(Clone, Copy)]
+pub(crate) struct ToolGate<'a> {
+    pub whitelist: Option<&'a [String]>,
+    pub no_ui_authorization: bool,
+}
+
+impl<'a> ToolGate<'a> {
+    /// 非白名单模式,未放行则等待授权(聊天 agent 路径)
+    pub(crate) fn wait() -> Self {
+        Self {
+            whitelist: None,
+            no_ui_authorization: false,
+        }
+    }
+
+    /// 显式白名单,不等待(任务 custom 步骤 / 子 agent)
+    pub(crate) fn listed(whitelist: &'a [String]) -> Self {
+        Self {
+            whitelist: Some(whitelist),
+            no_ui_authorization: true,
+        }
+    }
+
+    /// 该工具是否被名单放行(空名单 = 全量放行)
+    fn authorizes(&self, name: &str) -> bool {
+        self.whitelist
+            .is_some_and(|wl| wl.is_empty() || wl.iter().any(|n| n == name))
+    }
+
+    /// 该工具是否被闸门硬性排除。仅对「有名单 + 不等待授权」的路径成立(任务模式):
+    /// 名单是能力的硬边界,不在名单内的工具必须拒绝——否则文件规则可能因「宽松模式
+    /// 写文件放行」而放过被任务策略排除的危险工具(模型幻觉调用即越权)。
+    /// 聊天路径(no_ui_authorization=false)不硬性排除:名单外工具走授权等待,与改造前一致。
+    fn excludes(&self, name: &str) -> bool {
+        self.no_ui_authorization && self.whitelist.is_some() && !self.authorizes(name)
+    }
+}
+
 /// 跳过状态/工具调用落库;docs/任务引擎六模式.md 第三节);聊天路径恒 Some,行为不变。
 /// pub(crate):任务引擎 solo/custom 模式直调(批次 4.2 起)。
 #[allow(clippy::too_many_arguments)]
@@ -388,8 +431,8 @@ pub(crate) async fn run_tool_loop(
     flag: &AbortFlag,
     total_usage: &mut TokenUsage,
     run_id: &str,
-    // 步骤白名单(custom 模式):名单内工具自动放行,None = 非白名单模式
-    step_whitelist: Option<&[String]>,
+    // 授权闸门(替代 step_whitelist):见 ToolGate 文档
+    gate: ToolGate<'_>,
 ) -> Result<ExecutorResult, String> {
     // 轮次上限:缺省 32(settings 可调);至少 1 轮,防止配置异常导致死循环
     let max_rounds = params.max_tool_rounds.unwrap_or(32).max(1) as usize;
@@ -599,34 +642,57 @@ pub(crate) async fn run_tool_loop(
             tool_call_id: None,
         });
         // ===== 本轮工具执行 =====
-        // 1) 裁决(顺序,无副作用):白名单工具自动放行,其余走权限裁决
+        // 1) 裁决(顺序,无副作用):白名单工具自动放行,其余走三档授权模式裁决
+        // (任务模式无 UI 授权上下文时,未放行工具在下方执行阶段直接拒绝,不空等)
         let mut executed: Vec<ExecutedTool> = result
             .tool_calls
             .iter()
             .map(|call| {
                 let registered = engine.tool_registry.get(&call.name).is_some();
-                let custom_authorized = step_whitelist.is_some_and(|whitelist| {
-                    whitelist.is_empty() || whitelist.iter().any(|name| name == &call.name)
-                });
-                let (bypass_mode, bypass_blacklisted) = {
+                let custom_authorized = gate.authorizes(&call.name);
+                let (mode, always_required) = {
                     // 设置快照:不留锁跨 await
                     let settings = engine.settings_snapshot();
                     (
-                        settings.bypass_mode,
+                        settings.authorization_mode,
                         settings
                             .bypass_blacklist
                             .iter()
                             .any(|name| name == &call.name),
                     )
                 };
-                let permission = engine.tool_registry.permissions().decide_with_policy(
+                // 操作分类:读/写/删文件与系统路径区域,决定三档矩阵的走向
+                let origin = engine
+                    .tool_registry
+                    .origin_of(&call.name)
+                    .unwrap_or(crate::tools::action_class::ToolOrigin::Builtin);
+                let action = crate::tools::action_class::classify(
                     &call.name,
-                    tool_ctx,
-                    registered,
-                    custom_authorized,
-                    bypass_mode,
-                    bypass_blacklisted,
+                    &call.arguments,
+                    origin,
                 );
+                let permission = if gate.excludes(&call.name) {
+                    // 任务模式名单是硬边界:名单外工具直接拒绝,不进入三档文件规则
+                    // (否则宽松模式会放过被任务策略排除的写类工具)
+                    crate::tools::permissions::PermissionDecision {
+                        allowed: false,
+                        risk: engine
+                            .tool_registry
+                            .permissions()
+                            .risk_for(&call.name),
+                        reason: "该工具不在当前任务策略允许的工具清单内".into(),
+                    }
+                } else {
+                    engine.tool_registry.permissions().decide_with_policy(
+                        &call.name,
+                        tool_ctx,
+                        registered,
+                        custom_authorized,
+                        mode,
+                        &action,
+                        always_required,
+                    )
+                };
                 tracing::info!(
                     tool = call.name.clone(),
                     risk = format!("{:?}", permission.risk).to_lowercase(),
@@ -682,6 +748,7 @@ pub(crate) async fn run_tool_loop(
                     abort,
                     flag,
                     run_id,
+                    gate,
                 )
                 .await?;
                 if interrupted {
@@ -817,6 +884,9 @@ fn split_parallel_groups(parallel_safe: &[bool]) -> Vec<Vec<usize>> {
 
 /// 串行执行单个工具调用(含未授权时的等待授权)。返回是否被中止。
 /// 与并发组不同,非 Safe/未注册工具必须走此路径,保证授权语义与副作用顺序稳定。
+/// `gate.no_ui_authorization = true`(任务模式)时,未放行工具直接拒绝并回灌错误,
+/// 不进入 300 秒授权等待——任务模式没有 UI 授权上下文,等待必然超时。
+#[allow(clippy::too_many_arguments)]
 async fn execute_serial_tool(
     engine: &AgentEngine,
     e: &mut ExecutedTool,
@@ -825,11 +895,20 @@ async fn execute_serial_tool(
     abort: &watch::Receiver<bool>,
     flag: &AbortFlag,
     run_id: &str,
+    gate: ToolGate<'_>,
 ) -> Result<bool, String> {
     if *abort.borrow() {
         return Ok(true);
     }
     if !e.permission.allowed && engine.tool_registry.get(&e.call.name).is_some() {
+        // 任务模式(无 UI 授权上下文):立即拒绝,不空等
+        if gate.no_ui_authorization {
+            e.output = json!({
+                "error": e.permission.reason,
+                "code": "tool_policy_denied"
+            });
+            return Ok(false);
+        }
         let receiver = engine.tool_registry.permissions().begin_wait(
             run_id,
             &e.call.id,
@@ -850,8 +929,12 @@ async fn execute_serial_tool(
         )
         .await?;
         let mut abort_wait = abort.clone();
+        let timeout_secs = {
+            let s = engine.settings_snapshot();
+            s.tool_authorization_timeout_secs as u64
+        };
         let resolved = tokio::select! {
-            decision = tokio::time::timeout(std::time::Duration::from_secs(300), receiver) => {
+            decision = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), receiver) => {
                 match decision {
                     Ok(Ok(value)) => Ok(value),
                     Ok(Err(_)) => Err(("authorization_disconnected", "授权通道已断开")),
@@ -875,34 +958,58 @@ async fn execute_serial_tool(
                 );
             }
             Ok(crate::tools::permissions::PendingAuthorizationDecision::AllowSession) => {
-                engine.tool_registry.permissions().authorize(
+                // 授权落盘失败(如匿名会话/磁盘异常)不应中断整轮生成:降级为「仅本次允许」
+                // 并留痕,否则用户看到的是生成失败而非授权失败。
+                match engine.tool_registry.permissions().authorize(
                     &e.call.name,
                     "session",
                     &tool_ctx.session_id,
-                )?;
-                e.permission = crate::tools::permissions::PermissionDecision::allowed(
-                    e.permission.risk,
-                    "用户授权当前会话".into(),
-                );
+                ) {
+                    Ok(()) => {
+                        e.permission = crate::tools::permissions::PermissionDecision::allowed(
+                            e.permission.risk,
+                            "用户授权当前会话".into(),
+                        );
+                    }
+                    Err(err) => {
+                        tracing::warn!(tool = e.call.name, error = %err, "会话授权落盘失败,降级为仅本次允许");
+                        e.permission = crate::tools::permissions::PermissionDecision::allowed(
+                            e.permission.risk,
+                            format!("用户允许本次调用(会话授权未保存:{err})"),
+                        );
+                    }
+                }
             }
             Ok(crate::tools::permissions::PendingAuthorizationDecision::AllowRole) => {
-                engine.tool_registry.permissions().authorize(
+                match engine.tool_registry.permissions().authorize(
                     &e.call.name,
                     "role",
                     &tool_ctx.character_id,
-                )?;
-                e.permission = crate::tools::permissions::PermissionDecision::allowed(
-                    e.permission.risk,
-                    "用户授权当前角色".into(),
-                );
+                ) {
+                    Ok(()) => {
+                        e.permission = crate::tools::permissions::PermissionDecision::allowed(
+                            e.permission.risk,
+                            "用户授权当前角色".into(),
+                        );
+                    }
+                    Err(err) => {
+                        tracing::warn!(tool = e.call.name, error = %err, "角色授权落盘失败,降级为仅本次允许");
+                        e.permission = crate::tools::permissions::PermissionDecision::allowed(
+                            e.permission.risk,
+                            format!("用户允许本次调用(角色授权未保存:{err})"),
+                        );
+                    }
+                }
             }
             Ok(crate::tools::permissions::PendingAuthorizationDecision::Deny) => {
                 e.output =
                     json!({ "error": "用户拒绝工具调用", "code": "tool_authorization_denied" });
+                emit_authorization_outcome(tx, abort, flag, &e.call.name, "已拒绝").await;
                 return Ok(false);
             }
             Err((code, message)) => {
                 e.output = json!({ "error": message, "code": code });
+                emit_authorization_outcome(tx, abort, flag, &e.call.name, message).await;
                 return Ok(false);
             }
         }
@@ -912,6 +1019,29 @@ async fn execute_serial_tool(
     e.output = output;
     e.duration_ms = duration_ms;
     Ok(false)
+}
+
+/// 授权终态事件(拒绝/超时/断开):原实现只回灌 error JSON,前端工具卡片显示为
+/// 普通失败,用户无法区分「授权被拒」与「工具报错」。发一条 step 事件补足可见性。
+async fn emit_authorization_outcome(
+    tx: &mpsc::Sender<SseEvent>,
+    abort: &watch::Receiver<bool>,
+    flag: &AbortFlag,
+    tool: &str,
+    outcome: &str,
+) {
+    let _ = send_event(
+        step_evt(
+            &format!("工具 {tool} 未执行"),
+            Some(format!("授权结果:{outcome}")),
+            None,
+            None,
+        ),
+        tx,
+        abort,
+        flag,
+    )
+    .await;
 }
 
 /// 执行单个工具调用(已裁决)。未授权不执行:未注册 → 错误 JSON;已注册 → 错误 JSON
@@ -1014,6 +1144,41 @@ impl AgentEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 任务模式名单是硬边界:名单外工具必须被闸门排除。
+    /// 回归用例——曾因三档文件规则(宽松模式写文件放行)而放过被策略排除的 write。
+    #[test]
+    fn task_gate_hard_excludes_tools_outside_whitelist() {
+        let allowed = vec!["read".to_string(), "search".to_string()];
+        let gate = ToolGate::listed(&allowed);
+        assert!(gate.excludes("write"), "名单外 write 必须被排除");
+        assert!(!gate.excludes("read"), "名单内 read 不应被排除");
+    }
+
+    /// 聊天路径不硬性排除名单外工具:走授权等待(与改造前行为一致)
+    #[test]
+    fn chat_gate_does_not_hard_exclude() {
+        let allowed = vec!["read".to_string()];
+        let chat = ToolGate {
+            whitelist: Some(&allowed),
+            no_ui_authorization: false,
+        };
+        assert!(!chat.excludes("write"), "聊天路径名单外工具应走授权等待");
+    }
+
+    /// 非白名单模式(whitelist=None)不排除任何工具
+    #[test]
+    fn wait_gate_excludes_nothing() {
+        assert!(!ToolGate::wait().excludes("write"));
+    }
+
+    /// 空名单 = 全量放行(任务策略 all),不排除任何工具
+    #[test]
+    fn empty_whitelist_authorizes_all() {
+        let gate = ToolGate::listed(&[]);
+        assert!(!gate.excludes("write"));
+        assert!(gate.authorizes("write"));
+    }
 
     #[test]
     fn split_parallel_groups_groups_safe_runs() {

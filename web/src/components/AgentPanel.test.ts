@@ -105,3 +105,34 @@ describe('AgentPanel 合并结构(调用情况收编为内部 tab)', () => {
     expect(html).toContain('LLM 调用');
   });
 });
+
+// 回归:面板开合只由 agentPanelOpen 决定,生成状态不再强行锁死展开。
+// 历史 bug:showPanel = generating || agentPanelOpen,生成期间关闭按钮写 false 无效。
+describe('AgentPanel 面板开合不再被生成状态锁死', () => {
+  it('generating=true 但 agentPanelOpen=false 时面板不展开', async () => {
+    const html = await renderPanel((store) => {
+      store.currentSessionId = 's1';
+      store.generating = true;
+      store.agentPanelOpen = false;
+    });
+    expect(html).toContain('sv-agent-panel');
+    expect(html).not.toMatch(/class="sv-agent-panel open"/);
+  });
+
+  it('agentPanelOpen=true 时展开(与 generating 无关)', async () => {
+    const html = await renderPanel((store) => {
+      store.currentSessionId = 's1';
+      store.generating = false;
+      store.agentPanelOpen = true;
+    });
+    expect(html).toMatch(/class="sv-agent-panel open"/);
+  });
+
+  it('任务执行态但 agentPanelOpen=false 时面板不展开', async () => {
+    const html = await renderPanel((store) => {
+      store.appMode = 'task';
+      store.agentPanelOpen = false;
+    });
+    expect(html).not.toMatch(/class="sv-agent-panel open"/);
+  });
+});

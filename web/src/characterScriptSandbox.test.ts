@@ -360,7 +360,11 @@ describe('sandboxScript(inline 事件降级桥沙箱半)', () => {
       fn({ data: { channel: 'kedai-character-script-v1', nonce, type: 'inline-event', code: 'if({', event: { type: 'click' }, target: { kind: 'target', id: 1 } } });
     }
     await new Promise((r) => setTimeout(r, 20));
-    expect(messages.some((m) => m.type === 'warn' && String(m.message).includes('内联事件代码解析失败'))).toBe(true);
+    // 消息级沙箱经闭包桥 eval 求值:语法错误在调用时抛出 → 归入「回调出错」;
+    // 无桥(卡级)时 new Function 同步抛 → 「解析失败」。两种都只告警、不拆沙箱。
+    expect(
+      messages.some((m) => m.type === 'warn' && String(m.message).includes('内联事件')),
+    ).toBe(true);
     expect(messages.some((m) => m.type === 'error')).toBe(false);
   });
 });
@@ -678,6 +682,7 @@ describe('sandboxScript(角色卡悬浮窗兼容面:head 映射/css 对象/attr 
       setTimeout,
       window: {},
       document: { body: {}, documentElement: {} },
+      navigator: {},
     };
     vm.createContext(sandboxGlobal);
     (sandboxGlobal as Record<string, unknown>).Function = vm.runInContext('Function', sandboxGlobal as never);
@@ -769,6 +774,67 @@ describe('sandboxScript(角色卡悬浮窗兼容面:head 映射/css 对象/attr 
     const op = batchOps(messages).find((o) => o.method === 'on');
     expect(op?.ref).toEqual({ kind: 'window' });
     expect((op?.args as unknown[])[0]).toBe('unload');
+  });
+
+  it("实跑问题 7 R3:三参委托写法 on(evt, selector, fn) 的 selector 作为第 3 参数入队,回调登记可用", async () => {
+    const nonce = 'nonce-deleg';
+    const script = sandboxScript(
+      "$(document).on('click.myNS','.modal-btn',function(){warn('hit');});",
+      nonce,
+      { stat_data: {}, display_data: {} },
+    );
+    const { messages, dispatch } = makeSandbox(nonce, script);
+    await new Promise((r) => setTimeout(r, 10));
+    const op = batchOps(messages).find((o) => o.method === 'on');
+    expect(op).toBeTruthy();
+    expect(op?.ref).toEqual({ kind: 'document' });
+    const args = op?.args as unknown[];
+    // 事件名原样入队(命名空间剥离在宿主 applyJq 侧统一做,见 dom-rpc.test.ts)
+    expect(args[0]).toBe('click.myNS');
+    // 第 3 参数是委托选择器(旧实现把函数当参数,宿主收不到有效事件名)
+    expect(args[2]).toBe('.modal-btn');
+    expect(typeof args[1]).toBe('number');
+    // 回发该 jqId 的事件:回调应执行(旧实现把 selector 当回调,fn.call 抛 TypeError 被吞)
+    dispatch({
+      channel: 'kedai-character-script-v1',
+      nonce,
+      type: 'jq-event',
+      jqId: args[1] as number,
+      event: { type: 'click' },
+      target: { kind: 'target', id: 1, data: {}, state: {} },
+      mirror: { controls: [] },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(messages.some((m) => m.type === 'warn' && String(m.message).includes('hit'))).toBe(true);
+  });
+
+  it('实跑问题 7 R4:剪贴板桥把 navigator.clipboard.writeText 转发为 clipboard-write RPC', async () => {
+    const nonce = 'nonce-clip';
+    const script = sandboxScript(
+      "navigator.clipboard.writeText('提示词正文');",
+      nonce,
+      { stat_data: {}, display_data: {} },
+    );
+    const { messages } = makeSandbox(nonce, script);
+    await new Promise((r) => setTimeout(r, 10));
+    const rpc = messages.find((m) => m.type === 'rpc' && m.op === 'clipboard-write');
+    expect(rpc).toBeTruthy();
+    expect((rpc?.args as unknown[])[0]).toBe('提示词正文');
+  });
+
+  it('实跑问题 7 R4:execCommand("copy") 桥接后不再走原生(无选区也不抛错)', async () => {
+    const nonce = 'nonce-execcopy';
+    const script = sandboxScript(
+      "document.execCommand('copy');",
+      nonce,
+      { stat_data: {}, display_data: {} },
+    );
+    const out = sandboxScript('x();', 'nonce-execcopy-gen', { stat_data: {}, display_data: {} });
+    expect(out).toContain('__kdExec');
+    expect(() => new vm.Script(out)).not.toThrow();
+    const { messages } = makeSandbox(nonce, script);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(messages.some((m) => m.type === 'error')).toBe(false);
   });
 
   it("draggable('destroy') 入队 destroy op,data('ui-draggable') 随应用翻转", async () => {

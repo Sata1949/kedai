@@ -27,13 +27,14 @@ pub fn register_memory_tools(
             let sessions_read = sessions_read.clone();
             let memory_read = memory_read.clone();
             Box::pin(async move {
-                // 新表:按精选排序取全部选中记忆(usage 优先,与注入策略一致)
+                // 新表:按精选排序(pinned→usage→recency→id)取前 MEMORY_READ_LIMIT 条,
+                // 与注入策略一致;旧表全量返回会随记忆库增长无界膨胀
                 let entries = memory_read.list(&ctx.character_id);
-                let mut facts: Vec<String> = entries
-                    .iter()
-                    .filter(|e| e.selected)
-                    .map(|e| e.content.clone())
-                    .collect();
+                let picked = crate::services::memory_service::select_for_injection(
+                    &entries,
+                    crate::services::memory_service::MEMORY_READ_LIMIT,
+                );
+                let mut facts: Vec<String> = picked.iter().map(|e| e.content.clone()).collect();
                 // 旧路径兼容:会话内 system 消息(extra.kind=memory)是历史版本的
                 // 记忆存储,合并返回避免存量记忆丢失;新写入不再产生该类消息。
                 let legacy: Vec<String> = sessions_read
@@ -74,7 +75,30 @@ pub fn register_memory_tools(
                 if fact.trim().is_empty() {
                     return Err("缺少 fact 参数".into());
                 }
-                memory_write.insert(&ctx.character_id, Some(&ctx.session_id), "tool", &fact)?;
+                let entry =
+                    memory_write.insert(&ctx.character_id, Some(&ctx.session_id), "tool", &fact)?;
+                // Phase 3:向量化开启时为工具写入的记忆补向量(失败静默,不阻断工具返回)
+                if let Some(settings) = memory_write.settings_snapshot() {
+                    if settings.embedding_enabled {
+                        let svc = crate::services::embedding_service::EmbeddingService::new();
+                        match svc.embed_one(&settings, &entry.content).await {
+                            Ok(v) if !v.is_empty() => {
+                                let memory_id = entry.id;
+                                let svc2 = memory_write.clone();
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    svc2.upsert_vector(memory_id, &v)
+                                })
+                                .await;
+                            }
+                            Ok(_) => {}
+                            Err(e) => tracing::warn!(
+                                error = e.to_string(),
+                                memory_id = entry.id,
+                                "记忆工具写入后生成向量失败"
+                            ),
+                        }
+                    }
+                }
                 Ok(json!({ "ok": true, "stored": fact }).to_string())
             })
         }),

@@ -7,6 +7,7 @@ import { useAppStore } from '../../store';
 import { storeToRefs } from 'pinia';
 import { useAgentSettings } from '../../composables/useAgentSettings';
 import { useAgentPromptEditor } from '../../composables/useAgentPromptEditor';
+import AuthorizationSection from './AuthorizationSection.vue';
 
 withDefaults(defineProps<{
   /** 是否显示(embedded 模式按 activeSection 切换;standalone 恒 true) */
@@ -18,7 +19,7 @@ withDefaults(defineProps<{
 const store = useAppStore();
 // Agent 设置直接绑定 store(storeToRefs),与 useAgentSettings 保存逻辑读写同一 store;
 // appMode 用于「系统提示词按模式独立存储」的 UI 标注(徽标/说明/按钮文案随模式即时切换)
-const { agentSystemPrompt, searchEndpoint, mvuVarsPosition, reflectPrompt, taskPersonaFull, appMode } = storeToRefs(store);
+const { agentSystemPrompt, searchEndpoint, mvuVarsPosition, reflectPrompt, taskPersonaFull, taskPromptInjectEnabled, appMode } = storeToRefs(store);
 
 /** 模式徽标文案:标注当前编辑的是哪个模式的提示词,避免误以为两模式共用一份 */
 const modeBadgeText = computed(() => (appMode.value === 'task' ? '任务模式专属' : '角色扮演专属'));
@@ -121,6 +122,18 @@ watch(appMode, () => void loadPromptPreview());
         情境与文风示例,显著省 token);<b>完整</b>为旧行为,注入角色卡全部四段。角色扮演模式下修改将作为任务模式未单独
         设置时的沿用值。
       </p>
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">任务继承提示词注入</label>
+        <select v-model="taskPromptInjectEnabled" class="sv-input">
+          <option :value="false">不继承(默认)</option>
+          <option :value="true">继承</option>
+        </select>
+      </div>
+      <p class="sv-note">
+        仅任务模式生效:「提示词注入」配置(角色扮演的文章要求,如字数 / 视角 / 禁词)是否也注入任务执行、汇总与追加指令。
+        <b>不继承(默认)</b>可避免角色扮演的写作要求与任务目标冲突(例如追加「压缩到 200 字」却因注入的「1200 字」要求
+        反而变长);<b>继承</b>为旧行为,任务与角色扮演共用同一注入源。
+      </p>
       <div class="sv-btn-row">
         <button class="sv-btn primary sv-btn-fill" :disabled="agentSaving" @click="saveAgentNow">
           {{ agentSaving ? '保存中...' : '保存 Agent 设置' }}
@@ -129,6 +142,11 @@ watch(appMode, () => void loadPromptPreview());
           {{ resetPromptLabel }}
         </button>
         <div v-if="agentMsg" class="sv-feedback ok sv-feedback-flex">{{ agentMsg }}</div>
+      </div>
+
+      <div class="sv-separator">
+        <div class="sv-field-label sub">授权管理</div>
+        <AuthorizationSection :show="show" />
       </div>
 
       <div class="sv-separator">

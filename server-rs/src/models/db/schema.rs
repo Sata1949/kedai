@@ -291,6 +291,7 @@ CREATE INDEX IF NOT EXISTS idx_kaleido_changelog_session ON kaleido_changelog(se
 -- selected: 是否参与注入候选(0/1);usage_count/last_usage 为衰减精选排序键。
 -- character_id 不设外键:记忆须活过会话生命周期由用户显式管理(删角色不级联清记忆),
 -- 与 agent_subtasks.character_id 同策略;source_session_id 记录来源会话(可空)。
+-- pinned: 分层注入的最高优先级(1 = 常驻置顶,排序键首位);旧库经 ALTER 补列。
 CREATE TABLE IF NOT EXISTS memory_entries (
   id                INTEGER PRIMARY KEY AUTOINCREMENT,
   character_id      TEXT NOT NULL,
@@ -301,9 +302,39 @@ CREATE TABLE IF NOT EXISTS memory_entries (
   last_usage        TEXT,
   selected          INTEGER NOT NULL DEFAULT 1,
   created_at        TEXT NOT NULL,
-  updated_at        TEXT NOT NULL
+  updated_at        TEXT NOT NULL,
+  pinned            INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_memory_entries_character ON memory_entries(character_id, selected);
+-- 记忆全文检索(升级工作流 B1):FTS5 外部内容表(content='memory_entries'),
+-- trigram 分词器支持中文子串匹配(<3 字符查询由服务层回退 LIKE);
+-- 3 个同步 trigger 保持索引与主表一致;旧库首次建表后由 ensure_memory_entries_fts
+-- 执行一次 rebuild 回填(backfill_meta 记标记,避免每次启动重跑)。
+CREATE VIRTUAL TABLE IF NOT EXISTS memory_entries_fts USING fts5(
+  content,
+  content='memory_entries',
+  content_rowid='id',
+  tokenize='trigram'
+);
+CREATE TRIGGER IF NOT EXISTS memory_entries_ai AFTER INSERT ON memory_entries BEGIN
+  INSERT INTO memory_entries_fts(rowid, content) VALUES (new.id, new.content);
+END;
+CREATE TRIGGER IF NOT EXISTS memory_entries_ad AFTER DELETE ON memory_entries BEGIN
+  INSERT INTO memory_entries_fts(memory_entries_fts, rowid, content)
+    VALUES('delete', old.id, old.content);
+END;
+CREATE TRIGGER IF NOT EXISTS memory_entries_au AFTER UPDATE ON memory_entries BEGIN
+  INSERT INTO memory_entries_fts(memory_entries_fts, rowid, content)
+    VALUES('delete', old.id, old.content);
+  INSERT INTO memory_entries_fts(rowid, content) VALUES (new.id, new.content);
+END;
+-- 记忆向量索引元信息(升级工作流 Phase 3):记录当前 vec0 表的维度与来源模型。
+-- vec0 虚拟表的维度必须建表时确定,故不写进静态 DDL,由 memory_service 在首次
+-- 写入/检索时按配置懒建;本表用于检测「换模型/换维度」并提示需要重建索引。
+CREATE TABLE IF NOT EXISTS memory_vec_meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 -- 回填游标元表(2026-08 DB 并发改造):记录启动幂等回填的增量进度。
 -- 当前唯一 key:message_scope_last_id(messages.id 已回填边界,含 extra='{}' 的跳过行)。
 CREATE TABLE IF NOT EXISTS backfill_meta (

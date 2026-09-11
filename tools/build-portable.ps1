@@ -66,8 +66,24 @@ if (-not (Test-Path $DesktopExe)) {
 }
 
 Write-Host "[3/3] 组装便携目录 ..." -ForegroundColor Green
+# 目录内 exe 可能正在运行:Windows 不允许删除运行中的 exe,整体 Remove-Item 会失败。
+# 失败时把旧目录改名让位(.old)再新建,与 build.ps1 复制 dist\kedai-server.exe 的
+# 「改名让位」策略一致——旧进程继续跑旧代码,新产物正常就位。
 if (Test-Path $OutputDir) {
-    Remove-Item -Recurse -Force $OutputDir
+    try {
+        Remove-Item -Recurse -Force $OutputDir -ErrorAction Stop
+    } catch {
+        $staleDir = "$OutputDir.old"
+        if (Test-Path $staleDir) {
+            try {
+                Remove-Item -Recurse -Force $staleDir -ErrorAction Stop
+            } catch {
+                throw "旧便携目录被占用,且历史备份 $staleDir 也无法清理;请关闭 Kedai.exe 后重试"
+            }
+        }
+        Move-Item $OutputDir $staleDir -Force -ErrorAction Stop
+        Write-Host "[提示] 旧便携目录被运行中的进程占用,已改名为 $(Split-Path $staleDir -Leaf) 让位;关闭旧进程后可删除" -ForegroundColor Yellow
+    }
 }
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 Copy-Item $DesktopExe (Join-Path $OutputDir "Kedai.exe")

@@ -880,6 +880,16 @@ async fn task_plan_approve_resume_executes_plan_steps() {
             .any(|c| c["phase"] == "summarize" && c["status"] == "ok"),
         "应有汇总调用行: {calls:?}"
     );
+
+    // F4(2026-09-10 实测修复):续跑 goal 显式要求「以已批准计划为准」,
+    // 防止用户经 plan-chat 改过步数后,汇总仍沿用原始目标里的旧步数描述。
+    assert!(
+        agent_calls.iter().any(|c| c["prompt_summary"]
+            .as_str()
+            .unwrap_or("")
+            .contains("步骤数量与内容一律以本清单为准")),
+        "续跑 goal 应含「以已批准计划为准」约束: {calls:?}"
+    );
 }
 
 /// 批次 R1:plan 批准续跑完成的 result = 汇总文本 + 「## 最终计划」段
@@ -1182,13 +1192,16 @@ async fn task_multi_mode_stop_running() {
 async fn task_custom_mode_flow_steps_and_disabled_flow() {
     let app = test_app();
 
-    // 预置启用流程(保存即设为当前选中;validate_flow 要求至少一个生成步骤)
+    // 预置启用流程(保存即设为当前选中;validate_flow 要求至少一个生成步骤)。
+    // 首步「理解」为 generates=false 的内部规划步:2026-09-10 实测修复后,
+    // 它用内部规划指令产出要点(不吐正文)、不计入最终成果,但作为下一步上下文。
     let flow = json!({
         "config": {
             "id": "",
-            "name": "测试两步流程",
+            "name": "测试三步流程",
             "enabled": true,
             "steps": [
+                {"id":"s0","name":"理解","enabled":true,"goal":"分析目标","action":"direct","generates":false,"system_prompt":"【本步指令·理解本步】只做内部规划"},
                 {"id":"s1","name":"起草","enabled":true,"goal":"撰写草稿","action":"direct","generates":true,"system_prompt":"【本步指令·起草本步】直接输出草稿"},
                 {"id":"s2","name":"润色","enabled":true,"goal":"润色上一版","action":"direct","generates":true,"system_prompt":"【本步指令·润色本步】输出润色后的最终版"}
             ]
@@ -1199,7 +1212,7 @@ async fn task_custom_mode_flow_steps_and_disabled_flow() {
 
     // reply_if 钩子按 system 命中步骤提示词(钩子语法内的 needle 出现不算命中,
     // 故任务目标上下文(untrusted 包裹进 system)里的钩子文本不会自命中)
-    let title = "[[reply_if:起草本步|草稿正文]][[reply_if:润色本步|润色成果]] 自定义任务目标";
+    let title = "[[reply_if:理解本步|内部规划要点]][[reply_if:起草本步|草稿正文]][[reply_if:润色本步|润色成果]] 自定义任务目标";
     let id = create_task_with_mode(app, title, "custom").await;
     let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
@@ -1214,14 +1227,28 @@ async fn task_custom_mode_flow_steps_and_disabled_flow() {
 
     // plan 步骤 = flow 启用步骤,状态全 done(前端 custom 渲染契约)
     let plan = detail["task"]["plan"].as_array().unwrap();
-    assert_eq!(plan.len(), 2, "plan 步骤数 = 流程启用步骤数: {detail}");
-    assert_eq!(plan[0]["name"], "起草");
-    assert_eq!(plan[1]["name"], "润色");
+    assert_eq!(plan.len(), 3, "plan 步骤数 = 流程启用步骤数: {detail}");
+    assert_eq!(plan[0]["name"], "理解");
+    assert_eq!(plan[1]["name"], "起草");
+    assert_eq!(plan[2]["name"], "润色");
     for step in plan {
         assert_eq!(step["status"], "done", "步骤应 done: {detail}");
     }
+    // 非生成步骤:产出带「(内部规划)」标注,且不进入最终成果
+    let inner = plan[0]["result"].as_str().unwrap_or("");
+    assert!(
+        inner.contains("(内部规划)") && inner.contains("内部规划要点"),
+        "generates=false 步骤应产内部规划要点: {detail}"
+    );
+    assert!(
+        !detail["task"]["result"]
+            .as_str()
+            .unwrap_or("")
+            .contains("内部规划要点"),
+        "内部规划产出不得进入最终成果: {detail}"
+    );
 
-    // 调用追踪:phase=step 两行,step_index 0/1 对齐步骤顺序
+    // 调用追踪:phase=step 三行,step_index 0/1/2 对齐步骤顺序
     let (_, calls) = send_json(app, "GET", &format!("/api/tasks/{id}/calls"), json!({})).await;
     let step_calls: Vec<&Value> = calls["calls"]
         .as_array()
@@ -1231,11 +1258,12 @@ async fn task_custom_mode_flow_steps_and_disabled_flow() {
         .collect();
     assert_eq!(
         step_calls.len(),
-        2,
+        3,
         "phase=step 行数应与步骤数对齐: {calls:?}"
     );
     assert_eq!(step_calls[0]["step_index"], 0);
     assert_eq!(step_calls[1]["step_index"], 1);
+    assert_eq!(step_calls[2]["step_index"], 2);
 
     // usage 落库:逐步骤一行,聚合非零
     let usage = &detail["usage_total"];
@@ -1364,7 +1392,7 @@ async fn task_team_mode_audit_kickback_redoes_once() {
         r#"{"name":"写作","goals":[{"name":"子目标二","goal":"\u005b\u005breply:主二产出\u005d\u005d 写正文"}]}]"#,
         r#" }]]"#,
         r#"[[reply_if:团队审计员|{"通过":false,"打回":[{"main":1,"instruction":"请补充数据"}],"结论":"主一缺数据"}]]"#,
-        "[[reply_if:团队终审员|终审结论:补做后已覆盖]]",
+        r#"[[reply_if:团队终审员|{"通过":true,"结论":"终审结论:补做后已覆盖"}]]"#,
         "[[reply_if:任务汇总者|补做后最终成果]]",
         " 团队总目标"
     );
@@ -1414,6 +1442,138 @@ async fn task_team_mode_audit_kickback_redoes_once() {
         .filter(|c| c["phase"] == "final_audit")
         .collect();
     assert_eq!(final_calls.len(), 1, "补做后应恰好追加 1 次终审: {calls:?}");
+}
+
+/// team 子目标粒度补做(实跑问题 2):审计点名「主 1 第 2 个子目标」→ 仅重跑该
+/// 子目标(step_index=1),同主第 1 个子目标不重跑(step_index=0 仅 1 次)且不留
+/// running;终审通过后任务 done。
+#[tokio::test]
+async fn task_team_mode_kickback_scoped_to_subgoal() {
+    let app = test_app();
+
+    let title = concat!(
+        r#"[[reply_if:团队规划器|{"mains":["#,
+        r#"{"name":"调研","goals":[{"name":"子一","goal":"\u005b\u005breply:子一成果\u005d\u005d 做调研一"},{"name":"子二","goal":"\u005b\u005breply:子二旧版\u005d\u005d 做调研二"}]},"#,
+        r#"{"name":"写作","goals":[{"name":"子三","goal":"\u005b\u005breply:子三成果\u005d\u005d 写正文"}]}]"#,
+        r#" }]]"#,
+        // 审计只打回主 1 的第 2 个子目标
+        r#"[[reply_if:团队审计员|{"通过":false,"打回":[{"main":1,"step":2,"instruction":"子二需补数据"}],"结论":"主一子二缺数据"}]]"#,
+        r#"[[reply_if:团队终审员|{"通过":true,"结论":"补做后已覆盖"}]]"#,
+        "[[reply_if:任务汇总者|子目标粒度补做后成果]]",
+        " 团队子目标粒度目标"
+    );
+    let id = create_task_with_mode(app, title, "team").await;
+    let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
+
+    let (st, detail) = wait_terminal(app, &id).await;
+    assert_eq!(st, "done", "终审通过后应 done: {detail}");
+
+    // 未被打回的步骤保持 done(不得因补做轮被置 running 后遗留)
+    let plan = detail["task"]["plan"].as_array().unwrap();
+    assert_eq!(plan[0]["status"], "done", "子一应保持 done: {detail}");
+    assert_eq!(plan[1]["status"], "done", "子二补做后应 done: {detail}");
+
+    let (_, calls) = send_json(app, "GET", &format!("/api/tasks/{id}/calls"), json!({})).await;
+    let calls = calls["calls"].as_array().unwrap();
+    let count = |si: i64| {
+        calls
+            .iter()
+            .filter(|c| c["phase"] == "agent" && c["step_index"] == si)
+            .count()
+    };
+    assert_eq!(count(0), 1, "主 1 子一未被点名,不应重跑: {calls:?}");
+    assert_eq!(count(1), 2, "主 1 子二被点名,应首轮 + 补做共 2 次: {calls:?}");
+    assert_eq!(count(2), 1, "主 2 未被点名,不应重跑: {calls:?}");
+}
+
+/// team 补做轮 prior 种子(实跑问题 2):补做子目标必须看得到同主其他子目标成果
+/// 与「自己被替换的旧版本」标注,否则重写时无参考、版本冲突原样复现。
+/// 标题刻意保持精简:prompt_summary 对每条消息截 800 字符,标题越长 prior 段越容易被
+/// 截掉;本测试用最短标题确保 prior 段完整落在摘要内(断言只针对 prior 内容)。
+#[tokio::test]
+async fn task_team_mode_kickback_prior_seed() {
+    let app = test_app();
+
+    let title = concat!(
+        r#"[[reply_if:团队规划器|{"mains":["#,
+        r#"{"name":"甲","goals":[{"name":"一","goal":"\u005b\u005breply:一果\u005d\u005d"},{"name":"二","goal":"\u005b\u005breply:二果\u005d\u005d"}]},"#,
+        r#"{"name":"乙","goals":[{"name":"三","goal":"\u005b\u005breply:三果\u005d\u005d"}]}]}]]"#,
+        r#"[[reply_if:团队审计员|{"通过":false,"打回":[{"main":1,"step":2,"instruction":"补"}],"结论":"缺"}]]"#,
+        r#"[[reply_if:团队终审员|{"通过":true,"结论":"过"}]]"#,
+        r#"[[reply_if:任务汇总者|成]]"#,
+        " T"
+    );
+    let id = create_task_with_mode(app, title, "team").await;
+    let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
+
+    let (st, detail) = wait_terminal(app, &id).await;
+    assert_eq!(st, "done", "终审通过后应 done: {detail}");
+
+    let (_, calls) = send_json(app, "GET", &format!("/api/tasks/{id}/calls"), json!({})).await;
+    let calls = calls["calls"].as_array().unwrap();
+    let redo: Vec<&str> = calls
+        .iter()
+        .filter(|c| c["phase"] == "agent" && c["step_index"] == 1)
+        .filter_map(|c| c["prompt_summary"].as_str())
+        .collect();
+    let redo = *redo.get(1).expect("应有补做轮的第 2 次 agent 调用");
+    // 同主未打回子目标的产出被种入(版本衔接;mock 首轮产出为「一」子目标的结果文本)
+    assert!(
+        redo.contains("「一」"),
+        "补做轮应种入同主未打回子目标的产出: {redo}"
+    );
+    // 被打回子目标标注旧版本(明确本次是替换而非新增)
+    assert!(
+        redo.contains("旧版本,本次产出将替换它"),
+        "补做轮应标注被打回子目标的旧版本: {redo}"
+    );
+    // 审计补做指令仍随行
+    assert!(redo.contains("审计补做指令"), "补做轮应携带补做指令: {redo}");
+}
+
+/// team 审计未通过且无可补做项 → partial(实跑问题 2):审计是质量闸门,
+/// 「通过=false 但打回为空」不得静默判 done;审计结论段保留未通过说明。
+#[tokio::test]
+async fn task_team_mode_audit_fail_without_kickback_is_partial() {
+    let app = test_app();
+
+    let title = concat!(
+        r#"[[reply_if:团队规划器|{"mains":["#,
+        r#"{"name":"调研","goals":[{"name":"子一","goal":"\u005b\u005breply:主一产出\u005d\u005d 做调研"}]},"#,
+        r#"{"name":"写作","goals":[{"name":"子二","goal":"\u005b\u005breply:主二产出\u005d\u005d 写正文"}]}]"#,
+        r#" }]]"#,
+        // 审计判定未通过,但打回为空(不可经补做修复)
+        r#"[[reply_if:团队审计员|{"通过":false,"打回":[],"结论":"产出之间仍存在矛盾,无法通过补做修复"}]]"#,
+        "[[reply_if:任务汇总者|未通过审计的成果]]",
+        " 团队审计闸门目标"
+    );
+    let id = create_task_with_mode(app, title, "team").await;
+    let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
+
+    let (st, detail) = wait_terminal(app, &id).await;
+    assert_eq!(
+        st, "partial",
+        "审计未通过且无可补做项应为 partial(不得静默 done): {detail}"
+    );
+    let result = detail["task"]["result"].as_str().unwrap_or("");
+    assert!(
+        result.contains("## 审计结论"),
+        "应保留审计结论段: {result}"
+    );
+    assert!(
+        result.contains("仍存在矛盾"),
+        "审计未通过说明应进入结论段: {result}"
+    );
+    // partial 须可解释(实跑问题 2 观感修复):error 字段写明未达标原因,前端状态行展示,
+    // 不再只有与「执行中」同色的黄标而用户无从得知为何不是完成
+    let err = detail["task"]["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("审计/终审未通过"),
+        "partial 应写入可解释的 error 原因: {err}"
+    );
 }
 
 /// team 同主多子目标(2026-08 真实模型实测修复):同一主 agent 的多个子目标逐个
@@ -1874,6 +2034,14 @@ async fn task_plan_mode_planner_scout_collects_then_plans() {
             .contains("侦察步"),
         "计划轮应产出计划 JSON: {last}"
     );
+    // F6(2026-09-10 实测修复):侦察轮(带工具调用)的 finish_reason 应为 tool_calls,
+    // 此前因 sse_parser 在 tool_calls 完成时不发 Finish 块而落空串。
+    let scout = planner_calls.first().unwrap();
+    assert_eq!(
+        scout["finish_reason"].as_str(),
+        Some("tool_calls"),
+        "带工具调用的侦察轮 finish_reason 应为 tool_calls: {scout}"
+    );
 }
 
 /// 问题③步骤 error 文本落库(plan 批准续跑):步骤 agent 调用失败(mock [[fail:]]
@@ -1969,6 +2137,12 @@ async fn task_team_mode_failed_main_step_carries_reason_text() {
         "team 步骤 error 文本应携带失败原因(问题③),实际: {err_text}"
     );
     assert_eq!(plan[1]["status"], "done", "主二步骤应 done: {detail}");
+    // partial 原因写入 error 字段(实跑问题 2 观感修复):前端状态行据此说明为何不是完成
+    let task_err = detail["task"]["error"].as_str().unwrap_or("");
+    assert!(
+        task_err.contains("以下子目标执行失败") && task_err.contains("失败子目标"),
+        "partial 应写入可解释的失败子目标清单: {task_err}"
+    );
 }
 
 // ==================== R3b:工具循环历史回灌上限(集成) ====================
@@ -2108,8 +2282,10 @@ async fn task_solo_tool_history_trimmed_in_prompt_summary() {
 
 /// followup 全链路:solo 任务完成后追加指令 → 任务回 running 续跑(用户输入落
 /// task_messages 后 spawn solo 续跑:原目标 + 上轮 result + 追加指令)→ 终态回 done;
-/// result 追加「**追加 1:**」段且保留首轮成果;详情 messages 两行(user 指令 +
-/// assistant 产出,均 kind=followup);第二轮追加段序号为「追加 2」、messages 累计 4 行。
+/// result 追加「**追加 1:**」段且保留首轮成果;第二轮追加段序号为「追加 2」。
+/// 实跑问题 1 后 messages 语义扩展为「完整对话记录」:创建落 user(kind=goal)、
+/// 首轮产出落 assistant(kind=result)、每轮 followup 落 user+assistant(kind=followup),
+/// 故一轮追加后 messages = 4 行、两轮追加累计 6 行。
 /// 剧本说明:首轮 title 不带钩子(产出 = mock 默认回复),followup 指令带
 /// [[reply:...]] 钩子 —— 续跑 user 消息(原目标 + 上轮 result + 追加指令)中
 /// 首个 [[reply: 即本论钩子(mock reply 钩子按首个出现命中),产出确定。
@@ -2118,6 +2294,14 @@ async fn task_followup_appends_to_result_and_messages() {
     let app = test_app();
 
     let id = create_task_with_mode(app, "写一段关于秋天的短文", "solo").await;
+    // 实跑问题 1:创建即落 user 目标消息(对话记录首条)
+    let (_, created) = send_json(app, "GET", &format!("/api/tasks/{id}"), json!({})).await;
+    let created_msgs = created["messages"].as_array().expect("详情应含 messages");
+    assert_eq!(created_msgs.len(), 1, "创建应落 1 条目标消息: {created}");
+    assert_eq!(created_msgs[0]["role"], "user");
+    assert_eq!(created_msgs[0]["kind"], "goal");
+    assert_eq!(created_msgs[0]["content"], "写一段关于秋天的短文");
+
     let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
     let (st, detail) = wait_terminal(app, &id).await;
@@ -2127,10 +2311,15 @@ async fn task_followup_appends_to_result_and_messages() {
         first_result.contains("模拟回复"),
         "首轮产出应为 mock 默认回复: {first_result}"
     );
+    // 实跑问题 1:首轮成果落 assistant 消息(kind=result),供前端逐轮气泡渲染
+    let after_run = detail["messages"].as_array().expect("详情应含 messages");
+    assert_eq!(after_run.len(), 2, "首轮后应为「目标 + 成果」两行: {detail}");
+    assert_eq!(after_run[0]["kind"], "goal");
+    assert_eq!(after_run[1]["role"], "assistant");
+    assert_eq!(after_run[1]["kind"], "result");
     assert_eq!(
-        detail["messages"].as_array().map(|m| m.len()),
-        Some(0),
-        "首轮无用户追加,messages 应为空数组: {detail}"
+        after_run[1]["content"], first_result,
+        "成果消息应存首轮产出全文: {detail}"
     );
 
     // ===== 第一轮追加 =====
@@ -2167,24 +2356,26 @@ async fn task_followup_appends_to_result_and_messages() {
     let append_idx = result.find("**追加 1:**").unwrap_or(usize::MAX);
     assert!(first_idx < append_idx, "首轮成果应在追加段之前: {result}");
 
-    // messages 两行:user 指令 + assistant 产出(kind=followup,created_at 升序)
+    // messages 四行:目标 + 首轮成果 + user 指令 + assistant 产出(created_at 升序)
     let messages = detail["messages"]
         .as_array()
         .expect("详情应含 messages 数组");
-    assert_eq!(messages.len(), 2, "一轮追加应落两行消息: {messages:?}");
-    assert_eq!(messages[0]["role"], "user");
-    assert_eq!(messages[0]["kind"], "followup");
+    assert_eq!(messages.len(), 4, "一轮追加应为 4 行消息: {messages:?}");
+    assert_eq!(messages[0]["kind"], "goal");
+    assert_eq!(messages[1]["kind"], "result");
+    assert_eq!(messages[2]["role"], "user");
+    assert_eq!(messages[2]["kind"], "followup");
     assert!(
-        messages[0]["content"]
+        messages[2]["content"]
             .as_str()
             .unwrap_or("")
             .contains("再补充一点秋色"),
         "user 消息应存指令原文: {messages:?}"
     );
-    assert_eq!(messages[1]["role"], "assistant");
-    assert_eq!(messages[1]["kind"], "followup");
+    assert_eq!(messages[3]["role"], "assistant");
+    assert_eq!(messages[3]["kind"], "followup");
     assert_eq!(
-        messages[1]["content"], "追加成果甲",
+        messages[3]["content"], "追加成果甲",
         "assistant 消息应存产出全文: {messages:?}"
     );
 
@@ -2209,10 +2400,10 @@ async fn task_followup_appends_to_result_and_messages() {
         "第二轮段标应带本轮指令概要: {result}"
     );
     let messages = detail["messages"].as_array().unwrap();
-    assert_eq!(messages.len(), 4, "两轮追加应累计 4 行消息: {messages:?}");
-    assert_eq!(messages[2]["role"], "user");
-    assert_eq!(messages[2]["kind"], "followup");
-    assert_eq!(messages[3]["role"], "assistant");
+    assert_eq!(messages.len(), 6, "两轮追加应累计 6 行消息: {messages:?}");
+    assert_eq!(messages[4]["role"], "user");
+    assert_eq!(messages[4]["kind"], "followup");
+    assert_eq!(messages[5]["role"], "assistant");
 
     // 删除任务级联清消息(FK ON DELETE CASCADE;DB 层断言见 migration.rs 专测)
     let status = send_empty(app, "DELETE", &format!("/api/tasks/{id}")).await;
@@ -2249,6 +2440,17 @@ async fn task_followup_state_gate() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "空指令应 400: {json}");
+    assert_eq!(json["code"], "VALIDATION");
+
+    // 400:非法 mode(严格解析,与 task_mode 同口径;前置于状态门禁)
+    let (status, json) = send_json(
+        app,
+        "POST",
+        &format!("/api/tasks/{id}/followup"),
+        json!({ "content": "补充", "mode": "rewrite" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "非法 mode 应 400: {json}");
     assert_eq!(json["code"], "VALIDATION");
 
     // 409:pending(未启动)
@@ -2376,7 +2578,11 @@ async fn task_followup_keeps_partial_status() {
         "result 应含追加产出: {result}"
     );
     let messages = detail["messages"].as_array().unwrap();
-    assert_eq!(messages.len(), 2, "一轮追加应落两行: {messages:?}");
+    assert_eq!(
+        messages.len(),
+        4,
+        "目标 + 首轮成果 + 一轮追加两行 = 4 行: {messages:?}"
+    );
 }
 
 // ==================== 批次 R2b:批准环节规划对话(plan-chat) ====================
@@ -2422,8 +2628,8 @@ async fn task_plan_chat_revises_plan_and_keeps_planned() {
     );
     assert_eq!(
         detail["messages"].as_array().map(|m| m.len()),
-        Some(0),
-        "对话前 messages 应为空: {detail}"
+        Some(1),
+        "对话前应只有创建时落的 1 条目标消息: {detail}"
     );
 
     // ===== 第一轮反馈:修订为计划B,任务保持 planned =====
@@ -2464,15 +2670,21 @@ async fn task_plan_chat_revises_plan_and_keeps_planned() {
         "清单应含新步骤目标: {result}"
     );
 
-    // messages 两行:user 反馈 + assistant 修订说明(均 kind=plan_chat)
+    // messages 三行:目标 + user 反馈 + assistant 修订说明(后两行 kind=plan_chat)
     let messages = detail["messages"].as_array().expect("详情应含 messages");
-    assert_eq!(messages.len(), 2, "一轮对话应落两行: {messages:?}");
+    assert_eq!(
+        messages.len(),
+        3,
+        "目标 + 一轮对话两行 = 3 行: {messages:?}"
+    );
     assert_eq!(messages[0]["role"], "user");
-    assert_eq!(messages[0]["kind"], "plan_chat");
-    assert_eq!(messages[0]["content"], "把步骤换成先做竞品调研");
-    assert_eq!(messages[1]["role"], "assistant");
+    assert_eq!(messages[0]["kind"], "goal");
+    assert_eq!(messages[1]["role"], "user");
     assert_eq!(messages[1]["kind"], "plan_chat");
-    let note = messages[1]["content"].as_str().unwrap_or("");
+    assert_eq!(messages[1]["content"], "把步骤换成先做竞品调研");
+    assert_eq!(messages[2]["role"], "assistant");
+    assert_eq!(messages[2]["kind"], "plan_chat");
+    let note = messages[2]["content"].as_str().unwrap_or("");
     assert!(
         note.contains("计划已修订") && note.contains("修订步骤甲"),
         "assistant 说明应含步数与步骤名: {note}"
@@ -2493,9 +2705,11 @@ async fn task_plan_chat_revises_plan_and_keeps_planned() {
         "多轮修订后仍应 planned: {detail}"
     );
     let messages = detail["messages"].as_array().unwrap();
-    assert_eq!(messages.len(), 4, "两轮对话应累计 4 行: {messages:?}");
-    assert_eq!(messages[2]["role"], "user");
-    assert_eq!(messages[2]["content"], "粒度再细一点");
+    // 目标(goal)+ 两轮 plan_chat 各两行 = 5 行
+    assert_eq!(messages.len(), 5, "目标 + 两轮对话应累计 5 行: {messages:?}");
+    assert_eq!(messages[0]["kind"], "goal");
+    assert_eq!(messages[3]["role"], "user");
+    assert_eq!(messages[3]["content"], "粒度再细一点");
 
     // 历史携带:第二轮规划器调用的 prompt_summary 应含首轮反馈与本轮反馈
     let (status, calls) = send_json(app, "GET", &format!("/api/tasks/{id}/calls"), json!({})).await;
@@ -2575,4 +2789,277 @@ async fn task_plan_chat_state_gate() {
         "done 应 409(规划对话仅 planned 态): {json}"
     );
     assert_eq!(json["code"], "CONFLICT");
+}
+
+/// 2026-09-10 六模式实跑修复(F2):任务模式提示词注入默认隔离。
+/// 角色扮演的 prompt_floors.json 通常承载「1200 字/第三人称/禁词表」等文章要求,
+/// 注入任务 system 会与任务目标冲突(实测 legacy 追加「压缩到 200 字」后结果反而变长)。
+/// 本用例:注入配置含唯一哨兵文本 → 默认(隔离)时任务 system 不含哨兵;
+/// 显式开启 task_prompt_inject_enabled 后哨兵出现;最后恢复默认(隔离)。
+#[tokio::test]
+async fn task_prompt_inject_isolated_by_default() {
+    let app = test_app();
+    const NEEDLE: &str = "注入哨兵ABCXYZ";
+
+    // 注入配置设唯一哨兵(simple 模式;perspective 会进 system_inject_text;
+    // prompt_inject 为全局共享,用例末恢复默认)
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/prompt-inject",
+        json!({
+            "config": {
+                "mode": "simple",
+                "simple": {
+                    "word_count_enabled": false,
+                    "word_count": 1200,
+                    "paraphrase_enabled": false,
+                    "dialogue_enabled": false,
+                    "perspective_enabled": true,
+                    "perspective": NEEDLE,
+                    "banned_words_enabled": false,
+                    "banned_prompt": "",
+                    "banned_words": []
+                },
+                "floors": []
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "设置注入配置应 200");
+
+    // 关闭继承(默认)→ solo 任务 system 不含哨兵
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=task",
+        json!({ "task_prompt_inject_enabled": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "关闭注入继承应 200");
+
+    let id = create_task_with_mode(app, "写一句关于秋天的话", "solo").await;
+    let (status, _) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_st, _) = wait_terminal(app, &id).await;
+    let (_, calls) = send_json(app, "GET", &format!("/api/tasks/{id}/calls"), json!({})).await;
+    let off_text = calls.to_string();
+    assert!(
+        !off_text.contains(NEEDLE),
+        "默认隔离时任务调用提示词不得含注入哨兵: {off_text}"
+    );
+
+    // 显式开启继承 → system 含哨兵
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=task",
+        json!({ "task_prompt_inject_enabled": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "开启注入继承应 200");
+
+    let id = create_task_with_mode(app, "写一句关于春天的话", "solo").await;
+    let (status, _) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_st, _) = wait_terminal(app, &id).await;
+    let (_, calls) = send_json(app, "GET", &format!("/api/tasks/{id}/calls"), json!({})).await;
+    assert!(
+        calls.to_string().contains(NEEDLE),
+        "显式开启后任务调用提示词应含注入哨兵: {calls}"
+    );
+
+    // 恢复默认:关闭继承 + 清空注入内容(避免影响后续并行用例)
+    let _ = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=task",
+        json!({ "task_prompt_inject_enabled": false }),
+    )
+    .await;
+    let _ = send_json(
+        app,
+        "PUT",
+        "/api/prompt-inject",
+        json!({
+            "config": {
+                "mode": "simple",
+                "simple": {
+                    "word_count_enabled": false,
+                    "word_count": 1200,
+                    "paraphrase_enabled": false,
+                    "dialogue_enabled": false,
+                    "perspective_enabled": false,
+                    "perspective": "第三人称",
+                    "banned_words_enabled": false,
+                    "banned_prompt": "",
+                    "banned_words": []
+                },
+                "floors": []
+            }
+        }),
+    )
+    .await;
+}
+
+/// 2026-09-10 六模式实跑修复(F3):调用记账口径统一。
+/// 验收标准:task_llm_calls 各行 token 求和 == 详情接口 usage_total(逐字段)。
+/// 覆盖两个此前漏计的缺口:规划器侦察轮、截断自愈行。
+#[tokio::test]
+async fn task_usage_total_matches_call_rows_with_scout_and_heal() {
+    let app = test_app();
+
+    // 场景 A:规划器侦察轮(plan 模式,plan_scout_loop 记侦察轮 usage)
+    let title = r#"[[tool:read {"type":"file","name":"notes.md"}]] [[reply:[{"name":"侦察步","goal":"基于收集的信息写作"}] ]] 侦察记账目标"#;
+    let id = create_task_with_mode(app, title, "plan").await;
+    let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
+    let _ = wait_status(app, &id, "planned").await;
+    let (_, detail) = send_json(app, "GET", &format!("/api/tasks/{id}"), json!({})).await;
+    let (_, calls) = send_json(app, "GET", &format!("/api/tasks/{id}/calls"), json!({})).await;
+    let planner_rows = calls["calls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["phase"] == "planner")
+        .count();
+    assert!(
+        planner_rows >= 2,
+        "应含侦察轮与计划轮: {calls:?}"
+    );
+    assert_usage_matches_calls(&detail, &calls);
+
+    // 场景 B:截断自愈(solo 工具循环单轮被截断 → 翻倍重发;heal 行记 usage)
+    let title = r#"[[tool_raw:read {"type":"file","name":"notes.md"}]] 截断自愈记账目标"#;
+    let id = create_task_with_mode(app, title, "solo").await;
+    let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
+    let (_st, _) = wait_terminal(app, &id).await;
+    let (_, detail) = send_json(app, "GET", &format!("/api/tasks/{id}"), json!({})).await;
+    let (_, calls) = send_json(app, "GET", &format!("/api/tasks/{id}/calls"), json!({})).await;
+    assert!(
+        calls["calls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["response_summary"]
+                .as_str()
+                .unwrap_or("")
+                .contains("截断自愈")),
+        "应有截断自愈标注行: {calls:?}"
+    );
+    assert_usage_matches_calls(&detail, &calls);
+}
+
+/// 断言 usage_total 与 task_llm_calls 逐行 token 求和一致(修复后为强不变量)。
+fn assert_usage_matches_calls(detail: &Value, calls: &Value) {
+    let sum = |field: &str| -> i64 {
+        calls["calls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c[field].as_i64().unwrap_or(0))
+            .sum()
+    };
+    let usage = &detail["usage_total"];
+    assert_eq!(
+        usage["prompt_tokens"].as_i64().unwrap_or(-1),
+        sum("prompt_tokens"),
+        "usage_total.prompt_tokens 应等于调用明细求和: usage={usage} calls={calls}"
+    );
+    assert_eq!(
+        usage["completion_tokens"].as_i64().unwrap_or(-1),
+        sum("completion_tokens"),
+        "usage_total.completion_tokens 应等于调用明细求和: usage={usage} calls={calls}"
+    );
+}
+
+/// 2026-09-10 六模式实跑修复(F5):followup replace 模式整体替换结果。
+/// 背景:append 语义下「压缩到 200 字」这类指令无法表达——新产出以追加段附加,
+/// 原文仍在(实测 result 反而变长)。replace 模式用新产出整体替换 result(段标
+
+/// 2026-09-10 六模式实跑修复(F5):followup replace 模式整体替换结果。
+/// 背景:append 语义下「压缩到 200 字」这类指令无法表达——新产出以追加段附加,
+/// 原文仍在(实测 result 反而变长)。replace 模式用新产出整体替换 result(段标
+/// 「修订 N」),旧内容不保留;messages 仍按 user/assistant 各一行落库。
+/// 用两个独立任务分别验证 replace 与默认 append,避免 title 内的回复钩子
+/// 在多轮之间互相污染(mock [[reply:]] 按最后一条 user 消息中首个命中)。
+#[tokio::test]
+async fn task_followup_replace_mode_replaces_result() {
+    let app = test_app();
+
+    // ===== 任务 A:replace 整体替换 =====
+    // 首轮无钩子 → mock 默认回复(内含目标前 60 字,作为「旧内容」标记)
+    let a = create_task_with_mode(app, "独有标记QAQ 写一段内容", "solo").await;
+    let (status, json) = send_json(app, "POST", &format!("/api/tasks/{a}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
+    let (st, detail) = wait_terminal(app, &a).await;
+    assert_eq!(st, "done");
+    assert!(
+        detail["task"]["result"]
+            .as_str()
+            .unwrap_or("")
+            .contains("独有标记QAQ"),
+        "首轮应含旧内容标记: {detail}"
+    );
+
+    let (status, json) = send_json(
+        app,
+        "POST",
+        &format!("/api/tasks/{a}/followup"),
+        json!({ "content": "[[reply:替换后成果]]", "mode": "replace" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "replace 追加应 200: {json}");
+    let (st, detail) = wait_terminal(app, &a).await;
+    assert_eq!(st, "done", "replace 完成后应为 done: {detail}");
+    let result = detail["task"]["result"].as_str().unwrap_or("");
+    assert!(
+        result.contains("**修订 1:**"),
+        "replace 模式应用「修订 N」段标: {result}"
+    );
+    assert!(
+        result.contains("替换后成果"),
+        "result 应含新版产出: {result}"
+    );
+    assert!(
+        !result.contains("独有标记QAQ"),
+        "replace 模式旧结果不得保留: {result}"
+    );
+    let messages = detail["messages"].as_array().unwrap();
+    // 目标 + 首轮成果 + 一轮追加两行 = 4 行
+    assert_eq!(
+        messages.len(),
+        4,
+        "目标 + 首轮成果 + 一轮追加两行 = 4 行: {messages:?}"
+    );
+    assert_eq!(messages[0]["kind"], "goal");
+    assert_eq!(messages[1]["kind"], "result");
+
+    // ===== 任务 B:缺省 mode = append,累积而非替换 =====
+    let b = create_task_with_mode(app, "第二标记QBQ 写点东西", "solo").await;
+    let (status, _) = send_json(app, "POST", &format!("/api/tasks/{b}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let (st, _) = wait_terminal(app, &b).await;
+    assert_eq!(st, "done");
+
+    let (status, json) = send_json(
+        app,
+        "POST",
+        &format!("/api/tasks/{b}/followup"),
+        json!({ "content": "[[reply:追加内容段]]" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "缺省 mode 追加应 200: {json}");
+    let (st, detail) = wait_terminal(app, &b).await;
+    assert_eq!(st, "done");
+    let result = detail["task"]["result"].as_str().unwrap_or("");
+    assert!(
+        result.contains("**追加 1:**") && result.contains("第二标记QBQ"),
+        "缺省 append 应保留旧结果并附加段: {result}"
+    );
+    assert!(
+        result.contains("追加内容段"),
+        "append 应含本轮产出: {result}"
+    );
 }

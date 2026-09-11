@@ -2232,6 +2232,115 @@ async fn memory_distill_crud_flow() {
     .await;
 }
 
+/// GET /api/memory/search:中文 FTS 命中、缺参 400、limit 上限钳制;
+/// POST /api/memory/prune:硬删除 selected=0 归档条目并返回条数
+#[tokio::test]
+async fn memory_search_and_prune_endpoints() {
+    let app = test_app();
+    let (_, char) = upload_character(app, "记忆检索角色.json").await;
+    let cid = char["id"].as_str().unwrap().to_string();
+
+    // 落两条记忆(其中一条含「图书馆」)
+    let (status, created) = send_json(
+        app,
+        "POST",
+        "/api/memory",
+        json!({ "character_id": cid, "content": "用户与角色在图书馆初识" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let lib_id = created["memory"]["id"].as_i64().unwrap();
+    let (_, other) = send_json(
+        app,
+        "POST",
+        "/api/memory",
+        json!({ "character_id": cid, "content": "角色害怕打雷" }),
+    )
+    .await;
+    let other_id = other["memory"]["id"].as_i64().unwrap();
+
+    // 检索:中文命中
+    let (status, body) = send_json(
+        app,
+        "GET",
+        &format!("/api/memory/search?character_id={cid}&q=%E5%9B%BE%E4%B9%A6%E9%A6%86"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "检索失败: {body}");
+    let memories = body["memories"].as_array().unwrap();
+    assert_eq!(memories.len(), 1, "应仅命中含「图书馆」的记忆: {body}");
+    assert_eq!(memories[0]["id"], json!(lib_id));
+    assert_eq!(memories[0]["pinned"], json!(false), "条目应含 pinned 字段");
+
+    // 缺参 400
+    let (status, _) = send_json(
+        app,
+        "GET",
+        &format!("/api/memory/search?character_id={cid}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "缺 q 应 400");
+    let (status, _) = send_json(app, "GET", "/api/memory/search?q=test", json!({})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "缺 character_id 应 400");
+
+    // limit 超上限钳制到 100(不报错)
+    let (status, body) = send_json(
+        app,
+        "GET",
+        &format!("/api/memory/search?character_id={cid}&q=%E5%9B%BE%E4%B9%A6%E9%A6%86&limit=9999"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["memories"].as_array().unwrap().len(), 1);
+
+    // prune:两条都 selected=1 → 删除 0 条
+    let (status, body) = send_json(
+        app,
+        "POST",
+        "/api/memory/prune",
+        json!({ "character_id": cid }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["removed"], json!(0), "无归档条目应删 0 条");
+
+    // 归档一条后 prune 硬删除它,列表只剩一条
+    let (status, _) = send_json(
+        app,
+        "PATCH",
+        &format!("/api/memory/{other_id}"),
+        json!({ "selected": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = send_json(
+        app,
+        "POST",
+        "/api/memory/prune",
+        json!({ "character_id": cid }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["removed"], json!(1), "应硬删除 1 条归档条目: {body}");
+    let (_, list) = send_json(
+        app,
+        "GET",
+        &format!("/api/memory?character_id={cid}"),
+        json!({}),
+    )
+    .await;
+    let remaining = list["memories"].as_array().unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0]["id"], json!(lib_id));
+
+    // 缺参 400
+    let (status, _) = send_json(app, "POST", "/api/memory/prune", json!({})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
 /// 记忆设置白名单透出:GET 默认 关闭/上限 8;PUT 可写,越界(>50)忽略、0 合法
 #[tokio::test]
 async fn memory_settings_exposed_and_clamped() {
@@ -2243,8 +2352,14 @@ async fn memory_settings_exposed_and_clamped() {
         "设置应透出 memory_distill_enabled: {s}"
     );
     assert_eq!(s["memory_inject_limit"], json!(8), "注入上限默认 8: {s}");
+    assert_eq!(
+        s["memory_inject_char_budget"],
+        json!(2000),
+        "字符预算默认 2000: {s}"
+    );
+    assert_eq!(s["memory_max_entries"], json!(200), "容量默认 200: {s}");
 
-    // 越界值忽略(保持 8);0 合法(关闭注入)
+    // 越界值忽略(保持默认);0 合法(关闭注入/不限制/不淘汰)
     let (status, _) = send_json(
         app,
         "PUT",
@@ -2255,6 +2370,42 @@ async fn memory_settings_exposed_and_clamped() {
     assert_eq!(status, StatusCode::OK);
     let (_, s) = send_json(app, "GET", "/api/settings", json!({})).await;
     assert_eq!(s["memory_inject_limit"], json!(8), "越界值应被忽略");
+
+    // 新增两字段:越界忽略、合法值生效
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({ "memory_inject_char_budget": 999_999, "memory_max_entries": 999_999 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, s) = send_json(app, "GET", "/api/settings", json!({})).await;
+    assert_eq!(
+        s["memory_inject_char_budget"],
+        json!(2000),
+        "越界预算应忽略"
+    );
+    assert_eq!(s["memory_max_entries"], json!(200), "越界容量应忽略");
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({ "memory_inject_char_budget": 500, "memory_max_entries": 10 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, s) = send_json(app, "GET", "/api/settings", json!({})).await;
+    assert_eq!(s["memory_inject_char_budget"], json!(500), "合法预算应生效");
+    assert_eq!(s["memory_max_entries"], json!(10), "合法容量应生效");
+    // 还原
+    let _ = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({ "memory_inject_char_budget": 2000, "memory_max_entries": 200 }),
+    )
+    .await;
 
     let (status, _) = send_json(
         app,
@@ -2505,4 +2656,35 @@ async fn plugin_delete_sanitizes_filename() {
     // 合法名通过(文件不存在也走完整校验后 200,删除语义幂等)
     let status = send_empty(app, "DELETE", "/api/plugins/tools/nonexistent-b4.json").await;
     assert_eq!(status, StatusCode::OK, "合法文件名应通过校验");
+}
+
+/// SPA 回退边界(2026-09 修复「面板加载失败」):静态资源未命中必须 404,
+/// 不能回退成 index.html——否则浏览器把 HTML 当 JS 解析,前端表现为
+/// 「面板加载失败」且懒加载重试永远失败(典型触发:前端重建后 chunk hash 变化)。
+#[tokio::test]
+async fn spa_fallback_returns_404_for_missing_assets() {
+    let app = test_app();
+    let _guard = test_lock().await;
+
+    // 不存在的 assets chunk → 404(不是 200 + text/html)
+    let (status, _) = send_json(
+        app,
+        "GET",
+        "/assets/EmbeddingSection-STALEHASH.js",
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "缺失的 assets chunk 应 404,不能回退 index.html"
+    );
+
+    // 其它带扩展名的静态资源(如 favicon 缺失)同样 404
+    let (status, _) = send_json(app, "GET", "/missing-icon.png", json!({})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "缺失的静态资源应 404");
+
+    // 路由式路径(无点、非 assets)仍回退 index.html,保证前端路由可刷新
+    let (status, _) = send_json(app, "GET", "/some-spa-route", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "路由路径应回退 index.html");
 }

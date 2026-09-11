@@ -16,13 +16,16 @@ function softNever(value: never, fallback: string): string {
   return fallback;
 }
 
-/** 状态 → 色块/标签 class(done / active / error / pending) */
+/** 状态 → 色块/标签 class(done / active / partial / error / pending) */
 export function taskStatusClass(status: AnyTaskStatus): string {
   switch (status) {
     case 'done': return 'done';
     case 'planning':
-    case 'running':
-    case 'partial': return 'active';
+    case 'running': return 'active';
+    // partial(部分完成)是**终态**,与 running/planning 的「还在跑」语义不同:
+    // 旧实现与进行中同色(active 黄),用户看不出「已结束但未达标」,只当成仍在执行
+    //(实跑问题 2 观感残留)。独立配色(橙)区分终态。
+    case 'partial': return 'partial';
     case 'error':
     case 'ended': return 'error';
     case 'pending':

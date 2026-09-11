@@ -46,8 +46,8 @@ pub(crate) struct AgentLoopCall {
 
 /// 单主 agent 工具自循环(solo/multi 执行器主体;team 各主 agent 复用):
 /// system 组装(内置执行者指令 → 人设 → 世界书 → 提示词注入 → Agent 提示词,
-/// 外部段落逐一 untrusted 包裹)→ run_tool_loop(工具全量 + step_whitelist Some(&[])
-/// 全量免授权放行)→ 调用追踪统一出口落 task_llm_calls(成功/空/中断/错误均一行)。
+/// 外部段落逐一 untrusted 包裹)→ run_tool_loop(工具按 task_tool_policy 编译 +
+/// ToolGate 闸门,恒不等待授权:名单外工具立即拒绝)→ 调用追踪统一出口落 task_llm_calls(成功/空/中断/错误均一行)。
 /// 成功返回 (正文, 整轮累计 usage);中断/错误/空内容返回 Err。
 pub(crate) async fn run_agent_loop(
     svc: Arc<TaskService>,
@@ -77,7 +77,13 @@ pub(crate) async fn run_agent_loop(
     if !world.is_empty() {
         sys.push_str(&format!("\n\n{}", untrusted_boundary("world_book", &world)));
     }
-    let inject = svc.inject_text();
+    // 提示词注入默认隔离(2026-09-10 实测修复):solo/multi/team 主 agent 与 followup
+    // 续跑共用本函数;仅显式开启 task_prompt_inject_enabled 才继承 prompt_floors.json
+    let inject = if settings.task_prompt_inject_enabled {
+        svc.inject_text()
+    } else {
+        String::new()
+    };
     if !inject.is_empty() {
         sys.push_str(&format!(
             "\n\n{}",
@@ -103,19 +109,27 @@ pub(crate) async fn run_agent_loop(
         LlmMessage::plain("user", &call.goal),
     ];
 
-    // 工具全量下发(与聊天 agent 模式同一来源:tool_registry 全量 definitions);
-    // 任务模式无 UI 授权上下文,step_whitelist 恒 Some(&[]) = 全部工具免授权弹窗
-    // 放行,否则危险工具会空等 300s 授权超时(docs/任务引擎六模式.md 第三节·6)。
+    // 工具按任务策略下发(批次授权改造):默认拒绝危险工具;元工具不入正文列表。
+    // 任务模式无 UI 授权上下文,闸门恒 no_ui_authorization = true:
+    // 名单外工具立即拒绝并回灌错误,不会空等 300 秒授权超时。
+    let policy = super::tool_policy::compile(
+        &settings.task_tool_policy,
+        &settings.task_tool_allowlist,
+        &engine.tool_registry(),
+    );
+    // 闸门名单先取出(allowed 借用生命周期需覆盖整个工具循环),再取走 defs
+    let allowed = policy.allowed;
     let params = GenerationParams {
         temperature: settings.default_temperature,
         top_p: settings.default_top_p,
         max_tokens: settings.default_max_tokens,
         stop: None,
-        tools: engine.tool_definitions(),
+        tools: policy.defs,
         max_tool_rounds: Some(settings.max_tool_rounds),
         tool_choice: ToolChoice::Auto,
         parallel_tool_calls: None,
     };
+    let gate = crate::agents::engine::executor::ToolGate::listed(&allowed);
 
     // 运行身份:虚拟 session_id(task: 前缀,不建 sessions/agent_sessions 影子行);
     // StateMachine 纯日志;run_id 标识本轮(工具授权等待的 key,白名单模式下用不到)。
@@ -155,7 +169,7 @@ pub(crate) async fn run_agent_loop(
         &flag,
         &mut total_usage,
         &run_id,
-        Some(&[]),
+        gate,
     )
     .await;
     // 先关通道再等 drain 收尾,保证进度事件全部转发完毕
@@ -195,6 +209,9 @@ pub(crate) async fn run_agent_loop(
                     std::time::Duration::ZERO,
                     "error",
                 );
+                // 被截断那次调用同样消耗 token:补落 usage 行,否则 usage_total
+                // 少于调用明细求和(2026-09-10 实测修复,口径同 team generate_text_healed)
+                svc.record_usage(&call.task_id, call.phase, call.step_index, &heal_out);
             }
             let text = res.content.trim().to_string();
             let status = if text.is_empty() { "empty" } else { "ok" };
@@ -305,6 +322,7 @@ impl SoloExecutor {
             text,
             usage,
             status: None,
+            error: None,
         })
     }
 }

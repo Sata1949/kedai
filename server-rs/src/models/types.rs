@@ -208,7 +208,7 @@ pub struct PlanStep {
     pub enabled: bool,
     #[serde(default)]
     pub goal: String,
-    /// direct | tool | reflect
+    /// direct | reflect(校验见 `services/agent_flow_service.rs`;`tool` 不在支持范围)
     #[serde(default)]
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -460,7 +460,8 @@ pub struct ToolContext {
     pub session_id: String,
     pub character_id: String,
     /// 子智能体嵌套深度(主 Agent 为 0;子任务内再派发时 +1)。
-    /// 当前子任务生成不带工具、深度恒 0,字段为深度守卫预留(落地项 3)。
+    /// 深度守卫:子 agent 以 `agent_depth + 1` 运行,达 `subagent_max_depth` 后不再派发
+    /// (见 `tools/agent_tools_agent.rs`)。
     pub agent_depth: u32,
 }
 
@@ -568,6 +569,37 @@ impl TaskRunMode {
 /// TaskRecord.task_mode 的 serde 缺省(旧 JSON 无此字段 = legacy)
 fn task_default_run_mode() -> TaskRunMode {
     TaskRunMode::Legacy
+}
+
+/// 终态追加指令的作用模式(批次 R2b+,2026-09-10 实跑修复 F5)。
+/// 序列化为 snake_case 文本;`append`(默认)为历史行为,`replace` 用新产出整体
+/// 替换原 result,支持「压缩 / 重写 / 改前面」这类 append 无法表达的指令。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskFollowupMode {
+    /// 追加:新产出以「追加 N」段附加到 result 末尾(历史行为,默认)
+    Append,
+    /// 替换:新产出整体替换 result(段标「修订 N」)
+    Replace,
+}
+
+impl TaskFollowupMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Append => "append",
+            Self::Replace => "replace",
+        }
+    }
+
+    /// 严格解析(API 入参用):缺省/空 = Append;未知值返回 None 由调用方回 400。
+    /// 与 TaskRunMode 口径一致:入参严格、无容错回退。
+    pub fn from_str_strict(s: &str) -> Option<Self> {
+        match s {
+            "append" => Some(Self::Append),
+            "replace" => Some(Self::Replace),
+            _ => None,
+        }
+    }
 }
 
 /// 任务状态(tasks.status 列)。序列化输出与 DB 落盘均为 snake_case 文本,

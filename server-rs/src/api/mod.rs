@@ -18,6 +18,7 @@ pub mod memory;
 pub mod plugins;
 pub mod prompt_inject;
 pub mod quick_replies;
+pub mod repo_index;
 pub mod resource;
 pub mod security;
 pub mod sessions;

@@ -216,7 +216,8 @@ fn parse_usage_reads_reasoning_tokens() {
     assert_eq!(parse_usage(&u), (800, 10000, 10800, 0, 0, 10000));
 }
 
-/// finish_reason:stop/length 产出 Finish 块;tool_calls 只 flush 工具调用,不产 Finish 块
+/// finish_reason:stop/length 产出 Finish 块;tool_calls 同样产出
+/// Finish{tool_calls}(F6,2026-09-10:带工具轮 finish 列此前落空串)。
 #[test]
 fn sse_parser_emits_finish_chunk() {
     let mut parser = SseParser::default();
@@ -241,10 +242,10 @@ fn sse_parser_emits_finish_chunk() {
         )
         .unwrap();
     assert!(
-        !out2
+        out2
             .iter()
-            .any(|c| matches!(c, crate::models::types::LlmStreamChunk::Finish { .. })),
-        "tool_calls 不得产出 Finish 块: {out2:?}"
+            .any(|c| matches!(c, crate::models::types::LlmStreamChunk::Finish { reason } if reason == "tool_calls")),
+        "tool_calls 应产出 Finish{{tool_calls}} 块(F6): {out2:?}"
     );
 }
 
@@ -373,7 +374,9 @@ fn sse_parser_tolerates_bad_json_then_fails_at_threshold() {
 }
 
 /// M2:工具调用只在 finish_reason == "tool_calls" 时 flush;
-/// stop/length 等其他 finish 不提前 flush,避免半截调用被当作完整调用发出
+/// stop/length 等其他 finish 不提前 flush,避免半截调用被当作完整调用发出。
+/// F6(2026-09-10):tool_calls 完成时同时产出 Finish{tool_calls}——
+/// 带工具轮此前 finish 无值,任务模式调用面板 finish 列空白。
 #[test]
 fn sse_parser_flushes_tool_calls_only_on_tool_calls_finish() {
     let mut parser = SseParser::default();
@@ -389,7 +392,7 @@ fn sse_parser_flushes_tool_calls_only_on_tool_calls_finish() {
         !out.iter().any(|c| matches!(c, LlmStreamChunk::ToolCall(_))),
         "非 tool_calls finish 不应 flush 工具调用: {out:?}"
     );
-    // finish_reason=tool_calls → flush
+    // finish_reason=tool_calls → flush,且产出 Finish{tool_calls}(F6)
     parser
         .push(
             b"data: {\"choices\":[{\"finish_reason\":\"tool_calls\"}]}\n\n",
@@ -400,6 +403,11 @@ fn sse_parser_flushes_tool_calls_only_on_tool_calls_finish() {
         out.iter()
             .any(|c| matches!(c, LlmStreamChunk::ToolCall(c) if c.name == "read")),
         "tool_calls finish 应 flush 已聚合调用: {out:?}"
+    );
+    assert!(
+        out.iter()
+            .any(|c| matches!(c, LlmStreamChunk::Finish { reason } if reason == "tool_calls")),
+        "tool_calls finish 应产出 Finish{{tool_calls}} 供上层落库(F6): {out:?}"
     );
 }
 

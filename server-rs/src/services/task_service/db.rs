@@ -178,14 +178,34 @@ impl TaskService {
 
     /// 写入最终结果并置终态:全部步骤成功为 done;含 error 步骤为 partial(部分完成)。
     pub(super) fn set_result(&self, id: &str, result: &str, status: TaskStatus) -> bool {
+        self.set_result_with_error(id, result, status, None)
+    }
+
+    /// set_result 的可解释版本:partial 终态可携带原因文本写入 tasks.error(供前端
+    /// 状态行展示「为什么不是完成」);error 为 None 时清空旧 error(重跑成功后不残留
+    /// 上一轮的错误提示)。其余语义与 set_result 一致。
+    pub(super) fn set_result_with_error(
+        &self,
+        id: &str,
+        result: &str,
+        status: TaskStatus,
+        error: Option<&str>,
+    ) -> bool {
         let conn = self.db.write();
         let changed = conn
             .execute(
-                "UPDATE tasks SET result = ?1, status = ?2, updated_at = ?3 WHERE id = ?4",
-                params![result, status.as_str(), now_iso(), id],
+                "UPDATE tasks SET result = ?1, status = ?2, error = ?3, updated_at = ?4 WHERE id = ?5",
+                params![
+                    result,
+                    status.as_str(),
+                    error.unwrap_or(""),
+                    now_iso(),
+                    id
+                ],
             )
             .map(|n| n > 0)
             .unwrap_or(false);
+        drop(conn);
         if changed {
             self.emit_event(
                 "status",

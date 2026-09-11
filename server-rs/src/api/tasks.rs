@@ -1,7 +1,7 @@
 // 任务模式路由:/api/tasks(列表/新建/详情/执行/批准/停止/删除/事件 SSE 流)
 use crate::api::app_state::AppState;
 use crate::api::{db_err, err_with_code, ErrorCode, WithStatus};
-use crate::models::types::{TaskRunMode, TaskStatus, TaskStep};
+use crate::models::types::{TaskFollowupMode, TaskRunMode, TaskStatus, TaskStep};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::sse::Event;
@@ -31,10 +31,13 @@ pub struct ApproveTaskBody {
 }
 
 /// followup 追加指令请求体(批次 R2a):content 为追加指令原文。
+/// mode(批次 R2b+):append 缺省 | replace(整体替换 result);未知值 400。
 #[derive(Deserialize)]
 pub struct FollowupTaskBody {
     #[serde(default)]
     pub content: String,
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 /// plan-chat 规划对话请求体(批次 R2b):message 为本轮反馈原文。
@@ -198,10 +201,12 @@ pub async fn approve(
     }
 }
 
-/// POST /api/tasks/{id}/followup:终态任务追加指令(批次 R2a)。
-/// 校验顺序:空指令 400(VALIDATION,先于状态门禁)→ 不存在 404(NOT_FOUND)→
-/// 非终态(running/planning/planned/pending)409(CONFLICT)→
+/// POST /api/tasks/{id}/followup:终态任务追加指令(批次 R2a;R2b+ 扩 mode)。
+/// 校验顺序:空指令 400(VALIDATION,先于状态门禁)→ 非法 mode 400 → 不存在
+/// 404(NOT_FOUND)→ 非终态(running/planning/planned/pending)409(CONFLICT)→
 /// service 层复核(预检后状态竞态变化,同样 409)。
+/// body.mode:append(缺省/空,历史行为,产出追加进 result)|replace(产出整体替换
+/// result,用于「压缩/重写/改前面」类指令);未知值 400。
 /// 成功 200:用户指令已落 task_messages 并 spawn solo 续跑,前端经
 /// status 事件(running → done/partial)感知生命周期,详情重拉携带 messages。
 pub async fn followup(
@@ -217,6 +222,20 @@ pub async fn followup(
             StatusCode::BAD_REQUEST,
         );
     }
+    // mode 严格解析:缺省/空 = append(旧客户端零变化);未知值 400(与 task_mode 同口径)
+    let mode = match body.mode.as_deref() {
+        None | Some("") => TaskFollowupMode::Append,
+        Some(s) => match TaskFollowupMode::from_str_strict(s) {
+            Some(m) => m,
+            None => {
+                return err_with_code(
+                    ErrorCode::Validation,
+                    format!("未知追加模式:{s}(可选:append/replace)"),
+                    StatusCode::BAD_REQUEST,
+                )
+            }
+        },
+    };
     let svc = state.tasks.clone();
     let id_probe = id.clone();
     let found = match state.db_call(move || svc.get(&id_probe)).await {
@@ -240,7 +259,7 @@ pub async fn followup(
         );
     }
     let svc = state.tasks.clone();
-    match state.db_call(move || svc.followup(&id, &content)).await {
+    match state.db_call(move || svc.followup(&id, &content, mode)).await {
         Err(e) => db_err(&e),
         Ok(Ok(())) => Json(json!({ "ok": true })).into_response(),
         // 复核失败(竞态:预检通过后状态被 stop/重跑改变)按 409 语义返回

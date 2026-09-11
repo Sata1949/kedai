@@ -27,6 +27,9 @@ export function sandboxScript(
   idMap: Record<string, unknown> = {},
   lorebookName: string | null = null,
   sharedGlobals: Record<string, unknown> = {},
+  /** 启动时的宿主表单控件快照(gatherControls):document.getElementById 门面读 select/input
+   *  真值的同步数据源(事件回包也会带 controls,此处覆盖脚本 boot 后、首次事件前的裸读)。 */
+  controls: Array<Record<string, unknown>> = [],
 ): string {
   const segments = typeof code === 'string' ? null : code;
   const escapedCode = segments === null ? (code as string).replace(/<\/script/gi, '<\\/script') : '';
@@ -35,6 +38,7 @@ export function sandboxScript(
   const initialStorage = JSON.stringify(cloneData(storage)).replace(/</g, '\\u003c');
   const initialGeo = JSON.stringify(geo ?? null).replace(/</g, '\\u003c');
   const initialMirror = JSON.stringify(cloneData(idMap)).replace(/</g, '\\u003c');
+  const initialControls = JSON.stringify(cloneData(controls)).replace(/</g, '\\u003c');
   const initialLorebook = JSON.stringify(lorebookName ?? null);
   const initialNonce = JSON.stringify(nonce);
   const initialShared = JSON.stringify(cloneData(sharedGlobals)).replace(/</g, '\\u003c');
@@ -43,8 +47,14 @@ export function sandboxScript(
     (segments ?? []).map((s) => ({ name: String(s?.name ?? ''), code: String(s?.code ?? '') })),
   ).replace(/</g, '\\u003c');
   const runUserCode = segments === null
-    // 单段(消息级):现行为不变,仅在 done 前挂共享桥首次 diff
-    ? `(async()=>{try{${escapedCode}\n;await flush();__kdSharedStart();send('done')}catch(error){send('error',{message:error instanceof Error?(error.stack||error.message):String(error)})}})();`
+    // 单段(消息级):现行为不变,仅在 done 前挂共享桥首次 diff。
+    // 额外在用户代码前注册 __kdEvalInline:直接 eval 定义在 IIFE 内,作用域链含用户代码的
+    // function 声明与 const 绑定;inline 事件降级桥据此求值(onclick/onchange 里调用卡内函数)。
+    ? `(async()=>{try{
+const __kdInlineEval=function(__c,__e){var event=__e;return eval(__c);};
+window.__kdEvalInline=__kdInlineEval;globalThis.__kdEvalInline=__kdInlineEval;
+${escapedCode}
+;await flush();__kdSharedStart();send('done')}catch(error){send('error',{message:error instanceof Error?(error.stack||error.message):String(error)})}})();`
     // 多段(卡级合并单 realm):逐段独立 <script> 注入(appendChild 同步执行,语义对齐
     // SillyTavern 逐 <script> 加载:共享 window 与全局词法环境,单段语法错误只废该段)。
     // 错误三路径(window error / unhandledrejection / harness finish)统一带段名前缀。
@@ -99,16 +109,27 @@ addEventListener('message',(event)=>{
     // 不应导致整个状态栏被 cleanup 拆除(此前此处上送 error 会触发宿主 finish→界面死亡)
     const fn=jqHandlers.get(m.jqId);if(fn)Promise.resolve().then(()=>fn.call(__kdWrapTarget(m.target),m.event||{})).then(flush).catch(e=>send('warn',{message:'事件回调出错: '+(e&&e.message?e.message:e)}));
   } else if(m.type==='inline-event'){
-    // inline 事件降级桥:宿主把元素 data-kd-on* 属性里的作者代码串转回沙箱,
-    // 用 new Function 求值(沙箱 CSP 含 unsafe-eval;求值对象仅限作者自己的 inline
-    // 代码,与已授权执行的卡脚本同信任级)。this 包装为状态门面,event 补默认方法。
+    // inline 事件降级桥:宿主把元素 data-kd-on* 属性里的作者代码串转回沙箱求值。
+    // 优先走 __kdEvalInline(消息级单段由 IIFE 内注册,直接 eval——作用域链含作者脚本的
+    // function 声明与 const 绑定;否则 onclick="submitCreation()" 这类调用在全局域
+    // ReferenceError,这正是赛马娘卡首楼输入框/弹窗/复制按钮全部失效的主因)。
+    // 无该桥(卡级 realm:作者脚本按 <script> 注入即全局作用域)时回退 new Function。
     __kdMergeMirror(m.mirror);
     __kdMergeEventTarget(m.target);
     try{
-      const handler=new Function('event',String(m.code||''));
       const wrapped=__kdWrapTarget(m.target);
       const ev=Object.assign({preventDefault:function(){},stopPropagation:function(){},target:wrapped},m.event||{});
-      Promise.resolve().then(()=>handler.call(wrapped,ev)).then(flush).catch(e=>send('warn',{message:'内联事件回调出错: '+(e&&e.message?e.message:e)}));
+      const bridge=globalThis.__kdEvalInline;
+      let run;
+      if(typeof bridge==='function'){
+        run=()=>bridge.call(wrapped,String(m.code||''),ev);
+      }else{
+        // 无闭包桥(卡级 realm:作者脚本即全局作用域)时回退 new Function;
+        // 构造保持同步,语法错误仍走「解析失败」告警分支(与旧行为一致)
+        const handler=new Function('event',String(m.code||''));
+        run=()=>handler.call(wrapped,ev);
+      }
+      Promise.resolve().then(run).then(flush).catch(e=>send('warn',{message:'内联事件回调出错: '+(e&&e.message?e.message:e)}));
     }catch(e){send('warn',{message:'内联事件代码解析失败: '+(e&&e.message?e.message:e)});}
   } else if(m.type==='mvu-event'){
     // 宿主变量广播:合并最新变量树并触发本地事件订阅(状态栏的 MVU 更新监听)。
@@ -224,20 +245,47 @@ const toastr=Object.freeze({info:function(m){console.info('[kedai-toastr]',m);},
 // 使开场协议勾选/确认($('#agree').prop('checked') 等)读到真实值而非假值桩。
 // 未命中的选择器 getter 会顺带 enqueue 一次 probe,下一批回包后同选择器即可读到真值。
 const jqHandlers=new Map();
+// jQuery 事件名规整:剥离命名空间('click.myNS' → 'click')并按空格拆多事件名。
+// 旧实现把整串当事件名 addEventListener,带命名空间的绑定永不触发(实跑问题 7 R3)。
+const __kdEventNames=(evt)=>String(evt??'').split(/\\s+/).map(function(s){var i=s.indexOf('.');return i<0?s:s.slice(0,i);}).filter(Boolean);
+// jQuery on 参数重载:on(evt, fn) 直接绑定;on(evt, selector, fn) 委托绑定
+// (动态弹窗/输入框最依赖委托;旧实现把 selector 字符串当回调存入 jqHandlers,
+// 事件到来时 fn.call 抛 TypeError 被吞掉,表现即「绑定静默失效」——实跑问题 7 R3)。
+// 注意:必须用 function 声明(不能用箭头函数)——下方依赖 arguments 读重载参数。
+const __kdParseOn=function(a,b,c){
+  if(typeof b==='function')return{evt:a,selector:null,fn:b};
+  if(typeof c==='function')return{evt:a,selector:typeof b==='string'&&b?b:null,fn:c};
+  return null;
+};
 // 已应用 draggable 的选择器键集合:data('ui-draggable') 与 destroy 判定用
 const jqDraggableApplied={};
 const jqReadyQueue=[];
 let jqIdSeq=0;
 let ops=[];
 let flushPromise=null;
-const __kdMirror={selectors:JSON.parse(${JSON.stringify(initialMirror)}),controls:[]};
+const __kdMirror={selectors:JSON.parse(${JSON.stringify(initialMirror)}),controls:JSON.parse(${JSON.stringify(initialControls)})};
 // id 反向索引:attr('id') 读复合类选择器('.tab-page.active')时回查。
 // jQuery 语义 = 集合首元素的 id;镜像只按「原样选择器串」采集,复合选择器可能从未入镜像,
 // 但同族简单选择器('.tab-page' 的 items)与写操作补丁('#page-user' addClass)已在索引里。
 const __kdById={};
 const __kdIndexState=function(st){if(st&&typeof st.id==='string'&&st.id)__kdById[st.id]=st;};
+// 表单控件并入 #id 选择器镜像:controls 携带 val/checked/disabled/selectedIndex/options,
+// 而 id 轻量表(initialMirror)只有 classes——门面与 jQuery 子集的 read() 优先读
+// __kdMirror.selectors['#id'],不并入就读不到控件真值(实测踩坑)。
+const __kdMergeControls=function(list){
+  if(!Array.isArray(list))return;
+  __kdMirror.controls=list;
+  for(const c of list){
+    if(!c||typeof c.id!=='string'||!c.id)continue;
+    const k='#'+c.id;
+    const merged=Object.assign({n:1},__kdMirror.selectors[k]||{},c);
+    __kdMirror.selectors[k]=merged;
+    __kdIndexState(merged);
+  }
+};
 // boot 注入的 id 轻量表立即入索引(boot 内同步执行的 render 读 attr('id') 时无需等 ack)
 for(const __k in __kdMirror.selectors)__kdIndexState(__kdMirror.selectors[__k]);
+__kdMergeControls(__kdMirror.controls);
 const __kdMergeMirror=function(m){
   if(!m||typeof m!=='object')return;
   const S=m.selectors||{};
@@ -246,7 +294,7 @@ const __kdMergeMirror=function(m){
     __kdIndexState(S[k]);
     if(S[k]&&Array.isArray(S[k].items))S[k].items.forEach(__kdIndexState);
   }
-  if(Array.isArray(m.controls))__kdMirror.controls=m.controls;
+  if(Array.isArray(m.controls))__kdMergeControls(m.controls);
 };
 // 复合类选择器回查:'.tab-page.active' / 'div.a.b' → 第一个 classes 全含的元素 id
 const __kdByClassLookup=function(sel){
@@ -324,6 +372,106 @@ const flush=async()=>{
 const enqueue=(op)=>{ops.push(op);queueMicrotask(()=>{void flush().catch(e=>warn('DOM 操作失败: '+(e&&e.message?e.message:e)));});};
 const __kdRefKey=function(ref){return ref?(ref.kind==='selector'?ref.value:ref.kind==='selector-index'?ref.value+'@@'+ref.index:null):null;};
 const probe=(ref)=>{const k=__kdRefKey(ref);if(k&&!__kdProbeQueue[k]){__kdProbeQueue[k]=1;enqueue({ref,method:'probe',args:[]});}};
+// ---- document.getElementById 门面:沙箱是不透明来源,自身文档没有任何卡内元素,
+//      作者脚本的裸 getElementById(...).value / .innerHTML / .style.display 全部落空
+//      (实跑问题 7 R5:赛马娘卡首楼 select/input/按钮交互失效的第二道断点)。
+//      宿主在 boot(initialMirror)与每次事件/批回包下发容器状态镜像——按 id 索引的
+//      元素状态 + 全部表单控件;这里据此返回元素门面:读走镜像(同步真值,in 含 select
+//      的 value/selectedIndex/options[i].text),写经既有 DOM 白名单 batch 回写宿主真实
+//      元素(innerHTML/value/checked/disabled/style.*),并乐观补丁镜像保证同一同步段内
+//      写后即读一致。未命中镜像时回退原生(沙箱空文档返回 null,交给作者代码的空值分支)。
+const __kdReadElemState=function(id){
+  const key='#'+id;
+  return __kdMirror.selectors[key]||__kdById[id]||null;
+};
+const __kdElemFacade=function(entry){
+  const id=String((entry&&entry.id)||'');
+  const ref={kind:'selector',value:'#'+id};
+  const read=function(){return __kdReadElemState(id)||entry||{};};
+  const ctl=function(){const c=__kdFindControl('#'+id);return c||null;};
+  const write=function(method,args,patch){if(id)enqueue({ref,method,args});if(id)__kdPatch(ref.value,patch);};
+  const state=read();
+  const fac={
+    id:id,
+    tagName:String(state.tag||'').toUpperCase(),
+    getAttribute:function(k){const n=String(k);const s=read();
+      if(n==='id')return id||null;
+      if(n==='name')return typeof s.name==='string'?s.name:null;
+      if(n==='value')return typeof s.val==='string'?s.val:null;
+      if(n==='class')return Array.isArray(s.classes)?s.classes.join(' '):null;
+      if(n.indexOf('data-')===0){const key=n.slice(5).replace(/-([a-z])/g,function(_,c){return c.toUpperCase();});return key in s?String(s[key]):null;}
+      return null;},
+    setAttribute:function(k,v){if(k==='value')write('val',[String(v??'')],{val:String(v??'')});},
+    removeAttribute:function(){},
+    hasAttribute:function(k){return String(k)==='id'?!!id:false;},
+    classList:{
+      contains:function(c){const s=read();return Array.isArray(s.classes)&&s.classes.indexOf(String(c))>=0;},
+      add:function(){write('addClass',Array.prototype.slice.call(arguments),{});},
+      remove:function(){write('removeClass',Array.prototype.slice.call(arguments),{});},
+    },
+    get className(){const s=read();return Array.isArray(s.classes)?s.classes.join(' '):'';},
+    set className(v){write('attr',['class',String(v??'')],{});},
+    dataset:Object.assign({},(entry&&entry.data)||{}),
+    // 游离子树操作:本卡剪贴板兜底分支会 createElement + body.appendChild;
+    // 沙箱不实现真子树,仅保证不抛错(主路径经 navigator.clipboard 桥,不走此处)。
+    appendChild:function(c){return c;},
+    removeChild:function(c){return c;},
+    insertBefore:function(c){return c;},
+    querySelector:function(){return null;},
+    querySelectorAll:function(){return [];},
+    getBoundingClientRect:function(){return {top:0,left:0,right:__kdGeo.width,bottom:__kdGeo.height,width:__kdGeo.width,height:__kdGeo.height,x:0,y:0};},
+    closest:function(){return null;},
+    remove:function(){},
+    focus:function(){},
+    blur:function(){},
+    click:function(){if(id)enqueue({ref,method:'trigger',args:['click']});},
+    contains:function(){return false;},
+    get style(){return __kdElemStyleFacade(read,write);},
+  };
+  // 读属性:每次取镜像最新值(同一同步段内写后即读要走乐观补丁)
+  for(const key of ['value','val']){
+    Object.defineProperty(fac,key,{configurable:true,get:function(){const s=read();const c=ctl();if(c&&typeof c.val==='string')return c.val;return typeof s.val==='string'?s.val:'';},set:function(v){write('val',[String(v??'')],{val:String(v??'')});}});
+  }
+  Object.defineProperty(fac,'checked',{configurable:true,get:function(){const s=read();const c=ctl();return c?!!c.checked:!!s.checked;},set:function(v){write('prop',['checked',!!v],{checked:!!v});}});
+  Object.defineProperty(fac,'disabled',{configurable:true,get:function(){const s=read();const c=ctl();return c?!!c.disabled:!!s.disabled;},set:function(v){write('prop',['disabled',!!v],{disabled:!!v});}});
+  Object.defineProperty(fac,'selectedIndex',{configurable:true,get:function(){const c=ctl();const s=read();if(c&&typeof c.selectedIndex==='number')return c.selectedIndex;return typeof s.selectedIndex==='number'?s.selectedIndex:-1;}});
+  Object.defineProperty(fac,'options',{configurable:true,get:function(){const c=ctl();const s=read();const src=c&&Array.isArray(c.options)?c.options:(Array.isArray(s.options)?s.options:[]);return src.map(function(o){return {value:String((o&&o.value)||''),text:String((o&&o.text)||'')};});}});
+  Object.defineProperty(fac,'innerHTML',{configurable:true,get:function(){const s=read();return typeof s.html==='string'?s.html:'';},set:function(v){write('html',[String(v??'')],{html:String(v??'')});}});
+  Object.defineProperty(fac,'outerHTML',{configurable:true,get:function(){const s=read();return typeof s.html==='string'?s.html:'';}});
+  Object.defineProperty(fac,'textContent',{configurable:true,get:function(){const s=read();return typeof s.text==='string'?s.text:'';},set:function(v){write('text',[String(v??'')],{text:String(v??'')});}});
+  Object.defineProperty(fac,'innerText',{configurable:true,get:function(){const s=read();return typeof s.text==='string'?s.text:'';},set:function(v){write('text',[String(v??'')],{text:String(v??'')});}});
+  return fac;
+};
+const __kdElemStyleFacade=function(read,write){
+  const cur=function(){const s=read();return (s&&s.css&&typeof s.css==='object')?s.css:{};};
+  return new Proxy({},{
+    get:function(_t,k){
+      if(k==='setProperty')return function(prop,v){write('css',[String(prop),String(v)],{css:Object.assign({},cur(),{[String(prop)]:String(v)})});};
+      if(k==='removeProperty')return function(prop){write('css',[String(prop),''],{css:Object.assign({},cur(),{[String(prop)]:''})});};
+      if(k==='getPropertyValue')return function(prop){const c=cur();return c[String(prop)]||c[String(prop).replace(/-([a-z])/g,function(_m,ch){return ch.toUpperCase();})]||'';};
+      if(k==='length')return 0;
+      if(k==='item')return function(){return '';};
+      const c=cur();return c[k]!==undefined?c[k]:'';
+    },
+    set:function(_t,k,v){
+      if(k==='cssText'){return true;}
+      write('css',[String(k),String(v)],{css:Object.assign({},cur(),{[String(k)]:String(v)})});
+      return true;
+    },
+  });
+};
+// 覆写 document.getElementById:命中宿主镜像返回门面,未命中回退原生(空文档 null)。
+// 只拦截 getElementById —— 本卡需求面;querySelector 等保持原生,最小化回归风险。
+try{
+  const __kdNativeGetById=document.getElementById.bind(document);
+  Object.defineProperty(document,'getElementById',{configurable:true,writable:true,value:function(id){
+    const key=String(id);
+    const st=__kdReadElemState(key);
+    const c=__kdFindControl('#'+key);
+    if(!st&&!c)return __kdNativeGetById(key);
+    return __kdElemFacade(c||st);
+  }});
+}catch(e){warn('document 查询门面安装失败(作者脚本裸 getElementById 将拿不到卡内元素): '+(e&&e.message?e.message:e));}
 // $('<div …>') 创建游离元素:on 绑定与子元素先记在 spec 里,append 进真实容器时由宿主一并落 DOM
 function jqCreated(spec){
   if(!spec.attrs)spec.attrs={};
@@ -331,7 +479,7 @@ function jqCreated(spec){
   const coll={};
   Object.defineProperty(coll,'__kdSpec',{get:function(){return spec;}});
   Object.defineProperty(coll,'length',{get:function(){return 1;}});
-  coll.on=function(evt,fn){if(typeof fn==='function'){const id=++jqIdSeq;jqHandlers.set(id,fn);spec.handlers.push({evt:String(evt),jqId:id});}return coll;};
+  coll.on=function(evt,fn){const p=__kdParseOn.apply(null,arguments);if(!p)return coll;const id=++jqIdSeq;jqHandlers.set(id,p.fn);spec.handlers.push({evt:String(p.evt),jqId:id,selector:p.selector||null});return coll;};
   coll.off=function(){return coll;};
   coll.append=function(child){if(child&&child.__kdSpec)spec.children.push(child.__kdSpec);return coll;};
   coll.addClass=function(c){spec.addClass=(spec.addClass?spec.addClass+' ':'')+String(c??'');return coll;};
@@ -437,7 +585,7 @@ function jq(sel){
   // 其余键沿用事件 target.data / 本地数据
   coll.data=function(name){const n=String(name);if(n==='ui-draggable')return !!(refKey&&jqDraggableApplied[refKey]);return localData[n]??'';};
   coll.val=function(v){if(arguments.length===0){const c=__kdFindControl(sel);if(c&&typeof c.val==='string')return c.val;const st=readState();if(st&&typeof st.val==='string')return st.val;if(!st)probe(ref);return '';}if(ref)enqueue({ref,method:'val',args:[v]});__kdPatch(sel,{val:String(v??'')});return coll;};
-  coll.on=function(evt,fn){if(ref){const id=++jqIdSeq;jqHandlers.set(id,fn);enqueue({ref,method:'on',args:[evt,id]});}return coll;};
+  coll.on=function(evt,fn){const p=__kdParseOn.apply(null,arguments);if(ref&&p){const id=++jqIdSeq;jqHandlers.set(id,p.fn);enqueue({ref,method:'on',args:[p.evt,id,p.selector]});}return coll;};
   coll.off=function(evt){if(ref)enqueue({ref,method:'off',args:[evt]});return coll;};
   coll.hide=function(){if(ref)enqueue({ref,method:'css',args:['display','none']});__kdPatch(sel,{css:Object.assign({},(readState()||{}).css||{},{display:'none'})});return coll;};
   coll.show=function(){if(ref)enqueue({ref,method:'css',args:['display','']});__kdPatch(sel,{css:Object.assign({},(readState()||{}).css||{},{display:''})});return coll;};
@@ -669,6 +817,49 @@ const TavernHelper=Object.freeze({
   getChatMessages:function(id,opts){return rpc('chat-messages',Number(id)||0,opts&&typeof opts==='object'?opts:{});},
 });
 globalThis.TavernHelper=TavernHelper;
+// ---- 剪贴板桥(实跑问题 7 R4)----
+// 沙箱是不透明来源 + display:none 隐藏框架,无焦点/无用户激活,navigator.clipboard.writeText
+// 与 document.execCommand('copy') 都不可能成功(权限与焦点双缺),「复制提示词」类按钮静默失效。
+// 这里覆写 navigator.clipboard,把写入经 RPC 转给宿主页面执行(宿主页有真实用户手势与
+// clipboard-write 权限);文本型写入放行,其余(读剪贴板等)不提供。
+try{
+  const __kdWriteItems=function(items){
+    try{
+      const arr=Array.isArray(items)?items:[];
+      const jobs=[];
+      for(const it of arr){
+        // 仅支持纯文本 ClipboardItem(getType('text/plain') 返回 Blob/Promise)
+        if(it&&typeof it.getType==='function'){
+          jobs.push(Promise.resolve(it.getType('text/plain')).then(function(blob){
+            return blob&&typeof blob.text==='function'?blob.text():String(blob??'');
+          }));
+        }
+      }
+      if(jobs.length===0)return Promise.resolve(true);
+      return Promise.all(jobs).then(function(texts){
+        return rpc('clipboard-write',texts.filter(Boolean).join('\\n'));
+      });
+    }catch(e){return Promise.resolve(false);}
+  };
+  const __kdClipboard={
+    writeText:function(text){return rpc('clipboard-write',String(text??''));},
+    write:__kdWriteItems,
+  };
+  Object.defineProperty(navigator,'clipboard',{configurable:true,enumerable:true,get:function(){return __kdClipboard;}});
+}catch(e){warn('剪贴板桥安装失败(不影响主流程): '+(e&&e.message?e.message:e));}
+// 降级路径:document.execCommand('copy') 转宿主剪贴板桥(旧卡脚本用)
+try{
+  const __kdExec=document.execCommand?document.execCommand.bind(document):null;
+  document.execCommand=function(cmd){
+    if(String(cmd)==='copy'){
+      // 取当前选区文本(沙箱内选区);无选区时由调用方先 select(),此处尽力读取
+      let text='';try{text=String(globalThis.getSelection?globalThis.getSelection():'')||'';}catch(_e){}
+      if(text)void rpc('clipboard-write',text).catch(function(){});
+      return true;
+    }
+    return __kdExec?__kdExec.apply(document,arguments):false;
+  };
+}catch(_e){}
 // tavern_events 在 TavernHelper 同区定义(后于上方事件总线挂载区),此处挂载避开 TDZ
 globalThis.tavern_events=tavern_events;
 // ---- 跨 realm 共享全局桥(镜像:宿主 sandbox/shared-globals.ts 的键/值校验,语义同步,改动必须双侧同改) ----

@@ -1,5 +1,7 @@
 # Kedai 上下文机制优化实施简报
 
+> ⚠️ **已归档,仅供溯源**:本文为 2026-08-25 的交接简报,其中任务模式「REST + 前端 1 秒轮询、不走 SSE」的描述**已被 WP4/WP5 取代**——现行实现为 SSE 事件驱动(`GET /api/tasks/events`,断线 5s 兜底轮询),见 [任务引擎六模式.md](任务引擎六模式.md) 与 `web/src/stores/task.ts`。文中行号与测试计数为当时实测值,不随代码更新。
+>
 > **本文件用途**:交给 Kimi(网页版)作为完整实施依据。文件自包含——包含项目背景、现状核实(带 `文件:行号` 证据)、痛点清单、外部借鉴机制、分阶段任务卡、约束与验收标准。执行时无需再做全面调查,按阶段 0→4 顺序施工即可。
 >
 > 生成日期:2026-08-25。基线:`cargo test` 219 绿(175 单测 + 44 集成),`vitest` 62 绿。
@@ -85,7 +87,9 @@
 - 全链路**无 token 计数、无 trim、无压缩、无 snip**——角色扮演链路的多级管线在任务模式完全缺位。
 - 护栏仅有:`TASK_LLM_TOTAL_TIMEOUT = 300s` 单次调用看门狗(task_service.rs:30, 494-510);取消经 watch channel + run token(76-82, 421-455)。
 
-**上下文隔离设计(保留,不改)**:任务模式无对话历史(`inject_text` 注释 134 明确「楼层 before/after/depth 语义不适用」)、无 mvu、无反思、无工具循环;设置经 `for_mode(AppMode::Task)` 覆盖层,`agent_system_prompt` 不回退 roleplay 值防污染(settings_service.rs:325-, 344-348)。这个「隔离但无界」的形态正是优化对象:**保持隔离,补上预算**。
+**上下文隔离设计(保留,不改)**:任务模式无对话历史(`inject_text` 注释 134 明确「楼层 before/after/depth 语义不适用」)、无 mvu、无反思;设置经 `for_mode(AppMode::Task)` 覆盖层,`agent_system_prompt` 不回退 roleplay 值防污染(settings_service.rs:325-, 344-348)。这个「隔离但无界」的形态正是优化对象:**保持隔离,补上预算**。
+
+> 更正(2026-09):原文称「任务模式无工具循环」已过时。批次 4 起 solo / multi / team 主 agent / plan 续跑 / custom 步骤均有工具循环;任务模式工具集由 `task_tool_policy`(all / deny_dangerous / allowlist)决定,且恒不等待授权(名单外直接拒绝,见 docs/任务引擎六模式.md)。仅 legacy 执行步无工具。
 
 ### 2.3 持久化与加载
 

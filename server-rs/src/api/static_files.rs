@@ -163,17 +163,26 @@ pub(crate) async fn spa_fallback(
                 .body(axum::body::Body::from(bytes))
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
         }
-        // 2) SPA 回退:未命中一律返回 index.html(与 Node 版 setNotFoundHandler 一致)
-        if let Some(index) = read_file_or_embedded(&state, "index.html").await {
-            return Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-                .header(
-                    header::CACHE_CONTROL,
-                    "no-store, no-cache, must-revalidate, max-age=0",
-                )
-                .body(axum::body::Body::from(index))
-                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+        // 2) SPA 回退:仅对「路由式路径」返回 index.html。
+        //    静态资源(assets/*.js|css、*.ico 等)未命中时必须 404 —— 若也回退成
+        //    index.html,浏览器会把 HTML 当 JS 解析,前端表现为「面板加载失败」这类
+        //    误导性报错,且懒加载重试永远失败。典型触发:前端重建后 chunk hash 变化,
+        //    旧页面/旧缓存仍请求已不存在的旧 chunk。
+        //    判定:末段含 '.' 视为资源请求(本应用为单页 hash 路由,无带点的路径)。
+        let last_seg = rel.rsplit('/').next().unwrap_or("");
+        let looks_like_asset = rel.starts_with("assets/") || last_seg.contains('.');
+        if !looks_like_asset {
+            if let Some(index) = read_file_or_embedded(&state, "index.html").await {
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+                    .header(
+                        header::CACHE_CONTROL,
+                        "no-store, no-cache, must-revalidate, max-age=0",
+                    )
+                    .body(axum::body::Body::from(index))
+                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+            }
         }
     }
     // 其余一律 404 {"error":"Not Found"}

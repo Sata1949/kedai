@@ -3,7 +3,8 @@
 // 与 contextStats.ts 同风格:纯函数供组件渲染与 Vitest 共用。
 import type { CacheUsageEntry, CacheWatermark } from '../api';
 
-/** 单条请求命中率:hit / (hit + miss);hit 与 miss 全 0(无缓存字段)→ null */
+/** 单条请求命中率:hit / (hit + miss);hit 与 miss 全 0(无缓存字段)→ null。
+ *  与 `contextStats.ts` 的 `computeHitRate(u)` 口径等价(后端 prompt_tokens = hit + miss)。 */
 export function entryHitRate(hit: number, miss: number): number | null {
   const denom = hit + miss;
   return denom > 0 ? hit / denom : null;

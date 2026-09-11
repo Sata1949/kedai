@@ -4,6 +4,8 @@ import {
   deleteMemory,
   distillMemory,
   listMemories,
+  pruneMemories,
+  searchMemories,
   updateMemory,
   type MemoryEntry,
 } from './memory';
@@ -20,6 +22,7 @@ function entry(overrides: Partial<MemoryEntry> = {}): MemoryEntry {
     usage_count: 3,
     last_usage: '2026-08-15T10:30:00Z',
     selected: true,
+    pinned: false,
     created_at: '2026-08-14T08:00:00Z',
     updated_at: '2026-08-15T10:30:00Z',
     ...overrides,
@@ -85,6 +88,56 @@ describe('distillMemory', () => {
   });
 });
 
+describe('searchMemories', () => {
+  beforeEach(() => {
+    resetApiTokenForTest();
+    vi.restoreAllMocks();
+  });
+
+  it('请求 GET /api/memory/search,携带 character_id/q/limit(URL 编码)并解包 memories', async () => {
+    const spy = mockFetchSequence({ body: { memories: [entry({ pinned: true })] } });
+    const list = await searchMemories('char A/1', '图书馆 初识');
+    expect(String(spy.mock.calls[1][0])).toBe(
+      '/api/memory/search?character_id=char+A%2F1&q=%E5%9B%BE%E4%B9%A6%E9%A6%86+%E5%88%9D%E8%AF%86&limit=20',
+    );
+    expect(spy.mock.calls[1][1].method).toBeUndefined(); // 不传 method = GET
+    expect(list).toHaveLength(1);
+    expect(list[0].pinned).toBe(true);
+  });
+
+  it('自定义 limit 进入查询串', async () => {
+    const spy = mockFetchSequence({ body: { memories: [] } });
+    await searchMemories('charA', 'q', 5);
+    expect(String(spy.mock.calls[1][0])).toContain('limit=5');
+  });
+
+  it('缺 q 时后端 400 原样抛出', async () => {
+    mockFetchSequence({ body: { error: '缺少 q' }, status: 400 });
+    await expect(searchMemories('charA', ' ')).rejects.toThrow('缺少 q');
+  });
+});
+
+describe('pruneMemories', () => {
+  beforeEach(() => {
+    resetApiTokenForTest();
+    vi.restoreAllMocks();
+  });
+
+  it('请求 POST /api/memory/prune,body 携带 character_id,把后端 removed 映射为 deleted', async () => {
+    const spy = mockFetchSequence({ body: { ok: true, removed: 4 } });
+    const res = await pruneMemories('charA');
+    expect(String(spy.mock.calls[1][0])).toBe('/api/memory/prune');
+    expect(spy.mock.calls[1][1]).toMatchObject({ method: 'POST' });
+    expect(JSON.parse(String(spy.mock.calls[1][1].body))).toEqual({ character_id: 'charA' });
+    expect(res).toEqual({ ok: true, deleted: 4 });
+  });
+
+  it('缺 character_id 400 时抛出后端文案', async () => {
+    mockFetchSequence({ body: { error: '缺少 character_id' }, status: 400 });
+    await expect(pruneMemories(' ')).rejects.toThrow('缺少 character_id');
+  });
+});
+
 describe('createMemory', () => {
   beforeEach(() => {
     resetApiTokenForTest();
@@ -125,6 +178,13 @@ describe('updateMemory', () => {
     expect(spy.mock.calls[1][1]).toMatchObject({ method: 'PATCH' });
     expect(JSON.parse(String(spy.mock.calls[1][1].body))).toEqual({ selected: false });
     expect(res.selected).toBe(false);
+  });
+
+  it('支持 pinned 字段(PATCH body 仅携带 pinned,解包 pinned=true)', async () => {
+    const spy = mockFetchSequence({ body: { ok: true, memory: entry({ pinned: true }) } });
+    const res = await updateMemory(7, { pinned: true });
+    expect(JSON.parse(String(spy.mock.calls[1][1].body))).toEqual({ pinned: true });
+    expect(res.pinned).toBe(true);
   });
 
   it('不存在或被拒绝的 id 404 时抛出后端文案', async () => {

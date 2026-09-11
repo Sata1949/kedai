@@ -82,7 +82,7 @@ fn locate_root() -> Option<PathBuf> {
 
 // ---------------------------------------------------------------- 服务健康探测
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Eq, Debug)]
 enum PortState {
     /// 端口空闲,可以启动
     Free,
@@ -169,6 +169,76 @@ fn parse_port(content: &str) -> Option<u16> {
         }
     }
     None
+}
+
+// ---------------------------------------------------------------- 旧实例清理
+
+/// 列出监听指定端口的进程 PID(Windows:解析 `netstat -ano`)。
+/// 用于结束上一次未正常退出的 Kedai 实例——它占着端口会让新版无法启动,
+/// 用户只看到旧界面,误以为「修复没生效」(实跑反馈)。
+fn pids_listening_on(port: u16) -> Vec<u32> {
+    let out = match Command::new("netstat").arg("-ano").output() {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let needle = format!(":{port}");
+    let mut pids = Vec::new();
+    for line in text.lines() {
+        // TCP    127.0.0.1:3001    0.0.0.0:0    LISTENING    8748
+        if !line.contains("LISTENING") {
+            continue;
+        }
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() < 4 {
+            continue;
+        }
+        // 本地地址列须以 :PORT 结尾(避免 :13001 之类的误命中)
+        if !cols[1].ends_with(&needle) {
+            continue;
+        }
+        if let Ok(pid) = cols[cols.len() - 1].parse::<u32>() {
+            if !pids.contains(&pid) {
+                pids.push(pid);
+            }
+        }
+    }
+    pids
+}
+
+/// 结束占用指定端口的进程(排除自身,避免启动器在自清理时把自己杀掉)。
+/// 返回是否至少成功结束一个进程。
+fn terminate_port_owner(port: u16) -> bool {
+    let self_pid = std::process::id();
+    let mut killed = false;
+    for pid in pids_listening_on(port) {
+        if pid == self_pid {
+            continue;
+        }
+        let ok = Command::new("taskkill")
+            .args(["/F", "/PID", &pid.to_string()])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if ok {
+            killed = true;
+        }
+    }
+    killed
+}
+
+/// 等待端口释放(结束旧进程后 TCP 表更新有延迟)
+fn wait_port_free(addr: SocketAddr, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if probe_port(addr) == PortState::Free {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
 }
 
 // ---------------------------------------------------------------- 数据迁移
@@ -454,6 +524,46 @@ fn artifact_stale(root: &Path, exe: &Path) -> bool {
     src.duration_since(art).map(|d| d > grace).unwrap_or(false)
 }
 
+// ---------------------------------------------------------------- 两版漂移检测
+
+/// 测试版与便携版的构建指纹是否不一致。
+/// mtime 检测只能发现「产物比源码旧」,发现不了「两版各自从不同的 web/dist 编译」
+/// (旧构建流程默认只刷新测试版,便携版会整体落后)。sidecar 指纹比对补上这个盲区。
+/// 任一 sidecar 缺失视为无法判定(不误报),仍由 mtime 检测兜底。
+fn versions_drifted(root: &Path, desktop: &Path) -> bool {
+    let test_exe = root.join("dist/kedai-server.exe");
+    if !test_exe.is_file() || !desktop.is_file() {
+        return false;
+    }
+    match (sidecar_dist_hash(&test_exe), sidecar_dist_hash(desktop)) {
+        (Some(a), Some(b)) => a != b,
+        _ => false,
+    }
+}
+
+/// 读取 <exe>.build.json 的 dist_hash 字段。sidecar 由 tools/Write-BuildStamp.ps1
+/// 以紧凑扁平 JSON 写出;零依赖启动器不引入 JSON 库,按固定模式做子串提取。
+fn sidecar_dist_hash(exe: &Path) -> Option<String> {
+    let mut name = exe.file_name()?.to_os_string();
+    name.push(".build.json");
+    let sidecar = exe.with_file_name(name);
+    let content = std::fs::read_to_string(sidecar).ok()?;
+    extract_json_string(&content, "dist_hash")
+}
+
+fn extract_json_string(json: &str, key: &str) -> Option<String> {
+    let pat = format!("\"{key}\":\"");
+    let start = json.find(&pat)? + pat.len();
+    let rest = &json[start..];
+    let end = rest.find('"')?;
+    let val = &rest[..end];
+    if val.is_empty() {
+        None
+    } else {
+        Some(val.to_string())
+    }
+}
+
 // ---------------------------------------------------------------- 启动
 
 fn main() {
@@ -483,14 +593,30 @@ fn main() {
     // 先看端口,再谈启动:被别的程序占着的话,启动多少次都是白屏
     match probe_port(addr) {
         PortState::KedaiRunning => {
-            // 桌面壳(lib.rs)要求独占端口、只复用进程内后端:探测到健康 Kedai 时
-            // 它会写 tauri-start-error.log 并以退出码 1 退出。这里直接给出可读原因,
-            // 不再 spawn 一个注定秒退的进程。
-            fail(&format!(
-                "端口 {port} 上已有 Kedai 服务在运行(通常是浏览器开发版服务)。\n\n\
-                 桌面版必须独占该端口,无法与它共存。\n\n\
-                 解决办法:关闭正在运行的 Kedai(浏览器开发服务或旧桌面窗口)后,重新双击本启动器。"
-            ));
+            // 端口上已有 Kedai 服务:绝大多数情况是上次未正常退出的旧实例
+            // (直接跑过 kedai-server.exe、或旧桌面版未回收内嵌后端)。它占着端口,
+            // 新版根本起不来,用户看到的始终是旧界面——误以为「修复没生效」。
+            // 这里提供一键结束旧实例并继续启动(对齐 start.ps1 的交互;不再只报错劝退)。
+            if confirm(&format!(
+                "端口 {port} 上已有 Kedai 服务在运行。\n\n\
+                 这通常是上一次未正常退出的旧实例,它占着端口会让新版本无法启动\n\
+                 (你看到的会一直是旧界面)。\n\n\
+                 是否结束该旧实例,并启动最新版?"
+            )) {
+                terminate_port_owner(port);
+                if !wait_port_free(addr, Duration::from_secs(5)) {
+                    fail(&format!(
+                        "已尝试结束旧实例,但端口 {port} 仍被占用。\n\n\
+                         请在任务管理器中结束 kedai-server.exe / Kedai.exe 后重试,\n\
+                         或把 .env 里的 PORT 改成别的端口(如 3002)。"
+                    ));
+                }
+            } else {
+                fail(&format!(
+                    "已取消启动:端口 {port} 仍被旧 Kedai 实例占用,新版本不会启动。\n\n\
+                     你看到的仍是旧界面。如需使用新版,请先结束旧实例后重新双击本启动器。"
+                ));
+            }
         }
         PortState::Occupied => fail(&format!(
             "端口 {port} 已被其它程序占用,Kedai 无法启动。\n\n\
@@ -519,22 +645,30 @@ fn main() {
                 "未找到桌面应用产物 Kedai.exe(期望位于 dist\\Kedai-portable\\)。\n\n{hint}\n\n\
                  请在项目根目录 {} 打开 PowerShell 执行:\n\n\
                  npm install\n\
-                 npm run build:portable\n\n\
+                 .\\build.ps1\n\n\
                  首次构建 Tauri 需要较长时间,请耐心等待完成。",
                 root.display()
             ));
         }
     };
 
-    // 源码比产物新 → 询问是否自动重建,保证双击启动器拿到的始终是最新版本
-    // (与 start.ps1 -Portable 的自动重建语义一致;直接双击 dist 内 exe 无此保障)。
-    if artifact_stale(&root, &desktop) {
-        if confirm(
+    // 触发重建的两类原因:① 源码比产物新(mtime);② 两版构建指纹不一致(sidecar)。
+    // 保证双击启动器拿到的始终是最新且与测试版同步的版本
+    // (与 start.ps1 的自动重建语义一致;直接双击 dist 内 exe 无此保障)。
+    let drifted = versions_drifted(&root, &desktop);
+    if drifted || artifact_stale(&root, &desktop) {
+        let prompt = if drifted {
+            "检测到测试版与便携版的构建指纹不一致(两版曾分开构建)。\n\n\
+             是否现在自动重建并同步两版?(前端 + Rust 编译,首次或全量需数分钟)\n\n\
+             选「是」开始重建并自动启动新版;选「否」直接启动当前便携版。"
+        } else {
             "检测到源码比当前程序新。\n\n\
-             是否现在自动重建便携版?(前端 + Rust 编译,首次或全量需数分钟)\n\n\
-             选「是」开始重建并自动启动新版;选「否」直接启动当前版本。",
-        ) {
-            let script = root.join("tools/build-portable.ps1");
+             是否现在自动重建?(前端 + Rust 编译,首次或全量需数分钟)\n\n\
+             选「是」开始重建并自动启动新版;选「否」直接启动当前版本。"
+        };
+        if confirm(prompt) {
+            // build.ps1 默认双端同步产出(测试版 + 便携版),重建即对齐指纹
+            let script = root.join("build.ps1");
             #[cfg(windows)]
             let status = {
                 use std::os::windows::process::CommandExt;
@@ -560,12 +694,12 @@ fn main() {
                 Ok(s) if s.success() => {}
                 Ok(s) => fail(&format!(
                     "自动重建失败(退出码 {:?}),请在上面的构建窗口中查看错误。\n\
-                     修复后重新双击本启动器,或手动执行 npm run build:portable。",
+                     修复后重新双击本启动器,或手动执行 .\\build.ps1。",
                     s.code()
                 )),
-                Err(e) => fail(&format!("无法启动构建脚本:{e}\n请手动执行 npm run build:portable。")),
+                Err(e) => fail(&format!("无法启动构建脚本:{e}\n请手动执行 .\\build.ps1。")),
             }
-            // 重建后产物路径不变(build-portable 原地更新 dist\Kedai-portable\Kedai.exe)
+            // 重建后产物路径不变(build.ps1 原地更新 dist\Kedai-portable\Kedai.exe)
         }
     }
 
@@ -641,6 +775,53 @@ mod tests {
         let d = std::env::temp_dir().join(format!("kedai-launcher-test-{tag}-{stamp}"));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn extract_json_string_reads_compact_json() {
+        let json = r#"{"version":"0.2.0","build_time":"2026-08-28T12:00:00Z","dist_hash":"abc123"}"#;
+        assert_eq!(
+            extract_json_string(json, "dist_hash"),
+            Some("abc123".to_string())
+        );
+        assert_eq!(
+            extract_json_string(json, "version"),
+            Some("0.2.0".to_string())
+        );
+        assert_eq!(extract_json_string(json, "missing"), None);
+        // 空值与无引号值都不该误判
+        assert_eq!(extract_json_string(r#"{"dist_hash":""}"#, "dist_hash"), None);
+        assert_eq!(extract_json_string(r#"{"dist_hash":123}"#, "dist_hash"), None);
+    }
+
+    #[test]
+    fn drift_detects_mismatch_and_tolerates_missing_sidecar() {
+        let root = tmpdir("drift");
+        let dist = root.join("dist");
+        std::fs::create_dir_all(&dist).unwrap();
+        let test_exe = dist.join("kedai-server.exe");
+        let desktop = dist.join("Kedai.exe");
+        std::fs::write(&test_exe, b"a").unwrap();
+        std::fs::write(&desktop, b"b").unwrap();
+
+        // sidecar 缺失(旧产物)→ 无法判定,绝不能误报漂移
+        assert!(!versions_drifted(&root, &desktop));
+
+        let stamp = |h: &str| {
+            format!(r#"{{"version":"0.2.0","build_time":"t","dist_hash":"{h}"}}"#)
+        };
+        std::fs::write(dist.join("kedai-server.exe.build.json"), stamp("aaa")).unwrap();
+        std::fs::write(dist.join("Kedai.exe.build.json"), stamp("aaa")).unwrap();
+        assert!(!versions_drifted(&root, &desktop), "指纹一致不算漂移");
+
+        std::fs::write(dist.join("Kedai.exe.build.json"), stamp("bbb")).unwrap();
+        assert!(versions_drifted(&root, &desktop), "指纹不一致必须判漂移");
+
+        // 测试版产物缺失(未构建过)→ 不误报
+        std::fs::remove_file(&test_exe).unwrap();
+        assert!(!versions_drifted(&root, &desktop));
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

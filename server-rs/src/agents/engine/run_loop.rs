@@ -506,8 +506,16 @@ impl AgentEngine {
             // (含 [本步指令] 与 agent 模式的动态工具指南),反思回退后按步骤重建。
             let result = if req.mode == "agent" {
                 // agent 兼容旧行为:planner 未配步骤 tools 时使用请求级工具。
+                // 聊天路径保留「未放行即等待授权」语义(有 UI 授权上下文)。
                 let effective = step_params.clone();
-                let whitelist = step.tools.as_deref();
+                let gate = match step.tools.as_deref() {
+                    // planner 显式配了步骤白名单:名单内自动放行,名单外回到等待授权
+                    Some(list) if !list.is_empty() => crate::agents::engine::executor::ToolGate {
+                        whitelist: Some(list),
+                        no_ui_authorization: false,
+                    },
+                    _ => crate::agents::engine::executor::ToolGate::wait(),
+                };
                 run_tool_loop(
                     self,
                     state_machine,
@@ -522,7 +530,7 @@ impl AgentEngine {
                     flag,
                     rctx.total_usage,
                     &run_id.to_string(),
-                    whitelist,
+                    gate,
                 )
                 .await?
             } else if req.mode == "custom" {
@@ -539,8 +547,17 @@ impl AgentEngine {
                     )
                     .await?
                 } else {
-                    // custom 模式白名单:步骤配置了 tools 白名单时,名单内工具自动放行
-                    let whitelist = step.tools.as_deref();
+                    // custom 模式白名单:步骤配置了 tools 白名单时,名单内工具自动放行;
+                    // 名单外工具回到等待授权(聊天有 UI 授权上下文)
+                    let gate = match step.tools.as_deref() {
+                        Some(list) if !list.is_empty() => {
+                            crate::agents::engine::executor::ToolGate {
+                                whitelist: Some(list),
+                                no_ui_authorization: false,
+                            }
+                        }
+                        _ => crate::agents::engine::executor::ToolGate::wait(),
+                    };
                     run_tool_loop(
                         self,
                         state_machine,
@@ -555,7 +572,7 @@ impl AgentEngine {
                         flag,
                         rctx.total_usage,
                         &run_id.to_string(),
-                        whitelist,
+                        gate,
                     )
                     .await?
                 };

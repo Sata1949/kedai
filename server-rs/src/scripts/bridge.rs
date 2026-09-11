@@ -68,11 +68,6 @@ impl EvalBridge {
         self
     }
 
-    pub fn with_slash(mut self, handler: Arc<SlashHandler>) -> Self {
-        self.slash = Some(handler);
-        self
-    }
-
     pub fn with_registry(mut self, registry: Arc<SlashRegistry>) -> Self {
         self.registry = Some(registry);
         self

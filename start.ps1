@@ -99,9 +99,13 @@ if ($Portable) {
     if (-not $NoRebuild -and ($mismatch -or (Test-ArtifactStale $PortableExe))) {
         Write-Host "========== Kedai 自动构建(检测到源码更新) ==========" -ForegroundColor Yellow
         Write-Host "[构建] 产物过期或两版漂移,自动执行 build.ps1(双端同步) ..." -ForegroundColor Yellow
-        & (Join-Path $Root "build.ps1")
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "[错误] 构建失败,请查看上方错误输出。" -ForegroundColor Red
+        # build.ps1 失败走 throw(不是 exit),异常会直接穿透到本脚本;
+        # 必须 try/catch 捕获,否则 $LASTEXITCODE 判断永远执行不到,用户只看到裸红字堆栈。
+        try {
+            & (Join-Path $Root "build.ps1")
+        } catch {
+            Write-Host "[错误] 构建失败:$($_.Exception.Message)" -ForegroundColor Red
+            Write-Host "       请查看上方错误输出,修复后重跑 .\start.ps1" -ForegroundColor Yellow
             Read-Host "按回车关闭窗口"
             exit 1
         }
@@ -155,8 +159,12 @@ if (-not $NeedBuild -and -not $NoRebuild) {
 }
 if ($NeedBuild) {
     Write-Host "[自动构建] 产物缺失或源码更新,执行 build.ps1(双端同步) ..." -ForegroundColor Yellow
-    & (Join-Path $Root "build.ps1")
-    if ($LASTEXITCODE -ne 0) { throw "构建失败" }
+    # 同 -Portable 分支:build.ps1 失败是 throw,需捕获而非查 $LASTEXITCODE
+    try {
+        & (Join-Path $Root "build.ps1")
+    } catch {
+        throw "构建失败:$($_.Exception.Message)(详见上方错误输出)"
+    }
     # 重建后重新探测
     $ServerExe = $ServerCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
     # 重建后端口仍被旧实例占用 → 旧服务还在提供旧版本,静默复用会让本次重建白做。

@@ -52,8 +52,14 @@ function makeSettings(overrides: Partial<RuntimeSettings> = {}): RuntimeSettings
     reflect_advice_prompt: '',
     reflect_advice_role: 'user',
     bypass_mode: false,
+    authorization_mode: 'loose',
     bypass_blacklist: [],
+    tool_authorization_timeout_secs: 300,
+    task_tool_policy: 'deny_dangerous',
+    task_tool_allowlist: [],
     max_tool_rounds: 32,
+    tool_history_keep_rounds: 4,
+    tool_history_budget_tokens: 16384,
     render_html: false,
     compaction_mode: 'off',
     compaction_threshold: 0.8,
@@ -62,6 +68,14 @@ function makeSettings(overrides: Partial<RuntimeSettings> = {}): RuntimeSettings
     llm_request_log: false,
     memory_distill_enabled: false,
     memory_inject_limit: 8,
+    memory_inject_char_budget: 2000,
+    memory_max_entries: 200,
+    embedding_enabled: false,
+    embedding_base_url: '',
+    embedding_api_key_masked: '',
+    has_embedding_api_key: false,
+    embedding_model: '',
+    embedding_dim: 0,
     skill_progressive_disclosure: true,
     subagent_max_depth: 2,
     subagent_max_concurrency: 6,
@@ -70,6 +84,7 @@ function makeSettings(overrides: Partial<RuntimeSettings> = {}): RuntimeSettings
     mcp_enabled: false,
     mcp_servers: [],
     task_persona_full: false,
+    task_prompt_inject_enabled: false,
     ...overrides,
   };
 }
@@ -126,6 +141,45 @@ describe('genSettings 模式分流:loadSettings/saveSettings 按 appMode 传 mod
   });
 });
 
+describe('genSettings 记忆槽预算与容量上限(B2/B3)', () => {
+  beforeEach(() => {
+    memStorage.clear();
+    setActivePinia(createPinia());
+  });
+
+  it('loadSettings 回填服务端值;缺字段兜底 2000 / 200', async () => {
+    const store = useGenSettingsStore();
+    getSettingsMock.mockReset().mockResolvedValue(
+      makeSettings({ memory_inject_char_budget: 4000, memory_max_entries: 500 }),
+    );
+    await store.loadSettings();
+    expect(store.memoryInjectCharBudget).toBe(4000);
+    expect(store.memoryMaxEntries).toBe(500);
+
+    // 旧服务端/异常响应缺字段:回退默认值
+    getSettingsMock.mockReset().mockResolvedValue(
+      makeSettings({
+        memory_inject_char_budget: undefined as unknown as number,
+        memory_max_entries: undefined as unknown as number,
+      }),
+    );
+    await store.loadSettings();
+    expect(store.memoryInjectCharBudget).toBe(2000);
+    expect(store.memoryMaxEntries).toBe(200);
+  });
+
+  it('saveSettings 响应回填两个字段(与 loadSettings 同口径)', async () => {
+    const store = useGenSettingsStore();
+    saveSettingsMock.mockReset().mockResolvedValue({
+      ok: true,
+      settings: makeSettings({ memory_inject_char_budget: 0, memory_max_entries: 0 }),
+    });
+    await store.saveSettings({ memory_inject_char_budget: 0, memory_max_entries: 0 });
+    expect(store.memoryInjectCharBudget).toBe(0);
+    expect(store.memoryMaxEntries).toBe(0);
+  });
+});
+
 describe('genSettings 执行者人设开关(R3a task_persona_full)', () => {
   beforeEach(() => {
     memStorage.clear();
@@ -155,5 +209,79 @@ describe('genSettings 执行者人设开关(R3a task_persona_full)', () => {
     await store.saveSettings({ task_persona_full: true });
     expect(saveSettingsMock).toHaveBeenCalledWith({ task_persona_full: true }, 'roleplay');
     expect(store.taskPersonaFull).toBe(true);
+  });
+});
+
+describe('genSettings 授权模式三档(2026-09 授权改造)', () => {
+  beforeEach(() => {
+    memStorage.clear();
+    setActivePinia(createPinia());
+  });
+
+  it('loadSettings 读取 authorization_mode 三档', async () => {
+    const store = useGenSettingsStore();
+    for (const mode of ['strict', 'loose', 'bypass'] as const) {
+      getSettingsMock.mockReset().mockResolvedValue(makeSettings({ authorization_mode: mode }));
+      await store.loadSettings();
+      expect(store.authorizationMode).toBe(mode);
+    }
+  });
+
+  it('旧配置只有 bypass_mode 时映射:true→bypass,false→strict', async () => {
+    const store = useGenSettingsStore();
+    // 模拟旧服务端:authorization_mode 缺失,仅 bypass_mode
+    getSettingsMock.mockReset().mockResolvedValue(
+      makeSettings({
+        authorization_mode: undefined as unknown as 'loose',
+        bypass_mode: true,
+      }),
+    );
+    await store.loadSettings();
+    expect(store.authorizationMode).toBe('bypass');
+
+    getSettingsMock.mockReset().mockResolvedValue(
+      makeSettings({
+        authorization_mode: undefined as unknown as 'loose',
+        bypass_mode: false,
+      }),
+    );
+    await store.loadSettings();
+    expect(store.authorizationMode).toBe('strict');
+  });
+
+  it('setAuthorizationMode 持久化 authorization_mode 并回填', async () => {
+    const store = useGenSettingsStore();
+    saveSettingsMock.mockReset().mockResolvedValue({
+      ok: true,
+      settings: makeSettings({ authorization_mode: 'strict' }),
+    });
+    await store.setAuthorizationMode('strict');
+    expect(saveSettingsMock).toHaveBeenCalledWith({ authorization_mode: 'strict' }, 'roleplay');
+    expect(store.authorizationMode).toBe('strict');
+  });
+
+  it('setAuthorizationMode 失败时回滚本地值', async () => {
+    const store = useGenSettingsStore();
+    store.authorizationMode = 'loose';
+    saveSettingsMock.mockReset().mockRejectedValue(new Error('网络错误'));
+    await store.setAuthorizationMode('bypass');
+    expect(store.authorizationMode).toBe('loose');
+  });
+
+  it('loadSettings 回填始终需授权清单、超时与任务工具策略', async () => {
+    const store = useGenSettingsStore();
+    getSettingsMock.mockReset().mockResolvedValue(
+      makeSettings({
+        bypass_blacklist: ['write', 'replace'],
+        tool_authorization_timeout_secs: 120,
+        task_tool_policy: 'all',
+        task_tool_allowlist: ['read'],
+      }),
+    );
+    await store.loadSettings();
+    expect(store.authorizationAlwaysRequired).toEqual(['write', 'replace']);
+    expect(store.toolAuthorizationTimeoutSecs).toBe(120);
+    expect(store.taskToolPolicy).toBe('all');
+    expect(store.taskToolAllowlist).toEqual(['read']);
   });
 });

@@ -204,17 +204,15 @@ const phaseText = computed(() => {
   return t || '就绪';
 });
 
-/** 当前任务是否在执行中(planning / running) */
-const taskActive = computed(() => {
-  const s = currentTask.value?.task.status;
-  return s === 'planning' || s === 'running';
-});
-
-/** 是否展示面板(角色扮演:生成中强制展开;任务:执行中强制展开) */
-const showPanel = computed(() => {
-  if (appMode.value === 'task') return taskActive.value || agentPanelOpen.value;
-  return generating.value || agentPanelOpen.value;
-});
+/**
+ * 是否展示面板:完全由用户可控的 agentPanelOpen 决定。
+ *
+ * 历史行为是 `generating || agentPanelOpen`(任务模式 `taskActive || agentPanelOpen`),
+ * 生成期间恒真、关闭按钮写了 false 也不生效 → 面板被锁死展开。现在自动展开只在
+ * 生成/任务开始时触发一次(chat.startStream / task)、由 autoOpenAgentPanel 写入,
+ * 用户随时可收起且收起后不会再被自动撑开。
+ */
+const showPanel = computed(() => agentPanelOpen.value);
 
 /** 任务模式:计划步骤已完成数 */
 const planDoneCount = computed(
@@ -269,7 +267,7 @@ function subtaskDot(status: TaskSubtaskStatus): { cls: string; icon: string } {
         <span class="sv-supreme pink xs" />
         AGENT
       </h2>
-      <button class="sv-agent-panel-close" title="收起" @click="store.agentPanelOpen = false">
+      <button class="sv-agent-panel-close" title="收起" @click="store.collapseAgentPanel()">
         ✕
       </button>
     </div>

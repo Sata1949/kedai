@@ -1,6 +1,7 @@
 // 生成参数:模式隔离类型(Roleplay/Task 提示词、ModeSettings 覆盖层)、serde 默认值函数、
 // from_config 默认构建与 for_mode 按模式覆盖合并。
 use crate::config::AppConfig;
+use crate::tools::permissions::AuthorizationMode;
 use serde::{Deserialize, Serialize};
 
 use super::connection::DEFAULT_SEARCH_ENDPOINT;
@@ -75,8 +76,20 @@ pub struct ModeSettings {
     pub reflect_advice_role: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bypass_mode: Option<bool>,
+    /// task 覆盖层的授权模式(三档);None 沿用扁平值
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_mode: Option<AuthorizationMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bypass_blacklist: Option<Vec<String>>,
+    /// task 覆盖层的授权等待超时(秒)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_authorization_timeout_secs: Option<u32>,
+    /// task 覆盖层的任务工具策略
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_tool_policy: Option<String>,
+    /// task 覆盖层的任务工具白名单
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_tool_allowlist: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tool_rounds: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -99,6 +112,12 @@ pub struct ModeSettings {
     /// 记忆槽注入条数上限(0 = 关闭注入;默认 8,钳 0..=50)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_inject_limit: Option<u32>,
+    /// 记忆槽字符预算(通道 1+2 合计,默认 2000;0 = 不限制,钳 0..=20000)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_inject_char_budget: Option<u32>,
+    /// 每角色记忆容量上限(默认 200;0 = 不淘汰,钳 0..=10000)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_max_entries: Option<u32>,
     /// 技能渐进披露开关(落地项 3;默认 true)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_progressive_disclosure: Option<bool>,
@@ -125,6 +144,10 @@ pub struct ModeSettings {
     /// roleplay 引擎侧无人设注入点,扁平值仅作 task 覆盖层 None 时的沿用值。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_persona_full: Option<bool>,
+    /// 任务模式是否继承提示词注入(2026-09-10 实测修复):None 沿用扁平值(默认 false = 隔离),
+    /// true = 任务侧注入 prompt_floors.json(旧行为)。仅任务模式 system 拼装消费。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_prompt_inject_enabled: Option<bool>,
 }
 
 /// 默认工具循环轮次上限
@@ -144,13 +167,40 @@ pub(super) fn default_tool_history_budget_tokens() -> u32 {
 }
 
 /// 默认放行模式黑名单
+/// 授权模式默认值:新装为宽松(读写放行、仅删除需授权)。
+/// 旧配置的迁移见 `migrate_authorization_mode`(按旧 bypass_mode 修正)。
+pub(super) fn default_authorization_mode() -> AuthorizationMode {
+    AuthorizationMode::Loose
+}
+
+/// 授权等待超时默认 300 秒(与旧硬编码一致,行为不变);钳制 30..=1800。
+pub(super) fn default_tool_authorization_timeout_secs() -> u32 {
+    300
+}
+
+/// 任务模式工具策略默认:拒绝危险工具(无人值守任务不默认放行写类操作)。
+pub(super) fn default_task_tool_policy() -> String {
+    "deny_dangerous".to_string()
+}
+
+/// 「始终需授权」清单默认值:空。
+/// 原默认值 delete_file/format_disk/modify_system/registry_write 都不是真实注册工具名,
+/// 形同虚设;现重定义为「始终需授权」的用户可选清单,默认空以保证放行模式语义
+/// (放行模式下除系统路径写/删外一律放行)。需要的用户可手动钉死高危工具。
 pub(super) fn default_bypass_blacklist() -> Vec<String> {
-    vec![
-        "delete_file".to_string(),
-        "format_disk".to_string(),
-        "modify_system".to_string(),
-        "registry_write".to_string(),
-    ]
+    Vec::new()
+}
+
+/// 旧配置迁移:旧版只有 bypass_mode 布尔值,映射到三档模式。
+/// - bypass_mode=true  → Bypass(旧行为:除黑名单外全放行)
+/// - bypass_mode=false → Strict(旧行为:非安全工具都需授权,Strict 最贴近)
+/// 仅当配置中确实出现旧字段时调用,避免把「新装默认 loose」误改。
+pub(super) fn migrate_authorization_mode(legacy_bypass_mode: bool) -> AuthorizationMode {
+    if legacy_bypass_mode {
+        AuthorizationMode::Bypass
+    } else {
+        AuthorizationMode::Strict
+    }
 }
 
 /// 默认尾部注入角色(user;旧配置缺省保持 user 行为)
@@ -181,6 +231,16 @@ pub(super) fn default_compaction_snip_bytes() -> u32 {
 /// 默认记忆槽注入条数上限(落地项 2)
 pub(super) fn default_memory_inject_limit() -> u32 {
     8
+}
+
+/// 默认记忆槽字符预算(升级工作流 B2)
+pub(super) fn default_memory_inject_char_budget() -> u32 {
+    2000
+}
+
+/// 默认每角色记忆容量上限(升级工作流 B3)
+pub(super) fn default_memory_max_entries() -> u32 {
+    200
 }
 
 /// 默认开启技能渐进披露(落地项 3)
@@ -244,7 +304,11 @@ impl RuntimeSettings {
             reflect_advice_prompt: String::new(),
             reflect_advice_role: "user".to_string(),
             bypass_mode: false,
+            authorization_mode: default_authorization_mode(),
             bypass_blacklist: default_bypass_blacklist(),
+            tool_authorization_timeout_secs: default_tool_authorization_timeout_secs(),
+            task_tool_policy: default_task_tool_policy(),
+            task_tool_allowlist: Vec::new(),
             max_tool_rounds: default_max_tool_rounds(),
             tool_history_keep_rounds: default_tool_history_keep_rounds(),
             tool_history_budget_tokens: default_tool_history_budget_tokens(),
@@ -256,6 +320,13 @@ impl RuntimeSettings {
             llm_request_log: false,
             memory_distill_enabled: false,
             memory_inject_limit: default_memory_inject_limit(),
+            memory_inject_char_budget: default_memory_inject_char_budget(),
+            memory_max_entries: default_memory_max_entries(),
+            embedding_enabled: false,
+            embedding_base_url: String::new(),
+            embedding_api_key: String::new(),
+            embedding_model: String::new(),
+            embedding_dim: 0,
             skill_progressive_disclosure: default_skill_progressive_disclosure(),
             undo_enabled: default_undo_enabled(),
             subagent_max_depth: default_subagent_max_depth(),
@@ -264,6 +335,8 @@ impl RuntimeSettings {
             mcp_enabled: false,
             mcp_servers: Vec::new(),
             task_persona_full: false,
+            // 默认隔离:任务模式不继承 prompt_floors.json 注入(2026-09-10 实测修复)
+            task_prompt_inject_enabled: false,
             task: ModeSettings::default(),
         }
     }
@@ -321,8 +394,20 @@ impl RuntimeSettings {
         if let Some(v) = ov.bypass_mode {
             out.bypass_mode = v;
         }
+        if let Some(v) = ov.authorization_mode {
+            out.authorization_mode = v;
+        }
         if let Some(v) = &ov.bypass_blacklist {
             out.bypass_blacklist = v.clone();
+        }
+        if let Some(v) = ov.tool_authorization_timeout_secs {
+            out.tool_authorization_timeout_secs = v;
+        }
+        if let Some(v) = &ov.task_tool_policy {
+            out.task_tool_policy = v.clone();
+        }
+        if let Some(v) = &ov.task_tool_allowlist {
+            out.task_tool_allowlist = v.clone();
         }
         if let Some(v) = ov.max_tool_rounds {
             out.max_tool_rounds = v;
@@ -351,6 +436,12 @@ impl RuntimeSettings {
         if let Some(v) = ov.memory_inject_limit {
             out.memory_inject_limit = v;
         }
+        if let Some(v) = ov.memory_inject_char_budget {
+            out.memory_inject_char_budget = v;
+        }
+        if let Some(v) = ov.memory_max_entries {
+            out.memory_max_entries = v;
+        }
         if let Some(v) = ov.skill_progressive_disclosure {
             out.skill_progressive_disclosure = v;
         }
@@ -374,6 +465,9 @@ impl RuntimeSettings {
         }
         if let Some(v) = ov.task_persona_full {
             out.task_persona_full = v;
+        }
+        if let Some(v) = ov.task_prompt_inject_enabled {
+            out.task_prompt_inject_enabled = v;
         }
         out
     }

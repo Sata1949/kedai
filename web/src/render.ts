@@ -175,12 +175,21 @@ export function sanitizeVisibleHtml(html: string): string {
     ],
     allowedAttributes: {
       // id 必须保留:状态栏脚本(jQuery 子集)用 #id 选择器定位元素,剥离后脚本静默空转;
-      // style 值经 transformTags 清洗(声明级,与规则体同一管线)
+      // style 值经 transformTags 清洗(声明级,与规则体同一管线)。
+      // width/height 属性保留(实跑问题 5):酒馆状态栏常用 <table width="100%"> 或
+      // <div width=…> 排版,旧白名单只放行 img,表格宽度属性被剥后塌成内容宽,
+      // 表现为「状态栏文案显示不全/错位」。
       '*': ['class', 'title', 'aria-label', 'role', 'data-*', 'id', 'style'],
+      div: ['style', 'class', 'id', 'width', 'height', 'align'],
+      table: ['style', 'class', 'id', 'width', 'height', 'border', 'cellpadding', 'cellspacing', 'align'],
+      thead: ['style', 'class', 'id', 'align'],
+      tbody: ['style', 'class', 'id', 'align'],
+      tfoot: ['style', 'class', 'id', 'align'],
+      tr: ['style', 'class', 'id', 'align'],
       a: ['href', 'title', 'target', 'rel', 'class', 'aria-label', 'style'],
       img: ['src', 'alt', 'title', 'class', 'width', 'height', 'style'],
-      th: ['colspan', 'rowspan', 'scope', 'class', 'style'],
-      td: ['colspan', 'rowspan', 'class', 'style'],
+      th: ['colspan', 'rowspan', 'scope', 'class', 'style', 'width', 'height', 'align', 'valign'],
+      td: ['colspan', 'rowspan', 'class', 'style', 'width', 'height', 'align', 'valign'],
       form: ['action', 'method', 'class', 'id', 'style'],
       label: ['for', 'class', 'id', 'style'],
       input: ['type', 'name', 'value', 'placeholder', 'checked', 'disabled', 'min', 'max', 'maxlength', 'size', 'class', 'id', 'style'],

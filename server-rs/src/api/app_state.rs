@@ -135,6 +135,8 @@ impl AppState {
             loaded_settings.model.clone(),
         );
         let settings = Arc::new(Mutex::new(loaded_settings));
+        // 记忆服务接入运行期设置(淘汰容量/字符预算阈值来源;OnceLock 幂等注入)
+        memory.attach_settings(settings.clone());
         // 关键:已保存非空 API 配置时,即使环境变量 CONNECTOR=mock(演示模式)也自动
         // 使用 openai-compatible,否则用户「退出演示模式」后一旦重启又回到 mock,
         // 设置里填的 API 配置永远不生效(与 PUT /settings 的自动切换逻辑保持一致)。
@@ -167,6 +169,24 @@ impl AppState {
             tasks: std::sync::OnceLock::new(),
         });
         crate::tools::register_builtin_tools(&tool_registry, deps.clone());
+
+        // 启动清理:移除指向已不存在会话的孤儿授权(会话可能在历史版本中被删除而
+        // 未清理授权;失败仅告警,不影响启动)。
+        {
+            let existing: std::collections::HashSet<String> = sessions
+                .list_all()
+                .iter()
+                .map(|s| s.id.clone())
+                .collect();
+            match tool_registry
+                .permissions()
+                .prune_orphan_session_grants(&existing)
+            {
+                Ok(0) => {}
+                Ok(n) => tracing::info!(removed = n, "清理孤儿会话授权"),
+                Err(e) => tracing::warn!(error = e, "孤儿会话授权清理失败"),
+            }
+        }
 
         // 回退快照(批次 6.1「undo」):与 SessionService 共用同一 Arc<Db> 句柄
         // (ToolDeps 上没有 db 连接池,直接同源构造是最小侵入路径);注入注册表供

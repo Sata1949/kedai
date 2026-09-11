@@ -68,6 +68,8 @@ export const useChatStore = defineStore('app.chat', () => {
     writeLastSessionId(cid, session.id);
     lastUsage.value = null;
     agent.value = idleAgent();
+    // 新会话恢复自动展开语义
+    useUiPrefsStore().resetAgentPanelAutoSuppress();
     await loadHistory(session.id);
   }
 
@@ -85,6 +87,8 @@ export const useChatStore = defineStore('app.chat', () => {
   async function switchSession(id: string): Promise<void> {
     if (generating.value) return;
     currentSessionId.value = id;
+    // 新会话恢复自动展开语义(上一会话的「不再自动弹」不跨越会话边界)
+    useUiPrefsStore().resetAgentPanelAutoSuppress();
     const cid = useCharacterStore().currentCharacterId;
     if (cid) writeLastSessionId(cid, id);
     await loadHistory(id);
@@ -98,11 +102,42 @@ export const useChatStore = defineStore('app.chat', () => {
       updateContextTokens(msgs);
       // 加载 Token 累计统计
       void loadTokenTotals(sessionId);
+      // 恢复该会话的 Agent 记录(实跑问题 4:此前 agent 纯内存,切会话/重启即丢;
+      // 后端 tool_calls 已持久化,这里按会话读回工具调用列表)
+      void restoreAgentTrace(sessionId);
     } catch (e) {
       console.error('加载历史失败', e);
       // 历史加载失败必须可见:静默失败 + sendMessage 自动新建会话会把旧会话「藏」起来,
       // 表现为聊天记录丢失
       useUiPrefsStore().dataLoadError = `加载聊天记录失败:${(e as Error).message ?? e}`;
+    }
+  }
+
+  /**
+   * 恢复角色扮演模式的 Agent 记录(只读):读 agent_sessions + tool_calls,
+   * 把工具调用列表回填到 agent.value(状态置 done,历史记录不会处于 running)。
+   * 无记录 / 请求失败时保持空闲态,不阻断聊天主流程。
+   */
+  async function restoreAgentTrace(sessionId: string): Promise<void> {
+    try {
+      const trace = await api.fetchAgentTrace(sessionId);
+      // 会话已切换:迟到的响应不得覆盖当前会话(loadHistory 并发可重入)
+      if (currentSessionId.value !== sessionId) return;
+      if (!trace || trace.tool_calls.length === 0) {
+        agent.value = idleAgent();
+        return;
+      }
+      const base = idleAgent();
+      base.phase = trace.state === 'idle' ? 'finished' : trace.state;
+      base.toolCalls = trace.tool_calls.map((c) => ({
+        name: c.name,
+        input: c.input,
+        output: c.output,
+        status: 'done' as const,
+      }));
+      agent.value = base;
+    } catch {
+      // 静默:Agent 记录是辅助展示,失败保持空闲态
     }
   }
 
@@ -176,6 +211,11 @@ export const useChatStore = defineStore('app.chat', () => {
 
     generating.value = true;
     agent.value = { ...idleAgent(), phase: 'planning', stepText: '计划中…' };
+    // 生成开始时自动展开右侧 Agent 面板(仅 Deep/Agent/Custom 模式,且用户本轮未主动收起过)。
+    // 只在这一次置位;生成期间的 SSE 事件不再干预面板开合(详见 AgentPanel.showPanel)。
+    if (['deep', 'agent', 'custom'].includes(agentMode.value)) {
+      useUiPrefsStore().autoOpenAgentPanel();
+    }
 
     const genSettings = useGenSettingsStore();
     chatStream.start(
@@ -388,10 +428,6 @@ export const useChatStore = defineStore('app.chat', () => {
     if (changes.mvuVariables) mvuVariables.value = changes.mvuVariables;
     if (changes.applyMvuOn) void applyMvuUpdate(changes.applyMvuOn);
     if (changes.reloadHistory && currentSessionId.value) void loadHistory(currentSessionId.value);
-    // 生成时自动展开右侧 Agent 面板(Deep/Agent/Custom 模式)
-    if (generating.value && ['deep', 'agent', 'custom'].includes(agentMode.value)) {
-      useUiPrefsStore().agentPanelOpen = true;
-    }
   }
 
   function stop(): void {
@@ -469,6 +505,8 @@ export const useChatStore = defineStore('app.chat', () => {
     await api.clearMessages(sid);
     messages.value = [];
     contextTokens.value = 0;
+    // 清空即回到空会话状态:恢复自动展开语义
+    useUiPrefsStore().resetAgentPanelAutoSuppress();
   }
 
   /**

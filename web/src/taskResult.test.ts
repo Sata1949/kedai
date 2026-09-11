@@ -43,4 +43,21 @@ describe('splitTaskResult 任务结果拆段', () => {
     expect(p.main).toContain('## 审计结论');
     expect(p.audit).toBe('');
   });
+
+  it('team 正文复述「## 审计结论」标题:按最后一处拆段,主卡不被截半', () => {
+    // 实跑问题 2:审计结论原文作为汇总输入下发,模型可能在正文中复述该标题。
+    // 后端把真正的审计段拼在最末尾,故必须取 lastIndexOf 而非首个。
+    const r = splitTaskResult(
+      'team',
+      '正文开头\n\n## 审计结论\n(正文里复述的标题,后面还有正文)\n\n正文结尾\n\n## 审计结论\n审计通过',
+    );
+    expect(r.main).toBe('正文开头\n\n## 审计结论\n(正文里复述的标题,后面还有正文)\n\n正文结尾');
+    expect(r.audit).toBe('## 审计结论\n审计通过');
+  });
+
+  it('plan 正文复述「## 最终计划」标题:按最后一处拆段', () => {
+    const r = splitTaskResult('plan', '正文提到 ## 最终计划 这个词\n\n## 最终计划\n1. 步骤一');
+    expect(r.main).toBe('正文提到 ## 最终计划 这个词');
+    expect(r.finalPlan).toBe('## 最终计划\n1. 步骤一');
+  });
 });

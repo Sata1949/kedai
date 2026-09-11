@@ -71,12 +71,24 @@ pub struct UpdateSettingsBody {
     /// 反思失败建议提示词注入角色(user / assistant)
     #[serde(default)]
     pub reflect_advice_role: Option<String>,
-    /// 放行模式:true = 除黑名单外自动放行
+    /// 旧放行模式开关(deprecated;true → bypass,false → strict)
     #[serde(default)]
     pub bypass_mode: Option<bool>,
-    /// 放行模式黑名单
+    /// 授权模式三档(strict / loose / bypass);优先于旧 bypass_mode
+    #[serde(default)]
+    pub authorization_mode: Option<String>,
+    /// 「始终需授权」清单
     #[serde(default)]
     pub bypass_blacklist: Option<Vec<String>>,
+    /// 授权等待超时(秒;30..=1800)
+    #[serde(default)]
+    pub tool_authorization_timeout_secs: Option<u32>,
+    /// 任务模式工具策略(all / deny_dangerous / allowlist)
+    #[serde(default)]
+    pub task_tool_policy: Option<String>,
+    /// 任务模式工具白名单(allowlist 策略生效)
+    #[serde(default)]
+    pub task_tool_allowlist: Option<Vec<String>>,
     /// AGENT/CUSTOM 模式工具循环轮次上限(1..=200;缺省保持不变)
     #[serde(default)]
     pub max_tool_rounds: Option<u32>,
@@ -104,6 +116,27 @@ pub struct UpdateSettingsBody {
     /// 记忆槽注入条数上限(0..=50;0 = 关闭注入)
     #[serde(default)]
     pub memory_inject_limit: Option<u32>,
+    /// 记忆槽字符预算(0..=20000;0 = 不限制)
+    #[serde(default)]
+    pub memory_inject_char_budget: Option<u32>,
+    /// 每角色记忆容量上限(0..=10000;0 = 不淘汰)
+    #[serde(default)]
+    pub memory_max_entries: Option<u32>,
+    /// 向量化开关(开启后记忆写入生成向量、召回走混合打分)
+    #[serde(default)]
+    pub embedding_enabled: Option<bool>,
+    /// embedding 服务地址(OpenAI 兼容 /embeddings)
+    #[serde(default)]
+    pub embedding_base_url: Option<String>,
+    /// embedding API Key(空 = 不变更;与聊天 Key 同策略加密存储)
+    #[serde(default)]
+    pub embedding_api_key: Option<String>,
+    /// embedding 模型名
+    #[serde(default)]
+    pub embedding_model: Option<String>,
+    /// 向量维度(0 = 自动探测)
+    #[serde(default)]
+    pub embedding_dim: Option<u32>,
     /// 技能渐进披露开关(true = system 只注入「name:description」清单,正文按需 read)
     #[serde(default)]
     pub skill_progressive_disclosure: Option<bool>,
@@ -129,6 +162,10 @@ pub struct UpdateSettingsBody {
     /// 缺省保持不变
     #[serde(default)]
     pub task_persona_full: Option<bool>,
+    /// 任务模式是否继承提示词注入(2026-09-10 实测修复):true = 继承 prompt_floors.json
+    /// (旧行为),false = 隔离(默认);缺省保持不变
+    #[serde(default)]
+    pub task_prompt_inject_enabled: Option<bool>,
     /// 工具循环历史保留的最近完整轮数(R3b;1..=32;缺省保持不变)
     #[serde(default)]
     pub tool_history_keep_rounds: Option<u32>,
@@ -137,9 +174,11 @@ pub struct UpdateSettingsBody {
     pub tool_history_budget_tokens: Option<u32>,
 }
 
-/// 序列化运行期设置(API Key 脱敏)
+/// 序列化运行期设置(API Key 脱敏)。
+/// 字段数已达 serde_json::json! 宏的递归展开上限,故拆成两段构建再合并
+/// (比给整个 crate 提高 recursion_limit 影响面更小)。
 fn settings_json(s: &RuntimeSettings) -> Value {
-    json!({
+    let mut v = json!({
         "openai_base_url": s.openai_base_url,
         "api_key_masked": s.masked_api_key(),
         "has_api_key": !s.openai_api_key.is_empty(),
@@ -157,7 +196,11 @@ fn settings_json(s: &RuntimeSettings) -> Value {
         "reflect_advice_prompt": s.reflect_advice_prompt,
         "reflect_advice_role": s.reflect_advice_role,
         "bypass_mode": s.bypass_mode,
+        "authorization_mode": s.authorization_mode.as_str(),
         "bypass_blacklist": s.bypass_blacklist,
+        "tool_authorization_timeout_secs": s.tool_authorization_timeout_secs,
+        "task_tool_policy": s.task_tool_policy,
+        "task_tool_allowlist": s.task_tool_allowlist,
         "max_tool_rounds": s.max_tool_rounds,
         "render_html": s.render_html,
         "compaction_mode": s.compaction_mode,
@@ -167,6 +210,16 @@ fn settings_json(s: &RuntimeSettings) -> Value {
         "llm_request_log": s.llm_request_log,
         "memory_distill_enabled": s.memory_distill_enabled,
         "memory_inject_limit": s.memory_inject_limit,
+        "memory_inject_char_budget": s.memory_inject_char_budget,
+        "memory_max_entries": s.memory_max_entries,
+    });
+    let rest = json!({
+        "embedding_enabled": s.embedding_enabled,
+        "embedding_base_url": s.embedding_base_url,
+        "embedding_api_key_masked": s.masked_embedding_api_key(),
+        "has_embedding_api_key": !s.embedding_api_key.is_empty(),
+        "embedding_model": s.embedding_model,
+        "embedding_dim": s.embedding_dim,
         "skill_progressive_disclosure": s.skill_progressive_disclosure,
         "undo_enabled": s.undo_enabled,
         "subagent_max_depth": s.subagent_max_depth,
@@ -175,9 +228,16 @@ fn settings_json(s: &RuntimeSettings) -> Value {
         "mcp_enabled": s.mcp_enabled,
         "mcp_servers": s.mcp_servers,
         "task_persona_full": s.task_persona_full,
+        "task_prompt_inject_enabled": s.task_prompt_inject_enabled,
         "tool_history_keep_rounds": s.tool_history_keep_rounds,
         "tool_history_budget_tokens": s.tool_history_budget_tokens,
-    })
+    });
+    if let (Some(dst), Some(src)) = (v.as_object_mut(), rest.as_object()) {
+        for (k, val) in src {
+            dst.insert(k.clone(), val.clone());
+        }
+    }
+    v
 }
 
 /// GET /api/settings:当前运行期设置(供前端表单回填)。?mode= 返回该模式合并后的有效值。
@@ -231,6 +291,33 @@ pub async fn update_settings(
             let t = v.trim().to_string();
             if !t.is_empty() {
                 s.model = t;
+            }
+        }
+        // 向量化配置:与连接信息同属全局共享层(不按模式隔离)
+        if let Some(v) = body.embedding_enabled {
+            s.embedding_enabled = v;
+        }
+        if let Some(v) = &body.embedding_base_url {
+            let t = normalize_base_url(v);
+            // 允许清空(关闭向量化时用户可能想抹掉地址)
+            s.embedding_base_url = if t.is_empty() { String::new() } else { t };
+        }
+        if let Some(v) = &body.embedding_api_key {
+            let t = v.trim().to_string();
+            if !t.is_empty() {
+                s.embedding_api_key = t;
+            }
+        }
+        if let Some(v) = &body.embedding_model {
+            s.embedding_model = v.trim().to_string();
+        }
+        if let Some(v) = body.embedding_dim {
+            if v == 0 || (16..=8192).contains(&v) {
+                s.embedding_dim = v;
+            } else {
+                return Json(json!({ "error": "embedding_dim 必须为 0(自动)或 16..=8192" }))
+                    .into_response()
+                    .with_status(StatusCode::BAD_REQUEST);
             }
         }
 
@@ -333,13 +420,57 @@ pub async fn update_settings(
                     apply!(s, is_task, reflect_advice_role, t);
                 }
             }
-            // 放行模式
-            if let Some(v) = body.bypass_mode {
-                apply!(s, is_task, bypass_mode, v);
+            // 授权模式(三档;旧 bypass_mode 仍接受并映射为对应档位)
+            if let Some(v) = &body.authorization_mode {
+                let parsed = match crate::tools::permissions::AuthorizationMode::parse(v.trim()) {
+                    Some(m) => m,
+                    None => {
+                        return Json(json!({
+                            "error": "authorization_mode 仅支持 strict / loose / bypass"
+                        }))
+                        .into_response()
+                        .with_status(StatusCode::BAD_REQUEST);
+                    }
+                };
+                apply!(s, is_task, authorization_mode, parsed);
             }
-            // 放行模式黑名单
+            // 旧字段兼容:bypass_mode=true → bypass,false → strict
+            if let Some(v) = body.bypass_mode {
+                let mapped = if v {
+                    crate::tools::permissions::AuthorizationMode::Bypass
+                } else {
+                    crate::tools::permissions::AuthorizationMode::Strict
+                };
+                apply!(s, is_task, authorization_mode, mapped);
+            }
+            // 「始终需授权」清单:校验工具名存在性,未知名返回 warning(不阻塞保存)
             if let Some(v) = &body.bypass_blacklist {
                 apply!(s, is_task, bypass_blacklist, v.clone());
+            }
+            // 授权等待超时(秒):30..=1800
+            if let Some(v) = body.tool_authorization_timeout_secs {
+                if !(30..=1800).contains(&v) {
+                    return Json(json!({
+                        "error": "tool_authorization_timeout_secs 必须在 30..=1800"
+                    }))
+                    .into_response()
+                    .with_status(StatusCode::BAD_REQUEST);
+                }
+                apply!(s, is_task, tool_authorization_timeout_secs, v);
+            }
+            // 任务模式工具策略:all / deny_dangerous / allowlist
+            if let Some(v) = &body.task_tool_policy {
+                if !matches!(v.as_str(), "all" | "deny_dangerous" | "allowlist") {
+                    return Json(json!({
+                        "error": "task_tool_policy 仅支持 all / deny_dangerous / allowlist"
+                    }))
+                    .into_response()
+                    .with_status(StatusCode::BAD_REQUEST);
+                }
+                apply!(s, is_task, task_tool_policy, v.clone());
+            }
+            if let Some(v) = &body.task_tool_allowlist {
+                apply!(s, is_task, task_tool_allowlist, v.clone());
             }
             // 工具循环轮次上限:仅接受 1..=200(防止误填 0 或超大值打爆模型请求)
             if let Some(v) = body.max_tool_rounds {
@@ -396,6 +527,18 @@ pub async fn update_settings(
                     apply!(s, is_task, memory_inject_limit, v);
                 }
             }
+            // 记忆槽字符预算(0..=20000;0 = 不限制,越界忽略)
+            if let Some(v) = body.memory_inject_char_budget {
+                if v <= 20_000 {
+                    apply!(s, is_task, memory_inject_char_budget, v);
+                }
+            }
+            // 每角色记忆容量上限(0..=10000;0 = 不淘汰,越界忽略)
+            if let Some(v) = body.memory_max_entries {
+                if v <= 10_000 {
+                    apply!(s, is_task, memory_max_entries, v);
+                }
+            }
             // 技能渐进披露开关(落地项 3)
             if let Some(v) = body.skill_progressive_disclosure {
                 apply!(s, is_task, skill_progressive_disclosure, v);
@@ -448,6 +591,10 @@ pub async fn update_settings(
             // 执行者人设完整开关(R3a;bool 免校验,task 模式写覆盖层)
             if let Some(v) = body.task_persona_full {
                 apply!(s, is_task, task_persona_full, v);
+            }
+            // 任务模式提示词注入继承开关(2026-09-10 实测修复;bool 免校验,task 写覆盖层)
+            if let Some(v) = body.task_prompt_inject_enabled {
+                apply!(s, is_task, task_prompt_inject_enabled, v);
             }
             // 工具历史回灌上限(R3b):扁平全局字段(引擎 run_tool_loop 直读扁平值,
             // 不入模式覆盖层——任务/聊天工具循环共用同一上限,与 subagent 参数的
@@ -556,6 +703,23 @@ pub async fn connect(State(state): State<Arc<AppState>>) -> Json<serde_json::Val
 pub async fn models(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let models = state.engine.connector.read().await.available_models().await;
     Json(json!({ "models": models }))
+}
+
+/// POST /api/settings/embedding/test:测试向量化连接(嵌入一条固定文本)。
+/// 成功回传实际维度与耗时;失败回传错误原因。不写库、不改配置。
+pub async fn test_embedding(State(state): State<Arc<AppState>>) -> Response {
+    let settings = state.settings_snapshot();
+    let svc = crate::services::embedding_service::EmbeddingService::new();
+    match svc.test(&settings).await {
+        Ok((dim, ms)) => Json(json!({
+            "ok": true,
+            "dim": dim,
+            "latency_ms": ms,
+            "message": format!("连接成功:向量维度 {dim},耗时 {ms} ms"),
+        }))
+        .into_response(),
+        Err(e) => Json(json!({ "ok": false, "message": e.to_string() })).into_response(),
+    }
 }
 
 /// GET /api/settings/info:连接器信息 + 模型列表 + 可用连接器
@@ -735,29 +899,34 @@ pub async fn prompt_preview(
         );
     }
 
-    let inject = state
-        .prompt_inject
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get()
-        .clone();
-    match inject.mode {
-        crate::services::prompt_inject_service::InjectMode::Simple => push_preview_layer(
-            &mut layers,
-            "simple_inject",
-            "system",
-            4,
-            inject.simple_inject_text(),
-        ),
-        crate::services::prompt_inject_service::InjectMode::Complex => {
-            for floor in inject.enabled_floors_sorted() {
-                push_preview_layer(
-                    &mut layers,
-                    format!("complex_floor:{}", floor.name),
-                    floor.role.as_str(),
-                    4,
-                    floor.content.clone(),
-                );
+    // 任务模式注入默认隔离(2026-09-10 实测修复):task 模式且未显式开启继承时,
+    // 不推送注入层——预览必须与真实下发一致(docs/模式提示词边界.md 第五节)。
+    let inject_gated = matches!(mode, AppMode::Task) && !settings.task_prompt_inject_enabled;
+    if !inject_gated {
+        let inject = state
+            .prompt_inject
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get()
+            .clone();
+        match inject.mode {
+            crate::services::prompt_inject_service::InjectMode::Simple => push_preview_layer(
+                &mut layers,
+                "simple_inject",
+                "system",
+                4,
+                inject.simple_inject_text(),
+            ),
+            crate::services::prompt_inject_service::InjectMode::Complex => {
+                for floor in inject.enabled_floors_sorted() {
+                    push_preview_layer(
+                        &mut layers,
+                        format!("complex_floor:{}", floor.name),
+                        floor.role.as_str(),
+                        4,
+                        floor.content.clone(),
+                    );
+                }
             }
         }
     }

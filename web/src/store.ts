@@ -77,6 +77,7 @@ export const useAppStore = defineStore('app', () => {
     loadSettings: genSettings.loadSettings,
     saveSettings: genSettings.saveSettings,
     queueSettingsSave: genSettings.queueSettingsSave,
+    setAuthorizationMode: genSettings.setAuthorizationMode,
     loadPromptInject: genSettings.loadPromptInject,
     savePromptInjectConfig: genSettings.savePromptInjectConfig,
     loadAgentFlow: genSettings.loadAgentFlow,
@@ -90,6 +91,8 @@ export const useAppStore = defineStore('app', () => {
     loadTaskCalls: task.loadTaskCalls,
     createTask: task.createTask,
     selectTask: task.selectTask,
+    clearSelectedTask: task.clearSelectedTask,
+    restoreSelectedTask: task.restoreSelectedTask,
     loadTaskDetail: task.loadTaskDetail,
     runTask: task.runTask,
     stopTask: task.stopTask,
@@ -104,6 +107,12 @@ export const useAppStore = defineStore('app', () => {
     // 界面偏好(渲染开关按角色记忆等动作)
     syncRenderHtmlToCurrent: uiPrefs.syncRenderHtmlToCurrent,
     removeRenderHtmlOverride: uiPrefs.removeRenderHtmlOverride,
+    // Agent 面板开合(自动展开一次 + 用户主动收起后不再打扰)
+    openAgentPanel: uiPrefs.openAgentPanel,
+    collapseAgentPanel: uiPrefs.collapseAgentPanel,
+    toggleAgentPanel: uiPrefs.toggleAgentPanel,
+    autoOpenAgentPanel: uiPrefs.autoOpenAgentPanel,
+    resetAgentPanelAutoSuppress: uiPrefs.resetAgentPanelAutoSuppress,
     // 世界书
     loadWorldBooks: resources.loadWorldBooks,
     uploadWorldBook: resources.uploadWorldBook,
