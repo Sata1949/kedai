@@ -2,7 +2,8 @@
 // 设置区:生成参数(温度/Top-P/长度/上下文窗口/工具轮次 + 压缩/记忆/子代理参数)。
 // 从 SettingsModal.vue 双模板合并而来:取 standalone 超集版本(embedded 分支缺失
 // 压缩模式/记忆蒸馏/子代理等字段,属模板漂移,合并后两模式一致)。
-import { onMounted } from 'vue';
+// 数值字段的默认值由 stores/genSettings.ts 的 loadSettings 集中 `?? 默认` 兜底,
+// 本组件不再逐个兜(onMounted 里曾只兜 3 个字段,既冗余又误导)。
 import { useAppStore } from '../../store';
 import { storeToRefs } from 'pinia';
 import { useGenerationParams } from '../../composables/useDataManager';
@@ -25,12 +26,6 @@ const {
 } = storeToRefs(store);
 
 const { tempLabel, topPLabel, ctxLabel, saveParams, paramsMsg, saveParamsNow } = useGenerationParams();
-
-onMounted(() => {
-  maxToolRounds.value = maxToolRounds.value ?? 32;
-  toolHistoryKeepRounds.value = toolHistoryKeepRounds.value ?? 4;
-  toolHistoryBudgetTokens.value = toolHistoryBudgetTokens.value ?? 16384;
-});
 </script>
 
 <template>

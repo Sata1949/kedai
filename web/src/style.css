@@ -2387,6 +2387,17 @@ input[type="range"].sv-range::-moz-range-thumb {
 }
 .flow-row.dragging { opacity: 0.4; border-style: dashed; }
 .flow-row .sv-input, .flow-row .sv-select { font-size: 12px; }
+/* 流程库操作按钮组(选择/新建/复制/删除):桌面保持 display:contents —— 子按钮仍是
+   .sv-inp-row 的直接 flex 项,布局与加这个 wrapper 之前逐像素一致;
+   手机端(媒体查询内)才让它整体换行,给流程下拉让出整行宽度。 */
+.flow-lib-actions { display: contents; }
+/* 「流程名称 / 说明」两组字段:桌面同样 display:contents —— 四个子元素(label/input 各二)
+   仍是 .sv-inp-row 的直接 flex 项,桌面单行布局不变;
+   手机端(媒体查询内)每组各自成行,避免「说明」标签孤零零留在上一行末尾。 */
+.flow-meta-pair { display: contents; }
+/* 桌面:复刻原来内联 style="padding-top:8px" 的视觉效果(说明标签略微下移);
+   手机端用 .flow-meta-pair > .sv-inp-tag(0-2-0)覆盖为 0,无需 !important。 */
+.flow-meta-gap { padding-top: 8px; }
 .flow-edit {
   grid-column: 1 / -1;
   display: flex;
@@ -4001,6 +4012,81 @@ input[type="range"].sv-range::-moz-range-thumb {
 
   .sv-hub-content { flex: 1; min-height: 0; overflow-y: auto; }
   .sv-hub-modal { width: 100%; }
+
+  /* --- 设置面板表单行:窄屏堆叠(修输入框塌缩 / 下拉截断 / 横向溢出) ---
+     根因:.sv-input/.sv-select 的 `flex:1` 即 basis 0%,与同行的长中文说明
+     (.sv-note,basis:auto)竞争负自由空间时,收缩权重按 basis 摊 → basis 为 0 的
+     控件一点都不缩也长不大,恒定 0 内容宽,只剩 24px padding + 6px 边框,数字被裁空
+     (说明越长越空:实测只有说明最短的「子代理深度/并发」幸存)。.inject-num 的
+     width:110px 同样被 basis:0% 覆盖而失效。
+     改为:标签与控件同一行(控件吃满剩余宽),说明文字独占下一行。
+     min-width:60px 是关键——它让「流程名称+说明」这类同行双控件自动折成两行,无需改模板。 */
+  .sv-inp-row { flex-wrap: wrap; row-gap: 6px; align-items: center; }
+  .sv-inp-row > .sv-inp-tag { flex: 0 0 auto; }
+  .sv-inp-row > .sv-input,
+  .sv-inp-row > .sv-select {
+    flex: 1 1 0;
+    width: auto; /* 中和 .inject-num 的 width:110px(basis:0 已使其失效,此处写清意图) */
+    /* min-width 兜底:绝不收缩到 0 导致数值不可见;120px 同时是折行阈值——
+       「流程名称 + 说明」这类同行双控件(label 72×2 + 120×2 + 间距 30 = 414)超过
+       可用宽(约 210~282)时会自动折成两行,无需改模板。
+       取 120 而非更大值:320px 最窄视口下可用宽约 210,72+120+10 恰好放得下不溢出。 */
+    min-width: 120px;
+    min-height: 44px; /* 项目既有触摸目标下限 */
+  }
+  /* 说明文字换到下一行:既保证完整可读,也消除与控件抢空间的竞争本身 */
+  .sv-inp-row > .sv-note { flex: 1 1 100%; }
+  .sv-inp-row > .sv-btn:not(.sv-btn-fill) { flex: 0 0 auto; white-space: nowrap; }
+  /* 流程库操作按钮组:整体换到下一行右对齐,让流程下拉吃到整行宽度 */
+  .sv-inp-row > .flow-lib-actions {
+    flex: 1 1 100%;
+    display: flex;
+    gap: 6px;
+    justify-content: flex-end;
+  }
+  /* 「流程名称 / 说明」每组各自成行(否则「说明」标签孤立在上一行末尾) */
+  .sv-inp-row > .flow-meta-pair {
+    flex: 1 1 100%;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    row-gap: 6px;
+  }
+  .flow-meta-pair > .sv-inp-tag { flex: 0 0 auto; padding-top: 0; }
+  .flow-meta-pair > .sv-input {
+    flex: 1 1 0;
+    width: auto;
+    min-width: 120px;
+    min-height: 44px;
+  }
+
+  /* --- 执行流程步骤行:grid → flex-wrap ---
+     原 6 列 auto grid 最小内容宽合计约 350px > 可用约 282px,行盒溢出 →
+     .sv-hub-content 的 overflow-y:auto 使另一轴计算为 auto → 横向滚动,最右列
+     ✕ 被推出视口;grid 轨道缩到 min-content → select 只剩箭头、无 nowrap 的中文
+     按钮缩成 1 字宽竖排(「生成」竖排)。 */
+  .flow-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .flow-row > .floor-grip { flex: 0 0 auto; }
+  /* 步骤名称 basis 取 120px:实测 412px 视口下容器内宽约 306px,这样「把手+开关+
+     名称+动作下拉」正好落在第一行(名称伸展到约 145px),「生成/不生成」与操作按钮
+     落到第二行;basis 再大就会把下拉挤到第二行、多出一行。 */
+  .flow-row > .floor-name { flex: 1 1 120px; min-width: 0; }
+  .flow-row > .floor-select { flex: 0 0 auto; min-width: 84px; } /* 至少显示「执行」 */
+  .flow-row > .sv-btn:not(.sv-btn-fill) { flex: 0 0 auto; white-space: nowrap; }
+  /* 操作按钮组:margin-left:auto 推到自己那行的右端(原 grid 下在最右列,窄屏被挤出视口) */
+  .flow-row > .floor-actions { flex: 0 0 auto; margin-left: auto; }
+  .flow-row > .flow-edit { flex: 1 1 100%; } /* 原 grid-column:1/-1 在 flex 下失效 */
+  .flow-edit { padding-left: 0; } /* 窄屏不再缩进,省出宽度给控件 */
+
+  /* --- 提示词楼层行:同病同治(PromptManager / PromptInjectSection 共用 7 列 grid) --- */
+  .floor-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .floor-row > .floor-grip { flex: 0 0 auto; }
+  .floor-row > .floor-name { flex: 1 1 120px; min-width: 0; }
+  .floor-row > .floor-select { flex: 0 0 auto; min-width: 84px; }
+  .floor-row > .floor-depth { flex: 0 0 auto; width: 76px; }
+  .floor-row > .sv-btn:not(.sv-btn-fill) { flex: 0 0 auto; white-space: nowrap; }
+  .floor-row > .floor-actions { flex: 0 0 auto; margin-left: auto; }
+  .floor-row > .floor-content { flex: 1 1 100%; } /* 原 grid-column:1/-1 在 flex 下失效 */
 
   /* --- 音频浮层上移到导航栏之上,避开手势条 --- */
   /* 音频浮层位置已在输入区小节统一处理(底部整宽浮层) */

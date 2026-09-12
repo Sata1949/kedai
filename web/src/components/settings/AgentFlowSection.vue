@@ -45,15 +45,21 @@ onMounted(async () => {
             {{ f.name || '未命名流程' }}{{ f.enabled ? '' : '(未启用)' }}
           </option>
         </select>
-        <button class="sv-btn ghost sv-btn-square" title="新建流程" @click="newFlow">+</button>
-        <button class="sv-btn ghost sv-btn-square" title="复制当前流程" @click="duplicateFlow">⧉</button>
-        <button class="sv-btn danger sv-btn-square" title="删除当前流程" @click="deleteFlowNow">✕</button>
+        <span class="flow-lib-actions">
+          <button class="sv-btn ghost sv-btn-square" title="新建流程" @click="newFlow">+</button>
+          <button class="sv-btn ghost sv-btn-square" title="复制当前流程" @click="duplicateFlow">⧉</button>
+          <button class="sv-btn danger sv-btn-square" title="删除当前流程" @click="deleteFlowNow">✕</button>
+        </span>
       </div>
       <div class="sv-inp-row">
-        <label class="sv-inp-tag">流程名称</label>
-        <input v-model="flowName" type="text" class="sv-input" placeholder="流程名称(保存时生效)" spellcheck="false" />
-        <label class="sv-inp-tag" style="padding-top: 8px">说明</label>
-        <input v-model="flowDesc" type="text" class="sv-input" placeholder="流程说明(可选)" spellcheck="false" />
+        <span class="flow-meta-pair">
+          <label class="sv-inp-tag">流程名称</label>
+          <input v-model="flowName" type="text" class="sv-input" placeholder="流程名称(保存时生效)" spellcheck="false" />
+        </span>
+        <span class="flow-meta-pair">
+          <label class="sv-inp-tag flow-meta-gap">说明</label>
+          <input v-model="flowDesc" type="text" class="sv-input" placeholder="流程说明(可选)" spellcheck="false" />
+        </span>
       </div>
       <div class="sv-btn-row">
         <button class="sv-btn ghost sv-btn-fill" :disabled="flowImporting" @click="flowImportInput?.click()">
