@@ -25,6 +25,7 @@ const DataManagementSection = lazyModal(() => import('./settings/DataManagementS
 const McpSection = lazyModal(() => import('./settings/McpSection.vue'), '设置区:MCP 服务', 'settingsOpen');
 const UiSection = lazyModal(() => import('./settings/UiSection.vue'), '设置区:界面', 'settingsOpen');
 const EmbeddingSection = lazyModal(() => import('./settings/EmbeddingSection.vue'), '设置区:向量化模型', 'settingsOpen');
+const AboutSection = lazyModal(() => import('./settings/AboutSection.vue'), '设置区:关于', 'settingsOpen');
 
 const props = withDefaults(defineProps<{
   embedded?: boolean;
@@ -78,6 +79,7 @@ const close = (): void => {
     <McpSection v-if="visitedSections.has('mcp')" :show="props.activeSection === 'mcp'" />
     <EmbeddingSection v-if="visitedSections.has('embedding')" :show="props.activeSection === 'embedding'" />
     <UiSection v-if="visitedSections.has('ui')" :state="dataManager" :show="props.activeSection === 'ui'" />
+    <AboutSection v-if="visitedSections.has('about')" :show="props.activeSection === 'about'" />
   </div>
 
   <!-- 独立模态框模式(遮罩 + 头部 + 全部设置区 + 底部) -->
@@ -101,8 +103,9 @@ const close = (): void => {
         <PresetImportExportSection :state="promptInject" />
         <DataManagementSection :state="dataManager" />
         <McpSection />
-        <EmbeddingSection />
-        <UiSection :state="dataManager" />
+    <EmbeddingSection />
+    <UiSection :state="dataManager" />
+    <AboutSection />
       </div>
 
       <div class="sv-modal-foot">

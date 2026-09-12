@@ -177,7 +177,12 @@ impl MockConnector {
         }
 
         // 测试钩子:[[tool:name {"json"}]] → 返回 ToolCall
-        if let Some((name, args)) = extract_tool_marker(&last_user) {
+        // 仅当该工具在本轮 tools 白名单内才产出(见 tool_offered):反射轮只下发
+        // censor_text/revise_passage/read,若无视白名单会凭空再执行一次 write,
+        // 产生重复副作用与多余快照——真实模型受 tools 参数约束,不可能这样调用。
+        if let Some((name, args)) =
+            extract_tool_marker(&last_user).filter(|(n, _)| tool_offered(&params, n))
+        {
             chunks.push(LlmStreamChunk::ToolCall(ToolCallArgs {
                 id: "mock-call-1".into(),
                 name,
@@ -554,6 +559,16 @@ fn extract_mvu_text_marker(input: &str) -> Option<String> {
         return Some(format!("<StatusBar>{inner}</StatusBar>"));
     }
     Some(text)
+}
+
+/// 本轮是否下发了该工具(tools 白名单语义)。
+///
+/// 真实模型只能调用调用方提供的工具;mock 的 `[[tool:...]]` 钩子此前无视该约束,
+/// 导致「工具白名单被收窄」的轮次(如反射轮仅 censor_text/revise_passage/read)
+/// 仍会重复产出同一写工具调用,凭空多出副作用与快照——那是 mock 不忠实,而非真实行为。
+/// tools 为空表示本轮未启用工具(不靠白名单限制,保留旧行为,兼容既有用例)。
+fn tool_offered(params: &GenerationParams, name: &str) -> bool {
+    params.tools.is_empty() || params.tools.iter().any(|t| t.name == name)
 }
 
 /// 提取 [[tool:name {"json"}]] 标记;返回 (name, arguments_json)

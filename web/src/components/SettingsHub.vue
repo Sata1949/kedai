@@ -39,7 +39,8 @@ type SectionKey =
   | 'prompt' | 'preset'
   | 'agent' | 'flow'
   | 'data'
-  | 'ui';
+  | 'ui'
+  | 'about';
 
 /** 二级项:section 切右侧内容区;action 打开独立面板/执行操作后关闭 */
 type HubItem =
@@ -110,6 +111,12 @@ const domains: Domain[] = [
       { type: 'action', key: 'optimize', label: '优化面板', run: openPanel('optimizeOpen') },
       { type: 'action', key: 'repoIndex', label: '仓库索引', run: openPanel('repoIndexOpen') },
       { type: 'action', key: 'clear', label: '清空会话', run: () => { if (confirm('确定清空当前会话?')) void store.clearCurrentChat(); close(); } },
+    ],
+  },
+  {
+    key: 'about', label: '关于', dot: 'red',
+    items: [
+      { type: 'section', key: 'about', label: '关于与教程' },
     ],
   },
 ];

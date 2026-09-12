@@ -1,7 +1,7 @@
 # Kedai 维护指南(MAINTENANCE)
 
 > 面向后续维护者的技术文档。涵盖架构、构建、启动、API 契约、数据库、日志与已知坑位。
-> 版本:v0.2.0(前端 Vue3 + 后端 Rust + Tauri 桌面壳) 最后更新:2026-09-09
+> 版本:v0.2.1(前端 Vue3 + 后端 Rust + Tauri 桌面壳) 最后更新:2026-09-12
 
 ---
 
@@ -399,7 +399,7 @@ rusqlite(bundled,零原生依赖),**WAL 模式 + foreign_keys ON**。共 28 张�
 cd server-rs && cargo test
 ```
 
-- 单元测试(源文件内 `#[test]`/`#[tokio::test]`,723 个,2026-09-12 实测):状态机迁移、planner(fast/deep/算式识别)、reflector(3 规则)、calculator(白名单解析)、censor(禁词同义替换)、token 编码映射与估算、工具注册表、世界书转换、世界书注入(含 `extensions.depth` 扫描窗口)、提示词注入(含禁词库)、mvu 变量系统(含 JSONPatch 转义/reason/delta 容错)、EJS 渲染器(含读取 API 与 escape-ejs)、角色卡解析、正则脚本、@INJECT 解析/应用、GENERATE 注入、结构化错误码(api/errors.rs)
+- 单元测试(源文件内 `#[test]`/`#[tokio::test]`,726 个,2026-09-12 实测):状态机迁移、planner(fast/deep/算式识别)、reflector(3 规则)、calculator(白名单解析)、censor(禁词同义替换)、token 编码映射与估算、工具注册表、世界书转换、世界书注入(含 `extensions.depth` 扫描窗口)、提示词注入(含禁词库)、mvu 变量系统(含 JSONPatch 转义/reason/delta 容错)、EJS 渲染器(含读取 API 与 escape-ejs)、角色卡解析、正则脚本、@INJECT 解析/应用、GENERATE 注入、运行时提示词内置默认回退、结构化错误码(api/errors.rs)
 - API 集成测试(`tests/` 18 个文件,171 个,mock 连接器 + 临时数据目录):api_integration、assistant、agent_flows、tasks、task_events、prompt_inject、world_books、settings_connector、security、contracts_e2e、scripts_e2e、scripts_import、swipe_regenerate、undo、user_scripts、variables_scopes、db_concurrency、macros——health、角色 CRUD(multipart 上传)、会话/消息/导入导出、设置与 token、agent plan、SSE 聊天流、任务引擎六模式、计算器工具 SSE、世界书/角色卡、提示词注入与酒馆预设导入、鉴权
 - 前端 `npm test -w web`(Vitest,686 个 / 68 文件,2026-09-12 实测):stores、api client(含 ApiError 错误码分类)、组件与 composables、CSS 清洗(含注释处理)与沙箱回归;类型门禁 `npm run typecheck -w web`(vue-tsc,**硬门禁**,存量 168 已于 2026-09-08 清偿归零,清偿记录见 docs/优化实施方案-2026-09.md 附录 D)
 - 新增接口建议同步补集成测试;测试环境变量 `CONNECTOR=mock` 强制隔离

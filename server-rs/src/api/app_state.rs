@@ -246,10 +246,15 @@ impl AppState {
                     .ok()
                     .map(|p| p.join("AGENTS_RUNTIME.md"))
             });
-        let runtime_prompt = Arc::new(RuntimePromptService::new(
-            config.data_dir.clone(),
-            legacy_runtime_prompt,
-        ));
+        let runtime_prompt = Arc::new(match std::env::var_os("KEDAI_RUNTIME_PROMPT_DIR") {
+            // 显式指定目录:只从该目录读,不回退内置默认(测试隔离与自定义部署)
+            Some(dir) => RuntimePromptService::with_dir(
+                std::path::PathBuf::from(dir),
+                legacy_runtime_prompt,
+            ),
+            // 默认:DATA_DIR;文件与旧文件都缺失时回退内置默认提示词
+            None => RuntimePromptService::new(config.data_dir.clone(), legacy_runtime_prompt),
+        });
 
         // 自定义 Agent 执行流程(custom 模式);保存时按当前已注册工具校验白名单
         let registered_tools = tool_registry
