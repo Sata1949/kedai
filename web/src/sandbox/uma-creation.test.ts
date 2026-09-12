@@ -74,25 +74,43 @@ interface Harness {
   settle: () => Promise<void>;
 }
 
-/** 控件快照:与宿主 gatherControls 形状一致(含 select 的 selectedIndex/options) */
+/**
+ * 控件快照:与宿主 gatherControls 形状一致(只含 input/select/textarea/button,
+ * 不含 div —— 见 dom-rpc.ts 的 querySelectorAll('input, select, textarea, button'))。
+ * 这一点很关键:卡脚本里 document.getElementById('identity-desc-box') 这类 div 查询
+ * 只能命中宿主经 gatherIdMap 下发的 id 轻量表(含 classes),拿不到 html/css;
+ * 夹具若给 div 造出 html/css 字段,就会掩盖真实数据来源(此前夹具与生产不一致)。
+ */
 const CONTROLS = [
   { id: 'identity-select', tag: 'select', val: 'trainer1', selectedIndex: 1, options: [{ value: '', text: '— 请选择你的职称 —' }, { value: 'trainer1', text: '训练员' }] },
   { id: 'identity-custom-input', tag: 'input', val: '' },
-  { id: 'identity-custom-container', tag: 'div', val: '' },
-  { id: 'identity-desc-box', tag: 'div', val: '' },
   { id: 'uma-select', tag: 'select', val: 'empty', selectedIndex: 2, options: [{ value: '', text: '—' }, { value: 'custom', text: '自定义' }, { value: 'empty', text: '暂时留空' }] },
   { id: 'uma-custom-input', tag: 'input', val: '' },
-  { id: 'uma-custom-container', tag: 'div', val: '' },
-  { id: 'uma-desc-box', tag: 'div', val: '' },
   { id: 'start-select', tag: 'select', val: 'randomly', selectedIndex: 1, options: [{ value: '', text: '—' }, { value: 'randomly', text: '随机开局' }] },
   { id: 'start-custom-input', tag: 'input', val: '' },
-  { id: 'start-custom-container', tag: 'div', val: '' },
-  { id: 'start-desc-box', tag: 'div', val: '' },
   { id: 'world-select', tag: 'select', val: 'none', selectedIndex: 1, options: [{ value: '', text: '—' }, { value: 'none', text: '无' }] },
   { id: 'world-custom-input', tag: 'input', val: '' },
-  { id: 'world-custom-container', tag: 'div', val: '' },
-  { id: 'world-desc-box', tag: 'div', val: '' },
 ];
+
+/** id 轻量表(宿主 gatherIdMap 形状:只含 id/classes/n),div 与容器类元素只在这里存在 */
+const ID_MAP = {
+  '#identity-select': { id: 'identity-select', classes: [], n: 1 },
+  '#identity-custom-input': { id: 'identity-custom-input', classes: [], n: 1 },
+  '#identity-custom-container': { id: 'identity-custom-container', classes: ['custom-container'], n: 1 },
+  '#identity-desc-box': { id: 'identity-desc-box', classes: ['description-box'], n: 1 },
+  '#uma-select': { id: 'uma-select', classes: [], n: 1 },
+  '#uma-custom-input': { id: 'uma-custom-input', classes: [], n: 1 },
+  '#uma-custom-container': { id: 'uma-custom-container', classes: ['custom-container'], n: 1 },
+  '#uma-desc-box': { id: 'uma-desc-box', classes: ['description-box'], n: 1 },
+  '#start-select': { id: 'start-select', classes: [], n: 1 },
+  '#start-custom-input': { id: 'start-custom-input', classes: [], n: 1 },
+  '#start-custom-container': { id: 'start-custom-container', classes: ['custom-container'], n: 1 },
+  '#start-desc-box': { id: 'start-desc-box', classes: ['description-box'], n: 1 },
+  '#world-select': { id: 'world-select', classes: [], n: 1 },
+  '#world-custom-input': { id: 'world-custom-input', classes: [], n: 1 },
+  '#world-custom-container': { id: 'world-custom-container', classes: ['custom-container'], n: 1 },
+  '#world-desc-box': { id: 'world-desc-box', classes: ['description-box'], n: 1 },
+};
 
 function makeHarness(nonce: string): Harness {
   const messages: Array<Record<string, unknown>> = [];
@@ -135,7 +153,7 @@ function makeHarness(nonce: string): Harness {
     {},
     {},
     undefined,
-    {},
+    ID_MAP,
     null,
     {},
     CONTROLS,
@@ -270,6 +288,31 @@ describe('赛马娘卡首楼交互(内联事件 + 裸 document 查询)', () => {
     await h.settle();
     h.fireInline("updateDictDesc('nope','x')", '2', { id: 'nope' });
     await h.settle();
+    expect(h.errors).toEqual([]);
+  });
+
+  it('div 门面数据源是 gatherIdMap(只带 id/classes):可读 class,可写并乐观回读', async () => {
+    // 真实宿主 gatherControls 只采集 input/select/textarea/button,div 不在其中;
+    // div 门面完全靠 gatherIdMap 的 id 轻量表提供。此用例锁住该真实来源,
+    // 避免夹具再次给 div 造出 html/css 字段而掩盖问题。
+    const h = makeHarness('uma-4');
+    await h.settle();
+    h.fireInline(
+      "var b=document.getElementById('identity-desc-box');" +
+        "alert('cls='+b.className+'|initHtml=['+b.innerHTML+']');" +
+        "b.innerHTML='写入值';" +
+        "alert('after='+b.innerHTML);",
+      '3',
+      { id: 'identity-desc-box' },
+    );
+    await h.settle();
+    const out = h.alerts.join('\n');
+    expect(out).toContain('cls=description-box'); // classes 来自 idMap
+    expect(out).toContain('initHtml=[]'); // idMap 无 html 字段 → 初始读为空
+    expect(out).toContain('after=写入值'); // 写后同一同步段乐观回读
+    // 写入经 DOM 白名单 batch 回写宿主真实元素
+    const htmlOp = h.ops().find((o) => o.method === 'html' && o.ref?.value === '#identity-desc-box');
+    expect(htmlOp?.args?.[0]).toBe('写入值');
     expect(h.errors).toEqual([]);
   });
 });

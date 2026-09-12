@@ -325,9 +325,11 @@ fn normalize_entry(v: &Value) -> Option<WorldEntry> {
     let keys_secondary = read_field_list(v, &["keysecondary", "secondary_keys"]);
     // 位置:数字 0-4,或 ST 导出字符串 before_char/1/2/3/after_char
     let position = read_position(v);
-    // 扫描深度(ST depth;数字)
+    // 扫描深度(ST depth;数字)。角色卡导出常把 depth 放在 extensions 内
+    // (与 probability 同一形态,见下方),顶层优先、extensions 兜底。
     let depth = v
         .get("depth")
+        .or_else(|| v.get("extensions").and_then(|e| e.get("depth")))
         .and_then(|d| d.as_i64())
         .unwrap_or(default_depth());
     // 注入顺序:order(ST) / insertion_order(originalData);缺省 100
@@ -358,11 +360,7 @@ fn normalize_entry(v: &Value) -> Option<WorldEntry> {
         .and_then(|u| u.as_bool())
         .unwrap_or(false);
     // 注入角色(system / user / assistant;缺省 None = 按位置语义决定)
-    let role = v
-        .get("role")
-        .and_then(|r| r.as_str())
-        .map(|s| s.trim().to_string())
-        .filter(|s| s == "system" || s == "user" || s == "assistant");
+    let role = read_role(v);
     Some(WorldEntry {
         id,
         comment,
@@ -403,6 +401,28 @@ fn read_position(v: &Value) -> i64 {
         };
     }
     0
+}
+
+/// 读取注入角色:接受字符串 system/user/assistant,或 ST 数字 0/1/2
+/// (0=system, 1=user, 2=assistant)。角色卡导出常把 role 放在 extensions 内,
+/// 故顶层 role 优先、extensions.role 兜底;无法识别时返回 None(按位置语义取缺省角色)。
+fn read_role(v: &Value) -> Option<String> {
+    let raw = v
+        .get("role")
+        .or_else(|| v.get("extensions").and_then(|e| e.get("role")))?;
+    if let Some(s) = raw.as_str() {
+        let t = s.trim();
+        return match t {
+            "system" | "user" | "assistant" => Some(t.to_string()),
+            _ => None,
+        };
+    }
+    match raw.as_i64() {
+        Some(0) => Some("system".to_string()),
+        Some(1) => Some("user".to_string()),
+        Some(2) => Some("assistant".to_string()),
+        _ => None,
+    }
 }
 
 /// 读取字符串/数组字段(keysecondary / secondary_keys 等)
@@ -884,6 +904,61 @@ mod tests {
         assert_eq!(e.probability, 80);
         assert!(e.use_probability);
         assert_eq!(e.position, 1);
+    }
+
+    /// 角色卡导出格式:depth/role 常落在 extensions 内(顶层无同名字段)。
+    /// 回归:赛马娘卡 95 条条目全部把 depth 放在 extensions,旧实现一律取缺省 4,
+    /// 导致 depth=1/2 的剧情条目被放宽到 4 条窗口误命中。
+    #[test]
+    fn parses_depth_and_role_from_extensions() {
+        let raw = json!({
+            "entries": [
+                { "uid": 7, "comment": "ext 深度", "keys": ["关键"], "content": "内容",
+                  "constant": false, "extensions": { "depth": 2, "role": 1 } },
+                { "uid": 8, "comment": "ext 深度 0", "keys": ["关键"], "content": "内容",
+                  "constant": false, "extensions": { "depth": 0 } },
+                { "uid": 9, "comment": "无 depth", "keys": ["关键"], "content": "内容",
+                  "constant": false }
+            ]
+        });
+        let entries = collect_entries(&raw);
+        assert_eq!(entries[0].depth, 2, "extensions.depth 生效");
+        assert_eq!(entries[0].role.as_deref(), Some("user"), "extensions.role 数字 1 → user");
+        assert_eq!(entries[1].depth, 0, "extensions.depth=0(全部历史)保留");
+        assert_eq!(entries[2].depth, 4, "两者都缺省回退 4");
+    }
+
+    /// 顶层字段优先于 extensions(同一份导出两种形态并存时的优先级)
+    #[test]
+    fn top_level_depth_and_role_win_over_extensions() {
+        let raw = json!({
+            "entries": [
+                { "uid": 1, "comment": "双写", "keys": ["关键"], "content": "内容",
+                  "constant": false, "depth": 5, "role": "assistant",
+                  "extensions": { "depth": 2, "role": 0 } }
+            ]
+        });
+        let entries = collect_entries(&raw);
+        assert_eq!(entries[0].depth, 5, "顶层 depth 优先");
+        assert_eq!(entries[0].role.as_deref(), Some("assistant"), "顶层 role 优先");
+    }
+
+    /// role 字符串形态与无法识别值:合法字符串归一,非法值退回 None(按位置语义取缺省)
+    #[test]
+    fn role_string_and_invalid_forms() {
+        let raw = json!({
+            "entries": [
+                { "uid": 1, "comment": "字符串", "keys": [], "content": "x", "constant": true, "role": " assistant " },
+                { "uid": 2, "comment": "非法数字", "keys": [], "content": "x", "constant": true, "role": 9 },
+                { "uid": 3, "comment": "非法字符串", "keys": [], "content": "x", "constant": true, "role": "tool" },
+                { "uid": 4, "comment": "缺省", "keys": [], "content": "x", "constant": true }
+            ]
+        });
+        let entries = collect_entries(&raw);
+        assert_eq!(entries[0].role.as_deref(), Some("assistant"), "两侧空白归一");
+        assert!(entries[1].role.is_none(), "非法数字 → None");
+        assert!(entries[2].role.is_none(), "非法字符串 → None");
+        assert!(entries[3].role.is_none(), "缺省 → None");
     }
 
     /// view → value 往返:写回字段与 ST/角色卡兼容(disable 反转、uid/id、depth/order 等)

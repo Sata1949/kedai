@@ -33,7 +33,49 @@ export function sanitizeScopedCss(css: string): string {
     .filter(Boolean)
     .join('\n');
 
-  return cleanBlocks(css.replace(/<\/style/gi, ''));
+  // 注释必须先剥:注释内若含 {} 会破坏 splitCssBlocks 的顶层块切分
+  return cleanBlocks(stripCssComments(css).replace(/<\/style/gi, ''));
+}
+
+/**
+ * 剥离 CSS 注释(引号感知)。作者卡常把说明写在声明之间:
+ *   `background-color: #fce8e6;\n/* 信纸质感 *\/\nbackground-image: radial-gradient(…)`
+ * 注释文本会被并入下一条声明的属性名,导致该声明整条被清洗丢弃(赛马娘卡纸纹背景
+ * 与 .select-item 的 gap 就是这样丢的)。这里把注释替换为一个空格再走声明切分。
+ *
+ * 引号内的 `/*` 不清:url("https://a/*.png") 这类合法值不能被误伤;反斜杠转义按
+ * CSS 语义跳过下一个字符,避免 `content: "\\"` 这类写法提前结束引号态。
+ */
+export function stripCssComments(css: string): string {
+  if (!css.includes('/*')) return css;
+  let out = '';
+  let quote: string | null = null;
+  for (let i = 0; i < css.length; i++) {
+    const ch = css[i];
+    if (quote) {
+      out += ch;
+      if (ch === '\\') {
+        if (i + 1 < css.length) out += css[++i];
+      } else if (ch === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      out += ch;
+      continue;
+    }
+    if (ch === '/' && css[i + 1] === '*') {
+      const end = css.indexOf('*/', i + 2);
+      // 未闭合注释:按 CSS 容错语义吞到末尾
+      i = end === -1 ? css.length : end + 1;
+      out += ' ';
+      continue;
+    }
+    out += ch;
+  }
+  return out;
 }
 
 /** url() 逐条白名单:仅 https 与 data:image(外链图/内联图);无 url() 直接放行 */
@@ -49,13 +91,14 @@ export function cssUrlsSafe(value: string): boolean {
 
 /**
  * CSS 声明清洗(规则体与 style 属性共用):
- * 剥 behavior/binding、expression()/@import/javascript:、非白名单 url();
+ * 先剥注释(否则注释会被并入下一条声明的属性名,整条声明被丢弃),
+ * 再剥 behavior/binding、expression()/@import/javascript:、非白名单 url();
  * 属性名限小写字母/连字符或 -- 自定义属性。
  */
 export function sanitizeCssDeclarations(input: string): string {
   const deniedProperties = new Set(['behavior', 'binding', '-moz-binding']);
   const unsafeValue = /expression\s*\(|@import|javascript:/i;
-  return splitCssDeclarations(input)
+  return splitCssDeclarations(stripCssComments(input))
     .map((declaration) => {
       const colon = declaration.indexOf(':');
       if (colon <= 0) return '';

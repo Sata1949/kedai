@@ -284,16 +284,24 @@ describe('applyJq 事件绑定(on/off,实跑问题 7 R3)', () => {
     expect(bindings).toHaveLength(0);
   });
 
-  it('clipboard-write 交给宿主 navigator.clipboard(无 clipboard 时返回 false,不抛错)', () => {
+  it('clipboard-write 无剪贴板时抛错(让沙箱侧 reject,而非谎报成功)', () => {
     const doc = { createElement: (_t: string): StubEl => new StubEl(doc) };
     const container = new StubEl(doc);
     const context = {
       container: container as unknown as HTMLElement,
       characterId: 'c1',
     } as never;
-    const result = applyRpc(context, 'clipboard-write', ['要复制的文本']);
-    // node 环境无 navigator.clipboard:返回 false(Promise 或布尔都不抛错,不拆沙箱)
-    expect(result === false || result instanceof Promise).toBe(true);
+    // node 环境无 navigator.clipboard。抛错是刻意契约:宿主 rpc-result(ok:false) 会让沙箱侧
+    // writeText 的 Promise reject,作者脚本 .catch() 才能弹真实失败提示。若降级成 false,
+    // 作者脚本 .then() 仍会弹「已复制」而剪贴板为空(实测缺口)。
+    expect(() => applyRpc(context, 'clipboard-write', ['要复制的文本'])).toThrow('剪贴板');
+  });
+
+  it('clipboard-write 超长文本抛错(既有长度上限不变)', () => {
+    const doc = { createElement: (_t: string): StubEl => new StubEl(doc) };
+    const container = new StubEl(doc);
+    const context = { container: container as unknown as HTMLElement, characterId: 'c1' } as never;
+    expect(() => applyRpc(context, 'clipboard-write', ['x'.repeat(1_000_001)])).toThrow('过大');
   });
 
   it('纯数据 op 未注入扩展点时返回 null 而非抛选择器错误(实跑问题 7 主因兜底)', () => {

@@ -431,6 +431,41 @@ mod tests {
         assert!(collect_world_text(&[e], &history, &mut AssistantVars::new()).is_some());
     }
 
+    /// 回归:角色卡把 depth 写在 extensions 内时,扫描窗口须按该值生效。
+    /// 赛马娘卡的【开局】/【怪奇IF】条目作者设定 depth=2,而首楼界面替换后选项文案
+    /// 会继续留在历史里;旧实现把 depth 当缺省 4,使这些条目超出作者窗口后仍命中,
+    /// 污染提示词(实测:4 条消息窗口下误注入)。
+    #[test]
+    fn extensions_depth_limits_scan_window() {
+        let raw = serde_json::json!({ "entries": [
+            { "uid": 1, "comment": "【开局】野史大学习", "keys": ["野史大学习"],
+              "content": "开局正文", "constant": false, "disable": false,
+              "extensions": { "depth": 2 } }
+        ] });
+        let entries = crate::parsing::world_book::collect_entries(&raw);
+        assert_eq!(entries[0].depth, 2, "extensions.depth 应被解析");
+
+        // 关键词只在第 1 条,其后 3 条无关 → 共 4 条用户消息
+        let history = vec![
+            message("user", "【开场场景】野史大学习"),
+            message("user", "无关消息一"),
+            message("user", "无关消息二"),
+            message("user", "无关消息三"),
+        ];
+        // depth=2 只扫最近 2 条,关键词落在窗口外 → 不命中(旧实现 depth=4 会误命中)
+        assert!(
+            collect_world_text(&entries, &history, &mut AssistantVars::new()).is_none(),
+            "extensions.depth=2 不应扫到 4 条窗口外的关键词"
+        );
+        // 关键词回到窗口内(最后一条)则命中
+        let near = vec![
+            message("user", "无关消息一"),
+            message("user", "无关消息二"),
+            message("user", "【开场场景】野史大学习"),
+        ];
+        assert!(collect_world_text(&entries, &near, &mut AssistantVars::new()).is_some());
+    }
+
     /// 副关键词(keysecondary)与主关键词并列命中
     #[test]
     fn secondary_keys_match() {

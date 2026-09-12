@@ -22,6 +22,7 @@ export {
   sanitizeScopedCss,
   sanitizeStyleAttribute,
   scopeCss,
+  stripCssComments,
 } from './cssSanitize';
 
 /** HTML 转义(防注入) */

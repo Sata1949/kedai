@@ -852,9 +852,13 @@ try{
   const __kdExec=document.execCommand?document.execCommand.bind(document):null;
   document.execCommand=function(cmd){
     if(String(cmd)==='copy'){
-      // 取当前选区文本(沙箱内选区);无选区时由调用方先 select(),此处尽力读取
+      // 取当前选区文本(沙箱内选区);无选区时由调用方先 select(),此处尽力读取。
+      // 返回值对齐原生语义:真的派发了文本才算成功。此前无条件 return true 会让
+      // 作者脚本的 try 分支照常弹「已复制」,而剪贴板其实没有内容(与 clipboard-write
+      // 桥同一类谎报问题);取不到文本时返回 false,落到作者脚本的 catch 分支。
       let text='';try{text=String(globalThis.getSelection?globalThis.getSelection():'')||'';}catch(_e){}
-      if(text)void rpc('clipboard-write',text).catch(function(){});
+      if(!text)return false;
+      void rpc('clipboard-write',text).catch(function(){});
       return true;
     }
     return __kdExec?__kdExec.apply(document,arguments):false;

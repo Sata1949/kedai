@@ -9,6 +9,7 @@ import {
   hasStatusPlaceholderScript,
   buildMessageRenderText,
   sanitizeScopedCss,
+  sanitizeStyleAttribute,
   extractBodyLoadUrl,
   buildRemoteResourceHtml,
   stableFrameNonce,
@@ -100,6 +101,60 @@ describe('sanitizeScopedCss', () => {
     const safe = sanitizeScopedCss('@import "x"; @font-face{x:y} @media(max-width:1px){.x{color:red}} @keyframes k{from{opacity:0}}');
     expect(safe).not.toMatch(/@import|@font-face|@media/i);
     expect(safe).toContain('@keyframes k');
+  });
+});
+
+describe('CSS 注释处理(回归:注释吞掉紧随声明)', () => {
+  it('注释写在声明之间时,两侧声明都保留(赛马娘卡 body 纸纹背景)', () => {
+    // 作者卡常把说明写在声明之间;旧实现把注释文本并入下一条的属性名 → 整条声明被丢弃
+    const css =
+      'margin: 0; background-color: #fce8e6; /* 信纸质感 */ background-image: radial-gradient(circle at top left, rgba(255,255,255,0.8) 0%, transparent 100%); font-family: sans-serif;';
+    const safe = sanitizeScopedCss(`body{${css}}`);
+    expect(safe).toContain('background-color: #fce8e6');
+    expect(safe).toContain('background-image: radial-gradient');
+    expect(safe).toContain('font-family: sans-serif');
+    expect(safe).not.toContain('/*');
+  });
+
+  it('注释在属性名前(.select-item 的 gap / .description-box 的 padding)', () => {
+    const safe = sanitizeScopedCss(
+      '.select-item{display:flex; /* 竖向排列更清爽 */ gap:8px}' +
+        '.description-box{border-left:4px solid #f6a192; /* 温柔粉橘边框 */ padding:15px 20px}',
+    );
+    expect(safe).toContain('gap: 8px');
+    expect(safe).toContain('padding: 15px 20px');
+  });
+
+  it('注释含花括号时不破坏顶层块切分', () => {
+    const safe = sanitizeScopedCss('/* 说明 { 花括号 } */ .a{color:red} .b{color:blue}');
+    expect(safe).toContain('.a { color: red }');
+    expect(safe).toContain('.b { color: blue }');
+  });
+
+  it('引号内的 /* 不被当注释(合法 url 值)', () => {
+    const safe = sanitizeScopedCss('.a{background:url("https://a/x/*.png")}');
+    expect(safe).toContain('https://a/x/*.png');
+  });
+
+  it('无其他声明的纯注释规则被丢弃,不留空壳', () => {
+    expect(sanitizeScopedCss('.a{/* 只有注释 */}')).toBe('');
+  });
+
+  it('剥注释后安全拦截不回退', () => {
+    const safe = sanitizeScopedCss(
+      '.a{ /* 说明 */ behavior:url(x.htc)}' +
+        '.b{ /* 说明 */ width:expression(alert(1))}' +
+        '.c{ /* 说明 */ background:url(javascript:alert(1))}' +
+        '.d{ /* 说明 */ background:url(http://evil.test/x.png)}',
+    );
+    expect(safe).not.toMatch(/behavior|expression|javascript:|evil\.test/i);
+  });
+
+  it('style 属性清洗同样剥注释(sanitizeStyleAttribute 共用管线)', () => {
+    const safe = sanitizeStyleAttribute('color: red; /* 说明 */ padding: 4px');
+    expect(safe).toContain('color: red');
+    expect(safe).toContain('padding: 4px');
+    expect(safe).not.toContain('/*');
   });
 });
 

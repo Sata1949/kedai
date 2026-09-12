@@ -668,9 +668,12 @@ export function applyRpc(
     if (text.length > 1_000_000) throw new Error('剪贴板文本过大');
     const nav = typeof navigator !== 'undefined' ? navigator : undefined;
     const clip = nav?.clipboard;
-    if (!clip?.writeText) return false;
-    // 返回 Promise:宿主页在用户手势上下文内调用 writeText(失败仅报 false,不拆沙箱)
-    return clip.writeText(text).then(() => true).catch(() => false);
+    if (!clip?.writeText) throw new Error('宿主页面不提供剪贴板写入');
+    // 失败必须走 reject:沙箱侧 writeText 直接 resolve 本 Promise,若此处把失败降级成
+    // false,作者脚本的 .then() 会照常弹「已复制」而剪贴板其实是空的。抛错后由 host 的
+    // rpc-result(ok:false) 转成沙箱侧 reject,落到作者脚本 .catch() 分支;
+    // 未捕获时仅触发 boot 的 unhandledrejection 上报 warn,不会拆除整个沙箱。
+    return clip.writeText(text).then(() => true);
   }
   // 纯数据 op(数据 RPC 未注入扩展点时的兜底):首参不是 CSS 选择器,不得走
   // querySelector —— 旧实现会把楼层序号/世界书名当选择器,safeSelector 抛错 →

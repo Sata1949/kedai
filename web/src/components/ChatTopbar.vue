@@ -6,6 +6,7 @@ import { ref, computed } from 'vue';
 import { storeToRefs } from 'pinia';
 import { useAppStore } from '../store';
 import { computeHitRate } from '../contextStats';
+import { hasRenderableScripts as cardHasRenderableScripts, shouldShowJsAuthHint, shouldShowRenderHint } from '../renderHints';
 
 const emit = defineEmits<{
   /** 打开开场选择器(new=新建会话时选择;switch=当前会话内重置开场) */
@@ -26,14 +27,22 @@ const currentScripts = computed(() => currentCharacter.value?.regex_scripts ?? [
  * 角色卡含有替换体的启用脚本(即可渲染界面)且 HTML 渲染处于关闭态时,在顶栏下
  * 显示一键开启提示;关闭动作按角色记忆,换卡后重新评估。
  */
-const hasRenderableScripts = computed(() =>
-  currentScripts.value.some((s) => s.enabled && !!s.replace_string?.trim()),
-);
+const hasRenderableScripts = computed(() => cardHasRenderableScripts(currentScripts.value));
 const renderHintDismissed = ref<Set<string>>(new Set());
-const renderHintVisible = computed(() => {
+const jsHintDismissed = ref<Set<string>>(new Set());
+/** 两条提示共用的判定输入(真值表见 renderHints.ts 与其测试) */
+const hintState = computed(() => {
   const id = currentCharacterId.value;
-  return !!id && hasRenderableScripts.value && !renderHtml.value && !renderHintDismissed.value.has(id);
+  return {
+    characterId: id,
+    renderHtml: renderHtml.value,
+    scriptAuthorized: currentScriptAuthorized.value,
+    hasRenderable: hasRenderableScripts.value,
+    renderHintDismissed: !!id && renderHintDismissed.value.has(id),
+    jsHintDismissed: !!id && jsHintDismissed.value.has(id),
+  };
 });
+const renderHintVisible = computed(() => shouldShowRenderHint(hintState.value));
 function dismissRenderHint(): void {
   const id = currentCharacterId.value;
   if (!id) return;
@@ -41,10 +50,25 @@ function dismissRenderHint(): void {
   next.add(id);
   renderHintDismissed.value = next;
 }
-/** 一键开启 HTML 渲染;并顺带提示可再授权 JS(授权按钮常驻,指引用户二次确认) */
+/** 一键开启 HTML 渲染;JS 授权由引导条上的独立按钮触发(高危操作不合并进一次点击) */
 function enableRenderFromHint(): void {
   store.renderHtml = true;
   dismissRenderHint();
+}
+
+/**
+ * JS 授权引导条(实跑问题:赛马娘卡首楼界面点击全失效的可发现性缺口)。
+ * HTML 渲染已开、卡内含界面脚本、但 JS 尚未授权时,界面能显示却完全不响应点击
+ * (下拉不更新描述、按钮无反应),用户无从判断原因。这里给出显式提示与授权入口。
+ * 与 HTML 提示各用独立 dismissed 集合:关掉其一不影响另一条的提示。
+ */
+const jsAuthHintVisible = computed(() => shouldShowJsAuthHint(hintState.value));
+function dismissJsAuthHint(): void {
+  const id = currentCharacterId.value;
+  if (!id) return;
+  const next = new Set(jsHintDismissed.value);
+  next.add(id);
+  jsHintDismissed.value = next;
 }
 
 // 会话切换
@@ -181,5 +205,12 @@ const hitRate = computed<number | null>(() => computeHitRate(store.lastUsage));
     <button type="button" class="sv-btn ghost sv-btn-sm" @click="enableRenderFromHint">开启 HTML 渲染</button>
     <button type="button" class="sv-btn ghost sv-btn-sm" title="查看风险后为当前角色卡启用 JavaScript" @click="confirmScriptAuthorization">授权 JS</button>
     <button type="button" class="sv-icon-btn" title="不再提示(仅此角色)" @click="dismissRenderHint">✕</button>
+  </div>
+
+  <!-- JS 授权引导条:界面已显示但脚本未授权,交互不会生效(赛马娘卡首楼点击全失效的可发现性缺口) -->
+  <div v-if="jsAuthHintVisible" class="sv-render-hint" role="status">
+    <span class="sv-render-hint-text">此角色卡的界面脚本尚未授权 JS,界面上的下拉/按钮点击不会生效。</span>
+    <button type="button" class="sv-btn ghost sv-btn-sm" title="查看风险后为当前角色卡启用 JavaScript" @click="confirmScriptAuthorization">授权 JS</button>
+    <button type="button" class="sv-icon-btn" title="不再提示(仅此角色)" @click="dismissJsAuthHint">✕</button>
   </div>
 </template>

@@ -822,6 +822,34 @@ describe('sandboxScript(角色卡悬浮窗兼容面:head 映射/css 对象/attr 
     expect((rpc?.args as unknown[])[0]).toBe('提示词正文');
   });
 
+  it('剪贴板 RPC 失败时沙箱侧 Promise reject,作者脚本走 catch 分支(不再谎报成功)', async () => {
+    const nonce = 'nonce-clip-fail';
+    const script = sandboxScript(
+      "navigator.clipboard.writeText('提示词').then(function(){warn('then-hit')}).catch(function(e){warn('catch-hit:'+e.message)});",
+      nonce,
+      { stat_data: {}, display_data: {} },
+    );
+    const { messages, dispatch } = makeSandbox(nonce, script);
+    await new Promise((r) => setTimeout(r, 10));
+    const rpc = messages.find((m) => m.type === 'rpc' && m.op === 'clipboard-write');
+    expect(rpc).toBeTruthy();
+    // 宿主剪贴板失败 → rpc-result(ok:false);沙箱侧据此 reject
+    dispatch({
+      channel: 'kedai-character-script-v1',
+      nonce,
+      type: 'rpc-result',
+      id: rpc?.id,
+      ok: false,
+      error: '宿主页面不提供剪贴板写入',
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    const warns = messages.filter((m) => m.type === 'warn').map((m) => String(m.message));
+    expect(warns.some((w) => w.includes('catch-hit'))).toBe(true);
+    expect(warns.some((w) => w.includes('then-hit'))).toBe(false);
+    // 单次失败只上报 warn,不拆沙箱
+    expect(messages.some((m) => m.type === 'error')).toBe(false);
+  });
+
   it('实跑问题 7 R4:execCommand("copy") 桥接后不再走原生(无选区也不抛错)', async () => {
     const nonce = 'nonce-execcopy';
     const script = sandboxScript(
