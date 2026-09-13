@@ -92,8 +92,17 @@ if (-not $SkipWeb) {
     try {
         # 契约快照:手写 TS 类型与 Rust 后端字段集合比对(漂移即 FAIL,纯 Node 零依赖)
         Invoke-Stage 'contract: check-contract' { node tools/check-contract.mjs }
-        # 架构护栏:store 循环依赖 + 组件直改 state(新增违规即 FAIL)
+        # 架构护栏:前端 store 循环依赖 + 组件直改 state + 后端分层规则 C/D/E
+        # (后端规则当前为 WARN 档,批次 B/D 完成后随构建切 --strict-backend 硬门禁)
         Invoke-Stage 'arch: check-arch'         { node tools/check-arch.mjs }
+        # 测试数自动统计:与 MAINTENANCE.md 记录比对,文档漂移即 WARN(不拦截)
+        Write-Host "`n===== 测试数统计(文档漂移检查,警告档)=====" -ForegroundColor Cyan
+        node tools/count-tests.mjs
+        node tools/count-tests.mjs --check
+        if ($LASTEXITCODE -ne 0) { Write-Host '[WARN] 测试数字与 MAINTENANCE.md 不一致(不拦截;请更新文档)' -ForegroundColor Yellow }
+        # 前端类型逃逸 ratchet:as never / as unknown as / 非空断言 / any 只降不升
+        # (纯 Node 零依赖,与 check-arch/check-contract 同风格;基线见脚本内 BASELINE)
+        Invoke-Stage 'web: type-ratchet'        { node tools/check-frontend-lint.mjs }
         # 2026-09-08 附录 D 168 个存量错误已清偿归零,typecheck 恢复硬门禁;
         # -StrictTypecheck 参数保留兼容(已无分支差异)
         Invoke-Stage 'web: vue-tsc --noEmit'    { npm run typecheck -w web }

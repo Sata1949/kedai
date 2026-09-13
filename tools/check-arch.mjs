@@ -1,14 +1,19 @@
 #!/usr/bin/env node
 /**
- * Kedai 前端架构护栏(Node 零依赖)。
+ * Kedai 架构护栏(Node 零依赖)。
  *
- * 两项检查:
+ * 前端两项检查:
  *   A. store 循环依赖 —— store 间顶层 import 构成的环。Pinia setup store 允许在
  *      action 内运行期 `useXStore()`,但顶层 import 成环会让初始化顺序变成隐式契约
  *      (谁先被 import 影响 setup 期行为),且无法单独替换任一 store。检出即 FAIL。
  *   B. 组件直改 store state —— 组件里 `store.field = ...` 绕过 action 直接赋值,
  *      使状态变更路径分散、无法在 action 里统一做副作用与校验。仅报「疑似绕过」
  *      (字段写了 action 才会被拦),存量无害赋值经 BASELINE 白名单豁免。
+ *
+ * 后端三项分层检查(2026-09-13 新增,落实三结合 L1/L2 边界):
+ *   C. `services/task_engine/**` 不得 import `task_service`(任务引擎依赖倒置)。
+ *   D. L1(parsing/models/contracts)不得 `use crate::services::`(老层不被上层渗透)。
+ *   E. `services/**` 生产代码不得出现 `.expect(`(连接池异常不得 panic 掉请求线程)。
  *
  * 用法:
  *   node tools/check-arch.mjs
@@ -228,7 +233,112 @@ if (VERBOSE) {
 
 // ---------- 汇总 ----------
 
-console.log('========== Kedai 前端架构护栏 ==========');
+// ========== 后端分层检查(C/D/E) ==========
+//
+// 上线策略:先以 WARN 报告(不 FAIL),待对应批次完成后再切硬门禁。
+// 切换方式:把 STRICT_BACKEND 置 true,或在 check-all 传 --strict-backend。
+const STRICT_BACKEND = process.argv.includes('--strict-backend');
+const SERVER = join(ROOT, 'server-rs', 'src');
+
+/** 递归收集指定后缀文件(相对 ROOT 的路径)。 */
+function collect(dir, exts) {
+  const out = [];
+  const walk = (d) => {
+    for (const name of readdirSync(d)) {
+      const p = join(d, name);
+      if (statSync(p).isDirectory()) walk(p);
+      else if (exts.some((e) => name.endsWith(e))) out.push(p);
+    }
+  };
+  if (statSync(dir, { throwIfNoEntry: false })?.isDirectory()) walk(dir);
+  return out;
+}
+
+/** 生产代码行(剔除 #[cfg(test)] 之后的内容)的行号集合。 */
+function productionLineCount(src) {
+  const idx = src.search(/^#\[cfg\(test\)\]/m);
+  return idx === -1 ? Infinity : src.slice(0, idx).split('\n').length;
+}
+
+const backendFailures = [];
+const backendWarnings = [];
+
+// --- 规则 C:task_engine 不得依赖 task_service(批次 B 断环) ---
+{
+  const dir = join(SERVER, 'services', 'task_engine');
+  let hits = 0;
+  for (const f of collect(dir, ['.rs'])) {
+    const src = readFileSync(f, 'utf8');
+    src.split('\n').forEach((line, i) => {
+      if (/^\s*(?:pub(?:\([^)]*\))?\s+)?use\s+crate::services::task_service/.test(line)) {
+        hits++;
+        backendFailures.push(
+          `[C] 任务引擎反向依赖 task_service:${relative(ROOT, f)}:${i + 1}(应经 task_core::TaskBackend 接口)`,
+        );
+      }
+    });
+  }
+  if (VERBOSE) console.log(`  [C] task_engine → task_service 违规 import:${hits} 处`);
+}
+
+// --- 规则 D:L1 不得依赖 services ---
+{
+  const ALLOW = new Set([join(SERVER, 'models', 'transport.rs')]); // 传输子域类型引用豁免
+  let hits = 0;
+  for (const top of ['parsing', 'models', 'contracts']) {
+    for (const f of collect(join(SERVER, top), ['.rs'])) {
+      if (ALLOW.has(f)) continue;
+      const src = readFileSync(f, 'utf8');
+      src.split('\n').forEach((line, i) => {
+        if (/^\s*use\s+crate::services::/.test(line)) {
+          hits++;
+          backendFailures.push(
+            `[D] L1 层(${top}/)反向依赖 services:${relative(ROOT, f)}:${i + 1}(L1 不得被上层渗透)`,
+          );
+        }
+      });
+    }
+  }
+  if (VERBOSE) console.log(`  [D] parsing/models/contracts → services 违规 import:${hits} 处`);
+}
+
+// --- 规则 E:services 生产代码不得 .expect( ---
+{
+  // 存量白名单:格式 "相对路径:行号"。批次 D 清零过程中逐条删除。
+  const EXPECT_BASELINE = new Set();
+  let hits = 0;
+  for (const f of collect(join(SERVER, 'services'), ['.rs'])) {
+    const src = readFileSync(f, 'utf8');
+    const prodLines = productionLineCount(src);
+    src.split('\n').forEach((line, i) => {
+      const ln = i + 1;
+      if (ln > prodLines) return; // 测试模块内豁免
+      if (!/\.expect\(/.test(line)) return;
+      // 注释行不算
+      if (/^\s*\/\//.test(line)) return;
+      const rel = relative(ROOT, f);
+      if (EXPECT_BASELINE.has(`${rel}:${ln}`)) return;
+      hits++;
+      backendFailures.push(
+        `[E] services 生产代码使用 .expect(:${rel}:${ln}(应返回 Result 或 tracing::error,不得 panic 请求线程)`,
+      );
+    });
+  }
+  if (VERBOSE) console.log(`  [E] services 生产 .expect( 违规:${hits} 处`);
+}
+
+console.log('\n========== Kedai 后端分层护栏(C/D/E) ==========');
+if (backendFailures.length) {
+  const tag = STRICT_BACKEND ? 'FAIL' : 'WARN';
+  console.log(`[${tag}] ${backendFailures.length} 处分层违规${STRICT_BACKEND ? '' : '(当前为警告档;批次 B/D 完成后随构建切硬门禁)'}:`);
+  for (const f of backendFailures.slice(0, 40)) console.log(`  - ${f}`);
+  if (backendFailures.length > 40) console.log(`  ... 另有 ${backendFailures.length - 40} 处`);
+  if (STRICT_BACKEND) process.exit(1);
+} else {
+  console.log('[ OK ] 后端分层无违规');
+}
+
+console.log('\n========== Kedai 前端架构护栏 ==========');
 console.log(`store 循环依赖:${cycles.length} 个(新增 ${newCycles})`);
 console.log(`组件直改 state:${writeHits} 处(白名单 ${whitelisted})`);
 if (notes.length) {

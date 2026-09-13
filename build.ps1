@@ -25,7 +25,8 @@ param(
     [switch]$NoWeb,
     [switch]$Tauri,
     [switch]$WithPortable,
-    [switch]$TestOnly
+    [switch]$TestOnly,
+    [switch]$SkipChecks
 )
 
 $ErrorActionPreference = "Stop"
@@ -86,6 +87,21 @@ if ($TestOnly -and $Dev) {
 
 # 双端同步是默认行为;-TestOnly / -Dev 是明确的单端快速通道
 $BuildPortable = -not $TestOnly -and -not $Dev
+
+# 0) 门禁:先跑测试与静态检查,失败即中止(避免先花十分钟构建才发现测试红)。
+#    -Quick 跳过 check-all 内部的前端 vite build(下方 [1/3] 会再构建一次,避免重复)。
+#    逃生开关 -SkipChecks 仅限本地应急;交付前必须补跑一次完整的 tools/check-all.ps1。
+if (-not $SkipChecks) {
+    Write-Host "[0/3] 门禁检查(check-all.ps1 -Quick) ..." -ForegroundColor Green
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root "tools\check-all.ps1") -Quick
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[FAIL] 门禁未通过,构建中止(仅本地应急可加 -SkipChecks)" -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "[OK] 门禁通过" -ForegroundColor Green
+} else {
+    Write-Host "[0/3] 已跳过门禁检查(-SkipChecks);交付前请补跑完整 check-all" -ForegroundColor Yellow
+}
 
 Assert-VersionConsistency
 

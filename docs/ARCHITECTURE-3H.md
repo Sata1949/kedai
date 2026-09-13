@@ -56,6 +56,10 @@ kedai 落点：
 - `skills/`、`examples/`（技能库、示范模板）
 - 脚本沙箱（`characterScriptSandbox.ts`）、远程资源代理
 - 本轮新能力：GENERATE/@INJECT 注入、@@ 装饰器、EJS 读取 API、统计变量
+- **EJS 自研解释器（`parsing/assistant/ejs/`）· 冻结**：只接受安全修复，**新模板能力一律在
+  `scripts/runtime.rs` 的 rquickjs 沙箱侧实现**（rquickjs 自带内存/中断/栈上限）。该解释器
+  已加固「循环步数 + 墙钟预算 + 解析深度守卫」（2026-09-13），但不再扩展——自研引擎缺
+  引擎级沙箱限额，继续加功能会扩大不可信输入的攻击面。详见 `MAINTENANCE.md §0` 冻结纪律。
 
 ---
 
