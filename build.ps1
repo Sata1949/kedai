@@ -282,15 +282,34 @@ if (-not $Dev) {
         $stampPath = Write-KedaiBuildStamp -Root $Root -ExePath $dest
         Write-Host "[指纹] 已写出 $(Split-Path $stampPath -Leaf)" -ForegroundColor Green
     }
-    # 清理路径必须与实际产物目录一致:外置(-RustTargetDir 或 CARGO_TARGET_DIR)时,
-    # 硬编码 server-rs\target 会清理不到,外置目录将持续累积(2026-09-13 批次 1 修正)。
-    if (Test-Path $CargoTargetDir) {
-        try {
-            Remove-Item -Recurse -Force $CargoTargetDir -ErrorAction Stop
-            Write-Host "[清理] 已删除 $CargoTargetDir" -ForegroundColor Yellow
-        } catch {
-            Write-Host "[警告] 清理 $CargoTargetDir 失败: $($_.Exception.Message)" -ForegroundColor Yellow
+    # 清理产物释放磁盘(下次构建全量重编,是有意取舍)。
+    # 路径必须与实际产物目录一致(2026-09-13 批次 1 修正):外置时硬编码 server-rs\target
+    # 会清理不到。**但外置目录可能与他人共用**(本机 D:\kedai-build 下还挂着 Android 构建的
+    # junction 目标 android-app-build)——2026-09-13 实测踩坑:整删外置目录把 Android 构建目录
+    # 一并删除,导致 APK 构建在 `app:mergeUniversalReleaseJniLibsFolders` 报「无法创建目录」。
+    # 故:默认路径整删(整个 target 都是 cargo 的);外置目录只清 cargo 自己的 profile 子目录。
+    if ($CargoTargetDir -eq "$Root\server-rs\target") {
+        if (Test-Path $CargoTargetDir) {
+            try {
+                Remove-Item -Recurse -Force $CargoTargetDir -ErrorAction Stop
+                Write-Host "[清理] 已删除 $CargoTargetDir" -ForegroundColor Yellow
+            } catch {
+                Write-Host "[警告] 清理 $CargoTargetDir 失败: $($_.Exception.Message)" -ForegroundColor Yellow
+            }
         }
+    } else {
+        foreach ($sub in @("debug", "release", "tmp", "CACHEDIR.TAG", ".rustc_info.json")) {
+            $p = Join-Path $CargoTargetDir $sub
+            if (Test-Path $p) {
+                try {
+                    Remove-Item -Recurse -Force $p -ErrorAction Stop
+                    Write-Host "[清理] 已删除 $p" -ForegroundColor Yellow
+                } catch {
+                    Write-Host "[警告] 清理 $p 失败: $($_.Exception.Message)" -ForegroundColor Yellow
+                }
+            }
+        }
+        Write-Host "[提示] 外置产物目录只清 cargo 子目录,保留同目录下其它数据: $CargoTargetDir" -ForegroundColor DarkGray
     }
 }
 # 本次要构建便携版时保留 src-tauri\target,交由 build-portable.ps1 复用缓存并统一清理。

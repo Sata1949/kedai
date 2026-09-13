@@ -1,7 +1,7 @@
 # Kedai 维护指南(MAINTENANCE)
 
 > 面向后续维护者的技术文档。涵盖架构、构建、启动、API 契约、数据库、日志与已知坑位。
-> 版本:v0.3.0-beta(前端 Vue3 + 后端 Rust + Tauri 桌面壳) 最后更新:2026-09-13
+> 版本:v0.3.0-A-beta(前端 Vue3 + 后端 Rust + Tauri 桌面壳) 最后更新:2026-09-13
 
 ---
 
@@ -439,7 +439,10 @@ rusqlite(bundled,零原生依赖),**WAL 模式 + foreign_keys ON**。共 28 张�
     npm `check:lock`)以 **0 漂移**为基线,新增即 FAIL;② 新增依赖后两边各构建一次
     (便携版构建会自动带上 src-tauri 锁,测试版锁不会);③ 对齐手法:
     `cargo update -p <crate> --precise <ver>`(**不支持一次多条 `--precise`**,逐条执行),
-    或把落后一侧整体更新到较新版本;④ 不可避免的例外登记 `tools/lock-sync-baseline.json`。
+    或把落后一侧整体更新到较新版本;④ 不可避免的例外登记 `tools/lock-sync-baseline.json`;
+    ⑤ **本仓自身包**(`kedai-server`/`kedai-desktop`/`kedai-web`/`kedai`/`launcher`)已从比对中排除
+    —— 版本号由 `bump-version.ps1` 变更后,两锁的自身版本会暂时不一致(各自构建时才更新),
+    属发版的正常中间态而非依赖漂移(2026-09-13 实测:发版时该门禁曾误报,已加白名单)。
     根治途径是 Cargo workspace 化(未做,列入批次 4 可选项)。**注意**:对齐 `cc`/`thiserror`
     等版本后须重跑完整 `cargo test`(本批次已跑,全绿)。
 24. **API Key 解密失败曾在一次保存后被静默清空**(2026-09-13 批次 2 修复)。`secret_store::unprotect`
@@ -456,6 +459,17 @@ rusqlite(bundled,零原生依赖),**WAL 模式 + foreign_keys ON**。共 28 张�
     `Db::open` 升级 → 与全新库逐表比对 `PRAGMA table_info` + 索引;新增列/表/索引漏迁移即失败
     (已用注入探针验证)。**纪律**:改 `schema.rs` 的建表结构必须同步写 `migration/ddl.rs` 的
     `ensure_*` 迁移;**不要更新基线文件**(它是历史快照,更新它等于关掉守卫)。
+26. **外置产物目录不能整删:会连带删掉同目录下的 Android 构建目录**(2026-09-13 实测踩坑)。
+    `build.ps1` 的收尾清理在批次 1 改为跟随 `-RustTargetDir` 后**整删外置目录** —— 而本机
+    `D:\kedai-build` 下还挂着 `src-tauri\gen\android\app\build` 的 **junction 目标**
+    `android-app-build`。整删后 APK 构建在 `:app:mergeUniversalReleaseJniLibsFolders` 报
+    `Failed to create parent directory ...app\build`(悬空 junction 无法再被当作目录创建),
+    报错文案**不指向真因**,排查成本高。**纪律**:默认路径 `server-rs\target` 可整删;
+    **外置目录只清 cargo 自己的子目录**(`debug`/`release`/`tmp`/`CACHEDIR.TAG`/`.rustc_info.json`),
+    保留同目录其它数据(`build.ps1` 与 `tools/build-portable.ps1` 已按此修正)。
+    修复手法:重建 `D:\kedai-build\android-app-build`(空目录即可,gradle 会重新生成内容)。
+    另注:压缩/备份工具会**跟随** junction(踩坑 21),与本次「悬空 junction 无法创建目录」
+    是两个不同现象,勿混。
 
 ---
 

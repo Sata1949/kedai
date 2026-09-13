@@ -108,11 +108,23 @@ Write-Host "入口:$OutputDir\Kedai.exe"
 
 # 打包完成,清除编译产物目录(释放磁盘;下次构建需重新编译)。
 # 文件被占用(如 Kedai.exe 仍在运行)时删除可能失败,仅警告不中止。
-# server-rs 产物目录:broad 构建可能把后端产物外置(CARGO_TARGET_DIR),跟随该变量,
-# 避免外置目录清理不到(2026-09-13 批次 1 修正)。
+# server-rs 产物目录:构建可能把后端产物外置(CARGO_TARGET_DIR)——2026-09-13 批次 1 起跟随;
+# **但外置目录可能与他人共用**(本机 D:\kedai-build 下挂着 Android 构建的 junction 目标
+# android-app-build),整删会连带删掉 → APK 构建报「无法创建目录」。故外置时只清 cargo 子目录。
 $ServerRustTarget = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR }
                     else { Join-Path $Root "server-rs\target" }
-$CleanDirs = @($ServerRustTarget, (Join-Path $Root "src-tauri\target"))
+$DefaultServerTarget = Join-Path $Root "server-rs\target"
+if ($ServerRustTarget -eq $DefaultServerTarget) {
+    $CleanDirs = @($ServerRustTarget, (Join-Path $Root "src-tauri\target"))
+} else {
+    $CleanDirs = @(
+        (Join-Path $ServerRustTarget "debug"), (Join-Path $ServerRustTarget "release"),
+        (Join-Path $ServerRustTarget "tmp"), (Join-Path $ServerRustTarget "CACHEDIR.TAG"),
+        (Join-Path $ServerRustTarget ".rustc_info.json"),
+        (Join-Path $Root "src-tauri\target")
+    )
+    Write-Host "[提示] 外置产物目录只清 cargo 子目录,保留同目录下其它数据: $ServerRustTarget" -ForegroundColor DarkGray
+}
 foreach ($dir in $CleanDirs) {
     if (Test-Path $dir) {
         try {

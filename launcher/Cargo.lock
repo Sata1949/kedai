@@ -4,4 +4,4 @@ version = 4
 
 [[package]]
 name = "kedai-launcher"
-version = "0.3.0-beta"
+version = "0.3.0-A-beta"

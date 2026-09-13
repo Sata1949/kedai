@@ -24,6 +24,11 @@ const SERVER_LOCK = join(ROOT, 'server-rs', 'Cargo.lock');
 const TAURI_LOCK = join(ROOT, 'src-tauri', 'Cargo.lock');
 const BASELINE = join(ROOT, 'tools', 'lock-sync-baseline.json');
 
+/// 本仓自身包(工作区成员):版本号由 tools/bump-version.ps1 单点变更,lock 里的
+/// 自身版本由各自构建更新 —— 版本号刚改、便携版尚未重建时两侧会暂时不一致,
+/// 那是**版本更新的正常中间态**,不是依赖漂移,必须排除(否则每次发版都误报)。
+const WORKSPACE_PACKAGES = new Set(['kedai-server', 'kedai-desktop', 'kedai-web', 'kedai', 'launcher']);
+
 /** 解析 Cargo.lock → Map<name, Set<version>> */
 export function parseLock(text) {
   const map = new Map();
@@ -61,6 +66,7 @@ function loadBaseline() {
 export function findDrift(serverMap, tauriMap) {
   const drift = [];
   for (const [name, versions] of serverMap) {
+    if (WORKSPACE_PACKAGES.has(name)) continue; // 本仓自身包:版本更迭的中间态,非漂移
     const other = tauriMap.get(name);
     if (!other) continue; // 单侧存在:平台 cfg 差异,跳过
     for (const v of versions) {
