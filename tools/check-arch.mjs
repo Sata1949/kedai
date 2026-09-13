@@ -235,9 +235,12 @@ if (VERBOSE) {
 
 // ========== 后端分层检查(C/D/E) ==========
 //
-// 上线策略:先以 WARN 报告(不 FAIL),待对应批次完成后再切硬门禁。
-// 切换方式:把 STRICT_BACKEND 置 true,或在 check-all 传 --strict-backend。
-const STRICT_BACKEND = process.argv.includes('--strict-backend');
+// 分级策略:
+//   C(任务引擎不得依赖 task_service)、D(L1 不得依赖 services)——
+//     2026-09-13 已完成断环/清理,违规数归零,**永久硬门禁**(出现在这里即 FAIL)。
+//   E(services 生产代码不得 .expect)、G(不得新增裸 {error})——
+//     同批已清零 E;G 存量 117 处待逐个补 code(需逐处判定 HTTP 状态码),故走
+//     ratchet(数量不得超基线)。二者违规即 FAIL。
 const SERVER = join(ROOT, 'server-rs', 'src');
 
 /** 递归收集指定后缀文件(相对 ROOT 的路径)。 */
@@ -365,11 +368,10 @@ const backendWarnings = [];
 
 console.log('\n========== Kedai 后端分层护栏(C/D/E/G) ==========');
 if (backendFailures.length) {
-  const tag = STRICT_BACKEND ? 'FAIL' : 'WARN';
-  console.log(`[${tag}] ${backendFailures.length} 处分层违规${STRICT_BACKEND ? '' : '(当前为警告档;批次 B/D 完成后随构建切硬门禁)'}:`);
+  console.log(`[FAIL] ${backendFailures.length} 处分层违规(全部规则均为硬门禁):`);
   for (const f of backendFailures.slice(0, 40)) console.log(`  - ${f}`);
   if (backendFailures.length > 40) console.log(`  ... 另有 ${backendFailures.length - 40} 处`);
-  if (STRICT_BACKEND) process.exit(1);
+  process.exit(1);
 } else {
   console.log('[ OK ] 后端分层无违规');
 }

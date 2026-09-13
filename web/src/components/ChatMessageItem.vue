@@ -75,13 +75,8 @@ function swipeTotal(m: { extra?: Record<string, unknown> }): number {
   return Array.isArray(arr) ? arr.length : 0;
 }
 
-/**
- * 消息渲染文本:正文 + 状态栏占位符(与 ChatWindow 脚本执行共用的同一规则,
- * 保证渲染与脚本执行看到的文本一致)。
- */
-function renderText(): string {
-  return buildMessageRenderText(displayText(props.m), statusBar(props.m), hasStatusScript.value);
-}
+// 消息渲染文本的组装已内联到下方 renderTextSource computed(需参与节流依赖链),
+// 原独立函数 renderText() 随之移除。
 
 /** iframe srcdoc 注入用:HTML 属性转义(资源页原文仅作 srcdoc 字符串,不拼接进本页面) */
 function escapeAttr(s: string): string {
@@ -121,46 +116,78 @@ function buildRenderPanelHtml(code: string, seed: string): string {
 /**
  * 流式渲染节流(批次 G.1):
  *
- * 问题:后端逐 token 推送、sseReducer 逐 token 就地追加 `m.content`,本组件的 `html`
- * computed 依赖 content → 每个 token 都对**整条增长中的消息**重跑 markdown + 重设
- * `v-html`,长回复呈 O(n²)(渲染成本随累计长度线性增长 × token 数)。
+ * 问题:后端逐 token 推送、sseReducer 逐 token 就地追加 `m.content`,若 `html` computed
+ * 直接依赖 content,则每个 token 都对**整条增长中的消息**重跑 markdown + 重设 `v-html`,
+ * 长回复呈 O(n²)(渲染成本随累计长度线性增长 × token 数)。
  *
- * 处置:不改数据层(内容仍逐 token 累积,不丢字),只在**渲染层**加节拍——
- *   - 未流式(`streaming !== true`)时 `renderTick` 恒为 0,computed 直读最新内容,
- *     非流式消息(历史消息、终态消息)行为与节流前完全一致;
- *   - 流式中每帧最多重算一次(rAF 合帧):一帧内到达的多个 token 只触发一次渲染。
+ * 处置(不改数据层,内容仍逐 token 累积,不丢字):
+ *   渲染**只读 `paintText`**,它是一份「按帧推进的文本快照」——
+ *   - 非流式(streaming !== true):`paintText` 恒等于最新渲染文本,行为与节流前一致;
+ *   - 流式中:content 变化只**记录**待绘文本并排期一帧(rAF 合帧),帧到达时统一推进
+ *     `paintText`。一帧内到达的多个 token 因此只触发一次 markdown 重算。
  *
- * 依赖说明:`html` 的 computed 显式 `void renderTick.value` 建立依赖——否则 Vue 只会
- * 因 content 变化重算,节流不起作用。rAF 在测试环境(node)不存在,退化用定时器。
+ * 关键取舍:必须让 computed **不直接依赖 content**——否则 Vue 的依赖追踪会因 content
+ * 变化立即失效并重算,ref 节拍无法阻止(这正是初版 `void renderTick.value` 写法无效的原因)。
+ * 故此处以「快照 + 按文本内容缓存」实现:computed 依赖 paintText(节拍变量),
+ * 非流式时 paintText 与 content 同步,语义不变。
+ *
+ * rAF 在 node 测试环境不存在,退化用 16ms 定时器。
  */
-const renderTick = ref(0);
-let rafId: number | null = null;
+const renderTextSource = computed(() => {
+  void props.scriptHash; // 脚本版本变化时强制重算依赖链
+  return buildMessageRenderText(
+    displayText(props.m),
+    statusBar(props.m),
+    hasStatusScript.value,
+  );
+});
 
-function scheduleRender(): void {
-  if (rafId !== null) return; // 本帧已排期,合并
-  const schedule: (cb: () => void) => number =
-    typeof requestAnimationFrame === 'function'
-      ? (cb) => requestAnimationFrame(cb)
-      : (cb) => setTimeout(cb, 16) as unknown as number;
-  rafId = schedule(() => {
-    rafId = null;
-    renderTick.value++;
-  });
+/** 实际参与渲染的文本:非流式直通;流式按帧推进(见上方说明) */
+const paintText = ref('');
+
+// 可变状态须全部声明在下方 immediate watch **之前**:immediate 会立即执行回调,
+// 若用 let 声明在 watch 之后会命中 TDZ(ReferenceError)。
+let pendingText: string | null = null;
+/** 待执行的绘制句柄:rAF 与 setTimeout 返回类型不同,但此处置为同一数值槽位,
+ *  两种环境互不混用(分支内独立赋值/取消),无需断言。 */
+let paintHandle: number | null = null;
+
+function paint(): void {
+  paintHandle = null;
+  if (pendingText !== null) {
+    paintText.value = pendingText;
+    pendingText = null;
+  }
 }
 
-// 仅当本条消息处于流式时才排期(历史消息 content 微变不值得引入一帧延迟)
+/** 排期一次绘制(同帧内重复调用被合并;rAF 缺失时退化 16ms 定时器) */
+function schedulePaint(): void {
+  if (paintHandle !== null) return;
+  if (typeof requestAnimationFrame === 'function') {
+    paintHandle = requestAnimationFrame(paint);
+  } else {
+    paintHandle = setTimeout(paint, 16);
+  }
+}
+
 watch(
-  () => props.m.content,
-  () => {
-    if (props.m.streaming) scheduleRender();
+  renderTextSource,
+  (next) => {
+    if (!props.m.streaming) {
+      paintText.value = next; // 非流式:立即同步(历史消息/终态消息零延迟)
+      return;
+    }
+    pendingText = next;
+    schedulePaint();
   },
+  { immediate: true },
 );
 
 onUnmounted(() => {
-  if (rafId !== null) {
-    if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(rafId);
-    else clearTimeout(rafId);
-    rafId = null;
+  if (paintHandle !== null) {
+    if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(paintHandle);
+    else clearTimeout(paintHandle);
+    paintHandle = null;
   }
 });
 
@@ -177,8 +204,8 @@ onUnmounted(() => {
  */
 const html = computed<string>(() => {
   void props.scriptHash; // 脚本版本变化时强制重算(即便 scripts 引用与字段未触发)
-  void renderTick.value; // 流式节拍依赖:每帧最多重算一次(见上方 renderTick 说明)
-  const text = renderText();
+  // 渲染只读按帧推进的 paintText(不直接依赖 m.content):见上方节流说明
+  const text = paintText.value;
   const resourceUrl = extractBodyLoadUrl(text);
   if (resourceUrl) {
     return buildRemoteResourceHtml(resourceUrl, `m${props.m.id}`);

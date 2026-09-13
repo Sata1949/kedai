@@ -92,8 +92,8 @@ if (-not $SkipWeb) {
     try {
         # 契约快照:手写 TS 类型与 Rust 后端字段集合比对(漂移即 FAIL,纯 Node 零依赖)
         Invoke-Stage 'contract: check-contract' { node tools/check-contract.mjs }
-        # 架构护栏:前端 store 循环依赖 + 组件直改 state + 后端分层规则 C/D/E
-        # (后端规则当前为 WARN 档,批次 B/D 完成后随构建切 --strict-backend 硬门禁)
+        # 架构护栏:前端 store 循环依赖 + 组件直改 state + 后端分层规则 C/D/E/G
+        # (全部规则已切硬门禁:违规即 exit 1;C/D/E 已于 2026-09-13 清零,G 为 ratchet)
         Invoke-Stage 'arch: check-arch'         { node tools/check-arch.mjs }
         # 测试数自动统计:与 MAINTENANCE.md 记录比对,文档漂移即 WARN(不拦截)
         Write-Host "`n===== 测试数统计(文档漂移检查,警告档)=====" -ForegroundColor Cyan
