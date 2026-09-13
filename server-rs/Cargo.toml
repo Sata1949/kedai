@@ -22,8 +22,10 @@ sqlite-vec = "0.1.9"
 # reqwest 的 TLS 后端按目标平台分离(见文件末尾 target 依赖块):
 # 桌面 native-tls 保持 Windows 现有证书行为;Android 用 rustls 以消除对系统 OpenSSL 的依赖。
 # 注意:两处 features 必须保持 json/stream 一致,只改 TLS 后端。
-# tiktoken-rs 0.12:get_bpe_from_model 已废弃(改名 bpe_for_model,返回 &'static 单例且下载失败会 panic),
-# 故 token_service 改用直接构造器(cl100k_base/o200k_base/p50k_base),保持「失败返回 Err 降级估算」语义
+# tiktoken-rs 0.12:get_bpe_from_model 已废弃(改名 bpe_for_model,返回 &'static 单例),
+# 故 token_service 改用直接构造器(cl100k_base/o200k_base/p50k_base),保持「失败返回 Err 降级估算」语义。
+# 注(2026-09-13 批次 6 核实):0.12 的词表是 include_str! vendored(assets 随 crate 分发),
+# **不存在运行期联网下载**,此前「下载失败会 panic」的注释与 android-port-plan 的待办均已过时。
 tiktoken-rs = "0.12"
 # 注:png 依赖已移除——角色卡 PNG tEXt 解析(parsing/character_card.rs)为手工 chunk 解析,
 # 全仓无任何 png:: API 调用(grep `png::`/`use png` 无命中),属冗余依赖;无需升级到 0.18

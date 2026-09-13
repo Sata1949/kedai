@@ -98,7 +98,8 @@ Rust 后端交叉编译进 APK,与 Tauri Android app 同进程;前端资源继�
 3. **数据目录**:`config.rs:73-81` 的 `canonical_user_data_dir` 加 Android 分支(不依赖 `APPDATA`);主路径仍由壳注入 `DATA_DIR`/`LOG_DIR`(照 `src-tauri/src/lib.rs:71-72`),缺省时给 app 私有目录默认值而非回退 `current_dir`。`config.rs:47-67` 的 `project_root()`(靠 `current_exe` 找 `web`/`server-rs`)降级为开发态逻辑。
 4. **Windows 专属代码 cfg 复核**:`utils/fs_atomic.rs:32-40`(已有非 Windows rename 回退,确认即可)、`services/runtime_prompt_service.rs:173-199`(`ReplaceFileW`)、`mcp/process.rs:122-141`(Windows 测试)、`api/repo_index.rs:28-57`(开发态 current_dir 索引)→ 加 `cfg(windows)` / `cfg(not(target_os="android"))` 门控,Android 走 no-op 或明确报错。
 5. **MCP 与子进程**:`mcp/process.rs` 的 `tokio::process::Command` 在 Android 门控;Android 侧改由阶段 3 执行器承接(第一版可先返回「未支持」)。
-6. **tiktoken 词表**:`services/token_service.rs:60-70` 依赖运行期联网下载,移动端不可靠;改为 vendored 词表随包,或明确降级为估算计数并在设置页标注。
+6. ~~**tiktoken 词表**:`services/token_service.rs:60-70` 依赖运行期联网下载,移动端不可靠;改为 vendored 词表随包,或明确降级为估算计数并在设置页标注。~~
+   **已失效(2026-09-13 批次 6 核实)**:tiktoken-rs 0.12 的词表为 `include_str!` vendored(随 crate 分发),**不存在运行期下载**;仅当词表加载失败时才降级为字节估算(token_service 已有该回退)。本项无需再处理。
 7. **日志**:`LOG_DIR` 由壳注入;补 Android logcat 双写便于真机排查。
 8. **回归保障**:所有改动以 cfg 门控,**Windows 行为逐字节不变**;跑 `cargo test` + `cargo clippy`;新增 android target 的 `cargo check`。
 
@@ -586,7 +587,7 @@ D:\kedai-android\
 | `server-rs/src/services/runtime_prompt_service.rs:173-199` | `ReplaceFileW` | 门控 |
 | `server-rs/src/mcp/process.rs:13,29-42` | spawn 子进程 | 门控,转执行器 |
 | `server-rs/src/api/repo_index.rs:28-57` | `current_dir` 索引 | 门控 |
-| `server-rs/src/services/token_service.rs:60-70` | 联网下载词表 | vendored 或降级 |
+| `server-rs/src/services/token_service.rs:60-70` | ~~联网下载词表~~(**已核实为 vendored,无运行期下载**) | 无需处理 |
 | `src-tauri/src/lib.rs:22-50` | `netstat`/`taskkill` | desktop-only |
 | `src-tauri/src/lib.rs:58-60` | `%APPDATA%` 回退 | 删,用 `app_data_dir()` |
 | `src-tauri/src/lib.rs:95-125` | `CloseRequested` 退出确认 | 改返回键 |
