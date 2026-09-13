@@ -8,7 +8,7 @@
 // 反思步骤(action=reflect)按契约不携带用户 system_prompt,统一用内置
 // CUSTOM_REFLECT_PROMPT;首版不做 reflect 回退循环(判定结论作为文本流向下一步)。
 use super::context::TaskRunContext;
-use super::executor::{ModeExecutor, TaskOutcome};
+use super::executor::ModeExecutor;
 use super::sink;
 use crate::agents::engine::executor::run_tool_loop;
 use crate::agents::engine::{AbortFlag, AgentEngine};
@@ -19,23 +19,23 @@ use crate::models::types::{
 };
 use crate::services::agent_flow_service::AgentFlowConfig;
 use crate::services::prompt_kit::untrusted_boundary;
-use crate::services::task_service::prompt::{
+use crate::services::task_core::prompt_consts::{
     CUSTOM_REFLECT_PROMPT, EXECUTOR_PROMPT, TASK_INTERNAL_PLAN_PROMPT,
 };
-use crate::services::task_service::{TaskGenOutput, TaskService};
+use crate::services::task_core::{TaskBackend, TaskGenOutput, TaskTerminal};
 use futures::future::BoxFuture;
 use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
 
-/// custom 执行器:任务服务(流程库/落库/追踪)+ 聊天引擎(带工具步骤的工具循环)。
+/// custom 执行器:任务后端(流程库/落库/追踪)+ 聊天引擎(带工具步骤的工具循环)。
 pub(crate) struct CustomExecutor {
-    svc: Arc<TaskService>,
+    svc: Arc<dyn TaskBackend>,
     engine: Arc<AgentEngine>,
 }
 
 impl CustomExecutor {
-    pub(crate) fn new(svc: Arc<TaskService>, engine: Arc<AgentEngine>) -> Self {
+    pub(crate) fn new(svc: Arc<dyn TaskBackend>, engine: Arc<AgentEngine>) -> Self {
         CustomExecutor { svc, engine }
     }
 
@@ -246,7 +246,10 @@ impl CustomExecutor {
         }
     }
 
-    async fn run_inner(&self, ctx: TaskRunContext) -> Result<TaskOutcome, String> {
+    async fn run_inner(
+        &self,
+        ctx: TaskRunContext,
+    ) -> Result<(TaskTerminal, TokenUsage), String> {
         let cfg = self.current_flow()?;
         let steps: Vec<PlanStep> = cfg.steps.iter().filter(|s| s.enabled).cloned().collect();
         if steps.is_empty() {
@@ -319,20 +322,14 @@ impl CustomExecutor {
                         (text, out)
                     })
                 }
-                // 工具步骤:run_tool_loop(白名单自动放行),调用追踪在步骤函数内落
+                // 工具步骤:run_tool_loop(白名单自动放行),调用追踪在步骤函数内落。
+                // usage → TaskGenOutput 统一走 usage_as_output(批次 B.4 单一出处);
+                // 该 out 仅作 record_usage 入参(text 不消费)
                 Some(list) => self
                     .run_step_with_tools(&ctx, i, step, &mut messages, list)
                     .await
                     .map(|(text, usage)| {
-                        let out = TaskGenOutput {
-                            text: text.clone(),
-                            finish_reason: None,
-                            prompt_tokens: usage.prompt_tokens,
-                            completion_tokens: usage.completion_tokens,
-                            reasoning_tokens: 0,
-                            reasoning_chars: 0,
-                            tool_calls: Vec::new(),
-                        };
+                        let out = super::executor::usage_as_output(&usage);
                         (text, out)
                     }),
             };
@@ -383,21 +380,26 @@ impl CustomExecutor {
         }
         // 含 error 步骤但成果已产出 → partial(对齐 legacy WP3 语义)
         let status = if any_error {
-            Some(TaskStatus::Partial)
+            TaskStatus::Partial
         } else {
-            None
+            TaskStatus::Done
         };
-        Ok(TaskOutcome {
-            text: draft,
-            usage: total,
-            status,
-            error: None,
-        })
+        Ok((
+            TaskTerminal::Complete {
+                result: draft,
+                status,
+                error: None,
+            },
+            total,
+        ))
     }
 }
 
 impl ModeExecutor for CustomExecutor {
-    fn run<'a>(&'a self, ctx: TaskRunContext) -> BoxFuture<'a, Result<TaskOutcome, String>> {
+    fn run<'a>(
+        &'a self,
+        ctx: TaskRunContext,
+    ) -> BoxFuture<'a, Result<(TaskTerminal, TokenUsage), String>> {
         Box::pin(async move { self.run_inner(ctx).await })
     }
 }

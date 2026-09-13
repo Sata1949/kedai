@@ -327,7 +327,43 @@ const backendWarnings = [];
   if (VERBOSE) console.log(`  [E] services 生产 .expect( 违规:${hits} 处`);
 }
 
-console.log('\n========== Kedai 后端分层护栏(C/D/E) ==========');
+// --- 规则 G:HTTP 错误响应不得新增「裸 {error}」形状(错误形状统一 ratchet) ---
+//
+// 背景:`api/errors.rs` 提供 `err_with_code`(body `{error, code}`),但历史上大量 handler
+// 直接返回 `Json(json!({ "error": ... }))`——同一错误出现两种形状,前端无法统一解析。
+// 存量 117 处**逐个**补齐 code 需为每处判定 HTTP 状态码(盲改会改 API 行为),属批次 D 的
+// 跟踪项而非本轮范围;此处先加 ratchet 防新增(数量不得超基线,修好一批请下调基线)。
+{
+  const BASELINE_BARE_ERROR = 117; // 2026-09-13 实测;只降不升
+  const apiDir = join(SERVER, 'api');
+  let hits = 0;
+  const samples = [];
+  for (const f of collect(apiDir, ['.rs'])) {
+    // errors.rs 自身是错误出口的定义处,豁免
+    if (f.endsWith('errors.rs')) continue;
+    const src = readFileSync(f, 'utf8');
+    const prodLines = productionLineCount(src);
+    src.split('\n').forEach((line, i) => {
+      const ln = i + 1;
+      if (ln > prodLines) return;
+      if (/^\s*\/\//.test(line)) return;
+      if (!/json!\(\s*\{\s*"error"/.test(line)) return;
+      hits++;
+      if (samples.length < 3) samples.push(`${relative(ROOT, f)}:${ln}`);
+    });
+  }
+  if (hits > BASELINE_BARE_ERROR) {
+    backendFailures.push(
+      `[G] 裸 {error} 错误形状新增:${hits} 处 > 基线 ${BASELINE_BARE_ERROR}` +
+        `(${samples.join(', ')});请改用 api/errors.rs 的 err_with_code 携带 code`,
+    );
+  }
+  if (VERBOSE) {
+    console.log(`  [G] 裸 {error} 响应:${hits} 处(基线 ${BASELINE_BARE_ERROR},只降不升)`);
+  }
+}
+
+console.log('\n========== Kedai 后端分层护栏(C/D/E/G) ==========');
 if (backendFailures.length) {
   const tag = STRICT_BACKEND ? 'FAIL' : 'WARN';
   console.log(`[${tag}] ${backendFailures.length} 处分层违规${STRICT_BACKEND ? '' : '(当前为警告档;批次 B/D 完成后随构建切硬门禁)'}:`);

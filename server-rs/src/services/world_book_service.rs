@@ -1,4 +1,5 @@
 // 世界书服务(独立世界书):上传/CRUD/按角色查询/注入条目收集/自动分配机制自检
+use super::{log_query_failure, log_read_pool_failure};
 use crate::models::db::{now_iso, Db};
 use crate::models::types::{MessageRecord, WorldBookEntryView, WorldBookRecord};
 use crate::parsing::world_book::{collect_entries, parse_world_book_file, WorldEntry};
@@ -37,17 +38,26 @@ impl WorldBookService {
         WorldBookService { db }
     }
 
-    /// 列表(不含 data_raw),按 created_at DESC
+    /// 列表(不含 data_raw),按 created_at DESC。
+    /// 取连接/预编译/查询任一失败 → 记 warn 回退空列表(与其它列表函数同款 best-effort 语义),
+    /// 不 panic 请求线程(阻塞线程 panic 会经 JoinError 放大为 500)。
     pub fn list(&self) -> Vec<WorldBookRecord> {
-        let conn = self.db.read().expect("获取只读连接失败");
-        // SQL 为写死常量且表结构由 migration 保证,预编译必然成功
-        let mut stmt = conn
-            .prepare_cached(&format!("{LIST_SQL} ORDER BY w.created_at DESC"))
-            .expect("世界书列表 SQL 为常量且 schema 由 migration 保证,预编译必然成功");
-        stmt.query_map([], |row| row_to_record(row, false))
-            .expect("世界书列表查询必然成功(常量 SQL + migration 保证 schema)")
-            .filter_map(|r| r.ok())
-            .collect()
+        let conn = match self.db.read() {
+            Ok(c) => c,
+            Err(e) => return log_read_pool_failure("世界书列表", e),
+        };
+        // SQL 为写死常量且表结构由 migration 保证,正常不会失败;仍按 best-effort 兜底
+        let mut stmt = match conn.prepare_cached(&format!("{LIST_SQL} ORDER BY w.created_at DESC")) {
+            Ok(s) => s,
+            Err(e) => return log_query_failure("世界书列表 prepare_cached", e),
+        };
+        // 注意:query_map 结果须先绑定再返回,不能作为块尾表达式直接 match——
+        // 块尾临时值的析构顺序会让 stmt/conn 提前 drop(borrow 检查 E0597)。
+        let rows = match stmt.query_map([], |row| row_to_record(row, false)) {
+            Ok(r) => r,
+            Err(e) => return log_query_failure("世界书列表 query_map", e),
+        };
+        rows.filter_map(|r| r.ok()).collect()
     }
 
     pub fn get(&self, id: &str) -> Option<WorldBookRecord> {
@@ -172,15 +182,19 @@ impl WorldBookService {
     /// 破坏 system/常驻注入的前缀逐字节一致性。正常情况下 id 次级键不改变结果,
     /// 只把原本不确定的并列顺序固定下来。
     pub fn enabled_for_character(&self, character_id: &str) -> Vec<WorldBookRecord> {
-        let conn = self.db.read().expect("获取只读连接失败");
-        // SQL 为写死常量且表结构由 migration 保证,预编译必然成功
-        let mut stmt = conn
-            .prepare(&format!("{LIST_SQL} WHERE w.enabled = 1 AND (w.character_id = ?1 OR w.character_id IS NULL) ORDER BY w.created_at DESC, w.id"))
-            .expect("角色有效世界书 SQL 为常量且 schema 由 migration 保证,预编译必然成功");
-        stmt.query_map(params![character_id], |row| row_to_record(row, true))
-            .expect("角色有效世界书查询必然成功(常量 SQL + migration 保证 schema)")
-            .filter_map(|r| r.ok())
-            .collect()
+        let conn = match self.db.read() {
+            Ok(c) => c,
+            Err(e) => return log_read_pool_failure("角色有效世界书", e),
+        };
+        let mut stmt = match conn.prepare(&format!("{LIST_SQL} WHERE w.enabled = 1 AND (w.character_id = ?1 OR w.character_id IS NULL) ORDER BY w.created_at DESC, w.id")) {
+            Ok(s) => s,
+            Err(e) => return log_query_failure("角色有效世界书 prepare", e),
+        };
+        let rows = match stmt.query_map(params![character_id], |row| row_to_record(row, true)) {
+            Ok(r) => r,
+            Err(e) => return log_query_failure("角色有效世界书 query_map", e),
+        };
+        rows.filter_map(|r| r.ok()).collect()
     }
 
     /// 注入条目收集:合并该角色的独立世界书(已过滤 enabled),按条目过滤规则在 engine 侧执行
@@ -484,39 +498,30 @@ impl WorldBookService {
         )
     }
 
-    /// 回写角色卡 data_raw 中的 character_book(合并 entries 后 UPDATE characters)
+    /// 回写角色卡 data_raw 中的 character_book(合并 entries 后 UPDATE characters)。
+    /// 读改写经 `character_data::update_data_raw` 在**同一写锁事务**内完成:
+    /// 原实现「read 取快照 → 内存改 → write 回写」两步间不持锁,并发编辑同一张卡时
+    /// 后写者会用旧快照覆盖先写者的修改(丢更新)。
     pub fn save_character_book(
         &self,
         character_id: &str,
         views: &[WorldBookEntryView],
     ) -> Option<()> {
-        let raw_str = self
-            .db
-            .read()
-            .ok()?
-            .query_row(
-                "SELECT data_raw FROM characters WHERE id = ?1",
-                params![character_id],
-                |row| row.get::<_, String>(0),
-            )
-            .ok()?;
-        let mut raw: Value = serde_json::from_str(&raw_str).ok()?;
-        // 定位 character_book:V2 顶层 / V3 data 子对象(先判断再取可变引用,避免双重借用)
-        let cb = if raw.get("character_book").is_some() {
-            raw.get_mut("character_book")
-        } else {
-            raw.get_mut("data")
-                .and_then(|d| d.get_mut("character_book"))
-        };
-        let cb = cb?;
-        let entries_value = cb.as_object_mut()?.get_mut("entries")?;
-        crate::parsing::world_book::merge_entries_into(entries_value, views);
-        let raw_str = serde_json::to_string(&raw).ok()?;
-        let conn = self.db.write();
-        conn.execute(
-            "UPDATE characters SET data_raw = ?1 WHERE id = ?2",
-            params![raw_str, character_id],
-        )
+        crate::services::character_data::update_data_raw(&self.db, character_id, |raw| {
+            // 定位 character_book:V2 顶层 / V3 data 子对象
+            let cb = if raw.get("character_book").is_some() {
+                raw.get_mut("character_book")
+            } else {
+                raw.get_mut("data").and_then(|d| d.get_mut("character_book"))
+            };
+            let cb = cb.ok_or_else(|| "角色卡缺少 character_book".to_string())?;
+            let entries_value = cb
+                .as_object_mut()
+                .and_then(|o| o.get_mut("entries"))
+                .ok_or_else(|| "character_book.entries 结构异常".to_string())?;
+            crate::parsing::world_book::merge_entries_into(entries_value, views);
+            Ok(())
+        })
         .ok()?;
         Some(())
     }

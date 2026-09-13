@@ -8,14 +8,14 @@
 // 模块地图:
 //   context.rs   TaskRunContext(目标/设置快照/执行者/取消通道)
 //   sink.rs      引擎事件 → 任务事件桥(mpsc + drain,kind=agent_status)
-//   executor.rs  ModeExecutor trait 与 TaskOutcome(含终态覆盖与 usage 入参助手)
+//   executor.rs  ModeExecutor trait(产出 TaskTerminal 终态值 + usage)
 //   solo.rs      单主 agent 工具自循环(run_agent_loop 共享骨架:solo/multi/team 复用)
 //   multi.rs     solo 主循环 + 子 agent 工具化(agentgo 链路)
 //   plan.rs      只规划不执行(planned 待批准)+ 批准续跑执行器(ApprovedPlanExecutor)
 //   team.rs      自动拓扑多主 agent 并行 + 审计终审升华
 //   custom.rs    AgentFlowConfig 步骤序列轻量执行器
-//   legacy.rs    三段式(规划/逐步/汇总)执行器:原 task_service::run_task_background 搬迁
-//   followup.rs  终态追加指令执行器:原 task_service::run_followup_background 搬迁
+//   legacy.rs    三段式(规划/逐步/汇总)执行器:自原三段式后台执行主体机械搬迁
+//   followup.rs  终态追加指令执行器:自原 followup 后台执行主体机械搬迁
 pub(crate) mod context;
 pub(crate) mod custom;
 pub(crate) mod executor;
@@ -29,8 +29,8 @@ pub(crate) mod team;
 pub(crate) mod tool_policy;
 
 use crate::agents::engine::AgentEngine;
-use crate::models::types::{TaskRecord, TaskRunMode, TaskStatus, TaskStep};
-use crate::services::task_service::TaskService;
+use crate::models::types::{TaskRecord, TaskRunMode, TaskStep};
+use crate::services::task_core::{TaskBackend, TaskTerminal};
 use context::TaskRunContext;
 use custom::CustomExecutor;
 use executor::ModeExecutor;
@@ -43,29 +43,15 @@ use std::sync::Arc;
 use team::TeamExecutor;
 use tokio::sync::watch;
 
-/// 任务引擎:持有任务服务与聊天引擎,按 task_mode 派发后台执行。
+/// 任务引擎:持有任务后端与聊天引擎,按 task_mode 派发后台执行。
 /// 轻量句柄(两个 Arc),在 TaskService::run/approve 处即时构造,无状态。
 pub struct TaskEngine {
-    svc: Arc<TaskService>,
+    svc: Arc<dyn TaskBackend>,
     engine: Arc<AgentEngine>,
 }
 
-/// 执行器成功后的收尾方式:
-/// - Complete:写结果 + done 终态(solo / approve 续跑);
-/// - AwaitApproval:plan 模式的计划产出轮——planned 终态由执行器写入;计划清单文本
-///   落 result(批次 R1:planned 态 result 语义 = 待批准的计划清单,供批准前预览)
-///   后清理执行登记。
-/// - SelfFinalized:执行器已自行收尾(legacy 三段式 / followup),引擎不再写任何
-///   终态或结果——两者收尾语义与 Complete 不同(legacy 中途失败即 finalize_run;
-///   followup 的 result 与消息文本分离),强行走统一收尾会双重写入。
-enum OnSuccess {
-    Complete,
-    AwaitApproval,
-    SelfFinalized,
-}
-
 impl TaskEngine {
-    pub(crate) fn new(svc: Arc<TaskService>, engine: Arc<AgentEngine>) -> Arc<Self> {
+    pub(crate) fn new(svc: Arc<dyn TaskBackend>, engine: Arc<AgentEngine>) -> Arc<Self> {
         Arc::new(TaskEngine { svc, engine })
     }
 
@@ -77,7 +63,6 @@ impl TaskEngine {
         token: u64,
     ) {
         let executor: Box<dyn ModeExecutor> = match task.task_mode {
-            // legacy 三段式(行为逐字节不变):上缝统一派发点,收尾自行承担
             TaskRunMode::Legacy => Box::new(LegacyExecutor::new(self.svc.clone())),
             TaskRunMode::Solo => Box::new(SoloExecutor::new(self.svc.clone(), self.engine.clone())),
             TaskRunMode::Plan => Box::new(PlanExecutor::new(self.svc.clone())),
@@ -89,18 +74,12 @@ impl TaskEngine {
                 Box::new(CustomExecutor::new(self.svc.clone(), self.engine.clone()))
             }
         };
-        let on_success = match task.task_mode {
-            TaskRunMode::Plan => OnSuccess::AwaitApproval,
-            // legacy 自带收尾(中途失败 finalize_run / 成功 complete_mode_run)
-            TaskRunMode::Legacy => OnSuccess::SelfFinalized,
-            _ => OnSuccess::Complete,
-        };
-        self.spawn_run(task, executor, None, on_success, cancel, token);
+        self.spawn_run(task, executor, None, cancel, token);
     }
 
     /// followup(终态追加指令)派发入口:goal 由 TaskService 组装为「原目标 +
     /// 上轮 result + 追加指令」;params 携带消息文本与 append/replace 语义。
-    /// 收尾由 FollowupExecutor 经 complete_followup_run 自行完成(SelfFinalized)。
+    /// 收尾由 FollowupExecutor 返回 TaskTerminal::Followup,引擎统一落库。
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn run_followup(
         self: &Arc<Self>,
@@ -115,14 +94,7 @@ impl TaskEngine {
             self.engine.clone(),
             params,
         ));
-        self.spawn_run(
-            task,
-            executor,
-            Some(goal),
-            OnSuccess::SelfFinalized,
-            cancel,
-            token,
-        );
+        self.spawn_run(task, executor, Some(goal), cancel, token);
     }
 
     /// approve 续跑入口(plan 模式批准后):**只认已批准计划,与 task_mode 无关**——
@@ -147,14 +119,7 @@ impl TaskEngine {
                 plan,
             ))
         };
-        self.spawn_run(
-            task,
-            executor,
-            Some(goal),
-            OnSuccess::Complete,
-            cancel,
-            token,
-        );
+        self.spawn_run(task, executor, Some(goal), cancel, token);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -163,15 +128,13 @@ impl TaskEngine {
         task: &TaskRecord,
         executor: Box<dyn ModeExecutor>,
         goal: Option<String>,
-        on_success: OnSuccess,
         cancel: watch::Receiver<bool>,
         token: u64,
     ) {
         let this = Arc::clone(self);
         let task = task.clone();
         tokio::spawn(async move {
-            this.run_inner(task, executor, goal, on_success, cancel, token)
-                .await;
+            this.run_inner(task, executor, goal, cancel, token).await;
         });
     }
 
@@ -180,7 +143,6 @@ impl TaskEngine {
         task: TaskRecord,
         executor: Box<dyn ModeExecutor>,
         goal: Option<String>,
-        on_success: OnSuccess,
         cancel: watch::Receiver<bool>,
         token: u64,
     ) {
@@ -192,41 +154,28 @@ impl TaskEngine {
             character_id: task.character_id.clone(),
             cancel: cancel.clone(),
         };
+        // 单一收尾出口(批次 B 依赖倒置):执行器返回终态值,引擎按值分派落库;
+        // Err 分支兜底为 Failed(ended_by_cancel 以取消通道求值)。收尾判定所需的
+        // 取消态在此处快照,消费方不得再次 borrow。
         match executor.run(ctx).await {
-            Ok(outcome) => {
-                // 完成日志(对齐引擎 finish 口径:整轮 token 累计;任务侧 usage 面板
-                // 数据源为 task_llm_calls,本日志仅供排障)
+            Ok((terminal, usage)) => {
                 tracing::info!(
                     task_id = task.id.clone(),
                     mode = task.task_mode.as_str(),
-                    total_tokens = outcome.usage.total_tokens,
+                    total_tokens = usage.total_tokens,
                     "任务模式执行完成"
                 );
-                match on_success {
-                    // plan 计划产出轮:计划清单文本落 result 后清理执行登记(批次 R1)
-                    OnSuccess::AwaitApproval => {
-                        self.svc
-                            .planned_mode_run(&task.id, token, outcome.text.trim())
-                    }
-                    OnSuccess::Complete => self.svc.complete_mode_run(
-                        &task.id,
-                        token,
-                        outcome.text.trim(),
-                        // 执行器可覆盖成功终态(team/custom 有失败主/步骤但有产出 → partial)
-                        outcome.status.unwrap_or(TaskStatus::Done),
-                        // partial 的可解释原因(team 审计/终审未通过或子目标失败);
-                        // Done 时执行器给 None,写空串清掉上一轮残留 error
-                        outcome.error.as_deref(),
-                    ),
-                    // legacy / followup:执行器已自行收尾(终态、result、消息、取消条目
-                    // 全部写完),引擎不得再写——否则双重写入覆盖执行器的结果文本。
-                    OnSuccess::SelfFinalized => {}
-                }
+                self.svc
+                    .finalize_terminal(&task.id, token, terminal, *cancel.borrow());
             }
-            // 取消(stop)时 ended_by_cancel=true → ended;否则 error(与 legacy 收尾同语义)
-            Err(e) => self
-                .svc
-                .finalize_mode_run(&task.id, token, *cancel.borrow(), Some(&e)),
+            Err(e) => self.svc.finalize_terminal(
+                &task.id,
+                token,
+                TaskTerminal::Failed {
+                    error: Some(e),
+                },
+                *cancel.borrow(),
+            ),
         }
     }
 }

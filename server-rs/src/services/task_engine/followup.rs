@@ -1,5 +1,5 @@
-// followup(终态追加指令)执行器:原 `task_service/executor.rs::run_followup_background`
-// 的机械搬迁,上 `ModeExecutor` 缝(批次 M3),消除「绕过 ModeExecutor 直调
+// followup(终态追加指令)执行器:原三段式 followup 后台执行主体的机械搬迁,
+// 上 `ModeExecutor` 缝(批次 M3),消除「绕过 ModeExecutor 直调
 // solo::run_agent_loop」的第三条执行路径。
 //
 // 语义不变:solo 单轮 run_agent_loop(工具全量,不重新规划)→ 产出落
@@ -8,14 +8,15 @@
 // (原 partial 保持 partial,其余回 done)。
 //
 // 收尾需「写 result 的文本 ≠ 落消息的文本」且消息 kind 非 result,故不走
-// complete_mode_run,而由 OnSuccess::SelfFinalized + TaskService::complete_followup_run
-// 承担(守门与取消清理语义与 complete_mode_run 一致)。**永不返回 Err**。
+// Complete 而用 TaskTerminal::Followup,由引擎 finalize_terminal 转调
+// TaskService::complete_followup_run(守门与取消清理语义与 complete_mode_run 一致)。
+// **永不返回 Err**。
 use super::context::TaskRunContext;
-use super::executor::{usage_as_output, ModeExecutor, TaskOutcome};
+use super::executor::{usage_as_output, ModeExecutor};
 use super::solo::{run_agent_loop, AgentLoopCall};
 use crate::agents::engine::AgentEngine;
 use crate::models::types::{TaskFollowupMode, TaskStatus, TokenUsage};
-use crate::services::task_service::TaskService;
+use crate::services::task_core::{TaskBackend, TaskTerminal};
 use futures::future::BoxFuture;
 use std::sync::Arc;
 
@@ -34,14 +35,14 @@ pub(crate) struct FollowupParams {
 }
 
 pub(crate) struct FollowupExecutor {
-    svc: Arc<TaskService>,
+    svc: Arc<dyn TaskBackend>,
     engine: Arc<AgentEngine>,
     params: FollowupParams,
 }
 
 impl FollowupExecutor {
     pub(crate) fn new(
-        svc: Arc<TaskService>,
+        svc: Arc<dyn TaskBackend>,
         engine: Arc<AgentEngine>,
         params: FollowupParams,
     ) -> Self {
@@ -54,16 +55,17 @@ impl FollowupExecutor {
 }
 
 impl ModeExecutor for FollowupExecutor {
-    fn run<'a>(&'a self, ctx: TaskRunContext) -> BoxFuture<'a, Result<TaskOutcome, String>> {
+    fn run<'a>(
+        &'a self,
+        ctx: TaskRunContext,
+    ) -> BoxFuture<'a, Result<(TaskTerminal, TokenUsage), String>> {
         Box::pin(async move {
             let svc = &self.svc;
             let task_id = ctx.task_id.as_str();
-            let token = ctx.token;
             let cancel = ctx.cancel;
 
             let Some(task) = svc.get(task_id) else {
-                svc.finalize_mode_run(task_id, token, false, None);
-                return Ok(TaskOutcome::self_finalized(TokenUsage::default()));
+                return Ok((TaskTerminal::Noop, TokenUsage::default()));
             };
 
             let call = AgentLoopCall {
@@ -84,8 +86,12 @@ impl ModeExecutor for FollowupExecutor {
                     svc.record_usage(task_id, "agent", None, &usage_as_output(&usage));
                     // 取消优先于写结果:stop 后产出不再落库(与 legacy 同口径)
                     if *cancel.borrow() {
-                        svc.finalize_mode_run(task_id, token, true, None);
-                        return Ok(TaskOutcome::self_finalized(usage));
+                        return Ok((
+                            TaskTerminal::Failed {
+                                error: None,
+                            },
+                            usage,
+                        ));
                     }
                     let text = text.trim();
                     let brief: String = self.params.instruction.chars().take(80).collect();
@@ -117,14 +123,23 @@ impl ModeExecutor for FollowupExecutor {
                     } else {
                         TaskStatus::Done
                     };
-                    // 守门写入 + 落 kind=followup 消息 + 清理取消条目(原 run_followup_background 同款)
-                    svc.complete_followup_run(task_id, token, text, &new_result, status);
-                    Ok(TaskOutcome::self_finalized(usage))
+                    // 终态值:msg_text 落 kind=followup 消息,new_result 写 result
+                    //(引擎 finalize_terminal 转调 complete_followup_run,守门一致)
+                    Ok((
+                        TaskTerminal::Followup {
+                            msg_text: text.to_string(),
+                            new_result,
+                            status,
+                        },
+                        usage,
+                    ))
                 }
-                Err(e) => {
-                    svc.finalize_mode_run(task_id, token, *cancel.borrow(), Some(&e));
-                    Ok(TaskOutcome::self_finalized(TokenUsage::default()))
-                }
+                Err(e) => Ok((
+                    TaskTerminal::Failed {
+                        error: Some(e),
+                    },
+                    TokenUsage::default(),
+                )),
             }
         })
     }

@@ -37,6 +37,7 @@ use tokio::sync::{mpsc, watch, RwLock};
 use uuid::Uuid;
 
 // 按职责拆分的子模块(纯代码移动):DB 读写 / 取消信号 / 提示词组装 / 计划解析 / 后台执行
+pub(crate) mod backend_impl;
 pub(crate) mod cancel;
 pub(crate) mod db;
 pub(crate) mod events;
@@ -79,22 +80,9 @@ const PLANNER_SCOUT_TOOLS: &[&str] = crate::tools::tool_sets::READONLY_SCOUT;
 /// (计划契约不变);侦察是增强环节,轮数封底防模型沉迷收集迟迟不出计划。
 const PLANNER_SCOUT_MAX_ROUNDS: usize = 2;
 
-/// 任务模式单次 LLM 调用的完整产出:正文 + 诊断信息。
-/// 诊断字段来自流式 Usage/Finish/Reasoning 块,用于日志排障、空输出分级重试与 usage 落库。
-pub(crate) struct TaskGenOutput {
-    pub text: String,
-    /// stop/length/content_filter 等;上游未下发时为 None
-    pub finish_reason: Option<String>,
-    pub prompt_tokens: i64,
-    pub completion_tokens: i64,
-    /// completion 中推理消耗的 token(推理模型;0 = 无观测)
-    pub reasoning_tokens: i64,
-    /// 推理正文字符数(reasoning_content 流;与 reasoning_tokens 互补,部分上游只给其一)
-    pub reasoning_chars: usize,
-    /// 本次调用模型请求的工具调用(仅下发 tools 的调用可能非空;问题②规划器侦察轮用,
-    /// 其余调用方恒空)。来自流式 ToolCall 块聚合(与 execute_generation 同口径)。
-    pub tool_calls: Vec<ToolCallArgs>,
-}
+/// 任务模式单次 LLM 调用的完整产出:正文 + 诊断信息(批次 B.3 搬迁至 task_core,
+/// 本处再导出保持既有调用方零改动)。
+pub(crate) use crate::services::task_core::TaskGenOutput;
 
 pub struct TaskService {
     db: Arc<Db>,

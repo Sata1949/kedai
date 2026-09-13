@@ -288,6 +288,77 @@ impl LlmMessage {
     }
 }
 
+// ---------- 提示词楼层(L1:与 DB/服务无关,parsing 预设导入与 services 注入共用) ----------
+
+/// 楼层注入位置(与 SillyTavern Prompt Manager 语义对齐)
+///
+/// **注意**:引擎注入路径已统一归位「系统提示词内」——`Before`/`After`/`Depth`
+/// 不再参与注入(见 `agents/engine/messages/build.rs` 位置4 注释)。三个变体仅保留
+/// 解析能力,用于兼容导入的酒馆预设(`parsing/preset.rs`),新配置应一律用 `System`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum FloorPosition {
+    /// 拼入系统提示词末尾
+    #[default]
+    System,
+    /// 对话历史最前(开场白之前)——已废弃,不参与注入
+    Before,
+    /// 对话历史最后(最新消息之后)——已废弃,不参与注入
+    After,
+    /// 深度:从历史末尾往前数第 N 条之后插入(0 = 最新消息后)——已废弃,不参与注入
+    Depth,
+}
+
+/// 楼层消息角色(自由选择)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum FloorRole {
+    #[default]
+    System,
+    User,
+    Assistant,
+}
+
+impl FloorRole {
+    /// LLM 消息角色字符串(system/user/assistant)
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FloorRole::System => "system",
+            FloorRole::User => "user",
+            FloorRole::Assistant => "assistant",
+        }
+    }
+}
+
+/// 单条提示词楼层
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptFloor {
+    pub id: String,
+    pub name: String,
+    pub content: String,
+    #[serde(default)]
+    pub role: FloorRole,
+    #[serde(default)]
+    pub position: FloorPosition,
+    /// position = depth 时的深度(0 = 最新消息后)
+    #[serde(default)]
+    pub depth: usize,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// 拖拽排序序号(同级内按 order 升序)
+    #[serde(default)]
+    pub order: usize,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// 楼层 ID 生成(uuid v4,与 skill_service 一致)
+pub fn new_floor_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 /// 工具选择策略(function calling):决定模型是否/如何调用工具。
 /// OpenAI 兼容语义:auto = 模型自行决定;none = 禁止调用;required = 强制调用(至少一个);
 /// function(name) = 强制调用指定工具。

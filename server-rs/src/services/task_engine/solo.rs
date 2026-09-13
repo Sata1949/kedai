@@ -5,7 +5,7 @@
 // run_agent_loop 为「单主 agent 工具自循环」共享骨架:solo/multi 执行器与
 // team 模式的各主 agent 复用同一实现(批次 4.3b),差异仅在运行身份/追踪字段。
 use super::context::TaskRunContext;
-use super::executor::{usage_as_output, ModeExecutor, TaskOutcome};
+use super::executor::{usage_as_output, ModeExecutor};
 use super::sink;
 use crate::agents::engine::executor::run_tool_loop;
 use crate::agents::engine::{AbortFlag, AgentEngine};
@@ -14,7 +14,7 @@ use crate::models::types::{
     GenerationParams, LlmMessage, TaskStatus, TokenUsage, ToolChoice, ToolContext,
 };
 use crate::services::settings_service::RuntimeSettings;
-use crate::services::task_service::TaskService;
+use crate::services::task_core::{TaskBackend, TaskTerminal};
 use futures::future::BoxFuture;
 use std::sync::Arc;
 use std::time::Instant;
@@ -48,15 +48,15 @@ pub(crate) struct AgentLoopCall {
 /// ToolGate 闸门,恒不等待授权:名单外工具立即拒绝)→ 调用追踪统一出口落 task_llm_calls(成功/空/中断/错误均一行)。
 /// 成功返回 (正文, 整轮累计 usage);中断/错误/空内容返回 Err。
 pub(crate) async fn run_agent_loop(
-    svc: Arc<TaskService>,
+    svc: Arc<dyn TaskBackend>,
     engine: Arc<AgentEngine>,
     call: AgentLoopCall,
     cancel: watch::Receiver<bool>,
 ) -> Result<(String, TokenUsage), String> {
     let settings = &call.settings;
 
-    // system 提示词组装:统一走 TaskService::assemble_executor_system_prompt
-    // (单一实现,见 task_service/prompt.rs);拼装顺序与 untrusted 包裹纪律同 legacy,
+    // system 提示词组装:统一走 TaskBackend::assemble_executor_system_prompt
+    // (单一实现,宿主侧 prompt.rs);拼装顺序与 untrusted 包裹纪律同 legacy,
     // 勿在本文件复制实现(WP7)。
     let sys =
         svc.assemble_executor_system_prompt(settings, call.character_id.as_deref(), &call.goal);
@@ -89,7 +89,8 @@ pub(crate) async fn run_agent_loop(
     let gate = crate::agents::engine::executor::ToolGate::listed(&allowed);
 
     // 运行身份:虚拟 session_id(task: 前缀,不建 sessions/agent_sessions 影子行);
-    // StateMachine 纯日志;run_id 标识本轮(工具授权等待的 key,白名单模式下用不到)。
+    // 状态迁移校验:非法迁移记 warn 日志(StateMachine 会返回 Err,不得静默丢弃);
+    // run_id 标识本轮(工具授权等待的 key,白名单模式下用不到)。
     let mut state_machine = StateMachine::new(&call.session_id);
     let run_id = Uuid::new_v4().to_string();
     // AbortFlag 仅供 send_event 的「通道断开」置位;中断信号本体是任务取消通道
@@ -112,7 +113,11 @@ pub(crate) async fn run_agent_loop(
     );
     let mut total_usage = TokenUsage::default();
     let started = Instant::now();
-    let _ = state_machine.transition(AgentState::Executing, &call.session_id);
+    // Idle → Executing 为任务/工具路径的合法首迁(无独立规划阶段,见 state_machine.rs);
+    // 仍记录非法迁移,避免静默吞掉状态机校验结果。
+    if let Err(e) = state_machine.transition(AgentState::Executing, &call.session_id) {
+        tracing::warn!(error = %e, session = %call.session_id, "状态迁移被拒");
+    }
     let result = run_tool_loop(
         &engine,
         &mut state_machine,
@@ -151,17 +156,11 @@ pub(crate) async fn run_agent_loop(
             );
             let text = res.content.trim().to_string();
             let status = if text.is_empty() { "empty" } else { "ok" };
-            let out = crate::services::task_service::TaskGenOutput {
-                text: text.clone(),
-                // 上游 finish_reason 经 run_tool_loop 末轮透出(可观测性问题①);
-                // 上游未下发时为 None,落库 ''
-                finish_reason: res.finish_reason.clone(),
-                prompt_tokens: total_usage.prompt_tokens,
-                completion_tokens: total_usage.completion_tokens,
-                reasoning_tokens: 0,
-                reasoning_chars: 0,
-                tool_calls: Vec::new(),
-            };
+            // token/字段构造统一走 usage_as_output(批次 B.4 单一出处);text 由
+            // record_llm_call 的 response 参数单独承载,finish_reason 是本调用特有的
+            // 诊断(问题①)故单独覆盖——上游未下发时为 None,落库 ''。
+            let mut out = usage_as_output(&total_usage);
+            out.finish_reason = res.finish_reason.clone();
             svc.record_llm_call(
                 &call.task_id,
                 call.phase,
@@ -174,14 +173,18 @@ pub(crate) async fn run_agent_loop(
                 status,
             );
             if text.is_empty() {
-                let _ = state_machine.transition(AgentState::Error, &call.session_id);
                 // 空内容错误带 finish_reason(问题③):区分「已达 token 上限」(推理
                 // 烧光预算,实测主因)与其他成因,与 legacy retry_if_empty_output
                 // 的文案口径对齐,步骤 result 落库后可读
+                if let Err(e) = state_machine.transition(AgentState::Error, &call.session_id) {
+                    tracing::warn!(error = %e, session = %call.session_id, "状态迁移被拒");
+                }
                 let reason = res.finish_reason.as_deref().unwrap_or("未知");
                 return Err(format!("{}返回空内容(finish_reason={reason})", call.label));
             }
-            let _ = state_machine.transition(AgentState::Finished, &call.session_id);
+            if let Err(e) = state_machine.transition(AgentState::Finished, &call.session_id) {
+                tracing::warn!(error = %e, session = %call.session_id, "状态迁移被拒");
+            }
             Ok((text, total_usage))
         }
         Ok(_) => {
@@ -197,7 +200,9 @@ pub(crate) async fn run_agent_loop(
                 elapsed,
                 "error",
             );
-            let _ = state_machine.transition(AgentState::Interrupted, &call.session_id);
+            if let Err(e) = state_machine.transition(AgentState::Interrupted, &call.session_id) {
+                tracing::warn!(error = %e, session = %call.session_id, "状态迁移被拒");
+            }
             Err("任务已停止".into())
         }
         Err(e) => {
@@ -212,24 +217,29 @@ pub(crate) async fn run_agent_loop(
                 elapsed,
                 "error",
             );
-            let _ = state_machine.transition(AgentState::Error, &call.session_id);
+            if let Err(e) = state_machine.transition(AgentState::Error, &call.session_id) {
+                tracing::warn!(error = %e, session = %call.session_id, "状态迁移被拒");
+            }
             Err(e)
         }
     }
 }
 
-/// solo 执行器:持有任务服务(提示词助手/状态落库/调用追踪)与聊天引擎(工具循环)。
+/// solo 执行器:持有任务后端(提示词助手/状态落库/调用追踪)与聊天引擎(工具循环)。
 pub(crate) struct SoloExecutor {
-    svc: Arc<TaskService>,
+    svc: Arc<dyn TaskBackend>,
     engine: Arc<AgentEngine>,
 }
 
 impl SoloExecutor {
-    pub(crate) fn new(svc: Arc<TaskService>, engine: Arc<AgentEngine>) -> Self {
+    pub(crate) fn new(svc: Arc<dyn TaskBackend>, engine: Arc<AgentEngine>) -> Self {
         SoloExecutor { svc, engine }
     }
 
-    async fn run_inner(&self, ctx: TaskRunContext) -> Result<TaskOutcome, String> {
+    async fn run_inner(
+        &self,
+        ctx: TaskRunContext,
+    ) -> Result<(TaskTerminal, TokenUsage), String> {
         // solo 无规划阶段:进入即执行(run 入口 reset_task 已置 planning,此处推进到 running)
         self.svc.set_status(&ctx.task_id, TaskStatus::Running);
 
@@ -254,17 +264,23 @@ impl SoloExecutor {
         // 自 2026-08 起由 ApprovedPlanExecutor 逐步落库,本执行器仅作 plan 为空时的兜底)
         self.svc
             .record_usage(&ctx.task_id, "agent", None, &usage_as_output(&usage));
-        Ok(TaskOutcome {
-            text,
+        // 成功终态:result 文本 + done(无覆盖状态/原因)
+        Ok((
+            TaskTerminal::Complete {
+                result: text,
+                status: TaskStatus::Done,
+                error: None,
+            },
             usage,
-            status: None,
-            error: None,
-        })
+        ))
     }
 }
 
 impl ModeExecutor for SoloExecutor {
-    fn run<'a>(&'a self, ctx: TaskRunContext) -> BoxFuture<'a, Result<TaskOutcome, String>> {
+    fn run<'a>(
+        &'a self,
+        ctx: TaskRunContext,
+    ) -> BoxFuture<'a, Result<(TaskTerminal, TokenUsage), String>> {
         Box::pin(async move { self.run_inner(ctx).await })
     }
 }

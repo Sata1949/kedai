@@ -1,4 +1,6 @@
-// Agent 状态机(与 Node 版 state-machine.ts 对齐)
+// Agent 状态机(与 Node 版 state-machine.ts 对齐)。
+// 状态迁移校验:非法迁移记 warn 日志(transition 返回 Err;调用方应记录,不得静默丢弃)。
+// 状态机本身不做落库——持久化终态以 agent_sessions/tasks 行为准。
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentState {
@@ -47,7 +49,9 @@ pub struct StateMachine {
 fn transitions(from: AgentState) -> &'static [AgentState] {
     use AgentState::*;
     match from {
-        Idle => &[Planning, Finished],
+        // Idle 可直接进 Executing:任务/工具路径无独立规划阶段(solo/multi 进入即执行,
+        // 见 task_engine/solo.rs),补入本迁移使该真实路径合法。
+        Idle => &[Planning, Executing, Finished],
         Planning => &[Executing, Finished, Interrupted, Error],
         Executing => &[ToolCall, Reflecting, Finished, Interrupted, Error],
         ToolCall => &[Executing, Interrupted, Error],

@@ -160,7 +160,21 @@ mod tests {
         let characters = Arc::new(CharacterService::new(db.clone(), dir));
         let world_books = Arc::new(WorldBookService::new(db.clone()));
         let kaleido = Arc::new(KaleidoStateService::new(db.clone()));
-        let registry = Arc::new(ContractRegistry::new(characters.clone(), world_books));
+        // 批次 B.6:注册表改注入取数据闭包(生产注入见 api/app_state.rs)
+        let registry = Arc::new(ContractRegistry::new(
+            {
+                let characters = characters.clone();
+                move |id: &str| {
+                    characters
+                        .get(id)
+                        .and_then(|c: crate::models::types::CharacterRecord| c.data_raw)
+                }
+            },
+            {
+                let world_books = world_books.clone();
+                move |id: &str| world_books.collect_entries_for_character(id)
+            },
+        ));
         Fixture {
             sessions,
             registry,

@@ -221,10 +221,17 @@ impl AppState {
         ));
         tool_registry.set_undo(undo.clone());
 
-        // 契约注册表:引擎与多步工具共享同一实例(缓存一致;改卡后写路径 invalidate)
+        // 契约注册表:引擎与多步工具共享同一实例(缓存一致;改卡后写路径 invalidate)。
+        // 批次 B.6:注册表不再依赖服务类型,注入两个取数据闭包(角色卡 data_raw / 世界书条目)。
         let contract_registry = Arc::new(crate::contracts::ContractRegistry::new(
-            characters.clone(),
-            world_books.clone(),
+            {
+                let characters = characters.clone();
+                move |id: &str| characters.get(id).and_then(|c| c.data_raw)
+            },
+            {
+                let world_books = world_books.clone();
+                move |id: &str| world_books.collect_entries_for_character(id)
+            },
         ));
         // P4:多步模式工具(get_state/apply_patch)。契约经共享 registry(与引擎同缓存);
         // 不进入 agent 正文模式的默认下发列表(chat.rs 过滤)。P6:apply_patch 契约生效时

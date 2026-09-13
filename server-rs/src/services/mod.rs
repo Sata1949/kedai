@@ -4,6 +4,8 @@ pub mod agent_session_service;
 pub mod agent_subtask_service;
 pub mod audio_service;
 pub mod cache_diagnostics;
+// characters.data_raw 读改写单一入口(防丢更新):世界书/脚本/契约三处共用
+pub(crate) mod character_data;
 pub mod character_service;
 pub mod contract_changelog_service;
 // 向量化服务(Phase 3):OpenAI 兼容 /embeddings 客户端 + 余弦/归一化工具
@@ -30,6 +32,8 @@ pub mod session_service;
 pub mod settings_service;
 pub mod skill_service;
 pub mod task_service;
+// 任务核心契约(批次 B 依赖倒置):执行器终态值类型,先于 task_engine 定义
+pub(crate) mod task_core;
 // 任务引擎(批次 4 六模式):模式执行器底座 + solo/plan;设计见 docs/任务引擎六模式.md
 pub mod task_engine;
 pub mod token_service;
@@ -44,5 +48,13 @@ pub mod world_book_service;
 /// (schema 级异常)同样不回传 panic——阻塞线程 panic 会经 JoinError 放大为 500。
 pub(crate) fn log_query_failure<T>(op: &str, e: rusqlite::Error) -> Vec<T> {
     tracing::warn!(op = op, error = e.to_string(), "DB 列表查询失败,回退空列表");
+    Vec::new()
+}
+
+/// 取只读连接失败(连接池耗尽等)时的兜底:记 warn 并回退空列表。
+/// 与 `log_query_failure` 同属「best-effort 列表语义」——此类函数本就丢弃坏行、
+/// 对 schema 级异常回退空集;阻塞线程 panic 会经 JoinError 放大为 500,故不 panic。
+pub(crate) fn log_read_pool_failure<T>(op: &str, e: String) -> Vec<T> {
+    tracing::warn!(op = op, error = e, "获取只读连接失败,回退空列表");
     Vec::new()
 }

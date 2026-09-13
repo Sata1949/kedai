@@ -7,8 +7,7 @@
 // 转发为 kind=delta 暂态事件,前端任务工作台据此实时显示「正在生成」;
 // 攒批器携带 phase/step_index 调用上下文(与 task_llm_calls 落库行同口径)。
 use crate::models::types::{SseEvent, TaskEventKind};
-use crate::services::task_service::events::DELTA_FLUSH_WINDOW;
-use crate::services::task_service::TaskService;
+use crate::services::task_core::{TaskBackend, DELTA_FLUSH_WINDOW};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -29,7 +28,7 @@ const DETAIL_MAX_CHARS: usize = 200;
 /// team 主 agent 复用同桥、step_index 为子目标全局下标;custom 工具步骤 phase=step;
 /// 子 agent phase=subagent),随 delta 事件透出供前端缓冲归键。
 pub(crate) fn spawn(
-    svc: Arc<TaskService>,
+    svc: Arc<dyn TaskBackend>,
     task_id: String,
     label: &str,
     phase: &str,

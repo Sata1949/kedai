@@ -9,6 +9,8 @@ use super::*;
 // 兄弟模块的自由函数:parse_plan(计划解析;人设与提示词组装统一走
 // prompt.rs::assemble_executor_system_prompt,不再在本文件直接用 persona_style)
 use super::parse::parse_plan;
+// 执行器终态值(批次 B 依赖倒置):finalize_terminal 按值分派落库
+use crate::services::task_core::terminal::TaskTerminal;
 
 impl TaskService {
     // ===== 执行 =====
@@ -16,8 +18,8 @@ impl TaskService {
     /// 启动后台执行(按 task_mode 派发;legacy 路径行为逐字节不变)。
     /// 重跑会清空旧 plan/result/error 并重新规划。
     /// 每次 run 分配新 token 覆盖旧条目,旧后台任务退出时凭 token 判断自己是否仍是当前执行。
-    /// 全部六模式(含 legacy)统一经 TaskEngine 派发;legacy 执行器自行收尾
-    /// (task_engine/legacy.rs + OnSuccess::SelfFinalized),此处不再分叉。
+    /// 全部六模式(含 legacy)统一经 TaskEngine 派发;收尾由执行器返回 TaskTerminal 值、
+    /// 引擎经 finalize_terminal 统一落库(批次 B 依赖倒置),此处不再分叉。
     pub fn run(self: &Arc<Self>, id: &str) -> Result<(), String> {
         let task = self.get(id).ok_or("任务不存在")?;
         if task.status == TaskStatus::Running || task.status == TaskStatus::Planning {
@@ -29,8 +31,8 @@ impl TaskService {
         }
         self.reset_task(id);
         let (cancel, token) = self.register_cancel(id);
-        let engine =
-            crate::services::task_engine::TaskEngine::new(self.clone(), self.engine.clone());
+        let backend: std::sync::Arc<dyn crate::services::task_core::TaskBackend> = self.clone();
+        let engine = crate::services::task_engine::TaskEngine::new(backend, self.engine.clone());
         engine.run_mode(&task, cancel, token);
         Ok(())
     }
@@ -73,8 +75,8 @@ impl TaskService {
             goal.push_str(&format!("{}. {}:{}\n", i + 1, s.name, s.goal));
         }
         let (cancel, token) = self.register_cancel(id);
-        let engine =
-            crate::services::task_engine::TaskEngine::new(self.clone(), self.engine.clone());
+        let backend: std::sync::Arc<dyn crate::services::task_core::TaskBackend> = self.clone();
+        let engine = crate::services::task_engine::TaskEngine::new(backend, self.engine.clone());
         engine.run_approved(&task, goal, steps, cancel, token);
         Ok(())
     }
@@ -146,6 +148,40 @@ impl TaskService {
         self.remove_cancel_if(task_id, token);
     }
 
+    /// 任务执行终态统一收尾入口(批次 B 依赖倒置):执行器只返回 TaskTerminal 值,
+    /// 由本方法按变体分派到既有 5 种写入形态,语义逐字节不变。
+    ///
+    /// `ended_by_cancel` 由引擎侧在收尾点读取消通道求值后传入:它是取消判定的
+    /// **唯一来源**(TaskTerminal 不再携带该信息,避免两处求值不一致)。
+    /// Noop 等价于原 `finalize_run(error=None, 非取消)` 分支:仅清理取消条目。
+    pub(crate) fn finalize_terminal(
+        &self,
+        task_id: &str,
+        token: u64,
+        terminal: TaskTerminal,
+        ended_by_cancel: bool,
+    ) {
+        match terminal {
+            TaskTerminal::Complete {
+                result,
+                status,
+                error,
+            } => self.complete_mode_run(task_id, token, &result, status, error.as_deref()),
+            TaskTerminal::AwaitApproval { plan_text } => {
+                self.planned_mode_run(task_id, token, &plan_text)
+            }
+            TaskTerminal::Followup {
+                msg_text,
+                new_result,
+                status,
+            } => self.complete_followup_run(task_id, token, &msg_text, &new_result, status),
+            TaskTerminal::Failed { error } => {
+                self.finalize_mode_run(task_id, token, ended_by_cancel, error.as_deref())
+            }
+            TaskTerminal::Noop => self.remove_cancel_if(task_id, token),
+        }
+    }
+
     /// 终态追加指令(批次 R2a followup;R2b+ 扩 mode):仅 done/partial/error/ended 可追加,
     /// running/planning/planned 由 API 层预检 409(此处复核兜底竞态)。
     /// 用户指令落 task_messages(kind=followup, role=user)→ 任务回 running,
@@ -205,10 +241,10 @@ impl TaskService {
         // is_current_run 让位不写,新执行的 running 不被覆盖。
         let (cancel, token) = self.register_cancel(id);
         let _ = self.set_status(id, TaskStatus::Running);
-        // 经任务引擎派发 followup 执行器(统一派发点;收尾由执行器经
-        // complete_followup_run 完成,OnSuccess::SelfFinalized)
-        let engine =
-            crate::services::task_engine::TaskEngine::new(self.clone(), self.engine.clone());
+        // 经任务引擎派发 followup 执行器(统一派发点;收尾由执行器返回
+        // TaskTerminal::Followup,引擎 finalize_terminal 转调 complete_followup_run)
+        let backend: std::sync::Arc<dyn crate::services::task_core::TaskBackend> = self.clone();
+        let engine = crate::services::task_engine::TaskEngine::new(backend, self.engine.clone());
         engine.run_followup(
             &task,
             goal,

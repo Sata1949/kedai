@@ -10,17 +10,17 @@
 // plan 步骤名 = 「【主Agent-N】子目标名」(前端分工卡按此前缀分组)。
 // 手动拓扑(用户指定主 agent 数量/人设/分工)预留,待前端入口批次(docs/任务引擎六模式.md)。
 use super::context::TaskRunContext;
-use super::executor::{usage_as_output, ModeExecutor, TaskOutcome};
+use super::executor::{usage_as_output, ModeExecutor};
 use super::solo::{run_agent_loop, AgentLoopCall};
 use crate::agents::engine::AgentEngine;
 use crate::models::types::{
     LlmMessage, TaskEventKind, TaskStatus, TaskStep, TaskStepStatus, TokenUsage,
 };
 use crate::services::prompt_kit::untrusted_boundary;
-use crate::services::task_service::prompt::{
+use crate::services::task_core::prompt_consts::{
     SUMMARIZER_PROMPT, TEAM_AUDIT_PROMPT, TEAM_FINAL_AUDIT_PROMPT, TEAM_PLANNER_PROMPT,
 };
-use crate::services::task_service::TaskService;
+use crate::services::task_core::{TaskBackend, TaskGenOutput, TaskTerminal};
 use futures::future::BoxFuture;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -282,7 +282,7 @@ fn trunc_heal_budget(finish_reason: Option<&str>, max_tokens: u32) -> Option<u32
 /// record_usage 两次都落(与 solo 自愈留痕同口径)。
 #[allow(clippy::too_many_arguments)]
 async fn generate_text_healed(
-    svc: &TaskService,
+    svc: &Arc<dyn TaskBackend>,
     task_id: &str,
     phase: &str,
     messages: Vec<LlmMessage>,
@@ -291,7 +291,7 @@ async fn generate_text_healed(
     top_p: f64,
     cancel: &watch::Receiver<bool>,
     total: &mut TokenUsage,
-) -> Result<crate::services::task_service::TaskGenOutput, String> {
+) -> Result<TaskGenOutput, String> {
     let mut out = svc
         .generate_text(
             task_id,
@@ -347,24 +347,21 @@ async fn generate_text_healed(
     Ok(out)
 }
 
-/// team 执行器:任务服务(规划/审计/汇总纯生成出口 + 落库)+ 聊天引擎(主 agent 工具循环)。
+/// team 执行器:任务后端(规划/审计/汇总纯生成出口 + 落库)+ 聊天引擎(主 agent 工具循环)。
 pub(crate) struct TeamExecutor {
-    svc: Arc<TaskService>,
+    svc: Arc<dyn TaskBackend>,
     engine: Arc<AgentEngine>,
 }
 
 impl TeamExecutor {
-    pub(crate) fn new(svc: Arc<TaskService>, engine: Arc<AgentEngine>) -> Self {
+    pub(crate) fn new(svc: Arc<dyn TaskBackend>, engine: Arc<AgentEngine>) -> Self {
         TeamExecutor { svc, engine }
     }
 
     /// team 规划:TEAM_PLANNER_PROMPT + 世界书背景(untrusted 包裹),解析失败按
     /// finish_reason 分级重试(截断/空输出翻倍预算,最多 TEAM_PLAN_MAX_ATTEMPTS 次)。
     /// 调用追踪经 generate_text 统一出口落 task_llm_calls(phase=planner)。
-    async fn plan_team(
-        &self,
-        ctx: &TaskRunContext,
-    ) -> Result<(Vec<TeamMain>, crate::services::task_service::TaskGenOutput), String> {
+    async fn plan_team(&self, ctx: &TaskRunContext) -> Result<(Vec<TeamMain>, TaskGenOutput), String> {
         let mut sys = String::from(TEAM_PLANNER_PROMPT);
         let world = self.svc.world_context(ctx.character_id.as_deref());
         if !world.is_empty() {
@@ -514,7 +511,10 @@ impl TeamExecutor {
         (main_index, results)
     }
 
-    async fn run_inner(&self, ctx: TaskRunContext) -> Result<TaskOutcome, String> {
+    async fn run_inner(
+        &self,
+        ctx: TaskRunContext,
+    ) -> Result<(TaskTerminal, TokenUsage), String> {
         let svc = &self.svc;
         let mut total = TokenUsage::default();
 
@@ -730,17 +730,20 @@ impl TeamExecutor {
         } else {
             None
         };
+        // 有可解释 error(失败子目标或审计/终审未通过)即 partial,否则 done
         let status = if error.is_some() {
-            Some(TaskStatus::Partial)
+            TaskStatus::Partial
         } else {
-            None
+            TaskStatus::Done
         };
-        Ok(TaskOutcome {
-            text,
-            usage: total,
-            status,
-            error,
-        })
+        Ok((
+            TaskTerminal::Complete {
+                result: text,
+                status,
+                error,
+            },
+            total,
+        ))
     }
 
     /// 并行跑一批主 agent(首轮 = 全部;补做轮 = 打回指定子集/子目标,目标文本附补做指令)。
@@ -1120,7 +1123,10 @@ fn build_final_review_input(
 }
 
 impl ModeExecutor for TeamExecutor {
-    fn run<'a>(&'a self, ctx: TaskRunContext) -> BoxFuture<'a, Result<TaskOutcome, String>> {
+    fn run<'a>(
+        &'a self,
+        ctx: TaskRunContext,
+    ) -> BoxFuture<'a, Result<(TaskTerminal, TokenUsage), String>> {
         Box::pin(async move { self.run_inner(ctx).await })
     }
 }

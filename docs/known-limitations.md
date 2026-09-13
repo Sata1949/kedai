@@ -164,23 +164,33 @@
 
 ---
 
-## L12 角色卡脚本桥不经过工具授权裁决(待办)
+## L12 角色卡脚本:前端沙箱有授权台账,后端执行路径未打通(待办)
 
-- **现状行为**:角色卡脚本经 rquickjs 沙箱执行后,其数据写入能力
-  `TavernHelper.setVariables` → `write_scope`(`server-rs/src/scripts/bridge.rs:265`)、
-  `importRawCharacter/Worldbook/Preset/Chat/TavernRegex` → `import_raw`(`:244`)、
-  `generate` → `generate_from_config`(`:198`)直接改变量树/导入数据,**不经
-  `ToolRegistry` 与 `ToolPermissionManager`**;而角色卡脚本默认自动执行
-  (`server-rs/src/agents/engine/run_scripts.rs:205-231`)。等价于「无授权执行
-  `update_variables` 级写操作」。
-- **判定**:**待办**。与 MAINTENANCE §0「新能力默认进 L3 隔离验证」的纪律相悖——
-  脚本沙箱做了引擎级隔离(内存/中断上限、无 fs/net API),但**授权维度缺失**。
-- **补齐路径**:在 `bridge.rs` 三处写路径前插入裁决,复用
-  `ToolPermissionManager::decide_with_policy`(`server-rs/src/tools/permissions.rs:165`)
-  与 `action_class::classify`(`tools/action_class.rs:82`);新增设置项
-  `script_authorization_enabled`(**默认关**以保持现有行为,开启后走三档裁决)。
-- **生态兼容考量**:ST 生态的大量卡依赖脚本自动写变量(如好感度、状态栏),默认开启授权
-  会导致这类卡静默失效,故必须默认关、由用户显式启用。
+- **现状行为**(2026-09-13 复核后修正描述——**并非「完全没有授权机制」**):
+  - **前端**路径已有授权:`web/src/scriptAuthorization.ts` 的
+    `LocalScriptAuthorizationStore` 按「角色 id + 脚本内容 SHA-256」记录授权
+    (localStorage,key `kedai.character-script-authorizations.v1`),
+    `stores/character.ts` 暴露 `currentScriptAuthorized` / `scriptAuthorizations`,
+    设置页 `components/settings/UiSection.vue` 可查看与撤销。前端沙箱脚本受此约束。
+  - **后端**路径无授权门槛:`agents/engine/mod.rs:641` 在消息生成完成后调用
+    `run_character_scripts`,串行执行角色卡 `extensions.tavern_helper` 里的启用脚本;
+    脚本经 TavernHelper 兼容桥(`scripts/bridge.rs`)可写 global/character/preset/script
+    作用域(`write_scope:265`)、导入数据(`import_raw:244`)、发起生成(`generate_from_config:198`),
+    写回结果由 `take_others` **落库**。此路径不查前端的授权台账(后端无从读取浏览器 localStorage),
+    即**同一张卡的脚本,前端要授权、后端自动跑**。
+- **判定**:**待办**。这是两条执行路径的**授权不对称**,不是「新能力没隔离」——
+  前端已按 L3 纪律做了隔离,后端这条漏了对应门槛。
+- **补齐路径**(两条,需先定方案):
+  1. **后端独立开关**(改动小、语义清晰):新增设置项(默认关=保持现状),开启后后端脚本
+     经 `ToolPermissionManager::decide_with_policy`(`tools/permissions.rs:165`)裁决;
+     注意需**两端同步**加字段,否则 `tools/check-contract.mjs` 会因「后端有前端无」判 FAIL。
+  2. **复用前端授权**(语义统一、改动大):前端在生成请求里携带当前角色的授权状态,
+     后端据此放行——需设计跨端信任模型(后端不能信任前端的自我声明而不校验)。
+- **生态兼容考量**:ST 生态大量卡依赖脚本自动写变量(状态栏、好感度),
+  默认开启授权会让这类卡静默失效,故**无论选哪种方案都必须默认放行、由用户显式收紧**。
+- **本轮已完成的相关加固**(E.2,与授权正交):脚本单次执行加 5 秒墙钟硬超时
+  (`agents/engine/run_scripts.rs`,协作式中断拦不住阻塞在 native 闭包者)、
+  单轮脚本数量上限 32(防「脚本海」耗尽资源)。
 
 ## L13 聊天流逐 token 全量重渲染(待办)
 

@@ -5,7 +5,7 @@
 // (该表 session_id 外键指向 sessions(id),任务 id 不在其中,写入必 FK 失败),
 // 改走内存覆盖层(mem map);进度经任务事件桥(agent_status)观测,口径与
 // llm_requests 的 task: 前缀跳过守卫同款。
-use super::log_query_failure;
+use super::{log_query_failure, log_read_pool_failure};
 use crate::models::db::{now_iso, Db};
 use crate::models::types::AgentSubtaskRecord;
 use rusqlite::{params, OptionalExtension};
@@ -146,7 +146,10 @@ impl AgentSubtaskService {
             out.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
             return out;
         }
-        let conn = self.db.read().expect("获取只读连接失败");
+        let conn = match self.db.read() {
+            Ok(c) => c,
+            Err(e) => return log_read_pool_failure("子任务列表", e),
+        };
         let mut stmt = match conn
             .prepare("SELECT id, session_id, character_id, name, instruction, status, result, error, created_at, updated_at FROM agent_subtasks WHERE session_id = ?1 ORDER BY created_at ASC")
         {

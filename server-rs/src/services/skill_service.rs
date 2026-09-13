@@ -2,7 +2,7 @@
 // 渐进披露(落地项 3):system 只注入 name+description 紧凑清单(skill_manifest),
 // 正文按需经 read(type=skill) 读取;allowed_tools/run_as_subagent/model 为
 // 子智能体调度增强预留元数据(旧库缺列由迁移补默认)。
-use super::log_query_failure;
+use super::{log_query_failure, log_read_pool_failure};
 use crate::models::db::{now_iso, Db};
 use crate::models::types::SkillRecord;
 use rusqlite::{params, OptionalExtension};
@@ -77,7 +77,10 @@ impl SkillService {
     }
 
     pub fn list(&self, only_enabled: bool) -> Vec<SkillRecord> {
-        let conn = self.db.read().expect("获取只读连接失败");
+        let conn = match self.db.read() {
+            Ok(c) => c,
+            Err(e) => return log_read_pool_failure("技能列表", e),
+        };
         let sql = if only_enabled {
             "SELECT id, name, description, content, enabled, created_at, allowed_tools, run_as_subagent, model FROM skills WHERE enabled = 1 ORDER BY name ASC"
         } else {

@@ -4,7 +4,7 @@
 // 依赖精确到 (消息 id/content/content_display/extra、正则脚本版本 hash、renderHtml 偏好);
 // 流式 token 到达时仅当前生成中的消息重算,历史消息零重渲染。
 // 注意:样式类名与 DOM 结构语义与迁入前完全一致(style.css 全局选择器依赖),不得随意改名。
-import { computed, ref, watch } from 'vue';
+import { computed, onUnmounted, ref, watch } from 'vue';
 import { useAppStore } from '../store';
 import type { UiMessage } from '../sseReducer';
 import type { RegexScript } from '../api';
@@ -119,6 +119,52 @@ function buildRenderPanelHtml(code: string, seed: string): string {
 }
 
 /**
+ * 流式渲染节流(批次 G.1):
+ *
+ * 问题:后端逐 token 推送、sseReducer 逐 token 就地追加 `m.content`,本组件的 `html`
+ * computed 依赖 content → 每个 token 都对**整条增长中的消息**重跑 markdown + 重设
+ * `v-html`,长回复呈 O(n²)(渲染成本随累计长度线性增长 × token 数)。
+ *
+ * 处置:不改数据层(内容仍逐 token 累积,不丢字),只在**渲染层**加节拍——
+ *   - 未流式(`streaming !== true`)时 `renderTick` 恒为 0,computed 直读最新内容,
+ *     非流式消息(历史消息、终态消息)行为与节流前完全一致;
+ *   - 流式中每帧最多重算一次(rAF 合帧):一帧内到达的多个 token 只触发一次渲染。
+ *
+ * 依赖说明:`html` 的 computed 显式 `void renderTick.value` 建立依赖——否则 Vue 只会
+ * 因 content 变化重算,节流不起作用。rAF 在测试环境(node)不存在,退化用定时器。
+ */
+const renderTick = ref(0);
+let rafId: number | null = null;
+
+function scheduleRender(): void {
+  if (rafId !== null) return; // 本帧已排期,合并
+  const schedule: (cb: () => void) => number =
+    typeof requestAnimationFrame === 'function'
+      ? (cb) => requestAnimationFrame(cb)
+      : (cb) => setTimeout(cb, 16) as unknown as number;
+  rafId = schedule(() => {
+    rafId = null;
+    renderTick.value++;
+  });
+}
+
+// 仅当本条消息处于流式时才排期(历史消息 content 微变不值得引入一帧延迟)
+watch(
+  () => props.m.content,
+  () => {
+    if (props.m.streaming) scheduleRender();
+  },
+);
+
+onUnmounted(() => {
+  if (rafId !== null) {
+    if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(rafId);
+    else clearTimeout(rafId);
+    rafId = null;
+  }
+});
+
+/**
  * assistant 消息渲染(缓存于 computed,键见下):
  *  - 远程资源界面优先:消息含 `$('body').load('https://…')` → 沙箱 iframe 资源卡片,独立于 HTML 开关。
  *  - 渲染面板:消息正文含整页 HTML 代码块 → 面板壳(与 scoped 注入互斥,独立 iframe 隔离执行)。
@@ -131,6 +177,7 @@ function buildRenderPanelHtml(code: string, seed: string): string {
  */
 const html = computed<string>(() => {
   void props.scriptHash; // 脚本版本变化时强制重算(即便 scripts 引用与字段未触发)
+  void renderTick.value; // 流式节拍依赖:每帧最多重算一次(见上方 renderTick 说明)
   const text = renderText();
   const resourceUrl = extractBodyLoadUrl(text);
   if (resourceUrl) {

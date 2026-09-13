@@ -197,6 +197,24 @@ impl AgentEngine {
         if all.is_empty() {
             return;
         }
+        // 脚本数量上限:角色卡属不可信输入,可挂载大量脚本(每个都新建 quickjs Runtime)。
+        // 超限截断并告警,避免单张卡用「脚本海」耗尽 CPU/内存(与 EJS 循环预算同属
+        // 「不可信输入的资源边界」)。
+        const MAX_SCRIPTS_PER_RUN: usize = 32;
+        if all.len() > MAX_SCRIPTS_PER_RUN {
+            tracing::warn!(
+                character_id = character_id,
+                total = all.len(),
+                limit = MAX_SCRIPTS_PER_RUN,
+                "脚本数量超上限,已截断执行"
+            );
+            all.truncate(MAX_SCRIPTS_PER_RUN);
+        }
+        // 单脚本墙钟上限:runtime 内部的协作式中断(缺省 1s)对**阻塞在 native 闭包**里
+        // 的脚本无效(如 generate 等 LLM 回执),故在调度侧再加一层硬超时。
+        // 注意:spawn_blocking 的线程无法被取消——超时只保证「调用方不再等待」,
+        // 该线程会自然结束后回收;这是 tokio 的既有约束,故同时用数量上限控制并发面。
+        const SCRIPT_WALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
         let opts = crate::scripts::runtime::EvalOptions::default();
         // 阶段六 6g:生成/导入处理器在循环外构建一次(捕获最小依赖:connector 与各
         // service 的 Arc clone),所有脚本共享同一份接线。
@@ -213,13 +231,23 @@ impl AgentEngine {
                 .with_imports(import_handler.clone());
             let source = script.content.clone();
             let opts = opts.clone();
-            let outcome = tokio::task::spawn_blocking(move || {
-                crate::scripts::runtime::eval_with_bridge(&source, &opts, &bridge)
-            })
+            // 硬超时包裹:内部协作式中断拦不住阻塞在 native 闭包的脚本,此处兜住调用方
+            // (超时后不再等待;阻塞线程自然结束后回收——见上方 SCRIPT_WALL_TIMEOUT 注释)。
+            let outcome = match tokio::time::timeout(
+                SCRIPT_WALL_TIMEOUT,
+                tokio::task::spawn_blocking(move || {
+                    crate::scripts::runtime::eval_with_bridge(&source, &opts, &bridge)
+                }),
+            )
             .await
-            .unwrap_or_else(|_| {
-                crate::scripts::runtime::EvalOutcome::Error("脚本执行任务被取消".into())
-            });
+            {
+                Ok(joined) => joined.unwrap_or_else(|_| {
+                    crate::scripts::runtime::EvalOutcome::Error("脚本执行任务被取消".into())
+                }),
+                Err(_elapsed) => crate::scripts::runtime::EvalOutcome::Error(
+                    "脚本执行超出墙钟上限(5 秒),已放弃等待".into(),
+                ),
+            };
             if let crate::scripts::runtime::EvalOutcome::Error(msg) = outcome {
                 tracing::warn!(
                     character_id = character_id.to_string(),
