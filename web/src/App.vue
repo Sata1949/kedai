@@ -1,11 +1,12 @@
 <script setup lang="ts">
 // 根组件:左侧功能区 + 中间消息区 + 右侧 Agent 抽屉 + 启动动画
-// 弹窗懒加载(前端性能优化):13 个弹窗/浮层组件改 defineAsyncComponent,
+// 弹窗懒加载(前端性能优化):模态弹窗组件统一在 web/src/modals.ts 注册表声明,
 // 首屏 bundle 不再包含其实现,首次打开对应弹窗时才加载 chunk;
-// <Transition name="sv-modal"> 包裹与 v-if 条件保持不变(开合过渡语义不变)。
+// <Transition name="sv-modal"> 包裹与开合过渡语义不变(由注册表 v-for 派生)。
 import { nextTick, onMounted, onUnmounted, watch } from 'vue';
 import { useAppStore } from './store';
 import { lazyModal } from './asyncModal';
+import { MODALS, MODAL_FLAGS } from './modals';
 import { inTauri } from './platform';
 import { useExternalLinks } from './composables/useExternalLinks';
 import { useKeepAlive } from './composables/useKeepAlive';
@@ -15,27 +16,21 @@ import TaskBoard from './components/TaskBoard.vue';
 import AgentPanel from './components/AgentPanel.vue';
 import SplashScreen from './components/SplashScreen.vue';
 
-// ===== 懒加载弹窗(各自/分组拆 chunk,见 vite.config.ts manualChunks) =====
-// 统一经 lazyModal 包装:chunk 加载失败自动重试一次,仍失败显示全局错误条(可手动重试),
-// 不再静默「点了没反应」。第二参数为面板名,第三参数为 uiPrefs 中对应的开关 ref 名。
-const SettingsHub = lazyModal(() => import('./components/SettingsHub.vue'), '综合设置', 'settingsOpen');
-const WorldBooksModal = lazyModal(() => import('./components/WorldBooksModal.vue'), '世界书', 'worldBooksOpen');
-const ChatRecords = lazyModal(() => import('./components/ChatRecords.vue'), '聊天记录', 'chatRecordsOpen');
-const PluginsModal = lazyModal(() => import('./components/PluginsModal.vue'), '插件', 'pluginsOpen');
-const SkillsModal = lazyModal(() => import('./components/SkillsModal.vue'), '技能库', 'skillsOpen');
-const ContractsModal = lazyModal(() => import('./components/ContractsModal.vue'), '契约编辑', 'contractsOpen');
-const PromptManager = lazyModal(() => import('./components/PromptManager.vue'), '提示词管理', 'promptsOpen');
-const ScriptsModal = lazyModal(() => import('./components/ScriptsModal.vue'), '脚本管理', 'scriptsOpen');
-const MacrosModal = lazyModal(() => import('./components/MacrosModal.vue'), '宏调试', 'macrosOpen');
-const DevToolsModal = lazyModal(() => import('./components/DevToolsModal.vue'), '事件监控', 'eventsOpen');
-const OptimizeModal = lazyModal(() => import('./components/OptimizeModal.vue'), '优化面板', 'optimizeOpen');
-const MemoryModal = lazyModal(() => import('./components/MemoryModal.vue'), '记忆库', 'memoryOpen');
-const RepoIndexModal = lazyModal(() => import('./components/RepoIndexModal.vue'), '仓库索引', 'repoIndexOpen');
-const QuickRepliesModal = lazyModal(() => import('./components/QuickRepliesModal.vue'), '快速回复', 'quickRepliesOpen');
-// 音频播放器:右下角浮层,非首屏(默认收起为开关按钮),一并懒加载
+// 音频播放器:右下角浮层,非首屏(默认收起为开关按钮),一并懒加载。
+// 它是常驻浮层而非模态弹窗,故不进 modals.ts 注册表。
 const AudioPlayer = lazyModal(() => import('./components/AudioPlayer.vue'), '音频播放器', 'audioOpen');
 
 const store = useAppStore();
+
+/** 动态 flag 访问的统一收口:ModalDecl.flag 是运行期字符串,无法静态索引 store,
+ *  故只在此处做一次类型放宽(而非每个使用点各自断言);合法 flag 集合由
+ *  web/src/modals.ts 单点定义,并由 web/src/modals.test.ts 元测试锁定。 */
+const storeFlags = store as unknown as Record<string, boolean | undefined>;
+
+/** 按 flag 名读弹窗开关(渲染与返回键共用同一来源)。 */
+function isModalOpen(flag: string): boolean {
+  return storeFlags[flag] === true;
+}
 
 /** 窄屏(<768px)判定:抽屉与底部导航仅在窄屏有意义。
  *  用 matchMedia 而非 CSS 之外的 UA 嗅探:桌面端该查询恒为 false,行为与改动前一致。 */
@@ -89,23 +84,18 @@ function toggleAudio(): void {
  * WebView 历史里有两条记录,系统返回键会退回 about:blank —— 表现为整页白屏且无法恢复。
  *
  * 处理顺序(符合 Android 习惯):
- *   1) 有打开的弹窗 → 关掉最上层的那个;
+ *   1) 有打开的弹窗 → 关掉最上层的那个(MODAL_FLAGS 按渲染逆序,先关最上层);
  *   2) 有打开的抽屉 → 收起;
  *   3) 都没有 → 退出应用(与桌面版「关闭即退出」语义一致,后端与壳同进程一并结束)。
  *
  * 注册本监听后,壳不再自行处理返回键(见 AppPlugin 的 hasListener 分支)。
  */
-const MODAL_FLAGS = [
-  'settingsOpen', 'promptsOpen', 'worldBooksOpen', 'chatRecordsOpen', 'pluginsOpen',
-  'skillsOpen', 'contractsOpen', 'scriptsOpen', 'macrosOpen', 'eventsOpen',
-  'optimizeOpen', 'memoryOpen', 'repoIndexOpen', 'quickRepliesOpen',
-] as const;
-
 async function handleAndroidBack(): Promise<void> {
-  const flags = store as unknown as Record<string, boolean | undefined>;
-  for (const key of MODAL_FLAGS) {
-    if (flags[key]) {
-      flags[key] = false;
+  // 弹窗 flag 集合单点定义在 web/src/modals.ts;逆序即「后声明者在上层」
+  for (let i = MODAL_FLAGS.length - 1; i >= 0; i--) {
+    const key = MODAL_FLAGS[i];
+    if (storeFlags[key]) {
+      storeFlags[key] = false;
       return;
     }
   }
@@ -153,10 +143,9 @@ async function retryModalLoad(): Promise<void> {
   const err = store.modalLoadError;
   if (!err) return;
   store.modalLoadError = null;
-  const flags = store as unknown as Record<string, unknown>;
-  flags[err.flag] = false;
+  storeFlags[err.flag] = false;
   await nextTick();
-  flags[err.flag] = true;
+  storeFlags[err.flag] = true;
 }
 
 /** 面板 chunk 加载失败后的兜底恢复:整页刷新重新拉取 index.html(带最新 chunk hash)。
@@ -357,62 +346,11 @@ watch(
       </button>
     </nav>
 
-    <!-- 各模态弹窗:统一 <Transition name="sv-modal"> 开合过渡 -->
-    <!-- 综合设置弹窗 -->
-    <Transition name="sv-modal">
-      <SettingsHub v-if="store.settingsOpen" />
-    </Transition>
-    <!-- 世界书模态框 -->
-    <Transition name="sv-modal">
-      <WorldBooksModal v-if="store.worldBooksOpen" />
-    </Transition>
-    <!-- 聊天记录面板 -->
-    <Transition name="sv-modal">
-      <ChatRecords v-if="store.chatRecordsOpen" />
-    </Transition>
-    <!-- 插件管理弹窗 -->
-    <Transition name="sv-modal">
-      <PluginsModal v-if="store.pluginsOpen" />
-    </Transition>
-    <!-- 技能库弹窗 -->
-    <Transition name="sv-modal">
-      <SkillsModal v-if="store.skillsOpen" />
-    </Transition>
-    <!-- 契约编辑弹窗(P6 面板) -->
-    <Transition name="sv-modal">
-      <ContractsModal v-if="store.contractsOpen" />
-    </Transition>
-    <!-- 提示词顺序管理弹窗 -->
-    <Transition name="sv-modal">
-      <PromptManager v-if="store.promptsOpen" />
-    </Transition>
-    <!-- 用户脚本管理弹窗(阶段三) -->
-    <Transition name="sv-modal">
-      <ScriptsModal v-if="store.scriptsOpen" />
-    </Transition>
-    <!-- 宏调试弹窗(阶段六 6b) -->
-    <Transition name="sv-modal">
-      <MacrosModal v-if="store.macrosOpen" />
-    </Transition>
-    <!-- 事件监控弹窗(阶段六 6c) -->
-    <Transition name="sv-modal">
-      <DevToolsModal v-if="store.eventsOpen" />
-    </Transition>
-    <!-- 优化面板弹窗(阶段六 6d) -->
-    <Transition name="sv-modal">
-      <OptimizeModal v-if="store.optimizeOpen" />
-    </Transition>
-    <!-- 记忆库弹窗(侧边栏一级入口;与优化面板内的记忆库分区同源同组件) -->
-    <Transition name="sv-modal">
-      <MemoryModal v-if="store.memoryOpen" />
-    </Transition>
-    <!-- 仓库索引面板(只读展示 .kedai-index 生成的代码索引) -->
-    <Transition name="sv-modal">
-      <RepoIndexModal v-if="store.repoIndexOpen" />
-    </Transition>
-    <!-- 快速回复管理弹窗(阶段四 4b) -->
-    <Transition name="sv-modal">
-      <QuickRepliesModal v-if="store.quickRepliesOpen" />
+    <!-- 各模态弹窗:统一 <Transition name="sv-modal"> 开合过渡。
+         列表/组件/顺序均来自 web/src/modals.ts 单点注册表(声明顺序 = 渲染顺序,
+         后声明者叠在上层);Android 返回键按同表逆序关闭。 -->
+    <Transition v-for="modal in MODALS" :key="modal.flag" name="sv-modal">
+      <component :is="modal.component" v-if="isModalOpen(modal.flag)" />
     </Transition>
 
     <!-- 音频播放器(阶段五 5a):右下角悬浮 -->

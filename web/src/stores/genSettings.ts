@@ -1,8 +1,9 @@
 // 生成设置 store:生成参数(温度/Top-P/长度/上下文/工具轮次)、上下文压缩、记忆蒸馏、
 // 子代理参数、Agent 设置草稿(系统提示词/搜索端点/变量注入位置/反思系列)、授权模式、
 // 提示词注入配置、自定义 Agent 执行流程库,以及 loadSettings/saveSettings 读写服务端设置。
-// 从 store.ts 按领域拆分。跨 store 依赖(M5 断环后)为:
-//   - appMode 读回调桥(storeBridge.ts,owner 为 task store);
+// 从 store.ts 按领域拆分。跨 store 依赖实况(2026-09-13 批次 5.1 核对):
+//   - appMode 顶层 import useTaskStore 直读(loadSettings/saveSettings 按模式取覆盖层);
+//     该边单向(task 不 import 本 store),storeBridge 无 appMode 桥;
 //   - 对 uiPrefs 的两个写点(全局 render_html 默认值 + 生效值同步)改走回调桥
 //     (storeBridge.ts 的 notifyRenderHtmlDefault),本 store 不 import uiPrefs;
 //   - modelConn 是叶子 store(不反向引用本 store),保留直接引用。

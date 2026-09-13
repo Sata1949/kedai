@@ -42,6 +42,54 @@ const VERBOSE = process.argv.includes('--verbose');
  */
 const KNOWN_CYCLES = [];
 
+const failures = [];
+const notes = [];
+
+/**
+ * 弹窗 flag 白名单**单点派生**(批次 5.2):读取 web/src/modals.ts 的弹窗注册表,
+ * 不再在此手抄 flag 名(此前含僵尸项 devToolsOpen,真名是 eventsOpen)。
+ *
+ * 解析契约:modals.ts 内每个弹窗必须是单独一行
+ *   `modal('flag', '中文 label', () => import('./components/X.vue')),`
+ * 解析失败(文件缺失/结构改写)时**显式报错并判 FAIL**——绝不静默返回空列表:
+ * 白名单静默变空会让「组件直改弹窗开关」从合规变违规(或反之),护栏即失效。
+ */
+function readModalFlags() {
+  const file = join(SRC, 'modals.ts');
+  let src;
+  try {
+    src = readFileSync(file, 'utf8');
+  } catch (e) {
+    failures.push(`弹窗白名单派生失败:无法读取 web/src/modals.ts(${e.message})`);
+    return [];
+  }
+  const start = src.indexOf('export const MODALS');
+  const end = start === -1 ? -1 : src.indexOf('] as const;', start);
+  if (start === -1 || end === -1) {
+    failures.push(
+      '弹窗白名单派生失败:web/src/modals.ts 的 `export const MODALS = [...] as const;` 结构未识别(改了结构请同步 check-arch.mjs 的解析契约)',
+    );
+    return [];
+  }
+  const body = src.slice(start, end);
+  const entry = /^\s*modal\(\s*'([A-Za-z_$][\w$]*)'\s*,\s*'[^']*'\s*,\s*\(\)\s*=>\s*import\(/gm;
+  const flags = [...body.matchAll(entry)].map((m) => m[1]);
+  if (flags.length === 0) {
+    failures.push(
+      '弹窗白名单派生失败:web/src/modals.ts 的 MODALS 注册表解析出 0 条(解析契约已失效,请同步 check-arch.mjs)',
+    );
+    return [];
+  }
+  const dup = [...new Set(flags.filter((f, i) => flags.indexOf(f) !== i))];
+  if (dup.length) {
+    failures.push(`弹窗白名单派生失败:web/src/modals.ts 弹窗 flag 重复:${dup.join(', ')}`);
+  }
+  if (VERBOSE) {
+    console.log(`  [B] 弹窗白名单由 web/src/modals.ts 派生:${flags.length} 项(${flags.join(', ')})`);
+  }
+  return flags;
+}
+
 /**
  * 组件直改 store state 的白名单:字段名 → 理由。
  * 这些字段是纯 UI 开关(弹窗显隐 / 抽屉开合 / 面板展开 / 加载错误提示),
@@ -51,22 +99,8 @@ const KNOWN_CYCLES = [];
  * 后请同步把字段名从本集合删除。
  */
 const UI_FLAG_WHITELIST = new Set([
-  // 弹窗/面板显隐
-  'settingsOpen',
-  'promptsOpen',
-  'worldBooksOpen',
-  'quickRepliesOpen',
-  'pluginsOpen',
-  'skillsOpen',
-  'contractsOpen',
-  'scriptsOpen',
-  'macrosOpen',
-  'eventsOpen',
-  'optimizeOpen',
-  'memoryOpen',
-  'repoIndexOpen',
-  'chatRecordsOpen',
-  'devToolsOpen',
+  // 弹窗/面板显隐:由 web/src/modals.ts 弹窗注册表派生(新增弹窗本脚本零改动)
+  ...readModalFlags(),
   // 抽屉/面板开合(sidebarOpen 无副作用;agentPanelOpen 的收合语义走 collapseAgentPanel)
   'sidebarOpen',
   'audioOpen',
@@ -78,9 +112,6 @@ const UI_FLAG_WHITELIST = new Set([
   'modalLoadError',
   'dataLoadError',
 ]);
-
-const failures = [];
-const notes = [];
 
 // ---------- 工具 ----------
 

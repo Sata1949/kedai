@@ -45,7 +45,7 @@ const VERBOSE = process.argv.includes('--verbose');
 const BASELINE = {
   any: 0,
   asNever: 31,
-  asUnknownAs: 71,
+  asUnknownAs: 70,
   tsExpectError: 6,
   nonNull: 33,
 };

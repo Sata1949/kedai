@@ -1,9 +1,10 @@
 // 任务模式 store:顶层模式(roleplay/task)切换与持久化、任务列表/详情、
 // 任务事件 SSE 订阅(WP5:取代原 1s REST 轮询与本地合成伪事件)。
 // 从 store.ts 按领域拆分。依赖方向(M5 断环后):本 store 是依赖图汇点——
-//   - appMode 仍是本 store 状态,但经回调桥(storeBridge.ts)对外暴露给 genSettings,
-//     免去 genSettings → task 顶层 import;
-//   - 对 chat/genSettings/uiPrefs 的三处能力同样经回调桥调用。
+//   - appMode 是本 store 状态;genSettings 顶层 import 本 store 直读(loadSettings/
+//     saveSettings 取覆盖层用),该边单向、不构成环,故未设 appMode 桥;
+//   - 对 chat/genSettings/uiPrefs 的三处能力(事件上报 / 设置重载 / 界面偏好)
+//     经回调桥(storeBridge.ts)调用。
 //   整图因此无环(见 tools/check-arch.mjs)。
 import { defineStore } from 'pinia';
 import { ref, watch } from 'vue';

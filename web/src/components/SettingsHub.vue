@@ -6,6 +6,8 @@
 import { ref, computed, watch, onMounted } from 'vue';
 import { useAppStore } from '../store';
 import { health, type HealthInfo } from '../api/health';
+// 独立面板 flag 的类型取弹窗注册表(web/src/modals.ts 单点定义,新增弹窗此处零改动)
+import type { ModalFlag } from '../modals';
 import SettingsModal from './SettingsModal.vue';
 
 const store = useAppStore();
@@ -55,9 +57,7 @@ interface Domain {
 }
 
 /** 打开独立面板的统一写法:设开关后关闭 Hub,避免两层弹窗叠着 */
-function openPanel(flag: 'chatRecordsOpen' | 'worldBooksOpen' | 'contractsOpen' | 'pluginsOpen'
-  | 'skillsOpen' | 'promptsOpen' | 'scriptsOpen' | 'quickRepliesOpen' | 'macrosOpen'
-  | 'eventsOpen' | 'optimizeOpen' | 'memoryOpen' | 'repoIndexOpen'): () => void {
+function openPanel(flag: ModalFlag): () => void {
   return () => { store[flag] = true; close(); };
 }
 

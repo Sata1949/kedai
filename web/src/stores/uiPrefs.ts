@@ -1,8 +1,9 @@
 // 界面偏好 store:各弹窗/面板开关、启动动画、安全 HTML 渲染开关(按角色卡记忆 + 全局默认)。
 // 从 store.ts 按领域拆分。跨 store 依赖(M5 断环后)均为叶子模块:
 //   - currentCharacterId 读回调桥(storeBridge.ts,owner 为 character store);
-//   - 保存全局 render_html 走回调桥(storeBridge.ts,由 genSettings 注册队列保存)。
-// 本 store 不再顶层 import 任何其他 store,成为依赖图的汇点。
+//   - 保存全局 render_html 走回调桥(storeBridge.ts,由 genSettings 注册队列保存);
+//   - 反向注册两个 sink(renderHtml 默认值通知 / task 用的界面偏好能力)。
+// 本 store 不顶层 import 任何其他 store,成为依赖图的汇点。
 import { defineStore } from 'pinia';
 import { ref, watch } from 'vue';
 import { LocalRenderHtmlPreferenceStore } from '../renderHtmlPreference';
@@ -15,6 +16,9 @@ import {
 
 export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
   // ===== 弹窗/面板开关 =====
+  // 弹窗开关(settingsOpen…chatRecordsOpen)与 web/src/modals.ts 的 MODALS 注册表一一对应:
+  // 逐个声明的目的是保住 store.xxxOpen 的布尔类型与模板绑定;一致性由
+  // web/src/modals.test.ts 元测试锁定(解析契约:弹窗开关均为 ref(false) 的具名声明)。
   const settingsOpen = ref(false);
   /** 提示词顺序管理面板开关 */
   const promptsOpen = ref(false);

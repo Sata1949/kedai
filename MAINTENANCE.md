@@ -118,7 +118,7 @@ kedai/
 | 一键构建 | `.\build.ps1` | **默认双端同步产出**:前端 web/dist + Rust release(测试版)+ 便携版;`-TestOnly` 仅测试版快速通道 `-Dev` debug 构建 `-NoWeb` 仅 Rust `-Tauri` 追加 NSIS 打包 |
 | 兼容别名 | `npm run build:all` / `npm run build:rs` | 均等价 `.\build.ps1`(双端同步);`npm run build:test` 等价 `.\build.ps1 -TestOnly` |
 | 统一改版本号 | `npm run version:bump -- x.y.z` | 7 处版本号一次改全(2 个 package.json、3 个 Cargo.toml、tauri.conf.json、本文档版本行);支持 `-DryRun` 预览 |
-| 后端测试 | `cd server-rs && cargo test` | **1008 个测试(818 单测 + 190 集成,21 个集成文件)**,**需在 vcvars64 环境**;前端 `npm test -w web` **745 个(81 文件;静态计数;vitest 运行时为 763,差值 18 来自 `parser.contract.test.ts` 循环生成的 fixture 用例)**。数字由 `node tools/count-tests.mjs` 自动统计,勿手抄——`npm run count:tests` 查看当前值,`npm run check:tests` 校验文档是否漂移 |
+| 后端测试 | `cd server-rs && cargo test` | **1008 个测试(818 单测 + 190 集成,21 个集成文件)**,**需在 vcvars64 环境**;前端 `npm test -w web` **768 个(83 文件;静态计数;vitest 运行时为 786,差值 18 来自 `parser.contract.test.ts` 循环生成的 fixture 用例)**。数字由 `node tools/count-tests.mjs` 自动统计,勿手抄——`npm run count:tests` 查看当前值,`npm run check:tests` 校验文档是否漂移 |
 | 全量检查(本地 CI) | `npm run check` | `tools/check-all.ps1`:fmt → clippy → cargo test → cargo audit(**硬门禁**)→ lock-sync(双锁漂移)→ contract → arch(C/D/E 分层)→ 类型 ratchet → npm audit(警告)→ vue-tsc(**硬门禁**)→ vitest → vite build。**已接入 build.ps1、pre-push hook 与 CI 工作流**(见 §0 门禁纪律) |
 | 开发模式 | `cd server-rs && cargo run` + `npm run dev -w web` | 后端 3001 / 前端 5173(代理到 3001) |
 | 前端构建 | `npm run build -w web` | 产出 web/dist(编译进 exe 用) |
@@ -485,7 +485,7 @@ cd server-rs && cargo test
     (`settings.json 应已持久化: Os { code: 32 }`;另实测全量负载下的 `Os { code: 2 } NotFound` 变体),
     隔离重跑即通过——非代码缺陷:PUT 保存是 `db_call` 同步 await(`api/settings.rs:657-662`),返回 200 时
     文件必已落盘,失败属环境文件锁/时序竞争。CI 接入时给该断言加重试或改经 API 校验。
-- 前端 `npm test -w web`(Vitest,**745 个 / 81 文件**,数字以 `tools/count-tests.mjs` 为准;vitest 实际输出为 **763**——差值 18 来自 `parser.contract.test.ts:68` 对 `mvu_patch_cases.json` 的 19 个 fixture 用例循环生成,静态计数把该 `it(` 计为 1):stores、api client(含 ApiError 错误码分类)、组件与 composables、CSS 清洗(含注释处理)与沙箱回归;类型门禁 `npm run typecheck -w web`(vue-tsc,**硬门禁**,存量 168 已于 2026-09-08 清偿归零,清偿记录见 docs/优化实施方案-2026-09.md 附录 D);类型逃逸 ratchet `node tools/check-frontend-lint.mjs`(as never / as unknown as / 非空断言 / any,**只降不升**,基线见脚本内 BASELINE)
+- 前端 `npm test -w web`(Vitest,**768 个 / 83 文件**,数字以 `tools/count-tests.mjs` 为准;vitest 实际输出为 **786**——差值 18 来自 `parser.contract.test.ts:68` 对 `mvu_patch_cases.json` 的 19 个 fixture 用例循环生成,静态计数把该 `it(` 计为 1):stores(**storeBridge 注册/降级/owner 诊断 14 例**)、**弹窗注册表单点派生三方一致(flag 无重复/label/组件已定义/MODAL_FLAGS 对应;registry ↔ uiPrefs 双向;App.vue v-for 派生且无硬编码残留,共 9 例)**、api client(含 ApiError 错误码分类)、组件与 composables、CSS 清洗(含注释处理)与沙箱回归;类型门禁 `npm run typecheck -w web`(vue-tsc,**硬门禁**,存量 168 已于 2026-09-08 清偿归零,清偿记录见 docs/优化实施方案-2026-09.md 附录 D);类型逃逸 ratchet `node tools/check-frontend-lint.mjs`(as never / as unknown as / 非空断言 / any,**只降不升**,基线见脚本内 BASELINE;2026-09-13 批次 5.2 后 as unknown as 71→70)
 - 新增接口建议同步补集成测试;测试环境变量 `CONNECTOR=mock` 强制隔离
 
 ---
