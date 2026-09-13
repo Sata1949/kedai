@@ -35,7 +35,7 @@
 | 6e 脚本导入导出 | `GET /api/scripts/export` + 导入复用 PUT + ScriptsModal 按钮 | 小-中 | ✅ 后端集成 + 前端单测 |
 | 6f swipe | 消息模型扩 swipes + swipe 端点 + 前端滑动 + 每页变量同步 | 大 | ✅ 后端集成 + 前端单测 |
 | 6g TavernHelper 更多 API | 生成类(静默生成)+ 导入类(importRaw*)+ 扩展管理(只读) | 中-大 | ✅ 桥单测 + 集成 |
-| 文档 | `docs/plan6-ecosystem-devtools.md`(本文件) | — | — |
+| 文档 | `docs/archive/plan6-ecosystem-devtools.md`(本文件) | — | — |
 
 ---
 

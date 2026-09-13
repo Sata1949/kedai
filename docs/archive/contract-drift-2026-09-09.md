@@ -13,7 +13,7 @@
 > `SkillRecord.allowed_tools` / `run_as_subagent` / `model` 已补类型与技能库「高级」编辑入口;
 > `TokenUsage.prompt_cache_miss_tokens` 已补。`web/src/api/skills.ts` 的 patch 类型同步补齐。
 > 另新增授权相关字段 `authorization_mode` / `tool_authorization_timeout_secs` /
-> `task_tool_policy` / `task_tool_allowlist`(见 [授权模式.md](授权模式.md))。
+> `task_tool_policy` / `task_tool_allowlist`(见 [授权模式.md](../授权模式.md))。
 
 > 本文档登记**审计发现但本轮未修改**的前后端契约差异,供后续批次处理。
 > 原因:这些字段属于 2026-09-09 工作区未提交的在途改动(实测 `find -newermt` 确认),

@@ -25,7 +25,7 @@
 | 5a 前端 | `api/audio.ts` + types + store 接线 + `AudioPlayer.vue`(折叠面板 + 双通道)+ App.vue 挂载 + `audioController.ts` 注册表 + 沙箱 TavernHelper 音频桥 | ✅ 沙箱生成物回归(既有测试)+ build |
 | 5b 后端 | `api/render_frame_template.html` + `render_frame_headers` + `/render-frame.html` 路由 | ✅ `render_frame_document_is_served` 集成测试 |
 | 5b 前端 | `renderPanel.ts` 纯函数 + `ChatWindow.vue` 集成(占位 HTML + 投递 + 高度自适应 + 折叠)+ style.css | ✅ `renderPanel.test.ts` 6 个 |
-| 文档 | `docs/plan5-audio-render-panels.md`(本文件) | — |
+| 文档 | `docs/archive/plan5-audio-render-panels.md`(本文件) | — |
 
 ---
 

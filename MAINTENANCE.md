@@ -92,7 +92,7 @@ kedai/
 ├── Kedai.exe / Kedai.lnk       # 图形启动器(双击正式入口;源码在 launcher/,由 build.ps1 幂等维护)
 ├── logs/                       # 运行日志(自动清理 3 天前;桌面场景在 %APPDATA%\com.kedai.app\logs)
 ├── data/                       # SQLite + 角色卡原图 + avatars(勿删)
-└── docs/                       # 技术文档(如 kedai-agent-coordination.md)
+└── docs/                       # 技术文档(活文档 + archive/ 历史归档;索引见 docs/README.md)
 ```
 
 ### 请求数据流
@@ -533,7 +533,7 @@ cd server-rs && cargo test
 
 - 位置:`agents/engine/compaction.rs`(可逆投影 + LLM 摘要;原文消息永不删除,摘要存 `session_compactions` 表,删摘要行即恢复完整历史)。
 - 触发:manual(`/api/chat/compact`)或 auto(历史 token 超阈值);设置项 `compaction_mode` / `compaction_threshold`。
-- 2026-08 起配合「缓存感知压缩管线」升级(usage 缓存落库、四级水位、摘要槽增量式),设计见 `docs/learn-harness-2026-08.md`。
+- 2026-08 起配合「缓存感知压缩管线」升级(usage 缓存落库、四级水位、摘要槽增量式),设计见 `docs/archive/learn-harness-2026-08.md`。
 
 ### 缓存感知压缩管线(2026-08 新增)
 

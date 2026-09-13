@@ -21,7 +21,7 @@
 | 4a 后端 | `server-rs/src/slash/`(注册表 + 内置命令 + 参数解析)、EvalBridge 接线、`GET /api/slash/commands` | ✅ registry 单测 + 集成测试 + bridge 回归 |
 | 4b 快速回复 UI | `web/src/api/quickReplies.ts` + `QuickRepliesModal.vue` + store 接线 + ChatInput 快捷填入 | ✅ quickReplies API 单测 |
 | 4c 输入框联想 | ChatInput 内联下拉 + `slashSuggest.ts` 纯函数 | ✅ filterCommands 单测 |
-| 文档 | `docs/plan4-slash-quick-replies.md`(本文件) | — |
+| 文档 | `docs/archive/plan4-slash-quick-replies.md`(本文件) | — |
 
 ---
 

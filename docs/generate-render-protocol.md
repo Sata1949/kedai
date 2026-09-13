@@ -81,7 +81,7 @@ ST 原版中 RENDER 标签仅影响**显示渲染**、不影响发送给模型�
 **kedai 没有独立的显示渲染管道**,因此 RENDER:BEFORE/AFTER 与 GENERATE 同路
 并入 system 首/尾(即也影响生成)。这是有意的兼容取舍(以 engine/mod.rs
 「RENDER 仅影响显示渲染……kedai 无独立显示渲染管道,故并入生成注入」注释为准);
-前端显示渲染留有扩展位(见 docs/plan6-ecosystem-devtools.md 6a 记录)。
+前端显示渲染留有扩展位(见 docs/archive/plan6-ecosystem-devtools.md 6a 记录)。
 
 ## 5. 与变量树 / mvu 的交互
 
