@@ -1,6 +1,8 @@
 # Kedai Android 移植方案(可行性评估 + 实施计划)
 
-> 状态:**已批准,待执行**(2026-09-11 起草)。
+> 状态:**阶段 0/1/2/3/4 已完成,阶段 5(验证、性能与发布)进行中**(2026-09-11 起草,
+> 2026-09-13 更新)。已产出 arm64/x86_64 release APK(见 `kedai-android/artifacts/`);
+> 阶段 3 的落地见 `docs/命令执行层与Android三档执行器-变更说明.md`。
 > 本文是 Android 移植的活文档:架构决策、cfg 门控清单、阶段进度在此维护;改代码时同步更新。
 > 适用读者:开发 agent 与维护者。禁止注入聊天模型。
 
@@ -307,7 +309,7 @@ Rust 后端交叉编译进 APK,与 Tauri Android app 同进程;前端资源继�
 | 设置弹窗 | ✅ 全屏 Sheet `412×842` 完全覆盖视口、`maxWidth: none`、头部 sticky |
 | 底部导航 | ✅ 5 格,当前项高亮 |
 | **桌面零回归** | ✅ CDP 把视口临时切到 1280/1440 后比对计算样式:侧栏回到 `static`/260px/`transform:none`、`min-width` 回到 1100px、工具栏 `flex-wrap: wrap`、底导航/遮罩/关闭键全部 `display:none` |
-| 前端测试 | ✅ 65 文件 / **649 tests passed**,`vue-tsc` 无错 |
+| 前端测试 | ✅ 当日实测 65 文件 / 649 tests passed,`vue-tsc` 无错(数字为当时快照;当前基线见 `tools/count-tests.mjs` 输出) |
 | Windows 编译 | ✅ `cargo check`(server-rs 与 src-tauri)通过 |
 
 ### 新增的调试基建

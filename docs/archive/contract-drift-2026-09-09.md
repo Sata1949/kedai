@@ -1,4 +1,11 @@
-# 契约漂移登记(2026-09-09)
+# 契约漂移登记(2026-09-09)〔已归档〕
+
+> **归档说明(2026-09-13)**:本表登记的全部漂移项 **#1-#12 均已修复**(#1-#4、#9-#11
+> 在授权改造批次修复;#5-#8、#12 在后续批次修复,经 2026-09-13 复核确认:
+> `web/src/api/memory.ts` 已补 `searchMemories`/`prune`/`MemoryEntry.pinned`/`DistillResult.skipped`)。
+> 本文件由协议锁定类活文档降级为**历史快照**,只供溯源,不再更新;当前漂移检查由
+> `tools/check-contract.mjs` 在每次 `npm run check` / 构建时自动执行。
+> 唯一仍属实的历史遗留项:`POST /api/agent/execute` 为 501 桩(见 `docs/known-limitations.md`)。
 
 > **更新(2026-09 授权改造批次)**:本表 #1-#4、#9-#11 已修复——前端 `RuntimeSettings` /
 > `RuntimeSettingsPatch` 补齐 `tool_history_keep_rounds`、`tool_history_budget_tokens`、

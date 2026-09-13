@@ -25,9 +25,10 @@
 | [架构收口五项-变更说明.md](架构收口五项-变更说明.md) | 2026-09-13 架构收口五项:事件 kind 类型化、版本单源、契约快照校验、执行路径收口(legacy/followup 上 ModeExecutor)、前端护栏与断环 |
 | [perf-baseline.md](perf-baseline.md) | API 性能基线方法与记录 |
 | [known-limitations.md](known-limitations.md) | 已知能力缺口清单(有意裁剪 vs 待办,防误判为 bug) |
-| [contract-drift-2026-09-09.md](contract-drift-2026-09-09.md) | 前后端契约漂移登记(后端已实现、前端未接的字段与端点) |
 | [优化实施方案-2026-09.md](优化实施方案-2026-09.md) | 架构详解 + 22 项优化方案 + 实施路线图(2026-09-07 起执行) |
-| [android-port-plan.md](android-port-plan.md) | Android 移植方案:可行性评估、架构决策、分阶段计划、cfg 门控清单、风险表(2026-09-11 起执行) |
+| [android-port-plan.md](android-port-plan.md) | Android 移植方案:可行性评估、架构决策、分阶段计划、cfg 门控清单、风险表(**阶段 0/1/2/3/4 已完成,阶段 5 进行中**) |
+| [三结合彻底落实-实施计划.md](三结合彻底落实-实施计划.md) | 「三结合」分层从叙事落实为结构+护栏的实施计划(9 批次,含切点与验收断言) |
+| [三结合落实核对表.md](三结合落实核对表.md) | 上述计划的任务 ID → 状态 → 验证命令 → 证据 `文件:行号` 跟踪表 |
 
 ## 过程交接类(已归档,仅供溯源)
 
@@ -43,3 +44,4 @@
 | [kedai-agent-coordination.md](kedai-agent-coordination.md) | 多 agent 协作约定 |
 | [context-optimization-brief.md](context-optimization-brief.md) | 上下文优化简报(**已归档**:其中「1 秒轮询/不走 SSE」已被 WP4/WP5 取代) |
 | [archive/任务模式修复-变更说明.md](archive/任务模式修复-变更说明.md) | 上一轮任务模式修复的变更记录(**已归档**:被 [任务模式重构-变更说明.md](任务模式重构-变更说明.md) 取代) |
+| [archive/contract-drift-2026-09-09.md](archive/contract-drift-2026-09-09.md) | 前后端契约漂移登记(**已归档**:#1-#12 全数修复,漂移检查已由 `tools/check-contract.mjs` 自动执行) |
