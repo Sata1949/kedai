@@ -1,19 +1,23 @@
-// 后台执行引擎:启动/停止入口(run/stop)、非流式 LLM 调用(generate_text)、
+// 后台执行引擎:启动/停止入口(run/stop/followup)、非流式 LLM 调用(generate_text)、
 // 规划/步骤/汇总(plan_task/generate_step(_with)/summarize_task(_with))、
 // 空输出分级重试(generate_step_retry/plan_task_retry/summarize_task_retry)、
-// 后台执行主体与收尾(run_task_background/finalize_run)。
+// 收尾(finalize_run 及 complete/planned/followup 的守门包装)。
+// 执行主体已上 ModeExecutor 缝:legacy 三段式见 task_engine/legacy.rs,
+// followup 见 task_engine/followup.rs(本文件保留两者复用的生成与重试原语)。
 // 自 task_service.rs 拆分迁入,纯代码移动,逻辑不变;依赖经 `use super::*` 取自 mod.rs。
 use super::*;
-// 兄弟模块的自由函数:parse_plan(计划解析)与 persona_style(执行者人设文本)
+// 兄弟模块的自由函数:parse_plan(计划解析;人设与提示词组装统一走
+// prompt.rs::assemble_executor_system_prompt,不再在本文件直接用 persona_style)
 use super::parse::parse_plan;
-use super::prompt::persona_style;
 
 impl TaskService {
     // ===== 执行 =====
 
-    /// 启动后台执行(按 task_mode 分派;legacy 路径行为逐字节不变)。
+    /// 启动后台执行(按 task_mode 派发;legacy 路径行为逐字节不变)。
     /// 重跑会清空旧 plan/result/error 并重新规划。
     /// 每次 run 分配新 token 覆盖旧条目,旧后台任务退出时凭 token 判断自己是否仍是当前执行。
+    /// 全部六模式(含 legacy)统一经 TaskEngine 派发;legacy 执行器自行收尾
+    /// (task_engine/legacy.rs + OnSuccess::SelfFinalized),此处不再分叉。
     pub fn run(self: &Arc<Self>, id: &str) -> Result<(), String> {
         let task = self.get(id).ok_or("任务不存在")?;
         if task.status == TaskStatus::Running || task.status == TaskStatus::Planning {
@@ -23,34 +27,12 @@ impl TaskService {
         if task.status == TaskStatus::Planned {
             return Err("计划已产出待批准:请调用 approve 批准续跑,或 stop 放弃".into());
         }
-        match task.task_mode {
-            TaskRunMode::Legacy => {
-                self.reset_task(id);
-                let (cancel, token) = self.register_cancel(id);
-                let deps = self.clone();
-                let task_id = id.to_string();
-                tokio::spawn(async move {
-                    run_task_background(deps, task_id, cancel, token).await;
-                });
-                Ok(())
-            }
-            // solo / plan / multi / team / custom:任务引擎(六模式)执行器;
-            // 取消与互斥沿用同一 token 机制
-            TaskRunMode::Solo
-            | TaskRunMode::Plan
-            | TaskRunMode::Multi
-            | TaskRunMode::Team
-            | TaskRunMode::Custom => {
-                self.reset_task(id);
-                let (cancel, token) = self.register_cancel(id);
-                let engine = crate::services::task_engine::TaskEngine::new(
-                    self.clone(),
-                    self.engine.clone(),
-                );
-                engine.run_mode(&task, cancel, token);
-                Ok(())
-            }
-        }
+        self.reset_task(id);
+        let (cancel, token) = self.register_cancel(id);
+        let engine =
+            crate::services::task_engine::TaskEngine::new(self.clone(), self.engine.clone());
+        engine.run_mode(&task, cancel, token);
+        Ok(())
     }
 
     /// 批准计划(plan 模式特有):仅 planned 态合法;给了 plan 就替换落库。
@@ -116,6 +98,27 @@ impl TaskService {
             if !text.is_empty() {
                 let _ = self.add_task_message(task_id, "assistant", "result", text);
             }
+        }
+        self.remove_cancel_if(task_id, token);
+    }
+
+    /// followup 执行器(task_engine/followup.rs)的收尾:与 complete_mode_run 同款
+    /// 「旧执行让位 + 清理取消条目」守门,但落库形态不同——result 文本(new_result,
+    /// append/replace 拼接后)与落库消息文本(msg_text,本轮纯产出)分离,且消息
+    /// kind=followup(与首轮的 kind=result 区分,对话记录区据此渲染轮次)。
+    pub(crate) fn complete_followup_run(
+        &self,
+        task_id: &str,
+        token: u64,
+        msg_text: &str,
+        new_result: &str,
+        status: TaskStatus,
+    ) {
+        if self.is_current_run(task_id, token) {
+            // assistant 产出落库(WP4 纪律:消息不发射独立事件,详情经
+            // set_result 的 status 事件驱动前端重拉)
+            let _ = self.add_task_message(task_id, "assistant", "followup", msg_text);
+            let _ = self.set_result(task_id, new_result, status);
         }
         self.remove_cancel_if(task_id, token);
     }
@@ -202,24 +205,23 @@ impl TaskService {
         // is_current_run 让位不写,新执行的 running 不被覆盖。
         let (cancel, token) = self.register_cancel(id);
         let _ = self.set_status(id, TaskStatus::Running);
-        let deps = self.clone();
-        let task_id = id.to_string();
-        let instruction = content.to_string();
-        tokio::spawn(async move {
-            run_followup_background(
-                deps,
-                task_id,
-                goal,
-                instruction,
+        // 经任务引擎派发 followup 执行器(统一派发点;收尾由执行器经
+        // complete_followup_run 完成,OnSuccess::SelfFinalized)
+        let engine =
+            crate::services::task_engine::TaskEngine::new(self.clone(), self.engine.clone());
+        engine.run_followup(
+            &task,
+            goal,
+            crate::services::task_engine::followup::FollowupParams {
+                instruction: content.to_string(),
                 followup_no,
                 prev_result,
                 prev_partial,
                 mode,
-                cancel,
-                token,
-            )
-            .await;
-        });
+            },
+            cancel,
+            token,
+        );
         Ok(())
     }
 
@@ -291,7 +293,7 @@ impl TaskService {
         );
         // 重发批准请求:计划已变,需用户重新审阅批准(前端经此事件刷新批准区)
         self.emit_event(
-            "approval_required",
+            TaskEventKind::ApprovalRequired,
             id,
             None,
             Some(TaskStatus::Planned),
@@ -728,22 +730,26 @@ impl TaskService {
                 // 收口到统一裁决入口(批次授权改造):名单内 = custom_authorized 放行,
                 // 名单外直接拒绝。任务模式无 UI 授权上下文,不走等待授权分支。
                 let listed = PLANNER_SCOUT_TOOLS.contains(&call.name.as_str());
-                let decision = self.engine.tool_registry().permissions().decide_with_policy(
-                    &call.name,
-                    &tool_ctx,
-                    self.engine.tool_registry().get(&call.name).is_some(),
-                    listed,
-                    crate::tools::permissions::AuthorizationMode::Loose,
-                    &crate::tools::action_class::classify(
+                let decision = self
+                    .engine
+                    .tool_registry()
+                    .permissions()
+                    .decide_with_policy(
                         &call.name,
-                        &call.arguments,
-                        self.engine
-                            .tool_registry()
-                            .origin_of(&call.name)
-                            .unwrap_or(crate::tools::action_class::ToolOrigin::Builtin),
-                    ),
-                    false,
-                );
+                        &tool_ctx,
+                        self.engine.tool_registry().get(&call.name).is_some(),
+                        listed,
+                        crate::tools::permissions::AuthorizationMode::Loose,
+                        &crate::tools::action_class::classify(
+                            &call.name,
+                            &call.arguments,
+                            self.engine
+                                .tool_registry()
+                                .origin_of(&call.name)
+                                .unwrap_or(crate::tools::action_class::ToolOrigin::Builtin),
+                        ),
+                        false,
+                    );
                 let output = if listed && decision.allowed {
                     match self
                         .engine
@@ -809,57 +815,13 @@ impl TaskService {
         cancel: &watch::Receiver<bool>,
     ) -> Result<TaskGenOutput, String> {
         let settings = self.task_settings();
-        let character = task
-            .character_id
-            .as_deref()
-            .and_then(|cid| self.characters.get(cid));
-
-        let mut sys = String::from(super::prompt::EXECUTOR_PROMPT);
-        // 外部来源段落(人设/世界书/注入/用户可编辑 Agent 提示词)逐一 untrusted 边界包裹
-        // (WP7,与引擎侧同一原语);内置执行者指令不包裹。
-        if let Some(c) = &character {
-            // 人设精简/完整按任务模式有效设置(task_persona_full,R3a;None/false=精简)
-            let style = persona_style(c, settings.task_persona_full);
-            if !style.is_empty() {
-                sys.push_str(&format!(
-                    "\n\n写作风格参考(角色「{}」):\n{}",
-                    c.chara_name,
-                    crate::services::prompt_kit::untrusted_boundary("character", &style)
-                ));
-            }
-        }
-        let world = self.world_context(task.character_id.as_deref());
-        if !world.is_empty() {
-            sys.push_str(&format!(
-                "\n\n{}",
-                crate::services::prompt_kit::untrusted_boundary("world_book", &world)
-            ));
-        }
-        let inject = if settings.task_prompt_inject_enabled {
-            self.inject_text()
-        } else {
-            String::new()
-        };
-        if !inject.is_empty() {
-            sys.push_str(&format!(
-                "\n\n{}",
-                crate::services::prompt_kit::untrusted_boundary("prompt_inject", &inject)
-            ));
-        }
-        // settings 为 for_mode(Task) 合并值;agent_system_prompt 字段类型 RoleplayPromptConfig
-        // (RuntimeSettings 共用成员),此处内容已是 task 有效值(覆盖层计算结果),.0 取字符串
-        if !settings.agent_system_prompt.0.trim().is_empty() {
-            let rendered = self.render_agent_prompt(
-                &settings.agent_system_prompt.0,
-                character.as_ref(),
-                &world,
-                &task.title,
-            );
-            sys.push_str(&format!(
-                "\n\n{}",
-                crate::services::prompt_kit::untrusted_boundary("agent_prompt", &rendered)
-            ));
-        }
+        // 统一组装(单一实现,见 prompt.rs::assemble_executor_system_prompt);
+        // 外部来源段落逐一 untrusted 包裹,内置指令不包裹(WP7)
+        let sys = self.assemble_executor_system_prompt(
+            &settings,
+            task.character_id.as_deref(),
+            &task.title,
+        );
         let messages = vec![
             LlmMessage::plain("system", &sys),
             LlmMessage::plain("user", &step.goal),
@@ -1002,6 +964,7 @@ fn finalize_run(
 /// 仍空返回带 label 与原因的 Err;网络/超时等硬错误不重试直接透传。
 /// call 按 (max_tokens, temperature) 发起重试调用,复用同一 cancel,不重建 system 提示词。
 /// (plan_task_retry 不共用本骨架:多轮循环 + parse 判定 + 参数演进/日志规则不同。)
+#[allow(clippy::too_many_arguments)] // 输入为「定位信息 + 首调结果 + 重试闭包」三段,拆参反而分散调用点
 async fn retry_if_empty_output<F, Fut>(
     deps: &TaskService,
     task_id: &str,
@@ -1049,7 +1012,8 @@ where
 /// - 其他原因/无原因:temperature 调至 0.7 重试(沿用 mvu.rs 先例)。
 ///
 /// 重试走 generate_step_with 单参数覆盖变体,复用同一 cancel,不重建 system 提示词。
-async fn generate_step_retry(
+/// pub(crate):task_engine/legacy.rs legacy 执行器复用。
+pub(crate) async fn generate_step_retry(
     deps: &TaskService,
     task: &TaskRecord,
     step: &TaskStep,
@@ -1188,213 +1152,4 @@ pub(crate) async fn summarize_task_retry(
         },
     )
     .await
-}
-
-/// 后台执行主体:规划 → 逐步执行 → 汇总。
-async fn run_task_background(
-    deps: Arc<TaskService>,
-    task_id: String,
-    cancel: watch::Receiver<bool>,
-    token: u64,
-) {
-    let Some(task) = deps.get(&task_id) else {
-        deps.remove_cancel_if(&task_id, token);
-        return;
-    };
-
-    // 1) 规划(带解析与分级重试:截断/空输出翻倍 max_tokens,最多 PLAN_MAX_ATTEMPTS 次)
-    let (plan, plan_out) = match plan_task_retry(
-        &deps,
-        &task_id,
-        &task.title,
-        task.character_id.as_deref(),
-        &cancel,
-    )
-    .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            finalize_run(&deps, &task_id, token, *cancel.borrow(), Some(&e));
-            return;
-        }
-    };
-    deps.record_usage(&task_id, "plan", None, &plan_out);
-    if *cancel.borrow() {
-        finalize_run(&deps, &task_id, token, true, None);
-        return;
-    }
-    let _ = deps.set_plan(&task_id, &plan);
-    let _ = deps.set_status(&task_id, TaskStatus::Running);
-
-    // 2) 逐步执行
-    let mut final_plan = plan.clone();
-    for (i, step) in plan.iter().enumerate() {
-        if *cancel.borrow() {
-            finalize_run(&deps, &task_id, token, true, None);
-            return;
-        }
-        final_plan[i].status = TaskStepStatus::Running;
-        let _ = deps.set_plan(&task_id, &final_plan);
-
-        let subtask_id = match deps.create_subtask(&task_id, &step.name, &step.goal) {
-            Ok(id) => id,
-            Err(e) => {
-                final_plan[i].status = TaskStepStatus::Error;
-                final_plan[i].result = e.clone();
-                let _ = deps.set_plan(&task_id, &final_plan);
-                continue;
-            }
-        };
-
-        // 生成步骤:空输出按 finish_reason 分级重试一次(length 加倍 max_tokens,否则调温 0.7),
-        // 仍空标 error 且文案带 finish_reason(诊断推理耗尽 vs 内容过滤等不同成因)。
-        let gen = generate_step_retry(&deps, &task, step, Some(i), &cancel).await;
-        match gen {
-            Ok(out) => {
-                let text = out.text.trim().to_string();
-                final_plan[i].status = TaskStepStatus::Done;
-                final_plan[i].result = text.clone();
-                deps.set_subtask_status(&subtask_id, TaskSubtaskStatus::Done, Some(&text), None);
-                deps.record_usage(&task_id, "step", Some(i), &out);
-            }
-            Err(e) => {
-                if *cancel.borrow() {
-                    finalize_run(&deps, &task_id, token, true, None);
-                    return;
-                }
-                final_plan[i].status = TaskStepStatus::Error;
-                final_plan[i].result = e.clone();
-                deps.set_subtask_status(&subtask_id, TaskSubtaskStatus::Error, None, Some(&e));
-            }
-        }
-        let _ = deps.set_plan(&task_id, &final_plan);
-    }
-
-    // 3) 汇总:空输出同样按 finish_reason 分级重试一次。
-    if *cancel.borrow() {
-        finalize_run(&deps, &task_id, token, true, None);
-        return;
-    }
-    match summarize_task_retry(&deps, &task, &final_plan, &cancel).await {
-        Ok(out) => {
-            deps.record_usage(&task_id, "summary", None, &out);
-            // 正常完成:旧执行在重跑后让位,不覆盖新任务状态。
-            // 含 error 步骤时终态为「部分完成」(成果仍产出,但需向用户标示有步骤失败)。
-            if deps.is_current_run(&task_id, token) {
-                let has_error = final_plan.iter().any(|s| s.status == TaskStepStatus::Error);
-                let status = if has_error {
-                    TaskStatus::Partial
-                } else {
-                    TaskStatus::Done
-                };
-                let _ = deps.set_result(&task_id, out.text.trim(), status);
-                // 首轮成果落 assistant 消息(kind=result):与六模式
-                // complete_mode_run 同口径,供前端对话记录区逐轮气泡呈现
-                // (实跑问题 1:此前首轮产出只进 result,不进 messages)
-                let text = out.text.trim();
-                if !text.is_empty() {
-                    let _ = deps.add_task_message(&task_id, "assistant", "result", text);
-                }
-            }
-        }
-        Err(e) => finalize_run(&deps, &task_id, token, *cancel.borrow(), Some(&e)),
-    }
-    deps.remove_cancel_if(&task_id, token);
-}
-
-/// followup 追加指令的后台续跑主体(批次 R2a;R2b+ 扩 mode):solo 单轮 run_agent_loop
-///(工具全量,不重新规划;goal 已在入口组装为「原目标 + 上轮 result + 追加指令」)。
-/// 成功:usage 落库(phase=agent 与 solo 同口径)→ assistant 消息落库
-///(kind=followup)→ `append` 模式以「追加 N」段附加进 result(不覆盖前轮成果,
-/// 指令概要截 80 字符),`replace` 模式以「修订 N」段整体替换 result → 终态映射:
-/// 原 partial 保持 partial(失败步骤历史不被抹平),done/error/ended 后回 done。
-/// 取消/失败与 run_task_background 同款 finalize_run 收尾(stop → ended,
-/// 其余 → error 文本落库);is_current_run 守门,旧执行让位语义不变。
-#[allow(clippy::too_many_arguments)]
-async fn run_followup_background(
-    deps: Arc<TaskService>,
-    task_id: String,
-    goal: String,
-    instruction: String,
-    followup_no: usize,
-    prev_result: String,
-    prev_partial: bool,
-    mode: TaskFollowupMode,
-    cancel: watch::Receiver<bool>,
-    token: u64,
-) {
-    let Some(task) = deps.get(&task_id) else {
-        deps.remove_cancel_if(&task_id, token);
-        return;
-    };
-    let call = crate::services::task_engine::solo::AgentLoopCall {
-        task_id: task_id.clone(),
-        session_id: format!("task:{task_id}"),
-        goal,
-        settings: deps.task_settings(),
-        character_id: task.character_id.clone(),
-        phase: "agent",
-        step_index: None,
-        label: "主 agent".into(),
-    };
-    let result = crate::services::task_engine::solo::run_agent_loop(
-        deps.clone(),
-        deps.engine.clone(),
-        call,
-        cancel.clone(),
-    )
-    .await;
-    match result {
-        Ok((text, usage)) => {
-            deps.record_usage(
-                &task_id,
-                "agent",
-                None,
-                &crate::services::task_engine::executor::usage_as_output(&usage),
-            );
-            // 取消优先于写结果:stop 后产出不再落库(与 run_task_background 同口径)
-            if *cancel.borrow() {
-                finalize_run(&deps, &task_id, token, true, None);
-                return;
-            }
-            if deps.is_current_run(&task_id, token) {
-                let text = text.trim();
-                // assistant 产出落库(WP4 纪律:消息不发射独立事件,详情经
-                // 下方 set_result 的 status 事件驱动前端重拉)
-                let _ = deps.add_task_message(&task_id, "assistant", "followup", text);
-                let brief: String = instruction.chars().take(80).collect();
-                let brief = if instruction.chars().count() > 80 {
-                    format!("{brief}…")
-                } else {
-                    brief
-                };
-                let section = if mode == TaskFollowupMode::Replace {
-                    // replace:整体替换,段标「修订 N」,旧 result 不再保留
-                    format!("**修订 {followup_no}:**{brief}\n\n{text}")
-                } else {
-                    format!("**追加 {followup_no}:**{brief}\n\n{text}")
-                };
-                let new_result = if mode == TaskFollowupMode::Replace {
-                    section
-                } else {
-                    // prev_result 为入口快照:追加期间仅本执行可写 result
-                    //(is_current_run 守门;stop 只动状态不动 result),快照即当前
-                    let prev = prev_result.trim_end();
-                    if prev.is_empty() {
-                        section
-                    } else {
-                        format!("{prev}\n\n---\n\n{section}")
-                    }
-                };
-                let status = if prev_partial {
-                    TaskStatus::Partial
-                } else {
-                    TaskStatus::Done
-                };
-                let _ = deps.set_result(&task_id, &new_result, status);
-            }
-            deps.remove_cancel_if(&task_id, token);
-        }
-        Err(e) => finalize_run(&deps, &task_id, token, *cancel.borrow(), Some(&e)),
-    }
 }

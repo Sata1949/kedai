@@ -214,6 +214,13 @@ impl AgentSubtaskService {
         self.set_status(id, "error", None, Some(error))
     }
 
+    /// 子任务失败但保留部分产出(审计项 B:截断等场景正文仍有价值,不能丢内容)。
+    /// 与 set_error 的差异:set_error 只写 error(result 保持空);本方法把 result 与
+    /// error 一起落库,状态同为 error。内部转发既有私有 set_status(不复制写库实现)。
+    pub fn set_failed(&self, id: &str, result: &str, error: &str) -> Option<AgentSubtaskRecord> {
+        self.set_status(id, "error", Some(result), Some(error))
+    }
+
     /// agentend:标记结束并发送取消信号(后台生成若在跑会中断)
     pub fn end(&self, id: &str) -> bool {
         let ok = self.set_status(id, "ended", None, None).is_some();

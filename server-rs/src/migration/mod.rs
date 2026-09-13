@@ -11,7 +11,7 @@ mod merge;
 
 pub use backup::snapshot_database;
 pub use ddl::{
-    ensure_llm_requests_usage_columns, ensure_memory_entries_fts_backfill,
+    ensure_exec_audit_table, ensure_llm_requests_usage_columns, ensure_memory_entries_fts_backfill,
     ensure_memory_entries_pinned_column, ensure_skills_progressive_columns,
     ensure_task_llm_calls_finish_reason_column, ensure_task_messages_table,
     ensure_tasks_task_mode_column,
@@ -670,5 +670,48 @@ mod tests {
 
         fs::remove_dir_all(baseline).ok();
         fs::remove_dir_all(source).ok();
+    }
+
+    /// exec_audit 表迁移(阶段 B/C):旧库(无此表)建表成功、幂等可重复执行、
+    /// 索引存在、且可正常插入/查询(审计写入路径依赖这些列)。
+    #[test]
+    fn ensure_exec_audit_table_creates_and_is_idempotent() {
+        let dir = temp_dir("exec-audit");
+        let db = dir.join(DATABASE_FILE);
+        let conn = Connection::open(&db).unwrap();
+
+        // 旧库:无 exec_audit 表
+        ensure_exec_audit_table(&conn).unwrap();
+        // 幂等:重复执行不报错
+        ensure_exec_audit_table(&conn).unwrap();
+
+        // 插入一行(列齐全)后能读回
+        conn.execute(
+            "INSERT INTO exec_audit (ts, source, command, shell, tier, risk, decision, exit_code) \
+             VALUES ('2026-09-13T00:00:00Z', 'chat', 'ls -la', 'sh', 'sandbox', 'safe', 'allowed', 0)",
+            [],
+        )
+        .unwrap();
+        let (cmd, decision): (String, String) = conn
+            .query_row(
+                "SELECT command, decision FROM exec_audit ORDER BY id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(cmd, "ls -la");
+        assert_eq!(decision, "allowed");
+
+        // 索引已建(按 ts 查询可用)
+        let idx: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_exec_audit_ts'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx, 1, "审计时间索引应存在");
+
+        fs::remove_dir_all(dir).ok();
     }
 }

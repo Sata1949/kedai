@@ -13,7 +13,9 @@ use super::context::TaskRunContext;
 use super::executor::{usage_as_output, ModeExecutor, TaskOutcome};
 use super::solo::{run_agent_loop, AgentLoopCall};
 use crate::agents::engine::AgentEngine;
-use crate::models::types::{LlmMessage, TaskStatus, TaskStep, TaskStepStatus, TokenUsage};
+use crate::models::types::{
+    LlmMessage, TaskEventKind, TaskStatus, TaskStep, TaskStepStatus, TokenUsage,
+};
 use crate::services::prompt_kit::untrusted_boundary;
 use crate::services::task_service::prompt::{
     SUMMARIZER_PROMPT, TEAM_AUDIT_PROMPT, TEAM_FINAL_AUDIT_PROMPT, TEAM_PLANNER_PROMPT,
@@ -223,7 +225,10 @@ fn parse_audit(text: &str, mains_count: usize) -> AuditVerdict {
         for item in arr {
             let main = item.get("main").and_then(|n| n.as_u64()).unwrap_or(0) as usize;
             // step 为可选的主内 1-based 子目标序号;缺省 = 整主补做(兼容旧输出)
-            let step = item.get("step").and_then(|n| n.as_u64()).map(|n| n as usize);
+            let step = item
+                .get("step")
+                .and_then(|n| n.as_u64())
+                .map(|n| n as usize);
             let instruction = item
                 .get("instruction")
                 .and_then(|s| s.as_str())
@@ -236,14 +241,8 @@ fn parse_audit(text: &str, mains_count: usize) -> AuditVerdict {
                 // 再做去重比较(否则 1-based 与已存 0-based 不一致,去重失效)
                 let step0 = step.filter(|s| *s >= 1).map(|s| s - 1);
                 // 同一定位(主 + 子目标)重复打回只保留首条(补做轮每定位一个 spawn)
-                if kickbacks
-                    .iter()
-                    .any(|k| k.main == idx && k.step == step0)
-                {
-                    tracing::warn!(
-                        main = main,
-                        "team 审计打回条目与既有条目同定位,已保留首条"
-                    );
+                if kickbacks.iter().any(|k| k.main == idx && k.step == step0) {
+                    tracing::warn!(main = main, "team 审计打回条目与既有条目同定位,已保留首条");
                     continue;
                 }
                 kickbacks.push(Kickback {
@@ -320,7 +319,7 @@ async fn generate_text_healed(
         "team 纯生成调用截断,输出上限翻倍重发"
     );
     svc.emit_event(
-        "agent_status",
+        TaskEventKind::AgentStatus,
         task_id,
         None,
         None,
@@ -595,14 +594,11 @@ impl TeamExecutor {
         // 打回补做:仅一轮,补做完成后追加终审(只产出结论文本,不再打回)
         if !verdict.pass && !verdict.kickbacks.is_empty() {
             svc.emit_event(
-                "agent_status",
+                TaskEventKind::AgentStatus,
                 &ctx.task_id,
                 None,
                 None,
-                Some(format!(
-                    "审计打回 {} 处补做",
-                    verdict.kickbacks.len()
-                )),
+                Some(format!("审计打回 {} 处补做", verdict.kickbacks.len())),
             );
             let (new_outputs, cancelled) = self
                 .run_mains_parallel(
@@ -803,8 +799,7 @@ impl TeamExecutor {
                         // 过滤越界子目标:全部越界 → 整主(不设过滤),否则只跑命中项
                         let filtered = steps.and_then(|s| {
                             let max = mains[i].goals.len();
-                            let kept: Vec<usize> =
-                                s.into_iter().filter(|x| *x < max).collect();
+                            let kept: Vec<usize> = s.into_iter().filter(|x| *x < max).collect();
                             if kept.is_empty() {
                                 None
                             } else {
@@ -832,8 +827,7 @@ impl TeamExecutor {
                     None => true,
                     Some(steps) => {
                         // filter 存的是主内子目标下标;映射回全局步骤下标比对
-                        main_goal_index(step_ranges, *i, si)
-                            .is_some_and(|k| steps.contains(&k))
+                        main_goal_index(step_ranges, *i, si).is_some_and(|k| steps.contains(&k))
                     }
                 };
                 if will_run {
@@ -853,6 +847,7 @@ impl TeamExecutor {
             };
             let ctx2 = TaskRunContext {
                 task_id: ctx.task_id.clone(),
+                token: ctx.token,
                 goal: ctx.goal.clone(),
                 settings: ctx.settings.clone(),
                 character_id: ctx.character_id.clone(),
@@ -1011,10 +1006,7 @@ fn strip_main_prefix(name: &str) -> &str {
 
 /// 全局步骤下标 → 该主内子目标下标(反查;不在该主范围内返回 None)
 fn main_goal_index(step_ranges: &[Vec<usize>], main: usize, step: usize) -> Option<usize> {
-    step_ranges
-        .get(main)?
-        .iter()
-        .position(|s| *s == step)
+    step_ranges.get(main)?.iter().position(|s| *s == step)
 }
 
 /// JoinError(panic 等)兜底:无法从 JoinError 反查是哪一主 panic(不携带业务下标),
@@ -1364,7 +1356,10 @@ mod tests {
         ];
         let outputs = rebuild_outputs(&mains, &step_ranges, &plan);
         let o0 = outputs[0].as_deref().unwrap_or("");
-        assert!(o0.contains("子目标 1「子一」"), "应带主内 1-based 编号且剥离前缀: {o0}");
+        assert!(
+            o0.contains("子目标 1「子一」"),
+            "应带主内 1-based 编号且剥离前缀: {o0}"
+        );
         assert!(o0.contains("产出甲一"), "应含成功产出: {o0}");
         assert!(o0.contains("执行失败"), "失败子目标应附说明: {o0}");
         assert!(outputs[1].is_none(), "全败主产出应为 None");

@@ -113,6 +113,15 @@ Rust 后端交叉编译进 APK,与 Tauri Android app 同进程;前端资源继�
 
 ### 阶段 3:Android 命令执行层(2–3 周)
 
+> **执行状态(2026-09-13)**:已实现并通过编译验证,详见
+> [命令执行层与Android三档执行器-变更说明.md](命令执行层与Android三档执行器-变更说明.md)。
+> 落地范围:Exec 抽象层(`services/exec/`)、命令分级与硬门(`tools/command_risk.rs` + `permissions`)、
+> 审计表与 API、Kotlin `ShellExecutorBridge`(三档探测 + exec + Shizuku)、前端授权面板。
+> **ROOT/Shizuku 运行时待真机验证**(模拟器不可验);沙箱档与桌面路径已端到端实测。
+> **与本文原设计的差异**:① Shizuku 改用**反射**访问(不引入编译期依赖,规避 Maven 拉取风险,
+> 未安装时静默降级);② 沙箱档用系统自带 `sh -c`,**未打包 busybox**(避免第三方二进制与许可问题),
+> busybox 留作可选增强。
+
 1. **抽象与分层**:server-rs 新增 `exec` 模块,`ShellExecutor` trait + `ShellExecutorFactory`,按 `ROOT → Shizuku(DEBUGGER) → STANDARD` 探测;`STANDARD` 保底用内置静态 `busybox`(`libbusybox.so` 放入 `jniLibs/arm64-v8a/`)。
 2. **桥接**:进程派生、`su` 弹窗、Shizuku binder 均为 Android API,执行须在 Android 侧完成。新增最小 Kotlin 模块,经 Tauri 命令/JNI 把 `exec(command, cwd, env) -> {stdout, stderr, exitCode}` 暴露给 Rust;输出截断。
 3. **接入现有授权框架(关键)**:

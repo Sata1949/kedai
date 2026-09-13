@@ -1,8 +1,10 @@
-﻿# 统一修改全仓库版本号(单一入口,避免 6 处手工同步漏改)。
+﻿# 统一修改全仓库版本号(单一入口,避免 7 处手工同步漏改)。
 # 覆盖:根 package.json、web/package.json、server-rs/Cargo.toml、
 #       src-tauri/Cargo.toml、launcher/Cargo.toml、src-tauri/tauri.conf.json、
+#       package-lock.json(顶层 + packages[""] 两处;依赖项版本不动)、
 #       MAINTENANCE.md 的版本行与「最后更新」日期。
 # Cargo.lock 中包自身版本无需手改,下次 cargo 构建会自动同步。
+# 一致性由 build.ps1 开头的 Assert-VersionConsistency 把关(改漏即构建报错)。
 #
 # 用法:
 #   .\tools\bump-version.ps1 0.3.0            # 把全仓库版本号改为 0.3.0
@@ -44,6 +46,35 @@ function Update-JsonVersion([string]$RelativePath) {
         return
     }
     Write-Host "[$(if ($DryRun) { '预览' } else { '修改' })] $RelativePath : $old -> `"version`": `"$Version`"" -ForegroundColor Green
+    if (-not $DryRun) { [System.IO.File]::WriteAllText($path, $new, $utf8NoBom) }
+    $script:changed++
+}
+
+# lock 文件:package-lock.json v3 中前两处 "version" 恰为顶层与 packages[""] 的自身版本
+# (其余 version 都属于依赖包,一律不动)。逐个替换,不整文件重排格式。
+function Update-LockFileVersion([string]$RelativePath) {
+    $path = Join-Path $Root $RelativePath
+    $content = [System.IO.File]::ReadAllText($path)
+    $regex = New-Object regex '("version"\s*:\s*")[^"]*(")'
+    $new = $content
+    $replaced = 0
+    for ($i = 0; $i -lt 2; $i++) {
+        $m = $regex.Match($new)
+        if (-not $m.Success) { break }
+        $new = $regex.Replace($new, "`${1}$Version`${2}", 1)
+        $replaced++
+    }
+    if ($replaced -lt 2) {
+        Write-Host "[警告] $RelativePath 只匹配到 $replaced 处自身版本(预期 2),已跳过写入" -ForegroundColor Yellow
+        $script:skipped++
+        return
+    }
+    if ($new -eq $content) {
+        Write-Host "[跳过] $RelativePath 已是 $Version" -ForegroundColor DarkGray
+        $script:skipped++
+        return
+    }
+    Write-Host "[$(if ($DryRun) { '预览' } else { '修改' })] $RelativePath : 自身版本 x$replaced 处 -> $Version" -ForegroundColor Green
     if (-not $DryRun) { [System.IO.File]::WriteAllText($path, $new, $utf8NoBom) }
     $script:changed++
 }
@@ -106,6 +137,7 @@ Update-TomlVersion "server-rs\Cargo.toml"
 Update-TomlVersion "src-tauri\Cargo.toml"
 Update-TomlVersion "launcher\Cargo.toml"
 Update-JsonVersion "src-tauri\tauri.conf.json"
+Update-LockFileVersion "package-lock.json"
 Update-MaintenanceDoc "MAINTENANCE.md"
 
 Write-Host "======================================================" -ForegroundColor Cyan

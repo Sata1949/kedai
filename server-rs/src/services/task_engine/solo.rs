@@ -13,9 +13,7 @@ use crate::agents::state_machine::{AgentState, StateMachine};
 use crate::models::types::{
     GenerationParams, LlmMessage, TaskStatus, TokenUsage, ToolChoice, ToolContext,
 };
-use crate::services::prompt_kit::untrusted_boundary;
 use crate::services::settings_service::RuntimeSettings;
-use crate::services::task_service::prompt::{persona_style, EXECUTOR_PROMPT};
 use crate::services::task_service::TaskService;
 use futures::future::BoxFuture;
 use std::sync::Arc;
@@ -57,52 +55,11 @@ pub(crate) async fn run_agent_loop(
 ) -> Result<(String, TokenUsage), String> {
     let settings = &call.settings;
 
-    // ===== system 提示词组装(拼装顺序对齐 task_service generate_step_with):
-    // 内置执行者指令 → 人设 → 世界书 → 提示词注入 → 用户可编辑 Agent 提示词;
-    // 外部来源段落逐一 untrusted 边界包裹,内置指令不包裹(WP7 纪律,勿复制实现)。
-    let character = svc.character_for(call.character_id.as_deref());
-    let mut sys = String::from(EXECUTOR_PROMPT);
-    if let Some(c) = &character {
-        // 人设精简/完整按任务模式设置快照(task_persona_full,R3a;None/false=精简)
-        let style = persona_style(c, settings.task_persona_full);
-        if !style.is_empty() {
-            sys.push_str(&format!(
-                "\n\n写作风格参考(角色「{}」):\n{}",
-                c.chara_name,
-                untrusted_boundary("character", &style)
-            ));
-        }
-    }
-    let world = svc.world_context(call.character_id.as_deref());
-    if !world.is_empty() {
-        sys.push_str(&format!("\n\n{}", untrusted_boundary("world_book", &world)));
-    }
-    // 提示词注入默认隔离(2026-09-10 实测修复):solo/multi/team 主 agent 与 followup
-    // 续跑共用本函数;仅显式开启 task_prompt_inject_enabled 才继承 prompt_floors.json
-    let inject = if settings.task_prompt_inject_enabled {
-        svc.inject_text()
-    } else {
-        String::new()
-    };
-    if !inject.is_empty() {
-        sys.push_str(&format!(
-            "\n\n{}",
-            untrusted_boundary("prompt_inject", &inject)
-        ));
-    }
-    // settings 为 TaskRunContext 快照(for_mode(Task) 合并值),.0 取字符串
-    if !settings.agent_system_prompt.0.trim().is_empty() {
-        let rendered = svc.render_agent_prompt(
-            &settings.agent_system_prompt.0,
-            character.as_ref(),
-            &world,
-            &call.goal,
-        );
-        sys.push_str(&format!(
-            "\n\n{}",
-            untrusted_boundary("agent_prompt", &rendered)
-        ));
-    }
+    // system 提示词组装:统一走 TaskService::assemble_executor_system_prompt
+    // (单一实现,见 task_service/prompt.rs);拼装顺序与 untrusted 包裹纪律同 legacy,
+    // 勿在本文件复制实现(WP7)。
+    let sys =
+        svc.assemble_executor_system_prompt(settings, call.character_id.as_deref(), &call.goal);
 
     let mut messages = vec![
         LlmMessage::plain("system", &sys),
@@ -182,37 +139,16 @@ pub(crate) async fn run_agent_loop(
     let model = engine.model();
     match result {
         Ok(res) if !res.interrupted => {
-            // 截断自愈留痕落库(问题①):每次自愈把「被截断的那次调用」补落一行
-            // (status=error,response_summary 标注触发原因与重发预算),再落最终行——
-            // 调用情况面板可见「截断 → 提高预算重发」完整链路,且整轮实际调用次数可考。
-            for heal in &res.self_heals {
-                let heal_out = crate::services::task_service::TaskGenOutput {
-                    text: String::new(),
-                    finish_reason: heal.finish_reason.clone(),
-                    prompt_tokens: heal.prompt_tokens,
-                    completion_tokens: heal.completion_tokens,
-                    reasoning_tokens: 0,
-                    reasoning_chars: 0,
-                    tool_calls: Vec::new(),
-                };
-                svc.record_llm_call(
-                    &call.task_id,
-                    call.phase,
-                    call.step_index,
-                    &model,
-                    &messages,
-                    &format!(
-                        "(截断自愈){},输出上限翻倍至 {} 重发",
-                        heal.note, heal.retried_max_tokens
-                    ),
-                    Some(&heal_out),
-                    std::time::Duration::ZERO,
-                    "error",
-                );
-                // 被截断那次调用同样消耗 token:补落 usage 行,否则 usage_total
-                // 少于调用明细求和(2026-09-10 实测修复,口径同 team generate_text_healed)
-                svc.record_usage(&call.task_id, call.phase, call.step_index, &heal_out);
-            }
+            // 截断自愈留痕落库(问题①):被截断的调用补落一行 + 补 usage,
+            // 统一实现见 TaskService::record_self_heals(与 custom 共用)。
+            svc.record_self_heals(
+                &call.task_id,
+                call.phase,
+                call.step_index,
+                &model,
+                &messages,
+                &res.self_heals,
+            );
             let text = res.content.trim().to_string();
             let status = if text.is_empty() { "empty" } else { "ok" };
             let out = crate::services::task_service::TaskGenOutput {

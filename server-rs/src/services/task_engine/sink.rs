@@ -6,7 +6,7 @@
 // 批次 R4:Token 不再只计字数丢弃,改经 DeltaBatcher 攒批(200ms/80 字先到先发)
 // 转发为 kind=delta 暂态事件,前端任务工作台据此实时显示「正在生成」;
 // 攒批器携带 phase/step_index 调用上下文(与 task_llm_calls 落库行同口径)。
-use crate::models::types::SseEvent;
+use crate::models::types::{SseEvent, TaskEventKind};
 use crate::services::task_service::events::DELTA_FLUSH_WINDOW;
 use crate::services::task_service::TaskService;
 use std::sync::Arc;
@@ -60,7 +60,7 @@ pub(crate) fn spawn(
                             // 事件边界先落批:保证 delta 先于后续状态/收尾事件到达前端
                             batcher.flush();
                             if let Some(detail) = map_event(&ev, streamed_chars, &label) {
-                                svc.emit_event("agent_status", &task_id, None, None, Some(detail));
+                                svc.emit_event(TaskEventKind::AgentStatus, &task_id, None, None, Some(detail));
                             }
                         }
                         None => break,
@@ -138,7 +138,10 @@ mod tests {
         };
         let detail = map_event(&ev, 0, "主 agent").unwrap();
         assert!(detail.contains("被任务策略拒绝"), "实际:{detail}");
-        assert!(detail.contains("写入角色文件 a.md"), "应带上拒绝理由,实际:{detail}");
+        assert!(
+            detail.contains("写入角色文件 a.md"),
+            "应带上拒绝理由,实际:{detail}"
+        );
     }
 
     #[test]

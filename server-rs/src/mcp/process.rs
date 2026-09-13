@@ -12,9 +12,9 @@ use crate::services::settings_service::McpServerConfig;
 // Android 上 spawn 被平台门控(直接返回 Err),这些仅桌面/服务端派生进程所需
 #[cfg(not(target_os = "android"))]
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Child;
 #[cfg(not(target_os = "android"))]
 use tokio::process::Command;
-use tokio::process::Child;
 
 use super::client::McpClient;
 

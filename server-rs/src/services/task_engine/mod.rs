@@ -14,9 +14,13 @@
 //   plan.rs      只规划不执行(planned 待批准)+ 批准续跑执行器(ApprovedPlanExecutor)
 //   team.rs      自动拓扑多主 agent 并行 + 审计终审升华
 //   custom.rs    AgentFlowConfig 步骤序列轻量执行器
+//   legacy.rs    三段式(规划/逐步/汇总)执行器:原 task_service::run_task_background 搬迁
+//   followup.rs  终态追加指令执行器:原 task_service::run_followup_background 搬迁
 pub(crate) mod context;
 pub(crate) mod custom;
 pub(crate) mod executor;
+pub(crate) mod followup;
+pub(crate) mod legacy;
 pub(crate) mod multi;
 pub(crate) mod plan;
 pub(crate) mod sink;
@@ -30,6 +34,8 @@ use crate::services::task_service::TaskService;
 use context::TaskRunContext;
 use custom::CustomExecutor;
 use executor::ModeExecutor;
+use followup::{FollowupExecutor, FollowupParams};
+use legacy::LegacyExecutor;
 use multi::MultiExecutor;
 use plan::{ApprovedPlanExecutor, PlanExecutor};
 use solo::SoloExecutor;
@@ -49,9 +55,13 @@ pub struct TaskEngine {
 /// - AwaitApproval:plan 模式的计划产出轮——planned 终态由执行器写入;计划清单文本
 ///   落 result(批次 R1:planned 态 result 语义 = 待批准的计划清单,供批准前预览)
 ///   后清理执行登记。
+/// - SelfFinalized:执行器已自行收尾(legacy 三段式 / followup),引擎不再写任何
+///   终态或结果——两者收尾语义与 Complete 不同(legacy 中途失败即 finalize_run;
+///   followup 的 result 与消息文本分离),强行走统一收尾会双重写入。
 enum OnSuccess {
     Complete,
     AwaitApproval,
+    SelfFinalized,
 }
 
 impl TaskEngine {
@@ -66,37 +76,53 @@ impl TaskEngine {
         cancel: watch::Receiver<bool>,
         token: u64,
     ) {
-        let executor: Option<Box<dyn ModeExecutor>> = match task.task_mode {
-            TaskRunMode::Solo => Some(Box::new(SoloExecutor::new(
-                self.svc.clone(),
-                self.engine.clone(),
-            ))),
-            TaskRunMode::Plan => Some(Box::new(PlanExecutor::new(self.svc.clone()))),
-            TaskRunMode::Multi => Some(Box::new(MultiExecutor::new(
-                self.svc.clone(),
-                self.engine.clone(),
-            ))),
-            TaskRunMode::Team => Some(Box::new(TeamExecutor::new(
-                self.svc.clone(),
-                self.engine.clone(),
-            ))),
-            TaskRunMode::Custom => Some(Box::new(CustomExecutor::new(
-                self.svc.clone(),
-                self.engine.clone(),
-            ))),
-            // run() 已拦截 legacy;此处为防御兜底(不应到达)
-            TaskRunMode::Legacy => None,
-        };
-        let Some(executor) = executor else {
-            self.svc
-                .finalize_mode_run(&task.id, token, false, Some("该模式将在后续批次开放"));
-            return;
+        let executor: Box<dyn ModeExecutor> = match task.task_mode {
+            // legacy 三段式(行为逐字节不变):上缝统一派发点,收尾自行承担
+            TaskRunMode::Legacy => Box::new(LegacyExecutor::new(self.svc.clone())),
+            TaskRunMode::Solo => Box::new(SoloExecutor::new(self.svc.clone(), self.engine.clone())),
+            TaskRunMode::Plan => Box::new(PlanExecutor::new(self.svc.clone())),
+            TaskRunMode::Multi => {
+                Box::new(MultiExecutor::new(self.svc.clone(), self.engine.clone()))
+            }
+            TaskRunMode::Team => Box::new(TeamExecutor::new(self.svc.clone(), self.engine.clone())),
+            TaskRunMode::Custom => {
+                Box::new(CustomExecutor::new(self.svc.clone(), self.engine.clone()))
+            }
         };
         let on_success = match task.task_mode {
             TaskRunMode::Plan => OnSuccess::AwaitApproval,
+            // legacy 自带收尾(中途失败 finalize_run / 成功 complete_mode_run)
+            TaskRunMode::Legacy => OnSuccess::SelfFinalized,
             _ => OnSuccess::Complete,
         };
         self.spawn_run(task, executor, None, on_success, cancel, token);
+    }
+
+    /// followup(终态追加指令)派发入口:goal 由 TaskService 组装为「原目标 +
+    /// 上轮 result + 追加指令」;params 携带消息文本与 append/replace 语义。
+    /// 收尾由 FollowupExecutor 经 complete_followup_run 自行完成(SelfFinalized)。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn run_followup(
+        self: &Arc<Self>,
+        task: &TaskRecord,
+        goal: String,
+        params: FollowupParams,
+        cancel: watch::Receiver<bool>,
+        token: u64,
+    ) {
+        let executor: Box<dyn ModeExecutor> = Box::new(FollowupExecutor::new(
+            self.svc.clone(),
+            self.engine.clone(),
+            params,
+        ));
+        self.spawn_run(
+            task,
+            executor,
+            Some(goal),
+            OnSuccess::SelfFinalized,
+            cancel,
+            token,
+        );
     }
 
     /// approve 续跑入口(plan 模式批准后):**只认已批准计划,与 task_mode 无关**——
@@ -160,6 +186,7 @@ impl TaskEngine {
     ) {
         let ctx = TaskRunContext {
             task_id: task.id.clone(),
+            token,
             goal: goal.unwrap_or_else(|| task.title.clone()),
             settings: self.svc.task_settings(),
             character_id: task.character_id.clone(),
@@ -191,6 +218,9 @@ impl TaskEngine {
                         // Done 时执行器给 None,写空串清掉上一轮残留 error
                         outcome.error.as_deref(),
                     ),
+                    // legacy / followup:执行器已自行收尾(终态、result、消息、取消条目
+                    // 全部写完),引擎不得再写——否则双重写入覆盖执行器的结果文本。
+                    OnSuccess::SelfFinalized => {}
                 }
             }
             // 取消(stop)时 ended_by_cancel=true → ended;否则 error(与 legacy 收尾同语义)

@@ -362,3 +362,33 @@ async fn task_persona_full_roundtrip_via_settings_api() {
     let (_, after) = send_json(app, "GET", "/api/settings?mode=task", json!({})).await;
     assert_eq!(after["task_persona_full"], json!(false));
 }
+
+/// 新装/首装(含 Android)设置接口返回非空的角色扮演默认提示词:
+/// build_test_app 用全新临时数据目录(无 settings.json)→ 走 from_config 路径,
+/// 正是手机端首装场景。修复前该字段为空串,面板与执行时都拿不到默认人设词。
+#[tokio::test]
+async fn roleplay_default_prompt_visible_on_fresh_install() {
+    let app = test_app();
+    let (status, s) = send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let p = s["agent_system_prompt"].as_str().unwrap_or("");
+    assert!(!p.trim().is_empty(), "首装角色扮演默认提示词不得为空: {s}");
+    for ph in [
+        "{{char}}",
+        "{{personality}}",
+        "{{scenario}}",
+        "{{world_info}}",
+    ] {
+        assert!(p.contains(ph), "默认词应含占位符 {ph} 供宏展开");
+    }
+    assert!(p.contains("【创作总纲】"), "默认词应含创作总纲段: {p:.80}");
+
+    // 模式隔离不因新默认退化:task 视角仍是任务向默认词,不含角色扮演宏
+    let (_, t) = send_json(app, "GET", "/api/settings?mode=task", json!({})).await;
+    let tp = t["agent_system_prompt"].as_str().unwrap_or("");
+    assert!(!tp.trim().is_empty(), "task 缺省应有任务向默认词: {t}");
+    assert!(
+        !tp.contains("{{char}}"),
+        "task 默认词不得继承角色扮演宏: {tp:.80}"
+    );
+}

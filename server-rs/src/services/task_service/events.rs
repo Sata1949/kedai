@@ -36,7 +36,7 @@ impl TaskService {
     /// send 仅在无任何订阅者时返回 Err,属正常,忽略。
     pub(crate) fn emit_event(
         &self,
-        kind: &str,
+        kind: TaskEventKind,
         task_id: &str,
         title: Option<String>,
         status: Option<TaskStatus>,
@@ -44,7 +44,7 @@ impl TaskService {
     ) {
         let _ = self.events.send(SseEvent::Task {
             task_id: task_id.to_string(),
-            kind: Some(kind.to_string()),
+            kind: Some(kind),
             title,
             status,
             detail,
@@ -82,7 +82,7 @@ impl TaskService {
         let finish_reason = finish_reason.filter(|r| !r.is_empty());
         let _ = self.events.send(SseEvent::Task {
             task_id: task_id.to_string(),
-            kind: Some("llm_call".to_string()),
+            kind: Some(TaskEventKind::LlmCall),
             title: None,
             status: None,
             detail: Some(detail),
@@ -177,7 +177,7 @@ impl DeltaBatcher {
         self.since = None;
         let _ = self.tx.send(SseEvent::Task {
             task_id: self.task_id.clone(),
-            kind: Some("delta".to_string()),
+            kind: Some(TaskEventKind::Delta),
             title: None,
             status: None,
             detail: Some(text),
@@ -218,7 +218,7 @@ mod tests {
         else {
             panic!("达到字符阈值应立即发射一条 delta");
         };
-        assert_eq!(kind.as_deref(), Some("delta"));
+        assert_eq!(kind, Some(TaskEventKind::Delta));
         assert_eq!(detail.as_deref(), Some(long.as_str()));
         assert_eq!(phase.as_deref(), Some("step"));
         assert_eq!(step_index, Some(0));
@@ -253,7 +253,7 @@ mod tests {
         else {
             panic!("时间窗到应发射");
         };
-        assert_eq!(kind.as_deref(), Some("delta"));
+        assert_eq!(kind, Some(TaskEventKind::Delta));
         assert_eq!(detail.as_deref(), Some("少量"));
         assert_eq!(phase.as_deref(), Some("planner"));
         assert_eq!(step_index, None, "非步骤类阶段不携带 step_index");

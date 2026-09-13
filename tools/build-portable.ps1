@@ -119,3 +119,8 @@ foreach ($dir in $CleanDirs) {
         }
     }
 }
+
+# src-tauri\target 删除后,之前 Android 构建在 jniLibs 里留的 .so 符号链接会悬空,
+# 导致后续压缩/备份仓库报「系统找不到指定的路径」并中断;此处一并清理
+# (派生文件,见 gen/android/app/.gitignore 的 jniLibs 规则,下次 Android 构建自动重建)。
+Clear-KedaiDanglingJniLibs -Root $Root | Out-Null

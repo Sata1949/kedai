@@ -1291,7 +1291,9 @@ mod tests {
     fn vector_index_roundtrip_and_hybrid_recall() {
         let (memory, _, dir) = service();
         let a = memory.create_manual("c1", "用户喜欢薄荷茶").unwrap();
-        let b = memory.create_manual("c1", "角色承诺周末带用户看画展").unwrap();
+        let b = memory
+            .create_manual("c1", "角色承诺周末带用户看画展")
+            .unwrap();
 
         // 维度非法(0)时拒绝
         assert!(memory.ensure_vec_table(0).is_ok_and(|ok| !ok));

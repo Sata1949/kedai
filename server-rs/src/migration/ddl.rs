@@ -376,3 +376,37 @@ pub fn ensure_task_messages_table(conn: &Connection) -> Result<(), String> {
         .map_err(|e| format!("创建 task_messages 表失败: {e}"))?;
     Ok(())
 }
+
+/// 命令执行审计表(bash 工具与 Android 执行层):每次尝试执行(含被拒绝的)
+/// 落一行,供设置面板审计查看与事后追溯。
+/// 为什么必须落库:root/ADB 级命令不可逆,「谁在何时以什么等级跑了什么」
+/// 是唯一的回溯依据(见 docs/授权模式.md 与 docs/android-port-plan.md 合规要求)。
+pub(super) const EXEC_AUDIT_DDL: &str = r#"
+CREATE TABLE IF NOT EXISTS exec_audit (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts             TEXT NOT NULL,
+  source         TEXT NOT NULL DEFAULT 'chat',
+  task_id        TEXT,
+  session_id     TEXT,
+  command        TEXT NOT NULL,
+  shell          TEXT NOT NULL DEFAULT '',
+  tier           TEXT NOT NULL DEFAULT 'sandbox',
+  risk           TEXT NOT NULL DEFAULT 'sensitive',
+  decision       TEXT NOT NULL DEFAULT 'allowed',
+  exit_code      INTEGER,
+  stdout_summary TEXT NOT NULL DEFAULT '',
+  stderr_summary TEXT NOT NULL DEFAULT ''
+)"#;
+/// 审计按时间倒序查询的辅助索引。
+pub(super) const EXEC_AUDIT_INDEX_DDL: &str =
+    "CREATE INDEX IF NOT EXISTS idx_exec_audit_ts ON exec_audit(ts DESC)";
+
+/// 幂等补建命令执行审计表(旧库无此表时创建)。
+/// DDL 全用 IF NOT EXISTS,启动与跨库合并前各执行一次均安全(同 task_messages 模式)。
+pub fn ensure_exec_audit_table(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(EXEC_AUDIT_DDL)
+        .map_err(|e| format!("创建 exec_audit 表失败: {e}"))?;
+    conn.execute_batch(EXEC_AUDIT_INDEX_DDL)
+        .map_err(|e| format!("创建 exec_audit 索引失败: {e}"))?;
+    Ok(())
+}

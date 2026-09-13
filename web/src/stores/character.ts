@@ -19,6 +19,11 @@ import {
   writeLastCharacterId,
   writeLastSessionId,
 } from '../lastPosition';
+// 跨 store 依赖(M5 断环):当前角色 id 经回调桥(storeBridge.ts)暴露给 chat/uiPrefs,
+// 免去它们顶层 import 本 store;本 store 是这两条边的被依赖方。
+// chat / uiPrefs 已不再指向本 store,故本 store 对它们的引用(会话重置、渲染开关
+// 记忆/加载错误提示)不构成环,保持直接调用。
+import { registerCharacterIdProvider } from './storeBridge';
 import { useChatStore } from './chat';
 import { useUiPrefsStore } from './uiPrefs';
 
@@ -27,6 +32,9 @@ export const useCharacterStore = defineStore('app.character', () => {
   const characters = ref<api.CharacterRecord[]>([]);
   const currentCharacterId = ref<string | null>(null);
   const searchQuery = ref('');
+
+  // 注册给回调桥(M5 断环):chat/uiPrefs 读当前角色 id 经此取用本 store 实例。
+  registerCharacterIdProvider(() => currentCharacterId.value);
 
   const scriptAuthorizationStore = new LocalScriptAuthorizationStore(localStorage);
   /** 当前角色脚本内容哈希；角色或脚本变化时重算。 */

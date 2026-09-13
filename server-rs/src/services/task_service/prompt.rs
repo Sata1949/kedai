@@ -13,10 +13,10 @@ use super::*;
 /// 问题②(2026-08-31 实测:模型只写计划不收集信息,凭空编造步骤):允许先用
 /// 只读工具侦察(白名单/轮数上限由执行侧 PLANNER_SCOUT_* 保证),再产出计划;
 /// 「严格只输出 JSON 数组」约束的是最终计划轮的产出形态,侦察轮的工具调用不算违约。
-pub(crate) const PLANNER_PROMPT: &str = "你是任务规划器。把用户目标拆解为 2~5 个可独立执行的具体步骤,每个步骤单一、明确、粒度适中(约 2~5 分钟可完成)。若目标涉及的信息不足,可先调用可用的只读工具(如读取文件/搜索/查询记忆)收集与目标相关的信息,再产出计划。计划须严格只输出 JSON 数组,不要输出任何解释或多余文字。数组元素格式:{\"name\":\"步骤名\",\"goal\":\"该步骤要完成的目标\"}";
+pub(crate) const PLANNER_PROMPT: &str = "你是任务规划器。把用户目标拆解为 2~5 个可独立执行的具体步骤,每个步骤单一、明确、粒度适中(约 2~5 分钟可完成)。若目标涉及的信息不足,可先调用可用的只读工具(如读取文件/搜索/查询记忆)收集与目标相关的信息,再产出计划。计划须严格只输出 JSON 数组,不要输出任何解释或多余文字。数组元素格式:{\"name\":\"步骤名\",\"goal\":\"该步骤要完成的目标\"}。契约先行纪律:① 每个步骤的 goal 必须写明交付物与可判是的验收判据(能以是/否回答);② 同一交付物只允许一个权威版本,不得规划出会互相覆盖的重复步骤;③ 字段名与口径以本计划为唯一来源,执行方不得自拟字段名。";
 
 /// 执行者内置指令:独立完成单个子任务并直接产出结果
-pub(crate) const EXECUTOR_PROMPT: &str = "你是任务执行者,负责独立完成交给你的一个子任务。直接输出该子任务的最终结果:不要复述指令、不要输出计划或元文本、不要模拟对话、不要用标题包裹结果。";
+pub(crate) const EXECUTOR_PROMPT: &str = "你是任务执行者,负责独立完成交给你的一个子任务。直接输出该子任务的最终结果:不要复述指令、不要输出计划或元文本、不要模拟对话、不要用标题包裹结果。引用或替换其他 agent 的既有产出时,必须写明取代对象(名称或版本);禁止出现未声明取代对象的「替换旧版/最新版为唯一口径」这类表述。若你的职责是验证/审计,只回填实测结论,不得另立一版交付物。";
 
 /// 规划器修订指引段(批次 R2b plan-chat):追加在 PLANNER_PROMPT 之后,
 /// 引导规划器按用户反馈修订已产出计划(输出契约不变:严格 JSON 数组)。
@@ -72,6 +72,71 @@ impl TaskService {
     /// 执行者角色卡读取(solo 提示词组装用;无执行者/角色不存在返回 None)。
     pub(crate) fn character_for(&self, character_id: Option<&str>) -> Option<CharacterRecord> {
         character_id.and_then(|cid| self.characters.get(cid))
+    }
+
+    /// 执行者 system 提示词组装(单一实现):内置执行者指令 → 人设 → 世界书 →
+    /// 提示词注入 → 用户可编辑 Agent 提示词,外部来源段落逐一 untrusted 边界包裹,
+    /// 内置指令不包裹(WP7 纪律)。
+    /// 调用方:legacy 步骤生成(task_service::generate_step_with)与任务引擎主 agent
+    /// 循环(task_engine::solo::run_agent_loop)——两处此前各有一份逐行同构实现,
+    /// 差异仅在角色取用方式(characters.get vs character_for,本实现统一经
+    /// character_for,两者等价),合并后消除漂移风险。
+    /// `user_goal` 供 {{lastUserMessage}} 占位符渲染(步骤生成传任务目标,主 agent 传 goal)。
+    pub(crate) fn assemble_executor_system_prompt(
+        &self,
+        settings: &RuntimeSettings,
+        character_id: Option<&str>,
+        user_goal: &str,
+    ) -> String {
+        let character = self.character_for(character_id);
+
+        let mut sys = String::from(EXECUTOR_PROMPT);
+        if let Some(c) = &character {
+            // 人设精简/完整按任务模式有效设置(task_persona_full,R3a;None/false=精简)
+            let style = persona_style(c, settings.task_persona_full);
+            if !style.is_empty() {
+                sys.push_str(&format!(
+                    "\n\n写作风格参考(角色「{}」):\n{}",
+                    c.chara_name,
+                    crate::services::prompt_kit::untrusted_boundary("character", &style)
+                ));
+            }
+        }
+        let world = self.world_context(character_id);
+        if !world.is_empty() {
+            sys.push_str(&format!(
+                "\n\n{}",
+                crate::services::prompt_kit::untrusted_boundary("world_book", &world)
+            ));
+        }
+        // 提示词注入默认隔离(2026-09-10 实测修复):solo/multi/team 主 agent 与 followup
+        // 续跑共用本函数;仅显式开启 task_prompt_inject_enabled 才继承 prompt_floors.json
+        let inject = if settings.task_prompt_inject_enabled {
+            self.inject_text()
+        } else {
+            String::new()
+        };
+        if !inject.is_empty() {
+            sys.push_str(&format!(
+                "\n\n{}",
+                crate::services::prompt_kit::untrusted_boundary("prompt_inject", &inject)
+            ));
+        }
+        // settings 为 for_mode(Task) 合并值;agent_system_prompt 字段类型 RoleplayPromptConfig
+        // (RuntimeSettings 共用成员),此处内容已是 task 有效值(覆盖层计算结果),.0 取字符串
+        if !settings.agent_system_prompt.0.trim().is_empty() {
+            let rendered = self.render_agent_prompt(
+                &settings.agent_system_prompt.0,
+                character.as_ref(),
+                &world,
+                user_goal,
+            );
+            sys.push_str(&format!(
+                "\n\n{}",
+                crate::services::prompt_kit::untrusted_boundary("agent_prompt", &rendered)
+            ));
+        }
+        sys
     }
 
     /// 世界书常驻条目文本:过滤 enabled && constant 且内容非空,按 position→order→id 排序,
@@ -240,5 +305,39 @@ mod tests {
         c.data_raw = Some(serde_json::json!({}));
         assert!(persona_style(&c, false).is_empty(), "精简全空应返回空串");
         assert!(persona_style(&c, true).is_empty(), "完整全空应返回空串");
+    }
+
+    /// 提示词契约加固(审计项 G):mock 钩子 [[empty_if:任务执行者]] /
+    /// [[reply_if:任务规划器]] 依赖的独特子串不得丢失;新增契约纪律须就位。
+    /// 本用例是硬约束的回归锁:改文案时若删掉这两个子串,集成测试会连锁失败。
+    #[test]
+    fn builtin_prompts_keep_mock_hook_substrings_and_contract_disciplines() {
+        assert!(
+            EXECUTOR_PROMPT.contains("任务执行者"),
+            "EXECUTOR_PROMPT 必须含「任务执行者」(mock [[empty_if:]] 钩子依赖)"
+        );
+        assert!(
+            PLANNER_PROMPT.contains("任务规划器"),
+            "PLANNER_PROMPT 必须含「任务规划器」(mock [[reply_if:]] 钩子依赖)"
+        );
+        // 规划器:契约先行(交付物 + 可判是验收判据 + 权威版本唯一 + 字段名唯一来源)
+        for needle in ["交付物", "验收判据", "权威版本", "唯一来源"] {
+            assert!(
+                PLANNER_PROMPT.contains(needle),
+                "PLANNER_PROMPT 应含契约先行要素「{needle}」: {PLANNER_PROMPT}"
+            );
+        }
+        // 执行者:取代对象声明 + 审计只回填结论
+        for needle in ["取代对象", "验证/审计"] {
+            assert!(
+                EXECUTOR_PROMPT.contains(needle),
+                "EXECUTOR_PROMPT 应含纪律「{needle}」: {EXECUTOR_PROMPT}"
+            );
+        }
+        // END 只属于子任务指令(agentgo description),不得进 EXECUTOR_PROMPT 污染用户可见正文
+        assert!(
+            !EXECUTOR_PROMPT.contains("END"),
+            "EXECUTOR_PROMPT 不得含 END 收尾(属子任务指令模板): {EXECUTOR_PROMPT}"
+        );
     }
 }

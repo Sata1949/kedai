@@ -32,6 +32,48 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $Root "tools\Write-BuildStamp.ps1")
 
+# 版本一致性断言:全仓自身版本号必须一致,任一漏改即构建失败。
+# 覆盖 7 处声明(package.json / web/package.json / package-lock.json /
+# server-rs|src-tauri|launcher 的 Cargo.toml / tauri.conf.json)。
+# 由 tools/bump-version.ps1 统一维护;此处只读校验,不代改。
+function Assert-VersionConsistency {
+    $declared = [ordered]@{}
+    # 统一口径:取文件第一处 "version" 字段(与 tools/bump-version.ps1 同语义)。
+    # 不用 ConvertFrom-Json:PS 5.1 解析 package-lock.json 会因依赖键名报错。
+    function Get-JsonVersion([string]$rel) {
+        $p = Join-Path $Root $rel
+        if (-not (Test-Path $p)) { return "(缺失)" }
+        $m = [regex]::Match([System.IO.File]::ReadAllText($p), '"version"\s*:\s*"([^"]*)"')
+        if ($m.Success) { return $m.Groups[1].Value }
+        return "(解析失败)"
+    }
+    function Get-TomlVersion([string]$rel) {
+        $p = Join-Path $Root $rel
+        if (-not (Test-Path $p)) { return "(缺失)" }
+        $m = [regex]::Match([System.IO.File]::ReadAllText($p), '(?m)^version\s*=\s*"([^"]*)"')
+        if ($m.Success) { return $m.Groups[1].Value }
+        return "(解析失败)"
+    }
+    $declared["package.json"] = Get-JsonVersion "package.json"
+    $declared["web/package.json"] = Get-JsonVersion "web\package.json"
+    $declared["package-lock.json"] = Get-JsonVersion "package-lock.json"
+    $declared["server-rs/Cargo.toml"] = Get-TomlVersion "server-rs\Cargo.toml"
+    $declared["src-tauri/Cargo.toml"] = Get-TomlVersion "src-tauri\Cargo.toml"
+    $declared["launcher/Cargo.toml"] = Get-TomlVersion "launcher\Cargo.toml"
+    $declared["src-tauri/tauri.conf.json"] = Get-JsonVersion "src-tauri\tauri.conf.json"
+
+    $distinct = @($declared.Values | Select-Object -Unique)
+    if ($distinct.Count -gt 1) {
+        Write-Host "[FAIL] 版本号不一致,构建中止。请跑 npm run version:bump -- <x.y.z> 统一:" -ForegroundColor Red
+        foreach ($k in $declared.Keys) {
+            Write-Host ("       {0,-30} {1}" -f $k, $declared[$k]) -ForegroundColor Red
+        }
+        throw "版本号不一致(详见上列)"
+    }
+    Write-Host "版本一致性校验通过:$($distinct[0])(7 处声明)" -ForegroundColor DarkGray
+}
+
+
 if ($Dev -and $WithPortable) {
     throw "-Dev 与 -WithPortable 不能同时使用:便携版构建会清理 -Dev 需要保留的编译缓存"
 }
@@ -44,6 +86,8 @@ if ($TestOnly -and $Dev) {
 
 # 双端同步是默认行为;-TestOnly / -Dev 是明确的单端快速通道
 $BuildPortable = -not $TestOnly -and -not $Dev
+
+Assert-VersionConsistency
 
 Write-Host "========== Kedai Build ==========" -ForegroundColor Cyan
 
@@ -199,6 +243,9 @@ if ($Tauri -and -not $BuildPortable -and (Test-Path "$Root\src-tauri\target")) {
     try {
         Remove-Item -Recurse -Force "$Root\src-tauri\target" -ErrorAction Stop
         Write-Host "[清理] 已删除 $Root\src-tauri\target" -ForegroundColor Yellow
+        # target 删除会让 Android 构建留下的 jniLibs .so 符号链接悬空(压缩/备份会报
+        # 「系统找不到指定的路径」);派生文件,一并清理。
+        Clear-KedaiDanglingJniLibs -Root $Root | Out-Null
     } catch {
         Write-Host "[警告] 清理 $Root\src-tauri\target 失败: $($_.Exception.Message)" -ForegroundColor Yellow
     }

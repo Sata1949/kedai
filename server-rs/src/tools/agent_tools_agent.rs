@@ -14,6 +14,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use super::agent_tools::ToolDeps;
+use super::agent_tools_shared::subtask_candidates;
 
 // 子 agent 工具白名单(批次 4.3b):读/搜索类安全工具;写类(write/replace/create/
 // memory_write/update_variables)与编排类(agentgo/agentend——嵌套派发由深度守卫
@@ -26,7 +27,7 @@ pub(super) fn register_agentgo(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
     registry.register(
         ToolDefinition {
             name: "agentgo".into(),
-            description: "排出子智能体:为每个任务在后台用当前模型独立生成一段内容(带角色设定与常驻世界书上下文)。返回 task_id,后续用 read(type=subtask) 或 todo 轮询结果;用 agentend 结束任务。".into(),
+            description: "排出子智能体:为每个任务在后台用当前模型独立生成一段内容(带角色设定与常驻世界书上下文)。返回 task_id,后续用 read(type=subtask) 或 todo 轮询结果;用 agentend 结束任务。写指令时按此模板逐条给全:\n契约: <引用来源与版本>\n角色: <谁>\n单一交付物: <一个名词短语>\n判据: <能以是/否回答的验收句>\n输出: <形态与边界(如仅 JSON,首字符 { 末字符 },不得含围栏;或散文不限格式)>\n长度: 目标 ≤ <N> 字;若被迫截断,须以单独一行 END 收尾\n引用: 只允许引用既有字段名,禁止自拟字段\n结果末尾缺 END 即视为截断,应重发或明确标注 gap,不得当作完成。".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -85,26 +86,101 @@ pub(super) fn register_agentgo(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
                         tasks.len()
                     ));
                 }
+                // 逐项校验 + 部分派发(审计项 A):必须先全量校验再创建/派发,
+                // 顺序不可颠倒——旧实现边遍历边 create+spawn,任一空项整批 return Err
+                // 会让前面已 spawn 的合法任务变成孤儿(调用方只见错误、不知已派出)。
+                // 现在:非法项进 rejected,合法项照常 create+spawn,互不牵连。
                 let mut launched: Vec<Value> = Vec::new();
-                for t in &tasks {
-                    let name = t.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let instruction = t.get("instruction").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    if name.is_empty() || instruction.is_empty() {
-                        return Err("子任务 name 与 instruction 不能为空".into());
+                let mut rejected: Vec<Value> = Vec::new();
+                for (index, t) in tasks.iter().enumerate() {
+                    // 畸形输入按「拒绝该项」处理,不 panic:非对象元素没有可用 name/instruction
+                    let Some(obj) = t.as_object() else {
+                        rejected.push(json!({
+                            "index": index,
+                            "name": "",
+                            "reject_reason": "任务项不是对象(需要 {name, instruction})",
+                        }));
+                        continue;
+                    };
+                    // trim 后判定:纯空白 " " 不再被当作合法任务(旧实现 is_empty 判空漏过)
+                    let name = obj
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    let instruction = obj
+                        .get("instruction")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    let mut reasons: Vec<&str> = Vec::new();
+                    if name.is_empty() {
+                        reasons.push("name 为空");
                     }
-                    let max_tokens = t.get("max_tokens").and_then(|v| v.as_u64()).unwrap_or(512).clamp(64, 4096) as u32;
-                    let record = deps.subtasks.create(&ctx.session_id, &ctx.character_id, &name, &instruction)?;
+                    if instruction.is_empty() {
+                        reasons.push("instruction 为空");
+                    }
+                    if !reasons.is_empty() {
+                        // 闭包内不得因单项非法 return Err:否则整批失败且已派发的成孤儿
+                        rejected.push(json!({
+                            "index": index,
+                            "name": name,
+                            "reject_reason": reasons.join("; "),
+                        }));
+                        continue;
+                    }
+                    let max_tokens = obj
+                        .get("max_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(512)
+                        .clamp(64, 4096) as u32;
+                    // 合法项:用 trim 后的值创建与派发(维持原校验/派发顺序)
+                    let record = deps.subtasks.create(
+                        &ctx.session_id,
+                        &ctx.character_id,
+                        &name,
+                        &instruction,
+                    )?;
                     let deps2 = deps.clone();
                     let task_id = record.id.clone();
                     let session_id = ctx.session_id.clone();
                     let character_id = ctx.character_id.clone();
                     let agent_depth = ctx.agent_depth;
                     tokio::spawn(async move {
-                        run_subtask(deps2, task_id, session_id, character_id, instruction, max_tokens, agent_depth).await;
+                        run_subtask(
+                            deps2,
+                            task_id,
+                            session_id,
+                            character_id,
+                            instruction,
+                            max_tokens,
+                            agent_depth,
+                        )
+                        .await;
                     });
                     launched.push(json!({ "task_id": record.id, "name": name, "status": "pending" }));
                 }
-                Ok(json!({ "ok": true, "tasks": launched }).to_string())
+                // 合法项为 0 且存在 rejected:无任何派发,整批错误(文案带逐项原因供模型自纠);
+                // 原「tasks 为空」全局守卫已在前面返回,此处覆盖全废场景。
+                if launched.is_empty() {
+                    let detail = rejected
+                        .iter()
+                        .map(|r| {
+                            format!(
+                                "#{} {}: {}",
+                                r["index"],
+                                r["name"].as_str().unwrap_or(""),
+                                r["reject_reason"].as_str().unwrap_or("")
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    return Err(format!("agentgo 未派出任何子任务,逐项原因: {detail}"));
+                }
+                // 兼容既有调用/测试:保留 tasks 键;rejected 为新增键(无非法项时为空数组)
+                Ok(json!({ "ok": true, "tasks": launched, "rejected": rejected }).to_string())
             })
         }),
     );
@@ -361,12 +437,30 @@ async fn run_subtask_with_tools(
             let content = res.content.trim().to_string();
             if deps.subtasks.is_ended(task_id) {
                 // 生成期间被 agentend/任务 stop 结束:保持 ended,不写结果
-            } else if content.is_empty() {
-                let _ = deps.subtasks.set_error(task_id, "子任务返回空内容");
             } else {
-                let _ = deps
-                    .subtasks
-                    .set_done(task_id, &truncate_subtask_result(deps, &content));
+                // 判定抽为纯函数(classify_subtask_result),截断即失败的语义可单测
+                match classify_subtask_result(&content, res.finish_reason.as_deref(), max_tokens) {
+                    SubtaskVerdict::Empty { error } => {
+                        let _ = deps.subtasks.set_error(task_id, &error);
+                    }
+                    SubtaskVerdict::Truncated { error } => {
+                        // 截断算失败而非 done(审计项 B):半截正文的交付不可用,原先只要
+                        // 正文非空就静默 set_done,导致「自然完成 / max_tokens 截断 /
+                        // 拒绝执行」三态都 status=done 且 error 为空,是假成功的主通道。
+                        // 这里保留被截断的正文到 result 列(仍有参考价值,不能丢内容),
+                        // 同时把定性原因写入 error。
+                        let _ = deps.subtasks.set_failed(
+                            task_id,
+                            &truncate_subtask_result(deps, &content),
+                            &error,
+                        );
+                    }
+                    SubtaskVerdict::Done => {
+                        let _ = deps
+                            .subtasks
+                            .set_done(task_id, &truncate_subtask_result(deps, &content));
+                    }
+                }
             }
         }
         Ok(_) => {
@@ -381,6 +475,37 @@ async fn run_subtask_with_tools(
             }
         }
     }
+}
+
+/// 子任务写回判定(审计项 B,纯函数便于单测):
+/// 正文为空归 Empty(error 带 finish_reason,区分「真空响应」与「截断」);
+/// 正文非空但 finish_reason=length 归 Truncated(截断即交付不可用,算失败,不写 done);
+/// 其余归 Done。
+/// 注意:finish_reason 为 None(纯生成回退路径)时维持原「非空即成功」行为,不误伤。
+enum SubtaskVerdict {
+    Empty { error: String },
+    Truncated { error: String },
+    Done,
+}
+
+fn classify_subtask_result(
+    content: &str,
+    finish_reason: Option<&str>,
+    max_tokens: u32,
+) -> SubtaskVerdict {
+    if content.is_empty() {
+        let error = match finish_reason.filter(|r| !r.is_empty()) {
+            Some(r) => format!("子任务返回空内容(finish_reason={r})"),
+            None => "子任务返回空内容".to_string(),
+        };
+        return SubtaskVerdict::Empty { error };
+    }
+    if finish_reason == Some("length") {
+        return SubtaskVerdict::Truncated {
+            error: format!("子任务输出被截断(finish_reason=length,输出上限 {max_tokens} token)"),
+        };
+    }
+    SubtaskVerdict::Done
 }
 
 /// 子 agent 纯生成回退路径(引擎未注入时;行为与批次 4.3b 之前一致)
@@ -465,6 +590,20 @@ pub(super) fn truncate_subtask_result_for_test(deps: &ToolDeps, content: &str) -
     truncate_subtask_result(deps, content)
 }
 
+/// 测试入口:跨模块验证写回判定(截断即失败)
+#[cfg(test)]
+pub(super) fn classify_subtask_result_for_test(
+    content: &str,
+    finish_reason: Option<&str>,
+    max_tokens: u32,
+) -> (&'static str, String) {
+    match classify_subtask_result(content, finish_reason, max_tokens) {
+        SubtaskVerdict::Empty { error } => ("empty", error),
+        SubtaskVerdict::Truncated { error } => ("truncated", error),
+        SubtaskVerdict::Done => ("done", String::new()),
+    }
+}
+
 /// 常驻世界书文本(子任务上下文用:constant 且启用)。
 /// 过滤/排序/格式化统一走 prompt_kit 共享原语,勿在此复制实现(AGENTS.md 明文纪律)。
 fn collect_constant_world_text(deps: &ToolDeps, character_id: &str) -> String {
@@ -533,9 +672,27 @@ pub(super) fn register_agentend(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
                     if id.is_empty() {
                         continue;
                     }
-                    let existed = deps.subtasks.get(&id).is_some();
+                    // 审计项 F:end() 之前先取记录,拿到本次调用前的真实状态。
+                    // 旧实现只回 ended:true——它对「本次真的中断了活跃任务」与
+                    // 「任务早已 ended,本次是空操作」同样成立,无法证明中断成功。
+                    let rec = deps.subtasks.get(&id);
+                    let existed = rec.is_some();
+                    let prior_status = rec
+                        .as_ref()
+                        .map(|r| r.status.clone())
+                        .unwrap_or_default();
                     let ended = deps.subtasks.end(&id);
-                    results.push(json!({ "task_id": id, "existed": existed, "ended": ended }));
+                    // interrupted = 本次调用真实中断了活跃任务(pending/running);
+                    // 判定「本次中断成功」应以本字段(或审计口径的 existed)为准。
+                    let interrupted =
+                        existed && (prior_status == "pending" || prior_status == "running");
+                    results.push(json!({
+                        "task_id": id,
+                        "existed": existed,
+                        "prior_status": prior_status,
+                        "ended": ended,
+                        "interrupted": interrupted,
+                    }));
                 }
                 Ok(json!({ "ok": true, "results": results, "session_id": ctx.session_id }).to_string())
             })
@@ -573,13 +730,24 @@ pub(super) fn register_todo(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
                         .map(|c| json!({ "name": c.name, "input": c.input, "output": c.output, "duration_ms": c.duration_ms }))
                         .collect();
                     out["tool_calls"] = json!(calls);
+                    out["tool_calls_available"] = json!(true);
                 } else {
+                    // 任务模式虚拟 session(如 task:{id} / task:{id}:main:{n} /
+                    // task:{id}:sub:{tid})没有 agent_sessions 行,tool_calls 恒为空数组。
+                    // 显式标注不可用,避免「恒空数组」被审计误判为「无调用发生」(审计项 E);
+                    // 真实调用证据请走 read(type=subtask)/任务详情。
                     out["plan"] = json!([]);
                     out["tool_calls"] = json!([]);
+                    out["tool_calls_available"] = json!(false);
+                    out["tool_calls_note"] = json!(
+                        "任务模式虚拟会话无 agent_sessions 行,本字段不可用;请改用 read(type=subtask)/任务详情核对调用"
+                    );
                 }
-                let tasks: Vec<Value> = deps
-                    .subtasks
-                    .list_by_session(&ctx.session_id)
+                // 子任务清单走 shared helper(审计项 E):能取到任务前缀就用前缀列举,
+                // 使同任务的 :main:/:sub: 派生 session 也能看到全部兄弟子任务(跨 agent
+                // 证据可见,构成「交接登记表」);聊天路径退回精确 session。复用既有内存
+                // 覆盖层(list_by_session_prefix),不新增存储。
+                let tasks: Vec<Value> = subtask_candidates(&deps, &ctx.session_id)
                     .iter()
                     .map(|t| {
                         json!({

@@ -21,8 +21,8 @@ mod secret;
 
 pub use connection::{mask_key, normalize_base_url, DEFAULT_SEARCH_ENDPOINT};
 pub use params::{
-    default_task_agent_prompt, McpServerConfig, ModeSettings, RoleplayPromptConfig,
-    TaskPromptConfig,
+    default_roleplay_agent_prompt, default_task_agent_prompt, McpServerConfig, ModeSettings,
+    RoleplayPromptConfig, TaskPromptConfig,
 };
 
 // RuntimeSettings 字段的 serde(default = "...") 按名字在本模块作用域解析;
@@ -117,6 +117,7 @@ pub struct RuntimeSettings {
     /// - strict:读/写/删文件都需授权;
     /// - loose:读/写文件放行,删文件需授权(默认);
     /// - bypass:除「系统路径(C 盘)写/删」外一律放行。
+    ///
     /// 旧配置无此字段时由 serde default 填 loose,再由 load 侧迁移按 bypass_mode 修正
     /// (见 settings_service::migrate_authorization_mode)。
     #[serde(default = "default_authorization_mode")]
@@ -225,6 +226,19 @@ pub struct RuntimeSettings {
     /// MCP 服务器列表(默认空 = 不装配任何服务器)
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
+    /// 命令执行总开关(阶段 E;默认**关闭**,与「root 能力默认关闭、用户显式开启」一致)。
+    /// 关闭时 bash 工具与 Android 执行层直接拒绝执行(工具仍注册,便于用户在授权面板看到)。
+    #[serde(default)]
+    pub exec_enabled: bool,
+    /// Android 执行层:允许 ROOT 档(su 提权)。默认关闭(合规要求,不适合上架)。
+    #[serde(default)]
+    pub exec_allow_root: bool,
+    /// Android 执行层:允许 Shizuku 档(ADB shell 权限,无需 root)。默认关闭。
+    #[serde(default)]
+    pub exec_allow_shizuku: bool,
+    /// Android 执行层:允许沙箱档(应用自身 UID)。默认关闭(统一由 exec_enabled 控制)。
+    #[serde(default)]
+    pub exec_allow_sandbox: bool,
     /// 执行者人设完整开关(R3a):false = 精简(默认,旧配置缺省由 serde default 填 false,
     /// 零迁移),true = 完整(含 scenario+mes_example)。权威消费在任务模式人设拼装
     /// (persona_style);task 覆盖层可覆盖,None 沿用本扁平值。
@@ -955,9 +969,7 @@ mod tests {
             "旧配置缺省应为隔离(false)"
         );
         assert!(
-            !loaded
-                .for_mode(AppMode::Task)
-                .task_prompt_inject_enabled,
+            !loaded.for_mode(AppMode::Task).task_prompt_inject_enabled,
             "None 覆盖层沿用扁平值 = 隔离(旧配置兼容)"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -972,6 +984,102 @@ mod tests {
         assert!(
             !s.for_mode(AppMode::Roleplay).task_prompt_inject_enabled,
             "roleplay 读扁平权威值(false),task 覆盖层不得污染"
+        );
+    }
+
+    /// 新装(含 Android 首装)角色扮演默认提示词不再为空:from_config 直接物化 Win 端正用版,
+    /// 且必须保留四个宏占位符(宏系统按角色展开;与任务默认词「不得含 {{char}}」相反)。
+    #[test]
+    fn roleplay_default_prompt_is_materialized_on_new_install() {
+        let cfg = test_cfg();
+        let s = RuntimeSettings::from_config(&cfg);
+        let p = &s.agent_system_prompt.0;
+        assert!(
+            !p.trim().is_empty(),
+            "新装默认提示词不得为空(Android 首装同源)"
+        );
+        for ph in [
+            "{{char}}",
+            "{{personality}}",
+            "{{scenario}}",
+            "{{world_info}}",
+        ] {
+            assert!(p.contains(ph), "默认词必须保留占位符 {ph} 供宏系统展开");
+        }
+        // 与引擎内置兜底模板同源的标志性段落,便于维护者识别两份文本的对应关系
+        for seg in [
+            "【创作总纲】",
+            "【角色扮演规则】",
+            "【写作要求】",
+            "【剧情结构(模块化)】",
+            "【输出纪律】",
+        ] {
+            assert!(p.contains(seg), "默认词应含段落 {seg}");
+        }
+    }
+
+    /// 已存在 settings.json 且该字段为空(此前安装/用户显式清空后未改)→ load 物化内置默认;
+    /// 用户已保存的非空文本不得被覆盖(文件值优先)。
+    #[test]
+    fn load_backfills_empty_roleplay_prompt_and_keeps_custom_text() {
+        let cfg = test_cfg();
+
+        // 分支一:空串 → 回填内置默认
+        let dir_empty = tmp_dir("rp-prompt-backfill");
+        let mut empty = serde_json::to_value(RuntimeSettings::from_config(&cfg)).unwrap();
+        empty["agent_system_prompt"] = serde_json::Value::from("");
+        std::fs::write(
+            dir_empty.join("settings.json"),
+            serde_json::to_string_pretty(&empty).unwrap(),
+        )
+        .unwrap();
+        let loaded = RuntimeSettings::load(&dir_empty, &cfg);
+        assert_eq!(
+            loaded.agent_system_prompt.0,
+            default_roleplay_agent_prompt(),
+            "空值应回填内置默认(与首装一致)"
+        );
+        let _ = std::fs::remove_dir_all(&dir_empty);
+
+        // 分支二:用户自定义非空文本 → 原样保留,不得被默认词覆盖
+        let dir_custom = tmp_dir("rp-prompt-custom");
+        let mut custom = serde_json::to_value(RuntimeSettings::from_config(&cfg)).unwrap();
+        custom["agent_system_prompt"] = serde_json::Value::from("CUSTOM-RP-MARK 用户自己的提示词");
+        std::fs::write(
+            dir_custom.join("settings.json"),
+            serde_json::to_string_pretty(&custom).unwrap(),
+        )
+        .unwrap();
+        let loaded_custom = RuntimeSettings::load(&dir_custom, &cfg);
+        assert_eq!(
+            loaded_custom.agent_system_prompt.0, "CUSTOM-RP-MARK 用户自己的提示词",
+            "用户非空文本优先,回填不得覆盖"
+        );
+        let _ = std::fs::remove_dir_all(&dir_custom);
+    }
+
+    /// 模式隔离不因新增角色扮演默认词而退化:
+    /// task 缺省仍是任务向默认词(不含角色扮演宏),roleplay 默认词含宏;两者互不污染。
+    #[test]
+    fn roleplay_default_does_not_leak_into_task_default() {
+        let cfg = test_cfg();
+        let s = RuntimeSettings::from_config(&cfg);
+        let task_default = s.for_mode(AppMode::Task).agent_system_prompt.0;
+        assert_eq!(
+            task_default,
+            default_task_agent_prompt(),
+            "task 缺省仍是任务向默认词"
+        );
+        assert!(
+            !task_default.contains("{{char}}"),
+            "task 默认词不得继承角色扮演宏"
+        );
+        assert!(
+            s.for_mode(AppMode::Roleplay)
+                .agent_system_prompt
+                .0
+                .contains("{{char}}"),
+            "roleplay 默认词应含宏占位符"
         );
     }
 }

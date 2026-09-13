@@ -1,13 +1,18 @@
 // 任务模式 store:顶层模式(roleplay/task)切换与持久化、任务列表/详情、
 // 任务事件 SSE 订阅(WP5:取代原 1s REST 轮询与本地合成伪事件)。
-// 从 store.ts 按领域拆分。跨 store 引用(genSettings.loadSettings / uiPrefs.agentPanelOpen /
-// chat.onSseEvent 事件上报)均在动作运行时解析,setup 阶段不实例化其他 store。
+// 从 store.ts 按领域拆分。依赖方向(M5 断环后):本 store 是依赖图汇点——
+//   - appMode 仍是本 store 状态,但经回调桥(storeBridge.ts)对外暴露给 genSettings,
+//     免去 genSettings → task 顶层 import;
+//   - 对 chat/genSettings/uiPrefs 的三处能力同样经回调桥调用。
+//   整图因此无环(见 tools/check-arch.mjs)。
 import { defineStore } from 'pinia';
 import { ref, watch } from 'vue';
 import * as api from '../api';
-import { useChatStore } from './chat';
-import { useGenSettingsStore } from './genSettings';
-import { useUiPrefsStore } from './uiPrefs';
+import {
+  reloadSettings,
+  reportChatEvent,
+  uiPrefsBridge,
+} from './storeBridge';
 
 /** 顶层模式持久化键:刷新后停留在上次模式 */
 const APP_MODE_KEY = 'kedai.appMode';
@@ -140,6 +145,7 @@ export const useTaskStore = defineStore('app.task', () => {
       /* 忽略 */
     }
   }
+
 
   /** 持久化新建任务模式(仿 persistAppMode:try/catch 容错,写失败静默) */
   function persistTaskRunMode(): void {
@@ -318,12 +324,12 @@ export const useTaskStore = defineStore('app.task', () => {
     if (mode === 'task') {
       void loadTasks().then(() => restoreSelectedTask());
       void loadGlobalTaskUsage();
-      useUiPrefsStore().agentPanelOpen = false;
+      uiPrefsBridge().collapseAgentPanel();
       startTaskEvents();
     } else {
       stopTaskEvents();
     }
-    void useGenSettingsStore().loadSettings();
+    reloadSettings();
     persistAppMode();
   }
 
@@ -331,7 +337,7 @@ export const useTaskStore = defineStore('app.task', () => {
 
   /** 事件分发:按 kind 驱动局部刷新;所有事件原样透传事件监控面板(DevTools) */
   function onTaskEvent(ev: api.TaskEvent): void {
-    useChatStore().onSseEvent(ev);
+    reportChatEvent(ev);
     switch (ev.kind) {
       case 'created':
         void loadTasks();
@@ -354,7 +360,7 @@ export const useTaskStore = defineStore('app.task', () => {
       case 'llm_call':
         // LLM 调用落库:仅当前任务且「调用情况」tab 被记忆为激活时才拉取(避免无谓请求;
         // 面板合并后 callTraceOpen 语义为合并面板内部 tab 记忆,判断逻辑不变)
-        if (ev.task_id === currentTaskId.value && useUiPrefsStore().callTraceOpen) {
+        if (ev.task_id === currentTaskId.value && uiPrefsBridge().isCallTraceOpen()) {
           void loadTaskCalls(ev.task_id);
         }
         // 批次 R4 流式缓冲对齐:该调用的暂态 delta 已由落库行取代,清对应缓冲
@@ -482,7 +488,7 @@ export const useTaskStore = defineStore('app.task', () => {
   async function runTask(id: string): Promise<void> {
     await api.runTask(id);
     // 任务开始执行时自动展开一次 Agent 面板(进度可见性);用户若已主动收起则不打扰
-    useUiPrefsStore().autoOpenAgentPanel();
+    uiPrefsBridge().autoOpenAgentPanel();
     await loadTaskDetail(id);
   }
 
@@ -495,7 +501,7 @@ export const useTaskStore = defineStore('app.task', () => {
   async function approveTask(id: string, plan?: api.TaskStep[]): Promise<void> {
     await api.approveTask(id, plan);
     // 批准后任务进入执行:同样自动展开一次
-    useUiPrefsStore().autoOpenAgentPanel();
+    uiPrefsBridge().autoOpenAgentPanel();
     await loadTaskDetail(id);
   }
 

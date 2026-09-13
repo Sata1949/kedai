@@ -126,7 +126,6 @@
 ---
 
 ## L10 角色扮演 Agent 记录只恢复工具调用,不恢复推理链(有意裁剪)
-
 - **现状行为**(`server-rs/src/api/agent.rs` 的 `session_trace` + `web/src/stores/chat.ts`
   的 `restoreAgentTrace`):切会话/重启后,右侧 Agent 面板可恢复 `agent_sessions` 的
   state/plan/step_index 与 `tool_calls` 列表,但 `AgentActivity.chain`(推理链步骤明细)
@@ -137,6 +136,31 @@
   (现有 `SseEvent::Step` 已是结构化载荷,落库即可);前端恢复时按 `at` 升序回填 chain。
 - **生态兼容考量**:恢复的 `toolCalls` 一律置 `status='done'`(历史记录不可能处于 running),
   与实时 SSE 累积的形态区分,避免面板显示永不结束的「执行中」。
+
+---
+
+---
+
+## L11 沙箱 iframe 保留 `allow-modals`,`postMessage` 无法校验 origin(有意裁剪 + 平台限制)
+
+- **现状行为**(`web/src/sandbox/iframe-lifecycle.ts` 的 `sandboxAttributes()` 与 `onMessage`):
+  - iframe `sandbox="allow-scripts allow-modals"`(无 `allow-same-origin`,不透明源)。
+  - 消息身份校验**仅**为「高熵 nonce + 固定 channel」;不校验 `event.origin` / `event.source`。
+- **判定**:
+  - `origin` / `source` 校验属**平台限制不可用**(2026-09-12 实测评估):
+    不透明源 iframe 的 origin 恒为 `"null"`(见 `render.ts` 注释),无判别力;
+    而 WebView2 会把跨源 iframe 的 `event.source` 包装成另一个对象,与
+    `iframe.contentWindow` 不相等——按「不等即拒」会误杀全部正常消息
+    (`scriptRunner.test.ts`「接受 WebView2 source wrapper」已锁定该契约)。
+    故 nonce(128 位随机、仅存于执行闭包、经 URL fragment 交付、不落 DOM/存储)
+    是当前唯一可靠身份凭据。
+  - `allow-modals` 属**有意保留**:角色卡作者脚本用 `alert`/`confirm` 做协议确认与提示
+    (赛马娘卡 `submitCreation` 经剪贴板桥回包后 `alert` 弹窗,`sandbox/uma-creation.test.ts`
+    锁定该链路)。移除会让这类卡静默失效,故保留,前提是「沙箱内弹窗不触及宿主 DOM/存储」。
+- **安全边界**:外层仍有站点 CSP、`/sandbox.html` 下发、RPC op 白名单、innerHTML 清洗。
+  当前未发现可实际利用的逃逸路径,故不构成现实漏洞。
+- **加固路径**(若未来平台支持):改用 `MessageChannel` 端口传递(端口对象天然只有双方持有,
+  取代「广播 channel + nonce」模型),可彻底摆脱 origin/source 判别与 `'*'` targetOrigin。
 
 ---
 

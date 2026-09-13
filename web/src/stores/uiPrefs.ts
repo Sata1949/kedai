@@ -1,11 +1,17 @@
 // 界面偏好 store:各弹窗/面板开关、启动动画、安全 HTML 渲染开关(按角色卡记忆 + 全局默认)。
-// 从 store.ts 按领域拆分。跨 store 引用(currentCharacterId / queueSettingsSave)均在
-// 回调/动作运行时解析,setup 阶段不实例化其他 store,避免初始化环。
+// 从 store.ts 按领域拆分。跨 store 依赖(M5 断环后)均为叶子模块:
+//   - currentCharacterId 读回调桥(storeBridge.ts,owner 为 character store);
+//   - 保存全局 render_html 走回调桥(storeBridge.ts,由 genSettings 注册队列保存)。
+// 本 store 不再顶层 import 任何其他 store,成为依赖图的汇点。
 import { defineStore } from 'pinia';
 import { ref, watch } from 'vue';
 import { LocalRenderHtmlPreferenceStore } from '../renderHtmlPreference';
-import { useCharacterStore } from './character';
-import { useGenSettingsStore } from './genSettings';
+import {
+  currentCharacterIdValue,
+  queueSettingsSave,
+  registerRenderHtmlDefaultSink,
+  registerUiPrefsSink,
+} from './storeBridge';
 
 export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
   // ===== 弹窗/面板开关 =====
@@ -114,7 +120,7 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
    * 程序性赋值走 restoring 闩锁,不触发持久化写入(避免为默认值凭空生成记忆)。
    */
   function syncRenderHtmlToCurrent(): void {
-    const cid = useCharacterStore().currentCharacterId;
+    const cid = currentCharacterIdValue();
     const v = cid && cid in renderHtmlOverrides.value
       ? renderHtmlOverrides.value[cid]
       : defaultRenderHtml.value;
@@ -124,7 +130,21 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
       renderHtmlSaveTimer = null;
     }
     restoringRenderHtml = true;
+    renderHtml.value = v;  }
+
+  /**
+   * 程序性设置 HTML 渲染开关(引导条一键开启 / 顶栏与设置面板切换共用)。
+   * 与 syncRenderHtmlToCurrent 的区别:后者是「按当前角色卡回读持久化值」,
+   * 本函数是「用户显式改值」——赋值后由下方 watch 节流持久化(有卡写卡记忆,
+   * 无卡写全局默认)。统一入口避免组件直接赋值绕过持久化闩锁与失败回滚。
+   */
+  function setRenderHtml(v: boolean): void {
     renderHtml.value = v;
+  }
+
+  /** 切换 HTML 渲染开关(等价于 setRenderHtml(!renderHtml)) */
+  function toggleRenderHtml(): void {
+    renderHtml.value = !renderHtml.value;
   }
 
   /** 删除角色卡时清理其 HTML 渲染开关记忆(随卡删除,不留孤儿数据) */
@@ -149,7 +169,7 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
     }
     if (renderHtmlSaveTimer) clearTimeout(renderHtmlSaveTimer);
     renderHtmlSaveTimer = setTimeout(() => {
-      const cid = useCharacterStore().currentCharacterId;
+      const cid = currentCharacterIdValue();
       if (cid) {
         // 按角色卡记忆:仅写 localStorage,不改全局默认
         const next = { ...renderHtmlOverrides.value, [cid]: v };
@@ -157,7 +177,7 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
         renderHtmlPreferenceStore.write(next);
         confirmedRenderHtml = v;
       } else {
-        void useGenSettingsStore().queueSettingsSave({ render_html: v })
+        void queueSettingsSave({ render_html: v })
           .then(() => { confirmedRenderHtml = v; })
           .catch((error) => {
             console.error('HTML 渲染设置保存失败', error);
@@ -166,6 +186,22 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
           });
       }
     }, 300);
+  });
+
+  // 注册给回调桥(M5 断环):genSettings 读到新的全局 render_html 默认值后通知这里。
+  // 顺序与原实现一致:先写 defaultRenderHtml,再由 syncRenderHtmlToCurrent 按
+  // 角色卡记忆重算生效值(有卡记忆优先,无卡才跟随全局默认)。
+  registerRenderHtmlDefaultSink((v) => {
+    defaultRenderHtml.value = v;
+    syncRenderHtmlToCurrent();
+  });
+
+  // 注册给回调桥(M5 断环):task store 需要的三个界面操作,经桥调用免去
+  // task → uiPrefs 的顶层 import。
+  registerUiPrefsSink({
+    collapseAgentPanel,
+    autoOpenAgentPanel,
+    isCallTraceOpen: () => callTraceOpen.value,
   });
 
   // ===== Agent 面板开合动作 =====
@@ -231,6 +267,8 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
     defaultRenderHtml,
     renderHtmlOverrides,
     syncRenderHtmlToCurrent,
+    setRenderHtml,
+    toggleRenderHtml,
     removeRenderHtmlOverride,
   };
 });

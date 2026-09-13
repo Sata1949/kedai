@@ -20,3 +20,4 @@ export * from './diagnostics';
 export * from './memory';
 export * from './repoIndex';
 export * from './undo';
+export * from './exec';

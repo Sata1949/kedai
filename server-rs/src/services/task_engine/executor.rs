@@ -37,3 +37,18 @@ pub(crate) fn usage_as_output(usage: &TokenUsage) -> TaskGenOutput {
         tool_calls: Vec::new(),
     }
 }
+
+impl TaskOutcome {
+    /// 「执行器已自行收尾」占位产物:供 legacy / followup 这类自己调用
+    /// `complete_mode_run` / `finalize_mode_run` 的执行器返回。
+    /// 引擎对 `OnSuccess::SelfFinalized` 不再写库,故此处字段仅用于完成日志的
+    /// token 累计展示(权威用量仍以 task_llm_calls / task_usage 为准)。
+    pub(crate) fn self_finalized(usage: TokenUsage) -> Self {
+        TaskOutcome {
+            text: String::new(),
+            usage,
+            status: None,
+            error: None,
+        }
+    }
+}

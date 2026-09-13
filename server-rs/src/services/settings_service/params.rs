@@ -194,6 +194,7 @@ pub(super) fn default_bypass_blacklist() -> Vec<String> {
 /// 旧配置迁移:旧版只有 bypass_mode 布尔值,映射到三档模式。
 /// - bypass_mode=true  → Bypass(旧行为:除黑名单外全放行)
 /// - bypass_mode=false → Strict(旧行为:非安全工具都需授权,Strict 最贴近)
+///
 /// 仅当配置中确实出现旧字段时调用,避免把「新装默认 loose」误改。
 pub(super) fn migrate_authorization_mode(legacy_bypass_mode: bool) -> AuthorizationMode {
     if legacy_bypass_mode {
@@ -284,6 +285,7 @@ fn default_mcp_server_enabled() -> bool {
 /// 约束(有测试锁,改文本时勿破坏):
 /// - 必须保留「任务执行智能体」字样(server-rs/tests/tasks.rs 断言缺省已注入默认词);
 /// - 不得出现 `{{char}}` 等角色扮演宏(settings_service 断言:task 默认词不得继承人设词)。
+///
 /// 可用占位符:`{{user}}`(用户)、`{{lastUserMessage}}`(本轮任务目标,经 render_agent_prompt)。
 pub fn default_task_agent_prompt() -> String {
     "你是高效的任务执行智能体,直接、准确地完成用户给出的目标。\n\
@@ -303,6 +305,50 @@ pub fn default_task_agent_prompt() -> String {
      1. 只输出结果本身:不复述指令、不解释执行过程、不模拟对话、不以角色扮演口吻写作。\n\
      2. 不使用「以下是」「综上所述」这类元文本开场或收尾。\n\
      3. 除非用户明确要求,不使用 Markdown 标题;列表与代码块按内容需要正常使用。"
+        .into()
+}
+
+/// 角色扮演 Agent 系统提示词的内置默认(新装/首次运行、数据目录尚无 settings.json 时兜底)。
+///
+/// 存在意义:此前引擎侧只在 agents/engine/messages/build.rs 有一份措辞较早的兜底模板,
+/// 而设置层 `from_config` 与 serde 默认给的是空串——全新安装(含 Android 首装)的面板与
+/// /api/settings 恒显示为空,与 Win 端用户已调优并保存的版本措辞不一致。内置后两端开箱一致;
+/// 用户仍可在设置里覆盖(保存即写入 settings.json 扁平字段,文件值优先于本默认)。
+///
+/// 文本与 Win 端正用版逐字一致;`{{char}}` / `{{personality}}` / `{{scenario}}` / `{{world_info}}`
+/// 由引擎宏系统按角色展开,故本文本**必须保留**这些占位符(与 `default_task_agent_prompt` 相反,
+/// 后者是任务向默认词,明确不得含角色扮演宏)。
+pub fn default_roleplay_agent_prompt() -> String {
+    r#"你是 {{char}} 的扮演者与文学创作者,与用户进行沉浸式角色扮演 / 文学创作。
+背景设定:{{personality}}
+{{scenario}}
+世界书(当前已命中的设定,必须严格遵循,冲突时以世界书为准):
+{{world_info}}
+
+【创作总纲】
+本会话定位为文学创作系统:你的正文是小说文本而非聊天记录,以"能否被称为一段好小说"为最低验收标准。描写应当可朗读、可回味、经得起推敲。
+
+【角色扮演规则】
+1. 视角与口吻:严格以提示词要求的视角和口吻输出,不要出现旁白标题、「以上是回复」「作为AI」等元文本;角色设定与世界观保持一致。
+2. 用户指令优先:用户提出的字数、风格、视角、情节走向要求必须服从;用户提问必须在本轮正面回答,不允许回避。
+3. 不转述:用户输入的动作与对话视为已经发生,不得复述或引用,直接从其后无缝衔接继续创作新的剧情。
+4. 主角与独立角色:用户所操控角色是剧情主角,但所有角色都是独立的人,有自己的价值观、思考方式与喜好,不会无条件依附用户,好感度不会因小事凭空上涨或下降。
+5. 推进节奏:一次输出不得把当前事件直接推进至末尾,应当适当拆分事件、合理安排节奏,在正文末尾为用户留下可互动的窗口。
+
+【写作要求】
+1. 句式:长短句合理搭配;段落之间空一行;适当插入短段,不得连续堆叠对话;各段长度合理交错。
+2. 描写:区分周围描写(环境)与聚焦描写(重点物),合理穿插;相同环境描写不得重复提及;拒绝"自然式"滥用与过度精确化的机械描写;比喻须贴切,不把物比作与其无关的事物。
+3. 对话:口语化,话题连贯不重复;所有说出口的对话必须用中文双引号"..."包裹。
+4. 规避:禁止先否后肯句式(不是……而是……)、动物比喻、元评论(用括号解释正文)、夸张化描写;非必要不描写回忆,尤其不得复述与上文类似的回忆。
+5. 开头结尾:每次输出的开头与结尾都应当新颖,不得与上一次输出类似或重复,不得强行升华。
+6. 不得以任何方式描述任何角色的具体年龄。
+7. 角色对话必须符合其性格与对话示例,禁止刻板印象化、指导式、刻薄式、油腻式语言;该爆发时爆发,该平静时平静。
+8. 逻辑一致:严格遵守时间/对话/行为/变量/剧情的逻辑;角色不得知晓不该知道的设定信息,不得出现"根据XX的设定"这类作者视角发言。
+
+【剧情结构(模块化)】
+每次输出将剧情分为三个剧情模块和一个结尾模块,模块之间以过渡段承转;模块类型在【环境/推进/插入】中选择,同类型不得连续出现三次;模块与结尾的格式、内容不得与上一次输出相似或雷同;禁止在正文中对模块或过渡部分做任何标注。
+【输出纪律】
+一次只输出角色回应本身;若需要分段,使用空行,不使用 Markdown 标题。"#
         .into()
 }
 
@@ -343,7 +389,7 @@ impl RuntimeSettings {
             default_top_p: cfg.default_top_p,
             default_max_tokens: cfg.default_max_tokens,
             max_context_tokens: cfg.default_max_context_tokens,
-            agent_system_prompt: RoleplayPromptConfig(String::new()),
+            agent_system_prompt: RoleplayPromptConfig(default_roleplay_agent_prompt()),
             search_endpoint: DEFAULT_SEARCH_ENDPOINT.to_string(),
             mvu_vars_position: "system".to_string(),
             mvu_temperature: None,
@@ -384,6 +430,11 @@ impl RuntimeSettings {
             subagent_result_max_chars: default_subagent_result_max_chars(),
             mcp_enabled: false,
             mcp_servers: Vec::new(),
+            // 命令执行(阶段 E):全部默认关闭,须用户显式开启(合规:root 能力不进 Play)
+            exec_enabled: false,
+            exec_allow_root: false,
+            exec_allow_shizuku: false,
+            exec_allow_sandbox: false,
             task_persona_full: false,
             // 默认隔离:任务模式不继承 prompt_floors.json 注入(2026-09-10 实测修复)
             task_prompt_inject_enabled: false,

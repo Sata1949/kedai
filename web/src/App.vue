@@ -43,10 +43,12 @@ const narrowViewport = typeof window !== 'undefined' && typeof window.matchMedia
   ? window.matchMedia('(max-width: 767px)')
   : null;
 
-/** 收起全部移动端抽屉(遮罩点击、切换模式、打开设置时调用) */
+/** 收起全部移动端抽屉(遮罩点击、切换模式、打开设置时调用)。
+ *  Agent 面板走 collapseAgentPanel(收起时记抑制标记,本会话生成不再自动弹);
+ *  直接置 agentPanelOpen=false 会漏掉该标记,导致刚收起又被生成撑开。 */
 function closeDrawers(): void {
   store.sidebarOpen = false;
-  store.agentPanelOpen = false;
+  store.collapseAgentPanel();
 }
 
 /** 底部导航抽屉互斥开合:开一个时收起另一个,避免两层抽屉叠加。

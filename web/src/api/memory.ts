@@ -28,10 +28,12 @@ export interface MemoryEntry {
   updated_at: string;
 }
 
-/** 蒸馏结果:inserted = 本次落库条数(空历史为 0,不调模型) */
+/** 蒸馏结果:inserted = 本次落库条数(空历史为 0,不调模型);
+ *  skipped = 近似去重跳过条数(与已有记忆或本批已接受行重复) */
 export interface DistillResult {
   ok: boolean;
   inserted: number;
+  skipped: number;
   character_id: string;
 }
 

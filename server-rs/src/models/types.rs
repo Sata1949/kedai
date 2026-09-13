@@ -351,6 +351,37 @@ pub enum LlmStreamChunk {
 }
 
 // ---------- SSE 事件 ----------
+/// 任务事件分类(`SseEvent::Task.kind`,WP4 / 批次 4 / 批次 R4)。
+/// 序列化为 snake_case,与前端手写 union `TaskEventKind`(`web/src/api/types.ts`)
+/// 逐值对齐——改此处须同步前端 union 与 `tools/check-contract.mjs` 的映射表。
+///
+/// 用枚举而非 `String`:后端拼错分类名从前只会在前端静默失效(未知 kind 不刷新),
+/// 现由编译器拦住;线格式与字符串时代逐字节一致。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskEventKind {
+    /// 任务已创建
+    Created,
+    /// 任务状态迁移
+    Status,
+    /// 执行计划更新
+    Plan,
+    /// 子任务创建 / 状态更新
+    Subtask,
+    /// token 用量落库
+    Usage,
+    /// 任务已删除
+    Deleted,
+    /// LLM 调用落库(批次 3 调用追踪)
+    LlmCall,
+    /// 主 / 子 agent 状态迁移(批次 4)
+    AgentStatus,
+    /// 计划待批准(批次 4 plan 模式)
+    ApprovalRequired,
+    /// 流式正文增量(批次 R4;暂态事件不落库)
+    Delta,
+}
+
 /// SSE 事件,serde 序列化为 {"type":"...", ...}
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -423,7 +454,7 @@ pub enum SseEvent {
         ///  delta:批次 R4 流式输出,LLM 正文增量经攒批后透出,暂态事件不落库——
         ///  权威数据以 llm_call 落库行/calls 端点为准,见 events.rs emit_delta)
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        kind: Option<String>,
+        kind: Option<TaskEventKind>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -921,13 +952,13 @@ mod tests {
         }
     }
 
-    /// serde 快照:llm_call 事件线格式(批次 3 新增 kind)。kind 为 Option<String>,
+    /// serde 快照:llm_call 事件线格式(批次 3 新增 kind)。kind 为 Option<TaskEventKind>,
     /// 本测试锁定「type=task + kind=llm_call」帧形态(None 字段省略),防线格式漂移。
     #[test]
     fn sse_task_llm_call_event_wire_format() {
         let ev = SseEvent::Task {
             task_id: "t1".into(),
-            kind: Some("llm_call".into()),
+            kind: Some(TaskEventKind::LlmCall),
             title: None,
             status: None,
             detail: Some("step #1 · mock · 5 tokens".into()),
@@ -954,7 +985,7 @@ mod tests {
     fn sse_task_llm_call_event_with_finish_reason_wire_format() {
         let ev = SseEvent::Task {
             task_id: "t1".into(),
-            kind: Some("llm_call".into()),
+            kind: Some(TaskEventKind::LlmCall),
             title: None,
             status: None,
             detail: Some("agent · mock · 5 tokens".into()),
@@ -996,7 +1027,7 @@ mod tests {
     fn sse_task_delta_event_wire_format() {
         let ev = SseEvent::Task {
             task_id: "t1".into(),
-            kind: Some("delta".into()),
+            kind: Some(TaskEventKind::Delta),
             title: None,
             status: None,
             detail: Some("攒批后的正文增量".into()),
@@ -1025,7 +1056,7 @@ mod tests {
     fn sse_task_llm_call_event_with_phase_wire_format() {
         let ev = SseEvent::Task {
             task_id: "t1".into(),
-            kind: Some("llm_call".into()),
+            kind: Some(TaskEventKind::LlmCall),
             title: None,
             status: None,
             detail: Some("step #1 · mock · 5 tokens".into()),
@@ -1039,7 +1070,7 @@ mod tests {
 
         let ev = SseEvent::Task {
             task_id: "t1".into(),
-            kind: Some("llm_call".into()),
+            kind: Some(TaskEventKind::LlmCall),
             title: None,
             status: None,
             detail: Some("planner · mock · 5 tokens".into()),

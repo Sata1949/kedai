@@ -11,6 +11,7 @@ pub mod chat;
 pub mod contract_history;
 pub mod contracts;
 pub mod diagnostics;
+pub mod exec;
 pub mod import_export;
 pub mod kaleido;
 pub mod macros;

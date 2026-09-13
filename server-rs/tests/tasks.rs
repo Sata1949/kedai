@@ -1483,7 +1483,11 @@ async fn task_team_mode_kickback_scoped_to_subgoal() {
             .count()
     };
     assert_eq!(count(0), 1, "主 1 子一未被点名,不应重跑: {calls:?}");
-    assert_eq!(count(1), 2, "主 1 子二被点名,应首轮 + 补做共 2 次: {calls:?}");
+    assert_eq!(
+        count(1),
+        2,
+        "主 1 子二被点名,应首轮 + 补做共 2 次: {calls:?}"
+    );
     assert_eq!(count(2), 1, "主 2 未被点名,不应重跑: {calls:?}");
 }
 
@@ -1530,7 +1534,10 @@ async fn task_team_mode_kickback_prior_seed() {
         "补做轮应标注被打回子目标的旧版本: {redo}"
     );
     // 审计补做指令仍随行
-    assert!(redo.contains("审计补做指令"), "补做轮应携带补做指令: {redo}");
+    assert!(
+        redo.contains("审计补做指令"),
+        "补做轮应携带补做指令: {redo}"
+    );
 }
 
 /// team 审计未通过且无可补做项 → partial(实跑问题 2):审计是质量闸门,
@@ -1559,10 +1566,7 @@ async fn task_team_mode_audit_fail_without_kickback_is_partial() {
         "审计未通过且无可补做项应为 partial(不得静默 done): {detail}"
     );
     let result = detail["task"]["result"].as_str().unwrap_or("");
-    assert!(
-        result.contains("## 审计结论"),
-        "应保留审计结论段: {result}"
-    );
+    assert!(result.contains("## 审计结论"), "应保留审计结论段: {result}");
     assert!(
         result.contains("仍存在矛盾"),
         "审计未通过说明应进入结论段: {result}"
@@ -2313,7 +2317,11 @@ async fn task_followup_appends_to_result_and_messages() {
     );
     // 实跑问题 1:首轮成果落 assistant 消息(kind=result),供前端逐轮气泡渲染
     let after_run = detail["messages"].as_array().expect("详情应含 messages");
-    assert_eq!(after_run.len(), 2, "首轮后应为「目标 + 成果」两行: {detail}");
+    assert_eq!(
+        after_run.len(),
+        2,
+        "首轮后应为「目标 + 成果」两行: {detail}"
+    );
     assert_eq!(after_run[0]["kind"], "goal");
     assert_eq!(after_run[1]["role"], "assistant");
     assert_eq!(after_run[1]["kind"], "result");
@@ -2706,7 +2714,11 @@ async fn task_plan_chat_revises_plan_and_keeps_planned() {
     );
     let messages = detail["messages"].as_array().unwrap();
     // 目标(goal)+ 两轮 plan_chat 各两行 = 5 行
-    assert_eq!(messages.len(), 5, "目标 + 两轮对话应累计 5 行: {messages:?}");
+    assert_eq!(
+        messages.len(),
+        5,
+        "目标 + 两轮对话应累计 5 行: {messages:?}"
+    );
     assert_eq!(messages[0]["kind"], "goal");
     assert_eq!(messages[3]["role"], "user");
     assert_eq!(messages[3]["content"], "粒度再细一点");
@@ -2923,10 +2935,7 @@ async fn task_usage_total_matches_call_rows_with_scout_and_heal() {
         .iter()
         .filter(|c| c["phase"] == "planner")
         .count();
-    assert!(
-        planner_rows >= 2,
-        "应含侦察轮与计划轮: {calls:?}"
-    );
+    assert!(planner_rows >= 2, "应含侦察轮与计划轮: {calls:?}");
     assert_usage_matches_calls(&detail, &calls);
 
     // 场景 B:截断自愈(solo 工具循环单轮被截断 → 翻倍重发;heal 行记 usage)
@@ -2973,10 +2982,6 @@ fn assert_usage_matches_calls(detail: &Value, calls: &Value) {
         "usage_total.completion_tokens 应等于调用明细求和: usage={usage} calls={calls}"
     );
 }
-
-/// 2026-09-10 六模式实跑修复(F5):followup replace 模式整体替换结果。
-/// 背景:append 语义下「压缩到 200 字」这类指令无法表达——新产出以追加段附加,
-/// 原文仍在(实测 result 反而变长)。replace 模式用新产出整体替换 result(段标
 
 /// 2026-09-10 六模式实跑修复(F5):followup replace 模式整体替换结果。
 /// 背景:append 语义下「压缩到 200 字」这类指令无法表达——新产出以追加段附加,
@@ -3061,5 +3066,57 @@ async fn task_followup_replace_mode_replaces_result() {
     assert!(
         result.contains("追加内容段"),
         "append 应含本轮产出: {result}"
+    );
+}
+
+/// 审计 B(端到端):multi 子 agent 被 max_tokens 截断 → 子任务 status=error、
+/// error 含「截断」、result 保留半截正文。修复前只要正文非空就静默 done,是假成功主通道。
+/// 钩子内容取到首个 "]]"(与 [[reply:]] 同截断语义),故内容内不得含 "]]"。
+#[tokio::test]
+async fn task_multi_mode_subagent_truncation_marks_error() {
+    let app = test_app();
+
+    // 子 agent instruction 内嵌 \[ \] 转义的 finish 钩子:一是避免主 agent 的 tool 钩子
+    // 在首个 "]]" 截断参数 JSON;二是 agentgo 解析参数时还原为真实钩子文本,使子 agent
+    // 的 user 消息(instruction)命中 mock finish 钩子 → finish_reason=length + 半截正文。
+    let title = r#"[[tool:agentgo {"tasks":[{"name":"截断子","instruction":"\u005b\u005bfinish:length|半截成果在前\u005d\u005d"}]}]] 主目标:调研"#;
+    let id = create_task_with_mode(app, title, "multi").await;
+
+    let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
+    let (st, _) = wait_terminal(app, &id).await;
+    assert_eq!(st, "done", "主任务应完成(子任务失败不阻塞主循环)");
+
+    // 子 agent 后台执行,可能晚于主循环:轮询详情直至子任务落到终态
+    let mut sub: Option<Value> = None;
+    for _ in 0..50 {
+        let (_, detail) = send_json(app, "GET", &format!("/api/tasks/{id}"), json!({})).await;
+        let subs = detail["subtasks"].as_array().cloned().unwrap_or_default();
+        if let Some(s) = subs
+            .iter()
+            .find(|s| s["name"] == "截断子")
+            .filter(|s| s["status"] != "pending" && s["status"] != "running")
+        {
+            sub = Some(s.clone());
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let sub = sub.expect("截断子任务应出现在任务详情");
+    assert_eq!(
+        sub["status"].as_str(),
+        Some("error"),
+        "截断应记 error 而非 done: {sub}"
+    );
+    assert!(
+        sub["error"].as_str().unwrap_or("").contains("截断"),
+        "error 应含截断定性: {sub}"
+    );
+    assert!(
+        sub["result"]
+            .as_str()
+            .unwrap_or("")
+            .contains("半截成果在前"),
+        "被截断的正文必须保留在 result: {sub}"
     );
 }

@@ -103,7 +103,7 @@ kedai/
 | 一键构建 | `.\build.ps1` | **默认双端同步产出**:前端 web/dist + Rust release(测试版)+ 便携版;`-TestOnly` 仅测试版快速通道 `-Dev` debug 构建 `-NoWeb` 仅 Rust `-Tauri` 追加 NSIS 打包 |
 | 兼容别名 | `npm run build:all` / `npm run build:rs` | 均等价 `.\build.ps1`(双端同步);`npm run build:test` 等价 `.\build.ps1 -TestOnly` |
 | 统一改版本号 | `npm run version:bump -- x.y.z` | 7 处版本号一次改全(2 个 package.json、3 个 Cargo.toml、tauri.conf.json、本文档版本行);支持 `-DryRun` 预览 |
-| 后端测试 | `cd server-rs && cargo test` | 825 个测试(654 单测 + 171 集成,2026-09-08 实测),**需在 vcvars64 环境**;前端 `npm test -w web` **663 个(67 文件,2026-09-11 实测)**;后端 lib 单测 **719 个(2026-09-11 实测)** |
+| 后端测试 | `cd server-rs && cargo test` | 923 个测试(740 单测 + 183 集成,2026-09-12 实测),**需在 vcvars64 环境**;前端 `npm test -w web` **697 个(71 文件,2026-09-13 实测)** |
 | 全量检查(本地 CI) | `npm run check` | `tools/check-all.ps1`:fmt → clippy → cargo test → vue-tsc(**硬门禁**,2026-09-08 起)→ vitest → vite build |
 | 开发模式 | `cd server-rs && cargo run` + `npm run dev -w web` | 后端 3001 / 前端 5173(代理到 3001) |
 | 前端构建 | `npm run build -w web` | 产出 web/dist(编译进 exe 用) |
@@ -331,7 +331,7 @@ rusqlite(bundled,零原生依赖),**WAL 模式 + foreign_keys ON**。共 28 张�
 |---|---|
 | 换 LLM 后端 | 改 `.env` 的 OPENAI_BASE_URL / API_KEY,重启 |
 | 换默认模型 | 改 OPENAI_MODEL;或运行中在设置界面切换(持久化于内存,重启失效) |
-| 改默认系统提示词 | 改 `data/settings.json` 的 `agent_system_prompt`(优先级最高,保存即生效);运行中的服务需重启才读取;代码内置兜底模板在 `server-rs/src/agents/engine/messages/build.rs`(build_llm_messages_with_position),需重编译 |
+| 改默认系统提示词 | 改 `data/settings.json` 的 `agent_system_prompt`(优先级最高,保存即生效);运行中的服务需重启才读取;代码内置默认在 `server-rs/src/services/settings_service/params.rs`(default_roleplay_agent_prompt,新装/空值回填用);显式清空时另由引擎兜底模板兜底:`server-rs/src/agents/engine/messages/build.rs`(build_llm_messages_with_position),均需重编译 |
 | 演示模式 | CONNECTOR=mock 或清空 API Key,启动即演示 |
 | 端口被占 | `netstat -ano \| findstr ":3001"` → `taskkill /f /pid <pid>`;注意可能残留 Node 旧服务 |
 | 前端改了没生效 | 需重新 `.\build.ps1`(exe 内嵌的是编译期快照;开发期则靠 web/dist 磁盘优先) |
@@ -390,6 +390,8 @@ rusqlite(bundled,零原生依赖),**WAL 模式 + foreign_keys ON**。共 28 张�
 17. **16GB 内存 + 11GB 页面文件下禁止全并行 debug 链接**(2026-09 实测踩坑)。`cargo test`/`cargo build`(debug)全并行链接 `libkedai_server-*.rlib`(带 debuginfo 约 665MB)会触发 `os error 1455 页面文件太小`,rlib 被写坏后**后续所有编译持续报 E0786「invalid metadata files」**,表现为莫名其妙的全量失败。规避:`.shakedown/krun.bat` 已封装 `vcvars64 + CARGO_BUILD_JOBS=4 + debuginfo=0`;遇到 E0786 先删坏 rlib(`rm server-rs/target/debug/deps/libkedai_server-*.rlib`)再重建。**注意 release 构建(build.ps1)不受影响**(LTO + strip,产物小),但构建期间不要与前端 vitest/cargo test 并发跑,内存争用会让链接器崩(0xc0000409)。
 18. **世界书条目的 depth/role 在角色卡里常放在 `extensions`**(2026-09 第四轮实测踩坑)。顶层 `depth` 缺省 4;而真实卡(赛马娘 95 条、爱托邦 109 条、吸血鬼 54 条)**全部**把 `depth` 写在 `extensions`,顶层没有。解析必须两侧都读,否则作者设的 1/2/5 一律退化到 4:depth=1/2 被放宽 → 关键词在窗口外仍命中、污染提示词;depth=5 被收窄 → 漏注入。`probability`/`use_probability` 早有 extensions 回退,`role` 还须兼容 ST 数字(`0/1/2` → system/user/assistant)。改这条解析时对照 `parsing/world_book.rs` 的 `read_role`/depth 段与 `probability` 段保持同一写法;测试要覆盖「顶层优先 / 仅 extensions / 两者都缺省」三态(第四轮修复记录见此文 §10 之后的 `docs/实测四轮修复-变更说明.md` F1)。
 19. **卡内 CSS 注释会吞掉紧随的声明**(2026-09 第四轮实测踩坑)。`/* 说明 */\n background-image: …` 的属性名会被声明切分当成 `/* 说明 */ background-image`,不匹配属性白名单 → **整条声明被丢弃**。赛马娘卡因此丢了 `body` 的纸纹背景、`.select-item` 的 `gap`、`.description-box` 的 `padding`。修法是切分前先剥注释(`cssSanitize.ts` 的 `stripCssComments`,引号感知以免误伤 `url("https://a/*.png")`);**必须在 `splitCssBlocks` 之前剥**——注释里含 `{}` 会先破坏顶层块切分。改 CSS 清洗管线时注意 `sanitizeScopedCss`(规则体)与 `sanitizeCssDeclarations`(规则体 + style 属性)两个入口都要经过剥注释。
+20. **压缩 / 备份仓库报「系统找不到指定的路径」= jniLibs 里的 .so 符号链接悬空**(2026-09 实测踩坑)。`tauri android build` 为省空间不在 `gen\android\app\src\main\jniLibs\<abi>\` 存真文件,而是**建符号链接**指向 `src-tauri\target\<triple>\release\libkedai_desktop_lib.so`;构建收尾又会删除 `src-tauri\target` 回收磁盘 → 链接悬空。此后用资源管理器 / 7-Zip / HaoZip 压缩或备份仓库,工具跟随不到目标即报 `...libkedai_desktop_lib.so: 系统找不到指定的路径` 并中断,产物不完整。**判定陷阱**:悬空链接上 `Test-Path` 仍返回 `True`(PS 5.1 不穿透解析),必须比对 `(Get-Item -Force).Target` 是否存在;只看 `Test-Path` 会漏掉。现已自动化:`tools\Write-BuildStamp.ps1` 的 `Clear-KedaiDanglingJniLibs` 在删除 target 后清理悬空链接(`build.ps1` 的 `-Tauri` 分支与 `tools\build-portable.ps1` 收尾均已接入,幂等,只删 SymbolicLink 不碰真实文件)。这些链接与 .so 本就是派生文件(`gen/android/app/.gitignore` 已忽略),下次 Android 构建自动重建。
+21. **压缩工具会「跟随」junction,把外置目录的体积一起装进压缩包**(2026-09 实测确认:HaoZip 对 junction 是跟随而非跳过)。若把构建产物用 junction 外置(如 `src-tauri\gen\android\app\build` → `D:\kedai-build\...`,1.4GB),则压缩 `D:\kedai` 得到的包会明显大于目录本身——实测 218MB 的目录压出 417MB 包。需要「压缩包 ≙ 目录可见体积」时,压缩前应删除或排除 junction 目标,或改用 7-Zip 的 `-xr!` 排除;另注意**悬空 junction 会被静默跳过、不报错**,与悬空 symlink(条目 20 的报错)行为不同。
 
 ---
 
@@ -399,9 +401,9 @@ rusqlite(bundled,零原生依赖),**WAL 模式 + foreign_keys ON**。共 28 张�
 cd server-rs && cargo test
 ```
 
-- 单元测试(源文件内 `#[test]`/`#[tokio::test]`,726 个,2026-09-12 实测):状态机迁移、planner(fast/deep/算式识别)、reflector(3 规则)、calculator(白名单解析)、censor(禁词同义替换)、token 编码映射与估算、工具注册表、世界书转换、世界书注入(含 `extensions.depth` 扫描窗口)、提示词注入(含禁词库)、mvu 变量系统(含 JSONPatch 转义/reason/delta 容错)、EJS 渲染器(含读取 API 与 escape-ejs)、角色卡解析、正则脚本、@INJECT 解析/应用、GENERATE 注入、运行时提示词内置默认回退、结构化错误码(api/errors.rs)
-- API 集成测试(`tests/` 18 个文件,171 个,mock 连接器 + 临时数据目录):api_integration、assistant、agent_flows、tasks、task_events、prompt_inject、world_books、settings_connector、security、contracts_e2e、scripts_e2e、scripts_import、swipe_regenerate、undo、user_scripts、variables_scopes、db_concurrency、macros——health、角色 CRUD(multipart 上传)、会话/消息/导入导出、设置与 token、agent plan、SSE 聊天流、任务引擎六模式、计算器工具 SSE、世界书/角色卡、提示词注入与酒馆预设导入、鉴权
-- 前端 `npm test -w web`(Vitest,686 个 / 68 文件,2026-09-12 实测):stores、api client(含 ApiError 错误码分类)、组件与 composables、CSS 清洗(含注释处理)与沙箱回归;类型门禁 `npm run typecheck -w web`(vue-tsc,**硬门禁**,存量 168 已于 2026-09-08 清偿归零,清偿记录见 docs/优化实施方案-2026-09.md 附录 D)
+- 单元测试(源文件内 `#[test]`/`#[tokio::test]`,740 个,2026-09-12 实测):状态机迁移、planner(fast/deep/算式识别)、reflector(3 规则)、calculator(白名单解析)、censor(禁词同义替换)、token 编码映射与估算、工具注册表、世界书转换、世界书注入(含 `extensions.depth` 扫描窗口)、提示词注入(含禁词库)、mvu 变量系统(含 JSONPatch 转义/reason/delta 容错)、EJS 渲染器(含读取 API 与 escape-ejs)、角色卡解析、正则脚本、@INJECT 解析/应用、GENERATE 注入、运行时提示词内置默认回退、角色扮演默认提示词内置(from_config + load 空值回填)、结构化错误码(api/errors.rs)、任务编排工具契约(agentgo 逐项校验/子任务截断判失败/read subtask 多键命中/todo 跨 agent 可见/agentend interrupted)
+- API 集成测试(`tests/` 19 个文件,183 个,2026-09-12 实测,mock 连接器 + 临时数据目录):api_integration、assistant、agent_flows、tasks、task_events、prompt_inject、world_books、settings_connector、security、contracts_e2e、scripts_e2e、scripts_import、swipe_regenerate、undo、user_scripts、variables_scopes、db_concurrency、macros、repo_index——health、角色 CRUD(multipart 上传)、会话/消息/导入导出、设置与 token、agent plan、SSE 聊天流、任务引擎六模式、计算器工具 SSE、世界书/角色卡、提示词注入与酒馆预设导入、鉴权
+- 前端 `npm test -w web`(Vitest,697 个 / 71 文件,2026-09-13 实测):stores、api client(含 ApiError 错误码分类)、组件与 composables、CSS 清洗(含注释处理)与沙箱回归;类型门禁 `npm run typecheck -w web`(vue-tsc,**硬门禁**,存量 168 已于 2026-09-08 清偿归零,清偿记录见 docs/优化实施方案-2026-09.md 附录 D)
 - 新增接口建议同步补集成测试;测试环境变量 `CONNECTOR=mock` 强制隔离
 
 ---
@@ -409,10 +411,10 @@ cd server-rs && cargo test
 ## 12. Roadmap(来自 README,未实现)
 
 - Oobabooga / KoboldAI 连接器适配(世界书按 key 注入、Tauri 桌面化已完成)
-- LLM 原生 function calling 全链路(当前工具为规则触发 + 部分 function calling)
 - 工具执行沙箱隔离(角色卡脚本已有 iframe 沙箱,工具侧未做)
 - 知识库向量检索工具
 - (2026-08 已完成项移出:智能上下文压缩、自定义工具注册、缓存感知压缩管线、跨会话记忆蒸馏、技能渐进披露与子代理调度守卫——见第 14 章)
+- (2026-09 已完成项移出:LLM 原生 function calling 全链路——下发 `tools`/`tool_choice` 并按 index 聚合 `delta.tool_calls`,见 `connectors/openai_compatible/mod.rs`)
 
 ---
 

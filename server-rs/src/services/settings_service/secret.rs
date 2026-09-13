@@ -8,12 +8,12 @@ use super::connection::DEFAULT_SEARCH_ENDPOINT;
 use super::params::{
     default_compaction_keep_recent, default_compaction_mode, default_compaction_snip_bytes,
     default_compaction_threshold, default_memory_inject_char_budget, default_memory_inject_limit,
-    default_memory_max_entries, default_subagent_max_concurrency, default_subagent_max_depth,
-    default_subagent_result_max_chars, default_task_tool_policy,
+    default_memory_max_entries, default_roleplay_agent_prompt, default_subagent_max_concurrency,
+    default_subagent_max_depth, default_subagent_result_max_chars, default_task_tool_policy,
     default_tool_authorization_timeout_secs, default_tool_history_budget_tokens,
     default_tool_history_keep_rounds, migrate_authorization_mode,
 };
-use super::RuntimeSettings;
+use super::{RoleplayPromptConfig, RuntimeSettings};
 
 impl RuntimeSettings {
     /// 从 data/settings.json 加载;缺失或损坏则回退环境配置。
@@ -31,7 +31,12 @@ impl RuntimeSettings {
                 }
                 // 旧「放行模式黑名单」默认值是四个不存在的工具名,迁移为空的
                 // 「始终需授权」清单;仅当内容全是旧假名时清空,保留用户自定义项。
-                let legacy_fake = ["delete_file", "format_disk", "modify_system", "registry_write"];
+                let legacy_fake = [
+                    "delete_file",
+                    "format_disk",
+                    "modify_system",
+                    "registry_write",
+                ];
                 if !s.bypass_blacklist.is_empty()
                     && s.bypass_blacklist
                         .iter()
@@ -44,7 +49,10 @@ impl RuntimeSettings {
                     s.tool_authorization_timeout_secs = default_tool_authorization_timeout_secs();
                 }
                 // 任务工具策略仅接受三值,非法回退默认(与 API 校验同规则)
-                if !matches!(s.task_tool_policy.as_str(), "all" | "deny_dangerous" | "allowlist") {
+                if !matches!(
+                    s.task_tool_policy.as_str(),
+                    "all" | "deny_dangerous" | "allowlist"
+                ) {
                     s.task_tool_policy = default_task_tool_policy();
                 }
                 // 旧版 settings.json 无 search_endpoint:回退默认搜索端点
@@ -55,6 +63,14 @@ impl RuntimeSettings {
                 if s.mvu_vars_position.trim().is_empty() {
                     s.mvu_vars_position = "system".to_string();
                 }
+                // 角色扮演 Agent 系统提示词为空时物化内置默认(对齐 search_endpoint 回退模式):
+                // 空串语义 = 使用内置默认模板(设置页文案与 docs/模式提示词边界.md 同口径),
+                // 故此前安装(settings.json 已存在且该字段为空)也回退到内置默认,与首装/Android 端一致;
+                // 用户已保存的非空文本优先,不会被本回填覆盖。
+                if s.agent_system_prompt.0.trim().is_empty() {
+                    s.agent_system_prompt = RoleplayPromptConfig(default_roleplay_agent_prompt());
+                }
+
                 // 变量独立温度钳制到 0..=2.0;非法值(旧配置/越界)回退 None(沿用内置默认)
                 if let Some(t) = s.mvu_temperature {
                     if !(0.0..=2.0).contains(&t) {

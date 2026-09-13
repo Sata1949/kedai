@@ -159,6 +159,12 @@ pub fn run() {
                         tracing::warn!(error = e, "停止前台服务保活失败");
                     }
                 });
+                // 命令执行层的 Shizuku 授权请求(阶段 E):弹系统授权框
+                app.listen(native_bridge::SHIZUKU_REQUEST_EVENT, |_| {
+                    if let Err(e) = native_bridge::request_shizuku_permission() {
+                        tracing::warn!(error = e, "请求 Shizuku 授权失败");
+                    }
+                });
             }
 
             // 数据目录:Android 上 app_data_dir() 映射到应用私有目录(/data/data/<pkg>/files),

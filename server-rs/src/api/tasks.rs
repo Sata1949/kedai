@@ -259,7 +259,10 @@ pub async fn followup(
         );
     }
     let svc = state.tasks.clone();
-    match state.db_call(move || svc.followup(&id, &content, mode)).await {
+    match state
+        .db_call(move || svc.followup(&id, &content, mode))
+        .await
+    {
         Err(e) => db_err(&e),
         Ok(Ok(())) => Json(json!({ "ok": true })).into_response(),
         // 复核失败(竞态:预检通过后状态被 stop/重跑改变)按 409 语义返回

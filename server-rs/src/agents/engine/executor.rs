@@ -666,20 +666,14 @@ pub(crate) async fn run_tool_loop(
                     .tool_registry
                     .origin_of(&call.name)
                     .unwrap_or(crate::tools::action_class::ToolOrigin::Builtin);
-                let action = crate::tools::action_class::classify(
-                    &call.name,
-                    &call.arguments,
-                    origin,
-                );
+                let action =
+                    crate::tools::action_class::classify(&call.name, &call.arguments, origin);
                 let permission = if gate.excludes(&call.name) {
                     // 任务模式名单是硬边界:名单外工具直接拒绝,不进入三档文件规则
                     // (否则宽松模式会放过被任务策略排除的写类工具)
                     crate::tools::permissions::PermissionDecision {
                         allowed: false,
-                        risk: engine
-                            .tool_registry
-                            .permissions()
-                            .risk_for(&call.name),
+                        risk: engine.tool_registry.permissions().risk_for(&call.name),
                         reason: "该工具不在当前任务策略允许的工具清单内".into(),
                     }
                 } else {

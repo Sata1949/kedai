@@ -15,7 +15,7 @@ use super::context::TaskRunContext;
 use super::executor::{usage_as_output, ModeExecutor, TaskOutcome};
 use super::solo::{run_agent_loop, AgentLoopCall};
 use crate::agents::engine::AgentEngine;
-use crate::models::types::{TaskStatus, TaskStep, TaskStepStatus, TokenUsage};
+use crate::models::types::{TaskEventKind, TaskStatus, TaskStep, TaskStepStatus, TokenUsage};
 use crate::services::task_service::executor::{plan_task_retry, summarize_task_retry};
 use crate::services::task_service::TaskService;
 use futures::future::BoxFuture;
@@ -229,7 +229,7 @@ impl ModeExecutor for PlanExecutor {
             self.svc.set_plan(&ctx.task_id, &steps);
             self.svc.set_status(&ctx.task_id, TaskStatus::Planned);
             self.svc.emit_event(
-                "approval_required",
+                TaskEventKind::ApprovalRequired,
                 &ctx.task_id,
                 None,
                 Some(TaskStatus::Planned),

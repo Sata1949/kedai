@@ -32,9 +32,8 @@ pub fn register_sqlite_vec() {
     ) -> std::os::raw::c_int;
     static ONCE: Once = Once::new();
     ONCE.call_once(|| unsafe {
-        let init: ExtInit = std::mem::transmute::<*const (), ExtInit>(
-            sqlite_vec::sqlite3_vec_init as *const (),
-        );
+        let init: ExtInit =
+            std::mem::transmute::<*const (), ExtInit>(sqlite_vec::sqlite3_vec_init as *const ());
         rusqlite::ffi::sqlite3_auto_extension(Some(init));
     });
 }
@@ -80,6 +79,9 @@ impl Db {
         // 幂等 schema 升级(升级工作流 B2):旧库 memory_entries 补 pinned 列
         crate::migration::ensure_memory_entries_pinned_column(&conn)
             .map_err(|e| format!("升级 memory_entries pinned 列失败: {e}"))?;
+        // 幂等 schema 升级(阶段 B/C):旧库补建 exec_audit 审计表
+        crate::migration::ensure_exec_audit_table(&conn)
+            .map_err(|e| format!("升级 exec_audit 表失败: {e}"))?;
         // 幂等回填(升级工作流 B1):记忆全文索引首次建表后 rebuild 一次
         crate::migration::ensure_memory_entries_fts_backfill(&conn)
             .map_err(|e| format!("回填 memory_entries FTS 索引失败: {e}"))?;

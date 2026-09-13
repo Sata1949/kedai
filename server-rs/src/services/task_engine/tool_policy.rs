@@ -33,7 +33,11 @@ impl TaskToolPolicy {
 /// 按策略档位编译工具集。
 /// `policy`:all / deny_dangerous / allowlist(非法值按 deny_dangerous 处理,与加载侧钳制一致)。
 /// `allowlist`:仅 allowlist 档位使用。
-pub(crate) fn compile(policy: &str, allowlist: &[String], registry: &ToolRegistry) -> TaskToolPolicy {
+pub(crate) fn compile(
+    policy: &str,
+    allowlist: &[String],
+    registry: &ToolRegistry,
+) -> TaskToolPolicy {
     let all = tool_sets::exclude_meta(registry.list_definitions());
     let selected: Vec<ToolDefinition> = match policy {
         "all" => all,
@@ -95,7 +99,13 @@ mod tests {
         let reg = registry_with_tools();
         let p = compile("deny_dangerous", &[], &reg);
         let names: Vec<&str> = p.defs.iter().map(|d| d.name.as_str()).collect();
-        for banned in ["write", "replace", "create", "memory_write", "update_variables"] {
+        for banned in [
+            "write",
+            "replace",
+            "create",
+            "memory_write",
+            "update_variables",
+        ] {
             assert!(!names.contains(&banned), "危险工具 {banned} 应被拒绝");
         }
         for meta in ["get_state", "apply_patch"] {

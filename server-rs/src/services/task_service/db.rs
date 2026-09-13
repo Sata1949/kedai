@@ -121,7 +121,7 @@ impl TaskService {
         if changed {
             // 重跑入口即进入规划态,与 set_status 同款 kind="status" 事件
             self.emit_event(
-                "status",
+                TaskEventKind::Status,
                 id,
                 None,
                 Some(TaskStatus::Planning),
@@ -143,7 +143,7 @@ impl TaskService {
             .unwrap_or(false);
         if changed {
             self.emit_event(
-                "status",
+                TaskEventKind::Status,
                 id,
                 None,
                 Some(status),
@@ -166,7 +166,7 @@ impl TaskService {
             .unwrap_or(false);
         if changed {
             self.emit_event(
-                "plan",
+                TaskEventKind::Plan,
                 id,
                 None,
                 None,
@@ -208,7 +208,7 @@ impl TaskService {
         drop(conn);
         if changed {
             self.emit_event(
-                "status",
+                TaskEventKind::Status,
                 id,
                 None,
                 Some(status),
@@ -235,7 +235,7 @@ impl TaskService {
             .unwrap_or(false);
         if changed {
             self.emit_event(
-                "status",
+                TaskEventKind::Status,
                 id,
                 None,
                 Some(TaskStatus::Planned),
@@ -257,7 +257,13 @@ impl TaskService {
         if changed {
             // detail 截断防超长错误文本撑大事件帧
             let detail: String = error.chars().take(120).collect();
-            self.emit_event("status", id, None, Some(TaskStatus::Error), Some(detail));
+            self.emit_event(
+                TaskEventKind::Status,
+                id,
+                None,
+                Some(TaskStatus::Error),
+                Some(detail),
+            );
         }
         changed
     }
@@ -299,7 +305,7 @@ impl TaskService {
             );
         } else {
             self.emit_event(
-                "usage",
+                TaskEventKind::Usage,
                 task_id,
                 None,
                 None,
@@ -386,6 +392,50 @@ impl TaskService {
                 format!("{phase}{step} · {model} · {} tokens", p + c),
                 Some(finish_reason.to_string()),
             );
+        }
+    }
+
+    /// 截断自愈留痕批量落库(问题①的单一实现):solo.rs 与 custom.rs 各自复用过
+    /// 一段逐行同构的循环,现收拢于此——被截断的那次调用补落一行 status=error
+    /// (response_summary 标注触发原因与重发预算),并补落其 usage。
+    ///
+    /// 为何要补 usage:被截断那次同样消耗 token,只记最终行会让 usage_total
+    /// 少于调用明细求和(2026-09-10 实测修复口径)。
+    /// 调用情况面板据此看到完整「截断 → 提高预算重发」链路,实际调用次数可考。
+    pub(crate) fn record_self_heals(
+        &self,
+        task_id: &str,
+        phase: &str,
+        step_index: Option<usize>,
+        model: &str,
+        messages: &[LlmMessage],
+        self_heals: &[crate::agents::engine::executor::SelfHealRecord],
+    ) {
+        for heal in self_heals {
+            let heal_out = TaskGenOutput {
+                text: String::new(),
+                finish_reason: heal.finish_reason.clone(),
+                prompt_tokens: heal.prompt_tokens,
+                completion_tokens: heal.completion_tokens,
+                reasoning_tokens: 0,
+                reasoning_chars: 0,
+                tool_calls: Vec::new(),
+            };
+            self.record_llm_call(
+                task_id,
+                phase,
+                step_index,
+                model,
+                messages,
+                &format!(
+                    "(截断自愈){},输出上限翻倍至 {} 重发",
+                    heal.note, heal.retried_max_tokens
+                ),
+                Some(&heal_out),
+                Duration::ZERO,
+                "error",
+            );
+            self.record_usage(task_id, phase, step_index, &heal_out);
         }
     }
 
@@ -502,7 +552,7 @@ impl TaskService {
 
     // ===== 子任务 =====
 
-    pub(super) fn create_subtask(
+    pub(crate) fn create_subtask(
         &self,
         task_id: &str,
         name: &str,
@@ -518,7 +568,7 @@ impl TaskService {
         )
         .map_err(|e| format!("创建子任务失败: {e}"))?;
         self.emit_event(
-            "subtask",
+            TaskEventKind::Subtask,
             task_id,
             None,
             None,
@@ -527,7 +577,7 @@ impl TaskService {
         Ok(id)
     }
 
-    pub(super) fn set_subtask_status(
+    pub(crate) fn set_subtask_status(
         &self,
         id: &str,
         status: TaskSubtaskStatus,
@@ -568,7 +618,7 @@ impl TaskService {
         if changed {
             if let Some(tid) = task_id {
                 self.emit_event(
-                    "subtask",
+                    TaskEventKind::Subtask,
                     &tid,
                     None,
                     None,

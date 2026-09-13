@@ -166,6 +166,26 @@ CREATE TABLE IF NOT EXISTS task_messages (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_task_messages_task ON task_messages(task_id, created_at);
+
+-- 命令执行审计(阶段 B/C):每次尝试执行(含被拒绝的)落一行,root/ADB 级命令
+-- 不可逆,这是唯一回溯依据。旧库由 migration::ensure_exec_audit_table 幂等建表;
+-- 注意:列定义处不得写行内注释(同 task_llm_calls 教训,跨库合并 schema 比对会误报)。
+CREATE TABLE IF NOT EXISTS exec_audit (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts             TEXT NOT NULL,
+  source         TEXT NOT NULL DEFAULT 'chat',
+  task_id        TEXT,
+  session_id     TEXT,
+  command        TEXT NOT NULL,
+  shell          TEXT NOT NULL DEFAULT '',
+  tier           TEXT NOT NULL DEFAULT 'sandbox',
+  risk           TEXT NOT NULL DEFAULT 'sensitive',
+  decision       TEXT NOT NULL DEFAULT 'allowed',
+  exit_code      INTEGER,
+  stdout_summary TEXT NOT NULL DEFAULT '',
+  stderr_summary TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_exec_audit_ts ON exec_audit(ts DESC);
 CREATE TABLE IF NOT EXISTS session_vars (
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   key        TEXT NOT NULL,

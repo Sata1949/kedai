@@ -180,36 +180,16 @@ impl CustomExecutor {
         let model = self.engine.model();
         match result {
             Ok(res) if !res.interrupted => {
-                // 截断自愈留痕落库(问题①,与 solo.rs run_agent_loop 同口径):
-                // 被截断的那次调用补落一行 status=error,再落最终行
-                for heal in &res.self_heals {
-                    let heal_out = TaskGenOutput {
-                        text: String::new(),
-                        finish_reason: heal.finish_reason.clone(),
-                        prompt_tokens: heal.prompt_tokens,
-                        completion_tokens: heal.completion_tokens,
-                        reasoning_tokens: 0,
-                        reasoning_chars: 0,
-                        tool_calls: Vec::new(),
-                    };
-                    self.svc.record_llm_call(
-                        &ctx.task_id,
-                        "step",
-                        Some(step_index),
-                        &model,
-                        messages,
-                        &format!(
-                            "(截断自愈){},输出上限翻倍至 {} 重发",
-                            heal.note, heal.retried_max_tokens
-                        ),
-                        Some(&heal_out),
-                        std::time::Duration::ZERO,
-                        "error",
-                    );
-                    // 补落被截断那次调用的 usage(2026-09-10 实测修复,口径同 solo.rs)
-                    self.svc
-                        .record_usage(&ctx.task_id, "step", Some(step_index), &heal_out);
-                }
+                // 截断自愈留痕落库(问题①):与 solo.rs run_agent_loop 共用单一实现
+                // (TaskService::record_self_heals:补落被截断行 + 补 usage)。
+                self.svc.record_self_heals(
+                    &ctx.task_id,
+                    "step",
+                    Some(step_index),
+                    &model,
+                    messages,
+                    &res.self_heals,
+                );
                 let text = res.content.trim().to_string();
                 let status = if text.is_empty() { "empty" } else { "ok" };
                 let out = TaskGenOutput {

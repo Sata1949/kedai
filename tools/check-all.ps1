@@ -90,6 +90,10 @@ if (-not $SkipRust) {
 if (-not $SkipWeb) {
     Push-Location $root
     try {
+        # 契约快照:手写 TS 类型与 Rust 后端字段集合比对(漂移即 FAIL,纯 Node 零依赖)
+        Invoke-Stage 'contract: check-contract' { node tools/check-contract.mjs }
+        # 架构护栏:store 循环依赖 + 组件直改 state(新增违规即 FAIL)
+        Invoke-Stage 'arch: check-arch'         { node tools/check-arch.mjs }
         # 2026-09-08 附录 D 168 个存量错误已清偿归零,typecheck 恢复硬门禁;
         # -StrictTypecheck 参数保留兼容(已无分支差异)
         Invoke-Stage 'web: vue-tsc --noEmit'    { npm run typecheck -w web }

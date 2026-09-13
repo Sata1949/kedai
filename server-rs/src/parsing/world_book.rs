@@ -923,7 +923,11 @@ mod tests {
         });
         let entries = collect_entries(&raw);
         assert_eq!(entries[0].depth, 2, "extensions.depth 生效");
-        assert_eq!(entries[0].role.as_deref(), Some("user"), "extensions.role 数字 1 → user");
+        assert_eq!(
+            entries[0].role.as_deref(),
+            Some("user"),
+            "extensions.role 数字 1 → user"
+        );
         assert_eq!(entries[1].depth, 0, "extensions.depth=0(全部历史)保留");
         assert_eq!(entries[2].depth, 4, "两者都缺省回退 4");
     }
@@ -940,7 +944,11 @@ mod tests {
         });
         let entries = collect_entries(&raw);
         assert_eq!(entries[0].depth, 5, "顶层 depth 优先");
-        assert_eq!(entries[0].role.as_deref(), Some("assistant"), "顶层 role 优先");
+        assert_eq!(
+            entries[0].role.as_deref(),
+            Some("assistant"),
+            "顶层 role 优先"
+        );
     }
 
     /// role 字符串形态与无法识别值:合法字符串归一,非法值退回 None(按位置语义取缺省)
@@ -955,7 +963,11 @@ mod tests {
             ]
         });
         let entries = collect_entries(&raw);
-        assert_eq!(entries[0].role.as_deref(), Some("assistant"), "两侧空白归一");
+        assert_eq!(
+            entries[0].role.as_deref(),
+            Some("assistant"),
+            "两侧空白归一"
+        );
         assert!(entries[1].role.is_none(), "非法数字 → None");
         assert!(entries[2].role.is_none(), "非法字符串 → None");
         assert!(entries[3].role.is_none(), "缺省 → None");

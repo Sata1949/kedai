@@ -110,6 +110,9 @@ fn salvage_step_objects(text: &str) -> Vec<TaskStep> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // TaskStepStatus 仅测试断言用(生产代码不引用),显式引入以免 mod.rs 的重导出
+    // 被判定为 unused import
+    use crate::models::types::TaskStepStatus;
 
     /// 合法 JSON 数组直接解析
     #[test]

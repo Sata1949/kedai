@@ -360,11 +360,8 @@ pub async fn rebuild_embeddings(State(state): State<Arc<AppState>>) -> Response 
                 .with_status(StatusCode::BAD_REQUEST);
             }
         };
-        let items: Vec<(i64, Vec<f32>)> = pending
-            .iter()
-            .zip(vecs)
-            .map(|(e, v)| (e.id, v))
-            .collect();
+        let items: Vec<(i64, Vec<f32>)> =
+            pending.iter().zip(vecs).map(|(e, v)| (e.id, v)).collect();
         let n = items.len();
         let memory = state.memory.clone();
         if let Err(e) = state.db_call(move || memory.upsert_vectors(&items)).await {

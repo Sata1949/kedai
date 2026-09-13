@@ -158,6 +158,18 @@ pub struct UpdateSettingsBody {
     /// MCP 服务器列表(全量替换语义,与 bypass_blacklist 一致)
     #[serde(default)]
     pub mcp_servers: Option<Vec<McpServerConfig>>,
+    /// 命令执行总开关(阶段 E;缺省保持不变)。默认关闭。
+    #[serde(default)]
+    pub exec_enabled: Option<bool>,
+    /// Android 允许 ROOT 档(缺省保持不变)。默认关闭。
+    #[serde(default)]
+    pub exec_allow_root: Option<bool>,
+    /// Android 允许 Shizuku 档(缺省保持不变)。默认关闭。
+    #[serde(default)]
+    pub exec_allow_shizuku: Option<bool>,
+    /// Android 允许沙箱档(缺省保持不变)。默认关闭。
+    #[serde(default)]
+    pub exec_allow_sandbox: Option<bool>,
     /// 执行者人设完整开关(R3a):true = 完整(含 scenario+mes_example),false = 精简;
     /// 缺省保持不变
     #[serde(default)]
@@ -227,6 +239,10 @@ fn settings_json(s: &RuntimeSettings) -> Value {
         "subagent_result_max_chars": s.subagent_result_max_chars,
         "mcp_enabled": s.mcp_enabled,
         "mcp_servers": s.mcp_servers,
+        "exec_enabled": s.exec_enabled,
+        "exec_allow_root": s.exec_allow_root,
+        "exec_allow_shizuku": s.exec_allow_shizuku,
+        "exec_allow_sandbox": s.exec_allow_sandbox,
         "task_persona_full": s.task_persona_full,
         "task_prompt_inject_enabled": s.task_prompt_inject_enabled,
         "tool_history_keep_rounds": s.tool_history_keep_rounds,
@@ -260,7 +276,7 @@ pub async fn update_settings(
     let mode = query.app_mode();
     // 事务锁覆盖“读取当前值 → 应用 patch → 原子落盘 → 替换内存”，防止并发部分更新丢字段。
     // 只持有 tokio MutexGuard；std::sync::MutexGuard 均在同步代码块内释放，不跨 await。
-    let _update_guard = state.settings_update.lock().await;
+    let _update_guard = state.guards.settings_update.lock().await;
     let (mut candidate, old_base, old_key, old_model) = {
         let current = state.settings.lock().unwrap_or_else(|e| e.into_inner());
         (
@@ -587,6 +603,21 @@ pub async fn update_settings(
                     !srv.name.is_empty() && !srv.command.is_empty()
                 });
                 apply!(s, is_task, mcp_servers, servers);
+            }
+            // 命令执行开关(阶段 E):bool 免校验。这些是**全局**能力开关,
+            // 不随 roleplay/task 覆盖层分叉(exec: 权限是进程级事实,不是模式偏好),
+            // 故直接写扁平字段而非走 apply!(is_task,...)。
+            if let Some(v) = body.exec_enabled {
+                s.exec_enabled = v;
+            }
+            if let Some(v) = body.exec_allow_root {
+                s.exec_allow_root = v;
+            }
+            if let Some(v) = body.exec_allow_shizuku {
+                s.exec_allow_shizuku = v;
+            }
+            if let Some(v) = body.exec_allow_sandbox {
+                s.exec_allow_sandbox = v;
             }
             // 执行者人设完整开关(R3a;bool 免校验,task 模式写覆盖层)
             if let Some(v) = body.task_persona_full {

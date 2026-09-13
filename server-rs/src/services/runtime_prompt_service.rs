@@ -302,7 +302,10 @@ mod tests {
         let root = dir("builtin");
         let service = RuntimePromptService::new(root.clone(), None);
         let content = service.read().unwrap();
-        assert!(content.contains("主 Agent 提示词"), "内置默认应含标题: {content}");
+        assert!(
+            content.contains("主 Agent 提示词"),
+            "内置默认应含标题: {content}"
+        );
         assert!(content.contains("工具使用原则"), "内置默认应含工具使用原则");
         assert!(
             content.contains("{{char}}"),
@@ -341,7 +344,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_oversized_and_invalid_utf8_content() {        let root = dir("validation");
+    fn rejects_oversized_and_invalid_utf8_content() {
+        let root = dir("validation");
         let service = RuntimePromptService::new(root.clone(), None);
         let large = "x".repeat(MAX_RUNTIME_PROMPT_BYTES as usize + 1);
         assert!(service.write(&large).unwrap_err().contains("超过上限"));

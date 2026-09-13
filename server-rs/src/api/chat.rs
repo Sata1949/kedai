@@ -148,9 +148,8 @@ pub async fn send(State(state): State<Arc<AppState>>, Json(body): Json<SendBody>
     // 不进正文默认列表——它们只服务于多步变量驱动器与显式白名单,泄漏进正文会
     // 诱导模型在正文轮里误用变量补丁通道。
     if mode == "agent" {
-        params.tools = crate::tools::tool_sets::exclude_meta(
-            state.tool_registry.list_definitions(),
-        );
+        params.tools =
+            crate::tools::tool_sets::exclude_meta(state.tool_registry.list_definitions());
     }
     // 自定义流程(custom 模式):校验启用与合法性,步骤快照随请求传入引擎
     let mut flow_steps: Vec<PlanStep> = Vec::new();
@@ -193,7 +192,11 @@ pub async fn send(State(state): State<Arc<AppState>>, Json(body): Json<SendBody>
 
     // 原子占位必须发生在任何消息写入之前;所有前置校验已完成。
     {
-        let mut pending = state.pending_runs.lock().unwrap_or_else(|e| e.into_inner());
+        let mut pending = state
+            .guards
+            .pending_runs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if pending.contains_key(&session_id) || state.engine.is_active(&session_id) {
             return err_json("该会话正在生成中", StatusCode::CONFLICT);
         }
@@ -210,6 +213,7 @@ pub async fn send(State(state): State<Arc<AppState>>, Json(body): Json<SendBody>
         // 与重发锚点互斥:两个锚点同时出现属于请求错误
         if body.resend_message_id.is_some() {
             state
+                .guards
                 .pending_runs
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -223,6 +227,7 @@ pub async fn send(State(state): State<Arc<AppState>>, Json(body): Json<SendBody>
             .is_some_and(|m| m.id == message_id && m.role == "assistant");
         if !valid {
             state
+                .guards
                 .pending_runs
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -237,6 +242,7 @@ pub async fn send(State(state): State<Arc<AppState>>, Json(body): Json<SendBody>
             .is_some_and(|m| m.id == message_id && m.role == "user" && m.content == message);
         if !valid {
             state
+                .guards
                 .pending_runs
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -266,6 +272,7 @@ pub async fn send(State(state): State<Arc<AppState>>, Json(body): Json<SendBody>
         if let Err(e) = write_result.unwrap_or_else(|e| Err(format!("消息写入任务失败: {e}")))
         {
             state
+                .guards
                 .pending_runs
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -275,6 +282,7 @@ pub async fn send(State(state): State<Arc<AppState>>, Json(body): Json<SendBody>
     }
 
     let pending_cancelled = state
+        .guards
         .pending_runs
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -282,6 +290,7 @@ pub async fn send(State(state): State<Arc<AppState>>, Json(body): Json<SendBody>
         .is_none_or(|flag| *flag.borrow());
     if pending_cancelled {
         state
+            .guards
             .pending_runs
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -311,7 +320,7 @@ pub async fn send(State(state): State<Arc<AppState>>, Json(body): Json<SendBody>
 
     // 后台运行 Agent。assistant 消息落库已移至引擎收尾(Finish 事件发出前完成),
     // 保证前端收到 finish 后 loadHistory 能取到完整数据,消除落库竞态。
-    let pending_runs = state.pending_runs.clone();
+    let pending_runs = state.guards.pending_runs.clone();
     let run_session_id = session_id.clone();
     tokio::spawn(async move {
         let _ = engine.run(req, tx).await;
@@ -349,6 +358,7 @@ pub async fn stop(State(state): State<Arc<AppState>>, Json(body): Json<StopBody>
         return err_json("缺少 session_id", StatusCode::BAD_REQUEST);
     }
     if let Some(cancel) = state
+        .guards
         .pending_runs
         .lock()
         .unwrap_or_else(|e| e.into_inner())

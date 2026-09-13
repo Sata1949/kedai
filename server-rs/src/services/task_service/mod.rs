@@ -17,9 +17,9 @@ use super::log_query_failure;
 use crate::connectors::Connector;
 use crate::models::db::{now_iso, Db, PooledRead};
 use crate::models::types::{
-    CharacterRecord, GenerationParams, LlmMessage, LlmStreamChunk, SseEvent, TaskFollowupMode,
-    TaskLlmCallRecord, TaskMessageRecord, TaskRecord, TaskRunMode, TaskStatus, TaskStep,
-    TaskStepStatus, TaskSubtaskRecord, TaskSubtaskStatus, ToolCallArgs, ToolChoice, ToolContext,
+    CharacterRecord, GenerationParams, LlmMessage, LlmStreamChunk, SseEvent, TaskEventKind,
+    TaskFollowupMode, TaskLlmCallRecord, TaskMessageRecord, TaskRecord, TaskRunMode, TaskStatus,
+    TaskStep, TaskSubtaskRecord, TaskSubtaskStatus, ToolCallArgs, ToolChoice, ToolContext,
     ToolDefinition,
 };
 use crate::services::agent_flow_service::AgentFlowService;
@@ -152,7 +152,7 @@ impl TaskService {
         // + error 文本;DB 写成功后逐个发射 status 事件(WP4 纪律:先写库后发射)
         for id in db::recover_orphan_tasks(&svc.db) {
             svc.emit_event(
-                "status",
+                TaskEventKind::Status,
                 &id,
                 None,
                 Some(TaskStatus::Ended),
@@ -193,7 +193,7 @@ impl TaskService {
         // 落库失败不阻断创建(消息是展示层增强,任务本身已建好)。
         let _ = self.add_task_message(&id, "user", "goal", title);
         self.emit_event(
-            "created",
+            TaskEventKind::Created,
             &id,
             Some(title.to_string()),
             Some(TaskStatus::Pending),
@@ -262,7 +262,13 @@ impl TaskService {
             .map(|n| n > 0)
             .unwrap_or(false);
         if deleted {
-            self.emit_event("deleted", id, None, None, Some("任务已删除".into()));
+            self.emit_event(
+                TaskEventKind::Deleted,
+                id,
+                None,
+                None,
+                Some("任务已删除".into()),
+            );
         }
         deleted
     }
