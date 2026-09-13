@@ -282,12 +282,14 @@ if (-not $Dev) {
         $stampPath = Write-KedaiBuildStamp -Root $Root -ExePath $dest
         Write-Host "[指纹] 已写出 $(Split-Path $stampPath -Leaf)" -ForegroundColor Green
     }
-    if (Test-Path "$Root\server-rs\target") {
+    # 清理路径必须与实际产物目录一致:外置(-RustTargetDir 或 CARGO_TARGET_DIR)时,
+    # 硬编码 server-rs\target 会清理不到,外置目录将持续累积(2026-09-13 批次 1 修正)。
+    if (Test-Path $CargoTargetDir) {
         try {
-            Remove-Item -Recurse -Force "$Root\server-rs\target" -ErrorAction Stop
-            Write-Host "[清理] 已删除 $Root\server-rs\target" -ForegroundColor Yellow
+            Remove-Item -Recurse -Force $CargoTargetDir -ErrorAction Stop
+            Write-Host "[清理] 已删除 $CargoTargetDir" -ForegroundColor Yellow
         } catch {
-            Write-Host "[警告] 清理 $Root\server-rs\target 失败: $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-Host "[警告] 清理 $CargoTargetDir 失败: $($_.Exception.Message)" -ForegroundColor Yellow
         }
     }
 }

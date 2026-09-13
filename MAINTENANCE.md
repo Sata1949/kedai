@@ -17,11 +17,19 @@
 - **样式分层纪律(前端,2026-09 D-5 起)**:`web/src/style.css` 只保留层① 设计变量(:root 令牌)与层② 全局基础层;新增组件样式一律 `<style scoped>` 或 Tailwind 工具类,禁止再写入 style.css;修改存量组件时顺手把该组件样式搬进 scoped(「改到谁拆谁」,文件头分层约定注释为准);新增样式不得引入 `!important`(存量 11 处见 style.css)。
 - **跨端协议**(前后端 mvu)以 `docs/mvu-protocol.md` 锁定双端一致,防行为漂移。
 - **EJS 自研解释器冻结纪律**:`parsing/assistant/ejs/`(自研迷你 JS 引擎,约 4000 行)**只接受安全修复,不再扩展新能力**。任何新模板能力必须在 `scripts/runtime.rs` 的 rquickjs 沙箱侧实现(rquickjs 自带内存/中断/栈上限,见该文件 `set_memory_limit`/`set_interrupt_handler`)。理由:自研解释器缺引擎级沙箱限额,长期维护成本与风险高于复用;**已加固**(循环步数+墙钟预算、解析深度守卫,见 §10 踩坑记录),但债务不再增长。
-- **门禁纪律(2026-09-13 起)**:`tools/check-all.ps1` 是唯一的本地 CI 入口,现已接两处自动触发——
+- **门禁纪律(2026-09-13 起)**:`tools/check-all.ps1` 是唯一的本地 CI 入口,现已接三处触发——
   ① `build.ps1` 在构建前跑 `check-all -Quick`,失败即中止构建(`-SkipChecks` 仅限本地应急,
   **交付/试用前必须补跑一次完整 `check-all`**);② `tools/hooks/pre-push` 在推送前跑同一检查
-  (装一次:`npm run hooks:install`;紧急可 `git push --no-verify`,同样须事后补跑)。
+  (装一次:`npm run hooks:install`;紧急可 `git push --no-verify`,同样须事后补跑);
+  ③ `.github/workflows/ci.yml`(2026-09-13 批次 1 落盘;仓库**尚未配置远端**,配置并推送后自动生效)。
   变更 `tools/check-*.mjs` 的检查规则时,同步更新本节与本文件的检查项清单。
+- **依赖供应链纪律(2026-09-13 批次 1 起)**:三把闸已进 `check-all`——
+  ① `deps: check-lock-sync`(双 Cargo.lock 漂移检查:src-tauri 内嵌 server-rs 时 cargo 会
+  重新解析依赖树,同一后端源码可能编出不同版本依赖;**0 漂移为基线**,新增即 FAIL,
+  例外登记在 `tools/lock-sync-baseline.json`);
+  ② `cargo audit` 默认**硬门禁**(server-rs 锁历史 0 洞;仅 advisory DB 拉取失败时降级 WARN,
+  `-LooseAudit` 可临时降档);
+  ③ `npm audit --omit=dev` 警告档(历史 2 洞——sanitize-html 存储型 XSS / nanoid——已修复)。
 - 新能力默认进 L3 隔离验证,成熟后按晋升通道(测试通过 + 不破坏协议 + 评审)升级。
 
 ### 新能力晋升状态(三结合梯队)
@@ -111,7 +119,7 @@ kedai/
 | 兼容别名 | `npm run build:all` / `npm run build:rs` | 均等价 `.\build.ps1`(双端同步);`npm run build:test` 等价 `.\build.ps1 -TestOnly` |
 | 统一改版本号 | `npm run version:bump -- x.y.z` | 7 处版本号一次改全(2 个 package.json、3 个 Cargo.toml、tauri.conf.json、本文档版本行);支持 `-DryRun` 预览 |
 | 后端测试 | `cd server-rs && cargo test` | **986 个测试(797 单测 + 189 集成,20 个集成文件)**,**需在 vcvars64 环境**;前端 `npm test -w web` **745 个(81 文件;静态计数;vitest 运行时为 763,差值 18 来自 `parser.contract.test.ts` 循环生成的 fixture 用例)**。数字由 `node tools/count-tests.mjs` 自动统计,勿手抄——`npm run count:tests` 查看当前值,`npm run check:tests` 校验文档是否漂移 |
-| 全量检查(本地 CI) | `npm run check` | `tools/check-all.ps1`:fmt → clippy → cargo test → contract → arch(C/D/E 分层)→ 类型 ratchet → vue-tsc(**硬门禁**)→ vitest → vite build。**已接入 build.ps1 与 pre-push hook**(见 §0 门禁纪律) |
+| 全量检查(本地 CI) | `npm run check` | `tools/check-all.ps1`:fmt → clippy → cargo test → cargo audit(**硬门禁**)→ lock-sync(双锁漂移)→ contract → arch(C/D/E 分层)→ 类型 ratchet → npm audit(警告)→ vue-tsc(**硬门禁**)→ vitest → vite build。**已接入 build.ps1、pre-push hook 与 CI 工作流**(见 §0 门禁纪律) |
 | 开发模式 | `cd server-rs && cargo run` + `npm run dev -w web` | 后端 3001 / 前端 5173(代理到 3001) |
 | 前端构建 | `npm run build -w web` | 产出 web/dist(编译进 exe 用) |
 
@@ -130,6 +138,7 @@ kedai/
 | Rust 工具链 | 1.97.1 stable | `rustup`(本机经清华镜像安装) | rustup/cargo/rustc 在 `~/.cargo/bin`(可能不在 PATH,用全路径或加 PATH) |
 | VS2022 Build Tools | 17.14(C++ 工作负载) | winget | 提供 MSVC 链接器 `link.exe` 与 cl.exe(必需) |
 | Node.js | ≥ 18(验证 24) | 已有 | 仅前端构建需要;发布 exe 运行时**不需要** Node |
+| cargo-audit | 0.22.2 | `cargo install cargo-audit --locked` | `check-all` 的依赖审计阶段(**硬门禁**;未安装时该阶段提示跳过)。advisory DB 当前经 Gitee 镜像拉取 |
 
 ### 原生依赖说明(Phase 3 起)
 
@@ -413,6 +422,22 @@ rusqlite(bundled,零原生依赖),**WAL 模式 + foreign_keys ON**。共 28 张�
     - 或设环境变量 `CARGO_TARGET_DIR=D:\kedai-build`(作用于所有 cargo 调用,含 src-tauri;
       注意 `build-portable.ps1` 期望 `src-tauri\target\release\kedai-portable.exe`,用此变量会
       让便携版产物落到别处,故优先用 `-RustTargetDir`)。
+23. **src-tauri 内嵌 server-rs 时,两份 Cargo.lock 会静默漂移**(2026-09-13 批次 1 实测并清零)。
+    `src-tauri/Cargo.toml` 以 `kedai-server = { path = "../server-rs" }` 内嵌后端,构建便携版时
+    cargo **完全忽略 `server-rs/Cargo.lock`**,在 `src-tauri/Cargo.lock` 里重新解析整棵依赖树——
+    同一份后端源码,「测试版 `kedai-server.exe`」与「便携版 `Kedai.exe`」可能编译出**不同版本**
+    的依赖;跨 lock 的 `links` 冲突不会报错,分歧完全静默。实测两锁曾有 **17 个 crate 分歧**,含:
+    - `chacha20 0.10.2` vs `0.10.1`(**0.10.1 已被 yank**,密码学实现版本不同,最危险);
+    - `cc 1.4.0` vs `1.4.2`、`find-msvc-tools`(编译 C 依赖的工具链,影响生成的 native 代码);
+    - `thiserror`、`crossbeam-channel/-utils`、`combine`、`indexmap`、`tinyvec`、
+      `wasm-bindgen` 家族(0.2.126 vs 0.2.127,wasm 目标专用,影响面小)。
+    **纪律**:① `node tools/check-lock-sync.mjs`(已进 `check-all` 阶段 `deps: check-lock-sync`,
+    npm `check:lock`)以 **0 漂移**为基线,新增即 FAIL;② 新增依赖后两边各构建一次
+    (便携版构建会自动带上 src-tauri 锁,测试版锁不会);③ 对齐手法:
+    `cargo update -p <crate> --precise <ver>`(**不支持一次多条 `--precise`**,逐条执行),
+    或把落后一侧整体更新到较新版本;④ 不可避免的例外登记 `tools/lock-sync-baseline.json`。
+    根治途径是 Cargo workspace 化(未做,列入批次 4 可选项)。**注意**:对齐 `cc`/`thiserror`
+    等版本后须重跑完整 `cargo test`(本批次已跑,全绿)。
     `build.ps1` 已支持该参数,并把「后端产物目录」统一解析给新鲜度检测与 exe 校验使用;
     以前它硬编码 `server-rs\target`,外置产物时会误报「Rust 编译失败:未生成 …」。
     同一现象在 `docs/优化实施方案-2026-09.md` 亦有历史记录(当时以 `CARGO_TARGET_DIR` 降级处置)。

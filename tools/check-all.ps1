@@ -2,13 +2,15 @@
 # 用法: npm run check  |  或 powershell -NoProfile -ExecutionPolicy Bypass -File tools/check-all.ps1
 # 参数: -SkipRust 跳过后端; -SkipWeb 跳过前端; -Quick 只跑 test 不跑 build;
 #       -StrictTypecheck 历史保留参数(2026-09-08 起 typecheck 已是硬门禁,此开关无差异)
-#       -StrictAudit 把 cargo audit 从警告档切为硬门禁(默认仅警告不拦截)
+#       -StrictAudit 历史保留参数(2026-09-13 批次 1 起 cargo audit 默认硬门禁,此开关无差异)
+#       -LooseAudit 把 cargo audit 降回警告档(仅在 advisory DB 不可用等特殊场景临时使用)
 param(
     [switch]$SkipRust,
     [switch]$SkipWeb,
     [switch]$Quick,
     [switch]$StrictTypecheck,
     [switch]$StrictAudit,
+    [switch]$LooseAudit,
     # 后端 cargo target 根(见 MAINTENANCE.md §10 条目 22:某些机器上安全软件拦截
     # server-rs\target 下新建 exe 的执行)。留空则用 CARGO_TARGET_DIR 环境变量或默认路径。
     [string]$RustTargetDir
@@ -84,17 +86,29 @@ if (-not $SkipRust) {
             # -j 2:本机并行链接曾撞 LNK1318/os error 1455(页面文件不足),限并发换稳定
             Invoke-Stage 'cargo test --workspace'   { cargo test --workspace -j 2 @cargoTargetArgs }
             # cargo audit:依赖漏洞扫描(RustSec advisory DB,需联网拉取)。
-            # 与 vue-tsc 同策略:默认警告档——发现漏洞/警告只打 Yellow WARN 不拦截,
-            # 避免历史漏洞阻塞日常开发;加 -StrictAudit 才走 Invoke-Stage 硬拦截(exit 非 0 即 FAIL)。
-            # 未安装 cargo-audit 时打印提示并跳过(安装:cargo install cargo-audit --locked)。
+            # 2026-09-13 批次 1:历史漏洞已清零(server-rs 锁 0 洞),默认切**硬门禁**;
+            # 仅当 advisory DB 拉取失败(离线/镜像不可达)时降级为 WARN 跳过,避免断网误拦。
+            # -LooseAudit 可临时降回警告档(-StrictAudit 为历史保留参数,现已无差异)。
             if (Get-Command cargo-audit -ErrorAction SilentlyContinue) {
-                if ($StrictAudit) {
-                    Invoke-Stage 'cargo audit'      { cargo audit }
-                } else {
-                    Write-Host "`n===== cargo audit(警告档;-StrictAudit 可切硬门禁)=====" -ForegroundColor Cyan
+                if ($LooseAudit) {
+                    Write-Host "`n===== cargo audit(警告档,-LooseAudit)=====" -ForegroundColor Cyan
                     cargo audit
-                    if ($LASTEXITCODE -ne 0) { Write-Host '[WARN] cargo audit 发现漏洞或警告(不拦截;-StrictAudit 可切硬门禁)' -ForegroundColor Yellow }
+                    if ($LASTEXITCODE -ne 0) { Write-Host '[WARN] cargo audit 发现漏洞或警告(不拦截)' -ForegroundColor Yellow }
                     else { Write-Host '[ OK ] cargo audit 无已知漏洞' -ForegroundColor Green }
+                } else {
+                    Write-Host "`n===== cargo audit(硬门禁)=====" -ForegroundColor Cyan
+                    $auditOut = (cargo audit 2>&1 | Out-String)
+                    $auditCode = $LASTEXITCODE
+                    if ($auditCode -eq 0) {
+                        Write-Host '[ OK ] cargo audit 无已知漏洞' -ForegroundColor Green
+                    } elseif ($auditOut -match '(failed to fetch|failed to load|failed to update|could not|unable to|resolve host|timed out|network|TLS|Connection)') {
+                        Write-Host '[WARN] cargo audit 无法拉取 advisory DB(离线?),跳过硬门禁' -ForegroundColor Yellow
+                        Write-Host (($auditOut.Trim() -split "`n" | Select-Object -Last 3) -join ' ') -ForegroundColor DarkGray
+                    } else {
+                        Write-Host $auditOut
+                        Write-Host '[FAIL] cargo audit 发现依赖漏洞(硬门禁;评估修复后重跑,或 -LooseAudit 临时降档)' -ForegroundColor Red
+                        exit 1
+                    }
                 }
             } else {
                 Write-Host "`n===== cargo audit:未安装 cargo-audit,跳过(安装:cargo install cargo-audit --locked)=====" -ForegroundColor Yellow
@@ -106,6 +120,11 @@ if (-not $SkipRust) {
 if (-not $SkipWeb) {
     Push-Location $root
     try {
+        # 双 Cargo.lock 漂移:src-tauri 以 path 内嵌 server-rs,构建便携版时 cargo 忽略
+        # server-rs/Cargo.lock 并重新解析依赖树 —— 同一后端源码在两版产物中可能编译出
+        # 不同版本依赖(静默,跨 lock 不报 links 冲突)。2026-09-13 批次 1 起 0 漂移为基线,
+        # 新增漂移即 FAIL;不可避免的历史例外登记在 tools/lock-sync-baseline.json。
+        Invoke-Stage 'deps: check-lock-sync'    { node tools/check-lock-sync.mjs }
         # 契约快照:手写 TS 类型与 Rust 后端字段集合比对(漂移即 FAIL,纯 Node 零依赖)
         Invoke-Stage 'contract: check-contract' { node tools/check-contract.mjs }
         # 架构护栏:前端 store 循环依赖 + 组件直改 state + 后端分层规则 C/D/E/G
@@ -116,6 +135,16 @@ if (-not $SkipWeb) {
         node tools/count-tests.mjs
         node tools/count-tests.mjs --check
         if ($LASTEXITCODE -ne 0) { Write-Host '[WARN] 测试数字与 MAINTENANCE.md 不一致(不拦截;请更新文档)' -ForegroundColor Yellow }
+        # npm 生产依赖漏洞扫描(2026-09-13 批次 1 接入;需联网)。警告档:
+        # 历史 2 洞(sanitize-html XSS / nanoid)已修复,保持警告避免离线环境误拦。
+        Write-Host "`n===== npm audit(生产依赖,警告档)=====" -ForegroundColor Cyan
+        $npmAuditOut = (npm audit --omit=dev 2>&1 | Out-String)
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host ($npmAuditOut.Trim() -split "`n" | Select-Object -Last 8 | Out-String).Trim() -ForegroundColor Yellow
+            Write-Host '[WARN] npm audit 报告生产依赖漏洞(不拦截;请评估修复)' -ForegroundColor Yellow
+        } else {
+            Write-Host '[ OK ] npm audit 无生产依赖漏洞' -ForegroundColor Green
+        }
         # 前端类型逃逸 ratchet:as never / as unknown as / 非空断言 / any 只降不升
         # (纯 Node 零依赖,与 check-arch/check-contract 同风格;基线见脚本内 BASELINE)
         Invoke-Stage 'web: type-ratchet'        { node tools/check-frontend-lint.mjs }

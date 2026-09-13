@@ -108,7 +108,11 @@ Write-Host "入口:$OutputDir\Kedai.exe"
 
 # 打包完成,清除编译产物目录(释放磁盘;下次构建需重新编译)。
 # 文件被占用(如 Kedai.exe 仍在运行)时删除可能失败,仅警告不中止。
-$CleanDirs = @((Join-Path $Root "server-rs\target"), (Join-Path $Root "src-tauri\target"))
+# server-rs 产物目录:broad 构建可能把后端产物外置(CARGO_TARGET_DIR),跟随该变量,
+# 避免外置目录清理不到(2026-09-13 批次 1 修正)。
+$ServerRustTarget = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR }
+                    else { Join-Path $Root "server-rs\target" }
+$CleanDirs = @($ServerRustTarget, (Join-Path $Root "src-tauri\target"))
 foreach ($dir in $CleanDirs) {
     if (Test-Path $dir) {
         try {
