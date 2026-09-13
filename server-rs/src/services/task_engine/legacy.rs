@@ -50,9 +50,14 @@ impl ModeExecutor for LegacyExecutor {
             };
 
             // 1) 规划(带解析与分级重试:截断/空输出翻倍 max_tokens,最多 PLAN_MAX_ATTEMPTS 次)
-            let (plan, plan_out) = match svc
-                .plan_task_retry(task_id, &task.title, task.character_id.as_deref(), &cancel)
-                .await
+            let (plan, plan_out) = match super::retry::plan_task_retry(
+                svc.as_ref(),
+                task_id,
+                &task.title,
+                task.character_id.as_deref(),
+                &cancel,
+            )
+            .await
             {
                 Ok(v) => v,
                 Err(e) => {
@@ -88,7 +93,9 @@ impl ModeExecutor for LegacyExecutor {
 
                 // 生成步骤:空输出按 finish_reason 分级重试一次(length 加倍 max_tokens,否则调温 0.7),
                 // 仍空标 error 且文案带 finish_reason(诊断推理耗尽 vs 内容过滤等不同成因)。
-                let gen = svc.generate_step_retry(&task, step, Some(i), &cancel).await;
+                let gen =
+                    super::retry::generate_step_retry(svc.as_ref(), &task, step, Some(i), &cancel)
+                        .await;
                 match gen {
                     Ok(out) => {
                         accumulate(&mut usage, &out);
@@ -124,7 +131,9 @@ impl ModeExecutor for LegacyExecutor {
             if *cancel.borrow() {
                 return Ok((TaskTerminal::Failed { error: None }, usage));
             }
-            match svc.summarize_task_retry(&task, &final_plan, &cancel).await {
+            match super::retry::summarize_task_retry(svc.as_ref(), &task, &final_plan, &cancel)
+                .await
+            {
                 Ok(out) => {
                     accumulate(&mut usage, &out);
                     svc.record_usage(task_id, "summary", None, &out);

@@ -116,7 +116,8 @@ impl ApprovedPlanExecutor {
         let Some(task) = svc.get(&ctx.task_id) else {
             return Err("任务不存在".into());
         };
-        let out = svc.summarize_task_retry(&task, &plan, &ctx.cancel).await?;
+        let out =
+            super::retry::summarize_task_retry(svc.as_ref(), &task, &plan, &ctx.cancel).await?;
         svc.record_usage(&ctx.task_id, "summary", None, &out);
         total.prompt_tokens += out.prompt_tokens;
         total.completion_tokens += out.completion_tokens;
@@ -219,15 +220,14 @@ impl ModeExecutor for PlanExecutor {
         Box::pin(async move {
             // 显式置 planning(run 入口 reset_task 已是 planning,幂等;语义上规划阶段归执行器所有)
             self.svc.set_status(&ctx.task_id, TaskStatus::Planning);
-            let (steps, out) = self
-                .svc
-                .plan_task_retry(
-                    &ctx.task_id,
-                    &ctx.goal,
-                    ctx.character_id.as_deref(),
-                    &ctx.cancel,
-                )
-                .await?;
+            let (steps, out) = super::retry::plan_task_retry(
+                self.svc.as_ref(),
+                &ctx.task_id,
+                &ctx.goal,
+                ctx.character_id.as_deref(),
+                &ctx.cancel,
+            )
+            .await?;
             // 规划产出后落库前再查一次取消:已停止则不进 planned(终态由收尾写 ended)
             if *ctx.cancel.borrow() {
                 return Err("任务已停止".into());

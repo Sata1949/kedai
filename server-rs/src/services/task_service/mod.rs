@@ -11,8 +11,7 @@
 //   events.rs   任务事件 broadcast 通道与发射(WP4 SSE 实时化)
 //   cancel.rs   取消信号与执行 token 登记
 //   prompt.rs   提示词组装(任务设置/世界书/注入/Agent 系统提示词/人设)
-//   parse.rs    计划 JSON 解析(含 parse_plan 单测)
-//   executor.rs 后台执行引擎(run/stop、LLM 调用、分级重试、后台主体)
+//   executor.rs 后台执行引擎(run/stop、LLM 单次生成原语、后台主体)
 use super::log_query_failure;
 use crate::connectors::Connector;
 use crate::models::db::{now_iso, Db, PooledRead};
@@ -36,13 +35,12 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, RwLock};
 use uuid::Uuid;
 
-// 按职责拆分的子模块(纯代码移动):DB 读写 / 取消信号 / 提示词组装 / 计划解析 / 后台执行
+// 按职责拆分的子模块(纯代码移动):DB 读写 / 取消信号 / 提示词组装 / 后台执行
 pub(crate) mod backend_impl;
 pub(crate) mod cancel;
 pub(crate) mod db;
 pub(crate) mod events;
 pub(crate) mod executor;
-pub(crate) mod parse;
 pub(crate) mod prompt;
 
 use self::db::{row_to_task, TASK_COLS};
@@ -53,19 +51,9 @@ use self::db::{row_to_task, TASK_COLS};
 /// 均在数十秒量级,5 分钟上限足够宽裕)。
 const TASK_LLM_TOTAL_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// 空输出重试前的退避间隔(避免对上游瞬时抖动形成紧循环)。
-const EMPTY_RETRY_BACKOFF: Duration = Duration::from_millis(500);
-
-/// 空输出重试时的 max_tokens 翻倍上限(与设置页 max_tokens 上限一致)。
-const RETRY_MAX_TOKENS_CAP: u32 = 65536;
-
-/// 规划调用的初始 max_tokens。推理模型的 reasoning 与正文共用同一预算,
-/// 1024 曾被 reasoning 整体吃光导致正文零输出/JSON 半截(2026-08-27 exe 实测),
-/// 故起始预算给到 2048。
-const PLAN_INITIAL_MAX_TOKENS: u32 = 2048;
-
-/// 规划解析失败的最大尝试次数(截断/空输出每次翻倍预算,纯格式错误同预算重试)。
-const PLAN_MAX_ATTEMPTS: u32 = 3;
+// 空输出分级重试与规划解析的算法/常量(EMPTY_RETRY_BACKOFF / RETRY_MAX_TOKENS_CAP /
+// PLAN_INITIAL_MAX_TOKENS / PLAN_MAX_ATTEMPTS / parse_plan)已于批次 4.2 上移
+// task_engine::retry + task_engine::parse(任务引擎职责,非宿主能力)。
 
 /// 规划器只读侦察白名单(问题②,2026-08-31 实测:计划模式下模型只写计划、
 /// 不调用工具收集信息,对「测试 agent 框架能力」这类目标只能凭空编造步骤):

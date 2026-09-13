@@ -402,6 +402,9 @@ impl TaskService {
     /// 为何要补 usage:被截断那次同样消耗 token,只记最终行会让 usage_total
     /// 少于调用明细求和(2026-09-10 实测修复口径)。
     /// 调用情况面板据此看到完整「截断 → 提高预算重发」链路,实际调用次数可考。
+    ///
+    /// 批次 4.2:入参为 task_core 中性 DTO `TruncationHeal`(不再引用 agents 层
+    /// SelfHealRecord),转换在 task_engine 边界完成(见 task_engine::executor::to_self_heals)。
     pub(crate) fn record_self_heals(
         &self,
         task_id: &str,
@@ -409,7 +412,7 @@ impl TaskService {
         step_index: Option<usize>,
         model: &str,
         messages: &[LlmMessage],
-        self_heals: &[crate::agents::engine::executor::SelfHealRecord],
+        self_heals: &[crate::services::task_core::TruncationHeal],
     ) {
         for heal in self_heals {
             let heal_out = TaskGenOutput {

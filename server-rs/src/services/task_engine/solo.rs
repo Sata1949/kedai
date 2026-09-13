@@ -153,7 +153,7 @@ pub(crate) async fn run_agent_loop(
                 call.step_index,
                 &model,
                 &messages,
-                &res.self_heals,
+                &super::executor::to_self_heals(&res.self_heals),
             );
             let text = res.content.trim().to_string();
             let status = if text.is_empty() { "empty" } else { "ok" };

@@ -1,14 +1,13 @@
 // 后台执行引擎:启动/停止入口(run/stop/followup)、非流式 LLM 调用(generate_text)、
-// 规划/步骤/汇总(plan_task/generate_step(_with)/summarize_task(_with))、
-// 空输出分级重试(generate_step_retry/plan_task_retry/summarize_task_retry)、
+// 规划/步骤/汇总单次生成原语(plan_task/plan_revise/generate_step(_with)/summarize_task(_with))、
 // 收尾(finalize_run 及 complete/planned/followup 的守门包装)。
 // 执行主体已上 ModeExecutor 缝:legacy 三段式见 task_engine/legacy.rs,
-// followup 见 task_engine/followup.rs(本文件保留两者复用的生成与重试原语)。
+// followup 见 task_engine/followup.rs。
+// 批次 4.2:空输出分级重试与规划解析(原 retry_if_empty_output/generate_step_retry/
+// plan_task_retry/plan_revise_retry/summarize_task_retry/parse_plan)**算法已上移
+// task_engine/retry.rs + task_engine/parse.rs**(任务引擎职责),本文件只保留单次生成原语。
 // 自 task_service.rs 拆分迁入,纯代码移动,逻辑不变;依赖经 `use super::*` 取自 mod.rs。
 use super::*;
-// 兄弟模块的自由函数:parse_plan(计划解析;人设与提示词组装统一走
-// prompt.rs::assemble_executor_system_prompt,不再在本文件直接用 persona_style)
-use super::parse::parse_plan;
 // 执行器终态值(批次 B 依赖倒置):finalize_terminal 按值分派落库
 use crate::services::task_core::terminal::TaskTerminal;
 
@@ -293,7 +292,16 @@ impl TaskService {
             .collect();
         self.add_task_message(id, "user", "plan_chat", message)?;
         let (cancel, token) = self.register_cancel(id);
-        let revised = match plan_revise_retry(self, &task, &history, message, &cancel).await {
+        // 批次 4.2:重试/解析算法已上移 task_engine::retry(任务引擎职责)
+        let revised = match crate::services::task_engine::retry::plan_revise_retry(
+            self.as_ref(),
+            &task,
+            &history,
+            message,
+            &cancel,
+        )
+        .await
+        {
             Ok(v) => v,
             Err(e) => {
                 self.remove_cancel_if(id, token);
@@ -596,7 +604,7 @@ impl TaskService {
     /// 侦察轮也经 generate_text 统一出口落 task_llm_calls(phase=planner);
     /// 侦察轮调用失败(如半截 tool_call 被判协议损坏)不沉规划——记 warn 回退
     /// 无工具最终轮,与侦察能力缺席时的旧行为等价。
-    async fn plan_task(
+    pub(crate) async fn plan_task(
         &self,
         task_id: &str,
         title: &str,
@@ -626,7 +634,7 @@ impl TaskService {
     /// plan_chat 对话历史 + 本轮反馈。历史截断参照 record_llm_call 摘要口径:
     /// 每条内容截 800 字符、历史段整体截 4000(多轮对话体积封底)。
     /// 侦察/落库/取消检查与 plan_task 同口径(共用 plan_scout_loop)。
-    async fn plan_revise(
+    pub(crate) async fn plan_revise(
         &self,
         task: &TaskRecord,
         history: &[TaskMessageRecord],
@@ -821,7 +829,7 @@ impl TaskService {
 
     /// 执行单个步骤:注入执行者人设 + 世界书 + 提示词注入 + Agent 系统提示词。
     /// 生成参数读任务模式设置。
-    async fn generate_step(
+    pub(crate) async fn generate_step(
         &self,
         task: &TaskRecord,
         step: &TaskStep,
@@ -841,7 +849,7 @@ impl TaskService {
     }
 
     /// 带生成参数覆盖的步骤执行(空输出重试时提高 max_tokens 或调整温度)。
-    async fn generate_step_with(
+    pub(crate) async fn generate_step_with(
         &self,
         task: &TaskRecord,
         step: &TaskStep,
@@ -878,7 +886,7 @@ impl TaskService {
 
     /// 汇总:综合各步骤结果产出最终成果。注入世界书 + 提示词注入 + Agent 系统提示词。
     /// 生成参数读任务模式设置。
-    async fn summarize_task(
+    pub(crate) async fn summarize_task(
         &self,
         task: &TaskRecord,
         plan: &[TaskStep],
@@ -896,7 +904,7 @@ impl TaskService {
     }
 
     /// 带生成参数覆盖的汇总(空输出重试时提高 max_tokens 或调整温度)。
-    async fn summarize_task_with(
+    pub(crate) async fn summarize_task_with(
         &self,
         task: &TaskRecord,
         plan: &[TaskStep],
@@ -991,238 +999,4 @@ fn finalize_run(
         }
     }
     deps.remove_cancel_if(task_id, token);
-}
-
-/// 截断(length)空输出的重试预算:翻倍并封顶 RETRY_MAX_TOKENS_CAP。
-/// 算法收敛在 `utils::retry::doubled_heal_budget`(2026-09-13 批次 4.1 四路合一);
-/// 封顶后(结果不大于当前值)回退原预算仍重试一次——本路径是空输出兜底重试,
-/// 同预算再试一次好过直接失败(与 chat/engine/team 三处「封顶即放弃」语义不同)。
-/// `default_max_tokens` 经设置 API 校验恒在 1..=65536(= 封顶值),故回退分支
-/// 实际只覆盖「恰为封顶值」这一种可见情形。
-fn truncated_retry_budget(current: u32) -> u32 {
-    crate::utils::retry::doubled_heal_budget(current, RETRY_MAX_TOKENS_CAP).unwrap_or(current)
-}
-
-/// 空输出分级重试骨架(步骤/汇总共用;WP2-A 收敛两份逐行同构的重试,逻辑不变):
-/// 首次产出非空即返回;空输出退避 EMPTY_RETRY_BACKOFF 后按 finish_reason 分级重试一次——
-/// finish_reason=length:max_tokens 翻倍(上限 RETRY_MAX_TOKENS_CAP),温度保持默认;
-/// 其他原因/无原因:同 max_tokens,temperature 调至 0.7(沿用 mvu.rs 先例)。
-/// 仍空返回带 label 与原因的 Err;网络/超时等硬错误不重试直接透传。
-/// call 按 (max_tokens, temperature) 发起重试调用,复用同一 cancel,不重建 system 提示词。
-/// (plan_task_retry 不共用本骨架:多轮循环 + parse 判定 + 参数演进/日志规则不同。)
-#[allow(clippy::too_many_arguments)] // 输入为「定位信息 + 首调结果 + 重试闭包」三段,拆参反而分散调用点
-async fn retry_if_empty_output<F, Fut>(
-    deps: &TaskService,
-    task_id: &str,
-    phase: &str,
-    step_index: Option<usize>,
-    label: &str,
-    first: TaskGenOutput,
-    cancel: &watch::Receiver<bool>,
-    call: F,
-) -> Result<TaskGenOutput, String>
-where
-    F: Fn(u32, f64) -> Fut,
-    Fut: std::future::Future<Output = Result<TaskGenOutput, String>>,
-{
-    if !first.text.trim().is_empty() {
-        return Ok(first);
-    }
-    // 首调空输出的那次调用仍应入账(2026-09-10 实测修复):此前只落 task_llm_calls,
-    // 重试成功后只记末次 out,首调 token 从 usage_total 丢失。
-    deps.record_usage(task_id, phase, step_index, &first);
-    tokio::time::sleep(EMPTY_RETRY_BACKOFF).await;
-    if *cancel.borrow() {
-        return Err("任务已停止".into());
-    }
-    let settings = deps.task_settings();
-    let reason = first.finish_reason.as_deref().unwrap_or("");
-    let retried = if reason == "length" {
-        let doubled = truncated_retry_budget(settings.default_max_tokens);
-        call(doubled, settings.default_temperature).await
-    } else {
-        call(settings.default_max_tokens, 0.7).await
-    };
-    match retried {
-        Ok(o) if !o.text.trim().is_empty() => Ok(o),
-        Ok(o) => Err(format!(
-            "{label}返回空内容(finish_reason={})",
-            o.finish_reason.as_deref().unwrap_or("未知")
-        )),
-        Err(e) => Err(e),
-    }
-}
-
-/// 生成步骤:空输出按 finish_reason 分级重试一次(仍空返回带原因的 Err)。
-/// - finish_reason=length:max_tokens 翻倍(上限 RETRY_MAX_TOKENS_CAP)重试;
-/// - 其他原因/无原因:temperature 调至 0.7 重试(沿用 mvu.rs 先例)。
-///
-/// 重试走 generate_step_with 单参数覆盖变体,复用同一 cancel,不重建 system 提示词。
-/// pub(crate):task_engine/legacy.rs legacy 执行器复用。
-pub(crate) async fn generate_step_retry(
-    deps: &TaskService,
-    task: &TaskRecord,
-    step: &TaskStep,
-    step_index: Option<usize>,
-    cancel: &watch::Receiver<bool>,
-) -> Result<TaskGenOutput, String> {
-    let first = deps.generate_step(task, step, step_index, cancel).await?;
-    retry_if_empty_output(
-        deps,
-        &task.id,
-        "step",
-        step_index,
-        "子任务",
-        first,
-        cancel,
-        |max_tokens, temperature| {
-            deps.generate_step_with(task, step, step_index, max_tokens, temperature, cancel)
-        },
-    )
-    .await
-}
-
-/// 汇总:与步骤同款的分级重试(空输出按 finish_reason 分别加倍 max_tokens 或调温)。
-/// 规划(带解析与分级重试):parse_plan 内含截断打捞;仍失败时按 finish_reason 分级——
-/// length/空内容 = 预算被推理 token 耗尽,max_tokens 翻倍(上限 RETRY_MAX_TOKENS_CAP);
-/// 纯格式错误 = 同预算重试。网络/超时等硬错误不重试直接抛(与步骤重试同款约定)。
-/// 共 PLAN_MAX_ATTEMPTS 次尝试;失败文案带末次错误,便于排障。
-/// pub(crate):任务引擎 plan 模式复用(只规划不执行,docs/任务引擎六模式.md)。
-pub(crate) async fn plan_task_retry(
-    deps: &TaskService,
-    task_id: &str,
-    title: &str,
-    character_id: Option<&str>,
-    cancel: &watch::Receiver<bool>,
-) -> Result<(Vec<TaskStep>, TaskGenOutput), String> {
-    let mut max_tokens = PLAN_INITIAL_MAX_TOKENS;
-    let mut last_err = String::from("规划器未产出有效步骤");
-    for attempt in 1..=PLAN_MAX_ATTEMPTS {
-        if attempt > 1 {
-            tokio::time::sleep(EMPTY_RETRY_BACKOFF).await;
-            if *cancel.borrow() {
-                return Err("任务已停止".into());
-            }
-        }
-        let out = deps
-            .plan_task(task_id, title, character_id, max_tokens, cancel)
-            .await?;
-        match parse_plan(&out.text) {
-            Ok(steps) if !steps.is_empty() => return Ok((steps, out)),
-            Ok(_) => last_err = "规划器未产出有效步骤".into(),
-            Err(e) => last_err = e,
-        }
-        // 失败 attempt 仍是一次真实调用(已落 task_llm_calls):同步入账 usage,
-        // 否则重试场景下 usage_total 少于调用明细求和(2026-09-10 实测修复)。
-        deps.record_usage(task_id, "planner", None, &out);
-        let reason = out.finish_reason.as_deref().unwrap_or("");
-        tracing::warn!(
-            attempt = attempt,
-            finish_reason = reason,
-            max_tokens = max_tokens,
-            error = last_err.clone(),
-            "任务模式规划输出解析失败,准备重试"
-        );
-        if reason == "length" || out.text.trim().is_empty() {
-            max_tokens = (max_tokens.saturating_mul(2)).min(RETRY_MAX_TOKENS_CAP);
-        }
-    }
-    Err(format!("{last_err}(已重试 {} 次)", PLAN_MAX_ATTEMPTS - 1))
-}
-
-/// 规划对话修订(带解析与分级重试):与 plan_task_retry 同款骨架——
-/// 截断/空输出按 finish_reason 翻倍 max_tokens(上限 RETRY_MAX_TOKENS_CAP),
-/// 纯格式错误同预算重试;共 PLAN_MAX_ATTEMPTS 次;网络/超时硬错误直接抛。
-/// 返回修订后步骤与末次调用产出(usage 落库用)。
-async fn plan_revise_retry(
-    deps: &TaskService,
-    task: &TaskRecord,
-    history: &[TaskMessageRecord],
-    feedback: &str,
-    cancel: &watch::Receiver<bool>,
-) -> Result<(Vec<TaskStep>, TaskGenOutput), String> {
-    let mut max_tokens = PLAN_INITIAL_MAX_TOKENS;
-    let mut last_err = String::from("规划器未产出有效修订计划");
-    for attempt in 1..=PLAN_MAX_ATTEMPTS {
-        if attempt > 1 {
-            tokio::time::sleep(EMPTY_RETRY_BACKOFF).await;
-            if *cancel.borrow() {
-                return Err("任务已停止".into());
-            }
-        }
-        let out = deps
-            .plan_revise(task, history, feedback, max_tokens, cancel)
-            .await?;
-        match parse_plan(&out.text) {
-            Ok(steps) if !steps.is_empty() => return Ok((steps, out)),
-            Ok(_) => last_err = "规划器未产出有效修订计划".into(),
-            Err(e) => last_err = e,
-        }
-        // 失败 attempt 同步入账 usage(口径同 plan_task_retry;2026-09-10 实测修复)
-        deps.record_usage(&task.id, "planner", None, &out);
-        let reason = out.finish_reason.as_deref().unwrap_or("");
-        tracing::warn!(
-            attempt = attempt,
-            finish_reason = reason,
-            max_tokens = max_tokens,
-            error = last_err.clone(),
-            "规划对话修订输出解析失败,准备重试"
-        );
-        if reason == "length" || out.text.trim().is_empty() {
-            max_tokens = (max_tokens.saturating_mul(2)).min(RETRY_MAX_TOKENS_CAP);
-        }
-    }
-    Err(format!("{last_err}(已重试 {} 次)", PLAN_MAX_ATTEMPTS - 1))
-}
-
-/// 汇总:与步骤同款的分级重试(空输出按 finish_reason 分别加倍 max_tokens 或调温)。
-/// pub(crate):任务引擎 plan 批准续跑执行器(ApprovedPlanExecutor)汇总段复用,
-/// 对齐 legacy 执行段语义(docs/任务引擎六模式.md)。
-pub(crate) async fn summarize_task_retry(
-    deps: &TaskService,
-    task: &TaskRecord,
-    plan: &[TaskStep],
-    cancel: &watch::Receiver<bool>,
-) -> Result<TaskGenOutput, String> {
-    let first = deps.summarize_task(task, plan, cancel).await?;
-    retry_if_empty_output(
-        deps,
-        &task.id,
-        "summary",
-        None,
-        "汇总",
-        first,
-        cancel,
-        |max_tokens, temperature| {
-            deps.summarize_task_with(task, plan, max_tokens, temperature, cancel)
-        },
-    )
-    .await
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// 截断重试预算:未到封顶时翻倍;命中封顶返回原值,保证「封顶后同预算仍重试一次」
-    #[test]
-    fn truncated_retry_budget_doubles_and_keeps_cap() {
-        assert_eq!(truncated_retry_budget(1024), 2048);
-        assert_eq!(truncated_retry_budget(40000), RETRY_MAX_TOKENS_CAP);
-        assert_eq!(
-            truncated_retry_budget(RETRY_MAX_TOKENS_CAP),
-            RETRY_MAX_TOKENS_CAP,
-            "恰为封顶值:回退原预算,仍发起重试"
-        );
-        assert_eq!(
-            truncated_retry_budget(RETRY_MAX_TOKENS_CAP + 1),
-            RETRY_MAX_TOKENS_CAP + 1,
-            "设置异常超过封顶(正常路径不可达):保持原预算,不因封顶反而缩小"
-        );
-        assert_eq!(
-            truncated_retry_budget(u32::MAX),
-            u32::MAX,
-            "饱和相乘不得溢出"
-        );
-    }
 }

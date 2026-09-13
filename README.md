@@ -88,6 +88,8 @@ cargo build
 
 把整个 `dist\Kedai-portable\` 目录复制给用户即可;运行时不需要 Node.js、Rust 或项目源码。系统需要 Microsoft Edge WebView2 Runtime(Windows 10/11 通常已内置)。
 
+> Windows 产物**未做 Authenticode 代码签名**,从网络下载分发后首次运行可能触发 SmartScreen「Windows 已保护你的电脑」:点「更多信息」→「仍要运行」即可;操作步骤与产物来路自查(构建指纹/哈希/APK 签名)见 [docs/代码签名与SmartScreen说明.md](docs/代码签名与SmartScreen说明.md)。
+
 桌面壳与 Axum 后端运行在同一进程。主窗口初始隐藏,后端 `/api/health` 就绪后才导航并显示,避免启动阶段白屏;关闭窗口即退出,不残留后端进程。数据与日志统一保存到:
 
 - 数据:`%APPDATA%\com.kedai.app\data`

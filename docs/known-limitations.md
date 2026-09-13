@@ -237,6 +237,28 @@
 - **补齐路径**:EOF 时从注册表注销该服务器全部工具并标记禁用;`read_line` 加最大行长;
   孙进程回收见 L3(Windows Job Object)。
 
+## L17 Windows 产物无 Authenticode 签名,首装触发 SmartScreen 告警(有意裁剪)
+
+- **现状行为**:`dist\kedai-server.exe`、`dist\Kedai-portable\Kedai.exe` 与项目根
+  `Kedai.exe` 均无 Authenticode 签名(实测 `Get-AuthenticodeSignature` → `NotSigned`);NSIS 安装包同。
+  从网络渠道下载分发时,Windows SmartScreen 弹「Windows 已保护你的电脑」拦截启动。
+- **判定**:**有意裁剪**(是否购买代码签名证书属产品决策,当前未购买;自签证书对 SmartScreen 无效)。
+- **用户指引**:操作步骤与产物来路(构建指纹/哈希/APK 签名)自查见
+  [代码签名与SmartScreen说明.md](代码签名与SmartScreen说明.md);转正式签名的证书选型与构建改动要点见该文档第四节。
+- **生态兼容考量**:正式签名需 OV/EV 证书 + 硬件令牌或云 HSM 保管私钥;OV 仍需 SmartScreen 信誉积累,非即时消除告警。
+
+## L18 数据库无 schema 版本号,降级无官方路径(待办)
+
+- **现状行为**:`kedai.db` 的 `PRAGMA user_version` 恒为 0,无迁移台账(`backfill_meta` 只存
+  FTS 回填标记与 message 回填游标)。升级靠启动时 `CREATE TABLE IF NOT EXISTS` + `ensure_*`
+  幂等补列/补表/补索引(`server-rs/src/models/db/mod.rs:62-91`),schema 至今只增不减。
+  因此旧版 exe 打开新版库**不会报错、静默运行**;降级只能靠用户升级前的手工备份,
+  没有 down 迁移,升级前也不自动备份。
+- **判定**:**待办**(残余计划 6.2)。
+- **补齐路径**:引入 `PRAGMA user_version`(定义 `SCHEMA_VERSION`,启动时检测
+  「库版本 > 代码版本」并显式提示,升级全部成功后再写版本号);做法与验收见
+  [数据库版本与降级行为.md](数据库版本与降级行为.md) §四。
+
 ---
 
 > 新增缺口时按同一模板登记:现状行为(带文件:行号)/ 判定(有意裁剪 or 待办)/

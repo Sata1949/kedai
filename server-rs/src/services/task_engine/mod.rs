@@ -16,13 +16,17 @@
 //   custom.rs    AgentFlowConfig 步骤序列轻量执行器
 //   legacy.rs    三段式(规划/逐步/汇总)执行器:自原三段式后台执行主体机械搬迁
 //   followup.rs  终态追加指令执行器:自原 followup 后台执行主体机械搬迁
+//   retry.rs     空输出/规划分级重试算法(批次 4.2 自 task_service 上移)
+//   parse.rs     计划 JSON 解析(批次 4.2 自 task_service 上移)
 pub(crate) mod context;
 pub(crate) mod custom;
 pub(crate) mod executor;
 pub(crate) mod followup;
 pub(crate) mod legacy;
 pub(crate) mod multi;
+pub(crate) mod parse;
 pub(crate) mod plan;
+pub(crate) mod retry;
 pub(crate) mod sink;
 pub(crate) mod solo;
 pub(crate) mod team;

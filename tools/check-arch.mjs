@@ -10,10 +10,12 @@
  *      使状态变更路径分散、无法在 action 里统一做副作用与校验。仅报「疑似绕过」
  *      (字段写了 action 才会被拦),存量无害赋值经 BASELINE 白名单豁免。
  *
- * 后端三项分层检查(2026-09-13 新增,落实三结合 L1/L2 边界):
+ * 后端分层与冻结检查(2026-09-13 起,落实三结合 L1/L2 边界):
  *   C. `services/task_engine/**` 不得 import `task_service`(任务引擎依赖倒置)。
  *   D. L1(parsing/models/contracts)不得 `use crate::services::`(老层不被上层渗透)。
  *   E. `services/**` 生产代码不得出现 `.expect(`(连接池异常不得 panic 掉请求线程)。
+ *   G. `api/**` 不得新增「裸 {error}」响应(错误形状 ratchet,数量不得超基线)。
+ *   H. EJS 自研解释器 builtin 表条数不得增长(威胁模型 D5;冻结纪律的机器门禁)。
  *
  * 用法:
  *   node tools/check-arch.mjs
@@ -272,6 +274,8 @@ if (VERBOSE) {
 //   E(services 生产代码不得 .expect)、G(不得新增裸 {error})——
 //     同批已清零 E;G 存量 117 处待逐个补 code(需逐处判定 HTTP 状态码),故走
 //     ratchet(数量不得超基线)。二者违规即 FAIL。
+//   H(EJS builtin 表条数)——
+//     自研迷你 JS 引擎冻结纪律的机器门禁,同样是 ratchet(见该规则注释)。
 const SERVER = join(ROOT, 'server-rs', 'src');
 
 /** 递归收集指定后缀文件(相对 ROOT 的路径)。 */
@@ -397,7 +401,81 @@ const backendWarnings = [];
   }
 }
 
-console.log('\n========== Kedai 后端分层护栏(C/D/E/G) ==========');
+// --- 规则 H:EJS builtin 表冻结 ratchet(威胁模型 D5 / MAINTENANCE.md §0) ---
+//
+// 背景:`parsing/assistant/ejs/` 是自研迷你 JS 引擎(约 4000 行),纪律为「只接受安全
+// 修复,不再扩展新能力」——任何新模板能力必须走 `scripts/runtime.rs` 的 rquickjs 沙箱。
+// 此前该纪律仅靠文档约束(威胁模型 D5),此处把 `env.rs` 的 `builtin_global` 表**条数**
+// 钉成 ratchet:超过基线即 FAIL。
+//
+// 计数口径:match 分支的字符串模式名(**别名各计一条**,别名同样是对模板暴露的新名字面)
+// + JSON/Math/Object 等内联对象的成员名(成员也是新增能力面)。
+//
+// 基线纪律:**调低是唯一合法方向**。删除条目、收敛别名后请同步下调基线值;
+// 上调等于关掉护栏,确属安全修复必须在变更说明里给出理由。
+//
+// 解析失败(文件缺失 / `fn builtin_global` 或 `match name` 或 `_ => None` 结构未识别 /
+// 计出 0 条 / 出现无法分类的字面量)一律**显式 FAIL**,绝不静默跳过——静默返回 0 会让
+// 门禁形同虚设(错误文案风格参照本文件 readModalFlags)。
+{
+  const EJS_ENV = join(SERVER, 'parsing', 'assistant', 'ejs', 'env.rs');
+  const BASELINE_EJS_BUILTINS = 64; // 2026-09-13 实测;只降不升
+  const rel = relative(ROOT, EJS_ENV);
+  let src = null;
+  try {
+    src = readFileSync(EJS_ENV, 'utf8');
+  } catch (e) {
+    backendFailures.push(`[H] EJS builtin 表冻结检查失败:无法读取 ${rel}(${e.message})`);
+  }
+  if (src !== null) {
+    const fnIdx = src.search(/fn\s+builtin_global\s*\(\s*name\s*:\s*&str\s*\)/);
+    const matchIdx = fnIdx === -1 ? -1 : src.indexOf('match name', fnIdx);
+    const endIdx = matchIdx === -1 ? -1 : src.indexOf('_ => None', matchIdx);
+    if (fnIdx === -1 || matchIdx === -1 || endIdx === -1) {
+      backendFailures.push(
+        `[H] EJS builtin 表冻结检查失败:${rel} 的 \`fn builtin_global\` / \`match name\` / \`_ => None\` 结构未识别(重构了该函数请同步 check-arch.mjs 的解析契约)`,
+      );
+    } else {
+      // 去注释后再数:注释里提到的函数名不算条目
+      const body = src.slice(matchIdx, endIdx).replace(/\/\/[^\n]*/g, '');
+      const names = [];
+      const unknown = [];
+      for (const m of body.matchAll(/"((?:[^"\\]|\\.)*)"/g)) {
+        const after = body.slice(m.index + m[0].length);
+        // 分支名(`"a" | "b" =>`,多别名各计一条)或内联对象成员名(`("name".into(), …)`)
+        if (/^\s*(?:\|\s*"(?:[^"\\]|\\.)*"\s*)*=>/.test(after) || /^\s*\.into\s*\(/.test(after)) {
+          names.push(m[1]);
+        } else {
+          unknown.push(m[1]);
+        }
+      }
+      if (names.length === 0) {
+        backendFailures.push(
+          `[H] EJS builtin 表冻结检查失败:${rel} 的 builtin_global 解析出 0 条(解析契约已失效,请同步 check-arch.mjs)`,
+        );
+      } else if (unknown.length) {
+        backendFailures.push(
+          `[H] EJS builtin 表冻结检查失败:${rel} 的 builtin_global 出现无法分类的字面量:${unknown
+            .map((s) => `"${s}"`)
+            .join(', ')}(解析契约已失效,请同步 check-arch.mjs)`,
+        );
+      } else if (names.length > BASELINE_EJS_BUILTINS) {
+        backendFailures.push(
+          `[H] EJS builtin 表新增条目:${names.length} 条 > 基线 ${BASELINE_EJS_BUILTINS}(EJS 自研解释器已冻结:` +
+            `只接受安全修复,新模板能力请走 scripts/runtime.rs 的 rquickjs 沙箱;确属安全修复请说明理由并**下调**基线)`,
+        );
+      }
+      if (VERBOSE) {
+        const mark = names.length < BASELINE_EJS_BUILTINS ? '(可下调基线)' : '';
+        console.log(
+          `  [H] EJS builtin 表:${names.length} 条(基线 ${BASELINE_EJS_BUILTINS},只降不升)${mark}`,
+        );
+      }
+    }
+  }
+}
+
+console.log('\n========== Kedai 后端分层与冻结护栏(C/D/E/G/H) ==========');
 if (backendFailures.length) {
   console.log(`[FAIL] ${backendFailures.length} 处分层违规(全部规则均为硬门禁):`);
   for (const f of backendFailures.slice(0, 40)) console.log(`  - ${f}`);

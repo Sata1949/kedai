@@ -1,8 +1,9 @@
-// 计划 JSON 解析:parse_plan 四级从严到宽尝试(整体解析/剥 markdown 代码块/取数组
-// 子串/截断打捞),salvage_step_objects 字符串感知地打捞配平步骤对象;
-// 文件底部为 parse_plan 全部单测。
-// 自 task_service.rs 拆分迁入,纯代码移动,逻辑不变;依赖经 `use super::*` 取自 mod.rs。
-use super::*;
+// 计划 JSON 解析(批次 4.2 自 task_service/parse.rs 上移 task_engine):
+// parse_plan 四级从严到宽尝试(整体解析/剥 markdown 代码块/取数组子串/截断打捞),
+// salvage_step_objects 字符串感知地打捞配平步骤对象。
+// 纯文本算法、零宿主依赖,归任务引擎所有(重试与解析是任务引擎职责,不是宿主能力);
+// 宿主 task_service 不再持有本逻辑。
+use crate::models::types::TaskStep;
 
 /// 从 LLM 输出解析计划 JSON 数组。按从严到宽四级尝试:
 /// 1) 整体解析;2) 剥 markdown 代码块;3) 首个 '[' 到末个 ']' 的子串(容忍前言/后记);
@@ -11,7 +12,7 @@ use super::*;
 ///
 /// 所有层级统一过滤空 name+goal 的步骤(serde 默认值会让 `[{}]` 也"解析成功",
 /// 空步骤会把空调 goal 发给执行器,必须拦截)。
-pub(super) fn parse_plan(text: &str) -> Result<Vec<TaskStep>, String> {
+pub(crate) fn parse_plan(text: &str) -> Result<Vec<TaskStep>, String> {
     fn non_empty(steps: Vec<TaskStep>) -> Vec<TaskStep> {
         steps
             .into_iter()
@@ -110,8 +111,6 @@ fn salvage_step_objects(text: &str) -> Vec<TaskStep> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // TaskStepStatus 仅测试断言用(生产代码不引用),显式引入以免 mod.rs 的重导出
-    // 被判定为 unused import
     use crate::models::types::TaskStepStatus;
 
     /// 合法 JSON 数组直接解析

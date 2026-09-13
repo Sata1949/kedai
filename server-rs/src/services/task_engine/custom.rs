@@ -17,7 +17,6 @@ use crate::models::types::{
     GenerationParams, LlmMessage, PlanStep, TaskStatus, TaskStep, TaskStepStatus, TokenUsage,
     ToolChoice, ToolContext,
 };
-use crate::services::agent_flow_service::AgentFlowConfig;
 use crate::services::prompt_kit::untrusted_boundary;
 use crate::services::task_core::prompt_consts::{
     CUSTOM_REFLECT_PROMPT, EXECUTOR_PROMPT, TASK_INTERNAL_PLAN_PROMPT,
@@ -37,22 +36,6 @@ pub(crate) struct CustomExecutor {
 impl CustomExecutor {
     pub(crate) fn new(svc: Arc<dyn TaskBackend>, engine: Arc<AgentEngine>) -> Self {
         CustomExecutor { svc, engine }
-    }
-
-    /// 读取当前启用流程配置(克隆后立即释放锁,禁持引用跨 .await)。
-    fn current_flow(&self) -> Result<AgentFlowConfig, String> {
-        let flow = self.svc.agent_flow();
-        let guard = flow.lock().unwrap_or_else(|e| e.into_inner());
-        let cfg = guard
-            .get()
-            .cloned()
-            .ok_or("请先在设置中启用一个 Agent 流程")?;
-        if !cfg.enabled {
-            return Err("当前 Agent 流程未启用,请在设置中开启后再运行 custom 模式".into());
-        }
-        // 执行前按启动时注册工具集校验(与保存时同一 validate_flow)
-        guard.validate(&cfg)?;
-        Ok(cfg)
     }
 
     /// 组装步骤 system:内置基础指令(direct 生成=执行者 / direct 非生成=内部规划 /
@@ -188,7 +171,7 @@ impl CustomExecutor {
                     Some(step_index),
                     &model,
                     messages,
-                    &res.self_heals,
+                    &super::executor::to_self_heals(&res.self_heals),
                 );
                 let text = res.content.trim().to_string();
                 let status = if text.is_empty() { "empty" } else { "ok" };
@@ -247,7 +230,7 @@ impl CustomExecutor {
     }
 
     async fn run_inner(&self, ctx: TaskRunContext) -> Result<(TaskTerminal, TokenUsage), String> {
-        let cfg = self.current_flow()?;
+        let cfg = self.svc.current_flow()?;
         let steps: Vec<PlanStep> = cfg.steps.iter().filter(|s| s.enabled).cloned().collect();
         if steps.is_empty() {
             return Err("当前 Agent 流程没有启用的步骤".into());
