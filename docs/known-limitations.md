@@ -164,5 +164,76 @@
 
 ---
 
+## L12 角色卡脚本桥不经过工具授权裁决(待办)
+
+- **现状行为**:角色卡脚本经 rquickjs 沙箱执行后,其数据写入能力
+  `TavernHelper.setVariables` → `write_scope`(`server-rs/src/scripts/bridge.rs:265`)、
+  `importRawCharacter/Worldbook/Preset/Chat/TavernRegex` → `import_raw`(`:244`)、
+  `generate` → `generate_from_config`(`:198`)直接改变量树/导入数据,**不经
+  `ToolRegistry` 与 `ToolPermissionManager`**;而角色卡脚本默认自动执行
+  (`server-rs/src/agents/engine/run_scripts.rs:205-231`)。等价于「无授权执行
+  `update_variables` 级写操作」。
+- **判定**:**待办**。与 MAINTENANCE §0「新能力默认进 L3 隔离验证」的纪律相悖——
+  脚本沙箱做了引擎级隔离(内存/中断上限、无 fs/net API),但**授权维度缺失**。
+- **补齐路径**:在 `bridge.rs` 三处写路径前插入裁决,复用
+  `ToolPermissionManager::decide_with_policy`(`server-rs/src/tools/permissions.rs:165`)
+  与 `action_class::classify`(`tools/action_class.rs:82`);新增设置项
+  `script_authorization_enabled`(**默认关**以保持现有行为,开启后走三档裁决)。
+- **生态兼容考量**:ST 生态的大量卡依赖脚本自动写变量(如好感度、状态栏),默认开启授权
+  会导致这类卡静默失效,故必须默认关、由用户显式启用。
+
+## L13 聊天流逐 token 全量重渲染(待办)
+
+- **现状行为**:后端逐 token 发 `SseEvent::Token`,前端每 token 就地追加
+  (`web/src/sseReducer.ts:155-164`),触发 `ChatMessageItem.vue:132` 的 `html` computed
+  对**整条增长中的消息**重跑 markdown 渲染 + `v-html` 替换——长回复呈 O(n²)。
+  对比:任务侧的流式 delta 经 `DeltaBatcher`(200ms/80 字攒批,
+  `server-rs/src/services/task_engine/sink.rs:45`)已做攒批,聊天侧没有对应节流。
+- **判定**:**待办**(性能)。
+- **补齐路径**:在前端加渲染节流层——内容立即累积(不丢数据),但以 rAF(≤16ms)为节拍
+  刷新一个 `renderTick`,`html` computed 依赖它;流式中只对**已完成块**跑 markdown,
+  终态再全量渲染。仓库已有 rAF 用法可参考(`AgentPanel.vue:60`、`ChatInput.vue:201`)。
+
+## L14 核心渲染组件无测试(待办)
+
+- **现状行为**:44 个 `.vue` 组件中 24 个无测试,含最核心的
+  `web/src/components/ChatMessageItem.vue`(282 行——markdown/状态栏/swipe/资源卡全在此);
+  `ChatWindow.test.ts` 仅 3 个用例,断言为「空态存在/不同/输入栏存在」,且用 `as never`
+  硬塞 store 数据。对比 `stores/task.test.ts`(97 个 `expect`、fake timers 精确断言退避)
+  可见质量差距。
+- **判定**:**待办**(测试覆盖)。
+- **补齐路径**:为 `ChatMessageItem.vue` 补行为测试(markdown 分支/状态栏/swipe/资源卡);
+  以 `stores/task.test.ts` 为写法范例。
+
+## L15 前端契约文案硬编码分散(待办)
+
+- **现状行为**:任务模式与消息 kind 的中文文案手写在
+  `web/src/components/TaskBoard.vue:32-39`(`MODE_LABELS`)、`:124-129`
+  (`MESSAGE_KIND_LABELS`);弹窗开关在 `App.vue:98`(`MODAL_FLAGS`)、`uiPrefs`、模板三处
+  分别罗列。**新增一个任务模式或事件 kind 需改 4 处**(后端枚举+发射点、`api/types.ts`、
+  `stores/task.ts:341` 的 switch、`TaskBoard` 标签)。
+- **判定**:**待办**(可维护性)。
+- **补齐路径**:文案迁入 `web/src/api/labels.ts` 并用
+  `satisfies Record<TaskRunMode, string>` 做穷尽校验(漏配即 typecheck 报错);
+  弹窗开关统一由 `uiPrefs` 派生唯一注册表。
+
+## L16 MCP 服务器死亡后工具不注销,且无热重连(待办)
+
+- **现状行为**:MCP 客户端仅在**启动时**装配(`server-rs/src/mcp/mod.rs:1-5`,
+  改设置需重启生效、无热重连);服务器进程中途退出时,其工具**不从 `ToolRegistry` 注销**,
+  注册表内这些工具会持续报错直到进程重启。另 `client.rs:252` 的 `read_line` 对服务器
+  单行输出无长度上限。
+- **判定**:**待办**(韧性)。
+- **补齐路径**:EOF 时从注册表注销该服务器全部工具并标记禁用;`read_line` 加最大行长;
+  孙进程回收见 L3(Windows Job Object)。
+
+---
+
 > 新增缺口时按同一模板登记:现状行为(带文件:行号)/ 判定(有意裁剪 or 待办)/
 > 补齐路径 / 生态兼容考量。已补齐的项从本文删除并在对应章节留一行迁移注记。
+>
+> **2026-09-13 已封堵项**(从缺口转为已修,留此索引供溯源):
+> - EJS 自研解释器的循环无上限与解析无深度守卫(原可被单张角色卡触发挂死/栈溢出):
+>   已在 `parsing/assistant/ejs/exec.rs` 加迭代步数(20 万)+ 墙钟(2 秒)预算、
+>   在 `parser.rs` 加三处递归深度守卫(上限 64),并冻结该引擎不再扩展新能力
+>   (新模板能力一律走 `scripts/runtime.rs` 的 rquickjs 沙箱)。见 `MAINTENANCE.md §0`。

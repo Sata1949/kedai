@@ -128,3 +128,34 @@ kedai 落点：
 | 阶段 1 | L1 加固 | Mutex 76 处中毒恢复（经验库更可靠） |
 | 阶段 2 | L2 清障 | assistant 拆 6 模块、agent_tools 拆 4 模块、engine run 拆分 |
 | 阶段 3 | L3 放活 | mvu 语义对齐 + 协议文档（传帮带经验文本） |
+| 阶段 4 | 落实 | EJS 加固+冻结、任务引擎依赖倒置（`task_core`/`TaskBackend`）、门禁接线（build/pre-push）、L1 渗透清理 |
+
+---
+
+## 7. 叙事与实现的偏差登记（2026-09-13 核查）
+
+> 本章如实记录「本文件描述的架构」与「代码实际状态」曾经的差距,以及核查后的处置。
+> **用途**:防止后续 agent 照着旧叙事改错位置;也是「传帮带」的经验留存。
+> 核查方法:`grep` 交叉验证 + 全量测试(当时 975 后端 / 733 前端)+ 依赖图分析。
+
+| # | 叙事曾声称 | 代码实际(核查时) | 处置 |
+|---|---|---|---|
+| 1 | L1 是「不可变契约、上层不得渗透」 | **被 L2 反向渗透**:`contracts/registry.rs:11-12` 引 `services::character_service/world_book_service`;`parsing/preset.rs:24` 引 `services::prompt_inject_service` | 已修:`PromptFloor` 等类型下沉 `models/types.rs`;registry 改为闭包注入(见 §4)。check-arch 规则 D 锁死 |
+| 2 | L2 内部单向分层 | `services/task_engine/**` ↔ `services/task_service/**` **双向 import**(引擎侧 10 个文件引用 TaskService) | 已修:抽 `task_core`(共享类型/常量)+ `TaskBackend` trait(宿主能力),`task_engine` 对 `task_service` 零引用。check-arch 规则 C 锁死 |
+| 3 | legacy/followup「上 ModeExecutor 缝」 | 上了缝,但经 `OnSuccess::SelfFinalized` **自行写库**,绕过统一收尾(4 个收尾入口重复同构) | 已修:终态值化(`TaskTerminal` 五变体),执行器只返回值;4 入口收敛为 `finalize_terminal` 单一出口 |
+| 4 | EJS 为 L3 探索层「新能力」 | 自研解释器缺引擎级沙箱限额:循环无迭代上限、解析无深度守卫(单卡可挂死/栈溢出) | 已修:加迭代+墙钟预算与 3 处解析深度守卫;**并冻结**(新能力一律走 rquickjs 沙箱) |
+| 5 | 测试套件是 L1「经验库/晋升门槛」 | 数字长期手抄(文档 923/697,实际 975/733);且**从未被任何自动化调用**(无 CI、build.ps1 不跑测试) | 已修:`build.ps1` 硬门禁 + pre-push hook;测试数改 `tools/count-tests.mjs` 自动统计 |
+| 6 | 「新能力默认隔离」 | 角色卡脚本桥(`scripts/bridge.rs` 写变量/导入)**不经授权裁决**却默认自动执行 | 登记为 L12 待办(见 known-limitations),补齐路径已写明 |
+| 7 | 六模式「由 ModeExecutor 统一驱动」 | 仅**派发点**统一;`multi.rs` 逐行复制 `solo.rs`;步进循环三份且取消口径不一致 | 已修:multi 委托 solo;`StateMachine` 静默吞错改为告警+迁移表修正;步进循环收敛见 §4 待办 |
+
+**核查结论**:架构叙事本身方向正确(分层、隔离、晋升),但此前**停留在文档层**——代码里存在环依赖、重复实现与死抽象。本章第 1-5、7 项的处置使分层首次成为**结构 + 机器可验证护栏**;第 6 项与步进循环收敛仍为待办,已在对应文档登记。
+
+---
+
+## 8. 偏离纪律的结构性遗留(待办,知情接受)
+
+| 遗留 | 现状 | 为何暂不动 |
+|---|---|---|
+| 步进循环三份 | legacy/plan/custom 各写一遍「置 running→写库→失败继续」;取消兜底三种口径(plan 扫 Pending、team 扫 Running、custom 直接 return) | 抽 `step_runner` 会同时改动三个已稳定运行的模式,收益(一致性)低于回归风险;待下次实跑暴露问题时再做 |
+| `models/types.rs` 混装传输类型 | `LlmMessage`/`LlmStreamChunk`/`SseEvent`/`GenerationParams`/`ToolContext` 与数据契约同处一文件 | 拆分不改线格式但会大范围改动 import,收益仅为文件整洁;已用 check-arch 规则 D 的豁免项显式标注 |
+| 契约不变量仅 mutex | range/require_if 恒判通过(见 known-limitations L2) | 依赖未实现的谓词引擎,属独立设计,不宜顺手发明语法 |
