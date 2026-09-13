@@ -118,7 +118,7 @@ kedai/
 | 一键构建 | `.\build.ps1` | **默认双端同步产出**:前端 web/dist + Rust release(测试版)+ 便携版;`-TestOnly` 仅测试版快速通道 `-Dev` debug 构建 `-NoWeb` 仅 Rust `-Tauri` 追加 NSIS 打包 |
 | 兼容别名 | `npm run build:all` / `npm run build:rs` | 均等价 `.\build.ps1`(双端同步);`npm run build:test` 等价 `.\build.ps1 -TestOnly` |
 | 统一改版本号 | `npm run version:bump -- x.y.z` | 7 处版本号一次改全(2 个 package.json、3 个 Cargo.toml、tauri.conf.json、本文档版本行);支持 `-DryRun` 预览 |
-| 后端测试 | `cd server-rs && cargo test` | **986 个测试(797 单测 + 189 集成,20 个集成文件)**,**需在 vcvars64 环境**;前端 `npm test -w web` **745 个(81 文件;静态计数;vitest 运行时为 763,差值 18 来自 `parser.contract.test.ts` 循环生成的 fixture 用例)**。数字由 `node tools/count-tests.mjs` 自动统计,勿手抄——`npm run count:tests` 查看当前值,`npm run check:tests` 校验文档是否漂移 |
+| 后端测试 | `cd server-rs && cargo test` | **992 个测试(802 单测 + 190 集成,21 个集成文件)**,**需在 vcvars64 环境**;前端 `npm test -w web` **745 个(81 文件;静态计数;vitest 运行时为 763,差值 18 来自 `parser.contract.test.ts` 循环生成的 fixture 用例)**。数字由 `node tools/count-tests.mjs` 自动统计,勿手抄——`npm run count:tests` 查看当前值,`npm run check:tests` 校验文档是否漂移 |
 | 全量检查(本地 CI) | `npm run check` | `tools/check-all.ps1`:fmt → clippy → cargo test → cargo audit(**硬门禁**)→ lock-sync(双锁漂移)→ contract → arch(C/D/E 分层)→ 类型 ratchet → npm audit(警告)→ vue-tsc(**硬门禁**)→ vitest → vite build。**已接入 build.ps1、pre-push hook 与 CI 工作流**(见 §0 门禁纪律) |
 | 开发模式 | `cd server-rs && cargo run` + `npm run dev -w web` | 后端 3001 / 前端 5173(代理到 3001) |
 | 前端构建 | `npm run build -w web` | 产出 web/dist(编译进 exe 用) |
@@ -422,6 +422,10 @@ rusqlite(bundled,零原生依赖),**WAL 模式 + foreign_keys ON**。共 28 张�
     - 或设环境变量 `CARGO_TARGET_DIR=D:\kedai-build`(作用于所有 cargo 调用,含 src-tauri;
       注意 `build-portable.ps1` 期望 `src-tauri\target\release\kedai-portable.exe`,用此变量会
       让便携版产物落到别处,故优先用 `-RustTargetDir`)。
+    `build.ps1` 已支持该参数,并把「后端产物目录」统一解析给新鲜度检测与 exe 校验使用;
+    以前它硬编码 `server-rs\target`,外置产物时会误报「Rust 编译失败:未生成 …」
+    (2026-09-13 批次 1 起**清理路径也跟随该参数**,外置目录不再漏清);
+    同一现象在 `docs/优化实施方案-2026-09.md` 亦有历史记录(当时以 `CARGO_TARGET_DIR` 降级处置)。
 23. **src-tauri 内嵌 server-rs 时,两份 Cargo.lock 会静默漂移**(2026-09-13 批次 1 实测并清零)。
     `src-tauri/Cargo.toml` 以 `kedai-server = { path = "../server-rs" }` 内嵌后端,构建便携版时
     cargo **完全忽略 `server-rs/Cargo.lock`**,在 `src-tauri/Cargo.lock` 里重新解析整棵依赖树——
@@ -438,9 +442,20 @@ rusqlite(bundled,零原生依赖),**WAL 模式 + foreign_keys ON**。共 28 张�
     或把落后一侧整体更新到较新版本;④ 不可避免的例外登记 `tools/lock-sync-baseline.json`。
     根治途径是 Cargo workspace 化(未做,列入批次 4 可选项)。**注意**:对齐 `cc`/`thiserror`
     等版本后须重跑完整 `cargo test`(本批次已跑,全绿)。
-    `build.ps1` 已支持该参数,并把「后端产物目录」统一解析给新鲜度检测与 exe 校验使用;
-    以前它硬编码 `server-rs\target`,外置产物时会误报「Rust 编译失败:未生成 …」。
-    同一现象在 `docs/优化实施方案-2026-09.md` 亦有历史记录(当时以 `CARGO_TARGET_DIR` 降级处置)。
+24. **API Key 解密失败曾在一次保存后被静默清空**(2026-09-13 批次 2 修复)。`secret_store::unprotect`
+    解密失败返回空串(视为未配置,避免把密文当 Key 发给上游),而 `save` 直接 `protect(内存值)` ——
+    换用户/换机器/密文损坏后,用户下一次保存设置(改个温度也算)就会用空串覆盖磁盘密文,
+    密钥永久丢失且只有一行 stderr。**修法**:`settings_service/secret.rs::save` 先读盘,
+    「内存为空而磁盘仍是非空 `enc:v1:` 密文」时原样回写密文并留痕。**不会误伤清空操作**:
+    `PUT /api/settings` 对空值直接忽略(`api/settings.rs:300-305`),接口层面无法把已配置 Key 改为空。
+    改密钥相关代码时保持该不变式,并跑 `secret.rs` 的 3 个保留测试。
+25. **schema.rs 加列漏写 `ensure_*` 迁移只在老用户机器上炸**(2026-09-13 批次 2 加元测试)。
+    新装机走 `CREATE TABLE` 全量建表长得一切正常,全量测试也发现不了;而老库升级后访问该列直接
+    `no such column`。**守卫**:`tests/schema_migration_meta.rs` 用冻结基线
+    (`tests/fixtures/schema_baseline_v0_3_0_beta.sql`,0.3.0-beta 发布时的建表 SQL)建「老库」→
+    `Db::open` 升级 → 与全新库逐表比对 `PRAGMA table_info` + 索引;新增列/表/索引漏迁移即失败
+    (已用注入探针验证)。**纪律**:改 `schema.rs` 的建表结构必须同步写 `migration/ddl.rs` 的
+    `ensure_*` 迁移;**不要更新基线文件**(它是历史快照,更新它等于关掉守卫)。
 
 ---
 
@@ -450,8 +465,8 @@ rusqlite(bundled,零原生依赖),**WAL 模式 + foreign_keys ON**。共 28 张�
 cd server-rs && cargo test
 ```
 
-- 单元测试(源文件内 `#[test]`/`#[tokio::test]`,**797 个**,以 `tools/count-tests.mjs` 为准):状态机迁移、planner(fast/deep/算式识别)、reflector(3 规则)、calculator(白名单解析)、censor(禁词同义替换)、token 编码映射与估算、工具注册表、世界书转换、世界书注入(含 `extensions.depth` 扫描窗口)、提示词注入(含禁词库)、mvu 变量系统(含 JSONPatch 转义/reason/delta 容错)、EJS 渲染器(含读取 API、escape-ejs 与**循环预算/解析深度守卫 5 例**)、角色卡解析、正则脚本、@INJECT 解析/应用、GENERATE 注入、运行时提示词内置默认回退、角色扮演默认提示词内置(from_config + load 空值回填)、结构化错误码(api/errors.rs)、任务编排工具契约(agentgo 逐项校验/子任务截断判失败/read subtask 多键命中/todo 跨 agent 可见/agentend interrupted)、任务工具策略(deny_dangerous 的 bash 例外不外溢:含 `bash2`/`mcp_x_bash` 精确匹配护栏)、任务白名单不豁免命令级高危硬门(custom_authorized + rm -rf/sudo 必须拒绝)、generate-raw 结构化预算下限与截断自愈(含显式值钳制)
-- API 集成测试(`tests/` 20 个文件,**189 个**,以 `tools/count-tests.mjs` 为准,mock 连接器 + 临时数据目录):api_integration、assistant、agent_flows、tasks、task_events(含 `task_solo_offers_bash_tool`:任务模式确实下发 bash)、generate_raw(自愈成功且 injected 保留 / 重发失败回退半截 / 自愈用尽返回末次文本 / max_tokens=0 400)、prompt_inject、world_books、settings_connector、security、contracts_e2e、scripts_e2e、scripts_import、swipe_regenerate、undo、user_scripts、variables_scopes、db_concurrency、macros、repo_index——health、角色 CRUD(multipart 上传)、会话/消息/导入导出、设置与 token、agent plan、SSE 聊天流、任务引擎六模式、计算器工具 SSE、世界书/角色卡、提示词注入与酒馆预设导入、鉴权
+- 单元测试(源文件内 `#[test]`/`#[tokio::test]`,**802 个**,以 `tools/count-tests.mjs` 为准):状态机迁移、planner(fast/deep/算式识别)、reflector(3 规则)、calculator(白名单解析)、censor(禁词同义替换)、token 编码映射与估算、工具注册表、世界书转换、世界书注入(含 `extensions.depth` 扫描窗口)、提示词注入(含禁词库)、mvu 变量系统(含 JSONPatch 转义/reason/delta 容错)、EJS 渲染器(含读取 API、escape-ejs 与**循环预算/解析深度守卫 5 例**)、角色卡解析、正则脚本、@INJECT 解析/应用、GENERATE 注入、运行时提示词内置默认回退、角色扮演默认提示词内置(from_config + load 空值回填)、结构化错误码(api/errors.rs)、任务编排工具契约(agentgo 逐项校验/子任务截断判失败/read subtask 多键命中/todo 跨 agent 可见/agentend interrupted)、任务工具策略(deny_dangerous 的 bash 例外不外溢:含 `bash2`/`mcp_x_bash` 精确匹配护栏)、任务白名单不豁免命令级高危硬门(custom_authorized + rm -rf/sudo 必须拒绝)、generate-raw 结构化预算下限与截断自愈(含显式值钳制)、**密钥保留策略(批次 2:解密失败不覆盖磁盘密文 3 例)**、**pending_runs RAII 守卫(drop 与 panic 路径)**、**db writer 锁中毒回滚(未完成事务 ROLLBACK)**
+- API 集成测试(`tests/` 21 个文件,**190 个**,以 `tools/count-tests.mjs` 为准,mock 连接器 + 临时数据目录):api_integration、assistant、agent_flows、tasks、task_events(含 `task_solo_offers_bash_tool`:任务模式确实下发 bash)、generate_raw(自愈成功且 injected 保留 / 重发失败回退半截 / 自愈用尽返回末次文本 / max_tokens=0 400)、**schema_migration_meta(老库升级结构一致性,冻结基线见 `tests/fixtures/schema_baseline_v0_3_0_beta.sql`)**、prompt_inject、world_books、settings_connector、security、contracts_e2e、scripts_e2e、scripts_import、swipe_regenerate、undo、user_scripts、variables_scopes、db_concurrency、macros、repo_index——health、角色 CRUD(multipart 上传)、会话/消息/导入导出、设置与 token、agent plan、SSE 聊天流、任务引擎六模式、计算器工具 SSE、世界书/角色卡、提示词注入与酒馆预设导入、鉴权
   - **已知 flaky**:`settings_connector::mock_auto_switches_to_openai_on_save` 偶发因 Windows 文件占用失败
     (`settings.json 应已持久化: Os { code: 32 }`;另实测全量负载下的 `Os { code: 2 } NotFound` 变体),
     隔离重跑即通过——非代码缺陷:PUT 保存是 `db_call` 同步 await(`api/settings.rs:657-662`),返回 200 时

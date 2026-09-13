@@ -117,9 +117,28 @@ impl Db {
             .map_err(|e| format!("获取只读连接失败: {e}"))
     }
 
-    /// 取写连接(互斥):写 SQL 与「读+写同事务」混合场景使用;锁中毒按既有纪律恢复
+    /// 取写连接(互斥):写 SQL 与「读+写同事务」混合场景使用。
+    ///
+    /// 锁中毒恢复(2026-09-13 批次 2 加强):中毒说明上一次持锁者在 rusqlite 调用中途
+    /// panic,连接可能停在未完成的隐式/显式事务里;此前直接 `into_inner()` 续用,语义未定义。
+    /// 现在先留痕,再检查 `is_autocommit()`——非 autocommit 说明事务未收尾,显式 ROLLBACK
+    /// 回退到干净状态后交还。仍选择「可用性优先」:本地单用户应用里,让整个应用崩掉
+    /// 比带一处不一致继续跑更糟(与全仓锁中毒纪律一致)。
     pub fn write(&self) -> MutexGuard<'_, Connection> {
-        self.writer.lock().unwrap_or_else(|e| e.into_inner())
+        match self.writer.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                let guard = poisoned.into_inner();
+                tracing::error!(
+                    "db writer 互斥锁中毒(上一次持锁期间 panic);已恢复,如出现数据异常请重启应用"
+                );
+                if !guard.is_autocommit() {
+                    tracing::error!("db writer 停在未完成事务中,执行 ROLLBACK 回退");
+                    let _ = guard.execute_batch("ROLLBACK;");
+                }
+                guard
+            }
+        }
     }
 }
 
@@ -170,6 +189,47 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 1);
+        drop(conn);
+        drop(db);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// 写连接锁中毒可恢复:未完成事务被 ROLLBACK,连接仍可继续使用
+    /// (2026-09-13 批次 2:此前直接 into_inner 续用,事务残留语义未定义)
+    #[test]
+    fn poisoned_writer_lock_recovers_and_rolls_back_open_transaction() {
+        let dir = std::env::temp_dir().join(format!("kedai-db-poison-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("kedai.db"), &dir).unwrap();
+
+        // 持写锁开事务后 panic:锁中毒,且连接停在未完成事务里
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let conn = db.write();
+            conn.execute_batch("BEGIN; INSERT INTO characters (id, name, chara_name, description, file_path, data_raw, created_at) VALUES ('c-poison','c','c','','','{}','');")
+                .unwrap();
+            panic!("模拟持锁 panic");
+        }));
+        assert!(result.is_err(), "应捕获到 panic");
+        assert!(db.writer.is_poisoned(), "锁应已中毒");
+
+        // 恢复路径:自动 ROLLBACK,连接回到 autocommit 且可继续写
+        let conn = db.write();
+        assert!(conn.is_autocommit(), "未完成事务应已被 ROLLBACK");
+        conn.execute(
+            "INSERT INTO characters (id, name, chara_name, description, file_path, data_raw, created_at)
+             VALUES ('c-after', 'c', 'c', '', '', '{}', '')",
+            [],
+        )
+        .expect("恢复后的连接应仍可写");
+        // 被回滚的插入不应存在(证明事务确实未提交)
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM characters WHERE id = 'c-poison'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0, "panic 前未提交的插入必须被回滚");
         drop(conn);
         drop(db);
         std::fs::remove_dir_all(dir).ok();

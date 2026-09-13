@@ -317,28 +317,7 @@ mod tests {
 
     /// 最小 AppConfig(仅供设置加载/保存测试;不读环境变量,避免受本机 .env 影响)
     fn test_cfg() -> AppConfig {
-        AppConfig {
-            host: "127.0.0.1".into(),
-            port: 0,
-            data_dir: std::env::temp_dir(),
-            log_dir: std::env::temp_dir(),
-            web_dist: None,
-            connector: "mock".into(),
-            openai_base_url: "https://example.com/v1".into(),
-            openai_api_key: String::new(),
-            openai_model: "test-model".into(),
-            default_temperature: 0.8,
-            default_top_p: 0.9,
-            default_max_tokens: 1024,
-            default_max_context_tokens: 65_536,
-            log_level: "info".into(),
-            api_token: "test-token".into(),
-            auth_required: false,
-            api_token_injected: true,
-            allow_remote: false,
-            bootstrap_enabled: true,
-            strict_client_header: false,
-        }
+        crate::config::test_config()
     }
 
     /// API Key 落盘应为密文(文件不含明文),load 后还原为明文

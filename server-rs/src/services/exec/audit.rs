@@ -120,7 +120,24 @@ pub fn record(db: &Arc<Db>, r: &AuditRecord) -> bool {
         ],
     );
     match result {
-        Ok(_) => true,
+        Ok(_) => {
+            // 保留策略(2026-09-13 批次 2):审计表此前只增不删(仅手动 DELETE /api/exec/audit
+            // 清理),长期使用会无界增长。每次写入后按 id 保留最近 EXEC_AUDIT_KEEP_ROWS 行;
+            // 成本为一次带索引的 DELETE,失败仅告警不影响本次审计记录。
+            if let Err(e) = conn.execute(
+                "DELETE FROM exec_audit WHERE id NOT IN (
+                   SELECT id FROM exec_audit ORDER BY id DESC LIMIT ?1
+                 )",
+                rusqlite::params![EXEC_AUDIT_KEEP_ROWS],
+            ) {
+                tracing::warn!(
+                    op = "exec_audit prune",
+                    error = e.to_string(),
+                    "审计保留策略清理失败"
+                );
+            }
+            true
+        }
         Err(e) => {
             tracing::warn!(
                 op = "exec_audit insert",
@@ -131,6 +148,9 @@ pub fn record(db: &Arc<Db>, r: &AuditRecord) -> bool {
         }
     }
 }
+
+/// 审计表保留行数上限(最近 N 行);超出部分在每次写入后清理。
+const EXEC_AUDIT_KEEP_ROWS: i64 = 2000;
 
 /// 审计查询:按时间倒序,limit 上限 500。
 /// `source` / `risk` 非空时按其过滤(前端审计面板的筛选项)。

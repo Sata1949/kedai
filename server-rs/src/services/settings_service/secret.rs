@@ -170,13 +170,161 @@ impl RuntimeSettings {
     /// 统一走原子写(utils::fs_atomic:写临时文件 + 原子替换),
     /// 进程中断不会留下半截 JSON;Windows 下 ReplaceFileW 替换,消除了旧实现
     /// 「先删目标再 rename」的非原子窗口。
+    ///
+    /// 防「密钥静默清空」(2026-09-13 批次 2):`unprotect` 解密失败时返回空串
+    /// (视为未配置,避免把密文当 Key 发上游),若直接保存就会用 `protect("")` 的
+    /// 空串覆盖磁盘上的密文 —— 用户密钥从此永久丢失且无提示。故保存前读一次磁盘:
+    /// 内存为空而磁盘仍是非空 `enc:v1:` 密文时,原样回写该密文(保留原值)。
+    /// 该规则不会误伤「用户主动清空」:PUT /api/settings 对空值直接忽略
+    /// (`api/settings.rs:300-305`),接口层面无法把已配置的 Key 由非空改为空。
     pub fn save(&self, data_dir: &Path) -> Result<(), String> {
         // 仅持久化副本加密,不改动内存中的明文 Key(连接器仍需直接使用)
         let mut persisted = self.clone();
-        persisted.openai_api_key = secret_store::protect(&self.openai_api_key)?;
-        persisted.embedding_api_key = secret_store::protect(&self.embedding_api_key)?;
+        let on_disk = read_preserved_ciphertexts(data_dir);
+        persisted.openai_api_key =
+            encrypt_or_preserve(&self.openai_api_key, on_disk.openai.as_deref())?;
+        persisted.embedding_api_key =
+            encrypt_or_preserve(&self.embedding_api_key, on_disk.embedding.as_deref())?;
         let text = serde_json::to_string_pretty(&persisted).map_err(|e| e.to_string())?;
         crate::utils::fs_atomic::write_atomic(&data_dir.join("settings.json"), text.as_bytes())
             .map_err(|e| e.to_string())
+    }
+}
+
+/// 磁盘上仍是非空密文的敏感字段(供「内存为空」时回写保真)
+#[derive(Default)]
+struct OnDiskCiphertexts {
+    openai: Option<String>,
+    embedding: Option<String>,
+}
+
+/// 读取 settings.json 中仍为 `enc:v1:` 非空密文的 Key 字段。
+/// 文件缺失/损坏/字段缺失一律返回 None(按「无旧值」处理,写入新值)。
+fn read_preserved_ciphertexts(data_dir: &Path) -> OnDiskCiphertexts {
+    let Ok(text) = std::fs::read_to_string(data_dir.join("settings.json")) else {
+        return OnDiskCiphertexts::default();
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return OnDiskCiphertexts::default();
+    };
+    let pick = |field: &str| -> Option<String> {
+        let v = json.get(field)?.as_str()?.trim();
+        if v.is_empty() || !secret_store::is_protected(v) {
+            return None;
+        }
+        Some(v.to_string())
+    };
+    OnDiskCiphertexts {
+        openai: pick("openai_api_key"),
+        embedding: pick("embedding_api_key"),
+    }
+}
+
+/// 加密待落盘值;内存为空但磁盘仍有密文时保留磁盘原密文(防静默清空)。
+fn encrypt_or_preserve(
+    in_memory: &str,
+    on_disk_ciphertext: Option<&str>,
+) -> Result<String, String> {
+    if in_memory.is_empty() {
+        if let Some(ct) = on_disk_ciphertext {
+            eprintln!(
+                "[settings] API Key 在内存中为空但磁盘仍为密文(此前解密失败?),保留原密文不覆盖;请在设置页重填以恢复"
+            );
+            return Ok(ct.to_string());
+        }
+        return secret_store::protect(""); // 空串保持空串
+    }
+    secret_store::protect(in_memory)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::test_config;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "kedai-secret-preserve-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_settings(dir: &Path, json: &str) {
+        std::fs::write(dir.join("settings.json"), json.as_bytes()).unwrap();
+    }
+
+    /// 核心契约:内存 Key 为空而磁盘是密文 → 保存必须保留原密文,绝不写成空
+    /// (2026-09-13 批次 2:修复「解密失败后一次保存即静默清空密钥」)
+    #[test]
+    fn save_preserves_ciphertext_when_memory_key_is_empty() {
+        let dir = temp_dir("keep");
+        write_settings(
+            &dir,
+            r#"{"openai_api_key":"enc:v1:KEPT-CIPHERTEXT","embedding_api_key":"enc:v1:KEPT-EMB"}"#,
+        );
+        let mut s = RuntimeSettings::from_config(&test_config());
+        s.openai_api_key = String::new(); // 模拟解密失败后的内存态
+        s.embedding_api_key = String::new();
+        s.save(&dir).expect("保存应成功");
+
+        let text = std::fs::read_to_string(dir.join("settings.json")).unwrap();
+        assert!(
+            text.contains("enc:v1:KEPT-CIPHERTEXT"),
+            "openai_api_key 必须保留原密文:{text}"
+        );
+        assert!(
+            text.contains("enc:v1:KEPT-EMB"),
+            "embedding_api_key 必须保留原密文:{text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 未配置(磁盘无密文)时保存仍写空串;新的非空 Key 正常加密覆盖
+    #[cfg(windows)]
+    #[test]
+    fn save_writes_empty_or_new_key_normally() {
+        let dir = temp_dir("normal");
+        let mut s = RuntimeSettings::from_config(&test_config());
+        s.openai_api_key = String::new();
+        s.save(&dir).unwrap();
+        let text = std::fs::read_to_string(dir.join("settings.json")).unwrap();
+        assert!(
+            text.contains("\"openai_api_key\": \"\""),
+            "未配置应写空串:{text}"
+        );
+
+        s.openai_api_key = "sk-new-key-1234".to_string();
+        s.save(&dir).unwrap();
+        let text = std::fs::read_to_string(dir.join("settings.json")).unwrap();
+        assert!(
+            text.contains("enc:v1:") && !text.contains("sk-new-key-1234"),
+            "新 Key 应加密落盘:{text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 旧版明文 Key 的迁移路径不受影响:解密(直读)后重新加密
+    #[cfg(windows)]
+    #[test]
+    fn legacy_plaintext_key_still_migrates_to_ciphertext() {
+        let dir = temp_dir("legacy");
+        write_settings(
+            &dir,
+            r#"{"openai_api_key":"sk-legacy-plain","embedding_api_key":""}"#,
+        );
+        let cfg = test_config();
+        let mut s = RuntimeSettings::from_config(&cfg);
+        s.openai_api_key = secret_store::unprotect("sk-legacy-plain");
+        assert_eq!(s.openai_api_key, "sk-legacy-plain");
+        s.save(&dir).unwrap();
+        let text = std::fs::read_to_string(dir.join("settings.json")).unwrap();
+        assert!(
+            text.contains("enc:v1:") && !text.contains("sk-legacy-plain"),
+            "明文应迁移为密文:{text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

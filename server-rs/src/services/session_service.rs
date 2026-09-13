@@ -233,7 +233,62 @@ impl SessionService {
             params![session_id, upto_message_id, summary, model, now_iso()],
         )
         .map_err(|e| format!("保存压缩摘要失败: {e}"))?;
+        // 保留策略(2026-09-13 批次 2):此前每次压缩新增一行且全仓无 GC,长期会话行数
+        // 线性增长。保留最近 20 条(回溯用),更旧的删除;失败仅告警不影响本次保存。
+        if let Err(e) = conn.execute(
+            "DELETE FROM session_compactions
+             WHERE session_id = ?1 AND upto_message_id NOT IN (
+               SELECT upto_message_id FROM session_compactions
+               WHERE session_id = ?1 ORDER BY upto_message_id DESC LIMIT 20
+             )",
+            params![session_id],
+        ) {
+            tracing::warn!(
+                session_id,
+                error = e.to_string(),
+                "压缩摘要保留策略清理失败"
+            );
+        }
         Ok(())
+    }
+
+    /// 会话删除前清理无 FK 级联的从属表(2026-09-13 批次 2,防孤儿行无限累积):
+    /// - `scope_variables` 的 message 作用域行(随消息存亡;**必须在删会话之前**调用,
+    ///   删除会话会连带删 messages,届时子查询已取不到 message id);
+    /// - `undo_snapshots`(写工具快照,payload 可能很大,此前只在 restore 时清理);
+    /// - `kaleido_changelog`(契约逐 op 变更日志,会话删除时原本不清理)。
+    ///
+    /// 返回首个错误的描述;调用方记日志不阻断删除(残留仅占存储,读写均按 session_id 过滤)。
+    pub fn cleanup_dependent_rows_before_delete(&self, session_id: &str) -> Result<(), String> {
+        let conn = self.db.write();
+        let mut first_err: Option<String> = None;
+        let mut run = |sql: &str, label: &str| {
+            if let Err(e) = conn.execute(sql, params![session_id]) {
+                let msg = format!("{label}: {e}");
+                tracing::warn!(session_id, error = e.to_string(), "会话从属数据清理失败");
+                if first_err.is_none() {
+                    first_err = Some(msg);
+                }
+            }
+        };
+        run(
+            "DELETE FROM scope_variables WHERE scope = 'message' AND scope_id IN (
+               SELECT CAST(id AS TEXT) FROM messages WHERE session_id = ?1
+             )",
+            "message 作用域变量",
+        );
+        run(
+            "DELETE FROM undo_snapshots WHERE session_id = ?1",
+            "回退快照",
+        );
+        run(
+            "DELETE FROM kaleido_changelog WHERE session_id = ?1",
+            "契约变更日志",
+        );
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
     /// 读取该会话最新一条压缩摘要(按 upto_message_id 最大),返回 (upto_message_id, summary)。

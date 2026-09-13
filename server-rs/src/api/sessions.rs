@@ -230,11 +230,13 @@ pub async fn delete_session(
     let id_c = id.clone();
     match state
         .db_call(move || {
-            // P6:kaleido 两表无 FK 级联,显式清理契约运行态;失败仅记日志不阻断删除
+            // P6/批次 2:无 FK 级联的从属表显式清理;失败仅记日志不阻断删除
             // (残留行仅占用存储,不影响正确性——读写均按 session_id 过滤)。
+            // 顺序关键:message 作用域变量需要 messages 行还在,故必须在 svc.delete 之前清理。
+            let dependent_err = svc.cleanup_dependent_rows_before_delete(&id_c).err();
             if svc.delete(&id_c) {
                 let cleanup_err = kaleido.delete_for_session(&id_c).err();
-                Some(cleanup_err)
+                Some((dependent_err, cleanup_err))
             } else {
                 None
             }
@@ -242,7 +244,10 @@ pub async fn delete_session(
         .await
     {
         Err(e) => db_err(&e),
-        Ok(Some(cleanup_err)) => {
+        Ok(Some((dependent_err, cleanup_err))) => {
+            if let Some(e) = dependent_err {
+                tracing::warn!(session_id = id, error = e, "会话从属数据清理失败");
+            }
             if let Some(e) = cleanup_err {
                 tracing::warn!(session_id = id, error = e, "会话契约运行态清理失败");
             }

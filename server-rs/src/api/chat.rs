@@ -14,6 +14,25 @@ use serde_json::json;
 use std::convert::Infallible;
 use std::sync::Arc;
 
+/// `pending_runs` 占位守卫:插入即武装,离开作用域(含早退 return、panic、任务被丢弃)
+/// 自动移除。背景(2026-09-13 批次 2):此前清理逻辑散落在 5 处早退 + 1 处 spawn 收尾,
+/// 若引擎在 `engine.run` 内 panic,spawn 收尾不执行 → 该会话条目永久残留,此后所有
+/// 发送都 409(只能重启)。RAII 把「必然清理」变成类型保证,顺带删掉重复代码。
+struct PendingRunGuard {
+    pending:
+        Arc<std::sync::Mutex<std::collections::HashMap<String, tokio::sync::watch::Sender<bool>>>>,
+    session_id: String,
+}
+
+impl Drop for PendingRunGuard {
+    fn drop(&mut self) {
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.session_id);
+    }
+}
+
 #[derive(Deserialize)]
 pub struct SendBody {
     #[serde(default)]
@@ -191,7 +210,8 @@ pub async fn send(State(state): State<Arc<AppState>>, Json(body): Json<SendBody>
     }
 
     // 原子占位必须发生在任何消息写入之前;所有前置校验已完成。
-    {
+    // 守卫随作用域自动清理:早退 / panic / 任务丢弃都必然移除条目(见 PendingRunGuard)。
+    let pending_guard = {
         let mut pending = state
             .guards
             .pending_runs
@@ -202,7 +222,12 @@ pub async fn send(State(state): State<Arc<AppState>>, Json(body): Json<SendBody>
         }
         let (cancel, _receiver) = tokio::sync::watch::channel(false);
         pending.insert(session_id.clone(), cancel);
-    }
+        drop(pending);
+        PendingRunGuard {
+            pending: state.guards.pending_runs.clone(),
+            session_id: session_id.clone(),
+        }
+    };
 
     // 消息写入三路分支(互斥):
     //   1) 重生成锚点(regenerate_assistant_id):生成新版本,不落新 user 消息,
@@ -212,12 +237,6 @@ pub async fn send(State(state): State<Arc<AppState>>, Json(body): Json<SendBody>
     if let Some(message_id) = body.regenerate_assistant_id {
         // 与重发锚点互斥:两个锚点同时出现属于请求错误
         if body.resend_message_id.is_some() {
-            state
-                .guards
-                .pending_runs
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&session_id);
             return err_json("重生成与重发锚点互斥,不能同时指定", StatusCode::BAD_REQUEST);
         }
         let valid = state
@@ -226,12 +245,6 @@ pub async fn send(State(state): State<Arc<AppState>>, Json(body): Json<SendBody>
             .last()
             .is_some_and(|m| m.id == message_id && m.role == "assistant");
         if !valid {
-            state
-                .guards
-                .pending_runs
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&session_id);
             return err_json("重生成锚点无效或已过期", StatusCode::CONFLICT);
         }
     } else if let Some(message_id) = body.resend_message_id {
@@ -241,12 +254,6 @@ pub async fn send(State(state): State<Arc<AppState>>, Json(body): Json<SendBody>
             .last()
             .is_some_and(|m| m.id == message_id && m.role == "user" && m.content == message);
         if !valid {
-            state
-                .guards
-                .pending_runs
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&session_id);
             return err_json("重发消息锚点无效或已过期", StatusCode::CONFLICT);
         }
     } else {
@@ -271,12 +278,6 @@ pub async fn send(State(state): State<Arc<AppState>>, Json(body): Json<SendBody>
         }).await;
         if let Err(e) = write_result.unwrap_or_else(|e| Err(format!("消息写入任务失败: {e}")))
         {
-            state
-                .guards
-                .pending_runs
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&session_id);
             return err_json(&e, StatusCode::INTERNAL_SERVER_ERROR);
         }
     }
@@ -289,12 +290,6 @@ pub async fn send(State(state): State<Arc<AppState>>, Json(body): Json<SendBody>
         .get(&session_id)
         .is_none_or(|flag| *flag.borrow());
     if pending_cancelled {
-        state
-            .guards
-            .pending_runs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&session_id);
         return err_json("生成已中断", StatusCode::CONFLICT);
     }
 
@@ -320,14 +315,11 @@ pub async fn send(State(state): State<Arc<AppState>>, Json(body): Json<SendBody>
 
     // 后台运行 Agent。assistant 消息落库已移至引擎收尾(Finish 事件发出前完成),
     // 保证前端收到 finish 后 loadHistory 能取到完整数据,消除落库竞态。
-    let pending_runs = state.guards.pending_runs.clone();
-    let run_session_id = session_id.clone();
     tokio::spawn(async move {
+        // 占位守卫随任务存续:引擎正常结束、panic 或任务被丢弃都会自动清理(RAII),
+        // 不再依赖 spawn 收尾语句执行(引擎 panic 时它不会执行)。
+        let _pending_guard = pending_guard;
         let _ = engine.run(req, tx).await;
-        pending_runs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&run_session_id);
     });
 
     let stream = async_stream::stream! {
@@ -939,5 +931,43 @@ mod tests {
         );
         assert_eq!(generate_raw_heal_budget(Some("stop"), 1024, 0), None);
         assert_eq!(generate_raw_heal_budget(None, 1024, 0), None);
+    }
+
+    /// 占位守卫:离开作用域必然移除条目——含 panic 路径
+    /// (2026-09-13 批次 2:修复「引擎 panic → 该会话此后永久 409」)
+    #[test]
+    fn pending_run_guard_removes_entry_on_drop_and_panic() {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        let map = Arc::new(Mutex::new(HashMap::new()));
+        {
+            let (tx, _rx) = tokio::sync::watch::channel(false);
+            map.lock().unwrap().insert("s1".to_string(), tx);
+            let guard = PendingRunGuard {
+                pending: map.clone(),
+                session_id: "s1".into(),
+            };
+            assert!(map.lock().unwrap().contains_key("s1"), "持有期间占位应在位");
+            drop(guard);
+        }
+        assert!(!map.lock().unwrap().contains_key("s1"), "drop 后应移除");
+
+        // panic 路径:catch_unwind 捕获后条目也必须已移除(修复的核心场景)
+        let map_for_panic = map.clone();
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {})); // 静音预期的 panic 输出
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (tx, _rx) = tokio::sync::watch::channel(false);
+            map_for_panic.lock().unwrap().insert("s2".to_string(), tx);
+            let _guard = PendingRunGuard {
+                pending: map_for_panic.clone(),
+                session_id: "s2".into(),
+            };
+            panic!("模拟引擎 panic");
+        }));
+        std::panic::set_hook(hook);
+        assert!(result.is_err(), "应捕获到 panic");
+        assert!(!map.lock().unwrap().contains_key("s2"), "panic 后应移除");
     }
 }
