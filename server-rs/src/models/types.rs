@@ -612,7 +612,7 @@ pub struct AgentSubtaskRecord {
 pub enum TaskRunMode {
     /// 三段式:规划 → 逐步执行 → 汇总(既有行为,默认)
     Legacy,
-    /// 单主 agent 工具自循环(run_tool_loop,工具全量)
+    /// 单主 agent 工具自循环(run_tool_loop,工具集按 task_tool_policy 编译)
     Solo,
     /// solo + 子 agent 工具化(agent_depth+1 深度守卫)
     Multi,

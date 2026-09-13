@@ -47,6 +47,22 @@ function escapeAttr(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+/**
+ * 资源页 RPC 诊断日志(环形保留 20 条,localStorage)。
+ * 卡片自检报「丢格式」时,用 `injected`(世界书注入条数)与 `chars`(产出长度)
+ * 区分故障:injected=0 → 角色 id 未送达或条目未命中;chars 偏小 → 被 max_tokens 截断。
+ * 仅记元信息,不落正文/密钥。
+ */
+function logTavernCall(entry: Record<string, unknown>): void {
+  try {
+    const log = JSON.parse(localStorage.getItem('kedai.tavern-call-log') ?? '[]') as unknown[];
+    log.push({ t: Date.now(), ...entry });
+    localStorage.setItem('kedai.tavern-call-log', JSON.stringify(log.slice(-20)));
+  } catch {
+    /* 忽略(隐私模式/配额满) */
+  }
+}
+
 export function useResourceFrames(opts: UseResourceFramesOptions) {
   /** 已注册的资源框架:contentWindow(跨 reload 稳定)→ 条目 */
   const resourceFrames = new Map<Window, ResourceEntry>();
@@ -197,14 +213,8 @@ export function useResourceFrames(opts: UseResourceFramesOptions) {
     entry: ResourceEntry,
     m: { callId?: string; method?: string; args?: unknown },
   ): Promise<void> {
-    // 调试痕迹:资源页 RPC 调用记录(诊断桥断点;环形保留 20 条)
-    try {
-      const log = JSON.parse(localStorage.getItem('kedai.tavern-call-log') ?? '[]') as unknown[];
-      log.push({ t: Date.now(), method: m.method, callId: m.callId });
-      localStorage.setItem('kedai.tavern-call-log', JSON.stringify(log.slice(-20)));
-    } catch {
-      /* 忽略 */
-    }
+    // 调试痕迹:资源页 RPC 调用记录(桥入口先记一条,便于确认调用是否到达宿主)
+    logTavernCall({ method: m.method, callId: m.callId, phase: 'received' });
     const win = entry.frame.contentWindow;
     if (!win || !m.callId) return;
     const reply = (ok: boolean, value?: unknown, error?: string): void => {
@@ -254,9 +264,35 @@ export function useResourceFrames(opts: UseResourceFramesOptions) {
         // 触发的输出格式规范)由后端注入,缺失会让模型自由发挥 → 游戏自检「丢格式」
         body: JSON.stringify({ messages, character_id: opts.currentCharacterId.value ?? undefined }),
       });
-      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; text?: string; error?: string };
-      if (data.ok && typeof data.text === 'string') reply(true, data.text);
-      else reply(false, undefined, data.error ?? `HTTP ${res.status}`);
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        text?: string;
+        error?: string;
+        /** 后端注入的世界书条目 comment 清单,空数组/缺失即「未注入」 */
+        injected?: string[];
+      };
+      if (data.ok && typeof data.text === 'string') {
+        // 注入条数与产出长度写进诊断日志(卡片报「丢格式」时用于区分
+        // 「世界书没注入」与「JSON 被 max_tokens 截断」两种故障)
+        logTavernCall({
+          method: m.method ?? 'generate',
+          callId: m.callId,
+          ok: true,
+          injected: data.injected?.length ?? 0,
+          chars: data.text.length,
+          characterId: opts.currentCharacterId.value ?? null,
+        });
+        reply(true, data.text);
+      } else {
+        logTavernCall({
+          method: m.method ?? 'generate',
+          callId: m.callId,
+          ok: false,
+          error: data.error ?? `HTTP ${res.status}`,
+          characterId: opts.currentCharacterId.value ?? null,
+        });
+        reply(false, undefined, data.error ?? `HTTP ${res.status}`);
+      }
     } catch (e) {
       reply(false, undefined, String((e as Error).message || '桥接失败'));
     }

@@ -420,6 +420,60 @@ async fn task_events_delta_from_agent_sink() {
     );
 }
 
+/// 任务模式 bash 可下发(2026-09-13 用户要求):默认策略 `deny_dangerous` 对 bash
+/// 按工具名开例外。mock 的 `[[tool:bash]]` 钩子只在工具进入本轮 tools 白名单时才产出
+/// ToolCall(见 mock::tool_offered)——若策略仍把 bash 整体剔除,事件流里不会出现
+/// 「调用工具 bash」。据此断言策略层确实下发了 bash。
+///
+/// 注意:本用例只证「工具被下发并进入执行闸门」,不证命令真的执行成功——
+/// `exec_enabled` 默认关闭,执行会被总开关拒绝(非策略拒绝),这正是安全语义:
+/// 下发 ≠ 放行,受总开关与命令级硬门双重约束。
+#[tokio::test]
+async fn task_solo_offers_bash_tool() {
+    let app = test_app();
+    let (status, _, mut body) = open_event_stream(app).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let title = r#"[[tool:bash {"command":"echo kd-task-bash"}]] 主目标:执行只读命令"#;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/tasks")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({ "title": title, "task_mode": "solo" }).to_string(),
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let created: Value = serde_json::from_slice(&bytes).unwrap();
+    let id = created["task"]["id"].as_str().unwrap().to_string();
+
+    let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
+
+    let seq = collect_full_until_terminal(&mut body, &id).await;
+    let called_bash = seq.iter().any(|e| {
+        e["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains("调用工具 bash"))
+    });
+    assert!(
+        called_bash,
+        "任务模式下 bash 应被下发并进入工具循环(deny_dangerous 例外),实际事件: {seq:?}"
+    );
+    // 反向确认:不得以「被任务策略拒绝」形态出现(那是策略层剔除的特征)
+    let policy_denied = seq.iter().any(|e| {
+        e["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains("被任务策略拒绝") && d.contains("bash"))
+    });
+    assert!(
+        !policy_denied,
+        "bash 不应被任务策略拒绝(命令级拒绝应来自总开关/命令硬门,而非策略): {seq:?}"
+    );
+}
+
 /// 批次 3 调用追踪:执行任务后事件流含 kind=llm_call(落库成功后发射),
 /// GET /api/tasks/{id}/calls 返回 planner/step/summarize 三阶段调用行,字段与
 /// 前端 TaskLlmCall 契约逐一对应。

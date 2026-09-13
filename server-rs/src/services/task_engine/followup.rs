@@ -2,7 +2,7 @@
 // 上 `ModeExecutor` 缝(批次 M3),消除「绕过 ModeExecutor 直调
 // solo::run_agent_loop」的第三条执行路径。
 //
-// 语义不变:solo 单轮 run_agent_loop(工具全量,不重新规划)→ 产出落
+// 语义不变:solo 单轮 run_agent_loop(工具集按 task_tool_policy 编译,不重新规划)→ 产出落
 // assistant 消息(kind=followup,与首轮的 kind=result 区分)→ `append` 以
 // 「追加 N」段附加进 result,`replace` 以「修订 N」段整体替换 → 终态映射
 // (原 partial 保持 partial,其余回 done)。

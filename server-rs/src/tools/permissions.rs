@@ -909,6 +909,47 @@ mod tests {
         assert!(!decide_with(&m, "bash", AuthorizationMode::Bypass, &a2).allowed);
     }
 
+    /// ★ 任务模式白名单(custom_authorized=true,即 ToolGate 名单内工具)不得豁免
+    /// 命令级高危硬门:无人值守任务没有 UI 确认通道,rm -rf/sudo 必须直接拒绝;
+    /// 普通命令仍经白名单放行(证明硬化断言非恒真)。
+    #[test]
+    fn task_whitelist_does_not_bypass_destructive_command_gate() {
+        let m = ToolPermissionManager::in_memory();
+        let ctx = ToolContext {
+            session_id: "task:s1".into(),
+            character_id: String::new(),
+            agent_depth: 0,
+        };
+        for cmd in ["rm -rf /important", "sudo reboot"] {
+            let a = exec_action(cmd);
+            let d = m.decide_with_policy(
+                "bash",
+                &ctx,
+                true,
+                true,
+                AuthorizationMode::Loose,
+                &a,
+                false,
+            );
+            assert!(
+                !d.allowed,
+                "任务白名单不得放行高危命令 {cmd};理由:{}",
+                d.reason
+            );
+        }
+        let a = exec_action("ls -la");
+        let d = m.decide_with_policy(
+            "bash",
+            &ctx,
+            true,
+            true,
+            AuthorizationMode::Loose,
+            &a,
+            false,
+        );
+        assert!(d.allowed, "普通命令应经任务白名单放行:{}", d.reason);
+    }
+
     /// 非高危命令仍受工具级授权放行(授权 bash 后 ls 不再重复问)。
     #[test]
     fn explicit_tool_grant_still_applies_to_safe_commands() {

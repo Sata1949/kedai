@@ -13,6 +13,12 @@ use tokio::sync::watch;
 /// 默认输出上限 1024 → 截断;自愈翻倍 2048 → 完整(与 RETRY 翻倍语义对齐)。
 const TOOL_RAW_MIN_BUDGET: u32 = 2048;
 
+/// [[trunc_text:]]/[[trunc_fail:]] 钩子的截断预算门限:max_tokens 低于该值视为
+/// 「输出预算不足」返回半截文本 + Finish{length};达到即视为「自愈翻倍后的重发」。
+/// 取值须落在 generate-raw 结构化下限(8192)与首轮翻倍值(16384)之间,
+/// 使首轮截断、重发充足(2026-09-13 generate-raw 自愈循环端点级测试用)。
+const TRUNC_TEXT_MIN_BUDGET: u32 = 12_000;
+
 pub struct MockConnector;
 
 impl MockConnector {
@@ -392,6 +398,57 @@ impl MockConnector {
             return Ok(chunks);
         }
 
+        // 测试钩子:[[trunc_text:半截|完整]] → 文本版「max_tokens 截断自愈」模拟:
+        // 预算不足返回半截 + Finish{length};预算充足(自愈翻倍重发轮)返回完整 + Finish{stop}。
+        // 与 [[tool_raw:]] 同设计(按预算区分两轮),供 generate-raw 端点级自愈测试断言
+        // 「重发后拿到完整文本、且 injected 保留」。
+        if let Some((partial, full)) = extract_marker_pair(&last_user, "[[trunc_text:") {
+            let (text, reason) = if params.max_tokens < TRUNC_TEXT_MIN_BUDGET {
+                (partial, "length")
+            } else {
+                (full, "stop")
+            };
+            let prompt_chars: usize = messages.iter().map(|m| m.content.chars().count()).sum();
+            let out_chars = text.chars().count() as i64;
+            chunks.push(LlmStreamChunk::Token(text));
+            chunks.push(LlmStreamChunk::Usage {
+                prompt_tokens: (prompt_chars as f64 / 4.0).ceil() as i64,
+                completion_tokens: out_chars,
+                total_tokens: (prompt_chars as f64 / 4.0).ceil() as i64 + out_chars,
+                prompt_cache_hit_tokens: 0,
+                prompt_cache_miss_tokens: 0,
+                reasoning_tokens: 0,
+            });
+            chunks.push(LlmStreamChunk::Finish {
+                reason: reason.into(),
+            });
+            return Ok(chunks);
+        }
+
+        // 测试钩子:[[trunc_fail:半截]] → 预算不足返回半截 + Finish{length};
+        // 预算充足(重发轮)直接返回 Err,模拟「自愈重发失败」→ generate-raw 应回退
+        // 半截文本而非整体报错(回退分支端点级测试用)。
+        if let Some(partial) = extract_marker_single(&last_user, "[[trunc_fail:") {
+            if params.max_tokens < TRUNC_TEXT_MIN_BUDGET {
+                let prompt_chars: usize = messages.iter().map(|m| m.content.chars().count()).sum();
+                let out_chars = partial.chars().count() as i64;
+                chunks.push(LlmStreamChunk::Token(partial));
+                chunks.push(LlmStreamChunk::Usage {
+                    prompt_tokens: (prompt_chars as f64 / 4.0).ceil() as i64,
+                    completion_tokens: out_chars,
+                    total_tokens: (prompt_chars as f64 / 4.0).ceil() as i64 + out_chars,
+                    prompt_cache_hit_tokens: 0,
+                    prompt_cache_miss_tokens: 0,
+                    reasoning_tokens: 0,
+                });
+                chunks.push(LlmStreamChunk::Finish {
+                    reason: "length".into(),
+                });
+                return Ok(chunks);
+            }
+            return Err("模拟自愈重发失败(测试钩子 [[trunc_fail:]])".into());
+        }
+
         // 测试钩子:[[finish:原因|内容]] → 返回 Token(内容)+ Finish{reason:原因}
         //(可观测性问题①:模拟上游 max_tokens 截断,任务模式 finish_reason 透出测试用)。
         // 「原因」如 length/stop/content_filter;「内容」可省(缺省给固定半截文本)。
@@ -529,6 +586,32 @@ fn extract_finish_marker(input: &str) -> Option<(String, String)> {
         return None;
     }
     Some((reason.to_string(), content))
+}
+
+/// 提取 [[marker:左|右]] 形式的双段标记(取到首个 "]]";两段分别 trim,任一段为空视为未命中)。
+/// 供 [[trunc_text:]] 等「首轮/重发轮」双值钩子共用;约定内容不含 "]]" 与额外 "|"。
+fn extract_marker_pair(input: &str, marker: &str) -> Option<(String, String)> {
+    let start = input.find(marker)?;
+    let rest = &input[start + marker.len()..];
+    let end = rest.find("]]")?;
+    let (a, b) = rest[..end].split_once('|')?;
+    let (a, b) = (a.trim(), b.trim());
+    if a.is_empty() || b.is_empty() {
+        return None;
+    }
+    Some((a.to_string(), b.to_string()))
+}
+
+/// 提取 [[marker:内容]] 形式的单段标记(取到首个 "]]";空内容视为未命中)。
+fn extract_marker_single(input: &str, marker: &str) -> Option<String> {
+    let start = input.find(marker)?;
+    let rest = &input[start + marker.len()..];
+    let end = rest.find("]]").unwrap_or(rest.len());
+    let text = rest[..end].trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(text.to_string())
 }
 
 /// 提取 [[mvu_tool:name|args]] 标记;返回 (name, arguments_json)。

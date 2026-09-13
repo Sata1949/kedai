@@ -455,6 +455,28 @@ FTS5 全文检索(BM25 排序);查询短于 3 字符时后端回退 `LIKE`(trigr
 
 ### POST `/api/chat/generate-raw` — 角色卡资源页作者脚本的自由生成桥(一次性、非流式、不写会话)
 
+请求:`{ messages: [{role, content}], character_id?, temperature?, top_p?, max_tokens? }`
+(role 仅 `system`/`user`/`assistant`;条数 ≤200、单条 ≤64KB、总长 ≤256KB)。
+提供 `character_id` 时按该角色世界书做关键字匹配注入(常驻条目置顶、触发条目插到最后
+一条 user 之前)。
+
+响应:`{ ok: true, text, injected: string[] }`。`injected` 为本次注入的世界书条目
+comment 清单——卡片诊断时用它区分「世界书未注入(`injected` 为空)」与「输出被截断
+(`text` 偏短)」两类不同故障。
+
+**预算与截断自愈**(常量见 `server-rs/src/api/chat.rs`):
+- 未显式指定 `max_tokens` 时取「用户设置 vs 8192(`GENERATE_RAW_MIN_TOKENS)」的较大者
+  ——结构化输出下限:卡片要求「整个回复有且仅有一个 JSON」,1024 默认值会把 JSON 腰斩
+  (2026-09-13 Android「掉格式」根因);显式值原样尊重并钳在 `1..=65536`,
+  `max_tokens: 0` 返回 400 `VALIDATION`;
+- 上游 `finish_reason=length` 时预算翻倍重发(封顶 32768,最多 2 次);
+- **重发失败或自愈用尽时仍返回 200 + 最后一次(半截)文本**:卡片自带解析器可从半截
+  文本尽力提取,整体报错反而更无用;此时错误只留服务端日志
+  (`generate_raw_retry_failed_fallback_partial` / `generate_raw_still_truncated`)。
+
+**已知限制**:客户端断开不取消在途重发(最多 3 次上游调用);本端点不落 usage/审计,
+重发消耗只能从服务端日志统计。
+
 ### POST `/api/chat/compact` — 触发上下文压缩(manual)
 
 ### POST `/api/chat/compact/clear` — 清除压缩摘要

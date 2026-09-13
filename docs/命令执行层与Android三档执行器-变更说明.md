@@ -10,7 +10,12 @@
 - 名称 `bash`,参数 `command`(必填)/ `cwd` / `timeout_ms`。
 - 平台默认 shell:Windows 用 `cmd /c`,其他平台用 `sh -c`。
 - **不加入任何只读白名单**(READONLY_SCOUT / SUBAGENT / REFLECT),不自动下发给
-  规划侦察轮、子 agent、反思步骤,也不进任务模式默认集合(风险恒 `Dangerous`)。
+  规划侦察轮、子 agent、反思步骤。
+- **任务模式默认集合**(后续修订,2026-09-13):风险恒 `Dangerous`,但
+  `task_engine::tool_policy` 的 `deny_dangerous` 档按**工具名**对 `bash` 开例外下发——
+  用户要求任务模式具备命令执行能力。下发工具不等于放行危险命令:`destructive`/`admin`
+  命令仍由命令级硬门在任何自动放行之前拒绝(任务模式无 UI 通道 → 直接拒绝),
+  详情见 [授权模式.md](授权模式.md) 三·五与四节。
 
 ### 四道安全闸
 | 闸 | 落点 | 行为 |

@@ -145,7 +145,8 @@ watch([filterSource, filterRisk], () => void loadAudit());
     <p class="sv-note">
       允许 Agent 通过 <code>bash</code> 工具执行 shell 命令。默认关闭。
       <b>破坏性与提权命令(删除/格式化/su/sudo/包管理等)不受授权模式豁免,一律逐条确认</b>;
-      任务模式下此类命令不可用(无确认通道,直接拒绝)。每次尝试(含被拒绝的)都会留下审计记录。
+      任务模式下此类高危命令不可用(无确认通道,直接拒绝),普通命令可用。
+      每次尝试(含被拒绝的)都会留下审计记录。
     </p>
 
     <label class="sv-auth-tool-row">

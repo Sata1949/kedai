@@ -14,7 +14,7 @@ use crate::services::task_core::{TaskBackend, TaskTerminal};
 use futures::future::BoxFuture;
 use std::sync::Arc;
 
-/// multi 执行器:主 agent 工具自循环(工具全量,含 agentgo 子 agent 编排)。
+/// multi 执行器:主 agent 工具自循环(工具集按 task_tool_policy 编译,含 agentgo 子 agent 编排)。
 pub(crate) struct MultiExecutor {
     inner: SoloExecutor,
 }

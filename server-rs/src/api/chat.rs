@@ -577,6 +577,14 @@ pub async fn generate_raw(
     if total > MAX_TOTAL_LEN {
         return err_json("消息总长超限(256KB)", StatusCode::BAD_REQUEST);
     }
+    // 显式 max_tokens=0 属非法(上游 OpenAI 兼容端同样要求 ≥1):直接 400,不静默
+    // 当默认值——否则调用方以为「0 表示不限制」,实际拿到的是下限之外的意外小预算。
+    if body.max_tokens == Some(0) {
+        return err_json(
+            "max_tokens 非法:必须 ≥ 1,或省略以使用默认预算",
+            StatusCode::BAD_REQUEST,
+        );
+    }
 
     // 世界书匹配注入(带 character_id 时):角色内嵌 character_book + 绑定/全局世界书,
     // 对齐酒馆 TavernHelper.generate 语义——作者页只自组历史与 user_input,
@@ -606,14 +614,32 @@ pub async fn generate_raw(
             .await
             .unwrap_or_default()
         };
+        let entry_count = entries.len();
         injected = inject_worldbook_for_raw(&entries, &mut messages);
-        if !injected.is_empty() {
+        // 无论是否命中都记录:注入 0 条是「丢格式」的头号嫌疑(命中数=0 与
+        // character_id 缺失是两种不同故障,必须有日志可区分)。
+        if injected.is_empty() {
+            tracing::warn!(
+                character_id = cid,
+                entries = entry_count,
+                injected = 0,
+                "generate_raw_worldbook_inject_empty"
+            );
+        } else {
             tracing::info!(
                 character_id = cid,
+                entries = entry_count,
                 injected = injected.len(),
                 "generate_raw_worldbook_inject"
             );
         }
+    } else {
+        // 缺 character_id 时注入整段跳过,模型自由发挥 → 卡片 JSON 解析失败。
+        // 作者页依赖宿主 bridge 传当前角色 id,缺失属配置/时序问题,必须留痕。
+        tracing::warn!(
+            messages = messages.len(),
+            "generate_raw_without_character_id"
+        );
     }
 
     let messages: Vec<crate::models::types::LlmMessage> = messages
@@ -640,20 +666,121 @@ pub async fn generate_raw(
             parallel_tool_calls: None,
         }
     };
+    // 结构化输出预算:作者页(吸血鬼卡等)要求整个回复有且仅有一个 JSON,截断即等于失败。
+    let mut budget = generate_raw_budget(body.max_tokens, params.max_tokens);
     let connector = state.engine.connector.read().await;
     let (_cancel_tx, abort_rx) = tokio::sync::watch::channel(false);
-    match connector.generate(&messages, params, abort_rx).await {
-        Ok(chunks) => {
-            let text: String = chunks
-                .iter()
-                .filter_map(|c| match c {
-                    crate::models::types::LlmStreamChunk::Token(t) => Some(t.as_str()),
-                    _ => None,
-                })
-                .collect();
-            Json(json!({ "ok": true, "text": text, "injected": injected })).into_response()
+    let mut heal_rounds = 0u32;
+    // 总调用轮次(首轮 + 自愈重发):诊断日志用它统计「白烧」成本(本端点不落
+    // usage/审计,重发消耗只能从日志看)。
+    let mut attempts = 0u32;
+    // 上一次(截断但至少可读的)产出:自愈重发失败时回退它,而不是把
+    // 「本来能拿到半截文本」变成整体报错(卡片的报错提示比半截文本更无用)。
+    let mut last_text: Option<String> = None;
+    loop {
+        attempts += 1;
+        let mut attempt = params.clone();
+        attempt.max_tokens = budget;
+        let chunks = match connector
+            .generate(&messages, attempt, abort_rx.clone())
+            .await
+        {
+            Ok(chunks) => chunks,
+            Err(e) => {
+                return match last_text {
+                    Some(prev) => {
+                        tracing::warn!(
+                            error = %e,
+                            attempts,
+                            budget,
+                            chars = prev.len(),
+                            "generate_raw_retry_failed_fallback_partial"
+                        );
+                        Json(json!({ "ok": true, "text": prev, "injected": injected }))
+                            .into_response()
+                    }
+                    None => err_json(format!("生成失败:{e}"), StatusCode::BAD_GATEWAY),
+                };
+            }
+        };
+        let text: String = chunks
+            .iter()
+            .filter_map(|c| match c {
+                crate::models::types::LlmStreamChunk::Token(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        let finish = chunks.iter().rev().find_map(|c| match c {
+            crate::models::types::LlmStreamChunk::Finish { reason } => Some(reason.clone()),
+            _ => None,
+        });
+        match generate_raw_heal_budget(finish.as_deref(), budget, heal_rounds) {
+            Some(next) => {
+                tracing::warn!(
+                    used = budget,
+                    next,
+                    chars = text.len(),
+                    "generate_raw_truncated_retry"
+                );
+                last_text = Some(text);
+                budget = next;
+                heal_rounds += 1;
+            }
+            None => {
+                if finish.as_deref() == Some("length") {
+                    // 自愈用尽仍被截断:卡片会把这当作「丢格式」,留可诊断痕迹
+                    tracing::warn!(
+                        budget,
+                        chars = text.len(),
+                        attempts,
+                        "generate_raw_still_truncated"
+                    );
+                } else if attempts > 1 {
+                    // 自愈重发后成功:记录总轮次与最终长度,重发消耗可从日志统计
+                    tracing::warn!(
+                        budget,
+                        chars = text.len(),
+                        attempts,
+                        "generate_raw_healed_after_retry"
+                    );
+                }
+                return Json(json!({ "ok": true, "text": text, "injected": injected }))
+                    .into_response();
+            }
         }
-        Err(e) => err_json(format!("生成失败:{e}"), StatusCode::BAD_GATEWAY),
+    }
+}
+
+/// generate-raw 的最小输出预算。
+///
+/// 角色卡资源页(吸血鬼卡等)要求模型「整个回复有且仅有一个 JSON」,完整响应含
+/// thinking / self_check / context / character_state 等字段,常达数千 token;
+/// 而全局默认 `default_max_tokens = 1024` 会让 JSON 在字段中途腰斩,卡片
+/// `JSON.parse` 失败 → 弹出「丢格式」并把叙事原文当纯文本显示(2026-09-13
+/// Android 真机复现)。本路径输出是一个必须完整的结构化对象,截断即等于失败,
+/// 故给它专属下限(不改用户的全局设置语义,普通聊天仍尊重用户设置)。
+const GENERATE_RAW_MIN_TOKENS: u32 = 8192;
+/// 截断自愈的预算上限:一次翻倍即可覆盖绝大多数长卡,又不会顶爆上游模型输出上限。
+const GENERATE_RAW_RETRY_MAX_TOKENS: u32 = 32768;
+/// 请求显式 max_tokens 的合法上限:与 settings 侧 `1..=65536` 校验区间保持一致,
+/// 超限钳制而非报错(调用方多是资源页脚本,尽量可用;0 已在入口 400 拒绝)。
+const GENERATE_RAW_MAX_TOKENS_LIMIT: u32 = 65536;
+
+/// 卡片生成的输出预算:调用方显式指定时尊重之(钳在 1..=65536),未指定时取
+/// 「用户设置 vs 结构化下限」的较大者(用户把全局 max_tokens 调大到下限之上时用用户的)。
+fn generate_raw_budget(requested: Option<u32>, setting: u32) -> u32 {
+    match requested {
+        Some(v) => v.clamp(1, GENERATE_RAW_MAX_TOKENS_LIMIT),
+        None => setting.clamp(GENERATE_RAW_MIN_TOKENS, GENERATE_RAW_MAX_TOKENS_LIMIT),
+    }
+}
+
+/// `finish_reason=length` 时的重发预算(截断自愈):翻倍并封顶,最多重发 2 次。
+fn generate_raw_heal_budget(finish_reason: Option<&str>, used: u32, rounds: u32) -> Option<u32> {
+    if finish_reason == Some("length") && used < GENERATE_RAW_RETRY_MAX_TOKENS && rounds < 2 {
+        Some(used.saturating_mul(2).min(GENERATE_RAW_RETRY_MAX_TOKENS))
+    } else {
+        None
     }
 }
 
@@ -762,5 +889,55 @@ mod tests {
         let entries2 = vec![e];
         let mut messages2 = vec![msg("assistant", "… system log …"), msg("user", "继续")];
         assert_eq!(inject_worldbook_for_raw(&entries2, &mut messages2).len(), 1);
+    }
+
+    /// 卡片生成预算:未显式指定时不低于结构化下限,避免默认 1024 截断 JSON
+    /// (2026-09-13 Android 真机「丢格式」根因)
+    #[test]
+    fn raw_budget_applies_structured_floor() {
+        // 默认 1024(Android 首装)→ 抬到下限
+        assert_eq!(generate_raw_budget(None, 1024), GENERATE_RAW_MIN_TOKENS);
+        // 用户已调到下限之上 → 尊重用户
+        assert_eq!(generate_raw_budget(None, 10000), 10000);
+        // 作者页显式指定 → 原样尊重(不擅自抬高)
+        assert_eq!(generate_raw_budget(Some(512), 1024), 512);
+        assert_eq!(generate_raw_budget(Some(2048), 1024), 2048);
+        // 显式值钳在上限内(与 settings 1..=65536 同区间;0 由入口 400 拒绝,
+        // 此处兜底钳到 1,防直接调用绕过校验)
+        assert_eq!(generate_raw_budget(Some(0), 1024), 1);
+        assert_eq!(
+            generate_raw_budget(Some(u32::MAX), 1024),
+            GENERATE_RAW_MAX_TOKENS_LIMIT
+        );
+        assert_eq!(
+            generate_raw_budget(None, u32::MAX),
+            GENERATE_RAW_MAX_TOKENS_LIMIT,
+            "用户设置异常大时同样钳上限"
+        );
+    }
+
+    /// 截断自愈:仅 finish=length 触发翻倍、封顶、次数上限;stop/None 不重发
+    #[test]
+    fn raw_heal_budget_only_on_length_with_cap_and_round_limit() {
+        assert_eq!(
+            generate_raw_heal_budget(Some("length"), GENERATE_RAW_MIN_TOKENS, 0),
+            Some(GENERATE_RAW_MIN_TOKENS * 2)
+        );
+        assert_eq!(
+            generate_raw_heal_budget(Some("length"), 20000, 1),
+            Some(GENERATE_RAW_RETRY_MAX_TOKENS)
+        );
+        // 已到封顶值 → 不再重发
+        assert_eq!(
+            generate_raw_heal_budget(Some("length"), GENERATE_RAW_RETRY_MAX_TOKENS, 0),
+            None
+        );
+        // 重发次数用尽 → 不再重发
+        assert_eq!(
+            generate_raw_heal_budget(Some("length"), GENERATE_RAW_MIN_TOKENS, 2),
+            None
+        );
+        assert_eq!(generate_raw_heal_budget(Some("stop"), 1024, 0), None);
+        assert_eq!(generate_raw_heal_budget(None, 1024, 0), None);
     }
 }

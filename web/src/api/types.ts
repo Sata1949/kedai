@@ -353,7 +353,7 @@ export interface RuntimeSettings {
   bypass_blacklist: string[];
   /** 授权等待超时(秒;30..=1800,默认 300) */
   tool_authorization_timeout_secs: number;
-  /** 任务模式工具策略:all=全量、deny_dangerous=拒绝危险工具(默认)、allowlist=白名单 */
+  /** 任务模式工具策略:all=全量、deny_dangerous=拒绝危险工具但保留 bash(默认)、allowlist=白名单 */
   task_tool_policy: 'all' | 'deny_dangerous' | 'allowlist';
   /** 任务模式工具白名单(task_tool_policy=allowlist 时生效) */
   task_tool_allowlist: string[];
