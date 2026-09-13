@@ -341,9 +341,7 @@ impl CharacterService {
                 )
                 .optional()
                 .ok()?;
-            let Some((old_name, old_desc, old_raw)) = row else {
-                return None;
-            };
+            let (old_name, old_desc, old_raw) = row?;
             let mut data_raw: Value = serde_json::from_str(&old_raw)
                 .unwrap_or_else(|_| Value::Object(Default::default()));
             if let Some(obj) = data_raw.as_object_mut() {

@@ -138,18 +138,16 @@ impl ModeExecutor for LegacyExecutor {
                     } else {
                         TaskStatus::Done
                     };
-                    return Ok((
+                    Ok((
                         TaskTerminal::Complete {
                             result: out.text.trim().to_string(),
                             status,
                             error: None,
                         },
                         usage,
-                    ));
+                    ))
                 }
-                Err(e) => {
-                    return Ok((TaskTerminal::Failed { error: Some(e) }, usage));
-                }
+                Err(e) => Ok((TaskTerminal::Failed { error: Some(e) }, usage)),
             }
         })
     }
