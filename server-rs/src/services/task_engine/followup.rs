@@ -86,12 +86,7 @@ impl ModeExecutor for FollowupExecutor {
                     svc.record_usage(task_id, "agent", None, &usage_as_output(&usage));
                     // 取消优先于写结果:stop 后产出不再落库(与 legacy 同口径)
                     if *cancel.borrow() {
-                        return Ok((
-                            TaskTerminal::Failed {
-                                error: None,
-                            },
-                            usage,
-                        ));
+                        return Ok((TaskTerminal::Failed { error: None }, usage));
                     }
                     let text = text.trim();
                     let brief: String = self.params.instruction.chars().take(80).collect();
@@ -135,9 +130,7 @@ impl ModeExecutor for FollowupExecutor {
                     ))
                 }
                 Err(e) => Ok((
-                    TaskTerminal::Failed {
-                        error: Some(e),
-                    },
+                    TaskTerminal::Failed { error: Some(e) },
                     TokenUsage::default(),
                 )),
             }

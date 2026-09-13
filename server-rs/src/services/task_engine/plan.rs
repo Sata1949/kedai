@@ -42,10 +42,7 @@ impl ApprovedPlanExecutor {
         ApprovedPlanExecutor { svc, engine, plan }
     }
 
-    async fn run_inner(
-        &self,
-        ctx: TaskRunContext,
-    ) -> Result<(TaskTerminal, TokenUsage), String> {
+    async fn run_inner(&self, ctx: TaskRunContext) -> Result<(TaskTerminal, TokenUsage), String> {
         let svc = &self.svc;
         let mut total = TokenUsage::default();
         let mut plan = self.plan.clone();

@@ -198,9 +198,11 @@ onUnmounted(() => {
  *  - HTML 渲染开启:脚本命中走 scoped HTML(样式作用域化 + 脚本受控执行);未命中走 markdown。
  *  - HTML 渲染关闭:先剥隐藏占位符(<StatusPlaceHolderImpl/> 等),再 markdown。
  *
- * 缓存键(被读取即成为依赖):props.m.content / content_display / extra.status_bar、
+ * 缓存键(被读取即成为依赖):**paintText**(按帧推进的渲染文本快照,见上方节流说明;
+ * 非流式时它同步跟随 content/content_display/extra.status_bar)、
  * props.scripts(渲染时逐字段读取)、props.scriptHash(版本兜底)、props.renderHtml。
- * swipe 切换由 store 改写 content(新对象),天然触发重算。
+ * swipe 切换由 store 改写 content(新对象)→ renderTextSource 变化 → 同步进 paintText
+ * (非流式)或下一帧进(流式),渲染随之更新。
  */
 const html = computed<string>(() => {
   void props.scriptHash; // 脚本版本变化时强制重算(即便 scripts 引用与字段未触发)

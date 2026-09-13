@@ -56,23 +56,13 @@ impl ModeExecutor for LegacyExecutor {
             {
                 Ok(v) => v,
                 Err(e) => {
-                    return Ok((
-                        TaskTerminal::Failed {
-                            error: Some(e),
-                        },
-                        usage,
-                    ));
+                    return Ok((TaskTerminal::Failed { error: Some(e) }, usage));
                 }
             };
             accumulate(&mut usage, &plan_out);
             svc.record_usage(task_id, "plan", None, &plan_out);
             if *cancel.borrow() {
-                return Ok((
-                    TaskTerminal::Failed {
-                        error: None,
-                    },
-                    usage,
-                ));
+                return Ok((TaskTerminal::Failed { error: None }, usage));
             }
             let _ = svc.set_plan(task_id, &plan);
             let _ = svc.set_status(task_id, TaskStatus::Running);
@@ -81,12 +71,7 @@ impl ModeExecutor for LegacyExecutor {
             let mut final_plan = plan.clone();
             for (i, step) in plan.iter().enumerate() {
                 if *cancel.borrow() {
-                    return Ok((
-                        TaskTerminal::Failed {
-                            error: None,
-                        },
-                        usage,
-                    ));
+                    return Ok((TaskTerminal::Failed { error: None }, usage));
                 }
                 final_plan[i].status = TaskStepStatus::Running;
                 let _ = svc.set_plan(task_id, &final_plan);
@@ -120,12 +105,7 @@ impl ModeExecutor for LegacyExecutor {
                     }
                     Err(e) => {
                         if *cancel.borrow() {
-                            return Ok((
-                                TaskTerminal::Failed {
-                                    error: None,
-                                },
-                                usage,
-                            ));
+                            return Ok((TaskTerminal::Failed { error: None }, usage));
                         }
                         final_plan[i].status = TaskStepStatus::Error;
                         final_plan[i].result = e.clone();
@@ -142,12 +122,7 @@ impl ModeExecutor for LegacyExecutor {
 
             // 3) 汇总:空输出同样按 finish_reason 分级重试一次。
             if *cancel.borrow() {
-                return Ok((
-                    TaskTerminal::Failed {
-                        error: None,
-                    },
-                    usage,
-                ));
+                return Ok((TaskTerminal::Failed { error: None }, usage));
             }
             match svc.summarize_task_retry(&task, &final_plan, &cancel).await {
                 Ok(out) => {
@@ -173,12 +148,7 @@ impl ModeExecutor for LegacyExecutor {
                     ));
                 }
                 Err(e) => {
-                    return Ok((
-                        TaskTerminal::Failed {
-                            error: Some(e),
-                        },
-                        usage,
-                    ));
+                    return Ok((TaskTerminal::Failed { error: Some(e) }, usage));
                 }
             }
         })

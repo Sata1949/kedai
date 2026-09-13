@@ -171,9 +171,7 @@ impl TaskEngine {
             Err(e) => self.svc.finalize_terminal(
                 &task.id,
                 token,
-                TaskTerminal::Failed {
-                    error: Some(e),
-                },
+                TaskTerminal::Failed { error: Some(e) },
                 *cancel.borrow(),
             ),
         }

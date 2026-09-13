@@ -236,10 +236,7 @@ impl SoloExecutor {
         SoloExecutor { svc, engine }
     }
 
-    async fn run_inner(
-        &self,
-        ctx: TaskRunContext,
-    ) -> Result<(TaskTerminal, TokenUsage), String> {
+    async fn run_inner(&self, ctx: TaskRunContext) -> Result<(TaskTerminal, TokenUsage), String> {
         // solo 无规划阶段:进入即执行(run 入口 reset_task 已置 planning,此处推进到 running)
         self.svc.set_status(&ctx.task_id, TaskStatus::Running);
 

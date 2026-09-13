@@ -361,7 +361,10 @@ impl TeamExecutor {
     /// team 规划:TEAM_PLANNER_PROMPT + 世界书背景(untrusted 包裹),解析失败按
     /// finish_reason 分级重试(截断/空输出翻倍预算,最多 TEAM_PLAN_MAX_ATTEMPTS 次)。
     /// 调用追踪经 generate_text 统一出口落 task_llm_calls(phase=planner)。
-    async fn plan_team(&self, ctx: &TaskRunContext) -> Result<(Vec<TeamMain>, TaskGenOutput), String> {
+    async fn plan_team(
+        &self,
+        ctx: &TaskRunContext,
+    ) -> Result<(Vec<TeamMain>, TaskGenOutput), String> {
         let mut sys = String::from(TEAM_PLANNER_PROMPT);
         let world = self.svc.world_context(ctx.character_id.as_deref());
         if !world.is_empty() {
@@ -511,10 +514,7 @@ impl TeamExecutor {
         (main_index, results)
     }
 
-    async fn run_inner(
-        &self,
-        ctx: TaskRunContext,
-    ) -> Result<(TaskTerminal, TokenUsage), String> {
+    async fn run_inner(&self, ctx: TaskRunContext) -> Result<(TaskTerminal, TokenUsage), String> {
         let svc = &self.svc;
         let mut total = TokenUsage::default();
 

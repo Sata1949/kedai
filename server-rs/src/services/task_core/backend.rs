@@ -70,11 +70,21 @@ pub(crate) trait TaskBackend: Send + Sync {
     ) -> bool;
 
     /// 创建子任务行;失败返回错误文本。
-    fn create_subtask(&self, task_id: &str, name: &str, instruction: &str)
-        -> Result<String, String>;
+    fn create_subtask(
+        &self,
+        task_id: &str,
+        name: &str,
+        instruction: &str,
+    ) -> Result<String, String>;
 
     /// 落一次 LLM 调用的 usage。
-    fn record_usage(&self, task_id: &str, phase: &str, step_index: Option<usize>, out: &TaskGenOutput);
+    fn record_usage(
+        &self,
+        task_id: &str,
+        phase: &str,
+        step_index: Option<usize>,
+        out: &TaskGenOutput,
+    );
 
     /// 落一次 LLM 调用追踪行。
     #[allow(clippy::too_many_arguments)]
@@ -116,7 +126,13 @@ pub(crate) trait TaskBackend: Send + Sync {
     fn delta_batcher(&self, task_id: &str, phase: &str, step_index: Option<usize>) -> DeltaBatcher;
 
     /// 任务执行终态统一落库(按 TaskTerminal 变体分派既有写入形态)。
-    fn finalize_terminal(&self, task_id: &str, token: u64, terminal: TaskTerminal, ended_by_cancel: bool);
+    fn finalize_terminal(
+        &self,
+        task_id: &str,
+        token: u64,
+        terminal: TaskTerminal,
+        ended_by_cancel: bool,
+    );
 
     // —— 异步(BoxFuture,沿用 ModeExecutor 既有风格,不引入新依赖) ——
 

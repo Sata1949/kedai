@@ -344,7 +344,8 @@ impl CharacterService {
             let Some((old_name, old_desc, old_raw)) = row else {
                 return None;
             };
-            let mut data_raw: Value = serde_json::from_str(&old_raw).unwrap_or_else(|_| Value::Object(Default::default()));
+            let mut data_raw: Value = serde_json::from_str(&old_raw)
+                .unwrap_or_else(|_| Value::Object(Default::default()));
             if let Some(obj) = data_raw.as_object_mut() {
                 if let Some(n) = chara_name {
                     obj.insert("name".into(), Value::String(n.to_string()));
@@ -427,31 +428,30 @@ impl CharacterService {
     /// 结构校验由调用方(契约 API 的 parse_contract)前置完成,此处只管落库。
     /// 读改写经 `character_data::update_data_raw` 在同一写锁事务内完成(防丢更新)。
     pub fn set_embedded_contract(&self, id: &str, contract: Option<&Value>) -> Option<()> {
-        let changed =
-            crate::services::character_data::update_data_raw(&self.db, id, |data_raw| {
-                let obj = data_raw
-                    .as_object_mut()
-                    .ok_or_else(|| "角色卡 data_raw 不是对象".to_string())?;
-                match contract {
-                    Some(c) => {
-                        let ext = obj
-                            .entry("extensions")
-                            .or_insert_with(|| Value::Object(Default::default()));
-                        ext.as_object_mut()
-                            .ok_or_else(|| "extensions 不是对象".to_string())?
-                            .insert("nlkaleido".into(), c.clone());
-                    }
-                    None => {
-                        if let Some(ext) = obj.get_mut("extensions") {
-                            if let Some(ext_obj) = ext.as_object_mut() {
-                                ext_obj.remove("nlkaleido");
-                            }
+        let changed = crate::services::character_data::update_data_raw(&self.db, id, |data_raw| {
+            let obj = data_raw
+                .as_object_mut()
+                .ok_or_else(|| "角色卡 data_raw 不是对象".to_string())?;
+            match contract {
+                Some(c) => {
+                    let ext = obj
+                        .entry("extensions")
+                        .or_insert_with(|| Value::Object(Default::default()));
+                    ext.as_object_mut()
+                        .ok_or_else(|| "extensions 不是对象".to_string())?
+                        .insert("nlkaleido".into(), c.clone());
+                }
+                None => {
+                    if let Some(ext) = obj.get_mut("extensions") {
+                        if let Some(ext_obj) = ext.as_object_mut() {
+                            ext_obj.remove("nlkaleido");
                         }
                     }
                 }
-                Ok(())
-            })
-            .ok()?;
+            }
+            Ok(())
+        })
+        .ok()?;
         changed.then_some(())
     }
 

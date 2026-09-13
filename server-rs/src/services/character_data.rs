@@ -45,8 +45,7 @@ where
         serde_json::from_str(&raw).map_err(|e| format!("解析角色卡失败: {e}"))?;
     // 闭包拒绝(如角色卡结构不符合预期)时事务回滚,不留下半写状态
     mutate(&mut value)?;
-    let serialized =
-        serde_json::to_string(&value).map_err(|e| format!("序列化角色卡失败: {e}"))?;
+    let serialized = serde_json::to_string(&value).map_err(|e| format!("序列化角色卡失败: {e}"))?;
     tx.execute(
         "UPDATE characters SET data_raw = ?1 WHERE id = ?2",
         params![serialized, character_id],

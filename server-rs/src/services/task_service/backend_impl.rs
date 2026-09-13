@@ -78,7 +78,13 @@ impl TaskBackend for TaskService {
         TaskService::create_subtask(self, task_id, name, instruction)
     }
 
-    fn record_usage(&self, task_id: &str, phase: &str, step_index: Option<usize>, out: &TaskGenOutput) {
+    fn record_usage(
+        &self,
+        task_id: &str,
+        phase: &str,
+        step_index: Option<usize>,
+        out: &TaskGenOutput,
+    ) {
         TaskService::record_usage(self, task_id, phase, step_index, out)
     }
 
@@ -109,7 +115,9 @@ impl TaskBackend for TaskService {
         messages: &[LlmMessage],
         self_heals: &[crate::agents::engine::executor::SelfHealRecord],
     ) {
-        TaskService::record_self_heals(self, task_id, phase, step_index, model, messages, self_heals)
+        TaskService::record_self_heals(
+            self, task_id, phase, step_index, model, messages, self_heals,
+        )
     }
 
     fn emit_event(
@@ -151,7 +159,15 @@ impl TaskBackend for TaskService {
         cancel: watch::Receiver<bool>,
     ) -> BoxFuture<'a, Result<TaskGenOutput, String>> {
         Box::pin(TaskService::generate_text(
-            self, task_id, phase, step_index, messages, tools, max_tokens, temperature, top_p,
+            self,
+            task_id,
+            phase,
+            step_index,
+            messages,
+            tools,
+            max_tokens,
+            temperature,
+            top_p,
             cancel,
         ))
     }

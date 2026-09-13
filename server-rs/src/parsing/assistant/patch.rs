@@ -569,8 +569,14 @@ mod tests {
         );
 
         for case in cases {
-            let name = case.get("name").and_then(|n| n.as_str()).unwrap_or("(未命名)");
-            let input = case.get("input").and_then(|i| i.as_str()).expect("用例应有 input");
+            let name = case
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("(未命名)");
+            let input = case
+                .get("input")
+                .and_then(|i| i.as_str())
+                .expect("用例应有 input");
             let expected = case
                 .get("ops")
                 .and_then(|o| o.as_array())
@@ -590,11 +596,19 @@ mod tests {
     /// 缺省字段不出现;reason 无则 null。JSON 中数字统一为 f64 比较(serde_json 语义)。
     fn normalize_op(op: &PatchOp) -> Value {
         match op {
-            PatchOp::Replace { path, value, reason } => json!({
+            PatchOp::Replace {
+                path,
+                value,
+                reason,
+            } => json!({
                 "op": "set", "path": path, "new": value,
                 "reason": reason.as_deref(),
             }),
-            PatchOp::Delta { path, value, reason } => json!({
+            PatchOp::Delta {
+                path,
+                value,
+                reason,
+            } => json!({
                 "op": "delta", "path": path, "new": value,
                 "reason": reason.as_deref(),
             }),

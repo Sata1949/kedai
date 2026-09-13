@@ -263,7 +263,9 @@ async fn concurrent_data_raw_writes_do_not_lose_updates() {
         !entries.is_empty(),
         "世界书条目应保留(为空说明被角色更新用旧快照覆盖 —— 丢更新)。detail: {detail}"
     );
-    let raw_desc = detail["data_raw"]["description"].as_str().unwrap_or_default();
+    let raw_desc = detail["data_raw"]["description"]
+        .as_str()
+        .unwrap_or_default();
     assert_eq!(
         raw_desc, desc,
         "data_raw.description 应与列 description 一致(同事务写入,未出现半写)"

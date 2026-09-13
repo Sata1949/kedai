@@ -246,10 +246,7 @@ impl CustomExecutor {
         }
     }
 
-    async fn run_inner(
-        &self,
-        ctx: TaskRunContext,
-    ) -> Result<(TaskTerminal, TokenUsage), String> {
+    async fn run_inner(&self, ctx: TaskRunContext) -> Result<(TaskTerminal, TokenUsage), String> {
         let cfg = self.current_flow()?;
         let steps: Vec<PlanStep> = cfg.steps.iter().filter(|s| s.enabled).cloned().collect();
         if steps.is_empty() {

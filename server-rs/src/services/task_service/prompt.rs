@@ -16,7 +16,6 @@ pub(crate) use crate::services::task_core::prompt_consts::{
     EXECUTOR_PROMPT, PLANNER_PROMPT, PLANNER_REVISE_GUIDANCE, SUMMARIZER_PROMPT,
 };
 
-
 impl TaskService {
     /// 读取任务模式合并后的有效设置(生成参数覆盖项已应用,连接信息共享)。
     /// pub(crate):任务引擎(task_engine)构造 TaskRunContext 设置快照用。

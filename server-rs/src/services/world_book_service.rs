@@ -47,7 +47,8 @@ impl WorldBookService {
             Err(e) => return log_read_pool_failure("世界书列表", e),
         };
         // SQL 为写死常量且表结构由 migration 保证,正常不会失败;仍按 best-effort 兜底
-        let mut stmt = match conn.prepare_cached(&format!("{LIST_SQL} ORDER BY w.created_at DESC")) {
+        let mut stmt = match conn.prepare_cached(&format!("{LIST_SQL} ORDER BY w.created_at DESC"))
+        {
             Ok(s) => s,
             Err(e) => return log_query_failure("世界书列表 prepare_cached", e),
         };
@@ -512,7 +513,8 @@ impl WorldBookService {
             let cb = if raw.get("character_book").is_some() {
                 raw.get_mut("character_book")
             } else {
-                raw.get_mut("data").and_then(|d| d.get_mut("character_book"))
+                raw.get_mut("data")
+                    .and_then(|d| d.get_mut("character_book"))
             };
             let cb = cb.ok_or_else(|| "角色卡缺少 character_book".to_string())?;
             let entries_value = cb
