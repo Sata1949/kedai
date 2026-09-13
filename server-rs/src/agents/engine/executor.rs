@@ -25,7 +25,7 @@ pub(super) async fn maybe_run_tool(
         return Ok(());
     }
     *tool_triggered = true;
-    let _ = state_machine.transition(AgentState::ToolCall, session_id);
+    state_machine.transition_best_effort(AgentState::ToolCall, session_id);
     let _ = engine
         .agent_sessions
         .update(agent_session_id, Some("tool_call"), None, None, None);
@@ -96,7 +96,7 @@ pub(super) async fn maybe_run_tool(
             tool_call_id: None,
         });
     }
-    let _ = state_machine.transition(AgentState::Executing, session_id);
+    state_machine.transition_best_effort(AgentState::Executing, session_id);
     let _ = engine
         .agent_sessions
         .update(agent_session_id, Some("executing"), None, None, None);
@@ -763,7 +763,7 @@ pub(crate) async fn run_tool_loop(
         // 3) 收尾(按原调用顺序):状态机/持久化/SSE 推送/模型消息回填。
         //    ToolResult 与 ToolAuthorizationRequired 均在此按序推送,保证前端配对稳定。
         for e in &executed {
-            let _ = state_machine.transition(AgentState::ToolCall, session_id);
+            state_machine.transition_best_effort(AgentState::ToolCall, session_id);
             // 任务模式 agent_session=None(不建影子会话行):跳过 agent_sessions 落库;
             // 聊天路径恒 Some,落库顺序与原实现逐字节一致。
             if let Some(agent_session) = agent_session {
@@ -784,7 +784,7 @@ pub(crate) async fn run_tool_loop(
                     e.duration_ms,
                 );
             }
-            let _ = state_machine.transition(AgentState::Executing, session_id);
+            state_machine.transition_best_effort(AgentState::Executing, session_id);
             if let Some(agent_session) = agent_session {
                 let _ = engine.agent_sessions.update(
                     &agent_session.id,

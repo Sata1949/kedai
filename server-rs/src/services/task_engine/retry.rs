@@ -28,8 +28,8 @@ const PLAN_MAX_ATTEMPTS: u32 = 3;
 /// 算法收敛在 `utils::retry::doubled_heal_budget`(2026-09-13 批次 4.1 四路合一);
 /// 封顶后(结果不大于当前值)回退原预算仍重试一次——本路径是空输出兜底重试,
 /// 同预算再试一次好过直接失败(与 chat/engine/team 三处「封顶即放弃」语义不同)。
-/// `default_max_tokens` 经设置 API 校验恒在 1..=65536(= 封顶值),故回退分支
-/// 实际只覆盖「恰为封顶值」这一种可见情形。
+/// `default_max_tokens` 经 `PUT /api/settings` 校验为 1..=65536;手改 settings.json 可超出
+/// 该区间(加载期无钳制),此时保持原预算不缩小——见 `truncated_retry_budget_doubles_and_keeps_cap`。
 fn truncated_retry_budget(current: u32) -> u32 {
     crate::utils::retry::doubled_heal_budget(current, RETRY_MAX_TOKENS_CAP).unwrap_or(current)
 }
@@ -153,7 +153,8 @@ pub(crate) async fn plan_task_retry(
             "任务模式规划输出解析失败,准备重试"
         );
         if reason == "length" || out.text.trim().is_empty() {
-            max_tokens = (max_tokens.saturating_mul(2)).min(RETRY_MAX_TOKENS_CAP);
+            max_tokens = crate::utils::retry::doubled_heal_budget(max_tokens, RETRY_MAX_TOKENS_CAP)
+                .unwrap_or(max_tokens);
         }
     }
     Err(format!("{last_err}(已重试 {} 次)", PLAN_MAX_ATTEMPTS - 1))
@@ -198,7 +199,8 @@ pub(crate) async fn plan_revise_retry(
             "规划对话修订输出解析失败,准备重试"
         );
         if reason == "length" || out.text.trim().is_empty() {
-            max_tokens = (max_tokens.saturating_mul(2)).min(RETRY_MAX_TOKENS_CAP);
+            max_tokens = crate::utils::retry::doubled_heal_budget(max_tokens, RETRY_MAX_TOKENS_CAP)
+                .unwrap_or(max_tokens);
         }
     }
     Err(format!("{last_err}(已重试 {} 次)", PLAN_MAX_ATTEMPTS - 1))

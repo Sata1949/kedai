@@ -15,7 +15,8 @@
  *   D. L1(parsing/models/contracts)不得 `use crate::services::`(老层不被上层渗透)。
  *   E. `services/**` 生产代码不得出现 `.expect(`(连接池异常不得 panic 掉请求线程)。
  *   G. `api/**` 不得新增「裸 {error}」响应(错误形状 ratchet,数量不得超基线)。
- *   H. EJS 自研解释器 builtin 表条数不得增长(威胁模型 D5;冻结纪律的机器门禁)。
+ *   H. EJS 自研解释器能力面(builtin_global / get_prop / set_prop 的字面量条数)不得增长
+ *      (威胁模型 D5;冻结纪律的机器门禁)。
  *
  * 用法:
  *   node tools/check-arch.mjs
@@ -74,13 +75,23 @@ function readModalFlags() {
     return [];
   }
   const body = src.slice(start, end);
-  const entry = /^\s*modal\(\s*'([A-Za-z_$][\w$]*)'\s*,\s*'[^']*'\s*,\s*\(\)\s*=>\s*import\(/gm;
+  // flag 引号放宽到单/双引号,避免「有人用双引号写新条目」时静默少算一项。
+  const entry = /^\s*modal\(\s*['"]([A-Za-z_$][\w$]*)['"]\s*,\s*['"][^'"]*['"]\s*,\s*\(\)\s*=>\s*import\(/gm;
   const flags = [...body.matchAll(entry)].map((m) => m[1]);
   if (flags.length === 0) {
     failures.push(
       '弹窗白名单派生失败:web/src/modals.ts 的 MODALS 注册表解析出 0 条(解析契约已失效,请同步 check-arch.mjs)',
     );
     return [];
+  }
+  // 交叉校验:注册表里 `modal(` 的出现次数必须与解析出的条数一致,
+  // 否则说明有条目写法未匹配(单条漏算会让白名单静默少项,违背本函数「绝不静默」纪律)。
+  const modalCalls = [...body.matchAll(/\bmodal\s*\(/g)].length;
+  if (modalCalls !== flags.length) {
+    failures.push(
+      `弹窗白名单派生失败:web/src/modals.ts 的 MODALS 中 \`modal(\` 出现 ${modalCalls} 次,但仅解析出 ${flags.length} 条` +
+        `(有条目写法未匹配解析契约,请对齐 check-arch.mjs 的正则或统一写法)`,
+    );
   }
   const dup = [...new Set(flags.filter((f, i) => flags.indexOf(f) !== i))];
   if (dup.length) {
@@ -401,43 +412,62 @@ const backendWarnings = [];
   }
 }
 
-// --- 规则 H:EJS builtin 表冻结 ratchet(威胁模型 D5 / MAINTENANCE.md §0) ---
+// --- 规则 H:EJS 能力面冻结 ratchet(威胁模型 D5 / MAINTENANCE.md §0) ---
 //
 // 背景:`parsing/assistant/ejs/` 是自研迷你 JS 引擎(约 4000 行),纪律为「只接受安全
 // 修复,不再扩展新能力」——任何新模板能力必须走 `scripts/runtime.rs` 的 rquickjs 沙箱。
-// 此前该纪律仅靠文档约束(威胁模型 D5),此处把 `env.rs` 的 `builtin_global` 表**条数**
-// 钉成 ratchet:超过基线即 FAIL。
+// 此前该纪律仅靠文档约束(威胁模型 D5),此处把 `env.rs` 的能力面**字面量条数**钉成
+// ratchet:任一处超过基线即 FAIL。
 //
-// 计数口径:match 分支的字符串模式名(**别名各计一条**,别名同样是对模板暴露的新名字面)
-// + JSON/Math/Object 等内联对象的成员名(成员也是新增能力面)。
+// 覆盖三处能力面(缺一不可;只锁 `builtin_global` 会漏掉方法表这条更大的口子):
+//   - `builtin_global`:全局内建名(含别名),另有 JSON/Math/Object 内联成员名;
+//   - `get_prop`:字符串/数组的**属性方法名**——往这里加 `"padStart" => ...` 同样是一次
+//     真实的模板能力扩展,必须一并冻结;
+//   - `set_prop`:当前无硬编码属性名(基线 0),一旦出现即视为能力面变化。
+//
+// 计数口径:match 分支的字符串模式名(**别名各计一条**)+ 内联对象成员名(`"name".into(`)。
 //
 // 基线纪律:**调低是唯一合法方向**。删除条目、收敛别名后请同步下调基线值;
 // 上调等于关掉护栏,确属安全修复必须在变更说明里给出理由。
 //
-// 解析失败(文件缺失 / `fn builtin_global` 或 `match name` 或 `_ => None` 结构未识别 /
-// 计出 0 条 / 出现无法分类的字面量)一律**显式 FAIL**,绝不静默跳过——静默返回 0 会让
-// 门禁形同虚设(错误文案风格参照本文件 readModalFlags)。
+// 解析失败(文件缺失 / 三个函数任一未找到 / 计出 0 条 / strict 面出现无法分类的字面量)
+// 一律**显式 FAIL**,绝不静默跳过(错误文案风格参照本文件 readModalFlags)。
 {
   const EJS_ENV = join(SERVER, 'parsing', 'assistant', 'ejs', 'env.rs');
-  const BASELINE_EJS_BUILTINS = 64; // 2026-09-13 实测;只降不升
   const rel = relative(ROOT, EJS_ENV);
+  // 能力面基线(2026-09-13 实测;只降不升)。
+  // strict=true 的面要求「所有字面量都能归类为能力名」;get_prop/set_prop 内还有错误文案
+  // 等非能力字面量,故不要求 pristine,只做条数 ratchet。
+  const EJS_SURFACES = [
+    { fn: 'builtin_global', baseline: 64, strict: true },
+    { fn: 'get_prop', baseline: 26, strict: false },
+    { fn: 'set_prop', baseline: 0, strict: false },
+  ];
   let src = null;
   try {
     src = readFileSync(EJS_ENV, 'utf8');
   } catch (e) {
-    backendFailures.push(`[H] EJS builtin 表冻结检查失败:无法读取 ${rel}(${e.message})`);
+    backendFailures.push(`[H] EJS 能力面冻结检查失败:无法读取 ${rel}(${e.message})`);
   }
   if (src !== null) {
-    const fnIdx = src.search(/fn\s+builtin_global\s*\(\s*name\s*:\s*&str\s*\)/);
-    const matchIdx = fnIdx === -1 ? -1 : src.indexOf('match name', fnIdx);
-    const endIdx = matchIdx === -1 ? -1 : src.indexOf('_ => None', matchIdx);
-    if (fnIdx === -1 || matchIdx === -1 || endIdx === -1) {
-      backendFailures.push(
-        `[H] EJS builtin 表冻结检查失败:${rel} 的 \`fn builtin_global\` / \`match name\` / \`_ => None\` 结构未识别(重构了该函数请同步 check-arch.mjs 的解析契约)`,
-      );
-    } else {
-      // 去注释后再数:注释里提到的函数名不算条目
-      const body = src.slice(matchIdx, endIdx).replace(/\/\/[^\n]*/g, '');
+    // 按顶层 fn 切分函数体(比手工定位 match/结尾标记更稳):函数体延伸到下一个顶层 fn
+    const heads = [...src.matchAll(/^(?:pub(?:\([^)]*\))?\s+)?fn\s+(\w+)/gm)];
+    const bodyOf = (name) => {
+      const i = heads.findIndex((h) => h[1] === name);
+      if (i === -1) return null;
+      const start = heads[i].index;
+      const end = i + 1 < heads.length ? heads[i + 1].index : src.length;
+      return src.slice(start, end).replace(/\/\/[^\n]*/g, ''); // 去注释:注释里提到的名字不算条目
+    };
+    const reports = [];
+    for (const { fn, baseline, strict } of EJS_SURFACES) {
+      const body = bodyOf(fn);
+      if (body === null) {
+        backendFailures.push(
+          `[H] EJS 能力面冻结检查失败:${rel} 未找到 \`fn ${fn}\`(重构了该文件请同步 check-arch.mjs 的解析契约)`,
+        );
+        continue;
+      }
       const names = [];
       const unknown = [];
       for (const m of body.matchAll(/"((?:[^"\\]|\\.)*)"/g)) {
@@ -449,28 +479,23 @@ const backendWarnings = [];
           unknown.push(m[1]);
         }
       }
-      if (names.length === 0) {
+      if (names.length > baseline) {
         backendFailures.push(
-          `[H] EJS builtin 表冻结检查失败:${rel} 的 builtin_global 解析出 0 条(解析契约已失效,请同步 check-arch.mjs)`,
-        );
-      } else if (unknown.length) {
-        backendFailures.push(
-          `[H] EJS builtin 表冻结检查失败:${rel} 的 builtin_global 出现无法分类的字面量:${unknown
-            .map((s) => `"${s}"`)
-            .join(', ')}(解析契约已失效,请同步 check-arch.mjs)`,
-        );
-      } else if (names.length > BASELINE_EJS_BUILTINS) {
-        backendFailures.push(
-          `[H] EJS builtin 表新增条目:${names.length} 条 > 基线 ${BASELINE_EJS_BUILTINS}(EJS 自研解释器已冻结:` +
+          `[H] EJS 能力面新增:${rel} 的 ${fn} 有 ${names.length} 条 > 基线 ${baseline}(EJS 自研解释器已冻结:` +
             `只接受安全修复,新模板能力请走 scripts/runtime.rs 的 rquickjs 沙箱;确属安全修复请说明理由并**下调**基线)`,
         );
       }
-      if (VERBOSE) {
-        const mark = names.length < BASELINE_EJS_BUILTINS ? '(可下调基线)' : '';
-        console.log(
-          `  [H] EJS builtin 表:${names.length} 条(基线 ${BASELINE_EJS_BUILTINS},只降不升)${mark}`,
+      if (strict && unknown.length) {
+        backendFailures.push(
+          `[H] EJS 能力面冻结检查失败:${rel} 的 ${fn} 出现无法分类的字面量:${unknown
+            .map((s) => `"${s}"`)
+            .join(', ')}(解析契约已失效,请同步 check-arch.mjs)`,
         );
       }
+      reports.push(`${fn}=${names.length}/${baseline}${names.length < baseline ? '(可下调)' : ''}`);
+    }
+    if (VERBOSE) {
+      console.log(`  [H] EJS 能力面(条数/基线,只降不升):${reports.join('、')}`);
     }
   }
 }

@@ -1,5 +1,5 @@
 // 应用共享状态(axum State):汇聚 DB、服务、连接器、引擎、工具
-use crate::agents::engine::AgentEngine;
+use crate::agents::engine::{AgentEngine, EngineCore, EngineExt, EnginePrompt, EngineStorage};
 use crate::config::AppConfig;
 use crate::mcp::McpManager;
 use crate::models::db::Db;
@@ -297,24 +297,32 @@ impl AppState {
         // 聊天引擎:先于 TaskService 构造(engine 不依赖 tasks,无循环;
         // 批次 4.2 起 TaskService 注入 Arc<AgentEngine> 供六模式执行器复用工具循环)
         let engine = Arc::new(AgentEngine::new(
-            connector.clone(),
-            characters.clone(),
-            sessions.clone(),
-            agent_sessions.clone(),
-            world_books.clone(),
-            tool_registry.clone(),
-            settings.clone(),
-            prompt_inject.clone(),
-            quick_replies.clone(),
-            runtime_prompt.clone(),
-            db.clone(),
-            initial_model.clone(),
-            user_scripts.clone(),
-            slash.clone(),
-            contract_registry.clone(),
-            kaleido_state.clone(),
-            memory.clone(),
-            skills.clone(),
+            EngineCore {
+                connector: connector.clone(),
+                settings: settings.clone(),
+                db: db.clone(),
+                initial_model: initial_model.clone(),
+            },
+            EngineStorage {
+                characters: characters.clone(),
+                sessions: sessions.clone(),
+                agent_sessions: agent_sessions.clone(),
+                world_books: world_books.clone(),
+                contract_registry: contract_registry.clone(),
+                kaleido_state: kaleido_state.clone(),
+            },
+            EnginePrompt {
+                prompt_inject: prompt_inject.clone(),
+                quick_replies: quick_replies.clone(),
+                runtime_prompt: runtime_prompt.clone(),
+                memory: memory.clone(),
+                skills: skills.clone(),
+            },
+            EngineExt {
+                tool_registry: tool_registry.clone(),
+                user_scripts: user_scripts.clone(),
+                slash: slash.clone(),
+            },
         ));
         let engine_model = engine.model();
         // 批次 4.3b:引擎弱引用注入 ToolDeps(子 agent 工具化经 run_tool_loop 跑

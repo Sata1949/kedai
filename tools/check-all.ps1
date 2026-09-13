@@ -1,13 +1,21 @@
 ﻿# check-all.ps1 — 本地 CI 一键检查:后端 fmt/clippy/test + 前端 typecheck/test/build
 # 用法: npm run check  |  或 powershell -NoProfile -ExecutionPolicy Bypass -File tools/check-all.ps1
-# 参数: -SkipRust 跳过后端; -SkipWeb 跳过前端; -Quick 只跑 test 不跑 build;
+# 参数: -SkipRust 跳过后端编译; -SkipWeb 跳过前端编译; -Quick 只跑 test 不跑 build;
+#       -AuditOnly 只跑审计段(两把 Cargo.lock + npm 生产依赖),跳过全部编译/测试/构建;
 #       -StrictTypecheck 历史保留参数(2026-09-08 起 typecheck 已是硬门禁,此开关无差异)
-#       -StrictAudit 历史保留参数(2026-09-13 批次 1 起 cargo audit 默认硬门禁,此开关无差异)
+#       -StrictAudit 历史保留参数(2026-09-13 起 cargo audit 已是硬门禁,此开关无差异)
 #       -LooseAudit 把 cargo audit 降回警告档(仅在 advisory DB 不可用等特殊场景临时使用)
+#
+# 审计段(独立安全门禁,与 -SkipRust/-SkipWeb 解耦;批次 6.1 升级):
+#   - cargo audit 覆盖**两把锁**:server-rs/Cargo.lock + src-tauri/Cargo.lock(此前只扫前者)。
+#     无法本地修复的 unmaintained 告警在 .cargo/audit.toml 逐条 ignore(附理由与复审时机);
+#     真实漏洞/未忽略告警出现即 FAIL。
+#   - npm audit --omit=dev 复核为 0 告警,由警告档提升为硬门禁;离线自动降 WARN。
 param(
     [switch]$SkipRust,
     [switch]$SkipWeb,
     [switch]$Quick,
+    [switch]$AuditOnly,
     [switch]$StrictTypecheck,
     [switch]$StrictAudit,
     [switch]$LooseAudit,
@@ -67,7 +75,7 @@ function Invoke-Stage([string]$Name, [scriptblock]$Body) {
     $script:results += [pscustomobject]@{ Stage = $Name; Result = 'OK'; Seconds = [math]::Round($sw.Elapsed.TotalSeconds,1) }
 }
 
-if (-not $SkipRust) {
+if (-not $SkipRust -and -not $AuditOnly) {
     if (-not $hasCargo) { Write-Host '未找到 cargo(也不在 ~\.cargo\bin),跳过后端;请先安装 Rust 工具链' -ForegroundColor Yellow }
     elseif (-not (Test-Path $vcvars)) { Write-Host "未找到 vcvars64.bat,跳过后端;请安装 VS BuildTools(MSVC)" -ForegroundColor Yellow }
     else {
@@ -85,39 +93,98 @@ if (-not $SkipRust) {
             Invoke-Stage 'cargo clippy'             { cargo clippy --all-targets @cargoTargetArgs -- -D warnings }
             # -j 2:本机并行链接曾撞 LNK1318/os error 1455(页面文件不足),限并发换稳定
             Invoke-Stage 'cargo test --workspace'   { cargo test --workspace -j 2 @cargoTargetArgs }
-            # cargo audit:依赖漏洞扫描(RustSec advisory DB,需联网拉取)。
-            # 2026-09-13 批次 1:历史漏洞已清零(server-rs 锁 0 洞),默认切**硬门禁**;
-            # 仅当 advisory DB 拉取失败(离线/镜像不可达)时降级为 WARN 跳过,避免断网误拦。
-            # -LooseAudit 可临时降回警告档(-StrictAudit 为历史保留参数,现已无差异)。
-            if (Get-Command cargo-audit -ErrorAction SilentlyContinue) {
-                if ($LooseAudit) {
-                    Write-Host "`n===== cargo audit(警告档,-LooseAudit)=====" -ForegroundColor Cyan
-                    cargo audit
-                    if ($LASTEXITCODE -ne 0) { Write-Host '[WARN] cargo audit 发现漏洞或警告(不拦截)' -ForegroundColor Yellow }
-                    else { Write-Host '[ OK ] cargo audit 无已知漏洞' -ForegroundColor Green }
-                } else {
-                    Write-Host "`n===== cargo audit(硬门禁)=====" -ForegroundColor Cyan
-                    $auditOut = (cargo audit 2>&1 | Out-String)
-                    $auditCode = $LASTEXITCODE
-                    if ($auditCode -eq 0) {
-                        Write-Host '[ OK ] cargo audit 无已知漏洞' -ForegroundColor Green
-                    } elseif ($auditOut -match '(failed to fetch|failed to load|failed to update|could not|unable to|resolve host|timed out|network|TLS|Connection)') {
-                        Write-Host '[WARN] cargo audit 无法拉取 advisory DB(离线?),跳过硬门禁' -ForegroundColor Yellow
-                        Write-Host (($auditOut.Trim() -split "`n" | Select-Object -Last 3) -join ' ') -ForegroundColor DarkGray
-                    } else {
-                        Write-Host $auditOut
-                        Write-Host '[FAIL] cargo audit 发现依赖漏洞(硬门禁;评估修复后重跑,或 -LooseAudit 临时降档)' -ForegroundColor Red
-                        exit 1
-                    }
-                }
-            } else {
-                Write-Host "`n===== cargo audit:未安装 cargo-audit,跳过(安装:cargo install cargo-audit --locked)=====" -ForegroundColor Yellow
-            }
+            # cargo audit 已迁出本块,升级为下方独立「审计段」:不再受 -SkipRust 影响,
+            # 并覆盖 server-rs + src-tauri 两把锁。
         } finally { Pop-Location }
     }
 }
 
-if (-not $SkipWeb) {
+# ---- 审计段(独立安全门禁,与 -SkipRust/-SkipWeb 解耦)----
+# 2026-09-13 批次 6.1:cargo audit 由「只扫 server-rs」升级为双锁覆盖
+# (server-rs/Cargo.lock + src-tauri/Cargo.lock,后者含 Tauri 桌面壳完整依赖树)。
+# 无法本地修复的 unmaintained 告警列在 .cargo/audit.toml(逐条附理由与复审时机);
+# 真实漏洞或未忽略告警出现时该锁 FAIL。
+if ($AuditOnly) { Write-Host "`n##### 审计档:-AuditOnly(跳过编译/测试/构建)#####" -ForegroundColor DarkCyan }
+
+# 对单把锁跑 cargo audit;返回 'ok' | 'warn'(无法拉 DB/离线,跳过) | 'fail'。
+# 判定 fail-closed:仅当明确是 advisory DB / 索引拉取失败时才降 WARN。
+function Invoke-CargoAuditLock {
+    param([string]$Label, [string]$LockPath, [bool]$Loose)
+    Write-Host "`n--- cargo audit: $Label ($LockPath) ---" -ForegroundColor Cyan
+    # --no-yanked:yank 状态不是漏洞信号,且冷索引下该检查会大量超时刷屏(不影响漏洞判定)。
+    $out = (cargo audit -f $LockPath --no-yanked 2>&1 | Out-String)
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "[ OK ] $Label 无已知漏洞" -ForegroundColor Green
+        # exit 0 仍可能带 allowed warning(如 glib 的 unsound,无 CVE、无修复版本,
+        # 不属 unmaintained 故未列入 .cargo/audit.toml)。打印出来保持透明,不拦截。
+        if ($out -match 'allowed warning') {
+            Write-Host (($out.Trim() -split "`n" | Where-Object { $_ -match 'Crate:|Version:|Warning:|Title:|ID:' }) -join "`n") -ForegroundColor DarkYellow
+            Write-Host "[提示] $Label 存在未拦截的信息类告警(见上;非 CVE,评估后如需处理请登记 .cargo/audit.toml 或升级依赖)" -ForegroundColor DarkYellow
+        }
+        return 'ok'
+    }
+    if ($Loose) {
+        Write-Host (($out.Trim() -split "`n" | Select-Object -Last 8) -join "`n") -ForegroundColor Yellow
+        Write-Host "[WARN] $Label 审计未通过(警告档,-LooseAudit)" -ForegroundColor Yellow
+        return 'warn'
+    }
+    if ($out -match '(failed to fetch|failed to load|failed to update|unable to fetch|could not be fetched|could not be loaded|resolve host|timed out|network|TLS|connection refused|ENOTFOUND)') {
+        Write-Host "[WARN] $Label 无法拉取 advisory DB(离线/镜像不可达?),跳过该锁硬门禁" -ForegroundColor Yellow
+        Write-Host (($out.Trim() -split "`n" | Select-Object -Last 3) -join ' ') -ForegroundColor DarkGray
+        return 'warn'
+    }
+    Write-Host $out
+    Write-Host "[FAIL] $Label 发现依赖漏洞或未忽略告警(硬门禁;评估修复后重跑,或 -LooseAudit 临时降档)" -ForegroundColor Red
+    return 'fail'
+}
+
+Write-Host "`n===== cargo audit(硬门禁,双 Cargo.lock)=====" -ForegroundColor Cyan
+# cargo-audit 可能未加入 PATH(-AuditOnly 时不会走上面的 Import-VcVars 分支),按需补 ~\.cargo\bin
+if (-not (Get-Command cargo -ErrorAction SilentlyContinue) -and (Test-Path (Join-Path $cargoBin 'cargo.exe'))) { $env:PATH = "$cargoBin;$env:PATH" }
+if (Get-Command cargo-audit -ErrorAction SilentlyContinue) {
+    $auditFail = $false
+    $auditLocks = @(
+        @{ Label = 'server-rs'; Lock = 'server-rs/Cargo.lock' },
+        @{ Label = 'src-tauri'; Lock = 'src-tauri/Cargo.lock' }
+    )
+    # 从仓库根运行:cargo-audit 由当前目录向上查找 .cargo/audit.toml,确保两把锁共用同一 ignore 配置。
+    Push-Location $root
+    try {
+        foreach ($lk in $auditLocks) {
+            if (-not (Test-Path (Join-Path $root $lk.Lock))) {
+                Write-Host "[WARN] 未找到 $($lk.Lock),跳过该锁" -ForegroundColor Yellow
+                continue
+            }
+            if ((Invoke-CargoAuditLock $lk.Label $lk.Lock $LooseAudit.IsPresent) -eq 'fail') { $auditFail = $true }
+        }
+    } finally { Pop-Location }
+    if ($auditFail) {
+        Write-Host "`n===== 汇总: cargo audit 失败,后续阶段跳过 =====" -ForegroundColor Red
+        exit 1
+    }
+} else {
+    Write-Host '未安装 cargo-audit,跳过(安装:cargo install cargo-audit --locked)' -ForegroundColor Yellow
+}
+
+# npm 生产依赖审计:批次 1 接入(警告档),批次 6.1 复核 --omit=dev 为 0 告警后**提升为硬门禁**。
+# 离线(拉不到 registry)时降 WARN,避免断网误拦;真漏洞输出无「离线」特征,仍按 FAIL 处理。
+Write-Host "`n===== npm audit(生产依赖,硬门禁)=====" -ForegroundColor Cyan
+$npmAuditOut = (npm audit --omit=dev 2>&1 | Out-String)
+if ($LASTEXITCODE -eq 0) {
+    Write-Host '[ OK ] npm audit 无生产依赖漏洞' -ForegroundColor Green
+} elseif ($npmAuditOut -match 'found\s+(\d+)\s+vulnerabilit') {
+    Write-Host ($npmAuditOut.Trim() -split "`n" | Select-Object -Last 8 | Out-String).Trim() -ForegroundColor Yellow
+    Write-Host '[FAIL] npm audit 报告生产依赖漏洞(硬门禁;评估修复,勿裸升依赖)' -ForegroundColor Red
+    exit 1
+} elseif ($npmAuditOut -match 'ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|network|registry|audit endpoint|request to') {
+    Write-Host '[WARN] npm audit 无法访问 registry(离线?),跳过硬门禁' -ForegroundColor Yellow
+} else {
+    Write-Host ($npmAuditOut.Trim() -split "`n" | Select-Object -Last 8 | Out-String).Trim() -ForegroundColor Yellow
+    Write-Host '[FAIL] npm audit 异常退出(非漏洞输出,也非离线;请人工核查)' -ForegroundColor Red
+    exit 1
+}
+
+if (-not $SkipWeb -and -not $AuditOnly) {
     Push-Location $root
     try {
         # 双 Cargo.lock 漂移:src-tauri 以 path 内嵌 server-rs,构建便携版时 cargo 忽略
@@ -135,19 +202,15 @@ if (-not $SkipWeb) {
         node tools/count-tests.mjs
         node tools/count-tests.mjs --check
         if ($LASTEXITCODE -ne 0) { Write-Host '[WARN] 测试数字与 MAINTENANCE.md 不一致(不拦截;请更新文档)' -ForegroundColor Yellow }
-        # npm 生产依赖漏洞扫描(2026-09-13 批次 1 接入;需联网)。警告档:
-        # 历史 2 洞(sanitize-html XSS / nanoid)已修复,保持警告避免离线环境误拦。
-        Write-Host "`n===== npm audit(生产依赖,警告档)=====" -ForegroundColor Cyan
-        $npmAuditOut = (npm audit --omit=dev 2>&1 | Out-String)
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host ($npmAuditOut.Trim() -split "`n" | Select-Object -Last 8 | Out-String).Trim() -ForegroundColor Yellow
-            Write-Host '[WARN] npm audit 报告生产依赖漏洞(不拦截;请评估修复)' -ForegroundColor Yellow
-        } else {
-            Write-Host '[ OK ] npm audit 无生产依赖漏洞' -ForegroundColor Green
-        }
         # 前端类型逃逸 ratchet:as never / as unknown as / 非空断言 / any 只降不升
         # (纯 Node 零依赖,与 check-arch/check-contract 同风格;基线见脚本内 BASELINE)
         Invoke-Stage 'web: type-ratchet'        { node tools/check-frontend-lint.mjs }
+        # 前端代码质量(ESLint flat config + eslint-plugin-vue):0 error 硬门禁。
+        # 与上面 type-ratchet 目的不同(ratchet 管类型逃逸、此管代码质量),两者并存。
+        # 规则集首轮克制:存量问题降级为 warn(见 web/eslint.config.js),故 0 error 可过;
+        # prettier --check 未接入——现有代码为手写紧凑风格,全量格式化差异面 ~80%,
+        # 待独立「全量格式化」专项落地后再接(见 docs/前端工具链与审计升级-变更说明.md)。
+        Invoke-Stage 'web: eslint'              { npm run lint -w web }
         # 2026-09-08 附录 D 168 个存量错误已清偿归零,typecheck 恢复硬门禁;
         # -StrictTypecheck 参数保留兼容(已无分支差异)
         Invoke-Stage 'web: vue-tsc --noEmit'    { npm run typecheck -w web }

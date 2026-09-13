@@ -73,6 +73,59 @@ use self::util::{
     check_aborted, classify_engine_error, rebuild_content_keeping_blocks, send_event, step_evt,
 };
 
+/// AgentEngine 构造依赖分组一:基础运行依赖(连接器 / 运行设置 / 数据库 / 初始模型)。
+/// 纯字段搬运,字段类型与语义与原构造函数参数逐一对应。
+pub struct EngineCore {
+    /// LLM 连接器(内层 RwLock,支持运行期热切换)
+    pub connector: Arc<RwLock<Connector>>,
+    /// 运行时设置(agent 系统提示词、搜索端点等)
+    pub settings: Arc<Mutex<RuntimeSettings>>,
+    /// SQLite 句柄(Token 累计统计)
+    pub db: Arc<Db>,
+    /// 初始生效模型名(运行期经 model() 读取,切换后立即生效)
+    pub initial_model: String,
+}
+
+/// AgentEngine 构造依赖分组二:数据服务(角色 / 会话 / 世界书与契约、Kaleido 运行态)。
+pub struct EngineStorage {
+    /// 角色卡服务
+    pub characters: Arc<CharacterService>,
+    /// 聊天会话服务
+    pub sessions: Arc<SessionService>,
+    /// Agent 影子会话服务(状态与工具调用落库)
+    pub agent_sessions: Arc<AgentSessionService>,
+    /// 世界书服务(条目收集与触发)
+    pub world_books: Arc<WorldBookService>,
+    /// 契约注册表(character_id → Contract,与工具/API 写路径共享同实例)
+    pub contract_registry: Arc<crate::contracts::ContractRegistry>,
+    /// 契约运行态服务(收尾把 KaleidoState/changelog 提交到 SQLite)
+    pub kaleido_state: Arc<crate::services::kaleido_state_service::KaleidoStateService>,
+}
+
+/// AgentEngine 构造依赖分组三:提示词与上下文(注入配置 / 快速回复 / 运行提示词 / 记忆 / 技能)。
+pub struct EnginePrompt {
+    /// 提示词注入配置(简单模式 + 楼层系统)
+    pub prompt_inject: Arc<Mutex<PromptInjectService>>,
+    /// 快速回复(Quick Replies):getqr 的渲染数据源
+    pub quick_replies: Arc<QuickReplyService>,
+    /// 与 settings API 共用的 DATA_DIR 运行时提示词文件服务
+    pub runtime_prompt: Arc<RuntimePromptService>,
+    /// 跨会话记忆蒸馏:记忆槽注入与 touch 衰减回写
+    pub memory: Arc<crate::services::memory_service::MemoryService>,
+    /// 技能库(渐进披露):system 注入「name:description」紧凑清单
+    pub skills: Arc<crate::services::skill_service::SkillService>,
+}
+
+/// AgentEngine 构造依赖分组四:工具与扩展(工具注册表 / 用户脚本 / slash 命令)。
+pub struct EngineExt {
+    /// 工具注册表(白名单工具循环执行入口)
+    pub tool_registry: Arc<ToolRegistry>,
+    /// 用户脚本服务:角色卡 extensions.tavern_helper 脚本树读取
+    pub user_scripts: Arc<UserScriptService>,
+    /// slash 命令注册表:脚本 triggerSlash 与 API 命令清单共用
+    pub slash: Arc<crate::slash::SlashRegistry>,
+}
+
 pub struct AgentEngine {
     pub connector: Arc<RwLock<Connector>>,
     current_model: Mutex<String>,
@@ -114,49 +167,36 @@ pub struct AgentEngine {
 }
 
 impl AgentEngine {
-    #[allow(clippy::too_many_arguments)]
+    /// 装配引擎:依赖按职责分成 4 组(基础运行 / 数据服务 / 提示词与上下文 / 工具与扩展),
+    /// 字段搬运纯机械,不改变任何字段类型与语义。
     pub fn new(
-        connector: Arc<RwLock<Connector>>,
-        characters: Arc<CharacterService>,
-        sessions: Arc<SessionService>,
-        agent_sessions: Arc<AgentSessionService>,
-        world_books: Arc<WorldBookService>,
-        tool_registry: Arc<ToolRegistry>,
-        settings: Arc<Mutex<RuntimeSettings>>,
-        prompt_inject: Arc<Mutex<PromptInjectService>>,
-        quick_replies: Arc<QuickReplyService>,
-        runtime_prompt: Arc<RuntimePromptService>,
-        db: Arc<Db>,
-        initial_model: String,
-        user_scripts: Arc<UserScriptService>,
-        slash: Arc<crate::slash::SlashRegistry>,
-        contract_registry: Arc<crate::contracts::ContractRegistry>,
-        kaleido_state: Arc<crate::services::kaleido_state_service::KaleidoStateService>,
-        memory: Arc<crate::services::memory_service::MemoryService>,
-        skills: Arc<crate::services::skill_service::SkillService>,
+        core: EngineCore,
+        storage: EngineStorage,
+        prompt: EnginePrompt,
+        ext: EngineExt,
     ) -> Self {
         AgentEngine {
-            connector,
-            current_model: Mutex::new(initial_model),
-            characters,
-            sessions,
-            agent_sessions,
-            world_books,
-            tool_registry,
+            connector: core.connector,
+            current_model: Mutex::new(core.initial_model),
+            characters: storage.characters,
+            sessions: storage.sessions,
+            agent_sessions: storage.agent_sessions,
+            world_books: storage.world_books,
+            tool_registry: ext.tool_registry,
             token_service: Arc::new(Mutex::new(TokenService::new())),
-            settings,
-            prompt_inject,
-            quick_replies,
-            runtime_prompt,
-            db,
-            memory,
-            skills,
+            settings: core.settings,
+            prompt_inject: prompt.prompt_inject,
+            quick_replies: prompt.quick_replies,
+            runtime_prompt: prompt.runtime_prompt,
+            db: core.db,
+            memory: prompt.memory,
+            skills: prompt.skills,
             generate_dispatch: Mutex::new(None),
             runs: Mutex::new(HashMap::new()),
-            contract_registry,
-            kaleido_state,
-            user_scripts,
-            slash,
+            contract_registry: storage.contract_registry,
+            kaleido_state: storage.kaleido_state,
+            user_scripts: ext.user_scripts,
+            slash: ext.slash,
         }
     }
 
@@ -418,7 +458,7 @@ impl AgentEngine {
 
             // ===== 3. 收尾 =====
             if *abort_rx.borrow() {
-                let _ = state_machine.transition(AgentState::Interrupted, &session_id);
+                state_machine.transition_best_effort(AgentState::Interrupted, &session_id);
                 let _ = self.agent_sessions.update(
                     &agent_session.id,
                     Some("interrupted"),
@@ -429,7 +469,7 @@ impl AgentEngine {
                 send_event(SseEvent::Interrupted, &tx, &abort_rx, &flag).await?;
                 logging::agent_step(&session_id, "interrupted", Some("生成被中止"));
             } else {
-                let _ = state_machine.transition(AgentState::Finished, &session_id);
+                state_machine.transition_best_effort(AgentState::Finished, &session_id);
                 let _ = self.agent_sessions.update(
                     &agent_session.id,
                     Some("finished"),
@@ -741,7 +781,7 @@ impl AgentEngine {
             Err(e) => {
                 if *abort_rx.borrow() {
                     // 中断或客户端断开
-                    let _ = state_machine.transition(AgentState::Interrupted, &session_id);
+                    state_machine.transition_best_effort(AgentState::Interrupted, &session_id);
                     let _ = self.agent_sessions.update(
                         &agent_session.id,
                         Some("interrupted"),
@@ -751,7 +791,7 @@ impl AgentEngine {
                     );
                     let _ = tx.send(SseEvent::Interrupted).await;
                 } else {
-                    let _ = state_machine.transition(AgentState::Error, &session_id);
+                    state_machine.transition_best_effort(AgentState::Error, &session_id);
                     let _ = self.agent_sessions.update(
                         &agent_session.id,
                         Some("error"),

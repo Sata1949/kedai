@@ -53,6 +53,11 @@ jobs:
       - name: Install npm deps (lockfile 严格一致)
         run: npm ci
 
-      - name: Local gates (fmt / clippy / test / contract / arch / lock-sync / typecheck / vitest / build)
+      # 审计口径与本地一致(批次 6.1):check-all.ps1 的独立「审计段」同时扫描
+      # server-rs/Cargo.lock 与 src-tauri/Cargo.lock 两把锁(cargo audit 硬门禁),
+      # 并执行 npm audit --omit=dev 生产依赖硬门禁。无法本地修复的 unmaintained 告警
+      # 由仓库根 .cargo/audit.toml 逐条 ignore(随 checkout 带入,无需额外步骤)。
+      # 注意:本仓库当前**未配置 git 远端**,本工作流在配置远端并推送后才会真正运行。
+      - name: Local gates (fmt / clippy / test / audit[两锁+npm] / contract / arch / lock-sync / typecheck / vitest / build)
         shell: pwsh
         run: ./tools/check-all.ps1

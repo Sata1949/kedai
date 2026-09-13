@@ -415,7 +415,10 @@ impl TeamExecutor {
                 "team 规划输出解析失败,准备重试"
             );
             if reason == "length" || out.text.trim().is_empty() {
-                max_tokens = (max_tokens.saturating_mul(2)).min(TEAM_RETRY_MAX_TOKENS_CAP);
+                // 与 trunc_heal_budget 同源(批次 4.1 收敛后的补充):翻倍+封顶,达上限保持原值
+                max_tokens =
+                    crate::utils::retry::doubled_heal_budget(max_tokens, TEAM_RETRY_MAX_TOKENS_CAP)
+                        .unwrap_or(max_tokens);
             }
         }
         Err(format!(

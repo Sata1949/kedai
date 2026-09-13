@@ -61,9 +61,13 @@ describe('弹窗注册表自身一致性', () => {
     }
   });
 
-  it('每条声明的懒加载组件已定义', () => {
+  it('每条的组件都是 defineAsyncComponent 产物(真·懒加载,而非直接 import)', () => {
     for (const m of MODALS) {
-      expect(m.component, `${m.flag} 缺少组件`).toBeTruthy();
+      // lazyModal 内部走 defineAsyncComponent:产物带 __asyncLoader,可据此区分
+      // 「声明成懒加载」与「被误改成静态 import」——比 toBeTruthy 更紧,后者恒真。
+      // Vue 未在公开类型里导出该内部字段,故经 in 收窄而非断言。
+      const comp: object = m.component;
+      expect('__asyncLoader' in comp, `${m.flag} 的组件不是异步组件(懒加载失效)`).toBe(true);
     }
   });
 

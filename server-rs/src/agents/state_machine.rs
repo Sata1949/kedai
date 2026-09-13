@@ -86,6 +86,27 @@ impl StateMachine {
         Ok(())
     }
 
+    /// 尽力而为迁移:合法迁移返回 true;非法迁移记 warn 日志后返回 false,状态不变。
+    /// 用于「中断/收尾竞态」等失败可接受的路径,替代 `let _ = transition(...)` 的静默吞错。
+    pub fn transition_best_effort(&mut self, to: AgentState, session_id: &str) -> bool {
+        // from 必须在迁移前取:transition 失败时 state 不变,但成功时已改写,
+        // 提前取值可让日志同时表达「从哪来、到哪去」。
+        let from = self.state;
+        match self.transition(to, session_id) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(
+                    session_id,
+                    from = %from,
+                    to = %to,
+                    error = %e,
+                    "状态迁移被拒绝(尽力而为路径继续)"
+                );
+                false
+            }
+        }
+    }
+
     /// 无校验强制设状态(用于从持久化恢复)
     pub fn restore(&mut self, state: AgentState) {
         self.state = state;
@@ -130,5 +151,65 @@ mod tests {
         let mut sm = StateMachine::new("s1");
         sm.restore(AgentState::Finished);
         sm.transition(AgentState::Executing, "s1").unwrap();
+    }
+
+    #[test]
+    fn test_best_effort_valid_transition_returns_true_and_changes_state() {
+        let mut sm = StateMachine::new("s1");
+        // idle → planning 合法:返回 true 且状态已变
+        assert!(sm.transition_best_effort(AgentState::Planning, "s1"));
+        assert_eq!(sm.current(), AgentState::Planning);
+    }
+
+    #[test]
+    fn test_best_effort_invalid_transition_returns_false_and_keeps_state() {
+        let mut sm = StateMachine::new("s1");
+        // idle → tool_call 非法:返回 false 且状态不变
+        assert!(!sm.transition_best_effort(AgentState::ToolCall, "s1"));
+        assert_eq!(sm.current(), AgentState::Idle);
+    }
+
+    #[test]
+    fn test_best_effort_invalid_transition_emits_warn_log() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::fmt::MakeWriter;
+
+        #[derive(Clone, Default)]
+        struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for CaptureWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> MakeWriter<'a> for CaptureWriter {
+            type Writer = CaptureWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let writer = CaptureWriter::default();
+        let buf = writer.0.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let mut sm = StateMachine::new("s1");
+        tracing::subscriber::with_default(subscriber, || {
+            // 非法迁移:应发出 warn 日志
+            assert!(!sm.transition_best_effort(AgentState::ToolCall, "s1"));
+        });
+        let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(
+            text.contains("WARN") && text.contains("状态迁移被拒绝"),
+            "应捕获到警告日志,实际输出:{text}"
+        );
     }
 }
