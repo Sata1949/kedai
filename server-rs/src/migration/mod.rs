@@ -12,7 +12,7 @@ mod merge;
 pub use backup::snapshot_database;
 pub use ddl::{
     ensure_exec_audit_table, ensure_llm_requests_usage_columns, ensure_memory_entries_fts_backfill,
-    ensure_memory_entries_pinned_column, ensure_skills_progressive_columns,
+    ensure_memory_entries_pinned_column, ensure_perf_indexes, ensure_skills_progressive_columns,
     ensure_task_llm_calls_finish_reason_column, ensure_task_messages_table,
     ensure_tasks_task_mode_column,
 };

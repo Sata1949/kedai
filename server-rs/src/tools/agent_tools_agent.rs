@@ -527,7 +527,7 @@ async fn run_subtask_plain(
         parallel_tool_calls: None,
     };
 
-    let connector = deps.connector.read().await;
+    let connector = deps.connector.read().await.clone();
     let res = connector.generate(messages, params, cancel).await;
     drop(connector);
 

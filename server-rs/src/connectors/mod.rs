@@ -6,7 +6,12 @@ use crate::models::types::{GenerationParams, LlmMessage, LlmStreamChunk};
 use serde_json::Value;
 use tokio::sync::{mpsc, watch};
 
-/// 连接器统一枚举(mock / openai-compatible)
+/// 连接器统一枚举(mock / openai-compatible)。
+///
+/// `Clone` 语义(2026-09-13 批次 3):内部只持 String 与 reqwest Client(Arc 支撑),
+/// clone 是廉价快照 —— 调用方应 `read().await.clone()` 取快照后**立即释放读锁**,
+/// 不要把 RwLockGuard 跨流式生成持有(否则生成期间保存设置会阻塞)。
+#[derive(Clone)]
 pub enum Connector {
     Mock(mock::MockConnector),
     OpenAi(openai_compatible::OpenAiCompatibleConnector),

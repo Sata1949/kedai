@@ -405,7 +405,7 @@ impl TaskService {
         // 慢网络请求可能持锁排队)与整个流式生成;超时后 future 被 drop,读锁随之释放,
         // chunk_tx 随之 drop,collect 端收 None 正常收尾。
         let call = async {
-            let connector = self.connector.read().await;
+            let connector = self.connector.read().await.clone();
             let model = connector.model().to_string();
             let connector_type = connector.type_name().to_string();
             let res = connector

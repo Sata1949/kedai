@@ -39,6 +39,7 @@ fn provider_host(base_url: &str) -> String {
         .unwrap_or_else(|| "invalid-host".into())
 }
 
+#[derive(Clone)]
 pub struct OpenAiCompatibleConnector {
     base_url: String,
     api_key: String,

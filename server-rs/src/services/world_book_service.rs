@@ -462,13 +462,16 @@ impl WorldBookService {
         Some(view)
     }
 
-    /// 回写 data_raw(条目编辑后落库;仅更新 entries 字段,其余原样保留)
+    /// 回写 data_raw(条目编辑后落库;仅更新 entries 字段,其余原样保留)。
+    /// 同时按新 raw 重算 `entry_count`(2026-09-13 批次 3 修复:该列此前只在插入时写一次,
+    /// 编辑条目不回写 → 列表页条目数一直显示旧值)。
     pub fn save_data_raw(&self, id: &str, raw: &Value) -> Option<()> {
         let data_raw_str = serde_json::to_string(raw).ok()?;
+        let entry_count = collect_entries(raw).len() as i64;
         let conn = self.db.write();
         conn.execute(
-            "UPDATE world_books SET data_raw = ?1 WHERE id = ?2",
-            params![data_raw_str, id],
+            "UPDATE world_books SET data_raw = ?1, entry_count = ?2 WHERE id = ?3",
+            params![data_raw_str, entry_count, id],
         )
         .ok()?;
         Some(())

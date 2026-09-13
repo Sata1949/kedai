@@ -688,7 +688,14 @@ pub async fn update_settings(
             candidate.openai_api_key.clone(),
             candidate.model.clone(),
         );
-        let type_name = state.engine.connector.read().await.type_name().to_string();
+        let type_name = state
+            .engine
+            .connector
+            .read()
+            .await
+            .clone()
+            .type_name()
+            .to_string();
         let target = if type_name == "mock" && (!base_url.is_empty() || !api_key.is_empty()) {
             "openai-compatible"
         } else {
@@ -710,7 +717,7 @@ pub async fn update_settings(
 
 /// POST /api/settings/refresh-models:向已保存的 API 请求可用模型列表(立即生效,不保存)
 pub async fn refresh_models(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let connector = state.engine.connector.read().await;
+    let connector = state.engine.connector.read().await.clone();
     let models = connector.available_models().await;
     // openai-compatible 下若只拿到回退的 1 个当前模型,大概率是服务不支持 /models 接口
     let message = if connector.type_name() == "openai-compatible" && models.len() <= 1 {
@@ -726,13 +733,20 @@ pub async fn refresh_models(State(state): State<Arc<AppState>>) -> Json<serde_js
 
 /// POST /api/settings/connect:测试连接
 pub async fn connect(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let diagnostic = state.engine.connector.read().await.test().await;
+    let diagnostic = state.engine.connector.read().await.clone().test().await;
     Json(diagnostic)
 }
 
 /// GET /api/settings/models:可用模型列表
 pub async fn models(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let models = state.engine.connector.read().await.available_models().await;
+    let models = state
+        .engine
+        .connector
+        .read()
+        .await
+        .clone()
+        .available_models()
+        .await;
     Json(json!({ "models": models }))
 }
 
@@ -755,7 +769,7 @@ pub async fn test_embedding(State(state): State<Arc<AppState>>) -> Response {
 
 /// GET /api/settings/info:连接器信息 + 模型列表 + 可用连接器
 pub async fn info(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let connector = state.engine.connector.read().await;
+    let connector = state.engine.connector.read().await.clone();
     let type_name = connector.type_name();
     let models = connector.available_models().await;
     let model = connector.model().to_string();

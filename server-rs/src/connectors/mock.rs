@@ -19,6 +19,7 @@ const TOOL_RAW_MIN_BUDGET: u32 = 2048;
 /// 使首轮截断、重发充足(2026-09-13 generate-raw 自愈循环端点级测试用)。
 const TRUNC_TEXT_MIN_BUDGET: u32 = 12_000;
 
+#[derive(Clone)]
 pub struct MockConnector;
 
 impl MockConnector {

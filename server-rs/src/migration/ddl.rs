@@ -410,3 +410,20 @@ pub fn ensure_exec_audit_table(conn: &Connection) -> Result<(), String> {
         .map_err(|e| format!("创建 exec_audit 索引失败: {e}"))?;
     Ok(())
 }
+
+/// 性能索引补建(2026-09-13 批次 3):旧库补 `sessions.character_id` 与 `tasks` 过滤列索引。
+/// 此前这些列表查询走全表扫描 + 排序(外键列 SQLite 不自动建索引)。
+/// 与 `schema.rs` 的同名 `CREATE INDEX IF NOT EXISTS` 保持一致——新增/改动索引时
+/// **两处都要改**(迁移元测试 `tests/schema_migration_meta.rs` 会逐表比对索引集合把关)。
+const PERF_INDEX_DDL: &str = "
+CREATE INDEX IF NOT EXISTS idx_sessions_character ON sessions(character_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tasks_character ON tasks(character_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+";
+
+/// 幂等 schema 升级(批次 3):旧库补建会话/任务列表查询索引。
+pub fn ensure_perf_indexes(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(PERF_INDEX_DDL)
+        .map_err(|e| format!("创建性能索引失败: {e}"))?;
+    Ok(())
+}

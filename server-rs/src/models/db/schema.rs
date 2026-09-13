@@ -19,6 +19,9 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at   TEXT NOT NULL,
   updated_at   TEXT NOT NULL
 );
+-- 会话按角色列表查询(list_by_character:WHERE character_id ORDER BY updated_at DESC):
+-- 此前无索引 → 全表扫描 + 排序(2026-09-13 批次 3 补;旧库经 ensure_perf_indexes 补建)
+CREATE INDEX IF NOT EXISTS idx_sessions_character ON sessions(character_id, updated_at DESC);
 CREATE TABLE IF NOT EXISTS messages (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -101,6 +104,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   task_mode    TEXT NOT NULL DEFAULT 'legacy'
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
+-- 任务列表按角色 / 状态过滤(2026-09-13 批次 3 补;旧库经 ensure_perf_indexes 补建)
+CREATE INDEX IF NOT EXISTS idx_tasks_character ON tasks(character_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE TABLE IF NOT EXISTS task_subtasks (
   id           TEXT PRIMARY KEY,
   task_id      TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,

@@ -342,6 +342,34 @@ mod tests {
         assert!(text.contains("图书馆很安静"));
     }
 
+    /// 概率门控只作用于触发条目:constant 条目即使 use_probability=true/probability=0
+    /// 也必须注入(2026-09-13 批次 3 核实并锁定:常驻条目进 system 前缀,若参与概率
+    /// 会每轮扰动缓存前缀;实现上概率判定位于 constant 分支之后,本测试锁死该不变式)。
+    #[test]
+    fn constant_entries_ignore_probability() {
+        let mut e = entry("世界观", vec![], "常驻设定", true, true);
+        e.use_probability = true;
+        e.probability = 0; // 0 = 永不注入;若常驻条目参与概率,本断言即失败
+        let history = vec![message("user", "你好")];
+        let text = collect_world_text(&[e], &history, &mut AssistantVars::new())
+            .expect("常驻条目不参与概率,必须注入");
+        assert!(text.contains("常驻设定"));
+    }
+
+    /// 触发条目参与概率:probability=0 时命中也不注入(证明门控确实作用于触发条目,
+    /// 与上一条共同锁定「概率只影响尾部注入、不影响 system 前缀」)
+    #[test]
+    fn triggered_entries_respect_probability() {
+        let mut e = entry("地点", vec!["图书馆"], "图书馆很安静", false, true);
+        e.use_probability = true;
+        e.probability = 0;
+        let history = vec![message("user", "我在图书馆")];
+        assert!(
+            collect_world_text(&[e], &history, &mut AssistantVars::new()).is_none(),
+            "触发条目 probability=0 应被概率门控拦下"
+        );
+    }
+
     /// 未启用 / 非 constant 且无 key / 命中与否的多种组合
     #[test]
     fn disabled_and_keyless_entries_skipped() {

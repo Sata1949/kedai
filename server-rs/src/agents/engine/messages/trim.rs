@@ -37,11 +37,22 @@ pub(in crate::agents::engine) fn trim_to_context(
         messages.remove(idx);
         total -= cost;
     }
-    // 仍超预算(极长角色设定):按预算约 80% 截断 system,保留尾部注入块
+    // 仍超预算(极长角色设定):按预算截断 system,保留尾部注入块
     if total > budget as i64 && messages.len() == head && head > 0 {
         let sys = &mut messages[0];
         let text = sys.content.clone();
-        let n: usize = ((budget as f64 * 0.8) as usize).max(200);
+        // 字符预算估计(2026-09-13 批次 3 修正量纲混用):此前写成 `budget * 0.8` 直接把
+        // **token 数当字符数**用,对中文(约 1.5 字符/token)属过度截断。改为
+        // 「1 token ≈ 2 字符」的保守估计起步(英文约 4、中文约 1.5,取偏小侧保证不超窗),
+        // 再用真实 tokenizer 复测:仍超预算则按比例收缩一次,消除量纲混用。
+        let mut n: usize = ((budget as usize).saturating_mul(2)).max(200);
+        let probe: String = text.chars().take(n).collect();
+        let measured = token_service.count_tokens(&probe, model);
+        if measured > budget as i64 {
+            let ratio = (budget as f64 / measured as f64).clamp(0.1, 0.95);
+            n = ((n as f64 * ratio) as usize).max(200);
+        }
+        drop(probe);
         let total_chars = text.chars().count();
         let keep_tail = protected_tail.min(total_chars);
         if keep_tail > 0 {

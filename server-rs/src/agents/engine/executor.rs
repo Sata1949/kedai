@@ -149,7 +149,7 @@ pub(crate) async fn execute_generation(
     // 任务模式经 run_tool_loop 一路带到 task_llm_calls 落库点;聊天路径不消费本字段。
     let mut finish_reason: Option<String> = None;
 
-    let connector = engine.connector.read().await;
+    let connector = engine.connector.read().await.clone();
     let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel();
     let generate = connector.generate_stream(messages, params.clone(), abort.clone(), chunk_tx);
     tokio::pin!(generate);
@@ -1102,7 +1102,7 @@ impl AgentEngine {
         if *abort.borrow() {
             return Err("生成已中断".into());
         }
-        let connector = self.connector.read().await;
+        let connector = self.connector.read().await.clone();
         let chunks = connector.generate(messages, params, abort).await?;
         drop(connector);
         let mut out = String::new();

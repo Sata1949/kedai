@@ -32,7 +32,7 @@ async fn generate_dispatch_loop(
             abort,
             reply,
         } = req;
-        let conn = connector.read().await;
+        let conn = connector.read().await.clone();
         let chunks = conn.generate(&messages, params, abort).await;
         drop(conn);
         let result = chunks.map(|chunks| {

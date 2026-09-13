@@ -660,7 +660,7 @@ pub async fn generate_raw(
     };
     // 结构化输出预算:作者页(吸血鬼卡等)要求整个回复有且仅有一个 JSON,截断即等于失败。
     let mut budget = generate_raw_budget(body.max_tokens, params.max_tokens);
-    let connector = state.engine.connector.read().await;
+    let connector = state.engine.connector.read().await.clone();
     let (_cancel_tx, abort_rx) = tokio::sync::watch::channel(false);
     let mut heal_rounds = 0u32;
     // 总调用轮次(首轮 + 自愈重发):诊断日志用它统计「白烧」成本(本端点不落
