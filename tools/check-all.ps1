@@ -8,11 +8,21 @@ param(
     [switch]$SkipWeb,
     [switch]$Quick,
     [switch]$StrictTypecheck,
-    [switch]$StrictAudit
+    [switch]$StrictAudit,
+    # 后端 cargo target 根(见 MAINTENANCE.md §10 条目 22:某些机器上安全软件拦截
+    # server-rs\target 下新建 exe 的执行)。留空则用 CARGO_TARGET_DIR 环境变量或默认路径。
+    [string]$RustTargetDir
 )
 $ErrorActionPreference = 'Continue'
 $root = Split-Path -Parent $PSScriptRoot
 $results = @()
+
+# 解析后端产物目录:参数 > 环境变量 > 默认;统一经 $env:CARGO_TARGET_DIR 传给 cargo,
+# 使 fmt/clippy/test 三处口径一致(显式导出后子进程与后续路径检查都据此走)。
+if ($RustTargetDir) {
+    $env:CARGO_TARGET_DIR = if ([System.IO.Path]::IsPathRooted($RustTargetDir)) { $RustTargetDir }
+                            else { Join-Path $root $RustTargetDir }
+}
 
 # ---- 环境准备:MSVC vcvars64 + cargo 路径 ----
 $vcvars = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
@@ -63,10 +73,16 @@ if (-not $SkipRust) {
         if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { $env:PATH = "$cargoBin;$env:PATH" }
         Push-Location "$root\server-rs"
         try {
+            # 后端产物目录:默认 server-rs\target;若外部已设 CARGO_TARGET_DIR 则用其值
+            # (某些机器上安全软件会拦截 server-rs\target 下**新建 exe** 的执行,报
+            #  os error 5,需把产物外置。详见 MAINTENANCE.md §10 条目 22)。
+            # 这里显式把变量导出给本轮 cargo 调用,并让 grep/路径类检查一致。
+            $cargoTargetArgs = if ($env:CARGO_TARGET_DIR) { @('--target-dir', $env:CARGO_TARGET_DIR) } else { @() }
+            if ($env:CARGO_TARGET_DIR) { Write-Host "[信息] 后端产物目录外置: $env:CARGO_TARGET_DIR" -ForegroundColor DarkGray }
             Invoke-Stage 'cargo fmt --check'        { cargo fmt --check }
-            Invoke-Stage 'cargo clippy'             { cargo clippy --all-targets -- -D warnings }
+            Invoke-Stage 'cargo clippy'             { cargo clippy --all-targets @cargoTargetArgs -- -D warnings }
             # -j 2:本机并行链接曾撞 LNK1318/os error 1455(页面文件不足),限并发换稳定
-            Invoke-Stage 'cargo test --workspace'   { cargo test --workspace -j 2 }
+            Invoke-Stage 'cargo test --workspace'   { cargo test --workspace -j 2 @cargoTargetArgs }
             # cargo audit:依赖漏洞扫描(RustSec advisory DB,需联网拉取)。
             # 与 vue-tsc 同策略:默认警告档——发现漏洞/警告只打 Yellow WARN 不拦截,
             # 避免历史漏洞阻塞日常开发;加 -StrictAudit 才走 Invoke-Stage 硬拦截(exit 非 0 即 FAIL)。

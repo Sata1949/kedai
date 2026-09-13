@@ -1,7 +1,7 @@
 # Kedai 维护指南(MAINTENANCE)
 
 > 面向后续维护者的技术文档。涵盖架构、构建、启动、API 契约、数据库、日志与已知坑位。
-> 版本:v0.2.1(前端 Vue3 + 后端 Rust + Tauri 桌面壳) 最后更新:2026-09-12
+> 版本:v0.3.0-beta(前端 Vue3 + 后端 Rust + Tauri 桌面壳) 最后更新:2026-09-13
 
 ---
 
@@ -399,6 +399,23 @@ rusqlite(bundled,零原生依赖),**WAL 模式 + foreign_keys ON**。共 28 张�
 19. **卡内 CSS 注释会吞掉紧随的声明**(2026-09 第四轮实测踩坑)。`/* 说明 */\n background-image: …` 的属性名会被声明切分当成 `/* 说明 */ background-image`,不匹配属性白名单 → **整条声明被丢弃**。赛马娘卡因此丢了 `body` 的纸纹背景、`.select-item` 的 `gap`、`.description-box` 的 `padding`。修法是切分前先剥注释(`cssSanitize.ts` 的 `stripCssComments`,引号感知以免误伤 `url("https://a/*.png")`);**必须在 `splitCssBlocks` 之前剥**——注释里含 `{}` 会先破坏顶层块切分。改 CSS 清洗管线时注意 `sanitizeScopedCss`(规则体)与 `sanitizeCssDeclarations`(规则体 + style 属性)两个入口都要经过剥注释。
 20. **压缩 / 备份仓库报「系统找不到指定的路径」= jniLibs 里的 .so 符号链接悬空**(2026-09 实测踩坑)。`tauri android build` 为省空间不在 `gen\android\app\src\main\jniLibs\<abi>\` 存真文件,而是**建符号链接**指向 `src-tauri\target\<triple>\release\libkedai_desktop_lib.so`;构建收尾又会删除 `src-tauri\target` 回收磁盘 → 链接悬空。此后用资源管理器 / 7-Zip / HaoZip 压缩或备份仓库,工具跟随不到目标即报 `...libkedai_desktop_lib.so: 系统找不到指定的路径` 并中断,产物不完整。**判定陷阱**:悬空链接上 `Test-Path` 仍返回 `True`(PS 5.1 不穿透解析),必须比对 `(Get-Item -Force).Target` 是否存在;只看 `Test-Path` 会漏掉。现已自动化:`tools\Write-BuildStamp.ps1` 的 `Clear-KedaiDanglingJniLibs` 在删除 target 后清理悬空链接(`build.ps1` 的 `-Tauri` 分支与 `tools\build-portable.ps1` 收尾均已接入,幂等,只删 SymbolicLink 不碰真实文件)。这些链接与 .so 本就是派生文件(`gen/android/app/.gitignore` 已忽略),下次 Android 构建自动重建。
 21. **压缩工具会「跟随」junction,把外置目录的体积一起装进压缩包**(2026-09 实测确认:HaoZip 对 junction 是跟随而非跳过)。若把构建产物用 junction 外置(如 `src-tauri\gen\android\app\build` → `D:\kedai-build\...`,1.4GB),则压缩 `D:\kedai` 得到的包会明显大于目录本身——实测 218MB 的目录压出 417MB 包。需要「压缩包 ≙ 目录可见体积」时,压缩前应删除或排除 junction 目标,或改用 7-Zip 的 `-xr!` 排除;另注意**悬空 junction 会被静默跳过、不报错**,与悬空 symlink(条目 20 的报错)行为不同。
+22. **`server-rs\target` 下新建的 exe 可能被安全软件拦截执行**(2026-09-13 实测踩坑,os error 5)。现象:`cargo build/check/test` 在**默认 target 路径**下报
+    `failed to run custom build command for native-tls … 拒绝访问。 (os error 5)`,失败在这个
+    build script 上。逐步排查结论:
+    - **不是目录权限**:`icacls` 显示 `server-rs\target` 与可用的外部目录 ACL 完全一致;
+    - **不是残留产物**:`rm -rf target` 全量清空后仍在同一位置失败;
+    - **不是目录性质**:`dir /AL` 与 `Get-Item … -Force` 确认它不是 junction/符号链接;
+    - **是关键线索**:把一个**既有**的 `cmd.exe` 复制进 `server-rs\target\`,能正常执行;
+      而 cargo **刚编译出来的** `build-script-build.exe` 一执行就「拒绝访问」——
+      即拦截针对「在该目录下新建的可执行文件」,典型的实时防护(杀软)行为。
+    **规避**:把后端产物外置到白名单目录,两种等价写法——
+    - `.\build.ps1 -RustTargetDir D:\kedai-build`(**推荐给构建脚本**,只作用于 server-rs);
+    - 或设环境变量 `CARGO_TARGET_DIR=D:\kedai-build`(作用于所有 cargo 调用,含 src-tauri;
+      注意 `build-portable.ps1` 期望 `src-tauri\target\release\kedai-portable.exe`,用此变量会
+      让便携版产物落到别处,故优先用 `-RustTargetDir`)。
+    `build.ps1` 已支持该参数,并把「后端产物目录」统一解析给新鲜度检测与 exe 校验使用;
+    以前它硬编码 `server-rs\target`,外置产物时会误报「Rust 编译失败:未生成 …」。
+    同一现象在 `docs/优化实施方案-2026-09.md` 亦有历史记录(当时以 `CARGO_TARGET_DIR` 降级处置)。
 
 ---
 

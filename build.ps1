@@ -26,7 +26,12 @@ param(
     [switch]$Tauri,
     [switch]$WithPortable,
     [switch]$TestOnly,
-    [switch]$SkipChecks
+    [switch]$SkipChecks,
+    # 后端 cargo target 根(仅作用于 server-rs,不影响 src-tauri 便携版产物路径)。
+    # 默认 server-rs\target。当该目录被安全软件拦截「新建可执行文件的执行」时
+    # (build script exe 报 os error 5),用本参数把后端产物外置到白名单目录,例如:
+    #   .\build.ps1 -RustTargetDir D:\kedai-build
+    [string]$RustTargetDir
 )
 
 $ErrorActionPreference = "Stop"
@@ -88,12 +93,44 @@ if ($TestOnly -and $Dev) {
 # 双端同步是默认行为;-TestOnly / -Dev 是明确的单端快速通道
 $BuildPortable = -not $TestOnly -and -not $Dev
 
+# 后端产物目录(仅 server-rs):优先级 -RustTargetDir 参数 > CARGO_TARGET_DIR 环境变量
+# > 默认 server-rs\target。
+#
+# 为何需要:某些机器的安全软件会拦截「在 server-rs\target 下新建的可执行文件」的**执行**
+# (实测 build.rs 编译出的 build-script-build.exe 报「拒绝访问 os error 5」;同目录下
+# 复制进去的既有 exe 却能正常运行,说明不是目录权限问题,而是对新建 exe 的实时防护)。
+# 此时用 -RustTargetDir 把后端产物外置到白名单目录即可正常构建。
+#
+# 注意:这里**只解析路径并显式传给 server-rs 的 cargo 命令(--target-dir)**,
+# 不设置 CARGO_TARGET_DIR 环境变量——否则会一并作用于 src-tauri,使便携版产物
+# 落到错误位置(build-portable.ps1 期望 src-tauri\target\release\kedai-portable.exe)。
+$CargoTargetDir = if ($RustTargetDir) {
+    if ([System.IO.Path]::IsPathRooted($RustTargetDir)) { $RustTargetDir }
+    else { Join-Path $Root $RustTargetDir }
+} elseif ($env:CARGO_TARGET_DIR) {
+    if ([System.IO.Path]::IsPathRooted($env:CARGO_TARGET_DIR)) { $env:CARGO_TARGET_DIR }
+    else { Join-Path $Root $env:CARGO_TARGET_DIR }
+} else {
+    "$Root\server-rs\target"
+}
+$null = New-Item -ItemType Directory -Force -Path $CargoTargetDir -ErrorAction SilentlyContinue
+if ($CargoTargetDir -ne "$Root\server-rs\target") {
+    Write-Host "[信息] 后端产物目录外置: $CargoTargetDir(仅 server-rs;src-tauri 仍用自身 target)" -ForegroundColor DarkGray
+}
+
 # 0) 门禁:先跑测试与静态检查,失败即中止(避免先花十分钟构建才发现测试红)。
 #    -Quick 跳过 check-all 内部的前端 vite build(下方 [1/3] 会再构建一次,避免重复)。
 #    逃生开关 -SkipChecks 仅限本地应急;交付前必须补跑一次完整的 tools/check-all.ps1。
 if (-not $SkipChecks) {
     Write-Host "[0/3] 门禁检查(check-all.ps1 -Quick) ..." -ForegroundColor Green
-    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root "tools\check-all.ps1") -Quick
+    # 把后端产物目录一并传给门禁,使 check-all 的 cargo fmt/clippy/test 与本次构建
+    # 使用同一 target 根(否则外置产物时门禁会走默认 server-rs\target 而失败)。
+    $checkArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass',
+        '-File', (Join-Path $Root 'tools\check-all.ps1'), '-Quick')
+    if ($CargoTargetDir -ne "$Root\server-rs\target") {
+        $checkArgs += @('-RustTargetDir', $CargoTargetDir)
+    }
+    & powershell @checkArgs
     if ($LASTEXITCODE -ne 0) {
         Write-Host "[FAIL] 门禁未通过,构建中止(仅本地应急可加 -SkipChecks)" -ForegroundColor Red
         exit 1
@@ -143,7 +180,7 @@ if (-not $NoWeb) {
 #    清掉 kedai-server 的编译指纹强制重编(不会触发 500 个 crate 全量重编)。
 if (-not $NoWeb) {
     $distIndex = "$Root\web\dist\index.html"
-    $exeCheck = if ($Dev) { "$Root\server-rs\target\debug\kedai-server.exe" } else { "$Root\server-rs\target\release\kedai-server.exe" }
+    $exeCheck = if ($Dev) { "$CargoTargetDir\debug\kedai-server.exe" } else { "$CargoTargetDir\release\kedai-server.exe" }
     if ((Test-Path $distIndex) -and (Test-Path $exeCheck)) {
         $distTime = (Get-Item $distIndex).LastWriteTime
         $exeTime = (Get-Item $exeCheck).LastWriteTime
@@ -152,7 +189,7 @@ if (-not $NoWeb) {
             Push-Location "$Root\server-rs"
             try {
                 $ErrorActionPreference = "Continue"
-                & $env:ComSpec /d /c "cargo clean -p kedai-server 2>&1"
+                & $env:ComSpec /d /c "cargo clean -p kedai-server --target-dir `"$CargoTargetDir`" 2>&1"
             } finally {
                 $ErrorActionPreference = "Stop"
                 Pop-Location
@@ -170,9 +207,9 @@ try {
     # 不再产生 ErrorRecord;成败以退出码判断(不附加 exit 语句,见前端构建处说明)。
     $ErrorActionPreference = "Continue"
     if ($Dev) {
-        & $env:ComSpec /d /c "cargo build 2>&1"
+        & $env:ComSpec /d /c "cargo build --target-dir `"$CargoTargetDir`" 2>&1"
     } else {
-        & $env:ComSpec /d /c "cargo build --release 2>&1"
+        & $env:ComSpec /d /c "cargo build --release --target-dir `"$CargoTargetDir`" 2>&1"
     }
     $code = $LASTEXITCODE
     if ($code -ne 0) {
@@ -184,7 +221,7 @@ try {
     Pop-Location
 }
 
-$exe = if ($Dev) { "$Root\server-rs\target\debug\kedai-server.exe" } else { "$Root\server-rs\target\release\kedai-server.exe" }
+$exe = if ($Dev) { "$CargoTargetDir\debug\kedai-server.exe" } else { "$CargoTargetDir\release\kedai-server.exe" }
 if (-not (Test-Path $exe)) {
     throw "Rust 编译失败:未生成 $exe"
 }
