@@ -993,6 +993,16 @@ fn finalize_run(
     deps.remove_cancel_if(task_id, token);
 }
 
+/// 截断(length)空输出的重试预算:翻倍并封顶 RETRY_MAX_TOKENS_CAP。
+/// 算法收敛在 `utils::retry::doubled_heal_budget`(2026-09-13 批次 4.1 四路合一);
+/// 封顶后(结果不大于当前值)回退原预算仍重试一次——本路径是空输出兜底重试,
+/// 同预算再试一次好过直接失败(与 chat/engine/team 三处「封顶即放弃」语义不同)。
+/// `default_max_tokens` 经设置 API 校验恒在 1..=65536(= 封顶值),故回退分支
+/// 实际只覆盖「恰为封顶值」这一种可见情形。
+fn truncated_retry_budget(current: u32) -> u32 {
+    crate::utils::retry::doubled_heal_budget(current, RETRY_MAX_TOKENS_CAP).unwrap_or(current)
+}
+
 /// 空输出分级重试骨架(步骤/汇总共用;WP2-A 收敛两份逐行同构的重试,逻辑不变):
 /// 首次产出非空即返回;空输出退避 EMPTY_RETRY_BACKOFF 后按 finish_reason 分级重试一次——
 /// finish_reason=length:max_tokens 翻倍(上限 RETRY_MAX_TOKENS_CAP),温度保持默认;
@@ -1028,7 +1038,7 @@ where
     let settings = deps.task_settings();
     let reason = first.finish_reason.as_deref().unwrap_or("");
     let retried = if reason == "length" {
-        let doubled = (settings.default_max_tokens.saturating_mul(2)).min(RETRY_MAX_TOKENS_CAP);
+        let doubled = truncated_retry_budget(settings.default_max_tokens);
         call(doubled, settings.default_temperature).await
     } else {
         call(settings.default_max_tokens, 0.7).await
@@ -1188,4 +1198,31 @@ pub(crate) async fn summarize_task_retry(
         },
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 截断重试预算:未到封顶时翻倍;命中封顶返回原值,保证「封顶后同预算仍重试一次」
+    #[test]
+    fn truncated_retry_budget_doubles_and_keeps_cap() {
+        assert_eq!(truncated_retry_budget(1024), 2048);
+        assert_eq!(truncated_retry_budget(40000), RETRY_MAX_TOKENS_CAP);
+        assert_eq!(
+            truncated_retry_budget(RETRY_MAX_TOKENS_CAP),
+            RETRY_MAX_TOKENS_CAP,
+            "恰为封顶值:回退原预算,仍发起重试"
+        );
+        assert_eq!(
+            truncated_retry_budget(RETRY_MAX_TOKENS_CAP + 1),
+            RETRY_MAX_TOKENS_CAP + 1,
+            "设置异常超过封顶(正常路径不可达):保持原预算,不因封顶反而缩小"
+        );
+        assert_eq!(
+            truncated_retry_budget(u32::MAX),
+            u32::MAX,
+            "饱和相乘不得溢出"
+        );
+    }
 }

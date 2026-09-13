@@ -322,10 +322,11 @@ pub(crate) struct SelfHealRecord {
 /// 封顶防止异常上游把单轮预算顶到设置页上限(65536)空烧 token。
 const TRUNCATION_HEAL_MAX_TOKENS_CAP: u32 = 8192;
 
-/// 计算自愈重发的 max_tokens(翻倍+封顶);已封顶返回 None(重发无意义,走原错误路径)
+/// 计算自愈重发的 max_tokens(翻倍+封顶);已封顶返回 None(重发无意义,走原错误路径)。
+/// 算法收敛在 `utils::retry::doubled_heal_budget`(2026-09-13 批次 4.1 四路合一),
+/// 此处仅绑定本路径专属封顶值;是否重发仍由外层 `truncation_heal_cause` 判定。
 fn doubled_heal_budget(current: u32) -> Option<u32> {
-    let doubled = (current.saturating_mul(2)).min(TRUNCATION_HEAL_MAX_TOKENS_CAP);
-    (doubled > current).then_some(doubled)
+    crate::utils::retry::doubled_heal_budget(current, TRUNCATION_HEAL_MAX_TOKENS_CAP)
 }
 
 /// Ok 形态的截断判定(问题①):finish_reason=length 且该轮产出不可用——

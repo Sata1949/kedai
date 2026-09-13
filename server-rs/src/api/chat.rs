@@ -768,12 +768,19 @@ fn generate_raw_budget(requested: Option<u32>, setting: u32) -> u32 {
 }
 
 /// `finish_reason=length` 时的重发预算(截断自愈):翻倍并封顶,最多重发 2 次。
+/// 本路径专属常量 GENERATE_RAW_RETRY_MAX_TOKENS;算法与触发条件收敛在
+/// `utils::retry::truncation_heal_budget`(2026-09-13 批次 4.1 四路合一)。
+/// 旧条件 `used < CAP` 由公共函数的「未增长即 None」等价覆盖(used≥CAP 两者都 None);
+/// 唯一差异在 used==0(旧实现 Some(0)/现 None)——本路径预算经 generate_raw_budget
+/// 恒 ≥1(入口已 400 拒绝显式 0,函数内再兜底钳到 1),故此差异不可达,不造特例。
 fn generate_raw_heal_budget(finish_reason: Option<&str>, used: u32, rounds: u32) -> Option<u32> {
-    if finish_reason == Some("length") && used < GENERATE_RAW_RETRY_MAX_TOKENS && rounds < 2 {
-        Some(used.saturating_mul(2).min(GENERATE_RAW_RETRY_MAX_TOKENS))
-    } else {
-        None
-    }
+    crate::utils::retry::truncation_heal_budget(
+        finish_reason,
+        used,
+        rounds,
+        GENERATE_RAW_RETRY_MAX_TOKENS,
+        2,
+    )
 }
 
 #[cfg(test)]

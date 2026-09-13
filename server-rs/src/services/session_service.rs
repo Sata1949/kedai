@@ -46,6 +46,31 @@ fn row_to_session_with_char(row: &rusqlite::Row) -> rusqlite::Result<SessionWith
     })
 }
 
+/// 删消息前清理其 message 作用域变量(2026-09-13 批次 3.1):
+/// `scope_variables` 的 message 行(scope='message',scope_id=消息 id 的**文本**)没有
+/// FK 级联,消息行删除后即成孤儿;单条删除/截断/清空三条路径都必须**先于删 messages**
+/// 调用(删后子查询已取不到消息 id)。只清 message 作用域,不涉及 undo_snapshots /
+/// kaleido_changelog(那属于会话删除,见 cleanup_dependent_rows_before_delete)。
+/// `filter` 是 messages 表的会话内筛选片段(仅本文件内字面量,无注入面);`ps` 与调用方
+/// 删消息的 SQL 参数一致。失败记日志且不阻断消息删除(残留仅占存储,读写均按 id 过滤)。
+fn cleanup_message_scope_variables<P: rusqlite::Params>(
+    conn: &rusqlite::Connection,
+    filter: &str,
+    ps: P,
+) {
+    let sql = format!(
+        "DELETE FROM scope_variables WHERE scope = 'message' AND scope_id IN (
+           SELECT CAST(id AS TEXT) FROM messages WHERE {filter}
+         )"
+    );
+    if let Err(e) = conn.execute(&sql, ps) {
+        tracing::warn!(
+            error = e.to_string(),
+            "消息作用域变量清理失败(不阻断消息删除)"
+        );
+    }
+}
+
 impl SessionService {
     pub fn new(db: Arc<Db>) -> Self {
         SessionService { db }
@@ -531,6 +556,12 @@ impl SessionService {
 
     pub fn delete_message(&self, session_id: &str, id: i64) -> bool {
         let conn = self.db.write();
+        // 先清 message 作用域变量再删消息(批次 3.1;顺序不可换:删后子查询取不到 id)
+        cleanup_message_scope_variables(
+            &conn,
+            "session_id = ?1 AND id = ?2",
+            params![session_id, id],
+        );
         conn.execute(
             "DELETE FROM messages WHERE session_id = ?1 AND id = ?2",
             params![session_id, id],
@@ -543,6 +574,12 @@ impl SessionService {
     /// 用于「编辑用户消息后重发」:保留被编辑消息、丢弃其后的所有上下文。
     pub fn truncate_messages_after(&self, session_id: &str, anchor_id: i64) -> usize {
         let conn = self.db.write();
+        // 被截断消息的 message 作用域变量一并清理(批次 3.1;anchor 本身保留)
+        cleanup_message_scope_variables(
+            &conn,
+            "session_id = ?1 AND id > ?2",
+            params![session_id, anchor_id],
+        );
         conn.execute(
             "DELETE FROM messages WHERE session_id = ?1 AND id > ?2",
             params![session_id, anchor_id],
@@ -552,6 +589,9 @@ impl SessionService {
 
     pub fn clear_messages(&self, session_id: &str) {
         let conn = self.db.write();
+        // 清空前先清该会话全部 message 作用域变量(批次 3.1;import_chat 复用本函数,
+        // 导入后消息 id 重分配,旧变量按旧 id 存续只会成为永久孤儿)
+        cleanup_message_scope_variables(&conn, "session_id = ?1", params![session_id]);
         let _ = conn.execute(
             "DELETE FROM messages WHERE session_id = ?1",
             params![session_id],
@@ -868,6 +908,139 @@ mod tests {
         assert_eq!((hit, miss), (0, 500));
         assert_eq!(payload, "", "无快照开关时应插入轻量行(payload 空)");
         drop(conn);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// 再建一个会话(FK 指向同一 character),供「跨会话不受影响」断言
+    fn add_second_session(svc: &SessionService) {
+        let conn = svc.db.write();
+        conn.execute(
+            "INSERT INTO sessions (id, character_id, title, created_at, updated_at)
+             VALUES ('s2', 'c1', 't2', '', '')",
+            [],
+        )
+        .unwrap();
+    }
+
+    /// 3.1 单条删除:仅该消息的 message 作用域变量被清,同会话其它消息与其它作用域保留
+    #[test]
+    fn delete_message_cleans_its_message_scope_variables() {
+        let (svc, dir) = service();
+        let m1 = svc
+            .add_message("s1", "assistant", "一", serde_json::json!({}))
+            .unwrap();
+        let m2 = svc
+            .add_message("s1", "user", "二", serde_json::json!({}))
+            .unwrap();
+        svc.save_scope_variables(
+            "message",
+            &m1.id.to_string(),
+            &serde_json::json!({ "好感度": 1 }),
+        );
+        svc.save_scope_variables(
+            "message",
+            &m2.id.to_string(),
+            &serde_json::json!({ "好感度": 2 }),
+        );
+        // 同名数据的 chat 作用域:不得被顺手清掉(只清 message)
+        svc.save_scope_variables("chat", "s1", &serde_json::json!({ "好感度": 3 }));
+
+        assert!(svc.delete_message("s1", m1.id), "删除应命中一行");
+        assert!(
+            svc.load_scope_variables("message", &m1.id.to_string())
+                .is_none(),
+            "被删消息的 message 变量应清理(否则成孤儿)"
+        );
+        assert_eq!(
+            svc.load_scope_variables("message", &m2.id.to_string()),
+            Some(serde_json::json!({ "好感度": 2 })),
+            "同会话其它消息的变量保留"
+        );
+        assert_eq!(
+            svc.load_scope_variables("chat", "s1"),
+            Some(serde_json::json!({ "好感度": 3 })),
+            "chat 作用域不受影响"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// 3.1 截断:anchor 之后的消息变量被清,anchor 自身保留
+    #[test]
+    fn truncate_messages_after_cleans_later_message_scope_variables() {
+        let (svc, dir) = service();
+        let m1 = svc
+            .add_message("s1", "assistant", "一", serde_json::json!({}))
+            .unwrap();
+        let m2 = svc
+            .add_message("s1", "user", "二", serde_json::json!({}))
+            .unwrap();
+        let m3 = svc
+            .add_message("s1", "assistant", "三", serde_json::json!({}))
+            .unwrap();
+        for id in [m1.id, m2.id, m3.id] {
+            svc.save_scope_variables(
+                "message",
+                &id.to_string(),
+                &serde_json::json!({ "轮次": id }),
+            );
+        }
+
+        assert_eq!(
+            svc.truncate_messages_after("s1", m1.id),
+            2,
+            "应删 anchor 之后两条"
+        );
+        assert!(
+            svc.load_scope_variables("message", &m1.id.to_string())
+                .is_some(),
+            "anchor 自身的变量保留"
+        );
+        assert!(
+            svc.load_scope_variables("message", &m2.id.to_string())
+                .is_none(),
+            "anchor 之后的消息变量应清理"
+        );
+        assert!(
+            svc.load_scope_variables("message", &m3.id.to_string())
+                .is_none(),
+            "anchor 之后的消息变量应清理(最末条)"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// 3.1 清空:该会话 message 变量清空,其它会话的 message 变量保留
+    #[test]
+    fn clear_messages_cleans_only_that_session_scope_variables() {
+        let (svc, dir) = service();
+        add_second_session(&svc);
+        let m1 = svc
+            .add_message("s1", "assistant", "甲", serde_json::json!({}))
+            .unwrap();
+        let m2 = svc
+            .add_message("s2", "assistant", "乙", serde_json::json!({}))
+            .unwrap();
+        svc.save_scope_variables(
+            "message",
+            &m1.id.to_string(),
+            &serde_json::json!({ "v": 1 }),
+        );
+        svc.save_scope_variables(
+            "message",
+            &m2.id.to_string(),
+            &serde_json::json!({ "v": 2 }),
+        );
+
+        svc.clear_messages("s1");
+        assert!(
+            svc.load_scope_variables("message", &m1.id.to_string())
+                .is_none(),
+            "被清空会话的 message 变量应清理"
+        );
+        assert_eq!(
+            svc.load_scope_variables("message", &m2.id.to_string()),
+            Some(serde_json::json!({ "v": 2 })),
+            "其它会话的 message 变量不受影响"
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 }

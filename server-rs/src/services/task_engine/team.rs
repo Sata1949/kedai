@@ -268,12 +268,16 @@ fn parse_audit(text: &str, mains_count: usize) -> AuditVerdict {
 /// 截断自愈预算决策(纯函数):仅 finish_reason=length 触发,预算翻倍并封顶。
 /// 对齐 solo/custom 逐步执行的自愈语义(2026-09-03 实测:team 审计/终审/汇总
 /// 直调 generate_text 无自愈,推理模型 reasoning 烧光 1024 预算产出腰斩 JSON)。
+/// 算法与触发条件收敛在 `utils::retry::truncation_heal_budget`(2026-09-13 批次 4.1
+/// 四路合一);本路径单次重发,故 max_rounds=1。
 fn trunc_heal_budget(finish_reason: Option<&str>, max_tokens: u32) -> Option<u32> {
-    if finish_reason == Some("length") && max_tokens < TEAM_RETRY_MAX_TOKENS_CAP {
-        Some(max_tokens.saturating_mul(2).min(TEAM_RETRY_MAX_TOKENS_CAP))
-    } else {
-        None
-    }
+    crate::utils::retry::truncation_heal_budget(
+        finish_reason,
+        max_tokens,
+        0,
+        TEAM_RETRY_MAX_TOKENS_CAP,
+        1,
+    )
 }
 
 /// 审计/终审/汇总共用的纯生成出口:先按原预算调 generate_text,finish=length
