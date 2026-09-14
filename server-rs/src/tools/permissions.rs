@@ -8,54 +8,16 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use tokio::sync::oneshot;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ToolRisk {
-    Safe,
-    Sensitive,
-    Dangerous,
-}
-
-/// 授权模式(三档;settings 以 snake_case 字符串落盘,旧配置缺省经迁移映射)。
-/// - Strict:读/写/删文件都需授权;其他工具走原风险裁决。
-/// - Loose:读/写文件放行,删文件需授权;其他工具走原风险裁决。
-/// - Bypass:除「系统路径(C 盘)写/删」外一律放行。
+/// 工具风险等级与授权模式**已下沉到 L1**（`crate::models::tool_policy`，2026-09-14），
+/// 此处仅重导出以保持 `tools/` 内部既有 `use` 路径可用。
 ///
-/// 三档下「写/删系统路径」始终需授权,这是模式的硬底线。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AuthorizationMode {
-    Strict,
-    Loose,
-    Bypass,
-}
-
-impl Default for AuthorizationMode {
-    /// 新装默认宽松(可用性优先:读写放行、仅删除需授权)
-    fn default() -> Self {
-        AuthorizationMode::Loose
-    }
-}
-
-impl AuthorizationMode {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            AuthorizationMode::Strict => "strict",
-            AuthorizationMode::Loose => "loose",
-            AuthorizationMode::Bypass => "bypass",
-        }
-    }
-
-    /// 解析模式字符串;非法值返回 None(调用方决定是 400 还是回退)
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "strict" => Some(AuthorizationMode::Strict),
-            "loose" => Some(AuthorizationMode::Loose),
-            "bypass" => Some(AuthorizationMode::Bypass),
-            _ => None,
-        }
-    }
-}
+/// **下沉理由**：`services/`（L2）需要读授权档位与风险等级，若词汇留在 `tools/`（L3），
+/// 就形成 L2→L3 的越代依赖。详见 `models/tool_policy.rs` 头部与
+/// `docs/ARCHITECTURE-3H.md` §2.2。
+///
+/// **L2 代码请直接 `use crate::models::tool_policy::{...}`**，不要经本模块转发——
+/// 转发仍会构成跨代依赖边（规则 J 会如实检出）。本重导出只服务 `tools/` 内部。
+pub use crate::models::tool_policy::{AuthorizationMode, ToolRisk};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PermissionDecision {

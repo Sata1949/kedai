@@ -1006,6 +1006,7 @@ mod tests {
             enabled: true,
             position: 0,
             depth: 4,
+            scan_depth: None,
             order: 100,
             case_sensitive: false,
             sticky: 0,

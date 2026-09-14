@@ -5,7 +5,7 @@ use crate::models::types::{TaskFollowupMode, TaskRunMode, TaskStatus, TaskStep};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::sse::Event;
-use axum::response::{IntoResponse, Response, Sse};
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
@@ -138,16 +138,9 @@ pub async fn events(State(state): State<Arc<AppState>>) -> Response {
             }
         }
     };
-    let mut response = Sse::new(stream)
-        .keep_alive(
-            axum::response::sse::KeepAlive::new().interval(std::time::Duration::from_secs(30)),
-        )
-        .into_response();
-    response.headers_mut().insert(
-        axum::http::header::CACHE_CONTROL,
-        axum::http::HeaderValue::from_static("no-cache, no-transform"),
-    );
-    response
+    // 装配单点在 api::util::sse_response(KeepAlive 30s + no-transform),
+    // 与 /api/chat/send 共用——两处必须一致,见该函数注释。
+    super::sse_response(stream)
 }
 
 /// GET /api/tasks/{id}/calls:任务 LLM 调用追踪全量列表(批次 3「调用情况」面板;

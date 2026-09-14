@@ -1,4 +1,8 @@
 // 连接器模块
+//
+// 代际: L2(中层·干 / Orchestration)——LLM 后端适配(协议翻译)。
+// 判据: 把各提供商的线格式翻译成本项目内部类型;只依赖 L1(models)。
+// 纪律: 新增提供商在此适配,不得把提供商特有字段泄漏到上层。
 pub mod mock;
 pub mod openai_compatible;
 

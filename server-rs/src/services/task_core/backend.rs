@@ -11,6 +11,21 @@
 // 方法签名逐字对齐 TaskService 既有方法(返回类型不得漂移,见 db.rs/events.rs/
 // executor.rs):写库类保持 bool / Result 返回,异步生成类用 BoxFuture(与
 // ModeExecutor 同风格,不引入新依赖)。
+//
+// ## 读代码须知:这些窄接口的存在理由(2026-09-14 明确,防误读)
+//
+// **存在理由是「断开 task_engine → task_service 的反向依赖」,不是「为将来多实现预留」。**
+// 当前 8 个窄接口**各自只有 1 个实现**(全在 `task_service/backend_impl.rs`),
+// 经 blanket `TaskBackend` 以 `Arc<dyn TaskBackend>` 消费——即就「多态」而言,
+// 它是一层纯转发,没有第二个实现者,也**不建议**为「万一将来换实现」而继续细拆。
+//
+// 它的价值是**结构性的**:把「引擎需要宿主提供什么」写成不可绕过的清单,
+// 使规则 C(L1 边界门禁)可机器验证,并让引擎与宿主可以独立演进/测试。
+// 对比:`ModeExecutor`(task_engine/executor.rs)有 8 个**真实**实现(solo/multi/plan/
+// team/custom/legacy/followup),那一处的 trait 拆分才兼具「多态」价值。
+//
+// 结论:**新增窄接口前先问「是否真的多了一个实现者或一条要断的依赖」**;
+// 两个都不是,就不要拆(trait 数量本身不是架构收益)。
 use crate::models::types::{
     CharacterRecord, LlmMessage, TaskEventKind, TaskMessageRecord, TaskRecord, TaskStatus,
     TaskStep, TaskSubtaskStatus, ToolDefinition,

@@ -52,6 +52,10 @@ try {
     # NativeCommandError 中止脚本,且经 powershell -File 调用时退出码可能为 0(失败被吞)。
     # 经 cmd 内联合并流,成败以退出码判断,保证失败如实传播。
     $ErrorActionPreference = "Continue"
+    # 占用让位:运行中的 kedai-portable.exe(直接跑 src-tauri\target 产物时)会锁住链接目标,
+    # 导致 cargo 报「failed to remove file ... os error 5」;编译前改名让位,无需杀进程。
+    [void](Clear-KedaiLockedBuildArtifact -ExePath $DesktopExe)
+    [void](Clear-KedaiLockedBuildArtifact -ExePath (Join-Path $Root "src-tauri\target\release\kedai-desktop.exe"))
     & $env:ComSpec /d /c "cargo build --release --manifest-path `"$(Join-Path $Root 'src-tauri\Cargo.toml')`" --bin kedai-portable 2>&1"
     $code = $LASTEXITCODE
     $ErrorActionPreference = "Stop"

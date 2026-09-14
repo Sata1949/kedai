@@ -14,7 +14,8 @@
 // permissions::check 的命令级硬门在任何自动放行之前判定,破坏性/提权命令在任务模式下
 // 仍被直接拒绝(无 UI 可确认),只有 safe/sensitive 命令经白名单授权放行。
 use crate::models::types::ToolDefinition;
-use crate::tools::permissions::ToolRisk;
+// 工具风险词汇已下沉 L1(2026-09-14):L2 直连 models,不经 tools 转发。
+use crate::models::tool_policy::ToolRisk;
 use crate::tools::registry::ToolRegistry;
 use crate::tools::tool_sets;
 

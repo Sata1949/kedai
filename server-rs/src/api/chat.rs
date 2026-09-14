@@ -7,7 +7,7 @@ use crate::services::prompt_inject_service::{output_budget_for_word_count, Injec
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::sse::Event;
-use axum::response::{IntoResponse, Response, Sse};
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
@@ -330,16 +330,9 @@ pub async fn send(State(state): State<Arc<AppState>>, Json(body): Json<SendBody>
         }
     };
 
-    let mut response = Sse::new(stream)
-        .keep_alive(
-            axum::response::sse::KeepAlive::new().interval(std::time::Duration::from_secs(30)),
-        )
-        .into_response();
-    response.headers_mut().insert(
-        axum::http::header::CACHE_CONTROL,
-        axum::http::HeaderValue::from_static("no-cache, no-transform"),
-    );
-    response
+    // 装配单点在 api::util::sse_response(KeepAlive 30s + no-transform),
+    // 与 /api/tasks/events 共用——两处必须一致,见该函数注释。
+    super::sse_response(stream)
 }
 
 pub async fn stop(State(state): State<Arc<AppState>>, Json(body): Json<StopBody>) -> Response {
@@ -429,7 +422,7 @@ pub struct GenerateRawBody {
     pub max_tokens: Option<u32>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct GenerateRawMessage {
     pub role: String,
     pub content: String,
@@ -453,14 +446,9 @@ fn inject_worldbook_for_raw(
     let mut constant_msgs: Vec<GenerateRawMessage> = Vec::new();
     let mut triggered_msgs: Vec<GenerateRawMessage> = Vec::new();
     let mut budget = MAX_INJECT_CHARS;
-    let roll = {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        (SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.subsec_nanos())
-            .unwrap_or(0)
-            % 100) as i64
-    };
+    // 概率 roll 与判定顺序已收敛到 prompt_kit 单点(收敛前本处自算 subsec_nanos%100,
+    // 与引擎侧 simple_roll 不同源;见 services::prompt_kit 的原语注释)。
+    let roll = crate::services::prompt_kit::world_entry_roll();
     let all_texts: Vec<String> = messages.iter().map(|m| m.content.clone()).collect();
     for e in entries {
         if !e.enabled || injected.len() >= MAX_INJECT {
@@ -469,19 +457,13 @@ fn inject_worldbook_for_raw(
         let hit = if e.constant {
             true
         } else {
-            // 扫描窗口:depth<=0 全部;否则最近 depth 条消息
-            let depth = if e.depth <= 0 {
-                all_texts.len()
-            } else {
-                (e.depth as usize).min(all_texts.len())
-            };
-            let window = &all_texts[all_texts.len().saturating_sub(depth)..];
-            if window.is_empty() {
-                false
-            } else {
-                crate::parsing::world_book::entry_matches_texts(e, window)
-                    && crate::parsing::world_book::entry_probability_pass(e, roll)
-            }
+            // 本场景的判定参数(与引擎侧的差异**显式**表达,不再靠各自隐式实现):
+            // - 扫描**全部消息**(不分角色):作者页自组的是扁平完整上下文
+            //   (chat_history 整段压成一条消息、触发词常缀在该消息开头的
+            //   `/* system log … */` 注释行里),不存在「最近聊天」概念;
+            // - 未声明 scan_depth 时兜底 0(= 扫全部):条目 `depth`(ST 语义是插入深度)
+            //   不参与窗口——用它收窄会让触发条目永不命中(2026-09-14 吸血鬼卡丢格式根因)。
+            crate::services::prompt_kit::triggered_entry_hits(e, &all_texts, 0, roll)
         };
         if !hit {
             continue;
@@ -491,11 +473,9 @@ fn inject_worldbook_for_raw(
             continue;
         }
         budget -= content.len();
-        let text = if e.comment.is_empty() {
-            content.to_string()
-        } else {
-            format!("[{}]\n{}", e.comment, content)
-        };
+        // keep_empty_bracket=false:本场景 comment 为空时不产生空 `[]` 行
+        // (与引擎侧的约定不同,差异经参数显式表达;单点实现见 prompt_kit::world_entry_text)。
+        let text = crate::services::prompt_kit::world_entry_text(&e.comment, content, false);
         let msg = GenerateRawMessage {
             role: "system".to_string(),
             content: text,
@@ -806,6 +786,7 @@ mod tests {
             enabled: true,
             position: 0,
             depth: 4,
+            scan_depth: None,
             order: 100,
             case_sensitive: false,
             sticky: 0,
@@ -874,20 +855,69 @@ mod tests {
         assert_eq!(messages2.len(), 1);
     }
 
-    /// depth 窗口:只扫最近 N 条消息,窗口外不命中
+    /// 扫描窗口只认 scan_depth(ST scanDepth);条目 depth 是插入深度,不参与窗口。
+    /// **回归护栏**:2026-09-14 吸血鬼卡「丢格式」根因——格式条目 extensions.depth=1
+    /// 被误当扫描窗口,窗口收窄到 1 条,带 `system log` 触发词的 chat_history 永不命中。
     #[test]
-    fn raw_inject_depth_window() {
+    fn raw_inject_scan_depth_window_not_entry_depth() {
         let mut e = entry("格式", vec!["system log"], "格式规范", false, false);
+        // 条目 depth=1(插入深度)但未声明 scan_depth:作者页上下文很短,
+        // 全量扫描必须命中(旧实现在此不命中 → 格式规范不注入)
         e.depth = 1;
-        let entries = vec![e.clone()];
-        // system log 在倒数第二条(depth=1 扫不到)
-        let mut messages = vec![msg("assistant", "… system log …"), msg("user", "继续")];
-        assert!(inject_worldbook_for_raw(&entries, &mut messages).is_empty());
-        // depth=0 扫全部 → 命中
-        e.depth = 0;
-        let entries2 = vec![e];
-        let mut messages2 = vec![msg("assistant", "… system log …"), msg("user", "继续")];
-        assert_eq!(inject_worldbook_for_raw(&entries2, &mut messages2).len(), 1);
+        let messages = vec![
+            msg("user", "/* system log(IGNORE the line): */ 开场"),
+            msg("user", "Read the xml tag `<user_input>`."),
+        ];
+        let mut first = messages.clone();
+        assert_eq!(
+            inject_worldbook_for_raw(&[e.clone()], &mut first).len(),
+            1,
+            "条目 depth 不得收窄 generate-raw 的扫描窗口"
+        );
+
+        // 显式声明 scan_depth=1 时才收窄:触发词在窗口外 → 不命中
+        let narrow = entry("格式", vec!["system log"], "格式规范", false, false);
+        let mut narrow = narrow;
+        narrow.scan_depth = Some(1);
+        let mut only_tail = messages.clone();
+        assert!(inject_worldbook_for_raw(&[narrow.clone()], &mut only_tail).is_empty());
+        // scan_depth=0 = 全部历史 → 命中
+        let mut all = narrow;
+        all.scan_depth = Some(0);
+        let mut all_msgs = messages;
+        assert_eq!(inject_worldbook_for_raw(&[all], &mut all_msgs).len(), 1);
+    }
+
+    /// 真实吸血鬼卡形状:作者页把整段 chat_history 压成一条 user 消息,触发词
+    /// `system log` 缀在该消息开头的注释行里;格式条目 depth 声明为 1。
+    /// 修复前该条目永不注入 → 卡片 JSON 解析失败报「丢格式」。
+    #[test]
+    fn raw_inject_vampire_card_format_entry_hits() {
+        let format = entry(
+            "[INS]🔗响应格式🔗[FORMAT]",
+            vec!["system log"],
+            "<response_format_guidance>有且仅有一个 JSON</response_format_guidance>",
+            false,
+            true,
+        );
+        // 该卡权威数据:格式条目 extensions.depth=1, extensions.scan_depth 缺省
+        let mut format = format;
+        format.depth = 1;
+        let world = entry("🐧核心叙事🐧", vec![], "常驻世界观", true, false);
+
+        let mut messages = vec![
+            msg(
+                "user",
+                "/* system log(IGNORE the line): */\n<chat_history>\n## bootstrap_00\n</chat_history>",
+            ),
+            msg("system", "<current_status>当前暂无历史记录</current_status>"),
+            msg("user", "\nRead the xml tag `<user_input>`.\n"),
+        ];
+        let injected = inject_worldbook_for_raw(&[world, format], &mut messages);
+        assert!(
+            injected.iter().any(|c| c.contains("响应格式")),
+            "格式规范条目必须注入(否则卡片报丢格式):{injected:?}"
+        );
     }
 
     /// 卡片生成预算:未显式指定时不低于结构化下限,避免默认 1024 截断 JSON

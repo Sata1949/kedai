@@ -6,13 +6,31 @@
 > **物理约定:过程交接类一律放 `docs/archive/`,`docs/` 根下只留活文档。**
 > 新增、移动或归档文档后必须同步本索引;活文档中的 `文件:行号` 引文在改动后需复核。
 
+## 事实权威优先级(2026-09-14 确立)
+
+同一件事实在多个文档出现时,以下列顺序为准(**冲突时高优先级胜出,并须回填低优先级**):
+
+| 权威 | 管什么 | 位置 | 守护机制 |
+|---|---|---|---|
+| **代际归属权威** | 模块属 L1/L2/L3/entry、允许的跨代方向、已登记的越代债务 | `tools/arch-layers.json` | `tools/check-arch.mjs` 规则 I/J(**未登记即 FAIL**) |
+| **数字权威** | 测试数量、构建步骤、命令、门禁清单等一切可计数事实 | `MAINTENANCE.md` | `tools/count-tests.mjs --check` |
+| **叙述权威** | 为什么这样分层、判据、纪律与晋升规则 | `ARCHITECTURE-3H.md` | 须向 `arch-layers.json` 对账 |
+
+**CI 现状**:`.github/workflows/ci.yml` 为**纸面 CI**(仓库无 git 远端,从未运行)。
+实际生效的闸门是 `build.ps1` 的 `[0]` 阶段与 `tools/hooks/pre-push`(详见 `MAINTENANCE.md` §0)。
+
+**纪律**:架构文档不再硬编码测试数字(那类事实一律引用 `MAINTENANCE.md`);`ARCHITECTURE-3H.md`
+若与代码实测不符,以代码为准并**先修文档再动代码**。
+
 ## 活文档
 
 ### 架构与协议
 
 | 文档 | 内容 |
 |---|---|
-| [ARCHITECTURE-3H.md](ARCHITECTURE-3H.md) | 「三结合」梯队架构总纲 |
+| [ARCHITECTURE-3H.md](ARCHITECTURE-3H.md) | 「三结合」梯队架构总纲(叙述权威;代际归属以 `tools/arch-layers.json` 为准) |
+| [架构治理全面落地-变更说明.md](架构治理全面落地-变更说明.md) | 2026-09-14 架构治理落地契约:门禁自遮蔽修复、代际 SSOT 纳管、`tools/` 归属修正(L3→L2)、L3 依赖倒置、世界书注入收敛、**安全三项修复(含一项兼容性收紧:后端脚本授权门)** |
+| [架构分析-2026-09-14.md](架构分析-2026-09-14.md) | **全量架构审计报告**:四代际(3+1)精确判据与判定程序、做对/不足的逐条证据、`tools/` 收口施工图、落地路线图;**`tools/arch-layers.json` 中全部越代债务的「收口路径」出处** |
 | [mvu-protocol.md](mvu-protocol.md) | mvu 变量系统协议(UpdateVariable / MagVarUpdate 双格式) |
 | [generate-render-protocol.md](generate-render-protocol.md) | 生成与渲染协议(双端一致性约束) |
 | [inject-protocol.md](inject-protocol.md) | 提示词注入协议 |
@@ -42,6 +60,7 @@
 | [前端结构债收敛-变更说明.md](前端结构债收敛-变更说明.md) | 2026-09-13 残余任务批次二(5.1+5.2):storeBridge 类型化注册(owner 必填 + 显式降级 + 14 例配对测试)、弹窗 MODALS 单点定义(App.vue/check-arch 白名单派生 + 9 例三方一致元测试) |
 | [任务引擎拆分与工程文档补齐-变更说明.md](任务引擎拆分与工程文档补齐-变更说明.md) | 2026-09-13 残余任务批次三:4.2 TaskBackend 拆 8 个窄接口(算法上移 task_engine、锁纪律回收、中性 DTO)、6.5 EJS builtin 冻结门禁(规则 H)、3.2/6.2/6.3 三项评估与说明文档 |
 | [前端工具链与审计升级-变更说明.md](前端工具链与审计升级-变更说明.md) | 2026-09-13 残余任务批次四:4.3 AgentEngine 依赖分组(18 参→4 结构体)、4.4 状态机迁移非静默(transition_best_effort + 8 处)、5.3 ESLint+Prettier、6.1 审计升级(双锁 cargo audit + npm audit 硬门禁),并收口前三批只读审查发现的 P1/P2 |
+| [角色卡世界书扫描窗口修复-变更说明.md](角色卡世界书扫描窗口修复-变更说明.md) | 2026-09-14 吸血鬼卡「修复后仍丢格式」:根因是 `depth`(插入深度)被误当扫描窗口,格式条目永不注入;新增 `scan_depth` 字段 + 共享 `scan_window_len`,并修掉编辑保存抹掉 `extensions` 的数据缺陷 |
 
 ### 现状、风险与计划
 

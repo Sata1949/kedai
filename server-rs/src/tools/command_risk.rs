@@ -17,43 +17,17 @@
 // (`&&`/`;`/`|`)逐段判定后取最高危,避免「安全命令 && 危险命令」被降级放行。
 
 /// 命令风险级别。
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum CommandRisk {
-    Safe,
-    Sensitive,
-    Destructive,
-    Admin,
-}
-
-impl CommandRisk {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Safe => "safe",
-            Self::Sensitive => "sensitive",
-            Self::Destructive => "destructive",
-            Self::Admin => "admin",
-        }
-    }
-
-    /// 是否必须逐条确认(不受授权模式影响)。
-    /// 这是本模块与权限裁决的**唯一接口契约**:危险级永远要人点头。
-    pub fn requires_explicit_confirm(&self) -> bool {
-        matches!(self, Self::Destructive | Self::Admin)
-    }
-
-    /// 面向用户的中文标签(确认卡与审计面板用)。
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Safe => "只读",
-            Self::Sensitive => "写入",
-            Self::Destructive => "破坏性",
-            Self::Admin => "提权/系统",
-        }
-    }
-}
+/// 命令风险级别**已下沉到 L1**（`crate::models::tool_policy::CommandRisk`，2026-09-14）。
+///
+/// 本模块的职责边界随之澄清：
+/// - **保留在此（L3）**：分级表（`ADMIN_COMMANDS` 等）与 `classify_command` 算法
+///   ——这是**业务判定**，依赖具体命令语义；
+/// - **已下沉（L1）**：`CommandRisk` 枚举本身——它是被 `services/exec/audit.rs`（审计落库）
+///   等 L2 代码共享的**领域词汇**。
+///
+/// 若枚举留在本模块，`services/exec/audit.rs:11` 就会构成 L2→L3 越代依赖。
+/// 详见 `models/tool_policy.rs` 头部与 `docs/ARCHITECTURE-3H.md` §2.2。
+pub use crate::models::tool_policy::CommandRisk;
 
 /// 提权或系统级控制的命令名(取最高危,先判)。
 const ADMIN_COMMANDS: &[&str] = &[

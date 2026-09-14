@@ -21,8 +21,28 @@
   ① `build.ps1` 在构建前跑 `check-all -Quick`,失败即中止构建(`-SkipChecks` 仅限本地应急,
   **交付/试用前必须补跑一次完整 `check-all`**);② `tools/hooks/pre-push` 在推送前跑同一检查
   (装一次:`npm run hooks:install`;紧急可 `git push --no-verify`,同样须事后补跑);
-  ③ `.github/workflows/ci.yml`(2026-09-13 批次 1 落盘;仓库**尚未配置远端**,配置并推送后自动生效)。
+  ③ `.github/workflows/ci.yml`(**纸面 CI,从未运行**):2026-09-13 落盘,但仓库
+  **始终未配置 git 远端**(`git remote -v` 为空),故从未触发。**当前实际生效的闸门
+  只有前两条(build.ps1 与 pre-push)**——不要依赖 CI 兜底。配置远端并推送后它会自动生效,
+  届时本节应更新为「三处触发均实测生效」。
   变更 `tools/check-*.mjs` 的检查规则时,同步更新本节与本文件的检查项清单。
+- **代际归属与跨代依赖门禁(规则 I/J,2026-09-14 起)**:`tools/check-arch.mjs` 新增两条护栏,
+  其唯一机器可读事实源(SSOT)是 **`tools/arch-layers.json`**——
+  - **规则 I(代际归属完整性)**:`server-rs/src` 的每个顶层模块/根文件、`web/src` 的每个顶层目录/根文件
+    **必须**在 `arch-layers.json` 登记代际(L1/L2/L3/entry)与职责,**未登记即 FAIL**。
+    新增或改名顶层模块时先补登记再动代码——没有代际归属的模块无从按分层纪律评审,是「分层叙事的静默失效点」。
+  - **规则 J(跨代依赖方向)**:按登记代际与允许方向校验实测 import 图。**新增未登记的越代边即 FAIL**;
+    存量越代边必须在 `arch-layers.json` 的 `registeredEdges`(后端)/`frontendRegisteredEdges`(前端)登记,
+    写明 `reason`(为何存在)与 `remediation`(收口路径)。登记表**只减不增**:还清一条删一条,
+    **禁止为过检查而加条目**(那等同于关掉护栏)。
+  - **前后端方向规则不同(务必区分)**:后端是**隔离模型**——L3(工具/沙箱)与 L2(编排)双向互斥,
+    青层反向依赖骨干层会让「隔离」名存实亡;前端是**层次模型**——L3(展示)→ L2(状态编排)→ L1(纯契约)
+    是严格向下的正常依赖(组件读 store、store 调 composable),故前端**额外允许 L3→L2**。
+    配置分别见 `arch-layers.json` 的 `dependencyRules.backendAllowed` / `frontendAllowed`。
+  - **修复纪律(2026-09-14 教训)**:规则 I 的前端分支曾误写入后端失败桶,而汇总在后端违规时立即 `exit(1)`,
+    导致**前端规则 J 的结论永不打印**(护栏静默失效,且当时 26 项未登记使构建被阻断)。
+    现已改为两个失败桶都打印后再统一退出。修改任何门禁脚本的失败聚合逻辑时,
+    **必须验证两侧报告都能输出**,并确认退出码仍非 0。
 - **依赖供应链纪律(2026-09-13 批次 1 起)**:三把闸已进 `check-all`——
   ① `deps: check-lock-sync`(双 Cargo.lock 漂移检查:src-tauri 内嵌 server-rs 时 cargo 会
   重新解析依赖树,同一后端源码可能编出不同版本依赖;**0 漂移为基线**,新增即 FAIL,
@@ -118,8 +138,9 @@ kedai/
 | 一键构建 | `.\build.ps1` | **默认双端同步产出**:前端 web/dist + Rust release(测试版)+ 便携版;`-TestOnly` 仅测试版快速通道 `-Dev` debug 构建 `-NoWeb` 仅 Rust `-Tauri` 追加 NSIS 打包 |
 | 兼容别名 | `npm run build:all` / `npm run build:rs` | 均等价 `.\build.ps1`(双端同步);`npm run build:test` 等价 `.\build.ps1 -TestOnly` |
 | 统一改版本号 | `npm run version:bump -- x.y.z` | 7 处版本号一次改全(2 个 package.json、3 个 Cargo.toml、tauri.conf.json、本文档版本行);支持 `-DryRun` 预览 |
-| 后端测试 | `cd server-rs && cargo test` | **1013 个测试(823 单测 + 190 集成,21 个集成文件)**,**需在 vcvars64 环境**;前端 `npm test -w web` **768 个(83 文件;静态计数;vitest 运行时为 786,差值 18 来自 `parser.contract.test.ts` 循环生成的 fixture 用例)**。数字由 `node tools/count-tests.mjs` 自动统计,勿手抄——`npm run count:tests` 查看当前值,`npm run check:tests` 校验文档是否漂移 |
-| 全量检查(本地 CI) | `npm run check` | `tools/check-all.ps1`:fmt → clippy → cargo test → cargo audit(**硬门禁**)→ lock-sync(双锁漂移)→ contract → arch(C/D/E 分层)→ 类型 ratchet → npm audit(警告)→ vue-tsc(**硬门禁**)→ vitest → vite build。**已接入 build.ps1、pre-push hook 与 CI 工作流**(见 §0 门禁纪律) |
+| 后端测试 | `cd server-rs && cargo test` | **1043 个测试(845 单测 + 198 集成,22 个集成文件)**,**需在 vcvars64 环境**;前端 `npm test -w web` **768 个(83 文件;静态计数;vitest 运行时为 786,差值 18 来自 `parser.contract.test.ts` 循环生成的 fixture 用例)**。数字由 `node tools/count-tests.mjs` 自动统计,勿手抄——`npm run count:tests` 查看当前值,`npm run check:tests` 校验文档是否漂移 |
+| 全量检查(本地 CI) | `npm run check` | `tools/check-all.ps1`:fmt → clippy → cargo test → cargo audit(**硬门禁**)→ lock-sync(双锁漂移)→ contract → arch(C/D/E 分层)→ 类型 ratchet → npm audit(警告)→ vue-tsc(**硬门禁**)→ vitest → vite build。**已接入 build.ps1 与 pre-push hook**(CI 工作流为纸面、未运行,见 §0 门禁纪律)。
+`check-arch` 规则自 2026-09-14 起含 C/D/E/G/H/I/J(代际归属与跨代方向以 `tools/arch-layers.json` 为 SSOT) |
 | 开发模式 | `cd server-rs && cargo run` + `npm run dev -w web` | 后端 3001 / 前端 5173(代理到 3001) |
 | 前端构建 | `npm run build -w web` | 产出 web/dist(编译进 exe 用) |
 
@@ -470,6 +491,41 @@ rusqlite(bundled,零原生依赖),**WAL 模式 + foreign_keys ON**。共 28 张�
     修复手法:重建 `D:\kedai-build\android-app-build`(空目录即可,gradle 会重新生成内容)。
     另注:压缩/备份工具会**跟随** junction(踩坑 21),与本次「悬空 junction 无法创建目录」
     是两个不同现象,勿混。
+27. **构建/门禁报 `failed to remove file ... os error 5`,先查是不是 exe 还在跑**(2026-09-13 实测)。
+    现象:开发时用 `cargo run` 或 `start.ps1` 起了 `kedai-server`,随后跑 `build.ps1` /
+    `check-all.ps1`,`cargo` 重新链接时报:
+    ```
+    error: failed to remove file `...\target\debug\kedai-server.exe`
+    Caused by:
+      拒绝访问。 (os error 5)
+    ```
+    由 `check-all` 的 `cargo test --workspace` 阶段抛出时,汇总表只显示 `FAIL`,文案像权限/杀软问题,
+    **实际根因是 Windows 不允许删除 / 覆盖正在运行的 exe**(错误发生在「删除」),与踩坑 22
+    (杀软拦截**新建 exe 的执行**,错误发生在「执行」)是两回事,两者共用 `os error 5` 这个码,极易混淆。
+    已验证的判定手法:用 `FileShare.None` 独占打开产物,成功=未被占用、失败=被占用
+    (注意不能只看「能不能删」:Windows 对运行中的 exe **有时允许删除**(删除挂起,名字立即释放、
+    进程继续跑),此时 `Remove-Item` 会成功但产物已消失,症状反变成「未生成 exe」)。
+    **规避**:编译前跑 `Clear-KedaiLockedServerArtifacts`(`tools/Write-BuildStamp.ps1`,已接入
+    `build.ps1` / `check-all.ps1` / `build-portable.ps1`)——把被占用的产物改名让位为 `<exe>.old`,
+    cargo 随即写入同名新文件,**无需杀进程**,旧进程继续跑旧代码;未被占用的产物一律不动(不误伤增量编译)。
+    另注:`cargo test` 期间若有 `kedai-server` 在跑,个别用例(如 `settings_connector` 的
+    `mock_auto_switches_to_openai_on_save`)可能因占用 `settings.json` 报 `Os { code: 32 }`
+    而假红;跑门禁前先关掉手动起的服务实例。
+28. **世界书 `depth` 是「插入深度」不是「关键词扫描窗口」,两者混用会让条目永不触发**(2026-09-14 实测踩坑,吸血鬼卡「修复后仍丢格式」根因)。
+    SillyTavern 语义(`public/scripts/world-info.js`):`entry.depth` ↔ `originalData.extensions.depth`,
+    只在 `position=4`(atDepth)时决定注入插入到倒数第几条;关键词**扫描窗口**是**另一个字段**
+    `entry.scanDepth` ↔ `extensions.scan_depth`(取值 `entry.scanDepth ?? 全局扫描深度`,从不读 `depth`)。
+    踩坑 18 给 `depth` 补 `extensions` 回退是对的,但第四轮修复同时把它**当扫描窗口**用;
+    吸血鬼卡格式条目 `extensions.depth=1` 因此被读成「只扫最近 1 条消息」,而作者页把整段
+    `<chat_history>` 压成**一条** user 消息、触发词 `system log` 只在开头的 `/* system log … */` 注释行 →
+    窗口只剩尾部 `<user_input>` 那条 → 格式规范永不注入 → 卡片报「丢格式」。
+    现行实现:`WorldEntry.scan_depth` 独立字段(解析 `scan_depth`/`scanDepth`/`extensions.scan_depth`),
+    两条路径统一经 `parsing::world_book::scan_window_len` 取窗口——**卡片生成(generate-raw)未声明则扫全部**
+    (作者页自组的是扁平上下文,没有"最近聊天"概念),**角色扮演引擎未声明则沿用 depth 兜底**
+    (存量卡行为不变)。改这里必须同时看这两个调用点,别再各写一份。
+    另一处陷阱:`merge_entries_into` 曾是**整体替换**条目对象,而 `extensions` 不在前端视图里 →
+    任何一次条目编辑保存都会静默抹掉 `extensions`(depth/scan_depth/role 全退化),已改为字段叠加
+    (`overlay_view`)。改世界书写回时注意:视图为空的正则/角色要写显式 `null`,否则旧值"复活"。
 
 ---
 
@@ -479,7 +535,7 @@ rusqlite(bundled,零原生依赖),**WAL 模式 + foreign_keys ON**。共 28 张�
 cd server-rs && cargo test
 ```
 
-- 单元测试(源文件内 `#[test]`/`#[tokio::test]`,**823 个**,以 `tools/count-tests.mjs` 为准):状态机迁移、planner(fast/deep/算式识别)、reflector(3 规则)、calculator(白名单解析)、censor(禁词同义替换)、token 编码映射与估算、工具注册表、世界书转换、世界书注入(含 `extensions.depth` 扫描窗口)、提示词注入(含禁词库)、mvu 变量系统(含 JSONPatch 转义/reason/delta 容错)、EJS 渲染器(含读取 API、escape-ejs 与**循环预算/解析深度守卫 5 例**)、角色卡解析、正则脚本、@INJECT 解析/应用、GENERATE 注入、运行时提示词内置默认回退、角色扮演默认提示词内置(from_config + load 空值回填)、结构化错误码(api/errors.rs)、任务编排工具契约(agentgo 逐项校验/子任务截断判失败/read subtask 多键命中/todo 跨 agent 可见/agentend interrupted)、任务工具策略(deny_dangerous 的 bash 例外不外溢:含 `bash2`/`mcp_x_bash` 精确匹配护栏)、任务白名单不豁免命令级高危硬门(custom_authorized + rm -rf/sudo 必须拒绝)、generate-raw 结构化预算下限与截断自愈(含显式值钳制)、**密钥保留策略(批次 2:解密失败不覆盖磁盘密文 3 例)**、**pending_runs RAII 守卫(drop 与 panic 路径)**、**db writer 锁中毒回滚(未完成事务 ROLLBACK)**、**世界书概率门控不变式(常驻条目不参与概率 / 触发条目参与,2 例)**、**system 前缀不被概率扰动(构建侧锁定)**、**截断自愈预算四路合一(utils::retry 纯函数 7 例:翻倍/精确命中封顶/已封顶返回 None/饱和不溢出/零边界/仅 length 且轮次内触发/单轮限制;task_service 封顶回退 1 例见 [抽象收敛与残余修复-变更说明.md](docs/抽象收敛与残余修复-变更说明.md))**、**用量落库事务化(global_usage 写入失败回滚 1 例、会话与全局同进同退 1 例)**、**消息删除的 message 作用域变量清理(单条/截断/清空 3 例)**
+- 单元测试(源文件内 `#[test]`/`#[tokio::test]`,**827 个**,以 `tools/count-tests.mjs` 为准):状态机迁移、planner(fast/deep/算式识别)、reflector(3 规则)、calculator(白名单解析)、censor(禁词同义替换)、token 编码映射与估算、工具注册表、世界书转换、世界书注入(`scan_depth` 扫描窗口:`scan_window_len` 优先/兜底/0/封顶、`scan_depth` 三来源解析、显式 scanDepth 覆盖 depth 兜底)、提示词注入(含禁词库)、mvu 变量系统(含 JSONPatch 转义/reason/delta 容错)、EJS 渲染器(含读取 API、escape-ejs 与**循环预算/解析深度守卫 5 例**)、角色卡解析、正则脚本、@INJECT 解析/应用、GENERATE 注入、运行时提示词内置默认回退、角色扮演默认提示词内置(from_config + load 空值回填)、结构化错误码(api/errors.rs)、任务编排工具契约(agentgo 逐项校验/子任务截断判失败/read subtask 多键命中/todo 跨 agent 可见/agentend interrupted)、任务工具策略(deny_dangerous 的 bash 例外不外溢:含 `bash2`/`mcp_x_bash` 精确匹配护栏)、任务白名单不豁免命令级高危硬门(custom_authorized + rm -rf/sudo 必须拒绝)、generate-raw 结构化预算下限与截断自愈(含显式值钳制)、**generate-raw 世界书窗口不认条目 depth(回归护栏)+ 吸血鬼卡真实形状格式条目必注入**、**密钥保留策略(批次 2:解密失败不覆盖磁盘密文 3 例)**、**pending_runs RAII 守卫(drop 与 panic 路径)**、**db writer 锁中毒回滚(未完成事务 ROLLBACK)**、**世界书概率门控不变式(常驻条目不参与概率 / 触发条目参与,2 例)**、**system 前缀不被概率扰动(构建侧锁定)**、**截断自愈预算四路合一(utils::retry 纯函数 7 例:翻倍/精确命中封顶/已封顶返回 None/饱和不溢出/零边界/仅 length 且轮次内触发/单轮限制;task_service 封顶回退 1 例见 [抽象收敛与残余修复-变更说明.md](docs/抽象收敛与残余修复-变更说明.md))**、**用量落库事务化(global_usage 写入失败回滚 1 例、会话与全局同进同退 1 例)**、**消息删除的 message 作用域变量清理(单条/截断/清空 3 例)**、mvu 变量系统(含 JSONPatch 转义/reason/delta 容错)、EJS 渲染器(含读取 API、escape-ejs 与**循环预算/解析深度守卫 5 例**)、角色卡解析、正则脚本、@INJECT 解析/应用、GENERATE 注入、运行时提示词内置默认回退、角色扮演默认提示词内置(from_config + load 空值回填)、结构化错误码(api/errors.rs)、任务编排工具契约(agentgo 逐项校验/子任务截断判失败/read subtask 多键命中/todo 跨 agent 可见/agentend interrupted)、任务工具策略(deny_dangerous 的 bash 例外不外溢:含 `bash2`/`mcp_x_bash` 精确匹配护栏)、任务白名单不豁免命令级高危硬门(custom_authorized + rm -rf/sudo 必须拒绝)、generate-raw 结构化预算下限与截断自愈(含显式值钳制)、**密钥保留策略(批次 2:解密失败不覆盖磁盘密文 3 例)**、**pending_runs RAII 守卫(drop 与 panic 路径)**、**db writer 锁中毒回滚(未完成事务 ROLLBACK)**、**世界书概率门控不变式(常驻条目不参与概率 / 触发条目参与,2 例)**、**system 前缀不被概率扰动(构建侧锁定)**、**截断自愈预算四路合一(utils::retry 纯函数 7 例:翻倍/精确命中封顶/已封顶返回 None/饱和不溢出/零边界/仅 length 且轮次内触发/单轮限制;task_service 封顶回退 1 例见 [抽象收敛与残余修复-变更说明.md](docs/抽象收敛与残余修复-变更说明.md))**、**用量落库事务化(global_usage 写入失败回滚 1 例、会话与全局同进同退 1 例)**、**消息删除的 message 作用域变量清理(单条/截断/清空 3 例)**
 - API 集成测试(`tests/` 21 个文件,**190 个**,以 `tools/count-tests.mjs` 为准,mock 连接器 + 临时数据目录):api_integration、assistant、agent_flows、tasks、task_events(含 `task_solo_offers_bash_tool`:任务模式确实下发 bash)、generate_raw(自愈成功且 injected 保留 / 重发失败回退半截 / 自愈用尽返回末次文本 / max_tokens=0 400)、**schema_migration_meta(老库升级结构一致性,冻结基线见 `tests/fixtures/schema_baseline_v0_3_0_beta.sql`)**、prompt_inject、world_books、settings_connector、security、contracts_e2e、scripts_e2e、scripts_import、swipe_regenerate、undo、user_scripts、variables_scopes、db_concurrency、macros、repo_index——health、角色 CRUD(multipart 上传)、会话/消息/导入导出、设置与 token、agent plan、SSE 聊天流、任务引擎六模式、计算器工具 SSE、世界书/角色卡、提示词注入与酒馆预设导入、鉴权
   - **已知 flaky**:`settings_connector::mock_auto_switches_to_openai_on_save` 偶发因 Windows 文件占用失败
     (`settings.json 应已持久化: Os { code: 32 }`;另实测全量负载下的 `Os { code: 2 } NotFound` 变体),

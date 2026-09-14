@@ -12,13 +12,11 @@ use serde_json::Value;
 
 use super::command_risk::CommandRisk;
 
-/// 工具来源:决定路径区域可信度。内置工具受沙箱约束,插件/MCP 的参数对引擎不透明。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolOrigin {
-    Builtin,
-    Plugin,
-    Mcp,
-}
+/// 工具来源**已下沉到 L1**（`crate::models::tool_policy::ToolOrigin`，2026-09-14）。
+///
+/// 理由：`plugins/` 与 `mcp/`（均为 L3）都需要标注工具来源。若该枚举留在 `tools/`（L2），
+/// 两个 L3 模块都会构成 `L3→L2` 越代依赖。此处仅重导出，服务 `tools/` 内部既有 `use`。
+pub use crate::models::tool_policy::ToolOrigin;
 
 /// 操作类型。派生的 Ord 顺序即危险度序
 /// (Other < ReadFile < WriteFile < DeleteFile < Exec),

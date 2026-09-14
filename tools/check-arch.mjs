@@ -17,6 +17,11 @@
  *   G. `api/**` 不得新增「裸 {error}」响应(错误形状 ratchet,数量不得超基线)。
  *   H. EJS 自研解释器能力面(builtin_global / get_prop / set_prop 的字面量条数)不得增长
  *      (威胁模型 D5;冻结纪律的机器门禁)。
+ *   I. 代际归属完整性 —— server-rs/src 顶层模块/根文件、web/src 顶层目录/根文件
+ *      必须全部登记在 `tools/arch-layers.json`(三结合分层的单一事实源)。未登记即 FAIL:
+ *      没有代际归属的模块无从按分层纪律评审,是分层叙事的静默失效点。
+ *   J. 跨代依赖方向 —— 按 arch-layers.json 的 L1/L2/L3 归属与允许方向校验实测 import 图。
+ *      新增越代边 FAIL;存量越代边须在 registeredEdges 中登记(只报债务不阻塞,可还债不可增债)。
  *
  * 用法:
  *   node tools/check-arch.mjs
@@ -46,6 +51,15 @@ const VERBOSE = process.argv.includes('--verbose');
 const KNOWN_CYCLES = [];
 
 const failures = [];
+/**
+ * 前端「代际归属」类违规(规则 I 的前端分支)独立分桶。
+ *
+ * 为什么必须分桶:规则 I 的前端检查与后端检查此前共用 backendFailures,而汇总段
+ * 在后端违规时**立即 process.exit(1)**(位于前端报告段之前),后果是「只要有一个
+ * 前端根文件未登记,前端规则 J 的全部结论就永不打印」——护栏静默失效。
+ * 现在两个桶在汇总处一并打印后再统一退出,任一桶非空都判 FAIL(不降低门禁强度)。
+ */
+const frontendFailures = [];
 const notes = [];
 
 /**
@@ -500,17 +514,275 @@ const backendWarnings = [];
   }
 }
 
-console.log('\n========== Kedai 后端分层与冻结护栏(C/D/E/G/H) ==========');
+// ========== 三结合代际归属与依赖方向(规则 I / J) ==========
+//
+// 单一事实源:`tools/arch-layers.json`(代际定义、模块归属、允许方向、已知偏离登记)。
+//
+// 为什么需要这两条规则:docs/ARCHITECTURE-3H.md 定义了「老中青三结合」分层(L1 稳 / L2 干 /
+// L3 活),但 2026-09-14 全仓实测发现两处护栏盲区——
+//   ① 5 个顶层模块(migration/scripts/slash/utils/plugins)从未被列入任何代际清单,分层
+//      叙事对它们完全失效(新代码不知该按哪一代纪律评审);
+//   ② 存在 10 条真实越代依赖边(tools 名义 L3,实为被 L2 依赖的核心设施),此前无任何机器约束。
+// 规则 I 把「每个模块都有明确代际」变成硬约束;规则 J 把「跨代方向」变成 ratchet 门禁。
+//
+// 设计取舍:registeredEdges 登记的是**已核实的存量结构债务**,只报债务不阻塞(与
+// KNOWN_CYCLES / BASELINE_BARE_ERROR 同模式)——若不做登记,门禁将永久红而失去信号价值;
+// 一旦登记,**任何新增**未登记越代边立即 FAIL。还债即删条目,禁止为过检查而加条目。
+{
+  let cfg = null;
+  try {
+    cfg = JSON.parse(readFileSync(join(ROOT, 'tools', 'arch-layers.json'), 'utf8'));
+  } catch (e) {
+    backendFailures.push(
+      `[I] 代际归属清单读取失败:tools/arch-layers.json(${e.message});该文件是分层的单一事实源,缺失即护栏失效`,
+    );
+  }
+  if (cfg) {
+    const genOf = (n) => cfg.backend?.[n]?.generation ?? null;
+    /** 目录代际(仅 frontend 表:api/contracts/mvu/utils/stores/composables/components/sandbox)。 */
+    const feDirGen = (n) => cfg.frontend?.[n]?.generation ?? null;
+    /**
+     * 前端「模块代际」解析:先查目录,再查根文件(frontendEntryFiles 的键带扩展名)。
+     *
+     * 为什么要解析根文件:web/src 根下约 30 个模块此前既未登记、也不参与方向校验,
+     * 造成 components→render / stores→sseReducer 这类边整体被跳过(实测 69 条跨目录边
+     * 中 49 条因一端无代际而静默略过)。根文件既可能是被依赖方(如上),也可能是
+     * 依赖发起方(如 cardScriptHost.ts 导入 mvu),故两侧都要按代际校验。
+     * 返回 null 表示未登记(由规则 I 单独报错,此处不重复报)。
+     */
+    const feModuleGen = (name) => {
+      const dir = feDirGen(name);
+      if (dir) return dir;
+      const file =
+        cfg.frontendEntryFiles?.[`${name}.ts`] ?? cfg.frontendEntryFiles?.[`${name}.vue`];
+      return file?.generation ?? null;
+    };
+    const allowedDirs = new Set(cfg.dependencyRules?.allowed ?? []);
+    /**
+     * 后端与前端的方向规则**必须分开**:两者的 L1/L2/L3 虽是同一套代际词汇,
+     * 依赖位置却不同(2026-09-14 澄清,见 docs/ARCHITECTURE-3H.md §2.3)。
+     *
+     *   后端 = 隔离模型: L3(工具/沙箱) 与 L2(编排) **互斥**——青层不得反向依赖
+     *          骨干层(否则「隔离」名存实亡),故 L3->L2 与 L2->L3 双向禁止。
+     *   前端 = 层次模型: L3(展示) → L2(状态编排) → L1(纯契约) 是**严格向下**的
+     *          正常依赖。组件读 store、store 调 composable 是该架构的常态,而非越代;
+     *          真正要禁止的是 L2->L3(编排依赖 UI/沙箱)与 L1->L2/L3(纯逻辑依赖状态)。
+     *
+     * 因此前端额外允许 L3->L2。这**不是**为过检查而放宽:若禁止 L3->L2,几乎每个
+     * 组件都会「违规」,护栏会因噪声过载而失去信号价值——那才是真正的失效。
+     */
+    const backendAllowed = new Set(cfg.dependencyRules?.backendAllowed ?? cfg.dependencyRules?.allowed ?? []);
+    const frontendAllowed = new Set(
+      cfg.dependencyRules?.frontendAllowed ??
+        [...(cfg.dependencyRules?.allowed ?? []), 'L3->L2'],
+    );
+    const isAllowedDir = (a, b) => backendAllowed.has(`${a}->${b}`);
+    const isAllowedFeDir = (a, b) => frontendAllowed.has(`${a}->${b}`);
+
+    /** 生产代码切片:剔除 `#[cfg(test)]` 及其后(测试里的跨模块引用不是架构依赖)。 */
+    const productionSource = (src) => {
+      const i = src.search(/^#\[cfg\(test\)\]/m);
+      return i === -1 ? src : src.slice(0, i);
+    };
+
+    // --- 规则 I:归属完整性 ---
+    let unregistered = 0;
+    for (const name of readdirSync(SERVER)) {
+      const p = join(SERVER, name);
+      if (statSync(p).isDirectory()) {
+        if (!cfg.backend?.[name]) {
+          unregistered++;
+          backendFailures.push(
+            `[I] 后端模块未登记代际:server-rs/src/${name}/ 不在 arch-layers.json 的 backend 中` +
+              `(新增模块必须先声明 L1/L2/L3 归属与职责,否则无从按代际纪律评审)`,
+          );
+        }
+      } else if (name.endsWith('.rs')) {
+        if (!cfg.entryFiles?.[name]) {
+          unregistered++;
+          backendFailures.push(
+            `[I] 后端根文件未登记:server-rs/src/${name} 不在 arch-layers.json 的 entryFiles 中`,
+          );
+        }
+      }
+    }
+    for (const name of readdirSync(SRC)) {
+      const p = join(SRC, name);
+      if (statSync(p).isDirectory()) {
+        if (!cfg.frontend?.[name]) {
+          unregistered++;
+          frontendFailures.push(
+            `[I] 前端目录未登记代际:web/src/${name}/ 不在 arch-layers.json 的 frontend 中`,
+          );
+        }
+      } else if (!isTest(name) && /\.(ts|vue)$/.test(name)) {
+        if (!cfg.frontendEntryFiles?.[name]) {
+          unregistered++;
+          frontendFailures.push(
+            `[I] 前端根文件未登记:web/src/${name} 不在 arch-layers.json 的 frontendEntryFiles 中` +
+              `(根文件同样要声明代际:它既是规则的被依赖方,也是依赖的发起方)`,
+          );
+        }
+      }
+    }
+    if (VERBOSE) console.log(`  [I] 代际归属完整性:未登记 ${unregistered} 项`);
+
+    // --- 规则 J:跨代依赖方向 ---
+    //
+    // 组合根(`entry` 代际:lib.rs/config.rs/main.rs、App.vue/main.ts)被**允许依赖一切**,
+    // 这是分层架构的通用豁免——它的职责就是把各层拼装起来,故不参与方向校验。
+    const registeredBackend = new Set((cfg.registeredEdges ?? []).map((e) => `${e.from}->${e.to}`));
+    const backendEdges = new Map();
+    for (const f of collect(SERVER, ['.rs'])) {
+      const parts = relative(SERVER, f).split(sep);
+      const from = parts.length === 1 ? 'entry' : parts[0];
+      if (from === 'entry') continue;
+      const src = readFileSync(f, 'utf8');
+      productionSource(src)
+        .split('\n')
+        .forEach((line, i) => {
+          const m = /^\s*(?:pub(?:\([^)]*\))?\s+)?use\s+crate::([a-z_]+)/.exec(line);
+          if (!m) return;
+          const to = m[1];
+          if (to === from || to === 'entry') return;
+          if (!genOf(from) || !genOf(to)) return; // 未登记模块由规则 I 单独报错
+          const key = `${from}->${to}`;
+          if (!backendEdges.has(key)) backendEdges.set(key, { from, to, samples: [] });
+          const rec = backendEdges.get(key);
+          if (rec.samples.length < 3) rec.samples.push(`${relative(ROOT, f)}:${i + 1}`);
+        });
+    }
+    let backendCrossGen = 0;
+    let backendRegistered = 0;
+    for (const [key, e] of backendEdges) {
+      const ga = genOf(e.from);
+      const gb = genOf(e.to);
+      if (ga === gb || isAllowedDir(ga, gb)) continue; // 同代内自由 / 允许方向
+      backendCrossGen++;
+      if (registeredBackend.has(key)) {
+        backendRegistered++;
+        notes.push(
+          `[债务] 后端越代依赖 ${e.from}(${ga}) → ${e.to}(${gb}) 例:${e.samples[0]}` +
+            `(已登记于 arch-layers.json;还清后请删除该条目)`,
+        );
+      } else {
+        backendFailures.push(
+          `[J] 新增越代依赖:${e.from}(${ga}) → ${e.to}(${gb}) 例:${e.samples.join(', ')}` +
+            `(L1 不得依赖上层、L2 不得依赖 L3、L3 不得依赖 L2;确属本轮无法消除,须在 arch-layers.json 的 ` +
+            `registeredEdges 登记理由与收口路径)`,
+        );
+      }
+    }
+    // 登记陈旧检测:已登记但实测不存在的边 → 提示删除,防止登记表变成「历史沉积」而失去意义
+    for (const key of registeredBackend) {
+      if (!backendEdges.has(key)) {
+        notes.push(
+          `[登记陈旧] arch-layers.json 的 registeredEdges 含 ${key},但实测已无该依赖,请删除该条目`,
+        );
+      }
+    }
+    if (VERBOSE) {
+      console.log(
+        `  [J] 后端跨代边:${backendCrossGen} 条(已登记 ${backendRegistered},新增 ${backendCrossGen - backendRegistered})`,
+      );
+    }
+
+    // 前端同法校验(仅登记回边;components→api 等 L3→L1 属允许方向)
+    //
+    // 与后端的差异:前端的「模块」既可能是顶层目录,也可能是 web/src 根文件。
+    // 根文件此前从不参与方向校验,导致大量真实边被静默跳过;现按 feModuleGen
+    // 统一解析两侧代际——目录查 frontend、根文件查 frontendEntryFiles。
+    // 入口根文件(App.vue/main.ts/modals.ts/store.ts,generation=entry)照 backend 的
+    // 组合根豁免,不参与方向校验(登记仍是硬要求,由规则 I 负责)。
+    const registeredFrontend = new Set(
+      (cfg.frontendRegisteredEdges ?? []).map((e) => `${e.from}->${e.to}`),
+    );
+    const feEdges = new Map();
+    for (const f of collect(SRC, ['.ts', '.vue'])) {
+      if (isTest(f)) continue;
+      const relPath = relative(SRC, f).split(sep).join('/');
+      const parts = relPath.split('/');
+      const fromFile = parts.length === 1 ? parts[0].replace(/\.(ts|vue)$/, '') : null;
+      const from = fromFile ?? parts[0];
+      if (feModuleGen(from) === 'entry') continue; // 组合根作为依赖发起方 → 豁免
+      const src = readFileSync(f, 'utf8');
+      for (const m of src.matchAll(/from\s+['"]([^'"]+)['"]/g)) {
+        const spec = m[1];
+        let to = null;
+        if (spec.startsWith('@/')) to = spec.slice(2).split('/')[0];
+        else if (spec.startsWith('.')) {
+          const joined = join(dirname(relPath), spec).split(sep).join('/');
+          const seg = joined.split('/')[0];
+          // ./x 在根目录下解析为根文件 x;../x 等上跳路径不视作同层依赖
+          to = seg === '.' || seg === '..' ? null : seg;
+        } else continue;
+        if (to === null || to === from) continue;
+        const toName = to.replace(/\.(ts|vue)$/, '');
+        if (!feModuleGen(toName)) continue; // 未登记由规则 I 单独报错
+        // 组合根作为依赖接收方 → 也豁免:前端 entry 是**被广泛引用的公共装配面**
+        // (store.ts 门面聚合 7 个 store、modals.ts 是弹窗注册表),组件/composable
+        // 经门面访问状态正是该架构的核心模式——若禁止,门面即不可用。这与后端
+        // entry 只作发起方的语义不同,是前端层次模型的固有差异。
+        if (feModuleGen(toName) === 'entry') continue;
+        const key = `${from}->${toName}`;
+        if (!feEdges.has(key)) feEdges.set(key, { from, to: toName, samples: [] });
+        const rec = feEdges.get(key);
+        if (rec.samples.length < 3) rec.samples.push(relPath);
+      }
+    }
+    let feCrossGen = 0;
+    for (const [key, e] of feEdges) {
+      const ga = feModuleGen(e.from);
+      const gb = feModuleGen(e.to);
+      if (ga === gb || isAllowedFeDir(ga, gb)) continue;
+      feCrossGen++;
+      if (registeredFrontend.has(key)) {
+        notes.push(
+          `[债务] 前端越代依赖 ${e.from}(${ga}) → ${e.to}(${gb}) 例:${e.samples[0]}` +
+            `(已登记于 arch-layers.json;还清后请删除该条目)`,
+        );
+      } else {
+        frontendFailures.push(
+          `[J] 前端新增越代依赖:${e.from}(${ga}) → ${e.to}(${gb}) 例:${e.samples.join(', ')}` +
+            `(L1 不得依赖上层、L2 不得依赖 L3、L3 不得依赖 L2)`,
+        );
+      }
+    }
+    for (const key of registeredFrontend) {
+      if (!feEdges.has(key)) {
+        notes.push(
+          `[登记陈旧] arch-layers.json 的 frontendRegisteredEdges 含 ${key},但实测已无该依赖,请删除该条目`,
+        );
+      }
+    }
+    if (VERBOSE) console.log(`  [J] 前端跨代边:${feCrossGen} 条(登记 ${registeredFrontend.size})`);
+  }
+}
+
+// ========== 汇总 ==========
+//
+// 退出纪律:后端桶与前端桶**都必须先打印再退出**。
+// 此前规则 I 的前端分支写进 backendFailures,而这里在后端违规时立即 exit(1),
+// 使前端报告段永不输出——前端规则 J 的结论被静默吞掉。现将两者的报告与退出
+// 统一到本段末尾:任一侧非空即 exit(1),门禁强度不变,可见性恢复。
+
+console.log('\n========== Kedai 后端分层与冻结护栏(C/D/E/G/H/I/J) ==========');
 if (backendFailures.length) {
   console.log(`[FAIL] ${backendFailures.length} 处分层违规(全部规则均为硬门禁):`);
   for (const f of backendFailures.slice(0, 40)) console.log(`  - ${f}`);
   if (backendFailures.length > 40) console.log(`  ... 另有 ${backendFailures.length - 40} 处`);
-  process.exit(1);
 } else {
   console.log('[ OK ] 后端分层无违规');
 }
 
-console.log('\n========== Kedai 前端架构护栏 ==========');
+console.log('\n========== Kedai 前端架构护栏(A/B/I/J) ==========');
+if (frontendFailures.length) {
+  console.log(`[FAIL] ${frontendFailures.length} 处架构违规:`);
+  for (const f of frontendFailures.slice(0, 40)) console.log(`  - ${f}`);
+  if (frontendFailures.length > 40) console.log(`  ... 另有 ${frontendFailures.length - 40} 处`);
+} else {
+  console.log('[ OK ] 前端架构无违规');
+}
 console.log(`store 循环依赖:${cycles.length} 个(新增 ${newCycles})`);
 console.log(`组件直改 state:${writeHits} 处(白名单 ${whitelisted})`);
 if (notes.length) {
@@ -520,6 +792,8 @@ if (notes.length) {
 if (failures.length) {
   console.log(`\n[FAIL] ${failures.length} 处架构违规:`);
   for (const f of failures) console.log(`  - ${f}`);
+}
+if (backendFailures.length || frontendFailures.length || failures.length) {
   process.exit(1);
 }
 console.log('\n[ OK ] 无新增架构违规');

@@ -382,6 +382,16 @@ CREATE TABLE IF NOT EXISTS undo_snapshots (
   created_at        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_undo_snapshots_session ON undo_snapshots(session_id, created_at);
+
+-- 角色卡脚本授权台账(2026-09-14,known-limitations L12 后端授权门)。
+-- 语义:character_id → 该卡**当前被授权执行的脚本内容哈希**。
+-- 哈希绑定脚本正文,卡更新脚本后旧授权自动失效(与前端 localStorage 台账同一模型)。
+-- 默认无行 = 未授权 = 后端不执行该卡脚本(fail-closed);global 脚本属用户自有,不受此表约束。
+CREATE TABLE IF NOT EXISTS script_authorizations (
+  character_id  TEXT PRIMARY KEY,
+  script_hash   TEXT NOT NULL,
+  authorized_at TEXT NOT NULL
+);
 "#;
 
 /// 暴露建表 SQL 供迁移一致性测试比对(旧库 ALTER 补列后应与新建表 schema normalize 一致)

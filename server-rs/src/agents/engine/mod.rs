@@ -122,6 +122,9 @@ pub struct EngineExt {
     pub tool_registry: Arc<ToolRegistry>,
     /// 用户脚本服务:角色卡 extensions.tavern_helper 脚本树读取
     pub user_scripts: Arc<UserScriptService>,
+    /// 脚本授权台账(2026-09-14):角色卡脚本执行前的 fail-closed 门(known-limitations L12)
+    pub script_authorizations:
+        Arc<crate::services::script_authorization_service::ScriptAuthorizationService>,
     /// slash 命令注册表:脚本 triggerSlash 与 API 命令清单共用
     pub slash: Arc<crate::slash::SlashRegistry>,
 }
@@ -145,6 +148,9 @@ pub struct AgentEngine {
     runtime_prompt: Arc<RuntimePromptService>,
     /// 用户脚本服务(阶段三 3b-3):角色卡 extensions.tavern_helper 脚本树读取
     user_scripts: Arc<UserScriptService>,
+    /// 脚本授权台账(2026-09-14):角色卡脚本执行门(fail-closed)
+    script_authorizations:
+        Arc<crate::services::script_authorization_service::ScriptAuthorizationService>,
     /// slash 命令注册表(阶段四 4a):脚本 triggerSlash 与 API 命令清单共用
     slash: Arc<crate::slash::SlashRegistry>,
     /// SQLite 句柄(Token 累计统计)
@@ -196,6 +202,7 @@ impl AgentEngine {
             contract_registry: storage.contract_registry,
             kaleido_state: storage.kaleido_state,
             user_scripts: ext.user_scripts,
+            script_authorizations: ext.script_authorizations,
             slash: ext.slash,
         }
     }
@@ -300,6 +307,47 @@ impl AgentEngine {
     /// 正常完成时返回 Some((assistant_content, total_usage, 酒馆助手变量快照));
     /// content 已剥离 <UpdateVariable> 块;快照为 Some 时表示本轮回合更新过变量。
     /// 中断/出错返回 None。
+    ///
+    /// # 结构地图(约 520 行,读之前先看这里)
+    ///
+    /// 本函数是全库最长函数,**刻意未拆分**——原因见下方「为何不拆」。先在脑中建立骨架:
+    ///
+    /// | 阶段 | 位置 | 职责 | 产出 |
+    /// |---|---|---|---|
+    /// | 抢占 + 注册 run | `run` 开头 | 中止同会话旧 run;登记 `runs` 表(供 stop/抢占) | `flag` / `run_id` |
+    /// | agent_sessions 初始化 | 紧随其后 | 清旧残留 → `create` | `agent_session` |
+    /// | **1. 规划** | `run_body` 内 | `plan_phase`(deep 模式先出计划) | `plan` |
+    /// | **2. 上下文构建** | 同上 | `collect_context` → `finalize_messages` → `build_llm_messages` | `rctx` / `llm_messages` |
+    /// | **2. 执行** | 同上 | `step_loop` → 工具循环(`run_tool_loop`) | `content` + custom 变量/契约增量 |
+    /// | **3. 收尾** | 同上 | 见下方「收尾子阶段」 | `final_out` / SSE `Finish` |
+    /// | 错误/中断终态 | `run_body.await` 之后 | 按 `abort_rx` 分派 Interrupted / Error 事件 | — |
+    ///
+    /// **收尾子阶段(第 3 阶段内部,顺序不可换)**:
+    ///   ① 解析正文 `parse_update_variable` → 剥离状态栏标签 → 违禁词检查;
+    ///   ② 载入契约 → `gate_assistant_patches_detailed` **门控**(必须在 apply 之前);
+    ///   ③ `generate_mvu_status` 生成状态栏(两步变量模式);
+    ///   ④ **落库**(`regenerate_assistant_id` 走原地更新、否则插入新行)→
+    ///      `run_character_scripts`(脚本写 `rctx.scopes`)→ `take_others` 一并落库;
+    ///   ⑤ 契约运行态 `commit_turn`;
+    ///   ⑥ `send_event(Finish)` → 记录 LAST_RECEIVE 统计 → `record_usage`;
+    ///   ⑦ 组装 `final_out` 返回。
+    ///
+    /// # 为何不拆(2026-09-14 实测评估,非常规的「懒」)
+    ///
+    /// 拆分的**收益**是导航性(「finish 语义在哪」→ 一个具名函数),**代价**却非机械:
+    ///   1. `run_body` 是 **async block + 捕获外层可变状态**——`final_out` 在块内赋值、
+    ///      `state_machine`/`total_usage` 内外共用。抽成 `&mut self` 方法需先重构掉这个
+    ///      捕获模式(改为显式返回值),那是**热路径重写**,不是搬移;
+    ///   2. `rctx` 承载 `&mut *rctx.assistant_vars` 与 `rctx.scopes` 两种借用,且
+    ///      收尾各步共享它——抽出方法会与 `&mut self` 产生借用冲突,须重新设计数据流;
+    ///   3. 收尾是**累积状态的线性管道**(①→⑦ 逐步消费前一步产出),
+    ///      拆开要么传 6-7 个参数(可读性更差),要么引入 `FinalizeState` 结构体
+    ///      (新增一个需与流程保持同步的类型)。
+    ///
+    /// 结论:**收益(导航)已由本结构地图 + 阶段注释提供;真正的行为收益为零,
+    /// 而回归面覆盖核心热路径。** 故知情接受,待该区域出现真实缺陷时再连同测试一并重构。
+    /// 相关:特征化测试见 `tests/engine_characterization.rs`(中断/工具回填/纯文本路径,
+    /// 已经变异测试验证有效性);审计结论见 `docs/架构分析-2026-09-14.md §6 批次5`。
     pub async fn run(
         &self,
         req: AgentRunRequest,

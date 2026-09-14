@@ -180,19 +180,41 @@ impl AgentEngine {
     /// 依次收集「全局脚本」与「角色卡脚本」的启用脚本,串行执行;
     /// 脚本经 TavernHelper 兼容桥写回共享 scopes(global/character/script 等),
     /// 由调用方收尾 take_others 统一落库。执行失败仅记日志,不影响主流程。
+    ///
+    /// **角色卡脚本授权门(2026-09-14,补 known-limitations L12)**:角色卡脚本来自网络、
+    /// 属不可信输入,能力上可写变量/导入数据/发起生成并落库。此前后端无门槛
+    /// (前端沙箱要授权、后端自动跑,授权不对称)。现改为 **fail-closed**:
+    /// 只有台账存有「与当前脚本内容一致的哈希」才执行,否则跳过并告警。
+    /// 门禁粒度为**整张卡**:卡更新脚本 → 哈希变 → 旧授权失效,需重新授权
+    /// (有意的兼容性收紧,已登记)。
     pub(super) async fn run_character_scripts(
         &self,
         character_id: &str,
         scopes: &Arc<Mutex<crate::parsing::scopes::ScopeVars>>,
     ) {
-        // 全局脚本(scope=global,owner 恒为空)
+        // 全局脚本(scope=global,owner 恒为空):**用户自有内容,视为可信**,不走授权门。
         let mut all: Vec<crate::scripts::loader::LoadedScript> = Vec::new();
         if let Ok(g) = self.user_scripts.get_tree("global", "") {
             all.extend(crate::scripts::loader::collect_enabled_scripts(&g));
         }
-        // 角色卡脚本(含旧字段迁移;角色不存在/无脚本树 → 跳过)
-        if let Ok(t) = self.user_scripts.get_character(character_id) {
-            all.extend(crate::scripts::loader::collect_enabled_scripts(&t));
+        // 角色卡脚本(含旧字段迁移;角色不存在/无脚本树 → 跳过)——受授权门约束
+        let card_scripts = match self.user_scripts.get_character(character_id) {
+            Ok(t) => crate::scripts::loader::collect_enabled_scripts(&t),
+            Err(_) => Vec::new(),
+        };
+        if !card_scripts.is_empty() {
+            if self
+                .script_authorizations
+                .is_authorized(character_id, &card_scripts)
+            {
+                all.extend(card_scripts);
+            } else {
+                tracing::warn!(
+                    character_id = character_id,
+                    scripts = card_scripts.len(),
+                    "角色卡脚本未授权,已跳过执行(前端需重新授权;见 known-limitations L12)"
+                );
+            }
         }
         if all.is_empty() {
             return;

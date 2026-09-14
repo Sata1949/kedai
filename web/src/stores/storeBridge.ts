@@ -1,21 +1,12 @@
-// store 间回调桥(架构护栏:M5 断环)。
+// stores/storeBridge.ts — store 间依赖的**类型化注册桥**(断环机制)。
 //
-// 用途:当一个 store 需要读/调用另一个 store 的状态或动作、而对方（直接或间接）
-// 又依赖自己时,顶层的 `import { useXStore }` 就会成环。做法是:由**被依赖方**在
-// 自己的 setup 里把「读值函数」或「动作」注册进来,依赖方通过本模块取用——
-// 依赖方向因此变为单向(都指向本叶子模块)。
-//
-// 类型化注册(批次 5.1):六条桥统一由 createBridge 构造,每条桥是「一个注册口 +
-// 一个取用口」的对象;register 的 owner 必填——同一 owner 重复注册是幂等覆盖
-// (store 重建实例等正常场景),不同 owner 抢同一桥会 console.warn 诊断,不静默覆盖。
-// get() 在未注册时返回本桥构造时声明的**显式降级实现**(见 storeBridges 各条注释),
-// 与断环前各调用点的旧行为一一对应。
-//
-// 为什么不把状态提到模块级 ref:Pinia 的实例隔离依赖「状态创建于 setup 内」。
-// 模块级 ref 会让状态脱离 Pinia 实例(测试里 createPinia() 无法重置、多实例串数据)。
-// 故本模块只保存**引用/函数**,状态仍住在各自 store 的 setup 里。
-//
-// 纪律:本模块不 import 任何 store;未注册时的降级行为要显式、可诊断。
+// 代际: L2(中层·干 / Orchestration)。
+// 为什么存在: 前端 store 曾构成一个强连通分量(character/chat/genSettings/uiPrefs/task
+//   互相可达),顶层 import 成环会让初始化顺序变成隐式契约、且无法单独替换任一 store。
+//   `tools/check-arch.mjs` 规则 A 对此**硬 FAIL**。
+// 机制: 被依赖方在 setup 期**注册回调**,依赖方在 action 运行期取值——依赖方向强制
+//   单向指向叶子模块,环被拆解。`KNOWN_CYCLES` 因此为空数组,规则 A 实测 0 环。
+// 纪律: 新增跨 store 调用必须走本桥(owner 必填 + 显式降级 + 配对测试),不得直接 import。
 import type * as api from '../api';
 
 // ---------- 桥的通用结构 ----------

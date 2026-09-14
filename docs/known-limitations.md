@@ -164,7 +164,7 @@
 
 ---
 
-## L12 角色卡脚本:前端沙箱有授权台账,后端执行路径未打通(待办)
+## L12 角色卡脚本:前端沙箱有授权台账,后端执行路径未打通(**已修复**,2026-09-14)
 
 - **现状行为**(2026-09-13 复核后修正描述——**并非「完全没有授权机制」**):
   - **前端**路径已有授权:`web/src/scriptAuthorization.ts` 的
@@ -178,54 +178,118 @@
     作用域(`write_scope:265`)、导入数据(`import_raw:244`)、发起生成(`generate_from_config:198`),
     写回结果由 `take_others` **落库**。此路径不查前端的授权台账(后端无从读取浏览器 localStorage),
     即**同一张卡的脚本,前端要授权、后端自动跑**。
-- **判定**:**待办**。这是两条执行路径的**授权不对称**,不是「新能力没隔离」——
-  前端已按 L3 纪律做了隔离,后端这条漏了对应门槛。
-- **补齐路径**(两条,需先定方案):
-  1. **后端独立开关**(改动小、语义清晰):新增设置项(默认关=保持现状),开启后后端脚本
-     经 `ToolPermissionManager::decide_with_policy`(`tools/permissions.rs:165`)裁决;
-     注意需**两端同步**加字段,否则 `tools/check-contract.mjs` 会因「后端有前端无」判 FAIL。
-  2. **复用前端授权**(语义统一、改动大):前端在生成请求里携带当前角色的授权状态,
-     后端据此放行——需设计跨端信任模型(后端不能信任前端的自我声明而不校验)。
+- **判定与处置**:**已修**(2026-09-14,采用下方「方案 1 复用前端授权」的变体):
+  后端新增 `script_authorizations` 表 + `ScriptAuthorizationService` 授权门,
+  `run_character_scripts` 把 **global(用户自有,可信,不走门禁)与 character(受门禁)拆分**,
+  character 部分 **fail-closed**——台账无「与当前脚本内容一致的哈希」即不执行并告警。
+  **哈希唯一来源是后端**:`GET /api/script-authorizations` 返回实时计算的 `current_hash`,
+  前端授权时原样回传(避免前后端各算一遍导致算法漂移永不匹配)。
+  端点:GET 查询 / PUT 授权 / DELETE 撤销 / GET list。e2e 测试 4 条
+  (`tests/scripts_e2e.rs`:未授权不执行、授权后执行、撤销后不执行、陈旧哈希 409)。
+  **这是有意的兼容性收紧**(旧行为自动执行),已按兼容性变更登记。
+- **补齐路径**(2026-09-14 已选定方案 2,见 `docs/授权模式.md` 的「后端脚本授权门」节):
+  1. **复用前端授权**(**已选定**):后端执行的**角色脚本树正是角色卡的
+     `data_raw.extensions.tavern_helper`**(`services/user_script_service.rs:4`),
+     与前端 `cardScripts.ts` 读的是**同一份数据**——故后端可在同一数据源上算出与前端**一致**的
+     规范化哈希,据此对账。方案:新增 `script_authorizations` 表 + `GET/PUT/DELETE
+     /api/script-authorizations?characterId=` + 前后端共享哈希 fixture 对拍;
+     `run_character_scripts` 把 **global(用户自有,视为可信)与 character(受门禁)拆分**,
+     character 部分查台账,**默认拒绝**并发出可观测事件。
+  2. **后端独立开关**(备选,改动更小):新增设置项经
+     `ToolPermissionManager::decide_with_policy`(`tools/permissions.rs:165`)裁决。
 - **生态兼容考量**:ST 生态大量卡依赖脚本自动写变量(状态栏、好感度),
-  默认开启授权会让这类卡静默失效,故**无论选哪种方案都必须默认放行、由用户显式收紧**。
+  默认开启授权会让这类卡静默失效。**本方案的 fail-closed 收紧属有意的安全变更**,
+  须在变更说明中作为**兼容性变更**登记,并在 UI 给出清晰的重新授权引导。
 - **本轮已完成的相关加固**(E.2,与授权正交):脚本单次执行加 5 秒墙钟硬超时
   (`agents/engine/run_scripts.rs`,协作式中断拦不住阻塞在 native 闭包者)、
   单轮脚本数量上限 32(防「脚本海」耗尽资源)。
 
-## L13 聊天流逐 token 全量重渲染(待办)
+## L19 插件工具可重名覆盖内置工具(**已修复**,2026-09-14)
 
-- **现状行为**:后端逐 token 发 `SseEvent::Token`,前端每 token 就地追加
+- **现状行为**:插件加载走 `plugins/mod.rs` 的 `load_file` → `registry.rs` 的
+  `register_external`,后者用 `g.tools.insert(name, ...)` **无条件写入**,
+  **不校验是否与内置工具重名**(`registry.rs:123` 的 `is_builtin` 已存在但注册路径未调用)。
+  插件 `name` 仅校验非空(`plugins/mod.rs:68-73`)。
+  后果:一个名为 `bash` / `write` 的插件工具会**覆盖内置工具的执行器**,
+  且其 `origin` 变为 `Plugin`——三档授权的路径可信度判定随之改变(外部工具参数被视为不可信),
+  但**执行体已被替换**。`data/plugins/tools/*.json` 无总开关,启动即加载目录下全部文件。
+- **判定与处置**:**已修**(2026-09-14)。三处加固:
+  ① 注册前置校验内置名冲突并**拒绝**(`api/plugins.rs::register_plugins`,冲突计入 errors 而非覆盖);
+  ② 解析期名称格式校验(`plugins/mod.rs::validate_plugin_name`):`^[a-z][a-z0-9_]*$`、长度 ≤48、
+  **拒绝保留前缀** `mcp_`/`agent`(防命名空间伪造——比重名更隐蔽);
+  ③ 回归测试 `plugin_name_validation_rejects_reserved_and_invalid_names`(12 条断言)。
+  插件「目录即加载」的设计保持不变(注册表 + 默认 Dangerous 仍是隔离手段),
+  但**不得劫持已有工具**这条不变量已落地。
+
+## L20 rquickjs 沙箱无栈上限(**已修复**,2026-09-14;**实测修正了原判断**)
+
+- **现状行为**:`scripts/runtime.rs` 设置了内存上限(64MB,`set_memory_limit`,行 55/94)
+  与协作式中断(1s,`set_interrupt_handler`,行 58/97),但**未设置栈上限**
+  (全仓无 `set_max_stack_size`)。深递归脚本可致栈溢出——rquickjs 虽为独立 Runtime,
+  但宿主进程与之同栈空间,存在崩溃宿主的风险。
+- **判定与处置**:**已修**(2026-09-14),且**实测修正了本条最初的判断**:
+  1. **原判断(未显式设置 = 拿到库默认值)是错的**:实测 rquickjs **不会**自动施加安全默认值,
+     未调用 `set_max_stack_size` 时深递归以 `STATUS_STACK_OVERFLOW` **直接杀进程**
+     ——这是比「缺一个上限」更严重的真实漏洞(可被单张卡挂掉整个后端);
+  2. **该上限不是「越大越安全」,而是越大越危险**:实测(Windows,单档隔离)——
+     | 栈上限 | 深度 30 | 深度 100 | 深度 300 |
+     |---|---|---|---|
+     | 未显式设置 | **崩进程** | **崩进程** | **崩进程** |
+     | 256KB | JS 异常 | JS 异常 | JS 异常 |
+     | **512KB(采用值)** | **正常** | JS 异常 | JS 异常 |
+     | 1MB+ | 正常 | **崩进程** | **崩进程** |
+  3. 原因是 QuickJS 以**原生栈指针**为基线记账:上限越大允许的 JS 帧越多,
+     原生栈越可能在 QuickJS 检查触发前先溢出——那时是进程被杀,没有可捕获的 JS 异常。
+- **已落地**:`EvalOptions.stack_limit`(缺省 `DEFAULT_STACK_LIMIT = 512KB`,
+  `scripts/runtime.rs`),两处执行入口(`eval_js`/`eval_with_bridge`)均显式设置;
+  回归测试 3 条(深递归返 Error 不崩进程、默认上限允许常规递归、显式上限生效)。
+- **教训**:资源上限的正确取值靠**实测**确定边界,不能凭「留宽裕些更好」的直觉放大。
+
+## L21 数据库 schema 升级链无事务包裹(**新发现**,2026-09-14)
+
+- **现状行为**:`models/db/mod.rs:62` 建表批 + `:65-91` 的 9 个 `migration::ensure_*`
+  顺序固定执行,失败即 `Err` 退出(`api/app_state.rs:113-116`)——但**整链无事务包裹**
+  (`:76-79`)。中途失败会留下**部分升级态**(部分 `ALTER TABLE ADD COLUMN` 已生效)。
+  因每条 `ensure_*` 自身幂等(探测列是否存在再补),重跑可收敛,故不是数据损坏,
+  但「失败后库处于何种状态」不可预测,且无版本号可判(见 L18)。
+- **判定**:**待办(韧性)**。与 L18「无 `PRAGMA user_version`」同源——
+  都是缺少 schema 版本这一权威事实。建议与 L18 一并处理。
+- **补齐路径**:见 `docs/数据库版本与降级行为.md` 已备的方案与 7 条验收断言
+  (引入 `PRAGMA user_version`);两项合做,一次引入版本号 + 事务化升级链。
+
+## L13 聊天流逐 token 全量重渲染(**已修复**,2026-09-13 核对表 G.1)
+
+- **原现状行为**:后端逐 token 发 `SseEvent::Token`,前端每 token 就地追加
   (`web/src/sseReducer.ts:155-164`),触发 `ChatMessageItem.vue:132` 的 `html` computed
   对**整条增长中的消息**重跑 markdown 渲染 + `v-html` 替换——长回复呈 O(n²)。
   对比:任务侧的流式 delta 经 `DeltaBatcher`(200ms/80 字攒批,
   `server-rs/src/services/task_engine/sink.rs:45`)已做攒批,聊天侧没有对应节流。
-- **判定**:**待办**(性能)。
-- **补齐路径**:在前端加渲染节流层——内容立即累积(不丢数据),但以 rAF(≤16ms)为节拍
-  刷新一个 `renderTick`,`html` computed 依赖它;流式中只对**已完成块**跑 markdown,
-  终态再全量渲染。仓库已有 rAF 用法可参考(`AgentPanel.vue:60`、`ChatInput.vue:201`)。
+- **判定与处置**:**已修**(2026-09-13)。渲染节流层已落地:内容立即累积(不丢数据),
+  以 rAF(≤16ms)为节拍刷新 `renderTick`,`html` computed 依赖它;流式中只对**已完成块**
+  跑 markdown,终态再全量渲染。证据见 `docs/三结合落实核对表.md` G.1。
+- **保留本条的理由**:作为「性能债曾经存在」的溯源记录,不代表当前仍有该问题。
 
-## L14 核心渲染组件无测试(待办)
+## L14 核心渲染组件无测试(**已补**,2026-09-13 核对表 G.2)
 
-- **现状行为**:44 个 `.vue` 组件中 24 个无测试,含最核心的
-  `web/src/components/ChatMessageItem.vue`(282 行——markdown/状态栏/swipe/资源卡全在此);
-  `ChatWindow.test.ts` 仅 3 个用例,断言为「空态存在/不同/输入栏存在」,且用 `as never`
-  硬塞 store 数据。对比 `stores/task.test.ts`(97 个 `expect`、fake timers 精确断言退避)
-  可见质量差距。
-- **判定**:**待办**(测试覆盖)。
-- **补齐路径**:为 `ChatMessageItem.vue` 补行为测试(markdown 分支/状态栏/swipe/资源卡);
-  以 `stores/task.test.ts` 为写法范例。
+- **原现状行为**:44 个 `.vue` 组件中 24 个无测试,含最核心的
+  `web/src/components/ChatMessageItem.vue`(markdown/状态栏/swipe/资源卡全在此);
+  `ChatWindow.test.ts` 仅 3 个用例(空态存在/不同/输入栏存在)。
+- **判定与处置**:**已补**(2026-09-13)。`ChatMessageItem.test.ts` 已落地,
+  以 `stores/task.test.ts` 为写法范例。证据见 `docs/三结合落实核对表.md` G.2。
+- **仍有空洞的部分**:组件层覆盖面仍不完整(如 `SettingsModal`、`TaskModeSelect`、
+  `QuickRepliesModal` 等 14 个组件无测试),该部分归入
+  `docs/架构分析-2026-09-14.md §4.10` 的测试空洞清单继续跟踪。
 
-## L15 前端契约文案硬编码分散(待办)
+## L15 前端契约文案硬编码分散(**已收敛**,2026-09-13 核对表 G.4)
 
-- **现状行为**:任务模式与消息 kind 的中文文案手写在
+- **原现状行为**:任务模式与消息 kind 的中文文案手写在
   `web/src/components/TaskBoard.vue:32-39`(`MODE_LABELS`)、`:124-129`
   (`MESSAGE_KIND_LABELS`);弹窗开关在 `App.vue:98`(`MODAL_FLAGS`)、`uiPrefs`、模板三处
-  分别罗列。**新增一个任务模式或事件 kind 需改 4 处**(后端枚举+发射点、`api/types.ts`、
-  `stores/task.ts:341` 的 switch、`TaskBoard` 标签)。
-- **判定**:**待办**(可维护性)。
-- **补齐路径**:文案迁入 `web/src/api/labels.ts` 并用
+  分别罗列。**新增一个任务模式或事件 kind 需改 4 处**。
+- **判定与处置**:**已收敛**(2026-09-13)。文案已迁 `web/src/api/labels.ts` 并以
   `satisfies Record<TaskRunMode, string>` 做穷尽校验(漏配即 typecheck 报错);
-  弹窗开关统一由 `uiPrefs` 派生唯一注册表。
+  弹窗开关已由 `web/src/modals.ts` 单点注册表派生(`App.vue` 与 check-arch 白名单同源)。
+  证据见 `docs/三结合落实核对表.md` G.4。
 
 ## L16 MCP 服务器死亡后工具不注销,且无热重连(待办)
 

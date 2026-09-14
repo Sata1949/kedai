@@ -27,6 +27,11 @@ $ErrorActionPreference = 'Continue'
 $root = Split-Path -Parent $PSScriptRoot
 $results = @()
 
+# 占用让位助手(见 Write-BuildStamp.ps1):开发时 cargo run / start.ps1 起的 kedai-server
+# 会锁住 target 下的产物,cargo 重新链接时报「failed to remove file ... os error 5」,
+# 门禁会误报成权限/杀软问题并中止。编译前统一改名让位,无需杀进程。
+. (Join-Path $root "tools\Write-BuildStamp.ps1")
+
 # 解析后端产物目录:参数 > 环境变量 > 默认;统一经 $env:CARGO_TARGET_DIR 传给 cargo,
 # 使 fmt/clippy/test 三处口径一致(显式导出后子进程与后续路径检查都据此走)。
 if ($RustTargetDir) {
@@ -89,6 +94,9 @@ if (-not $SkipRust -and -not $AuditOnly) {
             # 这里显式把变量导出给本轮 cargo 调用,并让 grep/路径类检查一致。
             $cargoTargetArgs = if ($env:CARGO_TARGET_DIR) { @('--target-dir', $env:CARGO_TARGET_DIR) } else { @() }
             if ($env:CARGO_TARGET_DIR) { Write-Host "[信息] 后端产物目录外置: $env:CARGO_TARGET_DIR" -ForegroundColor DarkGray }
+            # 编译前让位:运行中的 kedai-server 会锁住产物,导致 cargo 链接失败(os error 5)
+            $serverTargetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $root "server-rs\target" }
+            Clear-KedaiLockedServerArtifacts -TargetDir $serverTargetDir
             Invoke-Stage 'cargo fmt --check'        { cargo fmt --check }
             Invoke-Stage 'cargo clippy'             { cargo clippy --all-targets @cargoTargetArgs -- -D warnings }
             # -j 2:本机并行链接曾撞 LNK1318/os error 1455(页面文件不足),限并发换稳定
@@ -194,14 +202,16 @@ if (-not $SkipWeb -and -not $AuditOnly) {
         Invoke-Stage 'deps: check-lock-sync'    { node tools/check-lock-sync.mjs }
         # 契约快照:手写 TS 类型与 Rust 后端字段集合比对(漂移即 FAIL,纯 Node 零依赖)
         Invoke-Stage 'contract: check-contract' { node tools/check-contract.mjs }
-        # 架构护栏:前端 store 循环依赖 + 组件直改 state + 后端分层规则 C/D/E/G
-        # (全部规则已切硬门禁:违规即 exit 1;C/D/E 已于 2026-09-13 清零,G 为 ratchet)
+        # 架构护栏:前端 store 循环依赖(A) + 组件直改 state(B) + 后端分层规则 C/D/E/G
+        # + EJS 能力面冻结(H) + 代际归属 I + 跨代依赖方向 J(2026-09-14 新增)。
+        # 全部规则均为硬门禁:违规即 exit 1;C/D/E 已于 2026-09-13 清零,
+        # G/H 为 ratchet(只降不升),I/J 以 tools/arch-layers.json 为 SSOT。
         Invoke-Stage 'arch: check-arch'         { node tools/check-arch.mjs }
-        # 测试数自动统计:与 MAINTENANCE.md 记录比对,文档漂移即 WARN(不拦截)
-        Write-Host "`n===== 测试数统计(文档漂移检查,警告档)=====" -ForegroundColor Cyan
-        node tools/count-tests.mjs
-        node tools/count-tests.mjs --check
-        if ($LASTEXITCODE -ne 0) { Write-Host '[WARN] 测试数字与 MAINTENANCE.md 不一致(不拦截;请更新文档)' -ForegroundColor Yellow }
+        # 测试数自动统计:与 MAINTENANCE.md 记录比对。
+        # 2026-09-14 起为**硬门禁**(此前为警告档):MAINTENANCE.md 是「数字唯一真值源」,
+        # 历史教训是同一数字在 5 份文档并存(923/697、975/733、977/745、971/763、1017/768),
+        # 根因就是多处手抄且无人守护。新增测试后请跑 `npm run count:tests` 并同步该文档。
+        Invoke-Stage 'count: tests' { node tools/count-tests.mjs --check }
         # 前端类型逃逸 ratchet:as never / as unknown as / 非空断言 / any 只降不升
         # (纯 Node 零依赖,与 check-arch/check-contract 同风格;基线见脚本内 BASELINE)
         Invoke-Stage 'web: type-ratchet'        { node tools/check-frontend-lint.mjs }

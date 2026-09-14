@@ -8,7 +8,8 @@
 //
 // 注意:kill 只杀直接子进程;若服务器命令是 cmd/sh 包装再启孙进程,孙进程不保证回收
 // (v1 保守语义,注释留痕;如需进程组级清理另起批次)。
-use crate::services::settings_service::McpServerConfig;
+// 配置词汇已在 L1(models/tool_policy):L3 不得依赖 L2 的 settings_service。
+use crate::models::tool_policy::McpServerConfig;
 // Android 上 spawn 被平台门控(直接返回 Err),这些仅桌面/服务端派生进程所需
 #[cfg(not(target_os = "android"))]
 use tokio::io::{AsyncBufReadExt, BufReader};

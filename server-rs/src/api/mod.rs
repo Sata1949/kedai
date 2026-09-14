@@ -1,7 +1,14 @@
 // API 路由组装 + health + 头像静态服务 + SPA 回退
+//
+// 代际: L2(中层·干 / Orchestration)——HTTP 面编排层。
+// 判据: 路由 handler 薄、委托 services;承担鉴权与 SSE 流装配。
+// 纪律: 本层的 `app_state.rs` 是**组合根装配点**(把各层拼装成可运行系统),
+//       故允许依赖各层(含 L3 的 mcp/plugins)——这是分层架构对组合根的通用豁免,
+//       已在 arch-layers.json 登记为 class=wiring。
+// 详见 docs/ARCHITECTURE-3H.md §2.2、§3(entry 与组合根说明)。
 // 路由表按域拆至 routes/ 子模块;静态文档与 SPA 回退在 static_files.rs;
-// 响应工具(WithStatus/db_err)在 util.rs,经下方再导出保持 crate::api::* 路径不变;
-// 结构化错误码(ErrorCode/err_with_code)在 errors.rs,同样经下方再导出。
+// 响应工具(WithStatus/db_err/sse_response)在 util.rs;
+// 结构化错误码(ErrorCode/err_with_code)在 errors.rs,经下方再导出保持 crate::api::* 路径不变。
 pub mod agent;
 pub mod agent_flows;
 pub mod app_state;
@@ -40,8 +47,8 @@ pub(crate) mod static_files;
 mod util;
 
 pub(crate) use errors::{code_for_status, err_with_code, ErrorCode};
-pub(crate) use util::db_err;
 pub use util::WithStatus;
+pub(crate) use util::{db_err, sse_response};
 
 use crate::api::app_state::AppState;
 use axum::extract::DefaultBodyLimit;

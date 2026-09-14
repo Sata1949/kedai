@@ -1,4 +1,14 @@
 // 业务服务层
+//
+// 代际: L2(中层·干 / Orchestration)——业务编排与协议翻译,**日常开发主战场**。
+// 判据: 依赖 L1 契约完成业务流程(角色/会话/世界书/注入/设置/密钥/任务/undo),
+//       自身不被 L1 感知;是「经验 → 实现」的桥梁。
+// 纪律: 不得绕过 L1 契约直接改数据层语义;协议翻译集中在本层;
+//       不得依赖 L3(scripts/mcp/plugins/exec)——青层能力经显式接缝注入
+//       (先例:task_core::TaskBackend 断开 task_engine→task_service)。
+// 子域: task_service/(任务宿主)· task_engine/(六模式引擎)· task_core/(共享契约)·
+//       settings_service/ · exec/(命令执行,默认关) · script_authorization_service/(脚本授权门)。
+// 详见 docs/ARCHITECTURE-3H.md §2.2、§3。
 pub mod agent_flow_service;
 pub mod agent_session_service;
 pub mod agent_subtask_service;
@@ -38,6 +48,8 @@ pub(crate) mod task_core;
 pub mod task_engine;
 pub mod token_service;
 // 回退快照(批次 6.1「undo」):写工具执行前逆操作负载落 undo_snapshots 表
+// 角色卡脚本授权台账(2026-09-14):后端脚本执行门(fail-closed),补 known-limitations L12
+pub mod script_authorization_service;
 pub mod undo_service;
 pub mod user_script_service;
 pub mod variable_apply;

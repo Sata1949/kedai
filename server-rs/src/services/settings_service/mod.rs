@@ -13,7 +13,8 @@
 // 保证 `services::settings_service::*` 对外路径不变。
 use serde::{Deserialize, Serialize};
 
-use crate::tools::permissions::AuthorizationMode;
+// 授权档位词汇已下沉 L1(2026-09-14):L2 直连 models,不经 tools 转发。
+use crate::models::tool_policy::AuthorizationMode;
 
 mod connection;
 mod params;

@@ -14,6 +14,7 @@ use crate::services::memory_service::MemoryService;
 use crate::services::prompt_inject_service::PromptInjectService;
 use crate::services::quick_reply_service::QuickReplyService;
 use crate::services::runtime_prompt_service::RuntimePromptService;
+use crate::services::script_authorization_service::ScriptAuthorizationService;
 use crate::services::session_service::SessionService;
 use crate::services::settings_service::RuntimeSettings;
 use crate::services::skill_service::SkillService;
@@ -66,6 +67,8 @@ pub struct CoreServices {
     pub quick_replies: Arc<QuickReplyService>,
     /// 用户脚本(ScriptTree,阶段三):global 存 SQLite,character 存角色卡 extensions.tavern_helper
     pub user_scripts: Arc<UserScriptService>,
+    /// 角色卡脚本授权台账(2026-09-14):后端脚本执行门(fail-closed;known-limitations L12)
+    pub script_authorizations: Arc<ScriptAuthorizationService>,
     /// 跨会话记忆蒸馏(落地项 2):按角色维度共享的长期记忆条目
     pub memory: Arc<MemoryService>,
     /// 回退快照(批次 6.1「undo」):写工具逆操作快照的暂存/列表/恢复
@@ -139,6 +142,7 @@ impl AppState {
         let quick_replies = Arc::new(QuickReplyService::new(db.clone()));
         // 用户脚本(ScriptTree,阶段三)
         let user_scripts = Arc::new(UserScriptService::new(db.clone()));
+        let script_authorizations = Arc::new(ScriptAuthorizationService::new(db.clone()));
         // slash 命令注册表(阶段四 4a):注册内置命令;engine 与 API 共享同一实例
         let slash = crate::slash::SlashRegistry::new();
 
@@ -244,11 +248,14 @@ impl AppState {
         );
 
         // 工具插件加载:data/plugins/tools/*.json(白名单脚本)
+        // 两段式:L3 plugins/ 负责解析,本层负责注册(含内置重名防护,见 api::plugins::register_plugins)。
         {
             let loader = crate::plugins::ToolPluginLoader::new(
                 config.data_dir.join("plugins").join("tools"),
             );
-            let (count, errors) = loader.load_all(&tool_registry);
+            let (loaded, mut errors) = loader.parse_all();
+            let (count, reg_errors) = crate::api::plugins::register_plugins(loaded, &tool_registry);
+            errors.extend(reg_errors);
             if !errors.is_empty() {
                 eprintln!("[工具插件] 加载部分失败: {}", errors.join("; "));
             }
@@ -321,6 +328,7 @@ impl AppState {
             EngineExt {
                 tool_registry: tool_registry.clone(),
                 user_scripts: user_scripts.clone(),
+                script_authorizations: script_authorizations.clone(),
                 slash: slash.clone(),
             },
         ));
@@ -368,6 +376,7 @@ impl AppState {
                 audio,
                 quick_replies,
                 user_scripts,
+                script_authorizations,
                 memory,
                 undo,
                 // MCP 默认空管理器;AppState::new 是同步函数,进程装配(异步握手)
@@ -451,8 +460,16 @@ impl AppState {
         if !snapshot.mcp_enabled {
             return;
         }
+        // 宿主负责过滤 enabled 并传参:L3 的 mcp 模块不读 L2 的 RuntimeSettings,
+        // 只收 McpServerConfig 列表与 L1 的 &dyn ToolRegistrar(依赖倒置,见 mcp/mod.rs 头部)。
+        let servers: Vec<crate::models::tool_policy::McpServerConfig> = snapshot
+            .mcp_servers
+            .iter()
+            .filter(|s| s.enabled)
+            .cloned()
+            .collect();
         let n_before = self.tool_registry.list_definitions().len();
-        self.mcp.start(&snapshot, &self.tool_registry).await;
+        self.mcp.start(servers, &self.tool_registry).await;
         let servers = self.mcp.server_count();
         if servers > 0 {
             let added = self.tool_registry.list_definitions().len() - n_before;

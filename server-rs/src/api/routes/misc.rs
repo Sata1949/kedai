@@ -71,6 +71,18 @@ pub(crate) fn misc_routes() -> Router<Arc<AppState>> {
             "/api/scripts/tree",
             get(user_scripts::get_tree).put(user_scripts::save_tree),
         )
+        // 角色卡脚本授权台账(2026-09-14,known-limitations L12 后端授权门)
+        // GET 查询授权态(含后端实时计算的 current_hash)/ PUT 授权 / DELETE 撤销
+        .route(
+            "/api/script-authorizations",
+            get(user_scripts::get_authorization)
+                .put(user_scripts::grant_authorization)
+                .delete(user_scripts::revoke_authorization),
+        )
+        .route(
+            "/api/script-authorizations/list",
+            get(user_scripts::list_authorizations),
+        )
         // slash 命令清单(阶段四 4a):前端输入框联想
         .route("/api/slash/commands", get(slash_commands::list_commands))
         // 宏调试(阶段六 6b):纯扁平 vars 展开,供前端「宏调试」面板验证模板结果

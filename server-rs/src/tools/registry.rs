@@ -4,7 +4,6 @@
 use crate::models::types::{ToolContext, ToolDefinition};
 use crate::tools::action_class::ToolOrigin;
 use crate::tools::permissions::{PermissionDecision, ToolPermissionManager};
-use futures::future::BoxFuture;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -15,9 +14,11 @@ const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(30);
 /// 工具结果最大字节数(超出截断,避免超长输出撑爆上下文与前端渲染)
 const MAX_TOOL_OUTPUT_BYTES: usize = 64 * 1024;
 
-/// 工具执行器类型别名(register_multistep_tools 等外部构造闭包时需要显式标注)
-pub type ToolExecutor =
-    Arc<dyn Fn(Value, ToolContext) -> BoxFuture<'static, Result<String, String>> + Send + Sync>;
+/// 工具执行器类型别名**已下沉到 L1**（`crate::models::types::ToolExecutor`，2026-09-14）。
+///
+/// 理由：`plugins/`（L3）与 `mcp/`（L3）都需要**构造**执行器，若类型留在本模块（L2），
+/// 两者都会构成 `L3→L2` 越代依赖。此处仅重导出，服务 `tools/` 内部既有 `use`。
+pub use crate::models::types::ToolExecutor;
 
 #[derive(Clone)]
 pub struct RegisteredTool {
@@ -123,7 +124,28 @@ impl ToolRegistry {
     pub fn is_builtin(&self, name: &str) -> bool {
         self.origin_of(name) == Some(ToolOrigin::Builtin)
     }
+}
 
+/// 实现 L1 的 [`crate::models::types::ToolRegistrar`] 窄接口：让 L3（`mcp/`）能经
+/// `&dyn ToolRegistrar` 注册工具，而**不必** `use crate::tools::...`（否则构成 L3→L2
+/// 越代依赖）。方法体直接委托到本结构体的同名固有方法，行为零变化。
+impl crate::models::types::ToolRegistrar for ToolRegistry {
+    fn register_external(
+        &self,
+        definition: ToolDefinition,
+        execute: ToolExecutor,
+        timeout: Option<Duration>,
+        origin: ToolOrigin,
+    ) {
+        ToolRegistry::register_external(self, definition, execute, timeout, origin);
+    }
+
+    fn unregister(&self, name: &str) {
+        ToolRegistry::unregister(self, name);
+    }
+}
+
+impl ToolRegistry {
     pub fn unregister(&self, name: &str) {
         self.tools
             .lock()

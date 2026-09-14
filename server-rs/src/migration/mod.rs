@@ -1,9 +1,14 @@
 // 数据迁移模块(目录化拆分,纯代码移动,逻辑不变):
+//
+// 代际: L1(老层·稳 / Anchored Core)——兼容契约的**载体内**。
+// 判据: 决定「老层经验」能否跨版本延续(幂等 DDL 升级、双库合并、快照备份);
+//       零 `crate::` 出边,是纯基石模块。
+// 纪律: 所有升级必须**幂等**(探测后补列/补表),失败返回 Err 不 panic。
+// 详见 docs/ARCHITECTURE-3H.md §2.2。
+//
 //   backup.rs   数据库快照备份(SQLite Online Backup API,含未 checkpoint 的 WAL)
 //   merge.rs    双库合并:schema 一致性比对、按外键依赖序逐表合并、文件树/JSON 配置合并、合并后校验
 //   ddl.rs      幂等 DDL 升级:新增表 DDL 常量与 ensure_* 补列/补表函数
-//   conflict.rs 冲突处理:主键重映射、外键改写、等价行探测、文件冲突改名与值工具
-// 本文件只做公共入口与再导出,保证 `kedai_server::migration::*` 对外路径不变。
 mod backup;
 mod conflict;
 mod ddl;

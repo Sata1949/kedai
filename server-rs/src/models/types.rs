@@ -567,6 +567,77 @@ pub struct ToolContext {
     pub agent_depth: u32,
 }
 
+/// 工具执行器签名（**L1 契约**：工具注册表与各 L3 加载器共用）。
+///
+/// 2026-09-14 从 `tools/registry.rs` 下沉至此。理由：`plugins/`（L3 插件加载器）与
+/// `mcp/`（L3 客户端）都需要**构造**执行器来注册工具，若该类型留在 L2 的 `tools/`，
+/// 两者都会构成 `L3→L2` 越代依赖。类型别名是纯契约、无实现，与
+/// `ToolDefinition` / `ToolContext` 同处 L1 最合适。
+pub type ToolExecutor = std::sync::Arc<
+    dyn Fn(Value, ToolContext) -> futures::future::BoxFuture<'static, Result<String, String>>
+        + Send
+        + Sync,
+>;
+
+/// 已装载的脚本执行体（**L1 契约**）。
+///
+/// 2026-09-14 从 `scripts/loader.rs`（L3）下沉至此。理由：`services::script_authorization_service`
+/// （L2）需要用它计算脚本内容哈希（授权门），若类型留在 L3，就构成 `L2→L3` 越代依赖
+/// （规则 J 实测检出）。它是纯数据形状、无行为，与 `ToolDefinition` 同类。
+///
+/// 字段语义与 `scripts::loader::collect_enabled_scripts` 的产出保持一致。
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoadedScript {
+    pub id: String,
+    pub name: String,
+    pub content: String,
+    /// script 作用域变量（data）
+    pub data: Value,
+}
+
+/// 工具注册能力的最小接口（**L1 契约**，宿主注入用）。
+///
+/// 2026-09-14 新增。理由：L3 的 `mcp/` 需要把发现的远端工具登记进工具表，
+/// 但**不能**直接依赖 `tools::registry::ToolRegistry`（L2 设施，会构成 `L3→L2`）。
+/// 故定义此窄接口，由 L2 的注册表实现、由组合根把 `&dyn ToolRegistrar` 注入给 L3。
+///
+/// **这是「青层能力经显式接缝注入」的标准形态**，与 `task_core::TaskBackend`
+/// 断开 `task_engine→task_service` 是同一手法（见 `docs/ARCHITECTURE-3H.md` §3）。
+pub trait ToolRegistrar: Send + Sync {
+    /// 注册一个**外部来源**工具（插件 / MCP）。实现方须据此把参数视为不可信。
+    fn register_external(
+        &self,
+        definition: ToolDefinition,
+        execute: ToolExecutor,
+        timeout: Option<std::time::Duration>,
+        origin: crate::models::tool_policy::ToolOrigin,
+    );
+
+    /// 注销工具（插件删除 / MCP 服务器退出时用）；不存在时静默忽略。
+    fn unregister(&self, name: &str);
+}
+
+/// 让 `Arc<T>` 可直接当 `&dyn ToolRegistrar` 使用（组合根通常持有 `Arc<ToolRegistry>`）。
+///
+/// 没有它，`self.mcp.start(servers, &self.tool_registry)` 会因
+/// `Arc<ToolRegistry>` 未实现该 trait 而无法编译——宿主不得不先 deref 或改持裸引用，
+/// 反而增加装配摩擦。转发实现保持行为零变化。
+impl<T: ToolRegistrar + ?Sized> ToolRegistrar for std::sync::Arc<T> {
+    fn register_external(
+        &self,
+        definition: ToolDefinition,
+        execute: ToolExecutor,
+        timeout: Option<std::time::Duration>,
+        origin: crate::models::tool_policy::ToolOrigin,
+    ) {
+        (**self).register_external(definition, execute, timeout, origin);
+    }
+
+    fn unregister(&self, name: &str) {
+        (**self).unregister(name);
+    }
+}
+
 // ---------- Skill 库 ----------
 /// 提示词技能(skill):read 工具按名/关键词读取,可注入上下文。
 /// 渐进披露(落地项 3):system 仅注入 name+description 紧凑清单,

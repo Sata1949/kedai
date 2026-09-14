@@ -8,7 +8,8 @@
 // - stdout/stderr 截断存储,避免审计表被一条长输出灌爆;
 // - 写入失败只告警不阻断命令执行(审计是旁路,不应影响主流程)。
 use crate::models::db::{now_iso, Db};
-use crate::tools::command_risk::CommandRisk;
+// 命令风险词汇已下沉 L1(2026-09-14):L2 直连 models,不经 tools 转发(否则仍是跨代边)。
+use crate::models::tool_policy::CommandRisk;
 use serde::Serialize;
 use std::sync::Arc;
 

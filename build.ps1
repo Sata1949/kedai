@@ -118,6 +118,11 @@ if ($CargoTargetDir -ne "$Root\server-rs\target") {
     Write-Host "[信息] 后端产物目录外置: $CargoTargetDir(仅 server-rs;src-tauri 仍用自身 target)" -ForegroundColor DarkGray
 }
 
+# 产物占用让位:若开发时用 cargo run / start.ps1 起过 kedai-server,运行中的 exe 会让
+# cargo 重新链接报「failed to remove file ... os error 5」(见 Write-BuildStamp.ps1 说明)。
+# 编译前统一做一次改名让位,无需杀进程;门禁(check-all)与下面的 [2/3] 编译都受益。
+Clear-KedaiLockedServerArtifacts -TargetDir $CargoTargetDir
+
 # 0) 门禁:先跑测试与静态检查,失败即中止(避免先花十分钟构建才发现测试红)。
 #    -Quick 跳过 check-all 内部的前端 vite build(下方 [1/3] 会再构建一次,避免重复)。
 #    逃生开关 -SkipChecks 仅限本地应急;交付前必须补跑一次完整的 tools/check-all.ps1。
