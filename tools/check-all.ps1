@@ -5,6 +5,7 @@
 #       -StrictTypecheck 历史保留参数(2026-09-08 起 typecheck 已是硬门禁,此开关无差异)
 #       -StrictAudit 历史保留参数(2026-09-13 起 cargo audit 已是硬门禁,此开关无差异)
 #       -LooseAudit 把 cargo audit 降回警告档(仅在 advisory DB 不可用等特殊场景临时使用)
+#       -Perf 追加性能门禁(需 Kedai 服务已在运行;见文件末尾「性能门禁」段)
 #
 # 审计段(独立安全门禁,与 -SkipRust/-SkipWeb 解耦;批次 6.1 升级):
 #   - cargo audit 覆盖**两把锁**:server-rs/Cargo.lock + src-tauri/Cargo.lock(此前只扫前者)。
@@ -19,6 +20,11 @@ param(
     [switch]$StrictTypecheck,
     [switch]$StrictAudit,
     [switch]$LooseAudit,
+    # 性能门禁(2026-09-14 新增,默认关闭):需 Kedai 服务已在 $PerfBase 运行。
+    # 打开后跑 tools/perf-baseline.mjs,按「p95 <= 基线 × 倍数 且 errors==0」判定。
+    [switch]$Perf,
+    [string]$PerfBase = 'http://127.0.0.1:3001',
+    [double]$PerfFactor = 1.25,
     # 后端 cargo target 根(见 MAINTENANCE.md §10 条目 22:某些机器上安全软件拦截
     # server-rs\target 下新建 exe 的执行)。留空则用 CARGO_TARGET_DIR 环境变量或默认路径。
     [string]$RustTargetDir
@@ -229,6 +235,18 @@ if (-not $SkipWeb -and -not $AuditOnly) {
             Invoke-Stage 'web: vite build'      { npm run build -w web }
         }
     } finally { Pop-Location }
+}
+
+# ===== 性能门禁(可选,默认关闭;见 docs/perf-baseline.md 与 tools/perf-baseline.json)=====
+# 需要**已在运行**的 Kedai 服务(脚本自动从 /api/bootstrap 取 token),故默认不跑,
+# 避免把「没起服务」误报成门禁失败。用 -Perf 显式开启:
+#   powershell -File tools/check-all.ps1 -Perf
+# 服务不可用时脚本自身 exit(1),门禁显式 FAIL(fail-closed,不做自动探活降级——
+# 与审计段「离线才降 WARN」的例外语义区分开:性能门禁是本地可复现的,不该静默跳过)。
+if ($Perf) {
+    Invoke-Stage 'perf: p95 gate' {
+        node tools/perf-baseline.mjs --base $PerfBase --max-p95-factor $PerfFactor
+    }
 }
 
 Write-Host "`n===== 全部通过 =====" -ForegroundColor Green

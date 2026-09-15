@@ -45,3 +45,6 @@ data.retired-*/
 # 构建产出的 Windows 快捷方式(勿入库)
 *.lnk
 Kedai.exe
+
+# 开发 agent 工具生成的计划/会话目录(非项目产物)
+.zcode/

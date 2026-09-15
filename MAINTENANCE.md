@@ -26,6 +26,13 @@
   只有前两条(build.ps1 与 pre-push)**——不要依赖 CI 兜底。配置远端并推送后它会自动生效,
   届时本节应更新为「三处触发均实测生效」。
   变更 `tools/check-*.mjs` 的检查规则时,同步更新本节与本文件的检查项清单。
+- **性能门禁(2026-09-14 起,可选)**:`tools/perf-baseline.mjs` 支持 p95 阈值判定
+  (`--max-p95-factor`,默认 1.25),基线值存 `tools/perf-baseline.json`;
+  经 `check-all.ps1 -Perf` 并入总门禁(**默认关闭**——需服务已在运行,
+  避免把「没起服务」误报成门禁失败;服务不可用时 fail-closed 而非静默跳过)。
+  判定口径 `p95 <= 基线 × 倍数` 且 `errors == 0`,`p95 < 5ms` 的端点跳过。
+  基线是**本机 release 口径**,只作回归对比基准、不是跨机 SLA;换机器或数据量
+  变化后须重采样。数据与用法见 `docs/perf-baseline.md` 的「2026-09-14 实测」小节。
 - **代际归属与跨代依赖门禁(规则 I/J,2026-09-14 起)**:`tools/check-arch.mjs` 新增两条护栏,
   其唯一机器可读事实源(SSOT)是 **`tools/arch-layers.json`**——
   - **规则 I(代际归属完整性)**:`server-rs/src` 的每个顶层模块/根文件、`web/src` 的每个顶层目录/根文件

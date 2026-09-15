@@ -680,3 +680,60 @@ async fn task_plan_chat_reemits_plan_and_approval_events() {
         "plan-chat 不得产生终态事件: {seq2:?}"
     );
 }
+
+/// 裁决用例(2026-09-14 实测核查):每个工具事件是否被重复发射。
+///
+/// 背景:端到端实测(debug 二进制 + 真实上游)观察到 plan 模式每个 agent_status
+/// 事件疑似出现两次,而发射点看只有一处(sink.rs 的 map_event → emit_event),
+/// SSE 端点也只有一处 yield。本用例用 mock 确定性裁决「引擎↔sink↔SSE」链路
+/// 是否真的存在重复发射,避免把探针脚本的分帧问题误判为产品缺陷。
+///
+/// 断言口径:一次工具调用应恰好产出 1 条「调用工具」+ 1 条「已返回结果」事件;
+/// 若出现 2 条即证明链路上有重复发射(需修);出现 1 条即证明链路干净。
+#[tokio::test]
+async fn task_tool_events_are_not_duplicated() {
+    let app = test_app();
+    let (status, _, mut body) = open_event_stream(app).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // mock:单轮 read 工具调用后收尾(非死循环形态)
+    let title = r#"[[tool_loop:read|1 {"queries":[{"type":"character_prompt"}]}]] 读取角色提示词"#;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/tasks")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({ "title": title, "task_mode": "solo" }).to_string(),
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let created: Value = serde_json::from_slice(&bytes).unwrap();
+    let id = created["task"]["id"].as_str().unwrap().to_string();
+
+    let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
+
+    let seq = collect_full_until_terminal(&mut body, &id).await;
+    let details: Vec<&str> = seq
+        .iter()
+        .filter(|e| e["kind"].as_str() == Some("agent_status"))
+        .filter_map(|e| e["detail"].as_str())
+        .collect();
+
+    let called = details
+        .iter()
+        .filter(|d| d.contains("调用工具 read"))
+        .count();
+    let returned = details.iter().filter(|d| d.contains("已返回结果")).count();
+
+    assert_eq!(
+        called, 1,
+        "一次工具调用应恰好 1 条「调用工具」事件(实际 {called} 条): {details:?}"
+    );
+    assert_eq!(
+        returned, 1,
+        "一次工具返回应恰好 1 条「已返回结果」事件(实际 {returned} 条): {details:?}"
+    );
+}
