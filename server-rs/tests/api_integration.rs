@@ -1181,6 +1181,85 @@ async fn state_block_auto_injected_into_system() {
     );
 }
 
+/// 可观测性问题①(2026-09-15):聊天路径的 finish 事件须透出 finish_reason。
+/// 此前 SseEvent::Finish 只有 usage/content,聊天被 max_tokens 截断时前端完全静默
+/// (任务模式早有「截断」徽标)。此处经 mock [[finish:length|…]] 钩子直造截断终态。
+#[tokio::test]
+async fn chat_finish_event_exposes_finish_reason_on_truncation() {
+    let _guard = test_lock().await;
+    let app = test_app();
+    let (_, character) = upload_character(app, "截断测试.json").await;
+    let cid = character["id"].as_str().unwrap().to_string();
+    let (_, session) = send_json(
+        app,
+        "POST",
+        "/api/chat/sessions",
+        json!({ "character_id": cid }),
+    )
+    .await;
+    let sid = session["id"].as_str().unwrap().to_string();
+
+    // [[finish:length|半截正文]] → 产出该正文并带 finish_reason=length
+    let events = sse_events(
+        &app,
+        &sid,
+        &cid,
+        "[[finish:length|这段回复在输出上限处被截断]]",
+        "fast",
+    )
+    .await;
+    let finish = events
+        .iter()
+        .find(|e| e["type"] == "finish")
+        .expect("缺 finish 事件");
+    assert_eq!(
+        finish["finish_reason"], "length",
+        "聊天 finish 事件应透出 finish_reason: {finish}"
+    );
+
+    // 正常收尾(stop)不得被误标截断
+    let (_, session2) = send_json(
+        &app,
+        "POST",
+        "/api/chat/sessions",
+        json!({ "character_id": cid }),
+    )
+    .await;
+    let sid2 = session2["id"].as_str().unwrap().to_string();
+    let events2 = sse_events(
+        &app,
+        &sid2,
+        &cid,
+        "[[finish:stop|完整回复]]",
+        "fast",
+    )
+    .await;
+    let finish2 = events2
+        .iter()
+        .find(|e| e["type"] == "finish")
+        .expect("缺 finish 事件");
+    assert_eq!(finish2["finish_reason"], "stop", "正常收尾应为 stop");
+
+    // 落库的 assistant 消息带 extra.truncated=true(刷新后提示仍在)
+    let (_, history) = send_json(
+        &app,
+        "GET",
+        &format!("/api/chat/history?session_id={sid}"),
+        json!({}),
+    )
+    .await;
+    let msgs = history["messages"].as_array().expect("history 应含 messages");
+    let assistant = msgs
+        .iter()
+        .rev()
+        .find(|m| m["role"] == "assistant")
+        .expect("应有 assistant 消息");
+    assert_eq!(
+        assistant["extra"]["truncated"], true,
+        "截断应落库 extra.truncated(刷新后提示仍在): {assistant}"
+    );
+}
+
 /// custom 多步流程:中间步骤的 <UpdateVariable> 补丁在步骤完成时立即应用。
 /// 断言:第一个 vars 事件出现在步骤 2 执行之前(旧实现只在收尾解析,中间步骤变量会丢),
 /// 且最终消息 extra.mvu 快照落库正确。

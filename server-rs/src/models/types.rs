@@ -513,6 +513,13 @@ pub enum SseEvent {
     Finish {
         usage: TokenUsage,
         content: String,
+        /// 上游 finish_reason(stop / length / content_filter 等;可观测性问题①)。
+        /// "length" = 输出被 max_tokens 截断(推理模型常见:reasoning 吃光预算)。
+        /// 任务模式早已据此落库并展示「截断」徽标,聊天路径此前完全丢弃该字段——
+        /// 前端把半截回复当正常完成渲染,用户无从察觉。
+        /// None = 未下发/不适用,序列化时省略(旧客户端忽略即可,线格式向后兼容)。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        finish_reason: Option<String>,
     },
     /// 任务模式(task 工作台)事件(WP4):任务生命周期广播,由 TaskService 的
     /// broadcast 通道推送,GET /api/tasks/events 转发为 SSE,取代前端 1s REST 轮询。
@@ -1159,6 +1166,41 @@ mod tests {
             v["finish_reason"],
             serde_json::json!(""),
             "旧行(未知)应以空串透出,不等于 stop"
+        );
+    }
+
+    /// serde 快照:聊天终态 Finish 事件携带 finish_reason(可观测性问题①,2026-09-15)。
+    /// Some 时字段出现,None 时省略——旧客户端忽略未知字段即可,线格式向后兼容。
+    /// 锁定聊天路径不再丢弃截断信息(此前 SseEvent::Finish 只有 usage/content)。
+    #[test]
+    fn sse_finish_event_carries_finish_reason_wire_format() {
+        let truncated = SseEvent::Finish {
+            usage: TokenUsage::default(),
+            content: "半截回复".into(),
+            finish_reason: Some("length".into()),
+        };
+        let v = serde_json::to_value(&truncated).unwrap();
+        assert_eq!(v["type"], serde_json::json!("finish"));
+        assert_eq!(v["finish_reason"], serde_json::json!("length"));
+
+        let normal = SseEvent::Finish {
+            usage: TokenUsage::default(),
+            content: "完整回复".into(),
+            finish_reason: Some("stop".into()),
+        };
+        let v = serde_json::to_value(&normal).unwrap();
+        assert_eq!(v["finish_reason"], serde_json::json!("stop"));
+
+        // 未下发 finish_reason 时字段省略(不污染线格式,旧客户端兼容)
+        let unknown = SseEvent::Finish {
+            usage: TokenUsage::default(),
+            content: "x".into(),
+            finish_reason: None,
+        };
+        let v = serde_json::to_value(&unknown).unwrap();
+        assert!(
+            v.get("finish_reason").is_none(),
+            "None 应省略字段: {v}"
         );
     }
 

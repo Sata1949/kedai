@@ -456,6 +456,8 @@ impl AgentEngine {
                 scopes: scopes.clone(),
                 llm_messages: &mut llm_messages,
                 total_usage: &mut total_usage,
+                // 步骤循环逐轮覆盖;收尾透出 truncation 标记(可观测性问题①)
+                last_finish_reason: None,
             };
             let ctx_data = self.collect_context(&req, &session_id, &mut rctx).await;
             // 记忆召回查询向量(Phase 3):在 async 上下文算好,传入同步的 finalize_messages。
@@ -573,6 +575,11 @@ impl AgentEngine {
                 }
                 let mut vars_snapshot = custom_vars_snapshot.clone();
                 let mut status_bar: Option<String> = None;
+                // 本轮最终响应的上游结束原因与截断判定(可观测性问题①,2026-09-15)。
+                // 取步骤循环最后一次覆盖的值;仅 "length" 视为截断(上游用 length 表示
+                // 触达 max_tokens,stop 为正常收尾,content_filter 等另有语义)。
+                let finish_reason = rctx.last_finish_reason.clone();
+                let truncated = finish_reason.as_deref() == Some("length");
                 // P5 契约运行态:收尾统一加载契约一次(正文路径与两步路径共用);
                 // 无契约时所有门控/留痕路径退化为原行为(零变化)。
                 let contract = self.load_character_contract(&req.character_id);
@@ -683,6 +690,12 @@ impl AgentEngine {
                     if let Some(bar) = status_bar.clone() {
                         extra["status_bar"] = json!(bar);
                     }
+                    // 截断标记落库(可观测性问题①,2026-09-15):聊天回复被 max_tokens
+                    // 截断时写入 extra.truncated,前端刷新后仍能展示截断提示——
+                    // 事件是暂态的,不落库则重载历史后提示消失。
+                    if truncated {
+                        extra["truncated"] = json!(true);
+                    }
                     // 阶段六 6f:重生成锚点 → 原地更新原 assistant 消息行(swipes 追加,
                     // id 稳定);首次生成(无锚点)走既有 add_message 新增一行。
                     let stored = if let Some(regenerate_id) = req.regenerate_assistant_id {
@@ -790,6 +803,9 @@ impl AgentEngine {
                     SseEvent::Finish {
                         usage: total_usage.clone(),
                         content: clean_content.clone(),
+                        // 透出上游结束原因(可观测性问题①):前端据此在聊天里提示截断,
+                        // 与任务模式的「截断」徽标口径一致。
+                        finish_reason: finish_reason.clone(),
                     },
                     &tx,
                     &abort_rx,

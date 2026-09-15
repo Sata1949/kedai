@@ -243,6 +243,13 @@ export function reduceSseEvent(state: SseStateSlice, event: SseEvent): SseStateC
       if (last && last.role === 'assistant') {
         last.content = event.content;
         last.streaming = false;
+        // 截断标记(可观测性问题①,2026-09-15):上游以 finish_reason=length 表示
+        // 触达 max_tokens,正文被腰斩。写入 extra.truncated 让消息气泡立即显示提示,
+        // 与后端落库的 extra.truncated 同键(as any 无关:extra 本就是可写 Record);
+        // 随后 loadHistory 回放会带上同一个键,刷新前后表现一致。
+        if (event.finish_reason === 'length') {
+          last.extra = { ...last.extra, truncated: true };
+        }
         // 错误/空回复(HTTP 错误、网络错误、服务端 error 的空 finish):无内容即无落库,
         // 清理临时空消息,避免幽灵空气泡残留
         if (!event.content && last.id < 0) {

@@ -132,4 +132,8 @@ pub(super) struct RunContext<'a> {
     pub(super) scopes: Arc<Mutex<crate::parsing::scopes::ScopeVars>>,
     pub(super) llm_messages: &'a mut Vec<LlmMessage>,
     pub(super) total_usage: &'a mut TokenUsage,
+    /// 最后一步生成的 finish_reason(可观测性问题①,2026-09-15):步骤循环每轮
+    /// 用 `result.finish_reason` 覆盖(与 content 的覆盖语义一致),收尾据此判定
+    /// 聊天回复是否被 max_tokens 截断,并透出到 SseEvent::Finish / 落库 extra。
+    pub(super) last_finish_reason: Option<String>,
 }

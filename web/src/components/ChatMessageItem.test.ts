@@ -113,6 +113,16 @@ describe('ChatMessageItem', () => {
     expect(w.text()).toContain('HP: 100');
   });
 
+  it('extra.truncated 时显示截断提示(可观测性问题①);未标记则不显示', () => {
+    const cut = mountItem(msg({ content: '半截正文', extra: { truncated: true } }));
+    expect(cut.find('.sv-trunc-note').exists()).toBe(true);
+    expect(cut.find('.sv-badge.trunc').exists()).toBe(true);
+    expect(cut.text()).toContain('截断');
+
+    const normal = mountItem(msg({ content: '完整正文' }));
+    expect(normal.find('.sv-trunc-note').exists()).toBe(false);
+  });
+
   it('状态栏占位符脚本存在且 HTML 渲染开启时,隐藏纯文本状态栏气泡', () => {
     // 按 RegexScript 的真实字段构造(字段名:script_name / find_regex / replace_string;
     // 判定见 render.ts hasStatusPlaceholderScript:enabled + replace_string + find_regex 含占位符)

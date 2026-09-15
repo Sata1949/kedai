@@ -122,7 +122,7 @@ export type SseEvent =
   | { type: 'vars'; stat_data: Record<string, unknown> }
   | { type: 'interrupted' }
   | { type: 'error'; code: string; message: string; retryable: boolean }
-  | { type: 'finish'; usage: TokenUsage; content: string }
+  | { type: 'finish'; usage: TokenUsage; content: string; finish_reason?: string }
   | TaskEvent;
 
 export type ToolRisk = 'safe' | 'sensitive' | 'dangerous';

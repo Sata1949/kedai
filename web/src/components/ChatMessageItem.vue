@@ -63,6 +63,12 @@ function statusBar(m: { extra?: Record<string, unknown> }): string | null {
   return typeof bar === 'string' && bar.trim() ? bar : null;
 }
 
+/** 该消息是否被 max_tokens 截断(extra.truncated;后端按 finish_reason=length 写入,
+ *  finish 事件到达时前端也会即时写入,两者同键,刷新前后表现一致) */
+function truncated(m: { extra?: Record<string, unknown> }): boolean {
+  return m.extra?.truncated === true;
+}
+
 /** 当前 swipe 版本序号(1-based;无多版本返回 0,供角标与切换按钮) */
 function swipePosition(m: { extra?: Record<string, unknown> }): number {
   const idx = m.extra?.swipe_id;
@@ -321,6 +327,14 @@ defineExpose({ rootEl });
           :class="{ 'sv-stream-cursor': m.streaming }"
           v-html="html"
         ></div>
+        <!-- 截断提示(可观测性问题①,2026-09-15):上游 finish_reason=length 表示
+             触达 max_tokens、正文被腰斩。任务模式的调用情况面板早有「截断」徽标,
+             聊天此前完全静默,用户会把半截回复当完整内容。标记取自 extra.truncated
+             (finish 事件即时写入 + 后端落库,刷新后仍在)。 -->
+        <div v-if="truncated(m)" class="sv-trunc-note">
+          <span class="sv-badge trunc">截断</span>
+          <span class="sv-trunc-text">回复达到输出上限被截断,内容可能不完整;可增大「最大生成长度」后重发。</span>
+        </div>
         <div v-if="statusBarVisible" class="sv-status-bar">{{ statusBar(m) }}</div>
         <div v-if="!m.streaming" class="sv-msg-actions">
           <!-- 阶段六 6f:多版本切换(◀ n/N ▶)+ 生成新版本;单版本不显示切换 -->
@@ -356,3 +370,29 @@ defineExpose({ rootEl });
     <div class="sv-msg-bubble">{{ displayText(m) }}</div>
   </div>
 </template>
+
+<style scoped>
+/* 截断提示条(可观测性问题①,2026-09-15)。按 style.css 的设计纪律,新增组件样式
+   写在组件 scoped 块内(非 style.css)。视觉沿用至上主义 token:海报红细描边 +
+   白底小牌,与调用情况面板的 .sv-badge.trunc 同一语言,左侧红竖线做几何分隔。 */
+.sv-trunc-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-left: var(--bw) solid var(--sv-red);
+  background: var(--sv-white);
+  box-shadow: var(--shadow-card);
+}
+.sv-trunc-note .sv-trunc-text {
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--sv-ink-soft);
+  min-width: 0;
+}
+.sv-trunc-note .sv-badge {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+</style>
