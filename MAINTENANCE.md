@@ -145,7 +145,7 @@ kedai/
 | 一键构建 | `.\build.ps1` | **默认双端同步产出**:前端 web/dist + Rust release(测试版)+ 便携版;`-TestOnly` 仅测试版快速通道 `-Dev` debug 构建 `-NoWeb` 仅 Rust `-Tauri` 追加 NSIS 打包 |
 | 兼容别名 | `npm run build:all` / `npm run build:rs` | 均等价 `.\build.ps1`(双端同步);`npm run build:test` 等价 `.\build.ps1 -TestOnly` |
 | 统一改版本号 | `npm run version:bump -- x.y.z` | 7 处版本号一次改全(2 个 package.json、3 个 Cargo.toml、tauri.conf.json、本文档版本行);支持 `-DryRun` 预览 |
-| 后端测试 | `cd server-rs && cargo test` | **1043 个测试(845 单测 + 198 集成,22 个集成文件)**,**需在 vcvars64 环境**;前端 `npm test -w web` **768 个(83 文件;静态计数;vitest 运行时为 786,差值 18 来自 `parser.contract.test.ts` 循环生成的 fixture 用例)**。数字由 `node tools/count-tests.mjs` 自动统计,勿手抄——`npm run count:tests` 查看当前值,`npm run check:tests` 校验文档是否漂移 |
+| 后端测试 | `cd server-rs && cargo test` | **1108 个测试(891 单测 + 217 集成,22 个集成文件)**,**需在 vcvars64 环境**;前端 `npm test -w web` **823 个(86 文件;静态计数;vitest 运行时为 841,差值 18 来自 `parser.contract.test.ts` 循环生成的 fixture 用例)**。数字由 `node tools/count-tests.mjs` 自动统计,勿手抄——`npm run count:tests` 查看当前值,`npm run check:tests` 校验文档是否漂移 |
 | 全量检查(本地 CI) | `npm run check` | `tools/check-all.ps1`:fmt → clippy → cargo test → cargo audit(**硬门禁**)→ lock-sync(双锁漂移)→ contract → arch(C/D/E 分层)→ 类型 ratchet → npm audit(警告)→ vue-tsc(**硬门禁**)→ vitest → vite build。**已接入 build.ps1 与 pre-push hook**(CI 工作流为纸面、未运行,见 §0 门禁纪律)。
 `check-arch` 规则自 2026-09-14 起含 C/D/E/G/H/I/J(代际归属与跨代方向以 `tools/arch-layers.json` 为 SSOT) |
 | 开发模式 | `cd server-rs && cargo run` + `npm run dev -w web` | 后端 3001 / 前端 5173(代理到 3001) |
@@ -224,7 +224,7 @@ git-fetch-with-cli = true
 1. **构建层**:`build.ps1` 默认一次产出两端;每个 dist 产物旁边写 `<exe>.build.json`
    (`{version, build_time, dist_hash}`,算法见 `tools/Write-BuildStamp.ps1`)。
 2. **运行时层**:`server-rs/build.rs` 把 `KEDAI_DIST_HASH`/`KEDAI_BUILD_TIME` 编进二进制,
-   `GET /api/health` 返回 `{ok, ts, version, build_id, build_time}`;设置中心底部常驻显示
+   `GET /api/health` 返回 `{ok, ts, version, build_id, build_time, data_dir, dependencies:{db}}`;设置中心底部常驻显示
    「版本 · 构建时间 · 指纹前 8 位」,两端各开一次对比即可肉眼确认同步。
 3. **启动层**:`start.ps1` 与图形启动器(`Kedai.exe`,源码 `launcher/`)启动前比对两端
    sidecar 的 `dist_hash`,不一致自动执行 `build.ps1` 双端重建;`Kedai.lnk` 指向图形启动器,
@@ -272,7 +272,7 @@ git-fetch-with-cli = true
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | /api/health | `{ok, ts}` |
+| GET | /api/health | `{ok, ts, version, build_id, build_time, data_dir, dependencies:{db}}`(`ok` 恒 true 为 liveness;`?deep=1` 触发 quick_check) |
 | POST | /api/chat/send | SSE 流(见下) |
 | POST | /api/chat/stop | `{session_id}` → `{ok:true}` |
 | GET | /api/chat/sessions?character_id= | `{sessions:[...]}` |
@@ -431,7 +431,7 @@ rusqlite(bundled,零原生依赖),**WAL 模式 + foreign_keys ON**。共 28 张�
 14. **沙箱 realm 与酒馆不同:同卡脚本共享 window 需显式机制**(2026-09 修复记录,commit f2c10d1)。Kedai 每脚本一个不透明源 iframe,同卡多个 tavern_helper 脚本**互不可见 window 全局**——ST 生态脚本「th-A 挂 window.WuWaShared → th-B 读」的写法在这里会失效,直接裸读 `top`/`parent` 还抛 SecurityError(WuWa Solaris-3 卡崩溃根因)。两条通道(按需二选一,勿混):① **同卡同 realm**:卡级脚本已合并进单 iframe,靠逐 `<script>` 注入共享 window(web/src/cardScriptHost.ts + boot-script.ts 多段形态),同段组内的脚本可互读全局;② **跨 realm 共享桥**:不同沙箱(消息级脚本、不同时机起的卡级组)之间靠 shared-globals 快照桥(`web/src/sandbox/shared-globals.ts`),只同步合法键 + JSON 可序列化 ≤256KB 的 window 自有属性,函数/DOM 引用不共享(见 docs/known-limitations.md L5)。另:**运行期注入 `<style>` 会触发 dom-rpc 的声明级清洗 + 容器作用域化**——容器必须带 `data-kd-scope`(渲染块自带,卡级容器由 cardScriptHost 设 `cardScopeId`),否则样式段退回纯白名单仍被剥,界面裸渲染。
 15. **悬浮窗脚本依赖的 jQuery 面比想象宽**(2026-09 修复记录,commit 280e1cf)。WuWa 卡三个悬浮窗暴露了三类缺口,新增卡脚本报「悬浮球不显示/拖不动/切卡残留」时按此排查:① **jQuery UI `.draggable()` 沙箱没有**——th-5 无 `typeof` 守卫会直接 TypeError 中断整段脚本(连悬浮球都不挂);现在宿主侧 `web/src/sandbox/draggable.ts` 提供最小实现(handle/cancel/containment/distance + start/drag/stop 回调),能力边界见 known-limitations L6。② **`$('head')` 与 `.css({...})`**:`queryScoped` 只特判 body/html 时,`$('head').append('<style>…')` 零匹配静默丢失(面板失去 position:fixed/display:none → 落进消息流);`.css({k:v})` 对象形式若被当 getter 吞掉,`$('<div>').css({position:'fixed'})` 全部丢失;created 元素 `.attr('id',…)` 同理。③ **注入的 DOM 无人回收**:cleanup 原本只销毁 iframe/监听器/订阅,脚本 `$(window).on('unload')` 钩子在沙箱内静默失效 → 切卡后幽灵悬浮窗。现由 `data-kd-injected` 标记 + `data-kd-overlay-root` 覆层根统一清理;**capture 登记的监听器必须带 capture 摘除**(`removeEventListener` 的 capture 不匹配会摘不掉,拖拽中切卡残留 document 监听)。
 16. **改完必须重跑 `build.ps1` 才进 exe**(2026-09 实测八项修复复核)。`cargo test`/`npm run build` 只更新 `server-rs/target/` 与 `web/dist/`;`dist\kedai-server.exe`、`dist\Kedai-portable\Kedai.exe` 与项目根 `Kedai.exe` 都不会自动更新,交付前必须跑一次完整 `.\build.ps1`(前端 + release + 便携版 + 指纹 sidecar)。
-17. **16GB 内存 + 11GB 页面文件下禁止全并行 debug 链接**(2026-09 实测踩坑)。`cargo test`/`cargo build`(debug)全并行链接 `libkedai_server-*.rlib`(带 debuginfo 约 665MB)会触发 `os error 1455 页面文件太小`,rlib 被写坏后**后续所有编译持续报 E0786「invalid metadata files」**,表现为莫名其妙的全量失败。规避:`.shakedown/krun.bat` 已封装 `vcvars64 + CARGO_BUILD_JOBS=4 + debuginfo=0`;遇到 E0786 先删坏 rlib(`rm server-rs/target/debug/deps/libkedai_server-*.rlib`)再重建。**注意 release 构建(build.ps1)不受影响**(LTO + strip,产物小),但构建期间不要与前端 vitest/cargo test 并发跑,内存争用会让链接器崩(0xc0000409)。
+17. **16GB 内存 + 11GB 页面文件下禁止全并行 debug 链接**(2026-09 实测踩坑)。`cargo test`/`cargo build`(debug)全并行链接 `libkedai_server-*.rlib`(带 debuginfo 约 665MB)会触发 `os error 1455 页面文件太小`,rlib 被写坏后**后续所有编译持续报 E0786「invalid metadata files」**,表现为莫名其妙的全量失败。规避:`.shakedown/krun.bat` 已封装 `vcvars64 + CARGO_BUILD_JOBS=4 + debuginfo=0`;遇到 E0786 先删坏 rlib(`rm server-rs/target/debug/deps/libkedai_server-*.rlib`)再重建。**注意 release 构建(build.ps1)不受影响**(LTO + strip,产物小),但构建期间不要与前端 vitest/cargo test 并发跑,内存争用会让链接器崩(0xc0000409)。**另见条目 29**:`rustc` 自身崩溃(`STATUS_STACK_BUFFER_OVERRUN`)同样会伪装成「rlib 缺失」,那是另一诱因,处置也不同。
 18. **世界书条目的 depth/role 在角色卡里常放在 `extensions`**(2026-09 第四轮实测踩坑)。顶层 `depth` 缺省 4;而真实卡(赛马娘 95 条、爱托邦 109 条、吸血鬼 54 条)**全部**把 `depth` 写在 `extensions`,顶层没有。解析必须两侧都读,否则作者设的 1/2/5 一律退化到 4:depth=1/2 被放宽 → 关键词在窗口外仍命中、污染提示词;depth=5 被收窄 → 漏注入。`probability`/`use_probability` 早有 extensions 回退,`role` 还须兼容 ST 数字(`0/1/2` → system/user/assistant)。改这条解析时对照 `parsing/world_book.rs` 的 `read_role`/depth 段与 `probability` 段保持同一写法;测试要覆盖「顶层优先 / 仅 extensions / 两者都缺省」三态(第四轮修复记录见此文 §10 之后的 `docs/实测四轮修复-变更说明.md` F1)。
 19. **卡内 CSS 注释会吞掉紧随的声明**(2026-09 第四轮实测踩坑)。`/* 说明 */\n background-image: …` 的属性名会被声明切分当成 `/* 说明 */ background-image`,不匹配属性白名单 → **整条声明被丢弃**。赛马娘卡因此丢了 `body` 的纸纹背景、`.select-item` 的 `gap`、`.description-box` 的 `padding`。修法是切分前先剥注释(`cssSanitize.ts` 的 `stripCssComments`,引号感知以免误伤 `url("https://a/*.png")`);**必须在 `splitCssBlocks` 之前剥**——注释里含 `{}` 会先破坏顶层块切分。改 CSS 清洗管线时注意 `sanitizeScopedCss`(规则体)与 `sanitizeCssDeclarations`(规则体 + style 属性)两个入口都要经过剥注释。
 20. **压缩 / 备份仓库报「系统找不到指定的路径」= jniLibs 里的 .so 符号链接悬空**(2026-09 实测踩坑)。`tauri android build` 为省空间不在 `gen\android\app\src\main\jniLibs\<abi>\` 存真文件,而是**建符号链接**指向 `src-tauri\target\<triple>\release\libkedai_desktop_lib.so`;构建收尾又会删除 `src-tauri\target` 回收磁盘 → 链接悬空。此后用资源管理器 / 7-Zip / HaoZip 压缩或备份仓库,工具跟随不到目标即报 `...libkedai_desktop_lib.so: 系统找不到指定的路径` 并中断,产物不完整。**判定陷阱**:悬空链接上 `Test-Path` 仍返回 `True`(PS 5.1 不穿透解析),必须比对 `(Get-Item -Force).Target` 是否存在;只看 `Test-Path` 会漏掉。现已自动化:`tools\Write-BuildStamp.ps1` 的 `Clear-KedaiDanglingJniLibs` 在删除 target 后清理悬空链接(`build.ps1` 的 `-Tauri` 分支与 `tools\build-portable.ps1` 收尾均已接入,幂等,只删 SymbolicLink 不碰真实文件)。这些链接与 .so 本就是派生文件(`gen/android/app/.gitignore` 已忽略),下次 Android 构建自动重建。
@@ -533,6 +533,45 @@ rusqlite(bundled,零原生依赖),**WAL 模式 + foreign_keys ON**。共 28 张�
     另一处陷阱:`merge_entries_into` 曾是**整体替换**条目对象,而 `extensions` 不在前端视图里 →
     任何一次条目编辑保存都会静默抹掉 `extensions`(depth/scan_depth/role 全退化),已改为字段叠加
     (`overlay_view`)。改世界书写回时注意:视图为空的正则/角色要写显式 `null`,否则旧值"复活"。
+29. **见到「依赖 rlib 缺失」先降并发,不要改依赖**(2026-09-15 实测,批次 0 入档)。现象文案:
+    `error: crate <name> required to be available in rlib format, but was not found in this form`,
+    或 `error[E0463]: can't find crate for kedai_server`。**真实原因不是代码或依赖问题**:
+    默认并行度下 **rustc 进程自身崩溃**(退出码 `0xc0000409 STATUS_STACK_BUFFER_OVERRUN`),
+    崩溃信息在日志末尾可见;进程被杀导致依赖产物缺失,才表现为「找不到 rlib」。
+    **处置**:改用 `-j 2` 复跑(**实测一次通过、0 编译错误**),**不要改依赖**——照报错去动 `Cargo.toml`
+    只会越改越偏。`tools/check-all.ps1` 的 `cargo test --workspace` 步骤已带 `-j 2`
+    (注释记录了本机并行链接的历史故障),但该规避**只覆盖脚本内部**:直接调用裸 `cargo test` 仍会撞上,
+    故 `AGENTS.md` 的验证命令也已补 `-j 2`。
+    **与条目 17 相关,此为另一诱因**:条目 17 是 16GB 内存 / 11GB 页面文件下全并行链接的**内存耗尽**
+    (表现为 `os error 1455` / `E0786 invalid metadata files`),本条是 **rustc 自身栈溢出崩溃**;
+    两者都表现为「rlib 异常」,但诱因与处置不同,勿混。
+30. **`target\debug\deps\` 里只有 `.rmeta` 没有同名 `.rlib` 的孤立产物**(2026-09-15 实测 **183 个**)。
+    `cargo check` / `cargo clippy` 只产元数据不产 rlib,与 `cargo test` / `cargo build` 交替执行时便会残留
+    ——它正是上一条「找不到 rlib」的**直接来源**。**处置**:清掉孤立 `.rmeta` 及与之对应的
+    `.fingerprint\*-<hash>` 目录(**成对删除**:只删 `.rmeta` 会留下失配指纹,反而引出新怪象)。
+    此类残留会随 `check`/`clippy` 与 `test` 交替执行而**持续累积**,故每次撞上「找不到 rlib」
+    先看这里,再按条目 29 降并发复跑。
+31. **360 安全卫士拦截 cargo 新生成的 build script 可执行文件**(2026-09-15 实测,os error 5)。
+    **现象**:release 构建在 `icu_normalizer_data` / `icu_properties_data` 等 build script 处失败:
+    `error: failed to run custom build command for <crate>`,
+    细节为 `could not execute process ...\build-script-build (never executed)` +
+    `拒绝访问。 (os error 5)`。**注意它看起来像依赖或权限问题,实际都不是**。
+    **逐步排除(照此自查,别绕远路)**:
+    - `Get-MpComputerStatus` 显示 Defender `RealTimeProtectionEnabled=False` → **不是 Defender**;
+    - SAC(`HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy` 的 `VerifiedAndReputablePolicyState`)
+      为 `0` → **不是 Smart App Control**;
+    - **决定性证据**:把一个**既有**的 `cmd.exe` 复制进同一目录能正常执行,而 cargo
+      **刚编译出来**的 build script exe 一执行就「拒绝访问」,且随后**被安全软件删除**
+      (手动补放同名文件,重跑后仍消失)→ 拦截针对「新生成的可执行文件」,
+      **与条目 22 同源**(同一台机器上 360 安全卫士的实时防护;
+      `Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct` 可确认其存在)。
+    **处置**:临时关闭 360 实时防护,或把 `server-rs\target` 与 `src-tauri\target` 加入信任区,
+    再重跑 `.\build.ps1`。
+    **实测无效的绕法(别试)**:`-j 1` 降并发、外置 `CARGO_TARGET_DIR` / `-RustTargetDir`(条目 22 的
+    规避对本例**无效**——拦截对象是 cargo 的 build script,不是最终链接出的 rlib/exe)、
+    清理 `.fingerprint` 与新产物。以上均复测仍被拦。
+    **影响面提示**:本例中**测试版 `dist\kedai-server.exe` 已正常产出**,只有 `src-tauri`
+    便携版链路被阻断——故「便携版缺失」时先按本条查杀软,不要怀疑 Rust 代码。
 
 ---
 
@@ -618,3 +657,31 @@ cd server-rs && cargo test
 - 预载仅 name+description(设置 `skill_progressive_disclosure`,默认开;旧技能正文从未预载,关闭即回退零注入)。
 - 子代理:`tools/agent_tools_agent.rs` 深度守卫(`subagent_max_depth` 默认 2)、并发守卫(`subagent_max_concurrency` 默认 6)、结果截断(`subagent_result_max_chars` 默认 2000,截断附尾注)。
 - 工具治理:`tools/registry.rs` 错误文案带「下一步怎么做」指引;定义顺序按 name 稳定(有跨构建序列化一致性测试,保前缀缓存)。
+
+### 可观测性与错误面收口(2026-09-15 新增)
+
+- 请求关联 ID:`server-rs/src/api/request_id.rs`——读/生成 `X-Request-Id`、回写响应头、
+  建 `http_request` span、请求结束打 1 行 INFO 访问日志(`method`/`path`/`status`/`duration_ms`)。
+  **注册在 `build_router` 链尾(CORS 之后)成为最外层**,否则 `security::guard` 的 401/403
+  早退响应拿不到 requestId(回归护栏:`tests/security.rs::early_return_responses_carry_request_id`)。
+- span 穿透:`utils/logging.rs` 的 `RequestIdLayer`(`on_new_span` 存 span extension)+
+  `PinoFormat` 经 `event_scope()` 合并。**为何必须 extension**:`FormattedFields` 是格式化后的
+  字符串,拿不到结构化值。挂上后请求生命周期内所有日志(含 service 层、spawn 出去的引擎/任务)
+  自动带 `requestId`,无需逐处传参。改 span 字段名需两处同步(`api/request_id.rs` 与
+  `utils/logging.rs` 的 `REQUEST_ID_SPAN_FIELD`)。
+- JSON 体提取器:`api/json_body.rs` 的 `JsonBody<T>`(把 `JsonRejection` 收口为
+  `{error, code: VALIDATION}` + 400)。**新 handler 应优先用它**,规则 K 会拦住直接写
+  `Json(x): Json<T>` 的新增点(基线见 `tools/check-arch.mjs`,只降不升)。413 是已登记的例外。
+- 错误分类(L1):`models/llm_error.rs`——`LlmErrorKind`(`Timeout`/`RateLimited`/`AuthFailed`/
+  `Upstream`/`Generation`)+ 纯映射(`from_http_status` / `from_transport`),`code()` 返回值即
+  SSE `Error.code` 线格式(**五个值冻结,改动需两端同步 + `check-contract`**)。
+  `connectors/openai_compatible` 是**唯一分类边界**(生产者侧);引擎侧
+  `agents/engine/types.rs` 的 `EngineError` 消费它。**禁止**回退到「扫错误文案子串」判分类。
+- 前端响应形状闸门:`web/src/api/shape.ts` 的形状校验原语(`request<T>()` 后直接解构的封装配用);
+  仅做最小存在性校验,避免把「后端加字段」误判为故障。同族先例:`api/diagnostics.ts` 的
+  `assertDiagnostics`。
+- DB schema 版本:`models/db/schema.rs` 的 `SCHEMA_VERSION`(当前 `1`)+ `Db::open` 的
+  `user_version` 读写与「库比代码新则拒绝启动」。**升级一处 schema 必须同步**:
+  ① `schema.rs` 的 `CREATE_TABLES`;② `migration/ddl.rs` 的对应 `ensure_*`(两处文本须在
+  `normalize_sql` 后一致);③ 若属「表/列结构变化」,提升 `SCHEMA_VERSION`;
+  ④ `tests/schema_migration_meta.rs` 的 7 条验收保持通过。

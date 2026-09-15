@@ -606,4 +606,4 @@ D:\kedai-android\
 - 本文(`docs/android-port-plan.md`)为 Android 移植活文档,阶段推进时同步更新进度与门控清单。
 - 阶段 1/2 每个 cfg 改动补最小单测;阶段 5 建立移动端功能回归清单(可脚本化)。
 - 桌面与 Android 双目标构建纳入 `tools/check-all.ps1` 校验链。
-- 遵循 `AGENTS.md`:面向用户提示与注释用简体中文;改核心行为先写失败测试;**不提交 Git**。
+- 遵循 `AGENTS.md`:面向用户提示与注释用简体中文;改核心行为先写失败测试;Git 提交按 `AGENTS.md`「Git 提交纪律」(2026-09-15 修订,不再是「一律不提交」)。
