@@ -1,6 +1,7 @@
 // 设置路由:/api/settings(连接测试/模型列表/信息/模型切换/运行期设置读写)
 use crate::api::app_state::AppState;
-use crate::api::WithStatus;
+use crate::api::json_body::JsonBody;
+use crate::api::{err_with_code, ErrorCode, WithStatus};
 use crate::services::settings_service::{
     normalize_base_url, AppMode, McpServerConfig, RuntimeSettings, DEFAULT_SEARCH_ENDPOINT,
 };
@@ -271,7 +272,7 @@ pub async fn get_settings(
 pub async fn update_settings(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ModeQuery>,
-    Json(body): Json<UpdateSettingsBody>,
+    JsonBody(body): JsonBody<UpdateSettingsBody>,
 ) -> Response {
     let mode = query.app_mode();
     // 事务锁覆盖“读取当前值 → 应用 patch → 原子落盘 → 替换内存”，防止并发部分更新丢字段。
@@ -663,15 +664,22 @@ pub async fn update_settings(
     let (candidate, save_result) = match save_outcome {
         Ok(pair) => pair,
         Err(e) => {
-            return Json(json!({ "error": format!("设置保存失败: {e}") }))
-                .into_response()
-                .with_status(StatusCode::INTERNAL_SERVER_ERROR);
+            // 泄露封堵(批次 1):JoinError/IO 原文只进日志,回给用户稳定文案 + code
+            tracing::error!(error = %e, "设置保存失败:阻塞任务");
+            return err_with_code(
+                ErrorCode::Internal,
+                "设置保存失败,详情见服务端日志",
+                StatusCode::INTERNAL_SERVER_ERROR,
+            );
         }
     };
     if let Err(e) = save_result {
-        return Json(json!({ "error": format!("设置保存失败: {e}") }))
-            .into_response()
-            .with_status(StatusCode::INTERNAL_SERVER_ERROR);
+        tracing::error!(error = %e, "设置保存失败:写配置文件");
+        return err_with_code(
+            ErrorCode::Internal,
+            "设置保存失败,详情见服务端日志",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        );
     }
     let connector_changed =
         candidate.openai_base_url != old_base || candidate.openai_api_key != old_key;
@@ -752,6 +760,11 @@ pub async fn models(State(state): State<Arc<AppState>>) -> Json<serde_json::Valu
 
 /// POST /api/settings/embedding/test:测试向量化连接(嵌入一条固定文本)。
 /// 成功回传实际维度与耗时;失败回传错误原因。不写库、不改配置。
+///
+/// 形状(批次 1):保留 200 + `ok:false`,`ok:false` 是**正常业务上报**(测试结果),
+/// 不是 HTTP 错误——前端 settings.ts 的 testEmbedding 把该对象直接渲染到设置页,
+/// 改成非 2xx 会让 request() 抛 ApiError,把「测试未通过」变成异常弹窗(破坏既有 UX)。
+/// 这里补 `code`/`error` 供程序化分支;`message` 保留原文(用户需要据此修正自己的配置)。
 pub async fn test_embedding(State(state): State<Arc<AppState>>) -> Response {
     let settings = state.settings_snapshot();
     let svc = crate::services::embedding_service::EmbeddingService::new();
@@ -763,7 +776,20 @@ pub async fn test_embedding(State(state): State<Arc<AppState>>) -> Response {
             "message": format!("连接成功:向量维度 {dim},耗时 {ms} ms"),
         }))
         .into_response(),
-        Err(e) => Json(json!({ "ok": false, "message": e.to_string() })).into_response(),
+        Err(e) => {
+            // 未配置 → VALIDATION(用户可自行修正);已配置但调用失败 → UPSTREAM(上游)
+            let code = match &e {
+                crate::services::embedding_service::EmbedError::NotConfigured(_) => {
+                    ErrorCode::Validation
+                }
+                crate::services::embedding_service::EmbedError::Failed(_) => ErrorCode::Upstream,
+            };
+            let message = e.to_string();
+            Json(
+                json!({ "ok": false, "code": code.as_str(), "error": message, "message": message }),
+            )
+            .into_response()
+        }
     }
 }
 
@@ -784,7 +810,7 @@ pub async fn info(State(state): State<Arc<AppState>>) -> Json<serde_json::Value>
 /// PUT /api/settings/model:切换模型(立即生效)
 pub async fn switch_model(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<SwitchModelBody>,
+    JsonBody(body): JsonBody<SwitchModelBody>,
 ) -> Response {
     let model = body.model.trim().to_string();
     if model.is_empty() {
@@ -1125,7 +1151,7 @@ pub async fn prompt_preview(
 /// PUT /api/settings/agent-prompt:原子保存主 Agent 提示词到 DATA_DIR。
 pub async fn save_agent_prompt(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<SaveAgentPromptBody>,
+    JsonBody(body): JsonBody<SaveAgentPromptBody>,
 ) -> Response {
     let path = state.runtime_prompt.path().display().to_string();
     match state.runtime_prompt.write(&body.content) {

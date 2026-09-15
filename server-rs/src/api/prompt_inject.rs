@@ -2,7 +2,7 @@
 // POST /api/prompt-inject/import:导入酒馆(SillyTavern)预设 JSON → 楼层
 use crate::api::app_state::AppState;
 use crate::api::characters::{parse_boundary, parse_multipart};
-use crate::api::WithStatus;
+use crate::api::{err_with_code, ErrorCode, WithStatus};
 use crate::parsing::preset::parse_st_preset;
 use crate::services::prompt_inject_service::PromptInjectConfig;
 use axum::extract::State;
@@ -45,9 +45,15 @@ pub async fn update_prompt_inject(
         .await;
     match result {
         Ok(Ok(cfg)) => Json(json!({ "ok": true, "config": cfg })).into_response(),
-        Ok(Err(e)) | Err(e) => Json(json!({ "error": format!("保存失败: {e}") }))
-            .into_response()
-            .with_status(StatusCode::INTERNAL_SERVER_ERROR),
+        // 泄露封堵(批次 1):写盘错误原文(可能含盘符路径)只进日志,响应给稳定文案 + code
+        Ok(Err(e)) | Err(e) => {
+            tracing::error!(error = %e, "保存提示词注入配置失败");
+            err_with_code(
+                ErrorCode::Internal,
+                "保存失败,详情见服务端日志",
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+        }
     }
 }
 
@@ -133,8 +139,13 @@ pub async fn import(
         Ok(Ok((imported, config))) => {
             Json(json!({ "ok": true, "imported": imported, "config": config })).into_response()
         }
-        Ok(Err(e)) | Err(e) => Json(json!({ "error": format!("导入失败: {e}") }))
-            .into_response()
-            .with_status(StatusCode::INTERNAL_SERVER_ERROR),
+        Ok(Err(e)) | Err(e) => {
+            tracing::error!(error = %e, "导入提示词预设失败");
+            err_with_code(
+                ErrorCode::Internal,
+                "导入失败,详情见服务端日志",
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+        }
     }
 }

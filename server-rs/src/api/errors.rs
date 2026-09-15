@@ -123,8 +123,27 @@ mod tests {
         // DB 阻塞任务失败出口:500 + code "DB"(前端据此提示「服务端错误」)
         let (status, body) = body_json(super::super::util::db_err("连接池耗尽")).await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(body["error"], "连接池耗尽");
         assert_eq!(body["code"], "DB");
+    }
+
+    /// 泄露守卫(批次 1):内部错误原文只进日志,响应体只给稳定文案。
+    /// 触发内部失败后不得回显 SQLite 报错、SQL 片段或盘符路径。
+    #[tokio::test]
+    async fn db_err_never_leaks_internal_detail() {
+        let (status, body) = body_json(super::super::util::db_err(
+            "DB 任务执行失败: SQLite error: no such column: character_id (C:\\Users\\ops\\AppData\\data\\kedai.db)",
+        ))
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["code"], "DB");
+        assert_eq!(body["error"], "数据库操作失败,详情见服务端日志");
+        let text = body.to_string();
+        for leaked in ["SQLite", "no such column", "C:\\", "kedai.db"] {
+            assert!(
+                !text.contains(leaked),
+                "响应体泄露内部细节「{leaked}」:{text}"
+            );
+        }
     }
 
     #[test]

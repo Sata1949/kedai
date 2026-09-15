@@ -1,11 +1,10 @@
 // 静态资源与自包含文档:bootstrap / 头像 / iframe 宿主文档 / SPA 回退 / 内嵌 dist
 // (自 api/mod.rs 迁入,纯代码移动,行为不变)
 use crate::api::app_state::AppState;
-use crate::api::util::WithStatus;
+use crate::api::{err_with_code, ErrorCode};
 use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -31,7 +30,8 @@ pub(crate) async fn avatar_file(
         .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-' || *c == '_')
         .collect();
     if safe != file {
-        return Json(json!({ "error": "Not Found" })).into_response();
+        // 目录穿越拒绝:此前是错误体 + 200(假成功),改为真实 404 + code
+        return err_with_code(ErrorCode::NotFound, "Not Found", StatusCode::NOT_FOUND);
     }
     let path = state.config.data_dir.join("avatars").join(&file);
     match tokio::fs::read(&path).await {
@@ -45,7 +45,8 @@ pub(crate) async fn avatar_file(
                 .body(axum::body::Body::from(bytes))
                 .unwrap_or_else(|_| StatusCode::NOT_FOUND.into_response())
         }
-        Err(_) => Json(json!({ "error": "Not Found" })).into_response(),
+        // 头像不存在:同为错误体 + 200 的历史出口,改为真实 404 + code
+        Err(_) => err_with_code(ErrorCode::NotFound, "Not Found", StatusCode::NOT_FOUND),
     }
 }
 
@@ -185,10 +186,8 @@ pub(crate) async fn spa_fallback(
             }
         }
     }
-    // 其余一律 404 {"error":"Not Found"}
-    Json(json!({ "error": "Not Found" }))
-        .into_response()
-        .with_status(StatusCode::NOT_FOUND)
+    // 其余一律 404 {"error":"Not Found","code":"NOT_FOUND"}(批次 1 补 code)
+    err_with_code(ErrorCode::NotFound, "Not Found", StatusCode::NOT_FOUND)
 }
 
 /// 读取前端资源。发布版默认只使用内嵌 dist；仅显式设置 KEDAI_WEB_DIST 时启用磁盘覆盖。

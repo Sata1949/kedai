@@ -2,6 +2,7 @@
 use crate::agents::engine::AgentRunRequest;
 use crate::api::app_state::AppState;
 use crate::api::db_err;
+use crate::api::json_body::JsonBody;
 use crate::models::types::{GenerationParams, PlanStep, SseEvent};
 use crate::services::prompt_inject_service::{output_budget_for_word_count, InjectMode};
 use axum::extract::State;
@@ -13,6 +14,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::convert::Infallible;
 use std::sync::Arc;
+use tracing::Instrument;
 
 /// `pending_runs` 占位守卫:插入即武装,离开作用域(含早退 return、panic、任务被丢弃)
 /// 自动移除。背景(2026-09-13 批次 2):此前清理逻辑散落在 5 处早退 + 1 处 spawn 收尾,
@@ -71,7 +73,10 @@ pub struct CompactBody {
     pub session_id: Option<String>,
 }
 
-pub async fn send(State(state): State<Arc<AppState>>, Json(body): Json<SendBody>) -> Response {
+pub async fn send(
+    State(state): State<Arc<AppState>>,
+    JsonBody(body): JsonBody<SendBody>,
+) -> Response {
     let message = body.message.unwrap_or_default().trim().to_string();
     if message.is_empty() {
         return err_json("消息不能为空", StatusCode::BAD_REQUEST);
@@ -315,12 +320,21 @@ pub async fn send(State(state): State<Arc<AppState>>, Json(body): Json<SendBody>
 
     // 后台运行 Agent。assistant 消息落库已移至引擎收尾(Finish 事件发出前完成),
     // 保证前端收到 finish 后 loadHistory 能取到完整数据,消除落库竞态。
-    tokio::spawn(async move {
-        // 占位守卫随任务存续:引擎正常结束、panic 或任务被丢弃都会自动清理(RAII),
-        // 不再依赖 spawn 收尾语句执行(引擎 panic 时它不会执行)。
-        let _pending_guard = pending_guard;
-        let _ = engine.run(req, tx).await;
-    });
+    //
+    // span 不跨 tokio::spawn 自动继承:此处显式建 span + `.instrument(...)` 闭合。
+    // span 在此(仍在 http_request span 作用域内)创建,故父链含 http_request,
+    // 引擎日志因此同时带上 sessionId 与 requestId(后者经 span extension 穿透)。
+    // 既有手工传参(req.session_id)保持不变,那是既有契约。
+    let run_span = tracing::info_span!("agent_run", sessionId = session_id.as_str());
+    tokio::spawn(
+        async move {
+            // 占位守卫随任务存续:引擎正常结束、panic 或任务被丢弃都会自动清理(RAII),
+            // 不再依赖 spawn 收尾语句执行(引擎 panic 时它不会执行)。
+            let _pending_guard = pending_guard;
+            let _ = engine.run(req, tx).await;
+        }
+        .instrument(run_span),
+    );
 
     let stream = async_stream::stream! {
         while let Some(event) = rx.recv().await {
@@ -335,7 +349,10 @@ pub async fn send(State(state): State<Arc<AppState>>, Json(body): Json<SendBody>
     super::sse_response(stream)
 }
 
-pub async fn stop(State(state): State<Arc<AppState>>, Json(body): Json<StopBody>) -> Response {
+pub async fn stop(
+    State(state): State<Arc<AppState>>,
+    JsonBody(body): JsonBody<StopBody>,
+) -> Response {
     let Some(sid) = body.session_id else {
         return err_json("缺少 session_id", StatusCode::BAD_REQUEST);
     };
@@ -359,7 +376,7 @@ pub async fn stop(State(state): State<Arc<AppState>>, Json(body): Json<StopBody>
 /// 模式为 off 时拒绝;历史不足时返回 compacted=false。压缩结果落库,原文消息保留(可逆)。
 pub async fn compact(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<CompactBody>,
+    JsonBody(body): JsonBody<CompactBody>,
 ) -> Response {
     let Some(sid) = body.session_id else {
         return err_json("缺少 session_id", StatusCode::BAD_REQUEST);
@@ -381,7 +398,7 @@ pub async fn compact(
 /// 无摘要时返回 cleared=false;原文消息从未删除,清除摘要行即恢复。
 pub async fn clear_compact(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<CompactBody>,
+    JsonBody(body): JsonBody<CompactBody>,
 ) -> Response {
     let Some(sid) = body.session_id else {
         return err_json("缺少 session_id", StatusCode::BAD_REQUEST);
@@ -516,7 +533,7 @@ fn inject_worldbook_for_raw(
 /// role 白名单;始终非流式(作者页自行组装完整历史,无 SSE 需求)。
 pub async fn generate_raw(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<GenerateRawBody>,
+    JsonBody(body): JsonBody<GenerateRawBody>,
 ) -> Response {
     tracing::info!(
         messages = body.messages.len(),

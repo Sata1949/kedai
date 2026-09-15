@@ -1,6 +1,7 @@
 // 角色卡路由:/api/characters(列表/上传/详情/更新/删除)
 // services 同步 DB 调用均经 state.db_call 挪进阻塞线程池(DB 并发改造)
 use crate::api::app_state::AppState;
+use crate::api::json_body::JsonBody;
 use crate::api::{db_err, WithStatus};
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -179,7 +180,7 @@ pub async fn get(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> 
 pub async fn update(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    Json(body): Json<UpdateBody>,
+    JsonBody(body): JsonBody<UpdateBody>,
 ) -> Response {
     let svc = state.characters.clone();
     let updated = state

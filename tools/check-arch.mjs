@@ -394,10 +394,10 @@ const backendWarnings = [];
 //
 // 背景:`api/errors.rs` 提供 `err_with_code`(body `{error, code}`),但历史上大量 handler
 // 直接返回 `Json(json!({ "error": ... }))`——同一错误出现两种形状,前端无法统一解析。
-// 存量 117 处**逐个**补齐 code 需为每处判定 HTTP 状态码(盲改会改 API 行为),属批次 D 的
+// 存量 105 处**逐个**补齐 code 需为每处判定 HTTP 状态码(盲改会改 API 行为),属批次 D 的
 // 跟踪项而非本轮范围;此处先加 ratchet 防新增(数量不得超基线,修好一批请下调基线)。
 {
-  const BASELINE_BARE_ERROR = 117; // 2026-09-13 实测;只降不升
+  const BASELINE_BARE_ERROR = 105; // 2026-09-15 实测(批次 1 错误面收口后由 117 下调);只降不升
   const apiDir = join(SERVER, 'api');
   let hits = 0;
   const samples = [];
@@ -511,6 +511,46 @@ const backendWarnings = [];
     if (VERBOSE) {
       console.log(`  [H] EJS 能力面(条数/基线,只降不升):${reports.join('、')}`);
     }
+  }
+}
+
+// --- 规则 K:JSON body 提取器接入 ratchet(错误面收口,2026-09-15 起) ---
+//
+// 背景(批次 1 实测):axum 内建 `Json<T>` 的 `JsonRejection` 默认 `IntoResponse`
+// 产生 **400 text/plain**(带 serde 类型名/行列),与「统一 JSON 错误体」的承诺不符,
+// 前端 `client.ts` 的 `request()` 也解析不出 `code`。`api/json_body.rs` 的 `JsonBody<T>`
+// 是既有改造路径(收口为 `{error, code: VALIDATION}` + 400)。
+//
+// 存量 32 处**逐个**接入需按域判定(部分 handler 的 body 语义待确认),分批推进;
+// 此处先加 ratchet 防新增未接入点:直接写 `Json(x): Json<T>` 的 handler 数量不得超基线,
+// 接入一处请下调一处(只降不升)。
+{
+  const BASELINE_RAW_JSON_BODY = 32; // 2026-09-15 实测;只降不升
+  const apiDir = join(SERVER, 'api');
+  let hits = 0;
+  const samples = [];
+  for (const f of collect(apiDir, ['.rs'])) {
+    // json_body.rs 是提取器的定义处,豁免(其单测里有 `JsonBody` 的对照用法)
+    if (f.endsWith('json_body.rs')) continue;
+    const src = readFileSync(f, 'utf8');
+    const prodLines = productionLineCount(src);
+    src.split('\n').forEach((line, i) => {
+      const ln = i + 1;
+      if (ln > prodLines) return;
+      if (/^\s*\/\//.test(line)) return;
+      if (!/Json\([a-z_]+\):\s*Json</.test(line)) return;
+      hits++;
+      if (samples.length < 3) samples.push(`${relative(ROOT, f)}:${ln}`);
+    });
+  }
+  if (hits > BASELINE_RAW_JSON_BODY) {
+    backendFailures.push(
+      `[K] 未接入 JsonBody 的 JSON 体提取器新增:${hits} 处 > 基线 ${BASELINE_RAW_JSON_BODY}` +
+        `(${samples.join(', ')});请改用 api/json_body.rs 的 JsonBody<T> 以统一 JSON 错误体`,
+    );
+  }
+  if (VERBOSE) {
+    console.log(`  [K] 未接入 JsonBody 的提取器:${hits} 处(基线 ${BASELINE_RAW_JSON_BODY},只降不升)`);
   }
 }
 
@@ -766,7 +806,7 @@ const backendWarnings = [];
 // 使前端报告段永不输出——前端规则 J 的结论被静默吞掉。现将两者的报告与退出
 // 统一到本段末尾:任一侧非空即 exit(1),门禁强度不变,可见性恢复。
 
-console.log('\n========== Kedai 后端分层与冻结护栏(C/D/E/G/H/I/J) ==========');
+console.log('\n========== Kedai 后端分层与冻结护栏(C/D/E/G/H/I/J/K) ==========');
 if (backendFailures.length) {
   console.log(`[FAIL] ${backendFailures.length} 处分层违规(全部规则均为硬门禁):`);
   for (const f of backendFailures.slice(0, 40)) console.log(`  - ${f}`);

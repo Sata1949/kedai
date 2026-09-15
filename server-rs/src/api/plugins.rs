@@ -4,7 +4,7 @@
 // 但**注册是装配动作**,按三结合纪律由宿主(本层)执行——L3 不得依赖 L2 的工具注册表。
 // 故下方统一走「解析(L3) → 宿主注册(L2)」两段式:`parse_all`/`parse_file` + `register_plugin`。
 use crate::api::app_state::AppState;
-use crate::api::WithStatus;
+use crate::api::{ErrorCode, WithStatus};
 use crate::plugins::ToolPluginLoader;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -71,7 +71,15 @@ pub async fn reload_tools(State(state): State<Arc<AppState>>) -> Response {
     let (loaded, mut errors) =
         tokio::task::spawn_blocking(move || ToolPluginLoader::new(dir).parse_all())
             .await
-            .unwrap_or_else(|e| (Vec::new(), vec![format!("插件重载任务失败: {e}")]));
+            .unwrap_or_else(|e| {
+                // 泄露封堵(批次 1):JoinError 原文(线程池内部细节)只进日志,
+                // 面向用户的错误项换成固定文案。
+                tracing::error!(error = %e, "插件重载任务失败");
+                (
+                    Vec::new(),
+                    vec!["插件重载任务失败,详情见服务端日志".to_string()],
+                )
+            });
     let (count, reg_errors) = register_plugins(loaded, &registry);
     errors.extend(reg_errors);
     if errors.is_empty() {
@@ -79,9 +87,18 @@ pub async fn reload_tools(State(state): State<Arc<AppState>>) -> Response {
             .into_response()
             .with_status(StatusCode::OK)
     } else {
-        Json(json!({ "ok": false, "loaded": count, "errors": errors }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST)
+        // 形状(批次 1):`loaded`(已注册数)与 `errors`(逐项失败原因)是**业务数据**,
+        // 必须保留;仅补 `code` 供前端统一分支。errors 原文由解析器产生(面向插件的
+        // 文件名/语法错误,不含密钥/路径绝对化),属用户排障必需信息,保留透出。
+        Json(json!({
+            "ok": false,
+            "code": ErrorCode::Validation.as_str(),
+            "error": "部分插件加载失败",
+            "loaded": count,
+            "errors": errors,
+        }))
+        .into_response()
+        .with_status(StatusCode::BAD_REQUEST)
     }
 }
 

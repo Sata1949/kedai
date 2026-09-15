@@ -1,6 +1,7 @@
 // 会话与消息路由:/api/chat/sessions、/history、/messages/:id、/clear
 // services 同步 DB 调用均经 state.db_call 挪进阻塞线程池(DB 并发改造)
 use crate::api::app_state::AppState;
+use crate::api::json_body::JsonBody;
 use crate::api::{db_err, WithStatus};
 use crate::parsing::macros::{expand_macros, MacroCtx};
 use axum::extract::{Path, Query, State};
@@ -116,7 +117,7 @@ pub async fn list_sessions(
 
 pub async fn create_session(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<CreateSessionBody>,
+    JsonBody(body): JsonBody<CreateSessionBody>,
 ) -> Response {
     let Some(cid) = body.character_id else {
         return err_json("缺少 character_id", StatusCode::BAD_REQUEST);
@@ -193,7 +194,7 @@ pub(crate) fn seed_first_message(
 pub async fn regreet(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
-    Json(body): Json<RegreetBody>,
+    JsonBody(body): JsonBody<RegreetBody>,
 ) -> Response {
     let svc = state.sessions.clone();
     let characters = state.characters.clone();
@@ -365,7 +366,7 @@ pub async fn update_message(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
     Query(q): Query<MessageQuery>,
-    Json(body): Json<UpdateMessageBody>,
+    JsonBody(body): JsonBody<UpdateMessageBody>,
 ) -> Response {
     let Some(sid) = q.session_id else {
         return err_json("缺少 session_id 或 id", StatusCode::BAD_REQUEST);
@@ -394,7 +395,7 @@ pub async fn swipe_message(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
     Query(q): Query<MessageQuery>,
-    Json(body): Json<SwipeBody>,
+    JsonBody(body): JsonBody<SwipeBody>,
 ) -> Response {
     let Some(sid) = q.session_id else {
         return err_json("缺少 session_id 或 id", StatusCode::BAD_REQUEST);
@@ -461,7 +462,10 @@ pub async fn delete_message(
     }
 }
 
-pub async fn clear(State(state): State<Arc<AppState>>, Json(body): Json<ClearBody>) -> Response {
+pub async fn clear(
+    State(state): State<Arc<AppState>>,
+    JsonBody(body): JsonBody<ClearBody>,
+) -> Response {
     let Some(sid) = body.session_id else {
         return err_json("缺少 session_id", StatusCode::BAD_REQUEST);
     };
@@ -480,7 +484,7 @@ pub async fn clear(State(state): State<Arc<AppState>>, Json(body): Json<ClearBod
 pub async fn truncate_messages(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
-    Json(body): Json<TruncateBody>,
+    JsonBody(body): JsonBody<TruncateBody>,
 ) -> Response {
     if body.anchor_id <= 0 {
         // 负/零 id 是流式临时消息标记或非法值;按 id>anchor 语义会把整段历史删光。
@@ -510,7 +514,7 @@ pub async fn save_variables(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
     Query(q): Query<MessageQuery>,
-    Json(body): Json<SaveVariablesBody>,
+    JsonBody(body): JsonBody<SaveVariablesBody>,
 ) -> Response {
     let Some(sid) = q.session_id else {
         return err_json("缺少 session_id 或 id", StatusCode::BAD_REQUEST);
@@ -543,7 +547,7 @@ pub async fn save_variables(
 pub async fn save_assistant_vars(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    Json(body): Json<SaveVariablesBody>,
+    JsonBody(body): JsonBody<SaveVariablesBody>,
 ) -> Response {
     // 会话树只存 stat_data(与引擎一致);无 stat_data 时视为空树覆写
     let tree = body

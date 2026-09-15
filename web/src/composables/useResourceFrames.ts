@@ -16,7 +16,7 @@
 
 import { onBeforeUnmount, onMounted } from 'vue';
 import type { Ref } from 'vue';
-import { authorizedFetch, BASE } from '../api/client';
+import { ApiError, apiErrorMessage, authorizedFetch, BASE } from '../api/client';
 import { getCharacter } from '../api/characters';
 import type { CharacterRecord } from '../api/types';
 import { applyResourceSync, loadResourceSnapshot, type ResourceSyncMessage } from '../resourceStore';
@@ -67,22 +67,32 @@ export function useResourceFrames(opts: UseResourceFramesOptions) {
   /** 已注册的资源框架:contentWindow(跨 reload 稳定)→ 条目 */
   const resourceFrames = new Map<Window, ResourceEntry>();
   /** 作者页面 HTML 按 URL 缓存(同一作者页多条消息共享;失败不缓存,便于重试) */
-  const resourceHtmlCache = new Map<string, Promise<{ ok?: boolean; html?: string; base_url?: string; error?: string }>>();
+  const resourceHtmlCache = new Map<string, Promise<{ html: string; base_url?: string }>>();
 
-  function fetchResourceHtml(url: string): Promise<{ ok?: boolean; html?: string; base_url?: string; error?: string }> {
+  /**
+   * 取作者页 HTML。**成败按 HTTP 状态判定**(批次 1):后端错误体已统一为
+   * `{error, code}` + 真实状态码,不再用 200 + `{ok:false}` 上报失败——若仍按
+   * `body.ok` 分支,失败会被当成「html 缺失」而丢掉后端给的错误文案与 code 分类。
+   */
+  function fetchResourceHtml(url: string): Promise<{ html: string; base_url?: string }> {
     let p = resourceHtmlCache.get(url);
     if (!p) {
       p = (async () => {
         const res = await authorizedFetch(`${BASE}/resource/proxy?url=${encodeURIComponent(url)}`, undefined, false);
-        return (await res.json().catch(() => ({}))) as { ok?: boolean; html?: string; base_url?: string; error?: string };
+        const body = (await res.json().catch(() => ({}))) as { html?: unknown; base_url?: unknown; error?: unknown; code?: unknown };
+        if (!res.ok) {
+          const detail = typeof body.error === 'string' ? body.error : undefined;
+          const code = typeof body.code === 'string' ? body.code : undefined;
+          throw new ApiError(res.status, code, detail, apiErrorMessage(res.status, code, detail));
+        }
+        if (typeof body.html !== 'string') throw new Error('资源页响应缺少 html');
+        return { html: body.html, base_url: typeof body.base_url === 'string' ? body.base_url : undefined };
       })();
       resourceHtmlCache.set(url, p);
       const drop = (): void => {
         if (resourceHtmlCache.get(url) === p) resourceHtmlCache.delete(url);
       };
-      p.then((b) => {
-        if (!b?.ok) drop();
-      }, drop);
+      p.catch(drop);
     }
     return p;
   }
@@ -95,7 +105,6 @@ export function useResourceFrames(opts: UseResourceFramesOptions) {
     if (!win) return;
     try {
       const body = await fetchResourceHtml(url);
-      if (!body.ok || typeof body.html !== 'string') throw new Error(body.error ?? '未知错误');
       const html = body.base_url ? `<base href="${escapeAttr(body.base_url)}">\n${body.html}` : body.html;
       const snapshot = await loadResourceSnapshot(url);
       // 酒馆助手式资源页需要当前角色卡元数据推导资源包口令(TavernHelper shim)

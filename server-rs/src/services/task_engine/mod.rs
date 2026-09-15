@@ -46,6 +46,7 @@ use solo::SoloExecutor;
 use std::sync::Arc;
 use team::TeamExecutor;
 use tokio::sync::watch;
+use tracing::Instrument;
 
 /// 任务引擎:持有任务后端与聊天引擎,按 task_mode 派发后台执行。
 /// 轻量句柄(两个 Arc),在 TaskService::run/approve 处即时构造,无状态。
@@ -137,9 +138,17 @@ impl TaskEngine {
     ) {
         let this = Arc::clone(self);
         let task = task.clone();
-        tokio::spawn(async move {
-            this.run_inner(task, executor, goal, cancel, token).await;
-        });
+        // span 不跨 tokio::spawn 自动继承:显式建 span + `.instrument(...)` 闭合。
+        // 任务执行的两条入口(run / 批准续跑)都汇到此处,挂上 taskId 后执行器内
+        // (含 service 层)所有日志自动携带该字段;若调用链源自 HTTP 请求,父链还含
+        // http_request span,requestId 随之穿透。既有手工传参(task.id)保持不变。
+        let run_span = tracing::info_span!("task_run", taskId = task.id.as_str());
+        tokio::spawn(
+            async move {
+                this.run_inner(task, executor, goal, cancel, token).await;
+            }
+            .instrument(run_span),
+        );
     }
 
     async fn run_inner(

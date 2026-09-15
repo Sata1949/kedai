@@ -11,6 +11,10 @@
 // - serde_json::Value 复合值(数组/对象/需保留类型的值):`key = %JsonField(v)` →
 //   record_debug 文本按 JSON 回解析后原样嵌入。`%`/`?` 在本仓日志调用点仅限 JsonField 使用,
 //   普通字符串禁止用 %/?(内容若恰为合法 JSON 会被回解析,改变字段类型)。
+//
+// requestId 传递(批次 2):HTTP 中间件(api/request_id.rs)建 `http_request` span 时写
+// `requestId` 字段,RequestIdLayer 把它存为 span extension,PinoFormat 自动合并进该请求
+// 生命周期内所有事件行——调用点无需(也不应)重复声明 requestId 字段。
 use chrono::Local;
 use serde_json::{json, Map, Value};
 use std::fmt;
@@ -18,11 +22,12 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use tracing::field::{Field, Visit};
+use tracing::span::{Attributes, Id};
 use tracing::{Event, Level, Subscriber};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
-use tracing_subscriber::layer::{Layer, SubscriberExt};
+use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
@@ -104,8 +109,63 @@ impl Visit for PinoFields {
     }
 }
 
+/// 请求关联 ID(span extension 载荷,批次 2 可观测性最小骨架)。
+///
+/// 中间件(`api/request_id.rs`)建 span 时写 `requestId` 字段,`RequestIdLayer` 在
+/// on_new_span 时把它取成结构化值存进 span extension,`PinoFormat` 再读回并合并进
+/// JSON 行——这样请求生命周期内的**所有**日志(含 service 层与 spawn 出去的引擎日志)
+/// 自动携带 requestId,无需逐处传参。
+#[derive(Clone, Debug)]
+pub struct RequestId(pub String);
+
+/// span 字段名:中间件与 RequestIdLayer 的约定键,改名需两侧同步
+const REQUEST_ID_SPAN_FIELD: &str = "requestId";
+
+/// 从 span 属性里取出 requestId 的访问器
+#[derive(Default)]
+struct RequestIdVisitor {
+    value: Option<String>,
+}
+
+impl Visit for RequestIdVisitor {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == REQUEST_ID_SPAN_FIELD {
+            self.value = Some(value.to_string());
+        }
+    }
+
+    /// `%value`(Display)形态的记录路径:兜底读取,避免调用点写法变化后静默失效
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        if field.name() == REQUEST_ID_SPAN_FIELD && self.value.is_none() {
+            self.value = Some(format!("{value:?}"));
+        }
+    }
+}
+
+/// 把 span 的 `requestId` 字段结构化存为 span extension 的薄 Layer。
+///
+/// 为何必须走 extension:`FormattedFields` 给出的是**已格式化的字符串**,不是结构化值;
+/// 要让格式化器拿到结构化 `requestId` 并合并进 JSON 行,只能在 on_new_span 时存 extension。
+pub(crate) struct RequestIdLayer;
+
+impl<S> Layer<S> for RequestIdLayer
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
+        let mut visitor = RequestIdVisitor::default();
+        attrs.record(&mut visitor);
+        let Some(value) = visitor.value else {
+            return;
+        };
+        if let Some(span) = ctx.span(id) {
+            span.extensions_mut().insert(RequestId(value));
+        }
+    }
+}
+
 /// pino 风格 JSON 行格式:{"level","time","msg",...自定义字段}
-/// 不输出 target/span(旧 logger 无此概念;span 在本仓未使用)
+/// 不输出 target/span 前缀(旧 logger 无此概念);span 只经 extension 透出 requestId
 pub struct PinoFormat;
 
 impl<S, N> FormatEvent<S, N> for PinoFormat
@@ -115,7 +175,7 @@ where
 {
     fn format_event(
         &self,
-        _ctx: &FmtContext<'_, S, N>,
+        ctx: &FmtContext<'_, S, N>,
         mut writer: Writer<'_>,
         event: &Event<'_>,
     ) -> fmt::Result {
@@ -126,6 +186,15 @@ where
         obj.insert("level".into(), json!(level_str(event.metadata().level())));
         obj.insert("time".into(), json!(iso_now()));
         obj.insert("msg".into(), json!(collected.msg.unwrap_or_default()));
+        // span 穿透:事件作用域内任一 span 挂了 requestId extension 就合并进本行。
+        // 先合并、后写入事件自身字段——同名时以调用点显式字段为准(既有语义不变)。
+        if let Some(request_id) = ctx.event_scope().and_then(|scope| {
+            scope
+                .from_root()
+                .find_map(|span| span.extensions().get::<RequestId>().cloned())
+        }) {
+            obj.insert("requestId".into(), json!(request_id.0));
+        }
         for (k, v) in collected.fields {
             obj.insert(k, v);
         }
@@ -219,7 +288,10 @@ pub fn init(level: &str, log_dir: &Path) -> Vec<WorkerGuard> {
         .with_filter(EnvFilter::new(directives));
 
     // try_init:Tauri 壳与命令行入口重复初始化时忽略第二次,不 panic
+    // RequestIdLayer 必须注册在这里:span 的 requestId extension 由它写入,
+    // 两个 PinoFormat 层才能在事件行里合并出 requestId。
     let _ = tracing_subscriber::registry()
+        .with(RequestIdLayer)
         .with(stdout_layer)
         .with(file_layer)
         .try_init();
@@ -267,6 +339,7 @@ pub fn agent_step(session_id: &str, step: &str, detail: Option<&str>) {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+    use tracing_subscriber::filter::LevelFilter;
     use tracing_subscriber::fmt::MakeWriter;
 
     /// 捕获写入内容的测试 writer
@@ -384,5 +457,68 @@ mod tests {
         assert_eq!(obj["type"], json!("task_status"));
         assert_eq!(obj["value"], json!("bogus"));
         assert!(obj.get("r#type").is_none());
+    }
+
+    /// 带 RequestIdLayer 的捕获:在 span extension 生效的 subscriber 下运行 f,
+    /// 返回解析后的全部日志行(批次 2 span 穿透测试用)
+    fn capture_lines_with_request_id_layer(f: impl FnOnce()) -> Vec<Value> {
+        let writer = CaptureWriter::default();
+        let buf = writer.0.clone();
+        let subscriber = tracing_subscriber::registry().with(RequestIdLayer).with(
+            tracing_subscriber::fmt::layer()
+                .event_format(PinoFormat)
+                .with_writer(writer)
+                .with_filter(LevelFilter::TRACE),
+        );
+        tracing::subscriber::with_default(subscriber, f);
+        let bytes = buf.lock().unwrap().clone();
+        String::from_utf8(bytes)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("应为合法 JSON 行"))
+            .collect()
+    }
+
+    /// 单行版本(取首行)
+    fn capture_line_with_request_id_layer(f: impl FnOnce()) -> Value {
+        capture_lines_with_request_id_layer(f)
+            .into_iter()
+            .next()
+            .expect("应有一行日志")
+    }
+
+    #[test]
+    fn span扩展的request_id合并进事件行() {
+        // 模拟中间件:span 上写 requestId 字段,内层事件不重复声明 requestId,
+        // 靠 RequestIdLayer 存的 extension 穿透到 JSON 行
+        let obj = capture_line_with_request_id_layer(|| {
+            let span = tracing::info_span!("http_request", requestId = "req-abc-123");
+            span.in_scope(|| {
+                tracing::info!(status = 200u16, duration_ms = 3u64, method = "GET", "http");
+            });
+        });
+        assert_eq!(obj["level"], json!("info"));
+        assert_eq!(obj["requestId"], json!("req-abc-123"));
+        assert_eq!(obj["status"], json!(200));
+        assert_eq!(obj["duration_ms"], json!(3));
+    }
+
+    #[test]
+    fn 事件显式字段优先于span扩展的request_id() {
+        let obj = capture_line_with_request_id_layer(|| {
+            let span = tracing::info_span!("http_request", requestId = "from-span");
+            span.in_scope(|| {
+                tracing::info!(requestId = "from-event", "显式覆盖");
+            });
+        });
+        assert_eq!(obj["requestId"], json!("from-event"));
+    }
+
+    #[test]
+    fn 无request_id的span不凭空产生该字段() {
+        let obj = capture_line_with_request_id_layer(|| {
+            tracing::info!(note = "外出", "无 span");
+        });
+        assert!(obj.get("requestId").is_none());
     }
 }

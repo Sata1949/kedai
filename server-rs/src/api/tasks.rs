@@ -1,5 +1,6 @@
 // 任务模式路由:/api/tasks(列表/新建/详情/执行/批准/停止/删除/事件 SSE 流)
 use crate::api::app_state::AppState;
+use crate::api::json_body::JsonBody;
 use crate::api::{db_err, err_with_code, ErrorCode, WithStatus};
 use crate::models::types::{TaskFollowupMode, TaskRunMode, TaskStatus, TaskStep};
 use axum::extract::{Path, State};
@@ -57,7 +58,7 @@ pub async fn list(State(state): State<Arc<AppState>>) -> Response {
 
 pub async fn create(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<CreateTaskBody>,
+    JsonBody(body): JsonBody<CreateTaskBody>,
 ) -> Response {
     // 任务模式严格解析:未知值 400「未知任务模式」(from_str_lossy 仅用于 DB 读侧容错)
     let mode = match body.task_mode.as_deref() {
@@ -119,7 +120,7 @@ pub async fn get(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> 
 
 /// GET /api/tasks/events:任务事件 SSE 流(WP4 任务模式实时化,取代前端轮询)。
 /// 订阅 TaskService 的 broadcast 通道并逐条转发为 data 帧(与 /api/chat/send 同款
-/// KeepAlive 30s + CACHE_CONTROL no-cache);接收滞后(Lagged)记 debug 后跳过积压
+/// KeepAlive 30s + CACHE_CONTROL no-cache);接收滞后(Lagged)记 warn 后跳过积压
 /// 继续,通道关闭(Closed)结束流。
 pub async fn events(State(state): State<Arc<AppState>>) -> Response {
     let mut rx = state.tasks.subscribe();
@@ -131,7 +132,9 @@ pub async fn events(State(state): State<Arc<AppState>>) -> Response {
                     yield Ok::<Event, Infallible>(Event::default().data(json_str));
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                    tracing::debug!(skipped = skipped, "任务事件 SSE 接收滞后,跳过积压事件");
+                    // 滞后意味着前端已丢失事件(面板会短暂与后端不一致),属真实可观测
+                    // 异常而非调试噪声,故记 warn;前端依 5s 兜底轮询/重连补拉恢复一致。
+                    tracing::warn!(skipped = skipped, "任务事件 SSE 接收滞后,跳过积压事件");
                     continue;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -182,7 +185,7 @@ pub async fn run(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> 
 pub async fn approve(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    Json(body): Json<ApproveTaskBody>,
+    JsonBody(body): JsonBody<ApproveTaskBody>,
 ) -> Response {
     let svc = state.tasks.clone();
     match state.db_call(move || svc.approve(&id, body.plan)).await {
@@ -205,7 +208,7 @@ pub async fn approve(
 pub async fn followup(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    Json(body): Json<FollowupTaskBody>,
+    JsonBody(body): JsonBody<FollowupTaskBody>,
 ) -> Response {
     let content = body.content.trim().to_string();
     if content.is_empty() {
@@ -272,7 +275,7 @@ pub async fn followup(
 pub async fn plan_chat(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    Json(body): Json<PlanChatBody>,
+    JsonBody(body): JsonBody<PlanChatBody>,
 ) -> Response {
     let message = body.message.trim().to_string();
     if message.is_empty() {
