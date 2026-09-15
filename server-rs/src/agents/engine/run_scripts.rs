@@ -14,6 +14,8 @@ pub(super) struct GenerateRequest {
     /// 回执通道:tokio oneshot 无同步等待 API,std mpsc 的 recv 阻塞等在任何
     /// 线程上都安全;调度任务终止(引擎关闭/抢占/运行时退出)时发送端随请求
     /// drop,recv 立即返回 RecvError,handler 转为明确错误而非悬挂。
+    /// 脚本桥(TavernHelper.generate)对外契约是字符串错误(JS 侧无法消费分类),
+    /// 故调度结果在此落回文案;分类信息仅用于引擎/任务侧的错误终态。
     reply: std::sync::mpsc::Sender<Result<(String, TokenUsage), String>>,
 }
 
@@ -33,7 +35,11 @@ async fn generate_dispatch_loop(
             reply,
         } = req;
         let conn = connector.read().await.clone();
-        let chunks = conn.generate(&messages, params, abort).await;
+        // 分类在此落回文案:脚本桥的对外契约是字符串错误(见 GenerateRequest.reply 注释)
+        let chunks = conn
+            .generate(&messages, params, abort)
+            .await
+            .map_err(|e| e.message().to_string());
         drop(conn);
         let result = chunks.map(|chunks| {
             let mut out = String::new();
@@ -90,6 +96,7 @@ fn generate_handler_from_tx(
         })?;
         // 阻塞等回执:std mpsc recv;调度任务终止时发送端 drop → RecvError
         // → 明确错误,不悬挂。
+        // (有意丢弃 RecvError 本身:其原因即「发送端已 drop」,文案已等价表达)
         reply_rx
             .recv()
             .map_err(|_| "generate 调度循环异常终止,未返回生成结果".to_string())?

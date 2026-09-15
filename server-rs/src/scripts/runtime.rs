@@ -158,8 +158,10 @@ pub fn eval_with_bridge(
         let write_fn = Function::new(
             ctx.clone(),
             move |scope: String, json: String| -> Result<(), rquickjs::Error> {
+                // 保留原错误消息:此前丢弃后脚本侧只看到 "Unknown",变量写回失败
+                // (作用域名非法/JSON 非法)完全无从定位
                 b.write_scope(&scope, &json)
-                    .map_err(|_| rquickjs::Error::Unknown)
+                    .map_err(|e| rquickjs::Error::new_from_js_message("Rust", "JavaScript", e))
             },
         );
         // slash 闭包:脚本调 TavernHelper.triggerSlash → Rust 处理
@@ -174,8 +176,9 @@ pub fn eval_with_bridge(
         let generate_fn = Function::new(
             ctx.clone(),
             move |config_json: String| -> Result<String, rquickjs::Error> {
+                // 保留原错误消息(生成失败原因),不再退化为 "Unknown"
                 b.generate_from_config(&config_json)
-                    .map_err(|_| rquickjs::Error::Unknown)
+                    .map_err(|e| rquickjs::Error::new_from_js_message("Rust", "JavaScript", e))
             },
         );
         // 导入闭包(阶段六 6g-2):脚本调 TavernHelper.importRaw* → Rust 各 service。
@@ -187,8 +190,9 @@ pub fn eval_with_bridge(
                   content: String,
                   session_id: String|
                   -> Result<String, rquickjs::Error> {
+                // 保留原错误消息(导入失败原因),不再退化为 "Unknown"
                 b.import_raw(&kind, &filename, &content, &session_id)
-                    .map_err(|_| rquickjs::Error::Unknown)
+                    .map_err(|e| rquickjs::Error::new_from_js_message("Rust", "JavaScript", e))
             },
         );
         let globals = ctx.globals();

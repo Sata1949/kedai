@@ -31,7 +31,7 @@ impl AgentEngine {
             Vec<crate::contracts::ChangelogEntry>,
             Vec<crate::contracts::PatchOp>,
         ),
-        String,
+        EngineError,
     > {
         let mut content = String::new();
         // custom 模式:每步生成后立即应用的变量树快照(收尾据此落库 extra.mvu,

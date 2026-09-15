@@ -432,6 +432,8 @@ impl ToolPermissionManager {
         }
         // 上方 get 已确认键存在且持锁期间无并发移除,remove 必然为 Some
         let item = pending.remove(&key).expect("键已确认存在,移除必然成功");
+        // 有意丢弃 SendError:接收端已 drop 即原因本身(用户离开/会话结束),
+        // 文案已等价表达,且此处决策值无需回传给调用方
         item.sender
             .send(decision)
             .map_err(|_| "待授权调用已断开".to_string())

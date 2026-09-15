@@ -63,6 +63,7 @@ fn parse_result(raw: &str, tier: ShellTier) -> Result<ExecResult, String> {
     let code = parts
         .next()
         .ok_or_else(|| format!("执行器返回格式异常(缺 exitCode): {raw}"))?;
+    // 有意丢弃 ParseIntError:唯一信息是「不是整数」,原始 code 已在消息中
     let exit_code: i32 = code
         .trim()
         .parse()

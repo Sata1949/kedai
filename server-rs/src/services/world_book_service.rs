@@ -6,12 +6,30 @@ use crate::parsing::world_book::{collect_entries, parse_world_book_file, WorldEn
 use crate::parsing::world_book_convert::{convert_world_book, normalize_entry_value};
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 pub struct WorldBookService {
     db: Arc<Db>,
+    /// character_id → 解析后的注入条目(2026-09-14 性能缓存)。
+    ///
+    /// 为什么需要:`collect_entries_for_character` 在每轮生成的装配路径上被调用
+    /// (context.rs 每请求、契约缓存未命中、每次 read 工具、每个子 agent),
+    /// 而它每次都「查库 → 逐本 serde 解析 1MB JSON → 归一化条目」。
+    /// 实测(真实角色卡)单次约 3.8ms,纯属重复劳动。
+    ///
+    /// 失效设计(fail-safe 的关键):**所有 world_books 写路径都在本结构体内**
+    /// (upload/update/delete/add_entry/save_data_raw),写时整体清空即可——
+    /// 无跨模块挂钩,也就没有「漏挂一个失效点」导致读到旧世界书的风险。
+    /// 注意 `save_character_book` 写的是 characters.data_raw,而本函数只读
+    /// `world_books` 表,故与它无关,不需要失效。
+    entries_cache: Mutex<HashMap<String, Arc<Vec<WorldEntry>>>>,
 }
+
+/// 条目缓存容量上限:条目缓存按 character_id 计价,正常角色数量远小于此;
+/// 超限整体清空(纯派生数据,重建代价仅一次解析)。
+const ENTRIES_CACHE_CAP: usize = 256;
 
 /// 列:0 id, 1 name, 2 character_id, 3 enabled, 4 source, 5 entry_count, 6 data_raw, 7 created_at, 8 character_name
 fn row_to_record(row: &rusqlite::Row, with_data_raw: bool) -> rusqlite::Result<WorldBookRecord> {
@@ -35,7 +53,19 @@ const LIST_SQL: &str = "SELECT w.id, w.name, w.character_id, w.enabled, w.source
 
 impl WorldBookService {
     pub fn new(db: Arc<Db>) -> Self {
-        WorldBookService { db }
+        WorldBookService {
+            db,
+            entries_cache: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// 清空条目缓存:**每个 world_books 写路径都必须调用**。
+    /// 漏调会让生成读到旧世界书(fail-safe 由本结构体自包含性保证:写路径都在这里)。
+    fn invalidate_entries_cache(&self) {
+        self.entries_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 
     /// 列表(不含 data_raw),按 created_at DESC。
@@ -107,6 +137,7 @@ impl WorldBookService {
                 created_at,
             }
         };
+        self.invalidate_entries_cache();
         Ok(record)
     }
 
@@ -155,6 +186,8 @@ impl WorldBookService {
                 return None;
             }
         }
+        // 写成功才失效(enabled/绑定变更会影响 collect_entries_for_character 的结果)
+        self.invalidate_entries_cache();
         Some(WorldBookRecord {
             id: id.to_string(),
             name: new_name,
@@ -170,11 +203,16 @@ impl WorldBookService {
     }
 
     pub fn delete(&self, id: &str) -> bool {
-        self.db
+        let removed = self
+            .db
             .write()
             .execute("DELETE FROM world_books WHERE id = ?1", params![id])
             .map(|n| n > 0)
-            .unwrap_or(false)
+            .unwrap_or(false);
+        if removed {
+            self.invalidate_entries_cache();
+        }
+        removed
     }
 
     /// 指定角色的有效独立世界书:绑定到该角色 或 全局,且 enabled。
@@ -198,15 +236,34 @@ impl WorldBookService {
         rows.filter_map(|r| r.ok()).collect()
     }
 
-    /// 注入条目收集:合并该角色的独立世界书(已过滤 enabled),按条目过滤规则在 engine 侧执行
+    /// 注入条目收集:合并该角色的独立世界书(已过滤 enabled),按条目过滤规则在 engine 侧执行。
+    /// 结果按 character_id 缓存(2026-09-14);返回值仍为 owned Vec 以保持既有签名,
+    /// 但克隆远比重查库 + 重解析 JSON 便宜(前者是 memcpy,后者是 serde 解析 1MB)。
     pub fn collect_entries_for_character(&self, character_id: &str) -> Vec<WorldEntry> {
+        if let Some(hit) = self
+            .entries_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(character_id)
+            .cloned()
+        {
+            return hit.as_ref().clone();
+        }
         let mut out: Vec<WorldEntry> = Vec::new();
         for book in self.enabled_for_character(character_id) {
             if let Some(raw) = &book.data_raw {
                 out.extend(collect_entries(raw));
             }
         }
-        out
+        let shared = Arc::new(out);
+        {
+            let mut cache = self.entries_cache.lock().unwrap_or_else(|e| e.into_inner());
+            if cache.len() >= ENTRIES_CACHE_CAP {
+                cache.clear();
+            }
+            cache.insert(character_id.to_string(), shared.clone());
+        }
+        shared.as_ref().clone()
     }
 
     /// 自动分配属性机制自检:验证「角色为 None(自动)→ 常驻注入 system、激发注入 user」
@@ -476,6 +533,10 @@ impl WorldBookService {
             params![data_raw_str, entry_count, id],
         )
         .ok()?;
+        drop(conn);
+        // 条目内容变更必须失效:这是 collect_entries_for_character 的直接输入源。
+        // add_entry 亦经本方法落库,故在此一处失效即可覆盖两者。
+        self.invalidate_entries_cache();
         Some(())
     }
 
@@ -531,5 +592,131 @@ impl WorldBookService {
         })
         .ok()?;
         Some(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::db::Db;
+
+    fn service() -> (WorldBookService, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("kedai-wb-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Arc::new(Db::open(&dir.join("kedai.db"), &dir).unwrap());
+        (WorldBookService::new(db), dir)
+    }
+
+    fn upload_book(svc: &WorldBookService, name: &str, key: &str, cid: Option<&str>) -> String {
+        let raw = json!({
+            "name": name,
+            "entries": [
+                { "uid": 0, "comment": "地点", "keys": [key], "content": "内容", "constant": false }
+            ]
+        });
+        let bytes = serde_json::to_vec(&raw).unwrap();
+        svc.upload(&bytes, "book.json", cid).unwrap().id
+    }
+
+    /// P3-2(2026-09-14):条目缓存的**失效正确性**。
+    /// 这是本优化唯一的风险点——漏失效会让生成读到旧世界书。
+    /// 断言:① 重复读取结果一致(缓存生效);② 上传新书后立即可见;
+    /// ③ 改 enabled 后立即可见;④ 改条目内容后立即可见;⑤ 删除后立即可见。
+    #[test]
+    fn entries_cache_invalidates_on_every_write_path() {
+        let (svc, dir) = service();
+        // 全局世界书(character_id = None → 对所有角色生效,便于用同一角色观察)
+        let first_id = upload_book(&svc, "书一", "关键词一", None);
+
+        let before = svc.collect_entries_for_character("c1");
+        assert_eq!(before.len(), 1, "初始应有一本有效世界书");
+        assert_eq!(
+            svc.collect_entries_for_character("c1").len(),
+            1,
+            "重复读取一致"
+        );
+
+        // ② 上传第二本 → 必须立即可见
+        let _second_id = upload_book(&svc, "书二", "关键词二", None);
+        let after_upload = svc.collect_entries_for_character("c1");
+        assert_eq!(
+            after_upload.len(),
+            2,
+            "上传新世界书后缓存必须失效,条目应变为 2"
+        );
+        assert!(
+            after_upload
+                .iter()
+                .any(|e| e.keys.iter().any(|k| k == "关键词二")),
+            "新书的条目必须出现在结果里"
+        );
+
+        // ③ 停用第一本 → 立即只剩一条
+        svc.update(&first_id, Some(false), None, None).unwrap();
+        assert_eq!(
+            svc.collect_entries_for_character("c1").len(),
+            1,
+            "改 enabled 后缓存必须失效"
+        );
+        // 恢复启用
+        svc.update(&first_id, Some(true), None, None).unwrap();
+        assert_eq!(svc.collect_entries_for_character("c1").len(), 2);
+
+        // ④ 改条目内容(经 save_data_raw,add_entry 亦走此路径)
+        let raw = json!({
+            "name": "书一",
+            "entries": [
+                { "uid": 0, "comment": "地点", "keys": ["改过的关键词"], "content": "新内容", "constant": false }
+            ]
+        });
+        svc.save_data_raw(&first_id, &raw).unwrap();
+        let after_edit = svc.collect_entries_for_character("c1");
+        assert!(
+            after_edit
+                .iter()
+                .any(|e| e.keys.iter().any(|k| k == "改过的关键词")),
+            "改条目后缓存必须失效,应读到新关键词"
+        );
+        assert!(
+            !after_edit
+                .iter()
+                .any(|e| e.keys.iter().any(|k| k == "关键词一")),
+            "旧关键词不应残留"
+        );
+
+        // ⑤ 删除第一本 → 立即只剩一条
+        assert!(svc.delete(&first_id), "删除应成功");
+        assert_eq!(
+            svc.collect_entries_for_character("c1").len(),
+            1,
+            "删除后缓存必须失效"
+        );
+
+        drop(svc);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// 缓存按 character_id 隔离:不同角色互不污染
+    #[test]
+    fn entries_cache_is_per_character() {
+        let (svc, dir) = service();
+        {
+            let conn = svc.db.write();
+            conn.execute(
+                "INSERT INTO characters (id, name, chara_name, description, file_path, data_raw, created_at)
+                 VALUES ('c1','n','n','','','{}',''), ('c2','n','n','','','{}','')",
+                [],
+            )
+            .unwrap();
+        }
+        upload_book(&svc, "给 c1", "只属于c1", Some("c1"));
+
+        let c1 = svc.collect_entries_for_character("c1");
+        let c2 = svc.collect_entries_for_character("c2");
+        assert_eq!(c1.len(), 1, "c1 应有自己的世界书");
+        assert_eq!(c2.len(), 0, "c2 不应看到 c1 的世界书");
+
+        drop(svc);
+        std::fs::remove_dir_all(dir).ok();
     }
 }

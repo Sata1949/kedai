@@ -513,18 +513,21 @@ impl TaskService {
             }
         };
         if let Err(e) = res {
+            // 任务侧的调用追踪/步骤 result 是字符串契约(task_llm_calls 无分类列),
+            // 故分类在此落回文案;分类只服务聊天 SSE 的错误终态。
+            let msg = e.message().to_string();
             self.record_llm_call(
                 task_id,
                 phase,
                 step_index,
                 &model,
                 &messages,
-                &e,
+                &msg,
                 None,
                 started.elapsed(),
                 "error",
             );
-            return Err(e);
+            return Err(msg);
         }
         let out = TaskGenOutput {
             text: content,
@@ -992,10 +995,27 @@ fn finalize_run(
     error: Option<&str>,
 ) {
     if deps.is_current_run(task_id, token) {
+        // 终态落库必须成功:写失败时任务会停在 Running(前端永远转圈),
+        // 且无任何日志可查——故此处检查返回值并显式告警,不再静默吞掉。
         if ended_by_cancel {
-            let _ = deps.set_status(task_id, TaskStatus::Ended);
+            if !deps.set_status(task_id, TaskStatus::Ended) {
+                tracing::error!(
+                    task_id = task_id,
+                    token = token,
+                    status = "ended",
+                    "任务终态落库失败(取消路径):任务可能停留在 Running,请检查数据库写入"
+                );
+            }
         } else if let Some(e) = error {
-            let _ = deps.set_error(task_id, e);
+            if !deps.set_error(task_id, e) {
+                tracing::error!(
+                    task_id = task_id,
+                    token = token,
+                    error = e,
+                    status = "error",
+                    "任务终态落库失败(错误路径):任务可能停留在 Running,请检查数据库写入"
+                );
+            }
         }
     }
     deps.remove_cancel_if(task_id, token);

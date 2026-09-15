@@ -114,7 +114,7 @@ pub(crate) async fn execute_generation(
     tx: &mpsc::Sender<SseEvent>,
     abort: &watch::Receiver<bool>,
     flag: &AbortFlag,
-) -> Result<ExecutorResult, String> {
+) -> Result<ExecutorResult, EngineError> {
     // LLM 请求快照(第四点·主题 A):开关开启时,把真正下发的完整消息数组落盘,
     // 供回放/调试「模型到底看到了什么」。失败仅告警,不阻塞生成。
     // seq 总是分配:缓存观测(usage 落库)不依赖快照开关。
@@ -185,7 +185,8 @@ pub(crate) async fn execute_generation(
                 self_heals: Vec::new(),
             });
         }
-        return Err(e);
+        // 连接器失败:分类原样带出(不丢分类信息)
+        return Err(EngineError::Llm(e));
     }
 
     // 缓存观测落库(缓存感知管线):每轮请求的命中/未命中 token 记入 llm_requests,
@@ -347,9 +348,45 @@ fn truncation_heal_cause(res: &ExecutorResult) -> Option<String> {
         return Some(format!("工具参数 JSON 截断(工具 \"{}\")", bad.name));
     }
     if res.content.trim().is_empty() && res.tool_calls.is_empty() {
+        // 2026-09-14 细化:区分「推理烧光预算」与「输出预算本身不足」。
+        // 思考模型(DeepSeek 系等)会把 max_tokens 全花在 reasoning_content 上,
+        // 正文为空但推理非空——此时成因是推理挤占,单纯翻倍往往仍需再来一轮
+        // (实测 agent 模式两次自愈吃掉 37 秒,占该次请求 54%)。
+        // 识别出来才能给出可诊断的提示与更合理的提升幅度。
+        if !res.reasoning.trim().is_empty() {
+            return Some(format!(
+                "推理耗尽输出预算(推理 {} 字符,正文为空)",
+                res.reasoning.chars().count()
+            ));
+        }
         return Some("返回空内容(已达 token 上限)".into());
     }
     None
+}
+
+/// 自愈重发的 max_tokens 计算(2026-09-14 推理感知):
+/// - 普通截断(输出预算不足):沿用翻倍 + 封顶(既有语义不变);
+/// - 推理耗尽预算:按「已消耗推理 + 原预算」给足,使正文有与原预算等宽的空间。
+///   实测中该形态下翻倍往往一次不够、要再自愈一轮(每次一个完整 LLM 往返),
+///   一次给足可省掉后续轮次。仍受 CAP 封顶,不改变既有上限纪律。
+///
+/// 返回 None = 已无法再提升(重发无意义,走原错误路径)。
+fn heal_budget_for(res: &ExecutorResult, current: u32) -> Option<u32> {
+    let doubled = doubled_heal_budget(current)?;
+    // 仅当本轮确认是「推理挤占」时做加强提升;其余形态维持翻倍语义。
+    let reasoning_exhausted = res.finish_reason.as_deref() == Some("length")
+        && res.content.trim().is_empty()
+        && res.tool_calls.is_empty()
+        && !res.reasoning.trim().is_empty();
+    if !reasoning_exhausted {
+        return Some(doubled);
+    }
+    // 推理消耗以 completion_tokens 近似(思考模型该值含推理);
+    // 目标 = 已消耗 + 原预算(让正文有与原预算等宽的空间)
+    let spent = res.usage.completion_tokens.max(0) as u32;
+    let target = spent.saturating_add(current).max(doubled);
+    let capped = target.min(TRUNCATION_HEAL_MAX_TOKENS_CAP);
+    (capped > current).then_some(capped)
 }
 
 /// Err 形态的截断判定(问题①):真实连接器(openai_compatible)在 finish_reason=length
@@ -434,10 +471,17 @@ pub(crate) async fn run_tool_loop(
     run_id: &str,
     // 授权闸门(替代 step_whitelist):见 ToolGate 文档
     gate: ToolGate<'_>,
-) -> Result<ExecutorResult, String> {
+) -> Result<ExecutorResult, EngineError> {
     // 轮次上限:缺省 32(settings 可调);至少 1 轮,防止配置异常导致死循环
     let max_rounds = params.max_tool_rounds.unwrap_or(32).max(1) as usize;
     let mut round = 0usize;
+    // 重复调用熔断(P0-2,2026-09-14):普通 agent 工具循环此前**没有任何重复调用检测**,
+    // 唯一终止条件是 max_rounds。实测 plan 模式任务在单步反复调用同一工具(同参数)时,
+    // 7 分钟烧 150 万 prompt token 仍未收敛,必须人工 stop。
+    // 契约多步路径已有同类熔断(contracts/multi_step.rs),但只覆盖 PatchOp;
+    // 此处用 utils::loop_guard 的同口径算法补上工具循环的守卫。
+    // 口径 N=8 / K=3:窗口内同一「工具名+参数」指纹出现 ≥3 次即中止该步。
+    let mut loop_guard = crate::utils::loop_guard::LoopGuard::with_defaults();
     // 截断自愈留痕(问题①):各轮触发的自愈记录,随最终 ExecutorResult 透出;
     // Err 传播(?)时丢弃——失败路径由调用方落 error 行,截断细节含在错误文案内
     let mut self_heals: Vec<SelfHealRecord> = Vec::new();
@@ -463,21 +507,34 @@ pub(crate) async fn run_tool_loop(
             };
             let before = summarized_count(llm_messages);
             let model = engine.model();
-            {
+            let outcome = {
                 let mut ts = engine
                     .token_service
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
-                trim_tool_history(llm_messages, keep_rounds, budget_tokens, &mut ts, &model);
-            }
+                trim_tool_history(llm_messages, keep_rounds, budget_tokens, &mut ts, &model)
+            };
             let after = summarized_count(llm_messages);
-            if after > before {
+            if after > before || outcome.reclaimed_argument_rounds > 0 {
                 tracing::info!(
                     session_id = session_id.to_string(),
                     newly_summarized = after - before,
+                    reclaimed_argument_rounds = outcome.reclaimed_argument_rounds,
                     keep_rounds = keep_rounds,
                     budget_tokens = budget_tokens,
-                    "工具循环历史回灌截断(旧轮 tool 结果已摘要化)"
+                    total_tokens = outcome.total_tokens,
+                    "工具循环历史回灌截断(旧轮 tool 结果/参数已摘要化)"
+                );
+            }
+            // 未能收敛必须可诊断,不能静默(2026-09-14):体量超过预算闸门可压缩范围
+            // 时继续跑下去会持续放大 prompt,最终表现为任务长时间不收敛、token 失控。
+            if !outcome.converged {
+                tracing::warn!(
+                    session_id = session_id.to_string(),
+                    round = round,
+                    budget_tokens = budget_tokens,
+                    total_tokens = outcome.total_tokens,
+                    "工具历史压缩后仍超预算:单轮体量过大,上下文可能持续膨胀"
                 );
             }
         }
@@ -501,13 +558,10 @@ pub(crate) async fn run_tool_loop(
                 flag,
             )
             .await;
-            // 已自愈过(重发仍失败)或预算已封顶:透出原结果,不再重发
+            // 已自愈过(重发仍失败):透出原结果,不再重发
             if healed.is_some() {
                 break one;
             }
-            let Some(next_budget) = doubled_heal_budget(attempt_params.max_tokens) else {
-                break one;
-            };
             match one {
                 Ok(res) => {
                     let Some(cause) = truncation_heal_cause(&res) else {
@@ -518,6 +572,11 @@ pub(crate) async fn run_tool_loop(
                     if res.interrupted {
                         break Ok(res);
                     }
+                    // 预算提升:推理挤占形态一次给足(见 heal_budget_for),其余走翻倍;
+                    // None = 已封顶,重发无意义 → 透出原结果走既有错误路径
+                    let Some(next_budget) = heal_budget_for(&res, attempt_params.max_tokens) else {
+                        break Ok(res);
+                    };
                     tracing::info!(
                         session_id = session_id.to_string(),
                         cause = cause.clone(),
@@ -551,9 +610,14 @@ pub(crate) async fn run_tool_loop(
                     continue;
                 }
                 Err(e) => {
-                    if !is_truncated_tool_call_error(&e) {
+                    if !is_truncated_tool_call_error(e.message()) {
                         break Err(e);
                     }
+                    // Err 形态拿不到本轮结果(连接器流尾校验失败),
+                    // 只能沿用「翻倍 + 封顶」;None = 已封顶 → 透出原错误
+                    let Some(next_budget) = doubled_heal_budget(attempt_params.max_tokens) else {
+                        break Err(e);
+                    };
                     tracing::info!(
                         session_id = session_id.to_string(),
                         max_tokens = attempt_params.max_tokens,
@@ -594,9 +658,20 @@ pub(crate) async fn run_tool_loop(
             Err(e) => {
                 if let Some(h) = healed {
                     self_heals.push(h);
-                    return Err(format!(
-                        "工具参数 JSON 截断(已达 token 上限,提高预算重发仍失败): {e}"
-                    ));
+                    // 包装截断定性文案:分类保持原错误分类(截断不是新的失败类型)
+                    return Err(match e {
+                        EngineError::Llm(e) => {
+                            EngineError::Llm(crate::models::llm_error::LlmError::new(
+                                e.kind(),
+                                format!(
+                                    "工具参数 JSON 截断(已达 token 上限,提高预算重发仍失败): {e}"
+                                ),
+                            ))
+                        }
+                        other => EngineError::Internal(format!(
+                            "工具参数 JSON 截断(已达 token 上限,提高预算重发仍失败): {other}"
+                        )),
+                    });
                 }
                 return Err(e);
             }
@@ -630,6 +705,21 @@ pub(crate) async fn run_tool_loop(
         round += 1;
         // 本轮是否已达上限:是则执行完本轮工具后停止,不再发起新的模型请求
         let last_round = round >= max_rounds;
+        // ===== 重复调用熔断(P0-2)=====
+        // 对本轮每个工具调用做「工具名 + 参数」指纹登记;窗口内同一指纹累计达阈值
+        // 即判定模型在原地打转,执行本轮工具后停止,理由显式推给用户(不静默截断)。
+        let repeated: Option<(String, usize)> = {
+            let mut hit: Option<(String, usize)> = None;
+            for call in &result.tool_calls {
+                let fp = crate::utils::loop_guard::fnv1a_hash(&[&call.name, &call.arguments]);
+                if loop_guard.record(fp) {
+                    hit = Some((call.name.clone(), loop_guard.count_of(fp)));
+                    break;
+                }
+            }
+            hit
+        };
+        let loop_broken = repeated.is_some();
         // 回填 OpenAI 标准结构:先追加一条 assistant 消息,携带本轮完整 tool_calls[] 与
         // reasoning_content,再逐条追加 tool 结果消息。旧实现为每个 call 单独追加一条
         // assistant(tool_calls=[call]),违反 OpenAI 多工具调用格式,并行工具调用时可能被
@@ -834,6 +924,39 @@ pub(crate) async fn run_tool_loop(
             )
             .await?;
             return Ok(ExecutorResult {
+                content: result.content,
+                usage: TokenUsage::default(),
+                interrupted: false,
+                tool_calls: Vec::new(),
+                reasoning: String::new(),
+                finish_reason: result.finish_reason,
+                self_heals: std::mem::take(&mut self_heals),
+            });
+        }
+        // 重复调用熔断:本轮工具已执行完(与轮次上限同款收尾),显式告知中止理由。
+        // 置于 last_round 之后:轮次上限是更明确的终止条件,优先按其文案收尾。
+        if loop_broken {
+            let (tool, times) = repeated.expect("loop_broken 蕴含 repeated 为 Some");
+            let detail = format!(
+                "检测到重复调用:工具 \"{tool}\" 以相同参数在最近 {} 轮内出现 {times} 次,已在第 {round} 轮中止以避免空转。请调整策略后重试。",
+                crate::utils::loop_guard::DEFAULT_WINDOW
+            );
+            tracing::warn!(
+                session_id = session_id.to_string(),
+                tool = tool.as_str(),
+                repeat_count = times,
+                round = round,
+                "工具循环重复调用熔断"
+            );
+            send_event(
+                step_evt("重复调用熔断", Some(detail), None, None),
+                tx,
+                abort,
+                flag,
+            )
+            .await?;
+            return Ok(ExecutorResult {
+                // 尽量保留已产出的正文(可能为思考内容),不丢模型已有成果
                 content: result.content,
                 usage: TokenUsage::default(),
                 interrupted: false,
@@ -1104,7 +1227,11 @@ impl AgentEngine {
             return Err("生成已中断".into());
         }
         let connector = self.connector.read().await.clone();
-        let chunks = connector.generate(messages, params, abort).await?;
+        // 该公开接口(脚本 TavernHelper.generate)以 String 报错,分类在此落回文案
+        let chunks = connector
+            .generate(messages, params, abort)
+            .await
+            .map_err(|e| e.message().to_string())?;
         drop(connector);
         let mut out = String::new();
         let mut usage = TokenUsage::default();
@@ -1275,6 +1402,44 @@ mod tests {
         .is_none());
         // 无 finish_reason:不触发
         assert!(truncation_heal_cause(&mk_result("", None, vec![])).is_none());
+    }
+
+    /// P2-1(2026-09-14):思考模型「推理耗尽预算」的成因必须被识别出来,
+    /// 与「输出预算本身不足」区分——前者需要一次给足预算,后者翻倍即可。
+    #[test]
+    fn heal_cause_identifies_reasoning_exhausted_budget() {
+        let mut r = mk_result("", Some("length"), vec![]);
+        r.reasoning = "推理内容很长".repeat(100);
+        let cause = truncation_heal_cause(&r).unwrap();
+        assert!(
+            cause.contains("推理耗尽输出预算"),
+            "应识别为推理挤占: {cause}"
+        );
+        assert!(cause.contains("字符"), "应带上推理长度便于诊断: {cause}");
+    }
+
+    /// 推理挤占时预算一次给足(而非仅翻倍),减少一次完整 LLM 往返;
+    /// 且严格受 CAP 封顶、不超上限。
+    #[test]
+    fn heal_budget_gives_enough_for_reasoning_exhaustion() {
+        let mut r = mk_result("", Some("length"), vec![]);
+        r.reasoning = "思考".repeat(200);
+        // 已消耗 6000(推理占满),原预算 4000 → 翻倍仅 8000;
+        // 推理感知应给 6000+4000=10000,但受 CAP 8192 封顶
+        r.usage.completion_tokens = 6000;
+        let next = heal_budget_for(&r, 4000).unwrap();
+        assert_eq!(next, 8192, "应受 CAP 封顶且大于翻倍值");
+        assert!(next > 8000, "应比单纯翻倍给得更多: {next}");
+    }
+
+    /// 非推理形态维持既有「翻倍」语义(不改变原有行为)
+    #[test]
+    fn heal_budget_keeps_doubling_for_plain_truncation() {
+        let r = mk_result("", Some("length"), vec![]);
+        assert_eq!(heal_budget_for(&r, 1000), Some(2000), "无推理时仅翻倍");
+        // 已封顶 → None(重发无意义)
+        assert_eq!(heal_budget_for(&r, 8192), None);
+        assert_eq!(heal_budget_for(&r, 5000), Some(8192), "翻倍后受 CAP 收敛");
     }
 
     /// Err 形态判定:仅匹配连接器半截 tool_call flush 的专属文案

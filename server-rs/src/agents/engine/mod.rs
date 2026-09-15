@@ -67,11 +67,9 @@ use self::messages::{
 };
 use self::mvu::{apply_mvu_patches, generate_mvu_status, strip_status_bar_tag};
 use self::reflector_integration::{build_reflect_advice, reflect_with_tools};
-pub use self::types::{AbortFlag, AgentRunRequest};
+pub use self::types::{AbortFlag, AgentRunRequest, EngineError};
 use self::types::{RunContext, RunHandle};
-use self::util::{
-    check_aborted, classify_engine_error, rebuild_content_keeping_blocks, send_event, step_evt,
-};
+use self::util::{check_aborted, rebuild_content_keeping_blocks, send_event, step_evt};
 
 /// AgentEngine 构造依赖分组一:基础运行依赖(连接器 / 运行设置 / 数据库 / 初始模型)。
 /// 纯字段搬运,字段类型与语义与原构造函数参数逐一对应。
@@ -820,7 +818,7 @@ impl AgentEngine {
                     status_bar,
                 ));
             }
-            Ok::<(), String>(())
+            Ok::<(), EngineError>(())
         };
 
         let result = run_body.await;
@@ -848,19 +846,24 @@ impl AgentEngine {
                         None,
                     );
                     let _ = tx
-                        .send(step_evt("执行出错", Some(e.clone()), None, None))
+                        .send(step_evt(
+                            "执行出错",
+                            Some(e.message().to_string()),
+                            None,
+                            None,
+                        ))
                         .await;
                     // 错误终态:发 Error 事件,不再用「空内容 finish」伪装正常结束。
-                    // 前端据此展示错误并给出可重试提示。
-                    let (code, retryable) = classify_engine_error(&e);
+                    // 错误码/可重试性直接取自错误自带的分类(连接器边界标注,见
+                    // models/llm_error.rs);不再对文案做子串猜测。
                     let _ = tx
                         .send(SseEvent::Error {
-                            code,
-                            message: e.clone(),
-                            retryable,
+                            code: e.error_code().to_string(),
+                            message: e.message().to_string(),
+                            retryable: e.retryable(),
                         })
                         .await;
-                    logging::agent_step(&session_id, "error", Some(&e));
+                    logging::agent_step(&session_id, "error", Some(e.message()));
                 }
             }
         }

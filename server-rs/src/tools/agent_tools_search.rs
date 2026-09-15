@@ -82,7 +82,9 @@ pub(crate) struct ResolvedHttpTarget {
 /// 解析并校验公开 HTTP(S) 目标:拒绝 localhost/私网/元数据地址(SSRF 防护)。
 /// 供搜索端点与角色卡资源代理共用。
 pub(crate) async fn resolve_public_http_url(raw: &str) -> Result<ResolvedHttpTarget, String> {
-    let url = reqwest::Url::parse(raw).map_err(|_| "搜索端点 URL 无效".to_string())?;
+    // 补回 url crate 原错(如 invalid port / relative URL 等具体成因);其 Display
+    // 不回显完整 URL,无泄露风险
+    let url = reqwest::Url::parse(raw).map_err(|e| format!("搜索端点 URL 无效({e})"))?;
     if !matches!(url.scheme(), "http" | "https") {
         return Err("搜索端点仅允许 http/https".into());
     }

@@ -412,7 +412,8 @@ async fn run_subtask_with_tools(
                 (text, Some(out), status)
             }
             Ok(_) => ("(已中断)".to_string(), None, "error"),
-            Err(e) => (e.clone(), None, "error"),
+            // 子任务追踪是字符串契约,分类在此落回文案
+            Err(e) => (e.message().to_string(), None, "error"),
         };
         svc.record_llm_call(
             tid,
@@ -471,7 +472,7 @@ async fn run_subtask_with_tools(
         }
         Err(e) => {
             if !deps.subtasks.is_ended(task_id) {
-                let _ = deps.subtasks.set_error(task_id, &e);
+                let _ = deps.subtasks.set_error(task_id, e.message());
             }
         }
     }
@@ -551,7 +552,7 @@ async fn run_subtask_plain(
         }
         Err(e) => {
             if !deps.subtasks.is_ended(task_id) {
-                let _ = deps.subtasks.set_error(task_id, &e);
+                let _ = deps.subtasks.set_error(task_id, e.message());
             }
         }
     }

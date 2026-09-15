@@ -207,13 +207,16 @@ pub(crate) async fn run_agent_loop(
             Err("任务已停止".into())
         }
         Err(e) => {
+            // 对外契约是字符串错误(任务追踪列/步骤 result),分类在此落回文案;
+            // 分类只服务聊天路径的 SSE 错误终态。
+            let msg = e.message().to_string();
             svc.record_llm_call(
                 &call.task_id,
                 call.phase,
                 call.step_index,
                 &model,
                 &messages,
-                &e,
+                &msg,
                 None,
                 elapsed,
                 "error",
@@ -221,7 +224,7 @@ pub(crate) async fn run_agent_loop(
             if let Err(e) = state_machine.transition(AgentState::Error, &call.session_id) {
                 tracing::warn!(error = %e, session = %call.session_id, "状态迁移被拒");
             }
-            Err(e)
+            Err(msg)
         }
     }
 }

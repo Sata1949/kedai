@@ -367,6 +367,7 @@ fn eval_call(name: &str, args_str: &str, env: &HashMap<String, Value>) -> Result
             let v = args.first().ok_or("Number() 缺参数")?;
             match v {
                 Value::Number(n) => Ok(Value::from(n.as_f64().unwrap_or(0.0))),
+                // 有意丢弃 ParseFloatError:唯一信息是「不是数字」,原值 s 已在消息中
                 Value::String(s) => s
                     .parse::<f64>()
                     .map(Value::from)

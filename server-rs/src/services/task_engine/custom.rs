@@ -213,18 +213,21 @@ impl CustomExecutor {
                 Err("任务已停止".into())
             }
             Err(e) => {
+                // 步骤执行器对外契约是字符串错误(步骤 result/追踪列),分类在此落回文案;
+                // 分类只服务聊天路径的 SSE 错误终态。
+                let msg = e.message().to_string();
                 self.svc.record_llm_call(
                     &ctx.task_id,
                     "step",
                     Some(step_index),
                     &model,
                     messages,
-                    &e,
+                    &msg,
                     None,
                     elapsed,
                     "error",
                 );
-                Err(e)
+                Err(msg)
             }
         }
     }
