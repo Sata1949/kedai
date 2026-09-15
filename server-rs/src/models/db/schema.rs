@@ -1,5 +1,12 @@
 // 建表 SQL:与 Node 版(node:sqlite)建表完全一致,兼容现有 kedai.db(自 db.rs 迁入)
 
+/// 数据库 schema 版本(落盘于 SQLite `PRAGMA user_version`,即数据库头的 4 字节整数,
+/// 不需要额外表;方案见 docs/数据库版本与降级行为.md §四)。
+/// 0 = 未标记的旧库(与 SQLite 默认值一致,天然区分「从未写过版本」)。
+/// 写入时机在 `Db::open` 升级链**全部成功之后**;失败不抬版本,下次启动重跑补迁。
+/// 语义:库内值 > 本值 = 库由更新版本的 Kedai 写入 → `Db::open` 拒绝启动(宁可明确报错)。
+pub const SCHEMA_VERSION: i32 = 1;
+
 /// 全量建表语句(IF NOT EXISTS 幂等;含索引、种子行与表级注释)
 pub(super) const CREATE_TABLES: &str = r#"
 CREATE TABLE IF NOT EXISTS characters (

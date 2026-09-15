@@ -5,7 +5,7 @@
 mod backfill;
 mod schema;
 
-pub use schema::create_tables_sql;
+pub use schema::{create_tables_sql, SCHEMA_VERSION};
 
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{Connection, OpenFlags};
@@ -59,36 +59,78 @@ impl Db {
             .map_err(|e| format!("设置外键失败: {e}"))?;
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(|e| format!("设置 busy_timeout 失败: {e}"))?;
-        conn.execute_batch(schema::CREATE_TABLES)
-            .map_err(|e| format!("建表失败: {e}"))?;
-        // 幂等 schema 升级(2026-08 缓存感知管线):旧库 llm_requests 补 usage 缓存列
-        crate::migration::ensure_llm_requests_usage_columns(&conn)
-            .map_err(|e| format!("升级 llm_requests 缓存列失败: {e}"))?;
-        // 幂等 schema 升级(落地项 3 技能渐进披露):旧库 skills 补 allowed_tools 等列
-        crate::migration::ensure_skills_progressive_columns(&conn)
-            .map_err(|e| format!("升级 skills 渐进披露列失败: {e}"))?;
-        // 幂等 schema 升级(批次 4 六模式):旧库 tasks 补 task_mode 列
-        crate::migration::ensure_tasks_task_mode_column(&conn)
-            .map_err(|e| format!("升级 tasks task_mode 列失败: {e}"))?;
-        // 幂等 schema 升级(可观测性问题①):旧库 task_llm_calls 补 finish_reason 列
-        crate::migration::ensure_task_llm_calls_finish_reason_column(&conn)
-            .map_err(|e| format!("升级 task_llm_calls finish_reason 列失败: {e}"))?;
-        // 幂等 schema 升级(批次 R2 多轮用户输入):旧库补建 task_messages 表
-        crate::migration::ensure_task_messages_table(&conn)
-            .map_err(|e| format!("升级 task_messages 表失败: {e}"))?;
-        // 幂等 schema 升级(升级工作流 B2):旧库 memory_entries 补 pinned 列
-        crate::migration::ensure_memory_entries_pinned_column(&conn)
-            .map_err(|e| format!("升级 memory_entries pinned 列失败: {e}"))?;
-        // 幂等 schema 升级(阶段 B/C):旧库补建 exec_audit 审计表
-        crate::migration::ensure_exec_audit_table(&conn)
-            .map_err(|e| format!("升级 exec_audit 表失败: {e}"))?;
-        // 幂等 schema 升级(批次 3 性能):旧库补建 sessions/tasks 列表查询索引
-        crate::migration::ensure_perf_indexes(&conn)
-            .map_err(|e| format!("升级性能索引失败: {e}"))?;
+        // 建表批之前先读库内 schema 版本(PRAGMA user_version,0 = 未标记的旧库)。
+        // 库比代码新时**拒绝启动**:旧代码写新库会毁数据,宁可明确报错也不静默打开
+        // (docs/数据库版本与降级行为.md §4.2 策略 1)。
+        let db_version: i32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(|e| format!("读取数据库 schema 版本失败: {e}"))?;
+        if db_version > schema::SCHEMA_VERSION {
+            return Err(format!(
+                "数据库由更新版本的 Kedai 写入(库 v{db_version} 高于应用支持的 v{});\
+                 请升级应用后再打开,或从升级前的备份恢复(旧版本继续写入可能损坏数据)",
+                schema::SCHEMA_VERSION
+            ));
+        }
+        // 升级链事务化(known-limitations L21):建表批 + 9 个 ensure_* 包在同一个
+        // 事务里。SQLite 的 DDL 是事务性的,任一步失败整链回滚,不留「部分升级态」。
+        // 回滚必须落在 `?`/早退之前:否则连接停在打开的事务里,后续 Db::write 撞锁。
+        let upgrade: Result<(), String> = (|| {
+            conn.execute_batch("BEGIN IMMEDIATE;")
+                .map_err(|e| format!("开启 schema 升级事务失败: {e}"))?;
+            let body = (|| -> Result<(), String> {
+                conn.execute_batch(schema::CREATE_TABLES)
+                    .map_err(|e| format!("建表失败: {e}"))?;
+                // 幂等 schema 升级(2026-08 缓存感知管线):旧库 llm_requests 补 usage 缓存列
+                crate::migration::ensure_llm_requests_usage_columns(&conn)
+                    .map_err(|e| format!("升级 llm_requests 缓存列失败: {e}"))?;
+                // 幂等 schema 升级(落地项 3 技能渐进披露):旧库 skills 补 allowed_tools 等列
+                crate::migration::ensure_skills_progressive_columns(&conn)
+                    .map_err(|e| format!("升级 skills 渐进披露列失败: {e}"))?;
+                // 幂等 schema 升级(批次 4 六模式):旧库 tasks 补 task_mode 列
+                crate::migration::ensure_tasks_task_mode_column(&conn)
+                    .map_err(|e| format!("升级 tasks task_mode 列失败: {e}"))?;
+                // 幂等 schema 升级(可观测性问题①):旧库 task_llm_calls 补 finish_reason 列
+                crate::migration::ensure_task_llm_calls_finish_reason_column(&conn)
+                    .map_err(|e| format!("升级 task_llm_calls finish_reason 列失败: {e}"))?;
+                // 幂等 schema 升级(批次 R2 多轮用户输入):旧库补建 task_messages 表
+                crate::migration::ensure_task_messages_table(&conn)
+                    .map_err(|e| format!("升级 task_messages 表失败: {e}"))?;
+                // 幂等 schema 升级(升级工作流 B2):旧库 memory_entries 补 pinned 列
+                crate::migration::ensure_memory_entries_pinned_column(&conn)
+                    .map_err(|e| format!("升级 memory_entries pinned 列失败: {e}"))?;
+                // 幂等 schema 升级(阶段 B/C):旧库补建 exec_audit 审计表
+                crate::migration::ensure_exec_audit_table(&conn)
+                    .map_err(|e| format!("升级 exec_audit 表失败: {e}"))?;
+                // 幂等 schema 升级(批次 3 性能):旧库补建 sessions/tasks 列表查询索引
+                crate::migration::ensure_perf_indexes(&conn)
+                    .map_err(|e| format!("升级性能索引失败: {e}"))?;
+                Ok(())
+            })();
+            let failure: String = match body {
+                Ok(()) => match conn.execute_batch("COMMIT;") {
+                    Ok(()) => return Ok(()),
+                    Err(e) => format!("提交 schema 升级事务失败: {e}"),
+                },
+                Err(e) => e,
+            };
+            // 失败路径:回滚到升级前状态。回滚失败只留痕(原错误信息优先),
+            // 但这是不变量被破坏的情形,日志必须显式可见。
+            if let Err(rollback) = conn.execute_batch("ROLLBACK;") {
+                tracing::error!("schema 升级失败后 ROLLBACK 也失败,连接可能停在事务中: {rollback}");
+            }
+            Err(failure)
+        })();
+        upgrade?;
+        // 重量级幂等回填留在事务之外:全表 FTS rebuild 会把 WAL 撑大(长写事务代价高),
+        // 且两者各靠 backfill_meta 标记幂等(见 migration/ddl.rs 与 backfill.rs)。
         // 幂等回填(升级工作流 B1):记忆全文索引首次建表后 rebuild 一次
         crate::migration::ensure_memory_entries_fts_backfill(&conn)
             .map_err(|e| format!("回填 memory_entries FTS 索引失败: {e}"))?;
         backfill::backfill_scope_variables(&conn)?;
+        // 版本号最后写:过早抬高会让下次启动误判「已最新」而跳过补迁(L18 补齐路径)。
+        conn.pragma_update(None, "user_version", schema::SCHEMA_VERSION)
+            .map_err(|e| format!("写入数据库 schema 版本失败: {e}"))?;
 
         // 只读连接池:READ_ONLY 标志防止读路径误写;busy_timeout/foreign_keys 与写连接对齐。
         // 写连接全程持有(WAL/-shm 存在),只读连 WAL 库在 SQLite ≥3.22 下安全。

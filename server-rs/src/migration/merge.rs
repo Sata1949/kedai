@@ -20,6 +20,7 @@ use super::ddl::{
     SCOPE_VARIABLES_DDL, SESSION_COMPACTIONS_DDL, USER_SCRIPTS_DDL,
 };
 use super::{DATABASE_FILE, SKIPPED_SIDECARS};
+use crate::models::db::SCHEMA_VERSION;
 
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct MergeReport {
@@ -212,6 +213,9 @@ fn merge_databases(baseline: &Path, source: &Path) -> Result<MergeReport, String
     // 任务消息表(批次 R2):旧库缺失才建,保证两侧 schema 一致(比对在 DDL 补齐之后)
     ensure_task_messages_table(&conn)
         .map_err(|e| format!("补齐基线库 task_messages 表失败: {e}"))?;
+    align_schema_version(&conn, "工作库")?;
+    // 预补 DDL 完成后把工作库标到当前 schema 版本:合并把两侧结构对齐到当前形态,
+    // 版本号必须同步(否则合并产物带着旧版本号,「库比代码新」检测与升级判断失真)。
     let source_conn =
         Connection::open(source).map_err(|e| format!("打开源快照补齐 schema 失败: {e}"))?;
     source_conn
@@ -250,6 +254,8 @@ fn merge_databases(baseline: &Path, source: &Path) -> Result<MergeReport, String
         .map_err(|e| format!("补齐源快照 memory_entries FTS 索引失败: {e}"))?;
     ensure_task_messages_table(&source_conn)
         .map_err(|e| format!("补齐源快照 task_messages 表失败: {e}"))?;
+    // 源快照同样对齐版本(两侧结构一致才允许合并;版本号也随之一致)
+    align_schema_version(&source_conn, "源快照")?;
     drop(source_conn);
     conn.execute(
         "ATTACH DATABASE ?1 AS src",
@@ -286,6 +292,15 @@ fn merge_databases(baseline: &Path, source: &Path) -> Result<MergeReport, String
     conn.execute_batch("DETACH DATABASE src; PRAGMA foreign_keys=ON;")
         .map_err(|e| format!("结束数据库合并失败: {e}"))?;
     Ok(report)
+}
+
+/// 把库的 `PRAGMA user_version` 对齐到 `SCHEMA_VERSION`。
+/// 合并前两侧都会补跑预补 DDL(schema 对齐到当前形态),版本号必须同步;否则合并
+/// 产物带着旧版本号,「库比代码新」检测与后续升级判断都会失真(L18 补齐路径)。
+/// 合并期只做对齐,不做降级拒绝——拒绝启动是 `Db::open` 启动路径的职责。
+fn align_schema_version(conn: &Connection, side: &str) -> Result<(), String> {
+    conn.pragma_update(None, "user_version", SCHEMA_VERSION)
+        .map_err(|e| format!("标记{side} schema 版本失败: {e}"))
 }
 
 fn merge_table(
