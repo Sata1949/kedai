@@ -1021,6 +1021,7 @@ dependencies = [
  "http-body-util",
  "include_dir",
  "jni",
+ "kedai-server",
  "r2d2",
  "r2d2_sqlite",
  "regex",

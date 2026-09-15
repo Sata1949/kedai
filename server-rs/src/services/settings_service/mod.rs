@@ -262,6 +262,7 @@ pub struct RuntimeSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::test_support::TempDataDir;
 
     #[test]
     fn test_normalize_base_url() {
@@ -306,14 +307,9 @@ mod tests {
         assert_eq!(normalize_base_url("   "), "");
     }
 
-    /// 临时数据目录(测试隔离用)
-    fn tmp_dir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "kedai-settings-test-{tag}-{}",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    /// 临时数据目录(测试隔离用;作用域结束自动清理)
+    fn tmp_dir(tag: &str) -> TempDataDir {
+        TempDataDir::new(&format!("settings-test-{tag}"))
     }
 
     /// 最小 AppConfig(仅供设置加载/保存测试;不读环境变量,避免受本机 .env 影响)
@@ -340,7 +336,6 @@ mod tests {
             loaded.openai_api_key, "sk-secret-value-9999",
             "load 应还原明文"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 旧版明文 settings.json:可正常读取,且 load 时自动就地迁移为密文
@@ -369,7 +364,6 @@ mod tests {
         // 迁移后再次 load 仍应得到同一明文
         let again = RuntimeSettings::load(&dir, &test_cfg());
         assert_eq!(again.openai_api_key, "sk-legacy-plain-1234");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 未配置 Key:落盘保持空串,不产生密文噪声
@@ -381,7 +375,6 @@ mod tests {
         s.save(&dir).unwrap();
         let loaded = RuntimeSettings::load(&dir, &test_cfg());
         assert!(loaded.openai_api_key.is_empty(), "空 Key 应保持空");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 旧版 settings.json 缺少 render_html 时应兼容加载并默认关闭。
@@ -399,7 +392,6 @@ mod tests {
 
         let loaded = RuntimeSettings::load(&dir, &test_cfg());
         assert!(!loaded.render_html, "旧配置缺省时 HTML 渲染必须关闭");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 记忆设置(落地项 2):默认 关闭蒸馏 / 注入上限 8;
@@ -462,10 +454,6 @@ mod tests {
         assert_eq!(loaded3.memory_inject_limit, 0, "0 是合法值(关闭注入)");
         assert_eq!(loaded3.memory_inject_char_budget, 0, "0 合法(不限制预算)");
         assert_eq!(loaded3.memory_max_entries, 0, "0 合法(不淘汰)");
-
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_dir_all(&dir2);
-        let _ = std::fs::remove_dir_all(&dir3);
     }
 
     /// embedding 向量化配置:默认关闭且空;旧配置缺字段 serde default 补齐;
@@ -535,10 +523,6 @@ mod tests {
             0,
             "越界维度应回退 0"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_dir_all(&dir2);
-        let _ = std::fs::remove_dir_all(&dir3);
     }
 
     /// 落地项 3 设置:渐进披露默认开启、子代理三参数取默认;旧版 settings.json
@@ -646,10 +630,6 @@ mod tests {
                 .contains("{{char}}"),
             "roleplay 扁平值不受 task 缺省词影响"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_dir_all(&dir2);
-        let _ = std::fs::remove_dir_all(&dir3);
     }
 
     /// MCP 设置(批次 6.2):默认 关/空列表;旧版 settings.json 缺字段时 serde default 补齐;
@@ -716,9 +696,6 @@ mod tests {
             !s3.for_mode(AppMode::Roleplay).mcp_enabled,
             "roleplay 读扁平权威值"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_dir_all(&dir2);
     }
 
     /// 类型级模式隔离(WP7):RoleplayPromptConfig/TaskPromptConfig 的 serde 线格式
@@ -810,7 +787,6 @@ mod tests {
                 .is_none(),
             "空覆盖层写回不得新增 agent_system_prompt 键"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 类型级模式隔离(WP7):for_mode(Roleplay) 恒等于扁平权威值;
@@ -894,7 +870,6 @@ mod tests {
             !loaded.for_mode(AppMode::Task).task_persona_full,
             "None 覆盖层沿用扁平值 = 精简(旧配置兼容)"
         );
-        let _ = std::fs::remove_dir_all(&dir);
 
         // 覆盖层三分支:Some(true)=完整;Some(false)/None=精简;roleplay 读扁平权威值
         let mut s = RuntimeSettings::from_config(&cfg);
@@ -952,7 +927,6 @@ mod tests {
             !loaded.for_mode(AppMode::Task).task_prompt_inject_enabled,
             "None 覆盖层沿用扁平值 = 隔离(旧配置兼容)"
         );
-        let _ = std::fs::remove_dir_all(&dir);
 
         // 覆盖层分支:Some(true)=继承注入;roleplay 读扁平权威值,覆盖层不污染
         let mut s = RuntimeSettings::from_config(&cfg);
@@ -1019,7 +993,6 @@ mod tests {
             default_roleplay_agent_prompt(),
             "空值应回填内置默认(与首装一致)"
         );
-        let _ = std::fs::remove_dir_all(&dir_empty);
 
         // 分支二:用户自定义非空文本 → 原样保留,不得被默认词覆盖
         let dir_custom = tmp_dir("rp-prompt-custom");
@@ -1035,7 +1008,6 @@ mod tests {
             loaded_custom.agent_system_prompt.0, "CUSTOM-RP-MARK 用户自己的提示词",
             "用户非空文本优先,回填不得覆盖"
         );
-        let _ = std::fs::remove_dir_all(&dir_custom);
     }
 
     /// 模式隔离不因新增角色扮演默认词而退化:

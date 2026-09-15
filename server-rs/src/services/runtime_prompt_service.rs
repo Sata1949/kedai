@@ -267,14 +267,10 @@ fn atomic_replace(temp: &Path, target: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::test_support::TempDataDir;
 
-    fn dir(name: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "kedai-runtime-prompt-{name}-{}",
-            uuid::Uuid::new_v4()
-        ));
-        fs::create_dir_all(&path).unwrap();
-        path
+    fn dir(name: &str) -> TempDataDir {
+        TempDataDir::new(&format!("runtime-prompt-{name}"))
     }
 
     #[test]
@@ -292,7 +288,6 @@ mod tests {
         );
         fs::write(data.join(RUNTIME_PROMPT_FILE), "新提示词").unwrap();
         assert_eq!(service.read().unwrap(), "新提示词");
-        let _ = fs::remove_dir_all(root);
     }
 
     /// 全新安装(数据目录无该文件、项目根也无旧文件)回退内置默认:
@@ -300,7 +295,7 @@ mod tests {
     #[test]
     fn falls_back_to_builtin_default_when_no_file() {
         let root = dir("builtin");
-        let service = RuntimePromptService::new(root.clone(), None);
+        let service = RuntimePromptService::new(root.path().to_path_buf(), None);
         let content = service.read().unwrap();
         assert!(
             content.contains("主 Agent 提示词"),
@@ -316,20 +311,18 @@ mod tests {
             Some(content.as_str()),
             "read_optional 也应拿到内置默认(否则引擎不注入)"
         );
-        let _ = fs::remove_dir_all(root);
     }
 
     /// 文件优先于内置默认:用户保存过的内容不被默认覆盖
     #[test]
     fn file_wins_over_builtin_default() {
         let root = dir("builtin-override");
-        let service = RuntimePromptService::new(root.clone(), None);
+        let service = RuntimePromptService::new(root.path().to_path_buf(), None);
         service.write("我的自定义主提示词").unwrap();
         assert_eq!(service.read().unwrap(), "我的自定义主提示词");
         // 空文件 = 显式不注入(read_optional 视空为 None)
         service.write("   ").unwrap();
         assert_eq!(service.read_optional().unwrap(), None);
-        let _ = fs::remove_dir_all(root);
     }
 
     /// 显式指定目录(KEDAI_RUNTIME_PROMPT_DIR)关闭内置默认:
@@ -337,31 +330,28 @@ mod tests {
     #[test]
     fn with_dir_disables_builtin_default() {
         let root = dir("builtin-off");
-        let service = RuntimePromptService::with_dir(root.clone(), None);
+        let service = RuntimePromptService::with_dir(root.path().to_path_buf(), None);
         assert!(service.read().unwrap_err().contains("不存在"));
         assert_eq!(service.read_optional().unwrap(), None);
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn rejects_oversized_and_invalid_utf8_content() {
         let root = dir("validation");
-        let service = RuntimePromptService::new(root.clone(), None);
+        let service = RuntimePromptService::new(root.path().to_path_buf(), None);
         let large = "x".repeat(MAX_RUNTIME_PROMPT_BYTES as usize + 1);
         assert!(service.write(&large).unwrap_err().contains("超过上限"));
         fs::write(service.path(), [0xff, 0xfe]).unwrap();
         assert!(service.read().unwrap_err().contains("不是有效 UTF-8"));
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn atomic_write_replaces_existing_content() {
         let root = dir("replace");
-        let service = RuntimePromptService::new(root.clone(), None);
+        let service = RuntimePromptService::new(root.path().to_path_buf(), None);
         service.write("第一版").unwrap();
         service.write("第二版").unwrap();
         assert_eq!(service.read().unwrap(), "第二版");
         assert_eq!(fs::read_dir(&root).unwrap().count(), 1, "不应残留临时文件");
-        let _ = fs::remove_dir_all(root);
     }
 }

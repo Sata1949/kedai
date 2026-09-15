@@ -197,12 +197,12 @@ pub fn now_iso() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::test_support::TempDataDir;
 
     /// 读写分离:写连接已提交的写入,只读池连接立即可见(WAL)
     #[test]
     fn read_pool_sees_committed_writes() {
-        let dir = std::env::temp_dir().join(format!("kedai-db-rw-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TempDataDir::new("db-rw");
         let db = Db::open(&dir.join("kedai.db"), &dir).unwrap();
         let id = {
             let conn = db.write();
@@ -236,15 +236,13 @@ mod tests {
         assert_eq!(n, 1);
         drop(conn);
         drop(db);
-        std::fs::remove_dir_all(dir).ok();
     }
 
     /// 写连接锁中毒可恢复:未完成事务被 ROLLBACK,连接仍可继续使用
     /// (2026-09-13 批次 2:此前直接 into_inner 续用,事务残留语义未定义)
     #[test]
     fn poisoned_writer_lock_recovers_and_rolls_back_open_transaction() {
-        let dir = std::env::temp_dir().join(format!("kedai-db-poison-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TempDataDir::new("db-poison");
         let db = Db::open(&dir.join("kedai.db"), &dir).unwrap();
 
         // 持写锁开事务后 panic:锁中毒,且连接停在未完成事务里
@@ -277,6 +275,5 @@ mod tests {
         assert_eq!(n, 0, "panic 前未提交的插入必须被回滚");
         drop(conn);
         drop(db);
-        std::fs::remove_dir_all(dir).ok();
     }
 }

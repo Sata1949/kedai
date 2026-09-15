@@ -9,6 +9,12 @@ license = "MIT"
 name = "kedai-server"
 path = "src/main.rs"
 
+[features]
+# 测试支撑助手(utils/test_support.rs 的 TempDataDir)门控开关。
+# 单元测试靠 cfg(test) 即可;`tests/**` 集成测试是独立 crate、看不到本 crate 的 cfg(test),
+# 故由下方自引用 dev-dependency 打开本 feature(不引入任何新依赖)。
+test-support = []
+
 [dependencies]
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
@@ -89,6 +95,9 @@ tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 # test-util:暂停时钟(start_paused/time::advance),delta 攒批时间窗单测用(批次 R4)
 tokio = { version = "1", features = ["test-util"] }
+# 自引用以对被测 lib 打开 test-support feature(Rust 标准做法,见 tokens 依赖同款):
+# 集成测试需要 utils::test_support::TempDataDir,而 cfg(test) 不作用于独立 crate 的 tests/**。
+kedai-server = { path = ".", features = ["test-support"] }
 
 [profile.release]
 lto = true

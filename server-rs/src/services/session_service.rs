@@ -765,10 +765,11 @@ impl SessionService {
 mod tests {
     use super::*;
     use crate::models::db::Db;
+    use crate::utils::test_support::TempDataDir;
 
-    fn service() -> (SessionService, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("kedai-session-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+    /// 返回 (守卫, 服务):解构绑定按**逆序**析构,守卫在前才活到最后(见 test_support 模块头)
+    fn service() -> (TempDataDir, SessionService) {
+        let dir = TempDataDir::new("session");
         let db = Arc::new(Db::open(&dir.join("kedai.db"), &dir).unwrap());
         let svc = SessionService::new(db);
         // llm_requests/session_compactions 均外键引用 sessions,测试需先建 character + session
@@ -787,12 +788,12 @@ mod tests {
             )
             .unwrap();
         }
-        (svc, dir)
+        (dir, svc)
     }
 
     #[test]
     fn save_llm_request_persists_payload() {
-        let (svc, dir) = service();
+        let (_dir, svc) = service();
         svc.save_llm_request("s1", "run1", 0, r#"{"role":"system"}"#, "m")
             .unwrap();
 
@@ -808,12 +809,11 @@ mod tests {
         assert_eq!(payload, r#"{"role":"system"}"#);
         assert_eq!(model, "m");
         drop(conn);
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
     fn prune_llm_requests_keeps_only_recent() {
-        let (svc, dir) = service();
+        let (_dir, svc) = service();
         // 插入 seq 0..4 共 5 条
         for seq in 0..5 {
             svc.save_llm_request("s1", "run1", seq, "x", "m").unwrap();
@@ -848,13 +848,12 @@ mod tests {
         assert_eq!(max_seq, 4);
         assert_eq!(min_seq, 3);
         drop(conn);
-        std::fs::remove_dir_all(dir).ok();
     }
 
     /// 缓存 usage 落库:已有请求快照行(seq 匹配)时 UPDATE 缓存列,payload 不被覆盖
     #[test]
     fn save_llm_cache_usage_updates_existing_row() {
-        let (svc, dir) = service();
+        let (_dir, svc) = service();
         svc.save_llm_request("s1", "run1", 0, r#"{"role":"system"}"#, "m")
             .unwrap();
         svc.save_llm_cache_usage("s1", "run1", 0, "m", 1000, 200, 700, 300)
@@ -884,14 +883,13 @@ mod tests {
             "缓存列更新不应覆盖 payload"
         );
         drop(conn);
-        std::fs::remove_dir_all(dir).ok();
     }
 
     /// 缓存 usage 落库:快照开关关闭(无既有行)时插入轻量行(payload 为空串),
     /// 保证缓存观测数据不依赖 llm_request_log 调试开关
     #[test]
     fn save_llm_cache_usage_inserts_light_row_when_missing() {
-        let (svc, dir) = service();
+        let (_dir, svc) = service();
         svc.save_llm_cache_usage("s1", "run2", 3, "m", 500, 80, 0, 500)
             .unwrap();
 
@@ -908,7 +906,6 @@ mod tests {
         assert_eq!((hit, miss), (0, 500));
         assert_eq!(payload, "", "无快照开关时应插入轻量行(payload 空)");
         drop(conn);
-        std::fs::remove_dir_all(dir).ok();
     }
 
     /// 再建一个会话(FK 指向同一 character),供「跨会话不受影响」断言
@@ -925,7 +922,7 @@ mod tests {
     /// 3.1 单条删除:仅该消息的 message 作用域变量被清,同会话其它消息与其它作用域保留
     #[test]
     fn delete_message_cleans_its_message_scope_variables() {
-        let (svc, dir) = service();
+        let (_dir, svc) = service();
         let m1 = svc
             .add_message("s1", "assistant", "一", serde_json::json!({}))
             .unwrap();
@@ -961,13 +958,12 @@ mod tests {
             Some(serde_json::json!({ "好感度": 3 })),
             "chat 作用域不受影响"
         );
-        std::fs::remove_dir_all(dir).ok();
     }
 
     /// 3.1 截断:anchor 之后的消息变量被清,anchor 自身保留
     #[test]
     fn truncate_messages_after_cleans_later_message_scope_variables() {
-        let (svc, dir) = service();
+        let (_dir, svc) = service();
         let m1 = svc
             .add_message("s1", "assistant", "一", serde_json::json!({}))
             .unwrap();
@@ -1005,13 +1001,12 @@ mod tests {
                 .is_none(),
             "anchor 之后的消息变量应清理(最末条)"
         );
-        std::fs::remove_dir_all(dir).ok();
     }
 
     /// 3.1 清空:该会话 message 变量清空,其它会话的 message 变量保留
     #[test]
     fn clear_messages_cleans_only_that_session_scope_variables() {
-        let (svc, dir) = service();
+        let (_dir, svc) = service();
         add_second_session(&svc);
         let m1 = svc
             .add_message("s1", "assistant", "甲", serde_json::json!({}))
@@ -1041,6 +1036,5 @@ mod tests {
             Some(serde_json::json!({ "v": 2 })),
             "其它会话的 message 变量不受影响"
         );
-        std::fs::remove_dir_all(dir).ok();
     }
 }

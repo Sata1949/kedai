@@ -140,7 +140,7 @@ async fn mock_auto_switches_to_openai_on_save() {
     assert_eq!(conn["fallback_used"], json!(false));
     assert_eq!(conn["http_status"], json!(200));
 
-    // 持久化文件包含保存的配置
+    // 持久化文件包含保存的配置(build_test_app 的进程级共享数据目录;只读断言,不建目录)
     let settings_path = std::env::temp_dir()
         .join(format!("kedai-test-{}", std::process::id()))
         .join("settings.json");

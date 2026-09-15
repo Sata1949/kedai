@@ -21,22 +21,22 @@
 //   6. 合并产物/工作库的 user_version 对齐;
 //   7. 静态护栏:migration/ddl.rs 的 *_DDL 文本必须与 CREATE_TABLES normalize 后一致。
 use kedai_server::models::db::{Db, SCHEMA_VERSION};
+use kedai_server::utils::test_support::TempDataDir;
 use rusqlite::Connection;
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// 冻结基线建表 SQL(**历史快照,不得随代码演进更新**;见文件头注释)
 const BASELINE_SQL: &str = include_str!("fixtures/schema_baseline_v0_3_0_beta.sql");
 
-fn temp_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("kedai-schema-meta-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// 隔离临时数据目录(uuid 唯一 + 作用域结束自动清理);
+/// 用例内如需跨两次 open 复用同一路径,守卫绑定在测试函数作用域即可
+fn temp_dir(tag: &str) -> TempDataDir {
+    TempDataDir::new(&format!("schema-meta-{tag}"))
 }
 
 /// 建一个「0.3.0-beta 老库」数据目录(user_version 天然为 0,即「未标记」)
-fn legacy_dir(tag: &str) -> PathBuf {
+fn legacy_dir(tag: &str) -> TempDataDir {
     let dir = temp_dir(tag);
     let conn = Connection::open(dir.join("kedai.db")).unwrap();
     conn.execute_batch(BASELINE_SQL)
@@ -191,9 +191,6 @@ fn old_database_upgrades_to_current_schema() {
             "表 {table} 升级后结构与全新库不一致(新增列/索引漏写 ensure_* 迁移?)"
         );
     }
-
-    let _ = std::fs::remove_dir_all(&old_dir);
-    let _ = std::fs::remove_dir_all(&fresh_dir);
 }
 
 /// 【断言 1】全新库:升级链全部成功后写入 user_version == SCHEMA_VERSION
@@ -213,7 +210,6 @@ fn fresh_database_records_schema_version() {
     );
     // 版本号不是靠建表 SQL 写进去的(PRAGMA 不进 CREATE_TABLES,静态文本保持不变)
     drop(db);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// 【断言 3】库版本 > 代码版本 → 拒绝启动(§4.2 策略 1),文案须同时含两个版本号,
@@ -245,7 +241,6 @@ fn newer_database_version_is_rejected_with_both_versions() {
         "拒绝启动必须发生在建表批之前(更新的库不能被老代码改动)"
     );
     assert_eq!(user_version(&path), newer, "拒绝启动不得改写版本号");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// 【断言 4】幂等:连续两次 Db::open 不改版本、不改结构(升级链每轮照跑但结果收敛)
@@ -272,7 +267,6 @@ fn reopen_keeps_version_and_schema_unchanged() {
         "第二次 open 不得改动结构(升级链必须幂等)"
     );
     drop(second);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// 【断言 5,锁 L21】某个 ensure_* 失败 → Db::open 返回 Err,且整链事务回滚:
@@ -389,7 +383,6 @@ fn failed_ensure_rolls_back_whole_upgrade_chain_and_keeps_version() {
         "恢复升级后 llm_requests 应补齐 usage 缓存列"
     );
     drop(db);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// 【断言 6】合并产物(工作库)的 user_version 对齐 SCHEMA_VERSION:
@@ -399,7 +392,9 @@ fn merge_aligns_schema_version_on_output() {
     // ① 两侧都是老库(未标记):预补 DDL 后必须把工作库标到当前版本
     let baseline = legacy_dir("merge-legacy-baseline");
     let source = legacy_dir("merge-legacy-source");
-    let work = temp_dir("merge-legacy-work").join("work");
+    // 守卫绑定到测试函数作用域:work 子目录在同一用例内跨多次 open/merge 复用
+    let work_root = temp_dir("merge-legacy-work");
+    let work = work_root.join("work");
     kedai_server::migration::merge_data_dirs(&baseline, &source, &work)
         .expect("两个同版本老库应能合并");
     assert_eq!(
@@ -413,7 +408,8 @@ fn merge_aligns_schema_version_on_output() {
     let fresh_b = temp_dir("merge-fresh-b");
     Db::open(&fresh_a.join("kedai.db"), &fresh_a).expect("全新库 A 应能建立");
     Db::open(&fresh_b.join("kedai.db"), &fresh_b).expect("全新库 B 应能建立");
-    let work2 = temp_dir("merge-fresh-work").join("work");
+    let work2_root = temp_dir("merge-fresh-work");
+    let work2 = work2_root.join("work");
     kedai_server::migration::merge_data_dirs(&fresh_a, &fresh_b, &work2)
         .expect("两个全新库应能合并");
     assert_eq!(
@@ -421,10 +417,6 @@ fn merge_aligns_schema_version_on_output() {
         SCHEMA_VERSION,
         "全新库合并产物版本号应保持当前版本"
     );
-
-    for dir in [baseline, source, fresh_a, fresh_b] {
-        let _ = std::fs::remove_dir_all(dir);
-    }
 }
 
 /// 【断言 7】静态护栏:migration/ddl.rs 每个 `*_DDL` 里的 CREATE 语句,

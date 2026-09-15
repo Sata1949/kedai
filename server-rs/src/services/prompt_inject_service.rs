@@ -350,6 +350,7 @@ impl PromptInjectConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::test_support::TempDataDir;
 
     #[test]
     fn simple_inject_text_combines_enabled_items() {
@@ -654,8 +655,7 @@ mod tests {
 
     #[test]
     fn load_save_roundtrip() {
-        let dir = std::env::temp_dir().join(format!("kedai-pi-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = TempDataDir::new("pi");
         let cfg = PromptInjectConfig {
             mode: InjectMode::Complex,
             floors: vec![PromptFloor {
@@ -678,28 +678,23 @@ mod tests {
         assert_eq!(loaded.floors[0].position, FloorPosition::Depth);
         assert_eq!(loaded.floors[0].depth, 2);
         assert_eq!(loaded.floors[0].content, "内容 {{char}}");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn load_missing_file_returns_default() {
-        let dir = std::env::temp_dir().join(format!("kedai-pi-missing-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = TempDataDir::new("pi-missing");
         let cfg = PromptInjectConfig::load(&dir);
         assert_eq!(cfg.mode, InjectMode::Simple);
         assert!(cfg.floors.is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn load_corrupted_file_falls_back_to_default() {
-        let dir = std::env::temp_dir().join(format!("kedai-pi-bad-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = TempDataDir::new("pi-bad");
         std::fs::write(dir.join("prompt_floors.json"), "{{{ not json").unwrap();
         let cfg = PromptInjectConfig::load(&dir);
         assert_eq!(cfg.mode, InjectMode::Simple);
         assert!(!cfg.simple.word_count_enabled);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ---- output_budget_for_word_count 边界 ----

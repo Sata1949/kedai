@@ -205,11 +205,12 @@ mod tests {
     use super::*;
     use crate::models::db::Db;
     use crate::models::types::TokenUsage;
+    use crate::utils::test_support::TempDataDir;
 
-    /// 临时库:预置 characters + sessions(session_usage 有 FK 约束,必须先有会话行)
-    fn test_db(tag: &str) -> (Db, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("kedai-usage-{tag}-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+    /// 临时库:预置 characters + sessions(session_usage 有 FK 约束,必须先有会话行)。
+    /// 返回 (守卫, 库):解构绑定按**逆序**析构,守卫在前才活到最后(见 test_support 模块头)
+    fn test_db(tag: &str) -> (TempDataDir, Db) {
+        let dir = TempDataDir::new(&format!("usage-{tag}"));
         let db = Db::open(&dir.join("kedai.db"), &dir).unwrap();
         {
             let conn = db.write();
@@ -226,7 +227,7 @@ mod tests {
             )
             .unwrap();
         }
-        (db, dir)
+        (dir, db)
     }
 
     /// 失败回滚(2026-09-13 批次 3.7):第二条 SQL(global_usage)失败时,
@@ -235,7 +236,7 @@ mod tests {
     /// 制造失败的方式:删掉 global_usage 表(UPDATE 必然报 no such table)。
     #[test]
     fn record_usage_sync_rolls_back_when_global_update_fails() {
-        let (db, dir) = test_db("rollback");
+        let (_dir, db) = test_db("rollback");
         {
             let conn = db.write();
             conn.execute_batch("DROP TABLE global_usage").unwrap();
@@ -260,13 +261,12 @@ mod tests {
             "global_usage 写入失败 → session_usage 必须一并回滚,不得留半截用量"
         );
         drop(conn);
-        std::fs::remove_dir_all(dir).ok();
     }
 
     /// 成功路径一致性:连续两次落库后 session_usage 与 global_usage 累加值相等
     #[test]
     fn record_usage_sync_keeps_session_and_global_in_step() {
-        let (db, dir) = test_db("ok");
+        let (_dir, db) = test_db("ok");
         let usage = TokenUsage {
             prompt_tokens: 12,
             completion_tokens: 8,
@@ -293,6 +293,5 @@ mod tests {
         assert_eq!(s, (24, 16, 40), "两次累加后的会话用量");
         assert_eq!(g, (24, 16, 40), "全局用量与会话用量同进同退");
         drop(conn);
-        std::fs::remove_dir_all(dir).ok();
     }
 }

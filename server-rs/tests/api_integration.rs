@@ -943,9 +943,11 @@ async fn test_lock() -> MutexGuard<'static, ()> {
     // 被注入 mock 断言(与 build_test_app 临时数据目录的隔离语义一致)。Once 保证只设一次。
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(|| {
-        let dir = std::env::temp_dir().join("kedai-test-runtime-prompt-empty");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("KEDAI_RUNTIME_PROMPT_DIR", &dir);
+        // uuid 唯一名(避免多测试二进制并发共用同名目录);守卫随本闭包析构即回收。
+        // 目录是否存在不影响语义:with_dir 关闭内置默认回退,读不到文件即视为「无提示词」,
+        // 与「指向一个空目录」等价(全仓无测试写该文件)。
+        let dir = kedai_server::utils::test_support::TempDataDir::new("test-runtime-prompt-empty");
+        std::env::set_var("KEDAI_RUNTIME_PROMPT_DIR", dir.path());
     });
     LOCK.get_or_init(|| Mutex::new(())).lock().await
 }
@@ -2055,6 +2057,7 @@ async fn render_frame_document_is_served() {
 
 /// 直插 llm_requests 缓存统计行(绕过引擎,精确控制命中/未命中数据)
 fn insert_cache_rows(sid: &str) {
+    // build_test_app 的进程级共享数据目录(只读/直插,不受本批次守卫管理)
     let db_path = std::env::temp_dir()
         .join(format!("kedai-test-{}", std::process::id()))
         .join("kedai.db");
@@ -2968,7 +2971,9 @@ async fn repo_index_unavailable_reports_code_without_parse_detail() {
     let app = test_app();
     let _guard = test_lock().await;
     // 指向一个存在但内容非法的索引文件,命中「解析失败」分支
-    let bad = std::env::temp_dir().join(format!("kedai-bad-index-{}.json", std::process::id()));
+    // (守卫目录:断言失败/panic 时也不在 TEMP 残留)
+    let bad_dir = kedai_server::utils::test_support::TempDataDir::new("bad-index");
+    let bad = bad_dir.join("index.json");
     std::fs::write(&bad, b"{ this is not json").unwrap();
     let prev = std::env::var_os("KEDAI_REPO_INDEX");
     std::env::set_var("KEDAI_REPO_INDEX", &bad);
@@ -2980,8 +2985,6 @@ async fn repo_index_unavailable_reports_code_without_parse_detail() {
         Some(v) => std::env::set_var("KEDAI_REPO_INDEX", v),
         None => std::env::remove_var("KEDAI_REPO_INDEX"),
     }
-    let _ = std::fs::remove_file(&bad);
-
     // 索引不可用属正常上报(HTTP 200 + available:false),不改状态码
     assert_eq!(
         status,

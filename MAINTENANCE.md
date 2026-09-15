@@ -572,6 +572,39 @@ rusqlite(bundled,零原生依赖),**WAL 模式 + foreign_keys ON**。共 28 张�
     清理 `.fingerprint` 与新产物。以上均复测仍被拦。
     **影响面提示**:本例中**测试版 `dist\kedai-server.exe` 已正常产出**,只有 `src-tauri`
     便携版链路被阻断——故「便携版缺失」时先按本条查杀软,不要怀疑 Rust 代码。
+32. **测试临时数据目录从不清理,会把 %TEMP% 撑爆**(2026-09-15 实测并修复,测试基建批次 R5)。
+    **现象**:测试套件到处 `std::env::temp_dir().join(format!("kedai-..."))` 建数据目录
+    (DB/角色文件/settings.json 等),但**从不删除**;即使少数用例写了 `remove_dir_all`,
+    也在 `unwrap()` 断言之后,断言失败或 panic 时照样残留。
+    **实测数字**:清理前 `%TEMP%` 累计 **14015 个** `kedai-*` 目录 / **11.22 GB**(最早 09-11,
+    最新 09-15),前缀十几种:`kedai-tool-test-*`(2418)、`kedai-memory-*`(1804)、
+    `kedai-contract-history-*`(1148)、`kedai-session-*`(984) 等;单跑一次全量
+    `cargo test` 就新增 **105 个目录 / 17 种前缀**。这是压满 C 盘的主力之一。
+    **约定(新增测试必须遵守)**:
+    - 一律用 `server-rs/src/utils/test_support.rs` 的 `TempDataDir::new("<tag>")`
+      (目录名 `kedai-<tag>-<uuid-v4>`,作用域结束 best-effort 递归删除,失败静默忽略且绝不 panic);
+      **不要再裸写 `std::env::temp_dir().join(...)` 建目录**。模块门控
+      `cfg(any(test, feature = "test-support"))`,集成测试经 `Cargo.toml` 的自引用
+      dev-dependency(`kedai-server = { path = ".", features = ["test-support"] }`)打开。
+    - **守卫的析构顺序是硬约束**(2026-09-15 rustc 1.97 实测,写反了就是「句柄还开着 → 删除失败 →
+      静默残留」,不报错但没修好):局部变量按声明逆序析构(守卫声明在 Db/服务**之前**);
+      解构绑定按绑定逆序析构(故 `let (guard, svc) = service();`,**不是** `let (svc, guard)`);
+      结构体字段按声明顺序析构(守卫必须是**最后一个字段**);整个元组不解构时按字段顺序。
+    - 禁止临时值形态 `Db::open(&TempDataDir::new("x").path().join("kedai.db"), ..)`——
+      语句末守卫即析构,库还开着就删目录。必须先 `let dir = TempDataDir::new("x");`。
+    - **不要**给 `lib.rs::build_test_app` 的目录套守卫:它是 `OnceLock` 进程级单例,
+      生命周期等于测试进程,套上会在第一个用例结束就删掉后续所有用例要用的库。
+      个别「按需构造路径」的读取型代码(`tests/undo.rs`、`tests/agent_trace.rs` 等)同理保持现状。
+    - 少量确实需要「Drop 后仍检查目录」的场景用逃逸阀 `TempDataDir::keep() -> PathBuf`(极少用)。
+    **本批次后的实测残留**(2026-09-15,清空 %TEMP% 后单跑一次全量 `cargo test`):
+    迁移前 **105 个**目录 / 17 种前缀 → 迁移后 **约 30 个**,且全部属「有意不改」类别:
+    `kedai-test-<pid>`(≈19,`build_test_app` 进程级共享)、`kedai-secure-test-<uuid>`(7,
+    `build_secure_test_app` 每次调用新建)、`kedai-tool-test-<uuid>`(3)。
+    最后 3 个是**已知有界残留**:`tools/agent_tools.rs` 的 `agentgo_*` 用例
+    `tokio::spawn` 的后台子任务持有 `Arc<ToolDeps>`(内含 `Arc<Db>`),测试函数返回后仍存活
+    占用目录——实测把 Drop 重试拉长到 500ms 仍清不掉,属结构性的「句柄生命周期长于守卫」。
+    量级从「每次全量 105 个 / 十几种前缀、无上限增长」降到「约 30 个固定项」,
+    增长速率已归零(反复跑不再累积新前缀)。
 
 ---
 

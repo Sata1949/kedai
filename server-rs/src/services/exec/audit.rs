@@ -230,11 +230,11 @@ pub fn clear(db: &Arc<Db>) -> Result<usize, String> {
 mod tests {
     use super::*;
     use crate::models::db::Db;
+    use crate::utils::test_support::TempDataDir;
 
-    fn temp_db(tag: &str) -> (std::path::PathBuf, Arc<Db>) {
-        let dir =
-            std::env::temp_dir().join(format!("kedai-exec-audit-{tag}-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+    /// 返回 (守卫, 库):解构绑定按**逆序**析构,守卫在前才活到最后(见 test_support 模块头)
+    fn temp_db(tag: &str) -> (TempDataDir, Arc<Db>) {
+        let dir = TempDataDir::new(&format!("exec-audit-{tag}"));
         let db = Arc::new(Db::open(&dir.join("kedai.db"), &dir).expect("建库"));
         (dir, db)
     }
@@ -257,29 +257,27 @@ mod tests {
 
     #[test]
     fn records_and_lists_newest_first() {
-        let (dir, db) = temp_db("list");
+        let (_dir, db) = temp_db("list");
         assert!(record(&db, &rec("echo 1", AuditDecision::Allowed)));
         assert!(record(&db, &rec("echo 2", AuditDecision::Allowed)));
         let rows = list(&db, 10, None, None);
         assert_eq!(rows.len(), 2);
         // 倒序:id 大的在前
         assert!(rows[0].id > rows[1].id);
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn records_denied_attempts() {
-        let (dir, db) = temp_db("denied");
+        let (_dir, db) = temp_db("denied");
         record(&db, &rec("rm -rf /", AuditDecision::Denied));
         let rows = list(&db, 10, None, None);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].decision, "denied");
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn filters_by_source_and_risk() {
-        let (dir, db) = temp_db("filter");
+        let (_dir, db) = temp_db("filter");
         let mut r = rec("echo a", AuditDecision::Allowed);
         r.source = AuditSource::Task;
         r.risk = CommandRisk::Destructive;
@@ -288,39 +286,35 @@ mod tests {
         assert_eq!(list(&db, 10, Some("task"), None).len(), 1);
         assert_eq!(list(&db, 10, None, Some("destructive")).len(), 1);
         assert_eq!(list(&db, 10, Some("chat"), Some("sensitive")).len(), 1);
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn long_output_summarized() {
-        let (dir, db) = temp_db("trunc");
+        let (_dir, db) = temp_db("trunc");
         let mut r = rec("cat big", AuditDecision::Allowed);
         r.stdout = "x".repeat(SUMMARY_CHARS + 500);
         record(&db, &r);
         let rows = list(&db, 10, None, None);
         assert!(rows[0].stdout_summary.contains("字符"), "应标注总长");
         assert!(rows[0].stdout_summary.chars().count() < SUMMARY_CHARS + 100);
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn clear_removes_rows() {
-        let (dir, db) = temp_db("clear");
+        let (_dir, db) = temp_db("clear");
         record(&db, &rec("echo x", AuditDecision::Allowed));
         assert_eq!(clear(&db).unwrap(), 1);
         assert!(list(&db, 10, None, None).is_empty());
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn limit_is_clamped() {
-        let (dir, db) = temp_db("clamp");
+        let (_dir, db) = temp_db("clamp");
         for i in 0..5 {
             record(&db, &rec(&format!("echo {i}"), AuditDecision::Allowed));
         }
         // limit=0 被夹到 1;超大值夹到 500(此处只有 5 行)
         assert_eq!(list(&db, 0, None, None).len(), 1);
         assert_eq!(list(&db, 10_000, None, None).len(), 5);
-        let _ = std::fs::remove_dir_all(dir);
     }
 }

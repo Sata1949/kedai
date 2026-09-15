@@ -599,12 +599,13 @@ impl WorldBookService {
 mod tests {
     use super::*;
     use crate::models::db::Db;
+    use crate::utils::test_support::TempDataDir;
 
-    fn service() -> (WorldBookService, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("kedai-wb-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+    /// 返回 (守卫, 服务):解构绑定按**逆序**析构,守卫在前才活到最后(见 test_support 模块头)
+    fn service() -> (TempDataDir, WorldBookService) {
+        let dir = TempDataDir::new("wb");
         let db = Arc::new(Db::open(&dir.join("kedai.db"), &dir).unwrap());
-        (WorldBookService::new(db), dir)
+        (dir, WorldBookService::new(db))
     }
 
     fn upload_book(svc: &WorldBookService, name: &str, key: &str, cid: Option<&str>) -> String {
@@ -624,7 +625,7 @@ mod tests {
     /// ③ 改 enabled 后立即可见;④ 改条目内容后立即可见;⑤ 删除后立即可见。
     #[test]
     fn entries_cache_invalidates_on_every_write_path() {
-        let (svc, dir) = service();
+        let (_dir, svc) = service();
         // 全局世界书(character_id = None → 对所有角色生效,便于用同一角色观察)
         let first_id = upload_book(&svc, "书一", "关键词一", None);
 
@@ -693,13 +694,12 @@ mod tests {
         );
 
         drop(svc);
-        std::fs::remove_dir_all(dir).ok();
     }
 
     /// 缓存按 character_id 隔离:不同角色互不污染
     #[test]
     fn entries_cache_is_per_character() {
-        let (svc, dir) = service();
+        let (_dir, svc) = service();
         {
             let conn = svc.db.write();
             conn.execute(
@@ -717,6 +717,5 @@ mod tests {
         assert_eq!(c2.len(), 0, "c2 不应看到 c1 的世界书");
 
         drop(svc);
-        std::fs::remove_dir_all(dir).ok();
     }
 }

@@ -241,15 +241,11 @@ fn encrypt_or_preserve(
 mod tests {
     use super::*;
     use crate::config::test_config;
+    use crate::utils::test_support::TempDataDir;
 
-    fn temp_dir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "kedai-secret-preserve-{tag}-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// 隔离临时数据目录(uuid 唯一 + 作用域结束自动清理)
+    fn temp_dir(tag: &str) -> TempDataDir {
+        TempDataDir::new(&format!("secret-preserve-{tag}"))
     }
 
     fn write_settings(dir: &Path, json: &str) {
@@ -279,7 +275,6 @@ mod tests {
             text.contains("enc:v1:KEPT-EMB"),
             "embedding_api_key 必须保留原密文:{text}"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 未配置(磁盘无密文)时保存仍写空串;新的非空 Key 正常加密覆盖
@@ -303,7 +298,6 @@ mod tests {
             text.contains("enc:v1:") && !text.contains("sk-new-key-1234"),
             "新 Key 应加密落盘:{text}"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 旧版明文 Key 的迁移路径不受影响:解密(直读)后重新加密
@@ -325,6 +319,5 @@ mod tests {
             text.contains("enc:v1:") && !text.contains("sk-legacy-plain"),
             "明文应迁移为密文:{text}"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

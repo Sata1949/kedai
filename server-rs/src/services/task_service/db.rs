@@ -691,6 +691,7 @@ impl TaskService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::test_support::TempDataDir;
 
     /// 孤儿任务启动恢复(问题④):遗留 running/planning 置 ended + error 文本
     /// 「服务重启,任务中断」;planned(待批准可续跑)/pending/终态不动;
@@ -698,7 +699,7 @@ mod tests {
     /// 再插一行 running 仍能恢复——恢复语义跨进程成立。
     #[test]
     fn recover_orphan_tasks_marks_interrupted_once() {
-        let dir = std::env::temp_dir().join(format!("kedai-task-recover-{}", Uuid::new_v4()));
+        let dir = TempDataDir::new("task-recover");
         let db_path = dir.join("kedai.db");
         {
             let db = Db::open(&db_path, &dir).expect("开库失败");
@@ -778,6 +779,5 @@ mod tests {
         assert_eq!(st, "ended", "重开后新孤儿应被终结");
         assert!(err.contains("服务重启"), "error 文本应标注中断原因: {err}");
         drop(db2);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

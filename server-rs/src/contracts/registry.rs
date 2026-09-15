@@ -93,11 +93,14 @@ impl ContractRegistry {
 mod tests {
     use super::*;
     use crate::models::db::Db;
+    use crate::utils::test_support::TempDataDir;
     use rusqlite::OptionalExtension;
     use serde_json::json;
     use std::sync::Arc;
 
+    /// 首项为临时目录守卫:解构绑定按**逆序**析构,守卫在前才活到最后(见 test_support 模块头)
     type TestLoaders = (
+        TempDataDir,
         Arc<Db>,
         Box<dyn Fn(&str) -> Option<Value> + Send + Sync>,
         Box<dyn Fn(&str) -> Vec<WorldEntry> + Send + Sync>,
@@ -106,8 +109,7 @@ mod tests {
     /// 直接用 Db 构造两个取数据闭包:角色卡 data_raw 直查,世界书源本轮不涉及
     /// (注册表单测只覆盖角色卡提取与缓存语义)→ 空列表。生产注入见 api/app_state.rs。
     fn services() -> TestLoaders {
-        let dir = std::env::temp_dir().join(format!("kedai-reg-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TempDataDir::new("reg");
         let db = Arc::new(Db::open(&dir.join("t.db"), &dir).unwrap());
         let db_for_cards = db.clone();
         let characters = move |id: &str| -> Option<Value> {
@@ -123,7 +125,7 @@ mod tests {
             .and_then(|s| serde_json::from_str(&s).ok())
         };
         let world_books = |_id: &str| -> Vec<WorldEntry> { Vec::new() };
-        (db, Box::new(characters), Box::new(world_books))
+        (dir, db, Box::new(characters), Box::new(world_books))
     }
 
     fn contract_json(id: &str) -> String {
@@ -153,7 +155,7 @@ mod tests {
     /// (「脏缓存」bug 的回归测试)
     #[test]
     fn load_caches_until_invalidated() {
-        let (db, characters, world_books) = services();
+        let (_dir, db, characters, world_books) = services();
         upsert_character(&db, "c1", Some(&contract_json("v1")));
         let reg = ContractRegistry::new(characters, world_books);
 
@@ -171,7 +173,7 @@ mod tests {
     /// 无契约角色 → None 且不缓存;添加契约后(无需失效)即可加载到。
     #[test]
     fn no_contract_not_cached_and_later_add_works() {
-        let (db, characters, world_books) = services();
+        let (_dir, db, characters, world_books) = services();
         upsert_character(&db, "c2", None);
         let reg = ContractRegistry::new(characters, world_books);
 
@@ -184,7 +186,7 @@ mod tests {
     /// clear 清空全部(全局世界书变更场景)。
     #[test]
     fn clear_drops_all_entries() {
-        let (db, characters, world_books) = services();
+        let (_dir, db, characters, world_books) = services();
         upsert_character(&db, "c3", Some(&contract_json("v1")));
         let reg = ContractRegistry::new(characters, world_books);
         assert!(reg.load("c3").is_some());
@@ -196,7 +198,7 @@ mod tests {
     /// 不存在的角色 → None。
     #[test]
     fn missing_character_returns_none() {
-        let (_db, characters, world_books) = services();
+        let (_dir, _db, characters, world_books) = services();
         let reg = ContractRegistry::new(characters, world_books);
         assert!(reg.load("ghost").is_none());
     }

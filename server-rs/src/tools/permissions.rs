@@ -494,6 +494,7 @@ fn default_risk(tool: &str) -> ToolRisk {
 mod tests {
     use super::*;
     use crate::models::types::ToolContext;
+    use crate::utils::test_support::TempDataDir;
 
     fn context() -> ToolContext {
         ToolContext {
@@ -505,29 +506,31 @@ mod tests {
 
     #[test]
     fn failed_authorize_does_not_change_memory() {
-        let root =
-            std::env::temp_dir().join(format!("kedai-permission-fail-{}", uuid::Uuid::new_v4()));
-        std::fs::write(&root, "not a directory").unwrap();
-        let manager = ToolPermissionManager::load(root.join("permissions.json"));
+        let root = TempDataDir::new("permission-fail");
+        // 父路径故意做成一个「文件」而非目录:permissions.json 无法在其下创建,
+        // 借此模拟落盘失败。放在 root 内一层是为了让 TempDataDir 仍能整体清理
+        //(直接把 root 本身变成文件会让守卫的 remove_dir_all 静默失败、留下残留)。
+        let blocked = root.join("blocked");
+        std::fs::write(&blocked, "not a directory").unwrap();
+        let manager = ToolPermissionManager::load(blocked.join("permissions.json"));
         assert!(manager.authorize("search", "session", "s").is_err());
         assert!(!manager.decide("search", &context()).allowed);
-        let _ = std::fs::remove_file(root);
     }
 
     #[test]
     fn failed_revoke_keeps_existing_memory_grant() {
-        let root =
-            std::env::temp_dir().join(format!("kedai-permission-revoke-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        let path = root.join("permissions.json");
+        let root = TempDataDir::new("permission-revoke");
+        let dir = root.join("cfg");
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("permissions.json");
         let manager = ToolPermissionManager::load(path.clone());
         manager.authorize("search", "session", "s").unwrap();
         std::fs::remove_file(&path).unwrap();
-        std::fs::remove_dir(&root).unwrap();
-        std::fs::write(&root, "block directory").unwrap();
+        // 把承载目录换成文件(同上一用例的机制),使 revoke 的落盘必然失败
+        std::fs::remove_dir(&dir).unwrap();
+        std::fs::write(&dir, "block directory").unwrap();
         assert!(manager.revoke("search", "session", "s").is_err());
         assert!(manager.decide("search", &context()).allowed);
-        let _ = std::fs::remove_file(root);
     }
 
     // ==================== 三档授权模式矩阵 ====================
@@ -713,9 +716,7 @@ mod tests {
     /// 场景:历史配置或手改的 tool_permissions.json 里存在 role_grants[""]。
     #[test]
     fn anonymous_session_does_not_match_role_grants() {
-        let root =
-            std::env::temp_dir().join(format!("kedai-permission-anon-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
+        let root = TempDataDir::new("permission-anon");
         let path = root.join("permissions.json");
         std::fs::write(
             &path,
@@ -730,7 +731,6 @@ mod tests {
         };
         let d = m.decide("memory_write", &anon);
         assert!(!d.allowed, "空角色不应命中 role_grants[\"\"]");
-        let _ = std::fs::remove_dir_all(root);
     }
 
     /// authorize 拒绝空 scope_id(旧实现会写入 role_grants[""],造成跨匿名会话串权)

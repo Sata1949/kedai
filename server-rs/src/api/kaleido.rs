@@ -183,18 +183,18 @@ pub async fn changelog(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::test_support::TempDataDir;
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
 
     /// 构建含三个契约引擎 HTTP 出口路由的测试应用(与 contract_history 测试
     /// 同款隔离:独立 temp 目录 + mock 连接器 + 裸角色直插)。
-    fn app() -> (axum::Router, Arc<AppState>) {
+    fn app() -> (TempDataDir, axum::Router, Arc<AppState>) {
         let mut config = crate::config::AppConfig::from_env();
         config.auth_required = false;
-        let dir = std::env::temp_dir().join(format!("kedai-kaleido-api-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        config.data_dir = dir;
+        let dir = TempDataDir::new("kaleido-api");
+        config.data_dir = dir.path().to_path_buf();
         config.connector = "mock".into();
         let state = AppState::new(config).unwrap();
         let router = axum::Router::new()
@@ -202,7 +202,7 @@ mod tests {
             .route("/api/variable/state", axum::routing::get(get_state))
             .route("/api/variable/changelog", axum::routing::get(changelog))
             .with_state(state.clone());
-        (router, state)
+        (dir, router, state)
     }
 
     /// 直插带契约的角色(extensions.nlkaleido 内嵌于 data_raw 顶层,与
@@ -298,7 +298,7 @@ mod tests {
     /// 错误响应须带与状态码匹配的结构化 code(errors.rs 收尾)。
     #[tokio::test]
     async fn update_rejects_invalid_requests() {
-        let (router, state) = app();
+        let (_dir, router, state) = app();
         let (_, sid) = seed_contract_character(&state);
 
         let (status, body) = post(
@@ -329,7 +329,7 @@ mod tests {
     /// 低置信全拦时 ok:false 但提议入 meta.pending(自纠闭环)。
     #[tokio::test]
     async fn update_full_contract_engine_roundtrip() {
-        let (router, state) = app();
+        let (_dir, router, state) = app();
         let (cid, sid) = seed_contract_character(&state);
 
         // 第一轮:external 写好感度成功;信任度 not_owner 拒
@@ -407,7 +407,7 @@ mod tests {
     /// 无契约角色(存量卡):补丁原样放行(零行为变化),无 kaleido 行。
     #[tokio::test]
     async fn update_without_contract_passes_through() {
-        let (router, state) = app();
+        let (_dir, router, state) = app();
         let cid = uuid::Uuid::new_v4().to_string();
         {
             let conn = state.db.write();

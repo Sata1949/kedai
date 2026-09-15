@@ -290,16 +290,13 @@ impl AgentSubtaskService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::test_support::TempDataDir;
 
-    fn svc() -> AgentSubtaskService {
-        let dir = std::env::temp_dir().join(format!(
-            "kedai-subtask-test-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        let _ = std::fs::create_dir_all(&dir);
+    /// 返回 (守卫, 服务):解构绑定按**逆序**析构,守卫在前才活到最后(见 test_support 模块头)
+    fn svc() -> (TempDataDir, AgentSubtaskService) {
+        let dir = TempDataDir::new("subtask-test");
         let db = Arc::new(Db::open(&dir.join("t.db"), &dir).unwrap());
-        AgentSubtaskService::new(db)
+        (dir, AgentSubtaskService::new(db))
     }
 
     /// 任务模式内存覆盖层:task: 前缀虚拟 session 的 CRUD 全程不碰 DB
@@ -307,7 +304,7 @@ mod tests {
     /// create/get/list/set_status/end 语义与 DB 路径一致。
     #[test]
     fn task_prefixed_session_uses_memory_overlay() {
-        let s = svc();
+        let (_dir, s) = svc();
         // 创建(task: 前缀,DB 中无对应 sessions 行——若走 DB 必 FK 失败)
         let r1 = s
             .create("task:t1", "", "子一", "指令一")
@@ -355,7 +352,7 @@ mod tests {
     /// 只读覆盖层,不碰 DB(DB 路径的 session_id 是真实会话,无前缀语义)。
     #[test]
     fn list_by_session_prefix_covers_team_virtual_sessions() {
-        let s = svc();
+        let (_dir, s) = svc();
         let a = s.create("task:t1", "", "主旁子一", "指令一").unwrap();
         let b = s.create("task:t1:main:0", "", "主0子一", "指令二").unwrap();
         let c = s.create("task:t1:main:1", "", "主1子一", "指令三").unwrap();
@@ -388,11 +385,11 @@ mod tests {
     /// 普通会话仍走 DB 路径(回归:聊天路径行为不变)
     #[test]
     fn normal_session_still_uses_db() {
-        let s = svc();
+        let (_dir, s) = svc();
         // 造真实角色与会话行满足 FK
         let characters = crate::services::character_service::CharacterService::new(
             s.db.clone(),
-            std::env::temp_dir(),
+            _dir.path().to_path_buf(),
         );
         characters.seed_default_character();
         let sessions = crate::services::session_service::SessionService::new(s.db.clone());

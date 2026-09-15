@@ -186,18 +186,18 @@ fn not_found() -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::test_support::TempDataDir;
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
 
     /// 构建仅含契约路由的测试应用,返回 (Router, 共享 AppState)。
     /// AppState 的 db/engine 均为 pub,种子数据与缓存断言直接经句柄操作。
-    fn app() -> (axum::Router, Arc<AppState>) {
+    fn app() -> (TempDataDir, axum::Router, Arc<AppState>) {
         let mut config = crate::config::AppConfig::from_env();
         config.auth_required = false;
-        let dir = std::env::temp_dir().join(format!("kedai-contract-api-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        config.data_dir = dir;
+        let dir = TempDataDir::new("contract-api");
+        config.data_dir = dir.path().to_path_buf();
         config.connector = "mock".into();
         let state = AppState::new(config).unwrap();
         let router = axum::Router::new()
@@ -206,7 +206,7 @@ mod tests {
                 axum::routing::get(get).put(put).delete(super::delete),
             )
             .with_state(state.clone());
-        (router, state)
+        (dir, router, state)
     }
 
     /// 直接插入裸角色记录(不动生产代码接口)
@@ -281,7 +281,7 @@ mod tests {
     /// PUT 写入 → GET 读回一致 → DELETE 清除后 GET 返回 null。
     #[tokio::test]
     async fn put_get_delete_roundtrip() {
-        let (router, state) = app();
+        let (_dir, router, state) = app();
         seed_character(&state, "c-rt");
         let body = contract_body();
 
@@ -313,7 +313,7 @@ mod tests {
     /// PUT 保留角色卡其余字段(name/description 不被抹掉)。
     #[tokio::test]
     async fn put_preserves_other_card_fields() {
-        let (router, state) = app();
+        let (_dir, router, state) = app();
         seed_character(&state, "c-keep");
         // 起点带其他 extension 字段
         {
@@ -345,7 +345,7 @@ mod tests {
     /// 非法契约(依赖环)PUT → 422 + 错误信息,且不落库。
     #[tokio::test]
     async fn invalid_contract_rejected_with_422() {
-        let (router, state) = app();
+        let (_dir, router, state) = app();
         seed_character(&state, "c-bad");
         let mut body = contract_body();
         body["updateRules"]["A"] = json!({
@@ -371,7 +371,7 @@ mod tests {
     /// 不存在的角色 → 404(GET/PUT/DELETE)。
     #[tokio::test]
     async fn missing_character_404() {
-        let (router, _state) = app();
+        let (_dir, router, _state) = app();
         let (status, _) = get_contract(&router, "ghost").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
 
@@ -394,7 +394,7 @@ mod tests {
     /// PUT 成功后契约缓存已失效:registry 下次加载读到新契约(无需重启)。
     #[tokio::test]
     async fn put_invalidates_registry_cache() {
-        let (router, state) = app();
+        let (_dir, router, state) = app();
         seed_character(&state, "c-cache");
         // 预热(无契约 → None;由于无契约不缓存,直接断言)
         assert!(state.engine.contract_registry.load("c-cache").is_none());

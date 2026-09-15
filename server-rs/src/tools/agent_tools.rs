@@ -27,8 +27,6 @@ use super::agent_tools_agent::{
 };
 use super::agent_tools_read::register_read;
 use super::agent_tools_search::register_search;
-#[cfg(test)]
-use super::agent_tools_shared::random_u64;
 use super::agent_tools_shared::register_role;
 use super::agent_tools_write::{register_create, register_replace, register_write};
 
@@ -77,20 +75,16 @@ impl ToolDeps {
             .clone()
     }
 
-    /// 测试用空依赖(临时目录 + mock 连接器)
+    /// 测试用空依赖(临时目录 + mock 连接器)。
+    /// 返回 (守卫, 依赖):守卫不能存进 ToolDeps(其 data_dir 是 PathBuf),
+    /// 由调用方持有并须活到 deps 之后(解构绑定按逆序析构,守卫在前即最后析构)
     #[cfg(test)]
-    fn dummy_for_test() -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "kedai-tool-test-{}-{}",
-            std::process::id(),
-            random_u64()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::create_dir_all(&dir);
+    fn dummy_for_test() -> (crate::utils::test_support::TempDataDir, Self) {
+        let dir = crate::utils::test_support::TempDataDir::new("tool-test");
         let db = Arc::new(crate::models::db::Db::open(&dir.join("t.db"), &dir).unwrap());
-        ToolDeps {
+        let deps = ToolDeps {
             sessions: Arc::new(SessionService::new(db.clone())),
-            characters: Arc::new(CharacterService::new(db.clone(), dir.clone())),
+            characters: Arc::new(CharacterService::new(db.clone(), dir.path().to_path_buf())),
             world_books: Arc::new(WorldBookService::new(db.clone())),
             agent_sessions: Arc::new(AgentSessionService::new(db.clone())),
             subtasks: Arc::new(AgentSubtaskService::new(db.clone())),
@@ -102,12 +96,13 @@ impl ToolDeps {
             connector: Arc::new(RwLock::new(Connector::Mock(
                 crate::connectors::mock::MockConnector::new(),
             ))),
-            data_dir: dir,
+            data_dir: dir.path().to_path_buf(),
             memory: Arc::new(crate::services::memory_service::MemoryService::new(db)),
             // 测试缺省不注入引擎/任务服务:子任务走纯生成回退路径
             engine: std::sync::OnceLock::new(),
             tasks: std::sync::OnceLock::new(),
-        }
+        };
+        (dir, deps)
     }
 }
 
@@ -226,7 +221,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_role_tool() {
-        let deps = Arc::new(ToolDeps::dummy_for_test());
+        let (_dir, deps) = ToolDeps::dummy_for_test();
+        let deps = Arc::new(deps);
         let reg = ToolRegistry::new();
         register_role(&reg, deps);
         let out = reg
@@ -272,7 +268,8 @@ mod tests {
     /// write 文件 / create 目录与文件 / read 读回 / 重复创建报错 / 目录穿越被拒
     #[tokio::test]
     async fn test_write_create_read_files() {
-        let deps = Arc::new(ToolDeps::dummy_for_test());
+        let (_dir, deps) = ToolDeps::dummy_for_test();
+        let deps = Arc::new(deps);
         let reg = ToolRegistry::new();
         register_write(&reg, deps.clone());
         register_read(&reg, deps.clone());
@@ -362,7 +359,8 @@ mod tests {
     /// write 气泡 → replace 同步多次操作(append/prepend/replace/delete)
     #[tokio::test]
     async fn test_write_and_replace_bubble() {
-        let deps = Arc::new(ToolDeps::dummy_for_test());
+        let (_dir, deps) = ToolDeps::dummy_for_test();
+        let deps = Arc::new(deps);
         let reg = ToolRegistry::new();
         register_write(&reg, deps.clone());
         register_replace(&reg, deps.clone());
@@ -451,7 +449,8 @@ mod tests {
     /// replace 文件多次操作 + 最终内容验证
     #[tokio::test]
     async fn test_replace_file_ops() {
-        let deps = Arc::new(ToolDeps::dummy_for_test());
+        let (_dir, deps) = ToolDeps::dummy_for_test();
+        let deps = Arc::new(deps);
         let reg = ToolRegistry::new();
         register_write(&reg, deps.clone());
         register_replace(&reg, deps.clone());
@@ -537,7 +536,8 @@ mod tests {
     /// 删除不存在的文件报错而非静默成功;bubble 不支持 remove。
     #[tokio::test]
     async fn test_replace_remove_file_ops() {
-        let deps = Arc::new(ToolDeps::dummy_for_test());
+        let (_dir, deps) = ToolDeps::dummy_for_test();
+        let deps = Arc::new(deps);
         let reg = ToolRegistry::new();
         register_write(&reg, deps.clone());
         register_replace(&reg, deps.clone());
@@ -630,7 +630,8 @@ mod tests {
     /// 深度守卫:agent_depth 达到上限时拒绝派发,提示主智能体直接处理
     #[tokio::test]
     async fn agentgo_rejects_when_depth_exceeds_limit() {
-        let deps = Arc::new(ToolDeps::dummy_for_test());
+        let (_dir, deps) = ToolDeps::dummy_for_test();
+        let deps = Arc::new(deps);
         // 默认 subagent_max_depth = 2;模拟深度 2 的嵌套上下文
         {
             let mut s = deps.settings.lock().unwrap_or_else(|e| e.into_inner());
@@ -683,7 +684,8 @@ mod tests {
     /// 并发守卫:会话内 running 子任务数加本次派发超过上限时拒绝,不创建新任务
     #[tokio::test]
     async fn agentgo_rejects_when_concurrency_exhausted() {
-        let deps = Arc::new(ToolDeps::dummy_for_test());
+        let (_dir, deps) = ToolDeps::dummy_for_test();
+        let deps = Arc::new(deps);
         {
             let mut s = deps.settings.lock().unwrap_or_else(|e| e.into_inner());
             s.subagent_max_concurrency = 2;
@@ -728,7 +730,8 @@ mod tests {
     #[tokio::test]
     async fn subtask_result_truncates_with_marker() {
         use crate::tools::agent_tools_agent::truncate_subtask_result_for_test;
-        let deps = Arc::new(ToolDeps::dummy_for_test());
+        let (_dir, deps) = ToolDeps::dummy_for_test();
+        let deps = Arc::new(deps);
         {
             let mut s = deps.settings.lock().unwrap_or_else(|e| e.into_inner());
             s.subagent_result_max_chars = 10;
@@ -779,7 +782,8 @@ mod tests {
     /// 审计 A1/A2:混合批(1 合法 + 1 空 instruction)→ Ok,合法项被创建,非法项进 rejected
     #[tokio::test]
     async fn agentgo_mixed_batch_dispatches_valid_and_rejects_invalid() {
-        let deps = Arc::new(ToolDeps::dummy_for_test());
+        let (_dir, deps) = ToolDeps::dummy_for_test();
+        let deps = Arc::new(deps);
         let reg = ToolRegistry::new();
         register_agentgo(&reg, deps.clone());
         let ctx = mk_authorized_session(&deps, &reg, &["agentgo"]);
@@ -815,7 +819,8 @@ mod tests {
     /// 审计 A2:纯空白 instruction(" ")按 trim 语义被拒,不再当合法任务
     #[tokio::test]
     async fn agentgo_blank_whitespace_instruction_is_rejected() {
-        let deps = Arc::new(ToolDeps::dummy_for_test());
+        let (_dir, deps) = ToolDeps::dummy_for_test();
+        let deps = Arc::new(deps);
         let reg = ToolRegistry::new();
         register_agentgo(&reg, deps.clone());
         let ctx = mk_authorized_session(&deps, &reg, &["agentgo"]);
@@ -839,7 +844,8 @@ mod tests {
     /// 审计 A:全废批 → Err,错误文案含逐项原因(便于模型自纠)
     #[tokio::test]
     async fn agentgo_all_invalid_returns_error_with_per_item_reasons() {
-        let deps = Arc::new(ToolDeps::dummy_for_test());
+        let (_dir, deps) = ToolDeps::dummy_for_test();
+        let deps = Arc::new(deps);
         let reg = ToolRegistry::new();
         register_agentgo(&reg, deps.clone());
         let ctx = mk_authorized_session(&deps, &reg, &["agentgo"]);
@@ -868,7 +874,8 @@ mod tests {
     /// 审计 C:read(type=subtask) 三键命中(id / 精确 name / 子串)+ 无命中和多命中语义
     #[tokio::test]
     async fn read_subtask_matches_by_id_name_and_substring() {
-        let deps = Arc::new(ToolDeps::dummy_for_test());
+        let (_dir, deps) = ToolDeps::dummy_for_test();
+        let deps = Arc::new(deps);
         deps.characters.seed_default_character();
         let session = deps
             .sessions
@@ -943,7 +950,8 @@ mod tests {
     /// 审计 E:todo 在任务模式派生 session 下能看到同任务全部子任务,且显式标注 tool_calls 不可用
     #[tokio::test]
     async fn todo_in_task_mode_sees_sibling_subtasks_and_flags_tool_calls_unavailable() {
-        let deps = Arc::new(ToolDeps::dummy_for_test());
+        let (_dir, deps) = ToolDeps::dummy_for_test();
+        let deps = Arc::new(deps);
         // 子任务挂在 task:t1(走内存覆盖层);todo 从派生 session task:t1:sub:x 查询
         let _s1 = deps
             .subtasks
@@ -985,7 +993,8 @@ mod tests {
     /// 审计 F:agentend 对活跃任务 interrupted=true;对已结束任务再调 existed=true 但 interrupted=false
     #[tokio::test]
     async fn agentend_reports_interrupted_only_for_active_task() {
-        let deps = Arc::new(ToolDeps::dummy_for_test());
+        let (_dir, deps) = ToolDeps::dummy_for_test();
+        let deps = Arc::new(deps);
         let reg = ToolRegistry::new();
         register_agentend(&reg, deps.clone());
         let ctx = mk_authorized_session(&deps, &reg, &["agentend"]);
@@ -1053,7 +1062,8 @@ mod tests {
     /// 审计 B(落库):set_failed 状态 error 且保留截断正文
     #[tokio::test]
     async fn set_failed_keeps_truncated_body_and_marks_error() {
-        let deps = Arc::new(ToolDeps::dummy_for_test());
+        let (_dir, deps) = ToolDeps::dummy_for_test();
+        let deps = Arc::new(deps);
         let t = deps.subtasks.create("task:t1", "c", "子", "指令").unwrap();
         let rec = deps
             .subtasks

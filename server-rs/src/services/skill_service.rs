@@ -224,16 +224,13 @@ impl SkillService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::test_support::TempDataDir;
 
-    fn service() -> SkillService {
-        let dir = std::env::temp_dir().join(format!(
-            "kedai-skill-test-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        let _ = std::fs::create_dir_all(&dir);
+    /// 返回 (守卫, 服务):解构绑定按**逆序**析构,守卫在前才活到最后(见 test_support 模块头)
+    fn service() -> (TempDataDir, SkillService) {
+        let dir = TempDataDir::new("skill-test");
         let db = Arc::new(Db::open(&dir.join("t.db"), &dir).unwrap());
-        SkillService::new(db)
+        (dir, SkillService::new(db))
     }
 
     /// 渐进披露清单:格式固定「- name:description」,按 name 稳定排序,
@@ -311,7 +308,7 @@ mod tests {
     /// 旧格式(缺字段)导入回退默认;更新接口可改 enabled 与新字段;往返一致。
     #[test]
     fn import_and_update_progressive_metadata() {
-        let svc = service();
+        let (_dir, svc) = service();
         // 旧格式导入:缺三个新字段 → 默认 [] / false / ''
         svc.import(vec![SkillImport {
             name: "旧技能".into(),
