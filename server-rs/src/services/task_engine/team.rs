@@ -45,8 +45,13 @@ const TEAM_JSON_TEMPERATURE: f64 = 0.3;
 const TEAM_PLAN_INITIAL_MAX_TOKENS: u32 = 2048;
 /// 规划解析最大尝试次数(截断/空输出翻倍预算,同 PLAN_MAX_ATTEMPTS)
 const TEAM_PLAN_MAX_ATTEMPTS: u32 = 3;
-/// 重试预算翻倍上限(同 RETRY_MAX_TOKENS_CAP)
-const TEAM_RETRY_MAX_TOKENS_CAP: u32 = 65536;
+/// 重试预算翻倍上限(与设置页 max_tokens 上限一致)
+const TEAM_RETRY_MAX_TOKENS_CAP: u32 = 131_072;
+/// 结构化/长文本阶段(审计、终审、汇总)的初始输出预算下限。
+/// 2026-09-15 实录:审计 `max_tokens=10000` 被 reasoning 吃掉 9894、正文仅 178 字符
+/// 即被截断,自愈翻倍到 20000 重发才成功——首发即给足可省掉这一整个 50 秒左右
+/// 的空烧往返。默认 `default_max_tokens=1024` 时更小,结构化 JSON 必然腰斩。
+const TEAM_STRUCTURED_MIN_TOKENS: u32 = 16384;
 
 /// 一个主 agent 的分工:分工名 + 子目标(1~4 个)
 #[derive(Debug, Clone)]
@@ -265,25 +270,60 @@ fn parse_audit(text: &str, mains_count: usize) -> AuditVerdict {
     }
 }
 
-/// 截断自愈预算决策(纯函数):仅 finish_reason=length 触发,预算翻倍并封顶。
-/// 对齐 solo/custom 逐步执行的自愈语义(2026-09-03 实测:team 审计/终审/汇总
-/// 直调 generate_text 无自愈,推理模型 reasoning 烧光 1024 预算产出腰斩 JSON)。
-/// 算法与触发条件收敛在 `utils::retry::truncation_heal_budget`(2026-09-13 批次 4.1
-/// 四路合一);本路径单次重发,故 max_rounds=1。
+/// 截断自愈预算决策(纯函数):仅 finish_reason=length 触发,预算翻倍、不低于
+/// `HEAL_BUDGET_FLOOR` 并封顶。对齐 solo/custom 逐步执行的自愈语义
+///(2026-09-03 实测:team 审计/终审/汇总直调 generate_text 无自愈,推理模型
+/// reasoning 烧光 1024 预算产出腰斩 JSON;2026-09-15 实录审计 10000 预算被
+/// reasoning 吃掉 9894、正文仅 178 字符)。
+/// 算法与触发条件收敛在 `utils::retry`(2026-09-13 批次 4.1 四路合一;
+/// 2026-09-15 引入下限);本路径单次重发。
 fn trunc_heal_budget(finish_reason: Option<&str>, max_tokens: u32) -> Option<u32> {
-    crate::utils::retry::truncation_heal_budget(
-        finish_reason,
+    if finish_reason != Some("length") {
+        return None;
+    }
+    crate::utils::retry::heal_budget_with_floor(
         max_tokens,
-        0,
         TEAM_RETRY_MAX_TOKENS_CAP,
-        1,
+        crate::utils::retry::HEAL_BUDGET_FLOOR,
     )
 }
 
+/// 审计/终审/汇总的实际输出预算:在用户设置之上保证 `TEAM_STRUCTURED_MIN_TOKENS`
+/// 下限(结构化 JSON 与长文本汇总在小预算下必被 reasoning 挤断),并受封顶约束。
+fn structured_budget(setting: u32) -> u32 {
+    setting
+        .max(TEAM_STRUCTURED_MIN_TOKENS)
+        .min(TEAM_RETRY_MAX_TOKENS_CAP)
+}
+
+/// 推理感知的截断自愈预算(纯函数,2026-09-15):在 `trunc_heal_budget` 之上,
+/// 若该轮推理已挤占预算(有 reasoning 观测),按「已消耗 + 原预算」给足,让正文有
+/// 与原预算等宽的空间,避免翻倍后仍被推理吃掉、再烧一个完整往返。
+///
+/// 只在这一形态加强:无 reasoning 观测(非思考模型)或推理未挤占时,维持既有翻倍语义。
+fn trunc_heal_budget_reasoning_aware(
+    finish_reason: Option<&str>,
+    max_tokens: u32,
+    completion_tokens: i64,
+    reasoning_tokens: i64,
+) -> Option<u32> {
+    let base = trunc_heal_budget(finish_reason, max_tokens)?;
+    // 无推理观测(0 = 非思考模型或上游未下发)时不加强,保持既有语义
+    if reasoning_tokens <= 0 || completion_tokens <= 0 {
+        return Some(base);
+    }
+    // reasoning 与正文共用 completion 预算,推理占满时正文只能腰斩;
+    // 目标 = 已消耗 + 原预算(正文至少还有与原预算等宽的空间)
+    let target = (completion_tokens.max(0) as u32)
+        .saturating_add(max_tokens)
+        .min(TEAM_RETRY_MAX_TOKENS_CAP);
+    Some(target.max(base))
+}
+
 /// 审计/终审/汇总共用的纯生成出口:先按原预算调 generate_text,finish=length
-/// 时翻倍重发一次(截断自愈)。两次调用均经 generate_text 落 task_llm_calls,
-/// 调用情况面板可见「截断 → 提高预算重发」完整链路;token 用量两次都入 total,
-/// record_usage 两次都落(与 solo 自愈留痕同口径)。
+/// 时按「翻倍(不低于下限)+ 推理感知」重发一次(截断自愈)。两次调用均经
+/// generate_text 落 task_llm_calls,调用情况面板可见「截断 → 提高预算重发」
+/// 完整链路;token 用量两次都入 total,record_usage 两次都落(与 solo 自愈留痕同口径)。
 #[allow(clippy::too_many_arguments)]
 async fn generate_text_healed(
     svc: &Arc<dyn TaskBackend>,
@@ -313,14 +353,21 @@ async fn generate_text_healed(
     total.prompt_tokens += out.prompt_tokens;
     total.completion_tokens += out.completion_tokens;
     total.total_tokens += out.prompt_tokens + out.completion_tokens;
-    let Some(retry_budget) = trunc_heal_budget(out.finish_reason.as_deref(), max_tokens) else {
+    let Some(retry_budget) = trunc_heal_budget_reasoning_aware(
+        out.finish_reason.as_deref(),
+        max_tokens,
+        out.completion_tokens,
+        out.reasoning_tokens,
+    ) else {
         return Ok(out);
     };
     tracing::warn!(
         phase = phase,
         max_tokens = max_tokens,
+        reasoning_tokens = out.reasoning_tokens,
+        completion_tokens = out.completion_tokens,
         retry_max_tokens = retry_budget,
-        "team 纯生成调用截断,输出上限翻倍重发"
+        "team 纯生成调用截断,提高输出上限重发"
     );
     svc.emit_event(
         TaskEventKind::AgentStatus,
@@ -328,7 +375,7 @@ async fn generate_text_healed(
         None,
         None,
         Some(format!(
-            "(截断自愈){phase} 输出截断,输出上限翻倍至 {retry_budget} 重发"
+            "(截断自愈){phase} 输出截断,输出上限提高至 {retry_budget} 重发"
         )),
     );
     out = svc
@@ -579,7 +626,7 @@ impl TeamExecutor {
             &ctx.task_id,
             "audit",
             audit_messages,
-            ctx.settings.default_max_tokens,
+            structured_budget(ctx.settings.default_max_tokens),
             TEAM_JSON_TEMPERATURE,
             ctx.settings.default_top_p,
             &ctx.cancel,
@@ -637,7 +684,7 @@ impl TeamExecutor {
                 &ctx.task_id,
                 "final_audit",
                 review_messages,
-                ctx.settings.default_max_tokens,
+                structured_budget(ctx.settings.default_max_tokens),
                 TEAM_JSON_TEMPERATURE,
                 ctx.settings.default_top_p,
                 &ctx.cancel,
@@ -680,7 +727,7 @@ impl TeamExecutor {
             &ctx.task_id,
             "summary",
             summary_messages.clone(),
-            ctx.settings.default_max_tokens,
+            structured_budget(ctx.settings.default_max_tokens),
             ctx.settings.default_temperature,
             ctx.settings.default_top_p,
             &ctx.cancel,
@@ -696,7 +743,7 @@ impl TeamExecutor {
                     None,
                     summary_messages,
                     Vec::new(),
-                    ctx.settings.default_max_tokens,
+                    structured_budget(ctx.settings.default_max_tokens),
                     ctx.settings.default_temperature,
                     ctx.settings.default_top_p,
                     ctx.cancel.clone(),
@@ -1276,14 +1323,53 @@ mod tests {
 
     /// 截断自愈预算决策(2026-09-03 实测:推理模型 reasoning 烧光
     /// default_max_tokens=1024,审计 finish=length 产出腰斩 JSON):
-    /// 仅 finish=length 触发翻倍,封顶 TEAM_RETRY_MAX_TOKENS_CAP
+    /// 仅 finish=length 触发;翻倍且不低于 HEAL_BUDGET_FLOOR,封顶 TEAM_RETRY_MAX_TOKENS_CAP。
+    /// (2026-09-15:小预算不再「翻倍到 2048 这种仍被推理烧光」的档位,直接抬到下限。)
     #[test]
     fn trunc_heal_budget_only_on_length() {
-        assert_eq!(trunc_heal_budget(Some("length"), 1024), Some(2048));
-        assert_eq!(trunc_heal_budget(Some("length"), 40000), Some(65536));
-        assert_eq!(trunc_heal_budget(Some("length"), 65536), None);
+        assert_eq!(
+            trunc_heal_budget(Some("length"), 1024),
+            Some(16_384),
+            "小预算应抬到下限(而非仅翻倍到 2048)"
+        );
+        assert_eq!(
+            trunc_heal_budget(Some("length"), 16_384),
+            Some(32_768),
+            "下限之上仍按翻倍"
+        );
+        assert_eq!(trunc_heal_budget(Some("length"), 40000), Some(80_000));
+        assert_eq!(trunc_heal_budget(Some("length"), 131_072), None);
         assert_eq!(trunc_heal_budget(Some("stop"), 1024), None);
         assert_eq!(trunc_heal_budget(None, 1024), None);
+    }
+
+    /// 推理感知加强(2026-09-15 实录:审计 10000 预算被 reasoning 吃掉 9894、
+    /// 正文仅 178 字符即截断,翻倍到 20000 重发才成功):
+    /// 有 reasoning 观测时按「已消耗 + 原预算」一次给足;无观测时维持既有翻倍语义。
+    #[test]
+    fn trunc_heal_budget_reasoning_aware_gives_room_for_body() {
+        // 实录形态:10000 预算,completion 10005(其中 reasoning 9894)
+        // 目标 = 10005 + 10000 = 20005,比单纯翻倍(20000)略高,足以容下正文
+        assert_eq!(
+            trunc_heal_budget_reasoning_aware(Some("length"), 10_000, 10_005, 9_894),
+            Some(20_005)
+        );
+        // 无 reasoning 观测(非思考模型):维持既有翻倍语义
+        assert_eq!(
+            trunc_heal_budget_reasoning_aware(Some("length"), 10_000, 10_000, 0),
+            Some(20_000)
+        );
+        // 非 length 不触发(加强不得绕过触发条件)
+        assert_eq!(
+            trunc_heal_budget_reasoning_aware(Some("stop"), 10_000, 10_000, 9_000),
+            None
+        );
+        // 推理感知结果同样受封顶约束
+        assert_eq!(
+            trunc_heal_budget_reasoning_aware(Some("length"), 131_072, 131_072, 130_000),
+            None,
+            "已达封顶:无增长即不重发"
+        );
     }
 
     /// 腰斩 JSON 兜底(自愈重发仍截断的末层防线):按未通过兜底,结论段

@@ -751,11 +751,11 @@ pub async fn generate_raw(
 const GENERATE_RAW_MIN_TOKENS: u32 = 8192;
 /// 截断自愈的预算上限:一次翻倍即可覆盖绝大多数长卡,又不会顶爆上游模型输出上限。
 const GENERATE_RAW_RETRY_MAX_TOKENS: u32 = 32768;
-/// 请求显式 max_tokens 的合法上限:与 settings 侧 `1..=65536` 校验区间保持一致,
+/// 请求显式 max_tokens 的合法上限:与 settings 侧 `1..=131072` 校验区间保持一致,
 /// 超限钳制而非报错(调用方多是资源页脚本,尽量可用;0 已在入口 400 拒绝)。
-const GENERATE_RAW_MAX_TOKENS_LIMIT: u32 = 65536;
+const GENERATE_RAW_MAX_TOKENS_LIMIT: u32 = 131_072;
 
-/// 卡片生成的输出预算:调用方显式指定时尊重之(钳在 1..=65536),未指定时取
+/// 卡片生成的输出预算:调用方显式指定时尊重之(钳在 1..=131072),未指定时取
 /// 「用户设置 vs 结构化下限」的较大者(用户把全局 max_tokens 调大到下限之上时用用户的)。
 fn generate_raw_budget(requested: Option<u32>, setting: u32) -> u32 {
     match requested {

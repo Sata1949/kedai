@@ -169,7 +169,7 @@ impl AppConfig {
             .unwrap_or(0.9);
         let max_tokens = env_str("DEFAULT_MAX_TOKENS")
             .and_then(|v| v.parse::<u32>().ok())
-            .filter(|v| (1..=65_536).contains(v))
+            .filter(|v| (1..=131_072).contains(v))
             .unwrap_or(1024);
         let max_context = env_str("DEFAULT_MAX_CONTEXT_TOKENS")
             .and_then(|v| v.parse::<u32>().ok())

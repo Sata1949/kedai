@@ -364,8 +364,8 @@ pub async fn update_settings(
                 }
             }
             if let Some(v) = body.default_max_tokens {
-                if v == 0 || v > 65_536 {
-                    return Json(json!({ "error": "default_max_tokens 必须在 1..=65536" }))
+                if v == 0 || v > 131_072 {
+                    return Json(json!({ "error": "default_max_tokens 必须在 1..=131072" }))
                         .into_response()
                         .with_status(StatusCode::BAD_REQUEST);
                 }

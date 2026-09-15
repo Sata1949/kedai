@@ -14,7 +14,7 @@ use tokio::sync::watch;
 const EMPTY_RETRY_BACKOFF: Duration = Duration::from_millis(500);
 
 /// 空输出重试时的 max_tokens 翻倍上限(与设置页 max_tokens 上限一致)。
-const RETRY_MAX_TOKENS_CAP: u32 = 65536;
+const RETRY_MAX_TOKENS_CAP: u32 = 131_072;
 
 /// 规划调用的初始 max_tokens。推理模型的 reasoning 与正文共用同一预算,
 /// 1024 曾被 reasoning 整体吃光导致正文零输出/JSON 半截(2026-08-27 exe 实测),
@@ -24,14 +24,20 @@ const PLAN_INITIAL_MAX_TOKENS: u32 = 2048;
 /// 规划解析失败的最大尝试次数(截断/空输出每次翻倍预算,纯格式错误同预算重试)。
 const PLAN_MAX_ATTEMPTS: u32 = 3;
 
-/// 截断(length)空输出的重试预算:翻倍并封顶 RETRY_MAX_TOKENS_CAP。
-/// 算法收敛在 `utils::retry::doubled_heal_budget`(2026-09-13 批次 4.1 四路合一);
+/// 截断(length)空输出的重试预算:翻倍并封顶 RETRY_MAX_TOKENS_CAP,且不低于
+/// `HEAL_BUDGET_FLOOR`(小预算翻倍后仍是「必然被推理烧光」的档位,见该常量注释)。
+/// 算法收敛在 `utils::retry::heal_budget_with_floor`(2026-09-15 在下限补齐时引入);
 /// 封顶后(结果不大于当前值)回退原预算仍重试一次——本路径是空输出兜底重试,
 /// 同预算再试一次好过直接失败(与 chat/engine/team 三处「封顶即放弃」语义不同)。
-/// `default_max_tokens` 经 `PUT /api/settings` 校验为 1..=65536;手改 settings.json 可超出
+/// `default_max_tokens` 经 `PUT /api/settings` 校验为 1..=131072;手改 settings.json 可超出
 /// 该区间(加载期无钳制),此时保持原预算不缩小——见 `truncated_retry_budget_doubles_and_keeps_cap`。
 fn truncated_retry_budget(current: u32) -> u32 {
-    crate::utils::retry::doubled_heal_budget(current, RETRY_MAX_TOKENS_CAP).unwrap_or(current)
+    crate::utils::retry::heal_budget_with_floor(
+        current,
+        RETRY_MAX_TOKENS_CAP,
+        crate::utils::retry::HEAL_BUDGET_FLOOR,
+    )
+    .unwrap_or(current)
 }
 
 /// 空输出分级重试骨架(步骤/汇总共用;WP2-A 收敛两份逐行同构的重试,逻辑不变):
@@ -236,8 +242,11 @@ mod tests {
     /// 截断重试预算:未到封顶时翻倍;命中封顶返回原值,保证「封顶后同预算仍重试一次」
     #[test]
     fn truncated_retry_budget_doubles_and_keeps_cap() {
-        assert_eq!(truncated_retry_budget(1024), 2048);
-        assert_eq!(truncated_retry_budget(40000), RETRY_MAX_TOKENS_CAP);
+        // 小预算抬到 HEAL_BUDGET_FLOOR:1024 翻倍只有 2048,仍会被推理整个吃光
+        assert_eq!(truncated_retry_budget(1024), crate::utils::retry::HEAL_BUDGET_FLOOR);
+        assert_eq!(truncated_retry_budget(16_384), 32_768, "下限之上仍按翻倍");
+        assert_eq!(truncated_retry_budget(40000), 80_000);
+        assert_eq!(truncated_retry_budget(70_000), RETRY_MAX_TOKENS_CAP);
         assert_eq!(
             truncated_retry_budget(RETRY_MAX_TOKENS_CAP),
             RETRY_MAX_TOKENS_CAP,

@@ -51,7 +51,10 @@ fn transitions(from: AgentState) -> &'static [AgentState] {
     match from {
         // Idle 可直接进 Executing:任务/工具路径无独立规划阶段(solo/multi 进入即执行,
         // 见 task_engine/solo.rs),补入本迁移使该真实路径合法。
-        Idle => &[Planning, Executing, Finished],
+        // Idle 可直接进 ToolCall(2026-09-15):工具循环首轮就是「第一步调工具」,
+        // 引擎在 idle 上直接迁 ToolCall 是正常路径;此前不在表内,每轮都记一条
+        // 「非法状态迁移:idle → tool_call」warn,把真实日志淹没成噪声。
+        Idle => &[Planning, Executing, ToolCall, Finished],
         Planning => &[Executing, Finished, Interrupted, Error],
         Executing => &[ToolCall, Reflecting, Finished, Interrupted, Error],
         ToolCall => &[Executing, Interrupted, Error],
@@ -141,9 +144,21 @@ mod tests {
     #[test]
     fn test_invalid_transition() {
         let mut sm = StateMachine::new("s1");
-        // idle → tool_call 非法
-        assert!(sm.transition(AgentState::ToolCall, "s1").is_err());
+        // idle → reflecting 非法(反思必须先进入执行态)
+        assert!(sm.transition(AgentState::Reflecting, "s1").is_err());
         assert_eq!(sm.current(), AgentState::Idle);
+    }
+
+    /// 2026-09-15:工具循环首轮「idle → tool_call」是真实合法路径(引擎在 idle 上
+    /// 直接迁 ToolCall),此前被记为非法,每轮刷一条 warn 噪声。
+    #[test]
+    fn test_idle_directly_to_tool_call_is_valid() {
+        let mut sm = StateMachine::new("s1");
+        sm.transition(AgentState::ToolCall, "s1").unwrap();
+        assert_eq!(sm.current(), AgentState::ToolCall);
+        // 工具调用后回到执行态(工具循环的正常收束)
+        sm.transition(AgentState::Executing, "s1").unwrap();
+        assert_eq!(sm.current(), AgentState::Executing);
     }
 
     #[test]
@@ -164,8 +179,8 @@ mod tests {
     #[test]
     fn test_best_effort_invalid_transition_returns_false_and_keeps_state() {
         let mut sm = StateMachine::new("s1");
-        // idle → tool_call 非法:返回 false 且状态不变
-        assert!(!sm.transition_best_effort(AgentState::ToolCall, "s1"));
+        // idle → reflecting 非法:返回 false 且状态不变
+        assert!(!sm.transition_best_effort(AgentState::Reflecting, "s1"));
         assert_eq!(sm.current(), AgentState::Idle);
     }
 
@@ -203,8 +218,8 @@ mod tests {
             .finish();
         let mut sm = StateMachine::new("s1");
         tracing::subscriber::with_default(subscriber, || {
-            // 非法迁移:应发出 warn 日志
-            assert!(!sm.transition_best_effort(AgentState::ToolCall, "s1"));
+            // 非法迁移:应发出 warn 日志(idle → reflecting 不在允许表内)
+            assert!(!sm.transition_best_effort(AgentState::Reflecting, "s1"));
         });
         let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
         assert!(

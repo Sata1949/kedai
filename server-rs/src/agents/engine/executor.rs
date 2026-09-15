@@ -318,10 +318,12 @@ pub(crate) struct SelfHealRecord {
     pub(crate) retried_max_tokens: u32,
 }
 
-/// 截断自愈重发的 max_tokens 上限(问题①):与 task_service 空输出重试同款
-/// 「翻倍+封顶」口径;单轮产出(一次 tool_call 或一段正文)8192 足够宽裕,
-/// 封顶防止异常上游把单轮预算顶到设置页上限(65536)空烧 token。
-const TRUNCATION_HEAL_MAX_TOKENS_CAP: u32 = 8192;
+/// 截断自愈重发的 max_tokens 上限(问题①):与设置页 max_tokens 校验上限
+/// (`1..=131072`)同口径。2026-09-15 修正:该封顶原为 8192,低于子任务输出上限的
+/// 下限(16384),导致「下限之上的单轮一旦截断,翻倍结果仍被 8192 压回」——
+/// `doubled_heal_budget` 见 `min(current*2, cap) <= current` 即判定重发无意义,
+/// 子 agent 的自愈被静默放弃。封顶抬到 131072 后与子任务区间自洽。
+const TRUNCATION_HEAL_MAX_TOKENS_CAP: u32 = 131_072;
 
 /// 计算自愈重发的 max_tokens(翻倍+封顶);已封顶返回 None(重发无意义,走原错误路径)。
 /// 算法收敛在 `utils::retry::doubled_heal_budget`(2026-09-13 批次 4.1 四路合一),
@@ -1425,11 +1427,18 @@ mod tests {
         let mut r = mk_result("", Some("length"), vec![]);
         r.reasoning = "思考".repeat(200);
         // 已消耗 6000(推理占满),原预算 4000 → 翻倍仅 8000;
-        // 推理感知应给 6000+4000=10000,但受 CAP 8192 封顶
+        // 推理感知应给 6000+4000=10000(新 CAP 131072 之下一路放行)
         r.usage.completion_tokens = 6000;
         let next = heal_budget_for(&r, 4000).unwrap();
-        assert_eq!(next, 8192, "应受 CAP 封顶且大于翻倍值");
+        assert_eq!(next, 10000, "推理挤占时按已消耗+原预算给足");
         assert!(next > 8000, "应比单纯翻倍给得更多: {next}");
+        // 封顶仍生效:给足值超过 CAP 时收敛到 CAP
+        r.usage.completion_tokens = 200_000;
+        assert_eq!(
+            heal_budget_for(&r, 4000),
+            Some(TRUNCATION_HEAL_MAX_TOKENS_CAP),
+            "推理感知结果同样受 CAP 约束"
+        );
     }
 
     /// 非推理形态维持既有「翻倍」语义(不改变原有行为)
@@ -1438,8 +1447,12 @@ mod tests {
         let r = mk_result("", Some("length"), vec![]);
         assert_eq!(heal_budget_for(&r, 1000), Some(2000), "无推理时仅翻倍");
         // 已封顶 → None(重发无意义)
-        assert_eq!(heal_budget_for(&r, 8192), None);
-        assert_eq!(heal_budget_for(&r, 5000), Some(8192), "翻倍后受 CAP 收敛");
+        assert_eq!(heal_budget_for(&r, TRUNCATION_HEAL_MAX_TOKENS_CAP), None);
+        assert_eq!(
+            heal_budget_for(&r, 100_000),
+            Some(TRUNCATION_HEAL_MAX_TOKENS_CAP),
+            "翻倍后受 CAP 收敛"
+        );
     }
 
     /// Err 形态判定:仅匹配连接器半截 tool_call flush 的专属文案
@@ -1452,12 +1465,25 @@ mod tests {
         assert!(!is_truncated_tool_call_error("生成已中断"));
     }
 
-    /// 预算翻倍+封顶:1024→2048;4096→8192 封顶;8192 不再重发(None)
+    /// 预算翻倍+封顶:1024→2048;8192→16384;封顶值 131072 之上不再重发(None)
     #[test]
     fn heal_budget_doubles_with_cap() {
         assert_eq!(doubled_heal_budget(1024), Some(2048));
         assert_eq!(doubled_heal_budget(4096), Some(8192));
-        assert_eq!(doubled_heal_budget(8192), None, "已封顶不重发");
+        assert_eq!(doubled_heal_budget(8192), Some(16384));
+        assert_eq!(doubled_heal_budget(131_072), None, "已封顶不重发");
         assert_eq!(doubled_heal_budget(u32::MAX), None, "饱和相乘不得溢出");
+    }
+
+    /// 2026-09-15 回归:封顶抬到 131072 后,子任务下限(16384)之上的单轮截断
+    /// 仍能翻倍重发;旧封顶 8192 会让 16384 判定「重发无意义」而静默放弃自愈。
+    #[test]
+    fn heal_budget_still_grows_above_new_subagent_floor() {
+        assert_eq!(
+            doubled_heal_budget(16_384),
+            Some(32_768),
+            "下限之上的截断必须仍可自愈(旧封顶 8192 会返回 None)"
+        );
+        assert_eq!(doubled_heal_budget(65_536), Some(131_072));
     }
 }
