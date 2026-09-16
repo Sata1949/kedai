@@ -1812,6 +1812,12 @@ async fn task_multi_mode_subtasks_visible_from_memory_overlay() {
     );
     assert!(sub["created_at"].as_str().is_some(), "缺 created_at: {sub}");
     assert!(sub["updated_at"].as_str().is_some(), "缺 updated_at: {sub}");
+    // 批次 4:终态时刻一并透出,调用方据 finished_at 判「何时完成」,
+    // 不必再用 ended 兼表「完成后召回」与「中途中断」
+    assert!(
+        sub["finished_at"].as_str().is_some_and(|s| !s.is_empty()),
+        "done 子任务应带非空 finished_at: {sub}"
+    );
 }
 
 /// 问题⑤(回归):legacy 模式 subtasks 仍来自 task_subtasks 表(DB 路径),行为不变。

@@ -787,6 +787,9 @@ export interface TaskRecord {
  * 任务子任务状态(与 server-rs task_service 实际写入值对齐):
  * running=执行中(create_subtask 插入即 running) / done=完成 / error=失败 / ended=已停止(取消)
  * pending=待执行:当前无写入点,但 cancel 逻辑对其做防御性判断,保留在值域内
+ *
+ * 批次 4 起终态口径收窄:done/error 是终态,再被 agentend 召回**不再改写**为 ended
+ * (只补 finished_at),故 ended 只表示「真正中途中断」。
  */
 export type TaskSubtaskStatus = 'pending' | 'running' | 'done' | 'error' | 'ended';
 
@@ -801,6 +804,8 @@ export interface TaskSubtask {
   error: string;
   created_at: string;
   updated_at: string;
+  /** 首次进入终态(done/error/ended)的时刻;pending/running 期间为空串 */
+  finished_at: string;
 }
 
 /** 任务 token 累计(规划/步骤/汇总各次 LLM 调用落库聚合) */

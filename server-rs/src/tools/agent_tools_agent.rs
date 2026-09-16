@@ -725,17 +725,28 @@ pub(super) fn register_agentend(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
                         .as_ref()
                         .map(|r| r.status.clone())
                         .unwrap_or_default();
-                    let ended = deps.subtasks.end(&id);
-                    // interrupted = 本次调用真实中断了活跃任务(pending/running);
-                    // 判定「本次中断成功」应以本字段(或审计口径的 existed)为准。
-                    let interrupted =
-                        existed && (prior_status == "pending" || prior_status == "running");
+                    // 批次 4:end 返回显式结果(Interrupted / AlreadyFinished / Missing),
+                    // 不再靠 bool + prior_status 反推;终态记录保持原 status 与 result。
+                    let outcome = deps.subtasks.end(&id);
+                    let (ended, interrupted, outcome_label) = match &outcome {
+                        crate::services::agent_subtask_service::SubtaskEndOutcome::Missing => {
+                            (false, false, "missing")
+                        }
+                        crate::services::agent_subtask_service::SubtaskEndOutcome::Interrupted {
+                            ..
+                        } => (true, true, "interrupted"),
+                        crate::services::agent_subtask_service::SubtaskEndOutcome::AlreadyFinished {
+                            ..
+                        } => (true, false, "already_finished"),
+                    };
                     results.push(json!({
                         "task_id": id,
                         "existed": existed,
                         "prior_status": prior_status,
                         "ended": ended,
                         "interrupted": interrupted,
+                        // 显式三态:调用方无需自行组合 existed/prior_status 才能判语义
+                        "outcome": outcome_label,
                     }));
                 }
                 Ok(json!({
@@ -807,6 +818,9 @@ pub(super) fn register_todo(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
                             "instruction": t.instruction,
                             "result": t.result,
                             "error": t.error,
+                            // 批次 4:终态时刻一并回显,调用方据 finished_at 判「何时完成」,
+                            // 不必再用 ended 兼表「完成后召回」与「中途中断」
+                            "finished_at": t.finished_at,
                         })
                     })
                     .collect();

@@ -304,6 +304,7 @@ fn read_subtask(deps: &ToolDeps, ctx: &ToolContext, name: &str) -> Result<Subtas
 }
 
 /// 命中结果 JSON:id 与 name 双向别名 + matched_by 命中方式;字段沿用现状
+/// (批次 4 起含 finished_at:终态时刻自证,不必用 ended 反推有无结果)
 fn subtask_hit_json(task: &crate::models::types::AgentSubtaskRecord, matched_by: &str) -> Value {
     json!({
         "id": task.id,
@@ -313,5 +314,6 @@ fn subtask_hit_json(task: &crate::models::types::AgentSubtaskRecord, matched_by:
         "instruction": task.instruction,
         "result": task.result,
         "error": task.error,
+        "finished_at": task.finished_at,
     })
 }

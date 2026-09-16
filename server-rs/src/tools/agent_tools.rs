@@ -918,6 +918,11 @@ mod tests {
         assert_eq!(hit["matched_by"], "id");
         assert_eq!(hit["id"].as_str(), Some(a.id.as_str()));
         assert_eq!(hit["name"], "alpha-task");
+        // 批次 4:命中体带 finished_at(尚未进终态 → 空串),调用方据它判完成时刻
+        assert_eq!(
+            hit["finished_at"], "",
+            "pending 子任务 finished_at 应为空串: {hit}"
+        );
 
         // 2) 按精确 name:matched_by=name
         let by_name = call("beta-task".into()).await;
@@ -1050,6 +1055,11 @@ mod tests {
         let results = v["results"].as_array().unwrap();
         assert_eq!(results[0]["existed"], true);
         assert_eq!(results[1]["existed"], false);
+        // 批次 4:outcome 显式三态,调用方不必自行组合 existed/prior_status 才能判语义
+        assert_eq!(
+            results[1]["outcome"], "missing",
+            "未命中应显式 outcome=missing: {v}"
+        );
 
         // 全部命中时 ok 恢复为 true(保持既有调用方可依赖的成功语义)
         let t2 = deps
@@ -1171,6 +1181,10 @@ mod tests {
             v["results"][0]["interrupted"], true,
             "活跃任务应记为本次中断: {v}"
         );
+        assert_eq!(
+            v["results"][0]["outcome"], "interrupted",
+            "活跃任务应显式 outcome=interrupted: {v}"
+        );
 
         // 再调一次:已 ended,本次不是真实中断
         let raw2 = reg
@@ -1188,6 +1202,50 @@ mod tests {
             v2["results"][0]["interrupted"], false,
             "已 ended 任务不得再报本次中断: {v2}"
         );
+        assert_eq!(
+            v2["results"][0]["outcome"], "already_finished",
+            "终态再被召回应显式 outcome=already_finished: {v2}"
+        );
+    }
+
+    /// 批次 4(实跑记录第 3 条):`done` 的子任务被 agentend 召回后**保持 done**、
+    /// result 不丢,只有真正中途召回才落 ended——修掉 `ended` 一词的二义。
+    #[tokio::test]
+    async fn agentend_keeps_done_status_and_reports_already_finished() {
+        let (_dir, deps) = ToolDeps::dummy_for_test();
+        let deps = Arc::new(deps);
+        let reg = ToolRegistry::new();
+        register_agentend(&reg, deps.clone());
+        let ctx = mk_authorized_session(&deps, &reg, &["agentend"]);
+        let t = deps
+            .subtasks
+            .create(&ctx.session_id, "c", "已完成项", "指令")
+            .unwrap();
+        deps.subtasks.set_running(&t.id);
+        deps.subtasks.set_done(&t.id, "交付物");
+
+        let raw = reg
+            .execute(
+                "agentend",
+                &format!(r#"{{"task_ids":["{}"]}}"#, t.id),
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["ok"], true, "命中的 id 仍应 ok=true: {v}");
+        assert_eq!(v["results"][0]["prior_status"], "done");
+        assert_eq!(
+            v["results"][0]["interrupted"], false,
+            "已完成任务本次不是中断: {v}"
+        );
+        assert_eq!(v["results"][0]["outcome"], "already_finished");
+
+        // 关键断言:交付物未被 end 抹掉,状态仍为 done
+        let after = deps.subtasks.get(&t.id).unwrap();
+        assert_eq!(after.status, "done", "终态不得被 agentend 覆盖为 ended");
+        assert_eq!(after.result, "交付物", "终态结果不得被清空");
+        assert!(!after.finished_at.is_empty(), "finished_at 应在 done 时已写入");
     }
 
     /// 审计 B(纯函数):截断即失败、空内容带 finish_reason、自然完成仍 done

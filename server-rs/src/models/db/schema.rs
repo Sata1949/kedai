@@ -91,7 +91,11 @@ CREATE TABLE IF NOT EXISTS agent_subtasks (
   result       TEXT NOT NULL DEFAULT '',
   error        TEXT NOT NULL DEFAULT '',
   created_at   TEXT NOT NULL,
-  updated_at   TEXT NOT NULL
+  updated_at   TEXT NOT NULL,
+  -- 终态(done/error/ended)首次达成时刻;pending/running 期间为空串。
+  -- 旧库经 migration::ensure_agent_subtasks_finished_at_column 幂等补列;
+  -- 必须列在表尾(ALTER ADD COLUMN 只能追加,列序要与之逐位一致,否则迁移元测试会抓)
+  finished_at  TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_subtasks_session ON agent_subtasks(session_id);
 -- 任务模式(task 工作台):任务主表 + 子任务表。
@@ -123,7 +127,10 @@ CREATE TABLE IF NOT EXISTS task_subtasks (
   result       TEXT NOT NULL DEFAULT '',
   error        TEXT NOT NULL DEFAULT '',
   created_at   TEXT NOT NULL,
-  updated_at   TEXT NOT NULL
+  updated_at   TEXT NOT NULL,
+  -- 终态首次达成时刻(与 agent_subtasks 同口径;legacy 路径的等价表,形状必须一致)。
+  -- 旧库经 migration::ensure_task_subtasks_finished_at_column 幂等补列,列在表尾
+  finished_at  TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_task_subtasks_task ON task_subtasks(task_id);
 -- 任务模式 token 用量:每次 LLM 调用(规划/步骤/汇总)一行;任务删除随外键级联清除。

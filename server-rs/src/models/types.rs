@@ -680,6 +680,10 @@ pub struct AgentSubtaskRecord {
     pub error: String,
     pub created_at: String,
     pub updated_at: String,
+    /// 首次进入终态(done/error/ended)的时刻;pending/running 期间为空串。
+    /// 有了它,调用方不必再靠 `status` 反推「何时完成」,也不必用 `ended` 兼表中断与完成
+    /// (见 docs/子任务终态语义与退出确认弹窗-变更说明.md)。
+    pub finished_at: String,
 }
 
 // ---------- 任务模式(task 工作台) ----------
@@ -900,6 +904,11 @@ impl TaskSubtaskStatus {
         }
     }
 
+    /// 是否终态(done/error/ended):终态不再被后续状态写入改写,首次进入时记 finished_at。
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Done | Self::Error | Self::Ended)
+    }
+
     /// 容错同 TaskStatus::from_str_lossy。
     pub fn from_str_lossy(s: &str) -> Self {
         match s {
@@ -1004,6 +1013,8 @@ pub struct TaskSubtaskRecord {
     pub error: String,
     pub created_at: String,
     pub updated_at: String,
+    /// 首次进入终态(done/error/ended)的时刻;pending/running 期间为空串。
+    pub finished_at: String,
 }
 
 /// 任务 LLM 调用追踪行(task_llm_calls 表;批次 3「调用情况」面板时间线数据源)。

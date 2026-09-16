@@ -103,6 +103,7 @@ fn row_to_subtask(row: &rusqlite::Row) -> rusqlite::Result<TaskSubtaskRecord> {
         error: row.get(6)?,
         created_at: row.get(7)?,
         updated_at: row.get(8)?,
+        finished_at: row.get(9)?,
     })
 }
 
@@ -565,8 +566,8 @@ impl TaskService {
         let now = now_iso();
         let conn = self.db.write();
         conn.execute(
-            "INSERT INTO task_subtasks (id, task_id, name, instruction, status, result, error, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, 'running', '', '', ?5, ?5)",
+            "INSERT INTO task_subtasks (id, task_id, name, instruction, status, result, error, created_at, updated_at, finished_at) \
+             VALUES (?1, ?2, ?3, ?4, 'running', '', '', ?5, ?5, '')",
             params![id, task_id, name, instruction, now],
         )
         .map_err(|e| format!("创建子任务失败: {e}"))?;
@@ -589,32 +590,38 @@ impl TaskService {
     ) -> bool {
         let conn = self.db.write();
         // 保持未提供字段不变:先读旧值(顺带取 task_id 供事件发射,避免额外查库)
+        // finished_at 一并读出:终态只记首次(见下),不能无条件 now_iso() 覆盖
         let existing = conn
             .query_row(
-                "SELECT task_id, result, error FROM task_subtasks WHERE id = ?1",
+                "SELECT task_id, result, error, finished_at FROM task_subtasks WHERE id = ?1",
                 params![id],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
                     ))
                 },
             )
             .optional()
             .ok()
             .flatten();
-        let (task_id, res, err) = existing.map(|(t, r, e)| (Some(t), r, e)).unwrap_or((
-            None,
-            String::new(),
-            String::new(),
-        ));
+        let (task_id, res, err, finished) = existing
+            .map(|(t, r, e, f)| (Some(t), r, e, f))
+            .unwrap_or((None, String::new(), String::new(), String::new()));
         let res = result.map(|s| s.to_string()).unwrap_or(res);
         let err = error.map(|s| s.to_string()).unwrap_or(err);
+        // 首次进入终态才记 finished_at;pending/running 保持空串,重复置终态不改写首值
+        let finished_at = if status.is_terminal() && finished.is_empty() {
+            now_iso()
+        } else {
+            finished
+        };
         let changed = conn
             .execute(
-                "UPDATE task_subtasks SET status = ?1, result = ?2, error = ?3, updated_at = ?4 WHERE id = ?5",
-                params![status.as_str(), res, err, now_iso(), id],
+                "UPDATE task_subtasks SET status = ?1, result = ?2, error = ?3, updated_at = ?4, finished_at = ?5 WHERE id = ?6",
+                params![status.as_str(), res, err, now_iso(), finished_at, id],
             )
             .map(|n| n > 0)
             .unwrap_or(false);
@@ -656,6 +663,7 @@ impl TaskService {
                 error: r.error,
                 created_at: r.created_at,
                 updated_at: r.updated_at,
+                finished_at: r.finished_at,
             })
             .collect();
         let overlay_ids: std::collections::HashSet<String> =
@@ -666,7 +674,7 @@ impl TaskService {
             return out;
         };
         let mut stmt = match conn.prepare_cached(
-            "SELECT id, task_id, name, instruction, status, result, error, created_at, updated_at \
+            "SELECT id, task_id, name, instruction, status, result, error, created_at, updated_at, finished_at \
                  FROM task_subtasks WHERE task_id = ?1 ORDER BY created_at ASC",
         ) {
             Ok(s) => s,

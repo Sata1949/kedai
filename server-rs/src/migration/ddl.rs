@@ -195,6 +195,75 @@ pub fn ensure_task_llm_calls_finish_reason_column(conn: &Connection) -> Result<(
     Ok(())
 }
 
+/// 列补全的共用实现(2026-09-16 批次 4):两张子任务表要补同一个 `finished_at`,
+/// 逐个手抄一遍 PRAGMA 探测会把「表不存在直接跳过」这条易错的边界抄漏。
+///
+/// 语义与既有 ensure_* 列迁移一致:
+/// - 表不存在(极旧快照/手工建库/测试手工建库)时**零列返回**,交建表批负责,不得 ALTER 报错;
+/// - 列已存在即跳过(幂等,重复执行不产生重复列);
+/// - 列追加在表尾,与新版 CREATE_TABLES 建出的 schema normalize 后一致
+///  (跨库合并的 schema 一致性比对依赖此点)。
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    column_type: &str,
+) -> Result<(), String> {
+    let mut existing: Vec<String> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .map_err(|e| format!("读取 {table} 列失败: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| format!("遍历 {table} 列失败: {e}"))?;
+        for name in rows.flatten() {
+            existing.push(name.to_lowercase());
+        }
+    }
+    if existing.is_empty() {
+        return Ok(());
+    }
+    if existing.iter().any(|c| c == column) {
+        return Ok(());
+    }
+    conn.execute(
+        &format!("ALTER TABLE {table} ADD COLUMN {column} {column_type}"),
+        [],
+    )
+    .map_err(|e| format!("为 {table} 补 {column} 列失败: {e}"))?;
+    Ok(())
+}
+
+/// 幂等 schema 升级(批次 4 子任务终态语义):为 agent_subtasks 补 `finished_at` 列。
+///
+/// 用途:让「已完成再被 agentend 召回」与「中途被召回」可分——前者保持 `done` 且
+/// `finished_at` 非空,只有后者才落 `ended`。旧行经 DEFAULT '' 零迁移成本
+/// (`''` = 未知/该列引入前完成,不等于「未完成」,不反推语义)。
+/// 启动时(Db::open)与跨库合并前(merge_databases 两侧)各执行一次。
+pub fn ensure_agent_subtasks_finished_at_column(conn: &Connection) -> Result<(), String> {
+    add_column_if_missing(
+        conn,
+        "agent_subtasks",
+        "finished_at",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+}
+
+/// 幂等 schema 升级(批次 4):为 task_subtasks 补 `finished_at` 列。
+///
+/// task_subtasks 是 legacy 路径下 agent_subtasks 的等价表,契约映射
+/// (tools/check-contract.mjs 的「任务子任务」组)与迁移期 schema 指纹比对都要求
+/// 两表同形状——只补一张会让跨库合并报「基线缺少列」。
+pub fn ensure_task_subtasks_finished_at_column(conn: &Connection) -> Result<(), String> {
+    add_column_if_missing(
+        conn,
+        "task_subtasks",
+        "finished_at",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+}
+
 /// 契约变更历史表(阶段 C):append-only 审计 + 回滚源。合并前对两侧各补一次 DDL,
 /// 与 SCOPE_VARIABLES_DDL 同理,避免旧库与新库合并时因「基线缺少源表」停止(§4.3)。
 /// 索引不参与 schema 一致性比对(schema_map 仅读 type='table'),无需在此重复。

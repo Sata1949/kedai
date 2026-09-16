@@ -59,6 +59,29 @@ impl Db {
             .map_err(|e| format!("设置外键失败: {e}"))?;
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(|e| format!("设置 busy_timeout 失败: {e}"))?;
+        // ===== 写路径调优(2026-09-16 性能批次 P-1)=====
+        // 此前上述三项之外全走 SQLite 默认值,其中两项对本应用明显不合适:
+        //
+        // ① synchronous:WAL 下默认仍是 FULL,即每次 commit 都 fsync。但 WAL 的
+        //    FULL 与 DELETE 模式的 FULL 语义不同——WAL 里数据页在 commit 时已写入
+        //    WAL 文件,**断电最坏只丢最近若干次已提交事务,数据库不会损坏**(完整性
+        //    由 WAL 校验与恢复保证)。本应用写点极密(每条消息、任务每步状态、
+        //    每次 usage 落库),FULL 的额外 fsync 直接压在生成与任务循环关键路径上,
+        //    换来的只是「最后一条消息不丢」这一档收益,不值。
+        //    **取舍显式记录**:掉电可能丢最近若干次提交(最坏丢最后一条消息/状态),
+        //    但不损坏库;本机单用户应用接受此权衡。若需最强持久性,改回 FULL 即可
+        //    (单行变更,无其他连带)。
+        // ② temp_store/cache_size:默认 temp_store=FILE(排序/临时表落盘)与
+        //    cache_size=-2000(约 2MiB 页缓存)。列表查询带 ORDER BY、压缩管线做
+        //    多表连接,临时表与缓存命中率都吃紧,故提到 MEMORY + 16MiB。
+        // ③ wal_autocheckpoint 保持默认(1000 页):checkpoint 是后台摊还成本,
+        //    调大只会把 WAL 撑得更久,调小增加写停顿,默认值已合适。
+        conn.pragma_update(None, "synchronous", "NORMAL")
+            .map_err(|e| format!("设置 synchronous 失败: {e}"))?;
+        conn.pragma_update(None, "temp_store", "MEMORY")
+            .map_err(|e| format!("设置 temp_store 失败: {e}"))?;
+        conn.pragma_update(None, "cache_size", -16000_i64)
+            .map_err(|e| format!("设置 cache_size 失败: {e}"))?;
         // 建表批之前先读库内 schema 版本(PRAGMA user_version,0 = 未标记的旧库)。
         // 库比代码新时**拒绝启动**:旧代码写新库会毁数据,宁可明确报错也不静默打开
         // (docs/数据库版本与降级行为.md §4.2 策略 1)。
@@ -72,7 +95,7 @@ impl Db {
                 schema::SCHEMA_VERSION
             ));
         }
-        // 升级链事务化(known-limitations L21):建表批 + 9 个 ensure_* 包在同一个
+        // 升级链事务化(known-limitations L21):建表批 + 11 个 ensure_* 包在同一个
         // 事务里。SQLite 的 DDL 是事务性的,任一步失败整链回滚,不留「部分升级态」。
         // 回滚必须落在 `?`/早退之前:否则连接停在打开的事务里,后续 Db::write 撞锁。
         let upgrade: Result<(), String> = (|| {
@@ -93,6 +116,11 @@ impl Db {
                 // 幂等 schema 升级(可观测性问题①):旧库 task_llm_calls 补 finish_reason 列
                 crate::migration::ensure_task_llm_calls_finish_reason_column(&conn)
                     .map_err(|e| format!("升级 task_llm_calls finish_reason 列失败: {e}"))?;
+                // 幂等 schema 升级(批次 4 子任务终态语义):两张子任务表补 finished_at 列
+                crate::migration::ensure_agent_subtasks_finished_at_column(&conn)
+                    .map_err(|e| format!("升级 agent_subtasks finished_at 列失败: {e}"))?;
+                crate::migration::ensure_task_subtasks_finished_at_column(&conn)
+                    .map_err(|e| format!("升级 task_subtasks finished_at 列失败: {e}"))?;
                 // 幂等 schema 升级(批次 R2 多轮用户输入):旧库补建 task_messages 表
                 crate::migration::ensure_task_messages_table(&conn)
                     .map_err(|e| format!("升级 task_messages 表失败: {e}"))?;
@@ -131,6 +159,13 @@ impl Db {
         // 版本号最后写:过早抬高会让下次启动误判「已最新」而跳过补迁(L18 补齐路径)。
         conn.pragma_update(None, "user_version", schema::SCHEMA_VERSION)
             .map_err(|e| format!("写入数据库 schema 版本失败: {e}"))?;
+        // 启动收尾跑一次 PRAGMA optimize(2026-09-16 性能批次 P-1):SQLite 官方推荐
+        // 的「长期连接定期执行」动作——按需 ANALYZE 缺失统计并释放临时索引,让查询
+        // 规划器拿到准确的基数估计。放在版本号写入之后:升级/建表已完成,统计才可信。
+        // 幂等且通常极快(统计已新鲜时为 no-op);失败不阻断启动(仅留痕)。
+        if let Err(e) = conn.execute_batch("PRAGMA optimize;") {
+            tracing::warn!("启动 PRAGMA optimize 失败(不阻断启动): {e}");
+        }
 
         // 只读连接池:READ_ONLY 标志防止读路径误写;busy_timeout/foreign_keys 与写连接对齐。
         // 写连接全程持有(WAL/-shm 存在),只读连 WAL 库在 SQLite ≥3.22 下安全。
@@ -143,10 +178,20 @@ impl Db {
             .with_init(|c| {
                 c.busy_timeout(std::time::Duration::from_secs(5))?;
                 c.pragma_update(None, "foreign_keys", "ON")?;
+                // 每个池连接各有一份独立页缓存,故需逐连接设置(2026-09-16 性能批次 P-1)。
+                // synchronous 对只读连接无意义(不产生提交),不设;WAL 模式是库级属性,
+                // 由写连接在 open 时持久化,只读连接打开时自动沿用。
+                c.pragma_update(None, "temp_store", "MEMORY")?;
+                c.pragma_update(None, "cache_size", -16000_i64)?;
                 Ok(())
             });
         let readers = ReadPool::builder()
             .max_size(pool_size)
+            // 池借还超时(2026-09-16 性能批次 P-3):r2d2 默认 30s,池耗尽时
+            // 一次取连接会静默阻塞半分钟——在 tokio worker 上就是事件循环停摆。
+            // 收到 5s 与 busy_timeout 对齐:超时即返回错误,由 db_err 转 500,
+            // 好过让整个请求挂到 30s。
+            .connection_timeout(std::time::Duration::from_secs(5))
             .build(manager)
             .map_err(|e| format!("创建只读连接池失败: {e}"))?;
         Ok(Db {
@@ -234,6 +279,67 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 1);
+        drop(conn);
+        drop(db);
+    }
+
+    /// 写连接调优参数:此前只设 WAL/外键/busy_timeout,其余走 SQLite 默认值,
+    /// 其中 synchronous=FULL 对 WAL 库属过度保守——WAL 已保证「断电不损坏库」,
+    /// FULL 只是让每次 commit 多一次 fsync,而本应用写点极密(每条消息/任务状态/usage),
+    /// 这笔开销直接压在生成与任务循环的关键路径上。
+    /// (2026-09-16 性能批次 P-1)
+    #[test]
+    fn writer_pragmas_configured_for_write_throughput() {
+        let dir = TempDataDir::new("db-pragma-writer");
+        let db = Db::open(&dir.join("kedai.db"), &dir).unwrap();
+        let conn = db.write();
+        let synchronous: i64 = conn
+            .pragma_query_value(None, "synchronous", |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            synchronous, 1,
+            "synchronous 应为 NORMAL(1),而非默认 FULL(2)"
+        );
+        let temp_store: i64 = conn
+            .pragma_query_value(None, "temp_store", |r| r.get(0))
+            .unwrap();
+        assert_eq!(temp_store, 2, "temp_store 应为 MEMORY(2)");
+        let cache_size: i64 = conn
+            .pragma_query_value(None, "cache_size", |r| r.get(0))
+            .unwrap();
+        assert_eq!(cache_size, -16000, "cache_size 应为 16MiB(负数为 KiB)");
+        // WAL 仍是库级持久设置(不受本次调整影响)
+        let journal_mode: String = conn
+            .pragma_query_value(None, "journal_mode", |r| r.get(0))
+            .unwrap();
+        assert_eq!(journal_mode.to_lowercase(), "wal");
+        drop(conn);
+        drop(db);
+    }
+
+    /// 只读池连接共用写连接的页缓存/临时表调优(每个池连接各有一份缓存,
+    /// 缺省 2MiB 对「全量列表 + 排序」类查询偏小);synchronous 对只读连接无意义,不设。
+    /// (2026-09-16 性能批次 P-1)
+    #[test]
+    fn read_pool_connections_share_tuning_pragmas() {
+        let dir = TempDataDir::new("db-pragma-reader");
+        let db = Db::open(&dir.join("kedai.db"), &dir).unwrap();
+        let conn = db.read().unwrap();
+        let cache_size: i64 = conn
+            .pragma_query_value(None, "cache_size", |r| r.get(0))
+            .unwrap();
+        assert_eq!(cache_size, -16000, "只读连接也应拿到 16MiB 页缓存");
+        let temp_store: i64 = conn
+            .pragma_query_value(None, "temp_store", |r| r.get(0))
+            .unwrap();
+        assert_eq!(temp_store, 2, "只读连接也应 temp_store=MEMORY");
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            version, SCHEMA_VERSION as i64,
+            "版本号写入不受本次 pragma 调整影响"
+        );
         drop(conn);
         drop(db);
     }

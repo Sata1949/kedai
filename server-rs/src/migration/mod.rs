@@ -16,10 +16,11 @@ mod merge;
 
 pub use backup::snapshot_database;
 pub use ddl::{
-    ensure_exec_audit_table, ensure_llm_requests_usage_columns, ensure_memory_entries_fts_backfill,
+    ensure_agent_subtasks_finished_at_column, ensure_exec_audit_table,
+    ensure_llm_requests_usage_columns, ensure_memory_entries_fts_backfill,
     ensure_memory_entries_pinned_column, ensure_perf_indexes, ensure_skills_progressive_columns,
     ensure_task_llm_calls_finish_reason_column, ensure_task_messages_table,
-    ensure_tasks_task_mode_column,
+    ensure_task_subtasks_finished_at_column, ensure_tasks_task_mode_column,
 };
 pub use merge::{merge_data_dirs, MergeReport, TableReport};
 
@@ -410,6 +411,125 @@ mod tests {
             "迁移后 task_llm_calls schema 应与新建库一致"
         );
         drop(conn);
+    }
+
+    /// finished_at 列迁移(批次 4 子任务终态语义):旧版 agent_subtasks/task_subtasks
+    /// (无 finished_at 列)补列成功、旧行默认 ''(未知/该列引入前完成,不反推语义)、
+    /// 幂等可重复执行,且迁移后 schema 与新版 CREATE_TABLES normalize 后一致(合并比对依赖)。
+    /// 两表都要覆盖:只补一张会让跨库合并报「基线缺少列」。
+    #[test]
+    fn ensure_subtasks_finished_at_column_adds_and_is_idempotent() {
+        let dir = temp_dir("subtasks-finished-at");
+        let db = dir.join(DATABASE_FILE);
+        let conn = Connection::open(&db).unwrap();
+        // 旧版表结构(finished_at 引入之前):两张子任务表均无该列。
+        // sessions/tasks 一并建出以满足外键(此处只需插入成功)。
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+              id TEXT PRIMARY KEY, character_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT '',
+              created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE tasks (
+              id TEXT PRIMARY KEY, title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+              plan TEXT NOT NULL DEFAULT '[]', result TEXT NOT NULL DEFAULT '',
+              error TEXT NOT NULL DEFAULT '', character_id TEXT,
+              created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE agent_subtasks (
+              id           TEXT PRIMARY KEY,
+              session_id   TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+              character_id TEXT NOT NULL DEFAULT '',
+              name         TEXT NOT NULL DEFAULT '',
+              instruction  TEXT NOT NULL DEFAULT '',
+              status       TEXT NOT NULL DEFAULT 'pending',
+              result       TEXT NOT NULL DEFAULT '',
+              error        TEXT NOT NULL DEFAULT '',
+              created_at   TEXT NOT NULL,
+              updated_at   TEXT NOT NULL
+            );
+            CREATE TABLE task_subtasks (
+              id           TEXT PRIMARY KEY,
+              task_id      TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+              name         TEXT NOT NULL DEFAULT '',
+              instruction  TEXT NOT NULL DEFAULT '',
+              status       TEXT NOT NULL DEFAULT 'pending',
+              result       TEXT NOT NULL DEFAULT '',
+              error        TEXT NOT NULL DEFAULT '',
+              created_at   TEXT NOT NULL,
+              updated_at   TEXT NOT NULL
+            );
+            INSERT INTO sessions (id, character_id, created_at, updated_at) VALUES ('s1', 'c1', 'c', 'u');
+            INSERT INTO tasks (id, title, created_at, updated_at) VALUES ('t1', '旧任务', 'c', 'u');
+            INSERT INTO agent_subtasks (id, session_id, name, created_at, updated_at) VALUES ('a1', 's1', '旧子任务', 'c', 'u');
+            INSERT INTO task_subtasks (id, task_id, name, created_at, updated_at) VALUES ('b1', 't1', '旧任务子任务', 'c', 'u');",
+        )
+        .unwrap();
+
+        ensure_agent_subtasks_finished_at_column(&conn).unwrap();
+        ensure_task_subtasks_finished_at_column(&conn).unwrap();
+        // 旧行零迁移成本:finished_at 默认 ''(未知),不得被误读为「已完成,时刻为 epoch」
+        let agent_finished: String = conn
+            .query_row("SELECT finished_at FROM agent_subtasks WHERE id = 'a1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(agent_finished, "", "旧 agent_subtasks 行 finished_at 应默认空串");
+        let task_finished: String = conn
+            .query_row("SELECT finished_at FROM task_subtasks WHERE id = 'b1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(task_finished, "", "旧 task_subtasks 行 finished_at 应默认空串");
+
+        // 幂等:重复执行不报错、不产生重复列
+        ensure_agent_subtasks_finished_at_column(&conn).unwrap();
+        ensure_task_subtasks_finished_at_column(&conn).unwrap();
+        for table in ["agent_subtasks", "task_subtasks"] {
+            let dup = table_columns(&conn, "main", table)
+                .unwrap()
+                .into_iter()
+                .filter(|c| c.name == "finished_at")
+                .count();
+            assert_eq!(dup, 1, "{table} 重复迁移不应产生重复列");
+        }
+
+        // 迁移后列**名字与顺序**与新版 CREATE_TABLES 建出的表逐位一致。
+        // 不用 normalize_sql 比 SQL 原文:表定义内带说明注释(注释只存在于新建库的
+        // sqlite_schema 文本里,ALTER 追加的列没有),原文比对必然不等;
+        // 结构一致性由这里的列序比对 + tests/schema_migration_meta.rs 的逐表指纹共同把关。
+        let fresh_conn = Connection::open_in_memory().unwrap();
+        fresh_conn
+            .execute_batch(crate::models::db::create_tables_sql())
+            .unwrap();
+        for table in ["agent_subtasks", "task_subtasks"] {
+            let migrated: Vec<String> = table_columns(&conn, "main", table)
+                .unwrap()
+                .into_iter()
+                .map(|c| c.name)
+                .collect();
+            let fresh: Vec<String> = table_columns(&fresh_conn, "main", table)
+                .unwrap()
+                .into_iter()
+                .map(|c| c.name)
+                .collect();
+            assert_eq!(
+                migrated, fresh,
+                "{table} 迁移后的列名与顺序应与新建库逐位一致(ALTER 只能追加到表尾)"
+            );
+            assert_eq!(
+                migrated.last().map(String::as_str),
+                Some("finished_at"),
+                "{table} 的 finished_at 必须是最后一列(与建表语句一致)"
+            );
+        }
+        drop(conn);
+    }
+
+    /// 表缺失时两张子任务表的 ensure 都应零列返回、不报错(交建表批负责)。
+    /// 极旧快照/手工建库会命中这条路径;此处若 ALTER 报错将让整个 Db::open 升级链回滚。
+    #[test]
+    fn ensure_subtasks_finished_at_column_skips_missing_tables() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_agent_subtasks_finished_at_column(&conn)
+            .expect("表不存在应跳过而非报错(建表由 CREATE_TABLES 负责)");
+        ensure_task_subtasks_finished_at_column(&conn)
+            .expect("表不存在应跳过而非报错(建表由 CREATE_TABLES 负责)");
     }
 
     /// memory_entries 升级(升级工作流 B1+B2):旧库(无 pinned 列 / 无 FTS)补列建索引成功、
