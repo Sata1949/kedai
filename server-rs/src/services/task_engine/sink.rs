@@ -1,7 +1,7 @@
 // 引擎事件桥:任务模式没有聊天 SSE 客户端,引擎(execute_generation/run_tool_loop)
 // 只认 mpsc::Sender<SseEvent>。此处自建通道 + drain 任务,把引擎事件翻译为任务事件
 // (SseEvent::Task kind=agent_status)经 TaskService broadcast 转发到任务事件流,
-// 供「调用情况」面板/事件监控观察主 agent 进度(docs/任务引擎六模式.md 第三节·5)。
+// 供「调用情况」面板/事件监控观察主 agent 进度(docs/功能.md 第三节·5)。
 // label 为事件文案的执行者称谓(「主 agent」/team 的「主 agent N」/「子 agent」)。
 // 批次 R4:Token 不再只计字数丢弃,改经 DeltaBatcher 攒批(200ms/80 字先到先发)
 // 转发为 kind=delta 暂态事件,前端任务工作台据此实时显示「正在生成」;

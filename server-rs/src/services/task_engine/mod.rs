@@ -1,5 +1,5 @@
 // 任务引擎(批次 4 六模式):模式执行器底座 + legacy 派发 + 五模式执行器实现。
-// 设计依据 docs/任务引擎六模式.md:
+// 设计依据 docs/功能.md:
 // - 复用聊天引擎 execute_generation/run_tool_loop,不建影子 sessions 行;
 // - runs 互斥只在 AgentEngine::run() 内登记,直调 run_tool_loop 天然绕开,
 //   任务级互斥由 TaskService 的 cancel token 机制承担(register_cancel 在

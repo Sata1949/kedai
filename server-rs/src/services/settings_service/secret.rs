@@ -64,7 +64,7 @@ impl RuntimeSettings {
                     s.mvu_vars_position = "system".to_string();
                 }
                 // 角色扮演 Agent 系统提示词为空时物化内置默认(对齐 search_endpoint 回退模式):
-                // 空串语义 = 使用内置默认模板(设置页文案与 docs/模式提示词边界.md 同口径),
+                // 空串语义 = 使用内置默认模板(设置页文案与 docs/契约-协议与配置.md 同口径),
                 // 故此前安装(settings.json 已存在且该字段为空)也回退到内置默认,与首装/Android 端一致;
                 // 用户已保存的非空文本优先,不会被本回填覆盖。
                 if s.agent_system_prompt.0.trim().is_empty() {

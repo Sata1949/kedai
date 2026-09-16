@@ -19,10 +19,10 @@
 
 ## 任务模式机制要点(2026-08-28 重构后)
 
-- 后端任务引擎分两层:`server-rs/src/services/task_service/`(任务 CRUD/状态/取消/legacy 三段式执行/事件)与 `server-rs/src/services/task_engine/`(批次 4 六模式底座:ModeExecutor/TaskRunContext/事件桥;solo/multi/plan/team/custom 执行器,legacy 仍走 task_service 原路径);任务状态为枚举 `TaskStatus`/`TaskStepStatus`/`TaskSubtaskStatus`,运行模式为 `TaskRunMode`(`models/types.rs`,serde snake_case 字符串,落盘与 API 线格式不变)。六模式语义见 `docs/任务引擎六模式.md`。
+- 后端任务引擎分两层:`server-rs/src/services/task_service/`(任务 CRUD/状态/取消/legacy 三段式执行/事件)与 `server-rs/src/services/task_engine/`(批次 4 六模式底座:ModeExecutor/TaskRunContext/事件桥;solo/multi/plan/team/custom 执行器,legacy 仍走 task_service 原路径);任务状态为枚举 `TaskStatus`/`TaskStepStatus`/`TaskSubtaskStatus`,运行模式为 `TaskRunMode`(`models/types.rs`,serde snake_case 字符串,落盘与 API 线格式不变)。六模式语义见 `docs/功能.md`。
 - 数据流:DB 写入成功后 `TaskService` 经 broadcast 通道发射 `SseEvent::Task`,`GET /api/tasks/events` 转发为 SSE;前端 `web/src/stores/task.ts` 事件驱动精确刷新(无轮询;断线指数退避重连 + 5s 兜底轮询)。新增事件 kind 需前后端三处同步(枚举/发射点/store 刷新映射)。
 - 提示词共享原语在 `server-rs/src/services/prompt_kit.rs`(世界书过滤/注入合成/占位符渲染/`untrusted_boundary`),引擎与任务双侧调用,勿在任一侧复制实现。
-- 双模式提示词隔离由类型承载(`RoleplayPromptConfig`/`TaskPromptConfig`,settings.json 线格式不变);新增涉及双模式的设置字段时,继承/隔离规则先读 `docs/模式提示词边界.md`。
+- 双模式提示词隔离由类型承载(`RoleplayPromptConfig`/`TaskPromptConfig`,settings.json 线格式不变);新增涉及双模式的设置字段时,继承/隔离规则先读 `docs/契约-协议与配置.md`。
 
 ## 验证命令
 
@@ -58,6 +58,6 @@ cargo build --manifest-path server-rs/Cargo.toml
 - **提交前的最低验证**:改了后端跑 `cargo test --manifest-path server-rs/Cargo.toml -j 2`;
   改了前端跑 `npm test -w web`;只改文档可跳过测试,但仍要跑 `node tools/check-arch.mjs` 与
   `node tools/count-tests.mjs --check` 确认门禁不漂移。
-- **分支**:主干 `main` + 平台分支 `kedai-Win` / `kedai-Android`(模型见 `docs/平台分支说明.md`)。
+- **分支**:主干 `main` + 平台分支 `kedai-Win` / `kedai-Android`(模型见 `docs/契约-协议与配置.md`)。
   仓库当前**未配置远端**;有远端后推送前先确认当前分支,不要在平台分支上提交共享代码。
 - **不改写历史**:不 `rebase`/`amend` 已推送的提交;`docs/archive/` 下的历史文档只读不改。

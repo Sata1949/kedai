@@ -609,7 +609,7 @@ pub struct LoadedScript {
 /// 故定义此窄接口，由 L2 的注册表实现、由组合根把 `&dyn ToolRegistrar` 注入给 L3。
 ///
 /// **这是「青层能力经显式接缝注入」的标准形态**，与 `task_core::TaskBackend`
-/// 断开 `task_engine→task_service` 是同一手法（见 `docs/ARCHITECTURE-3H.md` §3）。
+/// 断开 `task_engine→task_service` 是同一手法（见 `docs/契约-架构与数据.md` §3）。
 pub trait ToolRegistrar: Send + Sync {
     /// 注册一个**外部来源**工具（插件 / MCP）。实现方须据此把参数视为不可信。
     fn register_external(
@@ -682,13 +682,13 @@ pub struct AgentSubtaskRecord {
     pub updated_at: String,
     /// 首次进入终态(done/error/ended)的时刻;pending/running 期间为空串。
     /// 有了它,调用方不必再靠 `status` 反推「何时完成」,也不必用 `ended` 兼表中断与完成
-    /// (见 docs/子任务终态语义与退出确认弹窗-变更说明.md)。
+    /// (见 docs/功能-变更史.md)。
     pub finished_at: String,
 }
 
 // ---------- 任务模式(task 工作台) ----------
 /// 任务执行模式(tasks.task_mode 列,批次 4 六模式)。序列化/落盘均为 snake_case
-/// 文本;旧行缺省 'legacy',行为与六模式引入前逐字节一致。语义见 docs/任务引擎六模式.md。
+/// 文本;旧行缺省 'legacy',行为与六模式引入前逐字节一致。语义见 docs/功能.md。
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskRunMode {

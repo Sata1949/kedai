@@ -1,6 +1,6 @@
 // solo 模式:单主 agent 工具自循环——目标直接进 run_tool_loop,工具集按
 // task_tool_policy 编译(默认 deny_dangerous:危险级与元工具除外、bash 例外),
-// 步数上限 max_tool_rounds(docs/任务引擎六模式.md 第一节)。
+// 步数上限 max_tool_rounds(docs/功能.md 第一节)。
 // 复用聊天引擎 run_tool_loop,不建影子 sessions 行(session_id 用 task: 前缀虚拟 id,
 // llm_requests 落库在引擎侧据此跳过;任务侧追踪走 task_llm_calls,phase=agent)。
 // run_agent_loop 为「单主 agent 工具自循环」共享骨架:solo/multi 执行器与

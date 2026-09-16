@@ -5,7 +5,7 @@
 // 纪律: 本层的 `app_state.rs` 是**组合根装配点**(把各层拼装成可运行系统),
 //       故允许依赖各层(含 L3 的 mcp/plugins)——这是分层架构对组合根的通用豁免,
 //       已在 arch-layers.json 登记为 class=wiring。
-// 详见 docs/ARCHITECTURE-3H.md §2.2、§3(entry 与组合根说明)。
+// 详见 docs/契约-架构与数据.md §2.2、§3(entry 与组合根说明)。
 // 路由表按域拆至 routes/ 子模块;静态文档与 SPA 回退在 static_files.rs;
 // 响应工具(WithStatus/db_err/sse_response)在 util.rs;
 // 结构化错误码(ErrorCode/err_with_code)在 errors.rs,经下方再导出保持 crate::api::* 路径不变。

@@ -455,7 +455,7 @@ impl<'a> ToolGate<'a> {
     }
 }
 
-/// 跳过状态/工具调用落库;docs/任务引擎六模式.md 第三节);聊天路径恒 Some,行为不变。
+/// 跳过状态/工具调用落库;docs/功能.md 第三节);聊天路径恒 Some,行为不变。
 /// pub(crate):任务引擎 solo/custom 模式直调(批次 4.2 起)。
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_tool_loop(

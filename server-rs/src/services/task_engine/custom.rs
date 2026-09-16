@@ -1,5 +1,5 @@
 // custom 模式:复用 AgentFlowService 当前启用流程(AgentFlowConfig 步骤序列,
-// L2 既有资产)配轻量 step 执行器(批次 4.3b,docs/任务引擎六模式.md 第一节)。
+// L2 既有资产)配轻量 step 执行器(批次 4.3b,docs/功能.md 第一节)。
 // 语义:逐 step 顺序执行,上一步输出作为下一步输入;只吃 steps+goal,
 // 不依赖角色卡/聊天历史(角色类占位符渲染为空,{{char}} 等宏原文不泄漏)。
 // 工具:step.tools=None 走 generate_text 纯生成;Some([]) = 按 task_tool_policy 编译的

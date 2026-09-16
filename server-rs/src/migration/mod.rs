@@ -4,7 +4,7 @@
 // 判据: 决定「老层经验」能否跨版本延续(幂等 DDL 升级、双库合并、快照备份);
 //       零 `crate::` 出边,是纯基石模块。
 // 纪律: 所有升级必须**幂等**(探测后补列/补表),失败返回 Err 不 panic。
-// 详见 docs/ARCHITECTURE-3H.md §2.2。
+// 详见 docs/契约-架构与数据.md §2.2。
 //
 //   backup.rs   数据库快照备份(SQLite Online Backup API,含未 checkpoint 的 WAL)
 //   merge.rs    双库合并:schema 一致性比对、按外键依赖序逐表合并、文件树/JSON 配置合并、合并后校验

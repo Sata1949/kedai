@@ -916,7 +916,7 @@ pub async fn prompt_preview(
         }
     }
 
-    // 预览按模式走 for_mode 合并值(docs/模式提示词边界.md 第五节):
+    // 预览按模式走 for_mode 合并值(docs/契约-协议与配置.md 第五节):
     // 缺省/未知值按 roleplay(旧客户端零变化);task 为覆盖层合并后的有效设置,
     // agent_system_prompt 经类型级隔离转换(None 已注入内置任务默认词)。
     let mode = match query.mode.as_deref() {
@@ -971,7 +971,7 @@ pub async fn prompt_preview(
     }
 
     // 任务模式注入默认隔离(2026-09-10 实测修复):task 模式且未显式开启继承时,
-    // 不推送注入层——预览必须与真实下发一致(docs/模式提示词边界.md 第五节)。
+    // 不推送注入层——预览必须与真实下发一致(docs/契约-协议与配置.md 第五节)。
     let inject_gated = matches!(mode, AppMode::Task) && !settings.task_prompt_inject_enabled;
     if !inject_gated {
         let inject = state

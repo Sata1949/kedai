@@ -13,7 +13,7 @@ use tokio::sync::oneshot;
 ///
 /// **下沉理由**：`services/`（L2）需要读授权档位与风险等级，若词汇留在 `tools/`（L3），
 /// 就形成 L2→L3 的越代依赖。详见 `models/tool_policy.rs` 头部与
-/// `docs/ARCHITECTURE-3H.md` §2.2。
+/// `docs/契约-架构与数据.md` §2.2。
 ///
 /// **L2 代码请直接 `use crate::models::tool_policy::{...}`**，不要经本模块转发——
 /// 转发仍会构成跨代依赖边（规则 J 会如实检出）。本重导出只服务 `tools/` 内部。

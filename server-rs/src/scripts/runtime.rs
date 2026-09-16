@@ -27,7 +27,7 @@ pub struct EvalOptions {
     pub memory_limit: Option<usize>,
     /// quickjs 调用栈上限(字节);缺省 [`DEFAULT_STACK_LIMIT`]。
     ///
-    /// **为何显式设置**(2026-09-14 安全加固,见 `docs/known-limitations.md` L20):
+    /// **为何显式设置**(2026-09-14 安全加固,见 `docs/遗留.md` L20):
     /// rquickjs 底层本身有 256KB 默认栈上限,但那是**库的默认值**——它不在本仓库的
     /// 控制范围内(升级依赖可能改变),而深递归脚本导致栈溢出会崩掉宿主进程。
     /// 与内存上限同理,把资源边界写进本仓库代码,边界才是可审计、可回归测试的。

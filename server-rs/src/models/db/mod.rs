@@ -84,7 +84,7 @@ impl Db {
             .map_err(|e| format!("设置 cache_size 失败: {e}"))?;
         // 建表批之前先读库内 schema 版本(PRAGMA user_version,0 = 未标记的旧库)。
         // 库比代码新时**拒绝启动**:旧代码写新库会毁数据,宁可明确报错也不静默打开
-        // (docs/数据库版本与降级行为.md §4.2 策略 1)。
+        // (docs/契约-架构与数据.md §4.2 策略 1)。
         let db_version: i32 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(|e| format!("读取数据库 schema 版本失败: {e}"))?;

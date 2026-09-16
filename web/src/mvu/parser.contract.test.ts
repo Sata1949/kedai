@@ -8,7 +8,7 @@
 //
 // 注意:fixture 只覆盖 `_.set`(MagVarUpdate)协议。JSON Patch 的路径格式两端确有差异
 // (Rust 保留 /a/b;TS 经 pathToDots 转 a.b),其是否需统一属待评审项,故意不纳入本对拍
-// (见 fixture 内 `_comment` 与 docs/known-limitations.md),避免用品固化未定的设计。
+// (见 fixture 内 `_comment` 与 docs/遗留.md),避免用品固化未定的设计。
 import { describe, it, expect } from 'vitest';
 import { parseUpdateVariable } from './parser';
 

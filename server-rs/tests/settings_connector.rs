@@ -199,7 +199,7 @@ async fn task_overlay_does_not_leak_into_roleplay_settings() {
     assert_eq!(rp_after["agent_system_prompt"], flat_before);
 }
 
-/// 提示词预览按模式合并(批次 2,docs/模式提示词边界.md 第五节):
+/// 提示词预览按模式合并(批次 2,docs/契约-协议与配置.md 第五节):
 /// task 模式追加规划器/执行者/汇总者三层固定提示词层(文本与 task_service/prompt.rs
 /// 单一来源逐字一致,预览即真实下发);roleplay(缺省)不含。三层为内置指令,
 /// 恒注入,与 task 覆盖层状态无关(共享 app 下不受同 binary 其他测试写动影响)。

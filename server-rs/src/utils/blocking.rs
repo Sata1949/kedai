@@ -5,7 +5,7 @@
 // `record_llm_call`/`finalize_terminal` 等)是同步 rusqlite 写。写在 async worker 上
 // 直接执行,一旦撞上写锁竞争(SQLite 唯一写连接 + busy_timeout 最长 5s)或 fsync
 // 延迟,就会**卡住整个 worker**,连带该 worker 上排队的其他请求一起停摆 ——
-// 这正是 `docs/perf-baseline.md` 记录的「队在阻塞 tokio worker」问题。
+// 这正是 `docs/功能-变更史.md` 记录的「队在阻塞 tokio worker」问题。
 // chat 路径的同类写入早已用 `spawn_blocking` 隔离(`engine/run_finish.rs:94`),
 // 任务路径此前漏改,属纪律不统一。
 //

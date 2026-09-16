@@ -43,7 +43,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, watch, RwLock};
 
 // executor 提为 pub(crate):任务引擎(services/task_engine)复用
-// execute_generation/run_tool_loop(docs/任务引擎六模式.md 第三节)
+// execute_generation/run_tool_loop(docs/功能.md 第三节)
 pub(super) mod compaction;
 pub(crate) mod executor;
 pub(super) mod messages;
@@ -261,7 +261,7 @@ impl AgentEngine {
     }
 
     /// 工具注册表全量定义(与聊天 agent 模式 GenerationParams.tools 同一来源;
-    /// 任务引擎 solo 模式构建工具清单用,docs/任务引擎六模式.md 第三节)
+    /// 任务引擎 solo 模式构建工具清单用,docs/功能.md 第三节)
     pub(crate) fn tool_definitions(&self) -> Vec<ToolDefinition> {
         self.tool_registry.list_definitions()
     }
@@ -345,7 +345,7 @@ impl AgentEngine {
     /// 结论:**收益(导航)已由本结构地图 + 阶段注释提供;真正的行为收益为零,
     /// 而回归面覆盖核心热路径。** 故知情接受,待该区域出现真实缺陷时再连同测试一并重构。
     /// 相关:特征化测试见 `tests/engine_characterization.rs`(中断/工具回填/纯文本路径,
-    /// 已经变异测试验证有效性);审计结论见 `docs/架构分析-2026-09-14.md §6 批次5`。
+    /// 已经变异测试验证有效性);审计结论见 `docs/功能-变更史.md §6 批次5`。
     pub async fn run(
         &self,
         req: AgentRunRequest,

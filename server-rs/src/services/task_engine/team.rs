@@ -8,7 +8,7 @@
 // 结果契约:result = 整合文本 + "\n\n## 审计结论\n" + 审计文本(前端按此拆卡);
 // 无打回时审计文本 = 首次审计结论,有打回时 = 终审结论。
 // plan 步骤名 = 「【主Agent-N】子目标名」(前端分工卡按此前缀分组)。
-// 手动拓扑(用户指定主 agent 数量/人设/分工)预留,待前端入口批次(docs/任务引擎六模式.md)。
+// 手动拓扑(用户指定主 agent 数量/人设/分工)预留,待前端入口批次(docs/功能.md)。
 use super::context::TaskRunContext;
 use super::executor::{usage_as_output, ModeExecutor};
 use super::solo::{run_agent_loop, AgentLoopCall};

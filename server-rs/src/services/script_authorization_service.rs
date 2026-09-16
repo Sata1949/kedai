@@ -16,7 +16,7 @@
 // 3. **global 脚本不受此表约束**:全局脚本是用户在前端主动添加的自有内容,视为可信;
 //    受门禁的只有**角色卡携带**的脚本(不可信来源)。
 // 4. **默认拒绝**:台账无记录即不执行(fail-closed)。这是**有意的兼容性收紧**
-//    (旧行为是自动执行),已在 `docs/known-limitations.md` L12 与变更说明中登记;
+//    (旧行为是自动执行),已在 `docs/遗留.md` L12 与变更说明中登记;
 //    前端提供「重新授权」入口。
 use crate::models::db::{now_iso, Db};
 // LoadedScript 已在 L1(models/types):L2 不得依赖 L3 的 scripts/。

@@ -121,8 +121,10 @@ const domains: Domain[] = [
   },
 ];
 
-/** 角色扮演专属分区:任务模式下隐藏(与 ROLEPLAY_ONLY 同源,便于两处同步) */
-const ROLEPLAY_ONLY: ReadonlySet<SectionKey> = new Set<SectionKey>(['prompt', 'preset', 'flow']);
+/** 角色扮演专属分区:任务模式下隐藏。'flow'(执行流程)不在此列——任务模式的 custom 依赖
+ *  流程库(后端 TaskFlowAccess::current_flow 读不到已启用流程即报错),必须两种模式下都可见
+ *  (IFW-3 入口错位修复,见 docs/遗留.md §九 已封堵项索引) */
+const ROLEPLAY_ONLY: ReadonlySet<SectionKey> = new Set<SectionKey>(['prompt', 'preset']);
 
 /** 按顶层模式过滤二级 section 项;过滤后为空的功能域整域隐藏 */
 const visibleDomains = computed<Domain[]>(() =>

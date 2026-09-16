@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 // SettingsHub 组件测试(阶段 A 补测):332 行,设置中心两层导航,此前无测试。
-// 覆盖:导航区渲染、一级域切换、二级项点击切分区、以及 task 模式下
-// 角色扮演专属项被过滤(visibleDomains 的核心逻辑)。
+// 覆盖:导航区渲染、一级域切换、二级项点击切分区、以及 task 模式下的分区过滤
+// (角色扮演专属项被隐藏;「执行流程」必须可见——IFW-3 入口错位回归)。
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { nextTick } from 'vue';
 import { mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
 
@@ -66,5 +67,32 @@ describe('SettingsHub 组件(阶段 A 补测)', () => {
     // section 项点击后应有一个二级项为 active
     const activeCount = wrapper.findAll('.hub-sub-item.active').length;
     expect(activeCount).toBe(1);
+  });
+
+  it('任务模式下「执行流程」入口可见(IFW-3 回归)', async () => {
+    const { store, wrapper } = mountHub();
+    store.appMode = 'task';
+    await nextTick();
+
+    // 「对话与提示词」域在任务模式下整域隐藏,故一级域下标与角色扮演模式不同,按文案定位
+    const agentDomain = wrapper
+      .findAll('.sv-hub-nav-item')
+      .find((b) => b.text().includes('Agent 与任务'));
+    expect(agentDomain).toBeTruthy();
+    await agentDomain?.trigger('click');
+
+    const labels = wrapper.findAll('.hub-sub-item').map((it) => it.text());
+    expect(labels).toContain('执行流程');
+  });
+
+  it('任务模式下角色扮演专属域仍整体隐藏(防过度放行)', async () => {
+    const { store, wrapper } = mountHub();
+    store.appMode = 'task';
+    await nextTick();
+
+    // 「对话与提示词」只含 prompt/preset,两者都属角色扮演专属 → 整域被过滤
+    const navLabels = wrapper.findAll('.sv-hub-nav-item').map((b) => b.text());
+    expect(navLabels.some((t) => t.includes('对话与提示词'))).toBe(false);
+    expect(navLabels.some((t) => t.includes('Agent 与任务'))).toBe(true);
   });
 });

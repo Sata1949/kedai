@@ -2,7 +2,7 @@
 //!
 //! ## 为什么在 L1 而不是 connectors/ 或 agents/
 //!
-//! 按三结合「代际判定程序」（见 `docs/ARCHITECTURE-3H.md` §2.2）：
+//! 按三结合「代际判定程序」（见 `docs/契约-架构与数据.md` §2.2）：
 //! - **P2 依赖方向**：本词汇被 `connectors/*`（L2 边界处构造：把 reqwest 错误与
 //!   HTTP 状态映射为分类）与 `agents/engine`（L2，消费分类决定 SSE 错误终态的
 //!   `code`/`retryable`）**共同**使用。放 L1 是两者唯一可共同依赖处。

@@ -4,7 +4,7 @@
 // 判据: 契约是变量系统的**唯一事实源**(字段/更新策略/护栏/不变量),结构变化即
 //       影响既有会话数据;仅依赖同层 parsing,不依赖上层。
 // 纪律: contractVersion+1 并触发调和,不得静默修改结构;禁止依赖 services/agents/api/tools。
-// 详见 docs/ARCHITECTURE-3H.md §2.2。
+// 详见 docs/契约-架构与数据.md §2.2。
 //
 pub mod changelog;
 pub mod due_fields;

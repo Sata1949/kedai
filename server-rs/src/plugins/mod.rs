@@ -140,7 +140,7 @@ pub fn plugin_executor(script: &str) -> crate::models::types::ToolExecutor {
     )
 }
 
-/// 插件工具名格式校验(2026-09-14;安全加固,见 `docs/known-limitations.md` L19)。
+/// 插件工具名格式校验(2026-09-14;安全加固,见 `docs/遗留.md` L19)。
 ///
 /// 规则:
 /// - 非空、`^[a-z][a-z0-9_]*$`、长度 ≤ 48;

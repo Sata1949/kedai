@@ -1,6 +1,6 @@
 // 命令执行抽象层(阶段 C):bash 工具与 Android 执行层共用的单一执行入口。
 //
-// 分层动机(见 docs/android-port-plan.md 决策 4):
+// 分层动机(见 docs/计划.md 决策 4):
 // - 桌面/服务端:`std::process` 直接派生(desktop.rs);
 // - Android:进程派生、su 弹窗、Shizuku binder 均为 Java API,必须经 Kotlin 桥
 //   (android.rs),Rust 侧只做字符串进出。

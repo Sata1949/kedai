@@ -6,7 +6,7 @@
 //       (非显式设置会崩进程,见 runtime.rs)+ 5s 墙钟 + 单轮 32 脚本上限。
 // 纪律: 只依赖 L1;不得依赖 L2(services/tools/agents)。**新模板能力的唯一合法落点**
 //       (EJS 自研解释器已冻结,见 MAINTENANCE.md §0)。
-// 详见 docs/ARCHITECTURE-3H.md §2.5、§2.6。
+// 详见 docs/契约-架构与数据.md §2.5、§2.6。
 pub mod bridge;
 pub mod loader;
 pub mod runtime;

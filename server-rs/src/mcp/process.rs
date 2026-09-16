@@ -35,7 +35,7 @@ impl McpProcess {
     /// Android 门控:移动端沙箱内没有 npx/uvx/node/python 等可执行环境,也没有可用的
     /// 进程派生模型(spawn 必然失败),直接返回带明确说明的错误,避免用户只看到一句
     /// 含义不明的 spawn 失败。MCP 在 Android 后续应改为内置执行器实现(见
-    /// docs/android-port-plan.md 的移动专项待办)。
+    /// docs/计划.md 的移动专项待办)。
     #[cfg(target_os = "android")]
     pub fn spawn(cfg: &McpServerConfig) -> Result<(Self, McpClient), String> {
         Err(format!(

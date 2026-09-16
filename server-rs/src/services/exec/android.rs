@@ -1,6 +1,6 @@
 // Android 执行器:经 Kotlin 桥执行(阶段 C/D)。
 //
-// 为什么必须在 Kotlin 侧执行(见 docs/android-port-plan.md 阶段 3 第 2 条):
+// 为什么必须在 Kotlin 侧执行(见 docs/计划.md 阶段 3 第 2 条):
 // 进程派生、`su` 弹窗、Shizuku binder 都是 Java 层 API;Rust 虽能 `Command::new`,
 // 但普通应用 UID 受 SELinux 约束,拿不到 root/ADB 权限。故 Rust 只做字符串进出
 // (与 native_bridge_android.rs 同一模式),执行逻辑在 Kotlin `ShellExecutorBridge`。

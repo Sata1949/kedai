@@ -8,7 +8,7 @@
 //       (先例:task_core::TaskBackend 断开 task_engine→task_service)。
 // 子域: task_service/(任务宿主)· task_engine/(六模式引擎)· task_core/(共享契约)·
 //       settings_service/ · exec/(命令执行,默认关) · script_authorization_service/(脚本授权门)。
-// 详见 docs/ARCHITECTURE-3H.md §2.2、§3。
+// 详见 docs/契约-架构与数据.md §2.2、§3。
 pub mod agent_flow_service;
 pub mod agent_session_service;
 pub mod agent_subtask_service;
@@ -44,7 +44,7 @@ pub mod skill_service;
 pub mod task_service;
 // 任务核心契约(批次 B 依赖倒置):执行器终态值类型,先于 task_engine 定义
 pub(crate) mod task_core;
-// 任务引擎(批次 4 六模式):模式执行器底座 + solo/plan;设计见 docs/任务引擎六模式.md
+// 任务引擎(批次 4 六模式):模式执行器底座 + solo/plan;设计见 docs/功能.md
 pub mod task_engine;
 pub mod token_service;
 // 回退快照(批次 6.1「undo」):写工具执行前逆操作负载落 undo_snapshots 表

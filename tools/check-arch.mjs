@@ -558,7 +558,7 @@ const backendWarnings = [];
 //
 // 单一事实源:`tools/arch-layers.json`(代际定义、模块归属、允许方向、已知偏离登记)。
 //
-// 为什么需要这两条规则:docs/ARCHITECTURE-3H.md 定义了「老中青三结合」分层(L1 稳 / L2 干 /
+// 为什么需要这两条规则:docs/契约-架构与数据.md 定义了「老中青三结合」分层(L1 稳 / L2 干 /
 // L3 活),但 2026-09-14 全仓实测发现两处护栏盲区——
 //   ① 5 个顶层模块(migration/scripts/slash/utils/plugins)从未被列入任何代际清单,分层
 //      叙事对它们完全失效(新代码不知该按哪一代纪律评审);
@@ -600,7 +600,7 @@ const backendWarnings = [];
     const allowedDirs = new Set(cfg.dependencyRules?.allowed ?? []);
     /**
      * 后端与前端的方向规则**必须分开**:两者的 L1/L2/L3 虽是同一套代际词汇,
-     * 依赖位置却不同(2026-09-14 澄清,见 docs/ARCHITECTURE-3H.md §2.3)。
+     * 依赖位置却不同(2026-09-14 澄清,见 docs/契约-架构与数据.md §2.3)。
      *
      *   后端 = 隔离模型: L3(工具/沙箱) 与 L2(编排) **互斥**——青层不得反向依赖
      *          骨干层(否则「隔离」名存实亡),故 L3->L2 与 L2->L3 双向禁止。

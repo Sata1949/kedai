@@ -1,5 +1,5 @@
 // 任务模式执行上下文:一次模式执行的输入聚合(目标/有效设置快照/执行者/取消通道)。
-// 设计依据 docs/任务引擎六模式.md 第四节;能力缝雏形(第六节),未来 webhook/后台 jobs
+// 设计依据 docs/功能.md 第四节;能力缝雏形(第六节),未来 webhook/后台 jobs
 // 等触发源复用同一上下文模型。
 use crate::services::settings_service::RuntimeSettings;
 use tokio::sync::watch;

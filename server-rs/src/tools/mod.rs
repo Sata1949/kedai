@@ -6,7 +6,7 @@
 //       (它失败则整个应用不可用,与 L3「失败必须被隔离」语义相反)。
 // 纪律: 可依赖 L1/L2;不得依赖 L3(scripts/mcp/plugins/exec)与 entry。
 // 真 L3 隔离能力在相邻模块:scripts/(rquickjs 沙箱)、mcp/(默认关)、plugins/(受控求值器)、
-// services/exec/(默认关)。详见 docs/ARCHITECTURE-3H.md §2.5 末段与晋升台账。
+// services/exec/(默认关)。详见 docs/契约-架构与数据.md §2.5 末段与晋升台账。
 pub mod action_class;
 pub mod agent_tools;
 pub mod bash;

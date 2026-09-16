@@ -7,7 +7,7 @@ use super::*;
 // ===== 三层固定提示词(单一来源)=====
 // 规划器/执行者/汇总者内置指令:执行器(executor.rs)与设置预览(api/settings.rs)
 // 共用同一份文本,改动只改这里,预览即真实下发。内置指令不经 untrusted 包裹
-//(docs/模式提示词边界.md 第三节)。
+//(docs/契约-协议与配置.md 第三节)。
 // 批次 B.3 依赖倒置:常量本体已机械搬迁至 task_core::prompt_consts
 //(使 task_engine 侧可直接引用而不经 task_service);此处按名再导出宿主侧
 // 既有使用者所需的三层固定提示词(executor.rs / api/settings.rs / 本文件),
@@ -147,7 +147,7 @@ impl TaskService {
 /// 与改造前逐字节一致。字段均为 V2 角色卡 data 对象的顶层字段。
 /// 任一字段为空则跳过;全部为空返回空串(此时不注入人设)。
 /// pub(crate):任务引擎 solo 提示词组装复用(勿复制实现)。
-/// 开关口径见 docs/模式提示词边界.md 第一节(task_persona_full,None/false=精简)。
+/// 开关口径见 docs/契约-协议与配置.md 第一节(task_persona_full,None/false=精简)。
 pub(crate) fn persona_style(c: &CharacterRecord, full: bool) -> String {
     let mut parts: Vec<String> = Vec::new();
     if !c.description.trim().is_empty() {

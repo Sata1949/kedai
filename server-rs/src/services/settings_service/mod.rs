@@ -832,7 +832,7 @@ mod tests {
 
     /// R3a:task_persona_full 默认精简(None/false 同义),旧配置零迁移;
     /// 覆盖层 Some(true) = 完整人设(现状四段);serde 线格式 None 省略不落 null。
-    /// 口径见 docs/模式提示词边界.md 第一节。
+    /// 口径见 docs/契约-协议与配置.md 第一节。
     #[test]
     fn task_persona_full_defaults_slim_and_roundtrips() {
         // 覆盖层 serde 三态:缺字段/null → None(沿用扁平);None 序列化省略字段

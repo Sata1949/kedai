@@ -5,7 +5,7 @@
 //       `server-rs/src/models/types.rs`、`task_core` 的线格式一一对应,
 //       由 `tools/check-contract.mjs` 做字段/枚举差集守卫(缺字段即 FAIL)。
 // 纪律: 改线格式须**双端同步**且过 check-contract;本层不得依赖上层(stores/components)。
-// 详见 docs/ARCHITECTURE-3H.md §2.5。
+// 详见 docs/契约-架构与数据.md §2.5。
 //
 export * from './types';
 export * from './health';

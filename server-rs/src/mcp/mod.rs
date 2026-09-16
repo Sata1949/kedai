@@ -1,4 +1,4 @@
-// MCP stdio 客户端管理(批次 6.2;L3 隔离;docs/ARCHITECTURE-3H.md §2.5)。
+// MCP stdio 客户端管理(批次 6.2;L3 隔离;docs/契约-架构与数据.md §2.5)。
 //
 // 边界:v1 只做 stdio transport + tools(不做 SSE/HTTP,不做 resources/prompts);
 // 仅在启动时装配(mcp_enabled=false 时完全跳过:零进程、零注册),运行期改设置

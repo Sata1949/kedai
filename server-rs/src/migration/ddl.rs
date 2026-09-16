@@ -449,7 +449,7 @@ pub fn ensure_task_messages_table(conn: &Connection) -> Result<(), String> {
 /// 命令执行审计表(bash 工具与 Android 执行层):每次尝试执行(含被拒绝的)
 /// 落一行,供设置面板审计查看与事后追溯。
 /// 为什么必须落库:root/ADB 级命令不可逆,「谁在何时以什么等级跑了什么」
-/// 是唯一的回溯依据(见 docs/授权模式.md 与 docs/android-port-plan.md 合规要求)。
+/// 是唯一的回溯依据(见 docs/契约-协议与配置.md 与 docs/计划.md 合规要求)。
 pub(super) const EXEC_AUDIT_DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS exec_audit (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -1,5 +1,5 @@
 // 模式执行器抽象:每种任务模式一个实现,共享 TaskRunContext 输入。
-// 风格对齐 tools 的 ToolExecutor(BoxFuture);能力缝雏形(docs/任务引擎六模式.md 第六节)。
+// 风格对齐 tools 的 ToolExecutor(BoxFuture);能力缝雏形(docs/功能.md 第六节)。
 // 产出为「终态值 + 整轮 token 累计」:执行器只描述到达什么终态(task_core::TaskTerminal),
 // 落库由 TaskService::finalize_terminal 统一消费(批次 B 依赖倒置,规则 C 断环)。
 use super::context::TaskRunContext;
