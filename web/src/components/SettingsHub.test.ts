@@ -25,6 +25,20 @@ vi.mock('../api/health', () => ({
   health: vi.fn().mockResolvedValue({ ok: true, version: '0.0.0-test' }),
 }));
 
+// 屏蔽分区懒加载(本用例只验证「设置中心导航 + 任务模式下分区过滤」,与分区内部无关)。
+//
+// 必要性(2026-09-16 实测):SettingsModal 的 9 个分区经 lazyModal→defineAsyncComponent
+// 动态 import,「点击域」会触发加载。测试随即结束、import 仍在飞行,环境拆除后该 Promise
+// 才 reject → lazyModal 的 onError 重试一次 → 二次失败触发 console.error(报错文案与
+// uiPrefs.modalLoadError 写入)→ 该 console 调用在 worker 关闭时呈 pending(vitest 报
+// EnvironmentTeardownError: Closing rpc while "onUserConsoleLog" was pending)→ **退出码 1**,
+// 而断言其实全绿。它只在全量套件下复现(单文件跑 10 次 0 失败;加入第 89 个测试文件后
+// 触发率约 4/24),因为能否命中取决于 vitest 的 worker 调度——属测试生命周期缺陷而非产品缺陷。
+// 屏蔽懒加载后本文件不再产生任何挂起的动态 import,判定确定。
+vi.mock('../asyncModal', () => ({
+  lazyModal: () => ({ name: 'StubSettingsSection', render: () => null }),
+}));
+
 import { useAppStore } from '../store';
 import SettingsHub from './SettingsHub.vue';
 

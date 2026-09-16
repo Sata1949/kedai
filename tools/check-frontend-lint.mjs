@@ -69,9 +69,21 @@ function collect(dir, exts, out = []) {
   return out;
 }
 
-/** 去掉整行注释与块注释,避免注释里的示例被计数。 */
+/**
+ * 去掉整行注释与块注释,避免注释里的示例被计数。
+ *
+ * **行尾归一化不可省(2026-09-16 修)**:先前的实现直接逐行 `l.replace(/\/\/.*$/, '')`,
+ * 而 JS 正则的 `.` **不匹配**行终止符——`\r` 也是行终止符,于是 `$`(无 m 标志,只认字符串
+ * 末尾)永远到不了,行内 `//` 注释在 **CRLF 文件上完全不被剥离**。后果:注释里出现的
+ * `as any` / `as never` / 非空断言被当成真实逃逸计数,ratchet 结果**取决于文件行尾**。
+ * 本仓库 Windows + `core.autocrlf=true`,checkout 后大量文件是 CRLF(实测 233 个源文件中
+ * 53 个),该缺陷会直接导致误报 FAIL(实测:某注释里的 `as any` 使 any 由 0 虚高到 1)。
+ * 归一化到 `\n` 后,行号不变、注释剥离对 LF/CRLF/CR 三种行尾口径一致。
+ * 块注释剥离用 `[\s\S]` 本就能跨行匹配,不受此影响。
+ */
 function stripComments(src) {
   return src
+    .replace(/\r\n?/g, '\n')
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .split('\n')
     .map((l) => l.replace(/\/\/.*$/, ''))
