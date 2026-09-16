@@ -400,9 +400,18 @@ export const useTaskStore = defineStore('app.task', () => {
           clearAllLiveDeltas(); // 批次 R4:任务删除,其流式缓冲一并失效
         }
         break;
-      default:
-        // kind 缺失(向后兼容):仅透传事件面板,不触发刷新
+      case undefined:
+        // kind 缺失(旧服务端/未知分类):仅透传事件面板,不触发刷新。
+        // 这是**契约允许**的向后兼容分支(后端 kind 为 Option + skip_serializing_if),
+        // 故显式列出而不靠 default 兜底。
         break;
+      default: {
+        // 穷尽性断言:后端 TaskEventKind 新增分类而此处漏接线时**编译失败**。
+        // 原实现是 default 静默 break,漏改不报错——正是本轮要堵的静默失效点。
+        const unhandled: never = ev.kind;
+        void unhandled;
+        break;
+      }
     }
   }
 

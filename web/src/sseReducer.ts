@@ -263,6 +263,17 @@ export function reduceSseEvent(state: SseStateSlice, event: SseEvent): SseStateC
       // 服务端已在 Finish 事件发出前落库 assistant 消息,此处 loadHistory 无竞态(由 store 应用)
       return changes;
     }
+    default: {
+      // 穷尽性断言:后端 SseEvent 新增变体而此处漏接时**编译失败**(比静默落到兜底更早暴露)。
+      // 契约侧由 tools/check-contract.mjs 的「SSE 顶层事件枚举」映射守住 Rust↔TS 一致,
+      // 本断言守住 TS union↔消费分支一致,两者配合才闭环(见该映射的登记注释)。
+      //
+      // 断言必须放在 default 子句内:若放到 switch 之后,`break` 的 case 会带着
+      // 未收窄的成员跳到该位置,`never` 永不成立(实测 TS2322 恒报)。
+      const exhaustive: never = event;
+      void exhaustive;
+      break;
+    }
   }
   // 兜底(事件已穷尽,此处仅为满足 strict 下 noImplicitReturns)
   return {};

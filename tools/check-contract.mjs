@@ -83,6 +83,16 @@ const MAPPINGS = [
     rust: { file: 'server-rs/src/models/types.rs', name: 'TaskStatus' },
     ts: { file: 'web/src/api/types.ts', name: 'TaskStatus', kind: 'union' },
   },
+  {
+    // SSE 顶层事件判别式联合(Rust `#[serde(tag="type")]` ↔ TS 判别式联合)。
+    // 此前**未登记**:新增一个顶层事件要手改 Rust 枚举 + TS 手写 union + 前端两个 switch
+    // (sseReducer.ts / stores/task.ts)共 3 处,其中 Rust→TS 这一步完全靠人,漏改不报错。
+    // 登记后漏改即 FAIL;switch 侧的漏接由 sseReducer.ts / task.ts 的 never 穷尽断言在
+    // 类型检查阶段拦住(两处配合才闭环)。
+    label: 'SSE 顶层事件枚举',
+    rust: { file: 'server-rs/src/models/types.rs', name: 'SseEvent' },
+    ts: { file: 'web/src/api/types.ts', name: 'SseEvent', kind: 'tagged-union' },
+  },
 ];
 
 const read = (rel) => readFileSync(join(ROOT, rel), 'utf8');
@@ -209,6 +219,51 @@ function tsUnion(src, name) {
   return values;
 }
 
+/**
+ * 取 `export type Name = ...;` 的完整声明体(括号配平,收尾于深度 0 的分号)。
+ *
+ * 为什么不能复用 `tsBlock(kind:'union')`:后者以**第一个分号**收尾,对
+ * `{ type: 'token'; text: string } | ...` 这种判别式联合会在第一个成员内部即截断,
+ * 得到残缺变体集并**静默通过**——比不检查更危险。
+ */
+function tsTypeBlock(src, name) {
+  const head = new RegExp(`export\\s+type\\s+${name}\\b[^=]*=`);
+  const m = head.exec(src);
+  if (!m) return null;
+  let depth = 0;
+  let i = m.index + m[0].length;
+  const start = i;
+  for (; i < src.length; i++) {
+    const ch = src[i];
+    if (ch === '{' || ch === '(' || ch === '[') depth++;
+    else if (ch === '}' || ch === ')' || ch === ']') depth--;
+    else if (ch === ';' && depth === 0) return src.slice(start, i);
+  }
+  return null;
+}
+
+/**
+ * 提取 TS 判别式联合的变体集合(`type: '<字面量>'`)。
+ *
+ * 联合里可能引用同文件的类型别名(如 `SseEvent` 的 `| TaskEvent`),故对被引用的
+ * 别名递归展开——否则会误报「TS 缺少取值 task」。
+ * 递归带 visited 集合防自引用死循环。
+ */
+function tsTaggedUnionVariants(src, name, seen = new Set()) {
+  if (seen.has(name)) return new Set();
+  seen.add(name);
+  const body = tsTypeBlock(src, name);
+  if (body === null) return null;
+  const out = new Set();
+  for (const m of body.matchAll(/\btype\s*:\s*'([^']+)'/g)) out.add(m[1]);
+  // 联合成员里引用的类型别名(位于行首或 `|` 之后,且不是内联对象/字面量)
+  for (const m of body.matchAll(/(?:^|\|)\s*([A-Z][A-Za-z0-9_]*)\s*(?=\||;|$)/gm)) {
+    const sub = tsTaggedUnionVariants(src, m[1], seen);
+    if (sub) for (const v of sub) out.add(v);
+  }
+  return out;
+}
+
 const failures = [];
 const warnings = [];
 let checked = 0;
@@ -224,6 +279,23 @@ for (const map of MAPPINGS) {
   const rustSrc = read(map.rust.file);
   const tsSrc = read(map.ts.file);
   checked++;
+
+  if (map.ts.kind === 'tagged-union') {
+    const want = rustVariants(rustSrc, map.rust.name);
+    const got = tsTaggedUnionVariants(tsSrc, map.ts.name);
+    if (!want || !got) {
+      fail(`${map.label}: ${!want ? `Rust 未找到枚举 ${map.rust.name}` : ''}${!got ? ` TS 未找到判别式联合 ${map.ts.name}` : ''}`);
+      continue;
+    }
+    const missing = [...want].filter((v) => !got.has(v));
+    const extra = [...got].filter((v) => !want.has(v));
+    if (missing.length) fail(`${map.label}(${map.ts.name}):TS 缺少事件类型 ${missing.map((v) => `'${v}'`).join(', ')}`);
+    if (extra.length) fail(`${map.label}(${map.ts.name}):TS 多出事件类型 ${extra.map((v) => `'${v}'`).join(', ')}`);
+    if (!missing.length && !extra.length && VERBOSE) {
+      console.log(`  [OK] ${map.label}:${want.size} 个事件类型对齐`);
+    }
+    continue;
+  }
 
   if (map.ts.kind === 'union') {
     const want = rustVariants(rustSrc, map.rust.name);
