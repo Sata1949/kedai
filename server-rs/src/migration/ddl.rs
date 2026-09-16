@@ -202,7 +202,7 @@ pub fn ensure_task_llm_calls_finish_reason_column(conn: &Connection) -> Result<(
 /// - 表不存在(极旧快照/手工建库/测试手工建库)时**零列返回**,交建表批负责,不得 ALTER 报错;
 /// - 列已存在即跳过(幂等,重复执行不产生重复列);
 /// - 列追加在表尾,与新版 CREATE_TABLES 建出的 schema normalize 后一致
-///  (跨库合并的 schema 一致性比对依赖此点)。
+///   (跨库合并的 schema 一致性比对依赖此点)。
 fn add_column_if_missing(
     conn: &Connection,
     table: &str,

@@ -1201,7 +1201,7 @@ async fn chat_finish_event_exposes_finish_reason_on_truncation() {
 
     // [[finish:length|半截正文]] → 产出该正文并带 finish_reason=length
     let events = sse_events(
-        &app,
+        app,
         &sid,
         &cid,
         "[[finish:length|这段回复在输出上限处被截断]]",
@@ -1219,14 +1219,14 @@ async fn chat_finish_event_exposes_finish_reason_on_truncation() {
 
     // 正常收尾(stop)不得被误标截断
     let (_, session2) = send_json(
-        &app,
+        app,
         "POST",
         "/api/chat/sessions",
         json!({ "character_id": cid }),
     )
     .await;
     let sid2 = session2["id"].as_str().unwrap().to_string();
-    let events2 = sse_events(&app, &sid2, &cid, "[[finish:stop|完整回复]]", "fast").await;
+    let events2 = sse_events(app, &sid2, &cid, "[[finish:stop|完整回复]]", "fast").await;
     let finish2 = events2
         .iter()
         .find(|e| e["type"] == "finish")
@@ -1235,7 +1235,7 @@ async fn chat_finish_event_exposes_finish_reason_on_truncation() {
 
     // 落库的 assistant 消息带 extra.truncated=true(刷新后提示仍在)
     let (_, history) = send_json(
-        &app,
+        app,
         "GET",
         &format!("/api/chat/history?session_id={sid}"),
         json!({}),

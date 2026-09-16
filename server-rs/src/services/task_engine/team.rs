@@ -291,9 +291,8 @@ fn trunc_heal_budget(finish_reason: Option<&str>, max_tokens: u32) -> Option<u32
 /// 审计/终审/汇总的实际输出预算:在用户设置之上保证 `TEAM_STRUCTURED_MIN_TOKENS`
 /// 下限(结构化 JSON 与长文本汇总在小预算下必被 reasoning 挤断),并受封顶约束。
 fn structured_budget(setting: u32) -> u32 {
-    setting
-        .max(TEAM_STRUCTURED_MIN_TOKENS)
-        .min(TEAM_RETRY_MAX_TOKENS_CAP)
+    // 下限与封顶都是常量,且 MIN <= CAP,故 clamp 不会 panic(见两常量定义处)
+    setting.clamp(TEAM_STRUCTURED_MIN_TOKENS, TEAM_RETRY_MAX_TOKENS_CAP)
 }
 
 /// 推理感知的截断自愈预算(纯函数,2026-09-15):在 `trunc_heal_budget` 之上,
