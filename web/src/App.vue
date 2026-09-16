@@ -282,6 +282,12 @@ watch(
       <button class="sv-btn ghost sv-btn-sm" @click="retryDataLoad">重试</button>
       <button class="sv-btn ghost sv-btn-sm" @click="store.dataLoadError = null">关闭</button>
     </div>
+    <!-- 未捕获异常兜底(计划批次 5.1):只给「关闭」——异常没有对应的重试动作,
+         给重试按钮会让用户以为点一下能修复,而实际只有刷新页面可能有用 -->
+    <div v-if="store.globalError" class="sv-global-error" role="alert">
+      <span class="sv-global-error-text">界面出现未捕获异常:{{ store.globalError }}</span>
+      <button class="sv-btn ghost sv-btn-sm" @click="store.globalError = null">关闭</button>
+    </div>
     <div v-if="store.modalLoadError" class="sv-global-error" role="alert">
       <span class="sv-global-error-text">「{{ store.modalLoadError.name }}」面板加载失败(前端已更新,需刷新页面)</span>
       <button class="sv-btn ghost sv-btn-sm" @click="reloadPage">刷新页面</button>

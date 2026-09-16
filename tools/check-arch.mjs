@@ -138,6 +138,9 @@ const UI_FLAG_WHITELIST = new Set([
   'renderHintDismissed',
   'modalLoadError',
   'dataLoadError',
+  // 全局未捕获异常横幅(批次 5.1):纯内存态展示开关,与 dataLoadError 同类——
+  // 由 main.ts 的注入回调写、App.vue 点「关闭」清 null,无业务副作用,不值得包 action。
+  'globalError',
 ]);
 
 // ---------- 工具 ----------

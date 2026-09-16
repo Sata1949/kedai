@@ -65,6 +65,13 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
   /** 启动/切换时的数据加载失败提示(角色/会话/历史加载 catch 写入;下次加载成功时清除) */
   const dataLoadError = ref<string | null>(null);
   /**
+   * 全局未捕获异常提示(计划批次 5.1;写入方为 main.ts 注册的 globalErrorHandlers)。
+   * 与 dataLoadError 分开的原因:后者的横幅挂着一个「重试 = 重载角色列表」按钮,
+   * 而未捕获异常没有对应的重试动作——混用会让用户点到一个与错误无关的重试。
+   * 仅内存态:下次异常覆盖、用户关闭即清除,不持久化。
+   */
+  const globalError = ref<string | null>(null);
+  /**
    * 上传角色卡请求计数器(跨组件通信,取代 document.querySelector 戳 Sidebar 内部 DOM):
    * 发起方(如 SettingsHub 快速操作)自增;Sidebar watch 本计数器触发自身隐藏 file input 的 click。
    * 计数器语义而非布尔开关:连续点两次也要各触发一次,不丢请求。
@@ -271,6 +278,7 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
     splashDone,
     modalLoadError,
     dataLoadError,
+    globalError,
     characterUploadRequested,
     callTraceOpen,
     taskResultSummaryOpen,

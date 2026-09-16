@@ -160,6 +160,7 @@
     "cardScripts.ts": { "generation": "L1", "responsibility": "角色卡卡级脚本收集与规范化(纯数据函数:递归拉平扩展形态 + cardScriptCanonical 哈希规范;与后端脚本授权门共享哈希契约,故属契约层而非沙箱层)" },
 
     "asyncModal.ts": { "generation": "L2", "responsibility": "弹窗懒加载包装(失败重试 + uiPrefs.modalLoadError 上报)" },
+    "globalErrorHandlers.ts": { "generation": "L2", "responsibility": "全局错误兜底接线(Vue errorHandler / unhandledrejection / window error;上报走注入回调,不直连 store)" },
     "audioController.ts": { "generation": "L2", "responsibility": "音频控制器注册表(宿主能力桥;被 sandbox 音频 RPC 调用)" },
     "chatStreamService.ts": { "generation": "L2", "responsibility": "聊天流服务编排(依赖注入 streamChat/stopChat,可测编排层)" },
     "resourceStore.ts": { "generation": "L2", "responsibility": "资源界面存储快照桥(localStorage + IndexedDB 持久化编排)" },
