@@ -149,14 +149,7 @@ pub(crate) async fn spa_fallback(
         // 1) 实际静态文件(磁盘优先,回退内嵌)
         if let Some(bytes) = read_file_or_embedded(&state, target).await {
             let mime = guess_mime(target);
-            // index.html 禁止缓存(no-cache):WebView2/浏览器会缓存旧的 index.html,
-            // 导致加载旧 hash 的 JS/CSS,表现为「改了代码重启后还是旧界面」。
-            // 其余静态资源(带 hash 的 assets/*)同样禁止缓存,保证部署后立即生效。
-            let cache_control = if target == "index.html" {
-                "no-store, no-cache, must-revalidate, max-age=0"
-            } else {
-                "no-cache, must-revalidate"
-            };
+            let cache_control = cache_control_for(target);
             return Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, mime)
@@ -215,6 +208,36 @@ mod embedded {
         }
         DIST.get_file(norm).map(|f| f.contents().to_vec())
     }
+}
+
+/// 静态资源缓存策略(2026-09-16 性能批次 P-2)。
+///
+/// 此前除 index.html 外一律 `no-cache, must-revalidate`,连带 content hash 的
+/// assets chunk 也不例外。实测每次启动要重新取回约 770KB(index 122K + vue-vendor
+/// 85K + vendor 187K + content-rendering 103K + modal-settings 188K + CSS 85K),
+/// 带宽走 loopback 不是瓶颈,但**JS 解析与编译每次都要重跑**,是真金白银的启动成本。
+///
+/// 分三档的依据是「URL 是否含内容指纹」:
+///   - `index.html`:恒 `no-store`。它是版本指针,引用的是带 hash 的资源名;
+///     index 一旦被缓存,前端重建后仍指向旧 hash,表现为「改了代码重启还是旧界面」
+///     (原注释记录的既有踩坑)。不做例外。
+///   - `assets/*`(Vite 产物,文件名含 content hash):内容变则文件名变、URL 变,
+///     因此可以 `immutable` 长缓存一年——浏览器连条件请求都省掉。这是安全性论证的
+///     关键:immutable 的前提不是「内容不变」,而是「同一 URL 必然对应同一内容」,
+///     Vite 的 hash 命名恰好保证这一点。
+///   - 其余固定名资源(favicon/logo 等):同名文件内容可能被替换,故短 max-age
+///     (1 小时)折中——仍然省掉大部分重取,过期后正常重新校验,不会长期拿到旧图。
+fn cache_control_for(target: &str) -> &'static str {
+    if target == "index.html" {
+        // 版本指针:必须每次向服务端确认,否则前端重建后拿到旧 hash 资源
+        return "no-store, no-cache, must-revalidate, max-age=0";
+    }
+    if target.starts_with("assets/") {
+        // 含 content hash,同 URL 必同内容 → immutable 安全且省掉一切重验证
+        return "public, max-age=31536000, immutable";
+    }
+    // 固定名资源:允许短期缓存,过期重新校验(不 immutable)
+    "public, max-age=3600"
 }
 
 fn guess_mime(path: &str) -> &'static str {
@@ -442,6 +465,92 @@ mod resource_frame_tests {
         assert!(
             TEMPLATE.contains("should_stream: false"),
             "默认预设应声明非流式(should_stream:false),作者页流式检测才不误报"
+        );
+    }
+}
+
+#[cfg(test)]
+mod cache_policy_tests {
+    use super::cache_control_for;
+
+    /// index.html 必须恒禁缓存:它是「版本指针」——引用的是带 content hash 的
+    /// assets 文件名,index 一旦被缓存,前端重建后仍指向旧 hash,表现为
+    /// 「改了代码重启还是旧界面」(原注释记录的既有踩坑)。
+    #[test]
+    fn index_html_is_never_cached() {
+        let v = cache_control_for("index.html");
+        assert!(v.contains("no-store"), "index.html 应 no-store,实际: {v}");
+    }
+
+    /// 带 content hash 的 assets 长缓存 + immutable(2026-09-16 性能批次 P-2):
+    /// 内容变则文件名 hash 变,URL 随之改变,因此「一年不校验」不会拿到旧代码;
+    /// 此前一律 no-cache,导致每次启动重下重解析约 770KB(实测),纯属浪费。
+    #[test]
+    fn hashed_assets_are_immutable_long_cached() {
+        for p in [
+            "assets/index-BJNFYLP3.js",
+            "assets/index-CGsDXxxK.css",
+            "assets/modal-settings-CndbXzw-.js",
+            "assets/archivo-black-latin-400-normal-BTVu2TQR.woff2",
+        ] {
+            let v = cache_control_for(p);
+            assert!(v.contains("max-age=31536000"), "{p} 应长缓存,实际: {v}");
+            assert!(v.contains("immutable"), "{p} 应 immutable,实际: {v}");
+        }
+    }
+
+    /// 无 hash 的固定名资源(favicon/logo)不能 immutable:同名文件内容可能变,
+    /// 故给较短 max-age(仍允许缓存,避免每次启动重取),过期即重新校验。
+    #[test]
+    fn unhashed_root_assets_use_short_cache() {
+        for p in ["favicon.ico", "favicon.png", "logo.png"] {
+            let v = cache_control_for(p);
+            assert!(v.contains("max-age=3600"), "{p} 应短缓存,实际: {v}");
+            assert!(
+                !v.contains("immutable"),
+                "{p} 无 hash,不可 immutable(内容可能同名更新): {v}"
+            );
+        }
+    }
+
+    /// 未知/无扩展名路径保守处理:不长缓存(默认分支不能误开 immutable)。
+    #[test]
+    fn unknown_paths_fall_back_to_revalidate() {
+        let v = cache_control_for("some-route");
+        assert!(
+            !v.contains("immutable"),
+            "未知路径不得 immutable,实际: {v}"
+        );
+    }
+
+    /// 真实产物对拍:从内嵌 web/dist 里取实际存在的 assets 文件断言策略,
+    /// 避免用硬编码 hash 自说自话(Vite 每次重建都会换名,硬编码必然过期)。
+    #[test]
+    fn real_embedded_assets_hit_immutable_branch() {
+        // 遍历内嵌目录,不做文件名假设
+        fn first_asset(dir: &include_dir::Dir<'_>) -> Option<String> {
+            for f in dir.files() {
+                let p = f.path().to_string_lossy().replace('\\', "/");
+                if p.starts_with("assets/") {
+                    return Some(p);
+                }
+            }
+            for sub in dir.dirs() {
+                if let Some(hit) = first_asset(sub) {
+                    return Some(hit);
+                }
+            }
+            None
+        }
+        let Some(asset) = first_asset(&super::embedded::DIST) else {
+            // web/dist 未构建时(dist 被 .gitignore,全新克隆可能为空)跳过:
+            // 这不是策略回归,构建流程本身要求先产 dist(见 build.ps1)。
+            return;
+        };
+        let v = cache_control_for(&asset);
+        assert!(
+            v.contains("immutable"),
+            "真实产物 {asset} 应命中 immutable 分支,实际: {v}"
         );
     }
 }

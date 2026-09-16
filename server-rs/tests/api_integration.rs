@@ -2903,6 +2903,33 @@ async fn spa_fallback_returns_404_for_missing_assets() {
     assert_eq!(status, StatusCode::OK, "路由路径应回退 index.html");
 }
 
+/// 静态资源缓存策略落地为真实响应头(2026-09-16 性能批次 P-2):
+/// index.html 是版本指针必须恒禁缓存;这里同时断言它没被误改成可缓存。
+#[tokio::test]
+async fn index_html_is_served_no_store() {
+    let app = test_app();
+    let _guard = test_lock().await;
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/index.html")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "index.html 应可取得");
+    let cc = resp.headers()["cache-control"]
+        .to_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        cc.contains("no-store"),
+        "index.html 必须 no-store(版本指针,缓存会导致加载旧 hash 资源),实际: {cc}"
+    );
+}
+
 // ==================== 批次 1:错误面收口(状态码 + code + 泄露守卫) ====================
 //
 // 约定(批次 7 先行的核心契约):错误响应必须断言**真实 HTTP 状态码 + JSON 的 code 字段**,
