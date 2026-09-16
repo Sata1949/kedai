@@ -4,7 +4,7 @@
 // 但**注册是装配动作**,按三结合纪律由宿主(本层)执行——L3 不得依赖 L2 的工具注册表。
 // 故下方统一走「解析(L3) → 宿主注册(L2)」两段式:`parse_all`/`parse_file` + `register_plugin`。
 use crate::api::app_state::AppState;
-use crate::api::{err_status, ErrorCode, WithStatus};
+use crate::api::{err_status, internal, validation, ErrorCode, WithStatus};
 use crate::plugins::ToolPluginLoader;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -157,10 +157,8 @@ pub async fn upload_tool(
             tokio::fs::create_dir_all(&dir).await.ok();
             let path = dir.join(&safe);
             if let Err(e) = tokio::fs::write(&path, &file_bytes).await {
-                return err_status(
-                    &format!("写文件失败: {e}"),
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                );
+                // 500:入参含 io 错误原文(可能带盘符路径),按泄露策略只进日志
+                return internal(format!("写文件失败: {e}"));
             }
             // 解析该插件(parse_file 同步读文件,挪阻塞线程池),注册由本层执行
             let registry = state.tool_registry.clone();
@@ -175,18 +173,18 @@ pub async fn upload_tool(
                 Ok(plugin) => {
                     let (_, reg_errors) = register_plugins(vec![plugin], &registry);
                     if let Some(e) = reg_errors.first() {
-                        return err_status(&format!("插件注册失败: {e}"), StatusCode::BAD_REQUEST);
+                        return validation(format!("插件注册失败: {e}"));
                     }
                 }
                 Err(e) => {
-                    return err_status(&format!("插件注册失败: {e}"), StatusCode::BAD_REQUEST);
+                    return validation(format!("插件注册失败: {e}"));
                 }
             }
             Json(json!({ "ok": true, "name": c.name, "file": safe }))
                 .into_response()
                 .with_status(StatusCode::CREATED)
         }
-        Err(e) => err_status(&format!("插件 JSON 解析失败: {e}"), StatusCode::BAD_REQUEST),
+        Err(e) => validation(format!("插件 JSON 解析失败: {e}")),
     }
 }
 
@@ -222,8 +220,6 @@ pub async fn delete_tool(
     let (count, _) = register_plugins(loaded, &registry);
     Json(json!({ "ok": true, "removed": name, "reloaded": count })).into_response()
 }
-
-/// 运行时错误响应(复用 WithStatus)
 
 #[cfg(test)]
 mod tests {
