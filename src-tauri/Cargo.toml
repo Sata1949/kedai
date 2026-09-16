@@ -50,3 +50,18 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 [profile.release]
 lto = true
 strip = true
+
+# MSVC 本地化链接进度消息的告警抑制(2026-09-16,详见 MAINTENANCE.md §10 条目 33):
+# 本包 crate-type 含 cdylib(Android 必需,见上方 [lib] 注释),在 Windows/MSVC 下链接 cdylib 时
+# link.exe 会向 stdout 打印进度消息「正在创建库 …dll.lib 和对象 …dll.exp」。Rust 1.97 起
+# linker_messages lint 默认 warn 并转发白名单外的链接器输出;而 rustc 的白名单只匹配英文字面串
+# ("Creating library" 等),中文匹配不上,故被报为告警。
+# 触发条件:该告警只在 link.exe 输出**合法 UTF-8** 时出现(需 UTF-8 代码页 / chcp 65001);
+# 默认 GBK 代码页下 rustc 因 UTF-8 解码失败而静默,故不一定每次构建都可见。
+# 代价(本机实测确认,勿误以为「只静默进度消息」):linker_messages 是链接器输出的**唯一**通道,
+# 白名单外的 stdout/stderr 会合并进同一条诊断(实测 LNK4044 与「正在创建库」出现在同一段)。
+# 故 allow 之后链接器**警告**也不再上报,等价于回到 Rust 1.97 之前的行为;链接**错误**
+# (导致构建失败者,走 error: linking with ... failed 路径)不受影响,仍会正常报出。
+# 参考 rust-lang/rust#159133 与 #136096;Rust >= 1.99(PR #160445 改为按 LNK 码分类)后本行可移除。
+[lints.rust]
+linker_messages = "allow"

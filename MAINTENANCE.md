@@ -422,6 +422,7 @@ rusqlite(bundled,零原生依赖),**WAL 模式 + foreign_keys ON**。共 28 张�
 | 30 | `target\debug\deps\` 里只有 `.rmeta` 没有同名 `.rlib` 的孤立产物 | `docs/经验.md` |
 | 31 | 360 安全卫士拦截 cargo 新生成的 build script 可执行文件 | `docs/经验.md` |
 | 32 | 测试临时数据目录从不清理,会把 %TEMP% 撑爆 | `docs/经验.md` |
+| 33 | MSVC 本地化 linker 进度消息被 `linker_messages` 报为告警(含 cdylib 的 crate) | `docs/经验.md` |
 
 条目 32 末尾的「本批次后的实测残留」(约 30 个测试临时目录残留、`kedai-tool-test-*` 3 个为
 已知有界残留)属**遗留登记**,见 `docs/遗留.md`。
