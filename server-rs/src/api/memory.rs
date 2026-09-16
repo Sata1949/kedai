@@ -102,14 +102,11 @@ pub async fn distill(
     };
     match memory.distill_session(&sessions, &session_id, llm).await {
         Ok(outcome) => {
-            // Phase 3:只为本次新增的记忆补向量(不重扫全表)
-            for id in &outcome.new_ids {
-                let memory = state.memory.clone();
-                let id = *id;
-                if let Ok(Some(e)) = state.db_call(move || memory.get(id)).await {
-                    embed_one_entry(&state, &e.id, &e.content).await;
-                }
-            }
+            // Phase 3:只为本次新增的记忆补向量(不重扫全表)。
+            // 2026-09-16 性能批次 P-5:此前是「逐条 get + 逐条 embed」的两层 N+1,
+            // 且每次都新建 EmbeddingService(丢连接池)。现改为一次批量取回、
+            // 一请求批量嵌入,并把向量一次事务写回;顺序由 new_ids 对齐保证。
+            embed_entries_batch(&state, &outcome.new_ids).await;
             Json(json!({
                 "ok": true,
                 "inserted": outcome.inserted,
@@ -217,7 +214,7 @@ pub async fn create(State(state): State<Arc<AppState>>, Json(body): Json<CreateB
         Err(e) => db_err(&e),
         Ok(Ok(entry)) => {
             // Phase 3:向量化开启时为新建记忆补向量(失败仅告警,不阻断写入)
-            embed_one_entry(&state, &entry.id, &entry.content).await;
+            embed_one_entry(&state, entry.id).await;
             Json(json!({ "ok": true, "memory": entry }))
                 .into_response()
                 .with_status(StatusCode::CREATED)
@@ -230,26 +227,79 @@ pub async fn create(State(state): State<Arc<AppState>>, Json(body): Json<CreateB
 
 /// 为单条记忆生成并写入向量(Phase 3 写入链路)。
 /// 未启用/未配置/调用失败一律静默返回:向量是增强能力,不能影响记忆写入主流程。
-async fn embed_one_entry(state: &Arc<AppState>, id: &i64, content: &str) {
+/// 内容按 id 从库中读(不接收调用方传入的 content,避免出现「传进来的内容」
+/// 与「库中实际内容」两个真值源分叉)。
+async fn embed_one_entry(state: &Arc<AppState>, id: i64) {
+    embed_entries_batch(state, &[id]).await;
+}
+
+/// 批量为若干记忆补向量(2026-09-16 性能批次 P-5)。
+///
+/// 此前蒸馏后的补向量是两层 N+1:外层逐 id `db_call(get)` 取内容,内层逐条
+/// `embed_one`(每次还新建 EmbeddingService)。改为:
+///   ① 一次 `get_many` 取回全部内容(单条 SELECT);
+///   ② 一次 `embed`(内部已按 `EMBED_BATCH_SIZE=32` 分片)拿到全部向量;
+///   ③ 一次 `upsert_vectors`(单事务)写回。
+/// 顺序由 `get_many` 的入参顺序保证,向量与 id 一一对齐。
+///
+/// 失败语义与逐条版一致:未启用直接返回;取库/嵌入/写库失败只 warn,
+/// **绝不阻断**记忆写入主流程(向量是增强能力)。
+async fn embed_entries_batch(state: &Arc<AppState>, ids: &[i64]) {
+    if ids.is_empty() {
+        return;
+    }
     let settings = state.settings_snapshot();
     if !settings.embedding_enabled {
         return;
     }
-    let svc = EmbeddingService::new();
-    match svc.embed_one(&settings, content).await {
-        Ok(v) if !v.is_empty() => {
-            let memory = state.memory.clone();
-            let id = *id;
-            if let Err(e) = state.db_call(move || memory.upsert_vector(id, &v)).await {
-                tracing::warn!(error = e, memory_id = id, "记忆向量写入失败");
-            }
+    // ① 一次取回全部内容(保持与 ids 同序,跳过已不存在的 id)
+    let memory = state.memory.clone();
+    let ids_owned: Vec<i64> = ids.to_vec();
+    let entries = match state.db_call(move || memory.get_many(&ids_owned)).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = e, "记忆内容批量读取失败,跳过向量生成");
+            return;
         }
-        Ok(_) => {}
-        Err(e) => tracing::warn!(
-            error = e.to_string(),
-            memory_id = *id,
-            "记忆向量生成失败(可在设置中手动重建索引)"
-        ),
+    };
+    if entries.is_empty() {
+        return;
+    }
+    let texts: Vec<String> = entries.iter().map(|e| e.content.clone()).collect();
+    // ② 一次批量嵌入(内部按批大小自动分片)
+    let svc = EmbeddingService::new();
+    let vecs = match svc.embed(&settings, &texts).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                error = e.to_string(),
+                count = entries.len(),
+                "记忆向量批量生成失败(可在设置中手动重建索引)"
+            );
+            return;
+        }
+    };
+    if vecs.len() != entries.len() {
+        tracing::warn!(
+            expected = entries.len(),
+            got = vecs.len(),
+            "向量返回条数与请求不一致,本次放弃写入"
+        );
+        return;
+    }
+    // ③ 一次事务写回
+    let items: Vec<(i64, Vec<f32>)> = entries
+        .iter()
+        .zip(vecs)
+        .filter(|(_, v)| !v.is_empty())
+        .map(|(e, v)| (e.id, v))
+        .collect();
+    if items.is_empty() {
+        return;
+    }
+    let memory = state.memory.clone();
+    if let Err(e) = state.db_call(move || memory.upsert_vectors(&items)).await {
+        tracing::warn!(error = e, "记忆向量批量写入失败");
     }
 }
 

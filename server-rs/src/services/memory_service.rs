@@ -384,6 +384,37 @@ impl MemoryService {
             .unwrap_or_default()
     }
 
+    /// 批量按 id 取记忆(2026-09-16 性能批次 P-5):一条 `WHERE id IN (...)` 取回,
+    /// **按入参顺序**返回,不存在的 id 静默跳过。
+    ///
+    /// 存在意义:蒸馏后为新增条目补向量时,调用方手上只有 `new_ids`,此前逐条 `get(id)`
+    /// 是典型 N+1——N 条记忆就是 N 次往返 + N 次 prepare。批量版把往返降到 1 次。
+    /// 顺序保证是硬要求:调用方要用「返回的向量」逐个配对「id 列表」,顺序错了会张冠李戴。
+    pub fn get_many(&self, ids: &[i64]) -> Vec<MemoryEntry> {
+        if ids.is_empty() {
+            // SQL 的 `IN ()` 是语法错误,空输入必须短路
+            return Vec::new();
+        }
+        let Ok(conn) = self.db.read() else {
+            return Vec::new();
+        };
+        // 用与 id 个数等长的占位符;rusqlite 的 params_from_iter 按序绑定
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let sql =
+            format!("SELECT {ENTRY_COLUMNS} FROM memory_entries WHERE id IN ({placeholders})");
+        let Ok(mut stmt) = conn.prepare(&sql) else {
+            return Vec::new();
+        };
+        let found: std::collections::HashMap<i64, MemoryEntry> =
+            match stmt.query_map(rusqlite::params_from_iter(ids.iter()), row_to_entry) {
+                Ok(rows) => rows.filter_map(|r| r.ok()).map(|e| (e.id, e)).collect(),
+                // 与同文件 list() 的错误处理惯例一致:查询失败返回空,由调用方按「无内容」处理
+                Err(_) => return Vec::new(),
+            };
+        // 按入参顺序重排(SQL 的 IN 不保证顺序),缺失项跳过
+        ids.iter().filter_map(|id| found.get(id).cloned()).collect()
+    }
+
     pub fn get(&self, id: i64) -> Option<MemoryEntry> {
         let conn = self.db.read().ok()?;
         conn.query_row(
@@ -1021,6 +1052,35 @@ mod tests {
         let memory = MemoryService::new(db.clone());
         let sessions = SessionService::new(db);
         (dir, memory, sessions)
+    }
+
+    /// 批量按 id 取记忆(2026-09-16 性能批次 P-5):蒸馏后为新增条目补向量时,
+    /// 此前逐条 `get(id)` 是 N+1 —— 同一份内容要发 N 条 SELECT。`get_many` 用
+    /// 一条 `WHERE id IN (...)` 取回,并**保持入参顺序**(调用方依赖 id 与内容对齐)。
+    #[test]
+    fn get_many_preserves_input_order_and_skips_missing() {
+        let (_dir, memory, _sessions) = service();
+        // 插 3 条,记录 id
+        let a = memory.create_manual("c1", "第一条").unwrap();
+        let b = memory.create_manual("c1", "第二条").unwrap();
+        let c = memory.create_manual("c1", "第三条").unwrap();
+        // 刻意打乱顺序 + 混入不存在的 id
+        let got = memory.get_many(&[c.id, 999_999, a.id, b.id]);
+        assert_eq!(
+            got.iter().map(|e| e.id).collect::<Vec<_>>(),
+            vec![c.id, a.id, b.id],
+            "应按入参顺序返回,并静默跳过不存在的 id"
+        );
+        assert_eq!(got[0].content, "第三条");
+        assert_eq!(got[2].content, "第二条");
+    }
+
+    /// 空入参不查库、直接返回空(SQL `IN ()` 是语法错误,顺手锁定边界)
+    #[test]
+    fn get_many_empty_input_returns_empty() {
+        let (_dir, memory, _sessions) = service();
+        let _ = memory.create_manual("c1", "有内容").unwrap();
+        assert!(memory.get_many(&[]).is_empty());
     }
 
     fn seed_session(
