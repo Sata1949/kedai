@@ -22,6 +22,7 @@
     "check:contract": "node tools/check-contract.mjs",
     "check:arch": "node tools/check-arch.mjs",
     "check:lock": "node tools/check-lock-sync.mjs",
+    "check:docs": "node tools/check-docs.mjs",
     "check:lint": "node tools/check-frontend-lint.mjs",
     "check:tests": "node tools/count-tests.mjs --check",
     "count:tests": "node tools/count-tests.mjs",

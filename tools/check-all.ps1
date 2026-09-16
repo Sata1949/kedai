@@ -198,6 +198,18 @@ if ($LASTEXITCODE -eq 0) {
     exit 1
 }
 
+# ===== 文档一致性门禁(纯 Node 零依赖,与 -SkipWeb 解耦)=====
+# 2026-09-16 文档整合:68 份散落 md → 六类体系(契约/功能/计划/展望/经验/遗留),
+# 原文档归档到 docs/archive/2026-09-16-consolidation/。此前 docs/ 没有任何机器校验,
+# 本阶段把「根下只放六类活文档 + 索引双向一致 + 链接不失效 + 归档映射覆盖」变成硬门禁。
+# 规则清单见 tools/check-docs.mjs 头部注释(D1~D6)。
+if (-not $AuditOnly) {
+    Push-Location $root
+    try {
+        Invoke-Stage 'docs: check-docs' { node tools/check-docs.mjs }
+    } finally { Pop-Location }
+}
+
 if (-not $SkipWeb -and -not $AuditOnly) {
     Push-Location $root
     try {
@@ -225,7 +237,7 @@ if (-not $SkipWeb -and -not $AuditOnly) {
         # 与上面 type-ratchet 目的不同(ratchet 管类型逃逸、此管代码质量),两者并存。
         # 规则集首轮克制:存量问题降级为 warn(见 web/eslint.config.js),故 0 error 可过;
         # prettier --check 未接入——现有代码为手写紧凑风格,全量格式化差异面 ~80%,
-        # 待独立「全量格式化」专项落地后再接(见 docs/前端工具链与审计升级-变更说明.md)。
+        # 待独立「全量格式化」专项落地后再接(见 docs/功能-变更史.md)。
         Invoke-Stage 'web: eslint'              { npm run lint -w web }
         # 2026-09-08 附录 D 168 个存量错误已清偿归零,typecheck 恢复硬门禁;
         # -StrictTypecheck 参数保留兼容(已无分支差异)
@@ -237,7 +249,7 @@ if (-not $SkipWeb -and -not $AuditOnly) {
     } finally { Pop-Location }
 }
 
-# ===== 性能门禁(可选,默认关闭;见 docs/perf-baseline.md 与 tools/perf-baseline.json)=====
+# ===== 性能门禁(可选,默认关闭;见 docs/功能-变更史.md 与 tools/perf-baseline.json)=====
 # 需要**已在运行**的 Kedai 服务(脚本自动从 /api/bootstrap 取 token),故默认不跑,
 # 避免把「没起服务」误报成门禁失败。用 -Perf 显式开启:
 #   powershell -File tools/check-all.ps1 -Perf
