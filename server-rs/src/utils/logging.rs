@@ -35,6 +35,23 @@ use tracing_subscriber::EnvFilter;
 /// 日志文件前缀:文件名 kedai-YYYY-MM-DD.log(与旧 logger 一致,3 天清理逻辑无需变更)
 const FILE_PREFIX: &str = "kedai-";
 
+/// 单文件大小上限(2026-09-16,计划批次 6.1):超过即轮转到同日的下一个序号文件。
+///
+/// 为什么需要:此前只有「按天滚动 + 启动时删 3 天前文件」,单文件**无上限**。一次失控的
+/// debug 级日志(或高频 warn 风暴)可以在一天内把磁盘写满——本仓已有「C 盘写满」的历史
+/// 环境故障,量级数以 GB 计。加此上限后,单日日志占用被钳制在「上限 × 当日轮转份数」,
+/// 而份数又受下面 MAX_ROTATED_PER_DAY 约束。
+///
+/// 取值 32 MiB:正常使用下一天的日志为几十 KB 到几 MB 量级,32 MiB 留了两个数量级余量;
+/// 真到该量级说明确有异常在刷日志,此时轮转比继续追加更有价值(留证且不撑爆磁盘)。
+const MAX_FILE_BYTES: u64 = 32 * 1024 * 1024;
+
+/// 同日最多保留的轮转份数(含首份):超出的最旧份被删除。
+/// 与 MAX_FILE_BYTES 相乘即「单日日志硬上限」——这是容量保护的关键一环:
+/// 只有大小上限而没有份数上限时,疯狂刷日志仍能靠不断轮转写满磁盘。
+/// 取 8:单日占用上限 256 MiB,足够留下完整现场,又不至于失控。
+const MAX_ROTATED_PER_DAY: u32 = 8;
+
 fn iso_now() -> String {
     Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%z").to_string()
 }
@@ -202,41 +219,174 @@ where
     }
 }
 
-/// 按天滚动文件写入器:保持 kedai-YYYY-MM-DD.log 命名(横杠,非 tracing-appender 默认点分隔)。
+/// 按天滚动 + 超限轮转的文件写入器:保持 kedai-YYYY-MM-DD.log 命名(横杠,非
+/// tracing-appender 默认点分隔);同一天超过 MAX_FILE_BYTES 时切到 `kedai-YYYY-MM-DD.<n>.log`。
 /// 仅被 non-blocking 后台线程独占访问,内部无需锁;打开失败时静默丢弃(与旧 logger 行为一致)。
+///
+/// 轮转文件名的设计要点:`.log` 后缀与 FILE_PREFIX 前缀都保留,故 `cleanup_old_logs` 的
+/// 既有过滤(`starts_with(FILE_PREFIX) && ends_with(".log")`)**无需改动**即覆盖轮转产物。
 struct DailyFileWriter {
     dir: PathBuf,
     today: String,
     file: Option<File>,
+    /// 当前文件的已写字节数。续写(重启/跨天落在既有文件)时取文件实际长度,故不是简单累加。
+    written: u64,
+    /// 0 = 首份 `kedai-<date>.log`;n>0 = 轮转产物 `kedai-<date>.<n>.log`
+    seq: u32,
+    /// 单文件上限(生产恒为 MAX_FILE_BYTES;测试用 with_limit 注入小值)
+    max_bytes: u64,
 }
 
 impl DailyFileWriter {
     fn new(dir: &Path) -> Self {
+        Self::with_limit(dir, MAX_FILE_BYTES)
+    }
+
+    /// 带显式上限的构造(测试注入小上限用;生产走 new)
+    fn with_limit(dir: &Path, max_bytes: u64) -> Self {
         let today = Local::now().format("%Y-%m-%d").to_string();
-        let file = Self::open(dir, &today);
+        // 重启续写:找到当日最后一个文件;若它已满则另起一份,避免往满文件继续追加。
+        let seq = Self::resume_seq(dir, &today, max_bytes);
+        let (file, written) = Self::open(dir, &today, seq);
         DailyFileWriter {
             dir: dir.to_path_buf(),
             today,
             file,
+            written,
+            seq,
+            max_bytes,
         }
     }
 
-    fn open(dir: &Path, today: &str) -> Option<File> {
-        let path = dir.join(format!("{FILE_PREFIX}{today}.log"));
-        OpenOptions::new().create(true).append(true).open(path).ok()
+    /// 序号 → 文件路径:0 为 `kedai-<date>.log`,n 为 `kedai-<date>.<n>.log`
+    fn file_name(date: &str, seq: u32) -> String {
+        if seq == 0 {
+            format!("{FILE_PREFIX}{date}.log")
+        } else {
+            format!("{FILE_PREFIX}{date}.{seq}.log")
+        }
+    }
+
+    /// 打开(或创建)指定序号的当日文件,返回句柄与其当前长度。
+    /// 打开失败返回 (None, 0) —— 调用方据此进入「静默丢弃」路径,与旧行为一致。
+    fn open(dir: &Path, date: &str, seq: u32) -> (Option<File>, u64) {
+        let path = dir.join(Self::file_name(date, seq));
+        match OpenOptions::new().create(true).append(true).open(path) {
+            Ok(f) => {
+                let size = f.metadata().map(|m| m.len()).unwrap_or(0);
+                (Some(f), size)
+            }
+            Err(_) => (None, 0),
+        }
+    }
+
+    /// 解析目录中当日各份日志的序号(供 max_seq 与淘汰使用)。
+    /// 只认 `<date>.log` 与 `<date>.<n>.log` 两种形态,其它日期/命名的文件一概忽略。
+    fn seqs_of(dir: &Path, date: &str) -> Vec<u32> {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let dotted = format!("{date}.");
+        let mut out = Vec::new();
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            let Some(rest) = name.strip_prefix(FILE_PREFIX) else {
+                continue;
+            };
+            let Some(stem) = rest.strip_suffix(".log") else {
+                continue;
+            };
+            if stem == date {
+                out.push(0);
+            } else if let Some(n) = stem.strip_prefix(&dotted) {
+                if let Ok(v) = n.parse::<u32>() {
+                    out.push(v);
+                }
+            }
+        }
+        out.sort_unstable();
+        out
+    }
+
+    /// 重启续写起点:当日无文件则 0;最后一个文件未满则续写它;已满则另起下一序号。
+    /// 「已满」判据用 `>= max_bytes`:轮转本就是在写到「将要超限」前触发,
+    /// 故正常轮转产物不会正好等于上限,此判据只兜「上次退出时刚好写满」这一情形。
+    fn resume_seq(dir: &Path, date: &str, max_bytes: u64) -> u32 {
+        let Some(&last) = Self::seqs_of(dir, date).last() else {
+            return 0;
+        };
+        let size = fs::metadata(dir.join(Self::file_name(date, last)))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        if size >= max_bytes {
+            last + 1
+        } else {
+            last
+        }
+    }
+
+    /// 轮转到下一序号,并按 MAX_ROTATED_PER_DAY 淘汰当日最旧份。
+    fn rotate(&mut self) {
+        // 进程重启后 seq 从既有最大值继续,不会撞名覆盖已轮转文件
+        self.seq = Self::seqs_of(&self.dir, &self.today)
+            .last()
+            .map_or(0, |&m| m.max(self.seq))
+            + 1;
+        let (file, written) = Self::open(&self.dir, &self.today, self.seq);
+        self.file = file;
+        self.written = written;
+        self.prune_rotated();
+    }
+
+    /// 淘汰当日超出 MAX_ROTATED_PER_DAY 的最旧轮转份(序号小者旧)。
+    /// 只删轮转产物,不动首份 `kedai-<date>.log` 与新写的那份——首份是「当日开场」,
+    /// 保留它有利于「当天日志从哪里开始」的可读性,且它正是跨天清理的自然对象。
+    fn prune_rotated(&self) {
+        let seqs = Self::seqs_of(&self.dir, &self.today);
+        // 首份(0)+ 轮转份;超限时从序号最小的轮转份删起
+        if seqs.len() <= MAX_ROTATED_PER_DAY as usize {
+            return;
+        }
+        let mut to_remove = seqs.len() - MAX_ROTATED_PER_DAY as usize;
+        for seq in seqs {
+            if to_remove == 0 {
+                break;
+            }
+            if seq == 0 {
+                continue; // 跳过首份,它不计入淘汰
+            }
+            let path = self.dir.join(Self::file_name(&self.today, seq));
+            if fs::remove_file(path).is_ok() {
+                to_remove -= 1;
+            }
+        }
     }
 }
 
 impl Write for DailyFileWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        // 跨天时切换文件
+        // 跨天时切换文件(序号回到首份)
         let today = Local::now().format("%Y-%m-%d").to_string();
         if today != self.today {
-            self.today = today.clone();
-            self.file = Self::open(&self.dir, &today);
+            self.today = today;
+            let seq = Self::resume_seq(&self.dir, &self.today, self.max_bytes);
+            let (file, written) = Self::open(&self.dir, &self.today, seq);
+            self.file = file;
+            self.written = written;
+            self.seq = seq;
+        }
+        // 超限轮转。`written > 0` 前置条件很重要:单条日志本身若大于上限(极长 payload),
+        // 轮转到空文件也解决不了问题,只会每次写入都开一个新文件。此时直接写进当前文件,
+        // 让它成为「唯一一个超限文件」,下一轮写入再轮转走。
+        if self.written > 0 && self.written + buf.len() as u64 > self.max_bytes {
+            self.rotate();
         }
         match self.file.as_mut() {
-            Some(f) => f.write(buf),
+            Some(f) => {
+                let n = f.write(buf)?;
+                self.written += n as u64;
+                Ok(n)
+            }
             None => Ok(buf.len()),
         }
     }
@@ -520,5 +670,207 @@ mod tests {
             tracing::info!(note = "外出", "无 span");
         });
         assert!(obj.get("requestId").is_none());
+    }
+
+    // ===== 容量上限与轮转(计划批次 6.1)=====
+    // 这些用例直接对 DailyFileWriter 断言(不经 tracing 层):轮转是纯文件层行为,
+    // 走 subscriber 反而引入格式噪声,且无法精确控制每次写入的字节数。
+
+    use crate::utils::test_support::TempDataDir;
+    use std::time::{Duration, SystemTime};
+
+    /// 目录里当日所有日志文件名(排序后)
+    fn log_names(dir: &Path, date: &str) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with(FILE_PREFIX) && n.ends_with(".log"))
+            .collect();
+        names.sort();
+        // 断言 date 参数被用到,避免「静默只匹配前缀」的假通过
+        assert!(
+            names.iter().all(|n| n.contains(date)),
+            "应只匹配当日文件,实际 {names:?}"
+        );
+        names
+    }
+
+    fn today() -> String {
+        Local::now().format("%Y-%m-%d").to_string()
+    }
+
+    #[test]
+    fn 未超上限不轮转() {
+        let tmp = TempDataDir::new("log-rotate-under");
+        let mut w = DailyFileWriter::with_limit(tmp.path(), 1024);
+        w.write_all(b"short line\n").unwrap();
+        w.flush().unwrap();
+        assert_eq!(
+            log_names(tmp.path(), &today()),
+            vec![format!("{FILE_PREFIX}{}.log", today())]
+        );
+    }
+
+    #[test]
+    fn 超上限轮转出新文件且命名仍匹配清理过滤() {
+        let tmp = TempDataDir::new("log-rotate-over");
+        let date = today();
+        let mut w = DailyFileWriter::with_limit(tmp.path(), 64);
+        // 每次 40 字节:第一次写入后 written=40;第二次 40+40>64 触发轮转
+        w.write_all(&[b'a'; 40]).unwrap();
+        w.write_all(&[b'b'; 40]).unwrap();
+        w.write_all(&[b'c'; 40]).unwrap();
+        w.flush().unwrap();
+
+        let names = log_names(tmp.path(), &date);
+        assert_eq!(
+            names,
+            vec![
+                format!("{FILE_PREFIX}{date}.1.log"),
+                format!("{FILE_PREFIX}{date}.2.log"),
+                format!("{FILE_PREFIX}{date}.log"),
+            ],
+            "应产生首份 + 两份轮转产物"
+        );
+        // 关键不变量:轮转产物的前缀与后缀都保留,故 cleanup_old_logs 的既有过滤
+        // (starts_with(FILE_PREFIX) && ends_with(".log"))无需改动即可覆盖它们
+        for n in &names {
+            assert!(
+                n.starts_with(FILE_PREFIX) && n.ends_with(".log"),
+                "{n} 未被清理过滤覆盖"
+            );
+        }
+        // 各份内容互不混淆
+        let read = |n: &str| fs::read(tmp.path().join(n)).unwrap();
+        assert_eq!(read(&format!("{FILE_PREFIX}{date}.log")), vec![b'a'; 40]);
+        assert_eq!(read(&format!("{FILE_PREFIX}{date}.1.log")), vec![b'b'; 40]);
+        assert_eq!(read(&format!("{FILE_PREFIX}{date}.2.log")), vec![b'c'; 40]);
+    }
+
+    #[test]
+    fn 轮转后按新文件重新计数() {
+        let tmp = TempDataDir::new("log-rotate-count");
+        let mut w = DailyFileWriter::with_limit(tmp.path(), 100);
+        w.write_all(&[b'x'; 80]).unwrap();
+        assert_eq!(w.written, 80);
+        // 80 + 80 > 100 → 轮转,written 重置为新文件长度(0)
+        w.write_all(&[b'y'; 80]).unwrap();
+        assert_eq!(w.seq, 1, "应已轮转到第 1 份");
+        assert_eq!(w.written, 80, "应在新文件上重新计数,而非在 80 上累加");
+        // 再写 30:80+30>100 → 再轮转
+        w.write_all(&[b'z'; 30]).unwrap();
+        assert_eq!(w.seq, 2);
+        assert_eq!(w.written, 30);
+        w.flush().unwrap();
+    }
+
+    #[test]
+    fn 单条超上限的写入不产生空转轮转() {
+        let tmp = TempDataDir::new("log-rotate-oversized");
+        let mut w = DailyFileWriter::with_limit(tmp.path(), 16);
+        // 首份为空(written==0)时写入一条超大 payload:轮转无意义,应直接写入
+        w.write_all(&[b'q'; 100]).unwrap();
+        w.flush().unwrap();
+        assert_eq!(w.seq, 0, "空文件上的超长写入不应轮转");
+        assert_eq!(w.written, 100);
+        let names = log_names(tmp.path(), &today());
+        assert_eq!(names.len(), 1, "不应产生多余文件");
+    }
+
+    #[test]
+    fn 重启后续写未满文件而不是另起一份() {
+        let tmp = TempDataDir::new("log-rotate-resume");
+        {
+            let mut w = DailyFileWriter::with_limit(tmp.path(), 1000);
+            w.write_all(b"first\n").unwrap();
+            w.flush().unwrap();
+        } // 模拟进程退出:writer 析构,文件保留
+        let mut w = DailyFileWriter::with_limit(tmp.path(), 1000);
+        assert_eq!(w.seq, 0, "未满应续写首份");
+        assert_eq!(w.written, 6, "written 应取既有文件长度,而非从 0 开始");
+        w.write_all(b"second\n").unwrap();
+        w.flush().unwrap();
+        let content = fs::read(tmp.path().join(format!("{FILE_PREFIX}{}.log", today()))).unwrap();
+        assert_eq!(content, b"first\nsecond\n");
+    }
+
+    #[test]
+    fn 重启后续写已满文件时另起下一序号() {
+        let tmp = TempDataDir::new("log-rotate-resume-full");
+        let date = today();
+        {
+            let mut w = DailyFileWriter::with_limit(tmp.path(), 8);
+            w.write_all(b"12345678").unwrap(); // 正好写满
+            w.flush().unwrap();
+        }
+        let mut w = DailyFileWriter::with_limit(tmp.path(), 8);
+        assert_eq!(w.seq, 1, "首份已满,应另起第 1 份而非继续追加");
+        assert_eq!(w.written, 0);
+        w.write_all(b"next").unwrap();
+        w.flush().unwrap();
+        // 首份内容未被破坏
+        assert_eq!(
+            fs::read(tmp.path().join(format!("{FILE_PREFIX}{date}.log"))).unwrap(),
+            b"12345678"
+        );
+    }
+
+    #[test]
+    fn 当日轮转份数超限时淘汰最旧份() {
+        let tmp = TempDataDir::new("log-rotate-prune");
+        // 上限远小于写入量,触发多次轮转,总数超过 MAX_ROTATED_PER_DAY
+        let mut w = DailyFileWriter::with_limit(tmp.path(), 4);
+        for i in 0..(MAX_ROTATED_PER_DAY + 4) {
+            w.write_all(&[b'0' + (i % 10) as u8; 4]).unwrap();
+        }
+        w.flush().unwrap();
+        let names = log_names(tmp.path(), &today());
+        assert!(
+            names.len() <= MAX_ROTATED_PER_DAY as usize,
+            "当日份数应被钳制在 {MAX_ROTATED_PER_DAY},实际 {} 份:{names:?}",
+            names.len()
+        );
+        // 首份始终保留(它是当日开场,且是跨天清理的自然对象)
+        assert!(
+            names.contains(&format!("{FILE_PREFIX}{}.log", today())),
+            "首份不应被淘汰:{names:?}"
+        );
+        // 最旧的轮转份(序号小者)应已被删除
+        assert!(
+            !names.contains(&format!("{FILE_PREFIX}{}.1.log", today())),
+            "序号最小的轮转份应被淘汰:{names:?}"
+        );
+    }
+
+    #[test]
+    fn cleanup_old_logs覆盖轮转产物() {
+        let tmp = TempDataDir::new("log-rotate-cleanup");
+        let old_first = format!("{FILE_PREFIX}2020-01-01.log");
+        let old_rotated = format!("{FILE_PREFIX}2020-01-01.3.log");
+        let fresh = format!("{FILE_PREFIX}{}.2.log", today());
+        for n in [&old_first, &old_rotated, &fresh] {
+            fs::write(tmp.path().join(n), b"x\n").unwrap();
+        }
+        // 注意:cleanup_old_logs 按**文件 mtime** 判定新旧,与文件名里的日期无关。
+        // 故必须真的把「旧」文件的修改时间回拨,否则刚写的文件 mtime 是现在、永远不删。
+        let ten_days_ago = SystemTime::now() - Duration::from_secs(10 * 24 * 3600);
+        for n in [&old_first, &old_rotated] {
+            OpenOptions::new()
+                .write(true)
+                .open(tmp.path().join(n))
+                .unwrap()
+                .set_modified(ten_days_ago)
+                .unwrap();
+        }
+
+        cleanup_old_logs(tmp.path());
+
+        let left: Vec<String> = fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(left, vec![fresh], "陈旧的轮转产物应随日志一并清理");
     }
 }
