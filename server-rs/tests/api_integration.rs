@@ -1226,14 +1226,7 @@ async fn chat_finish_event_exposes_finish_reason_on_truncation() {
     )
     .await;
     let sid2 = session2["id"].as_str().unwrap().to_string();
-    let events2 = sse_events(
-        &app,
-        &sid2,
-        &cid,
-        "[[finish:stop|完整回复]]",
-        "fast",
-    )
-    .await;
+    let events2 = sse_events(&app, &sid2, &cid, "[[finish:stop|完整回复]]", "fast").await;
     let finish2 = events2
         .iter()
         .find(|e| e["type"] == "finish")
@@ -1248,7 +1241,9 @@ async fn chat_finish_event_exposes_finish_reason_on_truncation() {
         json!({}),
     )
     .await;
-    let msgs = history["messages"].as_array().expect("history 应含 messages");
+    let msgs = history["messages"]
+        .as_array()
+        .expect("history 应含 messages");
     let assistant = msgs
         .iter()
         .rev()

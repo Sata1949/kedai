@@ -107,10 +107,19 @@ mod tests {
         assert_eq!(heal_budget_with_floor(64, 131_072, 16_384), Some(16_384));
         assert_eq!(heal_budget_with_floor(1024, 131_072, 16_384), Some(16_384));
         // 下限之上:翻倍仍生效(下限不得压低既有增长)
-        assert_eq!(heal_budget_with_floor(16_384, 131_072, 16_384), Some(32_768));
-        assert_eq!(heal_budget_with_floor(40_000, 131_072, 16_384), Some(80_000));
+        assert_eq!(
+            heal_budget_with_floor(16_384, 131_072, 16_384),
+            Some(32_768)
+        );
+        assert_eq!(
+            heal_budget_with_floor(40_000, 131_072, 16_384),
+            Some(80_000)
+        );
         // 封顶优先于下限
-        assert_eq!(heal_budget_with_floor(70_000, 131_072, 16_384), Some(131_072));
+        assert_eq!(
+            heal_budget_with_floor(70_000, 131_072, 16_384),
+            Some(131_072)
+        );
         // 已达封顶:无增长即 None
         assert_eq!(heal_budget_with_floor(131_072, 131_072, 16_384), None);
         // floor 高于 cap 时不得越界 cap

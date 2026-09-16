@@ -243,7 +243,10 @@ mod tests {
     #[test]
     fn truncated_retry_budget_doubles_and_keeps_cap() {
         // 小预算抬到 HEAL_BUDGET_FLOOR:1024 翻倍只有 2048,仍会被推理整个吃光
-        assert_eq!(truncated_retry_budget(1024), crate::utils::retry::HEAL_BUDGET_FLOOR);
+        assert_eq!(
+            truncated_retry_budget(1024),
+            crate::utils::retry::HEAL_BUDGET_FLOOR
+        );
         assert_eq!(truncated_retry_budget(16_384), 32_768, "下限之上仍按翻倍");
         assert_eq!(truncated_retry_budget(40000), 80_000);
         assert_eq!(truncated_retry_budget(70_000), RETRY_MAX_TOKENS_CAP);

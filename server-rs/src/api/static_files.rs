@@ -517,10 +517,7 @@ mod cache_policy_tests {
     #[test]
     fn unknown_paths_fall_back_to_revalidate() {
         let v = cache_control_for("some-route");
-        assert!(
-            !v.contains("immutable"),
-            "未知路径不得 immutable,实际: {v}"
-        );
+        assert!(!v.contains("immutable"), "未知路径不得 immutable,实际: {v}");
     }
 
     /// 真实产物对拍:从内嵌 web/dist 里取实际存在的 assets 文件断言策略,

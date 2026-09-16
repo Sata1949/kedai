@@ -90,8 +90,7 @@ fn cache_key_is_fresh(cached: &CacheKey, current: &CacheKey) -> bool {
             _ => false,
         }
     }
-    slot_matches(&cached.primary, &current.primary)
-        && slot_matches(&cached.legacy, &current.legacy)
+    slot_matches(&cached.primary, &current.primary) && slot_matches(&cached.legacy, &current.legacy)
 }
 
 fn stamp_of(meta: &fs::Metadata) -> FileStamp {
