@@ -411,6 +411,12 @@ export const useTaskStore = defineStore('app.task', () => {
     closeTaskEvents = api.streamTaskEvents(onTaskEvent, onTaskEventsClosed);
     settleTimer = setTimeout(() => {
       settleTimer = null;
+      // 可观测性(批次 5.3):settle 窗口内未再断开即视为恢复。此处 reconnectDelay 仍大于
+      // 起步值,说明本次是「断线后的重连」而非首次连接,才记一行——否则每次进任务模式都会刷。
+      // 纯观测,不参与任何判定(退避与重连策略见下方两处,未改)。
+      if (reconnectDelay > RECONNECT_BASE_MS) {
+        console.info('[kedai] 任务事件流已恢复(settle 窗口内未再断开),退避复位');
+      }
       reconnectDelay = RECONNECT_BASE_MS;
       stopTaskPolling();
       // 补偿断开期间可能遗漏的变更
@@ -421,13 +427,16 @@ export const useTaskStore = defineStore('app.task', () => {
   }
 
   /** SSE 关闭回调(对端断开/网络错误):启动兜底轮询,按指数退避安排重连 */
-  function onTaskEventsClosed(_err?: Error): void {
+  function onTaskEventsClosed(err?: Error): void {
     closeTaskEvents = null;
     if (settleTimer) {
       clearTimeout(settleTimer);
       settleTimer = null;
     }
     if (appMode.value !== 'task') return; // 已退出任务模式,不再重连
+    // 可观测性(批次 5.3):重连过程此前在控制台完全不可见,排查「当时发生了什么」只能靠猜。
+    // 记录本次退避值(即下方 setTimeout 实际使用的值)与兜底轮询状态,只加信号不改策略。
+    console.warn(`[kedai] 任务事件流断开,${reconnectDelay}ms 后重连(期间 5s 兜底轮询保活)`, err);
     startTaskPolling();
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
@@ -455,6 +464,7 @@ export const useTaskStore = defineStore('app.task', () => {
     }
     stopTaskPolling();
     if (closeTaskEvents) {
+      console.debug('[kedai] 任务事件流订阅已关闭(退出任务模式)');
       closeTaskEvents();
       closeTaskEvents = null;
     }
@@ -463,6 +473,7 @@ export const useTaskStore = defineStore('app.task', () => {
   // ===== 兜底轮询(SSE 断开期间的 5s 低频保活:仅列表 + 当前任务详情) =====
   function startTaskPolling(): void {
     if (taskPollTimer) return;
+    console.debug('[kedai] 任务兜底轮询启动(SSE 断开期间 5s 保活)');
     taskPollTimer = setInterval(() => {
       void loadTasks();
       if (currentTaskId.value) void loadTaskDetail(currentTaskId.value);
@@ -471,6 +482,7 @@ export const useTaskStore = defineStore('app.task', () => {
 
   function stopTaskPolling(): void {
     if (taskPollTimer) {
+      console.debug('[kedai] 任务兜底轮询停止(事件流已恢复)');
       clearInterval(taskPollTimer);
       taskPollTimer = null;
     }
