@@ -7,6 +7,7 @@
 //       `test_support.rs` 的 TempDataDir 是测试专用 RAII 守卫(2026-09-15),
 //       仅 cfg(test)/test-support feature 编译,不进生产产物。
 // 纪律: 保持无状态、无业务语义依赖。
+pub mod blocking;
 pub mod fs_atomic;
 pub mod logging;
 pub mod loop_guard;
