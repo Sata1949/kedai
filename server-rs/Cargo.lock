@@ -1009,7 +1009,7 @@ dependencies = [
 
 [[package]]
 name = "kedai-server"
-version = "0.3.0-A-beta"
+version = "0.3.0-B-beta"
 dependencies = [
  "async-stream",
  "axum",

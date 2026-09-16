@@ -1,6 +1,6 @@
 {
   "name": "kedai-web",
-  "version": "0.3.0-A-beta",
+  "version": "0.3.0-B-beta",
   "private": true,
   "type": "module",
   "description": "Kedai 前端:Vue 3 + Vite + Tailwind CSS v4 + Pinia(淡粉画布 × 至上主义/构成主义设计系统)",
