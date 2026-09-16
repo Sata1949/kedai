@@ -82,7 +82,7 @@ fn prune_preupgrade_backups(dir: &Path) {
         return;
     }
     // 新的在前;跳过前 PREUPGRADE_KEEP 份,其余删除
-    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files.sort_by_key(|b| std::cmp::Reverse(b.0));
     for (_, path) in files.into_iter().skip(PREUPGRADE_KEEP) {
         let _ = fs::remove_file(path);
     }
