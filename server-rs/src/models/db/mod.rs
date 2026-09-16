@@ -45,6 +45,35 @@ pub struct Db {
     readers: ReadPool,
 }
 
+/// 判断本次 `Db::open` 是否属于「对既有库做 schema 升级」,从而需要在升级前备份。
+///
+/// 三种情形:
+///   · `db_version >= SCHEMA_VERSION` → 已是当前版本(或更高,已被上方拒绝分支拦截),
+///     无需升级 → 不备份。**这条同时保证「每次启动都备份」不会发生**。
+///   · `db_version == 0` → 全新库与未标记旧库共用此值,必须再看库里有没有业务表:
+///     没有任何非 `sqlite_%` 的表 = 全新库(不备份);有表 = 0.3.0-beta 及更早的旧库(备份)。
+///   · `0 < db_version < SCHEMA_VERSION` → 明确的老版本库 → 备份。
+///
+/// 读取失败按「不备份」处理:此处只影响是否留档,不能反过来阻断启动;
+/// 真有问题会在随后的建表/迁移阶段以更明确的错误暴露。
+fn needs_preupgrade_backup(conn: &Connection, db_version: i32) -> bool {
+    if db_version >= schema::SCHEMA_VERSION {
+        return false;
+    }
+    if db_version > 0 {
+        return true;
+    }
+    // version == 0:看是否已有业务表(新库此刻还没有任何表)
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' \
+         AND name NOT LIKE 'sqlite_%'",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|n| n > 0)
+    .unwrap_or(false)
+}
+
 impl Db {
     pub fn open(db_path: &Path, data_dir: &Path) -> Result<Self, String> {
         // 向量扩展必须最先注册:之后所有连接(写连接 + 池中只读连接)才能用 vec0
@@ -98,6 +127,20 @@ impl Db {
         // 升级链事务化(known-limitations L21):建表批 + 11 个 ensure_* 包在同一个
         // 事务里。SQLite 的 DDL 是事务性的,任一步失败整链回滚,不留「部分升级态」。
         // 回滚必须落在 `?`/早退之前:否则连接停在打开的事务里,后续 Db::write 撞锁。
+        //
+        // 升级前自动备份(DB-2 / 计划批次):在动任何 schema 之前先留一份快照。判定
+        // 「需要升级」必须区分两种 user_version=0 的库(**这点极易写错**):
+        //   · 全新库:文件刚建、库里**没有任何业务表** → 无需备份;
+        //   · 未标记的旧库:version=0 但有业务表(0.3.0-beta 及更早)→ **必须备份**。
+        // 只判 `db_version > 0` 会漏掉后者,而那恰是真实用户升级的主路径。
+        if needs_preupgrade_backup(&conn, db_version) {
+            match crate::migration::snapshot_before_upgrade(db_path, data_dir, db_version) {
+                Ok(p) => tracing::info!(path = %p.display(), "已生成升级前数据库快照"),
+                // 失败绝不阻断启动:备份是「多一份保险」,不能因为它失败反而让库打不开
+                // (与下方 PRAGMA optimize 的处置口径一致)。
+                Err(e) => tracing::warn!("升级前数据库快照失败(不阻断启动): {e}"),
+            }
+        }
         let upgrade: Result<(), String> = (|| {
             conn.execute_batch("BEGIN IMMEDIATE;")
                 .map_err(|e| format!("开启 schema 升级事务失败: {e}"))?;

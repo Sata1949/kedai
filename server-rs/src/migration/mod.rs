@@ -14,7 +14,7 @@ mod conflict;
 mod ddl;
 mod merge;
 
-pub use backup::snapshot_database;
+pub use backup::{snapshot_before_upgrade, snapshot_database};
 pub use ddl::{
     ensure_agent_subtasks_finished_at_column, ensure_exec_audit_table,
     ensure_llm_requests_usage_columns, ensure_memory_entries_fts_backfill,

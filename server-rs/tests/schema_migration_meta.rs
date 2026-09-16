@@ -467,6 +467,123 @@ fn ddl_texts_match_create_tables_after_normalize() {
     );
 }
 
+// ===== 升级前自动备份(DB-2 / 计划批次)=====
+//
+// 登记口径:升级链已事务化(失败整体回滚),但此前**没有**任何前置快照,用户要退回旧版
+// exe 只能靠自己事前的备份。本组用例锁定四件事:老库升级留档、新库不留、已最新不重复留、
+// 备份失败不阻断启动。
+
+/// 列出 `<dir>/backups/` 下的升级前备份文件名(排序);目录不存在返回空
+fn backup_files(data_dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = match std::fs::read_dir(data_dir.join("backups")) {
+        Ok(entries) => entries
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    names.sort();
+    names
+}
+
+/// 【备份 1】老库(user_version=0 且有业务表)升级前留档,且快照内容确是**升级前**状态
+#[test]
+fn legacy_database_gets_preupgrade_backup_with_old_version() {
+    let dir = legacy_dir("backup-legacy");
+    let path = dir.join("kedai.db");
+    // 前置于此:legacy_dir 建的库 user_version 天然为 0(即「未标记的旧库」)。
+    // 这正是判定最容易写错的一档——只判 `> 0` 会漏掉它,而它是真实用户的升级主路径。
+    assert_eq!(user_version(&path), 0);
+    assert!(
+        table_exists(&path, "characters"),
+        "老库必须带业务表,否则与「全新库」不可区分"
+    );
+
+    let _db = Db::open(&path, &dir).expect("老库应能升级");
+
+    let backups = backup_files(&dir);
+    assert_eq!(backups.len(), 1, "老库升级应留下恰好一份快照:{backups:?}");
+    assert!(
+        backups[0].starts_with("kedai-preupgrade-v0-") && backups[0].ends_with(".db"),
+        "命名应含升级前版本号与时间戳(时间戳是唯一性所必需):{}",
+        backups[0]
+    );
+
+    // 关键判别断言:快照里的版本号必须是**升级前**的 0。
+    // 若实现把备份放在了升级之后,这里会读到 SCHEMA_VERSION 而非 0。
+    let snapshot = dir.join("backups").join(&backups[0]);
+    assert_eq!(
+        user_version(&snapshot),
+        0,
+        "快照必须反映升级前状态(版本号 0),否则它在降级场景下无用"
+    );
+    assert!(
+        table_exists(&snapshot, "characters"),
+        "快照应含升级前的业务表(确为一份可用备份)"
+    );
+    // 原库确实已完成升级(证明备份发生在升级之前、且升级照常完成)
+    assert_eq!(user_version(&path), SCHEMA_VERSION);
+}
+
+/// 【备份 2】全新库不留档(库里没有任何业务表 → 没有可备份的内容)
+#[test]
+fn fresh_database_creates_no_backup() {
+    let dir = temp_dir("backup-fresh");
+    let path = dir.join("kedai.db");
+    let _db = Db::open(&path, &dir).expect("全新库应能建立");
+    assert!(
+        backup_files(&dir).is_empty(),
+        "全新库不该产生升级前备份(其 user_version 同为 0,靠「有无业务表」区分)"
+    );
+}
+
+/// 【备份 3】已是当前版本的库再打开不留档(否则每次启动都会多一份)
+#[test]
+fn already_current_database_creates_no_additional_backup() {
+    let dir = legacy_dir("backup-idempotent");
+    let path = dir.join("kedai.db");
+
+    let first = Db::open(&path, &dir).expect("首次升级应成功");
+    drop(first);
+    let after_upgrade = backup_files(&dir);
+    assert_eq!(after_upgrade.len(), 1, "首次升级应留一份");
+
+    let second = Db::open(&path, &dir).expect("再次打开应成功");
+    drop(second);
+    assert_eq!(
+        backup_files(&dir),
+        after_upgrade,
+        "库已是当前版本时不应再留档(否则每次启动都新增一份)"
+    );
+}
+
+/// 【备份 4,锁「不阻断启动」不变量】备份失败时 Db::open 仍须成功
+///
+/// 手法:把 `<data_dir>/backups` 占成**同名文件**,使快照的
+/// `create_dir_all(parent)` 失败。此时应用必须照常启动——备份只是「多一份保险」,
+/// 不能因为它失败反而把「本来能正常升级」的库变成「应用打不开」。
+#[test]
+fn backup_failure_does_not_block_open() {
+    let dir = legacy_dir("backup-failure");
+    let path = dir.join("kedai.db");
+    std::fs::write(dir.join("backups"), b"not a directory").unwrap();
+
+    let db = Db::open(&path, &dir).expect("备份失败不得阻断启动(硬不变量)");
+
+    // 升级确实照常完成
+    assert_eq!(
+        user_version(&path),
+        SCHEMA_VERSION,
+        "备份失败时升级仍应正常完成"
+    );
+    assert!(table_exists(&path, "script_authorizations"));
+    drop(db);
+    assert!(
+        dir.join("backups").is_file(),
+        "占位文件不应被删除(我们没理由动用户的路径)"
+    );
+}
+
 /// 取出 schema.rs 中 CREATE_TABLES 的原文(`auto-comment` 留在串内的注释由
 /// strip_line_comments 负责剥离)
 fn create_tables_text(source: &str) -> String {
