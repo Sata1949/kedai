@@ -48,7 +48,11 @@ pub(crate) mod routes;
 pub(crate) mod static_files;
 mod util;
 
-pub(crate) use errors::{code_for_status, err_with_code, ErrorCode};
+// 统一错误出口(api/errors.rs):handler 一律用这些构造器,勿再就地拼 Json。
+// code_for_status 仅供 errors.rs 内部由 err_status 使用,不再对外导出。
+pub(crate) use errors::{
+    conflict, err_status, err_with_code, internal, not_found, upstream, validation, ErrorCode,
+};
 pub use util::WithStatus;
 pub(crate) use util::{db_err, sse_response};
 

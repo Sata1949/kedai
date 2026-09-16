@@ -1,8 +1,8 @@
 // 聊天路由(核心):/api/chat/send(SSE)、/api/chat/stop
 use crate::agents::engine::AgentRunRequest;
 use crate::api::app_state::AppState;
-use crate::api::db_err;
 use crate::api::json_body::JsonBody;
+use crate::api::{db_err, err_status, upstream};
 use crate::models::types::{GenerationParams, PlanStep, SseEvent};
 use crate::services::prompt_inject_service::{output_budget_for_word_count, InjectMode};
 use axum::extract::State;
@@ -79,7 +79,7 @@ pub async fn send(
 ) -> Response {
     let message = body.message.unwrap_or_default().trim().to_string();
     if message.is_empty() {
-        return err_json("消息不能为空", StatusCode::BAD_REQUEST);
+        return err_status("消息不能为空", StatusCode::BAD_REQUEST);
     }
 
     // 定位会话(指定 session_id 或按角色取首个)
@@ -87,7 +87,7 @@ pub async fn send(
         Some(sid) => sid.clone(),
         None => {
             let Some(cid) = &body.character_id else {
-                return err_json("缺少 session_id 或 character_id", StatusCode::BAD_REQUEST);
+                return err_status("缺少 session_id 或 character_id", StatusCode::BAD_REQUEST);
             };
             // 无会话直接发消息的路径:ensure_session + 补开场白一并挪进阻塞线程(DB 并发改造)
             let svc = state.sessions.clone();
@@ -103,16 +103,16 @@ pub async fn send(
             {
                 Err(e) => return db_err(&e),
                 Ok(Ok(s)) => s.id,
-                Ok(Err(e)) => return err_json(&e, StatusCode::INTERNAL_SERVER_ERROR),
+                Ok(Err(e)) => return err_status(&e, StatusCode::INTERNAL_SERVER_ERROR),
             }
         }
     };
     let session = match state.sessions.get(&session_id) {
         Some(s) => s,
-        None => return err_json("会话不存在", StatusCode::NOT_FOUND),
+        None => return err_status("会话不存在", StatusCode::NOT_FOUND),
     };
     if state.engine.is_active(&session_id) {
-        return err_json("该会话正在生成中", StatusCode::CONFLICT);
+        return err_status("该会话正在生成中", StatusCode::CONFLICT);
     }
 
     let mode = match body.agent_mode.as_deref() {
@@ -182,14 +182,14 @@ pub async fn send(
             Some(f) => f.clone(),
             // 流程库为空或未选中(仅删除全部流程后出现)
             None => {
-                return err_json(
+                return err_status(
                     "未选择执行流程:请先在设置中新建或选择一个 Agent 执行流程",
                     StatusCode::BAD_REQUEST,
                 );
             }
         };
         if !flow.enabled || flow.steps.is_empty() {
-            return err_json(
+            return err_status(
                 "自定义模式需要先在设置中启用并保存执行流程",
                 StatusCode::BAD_REQUEST,
             );
@@ -200,7 +200,7 @@ pub async fn send(
             .unwrap_or_else(|e| e.into_inner())
             .validate(&flow)
         {
-            return err_json(format!("执行流程配置无效:{e}"), StatusCode::BAD_REQUEST);
+            return err_status(format!("执行流程配置无效:{e}"), StatusCode::BAD_REQUEST);
         }
         flow_steps = flow.steps.into_iter().filter(|s| s.enabled).collect();
     }
@@ -211,7 +211,7 @@ pub async fn send(
         || params.max_tokens > MAX_GENERATION_TOKENS
         || max_context_tokens.is_some_and(|v| v == 0 || v > MAX_CONTEXT_TOKENS)
     {
-        return err_json("生成参数超出安全上限", StatusCode::BAD_REQUEST);
+        return err_status("生成参数超出安全上限", StatusCode::BAD_REQUEST);
     }
 
     // 原子占位必须发生在任何消息写入之前;所有前置校验已完成。
@@ -223,7 +223,7 @@ pub async fn send(
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         if pending.contains_key(&session_id) || state.engine.is_active(&session_id) {
-            return err_json("该会话正在生成中", StatusCode::CONFLICT);
+            return err_status("该会话正在生成中", StatusCode::CONFLICT);
         }
         let (cancel, _receiver) = tokio::sync::watch::channel(false);
         pending.insert(session_id.clone(), cancel);
@@ -242,7 +242,7 @@ pub async fn send(
     if let Some(message_id) = body.regenerate_assistant_id {
         // 与重发锚点互斥:两个锚点同时出现属于请求错误
         if body.resend_message_id.is_some() {
-            return err_json("重生成与重发锚点互斥,不能同时指定", StatusCode::BAD_REQUEST);
+            return err_status("重生成与重发锚点互斥,不能同时指定", StatusCode::BAD_REQUEST);
         }
         let valid = state
             .sessions
@@ -250,7 +250,7 @@ pub async fn send(
             .last()
             .is_some_and(|m| m.id == message_id && m.role == "assistant");
         if !valid {
-            return err_json("重生成锚点无效或已过期", StatusCode::CONFLICT);
+            return err_status("重生成锚点无效或已过期", StatusCode::CONFLICT);
         }
     } else if let Some(message_id) = body.resend_message_id {
         let valid = state
@@ -259,7 +259,7 @@ pub async fn send(
             .last()
             .is_some_and(|m| m.id == message_id && m.role == "user" && m.content == message);
         if !valid {
-            return err_json("重发消息锚点无效或已过期", StatusCode::CONFLICT);
+            return err_status("重发消息锚点无效或已过期", StatusCode::CONFLICT);
         }
     } else {
         let model = state.engine.model();
@@ -283,7 +283,7 @@ pub async fn send(
         }).await;
         if let Err(e) = write_result.unwrap_or_else(|e| Err(format!("消息写入任务失败: {e}")))
         {
-            return err_json(&e, StatusCode::INTERNAL_SERVER_ERROR);
+            return err_status(&e, StatusCode::INTERNAL_SERVER_ERROR);
         }
     }
 
@@ -295,7 +295,7 @@ pub async fn send(
         .get(&session_id)
         .is_none_or(|flag| *flag.borrow());
     if pending_cancelled {
-        return err_json("生成已中断", StatusCode::CONFLICT);
+        return err_status("生成已中断", StatusCode::CONFLICT);
     }
 
     let character_id = session.character_id.clone();
@@ -354,10 +354,10 @@ pub async fn stop(
     JsonBody(body): JsonBody<StopBody>,
 ) -> Response {
     let Some(sid) = body.session_id else {
-        return err_json("缺少 session_id", StatusCode::BAD_REQUEST);
+        return err_status("缺少 session_id", StatusCode::BAD_REQUEST);
     };
     if sid.trim().is_empty() {
-        return err_json("缺少 session_id", StatusCode::BAD_REQUEST);
+        return err_status("缺少 session_id", StatusCode::BAD_REQUEST);
     }
     if let Some(cancel) = state
         .guards
@@ -379,18 +379,18 @@ pub async fn compact(
     JsonBody(body): JsonBody<CompactBody>,
 ) -> Response {
     let Some(sid) = body.session_id else {
-        return err_json("缺少 session_id", StatusCode::BAD_REQUEST);
+        return err_status("缺少 session_id", StatusCode::BAD_REQUEST);
     };
     if sid.trim().is_empty() {
-        return err_json("缺少 session_id", StatusCode::BAD_REQUEST);
+        return err_status("缺少 session_id", StatusCode::BAD_REQUEST);
     }
     // 会话正在生成时拒绝(避免与生成流程的 auto 压缩/历史读取并发)
     if state.engine.is_active(&sid) {
-        return err_json("该会话正在生成中,暂不能压缩", StatusCode::CONFLICT);
+        return err_status("该会话正在生成中,暂不能压缩", StatusCode::CONFLICT);
     }
     match state.engine.compact_session(&sid).await {
         Ok(compacted) => Json(json!({ "ok": true, "compacted": compacted })).into_response(),
-        Err(e) => err_json(&e, StatusCode::BAD_REQUEST),
+        Err(e) => err_status(&e, StatusCode::BAD_REQUEST),
     }
 }
 
@@ -401,25 +401,19 @@ pub async fn clear_compact(
     JsonBody(body): JsonBody<CompactBody>,
 ) -> Response {
     let Some(sid) = body.session_id else {
-        return err_json("缺少 session_id", StatusCode::BAD_REQUEST);
+        return err_status("缺少 session_id", StatusCode::BAD_REQUEST);
     };
     if sid.trim().is_empty() {
-        return err_json("缺少 session_id", StatusCode::BAD_REQUEST);
+        return err_status("缺少 session_id", StatusCode::BAD_REQUEST);
     }
     if state.engine.is_active(&sid) {
-        return err_json("该会话正在生成中,暂不能恢复", StatusCode::CONFLICT);
+        return err_status("该会话正在生成中,暂不能恢复", StatusCode::CONFLICT);
     }
     match state.engine.clear_compaction(&sid) {
         Ok(cleared) => Json(json!({ "ok": true, "cleared": cleared })).into_response(),
-        Err(e) => err_json(&e, StatusCode::INTERNAL_SERVER_ERROR),
+        Err(e) => err_status(&e, StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
-
-/// 本模块统一错误响应:按状态码自动附带结构化错误码(见 api/errors.rs)。
-fn err_json(msg: impl AsRef<str>, status: StatusCode) -> Response {
-    crate::api::err_with_code(crate::api::code_for_status(status), msg, status)
-}
-
 /// 自由生成请求体:角色卡资源页(吸血鬼卡等)内的作者脚本经宿主桥接调用
 /// (TavernHelper.generate 等价物)。与 /api/chat/send 不同:不写会话、不流式,
 /// 一次性把调用方提供的完整消息列表发给当前模型并返回纯文本。
@@ -548,28 +542,28 @@ pub async fn generate_raw(
     const MAX_MSG_LEN: usize = 64 * 1024;
     const MAX_TOTAL_LEN: usize = 256 * 1024;
     if body.messages.is_empty() {
-        return err_json("messages 不能为空", StatusCode::BAD_REQUEST);
+        return err_status("messages 不能为空", StatusCode::BAD_REQUEST);
     }
     if body.messages.len() > MAX_MESSAGES {
-        return err_json("messages 过多(上限 200)", StatusCode::BAD_REQUEST);
+        return err_status("messages 过多(上限 200)", StatusCode::BAD_REQUEST);
     }
     let mut total = 0usize;
     for m in &body.messages {
         if !matches!(m.role.as_str(), "system" | "user" | "assistant") {
-            return err_json("role 仅支持 system/user/assistant", StatusCode::BAD_REQUEST);
+            return err_status("role 仅支持 system/user/assistant", StatusCode::BAD_REQUEST);
         }
         if m.content.len() > MAX_MSG_LEN {
-            return err_json("单条消息过长(上限 64KB)", StatusCode::BAD_REQUEST);
+            return err_status("单条消息过长(上限 64KB)", StatusCode::BAD_REQUEST);
         }
         total += m.content.len();
     }
     if total > MAX_TOTAL_LEN {
-        return err_json("消息总长超限(256KB)", StatusCode::BAD_REQUEST);
+        return err_status("消息总长超限(256KB)", StatusCode::BAD_REQUEST);
     }
     // 显式 max_tokens=0 属非法(上游 OpenAI 兼容端同样要求 ≥1):直接 400,不静默
     // 当默认值——否则调用方以为「0 表示不限制」,实际拿到的是下限之外的意外小预算。
     if body.max_tokens == Some(0) {
-        return err_json(
+        return err_status(
             "max_tokens 非法:必须 ≥ 1,或省略以使用默认预算",
             StatusCode::BAD_REQUEST,
         );
@@ -688,7 +682,8 @@ pub async fn generate_raw(
                         Json(json!({ "ok": true, "text": prev, "injected": injected }))
                             .into_response()
                     }
-                    None => err_json(format!("生成失败:{e}"), StatusCode::BAD_GATEWAY),
+                    // 上游失败:原文只进日志(可能含连接串/上游报错细节),响应体给稳定文案
+                    None => upstream(format!("生成失败:{e}")),
                 };
             }
         };

@@ -5,7 +5,7 @@
 //   GET  /api/variable/state        运行态整行(stat_data/meta/revision)
 //   GET  /api/variable/changelog    逐 op 变更流水(最新在前)
 use crate::api::app_state::AppState;
-use crate::api::db_err;
+use crate::api::{db_err, err_status, not_found, validation};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -38,19 +38,6 @@ pub struct StateQuery {
     pub session_id: Option<String>,
 }
 
-fn bad_request(msg: &str) -> Response {
-    err_json(msg, StatusCode::BAD_REQUEST)
-}
-
-fn not_found(msg: &str) -> Response {
-    err_json(msg, StatusCode::NOT_FOUND)
-}
-
-/// 本模块统一错误响应:按状态码自动附带结构化错误码(见 api/errors.rs)。
-fn err_json(msg: impl AsRef<str>, status: StatusCode) -> Response {
-    crate::api::err_with_code(crate::api::code_for_status(status), msg, status)
-}
-
 /// POST /api/variable/update — 契约引擎统一写入出口。
 ///
 /// 与多步工具 apply_patch 行为一致:契约门控(unknown_field/not_owner 拒绝、
@@ -59,7 +46,7 @@ fn err_json(msg: impl AsRef<str>, status: StatusCode) -> Response {
 /// 需要拿到已生效部分,而非整批失败)。
 pub async fn update(State(state): State<Arc<AppState>>, Json(body): Json<UpdateBody>) -> Response {
     if body.patches.is_empty() {
-        return bad_request("patches 不能为空");
+        return validation("patches 不能为空");
     }
     // 会话 → 角色(契约按角色加载);会话读取与 apply 落库合并进同一阻塞任务(DB 并发改造)
     let apply = crate::services::variable_apply::VariableApplyService::new(
@@ -80,7 +67,7 @@ pub async fn update(State(state): State<Arc<AppState>>, Json(body): Json<UpdateB
     match applied {
         Err(e) => db_err(&e),
         Ok(None) => not_found("会话不存在"),
-        Ok(Some(Err(e))) => bad_request(&e),
+        Ok(Some(Err(e))) => validation(&e),
         Ok(Some(Ok(outcome))) => {
             let mut resp = json!({
                 "ok": outcome.ok,
@@ -105,7 +92,7 @@ pub async fn get_state(
     Query(q): Query<StateQuery>,
 ) -> Response {
     let Some(sid) = q.session_id else {
-        return bad_request("缺少 session_id 查询参数");
+        return validation("缺少 session_id 查询参数");
     };
     let sessions = state.sessions.clone();
     let kaleido = state.kaleido_state.clone();
@@ -119,7 +106,7 @@ pub async fn get_state(
     match loaded {
         Err(e) => db_err(&e),
         Ok(None) => not_found("会话不存在"),
-        Ok(Some(Err(e))) => err_json(e, StatusCode::INTERNAL_SERVER_ERROR),
+        Ok(Some(Err(e))) => err_status(e, StatusCode::INTERNAL_SERVER_ERROR),
         Ok(Some(Ok(None))) => not_found("该会话尚无契约运行态"),
         Ok(Some(Ok(Some(row)))) => {
             // 库内 JSON 损坏属异常态,显式 500 让前端可排查(静默空对象会掩盖)
@@ -131,7 +118,9 @@ pub async fn get_state(
                 parse(&row.meta_json, "meta"),
             ) {
                 (Ok(s), Ok(m)) => (s, m),
-                (Err(e), _) | (_, Err(e)) => return err_json(e, StatusCode::INTERNAL_SERVER_ERROR),
+                (Err(e), _) | (_, Err(e)) => {
+                    return err_status(e, StatusCode::INTERNAL_SERVER_ERROR)
+                }
             };
             Json(json!({
                 "session_id": sid,
@@ -153,7 +142,7 @@ pub async fn changelog(
     Query(q): Query<ChangelogQuery>,
 ) -> Response {
     let Some(sid) = q.session_id else {
-        return bad_request("缺少 session_id 查询参数");
+        return validation("缺少 session_id 查询参数");
     };
     let sessions = state.sessions.clone();
     let kaleido = state.kaleido_state.clone();
@@ -168,7 +157,7 @@ pub async fn changelog(
     match listed {
         Err(e) => db_err(&e),
         Ok(None) => not_found("会话不存在"),
-        Ok(Some(Err(e))) => err_json(e, StatusCode::INTERNAL_SERVER_ERROR),
+        Ok(Some(Err(e))) => err_status(e, StatusCode::INTERNAL_SERVER_ERROR),
         Ok(Some(Ok(entries))) => {
             // 单条序列化失败跳过该条而非整表清空(ChangelogEntry 实际不会失败)
             let items = entries

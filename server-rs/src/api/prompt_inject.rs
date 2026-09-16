@@ -2,7 +2,7 @@
 // POST /api/prompt-inject/import:导入酒馆(SillyTavern)预设 JSON → 楼层
 use crate::api::app_state::AppState;
 use crate::api::characters::{parse_boundary, parse_multipart};
-use crate::api::{err_with_code, ErrorCode, WithStatus};
+use crate::api::{err_with_code, validation, ErrorCode};
 use crate::parsing::preset::parse_st_preset;
 use crate::services::prompt_inject_service::PromptInjectConfig;
 use axum::extract::State;
@@ -72,34 +72,24 @@ pub async fn import(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let Some(boundary) = parse_boundary(content_type) else {
-        return Json(json!({ "error": "缺少文件字段(file)" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return validation("缺少文件字段(file)");
     };
     let parts = parse_multipart(&body, &boundary);
     let Some(file_part) = parts.iter().find(|p| p.field == "file") else {
-        return Json(json!({ "error": "缺少文件字段(file)" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return validation("缺少文件字段(file)");
     };
     if file_part.content.len() > MAX_PRESET {
-        return Json(json!({ "error": "预设文件超过 30MB 上限" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return validation("预设文件超过 30MB 上限");
     }
     let text = String::from_utf8_lossy(&file_part.content);
     let floors = match parse_st_preset(&text) {
         Ok(f) => f,
         Err(e) => {
-            return Json(json!({ "error": e }))
-                .into_response()
-                .with_status(StatusCode::BAD_REQUEST);
+            return validation(e);
         }
     };
     if floors.is_empty() {
-        return Json(json!({ "error": "预设中没有可导入的提示词条目" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return validation("预设中没有可导入的提示词条目");
     }
     let mode = parts
         .iter()

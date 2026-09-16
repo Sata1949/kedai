@@ -1,7 +1,7 @@
 // 设置路由:/api/settings(连接测试/模型列表/信息/模型切换/运行期设置读写)
 use crate::api::app_state::AppState;
 use crate::api::json_body::JsonBody;
-use crate::api::{err_with_code, ErrorCode, WithStatus};
+use crate::api::{err_with_code, internal, not_found, validation, ErrorCode};
 use crate::services::settings_service::{
     normalize_base_url, AppMode, McpServerConfig, RuntimeSettings, DEFAULT_SEARCH_ENDPOINT,
 };
@@ -332,9 +332,7 @@ pub async fn update_settings(
             if v == 0 || (16..=8192).contains(&v) {
                 s.embedding_dim = v;
             } else {
-                return Json(json!({ "error": "embedding_dim 必须为 0(自动)或 16..=8192" }))
-                    .into_response()
-                    .with_status(StatusCode::BAD_REQUEST);
+                return validation("embedding_dim 必须为 0(自动)或 16..=8192");
             }
         }
 
@@ -365,19 +363,13 @@ pub async fn update_settings(
             }
             if let Some(v) = body.default_max_tokens {
                 if v == 0 || v > 131_072 {
-                    return Json(json!({ "error": "default_max_tokens 必须在 1..=131072" }))
-                        .into_response()
-                        .with_status(StatusCode::BAD_REQUEST);
+                    return validation("default_max_tokens 必须在 1..=131072");
                 }
                 apply!(s, is_task, default_max_tokens, v);
             }
             if let Some(v) = body.max_context_tokens {
                 if !(65_536..=1_048_576).contains(&v) {
-                    return Json(
-                        json!({ "error": "max_context_tokens 必须在 65536..=1048576(64K~1M)" }),
-                    )
-                    .into_response()
-                    .with_status(StatusCode::BAD_REQUEST);
+                    return validation("max_context_tokens 必须在 65536..=1048576(64K~1M)");
                 }
                 apply!(s, is_task, max_context_tokens, v);
             }
@@ -442,11 +434,7 @@ pub async fn update_settings(
                 let parsed = match crate::tools::permissions::AuthorizationMode::parse(v.trim()) {
                     Some(m) => m,
                     None => {
-                        return Json(json!({
-                            "error": "authorization_mode 仅支持 strict / loose / bypass"
-                        }))
-                        .into_response()
-                        .with_status(StatusCode::BAD_REQUEST);
+                        return validation("authorization_mode 仅支持 strict / loose / bypass");
                     }
                 };
                 apply!(s, is_task, authorization_mode, parsed);
@@ -467,22 +455,14 @@ pub async fn update_settings(
             // 授权等待超时(秒):30..=1800
             if let Some(v) = body.tool_authorization_timeout_secs {
                 if !(30..=1800).contains(&v) {
-                    return Json(json!({
-                        "error": "tool_authorization_timeout_secs 必须在 30..=1800"
-                    }))
-                    .into_response()
-                    .with_status(StatusCode::BAD_REQUEST);
+                    return validation("tool_authorization_timeout_secs 必须在 30..=1800");
                 }
                 apply!(s, is_task, tool_authorization_timeout_secs, v);
             }
             // 任务模式工具策略:all / deny_dangerous / allowlist
             if let Some(v) = &body.task_tool_policy {
                 if !matches!(v.as_str(), "all" | "deny_dangerous" | "allowlist") {
-                    return Json(json!({
-                        "error": "task_tool_policy 仅支持 all / deny_dangerous / allowlist"
-                    }))
-                    .into_response()
-                    .with_status(StatusCode::BAD_REQUEST);
+                    return validation("task_tool_policy 仅支持 all / deny_dangerous / allowlist");
                 }
                 apply!(s, is_task, task_tool_policy, v.clone());
             }
@@ -492,9 +472,7 @@ pub async fn update_settings(
             // 工具循环轮次上限:仅接受 1..=200(防止误填 0 或超大值打爆模型请求)
             if let Some(v) = body.max_tool_rounds {
                 if !(1..=200).contains(&v) {
-                    return Json(json!({ "error": "max_tool_rounds 必须在 1..=200" }))
-                        .into_response()
-                        .with_status(StatusCode::BAD_REQUEST);
+                    return validation("max_tool_rounds 必须在 1..=200");
                 }
                 apply!(s, is_task, max_tool_rounds, v);
             }
@@ -512,9 +490,7 @@ pub async fn update_settings(
             // 上下文压缩阈值:仅接受 0.5..=0.95
             if let Some(v) = body.compaction_threshold {
                 if !(0.5..=0.95).contains(&v) {
-                    return Json(json!({ "error": "compaction_threshold 必须在 0.5..=0.95" }))
-                        .into_response()
-                        .with_status(StatusCode::BAD_REQUEST);
+                    return validation("compaction_threshold 必须在 0.5..=0.95");
                 }
                 apply!(s, is_task, compaction_threshold, v);
             }
@@ -567,27 +543,21 @@ pub async fn update_settings(
             // 子智能体嵌套深度上限(1..=4,越界拒绝)
             if let Some(v) = body.subagent_max_depth {
                 if !(1..=4).contains(&v) {
-                    return Json(json!({ "error": "subagent_max_depth 必须在 1..=4" }))
-                        .into_response()
-                        .with_status(StatusCode::BAD_REQUEST);
+                    return validation("subagent_max_depth 必须在 1..=4");
                 }
                 apply!(s, is_task, subagent_max_depth, v);
             }
             // 子智能体并发上限(1..=16,越界拒绝)
             if let Some(v) = body.subagent_max_concurrency {
                 if !(1..=16).contains(&v) {
-                    return Json(json!({ "error": "subagent_max_concurrency 必须在 1..=16" }))
-                        .into_response()
-                        .with_status(StatusCode::BAD_REQUEST);
+                    return validation("subagent_max_concurrency 必须在 1..=16");
                 }
                 apply!(s, is_task, subagent_max_concurrency, v);
             }
             // 子智能体结果字符上限(500..=8000,越界拒绝)
             if let Some(v) = body.subagent_result_max_chars {
                 if !(500..=8000).contains(&v) {
-                    return Json(json!({ "error": "subagent_result_max_chars 必须在 500..=8000" }))
-                        .into_response()
-                        .with_status(StatusCode::BAD_REQUEST);
+                    return validation("subagent_result_max_chars 必须在 500..=8000");
                 }
                 apply!(s, is_task, subagent_result_max_chars, v);
             }
@@ -633,19 +603,13 @@ pub async fn update_settings(
             // 引擎侧消费口径一致);越界拒绝,与 load 钳制区间一致
             if let Some(v) = body.tool_history_keep_rounds {
                 if !(1..=32).contains(&v) {
-                    return Json(json!({ "error": "tool_history_keep_rounds 必须在 1..=32" }))
-                        .into_response()
-                        .with_status(StatusCode::BAD_REQUEST);
+                    return validation("tool_history_keep_rounds 必须在 1..=32");
                 }
                 s.tool_history_keep_rounds = v;
             }
             if let Some(v) = body.tool_history_budget_tokens {
                 if v != 0 && !(1024..=1_048_576).contains(&v) {
-                    return Json(
-                        json!({ "error": "tool_history_budget_tokens 须为 0(禁用)或 1024..=1048576" }),
-                    )
-                    .into_response()
-                    .with_status(StatusCode::BAD_REQUEST);
+                    return validation("tool_history_budget_tokens 须为 0(禁用)或 1024..=1048576");
                 }
                 s.tool_history_budget_tokens = v;
             }
@@ -814,9 +778,7 @@ pub async fn switch_model(
 ) -> Response {
     let model = body.model.trim().to_string();
     if model.is_empty() {
-        return Json(json!({ "error": "缺少 model" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return validation("缺少 model");
     }
     let changed = state.engine.model() != model;
     if changed {
@@ -839,9 +801,7 @@ pub async fn get_agent_prompt(State(state): State<Arc<AppState>>) -> Response {
         Ok(content) => {
             Json(json!({ "ok": true, "path": path, "content": content })).into_response()
         }
-        Err(e) => Json(json!({ "error": e }))
-            .into_response()
-            .with_status(StatusCode::NOT_FOUND),
+        Err(e) => not_found(e),
     }
 }
 
@@ -909,11 +869,7 @@ pub async fn prompt_preview(
             push_preview_layer(&mut layers, "runtime_prompt", "system", 5, runtime)
         }
         Ok(None) => {}
-        Err(error) => {
-            return Json(json!({ "error": error }))
-                .into_response()
-                .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        }
+        Err(error) => return internal(error),
     }
 
     // 预览按模式走 for_mode 合并值(docs/契约-协议与配置.md 第五节):
@@ -1156,8 +1112,6 @@ pub async fn save_agent_prompt(
     let path = state.runtime_prompt.path().display().to_string();
     match state.runtime_prompt.write(&body.content) {
         Ok(_) => Json(json!({ "ok": true, "path": path })).into_response(),
-        Err(e) => Json(json!({ "error": e }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST),
+        Err(e) => validation(e),
     }
 }

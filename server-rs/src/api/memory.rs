@@ -10,7 +10,7 @@
 //   GET    /api/memory/embedding-status    向量索引状态(总数/已嵌入/维度/漂移)
 //   POST   /api/memory/rebuild-embeddings  手动重建向量索引(清表 + 全量回填)
 use crate::api::app_state::AppState;
-use crate::api::{db_err, WithStatus};
+use crate::api::{db_err, not_found, validation, WithStatus};
 use crate::models::types::{GenerationParams, LlmMessage, ToolChoice};
 use crate::services::embedding_service::EmbeddingService;
 use axum::extract::{Path, Query, State};
@@ -68,17 +68,11 @@ pub async fn distill(
     // 设置快照:不留锁跨 await
     let enabled = state.settings_snapshot().memory_distill_enabled;
     if !enabled {
-        return Json(json!({
-            "error": "跨会话记忆蒸馏未开启,请先在设置中打开 memory_distill_enabled"
-        }))
-        .into_response()
-        .with_status(StatusCode::BAD_REQUEST);
+        return validation("跨会话记忆蒸馏未开启,请先在设置中打开 memory_distill_enabled");
     }
     let session_id = body.session_id.trim().to_string();
     if session_id.is_empty() {
-        return Json(json!({ "error": "缺少 session_id" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return validation("缺少 session_id");
     }
     // 蒸馏生成参数(与 compaction 同取向:低温度、无工具、非流式)
     let params = GenerationParams {
@@ -115,23 +109,17 @@ pub async fn distill(
             }))
             .into_response()
         }
-        Err(e) => Json(json!({ "error": e }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST),
+        Err(e) => validation(e),
     }
 }
 
 /// GET /api/memory?character_id=:角色全部记忆(最新在前,含未选中条目与计数)
 pub async fn list(State(state): State<Arc<AppState>>, Query(query): Query<ListQuery>) -> Response {
     let Some(character_id) = query.character_id.map(|c| c.trim().to_string()) else {
-        return Json(json!({ "error": "缺少 character_id" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return validation("缺少 character_id");
     };
     if character_id.is_empty() {
-        return Json(json!({ "error": "缺少 character_id" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return validation("缺少 character_id");
     }
     let svc = state.memory.clone();
     let memories = match state.db_call(move || svc.list(&character_id)).await {
@@ -152,15 +140,11 @@ pub async fn search(
         .map(|c| c.trim().to_string())
         .unwrap_or_default();
     if character_id.is_empty() {
-        return Json(json!({ "error": "缺少 character_id" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return validation("缺少 character_id");
     }
     let q = query.q.map(|q| q.trim().to_string()).unwrap_or_default();
     if q.is_empty() {
-        return Json(json!({ "error": "缺少 q" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return validation("缺少 q");
     }
     let limit = query.limit.unwrap_or(20).clamp(1, 100);
     let svc = state.memory.clone();
@@ -178,16 +162,12 @@ pub async fn search(
 pub async fn prune(State(state): State<Arc<AppState>>, Json(body): Json<PruneBody>) -> Response {
     let character_id = body.character_id.trim().to_string();
     if character_id.is_empty() {
-        return Json(json!({ "error": "缺少 character_id" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return validation("缺少 character_id");
     }
     let svc = state.memory.clone();
     match state.db_call(move || svc.prune(&character_id)).await {
         Err(e) => db_err(&e),
-        Ok(Err(e)) => Json(json!({ "error": e }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST),
+        Ok(Err(e)) => validation(e),
         Ok(Ok(removed)) => Json(json!({ "ok": true, "removed": removed })).into_response(),
     }
 }
@@ -196,14 +176,10 @@ pub async fn prune(State(state): State<Arc<AppState>>, Json(body): Json<PruneBod
 pub async fn create(State(state): State<Arc<AppState>>, Json(body): Json<CreateBody>) -> Response {
     let character_id = body.character_id.trim().to_string();
     if character_id.is_empty() {
-        return Json(json!({ "error": "缺少 character_id" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return validation("缺少 character_id");
     }
     if body.content.trim().is_empty() {
-        return Json(json!({ "error": "记忆内容不能为空" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return validation("记忆内容不能为空");
     }
     let svc = state.memory.clone();
     let content = body.content.clone();
@@ -219,9 +195,7 @@ pub async fn create(State(state): State<Arc<AppState>>, Json(body): Json<CreateB
                 .into_response()
                 .with_status(StatusCode::CREATED)
         }
-        Ok(Err(e)) => Json(json!({ "error": e }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST),
+        Ok(Err(e)) => validation(e),
     }
 }
 
@@ -311,9 +285,7 @@ pub async fn update(
 ) -> Response {
     if let Some(c) = &body.content {
         if c.trim().is_empty() {
-            return Json(json!({ "error": "记忆内容不能为空" }))
-                .into_response()
-                .with_status(StatusCode::BAD_REQUEST);
+            return validation("记忆内容不能为空");
         }
     }
     let svc = state.memory.clone();
@@ -323,9 +295,7 @@ pub async fn update(
     match updated {
         Err(e) => db_err(&e),
         Ok(Some(entry)) => Json(json!({ "ok": true, "memory": entry })).into_response(),
-        Ok(None) => Json(json!({ "error": format!("记忆 {id} 不存在或更新被拒绝") }))
-            .into_response()
-            .with_status(StatusCode::NOT_FOUND),
+        Ok(None) => not_found(format!("记忆 {id} 不存在或更新被拒绝")),
     }
 }
 
@@ -335,9 +305,7 @@ pub async fn delete(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> 
     match state.db_call(move || svc.delete(id)).await {
         Err(e) => db_err(&e),
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => Json(json!({ "error": format!("记忆 {id} 不存在") }))
-            .into_response()
-            .with_status(StatusCode::NOT_FOUND),
+        Ok(false) => not_found(format!("记忆 {id} 不存在")),
     }
 }
 
@@ -364,18 +332,14 @@ pub async fn embedding_status(State(state): State<Arc<AppState>>) -> Response {
 pub async fn rebuild_embeddings(State(state): State<Arc<AppState>>) -> Response {
     let settings = state.settings_snapshot();
     if !settings.embedding_enabled {
-        return Json(json!({ "error": "向量化未开启,请先在「向量化模型」中配置并启用" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return validation("向量化未开启,请先在「向量化模型」中配置并启用");
     }
     // 先做一次连接测试,拿到真实维度并校验配置(避免中途失败才报错)
     let svc = EmbeddingService::new();
     let (probe_dim, _ms) = match svc.test(&settings).await {
         Ok(v) => v,
         Err(e) => {
-            return Json(json!({ "error": e.to_string() }))
-                .into_response()
-                .with_status(StatusCode::BAD_REQUEST);
+            return validation(e.to_string());
         }
     };
     // 清空旧表并建新表(维度以实测为准)

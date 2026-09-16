@@ -4,7 +4,7 @@
 // PUT    写入契约(先 parse_contract 校验,失败 422 带错误列表;成功落卡 + 失效缓存)
 // DELETE 移除内嵌契约(世界书来源契约不受影响)
 use crate::api::app_state::AppState;
-use crate::api::{db_err, WithStatus};
+use crate::api::{db_err, err_status, not_found, validation};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -18,7 +18,7 @@ pub async fn get(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> 
     let card = match state.db_call(move || svc.get(&id)).await {
         Err(e) => return db_err(&e),
         Ok(Some(c)) => c,
-        Ok(None) => return not_found(),
+        Ok(None) => return not_found("角色卡不存在"),
     };
     match card
         .data_raw
@@ -43,15 +43,11 @@ pub async fn put(
     Json(body): Json<Value>,
 ) -> Response {
     if !body.is_object() {
-        return Json(json!({ "error": "契约必须是 JSON 对象" }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST);
+        return validation("契约必须是 JSON 对象");
     }
     // 先校验后落库:结构错误不进库,错误信息回显给编辑器
     if let Err(e) = crate::contracts::parse_contract(&body) {
-        return Json(json!({ "error": e }))
-            .into_response()
-            .with_status(StatusCode::UNPROCESSABLE_ENTITY);
+        return err_status(e, StatusCode::UNPROCESSABLE_ENTITY);
     }
     // 变更前旧契约(必须在 set_embedded_contract 之前读取;先移出所有权再借用,
     // 避免闭包内借用临时 card 导致悬垂引用)
@@ -112,7 +108,7 @@ pub async fn put(
             }))
             .into_response()
         }
-        None => not_found(),
+        None => not_found("角色卡不存在"),
     }
 }
 
@@ -146,7 +142,7 @@ pub async fn delete(State(state): State<Arc<AppState>>, Path(id): Path<String>) 
     // 角色不存在 → 404;存在但本无内嵌契约 → 幂等 204(不落空 remove 记录、不失效缓存)
     if before.is_none() {
         if !exists {
-            return not_found();
+            return not_found("角色卡不存在");
         }
         return StatusCode::NO_CONTENT.into_response();
     }
@@ -173,14 +169,8 @@ pub async fn delete(State(state): State<Arc<AppState>>, Path(id): Path<String>) 
                 .map(|e| format!("契约已移除,但变更历史写入失败: {e}"));
             Json(json!({ "ok": true, "warning": warning })).into_response()
         }
-        None => not_found(),
+        None => not_found("角色卡不存在"),
     }
-}
-
-fn not_found() -> Response {
-    Json(json!({ "error": "角色卡不存在" }))
-        .into_response()
-        .with_status(StatusCode::NOT_FOUND)
 }
 
 #[cfg(test)]

@@ -2,7 +2,7 @@
 // scope=global(owner_id 恒为空)或 character(需 character_id 指定角色卡)。
 // 角色级脚本存于角色卡 data_raw.extensions.tavern_helper(随卡导出),兼容 ST 卡格式。
 use crate::api::app_state::AppState;
-use crate::api::{db_err, err_with_code, ErrorCode, WithStatus};
+use crate::api::{db_err, err_with_code, not_found, validation, ErrorCode, WithStatus};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -26,19 +26,9 @@ pub async fn get_tree(State(state): State<Arc<AppState>>, Query(q): Query<TreeQu
         "global" => "",
         "character" => match q.character_id.as_deref().filter(|s| !s.is_empty()) {
             Some(id) => id,
-            None => {
-                return Json(json!({ "error": "角色级脚本需指定 character_id" }))
-                    .into_response()
-                    .with_status(StatusCode::BAD_REQUEST)
-            }
+            None => return validation("角色级脚本需指定 character_id"),
         },
-        other => {
-            return Json(
-                json!({ "error": format!("未知脚本作用域: {other}(仅支持 global/character)") }),
-            )
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST)
-        }
+        other => return validation(format!("未知脚本作用域: {other}(仅支持 global/character)")),
     };
     let svc = state.user_scripts.clone();
     let scope_owned = scope.to_string();
@@ -49,9 +39,7 @@ pub async fn get_tree(State(state): State<Arc<AppState>>, Query(q): Query<TreeQu
     {
         Err(e) => db_err(&e),
         Ok(Ok(trees)) => Json(json!({ "scope": scope, "trees": trees })).into_response(),
-        Ok(Err(e)) => Json(json!({ "error": e }))
-            .into_response()
-            .with_status(StatusCode::NOT_FOUND),
+        Ok(Err(e)) => not_found(e),
     }
 }
 
@@ -71,19 +59,9 @@ pub async fn save_tree(
         "global" => "",
         "character" => match q.character_id.as_deref().filter(|s| !s.is_empty()) {
             Some(id) => id,
-            None => {
-                return Json(json!({ "error": "角色级脚本需指定 character_id" }))
-                    .into_response()
-                    .with_status(StatusCode::BAD_REQUEST)
-            }
+            None => return validation("角色级脚本需指定 character_id"),
         },
-        other => {
-            return Json(
-                json!({ "error": format!("未知脚本作用域: {other}(仅支持 global/character)") }),
-            )
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST)
-        }
+        other => return validation(format!("未知脚本作用域: {other}(仅支持 global/character)")),
     };
     let svc = state.user_scripts.clone();
     let scope_owned = scope.to_string();
@@ -95,9 +73,7 @@ pub async fn save_tree(
     {
         Err(e) => db_err(&e),
         Ok(Ok(())) => Json(json!({ "ok": true, "scope": scope })).into_response(),
-        Ok(Err(e)) => Json(json!({ "error": e }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST),
+        Ok(Err(e)) => validation(e),
     }
 }
 

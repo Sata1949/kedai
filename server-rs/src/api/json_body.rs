@@ -1,3 +1,4 @@
+use crate::api::WithStatus;
 // JSON 请求体提取器统一收口(批次 1 · 错误面收口)。
 //
 // 背景(实测):axum 内建 `Json<T>` 的 `JsonRejection` 直接 `IntoResponse` 时,
@@ -22,8 +23,6 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
-
-use super::WithStatus;
 
 /// 畸形/不可解析 JSON 体的用户文案:不含 serde 内部类型名与行列细节
 /// (那些进 `tracing::warn!` 日志),只说明「哪里出错了 + 怎么办」。

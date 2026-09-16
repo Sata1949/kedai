@@ -395,12 +395,13 @@ const backendWarnings = [];
 
 // --- 规则 G:HTTP 错误响应不得新增「裸 {error}」形状(错误形状统一 ratchet) ---
 //
-// 背景:`api/errors.rs` 提供 `err_with_code`(body `{error, code}`),但历史上大量 handler
-// 直接返回 `Json(json!({ "error": ... }))`——同一错误出现两种形状,前端无法统一解析。
-// 存量 105 处**逐个**补齐 code 需为每处判定 HTTP 状态码(盲改会改 API 行为),属批次 D 的
-// 跟踪项而非本轮范围;此处先加 ratchet 防新增(数量不得超基线,修好一批请下调基线)。
+// 背景:`api/errors.rs` 提供 `err_status` / `err_with_code`(body `{error, code}`),但历史上
+// 大量 handler 直接返回 `Json(json!({ "error": ... }))`——同一错误出现两种形状,前端无法统一解析。
+// **2026-09-16 收口完成**:8 份私有 `err_json` 影子实现已删除,存量裸 `{error}` 由 105 处降到 1 处
+// (仅剩 `api/security.rs` 的 403/429 拒绝路径——那两个状态码无匹配 ErrorCode,上批决定有意保留)。
+// ratchet 继续守着:数量不得超基线,新代码一律用 errors.rs 的构造器。
 {
-  const BASELINE_BARE_ERROR = 105; // 2026-09-15 实测(批次 1 错误面收口后由 117 下调);只降不升
+  const BASELINE_BARE_ERROR = 1; // 2026-09-16 实测(错误出口收口后由 105 下调);只降不升
   const apiDir = join(SERVER, 'api');
   let hits = 0;
   const samples = [];

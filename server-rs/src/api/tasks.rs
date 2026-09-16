@@ -1,7 +1,7 @@
 // 任务模式路由:/api/tasks(列表/新建/详情/执行/批准/停止/删除/事件 SSE 流)
 use crate::api::app_state::AppState;
 use crate::api::json_body::JsonBody;
-use crate::api::{db_err, err_with_code, ErrorCode, WithStatus};
+use crate::api::{db_err, err_with_code, not_found, validation, ErrorCode, WithStatus};
 use crate::models::types::{TaskFollowupMode, TaskRunMode, TaskStatus, TaskStep};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -66,11 +66,9 @@ pub async fn create(
         Some(s) => match TaskRunMode::from_str_strict(s) {
             Some(m) => m,
             None => {
-                return Json(json!({
-                    "error": format!("未知任务模式:{s}(可选:legacy/solo/multi/plan/team/custom)"),
-                }))
-                .into_response()
-                .with_status(StatusCode::BAD_REQUEST);
+                return validation(format!(
+                    "未知任务模式:{s}(可选:legacy/solo/multi/plan/team/custom)"
+                ));
             }
         },
     };
@@ -83,9 +81,7 @@ pub async fn create(
         Ok(Ok(task)) => Json(json!({ "ok": true, "task": task }))
             .into_response()
             .with_status(StatusCode::CREATED),
-        Ok(Err(e)) => Json(json!({ "error": e }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST),
+        Ok(Err(e)) => validation(e),
     }
 }
 
@@ -112,9 +108,7 @@ pub async fn get(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> 
             "messages": messages,
         }))
         .into_response(),
-        Ok(None) => Json(json!({ "error": "任务不存在" }))
-            .into_response()
-            .with_status(StatusCode::NOT_FOUND),
+        Ok(None) => not_found("任务不存在"),
     }
 }
 
@@ -173,9 +167,7 @@ pub async fn run(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> 
     match state.db_call(move || svc.run(&id)).await {
         Err(e) => db_err(&e),
         Ok(Ok(())) => Json(json!({ "ok": true })).into_response(),
-        Ok(Err(e)) => Json(json!({ "error": e }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST),
+        Ok(Err(e)) => validation(e),
     }
 }
 
@@ -191,9 +183,7 @@ pub async fn approve(
     match state.db_call(move || svc.approve(&id, body.plan)).await {
         Err(e) => db_err(&e),
         Ok(Ok(())) => Json(json!({ "ok": true })).into_response(),
-        Ok(Err(e)) => Json(json!({ "error": e }))
-            .into_response()
-            .with_status(StatusCode::BAD_REQUEST),
+        Ok(Err(e)) => validation(e),
     }
 }
 
@@ -321,9 +311,7 @@ pub async fn stop(State(state): State<Arc<AppState>>, Path(id): Path<String>) ->
     match state.db_call(move || svc.stop(&id)).await {
         Err(e) => db_err(&e),
         Ok(true) => Json(json!({ "ok": true })).into_response(),
-        Ok(false) => Json(json!({ "error": "任务不存在" }))
-            .into_response()
-            .with_status(StatusCode::NOT_FOUND),
+        Ok(false) => not_found("任务不存在"),
     }
 }
 
@@ -332,8 +320,6 @@ pub async fn delete(State(state): State<Arc<AppState>>, Path(id): Path<String>) 
     match state.db_call(move || svc.delete(&id)).await {
         Err(e) => db_err(&e),
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => Json(json!({ "error": "任务不存在" }))
-            .into_response()
-            .with_status(StatusCode::NOT_FOUND),
+        Ok(false) => not_found("任务不存在"),
     }
 }

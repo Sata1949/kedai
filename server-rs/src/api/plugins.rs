@@ -4,7 +4,7 @@
 // 但**注册是装配动作**,按三结合纪律由宿主(本层)执行——L3 不得依赖 L2 的工具注册表。
 // 故下方统一走「解析(L3) → 宿主注册(L2)」两段式:`parse_all`/`parse_file` + `register_plugin`。
 use crate::api::app_state::AppState;
-use crate::api::{ErrorCode, WithStatus};
+use crate::api::{err_status, ErrorCode, WithStatus};
 use crate::plugins::ToolPluginLoader;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -130,15 +130,15 @@ pub async fn upload_tool(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let Some(boundary) = crate::api::characters::parse_boundary(content_type) else {
-        return err_json("缺少文件字段(file)", StatusCode::BAD_REQUEST);
+        return err_status("缺少文件字段(file)", StatusCode::BAD_REQUEST);
     };
     let parts = crate::api::characters::parse_multipart(&body, &boundary);
     let Some(file) = parts.into_iter().find(|p| p.filename.is_some()) else {
-        return err_json("缺少文件字段(file)", StatusCode::BAD_REQUEST);
+        return err_status("缺少文件字段(file)", StatusCode::BAD_REQUEST);
     };
     let file_name = file.filename.unwrap_or_else(|| "plugin.json".to_string());
     if !file_name.to_lowercase().ends_with(".json") {
-        return err_json("插件文件须为 .json 格式", StatusCode::BAD_REQUEST);
+        return err_status("插件文件须为 .json 格式", StatusCode::BAD_REQUEST);
     }
     let file_bytes = file.content;
     // 校验 JSON 结构(至少含 name / script)
@@ -146,18 +146,18 @@ pub async fn upload_tool(
     match cfg {
         Ok(c) => {
             if c.name.trim().is_empty() || c.script.trim().is_empty() {
-                return err_json("插件须包含 name 与 script 字段", StatusCode::BAD_REQUEST);
+                return err_status("插件须包含 name 与 script 字段", StatusCode::BAD_REQUEST);
             }
             // 文件名净化(与删除入口统一策略):净化结果不等于原始名 → 拒绝
             let Some(safe) = sanitize_plugin_filename(&file_name) else {
-                return err_json("文件名含非法字符", StatusCode::BAD_REQUEST);
+                return err_status("文件名含非法字符", StatusCode::BAD_REQUEST);
             };
             let dir = state.config.data_dir.join("plugins").join("tools");
             // B-1:文件 IO 走 tokio::fs / 阻塞线程池,不在 tokio worker 上同步读写
             tokio::fs::create_dir_all(&dir).await.ok();
             let path = dir.join(&safe);
             if let Err(e) = tokio::fs::write(&path, &file_bytes).await {
-                return err_json(
+                return err_status(
                     &format!("写文件失败: {e}"),
                     StatusCode::INTERNAL_SERVER_ERROR,
                 );
@@ -175,18 +175,18 @@ pub async fn upload_tool(
                 Ok(plugin) => {
                     let (_, reg_errors) = register_plugins(vec![plugin], &registry);
                     if let Some(e) = reg_errors.first() {
-                        return err_json(&format!("插件注册失败: {e}"), StatusCode::BAD_REQUEST);
+                        return err_status(&format!("插件注册失败: {e}"), StatusCode::BAD_REQUEST);
                     }
                 }
                 Err(e) => {
-                    return err_json(&format!("插件注册失败: {e}"), StatusCode::BAD_REQUEST);
+                    return err_status(&format!("插件注册失败: {e}"), StatusCode::BAD_REQUEST);
                 }
             }
             Json(json!({ "ok": true, "name": c.name, "file": safe }))
                 .into_response()
                 .with_status(StatusCode::CREATED)
         }
-        Err(e) => err_json(&format!("插件 JSON 解析失败: {e}"), StatusCode::BAD_REQUEST),
+        Err(e) => err_status(&format!("插件 JSON 解析失败: {e}"), StatusCode::BAD_REQUEST),
     }
 }
 
@@ -197,10 +197,10 @@ pub async fn delete_tool(
 ) -> Response {
     // 文件名净化(与上传入口统一策略):净化结果不等于原始名 → 拒绝
     let Some(safe) = sanitize_plugin_filename(&name) else {
-        return err_json("非法文件名", StatusCode::BAD_REQUEST);
+        return err_status("非法文件名", StatusCode::BAD_REQUEST);
     };
     if !safe.to_lowercase().ends_with(".json") {
-        return err_json("非法文件名", StatusCode::BAD_REQUEST);
+        return err_status("非法文件名", StatusCode::BAD_REQUEST);
     }
     let dir = state.config.data_dir.join("plugins").join("tools");
     let path = dir.join(&safe);
@@ -224,11 +224,6 @@ pub async fn delete_tool(
 }
 
 /// 运行时错误响应(复用 WithStatus)
-fn err_json(msg: &str, code: StatusCode) -> Response {
-    Json(json!({ "error": msg }))
-        .into_response()
-        .with_status(code)
-}
 
 #[cfg(test)]
 mod tests {
