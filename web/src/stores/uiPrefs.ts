@@ -52,6 +52,12 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
   const repoIndexOpen = ref(false);
   /** 聊天记录面板开关 */
   const chatRecordsOpen = ref(false);
+  /**
+   * 退出确认弹窗开关。打开时机:桌面壳下发 kedai://close-requested(用户点了窗口关闭),
+   * 或 Android 返回键已无弹窗/抽屉可退。确认后发 kedai://exit-app 退出,
+   * 取消则发 kedai://close-cancelled 让壳复位二次关闭兜底标记。
+   */
+  const exitConfirmOpen = ref(false);
   /** 启动动画是否完成 */
   const splashDone = ref(false);
   /** 弹窗懒加载失败提示(defineAsyncComponent onError 写入;flag 为重试所需的面板开关键) */
@@ -261,6 +267,7 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
     memoryOpen,
     repoIndexOpen,
     chatRecordsOpen,
+    exitConfirmOpen,
     splashDone,
     modalLoadError,
     dataLoadError,

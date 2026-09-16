@@ -22,6 +22,9 @@ const AudioPlayer = lazyModal(() => import('./components/AudioPlayer.vue'), '音
 
 const store = useAppStore();
 
+/** 壳事件监听的注销句柄(listen 返回的 unlisten;未注册成功时为 null) */
+let unlistenCloseRequested: (() => void) | null = null;
+
 /** 动态 flag 访问的统一收口:ModalDecl.flag 是运行期字符串,无法静态索引 store,
  *  故只在此处做一次类型放宽(而非每个使用点各自断言);合法 flag 集合由
  *  web/src/modals.ts 单点定义,并由 web/src/modals.test.ts 元测试锁定。 */
@@ -86,7 +89,8 @@ function toggleAudio(): void {
  * 处理顺序(符合 Android 习惯):
  *   1) 有打开的弹窗 → 关掉最上层的那个(MODAL_FLAGS 按渲染逆序,先关最上层);
  *   2) 有打开的抽屉 → 收起;
- *   3) 都没有 → 退出应用(与桌面版「关闭即退出」语义一致,后端与壳同进程一并结束)。
+ *   3) 都没有 → 弹出退出确认弹窗(与桌面端「关闭窗口」同一个弹窗,两平台语义一致;
+ *      此前是直接退出,误触返回键即丢未保存内容)。
  *
  * 注册本监听后,壳不再自行处理返回键(见 AppPlugin 的 hasListener 分支)。
  */
@@ -107,20 +111,41 @@ async function handleAndroidBack(): Promise<void> {
     store.audioOpen = false;
     return;
   }
-  // 无处可退 → 请求壳退出应用(后端与壳同进程,退出即整体结束,无残留服务)。
-  //
-  // 为什么用事件而不是命令:
-  // - 页面来自 http://127.0.0.1:<port>/(remote origin),Tauri 的 IPC 会做 ACL 校验,
-  //   而框架不为自定义 #[tauri::command] 生成权限条目,实测报
-  //   "exit_app not allowed. Plugin not found";
-  // - plugin:app|exit 亦被拒(无 Rust 侧权限声明);
-  // - getCurrentWindow().close() 在 Android 上不结束 Activity(进程仍在且 Promise 悬挂)。
-  // 事件系统的 emit 权限(core:event:allow-emit)已含在 core:default 中,无需额外授权。
+  // 无处可退 → 打开退出确认弹窗(与桌面端「关闭窗口」走同一个弹窗,两平台语义一致)。
+  // 此前是直接 emit 退出,误触返回键即丢未保存内容,且与桌面需二次确认的行为不一致。
+  store.exitConfirmOpen = true;
+}
+
+/**
+ * 监听壳下发的「用户点了窗口关闭」(仅桌面)。
+ *
+ * 这是本仓库前端第一处 `listen`(其余原生桥都是「前端 emit → 原生执行」单向):
+ * 关闭确认要出前端至上主义样式,而 Tauri 的 window.dialog() 是 Windows MessageBox,
+ * 外观不受前端 CSS 影响,故改为「壳 prevent_close + 下发事件 → 前端自绘弹窗」。
+ * 必须在 onUnmounted 注销:否则热更新/重挂载会累积监听器,一次关闭弹出多个确认框。
+ */
+async function registerCloseRequestListener(): Promise<void> {
+  if (!inTauri) return;
   try {
-    const { emit } = await import('@tauri-apps/api/event');
-    await emit('kedai://exit-app');
+    const { listen } = await import('@tauri-apps/api/event');
+    unlistenCloseRequested = await listen('kedai://close-requested', () => {
+      store.exitConfirmOpen = true;
+    });
   } catch (e) {
-    console.warn('[kedai] 返回键退出失败', e);
+    // 非桌面平台或 API 不可用时静默忽略:桌面壳另有二次关闭兜底,窗口仍关得掉
+    console.debug('[kedai] 关闭确认事件监听未注册', e);
+  }
+}
+
+/** 注销壳事件监听(存在才注销;未注册成功时为 null) */
+function unregisterCloseRequestListener(): void {
+  const off = unlistenCloseRequested;
+  unlistenCloseRequested = null;
+  if (!off) return;
+  try {
+    off();
+  } catch (e) {
+    console.warn('[kedai] 关闭确认事件注销失败', e);
   }
 }
 
@@ -207,10 +232,12 @@ onMounted(() => {
   if (shouldOpenSettings()) store.settingsOpen = true;
   window.addEventListener('hashchange', onHashChange);
   void registerBackButton();
+  void registerCloseRequestListener();
 });
 
 onUnmounted(() => {
   window.removeEventListener('hashchange', onHashChange);
+  unregisterCloseRequestListener();
 });
 
 watch(
