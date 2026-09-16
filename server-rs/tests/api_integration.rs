@@ -3231,3 +3231,74 @@ async fn missing_required_field_is_uniform_json_400() {
     let (status, _, raw) = send_raw_body(app, "POST", "/api/chat/send", r#""just a string""#).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "类型不符: {raw}");
 }
+
+/// 多线程 runtime 上的聊天生成 + 并发读不被阻塞(2026-09-16 性能批次 P-7)。
+///
+/// 覆盖缺口:本文件其余用例都是 `#[tokio::test]`(current_thread),而生产 chat 生成经
+/// `tokio::spawn` 跑在 multi-thread 的 worker 上(api/chat.rs:329)——`finalize_messages`
+/// 里的同步 IO 让出逻辑(`utils::blocking::park_worker`)在这两种 flavor 下走**不同分支**,
+/// 只在 current_thread 下测等于没覆盖生产路径。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_send_on_multi_thread_runtime_keeps_reads_alive() {
+    let app = test_app();
+    let _guard = test_lock().await;
+    let (_, char) = upload_character(app, "多线程聊天.json").await;
+    let cid = char["id"].as_str().unwrap().to_string();
+    let (_, session) = send_json(
+        app,
+        "POST",
+        "/api/chat/sessions",
+        json!({ "character_id": cid }),
+    )
+    .await;
+    let sid = session["id"].as_str().unwrap().to_string();
+
+    // 生成任务:走完整 finalize_messages(含 session_vars 落库、运行时提示词读取、记忆读取)
+    let gen_app = app.clone();
+    let gen_cid = cid.clone();
+    let gen_sid = sid.clone();
+    let generator = tokio::spawn(async move {
+        sse_events(
+            &gen_app,
+            &gen_sid,
+            &gen_cid,
+            "[[reply:并发读验证正文]]",
+            "fast",
+        )
+        .await
+    });
+
+    // 生成期间持续并发读:任何失败都说明 worker 被同步 IO 卡住
+    let mut reads = 0usize;
+    while !generator.is_finished() {
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let app = app.clone();
+            handles.push(tokio::spawn(async move {
+                let (st, _) = send_json(&app, "GET", "/api/health", json!({})).await;
+                st
+            }));
+        }
+        for h in handles {
+            assert_eq!(
+                h.await.unwrap(),
+                StatusCode::OK,
+                "生成期间并发读必须成功(worker 不应被同步 IO 阻塞)"
+            );
+            reads += 1;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+
+    // 生成本身必须正常完成并产出 finish 事件
+    let events = generator.await.unwrap();
+    let finish = events
+        .iter()
+        .find(|e| e["type"] == "finish")
+        .expect("应收到 finish 事件(multi-thread 下 finalize_messages 让出后链路仍完整)");
+    assert!(
+        finish["finish_reason"].is_string(),
+        "finish 事件应带 finish_reason: {finish}"
+    );
+    assert!(reads > 0, "应至少完成一轮并发读");
+}
