@@ -1,6 +1,7 @@
 // 世界书 API
-import { BASE, authorizedFetch, request } from './client';
+import { request } from './client';
 import { requireArrayField, requireObjectField } from './shape';
+import { uploadForm } from './stream';
 import type { WorldBookEntry, WorldBookRecord } from './types';
 
 export async function listWorldBooks(): Promise<WorldBookRecord[]> {
@@ -11,15 +12,11 @@ export async function listWorldBooks(): Promise<WorldBookRecord[]> {
 
 /** 上传独立世界书(JSON);characterId 可选绑定到角色 */
 export async function uploadWorldBook(file: File, characterId?: string): Promise<WorldBookRecord> {
-  const form = new FormData();
-  form.append('file', file);
-  if (characterId) form.append('character_id', characterId);
-  const res = await authorizedFetch(`${BASE}/world-books/upload`, { method: 'POST', body: form }, false);
-  if (!res.ok) {
-    const body = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(body.error ?? '上传失败');
-  }
-  return (await res.json()) as WorldBookRecord;
+  return uploadForm<WorldBookRecord>(
+    '/world-books/upload',
+    file,
+    characterId ? { character_id: characterId } : {},
+  );
 }
 
 /** 更新世界书:enabled / character_id(空串=转全局)/ name */

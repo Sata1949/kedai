@@ -1,5 +1,6 @@
 // 设置 / 连接 / 模型 / Token 与提示词注入 API
-import { BASE, authorizedFetch, request } from './client';
+import { request } from './client';
+import { uploadForm } from './stream';
 import {
   requireArrayField,
   requireNumberField,
@@ -114,14 +115,7 @@ export async function savePromptInject(config: PromptInjectConfig): Promise<Prom
 
 /** POST /api/prompt-inject/import:导入酒馆(SillyTavern)预设 JSON,替换现有楼层 */
 export async function importPromptPreset(file: File): Promise<PromptPresetImportResult> {
-  const form = new FormData();
-  form.append('file', file);
-  const res = await authorizedFetch(`${BASE}/prompt-inject/import`, { method: 'POST', body: form }, false);
-  if (!res.ok) {
-    const body = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(body.error ?? '导入失败');
-  }
-  return (await res.json()) as PromptPresetImportResult;
+  return uploadForm<PromptPresetImportResult>('/prompt-inject/import', file);
 }
 
 // ===== Token 计数 =====

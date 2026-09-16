@@ -2,9 +2,9 @@
 // 后端契约:GET /api/tasks → { tasks };POST /api/tasks → { ok, task };
 // GET /api/tasks/{id} → { task, subtasks };POST /api/tasks/{id}/run | /stop;
 // DELETE /api/tasks/{id} → 204;GET /api/tasks/events → SSE(KeepAlive 30s)。
-import { BASE, ApiError, apiErrorMessage, authorizedFetch, request } from './client';
+import { BASE, authorizedFetch, request } from './client';
 import { requireArrayField, requireObjectField } from './shape';
-import { createSseFrameParser } from './sseParser';
+import { pumpSseFrames, toApiError } from './stream';
 import type { TaskDetail, TaskEvent, TaskLlmCall, TaskRecord, TaskRunMode, TaskStep, TaskUsageTotal } from './types';
 
 /** 读取任务列表(最新在前) */
@@ -130,15 +130,12 @@ export function streamTaskEvents(
         signal: controller.signal,
       });
       if (!res.ok || !res.body) {
-        // 错误口径与 client.ts request() 一致:结构化 code 分类 + ApiError
-        const body = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
-        const code = body.code ?? (res.status === 401 ? 'UNAUTHORIZED' : undefined);
-        throw new ApiError(res.status, code, body.error, apiErrorMessage(res.status, code, body.error));
+        // 错误口径与 client.ts request() 一致:结构化 code 分类 + ApiError(共享 stream.ts)
+        throw await toApiError(res);
       }
 
-      const reader = res.body.getReader();
-      /** 帧解析(共享层):data 文本 → task 事件(非 task 类型/坏帧忽略) */
-      const frames = createSseFrameParser((data) => {
+      // 帧解析与读循环走共享底座;非 task 类型/坏帧跳过,不阻断后续事件
+      await pumpSseFrames(res, (data) => {
         try {
           const ev = JSON.parse(data) as TaskEvent;
           if (ev && ev.type === 'task' && typeof ev.task_id === 'string') onEvent(ev);
@@ -146,13 +143,6 @@ export function streamTaskEvents(
           // 单个坏事件不阻断后续事件
         }
       });
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        frames.push(value);
-      }
-      frames.finish();
       // 流自然结束(对端关闭):非主动关闭,通知调用方重连
       if (!closed) {
         closed = true;
