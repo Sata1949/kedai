@@ -1014,7 +1014,9 @@ mod tests {
             "候选应排除已 ended 的记录: {item}"
         );
         assert!(
-            cands.iter().all(|c| active_ids.iter().any(|id| c["id"] == id.as_str())),
+            cands
+                .iter()
+                .all(|c| active_ids.iter().any(|id| c["id"] == id.as_str())),
             "候选应全部是活跃任务: {item}"
         );
     }
@@ -1091,7 +1093,10 @@ mod tests {
                 { "name": "正常项", "instruction": "指令二", "max_tokens": 32768 }
             ]
         });
-        let raw = reg.execute("agentgo", &args.to_string(), ctx).await.unwrap();
+        let raw = reg
+            .execute("agentgo", &args.to_string(), ctx)
+            .await
+            .unwrap();
         let v: Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(v["ok"], true, "低于下限不应拒绝派发: {v}");
         let tasks = v["tasks"].as_array().unwrap();
@@ -1245,7 +1250,10 @@ mod tests {
         let after = deps.subtasks.get(&t.id).unwrap();
         assert_eq!(after.status, "done", "终态不得被 agentend 覆盖为 ended");
         assert_eq!(after.result, "交付物", "终态结果不得被清空");
-        assert!(!after.finished_at.is_empty(), "finished_at 应在 done 时已写入");
+        assert!(
+            !after.finished_at.is_empty(),
+            "finished_at 应在 done 时已写入"
+        );
     }
 
     /// 审计 B(纯函数):截断即失败、空内容带 finish_reason、自然完成仍 done

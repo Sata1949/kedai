@@ -217,7 +217,10 @@ enum SubtaskLookup {
     /// 命中的子任务(含 id/name 双向别名与 matched_by)
     Hit(Value),
     /// 未命中或歧义:带可读原因 + 裁剪后的候选
-    Miss { reason: String, candidates: Vec<Value> },
+    Miss {
+        reason: String,
+        candidates: Vec<Value>,
+    },
 }
 
 /// 候选裁剪(2026-09-15):默认排除已 `ended` 的记录(它们不再有取用价值,却最占位置),
@@ -291,7 +294,10 @@ fn read_subtask(deps: &ToolDeps, ctx: &ToolContext, name: &str) -> Result<Subtas
                 candidates: trimmed_candidates(&candidates.iter().collect::<Vec<_>>()),
             })
         }
-        1 => Ok(SubtaskLookup::Hit(subtask_hit_json(matched[0], "name_like"))),
+        1 => Ok(SubtaskLookup::Hit(subtask_hit_json(
+            matched[0],
+            "name_like",
+        ))),
         // 子串匹配到多条:给候选让模型自选,不随便挑一条
         _ => Ok(SubtaskLookup::Miss {
             reason: format!(

@@ -1209,10 +1209,7 @@ mod tests {
             finish_reason: None,
         };
         let v = serde_json::to_value(&unknown).unwrap();
-        assert!(
-            v.get("finish_reason").is_none(),
-            "None 应省略字段: {v}"
-        );
+        assert!(v.get("finish_reason").is_none(), "None 应省略字段: {v}");
     }
 
     /// serde 快照:delta 事件线格式(批次 R4 任务模式流式输出)。kind=delta +

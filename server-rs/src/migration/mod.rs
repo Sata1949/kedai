@@ -469,13 +469,27 @@ mod tests {
         ensure_task_subtasks_finished_at_column(&conn).unwrap();
         // 旧行零迁移成本:finished_at 默认 ''(未知),不得被误读为「已完成,时刻为 epoch」
         let agent_finished: String = conn
-            .query_row("SELECT finished_at FROM agent_subtasks WHERE id = 'a1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT finished_at FROM agent_subtasks WHERE id = 'a1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert_eq!(agent_finished, "", "旧 agent_subtasks 行 finished_at 应默认空串");
+        assert_eq!(
+            agent_finished, "",
+            "旧 agent_subtasks 行 finished_at 应默认空串"
+        );
         let task_finished: String = conn
-            .query_row("SELECT finished_at FROM task_subtasks WHERE id = 'b1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT finished_at FROM task_subtasks WHERE id = 'b1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert_eq!(task_finished, "", "旧 task_subtasks 行 finished_at 应默认空串");
+        assert_eq!(
+            task_finished, "",
+            "旧 task_subtasks 行 finished_at 应默认空串"
+        );
 
         // 幂等:重复执行不报错、不产生重复列
         ensure_agent_subtasks_finished_at_column(&conn).unwrap();
