@@ -32,6 +32,13 @@ import ExitConfirmModal from './ExitConfirmModal.vue';
 // 源码级接线契约(?raw 由 vite 提供,仓内既有先例:modals.test.ts)
 import appSource from '../App.vue?raw';
 
+/** 断言存在并收窄类型:替代非空断言 `!`(类型护栏 ratchet 只降不升,禁用 `x!` 逃逸)。
+ *  失败时抛出带中文提示的错误,与 `expect(...).toBeTruthy()` 的效果一致。 */
+function must<T>(value: T | undefined, message: string): T {
+  if (value === undefined) throw new Error(message);
+  return value;
+}
+
 function mountModal() {
   setActivePinia(createPinia());
   const uiPrefs = useUiPrefsStore();
@@ -81,9 +88,11 @@ describe('ExitConfirmModal 行为', () => {
     const { uiPrefs, wrapper } = mountModal();
     uiPrefs.exitConfirmOpen = true;
     const buttons = wrapper.findAll('button');
-    const cancelBtn = buttons.find((b) => b.text() === '取消');
-    expect(cancelBtn, '应有「取消」按钮').toBeTruthy();
-    await cancelBtn!.trigger('click');
+    const cancelBtn = must(
+      buttons.find((b) => b.text() === '取消'),
+      '应有「取消」按钮',
+    );
+    await cancelBtn.trigger('click');
     await flush();
     expect(uiPrefs.exitConfirmOpen).toBe(false);
     expect(vi.mocked(emit)).toHaveBeenCalledWith('kedai://close-cancelled');
@@ -92,9 +101,11 @@ describe('ExitConfirmModal 行为', () => {
   it('点「退出」:发 kedai://exit-app,且不发取消事件', async () => {
     const { uiPrefs, wrapper } = mountModal();
     uiPrefs.exitConfirmOpen = true;
-    const confirmBtn = wrapper.findAll('button').find((b) => b.text() === '退出');
-    expect(confirmBtn, '应有「退出」按钮').toBeTruthy();
-    await confirmBtn!.trigger('click');
+    const confirmBtn = must(
+      wrapper.findAll('button').find((b) => b.text() === '退出'),
+      '应有「退出」按钮',
+    );
+    await confirmBtn.trigger('click');
     await flush();
     const calls = vi.mocked(emit).mock.calls.map((c) => c[0]);
     expect(calls).toContain('kedai://exit-app');
@@ -104,9 +115,11 @@ describe('ExitConfirmModal 行为', () => {
   it('✕ 关闭按钮与「取消」同义(也通知壳复位兜底)', async () => {
     const { uiPrefs, wrapper } = mountModal();
     uiPrefs.exitConfirmOpen = true;
-    const closeBtn = wrapper.findAll('button').find((b) => b.text() === '✕');
-    expect(closeBtn, '应有 ✕ 关闭按钮').toBeTruthy();
-    await closeBtn!.trigger('click');
+    const closeBtn = must(
+      wrapper.findAll('button').find((b) => b.text() === '✕'),
+      '应有 ✕ 关闭按钮',
+    );
+    await closeBtn.trigger('click');
     await flush();
     expect(uiPrefs.exitConfirmOpen).toBe(false);
     expect(vi.mocked(emit)).toHaveBeenCalledWith('kedai://close-cancelled');
@@ -124,9 +137,11 @@ describe('ExitConfirmModal 行为', () => {
 describe('退出确认的注册表与壳事件接线(源码级契约)', () => {
   it('exitConfirmOpen 已进弹窗注册表,且声明在末尾(叠在最上层)', () => {
     expect(MODAL_FLAGS).toContain('exitConfirmOpen');
-    const decl = MODALS.find((m) => m.flag === 'exitConfirmOpen');
-    expect(decl, 'exitConfirmOpen 应在 MODALS 中').toBeTruthy();
-    expect(decl!.label).toBe('退出确认');
+    const decl = must(
+      MODALS.find((m) => m.flag === 'exitConfirmOpen'),
+      'exitConfirmOpen 应在 MODALS 中',
+    );
+    expect(decl.label).toBe('退出确认');
     expect(MODAL_FLAGS[MODAL_FLAGS.length - 1]).toBe('exitConfirmOpen');
   });
 
@@ -143,5 +158,19 @@ describe('退出确认的注册表与壳事件接线(源码级契约)', () => {
     const body = back.slice(0, back.indexOf('\n}'));
     expect(body).toContain('store.exitConfirmOpen = true');
     expect(body, '返回键分支不应再直接发退出事件').not.toContain('kedai://exit-app');
+  });
+});
+
+describe('must() 收窄助手自身行为(替代非空断言 ! 的类型护栏)', () => {
+  // 本助手是「禁用 x! 逃逸」后的替代品:正常路径返回原值,缺失路径必须抛出带
+  // 中文提示的错误(而非留到调用处变成 TypeError)。
+  it('存在时原样返回', () => {
+    expect(must('v', '不该走到这里')).toBe('v');
+    expect(must(0, '0 不是 undefined')).toBe(0);
+    expect(must(false, 'false 不是 undefined')).toBe(false);
+  });
+
+  it('缺失时抛出带提示的错误(保住原「应有…按钮」的诊断信息)', () => {
+    expect(() => must(undefined, '应有「取消」按钮')).toThrow('应有「取消」按钮');
   });
 });
