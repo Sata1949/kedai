@@ -31,13 +31,35 @@ pub struct AuditQuery {
     pub risk: Option<String>,
 }
 
-/// GET /api/exec/tier:当前可用执行器等级 + 是否支持 Shizuku 通道。
-/// 前端授权面板据此展示「等级可见」并可提示用户开启通道。
-pub async fn tier(State(_state): State<Arc<AppState>>) -> Response {
-    let t = detect_tier();
+/// 等级查询参数(可选)。
+#[derive(Debug, Deserialize)]
+pub struct TierQuery {
+    /// `refresh=1` 强制重探(清探测缓存)。
+    ///
+    /// 为什么必须显式区分:Android 侧 `detectTier` 带进程内缓存,只调探测拿不到
+    /// 「用户刚装 Shizuku / 刚授权 / 刚装 Magisk」后的新状态。设置页的「刷新」
+    /// 按钮走 `refresh=1`,其余读取(如启动探测)走缓存,避免每次请求都跑 `su`。
+    #[serde(default)]
+    pub refresh: Option<String>,
+}
+
+/// GET /api/exec/tier:当前可用执行器等级 + Shizuku 环境信息。
+/// 前端授权面板据此展示「等级可见」、按实际状态给可行动提示(而不是无条件报成功)。
+pub async fn tier(State(_state): State<Arc<AppState>>, Query(q): Query<TierQuery>) -> Response {
+    let force = matches!(q.refresh.as_deref(), Some("1") | Some("true"));
+    let t = if force {
+        crate::services::exec::refresh_tier()
+    } else {
+        detect_tier()
+    };
     Json(json!({
         "tier": t.as_str(),
         "label": t.label(),
+        // Shizuku 环境:UI 用它区分「未安装」(引导安装)与「已安装未授权」(引导授权)
+        "shizuku_installed": crate::services::exec::shizuku_installed(),
+        "shizuku_granted": crate::services::exec::shizuku_granted(),
+        // 本次是否为强制重探(前端可据此确认刷新真的生效了)
+        "refreshed": force,
     }))
     .into_response()
 }

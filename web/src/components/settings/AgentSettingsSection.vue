@@ -7,8 +7,6 @@ import { useAppStore } from '../../store';
 import { storeToRefs } from 'pinia';
 import { useAgentSettings } from '../../composables/useAgentSettings';
 import { useAgentPromptEditor } from '../../composables/useAgentPromptEditor';
-import AuthorizationSection from './AuthorizationSection.vue';
-import AndroidExecSection from './AndroidExecSection.vue';
 
 withDefaults(defineProps<{
   /** 是否显示(embedded 模式按 activeSection 切换;standalone 恒 true) */
@@ -146,12 +144,12 @@ watch(appMode, () => void loadPromptPreview());
       </div>
 
       <div class="sv-separator">
-        <div class="sv-field-label sub">授权管理</div>
-        <AuthorizationSection :show="show" />
-      </div>
-
-      <div class="sv-separator">
-        <AndroidExecSection :show="show" />
+        <div class="sv-field-label sub">授权与命令执行</div>
+        <p class="sv-note">
+          工具授权(三档模式 / 始终需授权 / 已授权限撤销)与命令执行(总开关、Android
+          ROOT/Shizuku 档位、执行审计)已移到独立分区「Agent 与任务 → 授权与命令执行」,
+          便于在移动端直接找到授权入口。
+        </p>
       </div>
 
       <div class="sv-separator">

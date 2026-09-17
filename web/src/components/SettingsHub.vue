@@ -39,7 +39,7 @@ const close = (): void => {
 type SectionKey =
   | 'api' | 'model' | 'mcp' | 'embedding'
   | 'prompt' | 'preset'
-  | 'agent' | 'flow'
+  | 'agent' | 'flow' | 'exec'
   | 'data'
   | 'ui'
   | 'about';
@@ -83,6 +83,10 @@ const domains: Domain[] = [
     items: [
       { type: 'section', key: 'agent', label: 'Agent 设置' },
       { type: 'section', key: 'flow', label: '执行流程' },
+      // 授权与命令执行独立成二级项(2026-09-17):此前它嵌在「Agent 设置」内部,
+      // 用户找不到 root/Shizuku 授权入口。移动端为主的场景下,授权是需要被
+      // 主动发现的设置项,不应埋在 Agent 设置的长表单里。
+      { type: 'section', key: 'exec', label: '授权与命令执行' },
     ],
   },
   {

@@ -8,9 +8,26 @@ export type ShellTier = 'root' | 'shizuku' | 'sandbox' | 'disabled';
 /** 命令风险级别(与 Rust CommandRisk serde snake_case 对齐) */
 export type CommandRiskLevel = 'safe' | 'sensitive' | 'destructive' | 'admin';
 
-/** GET /api/exec/tier:当前可用执行器等级 */
-export async function getExecTier(): Promise<{ tier: ShellTier; label: string }> {
-  return request<{ tier: ShellTier; label: string }>('/exec/tier');
+/** 执行器等级状态(含 Shizuku 环境信息;与 api/exec.rs 的响应对齐) */
+export interface ExecTierInfo {
+  tier: ShellTier;
+  label: string;
+  /** Shizuku 应用是否已安装(未安装 → 引导安装,而不是让用户点必然失败的按钮) */
+  shizuku_installed: boolean;
+  /** Shizuku 是否已获授权 */
+  shizuku_granted: boolean;
+  /** 本次是否为强制重探(「刷新」按钮走 refresh=1) */
+  refreshed: boolean;
+}
+
+/**
+ * GET /api/exec/tier:当前可用执行器等级。
+ * `refresh=true` 时清探测缓存强制重探——用户新装 Shizuku / 刚授权 / 刚装 Magisk 后,
+ * 不强制重探永远拿到缓存的过期值(设置页「刷新」按钮即为此用途)。
+ */
+export async function getExecTier(refresh = false): Promise<ExecTierInfo> {
+  const qs = refresh ? '?refresh=1' : '';
+  return request<ExecTierInfo>(`/exec/tier${qs}`);
 }
 
 /** 审计行(与 Rust services::exec::audit::ExecAuditEntry 对齐) */

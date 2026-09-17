@@ -109,4 +109,21 @@ describe('SettingsHub 组件(阶段 A 补测)', () => {
     expect(navLabels.some((t) => t.includes('对话与提示词'))).toBe(false);
     expect(navLabels.some((t) => t.includes('Agent 与任务'))).toBe(true);
   });
+
+  it('「授权与命令执行」是独立二级项且两种模式下都可见(2026-09-17:授权入口曾被埋在 Agent 设置内)', async () => {
+    const { store, wrapper } = mountHub();
+    for (const mode of ['roleplay', 'task'] as const) {
+      store.appMode = mode;
+      await nextTick();
+
+      const agentDomain = wrapper
+        .findAll('.sv-hub-nav-item')
+        .find((b) => b.text().includes('Agent 与任务'));
+      expect(agentDomain, `${mode} 模式应有「Agent 与任务」域`).toBeTruthy();
+      await agentDomain?.trigger('click');
+
+      const labels = wrapper.findAll('.hub-sub-item').map((it) => it.text());
+      expect(labels, `${mode} 模式应能看到授权入口`).toContain('授权与命令执行');
+    }
+  });
 });
