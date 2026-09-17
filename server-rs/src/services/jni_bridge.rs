@@ -42,7 +42,9 @@ pub const EXEC_CLASS: &str = "com/kedai/app/ShellExecutorBridge";
 const BRIDGE_CLASSES: &[&str] = &[KEYSTORE_CLASS, NATIVE_CLASS, EXEC_CLASS];
 
 /// 桥接方法签名:入参 String,返回 String
-const BRIDGE_SIG: &str = "(Ljava/lang/String;)Ljava/lang/String;";
+const BRIDGE_SIG_STR_IN: &str = "(Ljava/lang/String;)Ljava/lang/String;";
+/// 桥接方法签名:无入参,返回 String(Kotlin `fun f(): String`)
+const BRIDGE_SIG_NO_ARG: &str = "()Ljava/lang/String;";
 
 static VM: OnceLock<JavaVM> = OnceLock::new();
 static BRIDGES: OnceLock<Mutex<HashMap<&'static str, GlobalRef>>> = OnceLock::new();
@@ -93,7 +95,7 @@ fn cache_class(env: &mut JNIEnv<'_>, class: &'static str) -> Result<(), String> 
     Ok(())
 }
 
-/// 调用指定桥接类的静态方法(入参/出参均为 String)。
+/// 调用指定桥接类的静态方法(入参 String,出参 String)。
 ///
 /// `class` 必须是 [`BRIDGE_CLASSES`] 中的全限定名(`/` 分隔)。
 pub fn call_string_static(
@@ -101,6 +103,24 @@ pub fn call_string_static(
     method: &str,
     input: &str,
 ) -> Result<String, String> {
+    invoke(class, method, Some(input))
+}
+
+/// 调用指定桥接类的**无参**静态方法(Kotlin `fun f(): String`),出参 String。
+///
+/// 为什么必须有这个入口:JNI 的 `CallStaticMethod` 按**签名**查找方法,签名写错时
+/// 报 `NoSuchMethodError` 而非「参数不匹配」,极易误判。2026-09-17 实测:此前统一用
+/// `(Ljava/lang/String;)Ljava/lang/String;` 调所有桥接方法,而 `detectTier` /
+/// `requestShizukuPermission` / `startKeepAlive` / `stopKeepAlive` 在 Kotlin 侧
+/// **不接参数**,四个方法全部调用失败——其中 `detectTier` 失败使 Android 命令执行
+/// 恒回退 `disabled`。该缺陷此前被「ShellExecutorBridge 未登记」掩盖(类都找不到,
+/// 走不到方法查找这一层),修好登记后才暴露。规则 L 现已校验两侧方法名与参数个数一致。
+pub fn call_string_static_no_arg(class: &'static str, method: &str) -> Result<String, String> {
+    invoke(class, method, None)
+}
+
+/// 调用实现:按 `input` 是否给出选择 JNI 签名(两者出参均为 String)。
+fn invoke(class: &'static str, method: &str, input: Option<&str>) -> Result<String, String> {
     let vm = VM
         .get()
         .ok_or_else(|| "Android JVM 未就绪(JNI_OnLoad 未执行)".to_string())?;
@@ -122,13 +142,29 @@ pub fn call_string_static(
         .attach_current_thread()
         .map_err(|e| format!("JNI 线程附加失败: {e}"))?;
 
-    let arg = env
-        .new_string(input)
-        .map_err(|e| format!("构造 JNI 入参失败: {e}"))?;
+    // 按签名分派:有入参传一个 String,无入参传空参数表。
+    // 签名写错会得到 NoSuchMethodError(不含「参数不匹配」字样),故此处把两侧约定
+    // 显式分开,并在错误信息里回显所用签名,便于对照 Kotlin 声明排查。
+    let jstr = match input {
+        Some(text) => Some(
+            env.new_string(text)
+                .map_err(|e| format!("构造 JNI 入参失败: {e}"))?,
+        ),
+        None => None,
+    };
+    let sig = if jstr.is_some() {
+        BRIDGE_SIG_STR_IN
+    } else {
+        BRIDGE_SIG_NO_ARG
+    };
+    let args: Vec<JValue> = match &jstr {
+        Some(s) => vec![JValue::Object(s)],
+        None => Vec::new(),
+    };
 
     // jni 0.21 为 &GlobalRef 实现了 Desc<JClass>,可直接作为类参数传入,
     // 无需手工转 JClass(避免了 from_raw 的所有权/释放问题)。
-    let result = env.call_static_method(&global, method, BRIDGE_SIG, &[JValue::Object(&arg)]);
+    let result = env.call_static_method(&global, method, sig, &args);
 
     let value = match result {
         Ok(v) => v,
@@ -143,7 +179,10 @@ pub fn call_string_static(
                 }
                 _ => e.to_string(),
             };
-            return Err(format!("调用 {class}::{method} 失败: {detail}"));
+            return Err(format!(
+                "调用 {class}::{method} 失败(sig={sig}): {detail}\
+                 ;若为 NoSuchMethodError 请核对 Kotlin 侧的参数个数与本签名是否一致"
+            ));
         }
     };
 

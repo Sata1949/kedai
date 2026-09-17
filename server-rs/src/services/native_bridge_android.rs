@@ -9,7 +9,7 @@
 //! 说明:入参统一编码为 `name\u{1f}content`(单元分隔符),避免额外 JNI 签名重载。
 #![cfg(target_os = "android")]
 
-use super::jni_bridge::{call_string_static, NATIVE_CLASS};
+use super::jni_bridge::{call_string_static, call_string_static_no_arg, NATIVE_CLASS};
 
 /// 字段分隔符(US,单元分隔符):Kotlin 侧按此拆分双字段入参
 const SEP: char = '\u{1f}';
@@ -25,12 +25,12 @@ pub fn share_file(name: &str, content: &str) -> Result<(), String> {
     call_string_static(NATIVE_CLASS, "shareFile", &payload).map(|_| ())
 }
 
-/// 启动前台服务保活
+/// 启动前台服务保活(Kotlin 侧无入参,走无参入口)
 pub fn keepalive_start() -> Result<(), String> {
-    call_string_static(NATIVE_CLASS, "startKeepAlive", "").map(|_| ())
+    call_string_static_no_arg(NATIVE_CLASS, "startKeepAlive").map(|_| ())
 }
 
-/// 停止前台服务保活
+/// 停止前台服务保活(Kotlin 侧无入参,走无参入口)
 pub fn keepalive_stop() -> Result<(), String> {
-    call_string_static(NATIVE_CLASS, "stopKeepAlive", "").map(|_| ())
+    call_string_static_no_arg(NATIVE_CLASS, "stopKeepAlive").map(|_| ())
 }

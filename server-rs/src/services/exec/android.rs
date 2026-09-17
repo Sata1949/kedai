@@ -12,15 +12,18 @@
 #![cfg(target_os = "android")]
 
 use super::{truncate_output, ExecRequest, ExecResult, ShellTier};
-use crate::services::jni_bridge::{call_string_static, EXEC_CLASS};
+use crate::services::jni_bridge::{call_string_static, call_string_static_no_arg, EXEC_CLASS};
 
 /// 单元分隔符(US):与 Kotlin 侧 SEP 一致
 const SEP: char = '\u{1f}';
 
 /// 探测当前可用执行器等级(Kotlin 侧按 ROOT → Shizuku → Sandbox 顺序探测)。
 /// 探测失败一律回退 Disabled:宁可不可用,不给「看似可用实则失败」的假象。
+///
+/// 注意 `detectTier` 在 Kotlin 侧**不接参数**,必须走无参入口——此前误按「一个
+/// String 入参」调用,报 `NoSuchMethodError`,使本函数恒回退 disabled(2026-09-17 实测)。
 pub fn detect_tier() -> ShellTier {
-    match call_string_static(EXEC_CLASS, "detectTier", "") {
+    match call_string_static_no_arg(EXEC_CLASS, "detectTier") {
         Ok(s) => ShellTier::from_str_lossy(s.trim()),
         Err(e) => {
             tracing::warn!(error = %e, "探测 Android 执行器等级失败,回退 disabled");
@@ -77,8 +80,9 @@ fn parse_result(raw: &str, tier: ShellTier) -> Result<ExecResult, String> {
 }
 
 /// 请求 Shizuku 权限(由前端按钮触发;首次会弹系统授权框)。
+/// 同 `detectTier`:Kotlin 侧无入参,必须走无参入口。
 pub fn request_shizuku_permission() -> Result<(), String> {
-    call_string_static(EXEC_CLASS, "requestShizukuPermission", "").map(|_| ())
+    call_string_static_no_arg(EXEC_CLASS, "requestShizukuPermission").map(|_| ())
 }
 
 #[cfg(test)]

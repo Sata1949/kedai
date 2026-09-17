@@ -22,10 +22,12 @@
  *      没有代际归属的模块无从按分层纪律评审,是分层叙事的静默失效点。
  *   J. 跨代依赖方向 —— 按 arch-layers.json 的 L1/L2/L3 归属与允许方向校验实测 import 图。
  *      新增越代边 FAIL;存量越代边须在 registeredEdges 中登记(只报债务不阻塞,可还债不可增债)。
- *   L. JNI 按名调用桥类的登记完整性 —— `call_string_static` 用到的类必须登记在
- *      `jni_bridge.rs` 的 `BRIDGE_CLASSES`(未登记则 JNI_OnLoad 期不缓存,调用必失败),
- *      且登记项须有对应 Kotlin 源与被调用方法、须有 proguard 整类 keep。
- *      2026-09-17 实测:ShellExecutorBridge 漏登记致 Android 命令执行永久不可用。
+ *   L. JNI 按名调用桥类的登记完整性 —— 两个入口 `call_string_static`(1 个 String 入参)/
+ *      `call_string_static_no_arg`(无入参)用到的类必须登记在 `jni_bridge.rs` 的
+ *      `BRIDGE_CLASSES`(未登记则 JNI_OnLoad 期不缓存,调用必失败),且登记项须有对应
+ *      Kotlin 源、被调用方法存在且**参数个数两侧一致**、须有 proguard 整类 keep。
+ *      2026-09-17 实测:ShellExecutorBridge 漏登记 + detectTier 等四个无参方法被按
+ *      带参调用,两缺陷叠加致 Android 命令执行永久不可用(后者被前者掩盖,修前者才暴露)。
  *      相关文件均 `cfg(target_os = "android")`,Rust 单测在 Windows 上不编译,故只能本脚本守。
  *
  * 用法:
@@ -576,9 +578,12 @@ const backendWarnings = [];
 // **不参与编译**,单测写了也不会跑;只有本脚本(源文本扫描)能在日常门禁里跨平台生效。
 //
 // 三条不变量(缺一即故障,历史均已各自踩过坑):
-//   ① 调用方 → 注册表:凡 `call_string_static(<CONST>)` 用到的类必须在 `BRIDGE_CLASSES` 中
-//      (本轮实测的漏登记 bug;当年 KeystoreBridge 走的就是这条);
-//   ② 注册表 → Kotlin 源:类名必须有同名 `.kt`(防类名笔误,编译期不报、运行期必炸);
+//   ① 调用方 → 注册表:凡 `call_string_static[_no_arg](<CONST>)` 用到的类必须在
+//      `BRIDGE_CLASSES` 中(本轮实测的漏登记 bug;当年 KeystoreBridge 走的就是这条);
+//   ② 注册表 → Kotlin 源:类名必须有同名 `.kt`,且**被调用的方法名与参数个数两侧一致**
+//      (参数不符报 NoSuchMethodError,文案不含「参数不匹配」,极易误判——
+//       2026-09-17 实测:detectTier 等四个无参方法被按「一个 String 入参」调用而全失败,
+//       修好①之后才暴露,故本规则把两层一起锁);
 //   ③ 注册表 → proguard:必须有整类 keep 规则(否则 release 下 R8 改名,只有正式包暴露)。
 {
   const jniBridgePath = join(SERVER, 'services', 'jni_bridge.rs');
@@ -642,20 +647,26 @@ const backendWarnings = [];
     const src = readFileSync(f, 'utf8');
     src.split('\n').forEach((line, i) => {
       if (/^\s*\/\//.test(line)) return;
-      const m = line.match(/call_string_static\(\s*("([^"]+)"|[A-Za-z_][A-Za-z0-9_]*)/);
+      // 两个入口都扫:`call_string_static`(1 个 String 入参)与
+      // `call_string_static_no_arg`(0 个入参)——后者因方法名更长,需一并匹配,
+      // 否则无参调用点会成为本规则的盲区(正是 2026-09-17 那层漏检)。
+      const m = line.match(
+        /\bcall_string_static(_no_arg)?\(\s*("([^"]+)"|[A-Za-z_][A-Za-z0-9_]*)/,
+      );
       if (!m) return;
+      const noArg = Boolean(m[1]);
       const site = `${relative(ROOT, f)}:${i + 1}`;
-      const cls = m[2] ? m[2] : classConsts.get(m[1]);
+      const cls = m[3] ? m[3] : classConsts.get(m[2]);
       if (!cls) {
         backendFailures.push(
-          `[L] call_string_static 的类名常量 \`${m[1]}\` 未找到 com/kedai/app/* 声明:${site}`,
+          `[L] call_string_static 的类名常量 \`${m[2]}\` 未找到 com/kedai/app/* 声明:${site}`,
         );
         return;
       }
       callSites++;
-      // 记录方法名,供不变量②的「方法存在」校验
-      const mm = line.match(/call_string_static\([^,]+,\s*"([^"]+)"/);
-      if (mm) methodCalls.push({ cls, method: mm[1], site });
+      // 记录方法名与**实参个数**,供不变量②的方法存在性与参数一致性校验
+      const mm = line.match(/call_string_static(?:_no_arg)?\([^,]+,\s*"([^"]+)"/);
+      if (mm) methodCalls.push({ cls, method: mm[1], argCount: noArg ? 0 : 1, site });
       if (!registeredNames.has(cls)) {
         backendFailures.push(
           `[L] JNI 桥类未登记在 BRIDGE_CLASSES:${cls}(调用点 ${site})——` +
@@ -679,14 +690,37 @@ const backendWarnings = [];
       );
     } else {
       kotlinOk++;
-      // 方法名存在性:被按名调用的方法若在 .kt 中完全没有同名 fun,几乎必是拼写漂移
+      const ktSrc = readFileSync(kt, 'utf8');
       for (const mc of methodCalls) {
         if (mc.cls !== name) continue;
-        const ktSrc = readFileSync(kt, 'utf8');
-        if (!new RegExp(`fun\\s+${mc.method}\\s*\\(`).test(ktSrc)) {
+        // 方法存在性:被按名调用的方法若在 .kt 中完全没有同名 fun,几乎必是拼写漂移
+        const decl = ktSrc.match(new RegExp(`fun\\s+${mc.method}\\s*\\(([^)]*)\\)`));
+        if (!decl) {
           backendFailures.push(
             `[L] Kotlin 桥类缺被调用方法:${name}.${mc.method}(调用点 ${mc.site};` +
               `JNI 按名查找,方法名不一致即运行期失败)`,
+          );
+          continue;
+        }
+        // 参数个数一致性(2026-09-17 新增):JNI 的 CallStaticMethod 按**签名**查方法,
+        // 个数不符时报 `NoSuchMethodError`(文案不含「参数不匹配」,极易误判)。
+        // 实测教训:detectTier/requestShizukuPermission/startKeepAlive/stopKeepAlive
+        // 在 Kotlin 侧无参,而 Rust 统一按「一个 String 入参」调用 → 四个方法全失败,
+        // 其中 detectTier 使 Android 命令执行恒回退 disabled。
+        const ktParams = decl[1].trim();
+        const ktArgCount = ktParams
+          ? ktParams.split(',').filter((p) => p.trim()).length
+          : 0;
+        if (ktArgCount !== mc.argCount) {
+          const rustEntry = mc.argCount === 0 ? 'call_string_static_no_arg(无参)' : 'call_string_static(1 个 String 入参)';
+          const kotlinEntry = ktArgCount === 0 ? '无参' : `${ktArgCount} 个参数`;
+          backendFailures.push(
+            `[L] JNI 桥接方法参数个数不匹配:${name}.${mc.method}(调用点 ${mc.site})——` +
+              `Rust 侧用 ${rustEntry},Kotlin 侧是 ${kotlinEntry};` +
+              `签名不符报 NoSuchMethodError(运行期),请使两侧一致` +
+              (ktArgCount === 0
+                ? '(Kotlin 无参 → Rust 应用 call_string_static_no_arg)'
+                : ''),
           );
         }
       }
