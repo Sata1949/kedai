@@ -83,14 +83,20 @@ impl UserScriptService {
         serde_json::from_str(&raw).map_err(|e| format!("解析角色卡失败: {e}"))
     }
 
+    /// 整份回写角色卡 data_raw(旧字段迁移路径)。
+    ///
+    /// 2026-09-17 P-11:本函数**绕过了 `character_data::update_data_raw` 收口**,
+    /// 因此必须自己同步 `derived_json` 派生列 —— 否则迁移改写 data_raw 后,列表仍读列拿到
+    /// 旧的开场白/正则脚本(实测由 `tests/character_derived.rs` 的旁路用例锁定)。
     fn write_character_raw(&self, character_id: &str, raw: &Value) -> Result<(), String> {
         let raw_str = serde_json::to_string(raw).map_err(|e| format!("序列化角色卡失败: {e}"))?;
+        let derived = crate::parsing::character_derived::compute_derived_json(raw);
         // conn 作用域收窄:UPDATE 语句执行后立即释放锁(与 quick_reply_service 一致)
         {
             let conn = self.db.write();
             conn.execute(
-                "UPDATE characters SET data_raw = ?1 WHERE id = ?2",
-                params![raw_str, character_id],
+                "UPDATE characters SET data_raw = ?1, derived_json = ?2 WHERE id = ?3",
+                params![raw_str, derived, character_id],
             )
             .map_err(|e| format!("回写角色卡失败: {e}"))?;
         }

@@ -9,6 +9,7 @@
 // 注: assistant/ejs/(自研 JS 解释器)已**冻结**——只接受安全修复,新模板能力走 scripts/runtime.rs。
 pub mod assistant;
 pub mod character_card;
+pub mod character_derived;
 pub mod macros;
 pub mod preset;
 pub mod regex_script;

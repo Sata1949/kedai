@@ -235,6 +235,30 @@ fn add_column_if_missing(
     Ok(())
 }
 
+/// 幂等 schema 升级(2026-09-17 P-11):为 characters 补 `derived_json` 派生列。
+///
+/// 用途:缓存从 `data_raw` 提取的 6 个派生字段(first_mes / alternate_greetings /
+/// regex_scripts / creator / character_version / creator_notes),让列表接口**零 JSON 解析**
+/// ——此前无论列表还是详情都对每张卡做整份 `serde_json::from_str`,列表成本是
+/// O(卡数 × 卡体积)。
+///
+/// **该列是缓存而非事实源**:读取侧在列为空/非法时回退解析 `data_raw`,故:
+/// - 旧库未回填、旁路写入未同步等情形只会「慢」,不会显示错数据;
+/// - 回填是性能必需而非正确性必需,可增量推进;
+/// - 新旧版本代码混用安全(旧代码 SELECT 全为显式列名,不读该列)。
+///
+/// 带 DEFAULT(不是可空列):`merge.rs` 的 `merge_table` 用「源表全列 + 动态占位符」插入,
+/// 旧快照行不含该列,靠默认值补齐;旧库 ALTER 时既有行也自动取默认值(零迁移成本)。
+/// 类型串与 `CREATE_TABLES` 内**逐字一致**,否则 `PRAGMA table_info` 的 dflt 指纹不等即红。
+pub fn ensure_characters_derived_json_column(conn: &Connection) -> Result<(), String> {
+    add_column_if_missing(
+        conn,
+        "characters",
+        "derived_json",
+        "TEXT NOT NULL DEFAULT '{}'",
+    )
+}
+
 /// 幂等 schema 升级(批次 4 子任务终态语义):为 agent_subtasks 补 `finished_at` 列。
 ///
 /// 用途:让「已完成再被 agentend 召回」与「中途被召回」可分——前者保持 `done` 且
@@ -404,6 +428,64 @@ pub fn ensure_memory_entries_fts_backfill(conn: &Connection) -> Result<(), Strin
     .map_err(|e| format!("写入记忆索引回填标记失败: {e}"))?;
     Ok(())
 }
+/// 幂等回填(2026-09-17 P-11):为已存在的角色行计算 `derived_json`。
+///
+/// 与 `ensure_characters_derived_json_column` 配套:加列让旧库有该列(既有行取默认 `'{}'`),
+/// 本函数把 `'{}'` 的行逐行补齐。`backfill_meta` 记标记,只做一次。
+///
+/// **必须事务外执行**(`models/db/mod.rs` 的调用点已按此约定):逐行读 data_raw + 解析 +
+/// 回写,大库下是一次长写,放进升级事务会把 WAL 撑大(与 FTS rebuild 同理)。
+///
+/// 定位是**性能回填而非正确性回填**:中途失败、漏掉某些行都不影响正确性——列表读取侧在
+/// 列为空/非法时回退解析 data_raw。故此处失败只留痕、不阻断启动。
+pub fn ensure_characters_derived_backfill(conn: &Connection) -> Result<(), String> {
+    const KEY: &str = "characters_derived_backfilled";
+    let done: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM backfill_meta WHERE key = ?1)",
+            [KEY],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|v| v == 1)
+        .unwrap_or(false);
+    if done {
+        return Ok(());
+    }
+    // 收集待回填行的 (id, data_raw):先读完再写,避免在遍历游标上同时执行 UPDATE
+    let mut pending: Vec<(String, String)> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare("SELECT id, data_raw FROM characters WHERE derived_json = '{}'")
+            .map_err(|e| format!("读取待回填角色失败: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| format!("遍历待回填角色失败: {e}"))?;
+        for r in rows.flatten() {
+            pending.push(r);
+        }
+    }
+    for (id, raw) in &pending {
+        // data_raw 非法 JSON:保持 '{}'(读取侧会回退解析,且此处无法算出派生值)
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+            continue;
+        };
+        let derived = crate::parsing::character_derived::compute_derived_json(&value);
+        conn.execute(
+            "UPDATE characters SET derived_json = ?1 WHERE id = ?2",
+            rusqlite::params![derived, id],
+        )
+        .map_err(|e| format!("回填角色 {id} 派生列失败: {e}"))?;
+    }
+    conn.execute(
+        "INSERT OR REPLACE INTO backfill_meta (key, value) VALUES (?1, ?2)",
+        rusqlite::params![KEY, "1"],
+    )
+    .map_err(|e| format!("写入角色派生列回填标记失败: {e}"))?;
+    Ok(())
+}
+
 /// 任务消息表(批次 R2 多轮用户输入):任务全程的用户输入(followup 追加指令 /
 /// plan_chat 批准环节对话)与助手产出按行落库,任务删除随外键级联清除。
 /// 合并前对两侧各补一次 DDL,与 SCOPE_VARIABLES_DDL 同理,

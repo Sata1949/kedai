@@ -13,12 +13,13 @@ use super::conflict::{
     same_file, scalar_text, select_by_key, value_key,
 };
 use super::ddl::{
-    ensure_agent_subtasks_finished_at_column, ensure_llm_requests_usage_columns,
-    ensure_memory_entries_pinned_column, ensure_skills_progressive_columns,
-    ensure_task_llm_calls_finish_reason_column, ensure_task_messages_table,
-    ensure_task_subtasks_finished_at_column, ensure_tasks_task_mode_column, CONTRACT_CHANGELOG_DDL,
-    KALEIDO_STATE_DDL, LLM_REQUESTS_DDL, MEMORY_ENTRIES_DDL, MEMORY_ENTRIES_FTS_DDL,
-    SCOPE_VARIABLES_DDL, SESSION_COMPACTIONS_DDL, USER_SCRIPTS_DDL,
+    ensure_agent_subtasks_finished_at_column, ensure_characters_derived_json_column,
+    ensure_llm_requests_usage_columns, ensure_memory_entries_pinned_column,
+    ensure_skills_progressive_columns, ensure_task_llm_calls_finish_reason_column,
+    ensure_task_messages_table, ensure_task_subtasks_finished_at_column,
+    ensure_tasks_task_mode_column, CONTRACT_CHANGELOG_DDL, KALEIDO_STATE_DDL, LLM_REQUESTS_DDL,
+    MEMORY_ENTRIES_DDL, MEMORY_ENTRIES_FTS_DDL, SCOPE_VARIABLES_DDL, SESSION_COMPACTIONS_DDL,
+    USER_SCRIPTS_DDL,
 };
 use super::{DATABASE_FILE, SKIPPED_SIDECARS};
 use crate::models::db::SCHEMA_VERSION;
@@ -219,6 +220,10 @@ fn merge_databases(baseline: &Path, source: &Path) -> Result<MergeReport, String
     // 任务消息表(批次 R2):旧库缺失才建,保证两侧 schema 一致(比对在 DDL 补齐之后)
     ensure_task_messages_table(&conn)
         .map_err(|e| format!("补齐基线库 task_messages 表失败: {e}"))?;
+    // characters derived_json 列(P-11 派生列):旧库 ALTER 补齐,保证两侧 schema 一致;
+    // merge_table 按「源表全列」取数,该列缺席会让合并报「基线缺少列」
+    ensure_characters_derived_json_column(&conn)
+        .map_err(|e| format!("补齐基线库 characters derived_json 列失败: {e}"))?;
     align_schema_version(&conn, "工作库")?;
     // 预补 DDL 完成后把工作库标到当前 schema 版本:合并把两侧结构对齐到当前形态,
     // 版本号必须同步(否则合并产物带着旧版本号,「库比代码新」检测与升级判断失真)。
@@ -264,6 +269,9 @@ fn merge_databases(baseline: &Path, source: &Path) -> Result<MergeReport, String
         .map_err(|e| format!("补齐源快照 memory_entries FTS 索引失败: {e}"))?;
     ensure_task_messages_table(&source_conn)
         .map_err(|e| format!("补齐源快照 task_messages 表失败: {e}"))?;
+    // characters derived_json 列(P-11):源快照侧同样补齐(与基线侧成对,漏一侧即报缺少列)
+    ensure_characters_derived_json_column(&source_conn)
+        .map_err(|e| format!("补齐源快照 characters derived_json 列失败: {e}"))?;
     // 源快照同样对齐版本(两侧结构一致才允许合并;版本号也随之一致)
     align_schema_version(&source_conn, "源快照")?;
     drop(source_conn);

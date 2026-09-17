@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS characters (
   file_path   TEXT NOT NULL,
   avatar_path TEXT,
   data_raw    TEXT NOT NULL,
-  created_at  TEXT NOT NULL
+  created_at  TEXT NOT NULL,
+  derived_json TEXT NOT NULL DEFAULT '{}'
 );
 CREATE TABLE IF NOT EXISTS sessions (
   id           TEXT PRIMARY KEY,

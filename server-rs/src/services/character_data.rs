@@ -46,9 +46,13 @@ where
     // 闭包拒绝(如角色卡结构不符合预期)时事务回滚,不留下半写状态
     mutate(&mut value)?;
     let serialized = serde_json::to_string(&value).map_err(|e| format!("序列化角色卡失败: {e}"))?;
+    // 派生列随 data_raw 在同一事务内同步重算(2026-09-17 P-11):本函数是 data_raw 读改写的
+    // **单一入口**(世界书编辑、脚本树、契约内嵌、角色字段更新四处都经它),不在此重算会让
+    // derived_json 与 data_raw 静默不一致,列表读到陈旧的开场白/正则脚本。
+    let derived = crate::parsing::character_derived::compute_derived_json(&value);
     tx.execute(
-        "UPDATE characters SET data_raw = ?1 WHERE id = ?2",
-        params![serialized, character_id],
+        "UPDATE characters SET data_raw = ?1, derived_json = ?2 WHERE id = ?3",
+        params![serialized, derived, character_id],
     )
     .map_err(|e| format!("回写角色卡失败: {e}"))?;
     tx.commit()

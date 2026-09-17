@@ -176,6 +176,10 @@ impl Db {
                 // 幂等 schema 升级(批次 3 性能):旧库补建 sessions/tasks 列表查询索引
                 crate::migration::ensure_perf_indexes(&conn)
                     .map_err(|e| format!("升级性能索引失败: {e}"))?;
+                // 幂等 schema 升级(2026-09-17 P-11):characters 补 derived_json 派生列,
+                // 让列表接口零 JSON 解析(列是缓存,空/非法时读取侧回退解析 data_raw)
+                crate::migration::ensure_characters_derived_json_column(&conn)
+                    .map_err(|e| format!("升级 characters derived_json 列失败: {e}"))?;
                 Ok(())
             })();
             let failure: String = match body {
@@ -198,6 +202,12 @@ impl Db {
         // 幂等回填(升级工作流 B1):记忆全文索引首次建表后 rebuild 一次
         crate::migration::ensure_memory_entries_fts_backfill(&conn)
             .map_err(|e| format!("回填 memory_entries FTS 索引失败: {e}"))?;
+        // 幂等回填(2026-09-17 P-11):为旧库已有角色行补齐 derived_json。
+        // 同为长写,故与 FTS rebuild 一样留在事务外;失败不阻断启动——该列是缓存,
+        // 未回填的行读取侧会回退解析 data_raw(最差只是慢)。
+        if let Err(e) = crate::migration::ensure_characters_derived_backfill(&conn) {
+            tracing::warn!("回填 characters derived_json 失败(不阻断启动,读取侧会回退解析): {e}");
+        }
         backfill::backfill_scope_variables(&conn)?;
         // 版本号最后写:过早抬高会让下次启动误判「已最新」而跳过补迁(L18 补齐路径)。
         conn.pragma_update(None, "user_version", schema::SCHEMA_VERSION)

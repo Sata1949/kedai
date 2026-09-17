@@ -3,6 +3,7 @@ use super::{log_query_failure, log_read_pool_failure};
 use crate::models::db::{now_iso, Db};
 use crate::models::types::CharacterRecord;
 use crate::parsing::character_card::{parse_character_card, safe_file_name};
+use crate::parsing::character_derived;
 use rusqlite::{params, OptionalExtension};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -12,20 +13,18 @@ use uuid::Uuid;
 /// 内置「系统助手」角色 id(稳定,幂等;无提示词,作为默认助手使用)
 pub const BUILTIN_SYSTEM_ID: &str = "builtin-system";
 
+/// 角色行的 SELECT 列清单(两个调用点共用,**列序必须与 `row_to_character` 一致**:
+/// 0 id / 1 name / 2 chara_name / 3 description / 4 file_path / 5 avatar_path /
+/// 6 data_raw / 7 created_at / 8 derived_json)
+const CHARACTER_COLUMNS: &str =
+    "id, name, chara_name, description, file_path, avatar_path, data_raw, created_at, derived_json";
+
 /// 从 data_raw 提取备用开场列表(alternate_greetings):取非空字符串,空数组返回 None
+///
+/// 实现已迁至 `parsing::character_derived`(写入侧与回退路径共用的单一计算源),
+/// 此处保留薄包装以免既有调用点与文档引用失效。
 fn extract_alternate_greetings(data_raw: &Value) -> Option<Vec<String>> {
-    let arr = data_raw.get("alternate_greetings")?.as_array()?;
-    let list: Vec<String> = arr
-        .iter()
-        .filter_map(|v| v.as_str())
-        .map(|s| s.to_string())
-        .filter(|s| !s.trim().is_empty())
-        .collect();
-    if list.is_empty() {
-        None
-    } else {
-        Some(list)
-    }
+    character_derived::extract_alternate_greetings(data_raw)
 }
 
 pub struct CharacterService {
@@ -33,38 +32,53 @@ pub struct CharacterService {
     data_dir: PathBuf,
 }
 
+/// 从一行 character 构造记录。
+///
+/// 派生字段来源(2026-09-17 P-11):优先读 `derived_json` 列(**零 JSON 解析**),
+/// 该列为空/非法时**回退解析 `data_raw`**——列是缓存而非事实源,任何不确定都退回权威数据。
+///
+/// 列序约定(两个调用点的 SELECT 必须与之一致):
+/// 0 id / 1 name / 2 chara_name / 3 description / 4 file_path / 5 avatar_path /
+/// 6 data_raw / 7 created_at / 8 derived_json
 fn row_to_character(row: &rusqlite::Row, with_data_raw: bool) -> rusqlite::Result<CharacterRecord> {
-    // SQL 恒查 data_raw 列(第 7 列);regex_scripts 为前端渲染必需,列表也始终提取;
-    // data_raw 本体仅在详情接口返回(体积大)。
     let raw_str: Option<String> = row.get(6)?;
-    let data_raw_value: Option<Value> = raw_str
+    let derived_str: Option<String> = row.get(8).unwrap_or_default();
+    // 详情路径需要 data_raw 本体;列表路径不解析(除非派生列不可用而必须回退)
+    let mut data_raw_value: Option<Value> = None;
+    let derived: Option<Value> = derived_str
         .as_deref()
-        .and_then(|s| serde_json::from_str(s).ok());
-    let first_mes = data_raw_value
-        .as_ref()
-        .and_then(|d| d.get("first_mes"))
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
-    let alternate_greetings = data_raw_value
-        .as_ref()
-        .and_then(extract_alternate_greetings);
-    let regex_scripts = data_raw_value
-        .as_ref()
-        .map(crate::parsing::regex_script::extract_regex_scripts)
-        .filter(|v| !v.is_empty());
-    // 卡元数据三件套(远程资源页口令推导用;列表也携带,体积小)
-    let pick_str = |key: &str| {
-        data_raw_value
-            .as_ref()
-            .and_then(|d| d.get(key))
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.trim().is_empty())
-            .map(|s| s.to_string())
+        .and_then(crate::parsing::character_derived::parse_derived_json);
+
+    let record_fields = match derived {
+        Some(d) => {
+            if with_data_raw {
+                data_raw_value = raw_str
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str(s).ok());
+            }
+            DerivedFields {
+                first_mes: character_derived::derived_str(&d, "first_mes"),
+                alternate_greetings: character_derived::derived_string_list(
+                    &d,
+                    "alternate_greetings",
+                ),
+                regex_scripts: d
+                    .get("regex_scripts")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok()),
+                creator: character_derived::derived_str(&d, "creator"),
+                character_version: character_derived::derived_str(&d, "character_version"),
+                creator_notes: character_derived::derived_str(&d, "creator_notes"),
+            }
+        }
+        None => {
+            // 回退:解析 data_raw 现算(旧库未回填 / 旁路写入未同步时走这里)
+            data_raw_value = raw_str
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<Value>(s).ok());
+            derive_from_data_raw(data_raw_value.as_ref())
+        }
     };
-    let creator = pick_str("creator");
-    let character_version = pick_str("character_version");
-    let creator_notes = pick_str("creator_notes");
+
     Ok(CharacterRecord {
         id: row.get(0)?,
         name: row.get(1)?,
@@ -73,15 +87,52 @@ fn row_to_character(row: &rusqlite::Row, with_data_raw: bool) -> rusqlite::Resul
         file_path: row.get(4)?,
         avatar_path: row.get(5)?,
         data_raw: if with_data_raw { data_raw_value } else { None },
-        first_mes,
-        alternate_greetings,
-        regex_scripts,
+        first_mes: record_fields.first_mes,
+        alternate_greetings: record_fields.alternate_greetings,
+        regex_scripts: record_fields.regex_scripts,
         card_plugins: None,
-        creator,
-        character_version,
-        creator_notes,
+        creator: record_fields.creator,
+        character_version: record_fields.character_version,
+        creator_notes: record_fields.creator_notes,
         created_at: row.get(7)?,
     })
+}
+
+/// 派生字段集合(读取路径的内部中转,避免六个字段散着传)
+struct DerivedFields {
+    first_mes: Option<String>,
+    alternate_greetings: Option<Vec<String>>,
+    regex_scripts: Option<Vec<crate::parsing::regex_script::RegexScript>>,
+    creator: Option<String>,
+    character_version: Option<String>,
+    creator_notes: Option<String>,
+}
+
+/// 回退路径:直接从 data_raw 现算派生字段(与 `compute_derived_json` 口径一致,
+/// 后者是写入侧用的同一套规则;此处复用其输出再取字段,保证两条路径**不会漂移**)。
+fn derive_from_data_raw(data_raw: Option<&Value>) -> DerivedFields {
+    let Some(raw) = data_raw else {
+        return DerivedFields {
+            first_mes: None,
+            alternate_greetings: None,
+            regex_scripts: None,
+            creator: None,
+            character_version: None,
+            creator_notes: None,
+        };
+    };
+    let computed = character_derived::compute_derived_json(raw);
+    let d: Value = serde_json::from_str(&computed).unwrap_or_else(|_| serde_json::json!({}));
+    DerivedFields {
+        first_mes: character_derived::derived_str(&d, "first_mes"),
+        alternate_greetings: character_derived::derived_string_list(&d, "alternate_greetings"),
+        regex_scripts: d
+            .get("regex_scripts")
+            .and_then(|v| serde_json::from_value(v.clone()).ok()),
+        creator: character_derived::derived_str(&d, "creator"),
+        character_version: character_derived::derived_str(&d, "character_version"),
+        creator_notes: character_derived::derived_str(&d, "creator_notes"),
+    }
 }
 
 impl CharacterService {
@@ -91,15 +142,18 @@ impl CharacterService {
         CharacterService { db, data_dir }
     }
 
-    /// 列表不含 data_raw,按 created_at DESC
+    /// 列表不含 data_raw,按 created_at DESC。
+    ///
+    /// 2026-09-17 P-11:派生字段改读 `derived_json` 列(零 JSON 解析),故列表成本不再随
+    /// 「卡数 × 卡体积」线性增长;列不可用时自动回退解析 data_raw(见 `row_to_character`)。
+    /// `prepare_cached` 让语句在连接的语句缓存中复用(此前每次调用都重新 prepare)。
     pub fn list(&self) -> Vec<CharacterRecord> {
         let conn = match self.db.read() {
             Ok(c) => c,
             Err(e) => return log_read_pool_failure("角色列表", e),
         };
-        let mut stmt = match conn
-            .prepare("SELECT id, name, chara_name, description, file_path, avatar_path, data_raw, created_at FROM characters ORDER BY created_at DESC")
-        {
+        let sql = format!("SELECT {CHARACTER_COLUMNS} FROM characters ORDER BY created_at DESC");
+        let mut stmt = match conn.prepare_cached(&sql) {
             Ok(s) => s,
             Err(e) => return log_query_failure("角色列表 prepare", e),
         };
@@ -112,14 +166,11 @@ impl CharacterService {
 
     pub fn get(&self, id: &str) -> Option<CharacterRecord> {
         let conn = self.db.read().ok()?;
-        conn.query_row(
-            "SELECT id, name, chara_name, description, file_path, avatar_path, data_raw, created_at FROM characters WHERE id = ?1",
-            params![id],
-            |row| row_to_character(row, true),
-        )
-        .optional()
-        .ok()
-        .flatten()
+        let sql = format!("SELECT {CHARACTER_COLUMNS} FROM characters WHERE id = ?1");
+        conn.query_row(&sql, params![id], |row| row_to_character(row, true))
+            .optional()
+            .ok()
+            .flatten()
     }
 
     /// 启动时注入默认「系统助手」角色:无提示词(description/first_mes 为空),作为通用助手。
@@ -144,8 +195,9 @@ impl CharacterService {
             serde_json::to_vec_pretty(&data_raw).unwrap_or_default(),
         );
         let data_raw_str = serde_json::to_string(&data_raw).unwrap_or_else(|_| "{}".into());
+        let derived = character_derived::compute_derived_json(&data_raw);
         let _ = self.db.write().execute(
-            "INSERT INTO characters (id, name, chara_name, description, file_path, avatar_path, data_raw, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO characters (id, name, chara_name, description, file_path, avatar_path, data_raw, created_at, derived_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 BUILTIN_SYSTEM_ID,
                 "system",
@@ -154,7 +206,8 @@ impl CharacterService {
                 file_path.to_string_lossy().to_string(),
                 Option::<String>::None,
                 data_raw_str,
-                created_at
+                created_at,
+                derived
             ],
         );
     }
@@ -162,28 +215,28 @@ impl CharacterService {
     /// 幂等迁移存量 V3 角色卡:V3 卡正文位于 data 子对象,旧版本导入时顶层 V2 字段为空,
     /// 导致人设(description/personality/scenario 等)未注入提示词。此处把空顶层字段
     /// 从 data 子对象补全并同步 description/chara_name 列。二次运行:顶层已补全 → 无变更。
+    ///
+    /// 2026-09-17 P-11:改为**单次全表扫描**(原实现先 `SELECT id` 再逐个 id 查 `data_raw`,
+    /// 是 1+N 次查询的 N+1);同时同步 `derived_json` 列,避免补全后列表仍显示补全前的值。
     pub fn reflatten_v3_cards(&self) {
         use crate::parsing::character_card::flatten_v3_data;
         let conn = self.db.write();
-        let mut ids = Vec::new();
-        if let Ok(mut stmt) = conn.prepare("SELECT id FROM characters") {
-            if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
-                for id in rows.flatten() {
-                    ids.push(id);
-                }
+        // 先读完 (id, data_raw),再统一处理:避免在遍历游标上执行 UPDATE
+        let mut rows_data: Vec<(String, String)> = Vec::new();
+        {
+            let Ok(mut stmt) = conn.prepare("SELECT id, data_raw FROM characters") else {
+                return;
+            };
+            let Ok(rows) = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            }) else {
+                return;
+            };
+            for r in rows.flatten() {
+                rows_data.push(r);
             }
         }
-        for id in ids {
-            let raw_str: Option<String> = conn
-                .query_row(
-                    "SELECT data_raw FROM characters WHERE id = ?1",
-                    params![&id],
-                    |row| row.get(0),
-                )
-                .optional()
-                .ok()
-                .flatten();
-            let Some(raw_str) = raw_str else { continue };
+        for (id, raw_str) in rows_data {
             let Some(raw) = serde_json::from_str::<Value>(&raw_str).ok() else {
                 continue;
             };
@@ -211,9 +264,11 @@ impl CharacterService {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
                 .unwrap_or_default();
+            // 派生列随 data_raw 同步重算(否则列表读到的是补全前的旧值)
+            let derived = character_derived::compute_derived_json(&fixed);
             let _ = conn.execute(
-                "UPDATE characters SET data_raw = ?1, description = ?2, chara_name = ?3 WHERE id = ?4",
-                params![new_raw_str, description, chara_name, id],
+                "UPDATE characters SET data_raw = ?1, description = ?2, chara_name = ?3, derived_json = ?4 WHERE id = ?5",
+                params![new_raw_str, description, chara_name, derived, id],
             );
         }
     }
@@ -257,8 +312,9 @@ impl CharacterService {
         let created_at = now_iso();
 
         let conn = self.db.write();
+        let derived = character_derived::compute_derived_json(&parsed.data);
         conn.execute(
-            "INSERT INTO characters (id, name, chara_name, description, file_path, avatar_path, data_raw, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO characters (id, name, chara_name, description, file_path, avatar_path, data_raw, created_at, derived_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 id,
                 name,
@@ -267,7 +323,8 @@ impl CharacterService {
                 file_path.to_string_lossy(),
                 avatar_path.as_deref(),
                 data_raw,
-                created_at
+                created_at,
+                derived
             ],
         )
         .map_err(|e| format!("写数据库失败: {e}"))?;
@@ -372,10 +429,12 @@ impl CharacterService {
             let new_name = chara_name.unwrap_or(&old_name).to_string();
             let new_desc = description.unwrap_or(&old_desc).to_string();
             let data_raw_str = serde_json::to_string(&data_raw).unwrap_or_else(|_| "{}".into());
+            // 派生列随 data_raw 同步重算(2026-09-17 P-11)
+            let derived = character_derived::compute_derived_json(&data_raw);
             let n = tx
                 .execute(
-                    "UPDATE characters SET chara_name = ?1, description = ?2, data_raw = ?3 WHERE id = ?4",
-                    params![new_name, new_desc, data_raw_str, id],
+                    "UPDATE characters SET chara_name = ?1, description = ?2, data_raw = ?3, derived_json = ?4 WHERE id = ?5",
+                    params![new_name, new_desc, data_raw_str, derived, id],
                 )
                 .ok()?;
             if n == 0 {
