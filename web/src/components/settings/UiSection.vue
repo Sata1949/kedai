@@ -55,6 +55,16 @@ const { scriptAuthorizations } = storeToRefs(store);
           <span v-else>暂无已授权角色卡。</span>
         </div>
       </div>
+      <!-- 退出应用(2026-09-17):此前界面上没有退出入口,只能靠 Android 返回键
+           碰运气触发,或桌面关窗口。放在「界面」区末尾——危险操作不与其它设置项混排,
+           且点击后走同一个退出确认弹窗(不直接退,误触不丢未保存内容)。 -->
+      <div class="sv-data-row">
+        <div class="info">
+          <b>退出应用</b>
+          <span>结束 Kedai 进程(正在生成或执行中的任务会被中断)。Android 上也可连按两次返回键退出。</span>
+        </div>
+        <button type="button" class="sv-btn danger" @click="store.exitConfirmOpen = true">退出 Kedai</button>
+      </div>
     </div>
   </div>
 </template>

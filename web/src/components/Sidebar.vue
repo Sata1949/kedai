@@ -496,6 +496,23 @@ async function removeTask(task: TaskRecord): Promise<void> {
         class="hidden"
         @change="onFilePicked"
       />
+      <!-- 退出入口(2026-09-17):此前界面上**没有任何**退出按钮——Android 只能靠
+           返回键碰运气触发确认弹窗,桌面只能关窗口。补一个显式入口,点击后走同一个
+           退出确认弹窗(不直接退:误触不丢未保存内容)。 -->
+      <button
+        class="sv-btn sv-side-btn sidebar-exit"
+        title="退出 Kedai(会先弹确认)"
+        @click="store.exitConfirmOpen = true"
+      >
+        <span class="sv-side-btn-ico">
+          <svg viewBox="0 0 24 24">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+            <path d="M16 17l5-5-5-5" />
+            <path d="M21 12H9" />
+          </svg>
+        </span>
+        退出 Kedai
+      </button>
     </div>
 
     <!-- 右键菜单 -->
@@ -600,3 +617,18 @@ async function removeTask(task: TaskRecord): Promise<void> {
     </Teleport>
   </aside>
 </template>
+
+<style scoped>
+/* 退出按钮(2026-09-17 新增入口)。样式纪律(MAINTENANCE D-5):新增组件样式写 scoped,
+   不进 style.css;这里只覆盖该按钮特有的一点点视觉,尺寸/图标沿用 .sv-side-btn。 */
+.sidebar-exit {
+  /* 与「综合设置」(primary 黑底)区分层级:空心描边,悬停才转红提示危险语义 */
+  background: transparent;
+  border: var(--bw-thin) solid var(--sv-line-strong);
+  color: var(--sv-ink-dim);
+}
+.sidebar-exit:hover {
+  border-color: var(--sv-red);
+  color: var(--sv-red);
+}
+</style>
