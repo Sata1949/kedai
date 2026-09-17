@@ -46,7 +46,7 @@ pub(crate) fn compile(
     allowlist: &[String],
     registry: &ToolRegistry,
 ) -> TaskToolPolicy {
-    let all = tool_sets::exclude_meta(registry.list_definitions());
+    let all = platform_gate(tool_sets::exclude_meta(registry.list_definitions()));
     let selected: Vec<ToolDefinition> = match policy {
         "all" => all,
         "allowlist" => tool_sets::filter_by_names(all, allowlist),
@@ -67,6 +67,26 @@ pub(crate) fn compile(
         defs: selected,
         allowed,
     }
+}
+
+/// 平台/档位可见性闸门(2026-09-17)。
+///
+/// 与风险级过滤正交:本函数按**运行环境**决定某些工具该不该出现在模型面前。
+/// 当前唯一受限的是 `submit`(产物提交):
+///   - 它只在 Android 且执行档位为**沙箱**(非 ROOT / 非 Shizuku)时有意义——
+///     那两档下 `bash` 本就能写任意路径,再给一个 submit 只会让模型在两条等价通道间摇摆;
+///   - 非 Android 平台它必然失败(桌面有保存对话框与 write 工具),下发纯属噪声。
+///
+/// 为什么在策略层而不是注册层过滤:工具始终注册,权限面板与契约类型才有一致的
+/// 工具面;过滤只影响「本轮下发给模型什么」。档位在**每轮编译时现探**(带进程内
+/// 缓存),故用户在任务执行途中改授权档位,下一轮的工具清单即随之变化。
+fn platform_gate(defs: Vec<ToolDefinition>) -> Vec<ToolDefinition> {
+    if crate::services::artifact_submit::is_available() {
+        return defs;
+    }
+    defs.into_iter()
+        .filter(|d| d.name != crate::tools::submit::TOOL_NAME)
+        .collect()
 }
 
 #[cfg(test)]
@@ -98,6 +118,8 @@ mod tests {
             // 若实现改成前缀/包含匹配,这两个会被误放行,泄漏测试即失败。
             "bash2",
             "mcp_x_bash",
+            // 产物提交:敏感级,但受平台/档位闸门限制(见 platform_gate)
+            "submit",
         ] {
             reg.register(
                 ToolDefinition {
@@ -195,6 +217,32 @@ mod tests {
         let defs: Vec<&str> = p.defs.iter().map(|d| d.name.as_str()).collect();
         let allowed: Vec<&str> = p.allowed.iter().map(|s| s.as_str()).collect();
         assert_eq!(defs, allowed);
+    }
+
+    /// 平台/档位闸门(2026-09-17):submit 只在 Android 沙箱档可见。
+    ///
+    /// 单测跑在桌面,故此处断言的是「不可用环境下必须剔除」这一侧;Android 侧的
+    /// 反向断言(沙箱档下发、ROOT/Shizuku 档不下发)由 services::artifact_submit
+    /// 的 is_available 语义 + Kotlin 档位探测共同保证,规则 L 守桥接方法登记。
+    /// 关键点:**defs 与 allowed 必须同时剔除**——只剔 defs 会让模型臆造调用时报
+    /// 「未注册」而非「不可用」,只剔 allowed 则模型看得见却调不动。
+    #[test]
+    fn submit_filtered_out_when_unavailable() {
+        let reg = registry_with_tools();
+        let p = compile("all", &[], &reg);
+        let defs: Vec<&str> = p.defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(
+            !defs.contains(&"submit"),
+            "不可用环境下 submit 不得下发: {defs:?}"
+        );
+        assert!(
+            !p.allowed.iter().any(|n| n == "submit"),
+            "allowed 与 defs 必须同源剔除: {:?}",
+            p.allowed
+        );
+        // 其它工具不受影响(闸门只作用于 submit)
+        assert!(defs.contains(&"read"), "闸门不得误伤其它工具: {defs:?}");
+        assert!(defs.contains(&"bash"), "闸门不得误伤 bash: {defs:?}");
     }
 
     #[test]

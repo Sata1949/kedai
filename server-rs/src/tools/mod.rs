@@ -25,6 +25,8 @@ pub mod multistep;
 pub mod permissions;
 pub mod registry;
 pub mod revise;
+// 产物提交(仅 Android 沙箱档下发;可见性过滤见 task_engine/tool_policy.rs)
+pub mod submit;
 pub mod tool_sets;
 pub mod variables;
 
@@ -71,5 +73,7 @@ pub fn register_builtin_tools(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
         deps.settings.clone(),
         deps.data_dir.clone(),
     );
+    // 产物提交(仅 Android 沙箱档):始终注册,可见性由任务工具策略按平台+档位过滤
+    submit::register_submit_tool(registry);
     agent_tools::register_agent_tools(registry, deps);
 }

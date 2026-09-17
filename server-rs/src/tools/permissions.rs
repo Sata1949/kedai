@@ -481,6 +481,10 @@ fn default_risk(tool: &str) -> ToolRisk {
         // agentend 是子智能体编排收尾(结束任务),不改数据,归敏感级;
         // 若归危险级,任务模式默认策略(拒绝危险工具)会打断子智能体流程。
         "search" | "sleep" | "agentgo" | "agentend" => ToolRisk::Sensitive,
+        // 产物提交:目标路径由应用决定(设备下载位置),不接受任意路径参数,文件名经清洗;
+        // 归敏感级而非危险级——按危险级登记会被任务模式默认策略整体剔除,
+        // 而它恰恰只在任务/沙箱场景下有用(见 tools/submit.rs 顶部说明)。
+        "submit" => ToolRisk::Sensitive,
         "memory_write" | "update_variables" | "write" | "replace" | "create" => ToolRisk::Dangerous,
         // 命令执行恒危险级:与文件写工具同级,但额外走「命令级风险强制确认」
         // (tools/command_risk.rs)。显式登记而非依赖下面的通配兜底,便于后续审查。

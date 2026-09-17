@@ -12,6 +12,8 @@
 pub mod agent_flow_service;
 pub mod agent_session_service;
 pub mod agent_subtask_service;
+// 产物提交服务(submit 工具):把最终产物写成设备文件交付(仅 Android 沙箱档可用)
+pub mod artifact_submit;
 pub mod audio_service;
 pub mod cache_diagnostics;
 // characters.data_raw 读改写单一入口(防丢更新):世界书/脚本/契约三处共用
