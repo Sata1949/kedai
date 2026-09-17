@@ -146,6 +146,7 @@
     "render.ts": { "generation": "L1", "responsibility": "消息 HTML 渲染管道(正则占位→转义→还原;与后端渲染协议对锁)" },
     "renderHints.ts": { "generation": "L1", "responsibility": "引导条可见性真值表(纯函数)" },
     "renderPanel.ts": { "generation": "L1", "responsibility": "渲染面板约定判定与源码提取(纯函数)" },
+    "renderCache.ts": { "generation": "L1", "responsibility": "渲染结果有界缓存容器与缓存键构造(纯容器:容量/FIFO/统计;键纪律见文件头,键必须含渲染输入本身而非消息 id)" },
     "sseReducer.ts": { "generation": "L1", "responsibility": "SSE 事件→状态变更纯函数(与后端 SseEvent 线格式一一对应)" },
     "taskResult.ts": { "generation": "L1", "responsibility": "任务 result 拆段契约(与 task_engine team/plan 输出标记对锁)" },
     "taskStatus.ts": { "generation": "L1", "responsibility": "三类任务状态映射与配色(与后端状态枚举对锁)" },

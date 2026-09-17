@@ -33,6 +33,19 @@
   判定口径 `p95 <= 基线 × 倍数` 且 `errors == 0`,`p95 < 5ms` 的端点跳过。
   基线是**本机 release 口径**,只作回归对比基准、不是跨机 SLA;换机器或数据量
   变化后须重采样。数据与用法见 `docs/功能-变更史.md` 的「2026-09-14 实测」小节。
+  **跳过必须显式可见(2026-09-17 P-12 起)**:未开 `-Perf` 时 `check-all.ps1` 会单独打印
+  「性能门禁:未运行」并说明开启方式——此前静默跳过,收尾的「全部通过」容易被误读为
+  「性能也通过了」。
+- **前端体积预算门禁(2026-09-17 P-12 起)**:`tools/check-bundle.mjs`(纯 Node 零依赖,
+  与 `check-frontend-lint.mjs` 同体例:基线常量 + ratchet 只降不升 + `--verbose`)。
+  断言四件事:① `web/dist/index.html` 的 modulepreload **不含** `modal-*`
+  (2026-09-17 P-8 的固化护栏:弹窗一旦被首屏静态引用即等于懒加载失效);
+  ② 首屏集合(entry + 预载 js/css)的 **gzip 总量**;③ 各 chunk gzip 体积(按去哈希名索引,
+  哈希会变);④ 全部资产 gzip 总量。按 **gzip** 判定(收益口径贴近用户传输量),
+  `--verbose` 同时打印 raw。
+  **fail-closed**:`web/dist` 或 `index.html` 缺失即 FAIL,产物不在不等于通过。
+  超预算时**先确认增长是否有正当理由**:有则上调预算到实测值 + 10%,无则修代码。
+  已知局限:高度可压缩的增长(如重复字节填充)在 gzip 下几乎不涨,可能逃过判定。
 - **代际归属与跨代依赖门禁(规则 I/J,2026-09-14 起)**:`tools/check-arch.mjs` 新增两条护栏,
   其唯一机器可读事实源(SSOT)是 **`tools/arch-layers.json`**——
   - **规则 I(代际归属完整性)**:`server-rs/src` 的每个顶层模块/根文件、`web/src` 的每个顶层目录/根文件
@@ -146,8 +159,8 @@ kedai/
 | 兼容别名 | `npm run build:all` / `npm run build:rs` | 均等价 `.\build.ps1`(双端同步);`npm run build:test` 等价 `.\build.ps1 -TestOnly` |
 | 统一改版本号 | `npm run version:bump -- x.y.z` | 7 处版本号一次改全(2 个 package.json、3 个 Cargo.toml、tauri.conf.json、本文档版本行);支持 `-DryRun` 预览 |
 | 后端测试 | `cd server-rs && cargo test` | **1169 个测试(941 单测 + 228 集成,23 个集成文件)**,**需在 vcvars64 环境**;前端 `npm test -w web` **878 个(91 文件;静态计数;vitest 运行时为 896,差值 18 来自 `parser.contract.test.ts` 循环生成的 fixture 用例)**。数字由 `node tools/count-tests.mjs` 自动统计,勿手抄——`npm run count:tests` 查看当前值,`npm run check:tests` 校验文档是否漂移 |
-| 全量检查(本地 CI) | `npm run check` | `tools/check-all.ps1`:fmt → clippy → cargo test → cargo audit(**硬门禁**)→ lock-sync(双锁漂移)→ contract → arch(C/D/E 分层)→ 类型 ratchet → npm audit(警告)→ vue-tsc(**硬门禁**)→ vitest → vite build。**已接入 build.ps1 与 pre-push hook**(CI 工作流为纸面、未运行,见 §0 门禁纪律)。
-`check-arch` 规则自 2026-09-14 起含 C/D/E/G/H/I/J(代际归属与跨代方向以 `tools/arch-layers.json` 为 SSOT) |
+| 全量检查(本地 CI) | `npm run check` | `tools/check-all.ps1`:fmt → clippy → cargo test → cargo audit(**硬门禁**)→ lock-sync(双锁漂移)→ contract → arch(C/D/E 分层)→ 类型 ratchet → npm audit(**硬门禁**)→ vue-tsc(**硬门禁**)→ vitest → vite build → bundle budget(体积预算)。**已接入 build.ps1 与 pre-push hook**(CI 工作流为纸面、未运行,见 §0 门禁纪律)。
+`check-arch` 规则自 2026-09-14 起含 C/D/E/G/H/I/J(代际归属与跨代方向以 `tools/arch-layers.json` 为 SSOT);`check-bundle` 自 2026-09-17 起(基线在脚本内,ratchet 只降不升) |
 | 开发模式 | `cd server-rs && cargo run` + `npm run dev -w web` | 后端 3001 / 前端 5173(代理到 3001) |
 | 前端构建 | `npm run build -w web` | 产出 web/dist(编译进 exe 用) |
 

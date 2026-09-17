@@ -245,6 +245,10 @@ if (-not $SkipWeb -and -not $AuditOnly) {
         Invoke-Stage 'web: vitest run'          { npm test -w web }
         if (-not $Quick) {
             Invoke-Stage 'web: vite build'      { npm run build -w web }
+            # 体积预算门禁(2026-09-17 P-12 新增):断言首屏 gzip 总量、各 chunk gzip 体积、
+            # 以及「首屏不得预载 modal-* 弹窗 chunk」(P-8 的固化护栏)。构建成功 ≠ 体积没退化,
+            # 故必须紧跟 build 后跑;fail-closed(web/dist 缺失即 FAIL)。基线与 ratchet 纪律见脚本头。
+            Invoke-Stage 'web: bundle budget'   { node tools/check-bundle.mjs }
         }
     } finally { Pop-Location }
 }
@@ -259,6 +263,14 @@ if ($Perf) {
     Invoke-Stage 'perf: p95 gate' {
         node tools/perf-baseline.mjs --base $PerfBase --max-p95-factor $PerfFactor
     }
+} else {
+    # 2026-09-17 P-12:跳过必须**显式可见**。此前该门禁默认关闭且无任何提示,
+    # 收尾只打印「全部通过」,容易被误读为「性能门禁也过了」。
+    # 语义不变(-Perf 仍默认关闭,因为它依赖外部服务在跑),只是把跳过这件事说出来。
+    Write-Host "`n===== 性能门禁:未运行 =====" -ForegroundColor DarkYellow
+    Write-Host "  该门禁需要 Kedai 服务已在 $PerfBase 运行,故默认关闭(不做自动探活降级)。" -ForegroundColor DarkYellow
+    Write-Host "  需测量时:启动服务后跑  powershell -File tools/check-all.ps1 -Perf" -ForegroundColor DarkYellow
+    Write-Host "  基线值见 tools/perf-baseline.json;本次未测 ≠ 性能已通过。" -ForegroundColor DarkYellow
 }
 
 Write-Host "`n===== 全部通过 =====" -ForegroundColor Green
