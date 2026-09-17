@@ -46,7 +46,8 @@ pub async fn save(
     let result = state
         .db_call(move || {
             let mut svc = executors.lock().unwrap_or_else(|e| e.into_inner());
-            svc.save(body.config).map(|saved| (saved, svc.list().to_vec()))
+            svc.save(body.config)
+                .map(|saved| (saved, svc.list().to_vec()))
         })
         .await;
     match result {

@@ -104,7 +104,11 @@ impl TaskService {
         // 世界书过滤口径与身份来源一致:执行者库路径只取全局(传 None,
         // 执行者与角色卡无关联关系),角色卡路径按该角色过滤(旧语义:原样传 character_id,
         // 即使该角色已被删除也与改造前一致);无身份时也是全局
-        let world_char_id = if executor.is_some() { None } else { character_id };
+        let world_char_id = if executor.is_some() {
+            None
+        } else {
+            character_id
+        };
         let world = self.world_context(world_char_id);
         if !world.is_empty() {
             sys.push_str(&format!(

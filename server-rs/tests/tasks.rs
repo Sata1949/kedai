@@ -3293,13 +3293,7 @@ async fn executor_library_crud_roundtrip() {
     );
 
     // 删除不存在的执行者 → 400(与 agent-flows 同款校验语义)
-    let (status, _) = send_json(
-        app,
-        "DELETE",
-        "/api/task-executors/not-exist-id",
-        json!({}),
-    )
-    .await;
+    let (status, _) = send_json(app, "DELETE", "/api/task-executors/not-exist-id", json!({})).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "删除不存在的执行者应 400");
 }
 
@@ -3309,8 +3303,12 @@ async fn executor_library_crud_roundtrip() {
 async fn task_executor_replaces_character_persona() {
     let app = test_app();
     let cid = upload_persona_marked_character(app).await;
-    let executor_id =
-        create_executor(app, "EXEC-SEP-执行者", "EXECUTOR-INSTRUCTION-MARK 你的职责是核对数据").await;
+    let executor_id = create_executor(
+        app,
+        "EXEC-SEP-执行者",
+        "EXECUTOR-INSTRUCTION-MARK 你的职责是核对数据",
+    )
+    .await;
 
     // ① 只绑执行者:注入执行者指令,不含角色卡任何人设标记
     let (status, json) = send_json(
@@ -3392,7 +3390,11 @@ async fn unknown_executor_id_is_dropped_and_task_still_runs() {
         json!({ "title": "[[floors]]", "task_mode": "solo", "executor_id": "no-such-executor" }),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED, "未知执行者不应阻断创建: {json}");
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "未知执行者不应阻断创建: {json}"
+    );
     assert!(
         json["task"]["executor_id"].is_null(),
         "未知执行者应被丢弃为空: {json}"
@@ -3447,7 +3449,8 @@ async fn approve_without_exec_mode_keeps_approved_plan_executor() {
     let app = test_app();
     let id = planned_task(app, plan_title_two_steps()).await;
 
-    let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/approve"), json!({})).await;
+    let (status, json) =
+        send_json(app, "POST", &format!("/api/tasks/{id}/approve"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "缺省批准应 200: {json}");
     let (st, detail) = wait_terminal(app, &id).await;
     assert_eq!(st, "done", "缺省批准后应完成: {detail}");
@@ -3568,9 +3571,16 @@ async fn approve_with_unknown_exec_mode_is_rejected() {
             json!({ "exec_mode": bad }),
         )
         .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "exec_mode={bad} 应 400: {json}");
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "exec_mode={bad} 应 400: {json}"
+        );
         assert!(
-            json["error"].as_str().unwrap_or("").contains("approved_plan"),
+            json["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("approved_plan"),
             "错误文案应列出可选值(exec_mode={bad}): {json}"
         );
     }

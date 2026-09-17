@@ -2,7 +2,9 @@
 use crate::api::app_state::AppState;
 use crate::api::json_body::JsonBody;
 use crate::api::{db_err, err_with_code, not_found, validation, ErrorCode, WithStatus};
-use crate::models::types::{TaskApproveExecMode, TaskFollowupMode, TaskRunMode, TaskStatus, TaskStep};
+use crate::models::types::{
+    TaskApproveExecMode, TaskFollowupMode, TaskRunMode, TaskStatus, TaskStep,
+};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::sse::Event;
@@ -213,7 +215,10 @@ pub async fn approve(
         },
     };
     let svc = state.tasks.clone();
-    match state.db_call(move || svc.approve(&id, body.plan, exec_mode)).await {
+    match state
+        .db_call(move || svc.approve(&id, body.plan, exec_mode))
+        .await
+    {
         Err(e) => db_err(&e),
         Ok(Ok(())) => Json(json!({ "ok": true })).into_response(),
         Ok(Err(e)) => validation(e),

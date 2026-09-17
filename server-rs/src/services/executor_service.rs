@@ -26,7 +26,10 @@ pub struct ExecutorService {
 impl ExecutorService {
     pub fn new(data_dir: PathBuf) -> Self {
         let executors = load_library(&data_dir);
-        ExecutorService { data_dir, executors }
+        ExecutorService {
+            data_dir,
+            executors,
+        }
     }
 
     /// 全部执行者(按数组顺序;列表展示用)
@@ -189,7 +192,9 @@ mod tests {
     fn save_assigns_id_and_persists() {
         let dir = TempDataDir::new("executor-save");
         let mut svc = ExecutorService::new(dir.path().to_path_buf());
-        let saved = svc.save(executor("审稿员", "你是严苛的审稿人,逐条指出问题")).unwrap();
+        let saved = svc
+            .save(executor("审稿员", "你是严苛的审稿人,逐条指出问题"))
+            .unwrap();
         assert!(!saved.id.is_empty(), "空 id 应自动分配");
         assert_eq!(svc.list().len(), 1);
 
@@ -214,7 +219,8 @@ mod tests {
         assert_eq!(svc.list().len(), 1, "同 id 应就地更新而非追加");
         assert_eq!(svc.list()[0].name, "A2");
         assert_eq!(
-            svc.list()[0].created_at, created,
+            svc.list()[0].created_at,
+            created,
             "更新应保留创建时间(列表排序依据)"
         );
     }

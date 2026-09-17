@@ -66,7 +66,8 @@ pub fn sanitize_filename(raw: &str) -> Result<String, String> {
             .rsplit_once('.')
             .map(|(_, e)| e.to_string())
             .filter(|e| e.chars().count() <= 10);
-        let stem_len = FILENAME_MAX_CHARS - ext.as_ref().map(|e| e.chars().count() + 1).unwrap_or(0);
+        let stem_len =
+            FILENAME_MAX_CHARS - ext.as_ref().map(|e| e.chars().count() + 1).unwrap_or(0);
         let stem: String = cleaned.chars().take(stem_len).collect();
         return Ok(match ext {
             Some(e) => format!("{stem}.{e}"),

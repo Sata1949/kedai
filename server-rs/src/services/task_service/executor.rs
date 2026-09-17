@@ -58,14 +58,15 @@ impl TaskService {
         // 自定义流程模式依赖「已启用流程」:提前拒绝,避免批准后任务直接进 error
         //(custom 执行器在 run_inner 首行就取 current_flow,取不到即整体失败)。
         // 校验口径与 TaskFlowAccess::current_flow 一致(取当前流程 + enabled 判定)。
-        if matches!(
-            exec_mode,
-            crate::models::types::TaskApproveExecMode::Custom
-        ) {
+        if matches!(exec_mode, crate::models::types::TaskApproveExecMode::Custom) {
             let flow = self.agent_flow();
             let guard = flow.lock().unwrap_or_else(|e| e.into_inner());
             match guard.get() {
-                None => return Err("选择自定义流程执行前需先配置流程:请先在设置中启用一个 Agent 流程".into()),
+                None => {
+                    return Err(
+                        "选择自定义流程执行前需先配置流程:请先在设置中启用一个 Agent 流程".into(),
+                    )
+                }
                 Some(cfg) if !cfg.enabled => {
                     return Err(
                         "选择自定义流程执行前需先配置流程:当前 Agent 流程未启用,请在设置中开启后再试".into(),
