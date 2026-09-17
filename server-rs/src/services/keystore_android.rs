@@ -16,17 +16,14 @@
 //! 包运行时查找失败。双保险:`@Keep` 注解 + proguard-rules.pro 整类 keep。
 #![cfg(target_os = "android")]
 
-use super::jni_bridge::call_string_static;
-
-/// KeystoreBridge 的全限定类名(JNI 用 `/` 分隔)
-const BRIDGE_CLASS: &str = "com/kedai/app/KeystoreBridge";
+use super::jni_bridge::{call_string_static, KEYSTORE_CLASS};
 
 /// 加密明文,返回 base64(IV 长度 + IV + GCM 密文)。空串由调用方短路,不入此函数。
 pub fn encrypt(plain: &str) -> Result<String, String> {
-    call_string_static(BRIDGE_CLASS, "encrypt", plain)
+    call_string_static(KEYSTORE_CLASS, "encrypt", plain)
 }
 
 /// 解密 base64 密文。失败返回 Err(调用方按「未配置」处理,切勿把密文当 Key 使用)。
 pub fn decrypt(encoded: &str) -> Result<String, String> {
-    call_string_static(BRIDGE_CLASS, "decrypt", encoded)
+    call_string_static(KEYSTORE_CLASS, "decrypt", encoded)
 }

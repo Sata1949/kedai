@@ -9,10 +9,7 @@
 //! 说明:入参统一编码为 `name\u{1f}content`(单元分隔符),避免额外 JNI 签名重载。
 #![cfg(target_os = "android")]
 
-use super::jni_bridge::call_string_static;
-
-/// KedaiNative 的全限定类名(JNI 用 `/` 分隔)
-const NATIVE_CLASS: &str = "com/kedai/app/KedaiNative";
+use super::jni_bridge::{call_string_static, NATIVE_CLASS};
 
 /// 字段分隔符(US,单元分隔符):Kotlin 侧按此拆分双字段入参
 const SEP: char = '\u{1f}';

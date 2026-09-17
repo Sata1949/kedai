@@ -22,6 +22,11 @@
  *      没有代际归属的模块无从按分层纪律评审,是分层叙事的静默失效点。
  *   J. 跨代依赖方向 —— 按 arch-layers.json 的 L1/L2/L3 归属与允许方向校验实测 import 图。
  *      新增越代边 FAIL;存量越代边须在 registeredEdges 中登记(只报债务不阻塞,可还债不可增债)。
+ *   L. JNI 按名调用桥类的登记完整性 —— `call_string_static` 用到的类必须登记在
+ *      `jni_bridge.rs` 的 `BRIDGE_CLASSES`(未登记则 JNI_OnLoad 期不缓存,调用必失败),
+ *      且登记项须有对应 Kotlin 源与被调用方法、须有 proguard 整类 keep。
+ *      2026-09-17 实测:ShellExecutorBridge 漏登记致 Android 命令执行永久不可用。
+ *      相关文件均 `cfg(target_os = "android")`,Rust 单测在 Windows 上不编译,故只能本脚本守。
  *
  * 用法:
  *   node tools/check-arch.mjs
@@ -558,6 +563,154 @@ const backendWarnings = [];
   }
 }
 
+// --- 规则 L:JNI 按名调用桥类的登记完整性(2026-09-17 起) ---
+//
+// 背景(2026-09-17 实测):Android 端 bash 工具**永久不可用**——`exec/android.rs` 经
+// `call_string_static(EXEC_CLASS, ...)` 调用 `com/kedai/app/ShellExecutorBridge`,但
+// `jni_bridge.rs` 的 `BRIDGE_CLASSES` 只登记了 KeystoreBridge / KedaiNative,漏了它。
+// `call_string_static` 只从这张预缓存表取类引用(JNI 类加载器约束,见 jni_bridge.rs 文档),
+// 取不到即报「类引用未缓存」→ `detect_tier()` 恒回退 Disabled → 三档执行器全部不可用,
+// 且**错误文案指向设置项**,把排查引向「用户没开开关」而非「代码漏登记」。
+//
+// 为何不能用 Rust 单测守:相关文件全部 `#![cfg(target_os = "android")]`,Windows 上
+// **不参与编译**,单测写了也不会跑;只有本脚本(源文本扫描)能在日常门禁里跨平台生效。
+//
+// 三条不变量(缺一即故障,历史均已各自踩过坑):
+//   ① 调用方 → 注册表:凡 `call_string_static(<CONST>)` 用到的类必须在 `BRIDGE_CLASSES` 中
+//      (本轮实测的漏登记 bug;当年 KeystoreBridge 走的就是这条);
+//   ② 注册表 → Kotlin 源:类名必须有同名 `.kt`(防类名笔误,编译期不报、运行期必炸);
+//   ③ 注册表 → proguard:必须有整类 keep 规则(否则 release 下 R8 改名,只有正式包暴露)。
+{
+  const jniBridgePath = join(SERVER, 'services', 'jni_bridge.rs');
+  const kotlinDir = join(ROOT, 'src-tauri', 'gen', 'android', 'app', 'src', 'main', 'java', 'com', 'kedai', 'app');
+  const proguardPath = join(ROOT, 'src-tauri', 'gen', 'android', 'app', 'proguard-rules.pro');
+  const CLASS_PREFIX = 'com/kedai/app/';
+
+  const rsFiles = collect(SERVER, ['.rs']);
+  const bridgeSrc = rsFiles.includes(jniBridgePath) ? readFileSync(jniBridgePath, 'utf8') : '';
+
+  // 收集全仓 `const NAME: &str = "com/kedai/app/X";`(类名常量的单一出处)
+  const classConsts = new Map(); // NAME -> 类名
+  const constSites = new Map(); // NAME -> "相对路径:行号"
+  for (const f of rsFiles) {
+    const src = readFileSync(f, 'utf8');
+    src.split('\n').forEach((line, i) => {
+      const m = line.match(/const\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*&str\s*=\s*"([^"]+)"/);
+      if (!m) return;
+      if (!m[2].startsWith(CLASS_PREFIX)) return;
+      classConsts.set(m[1], m[2]);
+      constSites.set(m[1], `${relative(ROOT, f)}:${i + 1}`);
+    });
+  }
+
+  // 解析 BRIDGE_CLASSES 列表(条目可为字符串字面量或常量名,两者都支持)
+  let registered = [];
+  const blockMatch = bridgeSrc.match(/const\s+BRIDGE_CLASSES\s*:\s*&\[&str\]\s*=\s*&\[([\s\S]*?)\]/);
+  if (!blockMatch) {
+    backendFailures.push(
+      '[L] 未能在 server-rs/src/services/jni_bridge.rs 解析出 BRIDGE_CLASSES 列表;' +
+        '该常量是 JNI 类缓存的唯一登记处,解析不到即本规则失效(形态变更请同步本规则)',
+    );
+  } else {
+    for (const raw of blockMatch[1].split(',')) {
+      const entry = raw.replace(/\/\/[^\n]*/, '').trim();
+      if (!entry) continue;
+      const lit = entry.match(/^"([^"]+)"$/);
+      if (lit) {
+        registered.push({ name: lit[1], from: '字面量' });
+        continue;
+      }
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(entry)) continue;
+      const resolved = classConsts.get(entry);
+      if (!resolved) {
+        backendFailures.push(
+          `[L] BRIDGE_CLASSES 条目 \`${entry}\` 无法解析为 com/kedai/app/* 类名常量;` +
+            `请确认该常量已声明(${relative(ROOT, jniBridgePath)})`,
+        );
+        continue;
+      }
+      registered.push({ name: resolved, from: entry });
+    }
+  }
+  const registeredNames = new Set(registered.map((r) => r.name));
+
+  // 不变量①:调用方 → 注册表
+  let callSites = 0;
+  const methodCalls = []; // { cls, method, site }
+  for (const f of rsFiles) {
+    if (f === jniBridgePath) continue; // 定义处豁免
+    const src = readFileSync(f, 'utf8');
+    src.split('\n').forEach((line, i) => {
+      if (/^\s*\/\//.test(line)) return;
+      const m = line.match(/call_string_static\(\s*("([^"]+)"|[A-Za-z_][A-Za-z0-9_]*)/);
+      if (!m) return;
+      const site = `${relative(ROOT, f)}:${i + 1}`;
+      const cls = m[2] ? m[2] : classConsts.get(m[1]);
+      if (!cls) {
+        backendFailures.push(
+          `[L] call_string_static 的类名常量 \`${m[1]}\` 未找到 com/kedai/app/* 声明:${site}`,
+        );
+        return;
+      }
+      callSites++;
+      // 记录方法名,供不变量②的「方法存在」校验
+      const mm = line.match(/call_string_static\([^,]+,\s*"([^"]+)"/);
+      if (mm) methodCalls.push({ cls, method: mm[1], site });
+      if (!registeredNames.has(cls)) {
+        backendFailures.push(
+          `[L] JNI 桥类未登记在 BRIDGE_CLASSES:${cls}(调用点 ${site})——` +
+            `未登记的类在 JNI_OnLoad 期不会被缓存,调用必报「类引用未缓存」;` +
+            `请在 server-rs/src/services/jni_bridge.rs 的 BRIDGE_CLASSES 中登记`,
+        );
+      }
+    });
+  }
+
+  // 不变量②/③:注册表 → Kotlin 源 + proguard keep
+  const proguardSrc = readFileSync(proguardPath, 'utf8');
+  let kotlinOk = 0;
+  for (const { name } of registered) {
+    const simple = name.slice(CLASS_PREFIX.length);
+    const kt = join(kotlinDir, `${simple}.kt`);
+    if (!statSync(kt, { throwIfNoEntry: false })) {
+      backendFailures.push(
+        `[L] BRIDGE_CLASSES 登记的类无对应 Kotlin 源:${name}` +
+          `(期望 ${relative(ROOT, kt)};类名笔误在编译期不报错、运行期必炸)`,
+      );
+    } else {
+      kotlinOk++;
+      // 方法名存在性:被按名调用的方法若在 .kt 中完全没有同名 fun,几乎必是拼写漂移
+      for (const mc of methodCalls) {
+        if (mc.cls !== name) continue;
+        const ktSrc = readFileSync(kt, 'utf8');
+        if (!new RegExp(`fun\\s+${mc.method}\\s*\\(`).test(ktSrc)) {
+          backendFailures.push(
+            `[L] Kotlin 桥类缺被调用方法:${name}.${mc.method}(调用点 ${mc.site};` +
+              `JNI 按名查找,方法名不一致即运行期失败)`,
+          );
+        }
+      }
+    }
+    const keepRe = new RegExp(
+      `-keep\\s+class\\s+${name.replace(/[/]/g, '.')}\\s*\\{\\s*\\*;\\s*\\}`,
+    );
+    if (!keepRe.test(proguardSrc)) {
+      backendFailures.push(
+        `[L] JNI 桥类缺 proguard 整类 keep 规则:${name}` +
+          `(应在 src-tauri/gen/android/app/proguard-rules.pro 加 \`-keep class ${name.replace(/[/]/g, '.')} { *; }\`;` +
+          `逐成员签名写法不可靠,release 下 R8 会改方法名)`,
+      );
+    }
+  }
+
+  if (VERBOSE) {
+    console.log(
+      `  [L] JNI 桥类:调用点 ${callSites} 处,登记 ${registered.length} 个,` +
+        `Kotlin 源命中 ${kotlinOk} 个`,
+    );
+  }
+}
+
 // ========== 三结合代际归属与依赖方向(规则 I / J) ==========
 //
 // 单一事实源:`tools/arch-layers.json`(代际定义、模块归属、允许方向、已知偏离登记)。
@@ -810,7 +963,7 @@ const backendWarnings = [];
 // 使前端报告段永不输出——前端规则 J 的结论被静默吞掉。现将两者的报告与退出
 // 统一到本段末尾:任一侧非空即 exit(1),门禁强度不变,可见性恢复。
 
-console.log('\n========== Kedai 后端分层与冻结护栏(C/D/E/G/H/I/J/K) ==========');
+console.log('\n========== Kedai 后端分层与冻结护栏(C/D/E/G/H/I/J/K/L) ==========');
 if (backendFailures.length) {
   console.log(`[FAIL] ${backendFailures.length} 处分层违规(全部规则均为硬门禁):`);
   for (const f of backendFailures.slice(0, 40)) console.log(`  - ${f}`);

@@ -12,10 +12,7 @@
 #![cfg(target_os = "android")]
 
 use super::{truncate_output, ExecRequest, ExecResult, ShellTier};
-use crate::services::jni_bridge::call_string_static;
-
-/// Kotlin 桥类全限定名(JNI 用 `/` 分隔)
-const EXEC_CLASS: &str = "com/kedai/app/ShellExecutorBridge";
+use crate::services::jni_bridge::{call_string_static, EXEC_CLASS};
 
 /// 单元分隔符(US):与 Kotlin 侧 SEP 一致
 const SEP: char = '\u{1f}';

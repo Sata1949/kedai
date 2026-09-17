@@ -23,8 +23,23 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::{Mutex, OnceLock};
 
-/// 需要按名调用的桥接类(Kotlin object,静态方法入参/出参均为 String)
-const BRIDGE_CLASSES: &[&str] = &["com/kedai/app/KeystoreBridge", "com/kedai/app/KedaiNative"];
+/// 需要按名调用的桥接类(Kotlin object,静态方法入参/出参均为 String)。
+///
+/// **类名常量的单一出处**:调用方(`keystore_android` / `native_bridge_android` /
+/// `exec/android`)一律 `use` 本处的常量,`BRIDGE_CLASSES` 亦由同一批常量组装——
+/// 「给类起名」与「登记缓存」因此是同一个动作,新增桥类时不可能只做一半。
+///
+/// 历史教训(2026-09-17 实测):`ShellExecutorBridge` 曾被漏登记,后果是 Android 端
+/// 命令执行档位恒为 `disabled`(JNI 取不到类引用 → 探测失败 → 回退禁用),
+/// bash 工具在 Android 上**永久不可用**,而错误文案指向「设置里没开开关」,
+/// 把排查引向用户配置而非代码。现由 `tools/check-arch.mjs` 规则 L 三重锁定:
+/// 调用方↔注册表、注册表↔Kotlin 源(含方法名)、注册表↔proguard keep。
+pub const KEYSTORE_CLASS: &str = "com/kedai/app/KeystoreBridge";
+pub const NATIVE_CLASS: &str = "com/kedai/app/KedaiNative";
+pub const EXEC_CLASS: &str = "com/kedai/app/ShellExecutorBridge";
+
+/// 全部桥接类(组装自上方常量,勿另起字面量)
+const BRIDGE_CLASSES: &[&str] = &[KEYSTORE_CLASS, NATIVE_CLASS, EXEC_CLASS];
 
 /// 桥接方法签名:入参 String,返回 String
 const BRIDGE_SIG: &str = "(Ljava/lang/String;)Ljava/lang/String;";
@@ -92,9 +107,15 @@ pub fn call_string_static(
     // 先取全局引用再 attach:避免持锁跨 JNI 调用
     let global = {
         let map = bridges().lock().unwrap();
-        map.get(class)
-            .cloned()
-            .ok_or_else(|| format!("{class} 类引用未缓存"))?
+        map.get(class).cloned().ok_or_else(|| {
+            // 该类的类引用只在 JNI_OnLoad 期缓存,故「不在表里」等价于「永远取不到」。
+            // 历史案例:ShellExecutorBridge 漏登记致 Android 命令执行恒 disabled,
+            // 而调用方错误文案指向设置项——此处必须把真因说清楚,别让排查走偏。
+            format!(
+                "{class} 类引用未缓存:该类未登记在 services/jni_bridge.rs 的 BRIDGE_CLASSES\
+                 (JNI 类引用仅在 JNI_OnLoad 期缓存,未登记者永远取不到)"
+            )
+        })?
     };
 
     let mut env = vm
