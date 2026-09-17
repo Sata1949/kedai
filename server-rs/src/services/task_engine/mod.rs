@@ -114,6 +114,7 @@ impl TaskEngine {
     ///     作整体上下文自行组织执行。其中 **team/custom 会用自己的规划/流程重写
     ///     tasks.plan**——这是模式语义(team 自己分工、custom 按流程库执行),
     ///     已批准计划不丢失,仍在 goal 里作为权威上下文下发。
+    ///
     /// goal 为「目标 + 已批准计划」组合文本。
     pub(crate) fn run_approved(
         self: &Arc<Self>,

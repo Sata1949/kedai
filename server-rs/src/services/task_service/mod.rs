@@ -151,6 +151,7 @@ impl TaskService {
     ///   - `executor_id`:独立执行者库 id(前端唯一的绑定入口);
     ///   - `character_id`:**兼容入参**,保留给旧客户端与旧任务语义——前端已不再发送,
     ///     但 API 层面继续接受,避免破坏既有客户端与 R3a(task_persona_full)契约。
+    ///
     /// 两者同时给出时执行期以 executor_id 为准(见 prompt.rs 的分支顺序)。
     pub fn create(
         &self,
