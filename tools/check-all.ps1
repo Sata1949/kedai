@@ -105,8 +105,11 @@ if (-not $SkipRust -and -not $AuditOnly) {
             Clear-KedaiLockedServerArtifacts -TargetDir $serverTargetDir
             Invoke-Stage 'cargo fmt --check'        { cargo fmt --check }
             Invoke-Stage 'cargo clippy'             { cargo clippy --all-targets @cargoTargetArgs -- -D warnings }
-            # -j 2:本机并行链接曾撞 LNK1318/os error 1455(页面文件不足),限并发换稳定
-            Invoke-Stage 'cargo test --workspace'   { cargo test --workspace -j 2 @cargoTargetArgs }
+            # -j 8:2026-09-17 P-13 实测后由 -j 2 放宽。历史故障(全并行链接撞 os error 1455
+            # 页面文件不足 / rustc 自身 STATUS_STACK_BUFFER_OVERRUN)本次**未能复现**:
+            # 冷 target 全并行(16 jobs)与 -j 4/6/8 五轮均 1157 passed / 0 failed。
+            # 取 8 而非不限制,是为与 build.ps1 等重活并发时留内存余量(详见 docs/经验.md 条目 29)。
+            Invoke-Stage 'cargo test --workspace'   { cargo test --workspace -j 8 @cargoTargetArgs }
             # cargo audit 已迁出本块,升级为下方独立「审计段」:不再受 -SkipRust 影响,
             # 并覆盖 server-rs + src-tauri 两把锁。
         } finally { Pop-Location }

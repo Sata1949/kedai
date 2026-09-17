@@ -27,13 +27,13 @@
 ## 验证命令
 
 ```powershell
-cargo test --manifest-path server-rs/Cargo.toml -j 2
+cargo test --manifest-path server-rs/Cargo.toml -j 8
 npm test -w web
 npm run build -w web
 cargo build --manifest-path server-rs/Cargo.toml
 ```
 
-- **`cargo test` 必须带 `-j 2`**:本机默认并行度下 rustc 自身可能崩溃(`STATUS_STACK_BUFFER_OVERRUN`),报错却伪装成「依赖 rlib 缺失」,照它改依赖只会越改越偏;先降并发复跑(详见 `MAINTENANCE.md` §10 条目 29)。
+- **`cargo test` 统一带 `-j 8`**:本机历史上默认并行度下 rustc 自身可能崩溃(`STATUS_STACK_BUFFER_OVERRUN`),报错却伪装成「依赖 rlib 缺失」,照它改依赖只会越改越偏;遇到该形态先降并发复跑,不要改依赖(详见 `docs/经验.md` 条目 29)。**2026-09-17 P-13 实测**:冷 target 全并行(16 jobs)与 `-j 4/6/8` 五轮均 1157 passed / 0 failed,历史故障**未复现**,故上限由 2 放宽到 8(取 8 而非不限制,是为与 `build.ps1` 等重活并发时留内存余量);矩阵与依据见 `docs/经验.md` 条目 29。
 
 ## 构建提醒(后续模型必读)
 
@@ -55,7 +55,7 @@ cargo build --manifest-path server-rs/Cargo.toml
   按主题分多次提交(必要时用 `git add <path>` 逐个指定),不要一把 `git add -A` 了事。
 - **不提交**:构建产物与其 sidecar(`dist/`、`target/`、`Kedai.exe`、`*.lnk` 等,`.gitignore` 已覆盖)、
   用户数据(`data/`)、密钥(`.env`)、开发 agent 的会话目录(`.zcode/`)。
-- **提交前的最低验证**:改了后端跑 `cargo test --manifest-path server-rs/Cargo.toml -j 2`;
+- **提交前的最低验证**:改了后端跑 `cargo test --manifest-path server-rs/Cargo.toml -j 8`;
   改了前端跑 `npm test -w web`;只改文档可跳过测试,但仍要跑 `node tools/check-arch.mjs` 与
   `node tools/count-tests.mjs --check` 确认门禁不漂移。
 - **分支**:主干 `main` + 平台分支 `kedai-Win` / `kedai-Android`(模型见 `docs/契约-协议与配置.md`)。
