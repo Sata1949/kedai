@@ -10,7 +10,7 @@
 //     `vue-tsc` 直接报错(把「漏改」从运行期静默变成编译期失败)。
 //   - MESSAGE_KIND_LABELS 的键来自后端 task_messages.kind,非联合类型,故用
 //     `Record<string, string>` 并保留「未登记返回空」的既有语义。
-import type { TaskRunMode } from './types';
+import type { TaskApproveExecMode, TaskRunMode } from './types';
 
 /** 模式 → 短标签(任务卡头部展示)。穷尽校验:漏配模式编译期报错。 */
 export const MODE_LABELS = {
@@ -34,6 +34,28 @@ export const MODE_OPTION_LABELS = {
 
 /** 下拉展示顺序(与后端 TaskRunMode 定义顺序一致,便于对照) */
 export const MODE_ORDER: TaskRunMode[] = ['legacy', 'solo', 'multi', 'plan', 'team', 'custom'];
+
+/**
+ * plan 批准时的执行方式 → 下拉文案(2026-09-17)。
+ * 穷尽校验同上:后端新增可选值而此处漏配,`vue-tsc` 直接报错。
+ * 顺序 = 下拉展示顺序:默认项(按计划逐步执行)在最前。
+ */
+export const APPROVE_EXEC_MODE_LABELS = {
+  approved_plan: '按计划逐步执行(默认)',
+  solo: '单 Agent 整体执行',
+  multi: '多 Agent 执行',
+  team: '团队协作执行',
+  custom: '自定义流程执行',
+} satisfies Record<TaskApproveExecMode, string>;
+
+/** 批准下拉展示顺序(默认项置顶) */
+export const APPROVE_EXEC_MODE_ORDER: TaskApproveExecMode[] = [
+  'approved_plan',
+  'solo',
+  'multi',
+  'team',
+  'custom',
+];
 
 /**
  * 任务消息种类 → 小标签。键为后端 `task_messages.kind`(字符串,非联合类型),

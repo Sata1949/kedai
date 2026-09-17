@@ -102,27 +102,46 @@ impl TaskEngine {
         self.spawn_run(task, executor, Some(goal), cancel, token);
     }
 
-    /// approve 续跑入口(plan 模式批准后):**只认已批准计划,与 task_mode 无关**——
-    /// 续跑语义是「按已批准计划执行」,若按 Plan 派发会再规划一遍回到 planned 死循环
-    ///(批次 4.3 回归)。plan 非空 → ApprovedPlanExecutor 逐步骤执行(每步独立
-    /// run_agent_loop + SUMMARIZER_PROMPT 汇总);plan 为空(防御兜底)→ SoloExecutor
-    /// 纯 goal 续跑。goal 为「目标 + 已批准计划」组合文本,作各步骤消息的整体上下文。
+    /// approve 续跑入口(plan 模式批准后):**只认已批准计划,不按 task_mode 派发**——
+    /// 续跑语义是「按已批准计划执行」,若按 Plan 派发会再规划一遍回到 planned
+    /// 死循环(批次 4.3 回归)。
+    ///
+    /// `exec_mode`(2026-09-17)是用户在批准界面选的**本次执行方式**,只作用于本轮续跑
+    /// (不改 tasks.task_mode,那记录的是任务当初怎么产出计划):
+    ///   - ApprovedPlan(默认)→ ApprovedPlanExecutor 逐步骤执行(每步独立
+    ///     run_agent_loop + SUMMARIZER_PROMPT 汇总),即改造前行为;
+    ///   - Solo/Multi/Team/Custom → 对应现有执行器,以 goal(目标 + 已批准计划)
+    ///     作整体上下文自行组织执行。其中 **team/custom 会用自己的规划/流程重写
+    ///     tasks.plan**——这是模式语义(team 自己分工、custom 按流程库执行),
+    ///     已批准计划不丢失,仍在 goal 里作为权威上下文下发。
+    /// goal 为「目标 + 已批准计划」组合文本。
     pub(crate) fn run_approved(
         self: &Arc<Self>,
         task: &TaskRecord,
         goal: String,
         plan: Vec<TaskStep>,
+        exec_mode: crate::models::types::TaskApproveExecMode,
         cancel: watch::Receiver<bool>,
         token: u64,
     ) {
-        let executor: Box<dyn ModeExecutor> = if plan.is_empty() {
-            Box::new(SoloExecutor::new(self.svc.clone(), self.engine.clone()))
-        } else {
-            Box::new(ApprovedPlanExecutor::new(
-                self.svc.clone(),
-                self.engine.clone(),
-                plan,
-            ))
+        use crate::models::types::TaskApproveExecMode as M;
+        let executor: Box<dyn ModeExecutor> = match exec_mode {
+            M::ApprovedPlan => {
+                if plan.is_empty() {
+                    // 防御兜底:无计划可逐步执行时退化为纯 goal 续跑(approve 已拒绝空计划)
+                    Box::new(SoloExecutor::new(self.svc.clone(), self.engine.clone()))
+                } else {
+                    Box::new(ApprovedPlanExecutor::new(
+                        self.svc.clone(),
+                        self.engine.clone(),
+                        plan,
+                    ))
+                }
+            }
+            M::Solo => Box::new(SoloExecutor::new(self.svc.clone(), self.engine.clone())),
+            M::Multi => Box::new(MultiExecutor::new(self.svc.clone(), self.engine.clone())),
+            M::Team => Box::new(TeamExecutor::new(self.svc.clone(), self.engine.clone())),
+            M::Custom => Box::new(CustomExecutor::new(self.svc.clone(), self.engine.clone())),
         };
         self.spawn_run(task, executor, Some(goal), cancel, token);
     }

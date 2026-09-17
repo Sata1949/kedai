@@ -5,7 +5,7 @@
 import { BASE, authorizedFetch, request } from './client';
 import { requireArrayField, requireObjectField } from './shape';
 import { pumpSseFrames, toApiError } from './stream';
-import type { TaskDetail, TaskEvent, TaskLlmCall, TaskRecord, TaskRunMode, TaskStep, TaskUsageTotal } from './types';
+import type { TaskApproveExecMode, TaskDetail, TaskEvent, TaskLlmCall, TaskRecord, TaskRunMode, TaskStep, TaskUsageTotal } from './types';
 
 /** 读取任务列表(最新在前) */
 export async function listTasks(): Promise<TaskRecord[]> {
@@ -62,12 +62,23 @@ export async function stopTask(id: string): Promise<void> {
 
 /**
  * 批准计划(plan 模式,批次 4):仅 status='planned' 时合法,否则后端 400;
- * 传入 plan 则替换计划,批准后按 solo 续跑。
+ * 传入 plan 则替换计划。
+ *
+ * `execMode`(2026-09-17)为**本次批准续跑的执行方式**,缺省 `approved_plan`
+ * (按计划逐步执行,即改造前行为);可选 solo/multi/team/custom。
+ * 它不改任务的 `task_mode`(仍为 plan,记录任务当初怎么产出计划)。
  */
-export async function approveTask(id: string, plan?: TaskStep[]): Promise<{ ok: boolean }> {
+export async function approveTask(
+  id: string,
+  plan?: TaskStep[],
+  execMode?: TaskApproveExecMode,
+): Promise<{ ok: boolean }> {
+  const body: Record<string, unknown> = {};
+  if (plan) body.plan = plan;
+  if (execMode) body.exec_mode = execMode;
   return request<{ ok: boolean }>(`/tasks/${id}/approve`, {
     method: 'POST',
-    body: JSON.stringify(plan ? { plan } : {}),
+    body: JSON.stringify(body),
   });
 }
 

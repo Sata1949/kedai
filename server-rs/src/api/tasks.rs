@@ -2,7 +2,7 @@
 use crate::api::app_state::AppState;
 use crate::api::json_body::JsonBody;
 use crate::api::{db_err, err_with_code, not_found, validation, ErrorCode, WithStatus};
-use crate::models::types::{TaskFollowupMode, TaskRunMode, TaskStatus, TaskStep};
+use crate::models::types::{TaskApproveExecMode, TaskFollowupMode, TaskRunMode, TaskStatus, TaskStep};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::sse::Event;
@@ -35,6 +35,11 @@ pub struct ApproveTaskBody {
     /// 可携修改后计划(整体替换 tasks.plan);None = 按已产出计划原样批准
     #[serde(default)]
     pub plan: Option<Vec<TaskStep>>,
+    /// 本次批准续跑的执行方式(2026-09-17):缺省 = approved_plan(按计划逐步执行,
+    /// 即改造前行为);可选 solo/multi/team/custom。未知值 400。
+    /// 不改 tasks.task_mode(仍为 plan,记录任务当初怎么产出计划)。
+    #[serde(default)]
+    pub exec_mode: Option<String>,
 }
 
 /// followup 追加指令请求体(批次 R2a):content 为追加指令原文。
@@ -188,14 +193,27 @@ pub async fn run(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> 
 
 /// POST /api/tasks/{id}/approve:批准计划(plan 模式特有)。
 /// 仅 planned 态合法(其余 400);body 可携修改后 plan(整体替换);
-/// 批准后任务以 solo 续跑(user 消息 = 目标 + 已批准计划)。
+/// `exec_mode` 决定续跑执行方式(缺省 approved_plan = 按计划逐步执行,即改造前行为)。
 pub async fn approve(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     JsonBody(body): JsonBody<ApproveTaskBody>,
 ) -> Response {
+    // 严格解析执行方式:未知值 400(与 create 的 task_mode 同款口径,
+    // 不用容错回退——批准是显式用户动作,静默回退会让用户以为选了别的模式)
+    let exec_mode = match body.exec_mode.as_deref() {
+        None => TaskApproveExecMode::ApprovedPlan,
+        Some(s) => match TaskApproveExecMode::from_str_strict(s) {
+            Some(m) => m,
+            None => {
+                return validation(format!(
+                    "未知执行方式:{s}(可选:approved_plan/solo/multi/team/custom)"
+                ));
+            }
+        },
+    };
     let svc = state.tasks.clone();
-    match state.db_call(move || svc.approve(&id, body.plan)).await {
+    match state.db_call(move || svc.approve(&id, body.plan, exec_mode)).await {
         Err(e) => db_err(&e),
         Ok(Ok(())) => Json(json!({ "ok": true })).into_response(),
         Ok(Err(e)) => validation(e),

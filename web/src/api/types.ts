@@ -768,6 +768,14 @@ export type TaskStatus = 'pending' | 'planning' | 'running' | 'planned' | 'done'
  *  legacy 三段式(默认) / solo 单主工具循环 / multi 多agent / plan 先规划后批准 / team 多主+审计 / custom 自定义流程 */
 export type TaskRunMode = 'legacy' | 'solo' | 'multi' | 'plan' | 'team' | 'custom';
 
+/**
+ * plan 模式**批准时**选择的执行方式(2026-09-17,对齐 server-rs TaskApproveExecMode)。
+ * 只作用于本次批准续跑,不改任务自身的 task_mode。
+ *
+ * 不含 legacy(自带规划会与已批准计划重复劳动)与 plan(会再规划回到 planned 死循环)。
+ */
+export type TaskApproveExecMode = 'approved_plan' | 'solo' | 'multi' | 'team' | 'custom';
+
 /** 任务记录 */
 export interface TaskRecord {
   id: string;

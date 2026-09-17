@@ -108,6 +108,79 @@ describe('TaskBoard 组件(M5 补测)', () => {
     }
   });
 
+  it('plan 批准区渲染执行方式下拉,默认「按计划逐步执行」(2026-09-17 新增)', () => {
+    const store = useAppStore();
+    store.currentTask = makeTaskDetail({
+      status: 'planned',
+      task_mode: 'plan',
+      plan: [{ name: '步骤一', goal: '目标一', status: 'pending', result: '' }],
+    });
+    const wrapper = mount(TaskBoard);
+
+    const select = wrapper.find('.sv-task-approve-exec select');
+    expect(select.exists(), '批准区应有执行方式下拉').toBe(true);
+    expect(select.text()).toContain('按计划逐步执行');
+    // 可选集:不含 legacy(重复规划)与 plan(死循环),这两个值不在下拉里
+    const options = select.findAll('option').map((o) => o.attributes('value'));
+    expect(options).toEqual(['approved_plan', 'solo', 'multi', 'team', 'custom']);
+    expect(options).not.toContain('legacy');
+    expect(options).not.toContain('plan');
+    // 默认选中默认项(改造前行为的等价物)
+    expect((select.element as HTMLSelectElement).value).toBe('approved_plan');
+    wrapper.unmount();
+  });
+
+  it('批准时把所选执行方式下发给 store(缺省 approved_plan)', async () => {
+    const store = useAppStore();
+    // currentTaskId 是组件的守门与任务 id 来源(仅设 currentTask 时 approveCurrent 会提前返回)
+    store.currentTaskId = 't1';
+    store.currentTask = makeTaskDetail({
+      status: 'planned',
+      task_mode: 'plan',
+      plan: [{ name: '步骤一', goal: '目标一', status: 'pending', result: '' }],
+    });
+    const spy = vi.spyOn(store, 'approveTask').mockResolvedValue(undefined);
+    const wrapper = mount(TaskBoard);
+
+    // 选团队协作后批准
+    await wrapper.find('.sv-task-approve-exec select').setValue('team');
+    const approveBtn = wrapper
+      .findAll('.sv-task-approve-actions button')
+      .find((b) => b.text().includes('批准执行'))!;
+    await approveBtn.trigger('click');
+    await Promise.resolve();
+
+    expect(spy).toHaveBeenCalledWith('t1', undefined, 'team');
+    wrapper.unmount();
+  });
+
+  it('切任务时执行方式复位为默认(不把上个任务的选择带过来)', async () => {
+    const store = useAppStore();
+    store.currentTask = makeTaskDetail({
+      id: 't1',
+      status: 'planned',
+      task_mode: 'plan',
+      plan: [{ name: '步骤一', goal: '目标一', status: 'pending', result: '' }],
+    });
+    const wrapper = mount(TaskBoard);
+    store.currentTaskId = 't1';
+    await wrapper.find('.sv-task-approve-exec select').setValue('solo');
+    expect((wrapper.find('.sv-task-approve-exec select').element as HTMLSelectElement).value).toBe('solo');
+
+    // 切到另一个任务(复位 watch 的触发源是 currentTaskId)
+    store.currentTaskId = 't2';
+    store.currentTask = makeTaskDetail({
+      id: 't2',
+      status: 'planned',
+      task_mode: 'plan',
+      plan: [{ name: '步骤一', goal: '目标一', status: 'pending', result: '' }],
+    });
+    await Promise.resolve();
+    await wrapper.vm.$nextTick();
+    expect((wrapper.find('.sv-task-approve-exec select').element as HTMLSelectElement).value).toBe('approved_plan');
+    wrapper.unmount();
+  });
+
   it('非运行态显示「执行」按钮,运行态显示「停止」(用户主操作入口)', async () => {
     const store = useAppStore();
     store.currentTask = makeTaskDetail({ status: 'pending' });

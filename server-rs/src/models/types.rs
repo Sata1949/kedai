@@ -755,6 +755,61 @@ fn task_default_run_mode() -> TaskRunMode {
     TaskRunMode::Legacy
 }
 
+/// plan 模式**批准时**选择的执行方式(2026-09-17)。
+///
+/// 背景:批准后固定走 ApprovedPlanExecutor 逐步骤执行,用户无法选择「用别的模式
+/// 消化这份计划」。本枚举即批准界面新增的选项,只作用于**本次批准续跑**,
+/// 不改 `tasks.task_mode`(仍为 plan——那记录的是「任务当初怎么产出的计划」)。
+///
+/// 可选值刻意排除两个:
+///   - `legacy`:自带规划阶段,会与已批准计划重复劳动;
+///   - `plan`:会再规划一遍回到 planned,**死循环**(批次 4.3 回归的根因)。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskApproveExecMode {
+    /// 按已批准计划逐步执行(默认;ApprovedPlanExecutor,每步独立 agent 调用 + 汇总)
+    ApprovedPlan,
+    /// 单主 agent 工具自循环:已批准计划作目标上下文整体执行
+    Solo,
+    /// 多 agent(agent_depth+1):已批准计划作目标上下文整体执行
+    Multi,
+    /// 团队协作:已批准计划作目标上下文,由团队自行规划分工与审计
+    Team,
+    /// 自定义流程:已批准计划作任务目标(需已启用流程,否则报错)
+    Custom,
+}
+
+impl TaskApproveExecMode {
+    /// 文本形态(与 serde 输出一致;日志用)
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ApprovedPlan => "approved_plan",
+            Self::Solo => "solo",
+            Self::Multi => "multi",
+            Self::Team => "team",
+            Self::Custom => "custom",
+        }
+    }
+
+    /// 严格解析(API 入参用):未知值返回 None,由调用方回 400。
+    /// 缺省(不传)由调用方映射为 ApprovedPlan——保证既有客户端行为不变。
+    pub fn from_str_strict(s: &str) -> Option<Self> {
+        match s {
+            "approved_plan" => Some(Self::ApprovedPlan),
+            "solo" => Some(Self::Solo),
+            "multi" => Some(Self::Multi),
+            "team" => Some(Self::Team),
+            "custom" => Some(Self::Custom),
+            _ => None,
+        }
+    }
+
+    /// 是否为「按计划逐步执行」(默认路径;非默认路径的计划将由该模式自行重写)
+    pub fn is_approved_plan(&self) -> bool {
+        matches!(self, Self::ApprovedPlan)
+    }
+}
+
 /// 终态追加指令的作用模式(批次 R2b+,2026-09-10 实跑修复 F5)。
 /// 序列化为 snake_case 文本;`append`(默认)为历史行为,`replace` 用新产出整体
 /// 替换原 result,支持「压缩 / 重写 / 改前面」这类 append 无法表达的指令。

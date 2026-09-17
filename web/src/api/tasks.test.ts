@@ -154,6 +154,30 @@ describe('api/tasks REST 封装', () => {
     expect(JSON.parse(String(approveCalls[1]?.[1]?.body))).toEqual({ plan });
   });
 
+  it('approveTask 的执行方式:不传时不下发 exec_mode(后端按默认逐步执行)', async () => {
+    await approveTask('t1', undefined, undefined);
+    const call = vi.mocked(fetch).mock.calls.find(
+      ([input, init]) => String(input) === '/api/tasks/t1/approve' && (init?.method ?? 'GET') === 'POST',
+    );
+    expect(JSON.parse(String(call?.[1]?.body))).not.toHaveProperty('exec_mode');
+  });
+
+  it('approveTask 的执行方式:传入时与 plan 一并下发(2026-09-17 批准界面可选模式)', async () => {
+    const plan: TaskStep[] = [{ name: '步骤一', goal: '目标一', status: 'pending', result: '' }];
+    await approveTask('t1', plan, 'team');
+    const call = vi.mocked(fetch).mock.calls.find(
+      ([input, init]) => String(input) === '/api/tasks/t1/approve' && (init?.method ?? 'GET') === 'POST',
+    );
+    expect(JSON.parse(String(call?.[1]?.body))).toEqual({ plan, exec_mode: 'team' });
+
+    // 不给 plan 只给执行方式(直接批准 + 换模式)
+    await approveTask('t1', undefined, 'solo');
+    const calls = vi.mocked(fetch).mock.calls.filter(
+      ([input, init]) => String(input) === '/api/tasks/t1/approve' && (init?.method ?? 'GET') === 'POST',
+    );
+    expect(JSON.parse(String(calls[calls.length - 1]?.[1]?.body))).toEqual({ exec_mode: 'solo' });
+  });
+
   it('followupTask:POST /tasks/{id}/followup,body 带 content 原文(批次 R2a)', async () => {
     const r = await followupTask('t1', '再补充一点秋色');
     expect(r).toEqual({ ok: true });

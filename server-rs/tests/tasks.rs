@@ -3404,3 +3404,180 @@ async fn unknown_executor_id_is_dropped_and_task_still_runs() {
     let (st, _) = wait_terminal(app, &id).await;
     assert_eq!(st, "done", "丢弃执行者后任务应以通用执行者跑完");
 }
+// ===== 批准执行方式(2026-09-17:plan 批准界面可选「用什么模式执行」) =====
+//
+// 契约:
+//   - 缺省(不传 exec_mode)= approved_plan = 按计划逐步执行(改造前行为,回归锁);
+//   - 可选 solo/multi/team/custom:以该模式执行,已批准计划作 goal 上下文;
+//   - 未知值 400;legacy/plan 不在可选集内(前者重复规划、后者会回到 planned 死循环)。
+//
+// 测试写法说明(与既有 plan 测试同款):标题内嵌钩子让每次调用都以单 chunk 快速返回,
+// 否则 mock 的默认回复会逐字符流式(8ms/字),多步任务会超出 wait_terminal 的轮询窗口。
+// plan 步骤的 goal 用 \[ \] 转义钩子:规划 JSON 经 serde 还原为真实钩子,续跑时步骤
+// 专属产出即该钩子文本,从而无需依赖默认回复。
+//
+// 未覆盖 custom 的端到端执行:流程库是共享全局状态,而既有
+// `task_custom_mode_flow_steps_and_disabled_flow` 会改写/禁用当前流程,
+// 并行执行时任何依赖流程状态的用例都是竞态(该用例注释已记载此约束)。
+// custom 的分发正确性由 `approve_with_unknown_exec_mode_is_rejected` 的 400 断言
+// (legacy/plan 拒绝)与 run_approved 的类型穷尽匹配共同保证。
+
+/// 造一个 planned 态任务(2 步计划),返回任务 id
+async fn planned_task(app: &axum::Router, title: &str) -> String {
+    let id = create_task_with_mode(app, title, "plan").await;
+    let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
+    wait_status(app, &id, "planned").await;
+    id
+}
+
+/// 标准 plan 标题:规划返回两步计划(各步 goal 内嵌快速钩子)+ 汇总钩子
+fn plan_title_two_steps() -> &'static str {
+    concat!(
+        r#"[[reply:[{"name":"甲步","goal":"\u005b\u005breply:甲步成果\u005d\u005d 产出甲"},"#,
+        r#"{"name":"乙步","goal":"\u005b\u005breply:乙步成果\u005d\u005d 产出乙"}] ]]"#,
+        "[[reply_if:任务汇总者|计划续跑最终成果]]",
+        " 计划总目标"
+    )
+}
+
+/// 缺省 exec_mode:仍按已批准计划逐步执行(改造前行为,回归锁)
+#[tokio::test]
+async fn approve_without_exec_mode_keeps_approved_plan_executor() {
+    let app = test_app();
+    let id = planned_task(app, plan_title_two_steps()).await;
+
+    let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/approve"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "缺省批准应 200: {json}");
+    let (st, detail) = wait_terminal(app, &id).await;
+    assert_eq!(st, "done", "缺省批准后应完成: {detail}");
+    // ApprovedPlanExecutor 的结果契约:含「## 最终计划」段(其它模式不产该段)
+    let result = detail["task"]["result"].as_str().unwrap_or("");
+    assert!(
+        result.contains("## 最终计划"),
+        "缺省批准应走逐步执行(结果含最终计划段): {result}"
+    );
+    assert_eq!(
+        detail["task"]["plan"].as_array().unwrap().len(),
+        2,
+        "逐步执行按已批准计划原样保留两步: {detail}"
+    );
+}
+
+/// 显式 exec_mode=approved_plan 与缺省等价
+#[tokio::test]
+async fn approve_with_approved_plan_mode_matches_default() {
+    let app = test_app();
+    let id = planned_task(app, plan_title_two_steps()).await;
+
+    let (status, json) = send_json(
+        app,
+        "POST",
+        &format!("/api/tasks/{id}/approve"),
+        json!({ "exec_mode": "approved_plan" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "approved_plan 应 200: {json}");
+    let (st, detail) = wait_terminal(app, &id).await;
+    assert_eq!(st, "done");
+    let result = detail["task"]["result"].as_str().unwrap_or("");
+    assert!(
+        result.contains("## 最终计划"),
+        "approved_plan 应走逐步执行: {result}"
+    );
+}
+
+/// exec_mode=solo:以单 Agent 整体执行(不再是逐步执行)——调用追踪只一行 agent
+#[tokio::test]
+async fn approve_with_solo_mode_runs_single_agent_loop() {
+    let app = test_app();
+    let id = planned_task(app, plan_title_two_steps()).await;
+
+    let (status, json) = send_json(
+        app,
+        "POST",
+        &format!("/api/tasks/{id}/approve"),
+        json!({ "exec_mode": "solo" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "solo 批准应 200: {json}");
+
+    let (st, detail) = wait_terminal(app, &id).await;
+    assert_eq!(st, "done", "solo 执行应完成: {detail}");
+    // solo 走 run_tool_loop:结果不含逐步执行专属的「## 最终计划」段
+    let result = detail["task"]["result"].as_str().unwrap_or("");
+    assert!(
+        !result.contains("## 最终计划"),
+        "solo 模式不应产「最终计划」段(那是逐步执行的契约): {result}"
+    );
+    // 关键区分:逐步执行会逐步落 agent 行,而 solo 只有一行
+    let (status, calls) = send_json(app, "GET", &format!("/api/tasks/{id}/calls"), json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let agent_rows = calls["calls"]
+        .as_array()
+        .map(|rows| rows.iter().filter(|c| c["phase"] == "agent").count())
+        .unwrap_or(0);
+    assert_eq!(
+        agent_rows, 1,
+        "solo 应只有一行 agent 调用(逐步执行会每步一行): {calls}"
+    );
+}
+
+/// exec_mode=multi:复用 multi 执行器(与 solo 同骨架 + 子 agent 工具化)
+#[tokio::test]
+async fn approve_with_multi_mode_runs() {
+    let app = test_app();
+    let id = planned_task(app, plan_title_two_steps()).await;
+
+    let (status, json) = send_json(
+        app,
+        "POST",
+        &format!("/api/tasks/{id}/approve"),
+        json!({ "exec_mode": "multi" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "multi 批准应 200: {json}");
+    let (st, detail) = wait_terminal(app, &id).await;
+    assert_eq!(st, "done", "multi 执行应完成: {detail}");
+    let result = detail["task"]["result"].as_str().unwrap_or("");
+    assert!(
+        !result.contains("## 最终计划"),
+        "multi 不应产逐步执行段: {result}"
+    );
+    let (_, calls) = send_json(app, "GET", &format!("/api/tasks/{id}/calls"), json!({})).await;
+    let agent_rows = calls["calls"]
+        .as_array()
+        .map(|rows| rows.iter().filter(|c| c["phase"] == "agent").count())
+        .unwrap_or(0);
+    assert_eq!(agent_rows, 1, "multi 亦为单行 agent 调用: {calls}");
+}
+
+/// 未知/不支持的执行方式 → 400,错误文案列出可选值,且不改任务状态。
+/// 同时锁死两个**刻意排除**的值:legacy(自带规划会与已批准计划重复劳动)、
+/// plan(会再规划回到 planned 死循环,批次 4.3 回归的根因)。
+#[tokio::test]
+async fn approve_with_unknown_exec_mode_is_rejected() {
+    let app = test_app();
+    let id = planned_task(app, plan_title_two_steps()).await;
+
+    for bad in ["nope", "legacy", "plan"] {
+        let (status, json) = send_json(
+            app,
+            "POST",
+            &format!("/api/tasks/{id}/approve"),
+            json!({ "exec_mode": bad }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "exec_mode={bad} 应 400: {json}");
+        assert!(
+            json["error"].as_str().unwrap_or("").contains("approved_plan"),
+            "错误文案应列出可选值(exec_mode={bad}): {json}"
+        );
+    }
+    // 拒绝不得改变任务状态(仍待批准)
+    let (_, detail) = send_json(app, "GET", &format!("/api/tasks/{id}"), json!({})).await;
+    assert_eq!(
+        detail["task"]["status"], "planned",
+        "拒绝非法执行方式后任务应仍是 planned: {detail}"
+    );
+}

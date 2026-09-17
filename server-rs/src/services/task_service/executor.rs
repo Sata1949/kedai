@@ -38,12 +38,41 @@ impl TaskService {
 
     /// 批准计划(plan 模式特有):仅 planned 态合法;给了 plan 就替换落库。
     /// 随后置 planning 并 spawn 续跑:已批准计划(steps)随调用传入,由任务引擎
-    /// 逐步骤执行(复用 cancel token 登记,与 run 同款互斥/停止语义);
-    /// goal 为「目标 + 已批准计划」组合文本,供各步骤消息作整体上下文。
-    pub fn approve(self: &Arc<Self>, id: &str, plan: Option<Vec<TaskStep>>) -> Result<(), String> {
+    /// 按 `exec_mode` 选执行器(缺省 ApprovedPlanExecutor 逐步骤执行);
+    /// goal 为「目标 + 已批准计划」组合文本,供各步骤/各模式消息作整体上下文。
+    ///
+    /// `exec_mode`(2026-09-17):用户在批准界面选择的执行方式。非默认方式
+    /// (solo/multi/team/custom)会以该模式**自行组织执行**——其中 team/custom
+    /// 会用自己的规划/流程重写 tasks.plan(这是模式语义,非缺陷);已批准计划
+    /// 始终作为 goal 里的权威上下文下发。
+    pub fn approve(
+        self: &Arc<Self>,
+        id: &str,
+        plan: Option<Vec<TaskStep>>,
+        exec_mode: crate::models::types::TaskApproveExecMode,
+    ) -> Result<(), String> {
         let task = self.get(id).ok_or("任务不存在")?;
         if task.status != TaskStatus::Planned {
             return Err("仅待批准(planned)状态的任务可批准".into());
+        }
+        // 自定义流程模式依赖「已启用流程」:提前拒绝,避免批准后任务直接进 error
+        //(custom 执行器在 run_inner 首行就取 current_flow,取不到即整体失败)。
+        // 校验口径与 TaskFlowAccess::current_flow 一致(取当前流程 + enabled 判定)。
+        if matches!(
+            exec_mode,
+            crate::models::types::TaskApproveExecMode::Custom
+        ) {
+            let flow = self.agent_flow();
+            let guard = flow.lock().unwrap_or_else(|e| e.into_inner());
+            match guard.get() {
+                None => return Err("选择自定义流程执行前需先配置流程:请先在设置中启用一个 Agent 流程".into()),
+                Some(cfg) if !cfg.enabled => {
+                    return Err(
+                        "选择自定义流程执行前需先配置流程:当前 Agent 流程未启用,请在设置中开启后再试".into(),
+                    );
+                }
+                Some(_) => {}
+            }
         }
         let steps = match plan {
             Some(p) => {
@@ -76,7 +105,7 @@ impl TaskService {
         let (cancel, token) = self.register_cancel(id);
         let backend: std::sync::Arc<dyn crate::services::task_core::TaskBackend> = self.clone();
         let engine = crate::services::task_engine::TaskEngine::new(backend, self.engine.clone());
-        engine.run_approved(&task, goal, steps, cancel, token);
+        engine.run_approved(&task, goal, steps, exec_mode, cancel, token);
         Ok(())
     }
 

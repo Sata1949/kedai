@@ -521,9 +521,14 @@ export const useTaskStore = defineStore('app.task', () => {
     await loadTaskDetail(id);
   }
 
-  /** 批准计划(plan 模式):plan 可选(修改后批准);成功后刷新该任务详情 */
-  async function approveTask(id: string, plan?: api.TaskStep[]): Promise<void> {
-    await api.approveTask(id, plan);
+  /** 批准计划(plan 模式):plan 可选(修改后批准),execMode 可选(本次执行方式,
+   *  缺省 approved_plan = 按计划逐步执行);成功后刷新该任务详情 */
+  async function approveTask(
+    id: string,
+    plan?: api.TaskStep[],
+    execMode?: api.TaskApproveExecMode,
+  ): Promise<void> {
+    await api.approveTask(id, plan, execMode);
     // 批准后任务进入执行:同样自动展开一次
     uiPrefsBridge().autoOpenAgentPanel();
     await loadTaskDetail(id);

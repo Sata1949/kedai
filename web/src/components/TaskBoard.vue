@@ -9,8 +9,8 @@ import { storeToRefs } from 'pinia';
 import { renderMarkdown } from '../markdown';
 import { splitTaskResult } from '../taskResult';
 import { taskStatusClass as statusClass, taskStatusLabel as statusLabel } from '../taskStatus';
-import { MODE_LABELS, messageKindLabel } from '../api/labels';
-import type { TaskRecord, TaskRunMode, TaskStep } from '../api';
+import { APPROVE_EXEC_MODE_LABELS, APPROVE_EXEC_MODE_ORDER, MODE_LABELS, messageKindLabel } from '../api/labels';
+import type { TaskApproveExecMode, TaskRecord, TaskRunMode, TaskStep } from '../api';
 
 const store = useAppStore();
 const { currentTask, currentTaskId, model, currentTaskUsage, executorById } = storeToRefs(store);
@@ -179,11 +179,16 @@ const planEditing = ref(false);
 /** 编辑中的计划副本(name/goal 可改;status/result 保留原值随提交回传) */
 const editedPlan = ref<TaskStep[]>([]);
 const approving = ref(false);
+/** 本次批准的执行方式(2026-09-17):默认「按计划逐步执行」= 改造前行为。
+ *  切换任务时随编辑态一并复位,避免把上个任务的选择带到下个任务。 */
+const approveExecMode = ref<TaskApproveExecMode>('approved_plan');
 
-// 切换任务时收起编辑态与 pending 操作;追加指令/规划对话草稿一并清空(批次 R2)
+// 切换任务时收起编辑态与 pending 操作;追加指令/规划对话草稿一并清空(批次 R2);
+// 执行方式选择同时复位为默认(不跨任务沿用)
 watch(currentTaskId, () => {
   planEditing.value = false;
   editedPlan.value = [];
+  approveExecMode.value = 'approved_plan';
   followupDraft.value = '';
   planChatDraft.value = '';
 });
@@ -195,13 +200,14 @@ function startEditPlan(): void {
   planEditing.value = true;
 }
 
-/** 批准执行:plan 为空表示按原计划批准;给了 plan 则替换后由 ApprovedPlanExecutor 逐步执行 */
+/** 批准执行:plan 为空表示按原计划批准;给了 plan 则替换后逐步执行。
+ *  execMode 为本次执行方式(缺省「按计划逐步执行」),后端据此选执行器。 */
 async function approveCurrent(plan?: TaskStep[]): Promise<void> {
   const id = currentTaskId.value;
   if (!id || approving.value) return;
   approving.value = true;
   try {
-    await store.approveTask(id, plan);
+    await store.approveTask(id, plan, approveExecMode.value);
     planEditing.value = false;
     editedPlan.value = [];
   } catch (err) {
@@ -446,6 +452,21 @@ async function removeTask(task: TaskRecord): Promise<void> {
             <div class="sv-task-section-title">计划待批准</div>
             <!-- 批次 R1:planned 态 result = 待批准的计划清单,批准区内渲染供批准前审阅 -->
             <div v-if="plannedPlanHtml" class="sv-task-result sv-task-planned-plan" v-html="plannedPlanHtml" />
+            <!-- 执行方式选择(2026-09-17):默认按计划逐步执行;选其它模式则由该模式
+                 自行组织执行(team/custom 会用自身规划/流程重写计划步骤显示)。
+                 编辑态下同样可见——「修改后批准」也走这个选择。 -->
+            <div class="sv-task-approve-exec">
+              <label class="sv-inp-tag">执行方式</label>
+              <select v-model="approveExecMode" class="sv-select" title="选择批准后用什么模式执行这份计划">
+                <option v-for="m in APPROVE_EXEC_MODE_ORDER" :key="m" :value="m">
+                  {{ APPROVE_EXEC_MODE_LABELS[m] }}
+                </option>
+              </select>
+            </div>
+            <p v-if="approveExecMode !== 'approved_plan'" class="sv-note approve-exec-hint">
+              非默认方式将以该模式自行组织执行:已批准计划作为目标上下文下发;
+              团队协作与自定义流程会用自己的规划/流程重写计划步骤显示。
+            </p>
             <template v-if="!planEditing">
               <div class="sv-task-approve-actions">
                 <button
@@ -740,3 +761,16 @@ async function removeTask(task: TaskRecord): Promise<void> {
     </div>
   </section>
 </template>
+
+<style scoped>
+/* 批准区「执行方式」选择行(2026-09-17)。样式纪律(MAINTENANCE D-5):新增组件样式
+   一律写在 scoped 内,不进 style.css;只复用既有 :root 令牌与 .sv-* 基础类。 */
+.sv-task-approve-exec {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 12px 0 0;
+}
+.sv-task-approve-exec .sv-select { flex: 1; min-width: 0; }
+.approve-exec-hint { margin: 6px 0 0; }
+</style>
