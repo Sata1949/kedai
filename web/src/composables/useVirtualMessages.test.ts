@@ -92,3 +92,74 @@ describe('createVirtualListState', () => {
     expect(s.placeholderHeight(42, 'assistant')).toBe(ESTIMATED_HEIGHTS.assistant);
   });
 });
+
+// 条数窗口(2026-09-17 P-9):固定像素窗口对超高卡片覆盖不足——单条高度就可能吃掉整个
+// overscanPx(默认 1200),导致滚动时相邻条目反复挂载/卸载。条数窗口与像素窗口取较大者。
+describe('createVirtualListState 条数窗口(rowWindow)', () => {
+  /** 造一份连续 id 的列表顺序(下标 = id - 1) */
+  function syncRange(s: ReturnType<typeof createVirtualListState>, ids: number[]): void {
+    s.syncOrder(ids);
+  }
+
+  it('默认 rowWindow 为 8', () => {
+    const s = createVirtualListState();
+    expect(s.rowWindow).toBe(8);
+  });
+
+  it('缓冲区内的行其近邻也挂载(与像素窗口取较大者)', () => {
+    const ids = Array.from({ length: 200 }, (_, i) => i + 1);
+    const s = createVirtualListState({ threshold: 80, tailKeep: 30, rowWindow: 8 });
+    syncRange(s, ids);
+    // 仅下标 50 被 IO 上报可见
+    s.markVisible(51);
+    // 上下各 8 条内 → 挂载
+    expect(s.isActive(44, 43, 200)).toBe(true); // 距 50 有 7
+    expect(s.isActive(59, 58, 200)).toBe(true); // 距 50 有 8
+    // 窗口外 → 仍占位
+    expect(s.isActive(42, 41, 200)).toBe(false); // 距 50 有 9
+    expect(s.isActive(60, 59, 200)).toBe(false); // 距 50 有 9
+  });
+
+  it('rowWindow=0 时关闭条数窗口,退化为纯像素窗口行为', () => {
+    const ids = Array.from({ length: 200 }, (_, i) => i + 1);
+    const s = createVirtualListState({ threshold: 80, tailKeep: 30, rowWindow: 0 });
+    syncRange(s, ids);
+    s.markVisible(51);
+    expect(s.isActive(51, 50, 200)).toBe(true); // 自身仍挂载
+    expect(s.isActive(52, 51, 200)).toBe(false); // 近邻不再搭车
+  });
+
+  it('未同步顺序时条数窗口安全降级(不误挂载)', () => {
+    const s = createVirtualListState({ threshold: 80, tailKeep: 30, rowWindow: 8 });
+    s.markVisible(51); // 未 syncOrder → 无下标映射
+    expect(s.isActive(51, 50, 200)).toBe(true);
+    expect(s.isActive(52, 51, 200)).toBe(false);
+  });
+
+  it('窗口随列表顺序更新(消息插入后下标变化仍正确)', () => {
+    const s = createVirtualListState({ threshold: 80, tailKeep: 30, rowWindow: 2 });
+    const base = Array.from({ length: 200 }, (_, i) => i + 1);
+    syncRange(s, base);
+    s.markVisible(5); // 下标 4
+    expect(s.isActive(7, 6, 200)).toBe(true); // 距 2 → 窗口内
+    expect(s.isActive(8, 7, 200)).toBe(false); // 距 3 → 窗口外
+
+    // 头部插入两条(id 900/901)后,所有原 id 下标 +2:id=5 变为下标 6
+    syncRange(s, [900, 901, ...base]);
+    // id=8 现在下标 9,距 6 有 3 → 超出窗口 2(若沿用旧下标会误判为窗口内)
+    expect(s.isActive(8, 9, 202)).toBe(false);
+    // id=7 现在下标 8,距 6 有 2 → 仍在窗口内
+    expect(s.isActive(7, 8, 202)).toBe(true);
+  });
+
+  it('reset 同时清空顺序映射', () => {
+    const s = createVirtualListState({ threshold: 80, tailKeep: 30, rowWindow: 8 });
+    syncRange(s, [1, 2, 3]);
+    s.markVisible(1);
+    s.reset();
+    s.markVisible(2);
+    // 顺序已清空 → 窗口不生效,仅 2 自身挂载
+    expect(s.isActive(2, 1, 200)).toBe(true);
+    expect(s.isActive(1, 0, 200)).toBe(false);
+  });
+});

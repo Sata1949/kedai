@@ -18,6 +18,12 @@ export interface VirtualListOptions {
   tailKeep?: number;
   /** 视口上下缓冲区像素(IntersectionObserver rootMargin,默认 1200) */
   overscanPx?: number;
+  /**
+   * 条数窗口(默认上下各 8 条,0 关闭):与像素窗口**取较大者**。
+   * 固定像素窗口对超高卡片(整页 HTML 状态栏、长图表)覆盖不足——单条高度就可能吃掉整个
+   * overscanPx,导致滚动时相邻条目频繁挂载/卸载抖动。条数窗口保证视口内的行其近邻也常驻。
+   */
+  rowWindow?: number;
 }
 
 /** 未渲染消息的占位高度估算(按角色;assistant 通常含 markdown 卡片,偏高) */
@@ -37,11 +43,28 @@ export const ESTIMATED_HEIGHT_FALLBACK = 96;
 export function createVirtualListState(options: VirtualListOptions = {}) {
   const threshold = options.threshold ?? 80;
   const tailKeep = options.tailKeep ?? 30;
+  const rowWindow = Math.max(0, options.rowWindow ?? 8);
 
   /** 当前处于「真实挂载」集合内的消息 id(IO 上报进入缓冲区的非尾部消息) */
   const visible = reactive(new Set<number>());
   /** 已渲染消息的实测高度缓存(离开缓冲区时记录,占位等高) */
   const heights = reactive(new Map<number, number>());
+
+  /**
+   * 当前列表的 id → 下标映射(条数窗口判定用)。
+   * 由宿主每次渲染前经 `syncOrder` 同步;未同步时条数窗口退化为不生效(安全降级)。
+   */
+  let order = new Map<number, number>();
+
+  /**
+   * 同步当前列表顺序。宿主在每次取列表快照时调用(按数组引用记忆化,避免逐行重建)。
+   * 下标会随消息增删而变,故必须与列表同源更新,不能只在挂载时算一次。
+   */
+  function syncOrder(ids: readonly number[]): void {
+    const next = new Map<number, number>();
+    for (let i = 0; i < ids.length; i++) next.set(ids[i], i);
+    order = next;
+  }
 
   /** 是否启用虚拟化(未超阈值全部真实挂载) */
   function isEnabled(count: number): boolean {
@@ -56,7 +79,18 @@ export function createVirtualListState(options: VirtualListOptions = {}) {
     if (!isEnabled(count)) return true;
     if (id === pinnedId) return true;
     if (index >= count - tailKeep) return true;
-    return visible.has(id);
+    if (visible.has(id)) return true;
+    return isWithinRowWindow(index);
+  }
+
+  /** 条数窗口:任一已在缓冲区内的行与本行相距不超过 rowWindow 时,本行也挂载 */
+  function isWithinRowWindow(index: number): boolean {
+    if (rowWindow <= 0 || visible.size === 0) return false;
+    for (const vid of visible) {
+      const vi = order.get(vid);
+      if (vi !== undefined && Math.abs(vi - index) <= rowWindow) return true;
+    }
+    return false;
   }
 
   /** IO 上报:进入视口缓冲区 → 真实挂载 */
@@ -79,9 +113,10 @@ export function createVirtualListState(options: VirtualListOptions = {}) {
   function reset(): void {
     visible.clear();
     heights.clear();
+    order = new Map();
   }
 
-  return { threshold, tailKeep, visible, heights, isEnabled, isActive, markVisible, markHidden, placeholderHeight, reset };
+  return { threshold, tailKeep, rowWindow, visible, heights, isEnabled, isActive, markVisible, markHidden, placeholderHeight, reset, syncOrder };
 }
 
 export type VirtualListState = ReturnType<typeof createVirtualListState>;
@@ -118,8 +153,18 @@ export function useVirtualMessages(opts: UseVirtualMessagesOptions) {
 
   const enabled = computed(() => state.isEnabled(opts.messages.value.length));
 
+  // 条数窗口需要 id → 下标映射,而下标随消息增删变化。按数组引用记忆化:同一列表快照
+  // 内无论 isActive 被调用多少次(每行一次)都只重建一次映射。
+  let orderOwner: unknown = null;
+  function syncOrderIfNeeded(): void {
+    if (orderOwner === opts.messages.value) return;
+    orderOwner = opts.messages.value;
+    state.syncOrder(opts.messages.value.map((m) => m.id));
+  }
+
   /** 该行是否真实挂载(模板每行调用;依赖 reactive visible 集合,精准重渲染) */
   function isActive(id: number, index: number): boolean {
+    syncOrderIfNeeded();
     return state.isActive(id, index, opts.messages.value.length, opts.pinnedId.value);
   }
 

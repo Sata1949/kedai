@@ -19,6 +19,7 @@ import {
 } from '../render';
 import { renderMarkdown } from '../markdown';
 import { isRenderCodeBlock } from '../renderPanel';
+import { messageHtmlCache, buildMessageRenderKey } from '../renderCache';
 
 const props = defineProps<{
   /** 消息对象(store 响应式;流式期间 content 被就地追加) */
@@ -214,12 +215,35 @@ const html = computed<string>(() => {
   void props.scriptHash; // 脚本版本变化时强制重算(即便 scripts 引用与字段未触发)
   // 渲染只读按帧推进的 paintText(不直接依赖 m.content):见上方节流说明
   const text = paintText.value;
+  const scopeId = `m${props.m.id}`;
+  // 模块级缓存(2026-09-17 P-9):虚拟滚动卸载重挂时组件内 computed 缓存随之销毁,
+  // 同一条消息来回滚动会反复重付 markdown / scoped 脚本 / sanitize 成本,故提到模块级。
+  const key = buildMessageRenderKey({
+    text,
+    renderHtml: props.renderHtml,
+    scriptHash: props.scriptHash,
+    depth: props.depth ?? 0,
+    scopeId,
+    charName: store.currentCharacterName,
+  });
+  const cached = messageHtmlCache.get(key);
+  if (cached !== undefined) return cached;
+  const result = renderMessageHtml(text, scopeId);
+  messageHtmlCache.set(key, result);
+  return result;
+});
+
+/**
+ * 实际渲染(缓存未命中时执行)。分支优先级见上方说明;
+ * 提取为独立函数是为了让缓存命中路径**完全不触碰** sanitize/脚本解析。
+ */
+function renderMessageHtml(text: string, scopeId: string): string {
   const resourceUrl = extractBodyLoadUrl(text);
   if (resourceUrl) {
-    return buildRemoteResourceHtml(resourceUrl, `m${props.m.id}`);
+    return buildRemoteResourceHtml(resourceUrl, scopeId);
   }
   if (isRenderCodeBlock(text)) {
-    return buildRenderPanelHtml(text, `m${props.m.id}`);
+    return buildRenderPanelHtml(text, scopeId);
   }
   if (props.renderHtml && props.scripts.length > 0) {
     // 脚本替换串新引入的 {{user}}/{{char}} 宏随渲染展开(对齐 ST substituteParams;
@@ -231,7 +255,7 @@ const html = computed<string>(() => {
   }
   const clean = stripHiddenPlaceholders(text, props.scripts, props.depth);
   return renderMarkdown(clean);
-});
+}
 
 /** 状态栏是否以纯文本气泡展示:HTML 渲染开启且角色卡有状态栏脚本时,
  *  状态栏已由 HTML 卡片承载,隐藏纯文本气泡避免重复。 */

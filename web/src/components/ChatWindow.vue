@@ -11,6 +11,7 @@ import { enabledCardScriptsOf } from '../cardScripts';
 import { cleanupCardScriptSandbox, ensureCardScriptSandbox, makeCardScriptRpcExtensions } from '../cardScriptHost';
 import { useVirtualMessages } from '../composables/useVirtualMessages';
 import { useResourceFrames } from '../composables/useResourceFrames';
+import { scriptBlocksCache, buildScriptBlocksKey } from '../renderCache';
 import type { UiMessage } from '../sseReducer';
 import ChatInput from './ChatInput.vue';
 import ChatMessageItem from './ChatMessageItem.vue';
@@ -61,32 +62,29 @@ function renderTextFor(m: { id: number; content: string; content_display?: strin
 /**
  * 脚本块解析缓存(流式性能优化):调度器触发时会为每条历史 assistant 消息执行
  * renderScopedScripts(全量正则 + sanitize,重活),流式期间每个 token 触发一次,
- * 历史消息解析结果却不变。按 (scopeId + scriptHash + 渲染文本) 记忆结果,
- * 历史消息零重算;消息数组被替换(会话切换/刷新历史)或脚本数组引用变化时整体失效。
+ * 历史消息解析结果却不变。按 (scopeId + scriptHash + depth + 渲染文本) 记忆结果,
+ * 历史消息零重算。
+ *
+ * 2026-09-17 P-9:缓存由「组件作用域 + 无上限」改为**模块级有界**(容量 500,FIFO 淘汰,
+ * 见 renderCache.ts)。理由:原实现只在 messages/scripts 引用变化时整体重建,长会话下
+ * 条目无界增长;且组件卸载(如切走再切回聊天页)会丢失全部缓存。
+ * role 判定:renderScopedScripts 返回 null 表示「未命中任何脚本」,这是**有效结果**
+ * (缓存它可省掉每次重跑全量正则去确认无命中),故用 get 的返回值区分而非真假值。
  */
-let scriptBlocksCache = new Map<string, ReturnType<typeof renderScopedScripts>>();
-let scriptBlocksOwner: unknown = null;
-let scriptBlocksScripts: unknown = null;
-
 function renderScriptsCached(
   text: string,
   scripts: Parameters<typeof renderScopedScripts>[1],
   scopeId: string,
   depth: number,
 ): ReturnType<typeof renderScopedScripts> {
-  if (scriptBlocksOwner !== messages.value || scriptBlocksScripts !== scripts) {
-    scriptBlocksCache = new Map();
-    scriptBlocksOwner = messages.value;
-    scriptBlocksScripts = scripts;
-  }
   // depth 参与缓存键:同一条消息在不同楼层深度下脚本适用性不同(实跑问题 7 R2)
-  const key = `${scopeId}\n${currentScriptHash.value}\n${depth}\n${text}`;
+  const key = buildScriptBlocksKey(scopeId, currentScriptHash.value, depth, text);
   const hit = scriptBlocksCache.get(key);
-  if (hit !== undefined || scriptBlocksCache.has(key)) return hit ?? null;
+  if (hit !== undefined) return hit;
   const scoped = renderScopedScripts(text, scripts, scopeId, depth, {
     charName: currentCharacter.value?.chara_name ?? currentCharacter.value?.name ?? '',
   });
-  scriptBlocksCache.set(key, scoped);
+  scriptBlocksCache.set(key, scoped ?? null);
   return scoped;
 }
 
