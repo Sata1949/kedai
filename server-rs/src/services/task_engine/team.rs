@@ -546,6 +546,7 @@ impl TeamExecutor {
                 session_id: session_id.clone(),
                 goal,
                 settings: ctx.settings.clone(),
+                executor_id: ctx.executor_id.clone(),
                 character_id: ctx.character_id.clone(),
                 phase: "agent",
                 step_index: Some(step_idxs[k]),
@@ -906,6 +907,7 @@ impl TeamExecutor {
                 token: ctx.token,
                 goal: ctx.goal.clone(),
                 settings: ctx.settings.clone(),
+                executor_id: ctx.executor_id.clone(),
                 character_id: ctx.character_id.clone(),
                 cancel: ctx.cancel.clone(),
             };

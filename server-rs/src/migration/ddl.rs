@@ -161,6 +161,36 @@ pub fn ensure_tasks_task_mode_column(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// 幂等 schema 升级(执行者库):为 tasks 补 executor_id 列(缺失才 ALTER,已存在跳过)。
+/// 启动时(Db::open)与跨库合并前(merge_databases 两侧)各执行一次。
+/// **可空且无 DEFAULT**:NULL 表示「未指定执行者」(通用执行者),
+/// 与旧行语义一致,故零迁移成本——旧任务不需要任何回填。
+pub fn ensure_tasks_executor_id_column(conn: &Connection) -> Result<(), String> {
+    let mut existing: Vec<String> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(tasks)")
+            .map_err(|e| format!("读取 tasks 列失败: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| format!("遍历 tasks 列失败: {e}"))?;
+        for name in rows.flatten() {
+            existing.push(name.to_lowercase());
+        }
+    }
+    // tasks 表不存在(极旧快照/手工建库)时零列返回,直接跳过——
+    // 建表由 CREATE_TABLES 或合并期 schema 比对负责,此处不能 ALTER 报错
+    if existing.is_empty() {
+        return Ok(());
+    }
+    if existing.iter().any(|c| c == "executor_id") {
+        return Ok(());
+    }
+    conn.execute("ALTER TABLE tasks ADD COLUMN executor_id TEXT", [])
+        .map_err(|e| format!("为 tasks 补 executor_id 列失败: {e}"))?;
+    Ok(())
+}
+
 /// 幂等 schema 升级(可观测性问题①):为 task_llm_calls 补 finish_reason 列
 ///(缺失才 ALTER,已存在跳过)。启动时(Db::open)与跨库合并前(merge_databases
 /// 两侧)各执行一次;旧行经 DEFAULT '' 零迁移成本('' = 未知/未下发,

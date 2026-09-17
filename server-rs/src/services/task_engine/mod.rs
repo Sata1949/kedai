@@ -164,6 +164,7 @@ impl TaskEngine {
             token,
             goal: goal.unwrap_or_else(|| task.title.clone()),
             settings: self.svc.task_settings(),
+            executor_id: task.executor_id.clone(),
             character_id: task.character_id.clone(),
             cancel: cancel.clone(),
         };

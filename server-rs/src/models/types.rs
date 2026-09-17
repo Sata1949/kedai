@@ -986,7 +986,9 @@ pub struct TaskRecord {
     pub result: String,
     #[serde(default)]
     pub error: String,
-    /// 执行者人设角色 id(空 = 通用执行者)
+    /// 执行者人设角色 id(空 = 通用执行者)。**兼容字段**:执行者改由
+    /// `executor_id` 承担(独立执行者库),此列仅供旧任务回退读取——
+    /// 新任务不再写它,旧任务重跑仍按原语义注入角色人设(见 prompt.rs 的分支顺序)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub character_id: Option<String>,
     pub created_at: String,
@@ -994,6 +996,10 @@ pub struct TaskRecord {
     /// 执行模式(批次 4;缺省 legacy,旧客户端/旧行零变化)
     #[serde(default = "task_default_run_mode")]
     pub task_mode: TaskRunMode,
+    /// 执行者 id(执行者库;空 = 通用执行者)。指向 data/task_executors.json。
+    /// 与 character_id 的分支优先级:executor_id 命中时用执行者指令,角色卡不参与。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executor_id: Option<String>,
 }
 
 fn task_default_status() -> TaskStatus {

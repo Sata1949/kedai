@@ -1,6 +1,6 @@
-// Agent / 工具授权 / 自定义执行流程路由(自 api/mod.rs build_router 迁入)
+// Agent / 工具授权 / 自定义执行流程 / 任务执行者库路由(自 api/mod.rs build_router 迁入)
 use crate::api::app_state::AppState;
-use crate::api::{agent, agent_flows, tool_permissions};
+use crate::api::{agent, agent_flows, task_executors, tool_permissions};
 use axum::routing::{get, post};
 use axum::Router;
 use std::sync::Arc;
@@ -33,5 +33,14 @@ pub(crate) fn agent_routes() -> Router<Arc<AppState>> {
         .route(
             "/api/agent-flows/{id}",
             axum::routing::delete(agent_flows::delete_agent_flow),
+        )
+        // 任务执行者库(任务模式的执行者与角色扮演角色卡解耦):列表 + upsert + 删除
+        .route(
+            "/api/task-executors",
+            get(task_executors::list).post(task_executors::save),
+        )
+        .route(
+            "/api/task-executors/{id}",
+            axum::routing::delete(task_executors::delete),
         )
 }

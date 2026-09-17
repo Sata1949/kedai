@@ -22,6 +22,8 @@ pub mod contract_changelog_service;
 pub mod embedding_service;
 // 命令执行抽象层(阶段 C):bash 工具与 Android 执行层共用的单一入口
 pub mod exec;
+// 任务执行者库:任务模式的执行者与角色扮演角色卡解耦(独立实体 + 指令段注入)
+pub mod executor_service;
 pub mod kaleido_state_service;
 // Android Keystore 桥接(JNI):API Key 加密存储,仅 android 目标编译
 #[cfg(target_os = "android")]

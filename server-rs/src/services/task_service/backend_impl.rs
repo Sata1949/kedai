@@ -119,10 +119,17 @@ impl TaskPromptKit for TaskService {
     fn assemble_executor_system_prompt(
         &self,
         settings: &RuntimeSettings,
+        executor_id: Option<&str>,
         character_id: Option<&str>,
         user_goal: &str,
     ) -> String {
-        TaskService::assemble_executor_system_prompt(self, settings, character_id, user_goal)
+        TaskService::assemble_executor_system_prompt(
+            self,
+            settings,
+            executor_id,
+            character_id,
+            user_goal,
+        )
     }
 
     fn world_context(&self, character_id: Option<&str>) -> String {

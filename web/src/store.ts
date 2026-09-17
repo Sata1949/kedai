@@ -11,6 +11,7 @@ import { useCharacterStore } from './stores/character';
 import { useModelConnStore } from './stores/modelConn';
 import { useGenSettingsStore } from './stores/genSettings';
 import { useTaskStore } from './stores/task';
+import { useExecutorStore } from './stores/executor';
 import { useUiPrefsStore } from './stores/uiPrefs';
 import { useResourcesStore } from './stores/resources';
 
@@ -23,6 +24,7 @@ export const useAppStore = defineStore('app', () => {
   const modelConn = useModelConnStore();
   const genSettings = useGenSettingsStore();
   const task = useTaskStore();
+  const executor = useExecutorStore();
   const uiPrefs = useUiPrefsStore();
   const resources = useResourcesStore();
 
@@ -33,6 +35,7 @@ export const useAppStore = defineStore('app', () => {
     ...storeToRefs(modelConn),
     ...storeToRefs(genSettings),
     ...storeToRefs(task),
+    ...storeToRefs(executor),
     ...storeToRefs(uiPrefs),
     ...storeToRefs(resources),
 
@@ -107,6 +110,10 @@ export const useAppStore = defineStore('app', () => {
     stopTaskEvents: task.stopTaskEvents,
     startTaskPolling: task.startTaskPolling,
     stopTaskPolling: task.stopTaskPolling,
+    // 任务执行者库(执行者与角色扮演角色卡解耦)
+    loadExecutors: executor.loadExecutors,
+    saveExecutor: executor.saveExecutor,
+    deleteExecutor: executor.deleteExecutor,
     // 界面偏好(渲染开关按角色记忆等动作)
     syncRenderHtmlToCurrent: uiPrefs.syncRenderHtmlToCurrent,
     setRenderHtml: uiPrefs.setRenderHtml,

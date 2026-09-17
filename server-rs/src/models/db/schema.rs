@@ -113,7 +113,14 @@ CREATE TABLE IF NOT EXISTS tasks (
   updated_at   TEXT NOT NULL,
   -- 执行模式(批次 4 六模式):legacy|solo|multi|plan|team|custom;旧库经
   -- migration::ensure_tasks_task_mode_column 幂等补列,旧行默认 'legacy'
-  task_mode    TEXT NOT NULL DEFAULT 'legacy'
+  task_mode    TEXT NOT NULL DEFAULT 'legacy',
+  -- 执行者库 id(NULL = 通用执行者):指向 data/task_executors.json 中的执行者。
+  -- 旧库经 migration::ensure_tasks_executor_id_column 幂等补列;列在表尾以对齐
+  -- ALTER ADD COLUMN 的追加顺序(schema 指纹比对依赖)。
+  -- 不建索引:当前无按 executor_id 过滤的查询(对照 idx_tasks_character 属过滤列;
+  -- 且本表 CREATE INDEX 语句先于 ensure_* 补列执行,给新列建索引会让旧库升级报
+  -- 「no such column」——CREATE_TABLES 与补列在同一批次里,顺序不可调换)
+  executor_id  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
 -- 任务列表按角色 / 状态过滤(2026-09-13 批次 3 补;旧库经 ensure_perf_indexes 补建)

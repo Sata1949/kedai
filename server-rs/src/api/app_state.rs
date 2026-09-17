@@ -4,6 +4,7 @@ use crate::config::AppConfig;
 use crate::mcp::McpManager;
 use crate::models::db::Db;
 use crate::services::agent_flow_service::AgentFlowService;
+use crate::services::executor_service::ExecutorService;
 use crate::services::agent_session_service::AgentSessionService;
 use crate::services::agent_subtask_service::AgentSubtaskService;
 use crate::services::audio_service::AudioService;
@@ -83,6 +84,9 @@ pub struct CoreServices {
     pub runtime_prompt: Arc<RuntimePromptService>,
     /// 自定义 Agent 执行流程(custom 模式),持久化到 data/agent_flows.json
     pub flow: Arc<Mutex<AgentFlowService>>,
+    /// 任务执行者库(任务模式的执行者,与角色扮演角色卡解耦),
+    /// 持久化到 data/task_executors.json
+    pub executors: Arc<Mutex<crate::services::executor_service::ExecutorService>>,
 }
 
 /// 并发与限流脚手架(M4.3 归组):只服务于「串行化 / 取消 / 防滥用」,
@@ -301,6 +305,9 @@ impl AppState {
             registered_tools,
         )));
 
+        // 任务执行者库(执行者与角色扮演角色卡解耦);空库即「只有通用执行者」
+        let executors = Arc::new(Mutex::new(ExecutorService::new(config.data_dir.clone())));
+
         // 聊天引擎:先于 TaskService 构造(engine 不依赖 tasks,无循环;
         // 批次 4.2 起 TaskService 注入 Arc<AgentEngine> 供六模式执行器复用工具循环)
         let engine = Arc::new(AgentEngine::new(
@@ -348,6 +355,7 @@ impl AppState {
             engine.clone(),
             flow.clone(),
             agent_subtasks.clone(),
+            executors.clone(),
         ));
         // 任务服务弱引用注入 ToolDeps(任务模式子 agent 的事件桥/调用追踪/usage 落库)
         let _ = deps.tasks.set(Arc::downgrade(&tasks));
@@ -385,6 +393,7 @@ impl AppState {
                 slash,
                 runtime_prompt,
                 flow,
+                executors,
                 tasks,
             },
             guards: ConcurrencyGuards {

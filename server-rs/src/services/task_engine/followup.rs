@@ -73,6 +73,7 @@ impl ModeExecutor for FollowupExecutor {
                 session_id: format!("task:{}", ctx.task_id),
                 goal: ctx.goal.clone(),
                 settings: ctx.settings.clone(),
+                executor_id: task.executor_id.clone(),
                 character_id: task.character_id.clone(),
                 phase: "agent",
                 step_index: None,

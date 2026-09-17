@@ -14,11 +14,28 @@ export async function listTasks(): Promise<TaskRecord[]> {
   return requireArrayField<TaskRecord>(data, 'tasks', '任务列表');
 }
 
-/** 新建任务;character_id 可选(执行者人设角色);task_mode 可选(批次 4 六模式,缺省 legacy) */
-export async function createTask(title: string, characterId?: string, taskMode?: TaskRunMode): Promise<TaskRecord> {
+/**
+ * 新建任务。
+ * - `executorId`:执行者库 id(可选,缺省 = 通用执行者);
+ * - `characterId`:**兼容入参**,旧形态(角色卡执行者),新代码不应使用——
+ *   执行者已与角色扮演角色卡解耦,该字段仅为旧调用方保留(两者同时给出时执行者优先);
+ * - `taskMode`:批次 4 六模式,缺省 legacy。
+ */
+export async function createTask(
+  title: string,
+  executorId?: string,
+  taskMode?: TaskRunMode,
+  characterId?: string,
+): Promise<TaskRecord> {
   const data = await request<unknown>('/tasks', {
     method: 'POST',
-    body: JSON.stringify({ title, character_id: characterId ?? null, task_mode: taskMode ?? 'legacy' }),
+    body: JSON.stringify({
+      title,
+      executor_id: executorId ?? null,
+      task_mode: taskMode ?? 'legacy',
+      // 兼容入参:仅在显式给出时下发,避免污染新请求
+      ...(characterId ? { character_id: characterId } : {}),
+    }),
   });
   return requireObjectField<TaskRecord>(data, 'task', '任务');
 }

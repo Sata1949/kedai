@@ -3193,3 +3193,214 @@ async fn task_run_on_multi_thread_runtime_keeps_reads_alive() {
     }
     assert!(reads > 4, "应观察到多轮并发读,实际 {reads} 次");
 }
+
+// ===== 执行者库(2026-09-17:任务执行者与角色扮演角色卡解耦) =====
+//
+// 需求背景:任务创建下拉此前直接列角色扮演角色卡,两个模式的角色资产互相污染。
+// 本组用例锁定三条契约:
+//   ① 执行者库 CRUD 与落盘(独立于角色卡);
+//   ② 任务按 executor_id 绑定执行者,执行时注入该执行者的指令段;
+//   ③ 执行者与角色卡互斥:绑定执行者时不注入任何角色卡人设(解耦的核心断言)。
+
+/// 建一个执行者,返回 id
+async fn create_executor(app: &axum::Router, name: &str, instruction: &str) -> String {
+    let (status, json) = send_json(
+        app,
+        "POST",
+        "/api/task-executors",
+        json!({ "config": { "name": name, "instruction": instruction } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "创建执行者应 200: {json}");
+    json["saved"]["id"]
+        .as_str()
+        .expect("响应应含 saved.id")
+        .to_string()
+}
+
+#[tokio::test]
+async fn executor_library_crud_roundtrip() {
+    let app = test_app();
+
+    // 空名称 / 空指令被拒
+    let (status, json) = send_json(
+        app,
+        "POST",
+        "/api/task-executors",
+        json!({ "config": { "name": "  ", "instruction": "指令" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "空名称应 400: {json}");
+    let (status, _) = send_json(
+        app,
+        "POST",
+        "/api/task-executors",
+        json!({ "config": { "name": "名", "instruction": "  " } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "空指令应 400");
+
+    // 新建(带唯一名,不依赖库内初始状态)
+    let name = "EXEC-CRUD-审稿员";
+    let id = create_executor(app, name, "你是严苛的审稿人,逐条指出问题").await;
+
+    // 列表包含且带指令原文
+    let (status, json) = send_json(app, "GET", "/api/task-executors", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let found = json["executors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["id"].as_str() == Some(id.as_str()))
+        .expect("列表应含刚创建的执行者");
+    assert_eq!(found["name"], name);
+    assert_eq!(found["instruction"], "你是严苛的审稿人,逐条指出问题");
+
+    // 更新(同 id 就地改,不新增)
+    let (status, json) = send_json(
+        app,
+        "POST",
+        "/api/task-executors",
+        json!({ "config": { "id": id, "name": "EXEC-CRUD-审稿员改", "instruction": "改后的指令" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "更新应 200: {json}");
+    let count = json["executors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["id"].as_str() == Some(id.as_str()))
+        .count();
+    assert_eq!(count, 1, "同 id 更新不得产生重复条目");
+
+    // 删除
+    let (status, _) = send_json(
+        app,
+        "DELETE",
+        &format!("/api/task-executors/{id}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "删除应 200");
+    let (_, json) = send_json(app, "GET", "/api/task-executors", json!({})).await;
+    assert!(
+        !json["executors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["id"].as_str() == Some(id.as_str())),
+        "删除后列表不应再含该执行者"
+    );
+
+    // 删除不存在的执行者 → 400(与 agent-flows 同款校验语义)
+    let (status, _) = send_json(
+        app,
+        "DELETE",
+        "/api/task-executors/not-exist-id",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "删除不存在的执行者应 400");
+}
+
+/// 解耦的核心断言:绑定执行者时,注入的是执行者指令而非角色卡人设。
+/// 用 [[floors]] 钩子回显 mock 执行者实际收到的完整消息序列(system 含身份段)。
+#[tokio::test]
+async fn task_executor_replaces_character_persona() {
+    let app = test_app();
+    let cid = upload_persona_marked_character(app).await;
+    let executor_id =
+        create_executor(app, "EXEC-SEP-执行者", "EXECUTOR-INSTRUCTION-MARK 你的职责是核对数据").await;
+
+    // ① 只绑执行者:注入执行者指令,不含角色卡任何人设标记
+    let (status, json) = send_json(
+        app,
+        "POST",
+        "/api/tasks",
+        json!({ "title": "[[floors]]", "task_mode": "solo", "executor_id": executor_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "创建任务应 201: {json}");
+    let id = json["task"]["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        json["task"]["executor_id"].as_str(),
+        Some(executor_id.as_str()),
+        "任务详情应回带 executor_id: {json}"
+    );
+
+    let (status, _) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200");
+    let (st, detail) = wait_terminal(app, &id).await;
+    assert_eq!(st, "done", "solo 任务应完成: {detail}");
+    let echo = detail["task"]["result"].as_str().unwrap_or("");
+    assert!(
+        echo.contains("EXECUTOR-INSTRUCTION-MARK"),
+        "应注入执行者指令段: {echo}"
+    );
+    for persona_mark in [
+        "R3A-DESC-MARK",
+        "R3A-PERS-MARK",
+        "R3A-SCEN-MARK",
+        "R3A-MESEX-MARK",
+    ] {
+        assert!(
+            !echo.contains(persona_mark),
+            "绑定执行者时不得注入角色卡人设 {persona_mark}(解耦契约): {echo}"
+        );
+    }
+
+    // ② 兼容路径未回归:不绑执行者、只给 character_id(旧客户端形态)仍注入人设
+    let (status, json) = send_json(
+        app,
+        "POST",
+        "/api/tasks",
+        json!({ "title": "[[floors]]", "task_mode": "solo", "character_id": cid }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "兼容创建应 201: {json}");
+    let legacy_id = json["task"]["id"].as_str().unwrap().to_string();
+    let (status, _) = send_json(
+        app,
+        "POST",
+        &format!("/api/tasks/{legacy_id}/run"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "兼容路径 run 应 200");
+    let (st, detail) = wait_terminal(app, &legacy_id).await;
+    assert_eq!(st, "done", "兼容路径任务应完成: {detail}");
+    let echo = detail["task"]["result"].as_str().unwrap_or("");
+    assert!(
+        echo.contains("R3A-DESC-MARK"),
+        "旧路径(character_id)应仍注入角色人设: {echo}"
+    );
+    assert!(
+        !echo.contains("EXECUTOR-INSTRUCTION-MARK"),
+        "旧路径不得注入执行者指令: {echo}"
+    );
+}
+
+/// 引用不存在的执行者 → 静默丢弃(任务照建,回退通用执行者),不报错。
+/// 与「执行期查不到配置即回退通用执行者」同口径,避免创建期/执行期语义分叉。
+#[tokio::test]
+async fn unknown_executor_id_is_dropped_and_task_still_runs() {
+    let app = test_app();
+    let (status, json) = send_json(
+        app,
+        "POST",
+        "/api/tasks",
+        json!({ "title": "[[floors]]", "task_mode": "solo", "executor_id": "no-such-executor" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "未知执行者不应阻断创建: {json}");
+    assert!(
+        json["task"]["executor_id"].is_null(),
+        "未知执行者应被丢弃为空: {json}"
+    );
+
+    let id = json["task"]["id"].as_str().unwrap().to_string();
+    let (status, _) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let (st, _) = wait_terminal(app, &id).await;
+    assert_eq!(st, "done", "丢弃执行者后任务应以通用执行者跑完");
+}

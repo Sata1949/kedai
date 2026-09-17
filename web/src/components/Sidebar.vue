@@ -12,7 +12,7 @@ const {
   filteredCharacters, characters, currentCharacterId, connStatus,
   contextTokens, lastUsage, currentSessionId,
   sessionTotalTokens, globalTotalTokens, cacheZeroStreak, appMode, tasks, currentTaskId,
-  currentTaskUsage, globalTaskUsage,
+  currentTaskUsage, globalTaskUsage, executors,
 } = storeToRefs(store);
 
 const fileInput = ref<HTMLInputElement | null>(null);
@@ -227,8 +227,18 @@ function deleteChar(c: CharacterRecord): void {
 
 // ===== 任务模式:下达目标 + 任务历史(原任务工作台左栏移入,单列布局) =====
 const taskTitle = ref('');
-const personaId = ref('');
+/** 所选执行者库 id(空 = 通用执行者)。执行者与角色扮演角色卡解耦,不再列 characters。 */
+const executorId = ref('');
 const creatingTask = ref(false);
+
+// 任务模式进入时拉执行者库(下拉数据源);失败仅记错误,不影响创建任务(可选通用执行者)
+watch(
+  () => appMode.value,
+  (m) => {
+    if (m === 'task' && executors.value.length === 0) void store.loadExecutors();
+  },
+  { immediate: true },
+);
 
 /** 新建并立即执行 */
 async function createAndRun(): Promise<void> {
@@ -236,7 +246,7 @@ async function createAndRun(): Promise<void> {
   if (!t || creatingTask.value) return;
   creatingTask.value = true;
   try {
-    const task = await store.createTask(t, personaId.value || undefined);
+    const task = await store.createTask(t, executorId.value || undefined);
     taskTitle.value = '';
     await store.runTask(task.id);
   } catch (err) {
@@ -411,13 +421,20 @@ async function removeTask(task: TaskRecord): Promise<void> {
             />
             <!-- 执行模式(批次 4 六模式;独立子组件,选择持久化在 task store) -->
             <TaskModeSelect />
-            <!-- 执行者人设(可选):默认通用执行者 -->
-            <select v-model="personaId" class="sv-select">
-              <option value="">执行者:通用执行者</option>
-              <option v-for="c in characters" :key="c.id" :value="c.id">
-                执行者:{{ c.chara_name }}
-              </option>
-            </select>
+            <!-- 执行者(独立执行者库;与角色扮演角色卡解耦,故不列 characters) -->
+            <div class="sv-inp-row">
+              <select v-model="executorId" class="sv-select" title="选择任务执行者">
+                <option value="">执行者:通用执行者</option>
+                <option v-for="e in executors" :key="e.id" :value="e.id">
+                  执行者:{{ e.name }}
+                </option>
+              </select>
+              <button
+                class="sv-btn ghost sv-btn-sm"
+                title="管理执行者(新建/编辑/删除)"
+                @click="store.taskExecutorsOpen = true"
+              >管理</button>
+            </div>
             <button
               class="sv-btn primary"
               :disabled="creatingTask || !taskTitle.trim()"

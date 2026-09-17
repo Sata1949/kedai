@@ -13,7 +13,7 @@ import { MODE_LABELS, messageKindLabel } from '../api/labels';
 import type { TaskRecord, TaskRunMode, TaskStep } from '../api';
 
 const store = useAppStore();
-const { currentTask, currentTaskId, model, currentTaskUsage } = storeToRefs(store);
+const { currentTask, currentTaskId, model, currentTaskUsage, executorById } = storeToRefs(store);
 
 /** 当前任务是否在执行中(planning / running) */
 const taskRunning = computed(() => {
@@ -116,9 +116,17 @@ const followupDisabledHint = computed(() => {
 /** 消息种类小标签(文案源见 api/labels.ts;未登记种类返回空串、不显示) */
 // 原此处手写 MESSAGE_KIND_LABELS,已收敛到 api/labels.ts 的 messageKindLabel()
 
-/** 助手发言的署名:优先任务绑定角色的名字,无绑定(如纯任务)回退「任务 Agent」 */
+/** 助手发言的署名:优先执行者库的名称;旧任务(仅 character_id)回退角色名;
+ *  都无绑定(通用执行者)则「任务 Agent」。
+ *  执行者优先是本次解耦的要求:任务模式不应再以角色扮演角色卡为执行者署名。 */
 const taskMessageAuthor = computed(() => {
-  const cid = currentTask.value?.task.character_id;
+  const task = currentTask.value?.task;
+  const eid = task?.executor_id;
+  if (eid) {
+    const e = executorById.value(eid);
+    if (e?.name) return e.name;
+  }
+  const cid = task?.character_id;
   if (cid) {
     const c = store.characters.find((x) => x.id === cid);
     if (c?.chara_name) return c.chara_name;

@@ -863,9 +863,11 @@ impl TaskService {
     ) -> Result<TaskGenOutput, String> {
         let settings = self.task_settings();
         // 统一组装(单一实现,见 prompt.rs::assemble_executor_system_prompt);
-        // 外部来源段落逐一 untrusted 包裹,内置指令不包裹(WP7)
+        // 外部来源段落逐一 untrusted 包裹,内置指令不包裹(WP7)。
+        // 执行者优先:executor_id 命中即独占身份段,character_id 仅为旧任务回退。
         let sys = self.assemble_executor_system_prompt(
             &settings,
+            task.executor_id.as_deref(),
             task.character_id.as_deref(),
             &task.title,
         );

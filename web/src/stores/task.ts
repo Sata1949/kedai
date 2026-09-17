@@ -499,8 +499,10 @@ export const useTaskStore = defineStore('app.task', () => {
 
   // ===== CRUD(本地乐观更新保留;状态变化由 SSE 事件驱动后续刷新,不再合成伪事件) =====
 
-  async function createTask(title: string, characterId?: string): Promise<api.TaskRecord> {
-    const task = await api.createTask(title, characterId, taskRunMode.value);
+  /** 新建任务。`executorId` 为执行者库 id(缺省 = 通用执行者);
+   *  执行者与角色扮演角色卡已解耦,本入口不再接受 characterId。 */
+  async function createTask(title: string, executorId?: string): Promise<api.TaskRecord> {
+    const task = await api.createTask(title, executorId, taskRunMode.value);
     tasks.value = [task, ...tasks.value];
     listSignature = contentSignature(tasks.value); // 本地乐观改写后同步签名(下次事件刷新同内容时不再替换)
     await selectTask(task.id);

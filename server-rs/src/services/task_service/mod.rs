@@ -90,6 +90,9 @@ pub struct TaskService {
     world_books: Arc<WorldBookService>,
     /// 提示词注入配置(简单合成文本 / 复杂 system 楼层)
     prompt_inject: Arc<Mutex<PromptInjectService>>,
+    /// 执行者库(任务创建时校验 executor_id 是否存在;执行期按 id 取执行者指令
+    /// 注入 system 提示词;与 AppState 共享同一实例)
+    executors: Arc<Mutex<crate::services::executor_service::ExecutorService>>,
     /// 任务 id → (取消信号, 本次执行 token)。token 用于区分同一任务的先后执行:
     /// stop 后立即重跑时,旧后台任务退出不得删除/覆盖新任务的取消条目与状态。
     cancels: Mutex<HashMap<String, (watch::Sender<bool>, u64)>>,
@@ -110,6 +113,7 @@ impl TaskService {
         engine: Arc<crate::agents::engine::AgentEngine>,
         flow: Arc<Mutex<AgentFlowService>>,
         agent_subtasks: Arc<AgentSubtaskService>,
+        executors: Arc<Mutex<crate::services::executor_service::ExecutorService>>,
     ) -> Self {
         let svc = TaskService {
             db,
@@ -121,6 +125,7 @@ impl TaskService {
             settings,
             world_books,
             prompt_inject,
+            executors,
             cancels: Mutex::new(HashMap::new()),
             events: tokio::sync::broadcast::channel(events::EVENTS_CAPACITY).0,
         };
@@ -140,9 +145,17 @@ impl TaskService {
 
     // ===== CRUD =====
 
+    /// 创建任务。
+    ///
+    /// 两个执行者入参的兼容关系(2026-09-17 执行者库批次):
+    ///   - `executor_id`:独立执行者库 id(前端唯一的绑定入口);
+    ///   - `character_id`:**兼容入参**,保留给旧客户端与旧任务语义——前端已不再发送,
+    ///     但 API 层面继续接受,避免破坏既有客户端与 R3a(task_persona_full)契约。
+    /// 两者同时给出时执行期以 executor_id 为准(见 prompt.rs 的分支顺序)。
     pub fn create(
         &self,
         title: &str,
+        executor_id: Option<&str>,
         character_id: Option<&str>,
         mode: TaskRunMode,
     ) -> Result<TaskRecord, String> {
@@ -152,15 +165,32 @@ impl TaskService {
         }
         let id = Uuid::new_v4().to_string();
         let now = now_iso();
-        let cid = character_id.map(|s| s.to_string());
+        // 执行者库命中校验:引用了不存在的执行者时静默丢弃而非报错——执行者属可选增强,
+        // 不该因一次删除让引用它的任务建不出来(与执行期「查不到配置即回退通用执行者」
+        // 同口径,避免创建期与执行期语义分叉)。
+        let eid = executor_id
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .filter(|id| {
+                self.executors
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(id)
+                    .is_some()
+            })
+            .map(str::to_string);
+        let cid = character_id
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         {
             // 写锁作用域:INSERT 完成后立即释放——下方 add_task_message 会再次取
             // db.write(),若仍持锁则自死锁(非重入锁)
             let conn = self.db.write();
             conn.execute(
-                "INSERT INTO tasks (id, title, status, plan, result, error, character_id, created_at, updated_at, task_mode) \
-                 VALUES (?1, ?2, 'pending', '[]', '', '', ?3, ?4, ?4, ?5)",
-                params![id, title, cid, now, mode.as_str()],
+                "INSERT INTO tasks (id, title, status, plan, result, error, character_id, created_at, updated_at, task_mode, executor_id) \
+                 VALUES (?1, ?2, 'pending', '[]', '', '', ?3, ?4, ?4, ?5, ?6)",
+                params![id, title, cid, now, mode.as_str(), eid],
             )
             .map_err(|e| format!("创建任务失败: {e}"))?;
         }
@@ -187,6 +217,7 @@ impl TaskService {
             updated_at: now,
             // 创建入口由调用方(API)严格解析用户所选模式;缺省 legacy(行为与旧版一致)
             task_mode: mode,
+            executor_id: eid,
         })
     }
 

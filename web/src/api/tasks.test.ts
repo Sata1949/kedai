@@ -84,7 +84,7 @@ describe('api/tasks REST 封装', () => {
   it('list/get/create/run/stop/delete/usage-total 的路径与方法契约', async () => {
     await listTasks();
     await getTask('t1');
-    await createTask('目标', 'char-1');
+    await createTask('目标', 'exec-1');
     await runTask('t1');
     await stopTask('t1');
     await deleteTask('t1');
@@ -103,11 +103,11 @@ describe('api/tasks REST 封装', () => {
     expect(calls).toContainEqual(['/api/tasks/t1', 'DELETE']);
     expect(calls).toContainEqual(['/api/tasks/usage-total', 'GET']);
 
-    // create 请求体带 character_id;未指定模式时 task_mode 缺省 legacy(批次 4)
+    // create 请求体带 executor_id(执行者与角色卡解耦);未指定模式时 task_mode 缺省 legacy(批次 4)
     const createCall = vi.mocked(fetch).mock.calls.find(
       ([input, init]) => String(input) === '/api/tasks' && (init?.method ?? 'GET') === 'POST',
     );
-    expect(JSON.parse(String(createCall?.[1]?.body))).toEqual({ title: '目标', character_id: 'char-1', task_mode: 'legacy' });
+    expect(JSON.parse(String(createCall?.[1]?.body))).toEqual({ title: '目标', executor_id: 'exec-1', task_mode: 'legacy' });
   });
 
   it('createTask 指定 taskMode 时透传 task_mode(批次 4 六模式)', async () => {
@@ -115,7 +115,29 @@ describe('api/tasks REST 封装', () => {
     const createCall = vi.mocked(fetch).mock.calls.find(
       ([input, init]) => String(input) === '/api/tasks' && (init?.method ?? 'GET') === 'POST',
     );
-    expect(JSON.parse(String(createCall?.[1]?.body))).toEqual({ title: '目标', character_id: null, task_mode: 'team' });
+    expect(JSON.parse(String(createCall?.[1]?.body))).toEqual({ title: '目标', executor_id: null, task_mode: 'team' });
+  });
+
+  it('createTask 的 characterId 兼容入参仅在显式给出时下发(新代码不应使用)', async () => {
+    /** 取最后一次 /api/tasks POST 的请求体(同一用例内两次调用,find 会命中第一次) */
+    const lastCreateBody = (): Record<string, unknown> => {
+      const posts = vi.mocked(fetch).mock.calls.filter(
+        ([input, init]) => String(input) === '/api/tasks' && (init?.method ?? 'GET') === 'POST',
+      );
+      return JSON.parse(String(posts[posts.length - 1]?.[1]?.body)) as Record<string, unknown>;
+    };
+
+    // 不传:请求体不得出现 character_id 键(避免污染新请求)
+    await createTask('目标', 'exec-1', 'legacy');
+    expect(lastCreateBody()).not.toHaveProperty('character_id');
+
+    // 显式传(旧调用方):按兼容语义下发
+    await createTask('目标', undefined, 'legacy', 'char-legacy');
+    expect(lastCreateBody()).toMatchObject({
+      title: '目标',
+      executor_id: null,
+      character_id: 'char-legacy',
+    });
   });
 
   it('approveTask:POST /tasks/{id}/approve;不给 plan 时空体,给了 plan 则带 plan 字段', async () => {

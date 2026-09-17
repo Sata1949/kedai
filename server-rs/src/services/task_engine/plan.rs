@@ -78,6 +78,7 @@ impl ApprovedPlanExecutor {
                 session_id: format!("task:{}", ctx.task_id),
                 goal,
                 settings: ctx.settings.clone(),
+                executor_id: ctx.executor_id.clone(),
                 character_id: ctx.character_id.clone(),
                 phase: "agent",
                 step_index: Some(i),

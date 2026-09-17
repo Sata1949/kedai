@@ -119,13 +119,18 @@ pub(crate) trait TaskSettings: Send + Sync {
 
 // ==================== 窄接口(4/8):提示词组装 ====================
 
-/// 执行者提示词组装能力(内置指令/人设/世界书/注入/Agent 提示词)。
+/// 执行者提示词组装能力(内置指令/执行者身份/世界书/注入/Agent 提示词)。
 pub(crate) trait TaskPromptKit: Send + Sync {
-    /// 执行者 system 提示词组装(内置执行者指令 → 人设 → 世界书 → 提示词注入 →
+    /// 执行者 system 提示词组装(内置执行者指令 → 执行者身份段 → 世界书 → 提示词注入 →
     /// 用户可编辑 Agent 提示词)。
+    ///
+    /// 两个身份入参不是「二选一必填」而是**优先级**:`executor_id` 命中执行者库时
+    /// 独占身份段(角色卡不参与),否则回退 `character_id` 的旧角色卡路径——
+    /// 后者保留仅为旧任务零回归,新任务不再写 character_id。
     fn assemble_executor_system_prompt(
         &self,
         settings: &RuntimeSettings,
+        executor_id: Option<&str>,
         character_id: Option<&str>,
         user_goal: &str,
     ) -> String;

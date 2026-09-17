@@ -16,6 +16,12 @@ use std::sync::Arc;
 #[derive(Deserialize)]
 pub struct CreateTaskBody {
     pub title: String,
+    /// 执行者库 id(可选;缺省 = 通用执行者)。指向 data/task_executors.json,
+    /// 不存在的 id 由服务层静默丢弃(执行者属可选增强,不该让创建失败)。
+    #[serde(default)]
+    pub executor_id: Option<String>,
+    /// 兼容字段:旧客户端的角色卡执行者。服务端**一律忽略**(执行者已与角色卡解耦,
+    /// 落库时 character_id 显式置 NULL)——保留字段只为旧客户端请求不 400。
     #[serde(default)]
     pub character_id: Option<String>,
     /// 执行模式(批次 4 六模式):缺省 legacy;未知值严格拒绝(400),
@@ -73,8 +79,17 @@ pub async fn create(
         },
     };
     let svc = state.tasks.clone();
+    let executor_id = body.executor_id.clone();
+    let character_id = body.character_id.clone();
     match state
-        .db_call(move || svc.create(&body.title, body.character_id.as_deref(), mode))
+        .db_call(move || {
+            svc.create(
+                &body.title,
+                executor_id.as_deref(),
+                character_id.as_deref(),
+                mode,
+            )
+        })
         .await
     {
         Err(e) => db_err(&e),

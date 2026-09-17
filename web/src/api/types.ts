@@ -776,11 +776,17 @@ export interface TaskRecord {
   plan: TaskStep[];
   result: string;
   error: string;
+  /**
+   * 执行者人设角色 id。**兼容字段**:执行者已改由 executor_id 承担(独立执行者库),
+   * 新任务不再写它;旧任务读出该值时仍按旧语义注入角色人设,故类型保留。
+   */
   character_id?: string | null;
   created_at: string;
   updated_at: string;
   /** 执行模式(批次 4;旧服务端不带此字段,消费侧按 legacy 处理) */
   task_mode?: TaskRunMode;
+  /** 执行者库 id(空 = 通用执行者);指向后端 data/task_executors.json */
+  executor_id?: string | null;
 }
 
 /**

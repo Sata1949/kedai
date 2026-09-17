@@ -47,7 +47,9 @@ pub(super) fn recover_orphan_tasks(db: &Db) -> Vec<String> {
     ids
 }
 
-/// 任务主表列:0 id, 1 title, 2 status, 3 plan, 4 result, 5 error, 6 character_id, 7 created_at, 8 updated_at, 9 task_mode
+/// 任务主表列:0 id, 1 title, 2 status, 3 plan, 4 result, 5 error, 6 character_id,
+/// 7 created_at, 8 updated_at, 9 task_mode, 10 executor_id
+/// (新增列一律追加在表尾,与 TASK_COLS 及建表顺序一致)
 pub(super) fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<TaskRecord> {
     let plan_str: String = row.get(3)?;
     let plan = serde_json::from_str(&plan_str).unwrap_or_default();
@@ -66,11 +68,12 @@ pub(super) fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<TaskRecord> {
         updated_at: row.get(8)?,
         // DB 读取容错:未知模式记 warn 回退 Legacy(与 status 同款约定)
         task_mode: TaskRunMode::from_str_lossy(&task_mode),
+        executor_id: row.get(10)?,
     })
 }
 
-pub(super) const TASK_COLS: &str =
-    "id, title, status, plan, result, error, character_id, created_at, updated_at, task_mode";
+pub(super) const TASK_COLS: &str = "id, title, status, plan, result, error, character_id, \
+     created_at, updated_at, task_mode, executor_id";
 
 /// 按字符截断(中文安全,不切 char 边界;调用追踪摘要用)
 fn truncate_chars(s: &str, max: usize) -> String {

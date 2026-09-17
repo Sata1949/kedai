@@ -18,7 +18,11 @@ pub(crate) struct TaskRunContext {
     pub goal: String,
     /// 任务模式有效设置快照(温度/top_p/max_tokens/max_tool_rounds/Agent 提示词等)
     pub settings: RuntimeSettings,
-    /// 执行者人设角色 id(空 = 通用执行者)
+    /// 执行者库 id(空 = 通用执行者)。命中时以该执行者指令为身份段,
+    /// `character_id` 随之不参与(见 TaskPromptKit::assemble_executor_system_prompt)。
+    pub executor_id: Option<String>,
+    /// 执行者人设角色 id(空 = 通用执行者)。**兼容字段**:仅为旧任务保留,
+    /// 新任务由 executor_id 承担;两者都空时即通用执行者。
     pub character_id: Option<String>,
     /// 任务取消通道(TaskService cancel token 机制的接收端;true = 已请求停止)。
     /// 直接作为 run_tool_loop 的 abort 传入,stop 语义与 legacy/聊天路径一致。

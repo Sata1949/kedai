@@ -156,6 +156,9 @@ impl Db {
                 // 幂等 schema 升级(批次 4 六模式):旧库 tasks 补 task_mode 列
                 crate::migration::ensure_tasks_task_mode_column(&conn)
                     .map_err(|e| format!("升级 tasks task_mode 列失败: {e}"))?;
+                // 幂等 schema 升级(执行者库):旧库 tasks 补 executor_id 列(可空,零回填)
+                crate::migration::ensure_tasks_executor_id_column(&conn)
+                    .map_err(|e| format!("升级 tasks executor_id 列失败: {e}"))?;
                 // 幂等 schema 升级(可观测性问题①):旧库 task_llm_calls 补 finish_reason 列
                 crate::migration::ensure_task_llm_calls_finish_reason_column(&conn)
                     .map_err(|e| format!("升级 task_llm_calls finish_reason 列失败: {e}"))?;

@@ -32,7 +32,10 @@ pub(crate) struct AgentLoopCall {
     pub goal: String,
     /// 任务模式有效设置快照(执行全程读快照,与 legacy 同语义)
     pub settings: RuntimeSettings,
-    /// 执行者人设角色 id(空 = 通用执行者)
+    /// 执行者库 id(空 = 通用执行者)。与 character_id 的优先级见
+    /// TaskPromptKit::assemble_executor_system_prompt:executor_id 命中即独占身份段。
+    pub executor_id: Option<String>,
+    /// 执行者人设角色 id(空 = 通用执行者)。兼容字段,仅为旧任务保留。
     pub character_id: Option<String>,
     /// 调用追踪 phase(solo/multi/team 主 agent 均为 "agent")
     pub phase: &'static str,
@@ -59,8 +62,12 @@ pub(crate) async fn run_agent_loop(
     // system 提示词组装:统一走 TaskBackend::assemble_executor_system_prompt
     // (单一实现,宿主侧 prompt.rs);拼装顺序与 untrusted 包裹纪律同 legacy,
     // 勿在本文件复制实现(WP7)。
-    let sys =
-        svc.assemble_executor_system_prompt(settings, call.character_id.as_deref(), &call.goal);
+    let sys = svc.assemble_executor_system_prompt(
+        settings,
+        call.executor_id.as_deref(),
+        call.character_id.as_deref(),
+        &call.goal,
+    );
 
     let mut messages = vec![
         LlmMessage::plain("system", &sys),
@@ -249,6 +256,7 @@ impl SoloExecutor {
             session_id: format!("task:{}", ctx.task_id),
             goal: ctx.goal.clone(),
             settings: ctx.settings.clone(),
+            executor_id: ctx.executor_id.clone(),
             character_id: ctx.character_id.clone(),
             phase: "agent",
             step_index: None,
