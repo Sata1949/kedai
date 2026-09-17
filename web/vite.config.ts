@@ -23,14 +23,15 @@ export default defineConfig({
             if (id.includes('vue') || id.includes('pinia')) return 'vue-vendor';
             return 'vendor';
           }
-          // 应用代码分组(配合 App.vue defineAsyncComponent 懒加载):大弹窗各自/分组拆 chunk,
-          // 首屏 index.js 不再内联弹窗实现。仅归组「仅被懒加载入口引用」的组件文件,
-          // 避免把首屏共享模块误划入异步 chunk 造成反向耦合。
-          if (id.includes('/components/SettingsHub') || id.includes('/components/SettingsModal')) return 'modal-settings';
-          if (id.includes('/components/PromptManager')) return 'modal-prompt';
-          if (id.includes('/components/ContractsModal')) return 'modal-contracts';
-          if (id.includes('/components/DevToolsModal')) return 'modal-devtools';
-          if (id.includes('/components/WorldBooksModal')) return 'modal-worldbooks';
+          // 应用代码不设 manualChunks(2026-09-17 P-8 修复):改用 Rollup 默认分块。
+          // 原实现在此把 SettingsHub/SettingsModal 等弹窗组件强制归组。但每个弹窗组件都
+          // 静态 import 了 store.ts(顶层实例化全部子 store)/api/composable,这些模块
+          // **同时被首屏入口引用**;强制归组把它们一并拖进 modal-* chunk,于是 index.js
+          // 出现对 modal-* 的静态边 → index.html 发出 modulepreload → 首屏白拉弹窗实现。
+          // 实测:仅删 SettingsHub/SettingsModal 两条会把耦合原样搬到 modal-worldbooks
+          // (25.9 KB → 191 KB,比原 modal-settings 更大),故此处归组必须整体去掉。
+          // 去掉后 Rollup 把入口共享模块并入 index chunk,弹窗实现留在各自的异步 chunk,
+          // modals.ts 的动态 import() 懒加载语义天然保持(首屏预载实测已无 modal-*)。
           return undefined;
         }
       }
