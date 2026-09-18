@@ -102,6 +102,55 @@ pub(super) async fn maybe_run_tool(
         .update(agent_session_id, Some("executing"), None, None, None);
     Ok(())
 }
+/// 任务模式「单次 LLM 调用」总时长上限(第二次看门狗,2026-09-18)。
+///
+/// 为什么需要:姊妹路径 `TaskService::generate_text`(规划/步骤/汇总等纯生成)有 300s
+/// 总时长看门狗(`task_service/mod.rs` 的 `TASK_LLM_TOTAL_TIMEOUT`),而工具循环
+/// (`run_tool_loop` → `execute_generation`)此前只有连接器层的**空闲**看门狗与轮次上限,
+/// 没有总时长上限。两个缺口叠加可让任务无限停在 running:
+///   ① 引擎侧无总时长;② 空闲判定对「慢速滴流」无效——上游每 <120s 吐几个字节即可
+///   每次重置空闲计时,单轮生成拖到无穷。
+/// 本轮把任务模式补齐到与纯生成同档(300s/次),超时让任务进 error 终态而非静默卡死。
+///
+/// 常量与 `task_service` 的同名值口径一致但不跨层 import(L3 引擎不依赖 L2 服务;
+/// 两处各自声明、注释互指,改动时须同步)。
+///
+/// 风险:会中断「极慢但最终能返回」的上游请求。取 300s 而非更小值,是因为推理模型
+/// 单轮生成数十秒属正常;与 planner/step 既有 300s 口径一致,不对同类调用双标。
+const TASK_TOOL_LOOP_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// 总时长看门狗包装:`watchdog=None` 时行为与裸调完全一致;`Some(limit)` 时超过
+/// `limit` 未完成即放弃 future 并返回 `timeout_error()`。
+///
+/// 抽成泛型是为了让单测能用毫秒级阈值覆盖「超时/未超时」两条分支——生产阈值 300s
+/// 不可能在测试里真等。
+async fn with_call_watchdog<F, T>(
+    fut: F,
+    watchdog: Option<std::time::Duration>,
+    timeout_error: impl FnOnce() -> EngineError,
+) -> Result<T, EngineError>
+where
+    F: std::future::Future<Output = Result<T, EngineError>>,
+{
+    let Some(limit) = watchdog else {
+        return fut.await;
+    };
+    match tokio::time::timeout(limit, fut).await {
+        Ok(r) => r,
+        Err(_) => Err(timeout_error()),
+    }
+}
+
+/// 该会话是否启用工具循环总时长看门狗(任务模式虚拟 session 为 `task:` 前缀)。
+///
+/// 抽成纯函数以便单测锁死「只有任务模式启用」这条边界:聊天路径的长回复是正常形态,
+/// 加总时长上限会把「模型慢慢写长文」误判为失败。
+fn call_watchdog_for(session_id: &str) -> Option<std::time::Duration> {
+    session_id
+        .starts_with("task:")
+        .then_some(TASK_TOOL_LOOP_CALL_TIMEOUT)
+}
+
 /// 流式执行 LLM 生成(与 Node 版 executor.ts executeGeneration 对齐)
 /// pub(crate):任务引擎 custom 模式(批次 4.3b)按步骤直调;聊天路径行为不变。
 #[allow(clippy::too_many_arguments)]
@@ -484,6 +533,9 @@ pub(crate) async fn run_tool_loop(
     // 此处用 utils::loop_guard 的同口径算法补上工具循环的守卫。
     // 口径 N=8 / K=3:窗口内同一「工具名+参数」指纹出现 ≥3 次即中止该步。
     let mut loop_guard = crate::utils::loop_guard::LoopGuard::with_defaults();
+    // 单次调用总时长看门狗(2026-09-18):仅任务模式启用(见 call_watchdog_for 文档)。
+    // 聊天路径保持无总时长上限——长回复是正常形态,加限会误伤。
+    let call_watchdog = call_watchdog_for(session_id);
     // 截断自愈留痕(问题①):各轮触发的自愈记录,随最终 ExecutorResult 透出;
     // Err 传播(?)时丢弃——失败路径由调用方落 error 行,截断细节含在错误文案内
     let mut self_heals: Vec<SelfHealRecord> = Vec::new();
@@ -549,15 +601,37 @@ pub(crate) async fn run_tool_loop(
         let mut attempt_params = params.clone();
         let mut healed: Option<SelfHealRecord> = None;
         let result = loop {
-            let one = execute_generation(
-                engine,
-                session_id,
-                run_id,
-                llm_messages,
-                &attempt_params,
-                tx,
-                abort,
-                flag,
+            // 单次调用总时长看门狗(2026-09-18):任务模式下包 300s 上限,超时按超时分类
+            // 透出(任务侧照既有错误路径落 error 行并进 error 终态,不留静默挂起);
+            // 聊天路径 call_watchdog=None,行为与裸调完全一致。
+            let attempt_started = std::time::Instant::now();
+            let one = with_call_watchdog(
+                execute_generation(
+                    engine,
+                    session_id,
+                    run_id,
+                    llm_messages,
+                    &attempt_params,
+                    tx,
+                    abort,
+                    flag,
+                ),
+                call_watchdog,
+                || {
+                    let limit = call_watchdog.expect("看门狗为 Some 时才会走到超时分支"); // 见 call_watchdog_for
+                    tracing::warn!(
+                        session_id = session_id.to_string(),
+                        timeout_s = limit.as_secs(),
+                        elapsed_ms = attempt_started.elapsed().as_millis() as u64,
+                        max_tokens = attempt_params.max_tokens,
+                        "任务模式工具循环单次生成超时(总时长看门狗触发)"
+                    );
+                    crate::models::llm_error::LlmError::timeout(format!(
+                        "模型调用超过 {}s 未完成(上游停滞或输出过慢),已中止本轮;可重新执行任务",
+                        limit.as_secs()
+                    ))
+                    .into()
+                },
             )
             .await;
             // 已自愈过(重发仍失败):透出原结果,不再重发
@@ -1485,5 +1559,95 @@ mod tests {
             "下限之上的截断必须仍可自愈(旧封顶 8192 会返回 None)"
         );
         assert_eq!(doubled_heal_budget(65_536), Some(131_072));
+    }
+}
+
+#[cfg(test)]
+mod watchdog_tests {
+    use super::{call_watchdog_for, with_call_watchdog, EngineError, TASK_TOOL_LOOP_CALL_TIMEOUT};
+    use std::time::Duration;
+
+    /// 任务模式虚拟 session(`task:` 前缀)必须启用总时长看门狗——这是「任务无限停在
+    /// running」缺口的封堵点,漏接线则该缺口原样存在。
+    #[test]
+    fn watchdog_enabled_for_task_sessions_only() {
+        assert_eq!(
+            call_watchdog_for("task:57cf15f9-0508-440a-b1a3-ae2762b58581"),
+            Some(TASK_TOOL_LOOP_CALL_TIMEOUT),
+            "任务模式必须启用"
+        );
+        assert_eq!(
+            call_watchdog_for("task:abc:main:3:sub:def"),
+            Some(TASK_TOOL_LOOP_CALL_TIMEOUT),
+            "team/子 agent 的层叠 session 同样以 task: 开头,应一并启用"
+        );
+    }
+
+    /// 聊天路径不得启用:长回复是正常形态,加总时长会把正常生成判成失败。
+    #[test]
+    fn watchdog_disabled_for_chat_sessions() {
+        assert_eq!(call_watchdog_for("session-123"), None);
+        assert_eq!(call_watchdog_for(""), None);
+        // 边界:仅前缀匹配,含 task 但不以其开头的不算
+        assert_eq!(call_watchdog_for("mytask:1"), None);
+    }
+
+    /// 未超时:结果原样透出,错误路径不受影响。
+    #[tokio::test]
+    async fn watchdog_passes_through_when_within_limit() {
+        let out: Result<u32, EngineError> =
+            with_call_watchdog(async { Ok(42) }, Some(Duration::from_millis(500)), || {
+                EngineError::Internal("不应触发".into())
+            })
+            .await;
+        assert_eq!(out.unwrap(), 42);
+    }
+
+    /// 超时:放弃 future 并返回分类化超时错误(不是字符串猜测)。
+    #[tokio::test]
+    async fn watchdog_times_out_and_reports_timeout_kind() {
+        let out: Result<u32, EngineError> = with_call_watchdog(
+            async {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Ok(1)
+            },
+            Some(Duration::from_millis(50)),
+            || {
+                EngineError::Llm(crate::models::llm_error::LlmError::timeout(
+                    "模型调用超过 300s 未完成",
+                ))
+            },
+        )
+        .await;
+        let err = out.expect_err("超过阈值必须超时");
+        assert!(
+            err.message().contains("超过 300s 未完成"),
+            "实际:{}",
+            err.message()
+        );
+        // 分类须为超时:任务侧据此落 error 行,聊天路径据此映射错误码
+        match err {
+            EngineError::Llm(e) => assert_eq!(
+                e.kind(),
+                crate::models::llm_error::LlmErrorKind::Timeout,
+                "必须是超时分类,而不是内部错误"
+            ),
+            other => panic!("应为 EngineError::Llm(超时分类),实际 {other:?}"),
+        }
+    }
+
+    /// None = 不限时:future 按原样等待,行为与裸调一致(聊天路径语义)。
+    #[tokio::test]
+    async fn watchdog_none_awaits_without_limit() {
+        let out: Result<u32, EngineError> = with_call_watchdog(
+            async {
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                Ok(7)
+            },
+            None,
+            || EngineError::Internal("不应触发".into()),
+        )
+        .await;
+        assert_eq!(out.unwrap(), 7);
     }
 }
