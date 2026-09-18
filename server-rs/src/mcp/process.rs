@@ -56,6 +56,10 @@ impl McpProcess {
             .stderr(std::process::Stdio::piped())
             // 句柄 Drop 即杀进程:防孤儿兜底(配合显式 kill 双保险)
             .kill_on_drop(true);
+        // 桌面版入口是 GUI 子系统(无控制台):派生控制台型 MCP 服务器(如 npx/cmd 包装)
+        // 会新建可见控制台窗口(2026-09-18,与 exec/desktop.rs 同源修复)。
+        #[cfg(windows)]
+        cmd.creation_flags(crate::utils::win::CREATE_NO_WINDOW);
         let mut child = cmd.spawn().map_err(|e| {
             format!(
                 "MCP 服务器 \"{}\" 启动失败({}): {e}。下一步:核对设置里的 command/args 是否存在于本机",
