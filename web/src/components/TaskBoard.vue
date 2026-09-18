@@ -15,6 +15,9 @@ import type { TaskApproveExecMode, TaskRecord, TaskRunMode, TaskStep } from '../
 const store = useAppStore();
 const { currentTask, currentTaskId, model, currentTaskUsage, executorById } = storeToRefs(store);
 
+/** 最近一条执行进展(主/子 agent 状态简述;store 消费 agent_status 事件,不落库) */
+const lastAgentStatus = computed(() => store.lastAgentStatus);
+
 /** 当前任务是否在执行中(planning / running) */
 const taskRunning = computed(() => {
   const s = currentTask.value?.task.status;
@@ -447,6 +450,19 @@ async function removeTask(task: TaskRecord): Promise<void> {
             <span v-if="currentTask.task.error" class="sv-task-error">{{ currentTask.task.error }}</span>
           </div>
 
+          <!-- 执行中进度行(2026-09-18):后端 agent_status 事件本就携带每轮进展简述,
+               此前只用于刷详情、不展示——任务长时间执行时界面完全静止,用户无法区分
+               「还在跑」与「已挂死」(实跑反馈:空转 70 秒期间界面无任何变化)。
+               此处展示最近一条,给出可见的活性证据。事件不落库,故仅执行中显示。 -->
+          <div
+            v-if="taskRunning && lastAgentStatus"
+            class="sv-task-progress-line"
+            title="最近一次执行进展(来自后端事件,事件不落库)"
+          >
+            <span class="sv-task-progress-dot" />
+            <span class="sv-task-progress-text">{{ lastAgentStatus }}</span>
+          </div>
+
           <!-- plan 模式批准区:计划已生成待批准(批准 / 修改后批准 / 放弃) -->
           <div v-if="taskPlanned" class="sv-task-approve">
             <div class="sv-task-section-title">计划待批准</div>
@@ -773,4 +789,32 @@ async function removeTask(task: TaskRecord): Promise<void> {
 }
 .sv-task-approve-exec .sv-select { flex: 1; min-width: 0; }
 .approve-exec-hint { margin: 6px 0 0; }
+
+/* 执行中进度行(2026-09-18):展示最近一条 agent_status 简述,长循环期间可见活性。
+   脉冲圆点用既有动画节奏;文字单行省略,避免长工具名把状态行撑开。 */
+.sv-task-progress-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 0;
+  font-size: 0.85em;
+  color: var(--sv-text-dim, #999);
+}
+.sv-task-progress-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sv-task-progress-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--sv-accent, #4ea1ff);
+  animation: sv-progress-pulse 1.4s ease-in-out infinite;
+}
+@keyframes sv-progress-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
 </style>

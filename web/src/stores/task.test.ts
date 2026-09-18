@@ -653,6 +653,67 @@ describe('批次 4 六模式:taskRunMode / approveTask / 新事件分支', () =>
     await flush();
     expect(h.detailFetchCount, '非当前任务不拉详情').toBe(baseDetail + 1);
   });
+
+  // ===== 执行中进度行(2026-09-18)=====
+  // 后端的 agent_status 事件本就带每轮进展简述,此前只用于刷详情、不展示,导致任务
+  // 长时间执行时界面完全静止(实跑反馈:空转 70 秒无法区分「还在跑」与「已挂死」)。
+  // 这组用例锁「最近一条可见 + 不串任务 + 切任务清空」三条口径。
+
+  it('agent_status 留存最近一条详情供面板展示进度', async () => {
+    const store = useTaskStore();
+    store.appMode = 'task';
+    store.startTaskEvents();
+    await store.selectTask('t1');
+
+    expect(store.lastAgentStatus, '初始无进度').toBeNull();
+    h.emitEvent!({ type: 'task', task_id: 't1', kind: 'agent_status', detail: '主 agent 调用工具 bash' });
+    await flush();
+    expect(store.lastAgentStatus).toBe('主 agent 调用工具 bash');
+
+    // 只保留最近一条(进度行的语义是「此刻在做什么」,不是历史时间线)
+    h.emitEvent!({ type: 'task', task_id: 't1', kind: 'agent_status', detail: '工具 bash 已返回结果' });
+    await flush();
+    expect(store.lastAgentStatus).toBe('工具 bash 已返回结果');
+  });
+
+  it('其它任务的 agent_status 不写入进度行(不串台)', async () => {
+    const store = useTaskStore();
+    store.appMode = 'task';
+    store.startTaskEvents();
+    await store.selectTask('t1');
+    h.emitEvent!({ type: 'task', task_id: 't1', kind: 'agent_status', detail: '主 agent 调用工具 read' });
+    await flush();
+
+    h.emitEvent!({ type: 'task', task_id: 'other', kind: 'agent_status', detail: '别的任务在动' });
+    await flush();
+    expect(store.lastAgentStatus, '非当前任务的进度不得覆盖').toBe('主 agent 调用工具 read');
+  });
+
+  it('细节缺失的 agent_status 不写入进度行(旧服务端事件兼容)', async () => {
+    const store = useTaskStore();
+    store.appMode = 'task';
+    store.startTaskEvents();
+    await store.selectTask('t1');
+    h.emitEvent!({ type: 'task', task_id: 't1', kind: 'agent_status', detail: '先有一条' });
+    await flush();
+
+    h.emitEvent!({ type: 'task', task_id: 't1', kind: 'agent_status' });
+    await flush();
+    expect(store.lastAgentStatus, '无 detail 时保持原值,不写入空串').toBe('先有一条');
+  });
+
+  it('切换任务清空进度行(事件不落库,旧任务的进度不代入新任务)', async () => {
+    const store = useTaskStore();
+    store.appMode = 'task';
+    store.startTaskEvents();
+    await store.selectTask('t1');
+    h.emitEvent!({ type: 'task', task_id: 't1', kind: 'agent_status', detail: 't1 在动' });
+    await flush();
+    expect(store.lastAgentStatus).toBe('t1 在动');
+
+    await store.selectTask('t2');
+    expect(store.lastAgentStatus, '切任务即清空').toBeNull();
+  });
 });
 
 describe('plan 模式生命周期:planned → 批准 → done(签名去重不吞 plan 更新)', () => {

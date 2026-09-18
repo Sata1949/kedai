@@ -127,6 +127,26 @@ export const useTaskStore = defineStore('app.task', () => {
     liveBuffers.value = new Map();
   }
 
+  /**
+   * 最近一条 agent 状态详情(主/子 agent 状态迁移的简述文本)。
+   *
+   * 为什么需要:任务长时间执行时,工具循环的每轮进展只在事件里出现一次
+   * (kind=agent_status,如「主 agent 调用工具 bash」),而面板只按详情刷新步骤区——
+   * 用户看不到「它还在动」,只能看到一个不动的「执行中」,与真正挂死无法区分
+   * (2026-09-18 实跑反馈:任务空转 70 秒期间界面无任何变化,用户手动停止)。
+   * 此处保留最近一条并展示,把已有的后端事件变成可见进度。
+   * 事件本身不落库(queue 事件不持久化),故切换任务/终态时清空,避免串台。
+   */
+  const lastAgentStatus = ref<string | null>(null);
+
+  /** 记录一条 agent 状态(仅当前任务;detail 缺失视为旧服务端事件,忽略) */
+  function setAgentStatus(ev: api.TaskEvent): void {
+    if (ev.task_id !== currentTaskId.value) return;
+    const detail = ev.detail?.trim();
+    if (!detail) return;
+    lastAgentStatus.value = detail;
+  }
+
   // ===== SSE 订阅与重连(非响应式内部状态) =====
   /** 当前事件订阅的关闭函数(null = 未订阅) */
   let closeTaskEvents: (() => void) | null = null;
@@ -288,6 +308,8 @@ export const useTaskStore = defineStore('app.task', () => {
     taskCalls.value = [];
     callsSignature = contentSignature([]);
     clearAllLiveDeltas();
+    // 最近 agent 状态同理:agent_status 不落库,新任务从空开始(等下一个事件)
+    lastAgentStatus.value = null;
     await loadTaskDetail(id);
   }
 
@@ -298,6 +320,7 @@ export const useTaskStore = defineStore('app.task', () => {
     currentTaskUsage.value = null;
     taskCalls.value = [];
     clearAllLiveDeltas();
+    lastAgentStatus.value = null;
     persistCurrentTaskId(null);
   }
 
@@ -386,7 +409,9 @@ export const useTaskStore = defineStore('app.task', () => {
         break;
       case 'agent_status':
         // 主/子 agent 状态迁移(detail 为简述,前端不解析):当前任务刷新详情;
-        // 详情刷新有按 id 的 in-flight 合并兜底,事件密集时不叠加并发请求
+        // 详情刷新有按 id 的 in-flight 合并兜底,事件密集时不叠加并发请求。
+        // 同时留存最近一条详情供面板展示「还在动」(见 lastAgentStatus 文档)。
+        setAgentStatus(ev);
         if (ev.task_id === currentTaskId.value) void loadTaskDetail(ev.task_id);
         break;
       case 'deleted':
@@ -398,6 +423,7 @@ export const useTaskStore = defineStore('app.task', () => {
           taskCalls.value = [];
           callsSignature = contentSignature([]);
           clearAllLiveDeltas(); // 批次 R4:任务删除,其流式缓冲一并失效
+          lastAgentStatus.value = null;
         }
         break;
       case undefined:
@@ -578,6 +604,7 @@ export const useTaskStore = defineStore('app.task', () => {
     globalTaskUsage,
     taskCalls,
     liveBuffers,
+    lastAgentStatus,
     setAppMode,
     loadTasks,
     loadGlobalTaskUsage,
