@@ -569,11 +569,25 @@ pub(crate) async fn run_tool_loop(
     let call_watchdog = call_watchdog_for(session_id);
     // token 预算(HB-1):循环前取一次设置快照(与上面工具历史裁剪同款口径,
     // 不留锁跨 await);0 = 关闭。budget_noticed 保证 warn 档只提示一次。
-    let (token_budget, budget_action) = {
+    let (token_budget, budget_action, semantic_window, semantic_min_calls, semantic_max_distinct) = {
         let s = engine.settings_snapshot();
-        (s.session_token_budget, s.session_budget_action)
+        (
+            s.session_token_budget,
+            s.session_budget_action,
+            s.loop_guard_semantic_window as usize,
+            s.loop_guard_semantic_min_calls as usize,
+            s.loop_guard_semantic_max_distinct as usize,
+        )
     };
     let mut budget_noticed = false;
+    // 语义熔断(HB-2):看「输出的实质变化」而非参数指纹——参数每轮略变即绕开指纹熔断,
+    // 实测 54 轮不同命令烧 137 万 token(遗留 L22)。登记点在工具执行收尾(输出此时可得)。
+    let mut semantic_guard = crate::utils::loop_guard::SemanticGuard::new(
+        semantic_window,
+        semantic_min_calls,
+        semantic_max_distinct,
+    );
+    let mut semantic_break: Option<(String, usize, usize)> = None;
     // 截断自愈留痕(问题①):各轮触发的自愈记录,随最终 ExecutorResult 透出;
     // Err 传播(?)时丢弃——失败路径由调用方落 error 行,截断细节含在错误文案内
     let mut self_heals: Vec<SelfHealRecord> = Vec::new();
@@ -1022,6 +1036,13 @@ pub(crate) async fn run_tool_loop(
                 tool_calls: None,
                 tool_call_id: Some(e.call.id.clone()),
             });
+            // 语义熔断登记(HB-2):输出经归一化(抹时间戳/耗时/计数)后取指纹;
+            // 同一工具在窗口内调用 ≥N 次且指纹去重 ≤K 即判定空转。只记录首个命中,
+            // 收尾按与「重复调用熔断」同款方式中止(本轮工具已执行完,无悬挂)。
+            if semantic_break.is_none() {
+                let fp = crate::utils::loop_guard::output_fingerprint(&e.output.to_string());
+                semantic_break = semantic_guard.record(&e.call.name, fp);
+            }
         }
         // ===== token 预算闸门(HB-1,2026-09-18):按**成本**而非轮数收口 =====
         // 轮次上限(max_tool_rounds 默认 32)只管轮数:实测 54 轮各不相同命令的空转仍烧
@@ -1094,6 +1115,38 @@ pub(crate) async fn run_tool_loop(
                     None,
                     None,
                 ),
+                tx,
+                abort,
+                flag,
+            )
+            .await?;
+            return Ok(ExecutorResult {
+                content: result.content,
+                usage: TokenUsage::default(),
+                interrupted: false,
+                tool_calls: Vec::new(),
+                reasoning: String::new(),
+                finish_reason: result.finish_reason,
+                self_heals: std::mem::take(&mut self_heals),
+                budget_stopped: false,
+            });
+        }
+        // 语义熔断(HB-2):同一工具在窗口内反复调用且输出实质无变化(参数可以每轮都变)。
+        // 与「重复调用熔断」互补——后者抓同参数空转,本项抓「参数在变、结果不变」的空转。
+        // 同样置于 last_round 之后:轮次上限是更明确的终止条件。
+        if let Some((tool, calls, distinct)) = semantic_break.take() {
+            let detail = format!(
+                "检测到重复空转:工具 \"{tool}\" 在最近 {semantic_window} 次调用中出现 {calls} 次,输出实质无变化(去重后 {distinct} 种),已在第 {round} 轮中止。请调整策略后重试。"
+            );
+            tracing::warn!(
+                session_id = session_id.to_string(),
+                tool = tool.as_str(),
+                calls,
+                distinct,
+                "工具循环重复空转熔断(HB-2)"
+            );
+            send_event(
+                step_evt("重复空转熔断", Some(detail), None, None),
                 tx,
                 abort,
                 flag,

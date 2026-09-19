@@ -3393,6 +3393,8 @@ async fn token_budget_stop_halts_tool_loop_and_keeps_output() {
             "max_tool_rounds": 200,
             "session_token_budget": 1024,
             "session_budget_action": "stop",
+            // 这些用例要跑满 128 轮同工具循环:语义熔断(HB-2)会在第 12 轮先熔断,故关闭
+            "loop_guard_semantic_min_calls": 0,
         }),
     )
     .await;
@@ -3492,6 +3494,7 @@ async fn token_budget_stop_halts_tool_loop_and_keeps_output() {
             "max_tool_rounds": 32,
             "session_token_budget": 0,
             "session_budget_action": "warn",
+            "loop_guard_semantic_min_calls": 12,
         }),
     )
     .await;
@@ -3511,6 +3514,7 @@ async fn token_budget_warn_notices_once_and_continues() {
             "max_tool_rounds": 200,
             "session_token_budget": 1024,
             "session_budget_action": "warn",
+            "loop_guard_semantic_min_calls": 0,
         }),
     )
     .await;
@@ -3581,8 +3585,77 @@ async fn token_budget_warn_notices_once_and_continues() {
             "max_tool_rounds": 32,
             "session_token_budget": 0,
             "session_budget_action": "warn",
+            "loop_guard_semantic_min_calls": 12,
         }),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+}
+
+/// 语义熔断(HB-2,2026-09-18):同一工具反复调用、**参数每轮都变而输出实质无变化**
+/// → 熔断。既有「重复调用熔断」按「工具名+参数」指纹,对参数略变的空转无效
+/// (实测 54 轮各不相同的命令烧 137 万 prompt token,遗留 L22)。
+///
+/// 形态:mock 的 [[tool_loop:...]] 每轮经 vary_tool_args 注入新 _mock_round(指纹互不相同),
+/// 而 read 返回同一内容 → 只可能被输出侧判定抓住。
+#[tokio::test]
+async fn semantic_loop_guard_breaks_on_unchanged_output() {
+    let _guard = test_lock().await;
+    let app = test_app();
+    let (_, char) = upload_character(app, "空转熔断.json").await;
+    let cid = char["id"].as_str().unwrap().to_string();
+    let (_, session) = send_json(
+        app,
+        "POST",
+        "/api/chat/sessions",
+        json!({ "character_id": cid }),
+    )
+    .await;
+    let sid = session["id"].as_str().unwrap().to_string();
+
+    let args = r#"{"queries":[{"type":"character_prompt"}]}"#;
+    let events = sse_events(
+        app,
+        &sid,
+        &cid,
+        &format!("[[tool_loop:read|20 {args}]]"),
+        "agent",
+    )
+    .await;
+
+    let broke = events
+        .iter()
+        .any(|e| e["type"] == "step" && e["step"] == "重复空转熔断");
+    assert!(broke, "输出无变化的同工具空转应熔断并透出理由: {events:?}");
+    // 对照:参数每轮都变,指纹熔断不该触发(说明抓住它的确实是输出侧判定)
+    assert!(
+        !events
+            .iter()
+            .any(|e| e["type"] == "step" && e["step"] == "重复调用熔断"),
+        "本形态参数各不相同,不该走指纹熔断: {events:?}"
+    );
+    // 熔断发生在收到第 12 个同工具结果之后(每步各算各的窗口:agent 模式后续步骤
+    // 会再起一轮工具循环,故这里只看**首次**熔断之前的调用数)
+    let trip_at = events
+        .iter()
+        .position(|e| e["type"] == "step" && e["step"] == "重复空转熔断")
+        .expect("熔断事件位置");
+    let calls_before = events[..trip_at]
+        .iter()
+        .filter(|e| e["type"] == "tool_call")
+        .count();
+    assert_eq!(
+        calls_before, 12,
+        "默认下限 12:首次熔断前应恰有 12 次同工具调用(而非跑满 20 轮): {calls_before}"
+    );
+    let tool_calls = events.iter().filter(|e| e["type"] == "tool_call").count();
+    let tool_results = events.iter().filter(|e| e["type"] == "tool_result").count();
+    assert_eq!(
+        tool_results, tool_calls,
+        "已执行的工具调用必须都有 tool_result 终态(无悬挂): {events:?}"
+    );
+    assert!(
+        events.iter().any(|e| e["type"] == "finish"),
+        "熔断按正常终态收尾(不是 error): {events:?}"
+    );
 }

@@ -21,6 +21,7 @@ const {
   temperature, topP, maxTokens, maxContextTokens, maxToolRounds,
   toolHistoryKeepRounds, toolHistoryBudgetTokens,
   sessionTokenBudget, sessionBudgetAction,
+  loopGuardSemanticWindow, loopGuardSemanticMinCalls, loopGuardSemanticMaxDistinct,
   compactionMode, compactionThreshold, compactionKeepRecent, compactionSnipBytes,
   memoryDistillEnabled, memoryInjectLimit, memoryInjectCharBudget, memoryMaxEntries,
   subagentMaxDepth, subagentMaxConcurrency, subagentResultMaxChars,
@@ -152,6 +153,41 @@ const { tempLabel, topPLabel, ctxLabel, saveParams, paramsMsg, saveParamsNow } =
           <option value="stop">stop · 停止工具循环</option>
         </select>
         <span class="sv-note">默认 warn;stop 用于硬性控成本(长工具循环提前收尾)</span>
+      </div>
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">空转熔断次数下限</label>
+        <input
+          v-model.number="loopGuardSemanticMinCalls"
+          type="number"
+          min="0"
+          max="64"
+          step="1"
+          class="sv-input inject-num"
+          title="同一工具在窗口内被调用达到该次数、且输出实质无变化时熔断空转;0 = 关闭本闸门"
+        />
+        <span class="sv-note">0 = 关闭;否则 4-64(默认 12)</span>
+      </div>
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">空转熔断窗口 / 输出去重上限</label>
+        <input
+          v-model.number="loopGuardSemanticWindow"
+          type="number"
+          min="4"
+          max="64"
+          step="1"
+          class="sv-input inject-num"
+          title="近多少次工具调用内做空转判定(默认 16)"
+        />
+        <input
+          v-model.number="loopGuardSemanticMaxDistinct"
+          type="number"
+          min="1"
+          max="8"
+          step="1"
+          class="sv-input inject-num"
+          title="窗口内同工具输出指纹去重后不超过该值即判空转(默认 2)"
+        />
+        <span class="sv-note">窗口 4-64(默认 16);去重上限 1-8(默认 2)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">压缩模式</label>

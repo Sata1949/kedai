@@ -42,6 +42,12 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
   const sessionTokenBudget = ref(0);
   /** 预算超限动作:warn(只提示一次,默认)/ stop(停止本轮工具循环) */
   const sessionBudgetAction = ref<'warn' | 'stop'>('warn');
+  /** 语义熔断窗口(服务端默认 16) */
+  const loopGuardSemanticWindow = ref(16);
+  /** 语义熔断同工具调用次数下限(服务端默认 12;0 = 关闭) */
+  const loopGuardSemanticMinCalls = ref(12);
+  /** 语义熔断输出指纹去重上限(服务端默认 2) */
+  const loopGuardSemanticMaxDistinct = ref(2);
   /** 上下文压缩模式(off / manual / auto;服务端默认 off) */
   const compactionMode = ref<'off' | 'manual' | 'auto'>('off');
   /** 上下文压缩触发阈值(0.5..=0.95;服务端默认 0.8) */
@@ -132,6 +138,9 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
       toolHistoryBudgetTokens.value = s.tool_history_budget_tokens ?? 16384;
       sessionTokenBudget.value = s.session_token_budget ?? 0;
       sessionBudgetAction.value = s.session_budget_action === 'stop' ? 'stop' : 'warn';
+      loopGuardSemanticWindow.value = s.loop_guard_semantic_window ?? 16;
+      loopGuardSemanticMinCalls.value = s.loop_guard_semantic_min_calls ?? 12;
+      loopGuardSemanticMaxDistinct.value = s.loop_guard_semantic_max_distinct ?? 2;
       agentSystemPrompt.value = s.agent_system_prompt ?? '';
       searchEndpoint.value = s.search_endpoint ?? '';
       mvuVarsPosition.value = (s.mvu_vars_position ?? 'system') as 'system' | 'user_tail';
@@ -189,6 +198,9 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     toolHistoryBudgetTokens.value = s.tool_history_budget_tokens ?? 16384;
     sessionTokenBudget.value = s.session_token_budget ?? 0;
     sessionBudgetAction.value = s.session_budget_action === 'stop' ? 'stop' : 'warn';
+    loopGuardSemanticWindow.value = s.loop_guard_semantic_window ?? 16;
+    loopGuardSemanticMinCalls.value = s.loop_guard_semantic_min_calls ?? 12;
+    loopGuardSemanticMaxDistinct.value = s.loop_guard_semantic_max_distinct ?? 2;
     useModelConnStore().model = s.model;
     agentSystemPrompt.value = s.agent_system_prompt ?? '';
     searchEndpoint.value = s.search_endpoint ?? '';
@@ -321,6 +333,9 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     toolHistoryBudgetTokens,
     sessionTokenBudget,
     sessionBudgetAction,
+    loopGuardSemanticWindow,
+    loopGuardSemanticMinCalls,
+    loopGuardSemanticMaxDistinct,
     compactionMode,
     compactionThreshold,
     compactionKeepRecent,

@@ -169,6 +169,21 @@ pub(super) fn default_session_budget_action() -> String {
     "warn".to_string()
 }
 
+/// 默认语义熔断窗口(HB-2):同一工具近 16 次调用内累计达到下限即判空转
+pub(super) fn default_loop_guard_semantic_window() -> u32 {
+    16
+}
+
+/// 默认语义熔断同工具调用次数下限(HB-2;保守:宁可放过不可误杀)
+pub(super) fn default_loop_guard_semantic_min_calls() -> u32 {
+    12
+}
+
+/// 默认语义熔断输出指纹去重上限(HB-2):≤2 视为「输出实质无变化」
+pub(super) fn default_loop_guard_semantic_max_distinct() -> u32 {
+    2
+}
+
 /// 默认放行模式黑名单
 /// 授权模式默认值:新装为宽松(读写放行、仅删除需授权)。
 /// 旧配置的迁移见 `migrate_authorization_mode`(按旧 bypass_mode 修正)。
@@ -412,6 +427,9 @@ impl RuntimeSettings {
             tool_history_budget_tokens: default_tool_history_budget_tokens(),
             session_token_budget: default_session_token_budget(),
             session_budget_action: default_session_budget_action(),
+            loop_guard_semantic_window: default_loop_guard_semantic_window(),
+            loop_guard_semantic_min_calls: default_loop_guard_semantic_min_calls(),
+            loop_guard_semantic_max_distinct: default_loop_guard_semantic_max_distinct(),
             render_html: false,
             compaction_mode: default_compaction_mode(),
             compaction_threshold: default_compaction_threshold(),

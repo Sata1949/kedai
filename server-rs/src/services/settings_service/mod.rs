@@ -31,8 +31,10 @@ pub use params::{
 use params::{
     default_authorization_mode, default_bypass_blacklist, default_compaction_keep_recent,
     default_compaction_mode, default_compaction_snip_bytes, default_compaction_threshold,
-    default_max_tool_rounds, default_memory_inject_char_budget, default_memory_inject_limit,
-    default_memory_max_entries, default_session_budget_action, default_session_token_budget,
+    default_loop_guard_semantic_max_distinct, default_loop_guard_semantic_min_calls,
+    default_loop_guard_semantic_window, default_max_tool_rounds, default_memory_inject_char_budget,
+    default_memory_inject_limit, default_memory_max_entries, default_session_budget_action,
+    default_session_token_budget,
     default_skill_progressive_disclosure,
     default_subagent_max_concurrency, default_subagent_max_depth,
     default_subagent_result_max_chars, default_task_tool_policy,
@@ -163,6 +165,16 @@ pub struct RuntimeSettings {
     /// 预算超限动作(HB-1;warn = 只提示一次后继续(默认),stop = 提示并停止本轮工具循环)
     #[serde(default = "default_session_budget_action")]
     pub session_budget_action: String,
+    /// 语义熔断窗口(HB-2;默认 16,钳 4..=64):近 W 次工具调用内做「同工具 + 输出无变化」判定
+    #[serde(default = "default_loop_guard_semantic_window")]
+    pub loop_guard_semantic_window: u32,
+    /// 语义熔断同工具调用次数下限(HB-2;默认 12;0 = 关闭本闸门,否则钳 4..=64):
+    /// 窗口内同工具累计达到该次数且输出去重不超过上限即判空转
+    #[serde(default = "default_loop_guard_semantic_min_calls")]
+    pub loop_guard_semantic_min_calls: u32,
+    /// 语义熔断输出指纹去重上限(HB-2;默认 2,钳 1..=8):去重后不超过该值即判空转
+    #[serde(default = "default_loop_guard_semantic_max_distinct")]
+    pub loop_guard_semantic_max_distinct: u32,
     /// HTML 渲染开关(状态栏脚本执行前置条件):true = 开启(需用户主动授权脚本后再开启)
     #[serde(default)]
     pub render_html: bool,

@@ -370,6 +370,12 @@ export interface RuntimeSettings {
   session_token_budget: number;
   /** 预算超限动作:warn(只提示一次,默认)/ stop(提示并停止本轮工具循环) */
   session_budget_action: 'warn' | 'stop';
+  /** 语义熔断窗口(默认 16,4..=64):近 W 次工具调用内判定「同工具 + 输出无变化」 */
+  loop_guard_semantic_window: number;
+  /** 语义熔断同工具调用次数下限(默认 12;0 = 关闭,否则 4..=64) */
+  loop_guard_semantic_min_calls: number;
+  /** 语义熔断输出指纹去重上限(默认 2,1..=8) */
+  loop_guard_semantic_max_distinct: number;
   /** HTML 渲染开关(状态栏脚本执行前置条件):true = 开启安全 HTML 渲染 */
   render_html: boolean;
   /** 上下文压缩模式:off(不压缩)/ manual(手动触发)/ auto(token 超阈值自动压缩) */
@@ -493,6 +499,12 @@ export interface RuntimeSettingsPatch {
   session_token_budget?: number;
   /** 预算超限动作(warn/stop) */
   session_budget_action?: 'warn' | 'stop';
+  /** 语义熔断窗口(4..=64) */
+  loop_guard_semantic_window?: number;
+  /** 语义熔断同工具调用次数下限(0 = 关闭;否则 4..=64) */
+  loop_guard_semantic_min_calls?: number;
+  /** 语义熔断输出指纹去重上限(1..=8) */
+  loop_guard_semantic_max_distinct?: number;
   render_html?: boolean;
   compaction_mode?: string;
   compaction_threshold?: number;

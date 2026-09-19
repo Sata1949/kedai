@@ -8,8 +8,9 @@ use super::connection::DEFAULT_SEARCH_ENDPOINT;
 use super::params::{
     default_compaction_keep_recent, default_compaction_mode, default_compaction_snip_bytes,
     default_compaction_threshold, default_memory_inject_char_budget, default_memory_inject_limit,
-    default_memory_max_entries, default_roleplay_agent_prompt, default_session_budget_action,
-    default_session_token_budget, default_subagent_max_concurrency,
+    default_loop_guard_semantic_max_distinct, default_loop_guard_semantic_min_calls,
+    default_loop_guard_semantic_window, default_memory_max_entries, default_roleplay_agent_prompt,
+    default_session_budget_action, default_session_token_budget, default_subagent_max_concurrency,
     default_subagent_max_depth, default_subagent_result_max_chars, default_task_tool_policy,
     default_tool_authorization_timeout_secs, default_tool_history_budget_tokens,
     default_tool_history_keep_rounds, migrate_authorization_mode,
@@ -146,6 +147,18 @@ impl RuntimeSettings {
                 }
                 if !matches!(s.session_budget_action.as_str(), "warn" | "stop") {
                     s.session_budget_action = default_session_budget_action();
+                }
+                // HB-2:语义熔断参数钳制(窗口/下限 4..=64,去重上限 1..=8;越界回默认)
+                if !(4..=64).contains(&s.loop_guard_semantic_window) {
+                    s.loop_guard_semantic_window = default_loop_guard_semantic_window();
+                }
+                if s.loop_guard_semantic_min_calls != 0
+                    && !(4..=64).contains(&s.loop_guard_semantic_min_calls)
+                {
+                    s.loop_guard_semantic_min_calls = default_loop_guard_semantic_min_calls();
+                }
+                if !(1..=8).contains(&s.loop_guard_semantic_max_distinct) {
+                    s.loop_guard_semantic_max_distinct = default_loop_guard_semantic_max_distinct();
                 }
                 // MCP 服务器列表(批次 6.2):settings.json 可手改,启动装配前做一次卫生清理
                 // (trim 名称/命令,丢弃缺名或缺命令的不可用条目;与 PUT 校验同规则)

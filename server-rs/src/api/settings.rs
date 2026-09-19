@@ -191,6 +191,15 @@ pub struct UpdateSettingsBody {
     /// 预算超限动作(HB-1;warn/stop;缺省保持不变)
     #[serde(default)]
     pub session_budget_action: Option<String>,
+    /// 语义熔断窗口(HB-2;4..=64;缺省保持不变)
+    #[serde(default)]
+    pub loop_guard_semantic_window: Option<u32>,
+    /// 语义熔断同工具调用次数下限(HB-2;4..=64;缺省保持不变)
+    #[serde(default)]
+    pub loop_guard_semantic_min_calls: Option<u32>,
+    /// 语义熔断输出指纹去重上限(HB-2;1..=8;缺省保持不变)
+    #[serde(default)]
+    pub loop_guard_semantic_max_distinct: Option<u32>,
 }
 
 /// 序列化运行期设置(API Key 脱敏)。
@@ -256,6 +265,9 @@ fn settings_json(s: &RuntimeSettings) -> Value {
         "tool_history_budget_tokens": s.tool_history_budget_tokens,
         "session_token_budget": s.session_token_budget,
         "session_budget_action": s.session_budget_action,
+        "loop_guard_semantic_window": s.loop_guard_semantic_window,
+        "loop_guard_semantic_min_calls": s.loop_guard_semantic_min_calls,
+        "loop_guard_semantic_max_distinct": s.loop_guard_semantic_max_distinct,
     });
     if let (Some(dst), Some(src)) = (v.as_object_mut(), rest.as_object()) {
         for (k, val) in src {
@@ -634,6 +646,25 @@ pub async fn update_settings(
                     return validation("session_budget_action 须为 warn 或 stop");
                 }
                 s.session_budget_action = v.clone();
+            }
+            // HB-2 语义熔断参数(扁平全局:引擎 run_tool_loop 直读);越界拒绝,与 load 同区间
+            if let Some(v) = body.loop_guard_semantic_window {
+                if !(4..=64).contains(&v) {
+                    return validation("loop_guard_semantic_window 必须在 4..=64");
+                }
+                s.loop_guard_semantic_window = v;
+            }
+            if let Some(v) = body.loop_guard_semantic_min_calls {
+                if v != 0 && !(4..=64).contains(&v) {
+                    return validation("loop_guard_semantic_min_calls 须为 0(关闭)或 4..=64");
+                }
+                s.loop_guard_semantic_min_calls = v;
+            }
+            if let Some(v) = body.loop_guard_semantic_max_distinct {
+                if !(1..=8).contains(&v) {
+                    return validation("loop_guard_semantic_max_distinct 必须在 1..=8");
+                }
+                s.loop_guard_semantic_max_distinct = v;
             }
         }
     }
