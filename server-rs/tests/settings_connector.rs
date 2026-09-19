@@ -6,7 +6,17 @@ use http_body_util::BodyExt;
 use kedai_server::build_test_app;
 use serde_json::{json, Value};
 use std::sync::OnceLock;
+use tokio::sync::{Mutex, MutexGuard};
 use tower::ServiceExt;
+
+/// 本文件所有用例共享同一个 app 实例(进程级 settings),且多数用例会 PUT
+/// /api/settings(其中 Base URL/Key 会切换连接器)。此前无串行化,cargo test 默认
+/// 并行下互相踩踏:实测 `mock_auto_switches_to_openai_on_save` 断言的「初始必须是
+/// mock 连接器」会被并发用例保存 base_url 抢先切走而偶发失败(单跑恒过)。
+async fn test_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(())).lock().await
+}
 
 fn test_app() -> &'static axum::Router {
     static APP: OnceLock<axum::Router> = OnceLock::new();
@@ -34,6 +44,7 @@ async fn send_json(
 
 #[tokio::test]
 async fn mock_auto_switches_to_openai_on_save() {
+    let _guard = test_lock().await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let mock_provider = axum::Router::new().route(
@@ -155,6 +166,7 @@ async fn mock_auto_switches_to_openai_on_save() {
 /// 本 binary 无任务执行测试,task 覆盖层残留无副作用(结束时仍写回空串保持卫生)。
 #[tokio::test]
 async fn task_overlay_does_not_leak_into_roleplay_settings() {
+    let _guard = test_lock().await;
     let app = test_app();
 
     // 记录 roleplay 扁平权威值(共享 app,可能已被同 binary 其他测试写动,取现场值)
@@ -205,6 +217,7 @@ async fn task_overlay_does_not_leak_into_roleplay_settings() {
 /// 恒注入,与 task 覆盖层状态无关(共享 app 下不受同 binary 其他测试写动影响)。
 #[tokio::test]
 async fn prompt_preview_follows_mode() {
+    let _guard = test_lock().await;
     let app = test_app();
 
     // 缺省 = roleplay:不得含任务固定提示词层
@@ -248,6 +261,7 @@ async fn prompt_preview_follows_mode() {
 /// (缺命令条目被丢弃);GET 往返还原;task 覆盖层与扁平层互不影响。
 #[tokio::test]
 async fn mcp_settings_put_get_roundtrip() {
+    let _guard = test_lock().await;
     let app = test_app();
 
     // 默认:关 + 空列表
@@ -316,6 +330,7 @@ async fn mcp_settings_put_get_roundtrip() {
 /// 仍为扁平默认 false(覆盖层不污染扁平);还原后回 false。
 #[tokio::test]
 async fn task_persona_full_roundtrip_via_settings_api() {
+    let _guard = test_lock().await;
     let app = test_app();
 
     // 默认:两视图均为 false(精简,旧配置兼容)
@@ -368,6 +383,7 @@ async fn task_persona_full_roundtrip_via_settings_api() {
 /// 正是手机端首装场景。修复前该字段为空串,面板与执行时都拿不到默认人设词。
 #[tokio::test]
 async fn roleplay_default_prompt_visible_on_fresh_install() {
+    let _guard = test_lock().await;
     let app = test_app();
     let (status, s) = send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
     assert_eq!(status, StatusCode::OK);
