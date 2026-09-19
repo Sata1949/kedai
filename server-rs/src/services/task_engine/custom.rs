@@ -23,13 +23,15 @@ use crate::models::types::{
     GenerationParams, LlmMessage, PlanStep, TaskStatus, TaskStep, TaskStepStatus, TokenUsage,
     ToolChoice, ToolContext,
 };
-use crate::services::agent_flow_service::{output_index, resolve_graph};
+use crate::services::agent_flow_service::{effective_max_parallel, output_index, resolve_graph};
 use crate::services::prompt_kit::untrusted_boundary;
 use crate::services::task_core::prompt_consts::{
     CUSTOM_REFLECT_PROMPT, EXECUTOR_PROMPT, TASK_INTERNAL_PLAN_PROMPT,
 };
 use crate::services::task_core::{TaskBackend, TaskGenOutput, TaskTerminal};
 use futures::future::BoxFuture;
+use futures::stream::{FuturesUnordered, StreamExt};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
@@ -39,6 +41,10 @@ pub(crate) struct CustomExecutor {
     svc: Arc<dyn TaskBackend>,
     engine: Arc<AgentEngine>,
 }
+
+/// 在飞节点的执行 future:节点在流程数组中的下标 + 执行结果
+/// (Err 为该节点的中文错误文本,由调度器落回 plan 行)
+type NodeFuture<'a> = BoxFuture<'a, (usize, Result<(String, TaskGenOutput), String>)>;
 
 impl CustomExecutor {
     pub(crate) fn new(svc: Arc<dyn TaskBackend>, engine: Arc<AgentEngine>) -> Self {
@@ -333,6 +339,8 @@ impl CustomExecutor {
         // 此处不复制实现(否则「什么算合法图」会出现多个版本)。
         let graph = resolve_graph(&steps)?;
         let output_idx = output_index(&steps, &graph.inputs);
+        // 并行上限(二维批次 2):流程级配置,缺省 2、1 = 完全串行(批次 1 行为)
+        let max_parallel = effective_max_parallel(&cfg);
         let svc = &self.svc;
         svc.set_status(&ctx.task_id, TaskStatus::Running);
 
@@ -354,16 +362,55 @@ impl CustomExecutor {
         let mut any_error = false;
         let mut total = TokenUsage::default();
 
-        for &i in &graph.order {
-            if *ctx.cancel.borrow() {
-                return Err("任务已停止".into());
+        // ===== 并行调度(二维批次 2)=====
+        // 就绪判定:上游计数 + 后继表;就绪节点按下标升序取(线性流程顺序与旧版一致)。
+        //
+        // plan 写入纪律(IFW-4):**调度器是 plan 的唯一写者**,节点执行体只回传文本、
+        // 不持有 plan 快照。多节点并发完成时因此不存在「各自读旧快照再整列覆写」的丢更新
+        // (那是把 plan 交给各节点自行读-改-写才会有的缺陷)。这条纪律由
+        // tests/task_custom_graph.rs 的并发用例锁定:全部节点终态必须都落回 plan。
+        let node_count = steps.len();
+        let mut missing_parents: Vec<usize> = graph.inputs.iter().map(Vec::len).collect();
+        let mut children: Vec<Vec<usize>> = vec![Vec::new(); node_count];
+        for (i, parents) in graph.inputs.iter().enumerate() {
+            for &p in parents {
+                children[p].push(i);
             }
-            let step = &steps[i];
-            plan[i].status = TaskStepStatus::Running;
-            svc.set_plan(&ctx.task_id, &plan);
+        }
+        let mut ready: BTreeSet<usize> = (0..node_count)
+            .filter(|&i| missing_parents[i] == 0)
+            .collect();
+        // 在飞节点集合:节点 future 借用 &self / 流程数据 / ctx,故用 FuturesUnordered
+        // 而非 JoinSet(后者要求 'static 捕获,会把执行器与流程数据逼成 Arc);
+        // 两者并发语义等价(都是等待 LLM 的异步 I/O),且不引入新依赖。
+        let mut inflight: FuturesUnordered<NodeFuture<'_>> = FuturesUnordered::new();
+        let mut finished = 0usize;
 
-            let user = Self::node_user_message(&ctx.goal, &steps, &graph.inputs, i, &outputs);
-            match self.execute_node(&ctx, i, step, user).await {
+        while finished < node_count {
+            // 补满在飞槽位(上限 = 流程级 max_parallel_nodes,默认 2:并行成倍消耗 token)
+            while inflight.len() < max_parallel {
+                let Some(&i) = ready.iter().next() else { break };
+                ready.remove(&i);
+                if *ctx.cancel.borrow() {
+                    // 取消:丢弃在飞 future 即中止分支(与串行口径一致:在飞行保持 running),
+                    // 随后统一由「任务已停止」收口
+                    drop(inflight);
+                    return Err("任务已停止".into());
+                }
+                plan[i].status = TaskStepStatus::Running;
+                svc.set_plan(&ctx.task_id, &plan);
+                let user = Self::node_user_message(&ctx.goal, &steps, &graph.inputs, i, &outputs);
+                let (ctx_ref, step) = (&ctx, &steps[i]);
+                inflight.push(Box::pin(async move {
+                    (i, self.execute_node(ctx_ref, i, step, user).await)
+                }));
+            }
+            let Some((i, result)) = inflight.next().await else {
+                break;
+            };
+            finished += 1;
+            let step = &steps[i];
+            match result {
                 Ok((text, out)) => {
                     total.prompt_tokens += out.prompt_tokens;
                     total.completion_tokens += out.completion_tokens;
@@ -388,6 +435,7 @@ impl CustomExecutor {
                 }
                 Err(e) => {
                     if *ctx.cancel.borrow() {
+                        drop(inflight);
                         return Err("任务已停止".into());
                     }
                     any_error = true;
@@ -396,6 +444,14 @@ impl CustomExecutor {
                 }
             }
             svc.set_plan(&ctx.task_id, &plan);
+            // 释放后继:上游全部完成(无论成败)即就绪——下游照常执行并拿到空段,
+            // 与串行版「上游失败即清空产出、后续步骤继续」的语义一致
+            for &child in &children[i] {
+                missing_parents[child] -= 1;
+                if missing_parents[child] == 0 {
+                    ready.insert(child);
+                }
+            }
         }
 
         // 成果选拔:成果节点产出优先;为空则按**数组下标降序**回退到上一个非空

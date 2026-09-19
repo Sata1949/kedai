@@ -151,3 +151,176 @@ async fn custom_graph_merges_multi_parent_inputs_in_index_order() {
         "源节点不应携带上游段: {left_prompt}"
     );
 }
+
+/// 并行流程:两个源节点 + 一个合并节点(与上面同构,供批次 2 的两条用例复用)。
+/// 只给合并节点配回复钩子:两个源节点不命中 → 走 mock 默认逐字回复(每字 8ms,
+/// 约 0.8s),制造足够宽的并发观测窗口。
+async fn preset_parallel_flow(app: &axum::Router, max_parallel: u32) -> String {
+    let flow = json!({
+        "config": {
+            "id": "",
+            "name": "测试并行流程图",
+            "enabled": true,
+            "max_parallel_nodes": max_parallel,
+            "steps": [
+                {"id":"n-left","name":"左路","enabled":true,"goal":"产左路要点","action":"direct","generates":true,
+                 "system_prompt":"【本步指令·左路本步】只输出左路要点"},
+                {"id":"n-right","name":"右路","enabled":true,"goal":"产右路要点","action":"direct","generates":true,
+                 "system_prompt":"【本步指令·右路本步】只输出右路要点"},
+                {"id":"n-merge","name":"合并","enabled":true,"goal":"合并两路","action":"direct","generates":true,
+                 "inputs":["n-left","n-right"],"is_output":true,
+                 "system_prompt":"【本步指令·合并本步】合并上游两路产出"}
+            ]
+        }
+    });
+    let (status, json) = send_json(app, "PUT", "/api/agent-flows", flow).await;
+    assert_eq!(status, StatusCode::OK, "保存并行流程应 200: {json}");
+    let id =
+        create_task_with_mode(app, "[[reply_if:合并本步|合并成果]] 并行任务目标", "custom").await;
+    let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
+    id
+}
+
+/// 二维批次 2:并行分支同时推进、完成后 plan 每行都落库(IFW-4 无丢更新)、
+/// 逐节点记账之和与详情 usage_total 一致。
+///
+/// 并行证据:调度器在补满并发槽位时**不 await**,两个源节点必然先同时进入
+/// running 再开始等待回复,故轮询一定能观测到 ≥2 行同时 running(窗口 ~0.8s)。
+#[tokio::test]
+async fn custom_graph_parallel_branches_keep_all_plan_rows() {
+    let app = test_app();
+    let id = preset_parallel_flow(app, 2).await;
+
+    let mut max_running = 0usize;
+    let mut terminal = String::new();
+    let mut detail = Value::Null;
+    for _ in 0..400 {
+        let (status, json) = send_json(app, "GET", &format!("/api/tasks/{id}"), json!({})).await;
+        assert_eq!(status, StatusCode::OK);
+        if let Some(plan) = json["task"]["plan"].as_array() {
+            let running = plan.iter().filter(|s| s["status"] == "running").count();
+            max_running = max_running.max(running);
+        }
+        let st = json["task"]["status"].as_str().unwrap_or("").to_string();
+        if matches!(st.as_str(), "done" | "partial" | "error" | "ended") {
+            terminal = st;
+            detail = json;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert_eq!(terminal, "done", "并行任务应完成: {detail}");
+    assert!(
+        max_running >= 2,
+        "两个源节点应同时在跑(max_parallel_nodes=2):观测到的最大同时运行数 {max_running}"
+    );
+
+    // 无丢更新(IFW-4):并发完成后每一行都必须是终态,不能残留 pending/running
+    let plan = detail["task"]["plan"].as_array().unwrap();
+    assert_eq!(plan.len(), 3, "plan 步骤数 = 流程启用步骤数: {detail}");
+    for step in plan {
+        assert_eq!(
+            step["status"], "done",
+            "并发完成后每行都应落库为 done(丢更新会让某行停在 running): {detail}"
+        );
+    }
+    assert_eq!(
+        detail["task"]["result"].as_str().unwrap_or(""),
+        "合并成果",
+        "成果应为显式标注的合并节点产出: {detail}"
+    );
+
+    // 记账不变量:phase=step 逐节点一行,求和 == 详情 usage_total(并行下不漏记)
+    let (_, calls) = send_json(app, "GET", &format!("/api/tasks/{id}/calls"), json!({})).await;
+    let rows: Vec<&Value> = calls["calls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["phase"] == "step")
+        .collect();
+    assert_eq!(rows.len(), 3, "phase=step 行数应与节点数一致: {calls:?}");
+    let call_prompt: i64 = rows
+        .iter()
+        .map(|c| c["prompt_tokens"].as_i64().unwrap_or(0))
+        .sum();
+    let call_completion: i64 = rows
+        .iter()
+        .map(|c| c["completion_tokens"].as_i64().unwrap_or(0))
+        .sum();
+    let usage = &detail["usage_total"];
+    assert_eq!(
+        call_prompt,
+        usage["prompt_tokens"].as_i64().unwrap_or(-1),
+        "各行 prompt token 求和应等于 usage_total: {detail}"
+    );
+    assert_eq!(
+        call_completion,
+        usage["completion_tokens"].as_i64().unwrap_or(-1),
+        "各行 completion token 求和应等于 usage_total: {detail}"
+    );
+}
+
+/// 二维批次 2:取消传播到并行分支——停止后任务收口到 ended,在飞分支被中止,
+/// 不再有任何节点继续写 plan,也不再有新的调用行产生。
+#[tokio::test]
+async fn custom_graph_stop_aborts_parallel_branches() {
+    let app = test_app();
+    let id = preset_parallel_flow(app, 2).await;
+
+    // 等两个源节点进入 running 再停止(stop 落在并行窗口内)
+    let mut saw_parallel = false;
+    for _ in 0..200 {
+        let (_, json) = send_json(app, "GET", &format!("/api/tasks/{id}"), json!({})).await;
+        if let Some(plan) = json["task"]["plan"].as_array() {
+            if plan.iter().filter(|s| s["status"] == "running").count() >= 2 {
+                saw_parallel = true;
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(saw_parallel, "停止前应观测到两个分支同时在跑");
+
+    let (status, _) = send_json(app, "POST", &format!("/api/tasks/{id}/stop"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "running 态 stop 应 200");
+
+    let (terminal, detail) = wait_terminal(app, &id).await;
+    assert_eq!(terminal, "ended", "stop 后任务应 ended: {detail}");
+
+    // 收口:终态后再等一段时间,验证「不再启动新节点」——
+    //  - plan 不再变化:取消路径只丢弃在飞 future,不写 plan;
+    //  - 下游「合并」节点保持 pending(取消检查在启动之前,任何分支都不能再被拉起);
+    //  - 调用行只允许在飞分支的中断留痕(「已中断」行是前端徽标的数据源,按设计保留),
+    //    绝不允许出现从未启动节点的行。
+    let plan_before = detail["task"]["plan"].clone();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let (_, after) = send_json(app, "GET", &format!("/api/tasks/{id}"), json!({})).await;
+    assert_eq!(
+        after["task"]["plan"], plan_before,
+        "取消后不应再有分支继续写 plan: {after}"
+    );
+    let plan_after = after["task"]["plan"].as_array().unwrap();
+    assert_eq!(
+        plan_after[2]["status"], "pending",
+        "取消后下游节点应保持 pending(不得被拉起): {after}"
+    );
+    let (_, calls_after) =
+        send_json(app, "GET", &format!("/api/tasks/{id}/calls"), json!({})).await;
+    let rows_after: Vec<&Value> = calls_after["calls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["phase"] == "step")
+        .collect();
+    assert!(
+        rows_after.len() <= 2,
+        "取消后不得再有新节点启动(至多两个源节点留有中断留痕): {calls_after:?}"
+    );
+    assert!(
+        rows_after
+            .iter()
+            .all(|c| c["step_index"].as_i64() != Some(2)),
+        "未启动的合并节点不应留下调用行: {calls_after:?}"
+    );
+}

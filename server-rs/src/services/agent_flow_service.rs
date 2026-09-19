@@ -118,9 +118,26 @@ pub struct AgentFlowConfig {
     /// 是否启用自定义流程(chat/send 的 agent_mode=custom 需要 enabled=true 才生效)
     #[serde(default)]
     pub enabled: bool,
-    /// 步骤序列(按数组顺序执行;disabled 步骤跳过)
+    /// 步骤序列(按数组顺序展示;执行顺序见 `resolve_graph` 的拓扑序)
     #[serde(default)]
     pub steps: Vec<PlanStep>,
+    /// 并行节点数上限(二维批次 2):缺省 = `DEFAULT_MAX_PARALLEL_NODES`;范围 1-8
+    /// (1 = 完全串行)。落在**流程级**而非全局设置:并发度是流程自身的成本画像,
+    /// 且不触碰 settings.json 的双模式继承/隔离契约。并行会成倍消耗 token(WF-11)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_parallel_nodes: Option<u32>,
+}
+
+/// 并行节点数上限的默认值与上限(二维批次 2;产品风险 WF-11:
+/// 并行 = 成本倍增,故默认保守取 2,并在前端给出提示)
+pub const DEFAULT_MAX_PARALLEL_NODES: u32 = 2;
+pub const MAX_PARALLEL_NODES_LIMIT: u32 = 8;
+
+/// 生效的并行上限:缺省取默认值,越界取边界(1 = 完全串行,行为与二维批次 1 一致)
+pub fn effective_max_parallel(cfg: &AgentFlowConfig) -> usize {
+    cfg.max_parallel_nodes
+        .unwrap_or(DEFAULT_MAX_PARALLEL_NODES)
+        .clamp(1, MAX_PARALLEL_NODES_LIMIT) as usize
 }
 
 impl AgentFlowLibrary {
@@ -234,6 +251,9 @@ pub fn builtin_flow() -> AgentFlowConfig {
                 .into(),
         ),
         enabled: true,
+        // 并行上限缺省 = DEFAULT_MAX_PARALLEL_NODES(2):内置流程是线性三步,
+        // 并发度无实际影响,留 None 以便跟随默认值演进
+        max_parallel_nodes: None,
         steps: vec![
             PlanStep {
                 id: "draft".into(),
@@ -467,6 +487,15 @@ pub fn validate_flow(
     }
     // 二维依赖边校验(线性兼容流程恒通过:隐式串联无悬空/无环风险)
     resolve_graph(&active)?;
+    // 并行上限(二维批次 2):越界直接拒绝,避免执行期静默夹取
+    if let Some(n) = cfg.max_parallel_nodes {
+        if !(1..=MAX_PARALLEL_NODES_LIMIT).contains(&n) {
+            return Err(format!(
+                "并行节点上限需在 1-{} 之间(当前 {})",
+                MAX_PARALLEL_NODES_LIMIT, n
+            ));
+        }
+    }
     for s in &active {
         if s.action != "direct" && s.action != "reflect" {
             return Err(format!(
@@ -573,6 +602,7 @@ mod tests {
             description: None,
             enabled: true,
             steps,
+            max_parallel_nodes: None,
         }
     }
 
@@ -932,5 +962,48 @@ mod tests {
             }],
         );
         assert!(validate_flow(&loose, &tools()).is_ok());
+    }
+
+    #[test]
+    fn parallel_limit_defaults_clamped_and_validated() {
+        let mut cfg = flow("parallel", vec![graph_step("a", &[])]);
+        // 缺省 2(保守:并行会成倍消耗 token,WF-11)
+        assert_eq!(effective_max_parallel(&cfg), 2);
+        // 显式值生效
+        cfg.max_parallel_nodes = Some(4);
+        assert_eq!(effective_max_parallel(&cfg), 4);
+        // 执行期防护:越界取边界(1 = 完全串行)
+        cfg.max_parallel_nodes = Some(0);
+        assert_eq!(effective_max_parallel(&cfg), 1);
+        cfg.max_parallel_nodes = Some(99);
+        assert_eq!(
+            effective_max_parallel(&cfg),
+            MAX_PARALLEL_NODES_LIMIT as usize
+        );
+        // 保存期校验:越界直接 400,不静默夹取
+        assert!(validate_flow(&cfg, &tools()).is_err());
+        cfg.max_parallel_nodes = Some(0);
+        assert!(validate_flow(&cfg, &tools()).is_err());
+        cfg.max_parallel_nodes = Some(MAX_PARALLEL_NODES_LIMIT);
+        assert!(validate_flow(&cfg, &tools()).is_ok());
+    }
+
+    #[test]
+    fn topo_order_is_min_index_ready_expansion() {
+        // 拓扑序 = 反复取「当前就绪节点中下标最小者」的展开
+        //(并行调度器的就绪队列按下标升序出队,用的正是同一条规则)
+        let steps = vec![
+            graph_step("丙", &["乙"]), // 下标 0:依赖下标 1
+            graph_step("乙", &["甲"]), // 下标 1:依赖下标 2
+            graph_step("甲", &[]),     // 下标 2:源节点
+        ];
+        let graph = resolve_graph(&steps).unwrap();
+        assert_eq!(
+            graph.order,
+            vec![2, 1, 0],
+            "应从下标最小的就绪节点开始,而不是数组声明顺序"
+        );
+        assert_eq!(graph.inputs[0], vec![1]);
+        assert!(graph.inputs[2].is_empty());
     }
 }
