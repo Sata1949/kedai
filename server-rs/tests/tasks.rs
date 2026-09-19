@@ -1265,6 +1265,18 @@ async fn task_custom_mode_flow_steps_and_disabled_flow() {
     assert_eq!(step_calls[1]["step_index"], 1);
     assert_eq!(step_calls[2]["step_index"], 2);
 
+    // 线性兼容流程(二维批次 1 的回归护栏):单上游必须仍是旧版逐字节格式,
+    // 且不得误用多父段格式——存量一维流程的行为靠这两条锁住
+    let polish_prompt = step_calls[2]["prompt_summary"].as_str().unwrap_or("");
+    assert!(
+        polish_prompt.contains("上一步「起草」产出:\n草稿正文"),
+        "线性流程单上游格式应逐字节不变: {polish_prompt}"
+    );
+    assert!(
+        !polish_prompt.contains("上游节点产出:"),
+        "线性流程不得出现多父段格式: {polish_prompt}"
+    );
+
     // usage 落库:逐步骤一行,聚合非零
     let usage = &detail["usage_total"];
     assert!(

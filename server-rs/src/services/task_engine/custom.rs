@@ -7,6 +7,12 @@
 // 闸门,恒不等待授权(任务模式名单外工具立即拒绝)。
 // 反思步骤(action=reflect)按契约不携带用户 system_prompt,统一用内置
 // CUSTOM_REFLECT_PROMPT;首版不做 reflect 回退循环(判定结论作为文本流向下一步)。
+//
+// 二维批次 1(图执行):流程步骤可声明 `inputs`(上游节点 id),执行按下
+// `agent_flow_service::resolve_graph` 给出的**拓扑序**推进,节点 user 消息由
+// `node_user_message` 按上游产出合成。全部步骤 `inputs` 为空 = 线性兼容模式:
+// 拓扑序等于数组顺序、单上游格式与旧版逐字节一致,存量一维流程零迁移。
+// 批次 2 起同一批就绪节点走并行调度(上限 max_parallel_nodes)。
 use super::context::TaskRunContext;
 use super::executor::ModeExecutor;
 use super::sink;
@@ -17,6 +23,7 @@ use crate::models::types::{
     GenerationParams, LlmMessage, PlanStep, TaskStatus, TaskStep, TaskStepStatus, TokenUsage,
     ToolChoice, ToolContext,
 };
+use crate::services::agent_flow_service::{output_index, resolve_graph};
 use crate::services::prompt_kit::untrusted_boundary;
 use crate::services::task_core::prompt_consts::{
     CUSTOM_REFLECT_PROMPT, EXECUTOR_PROMPT, TASK_INTERNAL_PLAN_PROMPT,
@@ -232,66 +239,63 @@ impl CustomExecutor {
         }
     }
 
-    async fn run_inner(&self, ctx: TaskRunContext) -> Result<(TaskTerminal, TokenUsage), String> {
-        let cfg = self.svc.current_flow()?;
-        let steps: Vec<PlanStep> = cfg.steps.iter().filter(|s| s.enabled).cloned().collect();
-        if steps.is_empty() {
-            return Err("当前 Agent 流程没有启用的步骤".into());
-        }
-        let svc = &self.svc;
-        svc.set_status(&ctx.task_id, TaskStatus::Running);
-
-        // 进度模型 = plan 步骤(前端 custom 渲染:plan 步骤 + 状态徽标)
-        let mut plan: Vec<TaskStep> = steps
-            .iter()
-            .map(|s| TaskStep {
-                name: s.name.clone(),
-                goal: s.goal.clone(),
-                status: TaskStepStatus::Pending,
-                result: String::new(),
-            })
-            .collect();
-        svc.set_plan(&ctx.task_id, &plan);
-
-        let mut prev_output = String::new();
-        // 最近一次「生成正文」(direct + generates)步骤的产出,即最终结果
-        let mut draft = String::new();
-        let mut any_error = false;
-        let mut total = TokenUsage::default();
-
-        for (i, step) in steps.iter().enumerate() {
-            if *ctx.cancel.borrow() {
-                return Err("任务已停止".into());
-            }
-            plan[i].status = TaskStepStatus::Running;
-            svc.set_plan(&ctx.task_id, &plan);
-
-            let sys = self.build_step_system(step, &ctx.goal);
-            // 上一步输出作为下一步输入;任务目标贯穿每一步的 user 消息
-            //(同时进 system 上下文),保证后续步骤始终可见原始目标
-            let user = if i == 0 {
-                ctx.goal.clone()
-            } else {
+    /// 节点 user 消息:任务目标 + 上游产出(二维批次 1)。
+    ///  - 无上游(源节点/首步):只给任务目标(与旧版首步逐字节一致);
+    ///  - 单上游:沿用旧版格式「上一步「X」产出:」——线性兼容流程逐字节不变;
+    ///  - 多上游:D3 按父节点**数组下标升序**逐段拼接(顺序确定 → 同一流程两次运行可复现)。
+    ///
+    ///    上游失败或产出为空时该段留空(不写占位词,与旧版清空 prev_output 的语义一致)。
+    fn node_user_message(
+        goal: &str,
+        steps: &[PlanStep],
+        inputs: &[Vec<usize>],
+        index: usize,
+        outputs: &[String],
+    ) -> String {
+        match inputs[index].as_slice() {
+            [] => goal.to_string(),
+            [parent] => format!(
+                "任务目标:\n{}\n\n上一步「{}」产出:\n{}",
+                goal, steps[*parent].name, outputs[*parent]
+            ),
+            many => {
+                let segments: Vec<String> = many
+                    .iter()
+                    .map(|&p| format!("【{}】\n{}", steps[p].name, outputs[p]))
+                    .collect();
                 format!(
-                    "任务目标:\n{}\n\n上一步「{}」产出:\n{}",
-                    ctx.goal,
-                    steps[i - 1].name,
-                    prev_output
+                    "任务目标:\n{}\n\n上游节点产出:\n{}",
+                    goal,
+                    segments.join("\n\n")
                 )
-            };
-            let mut messages = vec![
-                LlmMessage::plain("system", &sys),
-                LlmMessage::plain("user", &user),
-            ];
+            }
+        }
+    }
 
-            let result: Result<(String, TaskGenOutput), String> = match &step.tools {
-                // 无工具步骤:纯生成统一出口(generate_text 自带调用追踪落库)
-                None => {
-                    let settings = &ctx.settings;
-                    svc.generate_text(
+    /// 执行单个节点(组装消息 → 纯生成或工具循环),返回 (正文, usage DTO)。
+    /// 调用追踪/usage 口径不变(phase=step,step_index=步骤在流程数组中的下标);
+    /// 失败与中断都返回 Err,由调用方决定状态与降级。
+    async fn execute_node(
+        &self,
+        ctx: &TaskRunContext,
+        index: usize,
+        step: &PlanStep,
+        user: String,
+    ) -> Result<(String, TaskGenOutput), String> {
+        let sys = self.build_step_system(step, &ctx.goal);
+        let mut messages = vec![
+            LlmMessage::plain("system", &sys),
+            LlmMessage::plain("user", &user),
+        ];
+        match &step.tools {
+            // 无工具步骤:纯生成统一出口(generate_text 自带调用追踪落库)
+            None => {
+                let settings = &ctx.settings;
+                self.svc
+                    .generate_text(
                         &ctx.task_id,
                         "step",
-                        Some(i),
+                        Some(index),
                         messages,
                         Vec::new(),
                         step.max_tokens.unwrap_or(settings.default_max_tokens),
@@ -304,20 +308,62 @@ impl CustomExecutor {
                         let text = out.text.trim().to_string();
                         (text, out)
                     })
-                }
-                // 工具步骤:run_tool_loop(白名单自动放行),调用追踪在步骤函数内落。
-                // usage → TaskGenOutput 统一走 usage_as_output(批次 B.4 单一出处);
-                // 该 out 仅作 record_usage 入参(text 不消费)
-                Some(list) => self
-                    .run_step_with_tools(&ctx, i, step, &mut messages, list)
-                    .await
-                    .map(|(text, usage)| {
-                        let out = super::executor::usage_as_output(&usage);
-                        (text, out)
-                    }),
-            };
+            }
+            // 工具步骤:run_tool_loop(白名单自动放行),调用追踪在步骤函数内落。
+            // usage → TaskGenOutput 统一走 usage_as_output(批次 B.4 单一出处);
+            // 该 out 仅作 record_usage 入参(text 不消费)
+            Some(list) => self
+                .run_step_with_tools(ctx, index, step, &mut messages, list)
+                .await
+                .map(|(text, usage)| {
+                    let out = super::executor::usage_as_output(&usage);
+                    (text, out)
+                }),
+        }
+    }
 
-            match result {
+    async fn run_inner(&self, ctx: TaskRunContext) -> Result<(TaskTerminal, TokenUsage), String> {
+        let cfg = self.svc.current_flow()?;
+        let steps: Vec<PlanStep> = cfg.steps.iter().filter(|s| s.enabled).cloned().collect();
+        if steps.is_empty() {
+            return Err("当前 Agent 流程没有启用的步骤".into());
+        }
+        // 图语义(二维批次 1):输入集/拓扑序/成果节点三件事都由共享原语回答——
+        // 与保存期校验(validate_flow)、聊天侧线性化(make_custom_plan)同一出处,
+        // 此处不复制实现(否则「什么算合法图」会出现多个版本)。
+        let graph = resolve_graph(&steps)?;
+        let output_idx = output_index(&steps, &graph.inputs);
+        let svc = &self.svc;
+        svc.set_status(&ctx.task_id, TaskStatus::Running);
+
+        // 进度模型 = plan 步骤(前端 custom 渲染:plan 步骤 + 状态徽标)。
+        // 展示顺序恒为流程数组顺序(用户编排顺序),执行顺序另由 graph.order 决定。
+        let mut plan: Vec<TaskStep> = steps
+            .iter()
+            .map(|s| TaskStep {
+                name: s.name.clone(),
+                goal: s.goal.clone(),
+                status: TaskStepStatus::Pending,
+                result: String::new(),
+            })
+            .collect();
+        svc.set_plan(&ctx.task_id, &plan);
+
+        // 各节点产出(下标对齐 steps):失败或空产出留空串,下游据此拿到空段
+        let mut outputs: Vec<String> = vec![String::new(); steps.len()];
+        let mut any_error = false;
+        let mut total = TokenUsage::default();
+
+        for &i in &graph.order {
+            if *ctx.cancel.borrow() {
+                return Err("任务已停止".into());
+            }
+            let step = &steps[i];
+            plan[i].status = TaskStepStatus::Running;
+            svc.set_plan(&ctx.task_id, &plan);
+
+            let user = Self::node_user_message(&ctx.goal, &steps, &graph.inputs, i, &outputs);
+            match self.execute_node(&ctx, i, step, user).await {
                 Ok((text, out)) => {
                     total.prompt_tokens += out.prompt_tokens;
                     total.completion_tokens += out.completion_tokens;
@@ -328,21 +374,16 @@ impl CustomExecutor {
                         any_error = true;
                         plan[i].status = TaskStepStatus::Error;
                         plan[i].result = format!("步骤「{}」返回空内容", step.name);
-                        prev_output.clear();
                     } else {
                         plan[i].status = TaskStepStatus::Done;
                         // generates=false 的内部规划步骤:产出仅供后续步骤参考,
-                        // 加标注区分于面向用户的成果(不参与 draft 选拔)。
+                        // 加标注区分于面向用户的成果(不参与成果选拔)。
                         if step.action == "direct" && step.generates == Some(false) {
                             plan[i].result = format!("(内部规划)\n{text}");
                         } else {
                             plan[i].result = text.clone();
                         }
-                        // 仅「生成正文」的 direct 步骤产出进入最终成果
-                        if step.action == "direct" && step.generates == Some(true) {
-                            draft = text.clone();
-                        }
-                        prev_output = text;
+                        outputs[i] = text;
                     }
                 }
                 Err(e) => {
@@ -352,12 +393,28 @@ impl CustomExecutor {
                     any_error = true;
                     plan[i].status = TaskStepStatus::Error;
                     plan[i].result = e;
-                    prev_output.clear();
                 }
             }
             svc.set_plan(&ctx.task_id, &plan);
         }
 
+        // 成果选拔:成果节点产出优先;为空则按**数组下标降序**回退到上一个非空
+        // 生成产出——存量线性流程语义就是「末个有效生成步」,且该兜底与执行顺序无关
+        // (并行下成果节点失败时不会退化成「谁先跑完算谁」,结果仍可复现)。
+        let draft = output_idx
+            .map(|i| outputs[i].clone())
+            .filter(|text| !text.is_empty())
+            .or_else(|| {
+                (0..steps.len())
+                    .rev()
+                    .find(|&i| {
+                        steps[i].action == "direct"
+                            && steps[i].generates == Some(true)
+                            && !outputs[i].is_empty()
+                    })
+                    .map(|i| outputs[i].clone())
+            })
+            .unwrap_or_default();
         if draft.is_empty() {
             return Err("自定义流程未产出任何成果(生成步骤全部失败或为空)".into());
         }

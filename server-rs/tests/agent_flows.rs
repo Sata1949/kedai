@@ -386,6 +386,75 @@ async fn agent_flows_invalid_flow_400() {
         "resp: {resp}"
     );
 
+    // 二维依赖边(二维批次 1):成环 → 400 并点名环上节点
+    let (status, resp) = send_json(
+        app,
+        "PUT",
+        "/api/agent-flows",
+        json!({
+            "config": {
+                "enabled": true,
+                "steps": [
+                    { "id": "a", "name": "甲", "goal": "甲目标", "action": "direct", "generates": true, "enabled": true, "inputs": ["b"] },
+                    { "id": "b", "name": "乙", "goal": "乙目标", "action": "direct", "generates": true, "enabled": true, "inputs": ["a"] }
+                ]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "resp: {resp}");
+    let err = resp["error"].as_str().unwrap_or("");
+    assert!(err.contains("环"), "resp: {resp}");
+    assert!(
+        err.contains("甲") && err.contains("乙"),
+        "应点名环上节点: {resp}"
+    );
+
+    // 悬空上游 → 400(引用了不存在或未启用的步骤 id)
+    let (status, resp) = send_json(
+        app,
+        "PUT",
+        "/api/agent-flows",
+        json!({
+            "config": {
+                "enabled": true,
+                "steps": [
+                    { "id": "a", "name": "生成", "goal": "生成正文", "action": "direct", "generates": true, "enabled": true, "inputs": ["missing"] }
+                ]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "resp: {resp}");
+    assert!(
+        resp["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("不存在或未启用"),
+        "resp: {resp}"
+    );
+
+    // 节点档位 strict 尚未实现(二维批次 6)→ 400,不允许静默无效
+    let (status, resp) = send_json(
+        app,
+        "PUT",
+        "/api/agent-flows",
+        json!({
+            "config": {
+                "enabled": true,
+                "steps": [
+                    { "id": "a", "name": "生成", "goal": "生成正文", "action": "direct", "generates": true, "enabled": true, "kind": "strict" }
+                ]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "resp: {resp}");
+    assert!(
+        resp["error"].as_str().unwrap_or("").contains("档位"),
+        "resp: {resp}"
+    );
+
     reset_flow(app).await;
 }
 

@@ -234,6 +234,24 @@ pub struct PlanStep {
     /// 是否允许模型单轮返回多个工具调用;None = 使用后端默认
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallel_tool_calls: Option<bool>,
+    /// 上游节点 id 列表(二维流程依赖边;空 = 线性串联或源节点,语义见
+    /// `services/agent_flow_service.rs` 的 `effective_inputs`)。缺省序列化省略:
+    /// 存量一维流程 JSON 读写逐字节不变。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<String>,
+    /// 是否显式标注为最终成果节点(Some(true) 标注;None = 按无后继汇点自动判定)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_output: Option<bool>,
+    /// 画布横坐标(二维批次 3 画布用;列表视图不写,缺省省略)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x: Option<f64>,
+    /// 画布纵坐标(同上)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub y: Option<f64>,
+    /// 节点档位:缺省/loose = 允许多轮工具自循环(现状语义);
+    /// strict = 单次模型调用(二维批次 6 实现,当前校验期直接拒绝,不允许静默无效)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

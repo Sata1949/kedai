@@ -1,5 +1,6 @@
 // 规划器(与 Node 版 planner.ts 对齐)
 use crate::models::types::{Plan, PlanStep};
+use crate::services::agent_flow_service::resolve_graph;
 
 /// fast: 单步直接生成;deep: 理解意图(不生成) → 生成草稿(生成) → 反思;
 /// agent: 同 deep 结构,但执行阶段启用完整 function calling 工具循环(模型可多轮自主调用工具);
@@ -90,9 +91,14 @@ pub fn make_custom_plan(steps: &[PlanStep]) -> Result<Plan, String> {
     {
         return Err("自定义流程缺少生成步骤:至少需要一个「生成正文」的 direct 步骤".into());
     }
-    let summary = format!("自定义流程:共 {} 步", active.len());
+    // 二维流程:聊天侧按**拓扑序线性化**(聊天不并行,分支结构被忽略——见
+    // docs/契约.md「Agent 执行流程(custom 模式)」执行语义);线性兼容流程顺序不变。
+    // 图合法性由保存期 validate_flow 保证,此处按同一原语再解析一次做兜底。
+    let graph = resolve_graph(&active)?;
+    let ordered: Vec<PlanStep> = graph.order.iter().map(|&i| active[i].clone()).collect();
+    let summary = format!("自定义流程:共 {} 步", ordered.len());
     Ok(Plan {
-        steps: active,
+        steps: ordered,
         summary,
     })
 }

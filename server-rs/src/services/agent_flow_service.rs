@@ -5,7 +5,7 @@
 use crate::models::types::PlanStep;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -289,11 +289,164 @@ pub fn builtin_flow() -> AgentFlowConfig {
     }
 }
 
+// ==================== 二维流程原语(二维批次 1) ====================
+//
+// **单一出处**:保存期校验(`validate_flow`)、任务侧执行器(`task_engine/custom.rs`)、
+// 聊天侧线性化(`agents/planner.rs::make_custom_plan`)三处共用下面这些纯函数。
+// 与 `prompt_kit` 的共享原语同一纪律:不得在任一侧复制实现(否则「什么算合法图」
+// 会出现多个版本,前端能保存的图与能执行的图就会漂移)。
+
+/// 流程图解析结果:所有下标一律对齐传入的 `steps` **数组顺序**。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowGraph {
+    /// 每个步骤的有效上游下标(已去重、按下标升序)
+    pub inputs: Vec<Vec<usize>>,
+    /// 执行拓扑序(Kahn;就绪节点按下标升序出队)
+    pub order: Vec<usize>,
+}
+
+/// 线性兼容模式判定:全部步骤的 `inputs` 均为空 → 语义回退为「按数组顺序串联」。
+///
+/// 该模式是**存量一维流程零迁移的保证**:线性模式下第 i 步的输入恒为第 i-1 步,
+/// 拓扑序 == 数组顺序,生成消息格式与旧版逐字节一致(见 custom.rs 的单父模板)。
+pub fn is_linear_compat(steps: &[PlanStep]) -> bool {
+    steps.iter().all(|s| s.inputs.is_empty())
+}
+
+/// 解析每个步骤的有效输入集(逐个对应 `steps`)。
+///
+/// - 线性兼容模式:第 i 步输入 = 第 i-1 步(首步无输入);
+/// - 二维模式:显式 `inputs` 按 id 解析;`inputs` 为空的步骤即**源节点**(只用任务目标)。
+///
+/// 校验(失败返回中文错误,供 400 展示):步骤 id 非空且唯一、上游必须存在且已启用
+/// (调用方传入的已是启用步骤集)、不得自环。父节点下标按**升序**排列
+/// (D3:多父合并顺序确定、可复现),且已去重(同一父写两次不产生重复段落)。
+pub fn effective_inputs(steps: &[PlanStep]) -> Result<Vec<Vec<usize>>, String> {
+    let mut index_of: BTreeMap<&str, usize> = BTreeMap::new();
+    for (i, s) in steps.iter().enumerate() {
+        if s.id.trim().is_empty() {
+            return Err(format!("步骤「{}」缺少 id(二维流程按 id 连接)", s.name));
+        }
+        if index_of.insert(s.id.as_str(), i).is_some() {
+            return Err(format!("步骤 id 重复:{}", s.id));
+        }
+    }
+    let linear = is_linear_compat(steps);
+    let mut out: Vec<Vec<usize>> = Vec::with_capacity(steps.len());
+    for (i, s) in steps.iter().enumerate() {
+        if linear {
+            out.push(if i == 0 { Vec::new() } else { vec![i - 1] });
+            continue;
+        }
+        let mut parents: Vec<usize> = Vec::with_capacity(s.inputs.len());
+        for parent_id in &s.inputs {
+            if parent_id.trim().is_empty() {
+                return Err(format!("步骤「{}」的上游列表含空 id", s.name));
+            }
+            let Some(&pi) = index_of.get(parent_id.trim()) else {
+                return Err(format!(
+                    "步骤「{}」引用了不存在或未启用的上游:{}",
+                    s.name, parent_id
+                ));
+            };
+            if pi == i {
+                return Err(format!("步骤「{}」不能把自身作为上游", s.name));
+            }
+            if !parents.contains(&pi) {
+                parents.push(pi);
+            }
+        }
+        parents.sort_unstable();
+        out.push(parents);
+    }
+    Ok(out)
+}
+
+/// 成果节点选拔(D4):显式 `is_output=true` 优先;未标注时取**无后继汇点**。
+/// 候选集内取下标最大的「direct + generates=true」步骤;候选内无生成步时回退
+/// 全流程最后一个生成步(存量线性流程:汇点即末步,语义与旧版一致);都没有 → None。
+///
+/// 注意:本函数只回答「谁是成果节点」;该节点产出为空时的兜底见 custom.rs
+/// (按数组下标降序取上一个非空生成产出,保证结果与执行顺序无关)。
+pub fn output_index(steps: &[PlanStep], inputs: &[Vec<usize>]) -> Option<usize> {
+    let is_generating = |i: usize| steps[i].action == "direct" && steps[i].generates == Some(true);
+    let explicit: Vec<usize> = (0..steps.len())
+        .filter(|&i| steps[i].is_output == Some(true))
+        .collect();
+    let candidates: Vec<usize> = if explicit.is_empty() {
+        let mut has_successor = vec![false; steps.len()];
+        for parents in inputs {
+            for &p in parents {
+                if p < has_successor.len() {
+                    has_successor[p] = true;
+                }
+            }
+        }
+        (0..steps.len()).filter(|&i| !has_successor[i]).collect()
+    } else {
+        explicit
+    };
+    candidates
+        .iter()
+        .rev()
+        .copied()
+        .find(|&i| is_generating(i))
+        .or_else(|| (0..steps.len()).rev().find(|&i| is_generating(i)))
+}
+
+/// 流程图解析:有效输入集 + 执行拓扑序(校验与执行共用的一步到位入口)。
+pub fn resolve_graph(steps: &[PlanStep]) -> Result<FlowGraph, String> {
+    let inputs = effective_inputs(steps)?;
+    let order = kahn_order(&inputs, steps)?;
+    Ok(FlowGraph { inputs, order })
+}
+
+/// Kahn 拓扑排序:就绪队列用 BTreeSet 维护,恒按下标升序出队——线性兼容流程的
+/// 拓扑序因此等于数组顺序(执行顺序与旧版完全一致),同一流程两次运行结果可复现。
+fn kahn_order(inputs: &[Vec<usize>], steps: &[PlanStep]) -> Result<Vec<usize>, String> {
+    let n = inputs.len();
+    let mut indegree = vec![0usize; n];
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (i, parents) in inputs.iter().enumerate() {
+        for &p in parents {
+            if p >= n || p == i {
+                continue; // 越界/自环已由 effective_inputs 拦截,此处仅防御
+            }
+            children[p].push(i);
+            indegree[i] += 1;
+        }
+    }
+    let mut ready: BTreeSet<usize> = (0..n).filter(|&i| indegree[i] == 0).collect();
+    let mut order = Vec::with_capacity(n);
+    while let Some(&i) = ready.iter().next() {
+        ready.remove(&i);
+        order.push(i);
+        for &child in &children[i] {
+            indegree[child] -= 1;
+            if indegree[child] == 0 {
+                ready.insert(child);
+            }
+        }
+    }
+    if order.len() != n {
+        let stuck: Vec<String> = (0..n)
+            .filter(|&i| indegree[i] > 0)
+            .map(|i| format!("「{}」", steps[i].name))
+            .collect();
+        return Err(format!(
+            "自定义流程存在环,无法确定执行顺序:{}",
+            stuck.join("、")
+        ));
+    }
+    Ok(order)
+}
+
 /// 校验自定义流程(失败返回中文错误,PUT 时 400 给用户):
 ///  - 启用的步骤非空
 ///  - 至少一个「生成正文」的 direct 步骤(反思回退/输出依赖它)
 ///  - action 仅 direct / reflect;reflect 步骤不得携带 generates=Some(true)
 ///  - 温度 0.0-2.0、输出上限 1-32768(仅校验显式提供的值)
+///  - 二维依赖边:步骤 id 唯一、上游必须存在且已启用、无自环、无环(见 `resolve_graph`)
 pub fn validate_flow(
     cfg: &AgentFlowConfig,
     registered_tools: &BTreeSet<String>,
@@ -302,7 +455,7 @@ pub fn validate_flow(
     if !cfg.enabled {
         return Ok(());
     }
-    let active: Vec<&PlanStep> = cfg.steps.iter().filter(|s| s.enabled).collect();
+    let active: Vec<PlanStep> = cfg.steps.iter().filter(|s| s.enabled).cloned().collect();
     if active.is_empty() {
         return Err("自定义流程为空:请启用至少一个步骤".into());
     }
@@ -312,6 +465,8 @@ pub fn validate_flow(
     {
         return Err("自定义流程缺少生成步骤:至少需要一个「生成正文」的 direct 步骤".into());
     }
+    // 二维依赖边校验(线性兼容流程恒通过:隐式串联无悬空/无环风险)
+    resolve_graph(&active)?;
     for s in &active {
         if s.action != "direct" && s.action != "reflect" {
             return Err(format!(
@@ -324,6 +479,15 @@ pub fn validate_flow(
         }
         if s.action == "reflect" && s.system_prompt.is_some() {
             return Err(format!("步骤「{}」为反思步骤,不支持系统提示词", s.name));
+        }
+        // 节点档位:strict(单次调用)属二维批次 6,当前直接拒绝——不允许静默无效
+        if let Some(kind) = s.kind.as_deref() {
+            if kind != "loose" {
+                return Err(format!(
+                    "步骤「{}」的节点档位「{}」尚未实现(严格节点将在二维批次 6 落地)",
+                    s.name, kind
+                ));
+            }
         }
         if let Some(t) = s.temperature {
             if !(0.0..=2.0).contains(&t) {
@@ -601,5 +765,172 @@ mod tests {
         // 重新加载(持久化验证)
         let svc2 = AgentFlowService::new(dir.path().to_path_buf(), tools().into_iter().collect());
         assert_eq!(svc2.get_library().flows.len(), 1);
+    }
+
+    // ===== 二维流程原语(二维批次 1) =====
+
+    /// 生成步骤(可带上游 id):二维测试的图节点
+    fn graph_step(id: &str, inputs: &[&str]) -> PlanStep {
+        PlanStep {
+            id: id.into(),
+            name: format!("节点{id}"),
+            enabled: true,
+            goal: format!("{id} 目标"),
+            action: "direct".into(),
+            generates: Some(true),
+            inputs: inputs.iter().map(|s| (*s).to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn linear_flow_chains_previous_step_as_input() {
+        // 存量一维流程:inputs 全空 → 线性兼容,输入即前一步(首步无输入)
+        let steps = vec![
+            step("起草", "direct", Some(true)),
+            step("修订", "direct", Some(true)),
+        ];
+        assert!(is_linear_compat(&steps));
+        let graph = resolve_graph(&steps).unwrap();
+        assert_eq!(graph.inputs, vec![Vec::<usize>::new(), vec![0]]);
+        // 拓扑序 == 数组顺序(就绪队列按下标升序),执行顺序与旧版一致
+        assert_eq!(graph.order, vec![0, 1]);
+    }
+
+    #[test]
+    fn two_dimensional_flow_resolves_inputs_and_topo_order() {
+        // 菱形:a、b 为源节点,c 合并两路,d 收口
+        let steps = vec![
+            graph_step("a", &[]),
+            graph_step("b", &[]),
+            graph_step("c", &["a", "b"]),
+            graph_step("d", &["c"]),
+        ];
+        assert!(!is_linear_compat(&steps));
+        let graph = resolve_graph(&steps).unwrap();
+        assert_eq!(graph.inputs[2], vec![0, 1], "多父按数组下标升序");
+        assert_eq!(graph.inputs[3], vec![2]);
+        assert_eq!(graph.order, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn multi_parent_order_is_by_index_and_deduped() {
+        // 声明顺序 b→a 也不影响合并顺序(D3:按下标升序);同一父写两次只算一次
+        let steps = vec![
+            graph_step("a", &[]),
+            graph_step("b", &[]),
+            graph_step("c", &["b", "a", "a"]),
+        ];
+        let graph = resolve_graph(&steps).unwrap();
+        assert_eq!(graph.inputs[2], vec![0, 1]);
+    }
+
+    #[test]
+    fn graph_edges_rejected_on_dangling_duplicate_and_self_loop() {
+        let dangling = vec![graph_step("a", &[]), graph_step("b", &["zzz"])];
+        let err = resolve_graph(&dangling).unwrap_err();
+        assert!(err.contains("不存在或未启用"), "实际错误:{err}");
+
+        let duplicate = vec![graph_step("a", &[]), graph_step("a", &[])];
+        let err = resolve_graph(&duplicate).unwrap_err();
+        assert!(err.contains("重复"), "实际错误:{err}");
+
+        let self_loop = vec![graph_step("a", &["a"])];
+        let err = resolve_graph(&self_loop).unwrap_err();
+        assert!(err.contains("自身"), "实际错误:{err}");
+
+        // 缺 id:二维模式按 id 连接,空 id 无法解析
+        let mut no_id = graph_step("a", &[]);
+        no_id.id = String::new();
+        let err = resolve_graph(&[no_id, graph_step("b", &["a"])]).unwrap_err();
+        assert!(err.contains("缺少 id"), "实际错误:{err}");
+    }
+
+    #[test]
+    fn cycle_rejected_and_nodes_named() {
+        let steps = vec![
+            graph_step("a", &["c"]),
+            graph_step("b", &["a"]),
+            graph_step("c", &["b"]),
+        ];
+        let err = resolve_graph(&steps).unwrap_err();
+        assert!(err.contains("环"), "实际错误:{err}");
+        assert!(
+            err.contains("节点a") && err.contains("节点c"),
+            "应点名环上节点:{err}"
+        );
+    }
+
+    #[test]
+    fn output_node_prefers_explicit_then_sink() {
+        // 显式标注优先于汇点:c 是唯一汇点,但 b 被标注为成果节点
+        let steps = vec![
+            graph_step("a", &[]),
+            PlanStep {
+                is_output: Some(true),
+                ..graph_step("b", &[])
+            },
+            graph_step("c", &["b"]),
+        ];
+        let graph = resolve_graph(&steps).unwrap();
+        assert_eq!(output_index(&steps, &graph.inputs), Some(1));
+
+        // 未标注:取无后继汇点
+        let sink = vec![graph_step("a", &[]), graph_step("b", &["a"])];
+        let graph = resolve_graph(&sink).unwrap();
+        assert_eq!(output_index(&sink, &graph.inputs), Some(1));
+    }
+
+    #[test]
+    fn output_node_skips_non_generating_sink_then_falls_back() {
+        // 汇点是反思步(不生成)→ 回退最后一个生成步(存量线性流程 [生成, 反思] 语义)
+        let reflect_tail = vec![
+            step("生成", "direct", Some(true)),
+            step("反思", "reflect", None),
+        ];
+        let graph = resolve_graph(&reflect_tail).unwrap();
+        assert_eq!(output_index(&reflect_tail, &graph.inputs), Some(0));
+
+        // 全流程无生成步 → None(调用方按「未产出任何成果」报错)
+        let no_gen = vec![
+            step("反思一", "reflect", None),
+            step("反思二", "reflect", None),
+        ];
+        let graph = resolve_graph(&no_gen).unwrap();
+        assert_eq!(output_index(&no_gen, &graph.inputs), None);
+    }
+
+    #[test]
+    fn validate_flow_rejects_broken_graph_and_strict_kind() {
+        // 环 → 400 文案点名节点
+        let cyclic = flow(
+            "cyclic",
+            vec![graph_step("a", &["b"]), graph_step("b", &["a"])],
+        );
+        let err = validate_flow(&cyclic, &tools()).unwrap_err();
+        assert!(err.contains("环"), "实际错误:{err}");
+
+        // 悬空上游 → 拒绝
+        let dangling = flow("dangling", vec![graph_step("a", &["missing"])]);
+        assert!(validate_flow(&dangling, &tools()).is_err());
+
+        // 节点档位:strict 尚未实现 → 明确报错而非静默无效;loose 放行
+        let strict = flow(
+            "strict",
+            vec![PlanStep {
+                kind: Some("strict".into()),
+                ..graph_step("a", &[])
+            }],
+        );
+        let err = validate_flow(&strict, &tools()).unwrap_err();
+        assert!(err.contains("档位"), "实际错误:{err}");
+        let loose = flow(
+            "loose",
+            vec![PlanStep {
+                kind: Some("loose".into()),
+                ..graph_step("a", &[])
+            }],
+        );
+        assert!(validate_flow(&loose, &tools()).is_ok());
     }
 }
