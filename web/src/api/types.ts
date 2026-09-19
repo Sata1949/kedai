@@ -729,6 +729,15 @@ export interface AgentFlowStep {
   tool_choice?: 'auto' | 'none' | 'required' | 'function' | null;
   tool_choice_function?: string | null;
   parallel_tool_calls?: boolean | null;
+  /** 上游步骤 id 列表(二维流程依赖边;空/缺省 = 线性串联或源节点) */
+  inputs?: string[];
+  /** 是否显式标注为最终成果节点(true = 标注;null/缺省 = 按无后继汇点自动判定) */
+  is_output?: boolean | null;
+  /** 画布坐标(二维批次 3 画布用;列表视图不写) */
+  x?: number | null;
+  y?: number | null;
+  /** 节点档位:loose = 工具自循环(现状);strict 由后端拒绝(二维批次 6 才实现) */
+  kind?: 'loose' | 'strict' | null;
 }
 
 /** 自定义执行流程配置(单个流程,data/agent_flows.json 流程库中的一项) */
@@ -741,6 +750,8 @@ export interface AgentFlowConfig {
   description?: string | null;
   enabled: boolean;
   steps: AgentFlowStep[];
+  /** 并行节点数上限(1-8;缺省 2;1 = 完全串行)。并行会成倍消耗 token */
+  max_parallel_nodes?: number | null;
 }
 
 /** 流程库(全局):当前选中的流程 + 全部流程 */

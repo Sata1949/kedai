@@ -2,9 +2,18 @@
 // 设置区:自定义 Agent 执行流程(custom 模式;流程库管理 + 步骤编辑)。
 // 从 SettingsModal.vue 双模板合并而来:取 embedded 超集版本(standalone 分支缺失
 // 「工具策略 / 并行调用」行,属模板漂移,合并后 standalone 一并补上)。
-import { onMounted } from 'vue';
+import { computed, onMounted } from 'vue';
 import { useAgentFlow, TOOL_MODE_LABELS } from '../../composables/useAgentFlow';
 import { stepToolsWarnings } from '../../utils/agentFlowTools';
+import {
+  graphHint,
+  isLinearCompat,
+  outputStepName,
+  stepInputs,
+  upstreamCandidates,
+  upstreamSummary,
+  upstreamWarnings,
+} from '../../utils/agentFlowGraph';
 
 withDefaults(defineProps<{
   /** 是否显示(embedded 模式按 activeSection 切换;standalone 恒 true) */
@@ -20,7 +29,13 @@ const {
   exportFlowNow, saveFlowNow, addStep, removeStep, moveStep, onStepActionChange,
   onStepDragStart, onStepDragOver, onStepDrop, onStepDragEnd,
   stepToolMode, setStepToolMode, stepToolsText, setStepToolsText,
+  toggleStepInput, toggleStepOutput, setFlowParallel,
 } = useAgentFlow();
+
+/** 流程级提示(线性流程返回 null,不增加噪音) */
+const graphHintText = computed(() =>
+  graphHint(flowDraft.value?.steps ?? [], flowDraft.value?.max_parallel_nodes),
+);
 
 onMounted(async () => {
   // 加载自定义 Agent 执行流程(custom 模式)
@@ -88,10 +103,26 @@ onMounted(async () => {
         </button>
         <span v-else class="sv-note">加载中...</span>
       </div>
+      <div v-if="flowDraft" class="sv-inp-row">
+        <label class="sv-inp-tag">并行上限</label>
+        <input
+          :value="flowDraft.max_parallel_nodes ?? ''"
+          type="number"
+          min="1"
+          max="8"
+          class="sv-input inject-num"
+          placeholder="默认 2"
+          title="同一层最多同时执行的步骤数(1 = 完全串行);并行会成倍消耗 token"
+          @change="setFlowParallel(($event.target as HTMLInputElement).value)"
+        />
+        <span class="sv-note">同一层的步骤最多同时跑这么多个;并行会成倍消耗 token。</span>
+      </div>
+      <p v-if="graphHintText" class="sv-note">{{ graphHintText }}</p>
       <p class="sv-note">
-        自定义流程:输入栏切换到 <b>CUSTOM</b> 模式后,按下方步骤从上到下依次执行;
-        每步可独立设置系统提示词(支持酒馆宏,以 <code v-pre>[本步指令]</code> 追加到系统提示词末尾)、
-        生成参数与工具范围。至少需要一步「生成正文」的 direct 步骤。
+        自定义流程:输入栏切换到 <b>CUSTOM</b> 模式后,按下方步骤从上到下依次执行
+        (设了上游则按依赖顺序执行);每步可独立设置系统提示词(支持酒馆宏,以
+        <code v-pre>[本步指令]</code> 追加到系统提示词末尾)、生成参数与工具范围。
+        至少需要一步「生成正文」的 direct 步骤。
       </p>
       <div v-if="flowDraft && !flowDraft.steps.length" class="sv-note inject-empty">
         尚未添加步骤,点击下方「+ 新增步骤」。
@@ -147,12 +178,64 @@ onMounted(async () => {
           </button>
           <button class="sv-btn danger sv-btn-square" title="删除步骤" @click="removeStep(step.id)">✕</button>
         </div>
+        <!-- 二维依赖摘要:层级 + 上游(线性流程不显示,避免给一维用户增加噪音) -->
+        <span v-if="!isLinearCompat(flowDraft?.steps ?? [])" class="flow-graph-note">
+          {{ upstreamSummary(flowDraft?.steps ?? [], step) }}
+        </span>
         <!-- 展开编辑区:跨整行、纵向堆叠,避免被步骤行 grid 挤压 -->
         <div v-if="editingStepId === step.id" class="flow-edit">
           <div class="sv-inp-row">
             <label class="sv-inp-tag">目标</label>
             <input v-model="step.goal" type="text" class="sv-input" placeholder="该步骤做什么(进度提示与计划摘要显示)" spellcheck="false" />
           </div>
+          <!-- 二维依赖(二维批次 1/2):上游勾选 + 成果标注 -->
+          <div class="sv-inp-row">
+            <label class="sv-inp-tag">上游步骤</label>
+            <div class="flow-upstream-list">
+              <label
+                v-for="cand in upstreamCandidates(flowDraft?.steps ?? [], step.id)"
+                :key="cand.id"
+                class="flow-upstream-item"
+                :class="{ off: !cand.enabled }"
+              >
+                <input
+                  type="checkbox"
+                  :checked="stepInputs(step).includes(cand.id)"
+                  @change="toggleStepInput(step, cand.id)"
+                />
+                <span>{{ cand.name || cand.id }}{{ cand.enabled ? '' : '(已停用)' }}</span>
+              </label>
+              <span v-if="!upstreamCandidates(flowDraft?.steps ?? [], step.id).length" class="sv-note">
+                暂无可用上游(先新增其它步骤)
+              </span>
+            </div>
+          </div>
+          <p class="sv-note">
+            {{ isLinearCompat(flowDraft?.steps ?? [])
+              ? '当前流程为一维线性:所有步骤都不设上游,按列表顺序逐步串联(与旧版行为一致)。'
+              : '当前流程为二维:不勾选上游 = 源节点(只给任务目标);勾选多个 = 多路产出按列表顺序拼接为本步输入。' }}
+          </p>
+          <div class="sv-inp-row">
+            <label class="sv-inp-tag">最终成果</label>
+            <button
+              class="sv-btn ghost"
+              :class="{ 'sv-btn-on': step.is_output === true }"
+              :title="step.is_output === true ? '点击取消标注' : '点击标注为最终成果节点'"
+              @click="toggleStepOutput(step)"
+            >
+              {{ step.is_output === true ? '本步产出即成果' : '未标注' }}
+            </button>
+            <span class="sv-note">
+              未标注时按「无后继汇点」自动判定;当前成果节点:{{ outputStepName(flowDraft?.steps ?? []) ?? '无' }}
+            </span>
+          </div>
+          <p
+            v-for="(warn, wi) in upstreamWarnings(flowDraft?.steps ?? [], step)"
+            :key="`g${wi}`"
+            class="sv-note flow-tool-warn"
+          >
+            {{ warn }}
+          </p>
           <template v-if="step.action === 'direct'">
             <div class="sv-inp-row">
               <label class="sv-inp-tag">系统提示词</label>

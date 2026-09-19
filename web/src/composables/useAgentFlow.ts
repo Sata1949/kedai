@@ -10,6 +10,7 @@ import {
   stepToolMode,
   stepToolsText,
 } from '../utils/agentFlowTools';
+import { removeStepReferences, toggleStepInput as toggleStepInputUtil } from '../utils/agentFlowGraph';
 
 /** 工具模式选择(与后端 tools 语义对齐:null=不使用,[]=全部,list=白名单) */
 export const TOOL_MODE_LABELS = {
@@ -225,6 +226,9 @@ export function useAgentFlow() {
       tool_choice: 'auto',
       tool_choice_function: null,
       parallel_tool_calls: null,
+      // 二维字段缺省 = 一维语义(不设上游 = 按列表顺序串联);上游由用户在编辑区勾选
+      inputs: [],
+      is_output: null,
     });
     editingStepId.value = id;
   }
@@ -232,7 +236,27 @@ export function useAgentFlow() {
   function removeStep(id: string): void {
     if (!flowDraft.value) return;
     flowDraft.value.steps = flowDraft.value.steps.filter((s) => s.id !== id);
+    // 同步清理其它步骤对它的上游引用:悬空引用会被后端拒绝保存(中文错误)
+    removeStepReferences(flowDraft.value.steps, id);
     if (editingStepId.value === id) editingStepId.value = null;
+  }
+
+  /** 勾选/取消上游(就地写入步骤 inputs;候选过滤见 utils/agentFlowGraph) */
+  function toggleStepInput(step: api.AgentFlowStep, upstreamId: string): void {
+    toggleStepInputUtil(step, upstreamId);
+  }
+
+  /** 切换「最终成果」标注(未勾选写回 null,序列化时省略该字段) */
+  function toggleStepOutput(step: api.AgentFlowStep): void {
+    step.is_output = step.is_output === true ? null : true;
+  }
+
+  /** 并行节点上限(1-8;空 = 用后端默认 2);越界由后端 400 拦下,前端限定输入范围 */
+  function setFlowParallel(value: string): void {
+    if (!flowDraft.value) return;
+    const n = Number(value);
+    flowDraft.value.max_parallel_nodes =
+      value.trim() === '' || !Number.isFinite(n) ? null : Math.min(8, Math.max(1, Math.trunc(n)));
   }
 
   /** ↑/↓ 移动(拖拽的兜底操作;数组顺序即执行顺序) */
@@ -293,6 +317,8 @@ export function useAgentFlow() {
     loadFlowConfig, onFlowSelect, newFlow, duplicateFlow, deleteFlowNow, onFlowImport,
     exportFlowNow, saveFlowNow, addStep, removeStep, moveStep, onStepActionChange,
     onStepDragStart, onStepDragOver, onStepDrop, onStepDragEnd,
+    // 二维依赖(二维批次 1/2):上游勾选 / 成果标注 / 并行上限
+    toggleStepInput, toggleStepOutput, setFlowParallel,
     // 工具模式三态 UI 与后端字段互转(utils/agentFlowTools)
     stepToolMode, setStepToolMode, stepToolsText, setStepToolsText,
   };

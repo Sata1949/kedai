@@ -2393,6 +2393,18 @@ input[type="range"].sv-range::-moz-range-thumb {
 }
 .flow-row.dragging { opacity: 0.4; border-style: dashed; }
 .flow-row .sv-input, .flow-row .sv-select { font-size: 12px; }
+/* 二维依赖摘要(二维批次 1/2):跨整行显示层级与上游。用 grid-column: 1/-1 而非新增
+   列——.flow-row 的第 6 列是操作按钮组,加列会把 ✕ 挤出窄屏(见文件末媒体查询的注释)。 */
+.flow-graph-note {
+  grid-column: 1 / -1;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--sv-ink-faint);
+}
+/* 上游步骤勾选列表(展开编辑区内) */
+.flow-upstream-list { display: flex; flex-wrap: wrap; gap: 4px 12px; flex: 1 1 auto; min-width: 0; }
+.flow-upstream-item { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
+.flow-upstream-item.off { opacity: 0.6; } /* 上游已停用:后端会拒绝保存,编辑器保留勾选并提示 */
 /* 流程库操作按钮组(选择/新建/复制/删除):桌面保持 display:contents —— 子按钮仍是
    .sv-inp-row 的直接 flex 项,布局与加这个 wrapper 之前逐像素一致;
    手机端(媒体查询内)才让它整体换行,给流程下拉让出整行宽度。 */
@@ -4082,6 +4094,7 @@ input[type="range"].sv-range::-moz-range-thumb {
   /* 操作按钮组:margin-left:auto 推到自己那行的右端(原 grid 下在最右列,窄屏被挤出视口) */
   .flow-row > .floor-actions { flex: 0 0 auto; margin-left: auto; }
   .flow-row > .flow-edit { flex: 1 1 100%; } /* 原 grid-column:1/-1 在 flex 下失效 */
+  .flow-row > .flow-graph-note { flex: 1 1 100%; } /* 同上:摘要整行独占 */
   .flow-edit { padding-left: 0; } /* 窄屏不再缩进,省出宽度给控件 */
 
   /* --- 提示词楼层行:同病同治(PromptManager / PromptInjectSection 共用 7 列 grid) --- */
