@@ -726,7 +726,8 @@ mod tests {
         assert_eq!(deps.subtasks.list_by_session(sid).len(), 2);
     }
 
-    /// 结果截断:超 subagent_result_max_chars 的子任务结果保留前 N 字符并带原长尾注
+    /// 结果截断:超 subagent_result_max_chars 的子任务结果保留前 N 字符并带原长尾注,
+    /// 且尾注**自身说明完整内容怎么取**(HB-6:父智能体不必重跑子任务去摸这条路径)
     #[tokio::test]
     async fn subtask_result_truncates_with_marker() {
         use crate::tools::agent_tools_agent::truncate_subtask_result_for_test;
@@ -737,11 +738,18 @@ mod tests {
             s.subagent_result_max_chars = 10;
         }
         let long = "字".repeat(25);
-        let out = truncate_subtask_result_for_test(&deps, &long);
+        let task_id = "0f1e2d3c-4b5a-6978-8a6b-5c4d3e2f1a09";
+        let out = truncate_subtask_result_for_test(&deps, &long, task_id);
         assert!(
-            out.contains("[子智能体结果已截断,原长 25 字符]"),
+            out.contains("[子智能体结果已截断,原长 25 字符;"),
             "应带原长尾注: {out}"
         );
+        // 尾注可操作:带读取路径与真实 id(read 的子任务 id 走 queries[].name 字段)
+        assert!(
+            out.contains("read(type=\"subtask\", name=\""),
+            "尾注应给出读取路径: {out}"
+        );
+        assert!(out.contains(task_id), "尾注应带上真实 task_id: {out}");
         // 保留前 10 字符,截断在字符边界(首行恰为 max_chars 个字符)
         assert!(out.starts_with(&"字".repeat(10)), "应保留前 10 字符: {out}");
         assert_eq!(
@@ -751,7 +759,10 @@ mod tests {
         );
         // 未超长:原样返回,不带尾注
         let short = "短结果";
-        assert_eq!(truncate_subtask_result_for_test(&deps, short), short);
+        assert_eq!(
+            truncate_subtask_result_for_test(&deps, short, task_id),
+            short
+        );
     }
 
     // ==================== 任务编排契约加固(审计 A/B/C/E/F) ====================

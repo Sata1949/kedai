@@ -487,14 +487,15 @@ async fn run_subtask_with_tools(
                         // 同时把定性原因写入 error。
                         let _ = deps.subtasks.set_failed(
                             task_id,
-                            &truncate_subtask_result(deps, &content),
+                            &truncate_subtask_result(deps, &content, task_id),
                             &error,
                         );
                     }
                     SubtaskVerdict::Done => {
-                        let _ = deps
-                            .subtasks
-                            .set_done(task_id, &truncate_subtask_result(deps, &content));
+                        let _ = deps.subtasks.set_done(
+                            task_id,
+                            &truncate_subtask_result(deps, &content, task_id),
+                        );
                     }
                 }
             }
@@ -580,9 +581,10 @@ async fn run_subtask_plain(
             } else if content.trim().is_empty() {
                 let _ = deps.subtasks.set_error(task_id, "子任务返回空内容");
             } else {
-                let _ = deps
-                    .subtasks
-                    .set_done(task_id, &truncate_subtask_result(deps, content.trim()));
+                let _ = deps.subtasks.set_done(
+                    task_id,
+                    &truncate_subtask_result(deps, content.trim(), task_id),
+                );
             }
         }
         Err(e) => {
@@ -604,26 +606,38 @@ fn spawn_discard_sink() -> (mpsc::Sender<SseEvent>, tokio::task::JoinHandle<()>)
 
 /// 子任务结果超长截断:超 subagent_result_max_chars 时保留前 N 字符并附尾注,
 /// 不静默丢内容(原长写入尾注,调用方可知全貌)。按字符截断,避开 UTF-8 边界问题。
-fn truncate_subtask_result(deps: &ToolDeps, content: &str) -> String {
+///
+/// 尾注必须**可操作**(2026-09-18 harness 补强 HB-6):父智能体拿到的是截断结果,
+/// 若不知道完整结果怎么取,只能重跑子任务(直接烧钱)。尾注因此携带 `task_id` 与
+/// 读取路径——`read` 工具的真实参数是 `queries[].{type,name}`,子任务 id 走 `name`
+/// (见 agent_tools_read.rs 的参数说明),故写 `read(type="subtask", name="<id>")`
+/// 这一与 agentgo description 同款的简写,而不是凭空造 `id=` 参数。
+fn truncate_subtask_result(deps: &ToolDeps, content: &str, task_id: &str) -> String {
     // 设置快照:不留锁跨 await
     let max_chars = deps.settings_snapshot().subagent_result_max_chars as usize;
-    truncate_subtask_result_with_limit(content, max_chars)
+    truncate_subtask_result_with_limit(content, max_chars, task_id)
 }
 
 /// 截断纯函数(限长可注入,测试用)
-fn truncate_subtask_result_with_limit(content: &str, max_chars: usize) -> String {
+fn truncate_subtask_result_with_limit(content: &str, max_chars: usize, task_id: &str) -> String {
     let total = content.chars().count();
     if total <= max_chars {
         return content.to_string();
     }
     let clipped: String = content.chars().take(max_chars).collect();
-    format!("{clipped}\n[子智能体结果已截断,原长 {total} 字符]")
+    format!(
+        "{clipped}\n[子智能体结果已截断,原长 {total} 字符;完整内容用 read(type=\"subtask\", name=\"{task_id}\") 获取]"
+    )
 }
 
 /// 测试入口:跨模块(agent_tools tests)验证截断行为
 #[cfg(test)]
-pub(super) fn truncate_subtask_result_for_test(deps: &ToolDeps, content: &str) -> String {
-    truncate_subtask_result(deps, content)
+pub(super) fn truncate_subtask_result_for_test(
+    deps: &ToolDeps,
+    content: &str,
+    task_id: &str,
+) -> String {
+    truncate_subtask_result(deps, content, task_id)
 }
 
 /// 测试入口:跨模块验证写回判定(截断即失败)
