@@ -419,6 +419,16 @@ pub enum LlmStreamChunk {
     Finish {
         reason: String,
     },
+    /// 上游请求重试中的提示(HB-4):连接器在等待重试前产出,
+    /// 由引擎翻译为 SseEvent::Retry 透出给界面
+    Retry {
+        /// 本次是第几次尝试(1 = 首次重试,即发起第 2 次请求)
+        attempt: usize,
+        /// 总尝试次数上限(与连接器 MAX_ATTEMPTS 同口径)
+        max: usize,
+        /// 重试原因(如「上游返回 429 Too Many Requests」)
+        reason: String,
+    },
 }
 
 // ---------- SSE 事件 ----------
@@ -501,6 +511,17 @@ pub enum SseEvent {
         stat_data: Value,
     },
     Interrupted,
+    /// 上游请求重试中的提示(HB-4,2026-09-18):连接器在等待重试前发出,
+    /// 用户不再面对「界面停几十秒然后报错」的无解释等待。
+    /// 非终态事件:成功后照常继续 token/finish,失败时仍以 Error 收尾。
+    Retry {
+        /// 本次是第几次尝试(1 = 首次重试,即发起第 2 次请求)
+        attempt: usize,
+        /// 总尝试次数上限(与连接器 MAX_ATTEMPTS 同口径)
+        max: usize,
+        /// 重试原因(如「上游返回 429 Too Many Requests」),用于界面文案
+        reason: String,
+    },
     /// 顶层生成错误终态:模型失败/上游错误时发送,取代「空内容 finish 伪装正常结束」。
     /// 前端据此展示错误而非「完成」。
     Error {

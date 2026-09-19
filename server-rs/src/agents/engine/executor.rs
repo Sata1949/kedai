@@ -327,6 +327,26 @@ async fn process_chunk(
         // finish_reason 聚合到结果(可观测性问题①):任务模式据此落 task_llm_calls,
         // 区分「正常收尾(stop)」与「max_tokens 截断(length)」;聊天引擎不据此动作
         LlmStreamChunk::Finish { reason } => *finish_reason = Some(reason),
+        // 连接器重试提示(HB-4,2026-09-18):透出为顶层 Retry 事件,界面显示
+        // 「正在重试 (n/m)…」。此前重试只写 tracing,用户看到的是「停几十秒
+        // 然后报错」的无解释等待。非终态事件,落到这里即视为可继续的普通块。
+        LlmStreamChunk::Retry {
+            attempt,
+            max,
+            reason,
+        } => {
+            send_event(
+                SseEvent::Retry {
+                    attempt,
+                    max,
+                    reason,
+                },
+                tx,
+                abort,
+                flag,
+            )
+            .await?;
+        }
     }
     Ok(false)
 }
@@ -450,8 +470,7 @@ fn is_truncated_tool_call_error(err: &str) -> bool {
 }
 
 /// AGENT 模式工具循环:生成 → 有 tool_calls 则逐个执行并回填消息 → 重新生成,
-/// 轮次上限默认 32(params.max_tool_rounds 可调,settings 页配置);无 tool_calls 时返回最终正文。
-/// 每轮 usage 已累加进 total_usage。
+/// 轮次上限默认 32(params.max_tool_rounds 可调,settings 页配置);无 tool_calls 时返回最终正文。/// 每轮 usage 已累加进 total_usage。
 /// 截断自愈(问题①):单轮生成被 max_tokens 截断到不可用(空正文 / 半截 tool_call
 /// JSON / 连接器流尾 flush 校验报错)时,本轮 max_tokens 翻倍(上限
 /// TRUNCATION_HEAL_MAX_TOKENS_CAP)原样重发一次,重发仍失败才透出原结果;
@@ -1560,6 +1579,7 @@ mod tests {
         );
         assert_eq!(doubled_heal_budget(65_536), Some(131_072));
     }
+
 }
 
 #[cfg(test)]

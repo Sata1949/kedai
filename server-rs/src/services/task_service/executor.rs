@@ -479,6 +479,20 @@ impl TaskService {
                         reasoning_tokens += rt;
                     }
                     LlmStreamChunk::Finish { reason } => finish_reason = Some(reason),
+                    // 重试提示(HB-4):任务侧 generate_text 无 SSE 通道,调用追踪走
+                    // task_llm_calls;此处只记 trace,不改变聚合结果
+                    LlmStreamChunk::Retry {
+                        attempt,
+                        max,
+                        reason,
+                    } => {
+                        tracing::debug!(
+                            attempt,
+                            max,
+                            reason = reason.as_str(),
+                            "任务侧模型请求重试中"
+                        );
+                    }
                     // 下发了工具(规划器侦察轮,问题②):ToolCall 块是预期产出,聚合进结果;
                     // 未下发工具时出现 ToolCall 块即上游/协议异常,记 warn 便于定位
                     LlmStreamChunk::ToolCall(call) => {

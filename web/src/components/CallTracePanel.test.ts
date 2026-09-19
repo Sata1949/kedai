@@ -107,6 +107,7 @@ describe('CallTracePanel(调用追踪内容,面板合并后为 AgentPanel「调�
         pendingTool: null,
         toolCalls: [{ name: 'web_search', input: {}, output: '结果', status: 'done', risk: 'safe' }],
         flowProgress: null,
+        retryable: false,
       };
     });
     expect(html).toContain('规划完成');

@@ -74,7 +74,7 @@ impl MockConnector {
         // `"_mock_round": k` 判别字段,使各轮「工具名+参数」指纹**互不相同**——
         // 这才是真实 agent 的形态(每次调用携带新信息,如读不同文件)。
         // 需要模拟「模型原地打转」的病态场景时用 [[tool_loop_repeat:name|N args]],
-        // 它保持参数逐字相同(供重复调用熔断的回归测试)。
+        // 它保持参数逐字相同(供重复调用熔断的回归测试);
         // 注入的判别字段会被工具忽略(read 等只读已知键),不影响工具行为。
         if let Some((name, n, args, repeat)) = extract_tool_loop_marker(&last_user) {
             let executed = messages.iter().filter(|m| m.role == "tool").count();
@@ -491,6 +491,18 @@ impl MockConnector {
             return Ok(chunks);
         }
 
+        // 测试钩子:[[retry:attempt,max@原因]] → 先在流首注入一条重试提示块,再走默认回复。
+        // 真实重试发生在 openai_compatible 连接器内部(带真实 HTTP),mock 不经过该路径,
+        // 故由钩子直接产出 LlmStreamChunk::Retry,覆盖「引擎翻译 → SseEvent::Retry →
+        // 前端渲染」这段链路(HB-4;退避与 Retry-After 口径由 retry.rs 单测覆盖)。
+        if let Some((attempt, max, reason)) = extract_retry_marker(&last_user) {
+            chunks.push(LlmStreamChunk::Retry {
+                attempt,
+                max,
+                reason,
+            });
+        }
+
         let excerpt: String = last_user.chars().take(60).collect();
         let reply = format!(
             "（模拟回复）我已收到你的消息:「{excerpt}」\n\n当前为演示模式,未连接真实模型。\n可在左下角「连接状态」处配置 OpenAI 兼容后端,或保持 Mock 体验完整 Agent 流程。\n\n*Agent 引擎已先后完成规划、执行、反思,输出质量检查通过。*"
@@ -574,6 +586,32 @@ fn extract_reply_stream_marker(input: &str) -> Option<String> {
             .unwrap_or(rest)
             .to_string(),
     )
+}
+
+/// 提取 [[retry:attempt,max@原因]] 标记(HB-4 重试提示注入)。
+/// 用逗号而非斜杠分隔次数:`a/b` 会被引擎的 looks_like_calculation 启发式当成算式,
+/// 自动插入一次 calculator 调用(并改写最后一条 user 消息),钩子将收不到原消息。
+/// attempt/max 解析失败按 1/3 兜底;原因可为空(缺省给「模拟重试」)。
+fn extract_retry_marker(input: &str) -> Option<(usize, usize, String)> {
+    let rest = &input[input.find("[[retry:")? + "[[retry:".len()..];
+    let body = rest.find("]]").map(|end| &rest[..end]).unwrap_or(rest);
+    let (counts, reason) = match body.split_once('@') {
+        Some((c, r)) => (c, r.trim()),
+        None => (body, ""),
+    };
+    let (attempt, max) = match counts.trim().split_once(',') {
+        Some((a, m)) => (
+            a.trim().parse::<usize>().unwrap_or(1),
+            m.trim().parse::<usize>().unwrap_or(3),
+        ),
+        None => (1, 3),
+    };
+    let reason = if reason.is_empty() {
+        "模拟重试".to_string()
+    } else {
+        reason.to_string()
+    };
+    Some((attempt.max(1), max.max(attempt.max(1)), reason))
 }
 
 /// 提取 [[tool_raw:name {"json"}]] 标记(问题①截断 tool_call 模拟);返回 (name, 完整 args)。

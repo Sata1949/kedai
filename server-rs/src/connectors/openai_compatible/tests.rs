@@ -690,3 +690,136 @@ async fn abort_wins_over_continuous_heartbeats() {
         .expect_err("中断应返回错误");
     assert_eq!(err.message(), "生成已中断");
 }
+
+/// 退避序列与 Retry-After 上限(HB-4 补测):此前 retry_delay 无任何覆盖——
+/// 上游 429 时的等待时长既影响体验也影响重试是否真能生效。
+#[test]
+fn retry_delay_backoff_sequence_and_retry_after_cap() {
+    // 无 Retry-After:500ms 起步指数增长,封顶 5s;带 ≤250ms jitter(以系统时钟纳秒做,
+    // 故断言区间而非定值)
+    let d1 = retry_delay(1, None).as_millis();
+    assert!((500..750).contains(&d1), "attempt=1 应为 500ms+jitter: {d1}");
+    let d2 = retry_delay(2, None).as_millis();
+    assert!((1000..1250).contains(&d2), "attempt=2 应为 1000ms+jitter: {d2}");
+    let d3 = retry_delay(3, None).as_millis();
+    assert!((2000..2250).contains(&d3), "attempt=3 应为 2000ms+jitter: {d3}");
+    let d5 = retry_delay(5, None).as_millis();
+    assert!((5000..5250).contains(&d5), "指数增长必须封顶 5s: {d5}");
+    // Retry-After 以秒为准,并封顶 30s(上游误配 60 不得真等一分钟)
+    assert_eq!(retry_delay(1, Some(5)), Duration::from_secs(5));
+    assert_eq!(retry_delay(2, Some(60)), Duration::from_secs(30));
+    assert_eq!(retry_delay(1, Some(0)), Duration::from_secs(0));
+}
+
+/// 上游 429 后重试成功:重试提示块必须先于正文产出(HB-4)——
+/// 此前重试只写 tracing,界面表现为「停几十秒然后报错」。
+/// 响应带 Retry-After: 0,用例无需真等退避。
+#[tokio::test]
+async fn retry_emits_notice_before_success() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        // 第一次:429 + Connection: close + Retry-After: 0
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = vec![0; 4096];
+        let _ = socket.read(&mut request).await;
+        socket
+            .write_all(
+                b"HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\nRetry-After: 0\r\nContent-Length: 2\r\n\r\n{}",
+            )
+            .await
+            .unwrap();
+        socket.flush().await.unwrap();
+        drop(socket);
+        // 第二次:200 + 正常 SSE 流
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = vec![0; 4096];
+        let _ = socket.read(&mut request).await;
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let body = b"data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n";
+        socket
+            .write_all(format!("{:X}\r\n", body.len()).as_bytes())
+            .await
+            .unwrap();
+        socket.write_all(body).await.unwrap();
+        socket.write_all(b"\r\n0\r\n\r\n").await.unwrap();
+        socket.flush().await.unwrap();
+    });
+
+    let connector = OpenAiCompatibleConnector::new(&format!("http://{addr}"), "key", "model");
+    let (_abort_tx, abort_rx) = watch::channel(false);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let task = tokio::spawn(async move {
+        connector
+            .generate_stream(
+                &[LlmMessage::plain("user", "hi")],
+                test_params(),
+                abort_rx,
+                tx,
+            )
+            .await
+    });
+
+    let first = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("重试提示应立即产出,不等退避")
+        .unwrap();
+    match first {
+        LlmStreamChunk::Retry {
+            attempt,
+            max,
+            reason,
+        } => {
+            assert_eq!((attempt, max), (1, MAX_ATTEMPTS), "首次重试应为 1/{MAX_ATTEMPTS}");
+            assert!(reason.contains("429"), "原因应带上游状态码: {reason}");
+        }
+        other => panic!("首块应为重试提示: {other:?}"),
+    }
+    // 重试成功后照常产出正文
+    let next = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(next, LlmStreamChunk::Token(t) if t == "ok"), "重试后应正常出块");
+    assert!(task.await.unwrap().is_ok(), "重试后整体应成功");
+}
+
+/// 不可重试状态直接失败(不产生重试提示):401 鉴权类错误不得被当成瞬时故障
+#[tokio::test]
+async fn non_retryable_status_fails_without_retry_notice() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = vec![0; 4096];
+        let _ = socket.read(&mut request).await;
+        socket
+            .write_all(b"HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{}")
+            .await
+            .unwrap();
+        socket.flush().await.unwrap();
+    });
+
+    let connector = OpenAiCompatibleConnector::new(&format!("http://{addr}"), "key", "model");
+    let (_abort_tx, abort_rx) = watch::channel(false);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let err = connector
+        .generate_stream(
+            &[LlmMessage::plain("user", "hi")],
+            test_params(),
+            abort_rx,
+            tx,
+        )
+        .await
+        .expect_err("401 应直接失败");
+    assert_eq!(err.kind(), LlmErrorKind::AuthFailed);
+    assert!(
+        rx.try_recv().is_err(),
+        "不可重试错误不得产出任何块(含重试提示)"
+    );
+}

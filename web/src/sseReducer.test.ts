@@ -275,3 +275,50 @@ describe('swipe 版本纯函数(阶段六 6f)', () => {
     expect(swipeIndex({ swipes: [{ swipe_id: 0, content: 'a', ts: 1 }] })).toBe(-1);
   });
 });
+
+describe('retry 事件与 retryable 消费(HB-4)', () => {
+  it('retry 为非终态:阶段行显示重试进度并写入推理链,不改生成态', () => {
+    const current = state();
+
+    const changes = reduceSseEvent(current, {
+      type: 'retry',
+      attempt: 1,
+      max: 3,
+      reason: '上游返回 429 Too Many Requests',
+    });
+
+    // 非终态:不结束生成、不动消息气泡
+    expect(changes).toMatchObject({});
+    expect(current.agent.stepText).toBe('正在重试 (1/3)…');
+    expect(current.agent.detail).toBe('上游返回 429 Too Many Requests');
+    expect(current.agent.chain.at(-1)).toMatchObject({ text: '请求上游重试 (1/3)' });
+    // 后续 token 到达即表示重试等待结束,阶段行交还给生成
+    reduceSseEvent(current, { type: 'token', text: '好' });
+    expect(current.agent.stepText).toBe('生成中…');
+  });
+
+  it('error 事件写入 retryable,新一轮 step 清除', () => {
+    const current = state();
+    reduceSseEvent(current, {
+      type: 'error',
+      code: 'upstream_error',
+      message: '连接失败',
+      retryable: true,
+    });
+    expect(current.agent.retryable).toBe(true);
+
+    reduceSseEvent(current, { type: 'step', step: '计划中…' });
+    expect(current.agent.retryable).toBe(false);
+  });
+
+  it('不可重试错误(鉴权类)不置可重试标记', () => {
+    const current = state();
+    reduceSseEvent(current, {
+      type: 'error',
+      code: 'auth_failed',
+      message: '鉴权失败',
+      retryable: false,
+    });
+    expect(current.agent.retryable).toBe(false);
+  });
+});

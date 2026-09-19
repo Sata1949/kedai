@@ -25,7 +25,20 @@ const activeTab = computed<'agent' | 'trace'>({
   set: (v) => { store.callTraceOpen = v === 'trace'; },
 });
 const authorizing = ref<string | null>(null);
-/** 授权操作错误/成功反馈(就近显示在授权卡片下方) */
+
+/**
+ * 错误终态「重试」的锚点(HB-4):最后一条**已落库**用户消息的 id。
+ * 错误终态下临时草稿(负 id)已被 reducer 清掉,拿不到 assistant 锚点,
+ * 故走 resendMessage(重发锚点)而非 regenerateMessage;负 id 绝不能作锚点
+ * (服务端按 id>anchor 截断会把历史一并删掉)。
+ */
+const retryTarget = computed<number | null>(() => {
+  for (let i = store.messages.length - 1; i >= 0; i--) {
+    const m = store.messages[i];
+    if (m.role === 'user' && m.id > 0) return m.id;
+  }
+  return null;
+});/** 授权操作错误/成功反馈(就近显示在授权卡片下方) */
 const authMsg = ref<string>('');
 /** 已授权的工具调用(callId ?? name):授权成功后卡片转「已授权」态,不再重复请求 */
 const grantedCalls = ref<Set<string>>(new Set());
@@ -382,6 +395,23 @@ function subtaskDot(status: TaskSubtaskStatus): { cls: string; icon: string } {
         <div class="sv-agent-summary-row" v-if="agent.detail">
           <span class="label">详情</span>
           <span class="value detail">{{ agent.detail }}</span>
+        </div>
+        <!-- 错误终态的操作位(HB-4):可重试错误给「重试」入口,不可重试只提示。
+             锚点是最后一条已落库用户消息——错误终态下临时草稿已被清掉,没有
+             assistant 锚点,故复用「重发」而非「生成新版本」。 -->
+        <div class="sv-agent-summary-row" v-if="agent.phase === 'error' && retryTarget !== null">
+          <span class="label">操作</span>
+          <span class="value">
+            <button
+              v-if="agent.retryable"
+              type="button"
+              class="sv-btn primary sv-btn-sm"
+              :disabled="generating || !currentSessionId"
+              title="以同一条用户消息重新生成(上游限流/超时/网络类错误适用)"
+              @click="store.resendMessage(retryTarget)"
+            >重试</button>
+            <span v-else class="sv-note-mini">该错误不可重试(检查模型连接与参数后手动重发)</span>
+          </span>
         </div>
       </div>
 

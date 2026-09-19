@@ -9,7 +9,7 @@ use crate::models::llm_error::{LlmError, TransportFailure};
 use crate::models::types::{GenerationParams, LlmMessage, LlmStreamChunk};
 use futures::StreamExt;
 use reqwest::Client;
-use retry::{log_retry, retry_delay, wait_retry, MAX_ATTEMPTS};
+use retry::{log_retry, notify_retry, retry_delay, wait_retry, MAX_ATTEMPTS};
 use serde_json::{json, Value};
 use sse_parser::SseParser;
 use std::time::Duration;
@@ -312,6 +312,7 @@ impl OpenAiCompatibleConnector {
                     ));
                     if attempt < MAX_ATTEMPTS {
                         log_retry(&e, attempt);
+                        notify_retry(&tx, attempt, &e);
                         wait_retry(retry_delay(attempt, None), &mut abort).await?;
                         continue;
                     }
@@ -325,6 +326,7 @@ impl OpenAiCompatibleConnector {
                     );
                     if attempt < MAX_ATTEMPTS {
                         log_retry(&e, attempt);
+                        notify_retry(&tx, attempt, &e);
                         wait_retry(retry_delay(attempt, None), &mut abort).await?;
                         continue;
                     }
@@ -347,6 +349,7 @@ impl OpenAiCompatibleConnector {
             let truncated: String = text.chars().take(300).collect();
             if retryable && attempt < MAX_ATTEMPTS {
                 log_retry(&format!("上游返回 {status}"), attempt);
+                notify_retry(&tx, attempt, &format!("上游返回 {status}"));
                 wait_retry(retry_delay(attempt, retry_after), &mut abort).await?;
                 continue;
             }

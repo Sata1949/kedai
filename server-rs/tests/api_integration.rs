@@ -3302,3 +3302,74 @@ async fn chat_send_on_multi_thread_runtime_keeps_reads_alive() {
     );
     assert!(reads > 0, "应至少完成一轮并发读");
 }
+
+/// 重试提示透出(HB-4,2026-09-18):连接器重试时必须先给界面一个信号,
+/// 而不是「停几十秒然后报错」的无解释等待。
+///
+/// 真实重试发生在 openai_compatible 连接器内(带真实 HTTP,由该模块的
+/// retry_emits_notice_before_success 用例覆盖 429→重试→成功);mock 不经过那条路径,
+/// 故由钩子 [[retry:attempt,max@原因]] 直接注入 LlmStreamChunk::Retry,
+/// 本用例锁「引擎翻译 → SseEvent::Retry → SSE 序列位置」这一段。
+///
+/// 钩子分隔符是逗号不是斜杠:`a/b` 会被引擎的 looks_like_calculation 启发式
+/// 当成算式,自动插入 calculator 调用并改写最后一条 user 消息,钩子随之失效。
+#[tokio::test]
+async fn retry_notice_reaches_sse_before_finish() {
+    let app = test_app();
+    let (_, char) = upload_character(app, "重试提示.json").await;
+    let cid = char["id"].as_str().unwrap().to_string();
+    let (_, session) = send_json(
+        app,
+        "POST",
+        "/api/chat/sessions",
+        json!({ "character_id": cid }),
+    )
+    .await;
+    let sid = session["id"].as_str().unwrap().to_string();
+
+    let events = sse_events(
+        app,
+        &sid,
+        &cid,
+        // 用 fast 模式:deep 会先规划/反思,marker 落在哪一轮的 last_user 不确定
+        "请在遇到上游限流时给出重试提示 [[retry:1,3@上游返回 429 Too Many Requests]]",
+        "fast",
+    )
+    .await;
+    let retry = events
+        .iter()
+        .find(|e| e["type"] == "retry")
+        .unwrap_or_else(|| panic!("应有 retry 事件: {events:?}"));
+    assert_eq!(retry["attempt"], json!(1), "attempt 字段: {retry}");
+    assert_eq!(retry["max"], json!(3), "max 字段: {retry}");
+    assert!(
+        retry["reason"]
+            .as_str()
+            .unwrap()
+            .contains("429"),
+        "reason 应透出上游状态: {retry}"
+    );
+    // 非终态:重试提示之后仍须正常产出正文与 finish
+    let retry_at = events
+        .iter()
+        .position(|e| e["type"] == "retry")
+        .expect("retry 位置");
+    let finish_at = events
+        .iter()
+        .position(|e| e["type"] == "finish")
+        .unwrap_or_else(|| panic!("重试后仍应有 finish: {events:?}"));
+    assert!(
+        retry_at < finish_at,
+        "retry 必须早于 finish(否则用户仍看不到等待信号)"
+    );
+    // mock 逐字符流式,故断言 token 事件拼接后的正文
+    let text: String = events
+        .iter()
+        .filter(|e| e["type"] == "token")
+        .filter_map(|e| e["text"].as_str())
+        .collect();
+    assert!(
+        text.contains("模拟回复"),
+        "重试后应正常输出正文: {text:?}"
+    );
+}

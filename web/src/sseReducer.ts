@@ -27,6 +27,11 @@ export interface AgentActivity {
   }>;
   /** 自定义流程(custom 模式)步骤进度;其余模式为 null */
   flowProgress: { index: number; total: number; name: string } | null;
+  /**
+   * 最近一次错误终态是否可重试(HB-4):由 error 事件写入,新的一轮 step/token 清除。
+   * 面板据此决定是否给「重试」入口——鉴权/参数类错误重试没有意义。
+   */
+  retryable: boolean;
 }
 
 /** 初始 Agent 活动状态(多处重置复用) */
@@ -39,6 +44,7 @@ export function idleAgent(): AgentActivity {
     pendingTool: null,
     toolCalls: [],
     flowProgress: null,
+    retryable: false,
   };
 }
 
@@ -101,6 +107,8 @@ export function reduceSseEvent(state: SseStateSlice, event: SseEvent): SseStateC
     case 'step':
       a.stepText = event.step;
       a.detail = event.detail ?? '';
+      // 新一轮开始即清除上一轮的「可重试」标记(错误卡片随之收起)
+      a.retryable = false;
       if (event.step === '计划中…') a.chain = [];
       a.chain.push({ at: Date.now(), text: event.step, detail: event.detail });
       // 反思重试:清空上一条流式 assistant 消息,避免两次生成内容拼接显示
@@ -152,6 +160,19 @@ export function reduceSseEvent(state: SseStateSlice, event: SseEvent): SseStateC
       }
       a.chain.push({ at: Date.now(), text: `工具 ${event.name} 返回`, detail: JSON.stringify(event.output) });
       break;
+    case 'retry': {
+      // 上游重试提示(HB-4):非终态——连接器正在退避等待下一轮请求。
+      // 此前这段等待对界面完全不可见,表现为「停几十秒然后报错」;现在先在阶段行
+      // 与推理链里给出「正在重试 (n/m)…」,随后的 token/finish 会自然覆盖阶段行。
+      a.stepText = `正在重试 (${event.attempt}/${event.max})…`;
+      a.detail = event.reason;
+      a.chain.push({
+        at: Date.now(),
+        text: `请求上游重试 (${event.attempt}/${event.max})`,
+        detail: event.reason,
+      });
+      break;
+    }
     case 'token': {
       const last = state.messages[state.messages.length - 1];
       if (!last || last.role !== 'assistant') {
@@ -160,6 +181,8 @@ export function reduceSseEvent(state: SseStateSlice, event: SseEvent): SseStateC
         last.content += event.text;
         last.streaming = true;
       }
+      // 上游已开始出块:重试等待结束,阶段行交还给后续 step/finish
+      if (a.stepText.startsWith('正在重试')) a.stepText = '生成中…';
       break;
     }
     case 'interrupted': {
@@ -194,6 +217,9 @@ export function reduceSseEvent(state: SseStateSlice, event: SseEvent): SseStateC
       // 清理无内容的临时 assistant 气泡,展示错误信息。
       a.phase = 'error';
       a.stepText = '执行出错';
+      // 消费 retryable(HB-4):网络/限流类错误可重试,鉴权/参数类不可——
+      // 此前该字段进了线格式却无人消费,界面表现为「可重试却没有重试入口」。
+      a.retryable = event.retryable;
       a.chain.push({ at: Date.now(), text: `执行出错:${event.message}`, detail: event.code });
       const last = state.messages[state.messages.length - 1];
       if (last && last.role === 'assistant') {

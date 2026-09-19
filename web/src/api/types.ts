@@ -121,6 +121,8 @@ export type SseEvent =
   | { type: 'tool_result'; name: string; output: unknown; call_id?: string; render_kind?: string }
   | { type: 'vars'; stat_data: Record<string, unknown> }
   | { type: 'interrupted' }
+  /** 上游请求重试中(HB-4):非终态提示事件,成功后照常继续 token/finish */
+  | { type: 'retry'; attempt: number; max: number; reason: string }
   | { type: 'error'; code: string; message: string; retryable: boolean }
   | { type: 'finish'; usage: TokenUsage; content: string; finish_reason?: string }
   | TaskEvent;
