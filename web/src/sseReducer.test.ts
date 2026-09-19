@@ -76,19 +76,23 @@ describe('reduceSseEvent', () => {
 
     expect(changes.generating).toBe(false);
     expect(current.agent).toMatchObject({ phase: 'interrupted', stepText: '已中断' });
-    // 临时草稿(负 id)从未落库,服务端中断不持久化任何消息:必须削除,
-    // 否则残留为「最后一条无法删除的草稿」(负 id 无法经删除接口移除)。
+    // 临时草稿(负 id)削除:未落库且无法经删除接口移除(负 id 幽灵气泡)。
     expect(current.messages.length).toBe(0);
+    // 中断语义统一(HB-3):服务端会落库「已生成的部分正文」(extra.interrupted),
+    // 故中断终态一律刷新历史,由带标记的正 id 消息回填。
+    expect(changes.reloadHistory).toBe(true);
   });
 
-  it('interrupted 保留已落库(正 id)消息,仅关闭流式状态', () => {
+  it('interrupted 保留已落库(正 id)消息,仅关闭流式状态,并请求刷新历史', () => {
     const current = state();
     current.messages.push({ id: 42, role: 'assistant', content: '已落库内容', extra: {}, streaming: true });
 
-    reduceSseEvent(current, { type: 'interrupted' });
+    const changes = reduceSseEvent(current, { type: 'interrupted' });
 
     expect(current.messages.length).toBe(1);
     expect(current.messages[0].streaming).toBe(false);
+    // HB-3:中断的部分产出由服务端落库,刷新历史后以 extra.interrupted 渲染「已中断」
+    expect(changes.reloadHistory).toBe(true);
   });
 
   it('finish 落最终正文、结束生成并请求刷新历史', () => {
@@ -197,8 +201,8 @@ describe('reduceSseEvent', () => {
   });
 
   it('interrupted 削除末尾未落库的用户临时气泡并请求刷新历史', () => {
-    // 发送消息时前端先 push 负 id 用户气泡,服务端同步落库为正 id;中断终态不刷新历史,
-    // 该气泡会残留成「删不掉的草稿」(负 id 无法经删除接口移除)。
+    // 发送消息时前端先 push 负 id 用户气泡,服务端同步落库为正 id;该气泡会残留成
+    // 「删不掉的草稿」(负 id 无法经删除接口移除),故削除并由刷新历史回填正 id 版本。
     const current = state();
     current.messages.push({ id: -100, role: 'user', content: '被中断的消息', extra: {}, streaming: false });
 

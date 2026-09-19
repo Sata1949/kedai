@@ -813,7 +813,10 @@ pub(crate) async fn run_tool_loop(
         total_usage.prompt_cache_hit_tokens += result.usage.prompt_cache_hit_tokens;
         total_usage.prompt_cache_miss_tokens += result.usage.prompt_cache_miss_tokens;
         if result.interrupted {
+            // 本轮 usage 已累进 total_usage(上方);返回体归零,避免调用方(HB-3 之后
+            // 中断分支也会合并 usage)重复计数。与「无工具调用短路」的归零同理由。
             return Ok(ExecutorResult {
+                usage: TokenUsage::default(),
                 self_heals: std::mem::take(&mut self_heals),
                 ..result
             });

@@ -595,6 +595,15 @@ impl AgentEngine {
                 .await?
             };
             if result.interrupted {
+                // 中断语义统一(HB-3):部分正文与中断轮 usage 必须流到收尾端——
+                // 此前 break 发生在 content/usage 赋值之前,两者随 run 返回被丢弃,
+                // 「保留部分产出 + 中断轮记账」无从实现。
+                content = result.content;
+                rctx.total_usage.prompt_tokens += result.usage.prompt_tokens;
+                rctx.total_usage.completion_tokens += result.usage.completion_tokens;
+                rctx.total_usage.total_tokens += result.usage.total_tokens;
+                rctx.total_usage.prompt_cache_hit_tokens += result.usage.prompt_cache_hit_tokens;
+                rctx.total_usage.prompt_cache_miss_tokens += result.usage.prompt_cache_miss_tokens;
                 break;
             }
             // update_variables 通过工具注册表直接持久化当前会话变量树;工具循环结束后

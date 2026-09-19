@@ -516,8 +516,49 @@ impl AgentEngine {
                     None,
                     None,
                 );
-                send_event(SseEvent::Interrupted, &tx, &abort_rx, &flag).await?;
-                logging::agent_step(&session_id, "interrupted", Some("生成被中止"));
+                // 中断语义统一(HB-3,2026-09-18):已生成的部分正文落库并打标记。
+                // 此前聊天侧「中断即丢弃」与任务侧「保留已落库内容」两套口径并存,
+                // 用户按停止等于白等一轮。extra.interrupted 与 extra.truncated 同构:
+                // 事件是暂态的,不落库则刷新后看不出这条是中断的。
+                let partial = content.trim();
+                if !partial.is_empty() {
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0);
+                    let mut extra = json!({
+                        "ts": ts,
+                        "completion_tokens": rctx.total_usage.completion_tokens,
+                        "total_tokens": rctx.total_usage.total_tokens,
+                        "interrupted": true,
+                    });
+                    if let Some(tree) = custom_vars_snapshot.clone() {
+                        extra["mvu"] = json!({ "stat_data": tree });
+                    }
+                    if let Err(e) = self.sessions.add_message(
+                        &session_id,
+                        "assistant",
+                        partial,
+                        extra,
+                    ) {
+                        tracing::warn!(error = e, "中断部分产出落库失败");
+                    }
+                }
+                // 中断轮已消耗的 token 必须记账(HB-3):此前整轮白烧不计账
+                self.record_usage(&session_id, &total_usage).await;
+                // 直发而非 send_event:后者在 abort 置位时必然短路返回 Err(既有实现里
+                // 这一行是死代码,中断事件实际由外层 Err 分支补发)。此处发完即正常返回,
+                // 语义与「外层补发」等价且不再依赖错误路径。
+                let _ = tx.send(SseEvent::Interrupted).await;
+                logging::agent_step(
+                    &session_id,
+                    "interrupted",
+                    Some(if partial.is_empty() {
+                        "生成被中止"
+                    } else {
+                        "生成被中止(已保留部分产出)"
+                    }),
+                );
             } else {
                 state_machine.transition_best_effort(AgentState::Finished, &session_id);
                 let _ = self.agent_sessions.update(

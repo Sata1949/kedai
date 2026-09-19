@@ -189,10 +189,11 @@ export function reduceSseEvent(state: SseStateSlice, event: SseEvent): SseStateC
       a.phase = 'interrupted';
       a.stepText = '已中断';
       a.chain.push({ at: Date.now(), text: '生成被中断' });
-      // 中断时服务端不落库任何消息:直接削除最后的临时草稿气泡(负 id 未持久化,
-      // 刷新后不会出现,却因负 id 无法经删除接口移除——「最后一条草稿删不掉」)。
-      // 仅当最后消息已落库(id>0)时才保留并关闭流式状态。
-      let droppedUserDraft = false;
+      // 中断语义统一(HB-3,2026-09-18):服务端会把**已生成的部分正文**以
+      // assistant 消息落库(extra.interrupted=true),故中断终态一律刷新历史,
+      // 让带标记的正 id 消息回填——刷新前后表现一致(与 truncated 同思路)。
+      // 负 id 临时草稿仍照旧削除(未落库且无法经删除接口移除:负 id 幽灵气泡),
+      // 正 id 已落库消息只关闭流式状态。
       const last = state.messages[state.messages.length - 1];
       if (last && last.role === 'assistant') {
         if (last.id < 0) {
@@ -201,16 +202,13 @@ export function reduceSseEvent(state: SseStateSlice, event: SseEvent): SseStateC
           last.streaming = false;
         }
       }
-      // 发送消息时前端先以负 id 临时气泡展示,服务端同步落库为正 id;中断终态
-      // 不刷新历史,该临时气泡会残留成「删不掉的草稿」(负 id 无法经删除接口移除)。
-      // 末尾仍是未落库的用户气泡(如「编辑后重发」中断)时一并削除,并请求刷新历史,
-      // 让服务端正 id 版本回填。
+      // 末尾仍是未落库的用户气泡(如「编辑后重发」中断)时一并削除,由刷新历史
+      // 回填服务端正 id 版本。
       const tail = state.messages[state.messages.length - 1];
       if (tail && tail.role === 'user' && tail.id < 0) {
         state.messages.pop();
-        droppedUserDraft = true;
       }
-      return { generating: false, reloadHistory: droppedUserDraft };
+      return { generating: false, reloadHistory: true };
     }
     case 'error': {
       // 顶层生成错误终态:模型/上游失败(取代旧「空 finish 伪装成功」)。复位生成态,
