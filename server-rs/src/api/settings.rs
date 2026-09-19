@@ -185,6 +185,12 @@ pub struct UpdateSettingsBody {
     /// 工具循环历史 token 预算(R3b;0 = 禁用预算闸门,否则 1024..=1M;缺省保持不变)
     #[serde(default)]
     pub tool_history_budget_tokens: Option<u32>,
+    /// 单次生成 token 预算(HB-1;0 = 关闭,否则 1024..=1e9;缺省保持不变)
+    #[serde(default)]
+    pub session_token_budget: Option<u32>,
+    /// 预算超限动作(HB-1;warn/stop;缺省保持不变)
+    #[serde(default)]
+    pub session_budget_action: Option<String>,
 }
 
 /// 序列化运行期设置(API Key 脱敏)。
@@ -248,6 +254,8 @@ fn settings_json(s: &RuntimeSettings) -> Value {
         "task_prompt_inject_enabled": s.task_prompt_inject_enabled,
         "tool_history_keep_rounds": s.tool_history_keep_rounds,
         "tool_history_budget_tokens": s.tool_history_budget_tokens,
+        "session_token_budget": s.session_token_budget,
+        "session_budget_action": s.session_budget_action,
     });
     if let (Some(dst), Some(src)) = (v.as_object_mut(), rest.as_object()) {
         for (k, val) in src {
@@ -612,6 +620,20 @@ pub async fn update_settings(
                     return validation("tool_history_budget_tokens 须为 0(禁用)或 1024..=1048576");
                 }
                 s.tool_history_budget_tokens = v;
+            }
+            // HB-1 成本护栏:扁平全局字段(引擎 run_tool_loop 直读扁平值,与工具历史
+            // 预算同款——聊天与任务工具循环共用同一上限);越界拒绝,与 load 钳制同区间
+            if let Some(v) = body.session_token_budget {
+                if v != 0 && !(1024..=1_000_000_000).contains(&v) {
+                    return validation("session_token_budget 须为 0(关闭)或 1024..=1000000000");
+                }
+                s.session_token_budget = v;
+            }
+            if let Some(v) = &body.session_budget_action {
+                if !matches!(v.as_str(), "warn" | "stop") {
+                    return validation("session_budget_action 须为 warn 或 stop");
+                }
+                s.session_budget_action = v.clone();
             }
         }
     }

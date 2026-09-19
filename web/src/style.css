@@ -403,6 +403,12 @@ output {
   padding: 4px 10px;
 }
 
+/* 单次生成 token 预算超限(HB-1):后端已按 warn/stop 处置,此处只做醒目提示 */
+.sv-budget-over {
+  color: var(--sv-red);
+  font-weight: 700;
+}
+
 /* 会话切换器 */
 .sv-session-select {
   border: var(--bw) solid var(--sv-ink);

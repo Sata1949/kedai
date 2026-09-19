@@ -212,7 +212,7 @@ pub(crate) async fn execute_generation(
             chunk = chunk_rx.recv() => match chunk {
                 Some(chunk) => {
                     if process_chunk(chunk, &mut content, &mut reasoning, &mut tool_calls, &mut usage, &mut finish_reason, tx, abort, flag).await? {
-                        return Ok(ExecutorResult { content, usage, interrupted: true, tool_calls, reasoning, finish_reason, self_heals: Vec::new() });
+                        return Ok(ExecutorResult { content, usage, interrupted: true, tool_calls, reasoning, finish_reason, self_heals: Vec::new(), budget_stopped: false });
                     }
                 }
                 None => break,
@@ -232,6 +232,7 @@ pub(crate) async fn execute_generation(
                 reasoning,
                 finish_reason,
                 self_heals: Vec::new(),
+                budget_stopped: false,
             });
         }
         // 连接器失败:分类原样带出(不丢分类信息)
@@ -264,6 +265,7 @@ pub(crate) async fn execute_generation(
         reasoning,
         finish_reason,
         self_heals: Vec::new(),
+        budget_stopped: false,
     })
 }
 
@@ -367,6 +369,9 @@ pub(crate) struct ExecutorResult {
     /// 本轮内发生的截断自愈记录(问题①,2026-08-31 deepseek 实测修复):
     /// 仅 run_tool_loop 的单轮自愈路径产出,其余构造点恒空;聊天路径不消费。
     pub(crate) self_heals: Vec<SelfHealRecord>,
+    /// 是否因 token 预算上限而提前停止工具循环(HB-1):收尾端据此在消息 extra
+    /// 里留痕(extra.budget_exceeded),刷新后仍能看出「这轮是被成本闸门收掉的」。
+    pub(crate) budget_stopped: bool,
 }
 
 /// 截断自愈记录(问题①):单轮生成被 max_tokens 截断到不可用(空正文/半截
@@ -523,6 +528,13 @@ impl<'a> ToolGate<'a> {
     }
 }
 
+/// 单次生成 token 预算是否已达上限(HB-1,纯函数便于边界单测):
+/// 预算 0 = 关闭;口径 = 本 run 内工具循环累计 prompt+completion,「达到」即算超限
+/// (等于预算也停,与轮次上限的 `round >= max_rounds` 同口径)。
+fn budget_reached(used_tokens: i64, budget: u32) -> bool {
+    budget > 0 && used_tokens >= budget as i64
+}
+
 /// 跳过状态/工具调用落库;docs/功能.md 第三节);聊天路径恒 Some,行为不变。
 /// pub(crate):任务引擎 solo/custom 模式直调(批次 4.2 起)。
 #[allow(clippy::too_many_arguments)]
@@ -555,6 +567,13 @@ pub(crate) async fn run_tool_loop(
     // 单次调用总时长看门狗(2026-09-18):仅任务模式启用(见 call_watchdog_for 文档)。
     // 聊天路径保持无总时长上限——长回复是正常形态,加限会误伤。
     let call_watchdog = call_watchdog_for(session_id);
+    // token 预算(HB-1):循环前取一次设置快照(与上面工具历史裁剪同款口径,
+    // 不留锁跨 await);0 = 关闭。budget_noticed 保证 warn 档只提示一次。
+    let (token_budget, budget_action) = {
+        let s = engine.settings_snapshot();
+        (s.session_token_budget, s.session_budget_action)
+    };
+    let mut budget_noticed = false;
     // 截断自愈留痕(问题①):各轮触发的自愈记录,随最终 ExecutorResult 透出;
     // Err 传播(?)时丢弃——失败路径由调用方落 error 行,截断细节含在错误文案内
     let mut self_heals: Vec<SelfHealRecord> = Vec::new();
@@ -795,6 +814,7 @@ pub(crate) async fn run_tool_loop(
                 // 末轮(无工具调用)的 finish_reason 透出:任务模式落库截断标记用
                 finish_reason: result.finish_reason,
                 self_heals: std::mem::take(&mut self_heals),
+                budget_stopped: false,
             });
         }
         round += 1;
@@ -941,6 +961,7 @@ pub(crate) async fn run_tool_loop(
                         // 工具执行期中断:生成未完成,finish_reason 不适用
                         finish_reason: None,
                         self_heals: std::mem::take(&mut self_heals),
+                        budget_stopped: false,
                     });
                 }
             }
@@ -1002,6 +1023,66 @@ pub(crate) async fn run_tool_loop(
                 tool_call_id: Some(e.call.id.clone()),
             });
         }
+        // ===== token 预算闸门(HB-1,2026-09-18):按**成本**而非轮数收口 =====
+        // 轮次上限(max_tool_rounds 默认 32)只管轮数:实测 54 轮各不相同命令的空转仍烧
+        // 137 万 prompt token(遗留 L22)。预算口径 = 本轮 run 内工具循环累计
+        // prompt+completion(与 Finish 事件透出的 total_tokens 同口径);0 = 关闭(默认)。
+        // 判定点放在**轮末**(本轮工具已执行完,与轮次上限/熔断同构):不发起下一轮
+        // 模型请求,也不会留下「无 tool_result 的悬挂 tool_call」。warn 档只提示一次
+        // 后继续;stop 档跳出循环并保留已有产出。
+        if token_budget > 0 {
+            let used_tokens = total_usage.prompt_tokens + total_usage.completion_tokens;
+            if budget_reached(used_tokens, token_budget) {
+                let stop = budget_action == "stop";
+                if !budget_noticed {
+                    budget_noticed = true;
+                    tracing::info!(
+                        session_id = session_id.to_string(),
+                        used_tokens,
+                        budget = token_budget,
+                        rounds = round + 1,
+                        action = budget_action.as_str(),
+                        "单次生成 token 预算超限"
+                    );
+                    send_event(
+                        step_evt(
+                            if stop {
+                                "Token 预算超限,停止工具循环"
+                            } else {
+                                "Token 预算超限"
+                            },
+                            Some(format!(
+                                "已用 {used_tokens} token / 预算 {token_budget}(第 {} 轮):{}",
+                                round + 1,
+                                if stop {
+                                    "已停止工具循环,本轮产出与用量照常保留"
+                                } else {
+                                    "仅提示(warn 档),循环继续"
+                                }
+                            )),
+                            None,
+                            None,
+                        ),
+                        tx,
+                        abort,
+                        flag,
+                    )
+                    .await?;
+                }
+                if stop {
+                    return Ok(ExecutorResult {
+                        content: result.content,
+                        usage: TokenUsage::default(),
+                        interrupted: false,
+                        tool_calls: Vec::new(),
+                        reasoning: String::new(),
+                        finish_reason: result.finish_reason,
+                        self_heals: std::mem::take(&mut self_heals),
+                        budget_stopped: true,
+                    });
+                }
+            }
+        }
         // 已达轮次上限:本轮工具已全部执行(含终态推送),停止发起新的模型请求并输出当前结果
         if last_round {
             send_event(
@@ -1026,6 +1107,7 @@ pub(crate) async fn run_tool_loop(
                 reasoning: String::new(),
                 finish_reason: result.finish_reason,
                 self_heals: std::mem::take(&mut self_heals),
+                budget_stopped: false,
             });
         }
         // 重复调用熔断:本轮工具已执行完(与轮次上限同款收尾),显式告知中止理由。
@@ -1059,6 +1141,7 @@ pub(crate) async fn run_tool_loop(
                 reasoning: String::new(),
                 finish_reason: result.finish_reason,
                 self_heals: std::mem::take(&mut self_heals),
+                budget_stopped: false,
             });
         }
     }
@@ -1446,6 +1529,7 @@ mod tests {
             reasoning: String::new(),
             finish_reason: finish.map(|s| s.into()),
             self_heals: Vec::new(),
+            budget_stopped: false,
         }
     }
 
@@ -1578,6 +1662,17 @@ mod tests {
             "下限之上的截断必须仍可自愈(旧封顶 8192 会返回 None)"
         );
         assert_eq!(doubled_heal_budget(65_536), Some(131_072));
+    }
+
+    /// token 预算判定边界(HB-1):预算 0 恒不触发;「达到」即算超限(与轮次上限同口径)
+    #[test]
+    fn budget_reached_boundaries() {
+        assert!(!budget_reached(0, 0), "预算 0 = 关闭");
+        assert!(!budget_reached(9_999, 0), "预算 0 时与用量无关");
+        assert!(!budget_reached(1023, 1024), "低于预算不触发");
+        assert!(budget_reached(1024, 1024), "等于预算即触发(达到即算超限)");
+        assert!(budget_reached(1025, 1024), "超过预算触发");
+        assert!(budget_reached(i64::MAX, 1), "极值不溢出");
     }
 
 }

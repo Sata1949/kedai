@@ -156,6 +156,19 @@ pub(super) fn default_tool_history_budget_tokens() -> u32 {
     16_384
 }
 
+/// 默认单次生成 token 预算(HB-1 成本护栏):0 = 关闭(默认)。
+/// 与上面的工具历史预算是**两回事**——那是上下文裁剪预算,这是成本上限:
+/// 工具循环累计 prompt+completion 达到该值即按 session_budget_action 处置。
+/// 默认关闭的理由:误杀正常长任务是主要风险,故先让用户显式开启。
+pub(super) fn default_session_token_budget() -> u32 {
+    0
+}
+
+/// 默认预算超限动作:warn = 只提示一次后继续(零行为变更)。
+pub(super) fn default_session_budget_action() -> String {
+    "warn".to_string()
+}
+
 /// 默认放行模式黑名单
 /// 授权模式默认值:新装为宽松(读写放行、仅删除需授权)。
 /// 旧配置的迁移见 `migrate_authorization_mode`(按旧 bypass_mode 修正)。
@@ -397,6 +410,8 @@ impl RuntimeSettings {
             max_tool_rounds: default_max_tool_rounds(),
             tool_history_keep_rounds: default_tool_history_keep_rounds(),
             tool_history_budget_tokens: default_tool_history_budget_tokens(),
+            session_token_budget: default_session_token_budget(),
+            session_budget_action: default_session_budget_action(),
             render_html: false,
             compaction_mode: default_compaction_mode(),
             compaction_threshold: default_compaction_threshold(),

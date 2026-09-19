@@ -458,6 +458,8 @@ impl AgentEngine {
                 total_usage: &mut total_usage,
                 // 步骤循环逐轮覆盖;收尾透出 truncation 标记(可观测性问题①)
                 last_finish_reason: None,
+                // 步骤循环逐轮覆盖;收尾落 extra.budget_exceeded(HB-1)
+                budget_stopped: false,
             };
             let ctx_data = self.collect_context(&req, &session_id, &mut rctx).await;
             // 记忆召回查询向量(Phase 3):在 async 上下文算好,传入同步的 finalize_messages。
@@ -695,6 +697,11 @@ impl AgentEngine {
                     // 事件是暂态的,不落库则重载历史后提示消失。
                     if truncated {
                         extra["truncated"] = json!(true);
+                    }
+                    // 预算停止留痕(HB-1):token 预算 stop 档提前收掉工具循环时写入,
+                    // 与 truncated 同理由——事件是暂态的,不落库则重载历史后原因消失。
+                    if rctx.budget_stopped {
+                        extra["budget_exceeded"] = json!(true);
                     }
                     // 阶段六 6f:重生成锚点 → 原地更新原 assistant 消息行(swipes 追加,
                     // id 稳定);首次生成(无锚点)走既有 add_message 新增一行。

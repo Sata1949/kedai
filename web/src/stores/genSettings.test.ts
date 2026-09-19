@@ -53,6 +53,9 @@ function makeSettings(overrides: Partial<RuntimeSettings> = {}): RuntimeSettings
     reflect_advice_role: 'user',
     bypass_mode: false,
     authorization_mode: 'loose',
+    // HB-1 成本护栏:单次生成 token 预算(0 = 关闭)与超限动作
+    session_token_budget: 0,
+    session_budget_action: 'warn',
     bypass_blacklist: [],
     tool_authorization_timeout_secs: 300,
     task_tool_policy: 'deny_dangerous',

@@ -610,6 +610,8 @@ impl AgentEngine {
             // finish_reason 与 content 同生命周期:逐轮覆盖,收尾即为「最终采纳那一步」
             // 的上游结束原因(可观测性问题①;聊天截断提示依此判定)。
             rctx.last_finish_reason = result.finish_reason.clone();
+            // 预算停止标记同样逐轮覆盖(HB-1):最终采纳的那一步才是收尾依据
+            rctx.budget_stopped = result.budget_stopped;
             // custom 模式:每步生成后立即解析并应用 mvu <UpdateVariable> 补丁。
             // 中间步骤的内容不保留(循环内被覆盖、不在收尾解析),延迟应用会丢;
             // 即时语义与 MagVarUpdate 原版一致(反思回退时已应用的补丁不回滚)。

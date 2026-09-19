@@ -38,6 +38,10 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
   const toolHistoryKeepRounds = ref(4);
   /** 工具循环历史 token 预算(服务端默认 16384;0 = 禁用预算闸门) */
   const toolHistoryBudgetTokens = ref(16384);
+  /** 单次生成的 token 预算(服务端默认 0 = 关闭;HB-1 成本护栏) */
+  const sessionTokenBudget = ref(0);
+  /** 预算超限动作:warn(只提示一次,默认)/ stop(停止本轮工具循环) */
+  const sessionBudgetAction = ref<'warn' | 'stop'>('warn');
   /** 上下文压缩模式(off / manual / auto;服务端默认 off) */
   const compactionMode = ref<'off' | 'manual' | 'auto'>('off');
   /** 上下文压缩触发阈值(0.5..=0.95;服务端默认 0.8) */
@@ -126,6 +130,8 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
       maxToolRounds.value = s.max_tool_rounds ?? 32;
       toolHistoryKeepRounds.value = s.tool_history_keep_rounds ?? 4;
       toolHistoryBudgetTokens.value = s.tool_history_budget_tokens ?? 16384;
+      sessionTokenBudget.value = s.session_token_budget ?? 0;
+      sessionBudgetAction.value = s.session_budget_action === 'stop' ? 'stop' : 'warn';
       agentSystemPrompt.value = s.agent_system_prompt ?? '';
       searchEndpoint.value = s.search_endpoint ?? '';
       mvuVarsPosition.value = (s.mvu_vars_position ?? 'system') as 'system' | 'user_tail';
@@ -181,6 +187,8 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     maxToolRounds.value = s.max_tool_rounds ?? 32;
     toolHistoryKeepRounds.value = s.tool_history_keep_rounds ?? 4;
     toolHistoryBudgetTokens.value = s.tool_history_budget_tokens ?? 16384;
+    sessionTokenBudget.value = s.session_token_budget ?? 0;
+    sessionBudgetAction.value = s.session_budget_action === 'stop' ? 'stop' : 'warn';
     useModelConnStore().model = s.model;
     agentSystemPrompt.value = s.agent_system_prompt ?? '';
     searchEndpoint.value = s.search_endpoint ?? '';
@@ -311,6 +319,8 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     maxToolRounds,
     toolHistoryKeepRounds,
     toolHistoryBudgetTokens,
+    sessionTokenBudget,
+    sessionBudgetAction,
     compactionMode,
     compactionThreshold,
     compactionKeepRecent,

@@ -32,7 +32,8 @@ use params::{
     default_authorization_mode, default_bypass_blacklist, default_compaction_keep_recent,
     default_compaction_mode, default_compaction_snip_bytes, default_compaction_threshold,
     default_max_tool_rounds, default_memory_inject_char_budget, default_memory_inject_limit,
-    default_memory_max_entries, default_skill_progressive_disclosure,
+    default_memory_max_entries, default_session_budget_action, default_session_token_budget,
+    default_skill_progressive_disclosure,
     default_subagent_max_concurrency, default_subagent_max_depth,
     default_subagent_result_max_chars, default_task_tool_policy,
     default_tool_authorization_timeout_secs, default_tool_history_budget_tokens,
@@ -154,6 +155,14 @@ pub struct RuntimeSettings {
     /// 仅 keep_rounds 生效):估算超预算时从最老完整轮起继续摘要,保底最近 1 轮完整
     #[serde(default = "default_tool_history_budget_tokens")]
     pub tool_history_budget_tokens: u32,
+    /// 单次生成的 token 预算(HB-1 成本护栏;0 = 关闭,默认 0;否则钳 1024..=1e9):
+    /// 工具循环累计 prompt+completion 达到该值即按 session_budget_action 处置。
+    /// 与 tool_history_budget_tokens 不同——后者管上下文裁剪,本项管成本上限。
+    #[serde(default = "default_session_token_budget")]
+    pub session_token_budget: u32,
+    /// 预算超限动作(HB-1;warn = 只提示一次后继续(默认),stop = 提示并停止本轮工具循环)
+    #[serde(default = "default_session_budget_action")]
+    pub session_budget_action: String,
     /// HTML 渲染开关(状态栏脚本执行前置条件):true = 开启(需用户主动授权脚本后再开启)
     #[serde(default)]
     pub render_html: bool,

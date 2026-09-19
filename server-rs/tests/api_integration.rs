@@ -3373,3 +3373,216 @@ async fn retry_notice_reaches_sse_before_finish() {
         "重试后应正常输出正文: {text:?}"
     );
 }
+
+/// token 预算 stop 档(HB-1,2026-09-18):达到预算即停工具循环,但仍按正常终态收尾——
+/// 正文落库、用量记账、extra.budget_exceeded 留痕(刷新后仍看得出停止原因)。
+///
+/// 触发确定性:预算下限 1024,mock 工具轮每轮 8 token(5+3)→ 第 128 轮越线。
+/// 用 [[tool_loop_text:...]] 让工具轮带正文:否则工具轮正文恒空,on-stop 无内容可落库,
+/// 「停止时保留产出」这条断言就无从校验。
+#[tokio::test]
+async fn token_budget_stop_halts_tool_loop_and_keeps_output() {
+    // 全局设置是进程级共享:预算/轮次上限类用例必须串行(同文件并发会互相踩踏)
+    let _guard = test_lock().await;
+    let app = test_app();
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({
+            "max_tool_rounds": 200,
+            "session_token_budget": 1024,
+            "session_budget_action": "stop",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "预算设置应保存成功");
+    let (_, char) = upload_character(app, "预算停止.json").await;
+    let cid = char["id"].as_str().unwrap().to_string();
+    let (_, session) = send_json(
+        app,
+        "POST",
+        "/api/chat/sessions",
+        json!({ "character_id": cid }),
+    )
+    .await;
+    let sid = session["id"].as_str().unwrap().to_string();
+
+    let args = r#"{"queries":[{"type":"character_prompt"}]}"#;
+    let events = sse_events(
+        app,
+        &sid,
+        &cid,
+        &format!("[[tool_loop_text:read|200 {args}]]"),
+        "agent",
+    )
+    .await;
+
+    let budget_step = events
+        .iter()
+        .find(|e| {
+            e["type"] == "step"
+                && e["step"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("Token 预算超限")
+        })
+        .unwrap_or_else(|| panic!("应透出预算停止理由: {events:?}"));
+    assert!(
+        !events
+            .iter()
+            .any(|e| e["type"] == "step" && e["step"] == "达到工具调用轮次上限"),
+        "预算(1024)必须先于 200 轮上限触发: {events:?}"
+    );
+    let tool_calls = events.iter().filter(|e| e["type"] == "tool_call").count();
+    let tool_results = events.iter().filter(|e| e["type"] == "tool_result").count();
+    assert_eq!(
+        tool_calls, 128,
+        "每轮 8 token、预算 1024 → 第 128 轮越线: {tool_calls}"
+    );
+    assert_eq!(
+        tool_results, tool_calls,
+        "已执行的工具调用都必须有 tool_result 终态(预算停止不得留悬挂): {events:?}"
+    );
+    assert!(
+        events.iter().any(|e| e["type"] == "finish"),
+        "预算停止是正常收尾(保留产出),不是错误终态: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| e["type"] == "error"),
+        "不得产生 error 终态: {events:?}"
+    );
+    let detail = budget_step["detail"].as_str().unwrap_or("");
+    assert!(
+        detail.contains("1024") && detail.contains("预算"),
+        "停止理由应含已用 token 与预算: {budget_step}"
+    );
+
+    // 停止时保留产出:正文落库(第 128 轮的短正文)+ extra.budget_exceeded 留痕
+    let (status, history) = send_json(
+        app,
+        "GET",
+        &format!("/api/chat/history?session_id={sid}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let msgs = history["messages"].as_array().expect("messages 数组");
+    let last = msgs
+        .iter()
+        .rev()
+        .find(|m| m["role"] == "assistant")
+        .unwrap_or_else(|| panic!("停止时应落库一条 assistant 消息: {history}"));
+    assert!(
+        last["content"].as_str().unwrap_or("").contains("第128轮说明"),
+        "落库正文应为停止轮的正文: {last}"
+    );
+    assert_eq!(
+        last["extra"]["budget_exceeded"],
+        json!(true),
+        "extra 应留预算停止痕迹(刷新后仍可见): {last}"
+    );
+
+    // 恢复默认(同进程内其他用例共享设置)
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({
+            "max_tool_rounds": 32,
+            "session_token_budget": 0,
+            "session_budget_action": "warn",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+/// token 预算 warn 档(HB-1):只提示一次且不中断循环——默认档必须零行为变更。
+#[tokio::test]
+async fn token_budget_warn_notices_once_and_continues() {
+    let _guard = test_lock().await;
+    let app = test_app();
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({
+            "max_tool_rounds": 200,
+            "session_token_budget": 1024,
+            "session_budget_action": "warn",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, char) = upload_character(app, "预算提示.json").await;
+    let cid = char["id"].as_str().unwrap().to_string();
+    let (_, session) = send_json(
+        app,
+        "POST",
+        "/api/chat/sessions",
+        json!({ "character_id": cid }),
+    )
+    .await;
+    let sid = session["id"].as_str().unwrap().to_string();
+
+    let args = r#"{"queries":[{"type":"character_prompt"}]}"#;
+    // N=140:预算在第 128 轮越线,循环继续到模型自然收尾(第 140 轮后给完成回复)
+    let events = sse_events(
+        app,
+        &sid,
+        &cid,
+        &format!("[[tool_loop:read|140 {args}]]"),
+        "agent",
+    )
+    .await;
+
+    let notices = events
+        .iter()
+        .filter(|e| {
+            e["type"] == "step"
+                && e["step"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("Token 预算超限")
+        })
+        .count();
+    assert_eq!(notices, 1, "warn 档只提示一次: {events:?}");
+    let tool_calls = events.iter().filter(|e| e["type"] == "tool_call").count();
+    assert_eq!(
+        tool_calls, 140,
+        "warn 不中断循环,应跑满模型请求的轮数: {tool_calls}"
+    );
+    let text: String = events
+        .iter()
+        .filter(|e| e["type"] == "token")
+        .filter_map(|e| e["text"].as_str())
+        .collect();
+    assert!(
+        text.contains("工具循环已完成"),
+        "warn 档循环应正常收尾并输出正文: {text:?}"
+    );
+    let step = events
+        .iter()
+        .find(|e| e["type"] == "step" && e["step"].as_str().unwrap_or("").contains("Token 预算超限"))
+        .expect("应有预算提示");
+    assert!(
+        step["step"].as_str().unwrap_or("").contains("仅提示")
+            || step["detail"].as_str().unwrap_or("").contains("warn 档"),
+        "提示文案应说明是 warn 档: {step}"
+    );
+
+    // 恢复默认
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({
+            "max_tool_rounds": 32,
+            "session_token_budget": 0,
+            "session_budget_action": "warn",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}

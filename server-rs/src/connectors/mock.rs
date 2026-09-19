@@ -75,8 +75,9 @@ impl MockConnector {
         // 这才是真实 agent 的形态(每次调用携带新信息,如读不同文件)。
         // 需要模拟「模型原地打转」的病态场景时用 [[tool_loop_repeat:name|N args]],
         // 它保持参数逐字相同(供重复调用熔断的回归测试);
+        // [[tool_loop_text:name|N args]] 同 plain,但每轮附带一句短正文(HB-1 用例)。
         // 注入的判别字段会被工具忽略(read 等只读已知键),不影响工具行为。
-        if let Some((name, n, args, repeat)) = extract_tool_loop_marker(&last_user) {
+        if let Some((name, n, args, repeat, text)) = extract_tool_loop_marker(&last_user) {
             let executed = messages.iter().filter(|m| m.role == "tool").count();
             if executed < n {
                 let arguments = if repeat {
@@ -84,6 +85,11 @@ impl MockConnector {
                 } else {
                     vary_tool_args(&args, executed + 1)
                 };
+                if text {
+                    // 工具轮附带短正文:循环在此轮被收掉(轮次上限/熔断/预算)时,
+                    // 收尾落库的正文就是这一句——否则工具轮正文恒空,无从校验留痕
+                    chunks.push(LlmStreamChunk::Token(format!("（第{}轮说明）", executed + 1)));
+                }
                 chunks.push(LlmStreamChunk::ToolCall(ToolCallArgs {
                     id: format!("mock-call-{}", executed + 1),
                     name,
@@ -736,15 +742,20 @@ fn extract_tool_echo_marker(input: &str) -> Option<(String, String)> {
 /// [[tool_loop_repeat:name|N args...]](参数逐字相同,模拟死循环)标记。
 /// 返回 (name, 轮数, arguments_json, repeat)。
 /// N 为工具循环持续轮数(含首轮);args 为调用回传的 arguments(单行 JSON)。
-fn extract_tool_loop_marker(input: &str) -> Option<(String, usize, String, bool)> {
+fn extract_tool_loop_marker(input: &str) -> Option<(String, usize, String, bool, bool)> {
     const MARK: &str = "[[tool_loop:";
     const MARK_REPEAT: &str = "[[tool_loop_repeat:";
-    // 先匹配更长的 repeat 前缀,避免被 plain 前缀误吞
-    let (start, prefix_len, repeat) = if let Some(p) = input.find(MARK_REPEAT) {
-        (p, MARK_REPEAT.len(), true)
+    const MARK_TEXT: &str = "[[tool_loop_text:";
+    // 先匹配更长的前缀,避免被 plain 前缀误吞;text 变体 = 工具轮里同时带一句短正文
+    // (真实模型常这样输出;也是「工具循环被预算/轮次上限收掉时仍有正文可落库」的
+    //  唯一可观测构造,HB-1 的 extra.budget_exceeded 用例依赖它)
+    let (start, prefix_len, repeat, text) = if let Some(p) = input.find(MARK_REPEAT) {
+        (p, MARK_REPEAT.len(), true, false)
+    } else if let Some(p) = input.find(MARK_TEXT) {
+        (p, MARK_TEXT.len(), false, true)
     } else {
         let p = input.find(MARK)?;
-        (p, MARK.len(), false)
+        (p, MARK.len(), false, false)
     };
     let rest = &input[start + prefix_len..];
     let end = rest.find("]]")?;
@@ -752,7 +763,7 @@ fn extract_tool_loop_marker(input: &str) -> Option<(String, usize, String, bool)
     let (name, tail) = inner.split_once('|')?;
     let (n_str, args) = tail.split_once(' ')?;
     let n: usize = n_str.trim().parse().ok()?;
-    Some((name.trim().to_string(), n, args.trim().to_string(), repeat))
+    Some((name.trim().to_string(), n, args.trim().to_string(), repeat, text))
 }
 
 /// 给每轮的工具参数注入判别字段 `"_mock_round": k`,使各轮指纹互不相同

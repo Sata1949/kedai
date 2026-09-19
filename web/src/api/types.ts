@@ -365,6 +365,11 @@ export interface RuntimeSettings {
   tool_history_keep_rounds: number;
   /** 工具历史 token 预算(0 = 禁用预算闸门;否则 1024..=1M,默认 16384) */
   tool_history_budget_tokens: number;
+  /** 单次生成的 token 预算(0 = 关闭,默认 0;否则 1024..=1e9):
+   *  工具循环累计 prompt+completion 达到该值即按 session_budget_action 处置 */
+  session_token_budget: number;
+  /** 预算超限动作:warn(只提示一次,默认)/ stop(提示并停止本轮工具循环) */
+  session_budget_action: 'warn' | 'stop';
   /** HTML 渲染开关(状态栏脚本执行前置条件):true = 开启安全 HTML 渲染 */
   render_html: boolean;
   /** 上下文压缩模式:off(不压缩)/ manual(手动触发)/ auto(token 超阈值自动压缩) */
@@ -484,6 +489,10 @@ export interface RuntimeSettingsPatch {
   tool_history_keep_rounds?: number;
   /** 工具历史 token 预算(0 = 禁用;否则 1024..=1048576) */
   tool_history_budget_tokens?: number;
+  /** 单次生成 token 预算(0 = 关闭;否则 1024..=1e9) */
+  session_token_budget?: number;
+  /** 预算超限动作(warn/stop) */
+  session_budget_action?: 'warn' | 'stop';
   render_html?: boolean;
   compaction_mode?: string;
   compaction_threshold?: number;

@@ -104,6 +104,7 @@ export function useGenerationParams() {
   const {
     temperature, topP, maxTokens, maxContextTokens, maxToolRounds,
     toolHistoryKeepRounds, toolHistoryBudgetTokens,
+    sessionTokenBudget, sessionBudgetAction,
     compactionMode, compactionThreshold, compactionKeepRecent, compactionSnipBytes,
     memoryDistillEnabled, memoryInjectLimit, memoryInjectCharBudget, memoryMaxEntries,
     subagentMaxDepth, subagentMaxConcurrency, subagentResultMaxChars,
@@ -131,6 +132,8 @@ export function useGenerationParams() {
         max_tool_rounds: maxToolRounds.value,
         tool_history_keep_rounds: toolHistoryKeepRounds.value,
         tool_history_budget_tokens: toolHistoryBudgetTokens.value,
+        session_token_budget: sessionTokenBudget.value,
+        session_budget_action: sessionBudgetAction.value,
         compaction_mode: compactionMode.value,
         compaction_threshold: compactionThreshold.value,
         compaction_keep_recent: compactionKeepRecent.value,

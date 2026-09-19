@@ -20,6 +20,7 @@ const store = useAppStore();
 const {
   temperature, topP, maxTokens, maxContextTokens, maxToolRounds,
   toolHistoryKeepRounds, toolHistoryBudgetTokens,
+  sessionTokenBudget, sessionBudgetAction,
   compactionMode, compactionThreshold, compactionKeepRecent, compactionSnipBytes,
   memoryDistillEnabled, memoryInjectLimit, memoryInjectCharBudget, memoryMaxEntries,
   subagentMaxDepth, subagentMaxConcurrency, subagentResultMaxChars,
@@ -126,6 +127,31 @@ const { tempLabel, topPLabel, ctxLabel, saveParams, paramsMsg, saveParamsNow } =
           title="工具循环历史 token 预算;估算超预算时从最老完整轮起继续摘要,保底最近 1 轮完整。0 = 禁用预算闸门"
         />
         <span class="sv-note">0 = 禁用;否则 1024-1048576(默认 16384)</span>
+      </div>
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">单次生成 token 预算</label>
+        <input
+          v-model.number="sessionTokenBudget"
+          type="number"
+          min="0"
+          max="1000000000"
+          step="1024"
+          class="sv-input inject-num"
+          title="单次生成内工具循环累计 token(prompt+completion)上限;0 = 关闭(默认)。达到上限按下一项的动作处置"
+        />
+        <span class="sv-note">0 = 关闭;否则 1024-1000000000(默认 0)</span>
+      </div>
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">预算超限动作</label>
+        <select
+          v-model="sessionBudgetAction"
+          class="sv-select"
+          title="warn = 只在推理链提示一次并继续;stop = 提示后停止本轮工具循环(已生成正文与用量照常保留)"
+        >
+          <option value="warn">warn · 只提示</option>
+          <option value="stop">stop · 停止工具循环</option>
+        </select>
+        <span class="sv-note">默认 warn;stop 用于硬性控成本(长工具循环提前收尾)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">压缩模式</label>
