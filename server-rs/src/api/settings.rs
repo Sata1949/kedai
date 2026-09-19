@@ -200,6 +200,12 @@ pub struct UpdateSettingsBody {
     /// 语义熔断输出指纹去重上限(HB-2;1..=8;缺省保持不变)
     #[serde(default)]
     pub loop_guard_semantic_max_distinct: Option<u32>,
+    /// 变量两步生成独立模型(HB-7;空串 = 清除(回到与正文共用);非空 = 覆盖;缺省保持不变)
+    #[serde(default)]
+    pub mvu_model: Option<String>,
+    /// 变量两步生成独立温度(HB-7;0.0..=2.0 = 设置,负值 = 清除(回到内置 0.3);缺省保持不变)
+    #[serde(default)]
+    pub mvu_temperature: Option<f64>,
 }
 
 /// 序列化运行期设置(API Key 脱敏)。
@@ -268,6 +274,9 @@ fn settings_json(s: &RuntimeSettings) -> Value {
         "loop_guard_semantic_window": s.loop_guard_semantic_window,
         "loop_guard_semantic_min_calls": s.loop_guard_semantic_min_calls,
         "loop_guard_semantic_max_distinct": s.loop_guard_semantic_max_distinct,
+        // HB-7 接线:变量两步生成的独立模型/温度档(此前可落盘但无 API 通路)
+        "mvu_model": s.mvu_model,
+        "mvu_temperature": s.mvu_temperature,
     });
     if let (Some(dst), Some(src)) = (v.as_object_mut(), rest.as_object()) {
         for (k, val) in src {
@@ -665,6 +674,30 @@ pub async fn update_settings(
                     return validation("loop_guard_semantic_max_distinct 必须在 1..=8");
                 }
                 s.loop_guard_semantic_max_distinct = v;
+            }
+            // HB-7:变量两步生成的独立模型/温度档。清除语义用哨兵值表达,避免引入
+            // 「Option<Option<T>>」这类与既有 PATCH 体例不符的写法:
+            // mvu_model 空串 = 清除(回到与正文共用同一连接器/模型);
+            // mvu_temperature 负值 = 清除(回到内置 0.3;温度本身不允许负数)
+            if let Some(v) = &body.mvu_model {
+                let trimmed = v.trim();
+                if trimmed.chars().count() > 200 {
+                    return validation("mvu_model 长度不得超过 200 字符");
+                }
+                s.mvu_model = if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                };
+            }
+            if let Some(v) = body.mvu_temperature {
+                if v < 0.0 {
+                    s.mvu_temperature = None;
+                } else if !(0.0..=2.0).contains(&v) {
+                    return validation("mvu_temperature 须为 0.0..=2.0,或负值表示清除");
+                } else {
+                    s.mvu_temperature = Some(v);
+                }
             }
         }
     }

@@ -3659,3 +3659,53 @@ async fn semantic_loop_guard_breaks_on_unchanged_output() {
         "熔断按正常终态收尾(不是 error): {events:?}"
     );
 }
+
+/// HB-7 接线:mvu_model / mvu_temperature 的 API 往返与清除语义。
+/// 此前两者「可落盘、无 API 通路」(mvu_model 连消费点都没有),属死配置——
+/// 本用例锁住接线的对外契约:GET 透出、PATCH 设置(trim)、越界拒绝、清除哨兵。
+#[tokio::test]
+async fn mvu_model_temperature_roundtrip_and_clear() {
+    let _guard = test_lock().await;
+    let app = test_app();
+
+    // 默认:未配置(None → JSON null)
+    let (_, s0) = send_json(app, "GET", "/api/settings", json!({})).await;
+    assert_eq!(s0["mvu_model"], Value::Null, "默认应为未配置: {s0}");
+    assert_eq!(s0["mvu_temperature"], Value::Null, "默认应为未配置: {s0}");
+
+    // 设置:模型两侧空白应被 trim
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({ "mvu_model": "  aux-model  ", "mvu_temperature": 0.2 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, s1) = send_json(app, "GET", "/api/settings", json!({})).await;
+    assert_eq!(s1["mvu_model"], json!("aux-model"), "应 trim 后落库: {s1}");
+    assert_eq!(s1["mvu_temperature"], json!(0.2), "温度应落库: {s1}");
+
+    // 越界拒绝(温度上限 2.0)
+    let (status, body) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({ "mvu_temperature": 3.0 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "越界应拒绝: {body}");
+
+    // 清除:空串 = 回到与正文共用;负值 = 回到内置 0.3
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({ "mvu_model": "", "mvu_temperature": -1.0 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, s2) = send_json(app, "GET", "/api/settings", json!({})).await;
+    assert_eq!(s2["mvu_model"], Value::Null, "空串应清除: {s2}");
+    assert_eq!(s2["mvu_temperature"], Value::Null, "负值应清除: {s2}");
+}

@@ -148,6 +148,16 @@ impl RuntimeSettings {
                 if !matches!(s.session_budget_action.as_str(), "warn" | "stop") {
                     s.session_budget_action = default_session_budget_action();
                 }
+                // HB-7:mvu_model 卫生清理(settings.json 可手改:trim、空白/超长视为未配置;
+                // 与 PUT 校验同规则,避免「看似配置了却打不通」)
+                if let Some(m) = s.mvu_model.as_mut() {
+                    let trimmed = m.trim().to_string();
+                    if trimmed.is_empty() || trimmed.chars().count() > 200 {
+                        s.mvu_model = None;
+                    } else {
+                        *m = trimmed;
+                    }
+                }
                 // HB-2:语义熔断参数钳制(窗口/下限 4..=64,去重上限 1..=8;越界回默认)
                 if !(4..=64).contains(&s.loop_guard_semantic_window) {
                     s.loop_guard_semantic_window = default_loop_guard_semantic_window();

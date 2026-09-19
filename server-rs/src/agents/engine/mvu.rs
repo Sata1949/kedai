@@ -225,6 +225,16 @@ async fn generate_status_call(
     Ok(StatusCallOutput { text, tool_calls })
 }
 
+/// 状态栏/变量生成所用连接器(HB-7 接线,纯函数便于单测):
+/// `mvu_model` 非空且非空白时复制一份改为该模型(连接器与 base_url/api_key 不变),
+/// 否则沿用传入的连接器——「与正文共用同一连接器/模型」是缺省语义。
+fn status_call_connector(base: &Connector, mvu_model: Option<&str>) -> Connector {
+    match mvu_model.map(str::trim).filter(|m| !m.is_empty()) {
+        Some(model) => crate::connectors::with_model(base, model),
+        None => base.clone(),
+    }
+}
+
 /// 两步生成:「变量更新 + 状态栏」专用调用(角色卡有变量树时,正文之外总是追加一次)。
 /// 本次为 function calling 调用:模型通过工具在正文后更新 mvu 变量与首楼状态栏——
 ///   - update_variables:JSON Patch 应用到变量树并推送 Vars 事件(复用 apply_mvu_patches);
@@ -298,10 +308,16 @@ pub(super) async fn generate_mvu_status(
     // G3:变量两步生成独立温度档。设置 mvu_temperature 非空时覆盖内置 0.3,
     // 允许与正文 default_temperature 解耦(变量调用单独降温度提高结构化遵循度)。
     // (设置快照:不留锁跨 await)
-    let mvu_temperature = engine.settings_snapshot().mvu_temperature.unwrap_or(0.3);
-    p.temperature = mvu_temperature;
+    let (mvu_temperature, mvu_model) = {
+        let s = engine.settings_snapshot();
+        (s.mvu_temperature, s.mvu_model)
+    };
+    p.temperature = mvu_temperature.unwrap_or(0.3);
     p.tools = mvu_status_tools();
-    let connector = engine.connector.read().await.clone();
+    let base = engine.connector.read().await.clone();
+    // HB-7:变量两步生成的独立模型档(此前是「可落盘、无通路、无消费」的死配置)。
+    // 非空时用 with_model 复制一个连接器(保留 base_url/api_key),只影响这一次调用。
+    let connector = status_call_connector(&base, mvu_model.as_deref());
     let mut out = generate_status_call(&connector, &messages, &p, abort).await?;
     // deepseek 偶发空输出:提高温度重试一次(重试兜底固定 0.7,与独立温度档语义分离)
     if out.text.trim().is_empty() && out.tool_calls.is_empty() {
@@ -527,6 +543,32 @@ fn fmt_status_val(v: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// HB-7 接线:独立模型档只在非空时换模型,空/空白等同「与正文共用」
+    #[test]
+    fn status_call_connector_applies_mvu_model_override() {
+        let base = crate::connectors::Connector::OpenAi(
+            crate::connectors::openai_compatible::OpenAiCompatibleConnector::new(
+                "http://127.0.0.1:9/v1",
+                "key",
+                "main-model",
+            ),
+        );
+        assert_eq!(base.model(), "main-model");
+
+        // 非空 → 复制一份换模型(原连接器不受影响)
+        let overridden = status_call_connector(&base, Some("mvu-model"));
+        assert_eq!(overridden.model(), "mvu-model");
+        assert_eq!(base.model(), "main-model", "原连接器不得被就地改写");
+
+        // 未配置 / 空白 → 沿用正文模型
+        assert_eq!(status_call_connector(&base, None).model(), "main-model");
+        assert_eq!(status_call_connector(&base, Some("")).model(), "main-model");
+        assert_eq!(
+            status_call_connector(&base, Some("   ")).model(),
+            "main-model"
+        );
+    }
 
     fn message(role: &str, content: &str) -> MessageRecord {
         message_with(role, content, json!({}))

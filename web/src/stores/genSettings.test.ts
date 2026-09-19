@@ -60,6 +60,9 @@ function makeSettings(overrides: Partial<RuntimeSettings> = {}): RuntimeSettings
     loop_guard_semantic_window: 16,
     loop_guard_semantic_min_calls: 12,
     loop_guard_semantic_max_distinct: 2,
+    // HB-7:变量两步生成的独立模型/温度(默认未配置)
+    mvu_model: null,
+    mvu_temperature: null,
     bypass_blacklist: [],
     tool_authorization_timeout_secs: 300,
     task_tool_policy: 'deny_dangerous',

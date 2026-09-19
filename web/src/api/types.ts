@@ -376,6 +376,10 @@ export interface RuntimeSettings {
   loop_guard_semantic_min_calls: number;
   /** 语义熔断输出指纹去重上限(默认 2,1..=8) */
   loop_guard_semantic_max_distinct: number;
+  /** 变量两步生成独立模型(HB-7;null = 与正文共用同一模型) */
+  mvu_model: string | null;
+  /** 变量两步生成独立温度(HB-7;null = 内置 0.3) */
+  mvu_temperature: number | null;
   /** HTML 渲染开关(状态栏脚本执行前置条件):true = 开启安全 HTML 渲染 */
   render_html: boolean;
   /** 上下文压缩模式:off(不压缩)/ manual(手动触发)/ auto(token 超阈值自动压缩) */
@@ -505,6 +509,10 @@ export interface RuntimeSettingsPatch {
   loop_guard_semantic_min_calls?: number;
   /** 语义熔断输出指纹去重上限(1..=8) */
   loop_guard_semantic_max_distinct?: number;
+  /** 变量两步生成独立模型(空串 = 清除回到与正文共用) */
+  mvu_model?: string;
+  /** 变量两步生成独立温度(0..=2 设置;负值 = 清除回到内置 0.3) */
+  mvu_temperature?: number;
   render_html?: boolean;
   compaction_mode?: string;
   compaction_threshold?: number;

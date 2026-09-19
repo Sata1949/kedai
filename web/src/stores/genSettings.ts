@@ -48,6 +48,10 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
   const loopGuardSemanticMinCalls = ref(12);
   /** 语义熔断输出指纹去重上限(服务端默认 2) */
   const loopGuardSemanticMaxDistinct = ref(2);
+  /** 变量两步生成独立模型(空串 = 与正文共用;HB-7) */
+  const mvuModel = ref('');
+  /** 变量两步生成独立温度输入(空串 = 跟随内置 0.3;保存时映射为清除哨兵) */
+  const mvuTemperatureInput = ref('');
   /** 上下文压缩模式(off / manual / auto;服务端默认 off) */
   const compactionMode = ref<'off' | 'manual' | 'auto'>('off');
   /** 上下文压缩触发阈值(0.5..=0.95;服务端默认 0.8) */
@@ -141,6 +145,8 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
       loopGuardSemanticWindow.value = s.loop_guard_semantic_window ?? 16;
       loopGuardSemanticMinCalls.value = s.loop_guard_semantic_min_calls ?? 12;
       loopGuardSemanticMaxDistinct.value = s.loop_guard_semantic_max_distinct ?? 2;
+      mvuModel.value = s.mvu_model ?? '';
+      mvuTemperatureInput.value = typeof s.mvu_temperature === 'number' ? String(s.mvu_temperature) : '';
       agentSystemPrompt.value = s.agent_system_prompt ?? '';
       searchEndpoint.value = s.search_endpoint ?? '';
       mvuVarsPosition.value = (s.mvu_vars_position ?? 'system') as 'system' | 'user_tail';
@@ -201,6 +207,8 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     loopGuardSemanticWindow.value = s.loop_guard_semantic_window ?? 16;
     loopGuardSemanticMinCalls.value = s.loop_guard_semantic_min_calls ?? 12;
     loopGuardSemanticMaxDistinct.value = s.loop_guard_semantic_max_distinct ?? 2;
+    mvuModel.value = s.mvu_model ?? '';
+    mvuTemperatureInput.value = typeof s.mvu_temperature === 'number' ? String(s.mvu_temperature) : '';
     useModelConnStore().model = s.model;
     agentSystemPrompt.value = s.agent_system_prompt ?? '';
     searchEndpoint.value = s.search_endpoint ?? '';
@@ -336,6 +344,8 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     loopGuardSemanticWindow,
     loopGuardSemanticMinCalls,
     loopGuardSemanticMaxDistinct,
+    mvuModel,
+    mvuTemperatureInput,
     compactionMode,
     compactionThreshold,
     compactionKeepRecent,
