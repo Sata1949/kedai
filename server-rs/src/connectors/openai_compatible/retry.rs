@@ -50,7 +50,11 @@ pub(super) fn log_retry(msg: &str, attempt: usize) {
 ///
 /// 与 log_retry 的分工:日志给排障,chunk 给用户。发送失败(接收端已关闭)静默忽略:
 /// 重试提示是尽力而为的可观测性,不得影响重试与生成本身。
-pub(super) fn notify_retry(tx: &mpsc::UnboundedSender<LlmStreamChunk>, attempt: usize, reason: &str) {
+pub(super) fn notify_retry(
+    tx: &mpsc::UnboundedSender<LlmStreamChunk>,
+    attempt: usize,
+    reason: &str,
+) {
     let _ = tx.send(LlmStreamChunk::Retry {
         attempt,
         max: MAX_ATTEMPTS,

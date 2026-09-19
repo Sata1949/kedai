@@ -301,16 +301,24 @@ mod tests {
         for i in 0..54 {
             // 参数每轮都不同(ls / cat a / cat b …),输出逐字相同
             let _args = format!("cmd-{i}");
-            if let Some(hit) = g.record("bash", output_fingerprint("total 0
+            if let Some(hit) = g.record(
+                "bash",
+                output_fingerprint(
+                    "total 0
 drwxr-xr-x 2 user
-")) {
+",
+                ),
+            ) {
                 tripped = Some(hit);
                 break;
             }
         }
         let (tool, calls, distinct) = tripped.expect("输出恒定的空转必须熔断");
         assert_eq!(tool, "bash");
-        assert_eq!(calls, DEFAULT_SEMANTIC_MIN_CALLS, "恰在第 N 次同工具调用触发");
+        assert_eq!(
+            calls, DEFAULT_SEMANTIC_MIN_CALLS,
+            "恰在第 N 次同工具调用触发"
+        );
         assert_eq!(distinct, 1, "输出只有一种");
     }
 
@@ -323,9 +331,26 @@ drwxr-xr-x 2 user
     fn semantic_guard_keeps_distinct_outputs() {
         let mut g = SemanticGuard::with_defaults();
         let topics = [
-            "开篇设定", "人物关系", "世界观", "伏笔一", "伏笔二", "结局走向", "支线甲", "支线乙",
-            "时间线", "地点设定", "道具设定", "势力设定", "冲突设计", "节奏安排", "叙事视角",
-            "语言风格", "意象", "隐喻", "对白设计", "场景切换",
+            "开篇设定",
+            "人物关系",
+            "世界观",
+            "伏笔一",
+            "伏笔二",
+            "结局走向",
+            "支线甲",
+            "支线乙",
+            "时间线",
+            "地点设定",
+            "道具设定",
+            "势力设定",
+            "冲突设计",
+            "节奏安排",
+            "叙事视角",
+            "语言风格",
+            "意象",
+            "隐喻",
+            "对白设计",
+            "场景切换",
         ];
         for (i, topic) in topics.iter().enumerate() {
             let out = format!("文件 {i}.md 的内容:关于「{topic}」的说明,与其它文件不同。");
@@ -345,14 +370,19 @@ drwxr-xr-x 2 user
             let out = format!(
                 "耗时 12{}ms  字节数 409{}  路径 /home/user/project/{}/out.txt  状态 ok
 ",
-                i, i, 1000 + i
+                i,
+                i,
+                1000 + i
             );
             if g.record("bash", output_fingerprint(&out)).is_some() {
                 tripped = true;
                 break;
             }
         }
-        assert!(tripped, "只有数字在变(时间戳/耗时/计数)应视为输出无实质变化");
+        assert!(
+            tripped,
+            "只有数字在变(时间戳/耗时/计数)应视为输出无实质变化"
+        );
     }
 
     /// 同工具调用不足 min_calls 不触发;去重指纹超过 max_distinct 不触发
@@ -366,7 +396,13 @@ drwxr-xr-x 2 user
 
         let mut g2 = SemanticGuard::new(16, 5, 2);
         for i in 0..10 {
-            let fp = if i % 3 == 0 { 1 } else if i % 3 == 1 { 2 } else { 3 };
+            let fp = if i % 3 == 0 {
+                1
+            } else if i % 3 == 1 {
+                2
+            } else {
+                3
+            };
             assert!(
                 g2.record("bash", fp).is_none(),
                 "去重 3 种 > 上限 2,不得熔断(第 {i} 次)"
@@ -394,26 +430,34 @@ drwxr-xr-x 2 user
     /// 归一化/指纹的稳定性:同内容(含噪声差异)指纹相同,不同内容指纹不同
     #[test]
     fn output_fingerprint_is_noise_insensitive() {
-        let a = output_fingerprint("耗时 120ms, 共 3 行
+        let a = output_fingerprint(
+            "耗时 120ms, 共 3 行
 A
 B
-");
-        let b = output_fingerprint("耗时 980ms, 共 3 行
+",
+        );
+        let b = output_fingerprint(
+            "耗时 980ms, 共 3 行
 A
 B
-");
+",
+        );
         assert_eq!(a, b, "只有数字变化时指纹必须相同");
-        let c = output_fingerprint("耗时 120ms, 共 3 行
+        let c = output_fingerprint(
+            "耗时 120ms, 共 3 行
 A
 C
-");
+",
+        );
         assert_ne!(a, c, "内容变化必须改变指纹");
         // 行数变化也要能区分(短输出可能头部相同)
-        let d = output_fingerprint("耗时 120ms, 共 3 行
+        let d = output_fingerprint(
+            "耗时 120ms, 共 3 行
 A
 B
 B
-");
+",
+        );
         assert_ne!(a, d, "行数变化应改变指纹");
     }
 }

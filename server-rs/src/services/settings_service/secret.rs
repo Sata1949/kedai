@@ -7,11 +7,12 @@ use std::path::Path;
 use super::connection::DEFAULT_SEARCH_ENDPOINT;
 use super::params::{
     default_compaction_keep_recent, default_compaction_mode, default_compaction_snip_bytes,
-    default_compaction_threshold, default_memory_inject_char_budget, default_memory_inject_limit,
-    default_loop_guard_semantic_max_distinct, default_loop_guard_semantic_min_calls,
-    default_loop_guard_semantic_window, default_memory_max_entries, default_roleplay_agent_prompt,
-    default_session_budget_action, default_session_token_budget, default_subagent_max_concurrency,
-    default_subagent_max_depth, default_subagent_result_max_chars, default_task_tool_policy,
+    default_compaction_threshold, default_loop_guard_semantic_max_distinct,
+    default_loop_guard_semantic_min_calls, default_loop_guard_semantic_window,
+    default_memory_inject_char_budget, default_memory_inject_limit, default_memory_max_entries,
+    default_roleplay_agent_prompt, default_session_budget_action, default_session_token_budget,
+    default_subagent_max_concurrency, default_subagent_max_depth,
+    default_subagent_result_max_chars, default_task_tool_policy,
     default_tool_authorization_timeout_secs, default_tool_history_budget_tokens,
     default_tool_history_keep_rounds, migrate_authorization_mode,
 };

@@ -698,11 +698,20 @@ fn retry_delay_backoff_sequence_and_retry_after_cap() {
     // 无 Retry-After:500ms 起步指数增长,封顶 5s;带 ≤250ms jitter(以系统时钟纳秒做,
     // 故断言区间而非定值)
     let d1 = retry_delay(1, None).as_millis();
-    assert!((500..750).contains(&d1), "attempt=1 应为 500ms+jitter: {d1}");
+    assert!(
+        (500..750).contains(&d1),
+        "attempt=1 应为 500ms+jitter: {d1}"
+    );
     let d2 = retry_delay(2, None).as_millis();
-    assert!((1000..1250).contains(&d2), "attempt=2 应为 1000ms+jitter: {d2}");
+    assert!(
+        (1000..1250).contains(&d2),
+        "attempt=2 应为 1000ms+jitter: {d2}"
+    );
     let d3 = retry_delay(3, None).as_millis();
-    assert!((2000..2250).contains(&d3), "attempt=3 应为 2000ms+jitter: {d3}");
+    assert!(
+        (2000..2250).contains(&d3),
+        "attempt=3 应为 2000ms+jitter: {d3}"
+    );
     let d5 = retry_delay(5, None).as_millis();
     assert!((5000..5250).contains(&d5), "指数增长必须封顶 5s: {d5}");
     // Retry-After 以秒为准,并封顶 30s(上游误配 60 不得真等一分钟)
@@ -775,7 +784,11 @@ async fn retry_emits_notice_before_success() {
             max,
             reason,
         } => {
-            assert_eq!((attempt, max), (1, MAX_ATTEMPTS), "首次重试应为 1/{MAX_ATTEMPTS}");
+            assert_eq!(
+                (attempt, max),
+                (1, MAX_ATTEMPTS),
+                "首次重试应为 1/{MAX_ATTEMPTS}"
+            );
             assert!(reason.contains("429"), "原因应带上游状态码: {reason}");
         }
         other => panic!("首块应为重试提示: {other:?}"),
@@ -785,7 +798,10 @@ async fn retry_emits_notice_before_success() {
         .await
         .unwrap()
         .unwrap();
-    assert!(matches!(next, LlmStreamChunk::Token(t) if t == "ok"), "重试后应正常出块");
+    assert!(
+        matches!(next, LlmStreamChunk::Token(t) if t == "ok"),
+        "重试后应正常出块"
+    );
     assert!(task.await.unwrap().is_ok(), "重试后整体应成功");
 }
 
@@ -799,7 +815,9 @@ async fn non_retryable_status_fails_without_retry_notice() {
         let mut request = vec![0; 4096];
         let _ = socket.read(&mut request).await;
         socket
-            .write_all(b"HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{}")
+            .write_all(
+                b"HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{}",
+            )
             .await
             .unwrap();
         socket.flush().await.unwrap();

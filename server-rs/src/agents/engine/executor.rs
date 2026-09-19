@@ -1730,7 +1730,6 @@ mod tests {
         assert!(budget_reached(1025, 1024), "超过预算触发");
         assert!(budget_reached(i64::MAX, 1), "极值不溢出");
     }
-
 }
 
 #[cfg(test)]

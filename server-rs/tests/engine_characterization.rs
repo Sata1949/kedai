@@ -277,7 +277,10 @@ async fn stop_keeps_partial_output_with_interrupted_mark() {
     assert!(
         entered_streaming,
         "应至少收到一个 token 才开始中断(实际事件: {:?})",
-        events.iter().filter_map(|e| e["type"].as_str()).collect::<Vec<_>>()
+        events
+            .iter()
+            .filter_map(|e| e["type"].as_str())
+            .collect::<Vec<_>>()
     );
 
     // 此刻确定处于流式中 → 请求停止(无时序假设)

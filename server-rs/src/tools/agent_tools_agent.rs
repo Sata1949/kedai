@@ -492,10 +492,9 @@ async fn run_subtask_with_tools(
                         );
                     }
                     SubtaskVerdict::Done => {
-                        let _ = deps.subtasks.set_done(
-                            task_id,
-                            &truncate_subtask_result(deps, &content, task_id),
-                        );
+                        let _ = deps
+                            .subtasks
+                            .set_done(task_id, &truncate_subtask_result(deps, &content, task_id));
                     }
                 }
             }

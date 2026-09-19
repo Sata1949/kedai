@@ -3343,10 +3343,7 @@ async fn retry_notice_reaches_sse_before_finish() {
     assert_eq!(retry["attempt"], json!(1), "attempt 字段: {retry}");
     assert_eq!(retry["max"], json!(3), "max 字段: {retry}");
     assert!(
-        retry["reason"]
-            .as_str()
-            .unwrap()
-            .contains("429"),
+        retry["reason"].as_str().unwrap().contains("429"),
         "reason 应透出上游状态: {retry}"
     );
     // 非终态:重试提示之后仍须正常产出正文与 finish
@@ -3368,10 +3365,7 @@ async fn retry_notice_reaches_sse_before_finish() {
         .filter(|e| e["type"] == "token")
         .filter_map(|e| e["text"].as_str())
         .collect();
-    assert!(
-        text.contains("模拟回复"),
-        "重试后应正常输出正文: {text:?}"
-    );
+    assert!(text.contains("模拟回复"), "重试后应正常输出正文: {text:?}");
 }
 
 /// token 预算 stop 档(HB-1,2026-09-18):达到预算即停工具循环,但仍按正常终态收尾——
@@ -3423,11 +3417,7 @@ async fn token_budget_stop_halts_tool_loop_and_keeps_output() {
     let budget_step = events
         .iter()
         .find(|e| {
-            e["type"] == "step"
-                && e["step"]
-                    .as_str()
-                    .unwrap_or("")
-                    .contains("Token 预算超限")
+            e["type"] == "step" && e["step"].as_str().unwrap_or("").contains("Token 预算超限")
         })
         .unwrap_or_else(|| panic!("应透出预算停止理由: {events:?}"));
     assert!(
@@ -3476,7 +3466,10 @@ async fn token_budget_stop_halts_tool_loop_and_keeps_output() {
         .find(|m| m["role"] == "assistant")
         .unwrap_or_else(|| panic!("停止时应落库一条 assistant 消息: {history}"));
     assert!(
-        last["content"].as_str().unwrap_or("").contains("第128轮说明"),
+        last["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains("第128轮说明"),
         "落库正文应为停止轮的正文: {last}"
     );
     assert_eq!(
@@ -3544,11 +3537,7 @@ async fn token_budget_warn_notices_once_and_continues() {
     let notices = events
         .iter()
         .filter(|e| {
-            e["type"] == "step"
-                && e["step"]
-                    .as_str()
-                    .unwrap_or("")
-                    .contains("Token 预算超限")
+            e["type"] == "step" && e["step"].as_str().unwrap_or("").contains("Token 预算超限")
         })
         .count();
     assert_eq!(notices, 1, "warn 档只提示一次: {events:?}");
@@ -3568,7 +3557,9 @@ async fn token_budget_warn_notices_once_and_continues() {
     );
     let step = events
         .iter()
-        .find(|e| e["type"] == "step" && e["step"].as_str().unwrap_or("").contains("Token 预算超限"))
+        .find(|e| {
+            e["type"] == "step" && e["step"].as_str().unwrap_or("").contains("Token 预算超限")
+        })
         .expect("应有预算提示");
     assert!(
         step["step"].as_str().unwrap_or("").contains("仅提示")

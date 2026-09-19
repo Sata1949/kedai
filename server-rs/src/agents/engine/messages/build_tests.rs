@@ -737,7 +737,8 @@ fn inject_into_mid_history_keeps_prior_prefix_stable() {
 
 /// 摘要槽:摘要出现在独立 system 消息(第二条),而非拼进首个 system 内
 #[test]
-fn summary_lives_in_dedicated_system_slot() {    let history = vec![
+fn summary_lives_in_dedicated_system_slot() {
+    let history = vec![
         ("user".to_string(), "旧对话".to_string()),
         ("assistant".to_string(), "旧回复".to_string()),
     ];

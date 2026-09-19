@@ -535,12 +535,10 @@ impl AgentEngine {
                     if let Some(tree) = custom_vars_snapshot.clone() {
                         extra["mvu"] = json!({ "stat_data": tree });
                     }
-                    if let Err(e) = self.sessions.add_message(
-                        &session_id,
-                        "assistant",
-                        partial,
-                        extra,
-                    ) {
+                    if let Err(e) =
+                        self.sessions
+                            .add_message(&session_id, "assistant", partial, extra)
+                    {
                         tracing::warn!(error = e, "中断部分产出落库失败");
                     }
                 }

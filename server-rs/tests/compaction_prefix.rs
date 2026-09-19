@@ -101,10 +101,7 @@ async fn new_session(app: &axum::Router, cid: &str) -> String {
         json!({ "character_id": cid }),
     )
     .await;
-    session["id"]
-        .as_str()
-        .expect("建会话应返回 id")
-        .to_string()
+    session["id"].as_str().expect("建会话应返回 id").to_string()
 }
 
 /// 发一轮 chat,读完整 SSE 流并解析为事件数组
@@ -250,12 +247,7 @@ async fn auto_compaction_keeps_prefix_and_freezes_prior_summary() {
 
     // 开场白带 [[reply:]] 钩子:压缩请求把历史段拼成**一条 user 消息**,钩子命中 →
     // 首轮摘要内容确定。第三轮起该段已被摘要覆盖、不再进压缩段,摘要增量走默认回复。
-    let cid = upload_character(
-        app,
-        "压缩前缀特征化.json",
-        "开场白 [[reply:压缩机摘要-首]]",
-    )
-    .await;
+    let cid = upload_character(app, "压缩前缀特征化.json", "开场白 [[reply:压缩机摘要-首]]").await;
     let sid = new_session(app, &cid).await;
     let big = sized_message(app).await;
     // 落库前 chat/send 会对消息做 trim(api/chat.rs),比对口径与库里一致

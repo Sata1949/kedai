@@ -88,7 +88,10 @@ impl MockConnector {
                 if text {
                     // 工具轮附带短正文:循环在此轮被收掉(轮次上限/熔断/预算)时,
                     // 收尾落库的正文就是这一句——否则工具轮正文恒空,无从校验留痕
-                    chunks.push(LlmStreamChunk::Token(format!("（第{}轮说明）", executed + 1)));
+                    chunks.push(LlmStreamChunk::Token(format!(
+                        "（第{}轮说明）",
+                        executed + 1
+                    )));
                 }
                 chunks.push(LlmStreamChunk::ToolCall(ToolCallArgs {
                     id: format!("mock-call-{}", executed + 1),
@@ -763,7 +766,13 @@ fn extract_tool_loop_marker(input: &str) -> Option<(String, usize, String, bool,
     let (name, tail) = inner.split_once('|')?;
     let (n_str, args) = tail.split_once(' ')?;
     let n: usize = n_str.trim().parse().ok()?;
-    Some((name.trim().to_string(), n, args.trim().to_string(), repeat, text))
+    Some((
+        name.trim().to_string(),
+        n,
+        args.trim().to_string(),
+        repeat,
+        text,
+    ))
 }
 
 /// 给每轮的工具参数注入判别字段 `"_mock_round": k`,使各轮指纹互不相同
