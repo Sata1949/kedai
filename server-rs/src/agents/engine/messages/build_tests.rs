@@ -729,7 +729,7 @@ fn inject_into_mid_history_keeps_prior_prefix_stable() {
     }
     let prefix = common_prefix_len(&m_old, &m_new);
     assert!(
-        prefix >= pos_idx + 1,
+        prefix > pos_idx,
         "公共前缀({prefix})必须覆盖两条中段注入(至下标 {pos_idx},旧长 {})",
         m_old.len()
     );
