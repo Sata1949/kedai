@@ -5,6 +5,8 @@ import { describe, expect, it } from 'vitest';
 import type { AgentFlowStep } from '../api/types';
 import {
   computeLevels,
+  effectiveInputIds,
+  effectiveLevels,
   graphHint,
   isLinearCompat,
   levelOf,
@@ -65,6 +67,33 @@ describe('agentFlowGraph 依赖解析', () => {
     expect(computeLevels(steps)).toBeNull();
     expect(levelOf(steps, 'a')).toBeNull();
     expect(graphHint(steps)).toContain('环');
+  });
+});
+
+describe('agentFlowGraph 有效图(执行器视角,画布连线与布局共用)', () => {
+  it('线性兼容流程的隐式上游 = 前一步(第 i 步挂第 i-1 步)', () => {
+    const steps = [step('a'), step('b'), step('c')];
+    expect(effectiveInputIds(steps)).toEqual([[], ['a'], ['b']]);
+    // 显式 computeLevels 会把它们全放在第 1 层(线性提示用),有效层级则是链
+    expect(computeLevels(steps)).toEqual([0, 0, 0]);
+    expect(effectiveLevels(steps)).toEqual([0, 1, 2]);
+  });
+
+  it('二维流程的有效上游就是显式上游,不再追加隐式串联边', () => {
+    const steps = diamond();
+    expect(effectiveInputIds(steps)).toEqual([[], [], ['a', 'b'], ['c']]);
+    expect(effectiveLevels(steps)).toEqual([0, 0, 1, 2]);
+  });
+
+  it('只要任一步设了上游,整个流程就不再按线性串联补边', () => {
+    // 用户把 c 的上游显式设为 a:此时 a、b 都是源节点,b 不再隐式依赖 a
+    const steps = [step('a'), step('b'), step('c', ['a'])];
+    expect(effectiveInputIds(steps)).toEqual([[], [], ['a']]);
+    expect(effectiveLevels(steps)).toEqual([0, 0, 1]);
+  });
+
+  it('有效层级在成环时为 null', () => {
+    expect(effectiveLevels([step('a', ['b']), step('b', ['a'])])).toBeNull();
   });
 });
 

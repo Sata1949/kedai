@@ -5,12 +5,17 @@ import * as api from '../api';
 import { downloadBlob } from '../exportFile';
 import {
   cleanStepsTools,
+  normalizeStepAction,
   setStepToolMode,
   setStepToolsText,
   stepToolMode,
   stepToolsText,
 } from '../utils/agentFlowTools';
-import { removeStepReferences, toggleStepInput as toggleStepInputUtil } from '../utils/agentFlowGraph';
+import {
+  removeStepReferences,
+  toggleStepInput as toggleStepInputUtil,
+  toggleStepOutput as toggleStepOutputUtil,
+} from '../utils/agentFlowGraph';
 
 /** 工具模式选择(与后端 tools 语义对齐:null=不使用,[]=全部,list=白名单) */
 export const TOOL_MODE_LABELS = {
@@ -248,7 +253,7 @@ export function useAgentFlow() {
 
   /** 切换「最终成果」标注(未勾选写回 null,序列化时省略该字段) */
   function toggleStepOutput(step: api.AgentFlowStep): void {
-    step.is_output = step.is_output === true ? null : true;
+    toggleStepOutputUtil(step);
   }
 
   /** 并行节点上限(1-8;空 = 用后端默认 2);越界由后端 400 拦下,前端限定输入范围 */
@@ -271,18 +276,7 @@ export function useAgentFlow() {
 
   /** 切换步骤动作:反思步骤不允许生成/系统提示词;直接步骤默认生成 */
   function onStepActionChange(s: api.AgentFlowStep): void {
-    if (s.action === 'reflect') {
-      s.generates = undefined;
-      s.system_prompt = null;
-      s.temperature = null;
-      s.max_tokens = null;
-      s.tools = null;
-      s.tool_choice = 'auto';
-      s.tool_choice_function = null;
-      s.parallel_tool_calls = null;
-    } else if (s.generates === undefined) {
-      s.generates = true;
-    }
+    normalizeStepAction(s);
   }
 
   // ===== 步骤拖拽(HTML5 DnD;数组顺序即执行顺序) =====

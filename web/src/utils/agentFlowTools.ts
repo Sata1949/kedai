@@ -69,6 +69,26 @@ export function cleanStepsTools(steps: AgentFlowStep[]): void {
 }
 
 /**
+ * 切换动作(执行/反思)后的字段归一化:反思步骤不生成正文,故清掉生成类字段。
+ * 由 useAgentFlow 下沉为纯函数——列表视图与画布 Inspector 共用同一份,
+ * 避免两处各写一遍后漂移(该文件历史上出过 embedded/standalone 双模板漂移)。
+ */
+export function normalizeStepAction(s: AgentFlowStep): void {
+  if (s.action === 'reflect') {
+    s.generates = undefined;
+    s.system_prompt = null;
+    s.temperature = null;
+    s.max_tokens = null;
+    s.tools = null;
+    s.tool_choice = 'auto';
+    s.tool_choice_function = null;
+    s.parallel_tool_calls = null;
+  } else if (s.generates === undefined) {
+    s.generates = true;
+  }
+}
+
+/**
  * 步骤工具配置的警示文案(F8,2026-09-10 六模式实跑修复)。
  * 背景:`tools: []` 语义是「全部工具」(非「不使用」),极易误配——实测「理解意图」
  * 这类 generates=false 的分析步骤被配成全部工具,实际下发 11 个工具(含编排/写类)。

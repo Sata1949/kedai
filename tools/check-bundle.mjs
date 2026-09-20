@@ -47,12 +47,21 @@ const ASSETS = join(DIST, 'assets');
 const VERBOSE = process.argv.includes('--verbose');
 
 /**
- * 预算基线(2026-09-17 P-8/P-9 完成后实测 + 10% 余量,单位:gzip 字节)。
- * 实测值:首屏 261,293 / 全部资产 369,533 / index 95,096 / vendor 70,815 /
- * content-rendering 44,786 / vue-vendor 33,687 / index css 16,537。
+ * 预算基线(2026-09-20 二维批次 3 画布落地后重测,「实测 + 10%」;此前为
+ *   2026-09-17 P-8/P-9 的实测值)。
+ * 实测值:首屏 264,388 / 全部资产 459,928 / index 97,480 / flow-vendor 71,594 /
+ *   vendor 70,815 / content-rendering 44,786 / vue-vendor 34,067 / index css 16,868。
+ *
+ * flow-vendor 必须单列一条(不能走默认上限):二维批次 3 引入的流程画布库
+ *   (`@vue-flow/*` + 传递依赖 d3-* / @vueuse/core / vue-demi)整体 71,594 gz。
+ *   它由 `web/vite.config.ts` 的 manualChunks 单列成块,只被执行流程编辑区里的画布
+ *   异步组件引用,**不在首屏预载里**(首屏 5 项为 vue-vendor/vendor/content-rendering
+ *   与两个 css),所以不影响首屏;但它远超「未列出前缀」的默认上限 12,000,不登记就会
+ *   被默认上限判红——这正是默认上限的作用(拦住「有重依赖落进某个小 chunk」)。
+ *   全部资产预算同步上调:画布库计入总量是事实,不能用「反正不首屏加载」绕过总量兜底。
  */
 const FIRST_PAINT_BUDGET_GZ = 288000;
-const ALL_ASSETS_BUDGET_GZ = 407000;
+const ALL_ASSETS_BUDGET_GZ = 506000;
 
 /**
  * 单 chunk 预算:键为「去哈希后的文件名」(`index.js` / `index.css` / `vendor.js` …)。
@@ -61,6 +70,7 @@ const ALL_ASSETS_BUDGET_GZ = 407000;
  */
 const CHUNK_BUDGETS_GZ = {
   'index.js': 105000,
+  'flow-vendor.js': 79000,
   'vendor.js': 78000,
   'content-rendering.js': 49500,
   'vue-vendor.js': 37500,

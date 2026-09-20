@@ -58,17 +58,18 @@ export function upstreamCandidates(
   return steps.filter((s) => s.id !== targetId && !wouldCreateCycle(steps, targetId, s.id));
 }
 
-/**
- * 层级(源节点 = 第 1 层):同层节点彼此无依赖,可并行执行(受并行上限约束)。
- * 存在环时返回 null(编辑器禁止保存,后端亦会拒绝)。
- */
-export function computeLevels(steps: AgentFlowStep[]): number[] | null {
+/** 显式上游 id → 步骤下标(缺失/脏数据跳过) */
+function parentIndices(steps: AgentFlowStep[]): number[][] {
   const index = new Map(steps.map((s, i) => [s.id, i]));
-  const parents: number[][] = steps.map((s) =>
+  return steps.map((s) =>
     stepInputs(s)
       .map((id) => index.get(id))
       .filter((i): i is number => i !== undefined),
   );
+}
+
+/** Kahn 分层(源节点 = 第 0 层);有环时返回 null */
+function levelsFrom(steps: AgentFlowStep[], parents: number[][]): number[] | null {
   const level = steps.map(() => 0);
   const pending = parents.map((p) => p.length);
   const queue: number[] = [];
@@ -85,6 +86,36 @@ export function computeLevels(steps: AgentFlowStep[]): number[] | null {
     }
   }
   return done === steps.length ? level : null;
+}
+
+/**
+ * 层级(源节点 = 第 1 层):同层节点彼此无依赖,可并行执行(受并行上限约束)。
+ * 存在环时返回 null(编辑器禁止保存,后端亦会拒绝)。
+ *
+ * 注意:这里只认**显式**上游,于是线性兼容流程的每一步都会落在第 1 层——列表视图
+ * 据此提示「线性串联」即可。要拿执行器实际使用的层级请用 `effectiveLevels`。
+ */
+export function computeLevels(steps: AgentFlowStep[]): number[] | null {
+  return levelsFrom(steps, parentIndices(steps));
+}
+
+/**
+ * 有效上游 id(与后端 `effective_inputs` 同口径):线性兼容流程里第 i 步的隐式上游是
+ * 第 i-1 步——执行器就是这么串起来的,画布的连线与自动布局必须按同一张图来画,
+ * 否则存量一维流程进画布会显示成「一堆互不相干的节点」,与 WF-10 的纵向链预期相悖。
+ */
+export function effectiveInputIds(steps: AgentFlowStep[]): string[][] {
+  const linear = isLinearCompat(steps);
+  return steps.map((s, i) => (linear ? (i === 0 ? [] : [steps[i - 1].id]) : stepInputs(s)));
+}
+
+/** 有效层级(执行器视角;源节点 = 第 0 层)。有环时返回 null */
+export function effectiveLevels(steps: AgentFlowStep[]): number[] | null {
+  const linear = isLinearCompat(steps);
+  const parents = linear
+    ? steps.map((_, i) => (i === 0 ? [] : [i - 1]))
+    : parentIndices(steps);
+  return levelsFrom(steps, parents);
 }
 
 /** 某步骤的层级(第 N 层,从 1 起);不存在或成环时返回 null */
@@ -111,6 +142,11 @@ export function toggleStepInput(step: AgentFlowStep, upstreamId: string): void {
     : [...now, upstreamId];
   // 归一化:保持与流程数组同序(后端按下标升序合并,与勾选顺序无关,此处只是稳定展示)
   step.inputs = next;
+}
+
+/** 切换「最终成果」标注(取消时写回 null,序列化时省略该字段) */
+export function toggleStepOutput(step: AgentFlowStep): void {
+  step.is_output = step.is_output === true ? null : true;
 }
 
 /** 步骤行的上游摘要(供列表视图一眼看出依赖关系) */
@@ -147,18 +183,30 @@ export function upstreamWarnings(steps: AgentFlowStep[], s: AgentFlowStep): stri
 }
 
 /**
- * 成果节点名(D4 规则镜像):显式 `is_output` 优先;未标注取无后继汇点;
+ * 成果节点(D4 规则镜像):显式 `is_output` 优先;未标注取无后继汇点;
  * 候选内取最后一个「生成正文」步骤,候选内没有生成步时回退全流程最后一个生成步。
- * 供编辑器提示「这次任务会以哪一步的产出为最终结果」。
  */
-export function outputStepName(steps: AgentFlowStep[]): string | null {
+export function outputStep(steps: AgentFlowStep[]): AgentFlowStep | null {
   const explicit = steps.filter((s) => s.is_output === true);
   const referenced = new Set(steps.flatMap((s) => stepInputs(s)));
   const candidates = explicit.length
     ? explicit
     : steps.filter((s) => !referenced.has(s.id));
   const generating = (list: AgentFlowStep[]) => list.filter(isGeneratingStep);
-  const pick = generating(candidates).at(-1) ?? generating(steps).at(-1) ?? null;
+  return generating(candidates).at(-1) ?? generating(steps).at(-1) ?? null;
+}
+
+/** 成果节点 id(画布按 id 标徽标;按名字比对会在重名步骤上出错) */
+export function outputStepId(steps: AgentFlowStep[]): string | null {
+  return outputStep(steps)?.id ?? null;
+}
+
+/**
+ * 成果节点名。供编辑器提示「这次任务会以哪一步的产出为最终结果」;
+ * 名字可能重复,仅用于展示。
+ */
+export function outputStepName(steps: AgentFlowStep[]): string | null {
+  const pick = outputStep(steps);
   return pick ? pick.name || pick.id : null;
 }
 
