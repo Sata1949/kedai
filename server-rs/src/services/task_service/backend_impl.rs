@@ -162,7 +162,8 @@ impl TaskFlowAccess for TaskService {
         if !cfg.enabled {
             return Err("当前 Agent 流程未启用,请在设置中开启后再运行 custom 模式".into());
         }
-        // 执行前按启动时注册工具集校验(与保存时同一 validate_flow)
+        // 执行前按启动时注册工具集校验(与保存时同一 validate_flow)+ 从本流程起链的
+        // 引用检查(库里无关流程的脏数据不拦本次执行,见 AgentFlowService::validate)
         guard.validate(&cfg)?;
         Ok(cfg)
     }
@@ -175,10 +176,13 @@ impl TaskFlowAccess for TaskService {
             .flow_by_id(id)
             .cloned()
             .ok_or_else(|| format!("子流程不存在:{}", id))?;
-        // 被引用流程按「启用态」校验结构(见 TaskFlowAccess::flow_by_id 文档)
+        // 被引用流程按「启用态」校验**结构**(见 TaskFlowAccess::flow_by_id 文档)。
+        // 引用链(环/深度)不在这里查:它是保存期全库校验的职责,运行期另有调用链守卫
+        // (custom.rs::run_sub_flow)兜底;每个子流程节点重扫一遍全库既是无谓开销,
+        // 也会被库里无关流程的脏数据误伤。
         let mut as_enabled = cfg.clone();
         as_enabled.enabled = true;
-        guard.validate(&as_enabled)?;
+        guard.validate_structure(&as_enabled)?;
         Ok(cfg)
     }
 }

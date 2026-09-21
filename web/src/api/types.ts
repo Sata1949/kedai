@@ -738,6 +738,13 @@ export interface AgentFlowStep {
   y?: number | null;
   /** 节点档位(二维批次 6a):loose/缺省 = 允许工具自循环;strict = 单次模型调用、不下发工具 */
   kind?: 'loose' | 'strict' | null;
+  /**
+   * 挂载的静态子流程 id(二维批次 6b):非空时本节点**不自己发起模型调用**,
+   * 改为把被引用流程当子图跑一遍,子图成果即本节点产出。
+   * 与档位同一纪律——`goal`/`action`/`kind`/`tools`/`system_prompt`/`temperature`/
+   * `max_tokens` 被旁路但**配置保留**,清空本字段即恢复生效。
+   */
+  sub_flow_id?: string | null;
 }
 
 /** 自定义执行流程配置(单个流程,data/agent_flows.json 流程库中的一项) */
@@ -908,8 +915,13 @@ export interface TaskDetail {
 export interface TaskLlmCall {
   id: string;
   task_id: string;
+  /**
+   * 调用归属阶段。**不含冒号**(前端流式缓冲 key 以第一个冒号切分 phase 与步骤号):
+   * `step` = 外层流程节点;`subflow.<父节点下标链>` = 静态子图的节点
+   * (如 `subflow.1` = 「外层下标 1 的节点挂载的子流程」里的节点,`subflow.1.2` 再嵌一层)。
+   */
   phase: string;
-  /** step 阶段的步骤序号(0 起,展示时 +1);其余阶段为 null */
+  /** 步骤序号(0 起,展示时 +1):step = 节点在外层流程中的下标;subflow.* = 节点在本层子图中的下标 */
   step_index: number | null;
   model: string;
   /** 提示词摘要(面板展开查看) */

@@ -1800,7 +1800,11 @@ async fn custom_strict_step_does_not_dispatch_tools() {
         json!({ "config": flow_of("strict") }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "严格档流程应可保存(二维批次 6a 放宽校验)");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "严格档流程应可保存(二维批次 6a 放宽校验)"
+    );
     let events = sse_events(app, &sid, &cid, &message, "custom").await;
     assert_eq!(
         events.iter().filter(|e| e["type"] == "tool_result").count(),

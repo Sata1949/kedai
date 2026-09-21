@@ -2,8 +2,9 @@
 // 与后端 agent_flow_service 的图原语同口径:线性兼容、上游合法性、层级、成果选拔。
 // 只断言数据层(与「画布不做像素断言」同一原则),不涉及 DOM。
 import { describe, expect, it } from 'vitest';
-import type { AgentFlowStep } from '../api/types';
+import type { AgentFlowConfig, AgentFlowStep } from '../api/types';
 import {
+  MAX_SUB_FLOW_DEPTH,
   computeLevels,
   effectiveInputIds,
   effectiveLevels,
@@ -13,14 +14,23 @@ import {
   outputStepName,
   removeStepReferences,
   setStepKind,
+  setSubFlowId,
   stepInputs,
   stepKind,
   stepKindWarnings,
+  stepSubFlowWarnings,
+  subFlowCandidates,
+  subFlowId,
+  subFlowMountNote,
+  subFlowSummary,
   toggleStepInput,
   upstreamCandidates,
   upstreamSummary,
   upstreamWarnings,
+  flowAncestorDepth,
+  flowNestingDepth,
   wouldCreateCycle,
+  wouldCreateFlowCycle,
 } from './agentFlowGraph';
 
 /** 步骤工厂:id/上游/是否生成可定制,其余取一维默认值 */
@@ -229,5 +239,207 @@ describe('agentFlowGraph 节点档位(二维批次 6a)', () => {
     // 严格 + 非 auto 工具策略:策略不会生效
     const choice = step('a', [], { kind: 'strict', tools: null, tool_choice: 'required' });
     expect(stepKindWarnings(choice)[0]).toContain('工具策略');
+  });
+});
+
+describe('agentFlowGraph 静态子图(二维批次 6b)', () => {
+  // 流程库工厂:主流程把挂载点写成 sub_flow_id
+  function flow(id: string, name: string, steps: Partial<AgentFlowStep>[] = []): AgentFlowConfig {
+    return { id, name, enabled: true, steps: steps.map((s, i) => step(`s${i}`, [], s)) };
+  }
+
+  it('子流程读写:空串/脏数据按未挂载,清空写回 null', () => {
+    const s = step('a');
+    expect(subFlowId(s)).toBeNull();
+
+    setSubFlowId(s, 'flow-x');
+    expect(s.sub_flow_id).toBe('flow-x');
+    expect(subFlowId(s)).toBe('flow-x');
+
+    // 前后空白 trim 后使用(后端 sub_flow_ref 同口径)
+    setSubFlowId(s, '  flow-y  ');
+    expect(s.sub_flow_id).toBe('flow-y');
+
+    // 清空 / 纯空白 → null(序列化时省略,不留脏引用)
+    setSubFlowId(s, '   ');
+    expect(s.sub_flow_id).toBeNull();
+    setSubFlowId(s, null);
+    expect(subFlowId({ sub_flow_id: undefined })).toBeNull();
+  });
+
+  it('成环判定:自引用与「引用链上已有本流程」都判为成环', () => {
+    const lib = [flow('A', '主'), flow('B', '中间', []), flow('C', '末端')];
+    // B → C 的链
+    lib[1].steps = [{ ...step('b1', [], { sub_flow_id: 'C' }) }];
+    // 把 C 挂到 A 上不成环
+    expect(wouldCreateFlowCycle(lib, 'A', 'C')).toBe(false);
+    // 把 A 自己挂到 A 上:自引用
+    expect(wouldCreateFlowCycle(lib, 'A', 'A')).toBe(true);
+    // C 引用链上没有 A,但让 C 挂 A(即 C→A 而 A 又要挂 C)会成环
+    lib[2].steps = [{ ...step('c1', [], { sub_flow_id: 'A' }) }];
+    expect(wouldCreateFlowCycle(lib, 'A', 'C')).toBe(true);
+  });
+
+  it('子流程候选:排除自身与会成环的流程,保留合法者', () => {
+    const lib = [flow('A', '主'), flow('B', '直接引用我', []), flow('C', '干净')];
+    lib[1].steps = [{ ...step('b1', [], { sub_flow_id: 'A' }) }];
+    const ids = subFlowCandidates(lib, 'A').map((f) => f.id);
+    expect(ids).toEqual(['C']);
+  });
+
+  it('子流程候选保留「深度过深」者(只滤必然错,不静默丢弃用户的选择)', () => {
+    // B→C→D→E 已 3 层,挂到 A 上会超限——候选里仍要有,由警示告知
+    const lib = [flow('A', '主'), flow('B', '深链', []), flow('C', '二'), flow('D', '三'), flow('E', '四')];
+    lib[1].steps = [step('b1', [], { sub_flow_id: 'C' })];
+    lib[2].steps = [step('c1', [], { sub_flow_id: 'D' })];
+    lib[3].steps = [step('d1', [], { sub_flow_id: 'E' })];
+    expect(subFlowCandidates(lib, 'A').map((f) => f.id)).toContain('B');
+    expect(stepSubFlowWarnings(lib, 'A', step('a1', [], { sub_flow_id: 'B' }))[0]).toContain(
+      '嵌套超过',
+    );
+  });
+
+  it('嵌套层数:逐层累加,成环/悬空返回 null', () => {
+    const lib = [flow('A', '主'), flow('B', '二'), flow('C', '三'), flow('D', '四')];
+    expect(flowNestingDepth(lib, 'A')).toBe(0);
+    lib[0].steps = [step('a1', [], { sub_flow_id: 'B' })];
+    lib[1].steps = [step('b1', [], { sub_flow_id: 'C' })];
+    lib[2].steps = [step('c1', [], { sub_flow_id: 'D' })];
+    expect(flowNestingDepth(lib, 'A')).toBe(3);
+    expect(flowNestingDepth(lib, 'D')).toBe(0);
+
+    // 悬空引用 → 层数无法确定
+    lib[3].steps = [step('d1', [], { sub_flow_id: 'missing' })];
+    expect(flowNestingDepth(lib, 'A')).toBeNull();
+
+    // 成环 → 层数无法确定(由成环警示兜底)
+    const cyclic = [flow('A', '主', [{ sub_flow_id: 'B' }]), flow('B', '环', [{ sub_flow_id: 'A' }])];
+    expect(flowNestingDepth(cyclic, 'A')).toBeNull();
+  });
+
+  it('祖先层数:沿反向边向上累加,无人挂载为 0,成环为 null', () => {
+    // H → G → F:F 的祖先跳数 2,H 为 0
+    const lib = [
+      flow('F', '中'),
+      flow('G', '上', [{ sub_flow_id: 'F' }]),
+      flow('H', '顶', [{ sub_flow_id: 'G' }]),
+    ];
+    expect(flowAncestorDepth(lib, 'F')).toBe(2);
+    expect(flowAncestorDepth(lib, 'G')).toBe(1);
+    expect(flowAncestorDepth(lib, 'H')).toBe(0);
+    // 库外 id / 成环 → null
+    expect(flowAncestorDepth(lib, 'nope')).toBeNull();
+    const cyclic = [flow('A', '主', [{ sub_flow_id: 'B' }]), flow('B', '环', [{ sub_flow_id: 'A' }])];
+    expect(flowAncestorDepth(cyclic, 'A')).toBeNull();
+  });
+
+  it('引用警示:悬空/成环/超深/反思四类都点名「保存会被拒绝」', () => {
+    const lib = [flow('A', '主'), flow('B', '子'), flow('C', '二'), flow('D', '三'), flow('E', '四')];
+    // 悬空
+    const dangling = step('a1', [], { sub_flow_id: 'nope' });
+    expect(stepSubFlowWarnings(lib, 'A', dangling)[0]).toContain('不存在');
+    expect(stepSubFlowWarnings(lib, 'A', dangling)[0]).toContain('保存会被拒绝');
+    // 合法引用:无警示
+    lib[1].steps = [step('b1', [], {})];
+    expect(stepSubFlowWarnings(lib, 'A', step('a1', [], { sub_flow_id: 'B' }))).toEqual([]);
+    // 成环
+    lib[1].steps = [step('b1', [], { sub_flow_id: 'A' })];
+    expect(stepSubFlowWarnings(lib, 'A', step('a1', [], { sub_flow_id: 'B' }))[0]).toContain('成环');
+    // 超深:B→C→D→E 已有 3 跳,再挂到 A 上共 4 跳(上限 3)→ 5 个流程
+    lib[1].steps = [step('b1', [], { sub_flow_id: 'C' })];
+    lib[2].steps = [step('c1', [], { sub_flow_id: 'D' })];
+    lib[3].steps = [step('d1', [], { sub_flow_id: 'E' })];
+    const deep = stepSubFlowWarnings(lib, 'A', step('a1', [], { sub_flow_id: 'B' }));
+    expect(deep[0]).toContain(`嵌套超过 ${MAX_SUB_FLOW_DEPTH} 层`);
+    expect(deep[0]).toContain('共 5 个流程');
+    // 反思步骤挂子流程(后端 validate_flow 直接拒)
+    const reflect = step('a1', [], { sub_flow_id: 'B', action: 'reflect' });
+    expect(stepSubFlowWarnings(lib, 'A', reflect)[0]).toContain('反思步骤');
+  });
+
+  it('深度警示把**祖先层数**算进去(本流程自身被挂载时也要报)', () => {
+    // H → G → F(本流程,F 的祖先跳数 2);候选 X 自身还有 1 跳 → 2+1+1 = 4 > 3
+    const lib = [
+      flow('F', '本流程'),
+      flow('G', '上', [{ sub_flow_id: 'F' }]),
+      flow('H', '顶', [{ sub_flow_id: 'G' }]),
+      flow('X', '候选', [{ sub_flow_id: 'W' }]),
+      flow('W', '末端'),
+    ];
+    // 只看「向下的层数」时这条引用看起来完全合法(1 + 1 = 2 ≤ 3)——正是修正前的假阴性
+    expect(flowNestingDepth(lib, 'X')).toBe(1);
+    const warns = stepSubFlowWarnings(lib, 'F', step('f1', [], { sub_flow_id: 'X' }));
+    expect(warns[0]).toContain('嵌套超过');
+    expect(warns[0]).toContain('共 5 个流程');
+  });
+
+  it('停用步骤不参与校验 → 不给任何警示(启用后才会被保存期拒绝)', () => {
+    const lib = [flow('A', '主'), flow('B', '子')];
+    const disabled = step('a1', [], { sub_flow_id: 'nope', enabled: false });
+    expect(stepSubFlowWarnings(lib, 'A', disabled)).toEqual([]);
+    // 同一个步骤启用后照报
+    expect(
+      stepSubFlowWarnings(lib, 'A', { ...disabled, enabled: true })[0],
+    ).toContain('不存在');
+  });
+
+  it('流程停用:只有「反思+挂载」那条不报,其余引用链警示仍然成立', () => {
+    // 各流程先各带一个合法生成步(否则会先撞上「被引用流程没有启用步骤」那条)
+    const lib = [
+      flow('A', '主'),
+      flow('B', '子', [{}]),
+      flow('C', '二', [{}]),
+      flow('D', '三', [{}]),
+      flow('E', '四', [{}]),
+    ];
+    // 反思那条由 validate_flow 判,而未启用流程在 validate_flow 里直接放行 → 不报
+    const reflect = step('a1', [], { sub_flow_id: 'B', action: 'reflect' });
+    expect(stepSubFlowWarnings(lib, 'A', reflect, false)).toEqual([]);
+    // 悬空 / 成环 / 超深由全库校验判(它遍历全库、不跳过未启用流程)→ 照报
+    expect(
+      stepSubFlowWarnings(lib, 'A', step('a1', [], { sub_flow_id: 'nope' }), false)[0],
+    ).toContain('不存在');
+    lib[1].steps = [step('b1', [], { sub_flow_id: 'A' })];
+    expect(
+      stepSubFlowWarnings(lib, 'A', step('a1', [], { sub_flow_id: 'B' }), false)[0],
+    ).toContain('成环');
+    lib[1].steps = [step('b1', [], { sub_flow_id: 'C' })];
+    lib[2].steps = [step('c1', [], { sub_flow_id: 'D' })];
+    lib[3].steps = [step('d1', [], { sub_flow_id: 'E' })];
+    expect(
+      stepSubFlowWarnings(lib, 'A', step('a1', [], { sub_flow_id: 'B' }), false)[0],
+    ).toContain('嵌套超过');
+  });
+
+  it('被引用流程结构不合法也提示(后端按「启用态」校验它)', () => {
+    // 没有启用的步骤
+    const noActive = flow('空子', '空子', [{ enabled: false }]);
+    const lib1 = [flow('A', '主'), noActive];
+    const warn1 = stepSubFlowWarnings(lib1, 'A', step('a1', [], { sub_flow_id: '空子' }));
+    expect(warn1[0]).toContain('没有启用的步骤');
+    expect(warn1[0]).toContain('保存会被拒绝');
+    // 缺少生成正文的步骤(只有反思步)
+    const noGenerating = flow('反思子', '反思子', [{ action: 'reflect', generates: undefined }]);
+    const lib2 = [flow('A', '主'), noGenerating];
+    const warn2 = stepSubFlowWarnings(lib2, 'A', step('a1', [], { sub_flow_id: '反思子' }));
+    expect(warn2[0]).toContain('缺少生成正文的步骤');
+  });
+
+  it('旁路说明点名子流程名且说明配置保留;未挂载返回空串', () => {
+    const lib = [flow('A', '主'), flow('B', '摘要流程')];
+    const note = subFlowMountNote(lib, 'B');
+    expect(note).toContain('摘要流程');
+    expect(note).toContain('清空子流程即恢复生效');
+    expect(subFlowMountNote(lib, null)).toBe('');
+  });
+
+  it('列表行摘要:挂载显示「子流程:名字」,失效点名「引用已失效」,未挂载返回空串', () => {
+    const lib = [flow('A', '主'), flow('B', '摘要流程')];
+    expect(subFlowSummary(lib, step('a1', [], { sub_flow_id: 'B' }))).toBe('子流程:摘要流程');
+    expect(subFlowSummary(lib, step('a1'))).toBe('');
+    // 引用已失效(库里没有)时回退显示 id,并点明失效(与画布徽标/下拉同文案)
+    expect(subFlowSummary(lib, step('a1', [], { sub_flow_id: 'gone' }))).toBe(
+      '子流程:gone(引用已失效)',
+    );
   });
 });

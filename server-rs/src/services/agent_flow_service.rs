@@ -41,11 +41,22 @@ impl AgentFlowService {
         &self.library
     }
 
-    /// 使用启动时已注册工具集合校验流程,供保存与执行前复用。
-    /// 含**子流程引用链**校验(二维批次 6b):当前流程或它引用的任一子流程有问题都拒绝。
+    /// 使用启动时已注册工具集合校验流程,供执行前复用。
+    ///
+    /// 校验分两层(二维批次 6b 审查修正):**结构**走 `validate_flow`,**引用链**只从
+    /// `config` 自己起走一条。执行期**不再全库扫描**——库里任一**无关**流程的脏引用
+    /// (手改 `data/agent_flows.json`、外部导入的流程)都不该拦死本次执行,全库口径是
+    /// **保存期**的职责(见 [`validate_sub_flows`] 与 `set`)。环与深度另由运行期调用链
+    /// 守卫兜底(见 `task_engine/custom.rs::run_sub_flow`)。
     pub fn validate(&self, config: &AgentFlowConfig) -> Result<(), String> {
         validate_flow(config, &self.registered_tools)?;
-        validate_sub_flows(&self.library, &self.registered_tools)
+        walk_sub_flows_from(&flow_index(&self.library), config, &self.registered_tools)
+    }
+
+    /// 只做**结构**校验(不含子流程引用链):被引用流程的运行期校验用。
+    /// 见 [`validate`] 的两层口径——环/深度由保存期全库校验与运行期调用链守卫兜住。
+    pub fn validate_structure(&self, config: &AgentFlowConfig) -> Result<(), String> {
+        validate_flow(config, &self.registered_tools)
     }
 
     /// 聊天侧执行快照(二维批次 6b):当前流程的启用步骤 + 子流程展开。
@@ -61,6 +72,11 @@ impl AgentFlowService {
     /// 保存(创建或更新)流程并设为当前选中;id 为空时自动生成新 id(新建)。
     /// 校验失败返回 Err(不落盘)。子流程引用链校验在**候选库**上做:
     /// 本次编辑可能让引用它的其它流程变深/成环(见 `validate_sub_flows`)。
+    ///
+    /// **已知代价(全库口径)**:`validate_sub_flows` 遍历候选库里的每个流程,故库内任一
+    /// 流程存在非法引用(悬空/自引用/环/深度/被引用流程结构不合法)都会拒绝**本次保存**
+    /// ——哪怕本次编辑的流程与它无关。这是有意的:保存是唯一的写入点,只有在这里全量
+    /// 把关,执行期才能只查入口可达链(见 `validate`)。
     pub fn set(&mut self, mut config: AgentFlowConfig) -> Result<(), String> {
         validate_flow(&config, &self.registered_tools)?;
         if config.id.trim().is_empty() {
@@ -93,6 +109,10 @@ impl AgentFlowService {
     ///
     /// 被其它流程当作子流程引用时**拒绝删除**(二维批次 6b):否则会留下悬空引用,
     /// 让引用方在执行期才失败。报错点名引用方,用户先解除引用再删。
+    ///
+    /// 引用口径与校验口径**一致:只看启用步骤**(`sub_flow_edges` 同款)——停用步骤里的
+    /// 残留引用不参与执行链、也不参与保存期校验,拿它卡住删除只会让用户被一条
+    /// 「不存在的约束」拦住。
     pub fn remove(&mut self, id: &str) -> Result<(), String> {
         let label = match self.flow_by_id(id) {
             Some(f) => flow_label(f),
@@ -102,7 +122,12 @@ impl AgentFlowService {
             .library
             .flows
             .iter()
-            .filter(|f| f.id != id && f.steps.iter().any(|s| s.sub_flow_ref() == Some(id)))
+            .filter(|f| {
+                f.id != id
+                    && f.steps
+                        .iter()
+                        .any(|s| s.enabled && s.sub_flow_ref() == Some(id))
+            })
             .map(flow_label)
             .collect();
         if !referrers.is_empty() {
@@ -670,22 +695,36 @@ fn sub_flow_edges(cfg: &AgentFlowConfig) -> Vec<(String, String)> {
 ///
 /// 遍历从**库内每个流程**出发,而不是只从本次编辑的流程:B 被编辑成引用 A 时,
 /// 引用 B 的 C 也会跟着变深/成环,只查 B 会漏。库规模是「用户手写的几十个流程」,
-/// 全量遍历的成本可忽略(且只在保存/执行前跑)。
+/// 全量遍历的成本可忽略(保存是低频操作;执行期另有只查入口链的 [`walk_sub_flows_from`])。
 pub fn validate_sub_flows(
     library: &AgentFlowLibrary,
     registered_tools: &BTreeSet<String>,
 ) -> Result<(), String> {
-    let by_id: BTreeMap<&str, &AgentFlowConfig> =
-        library.flows.iter().map(|f| (f.id.as_str(), f)).collect();
+    let by_id = flow_index(library);
     for flow in &library.flows {
-        // 链首是该流程自身;只有确实挂了子流程的流程才需要走一遍
-        if sub_flow_edges(flow).is_empty() {
-            continue;
-        }
-        let mut chain: Vec<String> = vec![flow.id.clone()];
-        walk_sub_flows(&by_id, flow, &mut chain, registered_tools)?;
+        walk_sub_flows_from(&by_id, flow, registered_tools)?;
     }
     Ok(())
+}
+
+/// 流程库的 id → 流程索引(引用解析共用;库内 id 唯一由 `set` 的写入路径保证)。
+fn flow_index(library: &AgentFlowLibrary) -> BTreeMap<&str, &AgentFlowConfig> {
+    library.flows.iter().map(|f| (f.id.as_str(), f)).collect()
+}
+
+/// 从**单个流程**起走一遍引用链(规则见 [`validate_sub_flows`] 的清单)。
+/// `by_id` 只用于解析被引用方,链首流程自身无须在库内(set 的候选库场景反之亦然)。
+fn walk_sub_flows_from(
+    by_id: &BTreeMap<&str, &AgentFlowConfig>,
+    flow: &AgentFlowConfig,
+    registered_tools: &BTreeSet<String>,
+) -> Result<(), String> {
+    // 链首是该流程自身;确实没挂子流程的流程无活可干
+    if sub_flow_edges(flow).is_empty() {
+        return Ok(());
+    }
+    let mut chain: Vec<String> = vec![flow.id.clone()];
+    walk_sub_flows(by_id, flow, &mut chain, registered_tools)
 }
 
 /// 引用链深度优先遍历(见 [`validate_sub_flows`] 的规则清单)。
@@ -774,8 +813,7 @@ pub fn expand_sub_flows(
     entry_flow_id: &str,
     steps: &[PlanStep],
 ) -> Result<Vec<PlanStep>, String> {
-    let by_id: BTreeMap<&str, &AgentFlowConfig> =
-        library.flows.iter().map(|f| (f.id.as_str(), f)).collect();
+    let by_id = flow_index(library);
     let mut chain: Vec<String> = vec![entry_flow_id.to_string()];
     let out = expand_ordered(&by_id, steps, &mut chain, "")?;
     // 兜底自检:展平后 `inputs` 已清空(线性兼容),该调用只剩「id 非空且唯一」的判定意义。
@@ -1525,6 +1563,91 @@ mod tests {
         fixed.steps[0].sub_flow_id = None;
         svc.set(fixed).unwrap();
         assert!(svc.remove("builtin-coordination").is_ok());
+    }
+
+    /// 把流程库写进临时数据目录(模拟「手改 data/agent_flows.json」这类脏数据来源)
+    fn write_library(dir: &TempDataDir, lib: &AgentFlowLibrary) {
+        std::fs::write(
+            dir.join("agent_flows.json"),
+            serde_json::to_string_pretty(lib).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn validate_checks_only_entry_chain_while_set_scans_whole_library() {
+        let dir = TempDataDir::new("flow-validate-scope");
+        // 库内有一个**无关**的非法流程(悬空引用)——只能来自手改文件/外部导入,
+        // 因为 `set` 的全库校验不允许它经正常写入路径进库
+        write_library(
+            &dir,
+            &library(vec![
+                flow("入口", vec![graph_step("n", &[])]),
+                flow("脏流程", vec![sub_step("bad", "missing-flow")]),
+            ]),
+        );
+        let mut svc = service(&dir);
+        let entry = svc.get().cloned().expect("当前流程应存在");
+        assert_eq!(entry.name, "入口");
+
+        // 执行期:只从入口起链 → 无关脏流程不拦(否则所有 custom 任务与聊天预览都起不来)
+        assert!(
+            svc.validate(&entry).is_ok(),
+            "库内无关流程的脏引用不应拦死本次执行"
+        );
+
+        // 保存期:仍是全库口径 → 拒绝,且拒绝不落盘
+        let err = svc
+            .set(flow("新流程", vec![graph_step("n", &[])]))
+            .unwrap_err();
+        assert!(err.contains("不存在"), "实际错误:{err}");
+        assert!(
+            !svc.get_library().flows.iter().any(|f| f.name == "新流程"),
+            "被拒的保存不应进库"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_broken_entry_chain() {
+        let dir = TempDataDir::new("flow-validate-entry");
+        // 入口流程**自己**引用了不存在的流程 → 可达链非法,执行期必须拒
+        write_library(
+            &dir,
+            &library(vec![
+                flow("入口", vec![sub_step("n", "missing")]),
+                flow("旁支", vec![graph_step("n", &[])]),
+            ]),
+        );
+        let svc = service(&dir);
+        let entry = svc.get().cloned().unwrap();
+        let err = svc.validate(&entry).unwrap_err();
+        assert!(err.contains("不存在"), "实际错误:{err}");
+    }
+
+    #[test]
+    fn remove_ignores_references_from_disabled_steps() {
+        // 引用口径与校验口径一致:只看**启用步骤**(停用步骤的残留引用不参与执行,
+        // 也不参与保存期校验,拿它卡住删除只会让用户被一条不存在的约束拦住)
+        let dir = TempDataDir::new("flow-subflow-del-disabled");
+        let mut svc = service(&dir);
+        let mut stale = sub_step("n", "builtin-coordination");
+        stale.enabled = false;
+        save_flow(&mut svc, "主", vec![stale, graph_step("g", &[])]);
+        assert!(
+            svc.remove("builtin-coordination").is_ok(),
+            "停用步骤里的残留引用不应阻止删除"
+        );
+
+        // 启用步骤里的引用仍然阻止(既有保护不变)
+        let dir2 = TempDataDir::new("flow-subflow-del-enabled");
+        let mut svc2 = service(&dir2);
+        save_flow(
+            &mut svc2,
+            "主",
+            vec![sub_step("n", "builtin-coordination"), graph_step("g", &[])],
+        );
+        let err = svc2.remove("builtin-coordination").unwrap_err();
+        assert!(err.contains("子流程引用"), "实际错误:{err}");
     }
 
     #[test]

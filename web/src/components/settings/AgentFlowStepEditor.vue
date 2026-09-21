@@ -8,12 +8,19 @@
 // 上游候选/成果节点/警示都走 utils/agentFlowGraph 的纯函数,与后端图原语同口径;
 // 权威校验仍在后端(保存被拒时由调用方展示中文错误)。
 import {
+  MAX_SUB_FLOW_DEPTH,
+  flowName,
   isLinearCompat,
   outputStepName,
+  setSubFlowId,
   stepInputs,
   stepKind,
   stepKindWarnings,
+  stepSubFlowWarnings,
   setStepKind,
+  subFlowCandidates,
+  subFlowId,
+  subFlowMountNote,
   toggleStepInput,
   toggleStepOutput,
   upstreamCandidates,
@@ -29,19 +36,45 @@ import {
   type StepToolMode,
 } from '../../utils/agentFlowTools';
 import { TOOL_MODE_LABELS } from '../../composables/useAgentFlow';
-import type { AgentFlowStep } from '../../api/types';
+import type { AgentFlowConfig, AgentFlowStep } from '../../api/types';
 
 const props = defineProps<{
   /** 被编辑的步骤(就地修改) */
   step: AgentFlowStep;
   /** 所属流程的全部步骤(上游候选、成果节点选拔、成环判断都要看全量) */
   steps: AgentFlowStep[];
+  /** 流程库全部流程(子流程候选;缺省 = 空库,选择器只剩「不挂载」) */
+  flows?: AgentFlowConfig[];
+  /** 本流程 id(子流程自引用/成环判断;新建未保存时为空串) */
+  currentFlowId?: string;
+  /**
+   * 本流程是否启用(草稿值)。只影响「反思步骤挂子流程」那条警示的口径:
+   * 后端 `validate_flow` 对未启用流程直接放行该检查;其余引用链警示由全库校验判,
+   * 与流程启停无关(见 `stepSubFlowWarnings`)。缺省按启用处理。
+   */
+  flowEnabled?: boolean;
 }>();
 
 // 就地对草稿里的步骤写入:草稿所有权在调用方(`useAgentFlow` 持有 flowDraft,保存时才提交),
 // 表单只是它的编辑入口。这里取步骤对象的引用再用,与 ConnectionSection(`props.state` 解构)
 // 同一写法——避免 vue/no-mutating-props 把「表单写自己的字段」误判为改 prop。
 const { step, steps } = props;
+const flowLib = () => props.flows ?? [];
+const selfFlowId = () => props.currentFlowId ?? '';
+
+/**
+ * 下拉的「当前值不在候选里」占位项(无此情形返回空串)。
+ * 两种成因的文案不同:库内不存在 → 引用已失效;因成环被候选过滤 → 会成环。
+ * 原生 select 在不命中任何 option 时会显示为空白,挂载状态就没有锚点了。
+ */
+function staleSubFlowOption(): string {
+  const id = subFlowId(step);
+  if (!id) return '';
+  if (subFlowCandidates(flowLib(), selfFlowId()).some((f) => f.id === id)) return '';
+  const known = flowLib().some((f) => f.id === id);
+  if (!known) return `${id}(引用已失效)`;
+  return `${flowName(flowLib(), id)}(会成环)`;
+}
 </script>
 
 <template>
@@ -98,105 +131,146 @@ const { step, steps } = props;
     >
       {{ warn }}
     </p>
-    <!-- 节点档位(二维批次 6a):严格 = 单次模型调用、不下发工具;宽松 = 允许多轮工具自循环 -->
+    <!-- 静态子图(二维批次 6b):挂上子流程后本节点不再自己发起模型调用,
+         而是把该流程当子图跑一遍,子图成果即本节点产出 -->
     <div class="sv-inp-row">
-      <label class="sv-inp-tag">档位</label>
+      <label class="sv-inp-tag">子流程</label>
       <select
         class="sv-select flow-select-wide"
-        :value="stepKind(step)"
-        title="严格 = 单次模型调用、不下发任何工具(适合压缩/抽取这类原子步骤);宽松 = 可与工具多轮循环"
-        @change="setStepKind(step, ($event.target as HTMLSelectElement).value as StepKind)"
+        :value="subFlowId(step) ?? ''"
+        title="挂载后本节点把该流程当子图执行,成果即本节点产出;本节点自身的目标/档位/工具/提示词都不参与执行(配置保留)"
+        @change="setSubFlowId(step, ($event.target as HTMLSelectElement).value || null)"
       >
-        <option value="loose">宽松（允许工具自循环）</option>
-        <option value="strict">严格（单次调用，不下发工具）</option>
+        <option value="">不挂载（本节点自己生成）</option>
+        <option v-for="f in subFlowCandidates(flowLib(), selfFlowId())" :key="f.id" :value="f.id">
+          {{ f.name || f.id }}
+        </option>
+        <!-- 当前值不在候选里(库内已删除,或因成环被候选过滤):补一个禁用项,
+             否则原生 select 会显示成空白,挂载状态失去视觉锚点 -->
+        <option v-if="staleSubFlowOption()" value="" disabled>
+          {{ staleSubFlowOption() }}
+        </option>
       </select>
-      <span class="sv-note">
-        {{ stepKind(step) === 'strict'
-          ? '严格档:一次模型调用即完成;已配置的工具不会下发(配置保留,切回宽松档即生效)。'
-          : '宽松档:模型可反复调用工具,直到给出正文。' }}
-      </span>
     </div>
+    <template v-if="subFlowId(step)">
+      <p class="sv-note">{{ subFlowMountNote(flowLib(), subFlowId(step)) }}</p>
+      <p class="sv-note">
+        子流程按它自己的并行上限执行(嵌套时并发会按层数相乘,token 消耗随之增加);
+        最多嵌套 {{ MAX_SUB_FLOW_DEPTH }} 层。
+      </p>
+      <p v-if="!step.enabled" class="sv-note">
+        本步骤已停用,引用暂不参与校验;启用后会被保存期校验。
+      </p>
+    </template>
     <p
-      v-for="(warn, wi) in stepKindWarnings(step)"
-      :key="`k${wi}`"
+      v-for="(warn, wi) in stepSubFlowWarnings(flowLib(), selfFlowId(), step, props.flowEnabled ?? true)"
+      :key="`s${wi}`"
       class="sv-note flow-tool-warn"
     >
       {{ warn }}
     </p>
-    <template v-if="step.action === 'direct'">
+    <!-- 以下执行参数在挂载子流程后被旁路(整块隐藏,草稿里的配置保留) -->
+    <template v-if="!subFlowId(step)">
+      <!-- 节点档位(二维批次 6a):严格 = 单次模型调用、不下发工具;宽松 = 允许多轮工具自循环 -->
       <div class="sv-inp-row">
-        <label class="sv-inp-tag">系统提示词</label>
-        <textarea
-          v-model="step.system_prompt"
-          rows="3"
-          class="sv-input"
-          placeholder="步骤级提示词(支持酒馆宏),以 [本步指令] 追加到系统提示词末尾;留空 = 不追加"
-          spellcheck="false"
-        />
+        <label class="sv-inp-tag">档位</label>
+        <select
+          class="sv-select flow-select-wide"
+          :value="stepKind(step)"
+          title="严格 = 单次模型调用、不下发任何工具(适合压缩/抽取这类原子步骤);宽松 = 可与工具多轮循环"
+          @change="setStepKind(step, ($event.target as HTMLSelectElement).value as StepKind)"
+        >
+          <option value="loose">宽松（允许工具自循环）</option>
+          <option value="strict">严格（单次调用，不下发工具）</option>
+        </select>
+        <span class="sv-note">
+          {{ stepKind(step) === 'strict'
+            ? '严格档:一次模型调用即完成;已配置的工具不会下发(配置保留,切回宽松档即生效)。'
+            : '宽松档:模型可反复调用工具,直到给出正文。' }}
+        </span>
       </div>
-      <!-- 工具区(二维批次 6a):严格档不下发工具,整区隐藏——草稿里的工具配置保留,
-           切回宽松档即恢复;已配置工具时的提示由上方 stepKindWarnings 给出 -->
-      <template v-if="stepKind(step) === 'loose'">
+      <p
+        v-for="(warn, wi) in stepKindWarnings(step)"
+        :key="`k${wi}`"
+        class="sv-note flow-tool-warn"
+      >
+        {{ warn }}
+      </p>
+      <template v-if="step.action === 'direct'">
         <div class="sv-inp-row">
-          <label class="sv-inp-tag">工具</label>
-          <select
-            class="sv-select flow-select-wide"
-            :value="stepToolMode(step)"
-            @change="setStepToolMode(step, ($event.target as HTMLSelectElement).value as StepToolMode)"
-          >
-            <option v-for="(label, val) in TOOL_MODE_LABELS" :key="val" :value="val">{{ label }}</option>
-          </select>
-          <input
-            v-if="stepToolMode(step) === 'list'"
+          <label class="sv-inp-tag">系统提示词</label>
+          <textarea
+            v-model="step.system_prompt"
+            rows="3"
             class="sv-input"
-            :value="stepToolsText(step)"
-            placeholder="工具名,逗号分隔(如 read, search, calculator)"
+            placeholder="步骤级提示词(支持酒馆宏),以 [本步指令] 追加到系统提示词末尾;留空 = 不追加"
             spellcheck="false"
-            @change="setStepToolsText(step, ($event.target as HTMLInputElement).value)"
           />
         </div>
-        <!-- F8(2026-09-10 实跑修复):tools 三态语义易误配——「全部工具」会下发
-             全部已注册工具(含编排/写类),分析规划类步骤不应选它。
-             文案由 stepToolsWarnings 纯函数产出,便于单测覆盖 -->
-        <p
-          v-for="(warn, wi) in stepToolsWarnings(step)"
-          :key="wi"
-          class="sv-note flow-tool-warn"
-        >
-          {{ warn }}
-        </p>
-        <p v-if="stepToolMode(step) === 'none'" class="sv-note">
-          「不使用工具」= 本步骤纯生成,不下发任何工具。
-        </p>
+        <!-- 工具区(二维批次 6a):严格档不下发工具,整区隐藏——草稿里的工具配置保留,
+             切回宽松档即恢复;已配置工具时的提示由上方 stepKindWarnings 给出 -->
+        <template v-if="stepKind(step) === 'loose'">
+          <div class="sv-inp-row">
+            <label class="sv-inp-tag">工具</label>
+            <select
+              class="sv-select flow-select-wide"
+              :value="stepToolMode(step)"
+              @change="setStepToolMode(step, ($event.target as HTMLSelectElement).value as StepToolMode)"
+            >
+              <option v-for="(label, val) in TOOL_MODE_LABELS" :key="val" :value="val">{{ label }}</option>
+            </select>
+            <input
+              v-if="stepToolMode(step) === 'list'"
+              class="sv-input"
+              :value="stepToolsText(step)"
+              placeholder="工具名,逗号分隔(如 read, search, calculator)"
+              spellcheck="false"
+              @change="setStepToolsText(step, ($event.target as HTMLInputElement).value)"
+            />
+          </div>
+          <!-- F8(2026-09-10 实跑修复):tools 三态语义易误配——「全部工具」会下发
+               全部已注册工具(含编排/写类),分析规划类步骤不应选它。
+               文案由 stepToolsWarnings 纯函数产出,便于单测覆盖 -->
+          <p
+            v-for="(warn, wi) in stepToolsWarnings(step)"
+            :key="wi"
+            class="sv-note flow-tool-warn"
+          >
+            {{ warn }}
+          </p>
+          <p v-if="stepToolMode(step) === 'none'" class="sv-note">
+            「不使用工具」= 本步骤纯生成,不下发任何工具。
+          </p>
+          <div class="sv-inp-row">
+            <label class="sv-inp-tag">工具策略</label>
+            <select v-model="step.tool_choice" class="sv-select flow-select-wide">
+              <option value="auto">auto（模型决定）</option>
+              <option value="none">none（禁止调用）</option>
+              <option value="required">required（至少调用一个）</option>
+              <option value="function">function（指定工具）</option>
+            </select>
+            <input
+              v-if="step.tool_choice === 'function'"
+              v-model="step.tool_choice_function"
+              class="sv-input"
+              placeholder="必须是本步骤有效工具名"
+              spellcheck="false"
+            />
+            <label class="sv-inp-tag">并行调用</label>
+            <select v-model="step.parallel_tool_calls" class="sv-select flow-select-wide">
+              <option :value="null">后端默认</option>
+              <option :value="true">允许</option>
+              <option :value="false">禁止</option>
+            </select>
+          </div>
+        </template>
         <div class="sv-inp-row">
-          <label class="sv-inp-tag">工具策略</label>
-          <select v-model="step.tool_choice" class="sv-select flow-select-wide">
-            <option value="auto">auto（模型决定）</option>
-            <option value="none">none（禁止调用）</option>
-            <option value="required">required（至少调用一个）</option>
-            <option value="function">function（指定工具）</option>
-          </select>
-          <input
-            v-if="step.tool_choice === 'function'"
-            v-model="step.tool_choice_function"
-            class="sv-input"
-            placeholder="必须是本步骤有效工具名"
-            spellcheck="false"
-          />
-          <label class="sv-inp-tag">并行调用</label>
-          <select v-model="step.parallel_tool_calls" class="sv-select flow-select-wide">
-            <option :value="null">后端默认</option>
-            <option :value="true">允许</option>
-            <option :value="false">禁止</option>
-          </select>
+          <label class="sv-inp-tag">温度</label>
+          <input v-model.number="step.temperature" type="number" min="0" max="2" step="0.1" class="sv-input inject-num" placeholder="沿用全局" />
+          <label class="sv-inp-tag">输出上限</label>
+          <input v-model.number="step.max_tokens" type="number" min="1" max="131072" class="sv-input inject-num" placeholder="沿用全局" title="该步骤的输出上限(1~131072);留空沿用全局最大生成长度" />
         </div>
       </template>
-      <div class="sv-inp-row">
-        <label class="sv-inp-tag">温度</label>
-        <input v-model.number="step.temperature" type="number" min="0" max="2" step="0.1" class="sv-input inject-num" placeholder="沿用全局" />
-        <label class="sv-inp-tag">输出上限</label>
-        <input v-model.number="step.max_tokens" type="number" min="1" max="131072" class="sv-input inject-num" placeholder="沿用全局" title="该步骤的输出上限(1~131072);留空沿用全局最大生成长度" />
-      </div>
     </template>
   </div>
 </template>

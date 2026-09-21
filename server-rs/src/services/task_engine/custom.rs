@@ -50,9 +50,24 @@ pub(crate) struct CustomExecutor {
     engine: Arc<AgentEngine>,
 }
 
+/// 单个节点的执行结果(二维批次 6b 审查修正:把「本节点是否降级完成」也带回来)。
+///
+/// 为什么需要 `degraded` 而不只看 `Err`:挂载子流程的节点即使**子图内部**有节点失败,
+/// 只要子图整体仍选得出成果就会返回 `Ok`。那种情况必须让本层汇总知道「这里降级了」,
+/// 否则任务会以 `done` 收尾(而非 `partial`),与「同层普通节点失败 → partial」的既有
+/// 语义不自洽。降级只影响状态与展示文案,`text` 保持纯成果(不污染下游提示词)。
+struct NodeOutcome {
+    /// 节点产出(下游与成果选拔用)
+    text: String,
+    /// 记账用的 usage(子流程节点只进本层合计,见 `run_graph_inner` 的 `record_usage` 分支)
+    out: TaskGenOutput,
+    /// 本节点是否「降级完成」(仅子图场景会为真:子图内有失败/空产出节点)
+    degraded: bool,
+}
+
 /// 在飞节点的执行 future:节点在流程数组中的下标 + 执行结果
 /// (Err 为该节点的中文错误文本,由调度器落回 plan 行)
-type NodeFuture<'a> = BoxFuture<'a, (usize, Result<(String, TaskGenOutput), String>)>;
+type NodeFuture<'a> = BoxFuture<'a, (usize, Result<NodeOutcome, String>)>;
 
 /// 一层图的执行上下文(入口流程与静态子图共用;二维批次 6b 抽取调度器时的参数束)。
 struct GraphCtx<'a> {
@@ -373,7 +388,7 @@ impl CustomExecutor {
         index: usize,
         step: &PlanStep,
         user: String,
-    ) -> Result<(String, TaskGenOutput), String> {
+    ) -> Result<NodeOutcome, String> {
         // 子流程节点不自己发起模型调用(与 6a「档位优先于 tools」同一纪律:
         // goal/action/kind/tools/system_prompt/temperature/max_tokens 全被旁路但保留配置)
         if let Some(sub_id) = step.sub_flow_ref() {
@@ -403,9 +418,10 @@ impl CustomExecutor {
                         ctx.cancel.clone(),
                     )
                     .await
-                    .map(|out| {
-                        let text = out.text.trim().to_string();
-                        (text, out)
+                    .map(|out| NodeOutcome {
+                        text: out.text.trim().to_string(),
+                        out,
+                        degraded: false,
                     })
             }
             // 宽松档 + 工具步骤:run_tool_loop(白名单自动放行),调用追踪在步骤函数内落。
@@ -414,9 +430,10 @@ impl CustomExecutor {
             (Some(list), false) => self
                 .run_step_with_tools(ctx, index, step, &mut messages, list, g.phase)
                 .await
-                .map(|(text, usage)| {
-                    let out = super::executor::usage_as_output(&usage);
-                    (text, out)
+                .map(|(text, usage)| NodeOutcome {
+                    out: super::executor::usage_as_output(&usage),
+                    text,
+                    degraded: false,
                 }),
         }
     }
@@ -434,6 +451,11 @@ impl CustomExecutor {
     /// 返回的 usage 只进 GraphOutcome 汇总(供完成日志),由调度器识别子流程节点跳过
     /// `record_usage`——否则同一批 token 会被父子两层各记一次,破坏
     /// 「`/calls` 各行求和 == 详情 usage_total」不变量。
+    ///
+    /// 降级(二维批次 6b 审查修正):子图内有失败/空产出节点、但成果仍选得出时,本节点
+    /// **成功完成**——`degraded = true` 把信号带回本层,由调度器置任务 `partial`
+    /// 并给 plan 行加标注(否则任务会以 `done` 收尾,与同层普通节点失败即 `partial`
+    /// 的既有语义不自洽)。
     async fn run_sub_flow(
         &self,
         ctx: &TaskRunContext,
@@ -442,7 +464,7 @@ impl CustomExecutor {
         step: &PlanStep,
         sub_id: &str,
         incoming: String,
-    ) -> Result<(String, TaskGenOutput), String> {
+    ) -> Result<NodeOutcome, String> {
         let cfg = self.svc.flow_by_id(sub_id)?;
         if g.chain.iter().any(|id| id == sub_id) {
             return Err(format!(
@@ -486,7 +508,11 @@ impl CustomExecutor {
                 flow_label(&cfg)
             ));
         }
-        Ok((draft, super::executor::usage_as_output(&outcome.total)))
+        Ok(NodeOutcome {
+            text: draft,
+            out: super::executor::usage_as_output(&outcome.total),
+            degraded: outcome.any_error,
+        })
     }
 
     /// 执行一层图(调度语义见 `run_graph_inner`)。
@@ -579,7 +605,11 @@ impl CustomExecutor {
             finished += 1;
             let step = &steps[i];
             match result {
-                Ok((text, out)) => {
+                Ok(NodeOutcome {
+                    text,
+                    out,
+                    degraded,
+                }) => {
                     total.prompt_tokens += out.prompt_tokens;
                     total.completion_tokens += out.completion_tokens;
                     total.total_tokens += out.prompt_tokens + out.completion_tokens;
@@ -589,6 +619,9 @@ impl CustomExecutor {
                     if !step.is_sub_flow() {
                         svc.record_usage(&ctx.task_id, g.phase, Some(i), &out);
                     }
+                    // 子图降级(子图内有失败/空产出节点,但成果仍选得出)同样算 any_error:
+                    // 本节点虽成功,整条链的质量已降级,任务不该报 done(见 NodeOutcome)
+                    any_error |= degraded;
                     if text.is_empty() {
                         any_error = true;
                         if let Some(p) = plan.as_deref_mut() {
@@ -598,9 +631,18 @@ impl CustomExecutor {
                     } else {
                         if let Some(p) = plan.as_deref_mut() {
                             p[i].status = TaskStepStatus::Done;
-                            // generates=false 的内部规划步骤:产出仅供后续步骤参考,
-                            // 加标注区分于面向用户的成果(不参与成果选拔)。
-                            if step.action == "direct" && step.generates == Some(false) {
+                            // 标注只改**展示**(p[i].result);outputs[i] 仍是纯成果,
+                            // 免得「(子图内有失败节点)」混进下游提示词
+                            if degraded {
+                                p[i].result = format!("(子图内有失败节点)\n{text}");
+                            } else if step.action == "direct"
+                                && step.generates == Some(false)
+                                && !step.is_sub_flow()
+                            {
+                                // generates=false 的内部规划步骤:产出仅供后续步骤参考,
+                                // 加标注区分于面向用户的成果(不参与成果选拔)。
+                                // 挂载子流程的节点除外——它的产出是子图成果(正文级),
+                                // 标注会反着说(子图成果被写成「内部规划」)。
                                 p[i].result = format!("(内部规划)\n{text}");
                             } else {
                                 p[i].result = text.clone();

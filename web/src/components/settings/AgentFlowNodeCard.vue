@@ -8,12 +8,29 @@
 // 样式写在本组件 `<style scoped>`(MAINTENANCE.md 明令禁止再往 style.css 追加),
 // 只覆盖 Vue Flow 的 CSS 变量来接管主题,不用 :deep 穿透它的内部 DOM。
 import { Handle, Position } from '@vue-flow/core';
+import { flowName, subFlowId } from '../../utils/agentFlowGraph';
 import type { FlowCanvasNodeData } from '../../composables/useFlowCanvas';
+import type { AgentFlowConfig } from '../../api/types';
 
 const props = defineProps<{
   data: FlowCanvasNodeData;
   selected?: boolean;
+  /** 流程库(二维批次 6b:把挂载的子流程显示成名字而不是 id) */
+  flows?: AgentFlowConfig[];
 }>();
+
+/**
+ * 挂载的子流程标签(未挂载返回空串,模板据此决定是否画徽标)。
+ * 三态要分清:库**未传入**(还没加载/画布独立用时)→ 只显示「子流程」;
+ * 库传了但没有这个 id → 才是「引用已失效」——否则「库还没加载」会被误报成失效。
+ */
+function subFlowLabel(): string {
+  const id = subFlowId(props.data.step);
+  if (!id) return '';
+  if (!props.flows) return '子流程';
+  const known = props.flows.some((f) => f.id === id);
+  return known ? `子流程:${flowName(props.flows, id)}` : '子流程(引用已失效)';
+}
 </script>
 
 <template>
@@ -32,6 +49,8 @@ const props = defineProps<{
       </span>
       <!-- 节点档位(二维批次 6a):严格节点单次调用、不下发工具 -->
       <span v-if="props.data.step.kind === 'strict'" class="flow-tag kind">严格</span>
+      <!-- 挂载静态子流程(二维批次 6b):本节点跑子图,成果即本节点产出 -->
+      <span v-if="subFlowLabel()" class="flow-tag sub">{{ subFlowLabel() }}</span>
       <span v-if="props.data.isOutput" class="flow-tag out">成果</span>
       <span v-if="!props.data.step.enabled" class="flow-tag off">已停用</span>
     </div>
@@ -96,6 +115,12 @@ const props = defineProps<{
 .flow-tag.kind {
   border-style: dashed;
   color: var(--sv-ink-dim);
+}
+/* 子流程徽标:实底强调——它改变的是「这个节点是什么」,比档位更强,需要一眼看见 */
+.flow-tag.sub {
+  border-color: var(--sv-pink-dark);
+  background: var(--sv-pink-light);
+  color: var(--sv-ink);
 }
 .flow-tag.off {
   border-color: var(--sv-ink-faint);

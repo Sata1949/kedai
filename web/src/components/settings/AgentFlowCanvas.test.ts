@@ -8,7 +8,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount, flushPromises } from '@vue/test-utils';
 import { VueFlow } from '@vue-flow/core';
 import AgentFlowCanvas from './AgentFlowCanvas.vue';
-import type { AgentFlowStep } from '../../api/types';
+import type { AgentFlowConfig, AgentFlowStep } from '../../api/types';
 
 // jsdom 未实现、而 Vue Flow 挂载即依赖的两个 API(缺 ResizeObserver 时一个节点都不渲染)
 class ResizeObserverStub {
@@ -50,9 +50,9 @@ function diamond(): AgentFlowStep[] {
   return [step('a', [], { name: '左路' }), step('b', [], { name: '右路' }), step('c', ['a', 'b'], { name: '合并' }), step('d', ['c'], { name: '收口' })];
 }
 
-/** 挂载画布(异步组件渲染完成后再断言) */
-async function mountCanvas(steps: AgentFlowStep[]) {
-  const wrapper = mount(AgentFlowCanvas, { props: { steps } });
+/** 挂载画布(异步组件渲染完成后再断言);flows 用于子流程徽标用例 */
+async function mountCanvas(steps: AgentFlowStep[], flows?: AgentFlowConfig[]) {
+  const wrapper = mount(AgentFlowCanvas, { props: { steps, flows } });
   await flushPromises();
   return wrapper;
 }
@@ -105,6 +105,29 @@ describe('AgentFlowCanvas 渲染', () => {
       wrapper.findAll('.vue-flow__node').find((n) => n.text().includes(name));
     expect(cardOf('原子步')?.text()).toContain('严格');
     expect(cardOf('循环步')?.text()).not.toContain('严格');
+  });
+
+  it('挂载子流程的节点带徽标:传库显示名字,库未传入只说「子流程」,失效才点名失效', async () => {
+    const steps = [step('a', [], { name: '挂载步', sub_flow_id: 'f2' })];
+    const cardText = (wrapper: Awaited<ReturnType<typeof mountCanvas>>) =>
+      wrapper.findAll('.vue-flow__node').find((n) => n.text().includes('挂载步'))?.text() ?? '';
+
+    // 库传了且命中 → 显示流程名
+    const withLib = await mountCanvas(steps, [
+      { id: 'f2', name: '摘要流程', enabled: true, steps: [] },
+    ]);
+    expect(cardText(withLib)).toContain('子流程:摘要流程');
+
+    // 库**未传入**(还没加载/画布独立用时)→ 只说「子流程」,不得误报失效
+    const noLib = await mountCanvas(steps);
+    expect(cardText(noLib)).toContain('子流程');
+    expect(cardText(noLib)).not.toContain('引用已失效');
+
+    // 库传了但没有这个 id → 引用已失效
+    const stale = await mountCanvas(steps, [
+      { id: 'other', name: '别的流程', enabled: true, steps: [] },
+    ]);
+    expect(cardText(stale)).toContain('子流程(引用已失效)');
   });
 
   it('线性流程(存量一维)进来就是一条链:节点逐层下降且有连线', async () => {

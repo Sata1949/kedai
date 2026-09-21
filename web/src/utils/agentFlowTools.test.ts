@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { AgentFlowStep } from '../api/types';
 import {
   cleanStepsTools,
+  normalizeStepAction,
   cleanStepTools,
   setStepToolMode,
   setStepToolsText,
@@ -115,5 +116,38 @@ describe('stepToolsWarnings(F8:工具三态误配警示)', () => {
   it('不使用工具 / 白名单 → 无警示', () => {
     expect(stepToolsWarnings({ tools: null, generates: false })).toHaveLength(0);
     expect(stepToolsWarnings({ tools: ['read'], generates: false })).toHaveLength(0);
+  });
+});
+
+describe('normalizeStepAction(切换动作后的字段归一化)', () => {
+  it('切反思:生成类字段与「挂载子流程」一并清掉', () => {
+    // sub_flow_id 与生成字段同纪律:后端同样拒「反思 + 挂载子流程」,
+    // 不清就会「点一下动作下拉,流程立刻不可保存」
+    const s = step(['read']);
+    s.system_prompt = '本步指令';
+    s.temperature = 0.5;
+    s.max_tokens = 1024;
+    s.sub_flow_id = 'flow-x';
+    s.action = 'reflect';
+
+    normalizeStepAction(s);
+
+    expect(s.generates).toBeUndefined();
+    expect(s.system_prompt).toBeNull();
+    expect(s.temperature).toBeNull();
+    expect(s.max_tokens).toBeNull();
+    expect(s.tools).toBeNull();
+    expect(s.tool_choice).toBe('auto');
+    expect(s.tool_choice_function).toBeNull();
+    expect(s.parallel_tool_calls).toBeNull();
+    expect(s.sub_flow_id ?? null, '切反思必须清掉子流程引用').toBeNull();
+  });
+
+  it('切回执行:只补默认 generates,不恢复其他字段', () => {
+    const s = step(null);
+    s.generates = undefined;
+    s.action = 'direct';
+    normalizeStepAction(s);
+    expect(s.generates).toBe(true);
   });
 });

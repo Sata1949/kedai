@@ -25,8 +25,26 @@ function toggle(key: string): void {
 }
 
 /** 阶段中文标签(step 阶段带步骤序号——后端落库 step_index 为 0 起,展示 +1;
- *  final_audit = team 模式终审,与后端契约并列于 audit;summary = team 模式汇总行) */
+ *  final_audit = team 模式终审,与后端契约并列于 audit;summary = team 模式汇总行;
+ *  subflow.<父节点下标链> = 静态子图节点(二维批次 6b),标签带上「从哪一步挂进来的」路径) */
 function phaseText(phase: string, stepIndex?: number | null): string {
+  // 静态子图:phase = `subflow` 或 `subflow.<父下标>[.<父下标>…]`(父下标 0 起,展示 +1)。
+  // 前缀判定放在 switch 之前:phase 不是固定词,故不能列成 case。
+  if (phase === 'subflow' || phase.startsWith('subflow.')) {
+    const path = phase
+      .slice('subflow'.length)
+      .split('.')
+      .filter((seg) => seg !== '')
+      // 脏数据(手改 phase)里的非数字段原样回退:不能把 NaN 渲染成 `#NaN`
+      .map((seg) => {
+        const n = Number(seg);
+        return Number.isFinite(n) ? `#${n + 1}` : seg;
+      })
+      .join('›');
+    const leaf = stepIndex != null ? `#${stepIndex + 1}` : '';
+    const head = path ? `子流程(${path} 内)` : '子流程';
+    return leaf ? `${head} ${leaf}` : head;
+  }
   switch (phase) {
     case 'planner': return '规划';
     case 'step': return stepIndex != null ? `步骤 #${stepIndex + 1}` : '步骤';
@@ -51,7 +69,8 @@ function phaseLabel(call: TaskLlmCall): string {
  */
 const liveRows = computed(() =>
   [...store.liveBuffers.entries()].map(([key, text]) => {
-    // key 契约:`${phase}:${step_index ?? ''}`(phase 为固定词,不含冒号)
+    // key 契约:`${phase}:${step_index ?? ''}`(phase **不含冒号**;子图为
+    // `subflow.<父下标链>` 这类带点的非固定词,故按**首个**冒号切分即可)
     const sep = key.indexOf(':');
     const phase = key.slice(0, sep);
     const idx = key.slice(sep + 1);

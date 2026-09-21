@@ -72,6 +72,10 @@ export function cleanStepsTools(steps: AgentFlowStep[]): void {
  * 切换动作(执行/反思)后的字段归一化:反思步骤不生成正文,故清掉生成类字段。
  * 由 useAgentFlow 下沉为纯函数——列表视图与画布 Inspector 共用同一份,
  * 避免两处各写一遍后漂移(该文件历史上出过 embedded/standalone 双模板漂移)。
+ *
+ * `sub_flow_id` 与生成类别同纪律:后端 `validate_flow` 同样拒「反思 + 挂载子流程」,
+ * 不清就会「点一下动作下拉,流程立刻不可保存」,而折叠态的行/卡片上没有任何标记
+ * (警示只在展开的编辑区里)。
  */
 export function normalizeStepAction(s: AgentFlowStep): void {
   if (s.action === 'reflect') {
@@ -83,6 +87,7 @@ export function normalizeStepAction(s: AgentFlowStep): void {
     s.tool_choice = 'auto';
     s.tool_choice_function = null;
     s.parallel_tool_calls = null;
+    s.sub_flow_id = null;
   } else if (s.generates === undefined) {
     s.generates = true;
   }

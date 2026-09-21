@@ -10,7 +10,7 @@
 // 不各写一份,避免本文件历史上出现过的双模板漂移。
 import { computed, defineAsyncComponent, onMounted, ref } from 'vue';
 import { useAgentFlow } from '../../composables/useAgentFlow';
-import { graphHint, isLinearCompat, upstreamSummary } from '../../utils/agentFlowGraph';
+import { graphHint, isLinearCompat, subFlowSummary, upstreamSummary } from '../../utils/agentFlowGraph';
 import { loadFlowCanvas } from '../../utils/flowCanvasChunk';
 import AgentFlowStepEditor from './AgentFlowStepEditor.vue';
 
@@ -234,12 +234,34 @@ onMounted(async () => {
           <!-- 二维依赖摘要:层级 + 上游(线性流程不显示,避免给一维用户增加噪音) -->
           <span v-if="!isLinearCompat(flowSteps)" class="flow-graph-note">
             {{ upstreamSummary(flowSteps, step) }}
+            <template v-if="subFlowSummary(flowLibFlows, step)">
+              · {{ subFlowSummary(flowLibFlows, step) }}
+            </template>
+          </span>
+          <!-- 挂载子流程的摘要在**线性流程**里也要显示:它是执行语义的一部分,不属于二维依赖 -->
+          <span v-else-if="subFlowSummary(flowLibFlows, step)" class="flow-graph-note">
+            {{ subFlowSummary(flowLibFlows, step) }}
           </span>
           <!-- 展开编辑区:跨整行、纵向堆叠,避免被步骤行 grid 挤压 -->
-          <AgentFlowStepEditor v-if="editingStepId === step.id" :step="step" :steps="flowSteps" />
+          <AgentFlowStepEditor
+            v-if="editingStepId === step.id"
+            :step="step"
+            :steps="flowSteps"
+            :flows="flowLibFlows"
+            :current-flow-id="flowId ?? ''"
+            :flow-enabled="flowDraft?.enabled ?? true"
+          />
         </div>
       </template>
-      <AgentFlowCanvas v-else :key="canvasKey" :steps="flowSteps" @remove="removeStep" />
+      <AgentFlowCanvas
+        v-else
+        :key="canvasKey"
+        :steps="flowSteps"
+        :flows="flowLibFlows"
+        :current-flow-id="flowId ?? ''"
+        :flow-enabled="flowDraft?.enabled ?? true"
+        @remove="removeStep"
+      />
       <p v-if="flowView === 'canvas' && canvasLoadFailed" class="sv-note flow-tool-warn">
         画布组件加载失败(多为前端已更新、页面缓存的旧 chunk 失效)。
         可点右侧「重试」;若仍失败,请刷新页面,或先用列表视图编辑(功能一致)。

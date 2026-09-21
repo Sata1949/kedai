@@ -28,7 +28,7 @@ import AgentFlowEdge from './AgentFlowEdge.vue';
 import AgentFlowStepEditor from './AgentFlowStepEditor.vue';
 import { useFlowCanvas } from '../../composables/useFlowCanvas';
 import { normalizeStepAction } from '../../utils/agentFlowTools';
-import type { AgentFlowStep } from '../../api/types';
+import type { AgentFlowConfig, AgentFlowStep } from '../../api/types';
 
 import '@vue-flow/core/dist/style.css';
 import '@vue-flow/core/dist/theme-default.css';
@@ -38,6 +38,11 @@ import '@vue-flow/minimap/dist/style.css';
 const props = defineProps<{
   /** 当前流程的全部步骤(就地编辑;所有权归调用方) */
   steps: AgentFlowStep[];
+  /** 流程库全部流程 + 本流程 id(二维批次 6b:子流程选择与成环候选过滤) */
+  flows?: AgentFlowConfig[];
+  currentFlowId?: string;
+  /** 本流程是否启用(草稿值;只影响「反思步骤挂子流程」那条警示,见 StepEditor) */
+  flowEnabled?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -104,7 +109,11 @@ function onRelayout(): void {
         @node-click="onNodeClick"
       >
         <template #node-flowStep="nodeProps">
-          <AgentFlowNodeCard :data="nodeProps.data" :selected="nodeProps.selected" />
+          <AgentFlowNodeCard
+            :data="nodeProps.data"
+            :selected="nodeProps.selected"
+            :flows="props.flows"
+          />
         </template>
         <!-- 连线走自定义组件:路径中点带「×」断开按钮(隐式边由它自己判断不画) -->
         <template #edge-flowEdge="edgeProps">
@@ -161,7 +170,13 @@ function onRelayout(): void {
         </button>
         <button class="sv-btn danger" title="删除该步骤" @click="emit('remove', inspecting.id)">删除步骤</button>
       </div>
-      <AgentFlowStepEditor :step="inspecting" :steps="props.steps" />
+      <AgentFlowStepEditor
+        :step="inspecting"
+        :steps="props.steps"
+        :flows="props.flows"
+        :current-flow-id="props.currentFlowId ?? ''"
+        :flow-enabled="props.flowEnabled ?? true"
+      />
     </aside>
   </div>
 </template>

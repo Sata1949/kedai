@@ -234,6 +234,8 @@ export function useAgentFlow() {
       // 二维字段缺省 = 一维语义(不设上游 = 按列表顺序串联);上游由用户在编辑区勾选
       inputs: [],
       is_output: null,
+      // 静态子图(二维批次 6b):缺省不挂载 = 本节点自己生成;挂载由用户在编辑区选择
+      sub_flow_id: null,
     });
     editingStepId.value = id;
   }

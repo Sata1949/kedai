@@ -187,3 +187,135 @@ describe('AgentFlowSection 列表编辑未因抽取共用组件而回归', () =>
     expect(editor().text()).toContain('工具策略');
   });
 });
+
+// ===== 静态子图(二维批次 6b)=====
+
+/** 流程库:当前流程 f1(单步,带工具与提示词)+ 可被引用的子流程 f2 */
+function subFlowLib(): AgentFlowConfig[] {
+  return [
+    {
+      id: 'f1',
+      name: '主流程',
+      description: null,
+      enabled: true,
+      steps: [
+        {
+          id: 'a',
+          name: '起草',
+          enabled: true,
+          goal: 'g',
+          action: 'direct',
+          generates: true,
+          inputs: [],
+          tools: ['read'],
+          tool_choice: 'auto',
+          system_prompt: '本步指令',
+        },
+      ],
+    },
+    {
+      id: 'f2',
+      name: '摘要流程',
+      description: null,
+      enabled: true,
+      steps: [{ id: 'x', name: '压缩', enabled: true, goal: 'g', action: 'direct', generates: true, inputs: [] }],
+    },
+  ];
+}
+
+async function mountSubFlowSection(lib: AgentFlowConfig[] = subFlowLib()) {
+  const spy = vi.spyOn(globalThis, 'fetch');
+  spy.mockResolvedValueOnce(new Response(JSON.stringify({ token: 'test-secret' }), { status: 200 }));
+  spy.mockResolvedValueOnce(
+    new Response(
+      JSON.stringify({ ok: true, library: { current_flow_id: 'f1', flows: lib }, config: null }),
+      { status: 200 },
+    ),
+  );
+  const wrapper = mount(AgentFlowSection);
+  await flushPromises();
+  return wrapper;
+}
+
+/** 二维流程库:主流程 a → b(两步有显式上游)+ 可被引用的子流程 f2 */
+function subFlow2dLib(): AgentFlowConfig[] {
+  const lib = subFlowLib();
+  lib[0].steps = [
+    { ...lib[0].steps[0], id: 'a', name: '起草', inputs: [] },
+    { ...lib[0].steps[0], id: 'b', name: '扩写', inputs: ['a'], sub_flow_id: 'f2' },
+  ];
+  return lib;
+}
+
+describe('AgentFlowSection 静态子图(二维批次 6b)', () => {
+  it('挂载子流程写回草稿、收起被旁路的执行参数,清空后恢复', async () => {
+    const wrapper = await mountSubFlowSection();
+    await wrapper.findAll('button[title="编辑详情"]')[0].trigger('click');
+    await flushPromises();
+    const editor = () => wrapper.find('.flow-edit');
+
+    // 未挂载:子流程选择器在场,执行参数(档位/提示词/工具)都在
+    expect(editor().text()).toContain('不挂载');
+    expect(editor().text()).toContain('系统提示词');
+    expect(editor().text()).toContain('工具策略');
+    expect(editor().findAll('select').length).toBeGreaterThan(1);
+
+    // 挂载:子流程选择器写回草稿(下拉读回 f2),被旁路的执行参数整体让位
+    const subSelect = editor()
+      .findAll('select')
+      .find((s) => s.text().includes('不挂载'))!;
+    await subSelect.setValue('f2');
+    await flushPromises();
+    expect((subSelect.element as HTMLSelectElement).value).toBe('f2');
+    expect(editor().text()).toContain('本节点已挂载子流程「摘要流程」');
+    expect(editor().text()).toContain('清空子流程即恢复生效');
+    expect(editor().text()).not.toContain('系统提示词');
+    expect(editor().text()).not.toContain('工具策略');
+    // 挂载后被旁路的执行参数整块收起(按**字段名**断言:数 select 个数是脆的实现细节,
+    // 用户看到的是这些字段名。注意别用「档位/工具/提示词」这些词——它们会命中旁路说明
+    // 那句「目标/动作/档位/工具/提示词/温度都不参与执行」)
+    for (const label of ['系统提示词', '工具策略', '并行调用', '输出上限']) {
+      expect(editor().text()).not.toContain(label);
+    }
+    // 子流程下拉仍在(挂载状态要能改回去)
+    expect(editor().text()).toContain('不挂载');
+
+    // 清空:执行参数恢复(说明草稿里的配置没有被清掉)
+    await subSelect.setValue('');
+    await flushPromises();
+    expect(editor().text()).toContain('系统提示词');
+    expect(editor().text()).toContain('工具策略');
+  });
+
+  it('列表行摘要显示挂载关系(线性流程也给提示)', async () => {
+    const wrapper = await mountSubFlowSection();
+    // 线性单步流程原本没有任何二维摘要;挂载子流程后要有可读的摘要
+    expect(wrapper.text()).not.toContain('子流程:');
+    await wrapper.findAll('button[title="编辑详情"]')[0].trigger('click');
+    await flushPromises();
+    const subSelect = wrapper
+      .find('.flow-edit')
+      .findAll('select')
+      .find((s) => s.text().includes('不挂载'))!;
+    await subSelect.setValue('f2');
+    await flushPromises();
+    expect(wrapper.find('.flow-row').text()).toContain('子流程:摘要流程');
+  });
+
+  it('二维流程的行摘要:层级/上游之后接「· 子流程:X」', async () => {
+    const wrapper = await mountSubFlowSection(subFlow2dLib());
+    const rows = wrapper.findAll('.flow-row');
+    // 挂载点在下标 1(扩写):二维摘要里要能同时读到上游与子流程
+    const summary = rows[1].find('.flow-graph-note').text();
+    expect(summary).toContain('上游:起草');
+    expect(summary).toContain('· 子流程:摘要流程');
+  });
+
+  it('引用失效的行摘要点名「引用已失效」(与画布徽标/编辑器下拉同文案)', async () => {
+    const lib = subFlow2dLib();
+    lib[0].steps[1].sub_flow_id = 'gone';
+    const wrapper = await mountSubFlowSection(lib);
+    const summary = wrapper.findAll('.flow-row')[1].find('.flow-graph-note').text();
+    expect(summary).toContain('子流程:gone(引用已失效)');
+  });
+});

@@ -5,7 +5,7 @@
 // 提示与候选过滤,**权威校验仍在后端**(保存被拒时返回中文错误,由 flowMsg 展示)。
 // 纯函数便于单测(与 agentFlowTools 同一约定;画布/像素不在断言范围内)。
 
-import type { AgentFlowStep } from '../api/types';
+import type { AgentFlowConfig, AgentFlowStep } from '../api/types';
 import { stepToolMode } from './agentFlowTools';
 
 /** 步骤的上游 id 列表(缺省/脏数据 = 空数组) */
@@ -281,4 +281,241 @@ export function graphHint(steps: AgentFlowStep[], maxParallel?: number | null): 
   const output = outputStepName(steps);
   const tail = output ? `,成果取「${output}」的产出` : '';
   return `二维流程:同一层的节点可并行执行(最多 ${cap} 个同时跑)${tail}。`;
+}
+
+// ---------- 静态子图(二维批次 6b:节点挂载子流程) ----------
+
+/** 子流程嵌套深度上限(与后端 `agent_flow_service::MAX_SUB_FLOW_DEPTH` 同值) */
+export const MAX_SUB_FLOW_DEPTH = 3;
+
+/** 读回节点挂载的子流程 id(空串/脏数据 = 未挂载;与后端 `PlanStep::sub_flow_ref` 同口径) */
+export function subFlowId(s: Pick<AgentFlowStep, 'sub_flow_id'>): string | null {
+  const id = typeof s.sub_flow_id === 'string' ? s.sub_flow_id.trim() : '';
+  return id.length > 0 ? id : null;
+}
+
+/** 挂载/解除子流程(解除写回 null,序列化时省略该字段) */
+export function setSubFlowId(s: Pick<AgentFlowStep, 'sub_flow_id'>, id: string | null): void {
+  const trimmed = typeof id === 'string' ? id.trim() : '';
+  s.sub_flow_id = trimmed.length > 0 ? trimmed : null;
+}
+
+/** 流程的启用步骤(子流程引用只看启用步骤,与后端「停用步骤不参与引用链」同口径) */
+function activeSteps(flow: AgentFlowConfig): AgentFlowStep[] {
+  return (flow.steps ?? []).filter((s) => s.enabled);
+}
+
+/** 流程名(命名为空回退 id;展示与警示共用) */
+export function flowName(flows: AgentFlowConfig[], id: string): string {
+  const flow = flows.find((f) => f.id === id);
+  return flow?.name?.trim() || id;
+}
+
+/**
+ * 把 candidateId 挂为「本流程」的子流程是否会成环(与后端跨流程环校验同口径):
+ * 沿 candidateId 的引用链向下走,遇到 currentFlowId 即闭合成环(A→B→A)。
+ * candidateId === currentFlowId(自引用)恒为真。
+ */
+export function wouldCreateFlowCycle(
+  flows: AgentFlowConfig[],
+  currentFlowId: string,
+  candidateId: string,
+): boolean {
+  const byId = new Map(flows.map((f) => [f.id, f]));
+  const seen = new Set<string>();
+  const stack = [candidateId];
+  while (stack.length) {
+    const cur = stack.pop() as string;
+    if (cur === currentFlowId) return true;
+    if (seen.has(cur)) continue;
+    seen.add(cur);
+    const flow = byId.get(cur);
+    if (!flow) continue;
+    for (const s of activeSteps(flow)) {
+      const ref = subFlowId(s);
+      if (ref) stack.push(ref);
+    }
+  }
+  return false;
+}
+
+/**
+ * 可选子流程:排除自身与「引用它会成环」的流程(与 `upstreamCandidates` 同一取舍——
+ * 只滤掉**必然错**的候选,深度过深等「保存会被拒」的情况保留在候选里并给警示,
+ * 不静默丢弃用户的选择)。
+ */
+export function subFlowCandidates(
+  flows: AgentFlowConfig[],
+  currentFlowId: string,
+): AgentFlowConfig[] {
+  return flows.filter((f) => !!f.id && !wouldCreateFlowCycle(flows, currentFlowId, f.id));
+}
+
+/**
+ * 流程的嵌套层数(入口流程算 0 层;= 1 + 各子流程节点里最深的那条链)。
+ * 成环或引用悬空时返回 null(层数无法确定,由警示文案兜底)。
+ */
+export function flowNestingDepth(flows: AgentFlowConfig[], flowId: string): number | null {
+  const byId = new Map(flows.map((f) => [f.id, f]));
+  const visiting = new Set<string>();
+  const walk = (id: string): number | null => {
+    if (visiting.has(id)) return null;
+    const flow = byId.get(id);
+    if (!flow) return null;
+    visiting.add(id);
+    let depth = 0;
+    for (const s of activeSteps(flow)) {
+      const ref = subFlowId(s);
+      if (!ref) continue;
+      const child = walk(ref);
+      if (child === null) {
+        visiting.delete(id);
+        return null;
+      }
+      depth = Math.max(depth, 1 + child);
+    }
+    visiting.delete(id);
+    return depth;
+  };
+  return walk(flowId);
+}
+
+/**
+ * 库内**到达**该流程的最长挂载跳数(0 = 没人挂它;`null` = 成环/无法确定)。
+ *
+ * 与 {@link flowNestingDepth}(向下)相反,本函数沿**反向边**向上走:一个流程自己
+ * 可以是根,也可以是被别人挂的子流程——两者都要算进「这条链路有多长」。后端的全库
+ * 校验正是从**库里每个流程**起链(`validate_sub_flows`),只看向下的层数会漏掉
+ * 「本流程自身已被祖先挂了两层」的情形(前端一条警示都不给,保存却被拒)。
+ */
+export function flowAncestorDepth(flows: AgentFlowConfig[], flowId: string): number | null {
+  const byId = new Map(flows.map((f) => [f.id, f]));
+  if (!byId.has(flowId)) return null;
+  // 反向边:被引用方 → 引用它的流程(未保存、还没有 id 的流程不入图)
+  const parents = new Map<string, string[]>();
+  for (const flow of flows) {
+    if (!flow.id) continue;
+    const parentId = flow.id;
+    for (const s of activeSteps(flow)) {
+      const ref = subFlowId(s);
+      if (!ref) continue;
+      const list = parents.get(ref);
+      if (list) list.push(parentId);
+      else parents.set(ref, [parentId]);
+    }
+  }
+  const visiting = new Set<string>();
+  const memo = new Map<string, number>();
+  const walk = (id: string): number | null => {
+    const cached = memo.get(id);
+    if (cached !== undefined) return cached;
+    if (visiting.has(id)) return null; // 祖先侧成环:层数无法确定
+    visiting.add(id);
+    let depth = 0;
+    for (const p of parents.get(id) ?? []) {
+      const up = walk(p);
+      if (up === null) {
+        visiting.delete(id);
+        return null;
+      }
+      depth = Math.max(depth, 1 + up);
+    }
+    visiting.delete(id);
+    memo.set(id, depth);
+    return depth;
+  };
+  return walk(flowId);
+}
+
+/**
+ * 挂载子流程后的**执行旁路说明**(挂载时恒有;它是语义说明而非警示,故与
+ * `stepSubFlowWarnings` 分开)。与 6a 的档位同一纪律:配置保留、只是不参与执行。
+ * 未挂载(含空串)返回空串,便于模板直接渲染。
+ */
+export function subFlowMountNote(flows: AgentFlowConfig[], id: string | null): string {
+  if (!id) return '';
+  return (
+    `本节点已挂载子流程「${flowName(flows, id)}」:` +
+    '本节点的目标/动作/档位/工具/提示词/温度都不参与执行,子流程成果即本节点产出' +
+    '(配置保留,清空子流程即恢复生效)。'
+  );
+}
+
+/**
+ * 子流程引用警示(空数组 = 无警示)。覆盖「保存会被后端拒绝」的五类情形:
+ * 悬空引用、被引用流程结构不合法、跨流程环、嵌套超过 {@link MAX_SUB_FLOW_DEPTH} 层、
+ * 反思步骤挂子流程。
+ *
+ * 两个开关与后端同口径:
+ *  - **步骤停用** → 整组警示为空(后端 `sub_flow_edges` 只看启用步骤,停用步骤的引用
+ *    既不参与执行也不参与校验;编辑器另给一句「启用后才会被校验」的说明);
+ *  - **流程停用** → 只有「反思步骤挂子流程」这条不报(它由 `validate_flow` 判,而
+ *    `validate_flow` 对未启用流程直接放行);其余几类由 `validate_sub_flows` 判,
+ *    那条链路**遍历全库、不跳过未启用流程**,故照报。
+ */
+export function stepSubFlowWarnings(
+  flows: AgentFlowConfig[],
+  currentFlowId: string,
+  s: Pick<AgentFlowStep, 'sub_flow_id' | 'action' | 'enabled'>,
+  flowEnabled = true,
+): string[] {
+  if (!s.enabled) return [];
+  const id = subFlowId(s);
+  if (!id) return [];
+  const out: string[] = [];
+  if (flowEnabled && s.action === 'reflect') {
+    out.push('反思步骤不支持挂载子流程(保存会被拒绝):反思步骤不产出正文。');
+  }
+  const target = flows.find((f) => f.id === id);
+  if (!target) {
+    out.push(`引用的子流程不存在(保存会被拒绝):${id}`);
+    return out;
+  }
+  // 被引用流程按「启用态」复用同一套结构规则(后端 validate_sub_flows → validate_flow)
+  const active = activeSteps(target);
+  if (active.length === 0) {
+    out.push(
+      `被引用的流程「${flowName(flows, id)}」没有启用的步骤(保存会被拒绝):` +
+        '子流程至少要有一个启用步骤。',
+    );
+  } else if (!active.some(isGeneratingStep)) {
+    out.push(
+      `被引用的流程「${flowName(flows, id)}」缺少生成正文的步骤(保存会被拒绝):` +
+        '子流程需要至少一个「生成正文」的执行步骤。',
+    );
+  }
+  if (wouldCreateFlowCycle(flows, currentFlowId, id)) {
+    out.push(
+      `子流程引用成环(保存会被拒绝):「${flowName(flows, id)}」的引用链上已有本流程` +
+        '(嵌套调用会无限递归)。',
+    );
+  }
+  // 本条链路的层数 = 祖先层数 + 本流程到子流程这 1 跳 + 子流程自身的层数。
+  // 后端允许链上最多 MAX_SUB_FLOW_DEPTH + 1 个流程,等价于「边数 ≤ MAX_SUB_FLOW_DEPTH」;
+  // 任一段算不出(成环/悬空)就跳过深度警示——那是别的警示要覆盖的情形。
+  const child = flowNestingDepth(flows, id);
+  const ancestor = currentFlowId ? flowAncestorDepth(flows, currentFlowId) : null;
+  if (child !== null && ancestor !== null && ancestor + 1 + child > MAX_SUB_FLOW_DEPTH) {
+    const total = ancestor + 1 + child + 1;
+    out.push(
+      `子流程嵌套超过 ${MAX_SUB_FLOW_DEPTH} 层(保存会被拒绝):` +
+        `挂上「${flowName(flows, id)}」后本条链路共 ${total} 个流程。`,
+    );
+  }
+  return out;
+}
+
+/**
+ * 子流程节点的行内摘要(列表视图;未挂载返回空串)。
+ * 引用失效时点名「引用已失效」——与画布徽标、编辑器下拉三处同文案,
+ * 免得同一个状态在三处各说各话。
+ */
+export function subFlowSummary(
+  flows: AgentFlowConfig[],
+  s: Pick<AgentFlowStep, 'sub_flow_id'>,
+): string {
+  const id = subFlowId(s);
+  if (!id) return '';
+  const known = flows.some((f) => f.id === id);
+  return known ? `子流程:${flowName(flows, id)}` : `子流程:${id}(引用已失效)`;
 }
