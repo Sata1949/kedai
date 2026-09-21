@@ -736,7 +736,7 @@ export interface AgentFlowStep {
   /** 画布坐标(二维批次 3 画布用;列表视图不写) */
   x?: number | null;
   y?: number | null;
-  /** 节点档位:loose = 工具自循环(现状);strict 由后端拒绝(二维批次 6 才实现) */
+  /** 节点档位(二维批次 6a):loose/缺省 = 允许工具自循环;strict = 单次模型调用、不下发工具 */
   kind?: 'loose' | 'strict' | null;
 }
 

@@ -248,10 +248,23 @@ pub struct PlanStep {
     /// 画布纵坐标(同上)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub y: Option<f64>,
-    /// 节点档位:缺省/loose = 允许多轮工具自循环(现状语义);
-    /// strict = 单次模型调用(二维批次 6 实现,当前校验期直接拒绝,不允许静默无效)
+    /// 节点档位(二维批次 6a):缺省/`loose` = 允许多轮工具自循环;
+    /// `strict` = 单次模型调用、**不下发任何工具**(档位优先于 `tools` 配置,见 `is_strict`)。
+    /// 其余取值在保存期被 `validate_flow` 拒绝。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+}
+
+impl PlanStep {
+    /// 是否严格档(单次模型调用,不进入工具自循环)。
+    ///
+    /// **档位优先于 `tools`**:严格节点即使声明了工具也不下发——配置保留在流程里,
+    /// 切回宽松档即生效(编辑器按此提示用户)。任务侧 `task_engine/custom.rs::execute_node`
+    /// 与聊天侧 `agents/engine/messages/steps.rs::step_params_for` 共用本判定,
+    /// 避免同一语义出现两份实现导致两条执行路径行为分裂。
+    pub fn is_strict(&self) -> bool {
+        matches!(self.kind.as_deref(), Some("strict"))
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

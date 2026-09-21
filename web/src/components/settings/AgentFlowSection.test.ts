@@ -163,4 +163,27 @@ describe('AgentFlowSection 列表编辑未因抽取共用组件而回归', () =>
     await flushPromises();
     expect(editor().text()).not.toContain('系统提示词');
   });
+
+  it('档位选择:切到严格写回草稿并收起工具区,切回宽松恢复', async () => {
+    const wrapper = await mountSection();
+    await expandStep(wrapper, 0);
+    const editor = () => wrapper.find('.flow-edit');
+    // 宽松(缺省):工具区可见
+    expect(editor().text()).toContain('工具策略');
+
+    // 切到严格:档位写回草稿(下拉读回 strict),工具区让位给档位说明
+    const kindSelect = editor()
+      .findAll('select')
+      .find((s) => s.text().includes('严格'))!;
+    await kindSelect.setValue('strict');
+    await flushPromises();
+    expect((kindSelect.element as HTMLSelectElement).value).toBe('strict');
+    expect(editor().text()).not.toContain('工具策略');
+    expect(editor().text()).toContain('严格档:一次模型调用即完成');
+
+    // 切回宽松:工具区恢复(说明草稿里的工具配置没有被清掉)
+    await kindSelect.setValue('loose');
+    await flushPromises();
+    expect(editor().text()).toContain('工具策略');
+  });
 });

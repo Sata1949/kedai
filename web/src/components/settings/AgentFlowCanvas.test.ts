@@ -95,6 +95,18 @@ describe('AgentFlowCanvas 渲染', () => {
     expect(cardOf('停用步')?.text()).toContain('已停用');
   });
 
+  it('严格档节点在卡片上有档位标记(二维批次 6a)', async () => {
+    const wrapper = await mountCanvas([
+      step('a', [], { name: '原子步', kind: 'strict' }),
+      step('b', ['a'], { name: '循环步' }),
+    ]);
+    /** 按节点定位断言:整页文本会把别的节点的徽标也带进来 */
+    const cardOf = (name: string) =>
+      wrapper.findAll('.vue-flow__node').find((n) => n.text().includes(name));
+    expect(cardOf('原子步')?.text()).toContain('严格');
+    expect(cardOf('循环步')?.text()).not.toContain('严格');
+  });
+
   it('线性流程(存量一维)进来就是一条链:节点逐层下降且有连线', async () => {
     const wrapper = await mountCanvas([step('a'), step('b'), step('c')]);
     // 节点层级按执行器视角递增

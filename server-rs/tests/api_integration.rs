@@ -1755,6 +1755,98 @@ async fn custom_whitelist_dangerous_tool_executes_successfully() {
     reset_flow(app).await;
 }
 
+/// 二维批次 6a:严格档在聊天侧同样生效——`step_params_for` 短路后严格节点不下发工具,
+/// 模型即便索要工具也不会被**执行**(没有 tool 结果 → 没有第二轮)。
+///
+/// 两阶段**只改档位、其余完全相同**,故「严格阶段 0 个工具结果」不会被误读为钩子没生效:
+/// 宽松阶段的同一份配置必须跑满工具循环。用 [[tool_loop_text:…]] 让「跑到第几轮」可读:
+///   - 严格:停在「（第1轮说明）」(单次调用,工具请求被忽略);
+///   - 宽松:推进到「（模拟回复）工具循环已完成,最终回复。」(两轮工具 + 完成轮)。
+///
+/// 注:`tool_call` **事件**在单次调用路径也会透出(`process_chunk` 对每个工具调用块都发事件,
+/// 与是否执行无关,见 executor.rs),故记录**未执行**的判定点是 `tool_result` 与收尾正文。
+#[tokio::test]
+async fn custom_strict_step_does_not_dispatch_tools() {
+    let _guard = test_lock().await;
+    let app = test_app();
+    let args = r#"{"queries":[{"type":"character_prompt"}]}"#;
+    let flow_of = |kind: &str| {
+        json!({
+            "enabled": true,
+            "steps": [{
+                "id": "s1", "name": "原子步", "goal": "一句话产出",
+                "action": "direct", "generates": true, "enabled": true,
+                "tools": ["read"], "kind": kind
+            }]
+        })
+    };
+    let (_, char) = upload_character(app, "档位工具.json").await;
+    let cid = char["id"].as_str().unwrap().to_string();
+    let (_, session) = send_json(
+        app,
+        "POST",
+        "/api/chat/sessions",
+        json!({ "character_id": cid }),
+    )
+    .await;
+    let sid = session["id"].as_str().unwrap().to_string();
+    let message = format!("[[tool_loop_text:read|2 {args}]]");
+
+    // 阶段 1:严格档(声明了工具白名单也不下发 → 不会执行任何工具)
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/agent-flows",
+        json!({ "config": flow_of("strict") }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "严格档流程应可保存(二维批次 6a 放宽校验)");
+    let events = sse_events(app, &sid, &cid, &message, "custom").await;
+    assert_eq!(
+        events.iter().filter(|e| e["type"] == "tool_result").count(),
+        0,
+        "严格节点不应执行任何工具(模型索要的工具无人执行): {events:?}"
+    );
+    let finish = events
+        .iter()
+        .find(|e| e["type"] == "finish")
+        .expect("严格节点单次调用后应正常收尾");
+    assert_eq!(
+        finish["content"].as_str().unwrap_or(""),
+        "（第1轮说明）",
+        "严格节点正文应停在单次调用那一轮(若进了工具循环会推进到完成轮): {events:?}"
+    );
+
+    // 阶段 2:同一份流程切回宽松档 → 工具循环恢复(对照,证明钩子与工具配置确实生效)
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/agent-flows",
+        json!({ "config": flow_of("loose") }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "宽松档流程应可保存");
+    let events = sse_events(app, &sid, &cid, &message, "custom").await;
+    assert_eq!(
+        events.iter().filter(|e| e["type"] == "tool_result").count(),
+        2,
+        "宽松节点应执行两轮工具调用: {events:?}"
+    );
+    let finish = events
+        .iter()
+        .find(|e| e["type"] == "finish")
+        .expect("宽松节点应有 finish");
+    assert!(
+        finish["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains("工具循环已完成"),
+        "宽松节点应推进到工具循环完成轮: {events:?}"
+    );
+    // 恢复流程配置
+    reset_flow(app).await;
+}
+
 /// M3:顶层模型失败产生 Error 终态(带 code/retryable),而非「空内容 finish 伪装正常结束」。
 #[tokio::test]
 async fn upstream_model_error_emits_error_terminal_event() {

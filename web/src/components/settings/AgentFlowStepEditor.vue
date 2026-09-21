@@ -11,10 +11,14 @@ import {
   isLinearCompat,
   outputStepName,
   stepInputs,
+  stepKind,
+  stepKindWarnings,
+  setStepKind,
   toggleStepInput,
   toggleStepOutput,
   upstreamCandidates,
   upstreamWarnings,
+  type StepKind,
 } from '../../utils/agentFlowGraph';
 import {
   setStepToolMode,
@@ -94,6 +98,31 @@ const { step, steps } = props;
     >
       {{ warn }}
     </p>
+    <!-- 节点档位(二维批次 6a):严格 = 单次模型调用、不下发工具;宽松 = 允许多轮工具自循环 -->
+    <div class="sv-inp-row">
+      <label class="sv-inp-tag">档位</label>
+      <select
+        class="sv-select flow-select-wide"
+        :value="stepKind(step)"
+        title="严格 = 单次模型调用、不下发任何工具(适合压缩/抽取这类原子步骤);宽松 = 可与工具多轮循环"
+        @change="setStepKind(step, ($event.target as HTMLSelectElement).value as StepKind)"
+      >
+        <option value="loose">宽松（允许工具自循环）</option>
+        <option value="strict">严格（单次调用，不下发工具）</option>
+      </select>
+      <span class="sv-note">
+        {{ stepKind(step) === 'strict'
+          ? '严格档:一次模型调用即完成;已配置的工具不会下发(配置保留,切回宽松档即生效)。'
+          : '宽松档:模型可反复调用工具,直到给出正文。' }}
+      </span>
+    </div>
+    <p
+      v-for="(warn, wi) in stepKindWarnings(step)"
+      :key="`k${wi}`"
+      class="sv-note flow-tool-warn"
+    >
+      {{ warn }}
+    </p>
     <template v-if="step.action === 'direct'">
       <div class="sv-inp-row">
         <label class="sv-inp-tag">系统提示词</label>
@@ -105,59 +134,63 @@ const { step, steps } = props;
           spellcheck="false"
         />
       </div>
-      <div class="sv-inp-row">
-        <label class="sv-inp-tag">工具</label>
-        <select
-          class="sv-select flow-select-wide"
-          :value="stepToolMode(step)"
-          @change="setStepToolMode(step, ($event.target as HTMLSelectElement).value as StepToolMode)"
+      <!-- 工具区(二维批次 6a):严格档不下发工具,整区隐藏——草稿里的工具配置保留,
+           切回宽松档即恢复;已配置工具时的提示由上方 stepKindWarnings 给出 -->
+      <template v-if="stepKind(step) === 'loose'">
+        <div class="sv-inp-row">
+          <label class="sv-inp-tag">工具</label>
+          <select
+            class="sv-select flow-select-wide"
+            :value="stepToolMode(step)"
+            @change="setStepToolMode(step, ($event.target as HTMLSelectElement).value as StepToolMode)"
+          >
+            <option v-for="(label, val) in TOOL_MODE_LABELS" :key="val" :value="val">{{ label }}</option>
+          </select>
+          <input
+            v-if="stepToolMode(step) === 'list'"
+            class="sv-input"
+            :value="stepToolsText(step)"
+            placeholder="工具名,逗号分隔(如 read, search, calculator)"
+            spellcheck="false"
+            @change="setStepToolsText(step, ($event.target as HTMLInputElement).value)"
+          />
+        </div>
+        <!-- F8(2026-09-10 实跑修复):tools 三态语义易误配——「全部工具」会下发
+             全部已注册工具(含编排/写类),分析规划类步骤不应选它。
+             文案由 stepToolsWarnings 纯函数产出,便于单测覆盖 -->
+        <p
+          v-for="(warn, wi) in stepToolsWarnings(step)"
+          :key="wi"
+          class="sv-note flow-tool-warn"
         >
-          <option v-for="(label, val) in TOOL_MODE_LABELS" :key="val" :value="val">{{ label }}</option>
-        </select>
-        <input
-          v-if="stepToolMode(step) === 'list'"
-          class="sv-input"
-          :value="stepToolsText(step)"
-          placeholder="工具名,逗号分隔(如 read, search, calculator)"
-          spellcheck="false"
-          @change="setStepToolsText(step, ($event.target as HTMLInputElement).value)"
-        />
-      </div>
-      <!-- F8(2026-09-10 实跑修复):tools 三态语义易误配——「全部工具」会下发
-           全部已注册工具(含编排/写类),分析规划类步骤不应选它。
-           文案由 stepToolsWarnings 纯函数产出,便于单测覆盖 -->
-      <p
-        v-for="(warn, wi) in stepToolsWarnings(step)"
-        :key="wi"
-        class="sv-note flow-tool-warn"
-      >
-        {{ warn }}
-      </p>
-      <p v-if="stepToolMode(step) === 'none'" class="sv-note">
-        「不使用工具」= 本步骤纯生成,不下发任何工具。
-      </p>
-      <div class="sv-inp-row">
-        <label class="sv-inp-tag">工具策略</label>
-        <select v-model="step.tool_choice" class="sv-select flow-select-wide">
-          <option value="auto">auto（模型决定）</option>
-          <option value="none">none（禁止调用）</option>
-          <option value="required">required（至少调用一个）</option>
-          <option value="function">function（指定工具）</option>
-        </select>
-        <input
-          v-if="step.tool_choice === 'function'"
-          v-model="step.tool_choice_function"
-          class="sv-input"
-          placeholder="必须是本步骤有效工具名"
-          spellcheck="false"
-        />
-        <label class="sv-inp-tag">并行调用</label>
-        <select v-model="step.parallel_tool_calls" class="sv-select flow-select-wide">
-          <option :value="null">后端默认</option>
-          <option :value="true">允许</option>
-          <option :value="false">禁止</option>
-        </select>
-      </div>
+          {{ warn }}
+        </p>
+        <p v-if="stepToolMode(step) === 'none'" class="sv-note">
+          「不使用工具」= 本步骤纯生成,不下发任何工具。
+        </p>
+        <div class="sv-inp-row">
+          <label class="sv-inp-tag">工具策略</label>
+          <select v-model="step.tool_choice" class="sv-select flow-select-wide">
+            <option value="auto">auto（模型决定）</option>
+            <option value="none">none（禁止调用）</option>
+            <option value="required">required（至少调用一个）</option>
+            <option value="function">function（指定工具）</option>
+          </select>
+          <input
+            v-if="step.tool_choice === 'function'"
+            v-model="step.tool_choice_function"
+            class="sv-input"
+            placeholder="必须是本步骤有效工具名"
+            spellcheck="false"
+          />
+          <label class="sv-inp-tag">并行调用</label>
+          <select v-model="step.parallel_tool_calls" class="sv-select flow-select-wide">
+            <option :value="null">后端默认</option>
+            <option :value="true">允许</option>
+            <option :value="false">禁止</option>
+          </select>
+        </div>
+      </template>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">温度</label>
         <input v-model.number="step.temperature" type="number" min="0" max="2" step="0.1" class="sv-input inject-num" placeholder="沿用全局" />

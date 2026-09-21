@@ -434,7 +434,8 @@ async fn agent_flows_invalid_flow_400() {
         "resp: {resp}"
     );
 
-    // 节点档位 strict 尚未实现(二维批次 6)→ 400,不允许静默无效
+    // 节点档位(二维批次 6a):loose / strict 都有已实现的语义 → 放行(不再 400);
+    // 未知取值 → 400,不允许静默无效
     let (status, resp) = send_json(
         app,
         "PUT",
@@ -444,6 +445,22 @@ async fn agent_flows_invalid_flow_400() {
                 "enabled": true,
                 "steps": [
                     { "id": "a", "name": "生成", "goal": "生成正文", "action": "direct", "generates": true, "enabled": true, "kind": "strict" }
+                ]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "strict 档位应可保存: {resp}");
+
+    let (status, resp) = send_json(
+        app,
+        "PUT",
+        "/api/agent-flows",
+        json!({
+            "config": {
+                "enabled": true,
+                "steps": [
+                    { "id": "a", "name": "生成", "goal": "生成正文", "action": "direct", "generates": true, "enabled": true, "kind": "medium" }
                 ]
             }
         }),

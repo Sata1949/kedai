@@ -12,7 +12,10 @@ import {
   levelOf,
   outputStepName,
   removeStepReferences,
+  setStepKind,
   stepInputs,
+  stepKind,
+  stepKindWarnings,
   toggleStepInput,
   upstreamCandidates,
   upstreamSummary,
@@ -174,5 +177,47 @@ describe('agentFlowGraph 提示与成果节点', () => {
     expect(text).toContain('成果取「d」');
     // 未配置上限时按默认 2 提示
     expect(graphHint(diamond())).toContain('最多 2 个');
+  });
+});
+
+describe('agentFlowGraph 节点档位(二维批次 6a)', () => {
+  it('档位读写:缺省/脏数据按宽松,严格写回 strict,切回宽松省略字段', () => {
+    const s = step('a');
+    expect(stepKind(s)).toBe('loose');
+
+    setStepKind(s, 'strict');
+    expect(s.kind).toBe('strict');
+    expect(stepKind(s)).toBe('strict');
+
+    // 切回宽松写 null(序列化时省略该字段,与后端「缺省即宽松」一致)
+    setStepKind(s, 'loose');
+    expect(s.kind).toBeNull();
+    expect(stepKind(s)).toBe('loose');
+
+    // 缺省 / 显式 null 都按宽松(只有 'strict' 是严格;未知取值由后端保存期 400 拒绝,
+    // 此处只做读侧兜底,不给非法取值留测试入口——类型逃逸会撞 lint ratchet)
+    expect(stepKind({ kind: undefined })).toBe('loose');
+    expect(stepKind({ kind: null })).toBe('loose');
+  });
+
+  it('严格档对已配置工具给出「不会下发」警示,且不暗示配置已丢失', () => {
+    // 宽松档:无警示
+    expect(stepKindWarnings(step('a'))).toEqual([]);
+
+    // 严格 + 全部工具
+    const all = step('a', [], { kind: 'strict', tools: [] });
+    expect(stepKindWarnings(all)[0]).toContain('全部工具');
+    expect(stepKindWarnings(all)[0]).toContain('切回宽松档即生效');
+
+    // 严格 + 白名单:报出工具个数
+    const list = step('a', [], { kind: 'strict', tools: ['read', 'search'] });
+    expect(stepKindWarnings(list)[0]).toContain('2 个工具');
+
+    // 严格 + 不使用工具:无矛盾,不提示(这是严格档的常态配置)
+    expect(stepKindWarnings(step('a', [], { kind: 'strict', tools: null }))).toEqual([]);
+
+    // 严格 + 非 auto 工具策略:策略不会生效
+    const choice = step('a', [], { kind: 'strict', tools: null, tool_choice: 'required' });
+    expect(stepKindWarnings(choice)[0]).toContain('工具策略');
   });
 });

@@ -509,11 +509,12 @@ pub fn validate_flow(
         if s.action == "reflect" && s.system_prompt.is_some() {
             return Err(format!("步骤「{}」为反思步骤,不支持系统提示词", s.name));
         }
-        // 节点档位:strict(单次调用)属二维批次 6,当前直接拒绝——不允许静默无效
+        // 节点档位(二维批次 6a):缺省/loose = 工具自循环;strict = 单次调用、不下发工具。
+        // 只拒绝未知取值——允许的取值都有已实现的语义,不存在「静默无效」(裁定 15 差异 2 口径)
         if let Some(kind) = s.kind.as_deref() {
-            if kind != "loose" {
+            if kind != "loose" && kind != "strict" {
                 return Err(format!(
-                    "步骤「{}」的节点档位「{}」尚未实现(严格节点将在二维批次 6 落地)",
+                    "步骤「{}」的节点档位「{}」非法(仅支持 loose / strict)",
                     s.name, kind
                 ));
             }
@@ -931,7 +932,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_flow_rejects_broken_graph_and_strict_kind() {
+    fn validate_flow_rejects_broken_graph_and_unknown_kind() {
         // 环 → 400 文案点名节点
         let cyclic = flow(
             "cyclic",
@@ -944,24 +945,50 @@ mod tests {
         let dangling = flow("dangling", vec![graph_step("a", &["missing"])]);
         assert!(validate_flow(&dangling, &tools()).is_err());
 
-        // 节点档位:strict 尚未实现 → 明确报错而非静默无效;loose 放行
-        let strict = flow(
-            "strict",
+        // 节点档位(二维批次 6a):loose / strict 都有已实现的语义 → 放行
+        for kind in ["loose", "strict"] {
+            let ok = flow(
+                "kind",
+                vec![PlanStep {
+                    kind: Some(kind.into()),
+                    ..graph_step("a", &[])
+                }],
+            );
+            assert!(validate_flow(&ok, &tools()).is_ok(), "kind={kind}");
+        }
+
+        // 未知档位 → 明确报错而非静默无效
+        let unknown = flow(
+            "unknown-kind",
+            vec![PlanStep {
+                kind: Some("medium".into()),
+                ..graph_step("a", &[])
+            }],
+        );
+        let err = validate_flow(&unknown, &tools()).unwrap_err();
+        assert!(err.contains("档位"), "实际错误:{err}");
+    }
+
+    #[test]
+    fn strict_step_wins_over_tools_config() {
+        // 档位优先于 tools(二维批次 6a):严格节点配了工具也仍判为严格;
+        // 「严格 + 工具」允许保存(工具配置保留以便切回宽松档,执行期不下发)
+        let strict_with_tools = flow(
+            "strict-tools",
             vec![PlanStep {
                 kind: Some("strict".into()),
+                tools: Some(vec!["read".into()]),
                 ..graph_step("a", &[])
             }],
         );
-        let err = validate_flow(&strict, &tools()).unwrap_err();
-        assert!(err.contains("档位"), "实际错误:{err}");
-        let loose = flow(
-            "loose",
-            vec![PlanStep {
-                kind: Some("loose".into()),
-                ..graph_step("a", &[])
-            }],
-        );
-        assert!(validate_flow(&loose, &tools()).is_ok());
+        assert!(validate_flow(&strict_with_tools, &tools()).is_ok());
+        assert!(strict_with_tools.steps[0].is_strict());
+
+        // 缺省档位 = 宽松(存量流程语义不变)
+        let mut plain = graph_step("a", &[]);
+        assert!(!plain.is_strict());
+        plain.kind = Some("loose".into());
+        assert!(!plain.is_strict());
     }
 
     #[test]

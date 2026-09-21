@@ -6,6 +6,7 @@
 // 纯函数便于单测(与 agentFlowTools 同一约定;画布/像素不在断言范围内)。
 
 import type { AgentFlowStep } from '../api/types';
+import { stepToolMode } from './agentFlowTools';
 
 /** 步骤的上游 id 列表(缺省/脏数据 = 空数组) */
 export function stepInputs(s: Pick<AgentFlowStep, 'inputs'>): string[] {
@@ -147,6 +148,49 @@ export function toggleStepInput(step: AgentFlowStep, upstreamId: string): void {
 /** 切换「最终成果」标注(取消时写回 null,序列化时省略该字段) */
 export function toggleStepOutput(step: AgentFlowStep): void {
   step.is_output = step.is_output === true ? null : true;
+}
+
+// ---------- 节点档位(二维批次 6a:严格/宽松) ----------
+
+/** 节点档位:loose = 工具自循环(缺省语义);strict = 单次模型调用、不下发任何工具 */
+export type StepKind = 'loose' | 'strict';
+
+/** 读回档位:缺省/脏数据一律按 loose(与后端 `PlanStep::is_strict` 同口径) */
+export function stepKind(s: Pick<AgentFlowStep, 'kind'>): StepKind {
+  return s.kind === 'strict' ? 'strict' : 'loose';
+}
+
+/** 切换档位(loose 写回 null,序列化时省略该字段——与后端缺省即宽松的语义一致) */
+export function setStepKind(s: Pick<AgentFlowStep, 'kind'>, kind: StepKind): void {
+  s.kind = kind === 'strict' ? 'strict' : null;
+}
+
+/**
+ * 档位警示(空数组 = 无警示)。严格档**优先于**工具配置(后端同一口径:
+ * `PlanStep::is_strict` 在任务侧与聊天侧都短路掉工具下发),故这里只提示、**不清空**配置——
+ * 用户把档位切回宽松后原配置立即恢复生效。
+ */
+export function stepKindWarnings(
+  s: Pick<AgentFlowStep, 'kind' | 'tools' | 'tool_choice' | 'tool_choice_function'>,
+): string[] {
+  if (stepKind(s) !== 'strict') return [];
+  const out: string[] = [];
+  const mode = stepToolMode(s);
+  if (mode === 'all') {
+    out.push(
+      '严格档:本步配的是「全部工具」,但严格档不下发任何工具(配置保留,切回宽松档即生效)。',
+    );
+  } else if (mode === 'list') {
+    const count = (s.tools ?? []).filter((t) => typeof t === 'string' && t.trim().length > 0).length;
+    out.push(
+      `严格档:已配置的 ${count} 个工具不会下发(配置保留,切回宽松档即生效);严格档只有一次模型调用,靠工具完成的步骤请改回宽松档。`,
+    );
+  }
+  const choice = s.tool_choice ?? 'auto';
+  if (choice !== 'auto') {
+    out.push(`严格档:工具策略「${choice}」不下发工具,不会生效。`);
+  }
+  return out;
 }
 
 /** 步骤行的上游摘要(供列表视图一眼看出依赖关系) */

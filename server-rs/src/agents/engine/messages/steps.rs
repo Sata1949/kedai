@@ -48,6 +48,7 @@ pub(in crate::agents::engine) fn with_step_prompt(
 /// None=不使用工具、Some([])=全部工具、Some(list)=白名单。
 /// 白名单名称已在流程保存阶段校验,此处只按注册表解析实际定义。
 /// 白名单中的工具被视为已授权(白名单即授权语义),不再弹授权框。
+/// 严格档(二维批次 6a)优先于上述配置:恒不下发工具 —— 见下方短路分支。
 pub(in crate::agents::engine) fn step_params_for(
     params: &GenerationParams,
     step: &PlanStep,
@@ -59,6 +60,16 @@ pub(in crate::agents::engine) fn step_params_for(
     }
     if let Some(m) = step.max_tokens {
         p.max_tokens = m;
+    }
+    // 严格档 = 单次模型调用、不下发任何工具:清空工具相关参数后返回。
+    // run_loop 的 custom 分支据 `step_params.tools.is_empty()` 走 execute_generation(单次),
+    // 工具指南注入与 custom 变量回写也随之为空跳过 —— 任务侧 custom.rs 同一口径
+    // (档位优先于 tools 配置;配置保留以便切回宽松档,编辑器已按此提示)。
+    if step.is_strict() {
+        p.tools = Vec::new();
+        p.tool_choice = crate::models::types::ToolChoice::None;
+        p.parallel_tool_calls = None;
+        return p;
     }
     p.tools = match &step.tools {
         None => Vec::new(),

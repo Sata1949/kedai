@@ -281,6 +281,7 @@ impl CustomExecutor {
     /// 执行单个节点(组装消息 → 纯生成或工具循环),返回 (正文, usage DTO)。
     /// 调用追踪/usage 口径不变(phase=step,step_index=步骤在流程数组中的下标);
     /// 失败与中断都返回 Err,由调用方决定状态与降级。
+    /// 档位分支见 `PlanStep::is_strict`(二维批次 6a):严格档恒走单次调用。
     async fn execute_node(
         &self,
         ctx: &TaskRunContext,
@@ -293,9 +294,11 @@ impl CustomExecutor {
             LlmMessage::plain("system", &sys),
             LlmMessage::plain("user", &user),
         ];
-        match &step.tools {
-            // 无工具步骤:纯生成统一出口(generate_text 自带调用追踪落库)
-            None => {
+        // 档位优先于 tools 配置(二维批次 6a):严格档 = 单次调用、不下发任何工具——
+        // 即使步骤声明了工具也如此(配置保留在流程里,切回宽松档即生效;编辑器已按此提示)。
+        match (&step.tools, step.is_strict()) {
+            // 无工具步骤,或严格档:纯生成统一出口(generate_text 自带调用追踪落库)
+            (None, _) | (Some(_), true) => {
                 let settings = &ctx.settings;
                 self.svc
                     .generate_text(
@@ -315,10 +318,10 @@ impl CustomExecutor {
                         (text, out)
                     })
             }
-            // 工具步骤:run_tool_loop(白名单自动放行),调用追踪在步骤函数内落。
+            // 宽松档 + 工具步骤:run_tool_loop(白名单自动放行),调用追踪在步骤函数内落。
             // usage → TaskGenOutput 统一走 usage_as_output(批次 B.4 单一出处);
             // 该 out 仅作 record_usage 入参(text 不消费)
-            Some(list) => self
+            (Some(list), false) => self
                 .run_step_with_tools(ctx, index, step, &mut messages, list)
                 .await
                 .map(|(text, usage)| {

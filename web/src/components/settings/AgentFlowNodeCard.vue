@@ -30,6 +30,8 @@ const props = defineProps<{
       <span v-if="props.data.step.action === 'direct' && props.data.step.generates" class="flow-tag">
         生成
       </span>
+      <!-- 节点档位(二维批次 6a):严格节点单次调用、不下发工具 -->
+      <span v-if="props.data.step.kind === 'strict'" class="flow-tag kind">严格</span>
       <span v-if="props.data.isOutput" class="flow-tag out">成果</span>
       <span v-if="!props.data.step.enabled" class="flow-tag off">已停用</span>
     </div>
@@ -89,6 +91,11 @@ const props = defineProps<{
   border-color: var(--sv-pink-dark);
   color: var(--sv-pink-dark);
   font-weight: 700;
+}
+/* 档位徽标用虚线:与「停用」的实线灰、成果的粉线区分开,一眼看出是「模式」而非状态 */
+.flow-tag.kind {
+  border-style: dashed;
+  color: var(--sv-ink-dim);
 }
 .flow-tag.off {
   border-color: var(--sv-ink-faint);
