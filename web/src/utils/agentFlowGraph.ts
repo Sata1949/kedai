@@ -135,14 +135,31 @@ export function removeStepReferences(steps: AgentFlowStep[], removedId: string):
   }
 }
 
-/** 切换上游勾选(就地写入步骤的 inputs) */
-export function toggleStepInput(step: AgentFlowStep, upstreamId: string): void {
+/**
+ * 按流程数组下标排序上游 id(未知 id 排在末尾、相对顺序稳定——脏数据由后端校验与
+ * `upstreamWarnings` 兜底)。与后端多父合并顺序同一口径。
+ */
+export function orderUpstreams(steps: AgentFlowStep[], ids: string[]): string[] {
+  const index = new Map(steps.map((s, i) => [s.id, i]));
+  return [...ids].sort(
+    (a, b) =>
+      (index.get(a) ?? Number.MAX_SAFE_INTEGER) - (index.get(b) ?? Number.MAX_SAFE_INTEGER),
+  );
+}
+
+/**
+ * 切换上游勾选(就地写入步骤的 inputs)。
+ *
+ * **归一化:写入后按流程数组下标升序排序** —— 后端多父合并按「父节点在数组中的下标升序」
+ * 拼接上游产出,勾选顺序与它无关;若这里不排序,列表摘要显示的顺序会与实际执行的拼接顺序
+ * 不一致(遗留 IFW-6,2026-09-21 修)。故需要 `steps` 才能定位下标。
+ */
+export function toggleStepInput(steps: AgentFlowStep[], step: AgentFlowStep, upstreamId: string): void {
   const now = stepInputs(step);
   const next = now.includes(upstreamId)
     ? now.filter((id) => id !== upstreamId)
     : [...now, upstreamId];
-  // 归一化:保持与流程数组同序(后端按下标升序合并,与勾选顺序无关,此处只是稳定展示)
-  step.inputs = next;
+  step.inputs = orderUpstreams(steps, next);
 }
 
 /** 切换「最终成果」标注(取消时写回 null,序列化时省略该字段) */

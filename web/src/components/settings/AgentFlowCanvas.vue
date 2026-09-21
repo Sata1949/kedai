@@ -24,6 +24,7 @@ import { Background } from '@vue-flow/background';
 import { Controls } from '@vue-flow/controls';
 import { MiniMap } from '@vue-flow/minimap';
 import AgentFlowNodeCard from './AgentFlowNodeCard.vue';
+import AgentFlowEdge from './AgentFlowEdge.vue';
 import AgentFlowStepEditor from './AgentFlowStepEditor.vue';
 import { useFlowCanvas } from '../../composables/useFlowCanvas';
 import { normalizeStepAction } from '../../utils/agentFlowTools';
@@ -105,13 +106,21 @@ function onRelayout(): void {
         <template #node-flowStep="nodeProps">
           <AgentFlowNodeCard :data="nodeProps.data" :selected="nodeProps.selected" />
         </template>
+        <!-- 连线走自定义组件:路径中点带「×」断开按钮(隐式边由它自己判断不画) -->
+        <template #edge-flowEdge="edgeProps">
+          <AgentFlowEdge
+            v-bind="edgeProps"
+            @disconnect="canvas.disconnect(edgeProps.source, edgeProps.target)"
+          />
+        </template>
         <Background :gap="16" :size="1" pattern-color="var(--sv-line-strong)" />
         <Controls :show-interactive="false" />
         <MiniMap pannable zoomable :node-color="'var(--sv-pink-light)'" />
       </VueFlow>
       <p class="sv-note">
         拖动节点调整位置;从节点<b>底部</b>圆点拖到另一个节点<b>顶部</b>圆点 = 把前者设为后者的上游;
-        点节点在右侧逐字段编辑。位置与连线都要点下方「保存执行流程」后才落盘。
+        点节点在右侧逐字段编辑;连线中点「×」断开该上游(线性串联的隐式边没有可断开的记录)。
+        位置与连线都要点下方「保存执行流程」后才落盘。
       </p>
     </div>
     <aside v-if="inspecting" class="flow-canvas-side">

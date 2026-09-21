@@ -95,6 +95,18 @@ describe('useFlowCanvas 节点与连线', () => {
     expect(canvas.nodes.value.map((n) => n.data.level)).toEqual([null, null]);
     expect(canvas.nodes.value).toHaveLength(2);
   });
+
+  it('边带画布组件类型与「是否隐式」标记(隐式链没有可断开的 inputs 记录)', () => {
+    const linear = draftOf([step('a'), step('b')]);
+    expect(
+      linear.canvas.edges.value.every((e) => e.type === 'flowEdge' && e.data.implicit),
+    ).toBe(true);
+
+    const twoDim = draftOf(diamond());
+    expect(
+      twoDim.canvas.edges.value.every((e) => e.type === 'flowEdge' && !e.data.implicit),
+    ).toBe(true);
+  });
 });
 
 describe('useFlowCanvas 连线拦截', () => {
@@ -145,6 +157,30 @@ describe('useFlowCanvas 连线拦截', () => {
     expect(draft.value.steps[2].inputs).toEqual(['b']);
     canvas.disconnect('a', 'c');
     expect(draft.value.steps[2].inputs).toEqual(['b']);
+  });
+
+  it('连到停用上游:允许连但当场说清「保存会被拒」(与列表视图同口径)', () => {
+    const { draft, canvas } = draftOf([step('a', [], { enabled: false }), step('b')]);
+    expect(canvas.connect('a', 'b')).toBe(true);
+    expect(draft.value.steps[1].inputs).toEqual(['a']);
+    expect(canvas.canvasMsg.value).toContain('已停用');
+    expect(canvas.canvasMsg.value).toContain('保存会被后端拒绝');
+  });
+
+  it('断开连线提示需保存;断掉最后一条上游时说明该步骤只用任务目标', () => {
+    const { draft, canvas } = draftOf(diamond());
+    canvas.disconnect('a', 'c');
+    expect(canvas.canvasMsg.value).toContain('点「保存执行流程」后生效');
+    canvas.disconnect('b', 'c');
+    expect(draft.value.steps[2].inputs).toEqual([]);
+    expect(canvas.canvasMsg.value).toContain('将只用任务目标');
+  });
+
+  it('线性隐式边不可断开:提示改串联关系要先显式设置上游', () => {
+    const { draft, canvas } = draftOf([step('a'), step('b')]);
+    canvas.disconnect('a', 'b');
+    expect(draft.value.steps[1].inputs).toEqual([]);
+    expect(canvas.canvasMsg.value).toContain('隐式串联');
   });
 });
 

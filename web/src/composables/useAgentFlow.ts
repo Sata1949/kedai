@@ -246,9 +246,10 @@ export function useAgentFlow() {
     if (editingStepId.value === id) editingStepId.value = null;
   }
 
-  /** 勾选/取消上游(就地写入步骤 inputs;候选过滤见 utils/agentFlowGraph) */
+  /** 勾选/取消上游(就地写入步骤 inputs;候选过滤见 utils/agentFlowGraph)。
+   *  归一化(按流程数组下标排序)需要全量步骤,故从草稿取 */
   function toggleStepInput(step: api.AgentFlowStep, upstreamId: string): void {
-    toggleStepInputUtil(step, upstreamId);
+    toggleStepInputUtil(flowDraft.value?.steps ?? [], step, upstreamId);
   }
 
   /** 切换「最终成果」标注(未勾选写回 null,序列化时省略该字段) */

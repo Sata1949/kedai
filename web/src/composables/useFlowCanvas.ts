@@ -13,6 +13,7 @@ import {
   effectiveInputIds,
   effectiveLevels,
   isLinearCompat,
+  orderUpstreams,
   outputStepId,
   stepInputs,
   wouldCreateCycle,
@@ -48,6 +49,13 @@ export interface FlowCanvasEdge {
   id: string;
   source: string;
   target: string;
+  /** 画布边类型名:渲染层据此挂自定义连线组件(路径 + 断开按钮) */
+  type: 'flowEdge';
+  /**
+   * 隐式边(线性兼容流程的串行链)。它没有对应的 `inputs` 记录,「断开」无从表达
+   * ——渲染层据此**不画断开按钮**(要改串联关系得先给步骤显式设置上游)。
+   */
+  data: { implicit: boolean };
 }
 
 export interface UseFlowCanvas {
@@ -111,11 +119,18 @@ export function useFlowCanvas(steps: () => AgentFlowStep[]): UseFlowCanvas {
   const edges = computed<FlowCanvasEdge[]>(() => {
     const list = steps();
     const known = new Set(list.map((s) => s.id));
+    const implicit = isLinearCompat(list);
     const out: FlowCanvasEdge[] = [];
     effectiveInputIds(list).forEach((ups, i) => {
       for (const up of ups) {
         if (!known.has(up)) continue;
-        out.push({ id: `${up}->${list[i].id}`, source: up, target: list[i].id });
+        out.push({
+          id: `${up}->${list[i].id}`,
+          source: up,
+          target: list[i].id,
+          type: 'flowEdge',
+          data: { implicit },
+        });
       }
     });
     return out;
@@ -141,22 +156,39 @@ export function useFlowCanvas(steps: () => AgentFlowStep[]): UseFlowCanvas {
       return false;
     }
     const wasLinear = isLinearCompat(list);
-    to.inputs = [...stepInputs(to), source];
+    // 写入顺序归一化为**流程数组下标序**:后端多父合并按下标升序拼接上游产出,
+    // 画布连线顺序与它无关——不归一化会让「画布上的边序」与「执行时的拼接顺序」不一致
+    // (与列表视图 IFW-6 同一口径,2026-09-21 一并修)。
+    to.inputs = orderUpstreams(list, [...stepInputs(to), source]);
     // 一维流程连上第一条边 = 语义分叉点:此后没勾上游的步骤不再是「上一步」而是源节点。
     // 不说清楚的话,用户会以为只是补了一条边。
-    canvasMsg.value = wasLinear
-      ? `已连接「${label(from)}」→「${label(to)}」。注意:流程已从「线性串联」变为二维流程,未设上游的步骤会变成源节点(只拿任务目标)。`
-      : `已连接「${label(from)}」→「${label(to)}」。`;
+    const linearNote = wasLinear
+      ? '注意:流程已从「线性串联」变为二维流程,未设上游的步骤会变成源节点(只拿任务目标)。'
+      : '';
+    // 停用上游与列表视图同口径(upstreamWarnings):能连上,但保存必被后端拒——故当场说清。
+    const offNote = from.enabled
+      ? ''
+      : `「${label(from)}」已停用,保存会被后端拒绝:请先启用它,或改用别的上游。`;
+    canvasMsg.value = `已连接「${label(from)}」→「${label(to)}」。${linearNote}${offNote}`;
     return true;
   }
 
   function disconnect(source: string, target: string): void {
-    const to = steps().find((s) => s.id === target);
+    const list = steps();
+    const from = list.find((s) => s.id === source);
+    const to = list.find((s) => s.id === target);
     if (!to) return;
     const kept = stepInputs(to).filter((id) => id !== source);
-    if (kept.length === stepInputs(to).length) return;
+    if (kept.length === stepInputs(to).length) {
+      canvasMsg.value = isLinearCompat(list)
+        ? // 隐式边(线性兼容流程的串行链)没有 inputs 记录:断开无从表达(渲染层不给按钮,此处兜底提示)
+          '线性流程的步骤是隐式串联的,这里没有可断开的显式上游;要改串联关系,请先给步骤显式设置上游。'
+        : `「${label(to)}」的上游里没有「${from ? label(from) : source}」,无需断开。`;
+      return;
+    }
     to.inputs = kept;
-    canvasMsg.value = `已断开「${label(to)}」与上游的连接。`;
+    const tail = kept.length === 0 ? '(该步骤现在没有上游了,将只用任务目标)' : '';
+    canvasMsg.value = `已断开「${from ? label(from) : source}」→「${label(to)}」的连接${tail}。点「保存执行流程」后生效。`;
   }
 
   function onNodeDragStop(id: string, at: FlowPoint): void {

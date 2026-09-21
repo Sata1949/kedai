@@ -11,22 +11,36 @@
 import { computed, defineAsyncComponent, onMounted, ref } from 'vue';
 import { useAgentFlow } from '../../composables/useAgentFlow';
 import { graphHint, isLinearCompat, upstreamSummary } from '../../utils/agentFlowGraph';
+import { loadFlowCanvas } from '../../utils/flowCanvasChunk';
 import AgentFlowStepEditor from './AgentFlowStepEditor.vue';
 
 // 画布重(@vue-flow 及其 d3/@vueuse 传递依赖),做成异步组件:切到画布视图才下载。
 // 与 lazyModal 同一纪律「失败自动重试一次」——静默失败在这里表现为一块空白画布,
-// 用户无从判断是加载慢还是坏了。
+// 用户无从判断是加载慢还是坏了。故第二次仍失败时**就地给出提示 + 重试入口**
+// (弹窗体系走 asyncModal 写全局错误条;画布是分区内的异步组件,就地提示更贴近出错位置)。
+const canvasLoadFailed = ref(false);
+/** 换 key 重建异步组件 = 让懒加载重新发起(切视图同理);失败兜底是刷新页面 */
+const canvasKey = ref(0);
+
 const AgentFlowCanvas = defineAsyncComponent({
-  loader: () => import('./AgentFlowCanvas.vue'),
+  // 懒加载入口在 utils/flowCanvasChunk(单独成模块 → 失败路径可测,见该文件注释)
+  loader: loadFlowCanvas,
   onError(error, retry, fail, attempts) {
     if (attempts <= 1) {
       retry();
       return;
     }
     console.error('[kedai] 流程画布加载失败', error);
+    canvasLoadFailed.value = true;
     fail();
   },
 });
+
+/** 画布加载失败后的手动重试 */
+function retryCanvasLoad(): void {
+  canvasLoadFailed.value = false;
+  canvasKey.value += 1;
+}
 
 withDefaults(defineProps<{
   /** 是否显示(embedded 模式按 activeSection 切换;standalone 恒 true) */
@@ -225,7 +239,12 @@ onMounted(async () => {
           <AgentFlowStepEditor v-if="editingStepId === step.id" :step="step" :steps="flowSteps" />
         </div>
       </template>
-      <AgentFlowCanvas v-else :steps="flowSteps" @remove="removeStep" />
+      <AgentFlowCanvas v-else :key="canvasKey" :steps="flowSteps" @remove="removeStep" />
+      <p v-if="flowView === 'canvas' && canvasLoadFailed" class="sv-note flow-tool-warn">
+        画布组件加载失败(多为前端已更新、页面缓存的旧 chunk 失效)。
+        可点右侧「重试」;若仍失败,请刷新页面,或先用列表视图编辑(功能一致)。
+        <button class="sv-btn ghost" @click="retryCanvasLoad">重试</button>
+      </p>
       <div class="sv-btn-row">
         <button v-if="flowDraft" class="sv-btn ghost sv-btn-fill" @click="addStep">+ 新增步骤</button>
       </div>

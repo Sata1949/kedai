@@ -116,11 +116,21 @@ describe('agentFlowGraph 上游候选与成环拦截', () => {
   });
 
   it('勾选上游就地写入 inputs,可反复切换', () => {
-    const c = step('c', ['a']);
-    toggleStepInput(c, 'a');
+    const steps = [step('a'), step('b'), step('c', ['a'])];
+    const c = steps[2];
+    toggleStepInput(steps, c, 'a');
     expect(stepInputs(c)).toEqual([]);
-    toggleStepInput(c, 'b');
+    toggleStepInput(steps, c, 'b');
     expect(stepInputs(c)).toEqual(['b']);
+  });
+
+  it('上游顺序归一化为流程数组下标序(与后端多父合并顺序同口径,IFW-6)', () => {
+    // 数组顺序 a、b、c;先勾 c 再勾 a —— 结果必须是 ['a','c'],不能是勾选顺序 ['c','a']
+    const steps = [step('a'), step('b'), step('c', ['b'])];
+    toggleStepInput(steps, steps[2], 'a');
+    expect(stepInputs(steps[2])).toEqual(['a', 'b']);
+    // 摘要显示顺序据此与执行时的拼接顺序一致(此前是勾选顺序,属误导)
+    expect(upstreamSummary(steps, steps[2])).toContain('上游:a、b');
   });
 
   it('删除步骤后清理其它步骤对它的悬空引用', () => {

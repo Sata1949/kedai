@@ -63,7 +63,7 @@ const { step, steps } = props;
           <input
             type="checkbox"
             :checked="stepInputs(step).includes(cand.id)"
-            @change="toggleStepInput(step, cand.id)"
+            @change="toggleStepInput(steps, step, cand.id)"
           />
           <span>{{ cand.name || cand.id }}{{ cand.enabled ? '' : '(已停用)' }}</span>
         </label>

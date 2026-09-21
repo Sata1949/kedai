@@ -117,6 +117,23 @@ describe('AgentFlowCanvas 渲染', () => {
 });
 
 describe('AgentFlowCanvas 交互', () => {
+  it('连线中点的「×」断开该上游;线性流程的隐式边不给按钮', async () => {
+    // 只留一条显式边(多条边会依赖渲染顺序定位,这里要确定性):a → c
+    const steps = [step('a'), step('b'), step('c', ['a'])];
+    const wrapper = await mountCanvas(steps);
+    const buttons = wrapper.findAll('.flow-edge-del');
+    expect(buttons).toHaveLength(1);
+    await buttons[0].trigger('click');
+    await flushPromises();
+    expect(steps[2].inputs).toEqual([]);
+    expect(wrapper.text()).toContain('已断开');
+
+    // 线性流程只有隐式串联边:没有可断开的 inputs 记录 → 不画按钮
+    const linear = await mountCanvas([step('a'), step('b')]);
+    expect(linear.findAll('.vue-flow__edge')).toHaveLength(1);
+    expect(linear.findAll('.flow-edge-del')).toHaveLength(0);
+  });
+
   it('点击节点在右侧打开 Inspector(逐字段编辑同一份草稿)', async () => {
     const steps = diamond();
     const wrapper = await mountCanvas(steps);
@@ -135,7 +152,8 @@ describe('AgentFlowCanvas 交互', () => {
     const steps = diamond();
     const wrapper = await mountCanvas(steps);
     await connect(wrapper, 'b', 'd');
-    expect(steps[3].inputs).toEqual(['c', 'b']);
+    // 归一化为流程数组下标序:b(下标 1)排在 c(下标 2)前,与后端多父合并顺序一致
+    expect(steps[3].inputs).toEqual(['b', 'c']);
     expect(wrapper.text()).toContain('已连接');
   });
 
