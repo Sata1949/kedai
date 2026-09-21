@@ -166,6 +166,21 @@ impl TaskFlowAccess for TaskService {
         guard.validate(&cfg)?;
         Ok(cfg)
     }
+
+    fn flow_by_id(&self, id: &str) -> Result<AgentFlowConfig, String> {
+        // 静态子图引用解析(二维批次 6b):与 current_flow 同一锁纪律(取完快照即释放)
+        let flow = TaskService::agent_flow(self);
+        let guard = flow.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = guard
+            .flow_by_id(id)
+            .cloned()
+            .ok_or_else(|| format!("子流程不存在:{}", id))?;
+        // 被引用流程按「启用态」校验结构(见 TaskFlowAccess::flow_by_id 文档)
+        let mut as_enabled = cfg.clone();
+        as_enabled.enabled = true;
+        guard.validate(&as_enabled)?;
+        Ok(cfg)
+    }
 }
 
 // ==================== TaskEvents:任务事件发射 ====================

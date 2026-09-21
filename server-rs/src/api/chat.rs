@@ -202,7 +202,17 @@ pub async fn send(
         {
             return err_status(format!("执行流程配置无效:{e}"), StatusCode::BAD_REQUEST);
         }
-        flow_steps = flow.steps.into_iter().filter(|s| s.enabled).collect();
+        flow_steps = match state
+            .flow
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .chat_flow_steps(&flow)
+        {
+            Ok(steps) => steps,
+            Err(e) => {
+                return err_status(format!("执行流程配置无效:{e}"), StatusCode::BAD_REQUEST);
+            }
+        };
     }
 
     const MAX_GENERATION_TOKENS: u32 = 65_536;

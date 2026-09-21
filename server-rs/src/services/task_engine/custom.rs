@@ -13,6 +13,12 @@
 // `node_user_message` 按上游产出合成。全部步骤 `inputs` 为空 = 线性兼容模式:
 // 拓扑序等于数组顺序、单上游格式与旧版逐字节一致,存量一维流程零迁移。
 // 批次 2 起同一批就绪节点走并行调度(上限 max_parallel_nodes)。
+//
+// 二维批次 6b(静态子图):节点可挂载 `sub_flow_id` 指向库内另一流程,该节点不自己
+// 发起模型调用,而是把被引用流程当作**子图**跑一遍,子图成果即本节点产出。调度器因此
+// 抽成 `run_graph`(入口流程与子图共用同一份实现,含并行与 plan 单写者纪律)。
+// 记账口径(D6):子图节点的调用行 phase = `subflow.<父节点下标链>`,step_index 为
+// 节点在**本层**的下标——phase 不含冒号(前端流式缓冲 key 以第一个冒号切分)。
 use super::context::TaskRunContext;
 use super::executor::ModeExecutor;
 use super::sink;
@@ -23,7 +29,9 @@ use crate::models::types::{
     GenerationParams, LlmMessage, PlanStep, TaskStatus, TaskStep, TaskStepStatus, TokenUsage,
     ToolChoice, ToolContext,
 };
-use crate::services::agent_flow_service::{effective_max_parallel, output_index, resolve_graph};
+use crate::services::agent_flow_service::{
+    effective_max_parallel, flow_label, output_index, resolve_graph, MAX_SUB_FLOW_DEPTH,
+};
 use crate::services::prompt_kit::untrusted_boundary;
 use crate::services::task_core::prompt_consts::{
     CUSTOM_REFLECT_PROMPT, EXECUTOR_PROMPT, TASK_INTERNAL_PLAN_PROMPT,
@@ -45,6 +53,76 @@ pub(crate) struct CustomExecutor {
 /// 在飞节点的执行 future:节点在流程数组中的下标 + 执行结果
 /// (Err 为该节点的中文错误文本,由调度器落回 plan 行)
 type NodeFuture<'a> = BoxFuture<'a, (usize, Result<(String, TaskGenOutput), String>)>;
+
+/// 一层图的执行上下文(入口流程与静态子图共用;二维批次 6b 抽取调度器时的参数束)。
+struct GraphCtx<'a> {
+    /// 本层节点(下标对齐)
+    steps: &'a [PlanStep],
+    /// 本层有效上游(下标对齐;由 `effective_inputs` 解析)
+    inputs: &'a [Vec<usize>],
+    /// 本层**源节点**(无上游)的 user 消息:入口流程是任务目标,子图是挂载它的
+    /// 那个节点收到的输入消息(上游产出因此照常流进子图,子图节点不是孤岛)
+    source_message: &'a str,
+    /// 本层节点调用的记账 phase(`step` = 入口流程;`subflow.<路径>` = 子图节点)
+    phase: &'a str,
+    /// 本层节点在调用链中的**下标路径**(入口为空串;子图为其父节点下标链)
+    path: &'a str,
+    /// 已进入的子图层数(入口 0;每次进入子图 +1)
+    depth: usize,
+    /// 子流程 id 调用链(运行期环守卫,与保存期 `validate_sub_flows` 同判定)
+    chain: &'a [String],
+    /// 本层并行上限(各层取**自己流程**的 max_parallel_nodes)
+    max_parallel: usize,
+}
+
+/// 一层图跑完的汇总。
+struct GraphOutcome {
+    /// 各节点产出(下标对齐 steps;失败或空产出留空串,下游据此拿到空段)
+    outputs: Vec<String>,
+    /// 本层所有调用的 usage 合计
+    total: TokenUsage,
+    /// 是否出现过失败/空产出节点(成果已产出 → 任务 partial)
+    any_error: bool,
+}
+
+/// 本层节点调用的记账 phase:入口流程 = `step`,子图 = `subflow.<父节点下标链>`。
+/// `path` 为空即入口流程。
+fn phase_for_path(path: &str) -> String {
+    if path.is_empty() {
+        "step".to_string()
+    } else {
+        format!("subflow.{}", path)
+    }
+}
+
+/// 进入子图后的路径:入口层(空路径)记父节点下标,深层在其后追加。
+fn child_path(path: &str, index: usize) -> String {
+    if path.is_empty() {
+        index.to_string()
+    } else {
+        format!("{}.{}", path, index)
+    }
+}
+
+/// 成果选拔(入口流程与子图共用,口径自二维批次 1 起未变):成果节点产出优先;
+/// 为空则按**数组下标降序**回退到上一个非空生成产出——线性流程语义就是「末个有效
+/// 生成步」,且该兜底与执行顺序无关(并行下成果节点失败时不会退化成「谁先跑完算谁」)。
+fn select_draft(steps: &[PlanStep], output_idx: Option<usize>, outputs: &[String]) -> String {
+    output_idx
+        .map(|i| outputs[i].clone())
+        .filter(|text| !text.is_empty())
+        .or_else(|| {
+            (0..steps.len())
+                .rev()
+                .find(|&i| {
+                    steps[i].action == "direct"
+                        && steps[i].generates == Some(true)
+                        && !outputs[i].is_empty()
+                })
+                .map(|i| outputs[i].clone())
+        })
+        .unwrap_or_default()
+}
 
 impl CustomExecutor {
     pub(crate) fn new(svc: Arc<dyn TaskBackend>, engine: Arc<AgentEngine>) -> Self {
@@ -82,8 +160,8 @@ impl CustomExecutor {
     }
 
     /// 带工具步骤:run_tool_loop + 步骤白名单;返回 (正文, 整轮 usage)。
-    /// 调用追踪在本函数内落(phase=step;对齐 generate_text 的统一出口语义:
-    /// 成功/空/中断/错误均落一行 task_llm_calls)。
+    /// 调用追踪在本函数内落(phase 由调用方给出:`step` 或 `subflow.<路径>`;
+    /// 对齐 generate_text 的统一出口语义:成功/空/中断/错误均落一行 task_llm_calls)。
     async fn run_step_with_tools(
         &self,
         ctx: &TaskRunContext,
@@ -91,6 +169,7 @@ impl CustomExecutor {
         step: &PlanStep,
         messages: &mut Vec<LlmMessage>,
         whitelist: &[String],
+        phase: &str,
     ) -> Result<(String, TokenUsage), String> {
         let settings = &ctx.settings;
         // 任务模式工具策略:先按策略编译候选集(默认拒绝危险工具、剔除元工具),
@@ -133,7 +212,10 @@ impl CustomExecutor {
             tool_choice,
             parallel_tool_calls: step.parallel_tool_calls,
         };
-        let session_id = format!("task:{}:step:{}", ctx.task_id, step_index + 1);
+        // 会话 id 保留既有形状 `task:{任务 id}:step:{下标}`(入口流程逐字节不变);
+        // 子图用 phase 段替换 `step`,避免同一下标在父子两层撞 key(取值仍可用
+        // split(':')[1] 反解任务 id)
+        let session_id = format!("task:{}:{}:{}", ctx.task_id, phase, step_index + 1);
         let mut state_machine = StateMachine::new(&session_id);
         let run_id = Uuid::new_v4().to_string();
         let (flag, _flag_rx) = AbortFlag::new();
@@ -143,12 +225,12 @@ impl CustomExecutor {
             agent_depth: 0,
         };
         // 事件桥(批次 R4 携 phase/step_index):custom 工具步骤的调用追踪口径为
-        // phase=step + 本步骤下标(与下方 record_llm_call 一致)
+        // phase + 本步骤下标(与下方 record_llm_call 一致;子图为 subflow.<路径>)
         let (tx, drain) = sink::spawn(
             self.svc.clone(),
             ctx.task_id.clone(),
             "主 agent",
-            "step",
+            phase,
             Some(step_index),
         );
         let mut total_usage = TokenUsage::default();
@@ -180,7 +262,7 @@ impl CustomExecutor {
                 // (TaskService::record_self_heals:补落被截断行 + 补 usage)。
                 self.svc.record_self_heals(
                     &ctx.task_id,
-                    "step",
+                    phase,
                     Some(step_index),
                     &model,
                     messages,
@@ -200,7 +282,7 @@ impl CustomExecutor {
                 };
                 self.svc.record_llm_call(
                     &ctx.task_id,
-                    "step",
+                    phase,
                     Some(step_index),
                     &model,
                     messages,
@@ -214,7 +296,7 @@ impl CustomExecutor {
             Ok(_) => {
                 self.svc.record_llm_call(
                     &ctx.task_id,
-                    "step",
+                    phase,
                     Some(step_index),
                     &model,
                     messages,
@@ -231,7 +313,7 @@ impl CustomExecutor {
                 let msg = e.message().to_string();
                 self.svc.record_llm_call(
                     &ctx.task_id,
-                    "step",
+                    phase,
                     Some(step_index),
                     &model,
                     messages,
@@ -246,12 +328,14 @@ impl CustomExecutor {
     }
 
     /// 节点 user 消息:任务目标 + 上游产出(二维批次 1)。
-    ///  - 无上游(源节点/首步):只给任务目标(与旧版首步逐字节一致);
+    ///  - 无上游(源节点/首步):给**本层源消息**——入口流程即任务目标(与旧版首步逐字节
+    ///    一致),子图则是「挂载它的那个节点收到的输入消息」(上游产出因此流进子图);
     ///  - 单上游:沿用旧版格式「上一步「X」产出:」——线性兼容流程逐字节不变;
     ///  - 多上游:D3 按父节点**数组下标升序**逐段拼接(顺序确定 → 同一流程两次运行可复现)。
     ///
     ///    上游失败或产出为空时该段留空(不写占位词,与旧版清空 prev_output 的语义一致)。
     fn node_user_message(
+        source_message: &str,
         goal: &str,
         steps: &[PlanStep],
         inputs: &[Vec<usize>],
@@ -259,7 +343,7 @@ impl CustomExecutor {
         outputs: &[String],
     ) -> String {
         match inputs[index].as_slice() {
-            [] => goal.to_string(),
+            [] => source_message.to_string(),
             [parent] => format!(
                 "任务目标:\n{}\n\n上一步「{}」产出:\n{}",
                 goal, steps[*parent].name, outputs[*parent]
@@ -278,17 +362,23 @@ impl CustomExecutor {
         }
     }
 
-    /// 执行单个节点(组装消息 → 纯生成或工具循环),返回 (正文, usage DTO)。
-    /// 调用追踪/usage 口径不变(phase=step,step_index=步骤在流程数组中的下标);
-    /// 失败与中断都返回 Err,由调用方决定状态与降级。
+    /// 执行单个节点:挂载了子流程 → 跑子图(二维批次 6b);否则组装消息走纯生成 / 工具循环。
+    /// 调用追踪口径不变(phase 由 `g` 给出、step_index = 步骤在**本层**数组中的下标);
+    /// 失败与中断都返回 Err,由调度器决定状态与降级。
     /// 档位分支见 `PlanStep::is_strict`(二维批次 6a):严格档恒走单次调用。
     async fn execute_node(
         &self,
         ctx: &TaskRunContext,
+        g: &GraphCtx<'_>,
         index: usize,
         step: &PlanStep,
         user: String,
     ) -> Result<(String, TaskGenOutput), String> {
+        // 子流程节点不自己发起模型调用(与 6a「档位优先于 tools」同一纪律:
+        // goal/action/kind/tools/system_prompt/temperature/max_tokens 全被旁路但保留配置)
+        if let Some(sub_id) = step.sub_flow_ref() {
+            return self.run_sub_flow(ctx, g, index, step, sub_id, user).await;
+        }
         let sys = self.build_step_system(step, &ctx.goal);
         let mut messages = vec![
             LlmMessage::plain("system", &sys),
@@ -303,7 +393,7 @@ impl CustomExecutor {
                 self.svc
                     .generate_text(
                         &ctx.task_id,
-                        "step",
+                        g.phase,
                         Some(index),
                         messages,
                         Vec::new(),
@@ -322,13 +412,232 @@ impl CustomExecutor {
             // usage → TaskGenOutput 统一走 usage_as_output(批次 B.4 单一出处);
             // 该 out 仅作 record_usage 入参(text 不消费)
             (Some(list), false) => self
-                .run_step_with_tools(ctx, index, step, &mut messages, list)
+                .run_step_with_tools(ctx, index, step, &mut messages, list, g.phase)
                 .await
                 .map(|(text, usage)| {
                     let out = super::executor::usage_as_output(&usage);
                     (text, out)
                 }),
         }
+    }
+
+    /// 跑一个静态子图(二维批次 6b):被引用流程当作独立的一层图执行,
+    /// **子图成果即本节点产出**(下游拿到的就是子图成果,与普通节点无差别)。
+    ///
+    /// 守卫(保存期 `validate_sub_flows` 的运行期兜底——防外部手改配置/导入的脏数据):
+    ///  - 环:被引用流程已在当前调用链上 → 拒绝(A→B→A 会在运行期无限递归);
+    ///  - 深度:再嵌一层会超过 [`MAX_SUB_FLOW_DEPTH`] → 拒绝(每层把该节点的调用
+    ///    次数乘上子图节点数,深度是成本闸门);
+    ///  - 结构:启用步骤非空、图可解析(图内环由 `resolve_graph` 拦下)。
+    ///
+    /// 记账:子图节点各自落调用行 + usage 行(phase = `subflow.<路径>`),本节点**不落**;
+    /// 返回的 usage 只进 GraphOutcome 汇总(供完成日志),由调度器识别子流程节点跳过
+    /// `record_usage`——否则同一批 token 会被父子两层各记一次,破坏
+    /// 「`/calls` 各行求和 == 详情 usage_total」不变量。
+    async fn run_sub_flow(
+        &self,
+        ctx: &TaskRunContext,
+        g: &GraphCtx<'_>,
+        index: usize,
+        step: &PlanStep,
+        sub_id: &str,
+        incoming: String,
+    ) -> Result<(String, TaskGenOutput), String> {
+        let cfg = self.svc.flow_by_id(sub_id)?;
+        if g.chain.iter().any(|id| id == sub_id) {
+            return Err(format!(
+                "子流程调用链存在环:「{}」在当前调用链上已出现过,拒绝再次进入",
+                flow_label(&cfg)
+            ));
+        }
+        if g.depth + 1 > MAX_SUB_FLOW_DEPTH {
+            return Err(format!(
+                "子流程嵌套超过 {} 层:步骤「{}」再嵌一层会超出上限",
+                MAX_SUB_FLOW_DEPTH, step.name
+            ));
+        }
+        let steps: Vec<PlanStep> = cfg.steps.iter().filter(|s| s.enabled).cloned().collect();
+        if steps.is_empty() {
+            return Err(format!("子流程「{}」没有启用的步骤", flow_label(&cfg)));
+        }
+        let graph = resolve_graph(&steps)?;
+        let output_idx = output_index(&steps, &graph.inputs);
+        let path = child_path(g.path, index);
+        let phase = phase_for_path(&path);
+        let mut chain: Vec<String> = g.chain.to_vec();
+        chain.push(sub_id.to_string());
+        let inner = GraphCtx {
+            steps: &steps,
+            inputs: &graph.inputs,
+            source_message: &incoming,
+            phase: &phase,
+            path: &path,
+            depth: g.depth + 1,
+            chain: &chain,
+            max_parallel: effective_max_parallel(&cfg),
+        };
+        // 子图不写 plan:plan 是**外层**流程的节点列表,嵌套节点没有对应行(IFW-5)。
+        // 进度体现在挂载节点那一行的 running 态与调用追踪的 subflow.<路径> 行
+        let outcome = self.run_graph(ctx, &inner, None).await?;
+        let draft = select_draft(&steps, output_idx, &outcome.outputs);
+        if draft.is_empty() {
+            return Err(format!(
+                "子流程「{}」未产出任何成果(生成步骤全部失败或为空)",
+                flow_label(&cfg)
+            ));
+        }
+        Ok((draft, super::executor::usage_as_output(&outcome.total)))
+    }
+
+    /// 执行一层图(调度语义见 `run_graph_inner`)。
+    ///
+    /// 返回**装箱** future:入口流程与静态子图共用同一调度器,于是存在
+    /// 「节点 future → execute_node → run_sub_flow → run_graph」的递归 async 调用。
+    /// 不装箱时 rustc 无法为这个自指的递归 future 推导 `Send`(节点 future 装在
+    /// `FuturesUnordered` 里并发跑,必须 Send);装箱把递归边界擦除成
+    /// `dyn Future + Send`,类型即可有限展开。
+    fn run_graph<'a>(
+        &'a self,
+        ctx: &'a TaskRunContext,
+        g: &'a GraphCtx<'a>,
+        plan: Option<&'a mut Vec<TaskStep>>,
+    ) -> BoxFuture<'a, Result<GraphOutcome, String>> {
+        Box::pin(self.run_graph_inner(ctx, g, plan))
+    }
+
+    /// 一层图的调度循环:就绪判定 = 上游计数 + 后继表,就绪节点按下标升序取
+    /// (线性流程顺序与旧版一致)。
+    ///
+    /// plan 写入纪律(IFW-4):**调度器是 plan 的唯一写者**,节点执行体只回传文本、
+    /// 不持有 plan 快照。多节点并发完成时因此不存在「各自读旧快照再整列覆写」的丢更新
+    /// (那是把 plan 交给各节点自行读-改-写才会有的缺陷)。这条纪律由
+    /// tests/task_custom_graph.rs 的并发用例锁定:全部节点终态必须都落回 plan。
+    /// 子图传 `plan = None`(不写 plan),其余调度语义与入口流程完全一致。
+    ///
+    /// 取消语义与抽取前一致:发现取消即丢弃在飞 future 并返回 Err(「任务已停止」),
+    /// 由调用方(入口 run_inner 或上层节点)收口。
+    async fn run_graph_inner(
+        &self,
+        ctx: &TaskRunContext,
+        g: &GraphCtx<'_>,
+        mut plan: Option<&mut Vec<TaskStep>>,
+    ) -> Result<GraphOutcome, String> {
+        let steps = g.steps;
+        let svc = &self.svc;
+        let node_count = steps.len();
+        let mut missing_parents: Vec<usize> = g.inputs.iter().map(Vec::len).collect();
+        let mut children: Vec<Vec<usize>> = vec![Vec::new(); node_count];
+        for (i, parents) in g.inputs.iter().enumerate() {
+            for &p in parents {
+                children[p].push(i);
+            }
+        }
+        let mut ready: BTreeSet<usize> = (0..node_count)
+            .filter(|&i| missing_parents[i] == 0)
+            .collect();
+        // 在飞节点集合:节点 future 借用 &self / 流程数据 / ctx,故用 FuturesUnordered
+        // 而非 JoinSet(后者要求 'static 捕获,会把执行器与流程数据逼成 Arc);
+        // 两者并发语义等价(都是等待 LLM 的异步 I/O),且不引入新依赖。
+        let mut inflight: FuturesUnordered<NodeFuture<'_>> = FuturesUnordered::new();
+        let mut finished = 0usize;
+        // 各节点产出(下标对齐 steps):失败或空产出留空串,下游据此拿到空段
+        let mut outputs: Vec<String> = vec![String::new(); node_count];
+        let mut any_error = false;
+        let mut total = TokenUsage::default();
+
+        while finished < node_count {
+            // 补满在飞槽位(上限 = 本层流程的 max_parallel_nodes,默认 2:并行成倍消耗 token)
+            while inflight.len() < g.max_parallel {
+                let Some(&i) = ready.iter().next() else { break };
+                ready.remove(&i);
+                if *ctx.cancel.borrow() {
+                    // 取消:丢弃在飞 future 即中止分支(与串行口径一致:在飞行保持 running),
+                    // 随后统一由「任务已停止」收口
+                    drop(inflight);
+                    return Err("任务已停止".into());
+                }
+                if let Some(p) = plan.as_deref_mut() {
+                    p[i].status = TaskStepStatus::Running;
+                    svc.set_plan(&ctx.task_id, p);
+                }
+                let user = Self::node_user_message(
+                    g.source_message,
+                    &ctx.goal,
+                    steps,
+                    g.inputs,
+                    i,
+                    &outputs,
+                );
+                let (ctx_ref, step) = (ctx, &steps[i]);
+                inflight.push(Box::pin(async move {
+                    (i, self.execute_node(ctx_ref, g, i, step, user).await)
+                }));
+            }
+            let Some((i, result)) = inflight.next().await else {
+                break;
+            };
+            finished += 1;
+            let step = &steps[i];
+            match result {
+                Ok((text, out)) => {
+                    total.prompt_tokens += out.prompt_tokens;
+                    total.completion_tokens += out.completion_tokens;
+                    total.total_tokens += out.prompt_tokens + out.completion_tokens;
+                    // usage 落库:逐节点一行(phase 同调用行,对齐 legacy 按调用计口径)。
+                    // 子流程节点除外——子图各节点已经在自己的那一层记过账了,
+                    // 再记一次汇总行会破坏「各行求和 == usage_total」不变量。
+                    if !step.is_sub_flow() {
+                        svc.record_usage(&ctx.task_id, g.phase, Some(i), &out);
+                    }
+                    if text.is_empty() {
+                        any_error = true;
+                        if let Some(p) = plan.as_deref_mut() {
+                            p[i].status = TaskStepStatus::Error;
+                            p[i].result = format!("步骤「{}」返回空内容", step.name);
+                        }
+                    } else {
+                        if let Some(p) = plan.as_deref_mut() {
+                            p[i].status = TaskStepStatus::Done;
+                            // generates=false 的内部规划步骤:产出仅供后续步骤参考,
+                            // 加标注区分于面向用户的成果(不参与成果选拔)。
+                            if step.action == "direct" && step.generates == Some(false) {
+                                p[i].result = format!("(内部规划)\n{text}");
+                            } else {
+                                p[i].result = text.clone();
+                            }
+                        }
+                        outputs[i] = text;
+                    }
+                }
+                Err(e) => {
+                    if *ctx.cancel.borrow() {
+                        drop(inflight);
+                        return Err("任务已停止".into());
+                    }
+                    any_error = true;
+                    if let Some(p) = plan.as_deref_mut() {
+                        p[i].status = TaskStepStatus::Error;
+                        p[i].result = e;
+                    }
+                }
+            }
+            if let Some(p) = plan.as_deref_mut() {
+                svc.set_plan(&ctx.task_id, p);
+            }
+            // 释放后继:上游全部完成(无论成败)即就绪——下游照常执行并拿到空段,
+            // 与串行版「上游失败即清空产出、后续步骤继续」的语义一致
+            for &child in &children[i] {
+                missing_parents[child] -= 1;
+                if missing_parents[child] == 0 {
+                    ready.insert(child);
+                }
+            }
+        }
+        Ok(GraphOutcome {
+            outputs,
+            total,
+            any_error,
+        })
     }
 
     async fn run_inner(&self, ctx: TaskRunContext) -> Result<(TaskTerminal, TokenUsage), String> {
@@ -342,13 +651,12 @@ impl CustomExecutor {
         // 此处不复制实现(否则「什么算合法图」会出现多个版本)。
         let graph = resolve_graph(&steps)?;
         let output_idx = output_index(&steps, &graph.inputs);
-        // 并行上限(二维批次 2):流程级配置,缺省 2、1 = 完全串行(批次 1 行为)
-        let max_parallel = effective_max_parallel(&cfg);
         let svc = &self.svc;
         svc.set_status(&ctx.task_id, TaskStatus::Running);
 
         // 进度模型 = plan 步骤(前端 custom 渲染:plan 步骤 + 状态徽标)。
         // 展示顺序恒为流程数组顺序(用户编排顺序),执行顺序另由 graph.order 决定。
+        // 挂载子流程的节点仍占**一行**(子图内部节点不进 plan,见 run_sub_flow)。
         let mut plan: Vec<TaskStep> = steps
             .iter()
             .map(|s| TaskStep {
@@ -360,125 +668,28 @@ impl CustomExecutor {
             .collect();
         svc.set_plan(&ctx.task_id, &plan);
 
-        // 各节点产出(下标对齐 steps):失败或空产出留空串,下游据此拿到空段
-        let mut outputs: Vec<String> = vec![String::new(); steps.len()];
-        let mut any_error = false;
-        let mut total = TokenUsage::default();
+        // 调用链以入口流程 id 起头:子图引用回入口流程会被运行期环守卫拦下
+        let chain = vec![cfg.id.clone()];
+        let g = GraphCtx {
+            steps: &steps,
+            inputs: &graph.inputs,
+            source_message: &ctx.goal,
+            phase: "step",
+            path: "",
+            depth: 0,
+            chain: &chain,
+            // 并行上限(二维批次 2):流程级配置,缺省 2、1 = 完全串行(批次 1 行为)
+            max_parallel: effective_max_parallel(&cfg),
+        };
+        let outcome = self.run_graph(&ctx, &g, Some(&mut plan)).await?;
 
-        // ===== 并行调度(二维批次 2)=====
-        // 就绪判定:上游计数 + 后继表;就绪节点按下标升序取(线性流程顺序与旧版一致)。
-        //
-        // plan 写入纪律(IFW-4):**调度器是 plan 的唯一写者**,节点执行体只回传文本、
-        // 不持有 plan 快照。多节点并发完成时因此不存在「各自读旧快照再整列覆写」的丢更新
-        // (那是把 plan 交给各节点自行读-改-写才会有的缺陷)。这条纪律由
-        // tests/task_custom_graph.rs 的并发用例锁定:全部节点终态必须都落回 plan。
-        let node_count = steps.len();
-        let mut missing_parents: Vec<usize> = graph.inputs.iter().map(Vec::len).collect();
-        let mut children: Vec<Vec<usize>> = vec![Vec::new(); node_count];
-        for (i, parents) in graph.inputs.iter().enumerate() {
-            for &p in parents {
-                children[p].push(i);
-            }
-        }
-        let mut ready: BTreeSet<usize> = (0..node_count)
-            .filter(|&i| missing_parents[i] == 0)
-            .collect();
-        // 在飞节点集合:节点 future 借用 &self / 流程数据 / ctx,故用 FuturesUnordered
-        // 而非 JoinSet(后者要求 'static 捕获,会把执行器与流程数据逼成 Arc);
-        // 两者并发语义等价(都是等待 LLM 的异步 I/O),且不引入新依赖。
-        let mut inflight: FuturesUnordered<NodeFuture<'_>> = FuturesUnordered::new();
-        let mut finished = 0usize;
-
-        while finished < node_count {
-            // 补满在飞槽位(上限 = 流程级 max_parallel_nodes,默认 2:并行成倍消耗 token)
-            while inflight.len() < max_parallel {
-                let Some(&i) = ready.iter().next() else { break };
-                ready.remove(&i);
-                if *ctx.cancel.borrow() {
-                    // 取消:丢弃在飞 future 即中止分支(与串行口径一致:在飞行保持 running),
-                    // 随后统一由「任务已停止」收口
-                    drop(inflight);
-                    return Err("任务已停止".into());
-                }
-                plan[i].status = TaskStepStatus::Running;
-                svc.set_plan(&ctx.task_id, &plan);
-                let user = Self::node_user_message(&ctx.goal, &steps, &graph.inputs, i, &outputs);
-                let (ctx_ref, step) = (&ctx, &steps[i]);
-                inflight.push(Box::pin(async move {
-                    (i, self.execute_node(ctx_ref, i, step, user).await)
-                }));
-            }
-            let Some((i, result)) = inflight.next().await else {
-                break;
-            };
-            finished += 1;
-            let step = &steps[i];
-            match result {
-                Ok((text, out)) => {
-                    total.prompt_tokens += out.prompt_tokens;
-                    total.completion_tokens += out.completion_tokens;
-                    total.total_tokens += out.prompt_tokens + out.completion_tokens;
-                    // usage 落库:逐步骤一行(phase=step,对齐 legacy 按调用计口径)
-                    svc.record_usage(&ctx.task_id, "step", Some(i), &out);
-                    if text.is_empty() {
-                        any_error = true;
-                        plan[i].status = TaskStepStatus::Error;
-                        plan[i].result = format!("步骤「{}」返回空内容", step.name);
-                    } else {
-                        plan[i].status = TaskStepStatus::Done;
-                        // generates=false 的内部规划步骤:产出仅供后续步骤参考,
-                        // 加标注区分于面向用户的成果(不参与成果选拔)。
-                        if step.action == "direct" && step.generates == Some(false) {
-                            plan[i].result = format!("(内部规划)\n{text}");
-                        } else {
-                            plan[i].result = text.clone();
-                        }
-                        outputs[i] = text;
-                    }
-                }
-                Err(e) => {
-                    if *ctx.cancel.borrow() {
-                        drop(inflight);
-                        return Err("任务已停止".into());
-                    }
-                    any_error = true;
-                    plan[i].status = TaskStepStatus::Error;
-                    plan[i].result = e;
-                }
-            }
-            svc.set_plan(&ctx.task_id, &plan);
-            // 释放后继:上游全部完成(无论成败)即就绪——下游照常执行并拿到空段,
-            // 与串行版「上游失败即清空产出、后续步骤继续」的语义一致
-            for &child in &children[i] {
-                missing_parents[child] -= 1;
-                if missing_parents[child] == 0 {
-                    ready.insert(child);
-                }
-            }
-        }
-
-        // 成果选拔:成果节点产出优先;为空则按**数组下标降序**回退到上一个非空
-        // 生成产出——存量线性流程语义就是「末个有效生成步」,且该兜底与执行顺序无关
-        // (并行下成果节点失败时不会退化成「谁先跑完算谁」,结果仍可复现)。
-        let draft = output_idx
-            .map(|i| outputs[i].clone())
-            .filter(|text| !text.is_empty())
-            .or_else(|| {
-                (0..steps.len())
-                    .rev()
-                    .find(|&i| {
-                        steps[i].action == "direct"
-                            && steps[i].generates == Some(true)
-                            && !outputs[i].is_empty()
-                    })
-                    .map(|i| outputs[i].clone())
-            })
-            .unwrap_or_default();
+        // 成果选拔:成果节点产出优先;为空则回退到末个非空生成产出(见 `select_draft`)
+        let draft = select_draft(&steps, output_idx, &outcome.outputs);
         if draft.is_empty() {
             return Err("自定义流程未产出任何成果(生成步骤全部失败或为空)".into());
         }
-        // 含 error 步骤但成果已产出 → partial(对齐 legacy WP3 语义)
-        let status = if any_error {
+        // 含 error 节点但成果已产出 → partial(对齐 legacy WP3 语义)
+        let status = if outcome.any_error {
             TaskStatus::Partial
         } else {
             TaskStatus::Done
@@ -489,7 +700,7 @@ impl CustomExecutor {
                 status,
                 error: None,
             },
-            total,
+            outcome.total,
         ))
     }
 }

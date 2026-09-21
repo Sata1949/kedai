@@ -253,6 +253,19 @@ pub struct PlanStep {
     /// 其余取值在保存期被 `validate_flow` 拒绝。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// 挂载的静态子流程 id(二维批次 6b):非空时本节点**不自己发起模型调用**,
+    /// 而是把被引用流程的步骤当作子图执行,子图成果即本节点产出。
+    ///
+    /// 与 6a 的档位同一纪律——**执行参数被旁路但原样保留**:本节点的
+    /// `goal`/`action`(reflect 除外,保存期拒绝)/`kind`/`tools`/`system_prompt`/
+    /// `temperature`/`max_tokens` 都不参与执行,清空本字段即恢复生效
+    /// (编辑器按此提示用户);`name`/`generates`/`inputs`/`is_output` 仍生效
+    /// ——它们是**展示与图结构**字段,不是执行参数。
+    ///
+    /// 引用合法性(存在性/跨流程环/嵌套深度)由 `agent_flow_service::validate_sub_flows`
+    /// 在保存期校验,运行期再以调用链守卫兜底(见 `task_engine/custom.rs`)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_flow_id: Option<String>,
 }
 
 impl PlanStep {
@@ -264,6 +277,22 @@ impl PlanStep {
     /// 避免同一语义出现两份实现导致两条执行路径行为分裂。
     pub fn is_strict(&self) -> bool {
         matches!(self.kind.as_deref(), Some("strict"))
+    }
+
+    /// 是否挂载了静态子流程(二维批次 6b)。空串按未挂载处理(与 `inputs` 同一「空值即缺省」口径)。
+    pub fn is_sub_flow(&self) -> bool {
+        self.sub_flow_id
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|id| !id.is_empty())
+    }
+
+    /// 挂载的子流程 id(已按 `is_sub_flow` 的口径 trim;未挂载返回 None)。
+    pub fn sub_flow_ref(&self) -> Option<&str> {
+        self.sub_flow_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
     }
 }
 

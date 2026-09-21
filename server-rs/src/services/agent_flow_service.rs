@@ -32,17 +32,35 @@ impl AgentFlowService {
         self.library.flows.iter().find(|f| &f.id == id)
     }
 
+    /// 按 id 取流程(二维批次 6b:静态子图的引用解析)。
+    pub fn flow_by_id(&self, id: &str) -> Option<&AgentFlowConfig> {
+        self.library.flows.iter().find(|f| f.id == id)
+    }
+
     pub fn get_library(&self) -> &AgentFlowLibrary {
         &self.library
     }
 
     /// 使用启动时已注册工具集合校验流程,供保存与执行前复用。
+    /// 含**子流程引用链**校验(二维批次 6b):当前流程或它引用的任一子流程有问题都拒绝。
     pub fn validate(&self, config: &AgentFlowConfig) -> Result<(), String> {
-        validate_flow(config, &self.registered_tools)
+        validate_flow(config, &self.registered_tools)?;
+        validate_sub_flows(&self.library, &self.registered_tools)
+    }
+
+    /// 聊天侧执行快照(二维批次 6b):当前流程的启用步骤 + 子流程展开。
+    ///
+    /// 单一出口的意义:`/api/chat/send` 与 `/api/agent/plan` 两个入口必须给出**同一份**
+    /// 步骤序列,否则预览看到的 plan 与实际执行会不一致。子流程展开只能在这里做——
+    /// 引擎拿到的是步骤快照(`AgentRunRequest.flow`),它没有流程库。
+    pub fn chat_flow_steps(&self, cfg: &AgentFlowConfig) -> Result<Vec<PlanStep>, String> {
+        let active: Vec<PlanStep> = cfg.steps.iter().filter(|s| s.enabled).cloned().collect();
+        expand_sub_flows(&self.library, &cfg.id, &active)
     }
 
     /// 保存(创建或更新)流程并设为当前选中;id 为空时自动生成新 id(新建)。
-    /// 校验失败返回 Err(不落盘)。
+    /// 校验失败返回 Err(不落盘)。子流程引用链校验在**候选库**上做:
+    /// 本次编辑可能让引用它的其它流程变深/成环(见 `validate_sub_flows`)。
     pub fn set(&mut self, mut config: AgentFlowConfig) -> Result<(), String> {
         validate_flow(&config, &self.registered_tools)?;
         if config.id.trim().is_empty() {
@@ -51,10 +69,13 @@ impl AgentFlowService {
         if config.name.trim().is_empty() {
             config.name = "未命名流程".into();
         }
-        match self.library.flows.iter_mut().find(|f| f.id == config.id) {
+        let mut candidate = self.library.clone();
+        match candidate.flows.iter_mut().find(|f| f.id == config.id) {
             Some(existing) => *existing = config.clone(),
-            None => self.library.flows.push(config.clone()),
+            None => candidate.flows.push(config.clone()),
         }
+        validate_sub_flows(&candidate, &self.registered_tools)?;
+        self.library = candidate;
         self.library.current_flow_id = Some(config.id);
         self.save_library()
     }
@@ -69,7 +90,28 @@ impl AgentFlowService {
     }
 
     /// 删除流程;删除当前选中时回退到第一个流程(库空则 None)。至少保留一个流程时不允许删空。
+    ///
+    /// 被其它流程当作子流程引用时**拒绝删除**(二维批次 6b):否则会留下悬空引用,
+    /// 让引用方在执行期才失败。报错点名引用方,用户先解除引用再删。
     pub fn remove(&mut self, id: &str) -> Result<(), String> {
+        let label = match self.flow_by_id(id) {
+            Some(f) => flow_label(f),
+            None => return Err(format!("流程不存在:{}", id)),
+        };
+        let referrers: Vec<String> = self
+            .library
+            .flows
+            .iter()
+            .filter(|f| f.id != id && f.steps.iter().any(|s| s.sub_flow_ref() == Some(id)))
+            .map(flow_label)
+            .collect();
+        if !referrers.is_empty() {
+            return Err(format!(
+                "流程「{}」正被子流程引用,无法删除:{}。请先在这些流程里解除引用",
+                label,
+                referrers.join("、")
+            ));
+        }
         let before = self.library.flows.len();
         self.library.flows.retain(|f| f.id != id);
         if self.library.flows.len() == before {
@@ -467,6 +509,9 @@ fn kahn_order(inputs: &[Vec<usize>], steps: &[PlanStep]) -> Result<Vec<usize>, S
 ///  - action 仅 direct / reflect;reflect 步骤不得携带 generates=Some(true)
 ///  - 温度 0.0-2.0、输出上限 1-32768(仅校验显式提供的值)
 ///  - 二维依赖边:步骤 id 唯一、上游必须存在且已启用、无自环、无环(见 `resolve_graph`)
+///  - 反思步骤不得挂载静态子流程(反思不产出正文,挂子图无意义且会绕过反思语义)
+///
+/// **只管单个流程自身**:跨流程的子流程引用链由 `validate_sub_flows` 负责(它需要库)。
 pub fn validate_flow(
     cfg: &AgentFlowConfig,
     registered_tools: &BTreeSet<String>,
@@ -508,6 +553,10 @@ pub fn validate_flow(
         }
         if s.action == "reflect" && s.system_prompt.is_some() {
             return Err(format!("步骤「{}」为反思步骤,不支持系统提示词", s.name));
+        }
+        // 反思步骤不产出正文,挂子图会绕过「反思判定 + 失败回退」语义 → 保存期直接拒绝
+        if s.action == "reflect" && s.is_sub_flow() {
+            return Err(format!("步骤「{}」为反思步骤,不支持挂载子流程", s.name));
         }
         // 节点档位(二维批次 6a):缺省/loose = 工具自循环;strict = 单次调用、不下发工具。
         // 只拒绝未知取值——允许的取值都有已实现的语义,不存在「静默无效」(裁定 15 差异 2 口径)
@@ -570,6 +619,269 @@ pub fn validate_flow(
         }
     }
     Ok(())
+}
+
+// ==================== 静态子图原语(二维批次 6b) ====================
+//
+// **单一出处**:保存期校验(`validate_sub_flows`)、任务侧执行器
+// (`task_engine/custom.rs::run_sub_flow`)、聊天侧线性化(`expand_sub_flows`)三处共用
+// 下面这些原语。与二维批次 1 的图原语同一纪律:不得在任一侧复制「什么算合法子流程引用」
+// 的判断(否则编辑器能保存的引用与能执行的引用会漂移)。
+//
+// 形态决策(见 `docs/计划.md` 裁定 18):子图取**引用流程 id**形态,不取内联嵌套。
+// 理由:内联嵌套需要一整套嵌套编辑 UI(列表 + 画布双层),成本远超本批规模;而引用形态
+// 与批次 7 的「子执行 + 深度守卫 + 记账」原语同构,且静态引用的环/深度都能在保存期完全
+// 判定(内联嵌套没有这个问题,但也没有跨流程复用的价值)。
+
+/// 子流程嵌套深度上限:入口流程算第 0 层,最多再嵌 3 层(整条链最多 4 个流程)。
+///
+/// 深度是**成本闸门**:每层子流程把该节点的调用次数乘上子图节点数(与 WF-11 的并行
+/// 加倍叠加)。静态子图本身无环(保存期已拒),深度仍必须封顶——子图节点多、层数深时
+/// 单节点的 token 消耗会以乘积增长。
+pub const MAX_SUB_FLOW_DEPTH: usize = 3;
+
+/// 流程展示名(命名为空时回退 id;错误文案与 plan 前缀都用它)
+pub fn flow_label(cfg: &AgentFlowConfig) -> String {
+    if cfg.name.trim().is_empty() {
+        cfg.id.clone()
+    } else {
+        cfg.name.trim().to_string()
+    }
+}
+
+/// 流程中**启用步骤**挂载的子流程引用:(步骤展示名, 子流程 id)。
+/// 停用步骤不参与执行,故不参与引用链校验(与 `validate_flow` 只看启用步骤同口径)。
+fn sub_flow_edges(cfg: &AgentFlowConfig) -> Vec<(String, String)> {
+    cfg.steps
+        .iter()
+        .filter(|s| s.enabled)
+        .filter_map(|s| s.sub_flow_ref().map(|id| (s.name.clone(), id.to_string())))
+        .collect()
+}
+
+/// 子流程引用链校验(二维批次 6b,保存期 400):
+///  - 被引用的流程必须在本库中存在(悬空引用);
+///  - 不得引用流程自身;
+///  - 调用链不得成环(A → B → A;**图内**环检测挡不住跨流程环);
+///  - 嵌套深度 ≤ [`MAX_SUB_FLOW_DEPTH`];
+///  - **被引用的**流程必须结构合法(启用步骤非空 / 有生成步 / 图无环 / 工具已注册),
+///    即把它当作「启用态」复用 [`validate_flow`] 的同一套规则——被引用流程自身的
+///    `enabled` 开关只决定它能否作为当前流程直接执行,不影响它能否被引用。
+///
+/// 遍历从**库内每个流程**出发,而不是只从本次编辑的流程:B 被编辑成引用 A 时,
+/// 引用 B 的 C 也会跟着变深/成环,只查 B 会漏。库规模是「用户手写的几十个流程」,
+/// 全量遍历的成本可忽略(且只在保存/执行前跑)。
+pub fn validate_sub_flows(
+    library: &AgentFlowLibrary,
+    registered_tools: &BTreeSet<String>,
+) -> Result<(), String> {
+    let by_id: BTreeMap<&str, &AgentFlowConfig> =
+        library.flows.iter().map(|f| (f.id.as_str(), f)).collect();
+    for flow in &library.flows {
+        // 链首是该流程自身;只有确实挂了子流程的流程才需要走一遍
+        if sub_flow_edges(flow).is_empty() {
+            continue;
+        }
+        let mut chain: Vec<String> = vec![flow.id.clone()];
+        walk_sub_flows(&by_id, flow, &mut chain, registered_tools)?;
+    }
+    Ok(())
+}
+
+/// 引用链深度优先遍历(见 [`validate_sub_flows`] 的规则清单)。
+/// `chain` 是自链首起的**流程 id 链(含当前流程)**,用于环检测与深度判定。
+fn walk_sub_flows(
+    by_id: &BTreeMap<&str, &AgentFlowConfig>,
+    flow: &AgentFlowConfig,
+    chain: &mut Vec<String>,
+    registered_tools: &BTreeSet<String>,
+) -> Result<(), String> {
+    let label_of = |id: &str| -> String {
+        by_id
+            .get(id)
+            .map(|f| flow_label(f))
+            .unwrap_or_else(|| id.to_string())
+    };
+    for (step_label, sub_id) in sub_flow_edges(flow) {
+        if sub_id == flow.id {
+            return Err(format!(
+                "流程「{}」的步骤「{}」不能引用流程自身",
+                flow_label(flow),
+                step_label
+            ));
+        }
+        if let Some(pos) = chain.iter().position(|id| *id == sub_id) {
+            let mut cycle: Vec<String> = chain[pos..].iter().map(|id| label_of(id)).collect();
+            cycle.push(label_of(&sub_id));
+            return Err(format!("子流程调用链存在环:{}", cycle.join(" → ")));
+        }
+        let Some(target) = by_id.get(sub_id.as_str()) else {
+            return Err(format!(
+                "流程「{}」的步骤「{}」引用的子流程不存在:{}",
+                flow_label(flow),
+                step_label,
+                sub_id
+            ));
+        };
+        if chain.len() > MAX_SUB_FLOW_DEPTH {
+            let mut path: Vec<String> = chain.iter().map(|id| label_of(id)).collect();
+            path.push(flow_label(target));
+            return Err(format!(
+                "子流程嵌套超过 {} 层:{}",
+                MAX_SUB_FLOW_DEPTH,
+                path.join(" → ")
+            ));
+        }
+        // 被引用流程按「启用态」复用同一套结构规则(见函数文档)
+        let mut as_enabled = (*target).clone();
+        as_enabled.enabled = true;
+        validate_flow(&as_enabled, registered_tools).map_err(|e| {
+            format!(
+                "流程「{}」引用的子流程「{}」无效:{}",
+                flow_label(flow),
+                flow_label(target),
+                e
+            )
+        })?;
+        chain.push(sub_id.clone());
+        walk_sub_flows(by_id, target, chain, registered_tools)?;
+        chain.pop();
+    }
+    Ok(())
+}
+
+/// 聊天侧线性化:把挂载了子流程的节点**就地展开**成被引用流程的启用步骤(递归),
+/// 按各级各自的拓扑序拼成一张扁平列表。
+///
+/// 为什么是「展开」而不是「让聊天引擎跑嵌套」:聊天侧本来就**按拓扑序串行、步骤之间
+/// 不传递产出**(见 `agents/planner.rs::make_custom_plan` 注释),在该位置依次跑子图节点
+/// 与「先跑子图、产出交给下游」在聊天里等价;展开还能让 plan 面板逐节点显示进度,
+/// 且无须给引擎引入流程库依赖。
+///
+/// 展开口径:
+///  - 产出步骤的 `inputs` **一律清空**——扁平列表已按拓扑序排好,再保留 id 依赖会与
+///    拼接后的图不一致(外层节点的 id 在展开后已不存在,留着就是悬空上游);
+///  - 展开步骤的**名字**加 `【子流程「X」】` 前缀,让 plan 里能看出边界;
+///  - 展开步骤的 **id 按挂载位置重写**(`前缀 + 原 id`,见 `expand_ordered`):同一子流程
+///    被两处挂载、或父子流程撞 id(「复制流程」原样保留 step id)时,扁平列表会出现重复 id,
+///    而聊天侧随后还要再跑一遍 `make_custom_plan` → `resolve_graph`,那里对重复 id 直接拒绝
+///    (`effective_inputs`,文案「步骤 id 重复」)——于是**同一份流程任务侧能跑、聊天侧 400**。
+///    顶层前缀为空串,故顶层步骤 id 逐字节不变;
+///  - `entry_flow_id` 是本次展开的入口流程 id,用于自引用/环守卫(与保存期同一套判定,
+///    此处是防御外部手改配置的兜底)。
+pub fn expand_sub_flows(
+    library: &AgentFlowLibrary,
+    entry_flow_id: &str,
+    steps: &[PlanStep],
+) -> Result<Vec<PlanStep>, String> {
+    let by_id: BTreeMap<&str, &AgentFlowConfig> =
+        library.flows.iter().map(|f| (f.id.as_str(), f)).collect();
+    let mut chain: Vec<String> = vec![entry_flow_id.to_string()];
+    let out = expand_ordered(&by_id, steps, &mut chain, "")?;
+    // 兜底自检:展平后 `inputs` 已清空(线性兼容),该调用只剩「id 非空且唯一」的判定意义。
+    // 前缀派生已保证各挂载点不撞 id,这里防的是「用户把步骤 id 写成与派生前缀同形」这类
+    // 极端配置:给出点名 id 的中文错误,而不是让下游报「步骤 id 重复」。
+    if let Err(e) = resolve_graph(&out) {
+        let dups = duplicated_step_ids(&out);
+        if !dups.is_empty() {
+            return Err(format!(
+                "子流程展开后步骤 id 冲突:重复的步骤 id「{}」——请检查子流程的步骤 id 是否与其它流程重复(原始错误:{e})",
+                dups.join("、")
+            ));
+        }
+        return Err(e);
+    }
+    Ok(out)
+}
+
+/// 扁平列表里重复出现的步骤 id(升序;无重复返回空)
+fn duplicated_step_ids(steps: &[PlanStep]) -> Vec<String> {
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut dups: BTreeSet<String> = BTreeSet::new();
+    for s in steps {
+        if !seen.insert(s.id.as_str()) {
+            dups.insert(s.id.clone());
+        }
+    }
+    dups.into_iter().collect()
+}
+
+/// `expand_sub_flows` 的递归体:解析本层拓扑序 → 逐节点产出(子流程节点就地展开)。
+///
+/// `prefix` 是本层的 id 前缀:入口流程为空串;每进入一层子图,按**挂载位置**追加
+/// `s{下标}/`(下标 = 挂载节点在本层数组中的下标)。「同一子流程挂两处」因此得到两个不同
+/// 前缀,id 天然唯一。重写是安全的:`PlanStep.id` 在聊天引擎侧不被消费——它只服务于图原语
+/// 自身的连接与校验(见 `effective_inputs`),展开后 `inputs` 已清空,id 不再参与执行。
+fn expand_ordered(
+    by_id: &BTreeMap<&str, &AgentFlowConfig>,
+    steps: &[PlanStep],
+    chain: &mut Vec<String>,
+    prefix: &str,
+) -> Result<Vec<PlanStep>, String> {
+    let graph = resolve_graph(steps)?;
+    let mut out: Vec<PlanStep> = Vec::with_capacity(steps.len());
+    for &i in &graph.order {
+        let step = &steps[i];
+        let Some(sub_id) = step.sub_flow_ref() else {
+            out.push(flattened_step(step, prefix));
+            continue;
+        };
+        let label_of = |id: &str| -> String {
+            by_id
+                .get(id)
+                .map(|f| flow_label(f))
+                .unwrap_or_else(|| id.to_string())
+        };
+        let Some(target) = by_id.get(sub_id) else {
+            return Err(format!(
+                "步骤「{}」引用的子流程不存在:{}",
+                step.name, sub_id
+            ));
+        };
+        if let Some(pos) = chain.iter().position(|id| id == sub_id) {
+            let mut cycle: Vec<String> = chain[pos..].iter().map(|id| label_of(id)).collect();
+            cycle.push(label_of(sub_id));
+            return Err(format!("子流程调用链存在环:{}", cycle.join(" → ")));
+        }
+        if chain.len() > MAX_SUB_FLOW_DEPTH {
+            let mut path: Vec<String> = chain.iter().map(|id| label_of(id)).collect();
+            path.push(flow_label(target));
+            return Err(format!(
+                "子流程嵌套超过 {} 层:{}",
+                MAX_SUB_FLOW_DEPTH,
+                path.join(" → ")
+            ));
+        }
+        let active: Vec<PlanStep> = target.steps.iter().filter(|s| s.enabled).cloned().collect();
+        if active.is_empty() {
+            return Err(format!(
+                "步骤「{}」引用的子流程「{}」没有启用的步骤",
+                step.name,
+                flow_label(target)
+            ));
+        }
+        chain.push(sub_id.to_string());
+        // 子层前缀按挂载位置派生:`s{本层下标}/`(下标取自 graph.order,即数组下标)
+        let child = format!("{}s{}/", prefix, i);
+        let nested = expand_ordered(by_id, &active, chain, &child)?;
+        chain.pop();
+        let label = flow_label(target);
+        for mut s in nested {
+            s.name = format!("【子流程「{}」】{}", label, s.name);
+            out.push(s);
+        }
+    }
+    Ok(out)
+}
+
+/// 展开产物的扁平化:清空 `inputs`(见 `expand_sub_flows` 的展开口径),并把 id 打上本层前缀。
+/// 顶层前缀为空串 → 顶层步骤 id 与配置里的原值逐字节相同。
+fn flattened_step(step: &PlanStep, prefix: &str) -> PlanStep {
+    PlanStep {
+        id: format!("{}{}", prefix, step.id),
+        inputs: Vec::new(),
+        ..step.clone()
+    }
 }
 
 #[cfg(test)]
@@ -1032,5 +1344,357 @@ mod tests {
         );
         assert_eq!(graph.inputs[0], vec![1]);
         assert!(graph.inputs[2].is_empty());
+    }
+
+    // ===== 静态子图(二维批次 6b) =====
+
+    /// 挂载子流程的节点:图结构同 `graph_step`,只多一个 sub_flow_id
+    fn sub_step(id: &str, sub_id: &str) -> PlanStep {
+        PlanStep {
+            sub_flow_id: Some(sub_id.into()),
+            ..graph_step(id, &[])
+        }
+    }
+
+    fn library(flows: Vec<AgentFlowConfig>) -> AgentFlowLibrary {
+        AgentFlowLibrary {
+            current_flow_id: flows.first().map(|f| f.id.clone()),
+            flows,
+        }
+    }
+
+    /// 保存流程并返回分配到的 id(库内按名字回查)
+    fn save_flow(svc: &mut AgentFlowService, name: &str, steps: Vec<PlanStep>) -> String {
+        let mut cfg = flow(name, steps);
+        cfg.id = String::new();
+        svc.set(cfg).unwrap();
+        svc.get_library()
+            .flows
+            .iter()
+            .find(|f| f.name == name)
+            .expect("刚保存的流程应在库内")
+            .id
+            .clone()
+    }
+
+    fn service(dir: &TempDataDir) -> AgentFlowService {
+        AgentFlowService::new(dir.path().to_path_buf(), tools().into_iter().collect())
+    }
+
+    #[test]
+    fn sub_flow_refs_reject_dangling_self_and_cycle() {
+        // 悬空引用:本库没有该 id
+        let lib = library(vec![flow("主", vec![sub_step("n1", "missing")])]);
+        let err = validate_sub_flows(&lib, &tools()).unwrap_err();
+        assert!(err.contains("不存在"), "实际错误:{err}");
+
+        // 自引用:flow() 的 id 形如 flow-<名字>
+        let lib = library(vec![flow("自", vec![sub_step("n1", "flow-自")])]);
+        let err = validate_sub_flows(&lib, &tools()).unwrap_err();
+        assert!(err.contains("自身"), "实际错误:{err}");
+
+        // 跨流程环 A → B → A(图内环检测挡不住,必须按调用链拦)
+        let lib = library(vec![
+            flow("A", vec![sub_step("n1", "flow-B")]),
+            flow("B", vec![sub_step("n1", "flow-A")]),
+        ]);
+        let err = validate_sub_flows(&lib, &tools()).unwrap_err();
+        assert!(err.contains("环"), "实际错误:{err}");
+        assert!(
+            err.contains("A") && err.contains("B"),
+            "应点名环上流程:{err}"
+        );
+    }
+
+    #[test]
+    fn sub_flow_depth_limit_counts_nesting_levels() {
+        // 入口 0 层 + 3 层子流程(A→B→C→D)= 上限内
+        let ok = library(vec![
+            flow("A", vec![sub_step("n", "flow-B")]),
+            flow("B", vec![sub_step("n", "flow-C")]),
+            flow("C", vec![sub_step("n", "flow-D")]),
+            flow("D", vec![graph_step("n", &[])]),
+        ]);
+        assert!(
+            validate_sub_flows(&ok, &tools()).is_ok(),
+            "3 层嵌套应放行(上限 {MAX_SUB_FLOW_DEPTH})"
+        );
+
+        // 再加一层 E → 第 4 层,越界
+        let too_deep = library(vec![
+            flow("A", vec![sub_step("n", "flow-B")]),
+            flow("B", vec![sub_step("n", "flow-C")]),
+            flow("C", vec![sub_step("n", "flow-D")]),
+            flow("D", vec![sub_step("n", "flow-E")]),
+            flow("E", vec![graph_step("n", &[])]),
+        ]);
+        let err = validate_sub_flows(&too_deep, &tools()).unwrap_err();
+        assert!(err.contains("嵌套超过"), "实际错误:{err}");
+        assert!(
+            err.contains(&MAX_SUB_FLOW_DEPTH.to_string()),
+            "应点名上限:{err}"
+        );
+    }
+
+    #[test]
+    fn referenced_flow_must_be_structurally_valid_regardless_of_enabled() {
+        // 被引用流程没有启用的步骤 → 拒绝(结构规则复用 validate_flow)
+        let mut empty = flow("空子", vec![graph_step("n", &[])]);
+        empty.steps[0].enabled = false;
+        let lib = library(vec![flow("主", vec![sub_step("n", "flow-空子")]), empty]);
+        let err = validate_sub_flows(&lib, &tools()).unwrap_err();
+        assert!(err.contains("引用的子流程"), "实际错误:{err}");
+
+        // 被引用流程缺少生成步 → 同样拒绝
+        let lib = library(vec![
+            flow("主", vec![sub_step("n", "flow-反思子")]),
+            flow("反思子", vec![step("反思", "reflect", None)]),
+        ]);
+        let err = validate_sub_flows(&lib, &tools()).unwrap_err();
+        assert!(err.contains("缺少生成步骤"), "实际错误:{err}");
+
+        // 被引用流程**未启用**:仍可作为子流程(
+        // 「已启用」只决定它能否作为当前流程直接执行)
+        let mut helper = flow("辅助", vec![graph_step("n", &[])]);
+        helper.enabled = false;
+        let lib = library(vec![flow("主", vec![sub_step("n", "flow-辅助")]), helper]);
+        assert!(
+            validate_sub_flows(&lib, &tools()).is_ok(),
+            "未启用的流程仍可作为子流程被引用"
+        );
+    }
+
+    #[test]
+    fn reflect_step_cannot_mount_sub_flow() {
+        let cfg = flow(
+            "x",
+            vec![
+                graph_step("gen", &[]),
+                PlanStep {
+                    sub_flow_id: Some("flow-子".into()),
+                    ..step("反思", "reflect", None)
+                },
+            ],
+        );
+        let err = validate_flow(&cfg, &tools()).unwrap_err();
+        assert!(err.contains("反思步骤,不支持挂载子流程"), "实际错误:{err}");
+    }
+
+    #[test]
+    fn blank_sub_flow_id_means_not_mounted() {
+        // 空串按未挂载处理(与 inputs 同一「空值即缺省」口径):编辑器清空选择时不写脏引用
+        let mut s = graph_step("n", &[]);
+        s.sub_flow_id = Some("   ".into());
+        assert!(!s.is_sub_flow());
+        assert_eq!(s.sub_flow_ref(), None);
+        s.sub_flow_id = Some(" flow-x ".into());
+        assert!(s.is_sub_flow());
+        assert_eq!(s.sub_flow_ref(), Some("flow-x"), "引用应 trim 后使用");
+    }
+
+    #[test]
+    fn set_rejects_edit_that_deepens_another_flows_chain() {
+        // 「后门」用例:编辑 B 可能让引用 B 的 A 变深,只查被编辑流程自身会漏。
+        let dir = TempDataDir::new("flow-subflow-deepen");
+        let mut svc = service(&dir);
+        let d = save_flow(&mut svc, "D", vec![graph_step("n", &[])]);
+        let c = save_flow(&mut svc, "C", vec![sub_step("n", &d)]);
+        let b = save_flow(&mut svc, "B", vec![sub_step("n", &c)]);
+        save_flow(&mut svc, "A", vec![sub_step("n", &b)]);
+        // 此刻 A→B→C→D 正好 3 层,合法
+        // 把 D 改成再嵌一层 E:C 自身只深 2 层,但 A 的链变成 4 层 → 必须被拒
+        let e = save_flow(&mut svc, "E", vec![graph_step("n", &[])]);
+        let mut d_cfg = svc.flow_by_id(&d).unwrap().clone();
+        d_cfg.steps = vec![sub_step("n", &e)];
+        let err = svc.set(d_cfg).unwrap_err();
+        assert!(err.contains("嵌套超过"), "实际错误:{err}");
+        // 拒绝不落盘:库里 D 仍是原来的单节点
+        assert_eq!(svc.flow_by_id(&d).unwrap().steps.len(), 1);
+    }
+
+    #[test]
+    fn remove_rejects_flow_referenced_as_sub_flow() {
+        let dir = TempDataDir::new("flow-subflow-del");
+        let mut svc = service(&dir);
+        let referrer = save_flow(&mut svc, "主", vec![sub_step("n", "builtin-coordination")]);
+        let err = svc.remove("builtin-coordination").unwrap_err();
+        assert!(err.contains("子流程引用"), "实际错误:{err}");
+        assert!(err.contains("主"), "应点名引用方:{err}");
+        // 解除引用后即可删除
+        let mut fixed = svc.flow_by_id(&referrer).unwrap().clone();
+        fixed.steps[0].sub_flow_id = None;
+        svc.set(fixed).unwrap();
+        assert!(svc.remove("builtin-coordination").is_ok());
+    }
+
+    #[test]
+    fn expand_sub_flows_splices_nested_steps_with_name_prefix() {
+        // 子流程两步线性;主流程三步线性(起草 → 挂子流程 → 收尾)
+        let sub = flow("子", vec![graph_step("s1", &[]), graph_step("s2", &["s1"])]);
+        let main = flow(
+            "主",
+            vec![
+                graph_step("a", &[]),
+                sub_step("b", "flow-子"),
+                graph_step("c", &["b"]),
+            ],
+        );
+        let lib = library(vec![main.clone(), sub]);
+        let active: Vec<PlanStep> = main.steps.iter().filter(|s| s.enabled).cloned().collect();
+        let out = expand_sub_flows(&lib, &main.id, &active).unwrap();
+        let names: Vec<&str> = out.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "节点a",
+                "【子流程「子」】节点s1",
+                "【子流程「子」】节点s2",
+                "节点c"
+            ],
+            "子流程节点就地展开,位置即外层拓扑序中的位置"
+        );
+        assert!(
+            out.iter().all(|s| s.inputs.is_empty()),
+            "展开产物一律清空 id 依赖(扁平列表已按拓扑序排好)"
+        );
+        assert!(
+            out[1].sub_flow_id.is_none() && out[2].sub_flow_id.is_none(),
+            "子图内部节点不应残留 sub_flow_id"
+        );
+    }
+
+    #[test]
+    fn expand_sub_flows_rewrites_ids_per_mount_point() {
+        // 同一子流程被两个节点挂载:展开后 id 必须全局唯一,否则聊天侧
+        // make_custom_plan → resolve_graph 会以「步骤 id 重复」直接 400,
+        // 而同一份流程在任务侧(custom)能正常跑完(任务侧不展开,走 run_sub_flow)。
+        let sub = flow("子", vec![graph_step("s1", &[]), graph_step("s2", &["s1"])]);
+        let main = flow(
+            "主",
+            vec![
+                graph_step("a", &[]),
+                sub_step("b", "flow-子"),
+                graph_step("c", &["b"]),
+                sub_step("d", "flow-子"),
+                graph_step("e", &["d"]),
+            ],
+        );
+        let lib = library(vec![main.clone(), sub]);
+        let active: Vec<PlanStep> = main.steps.iter().filter(|s| s.enabled).cloned().collect();
+        let out = expand_sub_flows(&lib, &main.id, &active).unwrap();
+        let ids: Vec<&str> = out.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["a", "s1/s1", "s1/s2", "c", "s3/s1", "s3/s2", "e"],
+            "子图步骤 id 按挂载位置加前缀(下标取挂载节点在本层数组中的位置),顶层 id 不变"
+        );
+        assert!(resolve_graph(&out).is_ok(), "展开产物 id 必须唯一且非空");
+
+        // 父子撞 id(「复制流程」只换流程 id、steps 深拷贝 → 两边步骤 id 相同)
+        let main2 = flow(
+            "主2",
+            vec![
+                graph_step("a", &[]),
+                sub_step("b", "flow-撞"),
+                graph_step("c", &["b"]),
+            ],
+        );
+        let clash = library(vec![main2.clone(), flow("撞", vec![graph_step("b", &[])])]);
+        let out2 = expand_sub_flows(&clash, &main2.id, &main2.steps).unwrap();
+        let ids2: Vec<&str> = out2.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids2, vec!["a", "s1/b", "c"], "父子同 id 也被前缀隔开");
+    }
+
+    #[test]
+    fn expand_sub_flows_self_check_reports_duplicate_ids() {
+        // 极端配置:顶层步骤 id 与「子图步骤 + 派生前缀」同形。
+        // 自检兜底给出点名 id 的中文错误,而不是让下游报「步骤 id 重复」。
+        let sub = flow("子", vec![graph_step("leaf", &[])]);
+        let main = flow(
+            "主",
+            vec![
+                graph_step("a", &[]),
+                sub_step("b", "flow-子"),
+                graph_step("s1/leaf", &["b"]),
+            ],
+        );
+        let lib = library(vec![main.clone(), sub]);
+        let active: Vec<PlanStep> = main.steps.iter().filter(|s| s.enabled).cloned().collect();
+        let err = expand_sub_flows(&lib, &main.id, &active).unwrap_err();
+        assert!(err.contains("子流程展开后步骤 id 冲突"), "实际错误:{err}");
+        assert!(err.contains("s1/leaf"), "应点名重复的 id:{err}");
+    }
+
+    #[test]
+    fn sub_flow_depth_limit_counts_ancestor_chain() {
+        // 祖先链:保存期从**库里每个流程**起链,故 H 在最上层就让整条链超限。
+        // 前端 flowAncestorDepth + stepSubFlowWarnings 的深度判定与这条等价。
+        let too_deep = library(vec![
+            flow("H", vec![sub_step("n", "flow-G")]),
+            flow("G", vec![sub_step("n", "flow-F")]),
+            flow("F", vec![sub_step("n", "flow-X")]),
+            flow("X", vec![sub_step("n", "flow-W")]),
+            flow("W", vec![graph_step("n", &[])]),
+        ]);
+        let err = validate_sub_flows(&too_deep, &tools()).unwrap_err();
+        assert!(err.contains("嵌套超过"), "实际错误:{err}");
+        assert!(
+            err.contains("H") && err.contains("W"),
+            "应点名整条链的两端:{err}"
+        );
+
+        // 去掉最上层的 H → 4 个流程 = 3 层,上限内
+        let ok = library(vec![
+            flow("G", vec![sub_step("n", "flow-F")]),
+            flow("F", vec![sub_step("n", "flow-X")]),
+            flow("X", vec![sub_step("n", "flow-W")]),
+            flow("W", vec![graph_step("n", &[])]),
+        ]);
+        assert!(
+            validate_sub_flows(&ok, &tools()).is_ok(),
+            "3 层嵌套应放行(上限 {MAX_SUB_FLOW_DEPTH})"
+        );
+    }
+
+    #[test]
+    fn expand_sub_flows_rejects_runtime_cycle_and_depth() {
+        // 环(保存期已拒,此处是外部手改配置的运行期兜底)
+        let a = flow("A", vec![sub_step("n", "flow-B")]);
+        let lib = library(vec![a.clone(), flow("B", vec![sub_step("n", "flow-A")])]);
+        let err = expand_sub_flows(&lib, &a.id, &a.steps).unwrap_err();
+        assert!(err.contains("环"), "实际错误:{err}");
+
+        // 深度:A→B→C→D→E(4 层嵌套)越界
+        let deep = library(vec![
+            flow("A", vec![sub_step("n", "flow-B")]),
+            flow("B", vec![sub_step("n", "flow-C")]),
+            flow("C", vec![sub_step("n", "flow-D")]),
+            flow("D", vec![sub_step("n", "flow-E")]),
+            flow("E", vec![graph_step("n", &[])]),
+        ]);
+        let entry = deep.flows[0].clone();
+        let err = expand_sub_flows(&deep, &entry.id, &entry.steps).unwrap_err();
+        assert!(err.contains("嵌套超过"), "实际错误:{err}");
+
+        // 悬空引用
+        let dangling = library(vec![flow("A", vec![sub_step("n", "missing")])]);
+        let entry = dangling.flows[0].clone();
+        let err = expand_sub_flows(&dangling, &entry.id, &entry.steps).unwrap_err();
+        assert!(err.contains("不存在"), "实际错误:{err}");
+    }
+
+    #[test]
+    fn sub_flow_field_is_omitted_when_unset() {
+        // 兼容承诺(二维批次 1):存量流程 JSON 读写逐字节不变——
+        // 未挂子流程的步骤不得序列化出 sub_flow_id 键
+        let s = graph_step("n", &[]);
+        let text = serde_json::to_string(&s).unwrap();
+        assert!(
+            !text.contains("sub_flow_id"),
+            "未挂子流程时不应出现该键:{text}"
+        );
+        let mounted = sub_step("n", "flow-x");
+        let text = serde_json::to_string(&mounted).unwrap();
+        assert!(text.contains("sub_flow_id"), "挂载时应落盘:{text}");
     }
 }

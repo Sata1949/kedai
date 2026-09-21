@@ -158,6 +158,14 @@ pub(crate) trait TaskPromptKit: Send + Sync {
 pub(crate) trait TaskFlowAccess: Send + Sync {
     /// 当前启用的 Agent 流程配置(未启用/未配置/校验失败返回错误文本)。
     fn current_flow(&self) -> Result<AgentFlowConfig, String>;
+
+    /// 按 id 取流程快照(二维批次 6b:静态子图的引用解析)。
+    ///
+    /// **不检查被引用流程的 `enabled` 开关**:该开关只决定一个流程能否作为「当前流程」
+    /// 直接执行,不影响它能否被别的流程当子流程引用(否则每个辅助流程都得保持启用,
+    /// 而「启用」在同一时刻只有一个是有意义的)。结构合法性照查——按「启用态」跑
+    /// `validate_flow`,与保存期 `validate_sub_flows` 同口径。
+    fn flow_by_id(&self, id: &str) -> Result<AgentFlowConfig, String>;
 }
 
 // ==================== 窄接口(6/8):任务事件发射 ====================
