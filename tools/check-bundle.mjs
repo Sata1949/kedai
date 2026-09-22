@@ -95,8 +95,25 @@ if (!existsSync(ASSETS)) {
   process.exit(1);
 }
 
-/** 去哈希:去掉扩展名前的最后一段 `-<hash>`(`index-CQ9DXqUA.js` → `index.js`) */
+/**
+ * 去哈希:把产物名折回预算表里的键(`index-CQ9DXqUA.js` → `index.js`)。
+ *
+ * **不能只剥最后一段 `-<hash>`**:Vite 的 base64url 哈希本身可能含 `-`
+ * (实测产物里有 `index-n-WGUpyo.js`),那时 `-[^-]+` 只吃得掉 `-WGUpyo`,
+ * 折出 `index-n.js` —— 于是入口 chunk 落到默认上限 12,000 被误判超预算,
+ * 而预算表里的 `index.js` 反倒被报成「产物中已不存在」。哈希是否含 `-` 取决于
+ * 产物内容,故这是随机触发的假失败(2026-09-22 实测:同一份脚本,内容一变即复发)。
+ *
+ * 改为**按预算表的键做前缀匹配**:产物名 = `<键干>-<hash>.<ext>`,故 `index-` 开头
+ * 即归 `index.js`。匹配不到时退回原来的剥尾规则(未登记 chunk 仍按默认上限判)。
+ */
 function dehash(name) {
+  const ext = name.endsWith('.css') ? '.css' : '.js';
+  for (const key of Object.keys(CHUNK_BUDGETS_GZ)) {
+    if (!key.endsWith(ext)) continue; // 扩展名必须同类:index-*.css 不能折成 index.js
+    const stem = key.slice(0, -ext.length);
+    if (name === key || name.startsWith(`${stem}-`)) return key;
+  }
   return name.replace(/-[^-]+\.(js|css)$/, '.$1');
 }
 
