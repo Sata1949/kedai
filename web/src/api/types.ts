@@ -808,6 +808,13 @@ export interface TaskStep {
   goal: string;
   status: TaskStepStatus;
   result: string;
+  /**
+   * 该行对应的流程节点 id(custom 模式填 `PlanStep.id`;其余模式下发时不带此键)。
+   *
+   * plan 行由**过滤后的启用步骤**构造,故 plan 下标 ≠ 流程数组下标——界面要问
+   * 「这一行是哪个节点」只能靠它(遗留.md IFW-5)。
+   */
+  node_id?: string | null;
 }
 
 /** 任务状态:待执行/规划中/执行中/计划待批准(plan 模式)/完成/部分完成(含失败步骤但成果已产出)/出错/已停止 */

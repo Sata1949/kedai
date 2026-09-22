@@ -273,6 +273,7 @@ mod tests {
             goal: String::new(),
             status,
             result: result.into(),
+            node_id: None,
         }
     }
 

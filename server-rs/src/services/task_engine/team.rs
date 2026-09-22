@@ -596,6 +596,7 @@ impl TeamExecutor {
                     goal: g.goal.clone(),
                     status: TaskStepStatus::Pending,
                     result: String::new(),
+                    node_id: None,
                 });
             }
             step_ranges.push(idxs);
@@ -1440,18 +1441,21 @@ mod tests {
                 goal: String::new(),
                 status: TaskStepStatus::Done,
                 result: "产出甲一".into(),
+                node_id: None,
             },
             TaskStep {
                 name: "【主Agent-1】子二".into(),
                 goal: String::new(),
                 status: TaskStepStatus::Error,
                 result: "上游抖动".into(),
+                node_id: None,
             },
             TaskStep {
                 name: "【主Agent-2】子三".into(),
                 goal: String::new(),
                 status: TaskStepStatus::Error,
                 result: "也失败了".into(),
+                node_id: None,
             },
         ];
         let outputs = rebuild_outputs(&mains, &step_ranges, &plan);
@@ -1479,6 +1483,7 @@ mod tests {
                 goal: String::new(),
                 status,
                 result: String::new(),
+                node_id: None,
             }
         }
         let mut plan = vec![
@@ -1516,6 +1521,7 @@ mod tests {
             goal: String::new(),
             status,
             result: "r".into(),
+            node_id: None,
         };
         let plan = vec![
             mk("【主Agent-1】子一", TaskStepStatus::Done),
@@ -1545,18 +1551,21 @@ mod tests {
                 goal: String::new(),
                 status: TaskStepStatus::Done,
                 result: "甲产出".into(),
+                node_id: None,
             },
             TaskStep {
                 name: "【主Agent-1】子二".into(),
                 goal: String::new(),
                 status: TaskStepStatus::Done,
                 result: "旧乙产出".into(),
+                node_id: None,
             },
             TaskStep {
                 name: "【主Agent-1】子三".into(),
                 goal: String::new(),
                 status: TaskStepStatus::Error,
                 result: "失败".into(),
+                node_id: None,
             },
         ];
         let step_ranges = vec![vec![0, 1, 2]];

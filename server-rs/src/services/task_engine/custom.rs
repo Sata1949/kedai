@@ -699,6 +699,10 @@ impl CustomExecutor {
         // 进度模型 = plan 步骤(前端 custom 渲染:plan 步骤 + 状态徽标)。
         // 展示顺序恒为流程数组顺序(用户编排顺序),执行顺序另由 graph.order 决定。
         // 挂载子流程的节点仍占**一行**(子图内部节点不进 plan,见 run_sub_flow)。
+        //
+        // node_id = 流程节点 id(`PlanStep.id`):plan 行由**过滤后的启用步骤**构造,
+        // 故 plan 下标 ≠ 流程数组下标——前端要问「这一行是哪个节点」只能靠它
+        // (遗留.md IFW-5)。其余模式不填,序列化时整键省略。
         let mut plan: Vec<TaskStep> = steps
             .iter()
             .map(|s| TaskStep {
@@ -706,6 +710,7 @@ impl CustomExecutor {
                 goal: s.goal.clone(),
                 status: TaskStepStatus::Pending,
                 result: String::new(),
+                node_id: Some(s.id.clone()),
             })
             .collect();
         svc.set_plan(&ctx.task_id, &plan);

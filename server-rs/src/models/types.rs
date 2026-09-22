@@ -1091,6 +1091,16 @@ pub struct TaskStep {
     pub status: TaskStepStatus,
     #[serde(default)]
     pub result: String,
+    /// 该行对应的**流程节点 id**(custom 模式填 `PlanStep.id`;其余模式为 None)。
+    ///
+    /// 为什么需要它:plan 行由**过滤后的启用步骤**构造(`task_engine/custom.rs`),
+    /// 于是 plan 下标 ≠ 流程数组下标——界面上问「这一行是哪个节点」只能靠 id,
+    /// 按下标对齐会在停用中间步骤时错位(`遗留.md` IFW-5)。
+    ///
+    /// 加性字段:`skip_serializing_if` 让 None 时**整键省略**,故 legacy/solo/multi/
+    /// plan/team 的 plan JSON 与存量 custom 任务逐字节不变,旧客户端反序列化也不受影响。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
 }
 
 fn task_step_default_status() -> TaskStepStatus {
@@ -1104,6 +1114,7 @@ impl Default for TaskStep {
             goal: String::new(),
             status: TaskStepStatus::Pending,
             result: String::new(),
+            node_id: None,
         }
     }
 }
@@ -1536,5 +1547,38 @@ mod tests {
             json.contains(r#""status":"done""#),
             "plan JSON 形态: {json}"
         );
+    }
+
+    /// `TaskStep.node_id`(遗留.md IFW-5)的三条线格式护栏:
+    /// ① None 时**整键省略**——legacy/solo/multi/plan/team 与存量 custom 任务的
+    ///    plan JSON 因此逐字节不变;② 旧数据(无该键)能反序列化;③ 有值时往返不丢。
+    #[test]
+    fn task_step_node_id_is_additive_and_omitted_when_none() {
+        // ① None → 不出现 "node_id"(本仓 plan 是 tasks.plan 列里的整段 JSON,
+        //    多一个 null 键就是存量任务的字节变化)
+        let step = TaskStep {
+            name: "起草".into(),
+            goal: "g".into(),
+            status: TaskStepStatus::Pending,
+            result: String::new(),
+            node_id: None,
+        };
+        let json = serde_json::to_string(&step).unwrap();
+        assert!(!json.contains("node_id"), "None 时不应落键: {json}");
+
+        // ② 旧 plan JSON(无该键)照常解析,得到 None
+        let old: TaskStep =
+            serde_json::from_str(r#"{"name":"起草","goal":"g","status":"done","result":"r"}"#)
+                .unwrap();
+        assert_eq!(old.node_id, None);
+
+        // ③ custom 填入的节点 id 往返不丢
+        let custom: TaskStep = serde_json::from_str(
+            r#"{"name":"起草","goal":"g","status":"done","result":"r","node_id":"node-a"}"#,
+        )
+        .unwrap();
+        assert_eq!(custom.node_id.as_deref(), Some("node-a"));
+        let back = serde_json::to_string(&custom).unwrap();
+        assert!(back.contains(r#""node_id":"node-a""#), "往返: {back}");
     }
 }

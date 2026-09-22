@@ -3,18 +3,21 @@
 // 下达目标与任务历史已移入左侧 Sidebar(单列布局);任务数据持久化到后端 SQLite。
 // 批次 4 六模式:模式徽标、plan 模式批准区(批准/放弃/修改后批准)、
 // team 模式分工卡与审计结论卡、solo/multi 调用情况面板入口、custom 流程步骤进度。
-import { computed, onUnmounted, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useAppStore } from '../store';
 import { storeToRefs } from 'pinia';
 import { renderMarkdown } from '../markdown';
 import { splitTaskResult } from '../taskResult';
 import { taskStatusClass as statusClass, taskStatusLabel as statusLabel } from '../taskStatus';
 import { bufferLabel } from '../utils/phaseLabel';
+import { planRowBadges, type NodeBadge } from '../utils/flowNodeBadges';
 import { APPROVE_EXEC_MODE_LABELS, APPROVE_EXEC_MODE_ORDER, MODE_LABELS, messageKindLabel } from '../api/labels';
 import type { TaskApproveExecMode, TaskRecord, TaskRunMode, TaskStep } from '../api';
 
 const store = useAppStore();
 const { currentTask, currentTaskId, model, currentTaskUsage, executorById } = storeToRefs(store);
+/** 流程库(自定义流程的节点徽标要按 node_id 对回节点;可能未加载 = null) */
+const { agentFlowLibrary } = storeToRefs(store);
 
 /** 最近一条执行进展(主/子 agent 状态简述;store 消费 agent_status 事件,不落库) */
 const lastAgentStatus = computed(() => store.lastAgentStatus);
@@ -59,6 +62,42 @@ const planRendered = computed<RenderedStep[]>(() =>
     html: s.result ? renderMarkdown(s.result) : '',
   })),
 );
+
+// ----- 自定义流程的运行态节点徽标(遗留.md IFW-5)-----
+/**
+ * 逐行徽标(下标与 plan 对齐;空数组 = 该行不显示)。
+ *
+ * 映射只认 `node_id`:plan 行由**过滤后的启用步骤**构造,plan 下标 ≠ 流程数组下标,
+ * 按下标对齐会在停了中间步骤时整条串位。降级规则(库没加载/流程不在库/旧任务没带
+ * node_id/节点已删除 → 不显示)收在 utils/flowNodeBadges 的 `planRowBadges`。
+ */
+const planBadges = computed<NodeBadge[][]>(() => {
+  const lib = agentFlowLibrary.value;
+  if (taskMode.value !== 'custom' || !lib) {
+    return (currentTask.value?.task.plan ?? []).map(() => []);
+  }
+  return (currentTask.value?.task.plan ?? []).map((s) =>
+    planRowBadges(lib.flows, lib.current_flow_id, s.node_id),
+  );
+});
+
+/**
+ * 徽标需要流程库,而任务模式此前不会加载它(只有设置区打开时才拉)。这里在遇到 custom
+ * 任务且库为空时惰性拉一次:失败保持 null(徽标不显示),不影响任务展示本身
+ * ——徽标是锦上添花,不能因它让详情区报错。
+ *
+ * 不用 `watch(immediate: true)`:那会在 SSR 期间就发请求,而本组件的 SSR 冒烟测试
+ * 依赖「服务端不发请求」这一既有约定(任务详情只在客户端看)。改为挂载时检查一次 +
+ * 之后随任务/模式变化检查——两个入口都只在客户端生效。
+ *
+ * 已知边界:读的是**当前**流程库,而任务与流程的绑定要等批次 5a(`flow_id` + 快照),
+ * 故「跑完任务后改了流程/换了当前流程」时徽标可能缺失或与当时编排不符。
+ */
+function ensureFlowLib(): void {
+  if (taskMode.value === 'custom' && !agentFlowLibrary.value) void store.loadAgentFlow();
+}
+onMounted(ensureFlowLib);
+watch([taskMode, currentTaskId], ensureFlowLib);
 
 /** 当前任务是否处于计划待批准(plan 模式 run 后的暂停态) */
 const taskPlanned = computed(() => currentTask.value?.task.status === 'planned');
@@ -634,6 +673,14 @@ async function removeTask(task: TaskRecord): Promise<void> {
                 <div class="sv-task-step-name">
                   {{ rs.step.name }}
                   <span class="sv-tag sm" :class="statusClass(rs.step.status)">{{ statusLabel(rs.step.status) }}</span>
+                  <!-- 编排徽标(遗留.md IFW-5):按 node_id 对回流程节点,显示层级/档位/子流程/成果。
+                       对不上就不显示(旧任务、节点已删、流程库没加载) -->
+                  <span
+                    v-for="(badge, bi) in planBadges[i]"
+                    :key="bi"
+                    class="sv-tag sm flow-node-tag"
+                    :class="badge.kind"
+                  >{{ badge.text }}</span>
                 </div>
                 <!-- 步骤目标(plan 模式待批准清单的完整内容:名称+目标;
                      批准后/完成后同区持续显示,状态徽标与 result 随 SSE 刷新实时反映) -->
@@ -822,5 +869,34 @@ async function removeTask(task: TaskRecord): Promise<void> {
 @keyframes sv-progress-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
+}
+
+/* 自定义流程的运行态节点徽标(遗留.md IFW-5):与画布节点卡片的 .flow-tag 同一套
+   配色语义(层级灰、严格虚线、子流程实底粉、成果粉线、停用淡),但类名独立——
+   那边是 scoped 到 AgentFlowNodeCard 的,跨组件复用会被样式隔离挡掉。 */
+.sv-task-step-name .flow-node-tag {
+  margin-left: 2px;
+}
+.flow-node-tag.level {
+  border-color: transparent;
+  color: var(--sv-ink-faint);
+}
+.flow-node-tag.strict {
+  border-style: dashed;
+  color: var(--sv-ink-dim);
+}
+.flow-node-tag.sub {
+  border-color: var(--sv-pink-dark);
+  background: var(--sv-pink-light);
+  color: var(--sv-ink);
+}
+.flow-node-tag.out {
+  border-color: var(--sv-pink-dark);
+  color: var(--sv-pink-dark);
+  font-weight: 700;
+}
+.flow-node-tag.off {
+  border-color: var(--sv-ink-faint);
+  color: var(--sv-ink-faint);
 }
 </style>

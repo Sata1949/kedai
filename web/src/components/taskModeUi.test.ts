@@ -3,9 +3,10 @@ import { createSSRApp, h, type Component } from 'vue';
 import { renderToString } from 'vue/server-renderer';
 import { createPinia, setActivePinia, type Pinia } from 'pinia';
 import { useTaskStore } from '../stores/task';
+import { useGenSettingsStore } from '../stores/genSettings';
 import TaskBoard from './TaskBoard.vue';
 import TaskModeSelect from './TaskModeSelect.vue';
-import type { TaskDetail, TaskRecord, TaskRunMode, TaskStep, TaskStatus } from '../api';
+import type { AgentFlowLibrary, TaskDetail, TaskRecord, TaskRunMode, TaskStep, TaskStatus } from '../api';
 
 // 批次 4 六模式 UI 冒烟测试:项目无 jsdom / @vue/test-utils,沿用 settingsSections.test.ts 的
 // SSR 模式(createSSRApp + renderToString)。SSR 不触发 onMounted,组件不发请求;
@@ -382,5 +383,97 @@ describe('TaskBoard F7:legacy 子任务区去重', () => {
     );
     expect(html).toContain('子任务执行');
     expect(html).toContain('开场白');
+  });
+});
+
+// ==================== 运行态节点徽标(遗留.md IFW-5)====================
+
+/** 二维流程库:两源 → 合并(严格 + 显式成果) */
+function seedFlowLib(library: AgentFlowLibrary | null): void {
+  useGenSettingsStore().agentFlowLibrary = library;
+}
+
+/**
+ * 抽出 HTML 里全部节点徽标的 kind 类(按出现顺序)。
+ * 渲染形态是 `<span class="<kind> sv-tag sm flow-node-tag">`(Vue 把 `:class` 的动态值
+ * 排在静态 class 之前),故按整段 class 属性匹配,不依赖类名顺序之外的写法。
+ */
+function nodeBadgeKinds(html: string): string[] {
+  return [...html.matchAll(/class="([^"]*flow-node-tag[^"]*)"/g)].map((m) =>
+    m[1].split(/\s+/).find((c) => c !== 'sv-tag' && c !== 'sm' && c !== 'flow-node-tag') ?? '',
+  );
+}
+
+function badgeLib(): AgentFlowLibrary {
+  return {
+    current_flow_id: 'f1',
+    flows: [
+      {
+        id: 'f1',
+        name: '主流程',
+        enabled: true,
+        steps: [
+          { id: 'n-a', name: '起头', enabled: true, goal: 'g', action: 'direct', generates: true },
+          { id: 'n-b', name: '收尾', enabled: true, goal: 'g', action: 'direct', generates: true, kind: 'strict', is_output: true, inputs: ['n-a'] },
+        ],
+      },
+    ],
+  };
+}
+
+describe('TaskBoard 流程步骤的节点徽标(IFW-5)', () => {
+  it('custom 任务按 node_id 对回节点,显示层级/档位/成果', async () => {
+    const plan: TaskStep[] = [
+      { name: '起头', goal: 'g', status: 'done', result: '', node_id: 'n-a' },
+      { name: '收尾', goal: 'g', status: 'running', result: '', node_id: 'n-b' },
+    ];
+    const html = await render(TaskBoard, (p) => {
+      seedCurrentTask(p, makeDetail(makeTask('running', 'custom', plan)));
+      seedFlowLib(badgeLib());
+    });
+    expect(html).toContain('流程步骤进度');
+    // 四类徽标文案都在,且 kind 类真拼进了 class 属性(kindBadges 抽的是类名;
+    // 只断言文案会漏掉「kind 没上去 → 样式不生效」)
+    expect(html).toContain('第 1 层');
+    expect(html).toContain('第 2 层');
+    expect(html).toContain('严格');
+    expect(nodeBadgeKinds(html)).toEqual(['level', 'level', 'strict', 'out']);
+  });
+
+  it('node_id 对不上(节点已删除)时不显示任何编排徽标', async () => {
+    const plan: TaskStep[] = [
+      { name: '幽灵步', goal: 'g', status: 'done', result: '', node_id: 'gone' },
+    ];
+    const html = await render(TaskBoard, (p) => {
+      seedCurrentTask(p, makeDetail(makeTask('done', 'custom', plan)));
+      seedFlowLib(badgeLib());
+    });
+    expect(html).toContain('流程步骤进度');
+    // 按徽标 class 断言,而不是页面上的任意文案(「最终成果」区块标题也含「成果」二字)
+    expect(nodeBadgeKinds(html)).toEqual([]);
+  });
+
+  it('旧任务没有 node_id(且流程库未加载)时零噪音:只有状态徽标', async () => {
+    const plan: TaskStep[] = [
+      { name: '旧步骤', goal: 'g', status: 'done', result: '' },
+    ];
+    const html = await render(TaskBoard, (p) => {
+      seedCurrentTask(p, makeDetail(makeTask('done', 'custom', plan)));
+      seedFlowLib(null);
+    });
+    expect(html).toContain('流程步骤进度');
+    expect(nodeBadgeKinds(html)).toEqual([]);
+  });
+
+  it('非 custom 模式即便带了 node_id 也不显示(徽标属流程专属)', async () => {
+    const plan: TaskStep[] = [
+      { name: '步骤一', goal: 'g', status: 'done', result: '', node_id: 'n-a' },
+    ];
+    const html = await render(TaskBoard, (p) => {
+      seedCurrentTask(p, makeDetail(makeTask('done', 'solo', plan)));
+      seedFlowLib(badgeLib());
+    });
+    expect(html).toContain('计划步骤');
+    expect(nodeBadgeKinds(html)).toEqual([]);
   });
 });

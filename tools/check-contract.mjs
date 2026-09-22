@@ -84,6 +84,44 @@ const MAPPINGS = [
     ts: { file: 'web/src/api/types.ts', name: 'TaskStatus', kind: 'union' },
   },
   {
+    // 此前标在 `契约.md` 的「机检状态总表」里为**缺口**(有 serde 快照、无跨端集合比对):
+    // plan JSON 的反序列化走 from_str_lossy 容错回退,前端手写 union 若漏一个取值,
+    // 界面会把合法状态显示成未知。
+    label: '任务步骤状态枚举',
+    rust: { file: 'server-rs/src/models/types.rs', name: 'TaskStepStatus' },
+    ts: { file: 'web/src/api/types.ts', name: 'TaskStepStatus', kind: 'union' },
+  },
+  {
+    // 同上(缺口的另一半):子任务状态比步骤多一个 ended。
+    label: '任务子任务状态枚举',
+    rust: { file: 'server-rs/src/models/types.rs', name: 'TaskSubtaskStatus' },
+    ts: { file: 'web/src/api/types.ts', name: 'TaskSubtaskStatus', kind: 'union' },
+  },
+  {
+    // 自定义流程的节点契约(遗留.md IFW-7②):此前「后端加字段、前端漏加」只能靠人
+    // 核对(6b 的 sub_flow_id 就是手工同步的)。节点是双路径共享结构——任务 custom 与
+    // 聊天 agent_mode=custom 吃同一份,漏一个字段会静默丢掉该节点的配置。
+    label: '流程节点',
+    rust: { file: 'server-rs/src/models/types.rs', name: 'PlanStep' },
+    ts: { file: 'web/src/api/types.ts', name: 'AgentFlowStep', kind: 'interface' },
+  },
+  {
+    label: '流程配置',
+    rust: {
+      file: 'server-rs/src/services/agent_flow_service.rs',
+      name: 'AgentFlowConfig',
+    },
+    ts: { file: 'web/src/api/types.ts', name: 'AgentFlowConfig', kind: 'interface' },
+  },
+  {
+    label: '流程库',
+    rust: {
+      file: 'server-rs/src/services/agent_flow_service.rs',
+      name: 'AgentFlowLibrary',
+    },
+    ts: { file: 'web/src/api/types.ts', name: 'AgentFlowLibrary', kind: 'interface' },
+  },
+  {
     // SSE 顶层事件判别式联合(Rust `#[serde(tag="type")]` ↔ TS 判别式联合)。
     // 此前**未登记**:新增一个顶层事件要手改 Rust 枚举 + TS 手写 union + 前端两个 switch
     // (sseReducer.ts / stores/task.ts)共 3 处,其中 Rust→TS 这一步完全靠人,漏改不报错。
