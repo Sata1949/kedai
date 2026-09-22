@@ -140,6 +140,29 @@ describe('api/tasks REST 封装', () => {
     });
   });
 
+  it('createTask 的 flowId 仅在显式给出时下发(二维批次 5a 流程绑定)', async () => {
+    const lastCreateBody = (): Record<string, unknown> => {
+      const posts = vi.mocked(fetch).mock.calls.filter(
+        ([input, init]) => String(input) === '/api/tasks' && (init?.method ?? 'GET') === 'POST',
+      );
+      return JSON.parse(String(posts[posts.length - 1]?.[1]?.body)) as Record<string, unknown>;
+    };
+
+    // 不传(= 跟随当前流程):请求体不得出现 flow_id 键,旧客户端请求体逐字节不变
+    await createTask('目标', undefined, 'custom');
+    expect(lastCreateBody()).not.toHaveProperty('flow_id');
+    expect(lastCreateBody()).toEqual({ title: '目标', executor_id: null, task_mode: 'custom' });
+
+    // 显式传:随请求下发(后端据此在创建时冻结快照)
+    await createTask('目标', undefined, 'custom', undefined, 'flow-b');
+    expect(lastCreateBody()).toEqual({
+      title: '目标',
+      executor_id: null,
+      task_mode: 'custom',
+      flow_id: 'flow-b',
+    });
+  });
+
   it('approveTask:POST /tasks/{id}/approve;不给 plan 时空体,给了 plan 则带 plan 字段', async () => {
     const plan: TaskStep[] = [{ name: '步骤一', goal: '目标一', status: 'pending', result: '' }];
     const r1 = await approveTask('t1');

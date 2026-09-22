@@ -19,6 +19,8 @@ import {
 const APP_MODE_KEY = 'kedai.appMode';
 /** 新建任务模式持久化键(批次 4 六模式):刷新后保持上次选择 */
 const TASK_RUN_MODE_KEY = 'kedai.taskRunMode.v1';
+/** 新建任务绑定的流程持久化键(二维批次 5a):刷新后保持上次选择;空 = 跟随当前流程 */
+const TASK_FLOW_ID_KEY = 'kedai.taskFlowId.v1';
 /** 当前选中任务持久化键(实跑问题 4):重启后恢复上次查看的任务详情与调用记录 */
 const CURRENT_TASK_KEY = 'kedai.currentTaskId.v1';
 
@@ -71,12 +73,32 @@ function readStoredTaskRunMode(): api.TaskRunMode {
   }
 }
 
+/**
+ * 读取持久化的流程绑定(二维批次 5a)。
+ *
+ * 这里**不校验该 id 是否还在流程库里**:库里没有它的原因可能只是「流程库还没加载」,
+ * 静默把它清成「跟随当前流程」会让用户下次建任务时跑到别的编排上。
+ * 失效由选择器组件如实显示(`(已失效) <id>`),绑定是否可用最终由后端判定。
+ */
+function readStoredTaskFlowId(): string {
+  try {
+    return (localStorage.getItem(TASK_FLOW_ID_KEY) ?? '').trim();
+  } catch {
+    return '';
+  }
+}
+
 export const useTaskStore = defineStore('app.task', () => {
   // ===== 状态 =====
   /** 顶层模式:roleplay = 角色扮演,task = 任务工作台;持久化到 localStorage */
   const appMode = ref<'roleplay' | 'task'>(readStoredAppMode());
   /** 新建任务的执行模式(批次 4 六模式;持久化到 localStorage,写时经 watch) */
   const taskRunMode = ref<api.TaskRunMode>(readStoredTaskRunMode());
+  /**
+   * 新建任务**绑定的流程**(二维批次 5a;空串 = 跟随当前流程;持久化到 localStorage)。
+   * 只在 custom 模式下由选择器改写;切到别的模式时不重置(用户切回来仍是原绑定)。
+   */
+  const taskFlowId = ref<string>(readStoredTaskFlowId());
   const tasks = ref<api.TaskRecord[]>([]);
   const currentTaskId = ref<string | null>(null);
   /** 当前任务详情(含子任务) */
@@ -177,6 +199,17 @@ export const useTaskStore = defineStore('app.task', () => {
     }
   }
   watch(taskRunMode, persistTaskRunMode);
+
+  /** 持久化流程绑定(与 taskRunMode 同款容错:写失败静默) */
+  function persistTaskFlowId(): void {
+    try {
+      if (taskFlowId.value) localStorage.setItem(TASK_FLOW_ID_KEY, taskFlowId.value);
+      else localStorage.removeItem(TASK_FLOW_ID_KEY);
+    } catch {
+      /* 忽略 */
+    }
+  }
+  watch(taskFlowId, persistTaskFlowId);
 
   // ===== 加载(in-flight 合并防事件风暴) =====
 
@@ -526,9 +559,16 @@ export const useTaskStore = defineStore('app.task', () => {
   // ===== CRUD(本地乐观更新保留;状态变化由 SSE 事件驱动后续刷新,不再合成伪事件) =====
 
   /** 新建任务。`executorId` 为执行者库 id(缺省 = 通用执行者);
-   *  执行者与角色扮演角色卡已解耦,本入口不再接受 characterId。 */
+   *  执行者与角色扮演角色卡已解耦,本入口不再接受 characterId。
+   *  二维批次 5a:custom 模式下 `taskFlowId` 非空即随请求下发(绑定即冻结),空则跟随当前流程。 */
   async function createTask(title: string, executorId?: string): Promise<api.TaskRecord> {
-    const task = await api.createTask(title, executorId, taskRunMode.value);
+    const task = await api.createTask(
+      title,
+      executorId,
+      taskRunMode.value,
+      undefined,
+      taskFlowId.value || undefined,
+    );
     tasks.value = [task, ...tasks.value];
     listSignature = contentSignature(tasks.value); // 本地乐观改写后同步签名(下次事件刷新同内容时不再替换)
     await selectTask(task.id);
@@ -597,6 +637,7 @@ export const useTaskStore = defineStore('app.task', () => {
   return {
     appMode,
     taskRunMode,
+    taskFlowId,
     tasks,
     currentTaskId,
     currentTask,

@@ -40,6 +40,8 @@ const h = vi.hoisted(() => ({
   emitClose: null as null | ((err?: Error) => void),
   /** createTask 收到的 task_mode 参数序列(批次 4 透传断言用) */
   createTaskModes: [] as (string | undefined)[],
+  /** createTask 收到的 flow_id 参数序列(二维批次 5a 绑定透传断言用) */
+  createTaskFlowIds: [] as (string | undefined)[],
   /** approveTask 收到的 (id, plan) 参数序列(批次 4 批准断言用) */
   approveCalls: [] as Array<{ id: string; plan?: TaskStep[] }>,
   /** followupTask 收到的 (id, content, mode) 参数序列(批次 R2a;R2b+ 扩 mode) */
@@ -81,8 +83,9 @@ vi.mock('../api', async (importOriginal) => {
     runTask: vi.fn(async () => {}),
     stopTask: vi.fn(async () => {}),
     deleteTask: vi.fn(async () => {}),
-    createTask: vi.fn(async (title: string, _characterId?: string, taskMode?: string) => {
+    createTask: vi.fn(async (title: string, _characterId?: string, taskMode?: string, _character?: string, flowId?: string) => {
       h.createTaskModes.push(taskMode);
+      h.createTaskFlowIds.push(flowId);
       return makeTask('pending', title);
     }),
     approveTask: vi.fn(async (id: string, plan?: TaskStep[]) => {
@@ -544,6 +547,7 @@ describe('批次 4 六模式:taskRunMode / approveTask / 新事件分支', () =>
     h.emitEvent = null;
     h.emitClose = null;
     h.createTaskModes = [];
+    h.createTaskFlowIds = [];
     h.approveCalls = [];
     h.followupCalls = [];
     h.planChatCalls = [];
@@ -575,6 +579,39 @@ describe('批次 4 六模式:taskRunMode / approveTask / 新事件分支', () =>
     memStorage.set('kedai.taskRunMode.v1', 'bogus');
     setActivePinia(createPinia());
     expect(useTaskStore().taskRunMode, '未知模式值应回退 legacy').toBe('legacy');
+  });
+
+  // ===== 二维批次 5a:任务绑定流程(flow_id)=====
+
+  it('taskFlowId 缺省为空(= 跟随当前流程);写入持久化到 kedai.taskFlowId.v1;createTask 透传 flow_id', async () => {
+    const store = useTaskStore();
+    expect(store.taskFlowId, '缺省不绑定流程').toBe('');
+
+    store.taskFlowId = 'flow-b';
+    await flush(); // watch 持久化
+    expect(memStorage.get('kedai.taskFlowId.v1')).toBe('flow-b');
+
+    store.taskRunMode = 'custom';
+    await store.createTask('绑定流程的目标');
+    expect(h.createTaskFlowIds, 'createTask 应透传绑定的 flow_id').toEqual(['flow-b']);
+
+    // 清空绑定(回到跟随当前流程):落盘键应被移除,且请求里不下发 flow_id
+    store.taskFlowId = '';
+    await flush();
+    expect(memStorage.has('kedai.taskFlowId.v1'), '空绑定应清掉持久化键').toBe(false);
+    await store.createTask('跟随当前流程的目标');
+    expect(h.createTaskFlowIds[1]).toBeUndefined();
+  });
+
+  it('localStorage 中的绑定在 store 初始化时恢复(库是否加载不影响取值)', async () => {
+    memStorage.set('kedai.taskFlowId.v1', 'flow-restored');
+    setActivePinia(createPinia());
+    expect(useTaskStore().taskFlowId, '刷新后应保持上次绑定').toBe('flow-restored');
+
+    // 库还没加载时也照原样保留:静默清空会让下次建任务跑到别的编排上
+    memStorage.set('kedai.taskFlowId.v1', '  ');
+    setActivePinia(createPinia());
+    expect(useTaskStore().taskFlowId, '空白值按未绑定处理').toBe('');
   });
 
   it('approveTask 透传 (id, plan) 并在成功后刷新任务详情;不给 plan 时 plan 为 undefined', async () => {

@@ -3,8 +3,13 @@
 // 关键事实:plan 行由**过滤后的启用步骤**构造,plan 下标 ≠ 流程数组下标——故映射只认
 // `node_id`。本文件既锁「对得上时显示什么」,也锁「对不上时不显示、不猜」的降级三档。
 import { describe, expect, it } from 'vitest';
-import { nodeBadges, planRowBadges, findNode } from './flowNodeBadges';
-import type { AgentFlowConfig, AgentFlowStep } from '../api/types';
+import { badgeFlowSource, nodeBadges, planRowBadges, findNode } from './flowNodeBadges';
+import type {
+  AgentFlowConfig,
+  AgentFlowLibrary,
+  AgentFlowStep,
+  TaskFlowSnapshot,
+} from '../api/types';
 
 function step(over: Partial<AgentFlowStep> & { id: string }): AgentFlowStep {
   return { name: over.id, enabled: true, goal: 'g', action: 'direct', generates: true, ...over };
@@ -90,5 +95,42 @@ describe('planRowBadges plan 行的三档降级', () => {
     expect(planRowBadges([flow()], 'f1', null)).toEqual([]);     // 旧任务的 plan 行
     expect(planRowBadges([flow()], 'f1', undefined)).toEqual([]);
     expect(planRowBadges([flow()], 'f1', 'deleted-node')).toEqual([]);
+  });
+});
+
+// 二维批次 5a:徽标数据源 = 任务快照优先、当前流程库兜底。
+// 这条规则是「跑完任务后改流程/换当前流程 → 徽标漂移」的收口点(裁定 19 连带口径)。
+describe('badgeFlowSource 数据源择一', () => {
+  const snapshot: TaskFlowSnapshot = { root_id: 'f1', flows: [flow()] };
+  const library: AgentFlowLibrary = { current_flow_id: 'f1', flows: [flow()] };
+
+  it('任务快照优先:当前库指向别处时仍用快照的编排', () => {
+    const other = { ...flow(), id: 'f9', name: '另一份流程' };
+    const src = badgeFlowSource(snapshot, { current_flow_id: 'f9', flows: [other] });
+    expect(src, '应取快照而非当前库').toEqual({ flows: snapshot.flows, rootId: 'f1' });
+    // 用快照的节点算徽标:改/换当前流程后节点仍能对上(这正是本批要的行为)
+    expect(planRowBadges(snapshot.flows, snapshot.root_id, 'c').map((b) => b.text)).toContain('成果');
+  });
+
+  it('无快照(本批之前的旧任务)→ 回退当前流程库,行为与本批之前一致', () => {
+    expect(badgeFlowSource(null, library)).toEqual({ flows: library.flows, rootId: 'f1' });
+    expect(badgeFlowSource(undefined, library)).toEqual({ flows: library.flows, rootId: 'f1' });
+  });
+
+  it('快照在手时不依赖流程库(库为 null 也照常出徽标)', () => {
+    expect(badgeFlowSource(snapshot, null)).toEqual({ flows: snapshot.flows, rootId: 'f1' });
+    expect(planRowBadges(snapshot.flows, snapshot.root_id, 'c').map((b) => b.text)).toEqual([
+      '第 2 层',
+      '严格',
+      '成果',
+    ]);
+  });
+
+  it('两个数据源都没有 → null;库没有当前流程 → rootId 为 null(都不显示徽标)', () => {
+    expect(badgeFlowSource(null, null)).toBeNull();
+    expect(badgeFlowSource(undefined, undefined)).toBeNull();
+    const lib = { flows: [flow()], current_flow_id: null };
+    expect(badgeFlowSource(null, lib)).toEqual({ flows: lib.flows, rootId: null });
+    expect(planRowBadges(lib.flows, null, 'c')).toEqual([]);
   });
 });

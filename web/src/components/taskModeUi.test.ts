@@ -476,4 +476,62 @@ describe('TaskBoard 流程步骤的节点徽标(IFW-5)', () => {
     expect(html).toContain('计划步骤');
     expect(nodeBadgeKinds(html)).toEqual([]);
   });
+
+  // ===== 二维批次 5a:徽标与流程名改读**任务快照**(收口裁定 19 的连带口径)=====
+
+  /** 带绑定与快照的任务详情(计划行 node_id 指向 `badgeLib` 的节点) */
+  function boundDetail(plan: TaskStep[], snapshotFlows = badgeLib().flows): TaskDetail {
+    const detail = makeDetail(makeTask('done', 'custom', plan));
+    detail.task.flow_id = 'f1';
+    detail.flow_snapshot = { root_id: 'f1', flows: snapshotFlows };
+    return detail;
+  }
+
+  const boundPlan: TaskStep[] = [
+    { name: '起头', goal: 'g', status: 'done', result: '', node_id: 'n-a' },
+    { name: '收尾', goal: 'g', status: 'done', result: '', node_id: 'n-b' },
+  ];
+
+  it('快照优先:当前库已换成另一份流程,徽标仍按快照对齐', async () => {
+    const html = await render(TaskBoard, (p) => {
+      seedCurrentTask(p, boundDetail(boundPlan));
+      // 当前库指向另一份流程(节点 id 全不同):读当前库的话一个徽标都对不上
+      seedFlowLib({
+        current_flow_id: 'f9',
+        flows: [
+          {
+            id: 'f9',
+            name: '另一份流程',
+            enabled: true,
+            steps: [
+              { id: 'x', name: '别处节点', enabled: true, goal: 'g', action: 'direct', generates: true, is_output: true },
+            ],
+          },
+        ],
+      });
+    });
+    expect(nodeBadgeKinds(html)).toEqual(['level', 'level', 'strict', 'out']);
+    expect(html).toContain('第 2 层');
+    // 流程名同样取自快照(读当前库会显示「另一份流程」)
+    expect(html).toContain('流程:主流程');
+  });
+
+  it('快照在手时不需要流程库(库未加载照常出徽标与流程名)', async () => {
+    const html = await render(TaskBoard, (p) => {
+      seedCurrentTask(p, boundDetail(boundPlan));
+      seedFlowLib(null);
+    });
+    expect(nodeBadgeKinds(html)).toEqual(['level', 'level', 'strict', 'out']);
+    expect(html).toContain('流程:主流程');
+  });
+
+  it('无快照的旧任务回退当前流程库(本批之前的降级路径保留)', async () => {
+    const html = await render(TaskBoard, (p) => {
+      seedCurrentTask(p, makeDetail(makeTask('done', 'custom', boundPlan)));
+      seedFlowLib(badgeLib());
+    });
+    expect(nodeBadgeKinds(html)).toEqual(['level', 'level', 'strict', 'out']);
+    // 未绑定 → 如实显示「跟随当前流程」
+    expect(html).toContain('流程:跟随当前流程');
+  });
 });

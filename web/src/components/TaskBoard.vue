@@ -10,7 +10,7 @@ import { renderMarkdown } from '../markdown';
 import { splitTaskResult } from '../taskResult';
 import { taskStatusClass as statusClass, taskStatusLabel as statusLabel } from '../taskStatus';
 import { bufferLabel } from '../utils/phaseLabel';
-import { planRowBadges, type NodeBadge } from '../utils/flowNodeBadges';
+import { badgeFlowSource, planRowBadges, type NodeBadge } from '../utils/flowNodeBadges';
 import { APPROVE_EXEC_MODE_LABELS, APPROVE_EXEC_MODE_ORDER, MODE_LABELS, messageKindLabel } from '../api/labels';
 import type { TaskApproveExecMode, TaskRecord, TaskRunMode, TaskStep } from '../api';
 
@@ -63,38 +63,56 @@ const planRendered = computed<RenderedStep[]>(() =>
   })),
 );
 
-// ----- 自定义流程的运行态节点徽标(遗留.md IFW-5)-----
+// ----- 自定义流程的运行态节点徽标(遗留.md IFW-5;二维批次 5a 起读任务快照)-----
 /**
  * 逐行徽标(下标与 plan 对齐;空数组 = 该行不显示)。
  *
  * 映射只认 `node_id`:plan 行由**过滤后的启用步骤**构造,plan 下标 ≠ 流程数组下标,
- * 按下标对齐会在停了中间步骤时整条串位。降级规则(库没加载/流程不在库/旧任务没带
- * node_id/节点已删除 → 不显示)收在 utils/flowNodeBadges 的 `planRowBadges`。
+ * 按下标对齐会在停了中间步骤时整条串位。
+ *
+ * 数据源择一(二维批次 5a):**本任务的流程快照优先**,没有才回退当前流程库——
+ * 于是「跑完任务后改流程 / 换当前流程」不会再让徽标缺失或与当时编排不符。
+ * 降级规则(两个数据源都没有/流程不在其中/旧任务没带 node_id/节点已删除 → 不显示)
+ * 收在 utils/flowNodeBadges 的 `badgeFlowSource` + `planRowBadges`。
  */
 const planBadges = computed<NodeBadge[][]>(() => {
-  const lib = agentFlowLibrary.value;
-  if (taskMode.value !== 'custom' || !lib) {
-    return (currentTask.value?.task.plan ?? []).map(() => []);
+  const rows = currentTask.value?.task.plan ?? [];
+  const source = badgeFlowSource(currentTask.value?.flow_snapshot, agentFlowLibrary.value);
+  if (taskMode.value !== 'custom' || !source) {
+    return rows.map(() => []);
   }
-  return (currentTask.value?.task.plan ?? []).map((s) =>
-    planRowBadges(lib.flows, lib.current_flow_id, s.node_id),
-  );
+  return rows.map((s) => planRowBadges(source.flows, source.rootId, s.node_id));
 });
 
 /**
- * 徽标需要流程库,而任务模式此前不会加载它(只有设置区打开时才拉)。这里在遇到 custom
- * 任务且库为空时惰性拉一次:失败保持 null(徽标不显示),不影响任务展示本身
+ * 当前任务用的流程名(二维批次 5a):绑定流程后显示其名称,未绑定显示「跟随当前流程」。
+ * 流程名从**快照**里查(与徽标同一份编排),快照缺失时才用当前库/流程 id 兜底。
+ */
+const taskFlowLabel = computed<string | null>(() => {
+  if (taskMode.value !== 'custom') return null;
+  const task = currentTask.value?.task;
+  if (!task) return null;
+  const boundId = task.flow_id;
+  if (!boundId) return '跟随当前流程';
+  const source = badgeFlowSource(currentTask.value?.flow_snapshot, agentFlowLibrary.value);
+  const name = source?.flows.find((f) => f.id === boundId)?.name;
+  return name && name.trim() ? name : boundId;
+});
+
+/**
+ * 徽标/流程名需要流程库,而任务模式此前不会加载它(只有设置区打开时才拉)。这里在
+ * 遇到 custom 任务时惰性拉一次:**已有任务快照就不拉**(快照是自足的数据源,少一次请求,
+ * 也不会被「当前库已被改过」误导);拉取失败保持 null(徽标不显示),不影响任务展示本身
  * ——徽标是锦上添花,不能因它让详情区报错。
  *
  * 不用 `watch(immediate: true)`:那会在 SSR 期间就发请求,而本组件的 SSR 冒烟测试
  * 依赖「服务端不发请求」这一既有约定(任务详情只在客户端看)。改为挂载时检查一次 +
  * 之后随任务/模式变化检查——两个入口都只在客户端生效。
- *
- * 已知边界:读的是**当前**流程库,而任务与流程的绑定要等批次 5a(`flow_id` + 快照),
- * 故「跑完任务后改了流程/换了当前流程」时徽标可能缺失或与当时编排不符。
  */
 function ensureFlowLib(): void {
-  if (taskMode.value === 'custom' && !agentFlowLibrary.value) void store.loadAgentFlow();
+  if (taskMode.value !== 'custom') return;
+  if (currentTask.value?.flow_snapshot) return;
+  if (!agentFlowLibrary.value) void store.loadAgentFlow();
 }
 onMounted(ensureFlowLib);
 watch([taskMode, currentTaskId], ensureFlowLib);
@@ -491,6 +509,13 @@ async function removeTask(task: TaskRecord): Promise<void> {
               {{ statusLabel(currentTask.task.status) }}
             </span>
             <span class="sv-tag sm" title="任务执行模式(批次 4 六模式)">模式:{{ taskModeLabel }}</span>
+            <!-- 本任务用的流程(二维批次 5a):绑定流程显示其名,未绑定显示「跟随当前流程」。
+                 名字取自任务快照(与徽标同一份编排),故跑完任务后再改流程这里也不会变 -->
+            <span
+              v-if="taskFlowLabel"
+              class="sv-tag sm"
+              title="本任务绑定/使用的流程(绑定即冻结:创建时的编排;未绑定 = 跟随当前流程)"
+            >流程:{{ taskFlowLabel }}</span>
             <span v-if="taskTotalTokens > 0" class="sv-task-usage">累计 token {{ taskTotalTokens.toLocaleString() }}</span>
             <span v-if="currentTask.task.error" class="sv-task-error">{{ currentTask.task.error }}</span>
           </div>

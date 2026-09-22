@@ -19,13 +19,16 @@ export async function listTasks(): Promise<TaskRecord[]> {
  * - `executorId`:执行者库 id(可选,缺省 = 通用执行者);
  * - `characterId`:**兼容入参**,旧形态(角色卡执行者),新代码不应使用——
  *   执行者已与角色扮演角色卡解耦,该字段仅为旧调用方保留(两者同时给出时执行者优先);
- * - `taskMode`:批次 4 六模式,缺省 legacy。
+ * - `taskMode`:批次 4 六模式,缺省 legacy;
+ * - `flowId`:二维批次 5a 的**流程绑定**(可选;仅 custom 模式可给,缺省 = 跟随当前流程)。
+ *   仅在显式给出时下发,旧调用方请求体不变。
  */
 export async function createTask(
   title: string,
   executorId?: string,
   taskMode?: TaskRunMode,
   characterId?: string,
+  flowId?: string,
 ): Promise<TaskRecord> {
   const data = await request<unknown>('/tasks', {
     method: 'POST',
@@ -35,6 +38,8 @@ export async function createTask(
       task_mode: taskMode ?? 'legacy',
       // 兼容入参:仅在显式给出时下发,避免污染新请求
       ...(characterId ? { character_id: characterId } : {}),
+      // 流程绑定:空串 = 跟随当前流程(不下发该键)
+      ...(flowId ? { flow_id: flowId } : {}),
     }),
   });
   return requireObjectField<TaskRecord>(data, 'task', '任务');
