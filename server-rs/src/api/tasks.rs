@@ -30,6 +30,14 @@ pub struct CreateTaskBody {
     /// DB 读取侧的容错回退(from_str_lossy)不用于 API 入参。
     #[serde(default)]
     pub task_mode: Option<String>,
+    /// **绑定的自定义流程 id**(二维批次 5a;仅 custom 模式可用,缺省 = 跟随当前流程)。
+    ///
+    /// 可选 = 旧客户端行为不变。给了就「绑定即冻结」:创建时按该流程落一份快照
+    /// (存在 + 启用 + 结构 + 可达引用链校验,失败 400 且**不建行**),此后改流程 /
+    /// 换当前流程都不影响这个任务。非 custom 模式给了该字段 → 400(不接受
+    /// 「字段存在但静默无效」)。
+    #[serde(default)]
+    pub flow_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -88,6 +96,7 @@ pub async fn create(
     let svc = state.tasks.clone();
     let executor_id = body.executor_id.clone();
     let character_id = body.character_id.clone();
+    let flow_id = body.flow_id.clone();
     match state
         .db_call(move || {
             svc.create(
@@ -95,6 +104,7 @@ pub async fn create(
                 executor_id.as_deref(),
                 character_id.as_deref(),
                 mode,
+                flow_id.as_deref(),
             )
         })
         .await
@@ -117,17 +127,23 @@ pub async fn get(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> 
                 // 批次 R2:用户指令历史(followup 追加 / plan_chat 规划对话),
                 // created_at 升序;无消息任务为空数组(前端零特判)
                 let messages = svc.list_task_messages(&task.id);
-                (task, subtasks, p, c, r, messages)
+                // 二维批次 5a:本任务的流程快照(入口 + 可达子流程闭包)。
+                // 只在**详情**下发(列表接口不带——快照是 O(流程库) 体积);
+                // 未绑定且未跑过的任务为 None(前端按 optional 容错,零噪音)。
+                // 运行态徽标读它而不是「当前流程库」,于是改流程/换当前流程都不再让徽标漂移。
+                let flow_snapshot = svc.flow_snapshot(&task.id);
+                (task, subtasks, p, c, r, messages, flow_snapshot)
             })
         })
         .await
     {
         Err(e) => db_err(&e),
-        Ok(Some((task, subtasks, p, c, r, messages))) => Json(json!({
+        Ok(Some((task, subtasks, p, c, r, messages, flow_snapshot))) => Json(json!({
             "task": task,
             "subtasks": subtasks,
             "usage_total": { "prompt_tokens": p, "completion_tokens": c, "reasoning_tokens": r },
             "messages": messages,
+            "flow_snapshot": flow_snapshot,
         }))
         .into_response(),
         Ok(None) => not_found("任务不存在"),

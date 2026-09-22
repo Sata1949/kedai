@@ -53,10 +53,74 @@ impl AgentFlowService {
         walk_sub_flows_from(&flow_index(&self.library), config, &self.registered_tools)
     }
 
-    /// 只做**结构**校验(不含子流程引用链):被引用流程的运行期校验用。
-    /// 见 [`validate`] 的两层口径——环/深度由保存期全库校验与运行期调用链守卫兜住。
-    pub fn validate_structure(&self, config: &AgentFlowConfig) -> Result<(), String> {
-        validate_flow(config, &self.registered_tools)
+    /// 校验一份**冻结快照**自身(二维批次 5a:绑定任务的执行前校验)。
+    /// 收在服务内,调用方无须知道注册工具集从哪来;规则见 [`validate_snapshot`]。
+    pub fn validate_task_snapshot(&self, snapshot: &FlowSnapshot) -> Result<(), String> {
+        validate_snapshot(snapshot, &self.registered_tools)
+    }
+
+    /// 当前流程 → 任务用快照(二维批次 5a:未绑定任务的执行前解析口径)。
+    ///
+    /// 与 [`snapshot_for`] 的差别只在「取哪一份流程」:本方法是「跟随当前流程」分支,
+    /// 故保留 current_flow 的既有语义(**要求 enabled**),校验与闭包收集同一套。
+    pub fn current_snapshot(&self) -> Result<FlowSnapshot, String> {
+        let cfg = self.get().ok_or("请先在设置中启用一个 Agent 流程")?;
+        if !cfg.enabled {
+            return Err("当前 Agent 流程未启用,请在设置中开启后再运行 custom 模式".into());
+        }
+        self.build_snapshot(cfg)
+    }
+
+    /// 绑定流程 id → 任务用快照(二维批次 5a:任务创建期与绑定任务的执行前解析)。
+    ///
+    /// 与「当前流程」同一取用纪律:要求该流程存在且**已启用**(未启用即拒绝绑定,
+    /// 避免任务建好一跑就 error),校验口径与 [`validate`] 一致(结构 + 从入口起可达的
+    /// 引用链,不看库里无关流程的脏数据)。
+    pub fn snapshot_for(&self, flow_id: &str) -> Result<FlowSnapshot, String> {
+        let cfg = self
+            .flow_by_id(flow_id)
+            .ok_or_else(|| format!("所选流程不存在:{flow_id}"))?;
+        if !cfg.enabled {
+            return Err(format!(
+                "所选流程「{}」未启用,请先在设置中开启后再绑定",
+                flow_label(cfg)
+            ));
+        }
+        self.build_snapshot(cfg)
+    }
+
+    /// 校验一份流程 + 收集它的子流程闭包(两条入口共用的实现)。
+    fn build_snapshot(&self, root: &AgentFlowConfig) -> Result<FlowSnapshot, String> {
+        self.validate(root)?;
+        Ok(self.sub_flow_closure(root))
+    }
+
+    /// 入口流程 + **可达子流程闭包**(入口恒为首个;其余按「发现顺序」= 逐层按引用声明顺序)。
+    ///
+    /// 复用 `sub_flow_edges` 这一条「什么算被引用」的判定(与保存期校验、删除保护同源),
+    /// 因此闭包与校验对「可达」的理解不可能分叉;环/深度由调用方的 [`validate`] 挡住,
+    /// 这里只做收集(`seen` 去重,不会死循环;悬空引用也在 validate 处拦下)。
+    fn sub_flow_closure(&self, root: &AgentFlowConfig) -> FlowSnapshot {
+        let by_id = flow_index(&self.library);
+        let mut flows: Vec<AgentFlowConfig> = vec![root.clone()];
+        let mut seen: BTreeSet<String> = BTreeSet::from([root.id.clone()]);
+        let mut cursor = 0usize;
+        while cursor < flows.len() {
+            let sub_ids = sub_flow_ids(&flows[cursor]);
+            cursor += 1;
+            for sub_id in sub_ids {
+                if !seen.insert(sub_id.clone()) {
+                    continue;
+                }
+                if let Some(cfg) = by_id.get(sub_id.as_str()) {
+                    flows.push((*cfg).clone());
+                }
+            }
+        }
+        FlowSnapshot {
+            root_id: root.id.clone(),
+            flows,
+        }
     }
 
     /// 聊天侧执行快照(二维批次 6b):当前流程的启用步骤 + 子流程展开。
@@ -199,6 +263,59 @@ pub struct AgentFlowConfig {
 /// 并行 = 成本倍增,故默认保守取 2,并在前端给出提示)
 pub const DEFAULT_MAX_PARALLEL_NODES: u32 = 2;
 pub const MAX_PARALLEL_NODES_LIMIT: u32 = 8;
+
+/// **任务用的流程快照**(二维批次 5a):入口流程 + 其**可达子流程闭包**,一次性冻结。
+///
+/// 为什么冻结**闭包**而不只记一个 id:运行期的子图解析原本按 id 回读流程库,于是
+/// 「改一个被挂载的子流程」会悄悄改变已建任务的行为——跨流程生效、最难排查。
+/// 冻结闭包后,任务跑过一次(或创建时绑定)就与流程库解耦:改库、换当前流程、
+/// 甚至删掉那份流程,都不再影响它。
+///
+/// 落库形态:整段 JSON 存 `tasks.flow_snapshot` 列(**不进**任务列表查询的列清单
+/// ——快照是 O(流程库) 体积);下发形态:任务详情顶层 `flow_snapshot` 字段。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlowSnapshot {
+    /// 入口流程 id(运行期解析的根;`flows` 中必有其一与之相等)
+    pub root_id: String,
+    /// 入口流程 + 可达子流程闭包(入口恒为首个;其余按发现顺序)
+    pub flows: Vec<AgentFlowConfig>,
+}
+
+impl FlowSnapshot {
+    /// 入口流程(快照自洽时必然存在;缺失即数据损坏,调用方按错误处理)
+    pub fn root(&self) -> Option<&AgentFlowConfig> {
+        self.flow_by_id(&self.root_id)
+    }
+
+    /// 在**闭包内**按 id 取流程(运行期子图解析用:快照外的一律取不到)
+    pub fn flow_by_id(&self, id: &str) -> Option<&AgentFlowConfig> {
+        self.flows.iter().find(|f| f.id == id)
+    }
+
+    /// 把快照当成一份「独立流程库」:校验复用它,从而不与流程库的实时状态耦合
+    pub fn as_library(&self) -> AgentFlowLibrary {
+        AgentFlowLibrary {
+            current_flow_id: Some(self.root_id.clone()),
+            flows: self.flows.clone(),
+        }
+    }
+}
+
+/// 校验**冻结快照自身**(绑定任务的执行前校验):结构 + 闭包内的引用链。
+///
+/// 与 [`AgentFlowService::validate`] 的关键差别是**只看快照、不看流程库**——被冻结的
+/// 任务不该因为库里子流程被改/被删而失效(那正是二维批次 5a 要收掉的行为漂移)。
+/// 校验规则本身仍是同一套(`validate_flow` + `validate_sub_flows`),不复制判定。
+pub fn validate_snapshot(
+    snapshot: &FlowSnapshot,
+    registered_tools: &BTreeSet<String>,
+) -> Result<(), String> {
+    let root = snapshot
+        .root()
+        .ok_or_else(|| format!("流程快照缺少入口流程:{}", snapshot.root_id))?;
+    validate_flow(root, registered_tools)?;
+    validate_sub_flows(&snapshot.as_library(), registered_tools)
+}
 
 /// 生效的并行上限:缺省取默认值,越界取边界(1 = 完全串行,行为与二维批次 1 一致)
 pub fn effective_max_parallel(cfg: &AgentFlowConfig) -> usize {
@@ -682,6 +799,11 @@ fn sub_flow_edges(cfg: &AgentFlowConfig) -> Vec<(String, String)> {
         .filter(|s| s.enabled)
         .filter_map(|s| s.sub_flow_ref().map(|id| (s.name.clone(), id.to_string())))
         .collect()
+}
+
+/// 同上,只要 id(快照闭包收集用;与 `sub_flow_edges` 同一条「什么算被引用」的判定)
+fn sub_flow_ids(cfg: &AgentFlowConfig) -> Vec<String> {
+    sub_flow_edges(cfg).into_iter().map(|(_, id)| id).collect()
 }
 
 /// 子流程引用链校验(二维批次 6b,保存期 400):
@@ -1819,5 +1941,86 @@ mod tests {
         let mounted = sub_step("n", "flow-x");
         let text = serde_json::to_string(&mounted).unwrap();
         assert!(text.contains("sub_flow_id"), "挂载时应落盘:{text}");
+    }
+
+    // ===== 任务用流程快照(二维批次 5a) =====
+
+    #[test]
+    fn snapshot_for_collects_transitive_sub_flow_closure() {
+        let dir = TempDataDir::new("flow-snapshot-closure");
+        let mut svc = service(&dir);
+        // C(叶子)← B(挂 C)← A(挂 B):入口 A 的闭包应含 A + B + C,入口恒首个
+        let c = save_flow(&mut svc, "C", vec![graph_step("n", &[])]);
+        let b = save_flow(&mut svc, "B", vec![sub_step("n", &c)]);
+        let a = save_flow(&mut svc, "A", vec![sub_step("n", &b)]);
+
+        let snap = svc.snapshot_for(&a).unwrap();
+        assert_eq!(snap.root_id, a, "根应为入口流程");
+        let ids: Vec<&str> = snap.flows.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![a.as_str(), b.as_str(), c.as_str()],
+            "闭包应逐层可达"
+        );
+        assert_eq!(snap.root().map(|f| f.id.as_str()), Some(a.as_str()));
+        assert!(snap.flow_by_id(&c).is_some(), "闭包内可取到深层子流程");
+        assert!(
+            snap.flow_by_id("flow-不存在").is_none(),
+            "闭包外的一律取不到(运行期子图解析只认快照)"
+        );
+    }
+
+    #[test]
+    fn snapshot_for_rejects_unknown_and_disabled_flow() {
+        let dir = TempDataDir::new("flow-snapshot-reject");
+        write_library(
+            &dir,
+            &library(vec![flow("启用流程", vec![graph_step("n", &[])]), {
+                let mut off = flow("停用流程", vec![graph_step("n", &[])]);
+                off.enabled = false;
+                off
+            }]),
+        );
+        let svc = service(&dir);
+
+        let err = svc.snapshot_for("flow-不存在").unwrap_err();
+        assert!(err.contains("不存在"), "实际错误:{err}");
+        // 未启用流程不可绑定:与执行期 current_flow 的 enabled 口径一致,提前拒绝
+        let err = svc.snapshot_for("flow-停用流程").unwrap_err();
+        assert!(err.contains("未启用"), "实际错误:{err}");
+    }
+
+    #[test]
+    fn frozen_snapshot_stays_valid_after_library_changes() {
+        let dir = TempDataDir::new("flow-snapshot-frozen");
+        let mut svc = service(&dir);
+        let sub = save_flow(&mut svc, "子", vec![graph_step("n", &[])]);
+        let main = save_flow(&mut svc, "主", vec![sub_step("n", &sub)]);
+        let snap = svc.snapshot_for(&main).unwrap();
+
+        // 库里把子流程改成悬空引用(只有手改文件能做到)→ 快照自身仍合法:
+        // 被冻结的任务不该因为库里被改而失效
+        let mut broken = flow("子", vec![sub_step("n", "missing")]);
+        broken.id = sub.clone();
+        write_library(
+            &dir,
+            &library(vec![
+                {
+                    let mut m = flow("主", vec![sub_step("n", &sub)]);
+                    m.id = main.clone();
+                    m
+                },
+                broken,
+            ]),
+        );
+        let svc2 = service(&dir);
+        assert!(
+            svc2.validate(svc2.get().unwrap()).is_err(),
+            "实时库口径下入口链已非法(对照:证明上面确实把库改坏了)"
+        );
+        assert!(
+            validate_snapshot(&snap, &tools()).is_ok(),
+            "冻结快照的校验只看快照自身"
+        );
     }
 }

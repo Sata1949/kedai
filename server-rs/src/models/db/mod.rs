@@ -159,6 +159,10 @@ impl Db {
                 // 幂等 schema 升级(执行者库):旧库 tasks 补 executor_id 列(可空,零回填)
                 crate::migration::ensure_tasks_executor_id_column(&conn)
                     .map_err(|e| format!("升级 tasks executor_id 列失败: {e}"))?;
+                // 幂等 schema 升级(二维批次 5a):旧库 tasks 补 flow_id/flow_snapshot 列
+                //(均可空无 DEFAULT,零回填——未绑定任务到执行开始时才捕获快照)
+                crate::migration::ensure_tasks_flow_columns(&conn)
+                    .map_err(|e| format!("升级 tasks flow 列失败: {e}"))?;
                 // 幂等 schema 升级(可观测性问题①):旧库 task_llm_calls 补 finish_reason 列
                 crate::migration::ensure_task_llm_calls_finish_reason_column(&conn)
                     .map_err(|e| format!("升级 task_llm_calls finish_reason 列失败: {e}"))?;

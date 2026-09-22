@@ -120,7 +120,14 @@ CREATE TABLE IF NOT EXISTS tasks (
   -- 不建索引:当前无按 executor_id 过滤的查询(对照 idx_tasks_character 属过滤列;
   -- 且本表 CREATE INDEX 语句先于 ensure_* 补列执行,给新列建索引会让旧库升级报
   -- 「no such column」——CREATE_TABLES 与补列在同一批次里,顺序不可调换)
-  executor_id  TEXT
+  executor_id  TEXT,
+  -- 任务绑定的流程 id(NULL = 跟随当前流程);旧库经 migration::ensure_tasks_flow_columns
+  -- 幂等补列。两列同样追加在表尾以对齐 ALTER ADD COLUMN 的顺序(schema 指纹比对依赖)
+  flow_id      TEXT,
+  -- 任务用的流程快照(JSON:入口流程 + 可达子流程闭包),绑定任务在创建时冻结、
+  -- 未绑定任务在执行开始时捕获;NULL = 尚无快照(旧任务/未跑过的未绑定任务)。
+  -- 有意**不建索引**也不进列表查询的列清单——快照是 O(流程库) 体积,详情接口按需单读。
+  flow_snapshot TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
 -- 任务列表按角色 / 状态过滤(2026-09-13 批次 3 补;旧库经 ensure_perf_indexes 补建)

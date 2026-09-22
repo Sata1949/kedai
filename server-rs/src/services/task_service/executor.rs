@@ -55,25 +55,14 @@ impl TaskService {
         if task.status != TaskStatus::Planned {
             return Err("仅待批准(planned)状态的任务可批准".into());
         }
-        // 自定义流程模式依赖「已启用流程」:提前拒绝,避免批准后任务直接进 error
-        //(custom 执行器在 run_inner 首行就取 current_flow,取不到即整体失败)。
-        // 校验口径与 TaskFlowAccess::current_flow 一致(取当前流程 + enabled 判定)。
+        // 自定义流程模式依赖「可用的流程」:提前拒绝,避免批准后任务直接进 error
+        //(custom 执行器在 run_inner 首行就要解析流程快照,取不到即整体失败)。
+        // 校验与执行期**同一出处**(`resolve_task_flow`:绑定任务用其冻结快照、
+        // 未绑定任务按当前流程),故这里只是提前一次干跑,规则不复制;
+        // 该调用是纯读(不落快照——落库发生在执行器开跑时,避免批准与执行两个时刻的编排不一致)。
         if matches!(exec_mode, crate::models::types::TaskApproveExecMode::Custom) {
-            let flow = self.agent_flow();
-            let guard = flow.lock().unwrap_or_else(|e| e.into_inner());
-            match guard.get() {
-                None => {
-                    return Err(
-                        "选择自定义流程执行前需先配置流程:请先在设置中启用一个 Agent 流程".into(),
-                    )
-                }
-                Some(cfg) if !cfg.enabled => {
-                    return Err(
-                        "选择自定义流程执行前需先配置流程:当前 Agent 流程未启用,请在设置中开启后再试".into(),
-                    );
-                }
-                Some(_) => {}
-            }
+            self.resolve_task_flow(Some(&task))
+                .map_err(|e| format!("选择自定义流程执行前需先确认可用流程:{e}"))?;
         }
         let steps = match plan {
             Some(p) => {

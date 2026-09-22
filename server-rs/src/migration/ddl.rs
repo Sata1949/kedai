@@ -191,6 +191,43 @@ pub fn ensure_tasks_executor_id_column(conn: &Connection) -> Result<(), String> 
     Ok(())
 }
 
+/// 幂等 schema 升级(二维批次 5a 任务绑定流程):为 tasks 补 flow_id 与 flow_snapshot
+/// 两列(各自缺失才 ALTER,已存在跳过)。启动时(Db::open)与跨库合并前(merge_databases
+/// 两侧)各执行一次。
+///
+/// **两列都可空、无 DEFAULT**:NULL = 「未绑定流程 / 尚无快照」,与旧行语义一致,
+/// 故零迁移成本——旧任务不需要任何回填(未绑定的任务到执行开始时才按当时的当前流程
+/// 捕获快照)。列序固定为 flow_id → flow_snapshot,与新建库的建表顺序一致
+/// (schema normalize 比对依赖追加顺序)。
+pub fn ensure_tasks_flow_columns(conn: &Connection) -> Result<(), String> {
+    let mut existing: Vec<String> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(tasks)")
+            .map_err(|e| format!("读取 tasks 列失败: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| format!("遍历 tasks 列失败: {e}"))?;
+        for name in rows.flatten() {
+            existing.push(name.to_lowercase());
+        }
+    }
+    // tasks 表不存在(极旧快照/手工建库)时零列返回,直接跳过——
+    // 建表由 CREATE_TABLES 或合并期 schema 比对负责,此处不能 ALTER 报错
+    if existing.is_empty() {
+        return Ok(());
+    }
+    if !existing.iter().any(|c| c == "flow_id") {
+        conn.execute("ALTER TABLE tasks ADD COLUMN flow_id TEXT", [])
+            .map_err(|e| format!("为 tasks 补 flow_id 列失败: {e}"))?;
+    }
+    if !existing.iter().any(|c| c == "flow_snapshot") {
+        conn.execute("ALTER TABLE tasks ADD COLUMN flow_snapshot TEXT", [])
+            .map_err(|e| format!("为 tasks 补 flow_snapshot 列失败: {e}"))?;
+    }
+    Ok(())
+}
+
 /// 幂等 schema 升级(可观测性问题①):为 task_llm_calls 补 finish_reason 列
 ///(缺失才 ALTER,已存在跳过)。启动时(Db::open)与跨库合并前(merge_databases
 /// 两侧)各执行一次;旧行经 DEFAULT '' 零迁移成本('' = 未知/未下发,

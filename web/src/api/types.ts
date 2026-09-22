@@ -851,6 +851,27 @@ export interface TaskRecord {
   task_mode?: TaskRunMode;
   /** 执行者库 id(空 = 通用执行者);指向后端 data/task_executors.json */
   executor_id?: string | null;
+  /**
+   * 任务**绑定的自定义流程 id**(二维批次 5a;空/缺省 = 跟随当前流程)。
+   *
+   * 绑定即冻结:后端在创建时按该流程落一份快照(`TaskDetail.flow_snapshot`),
+   * 此后改那份流程、或把「当前流程」换成别的,都不影响这个任务。
+   */
+  flow_id?: string | null;
+}
+
+/**
+ * 任务用的**流程快照**(二维批次 5a;任务详情顶层 `flow_snapshot`)。
+ *
+ * 入口流程 + 其可达子流程闭包,由后端在「创建时(绑定任务)/ 执行开始时(未绑定任务)」
+ * 冻结:运行态徽标读它而不是「当前流程库」,于是跑过任务后再改流程也不会让徽标漂移。
+ * 未绑定且尚未跑过的任务为 null(读取侧按 optional 容错,零噪音)。
+ */
+export interface TaskFlowSnapshot {
+  /** 入口流程 id(快照里的根;`flows` 中必有其一与之相等) */
+  root_id: string;
+  /** 入口流程 + 可达子流程闭包(入口恒为首个) */
+  flows: AgentFlowConfig[];
 }
 
 /**
@@ -912,6 +933,11 @@ export interface TaskDetail {
   usage_total: TaskUsageTotal;
   /** 用户指令历史(followup 追加 / plan_chat 规划对话);旧服务端无此字段,读取须容错 */
   messages?: TaskMessage[];
+  /**
+   * 本任务的流程快照(二维批次 5a);旧服务端/未绑定且未跑过的任务为 null 或缺失。
+   * 运行态徽标的数据源(优先于「当前流程库」)。
+   */
+  flow_snapshot?: TaskFlowSnapshot | null;
 }
 
 /**

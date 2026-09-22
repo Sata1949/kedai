@@ -48,8 +48,11 @@ pub(super) fn recover_orphan_tasks(db: &Db) -> Vec<String> {
 }
 
 /// 任务主表列:0 id, 1 title, 2 status, 3 plan, 4 result, 5 error, 6 character_id,
-/// 7 created_at, 8 updated_at, 9 task_mode, 10 executor_id
+/// 7 created_at, 8 updated_at, 9 task_mode, 10 executor_id, 11 flow_id
 /// (新增列一律追加在表尾,与 TASK_COLS 及建表顺序一致)
+///
+/// **有意不含 flow_snapshot**:它是 O(流程库) 体积的 JSON,而 TASK_COLS 被列表与详情
+/// 每次事件刷新都用;要读快照走 [`TaskService::flow_snapshot`](本文件的单列查询)。
 pub(super) fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<TaskRecord> {
     let plan_str: String = row.get(3)?;
     let plan = serde_json::from_str(&plan_str).unwrap_or_default();
@@ -69,11 +72,12 @@ pub(super) fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<TaskRecord> {
         // DB 读取容错:未知模式记 warn 回退 Legacy(与 status 同款约定)
         task_mode: TaskRunMode::from_str_lossy(&task_mode),
         executor_id: row.get(10)?,
+        flow_id: row.get(11)?,
     })
 }
 
 pub(super) const TASK_COLS: &str = "id, title, status, plan, result, error, character_id, \
-     created_at, updated_at, task_mode, executor_id";
+     created_at, updated_at, task_mode, executor_id, flow_id";
 
 /// 按字符截断(中文安全,不切 char 边界;调用追踪摘要用)
 fn truncate_chars(s: &str, max: usize) -> String {
@@ -199,6 +203,63 @@ impl TaskService {
             }
             changed
         })
+    }
+
+    /// 记录本任务**本轮实际使用的流程编排**(二维批次 5a):绑定任务在创建时已冻结,
+    /// 未绑定任务在**执行开始时**由执行器回写(重跑按新的当前流程覆写,语义与旧版一致)。
+    ///
+    /// 有意**不发事件**:快照是任务行的元数据(徽标/追溯的数据源),前端在详情加载时
+    /// 读取即可——为它新增一种 SSE kind 要三处同步,收益为零。
+    /// 落盘失败记 error 日志并返回 false(不阻断任务执行:快照缺失只影响徽标)。
+    pub(crate) fn set_flow_snapshot(&self, id: &str, snapshot: &FlowSnapshot) -> bool {
+        let json = match serde_json::to_string(snapshot) {
+            Ok(text) => text,
+            Err(e) => {
+                tracing::error!(task_id = id, error = e.to_string(), "流程快照序列化失败");
+                return false;
+            }
+        };
+        let changed = self
+            .db
+            .write()
+            .execute(
+                "UPDATE tasks SET flow_snapshot = ?1, updated_at = ?2 WHERE id = ?3",
+                params![json, now_iso(), id],
+            )
+            .map(|n| n > 0)
+            .unwrap_or(false);
+        if !changed {
+            tracing::error!(task_id = id, "流程快照写入未命中任何任务行");
+        }
+        changed
+    }
+
+    /// 读任务的流程快照(二维批次 5a;未绑定且未跑过 = None)。
+    ///
+    /// 单列查询(不进 `TASK_COLS`,见其文档):快照是 O(流程库) 体积,列表接口
+    /// 每次事件刷新都要用,不能顺带拉它。损坏的快照记 warn 后按「无快照」处理——
+    /// 详情接口不该因为一列脏数据整条失败。
+    pub fn flow_snapshot(&self, id: &str) -> Option<FlowSnapshot> {
+        let raw: Option<String> = self
+            .db
+            .read()
+            .ok()?
+            .query_row(
+                "SELECT flow_snapshot FROM tasks WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten();
+        let raw = raw?;
+        match serde_json::from_str::<FlowSnapshot>(&raw) {
+            Ok(snapshot) => Some(snapshot),
+            Err(e) => {
+                tracing::warn!(task_id = id, error = e.to_string(), "流程快照解析失败");
+                None
+            }
+        }
     }
 
     /// 写入最终结果并置终态:全部步骤成功为 done;含 error 步骤为 partial(部分完成)。

@@ -21,7 +21,7 @@ use crate::models::types::{
     TaskStep, TaskSubtaskRecord, TaskSubtaskStatus, ToolCallArgs, ToolChoice, ToolContext,
     ToolDefinition,
 };
-use crate::services::agent_flow_service::AgentFlowService;
+use crate::services::agent_flow_service::{AgentFlowService, FlowSnapshot};
 use crate::services::agent_subtask_service::AgentSubtaskService;
 use crate::services::character_service::CharacterService;
 use crate::services::prompt_inject_service::PromptInjectService;
@@ -159,11 +159,32 @@ impl TaskService {
         executor_id: Option<&str>,
         character_id: Option<&str>,
         mode: TaskRunMode,
+        flow_id: Option<&str>,
     ) -> Result<TaskRecord, String> {
         let title = title.trim();
         if title.is_empty() {
             return Err("任务目标不能为空".into());
         }
+        // 流程绑定(二维批次 5a):只对 custom 模式有意义。其余模式给了就明确拒绝
+        // ——「字段存在但静默无效」是本仓反复点名要避免的形态(裁定 15 差异 2)。
+        let flow_id = flow_id.map(str::trim).filter(|s| !s.is_empty());
+        if flow_id.is_some() && mode != TaskRunMode::Custom {
+            return Err("只有自定义流程模式可以绑定流程(flow_id)".into());
+        }
+        // 绑定即冻结:创建时按 id 解析一份快照(存在 + 启用 + 结构 + 可达引用链校验),
+        // 之后的流程编辑/换当前流程都不影响这个任务。校验在写库**之前**做,失败不留行;
+        // 流程锁在此作用域内取用并释放(与下方 db.write 不同时持有,避免锁序纠缠)。
+        let frozen = match flow_id {
+            None => None,
+            Some(id) => {
+                let snap = {
+                    let flow = self.agent_flow();
+                    let guard = flow.lock().unwrap_or_else(|e| e.into_inner());
+                    guard.snapshot_for(id)?
+                };
+                Some(serde_json::to_string(&snap).map_err(|e| format!("流程快照序列化失败: {e}"))?)
+            }
+        };
         let id = Uuid::new_v4().to_string();
         let now = now_iso();
         // 执行者库命中校验:引用了不存在的执行者时静默丢弃而非报错——执行者属可选增强,
@@ -189,9 +210,18 @@ impl TaskService {
             // db.write(),若仍持锁则自死锁(非重入锁)
             let conn = self.db.write();
             conn.execute(
-                "INSERT INTO tasks (id, title, status, plan, result, error, character_id, created_at, updated_at, task_mode, executor_id) \
-                 VALUES (?1, ?2, 'pending', '[]', '', '', ?3, ?4, ?4, ?5, ?6)",
-                params![id, title, cid, now, mode.as_str(), eid],
+                "INSERT INTO tasks (id, title, status, plan, result, error, character_id, created_at, updated_at, task_mode, executor_id, flow_id, flow_snapshot) \
+                 VALUES (?1, ?2, 'pending', '[]', '', '', ?3, ?4, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    id,
+                    title,
+                    cid,
+                    now,
+                    mode.as_str(),
+                    eid,
+                    flow_id,
+                    frozen
+                ],
             )
             .map_err(|e| format!("创建任务失败: {e}"))?;
         }
@@ -219,7 +249,34 @@ impl TaskService {
             // 创建入口由调用方(API)严格解析用户所选模式;缺省 legacy(行为与旧版一致)
             task_mode: mode,
             executor_id: eid,
+            flow_id: flow_id.map(str::to_string),
         })
+    }
+
+    /// 解析本任务**本轮要跑的流程快照**(二维批次 5a 的单一出处)。
+    ///
+    /// 规则(任务侧与 approve 前置校验共用同一份,避免两条分叉的判断):
+    ///  - **绑定任务**(`flow_id` 有值):读 `tasks.flow_snapshot` 并用
+    ///    [`validate_snapshot`](crate::services::agent_flow_service::validate_snapshot)
+    ///    校验它**自身**——不看流程库,被冻结的任务不该因为库里被改/被删而失效。
+    ///    快照缺失(只可能来自手改 DB)即报错,不静默回退到别的流程。
+    ///  - **未绑定任务**(或任务行已消失):按当时的**当前流程**解析(要求存在且启用),
+    ///    语义与 5a 之前完全一致。
+    pub(crate) fn resolve_task_flow(
+        &self,
+        task: Option<&TaskRecord>,
+    ) -> Result<FlowSnapshot, String> {
+        let flow = self.agent_flow();
+        let guard = flow.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(flow_id) = task.and_then(|t| t.flow_id.clone()) else {
+            return guard.current_snapshot();
+        };
+        let task_id = task.map(|t| t.id.as_str()).unwrap_or_default();
+        let snapshot = self
+            .flow_snapshot(task_id)
+            .ok_or_else(|| format!("任务绑定的流程快照缺失(flow_id={flow_id}),无法执行"))?;
+        guard.validate_task_snapshot(&snapshot)?;
+        Ok(snapshot)
     }
 
     pub fn list(&self) -> Vec<TaskRecord> {

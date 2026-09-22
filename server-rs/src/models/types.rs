@@ -1147,6 +1147,14 @@ pub struct TaskRecord {
     /// 与 character_id 的分支优先级:executor_id 命中时用执行者指令,角色卡不参与。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executor_id: Option<String>,
+    /// **任务绑定的流程 id**(二维批次 5a;空 = 跟随当前流程,旧客户端/旧行零变化)。
+    ///
+    /// 绑定即冻结:创建时按该 id 落一份 `tasks.flow_snapshot`(见
+    /// `services::agent_flow_service::FlowSnapshot`),此后改流程/换当前流程都不影响
+    /// 这个任务——这是「文档化的行为漂移」的收口点。未绑定的任务不落这份快照,
+    /// 执行开始时才按当时的当前流程捕获一次(语义与旧版一致)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_id: Option<String>,
 }
 
 fn task_default_status() -> TaskStatus {
@@ -1580,5 +1588,43 @@ mod tests {
         assert_eq!(custom.node_id.as_deref(), Some("node-a"));
         let back = serde_json::to_string(&custom).unwrap();
         assert!(back.contains(r#""node_id":"node-a""#), "往返: {back}");
+    }
+
+    /// `TaskRecord.flow_id`(二维批次 5a)的三条线格式护栏:
+    /// ① None 时**整键省略**——非 custom 与存量任务的 task JSON 逐字节不变;
+    /// ② 旧任务 JSON(无该键)能反序列化;③ 有值时往返不丢。
+    #[test]
+    fn task_flow_id_is_additive_and_omitted_when_none() {
+        let mut task = TaskRecord {
+            id: "t1".into(),
+            title: "任务".into(),
+            status: TaskStatus::Pending,
+            plan: Vec::new(),
+            result: String::new(),
+            error: String::new(),
+            character_id: None,
+            created_at: "c".into(),
+            updated_at: "u".into(),
+            task_mode: TaskRunMode::Custom,
+            executor_id: None,
+            flow_id: None,
+        };
+        let json = serde_json::to_string(&task).unwrap();
+        assert!(!json.contains("flow_id"), "None 时不应落键: {json}");
+
+        // ② 旧 JSON(无该键)照常解析
+        let old: TaskRecord = serde_json::from_str(
+            r#"{"id":"t1","title":"任务","status":"done","plan":[],"result":"",
+                "error":"","created_at":"c","updated_at":"u","task_mode":"custom"}"#,
+        )
+        .unwrap();
+        assert_eq!(old.flow_id, None);
+
+        // ③ 绑定值往返不丢
+        task.flow_id = Some("flow-a".into());
+        let back = serde_json::to_string(&task).unwrap();
+        assert!(back.contains(r#""flow_id":"flow-a""#), "往返: {back}");
+        let round: TaskRecord = serde_json::from_str(&back).unwrap();
+        assert_eq!(round.flow_id.as_deref(), Some("flow-a"));
     }
 }

@@ -30,7 +30,7 @@ use crate::models::types::{
     CharacterRecord, LlmMessage, TaskEventKind, TaskMessageRecord, TaskRecord, TaskStatus,
     TaskStep, TaskSubtaskStatus, ToolDefinition,
 };
-use crate::services::agent_flow_service::AgentFlowConfig;
+use crate::services::agent_flow_service::FlowSnapshot;
 use crate::services::settings_service::RuntimeSettings;
 use crate::services::task_core::{DeltaBatcher, TaskGenOutput, TaskTerminal, TruncationHeal};
 use futures::future::BoxFuture;
@@ -43,6 +43,11 @@ use tokio::sync::watch;
 pub(crate) trait TaskStore: Send + Sync {
     /// 按 id 读取任务记录。
     fn get(&self, id: &str) -> Option<TaskRecord>;
+
+    /// 覆写任务的流程快照(未绑定任务在**执行开始时**记录本轮实际编排);
+    /// 返回是否命中并更新。读侧不经本接口:执行器要的是**解析后**的快照
+    /// (绑定优先 → 冻结快照;否则当时的当前流程),那由 `TaskFlowAccess` 单一提供。
+    fn set_flow_snapshot(&self, id: &str, snapshot: &FlowSnapshot) -> bool;
 
     /// 设置任务状态;返回是否命中并更新。
     fn set_status(&self, id: &str, status: TaskStatus) -> bool;
@@ -150,22 +155,21 @@ pub(crate) trait TaskPromptKit: Send + Sync {
 
 // ==================== 窄接口(5/8):自定义 Agent 流程访问 ====================
 
-/// 自定义 Agent 流程库访问(custom 模式读取当前启用流程)。
+/// 自定义 Agent 流程库访问(custom 模式读取本轮要跑的流程)。
 ///
 /// 批次 4.2 起不再返回 `Arc<Mutex<AgentFlowService>>`(那会把锁纪律泄漏给调用方,
 /// 逼迫 task_engine 处理 `lock().unwrap()`):改由宿主侧在能力内部完成「加锁 →
-/// 取当前启用流程 → 启用校验 → 注册工具集校验」,只把结果快照交给调用方。
+/// 取流程 → 启用校验 → 注册工具集校验」,只把结果快照交给调用方。
+/// 二维批次 5a 起返回的是**流程快照**(入口 + 可达子流程闭包),不再返回单个配置:
+/// 运行期子图解析只能在这份闭包内进行,否则改一个被挂载的子流程仍会改变已冻结任务的行为。
 pub(crate) trait TaskFlowAccess: Send + Sync {
-    /// 当前启用的 Agent 流程配置(未启用/未配置/校验失败返回错误文本)。
-    fn current_flow(&self) -> Result<AgentFlowConfig, String>;
-
-    /// 按 id 取流程快照(二维批次 6b:静态子图的引用解析)。
+    /// 解析本任务**本轮要跑**的流程快照:
+    /// 绑定任务取其创建时冻结的快照(**不看流程库**;快照缺失即报错,不静默回退),
+    /// 未绑定任务按当时的当前流程解析(要求存在且启用,与旧 `current_flow` 语义一致)。
     ///
-    /// **不检查被引用流程的 `enabled` 开关**:该开关只决定一个流程能否作为「当前流程」
-    /// 直接执行,不影响它能否被别的流程当子流程引用(否则每个辅助流程都得保持启用,
-    /// 而「启用」在同一时刻只有一个是有意义的)。结构合法性照查——按「启用态」跑
-    /// `validate_flow`,与保存期 `validate_sub_flows` 同口径。
-    fn flow_by_id(&self, id: &str) -> Result<AgentFlowConfig, String>;
+    /// `task` 为 None(任务行已消失)时按「未绑定」处理:此时绑定信息无从谈起,
+    /// 后续的写库/收尾自会失败并收口。
+    fn resolve_task_flow(&self, task: Option<&TaskRecord>) -> Result<FlowSnapshot, String>;
 }
 
 // ==================== 窄接口(6/8):任务事件发射 ====================

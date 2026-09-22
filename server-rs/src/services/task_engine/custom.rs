@@ -1,5 +1,5 @@
-// custom 模式:复用 AgentFlowService 当前启用流程(AgentFlowConfig 步骤序列,
-// L2 既有资产)配轻量 step 执行器(批次 4.3b,docs/功能.md 第一节)。
+// custom 模式:复用**任务绑定的流程快照**(二维批次 5a;未绑定任务取当时的当前流程,
+// 与 5a 之前一致)配轻量 step 执行器(批次 4.3b,docs/功能.md 第一节)。
 // 语义:逐 step 顺序执行,上一步输出作为下一步输入;只吃 steps+goal,
 // 不依赖角色卡/聊天历史(角色类占位符渲染为空,{{char}} 等宏原文不泄漏)。
 // 工具:step.tools=None 走 generate_text 纯生成;Some([]) = 按 task_tool_policy 编译的
@@ -30,7 +30,8 @@ use crate::models::types::{
     ToolChoice, ToolContext,
 };
 use crate::services::agent_flow_service::{
-    effective_max_parallel, flow_label, output_index, resolve_graph, MAX_SUB_FLOW_DEPTH,
+    effective_max_parallel, flow_label, output_index, resolve_graph, AgentFlowConfig,
+    MAX_SUB_FLOW_DEPTH,
 };
 use crate::services::prompt_kit::untrusted_boundary;
 use crate::services::task_core::prompt_consts::{
@@ -88,6 +89,9 @@ struct GraphCtx<'a> {
     chain: &'a [String],
     /// 本层并行上限(各层取**自己流程**的 max_parallel_nodes)
     max_parallel: usize,
+    /// 本轮可用的流程集合 = **任务流程快照的闭包**(二维批次 5a):子图解析只在这里查,
+    /// 故跑起来的编排与冻结的那一份完全一致,不受流程库后续改动影响
+    flows: &'a [AgentFlowConfig],
 }
 
 /// 一层图跑完的汇总。
@@ -465,11 +469,20 @@ impl CustomExecutor {
         sub_id: &str,
         incoming: String,
     ) -> Result<NodeOutcome, String> {
-        let cfg = self.svc.flow_by_id(sub_id)?;
+        let cfg = g
+            .flows
+            .iter()
+            .find(|f| f.id == sub_id)
+            .ok_or_else(|| {
+                format!(
+                    "子流程不在本任务的流程快照内:{}（快照为创建/开跑时冻结的编排，请检查流程库或任务快照）",
+                    sub_id
+                )
+            })?;
         if g.chain.iter().any(|id| id == sub_id) {
             return Err(format!(
                 "子流程调用链存在环:「{}」在当前调用链上已出现过,拒绝再次进入",
-                flow_label(&cfg)
+                flow_label(cfg)
             ));
         }
         if g.depth + 1 > MAX_SUB_FLOW_DEPTH {
@@ -480,7 +493,7 @@ impl CustomExecutor {
         }
         let steps: Vec<PlanStep> = cfg.steps.iter().filter(|s| s.enabled).cloned().collect();
         if steps.is_empty() {
-            return Err(format!("子流程「{}」没有启用的步骤", flow_label(&cfg)));
+            return Err(format!("子流程「{}」没有启用的步骤", flow_label(cfg)));
         }
         let graph = resolve_graph(&steps)?;
         let output_idx = output_index(&steps, &graph.inputs);
@@ -496,7 +509,9 @@ impl CustomExecutor {
             path: &path,
             depth: g.depth + 1,
             chain: &chain,
-            max_parallel: effective_max_parallel(&cfg),
+            max_parallel: effective_max_parallel(cfg),
+            // 子图沿用**同一份**任务快照闭包(嵌套子流程也必须在冻结域内解析)
+            flows: g.flows,
         };
         // 子图不写 plan:plan 是**外层**流程的节点列表,嵌套节点没有对应行(IFW-5)。
         // 进度体现在挂载节点那一行的 running 态与调用追踪的 subflow.<路径> 行
@@ -505,7 +520,7 @@ impl CustomExecutor {
         if draft.is_empty() {
             return Err(format!(
                 "子流程「{}」未产出任何成果(生成步骤全部失败或为空)",
-                flow_label(&cfg)
+                flow_label(cfg)
             ));
         }
         Ok(NodeOutcome {
@@ -683,7 +698,20 @@ impl CustomExecutor {
     }
 
     async fn run_inner(&self, ctx: TaskRunContext) -> Result<(TaskTerminal, TokenUsage), String> {
-        let cfg = self.svc.current_flow()?;
+        // 本轮要跑的流程 = 任务流程快照(二维批次 5a):绑定任务用它创建时冻结的那份
+        // (改流程/换当前流程都不影响),未绑定任务按当时的当前流程解析。
+        // 解析与校验收在宿主侧单一出处(`TaskService::resolve_task_flow`),此处不复制规则。
+        let task = self.svc.get(&ctx.task_id);
+        let snapshot = self.svc.resolve_task_flow(task.as_ref())?;
+        // 未绑定任务:把本轮**实际用到**的编排记进任务行(徽标与追溯的数据源)。
+        // 重跑会按新的当前流程覆写——未绑定语义就是「跟随当前流程」,快照只作记录。
+        if task.as_ref().is_some_and(|t| t.flow_id.is_none()) {
+            self.svc.set_flow_snapshot(&ctx.task_id, &snapshot);
+        }
+        let cfg = snapshot
+            .root()
+            .ok_or_else(|| format!("流程快照缺少入口流程:{}", snapshot.root_id))?
+            .clone();
         let steps: Vec<PlanStep> = cfg.steps.iter().filter(|s| s.enabled).cloned().collect();
         if steps.is_empty() {
             return Err("当前 Agent 流程没有启用的步骤".into());
@@ -727,6 +755,8 @@ impl CustomExecutor {
             chain: &chain,
             // 并行上限(二维批次 2):流程级配置,缺省 2、1 = 完全串行(批次 1 行为)
             max_parallel: effective_max_parallel(&cfg),
+            // 子图解析域 = 本轮快照闭包(二维批次 5a)
+            flows: &snapshot.flows,
         };
         let outcome = self.run_graph(&ctx, &g, Some(&mut plan)).await?;
 

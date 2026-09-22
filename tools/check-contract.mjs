@@ -122,6 +122,17 @@ const MAPPINGS = [
     ts: { file: 'web/src/api/types.ts', name: 'AgentFlowLibrary', kind: 'interface' },
   },
   {
+    // 任务用的流程快照(二维批次 5a):入口流程 + 可达子流程闭包。它同时是
+    // tasks.flow_snapshot 列的落盘形态与任务详情顶层 `flow_snapshot` 的下发形态——
+    // 前端运行态徽标按它对齐节点,漏字段会让徽标静默退化成「只认当前流程库」。
+    label: '任务流程快照',
+    rust: {
+      file: 'server-rs/src/services/agent_flow_service.rs',
+      name: 'FlowSnapshot',
+    },
+    ts: { file: 'web/src/api/types.ts', name: 'TaskFlowSnapshot', kind: 'interface' },
+  },
+  {
     // SSE 顶层事件判别式联合(Rust `#[serde(tag="type")]` ↔ TS 判别式联合)。
     // 此前**未登记**:新增一个顶层事件要手改 Rust 枚举 + TS 手写 union + 前端两个 switch
     // (sseReducer.ts / stores/task.ts)共 3 处,其中 Rust→TS 这一步完全靠人,漏改不报错。

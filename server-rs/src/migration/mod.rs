@@ -22,7 +22,7 @@ pub use ddl::{
     ensure_memory_entries_pinned_column, ensure_perf_indexes, ensure_skills_progressive_columns,
     ensure_task_llm_calls_finish_reason_column, ensure_task_messages_table,
     ensure_task_subtasks_finished_at_column, ensure_tasks_executor_id_column,
-    ensure_tasks_task_mode_column,
+    ensure_tasks_flow_columns, ensure_tasks_task_mode_column,
 };
 pub use merge::{merge_data_dirs, MergeReport, TableReport};
 
@@ -159,6 +159,103 @@ mod tests {
             .filter(|c| c.name == "task_mode")
             .count();
         assert_eq!(dup, 1, "重复迁移不应产生重复列");
+        drop(conn);
+    }
+
+    /// flow_id / flow_snapshot 列迁移(二维批次 5a 任务绑定流程):旧版 tasks 补两列成功、
+    /// 旧行两列均为 NULL(零回填)、幂等可重复执行,且补列后 schema 与新版
+    /// CREATE_TABLES 建出的表 normalize 后一致(跨库合并比对依赖)。
+    #[test]
+    fn ensure_tasks_flow_columns_adds_and_is_idempotent() {
+        let dir = temp_dir("tasks-flow-columns");
+        let db = dir.join(DATABASE_FILE);
+        let conn = Connection::open(&db).unwrap();
+        // 旧版表结构(二维批次 5a 之前):无 flow_id / flow_snapshot 列
+        conn.execute_batch(
+            "CREATE TABLE tasks (
+              id           TEXT PRIMARY KEY,
+              title        TEXT NOT NULL,
+              status       TEXT NOT NULL DEFAULT 'pending',
+              plan         TEXT NOT NULL DEFAULT '[]',
+              result       TEXT NOT NULL DEFAULT '',
+              error        TEXT NOT NULL DEFAULT '',
+              character_id TEXT,
+              created_at   TEXT NOT NULL,
+              updated_at   TEXT NOT NULL,
+              task_mode    TEXT NOT NULL DEFAULT 'legacy',
+              executor_id  TEXT
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, title, created_at, updated_at) VALUES ('t1', '旧行', 'c', 'u')",
+            [],
+        )
+        .unwrap();
+
+        ensure_tasks_flow_columns(&conn).unwrap();
+        let columns: Vec<String> = table_columns(&conn, "main", "tasks")
+            .unwrap()
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        // 列序固定为 flow_id → flow_snapshot(与新建库建表顺序一致,schema 比对依赖)
+        let tail = columns
+            .get(columns.len().saturating_sub(2)..)
+            .unwrap_or(&[]);
+        assert_eq!(
+            tail,
+            ["flow_id", "flow_snapshot"],
+            "两列应追加在表尾且顺序固定,实际: {columns:?}"
+        );
+
+        // 旧行零迁移成本:两列均为 NULL(未绑定 / 尚无快照)
+        let (fid, snap): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT flow_id, flow_snapshot FROM tasks WHERE id = 't1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(fid, None, "旧行不绑定流程");
+        assert_eq!(snap, None, "旧行无快照");
+
+        // 幂等:重复执行不报错、不产生重复列
+        ensure_tasks_flow_columns(&conn).unwrap();
+        let dup = table_columns(&conn, "main", "tasks")
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.name == "flow_id" || c.name == "flow_snapshot")
+            .count();
+        assert_eq!(dup, 2, "重复迁移不应产生重复列");
+
+        // 迁移后 schema 与新版 CREATE_TABLES 建出的表**列定义**一致(跨库合并比对依赖)。
+        // 比对前剥掉 `--` 行注释:tasks 建表语句里带注释(注释是 sqlite_schema.sql 的
+        // 原始文本的一部分),旧库建表于这些注释之前、ALTER 补列不会回填注释,故逐字比对
+        // 对带注释的表本就不可能成立——要比的是列定义与约束,而不是注释文本。
+        let strip = |sql: &str| -> String {
+            normalize_sql(
+                &sql.lines()
+                    .map(|l| l.split("--").next().unwrap_or(""))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+        };
+        let table_sql = |c: &Connection| -> String {
+            c.query_row(
+                "SELECT sql FROM sqlite_schema WHERE type='table' AND name='tasks'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap()
+        };
+        let migrated = strip(&table_sql(&conn));
+        let fresh_conn = Connection::open_in_memory().unwrap();
+        fresh_conn
+            .execute_batch(crate::models::db::create_tables_sql())
+            .unwrap();
+        let fresh = strip(&table_sql(&fresh_conn));
+        assert_eq!(migrated, fresh, "补列后的 tasks 应与新建库列定义一致");
         drop(conn);
     }
 
