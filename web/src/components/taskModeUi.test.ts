@@ -318,7 +318,7 @@ describe('TaskBoard 批次 R4:「正在生成」流式块', () => {
     expect(html).not.toContain('sv-task-live');
   });
 
-  it('多缓冲(team 并行)时带 key 前缀区分各调用', async () => {
+  it('多缓冲(team 并行)时带 key 前缀区分各调用(标签中文化,不裸露内部 key)', async () => {
     const html = await render(TaskBoard, (p) => {
       seedCurrentTask(p, makeDetail(makeTask('running', 'team')));
       useTaskStore().liveBuffers = new Map([
@@ -328,8 +328,12 @@ describe('TaskBoard 批次 R4:「正在生成」流式块', () => {
     });
     expect(html).toContain('甲主的产出');
     expect(html).toContain('乙主的产出');
-    expect(html).toContain('agent:0');
-    expect(html).toContain('agent:1');
+    // 前缀 = 中文阶段标签 + 该主 agent 的步骤下标(遗留.md IFW-7③):
+    // 两条缓冲仍可区分,而用户看到的是「主Agent #1 / #2」而非内部 key
+    expect(html).toContain('【主Agent #1】');
+    expect(html).toContain('【主Agent #2】');
+    expect(html).not.toContain('【agent:0】');
+    expect(html).not.toContain('【agent:1】');
   });
 });
 

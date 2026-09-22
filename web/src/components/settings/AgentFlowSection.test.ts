@@ -319,3 +319,85 @@ describe('AgentFlowSection 静态子图(二维批次 6b)', () => {
     expect(summary).toContain('子流程:gone(引用已失效)');
   });
 });
+
+// ===== 保存后继续编辑(遗留.md IFW-7① 的端到端回归)=====
+// 保存链路 = PUT /agent-flows(入库并回显库)+ GET /agent-flows(重载草稿)。
+// 重载会用深拷贝**整体替换**草稿;此时编辑区若还指着旧对象,第二次保存就会把
+// 用户的第一处改动之外的内容按旧对象写回——即「保存后继续编辑会静默丢失」。
+describe('AgentFlowSection 保存后继续编辑', () => {
+  /** 保存链路打桩:PUT 回显入库后的库,GET 返回库(并记录每次 PUT 的请求体) */
+  function mockSaveRoundTrip(lib: AgentFlowConfig[]): Array<{ config: AgentFlowConfig }> {
+    const spy = vi.spyOn(globalThis, 'fetch');
+    const puts: Array<{ config: AgentFlowConfig }> = [];
+    spy.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/agent-flows') && init?.method === 'PUT') {
+        const body = JSON.parse(String(init.body)) as { config: AgentFlowConfig };
+        puts.push(body);
+        // 服务端按 id 覆盖入库,再把整库回显(与后端 set 的响应形状一致)
+        const saved = body.config;
+        const next = lib.map((f) => (f.id === saved.id ? saved : f));
+        return new Response(
+          JSON.stringify({ ok: true, library: { current_flow_id: saved.id ?? null, flows: next }, config: null }),
+          { status: 200 },
+        );
+      }
+      if (url.includes('/agent-flows')) {
+        return new Response(
+          JSON.stringify({ ok: true, library: { current_flow_id: 'f1', flows: lib }, config: null }),
+          { status: 200 },
+        );
+      }
+      // 其余(bootstrap 取 token)
+      return new Response(JSON.stringify({ token: 'test-secret' }), { status: 200 });
+    });
+    return puts;
+  }
+
+  function singleStepLib(): AgentFlowConfig[] {
+    return [
+      {
+        id: 'f1',
+        name: '流程一',
+        description: null,
+        enabled: true,
+        steps: [
+          { id: 'a', name: '起草', enabled: true, goal: '初始目标', action: 'direct', generates: true, inputs: [] },
+        ],
+      },
+    ];
+  }
+
+  const saveBtn = (wrapper: ReturnType<typeof mount>) =>
+    wrapper.findAll('button').find((b) => b.text() === '保存执行流程')!;
+
+  it('保存一次后继续编辑,再保存时两次改动都在(不写回旧对象)', async () => {
+    const lib = singleStepLib();
+    const puts = mockSaveRoundTrip(lib);
+    const wrapper = mount(AgentFlowSection);
+    await flushPromises();
+
+    await expandStep(wrapper, 0);
+    const goal = () => wrapper.find('.flow-edit input.sv-input');
+    await goal().setValue('第一次改');
+    await flushPromises();
+
+    await saveBtn(wrapper).trigger('click');
+    await flushPromises();
+    expect(puts).toHaveLength(1);
+    expect(puts[0].config.steps[0].goal).toBe('第一次改');
+    // 保存后编辑区仍在(editingStepId 不重置):这正是「继续编辑」的场景
+    expect(wrapper.find('.flow-edit').exists()).toBe(true);
+
+    await goal().setValue('第二次改');
+    await flushPromises();
+    await saveBtn(wrapper).trigger('click');
+    await flushPromises();
+
+    // 判别性断言:第二次保存的载荷必须是「第二次改」。
+    // 编辑器若按值解构 props,写入会落在保存前那个已被替换的对象上,此处会读到「第一次改」
+    expect(puts).toHaveLength(2);
+    expect(puts[1].config.steps[0].goal).toBe('第二次改');
+    wrapper.unmount();
+  });
+});

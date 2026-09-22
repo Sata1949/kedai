@@ -9,6 +9,7 @@ import { storeToRefs } from 'pinia';
 import { renderMarkdown } from '../markdown';
 import { splitTaskResult } from '../taskResult';
 import { taskStatusClass as statusClass, taskStatusLabel as statusLabel } from '../taskStatus';
+import { bufferLabel } from '../utils/phaseLabel';
 import { APPROVE_EXEC_MODE_LABELS, APPROVE_EXEC_MODE_ORDER, MODE_LABELS, messageKindLabel } from '../api/labels';
 import type { TaskApproveExecMode, TaskRecord, TaskRunMode, TaskStep } from '../api';
 
@@ -319,11 +320,16 @@ function openCallTrace(): void {
 }
 
 // ----- 批次 R4 流式输出:「正在生成」块 -----
-/** 流式缓冲原文(全部活跃调用的攒批增量;单缓冲纯文本,多缓冲(team 并行)带 key 前缀区分) */
+/** 流式缓冲原文(全部活跃调用的攒批增量;单缓冲纯文本,多缓冲(team 并行/子图)带 key 前缀区分)。
+ *  多缓冲的 key 是**内部键**(`${phase}:${step_index ?? ''}`),不能直接插值给用户看
+ *  (会露出 `【subflow.1:0】` 这类裸 key,见 `遗留.md` IFW-7③)——统一走 utils/phaseLabel 的
+ *  中文标签;step 阶段能对上 plan 时补一个步骤名,便于在多缓冲里认出是哪一步。 */
 const liveRaw = computed(() => {
   const entries = [...store.liveBuffers.entries()];
   if (entries.length === 1) return entries[0][1];
-  return entries.map(([k, t]) => `【${k}】\n${t}`).join('\n\n');
+  const plan = currentTask.value?.task.plan ?? [];
+  const stepName = (i: number) => plan[i]?.name || null;
+  return entries.map(([k, t]) => `【${bufferLabel(k, stepName)}】\n${t}`).join('\n\n');
 });
 
 /**

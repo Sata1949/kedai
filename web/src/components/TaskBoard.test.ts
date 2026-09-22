@@ -198,3 +198,49 @@ describe('TaskBoard 组件(M5 补测)', () => {
     wrapper.unmount();
   });
 });
+
+// 多缓冲的标签中文化(遗留.md IFW-7③):liveBuffers 的 key 是内部键
+// (`${phase}:${step_index ?? ''}`),多缓冲兜底(team 并行 / 静态子图)时曾把它直接插值给
+// 用户看(如 `【subflow.1:0】`)。现在统一走 utils/phaseLabel 的中文标签。
+describe('TaskBoard 多缓冲「正在生成」块(IFW-7③)', () => {
+  beforeEach(() => {
+    memStorage.clear();
+  });
+
+  it('多缓冲前缀用中文阶段标签,不裸露内部 key;step 阶段补步骤名', () => {
+    const store = useAppStore();
+    store.currentTaskId = 't1';
+    store.currentTask = makeTaskDetail({
+      id: 't1',
+      status: 'running',
+      task_mode: 'custom',
+      plan: [{ name: '起草', goal: 'g', status: 'running', result: '' }],
+    });
+    store.liveBuffers = new Map([
+      ['step:0', '第一条增量'],
+      ['subflow.1:0', '第二条增量'],
+    ]);
+    const wrapper = mount(TaskBoard);
+    const text = wrapper.text();
+
+    // 前缀可读:step 带步骤名、子图带挂载路径
+    expect(text).toContain('【步骤 #1 · 起草】');
+    expect(text).toContain('【子流程(#2 内) #1】');
+    // 内部 key 不再出现在界面里
+    expect(text).not.toContain('subflow.1:0');
+    expect(text).not.toContain('step:0');
+    wrapper.unmount();
+  });
+
+  it('单缓冲不画前缀(纯文本流式块与改造前一致)', () => {
+    const store = useAppStore();
+    store.currentTaskId = 't1';
+    store.currentTask = makeTaskDetail({ id: 't1', status: 'running', task_mode: 'solo', plan: [] });
+    store.liveBuffers = new Map([['step:0', '唯一一条增量']]);
+    const wrapper = mount(TaskBoard);
+    const text = wrapper.text();
+    expect(text).toContain('唯一一条增量');
+    expect(text).not.toContain('【步骤');
+    wrapper.unmount();
+  });
+});

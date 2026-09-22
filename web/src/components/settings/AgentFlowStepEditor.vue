@@ -7,6 +7,7 @@
 //
 // 上游候选/成果节点/警示都走 utils/agentFlowGraph 的纯函数,与后端图原语同口径;
 // 权威校验仍在后端(保存被拒时由调用方展示中文错误)。
+import { toRef } from 'vue';
 import {
   MAX_SUB_FLOW_DEPTH,
   flowName,
@@ -58,7 +59,15 @@ const props = defineProps<{
 // 就地对草稿里的步骤写入:草稿所有权在调用方(`useAgentFlow` 持有 flowDraft,保存时才提交),
 // 表单只是它的编辑入口。这里取步骤对象的引用再用,与 ConnectionSection(`props.state` 解构)
 // 同一写法——避免 vue/no-mutating-props 把「表单写自己的字段」误判为改 prop。
-const { step, steps } = props;
+//
+// **必须是响应式引用(`toRef`),不能解构成值**:Vue 3.5 的「响应式 props 解构」只对
+// 直接 `defineProps()` 生效,`const { step } = props` 拿到的是**一次性快照**。
+// 草稿会被整体替换(`useAgentFlow.loadFlowConfig` 用深拷贝重建,保存/切换/新建/导入后
+// 都走它),此时编辑区仍指向旧对象——列表行读新对象、编辑区写旧对象,用户看得见地分叉,
+// 继续编辑的改动在下次保存时**静默丢失**(遗留.md IFW-7①)。取引用后 `step.value`
+// 恒为当前 props 上的那个对象,模板写法不变(顶层 ref 在模板中自动解包)。
+const step = toRef(props, 'step');
+const steps = toRef(props, 'steps');
 const flowLib = () => props.flows ?? [];
 const selfFlowId = () => props.currentFlowId ?? '';
 
@@ -68,7 +77,7 @@ const selfFlowId = () => props.currentFlowId ?? '';
  * 原生 select 在不命中任何 option 时会显示为空白,挂载状态就没有锚点了。
  */
 function staleSubFlowOption(): string {
-  const id = subFlowId(step);
+  const id = subFlowId(step.value);
   if (!id) return '';
   if (subFlowCandidates(flowLib(), selfFlowId()).some((f) => f.id === id)) return '';
   const known = flowLib().some((f) => f.id === id);
