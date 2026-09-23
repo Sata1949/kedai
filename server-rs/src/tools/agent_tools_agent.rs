@@ -345,6 +345,7 @@ async fn run_subtask_with_tools(
         tools,
         max_tool_rounds: Some(max_rounds),
         tool_choice: crate::models::types::ToolChoice::Auto,
+        connection_id: None,
         parallel_tool_calls: None,
     };
 
@@ -560,6 +561,7 @@ async fn run_subtask_plain(
         tools: Vec::new(),
         max_tool_rounds: None,
         tool_choice: crate::models::types::ToolChoice::Auto,
+        connection_id: None,
         parallel_tool_calls: None,
     };
 

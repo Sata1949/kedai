@@ -136,6 +136,7 @@ pub async fn send(
                 max_tool_rounds: Some(s.max_tool_rounds),
                 // 工具选择策略:默认 auto(模型自行决定是否调用工具)
                 tool_choice: crate::models::types::ToolChoice::Auto,
+                connection_id: None,
                 parallel_tool_calls: None,
             },
             Some(s.max_context_tokens),
@@ -656,6 +657,7 @@ pub async fn generate_raw(
             tools: Vec::new(),
             max_tool_rounds: Some(1),
             tool_choice: crate::models::types::ToolChoice::None,
+            connection_id: None,
             parallel_tool_calls: None,
         }
     };

@@ -198,7 +198,11 @@ pub(crate) async fn execute_generation(
     // 任务模式经 run_tool_loop 一路带到 task_llm_calls 落库点;聊天路径不消费本字段。
     let mut finish_reason: Option<String> = None;
 
-    let connector = engine.connector.read().await.clone();
+    // 连接器按本次调用的 connection_id 解析(二维批次 5b):None = 默认连接(5b 之前
+    // 的读锁快照口径不变);节点级连接由 `resolve_connector` 单点解析,两条执行路径共用。
+    let (connector, _model) = engine
+        .resolve_connector(params.connection_id.as_deref())
+        .await?;
     let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel();
     let generate = connector.generate_stream(messages, params.clone(), abort.clone(), chunk_tx);
     tokio::pin!(generate);

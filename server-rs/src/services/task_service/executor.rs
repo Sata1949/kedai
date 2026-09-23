@@ -397,6 +397,9 @@ impl TaskService {
     /// 统一出口,成功/空内容/超时/上游错误均落 task_llm_calls 一行。
     /// tools 非空时下发工具定义并聚合 ToolCall 块到产出(问题②规划器侦察轮用;
     /// 其余调用方传空,出现 ToolCall 块按协议异常记 warn 忽略)。
+    /// `connection_id`(二维批次 5b):节点级连接;None = 默认连接。解析统一走
+    /// `AgentEngine::resolve_connector`(引用的连接被删除/停用 → 本调用失败并落 error 行,
+    /// **不静默回退默认连接**)。
     /// pub(crate):任务引擎 team/custom 执行器的纯生成步(规划/审计/汇总/无工具步骤)
     /// 复用本统一出口,勿另写 HTTP 调用(批次 4.3b)。
     #[allow(clippy::too_many_arguments)]
@@ -410,6 +413,7 @@ impl TaskService {
         max_tokens: u32,
         temperature: f64,
         top_p: f64,
+        connection_id: Option<&str>,
         cancel: watch::Receiver<bool>,
     ) -> Result<TaskGenOutput, String> {
         let params = GenerationParams {
@@ -420,6 +424,7 @@ impl TaskService {
             tools,
             max_tool_rounds: None,
             tool_choice: ToolChoice::Auto,
+            connection_id: None, // 连接解析在下方 call 内(与 engine 单点解析同一处)
             parallel_tool_calls: None,
         };
         // 工具是否下发(params 随后 move 进 generate_stream,先行记录):未下发而出现
@@ -432,13 +437,21 @@ impl TaskService {
         // 慢网络请求可能持锁排队)与整个流式生成;超时后 future 被 drop,读锁随之释放,
         // chunk_tx 随之 drop,collect 端收 None 正常收尾。
         let call = async {
-            let connector = self.connector.read().await.clone();
-            let model = connector.model().to_string();
+            // 连接解析失败(引用的连接已删除/停用)按「本次调用失败」处理:落一条 error
+            // 调用行(与其它失败形态同口径),文案原样由 resolve_connector 给出。
+            let (connector, model) = match self.engine.resolve_connector(connection_id).await {
+                Ok(v) => v,
+                Err(e) => return (Err(e), String::new(), String::new()),
+            };
             let connector_type = connector.type_name().to_string();
             let res = connector
                 .generate_stream(&messages, params, cancel, chunk_tx)
                 .await;
-            (res, model, connector_type)
+            (
+                res.map_err(|e| e.message().to_string()),
+                model,
+                connector_type,
+            )
         };
         // delta 攒批旁路(批次 R4):与聚合同一路逐块处理;delta 是暂态事件不落库
         // (纪律例外见 events.rs emit_delta),权威数据以本函数收尾的落库行为准
@@ -545,10 +558,10 @@ impl TaskService {
                 return Err(err);
             }
         };
-        if let Err(e) = res {
+        if let Err(msg) = res {
             // 任务侧的调用追踪/步骤 result 是字符串契约(task_llm_calls 无分类列),
-            // 故分类在此落回文案;分类只服务聊天 SSE 的错误终态。
-            let msg = e.message().to_string();
+            // 故上游分类在 `call` 内即折算为文案(连接解析失败也走这一条),
+            // 分类本身只服务聊天 SSE 的错误终态。
             self.record_llm_call(
                 task_id,
                 phase,
@@ -770,6 +783,7 @@ impl TaskService {
                     max_tokens,
                     0.3,
                     settings.default_top_p,
+                    None, // 规划器无节点级连接
                     cancel.clone(),
                 )
                 .await
@@ -917,6 +931,7 @@ impl TaskService {
             max_tokens,
             temperature,
             settings.default_top_p,
+            None, // legacy/plan 步骤无节点级连接
             cancel.clone(),
         )
         .await
@@ -1014,6 +1029,7 @@ impl TaskService {
             max_tokens,
             temperature,
             settings.default_top_p,
+            None, // 汇总步无节点级连接
             cancel.clone(),
         )
         .await

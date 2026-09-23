@@ -263,6 +263,8 @@ pub struct AgentFlowConfig {
 /// 并行 = 成本倍增,故默认保守取 2,并在前端给出提示)
 pub const DEFAULT_MAX_PARALLEL_NODES: u32 = 2;
 pub const MAX_PARALLEL_NODES_LIMIT: u32 = 8;
+/// 节点级工具轮次上限的取值范围(二维批次 5b):与设置项 `max_tool_rounds` 的 1-200 同口径
+pub const MAX_TOOL_ROUNDS_LIMIT: u32 = 200;
 
 /// **任务用的流程快照**(二维批次 5a):入口流程 + 其**可达子流程闭包**,一次性冻结。
 ///
@@ -720,6 +722,20 @@ pub fn validate_flow(
                 return Err(format!("步骤「{}」输出上限需在 1-32768 之间", s.name));
             }
         }
+        // 节点级工具轮次上限(二维批次 5b):与设置项 `max_tool_rounds` 同口径 1-200。
+        // 严格档下该参数无意义,但**不因此拒绝**——与「严格档保留工具配置」同一纪律
+        // (配置保留,切回宽松档即生效;编辑器在严格档收起该输入)。
+        if let Some(r) = s.max_tool_rounds {
+            if !(1..=MAX_TOOL_ROUNDS_LIMIT).contains(&r) {
+                return Err(format!(
+                    "步骤「{}」工具轮次上限需在 1-{} 之间(当前 {})",
+                    s.name, MAX_TOOL_ROUNDS_LIMIT, r
+                ));
+            }
+        }
+        // 节点级连接(二维批次 5b)**有意不校验引用是否存在**:流程库可导出/跨机导入,
+        // 而连接是本机设置(settings.json),保存期拒绝会把可移植流程变成本机绑定。
+        // 失效引用在运行期明确报错(不静默回退默认连接),编辑期由前端显示「(已失效)」。
         if s.goal.trim().is_empty() {
             return Err(format!("步骤「{}」缺少目标说明", s.name));
         }
@@ -1439,6 +1455,56 @@ mod tests {
         );
         let err = validate_flow(&unknown, &tools()).unwrap_err();
         assert!(err.contains("档位"), "实际错误:{err}");
+    }
+
+    /// 节点级工具轮次上限(二维批次 5b):1-200 放行,越界明确报错并点名步骤;
+    /// 严格档下该参数无意义但**不拒绝**(与「严格档保留工具配置」同一纪律)。
+    #[test]
+    fn validate_flow_checks_node_tool_rounds_and_ignores_connection_refs() {
+        for rounds in [1u32, 32, 200] {
+            let ok = flow(
+                "rounds",
+                vec![PlanStep {
+                    max_tool_rounds: Some(rounds),
+                    ..graph_step("a", &[])
+                }],
+            );
+            assert!(validate_flow(&ok, &tools()).is_ok(), "rounds={rounds}");
+        }
+        let over = flow(
+            "rounds-over",
+            vec![PlanStep {
+                max_tool_rounds: Some(201),
+                ..graph_step("a", &[])
+            }],
+        );
+        let err = validate_flow(&over, &tools()).unwrap_err();
+        assert!(
+            err.contains("工具轮次上限") && err.contains("节点a"),
+            "实际错误:{err}"
+        );
+
+        // 严格档 + 轮次上限:配置保留,不因「用不上」而拒绝
+        let strict = flow(
+            "rounds-strict",
+            vec![PlanStep {
+                kind: Some("strict".into()),
+                max_tool_rounds: Some(5),
+                ..graph_step("a", &[])
+            }],
+        );
+        assert!(validate_flow(&strict, &tools()).is_ok());
+
+        // 节点级连接**不做保存期校验**:流程可导出/跨机导入,连接是本机设置
+        // (失效引用在运行期报错,不静默回退)。所以这里引用一个不存在的连接也必须放行。
+        let foreign_ref = flow(
+            "conn-ref",
+            vec![PlanStep {
+                connection_id: Some("本机不存在的连接".into()),
+                ..graph_step("a", &[])
+            }],
+        );
+        assert!(validate_flow(&foreign_ref, &tools()).is_ok());
     }
 
     #[test]

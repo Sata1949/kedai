@@ -209,6 +209,7 @@ impl TaskGenerator for TaskService {
         max_tokens: u32,
         temperature: f64,
         top_p: f64,
+        connection_id: Option<&'a str>,
         cancel: watch::Receiver<bool>,
     ) -> BoxFuture<'a, Result<TaskGenOutput, String>> {
         Box::pin(TaskService::generate_text(
@@ -221,6 +222,7 @@ impl TaskGenerator for TaskService {
             max_tokens,
             temperature,
             top_p,
+            connection_id,
             cancel,
         ))
     }

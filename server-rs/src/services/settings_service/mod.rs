@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::models::tool_policy::AuthorizationMode;
 
 mod connection;
+mod connector_pool;
 mod params;
 mod secret;
 
@@ -24,6 +25,7 @@ pub use connection::{
     mask_key, normalize_base_url, resolve_connector_target, ConnectionProfile, CONNECTOR_TYPE_MOCK,
     CONNECTOR_TYPE_OPENAI, DEFAULT_SEARCH_ENDPOINT, MAX_CONNECTIONS,
 };
+pub use connector_pool::{connection_label, ConnectorPool};
 pub use params::{
     default_roleplay_agent_prompt, default_task_agent_prompt, McpServerConfig, ModeSettings,
     RoleplayPromptConfig, TaskPromptConfig,

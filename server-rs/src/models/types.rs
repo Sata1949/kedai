@@ -266,6 +266,22 @@ pub struct PlanStep {
     /// 在保存期校验,运行期再以调用链守卫兜底(见 `task_engine/custom.rs`)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sub_flow_id: Option<String>,
+    /// 节点级连接(二维批次 5b):该节点走哪一套 API 连接(`ConnectionProfile.id`)。
+    /// 缺省 = 用默认连接(行为与 5b 之前一致);provider 与模型随该连接
+    /// (`ConnectionProfile.model`),故「节点级模型」= 选连接。
+    ///
+    /// **不做保存期校验**:流程库可导出/跨机导入,而连接是本机设置(settings.json),
+    /// 保存期拒绝会把可移植流程变成本机绑定。运行期按「引用的连接已删除/已停用」明确报错,
+    /// **不静默回退默认连接**(口径与 5a「有 flow_id 却无快照」、6b「子流程不在快照内」一致)。
+    ///
+    /// 挂载子流程的节点上本字段被旁路(子图各节点各自解析自己的连接),配置保留。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
+    /// 节点级工具循环轮次上限(二维批次 5b;None = 用全局 `settings.max_tool_rounds`)。
+    /// 范围 1-200,保存期校验(与设置项同口径)。严格档下无意义——配置保留,
+    /// 与「严格档保留工具配置」同一纪律(见 `is_strict`)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tool_rounds: Option<u32>,
 }
 
 impl PlanStep {
@@ -290,6 +306,15 @@ impl PlanStep {
     /// 挂载的子流程 id(已按 `is_sub_flow` 的口径 trim;未挂载返回 None)。
     pub fn sub_flow_ref(&self) -> Option<&str> {
         self.sub_flow_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+    }
+
+    /// 节点级连接 id(二维批次 5b;空白串按「未设置」处理,与 `sub_flow_ref` 同一口径)。
+    /// 返回 None = 用默认连接。
+    pub fn connection_ref(&self) -> Option<&str> {
+        self.connection_id
             .as_deref()
             .map(str::trim)
             .filter(|id| !id.is_empty())
@@ -444,6 +469,11 @@ pub struct GenerationParams {
     pub max_tool_rounds: Option<u32>,
     /// 工具选择策略;默认 Auto(保持原行为)。None/Required/Function 仅 tools 非空时生效。
     pub tool_choice: ToolChoice,
+    /// 该调用走哪一套连接(`ConnectionProfile.id`;None = 默认连接)。
+    /// 二维批次 5b:节点级 provider 路由的内部通道——本结构**未实现 Serialize**,
+    /// 故新增字段不动任何线格式。消费点见 `agents/engine/executor.rs::execute_generation`
+    /// 与 `services/task_service/executor.rs::generate_text`(同一处解析,不各自实现)。
+    pub connection_id: Option<String>,
     /// 是否允许模型单轮返回多个工具调用(None = 使用后端默认)
     pub parallel_tool_calls: Option<bool>,
 }
@@ -1588,6 +1618,52 @@ mod tests {
         assert_eq!(custom.node_id.as_deref(), Some("node-a"));
         let back = serde_json::to_string(&custom).unwrap();
         assert!(back.contains(r#""node_id":"node-a""#), "往返: {back}");
+    }
+
+    /// `PlanStep.connection_id` / `max_tool_rounds`(二维批次 5b)的三条线格式护栏:
+    /// ① 两个字段为 None 时**整键省略**——存量 `agent_flows.json` 与聊天侧流程快照
+    ///    逐字节不变;② 旧 JSON(无这两个键)能反序列化;③ 有值时往返不丢。
+    /// 空串 connection_id 按「未设置」处理(与 `sub_flow_ref` 同口径)。
+    #[test]
+    fn plan_step_connection_and_tool_rounds_are_additive_and_omitted_when_none() {
+        // ① None → 两个键都不出现(存量流程 JSON 是 bytes 级契约)
+        let step = PlanStep {
+            id: "s1".into(),
+            name: "起草".into(),
+            enabled: true,
+            goal: "g".into(),
+            action: "direct".into(),
+            generates: Some(true),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&step).unwrap();
+        assert!(!json.contains("connection_id"), "None 时不应落键: {json}");
+        assert!(!json.contains("max_tool_rounds"), "None 时不应落键: {json}");
+
+        // ② 旧 JSON(无这两个键)照常解析
+        let old: PlanStep = serde_json::from_str(
+            r#"{"id":"s1","name":"起草","enabled":true,"goal":"g","action":"direct"}"#,
+        )
+        .unwrap();
+        assert_eq!(old.connection_id, None);
+        assert_eq!(old.max_tool_rounds, None);
+        assert_eq!(old.connection_ref(), None);
+
+        // ③ 有值时往返不丢
+        let custom: PlanStep = serde_json::from_str(
+            r#"{"id":"s1","name":"起草","goal":"g","action":"direct","connection_id":"conn-b","max_tool_rounds":3}"#,
+        )
+        .unwrap();
+        assert_eq!(custom.connection_ref(), Some("conn-b"));
+        assert_eq!(custom.max_tool_rounds, Some(3));
+        let back = serde_json::to_string(&custom).unwrap();
+        assert!(back.contains(r#""connection_id":"conn-b""#), "往返: {back}");
+        assert!(back.contains(r#""max_tool_rounds":3"#), "往返: {back}");
+
+        // ④ 空白 id = 未设置(手改 JSON 的脏值不得当成「引用了空 id 的连接」)
+        let blank: PlanStep =
+            serde_json::from_str(r#"{"id":"s1","goal":"g","connection_id":"   "}"#).unwrap();
+        assert_eq!(blank.connection_ref(), None);
     }
 
     /// `TaskRecord.flow_id`(二维批次 5a)的三条线格式护栏:

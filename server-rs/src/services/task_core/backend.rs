@@ -213,6 +213,10 @@ pub(crate) trait TaskTerminalSink: Send + Sync {
 /// 引擎侧据此自行决定重试策略与解析判定。
 pub(crate) trait TaskGenerator: Send + Sync {
     /// 非流式生成统一出口(含调用追踪/delta 旁路落库)。
+    ///
+    /// `connection_id`(二维批次 5b):本次调用走哪一套连接(`ConnectionProfile.id`);
+    /// `None` = 默认连接。只有自定义流程的节点会带值(节点级 provider 路由),
+    /// 其余模式恒传 `None`(行为与 5b 之前一致)。
     #[allow(clippy::too_many_arguments)]
     fn generate_text<'a>(
         &'a self,
@@ -224,6 +228,7 @@ pub(crate) trait TaskGenerator: Send + Sync {
         max_tokens: u32,
         temperature: f64,
         top_p: f64,
+        connection_id: Option<&'a str>,
         cancel: watch::Receiver<bool>,
     ) -> BoxFuture<'a, Result<TaskGenOutput, String>>;
 

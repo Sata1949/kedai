@@ -17,7 +17,7 @@ use crate::services::quick_reply_service::QuickReplyService;
 use crate::services::runtime_prompt_service::RuntimePromptService;
 use crate::services::script_authorization_service::ScriptAuthorizationService;
 use crate::services::session_service::SessionService;
-use crate::services::settings_service::RuntimeSettings;
+use crate::services::settings_service::{ConnectorPool, RuntimeSettings};
 use crate::services::skill_service::SkillService;
 use crate::services::task_service::TaskService;
 use crate::services::token_service::TokenService;
@@ -313,6 +313,9 @@ impl AppState {
         let engine = Arc::new(AgentEngine::new(
             EngineCore {
                 connector: connector.clone(),
+                // 连接器池(二维批次 5b):进程内唯一一份,引擎与任务服务共用
+                // (计划改动点 1 明令不在 TaskService 里另建缓存,否则数据源分裂)。
+                connector_pool: std::sync::Arc::new(ConnectorPool::new()),
                 settings: settings.clone(),
                 db: db.clone(),
                 initial_model: initial_model.clone(),
@@ -348,7 +351,6 @@ impl AppState {
         let tasks = Arc::new(TaskService::new(
             db.clone(),
             characters.clone(),
-            connector.clone(),
             settings.clone(),
             world_books.clone(),
             prompt_inject.clone(),

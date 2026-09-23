@@ -13,7 +13,6 @@
 //   prompt.rs   提示词组装(任务设置/世界书/注入/Agent 系统提示词/人设)
 //   executor.rs 后台执行引擎(run/stop、LLM 单次生成原语、后台主体)
 use super::log_query_failure;
-use crate::connectors::Connector;
 use crate::models::db::{now_iso, Db, PooledRead};
 use crate::models::types::{
     CharacterRecord, GenerationParams, LlmMessage, LlmStreamChunk, SseEvent, TaskEventKind,
@@ -32,7 +31,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, watch, RwLock};
+use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
 
 // 按职责拆分的子模块(纯代码移动):DB 读写 / 取消信号 / 提示词组装 / 后台执行
@@ -75,9 +74,11 @@ pub(crate) use crate::services::task_core::TaskGenOutput;
 pub struct TaskService {
     db: Arc<Db>,
     characters: Arc<CharacterService>,
-    connector: Arc<RwLock<Connector>>,
     /// 聊天引擎(solo/plan 等六模式执行器复用 execute_generation/run_tool_loop;
-    /// 批次 4.2 注入,engine 不依赖 tasks,无循环)
+    /// 批次 4.2 注入,engine 不依赖 tasks,无循环)。**连接器也从这里取**——二维批次 5b
+    /// 起本服务不再自持连接器:默认连接由 `engine.connector` 提供、节点级连接由
+    /// `engine.resolve_connector` 单点解析(计划改动点 1:不在 TaskService 另建缓存,
+    /// 否则「改设置 → 谁生效」会有两个数据源)。
     engine: Arc<crate::agents::engine::AgentEngine>,
     /// 自定义 Agent 执行流程库(custom 模式读取当前启用流程;批次 4.3b 注入,
     /// 与 AppState 共享同一实例,克隆配置后即释放锁,不持引用跨 .await)
@@ -106,7 +107,6 @@ impl TaskService {
     pub fn new(
         db: Arc<Db>,
         characters: Arc<CharacterService>,
-        connector: Arc<RwLock<Connector>>,
         settings: Arc<Mutex<RuntimeSettings>>,
         world_books: Arc<WorldBookService>,
         prompt_inject: Arc<Mutex<PromptInjectService>>,
@@ -118,7 +118,6 @@ impl TaskService {
         let svc = TaskService {
             db,
             characters,
-            connector,
             engine,
             flow,
             agent_subtasks,

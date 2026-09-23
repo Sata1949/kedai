@@ -181,6 +181,10 @@ impl CustomExecutor {
     /// 带工具步骤:run_tool_loop + 步骤白名单;返回 (正文, 整轮 usage)。
     /// 调用追踪在本函数内落(phase 由调用方给出:`step` 或 `subflow.<路径>`;
     /// 对齐 generate_text 的统一出口语义:成功/空/中断/错误均落一行 task_llm_calls)。
+    /// `node_model` = 本节点连接的**真实模型名**(二维批次 5b;调用方已解析,不再恒取全局模型)。
+    // 参数较多是「追踪落库三件套(phase/step_index/model)」与执行输入各占一位所致,
+    // 打包成结构体只会把一个直白的调用点换成一次构造,收益为负。
+    #[allow(clippy::too_many_arguments)]
     async fn run_step_with_tools(
         &self,
         ctx: &TaskRunContext,
@@ -189,6 +193,7 @@ impl CustomExecutor {
         messages: &mut Vec<LlmMessage>,
         whitelist: &[String],
         phase: &str,
+        node_model: &str,
     ) -> Result<(String, TokenUsage), String> {
         let settings = &ctx.settings;
         // 任务模式工具策略:先按策略编译候选集(默认拒绝危险工具、剔除元工具),
@@ -227,8 +232,12 @@ impl CustomExecutor {
             max_tokens: step.max_tokens.unwrap_or(settings.default_max_tokens),
             stop: None,
             tools,
-            max_tool_rounds: Some(settings.max_tool_rounds),
+            // 节点级轮次上限(二维批次 5b):缺省沿用全局;严格档下本参数无意义(不下发工具),
+            // 与「严格档保留工具配置」同一纪律——配置保留、切换档位即生效。
+            max_tool_rounds: Some(step.max_tool_rounds.unwrap_or(settings.max_tool_rounds)),
             tool_choice,
+            // 节点级连接(二维批次 5b):run_tool_loop 内层经 engine 单点解析
+            connection_id: step.connection_ref().map(str::to_string),
             parallel_tool_calls: step.parallel_tool_calls,
         };
         // 会话 id 保留既有形状 `task:{任务 id}:step:{下标}`(入口流程逐字节不变);
@@ -274,7 +283,9 @@ impl CustomExecutor {
         let _ = drain.await;
 
         let elapsed = started.elapsed();
-        let model = self.engine.model();
+        // 调用追踪的模型列 = 本节点连接的**真实模型**(二维批次 5b):原先恒取全局模型,
+        // 节点绑了别的连接时会记错 provider。解析已在 execute_node 做过(同一份结果传入)。
+        let model = node_model.to_string();
         match result {
             Ok(res) if !res.interrupted => {
                 // 截断自愈留痕落库(问题①):与 solo.rs run_agent_loop 共用单一实现
@@ -398,6 +409,16 @@ impl CustomExecutor {
         if let Some(sub_id) = step.sub_flow_ref() {
             return self.run_sub_flow(ctx, g, index, step, sub_id, user).await;
         }
+        // 节点级连接(二维批次 5b):**先解析一次**——引用的连接被删除/停用即本节点失败
+        // (文案点名连接,不静默回退默认连接;口径同 5a「有 flow_id 却无快照」)。
+        // 解析结果同时给出本节点的真实模型,供纯生成与工具循环两条路径的调用追踪使用。
+        // 挂载子流程的节点在上一行已返回:connection_id 对它**旁路**(子图各节点各自解析),
+        // 故这里不会因一个被旁路的失效引用而误伤挂载节点。
+        let (_, node_model) = self
+            .engine
+            .resolve_connector(step.connection_ref())
+            .await
+            .map_err(|e| format!("步骤「{}」:{}", step.name, e))?;
         let sys = self.build_step_system(step, &ctx.goal);
         let mut messages = vec![
             LlmMessage::plain("system", &sys),
@@ -419,6 +440,7 @@ impl CustomExecutor {
                         step.max_tokens.unwrap_or(settings.default_max_tokens),
                         step.temperature.unwrap_or(settings.default_temperature),
                         settings.default_top_p,
+                        step.connection_ref(),
                         ctx.cancel.clone(),
                     )
                     .await
@@ -432,7 +454,7 @@ impl CustomExecutor {
             // usage → TaskGenOutput 统一走 usage_as_output(批次 B.4 单一出处);
             // 该 out 仅作 record_usage 入参(text 不消费)
             (Some(list), false) => self
-                .run_step_with_tools(ctx, index, step, &mut messages, list, g.phase)
+                .run_step_with_tools(ctx, index, step, &mut messages, list, g.phase, &node_model)
                 .await
                 .map(|(text, usage)| NodeOutcome {
                     out: super::executor::usage_as_output(&usage),

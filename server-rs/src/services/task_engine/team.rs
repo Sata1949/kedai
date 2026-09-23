@@ -345,6 +345,7 @@ async fn generate_text_healed(
             max_tokens,
             temperature,
             top_p,
+            None, // team 模式无节点级连接
             cancel.clone(),
         )
         .await?;
@@ -387,6 +388,7 @@ async fn generate_text_healed(
             retry_budget,
             temperature,
             top_p,
+            None, // team 模式无节点级连接
             cancel.clone(),
         )
         .await?;
@@ -444,6 +446,7 @@ impl TeamExecutor {
                     max_tokens,
                     TEAM_JSON_TEMPERATURE,
                     ctx.settings.default_top_p,
+                    None, // team 模式无节点级连接
                     ctx.cancel.clone(),
                 )
                 .await?;
@@ -747,6 +750,7 @@ impl TeamExecutor {
                     structured_budget(ctx.settings.default_max_tokens),
                     ctx.settings.default_temperature,
                     ctx.settings.default_top_p,
+                    None, // team 模式无节点级连接
                     ctx.cancel.clone(),
                 )
                 .await?;

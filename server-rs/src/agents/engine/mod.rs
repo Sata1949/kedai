@@ -76,6 +76,9 @@ use self::util::{check_aborted, rebuild_content_keeping_blocks, send_event, step
 pub struct EngineCore {
     /// LLM 连接器(内层 RwLock,支持运行期热切换)
     pub connector: Arc<RwLock<Connector>>,
+    /// 连接器池(二维批次 5b):节点/请求级 `connection_id` 的连接器解析与缓存。
+    /// **单一出处**——`TaskService` 不另建一份(计划改动点 1 明令),它复用引擎上的这一份。
+    pub connector_pool: Arc<crate::services::settings_service::ConnectorPool>,
     /// 运行时设置(agent 系统提示词、搜索端点等)
     pub settings: Arc<Mutex<RuntimeSettings>>,
     /// SQLite 句柄(Token 累计统计)
@@ -129,6 +132,8 @@ pub struct EngineExt {
 
 pub struct AgentEngine {
     pub connector: Arc<RwLock<Connector>>,
+    /// 连接器池(二维批次 5b):`resolve_connector` 的缓存来源,见 `EngineCore`。
+    connector_pool: Arc<crate::services::settings_service::ConnectorPool>,
     current_model: Mutex<String>,
     characters: Arc<CharacterService>,
     sessions: Arc<SessionService>,
@@ -181,6 +186,7 @@ impl AgentEngine {
     ) -> Self {
         AgentEngine {
             connector: core.connector,
+            connector_pool: core.connector_pool,
             current_model: Mutex::new(core.initial_model),
             characters: storage.characters,
             sessions: storage.sessions,
@@ -226,6 +232,46 @@ impl AgentEngine {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// 解析一次调用要用的连接器(二维批次 5b 的**单一出处**):
+    ///  - `None`(未指定)→ 默认连接:沿用 `engine.connector` 的读锁快照与 `model()`,
+    ///    行为与 5b 之前**逐字节一致**;
+    ///  - `Some(id)` → 按 id 在设置快照的连接列表里找:`enabled` 的走连接器池取实例
+    ///    (模型取该连接器真实值),找不到即报「连接已删除」、停用即报「连接已停用」——
+    ///    **不静默回退默认连接**(与 5a「有 flow_id 却无快照」、6b「子流程不在快照内」同口径)。
+    ///
+    /// 返回的模型名恒取**连接器自身**报告的值(而不是 `model()`):追责「这次调用到底用了
+    /// 哪个模型」时,连接器是唯一权威;默认连接下两者本就一致(切换模型同步重建两者),
+    /// mock 连接则恒为 `mock-demo`(既有语义,5b 未改)。
+    ///
+    /// 消费点:`executor::execute_generation`(工具循环内层)与
+    /// `task_service::generate_text`(纯生成);自定义流程两条执行路径因此共享同一分流,
+    /// 聊天侧 `agent_mode=custom` 也随 `step_params_for` 带上的 connection_id 一并生效。
+    pub async fn resolve_connector(
+        &self,
+        connection_id: Option<&str>,
+    ) -> Result<(Connector, String), String> {
+        let Some(id) = connection_id.map(str::trim).filter(|id| !id.is_empty()) else {
+            let connector = self.connector.read().await.clone();
+            let model = connector.model().to_string();
+            return Ok((connector, model));
+        };
+        let settings = self.settings_snapshot();
+        let Some(profile) = settings.connections.iter().find(|p| p.id == id) else {
+            return Err(format!(
+                "引用的连接「{id}」不在设置里(可能已被删除);请改流程的节点连接,或在设置里恢复该连接"
+            ));
+        };
+        if !profile.enabled {
+            return Err(format!(
+                "引用的连接「{}」已停用;请启用它,或改流程的节点连接",
+                crate::services::settings_service::connection_label(profile)
+            ));
+        }
+        let connector = self.connector_pool.connector_for(profile);
+        let model = connector.model().to_string();
+        Ok((connector, model))
     }
 
     /// 运行期设置快照:lock 后立即 clone 返回,锁中毒时 into_inner 恢复取值。

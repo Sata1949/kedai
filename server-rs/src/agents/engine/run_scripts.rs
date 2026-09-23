@@ -310,6 +310,7 @@ mod tests {
             tools: Vec::new(),
             max_tool_rounds: None,
             tool_choice: crate::models::types::ToolChoice::Auto,
+            connection_id: None,
             parallel_tool_calls: None,
         }
     }

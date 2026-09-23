@@ -92,6 +92,7 @@ pub(crate) async fn run_agent_loop(
         tools: policy.defs,
         max_tool_rounds: Some(settings.max_tool_rounds),
         tool_choice: ToolChoice::Auto,
+        connection_id: None,
         parallel_tool_calls: None,
     };
     let gate = crate::agents::engine::executor::ToolGate::listed(&allowed);

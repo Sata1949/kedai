@@ -35,6 +35,7 @@ pub(super) async fn reflect_with_llm(
         tools: Vec::new(),
         max_tool_rounds: None,
         tool_choice: crate::models::types::ToolChoice::Auto,
+        connection_id: None,
         parallel_tool_calls: None,
     };
     let connector = engine.connector.read().await.clone();
@@ -130,6 +131,7 @@ pub(super) async fn reflect_with_tools(
             tools: tools.clone(),
             max_tool_rounds: None,
             tool_choice: crate::models::types::ToolChoice::Auto,
+            connection_id: None,
             parallel_tool_calls: None,
         };
         let connector = engine.connector.read().await.clone();
@@ -248,6 +250,7 @@ pub(super) async fn generate_reflect_advice(
         tools: Vec::new(),
         max_tool_rounds: None,
         tool_choice: crate::models::types::ToolChoice::Auto,
+        connection_id: None,
         parallel_tool_calls: None,
     };
     let connector = engine.connector.read().await.clone();
