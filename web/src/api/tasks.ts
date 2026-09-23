@@ -21,7 +21,10 @@ export async function listTasks(): Promise<TaskRecord[]> {
  *   执行者已与角色扮演角色卡解耦,该字段仅为旧调用方保留(两者同时给出时执行者优先);
  * - `taskMode`:批次 4 六模式,缺省 legacy;
  * - `flowId`:二维批次 5a 的**流程绑定**(可选;仅 custom 模式可给,缺省 = 跟随当前流程)。
- *   仅在显式给出时下发,旧调用方请求体不变。
+ *   仅在显式给出时下发,旧调用方请求体不变;
+ * - `flowIds`:二维批次 7b 的**对比模式名单**(可选;仅 custom 模式可给,根流程 + 名单内流程
+ *   作为 `run_flow` 工具释放给宽松节点)。同样仅在非空时下发——空数组会被后端判 400
+ *   (「空名单 = 名存实亡」),故调用方不必也不应传空数组。
  */
 export async function createTask(
   title: string,
@@ -29,6 +32,7 @@ export async function createTask(
   taskMode?: TaskRunMode,
   characterId?: string,
   flowId?: string,
+  flowIds?: string[],
 ): Promise<TaskRecord> {
   const data = await request<unknown>('/tasks', {
     method: 'POST',
@@ -40,6 +44,8 @@ export async function createTask(
       ...(characterId ? { character_id: characterId } : {}),
       // 流程绑定:空串 = 跟随当前流程(不下发该键)
       ...(flowId ? { flow_id: flowId } : {}),
+      // 对比模式名单:仅非空时下发(空数组 = 后端 400,不是「强制模式」的写法)
+      ...(flowIds && flowIds.length > 0 ? { flow_ids: flowIds } : {}),
     }),
   });
   return requireObjectField<TaskRecord>(data, 'task', '任务');

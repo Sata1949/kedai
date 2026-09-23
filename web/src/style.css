@@ -3678,6 +3678,21 @@ input[type="range"].sv-range::-moz-range-thumb {
 .sv-task-new .sv-select { width: 100%; margin-top: 8px; }
 .sv-task-new .sv-btn { width: 100%; margin-top: 10px; }
 
+/* --- 二维批次 7b:对比模式「可调用流程」名单(窄栏内纵向勾选列表) --- */
+.sv-task-new .flow-ids { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+.sv-task-new .flow-id-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--sv-ink-soft);
+  cursor: pointer;
+}
+/* 根流程与停用流程:只作展示(后端也会拒),故整行弱化 + 不可点 */
+.sv-task-new .flow-id-item.disabled { opacity: 0.55; cursor: not-allowed; }
+.sv-task-new .flow-id-box { margin: 0; flex: none; }
+.sv-task-new .flow-ids .sv-note { margin-top: 4px; }
+
 /* --- 侧栏底部反馈条:在按钮组上方,去掉默认上 margin 改下间距 --- */
 .sv-side-foot .sv-feedback { margin: 0 0 8px; }
 

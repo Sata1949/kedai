@@ -208,6 +208,26 @@ describe('TaskBoard 批次 4:solo/multi 调用情况入口与 custom 步骤进�
     expect(html).toContain('已完成');
   });
 
+  it('custom 任务的对比模式徽标:带名单才显示「对比 · 可调用 N 个流程」', async () => {
+    // 带名单 → 徽标 + 数量
+    const compareTask = makeTask('running', 'custom');
+    compareTask.flow_ids = ['f-1', 'f-2'];
+    const html = await render(TaskBoard, (p) => seedCurrentTask(p, makeDetail(compareTask)));
+    expect(html).toContain('对比 · 可调用 2 个流程');
+
+    // 强制模式(无名单):不显示该徽标
+    const forceHtml = await render(TaskBoard, (p) =>
+      seedCurrentTask(p, makeDetail(makeTask('running', 'custom'))),
+    );
+    expect(forceHtml).not.toContain('对比 · 可调用');
+
+    // 非 custom 模式即使带了字段也不显示(字段只对自定义流程有意义)
+    const soloTask = makeTask('running', 'solo');
+    soloTask.flow_ids = ['f-1'];
+    const soloHtml = await render(TaskBoard, (p) => seedCurrentTask(p, makeDetail(soloTask)));
+    expect(soloHtml).not.toContain('对比 · 可调用');
+  });
+
   it('legacy 模式渲染保持现状(无批准区/分工卡/调用面板入口)', async () => {
     const plan: TaskStep[] = [{ name: '步骤一', goal: '目标一', status: 'pending', result: '' }];
     const html = await render(TaskBoard, (p) =>

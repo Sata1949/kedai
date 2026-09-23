@@ -163,6 +163,39 @@ describe('api/tasks REST 封装', () => {
     });
   });
 
+  it('createTask 的 flowIds 仅在非空时下发(二维批次 7b 对比模式名单)', async () => {
+    const lastCreateBody = (): Record<string, unknown> => {
+      const posts = vi.mocked(fetch).mock.calls.filter(
+        ([input, init]) => String(input) === '/api/tasks' && (init?.method ?? 'GET') === 'POST',
+      );
+      return JSON.parse(String(posts[posts.length - 1]?.[1]?.body)) as Record<string, unknown>;
+    };
+
+    // 不给(强制模式):请求体不得出现 flow_ids 键,旧客户端请求体逐字节不变
+    await createTask('目标', undefined, 'custom', undefined, 'flow-a');
+    expect(lastCreateBody()).not.toHaveProperty('flow_ids');
+    expect(lastCreateBody()).toEqual({
+      title: '目标',
+      executor_id: null,
+      task_mode: 'custom',
+      flow_id: 'flow-a',
+    });
+
+    // 空数组同样不下发:后端把「给了空数组」判 400(空名单 = 名存实亡),
+    // 这里挡一次比让用户撞一次失败好
+    await createTask('目标', undefined, 'custom', undefined, undefined, []);
+    expect(lastCreateBody()).not.toHaveProperty('flow_ids');
+
+    // 非空:原样下发,且**顺序保持**(后端工具描述按名单顺序列举)
+    await createTask('目标', undefined, 'custom', undefined, undefined, ['f-2', 'f-1']);
+    expect(lastCreateBody()).toEqual({
+      title: '目标',
+      executor_id: null,
+      task_mode: 'custom',
+      flow_ids: ['f-2', 'f-1'],
+    });
+  });
+
   it('approveTask:POST /tasks/{id}/approve;不给 plan 时空体,给了 plan 则带 plan 字段', async () => {
     const plan: TaskStep[] = [{ name: '步骤一', goal: '目标一', status: 'pending', result: '' }];
     const r1 = await approveTask('t1');

@@ -42,6 +42,8 @@ const h = vi.hoisted(() => ({
   createTaskModes: [] as (string | undefined)[],
   /** createTask 收到的 flow_id 参数序列(二维批次 5a 绑定透传断言用) */
   createTaskFlowIds: [] as (string | undefined)[],
+  /** createTask 收到的 flow_ids 参数序列(二维批次 7b 对比名单透传断言用) */
+  createTaskFlowIdLists: [] as (string[] | undefined)[],
   /** approveTask 收到的 (id, plan) 参数序列(批次 4 批准断言用) */
   approveCalls: [] as Array<{ id: string; plan?: TaskStep[] }>,
   /** followupTask 收到的 (id, content, mode) 参数序列(批次 R2a;R2b+ 扩 mode) */
@@ -83,11 +85,21 @@ vi.mock('../api', async (importOriginal) => {
     runTask: vi.fn(async () => {}),
     stopTask: vi.fn(async () => {}),
     deleteTask: vi.fn(async () => {}),
-    createTask: vi.fn(async (title: string, _characterId?: string, taskMode?: string, _character?: string, flowId?: string) => {
-      h.createTaskModes.push(taskMode);
-      h.createTaskFlowIds.push(flowId);
-      return makeTask('pending', title);
-    }),
+    createTask: vi.fn(
+      async (
+        title: string,
+        _characterId?: string,
+        taskMode?: string,
+        _character?: string,
+        flowId?: string,
+        flowIds?: string[],
+      ) => {
+        h.createTaskModes.push(taskMode);
+        h.createTaskFlowIds.push(flowId);
+        h.createTaskFlowIdLists.push(flowIds);
+        return makeTask('pending', title);
+      },
+    ),
     approveTask: vi.fn(async (id: string, plan?: TaskStep[]) => {
       h.approveCalls.push({ id, plan });
       return { ok: true };
@@ -548,6 +560,7 @@ describe('批次 4 六模式:taskRunMode / approveTask / 新事件分支', () =>
     h.emitClose = null;
     h.createTaskModes = [];
     h.createTaskFlowIds = [];
+    h.createTaskFlowIdLists = [];
     h.approveCalls = [];
     h.followupCalls = [];
     h.planChatCalls = [];
@@ -612,6 +625,74 @@ describe('批次 4 六模式:taskRunMode / approveTask / 新事件分支', () =>
     memStorage.set('kedai.taskFlowId.v1', '  ');
     setActivePinia(createPinia());
     expect(useTaskStore().taskFlowId, '空白值按未绑定处理').toBe('');
+  });
+
+  // ===== 二维批次 7b:对比模式(流程用法 + 可调用名单) =====
+
+  it('taskFlowMode 缺省为 force;写入持久化到 kedai.taskFlowMode.v1;未知值回退 force', async () => {
+    const store = useTaskStore();
+    expect(store.taskFlowMode, '缺省是强制模式(老行为)').toBe('force');
+
+    store.taskFlowMode = 'compare';
+    await flush();
+    expect(memStorage.get('kedai.taskFlowMode.v1')).toBe('compare');
+
+    // 手改/旧版本写入的未知值按 force 处理(与 taskRunMode 的白名单回退同款)
+    memStorage.set('kedai.taskFlowMode.v1', 'whatever');
+    setActivePinia(createPinia());
+    expect(useTaskStore().taskFlowMode).toBe('force');
+  });
+
+  it('taskFlowIds 持久化为 JSON 数组;初始化恢复去空白去重;空名单清键', async () => {
+    const store = useTaskStore();
+    expect(store.taskFlowIds).toEqual([]);
+
+    store.taskFlowIds = ['f-1', 'f-2'];
+    await flush();
+    expect(memStorage.get('kedai.taskFlowIds.v1')).toBe('["f-1","f-2"]');
+
+    // 恢复:形状不对(非数组/非字符串项)一律忽略,不抛错
+    memStorage.set('kedai.taskFlowIds.v1', '{"a":1}');
+    setActivePinia(createPinia());
+    expect(useTaskStore().taskFlowIds).toEqual([]);
+    memStorage.set('kedai.taskFlowIds.v1', '[" f-1 ", "", 3, "f-1"]');
+    setActivePinia(createPinia());
+    expect(
+      useTaskStore().taskFlowIds,
+      '空白项与重复项应被剔除,顺序保持',
+    ).toEqual(['f-1']);
+
+    // 清空名单:落盘键移除(与「无名单」保持同一种表示)
+    const store2 = useTaskStore();
+    store2.taskFlowIds = [];
+    await flush();
+    expect(memStorage.has('kedai.taskFlowIds.v1'), '空名单应清掉持久化键').toBe(false);
+  });
+
+  it('对比名单**仅** custom + compare 时下发:强制模式与非 custom 都不带 flow_ids', async () => {
+    const store = useTaskStore();
+    store.taskRunMode = 'custom';
+    store.taskFlowMode = 'compare';
+    store.taskFlowIds = ['f-1', 'f-2'];
+    await store.createTask('对比模式目标');
+    expect(h.createTaskFlowIdLists[0], 'custom + compare 应透传名单').toEqual(['f-1', 'f-2']);
+
+    // 强制模式:名单留在内存(切回来还在),但请求里绝不下发——后端会 400
+    store.taskFlowMode = 'force';
+    await store.createTask('强制模式目标');
+    expect(h.createTaskFlowIdLists[1], '强制模式不下发名单').toBeUndefined();
+
+    // 非 custom:同样不下发(选择器不渲染,但内存里的名单仍在)
+    store.taskRunMode = 'solo';
+    store.taskFlowMode = 'compare';
+    await store.createTask('非 custom 目标');
+    expect(h.createTaskFlowIdLists[2], '非 custom 不下发名单').toBeUndefined();
+
+    // 名单为空:即使 custom + compare 也不下发(空数组会被后端判 400)
+    store.taskRunMode = 'custom';
+    store.taskFlowIds = [];
+    await store.createTask('空名单目标');
+    expect(h.createTaskFlowIdLists[3], '空名单不下发 flow_ids').toBeUndefined();
   });
 
   it('approveTask 透传 (id, plan) 并在成功后刷新任务详情;不给 plan 时 plan 为 undefined', async () => {

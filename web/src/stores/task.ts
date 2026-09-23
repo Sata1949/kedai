@@ -9,6 +9,7 @@
 import { defineStore } from 'pinia';
 import { ref, watch } from 'vue';
 import * as api from '../api';
+import type { TaskFlowMode } from '../api/labels';
 import {
   reloadSettings,
   reportChatEvent,
@@ -21,11 +22,18 @@ const APP_MODE_KEY = 'kedai.appMode';
 const TASK_RUN_MODE_KEY = 'kedai.taskRunMode.v1';
 /** 新建任务绑定的流程持久化键(二维批次 5a):刷新后保持上次选择;空 = 跟随当前流程 */
 const TASK_FLOW_ID_KEY = 'kedai.taskFlowId.v1';
+/** 流程用法持久化键(二维批次 7b):force 强制 | compare 对比;仅 custom 模式可见 */
+const TASK_FLOW_MODE_KEY = 'kedai.taskFlowMode.v1';
+/** 对比模式名单持久化键(二维批次 7b):刷新后保持上次勾选(JSON 字符串数组) */
+const TASK_FLOW_IDS_KEY = 'kedai.taskFlowIds.v1';
 /** 当前选中任务持久化键(实跑问题 4):重启后恢复上次查看的任务详情与调用记录 */
 const CURRENT_TASK_KEY = 'kedai.currentTaskId.v1';
 
 /** 任务模式可选值(写持久化前的白名单校验;未知值回退 legacy) */
 const TASK_RUN_MODES = new Set(['legacy', 'solo', 'multi', 'plan', 'team', 'custom']);
+
+/** 流程用法可选值(白名单校验;未知值回退 force) */
+const TASK_FLOW_MODES = new Set<TaskFlowMode>(['force', 'compare']);
 
 function readStoredCurrentTaskId(): string | null {
   try {
@@ -88,6 +96,41 @@ function readStoredTaskFlowId(): string {
   }
 }
 
+/** 读取持久化的流程用法(二维批次 7b;未知值回退 force = 强制模式) */
+function readStoredTaskFlowMode(): TaskFlowMode {
+  try {
+    const v = localStorage.getItem(TASK_FLOW_MODE_KEY) ?? '';
+    return (TASK_FLOW_MODES.has(v as TaskFlowMode) ? v : 'force') as TaskFlowMode;
+  } catch {
+    return 'force';
+  }
+}
+
+/**
+ * 读取持久化的对比模式名单(二维批次 7b)。
+ *
+ * 只做**形状**校验(字符串数组、去空白、去重),不校验成员是否还在流程库里
+ * ——与 `readStoredTaskFlowId` 同一纪律:库未加载 ≠ 名单失效,静默清空会让用户
+ * 下次建任务时悄悄退化成强制模式;成员可用性最终由后端判定(创建期逐项点名 400)。
+ */
+function readStoredTaskFlowIds(): string[] {
+  try {
+    const raw = localStorage.getItem(TASK_FLOW_IDS_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const out: string[] = [];
+    for (const item of parsed) {
+      if (typeof item !== 'string') continue;
+      const id = item.trim();
+      if (id && !out.includes(id)) out.push(id);
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 export const useTaskStore = defineStore('app.task', () => {
   // ===== 状态 =====
   /** 顶层模式:roleplay = 角色扮演,task = 任务工作台;持久化到 localStorage */
@@ -99,6 +142,16 @@ export const useTaskStore = defineStore('app.task', () => {
    * 只在 custom 模式下由选择器改写;切到别的模式时不重置(用户切回来仍是原绑定)。
    */
   const taskFlowId = ref<string>(readStoredTaskFlowId());
+  /**
+   * **流程用法**(二维批次 7b;仅 custom 模式可见;持久化到 localStorage)。
+   * force = 强制(老行为,忽略名单);compare = 对比(根流程照常跑 + 名单内流程可被模型调用)。
+   */
+  const taskFlowMode = ref<TaskFlowMode>(readStoredTaskFlowMode());
+  /**
+   * **对比模式的可调用流程名单**(二维批次 7b;仅 compare 时随请求下发;持久化到 localStorage)。
+   * 顺序即用户勾选顺序 → 后端工具描述里的列举顺序(同一份名单两次运行文案一致)。
+   */
+  const taskFlowIds = ref<string[]>(readStoredTaskFlowIds());
   const tasks = ref<api.TaskRecord[]>([]);
   const currentTaskId = ref<string | null>(null);
   /** 当前任务详情(含子任务) */
@@ -210,6 +263,28 @@ export const useTaskStore = defineStore('app.task', () => {
     }
   }
   watch(taskFlowId, persistTaskFlowId);
+
+  /** 持久化流程用法(与 taskRunMode 同款容错:写失败静默) */
+  function persistTaskFlowMode(): void {
+    try {
+      localStorage.setItem(TASK_FLOW_MODE_KEY, taskFlowMode.value);
+    } catch {
+      /* 忽略 */
+    }
+  }
+  watch(taskFlowMode, persistTaskFlowMode);
+
+  /** 持久化对比模式名单(空名单移除键:与「强制模式」保持同一种「无名单」表示) */
+  function persistTaskFlowIds(): void {
+    try {
+      const ids = taskFlowIds.value;
+      if (ids.length > 0) localStorage.setItem(TASK_FLOW_IDS_KEY, JSON.stringify(ids));
+      else localStorage.removeItem(TASK_FLOW_IDS_KEY);
+    } catch {
+      /* 忽略 */
+    }
+  }
+  watch(taskFlowIds, persistTaskFlowIds, { deep: true });
 
   // ===== 加载(in-flight 合并防事件风暴) =====
 
@@ -560,14 +635,27 @@ export const useTaskStore = defineStore('app.task', () => {
 
   /** 新建任务。`executorId` 为执行者库 id(缺省 = 通用执行者);
    *  执行者与角色扮演角色卡已解耦,本入口不再接受 characterId。
-   *  二维批次 5a:custom 模式下 `taskFlowId` 非空即随请求下发(绑定即冻结),空则跟随当前流程。 */
+   *  二维批次 5a:custom 模式下 `taskFlowId` 非空即随请求下发(绑定即冻结),空则跟随当前流程。
+   *  二维批次 7b:custom 模式 + `taskFlowMode === 'compare'` 时随请求下发 `flowIds`
+   *  (名单为空 = 不下发该键,后端会 400;UI 侧已在选择器给出即时警示)。
+   *
+   *  模式门控放在 store 而不是组件:非 custom 模式下选择器不渲染,但持久化的名单/绑定
+   *  仍在内存里——若照原样下发,后端会以「只有自定义流程模式可以…」400 掉一次**正常**创建。 */
   async function createTask(title: string, executorId?: string): Promise<api.TaskRecord> {
+    const isCustom = taskRunMode.value === 'custom';
+    // 空名单不下发:后端把「给了空数组」判 400(空名单 = 名存实亡),
+    // 「要跑强制模式」的正确写法是不带这个键。UI 同时给出即时警示。
+    const compareIds =
+      isCustom && taskFlowMode.value === 'compare' && taskFlowIds.value.length > 0
+        ? taskFlowIds.value
+        : undefined;
     const task = await api.createTask(
       title,
       executorId,
       taskRunMode.value,
       undefined,
-      taskFlowId.value || undefined,
+      isCustom ? taskFlowId.value || undefined : undefined,
+      compareIds,
     );
     tasks.value = [task, ...tasks.value];
     listSignature = contentSignature(tasks.value); // 本地乐观改写后同步签名(下次事件刷新同内容时不再替换)
@@ -638,6 +726,8 @@ export const useTaskStore = defineStore('app.task', () => {
     appMode,
     taskRunMode,
     taskFlowId,
+    taskFlowMode,
+    taskFlowIds,
     tasks,
     currentTaskId,
     currentTask,

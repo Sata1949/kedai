@@ -100,6 +100,19 @@ const taskFlowLabel = computed<string | null>(() => {
 });
 
 /**
+ * 对比模式徽标(二维批次 7b):任务带可调用流程名单时显示「对比 · 可调用 N 个流程」。
+ *
+ * N 取创建时勾选的名单长度(`task.flow_ids`);运行期实际可调用集还会扣除根流程、
+ * 剔除已不可用的成员(后端判定),故文案是「可调用 N 个」而不是「调用过 N 个」。
+ */
+const taskCompareLabel = computed<string | null>(() => {
+  if (taskMode.value !== 'custom') return null;
+  const ids = currentTask.value?.task.flow_ids ?? [];
+  if (ids.length === 0) return null;
+  return `对比 · 可调用 ${ids.length} 个流程`;
+});
+
+/**
  * 徽标/流程名需要流程库,而任务模式此前不会加载它(只有设置区打开时才拉)。这里在
  * 遇到 custom 任务时惰性拉一次:**已有任务快照就不拉**(快照是自足的数据源,少一次请求,
  * 也不会被「当前库已被改过」误导);拉取失败保持 null(徽标不显示),不影响任务展示本身
@@ -516,6 +529,13 @@ async function removeTask(task: TaskRecord): Promise<void> {
               class="sv-tag sm"
               title="本任务绑定/使用的流程(绑定即冻结:创建时的编排;未绑定 = 跟随当前流程)"
             >流程:{{ taskFlowLabel }}</span>
+            <!-- 对比模式(二维批次 7b):根流程照常执行,名单内流程额外作为 run_flow 工具
+                 释放给宽松节点,由模型自主调用、取回成果 -->
+            <span
+              v-if="taskCompareLabel"
+              class="sv-tag sm"
+              title="对比模式:根流程照常执行,名单内流程作为工具释放给流程节点,由模型在工具循环里自主调用并取回成果"
+            >{{ taskCompareLabel }}</span>
             <span v-if="taskTotalTokens > 0" class="sv-task-usage">累计 token {{ taskTotalTokens.toLocaleString() }}</span>
             <span v-if="currentTask.task.error" class="sv-task-error">{{ currentTask.task.error }}</span>
           </div>
