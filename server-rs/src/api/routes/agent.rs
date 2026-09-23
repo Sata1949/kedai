@@ -30,6 +30,16 @@ pub(crate) fn agent_routes() -> Router<Arc<AppState>> {
             "/api/agent-flows/select",
             post(agent_flows::select_agent_flow),
         )
+        // 流程搬运(二维批次 7a):导出搬运包(id 缺省 = 全库)/ 原子导入合并。
+        // 与 `/{id}` 并存不冲突:axum 静态段优先匹配,`/export` 不会被当成流程 id
+        .route(
+            "/api/agent-flows/export",
+            get(agent_flows::export_agent_flows),
+        )
+        .route(
+            "/api/agent-flows/import",
+            post(agent_flows::import_agent_flows),
+        )
         .route(
             "/api/agent-flows/{id}",
             axum::routing::delete(agent_flows::delete_agent_flow),

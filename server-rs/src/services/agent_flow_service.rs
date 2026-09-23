@@ -212,6 +212,160 @@ impl AgentFlowService {
         self.save_library()
     }
 
+    /// 导出**流程搬运包**(二维批次 7a):`root` 为 `Some(id)` 时导出该流程 + 其**可达子流程
+    /// 闭包**,`None` 时导出整个流程库。
+    ///
+    /// 为什么必须带子流程闭包:节点挂载的是 `sub_flow_id` 引用,只导入口流程等于导出一份
+    /// **引用了不存在的子流程**的文件——导入侧 `validate_sub_flows` 必然 400,「导出即坏文件」。
+    /// 闭包取的是 `sub_flow_closure`(与任务快照 `build_snapshot`、删除保护同一个「什么算被引用」
+    /// 的判定),故「导出的那些流程」与「跑任务时冻结的那些流程」不可能分叉。
+    ///
+    /// 与 `snapshot_for` 的差别:后者是**任务绑定**路径,要求流程已启用(任务绑定一套停用流程
+    /// 没有意义);导出是**搬运**路径,停用流程(草稿、辅助子流程)同样要能带走,故这里只做
+    /// [`validate`](Self::validate) 的结构 + 可达引用链校验,不看 `enabled`。
+    ///
+    /// 产物形状见 `docs/契约-协议与配置.md`「流程搬运契约」;**不含**连接定义与密钥
+    /// (连接是本机 settings,见 D7 口径);节点级 `connection_id` 原样保留,跨机导入后由
+    /// 编辑期警示 + 运行期报错兜住(二维批次 5b 口径)。
+    pub fn export_bundle(&self, root: Option<&str>) -> Result<Value, String> {
+        let (root_id, flows) = match root {
+            Some(id) => {
+                let cfg = self
+                    .flow_by_id(id)
+                    .ok_or_else(|| format!("流程不存在:{}", id))?;
+                self.validate(cfg)?;
+                let snapshot = self.sub_flow_closure(cfg);
+                (Some(snapshot.root_id), snapshot.flows)
+            }
+            // 全库导出:只读不校验——库一旦有脏引用(手改 JSON),导出仍应可用;
+            // 导入侧才是写路径,校验在那里把关。
+            None => (
+                self.library.current_flow_id.clone(),
+                self.library.flows.clone(),
+            ),
+        };
+        Ok(serde_json::json!({
+            "kedai_flow_bundle": FLOW_BUNDLE_VERSION,
+            "exported_at": crate::models::db::now_iso(),
+            "root_id": root_id,
+            "flows": flows,
+        }))
+    }
+
+    /// 导入流程搬运包(二维批次 7a):**只新增,绝不改写库里既有 id 的既有流程**。
+    ///
+    /// 判定顺序(口径见 `docs/契约-协议与配置.md`「流程搬运契约」):
+    ///  1. **内容已存在**(本库或本批已有逐字节相同的流程)→ 跳过。重复导入同一份文件因此
+    ///     幂等——哪怕上次导入因 id 冲突被分配了新 id,这次的同一份内容仍会被认出来;
+    ///     若已存在的那份 id 与文件不同,把批内对它的引用改指向**已存在的那份**(否则
+    ///     「入口被导入、子流程被跳过」会留下悬空引用);
+    ///  2. id 在本库不存在 → **沿用原 id**(跨机搬运时 id 保持稳定);
+    ///  3. 同 id 但内容不同 → 分配新 id 并登记重映射(绝不覆盖用户已有流程);
+    ///  4. id 为空 → 分配新 id。
+    ///
+    /// 重映射后按映射表改写**本批**所有 `steps[].sub_flow_id`——批内引用一律以「导入的这一份」
+    /// 为准,不会静默绑到本库同 id 的另一份流程上(那会悄悄改变编排语义);只有「该流程被跳过」
+    /// 这一种情形才指向本库的等价副本。批外引用由 [`validate_sub_flows`] 报错
+    /// (同一个「什么算合法引用」的判定,此处不复制规则)。
+    ///
+    /// **原子性**:全部校验在**候选库**上做完才换库,失败时 `self.library` 与磁盘逐字节不变
+    /// (逐个 PUT 的旧导入路径做不到这点:先导入的流程已落盘,后面的引用校验才失败)。
+    pub fn import_bundle(
+        &mut self,
+        flows: Vec<AgentFlowConfig>,
+        root_id: Option<&str>,
+    ) -> Result<FlowImportReport, String> {
+        if flows.is_empty() {
+            return Err("导入文件里没有流程".into());
+        }
+        // 批内重复 id:文件自相矛盾(同一 id 两份),不猜用户意图直接拒绝;
+        // 若放行,两份都会沿用同一个 id,库内出现重复 id 的流程。
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        for f in &flows {
+            let id = f.id.trim();
+            if id.is_empty() {
+                continue;
+            }
+            if !seen.insert(id.to_string()) {
+                return Err(format!("导入文件内存在重复的流程 id:{}", id));
+            }
+        }
+        // 「内容已存在」的判定基准 = 本库 + 本批已接受的流程(逐字节指纹 → 其 id)。
+        // 一次算好,避免逐条与全库反复序列化比较;值(已存在那份的 id)用于跳过后修引用。
+        let mut known: BTreeMap<String, String> = BTreeMap::new();
+        for f in &self.library.flows {
+            known.insert(flow_fingerprint(f)?, f.id.clone());
+        }
+
+        let mut report = FlowImportReport::default();
+        let mut remap: BTreeMap<String, String> = BTreeMap::new();
+        let mut incoming: Vec<AgentFlowConfig> = Vec::with_capacity(flows.len());
+        for mut cfg in flows {
+            let old_id = cfg.id.trim().to_string();
+            cfg.id = old_id.clone();
+            let fingerprint = flow_fingerprint(&cfg)?;
+            if let Some(kept_id) = known.get(&fingerprint).cloned() {
+                // 内容已存在 → 跳过;id 与文件不同则把引用改指向已存在的那份(防悬空)
+                if !old_id.is_empty() && old_id != kept_id {
+                    remap.insert(old_id, kept_id);
+                }
+                report.skipped += 1;
+                continue;
+            }
+            // id 冲突只发生在「内容不同」(内容相同已在上面跳过)
+            if !old_id.is_empty() && self.flow_by_id(&old_id).is_some() {
+                let new_id = Uuid::new_v4().to_string();
+                remap.insert(old_id.clone(), new_id.clone());
+                report.renamed.push(FlowIdRemap {
+                    old_id,
+                    new_id: new_id.clone(),
+                    name: flow_label(&cfg),
+                });
+                cfg.id = new_id;
+            } else if old_id.is_empty() {
+                cfg.id = Uuid::new_v4().to_string();
+            }
+            known.insert(fingerprint, cfg.id.clone());
+            incoming.push(cfg);
+        }
+        // 全部条目都已在本库(且内容相同)→ 库与当前选择都不动,如实回报告
+        if incoming.is_empty() {
+            return Ok(report);
+        }
+        for cfg in &mut incoming {
+            for step in &mut cfg.steps {
+                let Some(sub_id) = step.sub_flow_ref() else {
+                    continue;
+                };
+                if let Some(new_id) = remap.get(sub_id) {
+                    step.sub_flow_id = Some(new_id.clone());
+                }
+            }
+        }
+        // 校验:逐条结构(与 set 同一套规则)+ 候选库引用链(单一出处,不复制判定)
+        for cfg in &incoming {
+            validate_flow(cfg, &self.registered_tools)
+                .map_err(|e| format!("导入的流程「{}」无效:{}", flow_label(cfg), e))?;
+        }
+        let mut candidate = self.library.clone();
+        candidate.flows.extend(incoming.iter().cloned());
+        validate_sub_flows(&candidate, &self.registered_tools)?;
+
+        report.imported = incoming.len();
+        self.library = candidate;
+        // 选中入口:文件的 root_id(经重映射)优先,否则本批第一个;跳过项也算命中
+        //(重复导入同一份文件时,用户仍希望停在「刚导入的那套编排」上)
+        let selected = root_id
+            .map(|id| remap.get(id).cloned().unwrap_or_else(|| id.to_string()))
+            .filter(|id| self.library.flows.iter().any(|f| f.id == *id))
+            .or_else(|| incoming.first().map(|f| f.id.clone()));
+        if let Some(id) = selected {
+            self.library.current_flow_id = Some(id);
+        }
+        self.save_library()?;
+        Ok(report)
+    }
+
     /// 持久化流程库到 data/agent_flows.json(原子写:崩溃不留半截 JSON)
     fn save_library(&self) -> Result<(), String> {
         let text = serde_json::to_string_pretty(&self.library).map_err(|e| e.to_string())?;
@@ -265,6 +419,47 @@ pub const DEFAULT_MAX_PARALLEL_NODES: u32 = 2;
 pub const MAX_PARALLEL_NODES_LIMIT: u32 = 8;
 /// 节点级工具轮次上限的取值范围(二维批次 5b):与设置项 `max_tool_rounds` 的 1-200 同口径
 pub const MAX_TOOL_ROUNDS_LIMIT: u32 = 200;
+
+/// 流程搬运包(导出文件)的版本键与版本号(二维批次 7a)。
+///
+/// 版本键**存在且不等于本值**时导入侧明确拒绝(提示升级),缺失该键则按旧格式容忍
+/// (单流程 `{name,steps}` / `{config:{…}}` / 库格式 `{flows,current_flow_id}`)——
+/// 旧文件是既有的用户数据,不能因为新增一整套搬运格式就导不进来。
+pub const FLOW_BUNDLE_KEY: &str = "kedai_flow_bundle";
+pub const FLOW_BUNDLE_VERSION: u32 = 1;
+
+/// 一条 id 重映射记录(导入报告用):同 id 内容不同时,导入的那份被分配了新 id。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FlowIdRemap {
+    /// 文件里的原 id
+    pub old_id: String,
+    /// 本库实际分配的新 id
+    pub new_id: String,
+    /// 流程展示名(报告文案里点名用)
+    pub name: String,
+}
+
+/// 导入报告:前端据此给出「导入 N 个(跳过 M 个,其中 K 个因 id 冲突分配了新 id)」。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FlowImportReport {
+    /// 本次真正新增的流程数
+    pub imported: usize,
+    /// 因「本库已有同 id 且内容相同」而跳过的流程数(重复导入同一份文件 → imported=0)
+    pub skipped: usize,
+    /// 因 id 冲突被分配新 id 的流程清单
+    pub renamed: Vec<FlowIdRemap>,
+}
+
+/// 一份流程配置的**内容指纹**(重复导入幂等的判定基准)。
+///
+/// 用同一个结构的 serde 序列化:`skip_serializing_if` 决定缺省键是否省略,故两侧都经一次
+/// parse→serialize 后即可直接比字符串(手写 JSON 的空白差异在 parse 时消失)。
+/// **不含 `id`**:内容相同但 id 不同的两份流程,对用户而言同一份,不该重复进库。
+fn flow_fingerprint(cfg: &AgentFlowConfig) -> Result<String, String> {
+    let mut key = cfg.clone();
+    key.id = String::new();
+    serde_json::to_string(&key).map_err(|e| format!("流程序列化失败: {e}"))
+}
 
 /// **任务用的流程快照**(二维批次 5a):入口流程 + 其**可达子流程闭包**,一次性冻结。
 ///
@@ -2087,6 +2282,303 @@ mod tests {
         assert!(
             validate_snapshot(&snap, &tools()).is_ok(),
             "冻结快照的校验只看快照自身"
+        );
+    }
+
+    // ===== 流程搬运:导出/导入(二维批次 7a) =====
+
+    /// 导出→导入空库:带子流程的流程必须整体搬走,引用不断。
+    #[test]
+    fn export_import_bundle_keeps_sub_flow_references_intact() {
+        let dir = TempDataDir::new("flow-bundle-move");
+        let mut svc = service(&dir);
+        let sub = save_flow(&mut svc, "子", vec![graph_step("n", &[])]);
+        let main = save_flow(&mut svc, "主", vec![sub_step("n", &sub)]);
+
+        let bundle = svc.export_bundle(Some(&main)).unwrap();
+        let flows: Vec<AgentFlowConfig> = serde_json::from_value(bundle["flows"].clone()).unwrap();
+        assert_eq!(flows.len(), 2, "闭包应带走入口 + 子流程");
+        assert_eq!(bundle["root_id"], main, "root_id = 入口流程");
+        assert_eq!(bundle[FLOW_BUNDLE_KEY], FLOW_BUNDLE_VERSION);
+
+        // 空库导入:不撞 id,故原 id 全部保留,引用自然不断
+        let dir2 = TempDataDir::new("flow-bundle-move-target");
+        let mut dst = service(&dir2);
+        let report = dst.import_bundle(flows, Some(&main)).unwrap();
+        assert_eq!(report.imported, 2);
+        assert_eq!(report.skipped, 0);
+        assert!(report.renamed.is_empty(), "无冲突不应改 id");
+        let got = dst.flow_by_id(&main).expect("入口流程应搬过来");
+        assert_eq!(
+            got.steps[0].sub_flow_ref(),
+            Some(sub.as_str()),
+            "子流程引用必须原样可达(旧的「只导单流程」会把这里变成悬空引用)"
+        );
+        assert_eq!(
+            dst.get_library().current_flow_id.as_deref(),
+            Some(main.as_str()),
+            "导入后选中入口流程"
+        );
+    }
+
+    /// 同 id 内容不同 → 新增并重映射,库里既有流程逐字节不变。
+    #[test]
+    fn import_remaps_conflicting_id_and_leaves_existing_flow_untouched() {
+        let dir = TempDataDir::new("flow-bundle-conflict");
+        let mut svc = service(&dir);
+        let sub = save_flow(&mut svc, "子", vec![graph_step("n", &[])]);
+        let main = save_flow(&mut svc, "主", vec![sub_step("n", &sub)]);
+        let bundle: Vec<AgentFlowConfig> =
+            serde_json::from_value(svc.export_bundle(Some(&main)).unwrap()["flows"].clone())
+                .unwrap();
+
+        // 本机把两份都改掉(同 id 异内容)——**两份都要重映射**,才能真正验到引用改写
+        for id in [&sub, &main] {
+            let mut edited = svc.flow_by_id(id).unwrap().clone();
+            edited.description = Some("本机改过".into());
+            svc.set(edited).unwrap();
+        }
+        let before_main = serde_json::to_string(svc.flow_by_id(&main).unwrap()).unwrap();
+        let before_sub = serde_json::to_string(svc.flow_by_id(&sub).unwrap()).unwrap();
+
+        let report = svc.import_bundle(bundle, Some(&main)).unwrap();
+        assert_eq!(report.imported, 2, "两份都应新增");
+        assert_eq!(report.renamed.len(), 2, "两份都因 id 冲突分配新 id");
+        assert_eq!(report.skipped, 0);
+        let new_of = |old: &str| -> String {
+            report
+                .renamed
+                .iter()
+                .find(|r| r.old_id == old)
+                .unwrap_or_else(|| panic!("{old} 应在重映射清单里"))
+                .new_id
+                .clone()
+        };
+        let (new_sub, new_main) = (new_of(&sub), new_of(&main));
+        assert_ne!(new_main, main);
+        assert_eq!(
+            svc.flow_by_id(&new_main).unwrap().steps[0].sub_flow_ref(),
+            Some(new_sub.as_str()),
+            "批内引用必须改写为新 id(不能指向本机那份被改过的流程)"
+        );
+        assert_eq!(
+            svc.get_library().current_flow_id.as_deref(),
+            Some(new_main.as_str()),
+            "root_id 经重映射后仍选中导入的那一份"
+        );
+        // 本机既有两份逐字节不变(口径 1:只新增,绝不改写既有 id 的既有流程)
+        assert_eq!(
+            serde_json::to_string(svc.flow_by_id(&main).unwrap()).unwrap(),
+            before_main
+        );
+        assert_eq!(
+            serde_json::to_string(svc.flow_by_id(&sub).unwrap()).unwrap(),
+            before_sub
+        );
+    }
+
+    /// 跳过与重映射并存的边界:被跳过的那份仍指向本机编排(口径 1 的必然结果,如实锁定)。
+    #[test]
+    fn import_skips_identical_flow_and_adds_only_the_changed_one() {
+        let dir = TempDataDir::new("flow-bundle-mixed");
+        let mut svc = service(&dir);
+        let sub = save_flow(&mut svc, "子", vec![graph_step("n", &[])]);
+        let main = save_flow(&mut svc, "主", vec![sub_step("n", &sub)]);
+        let bundle: Vec<AgentFlowConfig> =
+            serde_json::from_value(svc.export_bundle(Some(&main)).unwrap()["flows"].clone())
+                .unwrap();
+
+        // 只改子流程:入口内容与文件完全一致 → 跳过;子流程 → 重映射新增
+        {
+            let mut edited = svc.flow_by_id(&sub).unwrap().clone();
+            edited.description = Some("本机改过".into());
+            svc.set(edited).unwrap();
+        }
+        let size = svc.get_library().flows.len();
+        let report = svc.import_bundle(bundle, Some(&main)).unwrap();
+        assert_eq!(report.imported, 1);
+        assert_eq!(report.skipped, 1, "入口与文件逐字节相同 → 跳过而非新增");
+        assert_eq!(report.renamed.len(), 1);
+        assert_eq!(svc.get_library().flows.len(), size + 1);
+        assert_eq!(
+            svc.flow_by_id(&main).unwrap().steps[0].sub_flow_ref(),
+            Some(sub.as_str()),
+            "被跳过的那份(本机入口)仍指向本机的子流程——口径 1 下不允许改写既有流程"
+        );
+    }
+
+    /// 同 id 同内容 → 跳过:重复导入同一份文件幂等,库规模不变。
+    #[test]
+    fn import_same_content_is_idempotent() {
+        let dir = TempDataDir::new("flow-bundle-idempotent");
+        let mut svc = service(&dir);
+        let sub = save_flow(&mut svc, "子", vec![graph_step("n", &[])]);
+        let main = save_flow(&mut svc, "主", vec![sub_step("n", &sub)]);
+        let bundle: Vec<AgentFlowConfig> =
+            serde_json::from_value(svc.export_bundle(Some(&main)).unwrap()["flows"].clone())
+                .unwrap();
+        let size = svc.get_library().flows.len();
+        let current = svc.get_library().current_flow_id.clone();
+
+        let report = svc.import_bundle(bundle, Some(&main)).unwrap();
+        assert_eq!(report.imported, 0, "全部已存在 → 一个都不新增");
+        assert_eq!(report.skipped, 2);
+        assert!(report.renamed.is_empty());
+        assert_eq!(svc.get_library().flows.len(), size, "库规模不变");
+        assert_eq!(
+            svc.get_library().current_flow_id,
+            current,
+            "一条都没导入 → 当前选择也不动"
+        );
+    }
+
+    /// 校验失败 → 库逐字节不变(原子性)。
+    #[test]
+    fn import_rejects_dangling_reference_and_keeps_library_unchanged() {
+        let dir = TempDataDir::new("flow-bundle-atomic");
+        let mut svc = service(&dir);
+        let keep = save_flow(&mut svc, "本机", vec![graph_step("n", &[])]);
+        let before = std::fs::read_to_string(dir.join("agent_flows.json")).unwrap();
+        let size = svc.get_library().flows.len();
+
+        // 文件里的流程引用了「既不在文件里、本库也没有」的子流程
+        let mut bad = flow("外来", vec![sub_step("n", "flow-不存在")]);
+        bad.id = String::new();
+        let err = svc.import_bundle(vec![bad], None).unwrap_err();
+        assert!(
+            err.contains("不存在") && err.contains("子流程"),
+            "应点名悬空引用:{err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("agent_flows.json")).unwrap(),
+            before,
+            "校验失败必须不落盘(旧逐个 PUT 路径做不到这点)"
+        );
+        assert_eq!(svc.get_library().flows.len(), size, "库内一份都没多");
+        assert!(svc.flow_by_id(&keep).is_some());
+    }
+
+    /// 空批与批内重复 id 都明确拒绝(后者会让库内出现重复 id 的流程)。
+    #[test]
+    fn import_rejects_empty_batch_and_duplicate_ids_in_file() {
+        let dir = TempDataDir::new("flow-bundle-badinput");
+        let mut svc = service(&dir);
+        let size = svc.get_library().flows.len();
+        let err = svc.import_bundle(Vec::new(), None).unwrap_err();
+        assert!(err.contains("没有流程"), "实际错误:{err}");
+
+        let dup_a = flow("重复", vec![graph_step("n", &[])]);
+        let dup_b = flow("重复", vec![graph_step("m", &[])]);
+        assert_eq!(dup_a.id, dup_b.id, "helper 给的是同名同 id");
+        let err = svc.import_bundle(vec![dup_a, dup_b], None).unwrap_err();
+        assert!(err.contains("重复"), "实际错误:{err}");
+        assert_eq!(svc.get_library().flows.len(), size, "两次都被拒,库不变");
+    }
+
+    /// 全库导出:不校验、不缩水(脏引用也照导),root_id 取当前选择。
+    #[test]
+    fn export_whole_library_dumps_every_flow() {
+        let dir = TempDataDir::new("flow-bundle-all");
+        let mut svc = service(&dir);
+        let a = save_flow(&mut svc, "A", vec![graph_step("n", &[])]);
+        let b = save_flow(&mut svc, "B", vec![graph_step("n", &[])]);
+        svc.select(&a).unwrap();
+        let size = svc.get_library().flows.len();
+
+        let bundle = svc.export_bundle(None).unwrap();
+        let flows: Vec<AgentFlowConfig> = serde_json::from_value(bundle["flows"].clone()).unwrap();
+        assert_eq!(flows.len(), size, "全库导出应带走每一份流程(含内置流程)");
+        assert_eq!(bundle["root_id"], a, "root_id = 当前选中流程");
+        assert!(flows.iter().any(|f| f.id == b), "非当前的流程同样要在包里");
+    }
+
+    /// 未启用流程同样能导出(搬运路径不看 enabled):草稿与辅助子流程都要能带走。
+    #[test]
+    fn export_bundle_allows_disabled_flow_but_unknown_id_errors() {
+        let dir = TempDataDir::new("flow-bundle-disabled");
+        write_library(
+            &dir,
+            &library(vec![{
+                let mut off = flow("停用的", vec![graph_step("n", &[])]);
+                off.enabled = false;
+                off
+            }]),
+        );
+        let svc = service(&dir);
+        let bundle = svc.export_bundle(Some("flow-停用的")).unwrap();
+        assert_eq!(
+            bundle["flows"].as_array().map(Vec::len),
+            Some(1),
+            "停用流程应可导出(与 snapshot_for 的 enabled 口径不同)"
+        );
+        let err = svc.export_bundle(Some("flow-不存在")).unwrap_err();
+        assert!(err.contains("不存在"), "实际错误:{err}");
+    }
+
+    /// 被跳过的子流程:批内对它的引用必须改指向**本库那份等价副本**,否则会留下悬空引用
+    /// (入口被导入、子流程被跳过 = 校验必然失败)。
+    #[test]
+    fn import_rewrites_reference_to_existing_copy_when_sub_flow_is_skipped() {
+        let dir = TempDataDir::new("flow-bundle-skip-rewrite");
+        // 本库:子内容(C)挂在 other-sub 这个 id 下;入口 old-main 引用它(库自身合法)。
+        // 注意 old-sub 这个 id 本库**没有**,但同内容已存在 → 导入时会被跳过。
+        let mut local_sub = flow("子", vec![graph_step("n", &[])]);
+        local_sub.id = "other-sub".into();
+        let mut local_main = flow("主", vec![sub_step("n", "other-sub")]);
+        local_main.id = "old-main".into();
+        write_library(&dir, &library(vec![local_main.clone(), local_sub]));
+        let mut svc = service(&dir);
+
+        // 文件:入口引用 old-sub(内容与本库入口不同 → 会被导入并重映射),
+        // 子流程 id 为 old-sub(内容与本库 other-sub 相同 → 被跳过)
+        let mut incoming_main = flow("主", vec![sub_step("n", "old-sub")]);
+        incoming_main.id = "old-main".into();
+        let mut incoming_sub = flow("子", vec![graph_step("n", &[])]);
+        incoming_sub.id = "old-sub".into();
+        let report = svc
+            .import_bundle(vec![incoming_main, incoming_sub], Some("old-main"))
+            .expect("跳过的子流程必须改指向本库等价副本,而不是让校验失败");
+
+        assert_eq!(report.imported, 1);
+        assert_eq!(report.skipped, 1, "同内容的子流程应被跳过");
+        assert_eq!(report.renamed.len(), 1, "只有入口因 id 冲突重映射");
+        let new_main = report.renamed[0].new_id.clone();
+        assert_eq!(
+            svc.flow_by_id(&new_main).unwrap().steps[0].sub_flow_ref(),
+            Some("other-sub"),
+            "批内引用应改指向本库那份等价副本"
+        );
+        assert_eq!(
+            svc.get_library().current_flow_id.as_deref(),
+            Some(new_main.as_str()),
+            "root_id 经重映射后仍选中导入的那一份"
+        );
+    }
+
+    /// 文件里没有 id(旧单流程导出的形状)→ 分配新 id,内容照搬。
+    #[test]
+    fn import_assigns_new_id_when_file_has_none() {
+        let dir = TempDataDir::new("flow-bundle-noid");
+        let mut svc = service(&dir);
+        let mut legacy = flow("旧文件", vec![graph_step("n", &[])]);
+        legacy.id = String::new();
+        legacy.enabled = false; // 旧导出不含 enabled 时也该能进来
+
+        let report = svc.import_bundle(vec![legacy], None).unwrap();
+        assert_eq!(report.imported, 1);
+        assert!(report.renamed.is_empty(), "原文件没有 id,谈不上重映射");
+        let added = svc
+            .get_library()
+            .flows
+            .iter()
+            .find(|f| f.name == "旧文件")
+            .expect("应新增进库");
+        assert!(!added.id.is_empty(), "必须分配 id");
+        assert_eq!(added.steps.len(), 1, "步骤内容照搬");
+        assert_eq!(
+            svc.get_library().current_flow_id.as_deref(),
+            Some(added.id.as_str()),
+            "root_id 缺省 = 批内第一个"
         );
     }
 }
