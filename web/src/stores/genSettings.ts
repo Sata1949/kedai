@@ -331,6 +331,19 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     agentFlowLibrary.value = await api.deleteAgentFlow(id);
   }
 
+  /**
+   * 导入搬运包(二维批次 7a):只新增(同内容跳过 / 同 id 异内容分配新 id),
+   * 服务端校验在候选库上一次性完成——失败抛错且**本库不变**。返回报告供调用方提示。
+   */
+  async function importAgentFlows(
+    flows: api.AgentFlowConfig[],
+    rootId?: string,
+  ): Promise<api.FlowImportReport> {
+    const { library, report } = await api.importAgentFlows(flows, rootId);
+    agentFlowLibrary.value = library;
+    return report;
+  }
+
   return {
     temperature,
     topP,
@@ -393,5 +406,6 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     saveAgentFlowConfig,
     selectAgentFlow,
     deleteAgentFlow,
+    importAgentFlows,
   };
 });

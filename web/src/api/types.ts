@@ -816,6 +816,36 @@ export interface AgentFlowLibrary {
   flows: AgentFlowConfig[];
 }
 
+/** 一条 id 重映射记录(二维批次 7a 导入报告):同 id 内容不同时,导入的那份被分配了新 id */
+export interface FlowIdRemap {
+  /** 文件里的原 id */
+  old_id: string;
+  /** 本库实际分配的新 id */
+  new_id: string;
+  /** 流程展示名(报告文案里点名用) */
+  name: string;
+}
+
+/** 导入报告(二维批次 7a):导入 N 个 / 跳过 M 个(内容已存在)/ 其中 K 个分配了新 id */
+export interface FlowImportReport {
+  imported: number;
+  skipped: number;
+  renamed: FlowIdRemap[];
+}
+
+/**
+ * 流程搬运包(导出文件,二维批次 7a):入口(或当前)流程 + 其可达子流程闭包,一次性冻结。
+ * 导入侧按版本键判定:`kedai_flow_bundle` 缺失 = 旧格式(单流程 / {config} 包装 / 库格式)。
+ * **不含**连接定义与密钥(连接是本机设置);节点级 `connection_id` 原样保留,跨机后会显示
+ * 「(引用已失效)」并由运行期报错兜住(二维批次 5b 口径)。
+ */
+export interface AgentFlowBundle {
+  kedai_flow_bundle: number;
+  exported_at?: string;
+  root_id?: string | null;
+  flows: AgentFlowConfig[];
+}
+
 // ===== 宏调试(阶段六 6b) =====
 
 /** 历史消息条目({{lastMessage}}/{{firstMessage}} 等宏读取) */

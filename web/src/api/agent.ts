@@ -1,6 +1,14 @@
 // Agent 计划与自定义执行流程(agent-flows)API
 import { request } from './client';
-import type { AgentFlowConfig, AgentFlowLibrary, AgentMode, AgentPlan, ToolPermission } from './types';
+import type {
+  AgentFlowBundle,
+  AgentFlowConfig,
+  AgentFlowLibrary,
+  AgentMode,
+  AgentPlan,
+  FlowImportReport,
+  ToolPermission,
+} from './types';
 
 export async function getToolPermissions(sessionId: string, characterId: string): Promise<ToolPermission[]> {
   const query = new URLSearchParams({ session_id: sessionId, character_id: characterId });
@@ -93,4 +101,27 @@ export async function deleteAgentFlow(id: string): Promise<AgentFlowLibrary> {
     method: 'DELETE',
   });
   return data.library;
+}
+
+/** 导出搬运包(二维批次 7a):给 id 导出该流程 + 可达子流程闭包,缺省导出全库 */
+export async function exportAgentFlows(id?: string): Promise<AgentFlowBundle> {
+  const qs = id ? `?id=${encodeURIComponent(id)}` : '';
+  const data = await request<{ ok: boolean; bundle: AgentFlowBundle }>(`/agent-flows/export${qs}`);
+  return data.bundle;
+}
+
+/** 导入搬运包(二维批次 7a):只新增(同内容跳过 / 同 id 异内容分配新 id),校验失败 400 且库不变 */
+export async function importAgentFlows(
+  flows: AgentFlowConfig[],
+  rootId?: string,
+): Promise<{ library: AgentFlowLibrary; report: FlowImportReport }> {
+  const data = await request<{
+    ok: boolean;
+    library: AgentFlowLibrary;
+    report: FlowImportReport;
+  }>('/agent-flows/import', {
+    method: 'POST',
+    body: JSON.stringify({ flows, ...(rootId ? { root_id: rootId } : {}) }),
+  });
+  return { library: data.library, report: data.report };
 }

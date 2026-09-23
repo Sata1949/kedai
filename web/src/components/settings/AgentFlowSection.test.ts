@@ -31,6 +31,10 @@ vi.stubGlobal(
 Object.defineProperty(HTMLElement.prototype, 'offsetWidth', { configurable: true, value: 800 });
 Object.defineProperty(HTMLElement.prototype, 'offsetHeight', { configurable: true, value: 460 });
 
+// 导出落盘在 jsdom 里无处可去(URL.createObjectURL 未实现);本批次只断言「导了什么」,
+// 故把落盘换成捕获桩(与 useAgentFlow.test.ts 同款)。
+vi.mock('../../exportFile', () => ({ downloadBlob: vi.fn(), saveExportFile: vi.fn() }));
+
 /** 二维流程:两源节点 → 合并(显式成果节点) */
 function sampleFlow(): AgentFlowConfig {
   return {
@@ -516,3 +520,85 @@ describe('AgentFlowSection 节点级连接(二维批次 5b)', () => {
     expect((disabledOpt.element as HTMLOptionElement).disabled).toBe(true);
   });
 });
+
+// ==================== 流程搬运(二维批次 7a) ====================
+
+describe('AgentFlowSection 流程搬运', () => {
+  /** 按 URL 应答(导出由点击触发,不能用 mountSection 的「按调用序」mock) */
+  function mockByUrl(exportBody: unknown): string[] {
+    const urls: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      urls.push(url);
+      if (url.includes('/api/bootstrap')) {
+        return new Response(JSON.stringify({ token: 'test-secret' }), { status: 200 });
+      }
+      if (url.includes('/agent-flows/export')) {
+        return new Response(JSON.stringify(exportBody), { status: 200 });
+      }
+      if (url.includes('/agent-flows')) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            library: { current_flow_id: 'f1', flows: [sampleFlow()] },
+            config: null,
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify({ connections: [], active_connection_id: null }), {
+        status: 200,
+      });
+    });
+    return urls;
+  }
+
+  it('导出区:两个导出按钮都在,且说明导出范围与「不含连接与密钥」', async () => {
+    mockByUrl({ ok: true, bundle: { kedai_flow_bundle: 1, flows: [] } });
+    const wrapper = mount(AgentFlowSection);
+    await flushPromises();
+
+    const texts = wrapper.findAll('button').map((b) => b.text());
+    expect(texts).toContain('导出流程(JSON)');
+    expect(texts).toContain('导出全部流程');
+    // 提示须说清:带上子流程、不含连接/密钥
+    expect(wrapper.text()).toContain('挂载的子流程');
+    expect(wrapper.text()).toContain('不含 API 连接与密钥');
+  });
+
+  it('点「导出全部流程」:不带 id 调搬运包端点,并提示流程总数', async () => {
+    const urls = mockByUrl({
+      ok: true,
+      bundle: { kedai_flow_bundle: 1, root_id: 'f1', flows: [sampleFlow()] },
+    });
+    const wrapper = mount(AgentFlowSection);
+    await flushPromises();
+
+    await wrapper.findAll('button').find((b) => b.text() === '导出全部流程')?.trigger('click');
+    await flushPromises();
+
+    const call = urls.find((u) => u.includes('/agent-flows/export'));
+    expect(call, '导出必须走搬运包端点').toBe('/api/agent-flows/export');
+    expect(wrapper.text()).toContain('已导出全部 1 个流程');
+  });
+
+  it('点「导出流程」:带当前流程 id 调端点,并提示带上的子流程数', async () => {
+    const urls = mockByUrl({
+      ok: true,
+      bundle: {
+        kedai_flow_bundle: 1,
+        root_id: 'f1',
+        flows: [sampleFlow(), { ...sampleFlow(), id: 'f2', name: '子流程' }],
+      },
+    });
+    const wrapper = mount(AgentFlowSection);
+    await flushPromises();
+
+    await wrapper.findAll('button').find((b) => b.text() === '导出流程(JSON)')?.trigger('click');
+    await flushPromises();
+
+    expect(urls.some((u) => u.includes('/agent-flows/export?id=f1'))).toBe(true);
+    expect(wrapper.text()).toContain('已导出「测试流程」及其 1 个子流程');
+  });
+});
+

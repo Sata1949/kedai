@@ -90,6 +90,7 @@ export const useAppStore = defineStore('app', () => {
     saveAgentFlowConfig: genSettings.saveAgentFlowConfig,
     selectAgentFlow: genSettings.selectAgentFlow,
     deleteAgentFlow: genSettings.deleteAgentFlow,
+    importAgentFlows: genSettings.importAgentFlows,
     // 任务模式
     setAppMode: task.setAppMode,
     loadTasks: task.loadTasks,

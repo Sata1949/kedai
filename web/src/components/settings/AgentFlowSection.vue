@@ -55,7 +55,7 @@ const {
   flowDraft, flowSaving, flowMsg, editingStepId, dragStepId, flowId, flowName, flowDesc,
   flowImportInput, flowImporting, flowLibFlows,
   loadFlowConfig, onFlowSelect, newFlow, duplicateFlow, deleteFlowNow, onFlowImport,
-  exportFlowNow, saveFlowNow, addStep, removeStep, moveStep, onStepActionChange,
+  exportFlowNow, exportAllFlows, saveFlowNow, addStep, removeStep, moveStep, onStepActionChange,
   onStepDragStart, onStepDragOver, onStepDrop, onStepDragEnd,
   setFlowParallel,
 } = useAgentFlow();
@@ -122,6 +122,11 @@ onMounted(async () => {
         <button class="sv-btn ghost sv-btn-fill" :disabled="!flowDraft" @click="exportFlowNow">
           导出流程(JSON)
         </button>
+        <button class="sv-btn ghost sv-btn-fill" @click="exportAllFlows">导出全部流程</button>
+      </div>
+      <div class="sv-note">
+        导出会带上该流程挂载的子流程(缺了它们,导入方必然报「引用的子流程不存在」);
+        导出文件不含 API 连接与密钥,节点上的连接引用跨机后需重选。
       </div>
       <input
         ref="flowImportInput"

@@ -24,6 +24,72 @@ export const TOOL_MODE_LABELS = {
   list: '白名单',
 } as const;
 
+/** 搬运包版本键与版本号(与后端 `agent_flow_service::FLOW_BUNDLE_*` 对齐) */
+export const FLOW_BUNDLE_KEY = 'kedai_flow_bundle';
+export const FLOW_BUNDLE_VERSION = 1;
+
+/**
+ * 归一流程文件 → 待导入的 flows[](+ 可选入口 root_id)。
+ *
+ * 支持四种形状(旧文件必须继续能导,新增的搬运包才有版本键):
+ *  - 搬运包 `{kedai_flow_bundle:1, root_id, flows:[…]}`:整包导入,root_id 一并带上;
+ *  - 库格式 `{flows:[…], current_flow_id}`:**整库**导入(此前只取当前/第一个,会静默丢流程);
+ *  - `{config:{…}}` 包装:取其中的单流程;
+ *  - 单流程 `{name,enabled,steps:[…]}`:一份。
+ *
+ * 版本键存在但不是 1 → 明确拒绝(新版字段旧端读不懂,静默丢字段比报错更糟)。
+ */
+export function normalizeFlowFile(raw: unknown): {
+  flows: api.AgentFlowConfig[];
+  rootId?: string;
+} {
+  if (!raw || typeof raw !== 'object') {
+    throw new Error('无法识别的流程文件:内容不是 JSON 对象');
+  }
+  const obj = raw as Record<string, unknown>;
+  if (obj[FLOW_BUNDLE_KEY] !== undefined && obj[FLOW_BUNDLE_KEY] !== FLOW_BUNDLE_VERSION) {
+    throw new Error(
+      `流程包版本不支持(${String(obj[FLOW_BUNDLE_KEY])}),请升级 Kedai 后再导入`,
+    );
+  }
+  const asFlow = (v: unknown): api.AgentFlowConfig | null =>
+    v && typeof v === 'object' && Array.isArray((v as api.AgentFlowConfig).steps)
+      ? (v as api.AgentFlowConfig)
+      : null;
+  if (Array.isArray(obj.flows)) {
+    const flows = (obj.flows as unknown[]).map(asFlow);
+    if (flows.length === 0 || flows.some((f) => f === null)) {
+      throw new Error('流程文件里的 flows 不含合法流程(每项都需要 steps 数组)');
+    }
+    const rootId = typeof obj.root_id === 'string' ? obj.root_id : undefined;
+    return { flows: flows as api.AgentFlowConfig[], rootId };
+  }
+  const single = asFlow(obj.config) ?? asFlow(obj);
+  if (!single) {
+    throw new Error('无法识别的流程文件:需包含 steps 数组(单流程 / {config} 包装 / 流程库 / 搬运包)');
+  }
+  return { flows: [single] };
+}
+
+/** 导入报告 → 用户文案(导入 N / 跳过 M / 其中 K 个分配了新 id) */
+export function importReportMessage(report: api.FlowImportReport): string {
+  const parts = [`已导入 ${report.imported} 个流程`];
+  if (report.skipped > 0) parts.push(`跳过 ${report.skipped} 个(内容已存在)`);
+  if (report.renamed.length > 0) {
+    const names = report.renamed.map((r) => `「${r.name || r.old_id}」`).join('、');
+    parts.push(`${report.renamed.length} 个因 id 冲突分配了新 id:${names}`);
+  }
+  return parts.join(';');
+}
+
+/** 下载 JSON(文件名净化非法字符后交给 downloadBlob;helper 只管落盘) */
+function downloadJson(base: string, payload: unknown): void {
+  downloadBlob(
+    `${base.replace(/[\\/:*?"<>|]/g, '_')}.json`,
+    new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }),
+  );
+}
+
 export function useAgentFlow() {
   const store = useAppStore();
 
@@ -130,8 +196,9 @@ export function useAgentFlow() {
     }
   }
 
-  /** 导入流程 JSON:支持单流程 {name,enabled,steps}、{config:{…}} 包装或流程库 {flows:[…]}
-   *  (库格式取当前选中流程);无 id 时自动分配,导入后立即入库并选中。 */
+  /** 导入流程 JSON:支持单流程 {name,enabled,steps}、{config:{…}} 包装、库格式 {flows:[…]}
+   *  与搬运包 {kedai_flow_bundle:1,…};归一为 flows[] 后**一次**请求导入(失败库不变)。
+   *  搬运包版本键不是 1 时明确拒绝(提示升级),不静默丢字段。 */
   async function onFlowImport(e: Event): Promise<void> {
     const input = e.target as HTMLInputElement;
     const file = input.files?.[0];
@@ -141,30 +208,11 @@ export function useAgentFlow() {
     flowMsg.value = '';
     try {
       const raw = JSON.parse(await file.text()) as unknown;
-      let cfg: api.AgentFlowConfig | null = null;
-      if (raw && typeof raw === 'object') {
-        const obj = raw as Record<string, unknown>;
-        if (Array.isArray(obj.steps)) {
-          cfg = obj as unknown as api.AgentFlowConfig;
-        } else if (obj.config && typeof obj.config === 'object') {
-          cfg = (obj.config as Record<string, unknown>) as unknown as api.AgentFlowConfig;
-        } else if (Array.isArray(obj.flows)) {
-          const lib = obj as unknown as api.AgentFlowLibrary;
-          cfg = lib.flows.find((f) => f.id === lib.current_flow_id) ?? lib.flows[0] ?? null;
-        }
-      }
-      if (!cfg || !Array.isArray(cfg.steps)) {
-        throw new Error('无法识别的流程文件:需包含 steps 数组(单流程 / {config} 包装 / 流程库)');
-      }
-      // 恒分配新 id:导入 = 创建全新流程,避免文件内 id 与库中已有流程撞车被静默覆盖
-      cfg.id = newFlowId();
-      cfg.name = cfg.name || '导入流程';
-      cfg.enabled = !!cfg.enabled;
-      if (!Array.isArray(cfg.steps)) throw new Error('流程缺少 steps 数组');
-      await store.saveAgentFlowConfig(cfg);
+      const { flows, rootId } = normalizeFlowFile(raw);
+      const report = await store.importAgentFlows(flows, rootId);
       await loadFlowConfig();
-      flowMsg.value = `已导入流程「${cfg.name}」(${cfg.steps.length} 步)`;
-      setTimeout(() => (flowMsg.value = ''), 3000);
+      flowMsg.value = importReportMessage(report);
+      setTimeout(() => (flowMsg.value = ''), 4000);
     } catch (err) {
       flowMsg.value = `导入失败:${(err as Error).message}`;
     } finally {
@@ -172,21 +220,32 @@ export function useAgentFlow() {
     }
   }
 
-  /** 导出当前流程为 JSON 文件(不含 id,便于重新导入为全新流程) */
-  function exportFlowNow(): void {
-    const cur = flowDraft.value;
-    if (!cur) return;
-    const payload = {
-      name: flowName.value || cur.name || '未命名流程',
-      description: flowDesc.value || cur.description || undefined,
-      enabled: cur.enabled,
-      steps: cur.steps,
-    };
-    // 直接下载,不弹保存对话框;文件名净化(非法字符→下划线)留在调用方,helper 只管落盘
-    downloadBlob(
-      `kedai-flow-${(flowName.value || '未命名').replace(/[\\/:*?"<>|]/g, '_')}.json`,
-      new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }),
-    );
+  /** 导出当前流程 + 其**可达子流程闭包**为搬运包(含 id,故子流程引用跨机仍可达) */
+  async function exportFlowNow(): Promise<void> {
+    const id = flowId.value;
+    if (!id) return;
+    try {
+      const bundle = await api.exportAgentFlows(id);
+      downloadJson(`kedai-flow-${flowName.value || '未命名'}`, bundle);
+      // 闭包可能不止一个:如实告知,避免用户以为只导了一个
+      const extra = bundle.flows.length - 1;
+      flowMsg.value = extra > 0 ? `已导出「${flowName.value || '未命名'}」及其 ${extra} 个子流程` : '';
+      setTimeout(() => (flowMsg.value = ''), 3000);
+    } catch (e) {
+      flowMsg.value = `导出失败:${(e as Error).message}`;
+    }
+  }
+
+  /** 导出**全部流程**(库整体搬运:目标机器导入后即为同一套库) */
+  async function exportAllFlows(): Promise<void> {
+    try {
+      const bundle = await api.exportAgentFlows();
+      downloadJson('kedai-flows-all', bundle);
+      flowMsg.value = `已导出全部 ${bundle.flows.length} 个流程`;
+      setTimeout(() => (flowMsg.value = ''), 3000);
+    } catch (e) {
+      flowMsg.value = `导出失败:${(e as Error).message}`;
+    }
   }
 
   async function saveFlowNow(): Promise<void> {
@@ -312,7 +371,7 @@ export function useAgentFlow() {
     flowDraft, flowSaving, flowMsg, editingStepId, dragStepId, flowId, flowName, flowDesc,
     flowImportInput, flowImporting, flowLibFlows,
     loadFlowConfig, onFlowSelect, newFlow, duplicateFlow, deleteFlowNow, onFlowImport,
-    exportFlowNow, saveFlowNow, addStep, removeStep, moveStep, onStepActionChange,
+    exportFlowNow, exportAllFlows, saveFlowNow, addStep, removeStep, moveStep, onStepActionChange,
     onStepDragStart, onStepDragOver, onStepDrop, onStepDragEnd,
     // 二维依赖(二维批次 1/2):上游勾选 / 成果标注 / 并行上限
     toggleStepInput, toggleStepOutput, setFlowParallel,

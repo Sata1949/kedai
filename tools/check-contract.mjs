@@ -122,6 +122,25 @@ const MAPPINGS = [
     ts: { file: 'web/src/api/types.ts', name: 'AgentFlowLibrary', kind: 'interface' },
   },
   {
+    // 流程搬运(二维批次 7a):导入报告回给前端做用户提示——漏一个字段会让
+    // 「跳过 N 个 / M 个分配了新 id」静默消失,用户以为全都导进来了。
+    label: '流程导入报告',
+    rust: {
+      file: 'server-rs/src/services/agent_flow_service.rs',
+      name: 'FlowImportReport',
+    },
+    ts: { file: 'web/src/api/types.ts', name: 'FlowImportReport', kind: 'interface' },
+  },
+  {
+    // 同上:报告条目(`renamed[]` 的元素)。
+    label: '流程 id 重映射',
+    rust: {
+      file: 'server-rs/src/services/agent_flow_service.rs',
+      name: 'FlowIdRemap',
+    },
+    ts: { file: 'web/src/api/types.ts', name: 'FlowIdRemap', kind: 'interface' },
+  },
+  {
     // 任务用的流程快照(二维批次 5a):入口流程 + 可达子流程闭包。它同时是
     // tasks.flow_snapshot 列的落盘形态与任务详情顶层 `flow_snapshot` 的下发形态——
     // 前端运行态徽标按它对齐节点,漏字段会让徽标静默退化成「只认当前流程库」。
