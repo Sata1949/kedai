@@ -3,7 +3,9 @@ use crate::api::app_state::AppState;
 use crate::api::json_body::JsonBody;
 use crate::api::{err_with_code, internal, not_found, validation, ErrorCode};
 use crate::services::settings_service::{
-    normalize_base_url, AppMode, McpServerConfig, RuntimeSettings, DEFAULT_SEARCH_ENDPOINT,
+    normalize_base_url, resolve_connector_target, AppMode, ConnectionProfile, McpServerConfig,
+    RuntimeSettings, CONNECTOR_TYPE_MOCK, CONNECTOR_TYPE_OPENAI, DEFAULT_SEARCH_ENDPOINT,
+    MAX_CONNECTIONS,
 };
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -40,6 +42,12 @@ pub struct UpdateSettingsBody {
     pub openai_api_key: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+    /// 多套连接(全量数组语义:数组里没有的 id 即删除;api_key 空/缺省 = 保持该连接原有密钥)
+    #[serde(default)]
+    pub connections: Option<Vec<ConnectionProfileInput>>,
+    /// 默认连接 id(空串 = 清除,由 normalize_connections 回退到第一个启用连接)
+    #[serde(default)]
+    pub active_connection_id: Option<String>,
     #[serde(default)]
     pub default_temperature: Option<f64>,
     #[serde(default)]
@@ -208,6 +216,28 @@ pub struct UpdateSettingsBody {
     pub mvu_temperature: Option<f64>,
 }
 
+/// 多套连接的写入项(与 `ConnectionProfile` 的差异:各字段可选,缺省 = 沿用该 id 的现有值)。
+/// `api_key` 与顶层 `openai_api_key` 同口径:**空/缺省表示保持不变**(接口层面无法把已配置的密钥改成空)。
+#[derive(Deserialize, Default)]
+pub struct ConnectionProfileInput {
+    /// 缺省或未命中已有 id = 新建(uuid);命中则沿用原 id(它是磁盘密文的配对键)
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub connector_type: Option<String>,
+    /// 允许显式空串(清空地址);缺省 = 沿用
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
 /// 序列化运行期设置(API Key 脱敏)。
 /// 字段数已达 serde_json::json! 宏的递归展开上限,故拆成两段构建再合并
 /// (比给整个 crate 提高 recursion_limit 影响面更小)。
@@ -283,6 +313,32 @@ fn settings_json(s: &RuntimeSettings) -> Value {
             dst.insert(k.clone(), val.clone());
         }
     }
+    // 多套连接:独立第三段构建,避免继续加深 json! 宏的递归展开;
+    // 只下发掩码与布尔,明文 Key 永不出现在响应里。
+    let connections = Value::Array(
+        s.connections
+            .iter()
+            .map(|p| {
+                json!({
+                    "id": p.id,
+                    "name": p.name,
+                    "connector_type": p.connector_type,
+                    "base_url": p.base_url,
+                    "model": p.model,
+                    "enabled": p.enabled,
+                    "api_key_masked": p.masked_api_key(),
+                    "has_api_key": p.has_api_key(),
+                })
+            })
+            .collect(),
+    );
+    if let Some(dst) = v.as_object_mut() {
+        dst.insert("connections".to_string(), connections);
+        dst.insert(
+            "active_connection_id".to_string(),
+            json!(s.active_connection_id),
+        );
+    }
     v
 }
 
@@ -307,38 +363,115 @@ pub async fn update_settings(
     // 事务锁覆盖“读取当前值 → 应用 patch → 原子落盘 → 替换内存”，防止并发部分更新丢字段。
     // 只持有 tokio MutexGuard；std::sync::MutexGuard 均在同步代码块内释放，不跨 await。
     let _update_guard = state.guards.settings_update.lock().await;
-    let (mut candidate, old_base, old_key, old_model) = {
+    let (mut candidate, old_base, old_key, old_model, old_active) = {
         let current = state.settings.lock().unwrap_or_else(|e| e.into_inner());
         (
             current.clone(),
             current.openai_base_url.clone(),
             current.openai_api_key.clone(),
             current.model.clone(),
+            current.active_connection().cloned(),
         )
     };
     {
         let s = &mut candidate;
 
-        // 连接信息:全局共享一份
-        if let Some(v) = &body.openai_base_url {
-            // 自动补全格式:补协议、补 /v1(缺 /v1 会导致 /models 请求 404)
-            let t = normalize_base_url(v);
-            if !t.is_empty() {
-                s.openai_base_url = t;
+        // 连接信息:全局共享一份。自多套连接批次起,写入落到**默认连接**上
+        // (旧客户端与设置页「API 连接」区走的都是这条路径 → 行为不变),
+        // 由末尾的 normalize_connections 投影回扁平字段。
+        // 三个字段都没出现时不动连接数组:避免无关 patch(如只改温度)也去建连接。
+        if body.openai_base_url.is_some() || body.openai_api_key.is_some() || body.model.is_some() {
+            let p = s.ensure_active_connection_mut();
+            if let Some(v) = &body.openai_base_url {
+                // 自动补全格式:补协议、补 /v1(缺 /v1 会导致 /models 请求 404)
+                let t = normalize_base_url(v);
+                if !t.is_empty() {
+                    p.base_url = t;
+                }
+            }
+            if let Some(v) = &body.openai_api_key {
+                let t = v.trim().to_string();
+                if !t.is_empty() {
+                    p.api_key = t;
+                }
+            }
+            if let Some(v) = &body.model {
+                let t = v.trim().to_string();
+                if !t.is_empty() {
+                    p.model = t;
+                }
+            }
+            // 沿用既有「填了就生效」口径:给显式 mock 的连接把地址与密钥都填上后,自动改回真实连接器
+            // 类型(否则用户在「API 连接」区填的配置永远不会生效 —— 旧实现在此处的同类修复)。
+            // 判据与 resolve_connector_target 一致:两者都填齐才算「配置完成」。
+            if p.connector_type == CONNECTOR_TYPE_MOCK
+                && !p.base_url.is_empty()
+                && !p.api_key.is_empty()
+            {
+                p.connector_type = CONNECTOR_TYPE_OPENAI.to_string();
             }
         }
-        if let Some(v) = &body.openai_api_key {
-            let t = v.trim().to_string();
-            if !t.is_empty() {
-                s.openai_api_key = t;
+        // 多套连接:全量数组语义(数组里没有的 id = 删除,密钥随之丢弃)
+        if let Some(list) = &body.connections {
+            if list.len() > MAX_CONNECTIONS {
+                return validation(format!("连接配置不能超过 {MAX_CONNECTIONS} 套"));
             }
-        }
-        if let Some(v) = &body.model {
-            let t = v.trim().to_string();
-            if !t.is_empty() {
-                s.model = t;
+            let mut next = Vec::with_capacity(list.len());
+            for item in list {
+                // 命中已有条目才谈「沿用」;未命中(含 id 缺省)一律新建,避免误接旧值
+                let existing = item
+                    .id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .and_then(|id| s.connections.iter().find(|p| p.id == id));
+                let new_key = item
+                    .api_key
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|k| !k.is_empty())
+                    .map(str::to_string);
+                next.push(ConnectionProfile {
+                    id: existing
+                        .map(|p| p.id.clone())
+                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                    name: item
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| existing.map(|p| p.name.clone()).unwrap_or_default()),
+                    connector_type: item.connector_type.clone().unwrap_or_else(|| {
+                        existing
+                            .map(|p| p.connector_type.clone())
+                            .unwrap_or_default()
+                    }),
+                    base_url: item.base_url.clone().unwrap_or_else(|| {
+                        existing.map(|p| p.base_url.clone()).unwrap_or_default()
+                    }),
+                    api_key: new_key
+                        .or_else(|| existing.map(|p| p.api_key.clone()))
+                        .unwrap_or_default(),
+                    model: item
+                        .model
+                        .clone()
+                        .unwrap_or_else(|| existing.map(|p| p.model.clone()).unwrap_or_default()),
+                    enabled: item
+                        .enabled
+                        .unwrap_or_else(|| existing.map(|p| p.enabled).unwrap_or(true)),
+                });
             }
+            s.connections = next;
         }
+        if let Some(id) = &body.active_connection_id {
+            let t = id.trim();
+            s.active_connection_id = if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            };
+        }
+        // 校验后的统一收口:卫生清理 → id 去重 → 默认连接回退 → 扁平字段投影
+        // (与 load / save 走同一条路径,避免三处口径漂移)
+        s.normalize_connections();
         // 向量化配置:与连接信息同属全局共享层(不按模式隔离)
         if let Some(v) = body.embedding_enabled {
             s.embedding_enabled = v;
@@ -735,30 +868,31 @@ pub async fn update_settings(
         candidate.openai_base_url != old_base || candidate.openai_api_key != old_key;
     let model_changed = candidate.model != old_model;
     let model_name = candidate.model.clone();
+    // 当前连接器类型(重建判定与目标解析共用这一次读锁快照)
+    let current_type = state
+        .engine
+        .connector
+        .read()
+        .await
+        .clone()
+        .type_name()
+        .to_string();
+    // 目标类型变化本身也算变更:切换默认连接时若两条连接的值完全相同、只有类型不同
+    // (一个显式 mock、一个走真实 API),只看扁平字段就漏判了。
+    let target = resolve_connector_target(candidate.active_connection(), &current_type);
+    let target_changed = target != resolve_connector_target(old_active.as_ref(), &current_type);
     *state.settings.lock().unwrap_or_else(|e| e.into_inner()) = candidate.clone();
 
-    // Base URL / API Key / 模型变更 → 重建连接器。
-    // 关键:当前为 mock 但保存了非空 Base URL 或 API Key 时,自动切换到 openai-compatible,
-    // 否则用户填写的 API 设置永远不会生效(模型列表始终只有 mock-demo)。
-    if connector_changed || model_changed {
+    // Base URL / API Key / 模型 / 目标类型变更 → 重建连接器。
+    // 目标类型由默认连接解析(与启动装配同一个函数):显式 mock 用 mock、无可用连接用 mock、
+    // 空配置保持 mock、其余 openai-compatible —— 否则用户填写的 API 设置永远不会生效
+    // (模型列表始终只有 mock-demo)。
+    if connector_changed || model_changed || target_changed {
         let (base_url, api_key, model) = (
             candidate.openai_base_url.clone(),
             candidate.openai_api_key.clone(),
             candidate.model.clone(),
         );
-        let type_name = state
-            .engine
-            .connector
-            .read()
-            .await
-            .clone()
-            .type_name()
-            .to_string();
-        let target = if type_name == "mock" && (!base_url.is_empty() || !api_key.is_empty()) {
-            "openai-compatible"
-        } else {
-            &type_name
-        };
         let new_connector = crate::connectors::build_connector(target, &base_url, &api_key, &model);
         *state.engine.connector.write().await = new_connector;
     }

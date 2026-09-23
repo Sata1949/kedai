@@ -398,10 +398,12 @@ pub fn default_reflect_prompt() -> String {
 impl RuntimeSettings {
     /// 从环境配置构建默认设置
     pub fn from_config(cfg: &AppConfig) -> Self {
-        RuntimeSettings {
+        let mut s = RuntimeSettings {
             openai_base_url: cfg.openai_base_url.clone(),
             openai_api_key: cfg.openai_api_key.clone(),
             model: cfg.openai_model.clone(),
+            connections: Vec::new(),
+            active_connection_id: None,
             default_temperature: cfg.default_temperature,
             default_top_p: cfg.default_top_p,
             default_max_tokens: cfg.default_max_tokens,
@@ -461,7 +463,12 @@ impl RuntimeSettings {
             // 默认隔离:任务模式不继承 prompt_floors.json 注入(2026-09-10 实测修复)
             task_prompt_inject_enabled: false,
             task: ModeSettings::default(),
-        }
+        };
+        // 多套连接:新装(无 settings.json)也要有一条默认连接——本批次之后 connections 是真源,
+        // 不播种则设置页与 API 会拿到空列表。内容与扁平字段一致,故与播种前行为等价;
+        // 这里不调 normalize_connections:避免把 .env 里未规范化的地址在启动时就改写。
+        s.seed_connections_from_flat();
+        s
     }
 
     /// 返回指定模式的合并后有效设置。扁平字段即 roleplay 权威值(引擎直接读);

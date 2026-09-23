@@ -142,6 +142,19 @@ const MAPPINGS = [
     rust: { file: 'server-rs/src/models/types.rs', name: 'SseEvent' },
     ts: { file: 'web/src/api/types.ts', name: 'SseEvent', kind: 'tagged-union' },
   },
+  {
+    // 多套连接(二维批次 4):落盘结构体 ↔ GET /api/settings 的 connections 元素。
+    // 线格式由 api/settings.rs 手工掩码:api_key 明文既不下发也不该下发,前端拿到的是
+    // api_key_masked / has_api_key 这两个派生展示值(按 DistillOutcome 先例登记差异)。
+    label: '连接配置(多套连接)',
+    rust: {
+      file: 'server-rs/src/services/settings_service/connection.rs',
+      name: 'ConnectionProfile',
+    },
+    ts: { file: 'web/src/api/types.ts', name: 'ConnectionProfile', kind: 'interface' },
+    rustIgnore: ['api_key'],
+    tsIgnore: ['api_key_masked', 'has_api_key'],
+  },
 ];
 
 const read = (rel) => readFileSync(join(ROOT, rel), 'utf8');

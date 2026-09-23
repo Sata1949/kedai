@@ -20,7 +20,10 @@ mod connection;
 mod params;
 mod secret;
 
-pub use connection::{mask_key, normalize_base_url, DEFAULT_SEARCH_ENDPOINT};
+pub use connection::{
+    mask_key, normalize_base_url, resolve_connector_target, ConnectionProfile, CONNECTOR_TYPE_MOCK,
+    CONNECTOR_TYPE_OPENAI, DEFAULT_SEARCH_ENDPOINT, MAX_CONNECTIONS,
+};
 pub use params::{
     default_roleplay_agent_prompt, default_task_agent_prompt, McpServerConfig, ModeSettings,
     RoleplayPromptConfig, TaskPromptConfig,
@@ -75,6 +78,17 @@ pub struct RuntimeSettings {
     /// API Key:内存中为明文;持久化时由 save() 加密、load() 解密(见 secret_store)
     pub openai_api_key: String,
     pub model: String,
+    /// 多套连接配置(2026-09-22 多套连接批次):**真源**。
+    /// 上面的 openai_base_url / openai_api_key / model 自本批次起降为
+    /// 「默认连接(active_connection_id)的派生视图」,由 normalize_connections 投影,
+    /// 旧客户端、embedding、启动装配、任务记账仍读扁平字段,行为不变。
+    /// 空数组 = 尚未播种(load 时按扁平字段播种一条),故**必须** serde default:
+    /// 缺键时若整文件反序列化失败,load 会整体回退环境配置(用户设置静默丢失)。
+    #[serde(default)]
+    pub connections: Vec<ConnectionProfile>,
+    /// 默认连接 id;指向不存在或已停用的连接时回退「第一个启用的连接」,全停用则空投影
+    #[serde(default)]
+    pub active_connection_id: Option<String>,
     pub default_temperature: f64,
     pub default_top_p: f64,
     pub default_max_tokens: u32,
@@ -332,6 +346,48 @@ mod tests {
         TempDataDir::new(&format!("settings-test-{tag}"))
     }
 
+    /// 目标连接器类型解析(批次 4):`openai_base_url` 的环境默认值本身非空,故
+    /// 「配置完成」的判据必须是**地址 + 密钥都非空** —— 只看地址会让全新安装与测试环境
+    /// 一启动就切到必然失败的真实连接器(2026-09-22 实测:该口径写错会让 tasks.rs 21 个目标全红)。
+    #[test]
+    fn resolve_connector_target_requires_address_and_key() {
+        let mut p = ConnectionProfile {
+            id: "c".to_string(),
+            name: "连接".to_string(),
+            connector_type: CONNECTOR_TYPE_OPENAI.to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            api_key: String::new(),
+            model: "m".to_string(),
+            enabled: true,
+        };
+        // 只有地址(环境默认值即如此)→ 保持 mock,不切真实连接器
+        assert_eq!(resolve_connector_target(Some(&p), "mock"), "mock");
+        // 地址 + 密钥都填了 → 切真实连接器
+        p.api_key = "sk-x".to_string();
+        assert_eq!(
+            resolve_connector_target(Some(&p), "mock"),
+            CONNECTOR_TYPE_OPENAI
+        );
+        // 显式声明 mock 的连接永远保持 mock(演示模式是用户的明确选择)
+        p.connector_type = CONNECTOR_TYPE_MOCK.to_string();
+        assert_eq!(
+            resolve_connector_target(Some(&p), CONNECTOR_TYPE_OPENAI),
+            "mock"
+        );
+        // 没有可用连接(全停用 / 删空)→ mock
+        assert_eq!(
+            resolve_connector_target(None, CONNECTOR_TYPE_OPENAI),
+            "mock"
+        );
+        // 当前已是真实连接器且凭据没配齐 → 不主动降级
+        p.connector_type = CONNECTOR_TYPE_OPENAI.to_string();
+        p.api_key = String::new();
+        assert_eq!(
+            resolve_connector_target(Some(&p), CONNECTOR_TYPE_OPENAI),
+            CONNECTOR_TYPE_OPENAI
+        );
+    }
+
     /// 最小 AppConfig(仅供设置加载/保存测试;不读环境变量,避免受本机 .env 影响)
     fn test_cfg() -> AppConfig {
         crate::config::test_config()
@@ -342,7 +398,8 @@ mod tests {
     fn api_key_is_encrypted_on_disk_and_restored_on_load() {
         let dir = tmp_dir("enc");
         let mut s = RuntimeSettings::from_config(&test_cfg());
-        s.openai_api_key = "sk-secret-value-9999".to_string();
+        // 本批次起 connections 才是真源,扁平字段是它的派生视图 → 写 Key 要写默认连接
+        s.connections[0].api_key = "sk-secret-value-9999".to_string();
         s.save(&dir).unwrap();
 
         let raw = std::fs::read_to_string(dir.join("settings.json")).unwrap();
@@ -363,7 +420,9 @@ mod tests {
     fn legacy_plaintext_settings_are_migrated_on_load() {
         let dir = tmp_dir("migrate");
         let mut s = RuntimeSettings::from_config(&test_cfg());
-        s.openai_api_key = "sk-legacy-plain-1234".to_string();
+        // 绕过 save 的加密直接写旧版明文文件:顶层与默认连接都写明文(旧文件两处都会是明文)
+        s.connections[0].api_key = "sk-legacy-plain-1234".to_string();
+        s.apply_active_projection();
         // 绕过 save 的加密,直接写旧版明文文件
         std::fs::write(
             dir.join("settings.json"),

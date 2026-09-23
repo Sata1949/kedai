@@ -164,17 +164,17 @@ impl AppState {
             loaded_settings.openai_api_key.clone(),
             loaded_settings.model.clone(),
         );
+        // 目标连接器类型由**默认连接**解析(多套连接批次):与 PUT /api/settings 的重建共用
+        // 同一个函数,保证「重启后的类型」与「保存后立即生效的类型」口径一致 ——
+        // 显式 mock 用 mock、无可用连接用 mock、有凭据则 openai-compatible,
+        // 否则用户「退出演示模式」后一旦重启又回到 mock,设置里填的 API 配置永远不生效。
+        let connector_type = crate::services::settings_service::resolve_connector_target(
+            loaded_settings.active_connection(),
+            &config.connector,
+        );
         let settings = Arc::new(Mutex::new(loaded_settings));
         // 记忆服务接入运行期设置(淘汰容量/字符预算阈值来源;OnceLock 幂等注入)
         memory.attach_settings(settings.clone());
-        // 关键:已保存非空 API 配置时,即使环境变量 CONNECTOR=mock(演示模式)也自动
-        // 使用 openai-compatible,否则用户「退出演示模式」后一旦重启又回到 mock,
-        // 设置里填的 API 配置永远不生效(与 PUT /settings 的自动切换逻辑保持一致)。
-        let connector_type = if !base_url.trim().is_empty() && !api_key.trim().is_empty() {
-            "openai-compatible"
-        } else {
-            &config.connector
-        };
         let connector =
             crate::connectors::build_connector(connector_type, &base_url, &api_key, &initial_model);
         let connector = Arc::new(RwLock::new(connector));
