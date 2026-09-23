@@ -141,6 +141,16 @@ const MAPPINGS = [
     ts: { file: 'web/src/api/types.ts', name: 'FlowIdRemap', kind: 'interface' },
   },
   {
+    // 流程搬运包(二维批次 7a):导出/导入**文件的线格式**,会被用户带到别的机器上——
+    // 本批所有契约里漂移代价最高的一个,故必须机检(前端按 kedai_flow_bundle 判新旧格式)。
+    label: '流程搬运包',
+    rust: {
+      file: 'server-rs/src/services/agent_flow_service.rs',
+      name: 'FlowBundle',
+    },
+    ts: { file: 'web/src/api/types.ts', name: 'AgentFlowBundle', kind: 'interface' },
+  },
+  {
     // 任务用的流程快照(二维批次 5a):入口流程 + 可达子流程闭包。它同时是
     // tasks.flow_snapshot 列的落盘形态与任务详情顶层 `flow_snapshot` 的下发形态——
     // 前端运行态徽标按它对齐节点,漏字段会让徽标静默退化成「只认当前流程库」。

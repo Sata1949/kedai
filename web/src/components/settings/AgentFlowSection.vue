@@ -122,7 +122,13 @@ onMounted(async () => {
         <button class="sv-btn ghost sv-btn-fill" :disabled="!flowDraft" @click="exportFlowNow">
           导出流程(JSON)
         </button>
-        <button class="sv-btn ghost sv-btn-fill" @click="exportAllFlows">导出全部流程</button>
+        <button
+          class="sv-btn ghost sv-btn-fill"
+          :disabled="!flowLibFlows.length"
+          @click="exportAllFlows"
+        >
+          导出全部流程
+        </button>
       </div>
       <div class="sv-note">
         导出会带上该流程挂载的子流程(缺了它们,导入方必然报「引用的子流程不存在」);

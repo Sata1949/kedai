@@ -227,7 +227,7 @@ impl AgentFlowService {
     /// 产物形状见 `docs/契约-协议与配置.md`「流程搬运契约」;**不含**连接定义与密钥
     /// (连接是本机 settings,见 D7 口径);节点级 `connection_id` 原样保留,跨机导入后由
     /// 编辑期警示 + 运行期报错兜住(二维批次 5b 口径)。
-    pub fn export_bundle(&self, root: Option<&str>) -> Result<Value, String> {
+    pub fn export_bundle(&self, root: Option<&str>) -> Result<FlowBundle, String> {
         let (root_id, flows) = match root {
             Some(id) => {
                 let cfg = self
@@ -244,12 +244,12 @@ impl AgentFlowService {
                 self.library.flows.clone(),
             ),
         };
-        Ok(serde_json::json!({
-            "kedai_flow_bundle": FLOW_BUNDLE_VERSION,
-            "exported_at": crate::models::db::now_iso(),
-            "root_id": root_id,
-            "flows": flows,
-        }))
+        Ok(FlowBundle {
+            kedai_flow_bundle: FLOW_BUNDLE_VERSION,
+            exported_at: crate::models::db::now_iso(),
+            root_id,
+            flows,
+        })
     }
 
     /// 导入流程搬运包(二维批次 7a):**只新增,绝不改写库里既有 id 的既有流程**。
@@ -268,8 +268,10 @@ impl AgentFlowService {
     /// 这一种情形才指向本库的等价副本。批外引用由 [`validate_sub_flows`] 报错
     /// (同一个「什么算合法引用」的判定,此处不复制规则)。
     ///
-    /// **原子性**:全部校验在**候选库**上做完才换库,失败时 `self.library` 与磁盘逐字节不变
-    /// (逐个 PUT 的旧导入路径做不到这点:先导入的流程已落盘,后面的引用校验才失败)。
+    /// **原子性**:全部校验在**候选库**上做完才换库,故**校验失败**时 `self.library` 与磁盘
+    /// 逐字节不变(逐个 PUT 的旧导入路径做不到这点:先导入的流程已落盘,后面的引用校验才失败)。
+    /// 落盘本身失败(磁盘满 / 权限 / 杀软占用)时内存库回滚到导入前,避免「内存里有、磁盘上没有」
+    /// 的幻影流程(重启即消失)——`set` / `select` / `remove` 没有这层回滚,那是既有形态。
     pub fn import_bundle(
         &mut self,
         flows: Vec<AgentFlowConfig>,
@@ -312,18 +314,25 @@ impl AgentFlowService {
                 report.skipped += 1;
                 continue;
             }
-            // id 冲突只发生在「内容不同」(内容相同已在上面跳过)
-            if !old_id.is_empty() && self.flow_by_id(&old_id).is_some() {
+            // id 处置:保留段(删不掉,见 RESERVED_FLOW_IDS)/ 冲突 → 分配新 id 并登记映射。
+            // 「内容相同」的情形已在上面跳过,故冲突只发生在「内容不同」。
+            let conflicts = !old_id.is_empty() && self.flow_by_id(&old_id).is_some();
+            let reserved = is_reserved_flow_id(&old_id);
+            if old_id.is_empty() || conflicts || reserved {
                 let new_id = Uuid::new_v4().to_string();
-                remap.insert(old_id.clone(), new_id.clone());
-                report.renamed.push(FlowIdRemap {
-                    old_id,
-                    new_id: new_id.clone(),
-                    name: flow_label(&cfg),
-                });
+                if !old_id.is_empty() {
+                    // 有旧 id 就要登记映射(批内引用得跟着走);空 id 无从映射
+                    remap.insert(old_id.clone(), new_id.clone());
+                }
+                if conflicts || reserved {
+                    // 空 id 不算「重命名」(旧单流程导出本就没有 id),其余都如实点名
+                    report.renamed.push(FlowIdRemap {
+                        old_id,
+                        new_id: new_id.clone(),
+                        name: flow_label(&cfg),
+                    });
+                }
                 cfg.id = new_id;
-            } else if old_id.is_empty() {
-                cfg.id = Uuid::new_v4().to_string();
             }
             known.insert(fingerprint, cfg.id.clone());
             incoming.push(cfg);
@@ -352,9 +361,9 @@ impl AgentFlowService {
         validate_sub_flows(&candidate, &self.registered_tools)?;
 
         report.imported = incoming.len();
-        self.library = candidate;
-        // 选中入口:文件的 root_id(经重映射)优先,否则本批第一个;跳过项也算命中
-        //(重复导入同一份文件时,用户仍希望停在「刚导入的那套编排」上)
+        // 换库 + 选中入口:文件的 root_id(经重映射)优先,否则本批第一个;
+        // root_id 命中的若是「被跳过」的项,也会落到本库那份等价副本上(remap 已登记)
+        let previous = std::mem::replace(&mut self.library, candidate);
         let selected = root_id
             .map(|id| remap.get(id).cloned().unwrap_or_else(|| id.to_string()))
             .filter(|id| self.library.flows.iter().any(|f| f.id == *id))
@@ -362,7 +371,11 @@ impl AgentFlowService {
         if let Some(id) = selected {
             self.library.current_flow_id = Some(id);
         }
-        self.save_library()?;
+        if let Err(e) = self.save_library() {
+            // 落盘失败:内存库一并回滚(否则 GET 会看到重启后就消失的幻影流程)
+            self.library = previous;
+            return Err(e);
+        }
         Ok(report)
     }
 
@@ -427,6 +440,36 @@ pub const MAX_TOOL_ROUNDS_LIMIT: u32 = 200;
 /// 旧文件是既有的用户数据,不能因为新增一整套搬运格式就导不进来。
 pub const FLOW_BUNDLE_KEY: &str = "kedai_flow_bundle";
 pub const FLOW_BUNDLE_VERSION: u32 = 1;
+
+/// **流程搬运包**(二维批次 7a):导出文件的线格式。
+///
+/// 为什么要有具名结构体而不是 `json!` 手拼:这是**跨进程、跨机器**的对外契约(文件会被用户
+/// 带走),字段漂移的代价最高——只有具名结构体才能登记进 `tools/check-contract.mjs`,与前端
+/// `AgentFlowBundle` 做机检(`DistillOutcome` 的漏字段先例就是这么漏出去的)。
+/// 字段名即线格式键;`kedai_flow_bundle` 与 [`FLOW_BUNDLE_KEY`] 的一致性由单测锁死。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlowBundle {
+    /// 版本号(键名见 [`FLOW_BUNDLE_KEY`])
+    pub kedai_flow_bundle: u32,
+    /// 导出时刻(ISO 字符串;仅作溯源展示)
+    pub exported_at: String,
+    /// 入口流程 id(全库导出时 = 当前流程;可能为 null)
+    pub root_id: Option<String>,
+    /// 包内流程:入口 + 可达子流程闭包,或全库
+    pub flows: Vec<AgentFlowConfig>,
+}
+
+/// 路由**保留段**:这些字符串是 `/api/agent-flows/{export,import,select}` 的静态路径段,
+/// 而 axum 的静态段优先于 `/{id}`——所以 id 恰为它们的流程**删不掉**
+/// (`DELETE /api/agent-flows/export` 命中静态路由后按方法不匹配回 405,不会回落到 `/{id}`)。
+/// 导入是唯一能引入任意 id 的入口(旧路径恒分配 UUID),故这类 id 在导入侧一律重映射,
+/// 不让库里出现「建得出来、删不掉」的流程。
+const RESERVED_FLOW_IDS: &[&str] = &["export", "import", "select"];
+
+/// 是否为保留段 id(见 [`RESERVED_FLOW_IDS`])
+fn is_reserved_flow_id(id: &str) -> bool {
+    RESERVED_FLOW_IDS.contains(&id)
+}
 
 /// 一条 id 重映射记录(导入报告用):同 id 内容不同时,导入的那份被分配了新 id。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -2296,10 +2339,14 @@ mod tests {
         let main = save_flow(&mut svc, "主", vec![sub_step("n", &sub)]);
 
         let bundle = svc.export_bundle(Some(&main)).unwrap();
-        let flows: Vec<AgentFlowConfig> = serde_json::from_value(bundle["flows"].clone()).unwrap();
+        let flows = bundle.flows.clone();
         assert_eq!(flows.len(), 2, "闭包应带走入口 + 子流程");
-        assert_eq!(bundle["root_id"], main, "root_id = 入口流程");
-        assert_eq!(bundle[FLOW_BUNDLE_KEY], FLOW_BUNDLE_VERSION);
+        assert_eq!(
+            bundle.root_id.as_deref(),
+            Some(main.as_str()),
+            "root_id = 入口流程"
+        );
+        assert_eq!(bundle.kedai_flow_bundle, FLOW_BUNDLE_VERSION);
 
         // 空库导入:不撞 id,故原 id 全部保留,引用自然不断
         let dir2 = TempDataDir::new("flow-bundle-move-target");
@@ -2328,9 +2375,7 @@ mod tests {
         let mut svc = service(&dir);
         let sub = save_flow(&mut svc, "子", vec![graph_step("n", &[])]);
         let main = save_flow(&mut svc, "主", vec![sub_step("n", &sub)]);
-        let bundle: Vec<AgentFlowConfig> =
-            serde_json::from_value(svc.export_bundle(Some(&main)).unwrap()["flows"].clone())
-                .unwrap();
+        let bundle = svc.export_bundle(Some(&main)).unwrap().flows;
 
         // 本机把两份都改掉(同 id 异内容)——**两份都要重映射**,才能真正验到引用改写
         for id in [&sub, &main] {
@@ -2384,9 +2429,7 @@ mod tests {
         let mut svc = service(&dir);
         let sub = save_flow(&mut svc, "子", vec![graph_step("n", &[])]);
         let main = save_flow(&mut svc, "主", vec![sub_step("n", &sub)]);
-        let bundle: Vec<AgentFlowConfig> =
-            serde_json::from_value(svc.export_bundle(Some(&main)).unwrap()["flows"].clone())
-                .unwrap();
+        let bundle = svc.export_bundle(Some(&main)).unwrap().flows;
 
         // 只改子流程:入口内容与文件完全一致 → 跳过;子流程 → 重映射新增
         {
@@ -2414,9 +2457,7 @@ mod tests {
         let mut svc = service(&dir);
         let sub = save_flow(&mut svc, "子", vec![graph_step("n", &[])]);
         let main = save_flow(&mut svc, "主", vec![sub_step("n", &sub)]);
-        let bundle: Vec<AgentFlowConfig> =
-            serde_json::from_value(svc.export_bundle(Some(&main)).unwrap()["flows"].clone())
-                .unwrap();
+        let bundle = svc.export_bundle(Some(&main)).unwrap().flows;
         let size = svc.get_library().flows.len();
         let current = svc.get_library().current_flow_id.clone();
 
@@ -2486,9 +2527,13 @@ mod tests {
         let size = svc.get_library().flows.len();
 
         let bundle = svc.export_bundle(None).unwrap();
-        let flows: Vec<AgentFlowConfig> = serde_json::from_value(bundle["flows"].clone()).unwrap();
+        let flows = bundle.flows.clone();
         assert_eq!(flows.len(), size, "全库导出应带走每一份流程(含内置流程)");
-        assert_eq!(bundle["root_id"], a, "root_id = 当前选中流程");
+        assert_eq!(
+            bundle.root_id.as_deref(),
+            Some(a.as_str()),
+            "root_id = 当前选中流程"
+        );
         assert!(flows.iter().any(|f| f.id == b), "非当前的流程同样要在包里");
     }
 
@@ -2507,8 +2552,8 @@ mod tests {
         let svc = service(&dir);
         let bundle = svc.export_bundle(Some("flow-停用的")).unwrap();
         assert_eq!(
-            bundle["flows"].as_array().map(Vec::len),
-            Some(1),
+            bundle.flows.len(),
+            1,
             "停用流程应可导出(与 snapshot_for 的 enabled 口径不同)"
         );
         let err = svc.export_bundle(Some("flow-不存在")).unwrap_err();
@@ -2580,5 +2625,105 @@ mod tests {
             Some(added.id.as_str()),
             "root_id 缺省 = 批内第一个"
         );
+    }
+
+    /// 包内成环 / 自引用:文件自相矛盾,必须 400 且不写库(与保存期同一套判定)。
+    #[test]
+    fn import_rejects_in_batch_cycle_and_self_reference() {
+        let dir = TempDataDir::new("flow-bundle-badrefs");
+        let mut svc = service(&dir);
+        let before = svc.get_library().flows.len();
+
+        // A → B、B → A:批内互挂成环(图内环检测挡不住,必须按调用链拦)
+        let mut a = flow("甲", vec![sub_step("n", "bundle-b")]);
+        a.id = "bundle-a".into();
+        let mut b = flow("乙", vec![sub_step("n", "bundle-a")]);
+        b.id = "bundle-b".into();
+        let err = svc.import_bundle(vec![a, b], None).unwrap_err();
+        assert!(err.contains("环"), "应点名调用链成环:{err}");
+        assert!(
+            err.contains("甲") && err.contains("乙"),
+            "应点名环上两套流程:{err}"
+        );
+        assert_eq!(svc.get_library().flows.len(), before, "拒绝时不写库");
+
+        // A → A:自引用
+        let mut self_ref = flow("自", vec![sub_step("n", "bundle-self")]);
+        self_ref.id = "bundle-self".into();
+        let err = svc.import_bundle(vec![self_ref], None).unwrap_err();
+        assert!(err.contains("自身"), "应点名自引用:{err}");
+        assert_eq!(svc.get_library().flows.len(), before);
+    }
+
+    /// 批内同内容不同 id:第二份按**本批**已接受的那份跳过(而非只认本库)。
+    #[test]
+    fn import_skips_duplicate_content_within_batch() {
+        let dir = TempDataDir::new("flow-bundle-batch-dup");
+        let mut svc = service(&dir);
+        let mut first = flow("同款", vec![graph_step("n", &[])]);
+        first.id = "dup-a".into();
+        let mut second = flow("同款", vec![graph_step("n", &[])]);
+        second.id = "dup-b".into();
+
+        let report = svc
+            .import_bundle(vec![first, second], Some("dup-b"))
+            .unwrap();
+        assert_eq!(report.imported, 1, "同内容只进一份");
+        assert_eq!(report.skipped, 1);
+        assert!(
+            report.renamed.is_empty(),
+            "第二份是「内容已存在」的跳过,不是 id 冲突重命名"
+        );
+        assert!(
+            svc.flow_by_id("dup-a").is_some() && svc.flow_by_id("dup-b").is_none(),
+            "留下的是第一份"
+        );
+        assert_eq!(
+            svc.get_library().current_flow_id.as_deref(),
+            Some("dup-a"),
+            "root_id 指向被跳过的第二份时,落到本批等价副本上(remap 已登记)"
+        );
+    }
+
+    /// 路由保留段 id(export/import/select)会被静态路由吃掉、导致流程删不掉 → 导入侧重映射。
+    #[test]
+    fn import_remaps_reserved_route_id() {
+        let dir = TempDataDir::new("flow-bundle-reserved");
+        let mut svc = service(&dir);
+        let mut reserved = flow("保留名", vec![graph_step("n", &[])]);
+        reserved.id = "export".into();
+
+        let report = svc.import_bundle(vec![reserved], Some("export")).unwrap();
+        assert_eq!(report.imported, 1);
+        assert_eq!(report.renamed.len(), 1, "保留段 id 必须重映射");
+        assert_eq!(report.renamed[0].old_id, "export");
+        let new_id = report.renamed[0].new_id.clone();
+        assert_ne!(new_id, "export");
+        assert!(
+            svc.flow_by_id("export").is_none(),
+            "库里不得出现删不掉的流程(静态路由段优先于 /{{id}})"
+        );
+        assert_eq!(
+            svc.get_library().current_flow_id.as_deref(),
+            Some(new_id.as_str()),
+            "root_id 经重映射后仍选中导入的那份"
+        );
+    }
+
+    /// 搬运包的线格式键必须与常量一致(前端按 `FLOW_BUNDLE_KEY` 判定新旧格式)。
+    #[test]
+    fn flow_bundle_wire_key_matches_constant() {
+        let dir = TempDataDir::new("flow-bundle-wire");
+        let svc = service(&dir);
+        let bundle = svc.export_bundle(None).unwrap();
+        let value = serde_json::to_value(&bundle).unwrap();
+        assert_eq!(
+            value.get(FLOW_BUNDLE_KEY),
+            Some(&serde_json::json!(FLOW_BUNDLE_VERSION)),
+            "线格式键/版本号必须与常量一致(改结构体字段名会在这里变红)"
+        );
+        for key in ["exported_at", "root_id", "flows"] {
+            assert!(value.get(key).is_some(), "线格式缺键:{key}");
+        }
     }
 }

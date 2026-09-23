@@ -170,13 +170,13 @@ describe('流程搬运 7a:文件归一', () => {
     expect(out.rootId).toBe('f1');
   });
 
-  it('库格式:整库导入(不再只取当前流程,否则静默丢流程)', () => {
+  it('库格式:整库导入(不再只取当前流程,否则静默丢流程),入口取 current_flow_id', () => {
     const out = normalizeFlowFile({
       current_flow_id: 'f2',
       flows: [flowOf('f1', 'A'), flowOf('f2', 'B')],
     });
     expect(out.flows.map((f) => f.name)).toEqual(['A', 'B']);
-    expect(out.rootId).toBeUndefined();
+    expect(out.rootId).toBe('f2');
   });
 
   it('{config} 包装与单流程各取一份(旧导出文件必须继续可导)', () => {
@@ -280,19 +280,76 @@ describe('流程搬运 7a:导入/导出接线', () => {
         },
       },
     ]);
-    const flow = useAgentFlow();
+    const flow = await loadedFlow();
     flow.flowId.value = 'f1';
-    flow.flowName.value = '主流程';
+    // 服务端那份的名字是权威(导出取的就是它),草稿名只在库未命中时兜底
     await flow.exportFlowNow();
 
     expect(api.urls.some((u) => u.includes('/agent-flows/export?id=f1'))).toBe(true);
     expect(downloadMock).toHaveBeenCalledTimes(1);
     const [fileName, blob] = downloadMock.mock.calls[0] as [string, Blob];
-    expect(fileName).toBe('kedai-flow-主流程.json');
+    expect(fileName).toBe('kedai-flow-测试菱形流程.json');
     const payload = JSON.parse(await blob.text()) as { flows: AgentFlowConfig[]; root_id: string };
     expect(payload.flows.map((f) => f.id)).toEqual(['f1', 'f2']);
     expect(payload.root_id).toBe('f1');
     expect(flow.flowMsg.value).toContain('1 个子流程');
+  });
+
+  it('导出单流程(无子流程)也给成功提示,不静默清空消息', async () => {
+    mockApi([
+      {
+        url: '/api/agent-flows/export',
+        body: {
+          ok: true,
+          bundle: { kedai_flow_bundle: 1, root_id: 'f1', flows: [flowOf('f1', '测试菱形流程')] },
+        },
+      },
+    ]);
+    const flow = await loadedFlow();
+    flow.flowId.value = 'f1';
+    await flow.exportFlowNow();
+    expect(flow.flowMsg.value).toBe('已导出「测试菱形流程」');
+  });
+
+  it('有未保存修改:导出前先确认;取消则不发请求', async () => {
+    const api = mockApi([
+      {
+        url: '/api/agent-flows/export',
+        body: { ok: true, bundle: { kedai_flow_bundle: 1, root_id: 'f1', flows: [] } },
+      },
+    ]);
+    const flow = await loadedFlow();
+    flow.flowId.value = 'f1';
+    // 真改一处草稿(加一个步骤)→ 与库中那份不同
+    flow.addStep();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+
+    await flow.exportFlowNow();
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(confirm.mock.calls[0][0]).toContain('已保存');
+    expect(api.urls.some((u) => u.includes('/agent-flows/export'))).toBe(false);
+    expect(downloadMock).not.toHaveBeenCalled();
+
+    // 确认继续 → 正常导出
+    confirm.mockReturnValue(true);
+    await flow.exportFlowNow();
+    expect(api.urls.some((u) => u.includes('/agent-flows/export?id=f1'))).toBe(true);
+    expect(downloadMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('无草稿改动时不弹确认(避免噪音)', async () => {
+    mockApi([
+      {
+        url: '/api/agent-flows/export',
+        body: { ok: true, bundle: { kedai_flow_bundle: 1, root_id: 'f1', flows: [] } },
+      },
+    ]);
+    const flow = await loadedFlow();
+    flow.flowId.value = 'f1';
+    const confirm = vi.spyOn(window, 'confirm');
+    await flow.exportFlowNow();
+    expect(confirm).not.toHaveBeenCalled();
+    expect(downloadMock).toHaveBeenCalledTimes(1);
   });
 
   it('导出全部流程:不带 id 调端点,提示流程总数', async () => {
@@ -305,7 +362,7 @@ describe('流程搬运 7a:导入/导出接线', () => {
         },
       },
     ]);
-    const flow = useAgentFlow();
+    const flow = await loadedFlow();
     await flow.exportAllFlows();
     const call = api.urls.find((u) => u.includes('/agent-flows/export'));
     expect(call).toBe('/api/agent-flows/export');

@@ -28,6 +28,10 @@ export const TOOL_MODE_LABELS = {
 export const FLOW_BUNDLE_KEY = 'kedai_flow_bundle';
 export const FLOW_BUNDLE_VERSION = 1;
 
+/** 有未保存修改时的导出确认文案(导出取服务端已保存的那一份,不能静默给旧版) */
+export const UNSAVED_EXPORT_HINT =
+  '有未保存的修改:导出的是**已保存**的版本(不含当前编辑)。要继续吗?\n(先点「保存执行流程」即导出最新版)';
+
 /**
  * 归一流程文件 → 待导入的 flows[](+ 可选入口 root_id)。
  *
@@ -61,8 +65,14 @@ export function normalizeFlowFile(raw: unknown): {
     if (flows.length === 0 || flows.some((f) => f === null)) {
       throw new Error('流程文件里的 flows 不含合法流程(每项都需要 steps 数组)');
     }
-    const rootId = typeof obj.root_id === 'string' ? obj.root_id : undefined;
-    return { flows: flows as api.AgentFlowConfig[], rootId };
+    // 入口:搬运包用 root_id;库格式用 current_flow_id(否则导入后只选中「第一个」)
+    const root =
+      typeof obj.root_id === 'string'
+        ? obj.root_id
+        : typeof obj.current_flow_id === 'string'
+          ? obj.current_flow_id
+          : undefined;
+    return { flows: flows as api.AgentFlowConfig[], rootId: root };
   }
   const single = asFlow(obj.config) ?? asFlow(obj);
   if (!single) {
@@ -224,12 +234,17 @@ export function useAgentFlow() {
   async function exportFlowNow(): Promise<void> {
     const id = flowId.value;
     if (!id) return;
+    if (draftDirty() && !window.confirm(UNSAVED_EXPORT_HINT)) return;
+    // 导出取的是**服务端已保存**的那一份,故文件名与提示都用库里的名字(草稿名可能还没保存)
+    const stored = store.agentFlowLibrary?.flows.find((f) => f.id === id);
+    const storedName = stored?.name || flowName.value || '未命名';
     try {
       const bundle = await api.exportAgentFlows(id);
-      downloadJson(`kedai-flow-${flowName.value || '未命名'}`, bundle);
+      downloadJson(`kedai-flow-${storedName}`, bundle);
       // 闭包可能不止一个:如实告知,避免用户以为只导了一个
       const extra = bundle.flows.length - 1;
-      flowMsg.value = extra > 0 ? `已导出「${flowName.value || '未命名'}」及其 ${extra} 个子流程` : '';
+      flowMsg.value =
+        extra > 0 ? `已导出「${storedName}」及其 ${extra} 个子流程` : `已导出「${storedName}」`;
       setTimeout(() => (flowMsg.value = ''), 3000);
     } catch (e) {
       flowMsg.value = `导出失败:${(e as Error).message}`;
@@ -238,6 +253,7 @@ export function useAgentFlow() {
 
   /** 导出**全部流程**(库整体搬运:目标机器导入后即为同一套库) */
   async function exportAllFlows(): Promise<void> {
+    if (draftDirty() && !window.confirm(UNSAVED_EXPORT_HINT)) return;
     try {
       const bundle = await api.exportAgentFlows();
       downloadJson('kedai-flows-all', bundle);
@@ -246,6 +262,31 @@ export function useAgentFlow() {
     } catch (e) {
       flowMsg.value = `导出失败:${(e as Error).message}`;
     }
+  }
+
+  /**
+   * 草稿与库中那份是否有差异。
+   *
+   * 为什么需要它:导出取的是**服务端已保存**的那一份(端点只认 id),而用户可能刚改完步骤
+   * 还没点保存——不提示就等于**静默**给出旧版本,而导出的用途恰恰是搬到别的机器。
+   * 归一化后比较(忽略 id / 键序;名字与说明来自各自的输入框),避免「看起来一样却判为脏」。
+   */
+  function draftDirty(): boolean {
+    const stored = store.agentFlowLibrary?.flows.find((f) => f.id === flowId.value);
+    const draft = flowDraft.value;
+    if (!stored || !draft) return false;
+    const norm = (f: api.AgentFlowConfig, name: string, desc: string): string =>
+      JSON.stringify({
+        name,
+        description: desc || null,
+        enabled: f.enabled,
+        steps: f.steps,
+        max_parallel_nodes: f.max_parallel_nodes ?? null,
+      });
+    return (
+      norm(stored, stored.name ?? '', stored.description ?? '') !==
+      norm(draft, flowName.value, flowDesc.value)
+    );
   }
 
   async function saveFlowNow(): Promise<void> {
