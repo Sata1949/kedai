@@ -8,7 +8,12 @@ use crate::models::types::ToolDefinition;
 
 /// 正文元工具:多步变量驱动器专用,不进正文默认列表。
 /// 聊天 agent 模式与任务全量模式共用此排除口径,避免同一模型在两处看到不同工具。
-pub const META_TOOLS: &[&str] = &["get_state", "apply_patch"];
+///
+/// `run_flow`(二维批次 7b 对比模式)加入本清单的理由与上两者同型:它是**按任务名单
+/// 释放**的工具——名单是运行期数据,全局可见毫无意义(聊天与 solo/multi/team 都不该
+/// 看到它);真正用得着它的那条路径由 `task_engine/custom.rs` 显式把定义塞进
+/// `params.tools` 并进闸门名单,不依赖本清单。
+pub const META_TOOLS: &[&str] = &["get_state", "apply_patch", "run_flow"];
 
 /// 规划器只读侦察白名单:规划阶段允许模型先收集信息再产出计划 JSON;
 /// 严禁写操作(违背 plan/legacy「只规划不执行」零副作用纪律)与编排类(会把规划变成执行)。
@@ -101,9 +106,10 @@ mod tests {
     }
 
     /// 常量内容与改造前的字面量逐一比对,防止无意改动导致能力漂移
+    /// (META_TOOLS 于二维批次 7b 追加 `run_flow`,属**有意**扩列,理由见常量文档)
     #[test]
     fn constants_match_legacy_literals() {
-        assert_eq!(META_TOOLS, &["get_state", "apply_patch"]);
+        assert_eq!(META_TOOLS, &["get_state", "apply_patch", "run_flow"]);
         assert_eq!(
             READONLY_SCOUT,
             &["read", "search", "memory_read", "calculator"]

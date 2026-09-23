@@ -7,6 +7,11 @@ use tokio::sync::watch;
 /// 一次任务模式执行的上下文。
 /// settings 为构造时的 task_settings() 快照(for_mode(Task) 合并值):执行全程
 /// 读快照不回头读全局设置,与 legacy 各阶段「执行期设置变更不影响本轮」语义一致。
+///
+/// `Clone`(二维批次 7b):对比模式的 `run_flow` 工具处理器要在节点栈退出后重跑被调流程,
+/// 只能捕获 **owned** 的任务上下文;克隆是副本共享(session_id 与 watch 接收端都可复制),
+/// 取消信号仍指向同一个 `watch` 通道,取消传播不因克隆而断。
+#[derive(Clone)]
 pub(crate) struct TaskRunContext {
     /// 任务 id(tasks 表主键;虚拟 session_id 与事件/落库均以此为准)
     pub task_id: String,

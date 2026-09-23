@@ -127,7 +127,11 @@ CREATE TABLE IF NOT EXISTS tasks (
   -- 任务用的流程快照(JSON:入口流程 + 可达子流程闭包),绑定任务在创建时冻结、
   -- 未绑定任务在执行开始时捕获;NULL = 尚无快照(旧任务/未跑过的未绑定任务)。
   -- 有意**不建索引**也不进列表查询的列清单——快照是 O(流程库) 体积,详情接口按需单读。
-  flow_snapshot TEXT
+  flow_snapshot TEXT,
+  -- 对比模式的可调用流程名单(JSON 字符串数组,二维批次 7b;NULL = 强制模式)。
+  -- 非空即「根流程照常跑 + 名单内流程作为 run_flow 工具释放给宽松节点」;
+  -- 旧库经 migration::ensure_tasks_flow_columns 幂等补列(同属表尾追加)。
+  flow_ids     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
 -- 任务列表按角色 / 状态过滤(2026-09-13 批次 3 补;旧库经 ensure_perf_indexes 补建)

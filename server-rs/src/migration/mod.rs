@@ -199,17 +199,17 @@ mod tests {
             .into_iter()
             .map(|c| c.name)
             .collect();
-        // 列序固定为 flow_id → flow_snapshot(与新建库建表顺序一致,schema 比对依赖)
+        // 列序固定为 flow_id → flow_snapshot → flow_ids(与新建库建表顺序一致,schema 比对依赖)
         let tail = columns
-            .get(columns.len().saturating_sub(2)..)
+            .get(columns.len().saturating_sub(3)..)
             .unwrap_or(&[]);
         assert_eq!(
             tail,
-            ["flow_id", "flow_snapshot"],
-            "两列应追加在表尾且顺序固定,实际: {columns:?}"
+            ["flow_id", "flow_snapshot", "flow_ids"],
+            "三列应追加在表尾且顺序固定,实际: {columns:?}"
         );
 
-        // 旧行零迁移成本:两列均为 NULL(未绑定 / 尚无快照)
+        // 旧行零迁移成本:三列均为 NULL(未绑定 / 尚无快照 / 强制模式)
         let (fid, snap): (Option<String>, Option<String>) = conn
             .query_row(
                 "SELECT flow_id, flow_snapshot FROM tasks WHERE id = 't1'",
@@ -220,14 +220,22 @@ mod tests {
         assert_eq!(fid, None, "旧行不绑定流程");
         assert_eq!(snap, None, "旧行无快照");
 
+        // 二维批次 7b:flow_ids(对比模式名单)同样补在表尾,旧行为 NULL(强制模式)
+        let fids: Option<String> = conn
+            .query_row("SELECT flow_ids FROM tasks WHERE id = 't1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(fids, None, "旧行是强制模式(名单为空)");
+
         // 幂等:重复执行不报错、不产生重复列
         ensure_tasks_flow_columns(&conn).unwrap();
         let dup = table_columns(&conn, "main", "tasks")
             .unwrap()
             .into_iter()
-            .filter(|c| c.name == "flow_id" || c.name == "flow_snapshot")
+            .filter(|c| c.name == "flow_id" || c.name == "flow_snapshot" || c.name == "flow_ids")
             .count();
-        assert_eq!(dup, 2, "重复迁移不应产生重复列");
+        assert_eq!(dup, 3, "重复迁移不应产生重复列");
 
         // 迁移后 schema 与新版 CREATE_TABLES 建出的表**列定义**一致(跨库合并比对依赖)。
         // 比对前剥掉 `--` 行注释:tasks 建表语句里带注释(注释是 sqlite_schema.sql 的

@@ -59,16 +59,21 @@ impl AgentFlowService {
         validate_snapshot(snapshot, &self.registered_tools)
     }
 
-    /// 当前流程 → 任务用快照(二维批次 5a:未绑定任务的执行前解析口径)。
+    /// 当前流程 → 任务用快照(二维批次 5a:未绑定任务的执行前解析口径;7b 携对比模式名单)。
     ///
     /// 与 [`snapshot_for`] 的差别只在「取哪一份流程」:本方法是「跟随当前流程」分支,
     /// 故保留 current_flow 的既有语义(**要求 enabled**),校验与闭包收集同一套。
-    pub fn current_snapshot(&self) -> Result<FlowSnapshot, String> {
+    ///
+    /// 名单成员按**当时的库**解析且取**宽松**口径(二维批次 7b):未绑定任务的快照本就是
+    /// 「执行时才捕获」的语义,成员在创建后被删/停用/改坏时从可调用集里剔除并告警即可
+    /// ——「根流程照常执行」是主语义,不该因为一个成员坏了整任务都跑不起来。
+    pub fn current_snapshot(&self, extra_ids: &[String]) -> Result<FlowSnapshot, String> {
         let cfg = self.get().ok_or("请先在设置中启用一个 Agent 流程")?;
         if !cfg.enabled {
             return Err("当前 Agent 流程未启用,请在设置中开启后再运行 custom 模式".into());
         }
-        self.build_snapshot(cfg)
+        let extras = self.resolve_members(extra_ids, false)?;
+        self.build_snapshot(cfg, &extras)
     }
 
     /// 绑定流程 id → 任务用快照(二维批次 5a:任务创建期与绑定任务的执行前解析)。
@@ -76,7 +81,15 @@ impl AgentFlowService {
     /// 与「当前流程」同一取用纪律:要求该流程存在且**已启用**(未启用即拒绝绑定,
     /// 避免任务建好一跑就 error),校验口径与 [`validate`] 一致(结构 + 从入口起可达的
     /// 引用链,不看库里无关流程的脏数据)。
-    pub fn snapshot_for(&self, flow_id: &str) -> Result<FlowSnapshot, String> {
+    ///
+    /// 名单成员(`extra_ids`,二维批次 7b)取**严格**口径:创建期逐项点名报错,不接受
+    /// 「字段存在但静默无效」;并显式拒绝「根流程出现在名单里」——根流程正在执行,
+    /// 被调用必然撞调用链环守卫,放进名单只会让描述文案与现实不一致。
+    pub fn snapshot_for(
+        &self,
+        flow_id: &str,
+        extra_ids: &[String],
+    ) -> Result<FlowSnapshot, String> {
         let cfg = self
             .flow_by_id(flow_id)
             .ok_or_else(|| format!("所选流程不存在:{flow_id}"))?;
@@ -86,24 +99,103 @@ impl AgentFlowService {
                 flow_label(cfg)
             ));
         }
-        self.build_snapshot(cfg)
+        // 只有**绑定根流程**这一分支才判「名单不得含根」:未绑定任务跟随当前流程,
+        // 根是哪一份要等执行时才定,那种情况由运行期可调用集扣除(见 task_engine/flow_call.rs)。
+        if extra_ids.iter().any(|id| id == flow_id) {
+            return Err(format!(
+                "对比模式名单不能包含根流程「{}」:该流程正在执行,无法再被调用",
+                flow_label(cfg)
+            ));
+        }
+        let extras = self.resolve_members(extra_ids, true)?;
+        self.build_snapshot(cfg, &extras)
+    }
+
+    /// 对比模式名单成员**严格**校验(二维批次 7b;任务创建期调用)。
+    ///
+    /// 未绑定根流程的任务也要验:字段不许静默无效——名单里写了不存在的流程,或写了一套
+    /// 结构不合法的流程,必须在创建时就报错,而不是等模型调用时才失败。
+    pub fn validate_members(&self, ids: &[String]) -> Result<(), String> {
+        self.resolve_members(ids, true).map(|_| ())
+    }
+
+    /// 对比模式名单成员解析(二维批次 7b):逐项要求存在 → 启用 → 结构合法。
+    ///
+    /// `strict = true`(创建期):任一不满足即整单拒绝,错误文案点名是哪一份、哪一条;
+    /// `strict = false`(运行期,未绑定任务的「当时的库」):不满足者剔除并 `warn`,
+    /// 返回仍可用的那些(调用方据此算可调用集)。
+    ///
+    /// 结构校验必须在这里做:名单成员**未必**被任何流程以 `sub_flow_id` 引用,而
+    /// `validate_snapshot` 的 `validate_sub_flows` 只校验「链首 + 被引用方」——不主动
+    /// 验一遍,坏流程会以「描述里列着、一调就报错」的形态漏到运行期。
+    fn resolve_members(
+        &self,
+        ids: &[String],
+        strict: bool,
+    ) -> Result<Vec<AgentFlowConfig>, String> {
+        let mut out: Vec<AgentFlowConfig> = Vec::new();
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        for id in ids {
+            let id = id.trim();
+            if id.is_empty() || !seen.insert(id) {
+                continue;
+            }
+            let reason = match self.flow_by_id(id) {
+                None => Some(format!("流程不存在:{id}")),
+                Some(cfg) if !cfg.enabled => Some(format!("流程「{}」未启用", flow_label(cfg))),
+                Some(cfg) => validate_flow(cfg, &self.registered_tools)
+                    .err()
+                    .map(|e| format!("流程「{}」结构不合法:{e}", flow_label(cfg))),
+            };
+            match (reason, strict) {
+                (None, _) => {
+                    // 上面已确认命中;expect 会被规则 E 拦,改用 if let 再取一次
+                    if let Some(cfg) = self.flow_by_id(id) {
+                        out.push(cfg.clone());
+                    }
+                }
+                (Some(msg), true) => return Err(format!("对比模式名单: {msg}")),
+                (Some(msg), false) => {
+                    tracing::warn!(flow_id = id, reason = msg, "对比模式名单成员不可用,已剔除");
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// 校验一份流程 + 收集它的子流程闭包(两条入口共用的实现)。
-    fn build_snapshot(&self, root: &AgentFlowConfig) -> Result<FlowSnapshot, String> {
+    /// `extras` 为对比模式名单成员(二维批次 7b;根流程之外**必须**在冻结域内的那些流程)。
+    fn build_snapshot(
+        &self,
+        root: &AgentFlowConfig,
+        extras: &[AgentFlowConfig],
+    ) -> Result<FlowSnapshot, String> {
         self.validate(root)?;
-        Ok(self.sub_flow_closure(root))
+        Ok(self.closure_from_roots(root, extras))
     }
 
-    /// 入口流程 + **可达子流程闭包**(入口恒为首个;其余按「发现顺序」= 逐层按引用声明顺序)。
+    /// 入口流程 + **名单成员** + 可达子流程闭包(入口恒为首个;名单按声明顺序紧随其后;
+    /// 子流程按「发现顺序」= 逐层按引用声明顺序)。
     ///
     /// 复用 `sub_flow_edges` 这一条「什么算被引用」的判定(与保存期校验、删除保护同源),
     /// 因此闭包与校验对「可达」的理解不可能分叉;环/深度由调用方的 [`validate`] 挡住,
     /// 这里只做收集(`seen` 去重,不会死循环;悬空引用也在 validate 处拦下)。
-    fn sub_flow_closure(&self, root: &AgentFlowConfig) -> FlowSnapshot {
+    ///
+    /// 二维批次 7b 扩了**起点集**:对比模式下被调用流程与子流程一样,必须在**冻结域**内
+    /// ——「快照外的一律取不到」这条纪律不因调用方式(静态挂载 / 动态调用)而分叉。
+    fn closure_from_roots(
+        &self,
+        root: &AgentFlowConfig,
+        extras: &[AgentFlowConfig],
+    ) -> FlowSnapshot {
         let by_id = flow_index(&self.library);
         let mut flows: Vec<AgentFlowConfig> = vec![root.clone()];
         let mut seen: BTreeSet<String> = BTreeSet::from([root.id.clone()]);
+        for extra in extras {
+            if seen.insert(extra.id.clone()) {
+                flows.push(extra.clone());
+            }
+        }
         let mut cursor = 0usize;
         while cursor < flows.len() {
             let sub_ids = sub_flow_ids(&flows[cursor]);
@@ -234,7 +326,7 @@ impl AgentFlowService {
                     .flow_by_id(id)
                     .ok_or_else(|| format!("流程不存在:{}", id))?;
                 self.validate(cfg)?;
-                let snapshot = self.sub_flow_closure(cfg);
+                let snapshot = self.closure_from_roots(cfg, &[]);
                 (Some(snapshot.root_id), snapshot.flows)
             }
             // 全库导出:只读不校验——库一旦有脏引用(手改 JSON),导出仍应可用;
@@ -1035,6 +1127,25 @@ pub fn validate_flow(
 /// 加倍叠加)。静态子图本身无环(保存期已拒),深度仍必须封顶——子图节点多、层数深时
 /// 单节点的 token 消耗会以乘积增长。
 pub const MAX_SUB_FLOW_DEPTH: usize = 3;
+
+/// 动态调用的嵌套深度上限(二维批次 7b 对比模式):入口流程算第 0 层,最多再嵌 2 层。
+///
+/// 为什么**不复用** `MAX_SUB_FLOW_DEPTH`:两者是成本模型不同的两条轴——静态子图在
+/// **保存期**就已定形(用户看得见连线),动态调用由**模型**在运行期决定。复用同一常量
+/// 会让「静态子图想放宽一点」顺手放宽模型的可调用深度,也可能让「子智能体深度」这类
+/// 无关设置意外改到流程嵌套。各自封顶、各自报错文案,谁也篡改不了谁。
+///
+/// 与静态子图深度**独立**计数:一次动态调用不额外占用静态子图的层数,反之亦然
+/// (总嵌套因此以 3 + 2 为界,再乘每任务调用预算 [MAX_FLOW_CALLS_PER_TASK] 的封顶)。
+pub const MAX_FLOW_CALL_DEPTH: usize = 2;
+
+/// 单个任务内动态调用的次数上限(二维批次 7b)。
+///
+/// 深度与环守卫拦的是「同一条调用链」,拦不住「模型串行地反复调用同一套流程」——
+/// 每次调用都是一整套流程的模型调用,只有按**任务**计数才能给总成本封顶。
+/// 计数在进程内、按任务、随本轮执行从零开始(重跑重新计数);超限的调用在**任何模型
+/// 调用之前**就被拒绝,不烧 token。
+pub const MAX_FLOW_CALLS_PER_TASK: usize = 8;
 
 /// 流程展示名(命名为空时回退 id;错误文案与 plan 前缀都用它)
 pub fn flow_label(cfg: &AgentFlowConfig) -> String {
@@ -2258,7 +2369,7 @@ mod tests {
         let b = save_flow(&mut svc, "B", vec![sub_step("n", &c)]);
         let a = save_flow(&mut svc, "A", vec![sub_step("n", &b)]);
 
-        let snap = svc.snapshot_for(&a).unwrap();
+        let snap = svc.snapshot_for(&a, &[]).unwrap();
         assert_eq!(snap.root_id, a, "根应为入口流程");
         let ids: Vec<&str> = snap.flows.iter().map(|f| f.id.as_str()).collect();
         assert_eq!(
@@ -2287,11 +2398,96 @@ mod tests {
         );
         let svc = service(&dir);
 
-        let err = svc.snapshot_for("flow-不存在").unwrap_err();
+        let err = svc.snapshot_for("flow-不存在", &[]).unwrap_err();
         assert!(err.contains("不存在"), "实际错误:{err}");
         // 未启用流程不可绑定:与执行期 current_flow 的 enabled 口径一致,提前拒绝
-        let err = svc.snapshot_for("flow-停用流程").unwrap_err();
+        let err = svc.snapshot_for("flow-停用流程", &[]).unwrap_err();
         assert!(err.contains("未启用"), "实际错误:{err}");
+    }
+
+    // ===== 对比模式名单(二维批次 7b) =====
+
+    /// 名单成员的**闭包**同样进冻结域:被调流程自带子流程时,子流程也必须取得到——
+    /// 否则「动态调用一套挂过子图的流程」会在运行期撞「快照外的一律取不到」。
+    /// 顺序:入口首个 → 名单按声明顺序 → 子流程按发现顺序。
+    #[test]
+    fn snapshot_with_members_extends_closure_and_keeps_order() {
+        let dir = TempDataDir::new("flow-snapshot-members");
+        let mut svc = service(&dir);
+        let deep = save_flow(&mut svc, "深", vec![graph_step("n", &[])]);
+        let member = save_flow(&mut svc, "被调", vec![sub_step("n", &deep)]);
+        let main = save_flow(&mut svc, "主", vec![graph_step("n", &[])]);
+
+        let snap = svc.snapshot_for(&main, std::slice::from_ref(&member)).unwrap();
+        let ids: Vec<&str> = snap.flows.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![main.as_str(), member.as_str(), deep.as_str()],
+            "入口首个 → 名单成员 → 成员自己的子流程"
+        );
+        assert_eq!(snap.root_id, main, "根仍是入口流程(名单不改根)");
+    }
+
+    /// 名单成员严格校验(创建期):不存在 / 未启用 / 结构不合法各自点名拒绝;
+    /// **根流程出现在名单里**同样拒绝(它正在执行,被调用必然撞环守卫)
+    #[test]
+    fn members_are_strictly_validated_at_creation() {
+        let dir = TempDataDir::new("flow-members-strict");
+        write_library(
+            &dir,
+            &library(vec![flow("主", vec![graph_step("n", &[])]), {
+                let mut off = flow("停用", vec![graph_step("n", &[])]);
+                off.enabled = false;
+                off
+            }]),
+        );
+        let svc = service(&dir);
+
+        let err = svc.validate_members(&["flow-不存在".into()]).unwrap_err();
+        assert!(err.contains("不存在"), "实际错误:{err}");
+        let err = svc.validate_members(&["flow-停用".into()]).unwrap_err();
+        assert!(err.contains("未启用"), "实际错误:{err}");
+        // 结构不合法(启用步骤为空)的流程不得进名单:否则要等模型调用时才失败
+        let mut broken = flow("坏", vec![]);
+        broken.steps = vec![graph_step("n", &[])];
+        broken.steps[0].enabled = false;
+        let lib = library(vec![flow("主", vec![graph_step("n", &[])]), broken]);
+        write_library(&dir, &lib);
+        let svc = service(&dir);
+        let err = svc.validate_members(&["flow-坏".into()]).unwrap_err();
+        assert!(err.contains("结构不合法"), "实际错误:{err}");
+
+        // 根流程在名单里 → 创建期即拒(名单与根的关系在绑定分支判定)
+        let err = svc
+            .snapshot_for("flow-主", &["flow-主".into(), "flow-主".into()])
+            .unwrap_err();
+        assert!(err.contains("不能包含根流程"), "实际错误:{err}");
+    }
+
+    /// 未绑定任务的**运行期**口径是宽松的:成员被删/停用即剔除,不阻断根流程执行
+    /// (「根流程照常跑」是主语义);严格口径只属于创建期
+    #[test]
+    fn runtime_snapshot_drops_unavailable_members() {
+        let dir = TempDataDir::new("flow-members-lenient");
+        let mut svc = service(&dir);
+        let member = save_flow(&mut svc, "被调", vec![graph_step("n", &[])]);
+        let main = save_flow(&mut svc, "主", vec![graph_step("n", &[])]);
+        // 把「被调」停用 + 另给一个不存在的 id:两者都应被剔除,根流程照常
+        {
+            let mut lib = svc.get_library().clone();
+            for f in lib.flows.iter_mut() {
+                if f.id == member {
+                    f.enabled = false;
+                }
+            }
+            write_library(&dir, &lib);
+        }
+        let svc = service(&dir);
+        let snap = svc
+            .current_snapshot(&[member.clone(), "flow-不存在".into()])
+            .unwrap();
+        let ids: Vec<&str> = snap.flows.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(ids, vec![main.as_str()], "不可用的成员不进闭包: {ids:?}");
     }
 
     #[test]
@@ -2300,7 +2496,7 @@ mod tests {
         let mut svc = service(&dir);
         let sub = save_flow(&mut svc, "子", vec![graph_step("n", &[])]);
         let main = save_flow(&mut svc, "主", vec![sub_step("n", &sub)]);
-        let snap = svc.snapshot_for(&main).unwrap();
+        let snap = svc.snapshot_for(&main, &[]).unwrap();
 
         // 库里把子流程改成悬空引用(只有手改文件能做到)→ 快照自身仍合法:
         // 被冻结的任务不该因为库里被改而失效

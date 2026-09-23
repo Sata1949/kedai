@@ -48,7 +48,7 @@ pub(super) fn recover_orphan_tasks(db: &Db) -> Vec<String> {
 }
 
 /// 任务主表列:0 id, 1 title, 2 status, 3 plan, 4 result, 5 error, 6 character_id,
-/// 7 created_at, 8 updated_at, 9 task_mode, 10 executor_id, 11 flow_id
+/// 7 created_at, 8 updated_at, 9 task_mode, 10 executor_id, 11 flow_id, 12 flow_ids
 /// (新增列一律追加在表尾,与 TASK_COLS 及建表顺序一致)
 ///
 /// **有意不含 flow_snapshot**:它是 O(流程库) 体积的 JSON,而 TASK_COLS 被列表与详情
@@ -58,6 +58,14 @@ pub(super) fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<TaskRecord> {
     let plan = serde_json::from_str(&plan_str).unwrap_or_default();
     let status: String = row.get(2)?;
     let task_mode: String = row.get(9)?;
+    // 对比模式名单(二维批次 7b):JSON 数组列,读取容错为空(None)——「列有脏数据」
+    // 不是「任务跑不起来」的理由,与 status/task_mode 的 from_str_lossy 同款约定。
+    let flow_ids_raw: Option<String> = row.get(12)?;
+    let flow_ids = flow_ids_raw
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+        .filter(|v| !v.is_empty());
     Ok(TaskRecord {
         id: row.get(0)?,
         title: row.get(1)?,
@@ -73,11 +81,12 @@ pub(super) fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<TaskRecord> {
         task_mode: TaskRunMode::from_str_lossy(&task_mode),
         executor_id: row.get(10)?,
         flow_id: row.get(11)?,
+        flow_ids,
     })
 }
 
 pub(super) const TASK_COLS: &str = "id, title, status, plan, result, error, character_id, \
-     created_at, updated_at, task_mode, executor_id, flow_id";
+     created_at, updated_at, task_mode, executor_id, flow_id, flow_ids";
 
 /// 按字符截断(中文安全,不切 char 边界;调用追踪摘要用)
 fn truncate_chars(s: &str, max: usize) -> String {

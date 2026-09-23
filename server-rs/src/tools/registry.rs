@@ -391,6 +391,7 @@ fn tool_when(name: &str) -> String {
         "memory_write" => "需要把值得长期记住的信息写入本会话记忆时调用。",
         "update_variables" => "需要更新当前会话的 stat_data 变量树时调用。",
         "submit" => "需要把最终产物作为文件交付给用户时调用(写入设备下载位置,返回落盘路径)。",
+        "run_flow" => "需要整套预置流程(而非单个工具)来完成一个子目标时调用;可用流程由本任务名单决定,成果作为本次调用结果返回。",
         _ => return String::new(),
     };
     s.to_string()
@@ -405,7 +406,9 @@ pub fn render_kind_for(name: &str) -> Option<&'static str> {
         "search" => Some("search"),
         "calculator" | "role" | "write" | "replace" | "create" | "todo" | "agentgo"
         | "agentend" | "sleep" | "censor_text" | "memory_read" | "memory_write"
-        | "update_variables" | "get_state" | "apply_patch" | "submit" => Some("generic"),
+        | "update_variables" | "get_state" | "apply_patch" | "submit" | "run_flow" => {
+            Some("generic")
+        }
         _ => None,
     }
 }

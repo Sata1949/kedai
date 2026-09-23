@@ -159,6 +159,7 @@ impl TaskService {
         character_id: Option<&str>,
         mode: TaskRunMode,
         flow_id: Option<&str>,
+        flow_ids: Option<&[String]>,
     ) -> Result<TaskRecord, String> {
         let title = title.trim();
         if title.is_empty() {
@@ -170,18 +171,58 @@ impl TaskService {
         if flow_id.is_some() && mode != TaskRunMode::Custom {
             return Err("只有自定义流程模式可以绑定流程(flow_id)".into());
         }
+        // 对比模式名单(二维批次 7b):口径与 flow_id 逐条对齐——非 custom 给了即 400;
+        // custom 下**给了空清单**(含全空白项)也 400:名存实亡的字段不如不传
+        // (要跑强制模式就别带 flow_ids,而不是带一个空数组)。
+        let flow_ids_raw: Option<Vec<String>> = flow_ids.map(|ids| {
+            ids.iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        });
+        if flow_ids_raw.is_some() && mode != TaskRunMode::Custom {
+            return Err("只有自定义流程模式可以给出可调用流程名单(flow_ids)".into());
+        }
+        let flow_ids: Option<Vec<String>> = match flow_ids_raw {
+            None => None,
+            Some(v) if v.is_empty() => {
+                return Err(
+                    "对比模式的流程名单为空:请至少选择一个流程,或不要传 flow_ids(强制模式)".into(),
+                )
+            }
+            Some(v) => Some(v),
+        };
+        // 命名用途:名单成员(下面两次校验都要)
+        let extras: Vec<String> = flow_ids.clone().unwrap_or_default();
         // 绑定即冻结:创建时按 id 解析一份快照(存在 + 启用 + 结构 + 可达引用链校验),
         // 之后的流程编辑/换当前流程都不影响这个任务。校验在写库**之前**做,失败不留行;
         // 流程锁在此作用域内取用并释放(与下方 db.write 不同时持有,避免锁序纠缠)。
+        // 二维批次 7b:快照的**起点集**扩为 {根流程} ∪ 名单,被调流程因此同样在冻结域内;
+        // 名单成员严格校验(存在 + 启用 + 结构合法),根流程出现在名单里也在这里被拒。
         let frozen = match flow_id {
-            None => None,
+            None => {
+                // 未绑定根流程:不冻结快照(执行时才捕获),但名单成员仍要**严格**校验
+                // ——「字段存在但静默无效」的边界不能因为「跟随当前流程」而放宽
+                if !extras.is_empty() {
+                    let flow = self.agent_flow();
+                    let guard = flow.lock().unwrap_or_else(|e| e.into_inner());
+                    guard.validate_members(&extras)?;
+                }
+                None
+            }
             Some(id) => {
                 let snap = {
                     let flow = self.agent_flow();
                     let guard = flow.lock().unwrap_or_else(|e| e.into_inner());
-                    guard.snapshot_for(id)?
+                    guard.snapshot_for(id, &extras)?
                 };
                 Some(serde_json::to_string(&snap).map_err(|e| format!("流程快照序列化失败: {e}"))?)
+            }
+        };
+        let flow_ids_json = match &flow_ids {
+            None => None,
+            Some(v) => {
+                Some(serde_json::to_string(v).map_err(|e| format!("流程名单序列化失败: {e}"))?)
             }
         };
         let id = Uuid::new_v4().to_string();
@@ -209,8 +250,8 @@ impl TaskService {
             // db.write(),若仍持锁则自死锁(非重入锁)
             let conn = self.db.write();
             conn.execute(
-                "INSERT INTO tasks (id, title, status, plan, result, error, character_id, created_at, updated_at, task_mode, executor_id, flow_id, flow_snapshot) \
-                 VALUES (?1, ?2, 'pending', '[]', '', '', ?3, ?4, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO tasks (id, title, status, plan, result, error, character_id, created_at, updated_at, task_mode, executor_id, flow_id, flow_snapshot, flow_ids) \
+                 VALUES (?1, ?2, 'pending', '[]', '', '', ?3, ?4, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     id,
                     title,
@@ -219,7 +260,8 @@ impl TaskService {
                     mode.as_str(),
                     eid,
                     flow_id,
-                    frozen
+                    frozen,
+                    flow_ids_json
                 ],
             )
             .map_err(|e| format!("创建任务失败: {e}"))?;
@@ -249,6 +291,8 @@ impl TaskService {
             task_mode: mode,
             executor_id: eid,
             flow_id: flow_id.map(str::to_string),
+            // 对比模式名单(二维批次 7b):原样回带(前端据此显示「可调用 N 个流程」)
+            flow_ids,
         })
     }
 
@@ -267,8 +311,12 @@ impl TaskService {
     ) -> Result<FlowSnapshot, String> {
         let flow = self.agent_flow();
         let guard = flow.lock().unwrap_or_else(|e| e.into_inner());
+        // 对比模式名单(二维批次 7b):未绑定任务走「当时的当前流程 + 名单」,
+        // 名单成员此刻按宽松口径解析(见 `current_snapshot` 的说明);绑定任务用冻结快照,
+        // 快照里本就含名单闭包,这里取出的 extra_ids 只为保持两个分支入口一致。
+        let extra_ids: Vec<String> = task.and_then(|t| t.flow_ids.clone()).unwrap_or_default();
         let Some(flow_id) = task.and_then(|t| t.flow_id.clone()) else {
-            return guard.current_snapshot();
+            return guard.current_snapshot(&extra_ids);
         };
         let task_id = task.map(|t| t.id.as_str()).unwrap_or_default();
         let snapshot = self

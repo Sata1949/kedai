@@ -191,13 +191,13 @@ pub fn ensure_tasks_executor_id_column(conn: &Connection) -> Result<(), String> 
     Ok(())
 }
 
-/// 幂等 schema 升级(二维批次 5a 任务绑定流程):为 tasks 补 flow_id 与 flow_snapshot
-/// 两列(各自缺失才 ALTER,已存在跳过)。启动时(Db::open)与跨库合并前(merge_databases
-/// 两侧)各执行一次。
+/// 幂等 schema 升级(二维批次 5a 任务绑定流程 + 7b 对比模式):为 tasks 补 flow_id、
+/// flow_snapshot 与 flow_ids 三列(各自缺失才 ALTER,已存在跳过)。启动时(Db::open)
+/// 与跨库合并前(merge_databases 两侧)各执行一次。
 ///
-/// **两列都可空、无 DEFAULT**:NULL = 「未绑定流程 / 尚无快照」,与旧行语义一致,
+/// **三列都可空、无 DEFAULT**:NULL = 「未绑定流程 / 尚无快照 / 强制模式」,与旧行语义一致,
 /// 故零迁移成本——旧任务不需要任何回填(未绑定的任务到执行开始时才按当时的当前流程
-/// 捕获快照)。列序固定为 flow_id → flow_snapshot,与新建库的建表顺序一致
+/// 捕获快照)。列序固定为 flow_id → flow_snapshot → flow_ids,与新建库的建表顺序一致
 /// (schema normalize 比对依赖追加顺序)。
 pub fn ensure_tasks_flow_columns(conn: &Connection) -> Result<(), String> {
     let mut existing: Vec<String> = Vec::new();
@@ -224,6 +224,10 @@ pub fn ensure_tasks_flow_columns(conn: &Connection) -> Result<(), String> {
     if !existing.iter().any(|c| c == "flow_snapshot") {
         conn.execute("ALTER TABLE tasks ADD COLUMN flow_snapshot TEXT", [])
             .map_err(|e| format!("为 tasks 补 flow_snapshot 列失败: {e}"))?;
+    }
+    if !existing.iter().any(|c| c == "flow_ids") {
+        conn.execute("ALTER TABLE tasks ADD COLUMN flow_ids TEXT", [])
+            .map_err(|e| format!("为 tasks 补 flow_ids 列失败: {e}"))?;
     }
     Ok(())
 }

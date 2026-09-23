@@ -1185,6 +1185,15 @@ pub struct TaskRecord {
     /// 执行开始时才按当时的当前流程捕获一次(语义与旧版一致)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow_id: Option<String>,
+    /// **对比模式的可调用流程名单**(二维批次 7b;空 = 强制模式,旧客户端/旧行零变化)。
+    ///
+    /// 非空即「根流程照常执行 + 名单内流程作为 `run_flow` 工具释放给根流程的宽松节点」:
+    /// 模型在工具循环里自主调用某套流程、取回其成果(D9 拍板取「甲」)。
+    /// 与 `flow_id` 相互独立——`flow_id` 仍是**根流程**(缺省 = 跟随当前流程),
+    /// 名单只决定「哪些流程可被调用」;根流程自身即使出现在名单里也不可被调用
+    /// (调用链环守卫必然拒绝,故创建期即 400)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_ids: Option<Vec<String>>,
 }
 
 fn task_default_status() -> TaskStatus {
@@ -1684,6 +1693,7 @@ mod tests {
             task_mode: TaskRunMode::Custom,
             executor_id: None,
             flow_id: None,
+            flow_ids: None,
         };
         let json = serde_json::to_string(&task).unwrap();
         assert!(!json.contains("flow_id"), "None 时不应落键: {json}");
@@ -1702,5 +1712,45 @@ mod tests {
         assert!(back.contains(r#""flow_id":"flow-a""#), "往返: {back}");
         let round: TaskRecord = serde_json::from_str(&back).unwrap();
         assert_eq!(round.flow_id.as_deref(), Some("flow-a"));
+    }
+
+    /// `TaskRecord.flow_ids`(二维批次 7b 对比模式名单)的三条线格式护栏,口径同 flow_id:
+    /// ① None 时**整键省略**(强制模式与存量任务逐字节不变);② 旧 JSON 无该键能解析;
+    /// ③ 有值时往返不丢且**顺序保持**——名单顺序决定工具描述里的列举顺序,
+    /// 与根流程排除、可调用集判定同源,乱序会让同一份名单两次运行给出不同文案。
+    #[test]
+    fn task_flow_ids_is_additive_and_omitted_when_none() {
+        let mut task = TaskRecord {
+            id: "t1".into(),
+            title: "任务".into(),
+            status: TaskStatus::Pending,
+            plan: Vec::new(),
+            result: String::new(),
+            error: String::new(),
+            character_id: None,
+            created_at: "c".into(),
+            updated_at: "u".into(),
+            task_mode: TaskRunMode::Custom,
+            executor_id: None,
+            flow_id: None,
+            flow_ids: None,
+        };
+        let json = serde_json::to_string(&task).unwrap();
+        assert!(!json.contains("flow_ids"), "None 时不应落键: {json}");
+
+        // ② 旧 JSON(无 flow_ids 键)照常解析
+        let old: TaskRecord = serde_json::from_str(
+            r#"{"id":"t1","title":"任务","status":"done","plan":[],"result":"",
+                "error":"","created_at":"c","updated_at":"u","task_mode":"custom"}"#,
+        )
+        .unwrap();
+        assert_eq!(old.flow_ids, None);
+
+        // ③ 往返不丢 + 顺序保持
+        task.flow_ids = Some(vec!["f-b".into(), "f-a".into()]);
+        let back = serde_json::to_string(&task).unwrap();
+        assert!(back.contains(r#""flow_ids":["f-b","f-a"]"#), "往返: {back}");
+        let round: TaskRecord = serde_json::from_str(&back).unwrap();
+        assert_eq!(round.flow_ids, Some(vec!["f-b".into(), "f-a".into()]));
     }
 }

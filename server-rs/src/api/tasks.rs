@@ -38,6 +38,13 @@ pub struct CreateTaskBody {
     /// 「字段存在但静默无效」)。
     #[serde(default)]
     pub flow_id: Option<String>,
+    /// **对比模式的可调用流程名单**(二维批次 7b;仅 custom 模式可用)。
+    ///
+    /// 非空即「根流程照常执行 + 名单内流程作为 `run_flow` 工具释放给宽松节点」;
+    /// 给了空数组(含全空白项)→ 400(空名单 = 名存实亡,要跑强制模式就别带这个键);
+    /// 非 custom 给了 → 400。成员须存在且启用,成员结构不合法同样 400(逐项点名)。
+    #[serde(default)]
+    pub flow_ids: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -97,6 +104,7 @@ pub async fn create(
     let executor_id = body.executor_id.clone();
     let character_id = body.character_id.clone();
     let flow_id = body.flow_id.clone();
+    let flow_ids = body.flow_ids.clone();
     match state
         .db_call(move || {
             svc.create(
@@ -105,6 +113,7 @@ pub async fn create(
                 character_id.as_deref(),
                 mode,
                 flow_id.as_deref(),
+                flow_ids.as_deref(),
             )
         })
         .await

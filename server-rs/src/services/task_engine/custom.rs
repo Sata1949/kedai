@@ -19,8 +19,17 @@
 // 抽成 `run_graph`(入口流程与子图共用同一份实现,含并行与 plan 单写者纪律)。
 // 记账口径(D6):子图节点的调用行 phase = `subflow.<父节点下标链>`,step_index 为
 // 节点在**本层**的下标——phase 不含冒号(前端流式缓冲 key 以第一个冒号切分)。
+//
+// 二维批次 7b(对比模式):任务可带一份**流程名单**(`tasks.flow_ids`),名单内流程作为
+// 单一内置工具 `run_flow` 释放给根流程内的**宽松节点**,模型在工具循环里自主调用、
+// 取回成果(根流程照常执行)。可调用集 = 名单 ∩ 冻结闭包 − 根流程;被调流程的节点
+// 与入口流程走**同一条** `execute_node` 路径(权限因此不可能因为「它是被调流程」而放宽)。
+// 记账口径:动态调用层的顶层 phase = `call.d<序号>`(嵌套为 `call.d1.d2`),其内部静态
+// 子图仍是 `subflow.<路径>`。三道闸(环/动态深度/每任务预算)见 `flow_call.rs`,全部在
+// 任何模型调用之前判定——被拒的调用不产生任何调用行。
 use super::context::TaskRunContext;
 use super::executor::ModeExecutor;
+use super::flow_call::{self, FlowCallState};
 use super::sink;
 use crate::agents::engine::executor::run_tool_loop;
 use crate::agents::engine::{AbortFlag, AgentEngine};
@@ -38,6 +47,7 @@ use crate::services::task_core::prompt_consts::{
     CUSTOM_REFLECT_PROMPT, EXECUTOR_PROMPT, TASK_INTERNAL_PLAN_PROMPT,
 };
 use crate::services::task_core::{TaskBackend, TaskGenOutput, TaskTerminal};
+use crate::tools::run_flow as run_flow_tool;
 use futures::future::BoxFuture;
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::collections::BTreeSet;
@@ -90,8 +100,17 @@ struct GraphCtx<'a> {
     /// 本层并行上限(各层取**自己流程**的 max_parallel_nodes)
     max_parallel: usize,
     /// 本轮可用的流程集合 = **任务流程快照的闭包**(二维批次 5a):子图解析只在这里查,
-    /// 故跑起来的编排与冻结的那一份完全一致,不受流程库后续改动影响
-    flows: &'a [AgentFlowConfig],
+    /// 故跑起来的编排与冻结的那一份完全一致,不受流程库后续改动影响。
+    /// 二维批次 7b 起用 `Arc` 承载:动态调用的工具处理器要在**任意时刻**(节点栈早已
+    /// 退出)重跑被调流程,只能捕获 owned 句柄;Arc 让「同一份冻结闭包」在调度器与被调
+    /// 流程之间共享而无需深拷。
+    flows: &'a Arc<Vec<AgentFlowConfig>>,
+    /// 对比模式的可调用状态(二维批次 7b;入口层创建,静态子图层原样下传同一份 Arc)。
+    /// None = 强制模式(未给 `flow_ids`,或名单在本轮闭包内一个都取不到)
+    call_state: Option<&'a Arc<FlowCallState>>,
+    /// 已进入的**动态调用**层数(入口 0;静态子图不改变它——动态深度与静态子图深度
+    /// 是两条独立轴,各自封顶、各自报错文案)
+    call_depth: usize,
 }
 
 /// 一层图跑完的汇总。
@@ -121,6 +140,19 @@ fn child_path(path: &str, index: usize) -> String {
     } else {
         format!("{}.{}", path, index)
     }
+}
+
+/// 可调用集 → 流程引用(二维批次 7b;生成 `run_flow` 描述与「本节点是否要释放工具」用)。
+/// 顺序恒为可调用集顺序(= 名单声明顺序);解析不到的 id 跳过——可调用集本就是从**同一份**
+/// 冻结闭包里筛出来的,这里的跳过只是防御,不是常规路径。
+fn released_flows<'a>(
+    callable: &[String],
+    flows: &'a [AgentFlowConfig],
+) -> Vec<&'a AgentFlowConfig> {
+    callable
+        .iter()
+        .filter_map(|id| flows.iter().find(|f| &f.id == id))
+        .collect()
 }
 
 /// 成果选拔(入口流程与子图共用,口径自二维批次 1 起未变):成果节点产出优先;
@@ -179,8 +211,9 @@ impl CustomExecutor {
     }
 
     /// 带工具步骤:run_tool_loop + 步骤白名单;返回 (正文, 整轮 usage)。
-    /// 调用追踪在本函数内落(phase 由调用方给出:`step` 或 `subflow.<路径>`;
-    /// 对齐 generate_text 的统一出口语义:成功/空/中断/错误均落一行 task_llm_calls)。
+    /// 调用追踪在本函数内落(phase 取自 `g`:入口 `step` / 静态子图 `subflow.<路径>` /
+    /// 动态调用层 `call.<路径>`;对齐 generate_text 的统一出口语义:成功/空/中断/错误
+    /// 均落一行 task_llm_calls)。
     /// `node_model` = 本节点连接的**真实模型名**(二维批次 5b;调用方已解析,不再恒取全局模型)。
     // 参数较多是「追踪落库三件套(phase/step_index/model)」与执行输入各占一位所致,
     // 打包成结构体只会把一个直白的调用点换成一次构造,收益为负。
@@ -188,14 +221,15 @@ impl CustomExecutor {
     async fn run_step_with_tools(
         &self,
         ctx: &TaskRunContext,
+        g: &GraphCtx<'_>,
         step_index: usize,
         step: &PlanStep,
         messages: &mut Vec<LlmMessage>,
         whitelist: &[String],
-        phase: &str,
         node_model: &str,
     ) -> Result<(String, TokenUsage), String> {
         let settings = &ctx.settings;
+        let phase = g.phase;
         // 任务模式工具策略:先按策略编译候选集(默认拒绝危险工具、剔除元工具),
         // 再与步骤白名单取交——步骤白名单只能收窄,不能突破任务策略放行危险工具。
         let policy = super::tool_policy::compile(
@@ -204,7 +238,7 @@ impl CustomExecutor {
             &self.engine.tool_registry(),
         );
         // Some([]) = 策略全量集;Some(list) = 策略集 ∩ 步骤白名单
-        let tools: Vec<_> = if whitelist.is_empty() {
+        let mut tools: Vec<_> = if whitelist.is_empty() {
             policy.defs
         } else {
             policy
@@ -213,6 +247,19 @@ impl CustomExecutor {
                 .filter(|d| whitelist.iter().any(|w| w == &d.name))
                 .collect()
         };
+        // 对比模式(二维批次 7b):本节点额外**释放名单内流程**——工具定义按名单改写描述
+        // 后直接进下发列表,于是闸门名单(下行由 tools 派生)自动包含它,不需要第二份判定。
+        // 前端节点白名单是自由文本,但策略编译集已剔除元工具,用户手写也拿不到它
+        // (可见性由这里单点决定,这是「用户无须知道这个名字」的落实处)。
+        let released = g
+            .call_state
+            .map(|st| released_flows(st.callable(), g.flows))
+            .unwrap_or_default();
+        if !released.is_empty() {
+            tools.push(run_flow_tool::definition_with_description(
+                flow_call::run_flow_description(&released),
+            ));
+        }
         // 闸门名单与下发工具一致:名单外立即拒绝(任务模式无 UI 授权上下文)
         let gate_list: Vec<String> = tools.iter().map(|d| d.name.clone()).collect();
         let gate = crate::agents::engine::executor::ToolGate::listed(&gate_list);
@@ -244,6 +291,11 @@ impl CustomExecutor {
         // 子图用 phase 段替换 `step`,避免同一下标在父子两层撞 key(取值仍可用
         // split(':')[1] 反解任务 id)
         let session_id = format!("task:{}:{}:{}", ctx.task_id, phase, step_index + 1);
+        // 对比模式:登记本节点的**调用点**(key 与工具处理器手里的 `ToolContext.session_id`
+        // 逐字节一致),`run_flow` 被调用时据此回到本任务上下文。守卫(RAII)在整个循环
+        // 期间持有,循环结束或本节点 future 被丢弃(取消)都会注销。
+        let _call_site = (!released.is_empty())
+            .then(|| run_flow_tool::register_call_site(&session_id, self.flow_invoker(ctx, g)));
         let mut state_machine = StateMachine::new(&session_id);
         let run_id = Uuid::new_v4().to_string();
         let (flag, _flag_rx) = AbortFlag::new();
@@ -454,7 +506,7 @@ impl CustomExecutor {
             // usage → TaskGenOutput 统一走 usage_as_output(批次 B.4 单一出处);
             // 该 out 仅作 record_usage 入参(text 不消费)
             (Some(list), false) => self
-                .run_step_with_tools(ctx, index, step, &mut messages, list, g.phase, &node_model)
+                .run_step_with_tools(ctx, g, index, step, &mut messages, list, &node_model)
                 .await
                 .map(|(text, usage)| NodeOutcome {
                     out: super::executor::usage_as_output(&usage),
@@ -534,6 +586,10 @@ impl CustomExecutor {
             max_parallel: effective_max_parallel(cfg),
             // 子图沿用**同一份**任务快照闭包(嵌套子流程也必须在冻结域内解析)
             flows: g.flows,
+            // 对比模式状态与动态层数原样下传:静态子图的节点同样可以动态调用名单内流程,
+            // 且它的环守卫看到的是**同一条**调用链(静态与动态共用,不存在两条判断分叉)
+            call_state: g.call_state,
+            call_depth: g.call_depth,
         };
         // 子图不写 plan:plan 是**外层**流程的节点列表,嵌套节点没有对应行(IFW-5)。
         // 进度体现在挂载节点那一行的 running 态与调用追踪的 subflow.<路径> 行
@@ -550,6 +606,123 @@ impl CustomExecutor {
             out: super::executor::usage_as_output(&outcome.total),
             degraded: outcome.any_error,
         })
+    }
+
+    /// 构造本节点的 `run_flow` **调用点**(二维批次 7b)。
+    ///
+    /// 闭包捕获的全是 owned 副本(上下文 / 冻结闭包 Arc / 状态 Arc / 调用链 / 路径):
+    /// 工具处理器由全局注册表在**任意时刻**调用,那时本节点的栈早已退出,任何借用都不成立。
+    /// 任务上下文与闭包都用 Arc/Clone 共享而非深拷——一次节点工具循环只构造一次。
+    fn flow_invoker(&self, ctx: &TaskRunContext, g: &GraphCtx<'_>) -> run_flow_tool::FlowInvoker {
+        let svc = self.svc.clone();
+        let engine = self.engine.clone();
+        let run_ctx = ctx.clone();
+        let flows = g.flows.clone();
+        let state = g.call_state.cloned();
+        let chain = g.chain.to_vec();
+        let call_depth = g.call_depth;
+        let parent_path = g.path.to_string();
+        Arc::new(move |flow: String, input: String| {
+            let (svc, engine) = (svc.clone(), engine.clone());
+            let (run_ctx, flows, state) = (run_ctx.clone(), flows.clone(), state.clone());
+            let (chain, parent_path) = (chain.clone(), parent_path.clone());
+            Box::pin(async move {
+                let Some(state) = state else {
+                    return Err("本次任务未启用对比模式(没有可调用的流程名单)".to_string());
+                };
+                CustomExecutor::new(svc, engine)
+                    .run_called_flow(
+                        &run_ctx,
+                        &flows,
+                        &state,
+                        &chain,
+                        call_depth,
+                        &parent_path,
+                        &flow,
+                        &input,
+                    )
+                    .await
+            })
+        })
+    }
+
+    /// 跑一套**被动态调用**的流程(二维批次 7b):名单内流程当作独立的一层图执行,
+    /// 其成果即本次工具调用的结果(与静态子图「子图成果即本节点产出」同型)。
+    ///
+    /// 守卫顺序 = 拒绝代价从低到高,**全部在任何模型调用之前**:
+    ///   ① 名单内解析(名单外 → 拒绝,连闭包都不查:这是「不烧钱」的关键一步);
+    ///   ② 环 + 动态嵌套深度(见 `flow_call::check_call_guards`);
+    ///   ③ 每任务调用预算(`charge`,兼作 `d<序号>`)。
+    ///
+    /// 记账:被调流程的顶层 phase = `call.<路径>`(路径含 `d<序号>`),它内部若再挂静态
+    /// 子图则为 `subflow.<路径>`;逐节点各记一行调用 + 一行 usage,调用方节点自有 usage
+    /// **不含**这些 token(工具调用不计入宿主节点的 usage 合计,与工具循环内其他工具同口径)。
+    ///
+    /// 降级:被调流程内有失败/空产出但成果仍选得出时,本节点成功返回、结果文本保持纯成果
+    /// (不污染模型的后续推理),只把任务整体置 `partial`([`FlowCallState::mark_degraded`])。
+    ///
+    /// 静态深度**重新起算**:动态调用与静态子图是两条独立的成本轴(口径见
+    /// `agent_flow_service::MAX_FLOW_CALL_DEPTH` 的说明),被调流程自己那套子图嵌套
+    /// 从 0 层数起,否则「从子图深处调用」会让同一份流程在两种入口下行为不一致。
+    #[allow(clippy::too_many_arguments)]
+    async fn run_called_flow(
+        &self,
+        ctx: &TaskRunContext,
+        flows: &Arc<Vec<AgentFlowConfig>>,
+        state: &Arc<FlowCallState>,
+        chain: &[String],
+        call_depth: usize,
+        parent_path: &str,
+        flow_key: &str,
+        input: &str,
+    ) -> Result<String, String> {
+        let cfg = flow_call::resolve_flow_ref(flows, state.callable(), flow_key)?;
+        flow_call::check_call_guards(chain, call_depth, cfg)?;
+        let n = state.charge()?;
+        let steps: Vec<PlanStep> = cfg.steps.iter().filter(|s| s.enabled).cloned().collect();
+        if steps.is_empty() {
+            return Err(format!("流程「{}」没有启用的步骤", flow_label(cfg)));
+        }
+        let graph = resolve_graph(&steps)?;
+        let output_idx = output_index(&steps, &graph.inputs);
+        let path = flow_call::dynamic_path(parent_path, n);
+        let phase = format!("call.{path}");
+        let mut inner_chain: Vec<String> = chain.to_vec();
+        inner_chain.push(cfg.id.clone());
+        // 输入:模型给了 input 就用它,否则用任务目标(与静态子图「挂载节点收到的输入
+        // 消息」同源语义——被调流程不是孤岛,但它的输入由调用方决定)
+        let source = if input.trim().is_empty() {
+            ctx.goal.clone()
+        } else {
+            input.to_string()
+        };
+        let inner = GraphCtx {
+            steps: &steps,
+            inputs: &graph.inputs,
+            source_message: &source,
+            phase: &phase,
+            path: &path,
+            depth: 0,
+            chain: &inner_chain,
+            max_parallel: effective_max_parallel(cfg),
+            flows,
+            call_state: Some(state),
+            call_depth: call_depth + 1,
+        };
+        // 被调流程不写 plan:plan 是**入口流程**的节点列表,动态层的节点没有对应行
+        // (与静态子图同口径,IFW-5)
+        let outcome = self.run_graph(ctx, &inner, None).await?;
+        let draft = select_draft(&steps, output_idx, &outcome.outputs);
+        if draft.is_empty() {
+            return Err(format!(
+                "流程「{}」未产出任何成果(生成步骤全部失败或为空)",
+                flow_label(cfg)
+            ));
+        }
+        if outcome.any_error {
+            state.mark_degraded();
+        }
+        Ok(draft)
     }
 
     /// 执行一层图(调度语义见 `run_graph_inner`)。
@@ -767,6 +940,31 @@ impl CustomExecutor {
 
         // 调用链以入口流程 id 起头:子图引用回入口流程会被运行期环守卫拦下
         let chain = vec![cfg.id.clone()];
+        // 对比模式(二维批次 7b):可调用集 = 名单 ∩ 冻结闭包 − 根流程。
+        // 名单为空 = 强制模式(None);名单非空但一份都取不到(成员已从库里消失且不在
+        // 冻结域内)→ 本轮按强制模式跑并告警——「根流程照常执行」是主语义,
+        // 不该因为名单失效让整个任务跑不起来。
+        let flow_ids = task
+            .as_ref()
+            .and_then(|t| t.flow_ids.clone())
+            .unwrap_or_default();
+        let call_state = if flow_ids.is_empty() {
+            None
+        } else {
+            let callable = flow_call::callable_ids(&flow_ids, &snapshot.flows, &cfg.id);
+            if callable.is_empty() {
+                tracing::warn!(
+                    task_id = ctx.task_id,
+                    "对比模式名单在本轮流程快照内一个都取不到,本轮按强制模式执行"
+                );
+                None
+            } else {
+                Some(Arc::new(FlowCallState::new(callable)))
+            }
+        };
+        // 冻结闭包改由 Arc 承载(动态调用的工具处理器要在节点栈退出后重跑被调流程,
+        // 只能捕获 owned 句柄;Arc 让调度器与被调流程共享同一份闭包而不深拷)
+        let flows = Arc::new(snapshot.flows);
         let g = GraphCtx {
             steps: &steps,
             inputs: &graph.inputs,
@@ -778,7 +976,9 @@ impl CustomExecutor {
             // 并行上限(二维批次 2):流程级配置,缺省 2、1 = 完全串行(批次 1 行为)
             max_parallel: effective_max_parallel(&cfg),
             // 子图解析域 = 本轮快照闭包(二维批次 5a)
-            flows: &snapshot.flows,
+            flows: &flows,
+            call_state: call_state.as_ref(),
+            call_depth: 0,
         };
         let outcome = self.run_graph(&ctx, &g, Some(&mut plan)).await?;
 
@@ -787,8 +987,11 @@ impl CustomExecutor {
         if draft.is_empty() {
             return Err("自定义流程未产出任何成果(生成步骤全部失败或为空)".into());
         }
-        // 含 error 节点但成果已产出 → partial(对齐 legacy WP3 语义)
-        let status = if outcome.any_error {
+        // 含 error 节点但成果已产出 → partial(对齐 legacy WP3 语义)。
+        // 对比模式再加一条:被调流程内有失败/空产出(degraded)同算降级——与本层静态
+        // 子图的 degraded 同一口径(那条链的质量已经降级,不该报 done)。
+        let degraded = call_state.as_ref().is_some_and(|s| s.degraded());
+        let status = if outcome.any_error || degraded {
             TaskStatus::Partial
         } else {
             TaskStatus::Done

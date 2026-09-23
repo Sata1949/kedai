@@ -27,6 +27,9 @@ pub mod registry;
 pub mod revise;
 // 产物提交(仅 Android 沙箱档下发;可见性过滤见 task_engine/tool_policy.rs)
 pub mod submit;
+// 动态调用名单内流程(二维批次 7b):工具**定义**在此,「谁可被调用」由 custom 执行器
+// 逐节点下发描述表达;名单/预算/环与深度守卫在 task_engine/flow_call.rs
+pub mod run_flow;
 pub mod tool_sets;
 pub mod variables;
 
@@ -75,5 +78,8 @@ pub fn register_builtin_tools(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
     );
     // 产物提交(仅 Android 沙箱档):始终注册,可见性由任务工具策略按平台+档位过滤
     submit::register_submit_tool(registry);
+    // 动态调用流程(二维批次 7b):始终注册但**永不进正文列表**(见 tool_sets::META_TOOLS),
+    // 只由 custom 执行器在对比模式的宽松节点上显式下发
+    run_flow::register_run_flow_tool(registry);
     agent_tools::register_agent_tools(registry, deps);
 }

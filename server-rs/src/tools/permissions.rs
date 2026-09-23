@@ -485,6 +485,11 @@ fn default_risk(tool: &str) -> ToolRisk {
         // 归敏感级而非危险级——按危险级登记会被任务模式默认策略整体剔除,
         // 而它恰恰只在任务/沙箱场景下有用(见 tools/submit.rs 顶部说明)。
         "submit" => ToolRisk::Sensitive,
+        // 动态调用流程(二维批次 7b):不放宽任何权限——被调流程的节点仍走
+        // task_tool_policy 编译 + 节点白名单收窄(与入口流程同一路径),它自身不写文件、
+        // 不执行命令,只消耗 token;归敏感级而非危险级,否则「按危险级剔除」的策略会
+        // 在对比模式下把它一并剔掉(可见性本就由 META_TOOLS 与逐节点下发决定)。
+        "run_flow" => ToolRisk::Sensitive,
         "memory_write" | "update_variables" | "write" | "replace" | "create" => ToolRisk::Dangerous,
         // 命令执行恒危险级:与文件写工具同级,但额外走「命令级风险强制确认」
         // (tools/command_risk.rs)。显式登记而非依赖下面的通配兜底,便于后续审查。
