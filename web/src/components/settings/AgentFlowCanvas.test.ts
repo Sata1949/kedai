@@ -9,6 +9,7 @@ import { mount, flushPromises } from '@vue/test-utils';
 import { VueFlow } from '@vue-flow/core';
 import AgentFlowCanvas from './AgentFlowCanvas.vue';
 import type { AgentFlowConfig, AgentFlowStep } from '../../api/types';
+import type { FlowConnectionOption } from '../../utils/agentFlowConnections';
 
 // jsdom 未实现、而 Vue Flow 挂载即依赖的两个 API(缺 ResizeObserver 时一个节点都不渲染)
 class ResizeObserverStub {
@@ -50,12 +51,21 @@ function diamond(): AgentFlowStep[] {
   return [step('a', [], { name: '左路' }), step('b', [], { name: '右路' }), step('c', ['a', 'b'], { name: '合并' }), step('d', ['c'], { name: '收口' })];
 }
 
-/** 挂载画布(异步组件渲染完成后再断言);flows 用于子流程徽标用例 */
-async function mountCanvas(steps: AgentFlowStep[], flows?: AgentFlowConfig[]) {
-  const wrapper = mount(AgentFlowCanvas, { props: { steps, flows } });
+/** 挂载画布(异步组件渲染完成后再断言);flows/connections 用于两类徽标用例 */
+async function mountCanvas(
+  steps: AgentFlowStep[],
+  flows?: AgentFlowConfig[],
+  connections?: FlowConnectionOption[],
+) {
+  const wrapper = mount(AgentFlowCanvas, { props: { steps, flows, connections } });
   await flushPromises();
   return wrapper;
 }
+
+const CONNS: FlowConnectionOption[] = [
+  { id: 'c-b', name: '外部连接', enabled: true, model: 'model-b', connectorType: 'openai-compatible' },
+  { id: 'c-off', name: '停用连接', enabled: false, model: 'model-x', connectorType: 'openai-compatible' },
+];
 
 /** 触发画布库的连线事件(等价用户在两个端口之间拖出一条线) */
 async function connect(wrapper: Awaited<ReturnType<typeof mountCanvas>>, source: string, target: string) {
@@ -128,6 +138,29 @@ describe('AgentFlowCanvas 渲染', () => {
       { id: 'other', name: '别的流程', enabled: true, steps: [] },
     ]);
     expect(cardText(stale)).toContain('子流程(引用已失效)');
+  });
+
+  it('节点级连接的卡片徽标(二维批次 5b):显示连接名,失效/停用如实标出', async () => {
+    const steps = [
+      step('a', [], { name: '默认步' }),
+      step('b', ['a'], { name: '外部步', connection_id: 'c-b' }),
+      step('c', ['b'], { name: '失效步', connection_id: 'gone' }),
+      step('d', ['c'], { name: '停用步', connection_id: 'c-off' }),
+    ];
+    const cardOf = (wrapper: Awaited<ReturnType<typeof mountCanvas>>, name: string) =>
+      wrapper.findAll('.vue-flow__node').find((n) => n.text().includes(name))?.text() ?? '';
+
+    const wrapper = await mountCanvas(steps, undefined, CONNS);
+    // 未指定连接 = 走默认连接:不挂徽标(避免给常态加噪音)
+    expect(cardOf(wrapper, '默认步')).not.toContain('连接');
+    expect(cardOf(wrapper, '外部步')).toContain('连接:外部连接');
+    expect(cardOf(wrapper, '失效步')).toContain('连接(引用已失效)');
+    expect(cardOf(wrapper, '停用步')).toContain('连接:停用连接(已停用)');
+
+    // 连接列表**未传入**(还没加载完/画布独立使用)→ 只说「连接」,不得误报失效
+    const noList = await mountCanvas(steps);
+    expect(cardOf(noList, '外部步')).toContain('连接');
+    expect(cardOf(noList, '外部步')).not.toContain('引用已失效');
   });
 
   it('线性流程(存量一维)进来就是一条链:节点逐层下降且有连线', async () => {

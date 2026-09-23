@@ -784,6 +784,16 @@ export interface AgentFlowStep {
    * `max_tokens` 被旁路但**配置保留**,清空本字段即恢复生效。
    */
   sub_flow_id?: string | null;
+  /**
+   * 节点级连接(二维批次 5b):该节点走哪一套 API 连接(`ConnectionProfile.id`)。
+   * 缺省 = 默认连接(与 5b 之前一致);provider 与模型随该连接,故「节点级模型」= 选连接。
+   * 保存期**不校验引用是否存在**(流程可导出/跨机导入,而连接是本机设置):
+   * 运行期若该连接已删除/已停用,该节点**明确报错**,不回退默认连接。
+   * 挂载子流程的节点上本字段被旁路(子图各节点各自解析),配置保留。
+   */
+  connection_id?: string | null;
+  /** 节点级工具循环轮次上限(二维批次 5b;1-200,缺省 = 沿用全局设置)。严格档下不下发工具,该配置保留但不生效 */
+  max_tool_rounds?: number | null;
 }
 
 /** 自定义执行流程配置(单个流程,data/agent_flows.json 流程库中的一项) */

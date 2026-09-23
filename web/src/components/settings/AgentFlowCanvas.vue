@@ -29,6 +29,7 @@ import AgentFlowStepEditor from './AgentFlowStepEditor.vue';
 import { useFlowCanvas } from '../../composables/useFlowCanvas';
 import { normalizeStepAction } from '../../utils/agentFlowTools';
 import type { AgentFlowConfig, AgentFlowStep } from '../../api/types';
+import type { FlowConnectionOption } from '../../utils/agentFlowConnections';
 
 import '@vue-flow/core/dist/style.css';
 import '@vue-flow/core/dist/theme-default.css';
@@ -40,6 +41,8 @@ const props = defineProps<{
   steps: AgentFlowStep[];
   /** 流程库全部流程 + 本流程 id(二维批次 6b:子流程选择与成环候选过滤) */
   flows?: AgentFlowConfig[];
+  /** 本机已落库的连接选项(二维批次 5b:节点级连接选择与失效警示) */
+  connections?: FlowConnectionOption[];
   currentFlowId?: string;
   /** 本流程是否启用(草稿值;只影响「反思步骤挂子流程」那条警示,见 StepEditor) */
   flowEnabled?: boolean;
@@ -113,6 +116,7 @@ function onRelayout(): void {
             :data="nodeProps.data"
             :selected="nodeProps.selected"
             :flows="props.flows"
+            :connections="props.connections"
           />
         </template>
         <!-- 连线走自定义组件:路径中点带「×」断开按钮(隐式边由它自己判断不画) -->
@@ -174,6 +178,7 @@ function onRelayout(): void {
         :step="inspecting"
         :steps="props.steps"
         :flows="props.flows"
+        :connections="props.connections"
         :current-flow-id="props.currentFlowId ?? ''"
         :flow-enabled="props.flowEnabled ?? true"
       />

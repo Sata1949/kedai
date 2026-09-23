@@ -36,6 +36,18 @@ import {
   stepToolsWarnings,
   type StepToolMode,
 } from '../../utils/agentFlowTools';
+import {
+  MAX_TOOL_ROUNDS_MAX,
+  MAX_TOOL_ROUNDS_MIN,
+  setStepConnectionId,
+  setStepToolRounds,
+  staleConnectionLabel,
+  stepConnectionId,
+  stepConnectionWarnings,
+  stepToolRoundsText,
+  stepToolRoundsWarnings,
+  type FlowConnectionOption,
+} from '../../utils/agentFlowConnections';
 import { TOOL_MODE_LABELS } from '../../composables/useAgentFlow';
 import type { AgentFlowConfig, AgentFlowStep } from '../../api/types';
 
@@ -54,6 +66,8 @@ const props = defineProps<{
    * 与流程启停无关(见 `stepSubFlowWarnings`)。缺省按启用处理。
    */
   flowEnabled?: boolean;
+  /** 本机已落库的连接选项(二维批次 5b;缺省 = 空列表,选择器只剩「默认连接」) */
+  connections?: FlowConnectionOption[];
 }>();
 
 // 就地对草稿里的步骤写入:草稿所有权在调用方(`useAgentFlow` 持有 flowDraft,保存时才提交),
@@ -70,6 +84,7 @@ const step = toRef(props, 'step');
 const steps = toRef(props, 'steps');
 const flowLib = () => props.flows ?? [];
 const selfFlowId = () => props.currentFlowId ?? '';
+const conns = () => props.connections ?? [];
 
 /**
  * 下拉的「当前值不在候选里」占位项(无此情形返回空串)。
@@ -180,6 +195,41 @@ function staleSubFlowOption(): string {
     </p>
     <!-- 以下执行参数在挂载子流程后被旁路(整块隐藏,草稿里的配置保留) -->
     <template v-if="!subFlowId(step)">
+      <!-- 节点级连接(二维批次 5b):本步走哪一套 API 连接;provider 与模型随该连接。
+           与档位无关(严格档同样生效)——严格只决定「跑几轮」,不决定「用谁跑」 -->
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">模型连接</label>
+        <select
+          class="sv-select flow-select-wide"
+          :value="stepConnectionId(step) ?? ''"
+          title="该步骤用哪一套 API 连接(连接里的模型一并生效);默认连接 = 设置里的默认那条"
+          @change="setStepConnectionId(step, ($event.target as HTMLSelectElement).value)"
+        >
+          <option value="">默认连接（跟随设置）</option>
+          <option v-for="c in conns()" :key="c.id" :value="c.id" :disabled="!c.enabled">
+            {{ c.name }}{{ c.model ? `｜${c.model}` : '' }}{{ c.enabled ? '' : '(已停用)' }}
+          </option>
+          <!-- 当前值不在候选里(本机已删除 / 流程来自别的机器):补一个禁用项保位,
+               否则原生 select 会显示成空白,引用状态失去视觉锚点(同子流程口径) -->
+          <option v-if="staleConnectionLabel(conns(), stepConnectionId(step))" value="" disabled>
+            {{ staleConnectionLabel(conns(), stepConnectionId(step)) }}
+          </option>
+        </select>
+        <span class="sv-note">
+          {{
+            stepConnectionId(step)
+              ? '本步走所选连接(模型随连接);引用失效时该步会明确报错,不会回退默认连接。'
+              : '本步走默认连接;改这里可为单步指定别的 provider 或模型。'
+          }}
+        </span>
+      </div>
+      <p
+        v-for="(warn, wi) in stepConnectionWarnings(step, conns())"
+        :key="`c${wi}`"
+        class="sv-note flow-tool-warn"
+      >
+        {{ warn }}
+      </p>
       <!-- 节点档位(二维批次 6a):严格 = 单次模型调用、不下发工具;宽松 = 允许多轮工具自循环 -->
       <div class="sv-inp-row">
         <label class="sv-inp-tag">档位</label>
@@ -272,6 +322,31 @@ function staleSubFlowOption(): string {
               <option :value="false">禁止</option>
             </select>
           </div>
+          <!-- 节点级工具轮次上限(二维批次 5b):只影响本步的工具自循环;留空 = 沿用全局设置。
+               与工具区同进退(严格档不下发工具 → 本行一并隐藏,配置保留,切回宽松档即生效) -->
+          <div class="sv-inp-row">
+            <label class="sv-inp-tag">工具轮次上限</label>
+            <input
+              class="sv-input inject-num"
+              type="number"
+              :min="MAX_TOOL_ROUNDS_MIN"
+              :max="MAX_TOOL_ROUNDS_MAX"
+              :value="stepToolRoundsText(step)"
+              placeholder="沿用全局"
+              title="工具轮次上限:本步最多让模型调用几轮工具(1-200);留空 = 沿用全局设置"
+              @change="setStepToolRounds(step, ($event.target as HTMLInputElement).value)"
+            />
+            <span class="sv-note">
+              限制本步的工具循环轮数(1-{{ MAX_TOOL_ROUNDS_MAX }});留空沿用全局。
+            </span>
+          </div>
+          <p
+            v-for="(warn, wi) in stepToolRoundsWarnings(step)"
+            :key="`r${wi}`"
+            class="sv-note flow-tool-warn"
+          >
+            {{ warn }}
+          </p>
         </template>
         <div class="sv-inp-row">
           <label class="sv-inp-tag">温度</label>

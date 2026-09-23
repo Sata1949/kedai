@@ -10,7 +10,9 @@
 // 不各写一份,避免本文件历史上出现过的双模板漂移。
 import { computed, defineAsyncComponent, onMounted, ref } from 'vue';
 import { useAgentFlow } from '../../composables/useAgentFlow';
+import { useFlowConnections } from '../../composables/useFlowConnections';
 import { graphHint, isLinearCompat, subFlowSummary, upstreamSummary } from '../../utils/agentFlowGraph';
+import { connectionSummary } from '../../utils/agentFlowConnections';
 import { loadFlowCanvas } from '../../utils/flowCanvasChunk';
 import AgentFlowStepEditor from './AgentFlowStepEditor.vue';
 
@@ -42,7 +44,7 @@ function retryCanvasLoad(): void {
   canvasKey.value += 1;
 }
 
-withDefaults(defineProps<{
+const props = withDefaults(defineProps<{
   /** 是否显示(embedded 模式按 activeSection 切换;standalone 恒 true) */
   show?: boolean;
 }>(), {
@@ -61,6 +63,10 @@ const {
 /** 视图模式:列表为默认(WF-10);本地状态,不写 store(组件直改 store state 会被 check-arch 拦) */
 const flowView = ref<'list' | 'canvas'>('list');
 
+// 节点级连接候选(二维批次 5b):只读拉一次已落库的连接列表,下传给步骤表单与画布。
+// 分区每次可见时重拉,故「先在连接配置区改连接、再切回执行流程」不会用到陈旧列表。
+const flowConn = useFlowConnections(computed(() => props.show !== false));
+
 const flowSteps = computed(() => flowDraft.value?.steps ?? []);
 
 /** 流程级提示(线性流程返回 null,不增加噪音) */
@@ -71,6 +77,8 @@ const graphHintText = computed(() =>
 onMounted(async () => {
   // 加载自定义 Agent 执行流程(custom 模式)
   await loadFlowConfig();
+  // 连接候选(SSR 不触发 onMounted → 测试期不发请求;失败只记提示,不挡流程编辑)
+  void flowConn.load();
 });
 </script>
 
@@ -237,10 +245,22 @@ onMounted(async () => {
             <template v-if="subFlowSummary(flowLibFlows, step)">
               · {{ subFlowSummary(flowLibFlows, step) }}
             </template>
+            <template v-if="connectionSummary(flowConn.options.value, step)">
+              · {{ connectionSummary(flowConn.options.value, step) }}
+            </template>
           </span>
-          <!-- 挂载子流程的摘要在**线性流程**里也要显示:它是执行语义的一部分,不属于二维依赖 -->
-          <span v-else-if="subFlowSummary(flowLibFlows, step)" class="flow-graph-note">
-            {{ subFlowSummary(flowLibFlows, step) }}
+          <!-- 挂载子流程的摘要在**线性流程**里也要显示:它是执行语义的一部分,不属于二维依赖
+               (节点级连接同理:它改了这一步走哪个 provider,不属二维依赖,但也是执行语义) -->
+          <span
+            v-else-if="subFlowSummary(flowLibFlows, step) || connectionSummary(flowConn.options.value, step)"
+            class="flow-graph-note"
+          >
+            <template v-if="subFlowSummary(flowLibFlows, step)">
+              {{ subFlowSummary(flowLibFlows, step) }}
+            </template>
+            <template v-if="connectionSummary(flowConn.options.value, step)">
+              {{ subFlowSummary(flowLibFlows, step) ? ' · ' : '' }}{{ connectionSummary(flowConn.options.value, step) }}
+            </template>
           </span>
           <!-- 展开编辑区:跨整行、纵向堆叠,避免被步骤行 grid 挤压 -->
           <AgentFlowStepEditor
@@ -248,6 +268,7 @@ onMounted(async () => {
             :step="step"
             :steps="flowSteps"
             :flows="flowLibFlows"
+            :connections="flowConn.options.value"
             :current-flow-id="flowId ?? ''"
             :flow-enabled="flowDraft?.enabled ?? true"
           />
@@ -258,6 +279,7 @@ onMounted(async () => {
         :key="canvasKey"
         :steps="flowSteps"
         :flows="flowLibFlows"
+        :connections="flowConn.options.value"
         :current-flow-id="flowId ?? ''"
         :flow-enabled="flowDraft?.enabled ?? true"
         @remove="removeStep"

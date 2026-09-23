@@ -13,7 +13,7 @@ import { flushPromises, mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
 import AgentFlowSection from './AgentFlowSection.vue';
 import { resetApiTokenForTest } from '../../api/client';
-import type { AgentFlowConfig } from '../../api/types';
+import type { AgentFlowConfig, ConnectionProfile } from '../../api/types';
 
 // 画布为异步组件且真实挂载 @vue-flow:补 jsdom 缺的两个 API(见 AgentFlowCanvas.test.ts)
 class ResizeObserverStub {
@@ -56,20 +56,33 @@ function sampleFlow(): AgentFlowConfig {
   };
 }
 
-/** 第一跳 bootstrap 取 token,第二跳返回流程库 */
-function mockFetchLibrary(): void {
+/**
+ * 第一跳 bootstrap 取 token,第二跳返回流程库,第三跳返回设置(节点级连接候选从那里来)。
+ * 三个都给出确定响应:否则第三条 fetch 会落到真实网络(测试环境无服务端 → 抛错噪声)。
+ */
+function mockFetchLibrary(connections: ConnectionProfile[] = [], flows?: AgentFlowConfig[]): void {
   const spy = vi.spyOn(globalThis, 'fetch');
   spy.mockResolvedValueOnce(new Response(JSON.stringify({ token: 'test-secret' }), { status: 200 }));
   spy.mockResolvedValueOnce(
     new Response(
-      JSON.stringify({ ok: true, library: { current_flow_id: 'f1', flows: [sampleFlow()] }, config: null }),
+      JSON.stringify({
+        ok: true,
+        library: { current_flow_id: 'f1', flows: flows ?? [sampleFlow()] },
+        config: null,
+      }),
+      { status: 200 },
+    ),
+  );
+  spy.mockResolvedValue(
+    new Response(
+      JSON.stringify({ connections, active_connection_id: connections[0]?.id ?? null }),
       { status: 200 },
     ),
   );
 }
 
-async function mountSection() {
-  mockFetchLibrary();
+async function mountSection(connections: ConnectionProfile[] = [], flows?: AgentFlowConfig[]) {
+  mockFetchLibrary(connections, flows);
   const wrapper = mount(AgentFlowSection);
   await flushPromises();
   return wrapper;
@@ -399,5 +412,107 @@ describe('AgentFlowSection 保存后继续编辑', () => {
     expect(puts).toHaveLength(2);
     expect(puts[1].config.steps[0].goal).toBe('第二次改');
     wrapper.unmount();
+  });
+});
+
+// ===== 节点级连接与工具轮次上限(二维批次 5b)=====
+
+function conn(id: string, name: string, enabled = true, model = 'model-x'): ConnectionProfile {
+  return {
+    id,
+    name,
+    connector_type: 'openai-compatible',
+    base_url: 'https://api.example/v1',
+    model,
+    enabled,
+    api_key_masked: '****abcd',
+    has_api_key: true,
+  };
+}
+
+/** 单步流程:第二步引用连接,用于「连接写回草稿」「失效引用警示」与列表摘要 */
+function connLib(): AgentFlowConfig[] {
+  return [
+    {
+      id: 'f1',
+      name: '连接流程',
+      description: null,
+      enabled: true,
+      steps: [
+        { id: 'a', name: '默认步', enabled: true, goal: 'g', action: 'direct', generates: true, inputs: [] },
+        {
+          id: 'b',
+          name: '外部步',
+          enabled: true,
+          goal: 'g',
+          action: 'direct',
+          generates: true,
+          inputs: ['a'],
+          is_output: true,
+          connection_id: 'c-b',
+          max_tool_rounds: 3,
+        },
+      ],
+    },
+  ];
+}
+
+describe('AgentFlowSection 节点级连接(二维批次 5b)', () => {
+  it('连接选择写回草稿,并在列表行显示连接摘要', async () => {
+    const wrapper = await mountSection([conn('c-b', '外部连接', true, 'model-b')], connLib());
+    // 列表行摘要:换了 provider 的节点要一眼可见(默认连接的节点不显示,避免噪音)
+    expect(wrapper.text()).toContain('连接:外部连接');
+
+    // 打开第一步(默认连接)→ 连接选择器停在「默认连接」,且示出候选
+    await expandStep(wrapper, 0);
+    const editor = () => wrapper.find('.flow-edit');
+    const select = editor()
+      .findAll('select')
+      .find((sel) => sel.text().includes('默认连接'))!;
+    expect((select.element as HTMLSelectElement).value).toBe('');
+    expect(select.text()).toContain('外部连接');
+
+    // 选中外部连接 → 写回草稿(下拉读回该 id),并给出「引用失效才报错」的口径说明
+    await select.setValue('c-b');
+    await flushPromises();
+    expect((select.element as HTMLSelectElement).value).toBe('c-b');
+    expect(editor().text()).toContain('本步走所选连接');
+  });
+
+  it('轮次上限写回草稿并夹取越界值;留空则清回 null(沿用全局)', async () => {
+    const wrapper = await mountSection([conn('c-b', '外部连接')], connLib());
+    await expandStep(wrapper, 1);
+    const editor = () => wrapper.find('.flow-edit');
+    const rounds = editor()
+      .findAll('input[type="number"]')
+      .find((i) => (i.element as HTMLInputElement).title.includes('工具轮次上限'))!;
+    // 草稿里的既有值原样读回
+    expect((rounds.element as HTMLInputElement).value).toBe('3');
+
+    await rounds.setValue('9999');
+    await flushPromises();
+    expect((rounds.element as HTMLInputElement).value).toBe('200');
+
+    await rounds.setValue('');
+    await flushPromises();
+    expect((rounds.element as HTMLInputElement).value).toBe('');
+  });
+
+  it('引用已失效/已停用的连接:选择器保位显示并给出警示(不静默改绑)', async () => {
+    // 设置里只有一条**停用**的连接,流程里引用的则是已删除的 id
+    const wrapper = await mountSection([conn('c-off', '停用连接', false)], connLib());
+    await expandStep(wrapper, 1);
+    const editor = () => wrapper.find('.flow-edit');
+
+    // 保位:当前值不在候选里也要有锚点文案,且该占位项不可选
+    expect(editor().text()).toContain('c-b(引用已失效)');
+    // 警示说清运行期后果(不回退默认连接)
+    expect(editor().text()).toContain('运行时会报错');
+    // 停用的连接也在候选里,但标出「已停用」且不可选(disabled)
+    const disabledOpt = editor()
+      .findAll('option')
+      .find((o) => o.text().includes('停用连接'))!;
+    expect(disabledOpt.text()).toContain('(已停用)');
+    expect((disabledOpt.element as HTMLOptionElement).disabled).toBe(true);
   });
 });
