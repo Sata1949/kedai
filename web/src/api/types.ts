@@ -321,12 +321,47 @@ export interface ConnectorInfo {
   availableConnectors: Array<{ type: string; label: string }>;
 }
 
+/** 连接器类型(取值域与后端 `connectors::available_connector_types()` 一致) */
+export type ConnectorType = 'openai-compatible' | 'mock';
+
+/** 一套 API 连接配置(GET /api/settings 的 connections 元素);api_key 只回传掩码 */
+export interface ConnectionProfile {
+  /** 稳定 id:保存时按它命中已有连接(缺省/未命中 = 新建) */
+  id: string;
+  /** 展示名 */
+  name: string;
+  connector_type: ConnectorType;
+  base_url: string;
+  model: string;
+  /** 停用的连接保留配置,但不会成为默认连接,也不出现在后续批次的节点选择器里 */
+  enabled: boolean;
+  /** 密钥掩码(仅保留后 4 位) */
+  api_key_masked: string;
+  /** 该连接是否已配置密钥 */
+  has_api_key: boolean;
+}
+
+/** 连接配置的写入项:各字段可选,按 id 命中已有连接;**api_key 空/缺省 = 保持该连接原密钥** */
+export interface ConnectionProfilePatch {
+  id?: string;
+  name?: string;
+  connector_type?: string;
+  base_url?: string;
+  api_key?: string;
+  model?: string;
+  enabled?: boolean;
+}
+
 /** 运行期设置(API 连接 + 生成参数);api_key 仅回传脱敏值 */
 export interface RuntimeSettings {
   openai_base_url: string;
   api_key_masked: string;
   has_api_key: boolean;
   model: string;
+  /** 多套连接配置(**真源**);上面的 openai_base_url / model 是默认连接的派生视图 */
+  connections: ConnectionProfile[];
+  /** 默认连接 id;null = 没有可用连接(全停用/删空 → 连接器回退 mock) */
+  active_connection_id: string | null;
   default_temperature: number;
   default_top_p: number;
   default_max_tokens: number;
@@ -470,6 +505,10 @@ export interface RuntimeSettingsPatch {
   openai_base_url?: string;
   openai_api_key?: string;
   model?: string;
+  /** 多套连接(**全量数组语义**:数组里没有的 id 即被删除) */
+  connections?: ConnectionProfilePatch[];
+  /** 默认连接 id(空串 = 清除,由后端回退到第一个启用连接) */
+  active_connection_id?: string;
   default_temperature?: number;
   default_top_p?: number;
   default_max_tokens?: number;

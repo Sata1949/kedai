@@ -37,7 +37,7 @@ const close = (): void => {
 
 /** 设置分区键(与 SettingsModal 的 activeSection 一一对应) */
 type SectionKey =
-  | 'api' | 'model' | 'mcp' | 'embedding'
+  | 'api' | 'connections' | 'model' | 'mcp' | 'embedding'
   | 'prompt' | 'preset'
   | 'agent' | 'flow' | 'exec'
   | 'data'
@@ -67,6 +67,7 @@ const domains: Domain[] = [
     key: 'conn', label: '连接与模型', dot: 'red',
     items: [
       { type: 'section', key: 'api', label: 'API 连接' },
+      { type: 'section', key: 'connections', label: '连接配置' },
       { type: 'section', key: 'model', label: '模型与生成' },
       { type: 'section', key: 'mcp', label: 'MCP 服务' },
     ],

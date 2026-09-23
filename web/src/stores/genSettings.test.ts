@@ -99,6 +99,9 @@ function makeSettings(overrides: Partial<RuntimeSettings> = {}): RuntimeSettings
     exec_allow_sandbox: false,
     task_persona_full: false,
     task_prompt_inject_enabled: false,
+    // 多套连接(批次 4):默认空列表,具体连接由用例覆盖
+    connections: [],
+    active_connection_id: null,
     ...overrides,
   };
 }

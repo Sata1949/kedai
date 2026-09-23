@@ -10,7 +10,18 @@
 //     `vue-tsc` 直接报错(把「漏改」从运行期静默变成编译期失败)。
 //   - MESSAGE_KIND_LABELS 的键来自后端 task_messages.kind,非联合类型,故用
 //     `Record<string, string>` 并保留「未登记返回空」的既有语义。
-import type { TaskApproveExecMode, TaskRunMode } from './types';
+import type { ConnectorType, TaskApproveExecMode, TaskRunMode } from './types';
+
+/** 连接器类型 → 展示文案(多套连接批次)。
+ *  键来自后端 `connectors::available_connector_types()`(非联合类型可穷尽),
+ *  故按 MESSAGE_KIND_LABELS 先例用 `Record<string, string>`,未登记项原样展示。 */
+export const CONNECTOR_TYPE_LABELS: Record<string, string> = {
+  'openai-compatible': 'OpenAI 兼容',
+  mock: '演示(Mock)',
+};
+
+/** 连接器类型下拉顺序(与后端定义顺序一致,便于对照) */
+export const CONNECTOR_TYPE_ORDER: ConnectorType[] = ['openai-compatible', 'mock'];
 
 /** 模式 → 短标签(任务卡头部展示)。穷尽校验:漏配模式编译期报错。 */
 export const MODE_LABELS = {
