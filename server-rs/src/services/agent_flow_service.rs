@@ -2418,7 +2418,9 @@ mod tests {
         let member = save_flow(&mut svc, "被调", vec![sub_step("n", &deep)]);
         let main = save_flow(&mut svc, "主", vec![graph_step("n", &[])]);
 
-        let snap = svc.snapshot_for(&main, std::slice::from_ref(&member)).unwrap();
+        let snap = svc
+            .snapshot_for(&main, std::slice::from_ref(&member))
+            .unwrap();
         let ids: Vec<&str> = snap.flows.iter().map(|f| f.id.as_str()).collect();
         assert_eq!(
             ids,

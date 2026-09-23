@@ -510,7 +510,8 @@ async fn compare_validates_list_at_creation_and_freezes_members() {
     );
 
     // ⑤ 绑定的根流程出现在名单里 → 400(根流程正在执行,被调用必然撞环守卫)
-    let (status, json) = create_custom_task(app, "名单含根", Some(&a), Some(std::slice::from_ref(&a))).await;
+    let (status, json) =
+        create_custom_task(app, "名单含根", Some(&a), Some(std::slice::from_ref(&a))).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
     assert!(
         json["error"]
