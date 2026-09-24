@@ -14,6 +14,16 @@ import type { AgentFlowStep } from '../api/types';
 export const STEP_OUTPUT_TOKENS_MIN = 1;
 export const STEP_OUTPUT_TOKENS_MAX = 32768;
 
+/**
+ * 节点级上下文上限(tokens)的允许区间——**与后端校验同口径**。
+ * 后端单一出处:`server-rs/src/services/agent_flow_service.rs` 的
+ * `MIN_STEP_MAX_CONTEXT` / `MAX_STEP_MAX_CONTEXT`(256..=1048576;上限与全局
+ * `max_context_tokens` 同口径,下限刻意更低——本字段的用途正是「给单个节点设更小的窗口」)。
+ * 缺省(留空)= **不裁剪**,与批次 8 之前的行为逐字节一致。
+ */
+export const STEP_MAX_CONTEXT_MIN = 256;
+export const STEP_MAX_CONTEXT_MAX = 1048576;
+
 /** 工具模式三态 */
 export type StepToolMode = 'none' | 'all' | 'list';
 

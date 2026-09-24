@@ -29,6 +29,8 @@ import {
   type StepKind,
 } from '../../utils/agentFlowGraph';
 import {
+  STEP_MAX_CONTEXT_MAX,
+  STEP_MAX_CONTEXT_MIN,
   STEP_OUTPUT_TOKENS_MAX,
   STEP_OUTPUT_TOKENS_MIN,
   setStepToolMode,
@@ -372,6 +374,24 @@ function staleSubFlowOption(): string {
             placeholder="沿用全局"
             :title="`该步骤的输出上限(${STEP_OUTPUT_TOKENS_MIN}~${STEP_OUTPUT_TOKENS_MAX});留空沿用全局最大生成长度`"
           />
+        </div>
+        <!-- 节点级上下文上限(二维批次 8):本步**输入**的 token 预算。
+             与「输出上限」同排:一个管进、一个管出;留空 = 不裁剪(与旧行为一致) -->
+        <div class="sv-inp-row">
+          <label class="sv-inp-tag">上下文上限</label>
+          <input
+            v-model.number="step.max_context"
+            type="number"
+            :min="STEP_MAX_CONTEXT_MIN"
+            :max="STEP_MAX_CONTEXT_MAX"
+            class="sv-input inject-num"
+            placeholder="不限制"
+            :title="`本步输入(系统提示 + 任务目标 + 上游产出)的 token 上限(${STEP_MAX_CONTEXT_MIN}~${STEP_MAX_CONTEXT_MAX});留空 = 不限制`"
+          />
+          <span class="sv-note">
+            本步输入的 token 上限:超出时从「最旧的上游产出」起省略(正文换成
+            「(因本节点上下文上限省略)」标记,标签行保留);任务目标恒保留(不会被省略)。
+          </span>
         </div>
       </template>
     </template>
