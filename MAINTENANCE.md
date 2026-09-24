@@ -454,9 +454,10 @@ cd server-rs && cargo test
     (`settings.json 应已持久化: Os { code: 32 }`;另实测全量负载下的 `Os { code: 2 } NotFound` 变体),
     隔离重跑即通过——非代码缺陷:PUT 保存是 `db_call` 同步 await(`api/settings.rs:657-662`),返回 200 时
     文件必已落盘,失败属环境文件锁/时序竞争。CI 接入时给该断言加重试或改经 API 校验。
-  - **已知 flaky(2026-09-24 新增)**:`settings_connector::roleplay_default_prompt_visible_on_fresh_install`
-    在 `-j 8` 全量下偶发失败(断言「首装角色扮演默认提示词不得为空」),**隔离复跑必绿**;真因未定位
-    即登记,详见 `docs/遗留.md` ENV-4。判别同 ENV-1:先按 `--test` 隔离复跑,不要改代码或依赖。
+  - **已知 flaky（2026-09-24 复核）**：同文件的 `roleplay_default_prompt_visible_on_fresh_install` 也会
+    在 `-j 8` 全量下偶发失败——那是上文 **TEST-ISO-1**（用例共享可变设置 / 顺序依赖）的另一条断言，
+    **不是新条目**（2026-09-24 曾一度误登记为 ENV-4，已撤销）；判别同 ENV-1：先
+    `cargo test --test settings_connector <用例名> -- --exact` 隔离复跑，不要改代码或依赖。
 - 前端 `npm test -w web`(Vitest,**1119 个 / 108 文件**,数字以 `tools/count-tests.mjs` 为准;vitest 实际输出为 **1137**——差值 18 来自 `parser.contract.test.ts:68` 对 `mvu_patch_cases.json` 的 19 个 fixture 用例循环生成,静态计数把该 `it(` 计为 1):stores(**storeBridge 注册/降级/owner 诊断 14 例**)、**弹窗注册表单点派生三方一致(flag 无重复/label/组件已定义/MODAL_FLAGS 对应;registry ↔ uiPrefs 双向;App.vue v-for 派生且无硬编码残留,共 9 例)**、api client(含 ApiError 错误码分类)、**api stream(SSE 读循环跨 chunk 帧重组/CRLF/残留帧、非 JSON 错误体、上传成功失败与 401 重试,12 例)**、组件与 composables、**自定义流程二维图(线性兼容 / 有效上游与层级 / 成环拦截 / 成果选拔 17 例)**、**画布数据层(节点连线产出、连线拦截、拖拽坐标写回、重新布局 17 例)**、**画布组件(真实挂载 @vue-flow:节点渲染、连线拦截、Inspector、重排确认 11 例)**、**执行流程区(默认列表视图、异步画布切换、列表编辑未回归 6 例)**、CSS 清洗(含注释处理)与沙箱回归;类型门禁 `npm run typecheck -w web`(vue-tsc,**硬门禁**,存量 168 已于 2026-09-08 清偿归零,清偿记录见 docs/功能.md 附录 D);类型逃逸 ratchet `node tools/check-frontend-lint.mjs`(as never / as unknown as / 非空断言 / any,**只降不升**,基线见脚本内 BASELINE;2026-09-13 批次 5.2 后 as unknown as 71→70)
 - 新增接口建议同步补集成测试;测试环境变量 `CONNECTOR=mock` 强制隔离
 
