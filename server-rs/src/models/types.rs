@@ -282,6 +282,20 @@ pub struct PlanStep {
     /// 与「严格档保留工具配置」同一纪律(见 `is_strict`)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tool_rounds: Option<u32>,
+    /// 节点级上下文上限(二维批次 8;None = **不裁剪**,与批次 8 之前逐字节一致)。
+    ///
+    /// 语义:**进入本节点的输入整体**的 token 预算——系统提示 + 节点消息(后者含任务目标与
+    /// 各上游产出)。超预算时从**最旧的上游产出段**起省略(正文换成省略标记、标签行保留),
+    /// 任务目标恒保留:它单独超预算即本节点**明确报错**,不静默截断(口径同 5b「引用失效
+    /// 不静默回退」)。裁剪的判定与共享原语在 `services/prompt_kit.rs`。
+    ///
+    /// 范围 256..=1_048_576,保存期校验(上限与全局 `max_context_tokens` 同口径;
+    /// 下限刻意低于全局的 65536——本字段的用途正是「给单个节点设**更小**的窗口」)。
+    /// **不裁工具轮内历史**:那是 `tool_history_keep_rounds` / `tool_history_budget_tokens`
+    /// 的职责,两者口径不同(见 `契约-协议与配置.md`)。
+    /// 挂载子流程的节点上本字段被旁路(子图各节点各自裁剪)、配置保留。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_context: Option<u32>,
 }
 
 impl PlanStep {

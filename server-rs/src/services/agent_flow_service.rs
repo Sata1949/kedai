@@ -524,6 +524,13 @@ pub const DEFAULT_MAX_PARALLEL_NODES: u32 = 2;
 pub const MAX_PARALLEL_NODES_LIMIT: u32 = 8;
 /// 节点级工具轮次上限的取值范围(二维批次 5b):与设置项 `max_tool_rounds` 的 1-200 同口径
 pub const MAX_TOOL_ROUNDS_LIMIT: u32 = 200;
+/// 节点级上下文上限的取值范围(二维批次 8)。
+///
+/// 上限与全局 `max_context_tokens` 同口径(`api/settings.rs` 的 65536..=1048576);
+/// **下限刻意更低**(256):本字段的用途正是「给单个节点设**更小**的窗口」,沿用全局的低限
+/// 会让它失去意义。更小的值也没有实用价值——节点输入至少含任务目标与省略标记。
+pub const MIN_STEP_MAX_CONTEXT: u32 = 256;
+pub const MAX_STEP_MAX_CONTEXT: u32 = 1_048_576;
 
 /// 流程搬运包(导出文件)的版本键与版本号(二维批次 7a)。
 ///
@@ -1066,6 +1073,16 @@ pub fn validate_flow(
         // 节点级连接(二维批次 5b)**有意不校验引用是否存在**:流程库可导出/跨机导入,
         // 而连接是本机设置(settings.json),保存期拒绝会把可移植流程变成本机绑定。
         // 失效引用在运行期明确报错(不静默回退默认连接),编辑期由前端显示「(已失效)」。
+        // 节点级上下文上限(二维批次 8):严格档/宽松档**都**生效(它管的是输入装配,不是工具面),
+        // 故不像 max_tool_rounds 那样区分档位;挂载子流程的节点在运行期旁路该字段(配置保留)。
+        if let Some(c) = s.max_context {
+            if !(MIN_STEP_MAX_CONTEXT..=MAX_STEP_MAX_CONTEXT).contains(&c) {
+                return Err(format!(
+                    "步骤「{}」上下文上限需在 {}-{} 之间(当前 {})",
+                    s.name, MIN_STEP_MAX_CONTEXT, MAX_STEP_MAX_CONTEXT, c
+                ));
+            }
+        }
         if s.goal.trim().is_empty() {
             return Err(format!("步骤「{}」缺少目标说明", s.name));
         }
@@ -1854,6 +1871,73 @@ mod tests {
             }],
         );
         assert!(validate_flow(&foreign_ref, &tools()).is_ok());
+    }
+
+    /// 节点级上下文上限(二维批次 8):区间 256..=1_048_576;
+    /// **严格档同样校验**(它管输入装配,与工具面无关,不像 max_tool_rounds 那样只在宽松档有意义);
+    /// 挂载子流程的节点也不放行越界值(运行期旁路是执行语义,配置仍需合法)。
+    #[test]
+    fn validate_flow_checks_step_max_context_range() {
+        for v in [MIN_STEP_MAX_CONTEXT, 4096, MAX_STEP_MAX_CONTEXT] {
+            let ok = flow(
+                "ctx",
+                vec![PlanStep {
+                    max_context: Some(v),
+                    ..graph_step("a", &[])
+                }],
+            );
+            assert!(validate_flow(&ok, &tools()).is_ok(), "max_context={v}");
+        }
+        for bad in [MIN_STEP_MAX_CONTEXT - 1, MAX_STEP_MAX_CONTEXT + 1] {
+            let over = flow(
+                "ctx-bad",
+                vec![PlanStep {
+                    max_context: Some(bad),
+                    ..graph_step("a", &[])
+                }],
+            );
+            let err = validate_flow(&over, &tools()).unwrap_err();
+            assert!(
+                err.contains("上下文上限")
+                    && err.contains("节点a")
+                    && err.contains(&bad.to_string()),
+                "max_context={bad} 的实际错误:{err}"
+            );
+        }
+        // 严格档 + 上限:有效(输入装配与档位无关)
+        let strict = flow(
+            "ctx-strict",
+            vec![PlanStep {
+                kind: Some("strict".into()),
+                max_context: Some(1024),
+                ..graph_step("a", &[])
+            }],
+        );
+        assert!(validate_flow(&strict, &tools()).is_ok());
+    }
+
+    /// 存量流程 JSON 逐字节不变(二维批次 8 的加性字段纪律):
+    /// `max_context = None` 时**整键省略**,Level-1/5b 的字段集合一字不动。
+    #[test]
+    fn step_max_context_is_absent_from_wire_when_none() {
+        let step = graph_step("a", &[]);
+        let v = serde_json::to_value(&step).unwrap();
+        assert!(
+            v.get("max_context").is_none(),
+            "None 必须整键省略(存量流程读写逐字节不变): {v}"
+        );
+        // 设值时才出现,且值原样往返
+        let with_ctx = PlanStep {
+            max_context: Some(4096),
+            ..graph_step("a", &[])
+        };
+        let v2 = serde_json::to_value(&with_ctx).unwrap();
+        assert_eq!(
+            v2.get("max_context").and_then(serde_json::Value::as_u64),
+            Some(4096)
+        );
+        let back: PlanStep = serde_json::from_value(v2).unwrap();
+        assert_eq!(back.max_context, Some(4096));
     }
 
     #[test]

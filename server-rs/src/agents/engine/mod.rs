@@ -234,6 +234,16 @@ impl AgentEngine {
             .clone()
     }
 
+    /// 按模型统计一段文本的 token 数(二维批次 8)。
+    ///
+    /// 复用引擎**同一个** `TokenService` 实例(与聊天侧裁剪 `trim_to_context`、
+    /// `count_message_tokens` 同源),**不引第二个计数源**:否则「同一段文本在裁剪与
+    /// 记账处算出两个数」这类漂移无从排查。消费点:`task_engine/custom.rs` 的节点输入预算。
+    pub fn count_tokens(&self, text: &str, model: &str) -> i64 {
+        let mut ts = self.token_service.lock().unwrap_or_else(|e| e.into_inner());
+        ts.count_tokens(text, model)
+    }
+
     /// 解析一次调用要用的连接器(二维批次 5b 的**单一出处**):
     ///  - `None`(未指定)→ 默认连接:沿用 `engine.connector` 的读锁快照与 `model()`,
     ///    行为与 5b 之前**逐字节一致**;

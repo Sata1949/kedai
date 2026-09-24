@@ -42,7 +42,9 @@ use crate::services::agent_flow_service::{
     effective_max_parallel, flow_label, output_index, resolve_graph, AgentFlowConfig,
     MAX_SUB_FLOW_DEPTH,
 };
-use crate::services::prompt_kit::untrusted_boundary;
+use crate::services::prompt_kit::{
+    select_segments_within_budget, untrusted_boundary, SegmentCost, OMITTED_SEGMENT_MARKER,
+};
 use crate::services::task_core::prompt_consts::{
     CUSTOM_REFLECT_PROMPT, EXECUTOR_PROMPT, TASK_INTERNAL_PLAN_PROMPT,
 };
@@ -74,6 +76,55 @@ struct NodeOutcome {
     out: TaskGenOutput,
     /// 本节点是否「降级完成」(仅子图场景会为真:子图内有失败/空产出节点)
     degraded: bool,
+}
+
+/// 节点输入的分段形态(二维批次 8):`head` 恒保留,`segments` 是上游产出段(**最旧在前**,
+/// 与 `PlanStep.inputs` 下标升序一致)——裁剪从下标 0 开始)。
+///
+/// 分段存在的意义:节点级 `max_context` 要按「上游产出段」取舍,而 `node_user_message`
+/// 在批次 8 之前是**直接拼串**,段结构一旦拍平就再也分不出来(只能整条截断,可能把
+/// 任务目标一起切掉)。渲染仍由 `render_omitted(0)` 产出与批次 8 之前**逐字节相同**的消息。
+struct NodeInput {
+    /// 恒保留的头部:无上游时即源消息(任务目标),有上游时是「任务目标:<goal>」
+    head: String,
+    /// 上游产出段(按 `inputs` 下标升序;空 = 源节点)
+    segments: Vec<NodeSegment>,
+}
+
+/// 上游产出段:标签行 + 正文。省略时**标签行保留**、正文换成 [`OMITTED_SEGMENT_MARKER`],
+/// 让模型与读提示词的人都看得出「这里原本有内容」,而不是静默少一段。
+struct NodeSegment {
+    label: String,
+    text: String,
+}
+
+impl NodeInput {
+    /// 完整渲染(不省略任何段)= 批次 8 之前 `node_user_message` 的输出。
+    fn render_full(&self) -> String {
+        self.render_omitted(0)
+    }
+
+    /// 保留下标 `[keep_from, len)` 的段;`[0, keep_from)` 的正文换成省略标记。
+    fn render_omitted(&self, keep_from: usize) -> String {
+        let body: Vec<String> = self
+            .segments
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let text = if i < keep_from {
+                    OMITTED_SEGMENT_MARKER
+                } else {
+                    s.text.as_str()
+                };
+                format!("{}\n{}", s.label, text)
+            })
+            .collect();
+        match body.len() {
+            0 => self.head.clone(),
+            1 => format!("{}\n\n{}", self.head, body[0]),
+            _ => format!("{}\n\n上游节点产出:\n{}", self.head, body.join("\n\n")),
+        }
+    }
 }
 
 /// 在飞节点的执行 future:节点在流程数组中的下标 + 执行结果
@@ -409,38 +460,46 @@ impl CustomExecutor {
         }
     }
 
-    /// 节点 user 消息:任务目标 + 上游产出(二维批次 1)。
+    /// 节点输入:任务目标 + 上游产出(二维批次 1;批次 8 起返回**分段**形态,由
+    /// [`NodeInput::render_full`] 渲染出与批次 8 之前逐字节一致的文本)。
     ///  - 无上游(源节点/首步):给**本层源消息**——入口流程即任务目标(与旧版首步逐字节
     ///    一致),子图则是「挂载它的那个节点收到的输入消息」(上游产出因此流进子图);
     ///  - 单上游:沿用旧版格式「上一步「X」产出:」——线性兼容流程逐字节不变;
     ///  - 多上游:D3 按父节点**数组下标升序**逐段拼接(顺序确定 → 同一流程两次运行可复现)。
     ///
     ///    上游失败或产出为空时该段留空(不写占位词,与旧版清空 prev_output 的语义一致)。
-    fn node_user_message(
+    ///
+    ///    分段还承载批次 8 的裁剪语义:段数组**最旧在前**,`max_context` 从下标 0 起省略。
+    fn node_input(
         source_message: &str,
         goal: &str,
         steps: &[PlanStep],
         inputs: &[Vec<usize>],
         index: usize,
         outputs: &[String],
-    ) -> String {
+    ) -> NodeInput {
         match inputs[index].as_slice() {
-            [] => source_message.to_string(),
-            [parent] => format!(
-                "任务目标:\n{}\n\n上一步「{}」产出:\n{}",
-                goal, steps[*parent].name, outputs[*parent]
-            ),
-            many => {
-                let segments: Vec<String> = many
+            [] => NodeInput {
+                head: source_message.to_string(),
+                segments: Vec::new(),
+            },
+            [parent] => NodeInput {
+                head: format!("任务目标:\n{}", goal),
+                segments: vec![NodeSegment {
+                    label: format!("上一步「{}」产出:", steps[*parent].name),
+                    text: outputs[*parent].clone(),
+                }],
+            },
+            many => NodeInput {
+                head: format!("任务目标:\n{}", goal),
+                segments: many
                     .iter()
-                    .map(|&p| format!("【{}】\n{}", steps[p].name, outputs[p]))
-                    .collect();
-                format!(
-                    "任务目标:\n{}\n\n上游节点产出:\n{}",
-                    goal,
-                    segments.join("\n\n")
-                )
-            }
+                    .map(|&p| NodeSegment {
+                        label: format!("【{}】", steps[p].name),
+                        text: outputs[p].clone(),
+                    })
+                    .collect(),
+            },
         }
     }
 
@@ -448,18 +507,23 @@ impl CustomExecutor {
     /// 调用追踪口径不变(phase 由 `g` 给出、step_index = 步骤在**本层**数组中的下标);
     /// 失败与中断都返回 Err,由调度器决定状态与降级。
     /// 档位分支见 `PlanStep::is_strict`(二维批次 6a):严格档恒走单次调用。
+    /// 节点级上下文上限(二维批次 8)在这里消费——它是**唯一**消费点(见 `apply_step_max_context`)。
     async fn execute_node(
         &self,
         ctx: &TaskRunContext,
         g: &GraphCtx<'_>,
         index: usize,
         step: &PlanStep,
-        user: String,
+        input: NodeInput,
     ) -> Result<NodeOutcome, String> {
         // 子流程节点不自己发起模型调用(与 6a「档位优先于 tools」同一纪律:
-        // goal/action/kind/tools/system_prompt/temperature/max_tokens 全被旁路但保留配置)
+        // goal/action/kind/tools/system_prompt/temperature/max_tokens 全被旁路但保留配置)。
+        // 批次 8 的 `max_context` 同属被旁路的执行参数(子图各节点各自裁剪),故这里用
+        // `render_full()` 把**未裁剪**的输入交出去,行为与批次 8 之前逐字节一致。
         if let Some(sub_id) = step.sub_flow_ref() {
-            return self.run_sub_flow(ctx, g, index, step, sub_id, user).await;
+            return self
+                .run_sub_flow(ctx, g, index, step, sub_id, input.render_full())
+                .await;
         }
         // 节点级连接(二维批次 5b):**先解析一次**——引用的连接被删除/停用即本节点失败
         // (文案点名连接,不静默回退默认连接;口径同 5a「有 flow_id 却无快照」)。
@@ -471,6 +535,7 @@ impl CustomExecutor {
             .resolve_connector(step.connection_ref())
             .await
             .map_err(|e| format!("步骤「{}」:{}", step.name, e))?;
+        let user = self.apply_step_max_context(step, &input, &node_model)?;
         let sys = self.build_step_system(step, &ctx.goal);
         let mut messages = vec![
             LlmMessage::plain("system", &sys),
@@ -514,6 +579,53 @@ impl CustomExecutor {
                     degraded: false,
                 }),
         }
+    }
+
+    /// 应用节点级上下文上限(二维批次 8):返回**进 prompt 的** node 消息文本。
+    ///
+    /// 口径(纯选择逻辑在 [`select_segments_within_budget`],此处只做计数与渲染):
+    ///  - 留空(`None`)= 不裁剪 → 与批次 8 之前**逐字节一致**(存量流程零行为变化);
+    ///  - 恒保留「任务目标」/源消息,从**最旧**的上游产出段起把正文换成
+    ///    [`OMITTED_SEGMENT_MARKER`](标签行保留),直到合计落在预算内,并 `warn` 一次;
+    ///  - 任务目标单独超预算 → 本节点**明确报错**(不静默截断,口径同 5b「引用失效不静默回退」);
+    ///  - **不裁系统提示**:它是本节点的指令与档位语义,裁它等于换了个节点;
+    ///  - **不裁工具轮内历史**:那是 `tool_history_keep_rounds` / `tool_history_budget_tokens`
+    ///    的职责(两者口径不同),故本函数只作用于**初始输入装配**。
+    ///  - 计数用本节点**真实模型**(与调用追踪同源):`node_model` 由连接解析给出。
+    fn apply_step_max_context(
+        &self,
+        step: &PlanStep,
+        input: &NodeInput,
+        node_model: &str,
+    ) -> Result<String, String> {
+        let Some(budget) = step.max_context else {
+            return Ok(input.render_full());
+        };
+        let head_tokens = self.engine.count_tokens(&input.head, node_model);
+        let marker_tokens = self.engine.count_tokens(OMITTED_SEGMENT_MARKER, node_model);
+        let costs: Vec<SegmentCost> = input
+            .segments
+            .iter()
+            .map(|s| {
+                let label = self.engine.count_tokens(&s.label, node_model);
+                SegmentCost {
+                    kept: label + self.engine.count_tokens(&s.text, node_model),
+                    omitted: label + marker_tokens,
+                }
+            })
+            .collect();
+        let keep_from = select_segments_within_budget(head_tokens, &costs, budget)
+            .map_err(|e| format!("步骤「{}」:{}", step.name, e))?;
+        if keep_from > 0 {
+            tracing::warn!(
+                step = %step.name,
+                budget,
+                omitted_segments = keep_from,
+                "节点输入超出上下文上限:已省略最旧的 {} 个上游产出段(正文换成标记,标签行保留)",
+                keep_from
+            );
+        }
+        Ok(input.render_omitted(keep_from))
     }
 
     /// 跑一个静态子图(二维批次 6b):被引用流程当作独立的一层图执行,
@@ -796,17 +908,11 @@ impl CustomExecutor {
                     p[i].status = TaskStepStatus::Running;
                     svc.set_plan(&ctx.task_id, p);
                 }
-                let user = Self::node_user_message(
-                    g.source_message,
-                    &ctx.goal,
-                    steps,
-                    g.inputs,
-                    i,
-                    &outputs,
-                );
+                let input =
+                    Self::node_input(g.source_message, &ctx.goal, steps, g.inputs, i, &outputs);
                 let (ctx_ref, step) = (ctx, &steps[i]);
                 inflight.push(Box::pin(async move {
-                    (i, self.execute_node(ctx_ref, g, i, step, user).await)
+                    (i, self.execute_node(ctx_ref, g, i, step, input).await)
                 }));
             }
             let Some((i, result)) = inflight.next().await else {
