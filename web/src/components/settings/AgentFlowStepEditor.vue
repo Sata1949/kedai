@@ -29,12 +29,15 @@ import {
   type StepKind,
 } from '../../utils/agentFlowGraph';
 import {
+  STEP_OUTPUT_TOKENS_MAX,
+  STEP_OUTPUT_TOKENS_MIN,
   setStepToolMode,
   setStepToolsText,
   stepToolMode,
   stepToolsText,
   stepToolsWarnings,
   type StepToolMode,
+  type ToolPolicyCtx,
 } from '../../utils/agentFlowTools';
 import {
   MAX_TOOL_ROUNDS_MAX,
@@ -68,6 +71,12 @@ const props = defineProps<{
   flowEnabled?: boolean;
   /** 本机已落库的连接选项(二维批次 5b;缺省 = 空列表,选择器只剩「默认连接」) */
   connections?: FlowConnectionOption[];
+  /**
+   * 任务工具策略上下文(设置 → 工具策略;缺省 = 未知)。
+   * 只喂给 `stepToolsWarnings` 的白名单取交提示——后端下发的工具 = 策略集 ∩ 步骤白名单,
+   * 交集为空时该节点拿不到任何工具且闸门 fail-closed(收口批 2026-09-24)。
+   */
+  toolPolicy?: ToolPolicyCtx;
 }>();
 
 // 就地对草稿里的步骤写入:草稿所有权在调用方(`useAgentFlow` 持有 flowDraft,保存时才提交),
@@ -289,9 +298,11 @@ function staleSubFlowOption(): string {
           </div>
           <!-- F8(2026-09-10 实跑修复):tools 三态语义易误配——「全部工具」会下发
                全部已注册工具(含编排/写类),分析规划类步骤不应选它。
+               收口批(2026-09-24):白名单档再补一条「与任务工具策略取交」的提示
+               (交集为空 → 本节点不下发任何工具,闸门 fail-closed)。
                文案由 stepToolsWarnings 纯函数产出,便于单测覆盖 -->
           <p
-            v-for="(warn, wi) in stepToolsWarnings(step)"
+            v-for="(warn, wi) in stepToolsWarnings(step, toolPolicy)"
             :key="wi"
             class="sv-note flow-tool-warn"
           >
@@ -352,7 +363,15 @@ function staleSubFlowOption(): string {
           <label class="sv-inp-tag">温度</label>
           <input v-model.number="step.temperature" type="number" min="0" max="2" step="0.1" class="sv-input inject-num" placeholder="沿用全局" />
           <label class="sv-inp-tag">输出上限</label>
-          <input v-model.number="step.max_tokens" type="number" min="1" max="131072" class="sv-input inject-num" placeholder="沿用全局" title="该步骤的输出上限(1~131072);留空沿用全局最大生成长度" />
+          <input
+            v-model.number="step.max_tokens"
+            type="number"
+            :min="STEP_OUTPUT_TOKENS_MIN"
+            :max="STEP_OUTPUT_TOKENS_MAX"
+            class="sv-input inject-num"
+            placeholder="沿用全局"
+            :title="`该步骤的输出上限(${STEP_OUTPUT_TOKENS_MIN}~${STEP_OUTPUT_TOKENS_MAX});留空沿用全局最大生成长度`"
+          />
         </div>
       </template>
     </template>

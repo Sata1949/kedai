@@ -259,6 +259,31 @@ describe('TaskBoard 批次 4:solo/multi 调用情况入口与 custom 步骤进�
     expect(html).toContain('对比 · 可调用 1 个流程(名单 2 个,1 个本轮不可用)');
   });
 
+  it('custom 模式渲染「查看调用情况」入口(收口批 2026-09-24:此前只给 solo/multi)', async () => {
+    // 对比模式花的是真金白银(被调流程 token 已在调用面板单列),却没有入口指引
+    const plan: TaskStep[] = [{ name: '生成草稿', goal: '生成', status: 'done', result: '' }];
+    const html = await render(TaskBoard, (p) =>
+      seedCurrentTask(p, makeDetail(makeTask('running', 'custom', plan))),
+    );
+    expect(html).toContain('查看调用情况');
+    expect(html).toContain('各流程节点调用,对比模式下含被调流程');
+  });
+
+  it('solo 入口文案仍指主/子 Agent(纳入 custom 未造成文案漂移)', async () => {
+    const html = await render(TaskBoard, (p) =>
+      seedCurrentTask(p, makeDetail(makeTask('running', 'solo'))),
+    );
+    expect(html).toContain('主/子 Agent 调用');
+    expect(html).not.toContain('各流程节点调用');
+  });
+
+  it('未列入的模式(plan)不渲染该入口', async () => {
+    const html = await render(TaskBoard, (p) =>
+      seedCurrentTask(p, makeDetail(makeTask('running', 'plan'))),
+    );
+    expect(html).not.toContain('查看调用情况');
+  });
+
   it('legacy 模式渲染保持现状(无批准区/分工卡/调用面板入口)', async () => {
     const plan: TaskStep[] = [{ name: '步骤一', goal: '目标一', status: 'pending', result: '' }];
     const html = await render(TaskBoard, (p) =>

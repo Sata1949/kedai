@@ -27,7 +27,7 @@ import AgentFlowNodeCard from './AgentFlowNodeCard.vue';
 import AgentFlowEdge from './AgentFlowEdge.vue';
 import AgentFlowStepEditor from './AgentFlowStepEditor.vue';
 import { useFlowCanvas } from '../../composables/useFlowCanvas';
-import { normalizeStepAction } from '../../utils/agentFlowTools';
+import { normalizeStepAction, type ToolPolicyCtx } from '../../utils/agentFlowTools';
 import type { AgentFlowConfig, AgentFlowStep } from '../../api/types';
 import type { FlowConnectionOption } from '../../utils/agentFlowConnections';
 
@@ -46,6 +46,8 @@ const props = defineProps<{
   currentFlowId?: string;
   /** 本流程是否启用(草稿值;只影响「反思步骤挂子流程」那条警示,见 StepEditor) */
   flowEnabled?: boolean;
+  /** 任务工具策略上下文(收口批 2026-09-24;透传给 Inspector 的步骤表单) */
+  toolPolicy?: ToolPolicyCtx;
 }>();
 
 const emit = defineEmits<{
@@ -181,6 +183,7 @@ function onRelayout(): void {
         :connections="props.connections"
         :current-flow-id="props.currentFlowId ?? ''"
         :flow-enabled="props.flowEnabled ?? true"
+        :tool-policy="props.toolPolicy"
       />
     </aside>
   </div>

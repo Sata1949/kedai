@@ -9,10 +9,13 @@
 // 两个视图共用 AgentFlowStepEditor(步骤表单)与 utils/agentFlowGraph(图算法),
 // 不各写一份,避免本文件历史上出现过的双模板漂移。
 import { computed, defineAsyncComponent, onMounted, ref } from 'vue';
+import { storeToRefs } from 'pinia';
+import { useAppStore } from '../../store';
 import { useAgentFlow } from '../../composables/useAgentFlow';
 import { useFlowConnections } from '../../composables/useFlowConnections';
 import { graphHint, isLinearCompat, subFlowSummary, upstreamSummary } from '../../utils/agentFlowGraph';
 import { connectionSummary } from '../../utils/agentFlowConnections';
+import type { ToolPolicyCtx } from '../../utils/agentFlowTools';
 import { loadFlowCanvas } from '../../utils/flowCanvasChunk';
 import AgentFlowStepEditor from './AgentFlowStepEditor.vue';
 
@@ -66,6 +69,16 @@ const flowView = ref<'list' | 'canvas'>('list');
 // 节点级连接候选(二维批次 5b):只读拉一次已落库的连接列表,下传给步骤表单与画布。
 // 分区每次可见时重拉,故「先在连接配置区改连接、再切回执行流程」不会用到陈旧列表。
 const flowConn = useFlowConnections(computed(() => props.show !== false));
+
+// 任务工具策略(收口批 2026-09-24):步骤白名单会与策略编译集取交,交集为空时该节点
+// 不下发任何工具(闸门 fail-closed)。策略值取自设置 store,仅供编辑区本地提示使用
+// (只读;保存与执行判定始终在后端)。
+const store = useAppStore();
+const { taskToolPolicy, taskToolAllowlist } = storeToRefs(store);
+const toolPolicyCtx = computed<ToolPolicyCtx>(() => ({
+  policy: taskToolPolicy.value,
+  allowlist: taskToolAllowlist.value,
+}));
 
 const flowSteps = computed(() => flowDraft.value?.steps ?? []);
 
@@ -282,6 +295,7 @@ onMounted(async () => {
             :connections="flowConn.options.value"
             :current-flow-id="flowId ?? ''"
             :flow-enabled="flowDraft?.enabled ?? true"
+            :tool-policy="toolPolicyCtx"
           />
         </div>
       </template>
@@ -293,6 +307,7 @@ onMounted(async () => {
         :connections="flowConn.options.value"
         :current-flow-id="flowId ?? ''"
         :flow-enabled="flowDraft?.enabled ?? true"
+        :tool-policy="toolPolicyCtx"
         @remove="removeStep"
       />
       <p v-if="flowView === 'canvas' && canvasLoadFailed" class="sv-note flow-tool-warn">

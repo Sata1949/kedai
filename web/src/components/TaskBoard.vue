@@ -12,7 +12,7 @@ import { taskStatusClass as statusClass, taskStatusLabel as statusLabel } from '
 import { bufferLabel } from '../utils/phaseLabel';
 import { badgeFlowSource, planRowBadges, type NodeBadge } from '../utils/flowNodeBadges';
 import { callableFlows } from '../utils/flowCallStats';
-import { APPROVE_EXEC_MODE_LABELS, APPROVE_EXEC_MODE_ORDER, MODE_LABELS, messageKindLabel } from '../api/labels';
+import { APPROVE_EXEC_MODE_LABELS, APPROVE_EXEC_MODE_ORDER, FLOW_MODE_LABELS, MODE_LABELS, messageKindLabel } from '../api/labels';
 import type { TaskApproveExecMode, TaskRecord, TaskRunMode, TaskStep } from '../api';
 
 const store = useAppStore();
@@ -130,8 +130,10 @@ const taskCompareLabel = computed<string | null>(() => {
   // 与后端同口径地去重去空后再数「名单几个」:重复/空白项不该被算成两个成员
   const declared = new Set(ids.map((s) => s.trim()).filter((s) => s !== '')).size;
   const callable = compareCallable.value;
-  if (callable === null) return `对比 · 可调用 ${declared} 个流程`;
-  const base = `对比 · 可调用 ${callable.length} 个流程`;
+  // 「对比」二字取自 api/labels.ts 的 FLOW_MODE_LABELS(单一出处;此前硬拼在展示串里)
+  const head = FLOW_MODE_LABELS.compare;
+  if (callable === null) return `${head} · 可调用 ${declared} 个流程`;
+  const base = `${head} · 可调用 ${callable.length} 个流程`;
   const missing = declared - callable.length;
   return missing > 0 ? `${base}(名单 ${declared} 个,${missing} 个本轮不可用)` : base;
 });
@@ -139,7 +141,7 @@ const taskCompareLabel = computed<string | null>(() => {
 /** 对比模式徽标的悬停说明:列出本轮**实际**可调用流程名(取不到名则退回 id) */
 const taskCompareTitle = computed<string>(() => {
   const head =
-    '对比模式:根流程照常执行,名单内流程作为工具释放给流程节点,由模型在工具循环里自主调用并取回成果';
+    `${FLOW_MODE_LABELS.compare}模式:根流程照常执行,名单内流程作为工具释放给流程节点,由模型在工具循环里自主调用并取回成果`;
   const callable = compareCallable.value;
   if (!callable || callable.length === 0) return head;
   const names = callable
@@ -421,7 +423,19 @@ const plannedPlanHtml = computed(() => {
   return result ? renderMarkdown(result) : '';
 });
 
-/** solo/multi 模式入口:打开 Agent 合并面板并落在「调用情况」tab(主/子 Agent 调用时间线) */
+/**
+ * 「查看调用情况」入口的说明文案(收口批 2026-09-24:custom 此前没有这个入口)。
+ * 面板本身与模式无关(通往 Agent 面板的「调用情况」tab);差别只在**细节是什么**:
+ * solo/multi 是主/子 Agent 时间线,custom 是逐个流程节点的调用
+ * (对比模式下还含被调流程的 `call.` 行,成本数据已在前端单列)。
+ */
+const callTraceHint = computed(() =>
+  taskMode.value === 'custom'
+    ? `${taskModeLabel.value}模式的执行细节(各流程节点调用,对比模式下含被调流程)请查看 Agent 面板「调用情况」`
+    : `${taskModeLabel.value}模式的执行细节(主/子 Agent 调用)请查看 Agent 面板「调用情况」`,
+);
+
+/** solo/multi/custom 模式入口:打开 Agent 合并面板并落在「调用情况」tab */
 function openCallTrace(): void {
   store.callTraceOpen = true; // tab 记忆指向「调用情况」
   store.openAgentPanel();     // 用户显式展开:清除自动展开抑制
@@ -703,10 +717,14 @@ async function removeTask(task: TaskRecord): Promise<void> {
             </div>
           </div>
 
-          <!-- solo / multi 模式:执行细节在 Agent 面板「调用情况」tab(主/子 Agent 调用时间线) -->
-          <div v-if="taskMode === 'solo' || taskMode === 'multi'" class="sv-task-hint">
+          <!-- solo / multi / custom 模式:执行细节在 Agent 面板「调用情况」tab
+               (custom 收口批 2026-09-24 纳入:对比模式有被调流程成本数据,却没有入口指引) -->
+          <div
+            v-if="taskMode === 'solo' || taskMode === 'multi' || taskMode === 'custom'"
+            class="sv-task-hint"
+          >
             <span class="sv-task-hint-text">
-              {{ taskModeLabel }}模式的执行细节(主/子 Agent 调用)请查看 Agent 面板「调用情况」
+              {{ callTraceHint }}
             </span>
             <button class="sv-btn ghost sv-btn-sm" @click="openCallTrace">查看调用情况</button>
           </div>

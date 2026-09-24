@@ -113,9 +113,51 @@ describe('stepToolsWarnings(F8:工具三态误配警示)', () => {
     expect(w[1]).toContain('理解意图');
   });
 
-  it('不使用工具 / 白名单 → 无警示', () => {
+  it('不使用工具 / 白名单(未传策略上下文) → 无警示', () => {
     expect(stepToolsWarnings({ tools: null, generates: false })).toHaveLength(0);
     expect(stepToolsWarnings({ tools: ['read'], generates: false })).toHaveLength(0);
+  });
+});
+
+// 自定义流程收口批(2026-09-24):空集工具闸门改 fail-closed 之后,「策略 ∩ 白名单 = 空集」
+// 的后果是**本节点不下发任何工具、模型发起的工具调用被直接拒绝**——而编辑区此前毫无提示。
+// 前端能精确判定的只有 allowlist 档(策略白名单可见);deny_dangerous 档的危险工具分类在
+// 后端,前端不复制该分类,只给「可能被整体剔除」的说明(不臆断为错误)。
+describe('stepToolsWarnings:任务工具策略取交(自定义流程收口批)', () => {
+  it('白名单 + deny_dangerous → 取交提示(点明元工具/危险级与被整体剔除的后果)', () => {
+    const w = stepToolsWarnings({ tools: ['write'] }, { policy: 'deny_dangerous' });
+    expect(w).toHaveLength(1);
+    expect(w[0]).toContain('任务工具策略');
+    expect(w[0]).toContain('agentgo');
+    expect(w[0]).toContain('不下发任何工具');
+  });
+
+  it('白名单 + allowlist 无交集 → 精确告警(点名两边都有的工具名)', () => {
+    const w = stepToolsWarnings(
+      { tools: ['write', 'bash'] },
+      { policy: 'allowlist', allowlist: ['read'] },
+    );
+    expect(w).toHaveLength(1);
+    expect(w[0]).toContain('无交集');
+    expect(w[0]).toContain('任务工具白名单');
+  });
+
+  it('白名单 + allowlist 有交集 → 不提示(可精确证明没问题,不制造噪音)', () => {
+    expect(
+      stepToolsWarnings({ tools: ['read', 'write'] }, { policy: 'allowlist', allowlist: ['read'] }),
+    ).toHaveLength(0);
+  });
+
+  it('policy=all / 不使用工具 / 全部工具档 → 不产出取交提示', () => {
+    expect(stepToolsWarnings({ tools: ['write'] }, { policy: 'all' })).toHaveLength(0);
+    expect(stepToolsWarnings({ tools: null }, { policy: 'deny_dangerous' })).toHaveLength(0);
+    expect(stepToolsWarnings({ tools: [] }, { policy: 'deny_dangerous' })).toHaveLength(1); // 仍是「全部工具」那条
+  });
+
+  it('白名单只有占位空串(未填工具名)→ 不告警(保存时清洗为「不使用工具」)', () => {
+    expect(
+      stepToolsWarnings({ tools: ['', ' '] }, { policy: 'allowlist', allowlist: [] }),
+    ).toHaveLength(0);
   });
 });
 
