@@ -9,7 +9,7 @@ import { createPinia, setActivePinia } from 'pinia';
 import { importReportMessage, normalizeFlowFile, useAgentFlow } from './useAgentFlow';
 import { downloadBlob } from '../exportFile';
 import { resetApiTokenForTest } from '../api/client';
-import type { AgentFlowConfig } from '../api/types';
+import type { AgentFlowConfig, FlowImportReport } from '../api/types';
 
 // 导出落盘在 jsdom 里无处可去(URL.createObjectURL 未实现),换成本地捕获:
 // 断言「导的是什么文件名、什么内容」才是本批的验收点。
@@ -205,6 +205,26 @@ describe('流程搬运 7a:文件归一', () => {
     expect(msg).toContain('1 个因 id 冲突分配了新 id');
     expect(msg).toContain('「调研」');
   });
+
+  it('导入报告文案(B 批 B4):有覆盖才出现「覆盖」与点名;无覆盖一字不提', () => {
+    const withReplaced = importReportMessage({
+      imported: 2,
+      skipped: 0,
+      renamed: [],
+      replaced: [{ id: 'f1', name: '调研流程' }],
+    });
+    expect(withReplaced).toContain('覆盖 1 个同 id 流程');
+    expect(withReplaced).toContain('「调研流程」');
+
+    // 空数组(缺省的 rename 路径):文案与改造前一致,不该多出「覆盖」二字
+    expect(importReportMessage({ imported: 2, skipped: 0, renamed: [], replaced: [] })).toBe(
+      '已导入 2 个流程',
+    );
+
+    // 旧服务端报告里没有 replaced 段:容缺读取,不报「导入失败」、也不出现覆盖文案
+    const legacyReport: FlowImportReport = JSON.parse('{"imported":1,"skipped":0,"renamed":[]}');
+    expect(importReportMessage(legacyReport)).toBe('已导入 1 个流程');
+  });
 });
 
 describe('流程搬运 7a:导入/导出接线', () => {
@@ -265,6 +285,70 @@ describe('流程搬运 7a:导入/导出接线', () => {
     await flow.onFlowImport(filePickEvent({ config: flowOf('', '悬空') }));
     expect(flow.flowMsg.value).toContain('导入失败');
     expect(flow.flowMsg.value).toContain('子流程不存在');
+  });
+
+  // ===== B 批 B4:导入「覆盖」模式(默认仍为新增改名)=====
+
+  it('未勾选覆盖:请求体不带 on_conflict(现状 rename),也不弹二次确认', async () => {
+    const api = mockApi([
+      {
+        url: '/api/agent-flows/import',
+        body: {
+          ok: true,
+          library: { current_flow_id: 'f1', flows: [flowOf('f1', '主')] },
+          report: { imported: 1, skipped: 0, renamed: [], replaced: [] },
+        },
+      },
+      {
+        url: '/api/agent-flows',
+        body: { ok: true, library: { current_flow_id: 'f1', flows: [flowOf('f1', '主')] }, config: null },
+      },
+    ]);
+    const confirm = vi.spyOn(window, 'confirm');
+    const flow = useAgentFlow();
+    expect(flow.flowImportReplace.value, '覆盖默认不勾选').toBe(false);
+    await flow.onFlowImport(filePickEvent({ config: flowOf('f1', '主') }));
+
+    const sent = JSON.parse(
+      api.bodies.find((b) => b.url.includes('/agent-flows/import'))?.body ?? '{}',
+    ) as Record<string, unknown>;
+    expect(sent).not.toHaveProperty('on_conflict');
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it('勾选覆盖:二次确认(讲清不可撤销)通过才带 on_conflict=replace;取消则一字不发', async () => {
+    const api = mockApi([
+      {
+        url: '/api/agent-flows/import',
+        body: {
+          ok: true,
+          library: { current_flow_id: 'f1', flows: [flowOf('f1', '主')] },
+          report: { imported: 1, skipped: 0, renamed: [], replaced: [{ id: 'f1', name: '主' }] },
+        },
+      },
+      {
+        url: '/api/agent-flows',
+        body: { ok: true, library: { current_flow_id: 'f1', flows: [flowOf('f1', '主')] }, config: null },
+      },
+    ]);
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const flow = useAgentFlow();
+    flow.flowImportReplace.value = true;
+
+    // 不可逆动作:先问一次;取消 = 库一字不动,且不会卡在「导入中」
+    await flow.onFlowImport(filePickEvent({ config: flowOf('f1', '主') }));
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(String(confirm.mock.calls[0][0])).toContain('无法撤销');
+    expect(api.urls.some((u) => u.includes('/agent-flows/import'))).toBe(false);
+    expect(flow.flowImporting.value).toBe(false);
+
+    // 确认后才真的导入:请求体带 replace,报告文案含覆盖
+    confirm.mockReturnValue(true);
+    await flow.onFlowImport(filePickEvent({ config: flowOf('f1', '主') }));
+    const posts = api.bodies.filter((b) => b.url.includes('/agent-flows/import'));
+    expect(posts).toHaveLength(1);
+    expect(JSON.parse(posts[0].body ?? '{}')).toMatchObject({ on_conflict: 'replace' });
+    expect(flow.flowMsg.value).toContain('覆盖 1 个同 id 流程');
   });
 
   it('导出当前流程:走搬运包端点(带 id),文件名与提示含子流程数', async () => {

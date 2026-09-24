@@ -346,12 +346,15 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
   /**
    * 导入搬运包(二维批次 7a):只新增(同内容跳过 / 同 id 异内容分配新 id),
    * 服务端校验在候选库上一次性完成——失败抛错且**本库不变**。返回报告供调用方提示。
+   * B 批 B4:`onConflict='replace'` 走**覆盖**模式(覆盖同 id 且内容不同的那份,
+   * 不可逆;UI 侧负责二次确认),缺省 = 现状 rename。
    */
   async function importAgentFlows(
     flows: api.AgentFlowConfig[],
     rootId?: string,
+    onConflict?: api.FlowImportConflict,
   ): Promise<api.FlowImportReport> {
-    const { library, report } = await api.importAgentFlows(flows, rootId);
+    const { library, report } = await api.importAgentFlows(flows, rootId, onConflict);
     agentFlowLibrary.value = library;
     return report;
   }

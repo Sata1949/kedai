@@ -718,6 +718,28 @@ export const useTaskStore = defineStore('app.task', () => {
     await loadTaskDetail(id);
   }
 
+  /**
+   * 改绑自定义流程(B 批 B3;仅 custom 模式且非进行中任务,其余由后端 400 拦下,
+   * 错误原文(点名原因)原样抛给调用方显示)。
+   *
+   * `flowId` / `flowIds` 是**全量替换**语义(`null` = 跟随当前流程,`[]` = 强制模式干净名单),
+   * 故一律显式传给 `api.bindTask`,不做「仅非空下发」的省略——省掉就表达不出「解绑/清空」。
+   *
+   * 成功后**本地就地更新**列表项与当前任务详情做即时反馈:SSE 的 `flow_bound` 事件同样会
+   * 触发刷新,但事件流断开时用户不该看到「点了保存界面没反应」。
+   * 快照(`flow_snapshot`)已被后端**重新冻结**,本地那份必然过期,故显式置空:徽标与流程名
+   * 随即回退到当前流程库(改绑后的编排正是库里的那份),好过继续用旧快照错标;权威快照由
+   * 随后的 flow_bound 刷新(或列表兜底轮询)补上。
+   */
+  async function bindTask(id: string, flowId: string | null, flowIds: string[]): Promise<void> {
+    const task = await api.bindTask(id, flowId, flowIds);
+    tasks.value = tasks.value.map((t) => (t.id === id ? task : t));
+    listSignature = contentSignature(tasks.value); // 同步签名(下次事件刷新同内容时不再替换)
+    if (currentTask.value?.task.id === id) {
+      currentTask.value = { ...currentTask.value, task, flow_snapshot: null };
+    }
+  }
+
   /** 批准计划(plan 模式):plan 可选(修改后批准),execMode 可选(本次执行方式,
    *  缺省 approved_plan = 按计划逐步执行);成功后刷新该任务详情 */
   async function approveTask(
@@ -791,6 +813,7 @@ export const useTaskStore = defineStore('app.task', () => {
     loadTaskDetail,
     runTask,
     stopTask,
+    bindTask,
     approveTask,
     followupTask,
     planChatTask,

@@ -103,6 +103,7 @@ export const useAppStore = defineStore('app', () => {
     loadTaskDetail: task.loadTaskDetail,
     runTask: task.runTask,
     stopTask: task.stopTask,
+    bindTask: task.bindTask,
     approveTask: task.approveTask,
     followupTask: task.followupTask,
     planChatTask: task.planChatTask,

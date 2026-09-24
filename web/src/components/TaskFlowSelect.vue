@@ -18,6 +18,12 @@ import { computed, onMounted, watch } from 'vue';
 import { storeToRefs } from 'pinia';
 import { useAppStore } from '../store';
 import { FLOW_MODE_OPTION_LABELS, FLOW_MODE_ORDER } from '../api/labels';
+import {
+  flowCandidates,
+  staleMembers,
+  usableCandidates,
+  type FlowCandidate,
+} from '../utils/flowCandidates';
 
 const store = useAppStore();
 const { taskRunMode, taskFlowId, taskFlowMode, taskFlowIds, agentFlowLibrary } =
@@ -47,39 +53,11 @@ const staleId = computed(() => {
  */
 const rootId = computed(() => taskFlowId.value || agentFlowLibrary.value?.current_flow_id || '');
 
-/** 勾选行:启用的库内流程(根流程禁用)+ 已失效的持久化项(可取消勾选) */
-interface Candidate {
-  id: string;
-  label: string;
-  disabled: boolean;
-  stale: boolean;
-}
-const candidates = computed<Candidate[]>(() => {
-  const out: Candidate[] = [];
-  for (const f of flows.value) {
-    // 库内流程的 id 由后端分配(TaskSend 类型标 optional,故这里显式挡一次脏数据)
-    const id = f.id ?? '';
-    if (!id) continue;
-    const name = f.name || id;
-    if (id === rootId.value) {
-      out.push({ id, label: `${name}(根流程,不可调用)`, disabled: true, stale: false });
-      continue;
-    }
-    out.push({
-      id,
-      label: f.enabled ? name : `${name}(已停用)`,
-      disabled: !f.enabled,
-      stale: false,
-    });
-  }
-  // 持久化名单里库里已不存在的 id:如实展示并允许取消勾选(否则创建必被后端 400)
-  for (const id of taskFlowIds.value) {
-    if (!flows.value.some((f) => f.id === id)) {
-      out.push({ id, label: `(已失效) ${id}`, disabled: false, stale: true });
-    }
-  }
-  return out;
-});
+/** 勾选行:启用的库内流程(根流程禁用)+ 已失效的持久化项(可取消勾选)。
+ *  判定与任务改绑的入选区**共用同一实现**(utils/flowCandidates),不各写一份 */
+const candidates = computed<FlowCandidate[]>(() =>
+  flowCandidates(flows.value, rootId.value, taskFlowIds.value),
+);
 
 /** 勾选态(数组顺序 = 用户勾选顺序,后端工具描述按此列举) */
 function isChecked(id: string): boolean {
@@ -96,9 +74,9 @@ function onToggle(id: string, ev: Event): void {
 /** 名单即时警示(后端为准;这里只把「一定会 400」的两种情形提前说清楚) */
 const listWarning = computed(() => {
   if (!flows.value.length) return '流程库为空:请先在设置里添加并启用流程。';
-  const usable = candidates.value.filter((c) => !c.disabled && !c.stale).length;
-  if (usable === 0) return '没有可勾选的流程(全部停用或只有根流程):对比模式至少需要一个可调用流程。';
-  if (taskFlowIds.value.some((id) => candidates.value.some((c) => c.id === id && c.stale)))
+  if (usableCandidates(candidates.value) === 0)
+    return '没有可勾选的流程(全部停用或只有根流程):对比模式至少需要一个可调用流程。';
+  if (staleMembers(candidates.value, taskFlowIds.value).length > 0)
     return '名单里有已失效的流程,请取消勾选后再创建。';
   if (taskFlowIds.value.length === 0)
     return '名单为空:对比模式需要至少勾选一个可调用流程,否则创建会被拒绝。';

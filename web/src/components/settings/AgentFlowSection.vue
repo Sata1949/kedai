@@ -56,7 +56,7 @@ const props = withDefaults(defineProps<{
 
 const {
   flowDraft, flowSaving, flowMsg, editingStepId, dragStepId, flowId, flowName, flowDesc,
-  flowImportInput, flowImporting, flowLibFlows,
+  flowImportInput, flowImporting, flowImportReplace, flowLibFlows,
   loadFlowConfig, onFlowSelect, newFlow, duplicateFlow, deleteFlowNow, onFlowImport,
   exportFlowNow, exportAllFlows, saveFlowNow, addStep, removeStep, moveStep, onStepActionChange,
   onStepDragStart, onStepDragOver, onStepDrop, onStepDragEnd,
@@ -143,6 +143,17 @@ onMounted(async () => {
           导出全部流程
         </button>
       </div>
+      <!-- 导入的冲突处理(B 批 B4):默认**不勾选**(导入 = 新增副本 + 分配新 id,现状)。
+           勾选后走覆盖模式:同 id 且内容不同的那份被替换(id 不变、引用不破),
+           属不可逆动作,故导入前还会二次确认(见 useAgentFlow.onFlowImport)。 -->
+      <label class="flex items-center gap-2 w-fit cursor-pointer text-[13px]" for="flow-import-replace-box">
+        <input id="flow-import-replace-box" v-model="flowImportReplace" type="checkbox" />
+        <span>覆盖同名流程(同 id 内容不同时替换本机那份)</span>
+      </label>
+      <p v-if="flowImportReplace" class="sv-note flow-tool-warn">
+        覆盖不可撤销:导入时会替换本机同 id 的流程(id 不变、引用不破),本机其它流程不受影响;
+        同一份内容重复导入仍会跳过。
+      </p>
       <div class="sv-note">
         导出会带上该流程挂载的子流程(缺了它们,导入方必然报「引用的子流程不存在」);
         导出文件不含 API 连接与密钥,节点上的连接引用跨机后需重选。

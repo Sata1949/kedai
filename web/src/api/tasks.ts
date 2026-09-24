@@ -1,6 +1,6 @@
-// 任务模式 API:任务 CRUD + 执行/停止 + 任务事件 SSE 订阅(WP5)。
+// 任务模式 API:任务 CRUD + 执行/停止 + 流程改绑 + 任务事件 SSE 订阅(WP5)。
 // 后端契约:GET /api/tasks → { tasks };POST /api/tasks → { ok, task };
-// GET /api/tasks/{id} → { task, subtasks };POST /api/tasks/{id}/run | /stop;
+// GET /api/tasks/{id} → { task, subtasks };POST /api/tasks/{id}/run | /stop | /bind;
 // DELETE /api/tasks/{id} → 204;GET /api/tasks/events → SSE(KeepAlive 30s)。
 import { BASE, authorizedFetch, request } from './client';
 import { requireArrayField, requireObjectField } from './shape';
@@ -54,6 +54,31 @@ export async function createTask(
       // 逐任务选用连接:仅非空时下发(空 = 跟随设置的默认连接,与 B 批之前逐字节一致)
       ...(connectionId ? { connection_id: connectionId } : {}),
     }),
+  });
+  return requireObjectField<TaskRecord>(data, 'task', '任务');
+}
+
+/**
+ * 改绑自定义流程(B 批 B3;仅 custom 模式任务可用)。
+ *
+ * **全量替换**语义——与 createTask 的「仅非空下发」口径**相反**,两个键都必须显式下发:
+ *  - `flowId: null` = 跟随当前流程(解绑);
+ *  - `flowIds: []` = 强制模式(清空名单)。
+ * 省略任一键,后端都无法区分「不改」与「清空」,故这里不做任何省略处理。
+ *
+ * 语义 = **重新冻结快照**(`flow_snapshot` 换成新流程的闭包);历史 plan 行不动,
+ * 其编排徽标按新快照解析(对不上就不显示,沿用 IFW-5 口径)。
+ * 非 custom 模式 / `planning|running|planned` 态 / 名单成员不存在或未启用 → 400
+ * (中文文案点名原因),且库不变。
+ */
+export async function bindTask(
+  id: string,
+  flowId: string | null,
+  flowIds: string[],
+): Promise<TaskRecord> {
+  const data = await request<unknown>(`/tasks/${encodeURIComponent(id)}/bind`, {
+    method: 'POST',
+    body: JSON.stringify({ flow_id: flowId, flow_ids: flowIds }),
   });
   return requireObjectField<TaskRecord>(data, 'task', '任务');
 }

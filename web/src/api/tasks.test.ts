@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   approveTask,
+  bindTask,
   createTask,
   deleteTask,
   followupTask,
@@ -69,6 +70,18 @@ describe('api/tasks REST 封装', () => {
       if (url.endsWith('/api/tasks/t1/stop') && method === 'POST') return json({ ok: true });
       if (url.endsWith('/api/tasks/t1/approve') && method === 'POST') return json({ ok: true });
       if (url.endsWith('/api/tasks/t1/followup') && method === 'POST') return json({ ok: true });
+      if (url.endsWith('/api/tasks/t1/bind') && method === 'POST') {
+        return json({
+          ok: true,
+          task: {
+            id: 't1', title: 'x', status: 'pending', plan: [], result: '', error: '',
+            task_mode: 'custom', created_at: '', updated_at: '',
+          },
+        });
+      }
+      if (url.endsWith('/api/tasks/a%2Fb/bind') && method === 'POST') {
+        return json({ ok: true, task: { id: 'a/b', title: 'x', status: 'pending', plan: [], result: '', error: '', created_at: '', updated_at: '' } });
+      }
       if (url.endsWith('/api/tasks/t1/plan-chat') && method === 'POST') {
         return json({ ok: true, plan: [{ name: '修订步骤甲', goal: '修订目标甲', status: 'pending', result: '' }] });
       }
@@ -217,6 +230,38 @@ describe('api/tasks REST 封装', () => {
       task_mode: 'solo',
       connection_id: 'conn-b',
     });
+  });
+
+  it('bindTask:POST /tasks/{id}/bind,flow_id 与 flow_ids 全量显式下发(B 批 B3)', async () => {
+    /** 取最后一次 bind 的请求体(同一用例内多次调用,find 只命中第一次) */
+    const lastBindBody = (): Record<string, unknown> => {
+      const posts = vi.mocked(fetch).mock.calls.filter(
+        ([input, init]) => String(input).includes('/bind') && (init?.method ?? 'GET') === 'POST',
+      );
+      return JSON.parse(String(posts[posts.length - 1]?.[1]?.body)) as Record<string, unknown>;
+    };
+
+    // 解绑 + 清空名单:两个键都必须**出现**——与 createTask 的「仅非空下发」口径相反,
+    // 省掉它们后端无法区分「不改」与「清空」,「跟随当前流程 / 强制模式」就表达不出来
+    await bindTask('t1', null, []);
+    expect(lastBindBody()).toEqual({ flow_id: null, flow_ids: [] });
+
+    // 绑定 + 保名单:原样下发,顺序保持(后端工具描述按名单顺序列举)
+    await bindTask('t1', 'flow-b', ['f-2', 'f-1']);
+    expect(lastBindBody()).toEqual({ flow_id: 'flow-b', flow_ids: ['f-2', 'f-1'] });
+
+    // 保留绑定、只清名单(另一侧的组合:根流程在,强制模式)
+    await bindTask('t1', 'flow-b', []);
+    expect(lastBindBody()).toEqual({ flow_id: 'flow-b', flow_ids: [] });
+
+    // 返回体取 task 字段(调用方据此就地更新列表与当前任务详情,不另发一次 GET)
+    const task = await bindTask('t1', 'flow-b', []);
+    expect(task.id).toBe('t1');
+
+    // id 含特殊字符时路径必须转义
+    await bindTask('a/b', null, []);
+    const urls = vi.mocked(fetch).mock.calls.map(([input]) => String(input));
+    expect(urls).toContain('/api/tasks/a%2Fb/bind');
   });
 
   it('approveTask:POST /tasks/{id}/approve;不给 plan 时空体,给了 plan 则带 plan 字段', async () => {
@@ -457,5 +502,12 @@ describe('api/tasks 形状闸门', () => {
       .mockResolvedValueOnce(json({ token: 't' }))
       .mockResolvedValueOnce(json({ ok: true }));
     await expect(getTaskCalls('t1')).rejects.toThrow('任务调用记录响应格式异常');
+  });
+
+  it('POST /tasks/:id/bind 缺 task 对象时抛错(不把 undefined 带进 store)', async () => {
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(json({ token: 't' }))
+      .mockResolvedValueOnce(json({ ok: true }));
+    await expect(bindTask('t1', null, [])).rejects.toThrow('任务响应格式异常');
   });
 });

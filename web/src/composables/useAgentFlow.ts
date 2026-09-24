@@ -33,6 +33,19 @@ export const UNSAVED_EXPORT_HINT =
   '有未保存的修改:导出的是**已保存**的版本(不含当前编辑)。要继续吗?\n(先点「保存执行流程」即导出最新版)';
 
 /**
+ * **覆盖模式**导入的二次确认文案(B 批 B4;覆盖不可逆,故每次导入前都问一遍)。
+ * 说清三件事:只动同 id 的那几份、id 不变引用不破、无法撤销——「本机其它流程不动」
+ * 一并写明,否则用户会以为整库被替换。
+ */
+export function importReplaceHint(count: number): string {
+  return (
+    `本次将导入 ${count} 个流程,并开启「覆盖同名流程」。\n` +
+    '与本机同 id 且内容不同的流程会被替换(id 不变,引用不会断),该操作无法撤销;\n' +
+    '本机其它流程不受影响。确定继续吗?'
+  );
+}
+
+/**
  * 归一流程文件 → 待导入的 flows[](+ 可选入口 root_id)。
  *
  * 支持四种形状(旧文件必须继续能导,新增的搬运包才有版本键):
@@ -81,13 +94,20 @@ export function normalizeFlowFile(raw: unknown): {
   return { flows: [single] };
 }
 
-/** 导入报告 → 用户文案(导入 N / 跳过 M / 其中 K 个分配了新 id) */
+/** 导入报告 → 用户文案(导入 N / 跳过 M / 其中 K 个分配了新 id / 覆盖 J 个) */
 export function importReportMessage(report: api.FlowImportReport): string {
   const parts = [`已导入 ${report.imported} 个流程`];
   if (report.skipped > 0) parts.push(`跳过 ${report.skipped} 个(内容已存在)`);
   if (report.renamed.length > 0) {
     const names = report.renamed.map((r) => `「${r.name || r.old_id}」`).join('、');
     parts.push(`${report.renamed.length} 个因 id 冲突分配了新 id:${names}`);
+  }
+  // 覆盖段(B 批 B4):仅 `on_conflict=replace` 才可能非空。容缺读取(replaced 缺失 =
+  // 旧服务端的报告,不给用户报「导入失败」),空数组则一字不出现(缺省的 rename 路径不变)
+  const replaced = report.replaced ?? [];
+  if (replaced.length > 0) {
+    const names = replaced.map((r) => `「${r.name || r.id}」`).join('、');
+    parts.push(`覆盖 ${replaced.length} 个同 id 流程(本机原有那份已被替换):${names}`);
   }
   return parts.join(';');
 }
@@ -114,6 +134,12 @@ export function useAgentFlow() {
   const flowDesc = ref('');
   const flowImportInput = ref<HTMLInputElement | null>(null);
   const flowImporting = ref(false);
+  /**
+   * 导入的**冲突处理**(B 批 B4):false(缺省)= 现状「新增副本 + 分配新 id」;
+   * true = 覆盖本机同 id 那份(不可逆,故 onFlowImport 里每次导入前二次确认)。
+   * 默认**不勾选**:覆盖会替换本机既有流程,绝不能是一个「顺手就带上」的默认项。
+   */
+  const flowImportReplace = ref(false);
 
   /** 流程库全部流程(选择器选项) */
   const flowLibFlows = computed(() => store.agentFlowLibrary?.flows ?? []);
@@ -208,7 +234,9 @@ export function useAgentFlow() {
 
   /** 导入流程 JSON:支持单流程 {name,enabled,steps}、{config:{…}} 包装、库格式 {flows:[…]}
    *  与搬运包 {kedai_flow_bundle:1,…};归一为 flows[] 后**一次**请求导入(失败库不变)。
-   *  搬运包版本键不是 1 时明确拒绝(提示升级),不静默丢字段。 */
+   *  搬运包版本键不是 1 时明确拒绝(提示升级),不静默丢字段。
+   *  B 批 B4:勾选「覆盖同名流程」时以 `on_conflict=replace` 导入——覆盖**不可逆**,
+   *  故发请求前二次确认(取消 = 什么都不做,本库一字不动);未勾选则不下发该键(现状)。 */
   async function onFlowImport(e: Event): Promise<void> {
     const input = e.target as HTMLInputElement;
     const file = input.files?.[0];
@@ -219,7 +247,11 @@ export function useAgentFlow() {
     try {
       const raw = JSON.parse(await file.text()) as unknown;
       const { flows, rootId } = normalizeFlowFile(raw);
-      const report = await store.importAgentFlows(flows, rootId);
+      const onConflict: api.FlowImportConflict | undefined = flowImportReplace.value
+        ? 'replace'
+        : undefined;
+      if (onConflict && !window.confirm(importReplaceHint(flows.length))) return;
+      const report = await store.importAgentFlows(flows, rootId, onConflict);
       await loadFlowConfig();
       flowMsg.value = importReportMessage(report);
       setTimeout(() => (flowMsg.value = ''), 4000);
@@ -410,7 +442,7 @@ export function useAgentFlow() {
 
   return {
     flowDraft, flowSaving, flowMsg, editingStepId, dragStepId, flowId, flowName, flowDesc,
-    flowImportInput, flowImporting, flowLibFlows,
+    flowImportInput, flowImporting, flowImportReplace, flowLibFlows,
     loadFlowConfig, onFlowSelect, newFlow, duplicateFlow, deleteFlowNow, onFlowImport,
     exportFlowNow, exportAllFlows, saveFlowNow, addStep, removeStep, moveStep, onStepActionChange,
     onStepDragStart, onStepDragOver, onStepDrop, onStepDragEnd,
