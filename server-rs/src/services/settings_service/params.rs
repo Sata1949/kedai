@@ -82,6 +82,15 @@ pub struct ModeSettings {
     pub task_tool_allowlist: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tool_rounds: Option<u32>,
+    /// task 覆盖层的流程动态调用深度上限(A 批 A3;None 沿用扁平值)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_flow_call_depth: Option<u32>,
+    /// task 覆盖层的每任务流程调用次数上限(A 批 A3;None 沿用扁平值)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_flow_calls_per_task: Option<u32>,
+    /// task 覆盖层的「节点默认上下文上限」(A 批 A4;None 沿用扁平值,0 = 不裁剪)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_node_max_context: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub render_html: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -143,6 +152,27 @@ pub struct ModeSettings {
 /// 默认工具循环轮次上限
 pub(super) fn default_max_tool_rounds() -> u32 {
     32
+}
+
+/// 默认流程动态调用深度上限(A 批 A3 = 二维批次 7b 的 `MAX_FLOW_CALL_DEPTH`)。
+///
+/// 默认值直接取 `agent_flow_service` 的常量而非写字面量:那两个常量从此退居
+/// **缺省值与测试基准**,真源是本设置项,两边抄成两个数字必然漂移。
+pub(super) fn default_max_flow_call_depth() -> u32 {
+    crate::services::agent_flow_service::MAX_FLOW_CALL_DEPTH as u32
+}
+
+/// 默认每任务流程调用次数上限(A 批 A3 = 二维批次 7b 的 `MAX_FLOW_CALLS_PER_TASK`)。
+pub(super) fn default_max_flow_calls_per_task() -> u32 {
+    crate::services::agent_flow_service::MAX_FLOW_CALLS_PER_TASK as u32
+}
+
+/// 默认「节点默认上下文上限」(A 批 A4):**0 = 不裁剪**。
+///
+/// 缺省必须是关闭:批次 8 之前任务侧从不裁剪,给整个任务侧默认套上预算属于可观测的
+/// 行为变化(可能截断当前正常工作的长输入)。想要全局溢出保护的用户显式开启。
+pub(super) fn default_node_max_context() -> u32 {
+    0
 }
 
 /// 默认工具循环历史保留轮数(R3b):最近 4 轮完整,更早轮摘要化
@@ -425,6 +455,9 @@ impl RuntimeSettings {
             task_tool_policy: default_task_tool_policy(),
             task_tool_allowlist: Vec::new(),
             max_tool_rounds: default_max_tool_rounds(),
+            max_flow_call_depth: default_max_flow_call_depth(),
+            max_flow_calls_per_task: default_max_flow_calls_per_task(),
+            default_node_max_context: default_node_max_context(),
             tool_history_keep_rounds: default_tool_history_keep_rounds(),
             tool_history_budget_tokens: default_tool_history_budget_tokens(),
             session_token_budget: default_session_token_budget(),
@@ -541,6 +574,15 @@ impl RuntimeSettings {
         }
         if let Some(v) = ov.max_tool_rounds {
             out.max_tool_rounds = v;
+        }
+        if let Some(v) = ov.max_flow_call_depth {
+            out.max_flow_call_depth = v;
+        }
+        if let Some(v) = ov.max_flow_calls_per_task {
+            out.max_flow_calls_per_task = v;
+        }
+        if let Some(v) = ov.default_node_max_context {
+            out.default_node_max_context = v;
         }
         if let Some(v) = ov.render_html {
             out.render_html = v;

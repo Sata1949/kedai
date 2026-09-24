@@ -312,6 +312,26 @@ impl MockConnector {
             }
         }
 
+        // 测试钩子:[[empty_below:N|内容]] → **单次输出预算**(max_tokens)低于 N 时返回空内容
+        // (仅 Usage),否则回复「内容」。与 [[tool_raw:]] / [[trunc_text:]] 同属「按预算区分
+        // 轮次」的设计,但模拟的是**空产出重试**而非截断自愈:空产出重试会把预算翻倍
+        // (`utils::retry::doubled_heal_budget`),于是同一节点第一次空、第二次成功。
+        // 与 [[empty]] 的分工:后者是无条件空,只能测「重试用尽」。
+        if let Some((threshold, text)) = extract_empty_below_marker(&last_user) {
+            if params.max_tokens < threshold {
+                chunks.push(LlmStreamChunk::Usage {
+                    prompt_tokens: 3,
+                    completion_tokens: 0,
+                    total_tokens: 3,
+                    prompt_cache_hit_tokens: 0,
+                    prompt_cache_miss_tokens: 0,
+                    reasoning_tokens: 0,
+                });
+                return Ok(chunks);
+            }
+            return Ok(text_reply_chunks(text, messages));
+        }
+
         // 测试钩子:[[floors]] → 回显完整 LLM 消息序列(每行 `[角色] 内容`),
         // 供集成测试断言提示词注入结果:简单模式注入文本、楼层(含宏展开)与位置。
         if messages
@@ -667,6 +687,13 @@ fn extract_marker_pair(input: &str, marker: &str) -> Option<(String, String)> {
         return None;
     }
     Some((a.to_string(), b.to_string()))
+}
+
+/// 提取 [[empty_below:阈值|内容]] 标记;返回 (阈值, 内容)。阈值非数字/内容为空视为未命中。
+/// 「双段 + 首段是数字」故直接复用 [`extract_marker_pair`] 的解析,不另写一份截断逻辑。
+fn extract_empty_below_marker(input: &str) -> Option<(u32, String)> {
+    let (threshold, text) = extract_marker_pair(input, "[[empty_below:")?;
+    Some((threshold.parse().ok()?, text))
 }
 
 /// 提取 [[marker:内容]] 形式的单段标记(取到首个 "]]";空内容视为未命中)。

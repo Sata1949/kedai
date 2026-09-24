@@ -531,6 +531,20 @@ pub const MAX_TOOL_ROUNDS_LIMIT: u32 = 200;
 /// 会让它失去意义。更小的值也没有实用价值——节点输入至少含任务目标与省略标记。
 pub const MIN_STEP_MAX_CONTEXT: u32 = 256;
 pub const MAX_STEP_MAX_CONTEXT: u32 = 1_048_576;
+/// 节点级单次调用超时的取值范围(A 批 A1;单位秒)。
+///
+/// 下限 30s:再低会把「上游首字延迟本就数秒」的正常调用误判为超时;
+/// 上限 3600s:给慢上游留出比宿主缺省(300s)更宽的一档——若上限只到 300s,
+/// 该字段就只剩「收紧」一种用法,「宽/严节点混用时间预算」的诉求落不了地。
+pub const MIN_STEP_CALL_TIMEOUT_SECS: u32 = 30;
+pub const MAX_STEP_CALL_TIMEOUT_SECS: u32 = 3600;
+/// 节点级空产出重试次数的取值范围(A 批 A2;n = **额外**尝试上限,总尝试 = 1 + n)。
+///
+/// 上限 5 是成本闸:每次重试都是一次全量输入的重发,再高会让「一个坏节点」吃掉整个任务的
+/// 预算。下限取 1 而非 0——「不重试」已由「清空该字段」表达,再放一个 0 只会让同一语义
+/// 有两条路径(与 6a 裁定 17「不许存在但静默无效」同一纪律)。
+pub const MIN_STEP_MAX_RETRIES: u32 = 1;
+pub const MAX_STEP_MAX_RETRIES: u32 = 5;
 
 /// 流程搬运包(导出文件)的版本键与版本号(二维批次 7a)。
 ///
@@ -1083,6 +1097,25 @@ pub fn validate_flow(
                 ));
             }
         }
+        // 节点级单次调用超时 / 空产出重试(A 批):与既有节点级参数同一纪律——保存期只校验
+        // 区间,取值语义由执行器消费;挂载子流程的节点上两者都被旁路,但**不拒绝**配置保留
+        // (与「严格档保留工具配置」一致:清空 sub_flow_id 即生效)。
+        if let Some(t) = s.call_timeout_secs {
+            if !(MIN_STEP_CALL_TIMEOUT_SECS..=MAX_STEP_CALL_TIMEOUT_SECS).contains(&t) {
+                return Err(format!(
+                    "步骤「{}」单次调用超时需在 {}-{} 秒之间(当前 {})",
+                    s.name, MIN_STEP_CALL_TIMEOUT_SECS, MAX_STEP_CALL_TIMEOUT_SECS, t
+                ));
+            }
+        }
+        if let Some(n) = s.max_retries {
+            if !(MIN_STEP_MAX_RETRIES..=MAX_STEP_MAX_RETRIES).contains(&n) {
+                return Err(format!(
+                    "步骤「{}」空产出重试次数需在 {}-{} 之间(当前 {})",
+                    s.name, MIN_STEP_MAX_RETRIES, MAX_STEP_MAX_RETRIES, n
+                ));
+            }
+        }
         if s.goal.trim().is_empty() {
             return Err(format!("步骤「{}」缺少目标说明", s.name));
         }
@@ -1163,6 +1196,23 @@ pub const MAX_FLOW_CALL_DEPTH: usize = 2;
 /// 计数在进程内、按任务、随本轮执行从零开始(重跑重新计数);超限的调用在**任何模型
 /// 调用之前**就被拒绝,不烧 token。
 pub const MAX_FLOW_CALLS_PER_TASK: usize = 8;
+
+// ==================== 调用闸的可配置区间(A 批 A3) ====================
+//
+// 上面两个常量从此**退居缺省值与测试基准**:真源是任务侧设置项
+// `max_flow_call_depth` / `max_flow_calls_per_task`(见 `settings_service::params`),
+// 消费点在 `task_engine/flow_call.rs`(读 `ctx.settings`,不再读常量)。
+// 区间上限刻意保守:两条都是**成本**闸,调大等于允许更长的模型自主链。
+
+/// 动态调用深度上限的可配区间(1..=5):上限 5 给「深链编排」留余量,
+/// 但不放开到无界——每加一层,单次语义的调用次数按子图规模相乘。
+pub const MIN_FLOW_CALL_DEPTH: u32 = 1;
+pub const MAX_FLOW_CALL_DEPTH_LIMIT: u32 = 5;
+
+/// 每任务动态调用次数上限的可配区间(1..=64):64 = 缺省值 8 的 8 倍,
+/// 够跑「一次任务里逐项处理十来个条目」这类用法,又仍是一个有限上界。
+pub const MIN_FLOW_CALLS_PER_TASK: u32 = 1;
+pub const MAX_FLOW_CALLS_PER_TASK_LIMIT: u32 = 64;
 
 /// 流程展示名(命名为空时回退 id;错误文案与 plan 前缀都用它)
 pub fn flow_label(cfg: &AgentFlowConfig) -> String {

@@ -151,6 +151,18 @@ fn call_watchdog_for(session_id: &str) -> Option<std::time::Duration> {
         .then_some(TASK_TOOL_LOOP_CALL_TIMEOUT)
 }
 
+/// 单次调用看门狗的最终取值(A 批 A1):**节点级覆盖优先**,缺省回落上面那条既有判定。
+///
+/// 抽成纯函数的原因与 `call_watchdog_for` 相同——生产阈值是 300s(或节点配的 30~3600s),
+/// 不可能在测试里真等,故把「取哪个值」与「等多久」分开锁:单测锁取值,引擎侧只按值包超时。
+/// 覆盖**同时具备收紧与放宽两种用法**(60s 的严节点 / 900s 的慢节点),故不是 `min` 语义。
+fn resolve_call_watchdog(
+    session_id: &str,
+    call_timeout: Option<std::time::Duration>,
+) -> Option<std::time::Duration> {
+    call_timeout.or_else(|| call_watchdog_for(session_id))
+}
+
 /// 流式执行 LLM 生成(与 Node 版 executor.ts executeGeneration 对齐)
 /// pub(crate):任务引擎 custom 模式(批次 4.3b)按步骤直调;聊天路径行为不变。
 #[allow(clippy::too_many_arguments)]
@@ -565,6 +577,10 @@ pub(crate) async fn run_tool_loop(
     run_id: &str,
     // 授权闸门(替代 step_whitelist):见 ToolGate 文档
     gate: ToolGate<'_>,
+    // 单次调用超时覆盖(A 批 A1):None = 用 call_watchdog_for 的既有判定(行为不变);
+    // Some = 该节点每次调用的时间预算(可收紧也可放宽),唯一来源是自定义流程节点的
+    // `call_timeout_secs`。放在末位是为了让既有 5 个调用点只在传值处改动。
+    call_timeout: Option<std::time::Duration>,
 ) -> Result<ExecutorResult, EngineError> {
     // 轮次上限:缺省 32(settings 可调);至少 1 轮,防止配置异常导致死循环
     let max_rounds = params.max_tool_rounds.unwrap_or(32).max(1) as usize;
@@ -578,7 +594,8 @@ pub(crate) async fn run_tool_loop(
     let mut loop_guard = crate::utils::loop_guard::LoopGuard::with_defaults();
     // 单次调用总时长看门狗(2026-09-18):仅任务模式启用(见 call_watchdog_for 文档)。
     // 聊天路径保持无总时长上限——长回复是正常形态,加限会误伤。
-    let call_watchdog = call_watchdog_for(session_id);
+    // A 批 A1:节点级覆盖优先(自定义流程节点的 `call_timeout_secs`),缺省回落既有判定。
+    let call_watchdog = resolve_call_watchdog(session_id, call_timeout);
     // token 预算(HB-1):循环前取一次设置快照(与上面工具历史裁剪同款口径,
     // 不留锁跨 await);0 = 关闭。budget_noticed 保证 warn 档只提示一次。
     let (token_budget, budget_action, semantic_window, semantic_min_calls, semantic_max_distinct) = {
@@ -1747,7 +1764,10 @@ mod tests {
 
 #[cfg(test)]
 mod watchdog_tests {
-    use super::{call_watchdog_for, with_call_watchdog, EngineError, TASK_TOOL_LOOP_CALL_TIMEOUT};
+    use super::{
+        call_watchdog_for, resolve_call_watchdog, with_call_watchdog, EngineError,
+        TASK_TOOL_LOOP_CALL_TIMEOUT,
+    };
     use std::time::Duration;
 
     /// 任务模式虚拟 session(`task:` 前缀)必须启用总时长看门狗——这是「任务无限停在
@@ -1773,6 +1793,40 @@ mod watchdog_tests {
         assert_eq!(call_watchdog_for(""), None);
         // 边界:仅前缀匹配,含 task 但不以其开头的不算
         assert_eq!(call_watchdog_for("mytask:1"), None);
+    }
+
+    /// 节点级覆盖(A 批 A1):配了就必须**原样照用**——收紧(60s)与放宽(900s)都是合法用法,
+    /// 故实现不能写成 `min(覆盖, 缺省)`,否则「给慢节点放宽」这条诉求会被静默吃掉。
+    #[test]
+    fn node_call_timeout_overrides_default() {
+        let tight = Duration::from_secs(60);
+        let loose = Duration::from_secs(900);
+        assert_eq!(
+            resolve_call_watchdog("task:t1", Some(tight)),
+            Some(tight),
+            "任务会话:节点级覆盖优先于既有 300s"
+        );
+        assert_eq!(
+            resolve_call_watchdog("task:t1", Some(loose)),
+            Some(loose),
+            "放宽用法同样生效(不是 min 语义)"
+        );
+        assert_eq!(
+            resolve_call_watchdog("session-1", Some(tight)),
+            Some(tight),
+            "聊天会话:节点级覆盖也照用(该字段只由任务侧 PlanStep 提供,聊天侧恒为 None)"
+        );
+    }
+
+    /// 未配覆盖时逐字节维持既有判定(任务会话 300s / 聊天会话无上限)。
+    #[test]
+    fn absent_node_call_timeout_keeps_default() {
+        assert_eq!(
+            resolve_call_watchdog("task:t1", None),
+            Some(TASK_TOOL_LOOP_CALL_TIMEOUT)
+        );
+        assert_eq!(resolve_call_watchdog("session-1", None), None);
+        assert_eq!(resolve_call_watchdog("", None), None);
     }
 
     /// 未超时:结果原样透出,错误路径不受影响。

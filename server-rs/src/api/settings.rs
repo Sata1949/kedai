@@ -2,6 +2,10 @@
 use crate::api::app_state::AppState;
 use crate::api::json_body::JsonBody;
 use crate::api::{err_with_code, internal, not_found, validation, ErrorCode};
+use crate::services::agent_flow_service::{
+    MAX_FLOW_CALLS_PER_TASK_LIMIT, MAX_FLOW_CALL_DEPTH_LIMIT, MIN_FLOW_CALLS_PER_TASK,
+    MIN_FLOW_CALL_DEPTH,
+};
 use crate::services::settings_service::{
     normalize_base_url, resolve_connector_target, AppMode, ConnectionProfile, McpServerConfig,
     RuntimeSettings, CONNECTOR_TYPE_MOCK, CONNECTOR_TYPE_OPENAI, DEFAULT_SEARCH_ENDPOINT,
@@ -101,6 +105,15 @@ pub struct UpdateSettingsBody {
     /// AGENT/CUSTOM 模式工具循环轮次上限(1..=200;缺省保持不变)
     #[serde(default)]
     pub max_tool_rounds: Option<u32>,
+    /// 流程动态调用深度上限(A 批 A3;1..=5)
+    #[serde(default)]
+    pub max_flow_call_depth: Option<u32>,
+    /// 每任务流程调用次数上限(A 批 A3;1..=64)
+    #[serde(default)]
+    pub max_flow_calls_per_task: Option<u32>,
+    /// 节点默认上下文上限(A 批 A4;0 = 不裁剪,否则 256..=1048576)
+    #[serde(default)]
+    pub default_node_max_context: Option<u32>,
     /// HTML 渲染开关(状态栏脚本执行前置条件)
     #[serde(default)]
     pub render_html: Option<bool>,
@@ -266,6 +279,9 @@ fn settings_json(s: &RuntimeSettings) -> Value {
         "task_tool_policy": s.task_tool_policy,
         "task_tool_allowlist": s.task_tool_allowlist,
         "max_tool_rounds": s.max_tool_rounds,
+        "max_flow_call_depth": s.max_flow_call_depth,
+        "max_flow_calls_per_task": s.max_flow_calls_per_task,
+        "default_node_max_context": s.default_node_max_context,
         "render_html": s.render_html,
         "compaction_mode": s.compaction_mode,
         "compaction_threshold": s.compaction_threshold,
@@ -637,6 +653,32 @@ pub async fn update_settings(
                     return validation("max_tool_rounds 必须在 1..=200");
                 }
                 apply!(s, is_task, max_tool_rounds, v);
+            }
+            // 流程调用闸(A 批 A3):动态调用深度与每任务调用次数。
+            // 上限刻意保守——两条都是**成本**闸,调大等于允许更长的模型自主链。
+            if let Some(v) = body.max_flow_call_depth {
+                if !(MIN_FLOW_CALL_DEPTH..=MAX_FLOW_CALL_DEPTH_LIMIT).contains(&v) {
+                    return validation("max_flow_call_depth 必须在 1..=5");
+                }
+                apply!(s, is_task, max_flow_call_depth, v);
+            }
+            if let Some(v) = body.max_flow_calls_per_task {
+                if !(MIN_FLOW_CALLS_PER_TASK..=MAX_FLOW_CALLS_PER_TASK_LIMIT).contains(&v) {
+                    return validation("max_flow_calls_per_task 必须在 1..=64");
+                }
+                apply!(s, is_task, max_flow_calls_per_task, v);
+            }
+            // 节点默认上下文上限(A 批 A4):0 = 不裁剪;非 0 时与节点级字段同口径
+            // (下限 256 的理由见 `agent_flow_service::MIN_STEP_MAX_CONTEXT`)。
+            if let Some(v) = body.default_node_max_context {
+                let ok = v == 0
+                    || (crate::services::agent_flow_service::MIN_STEP_MAX_CONTEXT
+                        ..=crate::services::agent_flow_service::MAX_STEP_MAX_CONTEXT)
+                        .contains(&v);
+                if !ok {
+                    return validation("default_node_max_context 必须为 0(不裁剪)或 256..=1048576");
+                }
+                apply!(s, is_task, default_node_max_context, v);
             }
             // HTML 渲染开关
             if let Some(v) = body.render_html {

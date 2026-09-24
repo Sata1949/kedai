@@ -531,6 +531,8 @@ impl AgentEngine {
                     rctx.total_usage,
                     &run_id.to_string(),
                     gate,
+                    // 聊天路径无节点级超时(A 批 A1):恒走宿主既有判定(聊天侧本无总时长上限)
+                    None,
                 )
                 .await?
             } else if req.mode == "custom" {
@@ -573,6 +575,9 @@ impl AgentEngine {
                         rctx.total_usage,
                         &run_id.to_string(),
                         gate,
+                        // 聊天 custom 步骤无节点级超时(A 批 A1:该字段只服务任务侧的
+                        // `PlanStep`);恒走宿主既有判定
+                        None,
                     )
                     .await?
                 };

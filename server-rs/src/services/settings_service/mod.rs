@@ -37,11 +37,12 @@ use params::{
     default_authorization_mode, default_bypass_blacklist, default_compaction_keep_recent,
     default_compaction_mode, default_compaction_snip_bytes, default_compaction_threshold,
     default_loop_guard_semantic_max_distinct, default_loop_guard_semantic_min_calls,
-    default_loop_guard_semantic_window, default_max_tool_rounds, default_memory_inject_char_budget,
-    default_memory_inject_limit, default_memory_max_entries, default_session_budget_action,
-    default_session_token_budget, default_skill_progressive_disclosure,
-    default_subagent_max_concurrency, default_subagent_max_depth,
-    default_subagent_result_max_chars, default_task_tool_policy,
+    default_loop_guard_semantic_window, default_max_flow_call_depth,
+    default_max_flow_calls_per_task, default_max_tool_rounds, default_memory_inject_char_budget,
+    default_memory_inject_limit, default_memory_max_entries, default_node_max_context,
+    default_session_budget_action, default_session_token_budget,
+    default_skill_progressive_disclosure, default_subagent_max_concurrency,
+    default_subagent_max_depth, default_subagent_result_max_chars, default_task_tool_policy,
     default_tool_authorization_timeout_secs, default_tool_history_budget_tokens,
     default_tool_history_keep_rounds, default_undo_enabled, default_user_role,
 };
@@ -164,6 +165,22 @@ pub struct RuntimeSettings {
     /// 达到上限后停止调用工具并输出当前结果)
     #[serde(default = "default_max_tool_rounds")]
     pub max_tool_rounds: u32,
+    /// 流程**动态调用**的嵌套深度上限(A 批 A3;默认 2,钳 1..=5)。
+    ///
+    /// 口径同 7b:只对「宽松档节点调 `run_flow`」生效;静态子图(`sub_flow_id`)与注册期
+    /// 的嵌套校验仍按 `MAX_SUB_FLOW_DEPTH = 3`(那是**结构**上限,不是运行期成本闸)。
+    #[serde(default = "default_max_flow_call_depth")]
+    pub max_flow_call_depth: u32,
+    /// 单个任务内的流程调用**次数**上限(A 批 A3;默认 8,钳 1..=64)。
+    #[serde(default = "default_max_flow_calls_per_task")]
+    pub max_flow_calls_per_task: u32,
+    /// 节点默认上下文上限(A 批 A4;默认 **0 = 不裁剪**,否则钳 256..=1048576)。
+    ///
+    /// 与节点级 `PlanStep.max_context` 的关系:节点值优先,缺省才用本设置;两者皆空
+    /// 即与批次 8 之前逐字节一致。缺省关闭是刻意的——默认套预算会截断当前正常工作的
+    /// 长输入,属可观测的行为变化(见 `计划.md` 裁定 26 口径 2)。
+    #[serde(default = "default_node_max_context")]
+    pub default_node_max_context: u32,
     /// 工具循环历史保留的最近完整轮数(R3b;默认 4,钳 1..=32):
     /// 超出后最老轮的 tool 结果原地替换为短摘要(配对不破坏),防止全量回灌无界膨胀
     #[serde(default = "default_tool_history_keep_rounds")]

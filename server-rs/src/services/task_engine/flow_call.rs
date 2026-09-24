@@ -7,12 +7,13 @@
 //
 // 三道闸(缺一条就是烧钱事故,计划 §四 7b 改动点 5):
 //   ① 调用链环检测(A 调 B、B 调 A:图内环检测挡不住跨流程环);
-//   ② 动态嵌套深度([`MAX_FLOW_CALL_DEPTH`],与静态子图深度**独立**计数);
-//   ③ 每任务调用预算([`MAX_FLOW_CALLS_PER_TASK`],拦「串行地反复调用同一套流程」)。
+//   ② 动态嵌套深度(缺省 `MAX_FLOW_CALL_DEPTH`,A 批 A3 起可配;与静态子图深度**独立**计数);
+//   ③ 每任务调用预算(缺省 `MAX_FLOW_CALLS_PER_TASK`,A 批 A3 起可配)。
 // 三者都在**任何模型调用之前**判定:被拒的调用不产生任何 `task_llm_calls` 行(不烧钱)。
-use crate::services::agent_flow_service::{
-    flow_label, AgentFlowConfig, MAX_FLOW_CALLS_PER_TASK, MAX_FLOW_CALL_DEPTH,
-};
+//
+// ②③ 的取值自 A 批 A3 起由**调用方传入**(来自 `TaskRunContext.settings` 快照),
+// 本模块不再直接读常量——常量退居缺省值与测试基准(见 `settings_service::params`)。
+use crate::services::agent_flow_service::{flow_label, AgentFlowConfig};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// 一次任务执行内共享的动态调用状态(入口层构造,各层原样下传)。
@@ -27,14 +28,19 @@ pub(crate) struct FlowCallState {
     used: AtomicUsize,
     /// 被调流程内是否出现过失败/空产出节点(供根层把任务置 `partial`)
     degraded: AtomicBool,
+    /// 每任务调用次数上限(A 批 A3):由设置项 `max_flow_calls_per_task` 传入。
+    /// **执行开始时取一次**(`TaskRunContext.settings` 快照)→ 执行中改设置不影响本轮,
+    /// 与「执行期设置变更不影响本轮」的既有语义一致。
+    max_calls: usize,
 }
 
 impl FlowCallState {
-    pub(crate) fn new(callable: Vec<String>) -> Self {
+    pub(crate) fn new(callable: Vec<String>, max_calls: usize) -> Self {
         FlowCallState {
             callable,
             used: AtomicUsize::new(0),
             degraded: AtomicBool::new(false),
+            max_calls,
         }
     }
 
@@ -48,10 +54,10 @@ impl FlowCallState {
     /// 任何痕迹(路径永不落地),这是有意的——序号只需要在**已发生的调用**之间唯一。
     pub(crate) fn charge(&self) -> Result<usize, String> {
         let n = self.used.fetch_add(1, Ordering::SeqCst) + 1;
-        if n > MAX_FLOW_CALLS_PER_TASK {
+        if n > self.max_calls {
             return Err(format!(
-                "本次任务已调用流程 {} 次,达到上限 {} 次(每次调用都会完整跑一套流程,预算用于防止反复调用烧 token);请拆分为多个任务,或在流程里改用静态子图",
-                MAX_FLOW_CALLS_PER_TASK, MAX_FLOW_CALLS_PER_TASK
+                "本次任务已调用流程 {} 次,达到上限 {} 次(每次调用都会完整跑一套流程,预算用于防止反复调用烧 token);请拆分为多个任务,或在流程里改用静态子图,或在设置里调高「每任务流程调用上限」",
+                self.max_calls, self.max_calls
             ));
         }
         Ok(n)
@@ -147,6 +153,7 @@ pub(crate) fn check_call_guards(
     chain: &[String],
     call_depth: usize,
     cfg: &AgentFlowConfig,
+    max_depth: usize,
 ) -> Result<(), String> {
     if chain.iter().any(|id| id == &cfg.id) {
         return Err(format!(
@@ -159,10 +166,10 @@ pub(crate) fn check_call_guards(
                 .join(" → ")
         ));
     }
-    if call_depth + 1 > MAX_FLOW_CALL_DEPTH {
+    if call_depth + 1 > max_depth {
         return Err(format!(
-            "动态调用嵌套超过 {} 层:流程「{}」再被调用会超出上限(每层都会把 token 消耗成倍放大)",
-            MAX_FLOW_CALL_DEPTH,
+            "动态调用嵌套超过 {} 层:流程「{}」再被调用会超出上限(每层都会把 token 消耗成倍放大);可在设置里调高「流程调用深度上限」",
+            max_depth,
             flow_label(cfg)
         ));
     }
@@ -186,7 +193,7 @@ pub(crate) fn dynamic_path(parent: &str, n: usize) -> String {
 ///
 /// 重名流程补上 id:描述里列举的名字必须**可解析**——否则模型照着描述调用会撞上
 /// 「对应多个流程」的报错,白烧一轮。
-pub(crate) fn run_flow_description(flows: &[&AgentFlowConfig]) -> String {
+pub(crate) fn run_flow_description(flows: &[&AgentFlowConfig], max_calls: usize) -> String {
     let dup_names: Vec<&str> = flows
         .iter()
         .map(|f| f.name.trim())
@@ -214,7 +221,7 @@ pub(crate) fn run_flow_description(flows: &[&AgentFlowConfig]) -> String {
     }
     out.push_str(&format!(
         "\n\n调用方式:flow = 上列流程名(重名时用流程 id);input = 传给它的输入文本,省略时用任务目标。本任务最多可调用 {} 次。",
-        MAX_FLOW_CALLS_PER_TASK
+        max_calls
     ));
     out
 }
@@ -231,7 +238,10 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 测试基准用缺省值(即 `agent_flow_service` 的两个常量):A 批 A3 起生产路径由设置项
+    // 传入,常量只剩「缺省值 + 测试基准」这一身份。
     use crate::models::types::PlanStep;
+    use crate::services::agent_flow_service::{MAX_FLOW_CALLS_PER_TASK, MAX_FLOW_CALL_DEPTH};
 
     fn flow(id: &str, name: &str) -> AgentFlowConfig {
         AgentFlowConfig {
@@ -303,8 +313,13 @@ mod tests {
     #[test]
     fn cycle_guard_precedes_depth_guard() {
         let cfg = flow("b", "乙");
-        let err =
-            check_call_guards(&["a".into(), "b".into()], MAX_FLOW_CALL_DEPTH, &cfg).unwrap_err();
+        let err = check_call_guards(
+            &["a".into(), "b".into()],
+            MAX_FLOW_CALL_DEPTH,
+            &cfg,
+            MAX_FLOW_CALL_DEPTH,
+        )
+        .unwrap_err();
         assert!(err.contains("调用链存在环"), "{err}");
         assert!(err.contains("「a」 → 「b」"), "应打印调用链: {err}");
     }
@@ -313,19 +328,23 @@ mod tests {
     #[test]
     fn depth_guard_allows_two_levels_only() {
         let cfg = flow("c", "丙");
-        assert!(check_call_guards(&["a".into()], 0, &cfg).is_ok(), "第 1 层");
         assert!(
-            check_call_guards(&["a".into(), "b".into()], 1, &cfg).is_ok(),
+            check_call_guards(&["a".into()], 0, &cfg, MAX_FLOW_CALL_DEPTH).is_ok(),
+            "第 1 层"
+        );
+        assert!(
+            check_call_guards(&["a".into(), "b".into()], 1, &cfg, MAX_FLOW_CALL_DEPTH).is_ok(),
             "第 2 层"
         );
-        let err = check_call_guards(&["a".into(), "b".into()], 2, &cfg).unwrap_err();
+        let err =
+            check_call_guards(&["a".into(), "b".into()], 2, &cfg, MAX_FLOW_CALL_DEPTH).unwrap_err();
         assert!(err.contains("超过 2 层"), "{err}");
     }
 
     /// 预算:第 8 次照常放行,第 9 次起拒绝且**不消耗**已通过者的序号
     #[test]
     fn budget_rejects_after_limit() {
-        let st = FlowCallState::new(vec!["b".into()]);
+        let st = FlowCallState::new(vec!["b".into()], MAX_FLOW_CALLS_PER_TASK);
         for n in 1..=MAX_FLOW_CALLS_PER_TASK {
             assert_eq!(st.charge().unwrap(), n, "第 {n} 次应放行并给出序号");
         }
@@ -355,7 +374,7 @@ mod tests {
         let b = flow("f-2", "乙流程");
         let dup1 = flow("d-1", "同名");
         let dup2 = flow("d-2", "同名");
-        let desc = run_flow_description(&[&a, &b, &dup1, &dup2]);
+        let desc = run_flow_description(&[&a, &b, &dup1, &dup2], MAX_FLOW_CALLS_PER_TASK);
         assert!(desc.contains("「甲流程」:写周报"), "{desc}");
         assert!(desc.contains("「乙流程」"), "{desc}");
         assert!(
@@ -375,7 +394,7 @@ mod tests {
     fn description_truncates_long_text() {
         let mut a = flow("f-1", "甲");
         a.description = Some("说明".repeat(100));
-        let desc = run_flow_description(&[&a]);
+        let desc = run_flow_description(&[&a], MAX_FLOW_CALLS_PER_TASK);
         assert!(desc.contains('…'), "{desc}");
         assert!(desc.chars().count() < 400, "描述不应被长文本撑爆: {desc}");
     }

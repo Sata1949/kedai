@@ -232,6 +232,42 @@ pub(crate) trait TaskGenerator: Send + Sync {
         cancel: watch::Receiver<bool>,
     ) -> BoxFuture<'a, Result<TaskGenOutput, String>>;
 
+    /// 带**单次调用超时覆盖**的生成(A 批 A1):`timeout` 覆盖宿主侧缺省看门狗
+    /// (任务侧两条路径各自的 300s);`None` = 与 `generate_text` 逐字节一致。
+    ///
+    /// 节点级 `call_timeout_secs` 是唯一消费者(自定义流程节点),故不走 `generate_text`
+    /// 加参的老路——那要动 8 个既有调用点与所有测试替身。默认实现**忽略覆盖、直接委托**:
+    /// 只有真正持有看门狗的实现(任务宿主)需要覆盖它,其余实现(含测试替身)零改动。
+    #[allow(clippy::too_many_arguments)]
+    fn generate_text_with_timeout<'a>(
+        &'a self,
+        task_id: &'a str,
+        phase: &'a str,
+        step_index: Option<usize>,
+        messages: Vec<LlmMessage>,
+        tools: Vec<ToolDefinition>,
+        max_tokens: u32,
+        temperature: f64,
+        top_p: f64,
+        connection_id: Option<&'a str>,
+        timeout: Option<std::time::Duration>,
+        cancel: watch::Receiver<bool>,
+    ) -> BoxFuture<'a, Result<TaskGenOutput, String>> {
+        let _ = timeout;
+        self.generate_text(
+            task_id,
+            phase,
+            step_index,
+            messages,
+            tools,
+            max_tokens,
+            temperature,
+            top_p,
+            connection_id,
+            cancel,
+        )
+    }
+
     /// 执行单个步骤的单次生成(注入执行者人设/世界书/注入/Agent 提示词)。
     fn generate_step<'a>(
         &'a self,

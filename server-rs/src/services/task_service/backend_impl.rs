@@ -227,6 +227,39 @@ impl TaskGenerator for TaskService {
         ))
     }
 
+    /// 带单次调用超时覆盖的生成(A 批 A1):宿主是唯一持有看门狗的实现,故只有这里
+    /// 需要覆盖 trait 的默认委托(见 `TaskGenerator::generate_text_with_timeout`)。
+    #[allow(clippy::too_many_arguments)]
+    fn generate_text_with_timeout<'a>(
+        &'a self,
+        task_id: &'a str,
+        phase: &'a str,
+        step_index: Option<usize>,
+        messages: Vec<LlmMessage>,
+        tools: Vec<ToolDefinition>,
+        max_tokens: u32,
+        temperature: f64,
+        top_p: f64,
+        connection_id: Option<&'a str>,
+        timeout: Option<Duration>,
+        cancel: watch::Receiver<bool>,
+    ) -> BoxFuture<'a, Result<TaskGenOutput, String>> {
+        Box::pin(TaskService::generate_text_timed(
+            self,
+            task_id,
+            phase,
+            step_index,
+            messages,
+            tools,
+            max_tokens,
+            temperature,
+            top_p,
+            connection_id,
+            timeout,
+            cancel,
+        ))
+    }
+
     fn generate_step<'a>(
         &'a self,
         task: &'a TaskRecord,

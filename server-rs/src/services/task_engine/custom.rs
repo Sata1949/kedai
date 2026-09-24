@@ -266,6 +266,7 @@ impl CustomExecutor {
     /// 动态调用层 `call.<路径>`;对齐 generate_text 的统一出口语义:成功/空/中断/错误
     /// 均落一行 task_llm_calls)。
     /// `node_model` = 本节点连接的**真实模型名**(二维批次 5b;调用方已解析,不再恒取全局模型)。
+    /// `max_tokens_override` = 空产出重试时的预算翻倍值(A 批 A2;None = 节点/全局配置的原始值)。
     // 参数较多是「追踪落库三件套(phase/step_index/model)」与执行输入各占一位所致,
     // 打包成结构体只会把一个直白的调用点换成一次构造,收益为负。
     #[allow(clippy::too_many_arguments)]
@@ -278,6 +279,7 @@ impl CustomExecutor {
         messages: &mut Vec<LlmMessage>,
         whitelist: &[String],
         node_model: &str,
+        max_tokens_override: Option<u32>,
     ) -> Result<(String, TokenUsage), String> {
         let settings = &ctx.settings;
         let phase = g.phase;
@@ -308,7 +310,12 @@ impl CustomExecutor {
             .unwrap_or_default();
         if !released.is_empty() {
             tools.push(run_flow_tool::definition_with_description(
-                flow_call::run_flow_description(&released),
+                // 预算文案按**本轮设置**写(A 批 A3):描述里承诺的次数必须与闸门判界同源,
+                // 否则用户调高设置后会看到「最多可调用 8 次」而实际能调 16 次
+                flow_call::run_flow_description(
+                    &released,
+                    ctx.settings.max_flow_calls_per_task as usize,
+                ),
             ));
         }
         // 闸门名单与下发工具一致:名单外立即拒绝(任务模式无 UI 授权上下文)
@@ -327,7 +334,9 @@ impl CustomExecutor {
         let params = GenerationParams {
             temperature: step.temperature.unwrap_or(settings.default_temperature),
             top_p: settings.default_top_p,
-            max_tokens: step.max_tokens.unwrap_or(settings.default_max_tokens),
+            // 节点级输出上限;空产出重试时被翻倍值覆盖(A 批 A2)
+            max_tokens: max_tokens_override
+                .unwrap_or_else(|| step.max_tokens.unwrap_or(settings.default_max_tokens)),
             stop: None,
             tools,
             // 节点级轮次上限(二维批次 5b):缺省沿用全局;严格档下本参数无意义(不下发工具),
@@ -366,6 +375,11 @@ impl CustomExecutor {
         );
         let mut total_usage = TokenUsage::default();
         let started = Instant::now();
+        // 节点级单次调用超时(A 批 A1):None = 宿主既有 300s 看门狗(行为不变),
+        // Some = 覆盖该值(工具循环**逐轮**各按它计,与宿主既有粒度一致)。
+        let call_timeout = step
+            .call_timeout_secs
+            .map(|secs| std::time::Duration::from_secs(secs as u64));
         let result = run_tool_loop(
             &self.engine,
             &mut state_machine,
@@ -380,6 +394,7 @@ impl CustomExecutor {
             &mut total_usage,
             &run_id,
             gate,
+            call_timeout,
         )
         .await;
         drop(tx);
@@ -508,6 +523,7 @@ impl CustomExecutor {
     /// 失败与中断都返回 Err,由调度器决定状态与降级。
     /// 档位分支见 `PlanStep::is_strict`(二维批次 6a):严格档恒走单次调用。
     /// 节点级上下文上限(二维批次 8)在这里消费——它是**唯一**消费点(见 `apply_step_max_context`)。
+    /// 节点级超时 / 空产出重试(A 批 A1/A2)同在这里消费(见 `run_node_attempt` 与本函数的重试循环)。
     async fn execute_node(
         &self,
         ctx: &TaskRunContext,
@@ -520,6 +536,8 @@ impl CustomExecutor {
         // goal/action/kind/tools/system_prompt/temperature/max_tokens 全被旁路但保留配置)。
         // 批次 8 的 `max_context` 同属被旁路的执行参数(子图各节点各自裁剪),故这里用
         // `render_full()` 把**未裁剪**的输入交出去,行为与批次 8 之前逐字节一致。
+        // A 批的 `call_timeout_secs` / `max_retries` 同属被旁路的执行参数:子图各节点
+        // 各自的配置生效,本节点这两项配置保留。
         if let Some(sub_id) = step.sub_flow_ref() {
             return self
                 .run_sub_flow(ctx, g, index, step, sub_id, input.render_full())
@@ -535,29 +553,147 @@ impl CustomExecutor {
             .resolve_connector(step.connection_ref())
             .await
             .map_err(|e| format!("步骤「{}」:{}", step.name, e))?;
-        let user = self.apply_step_max_context(step, &input, &node_model)?;
+        let user = self.apply_step_max_context(
+            step,
+            &input,
+            &node_model,
+            ctx.settings.default_node_max_context,
+        )?;
         let sys = self.build_step_system(step, &ctx.goal);
+        // 空产出重试(A 批 A2):`max_retries` = **额外**尝试上限,总尝试 = 1 + n;
+        // 未配即 1 次(与本批之前逐字节一致)。**只重试「产出为空」**:硬错误(连接失效/
+        // 超时/上游报错)立即返回——那类失败重试只会把成本翻倍地耗在同一个坏引用上,
+        // 且会与 `call_timeout_secs` 的语义互相掩盖。每次尝试都用**同一份**输入重建消息,
+        // 不在上一轮的 messages 上续写(重试 = 重跑本节点,不是接着聊)。
+        let max_attempts = step.max_retries.map(|n| n as usize).unwrap_or(0) + 1;
+        let mut attempt = 0usize;
+        // 重试时的输出预算覆盖(见下方翻倍逻辑):None = 用节点/全局配置的原始值
+        let mut budget_override: Option<u32> = None;
+        // 失败尝试的 token 携带量(A 批 A2 的记账收口):中间尝试各自落了一行
+        // `task_llm_calls`,而节点级 usage 只由**最终结果**携带(调度器按 `out` 记一行)
+        // ——两处口径不一致就会破「各行求和 == usage_total」不变量(WF-17 预告的记账风险)。
+        // 故把失败尝试的 token 归并进最终结果;若最终是硬错误(Err 不带 usage),
+        // 则显式补记一行,不让已花掉的 token 只留在明细里。
+        let mut carried_prompt = 0i64;
+        let mut carried_completion = 0i64;
+        loop {
+            attempt += 1;
+            let mut res = self
+                .run_node_attempt(
+                    ctx,
+                    g,
+                    index,
+                    step,
+                    &sys,
+                    &user,
+                    &node_model,
+                    budget_override,
+                )
+                .await;
+            let retryable = matches!(&res, Ok(out) if out.text.trim().is_empty());
+            if !retryable || attempt >= max_attempts {
+                if let Ok(out) = &mut res {
+                    out.out.prompt_tokens += carried_prompt;
+                    out.out.completion_tokens += carried_completion;
+                } else if carried_prompt > 0 || carried_completion > 0 {
+                    self.svc.record_usage(
+                        &ctx.task_id,
+                        g.phase,
+                        Some(index),
+                        &TaskGenOutput {
+                            text: String::new(),
+                            finish_reason: None,
+                            prompt_tokens: carried_prompt,
+                            completion_tokens: carried_completion,
+                            reasoning_tokens: 0,
+                            reasoning_chars: 0,
+                            tool_calls: Vec::new(),
+                        },
+                    );
+                }
+                return res;
+            }
+            if let Ok(out) = &res {
+                carried_prompt += out.out.prompt_tokens;
+                carried_completion += out.out.completion_tokens;
+            }
+            if *ctx.cancel.borrow() {
+                return res;
+            }
+            // 重试前按 legacy/plan 同一算法**翻倍输出预算**(空产出最常见的成因是推理吃光
+            // 预算,只重试不加预算等于把同一次失败重放一遍);翻倍不出(已到封顶)即同预算。
+            let current = budget_override
+                .unwrap_or_else(|| step.max_tokens.unwrap_or(ctx.settings.default_max_tokens));
+            budget_override = Some(
+                crate::utils::retry::doubled_heal_budget(
+                    current,
+                    super::retry::RETRY_MAX_TOKENS_CAP,
+                )
+                .unwrap_or(current),
+            );
+            tracing::warn!(
+                task_id = %ctx.task_id,
+                step = %step.name,
+                attempt,
+                max_attempts,
+                max_tokens = budget_override.unwrap_or(current),
+                "节点产出为空,按节点级重试配置再试一次(输出预算已翻倍)"
+            );
+            // 退避间隔复用 legacy/plan 侧同一常量(单一出处,不另立数字)
+            tokio::time::sleep(super::retry::EMPTY_RETRY_BACKOFF).await;
+            if *ctx.cancel.borrow() {
+                return res;
+            }
+        }
+    }
+
+    /// 本节点的一次尝试:严格档/无工具走纯生成,宽松档 + 工具走工具循环。
+    ///
+    /// 抽成独立函数是为 A 批的空产出重试服务——重试必须**重建**消息(见 `execute_node`),
+    /// 而两条路径的输入装配(系统提示/节点消息/超时/连接)完全相同,复制一份必然漂移。
+    /// `sys`/`user` 是**本层**输入(已过 `apply_step_max_context` 裁剪);
+    /// `max_tokens_override` 是重试时的预算翻倍值(None = 用节点/全局配置的原始值)。
+    #[allow(clippy::too_many_arguments)]
+    async fn run_node_attempt(
+        &self,
+        ctx: &TaskRunContext,
+        g: &GraphCtx<'_>,
+        index: usize,
+        step: &PlanStep,
+        sys: &str,
+        user: &str,
+        node_model: &str,
+        max_tokens_override: Option<u32>,
+    ) -> Result<NodeOutcome, String> {
         let mut messages = vec![
-            LlmMessage::plain("system", &sys),
-            LlmMessage::plain("user", &user),
+            LlmMessage::plain("system", sys),
+            LlmMessage::plain("user", user),
         ];
+        // 节点级单次调用超时(A 批 A1):None = 宿主缺省看门狗(300s,行为不变)。
+        let call_timeout = step
+            .call_timeout_secs
+            .map(|secs| std::time::Duration::from_secs(secs as u64));
         // 档位优先于 tools 配置(二维批次 6a):严格档 = 单次调用、不下发任何工具——
         // 即使步骤声明了工具也如此(配置保留在流程里,切回宽松档即生效;编辑器已按此提示)。
         match (&step.tools, step.is_strict()) {
             // 无工具步骤,或严格档:纯生成统一出口(generate_text 自带调用追踪落库)
             (None, _) | (Some(_), true) => {
                 let settings = &ctx.settings;
+                // 输出预算:重试翻倍值优先,其次节点配置,最后全局缺省(A 批 A2)
+                let max_tokens = max_tokens_override
+                    .unwrap_or_else(|| step.max_tokens.unwrap_or(settings.default_max_tokens));
                 self.svc
-                    .generate_text(
+                    .generate_text_with_timeout(
                         &ctx.task_id,
                         g.phase,
                         Some(index),
                         messages,
                         Vec::new(),
-                        step.max_tokens.unwrap_or(settings.default_max_tokens),
+                        max_tokens,
                         step.temperature.unwrap_or(settings.default_temperature),
                         settings.default_top_p,
                         step.connection_ref(),
+                        call_timeout,
                         ctx.cancel.clone(),
                     )
                     .await
@@ -571,7 +707,16 @@ impl CustomExecutor {
             // usage → TaskGenOutput 统一走 usage_as_output(批次 B.4 单一出处);
             // 该 out 仅作 record_usage 入参(text 不消费)
             (Some(list), false) => self
-                .run_step_with_tools(ctx, g, index, step, &mut messages, list, &node_model)
+                .run_step_with_tools(
+                    ctx,
+                    g,
+                    index,
+                    step,
+                    &mut messages,
+                    list,
+                    node_model,
+                    max_tokens_override,
+                )
                 .await
                 .map(|(text, usage)| NodeOutcome {
                     out: super::executor::usage_as_output(&usage),
@@ -597,8 +742,14 @@ impl CustomExecutor {
         step: &PlanStep,
         input: &NodeInput,
         node_model: &str,
+        default_budget: u32,
     ) -> Result<String, String> {
-        let Some(budget) = step.max_context else {
+        // 预算来源(A 批 A4):节点级 `max_context` 优先;缺省回落任务侧设置
+        // 「默认节点上下文上限」(0 = 不裁剪)。两者皆空 = 与批次 8 之前逐字节一致。
+        let budget = step
+            .max_context
+            .or_else(|| (default_budget > 0).then_some(default_budget));
+        let Some(budget) = budget else {
             return Ok(input.render_full());
         };
         let head_tokens = self.engine.count_tokens(&input.head, node_model);
@@ -789,7 +940,13 @@ impl CustomExecutor {
         input: &str,
     ) -> Result<String, String> {
         let cfg = flow_call::resolve_flow_ref(flows, state.callable(), flow_key)?;
-        flow_call::check_call_guards(chain, call_depth, cfg)?;
+        flow_call::check_call_guards(
+            chain,
+            call_depth,
+            cfg,
+            // 深度上限按本轮设置(A 批 A3;执行期改设置不影响本轮)
+            ctx.settings.max_flow_call_depth as usize,
+        )?;
         let n = state.charge()?;
         let steps: Vec<PlanStep> = cfg.steps.iter().filter(|s| s.enabled).cloned().collect();
         if steps.is_empty() {
@@ -1065,7 +1222,11 @@ impl CustomExecutor {
                 );
                 None
             } else {
-                Some(Arc::new(FlowCallState::new(callable)))
+                Some(Arc::new(FlowCallState::new(
+                    callable,
+                    // 每任务调用次数上限按本轮设置(A 批 A3)
+                    ctx.settings.max_flow_calls_per_task as usize,
+                )))
             }
         };
         // 冻结闭包改由 Arc 承载(动态调用的工具处理器要在节点栈退出后重跑被调流程,

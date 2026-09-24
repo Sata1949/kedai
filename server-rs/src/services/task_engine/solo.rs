@@ -141,6 +141,8 @@ pub(crate) async fn run_agent_loop(
         &mut total_usage,
         &run_id,
         gate,
+        // 单次调用超时覆盖(A 批 A1):solo 无节点级配置,恒走宿主既有判定
+        None,
     )
     .await;
     // 先关通道再等 drain 收尾,保证进度事件全部转发完毕

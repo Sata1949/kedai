@@ -11,10 +11,12 @@ use std::time::Duration;
 use tokio::sync::watch;
 
 /// 空输出重试前的退避间隔(避免对上游瞬时抖动形成紧循环)。
-const EMPTY_RETRY_BACKOFF: Duration = Duration::from_millis(500);
+/// `pub(super)`:自定义流程的节点级空产出重试(A 批 A2)复用同一间隔,不另立常量。
+pub(super) const EMPTY_RETRY_BACKOFF: Duration = Duration::from_millis(500);
 
 /// 空输出重试时的 max_tokens 翻倍上限(与设置页 max_tokens 上限一致)。
-const RETRY_MAX_TOKENS_CAP: u32 = 131_072;
+/// `pub(super)`:自定义流程的节点级空产出重试(A 批 A2)复用同一上限与算法。
+pub(super) const RETRY_MAX_TOKENS_CAP: u32 = 131_072;
 
 /// 规划调用的初始 max_tokens。推理模型的 reasoning 与正文共用同一预算,
 /// 1024 曾被 reasoning 整体吃光导致正文零输出/JSON 半截(2026-08-27 exe 实测),

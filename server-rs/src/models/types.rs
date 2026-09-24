@@ -296,6 +296,28 @@ pub struct PlanStep {
     /// 挂载子流程的节点上本字段被旁路(子图各节点各自裁剪)、配置保留。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_context: Option<u32>,
+    /// 节点级单次调用超时(秒;A 批 A1)。`None` = 用宿主缺省看门狗
+    /// (任务侧两条路径各自 300s),行为与本批之前**逐字节一致**;`Some(n)` = **覆盖**
+    /// 本节点每次 LLM 调用的时间预算——既可收紧(如 60)也可放宽(如 900)。
+    /// 宽松档工具循环**逐轮**各按该值计(与宿主既有 300s 是同一粒度,不是「节点总预算」)。
+    ///
+    /// 范围 30..=3600,保存期校验。超时 = 本节点**失败**(走既有降级口径),
+    /// **不自动重试**——重试是 [`Self::max_retries`] 的显式配置(两者刻意不叠加,
+    /// 避免「超时了再重试」把同一份成本重复烧在上游停滞上)。
+    /// 挂载子流程的节点上本字段被旁路(子图各节点各自的超时生效),配置保留。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_timeout_secs: Option<u32>,
+    /// 节点级空产出重试次数(A 批 A2)。`None` = 不重试(行为与本批之前一致);
+    /// `Some(n)` = 本节点产出为空时最多**再试 n 次**(n = 额外尝试上限,总尝试 = 1 + n)。
+    ///
+    /// **只重试空产出**:连接失效、超时、上游报错等硬错误一律不重试——重试只会把成本
+    /// 翻倍地耗在同一个坏引用上,且会与 [`Self::call_timeout_secs`] 的语义互相掩盖。
+    /// **记账**:每次尝试各记一行 `task_llm_calls`,phase 与首次相同(沿用 legacy/plan 侧
+    /// `generate_step_retry` 的既有先例),故「各行求和 == `usage_total`」不变量不变。
+    /// 只重试本节点,不重试下游;退避期间响应取消。
+    /// 范围 1..=5,保存期校验。挂载子流程的节点上本字段被旁路,配置保留。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u32>,
 }
 
 impl PlanStep {

@@ -416,6 +416,41 @@ impl TaskService {
         connection_id: Option<&str>,
         cancel: watch::Receiver<bool>,
     ) -> Result<TaskGenOutput, String> {
+        self.generate_text_timed(
+            task_id,
+            phase,
+            step_index,
+            messages,
+            tools,
+            max_tokens,
+            temperature,
+            top_p,
+            connection_id,
+            None,
+            cancel,
+        )
+        .await
+    }
+
+    /// 与 [`Self::generate_text`] 同一实现,额外接受**单次调用超时覆盖**(A 批 A1)。
+    ///
+    /// 只有自定义流程的节点会带值(节点级 `call_timeout_secs`);`None` = 既有缺省看门狗
+    /// (`TASK_LLM_TOTAL_TIMEOUT` = 300s),行为与本批之前逐字节一致。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn generate_text_timed(
+        &self,
+        task_id: &str,
+        phase: &str,
+        step_index: Option<usize>,
+        messages: Vec<LlmMessage>,
+        tools: Vec<ToolDefinition>,
+        max_tokens: u32,
+        temperature: f64,
+        top_p: f64,
+        connection_id: Option<&str>,
+        call_timeout: Option<Duration>,
+        cancel: watch::Receiver<bool>,
+    ) -> Result<TaskGenOutput, String> {
         let params = GenerationParams {
             temperature,
             top_p,
@@ -529,19 +564,23 @@ impl TaskService {
                 reasoning_chars,
                 tool_calls,
             ),
-        ) = tokio::join!(tokio::time::timeout(TASK_LLM_TOTAL_TIMEOUT, call), collect);
+        ) = tokio::join!(
+            tokio::time::timeout(call_timeout.unwrap_or(TASK_LLM_TOTAL_TIMEOUT), call),
+            collect
+        );
         let (res, model, connector_type) = match timed {
             Ok(v) => v,
             Err(_) => {
+                let limit = call_timeout.unwrap_or(TASK_LLM_TOTAL_TIMEOUT);
                 tracing::warn!(
-                    timeout_s = TASK_LLM_TOTAL_TIMEOUT.as_secs(),
+                    timeout_s = limit.as_secs(),
                     max_tokens = max_tokens,
                     elapsed_ms = started.elapsed().as_millis() as u64,
                     "任务模式 LLM 生成超时(看门狗触发)"
                 );
                 let err = format!(
                     "模型调用超过 {}s 未完成(上游停滞或接口占用),已中止;可重新执行任务",
-                    TASK_LLM_TOTAL_TIMEOUT.as_secs()
+                    limit.as_secs()
                 );
                 // 超时发生在 connector 读锁获取前后,model 未知,记空串
                 self.record_llm_call(
