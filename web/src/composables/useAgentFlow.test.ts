@@ -194,11 +194,12 @@ describe('流程搬运 7a:文件归一', () => {
   });
 
   it('导入报告文案含导入 / 跳过 / 新 id 计数与点名', () => {
-    expect(importReportMessage({ imported: 2, skipped: 0, renamed: [] })).toBe('已导入 2 个流程');
+    expect(importReportMessage({ imported: 2, skipped: 0, renamed: [], replaced: [] })).toBe('已导入 2 个流程');
     const msg = importReportMessage({
       imported: 1,
       skipped: 3,
       renamed: [{ old_id: 'a', new_id: 'b', name: '调研' }],
+      replaced: [],
     });
     expect(msg).toContain('跳过 3 个(内容已存在)');
     expect(msg).toContain('1 个因 id 冲突分配了新 id');

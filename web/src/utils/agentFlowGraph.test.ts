@@ -198,6 +198,15 @@ describe('agentFlowGraph 提示与成果节点', () => {
     // 未配置上限时按默认 2 提示
     expect(graphHint(diamond())).toContain('最多 2 个');
   });
+
+  it('并行提示显式写明 token 成本(B 批 B2:不只是「更快」,而是「更贵」)', () => {
+    const text = graphHint(diamond(), 4) ?? '';
+    expect(text).toContain('并行会成倍消耗 token');
+    expect(text).toContain('最多 4 个节点同时跑');
+    expect(text).toContain('token 消耗随之成倍增加');
+    // 一维流程仍不给提示(成本口径不加噪音:一维本就没有并行)
+    expect(graphHint([step('a'), step('b')])).toBeNull();
+  });
 });
 
 describe('agentFlowGraph 节点档位(二维批次 6a)', () => {

@@ -26,6 +26,8 @@ const TASK_FLOW_ID_KEY = 'kedai.taskFlowId.v1';
 const TASK_FLOW_MODE_KEY = 'kedai.taskFlowMode.v1';
 /** 对比模式名单持久化键(二维批次 7b):刷新后保持上次勾选(JSON 字符串数组) */
 const TASK_FLOW_IDS_KEY = 'kedai.taskFlowIds.v1';
+/** 逐任务选用连接的持久化键(B 批 B1):刷新后保持上次选择;空 = 跟随设置的默认连接 */
+const TASK_CONNECTION_ID_KEY = 'kedai.taskConnectionId.v1';
 /** 当前选中任务持久化键(实跑问题 4):重启后恢复上次查看的任务详情与调用记录 */
 const CURRENT_TASK_KEY = 'kedai.currentTaskId.v1';
 
@@ -131,6 +133,21 @@ function readStoredTaskFlowIds(): string[] {
   }
 }
 
+/**
+ * 读取持久化的**逐任务选用连接**(B 批 B1)。
+ *
+ * 只做形状校验(去空白),**不**校验该 id 是否还在本机连接列表里——列表由
+ * `TaskConnectionSelect` 挂载时经设置接口拉取,加载失败或尚未加载 ≠ 引用失效。
+ * 失效的判定与重置在组件里做(拉取成功且未命中才重置,并给出显式提示,不静默)。
+ */
+function readStoredTaskConnectionId(): string {
+  try {
+    return (localStorage.getItem(TASK_CONNECTION_ID_KEY) ?? '').trim();
+  } catch {
+    return '';
+  }
+}
+
 export const useTaskStore = defineStore('app.task', () => {
   // ===== 状态 =====
   /** 顶层模式:roleplay = 角色扮演,task = 任务工作台;持久化到 localStorage */
@@ -152,6 +169,14 @@ export const useTaskStore = defineStore('app.task', () => {
    * 顺序即用户勾选顺序 → 后端工具描述里的列举顺序(同一份名单两次运行文案一致)。
    */
   const taskFlowIds = ref<string[]>(readStoredTaskFlowIds());
+  /**
+   * **逐任务选用连接**(B 批 B1;空串 = 跟随设置的默认连接;持久化到 localStorage)。
+   *
+   * 与 `taskFlowId` 的关键差别:流程可跨机搬运,故引用失效不静默改绑;**任务是本机的**,
+   * 连接引用只可能「本机已删除/停用」,而创建期后端就会 400 点名该连接——所以选择器
+   * 在拉取到连接列表后**显式重置**失效引用并给一行提示(不静默;见 TaskConnectionSelect)。
+   */
+  const taskConnectionId = ref<string>(readStoredTaskConnectionId());
   const tasks = ref<api.TaskRecord[]>([]);
   const currentTaskId = ref<string | null>(null);
   /** 当前任务详情(含子任务) */
@@ -285,6 +310,17 @@ export const useTaskStore = defineStore('app.task', () => {
     }
   }
   watch(taskFlowIds, persistTaskFlowIds, { deep: true });
+
+  /** 持久化逐任务选用连接(空串移除键:与「跟随默认连接」保持同一种「未指定」表示) */
+  function persistTaskConnectionId(): void {
+    try {
+      if (taskConnectionId.value) localStorage.setItem(TASK_CONNECTION_ID_KEY, taskConnectionId.value);
+      else localStorage.removeItem(TASK_CONNECTION_ID_KEY);
+    } catch {
+      /* 忽略 */
+    }
+  }
+  watch(taskConnectionId, persistTaskConnectionId);
 
   // ===== 加载(in-flight 合并防事件风暴) =====
 
@@ -477,6 +513,9 @@ export const useTaskStore = defineStore('app.task', () => {
       case 'status':
       case 'plan':
       case 'subtask':
+      // A 批 B3:改绑编排 → 换的是「按哪份编排跑」与任务看台的编排徽标(快照),
+      // 状态本身没变,故按 status 同款刷新(列表徽标 + 当前任务详情),不触发终态逻辑
+      case 'flow_bound':
         // 侧栏状态跳动 + 当前任务详情刷新;终态时补全局 token 累计
         void loadTasks();
         if (ev.task_id === currentTaskId.value) void loadTaskDetail(ev.task_id);
@@ -638,6 +677,8 @@ export const useTaskStore = defineStore('app.task', () => {
    *  二维批次 5a:custom 模式下 `taskFlowId` 非空即随请求下发(绑定即冻结),空则跟随当前流程。
    *  二维批次 7b:custom 模式 + `taskFlowMode === 'compare'` 时随请求下发 `flowIds`
    *  (名单为空 = 不下发该键,后端会 400;UI 侧已在选择器给出即时警示)。
+   *  B 批 B1:`taskConnectionId` 非空即随请求下发(逐任务选用连接;**与模式无关**——
+   *  它绑的是 provider 而不是编排,legacy 到 custom 六模式都吃它),空则跟随设置的默认连接。
    *
    *  模式门控放在 store 而不是组件:非 custom 模式下选择器不渲染,但持久化的名单/绑定
    *  仍在内存里——若照原样下发,后端会以「只有自定义流程模式可以…」400 掉一次**正常**创建。 */
@@ -656,6 +697,8 @@ export const useTaskStore = defineStore('app.task', () => {
       undefined,
       isCustom ? taskFlowId.value || undefined : undefined,
       compareIds,
+      // 连接不做模式门控:六模式都会用到 provider,空串 = 跟随默认连接(不下发该键)
+      taskConnectionId.value || undefined,
     );
     tasks.value = [task, ...tasks.value];
     listSignature = contentSignature(tasks.value); // 本地乐观改写后同步签名(下次事件刷新同内容时不再替换)
@@ -728,6 +771,7 @@ export const useTaskStore = defineStore('app.task', () => {
     taskFlowId,
     taskFlowMode,
     taskFlowIds,
+    taskConnectionId,
     tasks,
     currentTaskId,
     currentTask,

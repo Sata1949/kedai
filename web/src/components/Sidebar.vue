@@ -6,6 +6,7 @@ import { storeToRefs } from 'pinia';
 import { taskStatusClass as statusClass, taskStatusLabel as statusLabel } from '../taskStatus';
 import TaskModeSelect from './TaskModeSelect.vue';
 import TaskFlowSelect from './TaskFlowSelect.vue';
+import TaskConnectionSelect from './TaskConnectionSelect.vue';
 import type { CharacterRecord, TaskRecord } from '../api';
 
 const store = useAppStore();
@@ -424,6 +425,8 @@ async function removeTask(task: TaskRecord): Promise<void> {
             <TaskModeSelect />
             <!-- 绑定流程(二维批次 5a;仅自定义流程模式可见,空 = 跟随当前流程) -->
             <TaskFlowSelect />
+            <!-- 逐任务选用连接(B 批 B1;与执行模式无关,故六模式都可见,空 = 跟随设置的默认连接) -->
+            <TaskConnectionSelect />
             <!-- 执行者(独立执行者库;与角色扮演角色卡解耦,故不列 characters) -->
             <div class="sv-inp-row">
               <select v-model="executorId" class="sv-select" title="选择任务执行者">

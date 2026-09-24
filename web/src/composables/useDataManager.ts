@@ -103,6 +103,7 @@ export function useGenerationParams() {
   const store = useAppStore();
   const {
     temperature, topP, maxTokens, maxContextTokens, maxToolRounds,
+    maxFlowCallDepth, maxFlowCallsPerTask, defaultNodeMaxContext,
     toolHistoryKeepRounds, toolHistoryBudgetTokens,
     sessionTokenBudget, sessionBudgetAction,
     loopGuardSemanticWindow, loopGuardSemanticMinCalls, loopGuardSemanticMaxDistinct,
@@ -131,6 +132,10 @@ export function useGenerationParams() {
         default_max_tokens: maxTokens.value,
         max_context_tokens: maxContextTokens.value,
         max_tool_rounds: maxToolRounds.value,
+        // 流程调用闸与节点默认上下文(A 批 A3/A4;三者都是任务侧设置)
+        max_flow_call_depth: maxFlowCallDepth.value,
+        max_flow_calls_per_task: maxFlowCallsPerTask.value,
+        default_node_max_context: defaultNodeMaxContext.value,
         tool_history_keep_rounds: toolHistoryKeepRounds.value,
         tool_history_budget_tokens: toolHistoryBudgetTokens.value,
         session_token_budget: sessionTokenBudget.value,

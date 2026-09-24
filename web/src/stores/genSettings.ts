@@ -34,6 +34,12 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
   const maxContextTokens = ref(65536);
   /** AGENT/CUSTOM 模式工具循环轮次上限(服务端默认 32,1..=200) */
   const maxToolRounds = ref(32);
+  /** 流程动态调用嵌套深度上限(**任务侧**,A 批 A3;服务端默认 2,1..=5) */
+  const maxFlowCallDepth = ref(2);
+  /** 单任务内流程调用次数上限(**任务侧**,A 批 A3;服务端默认 8,1..=64) */
+  const maxFlowCallsPerTask = ref(8);
+  /** 节点默认上下文上限(**任务侧**,A 批 A4;服务端默认 0 = 不裁剪,否则 256..=1048576) */
+  const defaultNodeMaxContext = ref(0);
   /** 工具循环历史保留的最近完整轮数(服务端默认 4,1..=32) */
   const toolHistoryKeepRounds = ref(4);
   /** 工具循环历史 token 预算(服务端默认 16384;0 = 禁用预算闸门) */
@@ -138,6 +144,9 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
       maxTokens.value = s.default_max_tokens ?? 1024;
       maxContextTokens.value = s.max_context_tokens ?? 65536;
       maxToolRounds.value = s.max_tool_rounds ?? 32;
+      maxFlowCallDepth.value = s.max_flow_call_depth ?? 2;
+      maxFlowCallsPerTask.value = s.max_flow_calls_per_task ?? 8;
+      defaultNodeMaxContext.value = s.default_node_max_context ?? 0;
       toolHistoryKeepRounds.value = s.tool_history_keep_rounds ?? 4;
       toolHistoryBudgetTokens.value = s.tool_history_budget_tokens ?? 16384;
       sessionTokenBudget.value = s.session_token_budget ?? 0;
@@ -200,6 +209,9 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     maxTokens.value = s.default_max_tokens ?? 1024;
     maxContextTokens.value = s.max_context_tokens ?? 65536;
     maxToolRounds.value = s.max_tool_rounds ?? 32;
+    maxFlowCallDepth.value = s.max_flow_call_depth ?? 2;
+    maxFlowCallsPerTask.value = s.max_flow_calls_per_task ?? 8;
+    defaultNodeMaxContext.value = s.default_node_max_context ?? 0;
     toolHistoryKeepRounds.value = s.tool_history_keep_rounds ?? 4;
     toolHistoryBudgetTokens.value = s.tool_history_budget_tokens ?? 16384;
     sessionTokenBudget.value = s.session_token_budget ?? 0;
@@ -350,6 +362,9 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     maxTokens,
     maxContextTokens,
     maxToolRounds,
+    maxFlowCallDepth,
+    maxFlowCallsPerTask,
+    defaultNodeMaxContext,
     toolHistoryKeepRounds,
     toolHistoryBudgetTokens,
     sessionTokenBudget,

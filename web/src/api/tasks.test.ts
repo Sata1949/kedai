@@ -196,6 +196,29 @@ describe('api/tasks REST 封装', () => {
     });
   });
 
+  it('createTask 的 connectionId 仅在非空时下发(B 批 B1 逐任务选用连接)', async () => {
+    const lastCreateBody = (): Record<string, unknown> => {
+      const posts = vi.mocked(fetch).mock.calls.filter(
+        ([input, init]) => String(input) === '/api/tasks' && (init?.method ?? 'GET') === 'POST',
+      );
+      return JSON.parse(String(posts[posts.length - 1]?.[1]?.body)) as Record<string, unknown>;
+    };
+
+    // 不给(= 跟随设置的默认连接):请求体不得出现 connection_id 键,旧客户端请求体逐字节不变
+    await createTask('目标', undefined, 'solo');
+    expect(lastCreateBody()).not.toHaveProperty('connection_id');
+    expect(lastCreateBody()).toEqual({ title: '目标', executor_id: null, task_mode: 'solo' });
+
+    // 非空:原样下发,且**与任务模式无关**(solo 也吃:它绑的是 provider,不是编排)
+    await createTask('目标', undefined, 'solo', undefined, undefined, undefined, 'conn-b');
+    expect(lastCreateBody()).toEqual({
+      title: '目标',
+      executor_id: null,
+      task_mode: 'solo',
+      connection_id: 'conn-b',
+    });
+  });
+
   it('approveTask:POST /tasks/{id}/approve;不给 plan 时空体,给了 plan 则带 plan 字段', async () => {
     const plan: TaskStep[] = [{ name: '步骤一', goal: '目标一', status: 'pending', result: '' }];
     const r1 = await approveTask('t1');

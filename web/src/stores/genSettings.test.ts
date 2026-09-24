@@ -68,6 +68,10 @@ function makeSettings(overrides: Partial<RuntimeSettings> = {}): RuntimeSettings
     task_tool_policy: 'deny_dangerous',
     task_tool_allowlist: [],
     max_tool_rounds: 32,
+    // 流程调用闸与节点默认上下文(A 批 A3/A4;三者都是任务侧设置)
+    max_flow_call_depth: 2,
+    max_flow_calls_per_task: 8,
+    default_node_max_context: 0,
     tool_history_keep_rounds: 4,
     tool_history_budget_tokens: 16384,
     render_html: false,
@@ -104,6 +108,17 @@ function makeSettings(overrides: Partial<RuntimeSettings> = {}): RuntimeSettings
     active_connection_id: null,
     ...overrides,
   };
+}
+
+/**
+ * 抹掉若干字段(模拟旧服务端/异常响应缺字段)。
+ * 用 delete 而不是 `undefined as unknown as T`:后者属类型逃逸,会推高
+ * `tools/check-frontend-lint.mjs` 的 ratchet 计数(该门禁只降不升)。
+ */
+function withoutFields(base: RuntimeSettings, keys: Array<keyof RuntimeSettings>): RuntimeSettings {
+  const out: Partial<RuntimeSettings> = { ...base };
+  for (const k of keys) delete out[k];
+  return out as RuntimeSettings;
 }
 
 describe('genSettings 模式分流:loadSettings/saveSettings 按 appMode 传 mode 参数', () => {
@@ -155,6 +170,68 @@ describe('genSettings 模式分流:loadSettings/saveSettings 按 appMode 传 mod
     task.appMode = 'task';
     await store.loadSettings();
     expect(getSettingsMock).toHaveBeenLastCalledWith('task');
+  });
+});
+
+describe('genSettings 流程调用闸与节点默认上下文(A 批 A3/A4)', () => {
+  beforeEach(() => {
+    memStorage.clear();
+    setActivePinia(createPinia());
+  });
+
+  it('store 默认值与后端缺省一致(深度 2 / 每任务 8 / 不裁剪 0)', () => {
+    const store = useGenSettingsStore();
+    expect(store.maxFlowCallDepth).toBe(2);
+    expect(store.maxFlowCallsPerTask).toBe(8);
+    expect(store.defaultNodeMaxContext).toBe(0);
+  });
+
+  it('loadSettings 回填服务端值;缺字段兜底 2 / 8 / 0', async () => {
+    const store = useGenSettingsStore();
+    getSettingsMock.mockReset().mockResolvedValue(
+      makeSettings({
+        max_flow_call_depth: 4,
+        max_flow_calls_per_task: 32,
+        default_node_max_context: 8192,
+      }),
+    );
+    await store.loadSettings();
+    expect(store.maxFlowCallDepth).toBe(4);
+    expect(store.maxFlowCallsPerTask).toBe(32);
+    expect(store.defaultNodeMaxContext).toBe(8192);
+
+    // 旧服务端/异常响应缺字段:回退默认值(不裁剪 = 0,即 A 批之前的行为)
+    getSettingsMock.mockReset().mockResolvedValue(
+      withoutFields(makeSettings(), [
+        'max_flow_call_depth',
+        'max_flow_calls_per_task',
+        'default_node_max_context',
+      ]),
+    );
+    await store.loadSettings();
+    expect(store.maxFlowCallDepth).toBe(2);
+    expect(store.maxFlowCallsPerTask).toBe(8);
+    expect(store.defaultNodeMaxContext).toBe(0);
+  });
+
+  it('saveSettings 响应回填三个字段(与 loadSettings 同口径)', async () => {
+    const store = useGenSettingsStore();
+    saveSettingsMock.mockReset().mockResolvedValue({
+      ok: true,
+      settings: makeSettings({
+        max_flow_call_depth: 5,
+        max_flow_calls_per_task: 64,
+        default_node_max_context: 4096,
+      }),
+    });
+    await store.saveSettings({
+      max_flow_call_depth: 5,
+      max_flow_calls_per_task: 64,
+      default_node_max_context: 4096,
+    });
+    expect(store.maxFlowCallDepth).toBe(5);
+    expect(store.maxFlowCallsPerTask).toBe(64);
+    expect(store.defaultNodeMaxContext).toBe(4096);
   });
 });
 

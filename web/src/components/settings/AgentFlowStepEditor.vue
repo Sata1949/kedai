@@ -53,6 +53,18 @@ import {
   stepToolRoundsWarnings,
   type FlowConnectionOption,
 } from '../../utils/agentFlowConnections';
+import {
+  STEP_CALL_TIMEOUT_MAX,
+  STEP_CALL_TIMEOUT_MIN,
+  STEP_MAX_RETRIES_MAX,
+  STEP_MAX_RETRIES_MIN,
+  setStepCallTimeout,
+  setStepMaxRetries,
+  stepCallTimeoutText,
+  stepCallTimeoutWarnings,
+  stepMaxRetriesText,
+  stepMaxRetriesWarnings,
+} from '../../utils/agentFlowStepLimits';
 import { TOOL_MODE_LABELS } from '../../composables/useAgentFlow';
 import type { AgentFlowConfig, AgentFlowStep } from '../../api/types';
 
@@ -394,6 +406,59 @@ function staleSubFlowOption(): string {
           </span>
         </div>
       </template>
+      <!-- 节点级调用预算(A 批 A1/A2):单次调用超时 + 空产出重试。
+           放在 direct 参数块**之外**(紧跟其后):反思步骤同样会发起一次模型调用,
+           两项对它也生效,塞进 direct 块会让反思节点无从配置(后端校验也不分 action)。
+           挂载子流程的节点整块不渲染(子图各节点各自的配置生效),草稿里的配置保留 -->
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">单次调用超时</label>
+        <input
+          class="sv-input inject-num"
+          type="number"
+          :min="STEP_CALL_TIMEOUT_MIN"
+          :max="STEP_CALL_TIMEOUT_MAX"
+          :value="stepCallTimeoutText(step)"
+          placeholder="沿用缺省 300 秒"
+          :title="`本步每次模型调用超过该秒数即失败(${STEP_CALL_TIMEOUT_MIN}-${STEP_CALL_TIMEOUT_MAX} 秒);留空沿用缺省 300 秒;挂载子流程的节点上不生效`"
+          @change="setStepCallTimeout(step, ($event.target as HTMLInputElement).value)"
+        />
+        <span class="sv-note">
+          本步「每次」模型调用的时间预算({{ STEP_CALL_TIMEOUT_MIN }}-{{ STEP_CALL_TIMEOUT_MAX }} 秒):
+          留空沿用缺省 300 秒;可收紧(如 60)也可放宽(如 900),宽松档工具循环逐轮各按它计;
+          超时即本步失败,不自动重试。挂载子流程的节点上本项不生效(配置保留)。
+        </span>
+      </div>
+      <p
+        v-for="(warn, wi) in stepCallTimeoutWarnings(step)"
+        :key="`t${wi}`"
+        class="sv-note flow-tool-warn"
+      >
+        {{ warn }}
+      </p>
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">空产出重试</label>
+        <input
+          class="sv-input inject-num"
+          type="number"
+          :min="STEP_MAX_RETRIES_MIN"
+          :max="STEP_MAX_RETRIES_MAX"
+          :value="stepMaxRetriesText(step)"
+          placeholder="不重试"
+          :title="`只在产出为空时重试(${STEP_MAX_RETRIES_MIN}-${STEP_MAX_RETRIES_MAX} 次 = 额外尝试上限);连接失败/超时等错误不重试;每次重试会翻倍输出预算`"
+          @change="setStepMaxRetries(step, ($event.target as HTMLInputElement).value)"
+        />
+        <span class="sv-note">
+          只在模型产出为空时重试({{ STEP_MAX_RETRIES_MIN }}-{{ STEP_MAX_RETRIES_MAX }} 次 = 额外尝试上限,
+          总尝试 1 + n);连接失败、超时、解析错误等一律不重试;每次重试会翻倍输出预算(封顶 131072)。
+        </span>
+      </div>
+      <p
+        v-for="(warn, wi) in stepMaxRetriesWarnings(step)"
+        :key="`x${wi}`"
+        class="sv-note flow-tool-warn"
+      >
+        {{ warn }}
+      </p>
     </template>
   </div>
 </template>

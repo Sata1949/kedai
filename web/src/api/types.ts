@@ -87,7 +87,7 @@ export interface ChatMessage {
  *  批次 R4 流式输出追加:delta(LLM 正文攒批增量,暂态不落库;权威数据以 llm_call 落库行为准)
  *  真源为 Rust `models/types.rs` 的 `TaskEventKind`(serde snake_case);改一侧须同步另一侧,
  *  并更新 `tools/check-contract.mjs` 的映射表。 */
-export type TaskEventKind = 'created' | 'status' | 'plan' | 'subtask' | 'usage' | 'deleted' | 'llm_call' | 'agent_status' | 'approval_required' | 'delta';
+export type TaskEventKind = 'created' | 'status' | 'plan' | 'subtask' | 'usage' | 'deleted' | 'llm_call' | 'agent_status' | 'approval_required' | 'delta' | 'flow_bound';
 
 /**
  * 任务模式(task 工作台)事件(对齐 server-rs SseEvent::Task):
@@ -396,6 +396,14 @@ export interface RuntimeSettings {
   task_tool_allowlist: string[];
   /** AGENT/CUSTOM 模式工具循环轮次上限(默认 32) */
   max_tool_rounds: number;
+  /** 流程动态调用嵌套深度上限(**任务侧**设置;A 批 A3;默认 2,1..=5):
+   *  节点用 `run_flow` 工具逐层调用流程时的深度闸(与静态子图 `sub_flow_id` 的嵌套上限是两回事) */
+  max_flow_call_depth: number;
+  /** 单任务内流程调用次数上限(**任务侧**设置;A 批 A3;默认 8,1..=64) */
+  max_flow_calls_per_task: number;
+  /** 节点默认上下文上限(**任务侧**设置;A 批 A4;默认 0 = **不裁剪**,否则 256..=1048576):
+   *  节点自己写了 `max_context` 即按节点的,只有未写时才用本项 */
+  default_node_max_context: number;
   /** 工具历史保留的最近完整轮数(1..=32;默认 4;超出后最老轮摘要化) */
   tool_history_keep_rounds: number;
   /** 工具历史 token 预算(0 = 禁用预算闸门;否则 1024..=1M,默认 16384) */
@@ -534,6 +542,12 @@ export interface RuntimeSettingsPatch {
   /** 任务模式工具白名单 */
   task_tool_allowlist?: string[];
   max_tool_rounds?: number;
+  /** 流程动态调用嵌套深度上限(任务侧;1..=5) */
+  max_flow_call_depth?: number;
+  /** 单任务内流程调用次数上限(任务侧;1..=64) */
+  max_flow_calls_per_task?: number;
+  /** 节点默认上下文上限(任务侧;0 = 不裁剪,否则 256..=1048576) */
+  default_node_max_context?: number;
   /** 工具历史保留轮数(1..=32) */
   tool_history_keep_rounds?: number;
   /** 工具历史 token 预算(0 = 禁用;否则 1024..=1048576) */
@@ -802,6 +816,22 @@ export interface AgentFlowStep {
    * 挂载子流程的节点上本字段被旁路(子图各节点各自裁剪),配置保留。
    */
   max_context?: number | null;
+  /**
+   * 节点级**单次 LLM 调用**超时(秒;A 批 A1;30-3600,缺省 = 沿用宿主缺省 300 秒看门狗)。
+   * 语义:覆盖本节点每次调用的时间预算——可收紧(如 60)也可放宽(如 900);
+   * 宽松档的工具循环**逐轮**各按它计(每轮一次调用,与全局看门狗同一粒度)。
+   * 超时 = 本节点失败,**不自动重试**(重试是 `max_retries` 的显式配置)。
+   * 挂载子流程的节点上本字段被旁路(子图各节点各自计时),配置保留。
+   */
+  call_timeout_secs?: number | null;
+  /**
+   * 节点级**空产出重试次数**(A 批 A2;1-5 = 额外尝试上限,总尝试 = 1 + n;
+   * 缺省/无值 = 不重试,与 A 批之前逐字节一致)。
+   * 语义:**只重试产出为空**的尝试;连接失败/超时/解析错误等硬错误一律不重试;
+   * 每次尝试各记一行调用记录,重试前输出预算翻倍(封顶 131072)。
+   * 挂载子流程的节点上本字段被旁路(子图各节点各自重试),配置保留。
+   */
+  max_retries?: number | null;
 }
 
 /** 自定义执行流程配置(单个流程,data/agent_flows.json 流程库中的一项) */
@@ -836,9 +866,21 @@ export interface FlowIdRemap {
 
 /** 导入报告(二维批次 7a):导入 N 个 / 跳过 M 个(内容已存在)/ 其中 K 个分配了新 id */
 export interface FlowImportReport {
+  /** 本次写入库的流程数(新增 + 覆盖) */
   imported: number;
   skipped: number;
   renamed: FlowIdRemap[];
+  /**
+   * 被**覆盖**的流程(A 批 B4;仅 `on_conflict=replace` 会非空)。
+   * 覆盖保留 id(引用不破),故只有 id 与名称,没有「谁变成了谁」的映射。
+   */
+  replaced: FlowReplacedFlow[];
+}
+
+/** 被覆盖的流程(A 批 B4):覆盖保留 id,故只记 id 与展示名 */
+export interface FlowReplacedFlow {
+  id: string;
+  name: string;
 }
 
 /**
@@ -954,6 +996,15 @@ export interface TaskRecord {
    * (根流程自身不可被调用,创建时后端即 400)。
    */
   flow_ids?: string[] | null;
+  /**
+   * 任务**逐任务选用连接**(B 批 B1;空/缺省 = 跟随设置的默认连接,与 B 批之前一致)。
+   *
+   * 语义:该任务**全部** LLM 调用的缺省连接(节点级 `connection_id` 优先)。
+   * 应用于全部任务模式(规划 / 步骤 / 汇总 / 工具循环 / 自定义节点)——它绑的是
+   * provider 而不是编排。创建期后端即校验「引用存在且启用」(不存在/停用 → 400 点名连接);
+   * 任务不可跨机搬运,故不像流程那样留到运行期才报错。
+   */
+  connection_id?: string | null;
 }
 
 /**

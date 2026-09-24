@@ -44,6 +44,8 @@ const h = vi.hoisted(() => ({
   createTaskFlowIds: [] as (string | undefined)[],
   /** createTask 收到的 flow_ids 参数序列(二维批次 7b 对比名单透传断言用) */
   createTaskFlowIdLists: [] as (string[] | undefined)[],
+  /** createTask 收到的 connection_id 参数序列(B 批 B1 逐任务选用连接透传断言用) */
+  createTaskConnectionIds: [] as (string | undefined)[],
   /** approveTask 收到的 (id, plan) 参数序列(批次 4 批准断言用) */
   approveCalls: [] as Array<{ id: string; plan?: TaskStep[] }>,
   /** followupTask 收到的 (id, content, mode) 参数序列(批次 R2a;R2b+ 扩 mode) */
@@ -93,10 +95,12 @@ vi.mock('../api', async (importOriginal) => {
         _character?: string,
         flowId?: string,
         flowIds?: string[],
+        connectionId?: string,
       ) => {
         h.createTaskModes.push(taskMode);
         h.createTaskFlowIds.push(flowId);
         h.createTaskFlowIdLists.push(flowIds);
+        h.createTaskConnectionIds.push(connectionId);
         return makeTask('pending', title);
       },
     ),
@@ -561,6 +565,7 @@ describe('批次 4 六模式:taskRunMode / approveTask / 新事件分支', () =>
     h.createTaskModes = [];
     h.createTaskFlowIds = [];
     h.createTaskFlowIdLists = [];
+    h.createTaskConnectionIds = [];
     h.approveCalls = [];
     h.followupCalls = [];
     h.planChatCalls = [];
@@ -693,6 +698,55 @@ describe('批次 4 六模式:taskRunMode / approveTask / 新事件分支', () =>
     store.taskFlowIds = [];
     await store.createTask('空名单目标');
     expect(h.createTaskFlowIdLists[3], '空名单不下发 flow_ids').toBeUndefined();
+  });
+
+  // ===== B 批 B1:逐任务选用连接(connection_id)=====
+
+  it('taskConnectionId 缺省为空(= 跟随设置的默认连接);写入持久化到 kedai.taskConnectionId.v1', async () => {
+    const store = useTaskStore();
+    expect(store.taskConnectionId, '缺省不指定连接').toBe('');
+
+    store.taskConnectionId = 'conn-b';
+    await flush(); // watch 持久化
+    expect(memStorage.get('kedai.taskConnectionId.v1')).toBe('conn-b');
+
+    // 选回默认连接:落盘键应被移除(与「未指定」保持同一种表示)
+    store.taskConnectionId = '';
+    await flush();
+    expect(memStorage.has('kedai.taskConnectionId.v1'), '空值应清掉持久化键').toBe(false);
+  });
+
+  it('localStorage 中的连接在 store 初始化时恢复(连接列表是否加载不影响取值)', async () => {
+    memStorage.set('kedai.taskConnectionId.v1', 'conn-restored');
+    setActivePinia(createPinia());
+    expect(useTaskStore().taskConnectionId, '刷新后应保持上次选择').toBe('conn-restored');
+
+    // 空白值按未指定处理;失效判定在组件里做(拉取成功且未命中才重置)
+    memStorage.set('kedai.taskConnectionId.v1', '  ');
+    setActivePinia(createPinia());
+    expect(useTaskStore().taskConnectionId).toBe('');
+  });
+
+  it('connection_id 仅非空时下发,且**与任务模式无关**(六模式都吃:它绑 provider 不绑编排)', async () => {
+    const store = useTaskStore();
+    // 缺省:不下发该键(旧客户端请求体逐字节不变)
+    await store.createTask('默认连接目标');
+    expect(h.createTaskConnectionIds[0], '缺省不下发 connection_id').toBeUndefined();
+
+    // 指定连接:legacy 下发
+    store.taskConnectionId = 'conn-b';
+    await store.createTask('指定连接目标');
+    expect(h.createTaskConnectionIds[1], '指定连接应透传').toBe('conn-b');
+
+    // 自定义流程模式下同样下发(与 flow_id 的模式门控**不同**,不做模式判断)
+    store.taskRunMode = 'custom';
+    await store.createTask('自定义流程 + 指定连接');
+    expect(h.createTaskConnectionIds[2], 'custom 模式也应透传 connection_id').toBe('conn-b');
+
+    // 清空选择:此后不再下发
+    store.taskConnectionId = '';
+    await store.createTask('清空后');
+    expect(h.createTaskConnectionIds[3]).toBeUndefined();
   });
 
   it('approveTask 透传 (id, plan) 并在成功后刷新任务详情;不给 plan 时 plan 为 undefined', async () => {

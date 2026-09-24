@@ -19,6 +19,7 @@ const store = useAppStore();
 // 生成参数直接绑定 store(storeToRefs),与 useGenerationParams 内部保存逻辑读写同一 store
 const {
   temperature, topP, maxTokens, maxContextTokens, maxToolRounds,
+  maxFlowCallDepth, maxFlowCallsPerTask, defaultNodeMaxContext,
   toolHistoryKeepRounds, toolHistoryBudgetTokens,
   sessionTokenBudget, sessionBudgetAction,
   loopGuardSemanticWindow, loopGuardSemanticMinCalls, loopGuardSemanticMaxDistinct,
@@ -102,6 +103,49 @@ const { tempLabel, topPLabel, ctxLabel, saveParams, paramsMsg, saveParamsNow } =
           title="AGENT/CUSTOM 模式工具循环轮次上限(每轮可执行多个工具调用;默认 32)"
         />
         <span class="sv-note">AGENT/CUSTOM 工具循环轮次上限(1-200,默认 32)</span>
+      </div>
+      <!-- 流程调用闸与节点默认上下文(A 批 A3/A4):三者都是**任务侧**设置
+           (服务端 `apply!(s, is_task, …)` 落在任务覆盖层),角色扮演侧不受影响。
+           缺省值全部等于 A 批之前的行为:深度 2 / 每任务 8 / 不裁剪(0)。 -->
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">流程调用深度</label>
+        <input
+          v-model.number="maxFlowCallDepth"
+          type="number"
+          min="1"
+          max="5"
+          step="1"
+          class="sv-input inject-num"
+          title="任务里节点用 run_flow 工具逐层调用流程的嵌套深度上限(1-5,默认 2);静态子流程(sub_flow_id)的嵌套上限另有 3 层的结构限制"
+        />
+        <span class="sv-note">任务侧:流程动态调用嵌套深度(1-5,默认 2)</span>
+      </div>
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">每任务调用上限</label>
+        <input
+          v-model.number="maxFlowCallsPerTask"
+          type="number"
+          min="1"
+          max="64"
+          step="1"
+          class="sv-input inject-num"
+          title="单个任务内流程调用(run_flow)的次数上限(1-64,默认 8);达到后该任务不再允许新的流程调用"
+        />
+        <span class="sv-note">任务侧:单个任务的流程调用次数上限(1-64,默认 8)</span>
+      </div>
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">节点默认上下文</label>
+        <input
+          v-model.number="defaultNodeMaxContext"
+          type="number"
+          min="0"
+          max="1048576"
+          step="1"
+          class="sv-input inject-num"
+          placeholder="0 = 不裁剪"
+          title="节点自己没写「上下文上限」时用的默认 token 上限(0 = 不裁剪,默认;否则 256-1048576);节点级配置优先"
+        />
+        <span class="sv-note">任务侧:节点未单独设置时的输入 token 上限(0 = 不裁剪,否则 256-1048576)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">工具历史保留轮数</label>

@@ -271,7 +271,14 @@ export function outputStepName(steps: AgentFlowStep[]): string | null {
   return pick ? pick.name || pick.id : null;
 }
 
-/** 二维流程的整体提示(线性流程返回 null,不给用户增加噪音) */
+/**
+ * 二维流程的整体提示(线性流程返回 null,不给用户增加噪音)。
+ *
+ * B 批 B2:并行不只是「快」——它是**成本**变化。同一层最多 N 个节点同时跑,
+ * 每个节点各自发起自己的模型调用,故 token 消耗随之成倍增加(嵌套子流程时还会按
+ * 层数相乘)。此前只写「最多 N 个同时跑」,用户读到的是性能提示而非成本提示;
+ * 这里把成本口径**显式**写进同一句(AgentFlowSection 的 note 是另一处文案,不改)。
+ */
 export function graphHint(steps: AgentFlowStep[], maxParallel?: number | null): string | null {
   if (isLinearCompat(steps)) return null;
   if (computeLevels(steps) === null) {
@@ -280,7 +287,11 @@ export function graphHint(steps: AgentFlowStep[], maxParallel?: number | null): 
   const cap = typeof maxParallel === 'number' && maxParallel > 0 ? maxParallel : 2;
   const output = outputStepName(steps);
   const tail = output ? `,成果取「${output}」的产出` : '';
-  return `二维流程:同一层的节点可并行执行(最多 ${cap} 个同时跑)${tail}。`;
+  return (
+    `二维流程:同一层的节点可并行执行(最多 ${cap} 个同时跑)${tail};` +
+    `并行会成倍消耗 token——同一层最多 ${cap} 个节点同时跑,每个节点各发起自己的模型调用,` +
+    'token 消耗随之成倍增加。'
+  );
 }
 
 // ---------- 静态子图(二维批次 6b:节点挂载子流程) ----------
