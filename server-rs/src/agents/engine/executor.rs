@@ -491,7 +491,10 @@ fn is_truncated_tool_call_error(err: &str) -> bool {
 /// agent_session 为 None 表示任务模式(不建影子 agent_sessions 行,
 /// 工具授权闸门:替代裸白名单,把「名单内放行」与「名单外如何处理」分开表达。
 /// - `whitelist`:None = 非白名单模式(未放行工具走授权等待);
-///   Some([]) = 全量放行;Some(list) = 仅名单内工具放行。
+///   Some(list) = 仅名单内工具放行,**空名单 = 拒绝一切**。
+///   名单由「本轮下发的工具集」派生,空集即「该节点一个工具都不该被调用」;
+///   旧语义「空 = 全量放行」是 fail-open 的越权面(见 `遗留.md` IFW-12 附带发现,
+///   2026-09-24 修正)。
 /// - `no_ui_authorization`:true = 未放行工具立即拒绝并回灌错误,不进入授权等待。
 ///   任务模式没有 UI 授权上下文,若走等待会空等 300 秒超时,故必须置 true。
 #[derive(Clone, Copy)]
@@ -517,16 +520,21 @@ impl<'a> ToolGate<'a> {
         }
     }
 
-    /// 该工具是否被名单放行(空名单 = 全量放行)
+    /// 该工具是否被名单放行。
+    ///
+    /// **空名单不放行任何工具**:名单由「本轮下发的工具集」派生,空集意味着该节点
+    /// 一个工具都没下发,此时放行一切与下发意图相反——模型臆造的工具调用会绕过
+    /// 策略剔除被执行(fail-open;任务策略 all 时下发集本身非空,不依赖该语义)。
     fn authorizes(&self, name: &str) -> bool {
         self.whitelist
-            .is_some_and(|wl| wl.is_empty() || wl.iter().any(|n| n == name))
+            .is_some_and(|wl| wl.iter().any(|n| n == name))
     }
 
     /// 该工具是否被闸门硬性排除。仅对「有名单 + 不等待授权」的路径成立(任务模式):
     /// 名单是能力的硬边界,不在名单内的工具必须拒绝——否则文件规则可能因「宽松模式
     /// 写文件放行」而放过被任务策略排除的危险工具(模型幻觉调用即越权)。
     /// 聊天路径(no_ui_authorization=false)不硬性排除:名单外工具走授权等待,与改造前一致。
+    /// 空名单同样走本判定(拒绝一切)——这正是 2026-09-24 修正的形态。
     fn excludes(&self, name: &str) -> bool {
         self.no_ui_authorization && self.whitelist.is_some() && !self.authorizes(name)
     }
@@ -1532,12 +1540,13 @@ mod tests {
         assert!(!ToolGate::wait().excludes("write"));
     }
 
-    /// 空名单 = 全量放行(任务策略 all),不排除任何工具
+    /// 空名单 = 拒绝一切(2026-09-24 修正)。回归用例——旧语义「空 = 全量放行」曾让
+    /// `custom` 节点在「策略 ∩ 白名单 = 空集」时退化成全开:模型臆造的工具调用被放行。
     #[test]
-    fn empty_whitelist_authorizes_all() {
+    fn empty_whitelist_denies_all() {
         let gate = ToolGate::listed(&[]);
-        assert!(!gate.excludes("write"));
-        assert!(gate.authorizes("write"));
+        assert!(gate.excludes("write"), "空名单必须硬性排除一切工具");
+        assert!(!gate.authorizes("write"));
     }
 
     #[test]
