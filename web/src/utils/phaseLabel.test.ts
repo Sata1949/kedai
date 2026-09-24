@@ -57,6 +57,24 @@ describe('phaseText 阶段中文映射', () => {
     expect(phaseText('subflow.1.x', 0)).toBe('子流程(#2›x 内) #1');
     expect(phaseText('subflow.x')).not.toContain('NaN');
   });
+
+  it('被调流程(对比模式):`d<n>` 段渲染为调用序号,混入的子图父下标段单独标注', () => {
+    expect(phaseText('call', 0)).toBe('被调流程 #1');
+    expect(phaseText('call.d1', 2)).toBe('被调流程(调用#1 内) #3');
+    // 嵌套动态调用:`d1` 层里的节点又调了一次
+    expect(phaseText('call.d1.d2', 0)).toBe('被调流程(调用#1›调用#2 内) #1');
+    // 宿主在静态子图内发起调用:路径前缀是当时的父下标链
+    expect(phaseText('call.3.d1', 0)).toBe('被调流程(#4›调用#1 内) #1');
+    expect(phaseText('call.2')).toBe('被调流程(#3 内)');
+  });
+
+  it('被调流程内部的静态子图(phase 仍是 subflow 前缀)与 call 共用同一套段渲染', () => {
+    // 后端记账:被调流程内挂的子图记 `subflow.<含 d 段的路径>`(custom.rs 的 phase_for_path)
+    expect(phaseText('subflow.d1.2', 1)).toBe('子流程(调用#1›#3 内) #2');
+    // 脏数据兜底同 subflow 分支:段原样回退,不渲染 NaN
+    expect(phaseText('call.x')).toBe('被调流程(x 内)');
+    expect(phaseText('call.x')).not.toContain('NaN');
+  });
 });
 
 describe('bufferLabel 缓冲 key → 标签', () => {
@@ -64,6 +82,7 @@ describe('bufferLabel 缓冲 key → 标签', () => {
     expect(bufferLabel('planner:')).toBe('规划');
     expect(bufferLabel('step:1')).toBe('步骤 #2');
     expect(bufferLabel('subflow.1:0')).toBe('子流程(#2 内) #1');
+    expect(bufferLabel('call.d1:0')).toBe('被调流程(调用#1 内) #1');
   });
 
   it('步骤名只在 step/agent 阶段生效,并按 key 里的下标取值', () => {

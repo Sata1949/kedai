@@ -11,6 +11,7 @@ import { splitTaskResult } from '../taskResult';
 import { taskStatusClass as statusClass, taskStatusLabel as statusLabel } from '../taskStatus';
 import { bufferLabel } from '../utils/phaseLabel';
 import { badgeFlowSource, planRowBadges, type NodeBadge } from '../utils/flowNodeBadges';
+import { callableFlows } from '../utils/flowCallStats';
 import { APPROVE_EXEC_MODE_LABELS, APPROVE_EXEC_MODE_ORDER, MODE_LABELS, messageKindLabel } from '../api/labels';
 import type { TaskApproveExecMode, TaskRecord, TaskRunMode, TaskStep } from '../api';
 
@@ -100,16 +101,53 @@ const taskFlowLabel = computed<string | null>(() => {
 });
 
 /**
- * 对比模式徽标(二维批次 7b):任务带可调用流程名单时显示「对比 · 可调用 N 个流程」。
+ * 对比模式的实际可调用集(二维批次 7b 收口):名单 ∩ 冻结闭包 − 根流程,**与后端运行期
+ * 取用同一口径**(`utils/flowCallStats::callableFlows`,对齐 `flow_call::callable_ids`)。
  *
- * N 取创建时勾选的名单长度(`task.flow_ids`);运行期实际可调用集还会扣除根流程、
- * 剔除已不可用的成员(后端判定),故文案是「可调用 N 个」而不是「调用过 N 个」。
+ * 数据源与节点徽标同一份(快照优先、当前库兜底):未绑定任务的失效成员在快照构造时
+ * 就已被剔除,故按快照重算即「本轮实际可调用」。两个数据源都取不到(库未加载/为空)
+ * 时返回 null,由展示层回退到名单条数,不猜。
+ */
+const compareCallable = computed(() => {
+  if (taskMode.value !== 'custom') return null;
+  const ids = currentTask.value?.task.flow_ids ?? [];
+  if (ids.length === 0) return null;
+  const source = badgeFlowSource(currentTask.value?.flow_snapshot, agentFlowLibrary.value);
+  return source ? callableFlows(ids, source.flows, source.rootId) : null;
+});
+
+/**
+ * 对比模式徽标(二维批次 7b;2026-09-24 改按**实际**可调用集显示)。
+ *
+ * 旧口径 N 取创建时勾选的名单长度(`task.flow_ids`),而运行期还会剔除根流程与已不可用的
+ * 成员——极端情形下数字会大于实际可调用数(遗留.md IFW-12 边界 2)。现在:有快照就以重算
+ * 结果为准,与名单条数不等时把差额一并说明;两个数据源都取不到时才回退名单条数。
  */
 const taskCompareLabel = computed<string | null>(() => {
   if (taskMode.value !== 'custom') return null;
   const ids = currentTask.value?.task.flow_ids ?? [];
   if (ids.length === 0) return null;
-  return `对比 · 可调用 ${ids.length} 个流程`;
+  // 与后端同口径地去重去空后再数「名单几个」:重复/空白项不该被算成两个成员
+  const declared = new Set(ids.map((s) => s.trim()).filter((s) => s !== '')).size;
+  const callable = compareCallable.value;
+  if (callable === null) return `对比 · 可调用 ${declared} 个流程`;
+  const base = `对比 · 可调用 ${callable.length} 个流程`;
+  const missing = declared - callable.length;
+  return missing > 0 ? `${base}(名单 ${declared} 个,${missing} 个本轮不可用)` : base;
+});
+
+/** 对比模式徽标的悬停说明:列出本轮**实际**可调用流程名(取不到名则退回 id) */
+const taskCompareTitle = computed<string>(() => {
+  const head =
+    '对比模式:根流程照常执行,名单内流程作为工具释放给流程节点,由模型在工具循环里自主调用并取回成果';
+  const callable = compareCallable.value;
+  if (!callable || callable.length === 0) return head;
+  const names = callable
+    .slice(0, 6)
+    .map((f) => f.name?.trim() || f.id || '')
+    .filter((n) => n !== '');
+  const more = callable.length > names.length ? ` 等 ${callable.length} 个` : '';
+  return `${head}。本轮可调用:${names.join('、')}${more}`;
 });
 
 /**
@@ -530,11 +568,11 @@ async function removeTask(task: TaskRecord): Promise<void> {
               title="本任务绑定/使用的流程(绑定即冻结:创建时的编排;未绑定 = 跟随当前流程)"
             >流程:{{ taskFlowLabel }}</span>
             <!-- 对比模式(二维批次 7b):根流程照常执行,名单内流程额外作为 run_flow 工具
-                 释放给宽松节点,由模型自主调用、取回成果 -->
+                 释放给宽松节点,由模型自主调用、取回成果。数字按**本轮实际**可调用集显示 -->
             <span
               v-if="taskCompareLabel"
               class="sv-tag sm"
-              title="对比模式:根流程照常执行,名单内流程作为工具释放给流程节点,由模型在工具循环里自主调用并取回成果"
+              :title="taskCompareTitle"
             >{{ taskCompareLabel }}</span>
             <span v-if="taskTotalTokens > 0" class="sv-task-usage">累计 token {{ taskTotalTokens.toLocaleString() }}</span>
             <span v-if="currentTask.task.error" class="sv-task-error">{{ currentTask.task.error }}</span>

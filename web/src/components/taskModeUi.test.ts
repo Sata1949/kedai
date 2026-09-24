@@ -6,7 +6,7 @@ import { useTaskStore } from '../stores/task';
 import { useGenSettingsStore } from '../stores/genSettings';
 import TaskBoard from './TaskBoard.vue';
 import TaskModeSelect from './TaskModeSelect.vue';
-import type { AgentFlowLibrary, TaskDetail, TaskRecord, TaskRunMode, TaskStep, TaskStatus } from '../api';
+import type { AgentFlowConfig, AgentFlowLibrary, TaskDetail, TaskRecord, TaskRunMode, TaskStep, TaskStatus } from '../api';
 
 // 批次 4 六模式 UI 冒烟测试:项目无 jsdom / @vue/test-utils,沿用 settingsSections.test.ts 的
 // SSR 模式(createSSRApp + renderToString)。SSR 不触发 onMounted,组件不发请求;
@@ -41,6 +41,11 @@ function makeTask(status: TaskStatus, mode: TaskRunMode, plan: TaskStep[] = [], 
 
 function makeDetail(task: TaskRecord): TaskDetail {
   return { task, subtasks: [], usage_total: { prompt_tokens: 0, completion_tokens: 0, reasoning_tokens: 0 } };
+}
+
+/** 快照闭包里的流程(只有 id/name 参与对比徽标的重算) */
+function flowCfg(id: string, name: string): AgentFlowConfig {
+  return { id, name, enabled: true, steps: [] };
 }
 
 /** 以 pinia 上下文 SSR 渲染组件为 HTML 字符串;seed 在渲染前对 task store 播种状态 */
@@ -226,6 +231,32 @@ describe('TaskBoard 批次 4:solo/multi 调用情况入口与 custom 步骤进�
     soloTask.flow_ids = ['f-1'];
     const soloHtml = await render(TaskBoard, (p) => seedCurrentTask(p, makeDetail(soloTask)));
     expect(soloHtml).not.toContain('对比 · 可调用');
+  });
+
+  it('对比徽标按**本轮实际**可调用集显示:快照闭包外的成员被扣掉并把差额一并说明', async () => {
+    // 未绑定任务:成员在创建后被删/停用 → 已从快照闭包剔除(后端宽松口径),
+    // 旧口径(直接用名单长度)会显示 3 个,与实际可调用的 2 个不符(遗留.md IFW-12 边界 2)
+    const task = makeTask('running', 'custom');
+    task.flow_ids = ['f-1', 'f-2', 'gone'];
+    const detail = makeDetail(task);
+    detail.flow_snapshot = {
+      root_id: 'root',
+      flows: [flowCfg('root', '根流程'), flowCfg('f-1', '甲'), flowCfg('f-2', '乙')],
+    };
+    const html = await render(TaskBoard, (p) => seedCurrentTask(p, detail));
+    expect(html).toContain('对比 · 可调用 2 个流程(名单 3 个,1 个本轮不可用)');
+    // 悬停说明列出实际可调用流程名(取不到名才退回 id)
+    expect(html).toContain('本轮可调用:甲、乙');
+  });
+
+  it('名单含根流程时同样扣掉:徽标数字即运行期实际可调用集', async () => {
+    // 未绑定任务 + 跟随当前流程:根是哪一份开跑才定,名单里重复的根流程由运行期扣除
+    const task = makeTask('running', 'custom');
+    task.flow_ids = ['root', 'f-1'];
+    const detail = makeDetail(task);
+    detail.flow_snapshot = { root_id: 'root', flows: [flowCfg('root', '根流程'), flowCfg('f-1', '甲')] };
+    const html = await render(TaskBoard, (p) => seedCurrentTask(p, detail));
+    expect(html).toContain('对比 · 可调用 1 个流程(名单 2 个,1 个本轮不可用)');
   });
 
   it('legacy 模式渲染保持现状(无批准区/分工卡/调用面板入口)', async () => {

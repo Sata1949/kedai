@@ -1039,10 +1039,14 @@ export interface TaskLlmCall {
   /**
    * 调用归属阶段。**不含冒号**(前端流式缓冲 key 以第一个冒号切分 phase 与步骤号):
    * `step` = 外层流程节点;`subflow.<父节点下标链>` = 静态子图的节点
-   * (如 `subflow.1` = 「外层下标 1 的节点挂载的子流程」里的节点,`subflow.1.2` 再嵌一层)。
+   * (如 `subflow.1` = 「外层下标 1 的节点挂载的子流程」里的节点,`subflow.1.2` 再嵌一层);
+   * `call.<路径>` = 对比模式**被调流程**的节点(二维批次 7b;路径段 `d<n>` = 本层第 n 次
+   * 动态调用,纯数字 = 宿主当时在静态子图内的父下标)。被调流程内部的静态子图记为
+   * `subflow.<含 d 段的路径>`(如 `subflow.d1.2`)——「被调流程花了多少」须把这两类都算上
+   * (判定收在 `utils/flowCallStats::isDynamicPhase`)。
    */
   phase: string;
-  /** 步骤序号(0 起,展示时 +1):step = 节点在外层流程中的下标;subflow.* = 节点在本层子图中的下标 */
+  /** 步骤序号(0 起,展示时 +1):step = 节点在外层流程中的下标;subflow 与 call 前缀的 = 节点在本层图(子图 / 被调流程)中的下标 */
   step_index: number | null;
   model: string;
   /** 提示词摘要(面板展开查看) */

@@ -8,6 +8,7 @@ import { computed, onMounted, ref, watch } from 'vue';
 import { useAppStore } from '../store';
 import { storeToRefs } from 'pinia';
 import { bufferLabel, phaseText as labelPhase } from '../utils/phaseLabel';
+import { dynamicCallStats } from '../utils/flowCallStats';
 import type { TaskLlmCall } from '../api';
 
 const store = useAppStore();
@@ -34,6 +35,13 @@ function phaseText(phase: string, stepIndex?: number | null): string {
 function phaseLabel(call: TaskLlmCall): string {
   return phaseText(call.phase, call.step_index);
 }
+
+/**
+ * 被调流程(对比模式)的调用汇总。记账本就在 `/calls` 全量行里,但此前要把它们挑出来
+ * 只能手动按 `call.` 前缀累加(遗留.md IFW-12 边界 1);口径(含被调流程内部的静态子图
+ * `subflow.<含 d 段路径>`)收在 `utils/flowCallStats`,这里只做展示。
+ */
+const dynamicStats = computed(() => dynamicCallStats(taskCalls.value));
 
 /**
  * 「进行中」伪行(批次 R4 流式输出):store.liveBuffers 非空 = 有调用正在流式生成
@@ -119,6 +127,12 @@ watch(callTraceOpen, (open) => {
     <template v-if="appMode === 'task'">
       <div>
         <div class="sv-agent-section-label">LLM 调用({{ taskCalls.length }})</div>
+        <!-- 被调流程单列(二维批次 7b 收口):动态调用层的次数与 token 一眼可见,
+             不必再按 phase 前缀手动累加 -->
+        <p v-if="dynamicStats.calls > 0" class="sv-note-mini">
+          其中被调流程(对比模式){{ dynamicStats.calls }} 次调用 ·
+          {{ dynamicStats.tokens.toLocaleString() }} tokens
+        </p>
         <!-- 进行中伪行(批次 R4):流式中的调用置顶显示;落库后伪行消失、正式行出现 -->
         <div
           v-for="row in liveRows"

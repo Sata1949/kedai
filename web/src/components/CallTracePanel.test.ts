@@ -96,6 +96,31 @@ describe('CallTracePanel(调用追踪内容,面板合并后为 AgentPanel「调�
     expect(html).not.toContain('提示词摘要');
   });
 
+  it('被调流程小结(二维批次 7b 收口):动态层次数与 token 单列,无动态调用时不显示', async () => {
+    const html = await render((store) => {
+      store.appMode = 'task';
+      store.currentTaskId = 't1';
+      store.taskCalls = [
+        makeCall(), // 入口层 step:不计入被调流程
+        makeCall({ id: 'c2', phase: 'call.d1', step_index: 0 }),
+        // 被调流程**内部**挂的静态子图:phase 仍是 subflow 前缀,但路径含 d 段 → 必须计入
+        makeCall({ id: 'c3', phase: 'subflow.d1.2', step_index: 1 }),
+      ];
+    });
+    expect(html).toContain('其中被调流程(对比模式)2 次调用');
+    expect(html).toContain('60'); // 两次各 10 + 20
+    // 被调流程的调用行走 call 分支的中文标签(不再裸露 `call.d1`)
+    expect(html).toContain('被调流程(调用#1 内)');
+    expect(html).not.toContain('call.d1');
+
+    const plain = await render((store) => {
+      store.appMode = 'task';
+      store.currentTaskId = 't1';
+      store.taskCalls = [makeCall()];
+    });
+    expect(plain).not.toContain('其中被调流程');
+  });
+
   it('聊天模式有推理链与工具调用时渲染对应内容', async () => {
     const html = await render((store) => {
       store.appMode = 'roleplay';
