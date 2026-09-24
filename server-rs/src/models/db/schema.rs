@@ -131,7 +131,11 @@ CREATE TABLE IF NOT EXISTS tasks (
   -- 对比模式的可调用流程名单(JSON 字符串数组,二维批次 7b;NULL = 强制模式)。
   -- 非空即「根流程照常跑 + 名单内流程作为 run_flow 工具释放给宽松节点」;
   -- 旧库经 migration::ensure_tasks_flow_columns 幂等补列(同属表尾追加)。
-  flow_ids     TEXT
+  flow_ids     TEXT,
+  -- 任务级连接的 id(NULL = 跟随设置的默认连接;A 批 B1)。语义:该任务所有 LLM 调用的
+  -- **缺省连接**(节点级 connection_id 优先);指向 settings.json 的 connections[].id。
+  -- 旧库经 migration::ensure_tasks_flow_columns 幂等补列(同属表尾追加,顺序不可调换)。
+  connection_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
 -- 任务列表按角色 / 状态过滤(2026-09-13 批次 3 补;旧库经 ensure_perf_indexes 补建)

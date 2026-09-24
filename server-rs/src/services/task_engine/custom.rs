@@ -343,8 +343,12 @@ impl CustomExecutor {
             // 与「严格档保留工具配置」同一纪律——配置保留、切换档位即生效。
             max_tool_rounds: Some(step.max_tool_rounds.unwrap_or(settings.max_tool_rounds)),
             tool_choice,
-            // 节点级连接(二维批次 5b):run_tool_loop 内层经 engine 单点解析
-            connection_id: step.connection_ref().map(str::to_string),
+            // 连接:节点级(二维批次 5b)优先,缺省回退**任务级**(A 批 B1);
+            // 两者皆空 = 默认连接(run_tool_loop 内层经 engine 单点解析)
+            connection_id: step
+                .connection_ref()
+                .map(str::to_string)
+                .or_else(|| ctx.connection_id.clone()),
             parallel_tool_calls: step.parallel_tool_calls,
         };
         // 会话 id 保留既有形状 `task:{任务 id}:step:{下标}`(入口流程逐字节不变);
@@ -548,9 +552,17 @@ impl CustomExecutor {
         // 解析结果同时给出本节点的真实模型,供纯生成与工具循环两条路径的调用追踪使用。
         // 挂载子流程的节点在上一行已返回:connection_id 对它**旁路**(子图各节点各自解析),
         // 故这里不会因一个被旁路的失效引用而误伤挂载节点。
+        // 生效连接(A 批 B1):节点级优先,缺省回退**任务级**;两者皆空 = 默认连接。
+        // 先解析一次即得本节点真实模型——必须用「生效连接」而不是只看节点字段,否则
+        // 任务级连接的场景下调用追踪会记成默认连接的模型(记什么用什么)。
+        // 引用失效在此**立即**失败(不静默回退),与 5b 口径一致。
+        let effective_connection = step
+            .connection_ref()
+            .map(str::to_string)
+            .or_else(|| ctx.connection_id.clone());
         let (_, node_model) = self
             .engine
-            .resolve_connector(step.connection_ref())
+            .resolve_connector(effective_connection.as_deref())
             .await
             .map_err(|e| format!("步骤「{}」:{}", step.name, e))?;
         let user = self.apply_step_max_context(

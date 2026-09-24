@@ -32,4 +32,10 @@ pub(crate) struct TaskRunContext {
     /// 任务取消通道(TaskService cancel token 机制的接收端;true = 已请求停止)。
     /// 直接作为 run_tool_loop 的 abort 传入,stop 语义与 legacy/聊天路径一致。
     pub cancel: watch::Receiver<bool>,
+    /// **任务级连接**(A 批 B1;空 = 跟随设置的默认连接)。
+    ///
+    /// 用途:节点级 `PlanStep.connection_id` 缺省时,本任务的所有模型调用回退到它——
+    /// 消费点在「工具循环参数装配」这一处;纯生成路径不必看它,那条路径由
+    /// `TaskService::generate_text` 内部统一回退(单一出处,不两处各判一次)。
+    pub connection_id: Option<String>,
 }

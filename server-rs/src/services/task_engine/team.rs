@@ -554,6 +554,7 @@ impl TeamExecutor {
                 phase: "agent",
                 step_index: Some(step_idxs[k]),
                 label: format!("主 agent {n} 子目标 {}", k + 1),
+                connection_id: ctx.connection_id.clone(),
             };
             let result = run_agent_loop(
                 self.svc.clone(),
@@ -915,6 +916,7 @@ impl TeamExecutor {
                 executor_id: ctx.executor_id.clone(),
                 character_id: ctx.character_id.clone(),
                 cancel: ctx.cancel.clone(),
+                connection_id: ctx.connection_id.clone(),
             };
             let main = mains[i].clone();
             let step_idxs = step_ranges[i].clone();

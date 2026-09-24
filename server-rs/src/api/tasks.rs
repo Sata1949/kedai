@@ -45,6 +45,14 @@ pub struct CreateTaskBody {
     /// 非 custom 给了 → 400。成员须存在且启用,成员结构不合法同样 400(逐项点名)。
     #[serde(default)]
     pub flow_ids: Option<Vec<String>>,
+    /// **任务级连接**(A 批 B1;缺省 = 跟随设置的默认连接)。
+    ///
+    /// 语义:该任务**所有** LLM 调用的缺省连接(指向 `settings.json` 的 `connections[].id`),
+    /// 与 `task_mode` 无关(绑的是 provider,不是编排);节点级 `PlanStep.connection_id`
+    /// 仍然优先。创建期校验「存在且启用」,失败 400 并点名连接——任务不可跨机搬运,
+    /// 故不像流程库那样把引用校验推迟到运行期。运行期引用失效即明确报错,不静默回退。
+    #[serde(default)]
+    pub connection_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -105,6 +113,7 @@ pub async fn create(
     let character_id = body.character_id.clone();
     let flow_id = body.flow_id.clone();
     let flow_ids = body.flow_ids.clone();
+    let connection_id = body.connection_id.clone();
     match state
         .db_call(move || {
             svc.create(
@@ -114,6 +123,7 @@ pub async fn create(
                 mode,
                 flow_id.as_deref(),
                 flow_ids.as_deref(),
+                connection_id.as_deref(),
             )
         })
         .await
@@ -122,6 +132,38 @@ pub async fn create(
         Ok(Ok(task)) => Json(json!({ "ok": true, "task": task }))
             .into_response()
             .with_status(StatusCode::CREATED),
+        Ok(Err(e)) => validation(e),
+    }
+}
+
+/// POST /api/tasks/{id}/bind:改绑编排(A 批 B3)——全量替换 `flow_id` / `flow_ids`
+/// 并**重新冻结**快照(改绑即重冻结;历史 plan 行不动)。
+///
+/// 体语义:缺省/`null` 的 `flow_id` = 跟随当前流程(等价于解绑);`flow_ids: []` = 强制模式
+/// (清空名单)。两者都是**全量替换**——不设「缺键 = 不改」的第三种含义,避免歧义。
+#[derive(Deserialize)]
+pub struct BindTaskBody {
+    #[serde(default)]
+    pub flow_id: Option<String>,
+    #[serde(default)]
+    pub flow_ids: Vec<String>,
+}
+
+/// 改绑编排:仅 custom 模式、且非 planning/running/planned 态(进行中改绑会撕裂本轮快照)。
+pub async fn bind(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    JsonBody(body): JsonBody<BindTaskBody>,
+) -> Response {
+    let svc = state.tasks.clone();
+    match state
+        .db_call(move || svc.bind(&id, body.flow_id.as_deref(), &body.flow_ids))
+        .await
+    {
+        Err(e) => db_err(&e),
+        // 不存在 → 404(与 followup 同款:服务层只报语义错误,「查不到」由 API 定状态码)
+        Ok(Ok(None)) => not_found("任务不存在"),
+        Ok(Ok(Some(task))) => Json(json!({ "ok": true, "task": task })).into_response(),
         Ok(Err(e)) => validation(e),
     }
 }

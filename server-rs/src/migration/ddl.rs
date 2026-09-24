@@ -229,6 +229,11 @@ pub fn ensure_tasks_flow_columns(conn: &Connection) -> Result<(), String> {
         conn.execute("ALTER TABLE tasks ADD COLUMN flow_ids TEXT", [])
             .map_err(|e| format!("为 tasks 补 flow_ids 列失败: {e}"))?;
     }
+    // 任务级连接(A 批 B1):同样追加在表尾,与新版建表顺序一致(schema 归一化比对依赖)
+    if !existing.iter().any(|c| c == "connection_id") {
+        conn.execute("ALTER TABLE tasks ADD COLUMN connection_id TEXT", [])
+            .map_err(|e| format!("为 tasks 补 connection_id 列失败: {e}"))?;
+    }
     Ok(())
 }
 

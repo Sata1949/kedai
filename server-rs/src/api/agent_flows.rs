@@ -5,7 +5,7 @@
 use crate::api::app_state::AppState;
 use crate::api::json_body::JsonBody;
 use crate::api::{internal, validation};
-use crate::services::agent_flow_service::{AgentFlowConfig, AgentFlowLibrary};
+use crate::services::agent_flow_service::{AgentFlowConfig, AgentFlowLibrary, ImportConflictMode};
 use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -141,23 +141,37 @@ pub struct ImportFlowsBody {
     /// 搬运包里的入口流程 id(可选):导入后选中它(经重映射解析)
     #[serde(default)]
     pub root_id: Option<String>,
+    /// id 冲突处理(A 批 B4):`rename`(缺省,= 7a 行为,新增副本)/ `replace`(覆盖本库那份)。
+    /// 未知值**严格拒绝**(400)——覆盖是不可逆动作,静默回退到 rename 会让用户以为已覆盖。
+    #[serde(default)]
+    pub on_conflict: Option<String>,
 }
 
-/// POST /api/agent-flows/import:导入流程搬运包(二维批次 7a)。
+/// POST /api/agent-flows/import:导入流程搬运包(二维批次 7a;A 批 B4 加 `on_conflict`)。
 ///
-/// 语义:**只新增**——同 id 内容相同则跳过,同 id 内容不同则分配新 id 并改写批内引用,
-/// 绝不覆盖库里既有流程。校验在候选库上一次性完成,**失败 400 且库逐字节不变**(原子)。
-/// 成功 200:`{ok, report, library, config}`(report 供前端给出「导入 N / 跳过 M / 新增 id K」)。
+/// 语义:缺省**只新增**——同 id 内容相同则跳过,同 id 内容不同则分配新 id 并改写批内引用,
+/// 绝不覆盖库里既有流程;`on_conflict=replace` 时同 id 内容不同者**覆盖本库那一份**
+/// (id 不变,库中其它流程一律不动)。校验在候选库上一次性完成,
+/// **失败 400 且库逐字节不变**(原子)。
+/// 成功 200:`{ok, report, library, config}`(report 供前端给出「导入 N / 跳过 M / 新增 id K /
+/// 覆盖 J」)。
 pub async fn import_agent_flows(
     State(state): State<Arc<AppState>>,
     JsonBody(body): JsonBody<ImportFlowsBody>,
 ) -> Response {
+    let mode = match body.on_conflict.as_deref().map(str::trim) {
+        None | Some("") | Some("rename") => ImportConflictMode::Rename,
+        Some("replace") => ImportConflictMode::Replace,
+        Some(other) => {
+            return validation(format!("未知的冲突处理方式:{other}(可选:rename/replace)"))
+        }
+    };
     // B-1:import 内含全库校验 + 同步落盘,持锁 + 写文件整体挪阻塞线程池
     let flow = state.flow.clone();
     let result = state
         .db_call(move || {
             let mut svc = flow.lock().unwrap_or_else(|e| e.into_inner());
-            svc.import_bundle(body.flows, body.root_id.as_deref())
+            svc.import_bundle(body.flows, body.root_id.as_deref(), mode)
                 .map(|report| (report, svc.get_library().clone()))
         })
         .await;

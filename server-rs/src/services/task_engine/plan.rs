@@ -83,6 +83,7 @@ impl ApprovedPlanExecutor {
                 phase: "agent",
                 step_index: Some(i),
                 label: format!("步骤 {}", i + 1),
+                connection_id: ctx.connection_id.clone(),
             };
             match run_agent_loop(svc.clone(), self.engine.clone(), call, ctx.cancel.clone()).await {
                 Ok((text, usage)) => {

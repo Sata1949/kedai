@@ -940,3 +940,78 @@ async fn flow_bundle_export_defaults_to_whole_library() {
     assert_eq!(delete_flow(app, id).await, StatusCode::OK);
     reset_flow(app).await;
 }
+
+/// 导入覆盖模式(A 批 B4,端点级):`on_conflict=replace` 覆盖同 id 者、`replaced` 如实报告,
+/// 未知取值 400(覆盖不可逆,静默回退到 rename 会让用户以为已覆盖)。
+#[tokio::test]
+async fn flow_bundle_import_replace_overwrites_via_api() {
+    let _guard = test_lock().await;
+    let app = test_app();
+    reset_flow(app).await;
+    let id = "int-replace";
+    assert_eq!(
+        put_flow(app, movable_flow(id, "覆盖流程", "文件里的目标")).await,
+        StatusCode::OK
+    );
+    let (_, resp) = send_json(
+        app,
+        "GET",
+        &format!("/api/agent-flows/export?id={id}"),
+        json!({}),
+    )
+    .await;
+    let bundle = resp["bundle"].clone();
+
+    // 本机把同 id 的流程改掉(内容与文件不同)
+    assert_eq!(
+        put_flow(app, movable_flow(id, "覆盖流程", "本机改过的目标")).await,
+        StatusCode::OK
+    );
+
+    // 未知取值:严格拒绝(不静默按 rename 处理)
+    let (status, resp) = send_json(
+        app,
+        "POST",
+        "/api/agent-flows/import",
+        json!({ "flows": bundle["flows"], "root_id": id, "on_conflict": "overwrite" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "未知取值应 400: {resp}");
+    assert!(
+        resp["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("rename/replace"),
+        "文案应给出可选值: {resp}"
+    );
+
+    // replace:同 id 内容被**覆盖**(id 不变),报告里出现 replaced
+    let (status, resp) = send_json(
+        app,
+        "POST",
+        "/api/agent-flows/import",
+        json!({ "flows": bundle["flows"], "root_id": id, "on_conflict": "replace" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "resp: {resp}");
+    assert_eq!(resp["report"]["imported"], 1, "resp: {resp}");
+    assert!(
+        resp["report"]["renamed"].as_array().unwrap().is_empty(),
+        "覆盖模式不产生新 id: {resp}"
+    );
+    let replaced = resp["report"]["replaced"].as_array().unwrap();
+    assert_eq!(replaced.len(), 1, "resp: {resp}");
+    assert_eq!(replaced[0]["id"], id);
+    assert_eq!(replaced[0]["name"], "覆盖流程");
+
+    let flows = resp["library"]["flows"].as_array().unwrap().clone();
+    let hit: Vec<&Value> = flows.iter().filter(|f| f["id"] == id).collect();
+    assert_eq!(hit.len(), 1, "覆盖不是新增:同 id 只应有一份");
+    assert_eq!(
+        hit[0]["steps"][0]["goal"], "文件里的目标",
+        "内容应被文件覆盖(本机那次改动被替换——这正是覆盖模式的语义)"
+    );
+
+    delete_flow(app, id).await;
+    reset_flow(app).await;
+}

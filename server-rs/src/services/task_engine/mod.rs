@@ -188,6 +188,8 @@ impl TaskEngine {
             executor_id: task.executor_id.clone(),
             character_id: task.character_id.clone(),
             cancel: cancel.clone(),
+            // 任务级连接(A 批 B1):随上下文下传,供工具循环参数装配回退
+            connection_id: task.connection_id.clone(),
         };
         // 单一收尾出口(批次 B 依赖倒置):执行器返回终态值,引擎按值分派落库;
         // Err 分支兜底为 Failed(ended_by_cancel 以取消通道求值)。收尾判定所需的

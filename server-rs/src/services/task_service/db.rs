@@ -48,8 +48,8 @@ pub(super) fn recover_orphan_tasks(db: &Db) -> Vec<String> {
 }
 
 /// 任务主表列:0 id, 1 title, 2 status, 3 plan, 4 result, 5 error, 6 character_id,
-/// 7 created_at, 8 updated_at, 9 task_mode, 10 executor_id, 11 flow_id, 12 flow_ids
-/// (新增列一律追加在表尾,与 TASK_COLS 及建表顺序一致)
+/// 7 created_at, 8 updated_at, 9 task_mode, 10 executor_id, 11 flow_id, 12 flow_ids,
+/// 13 connection_id (新增列一律追加在表尾,与 TASK_COLS 及建表顺序一致)
 ///
 /// **有意不含 flow_snapshot**:它是 O(流程库) 体积的 JSON,而 TASK_COLS 被列表与详情
 /// 每次事件刷新都用;要读快照走 [`TaskService::flow_snapshot`](本文件的单列查询)。
@@ -82,11 +82,14 @@ pub(super) fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<TaskRecord> {
         executor_id: row.get(10)?,
         flow_id: row.get(11)?,
         flow_ids,
+        // 任务级连接(A 批 B1):纯 id 列,读取不做容错——引用失效由运行期按 5b 口径
+        // **明确报错**(不静默回退默认连接),与 flow_ids 的 JSON 解析容错不同源。
+        connection_id: row.get(13)?,
     })
 }
 
 pub(super) const TASK_COLS: &str = "id, title, status, plan, result, error, character_id, \
-     created_at, updated_at, task_mode, executor_id, flow_id, flow_ids";
+     created_at, updated_at, task_mode, executor_id, flow_id, flow_ids, connection_id";
 
 /// 按字符截断(中文安全,不切 char 边界;调用追踪摘要用)
 fn truncate_chars(s: &str, max: usize) -> String {

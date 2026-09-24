@@ -60,6 +60,8 @@ pub(crate) fn misc_routes() -> Router<Arc<AppState>> {
         .route("/api/tasks/{id}/followup", post(tasks::followup))
         // 批准环节规划对话(批次 R2b):planned 态按反馈修订计划,保持 planned 待重新批准
         .route("/api/tasks/{id}/plan-chat", post(tasks::plan_chat))
+        // 改绑编排(A 批 B3):custom 模式且非进行中,全量替换 flow_id/flow_ids 并重冻结快照
+        .route("/api/tasks/{id}/bind", post(tasks::bind))
         // 任务 LLM 调用追踪(批次 3「调用情况」面板全量补拉)
         .route("/api/tasks/{id}/calls", get(tasks::list_calls))
         // 音频播放器(bgm/ambient 双通道):读取 / 设置 / 播放列表

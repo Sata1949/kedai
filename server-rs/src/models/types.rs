@@ -587,6 +587,12 @@ pub enum TaskEventKind {
     ApprovalRequired,
     /// 流式正文增量(批次 R4;暂态事件不落库)
     Delta,
+    /// 编排绑定变更(A 批 B3:改绑流程/名单后**重新冻结**快照)。
+    ///
+    /// 与 `Status` / `Plan` 分开的原因:改绑既不是状态迁移也不是计划更新,它换的是
+    /// 「这个任务按哪份编排跑」与 `flow_snapshot`(任务看台的编排徽标据此渲染);
+    /// 复用 `Status` 会让「状态没变却收到状态事件」成为常态,读日志的人无从分辨。
+    FlowBound,
 }
 
 /// SSE 事件,serde 序列化为 {"type":"...", ...}
@@ -1230,6 +1236,17 @@ pub struct TaskRecord {
     /// (调用链环守卫必然拒绝,故创建期即 400)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow_ids: Option<Vec<String>>,
+    /// **任务级连接**(A 批 B1;空 = 跟随设置的默认连接,旧客户端/旧行零变化)。
+    ///
+    /// 语义:该任务**所有** LLM 调用的**缺省连接**(指向 `settings.json` 的
+    /// `connections[].id`);节点级 `PlanStep.connection_id` 仍然优先。与 `task_mode`
+    /// 无关——它绑的是 provider 而非编排,故六种模式一律适用。
+    ///
+    /// 创建期**校验引用存在且启用**(400 点名连接):任务不可跨机搬运(对照流程库的
+    /// 「保存期不校验引用」——那是为可移植性让路),即时校验更友好。运行期引用失效
+    /// (连接被删/被停用)按 5b 口径**明确报错,不静默回退默认连接**。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
 }
 
 fn task_default_status() -> TaskStatus {
@@ -1730,6 +1747,7 @@ mod tests {
             executor_id: None,
             flow_id: None,
             flow_ids: None,
+            connection_id: None,
         };
         let json = serde_json::to_string(&task).unwrap();
         assert!(!json.contains("flow_id"), "None 时不应落键: {json}");
@@ -1770,6 +1788,7 @@ mod tests {
             executor_id: None,
             flow_id: None,
             flow_ids: None,
+            connection_id: None,
         };
         let json = serde_json::to_string(&task).unwrap();
         assert!(!json.contains("flow_ids"), "None 时不应落键: {json}");

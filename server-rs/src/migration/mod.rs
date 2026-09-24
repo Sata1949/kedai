@@ -199,14 +199,16 @@ mod tests {
             .into_iter()
             .map(|c| c.name)
             .collect();
-        // 列序固定为 flow_id → flow_snapshot → flow_ids(与新建库建表顺序一致,schema 比对依赖)
+        // 列序固定为 flow_id → flow_snapshot → flow_ids → connection_id
+        // (与新建库建表顺序一致,schema 比对依赖);connection_id 于 A 批 B1 追加在最后,
+        // 正是为了不打乱上面三列的既有相对顺序。
         let tail = columns
-            .get(columns.len().saturating_sub(3)..)
+            .get(columns.len().saturating_sub(4)..)
             .unwrap_or(&[]);
         assert_eq!(
             tail,
-            ["flow_id", "flow_snapshot", "flow_ids"],
-            "三列应追加在表尾且顺序固定,实际: {columns:?}"
+            ["flow_id", "flow_snapshot", "flow_ids", "connection_id"],
+            "四列应追加在表尾且顺序固定,实际: {columns:?}"
         );
 
         // 旧行零迁移成本:三列均为 NULL(未绑定 / 尚无快照 / 强制模式)

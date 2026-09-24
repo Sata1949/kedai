@@ -44,6 +44,10 @@ pub(crate) struct AgentLoopCall {
     pub step_index: Option<usize>,
     /// 事件桥文案称谓(「主 agent」/team 的「主 agent N」)
     pub label: String,
+    /// 任务级连接(A 批 B1;空 = 跟随设置的默认连接)。
+    /// 与节点级 `PlanStep.connection_id` 不同:solo/multi/team/plan 无节点概念,
+    /// 这里是本任务模型调用的缺省连接。
+    pub connection_id: Option<String>,
 }
 
 /// 单主 agent 工具自循环(solo/multi 执行器主体;team 各主 agent 复用):
@@ -92,7 +96,9 @@ pub(crate) async fn run_agent_loop(
         tools: policy.defs,
         max_tool_rounds: Some(settings.max_tool_rounds),
         tool_choice: ToolChoice::Auto,
-        connection_id: None,
+        // 任务级连接(A 批 B1):solo 无节点级连接可配,直接用任务绑定的那条
+        // (None = 默认连接,与本批之前一致)
+        connection_id: call.connection_id.clone(),
         parallel_tool_calls: None,
     };
     let gate = crate::agents::engine::executor::ToolGate::listed(&allowed);
@@ -264,6 +270,8 @@ impl SoloExecutor {
             phase: "agent",
             step_index: None,
             label: "主 agent".into(),
+            // 任务级连接(A 批 B1):从执行上下文原样下传
+            connection_id: ctx.connection_id.clone(),
         };
         let (text, usage) = run_agent_loop(
             self.svc.clone(),

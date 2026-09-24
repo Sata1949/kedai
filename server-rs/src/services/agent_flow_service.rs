@@ -368,6 +368,7 @@ impl AgentFlowService {
         &mut self,
         flows: Vec<AgentFlowConfig>,
         root_id: Option<&str>,
+        mode: ImportConflictMode,
     ) -> Result<FlowImportReport, String> {
         if flows.is_empty() {
             return Err("导入文件里没有流程".into());
@@ -393,6 +394,8 @@ impl AgentFlowService {
 
         let mut report = FlowImportReport::default();
         let mut remap: BTreeMap<String, String> = BTreeMap::new();
+        // 覆盖模式(A 批 B4)下被覆盖的 id:建库时按 id 替换而非追加
+        let mut replaced_ids: BTreeSet<String> = BTreeSet::new();
         let mut incoming: Vec<AgentFlowConfig> = Vec::with_capacity(flows.len());
         for mut cfg in flows {
             let old_id = cfg.id.trim().to_string();
@@ -410,6 +413,19 @@ impl AgentFlowService {
             // 「内容相同」的情形已在上面跳过,故冲突只发生在「内容不同」。
             let conflicts = !old_id.is_empty() && self.flow_by_id(&old_id).is_some();
             let reserved = is_reserved_flow_id(&old_id);
+            // 覆盖模式(A 批 B4):同 id 且内容不同 → 覆盖本库那份,**id 保持不变**。
+            // 保留段不在此列(那类 id 没有「本库同一份」可言,仍走重命名);
+            // 批内引用因此天然指向同名 id,不需要 remap(覆盖前已按指纹跳过同内容项)。
+            if mode == ImportConflictMode::Replace && conflicts && !reserved {
+                report.replaced.push(FlowReplacement {
+                    id: old_id.clone(),
+                    name: flow_label(&cfg),
+                });
+                replaced_ids.insert(old_id.clone());
+                known.insert(fingerprint, cfg.id.clone());
+                incoming.push(cfg);
+                continue;
+            }
             if old_id.is_empty() || conflicts || reserved {
                 let new_id = Uuid::new_v4().to_string();
                 if !old_id.is_empty() {
@@ -449,7 +465,17 @@ impl AgentFlowService {
                 .map_err(|e| format!("导入的流程「{}」无效:{}", flow_label(cfg), e))?;
         }
         let mut candidate = self.library.clone();
-        candidate.flows.extend(incoming.iter().cloned());
+        for cfg in &incoming {
+            // 覆盖模式下按 id 原地替换(B4):id 不变 → 引用它的流程不受影响;
+            // 其余一律追加(与 7a 行为逐字节一致)
+            if replaced_ids.contains(&cfg.id) {
+                if let Some(slot) = candidate.flows.iter_mut().find(|f| f.id == cfg.id) {
+                    *slot = cfg.clone();
+                    continue;
+                }
+            }
+            candidate.flows.push(cfg.clone());
+        }
         validate_sub_flows(&candidate, &self.registered_tools)?;
 
         report.imported = incoming.len();
@@ -598,12 +624,41 @@ pub struct FlowIdRemap {
 /// 导入报告:前端据此给出「导入 N 个(跳过 M 个,其中 K 个因 id 冲突分配了新 id)」。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FlowImportReport {
-    /// 本次真正新增的流程数
+    /// 本次**写入库**的流程数(新增 + 覆盖;B4 之前恒等于新增数)
     pub imported: usize,
     /// 因「本库已有同 id 且内容相同」而跳过的流程数(重复导入同一份文件 → imported=0)
     pub skipped: usize,
-    /// 因 id 冲突被分配新 id 的流程清单
+    /// 因 id 冲突被分配新 id 的流程清单(仅 `rename` 模式会非空)
     pub renamed: Vec<FlowIdRemap>,
+    /// 被**覆盖**的流程清单(A 批 B4;仅 `replace` 模式会非空)。
+    ///
+    /// 覆盖保留 id(引用不破),故这里只需「覆盖了谁」——与 `renamed` 的「谁变成了谁」
+    /// 是两件事,不复用同一个结构以免读者以为有 id 映射。
+    #[serde(default)]
+    pub replaced: Vec<FlowReplacement>,
+}
+
+/// 被覆盖的流程(A 批 B4):覆盖**保留 id**,故只记 id 与展示名(报告文案用)。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowReplacement {
+    pub id: String,
+    pub name: String,
+}
+
+/// 导入时的 id 冲突处理方式(A 批 B4)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ImportConflictMode {
+    /// 缺省(= 二维批次 7a 行为,零变化):同 id 内容不同 → 新增副本并分配新 id,
+    /// 本库那份**原样不动**。
+    #[default]
+    Rename,
+    /// 覆盖:同 id 内容不同 → **覆盖本库那一份**(id 不变 → 引用它的流程不受影响)。
+    ///
+    /// 三条边界是刻意的:① 只覆盖**文件里出现过的 id**,库中其它流程一律不动
+    /// (绝不做「导入即清库」);② 内容相同仍走跳过(指纹幂等不变);③ 保留段 id
+    /// (`export`/`import`/`select`)与空 id 仍走重命名——那些情形没有「本库同一份」可言。
+    /// 覆盖不可逆,故请求侧要求**显式**传 `on_conflict=replace`(前端另加二次确认)。
+    Replace,
 }
 
 /// 一份流程配置的**内容指纹**(重复导入幂等的判定基准)。
@@ -2683,7 +2738,9 @@ mod tests {
         // 空库导入:不撞 id,故原 id 全部保留,引用自然不断
         let dir2 = TempDataDir::new("flow-bundle-move-target");
         let mut dst = service(&dir2);
-        let report = dst.import_bundle(flows, Some(&main)).unwrap();
+        let report = dst
+            .import_bundle(flows, Some(&main), ImportConflictMode::Rename)
+            .unwrap();
         assert_eq!(report.imported, 2);
         assert_eq!(report.skipped, 0);
         assert!(report.renamed.is_empty(), "无冲突不应改 id");
@@ -2718,7 +2775,9 @@ mod tests {
         let before_main = serde_json::to_string(svc.flow_by_id(&main).unwrap()).unwrap();
         let before_sub = serde_json::to_string(svc.flow_by_id(&sub).unwrap()).unwrap();
 
-        let report = svc.import_bundle(bundle, Some(&main)).unwrap();
+        let report = svc
+            .import_bundle(bundle, Some(&main), ImportConflictMode::Rename)
+            .unwrap();
         assert_eq!(report.imported, 2, "两份都应新增");
         assert_eq!(report.renamed.len(), 2, "两份都因 id 冲突分配新 id");
         assert_eq!(report.skipped, 0);
@@ -2770,7 +2829,9 @@ mod tests {
             svc.set(edited).unwrap();
         }
         let size = svc.get_library().flows.len();
-        let report = svc.import_bundle(bundle, Some(&main)).unwrap();
+        let report = svc
+            .import_bundle(bundle, Some(&main), ImportConflictMode::Rename)
+            .unwrap();
         assert_eq!(report.imported, 1);
         assert_eq!(report.skipped, 1, "入口与文件逐字节相同 → 跳过而非新增");
         assert_eq!(report.renamed.len(), 1);
@@ -2793,7 +2854,9 @@ mod tests {
         let size = svc.get_library().flows.len();
         let current = svc.get_library().current_flow_id.clone();
 
-        let report = svc.import_bundle(bundle, Some(&main)).unwrap();
+        let report = svc
+            .import_bundle(bundle, Some(&main), ImportConflictMode::Rename)
+            .unwrap();
         assert_eq!(report.imported, 0, "全部已存在 → 一个都不新增");
         assert_eq!(report.skipped, 2);
         assert!(report.renamed.is_empty());
@@ -2817,7 +2880,9 @@ mod tests {
         // 文件里的流程引用了「既不在文件里、本库也没有」的子流程
         let mut bad = flow("外来", vec![sub_step("n", "flow-不存在")]);
         bad.id = String::new();
-        let err = svc.import_bundle(vec![bad], None).unwrap_err();
+        let err = svc
+            .import_bundle(vec![bad], None, ImportConflictMode::Rename)
+            .unwrap_err();
         assert!(
             err.contains("不存在") && err.contains("子流程"),
             "应点名悬空引用:{err}"
@@ -2837,13 +2902,17 @@ mod tests {
         let dir = TempDataDir::new("flow-bundle-badinput");
         let mut svc = service(&dir);
         let size = svc.get_library().flows.len();
-        let err = svc.import_bundle(Vec::new(), None).unwrap_err();
+        let err = svc
+            .import_bundle(Vec::new(), None, ImportConflictMode::Rename)
+            .unwrap_err();
         assert!(err.contains("没有流程"), "实际错误:{err}");
 
         let dup_a = flow("重复", vec![graph_step("n", &[])]);
         let dup_b = flow("重复", vec![graph_step("m", &[])]);
         assert_eq!(dup_a.id, dup_b.id, "helper 给的是同名同 id");
-        let err = svc.import_bundle(vec![dup_a, dup_b], None).unwrap_err();
+        let err = svc
+            .import_bundle(vec![dup_a, dup_b], None, ImportConflictMode::Rename)
+            .unwrap_err();
         assert!(err.contains("重复"), "实际错误:{err}");
         assert_eq!(svc.get_library().flows.len(), size, "两次都被拒,库不变");
     }
@@ -2913,7 +2982,11 @@ mod tests {
         let mut incoming_sub = flow("子", vec![graph_step("n", &[])]);
         incoming_sub.id = "old-sub".into();
         let report = svc
-            .import_bundle(vec![incoming_main, incoming_sub], Some("old-main"))
+            .import_bundle(
+                vec![incoming_main, incoming_sub],
+                Some("old-main"),
+                ImportConflictMode::Rename,
+            )
             .expect("跳过的子流程必须改指向本库等价副本,而不是让校验失败");
 
         assert_eq!(report.imported, 1);
@@ -2941,7 +3014,9 @@ mod tests {
         legacy.id = String::new();
         legacy.enabled = false; // 旧导出不含 enabled 时也该能进来
 
-        let report = svc.import_bundle(vec![legacy], None).unwrap();
+        let report = svc
+            .import_bundle(vec![legacy], None, ImportConflictMode::Rename)
+            .unwrap();
         assert_eq!(report.imported, 1);
         assert!(report.renamed.is_empty(), "原文件没有 id,谈不上重映射");
         let added = svc
@@ -2971,7 +3046,9 @@ mod tests {
         a.id = "bundle-a".into();
         let mut b = flow("乙", vec![sub_step("n", "bundle-a")]);
         b.id = "bundle-b".into();
-        let err = svc.import_bundle(vec![a, b], None).unwrap_err();
+        let err = svc
+            .import_bundle(vec![a, b], None, ImportConflictMode::Rename)
+            .unwrap_err();
         assert!(err.contains("环"), "应点名调用链成环:{err}");
         assert!(
             err.contains("甲") && err.contains("乙"),
@@ -2982,7 +3059,9 @@ mod tests {
         // A → A:自引用
         let mut self_ref = flow("自", vec![sub_step("n", "bundle-self")]);
         self_ref.id = "bundle-self".into();
-        let err = svc.import_bundle(vec![self_ref], None).unwrap_err();
+        let err = svc
+            .import_bundle(vec![self_ref], None, ImportConflictMode::Rename)
+            .unwrap_err();
         assert!(err.contains("自身"), "应点名自引用:{err}");
         assert_eq!(svc.get_library().flows.len(), before);
     }
@@ -2998,7 +3077,11 @@ mod tests {
         second.id = "dup-b".into();
 
         let report = svc
-            .import_bundle(vec![first, second], Some("dup-b"))
+            .import_bundle(
+                vec![first, second],
+                Some("dup-b"),
+                ImportConflictMode::Rename,
+            )
             .unwrap();
         assert_eq!(report.imported, 1, "同内容只进一份");
         assert_eq!(report.skipped, 1);
@@ -3025,7 +3108,9 @@ mod tests {
         let mut reserved = flow("保留名", vec![graph_step("n", &[])]);
         reserved.id = "export".into();
 
-        let report = svc.import_bundle(vec![reserved], Some("export")).unwrap();
+        let report = svc
+            .import_bundle(vec![reserved], Some("export"), ImportConflictMode::Rename)
+            .unwrap();
         assert_eq!(report.imported, 1);
         assert_eq!(report.renamed.len(), 1, "保留段 id 必须重映射");
         assert_eq!(report.renamed[0].old_id, "export");
@@ -3039,6 +3124,108 @@ mod tests {
             svc.get_library().current_flow_id.as_deref(),
             Some(new_id.as_str()),
             "root_id 经重映射后仍选中导入的那份"
+        );
+    }
+
+    // ==================== 导入覆盖模式(A 批 B4) ====================
+
+    /// 覆盖模式:同 id 内容不同 → **覆盖本库那份**(id 不变),库中其它流程一律不动。
+    ///
+    /// 判别性:本机那份已被改过(两步),用「原内容」的包覆盖后应回到单步;
+    /// 若误走 rename 分支,则本机那份保持两步、库里多出一份副本 —— 两条断言同时失败。
+    #[test]
+    fn import_replace_overwrites_same_id_and_keeps_the_rest() {
+        let dir = TempDataDir::new("flow-bundle-replace");
+        let mut svc = service(&dir);
+        let main = save_flow(&mut svc, "主", vec![graph_step("n", &[])]);
+        let other = save_flow(&mut svc, "别家", vec![graph_step("x", &[])]);
+        let bundle = svc.export_bundle(Some(&main)).unwrap().flows;
+        // 本机改掉 main(结构变了)→ 与文件内容不同
+        {
+            let mut edited = svc.flow_by_id(&main).unwrap().clone();
+            edited.steps.push(graph_step("n2", &["n"]));
+            svc.set(edited).unwrap();
+        }
+        let size = svc.get_library().flows.len();
+
+        let report = svc
+            .import_bundle(bundle, Some(&main), ImportConflictMode::Replace)
+            .unwrap();
+
+        assert_eq!(report.replaced.len(), 1, "应报告覆盖了 1 份");
+        assert_eq!(report.replaced[0].id, main);
+        assert_eq!(report.imported, 1);
+        assert!(report.renamed.is_empty(), "覆盖模式不产生新 id");
+        assert_eq!(
+            svc.get_library().flows.len(),
+            size,
+            "覆盖是原地替换,库规模不变"
+        );
+        assert_eq!(
+            svc.flow_by_id(&main).unwrap().steps.len(),
+            1,
+            "本库那份应被文件内容覆盖(回到单步)"
+        );
+        assert!(svc.flow_by_id(&other).is_some(), "库中其它流程一律不动");
+    }
+
+    /// 覆盖模式下**引用不破**:被覆盖的流程 id 不变,挂载它的流程仍指向同一份。
+    #[test]
+    fn import_replace_keeps_sub_flow_references_intact() {
+        let dir = TempDataDir::new("flow-bundle-replace-refs");
+        let mut svc = service(&dir);
+        let sub = save_flow(&mut svc, "子", vec![graph_step("n", &[])]);
+        let main = save_flow(&mut svc, "主", vec![sub_step("n", &sub)]);
+        let bundle = svc.export_bundle(Some(&main)).unwrap().flows;
+        // 只改子流程:入口与文件逐字节相同 → 跳过;子流程内容不同 → 被覆盖
+        {
+            let mut edited = svc.flow_by_id(&sub).unwrap().clone();
+            edited.description = Some("本机改过".into());
+            svc.set(edited).unwrap();
+        }
+
+        let report = svc
+            .import_bundle(bundle, Some(&main), ImportConflictMode::Replace)
+            .unwrap();
+
+        assert_eq!(report.skipped, 1, "入口内容相同 → 跳过");
+        assert_eq!(report.replaced.len(), 1, "子流程被覆盖");
+        assert_eq!(report.replaced[0].id, sub);
+        assert_eq!(
+            svc.flow_by_id(&main).unwrap().steps[0].sub_flow_ref(),
+            Some(sub.as_str()),
+            "覆盖保留 id → 挂载引用不受影响(这正是覆盖模式的价值)"
+        );
+        assert_eq!(
+            svc.flow_by_id(&sub).unwrap().description,
+            None,
+            "子流程内容确实被文件覆盖(本机那次编辑丢失——覆盖不可逆,故请求侧须显式传参)"
+        );
+    }
+
+    /// 覆盖模式仍不越界:① 保留段 id 照旧重命名(那类 id 没有「本库同一份」可言);
+    /// ② 库中未在文件里出现的流程不受影响(绝不「导入即清库」)。
+    #[test]
+    fn import_replace_does_not_touch_absent_or_reserved_flows() {
+        let dir = TempDataDir::new("flow-bundle-replace-scope");
+        let mut svc = service(&dir);
+        let kept = save_flow(&mut svc, "本机独有", vec![graph_step("k", &[])]);
+        let mut reserved = flow("保留名", vec![graph_step("n", &[])]);
+        reserved.id = "export".into();
+
+        let report = svc
+            .import_bundle(vec![reserved], Some("export"), ImportConflictMode::Replace)
+            .unwrap();
+
+        assert_eq!(report.renamed.len(), 1, "保留段 id 即使覆盖模式也要重映射");
+        assert!(report.replaced.is_empty());
+        assert!(
+            svc.flow_by_id("export").is_none(),
+            "库里不得出现删不掉的流程"
+        );
+        assert!(
+            svc.flow_by_id(&kept).is_some(),
+            "文件里没有的流程一律不动(覆盖 ≠ 清库)"
         );
     }
 

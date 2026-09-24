@@ -24,7 +24,7 @@ use crate::services::agent_flow_service::{AgentFlowService, FlowSnapshot};
 use crate::services::agent_subtask_service::AgentSubtaskService;
 use crate::services::character_service::CharacterService;
 use crate::services::prompt_inject_service::PromptInjectService;
-use crate::services::settings_service::{AppMode, RuntimeSettings};
+use crate::services::settings_service::{connection_label, AppMode, RuntimeSettings};
 use crate::services::world_book_service::WorldBookService;
 use rusqlite::{params, OptionalExtension};
 use std::collections::HashMap;
@@ -160,6 +160,7 @@ impl TaskService {
         mode: TaskRunMode,
         flow_id: Option<&str>,
         flow_ids: Option<&[String]>,
+        connection_id: Option<&str>,
     ) -> Result<TaskRecord, String> {
         let title = title.trim();
         if title.is_empty() {
@@ -225,6 +226,26 @@ impl TaskService {
                 Some(serde_json::to_string(v).map_err(|e| format!("流程名单序列化失败: {e}"))?)
             }
         };
+        // 任务级连接(A 批 B1):创建期校验「引用存在且启用」,失败 400 点名连接。
+        // 为什么与流程库的「保存期不校验引用」不同:流程可导出/跨机导入,保存期拒绝会把
+        // 可移植流程变成本机绑定;任务**不可搬运**(搬运不迁移任务,IFW-11 边界 3),
+        // 故即时校验在这里只有好处——用户不必等到跑起来才发现选错了连接。
+        // 运行期仍按 5b 口径兜底:引用被删/停用即明确报错,不静默回退默认连接。
+        let connection_id = connection_id.map(str::trim).filter(|s| !s.is_empty());
+        if let Some(cid) = connection_id {
+            let settings = self.task_settings();
+            let Some(profile) = settings.connections.iter().find(|p| p.id == cid) else {
+                return Err(
+                    "选择的连接不存在(可能已被删除);请在设置里恢复该连接,或改用默认连接".into(),
+                );
+            };
+            if !profile.enabled {
+                return Err(format!(
+                    "选择的连接「{}」已停用;请启用它,或改用默认连接",
+                    connection_label(profile)
+                ));
+            }
+        }
         let id = Uuid::new_v4().to_string();
         let now = now_iso();
         // 执行者库命中校验:引用了不存在的执行者时静默丢弃而非报错——执行者属可选增强,
@@ -250,8 +271,8 @@ impl TaskService {
             // db.write(),若仍持锁则自死锁(非重入锁)
             let conn = self.db.write();
             conn.execute(
-                "INSERT INTO tasks (id, title, status, plan, result, error, character_id, created_at, updated_at, task_mode, executor_id, flow_id, flow_snapshot, flow_ids) \
-                 VALUES (?1, ?2, 'pending', '[]', '', '', ?3, ?4, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT INTO tasks (id, title, status, plan, result, error, character_id, created_at, updated_at, task_mode, executor_id, flow_id, flow_snapshot, flow_ids, connection_id) \
+                 VALUES (?1, ?2, 'pending', '[]', '', '', ?3, ?4, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     id,
                     title,
@@ -261,7 +282,8 @@ impl TaskService {
                     eid,
                     flow_id,
                     frozen,
-                    flow_ids_json
+                    flow_ids_json,
+                    connection_id
                 ],
             )
             .map_err(|e| format!("创建任务失败: {e}"))?;
@@ -293,6 +315,8 @@ impl TaskService {
             flow_id: flow_id.map(str::to_string),
             // 对比模式名单(二维批次 7b):原样回带(前端据此显示「可调用 N 个流程」)
             flow_ids,
+            // 任务级连接(A 批 B1):原样回带(前端据此显示「本任务用哪条连接」)
+            connection_id: connection_id.map(str::to_string),
         })
     }
 
@@ -324,6 +348,86 @@ impl TaskService {
             .ok_or_else(|| format!("任务绑定的流程快照缺失(flow_id={flow_id}),无法执行"))?;
         guard.validate_task_snapshot(&snapshot)?;
         Ok(snapshot)
+    }
+
+    /// 改绑编排(A 批 B3):**全量替换** `flow_id` / `flow_ids`,并重新冻结快照。
+    ///
+    /// 口径(见交接稿 R7;撤销原「绑定不可改绑」,理由见 `遗留.md` IFW-8 边界 2 的溯源):
+    ///  - 只有 custom 模式任务可改绑(编排绑定对其它模式无意义);
+    ///  - `planning` / `running` / `planned` 态**拒绝**——进行中改绑会撕裂本轮快照;
+    ///  - 全量替换语义:`flow_id = None` = 跟随当前流程(快照清空,下次执行重新捕获),
+    ///    `flow_ids = []` = 强制模式(清空名单);缺键不再有「不改」的第三种含义;
+    ///  - 校验与 `create` 逐条同源(存在+启用+结构+可达引用链),**在写库之前**做,
+    ///    失败不留痕;历史 plan 行不动(编排徽标按新快照解析,对不上即不显示,IFW-5 口径)。
+    pub fn bind(
+        &self,
+        id: &str,
+        flow_id: Option<&str>,
+        flow_ids: &[String],
+    ) -> Result<Option<TaskRecord>, String> {
+        let Some(task) = self.get(id) else {
+            // 不存在 → `Ok(None)`(API 层转 404,与 followup 同款;服务层只报语义错误)
+            return Ok(None);
+        };
+        if task.task_mode != TaskRunMode::Custom {
+            return Err("只有自定义流程模式可以改绑流程".into());
+        }
+        if matches!(
+            task.status,
+            TaskStatus::Planning | TaskStatus::Running | TaskStatus::Planned
+        ) {
+            return Err(format!(
+                "任务正在执行({}),不能改绑流程;请先停止任务",
+                task.status.as_str()
+            ));
+        }
+        let flow_id = flow_id.map(str::trim).filter(|s| !s.is_empty());
+        let extras: Vec<String> = flow_ids
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        // 快照捕获与成员严格校验:与 create 同一处原语(不得在两侧各写一份判定)
+        let frozen = match flow_id {
+            None => {
+                if !extras.is_empty() {
+                    let flow = self.agent_flow();
+                    let guard = flow.lock().unwrap_or_else(|e| e.into_inner());
+                    guard.validate_members(&extras)?;
+                }
+                None
+            }
+            Some(fid) => {
+                let snap = {
+                    let flow = self.agent_flow();
+                    let guard = flow.lock().unwrap_or_else(|e| e.into_inner());
+                    guard.snapshot_for(fid, &extras)?
+                };
+                Some(serde_json::to_string(&snap).map_err(|e| format!("流程快照序列化失败: {e}"))?)
+            }
+        };
+        let flow_ids_json = if extras.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&extras).map_err(|e| format!("流程名单序列化失败: {e}"))?)
+        };
+        let now = now_iso();
+        {
+            let conn = self.db.write();
+            conn.execute(
+                "UPDATE tasks SET flow_id = ?1, flow_snapshot = ?2, flow_ids = ?3, updated_at = ?4 WHERE id = ?5",
+                params![flow_id, frozen, flow_ids_json, now, id],
+            )
+            .map_err(|e| format!("改绑流程失败: {e}"))?;
+        }
+        self.emit_event(
+            TaskEventKind::FlowBound,
+            id,
+            None,
+            Some(task.status),
+            Some("编排绑定已更新".into()),
+        );
+        Ok(self.get(id))
     }
 
     pub fn list(&self) -> Vec<TaskRecord> {
