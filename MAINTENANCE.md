@@ -460,11 +460,21 @@ cd server-rs && cargo test
     `cargo test --test settings_connector <用例名> -- --exact` 隔离复跑，不要改代码或依赖。
 - 前端 `npm test -w web`(Vitest,**1134 个 / 109 文件**,数字以 `tools/count-tests.mjs` 为准;vitest 实际输出为 **1152**——差值 18 来自 `parser.contract.test.ts:68` 对 `mvu_patch_cases.json` 的 19 个 fixture 用例循环生成,静态计数把该 `it(` 计为 1):stores(**storeBridge 注册/降级/owner 诊断 14 例**)、**弹窗注册表单点派生三方一致(flag 无重复/label/组件已定义/MODAL_FLAGS 对应;registry ↔ uiPrefs 双向;App.vue v-for 派生且无硬编码残留,共 9 例)**、api client(含 ApiError 错误码分类)、**api stream(SSE 读循环跨 chunk 帧重组/CRLF/残留帧、非 JSON 错误体、上传成功失败与 401 重试,12 例)**、组件与 composables、**自定义流程二维图(线性兼容 / 有效上游与层级 / 成环拦截 / 成果选拔 17 例)**、**画布数据层(节点连线产出、连线拦截、拖拽坐标写回、重新布局 17 例)**、**画布组件(真实挂载 @vue-flow:节点渲染、连线拦截、Inspector、重排确认 11 例)**、**执行流程区(默认列表视图、异步画布切换、列表编辑未回归 6 例)**、**步骤表单数值区间(输出上限 1~32768、上下文上限 256~1048576,与后端同口径,7 例)**、CSS 清洗(含注释处理)与沙箱回归;类型门禁 `npm run typecheck -w web`(vue-tsc,**硬门禁**,存量 168 已于 2026-09-08 清偿归零,清偿记录见 docs/功能.md 附录 D);类型逃逸 ratchet `node tools/check-frontend-lint.mjs`(as never / as unknown as / 非空断言 / any,**只降不升**,基线见脚本内 BASELINE;2026-09-13 批次 5.2 后 as unknown as 71→70)
   > **并发注意**:一次全量跑过 14 个文件报 `[vitest-pool] Failed to start forks worker ... spawn UNKNOWN`(worker 起不来,与用例无关,同后端全并行的资源现象同族);`npm test -w web -- --maxWorkers=3` 复跑即全绿。
-- **后端全量构建的同类注意**:本机全量 `cargo test` 曾两度报 `error[E0463] can't find crate for kedai_server` /
-  `crate X required to be available in rlib format`(**每次缺的 crate 都不同**,如 `time`/`deranged`、`uuid`/`rand`)。
+- **后端全量构建的同类注意(2026-09-24 二维批次 8 实测)**:本机全量 `cargo test` 曾两度报
+  `error[E0463] can't find crate for kedai_server` / `crate X required to be available in rlib format`
+  (**每次缺的 crate 都不同**,如 `time`/`deranged`、`uuid`/`rand`;单独跑 `--lib` / 单个 `--test` 却正常)。
   按 `docs/经验.md` 条目 17/29/30 处置:① 成对清理 `target/debug/deps` 里**孤立 `.rmeta`**(无同名 `.rlib`)
-  与 `.fingerprint/*-<hash>` 目录(一批 155 对);② 设 `CARGO_PROFILE_DEV_DEBUG=0`(rlib 由 ~775MB 降到数十 MB);
-  ③ 并发取 `-j 4`。三项齐备后 39 个测试二进制全绿——**这是环境/产物问题,不是代码回归**,勿照报错改依赖。
+  与 `.fingerprint/*-<hash>` 目录(`cargo check`/`clippy` 与 `cargo test` 交替执行会持续累积,2026-09-24 一次清出 155 对、
+  clippy 后又一次 196 对);② 设 `CARGO_PROFILE_DEV_DEBUG=0`(rlib 由 ~775MB 降到数十 MB,直接消掉内存侧压力);
+  ③ 并发取 `-j 4`。三项齐备后 **39 个测试二进制 / 1375 passed 全绿**——**这是环境/产物问题,不是代码回归**,勿照报错改依赖。
+
+  ```bat
+  rem 推荐的完整命令(走仓库自带包装器;debuginfo=0 是本机规避,不改仓库任何配置)
+  set CARGO_PROFILE_DEV_DEBUG=0
+  tools\cargo-vcvars.cmd cargo test -j 4
+  ```
+  > Git Bash 里:`export CARGO_PROFILE_DEV_DEBUG=0 && MSYS_NO_PATHCONV=1 cmd /c "tools\cargo-vcvars.cmd cargo test -j 4"`
+  > (注意 `//c` 会被 MSYS 处理成字面 `//c` 并让 cmd 起交互式 shell,必须 `MSYS_NO_PATHCONV=1` + `/c`)。
 - 新增接口建议同步补集成测试;测试环境变量 `CONNECTOR=mock` 强制隔离
 
 ---
