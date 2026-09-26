@@ -1306,7 +1306,8 @@ pub struct TaskMessageRecord {
     pub task_id: String,
     /// user | assistant(建表 CHECK 约束)
     pub role: String,
-    /// normal | followup | plan_chat(旧行默认 normal;读取侧不做严格校验,宽容演进)
+    /// normal | goal | result | followup | plan_chat(建表期写 goal、
+    /// 首轮成果写 result;旧行默认 normal;读取侧不做严格校验,宽容演进)
     pub kind: String,
     pub content: String,
     pub created_at: String,

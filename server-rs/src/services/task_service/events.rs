@@ -1,6 +1,7 @@
 // 任务事件广播(WP4 任务模式实时化):TaskService 内嵌 broadcast 通道,
 // 各 DB 写入方法落库成功后发射 SseEvent::Task(kind = created/status/plan/
-// subtask/usage/deleted),GET /api/tasks/events 订阅本通道并转发为 SSE,
+// subtask/usage/deleted/llm_call/agent_status/approval_required/delta/
+// flow_bound),GET /api/tasks/events 订阅本通道并转发为 SSE,
 // 取代前端 1s REST 轮询。无订阅者时 send 返回 Err,属正常,一律忽略。
 // 批次 R4:新增 kind=delta 流式增量(emit_delta + DeltaBatcher 攒批),
 // 与 llm_call 事件同步携带 phase/step_index 供前端对齐流式缓冲。
