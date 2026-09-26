@@ -10,6 +10,8 @@
 use super::*;
 // 执行器终态值(批次 B 依赖倒置):finalize_terminal 按值分派落库
 use crate::services::task_core::terminal::TaskTerminal;
+// 部分成果兜底(提交 2):终态 result 为空时用已完成步骤的产出拼装(单一出处)
+use crate::services::task_core::assemble_from_plan;
 
 impl TaskService {
     // ===== 执行 =====
@@ -80,6 +82,13 @@ impl TaskService {
             }
         };
         let _ = self.set_status(id, TaskStatus::Planning);
+        // 批准即让 planned 态的预览 result 失效(提交 2):那条 result 是「待批准的计划清单」,
+        // 只在 planned 态有语义。留着它会让续跑的失败/取消兜底因「result 非空」而跳过
+        // (salvage_partial_result 的判据),用户手里就只剩一份**计划**被当成「已完成部分的
+        // 成果」展示(2026-09-26 真模型 plan/写作 实测命中:某步已完成 560 字,成果卡里却仍是
+        // 计划清单)。清空后:续跑成功由汇总文本落 result,失败/取消由兜底写已完成步骤的产出,
+        // 两侧都是「真正产出」。只清 result 列,不发事件——紧随其后的 status/plan 写入各自发事件。
+        let _ = self.clear_result(id);
         // 续跑的整体上下文:目标 + 已批准计划(编号列表)。
         // 2026-09-10 实测修复(F4):原始目标里可能写了步骤数量(如「三步计划」),
         // 而用户经 plan-chat 修订后计划步数已变——显式要求以已批准计划为准,
@@ -380,6 +389,10 @@ impl TaskService {
     /// 六模式(multi/team)主 agent 经 agentgo 排出的子 agent 一并结束
     ///(task:{id} 前缀虚拟 session 的内存记录),防 stop 后残留孤儿后台任务。
     pub fn stop(&self, id: &str) -> bool {
+        // 部分成果兜底(提交 2):先把已完成步骤的产出写进 result,再置 ended——
+        // 终态一可见就已带成果,不出现「点了停止、成果还没落库」的空窗;
+        // 执行器随后收尾时因 result 非空自动跳过(同一判据,幂等)。
+        salvage_partial_result(self, id);
         let changed = self.set_status(id, TaskStatus::Ended);
         self.signal_cancel(id);
         for st in self.list_subtasks(id) {
@@ -1146,6 +1159,15 @@ impl TaskService {
 
 /// 后台执行退出收尾:仅当自己仍是该任务当前执行时才写终态(旧执行在重跑后让位,
 /// 不覆盖新任务状态),并按 token 清理取消条目(不删新执行的条目)。
+///
+/// 部分成果兜底(提交 2 · D2):写终态**前**先补 result——若 tasks.result 仍为空而
+/// plan 里已有「已完成且有产出」的步骤,把它们的产出拼装写回(单一出处
+/// `task_core::assemble_from_plan`)。取消(ended)与失败(error)两条路径都适用:
+/// 状态与错误文本一字不改,只让已完成的工作可被用户看到。
+/// `stop()` 也在置 ended 前调用同一个 [`salvage_partial_result`]——那条路径的终态由
+/// 请求侧直接写入,执行器收尾要晚一拍,先补一次才能让「已停止」一出现就带成果。
+/// 取「读库兜底」而非给 `TaskTerminal::Failed` 加字段:改动面更小,且一并覆盖
+/// 引擎 Err 兜底(task_engine/mod.rs 的 Err 分支)、模式自报 Failed、取消三条路径。
 fn finalize_run(
     deps: &TaskService,
     task_id: &str,
@@ -1154,6 +1176,7 @@ fn finalize_run(
     error: Option<&str>,
 ) {
     if deps.is_current_run(task_id, token) {
+        salvage_partial_result(deps, task_id);
         // 终态落库必须成功:写失败时任务会停在 Running(前端永远转圈),
         // 且无任何日志可查——故此处检查返回值并显式告警,不再静默吞掉。
         if ended_by_cancel {
@@ -1178,4 +1201,23 @@ fn finalize_run(
         }
     }
     deps.remove_cancel_if(task_id, token);
+}
+
+/// 终态前的部分成果兜底:result 为空且 plan 有已完成步骤 → 拼装写回。
+/// 读不到任务、已有 result、无任何可拼装内容三种情况一律不动(不伪造成果)。
+fn salvage_partial_result(deps: &TaskService, task_id: &str) {
+    let Some(task) = deps.get(task_id) else {
+        return;
+    };
+    if !task.result.trim().is_empty() {
+        return;
+    }
+    if let Some(text) = assemble_from_plan(&task.plan) {
+        if !deps.set_result_only(task_id, &text) {
+            tracing::warn!(
+                task_id = task_id,
+                "部分成果兜底落库失败:已完成步骤的产出未能写入 result"
+            );
+        }
+    }
 }

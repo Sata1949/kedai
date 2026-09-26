@@ -502,12 +502,25 @@ function teamStepName(name: string): string {
 // (拆段纯函数抽至 ../taskResult,契约与 server-rs task_engine 对齐,单测锁定)
 const resultSplit = computed(() => splitTaskResult(taskMode.value, currentTask.value?.task.result ?? ''));
 
-/** 结果卡仅在终态(done/partial)渲染(批次 R1):approve 后的 planning/running 过渡窗口
+/** 结果卡渲染门控:done/partial 恒渲染;error/ended 在 result 非空时渲染
+ * (提交 2 部分成果兜底:汇总失败/取消/重启中断的任务也会带着已完成步骤的产出落库,
+ *  不展示等于把已完成的工作藏起来)。
+ *  pending/planning/running/planned **一律不渲染**(批次 R1):approve 后的过渡窗口
  *  result 仍持有 planned 态写入的计划清单文本,不门控会把计划清单误显示为「最终成果」;
- *  planned 态的计划清单由批准区内的专属卡渲染(见 plannedPlanHtml) */
+ *  planned 态的计划清单由批准区内的专属卡渲染(见 plannedPlanHtml)。 */
 const resultFinal = computed(() => {
   const s = currentTask.value?.task.status;
-  return s === 'done' || s === 'partial';
+  if (s === 'done' || s === 'partial') return true;
+  if (s === 'error' || s === 'ended') return !!(currentTask.value?.task.result ?? '').trim();
+  return false;
+});
+
+/** error/ended 态展示成果时的标注:结果只是「已完成部分的成果」,不是完整交付 */
+const resultIncompleteNote = computed(() => {
+  const s = currentTask.value?.task.status;
+  return (s === 'error' || s === 'ended') && resultFinal.value
+    ? '任务未完成,以下为已完成部分的成果'
+    : '';
 });
 
 /** 最终成果/审计结论/最终计划的 markdown 预渲染(同 planRendered 的缓存口径) */
@@ -999,7 +1012,9 @@ async function removeTask(task: TaskRecord): Promise<void> {
           </div>
 
           <!-- 最终结果(team 模式拆尾部「## 审计结论」、plan 模式拆尾部「## 最终计划」
-               各自单独成卡;批次 R1:仅终态 done/partial 渲染,过渡窗口不显示)。
+               各自单独成卡;门控见 resultFinal:done/partial 恒渲染,error/ended 仅在
+               result 非空时渲染并加「未完成」标注——提交 2 起失败/取消/中断的任务也会
+               带着已完成步骤的产出落库,不展示等于把已完成的工作藏起来)。
                实跑问题 1:逐轮对话记录区已是产出的权威视图,本卡默认关闭(与气泡重复),
                可经标题栏开关展开;team 审计结论 / plan 最终计划为独立信息,保持常显。 -->
           <div v-if="resultMainHtml" class="sv-task-section">
@@ -1012,6 +1027,9 @@ async function removeTask(task: TaskRecord): Promise<void> {
               >
                 {{ summaryOpen ? '收起' : '展开' }}
               </button>
+            </div>
+            <div v-if="resultIncompleteNote" class="sv-task-incomplete-note">
+              {{ resultIncompleteNote }}
             </div>
             <div v-if="summaryOpen" class="sv-task-result" v-html="resultMainHtml" />
           </div>

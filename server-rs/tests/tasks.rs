@@ -450,15 +450,16 @@ async fn task_usage_recorded_and_aggregated() {
     );
 }
 
-/// 汇总路径空输出(WP6):规划与步骤正常、汇总返回空
-/// ([[empty_if:任务汇总者]] 钩子:仅当 system 含「任务汇总者」时返回空,
-/// 规划器/执行者 system 不含该子串故不受影响)→ 汇总按 finish_reason 分级重试一次
-/// 仍空 → 任务终态 error。
-/// 语义确认(executor.rs run_task_background):步骤全成功但汇总失败走 set_error
-/// → error 终态;partial 仅用于「步骤 error 但汇总成功产出成果」。二者互补勿混淆。
-/// (task_step_empty_output_retries_then_errors 仅覆盖步骤路径,本测试覆盖汇总路径。)
+/// 汇总路径空输出 + 步骤已产出(提交 2 部分成果兜底):
+/// 规划与步骤正常、汇总返回空([[empty_if:任务汇总者]] 钩子:仅当 system 含
+/// 「任务汇总者」时返回空,规划器/执行者 system 不含该子串故不受影响)→ 汇总按
+/// finish_reason 分级重试一次仍空。
+/// 旧行为(批次 WP6):走 set_error → error 终态 + result 空,已完成步骤的产出被整体
+/// 丢弃(真实模型实测 legacy/写作 就是这样丢掉约 3900 字)。现行为:能拼出成果即
+/// partial + result = 已完成步骤的确定性拼装,error 仍保留汇总失败原因。
+/// 对照用例 task_summary_failure_without_step_outputs_stays_error:无产出时不得伪造。
 #[tokio::test]
-async fn task_summary_empty_output_retries_then_errors() {
+async fn task_summary_failure_falls_back_to_step_outputs() {
     let app = test_app();
 
     // [[empty_if:]] 置于 [[reply:]] 之后:reply 仍在首个 "]]" 截断出计划 JSON,
@@ -470,25 +471,75 @@ async fn task_summary_empty_output_retries_then_errors() {
     assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
 
     let (st, detail) = wait_terminal(app, &id).await;
-    assert_eq!(st, "error", "汇总重试后仍空应为 error 终态,详情: {detail}");
+    assert_eq!(
+        st, "partial",
+        "汇总失败但有已完成步骤应部分完成(成果不得丢),详情: {detail}"
+    );
 
-    // 错误文案含「空内容」与 finish_reason(诊断推理耗尽 vs 内容过滤等成因)
+    // 原因仍可诊断:error 保留汇总失败文案(含「空内容」与 finish_reason)
     let error = detail["task"]["error"].as_str().unwrap_or("");
     assert!(
         error.contains("空内容") && error.contains("finish_reason"),
-        "汇总错误文案应含「空内容」与 finish_reason,实际: {error}"
+        "汇总失败原因应保留在 error,实际: {error}"
     );
 
-    // 步骤本身成功(done),失败发生在汇总阶段;最终结果为空(set_result 未被调用)
+    // 步骤本身成功(done);成果 = 「## 步骤名」+ 该步产出
     let plan = detail["task"]["plan"].as_array().unwrap();
     assert_eq!(plan.len(), 1);
     assert_eq!(plan[0]["status"], "done", "步骤应成功,失败在汇总: {detail}");
+    let step_result = plan[0]["result"].as_str().unwrap_or("");
+    assert!(!step_result.is_empty(), "步骤应有产出: {detail}");
+    let result = detail["task"]["result"].as_str().unwrap_or("");
+    assert!(
+        result.contains("## 步骤一"),
+        "result 应含步骤标题: {result}"
+    );
+    assert!(
+        result.contains(step_result),
+        "result 应含步骤产出: {result}"
+    );
+    assert!(
+        !result.contains("## 最终计划"),
+        "模式脚手架段不得混进成果: {result}"
+    );
+
     let subtasks = detail["subtasks"].as_array().unwrap();
     assert_eq!(subtasks.len(), 1);
     assert_eq!(subtasks[0]["status"], "done", "子任务应成功: {detail}");
+}
+
+/// 汇总失败且**无任何已完成步骤**时不得伪造成果(提交 2 的反面对照):
+/// 步骤全失败(空输出)+ 汇总同样失败 → 终态仍是 error、result 仍为空,
+/// 与旧行为逐字一致。两条合起来钉住「有成果才 partial,没成果不假装」。
+/// 钩子设计:步骤失败用 **goal 内嵌 `[[empty]]`**(转义写入规划 JSON,serde 还原;
+/// 规划器 user 消息只见转义序列故不受影响),汇总失败用 `[[empty_if:任务汇总者]]`,
+/// 二者互不干扰——mock 的 `[[empty_if:]]` 只认首个标记,故不能靠两条 empty_if 区分阶段。
+#[tokio::test]
+async fn task_summary_failure_without_step_outputs_stays_error() {
+    let app = test_app();
+
+    let title = concat!(
+        r#"[[reply:[{"name":"步骤一","goal":"\u005b\u005bempty\u005d\u005d 写第一段"},"#,
+        r#"{"name":"步骤二","goal":"\u005b\u005bempty\u005d\u005d 写第二段"}] ]]"#,
+        "[[empty_if:任务汇总者]]"
+    );
+    let id = create_task(app, title).await;
+
+    let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
+
+    let (st, detail) = wait_terminal(app, &id).await;
+    assert_eq!(
+        st, "error",
+        "无任何已完成步骤时仍应为 error(不得伪造成果),详情: {detail}"
+    );
+    let plan = detail["task"]["plan"].as_array().unwrap();
+    for step in plan {
+        assert_eq!(step["status"], "error", "步骤应全部失败: {detail}");
+    }
     assert!(
         detail["task"]["result"].as_str().unwrap_or("").is_empty(),
-        "汇总失败不应有最终结果: {detail}"
+        "无成果不得伪造 result: {detail}"
     );
 }
 
@@ -544,6 +595,56 @@ async fn task_stop_running() {
             .iter()
             .any(|s| s["status"].as_str() == Some("ended")),
         "执行中子任务应被 stop 置为 ended: {detail}"
+    );
+}
+
+/// 停止时保住已完成步骤的产出(提交 2 终态兜底 · finalize_run ended 分支):
+/// 3 步任务,首步 done 后 stop → 终态仍是 ended(状态语义不变),但 result 已写入
+/// 已完成步骤的确定性拼装,不再出现「点了停止 → 之前的产出全没了」。
+#[tokio::test]
+async fn task_stop_running_keeps_done_step_output() {
+    let app = test_app();
+
+    let title = r#"[[reply:[{"name":"步骤一","goal":"写第一段"},{"name":"步骤二","goal":"写第二段"},{"name":"步骤三","goal":"写第三段"}] ]]"#;
+    let id = create_task(app, title).await;
+    let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
+
+    // 轮询直到首步 done(legacy 每步完成即回写 plan);步骤 goal 无钩子,mock 走逐字
+    // 流式默认回复(约 8ms/字符 ≈ 1s/步),后续两步各留一个窗口,足够在第二步执行中 stop。
+    let mut first_done = false;
+    for _ in 0..200 {
+        let (status, json) = send_json(app, "GET", &format!("/api/tasks/{id}"), json!({})).await;
+        assert_eq!(status, StatusCode::OK);
+        if json["task"]["plan"][0]["status"].as_str() == Some("done") {
+            first_done = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(first_done, "应观测到首步 done 再 stop");
+
+    let (status, _) = send_json(app, "POST", &format!("/api/tasks/{id}/stop"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "running 态 stop 应 200");
+
+    let (st, detail) = wait_terminal(app, &id).await;
+    assert_eq!(st, "ended", "stop 后任务应 ended,详情: {detail}");
+
+    let plan = detail["task"]["plan"].as_array().unwrap();
+    let step0 = plan[0]["result"].as_str().unwrap_or("");
+    assert!(!step0.is_empty(), "首步应有产出: {detail}");
+    let result = detail["task"]["result"].as_str().unwrap_or("");
+    assert!(
+        !result.is_empty(),
+        "停止后已完成步骤的产出不得丢(终态兜底): {detail}"
+    );
+    assert!(
+        result.contains("## 步骤一"),
+        "result 应含已完成步骤标题: {result}"
+    );
+    assert!(
+        result.contains(step0),
+        "result 应含已完成步骤产出: {result}"
     );
 }
 
@@ -766,9 +867,9 @@ async fn task_plan_approve_with_modified_plan_replaces() {
     let detail = wait_status(app, &id, "planned").await;
     assert_eq!(detail["task"]["plan"].as_array().unwrap().len(), 2);
 
-    // 携修改后计划批准:2 步 → 1 步(goal 内嵌 [[reply:]] 钩子让该步产出确定文本,
-    // 供下方最终计划段断言;标题内首个 [[reply:]] 钩子会被 mock 汇总轮吃到并回显
-    // 原始规划 JSON,故「不含步骤二」只能断言在最终计划段内,见下)
+    // 携修改后计划批准:2 步 → 1 步(goal 内嵌 [[reply:]] 钩子让该步产出确定文本;
+    // 标题内首个 [[reply:]] 钩子会被 mock 汇总轮吃到并回显原始规划 JSON,故「修改版生效」
+    // 一律按 plan 数组断言,不按 result 文本断言)
     let (status, json) = send_json(
         app,
         "POST",
@@ -791,24 +892,12 @@ async fn task_plan_approve_with_modified_plan_replaces() {
         "修改版步骤应被执行到 done: {detail}"
     );
 
-    // 批次 R1:续跑完成 result = 汇总文本 + 「## 最终计划」段,段内容反映修改版计划
+    // 提交 2:续跑 result 只放成果(汇总文本),步骤信息不再重复拼进 result——
+    // 前端「计划步骤」列表已按 task.plan 渲染同一份结构化数据(含每步 result)。
     let result = detail["task"]["result"].as_str().unwrap_or("");
-    let section = result.split("## 最终计划").nth(1).unwrap_or("");
     assert!(
-        !section.is_empty(),
-        "result 应含「## 最终计划」段: {result}"
-    );
-    assert!(
-        section.contains("改写步"),
-        "最终计划段应反映修改版计划: {section}"
-    );
-    assert!(
-        section.contains("修改版产出"),
-        "最终计划段应含修改版步骤的产出概要: {section}"
-    );
-    assert!(
-        !section.contains("步骤二"),
-        "被替换掉的步骤不得出现在最终计划段: {section}"
+        !result.contains("## 最终计划"),
+        "result 不得再拼「## 最终计划」段(与计划步骤区重复): {result}"
     );
 }
 
@@ -892,11 +981,13 @@ async fn task_plan_approve_resume_executes_plan_steps() {
     );
 }
 
-/// 批次 R1:plan 批准续跑完成的 result = 汇总文本 + 「## 最终计划」段
-/// (前端拆卡契约,对齐 team「## 审计结论」):汇总文本在前、最终计划段在后;
-/// 段内含各步名称、状态(done)与 result 概要。
+/// 提交 2:plan 批准续跑完成的 result **只含汇总文本**,不再拼「## 最终计划」段
+/// (批次 R1 的旧契约)。理由:那一段是「各步名称/状态/result 概要」的文本副本,
+/// 而前端已按 task.plan 渲染同一份数据(计划步骤区,含每步 result)——同一份信息
+/// 不该在文本与结构里各存一份(写小说场景下用户拿到的是「正文 + 模式记账」)。
+/// 本用例锁定「段已移除」+「信息仍在 plan 结构里」。
 #[tokio::test]
-async fn task_plan_resume_result_contains_final_plan_section() {
+async fn task_plan_resume_result_is_summary_only() {
     let app = test_app();
 
     // 钩子布局同 task_plan_approve_resume_executes_plan_steps:规划器吃首个 [[reply:]]
@@ -920,42 +1011,89 @@ async fn task_plan_resume_result_contains_final_plan_section() {
     assert_eq!(st, "done", "批准续跑应完成,详情: {detail}");
 
     let result = detail["task"]["result"].as_str().unwrap_or("");
-    // 汇总文本在前、「## 最终计划」段在后
-    let sum_idx = result.find("批次R1汇总成果").unwrap_or(usize::MAX);
-    let mark_idx = result.find("## 最终计划").unwrap_or(usize::MAX);
     assert!(
-        mark_idx != usize::MAX,
-        "result 应含「## 最终计划」段: {result}"
-    );
-    assert!(sum_idx < mark_idx, "汇总文本应在最终计划段之前: {result}");
-    // 段内:各步名称 + done 状态 + result 概要
-    let section = &result[mark_idx..];
-    assert!(
-        section.contains("步骤一(done)"),
-        "段内应含步骤一及其状态: {section}"
+        result.contains("批次R1汇总成果"),
+        "result 应含汇总产出: {result}"
     );
     assert!(
-        section.contains("步骤一成果"),
-        "段内应含步骤一 result 概要: {section}"
+        !result.contains("## 最终计划"),
+        "result 不得再拼「## 最终计划」段(前端已有步骤列表): {result}"
+    );
+    // 信息不丢:各步名称/状态/产出一律由 plan 结构承载(前端计划步骤区渲染)
+    let plan = detail["task"]["plan"].as_array().unwrap();
+    assert_eq!(plan.len(), 2);
+    assert!(plan.iter().all(|s| s["status"] == "done"), "{detail}");
+    assert_eq!(plan[0]["name"], "步骤一");
+    assert_eq!(
+        plan[0]["result"].as_str().unwrap_or(""),
+        "步骤一成果",
+        "步骤产出应落在 plan 结构里: {detail}"
+    );
+    assert_eq!(plan[1]["result"].as_str().unwrap_or(""), "步骤二成果");
+}
+
+/// plan 批准续跑汇总失败 + 各步已产出(提交 2 部分成果兜底):汇总失败不再整体丢成果 →
+/// partial + result = 各步产出的确定性拼装(「## 步骤名」+ 正文),error 保留失败原因;
+/// 且拼装文本同样不带「## 最终计划」段。
+#[tokio::test]
+async fn task_plan_resume_summary_failure_falls_back_to_step_outputs() {
+    let app = test_app();
+
+    // 步骤 goal 内嵌转义 [[reply:]] 出确定产出;汇总 system 含「任务汇总者」→ 空输出 →
+    // 分级重试后仍空 → 走降级拼装(规划器/步骤 system 不含该子串,不受影响)。
+    let title = concat!(
+        r#"[[reply:[{"name":"步骤一","goal":"\u005b\u005breply:步骤一成果\u005d\u005d 写第一段"},"#,
+        r#"{"name":"步骤二","goal":"\u005b\u005breply:步骤二成果\u005d\u005d 写第二段"}] ]]"#,
+        "[[empty_if:任务汇总者]]",
+        " 汇总失败计划目标"
+    );
+    let id = create_task_with_mode(app, title, "plan").await;
+
+    let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
+    wait_status(app, &id, "planned").await;
+
+    let (status, json) =
+        send_json(app, "POST", &format!("/api/tasks/{id}/approve"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "approve 应 200: {json}");
+    let (st, detail) = wait_terminal(app, &id).await;
+    assert_eq!(
+        st, "partial",
+        "汇总失败但各步已产出应部分完成(成果不得丢),详情: {detail}"
+    );
+
+    let plan = detail["task"]["plan"].as_array().unwrap();
+    for step in plan {
+        assert_eq!(step["status"], "done", "各步应执行成功: {detail}");
+    }
+    let result = detail["task"]["result"].as_str().unwrap_or("");
+    assert!(
+        result.contains("## 步骤一") && result.contains("步骤一成果"),
+        "result 应含第一步产出: {result}"
     );
     assert!(
-        section.contains("步骤二(done)"),
-        "段内应含步骤二及其状态: {section}"
+        result.contains("## 步骤二") && result.contains("步骤二成果"),
+        "result 应含第二步产出: {result}"
     );
     assert!(
-        section.contains("步骤二成果"),
-        "段内应含步骤二 result 概要: {section}"
+        !result.contains("## 最终计划"),
+        "降级拼装同样不得带最终计划段: {result}"
+    );
+    let error = detail["task"]["error"].as_str().unwrap_or("");
+    assert!(
+        error.contains("空内容") && error.contains("finish_reason"),
+        "error 应保留汇总失败原因,实际: {error}"
     );
 }
 
-/// 批次 R1:含失败步骤时终态 partial(对齐 legacy「有产出则 partial」语义),
-/// 「## 最终计划」段内失败步标 error 且概要带失败原因。
+/// 含失败步骤时终态 partial(对齐 legacy「有产出则 partial」语义),失败信息落在
+/// **plan 结构**里(每步 status=error + result=失败原因),result 只放汇总文本。
 /// 注:ApprovedPlanExecutor 每步 user 消息都携带完整计划上下文,[[fail:]]/[[empty]]
 /// 等 user 侧无条件钩子会毒化全部步骤;[[empty_if:任务执行者]] 只匹配步骤执行的
 /// system 提示词(EXECUTOR_PROMPT),规划器(任务规划器)/汇总器(任务汇总者)不命中,
 /// 是 mock 下可精确只让步骤失败的钩子(mock 条件钩子仅匹配 system 消息)。
 #[tokio::test]
-async fn task_plan_resume_final_plan_section_marks_error_step() {
+async fn task_plan_resume_error_step_marks_partial_in_plan() {
     let app = test_app();
 
     // 钩子布局:规划器吃首个 [[reply:]] 出计划;步骤轮 system 含「任务执行者」
@@ -966,7 +1104,7 @@ async fn task_plan_resume_final_plan_section_marks_error_step() {
         r#"{"name":"步骤二","goal":"写第二段"}] ]]"#,
         "[[reply_if:任务汇总者|有失败步的汇总成果]]",
         "[[empty_if:任务执行者]]",
-        " 最终计划段失败步目标"
+        " 失败步计划目标"
     );
     let id = create_task_with_mode(app, title, "plan").await;
 
@@ -980,27 +1118,21 @@ async fn task_plan_resume_final_plan_section_marks_error_step() {
     let (st, detail) = wait_terminal(app, &id).await;
     assert_eq!(st, "partial", "含失败步骤应部分完成,详情: {detail}");
 
+    // 失败信息在 plan 结构里:两步 error、原因带「返回空内容」
+    let plan = detail["task"]["plan"].as_array().unwrap();
+    for step in plan {
+        assert_eq!(step["status"], "error", "步骤应失败: {detail}");
+        assert!(
+            step["result"].as_str().unwrap_or("").contains("返回空内容"),
+            "步骤 result 应带失败原因: {detail}"
+        );
+    }
+    // result 只放汇总文本(汇总成功即产出成果):不再拼步骤概要段
     let result = detail["task"]["result"].as_str().unwrap_or("");
-    // 汇总文本在前、「## 最终计划」段在后
-    let sum_idx = result.find("有失败步的汇总成果").unwrap_or(usize::MAX);
-    let mark_idx = result.find("## 最终计划").unwrap_or(usize::MAX);
+    assert!(result.contains("有失败步的汇总成果"), "{result}");
     assert!(
-        mark_idx != usize::MAX,
-        "result 应含「## 最终计划」段: {result}"
-    );
-    assert!(sum_idx < mark_idx, "汇总文本应在最终计划段之前: {result}");
-    let section = &result[mark_idx..];
-    assert!(
-        section.contains("步骤一(error)"),
-        "段内步骤一应标 error: {section}"
-    );
-    assert!(
-        section.contains("步骤二(error)"),
-        "段内步骤二应标 error: {section}"
-    );
-    assert!(
-        section.contains("返回空内容"),
-        "段内失败步概要应带失败原因: {section}"
+        !result.contains("## 最终计划"),
+        "result 不得再拼步骤概要段: {result}"
     );
 }
 
@@ -1059,6 +1191,89 @@ async fn task_plan_approve_resume_stop_marks_remaining_steps_error() {
             "终态后步骤不得残留 pending/running(取消兜底须置 error): {detail}"
         );
     }
+}
+
+/// 提交 2:plan 续跑**取消**时,已完成步骤的产出落进 result(而非留着 planned 态的
+/// 计划清单预览)——批准即让预览失效(`executor.rs::approve` 的 clear_result),
+/// 否则成果卡会把「计划」当成「已完成部分的成果」展示(2026-09-26 真模型 plan/写作
+/// 实测命中:某步已完成 560 字,result 里仍是计划清单)。
+#[tokio::test]
+async fn task_plan_resume_stop_keeps_done_step_output() {
+    let app = test_app();
+
+    // 规划器用 [[reply_if:任务规划器|…]] (只命中规划器 system):步骤的 user 消息里
+    // 携带整份已批准计划(含各步 goal),任何 user 侧无条件钩子都会毒化全部步骤——
+    // 步骤统一落回 mock 默认逐字流式回复(约 8ms/字符 ≈ 1s/步),留出 stop 窗口。
+    let title = concat!(
+        r#"[[reply_if:任务规划器|[{"name":"甲步","goal":"写第一段"},"#,
+        r#"{"name":"乙步","goal":"写第二段"},{"name":"丙步","goal":"写第三段"}] ]]"#,
+        " 计划取消目标"
+    );
+    let id = create_task_with_mode(app, title, "plan").await;
+    let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
+    let planned = wait_status(app, &id, "planned").await;
+    // planned 态 result = 待批准的计划清单(预览语义)
+    assert!(
+        planned["task"]["result"]
+            .as_str()
+            .unwrap_or("")
+            .contains("计划已产出"),
+        "planned 态 result 应是计划清单预览: {planned}"
+    );
+
+    let (status, json) =
+        send_json(app, "POST", &format!("/api/tasks/{id}/approve"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "approve 应 200: {json}");
+    // 批准即清空预览(结构性判据:预览不再可能被当成成果)
+    let (_, after_approve) = send_json(app, "GET", &format!("/api/tasks/{id}"), json!({})).await;
+    assert!(
+        after_approve["task"]["result"]
+            .as_str()
+            .unwrap_or("")
+            .is_empty(),
+        "批准后 planned 预览应清空: {after_approve}"
+    );
+
+    // 轮询到甲步 done 且任务仍在跑 → stop
+    let mut stop_ready = false;
+    let mut last = Value::Null;
+    for _ in 0..200 {
+        let (_, json) = send_json(app, "GET", &format!("/api/tasks/{id}"), json!({})).await;
+        let st = json["task"]["status"].as_str().unwrap_or("");
+        last = json.clone();
+        if json["task"]["plan"][0]["status"].as_str() == Some("done")
+            && matches!(st, "running" | "planning")
+        {
+            stop_ready = true;
+            break;
+        }
+        if matches!(st, "done" | "partial" | "error" | "ended") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        stop_ready,
+        "应观测到甲步 done 且任务仍在跑再 stop,最后观测: {last}"
+    );
+
+    let (status, _) = send_json(app, "POST", &format!("/api/tasks/{id}/stop"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "running 态 stop 应 200");
+    let (st, detail) = wait_terminal(app, &id).await;
+    assert_eq!(st, "ended", "stop 后任务应 ended,详情: {detail}");
+
+    let result = detail["task"]["result"].as_str().unwrap_or("");
+    let step0 = detail["task"]["plan"][0]["result"].as_str().unwrap_or("");
+    assert!(!step0.is_empty(), "甲步应有产出: {detail}");
+    assert!(
+        result.contains("## 甲步") && result.contains(step0),
+        "取消后 result 应是已完成步骤的拼装成果: {result}"
+    );
+    assert!(
+        !result.contains("计划已产出"),
+        "result 不得残留 planned 态的计划清单预览: {result}"
+    );
 }
 
 /// 创建任务:未知 task_mode 严格拒绝(400),容错回退只用于 DB 读侧。
@@ -1386,6 +1601,55 @@ async fn task_team_mode_auto_topology_audit_summary() {
     assert!(
         usage["prompt_tokens"].as_i64().unwrap_or(0) > 0,
         "usage_total 应非零: {detail}"
+    );
+}
+
+/// team 汇总失败 + 各主已产出(提交 2 部分成果兜底):升华整合失败不再整体丢成果 →
+/// partial + result = 各主产出的确定性拼装,error 保留团队汇总失败原因。
+/// (审计通过但汇总失败:审计结论段由汇总文本承载,失败时不存在该段,属预期。)
+#[tokio::test]
+async fn task_team_summary_failure_falls_back_to_main_outputs() {
+    let app = test_app();
+
+    // 拓扑经 [[reply_if:团队规划器]] 确定性给出;审计通过;汇总 system 含「任务汇总者」
+    // → 空输出 → 同参数重试一次仍空 → 走降级拼装(其余阶段 system 不含该子串,不受影响)。
+    let title = concat!(
+        r#"[[reply_if:团队规划器|{"mains":["#,
+        r#"{"name":"调研","goals":[{"name":"子目标一","goal":"\u005b\u005breply:主一产出\u005d\u005d 做调研"}]},"#,
+        r#"{"name":"写作","goals":[{"name":"子目标二","goal":"\u005b\u005breply:主二产出\u005d\u005d 写正文"}]}]"#,
+        r#" }]]"#,
+        r#"[[reply_if:团队审计员|{"通过":true,"打回":[],"结论":"覆盖完整"}]]"#,
+        "[[empty_if:任务汇总者]]",
+        " 团队汇总失败目标"
+    );
+    let id = create_task_with_mode(app, title, "team").await;
+    let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
+
+    let (st, detail) = wait_terminal(app, &id).await;
+    assert_eq!(
+        st, "partial",
+        "汇总失败但各主已产出应部分完成(成果不得丢),详情: {detail}"
+    );
+
+    let plan = detail["task"]["plan"].as_array().unwrap();
+    assert_eq!(plan.len(), 2, "两个主 agent 各 1 子目标: {detail}");
+    for step in plan {
+        assert_eq!(step["status"], "done", "各主应执行成功: {detail}");
+    }
+    let result = detail["task"]["result"].as_str().unwrap_or("");
+    assert!(
+        result.contains("主一产出") && result.contains("主二产出"),
+        "result 应含各主产出: {result}"
+    );
+    assert!(
+        result.contains("【主Agent-1】子目标一"),
+        "result 应含步骤标题: {result}"
+    );
+    let error = detail["task"]["error"].as_str().unwrap_or("");
+    assert!(
+        error.contains("汇总"),
+        "error 应保留团队汇总失败原因,实际: {error}"
     );
 }
 
@@ -3466,17 +3730,25 @@ async fn approve_without_exec_mode_keeps_approved_plan_executor() {
     assert_eq!(status, StatusCode::OK, "缺省批准应 200: {json}");
     let (st, detail) = wait_terminal(app, &id).await;
     assert_eq!(st, "done", "缺省批准后应完成: {detail}");
-    // ApprovedPlanExecutor 的结果契约:含「## 最终计划」段(其它模式不产该段)
+    // 逐步执行的证据:result 是汇总文本(提交 2 起不再拼「## 最终计划」段——该段是
+    // task.plan 的文本副本,前端「计划步骤」区已按结构渲染),各步产出落在 plan 里
     let result = detail["task"]["result"].as_str().unwrap_or("");
     assert!(
-        result.contains("## 最终计划"),
-        "缺省批准应走逐步执行(结果含最终计划段): {result}"
+        result.contains("计划续跑最终成果"),
+        "缺省批准应走逐步执行(汇总轮命中 reply_if): {result}"
     );
+    assert!(
+        !result.contains("## 最终计划"),
+        "提交 2 起 result 只放汇总文本: {result}"
+    );
+    let plan = detail["task"]["plan"].as_array().unwrap();
+    assert_eq!(plan.len(), 2, "逐步执行按已批准计划原样保留两步: {detail}");
     assert_eq!(
-        detail["task"]["plan"].as_array().unwrap().len(),
-        2,
-        "逐步执行按已批准计划原样保留两步: {detail}"
+        plan[0]["result"].as_str().unwrap_or(""),
+        "甲步成果",
+        "逐步执行应回写每步产出: {detail}"
     );
+    assert_eq!(plan[1]["result"].as_str().unwrap_or(""), "乙步成果");
 }
 
 /// 显式 exec_mode=approved_plan 与缺省等价
@@ -3497,8 +3769,8 @@ async fn approve_with_approved_plan_mode_matches_default() {
     assert_eq!(st, "done");
     let result = detail["task"]["result"].as_str().unwrap_or("");
     assert!(
-        result.contains("## 最终计划"),
-        "approved_plan 应走逐步执行: {result}"
+        result.contains("计划续跑最终成果") && !result.contains("## 最终计划"),
+        "approved_plan 应走逐步执行(汇总文本、无最终计划段): {result}"
     );
 }
 
@@ -3519,11 +3791,12 @@ async fn approve_with_solo_mode_runs_single_agent_loop() {
 
     let (st, detail) = wait_terminal(app, &id).await;
     assert_eq!(st, "done", "solo 执行应完成: {detail}");
-    // solo 走 run_tool_loop:结果不含逐步执行专属的「## 最终计划」段
+    // 提交 2 起任何模式都不产「## 最终计划」段(那是批次 R1 的旧契约,已移除);
+    // 保留反向断言防回退
     let result = detail["task"]["result"].as_str().unwrap_or("");
     assert!(
         !result.contains("## 最终计划"),
-        "solo 模式不应产「最终计划」段(那是逐步执行的契约): {result}"
+        "solo 模式不应产「最终计划」段: {result}"
     );
     // 关键区分:逐步执行会逐步落 agent 行,而 solo 只有一行
     let (status, calls) = send_json(app, "GET", &format!("/api/tasks/{id}/calls"), json!({})).await;
@@ -3557,7 +3830,7 @@ async fn approve_with_multi_mode_runs() {
     let result = detail["task"]["result"].as_str().unwrap_or("");
     assert!(
         !result.contains("## 最终计划"),
-        "multi 不应产逐步执行段: {result}"
+        "multi 不应产「最终计划」段(提交 2 起全模式已移除该段): {result}"
     );
     let (_, calls) = send_json(app, "GET", &format!("/api/tasks/{id}/calls"), json!({})).await;
     let agent_rows = calls["calls"]

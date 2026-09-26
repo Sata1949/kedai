@@ -316,7 +316,7 @@ describe('TaskBoard 批次 R1:plan 模式最终计划输出', () => {
     expect(html).not.toContain('计划步骤</div>');
   });
 
-  it('done 态:最终成果卡在上、最终计划卡在下,各自成卡', async () => {
+  it('旧任务:done 态 result 含「## 最终计划」段时仍拆卡(向后兼容,新任务不再产出该段)', async () => {
     const plan: TaskStep[] = [
       { name: '搜集资料', goal: '收集季度数据', status: 'done', result: '资料摘要' },
       { name: '撰写正文', goal: '输出报告初稿', status: 'done', result: '初稿内容' },
@@ -348,6 +348,53 @@ describe('TaskBoard 批次 R1:plan 模式最终计划输出', () => {
     expect(html).not.toContain('最终计划</div>');
     // 步骤区照常显示执行进度
     expect(html).toContain('计划步骤</div>');
+  });
+});
+
+describe('TaskBoard 提交 2:部分成果兜底展示(失败/取消不再藏起已完成的工作)', () => {
+  const plan: TaskStep[] = [
+    { name: '步骤一', goal: '写第一段', status: 'done', result: '已完成产出' },
+    { name: '步骤二', goal: '写第二段', status: 'error', result: '返回空内容(finish_reason=length)' },
+  ];
+  const salvageResult = '## 步骤一\n\n已完成产出\n\n> 未完成的步骤:步骤二';
+
+  it('error 态 result 非空:渲染成果汇总卡 + 「任务未完成」标注', async () => {
+    memStorage.set('kedai.task-result-summary.v1', '1');
+    const html = await render(TaskBoard, (p) =>
+      seedCurrentTask(p, makeDetail(makeTask('error', 'legacy', plan, salvageResult))),
+    );
+    // 卡标记类唯一标识成果汇总卡(纯文本断言会被模板注释污染)
+    expect(html).toContain('sv-task-summary-toggle');
+    expect(html).toContain('任务未完成,以下为已完成部分的成果');
+    expect(html).toContain('已完成产出');
+  });
+
+  it('ended 态 result 非空:同样渲染并标注(取消不再丢已完成步骤的产出)', async () => {
+    const html = await render(TaskBoard, (p) =>
+      seedCurrentTask(p, makeDetail(makeTask('ended', 'legacy', plan, salvageResult))),
+    );
+    expect(html).toContain('sv-task-summary-toggle');
+    expect(html).toContain('任务未完成,以下为已完成部分的成果');
+  });
+
+  it('error 态 result 为空:不渲染成果卡、无标注(不造假成果)', async () => {
+    const html = await render(TaskBoard, (p) =>
+      seedCurrentTask(p, makeDetail(makeTask('error', 'legacy', plan, ''))),
+    );
+    expect(html).not.toContain('sv-task-summary-toggle');
+    expect(html).not.toContain('任务未完成,以下为已完成部分的成果');
+    // 计划步骤区照常显示各步状态(失败原因在步骤 result 里)
+    expect(html).toContain('计划步骤</div>');
+  });
+
+  it('planned 态 result 持计划清单时不渲染成果卡(批次 R1 门控未被放宽抹掉)', async () => {
+    const pendingPlan: TaskStep[] = [
+      { name: '搜集资料', goal: '收集季度数据', status: 'pending', result: '' },
+    ];
+    const html = await render(TaskBoard, (p) =>
+      seedCurrentTask(p, makeDetail(makeTask('planned', 'plan', pendingPlan, '计划已产出,共 1 步:'))),
+    );
+    expect(html).not.toContain('sv-task-summary-toggle');
   });
 });
 

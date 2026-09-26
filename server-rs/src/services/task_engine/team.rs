@@ -20,7 +20,7 @@ use crate::services::prompt_kit::untrusted_boundary;
 use crate::services::task_core::prompt_consts::{
     SUMMARIZER_PROMPT, TEAM_AUDIT_PROMPT, TEAM_FINAL_AUDIT_PROMPT, TEAM_PLANNER_PROMPT,
 };
-use crate::services::task_core::{TaskBackend, TaskGenOutput, TaskTerminal};
+use crate::services::task_core::{fallback_terminal, TaskBackend, TaskGenOutput, TaskTerminal};
 use futures::future::BoxFuture;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -636,7 +636,11 @@ impl TeamExecutor {
             return Err("任务已停止".into());
         }
         if outputs.iter().all(|o| o.is_none()) {
-            return Err("全部主 agent 执行失败,团队无产出".into());
+            // 全灭时 helper 自然回落 Failed(无 done 步骤可拼),措辞与旧实现一致
+            return Ok((
+                fallback_terminal(&plan, "全部主 agent 执行失败,团队无产出".into()),
+                total,
+            ));
         }
 
         // ===== c. 审计 agent:一致性/质量/覆盖度审查;缺漏打回指定主补做(最多 1 轮) =====
@@ -646,7 +650,7 @@ impl TeamExecutor {
             LlmMessage::plain("user", &audit_input),
         ];
         // 截断自愈:审计是结构化 JSON 输出,推理模型烧光预算会腰斩 JSON(实测)
-        let audit_out = generate_text_healed(
+        let audit_out = match generate_text_healed(
             svc,
             &ctx.task_id,
             "audit",
@@ -657,7 +661,14 @@ impl TeamExecutor {
             &ctx.cancel,
             &mut total,
         )
-        .await?;
+        .await
+        {
+            Ok(o) => o,
+            // 取消:保持 Err,由引擎按 ended 收尾(终态兜底从库里的 plan 补写已完成产出)
+            Err(e) if *ctx.cancel.borrow() => return Err(e),
+            // 审计调用失败但各主已产出(提交 2 部分成果兜底):不再把成果整体丢掉
+            Err(e) => return Ok((fallback_terminal(&plan, format!("审计调用失败:{e}")), total)),
+        };
         if *ctx.cancel.borrow() {
             return Err("任务已停止".into());
         }
@@ -694,7 +705,12 @@ impl TeamExecutor {
                 return Err("任务已停止".into());
             }
             if outputs.iter().all(|o| o.is_none()) {
-                return Err("补做后全部主 agent 无产出".into());
+                // 补做后全灭:首轮通过的主产出仍可能已在 plan 里(helper 会捞回来),
+                // 一步都没有才回落 Failed
+                return Ok((
+                    fallback_terminal(&plan, "补做后全部主 agent 无产出".into()),
+                    total,
+                ));
             }
 
             // 终审:基于补做后的最终产出给出结论文本(空输出兜底回退首次审计结论,
@@ -704,7 +720,7 @@ impl TeamExecutor {
                 LlmMessage::plain("system", TEAM_FINAL_AUDIT_PROMPT),
                 LlmMessage::plain("user", &review_input),
             ];
-            let review_out = generate_text_healed(
+            let review_out = match generate_text_healed(
                 svc,
                 &ctx.task_id,
                 "final_audit",
@@ -715,7 +731,15 @@ impl TeamExecutor {
                 &ctx.cancel,
                 &mut total,
             )
-            .await?;
+            .await
+            {
+                Ok(o) => o,
+                Err(e) if *ctx.cancel.borrow() => return Err(e),
+                // 终审调用失败但补做产出已在手(提交 2 部分成果兜底):不再整体丢成果
+                Err(e) => {
+                    return Ok((fallback_terminal(&plan, format!("终审调用失败:{e}")), total))
+                }
+            };
             if *ctx.cancel.borrow() {
                 return Err("任务已停止".into());
             }
@@ -747,7 +771,7 @@ impl TeamExecutor {
         ];
         // 空输出重试一次(对齐 legacy 汇总空输出语义;此处简化为同参数单重重试)
         // 截断自愈与 record_usage/total 入账由 generate_text_healed 承担
-        let mut summary_out = generate_text_healed(
+        let mut summary_out = match generate_text_healed(
             svc,
             &ctx.task_id,
             "summary",
@@ -758,10 +782,16 @@ impl TeamExecutor {
             &ctx.cancel,
             &mut total,
         )
-        .await?;
+        .await
+        {
+            Ok(o) => o,
+            Err(e) if *ctx.cancel.borrow() => return Err(e),
+            // 汇总调用失败但各主已产出(提交 2 部分成果兜底):不再整体丢成果
+            Err(e) => return Ok((fallback_terminal(&plan, format!("团队汇总失败:{e}")), total)),
+        };
         if summary_out.text.trim().is_empty() && !*ctx.cancel.borrow() {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            summary_out = svc
+            summary_out = match svc
                 .generate_text(
                     &ctx.task_id,
                     "summary",
@@ -774,14 +804,22 @@ impl TeamExecutor {
                     None, // team 模式无节点级连接
                     ctx.cancel.clone(),
                 )
-                .await?;
+                .await
+            {
+                Ok(o) => o,
+                Err(e) if *ctx.cancel.borrow() => return Err(e),
+                Err(e) => {
+                    return Ok((fallback_terminal(&plan, format!("团队汇总失败:{e}")), total))
+                }
+            };
             svc.record_usage(&ctx.task_id, "summary", None, &summary_out);
             total.prompt_tokens += summary_out.prompt_tokens;
             total.completion_tokens += summary_out.completion_tokens;
             total.total_tokens += summary_out.prompt_tokens + summary_out.completion_tokens;
         }
         if summary_out.text.trim().is_empty() {
-            return Err("团队汇总返回空内容".into());
+            // 汇总空产出同样降级(提交 2):各主成果保留
+            return Ok((fallback_terminal(&plan, "团队汇总返回空内容".into()), total));
         }
 
         // ===== e. 收尾:终态失败步骤或审计/终审未通过 → partial;全部通过 → done =====

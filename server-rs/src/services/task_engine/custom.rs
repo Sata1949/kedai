@@ -48,7 +48,7 @@ use crate::services::prompt_kit::{
 use crate::services::task_core::prompt_consts::{
     CUSTOM_REFLECT_PROMPT, EXECUTOR_PROMPT, TASK_INTERNAL_PLAN_PROMPT,
 };
-use crate::services::task_core::{TaskBackend, TaskGenOutput, TaskTerminal};
+use crate::services::task_core::{fallback_terminal, TaskBackend, TaskGenOutput, TaskTerminal};
 use crate::tools::run_flow as run_flow_tool;
 use futures::future::BoxFuture;
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -1264,12 +1264,28 @@ impl CustomExecutor {
             call_state: call_state.as_ref(),
             call_depth: 0,
         };
-        let outcome = self.run_graph(&ctx, &g, Some(&mut plan)).await?;
+        // 运行失败的降级(提交 2 部分成果兜底):取消保持 Err(引擎按 ended 收尾,终态
+        // 兜底会从库里的 plan 补写已完成节点产出);其余失败能拼出已完成节点产出即 partial。
+        // 用量口径:Err 分支拿不到 outcome.total,此处返回默认值——权威用量在
+        // task_usage / task_llm_calls(每个节点各自 record_usage),该返回值只进引擎完成日志。
+        let outcome = match self.run_graph(&ctx, &g, Some(&mut plan)).await {
+            Ok(o) => o,
+            Err(e) if *ctx.cancel.borrow() => return Err(e),
+            Err(e) => return Ok((fallback_terminal(&plan, e), TokenUsage::default())),
+        };
 
         // 成果选拔:成果节点产出优先;为空则回退到末个非空生成产出(见 `select_draft`)
         let draft = select_draft(&steps, output_idx, &outcome.outputs);
         if draft.is_empty() {
-            return Err("自定义流程未产出任何成果(生成步骤全部失败或为空)".into());
+            // 无选拔结果时 plan 里仍可能有已完成节点产出(如生成步全空但工具步已跑),
+            // 能拼出成果就走 partial,一步都没有才 Failed
+            return Ok((
+                fallback_terminal(
+                    &plan,
+                    "自定义流程未产出任何成果(生成步骤全部失败或为空)".into(),
+                ),
+                outcome.total,
+            ));
         }
         // 含 error 节点但成果已产出 → partial(对齐 legacy WP3 语义)。
         // 对比模式再加一条:被调流程内有失败/空产出(degraded)同算降级——与本层静态

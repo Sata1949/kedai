@@ -3238,6 +3238,18 @@ input[type="range"].sv-range::-moz-range-thumb {
 .sv-task-final-plan { border-left: 6px solid var(--sv-blue); }
 .sv-task-planned-plan { margin: 10px 0; }
 
+/* 提交 2:error/ended 态展示「已完成部分的成果」时的未完成标注(常显,不随卡收起;
+   复用错误文本的构成主义警示节奏:红左边线 + 浅粉底 + 深红字) */
+.sv-task-incomplete-note {
+  margin: 6px 0 8px;
+  padding: 6px 10px;
+  border-left: 3px solid var(--sv-red);
+  background: var(--sv-pink-light);
+  color: var(--sv-red-deep);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 /* 任务空态复用 .sv-empty-geo 几何构成 */
 .sv-task-empty {
   display: flex;

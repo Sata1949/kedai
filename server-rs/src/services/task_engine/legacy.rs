@@ -10,7 +10,7 @@
 use super::context::TaskRunContext;
 use super::executor::ModeExecutor;
 use crate::models::types::{TaskStatus, TaskStepStatus, TaskSubtaskStatus, TokenUsage};
-use crate::services::task_core::{TaskBackend, TaskGenOutput, TaskTerminal};
+use crate::services::task_core::{fallback_terminal, TaskBackend, TaskGenOutput, TaskTerminal};
 use futures::future::BoxFuture;
 use std::sync::Arc;
 
@@ -161,7 +161,13 @@ impl ModeExecutor for LegacyExecutor {
                         usage,
                     ))
                 }
-                Err(e) => Ok((TaskTerminal::Failed { error: Some(e) }, usage)),
+                // 汇总失败的降级(提交 2 部分成果兜底,实测 legacy/写作 丢过约 3900 字):
+                // 能拼出已完成步骤的产出 → partial(成果 + 原因);一步都没成 → Failed。
+                // 判定与四模式共用 task_core::fallback_terminal,不在此另写一份。
+                Err(e) => Ok((
+                    fallback_terminal(&final_plan, format!("汇总失败:{e}")),
+                    usage,
+                )),
             }
         })
     }

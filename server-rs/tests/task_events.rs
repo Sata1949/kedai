@@ -453,10 +453,13 @@ async fn task_solo_offers_bash_tool() {
     assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
 
     let seq = collect_full_until_terminal(&mut body, &id).await;
+    // 同下方 fs_* 用例:瞬时事件在并行跑时可能被 broadcast 挤出(Lagged 跳过属设计内,
+    // 见 `api/tasks.rs::events`),故取「调用工具 / 已返回结果」两条的并集作判据。
     let called_bash = seq.iter().any(|e| {
-        e["detail"]
-            .as_str()
-            .is_some_and(|d| d.contains("调用工具 bash"))
+        e["detail"].as_str().is_some_and(|d| {
+            (d.contains("调用工具 bash") || d.contains("工具 bash 已返回结果"))
+                && !d.contains("被任务策略拒绝")
+        })
     });
     assert!(
         called_bash,
@@ -508,13 +511,19 @@ async fn workspace_less_task_binds_scratch_and_offers_fs_tools() {
     assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
 
     let seq = collect_full_until_terminal(&mut body, &id).await;
-    let called_fs = seq.iter().any(|e| {
-        e["detail"]
-            .as_str()
-            .is_some_and(|d| d.contains("调用工具 fs_glob"))
+    // 判据取「调用工具 / 已返回结果」两条瞬时事件的**并集**:二者都只在 fs_glob 进入
+    // 本轮 tools 白名单时才可能产生(mock 的 `[[tool:...]]` 钩子只在工具被下发时产出
+    // ToolCall)。只认其中一条会在并行跑时偶发误红——任务事件走 broadcast(容量 64,
+    // 溢出按 Lagged 跳过;`api/tasks.rs::events` 注释明确「任务事件允许丢,前端兜底仍可
+    // REST 拉详情」),同 binary 内 11 个用例并发时最旧的那帧可能被挤掉(实测约 1/3 概率,
+    // 与本批代码改动无关:对照组同样复现)。
+    let fs_offered = seq.iter().any(|e| {
+        e["detail"].as_str().is_some_and(|d| {
+            d.contains("调用工具 fs_glob") || d.contains("工具 fs_glob 已返回结果")
+        })
     });
     assert!(
-        called_fs,
+        fs_offered,
         "未绑定工作区的任务应经 scratch 作用域拿到 fs_* 工具(实测缺陷 D1),实际事件: {seq:?}"
     );
     let policy_denied = seq.iter().any(|e| {
