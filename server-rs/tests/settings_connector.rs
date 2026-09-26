@@ -163,7 +163,13 @@ async fn mock_auto_switches_to_openai_on_save() {
 
 /// 模式隔离 API 级回归(WP7 双向污染矩阵 D-2):写 task 覆盖层 agent_system_prompt
 /// 不得改变 roleplay 扁平值;GET ?mode=task 返回覆盖值,?mode=roleplay 返回扁平权威值。
-/// 本 binary 无任务执行测试,task 覆盖层残留无副作用(结束时仍写回空串保持卫生)。
+///
+/// 卫生复位口径(2026-09-26 修顺序竞争):本 binary 共享进程级 app,复位必须写回**测试
+/// 开始时的 task 视角原值**,不得写空串——`for_mode(Task)` 对 `Some("")` 是「显式清空」
+/// 语义(不回退内置任务默认词,params.rs),写空串会让同 binary 的
+/// `roleplay_default_prompt_visible_on_fresh_install` 第二条断言(「task 缺省应有任务向
+/// 默认词」)按用例运行顺序偶发变红(实测文件级连跑 6 次红 3 次)。复位为原值后本用例
+/// 对共享状态的净效果为零,顺序无关。
 #[tokio::test]
 async fn task_overlay_does_not_leak_into_roleplay_settings() {
     let _guard = test_lock().await;
@@ -174,6 +180,11 @@ async fn task_overlay_does_not_leak_into_roleplay_settings() {
     assert_eq!(status, StatusCode::OK);
     let flat_before = before_rp["agent_system_prompt"].clone();
     assert!(flat_before.is_string(), "扁平值应为裸字符串(线格式不变)");
+    // 记录 task 覆盖层现值(与 roleplay 同理取现场值;这是复位目标)
+    let (status, before_task) = send_json(app, "GET", "/api/settings?mode=task", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let task_before = before_task["agent_system_prompt"].clone();
+    assert!(task_before.is_string(), "task 视角应为裸字符串(线格式不变)");
 
     // 写 task 覆盖层
     let (status, r) = send_json(
@@ -198,17 +209,23 @@ async fn task_overlay_does_not_leak_into_roleplay_settings() {
         "roleplay 扁平值不得被 task 覆盖层污染"
     );
 
-    // 卫生复位:写回空串(API 三态语义中无「复位 None」操作;Some("") = 显式清空)
+    // 卫生复位:写回本用例开始时的 task 视角原值(不是空串——理由见用例文档注释)。
+    // API 三态语义中无「复位 None」操作,故以「记录现场值 + 写回」实现净零影响。
     let (status, _) = send_json(
         app,
         "PUT",
         "/api/settings?mode=task",
-        json!({ "agent_system_prompt": "" }),
+        json!({ "agent_system_prompt": task_before }),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     let (_, rp_after) = send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
     assert_eq!(rp_after["agent_system_prompt"], flat_before);
+    let (_, task_after) = send_json(app, "GET", "/api/settings?mode=task", json!({})).await;
+    assert_eq!(
+        task_after["agent_system_prompt"], task_before,
+        "task 覆盖层应复位为原值(共享 app 下对本用例之外零影响)"
+    );
 }
 
 /// 提示词预览按模式合并(批次 2,docs/契约-协议与配置.md 第五节):
