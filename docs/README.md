@@ -54,8 +54,9 @@
 | **字面契约权威** | HTTP 端点字段、SSE 负载、线格式冻结值 | [契约.md](契约.md) / [契约-协议与配置.md](契约-协议与配置.md) | `tools/check-contract.mjs`(21 组 MAPPINGS,未登记不校验) |
 | **条目编号权威** | 遗留 L/T/D 编号、计划批次号、经验条目 1~32 | [遗留.md](遗留.md) / [计划.md](计划.md) / [经验.md](经验.md) | **编号不得重编** —— 源码注释按编号引用 |
 
-**CI 现状**:`.github/workflows/ci.yml` 为**纸面 CI**(仓库无 git 远端,从未运行)。
-实际生效的闸门是 `build.ps1` 的 `[0]` 阶段、`tools/check-all.ps1` 与 `tools/hooks/pre-push`(详见 `../MAINTENANCE.md` §0)。
+**CI 现状**:`.github/workflows/ci.yml` **已激活**(2026-09-26 起 `origin` 为 GitHub 私有仓;
+触发面限 `push` 到 `main` + PR + 手动 `workflow_dispatch`,平台分支刻意不触发)。
+生效的闸门是 `build.ps1` 的 `[0]` 阶段、`tools/check-all.ps1`、`tools/hooks/pre-push` 与 CI(详见 `../MAINTENANCE.md` §0)。
 
 **纪律**:架构文档不再硬编码测试数字(那类事实一律引用 `../MAINTENANCE.md`);若与代码实测不符,
 以代码为准并**先修文档再动代码**。
