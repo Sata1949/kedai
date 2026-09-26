@@ -230,6 +230,10 @@ impl ModeExecutor for PlanExecutor {
                 &ctx.goal,
                 ctx.character_id.as_deref(),
                 &ctx.cancel,
+                ctx.scope.clone(),
+                // 能力事实 = ToolLoop:本模式批准后的步骤走 run_agent_loop(有工具);
+                // 规划器据此把「交付物正文 + 需要时用文件/命令」写进步骤(D1)。
+                crate::services::task_core::prompt_consts::StepCapability::ToolLoop,
             )
             .await?;
             // 规划产出后落库前再查一次取消:已停止则不进 planned(终态由收尾写 ended)

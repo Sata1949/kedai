@@ -289,7 +289,9 @@ impl CustomExecutor {
             &settings.task_tool_policy,
             &settings.task_tool_allowlist,
             &self.engine.tool_registry(),
-            // 工作区工具族只在绑定了工作区的任务里下发
+            // 工作区工具族随「作用域是否存在」下发(口径同 solo.rs:任务自 D1 起恒有
+            // 作用域——工作区或任务 scratch;传 is_some() 是为守住「没有作用域就不给
+            // 文件工具」这条不变量)
             ctx.scope.is_some(),
         );
         // Some([]) = 策略全量集;Some(list) = 策略集 ∩ 步骤白名单

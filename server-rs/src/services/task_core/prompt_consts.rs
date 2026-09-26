@@ -52,3 +52,119 @@ pub(crate) const CUSTOM_REFLECT_PROMPT: &str = "你是反思审查员。下面�
 /// 本指令明确「只做分析规划、产出要点、不产出面向用户的正文」,与步骤自身语义一致;
 /// 其产出仅作后续步骤的参考上下文,不计入最终成果。内置指令不经 untrusted 包裹。
 pub(crate) const TASK_INTERNAL_PLAN_PROMPT: &str = "你是任务内部规划者。请针对下面给出的目标做内部分析与规划:提炼关键要求、约束、需要参考的信息与执行要点,产出简洁的要点清单供后续步骤使用。只输出分析规划要点本身,不要输出面向用户的最终正文、不要模拟对话、不要用标题包裹结果。";
+
+/// 执行阶段的工具面事实(D1 修复):规划器必须知道执行者能做什么。
+///
+/// 为什么要有这个类型而不是让调用方传 bool:两个变体的语义差得远(一个说「只能出正文」、
+/// 一个说「有文件工具与命令工具、文件根在哪」),裸 bool 在调用点读不出含义,而这条提示
+/// 直接决定规划器会不会规划出执行者做不到的步骤(实测缺陷 D1)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StepCapability {
+    /// 执行阶段的步骤**没有任何工具**(legacy:`generate_step_retry` → 纯文本生成)
+    NoTools,
+    /// 执行阶段的步骤走工具循环(plan/team/custom:`run_agent_loop`),工具面由任务策略编译
+    ToolLoop,
+}
+
+/// 「本轮可用能力(执行阶段)」提示段(D1)。
+///
+/// 为什么必须告诉规划器:2026-09 实测里 plan/写作的规划器把交付物规划成
+/// `constraints.md`/`draft.md`/`check.md`,而 legacy 的步骤根本没有工具——模型只能
+/// `echo 中文 > a.txt`,cmd 按 ANSI 落盘后读回是乱码,于是换 `chcp`、换 python、
+/// 换 `-X utf8` 无限重试:一轮 77 条命令、15 分钟不收敛,还在用户数据目录留下 12 个
+/// 垃圾文件。规划器不知道执行者能做什么,就必然规划出做不到的步骤。
+///
+/// `allowed`:执行阶段实际下发的工具名(任务策略编译结果);`workspace`:执行侧文件根
+/// (绑定工作区或任务 scratch)。本段是内置指令,不经 untrusted 包裹。
+pub(crate) fn capability_note(
+    capability: StepCapability,
+    allowed: &[String],
+    workspace: Option<&std::path::Path>,
+) -> String {
+    let mut s = String::from("【本轮可用能力(执行阶段)】");
+    match capability {
+        StepCapability::NoTools => {
+            s.push_str(
+                "\n执行者没有任何文件或命令工具:不能读写文件、不能执行命令。每一步的产出都必须是\
+                 正文文本,禁止把交付物规划成文件(如 constraints.md / draft.md / 大纲.md)——\
+                 没有工具去创建它,那一步只会空转或失败。步骤 goal 请写清「产出哪段正文、\
+                 以什么判据验收」。",
+            );
+        }
+        StepCapability::ToolLoop => {
+            let has_fs = allowed
+                .iter()
+                .any(|n| n == crate::tools::agent_tools_fs::READ_TOOL);
+            let has_shell = allowed.iter().any(|n| n == crate::tools::bash::TOOL_NAME);
+            if has_fs {
+                let names = [
+                    crate::tools::agent_tools_fs::READ_TOOL,
+                    crate::tools::agent_tools_fs::WRITE_TOOL,
+                    crate::tools::agent_tools_fs::EDIT_TOOL,
+                    crate::tools::agent_tools_fs::GLOB_TOOL,
+                    crate::tools::agent_tools_fs::GREP_TOOL,
+                ]
+                .join("/");
+                s.push_str(&format!("\n执行者可以读写文件(工具 {names})。"));
+                match workspace {
+                    Some(w) => s.push_str(&format!(
+                        "文件根目录:{}(相对路径都按此根解析,越出根会被拒绝)。",
+                        w.display()
+                    )),
+                    None => s.push_str("但本轮未绑定文件根,步骤不得依赖文件读写。"),
+                }
+            } else {
+                s.push_str("\n执行者没有文件工具:不能读写文件,交付物必须写成正文。");
+            }
+            if has_shell {
+                s.push_str(
+                    "另有命令工具 bash(Windows 下由 cmd 解释:不支持 `;` 分隔多条命令与 /d/ \
+                     这类 MSYS 路径,多命令用 `&&` 连接)。",
+                );
+            } else {
+                s.push_str("执行者不能执行命令,步骤不得依赖运行命令。");
+            }
+            s.push_str("交付物正文必须由执行者直接产出:文件只是过程物,不得只把成果留在文件里。");
+        }
+    }
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 能力段的两套文案(D1):legacy(无工具)必须明说「不要规划成文件」;
+    /// 有工具时必须给出文件根与唯一出处纪律。文案本身是防回退断言——
+    /// 这两句一旦被后续改动抹平,缺陷 D1 会原样复发。
+    #[test]
+    fn capability_note_covers_both_executor_shapes() {
+        let no_tools = capability_note(StepCapability::NoTools, &[], None);
+        assert!(no_tools.contains("没有任何文件或命令工具"), "{no_tools}");
+        assert!(no_tools.contains("禁止把交付物规划成文件"), "{no_tools}");
+
+        let allowed = vec![
+            crate::tools::agent_tools_fs::READ_TOOL.to_string(),
+            crate::tools::agent_tools_fs::WRITE_TOOL.to_string(),
+            crate::tools::bash::TOOL_NAME.to_string(),
+        ];
+        let ws = std::path::Path::new("C:/scratch/t1");
+        let tools = capability_note(StepCapability::ToolLoop, &allowed, Some(ws));
+        assert!(
+            tools.contains(crate::tools::agent_tools_fs::READ_TOOL),
+            "{tools}"
+        );
+        assert!(tools.contains("C:/scratch/t1"), "应给出文件根:{tools}");
+        assert!(tools.contains("cmd"), "应说明 shell 实为 cmd:{tools}");
+        assert!(tools.contains("不得只把成果留在文件里"), "{tools}");
+
+        // 无文件工具但有 shell(策略收窄的极端情形):不得声称能读写文件
+        let shell_only = capability_note(
+            StepCapability::ToolLoop,
+            &[crate::tools::bash::TOOL_NAME.to_string()],
+            None,
+        );
+        assert!(shell_only.contains("没有文件工具"), "{shell_only}");
+        assert!(!shell_only.contains("可以读写文件"), "{shell_only}");
+    }
+}

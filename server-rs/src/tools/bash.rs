@@ -34,19 +34,23 @@ pub fn register_bash_tool(
 ) {
     let definition = ToolDefinition {
         name: TOOL_NAME.into(),
-        description: "执行 shell 命令并返回输出。危险命令(删除/提权/系统级)会要求用户逐条确认;\
-                      任务模式下此类命令不可用,普通命令可用。默认在数据目录执行,可用 cwd 指定工作目录。"
+        description: "执行 shell 命令并返回输出。**Windows 下由 cmd /C 解释**:不支持 `;` 分隔\
+                      多条命令、不支持 /d/ 或 /c/ 这类 MSYS 路径、没有 md5sum 等 GNU 工具——\
+                      多条命令用 `&&` 连接,跨盘符切目录用 `cd /d X:`;其他平台为 sh。\
+                      危险命令(删除/提权/系统级)会要求用户逐条确认;任务模式下此类命令不可用,\
+                      普通命令可用。绑定工作区的任务在工作区内执行;未绑定工作区的任务在\
+                      任务专属临时工作区执行;聊天场景在应用数据目录执行。可用 cwd 指定工作目录。"
             .into(),
         parameters: json!({
             "type": "object",
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "完整命令(交平台默认 shell 解释:Windows=cmd,其他=sh)"
+                    "description": "完整命令(交平台默认 shell 解释:Windows=cmd,其他=sh;每次调用的结果头会回显实际 shell 与 cwd)"
                 },
                 "cwd": {
                     "type": "string",
-                    "description": "工作目录绝对路径;省略则在应用数据目录执行"
+                    "description": "工作目录绝对路径;省略则用当前任务的工作区(聊天场景为应用数据目录)"
                 },
                 "timeout_ms": {
                     "type": "integer",
@@ -82,7 +86,10 @@ pub fn register_bash_tool(
 /// 绑定了工作区的任务里:cwd 缺省 = 工作区,显式 cwd 必须落回工作区内(jail)。
 /// jail **只约束 cwd** —— 命令文本里的绝对路径不在这里拦截(进程内有 shell 就能读该
 /// 进程有权限读的路径,那属于 OS 级隔离的范畴,不是本函数能承诺的)。
-/// 未绑定工作区时(含全部聊天场景)与改造前逐字一致:缺省 = 数据目录。
+///
+/// 无 scope(第四分支)自任务模式 D1 起**只可能出现在聊天路径**:任务恒有作用域——绑定
+/// 工作区的用工作区,未绑定的由 `task_engine::run_inner` 建任务级 scratch 并绑定。
+/// 该分支与改造前逐字一致(缺省 = 数据目录),角色扮演主链路零变化。
 ///
 /// 抽成自由函数是为了让 jail 语义能被单测直接断言,不必真的跑起一条命令。
 fn resolve_cwd(
@@ -136,6 +143,9 @@ async fn run(
         .unwrap_or(None);
 
     let risk = crate::tools::command_risk::classify_command(&command, "");
+    // 审计风险标记(D1):命令文本命中数据目录绝对路径 / 含 `..` 上溯 → 标记非空。
+    // **只标记不拦截**(理由见 audit::classify_risk_flag 文档)。
+    let risk_flag = audit::classify_risk_flag(&command, data_dir);
     let tier = exec::detect_tier();
     // 会话归属:task: 前缀为任务模式虚拟 session(与 task_service 同口径)
     let is_task = ctx.session_id.starts_with("task:");
@@ -162,6 +172,7 @@ async fn run(
                 exit_code: None,
                 stdout: String::new(),
                 stderr: "命令执行总开关未开启".into(),
+                risk_flag: risk_flag.clone(),
             },
         );
         return Err("命令执行未开启:请在「设置 → 授权管理 → 命令执行」中打开总开关后重试。".into());
@@ -216,9 +227,10 @@ async fn run(
                     exit_code: Some(out.exit_code),
                     stdout: out.stdout.clone(),
                     stderr: out.stderr.clone(),
+                    risk_flag: risk_flag.clone(),
                 },
             );
-            Ok(format_result(&command, &out))
+            Ok(format_result(&command, &cwd, &out))
         }
         Err(e) => {
             // 执行失败(超时/启动失败)也留痕:失败原因同样需要可回溯
@@ -237,6 +249,7 @@ async fn run(
                     exit_code: None,
                     stdout: String::new(),
                     stderr: e.clone(),
+                    risk_flag: risk_flag.clone(),
                 },
             );
             Err(e)
@@ -244,10 +257,16 @@ async fn run(
     }
 }
 
-/// 结果文本:给模型看的结构化摘要(含退出码与所跑命令,便于自查)。
-fn format_result(command: &str, out: &exec::ExecResult) -> String {
+/// 结果文本:给模型看的结构化摘要(含实际 shell、cwd、退出码与所跑命令,便于自查)。
+///
+/// shell 与 cwd 是 2026-09 实测补的(缺陷 D4):工具名叫 `bash`、实际却是 cmd,而结果头
+/// 原先只回执行器档位与退出码 —— 模型按 bash 语法写命令(`;` 分隔、`/d/` 路径、`md5sum`、
+/// `git status`)后只看到「退出码 1」,拿不到任何线索去纠正假设,于是换个写法无限重试,
+/// 每条白烧一轮 1~3 分钟。把「实际由谁解释、在哪个目录跑」回灌给模型,一轮内即可自纠。
+fn format_result(command: &str, cwd: &str, out: &exec::ExecResult) -> String {
+    let shell = shell_name();
     let mut s = format!(
-        "$ {command}\n(执行器:{};退出码:{})",
+        "$ {command}\n(执行器:{};shell:{shell};cwd:{cwd};退出码:{})",
         out.tier.label(),
         out.exit_code
     );
@@ -264,6 +283,12 @@ fn format_result(command: &str, out: &exec::ExecResult) -> String {
     }
     if out.exit_code != 0 {
         s.push_str("\n\n提示:非零退出码表示命令失败,请检查命令与参数。");
+        if cfg!(target_os = "windows") {
+            s.push_str(
+                "本机 shell 是 cmd:不支持 `;` 分隔多条命令、不支持 /d/ 或 /c/ 这类 MSYS 路径、\
+                 没有 md5sum/git 等未必安装的工具;多条命令用 `&&` 连接。",
+            );
+        }
     }
     s
 }
@@ -302,11 +327,15 @@ mod tests {
             tier: exec::ShellTier::Sandbox,
             timed_out: false,
         };
-        let s = format_result("echo hello", &out);
+        let s = format_result("echo hello", "C:/ws/task", &out);
         assert!(s.contains("$ echo hello"));
         assert!(s.contains("hello"));
         assert!(s.contains("退出码:0"));
         assert!(!s.contains("非零退出码"));
+        // 结果头自描述(D4):shell 与 cwd 必须回灌给模型,否则它无法纠正「名字叫 bash、
+        // 实际是 cmd」的假设。这两个字段是防回退断言,不得因排版调整删掉。
+        assert!(s.contains("shell:"), "结果头应回显实际 shell:{s}");
+        assert!(s.contains("cwd:C:/ws/task"), "结果头应回显实际 cwd:{s}");
     }
 
     #[test]
@@ -318,9 +347,15 @@ mod tests {
             tier: exec::ShellTier::Sandbox,
             timed_out: false,
         };
-        let s = format_result("false", &out);
+        let s = format_result("false", "C:/ws/task", &out);
         assert!(s.contains("boom"));
         assert!(s.contains("非零退出码"), "失败时应给提示:{s}");
+        if cfg!(target_os = "windows") {
+            assert!(
+                s.contains("cmd") && s.contains("&&"),
+                "Windows 失败提示应给出 cmd 语法纠正线索:{s}"
+            );
+        }
     }
 
     #[test]
@@ -332,7 +367,7 @@ mod tests {
             tier: exec::ShellTier::Sandbox,
             timed_out: false,
         };
-        assert!(format_result("true", &out).contains("无输出"));
+        assert!(format_result("true", "C:/ws/task", &out).contains("无输出"));
     }
 
     #[test]
@@ -386,6 +421,14 @@ mod tests {
         let err = resolve_cwd(Some(&outside.to_string_lossy()), Some(&scope), &data_dir)
             .expect_err("界外 cwd 必须被拒");
         assert!(err.contains("越界"), "文案应指明越界: {err}");
+        // D1 关键回归:显式把 cwd 指向**数据目录**必须被拒——jail 存在的全部意义就是
+        // 不让命令在用户真实数据里跑(实测缺陷是脚本去 open('kedai.db-wal','rb'))
+        let err = resolve_cwd(Some(&data_dir.to_string_lossy()), Some(&scope), &data_dir)
+            .expect_err("把 cwd 指到数据目录必须被拒");
+        assert!(
+            err.contains("越界") || err.contains("数据目录"),
+            "文案应指明越界/数据目录: {err}"
+        );
         // 未绑定工作区 → 旧行为:缺省 = 数据目录,显式 cwd 原样透传
         assert_eq!(
             resolve_cwd(None, None, &data_dir).unwrap(),

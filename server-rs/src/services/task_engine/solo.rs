@@ -88,7 +88,10 @@ pub(crate) async fn run_agent_loop(
         &settings.task_tool_policy,
         &settings.task_tool_allowlist,
         &engine.tool_registry(),
-        // 工作区工具族只在绑定了工作区的任务里下发(未绑定调了必然报错,不如不给)
+        // 工作区工具族随「作用域是否存在」下发:任务自 D1 起恒有作用域(绑定工作区用
+        // 工作区,未绑定则用任务 scratch,见 task_engine::run_inner),故 fs_* 对任务恒可见;
+        // 传 `scope.is_some()` 而非恒 true,是为守住「没有作用域就不给文件工具」这条不变量
+        // (作用域缺失时那些工具必然报错,不如不给)。
         call.scope.is_some(),
     );
     // 闸门名单先取出(allowed 借用生命周期需覆盖整个工具循环),再取走 defs

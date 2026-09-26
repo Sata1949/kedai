@@ -12,8 +12,8 @@ pub(crate) mod types;
 // 根级再导出:引擎/宿主两侧按 `task_core::{...}` 取用,隐藏模块内部布局。
 // DELTA_FLUSH_CHARS 仅 delta.rs 内部与单测使用,不在此再导出。
 pub(crate) use backend::{
-    TaskBackend, TaskEvents, TaskFlowAccess, TaskGenerator, TaskPromptKit, TaskSettings, TaskStore,
-    TaskTerminalSink, TaskTrace,
+    TaskBackend, TaskEvents, TaskFlowAccess, TaskGenerator, TaskPromptKit, TaskScratch,
+    TaskSettings, TaskStore, TaskTerminalSink, TaskTrace,
 };
 pub(crate) use delta::{DeltaBatcher, DELTA_FLUSH_WINDOW};
 pub(crate) use terminal::TaskTerminal;

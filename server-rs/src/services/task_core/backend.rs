@@ -37,7 +37,7 @@ use futures::future::BoxFuture;
 use std::time::Duration;
 use tokio::sync::watch;
 
-// ==================== 窄接口(1/8):任务/子任务持久化读写 ====================
+// ==================== 窄接口(1/9):任务/子任务持久化读写 ====================
 
 /// 任务与子任务的持久化读写(task 主表 + task_subtasks 表)。
 pub(crate) trait TaskStore: Send + Sync {
@@ -73,7 +73,7 @@ pub(crate) trait TaskStore: Send + Sync {
     ) -> Result<String, String>;
 }
 
-// ==================== 窄接口(2/8):调用追踪与用量留痕 ====================
+// ==================== 窄接口(2/9):调用追踪与用量留痕 ====================
 
 /// LLM 调用追踪(task_llm_calls)与用量(task_usage)留痕。
 pub(crate) trait TaskTrace: Send + Sync {
@@ -114,7 +114,7 @@ pub(crate) trait TaskTrace: Send + Sync {
     );
 }
 
-// ==================== 窄接口(3/8):任务模式有效设置 ====================
+// ==================== 窄接口(3/9):任务模式有效设置 ====================
 
 /// 任务模式合并后的有效设置快照读取。
 pub(crate) trait TaskSettings: Send + Sync {
@@ -122,7 +122,7 @@ pub(crate) trait TaskSettings: Send + Sync {
     fn task_settings(&self) -> RuntimeSettings;
 }
 
-// ==================== 窄接口(4/8):提示词组装 ====================
+// ==================== 窄接口(4/9):提示词组装 ====================
 
 /// 执行者提示词组装能力(内置指令/执行者身份/世界书/注入/Agent 提示词)。
 pub(crate) trait TaskPromptKit: Send + Sync {
@@ -153,7 +153,7 @@ pub(crate) trait TaskPromptKit: Send + Sync {
     ) -> String;
 }
 
-// ==================== 窄接口(5/8):自定义 Agent 流程访问 ====================
+// ==================== 窄接口(5/9):自定义 Agent 流程访问 ====================
 
 /// 自定义 Agent 流程库访问(custom 模式读取本轮要跑的流程)。
 ///
@@ -172,7 +172,7 @@ pub(crate) trait TaskFlowAccess: Send + Sync {
     fn resolve_task_flow(&self, task: Option<&TaskRecord>) -> Result<FlowSnapshot, String>;
 }
 
-// ==================== 窄接口(6/8):任务事件发射 ====================
+// ==================== 窄接口(6/9):任务事件发射 ====================
 
 /// 任务事件广播发射能力。
 pub(crate) trait TaskEvents: Send + Sync {
@@ -190,7 +190,7 @@ pub(crate) trait TaskEvents: Send + Sync {
     fn delta_batcher(&self, task_id: &str, phase: &str, step_index: Option<usize>) -> DeltaBatcher;
 }
 
-// ==================== 窄接口(7/8):执行终态落库 ====================
+// ==================== 窄接口(7/9):执行终态落库 ====================
 
 /// 任务执行终态统一落库能力。
 pub(crate) trait TaskTerminalSink: Send + Sync {
@@ -204,7 +204,7 @@ pub(crate) trait TaskTerminalSink: Send + Sync {
     );
 }
 
-// ==================== 窄接口(8/8):LLM 单次生成原语 ====================
+// ==================== 窄接口(8/9):LLM 单次生成原语 ====================
 
 /// 任务模式 LLM 单次生成原语。
 ///
@@ -309,6 +309,11 @@ pub(crate) trait TaskGenerator: Send + Sync {
     ) -> BoxFuture<'a, Result<TaskGenOutput, String>>;
 
     /// 规划的单次生成(含只读侦察;解析与重试在 task_engine::retry)。
+    ///
+    /// `scope`(D1):侦察轮的只读作用域——绑定了工作区/scratch 的任务,规划器可以
+    /// 用只读工作区工具看真实文件,而不是盲规划;`capability`:执行阶段的工具面事实,
+    /// 用于给规划器提示「执行者能做什么」(见 prompt_consts::capability_note)。
+    #[allow(clippy::too_many_arguments)]
     fn plan_task<'a>(
         &'a self,
         task_id: &'a str,
@@ -316,6 +321,8 @@ pub(crate) trait TaskGenerator: Send + Sync {
         character_id: Option<&'a str>,
         max_tokens: u32,
         cancel: &'a watch::Receiver<bool>,
+        scope: Option<std::sync::Arc<crate::models::types::ExecScope>>,
+        capability: crate::services::task_core::prompt_consts::StepCapability,
     ) -> BoxFuture<'a, Result<TaskGenOutput, String>>;
 
     /// 规划对话修订的单次生成(解析与重试在 task_engine::retry)。
@@ -327,7 +334,21 @@ pub(crate) trait TaskGenerator: Send + Sync {
         feedback: &'a str,
         max_tokens: u32,
         cancel: &'a watch::Receiver<bool>,
+        scope: Option<std::sync::Arc<crate::models::types::ExecScope>>,
+        capability: crate::services::task_core::prompt_consts::StepCapability,
     ) -> BoxFuture<'a, Result<TaskGenOutput, String>>;
+}
+
+// ==================== 窄接口(9/9):任务临时工作区 ====================
+
+/// 任务 scratch 工作区(任务模式 D1):未绑定工作区的任务的可写草稿区。
+///
+/// 语义归宿主:目录按任务 id 隔离、首次使用时创建、**失败必须 Err**——调用方据此让任务
+/// 以明确错误终止;降级(例如回落到数据目录)会让模型在用户真实数据里写垃圾文件,
+/// 是更坏的结果(2026-09 实测:一轮 77 条命令 / 12 个垃圾文件)。
+pub(crate) trait TaskScratch: Send + Sync {
+    /// 任务 scratch 目录:`<scratch_root>/<task_id>`,不存在则创建。
+    fn scratch_dir_for(&self, task_id: &str) -> Result<std::path::PathBuf, String>;
 }
 
 // ==================== 聚合别名(兼容既有构造点) ====================
@@ -343,6 +364,7 @@ pub(crate) trait TaskBackend:
     + TaskEvents
     + TaskTerminalSink
     + TaskGenerator
+    + TaskScratch
 {
 }
 
@@ -355,5 +377,6 @@ impl<T> TaskBackend for T where
         + TaskEvents
         + TaskTerminalSink
         + TaskGenerator
+        + TaskScratch
 {
 }

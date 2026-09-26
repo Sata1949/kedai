@@ -45,6 +45,8 @@ export interface ExecAuditEntry {
   exit_code: number | null;
   stdout_summary: string;
   stderr_summary: string;
+  /** 风险标记(D1 审计增强):'' | data_dir_touch | parent_climb;只标记不拦截 */
+  risk_flag: string;
 }
 
 /** GET /api/exec/audit:审计列表(时间倒序,limit 上限 500) */

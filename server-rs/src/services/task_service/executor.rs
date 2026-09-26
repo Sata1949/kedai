@@ -311,6 +311,12 @@ impl TaskService {
             .collect();
         self.add_task_message(id, "user", "plan_chat", message)?;
         let (cancel, token) = self.register_cancel(id);
+        // 侦察作用域(D1):与执行期同源解析(绑定工作区 → 该目录;未绑定 → 无)。
+        // 修订是只读侦察,目录不可用时降级为「无作用域」而不是拒绝修订——口径同
+        // plan_task 的「侦察失败不沉规划」。
+        let scope = crate::tools::workspace_guard::scope_for_task(task.workspace.as_deref())
+            .ok()
+            .flatten();
         // 批次 4.2:重试/解析算法已上移 task_engine::retry(任务引擎职责)
         let revised = match crate::services::task_engine::retry::plan_revise_retry(
             self.as_ref(),
@@ -318,6 +324,8 @@ impl TaskService {
             &history,
             message,
             &cancel,
+            scope,
+            crate::services::task_core::prompt_consts::StepCapability::ToolLoop,
         )
         .await
         {
@@ -689,6 +697,21 @@ impl TaskService {
         Ok(out)
     }
 
+    /// 执行阶段的工具名单(规划器能力段用,D1):与 `solo::run_agent_loop` 的工具循环
+    /// 走**同一处编译纪律**(`task_engine::tool_policy::compile`),避免「规划器被告知的
+    /// 工具面」与「执行者实际拿到的工具面」两处各自推断而漂移。
+    /// `has_scope`:任务是否绑定了作用域(工作区或 scratch)——决定 `fs_*` 族是否下发。
+    fn planned_step_tools(&self, has_scope: bool) -> Vec<String> {
+        let settings = self.task_settings();
+        crate::services::task_engine::tool_policy::compile(
+            &settings.task_tool_policy,
+            &settings.task_tool_allowlist,
+            &self.engine.tool_registry(),
+            has_scope,
+        )
+        .allowed
+    }
+
     /// 规划(单次规划尝试,含只读侦察;解析与重试在 plan_task_retry):
     /// 把目标交给规划器,允许先用只读白名单工具(PLANNER_SCOUT_TOOLS,最多
     /// PLANNER_SCOUT_MAX_ROUNDS 轮)收集与目标相关的信息,再产出计划 JSON 数组文本
@@ -700,6 +723,7 @@ impl TaskService {
     /// 侦察轮也经 generate_text 统一出口落 task_llm_calls(phase=planner);
     /// 侦察轮调用失败(如半截 tool_call 被判协议损坏)不沉规划——记 warn 回退
     /// 无工具最终轮,与侦察能力缺席时的旧行为等价。
+    #[allow(clippy::too_many_arguments)] // 参数 = 规划调用上下文(经重试包装逐次透传),拆 struct 只多一层中间类型
     pub(crate) async fn plan_task(
         &self,
         task_id: &str,
@@ -707,8 +731,19 @@ impl TaskService {
         character_id: Option<&str>,
         max_tokens: u32,
         cancel: &watch::Receiver<bool>,
+        scope: Option<Arc<crate::models::types::ExecScope>>,
+        capability: crate::services::task_core::prompt_consts::StepCapability,
     ) -> Result<TaskGenOutput, String> {
         let mut sys = String::from(super::prompt::PLANNER_PROMPT);
+        // 执行阶段能力段(D1):不告诉规划器执行者有什么,它就会把交付物规划成文件
+        sys.push_str(&format!(
+            "\n\n{}",
+            crate::services::task_core::prompt_consts::capability_note(
+                capability,
+                &self.planned_step_tools(scope.is_some()),
+                scope.as_deref().map(|s| s.workspace()),
+            )
+        ));
         // 世界书为外部文本(WP7):untrusted 边界包裹,内置规划器指令不包裹
         let world = self.world_context(character_id);
         if !world.is_empty() {
@@ -721,7 +756,7 @@ impl TaskService {
             LlmMessage::plain("system", &sys),
             LlmMessage::plain("user", title),
         ];
-        self.plan_scout_loop(task_id, character_id, messages, max_tokens, cancel)
+        self.plan_scout_loop(task_id, character_id, messages, max_tokens, cancel, scope)
             .await
     }
 
@@ -730,6 +765,7 @@ impl TaskService {
     /// plan_chat 对话历史 + 本轮反馈。历史截断参照 record_llm_call 摘要口径:
     /// 每条内容截 800 字符、历史段整体截 4000(多轮对话体积封底)。
     /// 侦察/落库/取消检查与 plan_task 同口径(共用 plan_scout_loop)。
+    #[allow(clippy::too_many_arguments)] // 同 plan_task:参数即规划调用上下文
     pub(crate) async fn plan_revise(
         &self,
         task: &TaskRecord,
@@ -737,8 +773,19 @@ impl TaskService {
         feedback: &str,
         max_tokens: u32,
         cancel: &watch::Receiver<bool>,
+        scope: Option<Arc<crate::models::types::ExecScope>>,
+        capability: crate::services::task_core::prompt_consts::StepCapability,
     ) -> Result<TaskGenOutput, String> {
         let mut sys = String::from(super::prompt::PLANNER_PROMPT);
+        // 能力段口径与首轮规划一致(D1):修订同样不得规划执行者做不到的步骤
+        sys.push_str(&format!(
+            "\n\n{}",
+            crate::services::task_core::prompt_consts::capability_note(
+                capability,
+                &self.planned_step_tools(scope.is_some()),
+                scope.as_deref().map(|s| s.workspace()),
+            )
+        ));
         let world = self.world_context(task.character_id.as_deref());
         if !world.is_empty() {
             sys.push_str(&format!(
@@ -786,6 +833,7 @@ impl TaskService {
             messages,
             max_tokens,
             cancel,
+            scope,
         )
         .await
     }
@@ -793,6 +841,12 @@ impl TaskService {
     /// 带只读侦察的规划调用循环(plan_task/plan_revise 共用骨架,批次 R2b 抽取):
     /// messages 由调用方组装(首轮规划 = 目标;修订轮 = 目标+当前计划+历史+反馈),
     /// 侦察白名单/轮数上限/回填/取消检查口径不变。
+    ///
+    /// `scope`(D1):任务绑定了作用域时,侦察轮额外下发**只读工作区工具**
+    /// (`fs_read`/`fs_glob`/`fs_grep`)并把它作为路径闸门根——规划器因此能看见真实
+    /// 代码/文件,而不是像实测那样报「读取文件 package.json 失败:系统找不到指定的路径」
+    /// 后盲规划(`read` 走的是角色扮演文件区语义,看不到工作区)。写类工具仍不下发,
+    /// 规划阶段保持零副作用。
     async fn plan_scout_loop(
         &self,
         task_id: &str,
@@ -800,22 +854,26 @@ impl TaskService {
         mut messages: Vec<LlmMessage>,
         max_tokens: u32,
         cancel: &watch::Receiver<bool>,
+        scope: Option<Arc<crate::models::types::ExecScope>>,
     ) -> Result<TaskGenOutput, String> {
         let settings = self.task_settings();
-        // 侦察白名单 ∩ 已注册工具(未注册的环境静默缺席,如裁剪版工具集)
+        // 侦察白名单 ∩ 已注册工具(未注册的环境静默缺席,如裁剪版工具集);
+        // 有作用域时并入工作区只读三件(单一出处:tool_sets::scout_tools)
+        let scout_whitelist = crate::tools::tool_sets::scout_tools(scope.is_some());
         let defs: Vec<ToolDefinition> = self
             .engine
             .tool_definitions()
             .into_iter()
-            .filter(|d| PLANNER_SCOUT_TOOLS.contains(&d.name.as_str()))
+            .filter(|d| scout_whitelist.contains(&d.name.as_str()))
             .collect();
         // 虚拟 session_id(task: 前缀,与 run_agent_loop 同口径;不建影子行)
         let tool_ctx = ToolContext {
             session_id: format!("task:{task_id}"),
             character_id: character_id.unwrap_or_default().to_string(),
             agent_depth: 0,
-            // 规划侦察轮的工具集是只读白名单(PLANNER_SCOUT_TOOLS),与工作区绑定无关
-            scope: None,
+            // 与白名单同源:有作用域才有工作区工具,无作用域时 scope 也必须为 None
+            // (否则工具会被闸门拒绝却仍出现在列表里,白烧侦察轮)
+            scope: scope.clone(),
         };
         let mut scout_round = 0usize;
         loop {
@@ -869,10 +927,11 @@ impl TaskService {
                 tool_call_id: None,
             });
             for call in &out.tool_calls {
-                // 白名单双保险:下发定义已是子集,执行时仍逐一核对(防模型幻觉工具名)。
+                // 白名单双保险:下发定义已是子集,执行时仍逐一核对(防模型幻觉工具名);
+                // 名单与下发同源(tool_sets::scout_tools:有作用域时含工作区只读三件)。
                 // 收口到统一裁决入口(批次授权改造):名单内 = custom_authorized 放行,
                 // 名单外直接拒绝。任务模式无 UI 授权上下文,不走等待授权分支。
-                let listed = PLANNER_SCOUT_TOOLS.contains(&call.name.as_str());
+                let listed = scout_whitelist.contains(&call.name.as_str());
                 let decision = self
                     .engine
                     .tool_registry()

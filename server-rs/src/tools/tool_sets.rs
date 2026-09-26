@@ -36,12 +36,21 @@ pub const REFLECT: &[&str] = &["censor_text", "revise_passage"];
 /// 工作区文件工具族(编码通道批次)的名字清单(**单一出处**:注册侧、风险级、任务工具策略
 /// 的工作区闸门与「何时调用」指南都以它为准)。
 ///
-/// **有意不进 `READONLY_SCOUT` / `SUBAGENT` / `REFLECT`**:那三份白名单是「既有能力面」的
-/// 冻结清单,本族的可见性由**任务是否绑定工作区**决定(见 `task_engine/tool_policy.rs`)。
-/// 纳入只读白名单会让规划侦察轮与子 agent(都跑在聊天/任务上下文里、未必有工作区)
-/// 看到必然报错的工具,还会顺带扩大子 agent 的写入面——本批不做这两件事。
-/// 故新增只读能力(如 fs_read)不自动进侦察轮,要放开请单独评估并改这里的注释。
+/// **有意不进 `SUBAGENT` / `REFLECT`**:那两份白名单是「既有能力面」的冻结清单,本族的
+/// 可见性由**任务是否绑定作用域**决定(见 `task_engine/tool_policy.rs`)。纳入子 agent /
+/// 反思轮会让它们看到必然报错的工具(子 agent 未必有工作区),还会顺带扩大写入面。
+///
+/// 规划侦察轮(READONLY_SCOUT)自任务模式 D1 起**有条件**放开只读子集:
+/// 见 `WORKSPACE_READONLY_TOOLS` 与 `scout_tools`——规划器看不到工作区就只能盲规划
+/// (实测缺陷 D5:`read` 走角色扮演文件区语义,报「读取文件 package.json 失败」)。
 pub const WORKSPACE_TOOLS: &[&str] = &["fs_read", "fs_write", "fs_edit", "fs_glob", "fs_grep"];
+
+/// 工作区文件工具族的**只读子集**:`fs_read`/`fs_glob`/`fs_grep`。
+///
+/// 用途只有一个:任务绑定了作用域时并入规划侦察轮白名单(D5),让规划器能看见工作区里的
+/// 真实文件再产出计划。写/改(fs_write/fs_edit)与 bash 不进侦察轮——规划阶段仍是
+/// 「只规划不执行」的零副作用纪律(零副作用靠白名单保证,不靠模型自觉)。
+pub const WORKSPACE_READONLY_TOOLS: &[&str] = &["fs_read", "fs_glob", "fs_grep"];
 
 /// 剔除正文元工具(get_state/apply_patch),保留其余工具与原顺序。
 /// 顺序稳定性是前缀缓存的前提,故不做排序。
@@ -49,6 +58,19 @@ pub fn exclude_meta(defs: Vec<ToolDefinition>) -> Vec<ToolDefinition> {
     defs.into_iter()
         .filter(|d| !META_TOOLS.contains(&d.name.as_str()))
         .collect()
+}
+
+/// 规划侦察轮白名单(按「本任务是否绑定作用域」求值):
+/// 无作用域 = 既有只读清单(角色文件区语义的 read/search 等);
+/// 有作用域 = 既有清单 + 工作区只读子集(仍禁写)。
+/// 单一出处在 `tools/tool_sets.rs`——侦察装配点(plan_scout_loop)与冻结测试都引用它,
+/// 避免「白名单常量改了、装配点没改」的漂移。
+pub fn scout_tools(has_workspace: bool) -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = READONLY_SCOUT.to_vec();
+    if has_workspace {
+        names.extend_from_slice(WORKSPACE_READONLY_TOOLS);
+    }
+    names
 }
 
 /// 剔除工作区文件工具族。聊天路径(角色扮演、custom 流程步骤)没有工作区上下文,
@@ -148,6 +170,32 @@ mod tests {
             WORKSPACE_TOOLS,
             &["fs_read", "fs_write", "fs_edit", "fs_glob", "fs_grep"]
         );
+        assert_eq!(WORKSPACE_READONLY_TOOLS, &["fs_read", "fs_glob", "fs_grep"]);
+    }
+
+    /// 侦察白名单的两档(D1):无作用域 = 既有只读清单(逐字不变),有作用域 = 追加
+    /// 工作区只读三件且**只追加不替换**;写类与 bash 任何一档都不得出现。
+    #[test]
+    fn scout_tools_adds_workspace_readonly_only_with_scope() {
+        assert_eq!(scout_tools(false), READONLY_SCOUT.to_vec());
+        let with_ws = scout_tools(true);
+        assert_eq!(
+            with_ws.len(),
+            READONLY_SCOUT.len() + WORKSPACE_READONLY_TOOLS.len()
+        );
+        for n in READONLY_SCOUT {
+            assert!(with_ws.contains(n), "既有只读清单不得丢失:{n}");
+        }
+        for n in WORKSPACE_READONLY_TOOLS {
+            assert!(with_ws.contains(n), "有作用域时应放开 {n}");
+            assert!(WORKSPACE_TOOLS.contains(n), "只读子集必须是工作区族的子集");
+        }
+        for forbidden in ["fs_write", "fs_edit", "bash", "write", "replace", "create"] {
+            assert!(
+                !with_ws.contains(&forbidden),
+                "规划侦察轮不得出现写/命令工具:{forbidden}"
+            );
+        }
     }
 
     /// 工作区工具族必须被 exclude_workspace 完整剔除,且不误伤同名前缀的其它工具

@@ -60,9 +60,11 @@ const TASK_LLM_TOTAL_TIMEOUT: Duration = Duration::from_secs(300);
 /// 严禁写操作(write/replace/create/memory_write/update_variables)与编排类
 /// (agentgo/agentend)——写操作违背 plan 模式「只规划不执行」零副作用纪律,
 /// 编排类会把规划阶段变成实际执行。
-/// 常量本体收敛在 tools::tool_sets::READONLY_SCOUT(单一出处,避免多处漂移)。
-const PLANNER_SCOUT_TOOLS: &[&str] = crate::tools::tool_sets::READONLY_SCOUT;
-
+///
+/// 常量本体在 `tools::tool_sets`(单一出处):无作用域 = `READONLY_SCOUT`;
+/// 任务绑定了作用域时由 `tool_sets::scout_tools(true)` 追加工作区只读三件(D5 修复,
+/// 见 `plan_scout_loop` 的文档注释)。此处不再留本地别名,避免「改了一处、另一处没改」。
+///
 /// 规划器侦察轮上限:工具调用最多 2 轮,随后最终轮不带工具强制产出计划 JSON
 /// (计划契约不变);侦察是增强环节,轮数封底防模型沉迷收集迟迟不出计划。
 const PLANNER_SCOUT_MAX_ROUNDS: usize = 2;
@@ -74,6 +76,10 @@ pub(crate) use crate::services::task_core::TaskGenOutput;
 pub struct TaskService {
     db: Arc<Db>,
     characters: Arc<CharacterService>,
+    /// 任务 scratch 工作区根(任务模式 D1):未绑定工作区的任务在其下按任务 id 建
+    /// 子目录,作为执行侧路径闸门根与 bash 缺省 cwd。来源 `AppConfig::task_scratch_dir`
+    /// (与数据目录同级;`KEDAI_TASK_SCRATCH_DIR` 可覆盖),只在首次使用时建目录。
+    scratch_root: std::path::PathBuf,
     /// 聊天引擎(solo/plan 等六模式执行器复用 execute_generation/run_tool_loop;
     /// 批次 4.2 注入,engine 不依赖 tasks,无循环)。**连接器也从这里取**——二维批次 5b
     /// 起本服务不再自持连接器:默认连接由 `engine.connector` 提供、节点级连接由
@@ -114,10 +120,12 @@ impl TaskService {
         flow: Arc<Mutex<AgentFlowService>>,
         agent_subtasks: Arc<AgentSubtaskService>,
         executors: Arc<Mutex<crate::services::executor_service::ExecutorService>>,
+        scratch_root: std::path::PathBuf,
     ) -> Self {
         let svc = TaskService {
             db,
             characters,
+            scratch_root,
             engine,
             flow,
             agent_subtasks,
@@ -140,6 +148,31 @@ impl TaskService {
             );
         }
         svc
+    }
+
+    /// 任务 scratch 目录解析(任务模式 D1):`<scratch_root>/<task_id>`,首次使用时创建。
+    ///
+    /// 未绑定工作区的任务由 `task_engine::run_inner` 取本目录作为执行作用域(路径闸门根
+    /// 与 bash 缺省 cwd),使「产出一份文档」类任务不再把数据目录当草稿纸。
+    /// **失败不降级**:建不出来就让任务以明确错误终止——降级回数据目录去写用户真实数据
+    /// 是更坏的结果(口径同 run_inner 的「工作区目录失效不降级」)。
+    pub(crate) fn scratch_dir_for(&self, task_id: &str) -> Result<std::path::PathBuf, String> {
+        // 任务 id 由服务端生成(UUID),此处只做廉价防御:带分隔符/上溯段的 id 绝不拼进路径
+        if task_id.is_empty()
+            || task_id.contains(['/', '\\'])
+            || task_id.contains("..")
+            || task_id.contains(':')
+        {
+            return Err(format!("任务 id 不能作为目录名使用:{task_id}"));
+        }
+        let dir = self.scratch_root.join(task_id);
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            format!(
+                "任务临时工作区创建失败({}):{e};可用 KEDAI_TASK_SCRATCH_DIR 指定可写目录",
+                dir.display()
+            )
+        })?;
+        Ok(dir)
     }
 
     // ===== CRUD =====

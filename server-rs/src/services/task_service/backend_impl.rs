@@ -18,8 +18,8 @@ use crate::models::types::{
 use crate::services::agent_flow_service::FlowSnapshot;
 use crate::services::settings_service::RuntimeSettings;
 use crate::services::task_core::{
-    DeltaBatcher, TaskEvents, TaskFlowAccess, TaskGenerator, TaskPromptKit, TaskSettings,
-    TaskStore, TaskTerminal, TaskTerminalSink, TaskTrace, TruncationHeal,
+    DeltaBatcher, TaskEvents, TaskFlowAccess, TaskGenerator, TaskPromptKit, TaskScratch,
+    TaskSettings, TaskStore, TaskTerminal, TaskTerminalSink, TaskTrace, TruncationHeal,
 };
 use futures::future::BoxFuture;
 use std::time::Duration;
@@ -195,6 +195,14 @@ impl TaskTerminalSink for TaskService {
     }
 }
 
+// ==================== TaskScratch:任务临时工作区 ====================
+
+impl TaskScratch for TaskService {
+    fn scratch_dir_for(&self, task_id: &str) -> Result<std::path::PathBuf, String> {
+        TaskService::scratch_dir_for(self, task_id)
+    }
+}
+
 // ==================== TaskGenerator:LLM 生成与分级重试 ====================
 
 impl TaskGenerator for TaskService {
@@ -326,6 +334,8 @@ impl TaskGenerator for TaskService {
         character_id: Option<&'a str>,
         max_tokens: u32,
         cancel: &'a watch::Receiver<bool>,
+        scope: Option<std::sync::Arc<crate::models::types::ExecScope>>,
+        capability: crate::services::task_core::prompt_consts::StepCapability,
     ) -> BoxFuture<'a, Result<TaskGenOutput, String>> {
         Box::pin(TaskService::plan_task(
             self,
@@ -334,6 +344,8 @@ impl TaskGenerator for TaskService {
             character_id,
             max_tokens,
             cancel,
+            scope,
+            capability,
         ))
     }
 
@@ -344,9 +356,11 @@ impl TaskGenerator for TaskService {
         feedback: &'a str,
         max_tokens: u32,
         cancel: &'a watch::Receiver<bool>,
+        scope: Option<std::sync::Arc<crate::models::types::ExecScope>>,
+        capability: crate::services::task_core::prompt_consts::StepCapability,
     ) -> BoxFuture<'a, Result<TaskGenOutput, String>> {
         Box::pin(TaskService::plan_revise(
-            self, task, history, feedback, max_tokens, cancel,
+            self, task, history, feedback, max_tokens, cancel, scope, capability,
         ))
     }
 }

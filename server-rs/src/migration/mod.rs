@@ -17,8 +17,8 @@ mod merge;
 pub use backup::{snapshot_before_upgrade, snapshot_database};
 pub use ddl::{
     ensure_agent_subtasks_finished_at_column, ensure_characters_derived_backfill,
-    ensure_characters_derived_json_column, ensure_exec_audit_table,
-    ensure_llm_requests_usage_columns, ensure_memory_entries_fts_backfill,
+    ensure_characters_derived_json_column, ensure_exec_audit_risk_flag_column,
+    ensure_exec_audit_table, ensure_llm_requests_usage_columns, ensure_memory_entries_fts_backfill,
     ensure_memory_entries_pinned_column, ensure_perf_indexes, ensure_skills_progressive_columns,
     ensure_task_llm_calls_finish_reason_column, ensure_task_messages_table,
     ensure_task_subtasks_finished_at_column, ensure_tasks_executor_id_column,

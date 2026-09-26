@@ -125,12 +125,17 @@ pub(crate) async fn generate_step_retry(
 /// length/空内容 = 预算被推理 token 耗尽,max_tokens 翻倍(上限 RETRY_MAX_TOKENS_CAP);
 /// 纯格式错误 = 同预算重试。网络/超时等硬错误不重试直接抛(与步骤重试同款约定)。
 /// 共 PLAN_MAX_ATTEMPTS 次尝试;失败文案带末次错误,便于排障。
+///
+/// `scope`/`capability`(D1):侦察轮的只读作用域与执行阶段能力事实,逐次尝试原样透传
+/// (重试只改 max_tokens,不改规划上下文)。
 pub(crate) async fn plan_task_retry(
     deps: &dyn TaskBackend,
     task_id: &str,
     title: &str,
     character_id: Option<&str>,
     cancel: &watch::Receiver<bool>,
+    scope: Option<std::sync::Arc<crate::models::types::ExecScope>>,
+    capability: crate::services::task_core::prompt_consts::StepCapability,
 ) -> Result<(Vec<TaskStep>, TaskGenOutput), String> {
     let mut max_tokens = PLAN_INITIAL_MAX_TOKENS;
     let mut last_err = String::from("规划器未产出有效步骤");
@@ -142,7 +147,15 @@ pub(crate) async fn plan_task_retry(
             }
         }
         let out = deps
-            .plan_task(task_id, title, character_id, max_tokens, cancel)
+            .plan_task(
+                task_id,
+                title,
+                character_id,
+                max_tokens,
+                cancel,
+                scope.clone(),
+                capability,
+            )
             .await?;
         match super::parse::parse_plan(&out.text) {
             Ok(steps) if !steps.is_empty() => return Ok((steps, out)),
@@ -178,6 +191,8 @@ pub(crate) async fn plan_revise_retry(
     history: &[crate::models::types::TaskMessageRecord],
     feedback: &str,
     cancel: &watch::Receiver<bool>,
+    scope: Option<std::sync::Arc<crate::models::types::ExecScope>>,
+    capability: crate::services::task_core::prompt_consts::StepCapability,
 ) -> Result<(Vec<TaskStep>, TaskGenOutput), String> {
     let mut max_tokens = PLAN_INITIAL_MAX_TOKENS;
     let mut last_err = String::from("规划器未产出有效修订计划");
@@ -189,7 +204,15 @@ pub(crate) async fn plan_revise_retry(
             }
         }
         let out = deps
-            .plan_revise(task, history, feedback, max_tokens, cancel)
+            .plan_revise(
+                task,
+                history,
+                feedback,
+                max_tokens,
+                cancel,
+                scope.clone(),
+                capability,
+            )
             .await?;
         match super::parse::parse_plan(&out.text) {
             Ok(steps) if !steps.is_empty() => return Ok((steps, out)),

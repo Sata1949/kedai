@@ -358,6 +358,8 @@ impl AppState {
             flow.clone(),
             agent_subtasks.clone(),
             executors.clone(),
+            // 未绑定工作区的任务在此根下按任务 id 建 scratch(任务模式 D1)
+            config.task_scratch_dir.clone(),
         ));
         // 任务服务弱引用注入 ToolDeps(任务模式子 agent 的事件桥/调用追踪/usage 落库)
         let _ = deps.tasks.set(Arc::downgrade(&tasks));

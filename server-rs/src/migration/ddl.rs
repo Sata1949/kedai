@@ -653,7 +653,8 @@ CREATE TABLE IF NOT EXISTS exec_audit (
   decision       TEXT NOT NULL DEFAULT 'allowed',
   exit_code      INTEGER,
   stdout_summary TEXT NOT NULL DEFAULT '',
-  stderr_summary TEXT NOT NULL DEFAULT ''
+  stderr_summary TEXT NOT NULL DEFAULT '',
+  risk_flag      TEXT NOT NULL DEFAULT ''
 )"#;
 /// 审计按时间倒序查询的辅助索引。
 pub(super) const EXEC_AUDIT_INDEX_DDL: &str =
@@ -667,6 +668,17 @@ pub fn ensure_exec_audit_table(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(EXEC_AUDIT_INDEX_DDL)
         .map_err(|e| format!("创建 exec_audit 索引失败: {e}"))?;
     Ok(())
+}
+
+/// 幂等补列(D1 审计增强,2026-09-26):exec_audit 加 `risk_flag`。
+///
+/// 取值 `''` | `data_dir_touch`(命令文本命中数据目录绝对路径)| `parent_climb`
+/// (含 `..` 路径段)。**只标记不拦截**:模型有 shell 就能读进程可读的任意路径,cwd jail
+/// 只约束相对路径与缺省目录;标记的价值是让「模型把用户数据目录当草稿纸」这类行为在
+/// 审计表里可筛可查(2026-09 实测证据见 docs/经验.md),不是假装封堵。
+/// 列追加在表尾,与新版 EXEC_AUDIT_DDL 建出的 schema normalize 后一致。
+pub fn ensure_exec_audit_risk_flag_column(conn: &Connection) -> Result<(), String> {
+    add_column_if_missing(conn, "exec_audit", "risk_flag", "TEXT NOT NULL DEFAULT ''")
 }
 
 /// 性能索引补建(2026-09-13 批次 3):旧库补 `sessions.character_id` 与 `tasks` 过滤列索引。

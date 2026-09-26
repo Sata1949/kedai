@@ -474,6 +474,68 @@ async fn task_solo_offers_bash_tool() {
     );
 }
 
+/// 未绑定工作区的任务也有执行作用域(D1):开跑时建 `<scratch_root>/<task_id>` 并作为
+/// 作用域下发,`fs_*` 族随之下发。
+///
+/// 判据两条,都是结构性证据而非文案断言:
+///   ① 事件流出现「调用工具 fs_glob」——mock 的 `[[tool:...]]` 钩子只在工具进入本轮
+///      tools 白名单时才产出 ToolCall(见 mock::tool_offered),故这证明 fs_* 确实下发;
+///      反向断言不得出现「被任务策略拒绝」形态(那是策略/闸门剔除的特征)。
+///   ② scratch 目录在任务跑完后落在盘上(路径与 `build_test_app` 注入的
+///      `KEDAI_TASK_SCRATCH_DIR` 同源)——这是「模型不再把数据目录当草稿纸」的前提。
+#[tokio::test]
+async fn workspace_less_task_binds_scratch_and_offers_fs_tools() {
+    let app = test_app();
+    let (status, _, mut body) = open_event_stream(app).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let title = r#"[[tool:fs_glob {"pattern":"*","max":10}]] 主目标:列出当前工作目录的文件"#;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/tasks")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({ "title": title, "task_mode": "solo" }).to_string(),
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let created: Value = serde_json::from_slice(&bytes).unwrap();
+    let id = created["task"]["id"].as_str().unwrap().to_string();
+
+    let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
+
+    let seq = collect_full_until_terminal(&mut body, &id).await;
+    let called_fs = seq.iter().any(|e| {
+        e["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains("调用工具 fs_glob"))
+    });
+    assert!(
+        called_fs,
+        "未绑定工作区的任务应经 scratch 作用域拿到 fs_* 工具(实测缺陷 D1),实际事件: {seq:?}"
+    );
+    let policy_denied = seq.iter().any(|e| {
+        e["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains("被任务策略拒绝") && d.contains("fs_glob"))
+    });
+    assert!(
+        !policy_denied,
+        "fs_glob 不应被判为策略拒绝(那说明工作区闸门把整族剔除了): {seq:?}"
+    );
+
+    let scratch = std::env::temp_dir().join(format!("kedai-test-scratch-{}", std::process::id()));
+    let task_dir = scratch.join(&id);
+    assert!(
+        task_dir.is_dir(),
+        "未绑定工作区的任务应建立任务级 scratch 目录: {}",
+        task_dir.display()
+    );
+}
+
 /// 批次 3 调用追踪:执行任务后事件流含 kind=llm_call(落库成功后发射),
 /// GET /api/tasks/{id}/calls 返回 planner/step/summarize 三阶段调用行,字段与
 /// 前端 TaskLlmCall 契约逐一对应。

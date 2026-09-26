@@ -418,6 +418,24 @@ impl TeamExecutor {
         ctx: &TaskRunContext,
     ) -> Result<(Vec<TeamMain>, TaskGenOutput), String> {
         let mut sys = String::from(TEAM_PLANNER_PROMPT);
+        // 执行阶段能力段(D1):各主 agent 走 run_agent_loop(有工具),工具面与
+        // solo/multi 同源编译(单一出处 task_engine::tool_policy::compile)——
+        // 让分工拓扑不再规划出执行者做不到的子目标(如没有工具却要求产出文件)。
+        let allowed = super::tool_policy::compile(
+            &ctx.settings.task_tool_policy,
+            &ctx.settings.task_tool_allowlist,
+            &self.engine.tool_registry(),
+            ctx.scope.is_some(),
+        )
+        .allowed;
+        sys.push_str(&format!(
+            "\n\n{}",
+            crate::services::task_core::prompt_consts::capability_note(
+                crate::services::task_core::prompt_consts::StepCapability::ToolLoop,
+                &allowed,
+                ctx.scope.as_deref().map(|s| s.workspace()),
+            )
+        ));
         let world = self.svc.world_context(ctx.character_id.as_deref());
         if !world.is_empty() {
             sys.push_str(&format!("\n\n{}", untrusted_boundary("world_book", &world)));

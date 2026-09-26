@@ -50,12 +50,17 @@ impl ModeExecutor for LegacyExecutor {
             };
 
             // 1) 规划(带解析与分级重试:截断/空输出翻倍 max_tokens,最多 PLAN_MAX_ATTEMPTS 次)
+            // 能力事实 = NoTools:本模式的步骤走 generate_step_retry(纯文本生成),
+            // **没有任何工具**——规划器必须知道这点,否则会把交付物规划成文件(D1 实测)。
+            // 侦察作用域照常下发:规划器本身可以只读查看工作区/scratch,再规划出「产出正文」的步骤。
             let (plan, plan_out) = match super::retry::plan_task_retry(
                 svc.as_ref(),
                 task_id,
                 &task.title,
                 task.character_id.as_deref(),
                 &cancel,
+                ctx.scope.clone(),
+                crate::services::task_core::prompt_consts::StepCapability::NoTools,
             )
             .await
             {

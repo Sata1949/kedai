@@ -125,12 +125,13 @@ describe('AndroidExecSection 组件(阶段 E)', () => {
         id: 2, ts: '2026-09-13T01:00:00Z', source: 'chat', task_id: null, session_id: 's1',
         command: 'rm -rf /tmp/x', shell: 'sh', tier: 'sandbox', risk: 'destructive',
         decision: 'denied', exit_code: null,
-        stdout_summary: '', stderr_summary: '高危命令需逐条确认',
+        stdout_summary: '', stderr_summary: '高危命令需逐条确认', risk_flag: 'parent_climb',
       },
       {
         id: 1, ts: '2026-09-13T00:59:00Z', source: 'chat', task_id: null, session_id: 's1',
         command: 'ls -la', shell: 'sh', tier: 'sandbox', risk: 'safe',
         decision: 'allowed', exit_code: 0, stdout_summary: 'total 0', stderr_summary: '',
+        risk_flag: '',
       },
     ]);
     const { wrapper } = await mountSection();

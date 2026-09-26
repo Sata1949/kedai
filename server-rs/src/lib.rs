@@ -32,10 +32,17 @@ pub fn build_test_app() -> Result<axum::Router, String> {
     // 每次构建前清空:消除 Windows PID 复用或上次运行残留的旧 DB/文件
     let _ = std::fs::remove_dir_all(&data_dir);
     let _ = std::fs::create_dir_all(&data_dir);
+    // 任务 scratch 根(任务模式 D1):测试进程独立、随构建清空。
+    // **必须在 DATA_DIR 之外**(目录名与 data_dir 平级)——scratch 落在数据目录内会被
+    // safe_workspace_path 的 data_dir 二次防线整体判为冲突,fs_* 全部不可用。
+    let mut scratch_dir = std::env::temp_dir();
+    scratch_dir.push(format!("kedai-test-scratch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch_dir);
 
     INIT.call_once(|| {
         std::env::set_var("CONNECTOR", "mock");
         std::env::set_var("DATA_DIR", &data_dir);
+        std::env::set_var("KEDAI_TASK_SCRATCH_DIR", &scratch_dir);
         std::env::set_var("LOG_LEVEL", "error");
     });
 

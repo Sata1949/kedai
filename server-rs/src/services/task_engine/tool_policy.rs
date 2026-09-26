@@ -49,7 +49,8 @@ impl TaskToolPolicy {
 /// 按策略档位编译工具集。
 /// `policy`:all / deny_dangerous / allowlist(非法值按 deny_dangerous 处理,与加载侧钳制一致)。
 /// `allowlist`:仅 allowlist 档位使用。
-/// `has_workspace`:本任务是否绑定了工作区(决定 fs_* 族是否下发,见 [`workspace_gate`])。
+/// `has_workspace`:本任务是否**有执行作用域**(绑定的工作区,或 D1 起的任务 scratch)——
+/// 决定 fs_* 族是否下发,见 [`workspace_gate`]。
 pub(crate) fn compile(
     policy: &str,
     allowlist: &[String],
@@ -105,16 +106,22 @@ fn platform_gate(defs: Vec<ToolDefinition>) -> Vec<ToolDefinition> {
         .collect()
 }
 
-/// 工作区绑定闸门(编码通道批次)。
+/// 工作区绑定闸门(编码通道批次;任务模式 D1 起语义不变、调用方取值口径变了)。
 ///
-/// 与平台闸门正交:本函数按「本任务是否绑定工作区」决定工作区文件工具族该不该出现在
-/// 模型面前。**未绑定即整族剔除**——族里三个是安全级,只靠风险级过滤会漏进模型视野,
-/// 而它们没有工作区时必然报「未绑定工作区」,只会浪费轮次并诱导模型反复重试。
-/// 绑定时整族保留;`fs_write`/`fs_edit` 在 deny_dangerous 档的放行由 `compile` 的按名
+/// 与平台闸门正交:本函数按「本任务是否有执行作用域」决定工作区文件工具族该不该出现在
+/// 模型面前。**无作用域即整族剔除**——族里三个是安全级,只靠风险级过滤会漏进模型视野,
+/// 而它们没有作用域时必然报「未绑定工作区」,只会浪费轮次并诱导模型反复重试。
+/// 有作用域时整族保留;`fs_write`/`fs_edit` 在 deny_dangerous 档的放行由 `compile` 的按名
 /// 例外承担(剔除顺序:先闸门后策略,故例外只会作用于已绑定的任务)。
 ///
+/// **调用方取值口径(D1)**:任务自 D1 起恒有作用域——绑定了工作区的用工作区,未绑定的由
+/// `task_engine::run_inner` 建任务级 scratch 并绑定,所以本闸门对任务是「恒开」的;
+/// `has_workspace` 仍按 `ctx.scope.is_some()` 求值而不写死 true,是为守住
+/// 「没有作用域就不给文件工具」这条不变量(聊天路径无 scope,将来若有任务路径拿不到
+/// 作用域,也不会下发必然报错的工具)。「未绑定工作区」与「无作用域」自 D1 起不再等价。
+///
 /// 为什么在策略层而不是注册层过滤:与 platform_gate 同理——工具始终注册,权限面板与
-/// 契约类型才有一致的工具面;过滤只影响「本轮下发给模型什么」。绑定在**每轮编译时**
+/// 契约类型才有一致的工具面;过滤只影响「本轮下发给模型什么」。作用域在**每轮编译时**
 /// 由调用方按任务记录求值(任务运行途中绑定不会变,口径仍是当轮为准)。
 fn workspace_gate(defs: Vec<ToolDefinition>, has_workspace: bool) -> Vec<ToolDefinition> {
     if has_workspace {

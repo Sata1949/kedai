@@ -180,10 +180,27 @@ impl TaskEngine {
         cancel: watch::Receiver<bool>,
         token: u64,
     ) {
-        // 工作区作用域(编码通道批次 1):绑定了工作区的任务在此构造一次并随上下文下传。
-        // 目录已失效时**不降级为 None**——降级会让 bash 的 cwd 回落到数据目录去动用户
-        // 真实数据,这里宁可让任务以明确错误终止。
-        let scope = match crate::tools::workspace_guard::scope_for_task(task.workspace.as_deref()) {
+        // 工作区作用域(编码通道批次 1;任务模式 D1 起「未绑定」也有作用域):绑定工作区
+        // 的任务用它;**未绑定的任务改用任务级 scratch 目录**——否则 bash 的缺省 cwd 会
+        // 回落到用户数据目录,「产出一份文档」类任务就会在用户真实数据里留垃圾文件
+        //(2026-09 实测:一轮 77 条命令 / 12 个垃圾文件 / 中文重定向乱码重试)。
+        // 目录不可用(绑定的工作区失效 / scratch 建不出来)时**不降级为 None**——降级会让
+        // bash 的 cwd 回落到数据目录去动用户真实数据,这里宁可让任务以明确错误终止。
+        let workspace: Result<Option<String>, String> = match task
+            .workspace
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(w) => Ok(Some(w.to_string())),
+            None => self
+                .svc
+                .scratch_dir_for(&task.id)
+                .map(|d| Some(d.to_string_lossy().into_owned())),
+        };
+        let scope = match workspace
+            .and_then(|ws| crate::tools::workspace_guard::scope_for_task(ws.as_deref()))
+        {
             Ok(scope) => scope,
             Err(e) => {
                 self.svc.finalize_terminal(
