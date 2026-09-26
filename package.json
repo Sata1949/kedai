@@ -25,6 +25,7 @@
     "check:docs": "node tools/check-docs.mjs",
     "check:lint": "node tools/check-frontend-lint.mjs",
     "check:tests": "node tools/count-tests.mjs --check",
+    "check:doc-claims": "node tools/check-doc-claims.mjs",
     "count:tests": "node tools/count-tests.mjs",
     "hooks:install": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/install-hooks.ps1",
     "perf": "node tools/perf-baseline.mjs",
