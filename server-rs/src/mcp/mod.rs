@@ -277,6 +277,7 @@ mod tests {
             session_id: "s".into(),
             character_id: "c".into(),
             agent_depth: 0,
+            scope: None,
         }
     }
 

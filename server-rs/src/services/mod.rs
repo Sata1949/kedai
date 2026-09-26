@@ -12,6 +12,8 @@
 pub mod agent_flow_service;
 pub mod agent_session_service;
 pub mod agent_subtask_service;
+// 产物提交服务(submit 工具):把最终产物写成设备文件交付(仅 Android 沙箱档可用)
+pub mod artifact_submit;
 pub mod audio_service;
 pub mod cache_diagnostics;
 // characters.data_raw 读改写单一入口(防丢更新):世界书/脚本/契约三处共用
@@ -22,6 +24,8 @@ pub mod contract_changelog_service;
 pub mod embedding_service;
 // 命令执行抽象层(阶段 C):bash 工具与 Android 执行层共用的单一入口
 pub mod exec;
+// 任务执行者库:任务模式的执行者与角色扮演角色卡解耦(独立实体 + 指令段注入)
+pub mod executor_service;
 pub mod kaleido_state_service;
 // Android Keystore 桥接(JNI):API Key 加密存储,仅 android 目标编译
 #[cfg(target_os = "android")]

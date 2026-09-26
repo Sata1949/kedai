@@ -9,7 +9,7 @@ use crate::models::llm_error::{LlmError, TransportFailure};
 use crate::models::types::{GenerationParams, LlmMessage, LlmStreamChunk};
 use futures::StreamExt;
 use reqwest::Client;
-use retry::{log_retry, retry_delay, wait_retry, MAX_ATTEMPTS};
+use retry::{log_retry, notify_retry, retry_delay, wait_retry, MAX_ATTEMPTS};
 use serde_json::{json, Value};
 use sse_parser::SseParser;
 use std::time::Duration;
@@ -19,9 +19,11 @@ use tokio::sync::{mpsc, watch};
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// 建连超时
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// SSE 流空闲超时:流中超过此时长未收到任何字节(上游停住或只发注释心跳)则报错中止。
-/// 没有它,响应头 200 已收到但流停滞时读取循环会永久挂起(任务卡在规划/步骤,
-/// 聊天卡在生成中);取较大值以容忍推理模型的慢速出段。
+/// SSE 流空闲超时:流中超过此时长未**产出有效数据事件**则报错中止。
+/// 判定口径是「解析出合法 JSON 的 data: 或 [DONE]」,不是「收到任何字节」——
+/// 上游建流后只发 SSE 注释心跳(`: ping`)时,字节在来、正文不出,按字节判活会让
+/// 读取循环永久挂起(任务卡在 running、聊天卡在生成中)。2026-09-18 修正;
+/// 取较大值以容忍推理模型的慢速出段。
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// 构造带超时的 HTTP 客户端(连接阶段超时;整体请求超时由调用方按流式语义控制)
@@ -310,6 +312,7 @@ impl OpenAiCompatibleConnector {
                     ));
                     if attempt < MAX_ATTEMPTS {
                         log_retry(&e, attempt);
+                        notify_retry(&tx, attempt, &e);
                         wait_retry(retry_delay(attempt, None), &mut abort).await?;
                         continue;
                     }
@@ -323,6 +326,7 @@ impl OpenAiCompatibleConnector {
                     );
                     if attempt < MAX_ATTEMPTS {
                         log_retry(&e, attempt);
+                        notify_retry(&tx, attempt, &e);
                         wait_retry(retry_delay(attempt, None), &mut abort).await?;
                         continue;
                     }
@@ -345,6 +349,7 @@ impl OpenAiCompatibleConnector {
             let truncated: String = text.chars().take(300).collect();
             if retryable && attempt < MAX_ATTEMPTS {
                 log_retry(&format!("上游返回 {status}"), attempt);
+                notify_retry(&tx, attempt, &format!("上游返回 {status}"));
                 wait_retry(retry_delay(attempt, retry_after), &mut abort).await?;
                 continue;
             }
@@ -354,62 +359,122 @@ impl OpenAiCompatibleConnector {
             ));
         };
 
-        let mut parser = SseParser::default();
-        let mut stream = resp.bytes_stream();
-        // 流空闲看门狗:超时分支的 sleep 在每次进入 select 时新建——收到数据走下一轮
-        // 循环即自动重置计时;上游停滞超过 STREAM_IDLE_TIMEOUT 则报错而非永久挂死。
-        // (不用 Sleep::reset:经 Pin 包装 reset 在 select 循环中会立即完成,已实测踩坑。)
-        let read_started = std::time::Instant::now();
-        loop {
-            tokio::select! {
-                changed = abort.changed() => {
-                    if changed.is_err() || *abort.borrow() {
-                        return Err(LlmError::generation("生成已中断"));
-                    }
-                }
-                _ = tokio::time::sleep(STREAM_IDLE_TIMEOUT) => {
-                    let waited_ms = read_started.elapsed().as_millis() as u64;
-                    tracing::warn!(waited_ms = waited_ms, timeout_s = STREAM_IDLE_TIMEOUT.as_secs(), "SSE 流空闲超时触发");
-                    return Err(LlmError::timeout(format!(
-                        "上游流停滞超时({}s 未收到任何数据),已中止本次生成",
-                        STREAM_IDLE_TIMEOUT.as_secs()
-                    )));
-                }
-                next = stream.next() => match next {
-                    Some(Ok(bytes)) => {
-                        let mut chunks = Vec::new();
-                        // 解析失败自带分类(非法 UTF-8/JSON、坏工具参数 → 生成层失败;
-                        // 流内上游错误对象按结构化字段分类)
-                        parser.push(&bytes, &mut chunks)?;
-                        for chunk in chunks {
-                            // 有意丢弃 SendError:接收端关闭即原因本身,文案已等价表达
-                            tx.send(chunk)
-                                .map_err(|_| LlmError::generation("生成接收端已关闭"))?;
-                        }
-                        if parser.is_done() {
-                            break;
-                        }
-                    }
-                    Some(Err(e)) => {
-                        // 响应体读取中断(流中途断开)→ 可重试的上游故障
-                        return Err(LlmError::from_transport(
-                            TransportFailure::Body,
-                            format!("读取响应失败: {e}"),
-                        ));
-                    }
-                    None => break,
+        // 流读取收口到独立函数(便于用合成流 + 毫秒级空闲阈值单测,不必真等 120s)
+        read_sse_stream(resp.bytes_stream(), abort, tx, STREAM_IDLE_TIMEOUT).await
+    }
+}
+
+/// 读取 SSE 响应流直到 `[DONE]` / EOF / 出错,边解析边把块推给 `tx`。
+///
+/// 空闲看门狗口径(2026-09-18 修正,`docs/经验.md` E45):只有**解析出有效数据事件**
+/// (合法 JSON 的 `data:`、或 `[DONE]`)才算上游有推进并按此重置计时。此前按「收到任何
+/// 字节」重置——上游建流后只发 SSE 注释心跳(`: ping`)同样产生字节,看门狗永不触发,
+/// 读取循环可无限挂起(task 状态永久停在 running)。注释行不是产出,不得为停滞续命。
+///
+/// `abort` 优先于读取(`biased`):用户停止时立即返回,不被上游的连续字节拖住。
+/// 不用 `Sleep::reset`:经 Pin 包装 reset 在 select 循环中会立即完成(已实测踩坑),
+/// 故改为每轮按「剩余额度」新建 sleep。
+pub(super) async fn read_sse_stream<S, B, E>(
+    stream: S,
+    mut abort: watch::Receiver<bool>,
+    tx: mpsc::UnboundedSender<LlmStreamChunk>,
+    idle_timeout: Duration,
+) -> Result<(), LlmError>
+where
+    S: futures::Stream<Item = Result<B, E>>,
+    B: AsRef<[u8]>,
+    E: std::fmt::Display,
+{
+    // 就地 pin:不为调用方附加 Unpin 约束(组合流如 then/chain 常非 Unpin)
+    tokio::pin!(stream);
+    let mut parser = SseParser::default();
+    // 最近一次「有效数据事件」的时刻;空闲计时以它为基准
+    let mut last_progress = std::time::Instant::now();
+    loop {
+        // 先在循环顶部判定期限,再进 select。
+        //
+        // 为什么不能只靠 select 里的 sleep 分支(2026-09-18 实现时踩到并修):
+        // `biased` 让分支按书写顺序优先轮询,而心跳刷屏时 `stream.next()` 恒就绪——
+        // 每轮循环都在 stream 分支返回、sleep 分支被新建后立刻丢弃,计时器永远走不到
+        // 完成,看门狗失效(上游狂发注释即可让读取无限循环)。顶部判定不依赖分支被轮到,
+        // 只要时间真的过去了就必然收敛。
+        if last_progress.elapsed() >= idle_timeout {
+            let waited_ms = last_progress.elapsed().as_millis() as u64;
+            tracing::warn!(
+                waited_ms = waited_ms,
+                timeout_s = idle_timeout.as_secs(),
+                "SSE 流空闲超时触发(阈值内未收到有效数据事件,注释心跳不计)"
+            );
+            return Err(LlmError::timeout(format!(
+                "上游流停滞超时({}s 未产出任何数据),已中止本次生成",
+                idle_timeout.as_secs()
+            )));
+        }
+        let remaining = idle_timeout.saturating_sub(last_progress.elapsed());
+        tokio::select! {
+            biased;
+            changed = abort.changed() => {
+                if changed.is_err() || *abort.borrow() {
+                    return Err(LlmError::generation("生成已中断"));
                 }
             }
+            next = stream.next() => match next {
+                Some(Ok(bytes)) => {
+                    let mut chunks = Vec::new();
+                    // 解析失败自带分类(非法 UTF-8/JSON、坏工具参数 → 生成层失败;
+                    // 流内上游错误对象按结构化字段分类)
+                    let progressed = parser.push(bytes.as_ref(), &mut chunks)? > 0;
+                    if progressed {
+                        last_progress = std::time::Instant::now();
+                    }
+                    for chunk in chunks {
+                        // 有意丢弃 SendError:接收端关闭即原因本身,文案已等价表达
+                        tx.send(chunk)
+                            .map_err(|_| LlmError::generation("生成接收端已关闭"))?;
+                    }
+                    if parser.is_done() {
+                        break;
+                    }
+                    // 未产出数据时让出一次(2026-09-18 实测踩到):上游高频发注释心跳时
+                    // 本分支恒就绪,循环将不再有 await 让点,独占 worker 线程并饿死同线程
+                    // 的其它任务(单线程运行时下表现为中断信号都送不进来)。让出后由顶部
+                    // 的时限判定收敛,不靠 sleep 分支被轮到。
+                    if !progressed {
+                        tokio::task::yield_now().await;
+                    }
+                }
+                Some(Err(e)) => {
+                    // 响应体读取中断(流中途断开)→ 可重试的上游故障
+                    return Err(LlmError::from_transport(
+                        TransportFailure::Body,
+                        format!("读取响应失败: {e}"),
+                    ));
+                }
+                None => break,
+            },
+            // 长时间无任何字节:此分支负责让等待可中断且不空转(到点即判停滞)
+            _ = tokio::time::sleep(remaining) => {
+                let waited_ms = last_progress.elapsed().as_millis() as u64;
+                tracing::warn!(
+                    waited_ms = waited_ms,
+                    timeout_s = idle_timeout.as_secs(),
+                    "SSE 流空闲超时触发(阈值内未收到有效数据事件,注释心跳不计)"
+                );
+                return Err(LlmError::timeout(format!(
+                    "上游流停滞超时({}s 未产出任何数据),已中止本次生成",
+                    idle_timeout.as_secs()
+                )));
+            }
         }
-        let mut chunks = Vec::new();
-        parser.finish(&mut chunks)?;
-        for chunk in chunks {
-            // 有意丢弃 SendError:接收端关闭即原因本身,文案已等价表达
-            tx.send(chunk)
-                .map_err(|_| LlmError::generation("生成接收端已关闭"))?;
-        }
-        Ok(())
     }
+    let mut chunks = Vec::new();
+    parser.finish(&mut chunks)?;
+    for chunk in chunks {
+        // 有意丢弃 SendError:接收端关闭即原因本身,文案已等价表达
+        tx.send(chunk)
+            .map_err(|_| LlmError::generation("生成接收端已关闭"))?;
+    }
+    Ok(())
 }
 
 /// LlmMessage → OpenAI 兼容 messages 数组(处理 assistant.tool_calls 与 role=tool)

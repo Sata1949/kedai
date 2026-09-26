@@ -82,6 +82,15 @@ pub struct ModeSettings {
     pub task_tool_allowlist: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tool_rounds: Option<u32>,
+    /// task 覆盖层的流程动态调用深度上限(A 批 A3;None 沿用扁平值)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_flow_call_depth: Option<u32>,
+    /// task 覆盖层的每任务流程调用次数上限(A 批 A3;None 沿用扁平值)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_flow_calls_per_task: Option<u32>,
+    /// task 覆盖层的「节点默认上下文上限」(A 批 A4;None 沿用扁平值,0 = 不裁剪)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_node_max_context: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub render_html: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -145,6 +154,27 @@ pub(super) fn default_max_tool_rounds() -> u32 {
     32
 }
 
+/// 默认流程动态调用深度上限(A 批 A3 = 二维批次 7b 的 `MAX_FLOW_CALL_DEPTH`)。
+///
+/// 默认值直接取 `agent_flow_service` 的常量而非写字面量:那两个常量从此退居
+/// **缺省值与测试基准**,真源是本设置项,两边抄成两个数字必然漂移。
+pub(super) fn default_max_flow_call_depth() -> u32 {
+    crate::services::agent_flow_service::MAX_FLOW_CALL_DEPTH as u32
+}
+
+/// 默认每任务流程调用次数上限(A 批 A3 = 二维批次 7b 的 `MAX_FLOW_CALLS_PER_TASK`)。
+pub(super) fn default_max_flow_calls_per_task() -> u32 {
+    crate::services::agent_flow_service::MAX_FLOW_CALLS_PER_TASK as u32
+}
+
+/// 默认「节点默认上下文上限」(A 批 A4):**0 = 不裁剪**。
+///
+/// 缺省必须是关闭:批次 8 之前任务侧从不裁剪,给整个任务侧默认套上预算属于可观测的
+/// 行为变化(可能截断当前正常工作的长输入)。想要全局溢出保护的用户显式开启。
+pub(super) fn default_node_max_context() -> u32 {
+    0
+}
+
 /// 默认工具循环历史保留轮数(R3b):最近 4 轮完整,更早轮摘要化
 pub(super) fn default_tool_history_keep_rounds() -> u32 {
     4
@@ -154,6 +184,48 @@ pub(super) fn default_tool_history_keep_rounds() -> u32 {
 /// 实测膨胀形态(3 步 26K+)在此预算内被收敛到最近几轮
 pub(super) fn default_tool_history_budget_tokens() -> u32 {
     16_384
+}
+
+/// 默认单次生成 token 预算(HB-1 成本护栏):0 = 关闭(默认)。
+/// 与上面的工具历史预算是**两回事**——那是上下文裁剪预算,这是成本上限:
+/// 工具循环累计 prompt+completion 达到该值即按 session_budget_action 处置。
+/// 默认关闭的理由:误杀正常长任务是主要风险,故先让用户显式开启。
+pub(super) fn default_session_token_budget() -> u32 {
+    0
+}
+
+/// 默认预算超限动作:warn = 只提示一次后继续(零行为变更)。
+pub(super) fn default_session_budget_action() -> String {
+    "warn".to_string()
+}
+
+/// 默认语义熔断窗口(HB-2):同一工具近 16 次调用内累计达到下限即判空转
+pub(super) fn default_loop_guard_semantic_window() -> u32 {
+    16
+}
+
+/// 默认语义熔断同工具调用次数下限(HB-2;保守:宁可放过不可误杀)
+pub(super) fn default_loop_guard_semantic_min_calls() -> u32 {
+    12
+}
+
+/// 默认语义熔断输出指纹去重上限(HB-2):≤2 视为「输出实质无变化」
+pub(super) fn default_loop_guard_semantic_max_distinct() -> u32 {
+    2
+}
+
+/// 默认任务步骤墙钟预算(提交 3 · D3):1200 秒 = 单次工具循环的墙钟上限,
+/// 到点带着已有产出收尾。0 = 关。依据:实测单步 10 条反复自检命令、单轮 LLM 往返
+/// 1.5~3 分钟,15 分钟不收敛——20 分钟足够正常的「读代码→改→自测」一轮跑完。
+pub(super) fn default_task_step_budget_secs() -> u32 {
+    1200
+}
+
+/// 默认任务空闲超时(提交 3 · D7):900 秒无任何活动即由看守收尾。
+/// 下限 601 的依据:最坏合法静默 = bash 单命令 300s 上限 + 单次模型调用 300s 上限 = 600s,
+/// 取 600 会误杀正常长命令。
+pub(super) fn default_task_idle_timeout_secs() -> u32 {
+    900
 }
 
 /// 默认放行模式黑名单
@@ -370,10 +442,12 @@ pub fn default_reflect_prompt() -> String {
 impl RuntimeSettings {
     /// 从环境配置构建默认设置
     pub fn from_config(cfg: &AppConfig) -> Self {
-        RuntimeSettings {
+        let mut s = RuntimeSettings {
             openai_base_url: cfg.openai_base_url.clone(),
             openai_api_key: cfg.openai_api_key.clone(),
             model: cfg.openai_model.clone(),
+            connections: Vec::new(),
+            active_connection_id: None,
             default_temperature: cfg.default_temperature,
             default_top_p: cfg.default_top_p,
             default_max_tokens: cfg.default_max_tokens,
@@ -395,8 +469,18 @@ impl RuntimeSettings {
             task_tool_policy: default_task_tool_policy(),
             task_tool_allowlist: Vec::new(),
             max_tool_rounds: default_max_tool_rounds(),
+            max_flow_call_depth: default_max_flow_call_depth(),
+            max_flow_calls_per_task: default_max_flow_calls_per_task(),
+            default_node_max_context: default_node_max_context(),
             tool_history_keep_rounds: default_tool_history_keep_rounds(),
             tool_history_budget_tokens: default_tool_history_budget_tokens(),
+            session_token_budget: default_session_token_budget(),
+            session_budget_action: default_session_budget_action(),
+            loop_guard_semantic_window: default_loop_guard_semantic_window(),
+            loop_guard_semantic_min_calls: default_loop_guard_semantic_min_calls(),
+            loop_guard_semantic_max_distinct: default_loop_guard_semantic_max_distinct(),
+            task_step_budget_secs: default_task_step_budget_secs(),
+            task_idle_timeout_secs: default_task_idle_timeout_secs(),
             render_html: false,
             compaction_mode: default_compaction_mode(),
             compaction_threshold: default_compaction_threshold(),
@@ -428,7 +512,12 @@ impl RuntimeSettings {
             // 默认隔离:任务模式不继承 prompt_floors.json 注入(2026-09-10 实测修复)
             task_prompt_inject_enabled: false,
             task: ModeSettings::default(),
-        }
+        };
+        // 多套连接:新装(无 settings.json)也要有一条默认连接——本批次之后 connections 是真源,
+        // 不播种则设置页与 API 会拿到空列表。内容与扁平字段一致,故与播种前行为等价;
+        // 这里不调 normalize_connections:避免把 .env 里未规范化的地址在启动时就改写。
+        s.seed_connections_from_flat();
+        s
     }
 
     /// 返回指定模式的合并后有效设置。扁平字段即 roleplay 权威值(引擎直接读);
@@ -501,6 +590,15 @@ impl RuntimeSettings {
         }
         if let Some(v) = ov.max_tool_rounds {
             out.max_tool_rounds = v;
+        }
+        if let Some(v) = ov.max_flow_call_depth {
+            out.max_flow_call_depth = v;
+        }
+        if let Some(v) = ov.max_flow_calls_per_task {
+            out.max_flow_calls_per_task = v;
+        }
+        if let Some(v) = ov.default_node_max_context {
+            out.default_node_max_context = v;
         }
         if let Some(v) = ov.render_html {
             out.render_html = v;

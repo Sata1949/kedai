@@ -9,6 +9,7 @@ use crate::services::agent_subtask_service::AgentSubtaskService;
 use crate::services::audio_service::AudioService;
 use crate::services::character_service::CharacterService;
 use crate::services::contract_changelog_service::ContractChangelogService;
+use crate::services::executor_service::ExecutorService;
 use crate::services::kaleido_state_service::KaleidoStateService;
 use crate::services::memory_service::MemoryService;
 use crate::services::prompt_inject_service::PromptInjectService;
@@ -16,7 +17,7 @@ use crate::services::quick_reply_service::QuickReplyService;
 use crate::services::runtime_prompt_service::RuntimePromptService;
 use crate::services::script_authorization_service::ScriptAuthorizationService;
 use crate::services::session_service::SessionService;
-use crate::services::settings_service::RuntimeSettings;
+use crate::services::settings_service::{ConnectorPool, RuntimeSettings};
 use crate::services::skill_service::SkillService;
 use crate::services::task_service::TaskService;
 use crate::services::token_service::TokenService;
@@ -83,6 +84,9 @@ pub struct CoreServices {
     pub runtime_prompt: Arc<RuntimePromptService>,
     /// 自定义 Agent 执行流程(custom 模式),持久化到 data/agent_flows.json
     pub flow: Arc<Mutex<AgentFlowService>>,
+    /// 任务执行者库(任务模式的执行者,与角色扮演角色卡解耦),
+    /// 持久化到 data/task_executors.json
+    pub executors: Arc<Mutex<crate::services::executor_service::ExecutorService>>,
 }
 
 /// 并发与限流脚手架(M4.3 归组):只服务于「串行化 / 取消 / 防滥用」,
@@ -160,17 +164,17 @@ impl AppState {
             loaded_settings.openai_api_key.clone(),
             loaded_settings.model.clone(),
         );
+        // 目标连接器类型由**默认连接**解析(多套连接批次):与 PUT /api/settings 的重建共用
+        // 同一个函数,保证「重启后的类型」与「保存后立即生效的类型」口径一致 ——
+        // 显式 mock 用 mock、无可用连接用 mock、有凭据则 openai-compatible,
+        // 否则用户「退出演示模式」后一旦重启又回到 mock,设置里填的 API 配置永远不生效。
+        let connector_type = crate::services::settings_service::resolve_connector_target(
+            loaded_settings.active_connection(),
+            &config.connector,
+        );
         let settings = Arc::new(Mutex::new(loaded_settings));
         // 记忆服务接入运行期设置(淘汰容量/字符预算阈值来源;OnceLock 幂等注入)
         memory.attach_settings(settings.clone());
-        // 关键:已保存非空 API 配置时,即使环境变量 CONNECTOR=mock(演示模式)也自动
-        // 使用 openai-compatible,否则用户「退出演示模式」后一旦重启又回到 mock,
-        // 设置里填的 API 配置永远不生效(与 PUT /settings 的自动切换逻辑保持一致)。
-        let connector_type = if !base_url.trim().is_empty() && !api_key.trim().is_empty() {
-            "openai-compatible"
-        } else {
-            &config.connector
-        };
         let connector =
             crate::connectors::build_connector(connector_type, &base_url, &api_key, &initial_model);
         let connector = Arc::new(RwLock::new(connector));
@@ -301,11 +305,17 @@ impl AppState {
             registered_tools,
         )));
 
+        // 任务执行者库(执行者与角色扮演角色卡解耦);空库即「只有通用执行者」
+        let executors = Arc::new(Mutex::new(ExecutorService::new(config.data_dir.clone())));
+
         // 聊天引擎:先于 TaskService 构造(engine 不依赖 tasks,无循环;
         // 批次 4.2 起 TaskService 注入 Arc<AgentEngine> 供六模式执行器复用工具循环)
         let engine = Arc::new(AgentEngine::new(
             EngineCore {
                 connector: connector.clone(),
+                // 连接器池(二维批次 5b):进程内唯一一份,引擎与任务服务共用
+                // (计划改动点 1 明令不在 TaskService 里另建缓存,否则数据源分裂)。
+                connector_pool: std::sync::Arc::new(ConnectorPool::new()),
                 settings: settings.clone(),
                 db: db.clone(),
                 initial_model: initial_model.clone(),
@@ -341,13 +351,15 @@ impl AppState {
         let tasks = Arc::new(TaskService::new(
             db.clone(),
             characters.clone(),
-            connector.clone(),
             settings.clone(),
             world_books.clone(),
             prompt_inject.clone(),
             engine.clone(),
             flow.clone(),
             agent_subtasks.clone(),
+            executors.clone(),
+            // 未绑定工作区的任务在此根下按任务 id 建 scratch(任务模式 D1)
+            config.task_scratch_dir.clone(),
         ));
         // 任务服务弱引用注入 ToolDeps(任务模式子 agent 的事件桥/调用追踪/usage 落库)
         let _ = deps.tasks.set(Arc::downgrade(&tasks));
@@ -385,6 +397,7 @@ impl AppState {
                 slash,
                 runtime_prompt,
                 flow,
+                executors,
                 tasks,
             },
             guards: ConcurrencyGuards {

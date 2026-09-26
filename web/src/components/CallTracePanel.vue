@@ -7,6 +7,8 @@
 import { computed, onMounted, ref, watch } from 'vue';
 import { useAppStore } from '../store';
 import { storeToRefs } from 'pinia';
+import { bufferLabel, phaseText as labelPhase } from '../utils/phaseLabel';
+import { dynamicCallStats } from '../utils/flowCallStats';
 import type { TaskLlmCall } from '../api';
 
 const store = useAppStore();
@@ -24,20 +26,10 @@ function toggle(key: string): void {
   openKeys.value = next;
 }
 
-/** 阶段中文标签(step 阶段带步骤序号——后端落库 step_index 为 0 起,展示 +1;
- *  final_audit = team 模式终审,与后端契约并列于 audit;summary = team 模式汇总行) */
+/** 阶段中文标签(实现见 `utils/phaseLabel`——任务看台「正在生成」块共用同一份,
+ *  子图路径展开与脏数据回退的契约都在那里) */
 function phaseText(phase: string, stepIndex?: number | null): string {
-  switch (phase) {
-    case 'planner': return '规划';
-    case 'step': return stepIndex != null ? `步骤 #${stepIndex + 1}` : '步骤';
-    case 'summarize': return '汇总';
-    case 'summary': return '汇总';
-    case 'agent': return '主Agent';
-    case 'subagent': return '子Agent';
-    case 'audit': return '审计';
-    case 'final_audit': return '终审';
-    default: return phase;
-  }
+  return labelPhase(phase, stepIndex);
 }
 
 function phaseLabel(call: TaskLlmCall): string {
@@ -45,22 +37,24 @@ function phaseLabel(call: TaskLlmCall): string {
 }
 
 /**
+ * 被调流程(对比模式)的调用汇总。记账本就在 `/calls` 全量行里,但此前要把它们挑出来
+ * 只能手动按 `call.` 前缀累加(遗留.md IFW-12 边界 1);口径(含被调流程内部的静态子图
+ * `subflow.<含 d 段路径>`)收在 `utils/flowCallStats`,这里只做展示。
+ */
+const dynamicStats = computed(() => dynamicCallStats(taskCalls.value));
+
+/**
  * 「进行中」伪行(批次 R4 流式输出):store.liveBuffers 非空 = 有调用正在流式生成
  * (delta 攒批增量就地累积,零请求);调用落库后 llm_call 事件清对应缓冲,伪行消失、
  * 正式行经 loadTaskCalls 全量重拉出现。展开区显示流式纯文本(不跑 markdown)。
  */
 const liveRows = computed(() =>
-  [...store.liveBuffers.entries()].map(([key, text]) => {
-    // key 契约:`${phase}:${step_index ?? ''}`(phase 为固定词,不含冒号)
-    const sep = key.indexOf(':');
-    const phase = key.slice(0, sep);
-    const idx = key.slice(sep + 1);
-    return {
-      key: `live:${key}`,
-      label: phaseText(phase, idx === '' ? undefined : Number(idx)),
-      text,
-    };
-  }),
+  [...store.liveBuffers.entries()].map(([key, text]) => ({
+    key: `live:${key}`,
+    // key → 标签的解析契约(= `${phase}:${step_index ?? ''}`)收在 utils/phaseLabel
+    label: bufferLabel(key),
+    text,
+  })),
 );
 
 /** 状态徽标:ok 绿 / empty 黄 / error 红(复用 sv-badge 色系) */
@@ -133,6 +127,12 @@ watch(callTraceOpen, (open) => {
     <template v-if="appMode === 'task'">
       <div>
         <div class="sv-agent-section-label">LLM 调用({{ taskCalls.length }})</div>
+        <!-- 被调流程单列(二维批次 7b 收口):动态调用层的次数与 token 一眼可见,
+             不必再按 phase 前缀手动累加 -->
+        <p v-if="dynamicStats.calls > 0" class="sv-note-mini">
+          其中被调流程(对比模式){{ dynamicStats.calls }} 次调用 ·
+          {{ dynamicStats.tokens.toLocaleString() }} tokens
+        </p>
         <!-- 进行中伪行(批次 R4):流式中的调用置顶显示;落库后伪行消失、正式行出现 -->
         <div
           v-for="row in liveRows"

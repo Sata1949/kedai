@@ -10,6 +10,8 @@
 use super::*;
 // 执行器终态值(批次 B 依赖倒置):finalize_terminal 按值分派落库
 use crate::services::task_core::terminal::TaskTerminal;
+// 部分成果兜底(提交 2):终态 result 为空时用已完成步骤的产出拼装(单一出处)
+use crate::services::task_core::assemble_from_plan;
 
 impl TaskService {
     // ===== 执行 =====
@@ -38,12 +40,31 @@ impl TaskService {
 
     /// 批准计划(plan 模式特有):仅 planned 态合法;给了 plan 就替换落库。
     /// 随后置 planning 并 spawn 续跑:已批准计划(steps)随调用传入,由任务引擎
-    /// 逐步骤执行(复用 cancel token 登记,与 run 同款互斥/停止语义);
-    /// goal 为「目标 + 已批准计划」组合文本,供各步骤消息作整体上下文。
-    pub fn approve(self: &Arc<Self>, id: &str, plan: Option<Vec<TaskStep>>) -> Result<(), String> {
+    /// 按 `exec_mode` 选执行器(缺省 ApprovedPlanExecutor 逐步骤执行);
+    /// goal 为「目标 + 已批准计划」组合文本,供各步骤/各模式消息作整体上下文。
+    ///
+    /// `exec_mode`(2026-09-17):用户在批准界面选择的执行方式。非默认方式
+    /// (solo/multi/team/custom)会以该模式**自行组织执行**——其中 team/custom
+    /// 会用自己的规划/流程重写 tasks.plan(这是模式语义,非缺陷);已批准计划
+    /// 始终作为 goal 里的权威上下文下发。
+    pub fn approve(
+        self: &Arc<Self>,
+        id: &str,
+        plan: Option<Vec<TaskStep>>,
+        exec_mode: crate::models::types::TaskApproveExecMode,
+    ) -> Result<(), String> {
         let task = self.get(id).ok_or("任务不存在")?;
         if task.status != TaskStatus::Planned {
             return Err("仅待批准(planned)状态的任务可批准".into());
+        }
+        // 自定义流程模式依赖「可用的流程」:提前拒绝,避免批准后任务直接进 error
+        //(custom 执行器在 run_inner 首行就要解析流程快照,取不到即整体失败)。
+        // 校验与执行期**同一出处**(`resolve_task_flow`:绑定任务用其冻结快照、
+        // 未绑定任务按当前流程),故这里只是提前一次干跑,规则不复制;
+        // 该调用是纯读(不落快照——落库发生在执行器开跑时,避免批准与执行两个时刻的编排不一致)。
+        if matches!(exec_mode, crate::models::types::TaskApproveExecMode::Custom) {
+            self.resolve_task_flow(Some(&task))
+                .map_err(|e| format!("选择自定义流程执行前需先确认可用流程:{e}"))?;
         }
         let steps = match plan {
             Some(p) => {
@@ -61,6 +82,13 @@ impl TaskService {
             }
         };
         let _ = self.set_status(id, TaskStatus::Planning);
+        // 批准即让 planned 态的预览 result 失效(提交 2):那条 result 是「待批准的计划清单」,
+        // 只在 planned 态有语义。留着它会让续跑的失败/取消兜底因「result 非空」而跳过
+        // (salvage_partial_result 的判据),用户手里就只剩一份**计划**被当成「已完成部分的
+        // 成果」展示(2026-09-26 真模型 plan/写作 实测命中:某步已完成 560 字,成果卡里却仍是
+        // 计划清单)。清空后:续跑成功由汇总文本落 result,失败/取消由兜底写已完成步骤的产出,
+        // 两侧都是「真正产出」。只清 result 列,不发事件——紧随其后的 status/plan 写入各自发事件。
+        let _ = self.clear_result(id);
         // 续跑的整体上下文:目标 + 已批准计划(编号列表)。
         // 2026-09-10 实测修复(F4):原始目标里可能写了步骤数量(如「三步计划」),
         // 而用户经 plan-chat 修订后计划步数已变——显式要求以已批准计划为准,
@@ -76,7 +104,7 @@ impl TaskService {
         let (cancel, token) = self.register_cancel(id);
         let backend: std::sync::Arc<dyn crate::services::task_core::TaskBackend> = self.clone();
         let engine = crate::services::task_engine::TaskEngine::new(backend, self.engine.clone());
-        engine.run_approved(&task, goal, steps, cancel, token);
+        engine.run_approved(&task, goal, steps, exec_mode, cancel, token);
         Ok(())
     }
 
@@ -292,6 +320,12 @@ impl TaskService {
             .collect();
         self.add_task_message(id, "user", "plan_chat", message)?;
         let (cancel, token) = self.register_cancel(id);
+        // 侦察作用域(D1):与执行期同源解析(绑定工作区 → 该目录;未绑定 → 无)。
+        // 修订是只读侦察,目录不可用时降级为「无作用域」而不是拒绝修订——口径同
+        // plan_task 的「侦察失败不沉规划」。
+        let scope = crate::tools::workspace_guard::scope_for_task(task.workspace.as_deref())
+            .ok()
+            .flatten();
         // 批次 4.2:重试/解析算法已上移 task_engine::retry(任务引擎职责)
         let revised = match crate::services::task_engine::retry::plan_revise_retry(
             self.as_ref(),
@@ -299,6 +333,8 @@ impl TaskService {
             &history,
             message,
             &cancel,
+            scope,
+            crate::services::task_core::prompt_consts::StepCapability::ToolLoop,
         )
         .await
         {
@@ -353,7 +389,27 @@ impl TaskService {
     /// 六模式(multi/team)主 agent 经 agentgo 排出的子 agent 一并结束
     ///(task:{id} 前缀虚拟 session 的内存记录),防 stop 后残留孤儿后台任务。
     pub fn stop(&self, id: &str) -> bool {
+        self.finish_ended(id, None)
+    }
+
+    /// 以 ended 收尾的**唯一实现**(提交 3 · D7):用户点 stop(`reason = None`)与
+    /// 空闲看守自动收尾(`reason = Some("空闲超时自动收尾:…")`)必须走同一条路径——
+    /// 两条各写一份必然漂移(谁先补成果、谁发取消、子任务怎么收)。
+    ///
+    /// 顺序:部分成果兜底(提交 2)→ 置 ended → 补原因(只写 error 列)→ 发取消信号 →
+    /// 结束未完成子任务。原因用 `set_error_only` 而非 `set_error`:后者会把状态改成
+    /// error,而这里语义是**正常收尾**(与 stop 同源),status 必须是 ended。
+    /// `reason = None`(用户主动停止)不写 error 列——「用户停了」不需要解释。
+    pub(super) fn finish_ended(&self, id: &str, reason: Option<&str>) -> bool {
+        // 部分成果兜底(提交 2):先把已完成步骤的产出写进 result,再置 ended——
+        // 终态一可见就已带成果,不出现「点了停止、成果还没落库」的空窗;
+        // 执行器随后收尾时因 result 非空自动跳过(同一判据,幂等)。
+        salvage_partial_result(self, id);
         let changed = self.set_status(id, TaskStatus::Ended);
+        if let Some(r) = reason {
+            // 终态已是 ended:这里只补「为什么结束」(写库成功后发 status 事件,detail 带原因)
+            self.set_error_only(id, r);
+        }
         self.signal_cancel(id);
         for st in self.list_subtasks(id) {
             if st.status == TaskSubtaskStatus::Running || st.status == TaskSubtaskStatus::Pending {
@@ -378,6 +434,9 @@ impl TaskService {
     /// 统一出口,成功/空内容/超时/上游错误均落 task_llm_calls 一行。
     /// tools 非空时下发工具定义并聚合 ToolCall 块到产出(问题②规划器侦察轮用;
     /// 其余调用方传空,出现 ToolCall 块按协议异常记 warn 忽略)。
+    /// `connection_id`(二维批次 5b):节点级连接;None = 默认连接。解析统一走
+    /// `AgentEngine::resolve_connector`(引用的连接被删除/停用 → 本调用失败并落 error 行,
+    /// **不静默回退默认连接**)。
     /// pub(crate):任务引擎 team/custom 执行器的纯生成步(规划/审计/汇总/无工具步骤)
     /// 复用本统一出口,勿另写 HTTP 调用(批次 4.3b)。
     #[allow(clippy::too_many_arguments)]
@@ -391,8 +450,51 @@ impl TaskService {
         max_tokens: u32,
         temperature: f64,
         top_p: f64,
+        connection_id: Option<&str>,
         cancel: watch::Receiver<bool>,
     ) -> Result<TaskGenOutput, String> {
+        self.generate_text_timed(
+            task_id,
+            phase,
+            step_index,
+            messages,
+            tools,
+            max_tokens,
+            temperature,
+            top_p,
+            connection_id,
+            None,
+            cancel,
+        )
+        .await
+    }
+
+    /// 与 [`Self::generate_text`] 同一实现,额外接受**单次调用超时覆盖**(A 批 A1)。
+    ///
+    /// 只有自定义流程的节点会带值(节点级 `call_timeout_secs`);`None` = 既有缺省看门狗
+    /// (`TASK_LLM_TOTAL_TIMEOUT` = 300s),行为与本批之前逐字节一致。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn generate_text_timed(
+        &self,
+        task_id: &str,
+        phase: &str,
+        step_index: Option<usize>,
+        messages: Vec<LlmMessage>,
+        tools: Vec<ToolDefinition>,
+        max_tokens: u32,
+        temperature: f64,
+        top_p: f64,
+        connection_id: Option<&str>,
+        call_timeout: Option<Duration>,
+        cancel: watch::Receiver<bool>,
+    ) -> Result<TaskGenOutput, String> {
+        // 任务级连接回退(A 批 B1):调用方未给节点级连接时,回退到**该任务**的连接。
+        // 收在这里的原因:规划/步骤/汇总/team/legacy 五条路径都经本函数发调用,
+        // 在这一处回退等于一次覆盖,不必在每处调用点各写一遍(单一出处)。
+        let task_connection = connection_id
+            .map(str::to_string)
+            .or_else(|| self.get(task_id).and_then(|t| t.connection_id));
+        let connection_id = task_connection.as_deref();
         let params = GenerationParams {
             temperature,
             top_p,
@@ -401,7 +503,13 @@ impl TaskService {
             tools,
             max_tool_rounds: None,
             tool_choice: ToolChoice::Auto,
+            // 与下方 call 内的解析同源(A 批 B1 起可能是任务级连接,不再恒 None)
+            connection_id: connection_id.map(str::to_string),
             parallel_tool_calls: None,
+            // 纯生成路径(规划/步骤生成/汇总/无工具的节点)没有工具循环,
+            // 步骤墙钟预算与语义熔断都无从生效:恒 None(与聊天路径同口径)。
+            step_budget: None,
+            semantic_guard: None,
         };
         // 工具是否下发(params 随后 move 进 generate_stream,先行记录):未下发而出现
         // ToolCall 块属上游/协议异常(保留既有 warn 语义);已下发则聚合进产出(规划器侦察轮)
@@ -413,13 +521,21 @@ impl TaskService {
         // 慢网络请求可能持锁排队)与整个流式生成;超时后 future 被 drop,读锁随之释放,
         // chunk_tx 随之 drop,collect 端收 None 正常收尾。
         let call = async {
-            let connector = self.connector.read().await.clone();
-            let model = connector.model().to_string();
+            // 连接解析失败(引用的连接已删除/停用)按「本次调用失败」处理:落一条 error
+            // 调用行(与其它失败形态同口径),文案原样由 resolve_connector 给出。
+            let (connector, model) = match self.engine.resolve_connector(connection_id).await {
+                Ok(v) => v,
+                Err(e) => return (Err(e), String::new(), String::new()),
+            };
             let connector_type = connector.type_name().to_string();
             let res = connector
                 .generate_stream(&messages, params, cancel, chunk_tx)
                 .await;
-            (res, model, connector_type)
+            (
+                res.map_err(|e| e.message().to_string()),
+                model,
+                connector_type,
+            )
         };
         // delta 攒批旁路(批次 R4):与聚合同一路逐块处理;delta 是暂态事件不落库
         // (纪律例外见 events.rs emit_delta),权威数据以本函数收尾的落库行为准
@@ -449,6 +565,20 @@ impl TaskService {
                         reasoning_tokens += rt;
                     }
                     LlmStreamChunk::Finish { reason } => finish_reason = Some(reason),
+                    // 重试提示(HB-4):任务侧 generate_text 无 SSE 通道,调用追踪走
+                    // task_llm_calls;此处只记 trace,不改变聚合结果
+                    LlmStreamChunk::Retry {
+                        attempt,
+                        max,
+                        reason,
+                    } => {
+                        tracing::debug!(
+                            attempt,
+                            max,
+                            reason = reason.as_str(),
+                            "任务侧模型请求重试中"
+                        );
+                    }
                     // 下发了工具(规划器侦察轮,问题②):ToolCall 块是预期产出,聚合进结果;
                     // 未下发工具时出现 ToolCall 块即上游/协议异常,记 warn 便于定位
                     LlmStreamChunk::ToolCall(call) => {
@@ -483,19 +613,23 @@ impl TaskService {
                 reasoning_chars,
                 tool_calls,
             ),
-        ) = tokio::join!(tokio::time::timeout(TASK_LLM_TOTAL_TIMEOUT, call), collect);
+        ) = tokio::join!(
+            tokio::time::timeout(call_timeout.unwrap_or(TASK_LLM_TOTAL_TIMEOUT), call),
+            collect
+        );
         let (res, model, connector_type) = match timed {
             Ok(v) => v,
             Err(_) => {
+                let limit = call_timeout.unwrap_or(TASK_LLM_TOTAL_TIMEOUT);
                 tracing::warn!(
-                    timeout_s = TASK_LLM_TOTAL_TIMEOUT.as_secs(),
+                    timeout_s = limit.as_secs(),
                     max_tokens = max_tokens,
                     elapsed_ms = started.elapsed().as_millis() as u64,
                     "任务模式 LLM 生成超时(看门狗触发)"
                 );
                 let err = format!(
                     "模型调用超过 {}s 未完成(上游停滞或接口占用),已中止;可重新执行任务",
-                    TASK_LLM_TOTAL_TIMEOUT.as_secs()
+                    limit.as_secs()
                 );
                 // 超时发生在 connector 读锁获取前后,model 未知,记空串
                 self.record_llm_call(
@@ -512,10 +646,10 @@ impl TaskService {
                 return Err(err);
             }
         };
-        if let Err(e) = res {
+        if let Err(msg) = res {
             // 任务侧的调用追踪/步骤 result 是字符串契约(task_llm_calls 无分类列),
-            // 故分类在此落回文案;分类只服务聊天 SSE 的错误终态。
-            let msg = e.message().to_string();
+            // 故上游分类在 `call` 内即折算为文案(连接解析失败也走这一条),
+            // 分类本身只服务聊天 SSE 的错误终态。
             self.record_llm_call(
                 task_id,
                 phase,
@@ -596,6 +730,21 @@ impl TaskService {
         Ok(out)
     }
 
+    /// 执行阶段的工具名单(规划器能力段用,D1):与 `solo::run_agent_loop` 的工具循环
+    /// 走**同一处编译纪律**(`task_engine::tool_policy::compile`),避免「规划器被告知的
+    /// 工具面」与「执行者实际拿到的工具面」两处各自推断而漂移。
+    /// `has_scope`:任务是否绑定了作用域(工作区或 scratch)——决定 `fs_*` 族是否下发。
+    fn planned_step_tools(&self, has_scope: bool) -> Vec<String> {
+        let settings = self.task_settings();
+        crate::services::task_engine::tool_policy::compile(
+            &settings.task_tool_policy,
+            &settings.task_tool_allowlist,
+            &self.engine.tool_registry(),
+            has_scope,
+        )
+        .allowed
+    }
+
     /// 规划(单次规划尝试,含只读侦察;解析与重试在 plan_task_retry):
     /// 把目标交给规划器,允许先用只读白名单工具(PLANNER_SCOUT_TOOLS,最多
     /// PLANNER_SCOUT_MAX_ROUNDS 轮)收集与目标相关的信息,再产出计划 JSON 数组文本
@@ -607,6 +756,7 @@ impl TaskService {
     /// 侦察轮也经 generate_text 统一出口落 task_llm_calls(phase=planner);
     /// 侦察轮调用失败(如半截 tool_call 被判协议损坏)不沉规划——记 warn 回退
     /// 无工具最终轮,与侦察能力缺席时的旧行为等价。
+    #[allow(clippy::too_many_arguments)] // 参数 = 规划调用上下文(经重试包装逐次透传),拆 struct 只多一层中间类型
     pub(crate) async fn plan_task(
         &self,
         task_id: &str,
@@ -614,8 +764,19 @@ impl TaskService {
         character_id: Option<&str>,
         max_tokens: u32,
         cancel: &watch::Receiver<bool>,
+        scope: Option<Arc<crate::models::types::ExecScope>>,
+        capability: crate::services::task_core::prompt_consts::StepCapability,
     ) -> Result<TaskGenOutput, String> {
         let mut sys = String::from(super::prompt::PLANNER_PROMPT);
+        // 执行阶段能力段(D1):不告诉规划器执行者有什么,它就会把交付物规划成文件
+        sys.push_str(&format!(
+            "\n\n{}",
+            crate::services::task_core::prompt_consts::capability_note(
+                capability,
+                &self.planned_step_tools(scope.is_some()),
+                scope.as_deref().map(|s| s.workspace()),
+            )
+        ));
         // 世界书为外部文本(WP7):untrusted 边界包裹,内置规划器指令不包裹
         let world = self.world_context(character_id);
         if !world.is_empty() {
@@ -628,7 +789,7 @@ impl TaskService {
             LlmMessage::plain("system", &sys),
             LlmMessage::plain("user", title),
         ];
-        self.plan_scout_loop(task_id, character_id, messages, max_tokens, cancel)
+        self.plan_scout_loop(task_id, character_id, messages, max_tokens, cancel, scope)
             .await
     }
 
@@ -637,6 +798,7 @@ impl TaskService {
     /// plan_chat 对话历史 + 本轮反馈。历史截断参照 record_llm_call 摘要口径:
     /// 每条内容截 800 字符、历史段整体截 4000(多轮对话体积封底)。
     /// 侦察/落库/取消检查与 plan_task 同口径(共用 plan_scout_loop)。
+    #[allow(clippy::too_many_arguments)] // 同 plan_task:参数即规划调用上下文
     pub(crate) async fn plan_revise(
         &self,
         task: &TaskRecord,
@@ -644,8 +806,19 @@ impl TaskService {
         feedback: &str,
         max_tokens: u32,
         cancel: &watch::Receiver<bool>,
+        scope: Option<Arc<crate::models::types::ExecScope>>,
+        capability: crate::services::task_core::prompt_consts::StepCapability,
     ) -> Result<TaskGenOutput, String> {
         let mut sys = String::from(super::prompt::PLANNER_PROMPT);
+        // 能力段口径与首轮规划一致(D1):修订同样不得规划执行者做不到的步骤
+        sys.push_str(&format!(
+            "\n\n{}",
+            crate::services::task_core::prompt_consts::capability_note(
+                capability,
+                &self.planned_step_tools(scope.is_some()),
+                scope.as_deref().map(|s| s.workspace()),
+            )
+        ));
         let world = self.world_context(task.character_id.as_deref());
         if !world.is_empty() {
             sys.push_str(&format!(
@@ -693,6 +866,7 @@ impl TaskService {
             messages,
             max_tokens,
             cancel,
+            scope,
         )
         .await
     }
@@ -700,6 +874,12 @@ impl TaskService {
     /// 带只读侦察的规划调用循环(plan_task/plan_revise 共用骨架,批次 R2b 抽取):
     /// messages 由调用方组装(首轮规划 = 目标;修订轮 = 目标+当前计划+历史+反馈),
     /// 侦察白名单/轮数上限/回填/取消检查口径不变。
+    ///
+    /// `scope`(D1):任务绑定了作用域时,侦察轮额外下发**只读工作区工具**
+    /// (`fs_read`/`fs_glob`/`fs_grep`)并把它作为路径闸门根——规划器因此能看见真实
+    /// 代码/文件,而不是像实测那样报「读取文件 package.json 失败:系统找不到指定的路径」
+    /// 后盲规划(`read` 走的是角色扮演文件区语义,看不到工作区)。写类工具仍不下发,
+    /// 规划阶段保持零副作用。
     async fn plan_scout_loop(
         &self,
         task_id: &str,
@@ -707,20 +887,26 @@ impl TaskService {
         mut messages: Vec<LlmMessage>,
         max_tokens: u32,
         cancel: &watch::Receiver<bool>,
+        scope: Option<Arc<crate::models::types::ExecScope>>,
     ) -> Result<TaskGenOutput, String> {
         let settings = self.task_settings();
-        // 侦察白名单 ∩ 已注册工具(未注册的环境静默缺席,如裁剪版工具集)
+        // 侦察白名单 ∩ 已注册工具(未注册的环境静默缺席,如裁剪版工具集);
+        // 有作用域时并入工作区只读三件(单一出处:tool_sets::scout_tools)
+        let scout_whitelist = crate::tools::tool_sets::scout_tools(scope.is_some());
         let defs: Vec<ToolDefinition> = self
             .engine
             .tool_definitions()
             .into_iter()
-            .filter(|d| PLANNER_SCOUT_TOOLS.contains(&d.name.as_str()))
+            .filter(|d| scout_whitelist.contains(&d.name.as_str()))
             .collect();
         // 虚拟 session_id(task: 前缀,与 run_agent_loop 同口径;不建影子行)
         let tool_ctx = ToolContext {
             session_id: format!("task:{task_id}"),
             character_id: character_id.unwrap_or_default().to_string(),
             agent_depth: 0,
+            // 与白名单同源:有作用域才有工作区工具,无作用域时 scope 也必须为 None
+            // (否则工具会被闸门拒绝却仍出现在列表里,白烧侦察轮)
+            scope: scope.clone(),
         };
         let mut scout_round = 0usize;
         loop {
@@ -737,6 +923,7 @@ impl TaskService {
                     max_tokens,
                     0.3,
                     settings.default_top_p,
+                    None, // 规划器无节点级连接
                     cancel.clone(),
                 )
                 .await
@@ -773,10 +960,11 @@ impl TaskService {
                 tool_call_id: None,
             });
             for call in &out.tool_calls {
-                // 白名单双保险:下发定义已是子集,执行时仍逐一核对(防模型幻觉工具名)。
+                // 白名单双保险:下发定义已是子集,执行时仍逐一核对(防模型幻觉工具名);
+                // 名单与下发同源(tool_sets::scout_tools:有作用域时含工作区只读三件)。
                 // 收口到统一裁决入口(批次授权改造):名单内 = custom_authorized 放行,
                 // 名单外直接拒绝。任务模式无 UI 授权上下文,不走等待授权分支。
-                let listed = PLANNER_SCOUT_TOOLS.contains(&call.name.as_str());
+                let listed = scout_whitelist.contains(&call.name.as_str());
                 let decision = self
                     .engine
                     .tool_registry()
@@ -863,11 +1051,16 @@ impl TaskService {
     ) -> Result<TaskGenOutput, String> {
         let settings = self.task_settings();
         // 统一组装(单一实现,见 prompt.rs::assemble_executor_system_prompt);
-        // 外部来源段落逐一 untrusted 包裹,内置指令不包裹(WP7)
+        // 外部来源段落逐一 untrusted 包裹,内置指令不包裹(WP7)。
+        // 执行者优先:executor_id 命中即独占身份段,character_id 仅为旧任务回退。
+        // `has_tools = false`:本原语是 legacy 三段的纯文本步骤生成,恒不下发工具
+        // (tools 传空),故不追加工具纪律段(提交 3 · D3-c)。
         let sys = self.assemble_executor_system_prompt(
             &settings,
+            task.executor_id.as_deref(),
             task.character_id.as_deref(),
             &task.title,
+            false,
         );
         let messages = vec![
             LlmMessage::plain("system", &sys),
@@ -882,6 +1075,7 @@ impl TaskService {
             max_tokens,
             temperature,
             settings.default_top_p,
+            None, // legacy/plan 步骤无节点级连接
             cancel.clone(),
         )
         .await
@@ -979,6 +1173,7 @@ impl TaskService {
             max_tokens,
             temperature,
             settings.default_top_p,
+            None, // 汇总步无节点级连接
             cancel.clone(),
         )
         .await
@@ -987,6 +1182,15 @@ impl TaskService {
 
 /// 后台执行退出收尾:仅当自己仍是该任务当前执行时才写终态(旧执行在重跑后让位,
 /// 不覆盖新任务状态),并按 token 清理取消条目(不删新执行的条目)。
+///
+/// 部分成果兜底(提交 2 · D2):写终态**前**先补 result——若 tasks.result 仍为空而
+/// plan 里已有「已完成且有产出」的步骤,把它们的产出拼装写回(单一出处
+/// `task_core::assemble_from_plan`)。取消(ended)与失败(error)两条路径都适用:
+/// 状态与错误文本一字不改,只让已完成的工作可被用户看到。
+/// `stop()` 也在置 ended 前调用同一个 [`salvage_partial_result`]——那条路径的终态由
+/// 请求侧直接写入,执行器收尾要晚一拍,先补一次才能让「已停止」一出现就带成果。
+/// 取「读库兜底」而非给 `TaskTerminal::Failed` 加字段:改动面更小,且一并覆盖
+/// 引擎 Err 兜底(task_engine/mod.rs 的 Err 分支)、模式自报 Failed、取消三条路径。
 fn finalize_run(
     deps: &TaskService,
     task_id: &str,
@@ -995,6 +1199,7 @@ fn finalize_run(
     error: Option<&str>,
 ) {
     if deps.is_current_run(task_id, token) {
+        salvage_partial_result(deps, task_id);
         // 终态落库必须成功:写失败时任务会停在 Running(前端永远转圈),
         // 且无任何日志可查——故此处检查返回值并显式告警,不再静默吞掉。
         if ended_by_cancel {
@@ -1019,4 +1224,23 @@ fn finalize_run(
         }
     }
     deps.remove_cancel_if(task_id, token);
+}
+
+/// 终态前的部分成果兜底:result 为空且 plan 有已完成步骤 → 拼装写回。
+/// 读不到任务、已有 result、无任何可拼装内容三种情况一律不动(不伪造成果)。
+fn salvage_partial_result(deps: &TaskService, task_id: &str) {
+    let Some(task) = deps.get(task_id) else {
+        return;
+    };
+    if !task.result.trim().is_empty() {
+        return;
+    }
+    if let Some(text) = assemble_from_plan(&task.plan) {
+        if !deps.set_result_only(task_id, &text) {
+            tracing::warn!(
+                task_id = task_id,
+                "部分成果兜底落库失败:已完成步骤的产出未能写入 result"
+            );
+        }
+    }
 }

@@ -253,7 +253,10 @@ impl AgentEngine {
             tools: Vec::new(),
             max_tool_rounds: None,
             tool_choice: crate::models::types::ToolChoice::Auto,
+            connection_id: None,
             parallel_tool_calls: None,
+            step_budget: None,
+            semantic_guard: None,
         };
         let (increment, _usage) = self.generate_text(&messages, params, abort_rx).await?;
         let increment = increment.trim().to_string();
@@ -351,7 +354,10 @@ impl AgentEngine {
             tools: Vec::new(),
             max_tool_rounds: None,
             tool_choice: crate::models::types::ToolChoice::Auto,
+            connection_id: None,
             parallel_tool_calls: None,
+            step_budget: None,
+            semantic_guard: None,
         };
         match self.generate_text(&messages, params, abort.clone()).await {
             Ok((increment, _usage)) => {

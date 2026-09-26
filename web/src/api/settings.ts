@@ -75,12 +75,12 @@ export async function saveSettings(patch: RuntimeSettingsPatch, mode?: 'roleplay
   return request(`/settings${q}`, { method: 'PUT', body: JSON.stringify(patch) });
 }
 
-/** GET /api/settings/agent-prompt:读取项目级运行时主 Agent 提示词(项目根 AGENTS_RUNTIME.md,注入模型) */
+/** GET /api/settings/agent-prompt:读取运行时主 Agent 提示词(DATA_DIR/AGENTS_RUNTIME.md,注入模型) */
 export async function getAgentPromptMd(): Promise<{ path: string; content: string }> {
   return request('/settings/agent-prompt');
 }
 
-/** PUT /api/settings/agent-prompt:保存运行时主 Agent 提示词(写回项目根 AGENTS_RUNTIME.md) */
+/** PUT /api/settings/agent-prompt:保存运行时主 Agent 提示词(写回 DATA_DIR/AGENTS_RUNTIME.md) */
 export async function saveAgentPromptMd(content: string): Promise<{ ok: boolean; path: string }> {
   return request('/settings/agent-prompt', { method: 'PUT', body: JSON.stringify({ content }) });
 }

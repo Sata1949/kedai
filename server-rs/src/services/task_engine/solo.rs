@@ -32,7 +32,10 @@ pub(crate) struct AgentLoopCall {
     pub goal: String,
     /// 任务模式有效设置快照(执行全程读快照,与 legacy 同语义)
     pub settings: RuntimeSettings,
-    /// 执行者人设角色 id(空 = 通用执行者)
+    /// 执行者库 id(空 = 通用执行者)。与 character_id 的优先级见
+    /// TaskPromptKit::assemble_executor_system_prompt:executor_id 命中即独占身份段。
+    pub executor_id: Option<String>,
+    /// 执行者人设角色 id(空 = 通用执行者)。兼容字段,仅为旧任务保留。
     pub character_id: Option<String>,
     /// 调用追踪 phase(solo/multi/team 主 agent 均为 "agent")
     pub phase: &'static str,
@@ -41,6 +44,13 @@ pub(crate) struct AgentLoopCall {
     pub step_index: Option<usize>,
     /// 事件桥文案称谓(「主 agent」/team 的「主 agent N」)
     pub label: String,
+    /// 任务级连接(A 批 B1;空 = 跟随设置的默认连接)。
+    /// 与节点级 `PlanStep.connection_id` 不同:solo/multi/team/plan 无节点概念,
+    /// 这里是本任务模型调用的缺省连接。
+    pub connection_id: Option<String>,
+    /// **工作区作用域**(编码通道批次 1;空 = 未绑定工作区)。从执行上下文原样下传,
+    /// 供工具循环构造 `ToolContext.scope`(fs_* 工具族与 bash 的 cwd jail 消费它)。
+    pub scope: Option<Arc<crate::models::types::ExecScope>>,
 }
 
 /// 单主 agent 工具自循环(solo/multi 执行器主体;team 各主 agent 复用):
@@ -56,17 +66,6 @@ pub(crate) async fn run_agent_loop(
 ) -> Result<(String, TokenUsage), String> {
     let settings = &call.settings;
 
-    // system 提示词组装:统一走 TaskBackend::assemble_executor_system_prompt
-    // (单一实现,宿主侧 prompt.rs);拼装顺序与 untrusted 包裹纪律同 legacy,
-    // 勿在本文件复制实现(WP7)。
-    let sys =
-        svc.assemble_executor_system_prompt(settings, call.character_id.as_deref(), &call.goal);
-
-    let mut messages = vec![
-        LlmMessage::plain("system", &sys),
-        LlmMessage::plain("user", &call.goal),
-    ];
-
     // 工具按任务策略下发(批次授权改造):默认拒绝危险工具;元工具不入正文列表。
     // 任务模式无 UI 授权上下文,闸门恒 no_ui_authorization = true:
     // 名单外工具立即拒绝并回灌错误,不会空等 300 秒授权超时。
@@ -74,9 +73,37 @@ pub(crate) async fn run_agent_loop(
         &settings.task_tool_policy,
         &settings.task_tool_allowlist,
         &engine.tool_registry(),
+        // 工作区工具族随「作用域是否存在」下发:任务自 D1 起恒有作用域(绑定工作区用
+        // 工作区,未绑定则用任务 scratch,见 task_engine::run_inner),故 fs_* 对任务恒可见;
+        // 传 `scope.is_some()` 而非恒 true,是为守住「没有作用域就不给文件工具」这条不变量
+        // (作用域缺失时那些工具必然报错,不如不给)。
+        call.scope.is_some(),
     );
     // 闸门名单先取出(allowed 借用生命周期需覆盖整个工具循环),再取走 defs
     let allowed = policy.allowed;
+    // 本轮**实际**下发的工具是否非空(策略收窄到空集时不得声称有工具):
+    // 既决定 system 是否追加工具纪律段,也与「能力事实」的实际形态一致。
+    // 必须在 `tools: policy.defs` 把 defs 移走之前算。
+    let has_tools = !policy.defs.is_empty();
+    // system 提示词组装:统一走 TaskBackend::assemble_executor_system_prompt
+    // (单一实现,宿主侧 prompt.rs);拼装顺序与 untrusted 包裹纪律同 legacy,
+    // 勿在本文件复制实现(WP7)。
+    let sys = svc.assemble_executor_system_prompt(
+        settings,
+        call.executor_id.as_deref(),
+        call.character_id.as_deref(),
+        &call.goal,
+        has_tools,
+    );
+
+    let mut messages = vec![
+        LlmMessage::plain("system", &sys),
+        LlmMessage::plain("user", &call.goal),
+    ];
+
+    // 任务侧工具循环的两道限制(提交 3 · D3):单步墙钟预算 + 语义熔断收紧,
+    // 与 custom 的工具节点共用同一映射(单一出处,见 task_loop_limits 文档)。
+    let (step_budget, semantic_guard) = super::task_loop_limits(settings);
     let params = GenerationParams {
         temperature: settings.default_temperature,
         top_p: settings.default_top_p,
@@ -85,7 +112,12 @@ pub(crate) async fn run_agent_loop(
         tools: policy.defs,
         max_tool_rounds: Some(settings.max_tool_rounds),
         tool_choice: ToolChoice::Auto,
+        // 任务级连接(A 批 B1):solo 无节点级连接可配,直接用任务绑定的那条
+        // (None = 默认连接,与本批之前一致)
+        connection_id: call.connection_id.clone(),
         parallel_tool_calls: None,
+        step_budget,
+        semantic_guard,
     };
     let gate = crate::agents::engine::executor::ToolGate::listed(&allowed);
 
@@ -101,6 +133,7 @@ pub(crate) async fn run_agent_loop(
         session_id: call.session_id.clone(),
         character_id: call.character_id.clone().unwrap_or_default(),
         agent_depth: 0,
+        scope: call.scope.clone(),
     };
     // 事件桥:引擎事件 → 任务事件(agent_status);drain 持续消费到 tx drop。
     // phase/step_index 随桥传入(批次 R4):Token 攒批 delta 携带调用归属,
@@ -133,6 +166,8 @@ pub(crate) async fn run_agent_loop(
         &mut total_usage,
         &run_id,
         gate,
+        // 单次调用超时覆盖(A 批 A1):solo 无节点级配置,恒走宿主既有判定
+        None,
     )
     .await;
     // 先关通道再等 drain 收尾,保证进度事件全部转发完毕
@@ -174,14 +209,20 @@ pub(crate) async fn run_agent_loop(
                 status,
             );
             if text.is_empty() {
-                // 空内容错误带 finish_reason(问题③):区分「已达 token 上限」(推理
-                // 烧光预算,实测主因)与其他成因,与 legacy retry_if_empty_output
-                // 的文案口径对齐,步骤 result 落库后可读
+                // 空内容错误文案统一走单一出处(提交 3 · D6):finish_reason + 思考占输出
+                // 比例 +「提高上限/改非推理模型」建议,区分「预算被推理吃光」(实测主因)
+                // 与其他成因。`out` 的 completion/reasoning token 来自本轮累计(工具循环
+                // 聚合口径不含推理拆分,故那边恒 0,文案会退化为「占比未知」——不报假数)。
                 if let Err(e) = state_machine.transition(AgentState::Error, &call.session_id) {
                     tracing::warn!(error = %e, session = %call.session_id, "状态迁移被拒");
                 }
-                let reason = res.finish_reason.as_deref().unwrap_or("未知");
-                return Err(format!("{}返回空内容(finish_reason={reason})", call.label));
+                return Err(
+                    crate::services::task_core::prompt_consts::empty_output_error(
+                        &call.label,
+                        &out,
+                        Some(params.max_tokens),
+                    ),
+                );
             }
             if let Err(e) = state_machine.transition(AgentState::Finished, &call.session_id) {
                 tracing::warn!(error = %e, session = %call.session_id, "状态迁移被拒");
@@ -249,10 +290,14 @@ impl SoloExecutor {
             session_id: format!("task:{}", ctx.task_id),
             goal: ctx.goal.clone(),
             settings: ctx.settings.clone(),
+            executor_id: ctx.executor_id.clone(),
             character_id: ctx.character_id.clone(),
             phase: "agent",
             step_index: None,
             label: "主 agent".into(),
+            // 任务级连接(A 批 B1):从执行上下文原样下传
+            connection_id: ctx.connection_id.clone(),
+            scope: ctx.scope.clone(),
         };
         let (text, usage) = run_agent_loop(
             self.svc.clone(),

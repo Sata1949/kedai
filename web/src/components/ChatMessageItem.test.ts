@@ -113,6 +113,15 @@ describe('ChatMessageItem', () => {
     expect(w.text()).toContain('HP: 100');
   });
 
+  it('extra.interrupted 时显示「已中断」提示(HB-3);未标记则不显示', () => {
+    const cut = mountItem(msg({ content: '写到一半的正文', extra: { interrupted: true } }));
+    expect(cut.find('.sv-trunc-note').exists()).toBe(true);
+    expect(cut.text()).toContain('已中断');
+
+    const normal = mountItem(msg({ content: '完整正文' }));
+    expect(normal.find('.sv-trunc-note').exists()).toBe(false);
+  });
+
   it('extra.truncated 时显示截断提示(可观测性问题①);未标记则不显示', () => {
     const cut = mountItem(msg({ content: '半截正文', extra: { truncated: true } }));
     expect(cut.find('.sv-trunc-note').exists()).toBe(true);

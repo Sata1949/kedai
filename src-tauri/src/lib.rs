@@ -50,6 +50,27 @@ fn reset_close_request(flag: &std::sync::atomic::AtomicBool) {
     flag.store(false, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// Windows 子进程创建标志:有控制台但**无可见控制台窗口**。
+/// 与 server-rs/src/utils/win.rs 的同名常量同值(壳不依赖后端 utils 的公共面,故各自声明)。
+#[cfg(all(desktop, windows))]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// 派生控制台程序(netstat / taskkill)的壳侧标准姿势。
+///
+/// 本进程为 GUI 子系统(无控制台,见 main.rs 的 windows_subsystem),不设该标志时
+/// 每次派生都会新开一个可见黑窗(2026-09-18,与后端 exec/desktop.rs 同源修复)。
+/// 非 Windows 桌面(cfg(desktop) 也涵盖 Linux/macOS 桌面)保持原行为。
+#[cfg(desktop)]
+fn hidden_command(program: &str) -> std::process::Command {
+    let mut c = std::process::Command::new(program);
+    #[cfg(all(desktop, windows))]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(CREATE_NO_WINDOW);
+    }
+    c
+}
+
 /// 结束占用指定端口的**其它**进程(排除自身):关闭 Kedai 时一并清理可能存在的
 /// 独立后端残留(例如上次直接运行 dist\kedai-server.exe 未退出、或旧桌面版未回收)。
 /// 桌面版的内嵌后端与本进程同 PID,会被排除,不影响正常退出路径。
@@ -60,7 +81,7 @@ fn reset_close_request(flag: &std::sync::atomic::AtomicBool) {
 #[cfg(desktop)]
 fn terminate_other_port_owners(port: u16) {
     let self_pid = std::process::id();
-    let out = match std::process::Command::new("netstat").arg("-ano").output() {
+    let out = match hidden_command("netstat").arg("-ano").output() {
         Ok(o) => o,
         Err(_) => return,
     };
@@ -82,7 +103,7 @@ fn terminate_other_port_owners(port: u16) {
         if pid == self_pid {
             continue;
         }
-        let _ = std::process::Command::new("taskkill")
+        let _ = hidden_command("taskkill")
             .args(["/F", "/PID", &pid.to_string()])
             .output();
     }
@@ -117,7 +138,10 @@ fn fallback_app_data_dir() -> Result<PathBuf, String> {
 /// 由 JVM 调用,`vm` 为其传入的合法 `JavaVM*`;返回期望的 JNI 版本。
 #[cfg(target_os = "android")]
 #[no_mangle]
-pub unsafe extern "C" fn JNI_OnLoad(vm: *mut std::ffi::c_void, _reserved: *mut std::ffi::c_void) -> i32 {
+pub unsafe extern "C" fn JNI_OnLoad(
+    vm: *mut std::ffi::c_void,
+    _reserved: *mut std::ffi::c_void,
+) -> i32 {
     kedai_server::services::jni_bridge::on_load(vm)
 }
 
@@ -200,26 +224,34 @@ pub fn run() {
                 // 原生能力事件(外链/分享/保活):同样是「前端 emit → 原生执行」,
                 // 绕开 remote origin 下的自定义命令 ACL 限制。
                 // 载荷是 JSON 字符串(&str),解析失败仅记 warn 不 panic。
-                app.listen(native_bridge::OPEN_EXTERNAL_EVENT, |event| {
-                    match serde_json::from_str::<native_bridge::OpenExternalPayload>(event.payload()) {
+                app.listen(
+                    native_bridge::OPEN_EXTERNAL_EVENT,
+                    |event| match serde_json::from_str::<native_bridge::OpenExternalPayload>(
+                        event.payload(),
+                    ) {
                         Ok(p) => {
                             if let Err(e) = native_bridge::open_external(&p.url) {
                                 tracing::warn!(url = p.url, error = e, "打开外链失败");
                             }
                         }
-                        Err(e) => tracing::warn!(error = e.to_string(), "open-external 载荷解析失败"),
-                    }
-                });
-                app.listen(native_bridge::SHARE_FILE_EVENT, |event| {
-                    match serde_json::from_str::<native_bridge::ShareFilePayload>(event.payload()) {
+                        Err(e) => {
+                            tracing::warn!(error = e.to_string(), "open-external 载荷解析失败")
+                        }
+                    },
+                );
+                app.listen(
+                    native_bridge::SHARE_FILE_EVENT,
+                    |event| match serde_json::from_str::<native_bridge::ShareFilePayload>(
+                        event.payload(),
+                    ) {
                         Ok(p) => {
                             if let Err(e) = native_bridge::share_file(&p.name, &p.content) {
                                 tracing::warn!(name = p.name, error = e, "分享导出失败");
                             }
                         }
                         Err(e) => tracing::warn!(error = e.to_string(), "share-file 载荷解析失败"),
-                    }
-                });
+                    },
+                );
                 app.listen(native_bridge::KEEPALIVE_START_EVENT, |_| {
                     if let Err(e) = native_bridge::keepalive_start() {
                         tracing::warn!(error = e, "启动前台服务保活失败");
@@ -291,7 +323,9 @@ pub fn run() {
             app.manage(ExitGuard::default());
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                if let Err(error) = start_and_wait_ready(config, app_handle.clone(), log_dir.clone()).await {
+                if let Err(error) =
+                    start_and_wait_ready(config, app_handle.clone(), log_dir.clone()).await
+                {
                     write_start_error(&log_dir, &error);
                     eprintln!("[错误] {error}");
                     app_handle.exit(1);
@@ -429,7 +463,10 @@ async fn start_and_wait_ready(
                         ));
                     }
                 }
-                tracing::info!(bind_error = error.as_str(), "检测到已有 Kedai 实例,直接复用");
+                tracing::info!(
+                    bind_error = error.as_str(),
+                    "检测到已有 Kedai 实例,直接复用"
+                );
                 eprintln!("[信息] 检测到已有 Kedai 实例,直接复用");
                 show_main_window(&app, &service_url)?;
                 clear_start_error(&log_dir);
@@ -692,7 +729,8 @@ mod tests {
         let migrated = rusqlite::Connection::open(target.join("kedai.db")).unwrap();
         assert_eq!(
             migrated
-                .query_row("SELECT COUNT(*) FROM snapshot_test", [], |row| row.get::<_, i64>(0))
+                .query_row("SELECT COUNT(*) FROM snapshot_test", [], |row| row
+                    .get::<_, i64>(0))
                 .unwrap(),
             1,
             "迁移必须通过 backup API 包含尚在 WAL 中的数据"

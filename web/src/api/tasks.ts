@@ -1,11 +1,11 @@
-// 任务模式 API:任务 CRUD + 执行/停止 + 任务事件 SSE 订阅(WP5)。
+// 任务模式 API:任务 CRUD + 执行/停止 + 流程改绑 + 任务事件 SSE 订阅(WP5)。
 // 后端契约:GET /api/tasks → { tasks };POST /api/tasks → { ok, task };
-// GET /api/tasks/{id} → { task, subtasks };POST /api/tasks/{id}/run | /stop;
+// GET /api/tasks/{id} → { task, subtasks };POST /api/tasks/{id}/run | /stop | /bind;
 // DELETE /api/tasks/{id} → 204;GET /api/tasks/events → SSE(KeepAlive 30s)。
 import { BASE, authorizedFetch, request } from './client';
 import { requireArrayField, requireObjectField } from './shape';
 import { pumpSseFrames, toApiError } from './stream';
-import type { TaskDetail, TaskEvent, TaskLlmCall, TaskRecord, TaskRunMode, TaskStep, TaskUsageTotal } from './types';
+import type { TaskApproveExecMode, TaskDetail, TaskEvent, TaskLlmCall, TaskRecord, TaskRunMode, TaskStep, TaskUsageTotal } from './types';
 
 /** 读取任务列表(最新在前) */
 export async function listTasks(): Promise<TaskRecord[]> {
@@ -14,11 +14,71 @@ export async function listTasks(): Promise<TaskRecord[]> {
   return requireArrayField<TaskRecord>(data, 'tasks', '任务列表');
 }
 
-/** 新建任务;character_id 可选(执行者人设角色);task_mode 可选(批次 4 六模式,缺省 legacy) */
-export async function createTask(title: string, characterId?: string, taskMode?: TaskRunMode): Promise<TaskRecord> {
+/**
+ * 新建任务。
+ * - `executorId`:执行者库 id(可选,缺省 = 通用执行者);
+ * - `characterId`:**兼容入参**,旧形态(角色卡执行者),新代码不应使用——
+ *   执行者已与角色扮演角色卡解耦,该字段仅为旧调用方保留(两者同时给出时执行者优先);
+ * - `taskMode`:批次 4 六模式,缺省 legacy;
+ * - `flowId`:二维批次 5a 的**流程绑定**(可选;仅 custom 模式可给,缺省 = 跟随当前流程)。
+ *   仅在显式给出时下发,旧调用方请求体不变;
+ * - `flowIds`:二维批次 7b 的**对比模式名单**(可选;仅 custom 模式可给,根流程 + 名单内流程
+ *   作为 `run_flow` 工具释放给宽松节点)。同样仅在非空时下发——空数组会被后端判 400
+ *   (「空名单 = 名存实亡」),故调用方不必也不应传空数组;
+ * - `connectionId`:B 批 B1 的**逐任务选用连接**(可选;**所有任务模式**都适用——它绑的是
+ *   provider 而不是编排)。语义 = 该任务所有 LLM 调用的缺省连接(节点级 `connection_id`
+ *   优先);仅非空时下发,缺省即跟随设置的默认连接(零行为变化)。
+ *   创建期后端即校验「引用存在且启用」,不存在/停用 → 400 点名该连接。
+ */
+export async function createTask(
+  title: string,
+  executorId?: string,
+  taskMode?: TaskRunMode,
+  characterId?: string,
+  flowId?: string,
+  flowIds?: string[],
+  connectionId?: string,
+): Promise<TaskRecord> {
   const data = await request<unknown>('/tasks', {
     method: 'POST',
-    body: JSON.stringify({ title, character_id: characterId ?? null, task_mode: taskMode ?? 'legacy' }),
+    body: JSON.stringify({
+      title,
+      executor_id: executorId ?? null,
+      task_mode: taskMode ?? 'legacy',
+      // 兼容入参:仅在显式给出时下发,避免污染新请求
+      ...(characterId ? { character_id: characterId } : {}),
+      // 流程绑定:空串 = 跟随当前流程(不下发该键)
+      ...(flowId ? { flow_id: flowId } : {}),
+      // 对比模式名单:仅非空时下发(空数组 = 后端 400,不是「强制模式」的写法)
+      ...(flowIds && flowIds.length > 0 ? { flow_ids: flowIds } : {}),
+      // 逐任务选用连接:仅非空时下发(空 = 跟随设置的默认连接,与 B 批之前逐字节一致)
+      ...(connectionId ? { connection_id: connectionId } : {}),
+    }),
+  });
+  return requireObjectField<TaskRecord>(data, 'task', '任务');
+}
+
+/**
+ * 改绑自定义流程(B 批 B3;仅 custom 模式任务可用)。
+ *
+ * **全量替换**语义——与 createTask 的「仅非空下发」口径**相反**,两个键都必须显式下发:
+ *  - `flowId: null` = 跟随当前流程(解绑);
+ *  - `flowIds: []` = 强制模式(清空名单)。
+ * 省略任一键,后端都无法区分「不改」与「清空」,故这里不做任何省略处理。
+ *
+ * 语义 = **重新冻结快照**(`flow_snapshot` 换成新流程的闭包);历史 plan 行不动,
+ * 其编排徽标按新快照解析(对不上就不显示,沿用 IFW-5 口径)。
+ * 非 custom 模式 / `planning|running|planned` 态 / 名单成员不存在或未启用 → 400
+ * (中文文案点名原因),且库不变。
+ */
+export async function bindTask(
+  id: string,
+  flowId: string | null,
+  flowIds: string[],
+): Promise<TaskRecord> {
+  const data = await request<unknown>(`/tasks/${encodeURIComponent(id)}/bind`, {
+    method: 'POST',
+    body: JSON.stringify({ flow_id: flowId, flow_ids: flowIds }),
   });
   return requireObjectField<TaskRecord>(data, 'task', '任务');
 }
@@ -45,12 +105,23 @@ export async function stopTask(id: string): Promise<void> {
 
 /**
  * 批准计划(plan 模式,批次 4):仅 status='planned' 时合法,否则后端 400;
- * 传入 plan 则替换计划,批准后按 solo 续跑。
+ * 传入 plan 则替换计划。
+ *
+ * `execMode`(2026-09-17)为**本次批准续跑的执行方式**,缺省 `approved_plan`
+ * (按计划逐步执行,即改造前行为);可选 solo/multi/team/custom。
+ * 它不改任务的 `task_mode`(仍为 plan,记录任务当初怎么产出计划)。
  */
-export async function approveTask(id: string, plan?: TaskStep[]): Promise<{ ok: boolean }> {
+export async function approveTask(
+  id: string,
+  plan?: TaskStep[],
+  execMode?: TaskApproveExecMode,
+): Promise<{ ok: boolean }> {
+  const body: Record<string, unknown> = {};
+  if (plan) body.plan = plan;
+  if (execMode) body.exec_mode = execMode;
   return request<{ ok: boolean }>(`/tasks/${id}/approve`, {
     method: 'POST',
-    body: JSON.stringify(plan ? { plan } : {}),
+    body: JSON.stringify(body),
   });
 }
 

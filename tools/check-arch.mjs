@@ -22,6 +22,8 @@
  *      没有代际归属的模块无从按分层纪律评审,是分层叙事的静默失效点。
  *   J. 跨代依赖方向 —— 按 arch-layers.json 的 L1/L2/L3 归属与允许方向校验实测 import 图。
  *      新增越代边 FAIL;存量越代边须在 registeredEdges 中登记(只报债务不阻塞,可还债不可增债)。
+ *   K. JSON body 提取器接入 ratchet —— 直接写 `Json(x): Json<T>` 的 handler 数量不得超基线
+ *      `BASELINE_RAW_JSON_BODY`(未接入 `JsonBody` 会让畸形 JSON 回 `400 text/plain`,前端解析不出 `code`)。
  *   L. JNI 按名调用桥类的登记完整性 —— 两个入口 `call_string_static`(1 个 String 入参)/
  *      `call_string_static_no_arg`(无入参)用到的类必须登记在 `jni_bridge.rs` 的
  *      `BRIDGE_CLASSES`(未登记则 JNI_OnLoad 期不缓存,调用必失败),且登记项须有对应

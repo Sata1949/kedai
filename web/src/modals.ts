@@ -51,6 +51,8 @@ export const MODALS = [
   modal('memoryOpen', '记忆库', () => import('./components/MemoryModal.vue')),
   modal('repoIndexOpen', '仓库索引', () => import('./components/RepoIndexModal.vue')),
   modal('quickRepliesOpen', '快速回复', () => import('./components/QuickRepliesModal.vue')),
+  // 任务执行者管理(独立执行者库:任务模式的执行者与角色扮演角色卡解耦)
+  modal('taskExecutorsOpen', '任务执行者', () => import('./components/TaskExecutorsModal.vue')),
   // 退出确认(桌面:壳下发 kedai://close-requested;Android:返回键无处可退)。
   // 声明在**末尾** = 渲染在最上层:Android 返回键按 MODAL_FLAGS 逆序关闭,先关它。
   modal('exitConfirmOpen', '退出确认', () => import('./components/ExitConfirmModal.vue')),

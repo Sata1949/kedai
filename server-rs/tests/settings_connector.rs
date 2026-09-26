@@ -6,7 +6,17 @@ use http_body_util::BodyExt;
 use kedai_server::build_test_app;
 use serde_json::{json, Value};
 use std::sync::OnceLock;
+use tokio::sync::{Mutex, MutexGuard};
 use tower::ServiceExt;
+
+/// 本文件所有用例共享同一个 app 实例(进程级 settings),且多数用例会 PUT
+/// /api/settings(其中 Base URL/Key 会切换连接器)。此前无串行化,cargo test 默认
+/// 并行下互相踩踏:实测 `mock_auto_switches_to_openai_on_save` 断言的「初始必须是
+/// mock 连接器」会被并发用例保存 base_url 抢先切走而偶发失败(单跑恒过)。
+async fn test_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(())).lock().await
+}
 
 fn test_app() -> &'static axum::Router {
     static APP: OnceLock<axum::Router> = OnceLock::new();
@@ -34,6 +44,7 @@ async fn send_json(
 
 #[tokio::test]
 async fn mock_auto_switches_to_openai_on_save() {
+    let _guard = test_lock().await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let mock_provider = axum::Router::new().route(
@@ -152,9 +163,16 @@ async fn mock_auto_switches_to_openai_on_save() {
 
 /// 模式隔离 API 级回归(WP7 双向污染矩阵 D-2):写 task 覆盖层 agent_system_prompt
 /// 不得改变 roleplay 扁平值;GET ?mode=task 返回覆盖值,?mode=roleplay 返回扁平权威值。
-/// 本 binary 无任务执行测试,task 覆盖层残留无副作用(结束时仍写回空串保持卫生)。
+///
+/// 卫生复位口径(2026-09-26 修顺序竞争):本 binary 共享进程级 app,复位必须写回**测试
+/// 开始时的 task 视角原值**,不得写空串——`for_mode(Task)` 对 `Some("")` 是「显式清空」
+/// 语义(不回退内置任务默认词,params.rs),写空串会让同 binary 的
+/// `roleplay_default_prompt_visible_on_fresh_install` 第二条断言(「task 缺省应有任务向
+/// 默认词」)按用例运行顺序偶发变红(实测文件级连跑 6 次红 3 次)。复位为原值后本用例
+/// 对共享状态的净效果为零,顺序无关。
 #[tokio::test]
 async fn task_overlay_does_not_leak_into_roleplay_settings() {
+    let _guard = test_lock().await;
     let app = test_app();
 
     // 记录 roleplay 扁平权威值(共享 app,可能已被同 binary 其他测试写动,取现场值)
@@ -162,6 +180,11 @@ async fn task_overlay_does_not_leak_into_roleplay_settings() {
     assert_eq!(status, StatusCode::OK);
     let flat_before = before_rp["agent_system_prompt"].clone();
     assert!(flat_before.is_string(), "扁平值应为裸字符串(线格式不变)");
+    // 记录 task 覆盖层现值(与 roleplay 同理取现场值;这是复位目标)
+    let (status, before_task) = send_json(app, "GET", "/api/settings?mode=task", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let task_before = before_task["agent_system_prompt"].clone();
+    assert!(task_before.is_string(), "task 视角应为裸字符串(线格式不变)");
 
     // 写 task 覆盖层
     let (status, r) = send_json(
@@ -186,25 +209,36 @@ async fn task_overlay_does_not_leak_into_roleplay_settings() {
         "roleplay 扁平值不得被 task 覆盖层污染"
     );
 
-    // 卫生复位:写回空串(API 三态语义中无「复位 None」操作;Some("") = 显式清空)
+    // 卫生复位:写回本用例开始时的 task 视角原值(不是空串——理由见用例文档注释)。
+    // API 三态语义中无「复位 None」操作,故以「记录现场值 + 写回」实现净零影响。
     let (status, _) = send_json(
         app,
         "PUT",
         "/api/settings?mode=task",
-        json!({ "agent_system_prompt": "" }),
+        json!({ "agent_system_prompt": task_before }),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     let (_, rp_after) = send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
     assert_eq!(rp_after["agent_system_prompt"], flat_before);
+    let (_, task_after) = send_json(app, "GET", "/api/settings?mode=task", json!({})).await;
+    assert_eq!(
+        task_after["agent_system_prompt"], task_before,
+        "task 覆盖层应复位为原值(共享 app 下对本用例之外零影响)"
+    );
 }
 
 /// 提示词预览按模式合并(批次 2,docs/契约-协议与配置.md 第五节):
-/// task 模式追加规划器/执行者/汇总者三层固定提示词层(文本与 task_service/prompt.rs
-/// 单一来源逐字一致,预览即真实下发);roleplay(缺省)不含。三层为内置指令,
-/// 恒注入,与 task 覆盖层状态无关(共享 app 下不受同 binary 其他测试写动影响)。
+/// task 模式追加规划器/执行者/汇总者三层固定提示词层 + 执行者工具纪律段
+/// (文本与 task_core/prompt_consts.rs 单一来源逐字一致,预览即真实下发);
+/// roleplay(缺省)不含。这些层都是内置指令,与 task 覆盖层状态无关
+/// (共享 app 下不受同 binary 其他测试写动影响)。
+/// 注意工具纪律段是**条件注入**:只有本轮真的下发了工具的执行者才拿到它
+/// (legacy 的步骤没有工具,不发这一段);预览无「本轮有没有工具」的概念,
+/// 故按「工具档」形态列出——口径写在契约文档第五节,避免读者以为它恒在。
 #[tokio::test]
 async fn prompt_preview_follows_mode() {
+    let _guard = test_lock().await;
     let app = test_app();
 
     // 缺省 = roleplay:不得含任务固定提示词层
@@ -218,7 +252,7 @@ async fn prompt_preview_follows_mode() {
         "roleplay 预览不得含任务固定提示词层"
     );
 
-    // task:三层固定提示词齐备,文本含内置指令原文
+    // task:三层固定提示词 + 工具纪律段齐备,文本含内置指令原文
     let (status, t) = send_json(
         app,
         "GET",
@@ -232,6 +266,7 @@ async fn prompt_preview_follows_mode() {
         ("task_planner_prompt", "你是任务规划器"),
         ("task_executor_prompt", "你是任务执行者"),
         ("task_summarizer_prompt", "你是任务汇总者"),
+        ("task_executor_tool_discipline", "自测通过即收尾"),
     ] {
         let hit = layers.iter().any(|l| {
             l["source"].as_str() == Some(src)
@@ -248,6 +283,7 @@ async fn prompt_preview_follows_mode() {
 /// (缺命令条目被丢弃);GET 往返还原;task 覆盖层与扁平层互不影响。
 #[tokio::test]
 async fn mcp_settings_put_get_roundtrip() {
+    let _guard = test_lock().await;
     let app = test_app();
 
     // 默认:关 + 空列表
@@ -316,6 +352,7 @@ async fn mcp_settings_put_get_roundtrip() {
 /// 仍为扁平默认 false(覆盖层不污染扁平);还原后回 false。
 #[tokio::test]
 async fn task_persona_full_roundtrip_via_settings_api() {
+    let _guard = test_lock().await;
     let app = test_app();
 
     // 默认:两视图均为 false(精简,旧配置兼容)
@@ -368,6 +405,7 @@ async fn task_persona_full_roundtrip_via_settings_api() {
 /// 正是手机端首装场景。修复前该字段为空串,面板与执行时都拿不到默认人设词。
 #[tokio::test]
 async fn roleplay_default_prompt_visible_on_fresh_install() {
+    let _guard = test_lock().await;
     let app = test_app();
     let (status, s) = send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
     assert_eq!(status, StatusCode::OK);

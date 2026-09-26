@@ -124,8 +124,9 @@ impl Db {
                 schema::SCHEMA_VERSION
             ));
         }
-        // 升级链事务化(known-limitations L21):建表批 + 11 个 ensure_* 包在同一个
-        // 事务里。SQLite 的 DDL 是事务性的,任一步失败整链回滚,不留「部分升级态」。
+        // 升级链事务化(known-limitations L21):建表批 + 14 个 ensure_* 包在同一个
+        // 事务里(另有 2 个重量级回填函数有意留在提交之后,见本函数末尾注释)。
+        // SQLite 的 DDL 是事务性的,任一步失败整链回滚,不留「部分升级态」。
         // 回滚必须落在 `?`/早退之前:否则连接停在打开的事务里,后续 Db::write 撞锁。
         //
         // 升级前自动备份(DB-2 / 计划批次):在动任何 schema 之前先留一份快照。判定
@@ -156,6 +157,17 @@ impl Db {
                 // 幂等 schema 升级(批次 4 六模式):旧库 tasks 补 task_mode 列
                 crate::migration::ensure_tasks_task_mode_column(&conn)
                     .map_err(|e| format!("升级 tasks task_mode 列失败: {e}"))?;
+                // 幂等 schema 升级(执行者库):旧库 tasks 补 executor_id 列(可空,零回填)
+                crate::migration::ensure_tasks_executor_id_column(&conn)
+                    .map_err(|e| format!("升级 tasks executor_id 列失败: {e}"))?;
+                // 幂等 schema 升级(二维批次 5a):旧库 tasks 补 flow_id/flow_snapshot 列
+                //(均可空无 DEFAULT,零回填——未绑定任务到执行开始时才捕获快照)
+                crate::migration::ensure_tasks_flow_columns(&conn)
+                    .map_err(|e| format!("升级 tasks flow 列失败: {e}"))?;
+                // 幂等 schema 升级(编码通道批次):旧库 tasks 补 workspace 列
+                //(可空无 DEFAULT,零回填——NULL = 未绑定工作区)
+                crate::migration::ensure_tasks_workspace_column(&conn)
+                    .map_err(|e| format!("升级 tasks workspace 列失败: {e}"))?;
                 // 幂等 schema 升级(可观测性问题①):旧库 task_llm_calls 补 finish_reason 列
                 crate::migration::ensure_task_llm_calls_finish_reason_column(&conn)
                     .map_err(|e| format!("升级 task_llm_calls finish_reason 列失败: {e}"))?;
@@ -173,6 +185,9 @@ impl Db {
                 // 幂等 schema 升级(阶段 B/C):旧库补建 exec_audit 审计表
                 crate::migration::ensure_exec_audit_table(&conn)
                     .map_err(|e| format!("升级 exec_audit 表失败: {e}"))?;
+                // 幂等 schema 升级(D1 审计增强):旧库 exec_audit 补 risk_flag 标记列
+                crate::migration::ensure_exec_audit_risk_flag_column(&conn)
+                    .map_err(|e| format!("升级 exec_audit risk_flag 列失败: {e}"))?;
                 // 幂等 schema 升级(批次 3 性能):旧库补建 sessions/tasks 列表查询索引
                 crate::migration::ensure_perf_indexes(&conn)
                     .map_err(|e| format!("升级性能索引失败: {e}"))?;

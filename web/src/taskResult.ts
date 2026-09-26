@@ -1,6 +1,8 @@
-// 任务 result 拆段(批次 R1):后端结果契约——
+// 任务 result 拆段(批次 R1;提交 2 起「## 最终计划」拆段属**存量旧任务兼容**):
 // team 模式 result = 整合文本 + "\n\n## 审计结论\n" + 审计文本(server-rs task_engine/team.rs);
-// plan 模式 result = 汇总文本 + "\n\n## 最终计划\n" + 最终计划段(task_engine/plan.rs)。
+// plan 模式 result 自 2026-09-26 提交 2 起**只放汇总文本**——「## 最终计划」段已移除
+// (各步名称/状态/产出由前端「计划步骤」区按 task.plan 渲染,同一份信息不再两处存);
+// 该标记的拆段逻辑保留,只因存量旧任务的 result 里仍带此段。
 // 前端把尾部标记段拆为独立卡;两模式段结构各自独立,互不拆对方标记。
 // 纯函数抽出自 TaskBoard.vue(原 team 审计结论拆卡逻辑原样迁入),供单测锁定契约。
 
@@ -9,7 +11,8 @@ import type { TaskRunMode } from './api/types';
 /** team 模式:审计结论段标记(契约见 server-rs task_engine/team.rs) */
 export const AUDIT_MARK = '## 审计结论';
 
-/** plan 模式:最终计划段标记(契约见 server-rs task_engine/plan.rs) */
+/** plan 模式:最终计划段标记(契约历史见 server-rs task_engine/plan.rs;
+ *  提交 2 起新任务不再产出该段,保留仅为存量旧任务拆卡) */
 export const FINAL_PLAN_MARK = '## 最终计划';
 
 /** result 拆段结果:主卡文本 + 各模式独立卡文本(空串 = 无该段) */

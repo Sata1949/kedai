@@ -233,6 +233,12 @@ if (-not $SkipWeb -and -not $AuditOnly) {
         # 历史教训是同一数字在 5 份文档并存(923/697、975/733、977/745、971/763、1017/768),
         # 根因就是多处手抄且无人守护。新增测试后请跑 `npm run count:tests` 并同步该文档。
         Invoke-Stage 'count: tests' { node tools/count-tests.mjs --check }
+        # 文档口径检查(2026-09-26 起,硬门禁):把「由代码/脚本派生」的计数(表数、ensure_* 个数、
+        # check-contract 映射组数与镜像表行数、check-arch 规则字母与两个 ratchet 基线、
+        # SseEvent/TaskEventKind 变体数、check-all 阶段数)与文档字面逐条比对——这批事实
+        # 原先散在多份文档各写一个数、且不在任何门禁内(count-tests 只管测试数字)。
+        # 历史层(「原文 + 变更标注」体例)保留旧值不判失配。
+        Invoke-Stage 'docs: check-doc-claims' { node tools/check-doc-claims.mjs }
         # 前端类型逃逸 ratchet:as never / as unknown as / 非空断言 / any 只降不升
         # (纯 Node 零依赖,与 check-arch/check-contract 同风格;基线见脚本内 BASELINE)
         Invoke-Stage 'web: type-ratchet'        { node tools/check-frontend-lint.mjs }

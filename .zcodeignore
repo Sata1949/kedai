@@ -1,0 +1,81 @@
+# 依赖与构建产物
+node_modules/
+dist/
+server-rs/target/
+launcher/target/
+src-tauri/target/
+portable-target/
+
+# Tauri 生成物(src-tauri/build.rs 的 tauri_build::build() 产出,构建时自动重建)
+src-tauri/gen/schemas/
+
+# 图形启动器产物(build.ps1 从 launcher/target 复制而来)
+/Kedai.exe
+/Kedai.lnk
+
+# 本地环境与密钥(API Key 经 .env 或 <数据目录>/settings.json 提供,均不入库)
+.env
+.DS_Store
+*.log
+
+# 日志目录(服务以 server-rs/ 为 cwd 运行时落在 server-rs/logs/)
+/logs/
+/server-rs/logs/
+
+# 本机专用调试脚本(硬编码本机绝对路径,已被 tools/cargo-vcvars.cmd 取代)
+server-rs/cargo-run.bat
+server-rs/probe.ps1
+
+# 本机专用临时脚本(硬编码 D:\kedai-android 等绝对路径,不影响仓库构建)
+*-tmp.bat
+build-debug.log
+build-full.log
+
+# 运行期用户数据:数据目录默认在 %APPDATA%\com.kedai.app\(见 README 目录结构一节);
+# 仅当 DATA_DIR 指回项目根时才会出现 data/,一律忽略
+data/
+data.retired-*/
+
+# 仓库索引(派生数据,可重建;详见 .kedai-index/README.md)
+.kedai-index/
+
+# 六模式实跑回归的隔离测试脚手架(临时数据/脚本/日志,不入仓库)
+.shakedown/
+
+# 构建产出的 Windows 快捷方式(勿入库)
+*.lnk
+Kedai.exe
+
+# 开发 agent 工具生成的计划/会话目录(非项目产物)
+.zcode/
+
+# ===== ↑ 以上同步自 .gitignore（「从 .gitignore 同步」只重写以上部分）=====
+.git/
+.hg/
+.svn/
+bower_components/
+jspm_packages/
+__pycache__/
+site-packages/
+venv/
+coverage/
+htmlcov/
+lcov-report/
+cmakefiles/
+cmake-build-*/
+bazel-*/
+pods/
+deriveddata/
+storybook-static/
+playwright-report/
+test-results/
+allure-results/
+allure-report/
+cdk.out/
+*.egg-info/
+*.dist-info/
+eggs/
+pip-wheel-metadata/
+wheels/
+# ----- ↑ 以上为 ZCode 默认排除规则（自定义规则请写在本行下方，不会被同步/恢复改动）-----
+# 自定义规则写在下方（本行提示可删除）

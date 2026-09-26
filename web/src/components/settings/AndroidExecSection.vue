@@ -28,6 +28,9 @@ const msgKind = ref<'ok' | 'err'>('ok');
 const tier = ref<execApi.ShellTier>('disabled');
 const tierLabel = ref('');
 const tierLoading = ref(false);
+/** Shizuku 环境(未安装 / 已安装未授权 / 已授权):决定提示文案与按钮可用性 */
+const shizukuInstalled = ref(false);
+const shizukuGranted = ref(false);
 
 /** 审计列表 */
 const audit = ref<execApi.ExecAuditEntry[]>([]);
@@ -53,17 +56,24 @@ const TIER_LABEL: Record<string, string> = {
 /** 是否展示 Android 专属档位(桌面无 su/Shizuku 概念) */
 const showAndroidTiers = computed(() => isAndroidTauri);
 
-async function loadTier(): Promise<void> {
-  tierLoading.value = true;
+/**
+ * 读取当前等级。`refresh=true` 时要求后端**强制重探**(清 Android 侧探测缓存)——
+ * 用户新装 Shizuku / 刚授权 / 刚装 Magisk 后,不强制重探永远拿到缓存的过期值。
+ * `silent=true` 时不动 loading(用于授权后的自动复核,避免按钮闪烁)。
+ */
+async function loadTier(refresh = false, silent = false): Promise<void> {
+  if (!silent) tierLoading.value = true;
   try {
-    const r = await execApi.getExecTier();
+    const r = await execApi.getExecTier(refresh);
     tier.value = r.tier;
     tierLabel.value = r.label;
+    shizukuInstalled.value = r.shizuku_installed;
+    shizukuGranted.value = r.shizuku_granted;
   } catch {
     tier.value = 'disabled';
     tierLabel.value = '读取失败';
   } finally {
-    tierLoading.value = false;
+    if (!silent) tierLoading.value = false;
   }
 }
 
@@ -105,17 +115,35 @@ async function saveFlags(): Promise<void> {
   }
 }
 
-/** 请求 Shizuku 授权(仅 Android 且已安装 Shizuku 时有意义) */
+/**
+ * 请求 Shizuku 授权。
+ *
+ * 旧行为(有缺陷):请求后无条件提示「已请求授权,请在系统弹窗中允许」——而后端
+ * 事件处理只 `tracing::warn!` 记日志、不把失败回传前端,所以未安装 Shizuku、
+ * 上下文未就绪等失败情形下,用户看到的是成功提示,无从判断到底成了没成。
+ * 现改为:先发请求 → **强制重探等级** → 按实际探测结果给真实结论。
+ */
 async function requestShizuku(): Promise<void> {
   msg.value = '';
   try {
     await store.requestShizukuPermission();
-    msgKind.value = 'ok';
-    msg.value = '已请求 Shizuku 授权,请在系统弹窗中允许';
-    await loadTier();
   } catch (e) {
     msgKind.value = 'err';
     msg.value = `请求失败:${(e as Error).message}`;
+    return;
+  }
+  // 授权框是异步的(用户可能还在选择),立即重探通常仍是未授权;
+  // 因此这里把「请求已发出」与「当前实际状态」都如实告知,不让用户误判。
+  await loadTier(true, true);
+  if (tier.value === 'shizuku' || shizukuGranted.value) {
+    msgKind.value = 'ok';
+    msg.value = 'Shizuku 授权已生效,当前执行器等级为 Shizuku。';
+  } else if (!shizukuInstalled.value) {
+    msgKind.value = 'err';
+    msg.value = '未检测到 Shizuku 应用:请先安装 Shizuku,并通过 ADB 启动其服务,再回到此处请求授权。';
+  } else {
+    msgKind.value = 'ok';
+    msg.value = '授权请求已发出:请在系统弹窗中允许,允许后点「刷新」查看最新等级。';
   }
 }
 
@@ -135,8 +163,7 @@ async function clearAudit(): Promise<void> {
 onMounted(() => {
   void loadTier();
   void loadAudit();
-});
-watch([filterSource, filterRisk], () => void loadAudit());
+});watch([filterSource, filterRisk], () => void loadAudit());
 </script>
 
 <template>
@@ -163,7 +190,10 @@ watch([filterSource, filterRisk], () => void loadAudit());
         <span class="sv-tag" :class="tier === 'root' ? 'dangerous' : tier === 'disabled' ? '' : 'sensitive'">
           {{ tierLoading ? '探测中…' : (tierLabel || TIER_LABEL[tier]) }}
         </span>
-        <button class="sv-btn ghost sv-btn-sm" :disabled="tierLoading" @click="loadTier">刷新</button>
+        <!-- 强制重探:用户刚装 Shizuku / 刚授权 / 刚装 Magisk 后,不重探会一直显示缓存旧值 -->
+        <button class="sv-btn ghost sv-btn-sm" :disabled="tierLoading" @click="loadTier(true)">
+          刷新
+        </button>
         <button
           v-if="tier !== 'shizuku' && tier !== 'root'"
           class="sv-btn ghost sv-btn-sm"
@@ -172,7 +202,14 @@ watch([filterSource, filterRisk], () => void loadAudit());
       </div>
       <p class="sv-note">
         ROOT 需设备已 root(su 可用);Shizuku 需先安装 Shizuku 应用并经 ADB 启动其服务;
-        沙箱档为应用自身权限,能力等同本应用。逐档放行后才会以该档执行:
+        沙箱档为应用自身权限,能力等同本应用。「刷新」会重新探测(新装/新授权后必须刷新才能看到变化)。
+      </p>
+      <p v-if="shizukuInstalled || shizukuGranted" class="sv-note">
+        Shizuku 环境:应用<b>{{ shizukuInstalled ? '已安装' : '未安装' }}</b> ·
+        授权<b>{{ shizukuGranted ? '已获得' : '未获得' }}</b>
+      </p>
+      <p class="sv-note">
+        逐档放行后才会以该档执行:
       </p>
       <label class="sv-auth-tool-row">
         <input v-model="execAllowRoot" type="checkbox" />

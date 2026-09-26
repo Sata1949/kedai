@@ -227,7 +227,10 @@ globalThis.TavernHelper = {{
             tools: Vec::new(),
             max_tool_rounds: None,
             tool_choice: crate::models::types::ToolChoice::Auto,
+            connection_id: None,
             parallel_tool_calls: None,
+            step_budget: None,
+            semantic_guard: None,
         };
         let (_, abort) = tokio::sync::watch::channel(false);
         let (text, _usage) =

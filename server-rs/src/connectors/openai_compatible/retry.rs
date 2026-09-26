@@ -1,7 +1,8 @@
 // 生成请求自动重试:退避计算 / 可中断等待 / 重试日志(自 openai_compatible.rs 迁入)
 use crate::models::llm_error::LlmError;
+use crate::models::types::LlmStreamChunk;
 use std::time::Duration;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
 /// 生成请求自动重试次数上限(总尝试次数 = 1 + 重试次数)
 pub(super) const MAX_ATTEMPTS: usize = 3;
@@ -42,4 +43,21 @@ pub(super) async fn wait_retry(
 /// 记录重试日志(不向 SSE 流注入事件——LlmStreamChunk 无提示通道,避免协议侵入)
 pub(super) fn log_retry(msg: &str, attempt: usize) {
     tracing::info!(message = msg.to_string(), attempt = attempt, "模型请求重试");
+}
+
+/// 重试提示(HB-4,2026-09-18):等待退避前向流通道发一条 Retry chunk,由引擎翻译为
+/// SseEvent::Retry——此前重试只写 tracing,界面表现为「停几十秒然后报错」。
+///
+/// 与 log_retry 的分工:日志给排障,chunk 给用户。发送失败(接收端已关闭)静默忽略:
+/// 重试提示是尽力而为的可观测性,不得影响重试与生成本身。
+pub(super) fn notify_retry(
+    tx: &mpsc::UnboundedSender<LlmStreamChunk>,
+    attempt: usize,
+    reason: &str,
+) {
+    let _ = tx.send(LlmStreamChunk::Retry {
+        attempt,
+        max: MAX_ATTEMPTS,
+        reason: reason.to_string(),
+    });
 }

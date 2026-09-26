@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 // AndroidExecSection 组件测试(阶段 E):命令执行授权面板。
 // 覆盖:总开关渲染、Android 档位按平台条件显示、保存走 store action、
-// 审计列表渲染与被拒绝态样式、等级展示。
+// 审计列表渲染与被拒绝态样式、等级展示与强制重探、Shizuku 授权结果回流。
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
@@ -15,6 +15,21 @@ vi.stubGlobal('localStorage', {
   key: (i: number) => [...memStorage.keys()][i] ?? null,
   get length() { return memStorage.size; },
 });
+
+/** 等级响应工厂:测试只关心 tier/label,Shizuku 环境字段给默认值 */
+function tierInfo(
+  tier: 'root' | 'shizuku' | 'sandbox' | 'disabled',
+  label: string,
+  env: { installed?: boolean; granted?: boolean; refreshed?: boolean } = {},
+) {
+  return {
+    tier,
+    label,
+    shizuku_installed: env.installed ?? false,
+    shizuku_granted: env.granted ?? false,
+    refreshed: env.refreshed ?? false,
+  };
+}
 
 vi.mock('../../api/exec', () => ({
   getExecTier: vi.fn().mockResolvedValue({ tier: 'sandbox', label: '沙箱(应用自身权限)' }),
@@ -45,11 +60,16 @@ async function mountSection() {
   return { store, wrapper };
 }
 
+/** 找到「刷新」按钮(等级行内,文案固定) */
+function refreshBtn(wrapper: ReturnType<typeof mount>) {
+  return wrapper.findAll('button').find((b) => b.text().trim() === '刷新')!;
+}
+
 describe('AndroidExecSection 组件(阶段 E)', () => {
   beforeEach(() => {
     memStorage.clear();
     platform.isAndroidTauri = false;
-    vi.mocked(execApi.getExecTier).mockResolvedValue({ tier: 'sandbox', label: '沙箱(应用自身权限)' });
+    vi.mocked(execApi.getExecTier).mockResolvedValue(tierInfo('sandbox', '沙箱(应用自身权限)'));
     vi.mocked(execApi.listExecAudit).mockResolvedValue([]);
   });
 
@@ -105,12 +125,13 @@ describe('AndroidExecSection 组件(阶段 E)', () => {
         id: 2, ts: '2026-09-13T01:00:00Z', source: 'chat', task_id: null, session_id: 's1',
         command: 'rm -rf /tmp/x', shell: 'sh', tier: 'sandbox', risk: 'destructive',
         decision: 'denied', exit_code: null,
-        stdout_summary: '', stderr_summary: '高危命令需逐条确认',
+        stdout_summary: '', stderr_summary: '高危命令需逐条确认', risk_flag: 'parent_climb',
       },
       {
         id: 1, ts: '2026-09-13T00:59:00Z', source: 'chat', task_id: null, session_id: 's1',
         command: 'ls -la', shell: 'sh', tier: 'sandbox', risk: 'safe',
         decision: 'allowed', exit_code: 0, stdout_summary: 'total 0', stderr_summary: '',
+        risk_flag: '',
       },
     ]);
     const { wrapper } = await mountSection();
@@ -124,10 +145,9 @@ describe('AndroidExecSection 组件(阶段 E)', () => {
 
   it('Android 平台展示当前执行器等级(等级可见)', async () => {
     platform.isAndroidTauri = true;
-    vi.mocked(execApi.getExecTier).mockResolvedValue({
-      tier: 'shizuku',
-      label: 'Shizuku(ADB 权限)',
-    });
+    vi.mocked(execApi.getExecTier).mockResolvedValue(
+      tierInfo('shizuku', 'Shizuku(ADB 权限)', { installed: true, granted: true }),
+    );
     const { wrapper } = await mountSection();
     // 等级区仅在 Android 渲染(桌面无 su/Shizuku 概念)
     expect(wrapper.text()).toContain('当前等级');
@@ -137,5 +157,57 @@ describe('AndroidExecSection 组件(阶段 E)', () => {
   it('非 Android 平台不请求/不展示等级(避免无意义探测)', async () => {
     const { wrapper } = await mountSection();
     expect(wrapper.text()).not.toContain('当前等级');
+  });
+
+  // ===== 2026-09-17 修复:刷新必须真的重探、授权结果必须如实回流 =====
+
+  it('首次读取等级不强制重探(走缓存,避免每次进设置都跑 su)', async () => {
+    platform.isAndroidTauri = true;
+    vi.mocked(execApi.getExecTier).mockClear();
+    await mountSection();
+    expect(vi.mocked(execApi.getExecTier)).toHaveBeenCalledWith(false);
+  });
+
+  it('点「刷新」强制重探(refresh=true):否则新装 Shizuku 后永远看到缓存旧值', async () => {
+    platform.isAndroidTauri = true;
+    const { wrapper } = await mountSection();
+    vi.mocked(execApi.getExecTier).mockClear();
+    vi.mocked(execApi.getExecTier).mockResolvedValue(tierInfo('shizuku', 'Shizuku(ADB 权限)', { refreshed: true }));
+
+    await refreshBtn(wrapper).trigger('click');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(vi.mocked(execApi.getExecTier)).toHaveBeenCalledWith(true);
+    expect(wrapper.text()).toContain('Shizuku');
+  });
+
+  it('请求 Shizuku 授权后按实际探测结果给结论,未安装时明确引导安装', async () => {
+    platform.isAndroidTauri = true;
+    const { store, wrapper } = await mountSection();
+    const spy = vi.spyOn(store, 'requestShizukuPermission').mockResolvedValue(undefined);
+    // 授权请求发出后重探仍拿不到 Shizuku 且未安装 → 必须如实报错,而不是「已请求授权」
+    vi.mocked(execApi.getExecTier).mockResolvedValue(
+      tierInfo('sandbox', '沙箱(应用自身权限)', { installed: false, granted: false, refreshed: true }),
+    );
+
+    const reqBtn = wrapper.findAll('button').find((b) => b.text().includes('请求 Shizuku 授权'))!;
+    await reqBtn.trigger('click');
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(spy).toHaveBeenCalled();
+    expect(wrapper.text()).toContain('未检测到 Shizuku 应用');
+  });
+
+  it('Shizuku 环境状态在已安装/已授权时展示给用户', async () => {
+    platform.isAndroidTauri = true;
+    vi.mocked(execApi.getExecTier).mockResolvedValue(
+      tierInfo('shizuku', 'Shizuku(ADB 权限)', { installed: true, granted: true }),
+    );
+    const { wrapper } = await mountSection();
+    expect(wrapper.text()).toContain('已安装');
+    expect(wrapper.text()).toContain('已获得');
   });
 });

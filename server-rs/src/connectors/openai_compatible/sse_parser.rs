@@ -18,18 +18,27 @@ pub(super) struct SseParser {
 pub(super) const MAX_BAD_JSON_EVENTS: usize = 20;
 
 impl SseParser {
+    /// 推入一段网络字节,产出可消费的流块。
+    ///
+    /// 返回值 = 本次解析出的**有效数据事件**数(合法 JSON 的 `data:`、或 `[DONE]`)。
+    /// 上游的空闲判定依赖它:SSE 注释/心跳行(`:` 开头、无 `data:` 前缀)同样是字节,
+    /// 但不是产出,不得让停滞的流无限续命(2026-09-18 修正;此前按「收到任何字节」
+    /// 判活,上游建流后只发 `: ping` 即可让读取永久挂起)。
     pub(super) fn push(
         &mut self,
         bytes: &[u8],
         out: &mut Vec<LlmStreamChunk>,
-    ) -> Result<(), LlmError> {
+    ) -> Result<usize, LlmError> {
         self.buffer.extend_from_slice(bytes);
+        let mut data_events = 0usize;
         while let Some((end, separator_len)) = find_event_end(&self.buffer) {
             let event = self.buffer.drain(..end).collect::<Vec<_>>();
             self.buffer.drain(..separator_len);
-            self.parse_event(&event, out)?;
+            if self.parse_event(&event, out)? {
+                data_events += 1;
+            }
         }
-        Ok(())
+        Ok(data_events)
     }
 
     pub(super) fn finish(&mut self, out: &mut Vec<LlmStreamChunk>) -> Result<(), LlmError> {
@@ -44,7 +53,12 @@ impl SseParser {
         self.done
     }
 
-    fn parse_event(&mut self, event: &[u8], out: &mut Vec<LlmStreamChunk>) -> Result<(), LlmError> {
+    /// 解析单个事件;返回值表示「是否为有效数据事件」(推进信号,见 `push` 文档)。
+    fn parse_event(
+        &mut self,
+        event: &[u8],
+        out: &mut Vec<LlmStreamChunk>,
+    ) -> Result<bool, LlmError> {
         let text = std::str::from_utf8(event)
             .map_err(|e| LlmError::generation(format!("SSE 响应不是有效 UTF-8: {e}")))?;
         let payload = text
@@ -58,12 +72,12 @@ impl SseParser {
             .collect::<Vec<_>>()
             .join("\n");
         if payload.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
         if payload.trim() == "[DONE]" {
             self.done = true;
             self.flush_tool_calls(out)?;
-            return Ok(());
+            return Ok(true);
         }
         // 非 JSON data 行:兼容 keepalive/注释(计数容忍),超阈值视为协议损坏。
         // 标准 OpenAI error 对象({"error":{...}})直接暴露为错误,不再静默吞掉。
@@ -78,7 +92,8 @@ impl SseParser {
                         self.bad_json_count
                     )));
                 }
-                return Ok(());
+                // 非 JSON 不是推进信号:容忍但不算上游有产出
+                return Ok(false);
             }
         };
         // 标准错误对象:暴露给调用方,避免前端收到「空成功 finish」
@@ -189,7 +204,7 @@ impl SseParser {
                 });
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     fn flush_tool_calls(&mut self, out: &mut Vec<LlmStreamChunk>) -> Result<(), LlmError> {

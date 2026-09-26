@@ -19,6 +19,19 @@ export default defineConfig({
       output: {
         manualChunks(id) {
           if (id.includes('node_modules')) {
+            // 画布库单列一块(2026-09-20 二维批次 3):`@vue-flow/*` 与它的传递依赖
+            // (`d3-*`、`@vueuse/core`、`vue-demi`)路径里都含 "vue",若不先拦,
+            // 会被下面的 vue 分支并进 **首屏预载** 的 vue-vendor —— 等于把整个画布库
+            // 塞进首屏,同时击穿 vue-vendor 与首屏的体积预算(见 tools/check-bundle.mjs)。
+            // 单列后本块只被执行流程编辑区里的画布异步组件引用,与首屏无关。
+            if (
+              id.includes('@vue-flow') ||
+              id.includes('@vueuse') ||
+              id.includes('vue-demi') ||
+              /[\\/]d3-[a-z]/.test(id)
+            ) {
+              return 'flow-vendor';
+            }
             if (id.includes('markdown-it') || id.includes('sanitize-html')) return 'content-rendering';
             if (id.includes('vue') || id.includes('pinia')) return 'vue-vendor';
             return 'vendor';

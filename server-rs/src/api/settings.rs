@@ -2,8 +2,14 @@
 use crate::api::app_state::AppState;
 use crate::api::json_body::JsonBody;
 use crate::api::{err_with_code, internal, not_found, validation, ErrorCode};
+use crate::services::agent_flow_service::{
+    MAX_FLOW_CALLS_PER_TASK_LIMIT, MAX_FLOW_CALL_DEPTH_LIMIT, MIN_FLOW_CALLS_PER_TASK,
+    MIN_FLOW_CALL_DEPTH,
+};
 use crate::services::settings_service::{
-    normalize_base_url, AppMode, McpServerConfig, RuntimeSettings, DEFAULT_SEARCH_ENDPOINT,
+    normalize_base_url, resolve_connector_target, AppMode, ConnectionProfile, McpServerConfig,
+    RuntimeSettings, CONNECTOR_TYPE_MOCK, CONNECTOR_TYPE_OPENAI, DEFAULT_SEARCH_ENDPOINT,
+    MAX_CONNECTIONS,
 };
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -40,6 +46,12 @@ pub struct UpdateSettingsBody {
     pub openai_api_key: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+    /// 多套连接(全量数组语义:数组里没有的 id 即删除;api_key 空/缺省 = 保持该连接原有密钥)
+    #[serde(default)]
+    pub connections: Option<Vec<ConnectionProfileInput>>,
+    /// 默认连接 id(空串 = 清除,由 normalize_connections 回退到第一个启用连接)
+    #[serde(default)]
+    pub active_connection_id: Option<String>,
     #[serde(default)]
     pub default_temperature: Option<f64>,
     #[serde(default)]
@@ -93,6 +105,15 @@ pub struct UpdateSettingsBody {
     /// AGENT/CUSTOM 模式工具循环轮次上限(1..=200;缺省保持不变)
     #[serde(default)]
     pub max_tool_rounds: Option<u32>,
+    /// 流程动态调用深度上限(A 批 A3;1..=5)
+    #[serde(default)]
+    pub max_flow_call_depth: Option<u32>,
+    /// 每任务流程调用次数上限(A 批 A3;1..=64)
+    #[serde(default)]
+    pub max_flow_calls_per_task: Option<u32>,
+    /// 节点默认上下文上限(A 批 A4;0 = 不裁剪,否则 256..=1048576)
+    #[serde(default)]
+    pub default_node_max_context: Option<u32>,
     /// HTML 渲染开关(状态栏脚本执行前置条件)
     #[serde(default)]
     pub render_html: Option<bool>,
@@ -185,6 +206,55 @@ pub struct UpdateSettingsBody {
     /// 工具循环历史 token 预算(R3b;0 = 禁用预算闸门,否则 1024..=1M;缺省保持不变)
     #[serde(default)]
     pub tool_history_budget_tokens: Option<u32>,
+    /// 单次生成 token 预算(HB-1;0 = 关闭,否则 1024..=1e9;缺省保持不变)
+    #[serde(default)]
+    pub session_token_budget: Option<u32>,
+    /// 预算超限动作(HB-1;warn/stop;缺省保持不变)
+    #[serde(default)]
+    pub session_budget_action: Option<String>,
+    /// 语义熔断窗口(HB-2;4..=64;缺省保持不变)
+    #[serde(default)]
+    pub loop_guard_semantic_window: Option<u32>,
+    /// 语义熔断同工具调用次数下限(HB-2;4..=64;缺省保持不变)
+    #[serde(default)]
+    pub loop_guard_semantic_min_calls: Option<u32>,
+    /// 语义熔断输出指纹去重上限(HB-2;1..=8;缺省保持不变)
+    #[serde(default)]
+    pub loop_guard_semantic_max_distinct: Option<u32>,
+    /// 任务步骤墙钟预算秒数(提交 3 · D3;0 = 关,否则 1..=86400;缺省保持不变)
+    #[serde(default)]
+    pub task_step_budget_secs: Option<u32>,
+    /// 任务空闲超时秒数(提交 3 · D7;0 = 关,否则 601..=86400;缺省保持不变)
+    #[serde(default)]
+    pub task_idle_timeout_secs: Option<u32>,
+    /// 变量两步生成独立模型(HB-7;空串 = 清除(回到与正文共用);非空 = 覆盖;缺省保持不变)
+    #[serde(default)]
+    pub mvu_model: Option<String>,
+    /// 变量两步生成独立温度(HB-7;0.0..=2.0 = 设置,负值 = 清除(回到内置 0.3);缺省保持不变)
+    #[serde(default)]
+    pub mvu_temperature: Option<f64>,
+}
+
+/// 多套连接的写入项(与 `ConnectionProfile` 的差异:各字段可选,缺省 = 沿用该 id 的现有值)。
+/// `api_key` 与顶层 `openai_api_key` 同口径:**空/缺省表示保持不变**(接口层面无法把已配置的密钥改成空)。
+#[derive(Deserialize, Default)]
+pub struct ConnectionProfileInput {
+    /// 缺省或未命中已有 id = 新建(uuid);命中则沿用原 id(它是磁盘密文的配对键)
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub connector_type: Option<String>,
+    /// 允许显式空串(清空地址);缺省 = 沿用
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
 }
 
 /// 序列化运行期设置(API Key 脱敏)。
@@ -215,6 +285,9 @@ fn settings_json(s: &RuntimeSettings) -> Value {
         "task_tool_policy": s.task_tool_policy,
         "task_tool_allowlist": s.task_tool_allowlist,
         "max_tool_rounds": s.max_tool_rounds,
+        "max_flow_call_depth": s.max_flow_call_depth,
+        "max_flow_calls_per_task": s.max_flow_calls_per_task,
+        "default_node_max_context": s.default_node_max_context,
         "render_html": s.render_html,
         "compaction_mode": s.compaction_mode,
         "compaction_threshold": s.compaction_threshold,
@@ -248,11 +321,48 @@ fn settings_json(s: &RuntimeSettings) -> Value {
         "task_prompt_inject_enabled": s.task_prompt_inject_enabled,
         "tool_history_keep_rounds": s.tool_history_keep_rounds,
         "tool_history_budget_tokens": s.tool_history_budget_tokens,
+        "session_token_budget": s.session_token_budget,
+        "session_budget_action": s.session_budget_action,
+        "loop_guard_semantic_window": s.loop_guard_semantic_window,
+        "loop_guard_semantic_min_calls": s.loop_guard_semantic_min_calls,
+        "loop_guard_semantic_max_distinct": s.loop_guard_semantic_max_distinct,
+        // 任务侧两道闸(提交 3 · D3/D7):扁平字段,任务侧消费(步骤墙钟预算 / 空闲看守)
+        "task_step_budget_secs": s.task_step_budget_secs,
+        "task_idle_timeout_secs": s.task_idle_timeout_secs,
+        // HB-7 接线:变量两步生成的独立模型/温度档(此前可落盘但无 API 通路)
+        "mvu_model": s.mvu_model,
+        "mvu_temperature": s.mvu_temperature,
     });
     if let (Some(dst), Some(src)) = (v.as_object_mut(), rest.as_object()) {
         for (k, val) in src {
             dst.insert(k.clone(), val.clone());
         }
+    }
+    // 多套连接:独立第三段构建,避免继续加深 json! 宏的递归展开;
+    // 只下发掩码与布尔,明文 Key 永不出现在响应里。
+    let connections = Value::Array(
+        s.connections
+            .iter()
+            .map(|p| {
+                json!({
+                    "id": p.id,
+                    "name": p.name,
+                    "connector_type": p.connector_type,
+                    "base_url": p.base_url,
+                    "model": p.model,
+                    "enabled": p.enabled,
+                    "api_key_masked": p.masked_api_key(),
+                    "has_api_key": p.has_api_key(),
+                })
+            })
+            .collect(),
+    );
+    if let Some(dst) = v.as_object_mut() {
+        dst.insert("connections".to_string(), connections);
+        dst.insert(
+            "active_connection_id".to_string(),
+            json!(s.active_connection_id),
+        );
     }
     v
 }
@@ -278,38 +388,115 @@ pub async fn update_settings(
     // 事务锁覆盖“读取当前值 → 应用 patch → 原子落盘 → 替换内存”，防止并发部分更新丢字段。
     // 只持有 tokio MutexGuard；std::sync::MutexGuard 均在同步代码块内释放，不跨 await。
     let _update_guard = state.guards.settings_update.lock().await;
-    let (mut candidate, old_base, old_key, old_model) = {
+    let (mut candidate, old_base, old_key, old_model, old_active) = {
         let current = state.settings.lock().unwrap_or_else(|e| e.into_inner());
         (
             current.clone(),
             current.openai_base_url.clone(),
             current.openai_api_key.clone(),
             current.model.clone(),
+            current.active_connection().cloned(),
         )
     };
     {
         let s = &mut candidate;
 
-        // 连接信息:全局共享一份
-        if let Some(v) = &body.openai_base_url {
-            // 自动补全格式:补协议、补 /v1(缺 /v1 会导致 /models 请求 404)
-            let t = normalize_base_url(v);
-            if !t.is_empty() {
-                s.openai_base_url = t;
+        // 连接信息:全局共享一份。自多套连接批次起,写入落到**默认连接**上
+        // (旧客户端与设置页「API 连接」区走的都是这条路径 → 行为不变),
+        // 由末尾的 normalize_connections 投影回扁平字段。
+        // 三个字段都没出现时不动连接数组:避免无关 patch(如只改温度)也去建连接。
+        if body.openai_base_url.is_some() || body.openai_api_key.is_some() || body.model.is_some() {
+            let p = s.ensure_active_connection_mut();
+            if let Some(v) = &body.openai_base_url {
+                // 自动补全格式:补协议、补 /v1(缺 /v1 会导致 /models 请求 404)
+                let t = normalize_base_url(v);
+                if !t.is_empty() {
+                    p.base_url = t;
+                }
+            }
+            if let Some(v) = &body.openai_api_key {
+                let t = v.trim().to_string();
+                if !t.is_empty() {
+                    p.api_key = t;
+                }
+            }
+            if let Some(v) = &body.model {
+                let t = v.trim().to_string();
+                if !t.is_empty() {
+                    p.model = t;
+                }
+            }
+            // 沿用既有「填了就生效」口径:给显式 mock 的连接把地址与密钥都填上后,自动改回真实连接器
+            // 类型(否则用户在「API 连接」区填的配置永远不会生效 —— 旧实现在此处的同类修复)。
+            // 判据与 resolve_connector_target 一致:两者都填齐才算「配置完成」。
+            if p.connector_type == CONNECTOR_TYPE_MOCK
+                && !p.base_url.is_empty()
+                && !p.api_key.is_empty()
+            {
+                p.connector_type = CONNECTOR_TYPE_OPENAI.to_string();
             }
         }
-        if let Some(v) = &body.openai_api_key {
-            let t = v.trim().to_string();
-            if !t.is_empty() {
-                s.openai_api_key = t;
+        // 多套连接:全量数组语义(数组里没有的 id = 删除,密钥随之丢弃)
+        if let Some(list) = &body.connections {
+            if list.len() > MAX_CONNECTIONS {
+                return validation(format!("连接配置不能超过 {MAX_CONNECTIONS} 套"));
             }
-        }
-        if let Some(v) = &body.model {
-            let t = v.trim().to_string();
-            if !t.is_empty() {
-                s.model = t;
+            let mut next = Vec::with_capacity(list.len());
+            for item in list {
+                // 命中已有条目才谈「沿用」;未命中(含 id 缺省)一律新建,避免误接旧值
+                let existing = item
+                    .id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .and_then(|id| s.connections.iter().find(|p| p.id == id));
+                let new_key = item
+                    .api_key
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|k| !k.is_empty())
+                    .map(str::to_string);
+                next.push(ConnectionProfile {
+                    id: existing
+                        .map(|p| p.id.clone())
+                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                    name: item
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| existing.map(|p| p.name.clone()).unwrap_or_default()),
+                    connector_type: item.connector_type.clone().unwrap_or_else(|| {
+                        existing
+                            .map(|p| p.connector_type.clone())
+                            .unwrap_or_default()
+                    }),
+                    base_url: item.base_url.clone().unwrap_or_else(|| {
+                        existing.map(|p| p.base_url.clone()).unwrap_or_default()
+                    }),
+                    api_key: new_key
+                        .or_else(|| existing.map(|p| p.api_key.clone()))
+                        .unwrap_or_default(),
+                    model: item
+                        .model
+                        .clone()
+                        .unwrap_or_else(|| existing.map(|p| p.model.clone()).unwrap_or_default()),
+                    enabled: item
+                        .enabled
+                        .unwrap_or_else(|| existing.map(|p| p.enabled).unwrap_or(true)),
+                });
             }
+            s.connections = next;
         }
+        if let Some(id) = &body.active_connection_id {
+            let t = id.trim();
+            s.active_connection_id = if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            };
+        }
+        // 校验后的统一收口:卫生清理 → id 去重 → 默认连接回退 → 扁平字段投影
+        // (与 load / save 走同一条路径,避免三处口径漂移)
+        s.normalize_connections();
         // 向量化配置:与连接信息同属全局共享层(不按模式隔离)
         if let Some(v) = body.embedding_enabled {
             s.embedding_enabled = v;
@@ -476,6 +663,32 @@ pub async fn update_settings(
                 }
                 apply!(s, is_task, max_tool_rounds, v);
             }
+            // 流程调用闸(A 批 A3):动态调用深度与每任务调用次数。
+            // 上限刻意保守——两条都是**成本**闸,调大等于允许更长的模型自主链。
+            if let Some(v) = body.max_flow_call_depth {
+                if !(MIN_FLOW_CALL_DEPTH..=MAX_FLOW_CALL_DEPTH_LIMIT).contains(&v) {
+                    return validation("max_flow_call_depth 必须在 1..=5");
+                }
+                apply!(s, is_task, max_flow_call_depth, v);
+            }
+            if let Some(v) = body.max_flow_calls_per_task {
+                if !(MIN_FLOW_CALLS_PER_TASK..=MAX_FLOW_CALLS_PER_TASK_LIMIT).contains(&v) {
+                    return validation("max_flow_calls_per_task 必须在 1..=64");
+                }
+                apply!(s, is_task, max_flow_calls_per_task, v);
+            }
+            // 节点默认上下文上限(A 批 A4):0 = 不裁剪;非 0 时与节点级字段同口径
+            // (下限 256 的理由见 `agent_flow_service::MIN_STEP_MAX_CONTEXT`)。
+            if let Some(v) = body.default_node_max_context {
+                let ok = v == 0
+                    || (crate::services::agent_flow_service::MIN_STEP_MAX_CONTEXT
+                        ..=crate::services::agent_flow_service::MAX_STEP_MAX_CONTEXT)
+                        .contains(&v);
+                if !ok {
+                    return validation("default_node_max_context 必须为 0(不裁剪)或 256..=1048576");
+                }
+                apply!(s, is_task, default_node_max_context, v);
+            }
             // HTML 渲染开关
             if let Some(v) = body.render_html {
                 apply!(s, is_task, render_html, v);
@@ -613,6 +826,80 @@ pub async fn update_settings(
                 }
                 s.tool_history_budget_tokens = v;
             }
+            // HB-1 成本护栏:扁平全局字段(引擎 run_tool_loop 直读扁平值,与工具历史
+            // 预算同款——聊天与任务工具循环共用同一上限);越界拒绝,与 load 钳制同区间
+            if let Some(v) = body.session_token_budget {
+                if v != 0 && !(1024..=1_000_000_000).contains(&v) {
+                    return validation("session_token_budget 须为 0(关闭)或 1024..=1000000000");
+                }
+                s.session_token_budget = v;
+            }
+            if let Some(v) = &body.session_budget_action {
+                if !matches!(v.as_str(), "warn" | "stop") {
+                    return validation("session_budget_action 须为 warn 或 stop");
+                }
+                s.session_budget_action = v.clone();
+            }
+            // HB-2 语义熔断参数(扁平全局:引擎 run_tool_loop 直读);越界拒绝,与 load 同区间
+            if let Some(v) = body.loop_guard_semantic_window {
+                if !(4..=64).contains(&v) {
+                    return validation("loop_guard_semantic_window 必须在 4..=64");
+                }
+                s.loop_guard_semantic_window = v;
+            }
+            if let Some(v) = body.loop_guard_semantic_min_calls {
+                if v != 0 && !(4..=64).contains(&v) {
+                    return validation("loop_guard_semantic_min_calls 须为 0(关闭)或 4..=64");
+                }
+                s.loop_guard_semantic_min_calls = v;
+            }
+            if let Some(v) = body.loop_guard_semantic_max_distinct {
+                if !(1..=8).contains(&v) {
+                    return validation("loop_guard_semantic_max_distinct 必须在 1..=8");
+                }
+                s.loop_guard_semantic_max_distinct = v;
+            }
+            // 任务侧两道闸(提交 3 · D3/D7):扁平全局字段(任务侧消费,不进模式覆盖层);
+            // 越界拒绝,与 load 钳制区间一致。step_budget 刻意不设下限(1 秒合法:
+            // 低于单次调用看门狗的值 = 「第一轮结束就收尾」的合法语义)。
+            if let Some(v) = body.task_step_budget_secs {
+                if v != 0 && !(1..=86_400).contains(&v) {
+                    return validation("task_step_budget_secs 须为 0(关闭)或 1..=86400");
+                }
+                s.task_step_budget_secs = v;
+            }
+            if let Some(v) = body.task_idle_timeout_secs {
+                if v != 0 && !(601..=86_400).contains(&v) {
+                    return validation(
+                        "task_idle_timeout_secs 须为 0(关闭)或 601..=86400(下限 = 单命令 300s + 单次调用 300s + 1)",
+                    );
+                }
+                s.task_idle_timeout_secs = v;
+            }
+            // HB-7:变量两步生成的独立模型/温度档。清除语义用哨兵值表达,避免引入
+            // 「Option<Option<T>>」这类与既有 PATCH 体例不符的写法:
+            // mvu_model 空串 = 清除(回到与正文共用同一连接器/模型);
+            // mvu_temperature 负值 = 清除(回到内置 0.3;温度本身不允许负数)
+            if let Some(v) = &body.mvu_model {
+                let trimmed = v.trim();
+                if trimmed.chars().count() > 200 {
+                    return validation("mvu_model 长度不得超过 200 字符");
+                }
+                s.mvu_model = if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                };
+            }
+            if let Some(v) = body.mvu_temperature {
+                if v < 0.0 {
+                    s.mvu_temperature = None;
+                } else if !(0.0..=2.0).contains(&v) {
+                    return validation("mvu_temperature 须为 0.0..=2.0,或负值表示清除");
+                } else {
+                    s.mvu_temperature = Some(v);
+                }
+            }
         }
     }
 
@@ -649,30 +936,31 @@ pub async fn update_settings(
         candidate.openai_base_url != old_base || candidate.openai_api_key != old_key;
     let model_changed = candidate.model != old_model;
     let model_name = candidate.model.clone();
+    // 当前连接器类型(重建判定与目标解析共用这一次读锁快照)
+    let current_type = state
+        .engine
+        .connector
+        .read()
+        .await
+        .clone()
+        .type_name()
+        .to_string();
+    // 目标类型变化本身也算变更:切换默认连接时若两条连接的值完全相同、只有类型不同
+    // (一个显式 mock、一个走真实 API),只看扁平字段就漏判了。
+    let target = resolve_connector_target(candidate.active_connection(), &current_type);
+    let target_changed = target != resolve_connector_target(old_active.as_ref(), &current_type);
     *state.settings.lock().unwrap_or_else(|e| e.into_inner()) = candidate.clone();
 
-    // Base URL / API Key / 模型变更 → 重建连接器。
-    // 关键:当前为 mock 但保存了非空 Base URL 或 API Key 时,自动切换到 openai-compatible,
-    // 否则用户填写的 API 设置永远不会生效(模型列表始终只有 mock-demo)。
-    if connector_changed || model_changed {
+    // Base URL / API Key / 模型 / 目标类型变更 → 重建连接器。
+    // 目标类型由默认连接解析(与启动装配同一个函数):显式 mock 用 mock、无可用连接用 mock、
+    // 空配置保持 mock、其余 openai-compatible —— 否则用户填写的 API 设置永远不会生效
+    // (模型列表始终只有 mock-demo)。
+    if connector_changed || model_changed || target_changed {
         let (base_url, api_key, model) = (
             candidate.openai_base_url.clone(),
             candidate.openai_api_key.clone(),
             candidate.model.clone(),
         );
-        let type_name = state
-            .engine
-            .connector
-            .read()
-            .await
-            .clone()
-            .type_name()
-            .to_string();
-        let target = if type_name == "mock" && (!base_url.is_empty() || !api_key.is_empty()) {
-            "openai-compatible"
-        } else {
-            &type_name
-        };
         let new_connector = crate::connectors::build_connector(target, &base_url, &api_key, &model);
         *state.engine.connector.write().await = new_connector;
     }
@@ -916,6 +1204,17 @@ pub async fn prompt_preview(
             "system",
             5,
             task_prompts::EXECUTOR_PROMPT,
+        );
+        // 执行者工具纪律段(提交 3 · D3-c):**条件注入**——只有本轮真的下发了工具时
+        // 才追加在 EXECUTOR_PROMPT 之后(legacy 的步骤没有工具,不发这一段)。
+        // 预览无「本轮有没有工具」的概念,故按「工具档」形态展示;口径写进
+        // docs/契约-协议与配置.md 第五节,避免读者以为它恒在。
+        push_preview_layer(
+            &mut layers,
+            "task_executor_tool_discipline",
+            "system",
+            5,
+            task_prompts::EXECUTOR_TOOL_DISCIPLINE,
         );
         push_preview_layer(
             &mut layers,

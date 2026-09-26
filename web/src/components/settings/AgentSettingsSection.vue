@@ -7,8 +7,6 @@ import { useAppStore } from '../../store';
 import { storeToRefs } from 'pinia';
 import { useAgentSettings } from '../../composables/useAgentSettings';
 import { useAgentPromptEditor } from '../../composables/useAgentPromptEditor';
-import AuthorizationSection from './AuthorizationSection.vue';
-import AndroidExecSection from './AndroidExecSection.vue';
 
 withDefaults(defineProps<{
   /** 是否显示(embedded 模式按 activeSection 切换;standalone 恒 true) */
@@ -20,7 +18,13 @@ withDefaults(defineProps<{
 const store = useAppStore();
 // Agent 设置直接绑定 store(storeToRefs),与 useAgentSettings 保存逻辑读写同一 store;
 // appMode 用于「系统提示词按模式独立存储」的 UI 标注(徽标/说明/按钮文案随模式即时切换)
-const { agentSystemPrompt, searchEndpoint, mvuVarsPosition, reflectPrompt, taskPersonaFull, taskPromptInjectEnabled, appMode } = storeToRefs(store);
+const { agentSystemPrompt, searchEndpoint, mvuVarsPosition, reflectPrompt, taskPersonaFull, taskPromptInjectEnabled, appMode, mvuModel, mvuTemperatureInput, model, models } = storeToRefs(store);
+
+/** 变量生成模型下拉的候选:当前正文模型 + 已拉取到的可用模型列表(HB-7) */
+const modelOptions = computed(() => {
+  const list = [...new Set([model.value, ...models.value])].filter(Boolean) as string[];
+  return list;
+});
 
 /** 模式徽标文案:标注当前编辑的是哪个模式的提示词,避免误以为两模式共用一份 */
 const modeBadgeText = computed(() => (appMode.value === 'task' ? '任务模式专属' : '角色扮演专属'));
@@ -96,6 +100,30 @@ watch(appMode, () => void loadPromptPreview());
         DeepSeek / Anthropic / OpenAI 等提供商的 prompt caching 命中率;需角色卡把
         <code v-pre>{{format_message_variable}}</code> 写在常驻世界书条目中才生效。
       </p>
+
+      <!-- HB-7:变量两步生成(状态栏/变量更新)的独立模型与温度档。
+           此前字段可落盘但无 API/UI 通路、无消费点(死配置),本批次接线。 -->
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">变量生成模型</label>
+        <select v-model="mvuModel" class="sv-input" title="变量与状态栏两步生成使用的模型;留空 = 与正文共用同一模型">
+          <option value="">跟随正文模型(默认)</option>
+          <option v-for="m in modelOptions" :key="m" :value="m">{{ m }}</option>
+        </select>
+      </div>
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">变量生成温度</label>
+        <input
+          v-model="mvuTemperatureInput"
+          type="number"
+          min="0"
+          max="2"
+          step="0.05"
+          class="sv-input inject-num"
+          placeholder="跟随内置(0.3)"
+          title="变量两步生成的温度档;留空 = 用内置 0.3(与正文温度解耦,降低温度可提高结构化遵循度)"
+        />
+      </div>
+      <p class="sv-note">变量更新/状态栏调用独立于正文:模型留空即共用,温度留空用内置 0.3(0-2,越小越稳)。</p>
       <div class="sv-inp-row" style="align-items: flex-start">
         <label class="sv-inp-tag" style="padding-top: 8px">反思提示词</label>
         <textarea
@@ -146,12 +174,12 @@ watch(appMode, () => void loadPromptPreview());
       </div>
 
       <div class="sv-separator">
-        <div class="sv-field-label sub">授权管理</div>
-        <AuthorizationSection :show="show" />
-      </div>
-
-      <div class="sv-separator">
-        <AndroidExecSection :show="show" />
+        <div class="sv-field-label sub">授权与命令执行</div>
+        <p class="sv-note">
+          工具授权(三档模式 / 始终需授权 / 已授权限撤销)与命令执行(总开关、Android
+          ROOT/Shizuku 档位、执行审计)已移到独立分区「Agent 与任务 → 授权与命令执行」,
+          便于在移动端直接找到授权入口。
+        </p>
       </div>
 
       <div class="sv-separator">

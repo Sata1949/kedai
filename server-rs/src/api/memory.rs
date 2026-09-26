@@ -83,7 +83,10 @@ pub async fn distill(
         tools: Vec::new(),
         max_tool_rounds: None,
         tool_choice: ToolChoice::Auto,
+        connection_id: None,
         parallel_tool_calls: None,
+        step_budget: None,
+        semantic_guard: None,
     };
     // 中止通道:HTTP 端点无 SSE 取消路径,恒 false(不中断)
     let (_abort_tx, abort_rx) = tokio::sync::watch::channel(false);

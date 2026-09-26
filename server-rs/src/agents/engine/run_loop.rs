@@ -121,6 +121,8 @@ impl AgentEngine {
                                 session_id: session_id.to_string(),
                                 character_id: req.character_id.clone(),
                                 agent_depth: 0,
+                                // 角色扮演链路不绑工作区:工作区文件工具不会在此下发
+                                scope: None,
                             };
                             let args = json!({ "text": reflect_text, "entries": entries });
                             match self
@@ -176,6 +178,8 @@ impl AgentEngine {
                         session_id: session_id.to_string(),
                         character_id: req.character_id.clone(),
                         agent_depth: 0,
+                        // 反思阶段的文本修正工具不触达文件系统,无工作区语义
+                        scope: None,
                     };
                     match reflect_with_tools(
                         self,
@@ -531,6 +535,8 @@ impl AgentEngine {
                     rctx.total_usage,
                     &run_id.to_string(),
                     gate,
+                    // 聊天路径无节点级超时(A 批 A1):恒走宿主既有判定(聊天侧本无总时长上限)
+                    None,
                 )
                 .await?
             } else if req.mode == "custom" {
@@ -573,6 +579,9 @@ impl AgentEngine {
                         rctx.total_usage,
                         &run_id.to_string(),
                         gate,
+                        // 聊天 custom 步骤无节点级超时(A 批 A1:该字段只服务任务侧的
+                        // `PlanStep`);恒走宿主既有判定
+                        None,
                     )
                     .await?
                 };
@@ -595,6 +604,15 @@ impl AgentEngine {
                 .await?
             };
             if result.interrupted {
+                // 中断语义统一(HB-3):部分正文与中断轮 usage 必须流到收尾端——
+                // 此前 break 发生在 content/usage 赋值之前,两者随 run 返回被丢弃,
+                // 「保留部分产出 + 中断轮记账」无从实现。
+                content = result.content;
+                rctx.total_usage.prompt_tokens += result.usage.prompt_tokens;
+                rctx.total_usage.completion_tokens += result.usage.completion_tokens;
+                rctx.total_usage.total_tokens += result.usage.total_tokens;
+                rctx.total_usage.prompt_cache_hit_tokens += result.usage.prompt_cache_hit_tokens;
+                rctx.total_usage.prompt_cache_miss_tokens += result.usage.prompt_cache_miss_tokens;
                 break;
             }
             // update_variables 通过工具注册表直接持久化当前会话变量树;工具循环结束后
@@ -610,6 +628,8 @@ impl AgentEngine {
             // finish_reason 与 content 同生命周期:逐轮覆盖,收尾即为「最终采纳那一步」
             // 的上游结束原因(可观测性问题①;聊天截断提示依此判定)。
             rctx.last_finish_reason = result.finish_reason.clone();
+            // 预算停止标记同样逐轮覆盖(HB-1):最终采纳的那一步才是收尾依据
+            rctx.budget_stopped = result.budget_stopped;
             // custom 模式:每步生成后立即解析并应用 mvu <UpdateVariable> 补丁。
             // 中间步骤的内容不保留(循环内被覆盖、不在收尾解析),延迟应用会丢;
             // 即时语义与 MagVarUpdate 原版一致(反思回退时已应用的补丁不回滚)。

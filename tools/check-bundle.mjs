@@ -47,12 +47,29 @@ const ASSETS = join(DIST, 'assets');
 const VERBOSE = process.argv.includes('--verbose');
 
 /**
- * 预算基线(2026-09-17 P-8/P-9 完成后实测 + 10% 余量,单位:gzip 字节)。
- * 实测值:首屏 261,293 / 全部资产 369,533 / index 95,096 / vendor 70,815 /
- * content-rendering 44,786 / vue-vendor 33,687 / index css 16,537。
+ * 预算基线(2026-09-26 自定义流程 A+B 批后重测,「实测 + 10%」;此前为
+ *   2026-09-20 二维批次 3 画布落地后的实测值)。
+ * 实测值(2026-09-26):首屏 275,060 / 全部资产 477,970 / index 107,834 / flow-vendor 71,603 /
+ *   vendor 70,815 / content-rendering 44,786 / vue-vendor 34,069 / index css 17,184。
+ *   → 与 2026-09-20 相比,**只有 index 涨了 10,354 gz**(97,480 → 107,834),其余七项持平。
+ *   该涨幅全部来自 A+B 批的前端新增代码(任务改绑入口 + 连接选择组件、导入覆盖模式、
+ *   节点级超时/重试控件、三个任务侧调用闸设置项;提交 `df62067` / `6d46144`),属**功能增长**,
+ *   故按本文件下方的既有协议上调对应预算(该批提交信息里的验收只跑了
+ *   `npm test` / `typecheck` / `check-contract` / `check-arch` / `check-frontend-lint`,
+ *   **未跑 bundle budget**,故当时未被发现——只跑部分门禁不等于门禁绿)。
+ * 历史基线(2026-09-20):首屏 264,388 / 全部资产 459,928 / index 97,480 / flow-vendor 71,594 /
+ *   vendor 70,815 / content-rendering 44,786 / vue-vendor 34,067 / index css 16,868。
+ *
+ * flow-vendor 必须单列一条(不能走默认上限):二维批次 3 引入的流程画布库
+ *   (`@vue-flow/*` + 传递依赖 d3-* / @vueuse/core / vue-demi)整体 71,594 gz。
+ *   它由 `web/vite.config.ts` 的 manualChunks 单列成块,只被执行流程编辑区里的画布
+ *   异步组件引用,**不在首屏预载里**(首屏 5 项为 vue-vendor/vendor/content-rendering
+ *   与两个 css),所以不影响首屏;但它远超「未列出前缀」的默认上限 12,000,不登记就会
+ *   被默认上限判红——这正是默认上限的作用(拦住「有重依赖落进某个小 chunk」)。
+ *   全部资产预算同步上调:画布库计入总量是事实,不能用「反正不首屏加载」绕过总量兜底。
  */
 const FIRST_PAINT_BUDGET_GZ = 288000;
-const ALL_ASSETS_BUDGET_GZ = 407000;
+const ALL_ASSETS_BUDGET_GZ = 506000;
 
 /**
  * 单 chunk 预算:键为「去哈希后的文件名」(`index.js` / `index.css` / `vendor.js` …)。
@@ -60,7 +77,8 @@ const ALL_ASSETS_BUDGET_GZ = 407000;
  * 哈希会随内容变化,故**必须按去哈希名索引**,不能写死文件名。
  */
 const CHUNK_BUDGETS_GZ = {
-  'index.js': 105000,
+  'index.js': 118600,
+  'flow-vendor.js': 79000,
   'vendor.js': 78000,
   'content-rendering.js': 49500,
   'vue-vendor.js': 37500,
@@ -68,8 +86,10 @@ const CHUNK_BUDGETS_GZ = {
 };
 
 /**
- * 未列出前缀的单 chunk 上限。当前最大的未列出 chunk 是 AgentSettingsSection(gz 8,721),
- * 12,000 既留有约 25% 正常增长余量,又能在「有重依赖落进某个小 chunk」时拦住。
+ * 未列出前缀的单 chunk 上限。当前最大的未列出 chunk 是 AgentFlowSection(gz 11,651,
+ * 2026-09-26 实测;A+B 批给它加了「覆盖同名流程」勾选与相应提示后由 8,721 涨上来),
+ * 其余均 < 8,400。12,000 仍能完成它「拦住有重依赖落进某个小 chunk」的职责;但 AgentFlowSection
+ * 距上限只剩约 3%,下次再动它请先跑本脚本——真要上调,按上方协议(实测 + 10%)并在此登记实测值。
  */
 const DEFAULT_CHUNK_BUDGET_GZ = 12000;
 
@@ -85,8 +105,25 @@ if (!existsSync(ASSETS)) {
   process.exit(1);
 }
 
-/** 去哈希:去掉扩展名前的最后一段 `-<hash>`(`index-CQ9DXqUA.js` → `index.js`) */
+/**
+ * 去哈希:把产物名折回预算表里的键(`index-CQ9DXqUA.js` → `index.js`)。
+ *
+ * **不能只剥最后一段 `-<hash>`**:Vite 的 base64url 哈希本身可能含 `-`
+ * (实测产物里有 `index-n-WGUpyo.js`),那时 `-[^-]+` 只吃得掉 `-WGUpyo`,
+ * 折出 `index-n.js` —— 于是入口 chunk 落到默认上限 12,000 被误判超预算,
+ * 而预算表里的 `index.js` 反倒被报成「产物中已不存在」。哈希是否含 `-` 取决于
+ * 产物内容,故这是随机触发的假失败(2026-09-22 实测:同一份脚本,内容一变即复发)。
+ *
+ * 改为**按预算表的键做前缀匹配**:产物名 = `<键干>-<hash>.<ext>`,故 `index-` 开头
+ * 即归 `index.js`。匹配不到时退回原来的剥尾规则(未登记 chunk 仍按默认上限判)。
+ */
 function dehash(name) {
+  const ext = name.endsWith('.css') ? '.css' : '.js';
+  for (const key of Object.keys(CHUNK_BUDGETS_GZ)) {
+    if (!key.endsWith(ext)) continue; // 扩展名必须同类:index-*.css 不能折成 index.js
+    const stem = key.slice(0, -ext.length);
+    if (name === key || name.startsWith(`${stem}-`)) return key;
+  }
   return name.replace(/-[^-]+\.(js|css)$/, '.$1');
 }
 

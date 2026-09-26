@@ -9,6 +9,7 @@
 import { defineStore } from 'pinia';
 import { ref, watch } from 'vue';
 import * as api from '../api';
+import type { TaskFlowMode } from '../api/labels';
 import {
   reloadSettings,
   reportChatEvent,
@@ -19,11 +20,22 @@ import {
 const APP_MODE_KEY = 'kedai.appMode';
 /** 新建任务模式持久化键(批次 4 六模式):刷新后保持上次选择 */
 const TASK_RUN_MODE_KEY = 'kedai.taskRunMode.v1';
+/** 新建任务绑定的流程持久化键(二维批次 5a):刷新后保持上次选择;空 = 跟随当前流程 */
+const TASK_FLOW_ID_KEY = 'kedai.taskFlowId.v1';
+/** 流程用法持久化键(二维批次 7b):force 强制 | compare 对比;仅 custom 模式可见 */
+const TASK_FLOW_MODE_KEY = 'kedai.taskFlowMode.v1';
+/** 对比模式名单持久化键(二维批次 7b):刷新后保持上次勾选(JSON 字符串数组) */
+const TASK_FLOW_IDS_KEY = 'kedai.taskFlowIds.v1';
+/** 逐任务选用连接的持久化键(B 批 B1):刷新后保持上次选择;空 = 跟随设置的默认连接 */
+const TASK_CONNECTION_ID_KEY = 'kedai.taskConnectionId.v1';
 /** 当前选中任务持久化键(实跑问题 4):重启后恢复上次查看的任务详情与调用记录 */
 const CURRENT_TASK_KEY = 'kedai.currentTaskId.v1';
 
 /** 任务模式可选值(写持久化前的白名单校验;未知值回退 legacy) */
 const TASK_RUN_MODES = new Set(['legacy', 'solo', 'multi', 'plan', 'team', 'custom']);
+
+/** 流程用法可选值(白名单校验;未知值回退 force) */
+const TASK_FLOW_MODES = new Set<TaskFlowMode>(['force', 'compare']);
 
 function readStoredCurrentTaskId(): string | null {
   try {
@@ -71,12 +83,100 @@ function readStoredTaskRunMode(): api.TaskRunMode {
   }
 }
 
+/**
+ * 读取持久化的流程绑定(二维批次 5a)。
+ *
+ * 这里**不校验该 id 是否还在流程库里**:库里没有它的原因可能只是「流程库还没加载」,
+ * 静默把它清成「跟随当前流程」会让用户下次建任务时跑到别的编排上。
+ * 失效由选择器组件如实显示(`(已失效) <id>`),绑定是否可用最终由后端判定。
+ */
+function readStoredTaskFlowId(): string {
+  try {
+    return (localStorage.getItem(TASK_FLOW_ID_KEY) ?? '').trim();
+  } catch {
+    return '';
+  }
+}
+
+/** 读取持久化的流程用法(二维批次 7b;未知值回退 force = 强制模式) */
+function readStoredTaskFlowMode(): TaskFlowMode {
+  try {
+    const v = localStorage.getItem(TASK_FLOW_MODE_KEY) ?? '';
+    return (TASK_FLOW_MODES.has(v as TaskFlowMode) ? v : 'force') as TaskFlowMode;
+  } catch {
+    return 'force';
+  }
+}
+
+/**
+ * 读取持久化的对比模式名单(二维批次 7b)。
+ *
+ * 只做**形状**校验(字符串数组、去空白、去重),不校验成员是否还在流程库里
+ * ——与 `readStoredTaskFlowId` 同一纪律:库未加载 ≠ 名单失效,静默清空会让用户
+ * 下次建任务时悄悄退化成强制模式;成员可用性最终由后端判定(创建期逐项点名 400)。
+ */
+function readStoredTaskFlowIds(): string[] {
+  try {
+    const raw = localStorage.getItem(TASK_FLOW_IDS_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const out: string[] = [];
+    for (const item of parsed) {
+      if (typeof item !== 'string') continue;
+      const id = item.trim();
+      if (id && !out.includes(id)) out.push(id);
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 读取持久化的**逐任务选用连接**(B 批 B1)。
+ *
+ * 只做形状校验(去空白),**不**校验该 id 是否还在本机连接列表里——列表由
+ * `TaskConnectionSelect` 挂载时经设置接口拉取,加载失败或尚未加载 ≠ 引用失效。
+ * 失效的判定与重置在组件里做(拉取成功且未命中才重置,并给出显式提示,不静默)。
+ */
+function readStoredTaskConnectionId(): string {
+  try {
+    return (localStorage.getItem(TASK_CONNECTION_ID_KEY) ?? '').trim();
+  } catch {
+    return '';
+  }
+}
+
 export const useTaskStore = defineStore('app.task', () => {
   // ===== 状态 =====
   /** 顶层模式:roleplay = 角色扮演,task = 任务工作台;持久化到 localStorage */
   const appMode = ref<'roleplay' | 'task'>(readStoredAppMode());
   /** 新建任务的执行模式(批次 4 六模式;持久化到 localStorage,写时经 watch) */
   const taskRunMode = ref<api.TaskRunMode>(readStoredTaskRunMode());
+  /**
+   * 新建任务**绑定的流程**(二维批次 5a;空串 = 跟随当前流程;持久化到 localStorage)。
+   * 只在 custom 模式下由选择器改写;切到别的模式时不重置(用户切回来仍是原绑定)。
+   */
+  const taskFlowId = ref<string>(readStoredTaskFlowId());
+  /**
+   * **流程用法**(二维批次 7b;仅 custom 模式可见;持久化到 localStorage)。
+   * force = 强制(老行为,忽略名单);compare = 对比(根流程照常跑 + 名单内流程可被模型调用)。
+   */
+  const taskFlowMode = ref<TaskFlowMode>(readStoredTaskFlowMode());
+  /**
+   * **对比模式的可调用流程名单**(二维批次 7b;仅 compare 时随请求下发;持久化到 localStorage)。
+   * 顺序即用户勾选顺序 → 后端工具描述里的列举顺序(同一份名单两次运行文案一致)。
+   */
+  const taskFlowIds = ref<string[]>(readStoredTaskFlowIds());
+  /**
+   * **逐任务选用连接**(B 批 B1;空串 = 跟随设置的默认连接;持久化到 localStorage)。
+   *
+   * 与 `taskFlowId` 的关键差别:流程可跨机搬运,故引用失效不静默改绑;**任务是本机的**,
+   * 连接引用只可能「本机已删除/停用」,而创建期后端就会 400 点名该连接——所以选择器
+   * 在拉取到连接列表后**显式重置**失效引用并给一行提示(不静默;见 TaskConnectionSelect)。
+   */
+  const taskConnectionId = ref<string>(readStoredTaskConnectionId());
   const tasks = ref<api.TaskRecord[]>([]);
   const currentTaskId = ref<string | null>(null);
   /** 当前任务详情(含子任务) */
@@ -127,6 +227,26 @@ export const useTaskStore = defineStore('app.task', () => {
     liveBuffers.value = new Map();
   }
 
+  /**
+   * 最近一条 agent 状态详情(主/子 agent 状态迁移的简述文本)。
+   *
+   * 为什么需要:任务长时间执行时,工具循环的每轮进展只在事件里出现一次
+   * (kind=agent_status,如「主 agent 调用工具 bash」),而面板只按详情刷新步骤区——
+   * 用户看不到「它还在动」,只能看到一个不动的「执行中」,与真正挂死无法区分
+   * (2026-09-18 实跑反馈:任务空转 70 秒期间界面无任何变化,用户手动停止)。
+   * 此处保留最近一条并展示,把已有的后端事件变成可见进度。
+   * 事件本身不落库(queue 事件不持久化),故切换任务/终态时清空,避免串台。
+   */
+  const lastAgentStatus = ref<string | null>(null);
+
+  /** 记录一条 agent 状态(仅当前任务;detail 缺失视为旧服务端事件,忽略) */
+  function setAgentStatus(ev: api.TaskEvent): void {
+    if (ev.task_id !== currentTaskId.value) return;
+    const detail = ev.detail?.trim();
+    if (!detail) return;
+    lastAgentStatus.value = detail;
+  }
+
   // ===== SSE 订阅与重连(非响应式内部状态) =====
   /** 当前事件订阅的关闭函数(null = 未订阅) */
   let closeTaskEvents: (() => void) | null = null;
@@ -157,6 +277,50 @@ export const useTaskStore = defineStore('app.task', () => {
     }
   }
   watch(taskRunMode, persistTaskRunMode);
+
+  /** 持久化流程绑定(与 taskRunMode 同款容错:写失败静默) */
+  function persistTaskFlowId(): void {
+    try {
+      if (taskFlowId.value) localStorage.setItem(TASK_FLOW_ID_KEY, taskFlowId.value);
+      else localStorage.removeItem(TASK_FLOW_ID_KEY);
+    } catch {
+      /* 忽略 */
+    }
+  }
+  watch(taskFlowId, persistTaskFlowId);
+
+  /** 持久化流程用法(与 taskRunMode 同款容错:写失败静默) */
+  function persistTaskFlowMode(): void {
+    try {
+      localStorage.setItem(TASK_FLOW_MODE_KEY, taskFlowMode.value);
+    } catch {
+      /* 忽略 */
+    }
+  }
+  watch(taskFlowMode, persistTaskFlowMode);
+
+  /** 持久化对比模式名单(空名单移除键:与「强制模式」保持同一种「无名单」表示) */
+  function persistTaskFlowIds(): void {
+    try {
+      const ids = taskFlowIds.value;
+      if (ids.length > 0) localStorage.setItem(TASK_FLOW_IDS_KEY, JSON.stringify(ids));
+      else localStorage.removeItem(TASK_FLOW_IDS_KEY);
+    } catch {
+      /* 忽略 */
+    }
+  }
+  watch(taskFlowIds, persistTaskFlowIds, { deep: true });
+
+  /** 持久化逐任务选用连接(空串移除键:与「跟随默认连接」保持同一种「未指定」表示) */
+  function persistTaskConnectionId(): void {
+    try {
+      if (taskConnectionId.value) localStorage.setItem(TASK_CONNECTION_ID_KEY, taskConnectionId.value);
+      else localStorage.removeItem(TASK_CONNECTION_ID_KEY);
+    } catch {
+      /* 忽略 */
+    }
+  }
+  watch(taskConnectionId, persistTaskConnectionId);
 
   // ===== 加载(in-flight 合并防事件风暴) =====
 
@@ -288,6 +452,8 @@ export const useTaskStore = defineStore('app.task', () => {
     taskCalls.value = [];
     callsSignature = contentSignature([]);
     clearAllLiveDeltas();
+    // 最近 agent 状态同理:agent_status 不落库,新任务从空开始(等下一个事件)
+    lastAgentStatus.value = null;
     await loadTaskDetail(id);
   }
 
@@ -298,6 +464,7 @@ export const useTaskStore = defineStore('app.task', () => {
     currentTaskUsage.value = null;
     taskCalls.value = [];
     clearAllLiveDeltas();
+    lastAgentStatus.value = null;
     persistCurrentTaskId(null);
   }
 
@@ -346,6 +513,9 @@ export const useTaskStore = defineStore('app.task', () => {
       case 'status':
       case 'plan':
       case 'subtask':
+      // A 批 B3:改绑编排 → 换的是「按哪份编排跑」与任务看台的编排徽标(快照),
+      // 状态本身没变,故按 status 同款刷新(列表徽标 + 当前任务详情),不触发终态逻辑
+      case 'flow_bound':
         // 侧栏状态跳动 + 当前任务详情刷新;终态时补全局 token 累计
         void loadTasks();
         if (ev.task_id === currentTaskId.value) void loadTaskDetail(ev.task_id);
@@ -386,7 +556,9 @@ export const useTaskStore = defineStore('app.task', () => {
         break;
       case 'agent_status':
         // 主/子 agent 状态迁移(detail 为简述,前端不解析):当前任务刷新详情;
-        // 详情刷新有按 id 的 in-flight 合并兜底,事件密集时不叠加并发请求
+        // 详情刷新有按 id 的 in-flight 合并兜底,事件密集时不叠加并发请求。
+        // 同时留存最近一条详情供面板展示「还在动」(见 lastAgentStatus 文档)。
+        setAgentStatus(ev);
         if (ev.task_id === currentTaskId.value) void loadTaskDetail(ev.task_id);
         break;
       case 'deleted':
@@ -398,6 +570,7 @@ export const useTaskStore = defineStore('app.task', () => {
           taskCalls.value = [];
           callsSignature = contentSignature([]);
           clearAllLiveDeltas(); // 批次 R4:任务删除,其流式缓冲一并失效
+          lastAgentStatus.value = null;
         }
         break;
       case undefined:
@@ -499,8 +672,34 @@ export const useTaskStore = defineStore('app.task', () => {
 
   // ===== CRUD(本地乐观更新保留;状态变化由 SSE 事件驱动后续刷新,不再合成伪事件) =====
 
-  async function createTask(title: string, characterId?: string): Promise<api.TaskRecord> {
-    const task = await api.createTask(title, characterId, taskRunMode.value);
+  /** 新建任务。`executorId` 为执行者库 id(缺省 = 通用执行者);
+   *  执行者与角色扮演角色卡已解耦,本入口不再接受 characterId。
+   *  二维批次 5a:custom 模式下 `taskFlowId` 非空即随请求下发(绑定即冻结),空则跟随当前流程。
+   *  二维批次 7b:custom 模式 + `taskFlowMode === 'compare'` 时随请求下发 `flowIds`
+   *  (名单为空 = 不下发该键,后端会 400;UI 侧已在选择器给出即时警示)。
+   *  B 批 B1:`taskConnectionId` 非空即随请求下发(逐任务选用连接;**与模式无关**——
+   *  它绑的是 provider 而不是编排,legacy 到 custom 六模式都吃它),空则跟随设置的默认连接。
+   *
+   *  模式门控放在 store 而不是组件:非 custom 模式下选择器不渲染,但持久化的名单/绑定
+   *  仍在内存里——若照原样下发,后端会以「只有自定义流程模式可以…」400 掉一次**正常**创建。 */
+  async function createTask(title: string, executorId?: string): Promise<api.TaskRecord> {
+    const isCustom = taskRunMode.value === 'custom';
+    // 空名单不下发:后端把「给了空数组」判 400(空名单 = 名存实亡),
+    // 「要跑强制模式」的正确写法是不带这个键。UI 同时给出即时警示。
+    const compareIds =
+      isCustom && taskFlowMode.value === 'compare' && taskFlowIds.value.length > 0
+        ? taskFlowIds.value
+        : undefined;
+    const task = await api.createTask(
+      title,
+      executorId,
+      taskRunMode.value,
+      undefined,
+      isCustom ? taskFlowId.value || undefined : undefined,
+      compareIds,
+      // 连接不做模式门控:六模式都会用到 provider,空串 = 跟随默认连接(不下发该键)
+      taskConnectionId.value || undefined,
+    );
     tasks.value = [task, ...tasks.value];
     listSignature = contentSignature(tasks.value); // 本地乐观改写后同步签名(下次事件刷新同内容时不再替换)
     await selectTask(task.id);
@@ -519,9 +718,36 @@ export const useTaskStore = defineStore('app.task', () => {
     await loadTaskDetail(id);
   }
 
-  /** 批准计划(plan 模式):plan 可选(修改后批准);成功后刷新该任务详情 */
-  async function approveTask(id: string, plan?: api.TaskStep[]): Promise<void> {
-    await api.approveTask(id, plan);
+  /**
+   * 改绑自定义流程(B 批 B3;仅 custom 模式且非进行中任务,其余由后端 400 拦下,
+   * 错误原文(点名原因)原样抛给调用方显示)。
+   *
+   * `flowId` / `flowIds` 是**全量替换**语义(`null` = 跟随当前流程,`[]` = 强制模式干净名单),
+   * 故一律显式传给 `api.bindTask`,不做「仅非空下发」的省略——省掉就表达不出「解绑/清空」。
+   *
+   * 成功后**本地就地更新**列表项与当前任务详情做即时反馈:SSE 的 `flow_bound` 事件同样会
+   * 触发刷新,但事件流断开时用户不该看到「点了保存界面没反应」。
+   * 快照(`flow_snapshot`)已被后端**重新冻结**,本地那份必然过期,故显式置空:徽标与流程名
+   * 随即回退到当前流程库(改绑后的编排正是库里的那份),好过继续用旧快照错标;权威快照由
+   * 随后的 flow_bound 刷新(或列表兜底轮询)补上。
+   */
+  async function bindTask(id: string, flowId: string | null, flowIds: string[]): Promise<void> {
+    const task = await api.bindTask(id, flowId, flowIds);
+    tasks.value = tasks.value.map((t) => (t.id === id ? task : t));
+    listSignature = contentSignature(tasks.value); // 同步签名(下次事件刷新同内容时不再替换)
+    if (currentTask.value?.task.id === id) {
+      currentTask.value = { ...currentTask.value, task, flow_snapshot: null };
+    }
+  }
+
+  /** 批准计划(plan 模式):plan 可选(修改后批准),execMode 可选(本次执行方式,
+   *  缺省 approved_plan = 按计划逐步执行);成功后刷新该任务详情 */
+  async function approveTask(
+    id: string,
+    plan?: api.TaskStep[],
+    execMode?: api.TaskApproveExecMode,
+  ): Promise<void> {
+    await api.approveTask(id, plan, execMode);
     // 批准后任务进入执行:同样自动展开一次
     uiPrefsBridge().autoOpenAgentPanel();
     await loadTaskDetail(id);
@@ -564,6 +790,10 @@ export const useTaskStore = defineStore('app.task', () => {
   return {
     appMode,
     taskRunMode,
+    taskFlowId,
+    taskFlowMode,
+    taskFlowIds,
+    taskConnectionId,
     tasks,
     currentTaskId,
     currentTask,
@@ -571,6 +801,7 @@ export const useTaskStore = defineStore('app.task', () => {
     globalTaskUsage,
     taskCalls,
     liveBuffers,
+    lastAgentStatus,
     setAppMode,
     loadTasks,
     loadGlobalTaskUsage,
@@ -582,6 +813,7 @@ export const useTaskStore = defineStore('app.task', () => {
     loadTaskDetail,
     runTask,
     stopTask,
+    bindTask,
     approveTask,
     followupTask,
     planChatTask,

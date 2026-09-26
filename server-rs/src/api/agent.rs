@@ -63,7 +63,18 @@ pub async fn plan(State(state): State<Arc<AppState>>, Json(body): Json<PlanBody>
         {
             return validation(e);
         }
-        match make_custom_plan(&flow.steps) {
+        // 预览 plan 与实际执行同一出口(chat_flow_steps):启用步骤 + 子流程展开,
+        // 否则预览看不到子图节点、与实际执行的 plan 不一致
+        let steps = match state
+            .flow
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .chat_flow_steps(&flow)
+        {
+            Ok(steps) => steps,
+            Err(e) => return validation(e),
+        };
+        match make_custom_plan(&steps) {
             Ok(p) => p,
             Err(e) => {
                 return validation(e);

@@ -11,14 +11,19 @@ import { ref, watch } from 'vue';
 import { useAppStore } from '../store';
 import { lazyModal } from '../asyncModal';
 import { useApiSettings } from '../composables/useApiSettings';
+import { useConnectionProfiles } from '../composables/useConnectionProfiles';
 import { usePromptInject } from '../composables/usePromptInject';
 import { useDataManager } from '../composables/useDataManager';
 import ApiSettingsSection from './settings/ApiSettingsSection.vue';
 import ConnectionSection from './settings/ConnectionSection.vue';
 
 const GenParamsSection = lazyModal(() => import('./settings/GenParamsSection.vue'), '设置区:模型与生成', 'settingsOpen');
+// 多套连接配置(批次 4):与「API 连接」区同属连接域,但管理的是连接列表
+const ConnectionProfilesSection = lazyModal(() => import('./settings/ConnectionProfilesSection.vue'), '设置区:连接配置', 'settingsOpen');
 const AgentSettingsSection = lazyModal(() => import('./settings/AgentSettingsSection.vue'), '设置区:Agent 设置', 'settingsOpen');
 const AgentFlowSection = lazyModal(() => import('./settings/AgentFlowSection.vue'), '设置区:执行流程', 'settingsOpen');
+// 授权与命令执行(2026-09-17 独立分区):工具三档授权 + 命令执行/设备档位
+const ExecAuthSection = lazyModal(() => import('./settings/ExecAuthSection.vue'), '设置区:授权与命令执行', 'settingsOpen');
 const PromptInjectSection = lazyModal(() => import('./settings/PromptInjectSection.vue'), '设置区:提示词注入', 'settingsOpen');
 const PresetImportExportSection = lazyModal(() => import('./settings/PresetImportExportSection.vue'), '设置区:预设导入', 'settingsOpen');
 const DataManagementSection = lazyModal(() => import('./settings/DataManagementSection.vue'), '设置区:数据管理', 'settingsOpen');
@@ -40,6 +45,8 @@ const store = useAppStore();
 // ===== 跨 section 共享的业务状态(在壳创建一次,经 prop 传入,避免重复实例化导致状态分叉) =====
 // API 设置区 + 后端连接区共享
 const apiSettings = useApiSettings();
+// 连接配置区(多套连接)独占一份列表状态
+const connectionProfiles = useConnectionProfiles();
 // 提示词注入区 + 预设导入导出区共享
 const promptInject = usePromptInject();
 // 数据管理区 + 界面区共享
@@ -70,9 +77,15 @@ const close = (): void => {
   <div v-if="props.embedded" class="sv-settings-embedded">
     <ApiSettingsSection :state="apiSettings" :show="props.activeSection === 'api'" />
     <ConnectionSection :state="apiSettings" :show="props.activeSection === 'api'" />
+    <ConnectionProfilesSection
+      v-if="visitedSections.has('connections')"
+      :state="connectionProfiles"
+      :show="props.activeSection === 'connections'"
+    />
     <GenParamsSection v-if="visitedSections.has('model')" :show="props.activeSection === 'model'" />
     <AgentSettingsSection v-if="visitedSections.has('agent')" :show="props.activeSection === 'agent'" />
     <AgentFlowSection v-if="visitedSections.has('flow')" :show="props.activeSection === 'flow'" />
+    <ExecAuthSection v-if="visitedSections.has('exec')" :show="props.activeSection === 'exec'" />
     <PromptInjectSection v-if="visitedSections.has('prompt')" :state="promptInject" :show="props.activeSection === 'prompt'" />
     <PresetImportExportSection v-if="visitedSections.has('preset')" :state="promptInject" :show="props.activeSection === 'preset'" />
     <DataManagementSection v-if="visitedSections.has('data')" :state="dataManager" :show="props.activeSection === 'data'" />
@@ -96,9 +109,11 @@ const close = (): void => {
       <div class="sv-modal-body">
         <ApiSettingsSection :state="apiSettings" />
         <ConnectionSection :state="apiSettings" />
+        <ConnectionProfilesSection :state="connectionProfiles" />
         <GenParamsSection />
         <AgentSettingsSection />
         <AgentFlowSection />
+        <ExecAuthSection />
         <PromptInjectSection :state="promptInject" />
         <PresetImportExportSection :state="promptInject" />
         <DataManagementSection :state="dataManager" />

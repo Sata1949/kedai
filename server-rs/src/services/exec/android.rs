@@ -32,6 +32,18 @@ pub fn detect_tier() -> ShellTier {
     }
 }
 
+/// 强制重新探测执行器等级(清 Kotlin 侧缓存后重跑探测)。
+/// 同 `detectTier`:Kotlin 侧无入参,必须走无参入口(否则 NoSuchMethodError)。
+pub fn refresh_tier() -> ShellTier {
+    match call_string_static_no_arg(EXEC_CLASS, "refreshTier") {
+        Ok(s) => ShellTier::from_str_lossy(s.trim()),
+        Err(e) => {
+            tracing::warn!(error = %e, "强制重探 Android 执行器等级失败,回退 disabled");
+            ShellTier::Disabled
+        }
+    }
+}
+
 /// 经 Kotlin 桥执行命令。
 /// 注意:授权与风险确认已在 bash 工具层完成,本函数只负责执行与结果解析。
 pub async fn execute(req: ExecRequest) -> Result<ExecResult, String> {
@@ -83,6 +95,16 @@ fn parse_result(raw: &str, tier: ShellTier) -> Result<ExecResult, String> {
 /// 同 `detectTier`:Kotlin 侧无入参,必须走无参入口。
 pub fn request_shizuku_permission() -> Result<(), String> {
     call_string_static_no_arg(EXEC_CLASS, "requestShizukuPermission").map(|_| ())
+}
+
+/// Shizuku 应用是否已安装("1" = 已安装)。供设置页授权面板给出可行动提示。
+pub fn shizuku_installed() -> bool {
+    matches!(call_string_static_no_arg(EXEC_CLASS, "shizukuInstalled"), Ok(s) if s.trim() == "1")
+}
+
+/// Shizuku 当前是否已获授权。
+pub fn shizuku_granted() -> bool {
+    matches!(call_string_static_no_arg(EXEC_CLASS, "shizukuGranted"), Ok(s) if s.trim() == "1")
 }
 
 #[cfg(test)]

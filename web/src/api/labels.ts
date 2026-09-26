@@ -10,7 +10,18 @@
 //     `vue-tsc` 直接报错(把「漏改」从运行期静默变成编译期失败)。
 //   - MESSAGE_KIND_LABELS 的键来自后端 task_messages.kind,非联合类型,故用
 //     `Record<string, string>` 并保留「未登记返回空」的既有语义。
-import type { TaskRunMode } from './types';
+import type { ConnectorType, TaskApproveExecMode, TaskRunMode } from './types';
+
+/** 连接器类型 → 展示文案(多套连接批次)。
+ *  键来自后端 `connectors::available_connector_types()`(非联合类型可穷尽),
+ *  故按 MESSAGE_KIND_LABELS 先例用 `Record<string, string>`,未登记项原样展示。 */
+export const CONNECTOR_TYPE_LABELS: Record<string, string> = {
+  'openai-compatible': 'OpenAI 兼容',
+  mock: '演示(Mock)',
+};
+
+/** 连接器类型下拉顺序(与后端定义顺序一致,便于对照) */
+export const CONNECTOR_TYPE_ORDER: ConnectorType[] = ['openai-compatible', 'mock'];
 
 /** 模式 → 短标签(任务卡头部展示)。穷尽校验:漏配模式编译期报错。 */
 export const MODE_LABELS = {
@@ -34,6 +45,54 @@ export const MODE_OPTION_LABELS = {
 
 /** 下拉展示顺序(与后端 TaskRunMode 定义顺序一致,便于对照) */
 export const MODE_ORDER: TaskRunMode[] = ['legacy', 'solo', 'multi', 'plan', 'team', 'custom'];
+
+/**
+ * **流程用法**(二维批次 7b;前端概念,**不是线格式字段**)。
+ * - `force` 强制:任务只跑指定流程(或当前流程),模型不能调用别的流程;
+ * - `compare` 对比:根流程照常执行,随后**名单内流程**作为 `run_flow` 工具释放给宽松节点,
+ *   模型在工具循环里自主调用、取回成果。
+ *
+ * 与后端的对应关系只有一条:`compare` ⇔ 创建任务时下发了**非空** `flow_ids`
+ * (后端把「给了空数组」判 400,故「空名单」不是强制模式的写法)。仅 custom 模式可见。
+ */
+export type TaskFlowMode = 'force' | 'compare';
+
+/** 流程用法 → 下拉文案(穷尽校验同 MODE_LABELS) */
+export const FLOW_MODE_OPTION_LABELS = {
+  force: '流程模式:强制',
+  compare: '流程模式:对比(模型可调用名单内流程)',
+} satisfies Record<TaskFlowMode, string>;
+
+/** 流程用法 → 徽标短标签(任务详情/看台展示用;对比模式的可调用数另拼) */
+export const FLOW_MODE_LABELS = {
+  force: '强制',
+  compare: '对比',
+} satisfies Record<TaskFlowMode, string>;
+
+/** 流程用法下拉顺序(默认项置顶) */
+export const FLOW_MODE_ORDER: TaskFlowMode[] = ['force', 'compare'];
+
+/**
+ * plan 批准时的执行方式 → 下拉文案(2026-09-17)。
+ * 穷尽校验同上:后端新增可选值而此处漏配,`vue-tsc` 直接报错。
+ * 顺序 = 下拉展示顺序:默认项(按计划逐步执行)在最前。
+ */
+export const APPROVE_EXEC_MODE_LABELS = {
+  approved_plan: '按计划逐步执行(默认)',
+  solo: '单 Agent 整体执行',
+  multi: '多 Agent 执行',
+  team: '团队协作执行',
+  custom: '自定义流程执行',
+} satisfies Record<TaskApproveExecMode, string>;
+
+/** 批准下拉展示顺序(默认项置顶) */
+export const APPROVE_EXEC_MODE_ORDER: TaskApproveExecMode[] = [
+  'approved_plan',
+  'solo',
+  'multi',
+  'team',
+  'custom',
+];
 
 /**
  * 任务消息种类 → 小标签。键为后端 `task_messages.kind`(字符串,非联合类型),

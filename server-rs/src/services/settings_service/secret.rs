@@ -2,14 +2,19 @@
 // load 时 unprotect 解密,旧版明文配置读取后就地重写为密文(一次性迁移,失败仅告警)。
 use crate::config::AppConfig;
 use crate::services::secret_store;
+use std::collections::HashMap;
 use std::path::Path;
 
 use super::connection::DEFAULT_SEARCH_ENDPOINT;
 use super::params::{
     default_compaction_keep_recent, default_compaction_mode, default_compaction_snip_bytes,
-    default_compaction_threshold, default_memory_inject_char_budget, default_memory_inject_limit,
-    default_memory_max_entries, default_roleplay_agent_prompt, default_subagent_max_concurrency,
-    default_subagent_max_depth, default_subagent_result_max_chars, default_task_tool_policy,
+    default_compaction_threshold, default_loop_guard_semantic_max_distinct,
+    default_loop_guard_semantic_min_calls, default_loop_guard_semantic_window,
+    default_memory_inject_char_budget, default_memory_inject_limit, default_memory_max_entries,
+    default_roleplay_agent_prompt, default_session_budget_action, default_session_token_budget,
+    default_subagent_max_concurrency, default_subagent_max_depth,
+    default_subagent_result_max_chars, default_task_idle_timeout_secs,
+    default_task_step_budget_secs, default_task_tool_policy,
     default_tool_authorization_timeout_secs, default_tool_history_budget_tokens,
     default_tool_history_keep_rounds, migrate_authorization_mode,
 };
@@ -136,6 +141,50 @@ impl RuntimeSettings {
                 {
                     s.tool_history_budget_tokens = default_tool_history_budget_tokens();
                 }
+                // HB-1:单次生成 token 预算与超限动作(手改 settings.json 的边界:
+                // 预算 0 = 关闭,否则 1024..=1e9;动作只认 warn/stop,越界回默认)
+                if s.session_token_budget != 0
+                    && !(1024..=1_000_000_000).contains(&s.session_token_budget)
+                {
+                    s.session_token_budget = default_session_token_budget();
+                }
+                if !matches!(s.session_budget_action.as_str(), "warn" | "stop") {
+                    s.session_budget_action = default_session_budget_action();
+                }
+                // HB-7:mvu_model 卫生清理(settings.json 可手改:trim、空白/超长视为未配置;
+                // 与 PUT 校验同规则,避免「看似配置了却打不通」)
+                if let Some(m) = s.mvu_model.as_mut() {
+                    let trimmed = m.trim().to_string();
+                    if trimmed.is_empty() || trimmed.chars().count() > 200 {
+                        s.mvu_model = None;
+                    } else {
+                        *m = trimmed;
+                    }
+                }
+                // HB-2:语义熔断参数钳制(窗口/下限 4..=64,去重上限 1..=8;越界回默认)
+                if !(4..=64).contains(&s.loop_guard_semantic_window) {
+                    s.loop_guard_semantic_window = default_loop_guard_semantic_window();
+                }
+                if s.loop_guard_semantic_min_calls != 0
+                    && !(4..=64).contains(&s.loop_guard_semantic_min_calls)
+                {
+                    s.loop_guard_semantic_min_calls = default_loop_guard_semantic_min_calls();
+                }
+                if !(1..=8).contains(&s.loop_guard_semantic_max_distinct) {
+                    s.loop_guard_semantic_max_distinct = default_loop_guard_semantic_max_distinct();
+                }
+                // 提交 3(D3/D7):任务侧两道闸的参数钳制。step_budget 刻意不设下限
+                // (1 秒合法:低于单次调用看门狗的值 = 「第一轮结束就收尾」的合法语义,
+                // 测试也靠它触发预算路径);idle 下限 601 的依据见默认值函数注释。
+                if s.task_step_budget_secs != 0 && !(1..=86_400).contains(&s.task_step_budget_secs)
+                {
+                    s.task_step_budget_secs = default_task_step_budget_secs();
+                }
+                if s.task_idle_timeout_secs != 0
+                    && !(601..=86_400).contains(&s.task_idle_timeout_secs)
+                {
+                    s.task_idle_timeout_secs = default_task_idle_timeout_secs();
+                }
                 // MCP 服务器列表(批次 6.2):settings.json 可手改,启动装配前做一次卫生清理
                 // (trim 名称/命令,丢弃缺名或缺命令的不可用条目;与 PUT 校验同规则)
                 s.mcp_servers.retain_mut(|srv| {
@@ -150,9 +199,24 @@ impl RuntimeSettings {
                 let embedding_was_plaintext = !s.embedding_api_key.is_empty()
                     && !secret_store::is_protected(&s.embedding_api_key);
                 s.embedding_api_key = secret_store::unprotect(&s.embedding_api_key);
+                // 多套连接(批次 4):逐条解密 —— 连接里的 Key 与顶层同策略(落盘密文 / 内存明文)。
+                // 必须早于下面的播种:播种的连接要从**已解密**的扁平字段取值。
+                let mut connections_was_plaintext = false;
+                for p in s.connections.iter_mut() {
+                    if !p.api_key.is_empty() && !secret_store::is_protected(&p.api_key) {
+                        connections_was_plaintext = true;
+                    }
+                    p.api_key = secret_store::unprotect(&p.api_key);
+                }
+                // 多套连接(批次 4):幂等播种 → 逐条卫生清理/id 去重 → 默认连接回退 → 扁平字段投影。
+                // 必须早于下面的「明文 Key 迁移写回」:那次 save 会把播种后的 connections 一并落盘,
+                // 否则迁移写回漏掉连接数组,用户要等到下一次保存才能看到默认连接。
+                s.seed_connections_from_flat();
+                s.normalize_connections();
                 // 旧版明文配置:立即重写为密文(一次性迁移,失败仅告警不影响启动)
                 if (was_plaintext && !s.openai_api_key.is_empty())
                     || (embedding_was_plaintext && !s.embedding_api_key.is_empty())
+                    || connections_was_plaintext
                 {
                     if let Err(e) = s.save(data_dir) {
                         eprintln!("[settings] API Key 加密迁移写回失败(下次保存设置时重试):{e}");
@@ -180,9 +244,34 @@ impl RuntimeSettings {
     pub fn save(&self, data_dir: &Path) -> Result<(), String> {
         // 仅持久化副本加密,不改动内存中的明文 Key(连接器仍需直接使用)
         let mut persisted = self.clone();
+        // 落盘前重算投影:扁平三字段始终是「默认连接的派生视图」,保证磁盘自洽
+        // (内存态若被外部改过,以 connections 为准)
+        persisted.normalize_connections();
         let on_disk = read_preserved_ciphertexts(data_dir);
-        persisted.openai_api_key =
-            encrypt_or_preserve(&self.openai_api_key, on_disk.openai.as_deref())?;
+        // 逐条加密:磁盘密文按 profile **id** 匹配,绝不按下标 —— 删除中间一条或调整顺序后
+        // 下标会整体错位,把 A 的密文写到 B 头上(密钥张冠李戴且原值不可恢复)。
+        // 活跃连接额外允许回退顶层旧密文:旧单份配置首次落盘时,磁盘上还没有该 id 的条目。
+        let active_id = persisted.active_connection_id.clone();
+        for p in persisted.connections.iter_mut() {
+            let is_active = active_id.as_deref() == Some(p.id.as_str());
+            let preserved = on_disk
+                .by_profile_id
+                .get(&p.id)
+                .map(|s| s.as_str())
+                .or(if is_active {
+                    on_disk.openai.as_deref()
+                } else {
+                    None
+                });
+            p.api_key = encrypt_or_preserve(&p.api_key, preserved)?;
+        }
+        // 顶层兼容字段 = 默认连接的密文(直接取上一步的结果,不二次加密);
+        // 没有可用连接(全停用/删空)时写空 —— 那是用户的显式操作,不属于「解密失败要保真」的场景。
+        let active_key = persisted
+            .active_connection()
+            .map(|p| p.api_key.clone())
+            .unwrap_or_default();
+        persisted.openai_api_key = active_key;
         persisted.embedding_api_key =
             encrypt_or_preserve(&self.embedding_api_key, on_disk.embedding.as_deref())?;
         let text = serde_json::to_string_pretty(&persisted).map_err(|e| e.to_string())?;
@@ -194,8 +283,11 @@ impl RuntimeSettings {
 /// 磁盘上仍是非空密文的敏感字段(供「内存为空」时回写保真)
 #[derive(Default)]
 struct OnDiskCiphertexts {
+    /// 顶层兼容字段 openai_api_key(旧单份配置;也是活跃连接首次落盘的兜底来源)
     openai: Option<String>,
     embedding: Option<String>,
+    /// connections[].api_key,键为 profile id:密文必须「跟 id 走」而不是「跟下标走」
+    by_profile_id: HashMap<String, String>,
 }
 
 /// 读取 settings.json 中仍为 `enc:v1:` 非空密文的 Key 字段。
@@ -207,17 +299,33 @@ fn read_preserved_ciphertexts(data_dir: &Path) -> OnDiskCiphertexts {
     let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
         return OnDiskCiphertexts::default();
     };
-    let pick = |field: &str| -> Option<String> {
-        let v = json.get(field)?.as_str()?.trim();
-        if v.is_empty() || !secret_store::is_protected(v) {
+    let ciphertext_of = |v: Option<&serde_json::Value>| -> Option<String> {
+        let s = v?.as_str()?.trim();
+        if s.is_empty() || !secret_store::is_protected(s) {
             return None;
         }
-        Some(v.to_string())
+        Some(s.to_string())
     };
-    OnDiskCiphertexts {
-        openai: pick("openai_api_key"),
-        embedding: pick("embedding_api_key"),
+    let mut out = OnDiskCiphertexts {
+        openai: ciphertext_of(json.get("openai_api_key")),
+        embedding: ciphertext_of(json.get("embedding_api_key")),
+        by_profile_id: HashMap::new(),
+    };
+    if let Some(list) = json.get("connections").and_then(|v| v.as_array()) {
+        for item in list {
+            // 空 id 或无密文的条目直接跳过(与该 id 对不上的内存态自然按「无旧值」处理)
+            let Some(id) = item.get("id").and_then(|v| v.as_str()).map(str::trim) else {
+                continue;
+            };
+            if id.is_empty() {
+                continue;
+            }
+            if let Some(ct) = ciphertext_of(item.get("api_key")) {
+                out.by_profile_id.insert(id.to_string(), ct);
+            }
+        }
     }
+    out
 }
 
 /// 加密待落盘值;内存为空但磁盘仍有密文时保留磁盘原密文(防静默清空)。
@@ -241,6 +349,7 @@ fn encrypt_or_preserve(
 mod tests {
     use super::*;
     use crate::config::test_config;
+    use crate::services::settings_service::ConnectionProfile;
     use crate::utils::test_support::TempDataDir;
 
     /// 隔离临时数据目录(uuid 唯一 + 作用域结束自动清理)
@@ -283,7 +392,8 @@ mod tests {
     fn save_writes_empty_or_new_key_normally() {
         let dir = temp_dir("normal");
         let mut s = RuntimeSettings::from_config(&test_config());
-        s.openai_api_key = String::new();
+        // 本批次起 connections 才是真源,扁平字段是它的派生视图 → 写 Key 要写默认连接
+        s.connections[0].api_key = String::new();
         s.save(&dir).unwrap();
         let text = std::fs::read_to_string(dir.join("settings.json")).unwrap();
         assert!(
@@ -291,7 +401,7 @@ mod tests {
             "未配置应写空串:{text}"
         );
 
-        s.openai_api_key = "sk-new-key-1234".to_string();
+        s.connections[0].api_key = "sk-new-key-1234".to_string();
         s.save(&dir).unwrap();
         let text = std::fs::read_to_string(dir.join("settings.json")).unwrap();
         assert!(
@@ -300,24 +410,308 @@ mod tests {
         );
     }
 
-    /// 旧版明文 Key 的迁移路径不受影响:解密(直读)后重新加密
+    /// 旧版明文 Key 的迁移路径不受影响:load 解密(直读)后重新加密,
+    /// 播种的默认连接同样拿到明文(否则迁移写回会把连接里的 Key 写成空)
     #[cfg(windows)]
     #[test]
     fn legacy_plaintext_key_still_migrates_to_ciphertext() {
         let dir = temp_dir("legacy");
-        write_settings(
-            &dir,
-            r#"{"openai_api_key":"sk-legacy-plain","embedding_api_key":""}"#,
+        // 完整旧版文件(无 connections 键)+ 明文 Key:走 load 的迁移写回
+        let mut base = RuntimeSettings::from_config(&test_config());
+        base.openai_base_url = "https://legacy.example/v1".to_string();
+        base.openai_api_key = "sk-legacy-plain".to_string();
+        let mut json = serde_json::to_value(&base).unwrap();
+        json.as_object_mut().unwrap().remove("connections");
+        json.as_object_mut().unwrap().remove("active_connection_id");
+        write_settings(&dir, &serde_json::to_string_pretty(&json).unwrap());
+
+        let loaded = RuntimeSettings::load(&dir, &test_config());
+        assert_eq!(
+            loaded.openai_api_key, "sk-legacy-plain",
+            "旧版明文应能正常读取"
         );
-        let cfg = test_config();
-        let mut s = RuntimeSettings::from_config(&cfg);
-        s.openai_api_key = secret_store::unprotect("sk-legacy-plain");
-        assert_eq!(s.openai_api_key, "sk-legacy-plain");
-        s.save(&dir).unwrap();
+        assert_eq!(loaded.connections.len(), 1, "旧文件应播种一条默认连接");
+        assert_eq!(
+            loaded.connections[0].api_key, "sk-legacy-plain",
+            "播种的连接必须继承明文 Key"
+        );
         let text = std::fs::read_to_string(dir.join("settings.json")).unwrap();
         assert!(
             text.contains("enc:v1:") && !text.contains("sk-legacy-plain"),
             "明文应迁移为密文:{text}"
+        );
+        // 迁移后再次 load 仍应得到同一明文(连接与顶层字段都还原)
+        let again = RuntimeSettings::load(&dir, &test_config());
+        assert_eq!(again.openai_api_key, "sk-legacy-plain");
+        assert_eq!(again.connections[0].api_key, "sk-legacy-plain");
+    }
+
+    // ---------- 多套连接(2026-09-22 批次 4) ----------
+
+    fn profile(id: &str, key: &str) -> ConnectionProfile {
+        ConnectionProfile {
+            id: id.to_string(),
+            name: format!("连接-{id}"),
+            connector_type: "openai-compatible".to_string(),
+            base_url: format!("https://{id}.example/v1"),
+            api_key: key.to_string(),
+            model: "m".to_string(),
+            enabled: true,
+        }
+    }
+
+    fn read_json(dir: &Path) -> serde_json::Value {
+        let text = std::fs::read_to_string(dir.join("settings.json")).unwrap();
+        serde_json::from_str(&text).unwrap()
+    }
+
+    /// 播种(用例 1):判据只有「数组为空」,内容来自扁平字段;重复播种与已有连接都不动它
+    #[test]
+    fn connections_seeded_from_flat_config_and_idempotent() {
+        let mut s = RuntimeSettings::from_config(&test_config());
+        s.connections.clear();
+        s.active_connection_id = None;
+        s.openai_base_url = "https://flat.example/v1".to_string();
+        s.model = "flat-model".to_string();
+
+        s.seed_connections_from_flat();
+        assert_eq!(s.connections.len(), 1);
+        assert_eq!(s.connections[0].id, "default");
+        assert_eq!(s.connections[0].name, "默认连接");
+        assert_eq!(s.connections[0].base_url, "https://flat.example/v1");
+        assert_eq!(s.connections[0].model, "flat-model");
+        assert_eq!(s.active_connection_id.as_deref(), Some("default"));
+
+        // 幂等:再播种一次不新增、不换 id
+        let before = serde_json::to_string(&s.connections).unwrap();
+        s.seed_connections_from_flat();
+        assert_eq!(serde_json::to_string(&s.connections).unwrap(), before);
+
+        // 用户已有连接时绝不覆盖
+        s.connections[0].name = "我的连接".to_string();
+        s.seed_connections_from_flat();
+        assert_eq!(s.connections.len(), 1);
+        assert_eq!(s.connections[0].name, "我的连接");
+    }
+
+    /// 旧文件兼容(用例 2):无 connections 键必须能正常反序列化 ——
+    /// 漏写 `#[serde(default)]` 会让整文件解析失败、load 回退环境配置(用户设置静默丢失)
+    #[test]
+    fn old_settings_json_without_connections_key_still_loads() {
+        let dir = temp_dir("legacy-no-conn");
+        let mut base = RuntimeSettings::from_config(&test_config());
+        base.openai_base_url = "https://kept.example/v1".to_string();
+        base.model = "kept-model".to_string();
+        let mut json = serde_json::to_value(&base).unwrap();
+        json.as_object_mut().unwrap().remove("connections");
+        json.as_object_mut().unwrap().remove("active_connection_id");
+        write_settings(&dir, &serde_json::to_string_pretty(&json).unwrap());
+
+        let loaded = RuntimeSettings::load(&dir, &test_config());
+        // 判别性:整文件回退 env 时这里会是 test_config 的 example.com / test-model
+        assert_eq!(loaded.openai_base_url, "https://kept.example/v1");
+        assert_eq!(loaded.model, "kept-model");
+        assert_eq!(loaded.connections.len(), 1, "缺键 → 空数组 → 播种");
+        assert_eq!(loaded.connections[0].base_url, "https://kept.example/v1");
+    }
+
+    /// 密文按 id 匹配而非按下标(用例 3):顺序颠倒后保存,每条仍拿回自己的密文
+    #[test]
+    fn profile_ciphertexts_are_matched_by_id_not_index() {
+        let dir = temp_dir("by-id");
+        write_settings(
+            &dir,
+            r#"{"connections":[
+                {"id":"a","api_key":"enc:v1:CT-A"},
+                {"id":"b","api_key":"enc:v1:CT-B"}]}"#,
+        );
+        let mut s = RuntimeSettings::from_config(&test_config());
+        s.connections = vec![profile("a", ""), profile("b", "")]; // 模拟解密失败后的内存态
+        s.active_connection_id = Some("a".to_string());
+        s.connections.reverse(); // 顺序颠倒:按下标实现会把 CT-A 写到 b 头上
+
+        s.save(&dir).unwrap();
+
+        let json = read_json(&dir);
+        assert_eq!(json["connections"][0]["id"], "b");
+        assert_eq!(json["connections"][0]["api_key"], "enc:v1:CT-B");
+        assert_eq!(json["connections"][1]["id"], "a");
+        assert_eq!(json["connections"][1]["api_key"], "enc:v1:CT-A");
+        assert_eq!(
+            json["openai_api_key"], "enc:v1:CT-A",
+            "顶层兼容字段应跟随默认连接 a"
+        );
+    }
+
+    /// 解密失败保真(用例 4):内存空 + 磁盘密文 → 该 id 的密文原样回写,绝不被空串覆盖
+    #[test]
+    fn save_preserves_ciphertext_for_profile_on_disk() {
+        let dir = temp_dir("keep-profile");
+        write_settings(
+            &dir,
+            r#"{"connections":[{"id":"main","api_key":"enc:v1:CT-MAIN"}]}"#,
+        );
+        let mut s = RuntimeSettings::from_config(&test_config());
+        s.connections = vec![profile("main", "")];
+        s.active_connection_id = Some("main".to_string());
+
+        s.save(&dir).unwrap();
+
+        let json = read_json(&dir);
+        assert_eq!(json["connections"][0]["api_key"], "enc:v1:CT-MAIN");
+        assert_eq!(json["openai_api_key"], "enc:v1:CT-MAIN");
+    }
+
+    /// 落盘无明文(用例 5):多套连接的明文 Key 都不得出现在文件里,load 后逐条还原
+    #[cfg(windows)]
+    #[test]
+    fn save_writes_no_plaintext_key_in_any_profile() {
+        let dir = temp_dir("no-plain");
+        let mut s = RuntimeSettings::from_config(&test_config());
+        s.connections = vec![profile("a", "sk-aaa-1111"), profile("b", "sk-bbb-2222")];
+        s.active_connection_id = Some("b".to_string());
+
+        s.save(&dir).unwrap();
+
+        let text = std::fs::read_to_string(dir.join("settings.json")).unwrap();
+        assert!(!text.contains("sk-aaa-1111"), "明文不得落盘:{text}");
+        assert!(!text.contains("sk-bbb-2222"), "明文不得落盘:{text}");
+        assert!(text.contains("enc:v1:"), "应写入密文:{text}");
+
+        let loaded = RuntimeSettings::load(&dir, &test_config());
+        assert_eq!(loaded.openai_api_key, "sk-bbb-2222", "顶层应还原默认连接");
+        assert_eq!(loaded.connections[0].api_key, "sk-aaa-1111");
+        assert_eq!(loaded.connections[1].api_key, "sk-bbb-2222");
+        assert_eq!(loaded.active_connection_id.as_deref(), Some("b"));
+    }
+
+    /// 投影(用例 6):扁平字段 = 默认连接的派生视图;save 以 connections 为准重算(手改扁平字段无效)
+    #[test]
+    fn active_connection_projection_written_to_flat_fields() {
+        let dir = temp_dir("projection");
+        let mut s = RuntimeSettings::from_config(&test_config());
+        s.connections = vec![profile("a", ""), profile("b", "")];
+        s.active_connection_id = Some("a".to_string());
+        s.normalize_connections();
+        assert_eq!(s.openai_base_url, "https://a.example/v1");
+
+        s.active_connection_id = Some("b".to_string());
+        s.normalize_connections();
+        assert_eq!(
+            s.openai_base_url, "https://b.example/v1",
+            "切默认连接应改变投影"
+        );
+        assert_eq!(s.model, "m");
+
+        // 手改扁平字段不再是真源:落盘值按 connections 重算
+        s.openai_base_url = "https://hand-edited.example/v1".to_string();
+        s.save(&dir).unwrap();
+        let json = read_json(&dir);
+        assert_eq!(
+            json["openai_base_url"], "https://b.example/v1",
+            "save 应以 connections 为准重算投影"
+        );
+        assert_eq!(json["active_connection_id"], "b");
+    }
+
+    /// 默认连接回退(用例 7):指向不存在/已停用 → 第一个启用的;全停用 → 空投影
+    #[test]
+    fn active_falls_back_to_first_enabled_when_missing_or_disabled() {
+        let mut s = RuntimeSettings::from_config(&test_config());
+        let mut disabled = profile("a", "");
+        disabled.enabled = false;
+        s.connections = vec![disabled, profile("b", "")];
+
+        s.active_connection_id = Some("ghost".to_string());
+        s.normalize_connections();
+        assert_eq!(s.active_connection_id.as_deref(), Some("b"));
+
+        s.active_connection_id = Some("a".to_string());
+        s.normalize_connections();
+        assert_eq!(
+            s.active_connection_id.as_deref(),
+            Some("b"),
+            "指向已停用 → 回退"
+        );
+
+        // 全停用:投影为空(连接器回退 mock,与「未配置」语义一致)
+        for p in s.connections.iter_mut() {
+            p.enabled = false;
+        }
+        s.normalize_connections();
+        assert_eq!(s.active_connection_id, None);
+        assert!(s.openai_base_url.is_empty());
+        assert!(s.openai_api_key.is_empty());
+        assert!(s.model.is_empty());
+    }
+
+    /// 卫生清理(用例 8):类型回退、空名补名、超长截断、空 id 与重复 id 重新分配(已有 id 不改写)
+    #[test]
+    fn profile_type_and_name_sanitized_on_load() {
+        let dir = temp_dir("sanitize");
+        let mut s = RuntimeSettings::from_config(&test_config());
+        s.connections = vec![
+            ConnectionProfile {
+                id: String::new(),
+                name: "   ".to_string(),
+                connector_type: "ollama".to_string(),
+                base_url: "127.0.0.1:1234".to_string(),
+                api_key: String::new(),
+                model: "m".repeat(250),
+                enabled: true,
+            },
+            profile("dup", ""),
+            profile("dup", ""),
+        ];
+        s.active_connection_id = Some("dup".to_string());
+        // 直接序列化(绕过 save 的规范化),模拟手改 / 跨库合并进来的脏数据
+        write_settings(&dir, &serde_json::to_string_pretty(&s).unwrap());
+
+        let loaded = RuntimeSettings::load(&dir, &test_config());
+        assert_eq!(loaded.connections.len(), 3);
+        assert_eq!(loaded.connections[0].name, "连接 1", "空名应补默认名");
+        assert_eq!(
+            loaded.connections[0].connector_type, "openai-compatible",
+            "未知连接器类型应回退"
+        );
+        assert_eq!(
+            loaded.connections[0].base_url, "http://127.0.0.1:1234/v1",
+            "地址应规范化"
+        );
+        assert_eq!(
+            loaded.connections[0].model.chars().count(),
+            200,
+            "超长应截断"
+        );
+        assert!(!loaded.connections[0].id.is_empty(), "空 id 应补新 id");
+        assert_eq!(loaded.connections[1].id, "dup", "首个 dup 保留原 id");
+        assert_ne!(loaded.connections[2].id, "dup", "重复 id 应重新分配");
+        assert_eq!(
+            loaded.connections[2].name, "连接-dup",
+            "其余字段不受去重影响"
+        );
+        assert_eq!(loaded.active_connection_id.as_deref(), Some("dup"));
+    }
+
+    /// 连接不进模式覆盖层(用例 9 / 口径 P5):task 与 roleplay 看到的连接完全一致
+    #[test]
+    fn connections_do_not_enter_mode_overlay() {
+        use crate::services::settings_service::AppMode;
+        let mut s = RuntimeSettings::from_config(&test_config());
+        s.connections = vec![profile("a", ""), profile("b", "")];
+        s.active_connection_id = Some("b".to_string());
+        s.normalize_connections();
+
+        let task = s.for_mode(AppMode::Task);
+        let roleplay = s.for_mode(AppMode::Roleplay);
+        assert_eq!(task.connections.len(), 2);
+        assert_eq!(task.active_connection_id.as_deref(), Some("b"));
+        assert_eq!(task.openai_base_url, "https://b.example/v1");
+        assert_eq!(task.model, "m");
+        assert_eq!(
+            serde_json::to_string(&task.connections).unwrap(),
+            serde_json::to_string(&roleplay.connections).unwrap(),
+            "连接信息始终共享,不得按模式隔离"
         );
     }
 }

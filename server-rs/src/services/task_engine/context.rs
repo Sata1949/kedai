@@ -7,6 +7,11 @@ use tokio::sync::watch;
 /// 一次任务模式执行的上下文。
 /// settings 为构造时的 task_settings() 快照(for_mode(Task) 合并值):执行全程
 /// 读快照不回头读全局设置,与 legacy 各阶段「执行期设置变更不影响本轮」语义一致。
+///
+/// `Clone`(二维批次 7b):对比模式的 `run_flow` 工具处理器要在节点栈退出后重跑被调流程,
+/// 只能捕获 **owned** 的任务上下文;克隆是副本共享(session_id 与 watch 接收端都可复制),
+/// 取消信号仍指向同一个 `watch` 通道,取消传播不因克隆而断。
+#[derive(Clone)]
 pub(crate) struct TaskRunContext {
     /// 任务 id(tasks 表主键;虚拟 session_id 与事件/落库均以此为准)
     pub task_id: String,
@@ -18,9 +23,26 @@ pub(crate) struct TaskRunContext {
     pub goal: String,
     /// 任务模式有效设置快照(温度/top_p/max_tokens/max_tool_rounds/Agent 提示词等)
     pub settings: RuntimeSettings,
-    /// 执行者人设角色 id(空 = 通用执行者)
+    /// 执行者库 id(空 = 通用执行者)。命中时以该执行者指令为身份段,
+    /// `character_id` 随之不参与(见 TaskPromptKit::assemble_executor_system_prompt)。
+    pub executor_id: Option<String>,
+    /// 执行者人设角色 id(空 = 通用执行者)。**兼容字段**:仅为旧任务保留,
+    /// 新任务由 executor_id 承担;两者都空时即通用执行者。
     pub character_id: Option<String>,
     /// 任务取消通道(TaskService cancel token 机制的接收端;true = 已请求停止)。
     /// 直接作为 run_tool_loop 的 abort 传入,stop 语义与 legacy/聊天路径一致。
     pub cancel: watch::Receiver<bool>,
+    /// **任务级连接**(A 批 B1;空 = 跟随设置的默认连接)。
+    ///
+    /// 用途:节点级 `PlanStep.connection_id` 缺省时,本任务的所有模型调用回退到它——
+    /// 消费点在「工具循环参数装配」这一处;纯生成路径不必看它,那条路径由
+    /// `TaskService::generate_text` 内部统一回退(单一出处,不两处各判一次)。
+    pub connection_id: Option<String>,
+    /// **工作区作用域**(编码通道批次 1;空 = 未绑定工作区)。
+    ///
+    /// 由 `tasks.workspace` 在任务开始时经 `tools::workspace_guard::scope_for_task`
+    /// 构造一次,随上下文下传到每个工具调用:`fs_*` 工具族以它为路径闸门根,
+    /// `bash` 以它为 cwd 缺省与 jail 边界。`Arc` 共享让同一任务的所有工具调用
+    /// 共用一份「本 run 读过哪些文件」的记录(fs_write/fs_edit 的先读后写校验依赖它)。
+    pub scope: Option<std::sync::Arc<crate::models::types::ExecScope>>,
 }

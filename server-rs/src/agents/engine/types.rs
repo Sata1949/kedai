@@ -136,4 +136,7 @@ pub(super) struct RunContext<'a> {
     /// 用 `result.finish_reason` 覆盖(与 content 的覆盖语义一致),收尾据此判定
     /// 聊天回复是否被 max_tokens 截断,并透出到 SseEvent::Finish / 落库 extra。
     pub(super) last_finish_reason: Option<String>,
+    /// 本轮是否因 token 预算上限而停止工具循环(HB-1):步骤循环逐轮覆盖,
+    /// 收尾据此在落库消息 extra 里写 budget_exceeded(刷新后仍能看出停止原因)。
+    pub(super) budget_stopped: bool,
 }

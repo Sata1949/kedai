@@ -17,7 +17,10 @@ fn test_params() -> GenerationParams {
         tools: Vec::new(),
         max_tool_rounds: None,
         tool_choice: crate::models::types::ToolChoice::Auto,
+        connection_id: None,
         parallel_tool_calls: None,
+        step_budget: None,
+        semantic_guard: None,
     }
 }
 
@@ -552,4 +555,292 @@ fn sse_parser_rejects_duplicate_tool_call_ids() {
         )
         .unwrap_err();
     assert!(err2.contains("重复工具调用 id"), "重复 id 应报错: {err2}");
+}
+
+// ===== 空闲看门狗口径(2026-09-18 修正)=====
+//
+// 背景:此前按「收到任何字节」重置空闲计时,而上游可以在建流后只发 SSE 注释心跳
+// (`: ping`)——字节在来、正文不出,看门狗永不触发,读取循环可无限挂起。
+// 这组用例锁「只有有效数据事件才算推进」与「注释不续命」两条口径。
+
+/// 注释心跳不算推进:只有合法 JSON data 行计 1,注释/空行计 0。
+#[test]
+fn sse_comment_heartbeat_is_not_progress() {
+    let mut parser = SseParser::default();
+    let mut out = Vec::new();
+
+    // 仅注释行(SSE 心跳的标准形态),无 data 前缀 → 0
+    let n = parser.push(b": ping\n\n", &mut out).unwrap();
+    assert_eq!(n, 0, "注释行不得算作推进信号");
+    assert!(out.is_empty(), "注释行不应产出任何块");
+
+    // 合法数据事件 → 1
+    let n = parser
+        .push(
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+            &mut out,
+        )
+        .unwrap();
+    assert_eq!(n, 1, "合法 JSON data 应记一次推进");
+    assert!(matches!(&out[0], LlmStreamChunk::Token(t) if t == "hi"));
+
+    // [DONE] 也是推进(流正常收尾,不是停滞)
+    let n = parser.push(b"data: [DONE]\n\n", &mut out).unwrap();
+    assert_eq!(n, 1, "[DONE] 应记一次推进");
+    assert!(parser.is_done());
+}
+
+/// 非 JSON 的 data 行(部分网关的 keepalive 形态)容忍但不算推进。
+#[test]
+fn sse_non_json_data_line_is_not_progress() {
+    let mut parser = SseParser::default();
+    let mut out = Vec::new();
+    let n = parser.push(b"data: keep-alive\n\n", &mut out).unwrap();
+    assert_eq!(n, 0, "非 JSON data 行不构成推进");
+}
+
+/// 一次 push 含多个事件时累加计数(网络分块边界不影响判定)。
+#[test]
+fn sse_progress_counts_all_events_in_one_chunk() {
+    let mut parser = SseParser::default();
+    let mut out = Vec::new();
+    let n = parser
+        .push(
+            b": ping\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n\n",
+            &mut out,
+        )
+        .unwrap();
+    assert_eq!(n, 2, "同批 2 个数据事件 + 1 个注释 → 计数为 2");
+}
+
+/// 核心回归:上游只发注释心跳(无任何数据事件)→ 空闲阈值到达后报超时,不再无限等待。
+/// 用合成流 + 毫秒级阈值,不必真等 120s。
+#[tokio::test]
+async fn heartbeat_only_stream_times_out_instead_of_hanging() {
+    use futures::stream;
+    use std::time::Duration as StdDuration;
+
+    // 注释心跳无限重复:模拟「上游活着但不产出正文」的停滞形态
+    let heartbeats = stream::repeat_with(|| Ok::<_, std::io::Error>(b": ping\n\n".to_vec()));
+    let (_abort_tx, abort_rx) = watch::channel(false);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+
+    let started = tokio::time::Instant::now();
+    let err = read_sse_stream(heartbeats, abort_rx, tx, StdDuration::from_millis(300))
+        .await
+        .expect_err("只发注释心跳必须超时报错,而非永久挂起");
+    assert!(err.message().contains("停滞超时"), "实际:{}", err.message());
+    // 断言真的在阈值量级返回(自动化用例不能等 120s)
+    assert!(
+        started.elapsed() < StdDuration::from_secs(5),
+        "应在毫秒级阈值内返回,实际耗时 {:?}",
+        started.elapsed()
+    );
+    assert!(rx.try_recv().is_err(), "注释不产出任何块");
+}
+
+/// 数据事件持续产出时不会被空闲阈值误杀(推进即续期)。
+#[tokio::test]
+async fn steady_data_events_do_not_trigger_idle_timeout() {
+    use futures::stream;
+    use std::time::Duration as StdDuration;
+
+    let chunks: Vec<Result<Vec<u8>, std::io::Error>> = vec![
+        Ok(b"data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n".to_vec()),
+        Ok(b"data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n\n".to_vec()),
+        Ok(b"data: [DONE]\n\n".to_vec()),
+    ];
+    // 每个事件之间隔 150ms,小于 400ms 空闲阈值:推进应不断续期至正常收尾
+    let paced = stream::iter(chunks).then(|c| async move {
+        tokio::time::sleep(StdDuration::from_millis(150)).await;
+        c
+    });
+    let (_abort_tx, abort_rx) = watch::channel(false);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+
+    read_sse_stream(paced, abort_rx, tx, StdDuration::from_millis(400))
+        .await
+        .expect("有数据推进时不应超时");
+
+    let mut texts = Vec::new();
+    while let Ok(c) = rx.try_recv() {
+        if let LlmStreamChunk::Token(t) = c {
+            texts.push(t);
+        }
+    }
+    assert_eq!(texts, vec!["a".to_string(), "b".to_string()]);
+}
+
+/// 中断优先于读取:注释心跳不断时,abort 应立即结束(不被字节流拖住)。
+#[tokio::test]
+async fn abort_wins_over_continuous_heartbeats() {
+    use futures::stream;
+    use std::time::Duration as StdDuration;
+
+    let heartbeats = stream::repeat_with(|| Ok::<_, std::io::Error>(b": ping\n\n".to_vec()));
+    let (abort_tx, abort_rx) = watch::channel(false);
+    let (tx, _rx) = mpsc::unbounded_channel();
+
+    let task = tokio::spawn(async move {
+        read_sse_stream(heartbeats, abort_rx, tx, StdDuration::from_secs(30)).await
+    });
+    tokio::time::sleep(StdDuration::from_millis(80)).await;
+    abort_tx.send(true).unwrap();
+    let err = tokio::time::timeout(StdDuration::from_secs(2), task)
+        .await
+        .expect("abort 应立即生效,不该等到 30s 空闲阈值")
+        .unwrap()
+        .expect_err("中断应返回错误");
+    assert_eq!(err.message(), "生成已中断");
+}
+
+/// 退避序列与 Retry-After 上限(HB-4 补测):此前 retry_delay 无任何覆盖——
+/// 上游 429 时的等待时长既影响体验也影响重试是否真能生效。
+#[test]
+fn retry_delay_backoff_sequence_and_retry_after_cap() {
+    // 无 Retry-After:500ms 起步指数增长,封顶 5s;带 ≤250ms jitter(以系统时钟纳秒做,
+    // 故断言区间而非定值)
+    let d1 = retry_delay(1, None).as_millis();
+    assert!(
+        (500..750).contains(&d1),
+        "attempt=1 应为 500ms+jitter: {d1}"
+    );
+    let d2 = retry_delay(2, None).as_millis();
+    assert!(
+        (1000..1250).contains(&d2),
+        "attempt=2 应为 1000ms+jitter: {d2}"
+    );
+    let d3 = retry_delay(3, None).as_millis();
+    assert!(
+        (2000..2250).contains(&d3),
+        "attempt=3 应为 2000ms+jitter: {d3}"
+    );
+    let d5 = retry_delay(5, None).as_millis();
+    assert!((5000..5250).contains(&d5), "指数增长必须封顶 5s: {d5}");
+    // Retry-After 以秒为准,并封顶 30s(上游误配 60 不得真等一分钟)
+    assert_eq!(retry_delay(1, Some(5)), Duration::from_secs(5));
+    assert_eq!(retry_delay(2, Some(60)), Duration::from_secs(30));
+    assert_eq!(retry_delay(1, Some(0)), Duration::from_secs(0));
+}
+
+/// 上游 429 后重试成功:重试提示块必须先于正文产出(HB-4)——
+/// 此前重试只写 tracing,界面表现为「停几十秒然后报错」。
+/// 响应带 Retry-After: 0,用例无需真等退避。
+#[tokio::test]
+async fn retry_emits_notice_before_success() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        // 第一次:429 + Connection: close + Retry-After: 0
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = vec![0; 4096];
+        let _ = socket.read(&mut request).await;
+        socket
+            .write_all(
+                b"HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\nRetry-After: 0\r\nContent-Length: 2\r\n\r\n{}",
+            )
+            .await
+            .unwrap();
+        socket.flush().await.unwrap();
+        drop(socket);
+        // 第二次:200 + 正常 SSE 流
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = vec![0; 4096];
+        let _ = socket.read(&mut request).await;
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let body = b"data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n";
+        socket
+            .write_all(format!("{:X}\r\n", body.len()).as_bytes())
+            .await
+            .unwrap();
+        socket.write_all(body).await.unwrap();
+        socket.write_all(b"\r\n0\r\n\r\n").await.unwrap();
+        socket.flush().await.unwrap();
+    });
+
+    let connector = OpenAiCompatibleConnector::new(&format!("http://{addr}"), "key", "model");
+    let (_abort_tx, abort_rx) = watch::channel(false);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let task = tokio::spawn(async move {
+        connector
+            .generate_stream(
+                &[LlmMessage::plain("user", "hi")],
+                test_params(),
+                abort_rx,
+                tx,
+            )
+            .await
+    });
+
+    let first = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("重试提示应立即产出,不等退避")
+        .unwrap();
+    match first {
+        LlmStreamChunk::Retry {
+            attempt,
+            max,
+            reason,
+        } => {
+            assert_eq!(
+                (attempt, max),
+                (1, MAX_ATTEMPTS),
+                "首次重试应为 1/{MAX_ATTEMPTS}"
+            );
+            assert!(reason.contains("429"), "原因应带上游状态码: {reason}");
+        }
+        other => panic!("首块应为重试提示: {other:?}"),
+    }
+    // 重试成功后照常产出正文
+    let next = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(next, LlmStreamChunk::Token(t) if t == "ok"),
+        "重试后应正常出块"
+    );
+    assert!(task.await.unwrap().is_ok(), "重试后整体应成功");
+}
+
+/// 不可重试状态直接失败(不产生重试提示):401 鉴权类错误不得被当成瞬时故障
+#[tokio::test]
+async fn non_retryable_status_fails_without_retry_notice() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = vec![0; 4096];
+        let _ = socket.read(&mut request).await;
+        socket
+            .write_all(
+                b"HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{}",
+            )
+            .await
+            .unwrap();
+        socket.flush().await.unwrap();
+    });
+
+    let connector = OpenAiCompatibleConnector::new(&format!("http://{addr}"), "key", "model");
+    let (_abort_tx, abort_rx) = watch::channel(false);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let err = connector
+        .generate_stream(
+            &[LlmMessage::plain("user", "hi")],
+            test_params(),
+            abort_rx,
+            tx,
+        )
+        .await
+        .expect_err("401 应直接失败");
+    assert_eq!(err.kind(), LlmErrorKind::AuthFailed);
+    assert!(
+        rx.try_recv().is_err(),
+        "不可重试错误不得产出任何块(含重试提示)"
+    );
 }

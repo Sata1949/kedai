@@ -40,6 +40,12 @@ const h = vi.hoisted(() => ({
   emitClose: null as null | ((err?: Error) => void),
   /** createTask 收到的 task_mode 参数序列(批次 4 透传断言用) */
   createTaskModes: [] as (string | undefined)[],
+  /** createTask 收到的 flow_id 参数序列(二维批次 5a 绑定透传断言用) */
+  createTaskFlowIds: [] as (string | undefined)[],
+  /** createTask 收到的 flow_ids 参数序列(二维批次 7b 对比名单透传断言用) */
+  createTaskFlowIdLists: [] as (string[] | undefined)[],
+  /** createTask 收到的 connection_id 参数序列(B 批 B1 逐任务选用连接透传断言用) */
+  createTaskConnectionIds: [] as (string | undefined)[],
   /** approveTask 收到的 (id, plan) 参数序列(批次 4 批准断言用) */
   approveCalls: [] as Array<{ id: string; plan?: TaskStep[] }>,
   /** followupTask 收到的 (id, content, mode) 参数序列(批次 R2a;R2b+ 扩 mode) */
@@ -81,10 +87,23 @@ vi.mock('../api', async (importOriginal) => {
     runTask: vi.fn(async () => {}),
     stopTask: vi.fn(async () => {}),
     deleteTask: vi.fn(async () => {}),
-    createTask: vi.fn(async (title: string, _characterId?: string, taskMode?: string) => {
-      h.createTaskModes.push(taskMode);
-      return makeTask('pending', title);
-    }),
+    createTask: vi.fn(
+      async (
+        title: string,
+        _characterId?: string,
+        taskMode?: string,
+        _character?: string,
+        flowId?: string,
+        flowIds?: string[],
+        connectionId?: string,
+      ) => {
+        h.createTaskModes.push(taskMode);
+        h.createTaskFlowIds.push(flowId);
+        h.createTaskFlowIdLists.push(flowIds);
+        h.createTaskConnectionIds.push(connectionId);
+        return makeTask('pending', title);
+      },
+    ),
     approveTask: vi.fn(async (id: string, plan?: TaskStep[]) => {
       h.approveCalls.push({ id, plan });
       return { ok: true };
@@ -544,6 +563,9 @@ describe('批次 4 六模式:taskRunMode / approveTask / 新事件分支', () =>
     h.emitEvent = null;
     h.emitClose = null;
     h.createTaskModes = [];
+    h.createTaskFlowIds = [];
+    h.createTaskFlowIdLists = [];
+    h.createTaskConnectionIds = [];
     h.approveCalls = [];
     h.followupCalls = [];
     h.planChatCalls = [];
@@ -575,6 +597,156 @@ describe('批次 4 六模式:taskRunMode / approveTask / 新事件分支', () =>
     memStorage.set('kedai.taskRunMode.v1', 'bogus');
     setActivePinia(createPinia());
     expect(useTaskStore().taskRunMode, '未知模式值应回退 legacy').toBe('legacy');
+  });
+
+  // ===== 二维批次 5a:任务绑定流程(flow_id)=====
+
+  it('taskFlowId 缺省为空(= 跟随当前流程);写入持久化到 kedai.taskFlowId.v1;createTask 透传 flow_id', async () => {
+    const store = useTaskStore();
+    expect(store.taskFlowId, '缺省不绑定流程').toBe('');
+
+    store.taskFlowId = 'flow-b';
+    await flush(); // watch 持久化
+    expect(memStorage.get('kedai.taskFlowId.v1')).toBe('flow-b');
+
+    store.taskRunMode = 'custom';
+    await store.createTask('绑定流程的目标');
+    expect(h.createTaskFlowIds, 'createTask 应透传绑定的 flow_id').toEqual(['flow-b']);
+
+    // 清空绑定(回到跟随当前流程):落盘键应被移除,且请求里不下发 flow_id
+    store.taskFlowId = '';
+    await flush();
+    expect(memStorage.has('kedai.taskFlowId.v1'), '空绑定应清掉持久化键').toBe(false);
+    await store.createTask('跟随当前流程的目标');
+    expect(h.createTaskFlowIds[1]).toBeUndefined();
+  });
+
+  it('localStorage 中的绑定在 store 初始化时恢复(库是否加载不影响取值)', async () => {
+    memStorage.set('kedai.taskFlowId.v1', 'flow-restored');
+    setActivePinia(createPinia());
+    expect(useTaskStore().taskFlowId, '刷新后应保持上次绑定').toBe('flow-restored');
+
+    // 库还没加载时也照原样保留:静默清空会让下次建任务跑到别的编排上
+    memStorage.set('kedai.taskFlowId.v1', '  ');
+    setActivePinia(createPinia());
+    expect(useTaskStore().taskFlowId, '空白值按未绑定处理').toBe('');
+  });
+
+  // ===== 二维批次 7b:对比模式(流程用法 + 可调用名单) =====
+
+  it('taskFlowMode 缺省为 force;写入持久化到 kedai.taskFlowMode.v1;未知值回退 force', async () => {
+    const store = useTaskStore();
+    expect(store.taskFlowMode, '缺省是强制模式(老行为)').toBe('force');
+
+    store.taskFlowMode = 'compare';
+    await flush();
+    expect(memStorage.get('kedai.taskFlowMode.v1')).toBe('compare');
+
+    // 手改/旧版本写入的未知值按 force 处理(与 taskRunMode 的白名单回退同款)
+    memStorage.set('kedai.taskFlowMode.v1', 'whatever');
+    setActivePinia(createPinia());
+    expect(useTaskStore().taskFlowMode).toBe('force');
+  });
+
+  it('taskFlowIds 持久化为 JSON 数组;初始化恢复去空白去重;空名单清键', async () => {
+    const store = useTaskStore();
+    expect(store.taskFlowIds).toEqual([]);
+
+    store.taskFlowIds = ['f-1', 'f-2'];
+    await flush();
+    expect(memStorage.get('kedai.taskFlowIds.v1')).toBe('["f-1","f-2"]');
+
+    // 恢复:形状不对(非数组/非字符串项)一律忽略,不抛错
+    memStorage.set('kedai.taskFlowIds.v1', '{"a":1}');
+    setActivePinia(createPinia());
+    expect(useTaskStore().taskFlowIds).toEqual([]);
+    memStorage.set('kedai.taskFlowIds.v1', '[" f-1 ", "", 3, "f-1"]');
+    setActivePinia(createPinia());
+    expect(
+      useTaskStore().taskFlowIds,
+      '空白项与重复项应被剔除,顺序保持',
+    ).toEqual(['f-1']);
+
+    // 清空名单:落盘键移除(与「无名单」保持同一种表示)
+    const store2 = useTaskStore();
+    store2.taskFlowIds = [];
+    await flush();
+    expect(memStorage.has('kedai.taskFlowIds.v1'), '空名单应清掉持久化键').toBe(false);
+  });
+
+  it('对比名单**仅** custom + compare 时下发:强制模式与非 custom 都不带 flow_ids', async () => {
+    const store = useTaskStore();
+    store.taskRunMode = 'custom';
+    store.taskFlowMode = 'compare';
+    store.taskFlowIds = ['f-1', 'f-2'];
+    await store.createTask('对比模式目标');
+    expect(h.createTaskFlowIdLists[0], 'custom + compare 应透传名单').toEqual(['f-1', 'f-2']);
+
+    // 强制模式:名单留在内存(切回来还在),但请求里绝不下发——后端会 400
+    store.taskFlowMode = 'force';
+    await store.createTask('强制模式目标');
+    expect(h.createTaskFlowIdLists[1], '强制模式不下发名单').toBeUndefined();
+
+    // 非 custom:同样不下发(选择器不渲染,但内存里的名单仍在)
+    store.taskRunMode = 'solo';
+    store.taskFlowMode = 'compare';
+    await store.createTask('非 custom 目标');
+    expect(h.createTaskFlowIdLists[2], '非 custom 不下发名单').toBeUndefined();
+
+    // 名单为空:即使 custom + compare 也不下发(空数组会被后端判 400)
+    store.taskRunMode = 'custom';
+    store.taskFlowIds = [];
+    await store.createTask('空名单目标');
+    expect(h.createTaskFlowIdLists[3], '空名单不下发 flow_ids').toBeUndefined();
+  });
+
+  // ===== B 批 B1:逐任务选用连接(connection_id)=====
+
+  it('taskConnectionId 缺省为空(= 跟随设置的默认连接);写入持久化到 kedai.taskConnectionId.v1', async () => {
+    const store = useTaskStore();
+    expect(store.taskConnectionId, '缺省不指定连接').toBe('');
+
+    store.taskConnectionId = 'conn-b';
+    await flush(); // watch 持久化
+    expect(memStorage.get('kedai.taskConnectionId.v1')).toBe('conn-b');
+
+    // 选回默认连接:落盘键应被移除(与「未指定」保持同一种表示)
+    store.taskConnectionId = '';
+    await flush();
+    expect(memStorage.has('kedai.taskConnectionId.v1'), '空值应清掉持久化键').toBe(false);
+  });
+
+  it('localStorage 中的连接在 store 初始化时恢复(连接列表是否加载不影响取值)', async () => {
+    memStorage.set('kedai.taskConnectionId.v1', 'conn-restored');
+    setActivePinia(createPinia());
+    expect(useTaskStore().taskConnectionId, '刷新后应保持上次选择').toBe('conn-restored');
+
+    // 空白值按未指定处理;失效判定在组件里做(拉取成功且未命中才重置)
+    memStorage.set('kedai.taskConnectionId.v1', '  ');
+    setActivePinia(createPinia());
+    expect(useTaskStore().taskConnectionId).toBe('');
+  });
+
+  it('connection_id 仅非空时下发,且**与任务模式无关**(六模式都吃:它绑 provider 不绑编排)', async () => {
+    const store = useTaskStore();
+    // 缺省:不下发该键(旧客户端请求体逐字节不变)
+    await store.createTask('默认连接目标');
+    expect(h.createTaskConnectionIds[0], '缺省不下发 connection_id').toBeUndefined();
+
+    // 指定连接:legacy 下发
+    store.taskConnectionId = 'conn-b';
+    await store.createTask('指定连接目标');
+    expect(h.createTaskConnectionIds[1], '指定连接应透传').toBe('conn-b');
+
+    // 自定义流程模式下同样下发(与 flow_id 的模式门控**不同**,不做模式判断)
+    store.taskRunMode = 'custom';
+    await store.createTask('自定义流程 + 指定连接');
+    expect(h.createTaskConnectionIds[2], 'custom 模式也应透传 connection_id').toBe('conn-b');
+
+    // 清空选择:此后不再下发
+    store.taskConnectionId = '';
+    await store.createTask('清空后');
+    expect(h.createTaskConnectionIds[3]).toBeUndefined();
   });
 
   it('approveTask 透传 (id, plan) 并在成功后刷新任务详情;不给 plan 时 plan 为 undefined', async () => {
@@ -652,6 +824,67 @@ describe('批次 4 六模式:taskRunMode / approveTask / 新事件分支', () =>
     h.emitEvent!({ type: 'task', task_id: 'other', kind: 'agent_status', detail: '子Agent-2 完成' });
     await flush();
     expect(h.detailFetchCount, '非当前任务不拉详情').toBe(baseDetail + 1);
+  });
+
+  // ===== 执行中进度行(2026-09-18)=====
+  // 后端的 agent_status 事件本就带每轮进展简述,此前只用于刷详情、不展示,导致任务
+  // 长时间执行时界面完全静止(实跑反馈:空转 70 秒无法区分「还在跑」与「已挂死」)。
+  // 这组用例锁「最近一条可见 + 不串任务 + 切任务清空」三条口径。
+
+  it('agent_status 留存最近一条详情供面板展示进度', async () => {
+    const store = useTaskStore();
+    store.appMode = 'task';
+    store.startTaskEvents();
+    await store.selectTask('t1');
+
+    expect(store.lastAgentStatus, '初始无进度').toBeNull();
+    h.emitEvent!({ type: 'task', task_id: 't1', kind: 'agent_status', detail: '主 agent 调用工具 bash' });
+    await flush();
+    expect(store.lastAgentStatus).toBe('主 agent 调用工具 bash');
+
+    // 只保留最近一条(进度行的语义是「此刻在做什么」,不是历史时间线)
+    h.emitEvent!({ type: 'task', task_id: 't1', kind: 'agent_status', detail: '工具 bash 已返回结果' });
+    await flush();
+    expect(store.lastAgentStatus).toBe('工具 bash 已返回结果');
+  });
+
+  it('其它任务的 agent_status 不写入进度行(不串台)', async () => {
+    const store = useTaskStore();
+    store.appMode = 'task';
+    store.startTaskEvents();
+    await store.selectTask('t1');
+    h.emitEvent!({ type: 'task', task_id: 't1', kind: 'agent_status', detail: '主 agent 调用工具 read' });
+    await flush();
+
+    h.emitEvent!({ type: 'task', task_id: 'other', kind: 'agent_status', detail: '别的任务在动' });
+    await flush();
+    expect(store.lastAgentStatus, '非当前任务的进度不得覆盖').toBe('主 agent 调用工具 read');
+  });
+
+  it('细节缺失的 agent_status 不写入进度行(旧服务端事件兼容)', async () => {
+    const store = useTaskStore();
+    store.appMode = 'task';
+    store.startTaskEvents();
+    await store.selectTask('t1');
+    h.emitEvent!({ type: 'task', task_id: 't1', kind: 'agent_status', detail: '先有一条' });
+    await flush();
+
+    h.emitEvent!({ type: 'task', task_id: 't1', kind: 'agent_status' });
+    await flush();
+    expect(store.lastAgentStatus, '无 detail 时保持原值,不写入空串').toBe('先有一条');
+  });
+
+  it('切换任务清空进度行(事件不落库,旧任务的进度不代入新任务)', async () => {
+    const store = useTaskStore();
+    store.appMode = 'task';
+    store.startTaskEvents();
+    await store.selectTask('t1');
+    h.emitEvent!({ type: 'task', task_id: 't1', kind: 'agent_status', detail: 't1 在动' });
+    await flush();
+    expect(store.lastAgentStatus).toBe('t1 在动');
+
+    await store.selectTask('t2');
+    expect(store.lastAgentStatus, '切任务即清空').toBeNull();
   });
 });
 

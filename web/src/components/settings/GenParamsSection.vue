@@ -19,7 +19,11 @@ const store = useAppStore();
 // 生成参数直接绑定 store(storeToRefs),与 useGenerationParams 内部保存逻辑读写同一 store
 const {
   temperature, topP, maxTokens, maxContextTokens, maxToolRounds,
+  maxFlowCallDepth, maxFlowCallsPerTask, defaultNodeMaxContext,
   toolHistoryKeepRounds, toolHistoryBudgetTokens,
+  sessionTokenBudget, sessionBudgetAction,
+  loopGuardSemanticWindow, loopGuardSemanticMinCalls, loopGuardSemanticMaxDistinct,
+  taskStepBudgetSecs, taskIdleTimeoutSecs,
   compactionMode, compactionThreshold, compactionKeepRecent, compactionSnipBytes,
   memoryDistillEnabled, memoryInjectLimit, memoryInjectCharBudget, memoryMaxEntries,
   subagentMaxDepth, subagentMaxConcurrency, subagentResultMaxChars,
@@ -101,6 +105,49 @@ const { tempLabel, topPLabel, ctxLabel, saveParams, paramsMsg, saveParamsNow } =
         />
         <span class="sv-note">AGENT/CUSTOM 工具循环轮次上限(1-200,默认 32)</span>
       </div>
+      <!-- 流程调用闸与节点默认上下文(A 批 A3/A4):三者都是**任务侧**设置
+           (服务端 `apply!(s, is_task, …)` 落在任务覆盖层),角色扮演侧不受影响。
+           缺省值全部等于 A 批之前的行为:深度 2 / 每任务 8 / 不裁剪(0)。 -->
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">流程调用深度</label>
+        <input
+          v-model.number="maxFlowCallDepth"
+          type="number"
+          min="1"
+          max="5"
+          step="1"
+          class="sv-input inject-num"
+          title="任务里节点用 run_flow 工具逐层调用流程的嵌套深度上限(1-5,默认 2);静态子流程(sub_flow_id)的嵌套上限另有 3 层的结构限制"
+        />
+        <span class="sv-note">任务侧:流程动态调用嵌套深度(1-5,默认 2)</span>
+      </div>
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">每任务调用上限</label>
+        <input
+          v-model.number="maxFlowCallsPerTask"
+          type="number"
+          min="1"
+          max="64"
+          step="1"
+          class="sv-input inject-num"
+          title="单个任务内流程调用(run_flow)的次数上限(1-64,默认 8);达到后该任务不再允许新的流程调用"
+        />
+        <span class="sv-note">任务侧:单个任务的流程调用次数上限(1-64,默认 8)</span>
+      </div>
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">节点默认上下文</label>
+        <input
+          v-model.number="defaultNodeMaxContext"
+          type="number"
+          min="0"
+          max="1048576"
+          step="1"
+          class="sv-input inject-num"
+          placeholder="0 = 不裁剪"
+          title="节点自己没写「上下文上限」时用的默认 token 上限(0 = 不裁剪,默认;否则 256-1048576);节点级配置优先"
+        />
+        <span class="sv-note">任务侧:节点未单独设置时的输入 token 上限(0 = 不裁剪,否则 256-1048576)</span>
+      </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">工具历史保留轮数</label>
         <input
@@ -126,6 +173,92 @@ const { tempLabel, topPLabel, ctxLabel, saveParams, paramsMsg, saveParamsNow } =
           title="工具循环历史 token 预算;估算超预算时从最老完整轮起继续摘要,保底最近 1 轮完整。0 = 禁用预算闸门"
         />
         <span class="sv-note">0 = 禁用;否则 1024-1048576(默认 16384)</span>
+      </div>
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">单次生成 token 预算</label>
+        <input
+          v-model.number="sessionTokenBudget"
+          type="number"
+          min="0"
+          max="1000000000"
+          step="1024"
+          class="sv-input inject-num"
+          title="单次生成内工具循环累计 token(prompt+completion)上限;0 = 关闭(默认)。达到上限按下一项的动作处置"
+        />
+        <span class="sv-note">0 = 关闭;否则 1024-1000000000(默认 0)</span>
+      </div>
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">预算超限动作</label>
+        <select
+          v-model="sessionBudgetAction"
+          class="sv-select"
+          title="warn = 只在推理链提示一次并继续;stop = 提示后停止本轮工具循环(已生成正文与用量照常保留)"
+        >
+          <option value="warn">warn · 只提示</option>
+          <option value="stop">stop · 停止工具循环</option>
+        </select>
+        <span class="sv-note">默认 warn;stop 用于硬性控成本(长工具循环提前收尾)</span>
+      </div>
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">空转熔断次数下限</label>
+        <input
+          v-model.number="loopGuardSemanticMinCalls"
+          type="number"
+          min="0"
+          max="64"
+          step="1"
+          class="sv-input inject-num"
+          title="同一工具在窗口内被调用达到该次数、且输出实质无变化时熔断空转;0 = 关闭本闸门"
+        />
+        <span class="sv-note">0 = 关闭;否则 4-64(默认 12)</span>
+      </div>
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">空转熔断窗口 / 输出去重上限</label>
+        <input
+          v-model.number="loopGuardSemanticWindow"
+          type="number"
+          min="4"
+          max="64"
+          step="1"
+          class="sv-input inject-num"
+          title="近多少次工具调用内做空转判定(默认 16)"
+        />
+        <input
+          v-model.number="loopGuardSemanticMaxDistinct"
+          type="number"
+          min="1"
+          max="8"
+          step="1"
+          class="sv-input inject-num"
+          title="窗口内同工具输出指纹去重后不超过该值即判空转(默认 2)"
+        />
+        <span class="sv-note">窗口 4-64(默认 16);去重上限 1-8(默认 2)</span>
+      </div>
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">步骤墙钟预算</label>
+        <input
+          v-model.number="taskStepBudgetSecs"
+          type="number"
+          min="0"
+          max="86400"
+          step="1"
+          class="sv-input inject-num"
+          title="任务模式**单步工具循环**的墙钟上限(秒):到点带着已有产出收尾并记完成,不判失败;0 = 关闭本闸门"
+        />
+        <span class="sv-note">任务侧:单步工具循环上限(默认 1200;0 = 关;建议 ≥300)</span>
+      </div>
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">任务空闲超时</label>
+        <input
+          v-model.number="taskIdleTimeoutSecs"
+          type="number"
+          min="0"
+          max="86400"
+          step="1"
+          class="sv-input inject-num"
+          title="任务模式:运行中的任务连续该秒数既无模型调用也无事件时,由看守自动收尾(与手动停止同源,原因写入任务错误栏);0 = 关闭看守"
+        />
+        <span class="sv-note">任务侧:无活动自动收尾(默认 900;0 = 关;601-86400)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">压缩模式</label>

@@ -52,6 +52,8 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
   const repoIndexOpen = ref(false);
   /** 聊天记录面板开关 */
   const chatRecordsOpen = ref(false);
+  /** 任务执行者管理面板开关(执行者库 CRUD;任务创建下拉旁的「管理」入口打开) */
+  const taskExecutorsOpen = ref(false);
   /**
    * 退出确认弹窗开关。打开时机:桌面壳下发 kedai://close-requested(用户点了窗口关闭),
    * 或 Android 返回键已无弹窗/抽屉可退。确认后发 kedai://exit-app 退出,
@@ -274,6 +276,7 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
     memoryOpen,
     repoIndexOpen,
     chatRecordsOpen,
+    taskExecutorsOpen,
     exitConfirmOpen,
     splashDone,
     modalLoadError,

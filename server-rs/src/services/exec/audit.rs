@@ -67,6 +67,8 @@ pub struct ExecAuditEntry {
     pub exit_code: Option<i64>,
     pub stdout_summary: String,
     pub stderr_summary: String,
+    /// 风险标记(D1 审计增强):'' | data_dir_touch | parent_climb(见 [`classify_risk_flag`])
+    pub risk_flag: String,
 }
 
 /// 一次审计写入的入参(字段多且多为可选,用具名结构避免位置参数错配)。
@@ -83,6 +85,67 @@ pub struct AuditRecord {
     pub exit_code: Option<i32>,
     pub stdout: String,
     pub stderr: String,
+    /// 风险标记(见 [`classify_risk_flag`];无语义时传空串)
+    pub risk_flag: String,
+}
+
+/// 风险标记:命令文本命中了数据目录的绝对路径。
+/// 用途见 [`classify_risk_flag`] —— 这是**审计线索**,不是拦截依据。
+pub const FLAG_DATA_DIR_TOUCH: &str = "data_dir_touch";
+
+/// 风险标记:命令文本含 `..` 路径段(相对上溯,可越过当前工作区)。
+pub const FLAG_PARENT_CLIMB: &str = "parent_climb";
+
+/// 给命令文本打风险标记(供审计筛选与事后追溯),**不改变命令是否执行**。
+///
+/// 为什么只标记不拦截:模型一旦拿到 shell,就能读该进程有权限读的**任意**路径;cwd jail
+/// 只约束「相对路径与缺省目录」,拦不住命令文本里的绝对路径。假装封堵比不封堵更糟——
+/// 这里能做的是把「这轮命令碰了用户真实数据目录 / 试图往上爬」记进审计表,让 D1 那类
+/// 「模型把数据目录当草稿纸」的行为事后可查、可量化(2026-09 实测证据见 docs/经验.md)。
+///
+/// 判定是启发式字符串检查,两个标记取更强的一个:
+/// - `data_dir_touch`:命令含数据目录绝对路径(两种分隔符写法都算,大小写不敏感);
+/// - `parent_climb`:命令含 `..` 路径段(如 `cd ..`、`..\x`、`../x`)。
+pub fn classify_risk_flag(command: &str, data_dir: &std::path::Path) -> String {
+    let dir = data_dir.to_string_lossy().to_lowercase();
+    if !dir.is_empty() {
+        let lower = command.to_lowercase();
+        let back = dir.replace('/', "\\");
+        let slash = dir.replace('\\', "/");
+        if lower.contains(&back) || lower.contains(&slash) {
+            return FLAG_DATA_DIR_TOUCH.into();
+        }
+    }
+    if has_parent_climb(command) {
+        return FLAG_PARENT_CLIMB.into();
+    }
+    String::new()
+}
+
+/// 命令文本是否含 `..` **路径段**:前一个字符是边界(串首或分隔符/空白/引号等)、
+/// 后一个字符是边界或串尾,且不是 `...` 这类省略号。
+fn has_parent_climb(command: &str) -> bool {
+    fn boundary(c: Option<&char>) -> bool {
+        match c {
+            None => true,
+            Some(c) => matches!(
+                c,
+                '/' | '\\' | ' ' | '\t' | '"' | '\'' | '=' | ';' | '&' | '|' | '(' | ')'
+            ),
+        }
+    }
+    let cs: Vec<char> = command.chars().collect();
+    for i in 0..cs.len().saturating_sub(1) {
+        if cs[i] != '.' || cs[i + 1] != '.' {
+            continue;
+        }
+        let before = if i == 0 { None } else { cs.get(i - 1) };
+        let after = cs.get(i + 2);
+        if boundary(before) && boundary(after) && after.map(|c| *c != '.').unwrap_or(true) {
+            return true;
+        }
+    }
+    false
 }
 
 /// 单条摘要保留长度(字符)。审计用于回溯「跑了什么、成没成」,
@@ -103,8 +166,8 @@ pub fn record(db: &Arc<Db>, r: &AuditRecord) -> bool {
     let conn = db.write();
     let result = conn.execute(
         "INSERT INTO exec_audit \
-         (ts, source, task_id, session_id, command, shell, tier, risk, decision, exit_code, stdout_summary, stderr_summary) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+         (ts, source, task_id, session_id, command, shell, tier, risk, decision, exit_code, stdout_summary, stderr_summary, risk_flag) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         rusqlite::params![
             now_iso(),
             r.source.as_str(),
@@ -118,6 +181,7 @@ pub fn record(db: &Arc<Db>, r: &AuditRecord) -> bool {
             r.exit_code.map(|c| c as i64),
             summarize(&r.stdout),
             summarize(&r.stderr),
+            r.risk_flag,
         ],
     );
     match result {
@@ -171,7 +235,7 @@ pub fn list(
     };
     let mut sql = String::from(
         "SELECT id, ts, source, task_id, session_id, command, shell, tier, risk, decision, \
-         exit_code, stdout_summary, stderr_summary FROM exec_audit WHERE 1=1",
+         exit_code, stdout_summary, stderr_summary, risk_flag FROM exec_audit WHERE 1=1",
     );
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     if let Some(s) = source.filter(|s| !s.trim().is_empty()) {
@@ -208,6 +272,7 @@ pub fn list(
             exit_code: row.get(10)?,
             stdout_summary: row.get(11)?,
             stderr_summary: row.get(12)?,
+            risk_flag: row.get(13)?,
         })
     });
     match rows {
@@ -252,7 +317,60 @@ mod tests {
             exit_code: Some(0),
             stdout: "ok".into(),
             stderr: String::new(),
+            risk_flag: String::new(),
         }
+    }
+
+    /// 风险标记分类器(D1 审计增强):命中数据目录绝对路径 / `..` 上溯时打标,
+    /// 普通命令与省略号不误报。**只标记不拦截**——本用例只断言分类结果。
+    #[test]
+    fn risk_flag_marks_data_dir_touch_and_parent_climb() {
+        let data_dir = std::path::Path::new(r"C:\Users\u\AppData\Roaming\com.kedai.app\data");
+        // 命中数据目录绝对路径:反斜杠 / 正斜杠两种写法 + 大小写不敏感
+        assert_eq!(
+            classify_risk_flag(
+                r"type C:\Users\u\AppData\Roaming\com.kedai.app\data\settings.json",
+                data_dir
+            ),
+            FLAG_DATA_DIR_TOUCH
+        );
+        assert_eq!(
+            classify_risk_flag(
+                "cat c:/users/u/appdata/roaming/com.kedai.app/data/kedai.db",
+                data_dir
+            ),
+            FLAG_DATA_DIR_TOUCH
+        );
+        // 相对上溯:`cd ..`、`..\x`、`../x` 都算
+        assert_eq!(
+            classify_risk_flag("cd .. && dir", data_dir),
+            FLAG_PARENT_CLIMB
+        );
+        assert_eq!(
+            classify_risk_flag(r"type ..\settings.json", data_dir),
+            FLAG_PARENT_CLIMB
+        );
+        assert_eq!(
+            classify_risk_flag("cat ../x.txt", data_dir),
+            FLAG_PARENT_CLIMB
+        );
+        // 普通命令(含实测里被反复重试的那类自检命令)不打标
+        assert!(classify_risk_flag("node test/vec2.test.mjs && echo done", data_dir).is_empty());
+        assert!(classify_risk_flag("git status --porcelain", data_dir).is_empty());
+        // 省略号/非路径段的三点不误报
+        assert!(classify_risk_flag("echo 完成…", data_dir).is_empty());
+        assert!(classify_risk_flag("echo a...b", data_dir).is_empty());
+    }
+
+    /// 风险标记随审计行往返落库(列表读出与写入一致)。
+    #[test]
+    fn records_and_reads_risk_flag() {
+        let (_dir, db) = temp_db("flag");
+        let mut r = rec("type ..\\settings.json", AuditDecision::Denied);
+        r.risk_flag = FLAG_PARENT_CLIMB.into();
+        record(&db, &r);
+        let rows = list(&db, 10, None, None);
+        assert_eq!(rows[0].risk_flag, FLAG_PARENT_CLIMB);
     }
 
     #[test]

@@ -3,23 +3,27 @@
 // 子任务 CRUD(create_subtask/set_subtask_status/list_subtasks)。
 // 自 task_service.rs 拆分迁入,纯代码移动,逻辑不变;依赖经 `use super::*` 取自 mod.rs。
 use super::*;
+use crate::services::task_core::assemble_from_plan;
 
 /// 孤儿任务启动恢复(问题④,2026-08-31 实测:服务进程被停后,任务永远停在
 /// running 态):上次进程退出时遗留在 running/planning 的任务,执行上下文已随
 /// 进程消亡、永不再推进,启动时统一置 ended 终态 + error 文本「服务重启,任务中断」。
 /// planned 不动:计划已产出待批准,approve 续跑语义可跨重启存活;
 /// pending(未启动)与终态不动。
+/// **部分成果兜底(提交 2)**:置 ended 时若该任务已完成若干步骤,把它们的产出拼装
+/// 写回 result(与 finalize_run 的 ended 分支同一口径:状态与错误文本不变,只补一个
+/// 可看的成果列,不伪造成果——无已完成步骤的任务 result 保持原样)。
 /// 返回被恢复任务的 id 列表(供 TaskService 在 DB 写成功后逐个发射 status 事件);
 /// 幂等:重复执行零命中(状态已是 ended,不再匹配 IN 条件)。
 pub(super) fn recover_orphan_tasks(db: &Db) -> Vec<String> {
     let conn = db.write();
-    let ids: Vec<String> = match conn
-        .prepare_cached("SELECT id FROM tasks WHERE status IN ('running', 'planning') ORDER BY created_at ASC, rowid ASC")
+    let rows: Vec<(String, String)> = match conn
+        .prepare_cached("SELECT id, plan FROM tasks WHERE status IN ('running', 'planning') ORDER BY created_at ASC, rowid ASC")
         .map(|mut stmt| {
-            stmt.query_map([], |row| row.get(0))
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
                 .map(|rows| rows.filter_map(|r| r.ok()).collect())
         }) {
-        Ok(Ok(ids)) => ids,
+        Ok(Ok(rows)) => rows,
         Ok(Err(e)) => {
             tracing::warn!(error = e.to_string(), "孤儿任务恢复查询失败");
             return Vec::new();
@@ -29,6 +33,7 @@ pub(super) fn recover_orphan_tasks(db: &Db) -> Vec<String> {
             return Vec::new();
         }
     };
+    let ids: Vec<String> = rows.iter().map(|(id, _)| id.clone()).collect();
     if ids.is_empty() {
         return ids;
     }
@@ -44,15 +49,54 @@ pub(super) fn recover_orphan_tasks(db: &Db) -> Vec<String> {
             "服务启动:遗留执行中任务已标记中断(孤儿恢复)"
         );
     }
+    // 部分成果兜底:只在 result 尚为空时写入(WHERE result = '' 保证不覆盖既有成果)
+    let mut salvaged = 0usize;
+    for (id, plan_str) in &rows {
+        let Ok(plan) = serde_json::from_str::<Vec<TaskStep>>(plan_str) else {
+            continue;
+        };
+        let Some(text) = assemble_from_plan(&plan) else {
+            continue;
+        };
+        if conn
+            .execute(
+                "UPDATE tasks SET result = ?1, updated_at = ?2 WHERE id = ?3 AND result = ''",
+                params![text, now_iso(), id],
+            )
+            .unwrap_or(0)
+            > 0
+        {
+            salvaged += 1;
+        }
+    }
+    if salvaged > 0 {
+        tracing::info!(
+            count = salvaged,
+            "服务启动:中断任务已补写已完成步骤的产出(部分成果兜底)"
+        );
+    }
     ids
 }
 
-/// 任务主表列:0 id, 1 title, 2 status, 3 plan, 4 result, 5 error, 6 character_id, 7 created_at, 8 updated_at, 9 task_mode
+/// 任务主表列:0 id, 1 title, 2 status, 3 plan, 4 result, 5 error, 6 character_id,
+/// 7 created_at, 8 updated_at, 9 task_mode, 10 executor_id, 11 flow_id, 12 flow_ids,
+/// 13 connection_id, 14 workspace (新增列一律追加在表尾,与 TASK_COLS 及建表顺序一致)
+///
+/// **有意不含 flow_snapshot**:它是 O(流程库) 体积的 JSON,而 TASK_COLS 被列表与详情
+/// 每次事件刷新都用;要读快照走 [`TaskService::flow_snapshot`](本文件的单列查询)。
 pub(super) fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<TaskRecord> {
     let plan_str: String = row.get(3)?;
     let plan = serde_json::from_str(&plan_str).unwrap_or_default();
     let status: String = row.get(2)?;
     let task_mode: String = row.get(9)?;
+    // 对比模式名单(二维批次 7b):JSON 数组列,读取容错为空(None)——「列有脏数据」
+    // 不是「任务跑不起来」的理由,与 status/task_mode 的 from_str_lossy 同款约定。
+    let flow_ids_raw: Option<String> = row.get(12)?;
+    let flow_ids = flow_ids_raw
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+        .filter(|v| !v.is_empty());
     Ok(TaskRecord {
         id: row.get(0)?,
         title: row.get(1)?,
@@ -66,11 +110,23 @@ pub(super) fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<TaskRecord> {
         updated_at: row.get(8)?,
         // DB 读取容错:未知模式记 warn 回退 Legacy(与 status 同款约定)
         task_mode: TaskRunMode::from_str_lossy(&task_mode),
+        executor_id: row.get(10)?,
+        flow_id: row.get(11)?,
+        flow_ids,
+        // 任务级连接(A 批 B1):纯 id 列,读取不做容错——引用失效由运行期按 5b 口径
+        // **明确报错**(不静默回退默认连接),与 flow_ids 的 JSON 解析容错不同源。
+        connection_id: row.get(13)?,
+        // 工作区(编码通道批次):创建期冻结的 canonical 绝对路径;NULL/空串都视为未绑定
+        // (空串只会来自手改 DB,一并归一为 None,免得下游把空路径当「绑定了一个根目录」)
+        workspace: row
+            .get::<_, Option<String>>(14)?
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
     })
 }
 
-pub(super) const TASK_COLS: &str =
-    "id, title, status, plan, result, error, character_id, created_at, updated_at, task_mode";
+pub(super) const TASK_COLS: &str = "id, title, status, plan, result, error, character_id, \
+     created_at, updated_at, task_mode, executor_id, flow_id, flow_ids, connection_id, workspace";
 
 /// 按字符截断(中文安全,不切 char 边界;调用追踪摘要用)
 fn truncate_chars(s: &str, max: usize) -> String {
@@ -198,6 +254,63 @@ impl TaskService {
         })
     }
 
+    /// 记录本任务**本轮实际使用的流程编排**(二维批次 5a):绑定任务在创建时已冻结,
+    /// 未绑定任务在**执行开始时**由执行器回写(重跑按新的当前流程覆写,语义与旧版一致)。
+    ///
+    /// 有意**不发事件**:快照是任务行的元数据(徽标/追溯的数据源),前端在详情加载时
+    /// 读取即可——为它新增一种 SSE kind 要三处同步,收益为零。
+    /// 落盘失败记 error 日志并返回 false(不阻断任务执行:快照缺失只影响徽标)。
+    pub(crate) fn set_flow_snapshot(&self, id: &str, snapshot: &FlowSnapshot) -> bool {
+        let json = match serde_json::to_string(snapshot) {
+            Ok(text) => text,
+            Err(e) => {
+                tracing::error!(task_id = id, error = e.to_string(), "流程快照序列化失败");
+                return false;
+            }
+        };
+        let changed = self
+            .db
+            .write()
+            .execute(
+                "UPDATE tasks SET flow_snapshot = ?1, updated_at = ?2 WHERE id = ?3",
+                params![json, now_iso(), id],
+            )
+            .map(|n| n > 0)
+            .unwrap_or(false);
+        if !changed {
+            tracing::error!(task_id = id, "流程快照写入未命中任何任务行");
+        }
+        changed
+    }
+
+    /// 读任务的流程快照(二维批次 5a;未绑定且未跑过 = None)。
+    ///
+    /// 单列查询(不进 `TASK_COLS`,见其文档):快照是 O(流程库) 体积,列表接口
+    /// 每次事件刷新都要用,不能顺带拉它。损坏的快照记 warn 后按「无快照」处理——
+    /// 详情接口不该因为一列脏数据整条失败。
+    pub fn flow_snapshot(&self, id: &str) -> Option<FlowSnapshot> {
+        let raw: Option<String> = self
+            .db
+            .read()
+            .ok()?
+            .query_row(
+                "SELECT flow_snapshot FROM tasks WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten();
+        let raw = raw?;
+        match serde_json::from_str::<FlowSnapshot>(&raw) {
+            Ok(snapshot) => Some(snapshot),
+            Err(e) => {
+                tracing::warn!(task_id = id, error = e.to_string(), "流程快照解析失败");
+                None
+            }
+        }
+    }
+
     /// 写入最终结果并置终态:全部步骤成功为 done;含 error 步骤为 partial(部分完成)。
     pub(super) fn set_result(&self, id: &str, result: &str, status: TaskStatus) -> bool {
         self.set_result_with_error(id, result, status, None)
@@ -245,7 +358,8 @@ impl TaskService {
     /// planned 态写入计划清单文本(批次 R1,plan 模式):只更新 result 列,不动状态
     /// (planned 终态由 PlanExecutor 先行写入,本方法随其后)。
     /// planned 态 result 的语义是「待批准的计划清单」:供用户在批准前预览完整计划;
-    /// 批准续跑完成后由终态 result(汇总文本 + 「## 最终计划」段)整体覆盖。
+    /// 批准续跑完成后由终态 result(**汇总文本**,提交 2 起不再拼「## 最终计划」段)
+    /// 整体覆盖。
     /// 写库成功后发射既有 kind="status" 事件(detail 与终态 set_result 文案区分;
     /// 不引入新事件 kind;WP4 纪律:仅 DB 写成功后发射)。
     pub(crate) fn set_planned_result(&self, id: &str, result: &str) -> bool {
@@ -266,6 +380,80 @@ impl TaskService {
                     Some(TaskStatus::Planned),
                     Some("计划清单已写入,待批准".into()),
                 );
+            }
+            changed
+        })
+    }
+
+    /// 兜底写 result(提交 2 部分成果兜底,用于取消 ended / 失败 error / 重启中断三类
+    /// 「任务未完成但已有已完成步骤」的收尾):**只更新 result 列**,不动 status 与
+    /// error——终态与错误文本由调用方既有的 set_status / set_error 决定,本方法只为
+    /// 「已完成步骤的产出」留一个可见出口,不改变任何终态语义。
+    /// 写库成功后发射既有 kind="status" 事件(detail 与终态文案区分;不引入新事件 kind;
+    /// WP4 纪律:仅 DB 写成功后发射)。
+    pub(super) fn set_result_only(&self, id: &str, result: &str) -> bool {
+        Self::blocking(|| {
+            let conn = self.db.write();
+            let changed = conn
+                .execute(
+                    "UPDATE tasks SET result = ?1, updated_at = ?2 WHERE id = ?3",
+                    params![result, now_iso(), id],
+                )
+                .map(|n| n > 0)
+                .unwrap_or(false);
+            drop(conn);
+            if changed {
+                self.emit_event(
+                    TaskEventKind::Status,
+                    id,
+                    None,
+                    None,
+                    Some("已保存已完成步骤的产出(任务未完成)".into()),
+                );
+            }
+            changed
+        })
+    }
+
+    /// 清空 result(提交 2,plan 批准续跑入口用):planned 态写入的计划清单是「待批准预览」,
+    /// 批准后即过期——留着会让续跑的失败/取消兜底(判据是「result 为空才补写」)整条跳过,
+    /// 成果卡里就只剩一份计划被当成「已完成部分的成果」。
+    /// 只更新 result 列,不动 status/error;**不发事件**:调用点(approve)紧随其后就会写
+    /// status(planning)/plan,前端由那些事件刷新,多一帧无信息量的事件反而无益。
+    pub(super) fn clear_result(&self, id: &str) -> bool {
+        Self::blocking(|| {
+            let conn = self.db.write();
+            conn.execute(
+                "UPDATE tasks SET result = '', updated_at = ?1 WHERE id = ?2",
+                params![now_iso(), id],
+            )
+            .map(|n| n > 0)
+            .unwrap_or(false)
+        })
+    }
+
+    /// 只写 error 列的终态原因(提交 3 · D7,空闲看守用):**不动 status**——
+    /// 终态(ended)由 `finish_ended` 里的 set_status 决定,本方法只为「为什么结束」留痕
+    /// (与 `set_result_only` 同形:一个只写 result、一个只写 error,都不串终态)。
+    /// 为什么不用 `set_error`:那个会把状态置成 error,而空闲收尾的语义是**正常收尾**
+    /// (与用户点 stop 同源),status 必须是 ended。
+    /// 「ended + 非空 error」不是新形态:`recover_orphan_tasks` 的重启中断行就是这么落的。
+    /// 写库成功后发既有 kind="status" 事件(status 传 None,细节在 detail),不引新 kind。
+    pub(super) fn set_error_only(&self, id: &str, error: &str) -> bool {
+        Self::blocking(|| {
+            let conn = self.db.write();
+            let changed = conn
+                .execute(
+                    "UPDATE tasks SET error = ?1, updated_at = ?2 WHERE id = ?3",
+                    params![error, now_iso(), id],
+                )
+                .map(|n| n > 0)
+                .unwrap_or(false);
+            drop(conn);
+            if changed {
+                // detail 截断防超长文本撑大事件帧(口径同 set_error)
+                let detail: String = error.chars().take(120).collect();
+                self.emit_event(TaskEventKind::Status, id, None, None, Some(detail));
             }
             changed
         })
@@ -293,6 +481,42 @@ impl TaskService {
                 );
             }
             changed
+        })
+    }
+
+    /// 运行中(或规划中)任务的**最近活动时刻**(提交 3 · D7):返回
+    /// `(任务 id, 最近活动 ISO 时间戳)`。
+    ///
+    /// 口径:`COALESCE(MAX(task_llm_calls.created_at), tasks.updated_at)`——
+    /// 有调用行就用最近一行,没有(刚进 running、或在长工具循环里还没落行)就回退
+    /// `tasks.updated_at`(状态写入时刻)。注意本表两条口径都**不是**实时活动信号:
+    /// solo/plan/team 的调用行是整轮工具循环结束后才落(`solo.rs` 的统一出口),
+    /// 所以看守必须叠加进程内心跳(`TaskService::activity`),本查询只服务
+    /// 「没有心跳的任务」(重启前遗留、测试直插行)——判据合成见 `idle.rs`。
+    ///
+    /// 只看 running/planning:planned 是「等用户批准」的合法静止态,end/pending 不在看守范围。
+    pub(super) fn running_tasks_activity(&self) -> Vec<(String, String)> {
+        Self::blocking(|| {
+            let Ok(conn) = self.db.read() else {
+                tracing::warn!("查询运行中任务失败:数据库读连接不可用");
+                return Vec::new();
+            };
+            let Ok(mut stmt) = conn.prepare(
+                "SELECT t.id, COALESCE((SELECT MAX(c.created_at) FROM task_llm_calls c \
+                 WHERE c.task_id = t.id), t.updated_at) \
+                 FROM tasks t WHERE t.status IN ('running','planning')",
+            ) else {
+                tracing::warn!("查询运行中任务失败:语句准备失败");
+                return Vec::new();
+            };
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)));
+            match rows {
+                Ok(iter) => iter.filter_map(Result::ok).collect(),
+                Err(e) => {
+                    tracing::warn!(error = %e, "读取运行中任务活动时刻失败");
+                    Vec::new()
+                }
+            }
         })
     }
 
@@ -742,6 +966,8 @@ mod tests {
     /// 「服务重启,任务中断」;planned(待批准可续跑)/pending/终态不动;
     /// 幂等(重复执行零命中);模拟「重开」(drop 后重新 open 同一库文件)后
     /// 再插一行 running 仍能恢复——恢复语义跨进程成立。
+    /// 提交 2 追加:中断任务若已完成若干步骤,产出补写进 result(部分成果兜底);
+    /// 无已完成产出不伪造,已有 result 不覆盖。
     #[test]
     fn recover_orphan_tasks_marks_interrupted_once() {
         let dir = TempDataDir::new("task-recover");
@@ -764,13 +990,58 @@ mod tests {
                     )
                     .unwrap();
                 }
+                // 部分成果兜底(提交 2)三态:有已完成步骤 → 补写拼装成果;只有失败/
+                // 未开始步骤 → 保持空(不伪造);已有 result → 不覆盖
+                let done_plan =
+                    r#"[{"name":"步骤一","goal":"g","status":"done","result":"已完成产出"}]"#;
+                let empty_plan =
+                    r#"[{"name":"步骤一","goal":"g","status":"error","result":"失败原因"}]"#;
+                for (id, plan) in [("t-salvage", done_plan), ("t-noplan", empty_plan)] {
+                    conn.execute(
+                        "INSERT INTO tasks (id, title, status, plan, created_at, updated_at) \
+                         VALUES (?1, '目标', 'running', ?2, 'c', 'u')",
+                        params![id, plan],
+                    )
+                    .unwrap();
+                }
+                conn.execute(
+                    "INSERT INTO tasks (id, title, status, plan, result, created_at, updated_at) \
+                     VALUES ('t-keep', '目标', 'running', ?1, '既有成果', 'c', 'u')",
+                    params![done_plan],
+                )
+                .unwrap();
             }
             let mut ids = recover_orphan_tasks(&db);
             ids.sort();
             assert_eq!(
                 ids,
-                vec!["t-planning".to_string(), "t-running".to_string()],
+                vec![
+                    "t-keep".to_string(),
+                    "t-noplan".to_string(),
+                    "t-planning".to_string(),
+                    "t-running".to_string(),
+                    "t-salvage".to_string()
+                ],
                 "running/planning 应被恢复"
+            );
+            let result_of = |db: &Db, id: &str| -> String {
+                db.read()
+                    .unwrap()
+                    .query_row("SELECT result FROM tasks WHERE id = ?1", params![id], |r| {
+                        r.get(0)
+                    })
+                    .unwrap()
+            };
+            let salvaged = result_of(&db, "t-salvage");
+            assert!(
+                salvaged.contains("## 步骤一") && salvaged.contains("已完成产出"),
+                "重启中断的任务应补写已完成步骤的产出: {salvaged}"
+            );
+            assert_eq!(result_of(&db, "t-noplan"), "", "无已完成产出时不得伪造成果");
+            assert_eq!(
+                result_of(&db, "t-keep"),
+                "既有成果",
+                "已有 result 不得被兜底覆盖"
             );
             let status_error_of = |db: &Db, id: &str| -> (String, String) {
                 db.read()

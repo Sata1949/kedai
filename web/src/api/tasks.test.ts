@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   approveTask,
+  bindTask,
   createTask,
   deleteTask,
   followupTask,
@@ -69,6 +70,18 @@ describe('api/tasks REST 封装', () => {
       if (url.endsWith('/api/tasks/t1/stop') && method === 'POST') return json({ ok: true });
       if (url.endsWith('/api/tasks/t1/approve') && method === 'POST') return json({ ok: true });
       if (url.endsWith('/api/tasks/t1/followup') && method === 'POST') return json({ ok: true });
+      if (url.endsWith('/api/tasks/t1/bind') && method === 'POST') {
+        return json({
+          ok: true,
+          task: {
+            id: 't1', title: 'x', status: 'pending', plan: [], result: '', error: '',
+            task_mode: 'custom', created_at: '', updated_at: '',
+          },
+        });
+      }
+      if (url.endsWith('/api/tasks/a%2Fb/bind') && method === 'POST') {
+        return json({ ok: true, task: { id: 'a/b', title: 'x', status: 'pending', plan: [], result: '', error: '', created_at: '', updated_at: '' } });
+      }
       if (url.endsWith('/api/tasks/t1/plan-chat') && method === 'POST') {
         return json({ ok: true, plan: [{ name: '修订步骤甲', goal: '修订目标甲', status: 'pending', result: '' }] });
       }
@@ -84,7 +97,7 @@ describe('api/tasks REST 封装', () => {
   it('list/get/create/run/stop/delete/usage-total 的路径与方法契约', async () => {
     await listTasks();
     await getTask('t1');
-    await createTask('目标', 'char-1');
+    await createTask('目标', 'exec-1');
     await runTask('t1');
     await stopTask('t1');
     await deleteTask('t1');
@@ -103,11 +116,11 @@ describe('api/tasks REST 封装', () => {
     expect(calls).toContainEqual(['/api/tasks/t1', 'DELETE']);
     expect(calls).toContainEqual(['/api/tasks/usage-total', 'GET']);
 
-    // create 请求体带 character_id;未指定模式时 task_mode 缺省 legacy(批次 4)
+    // create 请求体带 executor_id(执行者与角色卡解耦);未指定模式时 task_mode 缺省 legacy(批次 4)
     const createCall = vi.mocked(fetch).mock.calls.find(
       ([input, init]) => String(input) === '/api/tasks' && (init?.method ?? 'GET') === 'POST',
     );
-    expect(JSON.parse(String(createCall?.[1]?.body))).toEqual({ title: '目标', character_id: 'char-1', task_mode: 'legacy' });
+    expect(JSON.parse(String(createCall?.[1]?.body))).toEqual({ title: '目标', executor_id: 'exec-1', task_mode: 'legacy' });
   });
 
   it('createTask 指定 taskMode 时透传 task_mode(批次 4 六模式)', async () => {
@@ -115,7 +128,140 @@ describe('api/tasks REST 封装', () => {
     const createCall = vi.mocked(fetch).mock.calls.find(
       ([input, init]) => String(input) === '/api/tasks' && (init?.method ?? 'GET') === 'POST',
     );
-    expect(JSON.parse(String(createCall?.[1]?.body))).toEqual({ title: '目标', character_id: null, task_mode: 'team' });
+    expect(JSON.parse(String(createCall?.[1]?.body))).toEqual({ title: '目标', executor_id: null, task_mode: 'team' });
+  });
+
+  it('createTask 的 characterId 兼容入参仅在显式给出时下发(新代码不应使用)', async () => {
+    /** 取最后一次 /api/tasks POST 的请求体(同一用例内两次调用,find 会命中第一次) */
+    const lastCreateBody = (): Record<string, unknown> => {
+      const posts = vi.mocked(fetch).mock.calls.filter(
+        ([input, init]) => String(input) === '/api/tasks' && (init?.method ?? 'GET') === 'POST',
+      );
+      return JSON.parse(String(posts[posts.length - 1]?.[1]?.body)) as Record<string, unknown>;
+    };
+
+    // 不传:请求体不得出现 character_id 键(避免污染新请求)
+    await createTask('目标', 'exec-1', 'legacy');
+    expect(lastCreateBody()).not.toHaveProperty('character_id');
+
+    // 显式传(旧调用方):按兼容语义下发
+    await createTask('目标', undefined, 'legacy', 'char-legacy');
+    expect(lastCreateBody()).toMatchObject({
+      title: '目标',
+      executor_id: null,
+      character_id: 'char-legacy',
+    });
+  });
+
+  it('createTask 的 flowId 仅在显式给出时下发(二维批次 5a 流程绑定)', async () => {
+    const lastCreateBody = (): Record<string, unknown> => {
+      const posts = vi.mocked(fetch).mock.calls.filter(
+        ([input, init]) => String(input) === '/api/tasks' && (init?.method ?? 'GET') === 'POST',
+      );
+      return JSON.parse(String(posts[posts.length - 1]?.[1]?.body)) as Record<string, unknown>;
+    };
+
+    // 不传(= 跟随当前流程):请求体不得出现 flow_id 键,旧客户端请求体逐字节不变
+    await createTask('目标', undefined, 'custom');
+    expect(lastCreateBody()).not.toHaveProperty('flow_id');
+    expect(lastCreateBody()).toEqual({ title: '目标', executor_id: null, task_mode: 'custom' });
+
+    // 显式传:随请求下发(后端据此在创建时冻结快照)
+    await createTask('目标', undefined, 'custom', undefined, 'flow-b');
+    expect(lastCreateBody()).toEqual({
+      title: '目标',
+      executor_id: null,
+      task_mode: 'custom',
+      flow_id: 'flow-b',
+    });
+  });
+
+  it('createTask 的 flowIds 仅在非空时下发(二维批次 7b 对比模式名单)', async () => {
+    const lastCreateBody = (): Record<string, unknown> => {
+      const posts = vi.mocked(fetch).mock.calls.filter(
+        ([input, init]) => String(input) === '/api/tasks' && (init?.method ?? 'GET') === 'POST',
+      );
+      return JSON.parse(String(posts[posts.length - 1]?.[1]?.body)) as Record<string, unknown>;
+    };
+
+    // 不给(强制模式):请求体不得出现 flow_ids 键,旧客户端请求体逐字节不变
+    await createTask('目标', undefined, 'custom', undefined, 'flow-a');
+    expect(lastCreateBody()).not.toHaveProperty('flow_ids');
+    expect(lastCreateBody()).toEqual({
+      title: '目标',
+      executor_id: null,
+      task_mode: 'custom',
+      flow_id: 'flow-a',
+    });
+
+    // 空数组同样不下发:后端把「给了空数组」判 400(空名单 = 名存实亡),
+    // 这里挡一次比让用户撞一次失败好
+    await createTask('目标', undefined, 'custom', undefined, undefined, []);
+    expect(lastCreateBody()).not.toHaveProperty('flow_ids');
+
+    // 非空:原样下发,且**顺序保持**(后端工具描述按名单顺序列举)
+    await createTask('目标', undefined, 'custom', undefined, undefined, ['f-2', 'f-1']);
+    expect(lastCreateBody()).toEqual({
+      title: '目标',
+      executor_id: null,
+      task_mode: 'custom',
+      flow_ids: ['f-2', 'f-1'],
+    });
+  });
+
+  it('createTask 的 connectionId 仅在非空时下发(B 批 B1 逐任务选用连接)', async () => {
+    const lastCreateBody = (): Record<string, unknown> => {
+      const posts = vi.mocked(fetch).mock.calls.filter(
+        ([input, init]) => String(input) === '/api/tasks' && (init?.method ?? 'GET') === 'POST',
+      );
+      return JSON.parse(String(posts[posts.length - 1]?.[1]?.body)) as Record<string, unknown>;
+    };
+
+    // 不给(= 跟随设置的默认连接):请求体不得出现 connection_id 键,旧客户端请求体逐字节不变
+    await createTask('目标', undefined, 'solo');
+    expect(lastCreateBody()).not.toHaveProperty('connection_id');
+    expect(lastCreateBody()).toEqual({ title: '目标', executor_id: null, task_mode: 'solo' });
+
+    // 非空:原样下发,且**与任务模式无关**(solo 也吃:它绑的是 provider,不是编排)
+    await createTask('目标', undefined, 'solo', undefined, undefined, undefined, 'conn-b');
+    expect(lastCreateBody()).toEqual({
+      title: '目标',
+      executor_id: null,
+      task_mode: 'solo',
+      connection_id: 'conn-b',
+    });
+  });
+
+  it('bindTask:POST /tasks/{id}/bind,flow_id 与 flow_ids 全量显式下发(B 批 B3)', async () => {
+    /** 取最后一次 bind 的请求体(同一用例内多次调用,find 只命中第一次) */
+    const lastBindBody = (): Record<string, unknown> => {
+      const posts = vi.mocked(fetch).mock.calls.filter(
+        ([input, init]) => String(input).includes('/bind') && (init?.method ?? 'GET') === 'POST',
+      );
+      return JSON.parse(String(posts[posts.length - 1]?.[1]?.body)) as Record<string, unknown>;
+    };
+
+    // 解绑 + 清空名单:两个键都必须**出现**——与 createTask 的「仅非空下发」口径相反,
+    // 省掉它们后端无法区分「不改」与「清空」,「跟随当前流程 / 强制模式」就表达不出来
+    await bindTask('t1', null, []);
+    expect(lastBindBody()).toEqual({ flow_id: null, flow_ids: [] });
+
+    // 绑定 + 保名单:原样下发,顺序保持(后端工具描述按名单顺序列举)
+    await bindTask('t1', 'flow-b', ['f-2', 'f-1']);
+    expect(lastBindBody()).toEqual({ flow_id: 'flow-b', flow_ids: ['f-2', 'f-1'] });
+
+    // 保留绑定、只清名单(另一侧的组合:根流程在,强制模式)
+    await bindTask('t1', 'flow-b', []);
+    expect(lastBindBody()).toEqual({ flow_id: 'flow-b', flow_ids: [] });
+
+    // 返回体取 task 字段(调用方据此就地更新列表与当前任务详情,不另发一次 GET)
+    const task = await bindTask('t1', 'flow-b', []);
+    expect(task.id).toBe('t1');
+
+    // id 含特殊字符时路径必须转义
+    await bindTask('a/b', null, []);
+    const urls = vi.mocked(fetch).mock.calls.map(([input]) => String(input));
+    expect(urls).toContain('/api/tasks/a%2Fb/bind');
   });
 
   it('approveTask:POST /tasks/{id}/approve;不给 plan 时空体,给了 plan 则带 plan 字段', async () => {
@@ -130,6 +276,30 @@ describe('api/tasks REST 封装', () => {
     expect(approveCalls).toHaveLength(2);
     expect(JSON.parse(String(approveCalls[0]?.[1]?.body))).toEqual({});
     expect(JSON.parse(String(approveCalls[1]?.[1]?.body))).toEqual({ plan });
+  });
+
+  it('approveTask 的执行方式:不传时不下发 exec_mode(后端按默认逐步执行)', async () => {
+    await approveTask('t1', undefined, undefined);
+    const call = vi.mocked(fetch).mock.calls.find(
+      ([input, init]) => String(input) === '/api/tasks/t1/approve' && (init?.method ?? 'GET') === 'POST',
+    );
+    expect(JSON.parse(String(call?.[1]?.body))).not.toHaveProperty('exec_mode');
+  });
+
+  it('approveTask 的执行方式:传入时与 plan 一并下发(2026-09-17 批准界面可选模式)', async () => {
+    const plan: TaskStep[] = [{ name: '步骤一', goal: '目标一', status: 'pending', result: '' }];
+    await approveTask('t1', plan, 'team');
+    const call = vi.mocked(fetch).mock.calls.find(
+      ([input, init]) => String(input) === '/api/tasks/t1/approve' && (init?.method ?? 'GET') === 'POST',
+    );
+    expect(JSON.parse(String(call?.[1]?.body))).toEqual({ plan, exec_mode: 'team' });
+
+    // 不给 plan 只给执行方式(直接批准 + 换模式)
+    await approveTask('t1', undefined, 'solo');
+    const calls = vi.mocked(fetch).mock.calls.filter(
+      ([input, init]) => String(input) === '/api/tasks/t1/approve' && (init?.method ?? 'GET') === 'POST',
+    );
+    expect(JSON.parse(String(calls[calls.length - 1]?.[1]?.body))).toEqual({ exec_mode: 'solo' });
   });
 
   it('followupTask:POST /tasks/{id}/followup,body 带 content 原文(批次 R2a)', async () => {
@@ -332,5 +502,12 @@ describe('api/tasks 形状闸门', () => {
       .mockResolvedValueOnce(json({ token: 't' }))
       .mockResolvedValueOnce(json({ ok: true }));
     await expect(getTaskCalls('t1')).rejects.toThrow('任务调用记录响应格式异常');
+  });
+
+  it('POST /tasks/:id/bind 缺 task 对象时抛错(不把 undefined 带进 store)', async () => {
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(json({ token: 't' }))
+      .mockResolvedValueOnce(json({ ok: true }));
+    await expect(bindTask('t1', null, [])).rejects.toThrow('任务响应格式异常');
   });
 });
