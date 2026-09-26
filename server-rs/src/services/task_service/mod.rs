@@ -152,6 +152,7 @@ impl TaskService {
     ///     但 API 层面继续接受,避免破坏既有客户端与 R3a(task_persona_full)契约。
     ///
     /// 两者同时给出时执行期以 executor_id 为准(见 prompt.rs 的分支顺序)。
+    #[allow(clippy::too_many_arguments)] // 参数即创建请求体的字段面,拆 struct 只会多一层无人消费的中间类型
     pub fn create(
         &self,
         title: &str,

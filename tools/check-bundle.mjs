@@ -47,9 +47,17 @@ const ASSETS = join(DIST, 'assets');
 const VERBOSE = process.argv.includes('--verbose');
 
 /**
- * 预算基线(2026-09-20 二维批次 3 画布落地后重测,「实测 + 10%」;此前为
- *   2026-09-17 P-8/P-9 的实测值)。
- * 实测值:首屏 264,388 / 全部资产 459,928 / index 97,480 / flow-vendor 71,594 /
+ * 预算基线(2026-09-26 自定义流程 A+B 批后重测,「实测 + 10%」;此前为
+ *   2026-09-20 二维批次 3 画布落地后的实测值)。
+ * 实测值(2026-09-26):首屏 275,060 / 全部资产 477,970 / index 107,834 / flow-vendor 71,603 /
+ *   vendor 70,815 / content-rendering 44,786 / vue-vendor 34,069 / index css 17,184。
+ *   → 与 2026-09-20 相比,**只有 index 涨了 10,354 gz**(97,480 → 107,834),其余七项持平。
+ *   该涨幅全部来自 A+B 批的前端新增代码(任务改绑入口 + 连接选择组件、导入覆盖模式、
+ *   节点级超时/重试控件、三个任务侧调用闸设置项;提交 `df62067` / `6d46144`),属**功能增长**,
+ *   故按本文件下方的既有协议上调对应预算(该批提交信息里的验收只跑了
+ *   `npm test` / `typecheck` / `check-contract` / `check-arch` / `check-frontend-lint`,
+ *   **未跑 bundle budget**,故当时未被发现——只跑部分门禁不等于门禁绿)。
+ * 历史基线(2026-09-20):首屏 264,388 / 全部资产 459,928 / index 97,480 / flow-vendor 71,594 /
  *   vendor 70,815 / content-rendering 44,786 / vue-vendor 34,067 / index css 16,868。
  *
  * flow-vendor 必须单列一条(不能走默认上限):二维批次 3 引入的流程画布库
@@ -69,7 +77,7 @@ const ALL_ASSETS_BUDGET_GZ = 506000;
  * 哈希会随内容变化,故**必须按去哈希名索引**,不能写死文件名。
  */
 const CHUNK_BUDGETS_GZ = {
-  'index.js': 105000,
+  'index.js': 118600,
   'flow-vendor.js': 79000,
   'vendor.js': 78000,
   'content-rendering.js': 49500,
@@ -78,8 +86,10 @@ const CHUNK_BUDGETS_GZ = {
 };
 
 /**
- * 未列出前缀的单 chunk 上限。当前最大的未列出 chunk 是 AgentSettingsSection(gz 8,721),
- * 12,000 既留有约 25% 正常增长余量,又能在「有重依赖落进某个小 chunk」时拦住。
+ * 未列出前缀的单 chunk 上限。当前最大的未列出 chunk 是 AgentFlowSection(gz 11,651,
+ * 2026-09-26 实测;A+B 批给它加了「覆盖同名流程」勾选与相应提示后由 8,721 涨上来),
+ * 其余均 < 8,400。12,000 仍能完成它「拦住有重依赖落进某个小 chunk」的职责;但 AgentFlowSection
+ * 距上限只剩约 3%,下次再动它请先跑本脚本——真要上调,按上方协议(实测 + 10%)并在此登记实测值。
  */
 const DEFAULT_CHUNK_BUDGET_GZ = 12000;
 
