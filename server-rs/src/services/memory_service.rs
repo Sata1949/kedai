@@ -105,11 +105,11 @@ fn blob_to_vec(blob: &[u8]) -> Option<Vec<f32>> {
     if blob.is_empty() || !blob.len().is_multiple_of(4) {
         return None;
     }
-    Some(
-        blob.chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect(),
-    )
+    // `as_chunks` 而非 `chunks_exact(4)`(Rust 1.98 的 clippy 新增
+    // `chunks_exact_to_as_chunks` 硬门禁):得到的 `&[u8; 4]` 是定长数组,
+    // `from_le_bytes` 直接吃下,不必再做 `c[0..4]` 的边界检查。
+    let (words, _) = blob.as_chunks::<4>();
+    Some(words.iter().map(|c| f32::from_le_bytes(*c)).collect())
 }
 
 /// 解析 sqlite-vec 返回的向量文本格式 `[1.0,2.0,...]`(容错:空白跳过,非法项返回 None)。
