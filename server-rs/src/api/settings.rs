@@ -221,6 +221,12 @@ pub struct UpdateSettingsBody {
     /// 语义熔断输出指纹去重上限(HB-2;1..=8;缺省保持不变)
     #[serde(default)]
     pub loop_guard_semantic_max_distinct: Option<u32>,
+    /// 任务步骤墙钟预算秒数(提交 3 · D3;0 = 关,否则 1..=86400;缺省保持不变)
+    #[serde(default)]
+    pub task_step_budget_secs: Option<u32>,
+    /// 任务空闲超时秒数(提交 3 · D7;0 = 关,否则 601..=86400;缺省保持不变)
+    #[serde(default)]
+    pub task_idle_timeout_secs: Option<u32>,
     /// 变量两步生成独立模型(HB-7;空串 = 清除(回到与正文共用);非空 = 覆盖;缺省保持不变)
     #[serde(default)]
     pub mvu_model: Option<String>,
@@ -320,6 +326,9 @@ fn settings_json(s: &RuntimeSettings) -> Value {
         "loop_guard_semantic_window": s.loop_guard_semantic_window,
         "loop_guard_semantic_min_calls": s.loop_guard_semantic_min_calls,
         "loop_guard_semantic_max_distinct": s.loop_guard_semantic_max_distinct,
+        // 任务侧两道闸(提交 3 · D3/D7):扁平字段,任务侧消费(步骤墙钟预算 / 空闲看守)
+        "task_step_budget_secs": s.task_step_budget_secs,
+        "task_idle_timeout_secs": s.task_idle_timeout_secs,
         // HB-7 接线:变量两步生成的独立模型/温度档(此前可落盘但无 API 通路)
         "mvu_model": s.mvu_model,
         "mvu_temperature": s.mvu_temperature,
@@ -850,6 +859,23 @@ pub async fn update_settings(
                 }
                 s.loop_guard_semantic_max_distinct = v;
             }
+            // 任务侧两道闸(提交 3 · D3/D7):扁平全局字段(任务侧消费,不进模式覆盖层);
+            // 越界拒绝,与 load 钳制区间一致。step_budget 刻意不设下限(1 秒合法:
+            // 低于单次调用看门狗的值 = 「第一轮结束就收尾」的合法语义)。
+            if let Some(v) = body.task_step_budget_secs {
+                if v != 0 && !(1..=86_400).contains(&v) {
+                    return validation("task_step_budget_secs 须为 0(关闭)或 1..=86400");
+                }
+                s.task_step_budget_secs = v;
+            }
+            if let Some(v) = body.task_idle_timeout_secs {
+                if v != 0 && !(601..=86_400).contains(&v) {
+                    return validation(
+                        "task_idle_timeout_secs 须为 0(关闭)或 601..=86400(下限 = 单命令 300s + 单次调用 300s + 1)",
+                    );
+                }
+                s.task_idle_timeout_secs = v;
+            }
             // HB-7:变量两步生成的独立模型/温度档。清除语义用哨兵值表达,避免引入
             // 「Option<Option<T>>」这类与既有 PATCH 体例不符的写法:
             // mvu_model 空串 = 清除(回到与正文共用同一连接器/模型);
@@ -1178,6 +1204,17 @@ pub async fn prompt_preview(
             "system",
             5,
             task_prompts::EXECUTOR_PROMPT,
+        );
+        // 执行者工具纪律段(提交 3 · D3-c):**条件注入**——只有本轮真的下发了工具时
+        // 才追加在 EXECUTOR_PROMPT 之后(legacy 的步骤没有工具,不发这一段)。
+        // 预览无「本轮有没有工具」的概念,故按「工具档」形态展示;口径写进
+        // docs/契约-协议与配置.md 第五节,避免读者以为它恒在。
+        push_preview_layer(
+            &mut layers,
+            "task_executor_tool_discipline",
+            "system",
+            5,
+            task_prompts::EXECUTOR_TOOL_DISCIPLINE,
         );
         push_preview_layer(
             &mut layers,

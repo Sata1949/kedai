@@ -389,11 +389,27 @@ impl TaskService {
     /// 六模式(multi/team)主 agent 经 agentgo 排出的子 agent 一并结束
     ///(task:{id} 前缀虚拟 session 的内存记录),防 stop 后残留孤儿后台任务。
     pub fn stop(&self, id: &str) -> bool {
+        self.finish_ended(id, None)
+    }
+
+    /// 以 ended 收尾的**唯一实现**(提交 3 · D7):用户点 stop(`reason = None`)与
+    /// 空闲看守自动收尾(`reason = Some("空闲超时自动收尾:…")`)必须走同一条路径——
+    /// 两条各写一份必然漂移(谁先补成果、谁发取消、子任务怎么收)。
+    ///
+    /// 顺序:部分成果兜底(提交 2)→ 置 ended → 补原因(只写 error 列)→ 发取消信号 →
+    /// 结束未完成子任务。原因用 `set_error_only` 而非 `set_error`:后者会把状态改成
+    /// error,而这里语义是**正常收尾**(与 stop 同源),status 必须是 ended。
+    /// `reason = None`(用户主动停止)不写 error 列——「用户停了」不需要解释。
+    pub(super) fn finish_ended(&self, id: &str, reason: Option<&str>) -> bool {
         // 部分成果兜底(提交 2):先把已完成步骤的产出写进 result,再置 ended——
         // 终态一可见就已带成果,不出现「点了停止、成果还没落库」的空窗;
         // 执行器随后收尾时因 result 非空自动跳过(同一判据,幂等)。
         salvage_partial_result(self, id);
         let changed = self.set_status(id, TaskStatus::Ended);
+        if let Some(r) = reason {
+            // 终态已是 ended:这里只补「为什么结束」(写库成功后发 status 事件,detail 带原因)
+            self.set_error_only(id, r);
+        }
         self.signal_cancel(id);
         for st in self.list_subtasks(id) {
             if st.status == TaskSubtaskStatus::Running || st.status == TaskSubtaskStatus::Pending {
@@ -490,6 +506,10 @@ impl TaskService {
             // 与下方 call 内的解析同源(A 批 B1 起可能是任务级连接,不再恒 None)
             connection_id: connection_id.map(str::to_string),
             parallel_tool_calls: None,
+            // 纯生成路径(规划/步骤生成/汇总/无工具的节点)没有工具循环,
+            // 步骤墙钟预算与语义熔断都无从生效:恒 None(与聊天路径同口径)。
+            step_budget: None,
+            semantic_guard: None,
         };
         // 工具是否下发(params 随后 move 进 generate_stream,先行记录):未下发而出现
         // ToolCall 块属上游/协议异常(保留既有 warn 语义);已下发则聚合进产出(规划器侦察轮)
@@ -1033,11 +1053,14 @@ impl TaskService {
         // 统一组装(单一实现,见 prompt.rs::assemble_executor_system_prompt);
         // 外部来源段落逐一 untrusted 包裹,内置指令不包裹(WP7)。
         // 执行者优先:executor_id 命中即独占身份段,character_id 仅为旧任务回退。
+        // `has_tools = false`:本原语是 legacy 三段的纯文本步骤生成,恒不下发工具
+        // (tools 传空),故不追加工具纪律段(提交 3 · D3-c)。
         let sys = self.assemble_executor_system_prompt(
             &settings,
             task.executor_id.as_deref(),
             task.character_id.as_deref(),
             &task.title,
+            false,
         );
         let messages = vec![
             LlmMessage::plain("system", &sys),

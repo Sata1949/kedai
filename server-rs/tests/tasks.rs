@@ -363,6 +363,15 @@ async fn task_step_empty_output_retries_then_errors() {
         result.contains("空内容") && result.contains("finish_reason"),
         "步骤错误文案应含「空内容」与 finish_reason,实际: {result}"
     );
+    // 提交 3 · D6:文案必须可操作(用户知道该调什么),且思考占比不可伪造
+    assert!(
+        result.contains("提高单次生成上限") && result.contains("非推理模型"),
+        "错误文案应给出可操作建议,实际: {result}"
+    );
+    assert!(
+        result.contains("思考占比未知"),
+        "mock 未上报 completion token → 应明说未知而不是报假的 0%: {result}"
+    );
 
     // 子任务同样 error 且带原因
     let subtasks = detail["subtasks"].as_array().unwrap();
@@ -2189,6 +2198,11 @@ async fn task_solo_empty_truncation_heals_once_then_errors() {
         error.contains("返回空内容") && error.contains("finish_reason=length"),
         "错误文案应含「返回空内容」与 finish_reason(问题③),实际: {error}"
     );
+    // 提交 3 · D6:推理吃光预算是最常见成因,文案要给出「当前输出上限 + 该怎么调」
+    assert!(
+        error.contains("提高单次生成上限") && error.contains("当前输出上限"),
+        "错误文案应含当前上限与建议动作,实际: {error}"
+    );
 
     // 调用追踪:截断自愈标注行(error)+ 空内容行(empty),共两行 phase=agent
     let calls = wait_calls(app, &id, |cs| {
@@ -2491,12 +2505,17 @@ async fn task_solo_tool_history_trimmed_in_prompt_summary() {
     let app = test_app();
     let cid = upload_tool_marked_character(app).await;
 
-    // keep_rounds = 1:6 轮工具循环只保留最近 1 轮完整,最老 5 轮摘要化
+    // keep_rounds = 1:6 轮工具循环只保留最近 1 轮完整,最老 5 轮摘要化。
+    // **同时关闭语义熔断**:本用例要造「同一工具 6 轮、输出逐字相同」的形态来测裁剪,
+    // 而提交 3 起任务侧语义熔断被钳到「>4 次同工具 + 输出无实质变化即熔断」,
+    // 会在第 4 轮先把循环收掉(且工具轮无正文 → 任务报空内容),测不到第 5 轮摘要。
+    // 两者维度不同(历史裁剪 vs 输出空转),故关掉无关的那个(同 api_integration 预算用例),
+    // 语义熔断自身由 tests/task_loop_budget.rs 覆盖。
     let (status, json) = send_json(
         app,
         "PUT",
         "/api/settings",
-        json!({ "tool_history_keep_rounds": 1 }),
+        json!({ "tool_history_keep_rounds": 1, "loop_guard_semantic_min_calls": 0 }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "写入 keep_rounds 应 200: {json}");
@@ -2553,12 +2572,12 @@ async fn task_solo_tool_history_trimmed_in_prompt_summary() {
         "最近轮(第 6 轮)工具结果应完整保留且仅此一份(最老轮原文已移除): {prompt}"
     );
 
-    // 还原现场(共享 app;默认 4)
+    // 还原现场(共享 app;默认 4 / 语义熔断下限 12)
     let (status, json) = send_json(
         app,
         "PUT",
         "/api/settings",
-        json!({ "tool_history_keep_rounds": 4 }),
+        json!({ "tool_history_keep_rounds": 4, "loop_guard_semantic_min_calls": 12 }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "还原 keep_rounds 应 200: {json}");
@@ -3874,5 +3893,52 @@ async fn approve_with_unknown_exec_mode_is_rejected() {
     assert_eq!(
         detail["task"]["status"], "planned",
         "拒绝非法执行方式后任务应仍是 planned: {detail}"
+    );
+}
+
+/// 工具纪律段注入条件(提交 3 · D3-c):**有工具**的执行者 system 追加纪律句,
+/// legacy(无工具)档不追加。
+///
+/// 观测手段:mock 的 `[[floors]]` 回显完整消息序列(`[角色] 内容`),于是**真实 system
+/// 文本**直接落进步骤 result——正反两面都在同一份回显上断言,并以
+/// 「回显里含『你是任务执行者』」作控制项:保证「没出现纪律句」不是因为压根没回显到
+/// 系统提示词(mock 的其它条件钩子只匹配 system,回显是唯一能读全文的口子)。
+#[tokio::test]
+async fn executor_tool_discipline_injected_only_for_tool_executors() {
+    let app = test_app();
+
+    // ① solo:策略默认下发工具(fs_*/bash 等)→ 必须注入
+    let id = create_task_with_mode(app, "[[floors]] 纪律注入断言(solo)", "solo").await;
+    let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
+    let (st, detail) = wait_terminal(app, &id).await;
+    assert_eq!(st, "done", "回显即产出,应正常收尾: {detail}");
+    let result = detail["task"]["result"].as_str().unwrap_or("");
+    assert!(
+        result.contains("你是任务执行者"),
+        "回显应含执行者内置指令(控制项,否则本断言无意义): {result}"
+    );
+    assert!(
+        result.contains("自测通过即收尾"),
+        "有工具的执行者必须拿到工具纪律段: {result}"
+    );
+
+    // ② legacy:步骤走纯文本生成(无工具)→ 不注入
+    //    [[floors]] 放在规划器产出的 step goal 里(JSON 内需 \u005d 转义 "]]"),
+    //    规划器/汇总器的 user 消息里是被转义的形式,故只有步骤轮会命中回显。
+    let title =
+        r#"[[reply:[{"name":"步骤一","goal":"\u005b\u005bfloors\u005d\u005d 写第一段"}] ]]"#;
+    let id = create_task(app, title).await;
+    let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
+    let (_st, detail) = wait_terminal(app, &id).await;
+    let step_result = detail["task"]["plan"][0]["result"].as_str().unwrap_or("");
+    assert!(
+        step_result.contains("你是任务执行者"),
+        "legacy 步骤回显应含执行者内置指令(控制项): {step_result}"
+    );
+    assert!(
+        !step_result.contains("自测通过即收尾"),
+        "legacy 步骤没有工具,不得注入工具纪律段: {step_result}"
     );
 }

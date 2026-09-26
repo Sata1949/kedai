@@ -517,6 +517,16 @@ pub struct GenerationParams {
     pub connection_id: Option<String>,
     /// 是否允许模型单轮返回多个工具调用(None = 使用后端默认)
     pub parallel_tool_calls: Option<bool>,
+    /// 步骤墙钟预算(提交 3 · D3):单次 `run_tool_loop` 的墙钟上限,到点**带着已有产出
+    /// 收尾**(返回 Ok,步骤照常记 done,不制造失败)。None = 不设预算——聊天路径恒 None
+    /// (行为逐字节不变);唯一来源是任务侧设置 `task_step_budget_secs`
+    /// (装配见 `task_engine::task_loop_limits`,消费点 `agents/engine/executor.rs`)。
+    pub step_budget: Option<std::time::Duration>,
+    /// 语义熔断三值覆盖(提交 3 · D3;窗口/同工具次数下限/输出指纹去重上限):
+    /// None = 用引擎设置快照里的扁平值(聊天路径恒 None → 行为逐字节不变);
+    /// Some = 任务侧经 `utils::loop_guard::clamp_for_task` **收紧**后的值(只收不放,
+    /// 0 = 关闭位原样保持)。引擎不做模式嗅探:是不是任务由调用方显式传值表达。
+    pub semantic_guard: Option<(usize, usize, usize)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

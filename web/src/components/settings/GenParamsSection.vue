@@ -23,6 +23,7 @@ const {
   toolHistoryKeepRounds, toolHistoryBudgetTokens,
   sessionTokenBudget, sessionBudgetAction,
   loopGuardSemanticWindow, loopGuardSemanticMinCalls, loopGuardSemanticMaxDistinct,
+  taskStepBudgetSecs, taskIdleTimeoutSecs,
   compactionMode, compactionThreshold, compactionKeepRecent, compactionSnipBytes,
   memoryDistillEnabled, memoryInjectLimit, memoryInjectCharBudget, memoryMaxEntries,
   subagentMaxDepth, subagentMaxConcurrency, subagentResultMaxChars,
@@ -232,6 +233,32 @@ const { tempLabel, topPLabel, ctxLabel, saveParams, paramsMsg, saveParamsNow } =
           title="窗口内同工具输出指纹去重后不超过该值即判空转(默认 2)"
         />
         <span class="sv-note">窗口 4-64(默认 16);去重上限 1-8(默认 2)</span>
+      </div>
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">步骤墙钟预算</label>
+        <input
+          v-model.number="taskStepBudgetSecs"
+          type="number"
+          min="0"
+          max="86400"
+          step="1"
+          class="sv-input inject-num"
+          title="任务模式**单步工具循环**的墙钟上限(秒):到点带着已有产出收尾并记完成,不判失败;0 = 关闭本闸门"
+        />
+        <span class="sv-note">任务侧:单步工具循环上限(默认 1200;0 = 关;建议 ≥300)</span>
+      </div>
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">任务空闲超时</label>
+        <input
+          v-model.number="taskIdleTimeoutSecs"
+          type="number"
+          min="0"
+          max="86400"
+          step="1"
+          class="sv-input inject-num"
+          title="任务模式:运行中的任务连续该秒数既无模型调用也无事件时,由看守自动收尾(与手动停止同源,原因写入任务错误栏);0 = 关闭看守"
+        />
+        <span class="sv-note">任务侧:无活动自动收尾(默认 900;0 = 关;601-86400)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">压缩模式</label>

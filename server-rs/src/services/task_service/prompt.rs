@@ -13,7 +13,8 @@ use super::*;
 // 既有使用者所需的三层固定提示词(executor.rs / api/settings.rs / 本文件),
 // 调用方零改动。team/custom 专属常量由 task_engine 侧直接从 task_core 引用。
 pub(crate) use crate::services::task_core::prompt_consts::{
-    EXECUTOR_PROMPT, PLANNER_PROMPT, PLANNER_REVISE_GUIDANCE, SUMMARIZER_PROMPT,
+    EXECUTOR_PROMPT, EXECUTOR_TOOL_DISCIPLINE, PLANNER_PROMPT, PLANNER_REVISE_GUIDANCE,
+    SUMMARIZER_PROMPT,
 };
 
 impl TaskService {
@@ -65,12 +66,15 @@ impl TaskService {
     /// 差异仅在角色取用方式(characters.get vs character_for,本实现统一经
     /// character_for,两者等价),合并后消除漂移风险。
     /// `user_goal` 供 {{lastUserMessage}} 占位符渲染(步骤生成传任务目标,主 agent 传 goal)。
+    /// `has_tools`(提交 3 · D3-c):本轮是否真的下发了工具——true 时在内置执行者指令后
+    /// 追加工具使用纪律段(单一出处 `EXECUTOR_TOOL_DISCIPLINE`);legacy(无工具)传 false。
     pub(crate) fn assemble_executor_system_prompt(
         &self,
         settings: &RuntimeSettings,
         executor_id: Option<&str>,
         character_id: Option<&str>,
         user_goal: &str,
+        has_tools: bool,
     ) -> String {
         let executor = self.executor_for(executor_id);
         // 执行者库命中即独占身份段:角色卡不参与(含世界书过滤口径)
@@ -81,6 +85,13 @@ impl TaskService {
         };
 
         let mut sys = String::from(EXECUTOR_PROMPT);
+        // 工具纪律段紧随内置指令(属内置块,不经 untrusted 包裹);仅在真有工具时追加
+        if has_tools {
+            sys.push_str(&format!(
+                "\n\n{}",
+                crate::services::task_core::prompt_consts::EXECUTOR_TOOL_DISCIPLINE
+            ));
+        }
         if let Some(e) = &executor {
             let instruction = e.instruction.trim();
             if !instruction.is_empty() {

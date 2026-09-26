@@ -60,6 +60,9 @@ function makeSettings(overrides: Partial<RuntimeSettings> = {}): RuntimeSettings
     loop_guard_semantic_window: 16,
     loop_guard_semantic_min_calls: 12,
     loop_guard_semantic_max_distinct: 2,
+    // 提交 3:任务侧两道闸(步骤墙钟预算默认 1200 = 开;空闲看守默认 900)
+    task_step_budget_secs: 1200,
+    task_idle_timeout_secs: 900,
     // HB-7:变量两步生成的独立模型/温度(默认未配置)
     mvu_model: null,
     mvu_temperature: null,
@@ -232,6 +235,55 @@ describe('genSettings 流程调用闸与节点默认上下文(A 批 A3/A4)', () 
     expect(store.maxFlowCallDepth).toBe(5);
     expect(store.maxFlowCallsPerTask).toBe(64);
     expect(store.defaultNodeMaxContext).toBe(4096);
+  });
+});
+
+describe('genSettings 任务侧两道闸(提交 3 · D3/D7)', () => {
+  beforeEach(() => {
+    memStorage.clear();
+    setActivePinia(createPinia());
+  });
+
+  it('store 默认值与后端缺省一致(步骤预算 1200 / 空闲超时 900)', () => {
+    const store = useGenSettingsStore();
+    expect(store.taskStepBudgetSecs).toBe(1200);
+    expect(store.taskIdleTimeoutSecs).toBe(900);
+  });
+
+  it('loadSettings 回填服务端值;缺字段兜底 1200 / 900', async () => {
+    const store = useGenSettingsStore();
+    getSettingsMock.mockReset().mockResolvedValue(
+      makeSettings({
+        task_step_budget_secs: 300,
+        task_idle_timeout_secs: 601,
+      }),
+    );
+    await store.loadSettings();
+    expect(store.taskStepBudgetSecs).toBe(300);
+    expect(store.taskIdleTimeoutSecs).toBe(601);
+
+    // 旧服务端缺字段:回退默认(而非 0——0 是「关」,不能把缺字段当用户关掉了闸门)
+    getSettingsMock.mockReset().mockResolvedValue(
+      withoutFields(makeSettings(), ['task_step_budget_secs', 'task_idle_timeout_secs']),
+    );
+    await store.loadSettings();
+    expect(store.taskStepBudgetSecs).toBe(1200);
+    expect(store.taskIdleTimeoutSecs).toBe(900);
+  });
+
+  it('saveSettings 响应回填两个字段(与 loadSettings 同口径)', async () => {
+    const store = useGenSettingsStore();
+    saveSettingsMock.mockReset().mockResolvedValue({
+      ok: true,
+      settings: makeSettings({
+        task_step_budget_secs: 0,
+        task_idle_timeout_secs: 0,
+      }),
+    });
+    await store.saveSettings({ task_step_budget_secs: 0, task_idle_timeout_secs: 0 });
+    // 0 = 关,是合法用户选择:回填必须如实为 0(不得用 `?? 1200` 之类的兜底吃掉它)
+    expect(store.taskStepBudgetSecs).toBe(0);
+    expect(store.taskIdleTimeoutSecs).toBe(0);
   });
 });
 

@@ -312,6 +312,8 @@ mod tests {
             tool_choice: crate::models::types::ToolChoice::Auto,
             connection_id: None,
             parallel_tool_calls: None,
+            step_budget: None,
+            semantic_guard: None,
         }
     }
 

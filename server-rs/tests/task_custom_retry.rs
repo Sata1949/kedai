@@ -394,3 +394,40 @@ async fn node_timeout_and_retry_ranges_are_validated() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "6 次超上限应 400: {json}");
 }
+
+/// 空产出文案补齐 finish_reason(提交 3 · D6):自定义流程节点的空产出此前只报
+/// 「步骤「X」返回空内容」——同一条链路上 legacy/solo 早已带 finish_reason,
+/// 只有这里漏了,用户看不出成因(推理吃光预算?内容过滤?)。
+/// 用 `[[finish:length|]]` 让节点返回**空正文 + finish=length**;文案走单一出处
+/// `task_core::prompt_consts::empty_output_error`。
+#[tokio::test]
+async fn empty_output_message_carries_finish_reason() {
+    let _guard = test_lock().await;
+    let app = test_app();
+
+    let flow = save_flow(
+        app,
+        "空产出文案流程",
+        single_step(json!({ "max_tokens": 500 })),
+    )
+    .await;
+
+    let id = create_ok(app, "恒空产出 [[finish:length|]]", &flow).await;
+    run_task(app, &id).await;
+    let (st, detail) = wait_terminal(app, &id).await;
+
+    assert_eq!(st, "error", "无任何成果时终态仍按既有口径 error: {detail}");
+    let result = detail["task"]["plan"][0]["result"].as_str().unwrap_or("");
+    assert!(
+        result.contains("步骤「") && result.contains("返回空内容"),
+        "文案应保留「步骤「X」返回空内容」的可读形状: {result}"
+    );
+    assert!(
+        result.contains("finish_reason=length"),
+        "文案必须带 finish_reason(本次是 length): {result}"
+    );
+    assert!(
+        result.contains("提高单次生成上限") && result.contains("非推理模型"),
+        "文案应给出可操作建议: {result}"
+    );
+}

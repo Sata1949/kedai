@@ -388,10 +388,26 @@ async fn compare_depth_guard_blocks_third_level() {
 
 /// 每任务调用预算:模型串行地反复调用同一套流程时,第 9 次起拒绝(深度与环都拦不住
 /// 这种形态)。断言动态调用行恰好 8 条。
+///
+/// **本用例显式关闭语义熔断**(`loop_guard_semantic_min_calls: 0`):它要造的是
+/// 「同一套调用重复 10 轮」的形态,而提交 3 起任务侧的语义熔断被钳到
+/// 「>4 次同工具 + 输出实质无变化即熔断」——同一流程同一输入 10 次,工具结果当然逐字相同,
+/// 会在第 4 轮就先把循环收掉,测不到预算闸。两者是**不同维度**的守卫(次数预算 vs 输出空转),
+/// 故此处的正确做法是关掉无关的那一个(与 api_integration 的 token 预算用例同款),
+/// 而不是放宽钳制。语义熔断自身的任务侧行为由 `tests/task_loop_budget.rs` 覆盖。
 #[tokio::test]
 async fn compare_call_budget_halts_further_calls() {
     let _guard = test_lock().await;
     let app = test_app();
+
+    let (st0, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({ "loop_guard_semantic_min_calls": 0 }),
+    )
+    .await;
+    assert_eq!(st0, StatusCode::OK, "关闭语义熔断应保存成功");
 
     let b = save_flow(app, "乙流程", plain_node_flow("乙本步")).await;
     let a = save_flow(app, "甲流程", loose_node_flow("甲本步")).await;
@@ -416,6 +432,16 @@ async fn compare_call_budget_halts_further_calls() {
         "每任务预算 8 次:第 9、10 次调用应在任何模型调用之前被拒: {rows:?}"
     );
     assert_usage_invariant(&detail, &calls);
+
+    // 复位(共享 app:同文件其它用例串行拿 test_lock,但设置是进程级的)
+    let (st0, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({ "loop_guard_semantic_min_calls": 12 }),
+    )
+    .await;
+    assert_eq!(st0, StatusCode::OK);
 }
 
 /// 强制模式(未给名单 = 老客户端行为):`run_flow` 不在任何工具清单里,模型臆造调用

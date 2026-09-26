@@ -419,6 +419,13 @@ export interface RuntimeSettings {
   loop_guard_semantic_min_calls: number;
   /** 语义熔断输出指纹去重上限(默认 2,1..=8) */
   loop_guard_semantic_max_distinct: number;
+  /** 任务步骤墙钟预算秒数(**任务侧**设置;默认 1200 = 开,0 = 关,否则 1..=86400):
+   *  单次工具循环的墙钟上限,到点带着已有产出收尾(步骤照常 done);文档注「建议 ≥300」 */
+  task_step_budget_secs: number;
+  /** 任务空闲超时秒数(**任务侧**设置;默认 900,0 = 关,否则 601..=86400):
+   *  运行中任务连续该时长无模型调用也无事件 → 看守自动收尾(与 stop 同源),
+   *  原因写进 error「空闲超时自动收尾」;下限 = 单命令 300s + 单次调用 300s + 1 */
+  task_idle_timeout_secs: number;
   /** 变量两步生成独立模型(HB-7;null = 与正文共用同一模型) */
   mvu_model: string | null;
   /** 变量两步生成独立温度(HB-7;null = 内置 0.3) */
@@ -562,6 +569,10 @@ export interface RuntimeSettingsPatch {
   loop_guard_semantic_min_calls?: number;
   /** 语义熔断输出指纹去重上限(1..=8) */
   loop_guard_semantic_max_distinct?: number;
+  /** 任务步骤墙钟预算秒数(0 = 关;否则 1..=86400) */
+  task_step_budget_secs?: number;
+  /** 任务空闲超时秒数(0 = 关;否则 601..=86400) */
+  task_idle_timeout_secs?: number;
   /** 变量两步生成独立模型(空串 = 清除回到与正文共用) */
   mvu_model?: string;
   /** 变量两步生成独立温度(0..=2 设置;负值 = 清除回到内置 0.3) */

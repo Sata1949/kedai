@@ -76,18 +76,30 @@ where
     }
     let settings = deps.task_settings();
     let reason = first.finish_reason.as_deref().unwrap_or("");
-    let retried = if reason == "length" {
-        let doubled = truncated_retry_budget(settings.default_max_tokens);
-        call(doubled, settings.default_temperature).await
+    // 本次重试实际使用的输出上限(length 分支翻倍,否则沿用默认):既用于发起调用,
+    // 也用于失败文案里的「当前输出上限」——两处必须是同一个值(否则用户按文案调设置
+    // 会与真实生效值对不上)。
+    let used_cap = if reason == "length" {
+        truncated_retry_budget(settings.default_max_tokens)
     } else {
-        call(settings.default_max_tokens, 0.7).await
+        settings.default_max_tokens
+    };
+    let retried = if reason == "length" {
+        call(used_cap, settings.default_temperature).await
+    } else {
+        call(used_cap, 0.7).await
     };
     match retried {
         Ok(o) if !o.text.trim().is_empty() => Ok(o),
-        Ok(o) => Err(format!(
-            "{label}返回空内容(finish_reason={})",
-            o.finish_reason.as_deref().unwrap_or("未知")
-        )),
+        // 文案统一走单一出处(提交 3 · D6):带 finish_reason、思考占输出比例与
+        // 「提高上限/改非推理模型」建议,用户据此知道调什么。
+        Ok(o) => Err(
+            crate::services::task_core::prompt_consts::empty_output_error(
+                label,
+                &o,
+                Some(used_cap),
+            ),
+        ),
         Err(e) => Err(e),
     }
 }

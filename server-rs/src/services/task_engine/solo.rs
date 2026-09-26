@@ -66,21 +66,6 @@ pub(crate) async fn run_agent_loop(
 ) -> Result<(String, TokenUsage), String> {
     let settings = &call.settings;
 
-    // system 提示词组装:统一走 TaskBackend::assemble_executor_system_prompt
-    // (单一实现,宿主侧 prompt.rs);拼装顺序与 untrusted 包裹纪律同 legacy,
-    // 勿在本文件复制实现(WP7)。
-    let sys = svc.assemble_executor_system_prompt(
-        settings,
-        call.executor_id.as_deref(),
-        call.character_id.as_deref(),
-        &call.goal,
-    );
-
-    let mut messages = vec![
-        LlmMessage::plain("system", &sys),
-        LlmMessage::plain("user", &call.goal),
-    ];
-
     // 工具按任务策略下发(批次授权改造):默认拒绝危险工具;元工具不入正文列表。
     // 任务模式无 UI 授权上下文,闸门恒 no_ui_authorization = true:
     // 名单外工具立即拒绝并回灌错误,不会空等 300 秒授权超时。
@@ -96,6 +81,29 @@ pub(crate) async fn run_agent_loop(
     );
     // 闸门名单先取出(allowed 借用生命周期需覆盖整个工具循环),再取走 defs
     let allowed = policy.allowed;
+    // 本轮**实际**下发的工具是否非空(策略收窄到空集时不得声称有工具):
+    // 既决定 system 是否追加工具纪律段,也与「能力事实」的实际形态一致。
+    // 必须在 `tools: policy.defs` 把 defs 移走之前算。
+    let has_tools = !policy.defs.is_empty();
+    // system 提示词组装:统一走 TaskBackend::assemble_executor_system_prompt
+    // (单一实现,宿主侧 prompt.rs);拼装顺序与 untrusted 包裹纪律同 legacy,
+    // 勿在本文件复制实现(WP7)。
+    let sys = svc.assemble_executor_system_prompt(
+        settings,
+        call.executor_id.as_deref(),
+        call.character_id.as_deref(),
+        &call.goal,
+        has_tools,
+    );
+
+    let mut messages = vec![
+        LlmMessage::plain("system", &sys),
+        LlmMessage::plain("user", &call.goal),
+    ];
+
+    // 任务侧工具循环的两道限制(提交 3 · D3):单步墙钟预算 + 语义熔断收紧,
+    // 与 custom 的工具节点共用同一映射(单一出处,见 task_loop_limits 文档)。
+    let (step_budget, semantic_guard) = super::task_loop_limits(settings);
     let params = GenerationParams {
         temperature: settings.default_temperature,
         top_p: settings.default_top_p,
@@ -108,6 +116,8 @@ pub(crate) async fn run_agent_loop(
         // (None = 默认连接,与本批之前一致)
         connection_id: call.connection_id.clone(),
         parallel_tool_calls: None,
+        step_budget,
+        semantic_guard,
     };
     let gate = crate::agents::engine::executor::ToolGate::listed(&allowed);
 
@@ -199,14 +209,20 @@ pub(crate) async fn run_agent_loop(
                 status,
             );
             if text.is_empty() {
-                // 空内容错误带 finish_reason(问题③):区分「已达 token 上限」(推理
-                // 烧光预算,实测主因)与其他成因,与 legacy retry_if_empty_output
-                // 的文案口径对齐,步骤 result 落库后可读
+                // 空内容错误文案统一走单一出处(提交 3 · D6):finish_reason + 思考占输出
+                // 比例 +「提高上限/改非推理模型」建议,区分「预算被推理吃光」(实测主因)
+                // 与其他成因。`out` 的 completion/reasoning token 来自本轮累计(工具循环
+                // 聚合口径不含推理拆分,故那边恒 0,文案会退化为「占比未知」——不报假数)。
                 if let Err(e) = state_machine.transition(AgentState::Error, &call.session_id) {
                     tracing::warn!(error = %e, session = %call.session_id, "状态迁移被拒");
                 }
-                let reason = res.finish_reason.as_deref().unwrap_or("未知");
-                return Err(format!("{}返回空内容(finish_reason={reason})", call.label));
+                return Err(
+                    crate::services::task_core::prompt_consts::empty_output_error(
+                        &call.label,
+                        &out,
+                        Some(params.max_tokens),
+                    ),
+                );
             }
             if let Err(e) = state_machine.transition(AgentState::Finished, &call.session_id) {
                 tracing::warn!(error = %e, session = %call.session_id, "状态迁移被拒");

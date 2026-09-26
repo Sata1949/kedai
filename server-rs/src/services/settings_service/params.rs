@@ -214,6 +214,20 @@ pub(super) fn default_loop_guard_semantic_max_distinct() -> u32 {
     2
 }
 
+/// 默认任务步骤墙钟预算(提交 3 · D3):1200 秒 = 单次工具循环的墙钟上限,
+/// 到点带着已有产出收尾。0 = 关。依据:实测单步 10 条反复自检命令、单轮 LLM 往返
+/// 1.5~3 分钟,15 分钟不收敛——20 分钟足够正常的「读代码→改→自测」一轮跑完。
+pub(super) fn default_task_step_budget_secs() -> u32 {
+    1200
+}
+
+/// 默认任务空闲超时(提交 3 · D7):900 秒无任何活动即由看守收尾。
+/// 下限 601 的依据:最坏合法静默 = bash 单命令 300s 上限 + 单次模型调用 300s 上限 = 600s,
+/// 取 600 会误杀正常长命令。
+pub(super) fn default_task_idle_timeout_secs() -> u32 {
+    900
+}
+
 /// 默认放行模式黑名单
 /// 授权模式默认值:新装为宽松(读写放行、仅删除需授权)。
 /// 旧配置的迁移见 `migrate_authorization_mode`(按旧 bypass_mode 修正)。
@@ -465,6 +479,8 @@ impl RuntimeSettings {
             loop_guard_semantic_window: default_loop_guard_semantic_window(),
             loop_guard_semantic_min_calls: default_loop_guard_semantic_min_calls(),
             loop_guard_semantic_max_distinct: default_loop_guard_semantic_max_distinct(),
+            task_step_budget_secs: default_task_step_budget_secs(),
+            task_idle_timeout_secs: default_task_idle_timeout_secs(),
             render_html: false,
             compaction_mode: default_compaction_mode(),
             compaction_threshold: default_compaction_threshold(),

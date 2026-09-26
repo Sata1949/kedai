@@ -385,8 +385,10 @@ pub(crate) struct ExecutorResult {
     /// 本轮内发生的截断自愈记录(问题①,2026-08-31 deepseek 实测修复):
     /// 仅 run_tool_loop 的单轮自愈路径产出,其余构造点恒空;聊天路径不消费。
     pub(crate) self_heals: Vec<SelfHealRecord>,
-    /// 是否因 token 预算上限而提前停止工具循环(HB-1):收尾端据此在消息 extra
-    /// 里留痕(extra.budget_exceeded),刷新后仍能看出「这轮是被成本闸门收掉的」。
+    /// 是否因**预算类闸门**而提前停止工具循环:token 预算(HB-1,聊天与任务共用)或
+    /// 步骤墙钟预算(D3,任务侧专属,见 `GenerationParams.step_budget`)。收尾端据此在
+    /// 消息 extra 里留痕(extra.budget_exceeded),刷新后仍能看出「这轮是被成本/时间
+    /// 闸门收掉的」。聊天路径不传 `step_budget`,故聊天侧该位只可能来自 token 预算。
     pub(crate) budget_stopped: bool,
 }
 
@@ -559,6 +561,24 @@ fn budget_reached(used_tokens: i64, budget: u32) -> bool {
     budget > 0 && used_tokens >= budget as i64
 }
 
+/// 步骤墙钟预算是否已用尽(D3,纯函数便于边界单测):None = 不设预算(聊天路径恒此);
+/// 口径 = 单次 `run_tool_loop` 的墙钟耗时,「达到」即算(与 token 预算/轮次上限同族)。
+fn step_budget_reached(elapsed: std::time::Duration, budget: Option<std::time::Duration>) -> bool {
+    budget.is_some_and(|b| elapsed >= b)
+}
+
+/// 预算收尾时的正文选择(纯函数便于单测):本轮正文非空即用它;本轮只有工具调用
+/// (工具型模型的常见形态)则回退到最近一次非空正文——预算的承诺是「带着已有产出收尾」,
+/// 回一个空串会被上游判成「返回空内容」,与承诺相反。
+/// 两者都空时如实返回空串(不伪造正文,口径同提交 2 的「不伪造成果」)。
+fn budget_stop_content(current: String, last_non_empty: &str) -> String {
+    if current.trim().is_empty() {
+        last_non_empty.to_string()
+    } else {
+        current
+    }
+}
+
 /// 跳过状态/工具调用落库;docs/功能.md 第三节);聊天路径恒 Some,行为不变。
 /// pub(crate):任务引擎 solo/custom 模式直调(批次 4.2 起)。
 #[allow(clippy::too_many_arguments)]
@@ -598,7 +618,7 @@ pub(crate) async fn run_tool_loop(
     let call_watchdog = resolve_call_watchdog(session_id, call_timeout);
     // token 预算(HB-1):循环前取一次设置快照(与上面工具历史裁剪同款口径,
     // 不留锁跨 await);0 = 关闭。budget_noticed 保证 warn 档只提示一次。
-    let (token_budget, budget_action, semantic_window, semantic_min_calls, semantic_max_distinct) = {
+    let (token_budget, budget_action, sem_window, sem_min_calls, sem_max_distinct) = {
         let s = engine.settings_snapshot();
         (
             s.session_token_budget,
@@ -608,7 +628,21 @@ pub(crate) async fn run_tool_loop(
             s.loop_guard_semantic_max_distinct as usize,
         )
     };
+    // 语义熔断三值:任务侧由调用方经 `GenerationParams.semantic_guard` 显式传入
+    // **收紧后**的值(只收不放,0 = 关闭位原样保持);None = 聊天路径,用上面的扁平快照
+    // ——不存在按 `task:` 前缀的嗅探,模式由调用方传值表达(见 D3 口径裁定 C2)。
+    let (semantic_window, semantic_min_calls, semantic_max_distinct) = params
+        .semantic_guard
+        .unwrap_or((sem_window, sem_min_calls, sem_max_distinct));
+    // 步骤墙钟预算(D3):None = 不设(聊天路径恒 None,行为逐字节不变);
+    // 任务侧来源是设置项 `task_step_budget_secs`(装配见 task_engine::task_loop_limits)。
+    let step_budget = params.step_budget;
+    // 本步墙钟起点:闸门在**轮末**判定(与 token 预算/轮次上限同构:本轮工具已执行完,
+    // 不发起下一轮模型请求,也不会留下「无 tool_result 的悬挂 tool_call」)。
+    let loop_started = std::time::Instant::now();
     let mut budget_noticed = false;
+    // 轮级滚动:最近一次非空正文(墙钟预算收尾的回退值,见轮末更新点)
+    let mut last_non_empty_content = String::new();
     // 语义熔断(HB-2):看「输出的实质变化」而非参数指纹——参数每轮略变即绕开指纹熔断,
     // 实测 54 轮不同命令烧 137 万 token(遗留 L22)。登记点在工具执行收尾(输出此时可得)。
     let mut semantic_guard = crate::utils::loop_guard::SemanticGuard::new(
@@ -864,6 +898,13 @@ pub(crate) async fn run_tool_loop(
             });
         }
         round += 1;
+        // 最近一次**非空**正文(轮级滚动):工具型模型常见「只发工具调用、不带正文」的轮,
+        // 而墙钟预算闸门收尾时若恰好停在这样一轮上,返回值就是空串 → 上游按「返回空内容」
+        // 判失败,与「带着已有产出收尾」的承诺相反(2026-09-26 真模型实测:该模型整轮
+        // 工具调用几乎不带可见正文,delta 事件极少)。故预算收尾时回退到这里。
+        if !result.content.trim().is_empty() {
+            last_non_empty_content = result.content.clone();
+        }
         // 本轮是否已达上限:是则执行完本轮工具后停止,不再发起新的模型请求
         let last_round = round >= max_rounds;
         // ===== 重复调用熔断(P0-2)=====
@@ -1134,6 +1175,41 @@ pub(crate) async fn run_tool_loop(
                         budget_stopped: true,
                     });
                 }
+            }
+        }
+        // 步骤墙钟预算(D3,2026-09-26 实测):时间/成本闸门优先于轮数闸门——
+        // 任务模式每个 agent 循环各自重置轮次上限,实测单步 10 条命令反复自检(重跑测试/
+        // pwd/ls/git status)、单轮往返 1.5~3 分钟,15 分钟不收敛。到点**带着已有产出收尾**:
+        // 返回 Ok 让步骤照常记 done(不制造失败——失败会把已完成的工作一起丢掉)。
+        if round > 0 {
+            let elapsed = loop_started.elapsed();
+            if step_budget_reached(elapsed, step_budget) {
+                let budget_secs = step_budget.map(|b| b.as_secs()).unwrap_or(0);
+                send_event(
+                    step_evt(
+                        "步骤墙钟预算用尽",
+                        Some(format!(
+                            "已用 {}s / 预算 {budget_secs}s(第 {round} 轮):已停止工具循环,本轮产出与用量照常保留",
+                            elapsed.as_secs()
+                        )),
+                        None,
+                        None,
+                    ),
+                    tx,
+                    abort,
+                    flag,
+                )
+                .await?;
+                return Ok(ExecutorResult {
+                    content: budget_stop_content(result.content, &last_non_empty_content),
+                    usage: TokenUsage::default(),
+                    interrupted: false,
+                    tool_calls: Vec::new(),
+                    reasoning: String::new(),
+                    finish_reason: result.finish_reason,
+                    self_heals: std::mem::take(&mut self_heals),
+                    budget_stopped: true,
+                });
             }
         }
         // 已达轮次上限:本轮工具已全部执行(含终态推送),停止发起新的模型请求并输出当前结果
@@ -1759,6 +1835,55 @@ mod tests {
         assert!(budget_reached(1024, 1024), "等于预算即触发(达到即算超限)");
         assert!(budget_reached(1025, 1024), "超过预算触发");
         assert!(budget_reached(i64::MAX, 1), "极值不溢出");
+    }
+
+    /// 步骤墙钟预算判定边界(D3):None 恒不触发(聊天路径不放这个字段,行为不变);
+    /// 「达到」即算用尽(与 token 预算/轮次上限同族口径)
+    #[test]
+    fn step_budget_reached_boundaries() {
+        use std::time::Duration;
+        assert!(
+            !step_budget_reached(Duration::from_secs(9_999), None),
+            "None = 不设预算,永不由本闸门收口"
+        );
+        assert!(
+            !step_budget_reached(Duration::from_millis(999), Some(Duration::from_secs(1))),
+            "低于预算不触发"
+        );
+        assert!(
+            step_budget_reached(Duration::from_secs(1), Some(Duration::from_secs(1))),
+            "等于预算即触发(达到即算用尽)"
+        );
+        assert!(
+            step_budget_reached(Duration::from_secs(2), Some(Duration::from_secs(1))),
+            "超过预算触发"
+        );
+    }
+
+    /// 预算收尾的正文选择(D3):本轮有正文用本轮;只有工具调用则回退最近一次非空;
+    /// 两者皆空如实返回空(不伪造)
+    #[test]
+    fn budget_stop_content_prefers_current_then_falls_back() {
+        assert_eq!(
+            budget_stop_content("本轮正文".into(), "更早的正文"),
+            "本轮正文",
+            "本轮非空即用本轮"
+        );
+        assert_eq!(
+            budget_stop_content(String::new(), "更早的正文"),
+            "更早的正文",
+            "本轮只有工具调用时回退最近非空正文(否则会被判「返回空内容」)"
+        );
+        assert_eq!(
+            budget_stop_content("   \n".into(), "更早的正文"),
+            "更早的正文",
+            "纯空白等同空"
+        );
+        assert_eq!(
+            budget_stop_content(String::new(), ""),
+            "",
+            "两者皆空如实返回空:不伪造正文"
+        );
     }
 }
 

@@ -229,9 +229,13 @@ async fn task_overlay_does_not_leak_into_roleplay_settings() {
 }
 
 /// 提示词预览按模式合并(批次 2,docs/契约-协议与配置.md 第五节):
-/// task 模式追加规划器/执行者/汇总者三层固定提示词层(文本与 task_service/prompt.rs
-/// 单一来源逐字一致,预览即真实下发);roleplay(缺省)不含。三层为内置指令,
-/// 恒注入,与 task 覆盖层状态无关(共享 app 下不受同 binary 其他测试写动影响)。
+/// task 模式追加规划器/执行者/汇总者三层固定提示词层 + 执行者工具纪律段
+/// (文本与 task_core/prompt_consts.rs 单一来源逐字一致,预览即真实下发);
+/// roleplay(缺省)不含。这些层都是内置指令,与 task 覆盖层状态无关
+/// (共享 app 下不受同 binary 其他测试写动影响)。
+/// 注意工具纪律段是**条件注入**:只有本轮真的下发了工具的执行者才拿到它
+/// (legacy 的步骤没有工具,不发这一段);预览无「本轮有没有工具」的概念,
+/// 故按「工具档」形态列出——口径写在契约文档第五节,避免读者以为它恒在。
 #[tokio::test]
 async fn prompt_preview_follows_mode() {
     let _guard = test_lock().await;
@@ -248,7 +252,7 @@ async fn prompt_preview_follows_mode() {
         "roleplay 预览不得含任务固定提示词层"
     );
 
-    // task:三层固定提示词齐备,文本含内置指令原文
+    // task:三层固定提示词 + 工具纪律段齐备,文本含内置指令原文
     let (status, t) = send_json(
         app,
         "GET",
@@ -262,6 +266,7 @@ async fn prompt_preview_follows_mode() {
         ("task_planner_prompt", "你是任务规划器"),
         ("task_executor_prompt", "你是任务执行者"),
         ("task_summarizer_prompt", "你是任务汇总者"),
+        ("task_executor_tool_discipline", "自测通过即收尾"),
     ] {
         let hit = layers.iter().any(|l| {
             l["source"].as_str() == Some(src)

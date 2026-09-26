@@ -432,6 +432,33 @@ impl TaskService {
         })
     }
 
+    /// 只写 error 列的终态原因(提交 3 · D7,空闲看守用):**不动 status**——
+    /// 终态(ended)由 `finish_ended` 里的 set_status 决定,本方法只为「为什么结束」留痕
+    /// (与 `set_result_only` 同形:一个只写 result、一个只写 error,都不串终态)。
+    /// 为什么不用 `set_error`:那个会把状态置成 error,而空闲收尾的语义是**正常收尾**
+    /// (与用户点 stop 同源),status 必须是 ended。
+    /// 「ended + 非空 error」不是新形态:`recover_orphan_tasks` 的重启中断行就是这么落的。
+    /// 写库成功后发既有 kind="status" 事件(status 传 None,细节在 detail),不引新 kind。
+    pub(super) fn set_error_only(&self, id: &str, error: &str) -> bool {
+        Self::blocking(|| {
+            let conn = self.db.write();
+            let changed = conn
+                .execute(
+                    "UPDATE tasks SET error = ?1, updated_at = ?2 WHERE id = ?3",
+                    params![error, now_iso(), id],
+                )
+                .map(|n| n > 0)
+                .unwrap_or(false);
+            drop(conn);
+            if changed {
+                // detail 截断防超长文本撑大事件帧(口径同 set_error)
+                let detail: String = error.chars().take(120).collect();
+                self.emit_event(TaskEventKind::Status, id, None, None, Some(detail));
+            }
+            changed
+        })
+    }
+
     pub(super) fn set_error(&self, id: &str, error: &str) -> bool {
         Self::blocking(|| {
             let conn = self.db.write();
@@ -454,6 +481,42 @@ impl TaskService {
                 );
             }
             changed
+        })
+    }
+
+    /// 运行中(或规划中)任务的**最近活动时刻**(提交 3 · D7):返回
+    /// `(任务 id, 最近活动 ISO 时间戳)`。
+    ///
+    /// 口径:`COALESCE(MAX(task_llm_calls.created_at), tasks.updated_at)`——
+    /// 有调用行就用最近一行,没有(刚进 running、或在长工具循环里还没落行)就回退
+    /// `tasks.updated_at`(状态写入时刻)。注意本表两条口径都**不是**实时活动信号:
+    /// solo/plan/team 的调用行是整轮工具循环结束后才落(`solo.rs` 的统一出口),
+    /// 所以看守必须叠加进程内心跳(`TaskService::activity`),本查询只服务
+    /// 「没有心跳的任务」(重启前遗留、测试直插行)——判据合成见 `idle.rs`。
+    ///
+    /// 只看 running/planning:planned 是「等用户批准」的合法静止态,end/pending 不在看守范围。
+    pub(super) fn running_tasks_activity(&self) -> Vec<(String, String)> {
+        Self::blocking(|| {
+            let Ok(conn) = self.db.read() else {
+                tracing::warn!("查询运行中任务失败:数据库读连接不可用");
+                return Vec::new();
+            };
+            let Ok(mut stmt) = conn.prepare(
+                "SELECT t.id, COALESCE((SELECT MAX(c.created_at) FROM task_llm_calls c \
+                 WHERE c.task_id = t.id), t.updated_at) \
+                 FROM tasks t WHERE t.status IN ('running','planning')",
+            ) else {
+                tracing::warn!("查询运行中任务失败:语句准备失败");
+                return Vec::new();
+            };
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)));
+            match rows {
+                Ok(iter) => iter.filter_map(Result::ok).collect(),
+                Err(e) => {
+                    tracing::warn!(error = %e, "读取运行中任务活动时刻失败");
+                    Vec::new()
+                }
+            }
         })
     }
 

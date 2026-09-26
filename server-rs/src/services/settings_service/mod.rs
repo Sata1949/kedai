@@ -42,7 +42,8 @@ use params::{
     default_memory_inject_limit, default_memory_max_entries, default_node_max_context,
     default_session_budget_action, default_session_token_budget,
     default_skill_progressive_disclosure, default_subagent_max_concurrency,
-    default_subagent_max_depth, default_subagent_result_max_chars, default_task_tool_policy,
+    default_subagent_max_depth, default_subagent_result_max_chars, default_task_idle_timeout_secs,
+    default_task_step_budget_secs, default_task_tool_policy,
     default_tool_authorization_timeout_secs, default_tool_history_budget_tokens,
     default_tool_history_keep_rounds, default_undo_enabled, default_user_role,
 };
@@ -207,6 +208,19 @@ pub struct RuntimeSettings {
     /// 语义熔断输出指纹去重上限(HB-2;默认 2,钳 1..=8):去重后不超过该值即判空转
     #[serde(default = "default_loop_guard_semantic_max_distinct")]
     pub loop_guard_semantic_max_distinct: u32,
+    /// 任务步骤墙钟预算秒数(提交 3 · D3;默认 1200 = 开,0 = 关,否则钳 1..=86400):
+    /// 单次工具循环的墙钟上限,到点带着已有产出收尾(步骤记 done,不制造失败)。
+    /// **扁平字段、只被任务侧消费**(`task_engine::task_loop_limits` 装配给
+    /// `GenerationParams.step_budget`);聊天路径不读、不传。
+    /// 不设 60s 之类下限是刻意的:1 秒合法(测试靠它触发预算路径),文档注「建议 ≥300」。
+    #[serde(default = "default_task_step_budget_secs")]
+    pub task_step_budget_secs: u32,
+    /// 任务空闲超时秒数(提交 3 · D7;默认 900,0 = 关,否则钳 601..=86400):
+    /// 运行中任务若连续该时长既无模型调用行、也无事件心跳,由看守以 stop 同源路径收尾
+    /// 并标注「空闲超时自动收尾」。下限 601 = bash 单命令 300s + 单次模型调用 300s + 1。
+    /// **扁平字段、只被任务侧消费**(`task_service/idle.rs` 的看守)。
+    #[serde(default = "default_task_idle_timeout_secs")]
+    pub task_idle_timeout_secs: u32,
     /// HTML 渲染开关(状态栏脚本执行前置条件):true = 开启(需用户主动授权脚本后再开启)
     #[serde(default)]
     pub render_html: bool,

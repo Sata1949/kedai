@@ -10,7 +10,7 @@
 pub(crate) const PLANNER_PROMPT: &str = "你是任务规划器。把用户目标拆解为 2~5 个可独立执行的具体步骤,每个步骤单一、明确、粒度适中(约 2~5 分钟可完成)。若目标涉及的信息不足,可先调用可用的只读工具(如读取文件/搜索/查询记忆)收集与目标相关的信息,再产出计划。计划须严格只输出 JSON 数组,不要输出任何解释或多余文字。数组元素格式:{\"name\":\"步骤名\",\"goal\":\"该步骤要完成的目标\"}。契约先行纪律:① 每个步骤的 goal 必须写明交付物与可判是的验收判据(能以是/否回答);② 同一交付物只允许一个权威版本,不得规划出会互相覆盖的重复步骤;③ 字段名与口径以本计划为唯一来源,执行方不得自拟字段名。";
 
 /// 执行者内置指令:独立完成单个子任务并直接产出结果
-pub(crate) const EXECUTOR_PROMPT: &str = "你是任务执行者,负责独立完成交给你的一个子任务。直接输出该子任务的最终结果:不要复述指令、不要输出计划或元文本、不要模拟对话、不要用标题包裹结果。引用或替换其他 agent 的既有产出时,必须写明取代对象(名称或版本);禁止出现未声明取代对象的「替换旧版/最新版为唯一口径」这类表述。若你的职责是验证/审计,只回填实测结论,不得另立一版交付物。";
+pub(crate) const EXECUTOR_PROMPT: &str = "你是任务执行者,负责独立完成交给你的一个子任务。直接输出该子任务的最终结果:不要复述指令、不要输出计划或元文本、不要模拟对话、不要用标题包裹结果。引用或替换其他 agent 的既有产出时,必须写明取代对象(名称或版本);禁止出现未声明取代对象的「替换旧版/最新版为唯一口径」这类表述。若你的职责是验证/审计,只回填实测结论,不得另立一版交付物。交付物正文必须完整给出,写入文件不替代正文。";
 
 /// 规划器修订指引段(批次 R2b plan-chat):追加在 PLANNER_PROMPT 之后,
 /// 引导规划器按用户反馈修订已产出计划(输出契约不变:严格 JSON 数组)。
@@ -52,6 +52,59 @@ pub(crate) const CUSTOM_REFLECT_PROMPT: &str = "你是反思审查员。下面�
 /// 本指令明确「只做分析规划、产出要点、不产出面向用户的正文」,与步骤自身语义一致;
 /// 其产出仅作后续步骤的参考上下文,不计入最终成果。内置指令不经 untrusted 包裹。
 pub(crate) const TASK_INTERNAL_PLAN_PROMPT: &str = "你是任务内部规划者。请针对下面给出的目标做内部分析与规划:提炼关键要求、约束、需要参考的信息与执行要点,产出简洁的要点清单供后续步骤使用。只输出分析规划要点本身,不要输出面向用户的最终正文、不要模拟对话、不要用标题包裹结果。";
+
+/// 执行者的**工具使用纪律**段(提交 3 · D3),仅在该执行者**本轮有工具**时追加
+/// (legacy 的步骤没有工具,不追加——纪律讲的是怎么用工具,不是怎么写正文)。
+///
+/// 为什么需要:2026-09-26 真实模型实测里 solo/编程 2 分钟就改对了代码,之后 10 条命令
+/// 全是反复自检(重跑测试、`pwd`、`ls`、`git status`、`md5sum`),单轮 LLM 往返 1.5~3
+/// 分钟,15 分钟不收敛——执行者指令里**没有任何收尾纪律**,模型不知道「自测通过就该收尾」。
+/// 另两条来自同一轮实测:模型按 bash 语法写命令(command/`;`/`/d/` 路径,cmd 不认),
+/// 以及用 `echo 重定向`拼文件而不走 `fs_*`(D4)。
+///
+/// 单一出处:与 `capability_note`(规划器侧「本轮可用能力」段)同族但**受众不同**
+/// (一个给规划器、一个给执行者),故各自成文;HARNESS 线的「编码执行者模板」
+/// (HARNESS-PLAN.md 提交 3 第 6 项)直接引用本常量,不写第二份。内置指令不经 untrusted 包裹。
+pub(crate) const EXECUTOR_TOOL_DISCIPLINE: &str = "工具使用纪律:① 自测通过即收尾——同一事实不得反复验证,不要为「再确认一次」重跑已通过的检查;② 命令用本机 shell 语法(Windows 下由 cmd 解释:多命令用 && 连接,不支持 ; 分隔与 /d/ 这类 MSYS 路径);③ 改文件优先用 fs_write/fs_edit 工具,不要用 shell 重定向拼文件;④ 每轮只做一个动作,看完结果再决定下一步。";
+
+/// 「返回空内容」的用户可见错误文案(提交 3 · D6),任务侧三处消费点共用:
+/// legacy/plan/team 的步骤与汇总(`task_engine::retry`)、solo 系主循环
+/// (`task_engine::solo`)、自定义流程节点(`task_engine::custom` 的落库侧)。
+///
+/// 为什么要统一并补诊断:实测 `deepseek/deepseek-v4.1-flash` 约 90% completion token 是
+/// 推理(78/100、1835/2000),`default_max_tokens=10000` 下出现 `finish=length` 且正文为空,
+/// 而旧文案只说「返回空内容(finish_reason=length)」——用户不知道该调什么(遗留 TM-D6)。
+/// 本函数给出三类可操作事实:finish_reason、思考占输出的比例、当前输出上限与建议动作。
+///
+/// `max_tokens`:该次调用的输出上限。拿不到时传 `None`(如自定义流程节点:预算在节点内
+/// 算过但未回传),此时省略该子句而不是报一个可能不准的数。
+pub(crate) fn empty_output_error(
+    label: &str,
+    out: &super::types::TaskGenOutput,
+    max_tokens: Option<u32>,
+) -> String {
+    let reason = out.finish_reason.as_deref().unwrap_or("未知");
+    // 占比口径:completion token 里推理占了多少(实测推理模型的主因)。
+    // completion_tokens == 0 = 该次未上报用量(部分上游/mock),此时明说「未知」,
+    // 不报一个假的 0%(0 会被读成「没思考」,正好把诊断带反)。
+    let reasoning = if out.completion_tokens > 0 {
+        format!(
+            "思考占输出 {}%({}/{} token)",
+            out.reasoning_tokens * 100 / out.completion_tokens,
+            out.reasoning_tokens,
+            out.completion_tokens
+        )
+    } else {
+        "思考占比未知(该次未上报 completion token)".to_string()
+    };
+    let cap = max_tokens
+        .map(|m| format!(",当前输出上限 {m}"))
+        .unwrap_or_default();
+    format!(
+        "{label}返回空内容(finish_reason={reason};{reasoning}{cap})。\
+         若反复出现:提高单次生成上限或改用非推理模型"
+    )
+}
 
 /// 执行阶段的工具面事实(D1 修复):规划器必须知道执行者能做什么。
 ///
@@ -166,5 +219,57 @@ mod tests {
         );
         assert!(shell_only.contains("没有文件工具"), "{shell_only}");
         assert!(!shell_only.contains("可以读写文件"), "{shell_only}");
+    }
+
+    /// 工具纪律段(提交 3 · D3-c):三条实测教训各留一句钉子。
+    /// 文案是防回退断言——这些句子一旦被后续改动抹平,D3 会原样复发:
+    /// ① 「自测通过即收尾」(10 条反复自检);② cmd 语法边界(D4);③ 优先 fs_* 而非重定向。
+    #[test]
+    fn executor_tool_discipline_covers_the_three_lessons() {
+        for needle in ["自测通过即收尾", "cmd", "fs_write", "每轮只做一个动作"] {
+            assert!(
+                EXECUTOR_TOOL_DISCIPLINE.contains(needle),
+                "工具纪律段应含「{needle}」: {EXECUTOR_TOOL_DISCIPLINE}"
+            );
+        }
+    }
+
+    /// 空产出错误文案(提交 3 · D6):三类可操作事实必须齐备。
+    /// 用合成用量钉住**占比口径**(mock 永远上报 0,无法端到端检验百分比)。
+    #[test]
+    fn empty_output_error_carries_actionable_diagnostics() {
+        use crate::services::task_core::types::TaskGenOutput;
+        let mk = |reason: Option<&str>, rt: i64, ct: i64| TaskGenOutput {
+            text: String::new(),
+            finish_reason: reason.map(str::to_string),
+            prompt_tokens: 100,
+            completion_tokens: ct,
+            reasoning_tokens: rt,
+            reasoning_chars: 0,
+            tool_calls: Vec::new(),
+        };
+
+        let msg = empty_output_error("子任务", &mk(Some("length"), 78, 100), Some(10_000));
+        assert!(
+            msg.starts_with("子任务返回空内容(finish_reason=length;"),
+            "{msg}"
+        );
+        assert!(msg.contains("思考占输出 78%(78/100 token)"), "{msg}");
+        assert!(msg.contains("当前输出上限 10000"), "{msg}");
+        assert!(msg.contains("提高单次生成上限"), "{msg}");
+        assert!(msg.contains("非推理模型"), "{msg}");
+
+        // 未上报用量(completion 0):明说「未知」,不得报一个假的 0%(会把诊断带反)
+        let unknown = empty_output_error("汇总", &mk(None, 0, 0), None);
+        assert!(unknown.contains("思考占比未知"), "{unknown}");
+        assert!(!unknown.contains("思考占输出"), "{unknown}");
+        assert!(
+            !unknown.contains("当前输出上限"),
+            "拿不到上限时应整句省略:{unknown}"
+        );
+        assert!(unknown.contains("finish_reason=未知"), "{unknown}");
+
+        // 下限兜底:思考占比不得除零(completion 为 0 走未知分支;此处钉住不 panic)
+        let _ = empty_output_error("步骤", &mk(Some("stop"), 5, 0), Some(1));
     }
 }

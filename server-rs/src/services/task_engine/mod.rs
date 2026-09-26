@@ -35,6 +35,7 @@ pub(crate) mod tool_policy;
 
 use crate::agents::engine::AgentEngine;
 use crate::models::types::{TaskRecord, TaskRunMode, TaskStep};
+use crate::services::settings_service::RuntimeSettings;
 use crate::services::task_core::{TaskBackend, TaskTerminal};
 use context::TaskRunContext;
 use custom::CustomExecutor;
@@ -45,9 +46,35 @@ use multi::MultiExecutor;
 use plan::{ApprovedPlanExecutor, PlanExecutor};
 use solo::SoloExecutor;
 use std::sync::Arc;
+use std::time::Duration;
 use team::TeamExecutor;
 use tokio::sync::watch;
 use tracing::Instrument;
+
+/// 任务侧工具循环的两道限制(提交 3 · D3),单一出处:单步墙钟预算与语义熔断三值。
+///
+/// 为什么在引擎侧集中算:两个装配点(solo 主循环与 custom 工具节点)必须**同口径**——
+/// 各写一份必然漂移;而"哪些设置项对应哪些引擎参数"是任务引擎的知识,不是宿主的。
+///
+/// 返回 `(step_budget, semantic_guard)`:
+///   - `step_budget`:`task_step_budget_secs == 0` → `None`(关);否则 `Some(Duration)`;
+///   - `semantic_guard`:**恒`Some`**——任务侧只收不放,经
+///     [`crate::utils::loop_guard::clamp_for_task`] 把用户三值压到任务上限
+///     (窗口 ≤8 / 同工具次数 ≤4 / 去重 ≤2;`0` = 关闭位原样保持)。
+///     注意语义:用户把窗口设得比上限更**紧**时按用户的(那是合法的收紧请求),
+///     把它设得更松时按上限——绝不能把聊天侧的宽松值当任务侧许可。
+pub(crate) fn task_loop_limits(
+    settings: &RuntimeSettings,
+) -> (Option<Duration>, Option<(usize, usize, usize)>) {
+    let budget = (settings.task_step_budget_secs > 0)
+        .then(|| Duration::from_secs(u64::from(settings.task_step_budget_secs)));
+    let guard = crate::utils::loop_guard::clamp_for_task(
+        settings.loop_guard_semantic_window as usize,
+        settings.loop_guard_semantic_min_calls as usize,
+        settings.loop_guard_semantic_max_distinct as usize,
+    );
+    (budget, Some(guard))
+}
 
 /// 任务引擎:持有任务后端与聊天引擎,按 task_mode 派发后台执行。
 /// 轻量句柄(两个 Arc),在 TaskService::run/approve 处即时构造,无状态。
@@ -245,5 +272,73 @@ impl TaskEngine {
                 *cancel.borrow(),
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 最小配置 + `from_config` 构一份全默认设置(与设置加载/保存类测试同款;
+    /// 不走 `serde_json::from_str("{}")`——连接类字段没有 serde default)。
+    fn default_settings() -> RuntimeSettings {
+        RuntimeSettings::from_config(&crate::config::test_config())
+    }
+
+    /// 预算映射:默认 1200 秒 = 开;0 = 关(None);到秒的换算不丢精度。
+    #[test]
+    fn task_loop_limits_maps_step_budget() {
+        let mut s = default_settings();
+        s.task_step_budget_secs = 1200;
+        assert_eq!(
+            task_loop_limits(&s).0,
+            Some(Duration::from_secs(1200)),
+            "默认口径 = 1200 秒(§10 C4 的用户裁定)"
+        );
+        s.task_step_budget_secs = 1;
+        assert_eq!(
+            task_loop_limits(&s).0,
+            Some(Duration::from_secs(1)),
+            "1 秒是合法值(测试靠它触发预算路径),不得被抬下限"
+        );
+        s.task_step_budget_secs = 0;
+        assert_eq!(task_loop_limits(&s).0, None, "0 = 关");
+    }
+
+    /// 语义熔断钳制:宽松设置被压到任务上限;更紧的设置按用户的;0 保持关闭。
+    #[test]
+    fn task_loop_limits_clamps_semantic_guard() {
+        let mut s = default_settings();
+        // 默认三值(16/12/2)→ 任务上限(8/4/2)
+        assert_eq!(
+            task_loop_limits(&s).1,
+            Some((
+                crate::utils::loop_guard::TASK_MAX_SEMANTIC_WINDOW,
+                crate::utils::loop_guard::TASK_MAX_SEMANTIC_MIN_CALLS,
+                2
+            )),
+            "默认值在任务侧同样收紧"
+        );
+        // 用户把窗口设成 64(聊天侧允许的上限):任务侧仍得 8
+        s.loop_guard_semantic_window = 64;
+        s.loop_guard_semantic_min_calls = 12;
+        s.loop_guard_semantic_max_distinct = 4;
+        assert_eq!(
+            task_loop_limits(&s).1.map(|g| g.0),
+            Some(8),
+            "宽松值不得溢出任务上限"
+        );
+        // 用户主动收紧(4/4/1)→ 按用户的
+        s.loop_guard_semantic_window = 4;
+        s.loop_guard_semantic_min_calls = 4;
+        s.loop_guard_semantic_max_distinct = 1;
+        assert_eq!(task_loop_limits(&s).1, Some((4, 4, 1)), "更紧按用户的");
+        // 0 = 关闭本闸门:钳制必须原样保持,否则「关掉熔断」被静默推翻
+        s.loop_guard_semantic_min_calls = 0;
+        assert_eq!(
+            task_loop_limits(&s).1.map(|g| g.1),
+            Some(0),
+            "0 必须保持关闭"
+        );
     }
 }

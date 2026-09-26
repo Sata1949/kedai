@@ -13,7 +13,8 @@ use super::params::{
     default_memory_inject_char_budget, default_memory_inject_limit, default_memory_max_entries,
     default_roleplay_agent_prompt, default_session_budget_action, default_session_token_budget,
     default_subagent_max_concurrency, default_subagent_max_depth,
-    default_subagent_result_max_chars, default_task_tool_policy,
+    default_subagent_result_max_chars, default_task_idle_timeout_secs,
+    default_task_step_budget_secs, default_task_tool_policy,
     default_tool_authorization_timeout_secs, default_tool_history_budget_tokens,
     default_tool_history_keep_rounds, migrate_authorization_mode,
 };
@@ -171,6 +172,18 @@ impl RuntimeSettings {
                 }
                 if !(1..=8).contains(&s.loop_guard_semantic_max_distinct) {
                     s.loop_guard_semantic_max_distinct = default_loop_guard_semantic_max_distinct();
+                }
+                // 提交 3(D3/D7):任务侧两道闸的参数钳制。step_budget 刻意不设下限
+                // (1 秒合法:低于单次调用看门狗的值 = 「第一轮结束就收尾」的合法语义,
+                // 测试也靠它触发预算路径);idle 下限 601 的依据见默认值函数注释。
+                if s.task_step_budget_secs != 0 && !(1..=86_400).contains(&s.task_step_budget_secs)
+                {
+                    s.task_step_budget_secs = default_task_step_budget_secs();
+                }
+                if s.task_idle_timeout_secs != 0
+                    && !(601..=86_400).contains(&s.task_idle_timeout_secs)
+                {
+                    s.task_idle_timeout_secs = default_task_idle_timeout_secs();
                 }
                 // MCP 服务器列表(批次 6.2):settings.json 可手改,启动装配前做一次卫生清理
                 // (trim 名称/命令,丢弃缺名或缺命令的不可用条目;与 PUT 校验同规则)

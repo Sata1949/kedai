@@ -356,6 +356,12 @@ async fn run_subtask_with_tools(
         tool_choice: crate::models::types::ToolChoice::Auto,
         connection_id: None,
         parallel_tool_calls: None,
+        // 子 agent 工具循环(agentgo)不套任务侧步骤墙钟预算:本路径是聊天 AGENT 模式
+        // 与任务 multi/team 的**共用**实现,设置来自扁平快照而非任务侧 for_mode(Task)
+        // 快照,装预算就得把任务上下文穿透进工具层(改动面与回归面都大)。
+        // 缺口已登记 docs/遗留.md(任务模式 TM-D3 派生)。
+        step_budget: None,
+        semantic_guard: None,
     };
 
     // 运行身份:任务模式用派生虚拟 id(task: 前缀,llm_requests 跳过守卫同源);
@@ -575,6 +581,8 @@ async fn run_subtask_plain(
         tool_choice: crate::models::types::ToolChoice::Auto,
         connection_id: None,
         parallel_tool_calls: None,
+        step_budget: None,
+        semantic_guard: None,
     };
 
     let connector = deps.connector.read().await.clone();

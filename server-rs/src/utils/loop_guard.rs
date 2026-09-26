@@ -24,6 +24,42 @@ pub const DEFAULT_SEMANTIC_MIN_CALLS: usize = 12;
 /// 语义熔断默认输出指纹去重上限(HB-2):≤2 视为「输出实质无变化」
 pub const DEFAULT_SEMANTIC_MAX_DISTINCT: usize = 2;
 
+/// 任务模式语义熔断的**上限**(D3,2026-09-26 实测):
+/// 任务模式的工具循环是「一步一个 agent 循环」的短循环,16/12/2 的聊天侧默认太松——
+/// 实测单步 10 条命令反复自检(重跑测试/pwd/ls/git status)、单轮往返 1.5~3 分钟,
+/// 15 分钟不收敛。任务侧只**收紧**不放宽(见 [`clamp_for_task`])。
+/// 取值依据:4 次同工具调用即可判别空转;「连续写多个不同文件」不会误伤——
+/// `fs_write` 输出含相对路径(`已写入 {rel}(N 字节)`)、`fs_edit` 含替换处数,
+/// 不同文件的输出指纹互不相同,去重数必然超过 max_distinct。
+pub const TASK_MAX_SEMANTIC_WINDOW: usize = 8;
+/// 任务模式同工具调用次数上限(见 [`TASK_MAX_SEMANTIC_WINDOW`])
+pub const TASK_MAX_SEMANTIC_MIN_CALLS: usize = 4;
+/// 任务模式输出指纹去重上限(见 [`TASK_MAX_SEMANTIC_WINDOW`])
+pub const TASK_MAX_SEMANTIC_MAX_DISTINCT: usize = 2;
+
+/// 把语义熔断三值钳到任务侧上限(纯函数,便于边界单测)。
+///
+/// 纪律:任务侧**只收不放**——`min(v, 上限)`,故任务只会比聊天侧更早熔断,
+/// 绝不把聊天侧的宽松值当许可。`min_calls == 0` 是「关闭本闸门」的既有开关语义
+/// (`SemanticGuard::new` 的 0 = 关闭),钳制必须原样保持 0(详见 D3 口径:
+/// 设置页上那三个扁平输入对任务依然生效,只是越不过上限)。
+pub fn clamp_for_task(
+    window: usize,
+    min_calls: usize,
+    max_distinct: usize,
+) -> (usize, usize, usize) {
+    (
+        // clamp 的下界 1 与上界常量必须满足 min ≤ max(两个上限常量都 ≥1)
+        window.clamp(1, TASK_MAX_SEMANTIC_WINDOW),
+        if min_calls == 0 {
+            0
+        } else {
+            min_calls.min(TASK_MAX_SEMANTIC_MIN_CALLS)
+        },
+        max_distinct.clamp(1, TASK_MAX_SEMANTIC_MAX_DISTINCT),
+    )
+}
+
 /// FNV-1a 64 位哈希:对多个字符串分段依次混入。用于把「工具名 + 参数」这类
 /// 结构化指纹压成一个 u64,避免在缓冲里存完整参数字符串(参数可能极大)。
 pub fn fnv1a_hash(parts: &[&str]) -> u64 {
@@ -459,5 +495,51 @@ B
 ",
         );
         assert_ne!(a, d, "行数变化应改变指纹");
+    }
+
+    // ===== 任务侧钳制(提交 3 · D3) =====
+
+    /// 钳制只收不放:三值超上限即压到上限,上限内原样保留
+    #[test]
+    fn clamp_for_task_caps_but_never_loosens() {
+        assert_eq!(
+            clamp_for_task(64, 12, 4),
+            (TASK_MAX_SEMANTIC_WINDOW, TASK_MAX_SEMANTIC_MIN_CALLS, 2),
+            "聊天侧宽松值必须被压到任务上限"
+        );
+        assert_eq!(
+            clamp_for_task(16, 12, 2),
+            (8, 4, 2),
+            "聊天侧默认值在任务侧同样收紧"
+        );
+        assert_eq!(clamp_for_task(4, 4, 1), (4, 4, 1), "上限内原样保留");
+    }
+
+    /// `min_calls == 0` 是「关闭本闸门」的既有开关语义:钳制必须原样保持 0。
+    /// 若这里被改成 `max(上限)` 之类的写法,「关掉熔断」的用户设置会被静默推翻。
+    #[test]
+    fn clamp_for_task_keeps_zero_as_off() {
+        assert_eq!(clamp_for_task(64, 0, 4).1, 0, "0 = 关闭,不得被抬起");
+        let (w, m, d) = clamp_for_task(0, 0, 0);
+        assert_eq!(
+            (w, m, d),
+            (1, 0, 1),
+            "下界兜底:窗口/去重至少 1,关闭位保持 0"
+        );
+    }
+
+    /// 钳制后的值喂给 SemanticGuard 必须仍然可用(接线一致性):
+    /// 4 次输出相同的同工具调用即熔断,而聊天侧的 12 次门槛在任务侧不可达。
+    #[test]
+    fn clamped_values_break_early_in_semantic_guard() {
+        let (w, m, d) = clamp_for_task(64, 12, 4);
+        let mut g = SemanticGuard::new(w, m, d);
+        for i in 1..m {
+            assert!(g.record("bash", 7).is_none(), "第 {i} 次不应熔断");
+        }
+        assert!(
+            g.record("bash", 7).is_some(),
+            "第 {m} 次同工具同输出必须熔断(未钳制时聊天侧要 12 次)"
+        );
     }
 }

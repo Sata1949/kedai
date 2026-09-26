@@ -23,6 +23,9 @@ impl TaskService {
 
     /// 发射任务事件(仅在对应 DB 写入成功后调用)。
     /// send 仅在无任何订阅者时返回 Err,属正常,忽略。
+    ///
+    /// 顺带刷新活动心跳(提交 3 · D7):事件是「任务还活着」的最细粒度信号——工具调用/
+    /// 工具结果/步骤/Finish 全部经本函数,故空闲看守据此判定「真的什么都没发生」。
     pub(crate) fn emit_event(
         &self,
         kind: TaskEventKind,
@@ -31,6 +34,7 @@ impl TaskService {
         status: Option<TaskStatus>,
         detail: Option<String>,
     ) {
+        self.touch_activity(task_id);
         let _ = self.events.send(SseEvent::Task {
             task_id: task_id.to_string(),
             kind: Some(kind),
@@ -69,6 +73,7 @@ impl TaskService {
         finish_reason: Option<String>,
     ) {
         let finish_reason = finish_reason.filter(|r| !r.is_empty());
+        self.touch_activity(task_id);
         let _ = self.events.send(SseEvent::Task {
             task_id: task_id.to_string(),
             kind: Some(TaskEventKind::LlmCall),

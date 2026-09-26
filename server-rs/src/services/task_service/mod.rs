@@ -12,6 +12,7 @@
 //   cancel.rs   取消信号与执行 token 登记
 //   prompt.rs   提示词组装(任务设置/世界书/注入/Agent 系统提示词/人设)
 //   executor.rs 后台执行引擎(run/stop、LLM 单次生成原语、后台主体)
+//   idle.rs     任务级空闲看守(提交 3 · D7:活动心跳判据 + 自动收尾 + 常驻 tick)
 use super::log_query_failure;
 use crate::models::db::{now_iso, Db, PooledRead};
 use crate::models::types::{
@@ -40,6 +41,7 @@ pub(crate) mod cancel;
 pub(crate) mod db;
 pub(crate) mod events;
 pub(crate) mod executor;
+pub(crate) mod idle;
 pub(crate) mod prompt;
 
 use self::db::{row_to_task, TASK_COLS};
@@ -103,6 +105,15 @@ pub struct TaskService {
     /// 任务 id → (取消信号, 本次执行 token)。token 用于区分同一任务的先后执行:
     /// stop 后立即重跑时,旧后台任务退出不得删除/覆盖新任务的取消条目与状态。
     cancels: Mutex<HashMap<String, (watch::Sender<bool>, u64)>>,
+    /// 任务 id → **最近活动时刻**(提交 3 · D7,空闲看守的活动心跳)。
+    ///
+    /// 为什么需要内存心跳而不是只看库:任务侧的 `task_llm_calls` 行是**整轮工具循环
+    /// 结束后**才落的(`task_engine/solo.rs` 的统一出口),一次十分钟的工具循环期间库里
+    /// 没有任何新行——只看库会把正在干活的任务判成空闲并收掉。心跳在 run 起点登记
+    /// (`register_cancel`),并由全部事件发射点刷新(`emit_event` / `emit_llm_call`:
+    /// 工具调用、工具结果、步骤、Finish 都经此),故「心跳停了」= 真的什么都没发生。
+    /// 表由看守每轮按运行中任务裁剪,不随任务数无限增长。
+    activity: Mutex<HashMap<String, Instant>>,
     /// 任务事件广播通道(WP4):DB 写入成功后发射 SseEvent::Task,
     /// GET /api/tasks/events 订阅转发为 SSE
     events: tokio::sync::broadcast::Sender<SseEvent>,
@@ -134,6 +145,7 @@ impl TaskService {
             prompt_inject,
             executors,
             cancels: Mutex::new(HashMap::new()),
+            activity: Mutex::new(HashMap::new()),
             events: tokio::sync::broadcast::channel(events::EVENTS_CAPACITY).0,
         };
         // 孤儿任务启动恢复(问题④):遗留 running/planning 任务置 ended 终态

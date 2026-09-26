@@ -283,6 +283,8 @@ impl CustomExecutor {
     ) -> Result<(String, TokenUsage), String> {
         let settings = &ctx.settings;
         let phase = g.phase;
+        // 任务侧工具循环的两道限制(提交 3 · D3;与 solo 主循环同一映射、单一出处)
+        let limits = super::task_loop_limits(settings);
         // 任务模式工具策略:先按策略编译候选集(默认拒绝危险工具、剔除元工具),
         // 再与步骤白名单取交——步骤白名单只能收窄,不能突破任务策略放行危险工具。
         let policy = super::tool_policy::compile(
@@ -354,6 +356,10 @@ impl CustomExecutor {
                 .map(str::to_string)
                 .or_else(|| ctx.connection_id.clone()),
             parallel_tool_calls: step.parallel_tool_calls,
+            // 任务侧工具循环的两道限制(提交 3 · D3):与 solo 主循环共用同一映射
+            // (单一出处 task_engine::task_loop_limits,勿在此另算一份)。
+            step_budget: limits.0,
+            semantic_guard: limits.1,
         };
         // 会话 id 保留既有形状 `task:{任务 id}:step:{下标}`(入口流程逐字节不变);
         // 子图用 phase 段替换 `step`,避免同一下标在父子两层撞 key(取值仍可用
@@ -682,6 +688,20 @@ impl CustomExecutor {
         node_model: &str,
         max_tokens_override: Option<u32>,
     ) -> Result<NodeOutcome, String> {
+        // 工具纪律段(提交 3 · D3-c):与下方档位 match **同一判据**——严格档/无工具步骤
+        // 不下发工具,也就不需要「怎么用工具」的纪律。判据与那条 match 一处改动必须同步
+        // (放在本函数内而非 build_step_system,正是为了与档位判定同处、不复制档位知识)。
+        let sys_with_discipline;
+        let sys: &str = if matches!((&step.tools, step.is_strict()), (Some(_), false)) {
+            sys_with_discipline = format!(
+                "{}\n\n{}",
+                sys.trim_end(),
+                crate::services::task_core::prompt_consts::EXECUTOR_TOOL_DISCIPLINE
+            );
+            sys_with_discipline.as_str()
+        } else {
+            sys
+        };
         let mut messages = vec![
             LlmMessage::plain("system", sys),
             LlmMessage::plain("user", user),
@@ -1116,7 +1136,15 @@ impl CustomExecutor {
                         any_error = true;
                         if let Some(p) = plan.as_deref_mut() {
                             p[i].status = TaskStepStatus::Error;
-                            p[i].result = format!("步骤「{}」返回空内容", step.name);
+                            // 文案走单一出处(提交 3 · D6,补上此前唯一缺 finish_reason 的点):
+                            // 本处拿不到节点实际用的输出上限(在 run_node_attempt 内算),
+                            // 传 None 省略该子句,不报一个可能不准的数。
+                            p[i].result =
+                                crate::services::task_core::prompt_consts::empty_output_error(
+                                    &format!("步骤「{}」", step.name),
+                                    &out,
+                                    None,
+                                );
                         }
                     } else {
                         if let Some(p) = plan.as_deref_mut() {

@@ -132,12 +132,18 @@ pub(crate) trait TaskPromptKit: Send + Sync {
     /// 两个身份入参不是「二选一必填」而是**优先级**:`executor_id` 命中执行者库时
     /// 独占身份段(角色卡不参与),否则回退 `character_id` 的旧角色卡路径——
     /// 后者保留仅为旧任务零回归,新任务不再写 character_id。
+    ///
+    /// `has_tools`(提交 3 · D3-c):本轮执行者**实际**有没有下发工具(调用方按策略
+    /// 编译结果算,策略收窄到空集时为 false)。true 时在内置指令后追加
+    /// [`crate::services::task_core::prompt_consts::EXECUTOR_TOOL_DISCIPLINE`];
+    /// legacy 的步骤没有工具(传 false),不追加——那条纪律讲的是怎么用工具。
     fn assemble_executor_system_prompt(
         &self,
         settings: &RuntimeSettings,
         executor_id: Option<&str>,
         character_id: Option<&str>,
         user_goal: &str,
+        has_tools: bool,
     ) -> String;
 
     /// 世界书常驻条目文本。
