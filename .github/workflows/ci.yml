@@ -22,6 +22,13 @@ on:
   pull_request:
   workflow_dispatch:
 
+# 同 ref 的过期 run 直接取消:本仓库存在**多会话并行推送**的场景,没有这一条会出现
+# 三次 run 并行、其中两次白烧额度(Windows runner 计费 ×2;2026-09-26 实测:
+# run 36258299410 与 36259877695 并行,前者在后者启动后仍跑了 25 分钟)。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
     runs-on: windows-latest
