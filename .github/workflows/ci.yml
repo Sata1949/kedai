@@ -1,20 +1,26 @@
-# Kedai CI(批次 1,2026-09-13)
+# Kedai CI(批次 1,2026-09-13;2026-09-26 远端配置后受控启用)
 #
 # 背景:仓库此前只有本地门禁(tools/check-all.ps1 + pre-push hook),可被
 # `git push --no-verify` / `build.ps1 -SkipChecks` 绕过,且换机后 hook 需重装
 # (tools/install-hooks.ps1)。本工作流把同一套门禁搬到服务端强制执行。
 #
-# 触发:push(任意分支)+ PR。环境:windows-latest(需 MSVC;check-all.ps1 内已内置
+# 触发:push 到 main + PR + 手动 workflow_dispatch。**平台分支(kedai-Win /
+# kedai-Android)刻意不单独触发**——它们与 main 逐字节同源(见
+# docs/契约-协议与配置.md「平台分支契约」),为每个分支各跑一遍只是重复烧额度
+# (私有仓免费 2000 分钟/月,Windows runner 按 2 倍计费);需要在平台分支上验证时
+# 用网页的 Run workflow 手动触发。环境:windows-latest(需 MSVC;check-all.ps1 内已内置
 # vcvars64 定位逻辑,runner 自带 VS 即可)。
 #
-# 说明:本机当前**未配置 git 远端**,本文件在配置远端并推送后自动生效;
-# 本地等价命令:`powershell -NoProfile -ExecutionPolicy Bypass -File tools/check-all.ps1`
+# 远端:2026-09-26 起 origin 指向 GitHub 私有仓;本地等价命令:
+# `powershell -NoProfile -ExecutionPolicy Bypass -File tools/check-all.ps1`
 # (只跑快速档加 `-Quick`;跳过后端加 `-SkipRust`)。
 name: ci
 
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   check:
@@ -57,7 +63,6 @@ jobs:
       # server-rs/Cargo.lock 与 src-tauri/Cargo.lock 两把锁(cargo audit 硬门禁),
       # 并执行 npm audit --omit=dev 生产依赖硬门禁。无法本地修复的 unmaintained 告警
       # 由仓库根 .cargo/audit.toml 逐条 ignore(随 checkout 带入,无需额外步骤)。
-      # 注意:本仓库当前**未配置 git 远端**,本工作流在配置远端并推送后才会真正运行。
       - name: Local gates (fmt / clippy / test / audit[两锁+npm] / contract / arch / lock-sync / typecheck / vitest / build)
         shell: pwsh
         run: ./tools/check-all.ps1
