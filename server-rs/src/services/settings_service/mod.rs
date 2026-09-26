@@ -17,10 +17,15 @@ use serde::{Deserialize, Serialize};
 use crate::models::tool_policy::AuthorizationMode;
 
 mod connection;
+mod connector_pool;
 mod params;
 mod secret;
 
-pub use connection::{mask_key, normalize_base_url, DEFAULT_SEARCH_ENDPOINT};
+pub use connection::{
+    mask_key, normalize_base_url, resolve_connector_target, ConnectionProfile, CONNECTOR_TYPE_MOCK,
+    CONNECTOR_TYPE_OPENAI, DEFAULT_SEARCH_ENDPOINT, MAX_CONNECTIONS,
+};
+pub use connector_pool::{connection_label, ConnectorPool};
 pub use params::{
     default_roleplay_agent_prompt, default_task_agent_prompt, McpServerConfig, ModeSettings,
     RoleplayPromptConfig, TaskPromptConfig,
@@ -31,10 +36,14 @@ pub use params::{
 use params::{
     default_authorization_mode, default_bypass_blacklist, default_compaction_keep_recent,
     default_compaction_mode, default_compaction_snip_bytes, default_compaction_threshold,
-    default_max_tool_rounds, default_memory_inject_char_budget, default_memory_inject_limit,
-    default_memory_max_entries, default_skill_progressive_disclosure,
-    default_subagent_max_concurrency, default_subagent_max_depth,
-    default_subagent_result_max_chars, default_task_tool_policy,
+    default_loop_guard_semantic_max_distinct, default_loop_guard_semantic_min_calls,
+    default_loop_guard_semantic_window, default_max_flow_call_depth,
+    default_max_flow_calls_per_task, default_max_tool_rounds, default_memory_inject_char_budget,
+    default_memory_inject_limit, default_memory_max_entries, default_node_max_context,
+    default_session_budget_action, default_session_token_budget,
+    default_skill_progressive_disclosure, default_subagent_max_concurrency,
+    default_subagent_max_depth, default_subagent_result_max_chars, default_task_idle_timeout_secs,
+    default_task_step_budget_secs, default_task_tool_policy,
     default_tool_authorization_timeout_secs, default_tool_history_budget_tokens,
     default_tool_history_keep_rounds, default_undo_enabled, default_user_role,
 };
@@ -73,6 +82,17 @@ pub struct RuntimeSettings {
     /// API Key:内存中为明文;持久化时由 save() 加密、load() 解密(见 secret_store)
     pub openai_api_key: String,
     pub model: String,
+    /// 多套连接配置(2026-09-22 多套连接批次):**真源**。
+    /// 上面的 openai_base_url / openai_api_key / model 自本批次起降为
+    /// 「默认连接(active_connection_id)的派生视图」,由 normalize_connections 投影,
+    /// 旧客户端、embedding、启动装配、任务记账仍读扁平字段,行为不变。
+    /// 空数组 = 尚未播种(load 时按扁平字段播种一条),故**必须** serde default:
+    /// 缺键时若整文件反序列化失败,load 会整体回退环境配置(用户设置静默丢失)。
+    #[serde(default)]
+    pub connections: Vec<ConnectionProfile>,
+    /// 默认连接 id;指向不存在或已停用的连接时回退「第一个启用的连接」,全停用则空投影
+    #[serde(default)]
+    pub active_connection_id: Option<String>,
     pub default_temperature: f64,
     pub default_top_p: f64,
     pub default_max_tokens: u32,
@@ -146,6 +166,22 @@ pub struct RuntimeSettings {
     /// 达到上限后停止调用工具并输出当前结果)
     #[serde(default = "default_max_tool_rounds")]
     pub max_tool_rounds: u32,
+    /// 流程**动态调用**的嵌套深度上限(A 批 A3;默认 2,钳 1..=5)。
+    ///
+    /// 口径同 7b:只对「宽松档节点调 `run_flow`」生效;静态子图(`sub_flow_id`)与注册期
+    /// 的嵌套校验仍按 `MAX_SUB_FLOW_DEPTH = 3`(那是**结构**上限,不是运行期成本闸)。
+    #[serde(default = "default_max_flow_call_depth")]
+    pub max_flow_call_depth: u32,
+    /// 单个任务内的流程调用**次数**上限(A 批 A3;默认 8,钳 1..=64)。
+    #[serde(default = "default_max_flow_calls_per_task")]
+    pub max_flow_calls_per_task: u32,
+    /// 节点默认上下文上限(A 批 A4;默认 **0 = 不裁剪**,否则钳 256..=1048576)。
+    ///
+    /// 与节点级 `PlanStep.max_context` 的关系:节点值优先,缺省才用本设置;两者皆空
+    /// 即与批次 8 之前逐字节一致。缺省关闭是刻意的——默认套预算会截断当前正常工作的
+    /// 长输入,属可观测的行为变化(见 `计划.md` 裁定 26 口径 2)。
+    #[serde(default = "default_node_max_context")]
+    pub default_node_max_context: u32,
     /// 工具循环历史保留的最近完整轮数(R3b;默认 4,钳 1..=32):
     /// 超出后最老轮的 tool 结果原地替换为短摘要(配对不破坏),防止全量回灌无界膨胀
     #[serde(default = "default_tool_history_keep_rounds")]
@@ -154,6 +190,37 @@ pub struct RuntimeSettings {
     /// 仅 keep_rounds 生效):估算超预算时从最老完整轮起继续摘要,保底最近 1 轮完整
     #[serde(default = "default_tool_history_budget_tokens")]
     pub tool_history_budget_tokens: u32,
+    /// 单次生成的 token 预算(HB-1 成本护栏;0 = 关闭,默认 0;否则钳 1024..=1e9):
+    /// 工具循环累计 prompt+completion 达到该值即按 session_budget_action 处置。
+    /// 与 tool_history_budget_tokens 不同——后者管上下文裁剪,本项管成本上限。
+    #[serde(default = "default_session_token_budget")]
+    pub session_token_budget: u32,
+    /// 预算超限动作(HB-1;warn = 只提示一次后继续(默认),stop = 提示并停止本轮工具循环)
+    #[serde(default = "default_session_budget_action")]
+    pub session_budget_action: String,
+    /// 语义熔断窗口(HB-2;默认 16,钳 4..=64):近 W 次工具调用内做「同工具 + 输出无变化」判定
+    #[serde(default = "default_loop_guard_semantic_window")]
+    pub loop_guard_semantic_window: u32,
+    /// 语义熔断同工具调用次数下限(HB-2;默认 12;0 = 关闭本闸门,否则钳 4..=64):
+    /// 窗口内同工具累计达到该次数且输出去重不超过上限即判空转
+    #[serde(default = "default_loop_guard_semantic_min_calls")]
+    pub loop_guard_semantic_min_calls: u32,
+    /// 语义熔断输出指纹去重上限(HB-2;默认 2,钳 1..=8):去重后不超过该值即判空转
+    #[serde(default = "default_loop_guard_semantic_max_distinct")]
+    pub loop_guard_semantic_max_distinct: u32,
+    /// 任务步骤墙钟预算秒数(提交 3 · D3;默认 1200 = 开,0 = 关,否则钳 1..=86400):
+    /// 单次工具循环的墙钟上限,到点带着已有产出收尾(步骤记 done,不制造失败)。
+    /// **扁平字段、只被任务侧消费**(`task_engine::task_loop_limits` 装配给
+    /// `GenerationParams.step_budget`);聊天路径不读、不传。
+    /// 不设 60s 之类下限是刻意的:1 秒合法(测试靠它触发预算路径),文档注「建议 ≥300」。
+    #[serde(default = "default_task_step_budget_secs")]
+    pub task_step_budget_secs: u32,
+    /// 任务空闲超时秒数(提交 3 · D7;默认 900,0 = 关,否则钳 601..=86400):
+    /// 运行中任务若连续该时长既无模型调用行、也无事件心跳,由看守以 stop 同源路径收尾
+    /// 并标注「空闲超时自动收尾」。下限 601 = bash 单命令 300s + 单次模型调用 300s + 1。
+    /// **扁平字段、只被任务侧消费**(`task_service/idle.rs` 的看守)。
+    #[serde(default = "default_task_idle_timeout_secs")]
+    pub task_idle_timeout_secs: u32,
     /// HTML 渲染开关(状态栏脚本执行前置条件):true = 开启(需用户主动授权脚本后再开启)
     #[serde(default)]
     pub render_html: bool,
@@ -312,6 +379,48 @@ mod tests {
         TempDataDir::new(&format!("settings-test-{tag}"))
     }
 
+    /// 目标连接器类型解析(批次 4):`openai_base_url` 的环境默认值本身非空,故
+    /// 「配置完成」的判据必须是**地址 + 密钥都非空** —— 只看地址会让全新安装与测试环境
+    /// 一启动就切到必然失败的真实连接器(2026-09-22 实测:该口径写错会让 tasks.rs 21 个目标全红)。
+    #[test]
+    fn resolve_connector_target_requires_address_and_key() {
+        let mut p = ConnectionProfile {
+            id: "c".to_string(),
+            name: "连接".to_string(),
+            connector_type: CONNECTOR_TYPE_OPENAI.to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            api_key: String::new(),
+            model: "m".to_string(),
+            enabled: true,
+        };
+        // 只有地址(环境默认值即如此)→ 保持 mock,不切真实连接器
+        assert_eq!(resolve_connector_target(Some(&p), "mock"), "mock");
+        // 地址 + 密钥都填了 → 切真实连接器
+        p.api_key = "sk-x".to_string();
+        assert_eq!(
+            resolve_connector_target(Some(&p), "mock"),
+            CONNECTOR_TYPE_OPENAI
+        );
+        // 显式声明 mock 的连接永远保持 mock(演示模式是用户的明确选择)
+        p.connector_type = CONNECTOR_TYPE_MOCK.to_string();
+        assert_eq!(
+            resolve_connector_target(Some(&p), CONNECTOR_TYPE_OPENAI),
+            "mock"
+        );
+        // 没有可用连接(全停用 / 删空)→ mock
+        assert_eq!(
+            resolve_connector_target(None, CONNECTOR_TYPE_OPENAI),
+            "mock"
+        );
+        // 当前已是真实连接器且凭据没配齐 → 不主动降级
+        p.connector_type = CONNECTOR_TYPE_OPENAI.to_string();
+        p.api_key = String::new();
+        assert_eq!(
+            resolve_connector_target(Some(&p), CONNECTOR_TYPE_OPENAI),
+            CONNECTOR_TYPE_OPENAI
+        );
+    }
+
     /// 最小 AppConfig(仅供设置加载/保存测试;不读环境变量,避免受本机 .env 影响)
     fn test_cfg() -> AppConfig {
         crate::config::test_config()
@@ -322,7 +431,8 @@ mod tests {
     fn api_key_is_encrypted_on_disk_and_restored_on_load() {
         let dir = tmp_dir("enc");
         let mut s = RuntimeSettings::from_config(&test_cfg());
-        s.openai_api_key = "sk-secret-value-9999".to_string();
+        // 本批次起 connections 才是真源,扁平字段是它的派生视图 → 写 Key 要写默认连接
+        s.connections[0].api_key = "sk-secret-value-9999".to_string();
         s.save(&dir).unwrap();
 
         let raw = std::fs::read_to_string(dir.join("settings.json")).unwrap();
@@ -343,7 +453,9 @@ mod tests {
     fn legacy_plaintext_settings_are_migrated_on_load() {
         let dir = tmp_dir("migrate");
         let mut s = RuntimeSettings::from_config(&test_cfg());
-        s.openai_api_key = "sk-legacy-plain-1234".to_string();
+        // 绕过 save 的加密直接写旧版明文文件:顶层与默认连接都写明文(旧文件两处都会是明文)
+        s.connections[0].api_key = "sk-legacy-plain-1234".to_string();
+        s.apply_active_projection();
         // 绕过 save 的加密,直接写旧版明文文件
         std::fs::write(
             dir.join("settings.json"),

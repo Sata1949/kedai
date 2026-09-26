@@ -3,17 +3,26 @@
 // 下达目标与任务历史已移入左侧 Sidebar(单列布局);任务数据持久化到后端 SQLite。
 // 批次 4 六模式:模式徽标、plan 模式批准区(批准/放弃/修改后批准)、
 // team 模式分工卡与审计结论卡、solo/multi 调用情况面板入口、custom 流程步骤进度。
-import { computed, onUnmounted, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useAppStore } from '../store';
 import { storeToRefs } from 'pinia';
 import { renderMarkdown } from '../markdown';
 import { splitTaskResult } from '../taskResult';
 import { taskStatusClass as statusClass, taskStatusLabel as statusLabel } from '../taskStatus';
-import { MODE_LABELS, messageKindLabel } from '../api/labels';
-import type { TaskRecord, TaskRunMode, TaskStep } from '../api';
+import { bufferLabel } from '../utils/phaseLabel';
+import { badgeFlowSource, planRowBadges, type NodeBadge } from '../utils/flowNodeBadges';
+import { callableFlows } from '../utils/flowCallStats';
+import { flowCandidates, staleMembers, type FlowCandidate } from '../utils/flowCandidates';
+import { APPROVE_EXEC_MODE_LABELS, APPROVE_EXEC_MODE_ORDER, FLOW_MODE_LABELS, MODE_LABELS, messageKindLabel } from '../api/labels';
+import type { TaskApproveExecMode, TaskRecord, TaskRunMode, TaskStep } from '../api';
 
 const store = useAppStore();
-const { currentTask, currentTaskId, model, currentTaskUsage } = storeToRefs(store);
+const { currentTask, currentTaskId, model, currentTaskUsage, executorById } = storeToRefs(store);
+/** 流程库(自定义流程的节点徽标要按 node_id 对回节点;可能未加载 = null) */
+const { agentFlowLibrary } = storeToRefs(store);
+
+/** 最近一条执行进展(主/子 agent 状态简述;store 消费 agent_status 事件,不落库) */
+const lastAgentStatus = computed(() => store.lastAgentStatus);
 
 /** 当前任务是否在执行中(planning / running) */
 const taskRunning = computed(() => {
@@ -55,6 +64,216 @@ const planRendered = computed<RenderedStep[]>(() =>
     html: s.result ? renderMarkdown(s.result) : '',
   })),
 );
+
+// ----- 自定义流程的运行态节点徽标(遗留.md IFW-5;二维批次 5a 起读任务快照)-----
+/**
+ * 逐行徽标(下标与 plan 对齐;空数组 = 该行不显示)。
+ *
+ * 映射只认 `node_id`:plan 行由**过滤后的启用步骤**构造,plan 下标 ≠ 流程数组下标,
+ * 按下标对齐会在停了中间步骤时整条串位。
+ *
+ * 数据源择一(二维批次 5a):**本任务的流程快照优先**,没有才回退当前流程库——
+ * 于是「跑完任务后改流程 / 换当前流程」不会再让徽标缺失或与当时编排不符。
+ * 降级规则(两个数据源都没有/流程不在其中/旧任务没带 node_id/节点已删除 → 不显示)
+ * 收在 utils/flowNodeBadges 的 `badgeFlowSource` + `planRowBadges`。
+ */
+const planBadges = computed<NodeBadge[][]>(() => {
+  const rows = currentTask.value?.task.plan ?? [];
+  const source = badgeFlowSource(currentTask.value?.flow_snapshot, agentFlowLibrary.value);
+  if (taskMode.value !== 'custom' || !source) {
+    return rows.map(() => []);
+  }
+  return rows.map((s) => planRowBadges(source.flows, source.rootId, s.node_id));
+});
+
+/**
+ * 当前任务用的流程名(二维批次 5a):绑定流程后显示其名称,未绑定显示「跟随当前流程」。
+ * 流程名从**快照**里查(与徽标同一份编排),快照缺失时才用当前库/流程 id 兜底。
+ */
+const taskFlowLabel = computed<string | null>(() => {
+  if (taskMode.value !== 'custom') return null;
+  const task = currentTask.value?.task;
+  if (!task) return null;
+  const boundId = task.flow_id;
+  if (!boundId) return '跟随当前流程';
+  const source = badgeFlowSource(currentTask.value?.flow_snapshot, agentFlowLibrary.value);
+  const name = source?.flows.find((f) => f.id === boundId)?.name;
+  return name && name.trim() ? name : boundId;
+});
+
+/**
+ * 对比模式的实际可调用集(二维批次 7b 收口):名单 ∩ 冻结闭包 − 根流程,**与后端运行期
+ * 取用同一口径**(`utils/flowCallStats::callableFlows`,对齐 `flow_call::callable_ids`)。
+ *
+ * 数据源与节点徽标同一份(快照优先、当前库兜底):未绑定任务的失效成员在快照构造时
+ * 就已被剔除,故按快照重算即「本轮实际可调用」。两个数据源都取不到(库未加载/为空)
+ * 时返回 null,由展示层回退到名单条数,不猜。
+ */
+const compareCallable = computed(() => {
+  if (taskMode.value !== 'custom') return null;
+  const ids = currentTask.value?.task.flow_ids ?? [];
+  if (ids.length === 0) return null;
+  const source = badgeFlowSource(currentTask.value?.flow_snapshot, agentFlowLibrary.value);
+  return source ? callableFlows(ids, source.flows, source.rootId) : null;
+});
+
+/**
+ * 对比模式徽标(二维批次 7b;2026-09-24 改按**实际**可调用集显示)。
+ *
+ * 旧口径 N 取创建时勾选的名单长度(`task.flow_ids`),而运行期还会剔除根流程与已不可用的
+ * 成员——极端情形下数字会大于实际可调用数(遗留.md IFW-12 边界 2)。现在:有快照就以重算
+ * 结果为准,与名单条数不等时把差额一并说明;两个数据源都取不到时才回退名单条数。
+ */
+const taskCompareLabel = computed<string | null>(() => {
+  if (taskMode.value !== 'custom') return null;
+  const ids = currentTask.value?.task.flow_ids ?? [];
+  if (ids.length === 0) return null;
+  // 与后端同口径地去重去空后再数「名单几个」:重复/空白项不该被算成两个成员
+  const declared = new Set(ids.map((s) => s.trim()).filter((s) => s !== '')).size;
+  const callable = compareCallable.value;
+  // 「对比」二字取自 api/labels.ts 的 FLOW_MODE_LABELS(单一出处;此前硬拼在展示串里)
+  const head = FLOW_MODE_LABELS.compare;
+  if (callable === null) return `${head} · 可调用 ${declared} 个流程`;
+  const base = `${head} · 可调用 ${callable.length} 个流程`;
+  const missing = declared - callable.length;
+  return missing > 0 ? `${base}(名单 ${declared} 个,${missing} 个本轮不可用)` : base;
+});
+
+/** 对比模式徽标的悬停说明:列出本轮**实际**可调用流程名(取不到名则退回 id) */
+const taskCompareTitle = computed<string>(() => {
+  const head =
+    `${FLOW_MODE_LABELS.compare}模式:根流程照常执行,名单内流程作为工具释放给流程节点,由模型在工具循环里自主调用并取回成果`;
+  const callable = compareCallable.value;
+  if (!callable || callable.length === 0) return head;
+  const names = callable
+    .slice(0, 6)
+    .map((f) => f.name?.trim() || f.id || '')
+    .filter((n) => n !== '');
+  const more = callable.length > names.length ? ` 等 ${callable.length} 个` : '';
+  return `${head}。本轮可调用:${names.join('、')}${more}`;
+});
+
+/**
+ * 徽标/流程名需要流程库,而任务模式此前不会加载它(只有设置区打开时才拉)。这里在
+ * 遇到 custom 任务时惰性拉一次:**已有任务快照就不拉**(快照是自足的数据源,少一次请求,
+ * 也不会被「当前库已被改过」误导);拉取失败保持 null(徽标不显示),不影响任务展示本身
+ * ——徽标是锦上添花,不能因它让详情区报错。
+ *
+ * 不用 `watch(immediate: true)`:那会在 SSR 期间就发请求,而本组件的 SSR 冒烟测试
+ * 依赖「服务端不发请求」这一既有约定(任务详情只在客户端看)。改为挂载时检查一次 +
+ * 之后随任务/模式变化检查——两个入口都只在客户端生效。
+ */
+function ensureFlowLib(): void {
+  if (taskMode.value !== 'custom') return;
+  if (currentTask.value?.flow_snapshot) return;
+  if (!agentFlowLibrary.value) void store.loadAgentFlow();
+}
+onMounted(ensureFlowLib);
+watch([taskMode, currentTaskId], ensureFlowLib);
+
+// ----- B 批 B3:改绑流程(custom 模式;进行中不可改)-----
+/**
+ * 「改绑流程」入口的可见性:仅 custom 模式,且状态**不在** `planning` / `running` /
+ * `planned`(与后端门禁同一口径)。前端不该给出一个必然 400 的入口——进行中改绑会撕裂
+ * 快照,待批准态改绑会让批准后跑的那份编排对不上已批准的计划。
+ */
+const canBindFlow = computed(() => {
+  if (taskMode.value !== 'custom') return false;
+  const s = currentTask.value?.task.status;
+  return s !== 'planning' && s !== 'running' && s !== 'planned';
+});
+
+/** 入选区展开态(内联展开,不开模态);切换任务时收起 */
+const bindOpen = ref(false);
+/** 入选草稿:根流程空串 = 跟随当前流程(下发 null);名单空 = 强制模式 */
+const bindRoot = ref('');
+const bindIds = ref<string[]>([]);
+const bindSaving = ref(false);
+/** 保存失败的后端原文(400 文案点名原因,如「任务已在执行中」) */
+const bindError = ref('');
+
+/** 候选数据源(与创建选择器同一份库) */
+const bindFlows = computed(() => agentFlowLibrary.value?.flows ?? []);
+
+/** 根流程 id(与 TaskFlowSelect 同口径:显式绑定优先,否则「跟随当前流程」= 库的当前流程) */
+const bindRootId = computed(
+  () => bindRoot.value || agentFlowLibrary.value?.current_flow_id || '',
+);
+
+/** 绑定的流程库里已不存在 → 保位选项(与选择器同款,避免静默改绑到别的流程) */
+const bindStaleRoot = computed(() => {
+  const id = bindRoot.value;
+  if (!id) return '';
+  return bindFlows.value.some((f) => f.id === id) ? '' : id;
+});
+
+/** 勾选行(根流程不可调用 / 停用不可勾 / 已失效成员保位):判定与创建选择器共用同一实现 */
+const bindCandidates = computed<FlowCandidate[]>(() =>
+  flowCandidates(bindFlows.value, bindRootId.value, bindIds.value),
+);
+
+/** 名单里库中已不存在的成员:后端必 400,提前说清(与选择器同款警示) */
+const bindStaleSelected = computed(() => staleMembers(bindCandidates.value, bindIds.value));
+
+/** 展开入选区:草稿从当前绑定起步(取消即丢弃,不写回任何状态) */
+function openBind(): void {
+  const task = currentTask.value?.task;
+  if (!task) return;
+  bindRoot.value = task.flow_id ?? '';
+  bindIds.value = [...(task.flow_ids ?? [])];
+  bindError.value = '';
+  bindOpen.value = true;
+  // 候选来自流程库:有快照时 ensureFlowLib 不会拉库(徽标自足),而改绑必须有库
+  if (!agentFlowLibrary.value) void store.loadAgentFlow();
+}
+
+function cancelBind(): void {
+  bindOpen.value = false;
+  bindError.value = '';
+}
+
+/** 勾选/取消一个可调用流程(数组顺序 = 用户勾选顺序,后端工具描述按此列举) */
+function toggleBindId(id: string, ev: Event): void {
+  const checked = (ev.target as HTMLInputElement).checked;
+  const list = bindIds.value.filter((x) => x !== id);
+  if (checked) list.push(id);
+  bindIds.value = list;
+}
+
+/** 改绑确认文案:说清**快照会被替换**(历史徽标可能不再匹配)与名单形态 */
+function bindConfirmText(): string {
+  const id = bindRoot.value;
+  const rootName = id
+    ? bindFlows.value.find((f) => f.id === id)?.name?.trim() || id
+    : '跟随当前流程';
+  const list =
+    bindIds.value.length > 0
+      ? `可调用名单 ${bindIds.value.length} 个流程`
+      : '强制模式(清空可调用名单)';
+  return (
+    `将把本任务改绑到「${rootName}」(${list})。` +
+    '改绑会替换流程快照:历史步骤的编排徽标按新编排重新解析,对不上的不再显示;' +
+    '已跑过的步骤结果与调用记录不受影响。确定改绑吗?'
+  );
+}
+
+/** 保存改绑:全量替换(根流程与名单都显式下发;名单空 = 强制模式) */
+async function saveBind(): Promise<void> {
+  const id = currentTaskId.value;
+  if (!id || bindSaving.value) return;
+  if (!confirm(bindConfirmText())) return;
+  bindSaving.value = true;
+  bindError.value = '';
+  try {
+    await store.bindTask(id, bindRoot.value || null, [...bindIds.value]);
+    bindOpen.value = false;
+  } catch (err) {
+    // 后端 400 文案(点名原因)原样透出,不吞成「保存失败」
+    bindError.value = (err as Error).message;
+  } finally {
+    bindSaving.value = false;
+  }
+}
 
 /** 当前任务是否处于计划待批准(plan 模式 run 后的暂停态) */
 const taskPlanned = computed(() => currentTask.value?.task.status === 'planned');
@@ -116,9 +335,17 @@ const followupDisabledHint = computed(() => {
 /** 消息种类小标签(文案源见 api/labels.ts;未登记种类返回空串、不显示) */
 // 原此处手写 MESSAGE_KIND_LABELS,已收敛到 api/labels.ts 的 messageKindLabel()
 
-/** 助手发言的署名:优先任务绑定角色的名字,无绑定(如纯任务)回退「任务 Agent」 */
+/** 助手发言的署名:优先执行者库的名称;旧任务(仅 character_id)回退角色名;
+ *  都无绑定(通用执行者)则「任务 Agent」。
+ *  执行者优先是本次解耦的要求:任务模式不应再以角色扮演角色卡为执行者署名。 */
 const taskMessageAuthor = computed(() => {
-  const cid = currentTask.value?.task.character_id;
+  const task = currentTask.value?.task;
+  const eid = task?.executor_id;
+  if (eid) {
+    const e = executorById.value(eid);
+    if (e?.name) return e.name;
+  }
+  const cid = task?.character_id;
   if (cid) {
     const c = store.characters.find((x) => x.id === cid);
     if (c?.chara_name) return c.chara_name;
@@ -171,13 +398,20 @@ const planEditing = ref(false);
 /** 编辑中的计划副本(name/goal 可改;status/result 保留原值随提交回传) */
 const editedPlan = ref<TaskStep[]>([]);
 const approving = ref(false);
+/** 本次批准的执行方式(2026-09-17):默认「按计划逐步执行」= 改造前行为。
+ *  切换任务时随编辑态一并复位,避免把上个任务的选择带到下个任务。 */
+const approveExecMode = ref<TaskApproveExecMode>('approved_plan');
 
-// 切换任务时收起编辑态与 pending 操作;追加指令/规划对话草稿一并清空(批次 R2)
+// 切换任务时收起编辑态与 pending 操作;追加指令/规划对话草稿一并清空(批次 R2);
+// 执行方式选择同时复位为默认(不跨任务沿用);改绑入选区同样收起(草稿属于上一个任务)
 watch(currentTaskId, () => {
   planEditing.value = false;
   editedPlan.value = [];
+  approveExecMode.value = 'approved_plan';
   followupDraft.value = '';
   planChatDraft.value = '';
+  bindOpen.value = false;
+  bindError.value = '';
 });
 
 /** 进入「修改后批准」:复制当前计划为可编辑副本 */
@@ -187,13 +421,14 @@ function startEditPlan(): void {
   planEditing.value = true;
 }
 
-/** 批准执行:plan 为空表示按原计划批准;给了 plan 则替换后由 ApprovedPlanExecutor 逐步执行 */
+/** 批准执行:plan 为空表示按原计划批准;给了 plan 则替换后逐步执行。
+ *  execMode 为本次执行方式(缺省「按计划逐步执行」),后端据此选执行器。 */
 async function approveCurrent(plan?: TaskStep[]): Promise<void> {
   const id = currentTaskId.value;
   if (!id || approving.value) return;
   approving.value = true;
   try {
-    await store.approveTask(id, plan);
+    await store.approveTask(id, plan, approveExecMode.value);
     planEditing.value = false;
     editedPlan.value = [];
   } catch (err) {
@@ -267,12 +502,25 @@ function teamStepName(name: string): string {
 // (拆段纯函数抽至 ../taskResult,契约与 server-rs task_engine 对齐,单测锁定)
 const resultSplit = computed(() => splitTaskResult(taskMode.value, currentTask.value?.task.result ?? ''));
 
-/** 结果卡仅在终态(done/partial)渲染(批次 R1):approve 后的 planning/running 过渡窗口
+/** 结果卡渲染门控:done/partial 恒渲染;error/ended 在 result 非空时渲染
+ * (提交 2 部分成果兜底:汇总失败/取消/重启中断的任务也会带着已完成步骤的产出落库,
+ *  不展示等于把已完成的工作藏起来)。
+ *  pending/planning/running/planned **一律不渲染**(批次 R1):approve 后的过渡窗口
  *  result 仍持有 planned 态写入的计划清单文本,不门控会把计划清单误显示为「最终成果」;
- *  planned 态的计划清单由批准区内的专属卡渲染(见 plannedPlanHtml) */
+ *  planned 态的计划清单由批准区内的专属卡渲染(见 plannedPlanHtml)。 */
 const resultFinal = computed(() => {
   const s = currentTask.value?.task.status;
-  return s === 'done' || s === 'partial';
+  if (s === 'done' || s === 'partial') return true;
+  if (s === 'error' || s === 'ended') return !!(currentTask.value?.task.result ?? '').trim();
+  return false;
+});
+
+/** error/ended 态展示成果时的标注:结果只是「已完成部分的成果」,不是完整交付 */
+const resultIncompleteNote = computed(() => {
+  const s = currentTask.value?.task.status;
+  return (s === 'error' || s === 'ended') && resultFinal.value
+    ? '任务未完成,以下为已完成部分的成果'
+    : '';
 });
 
 /** 最终成果/审计结论/最终计划的 markdown 预渲染(同 planRendered 的缓存口径) */
@@ -295,18 +543,35 @@ const plannedPlanHtml = computed(() => {
   return result ? renderMarkdown(result) : '';
 });
 
-/** solo/multi 模式入口:打开 Agent 合并面板并落在「调用情况」tab(主/子 Agent 调用时间线) */
+/**
+ * 「查看调用情况」入口的说明文案(收口批 2026-09-24:custom 此前没有这个入口)。
+ * 面板本身与模式无关(通往 Agent 面板的「调用情况」tab);差别只在**细节是什么**:
+ * solo/multi 是主/子 Agent 时间线,custom 是逐个流程节点的调用
+ * (对比模式下还含被调流程的 `call.` 行,成本数据已在前端单列)。
+ */
+const callTraceHint = computed(() =>
+  taskMode.value === 'custom'
+    ? `${taskModeLabel.value}模式的执行细节(各流程节点调用,对比模式下含被调流程)请查看 Agent 面板「调用情况」`
+    : `${taskModeLabel.value}模式的执行细节(主/子 Agent 调用)请查看 Agent 面板「调用情况」`,
+);
+
+/** solo/multi/custom 模式入口:打开 Agent 合并面板并落在「调用情况」tab */
 function openCallTrace(): void {
   store.callTraceOpen = true; // tab 记忆指向「调用情况」
   store.openAgentPanel();     // 用户显式展开:清除自动展开抑制
 }
 
 // ----- 批次 R4 流式输出:「正在生成」块 -----
-/** 流式缓冲原文(全部活跃调用的攒批增量;单缓冲纯文本,多缓冲(team 并行)带 key 前缀区分) */
+/** 流式缓冲原文(全部活跃调用的攒批增量;单缓冲纯文本,多缓冲(team 并行/子图)带 key 前缀区分)。
+ *  多缓冲的 key 是**内部键**(`${phase}:${step_index ?? ''}`),不能直接插值给用户看
+ *  (会露出 `【subflow.1:0】` 这类裸 key,见 `遗留.md` IFW-7③)——统一走 utils/phaseLabel 的
+ *  中文标签;step 阶段能对上 plan 时补一个步骤名,便于在多缓冲里认出是哪一步。 */
 const liveRaw = computed(() => {
   const entries = [...store.liveBuffers.entries()];
   if (entries.length === 1) return entries[0][1];
-  return entries.map(([k, t]) => `【${k}】\n${t}`).join('\n\n');
+  const plan = currentTask.value?.task.plan ?? [];
+  const stepName = (i: number) => plan[i]?.name || null;
+  return entries.map(([k, t]) => `【${bufferLabel(k, stepName)}】\n${t}`).join('\n\n');
 });
 
 /**
@@ -429,8 +694,103 @@ async function removeTask(task: TaskRecord): Promise<void> {
               {{ statusLabel(currentTask.task.status) }}
             </span>
             <span class="sv-tag sm" title="任务执行模式(批次 4 六模式)">模式:{{ taskModeLabel }}</span>
+            <!-- 本任务用的流程(二维批次 5a):绑定流程显示其名,未绑定显示「跟随当前流程」。
+                 名字取自任务快照(与徽标同一份编排),故跑完任务后再改流程这里也不会变 -->
+            <span
+              v-if="taskFlowLabel"
+              class="sv-tag sm"
+              title="本任务绑定/使用的流程(绑定即冻结:创建时的编排;未绑定 = 跟随当前流程)"
+            >流程:{{ taskFlowLabel }}</span>
+            <!-- 对比模式(二维批次 7b):根流程照常执行,名单内流程额外作为 run_flow 工具
+                 释放给宽松节点,由模型自主调用、取回成果。数字按**本轮实际**可调用集显示 -->
+            <span
+              v-if="taskCompareLabel"
+              class="sv-tag sm"
+              :title="taskCompareTitle"
+            >{{ taskCompareLabel }}</span>
             <span v-if="taskTotalTokens > 0" class="sv-task-usage">累计 token {{ taskTotalTokens.toLocaleString() }}</span>
             <span v-if="currentTask.task.error" class="sv-task-error">{{ currentTask.task.error }}</span>
+          </div>
+
+          <!-- 改绑流程(B 批 B3):仅 custom 模式且不在进行中/待批准时给入口
+               (后端也会拒:进行中改绑会撕裂快照)。展开是**内联**入选区,不开模态 -->
+          <div v-if="canBindFlow" class="sv-task-flow-bind">
+            <button
+              v-if="!bindOpen"
+              class="sv-btn ghost sv-btn-sm"
+              title="改绑本任务执行的流程:保存后按新流程重新冻结快照"
+              @click="openBind"
+            >改绑流程</button>
+            <div v-else class="sv-task-flow-bind-panel">
+              <div class="sv-task-flow-bind-title">改绑流程(保存后按新编排重新冻结快照)</div>
+              <div class="sv-inp-row">
+                <label class="sv-inp-tag">根流程</label>
+                <select
+                  v-model="bindRoot"
+                  class="sv-select sv-task-flow-bind-select"
+                  title="绑定要执行的流程;绑定后该任务即冻结在这份编排上(改流程/换当前流程都不影响它)。「跟随当前流程」= 执行时按当时的当前流程跑"
+                >
+                  <option value="">流程:跟随当前流程</option>
+                  <option v-if="bindStaleRoot" :value="bindStaleRoot">流程:(已失效) {{ bindStaleRoot }}</option>
+                  <option v-for="f in bindFlows" :key="f.id" :value="f.id" :disabled="!f.enabled">
+                    流程:{{ f.name || f.id }}{{ f.enabled ? '' : '(已停用)' }}
+                  </option>
+                </select>
+              </div>
+              <!-- 可调用名单(与创建选择器同款文案与判定):空名单 = 强制模式,是合法选择 -->
+              <p v-if="!bindFlows.length" class="sv-note flow-tool-warn">
+                流程库为空(或尚未加载):请先在设置里添加并启用流程,再来改绑。
+              </p>
+              <p class="sv-note">
+                可调用流程(模型在工具循环里自主调用,成果回灌给根流程;一个都不勾 = 强制模式,只跑根流程):
+              </p>
+              <label
+                v-for="c in bindCandidates"
+                :key="c.id"
+                class="flow-id-item"
+                :class="{ disabled: c.disabled }"
+              >
+                <input
+                  type="checkbox"
+                  class="flow-id-box"
+                  :checked="bindIds.includes(c.id)"
+                  :disabled="c.disabled"
+                  @change="toggleBindId(c.id, $event)"
+                />
+                <span>{{ c.label }}</span>
+              </label>
+              <p v-if="bindStaleSelected.length" class="sv-note flow-tool-warn">
+                名单里有已失效的流程,请取消勾选后再保存(否则后端会拒绝并保持原绑定)。
+              </p>
+              <p v-if="bindError" class="sv-note sv-task-flow-bind-err">改绑失败:{{ bindError }}</p>
+              <div class="sv-task-flow-bind-actions">
+                <button
+                  class="sv-btn primary sv-btn-sm"
+                  :disabled="bindSaving"
+                  title="保存后按新流程重新冻结快照;历史步骤的编排徽标按新编排解析"
+                  @click="saveBind"
+                >{{ bindSaving ? '保存中…' : '保存' }}</button>
+                <button
+                  class="sv-btn ghost sv-btn-sm"
+                  :disabled="bindSaving"
+                  title="放弃本次改绑(当前绑定不受影响)"
+                  @click="cancelBind"
+                >取消</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- 执行中进度行(2026-09-18):后端 agent_status 事件本就携带每轮进展简述,
+               此前只用于刷详情、不展示——任务长时间执行时界面完全静止,用户无法区分
+               「还在跑」与「已挂死」(实跑反馈:空转 70 秒期间界面无任何变化)。
+               此处展示最近一条,给出可见的活性证据。事件不落库,故仅执行中显示。 -->
+          <div
+            v-if="taskRunning && lastAgentStatus"
+            class="sv-task-progress-line"
+            title="最近一次执行进展(来自后端事件,事件不落库)"
+          >
+            <span class="sv-task-progress-dot" />
+            <span class="sv-task-progress-text">{{ lastAgentStatus }}</span>
           </div>
 
           <!-- plan 模式批准区:计划已生成待批准(批准 / 修改后批准 / 放弃) -->
@@ -438,6 +798,21 @@ async function removeTask(task: TaskRecord): Promise<void> {
             <div class="sv-task-section-title">计划待批准</div>
             <!-- 批次 R1:planned 态 result = 待批准的计划清单,批准区内渲染供批准前审阅 -->
             <div v-if="plannedPlanHtml" class="sv-task-result sv-task-planned-plan" v-html="plannedPlanHtml" />
+            <!-- 执行方式选择(2026-09-17):默认按计划逐步执行;选其它模式则由该模式
+                 自行组织执行(team/custom 会用自身规划/流程重写计划步骤显示)。
+                 编辑态下同样可见——「修改后批准」也走这个选择。 -->
+            <div class="sv-task-approve-exec">
+              <label class="sv-inp-tag">执行方式</label>
+              <select v-model="approveExecMode" class="sv-select" title="选择批准后用什么模式执行这份计划">
+                <option v-for="m in APPROVE_EXEC_MODE_ORDER" :key="m" :value="m">
+                  {{ APPROVE_EXEC_MODE_LABELS[m] }}
+                </option>
+              </select>
+            </div>
+            <p v-if="approveExecMode !== 'approved_plan'" class="sv-note approve-exec-hint">
+              非默认方式将以该模式自行组织执行:已批准计划作为目标上下文下发;
+              团队协作与自定义流程会用自己的规划/流程重写计划步骤显示。
+            </p>
             <template v-if="!planEditing">
               <div class="sv-task-approve-actions">
                 <button
@@ -530,10 +905,14 @@ async function removeTask(task: TaskRecord): Promise<void> {
             </div>
           </div>
 
-          <!-- solo / multi 模式:执行细节在 Agent 面板「调用情况」tab(主/子 Agent 调用时间线) -->
-          <div v-if="taskMode === 'solo' || taskMode === 'multi'" class="sv-task-hint">
+          <!-- solo / multi / custom 模式:执行细节在 Agent 面板「调用情况」tab
+               (custom 收口批 2026-09-24 纳入:对比模式有被调流程成本数据,却没有入口指引) -->
+          <div
+            v-if="taskMode === 'solo' || taskMode === 'multi' || taskMode === 'custom'"
+            class="sv-task-hint"
+          >
             <span class="sv-task-hint-text">
-              {{ taskModeLabel }}模式的执行细节(主/子 Agent 调用)请查看 Agent 面板「调用情况」
+              {{ callTraceHint }}
             </span>
             <button class="sv-btn ghost sv-btn-sm" @click="openCallTrace">查看调用情况</button>
           </div>
@@ -583,6 +962,14 @@ async function removeTask(task: TaskRecord): Promise<void> {
                 <div class="sv-task-step-name">
                   {{ rs.step.name }}
                   <span class="sv-tag sm" :class="statusClass(rs.step.status)">{{ statusLabel(rs.step.status) }}</span>
+                  <!-- 编排徽标(遗留.md IFW-5):按 node_id 对回流程节点,显示层级/档位/子流程/成果。
+                       对不上就不显示(旧任务、节点已删、流程库没加载) -->
+                  <span
+                    v-for="(badge, bi) in planBadges[i]"
+                    :key="bi"
+                    class="sv-tag sm flow-node-tag"
+                    :class="badge.kind"
+                  >{{ badge.text }}</span>
                 </div>
                 <!-- 步骤目标(plan 模式待批准清单的完整内容:名称+目标;
                      批准后/完成后同区持续显示,状态徽标与 result 随 SSE 刷新实时反映) -->
@@ -625,7 +1012,9 @@ async function removeTask(task: TaskRecord): Promise<void> {
           </div>
 
           <!-- 最终结果(team 模式拆尾部「## 审计结论」、plan 模式拆尾部「## 最终计划」
-               各自单独成卡;批次 R1:仅终态 done/partial 渲染,过渡窗口不显示)。
+               各自单独成卡;门控见 resultFinal:done/partial 恒渲染,error/ended 仅在
+               result 非空时渲染并加「未完成」标注——提交 2 起失败/取消/中断的任务也会
+               带着已完成步骤的产出落库,不展示等于把已完成的工作藏起来)。
                实跑问题 1:逐轮对话记录区已是产出的权威视图,本卡默认关闭(与气泡重复),
                可经标题栏开关展开;team 审计结论 / plan 最终计划为独立信息,保持常显。 -->
           <div v-if="resultMainHtml" class="sv-task-section">
@@ -638,6 +1027,9 @@ async function removeTask(task: TaskRecord): Promise<void> {
               >
                 {{ summaryOpen ? '收起' : '展开' }}
               </button>
+            </div>
+            <div v-if="resultIncompleteNote" class="sv-task-incomplete-note">
+              {{ resultIncompleteNote }}
             </div>
             <div v-if="summaryOpen" class="sv-task-result" v-html="resultMainHtml" />
           </div>
@@ -732,3 +1124,117 @@ async function removeTask(task: TaskRecord): Promise<void> {
     </div>
   </section>
 </template>
+
+<style scoped>
+/* 批准区「执行方式」选择行(2026-09-17)。样式纪律(MAINTENANCE D-5):新增组件样式
+   一律写在 scoped 内,不进 style.css;只复用既有 :root 令牌与 .sv-* 基础类。 */
+.sv-task-approve-exec {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 12px 0 0;
+}
+.sv-task-approve-exec .sv-select { flex: 1; min-width: 0; }
+.approve-exec-hint { margin: 6px 0 0; }
+
+/* 执行中进度行(2026-09-18):展示最近一条 agent_status 简述,长循环期间可见活性。
+   脉冲圆点用既有动画节奏;文字单行省略,避免长工具名把状态行撑开。 */
+.sv-task-progress-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 0;
+  font-size: 0.85em;
+  color: var(--sv-text-dim, #999);
+}
+.sv-task-progress-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sv-task-progress-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--sv-accent, #4ea1ff);
+  animation: sv-progress-pulse 1.4s ease-in-out infinite;
+}
+@keyframes sv-progress-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+/* 改绑流程(B 批 B3):内联入选区。样式纪律(MAINTENANCE D-5)同下:只写 scoped、
+   只复用既有 :root 令牌与 .sv-* 基础类(直角体系,不引入圆角)。 */
+.sv-task-flow-bind {
+  margin: 10px 0 18px;
+}
+.sv-task-flow-bind-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: var(--bw-thin) solid var(--sv-line-strong);
+  background: var(--sv-surface-elevated);
+}
+.sv-task-flow-bind-title {
+  font-weight: 700;
+  font-size: 12px;
+}
+.sv-task-flow-bind-select {
+  flex: 1;
+  min-width: 0;
+}
+.sv-task-flow-bind-panel .flow-id-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.sv-task-flow-bind-panel .flow-id-item.disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.sv-task-flow-bind-panel .sv-note {
+  margin: 0;
+}
+.sv-task-flow-bind-err {
+  color: var(--sv-red-deep);
+}
+.sv-task-flow-bind-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+/* 自定义流程的运行态节点徽标(遗留.md IFW-5):与画布节点卡片的 .flow-tag 同一套
+   配色语义(层级灰、严格虚线、子流程实底粉、成果粉线、停用淡),但类名独立——
+   那边是 scoped 到 AgentFlowNodeCard 的,跨组件复用会被样式隔离挡掉。 */
+.sv-task-step-name .flow-node-tag {
+  margin-left: 2px;
+}
+.flow-node-tag.level {
+  border-color: transparent;
+  color: var(--sv-ink-faint);
+}
+.flow-node-tag.strict {
+  border-style: dashed;
+  color: var(--sv-ink-dim);
+}
+.flow-node-tag.sub {
+  border-color: var(--sv-pink-dark);
+  background: var(--sv-pink-light);
+  color: var(--sv-ink);
+}
+.flow-node-tag.out {
+  border-color: var(--sv-pink-dark);
+  color: var(--sv-pink-dark);
+  font-weight: 700;
+}
+.flow-node-tag.off {
+  border-color: var(--sv-ink-faint);
+  color: var(--sv-ink-faint);
+}
+</style>

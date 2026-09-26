@@ -34,10 +34,34 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
   const maxContextTokens = ref(65536);
   /** AGENT/CUSTOM 模式工具循环轮次上限(服务端默认 32,1..=200) */
   const maxToolRounds = ref(32);
+  /** 流程动态调用嵌套深度上限(**任务侧**,A 批 A3;服务端默认 2,1..=5) */
+  const maxFlowCallDepth = ref(2);
+  /** 单任务内流程调用次数上限(**任务侧**,A 批 A3;服务端默认 8,1..=64) */
+  const maxFlowCallsPerTask = ref(8);
+  /** 节点默认上下文上限(**任务侧**,A 批 A4;服务端默认 0 = 不裁剪,否则 256..=1048576) */
+  const defaultNodeMaxContext = ref(0);
   /** 工具循环历史保留的最近完整轮数(服务端默认 4,1..=32) */
   const toolHistoryKeepRounds = ref(4);
   /** 工具循环历史 token 预算(服务端默认 16384;0 = 禁用预算闸门) */
   const toolHistoryBudgetTokens = ref(16384);
+  /** 单次生成的 token 预算(服务端默认 0 = 关闭;HB-1 成本护栏) */
+  const sessionTokenBudget = ref(0);
+  /** 预算超限动作:warn(只提示一次,默认)/ stop(停止本轮工具循环) */
+  const sessionBudgetAction = ref<'warn' | 'stop'>('warn');
+  /** 语义熔断窗口(服务端默认 16) */
+  const loopGuardSemanticWindow = ref(16);
+  /** 语义熔断同工具调用次数下限(服务端默认 12;0 = 关闭) */
+  const loopGuardSemanticMinCalls = ref(12);
+  /** 语义熔断输出指纹去重上限(服务端默认 2) */
+  const loopGuardSemanticMaxDistinct = ref(2);
+  /** 任务步骤墙钟预算秒数(服务端默认 1200 = 开;0 = 关闭本闸门) */
+  const taskStepBudgetSecs = ref(1200);
+  /** 任务空闲超时秒数(服务端默认 900;0 = 关闭看守) */
+  const taskIdleTimeoutSecs = ref(900);
+  /** 变量两步生成独立模型(空串 = 与正文共用;HB-7) */
+  const mvuModel = ref('');
+  /** 变量两步生成独立温度输入(空串 = 跟随内置 0.3;保存时映射为清除哨兵) */
+  const mvuTemperatureInput = ref('');
   /** 上下文压缩模式(off / manual / auto;服务端默认 off) */
   const compactionMode = ref<'off' | 'manual' | 'auto'>('off');
   /** 上下文压缩触发阈值(0.5..=0.95;服务端默认 0.8) */
@@ -124,8 +148,20 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
       maxTokens.value = s.default_max_tokens ?? 1024;
       maxContextTokens.value = s.max_context_tokens ?? 65536;
       maxToolRounds.value = s.max_tool_rounds ?? 32;
+      maxFlowCallDepth.value = s.max_flow_call_depth ?? 2;
+      maxFlowCallsPerTask.value = s.max_flow_calls_per_task ?? 8;
+      defaultNodeMaxContext.value = s.default_node_max_context ?? 0;
       toolHistoryKeepRounds.value = s.tool_history_keep_rounds ?? 4;
       toolHistoryBudgetTokens.value = s.tool_history_budget_tokens ?? 16384;
+      sessionTokenBudget.value = s.session_token_budget ?? 0;
+      sessionBudgetAction.value = s.session_budget_action === 'stop' ? 'stop' : 'warn';
+      loopGuardSemanticWindow.value = s.loop_guard_semantic_window ?? 16;
+      loopGuardSemanticMinCalls.value = s.loop_guard_semantic_min_calls ?? 12;
+      loopGuardSemanticMaxDistinct.value = s.loop_guard_semantic_max_distinct ?? 2;
+      taskStepBudgetSecs.value = s.task_step_budget_secs ?? 1200;
+      taskIdleTimeoutSecs.value = s.task_idle_timeout_secs ?? 900;
+      mvuModel.value = s.mvu_model ?? '';
+      mvuTemperatureInput.value = typeof s.mvu_temperature === 'number' ? String(s.mvu_temperature) : '';
       agentSystemPrompt.value = s.agent_system_prompt ?? '';
       searchEndpoint.value = s.search_endpoint ?? '';
       mvuVarsPosition.value = (s.mvu_vars_position ?? 'system') as 'system' | 'user_tail';
@@ -179,8 +215,20 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     maxTokens.value = s.default_max_tokens ?? 1024;
     maxContextTokens.value = s.max_context_tokens ?? 65536;
     maxToolRounds.value = s.max_tool_rounds ?? 32;
+    maxFlowCallDepth.value = s.max_flow_call_depth ?? 2;
+    maxFlowCallsPerTask.value = s.max_flow_calls_per_task ?? 8;
+    defaultNodeMaxContext.value = s.default_node_max_context ?? 0;
     toolHistoryKeepRounds.value = s.tool_history_keep_rounds ?? 4;
     toolHistoryBudgetTokens.value = s.tool_history_budget_tokens ?? 16384;
+    sessionTokenBudget.value = s.session_token_budget ?? 0;
+    sessionBudgetAction.value = s.session_budget_action === 'stop' ? 'stop' : 'warn';
+    loopGuardSemanticWindow.value = s.loop_guard_semantic_window ?? 16;
+    loopGuardSemanticMinCalls.value = s.loop_guard_semantic_min_calls ?? 12;
+    loopGuardSemanticMaxDistinct.value = s.loop_guard_semantic_max_distinct ?? 2;
+    taskStepBudgetSecs.value = s.task_step_budget_secs ?? 1200;
+    taskIdleTimeoutSecs.value = s.task_idle_timeout_secs ?? 900;
+    mvuModel.value = s.mvu_model ?? '';
+    mvuTemperatureInput.value = typeof s.mvu_temperature === 'number' ? String(s.mvu_temperature) : '';
     useModelConnStore().model = s.model;
     agentSystemPrompt.value = s.agent_system_prompt ?? '';
     searchEndpoint.value = s.search_endpoint ?? '';
@@ -303,14 +351,42 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     agentFlowLibrary.value = await api.deleteAgentFlow(id);
   }
 
+  /**
+   * 导入搬运包(二维批次 7a):只新增(同内容跳过 / 同 id 异内容分配新 id),
+   * 服务端校验在候选库上一次性完成——失败抛错且**本库不变**。返回报告供调用方提示。
+   * B 批 B4:`onConflict='replace'` 走**覆盖**模式(覆盖同 id 且内容不同的那份,
+   * 不可逆;UI 侧负责二次确认),缺省 = 现状 rename。
+   */
+  async function importAgentFlows(
+    flows: api.AgentFlowConfig[],
+    rootId?: string,
+    onConflict?: api.FlowImportConflict,
+  ): Promise<api.FlowImportReport> {
+    const { library, report } = await api.importAgentFlows(flows, rootId, onConflict);
+    agentFlowLibrary.value = library;
+    return report;
+  }
+
   return {
     temperature,
     topP,
     maxTokens,
     maxContextTokens,
     maxToolRounds,
+    maxFlowCallDepth,
+    maxFlowCallsPerTask,
+    defaultNodeMaxContext,
     toolHistoryKeepRounds,
     toolHistoryBudgetTokens,
+    sessionTokenBudget,
+    sessionBudgetAction,
+    loopGuardSemanticWindow,
+    loopGuardSemanticMinCalls,
+    loopGuardSemanticMaxDistinct,
+    taskStepBudgetSecs,
+    taskIdleTimeoutSecs,
+    mvuModel,
+    mvuTemperatureInput,
     compactionMode,
     compactionThreshold,
     compactionKeepRecent,
@@ -358,5 +434,6 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     saveAgentFlowConfig,
     selectAgentFlow,
     deleteAgentFlow,
+    importAgentFlows,
   };
 });

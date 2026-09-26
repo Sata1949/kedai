@@ -66,6 +66,31 @@ object ShellExecutorBridge {
         return detectTier()
     }
 
+    /**
+     * Shizuku 应用是否已安装("1" = 已安装,"0" = 未安装)。
+     *
+     * 供设置页授权面板在用户点「请求授权」**之前**给出可行动的提示:未安装时
+     * 直接引导去安装,而不是让用户点一个必然抛异常的按钮。返回字符串而非 Boolean
+     * 是为了复用 Rust 侧现有的 String 往返约定(避免新增 JNI 签名)。
+     */
+    @JvmStatic
+    @Keep
+    fun shizukuInstalled(): String = if (isShizukuInstalled()) "1" else "0"
+
+    /**
+     * Shizuku 当前是否已获授权("1"/"0")。
+     * 未安装或依赖缺失时返回 "0"(UI 侧配合 shizukuInstalled 区分两种情形)。
+     */
+    @JvmStatic
+    @Keep
+    fun shizukuGranted(): String = try {
+        val cls = Class.forName("rikka.shizuku.Shizuku")
+        val has = cls.getMethod("checkSelfPermission").invoke(null) as? Boolean ?: false
+        if (has) "1" else "0"
+    } catch (_: Throwable) {
+        "0"
+    }
+
     private fun probeTier(): String {
         if (canUseRoot()) return TIER_ROOT
         if (isShizukuAvailable()) return TIER_SHIZUKU

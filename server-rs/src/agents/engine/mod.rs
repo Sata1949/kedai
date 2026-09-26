@@ -76,6 +76,9 @@ use self::util::{check_aborted, rebuild_content_keeping_blocks, send_event, step
 pub struct EngineCore {
     /// LLM 连接器(内层 RwLock,支持运行期热切换)
     pub connector: Arc<RwLock<Connector>>,
+    /// 连接器池(二维批次 5b):节点/请求级 `connection_id` 的连接器解析与缓存。
+    /// **单一出处**——`TaskService` 不另建一份(计划改动点 1 明令),它复用引擎上的这一份。
+    pub connector_pool: Arc<crate::services::settings_service::ConnectorPool>,
     /// 运行时设置(agent 系统提示词、搜索端点等)
     pub settings: Arc<Mutex<RuntimeSettings>>,
     /// SQLite 句柄(Token 累计统计)
@@ -129,6 +132,8 @@ pub struct EngineExt {
 
 pub struct AgentEngine {
     pub connector: Arc<RwLock<Connector>>,
+    /// 连接器池(二维批次 5b):`resolve_connector` 的缓存来源,见 `EngineCore`。
+    connector_pool: Arc<crate::services::settings_service::ConnectorPool>,
     current_model: Mutex<String>,
     characters: Arc<CharacterService>,
     sessions: Arc<SessionService>,
@@ -181,6 +186,7 @@ impl AgentEngine {
     ) -> Self {
         AgentEngine {
             connector: core.connector,
+            connector_pool: core.connector_pool,
             current_model: Mutex::new(core.initial_model),
             characters: storage.characters,
             sessions: storage.sessions,
@@ -226,6 +232,56 @@ impl AgentEngine {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// 按模型统计一段文本的 token 数(二维批次 8)。
+    ///
+    /// 复用引擎**同一个** `TokenService` 实例(与聊天侧裁剪 `trim_to_context`、
+    /// `count_message_tokens` 同源),**不引第二个计数源**:否则「同一段文本在裁剪与
+    /// 记账处算出两个数」这类漂移无从排查。消费点:`task_engine/custom.rs` 的节点输入预算。
+    pub fn count_tokens(&self, text: &str, model: &str) -> i64 {
+        let mut ts = self.token_service.lock().unwrap_or_else(|e| e.into_inner());
+        ts.count_tokens(text, model)
+    }
+
+    /// 解析一次调用要用的连接器(二维批次 5b 的**单一出处**):
+    ///  - `None`(未指定)→ 默认连接:沿用 `engine.connector` 的读锁快照与 `model()`,
+    ///    行为与 5b 之前**逐字节一致**;
+    ///  - `Some(id)` → 按 id 在设置快照的连接列表里找:`enabled` 的走连接器池取实例
+    ///    (模型取该连接器真实值),找不到即报「连接已删除」、停用即报「连接已停用」——
+    ///    **不静默回退默认连接**(与 5a「有 flow_id 却无快照」、6b「子流程不在快照内」同口径)。
+    ///
+    /// 返回的模型名恒取**连接器自身**报告的值(而不是 `model()`):追责「这次调用到底用了
+    /// 哪个模型」时,连接器是唯一权威;默认连接下两者本就一致(切换模型同步重建两者),
+    /// mock 连接则恒为 `mock-demo`(既有语义,5b 未改)。
+    ///
+    /// 消费点:`executor::execute_generation`(工具循环内层)与
+    /// `task_service::generate_text`(纯生成);自定义流程两条执行路径因此共享同一分流,
+    /// 聊天侧 `agent_mode=custom` 也随 `step_params_for` 带上的 connection_id 一并生效。
+    pub async fn resolve_connector(
+        &self,
+        connection_id: Option<&str>,
+    ) -> Result<(Connector, String), String> {
+        let Some(id) = connection_id.map(str::trim).filter(|id| !id.is_empty()) else {
+            let connector = self.connector.read().await.clone();
+            let model = connector.model().to_string();
+            return Ok((connector, model));
+        };
+        let settings = self.settings_snapshot();
+        let Some(profile) = settings.connections.iter().find(|p| p.id == id) else {
+            return Err(format!(
+                "引用的连接「{id}」不在设置里(可能已被删除);请改流程的节点连接,或在设置里恢复该连接"
+            ));
+        };
+        if !profile.enabled {
+            return Err(format!(
+                "引用的连接「{}」已停用;请启用它,或改流程的节点连接",
+                crate::services::settings_service::connection_label(profile)
+            ));
+        }
+        let connector = self.connector_pool.connector_for(profile);
+        let model = connector.model().to_string();
+        Ok((connector, model))
     }
 
     /// 运行期设置快照:lock 后立即 clone 返回,锁中毒时 into_inner 恢复取值。
@@ -458,6 +514,8 @@ impl AgentEngine {
                 total_usage: &mut total_usage,
                 // 步骤循环逐轮覆盖;收尾透出 truncation 标记(可观测性问题①)
                 last_finish_reason: None,
+                // 步骤循环逐轮覆盖;收尾落 extra.budget_exceeded(HB-1)
+                budget_stopped: false,
             };
             let ctx_data = self.collect_context(&req, &session_id, &mut rctx).await;
             // 记忆召回查询向量(Phase 3):在 async 上下文算好,传入同步的 finalize_messages。
@@ -475,6 +533,8 @@ impl AgentEngine {
                 session_id: session_id.clone(),
                 character_id: req.character_id.clone(),
                 agent_depth: 0,
+                // 聊天主链路无工作区绑定(工作区在任务创建期冻结,见 task_engine::context)
+                scope: None,
             };
 
             // ===== 2. 执行阶段 =====
@@ -514,8 +574,47 @@ impl AgentEngine {
                     None,
                     None,
                 );
-                send_event(SseEvent::Interrupted, &tx, &abort_rx, &flag).await?;
-                logging::agent_step(&session_id, "interrupted", Some("生成被中止"));
+                // 中断语义统一(HB-3,2026-09-18):已生成的部分正文落库并打标记。
+                // 此前聊天侧「中断即丢弃」与任务侧「保留已落库内容」两套口径并存,
+                // 用户按停止等于白等一轮。extra.interrupted 与 extra.truncated 同构:
+                // 事件是暂态的,不落库则刷新后看不出这条是中断的。
+                let partial = content.trim();
+                if !partial.is_empty() {
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0);
+                    let mut extra = json!({
+                        "ts": ts,
+                        "completion_tokens": rctx.total_usage.completion_tokens,
+                        "total_tokens": rctx.total_usage.total_tokens,
+                        "interrupted": true,
+                    });
+                    if let Some(tree) = custom_vars_snapshot.clone() {
+                        extra["mvu"] = json!({ "stat_data": tree });
+                    }
+                    if let Err(e) =
+                        self.sessions
+                            .add_message(&session_id, "assistant", partial, extra)
+                    {
+                        tracing::warn!(error = e, "中断部分产出落库失败");
+                    }
+                }
+                // 中断轮已消耗的 token 必须记账(HB-3):此前整轮白烧不计账
+                self.record_usage(&session_id, &total_usage).await;
+                // 直发而非 send_event:后者在 abort 置位时必然短路返回 Err(既有实现里
+                // 这一行是死代码,中断事件实际由外层 Err 分支补发)。此处发完即正常返回,
+                // 语义与「外层补发」等价且不再依赖错误路径。
+                let _ = tx.send(SseEvent::Interrupted).await;
+                logging::agent_step(
+                    &session_id,
+                    "interrupted",
+                    Some(if partial.is_empty() {
+                        "生成被中止"
+                    } else {
+                        "生成被中止(已保留部分产出)"
+                    }),
+                );
             } else {
                 state_machine.transition_best_effort(AgentState::Finished, &session_id);
                 let _ = self.agent_sessions.update(
@@ -554,6 +653,8 @@ impl AgentEngine {
                                 session_id: session_id.clone(),
                                 character_id: req.character_id.clone(),
                                 agent_depth: 0,
+                                // 禁词替换工具不触达文件系统,无工作区语义
+                                scope: None,
                             };
                             let args = json!({ "text": clean_content, "entries": entries });
                             match self
@@ -695,6 +796,11 @@ impl AgentEngine {
                     // 事件是暂态的,不落库则重载历史后提示消失。
                     if truncated {
                         extra["truncated"] = json!(true);
+                    }
+                    // 预算停止留痕(HB-1):token 预算 stop 档提前收掉工具循环时写入,
+                    // 与 truncated 同理由——事件是暂态的,不落库则重载历史后原因消失。
+                    if rctx.budget_stopped {
+                        extra["budget_exceeded"] = json!(true);
                     }
                     // 阶段六 6f:重生成锚点 → 原地更新原 assistant 消息行(swipes 追加,
                     // id 稳定);首次生成(无锚点)走既有 add_message 新增一行。

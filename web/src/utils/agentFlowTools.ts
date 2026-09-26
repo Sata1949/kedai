@@ -4,6 +4,26 @@
 
 import type { AgentFlowStep } from '../api/types';
 
+/**
+ * 步骤级输出上限(tokens)的允许区间——**与后端校验同口径**。
+ * 后端单一出处:`server-rs/src/services/agent_flow_service.rs` 的 `validate_flow`
+ * 只收 1..=32768(超出即 400「输出上限需在 1-32768 之间」)。
+ * 编辑器此前把 `max` 写死 131072,用户可填不可存(收口批 2026-09-24 对齐);
+ * 两端若再改区间,必须同批改这里与后端,`AgentFlowStepEditor.limits.test.ts` 锁定。
+ */
+export const STEP_OUTPUT_TOKENS_MIN = 1;
+export const STEP_OUTPUT_TOKENS_MAX = 32768;
+
+/**
+ * 节点级上下文上限(tokens)的允许区间——**与后端校验同口径**。
+ * 后端单一出处:`server-rs/src/services/agent_flow_service.rs` 的
+ * `MIN_STEP_MAX_CONTEXT` / `MAX_STEP_MAX_CONTEXT`(256..=1048576;上限与全局
+ * `max_context_tokens` 同口径,下限刻意更低——本字段的用途正是「给单个节点设更小的窗口」)。
+ * 缺省(留空)= **不裁剪**,与批次 8 之前的行为逐字节一致。
+ */
+export const STEP_MAX_CONTEXT_MIN = 256;
+export const STEP_MAX_CONTEXT_MAX = 1048576;
+
 /** 工具模式三态 */
 export type StepToolMode = 'none' | 'all' | 'list';
 
@@ -69,13 +89,91 @@ export function cleanStepsTools(steps: AgentFlowStep[]): void {
 }
 
 /**
+ * 切换动作(执行/反思)后的字段归一化:反思步骤不生成正文,故清掉生成类字段。
+ * 由 useAgentFlow 下沉为纯函数——列表视图与画布 Inspector 共用同一份,
+ * 避免两处各写一遍后漂移(该文件历史上出过 embedded/standalone 双模板漂移)。
+ *
+ * `sub_flow_id` 与生成类别同纪律:后端 `validate_flow` 同样拒「反思 + 挂载子流程」,
+ * 不清就会「点一下动作下拉,流程立刻不可保存」,而折叠态的行/卡片上没有任何标记
+ * (警示只在展开的编辑区里)。
+ */
+export function normalizeStepAction(s: AgentFlowStep): void {
+  if (s.action === 'reflect') {
+    s.generates = undefined;
+    s.system_prompt = null;
+    s.temperature = null;
+    s.max_tokens = null;
+    s.tools = null;
+    s.tool_choice = 'auto';
+    s.tool_choice_function = null;
+    s.parallel_tool_calls = null;
+    s.sub_flow_id = null;
+  } else if (s.generates === undefined) {
+    s.generates = true;
+  }
+}
+
+/**
+ * 任务工具策略(与后端 `settings.task_tool_policy` 同口径)。
+ * 仅用于编辑区本地提示,**不参与保存**——权威判定始终在后端。
+ */
+export type TaskToolPolicy = 'all' | 'deny_dangerous' | 'allowlist';
+
+/** 取交提示的上下文(缺省 = 策略未知,不产出取交提示) */
+export interface ToolPolicyCtx {
+  policy: TaskToolPolicy;
+  /** `policy=allowlist` 时的策略白名单(前端据此**精确**判定交集是否为空) */
+  allowlist?: readonly string[];
+}
+
+/**
+ * 白名单档与任务工具策略取交后的可用性提示(自定义流程收口批,2026-09-24)。
+ *
+ * 背景:后端 custom 节点实际下发/放行的工具 = **策略编译集 ∩ 步骤白名单**
+ * (`task_engine/tool_policy.rs::compile` 与 `custom.rs` 的取交;策略自身还会剔除元工具与
+ * 危险级,`deny_dangerous` 按工具名给 bash 开例外)。2026-09-24 起空名单闸门是 fail-closed
+ * ——交集为空时该节点**不下发任何工具**,模型臆造的工具调用被直接拒绝;而编辑区原本毫无提示,
+ * 用户配了白名单却拿不到工具时无从判断。
+ *
+ * 精确性纪律:危险级分类与元工具名单都在后端,前端**不复制**这两份分类,故:
+ *   - `allowlist` 档可精确判定(策略白名单在前端设置里可见):无交集 → 告警;有交集 → 不提示;
+ *   - `deny_dangerous` 档无法精确判定 → 只给「可能被整体剔除」的说明,不臆断为错误;
+ *   - `all` 档 → 不提示(策略侧只再剔除元工具,已由「全部工具」那条警告覆盖口径)。
+ */
+function listPolicyNotes(
+  s: Pick<AgentFlowStep, 'tools'>,
+  ctx: ToolPolicyCtx,
+): string[] {
+  // 仅占位空串(选了白名单但没填工具名):保存时会清洗为「不使用工具」,此处不打扰
+  const names = (s.tools ?? []).map((t) => String(t).trim()).filter(Boolean);
+  if (names.length === 0) return [];
+  if (ctx.policy === 'allowlist') {
+    const allow = ctx.allowlist ?? [];
+    if (names.some((n) => allow.includes(n))) return [];
+    return [
+      '本节点白名单与「任务工具白名单」(设置 → 工具策略)无交集 → 本节点不会下发任何工具,模型发起的工具调用会被直接拒绝;请至少保留一个两边都有的工具名。',
+    ];
+  }
+  if (ctx.policy === 'deny_dangerous') {
+    return [
+      '任务工具策略(设置 → 工具策略)会先剔除元工具(agentgo/agentend 等编排类)与危险级工具,再与本白名单取交;若白名单里的工具全被剔除,交集为空 → 本节点不下发任何工具,模型发起的工具调用会被直接拒绝。',
+    ];
+  }
+  return [];
+}
+
+/**
  * 步骤工具配置的警示文案(F8,2026-09-10 六模式实跑修复)。
  * 背景:`tools: []` 语义是「全部工具」(非「不使用」),极易误配——实测「理解意图」
  * 这类 generates=false 的分析步骤被配成全部工具,实际下发 11 个工具(含编排/写类)。
  * 返回需展示的警示列表(空数组 = 无警示);纯函数便于单测。
+ *
+ * `policyCtx` 为白名单档的取交提示(自定义流程收口批);不传则该提示不产出
+ * (旧调用点行为不变)。
  */
 export function stepToolsWarnings(
   s: Pick<AgentFlowStep, 'tools' | 'generates'>,
+  policyCtx?: ToolPolicyCtx,
 ): string[] {
   const mode = stepToolMode(s);
   const out: string[] = [];
@@ -88,6 +186,9 @@ export function stepToolsWarnings(
     out.push(
       '本步骤已设为「不生成正文」(如「理解意图」),通常只需只读工具或不用工具;选「全部工具」会把它当作执行步骤,建议改为「不使用工具」或「白名单」。',
     );
+  }
+  if (mode === 'list' && policyCtx) {
+    out.push(...listPolicyNotes(s, policyCtx));
   }
   return out;
 }

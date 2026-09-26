@@ -3,8 +3,9 @@
 // 摘要槽/记忆槽布局。私有兼容入口 build_llm_messages 的测试仍留 build.rs 内。
 // 经 messages/mod.rs 的 `#[cfg(test)] mod build_tests;` 挂载,测试名不变。
 use crate::agents::engine::messages::inject::{
-    append_memory_notice, insert_memory_slot, insert_recall_slot, insert_summary_slot,
-    MEMORY_SLOT_MARKER, RECALL_SLOT_MARKER, SUMMARY_SLOT_MARKER,
+    append_memory_notice, apply_inject_insertions, insert_memory_slot, insert_recall_slot,
+    insert_summary_slot, InjectAt, InjectInsertion, MEMORY_SLOT_MARKER, RECALL_SLOT_MARKER,
+    SUMMARY_SLOT_MARKER,
 };
 use crate::agents::engine::worldbook::WorldInjection;
 use crate::models::types::LlmMessage;
@@ -632,6 +633,106 @@ fn appending_history_keeps_prefix_bytes_stable() {
     );
     // 新数组确实发生了追加(而非重建出不同布局)
     assert!(m_new.len() >= m_old.len());
+}
+
+/// @INJECT 中段插入的前缀稳定性(harness 补强 HB-5,2026-09-18):
+/// 既有前缀回归只覆盖「构建期尾部注入区」(激发条目/预设尾部随新消息转移),
+/// 覆盖不到 @INJECT 把注入消息插进**历史中段**的场景(inject.rs 的 pos/target/regex
+/// 支持任意下标)。中段插入一旦随历史追加而漂移,插入点之后的整段前缀全部 miss,
+/// 而这条路径的收益正是缓存命中——故把「插入点之前逐字节稳定 + 注入内容自身稳定」
+/// 钉成断言。
+///
+/// 本用例同时锁住 apply_inject_insertions 的「从后往前插入」排序纪律:两个插入点
+/// 相邻时,正序插入会让后一个插入点被前一次插入挤位移(断言会失败)。
+#[test]
+fn inject_into_mid_history_keeps_prior_prefix_stable() {
+    // 生产顺序:build_llm_messages_with_position → apply_inject_insertions
+    // (messages/context.rs 收尾处的调用顺序,此处保持一致)
+    let build = |history: &[(String, String)]| {
+        let mut msgs = {
+            let mut vars = HashMap::new();
+            build_prefix_case(history, &mut vars)
+        };
+        apply_inject_insertions(
+            &mut msgs,
+            &[
+                // pos=3:插到第 3 条非 system 消息之前(历史中段,非尾部)
+                (
+                    InjectInsertion::Pos {
+                        pos: 3,
+                        role: "user".to_string(),
+                    },
+                    "中段位置注入".to_string(),
+                ),
+                // 第 2 条 user 消息之前:与上一个插入点相邻,用于锁排序纪律
+                (
+                    InjectInsertion::Target {
+                        target_role: "user".to_string(),
+                        index: 2,
+                        at: InjectAt::Before,
+                        role: "user".to_string(),
+                    },
+                    "中段目标注入".to_string(),
+                ),
+            ],
+        );
+        msgs
+    };
+
+    let old_history = prefix_case_history();
+    let m_old = build(&old_history);
+    let find = |msgs: &[LlmMessage], text: &str| {
+        msgs.iter()
+            .position(|m| m.content == text)
+            .unwrap_or_else(|| panic!("消息数组应含独立消息「{text}」:\n{msgs:?}"))
+    };
+    let find_contains = |msgs: &[LlmMessage], text: &str| {
+        msgs.iter()
+            .position(|m| m.content.contains(text))
+            .unwrap_or_else(|| panic!("消息数组应含「{text}」:\n{msgs:?}"))
+    };
+    let tgt_idx = find(&m_old, "中段目标注入");
+    let pos_idx = find(&m_old, "中段位置注入");
+    // 两个插入点在原数组里算出的完整下标相同(第 2 条 user 之前 == 第 3 条非 system 之前),
+    // 最终次序由「按位置从后往前插入」的纪律决定:先入列者(列表序 pos 在前)落在后一次
+    // 插入之下、最终在最前。改成正序插入即互换,字节布局随之变化(前缀缓存 miss)。
+    // 另注:尾部世界书注入会并进「最后一条 user 消息」内容里(不是独立消息),
+    // 故历史消息用 contains 定位,注入消息本身是独立消息、可用等值定位。
+    assert_eq!(
+        pos_idx + 1,
+        tgt_idx,
+        "同一下标的两条注入必须相邻且次序为 [pos, target](从后往前插入纪律)"
+    );
+    // 注入点确实落在历史中段:其后仍有「第二句(含尾部世界书注入)」与「回应二」
+    let second_idx = find_contains(&m_old, "第二句");
+    assert!(
+        second_idx > pos_idx,
+        "注入必须落在第二句之前(中段),实际 second_idx={second_idx}, pos_idx={pos_idx}"
+    );
+    assert!(
+        pos_idx < m_old.len() - 1,
+        "pos 注入应落在历史中段而非尾部(pos_idx={pos_idx}, 长度={})",
+        m_old.len()
+    );
+
+    // 尾部追加历史后重建:两条中段注入必须落在同一下标,且插入点之前逐字节不变
+    let mut new_history = old_history.clone();
+    new_history.push(("assistant".to_string(), "回应三".to_string()));
+    new_history.push(("user".to_string(), "第三句".to_string()));
+    let m_new = build(&new_history);
+    for (label, idx) in [("target", tgt_idx), ("pos", pos_idx)] {
+        assert_eq!(
+            serde_json::to_string(&m_old[idx]).unwrap(),
+            serde_json::to_string(&m_new[idx]).unwrap(),
+            "{label} 注入消息必须落在同一下标且逐字节一致(下标 {idx})"
+        );
+    }
+    let prefix = common_prefix_len(&m_old, &m_new);
+    assert!(
+        prefix > pos_idx,
+        "公共前缀({prefix})必须覆盖两条中段注入(至下标 {pos_idx},旧长 {})",
+        m_old.len()
+    );
 }
 
 /// 摘要槽:摘要出现在独立 system 消息(第二条),而非拼进首个 system 内

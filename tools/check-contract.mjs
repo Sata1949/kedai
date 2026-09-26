@@ -84,6 +84,84 @@ const MAPPINGS = [
     ts: { file: 'web/src/api/types.ts', name: 'TaskStatus', kind: 'union' },
   },
   {
+    // 此前标在 `契约.md` 的「机检状态总表」里为**缺口**(有 serde 快照、无跨端集合比对):
+    // plan JSON 的反序列化走 from_str_lossy 容错回退,前端手写 union 若漏一个取值,
+    // 界面会把合法状态显示成未知。
+    label: '任务步骤状态枚举',
+    rust: { file: 'server-rs/src/models/types.rs', name: 'TaskStepStatus' },
+    ts: { file: 'web/src/api/types.ts', name: 'TaskStepStatus', kind: 'union' },
+  },
+  {
+    // 同上(缺口的另一半):子任务状态比步骤多一个 ended。
+    label: '任务子任务状态枚举',
+    rust: { file: 'server-rs/src/models/types.rs', name: 'TaskSubtaskStatus' },
+    ts: { file: 'web/src/api/types.ts', name: 'TaskSubtaskStatus', kind: 'union' },
+  },
+  {
+    // 自定义流程的节点契约(遗留.md IFW-7②):此前「后端加字段、前端漏加」只能靠人
+    // 核对(6b 的 sub_flow_id 就是手工同步的)。节点是双路径共享结构——任务 custom 与
+    // 聊天 agent_mode=custom 吃同一份,漏一个字段会静默丢掉该节点的配置。
+    label: '流程节点',
+    rust: { file: 'server-rs/src/models/types.rs', name: 'PlanStep' },
+    ts: { file: 'web/src/api/types.ts', name: 'AgentFlowStep', kind: 'interface' },
+  },
+  {
+    label: '流程配置',
+    rust: {
+      file: 'server-rs/src/services/agent_flow_service.rs',
+      name: 'AgentFlowConfig',
+    },
+    ts: { file: 'web/src/api/types.ts', name: 'AgentFlowConfig', kind: 'interface' },
+  },
+  {
+    label: '流程库',
+    rust: {
+      file: 'server-rs/src/services/agent_flow_service.rs',
+      name: 'AgentFlowLibrary',
+    },
+    ts: { file: 'web/src/api/types.ts', name: 'AgentFlowLibrary', kind: 'interface' },
+  },
+  {
+    // 流程搬运(二维批次 7a):导入报告回给前端做用户提示——漏一个字段会让
+    // 「跳过 N 个 / M 个分配了新 id」静默消失,用户以为全都导进来了。
+    label: '流程导入报告',
+    rust: {
+      file: 'server-rs/src/services/agent_flow_service.rs',
+      name: 'FlowImportReport',
+    },
+    ts: { file: 'web/src/api/types.ts', name: 'FlowImportReport', kind: 'interface' },
+  },
+  {
+    // 同上:报告条目(`renamed[]` 的元素)。
+    label: '流程 id 重映射',
+    rust: {
+      file: 'server-rs/src/services/agent_flow_service.rs',
+      name: 'FlowIdRemap',
+    },
+    ts: { file: 'web/src/api/types.ts', name: 'FlowIdRemap', kind: 'interface' },
+  },
+  {
+    // 流程搬运包(二维批次 7a):导出/导入**文件的线格式**,会被用户带到别的机器上——
+    // 本批所有契约里漂移代价最高的一个,故必须机检(前端按 kedai_flow_bundle 判新旧格式)。
+    label: '流程搬运包',
+    rust: {
+      file: 'server-rs/src/services/agent_flow_service.rs',
+      name: 'FlowBundle',
+    },
+    ts: { file: 'web/src/api/types.ts', name: 'AgentFlowBundle', kind: 'interface' },
+  },
+  {
+    // 任务用的流程快照(二维批次 5a):入口流程 + 可达子流程闭包。它同时是
+    // tasks.flow_snapshot 列的落盘形态与任务详情顶层 `flow_snapshot` 的下发形态——
+    // 前端运行态徽标按它对齐节点,漏字段会让徽标静默退化成「只认当前流程库」。
+    label: '任务流程快照',
+    rust: {
+      file: 'server-rs/src/services/agent_flow_service.rs',
+      name: 'FlowSnapshot',
+    },
+    ts: { file: 'web/src/api/types.ts', name: 'TaskFlowSnapshot', kind: 'interface' },
+  },
+  {
     // SSE 顶层事件判别式联合(Rust `#[serde(tag="type")]` ↔ TS 判别式联合)。
     // 此前**未登记**:新增一个顶层事件要手改 Rust 枚举 + TS 手写 union + 前端两个 switch
     // (sseReducer.ts / stores/task.ts)共 3 处,其中 Rust→TS 这一步完全靠人,漏改不报错。
@@ -92,6 +170,19 @@ const MAPPINGS = [
     label: 'SSE 顶层事件枚举',
     rust: { file: 'server-rs/src/models/types.rs', name: 'SseEvent' },
     ts: { file: 'web/src/api/types.ts', name: 'SseEvent', kind: 'tagged-union' },
+  },
+  {
+    // 多套连接(二维批次 4):落盘结构体 ↔ GET /api/settings 的 connections 元素。
+    // 线格式由 api/settings.rs 手工掩码:api_key 明文既不下发也不该下发,前端拿到的是
+    // api_key_masked / has_api_key 这两个派生展示值(按 DistillOutcome 先例登记差异)。
+    label: '连接配置(多套连接)',
+    rust: {
+      file: 'server-rs/src/services/settings_service/connection.rs',
+      name: 'ConnectionProfile',
+    },
+    ts: { file: 'web/src/api/types.ts', name: 'ConnectionProfile', kind: 'interface' },
+    rustIgnore: ['api_key'],
+    tsIgnore: ['api_key_masked', 'has_api_key'],
   },
 ];
 

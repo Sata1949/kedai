@@ -27,6 +27,11 @@ export interface AgentActivity {
   }>;
   /** 自定义流程(custom 模式)步骤进度;其余模式为 null */
   flowProgress: { index: number; total: number; name: string } | null;
+  /**
+   * 最近一次错误终态是否可重试(HB-4):由 error 事件写入,新的一轮 step/token 清除。
+   * 面板据此决定是否给「重试」入口——鉴权/参数类错误重试没有意义。
+   */
+  retryable: boolean;
 }
 
 /** 初始 Agent 活动状态(多处重置复用) */
@@ -39,6 +44,7 @@ export function idleAgent(): AgentActivity {
     pendingTool: null,
     toolCalls: [],
     flowProgress: null,
+    retryable: false,
   };
 }
 
@@ -101,6 +107,8 @@ export function reduceSseEvent(state: SseStateSlice, event: SseEvent): SseStateC
     case 'step':
       a.stepText = event.step;
       a.detail = event.detail ?? '';
+      // 新一轮开始即清除上一轮的「可重试」标记(错误卡片随之收起)
+      a.retryable = false;
       if (event.step === '计划中…') a.chain = [];
       a.chain.push({ at: Date.now(), text: event.step, detail: event.detail });
       // 反思重试:清空上一条流式 assistant 消息,避免两次生成内容拼接显示
@@ -152,6 +160,19 @@ export function reduceSseEvent(state: SseStateSlice, event: SseEvent): SseStateC
       }
       a.chain.push({ at: Date.now(), text: `工具 ${event.name} 返回`, detail: JSON.stringify(event.output) });
       break;
+    case 'retry': {
+      // 上游重试提示(HB-4):非终态——连接器正在退避等待下一轮请求。
+      // 此前这段等待对界面完全不可见,表现为「停几十秒然后报错」;现在先在阶段行
+      // 与推理链里给出「正在重试 (n/m)…」,随后的 token/finish 会自然覆盖阶段行。
+      a.stepText = `正在重试 (${event.attempt}/${event.max})…`;
+      a.detail = event.reason;
+      a.chain.push({
+        at: Date.now(),
+        text: `请求上游重试 (${event.attempt}/${event.max})`,
+        detail: event.reason,
+      });
+      break;
+    }
     case 'token': {
       const last = state.messages[state.messages.length - 1];
       if (!last || last.role !== 'assistant') {
@@ -160,16 +181,19 @@ export function reduceSseEvent(state: SseStateSlice, event: SseEvent): SseStateC
         last.content += event.text;
         last.streaming = true;
       }
+      // 上游已开始出块:重试等待结束,阶段行交还给后续 step/finish
+      if (a.stepText.startsWith('正在重试')) a.stepText = '生成中…';
       break;
     }
     case 'interrupted': {
       a.phase = 'interrupted';
       a.stepText = '已中断';
       a.chain.push({ at: Date.now(), text: '生成被中断' });
-      // 中断时服务端不落库任何消息:直接削除最后的临时草稿气泡(负 id 未持久化,
-      // 刷新后不会出现,却因负 id 无法经删除接口移除——「最后一条草稿删不掉」)。
-      // 仅当最后消息已落库(id>0)时才保留并关闭流式状态。
-      let droppedUserDraft = false;
+      // 中断语义统一(HB-3,2026-09-18):服务端会把**已生成的部分正文**以
+      // assistant 消息落库(extra.interrupted=true),故中断终态一律刷新历史,
+      // 让带标记的正 id 消息回填——刷新前后表现一致(与 truncated 同思路)。
+      // 负 id 临时草稿仍照旧削除(未落库且无法经删除接口移除:负 id 幽灵气泡),
+      // 正 id 已落库消息只关闭流式状态。
       const last = state.messages[state.messages.length - 1];
       if (last && last.role === 'assistant') {
         if (last.id < 0) {
@@ -178,22 +202,22 @@ export function reduceSseEvent(state: SseStateSlice, event: SseEvent): SseStateC
           last.streaming = false;
         }
       }
-      // 发送消息时前端先以负 id 临时气泡展示,服务端同步落库为正 id;中断终态
-      // 不刷新历史,该临时气泡会残留成「删不掉的草稿」(负 id 无法经删除接口移除)。
-      // 末尾仍是未落库的用户气泡(如「编辑后重发」中断)时一并削除,并请求刷新历史,
-      // 让服务端正 id 版本回填。
+      // 末尾仍是未落库的用户气泡(如「编辑后重发」中断)时一并削除,由刷新历史
+      // 回填服务端正 id 版本。
       const tail = state.messages[state.messages.length - 1];
       if (tail && tail.role === 'user' && tail.id < 0) {
         state.messages.pop();
-        droppedUserDraft = true;
       }
-      return { generating: false, reloadHistory: droppedUserDraft };
+      return { generating: false, reloadHistory: true };
     }
     case 'error': {
       // 顶层生成错误终态:模型/上游失败(取代旧「空 finish 伪装成功」)。复位生成态,
       // 清理无内容的临时 assistant 气泡,展示错误信息。
       a.phase = 'error';
       a.stepText = '执行出错';
+      // 消费 retryable(HB-4):网络/限流类错误可重试,鉴权/参数类不可——
+      // 此前该字段进了线格式却无人消费,界面表现为「可重试却没有重试入口」。
+      a.retryable = event.retryable;
       a.chain.push({ at: Date.now(), text: `执行出错:${event.message}`, detail: event.code });
       const last = state.messages[state.messages.length - 1];
       if (last && last.role === 'assistant') {

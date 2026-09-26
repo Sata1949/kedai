@@ -3,9 +3,10 @@ import { createSSRApp, h, type Component } from 'vue';
 import { renderToString } from 'vue/server-renderer';
 import { createPinia, setActivePinia, type Pinia } from 'pinia';
 import { useTaskStore } from '../stores/task';
+import { useGenSettingsStore } from '../stores/genSettings';
 import TaskBoard from './TaskBoard.vue';
 import TaskModeSelect from './TaskModeSelect.vue';
-import type { TaskDetail, TaskRecord, TaskRunMode, TaskStep, TaskStatus } from '../api';
+import type { AgentFlowConfig, AgentFlowLibrary, TaskDetail, TaskRecord, TaskRunMode, TaskStep, TaskStatus } from '../api';
 
 // 批次 4 六模式 UI 冒烟测试:项目无 jsdom / @vue/test-utils,沿用 settingsSections.test.ts 的
 // SSR 模式(createSSRApp + renderToString)。SSR 不触发 onMounted,组件不发请求;
@@ -40,6 +41,11 @@ function makeTask(status: TaskStatus, mode: TaskRunMode, plan: TaskStep[] = [], 
 
 function makeDetail(task: TaskRecord): TaskDetail {
   return { task, subtasks: [], usage_total: { prompt_tokens: 0, completion_tokens: 0, reasoning_tokens: 0 } };
+}
+
+/** 快照闭包里的流程(只有 id/name 参与对比徽标的重算) */
+function flowCfg(id: string, name: string): AgentFlowConfig {
+  return { id, name, enabled: true, steps: [] };
 }
 
 /** 以 pinia 上下文 SSR 渲染组件为 HTML 字符串;seed 在渲染前对 task store 播种状态 */
@@ -207,6 +213,77 @@ describe('TaskBoard 批次 4:solo/multi 调用情况入口与 custom 步骤进�
     expect(html).toContain('已完成');
   });
 
+  it('custom 任务的对比模式徽标:带名单才显示「对比 · 可调用 N 个流程」', async () => {
+    // 带名单 → 徽标 + 数量
+    const compareTask = makeTask('running', 'custom');
+    compareTask.flow_ids = ['f-1', 'f-2'];
+    const html = await render(TaskBoard, (p) => seedCurrentTask(p, makeDetail(compareTask)));
+    expect(html).toContain('对比 · 可调用 2 个流程');
+
+    // 强制模式(无名单):不显示该徽标
+    const forceHtml = await render(TaskBoard, (p) =>
+      seedCurrentTask(p, makeDetail(makeTask('running', 'custom'))),
+    );
+    expect(forceHtml).not.toContain('对比 · 可调用');
+
+    // 非 custom 模式即使带了字段也不显示(字段只对自定义流程有意义)
+    const soloTask = makeTask('running', 'solo');
+    soloTask.flow_ids = ['f-1'];
+    const soloHtml = await render(TaskBoard, (p) => seedCurrentTask(p, makeDetail(soloTask)));
+    expect(soloHtml).not.toContain('对比 · 可调用');
+  });
+
+  it('对比徽标按**本轮实际**可调用集显示:快照闭包外的成员被扣掉并把差额一并说明', async () => {
+    // 未绑定任务:成员在创建后被删/停用 → 已从快照闭包剔除(后端宽松口径),
+    // 旧口径(直接用名单长度)会显示 3 个,与实际可调用的 2 个不符(遗留.md IFW-12 边界 2)
+    const task = makeTask('running', 'custom');
+    task.flow_ids = ['f-1', 'f-2', 'gone'];
+    const detail = makeDetail(task);
+    detail.flow_snapshot = {
+      root_id: 'root',
+      flows: [flowCfg('root', '根流程'), flowCfg('f-1', '甲'), flowCfg('f-2', '乙')],
+    };
+    const html = await render(TaskBoard, (p) => seedCurrentTask(p, detail));
+    expect(html).toContain('对比 · 可调用 2 个流程(名单 3 个,1 个本轮不可用)');
+    // 悬停说明列出实际可调用流程名(取不到名才退回 id)
+    expect(html).toContain('本轮可调用:甲、乙');
+  });
+
+  it('名单含根流程时同样扣掉:徽标数字即运行期实际可调用集', async () => {
+    // 未绑定任务 + 跟随当前流程:根是哪一份开跑才定,名单里重复的根流程由运行期扣除
+    const task = makeTask('running', 'custom');
+    task.flow_ids = ['root', 'f-1'];
+    const detail = makeDetail(task);
+    detail.flow_snapshot = { root_id: 'root', flows: [flowCfg('root', '根流程'), flowCfg('f-1', '甲')] };
+    const html = await render(TaskBoard, (p) => seedCurrentTask(p, detail));
+    expect(html).toContain('对比 · 可调用 1 个流程(名单 2 个,1 个本轮不可用)');
+  });
+
+  it('custom 模式渲染「查看调用情况」入口(收口批 2026-09-24:此前只给 solo/multi)', async () => {
+    // 对比模式花的是真金白银(被调流程 token 已在调用面板单列),却没有入口指引
+    const plan: TaskStep[] = [{ name: '生成草稿', goal: '生成', status: 'done', result: '' }];
+    const html = await render(TaskBoard, (p) =>
+      seedCurrentTask(p, makeDetail(makeTask('running', 'custom', plan))),
+    );
+    expect(html).toContain('查看调用情况');
+    expect(html).toContain('各流程节点调用,对比模式下含被调流程');
+  });
+
+  it('solo 入口文案仍指主/子 Agent(纳入 custom 未造成文案漂移)', async () => {
+    const html = await render(TaskBoard, (p) =>
+      seedCurrentTask(p, makeDetail(makeTask('running', 'solo'))),
+    );
+    expect(html).toContain('主/子 Agent 调用');
+    expect(html).not.toContain('各流程节点调用');
+  });
+
+  it('未列入的模式(plan)不渲染该入口', async () => {
+    const html = await render(TaskBoard, (p) =>
+      seedCurrentTask(p, makeDetail(makeTask('running', 'plan'))),
+    );
+    expect(html).not.toContain('查看调用情况');
+  });
+
   it('legacy 模式渲染保持现状(无批准区/分工卡/调用面板入口)', async () => {
     const plan: TaskStep[] = [{ name: '步骤一', goal: '目标一', status: 'pending', result: '' }];
     const html = await render(TaskBoard, (p) =>
@@ -239,7 +316,7 @@ describe('TaskBoard 批次 R1:plan 模式最终计划输出', () => {
     expect(html).not.toContain('计划步骤</div>');
   });
 
-  it('done 态:最终成果卡在上、最终计划卡在下,各自成卡', async () => {
+  it('旧任务:done 态 result 含「## 最终计划」段时仍拆卡(向后兼容,新任务不再产出该段)', async () => {
     const plan: TaskStep[] = [
       { name: '搜集资料', goal: '收集季度数据', status: 'done', result: '资料摘要' },
       { name: '撰写正文', goal: '输出报告初稿', status: 'done', result: '初稿内容' },
@@ -271,6 +348,53 @@ describe('TaskBoard 批次 R1:plan 模式最终计划输出', () => {
     expect(html).not.toContain('最终计划</div>');
     // 步骤区照常显示执行进度
     expect(html).toContain('计划步骤</div>');
+  });
+});
+
+describe('TaskBoard 提交 2:部分成果兜底展示(失败/取消不再藏起已完成的工作)', () => {
+  const plan: TaskStep[] = [
+    { name: '步骤一', goal: '写第一段', status: 'done', result: '已完成产出' },
+    { name: '步骤二', goal: '写第二段', status: 'error', result: '返回空内容(finish_reason=length)' },
+  ];
+  const salvageResult = '## 步骤一\n\n已完成产出\n\n> 未完成的步骤:步骤二';
+
+  it('error 态 result 非空:渲染成果汇总卡 + 「任务未完成」标注', async () => {
+    memStorage.set('kedai.task-result-summary.v1', '1');
+    const html = await render(TaskBoard, (p) =>
+      seedCurrentTask(p, makeDetail(makeTask('error', 'legacy', plan, salvageResult))),
+    );
+    // 卡标记类唯一标识成果汇总卡(纯文本断言会被模板注释污染)
+    expect(html).toContain('sv-task-summary-toggle');
+    expect(html).toContain('任务未完成,以下为已完成部分的成果');
+    expect(html).toContain('已完成产出');
+  });
+
+  it('ended 态 result 非空:同样渲染并标注(取消不再丢已完成步骤的产出)', async () => {
+    const html = await render(TaskBoard, (p) =>
+      seedCurrentTask(p, makeDetail(makeTask('ended', 'legacy', plan, salvageResult))),
+    );
+    expect(html).toContain('sv-task-summary-toggle');
+    expect(html).toContain('任务未完成,以下为已完成部分的成果');
+  });
+
+  it('error 态 result 为空:不渲染成果卡、无标注(不造假成果)', async () => {
+    const html = await render(TaskBoard, (p) =>
+      seedCurrentTask(p, makeDetail(makeTask('error', 'legacy', plan, ''))),
+    );
+    expect(html).not.toContain('sv-task-summary-toggle');
+    expect(html).not.toContain('任务未完成,以下为已完成部分的成果');
+    // 计划步骤区照常显示各步状态(失败原因在步骤 result 里)
+    expect(html).toContain('计划步骤</div>');
+  });
+
+  it('planned 态 result 持计划清单时不渲染成果卡(批次 R1 门控未被放宽抹掉)', async () => {
+    const pendingPlan: TaskStep[] = [
+      { name: '搜集资料', goal: '收集季度数据', status: 'pending', result: '' },
+    ];
+    const html = await render(TaskBoard, (p) =>
+      seedCurrentTask(p, makeDetail(makeTask('planned', 'plan', pendingPlan, '计划已产出,共 1 步:'))),
+    );
+    expect(html).not.toContain('sv-task-summary-toggle');
   });
 });
 
@@ -318,7 +442,7 @@ describe('TaskBoard 批次 R4:「正在生成」流式块', () => {
     expect(html).not.toContain('sv-task-live');
   });
 
-  it('多缓冲(team 并行)时带 key 前缀区分各调用', async () => {
+  it('多缓冲(team 并行)时带 key 前缀区分各调用(标签中文化,不裸露内部 key)', async () => {
     const html = await render(TaskBoard, (p) => {
       seedCurrentTask(p, makeDetail(makeTask('running', 'team')));
       useTaskStore().liveBuffers = new Map([
@@ -328,8 +452,12 @@ describe('TaskBoard 批次 R4:「正在生成」流式块', () => {
     });
     expect(html).toContain('甲主的产出');
     expect(html).toContain('乙主的产出');
-    expect(html).toContain('agent:0');
-    expect(html).toContain('agent:1');
+    // 前缀 = 中文阶段标签 + 该主 agent 的步骤下标(遗留.md IFW-7③):
+    // 两条缓冲仍可区分,而用户看到的是「主Agent #1 / #2」而非内部 key
+    expect(html).toContain('【主Agent #1】');
+    expect(html).toContain('【主Agent #2】');
+    expect(html).not.toContain('【agent:0】');
+    expect(html).not.toContain('【agent:1】');
   });
 });
 
@@ -378,5 +506,155 @@ describe('TaskBoard F7:legacy 子任务区去重', () => {
     );
     expect(html).toContain('子任务执行');
     expect(html).toContain('开场白');
+  });
+});
+
+// ==================== 运行态节点徽标(遗留.md IFW-5)====================
+
+/** 二维流程库:两源 → 合并(严格 + 显式成果) */
+function seedFlowLib(library: AgentFlowLibrary | null): void {
+  useGenSettingsStore().agentFlowLibrary = library;
+}
+
+/**
+ * 抽出 HTML 里全部节点徽标的 kind 类(按出现顺序)。
+ * 渲染形态是 `<span class="<kind> sv-tag sm flow-node-tag">`(Vue 把 `:class` 的动态值
+ * 排在静态 class 之前),故按整段 class 属性匹配,不依赖类名顺序之外的写法。
+ */
+function nodeBadgeKinds(html: string): string[] {
+  return [...html.matchAll(/class="([^"]*flow-node-tag[^"]*)"/g)].map((m) =>
+    m[1].split(/\s+/).find((c) => c !== 'sv-tag' && c !== 'sm' && c !== 'flow-node-tag') ?? '',
+  );
+}
+
+function badgeLib(): AgentFlowLibrary {
+  return {
+    current_flow_id: 'f1',
+    flows: [
+      {
+        id: 'f1',
+        name: '主流程',
+        enabled: true,
+        steps: [
+          { id: 'n-a', name: '起头', enabled: true, goal: 'g', action: 'direct', generates: true },
+          { id: 'n-b', name: '收尾', enabled: true, goal: 'g', action: 'direct', generates: true, kind: 'strict', is_output: true, inputs: ['n-a'] },
+        ],
+      },
+    ],
+  };
+}
+
+describe('TaskBoard 流程步骤的节点徽标(IFW-5)', () => {
+  it('custom 任务按 node_id 对回节点,显示层级/档位/成果', async () => {
+    const plan: TaskStep[] = [
+      { name: '起头', goal: 'g', status: 'done', result: '', node_id: 'n-a' },
+      { name: '收尾', goal: 'g', status: 'running', result: '', node_id: 'n-b' },
+    ];
+    const html = await render(TaskBoard, (p) => {
+      seedCurrentTask(p, makeDetail(makeTask('running', 'custom', plan)));
+      seedFlowLib(badgeLib());
+    });
+    expect(html).toContain('流程步骤进度');
+    // 四类徽标文案都在,且 kind 类真拼进了 class 属性(kindBadges 抽的是类名;
+    // 只断言文案会漏掉「kind 没上去 → 样式不生效」)
+    expect(html).toContain('第 1 层');
+    expect(html).toContain('第 2 层');
+    expect(html).toContain('严格');
+    expect(nodeBadgeKinds(html)).toEqual(['level', 'level', 'strict', 'out']);
+  });
+
+  it('node_id 对不上(节点已删除)时不显示任何编排徽标', async () => {
+    const plan: TaskStep[] = [
+      { name: '幽灵步', goal: 'g', status: 'done', result: '', node_id: 'gone' },
+    ];
+    const html = await render(TaskBoard, (p) => {
+      seedCurrentTask(p, makeDetail(makeTask('done', 'custom', plan)));
+      seedFlowLib(badgeLib());
+    });
+    expect(html).toContain('流程步骤进度');
+    // 按徽标 class 断言,而不是页面上的任意文案(「最终成果」区块标题也含「成果」二字)
+    expect(nodeBadgeKinds(html)).toEqual([]);
+  });
+
+  it('旧任务没有 node_id(且流程库未加载)时零噪音:只有状态徽标', async () => {
+    const plan: TaskStep[] = [
+      { name: '旧步骤', goal: 'g', status: 'done', result: '' },
+    ];
+    const html = await render(TaskBoard, (p) => {
+      seedCurrentTask(p, makeDetail(makeTask('done', 'custom', plan)));
+      seedFlowLib(null);
+    });
+    expect(html).toContain('流程步骤进度');
+    expect(nodeBadgeKinds(html)).toEqual([]);
+  });
+
+  it('非 custom 模式即便带了 node_id 也不显示(徽标属流程专属)', async () => {
+    const plan: TaskStep[] = [
+      { name: '步骤一', goal: 'g', status: 'done', result: '', node_id: 'n-a' },
+    ];
+    const html = await render(TaskBoard, (p) => {
+      seedCurrentTask(p, makeDetail(makeTask('done', 'solo', plan)));
+      seedFlowLib(badgeLib());
+    });
+    expect(html).toContain('计划步骤');
+    expect(nodeBadgeKinds(html)).toEqual([]);
+  });
+
+  // ===== 二维批次 5a:徽标与流程名改读**任务快照**(收口裁定 19 的连带口径)=====
+
+  /** 带绑定与快照的任务详情(计划行 node_id 指向 `badgeLib` 的节点) */
+  function boundDetail(plan: TaskStep[], snapshotFlows = badgeLib().flows): TaskDetail {
+    const detail = makeDetail(makeTask('done', 'custom', plan));
+    detail.task.flow_id = 'f1';
+    detail.flow_snapshot = { root_id: 'f1', flows: snapshotFlows };
+    return detail;
+  }
+
+  const boundPlan: TaskStep[] = [
+    { name: '起头', goal: 'g', status: 'done', result: '', node_id: 'n-a' },
+    { name: '收尾', goal: 'g', status: 'done', result: '', node_id: 'n-b' },
+  ];
+
+  it('快照优先:当前库已换成另一份流程,徽标仍按快照对齐', async () => {
+    const html = await render(TaskBoard, (p) => {
+      seedCurrentTask(p, boundDetail(boundPlan));
+      // 当前库指向另一份流程(节点 id 全不同):读当前库的话一个徽标都对不上
+      seedFlowLib({
+        current_flow_id: 'f9',
+        flows: [
+          {
+            id: 'f9',
+            name: '另一份流程',
+            enabled: true,
+            steps: [
+              { id: 'x', name: '别处节点', enabled: true, goal: 'g', action: 'direct', generates: true, is_output: true },
+            ],
+          },
+        ],
+      });
+    });
+    expect(nodeBadgeKinds(html)).toEqual(['level', 'level', 'strict', 'out']);
+    expect(html).toContain('第 2 层');
+    // 流程名同样取自快照(读当前库会显示「另一份流程」)
+    expect(html).toContain('流程:主流程');
+  });
+
+  it('快照在手时不需要流程库(库未加载照常出徽标与流程名)', async () => {
+    const html = await render(TaskBoard, (p) => {
+      seedCurrentTask(p, boundDetail(boundPlan));
+      seedFlowLib(null);
+    });
+    expect(nodeBadgeKinds(html)).toEqual(['level', 'level', 'strict', 'out']);
+    expect(html).toContain('流程:主流程');
+  });
+
+  it('无快照的旧任务回退当前流程库(本批之前的降级路径保留)', async () => {
+    const html = await render(TaskBoard, (p) => {
+      seedCurrentTask(p, makeDetail(makeTask('done', 'custom', boundPlan)));
+      seedFlowLib(badgeLib());
+    });
+    expect(nodeBadgeKinds(html)).toEqual(['level', 'level', 'strict', 'out']);
+    // 未绑定 → 如实显示「跟随当前流程」
+    expect(html).toContain('流程:跟随当前流程');
   });
 });

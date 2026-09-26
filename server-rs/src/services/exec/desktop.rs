@@ -46,6 +46,12 @@ pub async fn execute(req: ExecRequest) -> Result<ExecResult, String> {
         }
     }
 
+    // Windows 桌面版入口是 GUI 子系统(无控制台),派生 cmd 会**新建可见控制台窗口**,
+    // 用户可见为「任务模式乱弹 cmd 黑窗」(2026-09-18 修复;debug 构建自带控制台故不复现)。
+    // stdio 重定向挡不住窗口创建,必须显式带 CREATE_NO_WINDOW。
+    #[cfg(windows)]
+    cmd.creation_flags(crate::utils::win::CREATE_NO_WINDOW);
+
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -179,5 +185,38 @@ mod tests {
         } else {
             assert_eq!(sh, "sh");
         }
+    }
+
+    /// 生成标志纪律(2026-09-18):Windows 上派生必须带 CREATE_NO_WINDOW,
+    /// 否则 GUI 子系统的父进程会让每个 bash 调用弹出一个 cmd 黑窗。
+    ///
+    /// 为什么断言常量值而不是断言「窗口没弹」:窗口创建在自动化环境(CI/沙箱/无桌面
+    /// 会话)中不会发生,探针实测连 CREATE_NEW_CONSOLE 对照组都测不到窗口,无法自动
+    /// 复现;故此处锁「派生命中带对了位」,真机弹窗行为由交付前的手工验证项确认
+    /// (见 docs/遗留.md 的 GUI-4)。
+    #[test]
+    #[cfg(windows)]
+    fn create_no_window_flag_is_hidden_window_bit() {
+        // 0x08000000 = CREATE_NO_WINDOW(CreateProcess dwCreationFlags)。
+        // 与 DETACHED_PROCESS(0x08)/CREATE_NEW_CONSOLE(0x10)区分:那两者会让
+        // 子进程完全没有控制台或再开一个新窗口,都不是本处想要的语义。
+        assert_eq!(crate::utils::win::CREATE_NO_WINDOW, 0x0800_0000);
+    }
+
+    /// CREATE_NO_WINDOW 下的命令仍须正常工作:标志不能让 stdout 捕获或退出码失真
+    /// (历史风险点是「隐藏窗口」被误实现成 DETACHED_PROCESS,导致管道断开)。
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn command_still_works_with_hidden_window_flag() {
+        let out =
+            super::super::execute(req("echo kedai-hidden-window-probe"), &[ShellTier::Sandbox])
+                .await
+                .expect("带 CREATE_NO_WINDOW 的 echo 应成功");
+        assert_eq!(out.exit_code, 0);
+        assert!(
+            out.stdout.contains("kedai-hidden-window-probe"),
+            "stdout 应仍被完整捕获:{:?}",
+            out.stdout
+        );
     }
 }

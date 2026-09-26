@@ -113,7 +113,34 @@ CREATE TABLE IF NOT EXISTS tasks (
   updated_at   TEXT NOT NULL,
   -- 执行模式(批次 4 六模式):legacy|solo|multi|plan|team|custom;旧库经
   -- migration::ensure_tasks_task_mode_column 幂等补列,旧行默认 'legacy'
-  task_mode    TEXT NOT NULL DEFAULT 'legacy'
+  task_mode    TEXT NOT NULL DEFAULT 'legacy',
+  -- 执行者库 id(NULL = 通用执行者):指向 data/task_executors.json 中的执行者。
+  -- 旧库经 migration::ensure_tasks_executor_id_column 幂等补列;列在表尾以对齐
+  -- ALTER ADD COLUMN 的追加顺序(schema 指纹比对依赖)。
+  -- 不建索引:当前无按 executor_id 过滤的查询(对照 idx_tasks_character 属过滤列;
+  -- 且本表 CREATE INDEX 语句先于 ensure_* 补列执行,给新列建索引会让旧库升级报
+  -- 「no such column」——CREATE_TABLES 与补列在同一批次里,顺序不可调换)
+  executor_id  TEXT,
+  -- 任务绑定的流程 id(NULL = 跟随当前流程);旧库经 migration::ensure_tasks_flow_columns
+  -- 幂等补列。两列同样追加在表尾以对齐 ALTER ADD COLUMN 的顺序(schema 指纹比对依赖)
+  flow_id      TEXT,
+  -- 任务用的流程快照(JSON:入口流程 + 可达子流程闭包),绑定任务在创建时冻结、
+  -- 未绑定任务在执行开始时捕获;NULL = 尚无快照(旧任务/未跑过的未绑定任务)。
+  -- 有意**不建索引**也不进列表查询的列清单——快照是 O(流程库) 体积,详情接口按需单读。
+  flow_snapshot TEXT,
+  -- 对比模式的可调用流程名单(JSON 字符串数组,二维批次 7b;NULL = 强制模式)。
+  -- 非空即「根流程照常跑 + 名单内流程作为 run_flow 工具释放给宽松节点」;
+  -- 旧库经 migration::ensure_tasks_flow_columns 幂等补列(同属表尾追加)。
+  flow_ids     TEXT,
+  -- 任务级连接的 id(NULL = 跟随设置的默认连接;A 批 B1)。语义:该任务所有 LLM 调用的
+  -- **缺省连接**(节点级 connection_id 优先);指向 settings.json 的 connections[].id。
+  -- 旧库经 migration::ensure_tasks_flow_columns 幂等补列(同属表尾追加,顺序不可调换)。
+  connection_id TEXT,
+  -- 任务绑定的工作区绝对路径(NULL = 未绑定工作区;编码通道批次)。语义:创建期
+  -- canonicalize 后冻结,绑定后任务获得工作区文件工具族(fs_*)且 bash 缺省 cwd 落在
+  -- 其内。旧库经 migration::ensure_tasks_workspace_column 幂等补列;列追加在表尾以对齐
+  -- ALTER ADD COLUMN 的追加顺序(schema 指纹比对依赖)。
+  workspace    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
 -- 任务列表按角色 / 状态过滤(2026-09-13 批次 3 补;旧库经 ensure_perf_indexes 补建)
@@ -190,6 +217,9 @@ CREATE INDEX IF NOT EXISTS idx_task_messages_task ON task_messages(task_id, crea
 
 -- 命令执行审计(阶段 B/C):每次尝试执行(含被拒绝的)落一行,root/ADB 级命令
 -- 不可逆,这是唯一回溯依据。旧库由 migration::ensure_exec_audit_table 幂等建表;
+-- risk_flag(D1 审计增强,2026-09-26):'' | data_dir_touch | parent_climb,只标记不拦截
+-- (有 shell 就能读进程可读的任意路径,封堵在进程内做不到);旧库由
+-- migration::ensure_exec_audit_risk_flag_column 幂等补列。
 -- 注意:列定义处不得写行内注释(同 task_llm_calls 教训,跨库合并 schema 比对会误报)。
 CREATE TABLE IF NOT EXISTS exec_audit (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -204,7 +234,8 @@ CREATE TABLE IF NOT EXISTS exec_audit (
   decision       TEXT NOT NULL DEFAULT 'allowed',
   exit_code      INTEGER,
   stdout_summary TEXT NOT NULL DEFAULT '',
-  stderr_summary TEXT NOT NULL DEFAULT ''
+  stderr_summary TEXT NOT NULL DEFAULT '',
+  risk_flag      TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_exec_audit_ts ON exec_audit(ts DESC);
 CREATE TABLE IF NOT EXISTS session_vars (

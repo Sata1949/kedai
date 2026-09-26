@@ -190,6 +190,62 @@ pub fn untrusted_boundary(source: &str, content: &str) -> String {
     )
 }
 
+/// 被上下文预算裁掉的上游产出段的正文标记(二维批次 8)。
+/// 段**标签行保留**、正文替换为本标记——让模型知道「这里原本有内容」而不是静默少一段。
+pub const OMITTED_SEGMENT_MARKER: &str = "(因本节点上下文上限省略)";
+
+/// 单段在「保留 / 省略」两种形态下的 token 成本(二维批次 8)。
+/// 两种形态都要计入:省略并非零成本——标签行保留、正文换成 [`OMITTED_SEGMENT_MARKER`]。
+pub struct SegmentCost {
+    /// 保留:标签行 + 原文
+    pub kept: i64,
+    /// 省略:标签行 + 省略标记
+    pub omitted: i64,
+}
+
+/// 任务侧节点输入的**预算裁剪选择**(二维批次 8):恒保留头部段(任务目标 / 源消息),
+/// 上游产出段从**最旧**(数组下标最小)起整体省略,直到合计落在预算内。
+///
+/// 返回 `keep_from`:保留下标 `[keep_from, len)` 的段;`[0, keep_from)` 为被省略者。
+///
+/// **为何不复用聊天侧的 `trim_to_context`**(两者都叫「裁剪」但口径不同):
+///  - 聊天侧裁的是**多条消息**(从最旧整条丢弃),而节点输入只有 2 条消息、上游产出全在
+///    同一条 user 里——消息级裁剪会把「任务目标 + 全部上游产出」整条丢掉(静默灾难);
+///  - 节点侧要的是**段级、保留标签**的省略,故把「选哪几段保留」这一纯决策抽到本模块
+///    (与其它提示词原语同址),计数与渲染留在调用方(`task_engine/custom.rs`)。
+///
+/// 头部段单独超预算 → `Err`:**不静默截断任务目标**(口径同批次 5b「引用失效不静默回退」);
+/// 连「全部段都省略」也仍超预算 → 同样 `Err`(那说明上限设得过小,配置本身无解)。
+pub fn select_segments_within_budget(
+    head_tokens: i64,
+    segments: &[SegmentCost],
+    budget: u32,
+) -> Result<usize, String> {
+    let budget = budget as i64;
+    if head_tokens > budget {
+        return Err(format!(
+            "任务目标约 {head_tokens} token,已超出本节点上下文上限 {budget} token;\
+             请调大该步的「上下文上限」或留空(留空 = 不裁剪)"
+        ));
+    }
+    let mut keep_from = 0usize;
+    loop {
+        let total = head_tokens
+            + segments[keep_from..].iter().map(|s| s.kept).sum::<i64>()
+            + segments[..keep_from].iter().map(|s| s.omitted).sum::<i64>();
+        if total <= budget {
+            return Ok(keep_from);
+        }
+        if keep_from == segments.len() {
+            return Err(format!(
+                "本节点上下文上限 {budget} token 过小:任务目标与 {} 个省略标记合计约 {total} token",
+                keep_from
+            ));
+        }
+        keep_from += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,5 +382,73 @@ mod tests {
             let r = world_entry_roll();
             assert!((0..100).contains(&r), "roll 越界: {r}");
         }
+    }
+
+    // ----- 节点输入预算裁剪(二维批次 8)-----
+
+    /// 预算充足 → 一段都不省略(回归:不得因为「有预算」就把段落动一下)。
+    #[test]
+    fn budget_selects_no_omission_when_within() {
+        let segs = vec![
+            SegmentCost {
+                kept: 100,
+                omitted: 10,
+            },
+            SegmentCost {
+                kept: 200,
+                omitted: 10,
+            },
+        ];
+        assert_eq!(select_segments_within_budget(50, &segs, 400).unwrap(), 0);
+        // 恰好等于预算也算「在预算内」(<= 判定,不是 <)
+        assert_eq!(select_segments_within_budget(50, &segs, 350).unwrap(), 0);
+    }
+
+    /// 超预算 → 从**最旧**(下标最小)起省略,省略段按「标记成本」计入
+    /// (省略不是零成本:标签行与标记本身也占 token)。
+    #[test]
+    fn budget_drops_oldest_first_and_charges_marker_cost() {
+        let mk = |kept: i64| SegmentCost { kept, omitted: 10 };
+        // 头 50 + 两段 100/200 = 350;预算 300 → 去掉最旧的 100,改计标记 10 → 260 ≤ 300
+        assert_eq!(
+            select_segments_within_budget(50, &[mk(100), mk(200)], 300).unwrap(),
+            1
+        );
+        // 预算 200:去掉第一段后为 50+200+10=260 > 200 → 再省第二段 → 50+0+20=70 ≤ 200
+        assert_eq!(
+            select_segments_within_budget(50, &[mk(100), mk(200)], 200).unwrap(),
+            2
+        );
+    }
+
+    /// 头部段单独超预算 → Err(不静默截断任务目标)。
+    #[test]
+    fn budget_rejects_when_head_alone_exceeds() {
+        let segs = vec![SegmentCost {
+            kept: 1,
+            omitted: 1,
+        }];
+        let err = select_segments_within_budget(500, &segs, 400).unwrap_err();
+        assert!(err.contains("任务目标"), "错误须点名任务目标: {err}");
+        assert!(err.contains("500"), "错误须带上实际 token: {err}");
+    }
+
+    /// 连「全部段都省略」也仍超预算 → Err(上限设得过小,配置本身无解)。
+    #[test]
+    fn budget_rejects_when_markers_alone_exceed() {
+        let segs: Vec<SegmentCost> = (0..10)
+            .map(|_| SegmentCost {
+                kept: 100,
+                omitted: 40,
+            })
+            .collect();
+        let err = select_segments_within_budget(50, &segs, 200).unwrap_err();
+        assert!(err.contains("过小"), "错误须说明上限过小: {err}");
+    }
+
+    /// 无上游段(源节点)+ 头部在预算内 → 不省略、不报错。
+    #[test]
+    fn budget_with_no_segments_keeps_head() {
+        assert_eq!(select_segments_within_budget(80, &[], 100).unwrap(), 0);
     }
 }

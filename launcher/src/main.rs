@@ -23,6 +23,27 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+/// Windows 子进程创建标志:有控制台但**无可见控制台窗口**。
+/// 零依赖约束:就地定义,不复用 server-rs 的同名常量(见 server-rs/src/utils/win.rs)。
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// 派生控制台程序(netstat / taskkill / sqlite3)的标准姿势:带 CREATE_NO_WINDOW。
+///
+/// 本启动器自身无控制台(GUI 子系统),不设该标志时每个子进程都会新开一个可见黑窗
+/// (2026-09-18,与后端 exec/desktop.rs 同源修复)。
+/// 例外:下方 build.ps1 那条 powershell 是**故意**要可见窗口(CREATE_NEW_CONSOLE,
+/// 用于呈现耗时数分钟的构建进度),故不经过本函数。
+fn hidden_command(program: &str) -> Command {
+    let mut c = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(CREATE_NO_WINDOW);
+    }
+    c
+}
+
 // ---------------------------------------------------------------- Win32 绑定
 
 #[link(name = "user32")]
@@ -177,7 +198,7 @@ fn parse_port(content: &str) -> Option<u16> {
 /// 用于结束上一次未正常退出的 Kedai 实例——它占着端口会让新版无法启动,
 /// 用户只看到旧界面,误以为「修复没生效」(实跑反馈)。
 fn pids_listening_on(port: u16) -> Vec<u32> {
-    let out = match Command::new("netstat").arg("-ano").output() {
+    let out = match hidden_command("netstat").arg("-ano").output() {
         Ok(o) => o,
         Err(_) => return Vec::new(),
     };
@@ -215,7 +236,7 @@ fn terminate_port_owner(port: u16) -> bool {
         if pid == self_pid {
             continue;
         }
-        let ok = Command::new("taskkill")
+        let ok = hidden_command("taskkill")
             .args(["/F", "/PID", &pid.to_string()])
             .output()
             .map(|o| o.status.success())
@@ -347,7 +368,7 @@ fn rewrite_avatar_paths(dst: &Path, old_root: &Path) -> Result<usize, String> {
          WHERE avatar_path LIKE '{old}%'; SELECT changes();"
     );
 
-    let out = Command::new("sqlite3")
+    let out = hidden_command("sqlite3")
         .arg(&db)
         .arg(&sql)
         .output()
@@ -779,7 +800,8 @@ mod tests {
 
     #[test]
     fn extract_json_string_reads_compact_json() {
-        let json = r#"{"version":"0.2.0","build_time":"2026-08-28T12:00:00Z","dist_hash":"abc123"}"#;
+        let json =
+            r#"{"version":"0.2.0","build_time":"2026-08-28T12:00:00Z","dist_hash":"abc123"}"#;
         assert_eq!(
             extract_json_string(json, "dist_hash"),
             Some("abc123".to_string())
@@ -790,8 +812,14 @@ mod tests {
         );
         assert_eq!(extract_json_string(json, "missing"), None);
         // 空值与无引号值都不该误判
-        assert_eq!(extract_json_string(r#"{"dist_hash":""}"#, "dist_hash"), None);
-        assert_eq!(extract_json_string(r#"{"dist_hash":123}"#, "dist_hash"), None);
+        assert_eq!(
+            extract_json_string(r#"{"dist_hash":""}"#, "dist_hash"),
+            None
+        );
+        assert_eq!(
+            extract_json_string(r#"{"dist_hash":123}"#, "dist_hash"),
+            None
+        );
     }
 
     #[test]
@@ -807,9 +835,8 @@ mod tests {
         // sidecar 缺失(旧产物)→ 无法判定,绝不能误报漂移
         assert!(!versions_drifted(&root, &desktop));
 
-        let stamp = |h: &str| {
-            format!(r#"{{"version":"0.2.0","build_time":"t","dist_hash":"{h}"}}"#)
-        };
+        let stamp =
+            |h: &str| format!(r#"{{"version":"0.2.0","build_time":"t","dist_hash":"{h}"}}"#);
         std::fs::write(dist.join("kedai-server.exe.build.json"), stamp("aaa")).unwrap();
         std::fs::write(dist.join("Kedai.exe.build.json"), stamp("aaa")).unwrap();
         assert!(!versions_drifted(&root, &desktop), "指纹一致不算漂移");

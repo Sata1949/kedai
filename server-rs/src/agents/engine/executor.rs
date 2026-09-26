@@ -102,6 +102,67 @@ pub(super) async fn maybe_run_tool(
         .update(agent_session_id, Some("executing"), None, None, None);
     Ok(())
 }
+/// 任务模式「单次 LLM 调用」总时长上限(第二次看门狗,2026-09-18)。
+///
+/// 为什么需要:姊妹路径 `TaskService::generate_text`(规划/步骤/汇总等纯生成)有 300s
+/// 总时长看门狗(`task_service/mod.rs` 的 `TASK_LLM_TOTAL_TIMEOUT`),而工具循环
+/// (`run_tool_loop` → `execute_generation`)此前只有连接器层的**空闲**看门狗与轮次上限,
+/// 没有总时长上限。两个缺口叠加可让任务无限停在 running:
+///   ① 引擎侧无总时长;② 空闲判定对「慢速滴流」无效——上游每 <120s 吐几个字节即可
+///   每次重置空闲计时,单轮生成拖到无穷。
+/// 本轮把任务模式补齐到与纯生成同档(300s/次),超时让任务进 error 终态而非静默卡死。
+///
+/// 常量与 `task_service` 的同名值口径一致但不跨层 import(L3 引擎不依赖 L2 服务;
+/// 两处各自声明、注释互指,改动时须同步)。
+///
+/// 风险:会中断「极慢但最终能返回」的上游请求。取 300s 而非更小值,是因为推理模型
+/// 单轮生成数十秒属正常;与 planner/step 既有 300s 口径一致,不对同类调用双标。
+const TASK_TOOL_LOOP_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// 总时长看门狗包装:`watchdog=None` 时行为与裸调完全一致;`Some(limit)` 时超过
+/// `limit` 未完成即放弃 future 并返回 `timeout_error()`。
+///
+/// 抽成泛型是为了让单测能用毫秒级阈值覆盖「超时/未超时」两条分支——生产阈值 300s
+/// 不可能在测试里真等。
+async fn with_call_watchdog<F, T>(
+    fut: F,
+    watchdog: Option<std::time::Duration>,
+    timeout_error: impl FnOnce() -> EngineError,
+) -> Result<T, EngineError>
+where
+    F: std::future::Future<Output = Result<T, EngineError>>,
+{
+    let Some(limit) = watchdog else {
+        return fut.await;
+    };
+    match tokio::time::timeout(limit, fut).await {
+        Ok(r) => r,
+        Err(_) => Err(timeout_error()),
+    }
+}
+
+/// 该会话是否启用工具循环总时长看门狗(任务模式虚拟 session 为 `task:` 前缀)。
+///
+/// 抽成纯函数以便单测锁死「只有任务模式启用」这条边界:聊天路径的长回复是正常形态,
+/// 加总时长上限会把「模型慢慢写长文」误判为失败。
+fn call_watchdog_for(session_id: &str) -> Option<std::time::Duration> {
+    session_id
+        .starts_with("task:")
+        .then_some(TASK_TOOL_LOOP_CALL_TIMEOUT)
+}
+
+/// 单次调用看门狗的最终取值(A 批 A1):**节点级覆盖优先**,缺省回落上面那条既有判定。
+///
+/// 抽成纯函数的原因与 `call_watchdog_for` 相同——生产阈值是 300s(或节点配的 30~3600s),
+/// 不可能在测试里真等,故把「取哪个值」与「等多久」分开锁:单测锁取值,引擎侧只按值包超时。
+/// 覆盖**同时具备收紧与放宽两种用法**(60s 的严节点 / 900s 的慢节点),故不是 `min` 语义。
+fn resolve_call_watchdog(
+    session_id: &str,
+    call_timeout: Option<std::time::Duration>,
+) -> Option<std::time::Duration> {
+    call_timeout.or_else(|| call_watchdog_for(session_id))
+}
+
 /// 流式执行 LLM 生成(与 Node 版 executor.ts executeGeneration 对齐)
 /// pub(crate):任务引擎 custom 模式(批次 4.3b)按步骤直调;聊天路径行为不变。
 #[allow(clippy::too_many_arguments)]
@@ -149,7 +210,11 @@ pub(crate) async fn execute_generation(
     // 任务模式经 run_tool_loop 一路带到 task_llm_calls 落库点;聊天路径不消费本字段。
     let mut finish_reason: Option<String> = None;
 
-    let connector = engine.connector.read().await.clone();
+    // 连接器按本次调用的 connection_id 解析(二维批次 5b):None = 默认连接(5b 之前
+    // 的读锁快照口径不变);节点级连接由 `resolve_connector` 单点解析,两条执行路径共用。
+    let (connector, _model) = engine
+        .resolve_connector(params.connection_id.as_deref())
+        .await?;
     let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel();
     let generate = connector.generate_stream(messages, params.clone(), abort.clone(), chunk_tx);
     tokio::pin!(generate);
@@ -163,7 +228,7 @@ pub(crate) async fn execute_generation(
             chunk = chunk_rx.recv() => match chunk {
                 Some(chunk) => {
                     if process_chunk(chunk, &mut content, &mut reasoning, &mut tool_calls, &mut usage, &mut finish_reason, tx, abort, flag).await? {
-                        return Ok(ExecutorResult { content, usage, interrupted: true, tool_calls, reasoning, finish_reason, self_heals: Vec::new() });
+                        return Ok(ExecutorResult { content, usage, interrupted: true, tool_calls, reasoning, finish_reason, self_heals: Vec::new(), budget_stopped: false });
                     }
                 }
                 None => break,
@@ -183,6 +248,7 @@ pub(crate) async fn execute_generation(
                 reasoning,
                 finish_reason,
                 self_heals: Vec::new(),
+                budget_stopped: false,
             });
         }
         // 连接器失败:分类原样带出(不丢分类信息)
@@ -215,6 +281,7 @@ pub(crate) async fn execute_generation(
         reasoning,
         finish_reason,
         self_heals: Vec::new(),
+        budget_stopped: false,
     })
 }
 
@@ -278,6 +345,26 @@ async fn process_chunk(
         // finish_reason 聚合到结果(可观测性问题①):任务模式据此落 task_llm_calls,
         // 区分「正常收尾(stop)」与「max_tokens 截断(length)」;聊天引擎不据此动作
         LlmStreamChunk::Finish { reason } => *finish_reason = Some(reason),
+        // 连接器重试提示(HB-4,2026-09-18):透出为顶层 Retry 事件,界面显示
+        // 「正在重试 (n/m)…」。此前重试只写 tracing,用户看到的是「停几十秒
+        // 然后报错」的无解释等待。非终态事件,落到这里即视为可继续的普通块。
+        LlmStreamChunk::Retry {
+            attempt,
+            max,
+            reason,
+        } => {
+            send_event(
+                SseEvent::Retry {
+                    attempt,
+                    max,
+                    reason,
+                },
+                tx,
+                abort,
+                flag,
+            )
+            .await?;
+        }
     }
     Ok(false)
 }
@@ -298,6 +385,11 @@ pub(crate) struct ExecutorResult {
     /// 本轮内发生的截断自愈记录(问题①,2026-08-31 deepseek 实测修复):
     /// 仅 run_tool_loop 的单轮自愈路径产出,其余构造点恒空;聊天路径不消费。
     pub(crate) self_heals: Vec<SelfHealRecord>,
+    /// 是否因**预算类闸门**而提前停止工具循环:token 预算(HB-1,聊天与任务共用)或
+    /// 步骤墙钟预算(D3,任务侧专属,见 `GenerationParams.step_budget`)。收尾端据此在
+    /// 消息 extra 里留痕(extra.budget_exceeded),刷新后仍能看出「这轮是被成本/时间
+    /// 闸门收掉的」。聊天路径不传 `step_budget`,故聊天侧该位只可能来自 token 预算。
+    pub(crate) budget_stopped: bool,
 }
 
 /// 截断自愈记录(问题①):单轮生成被 max_tokens 截断到不可用(空正文/半截
@@ -401,8 +493,7 @@ fn is_truncated_tool_call_error(err: &str) -> bool {
 }
 
 /// AGENT 模式工具循环:生成 → 有 tool_calls 则逐个执行并回填消息 → 重新生成,
-/// 轮次上限默认 32(params.max_tool_rounds 可调,settings 页配置);无 tool_calls 时返回最终正文。
-/// 每轮 usage 已累加进 total_usage。
+/// 轮次上限默认 32(params.max_tool_rounds 可调,settings 页配置);无 tool_calls 时返回最终正文。/// 每轮 usage 已累加进 total_usage。
 /// 截断自愈(问题①):单轮生成被 max_tokens 截断到不可用(空正文 / 半截 tool_call
 /// JSON / 连接器流尾 flush 校验报错)时,本轮 max_tokens 翻倍(上限
 /// TRUNCATION_HEAL_MAX_TOKENS_CAP)原样重发一次,重发仍失败才透出原结果;
@@ -414,7 +505,10 @@ fn is_truncated_tool_call_error(err: &str) -> bool {
 /// agent_session 为 None 表示任务模式(不建影子 agent_sessions 行,
 /// 工具授权闸门:替代裸白名单,把「名单内放行」与「名单外如何处理」分开表达。
 /// - `whitelist`:None = 非白名单模式(未放行工具走授权等待);
-///   Some([]) = 全量放行;Some(list) = 仅名单内工具放行。
+///   Some(list) = 仅名单内工具放行,**空名单 = 拒绝一切**。
+///   名单由「本轮下发的工具集」派生,空集即「该节点一个工具都不该被调用」;
+///   旧语义「空 = 全量放行」是 fail-open 的越权面(见 `遗留.md` IFW-12 附带发现,
+///   2026-09-24 修正)。
 /// - `no_ui_authorization`:true = 未放行工具立即拒绝并回灌错误,不进入授权等待。
 ///   任务模式没有 UI 授权上下文,若走等待会空等 300 秒超时,故必须置 true。
 #[derive(Clone, Copy)]
@@ -440,18 +534,48 @@ impl<'a> ToolGate<'a> {
         }
     }
 
-    /// 该工具是否被名单放行(空名单 = 全量放行)
+    /// 该工具是否被名单放行。
+    ///
+    /// **空名单不放行任何工具**:名单由「本轮下发的工具集」派生,空集意味着该节点
+    /// 一个工具都没下发,此时放行一切与下发意图相反——模型臆造的工具调用会绕过
+    /// 策略剔除被执行(fail-open;任务策略 all 时下发集本身非空,不依赖该语义)。
     fn authorizes(&self, name: &str) -> bool {
         self.whitelist
-            .is_some_and(|wl| wl.is_empty() || wl.iter().any(|n| n == name))
+            .is_some_and(|wl| wl.iter().any(|n| n == name))
     }
 
     /// 该工具是否被闸门硬性排除。仅对「有名单 + 不等待授权」的路径成立(任务模式):
     /// 名单是能力的硬边界,不在名单内的工具必须拒绝——否则文件规则可能因「宽松模式
     /// 写文件放行」而放过被任务策略排除的危险工具(模型幻觉调用即越权)。
     /// 聊天路径(no_ui_authorization=false)不硬性排除:名单外工具走授权等待,与改造前一致。
+    /// 空名单同样走本判定(拒绝一切)——这正是 2026-09-24 修正的形态。
     fn excludes(&self, name: &str) -> bool {
         self.no_ui_authorization && self.whitelist.is_some() && !self.authorizes(name)
+    }
+}
+
+/// 单次生成 token 预算是否已达上限(HB-1,纯函数便于边界单测):
+/// 预算 0 = 关闭;口径 = 本 run 内工具循环累计 prompt+completion,「达到」即算超限
+/// (等于预算也停,与轮次上限的 `round >= max_rounds` 同口径)。
+fn budget_reached(used_tokens: i64, budget: u32) -> bool {
+    budget > 0 && used_tokens >= budget as i64
+}
+
+/// 步骤墙钟预算是否已用尽(D3,纯函数便于边界单测):None = 不设预算(聊天路径恒此);
+/// 口径 = 单次 `run_tool_loop` 的墙钟耗时,「达到」即算(与 token 预算/轮次上限同族)。
+fn step_budget_reached(elapsed: std::time::Duration, budget: Option<std::time::Duration>) -> bool {
+    budget.is_some_and(|b| elapsed >= b)
+}
+
+/// 预算收尾时的正文选择(纯函数便于单测):本轮正文非空即用它;本轮只有工具调用
+/// (工具型模型的常见形态)则回退到最近一次非空正文——预算的承诺是「带着已有产出收尾」,
+/// 回一个空串会被上游判成「返回空内容」,与承诺相反。
+/// 两者都空时如实返回空串(不伪造正文,口径同提交 2 的「不伪造成果」)。
+fn budget_stop_content(current: String, last_non_empty: &str) -> String {
+    if current.trim().is_empty() {
+        last_non_empty.to_string()
+    } else {
+        current
     }
 }
 
@@ -473,6 +597,10 @@ pub(crate) async fn run_tool_loop(
     run_id: &str,
     // 授权闸门(替代 step_whitelist):见 ToolGate 文档
     gate: ToolGate<'_>,
+    // 单次调用超时覆盖(A 批 A1):None = 用 call_watchdog_for 的既有判定(行为不变);
+    // Some = 该节点每次调用的时间预算(可收紧也可放宽),唯一来源是自定义流程节点的
+    // `call_timeout_secs`。放在末位是为了让既有 5 个调用点只在传值处改动。
+    call_timeout: Option<std::time::Duration>,
 ) -> Result<ExecutorResult, EngineError> {
     // 轮次上限:缺省 32(settings 可调);至少 1 轮,防止配置异常导致死循环
     let max_rounds = params.max_tool_rounds.unwrap_or(32).max(1) as usize;
@@ -484,6 +612,45 @@ pub(crate) async fn run_tool_loop(
     // 此处用 utils::loop_guard 的同口径算法补上工具循环的守卫。
     // 口径 N=8 / K=3:窗口内同一「工具名+参数」指纹出现 ≥3 次即中止该步。
     let mut loop_guard = crate::utils::loop_guard::LoopGuard::with_defaults();
+    // 单次调用总时长看门狗(2026-09-18):仅任务模式启用(见 call_watchdog_for 文档)。
+    // 聊天路径保持无总时长上限——长回复是正常形态,加限会误伤。
+    // A 批 A1:节点级覆盖优先(自定义流程节点的 `call_timeout_secs`),缺省回落既有判定。
+    let call_watchdog = resolve_call_watchdog(session_id, call_timeout);
+    // token 预算(HB-1):循环前取一次设置快照(与上面工具历史裁剪同款口径,
+    // 不留锁跨 await);0 = 关闭。budget_noticed 保证 warn 档只提示一次。
+    let (token_budget, budget_action, sem_window, sem_min_calls, sem_max_distinct) = {
+        let s = engine.settings_snapshot();
+        (
+            s.session_token_budget,
+            s.session_budget_action,
+            s.loop_guard_semantic_window as usize,
+            s.loop_guard_semantic_min_calls as usize,
+            s.loop_guard_semantic_max_distinct as usize,
+        )
+    };
+    // 语义熔断三值:任务侧由调用方经 `GenerationParams.semantic_guard` 显式传入
+    // **收紧后**的值(只收不放,0 = 关闭位原样保持);None = 聊天路径,用上面的扁平快照
+    // ——不存在按 `task:` 前缀的嗅探,模式由调用方传值表达(见 D3 口径裁定 C2)。
+    let (semantic_window, semantic_min_calls, semantic_max_distinct) = params
+        .semantic_guard
+        .unwrap_or((sem_window, sem_min_calls, sem_max_distinct));
+    // 步骤墙钟预算(D3):None = 不设(聊天路径恒 None,行为逐字节不变);
+    // 任务侧来源是设置项 `task_step_budget_secs`(装配见 task_engine::task_loop_limits)。
+    let step_budget = params.step_budget;
+    // 本步墙钟起点:闸门在**轮末**判定(与 token 预算/轮次上限同构:本轮工具已执行完,
+    // 不发起下一轮模型请求,也不会留下「无 tool_result 的悬挂 tool_call」)。
+    let loop_started = std::time::Instant::now();
+    let mut budget_noticed = false;
+    // 轮级滚动:最近一次非空正文(墙钟预算收尾的回退值,见轮末更新点)
+    let mut last_non_empty_content = String::new();
+    // 语义熔断(HB-2):看「输出的实质变化」而非参数指纹——参数每轮略变即绕开指纹熔断,
+    // 实测 54 轮不同命令烧 137 万 token(遗留 L22)。登记点在工具执行收尾(输出此时可得)。
+    let mut semantic_guard = crate::utils::loop_guard::SemanticGuard::new(
+        semantic_window,
+        semantic_min_calls,
+        semantic_max_distinct,
+    );
+    let mut semantic_break: Option<(String, usize, usize)> = None;
     // 截断自愈留痕(问题①):各轮触发的自愈记录,随最终 ExecutorResult 透出;
     // Err 传播(?)时丢弃——失败路径由调用方落 error 行,截断细节含在错误文案内
     let mut self_heals: Vec<SelfHealRecord> = Vec::new();
@@ -549,15 +716,37 @@ pub(crate) async fn run_tool_loop(
         let mut attempt_params = params.clone();
         let mut healed: Option<SelfHealRecord> = None;
         let result = loop {
-            let one = execute_generation(
-                engine,
-                session_id,
-                run_id,
-                llm_messages,
-                &attempt_params,
-                tx,
-                abort,
-                flag,
+            // 单次调用总时长看门狗(2026-09-18):任务模式下包 300s 上限,超时按超时分类
+            // 透出(任务侧照既有错误路径落 error 行并进 error 终态,不留静默挂起);
+            // 聊天路径 call_watchdog=None,行为与裸调完全一致。
+            let attempt_started = std::time::Instant::now();
+            let one = with_call_watchdog(
+                execute_generation(
+                    engine,
+                    session_id,
+                    run_id,
+                    llm_messages,
+                    &attempt_params,
+                    tx,
+                    abort,
+                    flag,
+                ),
+                call_watchdog,
+                || {
+                    let limit = call_watchdog.expect("看门狗为 Some 时才会走到超时分支"); // 见 call_watchdog_for
+                    tracing::warn!(
+                        session_id = session_id.to_string(),
+                        timeout_s = limit.as_secs(),
+                        elapsed_ms = attempt_started.elapsed().as_millis() as u64,
+                        max_tokens = attempt_params.max_tokens,
+                        "任务模式工具循环单次生成超时(总时长看门狗触发)"
+                    );
+                    crate::models::llm_error::LlmError::timeout(format!(
+                        "模型调用超过 {}s 未完成(上游停滞或输出过慢),已中止本轮;可重新执行任务",
+                        limit.as_secs()
+                    ))
+                    .into()
+                },
             )
             .await;
             // 已自愈过(重发仍失败):透出原结果,不再重发
@@ -687,7 +876,10 @@ pub(crate) async fn run_tool_loop(
         total_usage.prompt_cache_hit_tokens += result.usage.prompt_cache_hit_tokens;
         total_usage.prompt_cache_miss_tokens += result.usage.prompt_cache_miss_tokens;
         if result.interrupted {
+            // 本轮 usage 已累进 total_usage(上方);返回体归零,避免调用方(HB-3 之后
+            // 中断分支也会合并 usage)重复计数。与「无工具调用短路」的归零同理由。
             return Ok(ExecutorResult {
+                usage: TokenUsage::default(),
                 self_heals: std::mem::take(&mut self_heals),
                 ..result
             });
@@ -702,9 +894,17 @@ pub(crate) async fn run_tool_loop(
                 // 末轮(无工具调用)的 finish_reason 透出:任务模式落库截断标记用
                 finish_reason: result.finish_reason,
                 self_heals: std::mem::take(&mut self_heals),
+                budget_stopped: false,
             });
         }
         round += 1;
+        // 最近一次**非空**正文(轮级滚动):工具型模型常见「只发工具调用、不带正文」的轮,
+        // 而墙钟预算闸门收尾时若恰好停在这样一轮上,返回值就是空串 → 上游按「返回空内容」
+        // 判失败,与「带着已有产出收尾」的承诺相反(2026-09-26 真模型实测:该模型整轮
+        // 工具调用几乎不带可见正文,delta 事件极少)。故预算收尾时回退到这里。
+        if !result.content.trim().is_empty() {
+            last_non_empty_content = result.content.clone();
+        }
         // 本轮是否已达上限:是则执行完本轮工具后停止,不再发起新的模型请求
         let last_round = round >= max_rounds;
         // ===== 重复调用熔断(P0-2)=====
@@ -848,6 +1048,7 @@ pub(crate) async fn run_tool_loop(
                         // 工具执行期中断:生成未完成,finish_reason 不适用
                         finish_reason: None,
                         self_heals: std::mem::take(&mut self_heals),
+                        budget_stopped: false,
                     });
                 }
             }
@@ -908,6 +1109,108 @@ pub(crate) async fn run_tool_loop(
                 tool_calls: None,
                 tool_call_id: Some(e.call.id.clone()),
             });
+            // 语义熔断登记(HB-2):输出经归一化(抹时间戳/耗时/计数)后取指纹;
+            // 同一工具在窗口内调用 ≥N 次且指纹去重 ≤K 即判定空转。只记录首个命中,
+            // 收尾按与「重复调用熔断」同款方式中止(本轮工具已执行完,无悬挂)。
+            if semantic_break.is_none() {
+                let fp = crate::utils::loop_guard::output_fingerprint(&e.output.to_string());
+                semantic_break = semantic_guard.record(&e.call.name, fp);
+            }
+        }
+        // ===== token 预算闸门(HB-1,2026-09-18):按**成本**而非轮数收口 =====
+        // 轮次上限(max_tool_rounds 默认 32)只管轮数:实测 54 轮各不相同命令的空转仍烧
+        // 137 万 prompt token(遗留 L22)。预算口径 = 本轮 run 内工具循环累计
+        // prompt+completion(与 Finish 事件透出的 total_tokens 同口径);0 = 关闭(默认)。
+        // 判定点放在**轮末**(本轮工具已执行完,与轮次上限/熔断同构):不发起下一轮
+        // 模型请求,也不会留下「无 tool_result 的悬挂 tool_call」。warn 档只提示一次
+        // 后继续;stop 档跳出循环并保留已有产出。
+        if token_budget > 0 {
+            let used_tokens = total_usage.prompt_tokens + total_usage.completion_tokens;
+            if budget_reached(used_tokens, token_budget) {
+                let stop = budget_action == "stop";
+                if !budget_noticed {
+                    budget_noticed = true;
+                    tracing::info!(
+                        session_id = session_id.to_string(),
+                        used_tokens,
+                        budget = token_budget,
+                        rounds = round + 1,
+                        action = budget_action.as_str(),
+                        "单次生成 token 预算超限"
+                    );
+                    send_event(
+                        step_evt(
+                            if stop {
+                                "Token 预算超限,停止工具循环"
+                            } else {
+                                "Token 预算超限"
+                            },
+                            Some(format!(
+                                "已用 {used_tokens} token / 预算 {token_budget}(第 {} 轮):{}",
+                                round + 1,
+                                if stop {
+                                    "已停止工具循环,本轮产出与用量照常保留"
+                                } else {
+                                    "仅提示(warn 档),循环继续"
+                                }
+                            )),
+                            None,
+                            None,
+                        ),
+                        tx,
+                        abort,
+                        flag,
+                    )
+                    .await?;
+                }
+                if stop {
+                    return Ok(ExecutorResult {
+                        content: result.content,
+                        usage: TokenUsage::default(),
+                        interrupted: false,
+                        tool_calls: Vec::new(),
+                        reasoning: String::new(),
+                        finish_reason: result.finish_reason,
+                        self_heals: std::mem::take(&mut self_heals),
+                        budget_stopped: true,
+                    });
+                }
+            }
+        }
+        // 步骤墙钟预算(D3,2026-09-26 实测):时间/成本闸门优先于轮数闸门——
+        // 任务模式每个 agent 循环各自重置轮次上限,实测单步 10 条命令反复自检(重跑测试/
+        // pwd/ls/git status)、单轮往返 1.5~3 分钟,15 分钟不收敛。到点**带着已有产出收尾**:
+        // 返回 Ok 让步骤照常记 done(不制造失败——失败会把已完成的工作一起丢掉)。
+        if round > 0 {
+            let elapsed = loop_started.elapsed();
+            if step_budget_reached(elapsed, step_budget) {
+                let budget_secs = step_budget.map(|b| b.as_secs()).unwrap_or(0);
+                send_event(
+                    step_evt(
+                        "步骤墙钟预算用尽",
+                        Some(format!(
+                            "已用 {}s / 预算 {budget_secs}s(第 {round} 轮):已停止工具循环,本轮产出与用量照常保留",
+                            elapsed.as_secs()
+                        )),
+                        None,
+                        None,
+                    ),
+                    tx,
+                    abort,
+                    flag,
+                )
+                .await?;
+                return Ok(ExecutorResult {
+                    content: budget_stop_content(result.content, &last_non_empty_content),
+                    usage: TokenUsage::default(),
+                    interrupted: false,
+                    tool_calls: Vec::new(),
+                    reasoning: String::new(),
+                    finish_reason: result.finish_reason,
+                    self_heals: std::mem::take(&mut self_heals),
+                    budget_stopped: true,
+                });
+            }
         }
         // 已达轮次上限:本轮工具已全部执行(含终态推送),停止发起新的模型请求并输出当前结果
         if last_round {
@@ -933,6 +1236,39 @@ pub(crate) async fn run_tool_loop(
                 reasoning: String::new(),
                 finish_reason: result.finish_reason,
                 self_heals: std::mem::take(&mut self_heals),
+                budget_stopped: false,
+            });
+        }
+        // 语义熔断(HB-2):同一工具在窗口内反复调用且输出实质无变化(参数可以每轮都变)。
+        // 与「重复调用熔断」互补——后者抓同参数空转,本项抓「参数在变、结果不变」的空转。
+        // 同样置于 last_round 之后:轮次上限是更明确的终止条件。
+        if let Some((tool, calls, distinct)) = semantic_break.take() {
+            let detail = format!(
+                "检测到重复空转:工具 \"{tool}\" 在最近 {semantic_window} 次调用中出现 {calls} 次,输出实质无变化(去重后 {distinct} 种),已在第 {round} 轮中止。请调整策略后重试。"
+            );
+            tracing::warn!(
+                session_id = session_id.to_string(),
+                tool = tool.as_str(),
+                calls,
+                distinct,
+                "工具循环重复空转熔断(HB-2)"
+            );
+            send_event(
+                step_evt("重复空转熔断", Some(detail), None, None),
+                tx,
+                abort,
+                flag,
+            )
+            .await?;
+            return Ok(ExecutorResult {
+                content: result.content,
+                usage: TokenUsage::default(),
+                interrupted: false,
+                tool_calls: Vec::new(),
+                reasoning: String::new(),
+                finish_reason: result.finish_reason,
+                self_heals: std::mem::take(&mut self_heals),
+                budget_stopped: false,
             });
         }
         // 重复调用熔断:本轮工具已执行完(与轮次上限同款收尾),显式告知中止理由。
@@ -966,6 +1302,7 @@ pub(crate) async fn run_tool_loop(
                 reasoning: String::new(),
                 finish_reason: result.finish_reason,
                 self_heals: std::mem::take(&mut self_heals),
+                budget_stopped: false,
             });
         }
     }
@@ -1296,12 +1633,13 @@ mod tests {
         assert!(!ToolGate::wait().excludes("write"));
     }
 
-    /// 空名单 = 全量放行(任务策略 all),不排除任何工具
+    /// 空名单 = 拒绝一切(2026-09-24 修正)。回归用例——旧语义「空 = 全量放行」曾让
+    /// `custom` 节点在「策略 ∩ 白名单 = 空集」时退化成全开:模型臆造的工具调用被放行。
     #[test]
-    fn empty_whitelist_authorizes_all() {
+    fn empty_whitelist_denies_all() {
         let gate = ToolGate::listed(&[]);
-        assert!(!gate.excludes("write"));
-        assert!(gate.authorizes("write"));
+        assert!(gate.excludes("write"), "空名单必须硬性排除一切工具");
+        assert!(!gate.authorizes("write"));
     }
 
     #[test]
@@ -1353,6 +1691,7 @@ mod tests {
             reasoning: String::new(),
             finish_reason: finish.map(|s| s.into()),
             self_heals: Vec::new(),
+            budget_stopped: false,
         }
     }
 
@@ -1485,5 +1824,192 @@ mod tests {
             "下限之上的截断必须仍可自愈(旧封顶 8192 会返回 None)"
         );
         assert_eq!(doubled_heal_budget(65_536), Some(131_072));
+    }
+
+    /// token 预算判定边界(HB-1):预算 0 恒不触发;「达到」即算超限(与轮次上限同口径)
+    #[test]
+    fn budget_reached_boundaries() {
+        assert!(!budget_reached(0, 0), "预算 0 = 关闭");
+        assert!(!budget_reached(9_999, 0), "预算 0 时与用量无关");
+        assert!(!budget_reached(1023, 1024), "低于预算不触发");
+        assert!(budget_reached(1024, 1024), "等于预算即触发(达到即算超限)");
+        assert!(budget_reached(1025, 1024), "超过预算触发");
+        assert!(budget_reached(i64::MAX, 1), "极值不溢出");
+    }
+
+    /// 步骤墙钟预算判定边界(D3):None 恒不触发(聊天路径不放这个字段,行为不变);
+    /// 「达到」即算用尽(与 token 预算/轮次上限同族口径)
+    #[test]
+    fn step_budget_reached_boundaries() {
+        use std::time::Duration;
+        assert!(
+            !step_budget_reached(Duration::from_secs(9_999), None),
+            "None = 不设预算,永不由本闸门收口"
+        );
+        assert!(
+            !step_budget_reached(Duration::from_millis(999), Some(Duration::from_secs(1))),
+            "低于预算不触发"
+        );
+        assert!(
+            step_budget_reached(Duration::from_secs(1), Some(Duration::from_secs(1))),
+            "等于预算即触发(达到即算用尽)"
+        );
+        assert!(
+            step_budget_reached(Duration::from_secs(2), Some(Duration::from_secs(1))),
+            "超过预算触发"
+        );
+    }
+
+    /// 预算收尾的正文选择(D3):本轮有正文用本轮;只有工具调用则回退最近一次非空;
+    /// 两者皆空如实返回空(不伪造)
+    #[test]
+    fn budget_stop_content_prefers_current_then_falls_back() {
+        assert_eq!(
+            budget_stop_content("本轮正文".into(), "更早的正文"),
+            "本轮正文",
+            "本轮非空即用本轮"
+        );
+        assert_eq!(
+            budget_stop_content(String::new(), "更早的正文"),
+            "更早的正文",
+            "本轮只有工具调用时回退最近非空正文(否则会被判「返回空内容」)"
+        );
+        assert_eq!(
+            budget_stop_content("   \n".into(), "更早的正文"),
+            "更早的正文",
+            "纯空白等同空"
+        );
+        assert_eq!(
+            budget_stop_content(String::new(), ""),
+            "",
+            "两者皆空如实返回空:不伪造正文"
+        );
+    }
+}
+
+#[cfg(test)]
+mod watchdog_tests {
+    use super::{
+        call_watchdog_for, resolve_call_watchdog, with_call_watchdog, EngineError,
+        TASK_TOOL_LOOP_CALL_TIMEOUT,
+    };
+    use std::time::Duration;
+
+    /// 任务模式虚拟 session(`task:` 前缀)必须启用总时长看门狗——这是「任务无限停在
+    /// running」缺口的封堵点,漏接线则该缺口原样存在。
+    #[test]
+    fn watchdog_enabled_for_task_sessions_only() {
+        assert_eq!(
+            call_watchdog_for("task:57cf15f9-0508-440a-b1a3-ae2762b58581"),
+            Some(TASK_TOOL_LOOP_CALL_TIMEOUT),
+            "任务模式必须启用"
+        );
+        assert_eq!(
+            call_watchdog_for("task:abc:main:3:sub:def"),
+            Some(TASK_TOOL_LOOP_CALL_TIMEOUT),
+            "team/子 agent 的层叠 session 同样以 task: 开头,应一并启用"
+        );
+    }
+
+    /// 聊天路径不得启用:长回复是正常形态,加总时长会把正常生成判成失败。
+    #[test]
+    fn watchdog_disabled_for_chat_sessions() {
+        assert_eq!(call_watchdog_for("session-123"), None);
+        assert_eq!(call_watchdog_for(""), None);
+        // 边界:仅前缀匹配,含 task 但不以其开头的不算
+        assert_eq!(call_watchdog_for("mytask:1"), None);
+    }
+
+    /// 节点级覆盖(A 批 A1):配了就必须**原样照用**——收紧(60s)与放宽(900s)都是合法用法,
+    /// 故实现不能写成 `min(覆盖, 缺省)`,否则「给慢节点放宽」这条诉求会被静默吃掉。
+    #[test]
+    fn node_call_timeout_overrides_default() {
+        let tight = Duration::from_secs(60);
+        let loose = Duration::from_secs(900);
+        assert_eq!(
+            resolve_call_watchdog("task:t1", Some(tight)),
+            Some(tight),
+            "任务会话:节点级覆盖优先于既有 300s"
+        );
+        assert_eq!(
+            resolve_call_watchdog("task:t1", Some(loose)),
+            Some(loose),
+            "放宽用法同样生效(不是 min 语义)"
+        );
+        assert_eq!(
+            resolve_call_watchdog("session-1", Some(tight)),
+            Some(tight),
+            "聊天会话:节点级覆盖也照用(该字段只由任务侧 PlanStep 提供,聊天侧恒为 None)"
+        );
+    }
+
+    /// 未配覆盖时逐字节维持既有判定(任务会话 300s / 聊天会话无上限)。
+    #[test]
+    fn absent_node_call_timeout_keeps_default() {
+        assert_eq!(
+            resolve_call_watchdog("task:t1", None),
+            Some(TASK_TOOL_LOOP_CALL_TIMEOUT)
+        );
+        assert_eq!(resolve_call_watchdog("session-1", None), None);
+        assert_eq!(resolve_call_watchdog("", None), None);
+    }
+
+    /// 未超时:结果原样透出,错误路径不受影响。
+    #[tokio::test]
+    async fn watchdog_passes_through_when_within_limit() {
+        let out: Result<u32, EngineError> =
+            with_call_watchdog(async { Ok(42) }, Some(Duration::from_millis(500)), || {
+                EngineError::Internal("不应触发".into())
+            })
+            .await;
+        assert_eq!(out.unwrap(), 42);
+    }
+
+    /// 超时:放弃 future 并返回分类化超时错误(不是字符串猜测)。
+    #[tokio::test]
+    async fn watchdog_times_out_and_reports_timeout_kind() {
+        let out: Result<u32, EngineError> = with_call_watchdog(
+            async {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Ok(1)
+            },
+            Some(Duration::from_millis(50)),
+            || {
+                EngineError::Llm(crate::models::llm_error::LlmError::timeout(
+                    "模型调用超过 300s 未完成",
+                ))
+            },
+        )
+        .await;
+        let err = out.expect_err("超过阈值必须超时");
+        assert!(
+            err.message().contains("超过 300s 未完成"),
+            "实际:{}",
+            err.message()
+        );
+        // 分类须为超时:任务侧据此落 error 行,聊天路径据此映射错误码
+        match err {
+            EngineError::Llm(e) => assert_eq!(
+                e.kind(),
+                crate::models::llm_error::LlmErrorKind::Timeout,
+                "必须是超时分类,而不是内部错误"
+            ),
+            other => panic!("应为 EngineError::Llm(超时分类),实际 {other:?}"),
+        }
+    }
+
+    /// None = 不限时:future 按原样等待,行为与裸调一致(聊天路径语义)。
+    #[tokio::test]
+    async fn watchdog_none_awaits_without_limit() {
+        let out: Result<u32, EngineError> = with_call_watchdog(
+            async {
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                Ok(7)
+            },
+            None,
+            || EngineError::Internal("不应触发".into()),
+        )
+        .await;
+        assert_eq!(out.unwrap(), 7);
     }
 }

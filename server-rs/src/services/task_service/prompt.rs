@@ -13,7 +13,8 @@ use super::*;
 // 既有使用者所需的三层固定提示词(executor.rs / api/settings.rs / 本文件),
 // 调用方零改动。team/custom 专属常量由 task_engine 侧直接从 task_core 引用。
 pub(crate) use crate::services::task_core::prompt_consts::{
-    EXECUTOR_PROMPT, PLANNER_PROMPT, PLANNER_REVISE_GUIDANCE, SUMMARIZER_PROMPT,
+    EXECUTOR_PROMPT, EXECUTOR_TOOL_DISCIPLINE, PLANNER_PROMPT, PLANNER_REVISE_GUIDANCE,
+    SUMMARIZER_PROMPT,
 };
 
 impl TaskService {
@@ -27,28 +28,80 @@ impl TaskService {
     }
 
     /// 执行者角色卡读取(solo 提示词组装用;无执行者/角色不存在返回 None)。
+    /// **兼容路径**:仅供旧任务(带 character_id 且无 executor_id)回退使用。
+    /// 新任务一律走 [`Self::executor_for`] 的独立执行者库。
     pub(crate) fn character_for(&self, character_id: Option<&str>) -> Option<CharacterRecord> {
         character_id.and_then(|cid| self.characters.get(cid))
     }
 
-    /// 执行者 system 提示词组装(单一实现):内置执行者指令 → 人设 → 世界书 →
+    /// 独立执行者读取(执行者库命中返回配置;未指定/已删除返回 None)。
+    /// None 的调用方语义 = 通用执行者(不注入任何身份段)。
+    pub(crate) fn executor_for(
+        &self,
+        executor_id: Option<&str>,
+    ) -> Option<crate::services::executor_service::TaskExecutorConfig> {
+        let id = executor_id.map(str::trim).filter(|s| !s.is_empty())?;
+        self.executors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .cloned()
+    }
+
+    /// 执行者 system 提示词组装(单一实现):内置执行者指令 → 执行者身份段 → 世界书 →
     /// 提示词注入 → 用户可编辑 Agent 提示词,外部来源段落逐一 untrusted 边界包裹,
     /// 内置指令不包裹(WP7 纪律)。
+    ///
+    /// 身份段的两种来源(优先级见下,2026-09-17 执行者库批次):
+    ///   ① `executor_id` 命中执行者库 → 注入该执行者的指令段为「执行者职责」,
+    ///      **不再**注入任何角色卡人设(执行者与角色扮演资产彻底解耦);
+    ///   ② 否则 `character_id` 命中角色卡 → 旧行为逐字节不变(旧任务重跑零回归);
+    ///   ③ 都无 → 通用执行者(不注入身份段)。
+    ///
+    /// 世界书随身份来源取:走执行者库时只取全局世界书(执行者与角色卡无关联关系),
+    /// 走角色卡时按该角色过滤(旧语义)。
+    ///
     /// 调用方:legacy 步骤生成(task_service::generate_step_with)与任务引擎主 agent
     /// 循环(task_engine::solo::run_agent_loop)——两处此前各有一份逐行同构实现,
     /// 差异仅在角色取用方式(characters.get vs character_for,本实现统一经
     /// character_for,两者等价),合并后消除漂移风险。
     /// `user_goal` 供 {{lastUserMessage}} 占位符渲染(步骤生成传任务目标,主 agent 传 goal)。
+    /// `has_tools`(提交 3 · D3-c):本轮是否真的下发了工具——true 时在内置执行者指令后
+    /// 追加工具使用纪律段(单一出处 `EXECUTOR_TOOL_DISCIPLINE`);legacy(无工具)传 false。
     pub(crate) fn assemble_executor_system_prompt(
         &self,
         settings: &RuntimeSettings,
+        executor_id: Option<&str>,
         character_id: Option<&str>,
         user_goal: &str,
+        has_tools: bool,
     ) -> String {
-        let character = self.character_for(character_id);
+        let executor = self.executor_for(executor_id);
+        // 执行者库命中即独占身份段:角色卡不参与(含世界书过滤口径)
+        let character = if executor.is_some() {
+            None
+        } else {
+            self.character_for(character_id)
+        };
 
         let mut sys = String::from(EXECUTOR_PROMPT);
-        if let Some(c) = &character {
+        // 工具纪律段紧随内置指令(属内置块,不经 untrusted 包裹);仅在真有工具时追加
+        if has_tools {
+            sys.push_str(&format!(
+                "\n\n{}",
+                crate::services::task_core::prompt_consts::EXECUTOR_TOOL_DISCIPLINE
+            ));
+        }
+        if let Some(e) = &executor {
+            let instruction = e.instruction.trim();
+            if !instruction.is_empty() {
+                sys.push_str(&format!(
+                    "\n\n执行者职责(执行者「{}」):\n{}",
+                    e.name,
+                    crate::services::prompt_kit::untrusted_boundary("task_executor", instruction)
+                ));
+            }
+        } else if let Some(c) = &character {
             // 人设精简/完整按任务模式有效设置(task_persona_full,R3a;None/false=精简)
             let style = persona_style(c, settings.task_persona_full);
             if !style.is_empty() {
@@ -59,7 +112,15 @@ impl TaskService {
                 ));
             }
         }
-        let world = self.world_context(character_id);
+        // 世界书过滤口径与身份来源一致:执行者库路径只取全局(传 None,
+        // 执行者与角色卡无关联关系),角色卡路径按该角色过滤(旧语义:原样传 character_id,
+        // 即使该角色已被删除也与改造前一致);无身份时也是全局
+        let world_char_id = if executor.is_some() {
+            None
+        } else {
+            character_id
+        };
+        let world = self.world_context(world_char_id);
         if !world.is_empty() {
             sys.push_str(&format!(
                 "\n\n{}",

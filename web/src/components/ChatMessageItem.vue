@@ -70,6 +70,12 @@ function truncated(m: { extra?: Record<string, unknown> }): boolean {
   return m.extra?.truncated === true;
 }
 
+/** 该消息是否为「中断保留的部分产出」(extra.interrupted;HB-3 后端写入)。
+ *  与 truncated 同构:事件是暂态的,标记落库后刷新仍可见,前端据此渲染「已中断」 */
+function interrupted(m: { extra?: Record<string, unknown> }): boolean {
+  return m.extra?.interrupted === true;
+}
+
 /** 当前 swipe 版本序号(1-based;无多版本返回 0,供角标与切换按钮) */
 function swipePosition(m: { extra?: Record<string, unknown> }): number {
   const idx = m.extra?.swipe_id;
@@ -358,6 +364,12 @@ defineExpose({ rootEl });
         <div v-if="truncated(m)" class="sv-trunc-note">
           <span class="sv-badge trunc">截断</span>
           <span class="sv-trunc-text">回复达到输出上限被截断,内容可能不完整;可增大「最大生成长度」后重发。</span>
+        </div>
+        <!-- 中断提示(HB-3,2026-09-18):停止生成时保留已生成的部分正文并标记,
+             与「截断」同款呈现;重新生成入口复用既有「生成新版本」按钮 -->
+        <div v-if="interrupted(m)" class="sv-trunc-note">
+          <span class="sv-badge trunc">已中断</span>
+          <span class="sv-trunc-text">本次生成被手动停止,以上为已生成的部分内容;可用「生成新版本」重试。</span>
         </div>
         <div v-if="statusBarVisible" class="sv-status-bar">{{ statusBar(m) }}</div>
         <div v-if="!m.streaming" class="sv-msg-actions">

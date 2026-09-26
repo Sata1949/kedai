@@ -136,7 +136,10 @@ pub async fn send(
                 max_tool_rounds: Some(s.max_tool_rounds),
                 // 工具选择策略:默认 auto(模型自行决定是否调用工具)
                 tool_choice: crate::models::types::ToolChoice::Auto,
+                connection_id: None,
                 parallel_tool_calls: None,
+                step_budget: None,
+                semantic_guard: None,
             },
             Some(s.max_context_tokens),
         )
@@ -172,8 +175,11 @@ pub async fn send(
     // 不进正文默认列表——它们只服务于多步变量驱动器与显式白名单,泄漏进正文会
     // 诱导模型在正文轮里误用变量补丁通道。
     if mode == "agent" {
-        params.tools =
-            crate::tools::tool_sets::exclude_meta(state.tool_registry.list_definitions());
+        // 工作区工具族(fs_*)只随任务的工作区绑定下发:聊天没有工作区上下文,
+        // 留在列表里只会让模型看到 5 个注定报「未绑定工作区」的工具。
+        params.tools = crate::tools::tool_sets::exclude_workspace(
+            crate::tools::tool_sets::exclude_meta(state.tool_registry.list_definitions()),
+        );
     }
     // 自定义流程(custom 模式):校验启用与合法性,步骤快照随请求传入引擎
     let mut flow_steps: Vec<PlanStep> = Vec::new();
@@ -202,7 +208,17 @@ pub async fn send(
         {
             return err_status(format!("执行流程配置无效:{e}"), StatusCode::BAD_REQUEST);
         }
-        flow_steps = flow.steps.into_iter().filter(|s| s.enabled).collect();
+        flow_steps = match state
+            .flow
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .chat_flow_steps(&flow)
+        {
+            Ok(steps) => steps,
+            Err(e) => {
+                return err_status(format!("执行流程配置无效:{e}"), StatusCode::BAD_REQUEST);
+            }
+        };
     }
 
     const MAX_GENERATION_TOKENS: u32 = 65_536;
@@ -646,7 +662,10 @@ pub async fn generate_raw(
             tools: Vec::new(),
             max_tool_rounds: Some(1),
             tool_choice: crate::models::types::ToolChoice::None,
+            connection_id: None,
             parallel_tool_calls: None,
+            step_budget: None,
+            semantic_guard: None,
         }
     };
     // 结构化输出预算:作者页(吸血鬼卡等)要求整个回复有且仅有一个 JSON,截断即等于失败。

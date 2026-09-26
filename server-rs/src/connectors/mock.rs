@@ -74,9 +74,10 @@ impl MockConnector {
         // `"_mock_round": k` 判别字段,使各轮「工具名+参数」指纹**互不相同**——
         // 这才是真实 agent 的形态(每次调用携带新信息,如读不同文件)。
         // 需要模拟「模型原地打转」的病态场景时用 [[tool_loop_repeat:name|N args]],
-        // 它保持参数逐字相同(供重复调用熔断的回归测试)。
+        // 它保持参数逐字相同(供重复调用熔断的回归测试);
+        // [[tool_loop_text:name|N args]] 同 plain,但每轮附带一句短正文(HB-1 用例)。
         // 注入的判别字段会被工具忽略(read 等只读已知键),不影响工具行为。
-        if let Some((name, n, args, repeat)) = extract_tool_loop_marker(&last_user) {
+        if let Some((name, n, args, repeat, text)) = extract_tool_loop_marker(&last_user) {
             let executed = messages.iter().filter(|m| m.role == "tool").count();
             if executed < n {
                 let arguments = if repeat {
@@ -84,6 +85,14 @@ impl MockConnector {
                 } else {
                     vary_tool_args(&args, executed + 1)
                 };
+                if text {
+                    // 工具轮附带短正文:循环在此轮被收掉(轮次上限/熔断/预算)时,
+                    // 收尾落库的正文就是这一句——否则工具轮正文恒空,无从校验留痕
+                    chunks.push(LlmStreamChunk::Token(format!(
+                        "（第{}轮说明）",
+                        executed + 1
+                    )));
+                }
                 chunks.push(LlmStreamChunk::ToolCall(ToolCallArgs {
                     id: format!("mock-call-{}", executed + 1),
                     name,
@@ -303,6 +312,26 @@ impl MockConnector {
             }
         }
 
+        // 测试钩子:[[empty_below:N|内容]] → **单次输出预算**(max_tokens)低于 N 时返回空内容
+        // (仅 Usage),否则回复「内容」。与 [[tool_raw:]] / [[trunc_text:]] 同属「按预算区分
+        // 轮次」的设计,但模拟的是**空产出重试**而非截断自愈:空产出重试会把预算翻倍
+        // (`utils::retry::doubled_heal_budget`),于是同一节点第一次空、第二次成功。
+        // 与 [[empty]] 的分工:后者是无条件空,只能测「重试用尽」。
+        if let Some((threshold, text)) = extract_empty_below_marker(&last_user) {
+            if params.max_tokens < threshold {
+                chunks.push(LlmStreamChunk::Usage {
+                    prompt_tokens: 3,
+                    completion_tokens: 0,
+                    total_tokens: 3,
+                    prompt_cache_hit_tokens: 0,
+                    prompt_cache_miss_tokens: 0,
+                    reasoning_tokens: 0,
+                });
+                return Ok(chunks);
+            }
+            return Ok(text_reply_chunks(text, messages));
+        }
+
         // 测试钩子:[[floors]] → 回显完整 LLM 消息序列(每行 `[角色] 内容`),
         // 供集成测试断言提示词注入结果:简单模式注入文本、楼层(含宏展开)与位置。
         if messages
@@ -491,6 +520,18 @@ impl MockConnector {
             return Ok(chunks);
         }
 
+        // 测试钩子:[[retry:attempt,max@原因]] → 先在流首注入一条重试提示块,再走默认回复。
+        // 真实重试发生在 openai_compatible 连接器内部(带真实 HTTP),mock 不经过该路径,
+        // 故由钩子直接产出 LlmStreamChunk::Retry,覆盖「引擎翻译 → SseEvent::Retry →
+        // 前端渲染」这段链路(HB-4;退避与 Retry-After 口径由 retry.rs 单测覆盖)。
+        if let Some((attempt, max, reason)) = extract_retry_marker(&last_user) {
+            chunks.push(LlmStreamChunk::Retry {
+                attempt,
+                max,
+                reason,
+            });
+        }
+
         let excerpt: String = last_user.chars().take(60).collect();
         let reply = format!(
             "（模拟回复）我已收到你的消息:「{excerpt}」\n\n当前为演示模式,未连接真实模型。\n可在左下角「连接状态」处配置 OpenAI 兼容后端,或保持 Mock 体验完整 Agent 流程。\n\n*Agent 引擎已先后完成规划、执行、反思,输出质量检查通过。*"
@@ -576,6 +617,32 @@ fn extract_reply_stream_marker(input: &str) -> Option<String> {
     )
 }
 
+/// 提取 [[retry:attempt,max@原因]] 标记(HB-4 重试提示注入)。
+/// 用逗号而非斜杠分隔次数:`a/b` 会被引擎的 looks_like_calculation 启发式当成算式,
+/// 自动插入一次 calculator 调用(并改写最后一条 user 消息),钩子将收不到原消息。
+/// attempt/max 解析失败按 1/3 兜底;原因可为空(缺省给「模拟重试」)。
+fn extract_retry_marker(input: &str) -> Option<(usize, usize, String)> {
+    let rest = &input[input.find("[[retry:")? + "[[retry:".len()..];
+    let body = rest.find("]]").map(|end| &rest[..end]).unwrap_or(rest);
+    let (counts, reason) = match body.split_once('@') {
+        Some((c, r)) => (c, r.trim()),
+        None => (body, ""),
+    };
+    let (attempt, max) = match counts.trim().split_once(',') {
+        Some((a, m)) => (
+            a.trim().parse::<usize>().unwrap_or(1),
+            m.trim().parse::<usize>().unwrap_or(3),
+        ),
+        None => (1, 3),
+    };
+    let reason = if reason.is_empty() {
+        "模拟重试".to_string()
+    } else {
+        reason.to_string()
+    };
+    Some((attempt.max(1), max.max(attempt.max(1)), reason))
+}
+
 /// 提取 [[tool_raw:name {"json"}]] 标记(问题①截断 tool_call 模拟);返回 (name, 完整 args)。
 /// args 取到首个 "]]"(与 [[tool:]] 同截断语义,args 内不得含 "]]")。
 fn extract_tool_raw_marker(input: &str) -> Option<(String, String)> {
@@ -620,6 +687,13 @@ fn extract_marker_pair(input: &str, marker: &str) -> Option<(String, String)> {
         return None;
     }
     Some((a.to_string(), b.to_string()))
+}
+
+/// 提取 [[empty_below:阈值|内容]] 标记;返回 (阈值, 内容)。阈值非数字/内容为空视为未命中。
+/// 「双段 + 首段是数字」故直接复用 [`extract_marker_pair`] 的解析,不另写一份截断逻辑。
+fn extract_empty_below_marker(input: &str) -> Option<(u32, String)> {
+    let (threshold, text) = extract_marker_pair(input, "[[empty_below:")?;
+    Some((threshold.parse().ok()?, text))
 }
 
 /// 提取 [[marker:内容]] 形式的单段标记(取到首个 "]]";空内容视为未命中)。
@@ -698,15 +772,20 @@ fn extract_tool_echo_marker(input: &str) -> Option<(String, String)> {
 /// [[tool_loop_repeat:name|N args...]](参数逐字相同,模拟死循环)标记。
 /// 返回 (name, 轮数, arguments_json, repeat)。
 /// N 为工具循环持续轮数(含首轮);args 为调用回传的 arguments(单行 JSON)。
-fn extract_tool_loop_marker(input: &str) -> Option<(String, usize, String, bool)> {
+fn extract_tool_loop_marker(input: &str) -> Option<(String, usize, String, bool, bool)> {
     const MARK: &str = "[[tool_loop:";
     const MARK_REPEAT: &str = "[[tool_loop_repeat:";
-    // 先匹配更长的 repeat 前缀,避免被 plain 前缀误吞
-    let (start, prefix_len, repeat) = if let Some(p) = input.find(MARK_REPEAT) {
-        (p, MARK_REPEAT.len(), true)
+    const MARK_TEXT: &str = "[[tool_loop_text:";
+    // 先匹配更长的前缀,避免被 plain 前缀误吞;text 变体 = 工具轮里同时带一句短正文
+    // (真实模型常这样输出;也是「工具循环被预算/轮次上限收掉时仍有正文可落库」的
+    //  唯一可观测构造,HB-1 的 extra.budget_exceeded 用例依赖它)
+    let (start, prefix_len, repeat, text) = if let Some(p) = input.find(MARK_REPEAT) {
+        (p, MARK_REPEAT.len(), true, false)
+    } else if let Some(p) = input.find(MARK_TEXT) {
+        (p, MARK_TEXT.len(), false, true)
     } else {
         let p = input.find(MARK)?;
-        (p, MARK.len(), false)
+        (p, MARK.len(), false, false)
     };
     let rest = &input[start + prefix_len..];
     let end = rest.find("]]")?;
@@ -714,7 +793,13 @@ fn extract_tool_loop_marker(input: &str) -> Option<(String, usize, String, bool)
     let (name, tail) = inner.split_once('|')?;
     let (n_str, args) = tail.split_once(' ')?;
     let n: usize = n_str.trim().parse().ok()?;
-    Some((name.trim().to_string(), n, args.trim().to_string(), repeat))
+    Some((
+        name.trim().to_string(),
+        n,
+        args.trim().to_string(),
+        repeat,
+        text,
+    ))
 }
 
 /// 给每轮的工具参数注入判别字段 `"_mock_round": k`,使各轮指纹互不相同

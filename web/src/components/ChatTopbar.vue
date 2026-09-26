@@ -95,6 +95,15 @@ function confirmScriptAuthorization(): void {
 
 /** 当前请求的 prompt 缓存命中率:命中率计算抽到 contextStats.ts(computeHitRate,与优化面板共用) */
 const hitRate = computed<number | null>(() => computeHitRate(store.lastUsage));
+
+/**
+ * 单次生成 token 预算 HUD(HB-1):预算为 0 = 关闭,不显示。
+ * 已用取本轮 usage 的 total_tokens(prompt+completion,与后端判定口径一致);
+ * 超限标红——后端此时要么已停止工具循环(stop),要么已提示过一次(warn)。
+ */
+const budgetLimit = computed(() => store.sessionTokenBudget ?? 0);
+const budgetUsed = computed(() => store.lastUsage?.total_tokens ?? 0);
+const budgetOver = computed(() => budgetLimit.value > 0 && budgetUsed.value >= budgetLimit.value);
 </script>
 
 <template>
@@ -194,6 +203,12 @@ const hitRate = computed<number | null>(() => computeHitRate(store.lastUsage));
         <template v-if="hitRate !== null">
           <span class="sv-supreme green xxs" />
           命中 {{ hitRate }}%
+        </template>
+        <template v-if="budgetLimit > 0">
+          <span class="sv-supreme" :class="budgetOver ? 'red' : 'orange'" />
+          <span :class="{ 'sv-budget-over': budgetOver }" :title="budgetOver ? '本轮已达 token 预算上限' : '本轮 token 预算'">
+            预算 {{ budgetUsed.toLocaleString() }}/{{ budgetLimit.toLocaleString() }}
+          </span>
         </template>
       </span>
     </span>

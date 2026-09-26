@@ -1,6 +1,11 @@
 // 核心类型定义,与 Node 版 server/src/models/types.ts 契约一一对应
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+// 工作区作用域(ToolContext.scope 的载体,ExecScope)需要的标准库类型
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 // ---------- 角色 ----------
 #[derive(Debug, Clone, Serialize)]
@@ -234,6 +239,127 @@ pub struct PlanStep {
     /// 是否允许模型单轮返回多个工具调用;None = 使用后端默认
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallel_tool_calls: Option<bool>,
+    /// 上游节点 id 列表(二维流程依赖边;空 = 线性串联或源节点,语义见
+    /// `services/agent_flow_service.rs` 的 `effective_inputs`)。缺省序列化省略:
+    /// 存量一维流程 JSON 读写逐字节不变。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<String>,
+    /// 是否显式标注为最终成果节点(Some(true) 标注;None = 按无后继汇点自动判定)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_output: Option<bool>,
+    /// 画布横坐标(二维批次 3 画布用;列表视图不写,缺省省略)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x: Option<f64>,
+    /// 画布纵坐标(同上)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub y: Option<f64>,
+    /// 节点档位(二维批次 6a):缺省/`loose` = 允许多轮工具自循环;
+    /// `strict` = 单次模型调用、**不下发任何工具**(档位优先于 `tools` 配置,见 `is_strict`)。
+    /// 其余取值在保存期被 `validate_flow` 拒绝。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// 挂载的静态子流程 id(二维批次 6b):非空时本节点**不自己发起模型调用**,
+    /// 而是把被引用流程的步骤当作子图执行,子图成果即本节点产出。
+    ///
+    /// 与 6a 的档位同一纪律——**执行参数被旁路但原样保留**:本节点的
+    /// `goal`/`action`(reflect 除外,保存期拒绝)/`kind`/`tools`/`system_prompt`/
+    /// `temperature`/`max_tokens` 都不参与执行,清空本字段即恢复生效
+    /// (编辑器按此提示用户);`name`/`generates`/`inputs`/`is_output` 仍生效
+    /// ——它们是**展示与图结构**字段,不是执行参数。
+    ///
+    /// 引用合法性(存在性/跨流程环/嵌套深度)由 `agent_flow_service::validate_sub_flows`
+    /// 在保存期校验,运行期再以调用链守卫兜底(见 `task_engine/custom.rs`)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_flow_id: Option<String>,
+    /// 节点级连接(二维批次 5b):该节点走哪一套 API 连接(`ConnectionProfile.id`)。
+    /// 缺省 = 用默认连接(行为与 5b 之前一致);provider 与模型随该连接
+    /// (`ConnectionProfile.model`),故「节点级模型」= 选连接。
+    ///
+    /// **不做保存期校验**:流程库可导出/跨机导入,而连接是本机设置(settings.json),
+    /// 保存期拒绝会把可移植流程变成本机绑定。运行期按「引用的连接已删除/已停用」明确报错,
+    /// **不静默回退默认连接**(口径与 5a「有 flow_id 却无快照」、6b「子流程不在快照内」一致)。
+    ///
+    /// 挂载子流程的节点上本字段被旁路(子图各节点各自解析自己的连接),配置保留。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
+    /// 节点级工具循环轮次上限(二维批次 5b;None = 用全局 `settings.max_tool_rounds`)。
+    /// 范围 1-200,保存期校验(与设置项同口径)。严格档下无意义——配置保留,
+    /// 与「严格档保留工具配置」同一纪律(见 `is_strict`)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tool_rounds: Option<u32>,
+    /// 节点级上下文上限(二维批次 8;None = **不裁剪**,与批次 8 之前逐字节一致)。
+    ///
+    /// 语义:**进入本节点的输入整体**的 token 预算——系统提示 + 节点消息(后者含任务目标与
+    /// 各上游产出)。超预算时从**最旧的上游产出段**起省略(正文换成省略标记、标签行保留),
+    /// 任务目标恒保留:它单独超预算即本节点**明确报错**,不静默截断(口径同 5b「引用失效
+    /// 不静默回退」)。裁剪的判定与共享原语在 `services/prompt_kit.rs`。
+    ///
+    /// 范围 256..=1_048_576,保存期校验(上限与全局 `max_context_tokens` 同口径;
+    /// 下限刻意低于全局的 65536——本字段的用途正是「给单个节点设**更小**的窗口」)。
+    /// **不裁工具轮内历史**:那是 `tool_history_keep_rounds` / `tool_history_budget_tokens`
+    /// 的职责,两者口径不同(见 `契约-协议与配置.md`)。
+    /// 挂载子流程的节点上本字段被旁路(子图各节点各自裁剪)、配置保留。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_context: Option<u32>,
+    /// 节点级单次调用超时(秒;A 批 A1)。`None` = 用宿主缺省看门狗
+    /// (任务侧两条路径各自 300s),行为与本批之前**逐字节一致**;`Some(n)` = **覆盖**
+    /// 本节点每次 LLM 调用的时间预算——既可收紧(如 60)也可放宽(如 900)。
+    /// 宽松档工具循环**逐轮**各按该值计(与宿主既有 300s 是同一粒度,不是「节点总预算」)。
+    ///
+    /// 范围 30..=3600,保存期校验。超时 = 本节点**失败**(走既有降级口径),
+    /// **不自动重试**——重试是 [`Self::max_retries`] 的显式配置(两者刻意不叠加,
+    /// 避免「超时了再重试」把同一份成本重复烧在上游停滞上)。
+    /// 挂载子流程的节点上本字段被旁路(子图各节点各自的超时生效),配置保留。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_timeout_secs: Option<u32>,
+    /// 节点级空产出重试次数(A 批 A2)。`None` = 不重试(行为与本批之前一致);
+    /// `Some(n)` = 本节点产出为空时最多**再试 n 次**(n = 额外尝试上限,总尝试 = 1 + n)。
+    ///
+    /// **只重试空产出**:连接失效、超时、上游报错等硬错误一律不重试——重试只会把成本
+    /// 翻倍地耗在同一个坏引用上,且会与 [`Self::call_timeout_secs`] 的语义互相掩盖。
+    /// **记账**:每次尝试各记一行 `task_llm_calls`,phase 与首次相同(沿用 legacy/plan 侧
+    /// `generate_step_retry` 的既有先例),故「各行求和 == `usage_total`」不变量不变。
+    /// 只重试本节点,不重试下游;退避期间响应取消。
+    /// 范围 1..=5,保存期校验。挂载子流程的节点上本字段被旁路,配置保留。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u32>,
+}
+
+impl PlanStep {
+    /// 是否严格档(单次模型调用,不进入工具自循环)。
+    ///
+    /// **档位优先于 `tools`**:严格节点即使声明了工具也不下发——配置保留在流程里,
+    /// 切回宽松档即生效(编辑器按此提示用户)。任务侧 `task_engine/custom.rs::execute_node`
+    /// 与聊天侧 `agents/engine/messages/steps.rs::step_params_for` 共用本判定,
+    /// 避免同一语义出现两份实现导致两条执行路径行为分裂。
+    pub fn is_strict(&self) -> bool {
+        matches!(self.kind.as_deref(), Some("strict"))
+    }
+
+    /// 是否挂载了静态子流程(二维批次 6b)。空串按未挂载处理(与 `inputs` 同一「空值即缺省」口径)。
+    pub fn is_sub_flow(&self) -> bool {
+        self.sub_flow_id
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|id| !id.is_empty())
+    }
+
+    /// 挂载的子流程 id(已按 `is_sub_flow` 的口径 trim;未挂载返回 None)。
+    pub fn sub_flow_ref(&self) -> Option<&str> {
+        self.sub_flow_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+    }
+
+    /// 节点级连接 id(二维批次 5b;空白串按「未设置」处理,与 `sub_flow_ref` 同一口径)。
+    /// 返回 None = 用默认连接。
+    pub fn connection_ref(&self) -> Option<&str> {
+        self.connection_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -384,8 +510,23 @@ pub struct GenerationParams {
     pub max_tool_rounds: Option<u32>,
     /// 工具选择策略;默认 Auto(保持原行为)。None/Required/Function 仅 tools 非空时生效。
     pub tool_choice: ToolChoice,
+    /// 该调用走哪一套连接(`ConnectionProfile.id`;None = 默认连接)。
+    /// 二维批次 5b:节点级 provider 路由的内部通道——本结构**未实现 Serialize**,
+    /// 故新增字段不动任何线格式。消费点见 `agents/engine/executor.rs::execute_generation`
+    /// 与 `services/task_service/executor.rs::generate_text`(同一处解析,不各自实现)。
+    pub connection_id: Option<String>,
     /// 是否允许模型单轮返回多个工具调用(None = 使用后端默认)
     pub parallel_tool_calls: Option<bool>,
+    /// 步骤墙钟预算(提交 3 · D3):单次 `run_tool_loop` 的墙钟上限,到点**带着已有产出
+    /// 收尾**(返回 Ok,步骤照常记 done,不制造失败)。None = 不设预算——聊天路径恒 None
+    /// (行为逐字节不变);唯一来源是任务侧设置 `task_step_budget_secs`
+    /// (装配见 `task_engine::task_loop_limits`,消费点 `agents/engine/executor.rs`)。
+    pub step_budget: Option<std::time::Duration>,
+    /// 语义熔断三值覆盖(提交 3 · D3;窗口/同工具次数下限/输出指纹去重上限):
+    /// None = 用引擎设置快照里的扁平值(聊天路径恒 None → 行为逐字节不变);
+    /// Some = 任务侧经 `utils::loop_guard::clamp_for_task` **收紧**后的值(只收不放,
+    /// 0 = 关闭位原样保持)。引擎不做模式嗅探:是不是任务由调用方显式传值表达。
+    pub semantic_guard: Option<(usize, usize, usize)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -417,6 +558,16 @@ pub enum LlmStreamChunk {
     /// 流正常结束时的 finish_reason(stop/length/content_filter 等;tool_calls 不单独产出)。
     /// 任务模式据此区分「真空响应」与「max_tokens 截断」,决定是否提高上限重试
     Finish {
+        reason: String,
+    },
+    /// 上游请求重试中的提示(HB-4):连接器在等待重试前产出,
+    /// 由引擎翻译为 SseEvent::Retry 透出给界面
+    Retry {
+        /// 本次是第几次尝试(1 = 首次重试,即发起第 2 次请求)
+        attempt: usize,
+        /// 总尝试次数上限(与连接器 MAX_ATTEMPTS 同口径)
+        max: usize,
+        /// 重试原因(如「上游返回 429 Too Many Requests」)
         reason: String,
     },
 }
@@ -451,6 +602,12 @@ pub enum TaskEventKind {
     ApprovalRequired,
     /// 流式正文增量(批次 R4;暂态事件不落库)
     Delta,
+    /// 编排绑定变更(A 批 B3:改绑流程/名单后**重新冻结**快照)。
+    ///
+    /// 与 `Status` / `Plan` 分开的原因:改绑既不是状态迁移也不是计划更新,它换的是
+    /// 「这个任务按哪份编排跑」与 `flow_snapshot`(任务看台的编排徽标据此渲染);
+    /// 复用 `Status` 会让「状态没变却收到状态事件」成为常态,读日志的人无从分辨。
+    FlowBound,
 }
 
 /// SSE 事件,serde 序列化为 {"type":"...", ...}
@@ -501,6 +658,17 @@ pub enum SseEvent {
         stat_data: Value,
     },
     Interrupted,
+    /// 上游请求重试中的提示(HB-4,2026-09-18):连接器在等待重试前发出,
+    /// 用户不再面对「界面停几十秒然后报错」的无解释等待。
+    /// 非终态事件:成功后照常继续 token/finish,失败时仍以 Error 收尾。
+    Retry {
+        /// 本次是第几次尝试(1 = 首次重试,即发起第 2 次请求)
+        attempt: usize,
+        /// 总尝试次数上限(与连接器 MAX_ATTEMPTS 同口径)
+        max: usize,
+        /// 重试原因(如「上游返回 429 Too Many Requests」),用于界面文案
+        reason: String,
+    },
     /// 顶层生成错误终态:模型失败/上游错误时发送,取代「空内容 finish 伪装正常结束」。
     /// 前端据此展示错误而非「完成」。
     Error {
@@ -572,6 +740,89 @@ pub struct ToolContext {
     /// 深度守卫:子 agent 以 `agent_depth + 1` 运行,达 `subagent_max_depth` 后不再派发
     /// (见 `tools/agent_tools_agent.rs`)。
     pub agent_depth: u32,
+    /// 工作区作用域(任务绑定了工作区时非空;聊天路径恒 None)。
+    /// 子 agent 继承父 ctx 的 scope(同一个 Arc,读写记录共享)。
+    pub scope: Option<Arc<ExecScope>>,
+}
+
+/// 运行期工作区作用域:任务绑定了工作区时由任务引擎构造,随 ToolContext 逐调用传递。
+/// 同时承载「本 run 内读过哪些文件」的记录(fs_write/fs_edit 的先读后写校验用)。
+///
+/// 不变量:workspace 是**创建期已 canonicalize 的绝对路径**(冻结),运行期不再重新解析
+/// 用户输入;`read` 记录以同口径解析后的绝对路径为键(见 `tools::workspace_guard`)。
+pub struct ExecScope {
+    /// 创建期已 canonicalize 的绝对路径(冻结)
+    workspace: PathBuf,
+    /// bash 的 cwd 是否强制落在工作区内
+    jail: bool,
+    /// 本 run 内读过的文件 → 读取时刻的 (mtime, 长度)。
+    /// 用 mtime+长度而非内容哈希:单次 stat 即可判定「读后被外部改动」,
+    /// 误判面(同长度同 mtime 的内容替换)在实践中不需要花费整文件读取来封堵。
+    reads: Mutex<HashMap<PathBuf, (SystemTime, u64)>>,
+}
+
+impl ExecScope {
+    pub fn new(workspace: PathBuf, jail: bool) -> Self {
+        ExecScope {
+            workspace,
+            jail,
+            reads: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn workspace(&self) -> &Path {
+        &self.workspace
+    }
+
+    /// bash 的 cwd 是否强制落在工作区内(false = 维持改造前语义)
+    pub fn jail(&self) -> bool {
+        self.jail
+    }
+
+    /// 记录「刚读过 path」;`stamp` 由 [`ExecScope::stamp_of`] 取得。
+    /// 锁中毒按 into_inner 恢复(项目锁纪律:读记录不是不变量,失败方向不影响安全判定)。
+    pub fn note_read(&self, path: &Path, stamp: (SystemTime, u64)) {
+        self.reads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(path.to_path_buf(), stamp);
+    }
+
+    /// 单次 stat 取 (mtime, 长度);文件不存在/无权限时返回 Err。
+    pub fn stamp_of(path: &Path) -> std::io::Result<(SystemTime, u64)> {
+        let meta = std::fs::metadata(path)?;
+        let mtime = meta.modified()?;
+        Ok((mtime, meta.len()))
+    }
+
+    /// 先读后写校验(防盲写)。三种结果的文案即给模型的下一步动作。
+    pub fn check_read_before_write(&self, path: &Path) -> Result<(), String> {
+        let recorded = self
+            .reads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(path)
+            .copied();
+        let Some(recorded) = recorded else {
+            return Err("尚未读取该文件,请先用 fs_read 读取后再改(防盲写)".into());
+        };
+        let now = Self::stamp_of(path)
+            .map_err(|e| format!("无法确认文件当前状态(读取后被删除或不可访问?): {e}"))?;
+        if now != recorded {
+            return Err("文件在读取后被外部修改,请重新 fs_read 后再改".into());
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for ExecScope {
+    /// 只暴露「绑定了哪个工作区 + 是否 jail」,不打印读记录(体积大且与调试无关)
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExecScope")
+            .field("workspace", &self.workspace)
+            .field("jail", &self.jail)
+            .finish()
+    }
 }
 
 /// 工具执行器签名（**L1 契约**：工具注册表与各 L3 加载器共用）。
@@ -753,6 +1004,61 @@ impl TaskRunMode {
 /// TaskRecord.task_mode 的 serde 缺省(旧 JSON 无此字段 = legacy)
 fn task_default_run_mode() -> TaskRunMode {
     TaskRunMode::Legacy
+}
+
+/// plan 模式**批准时**选择的执行方式(2026-09-17)。
+///
+/// 背景:批准后固定走 ApprovedPlanExecutor 逐步骤执行,用户无法选择「用别的模式
+/// 消化这份计划」。本枚举即批准界面新增的选项,只作用于**本次批准续跑**,
+/// 不改 `tasks.task_mode`(仍为 plan——那记录的是「任务当初怎么产出的计划」)。
+///
+/// 可选值刻意排除两个:
+///   - `legacy`:自带规划阶段,会与已批准计划重复劳动;
+///   - `plan`:会再规划一遍回到 planned,**死循环**(批次 4.3 回归的根因)。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskApproveExecMode {
+    /// 按已批准计划逐步执行(默认;ApprovedPlanExecutor,每步独立 agent 调用 + 汇总)
+    ApprovedPlan,
+    /// 单主 agent 工具自循环:已批准计划作目标上下文整体执行
+    Solo,
+    /// 多 agent(agent_depth+1):已批准计划作目标上下文整体执行
+    Multi,
+    /// 团队协作:已批准计划作目标上下文,由团队自行规划分工与审计
+    Team,
+    /// 自定义流程:已批准计划作任务目标(需已启用流程,否则报错)
+    Custom,
+}
+
+impl TaskApproveExecMode {
+    /// 文本形态(与 serde 输出一致;日志用)
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ApprovedPlan => "approved_plan",
+            Self::Solo => "solo",
+            Self::Multi => "multi",
+            Self::Team => "team",
+            Self::Custom => "custom",
+        }
+    }
+
+    /// 严格解析(API 入参用):未知值返回 None,由调用方回 400。
+    /// 缺省(不传)由调用方映射为 ApprovedPlan——保证既有客户端行为不变。
+    pub fn from_str_strict(s: &str) -> Option<Self> {
+        match s {
+            "approved_plan" => Some(Self::ApprovedPlan),
+            "solo" => Some(Self::Solo),
+            "multi" => Some(Self::Multi),
+            "team" => Some(Self::Team),
+            "custom" => Some(Self::Custom),
+            _ => None,
+        }
+    }
+
+    /// 是否为「按计划逐步执行」(默认路径;非默认路径的计划将由该模式自行重写)
+    pub fn is_approved_plan(&self) -> bool {
+        matches!(self, Self::ApprovedPlan)
+    }
 }
 
 /// 终态追加指令的作用模式(批次 R2b+,2026-09-10 实跑修复 F5)。
@@ -955,6 +1261,16 @@ pub struct TaskStep {
     pub status: TaskStepStatus,
     #[serde(default)]
     pub result: String,
+    /// 该行对应的**流程节点 id**(custom 模式填 `PlanStep.id`;其余模式为 None)。
+    ///
+    /// 为什么需要它:plan 行由**过滤后的启用步骤**构造(`task_engine/custom.rs`),
+    /// 于是 plan 下标 ≠ 流程数组下标——界面上问「这一行是哪个节点」只能靠 id,
+    /// 按下标对齐会在停用中间步骤时错位(`遗留.md` IFW-5)。
+    ///
+    /// 加性字段:`skip_serializing_if` 让 None 时**整键省略**,故 legacy/solo/multi/
+    /// plan/team 的 plan JSON 与存量 custom 任务逐字节不变,旧客户端反序列化也不受影响。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
 }
 
 fn task_step_default_status() -> TaskStepStatus {
@@ -968,6 +1284,7 @@ impl Default for TaskStep {
             goal: String::new(),
             status: TaskStepStatus::Pending,
             result: String::new(),
+            node_id: None,
         }
     }
 }
@@ -986,7 +1303,9 @@ pub struct TaskRecord {
     pub result: String,
     #[serde(default)]
     pub error: String,
-    /// 执行者人设角色 id(空 = 通用执行者)
+    /// 执行者人设角色 id(空 = 通用执行者)。**兼容字段**:执行者改由
+    /// `executor_id` 承担(独立执行者库),此列仅供旧任务回退读取——
+    /// 新任务不再写它,旧任务重跑仍按原语义注入角色人设(见 prompt.rs 的分支顺序)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub character_id: Option<String>,
     pub created_at: String,
@@ -994,6 +1313,47 @@ pub struct TaskRecord {
     /// 执行模式(批次 4;缺省 legacy,旧客户端/旧行零变化)
     #[serde(default = "task_default_run_mode")]
     pub task_mode: TaskRunMode,
+    /// 执行者 id(执行者库;空 = 通用执行者)。指向 data/task_executors.json。
+    /// 与 character_id 的分支优先级:executor_id 命中时用执行者指令,角色卡不参与。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executor_id: Option<String>,
+    /// **任务绑定的流程 id**(二维批次 5a;空 = 跟随当前流程,旧客户端/旧行零变化)。
+    ///
+    /// 绑定即冻结:创建时按该 id 落一份 `tasks.flow_snapshot`(见
+    /// `services::agent_flow_service::FlowSnapshot`),此后改流程/换当前流程都不影响
+    /// 这个任务——这是「文档化的行为漂移」的收口点。未绑定的任务不落这份快照,
+    /// 执行开始时才按当时的当前流程捕获一次(语义与旧版一致)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_id: Option<String>,
+    /// **对比模式的可调用流程名单**(二维批次 7b;空 = 强制模式,旧客户端/旧行零变化)。
+    ///
+    /// 非空即「根流程照常执行 + 名单内流程作为 `run_flow` 工具释放给根流程的宽松节点」:
+    /// 模型在工具循环里自主调用某套流程、取回其成果(D9 拍板取「甲」)。
+    /// 与 `flow_id` 相互独立——`flow_id` 仍是**根流程**(缺省 = 跟随当前流程),
+    /// 名单只决定「哪些流程可被调用」;根流程自身即使出现在名单里也不可被调用
+    /// (调用链环守卫必然拒绝,故创建期即 400)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_ids: Option<Vec<String>>,
+    /// **任务级连接**(A 批 B1;空 = 跟随设置的默认连接,旧客户端/旧行零变化)。
+    ///
+    /// 语义:该任务**所有** LLM 调用的**缺省连接**(指向 `settings.json` 的
+    /// `connections[].id`);节点级 `PlanStep.connection_id` 仍然优先。与 `task_mode`
+    /// 无关——它绑的是 provider 而非编排,故六种模式一律适用。
+    ///
+    /// 创建期**校验引用存在且启用**(400 点名连接):任务不可跨机搬运(对照流程库的
+    /// 「保存期不校验引用」——那是为可移植性让路),即时校验更友好。运行期引用失效
+    /// (连接被删/被停用)按 5b 口径**明确报错,不静默回退默认连接**。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
+    /// **任务绑定的工作区**(编码通道批次;空 = 未绑定,旧客户端/旧行零变化)。
+    ///
+    /// 语义:创建期就绪冻结的**绝对路径**——创建时校验「已存在的目录 + canonicalize
+    /// 成功 + 与 DATA_DIR 互不包含」,落库的是 canonicalize 后的结果,此后不再解析
+    /// 用户输入。绑定后任务获得工作区文件工具族(`fs_*`)并让 bash 的缺省 cwd 落在
+    /// 工作区内;未绑定的任务两者都不给(见 `services/task_engine/tool_policy.rs`)。
+    /// 该列追加在表尾,旧库经 `migration::ensure_tasks_workspace_column` 幂等补列。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
 }
 
 fn task_default_status() -> TaskStatus {
@@ -1053,7 +1413,8 @@ pub struct TaskMessageRecord {
     pub task_id: String,
     /// user | assistant(建表 CHECK 约束)
     pub role: String,
-    /// normal | followup | plan_chat(旧行默认 normal;读取侧不做严格校验,宽容演进)
+    /// normal | goal | result | followup | plan_chat(建表期写 goal、
+    /// 首轮成果写 result;旧行默认 normal;读取侧不做严格校验,宽容演进)
     pub kind: String,
     pub content: String,
     pub created_at: String,
@@ -1394,5 +1755,203 @@ mod tests {
             json.contains(r#""status":"done""#),
             "plan JSON 形态: {json}"
         );
+    }
+
+    /// `TaskStep.node_id`(遗留.md IFW-5)的三条线格式护栏:
+    /// ① None 时**整键省略**——legacy/solo/multi/plan/team 与存量 custom 任务的
+    ///    plan JSON 因此逐字节不变;② 旧数据(无该键)能反序列化;③ 有值时往返不丢。
+    #[test]
+    fn task_step_node_id_is_additive_and_omitted_when_none() {
+        // ① None → 不出现 "node_id"(本仓 plan 是 tasks.plan 列里的整段 JSON,
+        //    多一个 null 键就是存量任务的字节变化)
+        let step = TaskStep {
+            name: "起草".into(),
+            goal: "g".into(),
+            status: TaskStepStatus::Pending,
+            result: String::new(),
+            node_id: None,
+        };
+        let json = serde_json::to_string(&step).unwrap();
+        assert!(!json.contains("node_id"), "None 时不应落键: {json}");
+
+        // ② 旧 plan JSON(无该键)照常解析,得到 None
+        let old: TaskStep =
+            serde_json::from_str(r#"{"name":"起草","goal":"g","status":"done","result":"r"}"#)
+                .unwrap();
+        assert_eq!(old.node_id, None);
+
+        // ③ custom 填入的节点 id 往返不丢
+        let custom: TaskStep = serde_json::from_str(
+            r#"{"name":"起草","goal":"g","status":"done","result":"r","node_id":"node-a"}"#,
+        )
+        .unwrap();
+        assert_eq!(custom.node_id.as_deref(), Some("node-a"));
+        let back = serde_json::to_string(&custom).unwrap();
+        assert!(back.contains(r#""node_id":"node-a""#), "往返: {back}");
+    }
+
+    /// `PlanStep.connection_id` / `max_tool_rounds`(二维批次 5b)的三条线格式护栏:
+    /// ① 两个字段为 None 时**整键省略**——存量 `agent_flows.json` 与聊天侧流程快照
+    ///    逐字节不变;② 旧 JSON(无这两个键)能反序列化;③ 有值时往返不丢。
+    /// 空串 connection_id 按「未设置」处理(与 `sub_flow_ref` 同口径)。
+    #[test]
+    fn plan_step_connection_and_tool_rounds_are_additive_and_omitted_when_none() {
+        // ① None → 两个键都不出现(存量流程 JSON 是 bytes 级契约)
+        let step = PlanStep {
+            id: "s1".into(),
+            name: "起草".into(),
+            enabled: true,
+            goal: "g".into(),
+            action: "direct".into(),
+            generates: Some(true),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&step).unwrap();
+        assert!(!json.contains("connection_id"), "None 时不应落键: {json}");
+        assert!(!json.contains("max_tool_rounds"), "None 时不应落键: {json}");
+
+        // ② 旧 JSON(无这两个键)照常解析
+        let old: PlanStep = serde_json::from_str(
+            r#"{"id":"s1","name":"起草","enabled":true,"goal":"g","action":"direct"}"#,
+        )
+        .unwrap();
+        assert_eq!(old.connection_id, None);
+        assert_eq!(old.max_tool_rounds, None);
+        assert_eq!(old.connection_ref(), None);
+
+        // ③ 有值时往返不丢
+        let custom: PlanStep = serde_json::from_str(
+            r#"{"id":"s1","name":"起草","goal":"g","action":"direct","connection_id":"conn-b","max_tool_rounds":3}"#,
+        )
+        .unwrap();
+        assert_eq!(custom.connection_ref(), Some("conn-b"));
+        assert_eq!(custom.max_tool_rounds, Some(3));
+        let back = serde_json::to_string(&custom).unwrap();
+        assert!(back.contains(r#""connection_id":"conn-b""#), "往返: {back}");
+        assert!(back.contains(r#""max_tool_rounds":3"#), "往返: {back}");
+
+        // ④ 空白 id = 未设置(手改 JSON 的脏值不得当成「引用了空 id 的连接」)
+        let blank: PlanStep =
+            serde_json::from_str(r#"{"id":"s1","goal":"g","connection_id":"   "}"#).unwrap();
+        assert_eq!(blank.connection_ref(), None);
+    }
+
+    /// `TaskRecord.flow_id`(二维批次 5a)的三条线格式护栏:
+    /// ① None 时**整键省略**——非 custom 与存量任务的 task JSON 逐字节不变;
+    /// ② 旧任务 JSON(无该键)能反序列化;③ 有值时往返不丢。
+    #[test]
+    fn task_flow_id_is_additive_and_omitted_when_none() {
+        let mut task = TaskRecord {
+            id: "t1".into(),
+            title: "任务".into(),
+            status: TaskStatus::Pending,
+            plan: Vec::new(),
+            result: String::new(),
+            error: String::new(),
+            character_id: None,
+            created_at: "c".into(),
+            updated_at: "u".into(),
+            task_mode: TaskRunMode::Custom,
+            executor_id: None,
+            flow_id: None,
+            flow_ids: None,
+            connection_id: None,
+            workspace: None,
+        };
+        let json = serde_json::to_string(&task).unwrap();
+        assert!(!json.contains("flow_id"), "None 时不应落键: {json}");
+
+        // ② 旧 JSON(无该键)照常解析
+        let old: TaskRecord = serde_json::from_str(
+            r#"{"id":"t1","title":"任务","status":"done","plan":[],"result":"",
+                "error":"","created_at":"c","updated_at":"u","task_mode":"custom"}"#,
+        )
+        .unwrap();
+        assert_eq!(old.flow_id, None);
+
+        // ③ 绑定值往返不丢
+        task.flow_id = Some("flow-a".into());
+        let back = serde_json::to_string(&task).unwrap();
+        assert!(back.contains(r#""flow_id":"flow-a""#), "往返: {back}");
+        let round: TaskRecord = serde_json::from_str(&back).unwrap();
+        assert_eq!(round.flow_id.as_deref(), Some("flow-a"));
+    }
+
+    /// `TaskRecord.flow_ids`(二维批次 7b 对比模式名单)的三条线格式护栏,口径同 flow_id:
+    /// ① None 时**整键省略**(强制模式与存量任务逐字节不变);② 旧 JSON 无该键能解析;
+    /// ③ 有值时往返不丢且**顺序保持**——名单顺序决定工具描述里的列举顺序,
+    /// 与根流程排除、可调用集判定同源,乱序会让同一份名单两次运行给出不同文案。
+    #[test]
+    fn task_flow_ids_is_additive_and_omitted_when_none() {
+        let mut task = TaskRecord {
+            id: "t1".into(),
+            title: "任务".into(),
+            status: TaskStatus::Pending,
+            plan: Vec::new(),
+            result: String::new(),
+            error: String::new(),
+            character_id: None,
+            created_at: "c".into(),
+            updated_at: "u".into(),
+            task_mode: TaskRunMode::Custom,
+            executor_id: None,
+            flow_id: None,
+            flow_ids: None,
+            connection_id: None,
+            workspace: None,
+        };
+        let json = serde_json::to_string(&task).unwrap();
+        assert!(!json.contains("flow_ids"), "None 时不应落键: {json}");
+
+        // ② 旧 JSON(无 flow_ids 键)照常解析
+        let old: TaskRecord = serde_json::from_str(
+            r#"{"id":"t1","title":"任务","status":"done","plan":[],"result":"",
+                "error":"","created_at":"c","updated_at":"u","task_mode":"custom"}"#,
+        )
+        .unwrap();
+        assert_eq!(old.flow_ids, None);
+
+        // ③ 往返不丢 + 顺序保持
+        task.flow_ids = Some(vec!["f-b".into(), "f-a".into()]);
+        let back = serde_json::to_string(&task).unwrap();
+        assert!(back.contains(r#""flow_ids":["f-b","f-a"]"#), "往返: {back}");
+        let round: TaskRecord = serde_json::from_str(&back).unwrap();
+        assert_eq!(round.flow_ids, Some(vec!["f-b".into(), "f-a".into()]));
+    }
+
+    /// ExecScope 的先读后写(编码通道批次 1):未读拒绝、读后被外部改动拒绝、刷新后放行。
+    /// stamp 用真实文件取((mtime, len)),不构造假时间戳——否则测不到「比对真实状态」。
+    #[test]
+    fn exec_scope_requires_read_before_write() {
+        let tmp = crate::utils::test_support::TempDataDir::new("exec-scope");
+        let file = tmp.join("a.txt");
+        std::fs::write(&file, "v1").unwrap();
+        let scope = ExecScope::new(tmp.path().to_path_buf(), true);
+
+        // 未读 → 拒绝,文案指明先读
+        let err = scope.check_read_before_write(&file).unwrap_err();
+        assert!(err.contains("fs_read"), "文案应指明先读: {err}");
+
+        // 读过且未变 → 放行
+        scope.note_read(&file, ExecScope::stamp_of(&file).unwrap());
+        assert!(scope.check_read_before_write(&file).is_ok());
+
+        // 读后被外部改动(长度变化即命中,不依赖 mtime 分辨率)→ 拒绝并要求重读
+        std::fs::write(&file, "v2-longer").unwrap();
+        let err = scope.check_read_before_write(&file).unwrap_err();
+        assert!(err.contains("重新"), "文案应要求重新读取: {err}");
+
+        // 刷新读记录后重新放行(否则同一次 run 里连改两次会被自己拦住)
+        scope.note_read(&file, ExecScope::stamp_of(&file).unwrap());
+        assert!(scope.check_read_before_write(&file).is_ok());
+    }
+
+    /// 作用域携带的工作区与 jail 标志(与 TaskRunContext.scope = None 的分支配套)
+    #[test]
+    fn exec_scope_carries_workspace_and_jail_flag() {
+        let tmp = crate::utils::test_support::TempDataDir::new("exec-scope-flags");
+        let scope = ExecScope::new(tmp.path().to_path_buf(), false);
+        assert_eq!(scope.workspace(), tmp.path());
+        assert!(!scope.jail());
     }
 }

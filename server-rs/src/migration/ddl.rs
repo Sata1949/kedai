@@ -161,6 +161,113 @@ pub fn ensure_tasks_task_mode_column(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// 幂等 schema 升级(执行者库):为 tasks 补 executor_id 列(缺失才 ALTER,已存在跳过)。
+/// 启动时(Db::open)与跨库合并前(merge_databases 两侧)各执行一次。
+/// **可空且无 DEFAULT**:NULL 表示「未指定执行者」(通用执行者),
+/// 与旧行语义一致,故零迁移成本——旧任务不需要任何回填。
+pub fn ensure_tasks_executor_id_column(conn: &Connection) -> Result<(), String> {
+    let mut existing: Vec<String> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(tasks)")
+            .map_err(|e| format!("读取 tasks 列失败: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| format!("遍历 tasks 列失败: {e}"))?;
+        for name in rows.flatten() {
+            existing.push(name.to_lowercase());
+        }
+    }
+    // tasks 表不存在(极旧快照/手工建库)时零列返回,直接跳过——
+    // 建表由 CREATE_TABLES 或合并期 schema 比对负责,此处不能 ALTER 报错
+    if existing.is_empty() {
+        return Ok(());
+    }
+    if existing.iter().any(|c| c == "executor_id") {
+        return Ok(());
+    }
+    conn.execute("ALTER TABLE tasks ADD COLUMN executor_id TEXT", [])
+        .map_err(|e| format!("为 tasks 补 executor_id 列失败: {e}"))?;
+    Ok(())
+}
+
+/// 幂等 schema 升级(二维批次 5a 任务绑定流程 + 7b 对比模式):为 tasks 补 flow_id、
+/// flow_snapshot 与 flow_ids 三列(各自缺失才 ALTER,已存在跳过)。启动时(Db::open)
+/// 与跨库合并前(merge_databases 两侧)各执行一次。
+///
+/// **三列都可空、无 DEFAULT**:NULL = 「未绑定流程 / 尚无快照 / 强制模式」,与旧行语义一致,
+/// 故零迁移成本——旧任务不需要任何回填(未绑定的任务到执行开始时才按当时的当前流程
+/// 捕获快照)。列序固定为 flow_id → flow_snapshot → flow_ids,与新建库的建表顺序一致
+/// (schema normalize 比对依赖追加顺序)。
+pub fn ensure_tasks_flow_columns(conn: &Connection) -> Result<(), String> {
+    let mut existing: Vec<String> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(tasks)")
+            .map_err(|e| format!("读取 tasks 列失败: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| format!("遍历 tasks 列失败: {e}"))?;
+        for name in rows.flatten() {
+            existing.push(name.to_lowercase());
+        }
+    }
+    // tasks 表不存在(极旧快照/手工建库)时零列返回,直接跳过——
+    // 建表由 CREATE_TABLES 或合并期 schema 比对负责,此处不能 ALTER 报错
+    if existing.is_empty() {
+        return Ok(());
+    }
+    if !existing.iter().any(|c| c == "flow_id") {
+        conn.execute("ALTER TABLE tasks ADD COLUMN flow_id TEXT", [])
+            .map_err(|e| format!("为 tasks 补 flow_id 列失败: {e}"))?;
+    }
+    if !existing.iter().any(|c| c == "flow_snapshot") {
+        conn.execute("ALTER TABLE tasks ADD COLUMN flow_snapshot TEXT", [])
+            .map_err(|e| format!("为 tasks 补 flow_snapshot 列失败: {e}"))?;
+    }
+    if !existing.iter().any(|c| c == "flow_ids") {
+        conn.execute("ALTER TABLE tasks ADD COLUMN flow_ids TEXT", [])
+            .map_err(|e| format!("为 tasks 补 flow_ids 列失败: {e}"))?;
+    }
+    // 任务级连接(A 批 B1):同样追加在表尾,与新版建表顺序一致(schema 归一化比对依赖)
+    if !existing.iter().any(|c| c == "connection_id") {
+        conn.execute("ALTER TABLE tasks ADD COLUMN connection_id TEXT", [])
+            .map_err(|e| format!("为 tasks 补 connection_id 列失败: {e}"))?;
+    }
+    Ok(())
+}
+
+/// 幂等 schema 升级(编码通道批次):为 tasks 补 workspace 列(缺失才 ALTER,已存在跳过)。
+/// 启动时(Db::open)与跨库合并前(merge_databases 两侧)各执行一次。
+/// **可空且无 DEFAULT**:NULL 表示「未绑定工作区」,与旧行语义一致,
+/// 故零迁移成本——旧任务不需要任何回填。列在表尾,与新版建表顺序一致
+/// (schema 归一化比对依赖)。
+pub fn ensure_tasks_workspace_column(conn: &Connection) -> Result<(), String> {
+    let mut existing: Vec<String> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(tasks)")
+            .map_err(|e| format!("读取 tasks 列失败: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| format!("遍历 tasks 列失败: {e}"))?;
+        for name in rows.flatten() {
+            existing.push(name.to_lowercase());
+        }
+    }
+    // tasks 表不存在(极旧快照/手工建库)时零列返回,直接跳过——
+    // 建表由 CREATE_TABLES 或合并期 schema 比对负责,此处不能 ALTER 报错
+    if existing.is_empty() {
+        return Ok(());
+    }
+    if existing.iter().any(|c| c == "workspace") {
+        return Ok(());
+    }
+    conn.execute("ALTER TABLE tasks ADD COLUMN workspace TEXT", [])
+        .map_err(|e| format!("为 tasks 补 workspace 列失败: {e}"))?;
+    Ok(())
+}
+
 /// 幂等 schema 升级(可观测性问题①):为 task_llm_calls 补 finish_reason 列
 ///(缺失才 ALTER,已存在跳过)。启动时(Db::open)与跨库合并前(merge_databases
 /// 两侧)各执行一次;旧行经 DEFAULT '' 零迁移成本('' = 未知/未下发,
@@ -546,7 +653,8 @@ CREATE TABLE IF NOT EXISTS exec_audit (
   decision       TEXT NOT NULL DEFAULT 'allowed',
   exit_code      INTEGER,
   stdout_summary TEXT NOT NULL DEFAULT '',
-  stderr_summary TEXT NOT NULL DEFAULT ''
+  stderr_summary TEXT NOT NULL DEFAULT '',
+  risk_flag      TEXT NOT NULL DEFAULT ''
 )"#;
 /// 审计按时间倒序查询的辅助索引。
 pub(super) const EXEC_AUDIT_INDEX_DDL: &str =
@@ -560,6 +668,17 @@ pub fn ensure_exec_audit_table(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(EXEC_AUDIT_INDEX_DDL)
         .map_err(|e| format!("创建 exec_audit 索引失败: {e}"))?;
     Ok(())
+}
+
+/// 幂等补列(D1 审计增强,2026-09-26):exec_audit 加 `risk_flag`。
+///
+/// 取值 `''` | `data_dir_touch`(命令文本命中数据目录绝对路径)| `parent_climb`
+/// (含 `..` 路径段)。**只标记不拦截**:模型有 shell 就能读进程可读的任意路径,cwd jail
+/// 只约束相对路径与缺省目录;标记的价值是让「模型把用户数据目录当草稿纸」这类行为在
+/// 审计表里可筛可查(2026-09 实测证据见 docs/经验.md),不是假装封堵。
+/// 列追加在表尾,与新版 EXEC_AUDIT_DDL 建出的 schema normalize 后一致。
+pub fn ensure_exec_audit_risk_flag_column(conn: &Connection) -> Result<(), String> {
+    add_column_if_missing(conn, "exec_audit", "risk_flag", "TEXT NOT NULL DEFAULT ''")
 }
 
 /// 性能索引补建(2026-09-13 批次 3):旧库补 `sessions.character_id` 与 `tasks` 过滤列索引。

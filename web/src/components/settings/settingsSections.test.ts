@@ -3,7 +3,9 @@ import { createSSRApp, h, type Component } from 'vue';
 import { renderToString } from 'vue/server-renderer';
 import { createPinia, setActivePinia } from 'pinia';
 import { useApiSettings } from '../../composables/useApiSettings';
+import { useConnectionProfiles } from '../../composables/useConnectionProfiles';
 import { usePromptInject } from '../../composables/usePromptInject';
+import ConnectionProfilesSection from './ConnectionProfilesSection.vue';
 import ConnectionSection from './ConnectionSection.vue';
 import McpSection from './McpSection.vue';
 import PresetImportExportSection from './PresetImportExportSection.vue';
@@ -49,6 +51,42 @@ describe('ConnectionSection(后端连接区)', () => {
   it('show=false 时根节点 display:none(embedded 模式按 activeSection 切换)', async () => {
     const state = useApiSettings();
     const html = await render(ConnectionSection, { state, show: false });
+    expect(html).toMatch(/display:\s*none/);
+  });
+});
+
+describe('ConnectionProfilesSection(连接配置区)', () => {
+  it('渲染连接列表:默认单选 / 密钥掩码占位 / 停用行不可选为默认', async () => {
+    const state = useConnectionProfiles();
+    state.drafts.value = [
+      {
+        id: 'c1', name: '主连接', connector_type: 'openai-compatible',
+        base_url: 'https://a.example/v1', model: 'ma',
+        api_key: '', enabled: true, api_key_masked: '****1111', has_api_key: true,
+      },
+      {
+        id: 'c2', name: '备用', connector_type: 'mock',
+        base_url: '', model: '',
+        api_key: '', enabled: false, api_key_masked: '', has_api_key: false,
+      },
+    ];
+    state.activeIndex.value = 0;
+    const html = await render(ConnectionProfilesSection, { state });
+    expect(html).toContain('连接配置');
+    expect(html).toContain('主连接');
+    expect(html).toContain('****1111'); // 密钥只回显掩码
+    expect(html).toContain('OpenAI 兼容'); // 类型文案来自 api/labels.ts
+    expect(html).toContain('新增连接');
+    expect(html).toContain('保存连接配置');
+    expect(html).toContain('连接信息全局共享'); // 本批只做配置管理,聊天/任务仍用默认连接
+    // 默认连接单选:第一行选中,停用的第二行不可选
+    expect(html).toMatch(/id="conn-default-0"[^>]*checked/);
+    expect(html).toMatch(/id="conn-default-1"[^>]*disabled/);
+  });
+
+  it('show=false 时根节点 display:none(embedded 模式按 activeSection 切换)', async () => {
+    const state = useConnectionProfiles();
+    const html = await render(ConnectionProfilesSection, { state, show: false });
     expect(html).toMatch(/display:\s*none/);
   });
 });

@@ -7,18 +7,19 @@
 //   TaskEvents/TaskTerminalSink/TaskGenerator(不再实现聚合别名 TaskBackend,该别名由
 //   task_core 的 blanket impl 自动满足);
 // - `record_self_heals` 改收中性 DTO `TruncationHeal`,不再引用 agents 层类型;
-// - `agent_flow()`(返回 Arc<Mutex<AgentFlowService>>)收敛为 `current_flow()`,
+// - `agent_flow()`(返回 Arc<Mutex<AgentFlowService>>)收敛为 `resolve_task_flow()`
+//   (二维批次 5a:绑定优先 → 冻结快照;未绑定 → 当时的当前流程),
 //   加锁与校验在能力内部完成,不再泄漏锁纪律。
 use super::{TaskGenOutput, TaskService};
 use crate::models::types::{
     CharacterRecord, LlmMessage, TaskEventKind, TaskMessageRecord, TaskRecord, TaskStatus,
     TaskStep, TaskSubtaskStatus, ToolDefinition,
 };
-use crate::services::agent_flow_service::AgentFlowConfig;
+use crate::services::agent_flow_service::FlowSnapshot;
 use crate::services::settings_service::RuntimeSettings;
 use crate::services::task_core::{
-    DeltaBatcher, TaskEvents, TaskFlowAccess, TaskGenerator, TaskPromptKit, TaskSettings,
-    TaskStore, TaskTerminal, TaskTerminalSink, TaskTrace, TruncationHeal,
+    DeltaBatcher, TaskEvents, TaskFlowAccess, TaskGenerator, TaskPromptKit, TaskScratch,
+    TaskSettings, TaskStore, TaskTerminal, TaskTerminalSink, TaskTrace, TruncationHeal,
 };
 use futures::future::BoxFuture;
 use std::time::Duration;
@@ -29,6 +30,10 @@ use tokio::sync::watch;
 impl TaskStore for TaskService {
     fn get(&self, id: &str) -> Option<TaskRecord> {
         TaskService::get(self, id)
+    }
+
+    fn set_flow_snapshot(&self, id: &str, snapshot: &FlowSnapshot) -> bool {
+        TaskService::set_flow_snapshot(self, id, snapshot)
     }
 
     fn set_status(&self, id: &str, status: TaskStatus) -> bool {
@@ -119,10 +124,19 @@ impl TaskPromptKit for TaskService {
     fn assemble_executor_system_prompt(
         &self,
         settings: &RuntimeSettings,
+        executor_id: Option<&str>,
         character_id: Option<&str>,
         user_goal: &str,
+        has_tools: bool,
     ) -> String {
-        TaskService::assemble_executor_system_prompt(self, settings, character_id, user_goal)
+        TaskService::assemble_executor_system_prompt(
+            self,
+            settings,
+            executor_id,
+            character_id,
+            user_goal,
+            has_tools,
+        )
     }
 
     fn world_context(&self, character_id: Option<&str>) -> String {
@@ -143,21 +157,10 @@ impl TaskPromptKit for TaskService {
 // ==================== TaskFlowAccess:自定义 Agent 流程访问 ====================
 
 impl TaskFlowAccess for TaskService {
-    fn current_flow(&self) -> Result<AgentFlowConfig, String> {
-        // 加锁与校验在能力内部完成(批次 4.2:不把 Arc<Mutex<_>> 交给调用方);
-        // 逻辑与原 task_engine/custom.rs::current_flow 逐行等价(克隆后立即释放锁)
-        let flow = TaskService::agent_flow(self);
-        let guard = flow.lock().unwrap_or_else(|e| e.into_inner());
-        let cfg = guard
-            .get()
-            .cloned()
-            .ok_or("请先在设置中启用一个 Agent 流程")?;
-        if !cfg.enabled {
-            return Err("当前 Agent 流程未启用,请在设置中开启后再运行 custom 模式".into());
-        }
-        // 执行前按启动时注册工具集校验(与保存时同一 validate_flow)
-        guard.validate(&cfg)?;
-        Ok(cfg)
+    fn resolve_task_flow(&self, task: Option<&TaskRecord>) -> Result<FlowSnapshot, String> {
+        // 规则(绑定优先 → 冻结快照自校验;未绑定 → 当时的当前流程)收在 TaskService
+        // 的单一出处里;approve 的前置校验调的是同一个方法,避免两条分叉的判断。
+        TaskService::resolve_task_flow(self, task)
     }
 }
 
@@ -194,6 +197,14 @@ impl TaskTerminalSink for TaskService {
     }
 }
 
+// ==================== TaskScratch:任务临时工作区 ====================
+
+impl TaskScratch for TaskService {
+    fn scratch_dir_for(&self, task_id: &str) -> Result<std::path::PathBuf, String> {
+        TaskService::scratch_dir_for(self, task_id)
+    }
+}
+
 // ==================== TaskGenerator:LLM 生成与分级重试 ====================
 
 impl TaskGenerator for TaskService {
@@ -208,6 +219,7 @@ impl TaskGenerator for TaskService {
         max_tokens: u32,
         temperature: f64,
         top_p: f64,
+        connection_id: Option<&'a str>,
         cancel: watch::Receiver<bool>,
     ) -> BoxFuture<'a, Result<TaskGenOutput, String>> {
         Box::pin(TaskService::generate_text(
@@ -220,6 +232,40 @@ impl TaskGenerator for TaskService {
             max_tokens,
             temperature,
             top_p,
+            connection_id,
+            cancel,
+        ))
+    }
+
+    /// 带单次调用超时覆盖的生成(A 批 A1):宿主是唯一持有看门狗的实现,故只有这里
+    /// 需要覆盖 trait 的默认委托(见 `TaskGenerator::generate_text_with_timeout`)。
+    #[allow(clippy::too_many_arguments)]
+    fn generate_text_with_timeout<'a>(
+        &'a self,
+        task_id: &'a str,
+        phase: &'a str,
+        step_index: Option<usize>,
+        messages: Vec<LlmMessage>,
+        tools: Vec<ToolDefinition>,
+        max_tokens: u32,
+        temperature: f64,
+        top_p: f64,
+        connection_id: Option<&'a str>,
+        timeout: Option<Duration>,
+        cancel: watch::Receiver<bool>,
+    ) -> BoxFuture<'a, Result<TaskGenOutput, String>> {
+        Box::pin(TaskService::generate_text_timed(
+            self,
+            task_id,
+            phase,
+            step_index,
+            messages,
+            tools,
+            max_tokens,
+            temperature,
+            top_p,
+            connection_id,
+            timeout,
             cancel,
         ))
     }
@@ -290,6 +336,8 @@ impl TaskGenerator for TaskService {
         character_id: Option<&'a str>,
         max_tokens: u32,
         cancel: &'a watch::Receiver<bool>,
+        scope: Option<std::sync::Arc<crate::models::types::ExecScope>>,
+        capability: crate::services::task_core::prompt_consts::StepCapability,
     ) -> BoxFuture<'a, Result<TaskGenOutput, String>> {
         Box::pin(TaskService::plan_task(
             self,
@@ -298,6 +346,8 @@ impl TaskGenerator for TaskService {
             character_id,
             max_tokens,
             cancel,
+            scope,
+            capability,
         ))
     }
 
@@ -308,9 +358,11 @@ impl TaskGenerator for TaskService {
         feedback: &'a str,
         max_tokens: u32,
         cancel: &'a watch::Receiver<bool>,
+        scope: Option<std::sync::Arc<crate::models::types::ExecScope>>,
+        capability: crate::services::task_core::prompt_consts::StepCapability,
     ) -> BoxFuture<'a, Result<TaskGenOutput, String>> {
         Box::pin(TaskService::plan_revise(
-            self, task, history, feedback, max_tokens, cancel,
+            self, task, history, feedback, max_tokens, cancel, scope, capability,
         ))
     }
 }

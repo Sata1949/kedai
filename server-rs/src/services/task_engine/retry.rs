@@ -11,10 +11,12 @@ use std::time::Duration;
 use tokio::sync::watch;
 
 /// 空输出重试前的退避间隔(避免对上游瞬时抖动形成紧循环)。
-const EMPTY_RETRY_BACKOFF: Duration = Duration::from_millis(500);
+/// `pub(super)`:自定义流程的节点级空产出重试(A 批 A2)复用同一间隔,不另立常量。
+pub(super) const EMPTY_RETRY_BACKOFF: Duration = Duration::from_millis(500);
 
 /// 空输出重试时的 max_tokens 翻倍上限(与设置页 max_tokens 上限一致)。
-const RETRY_MAX_TOKENS_CAP: u32 = 131_072;
+/// `pub(super)`:自定义流程的节点级空产出重试(A 批 A2)复用同一上限与算法。
+pub(super) const RETRY_MAX_TOKENS_CAP: u32 = 131_072;
 
 /// 规划调用的初始 max_tokens。推理模型的 reasoning 与正文共用同一预算,
 /// 1024 曾被 reasoning 整体吃光导致正文零输出/JSON 半截(2026-08-27 exe 实测),
@@ -74,18 +76,30 @@ where
     }
     let settings = deps.task_settings();
     let reason = first.finish_reason.as_deref().unwrap_or("");
-    let retried = if reason == "length" {
-        let doubled = truncated_retry_budget(settings.default_max_tokens);
-        call(doubled, settings.default_temperature).await
+    // 本次重试实际使用的输出上限(length 分支翻倍,否则沿用默认):既用于发起调用,
+    // 也用于失败文案里的「当前输出上限」——两处必须是同一个值(否则用户按文案调设置
+    // 会与真实生效值对不上)。
+    let used_cap = if reason == "length" {
+        truncated_retry_budget(settings.default_max_tokens)
     } else {
-        call(settings.default_max_tokens, 0.7).await
+        settings.default_max_tokens
+    };
+    let retried = if reason == "length" {
+        call(used_cap, settings.default_temperature).await
+    } else {
+        call(used_cap, 0.7).await
     };
     match retried {
         Ok(o) if !o.text.trim().is_empty() => Ok(o),
-        Ok(o) => Err(format!(
-            "{label}返回空内容(finish_reason={})",
-            o.finish_reason.as_deref().unwrap_or("未知")
-        )),
+        // 文案统一走单一出处(提交 3 · D6):带 finish_reason、思考占输出比例与
+        // 「提高上限/改非推理模型」建议,用户据此知道调什么。
+        Ok(o) => Err(
+            crate::services::task_core::prompt_consts::empty_output_error(
+                label,
+                &o,
+                Some(used_cap),
+            ),
+        ),
         Err(e) => Err(e),
     }
 }
@@ -123,12 +137,17 @@ pub(crate) async fn generate_step_retry(
 /// length/空内容 = 预算被推理 token 耗尽,max_tokens 翻倍(上限 RETRY_MAX_TOKENS_CAP);
 /// 纯格式错误 = 同预算重试。网络/超时等硬错误不重试直接抛(与步骤重试同款约定)。
 /// 共 PLAN_MAX_ATTEMPTS 次尝试;失败文案带末次错误,便于排障。
+///
+/// `scope`/`capability`(D1):侦察轮的只读作用域与执行阶段能力事实,逐次尝试原样透传
+/// (重试只改 max_tokens,不改规划上下文)。
 pub(crate) async fn plan_task_retry(
     deps: &dyn TaskBackend,
     task_id: &str,
     title: &str,
     character_id: Option<&str>,
     cancel: &watch::Receiver<bool>,
+    scope: Option<std::sync::Arc<crate::models::types::ExecScope>>,
+    capability: crate::services::task_core::prompt_consts::StepCapability,
 ) -> Result<(Vec<TaskStep>, TaskGenOutput), String> {
     let mut max_tokens = PLAN_INITIAL_MAX_TOKENS;
     let mut last_err = String::from("规划器未产出有效步骤");
@@ -140,7 +159,15 @@ pub(crate) async fn plan_task_retry(
             }
         }
         let out = deps
-            .plan_task(task_id, title, character_id, max_tokens, cancel)
+            .plan_task(
+                task_id,
+                title,
+                character_id,
+                max_tokens,
+                cancel,
+                scope.clone(),
+                capability,
+            )
             .await?;
         match super::parse::parse_plan(&out.text) {
             Ok(steps) if !steps.is_empty() => return Ok((steps, out)),
@@ -176,6 +203,8 @@ pub(crate) async fn plan_revise_retry(
     history: &[crate::models::types::TaskMessageRecord],
     feedback: &str,
     cancel: &watch::Receiver<bool>,
+    scope: Option<std::sync::Arc<crate::models::types::ExecScope>>,
+    capability: crate::services::task_core::prompt_consts::StepCapability,
 ) -> Result<(Vec<TaskStep>, TaskGenOutput), String> {
     let mut max_tokens = PLAN_INITIAL_MAX_TOKENS;
     let mut last_err = String::from("规划器未产出有效修订计划");
@@ -187,7 +216,15 @@ pub(crate) async fn plan_revise_retry(
             }
         }
         let out = deps
-            .plan_revise(task, history, feedback, max_tokens, cancel)
+            .plan_revise(
+                task,
+                history,
+                feedback,
+                max_tokens,
+                cancel,
+                scope.clone(),
+                capability,
+            )
             .await?;
         match super::parse::parse_plan(&out.text) {
             Ok(steps) if !steps.is_empty() => return Ok((steps, out)),

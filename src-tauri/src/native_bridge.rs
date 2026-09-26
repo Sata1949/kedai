@@ -40,19 +40,37 @@ pub fn open_external(url: &str) -> Result<(), String> {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err(format!("拒绝打开非 http(s) 链接: {url}"));
     }
-    let result = if cfg!(target_os = "windows") {
-        // cmd /C start 的第一个参数在部分情况下会被当作窗口标题,故先给一个空标题占位
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .spawn()
-    } else if cfg!(target_os = "macos") {
-        std::process::Command::new("open").arg(url).spawn()
-    } else {
-        std::process::Command::new("xdg-open").arg(url).spawn()
-    };
-    result
+    spawn_url_opener(url)
         .map(|_| ())
         .map_err(|e| format!("调用系统浏览器失败: {e}"))
+}
+
+/// 按平台派生「打开链接」的系统命令。
+///
+/// 按平台拆成三个 `#[cfg]` 分支(而非 `if cfg!(...)`)是因为 Windows 分支要
+/// `use std::os::windows::process::CommandExt`,该模块在非 Windows 平台不存在,
+/// `cfg!` 的假分支同样参与编译会直接编译失败。
+#[cfg(all(not(target_os = "android"), windows))]
+fn spawn_url_opener(url: &str) -> std::io::Result<std::process::Child> {
+    // cmd /C start 的第一个参数在部分情况下会被当作窗口标题,故先给一个空标题占位。
+    // CREATE_NO_WINDOW:本进程是 GUI 子系统(无控制台),不设该标志时 cmd 自身会闪一个
+    // 黑窗(2026-09-18,与后端 exec/desktop.rs 同源修复;只影响 cmd 进程,浏览器照常弹出)。
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    std::process::Command::new("cmd")
+        .args(["/C", "start", "", url])
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+}
+
+#[cfg(all(not(target_os = "android"), target_os = "macos"))]
+fn spawn_url_opener(url: &str) -> std::io::Result<std::process::Child> {
+    std::process::Command::new("open").arg(url).spawn()
+}
+
+#[cfg(all(not(target_os = "android"), not(windows), not(target_os = "macos")))]
+fn spawn_url_opener(url: &str) -> std::io::Result<std::process::Child> {
+    std::process::Command::new("xdg-open").arg(url).spawn()
 }
 
 #[cfg(target_os = "android")]

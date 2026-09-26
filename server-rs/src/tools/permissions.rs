@@ -481,7 +481,24 @@ fn default_risk(tool: &str) -> ToolRisk {
         // agentend 是子智能体编排收尾(结束任务),不改数据,归敏感级;
         // 若归危险级,任务模式默认策略(拒绝危险工具)会打断子智能体流程。
         "search" | "sleep" | "agentgo" | "agentend" => ToolRisk::Sensitive,
+        // 产物提交:目标路径由应用决定(设备下载位置),不接受任意路径参数,文件名经清洗;
+        // 归敏感级而非危险级——按危险级登记会被任务模式默认策略整体剔除,
+        // 而它恰恰只在任务/沙箱场景下有用(见 tools/submit.rs 顶部说明)。
+        "submit" => ToolRisk::Sensitive,
+        // 动态调用流程(二维批次 7b):不放宽任何权限——被调流程的节点仍走
+        // task_tool_policy 编译 + 节点白名单收窄(与入口流程同一路径),它自身不写文件、
+        // 不执行命令,只消耗 token;归敏感级而非危险级,否则「按危险级剔除」的策略会
+        // 在对比模式下把它一并剔掉(可见性本就由 META_TOOLS 与逐节点下发决定)。
+        "run_flow" => ToolRisk::Sensitive,
         "memory_write" | "update_variables" | "write" | "replace" | "create" => ToolRisk::Dangerous,
+        // 工作区文件工具族(编码通道批次):读/检索三个是安全级(只读,且路径被
+        // workspace_guard 收口在工作区内);写/改两个与 write/replace 同级归危险级
+        // ——它们会真的改动工作区里的源码,风险面与既有写工具同类。
+        // 归危险级不影响可用性:任务模式默认策略(deny_dangerous)按**工具名**开例外放行
+        // 它们(见 services/task_engine/tool_policy.rs),例外的安全前提是路径被 jail 在
+        // 工作区内,而不是「工具不危险」。
+        "fs_read" | "fs_glob" | "fs_grep" => ToolRisk::Safe,
+        "fs_write" | "fs_edit" => ToolRisk::Dangerous,
         // 命令执行恒危险级:与文件写工具同级,但额外走「命令级风险强制确认」
         // (tools/command_risk.rs)。显式登记而非依赖下面的通配兜底,便于后续审查。
         "bash" => ToolRisk::Dangerous,
@@ -501,6 +518,7 @@ mod tests {
             session_id: "s".into(),
             character_id: "r".into(),
             agent_depth: 0,
+            scope: None,
         }
     }
 
@@ -728,6 +746,7 @@ mod tests {
             session_id: "s1".into(),
             character_id: String::new(),
             agent_depth: 0,
+            scope: None,
         };
         let d = m.decide("memory_write", &anon);
         assert!(!d.allowed, "空角色不应命中 role_grants[\"\"]");
@@ -767,12 +786,14 @@ mod tests {
             session_id: "alive".into(),
             character_id: "r".into(),
             agent_depth: 0,
+            scope: None,
         };
         assert!(m.decide("search", &alive).allowed);
         let dead = ToolContext {
             session_id: "dead".into(),
             character_id: "r".into(),
             agent_depth: 0,
+            scope: None,
         };
         assert!(!m.decide("search", &dead).allowed);
     }
@@ -883,6 +904,7 @@ mod tests {
             session_id: "task:s1".into(),
             character_id: String::new(),
             agent_depth: 0,
+            scope: None,
         };
         for cmd in ["rm -rf /important", "sudo reboot"] {
             let a = exec_action(cmd);

@@ -76,19 +76,23 @@ describe('reduceSseEvent', () => {
 
     expect(changes.generating).toBe(false);
     expect(current.agent).toMatchObject({ phase: 'interrupted', stepText: '已中断' });
-    // 临时草稿(负 id)从未落库,服务端中断不持久化任何消息:必须削除,
-    // 否则残留为「最后一条无法删除的草稿」(负 id 无法经删除接口移除)。
+    // 临时草稿(负 id)削除:未落库且无法经删除接口移除(负 id 幽灵气泡)。
     expect(current.messages.length).toBe(0);
+    // 中断语义统一(HB-3):服务端会落库「已生成的部分正文」(extra.interrupted),
+    // 故中断终态一律刷新历史,由带标记的正 id 消息回填。
+    expect(changes.reloadHistory).toBe(true);
   });
 
-  it('interrupted 保留已落库(正 id)消息,仅关闭流式状态', () => {
+  it('interrupted 保留已落库(正 id)消息,仅关闭流式状态,并请求刷新历史', () => {
     const current = state();
     current.messages.push({ id: 42, role: 'assistant', content: '已落库内容', extra: {}, streaming: true });
 
-    reduceSseEvent(current, { type: 'interrupted' });
+    const changes = reduceSseEvent(current, { type: 'interrupted' });
 
     expect(current.messages.length).toBe(1);
     expect(current.messages[0].streaming).toBe(false);
+    // HB-3:中断的部分产出由服务端落库,刷新历史后以 extra.interrupted 渲染「已中断」
+    expect(changes.reloadHistory).toBe(true);
   });
 
   it('finish 落最终正文、结束生成并请求刷新历史', () => {
@@ -197,8 +201,8 @@ describe('reduceSseEvent', () => {
   });
 
   it('interrupted 削除末尾未落库的用户临时气泡并请求刷新历史', () => {
-    // 发送消息时前端先 push 负 id 用户气泡,服务端同步落库为正 id;中断终态不刷新历史,
-    // 该气泡会残留成「删不掉的草稿」(负 id 无法经删除接口移除)。
+    // 发送消息时前端先 push 负 id 用户气泡,服务端同步落库为正 id;该气泡会残留成
+    // 「删不掉的草稿」(负 id 无法经删除接口移除),故削除并由刷新历史回填正 id 版本。
     const current = state();
     current.messages.push({ id: -100, role: 'user', content: '被中断的消息', extra: {}, streaming: false });
 
@@ -273,5 +277,52 @@ describe('swipe 版本纯函数(阶段六 6f)', () => {
 
   it('swipe_id 缺失(历史消息兼容)回退 -1', () => {
     expect(swipeIndex({ swipes: [{ swipe_id: 0, content: 'a', ts: 1 }] })).toBe(-1);
+  });
+});
+
+describe('retry 事件与 retryable 消费(HB-4)', () => {
+  it('retry 为非终态:阶段行显示重试进度并写入推理链,不改生成态', () => {
+    const current = state();
+
+    const changes = reduceSseEvent(current, {
+      type: 'retry',
+      attempt: 1,
+      max: 3,
+      reason: '上游返回 429 Too Many Requests',
+    });
+
+    // 非终态:不结束生成、不动消息气泡
+    expect(changes).toMatchObject({});
+    expect(current.agent.stepText).toBe('正在重试 (1/3)…');
+    expect(current.agent.detail).toBe('上游返回 429 Too Many Requests');
+    expect(current.agent.chain.at(-1)).toMatchObject({ text: '请求上游重试 (1/3)' });
+    // 后续 token 到达即表示重试等待结束,阶段行交还给生成
+    reduceSseEvent(current, { type: 'token', text: '好' });
+    expect(current.agent.stepText).toBe('生成中…');
+  });
+
+  it('error 事件写入 retryable,新一轮 step 清除', () => {
+    const current = state();
+    reduceSseEvent(current, {
+      type: 'error',
+      code: 'upstream_error',
+      message: '连接失败',
+      retryable: true,
+    });
+    expect(current.agent.retryable).toBe(true);
+
+    reduceSseEvent(current, { type: 'step', step: '计划中…' });
+    expect(current.agent.retryable).toBe(false);
+  });
+
+  it('不可重试错误(鉴权类)不置可重试标记', () => {
+    const current = state();
+    reduceSseEvent(current, {
+      type: 'error',
+      code: 'auth_failed',
+      message: '鉴权失败',
+      retryable: false,
+    });
+    expect(current.agent.retryable).toBe(false);
   });
 });

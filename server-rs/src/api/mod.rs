@@ -33,6 +33,7 @@ pub mod sessions;
 pub mod settings;
 pub mod skills;
 pub mod slash_commands;
+pub mod task_executors;
 pub mod tasks;
 pub mod tokens;
 pub mod tool_permissions;

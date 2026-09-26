@@ -78,8 +78,9 @@ impl ToolDeps {
     /// 测试用空依赖(临时目录 + mock 连接器)。
     /// 返回 (守卫, 依赖):守卫不能存进 ToolDeps(其 data_dir 是 PathBuf),
     /// 由调用方持有并须活到 deps 之后(解构绑定按逆序析构,守卫在前即最后析构)
+    /// 可见性 pub(crate):tools 下各工具域测试(含 agent_tools_fs)共用同一份空依赖。
     #[cfg(test)]
-    fn dummy_for_test() -> (crate::utils::test_support::TempDataDir, Self) {
+    pub(crate) fn dummy_for_test() -> (crate::utils::test_support::TempDataDir, Self) {
         let dir = crate::utils::test_support::TempDataDir::new("tool-test");
         let db = Arc::new(crate::models::db::Db::open(&dir.join("t.db"), &dir).unwrap());
         let deps = ToolDeps {
@@ -233,6 +234,7 @@ mod tests {
                     session_id: "s".into(),
                     character_id: "c".into(),
                     agent_depth: 0,
+                    scope: None,
                 },
             )
             .await
@@ -255,6 +257,7 @@ mod tests {
                     session_id: "s".into(),
                     character_id: "c".into(),
                     agent_depth: 0,
+                    scope: None,
                 },
             )
             .await
@@ -278,6 +281,7 @@ mod tests {
             session_id: "s".into(),
             character_id: "c".into(),
             agent_depth: 0,
+            scope: None,
         };
         for tool in ["write", "create"] {
             reg.permissions()
@@ -373,6 +377,7 @@ mod tests {
             session_id: session.id.clone(),
             character_id: crate::services::character_service::BUILTIN_SYSTEM_ID.into(),
             agent_depth: 0,
+            scope: None,
         };
         for tool in ["write", "replace"] {
             reg.permissions()
@@ -459,6 +464,7 @@ mod tests {
             session_id: "s".into(),
             character_id: "c".into(),
             agent_depth: 0,
+            scope: None,
         };
         for tool in ["write", "replace"] {
             reg.permissions()
@@ -546,6 +552,7 @@ mod tests {
             session_id: "s".into(),
             character_id: "c".into(),
             agent_depth: 0,
+            scope: None,
         };
         for tool in ["write", "replace"] {
             reg.permissions()
@@ -653,6 +660,7 @@ mod tests {
             session_id: session.id.clone(),
             character_id: "c".into(),
             agent_depth: 2,
+            scope: None,
         };
         let err = reg
             .execute(
@@ -669,6 +677,7 @@ mod tests {
         // 深度 1(第二层)仍可派发
         let ctx1 = ToolContext {
             agent_depth: 1,
+            scope: None,
             ..ctx
         };
         let ok = reg
@@ -712,6 +721,7 @@ mod tests {
             session_id: sid.to_string(),
             character_id: "c".into(),
             agent_depth: 0,
+            scope: None,
         };
         let err = reg
             .execute(
@@ -726,7 +736,8 @@ mod tests {
         assert_eq!(deps.subtasks.list_by_session(sid).len(), 2);
     }
 
-    /// 结果截断:超 subagent_result_max_chars 的子任务结果保留前 N 字符并带原长尾注
+    /// 结果截断:超 subagent_result_max_chars 的子任务结果保留前 N 字符并带原长尾注,
+    /// 且尾注**自身说明完整内容怎么取**(HB-6:父智能体不必重跑子任务去摸这条路径)
     #[tokio::test]
     async fn subtask_result_truncates_with_marker() {
         use crate::tools::agent_tools_agent::truncate_subtask_result_for_test;
@@ -737,11 +748,18 @@ mod tests {
             s.subagent_result_max_chars = 10;
         }
         let long = "字".repeat(25);
-        let out = truncate_subtask_result_for_test(&deps, &long);
+        let task_id = "0f1e2d3c-4b5a-6978-8a6b-5c4d3e2f1a09";
+        let out = truncate_subtask_result_for_test(&deps, &long, task_id);
         assert!(
-            out.contains("[子智能体结果已截断,原长 25 字符]"),
+            out.contains("[子智能体结果已截断,原长 25 字符;"),
             "应带原长尾注: {out}"
         );
+        // 尾注可操作:带读取路径与真实 id(read 的子任务 id 走 queries[].name 字段)
+        assert!(
+            out.contains("read(type=\"subtask\", name=\""),
+            "尾注应给出读取路径: {out}"
+        );
+        assert!(out.contains(task_id), "尾注应带上真实 task_id: {out}");
         // 保留前 10 字符,截断在字符边界(首行恰为 max_chars 个字符)
         assert!(out.starts_with(&"字".repeat(10)), "应保留前 10 字符: {out}");
         assert_eq!(
@@ -751,7 +769,10 @@ mod tests {
         );
         // 未超长:原样返回,不带尾注
         let short = "短结果";
-        assert_eq!(truncate_subtask_result_for_test(&deps, short), short);
+        assert_eq!(
+            truncate_subtask_result_for_test(&deps, short, task_id),
+            short
+        );
     }
 
     // ==================== 任务编排契约加固(审计 A/B/C/E/F) ====================
@@ -776,6 +797,7 @@ mod tests {
             session_id: session.id,
             character_id: crate::services::character_service::BUILTIN_SYSTEM_ID.into(),
             agent_depth: 0,
+            scope: None,
         }
     }
 
@@ -896,6 +918,7 @@ mod tests {
             session_id: session.id.clone(),
             character_id: "c".into(),
             agent_depth: 0,
+            scope: None,
         };
 
         // 结果项统一结构化:命中 ok=true + content;未命中 ok=false + error + candidates
@@ -999,6 +1022,7 @@ mod tests {
             session_id: session.id.clone(),
             character_id: "c".into(),
             agent_depth: 0,
+            scope: None,
         };
         let args = serde_json::json!({
             "queries": [{ "type": "subtask", "name": "probe" }]
@@ -1139,6 +1163,7 @@ mod tests {
             session_id: "task:t1:sub:x".into(),
             character_id: "c".into(),
             agent_depth: 0,
+            scope: None,
         };
         let raw = reg.execute("todo", "{}", ctx).await.unwrap();
         let v: Value = serde_json::from_str(&raw).unwrap();

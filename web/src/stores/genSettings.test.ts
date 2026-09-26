@@ -53,11 +53,28 @@ function makeSettings(overrides: Partial<RuntimeSettings> = {}): RuntimeSettings
     reflect_advice_role: 'user',
     bypass_mode: false,
     authorization_mode: 'loose',
+    // HB-1 成本护栏:单次生成 token 预算(0 = 关闭)与超限动作
+    session_token_budget: 0,
+    session_budget_action: 'warn',
+    // HB-2 语义熔断:窗口/下限/去重上限
+    loop_guard_semantic_window: 16,
+    loop_guard_semantic_min_calls: 12,
+    loop_guard_semantic_max_distinct: 2,
+    // 提交 3:任务侧两道闸(步骤墙钟预算默认 1200 = 开;空闲看守默认 900)
+    task_step_budget_secs: 1200,
+    task_idle_timeout_secs: 900,
+    // HB-7:变量两步生成的独立模型/温度(默认未配置)
+    mvu_model: null,
+    mvu_temperature: null,
     bypass_blacklist: [],
     tool_authorization_timeout_secs: 300,
     task_tool_policy: 'deny_dangerous',
     task_tool_allowlist: [],
     max_tool_rounds: 32,
+    // 流程调用闸与节点默认上下文(A 批 A3/A4;三者都是任务侧设置)
+    max_flow_call_depth: 2,
+    max_flow_calls_per_task: 8,
+    default_node_max_context: 0,
     tool_history_keep_rounds: 4,
     tool_history_budget_tokens: 16384,
     render_html: false,
@@ -89,8 +106,22 @@ function makeSettings(overrides: Partial<RuntimeSettings> = {}): RuntimeSettings
     exec_allow_sandbox: false,
     task_persona_full: false,
     task_prompt_inject_enabled: false,
+    // 多套连接(批次 4):默认空列表,具体连接由用例覆盖
+    connections: [],
+    active_connection_id: null,
     ...overrides,
   };
+}
+
+/**
+ * 抹掉若干字段(模拟旧服务端/异常响应缺字段)。
+ * 用 delete 而不是 `undefined as unknown as T`:后者属类型逃逸,会推高
+ * `tools/check-frontend-lint.mjs` 的 ratchet 计数(该门禁只降不升)。
+ */
+function withoutFields(base: RuntimeSettings, keys: Array<keyof RuntimeSettings>): RuntimeSettings {
+  const out: Partial<RuntimeSettings> = { ...base };
+  for (const k of keys) delete out[k];
+  return out as RuntimeSettings;
 }
 
 describe('genSettings 模式分流:loadSettings/saveSettings 按 appMode 传 mode 参数', () => {
@@ -142,6 +173,117 @@ describe('genSettings 模式分流:loadSettings/saveSettings 按 appMode 传 mod
     task.appMode = 'task';
     await store.loadSettings();
     expect(getSettingsMock).toHaveBeenLastCalledWith('task');
+  });
+});
+
+describe('genSettings 流程调用闸与节点默认上下文(A 批 A3/A4)', () => {
+  beforeEach(() => {
+    memStorage.clear();
+    setActivePinia(createPinia());
+  });
+
+  it('store 默认值与后端缺省一致(深度 2 / 每任务 8 / 不裁剪 0)', () => {
+    const store = useGenSettingsStore();
+    expect(store.maxFlowCallDepth).toBe(2);
+    expect(store.maxFlowCallsPerTask).toBe(8);
+    expect(store.defaultNodeMaxContext).toBe(0);
+  });
+
+  it('loadSettings 回填服务端值;缺字段兜底 2 / 8 / 0', async () => {
+    const store = useGenSettingsStore();
+    getSettingsMock.mockReset().mockResolvedValue(
+      makeSettings({
+        max_flow_call_depth: 4,
+        max_flow_calls_per_task: 32,
+        default_node_max_context: 8192,
+      }),
+    );
+    await store.loadSettings();
+    expect(store.maxFlowCallDepth).toBe(4);
+    expect(store.maxFlowCallsPerTask).toBe(32);
+    expect(store.defaultNodeMaxContext).toBe(8192);
+
+    // 旧服务端/异常响应缺字段:回退默认值(不裁剪 = 0,即 A 批之前的行为)
+    getSettingsMock.mockReset().mockResolvedValue(
+      withoutFields(makeSettings(), [
+        'max_flow_call_depth',
+        'max_flow_calls_per_task',
+        'default_node_max_context',
+      ]),
+    );
+    await store.loadSettings();
+    expect(store.maxFlowCallDepth).toBe(2);
+    expect(store.maxFlowCallsPerTask).toBe(8);
+    expect(store.defaultNodeMaxContext).toBe(0);
+  });
+
+  it('saveSettings 响应回填三个字段(与 loadSettings 同口径)', async () => {
+    const store = useGenSettingsStore();
+    saveSettingsMock.mockReset().mockResolvedValue({
+      ok: true,
+      settings: makeSettings({
+        max_flow_call_depth: 5,
+        max_flow_calls_per_task: 64,
+        default_node_max_context: 4096,
+      }),
+    });
+    await store.saveSettings({
+      max_flow_call_depth: 5,
+      max_flow_calls_per_task: 64,
+      default_node_max_context: 4096,
+    });
+    expect(store.maxFlowCallDepth).toBe(5);
+    expect(store.maxFlowCallsPerTask).toBe(64);
+    expect(store.defaultNodeMaxContext).toBe(4096);
+  });
+});
+
+describe('genSettings 任务侧两道闸(提交 3 · D3/D7)', () => {
+  beforeEach(() => {
+    memStorage.clear();
+    setActivePinia(createPinia());
+  });
+
+  it('store 默认值与后端缺省一致(步骤预算 1200 / 空闲超时 900)', () => {
+    const store = useGenSettingsStore();
+    expect(store.taskStepBudgetSecs).toBe(1200);
+    expect(store.taskIdleTimeoutSecs).toBe(900);
+  });
+
+  it('loadSettings 回填服务端值;缺字段兜底 1200 / 900', async () => {
+    const store = useGenSettingsStore();
+    getSettingsMock.mockReset().mockResolvedValue(
+      makeSettings({
+        task_step_budget_secs: 300,
+        task_idle_timeout_secs: 601,
+      }),
+    );
+    await store.loadSettings();
+    expect(store.taskStepBudgetSecs).toBe(300);
+    expect(store.taskIdleTimeoutSecs).toBe(601);
+
+    // 旧服务端缺字段:回退默认(而非 0——0 是「关」,不能把缺字段当用户关掉了闸门)
+    getSettingsMock.mockReset().mockResolvedValue(
+      withoutFields(makeSettings(), ['task_step_budget_secs', 'task_idle_timeout_secs']),
+    );
+    await store.loadSettings();
+    expect(store.taskStepBudgetSecs).toBe(1200);
+    expect(store.taskIdleTimeoutSecs).toBe(900);
+  });
+
+  it('saveSettings 响应回填两个字段(与 loadSettings 同口径)', async () => {
+    const store = useGenSettingsStore();
+    saveSettingsMock.mockReset().mockResolvedValue({
+      ok: true,
+      settings: makeSettings({
+        task_step_budget_secs: 0,
+        task_idle_timeout_secs: 0,
+      }),
+    });
+    await store.saveSettings({ task_step_budget_secs: 0, task_idle_timeout_secs: 0 });
+    // 0 = 关,是合法用户选择:回填必须如实为 0(不得用 `?? 1200` 之类的兜底吃掉它)
+    expect(store.taskStepBudgetSecs).toBe(0);
+    expect(store.taskIdleTimeoutSecs).toBe(0);
   });
 });
 

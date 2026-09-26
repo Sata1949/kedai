@@ -81,20 +81,46 @@ function toggleAudio(): void {
 }
 
 /**
+ * 请求退出应用(Android 侧:发 kedai://exit-app,壳收到后结束进程)。
+ * 桌面侧不使用本函数(桌面退出走壳的窗口关闭流程 + ExitGuard 兜底)。
+ */
+async function requestExit(): Promise<void> {
+  try {
+    const { emit } = await import('@tauri-apps/api/event');
+    await emit('kedai://exit-app');
+  } catch (e) {
+    // 事件送不出去时如实告知,而不是留一个点了没反应的退出
+    console.warn('[kedai] 退出请求发送失败', e);
+    window.alert('退出请求发送失败,请手动关闭应用');
+  }
+}
+
+/**
  * Android 返回键处理(桌面端不触发)。
  *
  * 曾有的问题:壳的初始 URL 是 about:blank,导航到 http://127.0.0.1:<port>/ 后
  * WebView 历史里有两条记录,系统返回键会退回 about:blank —— 表现为整页白屏且无法恢复。
  *
  * 处理顺序(符合 Android 习惯):
- *   1) 有打开的弹窗 → 关掉最上层的那个(MODAL_FLAGS 按渲染逆序,先关最上层);
+ *   0) **退出确认弹窗已打开 → 直接退出**(2026-09-17 新增:对齐桌面 ExitGuard 的
+ *      「再按一次即退出」兜底;此前弹窗开着时再按返回键只是关掉弹窗,想退出必须
+ *      重新按两次,且没有任何提示告诉用户「再按一次就能退」);
+ *   1) 有其它打开的弹窗 → 关掉最上层的那个(MODAL_FLAGS 按渲染逆序,先关最上层);
  *   2) 有打开的抽屉 → 收起;
  *   3) 都没有 → 弹出退出确认弹窗(与桌面端「关闭窗口」同一个弹窗,两平台语义一致;
  *      此前是直接退出,误触返回键即丢未保存内容)。
  *
+ * 注意第 0 步必须在逆序循环**之前**:exitConfirmOpen 本身也在 MODAL_FLAGS 里,
+ * 若先进循环就只会关掉弹窗(旧行为)。
+ *
  * 注册本监听后,壳不再自行处理返回键(见 AppPlugin 的 hasListener 分支)。
  */
 async function handleAndroidBack(): Promise<void> {
+  // 0) 退出确认已打开:第二次返回键 = 确认退出(与桌面二次关闭同语义)
+  if (store.exitConfirmOpen) {
+    void requestExit();
+    return;
+  }
   // 弹窗 flag 集合单点定义在 web/src/modals.ts;逆序即「后声明者在上层」
   for (let i = MODAL_FLAGS.length - 1; i >= 0; i--) {
     const key = MODAL_FLAGS[i];

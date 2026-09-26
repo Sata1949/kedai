@@ -21,6 +21,7 @@
 pub(crate) mod context;
 pub(crate) mod custom;
 pub(crate) mod executor;
+pub(crate) mod flow_call;
 pub(crate) mod followup;
 pub(crate) mod legacy;
 pub(crate) mod multi;
@@ -34,6 +35,7 @@ pub(crate) mod tool_policy;
 
 use crate::agents::engine::AgentEngine;
 use crate::models::types::{TaskRecord, TaskRunMode, TaskStep};
+use crate::services::settings_service::RuntimeSettings;
 use crate::services::task_core::{TaskBackend, TaskTerminal};
 use context::TaskRunContext;
 use custom::CustomExecutor;
@@ -44,9 +46,35 @@ use multi::MultiExecutor;
 use plan::{ApprovedPlanExecutor, PlanExecutor};
 use solo::SoloExecutor;
 use std::sync::Arc;
+use std::time::Duration;
 use team::TeamExecutor;
 use tokio::sync::watch;
 use tracing::Instrument;
+
+/// 任务侧工具循环的两道限制(提交 3 · D3),单一出处:单步墙钟预算与语义熔断三值。
+///
+/// 为什么在引擎侧集中算:两个装配点(solo 主循环与 custom 工具节点)必须**同口径**——
+/// 各写一份必然漂移;而"哪些设置项对应哪些引擎参数"是任务引擎的知识,不是宿主的。
+///
+/// 返回 `(step_budget, semantic_guard)`:
+///   - `step_budget`:`task_step_budget_secs == 0` → `None`(关);否则 `Some(Duration)`;
+///   - `semantic_guard`:**恒`Some`**——任务侧只收不放,经
+///     [`crate::utils::loop_guard::clamp_for_task`] 把用户三值压到任务上限
+///     (窗口 ≤8 / 同工具次数 ≤4 / 去重 ≤2;`0` = 关闭位原样保持)。
+///     注意语义:用户把窗口设得比上限更**紧**时按用户的(那是合法的收紧请求),
+///     把它设得更松时按上限——绝不能把聊天侧的宽松值当任务侧许可。
+pub(crate) fn task_loop_limits(
+    settings: &RuntimeSettings,
+) -> (Option<Duration>, Option<(usize, usize, usize)>) {
+    let budget = (settings.task_step_budget_secs > 0)
+        .then(|| Duration::from_secs(u64::from(settings.task_step_budget_secs)));
+    let guard = crate::utils::loop_guard::clamp_for_task(
+        settings.loop_guard_semantic_window as usize,
+        settings.loop_guard_semantic_min_calls as usize,
+        settings.loop_guard_semantic_max_distinct as usize,
+    );
+    (budget, Some(guard))
+}
 
 /// 任务引擎:持有任务后端与聊天引擎,按 task_mode 派发后台执行。
 /// 轻量句柄(两个 Arc),在 TaskService::run/approve 处即时构造,无状态。
@@ -102,27 +130,47 @@ impl TaskEngine {
         self.spawn_run(task, executor, Some(goal), cancel, token);
     }
 
-    /// approve 续跑入口(plan 模式批准后):**只认已批准计划,与 task_mode 无关**——
-    /// 续跑语义是「按已批准计划执行」,若按 Plan 派发会再规划一遍回到 planned 死循环
-    ///(批次 4.3 回归)。plan 非空 → ApprovedPlanExecutor 逐步骤执行(每步独立
-    /// run_agent_loop + SUMMARIZER_PROMPT 汇总);plan 为空(防御兜底)→ SoloExecutor
-    /// 纯 goal 续跑。goal 为「目标 + 已批准计划」组合文本,作各步骤消息的整体上下文。
+    /// approve 续跑入口(plan 模式批准后):**只认已批准计划,不按 task_mode 派发**——
+    /// 续跑语义是「按已批准计划执行」,若按 Plan 派发会再规划一遍回到 planned
+    /// 死循环(批次 4.3 回归)。
+    ///
+    /// `exec_mode`(2026-09-17)是用户在批准界面选的**本次执行方式**,只作用于本轮续跑
+    /// (不改 tasks.task_mode,那记录的是任务当初怎么产出计划):
+    ///   - ApprovedPlan(默认)→ ApprovedPlanExecutor 逐步骤执行(每步独立
+    ///     run_agent_loop + SUMMARIZER_PROMPT 汇总),即改造前行为;
+    ///   - Solo/Multi/Team/Custom → 对应现有执行器,以 goal(目标 + 已批准计划)
+    ///     作整体上下文自行组织执行。其中 **team/custom 会用自己的规划/流程重写
+    ///     tasks.plan**——这是模式语义(team 自己分工、custom 按流程库执行),
+    ///     已批准计划不丢失,仍在 goal 里作为权威上下文下发。
+    ///
+    /// goal 为「目标 + 已批准计划」组合文本。
     pub(crate) fn run_approved(
         self: &Arc<Self>,
         task: &TaskRecord,
         goal: String,
         plan: Vec<TaskStep>,
+        exec_mode: crate::models::types::TaskApproveExecMode,
         cancel: watch::Receiver<bool>,
         token: u64,
     ) {
-        let executor: Box<dyn ModeExecutor> = if plan.is_empty() {
-            Box::new(SoloExecutor::new(self.svc.clone(), self.engine.clone()))
-        } else {
-            Box::new(ApprovedPlanExecutor::new(
-                self.svc.clone(),
-                self.engine.clone(),
-                plan,
-            ))
+        use crate::models::types::TaskApproveExecMode as M;
+        let executor: Box<dyn ModeExecutor> = match exec_mode {
+            M::ApprovedPlan => {
+                if plan.is_empty() {
+                    // 防御兜底:无计划可逐步执行时退化为纯 goal 续跑(approve 已拒绝空计划)
+                    Box::new(SoloExecutor::new(self.svc.clone(), self.engine.clone()))
+                } else {
+                    Box::new(ApprovedPlanExecutor::new(
+                        self.svc.clone(),
+                        self.engine.clone(),
+                        plan,
+                    ))
+                }
+            }
+            M::Solo => Box::new(SoloExecutor::new(self.svc.clone(), self.engine.clone())),
+            M::Multi => Box::new(MultiExecutor::new(self.svc.clone(), self.engine.clone())),
+            M::Team => Box::new(TeamExecutor::new(self.svc.clone(), self.engine.clone())),
+            M::Custom => Box::new(CustomExecutor::new(self.svc.clone(), self.engine.clone())),
         };
         self.spawn_run(task, executor, Some(goal), cancel, token);
     }
@@ -159,13 +207,49 @@ impl TaskEngine {
         cancel: watch::Receiver<bool>,
         token: u64,
     ) {
+        // 工作区作用域(编码通道批次 1;任务模式 D1 起「未绑定」也有作用域):绑定工作区
+        // 的任务用它;**未绑定的任务改用任务级 scratch 目录**——否则 bash 的缺省 cwd 会
+        // 回落到用户数据目录,「产出一份文档」类任务就会在用户真实数据里留垃圾文件
+        //(2026-09 实测:一轮 77 条命令 / 12 个垃圾文件 / 中文重定向乱码重试)。
+        // 目录不可用(绑定的工作区失效 / scratch 建不出来)时**不降级为 None**——降级会让
+        // bash 的 cwd 回落到数据目录去动用户真实数据,这里宁可让任务以明确错误终止。
+        let workspace: Result<Option<String>, String> = match task
+            .workspace
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(w) => Ok(Some(w.to_string())),
+            None => self
+                .svc
+                .scratch_dir_for(&task.id)
+                .map(|d| Some(d.to_string_lossy().into_owned())),
+        };
+        let scope = match workspace
+            .and_then(|ws| crate::tools::workspace_guard::scope_for_task(ws.as_deref()))
+        {
+            Ok(scope) => scope,
+            Err(e) => {
+                self.svc.finalize_terminal(
+                    &task.id,
+                    token,
+                    TaskTerminal::Failed { error: Some(e) },
+                    *cancel.borrow(),
+                );
+                return;
+            }
+        };
         let ctx = TaskRunContext {
             task_id: task.id.clone(),
             token,
             goal: goal.unwrap_or_else(|| task.title.clone()),
             settings: self.svc.task_settings(),
+            executor_id: task.executor_id.clone(),
             character_id: task.character_id.clone(),
             cancel: cancel.clone(),
+            // 任务级连接(A 批 B1):随上下文下传,供工具循环参数装配回退
+            connection_id: task.connection_id.clone(),
+            scope,
         };
         // 单一收尾出口(批次 B 依赖倒置):执行器返回终态值,引擎按值分派落库;
         // Err 分支兜底为 Failed(ended_by_cancel 以取消通道求值)。收尾判定所需的
@@ -188,5 +272,73 @@ impl TaskEngine {
                 *cancel.borrow(),
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 最小配置 + `from_config` 构一份全默认设置(与设置加载/保存类测试同款;
+    /// 不走 `serde_json::from_str("{}")`——连接类字段没有 serde default)。
+    fn default_settings() -> RuntimeSettings {
+        RuntimeSettings::from_config(&crate::config::test_config())
+    }
+
+    /// 预算映射:默认 1200 秒 = 开;0 = 关(None);到秒的换算不丢精度。
+    #[test]
+    fn task_loop_limits_maps_step_budget() {
+        let mut s = default_settings();
+        s.task_step_budget_secs = 1200;
+        assert_eq!(
+            task_loop_limits(&s).0,
+            Some(Duration::from_secs(1200)),
+            "默认口径 = 1200 秒(§10 C4 的用户裁定)"
+        );
+        s.task_step_budget_secs = 1;
+        assert_eq!(
+            task_loop_limits(&s).0,
+            Some(Duration::from_secs(1)),
+            "1 秒是合法值(测试靠它触发预算路径),不得被抬下限"
+        );
+        s.task_step_budget_secs = 0;
+        assert_eq!(task_loop_limits(&s).0, None, "0 = 关");
+    }
+
+    /// 语义熔断钳制:宽松设置被压到任务上限;更紧的设置按用户的;0 保持关闭。
+    #[test]
+    fn task_loop_limits_clamps_semantic_guard() {
+        let mut s = default_settings();
+        // 默认三值(16/12/2)→ 任务上限(8/4/2)
+        assert_eq!(
+            task_loop_limits(&s).1,
+            Some((
+                crate::utils::loop_guard::TASK_MAX_SEMANTIC_WINDOW,
+                crate::utils::loop_guard::TASK_MAX_SEMANTIC_MIN_CALLS,
+                2
+            )),
+            "默认值在任务侧同样收紧"
+        );
+        // 用户把窗口设成 64(聊天侧允许的上限):任务侧仍得 8
+        s.loop_guard_semantic_window = 64;
+        s.loop_guard_semantic_min_calls = 12;
+        s.loop_guard_semantic_max_distinct = 4;
+        assert_eq!(
+            task_loop_limits(&s).1.map(|g| g.0),
+            Some(8),
+            "宽松值不得溢出任务上限"
+        );
+        // 用户主动收紧(4/4/1)→ 按用户的
+        s.loop_guard_semantic_window = 4;
+        s.loop_guard_semantic_min_calls = 4;
+        s.loop_guard_semantic_max_distinct = 1;
+        assert_eq!(task_loop_limits(&s).1, Some((4, 4, 1)), "更紧按用户的");
+        // 0 = 关闭本闸门:钳制必须原样保持,否则「关掉熔断」被静默推翻
+        s.loop_guard_semantic_min_calls = 0;
+        assert_eq!(
+            task_loop_limits(&s).1.map(|g| g.1),
+            Some(0),
+            "0 必须保持关闭"
+        );
     }
 }

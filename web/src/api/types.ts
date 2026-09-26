@@ -87,7 +87,7 @@ export interface ChatMessage {
  *  批次 R4 流式输出追加:delta(LLM 正文攒批增量,暂态不落库;权威数据以 llm_call 落库行为准)
  *  真源为 Rust `models/types.rs` 的 `TaskEventKind`(serde snake_case);改一侧须同步另一侧,
  *  并更新 `tools/check-contract.mjs` 的映射表。 */
-export type TaskEventKind = 'created' | 'status' | 'plan' | 'subtask' | 'usage' | 'deleted' | 'llm_call' | 'agent_status' | 'approval_required' | 'delta';
+export type TaskEventKind = 'created' | 'status' | 'plan' | 'subtask' | 'usage' | 'deleted' | 'llm_call' | 'agent_status' | 'approval_required' | 'delta' | 'flow_bound';
 
 /**
  * 任务模式(task 工作台)事件(对齐 server-rs SseEvent::Task):
@@ -121,6 +121,8 @@ export type SseEvent =
   | { type: 'tool_result'; name: string; output: unknown; call_id?: string; render_kind?: string }
   | { type: 'vars'; stat_data: Record<string, unknown> }
   | { type: 'interrupted' }
+  /** 上游请求重试中(HB-4):非终态提示事件,成功后照常继续 token/finish */
+  | { type: 'retry'; attempt: number; max: number; reason: string }
   | { type: 'error'; code: string; message: string; retryable: boolean }
   | { type: 'finish'; usage: TokenUsage; content: string; finish_reason?: string }
   | TaskEvent;
@@ -319,12 +321,47 @@ export interface ConnectorInfo {
   availableConnectors: Array<{ type: string; label: string }>;
 }
 
+/** 连接器类型(取值域与后端 `connectors::available_connector_types()` 一致) */
+export type ConnectorType = 'openai-compatible' | 'mock';
+
+/** 一套 API 连接配置(GET /api/settings 的 connections 元素);api_key 只回传掩码 */
+export interface ConnectionProfile {
+  /** 稳定 id:保存时按它命中已有连接(缺省/未命中 = 新建) */
+  id: string;
+  /** 展示名 */
+  name: string;
+  connector_type: ConnectorType;
+  base_url: string;
+  model: string;
+  /** 停用的连接保留配置,但不会成为默认连接,也不出现在后续批次的节点选择器里 */
+  enabled: boolean;
+  /** 密钥掩码(仅保留后 4 位) */
+  api_key_masked: string;
+  /** 该连接是否已配置密钥 */
+  has_api_key: boolean;
+}
+
+/** 连接配置的写入项:各字段可选,按 id 命中已有连接;**api_key 空/缺省 = 保持该连接原密钥** */
+export interface ConnectionProfilePatch {
+  id?: string;
+  name?: string;
+  connector_type?: string;
+  base_url?: string;
+  api_key?: string;
+  model?: string;
+  enabled?: boolean;
+}
+
 /** 运行期设置(API 连接 + 生成参数);api_key 仅回传脱敏值 */
 export interface RuntimeSettings {
   openai_base_url: string;
   api_key_masked: string;
   has_api_key: boolean;
   model: string;
+  /** 多套连接配置(**真源**);上面的 openai_base_url / model 是默认连接的派生视图 */
+  connections: ConnectionProfile[];
+  /** 默认连接 id;null = 没有可用连接(全停用/删空 → 连接器回退 mock) */
+  active_connection_id: string | null;
   default_temperature: number;
   default_top_p: number;
   default_max_tokens: number;
@@ -359,10 +396,40 @@ export interface RuntimeSettings {
   task_tool_allowlist: string[];
   /** AGENT/CUSTOM 模式工具循环轮次上限(默认 32) */
   max_tool_rounds: number;
+  /** 流程动态调用嵌套深度上限(**任务侧**设置;A 批 A3;默认 2,1..=5):
+   *  节点用 `run_flow` 工具逐层调用流程时的深度闸(与静态子图 `sub_flow_id` 的嵌套上限是两回事) */
+  max_flow_call_depth: number;
+  /** 单任务内流程调用次数上限(**任务侧**设置;A 批 A3;默认 8,1..=64) */
+  max_flow_calls_per_task: number;
+  /** 节点默认上下文上限(**任务侧**设置;A 批 A4;默认 0 = **不裁剪**,否则 256..=1048576):
+   *  节点自己写了 `max_context` 即按节点的,只有未写时才用本项 */
+  default_node_max_context: number;
   /** 工具历史保留的最近完整轮数(1..=32;默认 4;超出后最老轮摘要化) */
   tool_history_keep_rounds: number;
   /** 工具历史 token 预算(0 = 禁用预算闸门;否则 1024..=1M,默认 16384) */
   tool_history_budget_tokens: number;
+  /** 单次生成的 token 预算(0 = 关闭,默认 0;否则 1024..=1e9):
+   *  工具循环累计 prompt+completion 达到该值即按 session_budget_action 处置 */
+  session_token_budget: number;
+  /** 预算超限动作:warn(只提示一次,默认)/ stop(提示并停止本轮工具循环) */
+  session_budget_action: 'warn' | 'stop';
+  /** 语义熔断窗口(默认 16,4..=64):近 W 次工具调用内判定「同工具 + 输出无变化」 */
+  loop_guard_semantic_window: number;
+  /** 语义熔断同工具调用次数下限(默认 12;0 = 关闭,否则 4..=64) */
+  loop_guard_semantic_min_calls: number;
+  /** 语义熔断输出指纹去重上限(默认 2,1..=8) */
+  loop_guard_semantic_max_distinct: number;
+  /** 任务步骤墙钟预算秒数(**任务侧**设置;默认 1200 = 开,0 = 关,否则 1..=86400):
+   *  单次工具循环的墙钟上限,到点带着已有产出收尾(步骤照常 done);文档注「建议 ≥300」 */
+  task_step_budget_secs: number;
+  /** 任务空闲超时秒数(**任务侧**设置;默认 900,0 = 关,否则 601..=86400):
+   *  运行中任务连续该时长无模型调用也无事件 → 看守自动收尾(与 stop 同源),
+   *  原因写进 error「空闲超时自动收尾」;下限 = 单命令 300s + 单次调用 300s + 1 */
+  task_idle_timeout_secs: number;
+  /** 变量两步生成独立模型(HB-7;null = 与正文共用同一模型) */
+  mvu_model: string | null;
+  /** 变量两步生成独立温度(HB-7;null = 内置 0.3) */
+  mvu_temperature: number | null;
   /** HTML 渲染开关(状态栏脚本执行前置条件):true = 开启安全 HTML 渲染 */
   render_html: boolean;
   /** 上下文压缩模式:off(不压缩)/ manual(手动触发)/ auto(token 超阈值自动压缩) */
@@ -453,6 +520,10 @@ export interface RuntimeSettingsPatch {
   openai_base_url?: string;
   openai_api_key?: string;
   model?: string;
+  /** 多套连接(**全量数组语义**:数组里没有的 id 即被删除) */
+  connections?: ConnectionProfilePatch[];
+  /** 默认连接 id(空串 = 清除,由后端回退到第一个启用连接) */
+  active_connection_id?: string;
   default_temperature?: number;
   default_top_p?: number;
   default_max_tokens?: number;
@@ -478,10 +549,34 @@ export interface RuntimeSettingsPatch {
   /** 任务模式工具白名单 */
   task_tool_allowlist?: string[];
   max_tool_rounds?: number;
+  /** 流程动态调用嵌套深度上限(任务侧;1..=5) */
+  max_flow_call_depth?: number;
+  /** 单任务内流程调用次数上限(任务侧;1..=64) */
+  max_flow_calls_per_task?: number;
+  /** 节点默认上下文上限(任务侧;0 = 不裁剪,否则 256..=1048576) */
+  default_node_max_context?: number;
   /** 工具历史保留轮数(1..=32) */
   tool_history_keep_rounds?: number;
   /** 工具历史 token 预算(0 = 禁用;否则 1024..=1048576) */
   tool_history_budget_tokens?: number;
+  /** 单次生成 token 预算(0 = 关闭;否则 1024..=1e9) */
+  session_token_budget?: number;
+  /** 预算超限动作(warn/stop) */
+  session_budget_action?: 'warn' | 'stop';
+  /** 语义熔断窗口(4..=64) */
+  loop_guard_semantic_window?: number;
+  /** 语义熔断同工具调用次数下限(0 = 关闭;否则 4..=64) */
+  loop_guard_semantic_min_calls?: number;
+  /** 语义熔断输出指纹去重上限(1..=8) */
+  loop_guard_semantic_max_distinct?: number;
+  /** 任务步骤墙钟预算秒数(0 = 关;否则 1..=86400) */
+  task_step_budget_secs?: number;
+  /** 任务空闲超时秒数(0 = 关;否则 601..=86400) */
+  task_idle_timeout_secs?: number;
+  /** 变量两步生成独立模型(空串 = 清除回到与正文共用) */
+  mvu_model?: string;
+  /** 变量两步生成独立温度(0..=2 设置;负值 = 清除回到内置 0.3) */
+  mvu_temperature?: number;
   render_html?: boolean;
   compaction_mode?: string;
   compaction_threshold?: number;
@@ -698,6 +793,56 @@ export interface AgentFlowStep {
   tool_choice?: 'auto' | 'none' | 'required' | 'function' | null;
   tool_choice_function?: string | null;
   parallel_tool_calls?: boolean | null;
+  /** 上游步骤 id 列表(二维流程依赖边;空/缺省 = 线性串联或源节点) */
+  inputs?: string[];
+  /** 是否显式标注为最终成果节点(true = 标注;null/缺省 = 按无后继汇点自动判定) */
+  is_output?: boolean | null;
+  /** 画布坐标(二维批次 3 画布用;列表视图不写) */
+  x?: number | null;
+  y?: number | null;
+  /** 节点档位(二维批次 6a):loose/缺省 = 允许工具自循环;strict = 单次模型调用、不下发工具 */
+  kind?: 'loose' | 'strict' | null;
+  /**
+   * 挂载的静态子流程 id(二维批次 6b):非空时本节点**不自己发起模型调用**,
+   * 改为把被引用流程当子图跑一遍,子图成果即本节点产出。
+   * 与档位同一纪律——`goal`/`action`/`kind`/`tools`/`system_prompt`/`temperature`/
+   * `max_tokens` 被旁路但**配置保留**,清空本字段即恢复生效。
+   */
+  sub_flow_id?: string | null;
+  /**
+   * 节点级连接(二维批次 5b):该节点走哪一套 API 连接(`ConnectionProfile.id`)。
+   * 缺省 = 默认连接(与 5b 之前一致);provider 与模型随该连接,故「节点级模型」= 选连接。
+   * 保存期**不校验引用是否存在**(流程可导出/跨机导入,而连接是本机设置):
+   * 运行期若该连接已删除/已停用,该节点**明确报错**,不回退默认连接。
+   * 挂载子流程的节点上本字段被旁路(子图各节点各自解析),配置保留。
+   */
+  connection_id?: string | null;
+  /** 节点级工具循环轮次上限(二维批次 5b;1-200,缺省 = 沿用全局设置)。严格档下不下发工具,该配置保留但不生效 */
+  max_tool_rounds?: number | null;
+  /**
+   * 节点级上下文上限(二维批次 8;256-1048576,缺省 = **不裁剪**)。
+   * 语义:进入本节点的输入(系统提示 + 任务目标 + 各上游产出)整体的 token 预算;
+   * 超限时从**最旧的上游产出段**起省略(正文换成标记、标签行保留),任务目标恒保留——
+   * 它单独超限即该节点报错。**不裁工具轮内历史**(那是工具历史预算设置的事)。
+   * 挂载子流程的节点上本字段被旁路(子图各节点各自裁剪),配置保留。
+   */
+  max_context?: number | null;
+  /**
+   * 节点级**单次 LLM 调用**超时(秒;A 批 A1;30-3600,缺省 = 沿用宿主缺省 300 秒看门狗)。
+   * 语义:覆盖本节点每次调用的时间预算——可收紧(如 60)也可放宽(如 900);
+   * 宽松档的工具循环**逐轮**各按它计(每轮一次调用,与全局看门狗同一粒度)。
+   * 超时 = 本节点失败,**不自动重试**(重试是 `max_retries` 的显式配置)。
+   * 挂载子流程的节点上本字段被旁路(子图各节点各自计时),配置保留。
+   */
+  call_timeout_secs?: number | null;
+  /**
+   * 节点级**空产出重试次数**(A 批 A2;1-5 = 额外尝试上限,总尝试 = 1 + n;
+   * 缺省/无值 = 不重试,与 A 批之前逐字节一致)。
+   * 语义:**只重试产出为空**的尝试;连接失败/超时/解析错误等硬错误一律不重试;
+   * 每次尝试各记一行调用记录,重试前输出预算翻倍(封顶 131072)。
+   * 挂载子流程的节点上本字段被旁路(子图各节点各自重试),配置保留。
+   */
+  max_retries?: number | null;
 }
 
 /** 自定义执行流程配置(单个流程,data/agent_flows.json 流程库中的一项) */
@@ -710,11 +855,55 @@ export interface AgentFlowConfig {
   description?: string | null;
   enabled: boolean;
   steps: AgentFlowStep[];
+  /** 并行节点数上限(1-8;缺省 2;1 = 完全串行)。并行会成倍消耗 token */
+  max_parallel_nodes?: number | null;
 }
 
 /** 流程库(全局):当前选中的流程 + 全部流程 */
 export interface AgentFlowLibrary {
   current_flow_id: string | null;
+  flows: AgentFlowConfig[];
+}
+
+/** 一条 id 重映射记录(二维批次 7a 导入报告):同 id 内容不同时,导入的那份被分配了新 id */
+export interface FlowIdRemap {
+  /** 文件里的原 id */
+  old_id: string;
+  /** 本库实际分配的新 id */
+  new_id: string;
+  /** 流程展示名(报告文案里点名用) */
+  name: string;
+}
+
+/** 导入报告(二维批次 7a):导入 N 个 / 跳过 M 个(内容已存在)/ 其中 K 个分配了新 id */
+export interface FlowImportReport {
+  /** 本次写入库的流程数(新增 + 覆盖) */
+  imported: number;
+  skipped: number;
+  renamed: FlowIdRemap[];
+  /**
+   * 被**覆盖**的流程(A 批 B4;仅 `on_conflict=replace` 会非空)。
+   * 覆盖保留 id(引用不破),故只有 id 与名称,没有「谁变成了谁」的映射。
+   */
+  replaced: FlowReplacedFlow[];
+}
+
+/** 被覆盖的流程(A 批 B4):覆盖保留 id,故只记 id 与展示名 */
+export interface FlowReplacedFlow {
+  id: string;
+  name: string;
+}
+
+/**
+ * 流程搬运包(导出文件,二维批次 7a):入口(或当前)流程 + 其可达子流程闭包,一次性冻结。
+ * 导入侧按版本键判定:`kedai_flow_bundle` 缺失 = 旧格式(单流程 / {config} 包装 / 库格式)。
+ * **不含**连接定义与密钥(连接是本机设置);节点级 `connection_id` 原样保留,跨机后会显示
+ * 「(引用已失效)」并由运行期报错兜住(二维批次 5b 口径)。
+ */
+export interface AgentFlowBundle {
+  kedai_flow_bundle: number;
+  exported_at?: string;
+  root_id?: string | null;
   flows: AgentFlowConfig[];
 }
 
@@ -759,6 +948,13 @@ export interface TaskStep {
   goal: string;
   status: TaskStepStatus;
   result: string;
+  /**
+   * 该行对应的流程节点 id(custom 模式填 `PlanStep.id`;其余模式下发时不带此键)。
+   *
+   * plan 行由**过滤后的启用步骤**构造,故 plan 下标 ≠ 流程数组下标——界面要问
+   * 「这一行是哪个节点」只能靠它(遗留.md IFW-5)。
+   */
+  node_id?: string | null;
 }
 
 /** 任务状态:待执行/规划中/执行中/计划待批准(plan 模式)/完成/部分完成(含失败步骤但成果已产出)/出错/已停止 */
@@ -768,6 +964,14 @@ export type TaskStatus = 'pending' | 'planning' | 'running' | 'planned' | 'done'
  *  legacy 三段式(默认) / solo 单主工具循环 / multi 多agent / plan 先规划后批准 / team 多主+审计 / custom 自定义流程 */
 export type TaskRunMode = 'legacy' | 'solo' | 'multi' | 'plan' | 'team' | 'custom';
 
+/**
+ * plan 模式**批准时**选择的执行方式(2026-09-17,对齐 server-rs TaskApproveExecMode)。
+ * 只作用于本次批准续跑,不改任务自身的 task_mode。
+ *
+ * 不含 legacy(自带规划会与已批准计划重复劳动)与 plan(会再规划回到 planned 死循环)。
+ */
+export type TaskApproveExecMode = 'approved_plan' | 'solo' | 'multi' | 'team' | 'custom';
+
 /** 任务记录 */
 export interface TaskRecord {
   id: string;
@@ -776,11 +980,63 @@ export interface TaskRecord {
   plan: TaskStep[];
   result: string;
   error: string;
+  /**
+   * 执行者人设角色 id。**兼容字段**:执行者已改由 executor_id 承担(独立执行者库),
+   * 新任务不再写它;旧任务读出该值时仍按旧语义注入角色人设,故类型保留。
+   */
   character_id?: string | null;
   created_at: string;
   updated_at: string;
   /** 执行模式(批次 4;旧服务端不带此字段,消费侧按 legacy 处理) */
   task_mode?: TaskRunMode;
+  /** 执行者库 id(空 = 通用执行者);指向后端 data/task_executors.json */
+  executor_id?: string | null;
+  /**
+   * 任务**绑定的自定义流程 id**(二维批次 5a;空/缺省 = 跟随当前流程)。
+   *
+   * 绑定即冻结:后端在创建时按该流程落一份快照(`TaskDetail.flow_snapshot`),
+   * 此后改那份流程、或把「当前流程」换成别的,都不影响这个任务。
+   */
+  flow_id?: string | null;
+  /**
+   * 任务**对比模式的可调用流程名单**(二维批次 7b;空/缺省 = 强制模式)。
+   *
+   * 非空即「根流程照常执行 + 名单内流程作为 `run_flow` 工具释放给宽松节点」:
+   * 模型在工具循环里自主调用某套流程、取回其成果。与 `flow_id` 相互独立——
+   * `flow_id` 仍是根流程(缺省 = 跟随当前流程),名单只决定哪些流程可被调用
+   * (根流程自身不可被调用,创建时后端即 400)。
+   */
+  flow_ids?: string[] | null;
+  /**
+   * 任务**逐任务选用连接**(B 批 B1;空/缺省 = 跟随设置的默认连接,与 B 批之前一致)。
+   *
+   * 语义:该任务**全部** LLM 调用的缺省连接(节点级 `connection_id` 优先)。
+   * 应用于全部任务模式(规划 / 步骤 / 汇总 / 工具循环 / 自定义节点)——它绑的是
+   * provider 而不是编排。创建期后端即校验「引用存在且启用」(不存在/停用 → 400 点名连接);
+   * 任务不可跨机搬运,故不像流程那样留到运行期才报错。
+   */
+  connection_id?: string | null;
+  /**
+   * 任务绑定的**工作区**(编码通道批次;空/缺省 = 未绑定)。
+   *
+   * 非空时是创建期就绪冻结的 canonical 绝对路径:工作区文件工具族(`fs_*`)以它为
+   * 路径闸门根,`bash` 以它为 cwd 缺省与 jail 边界。未绑定的任务不下发该工具族。
+   */
+  workspace?: string | null;
+}
+
+/**
+ * 任务用的**流程快照**(二维批次 5a;任务详情顶层 `flow_snapshot`)。
+ *
+ * 入口流程 + 其可达子流程闭包,由后端在「创建时(绑定任务)/ 执行开始时(未绑定任务)」
+ * 冻结:运行态徽标读它而不是「当前流程库」,于是跑过任务后再改流程也不会让徽标漂移。
+ * 未绑定且尚未跑过的任务为 null(读取侧按 optional 容错,零噪音)。
+ */
+export interface TaskFlowSnapshot {
+  /** 入口流程 id(快照里的根;`flows` 中必有其一与之相等) */
+  root_id: string;
+  /** 入口流程 + 可达子流程闭包(入口恒为首个) */
+  flows: AgentFlowConfig[];
 }
 
 /**
@@ -842,6 +1098,11 @@ export interface TaskDetail {
   usage_total: TaskUsageTotal;
   /** 用户指令历史(followup 追加 / plan_chat 规划对话);旧服务端无此字段,读取须容错 */
   messages?: TaskMessage[];
+  /**
+   * 本任务的流程快照(二维批次 5a);旧服务端/未绑定且未跑过的任务为 null 或缺失。
+   * 运行态徽标的数据源(优先于「当前流程库」)。
+   */
+  flow_snapshot?: TaskFlowSnapshot | null;
 }
 
 /**
@@ -852,8 +1113,17 @@ export interface TaskDetail {
 export interface TaskLlmCall {
   id: string;
   task_id: string;
+  /**
+   * 调用归属阶段。**不含冒号**(前端流式缓冲 key 以第一个冒号切分 phase 与步骤号):
+   * `step` = 外层流程节点;`subflow.<父节点下标链>` = 静态子图的节点
+   * (如 `subflow.1` = 「外层下标 1 的节点挂载的子流程」里的节点,`subflow.1.2` 再嵌一层);
+   * `call.<路径>` = 对比模式**被调流程**的节点(二维批次 7b;路径段 `d<n>` = 本层第 n 次
+   * 动态调用,纯数字 = 宿主当时在静态子图内的父下标)。被调流程内部的静态子图记为
+   * `subflow.<含 d 段的路径>`(如 `subflow.d1.2`)——「被调流程花了多少」须把这两类都算上
+   * (判定收在 `utils/flowCallStats::isDynamicPhase`)。
+   */
   phase: string;
-  /** step 阶段的步骤序号(0 起,展示时 +1);其余阶段为 null */
+  /** 步骤序号(0 起,展示时 +1):step = 节点在外层流程中的下标;subflow 与 call 前缀的 = 节点在本层图(子图 / 被调流程)中的下标 */
   step_index: number | null;
   model: string;
   /** 提示词摘要(面板展开查看) */

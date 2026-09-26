@@ -139,6 +139,53 @@ pub fn detect_tier() -> ShellTier {
     }
 }
 
+/// 强制重新探测当前可用等级(前端「刷新」按钮用)。
+///
+/// 为什么需要独立入口:Android 侧 `detectTier` 带进程内缓存(避免每次 exec 都跑一遍
+/// `su` 探测),而用户「新装了 Shizuku / 刚授权 / 刚装 Magisk」之后缓存就是过期值——
+/// 只调 `detect_tier()` 永远拿到旧结果。Kotlin 侧早有 `refreshTier` 清缓存重探,
+/// 但此前**没有任何 Rust 调用者**,导致设置页的「刷新」按钮点了等于没点
+/// (2026-09-17 实测)。本函数把该能力接通。
+///
+/// 桌面无缓存语义,等价于 `detect_tier()`。
+pub fn refresh_tier() -> ShellTier {
+    #[cfg(target_os = "android")]
+    {
+        android::refresh_tier()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        detect_tier()
+    }
+}
+
+/// Shizuku 应用是否已安装。桌面恒 false(无 Shizuku 概念)。
+///
+/// 用途:设置页授权面板在用户点「请求授权」**之前**给出可行动提示——
+/// 未安装时引导去安装,而不是让用户点一个必然失败的按钮。
+pub fn shizuku_installed() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        android::shizuku_installed()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        false
+    }
+}
+
+/// Shizuku 是否已获授权。桌面恒 false。
+pub fn shizuku_granted() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        android::shizuku_granted()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        false
+    }
+}
+
 pub mod audit;
 
 #[cfg(not(target_os = "android"))]

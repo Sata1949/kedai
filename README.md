@@ -21,8 +21,8 @@
   - 四种模式:`fast`(单步直接生成)、`deep`(计划 → 执行 → 反思,质量更高)、`agent`(工具自循环)、`custom`(自定义流程)
   - 推理链通过 SSE 流式推送到前端,实时展示思考过程
 - 🗂️ **任务模式**(与角色扮演平级的顶层模式)
-  - 独立任务引擎:六种运行模式(`legacy` 三段式 / `solo` / `multi` / `plan` / `team` / `custom`,见 [docs/功能.md](docs/功能.md));legacy 走 plan(LLM 拆解 2~5 步)→ execute(逐步派子任务)→ summarize(LLM 汇总),状态落 SQLite 五表(tasks/task_subtasks/task_usage/task_llm_calls/task_messages),全程可中断、可重跑
-  - 进度经 **SSE 实时推送**(`GET /api/tasks/events`,任务生命周期事件 created/status/plan/subtask/usage/llm_call/agent_status/approval_required/delta/deleted),前端事件驱动刷新,无轮询;断线指数退避重连 + 低频兜底
+  - 独立任务引擎:六种运行模式(`legacy` 三段式 / `solo` / `multi` / `plan` / `team` / `custom`,见 [docs/功能.md](docs/功能.md));legacy 走 plan(LLM 拆解 2~5 步)→ execute(逐步派子任务)→ summarize(LLM 汇总),状态落 SQLite 六表(tasks/task_subtasks/task_usage/task_llm_calls/task_messages/agent_subtasks),全程可中断、可重跑
+  - 进度经 **SSE 实时推送**(`GET /api/tasks/events`,任务生命周期事件 created/status/plan/subtask/usage/llm_call/agent_status/approval_required/delta/deleted/flow_bound),前端事件驱动刷新,无轮询;断线指数退避重连 + 低频兜底
   - 提示词与角色扮演模式**类型级隔离、按模式独立存储互不影响**,外部文本统一 `<UNTRUSTED_PROMPT_SOURCE>` 边界包裹;机制详见 [docs/契约-协议与配置.md](docs/契约-协议与配置.md) 与 [docs/功能-变更史.md](docs/功能-变更史.md)
 - 🧠 **上下文工程**(提示词缓存友好)
   - **缓存感知压缩**:每轮 LLM usage(含 DeepSeek `prompt_cache_hit_tokens` / OpenAI `cached_tokens`)落库,`GET /api/diagnostics/cache` 报告命中率、费用估算与四级水位(soft/snip/compact/force);前端「优化」弹窗内置缓存健康面板
@@ -32,7 +32,7 @@
 - 🔧 **工具系统**
   - 标准化 Tool 接口(OpenAI Function Calling 格式)
   - 内置:`calculator`(白名单解析,不使用 eval)、`memory_read/write`(会话长期记忆)
-  - **技能渐进披露**:技能清单仅预载 `name + description`(每技能几十 token),正文经 `read(type=skill)` 按需加载;支持 `allowed-tools` / `run-as-subagent` / `model` 元数据
+  - **技能渐进披露**:技能清单仅预载 `name + description`(每技能几十 token),正文经 `read(type=skill)` 按需加载;支持 `allowed-tools` / `run-as-subagent` / `model` 元数据(**当前仅存取、无生产消费点**,勿据其假定行为,见 [docs/遗留.md](docs/遗留.md) CFG-1)
   - **子代理调度守卫**:递归深度(默认 2)与全局并发(默认 6)可配置,子代理结果超长自动截断为摘要回传,防上下文爆炸
 - ⚡ **流式体验**:token 逐字渲染 + Agent 步骤事件,首 Token 低延迟
 - 🔐 **隐私**:数据仅存本地(SQLite + 文件),API Key 只存服务端环境变量
@@ -267,9 +267,9 @@ data: {"type":"finish","usage":{"prompt_tokens":166,"completion_tokens":35,"tota
 
 ```bash
 cd server-rs
-cargo test          # 单元测试 + API 集成测试(825 个:654 单测 + 171 集成,2026-09-08 实测)
+cargo test          # 单元测试 + API 集成测试(数量以 tools/count-tests.mjs 统计为准,见 MAINTENANCE.md §11)
 cd web
-npm test            # Vitest 前端测试(627 个 / 65 文件,2026-09-09 实测)
+npm test            # Vitest 前端测试(数量同上,不在本文复写)
 npm run typecheck   # vue-tsc 模板/脚本类型检查
 npm run check       # 仓库根:一键全量检查(tools/check-all.ps1)
 ```

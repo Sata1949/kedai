@@ -9,6 +9,12 @@ pub struct AppConfig {
     pub port: u16,
     /// 数据目录(绝对路径):SQLite + characters + avatars
     pub data_dir: PathBuf,
+    /// 任务 scratch 根(绝对路径):未绑定工作区的任务按任务 id 在其下建子目录,
+    /// 作为执行侧的路径闸门根与 bash 缺省 cwd(任务模式 D1 修复,见
+    /// `tools/workspace_guard.rs` 与 `services/task_engine/mod.rs`)。
+    /// 刻意与 data_dir **同级**而非其内:后者会与「fs_* 不得落在数据目录」的
+    /// 既有不变量(data_dir_conflict 二次防线)冲突。启动期不建目录,首次使用时建。
+    pub task_scratch_dir: PathBuf,
     /// 日志目录(绝对路径)
     pub log_dir: PathBuf,
     /// web 前端产物目录;仅 `KEDAI_WEB_DIST` 显式配置时启用磁盘资源
@@ -110,6 +116,7 @@ pub(crate) fn test_config() -> AppConfig {
         host: "127.0.0.1".into(),
         port: 0,
         data_dir: std::env::temp_dir(),
+        task_scratch_dir: std::env::temp_dir().join("kedai-test-scratch"),
         log_dir: std::env::temp_dir(),
         web_dist: None,
         connector: "mock".into(),
@@ -142,6 +149,17 @@ impl AppConfig {
         let data_dir = match env_str("DATA_DIR") {
             Some(d) => absolutize(Path::new(&d), &root),
             None => canonical_user_data_dir().unwrap_or_else(|| root.join("data")),
+        };
+        // 任务 scratch 根(D1):KEDAI_TASK_SCRATCH_DIR 显式覆盖 > 数据目录的**兄弟**目录。
+        // 与数据目录平级是刻意的:放进数据目录内会让「fs_* 不得落在 DATA_DIR」的二次防线
+        // (data_dir_conflict)把整个 scratch 判为冲突,等于给不变量开例外;放同级则既能让
+        // 用户按任务 id 找回/清理产物,又不动用户数据的边界。纯路径计算,不做 IO。
+        let task_scratch_dir = match env_str("KEDAI_TASK_SCRATCH_DIR") {
+            Some(d) => absolutize(Path::new(&d), &root),
+            None => data_dir
+                .parent()
+                .unwrap_or(root.as_path())
+                .join("task_scratch"),
         };
         // LOG_DIR 支持环境变量(Tauri 桌面场景注入,避免写入不可写的安装目录);缺省与 data 同级
         let log_dir = match env_str("LOG_DIR") {
@@ -203,6 +221,7 @@ impl AppConfig {
             host,
             port,
             data_dir,
+            task_scratch_dir,
             log_dir,
             web_dist,
             connector,

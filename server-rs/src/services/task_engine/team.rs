@@ -20,7 +20,7 @@ use crate::services::prompt_kit::untrusted_boundary;
 use crate::services::task_core::prompt_consts::{
     SUMMARIZER_PROMPT, TEAM_AUDIT_PROMPT, TEAM_FINAL_AUDIT_PROMPT, TEAM_PLANNER_PROMPT,
 };
-use crate::services::task_core::{TaskBackend, TaskGenOutput, TaskTerminal};
+use crate::services::task_core::{fallback_terminal, TaskBackend, TaskGenOutput, TaskTerminal};
 use futures::future::BoxFuture;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -345,6 +345,7 @@ async fn generate_text_healed(
             max_tokens,
             temperature,
             top_p,
+            None, // team 模式无节点级连接
             cancel.clone(),
         )
         .await?;
@@ -387,6 +388,7 @@ async fn generate_text_healed(
             retry_budget,
             temperature,
             top_p,
+            None, // team 模式无节点级连接
             cancel.clone(),
         )
         .await?;
@@ -416,6 +418,24 @@ impl TeamExecutor {
         ctx: &TaskRunContext,
     ) -> Result<(Vec<TeamMain>, TaskGenOutput), String> {
         let mut sys = String::from(TEAM_PLANNER_PROMPT);
+        // 执行阶段能力段(D1):各主 agent 走 run_agent_loop(有工具),工具面与
+        // solo/multi 同源编译(单一出处 task_engine::tool_policy::compile)——
+        // 让分工拓扑不再规划出执行者做不到的子目标(如没有工具却要求产出文件)。
+        let allowed = super::tool_policy::compile(
+            &ctx.settings.task_tool_policy,
+            &ctx.settings.task_tool_allowlist,
+            &self.engine.tool_registry(),
+            ctx.scope.is_some(),
+        )
+        .allowed;
+        sys.push_str(&format!(
+            "\n\n{}",
+            crate::services::task_core::prompt_consts::capability_note(
+                crate::services::task_core::prompt_consts::StepCapability::ToolLoop,
+                &allowed,
+                ctx.scope.as_deref().map(|s| s.workspace()),
+            )
+        ));
         let world = self.svc.world_context(ctx.character_id.as_deref());
         if !world.is_empty() {
             sys.push_str(&format!("\n\n{}", untrusted_boundary("world_book", &world)));
@@ -444,6 +464,7 @@ impl TeamExecutor {
                     max_tokens,
                     TEAM_JSON_TEMPERATURE,
                     ctx.settings.default_top_p,
+                    None, // team 模式无节点级连接
                     ctx.cancel.clone(),
                 )
                 .await?;
@@ -546,10 +567,14 @@ impl TeamExecutor {
                 session_id: session_id.clone(),
                 goal,
                 settings: ctx.settings.clone(),
+                executor_id: ctx.executor_id.clone(),
                 character_id: ctx.character_id.clone(),
                 phase: "agent",
                 step_index: Some(step_idxs[k]),
                 label: format!("主 agent {n} 子目标 {}", k + 1),
+                connection_id: ctx.connection_id.clone(),
+                // 工作区作用域(编码通道批次 1):各主 agent 共享同一任务的工作区
+                scope: ctx.scope.clone(),
             };
             let result = run_agent_loop(
                 self.svc.clone(),
@@ -595,6 +620,7 @@ impl TeamExecutor {
                     goal: g.goal.clone(),
                     status: TaskStepStatus::Pending,
                     result: String::new(),
+                    node_id: None,
                 });
             }
             step_ranges.push(idxs);
@@ -610,7 +636,11 @@ impl TeamExecutor {
             return Err("任务已停止".into());
         }
         if outputs.iter().all(|o| o.is_none()) {
-            return Err("全部主 agent 执行失败,团队无产出".into());
+            // 全灭时 helper 自然回落 Failed(无 done 步骤可拼),措辞与旧实现一致
+            return Ok((
+                fallback_terminal(&plan, "全部主 agent 执行失败,团队无产出".into()),
+                total,
+            ));
         }
 
         // ===== c. 审计 agent:一致性/质量/覆盖度审查;缺漏打回指定主补做(最多 1 轮) =====
@@ -620,7 +650,7 @@ impl TeamExecutor {
             LlmMessage::plain("user", &audit_input),
         ];
         // 截断自愈:审计是结构化 JSON 输出,推理模型烧光预算会腰斩 JSON(实测)
-        let audit_out = generate_text_healed(
+        let audit_out = match generate_text_healed(
             svc,
             &ctx.task_id,
             "audit",
@@ -631,7 +661,14 @@ impl TeamExecutor {
             &ctx.cancel,
             &mut total,
         )
-        .await?;
+        .await
+        {
+            Ok(o) => o,
+            // 取消:保持 Err,由引擎按 ended 收尾(终态兜底从库里的 plan 补写已完成产出)
+            Err(e) if *ctx.cancel.borrow() => return Err(e),
+            // 审计调用失败但各主已产出(提交 2 部分成果兜底):不再把成果整体丢掉
+            Err(e) => return Ok((fallback_terminal(&plan, format!("审计调用失败:{e}")), total)),
+        };
         if *ctx.cancel.borrow() {
             return Err("任务已停止".into());
         }
@@ -668,7 +705,12 @@ impl TeamExecutor {
                 return Err("任务已停止".into());
             }
             if outputs.iter().all(|o| o.is_none()) {
-                return Err("补做后全部主 agent 无产出".into());
+                // 补做后全灭:首轮通过的主产出仍可能已在 plan 里(helper 会捞回来),
+                // 一步都没有才回落 Failed
+                return Ok((
+                    fallback_terminal(&plan, "补做后全部主 agent 无产出".into()),
+                    total,
+                ));
             }
 
             // 终审:基于补做后的最终产出给出结论文本(空输出兜底回退首次审计结论,
@@ -678,7 +720,7 @@ impl TeamExecutor {
                 LlmMessage::plain("system", TEAM_FINAL_AUDIT_PROMPT),
                 LlmMessage::plain("user", &review_input),
             ];
-            let review_out = generate_text_healed(
+            let review_out = match generate_text_healed(
                 svc,
                 &ctx.task_id,
                 "final_audit",
@@ -689,7 +731,15 @@ impl TeamExecutor {
                 &ctx.cancel,
                 &mut total,
             )
-            .await?;
+            .await
+            {
+                Ok(o) => o,
+                Err(e) if *ctx.cancel.borrow() => return Err(e),
+                // 终审调用失败但补做产出已在手(提交 2 部分成果兜底):不再整体丢成果
+                Err(e) => {
+                    return Ok((fallback_terminal(&plan, format!("终审调用失败:{e}")), total))
+                }
+            };
             if *ctx.cancel.borrow() {
                 return Err("任务已停止".into());
             }
@@ -721,7 +771,7 @@ impl TeamExecutor {
         ];
         // 空输出重试一次(对齐 legacy 汇总空输出语义;此处简化为同参数单重重试)
         // 截断自愈与 record_usage/total 入账由 generate_text_healed 承担
-        let mut summary_out = generate_text_healed(
+        let mut summary_out = match generate_text_healed(
             svc,
             &ctx.task_id,
             "summary",
@@ -732,10 +782,16 @@ impl TeamExecutor {
             &ctx.cancel,
             &mut total,
         )
-        .await?;
+        .await
+        {
+            Ok(o) => o,
+            Err(e) if *ctx.cancel.borrow() => return Err(e),
+            // 汇总调用失败但各主已产出(提交 2 部分成果兜底):不再整体丢成果
+            Err(e) => return Ok((fallback_terminal(&plan, format!("团队汇总失败:{e}")), total)),
+        };
         if summary_out.text.trim().is_empty() && !*ctx.cancel.borrow() {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            summary_out = svc
+            summary_out = match svc
                 .generate_text(
                     &ctx.task_id,
                     "summary",
@@ -745,16 +801,25 @@ impl TeamExecutor {
                     structured_budget(ctx.settings.default_max_tokens),
                     ctx.settings.default_temperature,
                     ctx.settings.default_top_p,
+                    None, // team 模式无节点级连接
                     ctx.cancel.clone(),
                 )
-                .await?;
+                .await
+            {
+                Ok(o) => o,
+                Err(e) if *ctx.cancel.borrow() => return Err(e),
+                Err(e) => {
+                    return Ok((fallback_terminal(&plan, format!("团队汇总失败:{e}")), total))
+                }
+            };
             svc.record_usage(&ctx.task_id, "summary", None, &summary_out);
             total.prompt_tokens += summary_out.prompt_tokens;
             total.completion_tokens += summary_out.completion_tokens;
             total.total_tokens += summary_out.prompt_tokens + summary_out.completion_tokens;
         }
         if summary_out.text.trim().is_empty() {
-            return Err("团队汇总返回空内容".into());
+            // 汇总空产出同样降级(提交 2):各主成果保留
+            return Ok((fallback_terminal(&plan, "团队汇总返回空内容".into()), total));
         }
 
         // ===== e. 收尾:终态失败步骤或审计/终审未通过 → partial;全部通过 → done =====
@@ -906,8 +971,12 @@ impl TeamExecutor {
                 token: ctx.token,
                 goal: ctx.goal.clone(),
                 settings: ctx.settings.clone(),
+                executor_id: ctx.executor_id.clone(),
                 character_id: ctx.character_id.clone(),
                 cancel: ctx.cancel.clone(),
+                connection_id: ctx.connection_id.clone(),
+                // 工作区作用域(编码通道批次 1):打回补做轮沿用同一工作区
+                scope: ctx.scope.clone(),
             };
             let main = mains[i].clone();
             let step_idxs = step_ranges[i].clone();
@@ -1438,18 +1507,21 @@ mod tests {
                 goal: String::new(),
                 status: TaskStepStatus::Done,
                 result: "产出甲一".into(),
+                node_id: None,
             },
             TaskStep {
                 name: "【主Agent-1】子二".into(),
                 goal: String::new(),
                 status: TaskStepStatus::Error,
                 result: "上游抖动".into(),
+                node_id: None,
             },
             TaskStep {
                 name: "【主Agent-2】子三".into(),
                 goal: String::new(),
                 status: TaskStepStatus::Error,
                 result: "也失败了".into(),
+                node_id: None,
             },
         ];
         let outputs = rebuild_outputs(&mains, &step_ranges, &plan);
@@ -1477,6 +1549,7 @@ mod tests {
                 goal: String::new(),
                 status,
                 result: String::new(),
+                node_id: None,
             }
         }
         let mut plan = vec![
@@ -1514,6 +1587,7 @@ mod tests {
             goal: String::new(),
             status,
             result: "r".into(),
+            node_id: None,
         };
         let plan = vec![
             mk("【主Agent-1】子一", TaskStepStatus::Done),
@@ -1543,18 +1617,21 @@ mod tests {
                 goal: String::new(),
                 status: TaskStepStatus::Done,
                 result: "甲产出".into(),
+                node_id: None,
             },
             TaskStep {
                 name: "【主Agent-1】子二".into(),
                 goal: String::new(),
                 status: TaskStepStatus::Done,
                 result: "旧乙产出".into(),
+                node_id: None,
             },
             TaskStep {
                 name: "【主Agent-1】子三".into(),
                 goal: String::new(),
                 status: TaskStepStatus::Error,
                 result: "失败".into(),
+                node_id: None,
             },
         ];
         let step_ranges = vec![vec![0, 1, 2]];

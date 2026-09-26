@@ -1755,6 +1755,102 @@ async fn custom_whitelist_dangerous_tool_executes_successfully() {
     reset_flow(app).await;
 }
 
+/// 二维批次 6a:严格档在聊天侧同样生效——`step_params_for` 短路后严格节点不下发工具,
+/// 模型即便索要工具也不会被**执行**(没有 tool 结果 → 没有第二轮)。
+///
+/// 两阶段**只改档位、其余完全相同**,故「严格阶段 0 个工具结果」不会被误读为钩子没生效:
+/// 宽松阶段的同一份配置必须跑满工具循环。用 [[tool_loop_text:…]] 让「跑到第几轮」可读:
+///   - 严格:停在「（第1轮说明）」(单次调用,工具请求被忽略);
+///   - 宽松:推进到「（模拟回复）工具循环已完成,最终回复。」(两轮工具 + 完成轮)。
+///
+/// 注:`tool_call` **事件**在单次调用路径也会透出(`process_chunk` 对每个工具调用块都发事件,
+/// 与是否执行无关,见 executor.rs),故记录**未执行**的判定点是 `tool_result` 与收尾正文。
+#[tokio::test]
+async fn custom_strict_step_does_not_dispatch_tools() {
+    let _guard = test_lock().await;
+    let app = test_app();
+    let args = r#"{"queries":[{"type":"character_prompt"}]}"#;
+    let flow_of = |kind: &str| {
+        json!({
+            "enabled": true,
+            "steps": [{
+                "id": "s1", "name": "原子步", "goal": "一句话产出",
+                "action": "direct", "generates": true, "enabled": true,
+                "tools": ["read"], "kind": kind
+            }]
+        })
+    };
+    let (_, char) = upload_character(app, "档位工具.json").await;
+    let cid = char["id"].as_str().unwrap().to_string();
+    let (_, session) = send_json(
+        app,
+        "POST",
+        "/api/chat/sessions",
+        json!({ "character_id": cid }),
+    )
+    .await;
+    let sid = session["id"].as_str().unwrap().to_string();
+    let message = format!("[[tool_loop_text:read|2 {args}]]");
+
+    // 阶段 1:严格档(声明了工具白名单也不下发 → 不会执行任何工具)
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/agent-flows",
+        json!({ "config": flow_of("strict") }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "严格档流程应可保存(二维批次 6a 放宽校验)"
+    );
+    let events = sse_events(app, &sid, &cid, &message, "custom").await;
+    assert_eq!(
+        events.iter().filter(|e| e["type"] == "tool_result").count(),
+        0,
+        "严格节点不应执行任何工具(模型索要的工具无人执行): {events:?}"
+    );
+    let finish = events
+        .iter()
+        .find(|e| e["type"] == "finish")
+        .expect("严格节点单次调用后应正常收尾");
+    assert_eq!(
+        finish["content"].as_str().unwrap_or(""),
+        "（第1轮说明）",
+        "严格节点正文应停在单次调用那一轮(若进了工具循环会推进到完成轮): {events:?}"
+    );
+
+    // 阶段 2:同一份流程切回宽松档 → 工具循环恢复(对照,证明钩子与工具配置确实生效)
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/agent-flows",
+        json!({ "config": flow_of("loose") }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "宽松档流程应可保存");
+    let events = sse_events(app, &sid, &cid, &message, "custom").await;
+    assert_eq!(
+        events.iter().filter(|e| e["type"] == "tool_result").count(),
+        2,
+        "宽松节点应执行两轮工具调用: {events:?}"
+    );
+    let finish = events
+        .iter()
+        .find(|e| e["type"] == "finish")
+        .expect("宽松节点应有 finish");
+    assert!(
+        finish["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains("工具循环已完成"),
+        "宽松节点应推进到工具循环完成轮: {events:?}"
+    );
+    // 恢复流程配置
+    reset_flow(app).await;
+}
+
 /// M3:顶层模型失败产生 Error 终态(带 code/retryable),而非「空内容 finish 伪装正常结束」。
 #[tokio::test]
 async fn upstream_model_error_emits_error_terminal_event() {
@@ -3301,4 +3397,402 @@ async fn chat_send_on_multi_thread_runtime_keeps_reads_alive() {
         "finish 事件应带 finish_reason: {finish}"
     );
     assert!(reads > 0, "应至少完成一轮并发读");
+}
+
+/// 重试提示透出(HB-4,2026-09-18):连接器重试时必须先给界面一个信号,
+/// 而不是「停几十秒然后报错」的无解释等待。
+///
+/// 真实重试发生在 openai_compatible 连接器内(带真实 HTTP,由该模块的
+/// retry_emits_notice_before_success 用例覆盖 429→重试→成功);mock 不经过那条路径,
+/// 故由钩子 [[retry:attempt,max@原因]] 直接注入 LlmStreamChunk::Retry,
+/// 本用例锁「引擎翻译 → SseEvent::Retry → SSE 序列位置」这一段。
+///
+/// 钩子分隔符是逗号不是斜杠:`a/b` 会被引擎的 looks_like_calculation 启发式
+/// 当成算式,自动插入 calculator 调用并改写最后一条 user 消息,钩子随之失效。
+#[tokio::test]
+async fn retry_notice_reaches_sse_before_finish() {
+    let app = test_app();
+    let (_, char) = upload_character(app, "重试提示.json").await;
+    let cid = char["id"].as_str().unwrap().to_string();
+    let (_, session) = send_json(
+        app,
+        "POST",
+        "/api/chat/sessions",
+        json!({ "character_id": cid }),
+    )
+    .await;
+    let sid = session["id"].as_str().unwrap().to_string();
+
+    let events = sse_events(
+        app,
+        &sid,
+        &cid,
+        // 用 fast 模式:deep 会先规划/反思,marker 落在哪一轮的 last_user 不确定
+        "请在遇到上游限流时给出重试提示 [[retry:1,3@上游返回 429 Too Many Requests]]",
+        "fast",
+    )
+    .await;
+    let retry = events
+        .iter()
+        .find(|e| e["type"] == "retry")
+        .unwrap_or_else(|| panic!("应有 retry 事件: {events:?}"));
+    assert_eq!(retry["attempt"], json!(1), "attempt 字段: {retry}");
+    assert_eq!(retry["max"], json!(3), "max 字段: {retry}");
+    assert!(
+        retry["reason"].as_str().unwrap().contains("429"),
+        "reason 应透出上游状态: {retry}"
+    );
+    // 非终态:重试提示之后仍须正常产出正文与 finish
+    let retry_at = events
+        .iter()
+        .position(|e| e["type"] == "retry")
+        .expect("retry 位置");
+    let finish_at = events
+        .iter()
+        .position(|e| e["type"] == "finish")
+        .unwrap_or_else(|| panic!("重试后仍应有 finish: {events:?}"));
+    assert!(
+        retry_at < finish_at,
+        "retry 必须早于 finish(否则用户仍看不到等待信号)"
+    );
+    // mock 逐字符流式,故断言 token 事件拼接后的正文
+    let text: String = events
+        .iter()
+        .filter(|e| e["type"] == "token")
+        .filter_map(|e| e["text"].as_str())
+        .collect();
+    assert!(text.contains("模拟回复"), "重试后应正常输出正文: {text:?}");
+}
+
+/// token 预算 stop 档(HB-1,2026-09-18):达到预算即停工具循环,但仍按正常终态收尾——
+/// 正文落库、用量记账、extra.budget_exceeded 留痕(刷新后仍看得出停止原因)。
+///
+/// 触发确定性:预算下限 1024,mock 工具轮每轮 8 token(5+3)→ 第 128 轮越线。
+/// 用 [[tool_loop_text:...]] 让工具轮带正文:否则工具轮正文恒空,on-stop 无内容可落库,
+/// 「停止时保留产出」这条断言就无从校验。
+#[tokio::test]
+async fn token_budget_stop_halts_tool_loop_and_keeps_output() {
+    // 全局设置是进程级共享:预算/轮次上限类用例必须串行(同文件并发会互相踩踏)
+    let _guard = test_lock().await;
+    let app = test_app();
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({
+            "max_tool_rounds": 200,
+            "session_token_budget": 1024,
+            "session_budget_action": "stop",
+            // 这些用例要跑满 128 轮同工具循环:语义熔断(HB-2)会在第 12 轮先熔断,故关闭
+            "loop_guard_semantic_min_calls": 0,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "预算设置应保存成功");
+    let (_, char) = upload_character(app, "预算停止.json").await;
+    let cid = char["id"].as_str().unwrap().to_string();
+    let (_, session) = send_json(
+        app,
+        "POST",
+        "/api/chat/sessions",
+        json!({ "character_id": cid }),
+    )
+    .await;
+    let sid = session["id"].as_str().unwrap().to_string();
+
+    let args = r#"{"queries":[{"type":"character_prompt"}]}"#;
+    let events = sse_events(
+        app,
+        &sid,
+        &cid,
+        &format!("[[tool_loop_text:read|200 {args}]]"),
+        "agent",
+    )
+    .await;
+
+    let budget_step = events
+        .iter()
+        .find(|e| {
+            e["type"] == "step" && e["step"].as_str().unwrap_or("").contains("Token 预算超限")
+        })
+        .unwrap_or_else(|| panic!("应透出预算停止理由: {events:?}"));
+    assert!(
+        !events
+            .iter()
+            .any(|e| e["type"] == "step" && e["step"] == "达到工具调用轮次上限"),
+        "预算(1024)必须先于 200 轮上限触发: {events:?}"
+    );
+    let tool_calls = events.iter().filter(|e| e["type"] == "tool_call").count();
+    let tool_results = events.iter().filter(|e| e["type"] == "tool_result").count();
+    assert_eq!(
+        tool_calls, 128,
+        "每轮 8 token、预算 1024 → 第 128 轮越线: {tool_calls}"
+    );
+    assert_eq!(
+        tool_results, tool_calls,
+        "已执行的工具调用都必须有 tool_result 终态(预算停止不得留悬挂): {events:?}"
+    );
+    assert!(
+        events.iter().any(|e| e["type"] == "finish"),
+        "预算停止是正常收尾(保留产出),不是错误终态: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| e["type"] == "error"),
+        "不得产生 error 终态: {events:?}"
+    );
+    let detail = budget_step["detail"].as_str().unwrap_or("");
+    assert!(
+        detail.contains("1024") && detail.contains("预算"),
+        "停止理由应含已用 token 与预算: {budget_step}"
+    );
+
+    // 停止时保留产出:正文落库(第 128 轮的短正文)+ extra.budget_exceeded 留痕
+    let (status, history) = send_json(
+        app,
+        "GET",
+        &format!("/api/chat/history?session_id={sid}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let msgs = history["messages"].as_array().expect("messages 数组");
+    let last = msgs
+        .iter()
+        .rev()
+        .find(|m| m["role"] == "assistant")
+        .unwrap_or_else(|| panic!("停止时应落库一条 assistant 消息: {history}"));
+    assert!(
+        last["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains("第128轮说明"),
+        "落库正文应为停止轮的正文: {last}"
+    );
+    assert_eq!(
+        last["extra"]["budget_exceeded"],
+        json!(true),
+        "extra 应留预算停止痕迹(刷新后仍可见): {last}"
+    );
+
+    // 恢复默认(同进程内其他用例共享设置)
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({
+            "max_tool_rounds": 32,
+            "session_token_budget": 0,
+            "session_budget_action": "warn",
+            "loop_guard_semantic_min_calls": 12,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+/// token 预算 warn 档(HB-1):只提示一次且不中断循环——默认档必须零行为变更。
+#[tokio::test]
+async fn token_budget_warn_notices_once_and_continues() {
+    let _guard = test_lock().await;
+    let app = test_app();
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({
+            "max_tool_rounds": 200,
+            "session_token_budget": 1024,
+            "session_budget_action": "warn",
+            "loop_guard_semantic_min_calls": 0,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, char) = upload_character(app, "预算提示.json").await;
+    let cid = char["id"].as_str().unwrap().to_string();
+    let (_, session) = send_json(
+        app,
+        "POST",
+        "/api/chat/sessions",
+        json!({ "character_id": cid }),
+    )
+    .await;
+    let sid = session["id"].as_str().unwrap().to_string();
+
+    let args = r#"{"queries":[{"type":"character_prompt"}]}"#;
+    // N=140:预算在第 128 轮越线,循环继续到模型自然收尾(第 140 轮后给完成回复)
+    let events = sse_events(
+        app,
+        &sid,
+        &cid,
+        &format!("[[tool_loop:read|140 {args}]]"),
+        "agent",
+    )
+    .await;
+
+    let notices = events
+        .iter()
+        .filter(|e| {
+            e["type"] == "step" && e["step"].as_str().unwrap_or("").contains("Token 预算超限")
+        })
+        .count();
+    assert_eq!(notices, 1, "warn 档只提示一次: {events:?}");
+    let tool_calls = events.iter().filter(|e| e["type"] == "tool_call").count();
+    assert_eq!(
+        tool_calls, 140,
+        "warn 不中断循环,应跑满模型请求的轮数: {tool_calls}"
+    );
+    let text: String = events
+        .iter()
+        .filter(|e| e["type"] == "token")
+        .filter_map(|e| e["text"].as_str())
+        .collect();
+    assert!(
+        text.contains("工具循环已完成"),
+        "warn 档循环应正常收尾并输出正文: {text:?}"
+    );
+    let step = events
+        .iter()
+        .find(|e| {
+            e["type"] == "step" && e["step"].as_str().unwrap_or("").contains("Token 预算超限")
+        })
+        .expect("应有预算提示");
+    assert!(
+        step["step"].as_str().unwrap_or("").contains("仅提示")
+            || step["detail"].as_str().unwrap_or("").contains("warn 档"),
+        "提示文案应说明是 warn 档: {step}"
+    );
+
+    // 恢复默认
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({
+            "max_tool_rounds": 32,
+            "session_token_budget": 0,
+            "session_budget_action": "warn",
+            "loop_guard_semantic_min_calls": 12,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+/// 语义熔断(HB-2,2026-09-18):同一工具反复调用、**参数每轮都变而输出实质无变化**
+/// → 熔断。既有「重复调用熔断」按「工具名+参数」指纹,对参数略变的空转无效
+/// (实测 54 轮各不相同的命令烧 137 万 prompt token,遗留 L22)。
+///
+/// 形态:mock 的 [[tool_loop:...]] 每轮经 vary_tool_args 注入新 _mock_round(指纹互不相同),
+/// 而 read 返回同一内容 → 只可能被输出侧判定抓住。
+#[tokio::test]
+async fn semantic_loop_guard_breaks_on_unchanged_output() {
+    let _guard = test_lock().await;
+    let app = test_app();
+    let (_, char) = upload_character(app, "空转熔断.json").await;
+    let cid = char["id"].as_str().unwrap().to_string();
+    let (_, session) = send_json(
+        app,
+        "POST",
+        "/api/chat/sessions",
+        json!({ "character_id": cid }),
+    )
+    .await;
+    let sid = session["id"].as_str().unwrap().to_string();
+
+    let args = r#"{"queries":[{"type":"character_prompt"}]}"#;
+    let events = sse_events(
+        app,
+        &sid,
+        &cid,
+        &format!("[[tool_loop:read|20 {args}]]"),
+        "agent",
+    )
+    .await;
+
+    let broke = events
+        .iter()
+        .any(|e| e["type"] == "step" && e["step"] == "重复空转熔断");
+    assert!(broke, "输出无变化的同工具空转应熔断并透出理由: {events:?}");
+    // 对照:参数每轮都变,指纹熔断不该触发(说明抓住它的确实是输出侧判定)
+    assert!(
+        !events
+            .iter()
+            .any(|e| e["type"] == "step" && e["step"] == "重复调用熔断"),
+        "本形态参数各不相同,不该走指纹熔断: {events:?}"
+    );
+    // 熔断发生在收到第 12 个同工具结果之后(每步各算各的窗口:agent 模式后续步骤
+    // 会再起一轮工具循环,故这里只看**首次**熔断之前的调用数)
+    let trip_at = events
+        .iter()
+        .position(|e| e["type"] == "step" && e["step"] == "重复空转熔断")
+        .expect("熔断事件位置");
+    let calls_before = events[..trip_at]
+        .iter()
+        .filter(|e| e["type"] == "tool_call")
+        .count();
+    assert_eq!(
+        calls_before, 12,
+        "默认下限 12:首次熔断前应恰有 12 次同工具调用(而非跑满 20 轮): {calls_before}"
+    );
+    let tool_calls = events.iter().filter(|e| e["type"] == "tool_call").count();
+    let tool_results = events.iter().filter(|e| e["type"] == "tool_result").count();
+    assert_eq!(
+        tool_results, tool_calls,
+        "已执行的工具调用必须都有 tool_result 终态(无悬挂): {events:?}"
+    );
+    assert!(
+        events.iter().any(|e| e["type"] == "finish"),
+        "熔断按正常终态收尾(不是 error): {events:?}"
+    );
+}
+
+/// HB-7 接线:mvu_model / mvu_temperature 的 API 往返与清除语义。
+/// 此前两者「可落盘、无 API 通路」(mvu_model 连消费点都没有),属死配置——
+/// 本用例锁住接线的对外契约:GET 透出、PATCH 设置(trim)、越界拒绝、清除哨兵。
+#[tokio::test]
+async fn mvu_model_temperature_roundtrip_and_clear() {
+    let _guard = test_lock().await;
+    let app = test_app();
+
+    // 默认:未配置(None → JSON null)
+    let (_, s0) = send_json(app, "GET", "/api/settings", json!({})).await;
+    assert_eq!(s0["mvu_model"], Value::Null, "默认应为未配置: {s0}");
+    assert_eq!(s0["mvu_temperature"], Value::Null, "默认应为未配置: {s0}");
+
+    // 设置:模型两侧空白应被 trim
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({ "mvu_model": "  aux-model  ", "mvu_temperature": 0.2 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, s1) = send_json(app, "GET", "/api/settings", json!({})).await;
+    assert_eq!(s1["mvu_model"], json!("aux-model"), "应 trim 后落库: {s1}");
+    assert_eq!(s1["mvu_temperature"], json!(0.2), "温度应落库: {s1}");
+
+    // 越界拒绝(温度上限 2.0)
+    let (status, body) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({ "mvu_temperature": 3.0 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "越界应拒绝: {body}");
+
+    // 清除:空串 = 回到与正文共用;负值 = 回到内置 0.3
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({ "mvu_model": "", "mvu_temperature": -1.0 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, s2) = send_json(app, "GET", "/api/settings", json!({})).await;
+    assert_eq!(s2["mvu_model"], Value::Null, "空串应清除: {s2}");
+    assert_eq!(s2["mvu_temperature"], Value::Null, "负值应清除: {s2}");
 }

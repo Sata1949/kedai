@@ -1,7 +1,7 @@
 # Kedai 维护指南(MAINTENANCE)
 
 > 面向后续维护者的技术文档。涵盖架构、构建、启动、API 契约、数据库、日志与已知坑位。
-> 版本:v0.3.0-B-beta(前端 Vue3 + 后端 Rust + Tauri 桌面壳) 最后更新:2026-09-16
+> 版本:v0.3.0-B-beta(前端 Vue3 + 后端 Rust + Tauri 桌面壳) 最后更新:2026-09-26
 
 ---
 
@@ -17,14 +17,15 @@
 - **样式分层纪律(前端,2026-09 D-5 起)**:`web/src/style.css` 只保留层① 设计变量(:root 令牌)与层② 全局基础层;新增组件样式一律 `<style scoped>` 或 Tailwind 工具类,禁止再写入 style.css;修改存量组件时顺手把该组件样式搬进 scoped(「改到谁拆谁」,文件头分层约定注释为准);新增样式不得引入 `!important`(存量 11 处见 style.css)。
 - **跨端协议**(前后端 mvu)以 `docs/契约-协议与配置.md` 锁定双端一致,防行为漂移。
 - **EJS 自研解释器冻结纪律**:`parsing/assistant/ejs/`(自研迷你 JS 引擎,约 4000 行)**只接受安全修复,不再扩展新能力**。任何新模板能力必须在 `scripts/runtime.rs` 的 rquickjs 沙箱侧实现(rquickjs 自带内存/中断/栈上限,见该文件 `set_memory_limit`/`set_interrupt_handler`)。理由:自研解释器缺引擎级沙箱限额,长期维护成本与风险高于复用;**已加固**(循环步数+墙钟预算、解析深度守卫,见 §10 踩坑记录),但债务不再增长。
-- **门禁纪律(2026-09-13 起)**:`tools/check-all.ps1` 是唯一的本地 CI 入口,现已接三处触发——
+- **门禁纪律(2026-09-13 起;2026-09-26 起三处均生效)**:`tools/check-all.ps1` 是唯一的本地 CI 入口,现已接三处触发——
   ① `build.ps1` 在构建前跑 `check-all -Quick`,失败即中止构建(`-SkipChecks` 仅限本地应急,
   **交付/试用前必须补跑一次完整 `check-all`**);② `tools/hooks/pre-push` 在推送前跑同一检查
   (装一次:`npm run hooks:install`;紧急可 `git push --no-verify`,同样须事后补跑);
-  ③ `.github/workflows/ci.yml`(**纸面 CI,从未运行**):2026-09-13 落盘,但仓库
-  **始终未配置 git 远端**(`git remote -v` 为空),故从未触发。**当前实际生效的闸门
-  只有前两条(build.ps1 与 pre-push)**——不要依赖 CI 兜底。配置远端并推送后它会自动生效,
-  届时本节应更新为「三处触发均实测生效」。
+  ③ `.github/workflows/ci.yml`(2026-09-13 落盘,**2026-09-26 随 GitHub 私有远端配置而激活**):
+  windows-latest 跑同一套 `check-all.ps1`,触发面**刻意收窄**为 `push` 到 `main` + PR +
+  手动 `workflow_dispatch`——平台分支与 `main` 逐字节同源(见「平台分支契约」),给它们
+  各跑一遍只会重复烧私有仓额度(免费档 2000 分钟/月,Windows runner 按 2 倍计费)。
+  **不要依赖 CI 兜底**:CI 不覆盖平台分支推送,平台分支与本地提交仍靠前两条兜住。
   变更 `tools/check-*.mjs` 的检查规则时,同步更新本节与本文件的检查项清单。
 - **性能门禁(2026-09-14 起,可选)**:`tools/perf-baseline.mjs` 支持 p95 阈值判定
   (`--max-p95-factor`,默认 1.25),基线值存 `tools/perf-baseline.json`;
@@ -158,8 +159,8 @@ kedai/
 | 一键构建 | `.\build.ps1` | **默认双端同步产出**:前端 web/dist + Rust release(测试版)+ 便携版;`-TestOnly` 仅测试版快速通道 `-Dev` debug 构建 `-NoWeb` 仅 Rust `-Tauri` 追加 NSIS 打包 |
 | 兼容别名 | `npm run build:all` / `npm run build:rs` | 均等价 `.\build.ps1`(双端同步);`npm run build:test` 等价 `.\build.ps1 -TestOnly` |
 | 统一改版本号 | `npm run version:bump -- x.y.z` | 7 处版本号一次改全(2 个 package.json、3 个 Cargo.toml、tauri.conf.json、本文档版本行);支持 `-DryRun` 预览 |
-| 后端测试 | `cd server-rs && cargo test` | **1187 个测试(941 单测 + 246 集成,24 个集成文件)**,**需在 vcvars64 环境**;前端 `npm test -w web` **878 个(91 文件;静态计数;vitest 运行时为 896,差值 18 来自 `parser.contract.test.ts` 循环生成的 fixture 用例)**。数字由 `node tools/count-tests.mjs` 自动统计,勿手抄——`npm run count:tests` 查看当前值,`npm run check:tests` 校验文档是否漂移 |
-| 全量检查(本地 CI) | `npm run check` | `tools/check-all.ps1`:fmt → clippy → cargo test → cargo audit(**硬门禁**)→ lock-sync(双锁漂移)→ contract → arch(C/D/E 分层)→ 类型 ratchet → npm audit(**硬门禁**)→ vue-tsc(**硬门禁**)→ vitest → vite build → bundle budget(体积预算)。**已接入 build.ps1 与 pre-push hook**(CI 工作流为纸面、未运行,见 §0 门禁纪律)。
+| 后端测试 | `cd server-rs && cargo test` | **1462 个测试(1124 单测 + 338 集成,40 个集成文件)**,**需在 vcvars64 环境**;前端 `npm test -w web` **1195 个(113 文件;静态计数;vitest 运行时为 1213,差值 18 来自 `parser.contract.test.ts` 循环生成的 fixture 用例)**。数字由 `node tools/count-tests.mjs` 自动统计,勿手抄——`npm run count:tests` 查看当前值,`npm run check:tests` 校验文档是否漂移(**2026-09-26 起逐行扫描本节与根 `README.md` 的全部复写处,并校验集成文件数**;其余由代码/脚本派生的计数——表数、`ensure_*` 个数、映射组数、规则字母、ratchet 基线、枚举变体数、门禁阶段数——由 `npm run check:doc-claims` 守护) |
+| 全量检查(本地 CI) | `npm run check` | `tools/check-all.ps1`——**本行是本仓库门禁阶段清单的唯一展开处**,其余文档只写「见本节」。顺序:fmt → clippy → cargo test → **cargo audit(硬门禁,双 Cargo.lock)** → docs: check-docs → lock-sync(双锁漂移)→ contract → arch(规则集以 `tools/check-arch.mjs` 为准,A–L)→ count: tests → docs: check-doc-claims(计数类硬口径)→ 类型 ratchet → eslint → **npm audit(硬门禁)** → vue-tsc(**硬门禁**)→ vitest → vite build → bundle budget(体积预算)→ perf(-Perf 才跑)。**已接入 build.ps1 与 pre-push hook**(CI 工作流为纸面、未运行,见 §0 门禁纪律);`-Quick` 跳 vite build 与 bundle budget,`-SkipWeb` 跳 docs 之后全部 web+契约段,`-AuditOnly` 只跑两段 audit。 **工具链口径(2026-09-26 踩坑,见 `经验.md` E60)**:CI 用 `dtolnay/rust-toolchain@stable`,本机 rustup 可能落后 → 新版 clippy lint 只在 CI 报(`chunks_exact_to_as_chunks` 一类),而本地全绿;推送前先 `rustup update stable`(或 `rustup toolchain install <ver>` + `cargo +<ver> clippy --all-targets -- -D warnings` 本地复现整轮),别拿 CI 当选 lint 的地方。 |
 `check-arch` 规则自 2026-09-14 起含 C/D/E/G/H/I/J(代际归属与跨代方向以 `tools/arch-layers.json` 为 SSOT),**2026-09-17 起增规则 L**(JNI 按名调用桥类的登记完整性);`check-bundle` 自 2026-09-17 起(基线在脚本内,ratchet 只降不升) |
 | 开发模式 | `cd server-rs && cargo run` + `npm run dev -w web` | 后端 3001 / 前端 5173(代理到 3001) |
 | 前端构建 | `npm run build -w web` | 产出 web/dist(编译进 exe 用) |
@@ -291,13 +292,13 @@ git-fetch-with-cli = true
 | 约定(错误体 `{error:{code,...}}` 七值、状态码、ISO 8601) | `docs/契约.md` §错误体与状态码契约 |
 | 线格式冻结清单与机检状态 | `docs/契约.md` §线格式冻结清单 / §机检状态总表 |
 
-修改任一端点前**先读 `docs/契约.md`**,改完跑 `node tools/check-contract.mjs`(10 组 MAPPINGS;未登记的类型不校验)。
+修改任一端点前**先读 `docs/契约.md`**,改完跑 `node tools/check-contract.mjs`(21 组 MAPPINGS;未登记的类型不校验)。
 
 ---
 
 ## 7. 数据库(data/kedai.db)
 
-rusqlite(bundled,零原生依赖),**WAL 模式 + foreign_keys ON**。共 28 张表(定义见 `server-rs/src/models/db/schema.rs`),核心表:
+rusqlite(bundled,零原生依赖),**WAL 模式 + foreign_keys ON**。共 31 张表(定义见 `server-rs/src/models/db/schema.rs`;另有 FTS5 虚拟表 `memory_entries_fts` 与其同步 trigger,不计入表数),核心表:
 
 | 表 | 关键字段/约束 |
 |---|---|
@@ -448,13 +449,34 @@ rusqlite(bundled,零原生依赖),**WAL 模式 + foreign_keys ON**。共 28 张�
 cd server-rs && cargo test
 ```
 
-- 单元测试(源文件内 `#[test]`/`#[tokio::test]`,**941 个**,以 `tools/count-tests.mjs` 为准):状态机迁移、planner(fast/deep/算式识别)、reflector(3 规则)、calculator(白名单解析)、censor(禁词同义替换)、token 编码映射与估算、工具注册表、世界书转换、世界书注入(`scan_depth` 扫描窗口:`scan_window_len` 优先/兜底/0/封顶、`scan_depth` 三来源解析、显式 scanDepth 覆盖 depth 兜底)、提示词注入(含禁词库)、mvu 变量系统(含 JSONPatch 转义/reason/delta 容错)、EJS 渲染器(含读取 API、escape-ejs 与**循环预算/解析深度守卫 5 例**)、角色卡解析、正则脚本、@INJECT 解析/应用、GENERATE 注入、运行时提示词内置默认回退、角色扮演默认提示词内置(from_config + load 空值回填)、结构化错误码(api/errors.rs)、任务编排工具契约(agentgo 逐项校验/子任务截断判失败/read subtask 多键命中/todo 跨 agent 可见/agentend interrupted)、任务工具策略(deny_dangerous 的 bash 例外不外溢:含 `bash2`/`mcp_x_bash` 精确匹配护栏)、任务白名单不豁免命令级高危硬门(custom_authorized + rm -rf/sudo 必须拒绝)、generate-raw 结构化预算下限与截断自愈(含显式值钳制)、**generate-raw 世界书窗口不认条目 depth(回归护栏)+ 吸血鬼卡真实形状格式条目必注入**、**密钥保留策略(批次 2:解密失败不覆盖磁盘密文 3 例)**、**pending_runs RAII 守卫(drop 与 panic 路径)**、**db writer 锁中毒回滚(未完成事务 ROLLBACK)**、**世界书概率门控不变式(常驻条目不参与概率 / 触发条目参与,2 例)**、**system 前缀不被概率扰动(构建侧锁定)**、**截断自愈预算四路合一(utils::retry 纯函数 8 例:翻倍/精确命中封顶/已封顶返回 None/饱和不溢出/零边界/带下限抬升小预算/仅 length 且轮次内触发/单轮限制;task_service 封顶回退 1 例见 [抽象收敛与残余修复-变更说明.md](docs/功能-变更史.md))**、**用量落库事务化(global_usage 写入失败回滚 1 例、会话与全局同进同退 1 例)**、**消息删除的 message 作用域变量清理(单条/截断/清空 3 例)**、mvu 变量系统(含 JSONPatch 转义/reason/delta 容错)、EJS 渲染器(含读取 API、escape-ejs 与**循环预算/解析深度守卫 5 例**)、角色卡解析、正则脚本、@INJECT 解析/应用、GENERATE 注入、运行时提示词内置默认回退、角色扮演默认提示词内置(from_config + load 空值回填)、结构化错误码(api/errors.rs)、任务编排工具契约(agentgo 逐项校验/子任务截断判失败/read subtask 多键命中/todo 跨 agent 可见/agentend interrupted)、任务工具策略(deny_dangerous 的 bash 例外不外溢:含 `bash2`/`mcp_x_bash` 精确匹配护栏)、任务白名单不豁免命令级高危硬门(custom_authorized + rm -rf/sudo 必须拒绝)、generate-raw 结构化预算下限与截断自愈(含显式值钳制)、**密钥保留策略(批次 2:解密失败不覆盖磁盘密文 3 例)**、**pending_runs RAII 守卫(drop 与 panic 路径)**、**db writer 锁中毒回滚(未完成事务 ROLLBACK)**、**世界书概率门控不变式(常驻条目不参与概率 / 触发条目参与,2 例)**、**system 前缀不被概率扰动(构建侧锁定)**、**截断自愈预算四路合一(utils::retry 纯函数 8 例:翻倍/精确命中封顶/已封顶返回 None/饱和不溢出/零边界/带下限抬升小预算/仅 length 且轮次内触发/单轮限制;task_service 封顶回退 1 例见 [抽象收敛与残余修复-变更说明.md](docs/功能-变更史.md))**、**用量落库事务化(global_usage 写入失败回滚 1 例、会话与全局同进同退 1 例)**、**消息删除的 message 作用域变量清理(单条/截断/清空 3 例)**
-- API 集成测试(`tests/` 23 个文件,**228 个**,以 `tools/count-tests.mjs` 为准,mock 连接器 + 临时数据目录):api_integration、assistant、agent_flows、tasks、task_events(含 `task_solo_offers_bash_tool`:任务模式确实下发 bash)、generate_raw(自愈成功且 injected 保留 / 重发失败回退半截 / 自愈用尽返回末次文本 / max_tokens=0 400)、**schema_migration_meta(老库升级结构一致性,冻结基线见 `tests/fixtures/schema_baseline_v0_3_0_beta.sql`)**、prompt_inject、world_books、settings_connector、security、contracts_e2e、scripts_e2e、scripts_import、swipe_regenerate、undo、user_scripts、variables_scopes、db_concurrency、macros、repo_index、memory_embedding(P-5 记忆向量批量语义)——health、角色 CRUD(multipart 上传)、会话/消息/导入导出、设置与 token、agent plan、SSE 聊天流、任务引擎六模式、计算器工具 SSE、世界书/角色卡、提示词注入与酒馆预设导入、鉴权
+- 单元测试(源文件内 `#[test]`/`#[tokio::test]`,**1124 个**,以 `tools/count-tests.mjs` 为准):状态机迁移、planner(fast/deep/算式识别)、reflector(3 规则)、calculator(白名单解析)、censor(禁词同义替换)、token 编码映射与估算、工具注册表、世界书转换、世界书注入(`scan_depth` 扫描窗口:`scan_window_len` 优先/兜底/0/封顶、`scan_depth` 三来源解析、显式 scanDepth 覆盖 depth 兜底)、提示词注入(含禁词库)、mvu 变量系统(含 JSONPatch 转义/reason/delta 容错)、EJS 渲染器(含读取 API、escape-ejs 与**循环预算/解析深度守卫 5 例**)、角色卡解析、正则脚本、@INJECT 解析/应用、GENERATE 注入、运行时提示词内置默认回退、角色扮演默认提示词内置(from_config + load 空值回填)、结构化错误码(api/errors.rs)、任务编排工具契约(agentgo 逐项校验/子任务截断判失败/read subtask 多键命中/todo 跨 agent 可见/agentend interrupted)、任务工具策略(deny_dangerous 的 bash 例外不外溢:含 `bash2`/`mcp_x_bash` 精确匹配护栏)、**工作区机制(编码通道批次:路径闸门 `safe_workspace_path` 的符号链接/junction/UNC/盘符/`..` 越界/空路径/NUL/DATA_DIR 双向包含 10 例;`fs_*` 工具族的行号分页、先读后写、唯一性替换三态、glob/grep 排除表与稳定排序 7 例;工作区工具策略闸门「三档位未绑定即整族不下发 / 绑定时写类按名例外且 `defs` 与 `allowed` 同源」2 例;`bash` 的 `resolve_cwd` jail 分支 1 例;`ExecScope` 先读后写与标志 2 例;`CreateTaskBody.workspace` 校验 1 例;任务模式 D1 批:审计 `risk_flag` 分类器与往返落库 2 例、侦察白名单两档 `scout_tools` 1 例、规划器能力段两套文案 1 例;**任务模式提交 2 批:部分成果拼装器 `assemble_from_plan` 去空产出/保序与失败步清单/无成果返回 None/名称折叠假标题防回归/`fallback_terminal` 两分支 5 例;重启孤儿兜底补写成果 1 例(扩既有用例)**)**、任务白名单不豁免命令级高危硬门(custom_authorized + rm -rf/sudo 必须拒绝)、generate-raw 结构化预算下限与截断自愈(含显式值钳制)、**generate-raw 世界书窗口不认条目 depth(回归护栏)+ 吸血鬼卡真实形状格式条目必注入**、**密钥保留策略(批次 2:解密失败不覆盖磁盘密文 3 例)**、**pending_runs RAII 守卫(drop 与 panic 路径)**、**db writer 锁中毒回滚(未完成事务 ROLLBACK)**、**世界书概率门控不变式(常驻条目不参与概率 / 触发条目参与,2 例)**、**system 前缀不被概率扰动(构建侧锁定)**、**截断自愈预算四路合一(utils::retry 纯函数 8 例:翻倍/精确命中封顶/已封顶返回 None/饱和不溢出/零边界/带下限抬升小预算/仅 length 且轮次内触发/单轮限制;task_service 封顶回退 1 例见 [抽象收敛与残余修复-变更说明.md](docs/功能-变更史.md))**、**用量落库事务化(global_usage 写入失败回滚 1 例、会话与全局同进同退 1 例)**、**消息删除的 message 作用域变量清理(单条/截断/清空 3 例)**、mvu 变量系统(含 JSONPatch 转义/reason/delta 容错)、EJS 渲染器(含读取 API、escape-ejs 与**循环预算/解析深度守卫 5 例**)、角色卡解析、正则脚本、@INJECT 解析/应用、GENERATE 注入、运行时提示词内置默认回退、角色扮演默认提示词内置(from_config + load 空值回填)、结构化错误码(api/errors.rs)、任务编排工具契约(agentgo 逐项校验/子任务截断判失败/read subtask 多键命中/todo 跨 agent 可见/agentend interrupted)、任务工具策略(deny_dangerous 的 bash 例外不外溢:含 `bash2`/`mcp_x_bash` 精确匹配护栏)、任务白名单不豁免命令级高危硬门(custom_authorized + rm -rf/sudo 必须拒绝)、generate-raw 结构化预算下限与截断自愈(含显式值钳制)、**密钥保留策略(批次 2:解密失败不覆盖磁盘密文 3 例)**、**pending_runs RAII 守卫(drop 与 panic 路径)**、**db writer 锁中毒回滚(未完成事务 ROLLBACK)**、**世界书概率门控不变式(常驻条目不参与概率 / 触发条目参与,2 例)**、**system 前缀不被概率扰动(构建侧锁定)**、**截断自愈预算四路合一(utils::retry 纯函数 8 例:翻倍/精确命中封顶/已封顶返回 None/饱和不溢出/零边界/带下限抬升小预算/仅 length 且轮次内触发/单轮限制;task_service 封顶回退 1 例见 [抽象收敛与残余修复-变更说明.md](docs/功能-变更史.md))**、**用量落库事务化(global_usage 写入失败回滚 1 例、会话与全局同进同退 1 例)**、**消息删除的 message 作用域变量清理(单条/截断/清空 3 例)**
+- API 集成测试(`tests/` 40 个文件,**338 个**,以 `tools/count-tests.mjs` 为准,mock 连接器 + 临时数据目录):api_integration、assistant、agent_flows、tasks(含部分成果兜底批:汇总失败降级 partial/拼装成果、无成果不伪造、plan 去「## 最终计划」、取消保成果、plan 续跑取消保成果 5 例,2026-09-26)、task_events(含 `task_solo_offers_bash_tool`:任务模式确实下发 bash;**`workspace_less_task_binds_scratch_and_offers_fs_tools`:未绑定工作区的任务建任务级 scratch 且 `fs_*` 确实下发,2026-09-26**)、**task_custom_gate(工具闸门空名单 = 拒绝一切:空集拒臆造 / 非空名单不误伤 2 例,2026-09-24)**、generate_raw(自愈成功且 injected 保留 / 重发失败回退半截 / 自愈用尽返回末次文本 / max_tokens=0 400)、**schema_migration_meta(老库升级结构一致性,冻结基线见 `tests/fixtures/schema_baseline_v0_3_0_beta.sql`)**、prompt_inject、world_books、settings_connector、security、contracts_e2e、scripts_e2e、scripts_import、swipe_regenerate、undo、user_scripts、variables_scopes、db_concurrency、macros、repo_index、memory_embedding(P-5 记忆向量批量语义)——health、角色 CRUD(multipart 上传)、会话/消息/导入导出、设置与 token、agent plan、SSE 聊天流、任务引擎六模式、计算器工具 SSE、世界书/角色卡、提示词注入与酒馆预设导入、鉴权
   - **已知 flaky**:`settings_connector::mock_auto_switches_to_openai_on_save` 偶发因 Windows 文件占用失败
     (`settings.json 应已持久化: Os { code: 32 }`;另实测全量负载下的 `Os { code: 2 } NotFound` 变体),
     隔离重跑即通过——非代码缺陷:PUT 保存是 `db_call` 同步 await(`api/settings.rs:657-662`),返回 200 时
     文件必已落盘,失败属环境文件锁/时序竞争。CI 接入时给该断言加重试或改经 API 校验。
-- 前端 `npm test -w web`(Vitest,**858 个 / 89 文件**,数字以 `tools/count-tests.mjs` 为准;vitest 实际输出为 **876**——差值 18 来自 `parser.contract.test.ts:68` 对 `mvu_patch_cases.json` 的 19 个 fixture 用例循环生成,静态计数把该 `it(` 计为 1):stores(**storeBridge 注册/降级/owner 诊断 14 例**)、**弹窗注册表单点派生三方一致(flag 无重复/label/组件已定义/MODAL_FLAGS 对应;registry ↔ uiPrefs 双向;App.vue v-for 派生且无硬编码残留,共 9 例)**、api client(含 ApiError 错误码分类)、**api stream(SSE 读循环跨 chunk 帧重组/CRLF/残留帧、非 JSON 错误体、上传成功失败与 401 重试,12 例)**、组件与 composables、CSS 清洗(含注释处理)与沙箱回归;类型门禁 `npm run typecheck -w web`(vue-tsc,**硬门禁**,存量 168 已于 2026-09-08 清偿归零,清偿记录见 docs/功能.md 附录 D);类型逃逸 ratchet `node tools/check-frontend-lint.mjs`(as never / as unknown as / 非空断言 / any,**只降不升**,基线见脚本内 BASELINE;2026-09-13 批次 5.2 后 as unknown as 71→70)
+  - **已知 flaky（2026-09-24 复核）**：同文件的 `roleplay_default_prompt_visible_on_fresh_install` 也会
+    在 `-j 8` 全量下偶发失败——那是上文 **TEST-ISO-1**（用例共享可变设置 / 顺序依赖）的另一条断言，
+    **不是新条目**（2026-09-24 曾一度误登记为 ENV-4，已撤销）；判别同 ENV-1：先
+    `cargo test --test settings_connector <用例名> -- --exact` 隔离复跑，不要改代码或依赖。
+- 前端 `npm test -w web`(Vitest,**1195 个 / 113 文件**,数字以 `tools/count-tests.mjs` 为准;vitest 实际输出为 **1213**——差值 18 来自 `parser.contract.test.ts:68` 对 `mvu_patch_cases.json` 的 19 个 fixture 用例循环生成,静态计数把该 `it(` 计为 1):stores(**storeBridge 注册/降级/owner 诊断 14 例**)、**弹窗注册表单点派生三方一致(flag 无重复/label/组件已定义/MODAL_FLAGS 对应;registry ↔ uiPrefs 双向;App.vue v-for 派生且无硬编码残留,共 9 例)**、api client(含 ApiError 错误码分类)、**api stream(SSE 读循环跨 chunk 帧重组/CRLF/残留帧、非 JSON 错误体、上传成功失败与 401 重试,12 例)**、组件与 composables、**自定义流程二维图(线性兼容 / 有效上游与层级 / 成环拦截 / 成果选拔 17 例)**、**画布数据层(节点连线产出、连线拦截、拖拽坐标写回、重新布局 17 例)**、**画布组件(真实挂载 @vue-flow:节点渲染、连线拦截、Inspector、重排确认 11 例)**、**执行流程区(默认列表视图、异步画布切换、列表编辑未回归 6 例)**、**步骤表单数值区间(输出上限 1~32768、上下文上限 256~1048576,与后端同口径,7 例)**、CSS 清洗(含注释处理)与沙箱回归;类型门禁 `npm run typecheck -w web`(vue-tsc,**硬门禁**,存量 168 已于 2026-09-08 清偿归零,清偿记录见 docs/功能.md 附录 D);类型逃逸 ratchet `node tools/check-frontend-lint.mjs`(as never / as unknown as / 非空断言 / any,**只降不升**,基线见脚本内 BASELINE;2026-09-13 批次 5.2 后 as unknown as 71→70)
+  > **并发注意**:一次全量跑过 14 个文件报 `[vitest-pool] Failed to start forks worker ... spawn UNKNOWN`(worker 起不来,与用例无关,同后端全并行的资源现象同族);`npm test -w web -- --maxWorkers=3` 复跑即全绿。
+- **后端全量构建的同类注意(2026-09-24 二维批次 8 实测)**:本机全量 `cargo test` 曾两度报
+  `error[E0463] can't find crate for kedai_server` / `crate X required to be available in rlib format`
+  (**每次缺的 crate 都不同**,如 `time`/`deranged`、`uuid`/`rand`;单独跑 `--lib` / 单个 `--test` 却正常)。
+  按 `docs/经验.md` 条目 17/29/30 处置:① 成对清理 `target/debug/deps` 里**孤立 `.rmeta`**(无同名 `.rlib`)
+  与 `.fingerprint/*-<hash>` 目录(`cargo check`/`clippy` 与 `cargo test` 交替执行会持续累积,2026-09-24 一次清出 155 对、
+  clippy 后又一次 196 对);② 设 `CARGO_PROFILE_DEV_DEBUG=0`(rlib 由 ~775MB 降到数十 MB,直接消掉内存侧压力);
+  ③ 并发取 `-j 4`。三项齐备后 **39 个测试二进制 / 1375 passed 全绿**(运行时通过数;与 §11 的静态计数 1407
+  之差属「静态计数 vs 运行时输出」口径差,同前端 1192/1210 的机理,不是缺测)——**这是环境/产物问题,不是代码回归**,勿照报错改依赖。
+
+  ```bat
+  rem 推荐的完整命令(走仓库自带包装器;debuginfo=0 是本机规避,不改仓库任何配置)
+  set CARGO_PROFILE_DEV_DEBUG=0
+  tools\cargo-vcvars.cmd cargo test -j 4
+  ```
+  > Git Bash 里:`export CARGO_PROFILE_DEV_DEBUG=0 && MSYS_NO_PATHCONV=1 cmd /c "tools\cargo-vcvars.cmd cargo test -j 4"`
+  > (注意 `//c` 会被 MSYS 处理成字面 `//c` 并让 cmd 起交互式 shell,必须 `MSYS_NO_PATHCONV=1` + `/c`)。
 - 新增接口建议同步补集成测试;测试环境变量 `CONNECTOR=mock` 强制隔离
 
 ---

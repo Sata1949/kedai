@@ -48,6 +48,7 @@ pub(in crate::agents::engine) fn with_step_prompt(
 /// None=不使用工具、Some([])=全部工具、Some(list)=白名单。
 /// 白名单名称已在流程保存阶段校验,此处只按注册表解析实际定义。
 /// 白名单中的工具被视为已授权(白名单即授权语义),不再弹授权框。
+/// 严格档(二维批次 6a)优先于上述配置:恒不下发工具 —— 见下方短路分支。
 pub(in crate::agents::engine) fn step_params_for(
     params: &GenerationParams,
     step: &PlanStep,
@@ -60,11 +61,33 @@ pub(in crate::agents::engine) fn step_params_for(
     if let Some(m) = step.max_tokens {
         p.max_tokens = m;
     }
+    // 节点级连接与工具轮次上限(二维批次 5b):与档位**无关**,严格档同样生效
+    // (严格档只是不下发工具,连接仍决定这次调用走哪个 provider/模型)。
+    // 连接解析统一在 `execute_generation` 里经 `AgentEngine::resolve_connector` 单点完成
+    // ——聊天侧 custom 与任务侧 custom 因此共享同一分流,不各写一套。
+    if let Some(id) = step.connection_ref() {
+        p.connection_id = Some(id.to_string());
+    }
+    if let Some(rounds) = step.max_tool_rounds {
+        p.max_tool_rounds = Some(rounds);
+    }
+    // 严格档 = 单次模型调用、不下发任何工具:清空工具相关参数后返回。
+    // run_loop 的 custom 分支据 `step_params.tools.is_empty()` 走 execute_generation(单次),
+    // 工具指南注入与 custom 变量回写也随之为空跳过 —— 任务侧 custom.rs 同一口径
+    // (档位优先于 tools 配置;配置保留以便切回宽松档,编辑器已按此提示)。
+    if step.is_strict() {
+        p.tools = Vec::new();
+        p.tool_choice = crate::models::types::ToolChoice::None;
+        p.parallel_tool_calls = None;
+        return p;
+    }
+    // 工作区工具族(fs_*)随工作区绑定下发,聊天侧没有工作区上下文 → 先在源头剔除:
+    // 空名单等价于「全量定义」,不剔除就会让角色扮演的步骤看到 5 个注定报错的工具。
+    let all_defs = crate::tools::tool_sets::exclude_workspace(registry.list_definitions());
     p.tools = match &step.tools {
         None => Vec::new(),
-        Some(list) if list.is_empty() => registry.list_definitions(),
-        Some(list) => registry
-            .list_definitions()
+        Some(list) if list.is_empty() => all_defs,
+        Some(list) => all_defs
             .into_iter()
             .filter(|t| list.iter().any(|n| n == &t.name))
             .collect(),
@@ -137,7 +160,10 @@ mod tests {
             tools: Vec::new(),
             max_tool_rounds: None,
             tool_choice: crate::models::types::ToolChoice::Auto,
+            connection_id: None,
             parallel_tool_calls: None,
+            step_budget: None,
+            semantic_guard: None,
         };
         let step = PlanStep {
             tools: Some(vec!["read".into()]),
@@ -153,6 +179,59 @@ mod tests {
             crate::models::types::ToolChoice::Function("read".into())
         );
         assert_eq!(params.parallel_tool_calls, Some(false));
+    }
+
+    /// 节点级连接与工具轮次上限(二维批次 5b)必须**穿透到生成参数**上——这是聊天侧
+    /// `agent_mode=custom` 与任务侧 custom 共享同一分流的那一环:漏带上就退化成
+    /// 「字段存在但静默无效」(编辑器配了连接却仍走默认连接)。
+    #[test]
+    fn step_params_carry_connection_and_tool_rounds_including_strict() {
+        let registry = ToolRegistry::new();
+        let base = GenerationParams {
+            temperature: 1.0,
+            top_p: 1.0,
+            max_tokens: 100,
+            stop: None,
+            tools: Vec::new(),
+            max_tool_rounds: None,
+            tool_choice: crate::models::types::ToolChoice::Auto,
+            connection_id: None,
+            parallel_tool_calls: None,
+            step_budget: None,
+            semantic_guard: None,
+        };
+
+        // 宽松档:两个字段都带上
+        let loose = PlanStep {
+            connection_id: Some("conn-b".into()),
+            max_tool_rounds: Some(3),
+            ..Default::default()
+        };
+        let params = step_params_for(&base, &loose, &registry);
+        assert_eq!(params.connection_id.as_deref(), Some("conn-b"));
+        assert_eq!(params.max_tool_rounds, Some(3));
+
+        // 严格档:虽不下发工具,连接仍须生效(严格只是「单次调用」,不改变走哪个 provider)
+        let strict = PlanStep {
+            kind: Some("strict".into()),
+            tools: Some(vec!["read".into()]),
+            connection_id: Some("conn-c".into()),
+            max_tool_rounds: Some(9),
+            ..Default::default()
+        };
+        let params = step_params_for(&base, &strict, &registry);
+        assert!(params.tools.is_empty(), "严格档不下发工具");
+        assert_eq!(params.connection_id.as_deref(), Some("conn-c"));
+        assert_eq!(params.max_tool_rounds, Some(9));
+
+        // 未配置:沿用基参数(默认连接 / 全局轮次),不写空串
+        let plain = PlanStep {
+            connection_id: Some("  ".into()),
+            ..Default::default()
+        };
+        let params = step_params_for(&base, &plain, &registry);
+        assert_eq!(params.connection_id, None, "空白 id 视为未设置");
+        assert_eq!(params.max_tool_rounds, None);
     }
 
     /// 反思持续失败时整个循环必须有界(回归:旧实现无限循环,本测试在旧代码上会挂死)

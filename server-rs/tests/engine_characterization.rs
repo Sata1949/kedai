@@ -211,17 +211,24 @@ async fn concurrent_second_send_is_rejected_while_first_in_flight() {
     );
 }
 
-/// **中断不落库**:主动 stop 后不得产生 assistant 消息、不得发 finish,且须发 `interrupted`。
+/// **中断保留部分产出**(HB-3,2026-09-18 **口径变更**):主动 stop 后
+/// 已生成的部分正文落库(extra.interrupted=true)、中断轮消耗计入 session_usage、
+/// 仍不得发 `finish`、仍必须发 `interrupted`。
 ///
-/// 当前事实:`stop` 置 abort → 连接器在流式循环里
-/// `if *abort.borrow() { return Err("生成已中断") }` →
-/// `run` 的收尾 match 走 `*abort_rx.borrow()` 为真的分支 →
-/// `transition_best_effort(Interrupted)` + 发 `SseEvent::Interrupted` + 返回 None →
-/// **不落 assistant 消息**(落库在 `send_event(Finish)` 之后,被 `?` 短路跳过)。
+/// ## 口径为什么改(原断言为「中断不落库」)
 ///
-/// ## 为什么用「增量读 + 见 token 才 stop」而非固定 sleep(工程要点)
+/// 聊天侧「中断即丢弃」与任务侧「中断保留已落库内容」是两套口径(遗留 OBS-1),
+/// 且中断轮消耗的 token 无账可查——用户按停止 = 白等一轮。2026-09-18 的 harness
+/// 补强批次 HB-3 统一为「保留 + 标记」:extra.interrupted 与既有 extra.truncated
+/// 同构(事件是暂态的,不落库则刷新后看不出这条是中断的),前端据此渲染「已中断」
+/// 并复用既有「生成新版本」入口。
 ///
-/// 本测试初版用 `sleep(250ms)` 后 stop,结果**偶发失败**——固定延时是时序赌博:
+/// 本用例由旧不变量 `stop_aborts_generation_without_persisting_assistant_message`
+/// 重写而来(断言方向反转 + 新增标记与记账断言),测试名同步改为现在这条。
+///
+/// ## 为什么用「增量读 + 见 token 才 stop」而非固定 sleep(工程要点,沿用原注释)
+///
+/// 初版用 `sleep(250ms)` 后 stop,结果**偶发失败**——固定延时是时序赌博:
 /// 机器负载高时 250ms 可能已错过生成窗口(生成早结束 → 发 finish → 断言失败)。
 /// 现改为**事件驱动**:逐帧读到第一个 `token` 事件才发 stop,无任何时间假设。
 /// 这同时保证「确实是在流式过程中中断的」,而不是「生成还没开始就停了」。
@@ -230,7 +237,7 @@ async fn concurrent_second_send_is_rejected_while_first_in_flight() {
 /// `[[reply:]]`/`[[reply_stream:]]` 钩子走单块/无延时路径,来不及中断。
 /// 故本测试不传任何内容钩子。
 #[tokio::test]
-async fn stop_aborts_generation_without_persisting_assistant_message() {
+async fn stop_keeps_partial_output_with_interrupted_mark() {
     let _guard = test_lock().await;
     let app = test_app();
     let cid = upload_character(app, "中断特征化.json").await;
@@ -297,11 +304,48 @@ async fn stop_aborts_generation_without_persisting_assistant_message() {
         "中断不应发出 finish 事件(类型序列: {types:?})"
     );
 
-    // 历史中不得**新增** assistant 消息(落库在 Finish 之后,被短路跳过)
-    let assistant_after = assistant_count(app, &sid).await;
+    // 部分产出保留:历史新增一条 assistant 消息,带 interrupted 标记且正文非空
+    let (_, history) = send_json(
+        app,
+        "GET",
+        &format!("/api/chat/history?session_id={sid}"),
+        json!({}),
+    )
+    .await;
+    let assistant_after = history["messages"]
+        .as_array()
+        .map(|msgs| msgs.iter().filter(|m| m["role"] == "assistant").count())
+        .unwrap_or(0);
     assert_eq!(
-        assistant_after, assistant_before,
-        "中断后不应新增 assistant 消息(前 {assistant_before} → 后 {assistant_after})"
+        assistant_after,
+        assistant_before + 1,
+        "中断应保留部分产出(前 {assistant_before} → 后 {assistant_after})"
+    );
+    let last = history["messages"]
+        .as_array()
+        .and_then(|msgs| msgs.iter().rev().find(|m| m["role"] == "assistant"))
+        .expect("应有落库的 assistant 消息");
+    assert_eq!(
+        last["extra"]["interrupted"],
+        json!(true),
+        "中断消息必须带 extra.interrupted 标记(刷新后仍可见): {last}"
+    );
+    assert!(
+        !last["content"].as_str().unwrap_or("").trim().is_empty(),
+        "中断消息正文不应为空(流式中已生成的字符): {last}"
+    );
+
+    // 中断轮用量入账(HB-3):此前整轮白烧不计账
+    let (_, usage) = send_json(
+        app,
+        "GET",
+        &format!("/api/token/session-total?session_id={sid}"),
+        json!({}),
+    )
+    .await;
+    assert!(
+        usage["total_tokens"].as_i64().unwrap_or(0) > 0,
+        "中断轮消耗必须计入 session_usage: {usage}"
     );
 }
 

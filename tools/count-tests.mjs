@@ -73,34 +73,88 @@ const summary = [
 ].join('\n');
 
 if (process.argv.includes('--check')) {
-  const maint = fs.readFileSync(path.join(ROOT, 'MAINTENANCE.md'), 'utf8');
-  // 文档中形如:「953 个测试(770 单测 + 183 集成)」「732 个(78 文件)」
-  const mTotal = maint.match(/(\d+)\s*个测试\s*\((\d+)\s*单测\s*\+\s*(\d+)\s*集成/);
-  const mFront = maint.match(/(\d+)\s*个\s*\((\d+)\s*文件/);
+  // 2026-09-26 扩展(文档漂移收口批):
+  // ① 原先只比对 MAINTENANCE.md 的**第一处**匹配,导致同文件 §11 的旧数字(单测 1071 /
+  //    集成「34 个文件, 306 个」)长期不受守护、与 §2 的权威行自相矛盾。
+  // ② §11 用**另一种句式**复写同一事实(「单元测试(…**1083 个**,以 `tools/count-tests.mjs` 为准)」、
+  //    「API 集成测试(`tests/` 38 个文件,**324 个**,…)」、「(Vitest,**1188 个 / 113 文件**,…)」),
+  //    故改为**逐行扫描**:两套句式、两份文档(MAINTENANCE.md 为真值源,根 README.md 允许复写
+  //    但必须写对)全部比对,并补上一直漏掉的「集成文件数」。
   const problems = [];
-  if (mTotal) {
-    const [, total, unit, integ] = mTotal.map(Number);
-    if (total !== result.backendTotal) {
-      problems.push(`后端合计:文档 ${total} ≠ 实际 ${result.backendTotal}`);
-    }
-    if (unit !== backendUnit) problems.push(`后端单测:文档 ${unit} ≠ 实际 ${backendUnit}`);
-    if (integ !== backendIntegration) problems.push(`后端集成:文档 ${integ} ≠ 实际 ${backendIntegration}`);
-  } else {
-    problems.push('MAINTENANCE.md 未找到「N 个测试(M 单测 + K 集成)」格式,无法比对');
+  const hits = { backend: 0, backendFiles: 0, frontend: 0, frontendFiles: 0 };
+  const cmp = (where, label, got, expected) => {
+    if (got === undefined) return;
+    if (Number(got) !== expected) problems.push(`${where} ${label}:文档 ${got} ≠ 实际 ${expected}`);
+  };
+
+  for (const rel of ['MAINTENANCE.md', 'README.md']) {
+    const p = path.join(ROOT, rel);
+    if (!fs.existsSync(p)) continue;
+    const lines = fs.readFileSync(p, 'utf8').split('\n');
+
+    lines.forEach((line, i) => {
+      const where = `${rel}:${i + 1}`;
+      // 句式 A:「N 个测试(M 单测 + K 集成[, F 个集成文件])」
+      for (const m of line.matchAll(
+        /(\d+)\s*个测试\s*\((\d+)\s*单测\s*\+\s*(\d+)\s*集成(?:,\s*(\d+)\s*个集成文件)?/g,
+      )) {
+        hits.backend += 1;
+        if (m[4] !== undefined) hits.backendFiles += 1;
+        cmp(where, '后端合计', m[1], result.backendTotal);
+        cmp(where, '后端单测', m[2], backendUnit);
+        cmp(where, '后端集成', m[3], backendIntegration);
+        cmp(where, '集成文件数', m[4], testFiles.length);
+      }
+      // 句式 B:同一事实的复写(§11 三行)
+      if (line.includes('单元测试(')) {
+        const m = line.match(/\*\*(\d+) 个\*\*/);
+        if (m) {
+          hits.backend += 1;
+          cmp(where, '后端单测(复写)', m[1], backendUnit);
+        }
+      }
+      if (line.includes('API 集成测试(')) {
+        const mf = line.match(/(\d+) 个文件/);
+        const mc = line.match(/\*\*(\d+) 个\*\*/);
+        if (mf) {
+          hits.backendFiles += 1;
+          cmp(where, '集成文件数(复写)', mf[1], testFiles.length);
+        }
+        if (mc) {
+          hits.backend += 1;
+          cmp(where, '后端集成(复写)', mc[1], backendIntegration);
+        }
+      }
+      if (line.includes('npm test -w web`(Vitest')) {
+        const m = line.match(/\*\*(\d+) 个 \/ (\d+) 文件\*\*/);
+        if (m) {
+          hits.frontend += 1;
+          hits.frontendFiles += 1;
+          cmp(where, '前端用例(复写)', m[1], frontendCases);
+          cmp(where, '前端文件(复写)', m[2], tsFiles.length);
+        }
+      }
+      // 句式 C:「N 个(M 文件)」
+      for (const m of line.matchAll(/(\d+)\s*个\s*\((\d+)\s*文件/g)) {
+        hits.frontend += 1;
+        hits.frontendFiles += 1;
+        cmp(where, '前端用例', m[1], frontendCases);
+        cmp(where, '前端文件', m[2], tsFiles.length);
+      }
+    });
   }
-  if (mFront) {
-    const [, cases, files] = mFront.map(Number);
-    if (cases !== frontendCases) problems.push(`前端用例:文档 ${cases} ≠ 实际 ${frontendCases}`);
-    if (files !== tsFiles.length) problems.push(`前端文件:文档 ${files} ≠ 实际 ${tsFiles.length}`);
-  }
+
+  if (hits.backend === 0) problems.push('未找到后端测试数句式(「N 个测试(M 单测 + K 集成)」等),无法比对');
+  if (hits.frontend === 0) problems.push('未找到前端用例数句式(「N 个(M 文件)」等),无法比对');
+
   if (problems.length) {
-    console.error('[WARN] 测试数字与 MAINTENANCE.md 不一致(文档漂移):');
+    console.error('[WARN] 测试数字与文档记录不一致(文档漂移):');
     problems.forEach((p) => console.error('       - ' + p));
-    console.error('       请更新 MAINTENANCE.md,或在文档中注明「随脚本统计」。');
+    console.error('       请更新文档数字(唯一真值源:MAINTENANCE.md),或在文档中改为引用而不复写。');
     process.exit(1);
   }
   console.log(summary);
-  console.log('\n[OK] 与 MAINTENANCE.md 记录一致');
+  console.log('\n[OK] 与 MAINTENANCE.md / README.md 记录一致');
   process.exit(0);
 }
 

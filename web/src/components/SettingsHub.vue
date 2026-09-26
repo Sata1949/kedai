@@ -37,9 +37,9 @@ const close = (): void => {
 
 /** 设置分区键(与 SettingsModal 的 activeSection 一一对应) */
 type SectionKey =
-  | 'api' | 'model' | 'mcp' | 'embedding'
+  | 'api' | 'connections' | 'model' | 'mcp' | 'embedding'
   | 'prompt' | 'preset'
-  | 'agent' | 'flow'
+  | 'agent' | 'flow' | 'exec'
   | 'data'
   | 'ui'
   | 'about';
@@ -67,6 +67,7 @@ const domains: Domain[] = [
     key: 'conn', label: '连接与模型', dot: 'red',
     items: [
       { type: 'section', key: 'api', label: 'API 连接' },
+      { type: 'section', key: 'connections', label: '连接配置' },
       { type: 'section', key: 'model', label: '模型与生成' },
       { type: 'section', key: 'mcp', label: 'MCP 服务' },
     ],
@@ -83,6 +84,10 @@ const domains: Domain[] = [
     items: [
       { type: 'section', key: 'agent', label: 'Agent 设置' },
       { type: 'section', key: 'flow', label: '执行流程' },
+      // 授权与命令执行独立成二级项(2026-09-17):此前它嵌在「Agent 设置」内部,
+      // 用户找不到 root/Shizuku 授权入口。移动端为主的场景下,授权是需要被
+      // 主动发现的设置项,不应埋在 Agent 设置的长表单里。
+      { type: 'section', key: 'exec', label: '授权与命令执行' },
     ],
   },
   {

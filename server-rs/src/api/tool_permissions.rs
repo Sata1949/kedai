@@ -48,6 +48,8 @@ pub async fn list(
         session_id: session.id.clone(),
         character_id: session.character_id.clone(),
         agent_depth: 0,
+        // 本处只借 ctx 的会话身份列工具清单,与工作区绑定无关
+        scope: None,
     };
     let tools: Vec<_> = state
         .tool_registry

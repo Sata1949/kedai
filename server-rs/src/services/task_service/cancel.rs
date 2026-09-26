@@ -19,6 +19,9 @@ impl TaskService {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(id.to_string(), (tx, token));
+        // 活动心跳起点(提交 3 · D7):本轮执行从此刻起算「活着」,空闲看守据此
+        // 不会把刚启动、还没产出任何事件的任务误判为空闲。
+        self.touch_activity(id);
         (rx, token)
     }
 

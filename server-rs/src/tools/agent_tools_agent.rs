@@ -171,6 +171,10 @@ pub(super) fn register_agentgo(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
                     let session_id = ctx.session_id.clone();
                     let character_id = ctx.character_id.clone();
                     let agent_depth = ctx.agent_depth;
+                    // 工作区作用域随子 agent 继承(编码通道批次 1):子白名单当前不含
+                    // 工作区工具,但继承语义必须成立——否则日后扩白名单会出现
+                    // 「工具在,却恒报未绑定工作区」的静默降级。
+                    let scope = ctx.scope.clone();
                     tokio::spawn(async move {
                         run_subtask(
                             deps2,
@@ -180,6 +184,7 @@ pub(super) fn register_agentgo(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
                             instruction,
                             max_tokens,
                             agent_depth,
+                            scope,
                         )
                         .await;
                     });
@@ -235,6 +240,8 @@ async fn run_subtask(
     instruction: String,
     max_tokens: u32,
     agent_depth: u32,
+    // 父调用的工作区作用域(空 = 父任务未绑定工作区);见 `models::types::ExecScope`
+    scope: Option<std::sync::Arc<crate::models::types::ExecScope>>,
 ) {
     // 已被 agentend 提前结束 → 不再启动
     if deps.subtasks.is_ended(&task_id) {
@@ -290,6 +297,7 @@ async fn run_subtask(
                 max_tokens,
                 agent_depth,
                 cancel,
+                scope,
             )
             .await;
         }
@@ -317,6 +325,7 @@ async fn run_subtask_with_tools(
     max_tokens: u32,
     agent_depth: u32,
     cancel: tokio::sync::watch::Receiver<bool>,
+    scope: Option<std::sync::Arc<crate::models::types::ExecScope>>,
 ) {
     use crate::agents::engine::executor::run_tool_loop;
     use crate::agents::engine::AbortFlag;
@@ -345,7 +354,14 @@ async fn run_subtask_with_tools(
         tools,
         max_tool_rounds: Some(max_rounds),
         tool_choice: crate::models::types::ToolChoice::Auto,
+        connection_id: None,
         parallel_tool_calls: None,
+        // 子 agent 工具循环(agentgo)不套任务侧步骤墙钟预算:本路径是聊天 AGENT 模式
+        // 与任务 multi/team 的**共用**实现,设置来自扁平快照而非任务侧 for_mode(Task)
+        // 快照,装预算就得把任务上下文穿透进工具层(改动面与回归面都大)。
+        // 缺口已登记 docs/遗留.md(任务模式 TM-D3 派生)。
+        step_budget: None,
+        semantic_guard: None,
     };
 
     // 运行身份:任务模式用派生虚拟 id(task: 前缀,llm_requests 跳过守卫同源);
@@ -362,6 +378,7 @@ async fn run_subtask_with_tools(
         character_id: character_id.to_string(),
         // 深度 +1:子 agent 内再触 agentgo 时守卫按嵌套层判定(白名单已剔除,双保险)
         agent_depth: agent_depth + 1,
+        scope,
     };
     let (tx, drain) = match (&svc, &task_ref) {
         // 批次 R4:事件桥携 phase=subagent(与下方 record_llm_call 落库口径一致,
@@ -391,6 +408,8 @@ async fn run_subtask_with_tools(
         &mut total_usage,
         &run_id,
         gate,
+        // 单次调用超时覆盖(A 批 A1):子 agent 无节点级配置,恒走宿主既有判定
+        None,
     )
     .await;
     drop(tx);
@@ -487,14 +506,14 @@ async fn run_subtask_with_tools(
                         // 同时把定性原因写入 error。
                         let _ = deps.subtasks.set_failed(
                             task_id,
-                            &truncate_subtask_result(deps, &content),
+                            &truncate_subtask_result(deps, &content, task_id),
                             &error,
                         );
                     }
                     SubtaskVerdict::Done => {
                         let _ = deps
                             .subtasks
-                            .set_done(task_id, &truncate_subtask_result(deps, &content));
+                            .set_done(task_id, &truncate_subtask_result(deps, &content, task_id));
                     }
                 }
             }
@@ -560,7 +579,10 @@ async fn run_subtask_plain(
         tools: Vec::new(),
         max_tool_rounds: None,
         tool_choice: crate::models::types::ToolChoice::Auto,
+        connection_id: None,
         parallel_tool_calls: None,
+        step_budget: None,
+        semantic_guard: None,
     };
 
     let connector = deps.connector.read().await.clone();
@@ -580,9 +602,10 @@ async fn run_subtask_plain(
             } else if content.trim().is_empty() {
                 let _ = deps.subtasks.set_error(task_id, "子任务返回空内容");
             } else {
-                let _ = deps
-                    .subtasks
-                    .set_done(task_id, &truncate_subtask_result(deps, content.trim()));
+                let _ = deps.subtasks.set_done(
+                    task_id,
+                    &truncate_subtask_result(deps, content.trim(), task_id),
+                );
             }
         }
         Err(e) => {
@@ -604,26 +627,38 @@ fn spawn_discard_sink() -> (mpsc::Sender<SseEvent>, tokio::task::JoinHandle<()>)
 
 /// 子任务结果超长截断:超 subagent_result_max_chars 时保留前 N 字符并附尾注,
 /// 不静默丢内容(原长写入尾注,调用方可知全貌)。按字符截断,避开 UTF-8 边界问题。
-fn truncate_subtask_result(deps: &ToolDeps, content: &str) -> String {
+///
+/// 尾注必须**可操作**(2026-09-18 harness 补强 HB-6):父智能体拿到的是截断结果,
+/// 若不知道完整结果怎么取,只能重跑子任务(直接烧钱)。尾注因此携带 `task_id` 与
+/// 读取路径——`read` 工具的真实参数是 `queries[].{type,name}`,子任务 id 走 `name`
+/// (见 agent_tools_read.rs 的参数说明),故写 `read(type="subtask", name="<id>")`
+/// 这一与 agentgo description 同款的简写,而不是凭空造 `id=` 参数。
+fn truncate_subtask_result(deps: &ToolDeps, content: &str, task_id: &str) -> String {
     // 设置快照:不留锁跨 await
     let max_chars = deps.settings_snapshot().subagent_result_max_chars as usize;
-    truncate_subtask_result_with_limit(content, max_chars)
+    truncate_subtask_result_with_limit(content, max_chars, task_id)
 }
 
 /// 截断纯函数(限长可注入,测试用)
-fn truncate_subtask_result_with_limit(content: &str, max_chars: usize) -> String {
+fn truncate_subtask_result_with_limit(content: &str, max_chars: usize, task_id: &str) -> String {
     let total = content.chars().count();
     if total <= max_chars {
         return content.to_string();
     }
     let clipped: String = content.chars().take(max_chars).collect();
-    format!("{clipped}\n[子智能体结果已截断,原长 {total} 字符]")
+    format!(
+        "{clipped}\n[子智能体结果已截断,原长 {total} 字符;完整内容用 read(type=\"subtask\", name=\"{task_id}\") 获取]"
+    )
 }
 
 /// 测试入口:跨模块(agent_tools tests)验证截断行为
 #[cfg(test)]
-pub(super) fn truncate_subtask_result_for_test(deps: &ToolDeps, content: &str) -> String {
-    truncate_subtask_result(deps, content)
+pub(super) fn truncate_subtask_result_for_test(
+    deps: &ToolDeps,
+    content: &str,
+    task_id: &str,
+) -> String {
+    truncate_subtask_result(deps, content, task_id)
 }
 
 /// 测试入口:跨模块验证写回判定(截断即失败)

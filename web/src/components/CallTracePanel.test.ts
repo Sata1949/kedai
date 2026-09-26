@@ -96,6 +96,31 @@ describe('CallTracePanel(调用追踪内容,面板合并后为 AgentPanel「调�
     expect(html).not.toContain('提示词摘要');
   });
 
+  it('被调流程小结(二维批次 7b 收口):动态层次数与 token 单列,无动态调用时不显示', async () => {
+    const html = await render((store) => {
+      store.appMode = 'task';
+      store.currentTaskId = 't1';
+      store.taskCalls = [
+        makeCall(), // 入口层 step:不计入被调流程
+        makeCall({ id: 'c2', phase: 'call.d1', step_index: 0 }),
+        // 被调流程**内部**挂的静态子图:phase 仍是 subflow 前缀,但路径含 d 段 → 必须计入
+        makeCall({ id: 'c3', phase: 'subflow.d1.2', step_index: 1 }),
+      ];
+    });
+    expect(html).toContain('其中被调流程(对比模式)2 次调用');
+    expect(html).toContain('60'); // 两次各 10 + 20
+    // 被调流程的调用行走 call 分支的中文标签(不再裸露 `call.d1`)
+    expect(html).toContain('被调流程(调用#1 内)');
+    expect(html).not.toContain('call.d1');
+
+    const plain = await render((store) => {
+      store.appMode = 'task';
+      store.currentTaskId = 't1';
+      store.taskCalls = [makeCall()];
+    });
+    expect(plain).not.toContain('其中被调流程');
+  });
+
   it('聊天模式有推理链与工具调用时渲染对应内容', async () => {
     const html = await render((store) => {
       store.appMode = 'roleplay';
@@ -107,6 +132,7 @@ describe('CallTracePanel(调用追踪内容,面板合并后为 AgentPanel「调�
         pendingTool: null,
         toolCalls: [{ name: 'web_search', input: {}, output: '结果', status: 'done', risk: 'safe' }],
         flowProgress: null,
+        retryable: false,
       };
     });
     expect(html).toContain('规划完成');
@@ -186,5 +212,45 @@ describe('CallTracePanel(调用追踪内容,面板合并后为 AgentPanel「调�
     });
     expect(html).not.toContain('正在生成');
     expect(html).toContain('步骤 #1');
+  });
+});
+
+// 静态子图(二维批次 6b):嵌套调用按 phase=`subflow.<父下标链>` 归属,
+// 标签要能读出「从哪一步挂进来的」与「子图里的第几步」
+describe('CallTracePanel 静态子图阶段标签(二维批次 6b)', () => {
+  it('subflow.<父下标> 显示为「子流程(#父 内) #子步」,不裸露 phase 字符串', async () => {
+    const html = await render((store) => {
+      store.appMode = 'task';
+      store.currentTaskId = 't1';
+      store.taskCalls = [
+        makeCall({ id: 'c1', phase: 'subflow.1', step_index: 2 }),
+        makeCall({ id: 'c2', phase: 'subflow.1.0', step_index: 0 }),
+      ];
+    });
+    // 父下标与子下标都是 0 起,展示时 +1
+    expect(html).toContain('子流程(#2 内) #3');
+    // 再嵌一层:父链 #2›#1,叶子 #1
+    expect(html).toContain('子流程(#2›#1 内) #1');
+    // 未命中分支会原样渲染 phase;子图已有专属分支,不应裸露英文 phase
+    expect(html).not.toContain('subflow');
+  });
+
+  it('脏数据兜底:phase 的路径段非数字时原样回退,不渲染 #NaN', async () => {
+    const html = await render((store) => {
+      store.appMode = 'task';
+      store.currentTaskId = 't1';
+      store.taskCalls = [
+        // 裸 `subflow`(无路径段)
+        makeCall({ id: 'c1', phase: 'subflow', step_index: 0 }),
+        // `subflow.`(空路径段)
+        makeCall({ id: 'c2', phase: 'subflow.', step_index: 1 }),
+        // 手改 phase 出的非数字段
+        makeCall({ id: 'c3', phase: 'subflow.x', step_index: 2 }),
+      ];
+    });
+    expect(html).not.toContain('NaN');
+    expect(html).toContain('子流程 #1');
+    expect(html).toContain('子流程 #2');
+    expect(html).toContain('子流程(x 内) #3');
   });
 });

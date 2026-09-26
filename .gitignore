@@ -36,6 +36,10 @@ build-full.log
 data/
 data.retired-*/
 
+# 任务 scratch 工作区(未绑定工作区的任务的可写草稿区,与数据目录同级;
+# 仅当 DATA_DIR 指回项目根时才会落在仓库根,一律忽略)
+task_scratch/
+
 # 仓库索引(派生数据,可重建;详见 .kedai-index/README.md)
 .kedai-index/
 

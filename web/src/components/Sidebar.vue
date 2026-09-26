@@ -5,6 +5,8 @@ import { useAppStore } from '../store';
 import { storeToRefs } from 'pinia';
 import { taskStatusClass as statusClass, taskStatusLabel as statusLabel } from '../taskStatus';
 import TaskModeSelect from './TaskModeSelect.vue';
+import TaskFlowSelect from './TaskFlowSelect.vue';
+import TaskConnectionSelect from './TaskConnectionSelect.vue';
 import type { CharacterRecord, TaskRecord } from '../api';
 
 const store = useAppStore();
@@ -12,7 +14,7 @@ const {
   filteredCharacters, characters, currentCharacterId, connStatus,
   contextTokens, lastUsage, currentSessionId,
   sessionTotalTokens, globalTotalTokens, cacheZeroStreak, appMode, tasks, currentTaskId,
-  currentTaskUsage, globalTaskUsage,
+  currentTaskUsage, globalTaskUsage, executors,
 } = storeToRefs(store);
 
 const fileInput = ref<HTMLInputElement | null>(null);
@@ -227,8 +229,18 @@ function deleteChar(c: CharacterRecord): void {
 
 // ===== 任务模式:下达目标 + 任务历史(原任务工作台左栏移入,单列布局) =====
 const taskTitle = ref('');
-const personaId = ref('');
+/** 所选执行者库 id(空 = 通用执行者)。执行者与角色扮演角色卡解耦,不再列 characters。 */
+const executorId = ref('');
 const creatingTask = ref(false);
+
+// 任务模式进入时拉执行者库(下拉数据源);失败仅记错误,不影响创建任务(可选通用执行者)
+watch(
+  () => appMode.value,
+  (m) => {
+    if (m === 'task' && executors.value.length === 0) void store.loadExecutors();
+  },
+  { immediate: true },
+);
 
 /** 新建并立即执行 */
 async function createAndRun(): Promise<void> {
@@ -236,7 +248,7 @@ async function createAndRun(): Promise<void> {
   if (!t || creatingTask.value) return;
   creatingTask.value = true;
   try {
-    const task = await store.createTask(t, personaId.value || undefined);
+    const task = await store.createTask(t, executorId.value || undefined);
     taskTitle.value = '';
     await store.runTask(task.id);
   } catch (err) {
@@ -411,13 +423,24 @@ async function removeTask(task: TaskRecord): Promise<void> {
             />
             <!-- 执行模式(批次 4 六模式;独立子组件,选择持久化在 task store) -->
             <TaskModeSelect />
-            <!-- 执行者人设(可选):默认通用执行者 -->
-            <select v-model="personaId" class="sv-select">
-              <option value="">执行者:通用执行者</option>
-              <option v-for="c in characters" :key="c.id" :value="c.id">
-                执行者:{{ c.chara_name }}
-              </option>
-            </select>
+            <!-- 绑定流程(二维批次 5a;仅自定义流程模式可见,空 = 跟随当前流程) -->
+            <TaskFlowSelect />
+            <!-- 逐任务选用连接(B 批 B1;与执行模式无关,故六模式都可见,空 = 跟随设置的默认连接) -->
+            <TaskConnectionSelect />
+            <!-- 执行者(独立执行者库;与角色扮演角色卡解耦,故不列 characters) -->
+            <div class="sv-inp-row">
+              <select v-model="executorId" class="sv-select" title="选择任务执行者">
+                <option value="">执行者:通用执行者</option>
+                <option v-for="e in executors" :key="e.id" :value="e.id">
+                  执行者:{{ e.name }}
+                </option>
+              </select>
+              <button
+                class="sv-btn ghost sv-btn-sm"
+                title="管理执行者(新建/编辑/删除)"
+                @click="store.taskExecutorsOpen = true"
+              >管理</button>
+            </div>
             <button
               class="sv-btn primary"
               :disabled="creatingTask || !taskTitle.trim()"
@@ -479,6 +502,23 @@ async function removeTask(task: TaskRecord): Promise<void> {
         class="hidden"
         @change="onFilePicked"
       />
+      <!-- 退出入口(2026-09-17):此前界面上**没有任何**退出按钮——Android 只能靠
+           返回键碰运气触发确认弹窗,桌面只能关窗口。补一个显式入口,点击后走同一个
+           退出确认弹窗(不直接退:误触不丢未保存内容)。 -->
+      <button
+        class="sv-btn sv-side-btn sidebar-exit"
+        title="退出 Kedai(会先弹确认)"
+        @click="store.exitConfirmOpen = true"
+      >
+        <span class="sv-side-btn-ico">
+          <svg viewBox="0 0 24 24">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+            <path d="M16 17l5-5-5-5" />
+            <path d="M21 12H9" />
+          </svg>
+        </span>
+        退出 Kedai
+      </button>
     </div>
 
     <!-- 右键菜单 -->
@@ -583,3 +623,18 @@ async function removeTask(task: TaskRecord): Promise<void> {
     </Teleport>
   </aside>
 </template>
+
+<style scoped>
+/* 退出按钮(2026-09-17 新增入口)。样式纪律(MAINTENANCE D-5):新增组件样式写 scoped,
+   不进 style.css;这里只覆盖该按钮特有的一点点视觉,尺寸/图标沿用 .sv-side-btn。 */
+.sidebar-exit {
+  /* 与「综合设置」(primary 黑底)区分层级:空心描边,悬停才转红提示危险语义 */
+  background: transparent;
+  border: var(--bw-thin) solid var(--sv-line-strong);
+  color: var(--sv-ink-dim);
+}
+.sidebar-exit:hover {
+  border-color: var(--sv-red);
+  color: var(--sv-red);
+}
+</style>
