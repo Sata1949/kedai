@@ -84,6 +84,8 @@ impl ApprovedPlanExecutor {
                 step_index: Some(i),
                 label: format!("步骤 {}", i + 1),
                 connection_id: ctx.connection_id.clone(),
+                // 工作区作用域(编码通道批次 1):批准后的逐步执行同样受工作区约束
+                scope: ctx.scope.clone(),
             };
             match run_agent_loop(svc.clone(), self.engine.clone(), call, ctx.cancel.clone()).await {
                 Ok((text, usage)) => {

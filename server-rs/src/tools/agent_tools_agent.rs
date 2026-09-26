@@ -171,6 +171,10 @@ pub(super) fn register_agentgo(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
                     let session_id = ctx.session_id.clone();
                     let character_id = ctx.character_id.clone();
                     let agent_depth = ctx.agent_depth;
+                    // 工作区作用域随子 agent 继承(编码通道批次 1):子白名单当前不含
+                    // 工作区工具,但继承语义必须成立——否则日后扩白名单会出现
+                    // 「工具在,却恒报未绑定工作区」的静默降级。
+                    let scope = ctx.scope.clone();
                     tokio::spawn(async move {
                         run_subtask(
                             deps2,
@@ -180,6 +184,7 @@ pub(super) fn register_agentgo(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
                             instruction,
                             max_tokens,
                             agent_depth,
+                            scope,
                         )
                         .await;
                     });
@@ -235,6 +240,8 @@ async fn run_subtask(
     instruction: String,
     max_tokens: u32,
     agent_depth: u32,
+    // 父调用的工作区作用域(空 = 父任务未绑定工作区);见 `models::types::ExecScope`
+    scope: Option<std::sync::Arc<crate::models::types::ExecScope>>,
 ) {
     // 已被 agentend 提前结束 → 不再启动
     if deps.subtasks.is_ended(&task_id) {
@@ -290,6 +297,7 @@ async fn run_subtask(
                 max_tokens,
                 agent_depth,
                 cancel,
+                scope,
             )
             .await;
         }
@@ -317,6 +325,7 @@ async fn run_subtask_with_tools(
     max_tokens: u32,
     agent_depth: u32,
     cancel: tokio::sync::watch::Receiver<bool>,
+    scope: Option<std::sync::Arc<crate::models::types::ExecScope>>,
 ) {
     use crate::agents::engine::executor::run_tool_loop;
     use crate::agents::engine::AbortFlag;
@@ -363,6 +372,7 @@ async fn run_subtask_with_tools(
         character_id: character_id.to_string(),
         // 深度 +1:子 agent 内再触 agentgo 时守卫按嵌套层判定(白名单已剔除,双保险)
         agent_depth: agent_depth + 1,
+        scope,
     };
     let (tx, drain) = match (&svc, &task_ref) {
         // 批次 R4:事件桥携 phase=subagent(与下方 record_llm_call 落库口径一致,

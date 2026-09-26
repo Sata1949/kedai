@@ -173,8 +173,11 @@ pub async fn send(
     // 不进正文默认列表——它们只服务于多步变量驱动器与显式白名单,泄漏进正文会
     // 诱导模型在正文轮里误用变量补丁通道。
     if mode == "agent" {
-        params.tools =
-            crate::tools::tool_sets::exclude_meta(state.tool_registry.list_definitions());
+        // 工作区工具族(fs_*)只随任务的工作区绑定下发:聊天没有工作区上下文,
+        // 留在列表里只会让模型看到 5 个注定报「未绑定工作区」的工具。
+        params.tools = crate::tools::tool_sets::exclude_workspace(
+            crate::tools::tool_sets::exclude_meta(state.tool_registry.list_definitions()),
+        );
     }
     // 自定义流程(custom 模式):校验启用与合法性,步骤快照随请求传入引擎
     let mut flow_steps: Vec<PlanStep> = Vec::new();

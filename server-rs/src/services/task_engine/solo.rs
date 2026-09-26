@@ -48,6 +48,9 @@ pub(crate) struct AgentLoopCall {
     /// 与节点级 `PlanStep.connection_id` 不同:solo/multi/team/plan 无节点概念,
     /// 这里是本任务模型调用的缺省连接。
     pub connection_id: Option<String>,
+    /// **工作区作用域**(编码通道批次 1;空 = 未绑定工作区)。从执行上下文原样下传,
+    /// 供工具循环构造 `ToolContext.scope`(fs_* 工具族与 bash 的 cwd jail 消费它)。
+    pub scope: Option<Arc<crate::models::types::ExecScope>>,
 }
 
 /// 单主 agent 工具自循环(solo/multi 执行器主体;team 各主 agent 复用):
@@ -85,6 +88,8 @@ pub(crate) async fn run_agent_loop(
         &settings.task_tool_policy,
         &settings.task_tool_allowlist,
         &engine.tool_registry(),
+        // 工作区工具族只在绑定了工作区的任务里下发(未绑定调了必然报错,不如不给)
+        call.scope.is_some(),
     );
     // 闸门名单先取出(allowed 借用生命周期需覆盖整个工具循环),再取走 defs
     let allowed = policy.allowed;
@@ -115,6 +120,7 @@ pub(crate) async fn run_agent_loop(
         session_id: call.session_id.clone(),
         character_id: call.character_id.clone().unwrap_or_default(),
         agent_depth: 0,
+        scope: call.scope.clone(),
     };
     // 事件桥:引擎事件 → 任务事件(agent_status);drain 持续消费到 tx drop。
     // phase/step_index 随桥传入(批次 R4):Token 攒批 delta 携带调用归属,
@@ -272,6 +278,7 @@ impl SoloExecutor {
             label: "主 agent".into(),
             // 任务级连接(A 批 B1):从执行上下文原样下传
             connection_id: ctx.connection_id.clone(),
+            scope: ctx.scope.clone(),
         };
         let (text, usage) = run_agent_loop(
             self.svc.clone(),

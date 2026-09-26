@@ -491,6 +491,14 @@ fn default_risk(tool: &str) -> ToolRisk {
         // 在对比模式下把它一并剔掉(可见性本就由 META_TOOLS 与逐节点下发决定)。
         "run_flow" => ToolRisk::Sensitive,
         "memory_write" | "update_variables" | "write" | "replace" | "create" => ToolRisk::Dangerous,
+        // 工作区文件工具族(编码通道批次):读/检索三个是安全级(只读,且路径被
+        // workspace_guard 收口在工作区内);写/改两个与 write/replace 同级归危险级
+        // ——它们会真的改动工作区里的源码,风险面与既有写工具同类。
+        // 归危险级不影响可用性:任务模式默认策略(deny_dangerous)按**工具名**开例外放行
+        // 它们(见 services/task_engine/tool_policy.rs),例外的安全前提是路径被 jail 在
+        // 工作区内,而不是「工具不危险」。
+        "fs_read" | "fs_glob" | "fs_grep" => ToolRisk::Safe,
+        "fs_write" | "fs_edit" => ToolRisk::Dangerous,
         // 命令执行恒危险级:与文件写工具同级,但额外走「命令级风险强制确认」
         // (tools/command_risk.rs)。显式登记而非依赖下面的通配兜底,便于后续审查。
         "bash" => ToolRisk::Dangerous,
@@ -510,6 +518,7 @@ mod tests {
             session_id: "s".into(),
             character_id: "r".into(),
             agent_depth: 0,
+            scope: None,
         }
     }
 
@@ -737,6 +746,7 @@ mod tests {
             session_id: "s1".into(),
             character_id: String::new(),
             agent_depth: 0,
+            scope: None,
         };
         let d = m.decide("memory_write", &anon);
         assert!(!d.allowed, "空角色不应命中 role_grants[\"\"]");
@@ -776,12 +786,14 @@ mod tests {
             session_id: "alive".into(),
             character_id: "r".into(),
             agent_depth: 0,
+            scope: None,
         };
         assert!(m.decide("search", &alive).allowed);
         let dead = ToolContext {
             session_id: "dead".into(),
             character_id: "r".into(),
             agent_depth: 0,
+            scope: None,
         };
         assert!(!m.decide("search", &dead).allowed);
     }
@@ -892,6 +904,7 @@ mod tests {
             session_id: "task:s1".into(),
             character_id: String::new(),
             agent_depth: 0,
+            scope: None,
         };
         for cmd in ["rm -rf /important", "sudo reboot"] {
             let a = exec_action(cmd);

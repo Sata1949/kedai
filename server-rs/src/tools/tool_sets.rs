@@ -33,11 +33,29 @@ pub const SUBAGENT: &[&str] = &[
 /// 反思阶段工具白名单:仅禁词替换与定点修订;dirty 文本修正不引入检索类工具。
 pub const REFLECT: &[&str] = &["censor_text", "revise_passage"];
 
+/// 工作区文件工具族(编码通道批次)的名字清单(**单一出处**:注册侧、风险级、任务工具策略
+/// 的工作区闸门与「何时调用」指南都以它为准)。
+///
+/// **有意不进 `READONLY_SCOUT` / `SUBAGENT` / `REFLECT`**:那三份白名单是「既有能力面」的
+/// 冻结清单,本族的可见性由**任务是否绑定工作区**决定(见 `task_engine/tool_policy.rs`)。
+/// 纳入只读白名单会让规划侦察轮与子 agent(都跑在聊天/任务上下文里、未必有工作区)
+/// 看到必然报错的工具,还会顺带扩大子 agent 的写入面——本批不做这两件事。
+/// 故新增只读能力(如 fs_read)不自动进侦察轮,要放开请单独评估并改这里的注释。
+pub const WORKSPACE_TOOLS: &[&str] = &["fs_read", "fs_write", "fs_edit", "fs_glob", "fs_grep"];
+
 /// 剔除正文元工具(get_state/apply_patch),保留其余工具与原顺序。
 /// 顺序稳定性是前缀缓存的前提,故不做排序。
 pub fn exclude_meta(defs: Vec<ToolDefinition>) -> Vec<ToolDefinition> {
     defs.into_iter()
         .filter(|d| !META_TOOLS.contains(&d.name.as_str()))
+        .collect()
+}
+
+/// 剔除工作区文件工具族。聊天路径(角色扮演、custom 流程步骤)没有工作区上下文,
+/// 本族在那里必然报「未绑定工作区」——不下发即不给模型制造无效调用(口径同 exclude_meta)。
+pub fn exclude_workspace(defs: Vec<ToolDefinition>) -> Vec<ToolDefinition> {
+    defs.into_iter()
+        .filter(|d| !WORKSPACE_TOOLS.contains(&d.name.as_str()))
         .collect()
 }
 
@@ -126,5 +144,29 @@ mod tests {
             ]
         );
         assert_eq!(REFLECT, &["censor_text", "revise_passage"]);
+        assert_eq!(
+            WORKSPACE_TOOLS,
+            &["fs_read", "fs_write", "fs_edit", "fs_glob", "fs_grep"]
+        );
+    }
+
+    /// 工作区工具族必须被 exclude_workspace 完整剔除,且不误伤同名前缀的其它工具
+    #[test]
+    fn exclude_workspace_removes_only_the_family() {
+        let defs = vec![
+            def("read"),
+            def("fs_read"),
+            def("fs_write"),
+            def("fs_glob"),
+            def("fs_edit"),
+            def("fs_grep"),
+            // 名字含 fs_ 但不在族内(锁定「按名字精确匹配」)
+            def("fs_read2"),
+        ];
+        let names: Vec<String> = exclude_workspace(defs)
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        assert_eq!(names, vec!["read", "fs_read2"]);
     }
 }

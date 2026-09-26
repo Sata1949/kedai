@@ -77,6 +77,35 @@ pub fn register_bash_tool(
 /// 说明:授权裁决已由引擎在调用本执行器**之前**完成(见 agents/engine/executor.rs
 /// 的 decide 流程)。所以能进到这里就说明已获授权(或属自动放行的非高危命令)。
 /// 本函数仍会自查命令风险并记审计,保证「跑了什么」可回溯。
+/// 解析本次调用的工作目录(编码通道批次 1)。
+///
+/// 绑定了工作区的任务里:cwd 缺省 = 工作区,显式 cwd 必须落回工作区内(jail)。
+/// jail **只约束 cwd** —— 命令文本里的绝对路径不在这里拦截(进程内有 shell 就能读该
+/// 进程有权限读的路径,那属于 OS 级隔离的范畴,不是本函数能承诺的)。
+/// 未绑定工作区时(含全部聊天场景)与改造前逐字一致:缺省 = 数据目录。
+///
+/// 抽成自由函数是为了让 jail 语义能被单测直接断言,不必真的跑起一条命令。
+fn resolve_cwd(
+    explicit: Option<&str>,
+    scope: Option<&crate::models::types::ExecScope>,
+    data_dir: &std::path::Path,
+) -> Result<String, String> {
+    match (explicit, scope) {
+        (Some(raw), Some(scope)) if scope.jail() => {
+            Ok(crate::tools::workspace_guard::safe_workspace_path(
+                scope.workspace(),
+                raw,
+                Some(data_dir),
+            )?
+            .to_string_lossy()
+            .into_owned())
+        }
+        (Some(raw), _) => Ok(raw.to_string()),
+        (None, Some(scope)) => Ok(scope.workspace().to_string_lossy().into_owned()),
+        (None, None) => Ok(data_dir.to_string_lossy().into_owned()),
+    }
+}
+
 async fn run(
     args: &serde_json::Value,
     ctx: &ToolContext,
@@ -93,12 +122,13 @@ async fn run(
     if command.is_empty() {
         return Err("command 不能为空".into());
     }
-    let cwd = args
+    let explicit_cwd = args
         .get("cwd")
         .and_then(|v| v.as_str())
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| data_dir.to_string_lossy().into_owned());
+        .filter(|s| !s.is_empty());
+    // 工作区语义见 `resolve_cwd`:绑定时缺省工作区、显式 cwd 受 jail 约束
+    let cwd = resolve_cwd(explicit_cwd.as_deref(), ctx.scope.as_deref(), data_dir)?;
     let timeout_ms = args
         .get("timeout_ms")
         .and_then(|v| v.as_u64())
@@ -324,5 +354,43 @@ mod tests {
         } else {
             assert_eq!(shell_name(), "sh");
         }
+    }
+
+    /// 工作区语义(编码通道批次 1):绑定时 cwd 缺省 = 工作区、界外显式 cwd 被拒、
+    /// 界内相对/绝对路径通过;未绑定时缺省仍回落数据目录(旧行为逐字不变)。
+    /// 只断言 `resolve_cwd` 的分支,不触发真实命令执行。
+    #[test]
+    fn resolve_cwd_honors_workspace_jail() {
+        let tmp = crate::utils::test_support::TempDataDir::new("bash-cwd");
+        let ws = tmp.join("ws");
+        std::fs::create_dir_all(ws.join("sub")).unwrap();
+        let outside = tmp.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let data_dir = tmp.join("datadir");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let scope = crate::models::types::ExecScope::new(ws.clone(), true);
+        // 缺省 → 工作区(jail 生效时不再回落数据目录)
+        assert_eq!(
+            resolve_cwd(None, Some(&scope), &data_dir).unwrap(),
+            ws.to_string_lossy()
+        );
+        // 界内相对路径 → 解析为工作区内的真实路径(闸门返回 canonical 形式,故比对前
+        // 把工作区也 canonicalize;否则 `\\?\` 前缀会让字面前缀比对失败)
+        let inside = resolve_cwd(Some("sub"), Some(&scope), &data_dir).unwrap();
+        assert!(
+            std::path::Path::new(&inside).starts_with(std::fs::canonicalize(&ws).unwrap()),
+            "界内路径应落在工作区内: {inside}"
+        );
+        // 界外绝对路径 → 拒绝(文案指明越界)
+        let err = resolve_cwd(Some(&outside.to_string_lossy()), Some(&scope), &data_dir)
+            .expect_err("界外 cwd 必须被拒");
+        assert!(err.contains("越界"), "文案应指明越界: {err}");
+        // 未绑定工作区 → 旧行为:缺省 = 数据目录,显式 cwd 原样透传
+        assert_eq!(
+            resolve_cwd(None, None, &data_dir).unwrap(),
+            data_dir.to_string_lossy()
+        );
+        assert_eq!(resolve_cwd(Some("x"), None, &data_dir).unwrap(), "x");
     }
 }

@@ -814,6 +814,8 @@ impl TaskService {
             session_id: format!("task:{task_id}"),
             character_id: character_id.unwrap_or_default().to_string(),
             agent_depth: 0,
+            // 规划侦察轮的工具集是只读白名单(PLANNER_SCOUT_TOOLS),与工作区绑定无关
+            scope: None,
         };
         let mut scout_round = 0usize;
         loop {

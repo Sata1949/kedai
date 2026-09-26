@@ -81,11 +81,13 @@ pub(in crate::agents::engine) fn step_params_for(
         p.parallel_tool_calls = None;
         return p;
     }
+    // 工作区工具族(fs_*)随工作区绑定下发,聊天侧没有工作区上下文 → 先在源头剔除:
+    // 空名单等价于「全量定义」,不剔除就会让角色扮演的步骤看到 5 个注定报错的工具。
+    let all_defs = crate::tools::tool_sets::exclude_workspace(registry.list_definitions());
     p.tools = match &step.tools {
         None => Vec::new(),
-        Some(list) if list.is_empty() => registry.list_definitions(),
-        Some(list) => registry
-            .list_definitions()
+        Some(list) if list.is_empty() => all_defs,
+        Some(list) => all_defs
             .into_iter()
             .filter(|t| list.iter().any(|n| n == &t.name))
             .collect(),

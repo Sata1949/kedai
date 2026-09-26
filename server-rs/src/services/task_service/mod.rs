@@ -152,6 +152,10 @@ impl TaskService {
     ///     但 API 层面继续接受,避免破坏既有客户端与 R3a(task_persona_full)契约。
     ///
     /// 两者同时给出时执行期以 executor_id 为准(见 prompt.rs 的分支顺序)。
+    ///
+    /// `workspace`(编码通道批次)由 API 层**校验并 canonicalize 后**传入,本函数只做
+    /// 空白归一(不重复解析文件系统:创建期与运行期的判定口径必须只有一个出处,
+    /// 见 `tools::workspace_guard`)。
     #[allow(clippy::too_many_arguments)] // 参数即创建请求体的字段面,拆 struct 只会多一层无人消费的中间类型
     pub fn create(
         &self,
@@ -162,6 +166,7 @@ impl TaskService {
         flow_id: Option<&str>,
         flow_ids: Option<&[String]>,
         connection_id: Option<&str>,
+        workspace: Option<&str>,
     ) -> Result<TaskRecord, String> {
         let title = title.trim();
         if title.is_empty() {
@@ -249,6 +254,9 @@ impl TaskService {
         }
         let id = Uuid::new_v4().to_string();
         let now = now_iso();
+        // 工作区(编码通道批次):创建期已冻结的 canonical 绝对路径,原样落库;
+        // 空白/None = 未绑定(旧客户端不带该字段 → 零变化)
+        let workspace = workspace.map(str::trim).filter(|s| !s.is_empty());
         // 执行者库命中校验:引用了不存在的执行者时静默丢弃而非报错——执行者属可选增强,
         // 不该因一次删除让引用它的任务建不出来(与执行期「查不到配置即回退通用执行者」
         // 同口径,避免创建期与执行期语义分叉)。
@@ -272,8 +280,8 @@ impl TaskService {
             // db.write(),若仍持锁则自死锁(非重入锁)
             let conn = self.db.write();
             conn.execute(
-                "INSERT INTO tasks (id, title, status, plan, result, error, character_id, created_at, updated_at, task_mode, executor_id, flow_id, flow_snapshot, flow_ids, connection_id) \
-                 VALUES (?1, ?2, 'pending', '[]', '', '', ?3, ?4, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                "INSERT INTO tasks (id, title, status, plan, result, error, character_id, created_at, updated_at, task_mode, executor_id, flow_id, flow_snapshot, flow_ids, connection_id, workspace) \
+                 VALUES (?1, ?2, 'pending', '[]', '', '', ?3, ?4, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     id,
                     title,
@@ -284,7 +292,8 @@ impl TaskService {
                     flow_id,
                     frozen,
                     flow_ids_json,
-                    connection_id
+                    connection_id,
+                    workspace
                 ],
             )
             .map_err(|e| format!("创建任务失败: {e}"))?;
@@ -318,6 +327,8 @@ impl TaskService {
             flow_ids,
             // 任务级连接(A 批 B1):原样回带(前端据此显示「本任务用哪条连接」)
             connection_id: connection_id.map(str::to_string),
+            // 工作区(编码通道批次):原样回带回冻结值(前端据此显示「已绑定工作区」)
+            workspace: workspace.map(str::to_string),
         })
     }
 

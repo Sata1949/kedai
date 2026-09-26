@@ -180,6 +180,21 @@ impl TaskEngine {
         cancel: watch::Receiver<bool>,
         token: u64,
     ) {
+        // 工作区作用域(编码通道批次 1):绑定了工作区的任务在此构造一次并随上下文下传。
+        // 目录已失效时**不降级为 None**——降级会让 bash 的 cwd 回落到数据目录去动用户
+        // 真实数据,这里宁可让任务以明确错误终止。
+        let scope = match crate::tools::workspace_guard::scope_for_task(task.workspace.as_deref()) {
+            Ok(scope) => scope,
+            Err(e) => {
+                self.svc.finalize_terminal(
+                    &task.id,
+                    token,
+                    TaskTerminal::Failed { error: Some(e) },
+                    *cancel.borrow(),
+                );
+                return;
+            }
+        };
         let ctx = TaskRunContext {
             task_id: task.id.clone(),
             token,
@@ -190,6 +205,7 @@ impl TaskEngine {
             cancel: cancel.clone(),
             // 任务级连接(A 批 B1):随上下文下传,供工具循环参数装配回退
             connection_id: task.connection_id.clone(),
+            scope,
         };
         // 单一收尾出口(批次 B 依赖倒置):执行器返回终态值,引擎按值分派落库;
         // Err 分支兜底为 Failed(ended_by_cancel 以取消通道求值)。收尾判定所需的

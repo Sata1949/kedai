@@ -121,6 +121,8 @@ impl AgentEngine {
                                 session_id: session_id.to_string(),
                                 character_id: req.character_id.clone(),
                                 agent_depth: 0,
+                                // 角色扮演链路不绑工作区:工作区文件工具不会在此下发
+                                scope: None,
                             };
                             let args = json!({ "text": reflect_text, "entries": entries });
                             match self
@@ -176,6 +178,8 @@ impl AgentEngine {
                         session_id: session_id.to_string(),
                         character_id: req.character_id.clone(),
                         agent_depth: 0,
+                        // 反思阶段的文本修正工具不触达文件系统,无工作区语义
+                        scope: None,
                     };
                     match reflect_with_tools(
                         self,

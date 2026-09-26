@@ -392,6 +392,12 @@ fn tool_when(name: &str) -> String {
         "update_variables" => "需要更新当前会话的 stat_data 变量树时调用。",
         "submit" => "需要把最终产物作为文件交付给用户时调用(写入设备下载位置,返回落盘路径)。",
         "run_flow" => "需要整套预置流程(而非单个工具)来完成一个子目标时调用;可用流程由本任务名单决定,成果作为本次调用结果返回。",
+        // 工作区文件工具族(编码通道批次;仅任务绑定工作区时下发)
+        "fs_read" => "需要读取本任务工作区里的文件内容时调用(带行号、可分页);改文件前先用它读一遍。",
+        "fs_write" => "需要新建或整体重写工作区里的文件时调用;覆盖已有文件前必须先 fs_read(防盲写)。",
+        "fs_edit" => "需要定点修改工作区文件里的一段文本时调用(比 fs_write 省 token);先 fs_read,且原文需能唯一匹配。",
+        "fs_glob" => "需要按通配模式(如 **/*.rs)列出工作区里的文件、确认路径拼写时调用。",
+        "fs_grep" => "需要按正则在工作区里检索文本、定位到具体文件与行号时调用。",
         _ => return String::new(),
     };
     s.to_string()
@@ -402,13 +408,13 @@ fn tool_when(name: &str) -> String {
 /// 未知名(脚本插件工具)返回 None,前端回退 JSON 直出。
 pub fn render_kind_for(name: &str) -> Option<&'static str> {
     match name {
-        "read" => Some("read"),
+        "read" | "fs_read" | "fs_grep" => Some("read"),
         "search" => Some("search"),
         "calculator" | "role" | "write" | "replace" | "create" | "todo" | "agentgo"
         | "agentend" | "sleep" | "censor_text" | "memory_read" | "memory_write"
-        | "update_variables" | "get_state" | "apply_patch" | "submit" | "run_flow" => {
-            Some("generic")
-        }
+        | "update_variables" | "get_state" | "apply_patch" | "submit" | "run_flow"
+        // 工作区写/列族(编码通道批次)走通用渲染
+        | "fs_write" | "fs_edit" | "fs_glob" => Some("generic"),
         _ => None,
     }
 }
@@ -422,6 +428,7 @@ mod tests {
             session_id: "s".into(),
             character_id: "c".into(),
             agent_depth: 0,
+            scope: None,
         }
     }
 

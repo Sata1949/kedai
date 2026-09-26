@@ -135,7 +135,12 @@ CREATE TABLE IF NOT EXISTS tasks (
   -- 任务级连接的 id(NULL = 跟随设置的默认连接;A 批 B1)。语义:该任务所有 LLM 调用的
   -- **缺省连接**(节点级 connection_id 优先);指向 settings.json 的 connections[].id。
   -- 旧库经 migration::ensure_tasks_flow_columns 幂等补列(同属表尾追加,顺序不可调换)。
-  connection_id TEXT
+  connection_id TEXT,
+  -- 任务绑定的工作区绝对路径(NULL = 未绑定工作区;编码通道批次)。语义:创建期
+  -- canonicalize 后冻结,绑定后任务获得工作区文件工具族(fs_*)且 bash 缺省 cwd 落在
+  -- 其内。旧库经 migration::ensure_tasks_workspace_column 幂等补列;列追加在表尾以对齐
+  -- ALTER ADD COLUMN 的追加顺序(schema 指纹比对依赖)。
+  workspace    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
 -- 任务列表按角色 / 状态过滤(2026-09-13 批次 3 补;旧库经 ensure_perf_indexes 补建)

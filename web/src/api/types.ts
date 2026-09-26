@@ -1005,6 +1005,13 @@ export interface TaskRecord {
    * 任务不可跨机搬运,故不像流程那样留到运行期才报错。
    */
   connection_id?: string | null;
+  /**
+   * 任务绑定的**工作区**(编码通道批次;空/缺省 = 未绑定)。
+   *
+   * 非空时是创建期就绪冻结的 canonical 绝对路径:工作区文件工具族(`fs_*`)以它为
+   * 路径闸门根,`bash` 以它为 cwd 缺省与 jail 边界。未绑定的任务不下发该工具族。
+   */
+  workspace?: string | null;
 }
 
 /**

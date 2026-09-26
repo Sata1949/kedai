@@ -289,6 +289,8 @@ impl CustomExecutor {
             &settings.task_tool_policy,
             &settings.task_tool_allowlist,
             &self.engine.tool_registry(),
+            // 工作区工具族只在绑定了工作区的任务里下发
+            ctx.scope.is_some(),
         );
         // Some([]) = 策略全量集;Some(list) = 策略集 ∩ 步骤白名单
         let mut tools: Vec<_> = if whitelist.is_empty() {
@@ -367,6 +369,7 @@ impl CustomExecutor {
             session_id: session_id.clone(),
             character_id: String::new(), // custom 不吃角色卡
             agent_depth: 0,
+            scope: ctx.scope.clone(),
         };
         // 事件桥(批次 R4 携 phase/step_index):custom 工具步骤的调用追踪口径为
         // phase + 本步骤下标(与下方 record_llm_call 一致;子图为 subflow.<路径>)

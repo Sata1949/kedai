@@ -53,6 +53,14 @@ pub struct CreateTaskBody {
     /// 故不像流程库那样把引用校验推迟到运行期。运行期引用失效即明确报错,不静默回退。
     #[serde(default)]
     pub connection_id: Option<String>,
+    /// **绑定的工作区**(编码通道批次 1;缺省/空串 = 不绑定,旧客户端零变化)。
+    ///
+    /// 非空时必须是**已存在的目录**:创建期 canonicalize 后**冻结**落库(此后目录被移走
+    /// 或删除,任务会以明确错误终止,不静默降级)。工作区是 `fs_*` 工具族的路径闸门根,
+    /// 也是 `bash` 的 cwd 缺省与 jail 边界。与数据目录的双向包含关系一律拒绝
+    /// (不许把工作区指进数据目录,也不许让数据目录落在工作区内)。
+    #[serde(default)]
+    pub workspace: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -92,6 +100,34 @@ pub async fn list(State(state): State<Arc<AppState>>) -> Response {
     }
 }
 
+/// 校验创建请求里的工作区并**冻结**为规范化绝对路径(编码通道批次 1)。
+///
+/// 返回 `Ok(None)` = 未绑定(缺省/空串,旧客户端零变化);`Ok(Some(path))` = 可落库的
+/// canonical 绝对路径。判据与工具期二次防线同源(`tools::workspace_guard::data_dir_conflict`),
+/// 不在这里另写一份比较逻辑——创建期与运行期的口径必须只有一个出处。
+///
+/// 抽成自由函数以便单测覆盖三条负路径,不必起整个 AppState。
+fn validate_workspace(
+    raw: Option<&str>,
+    data_dir: &std::path::Path,
+) -> Result<Option<String>, String> {
+    let raw = match raw.map(str::trim).filter(|s| !s.is_empty()) {
+        None => return Ok(None),
+        Some(raw) => raw,
+    };
+    let path = std::path::Path::new(raw);
+    if !path.is_dir() {
+        return Err(format!("工作区不存在或不是目录:{raw}"));
+    }
+    let canonical = path
+        .canonicalize()
+        .map_err(|e| format!("工作区路径无法解析:{raw}({e})"))?;
+    if let Some(reason) = crate::tools::workspace_guard::data_dir_conflict(&canonical, data_dir) {
+        return Err(reason);
+    }
+    Ok(Some(canonical.to_string_lossy().into_owned()))
+}
+
 pub async fn create(
     State(state): State<Arc<AppState>>,
     JsonBody(body): JsonBody<CreateTaskBody>,
@@ -114,6 +150,11 @@ pub async fn create(
     let flow_id = body.flow_id.clone();
     let flow_ids = body.flow_ids.clone();
     let connection_id = body.connection_id.clone();
+    // 工作区(编码通道批次 1):创建期校验 + canonicalize 冻结;数据目录包含关系双向拒绝
+    let workspace = match validate_workspace(body.workspace.as_deref(), &state.config.data_dir) {
+        Ok(w) => w,
+        Err(e) => return validation(e),
+    };
     match state
         .db_call(move || {
             svc.create(
@@ -124,6 +165,7 @@ pub async fn create(
                 flow_id.as_deref(),
                 flow_ids.as_deref(),
                 connection_id.as_deref(),
+                workspace.as_deref(),
             )
         })
         .await
@@ -426,5 +468,54 @@ pub async fn delete(State(state): State<Arc<AppState>>, Path(id): Path<String>) 
         Err(e) => db_err(&e),
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => not_found("任务不存在"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 工作区校验(编码通道批次 1)三条负路径 + 一条正路径。
+    /// 负路径都在**创建期**拦下(不建行):指到不存在的位置、指到数据目录内、
+    /// 指到数据目录的上级(后者会让工作区工具顺着相对路径走进真实数据目录)。
+    #[test]
+    fn validate_workspace_rejects_invalid_targets() {
+        let tmp = crate::utils::test_support::TempDataDir::new("ws-validate");
+        let data_dir = tmp.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let ws = tmp.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+
+        // 缺省/空串 → 未绑定(旧客户端零变化)
+        assert_eq!(validate_workspace(None, &data_dir).unwrap(), None);
+        assert_eq!(validate_workspace(Some("   "), &data_dir).unwrap(), None);
+
+        // 不存在的位置 → 拒绝
+        let missing = tmp.join("nope");
+        let err = validate_workspace(Some(&missing.to_string_lossy()), &data_dir)
+            .expect_err("不存在的目录必须被拒");
+        assert!(err.contains("不存在"), "文案应指明不存在: {err}");
+
+        // 落在数据目录内 → 拒绝
+        let inside_data = data_dir.join("inner");
+        std::fs::create_dir_all(&inside_data).unwrap();
+        let err = validate_workspace(Some(&inside_data.to_string_lossy()), &data_dir)
+            .expect_err("数据目录内的路径必须被拒");
+        assert!(err.contains("数据目录"), "文案应指明数据目录: {err}");
+
+        // 数据目录的上级 → 拒绝(覆盖 tmp 本身)
+        let err = validate_workspace(Some(&tmp.path().to_string_lossy()), &data_dir)
+            .expect_err("包含数据目录的路径必须被拒");
+        assert!(err.contains("上级"), "文案应指明上级目录: {err}");
+
+        // 正常目录 → canonical 绝对路径
+        let got = validate_workspace(Some(&ws.to_string_lossy()), &data_dir)
+            .unwrap()
+            .expect("应返回已绑定的工作区");
+        assert_eq!(
+            std::path::Path::new(&got),
+            ws.canonicalize().unwrap(),
+            "落库值应为 canonical 绝对路径"
+        );
     }
 }

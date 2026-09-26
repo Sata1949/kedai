@@ -533,6 +533,8 @@ impl AgentEngine {
                 session_id: session_id.clone(),
                 character_id: req.character_id.clone(),
                 agent_depth: 0,
+                // 聊天主链路无工作区绑定(工作区在任务创建期冻结,见 task_engine::context)
+                scope: None,
             };
 
             // ===== 2. 执行阶段 =====
@@ -651,6 +653,8 @@ impl AgentEngine {
                                 session_id: session_id.clone(),
                                 character_id: req.character_id.clone(),
                                 agent_depth: 0,
+                                // 禁词替换工具不触达文件系统,无工作区语义
+                                scope: None,
                             };
                             let args = json!({ "text": clean_content, "entries": entries });
                             match self

@@ -78,8 +78,9 @@ impl ToolDeps {
     /// 测试用空依赖(临时目录 + mock 连接器)。
     /// 返回 (守卫, 依赖):守卫不能存进 ToolDeps(其 data_dir 是 PathBuf),
     /// 由调用方持有并须活到 deps 之后(解构绑定按逆序析构,守卫在前即最后析构)
+    /// 可见性 pub(crate):tools 下各工具域测试(含 agent_tools_fs)共用同一份空依赖。
     #[cfg(test)]
-    fn dummy_for_test() -> (crate::utils::test_support::TempDataDir, Self) {
+    pub(crate) fn dummy_for_test() -> (crate::utils::test_support::TempDataDir, Self) {
         let dir = crate::utils::test_support::TempDataDir::new("tool-test");
         let db = Arc::new(crate::models::db::Db::open(&dir.join("t.db"), &dir).unwrap());
         let deps = ToolDeps {
@@ -233,6 +234,7 @@ mod tests {
                     session_id: "s".into(),
                     character_id: "c".into(),
                     agent_depth: 0,
+                    scope: None,
                 },
             )
             .await
@@ -255,6 +257,7 @@ mod tests {
                     session_id: "s".into(),
                     character_id: "c".into(),
                     agent_depth: 0,
+                    scope: None,
                 },
             )
             .await
@@ -278,6 +281,7 @@ mod tests {
             session_id: "s".into(),
             character_id: "c".into(),
             agent_depth: 0,
+            scope: None,
         };
         for tool in ["write", "create"] {
             reg.permissions()
@@ -373,6 +377,7 @@ mod tests {
             session_id: session.id.clone(),
             character_id: crate::services::character_service::BUILTIN_SYSTEM_ID.into(),
             agent_depth: 0,
+            scope: None,
         };
         for tool in ["write", "replace"] {
             reg.permissions()
@@ -459,6 +464,7 @@ mod tests {
             session_id: "s".into(),
             character_id: "c".into(),
             agent_depth: 0,
+            scope: None,
         };
         for tool in ["write", "replace"] {
             reg.permissions()
@@ -546,6 +552,7 @@ mod tests {
             session_id: "s".into(),
             character_id: "c".into(),
             agent_depth: 0,
+            scope: None,
         };
         for tool in ["write", "replace"] {
             reg.permissions()
@@ -653,6 +660,7 @@ mod tests {
             session_id: session.id.clone(),
             character_id: "c".into(),
             agent_depth: 2,
+            scope: None,
         };
         let err = reg
             .execute(
@@ -669,6 +677,7 @@ mod tests {
         // 深度 1(第二层)仍可派发
         let ctx1 = ToolContext {
             agent_depth: 1,
+            scope: None,
             ..ctx
         };
         let ok = reg
@@ -712,6 +721,7 @@ mod tests {
             session_id: sid.to_string(),
             character_id: "c".into(),
             agent_depth: 0,
+            scope: None,
         };
         let err = reg
             .execute(
@@ -787,6 +797,7 @@ mod tests {
             session_id: session.id,
             character_id: crate::services::character_service::BUILTIN_SYSTEM_ID.into(),
             agent_depth: 0,
+            scope: None,
         }
     }
 
@@ -907,6 +918,7 @@ mod tests {
             session_id: session.id.clone(),
             character_id: "c".into(),
             agent_depth: 0,
+            scope: None,
         };
 
         // 结果项统一结构化:命中 ok=true + content;未命中 ok=false + error + candidates
@@ -1010,6 +1022,7 @@ mod tests {
             session_id: session.id.clone(),
             character_id: "c".into(),
             agent_depth: 0,
+            scope: None,
         };
         let args = serde_json::json!({
             "queries": [{ "type": "subtask", "name": "probe" }]
@@ -1150,6 +1163,7 @@ mod tests {
             session_id: "task:t1:sub:x".into(),
             character_id: "c".into(),
             agent_depth: 0,
+            scope: None,
         };
         let raw = reg.execute("todo", "{}", ctx).await.unwrap();
         let v: Value = serde_json::from_str(&raw).unwrap();

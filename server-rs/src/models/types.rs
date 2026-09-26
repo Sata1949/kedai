@@ -1,6 +1,11 @@
 // 核心类型定义,与 Node 版 server/src/models/types.ts 契约一一对应
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+// 工作区作用域(ToolContext.scope 的载体,ExecScope)需要的标准库类型
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 // ---------- 角色 ----------
 #[derive(Debug, Clone, Serialize)]
@@ -725,6 +730,89 @@ pub struct ToolContext {
     /// 深度守卫:子 agent 以 `agent_depth + 1` 运行,达 `subagent_max_depth` 后不再派发
     /// (见 `tools/agent_tools_agent.rs`)。
     pub agent_depth: u32,
+    /// 工作区作用域(任务绑定了工作区时非空;聊天路径恒 None)。
+    /// 子 agent 继承父 ctx 的 scope(同一个 Arc,读写记录共享)。
+    pub scope: Option<Arc<ExecScope>>,
+}
+
+/// 运行期工作区作用域:任务绑定了工作区时由任务引擎构造,随 ToolContext 逐调用传递。
+/// 同时承载「本 run 内读过哪些文件」的记录(fs_write/fs_edit 的先读后写校验用)。
+///
+/// 不变量:workspace 是**创建期已 canonicalize 的绝对路径**(冻结),运行期不再重新解析
+/// 用户输入;`read` 记录以同口径解析后的绝对路径为键(见 `tools::workspace_guard`)。
+pub struct ExecScope {
+    /// 创建期已 canonicalize 的绝对路径(冻结)
+    workspace: PathBuf,
+    /// bash 的 cwd 是否强制落在工作区内
+    jail: bool,
+    /// 本 run 内读过的文件 → 读取时刻的 (mtime, 长度)。
+    /// 用 mtime+长度而非内容哈希:单次 stat 即可判定「读后被外部改动」,
+    /// 误判面(同长度同 mtime 的内容替换)在实践中不需要花费整文件读取来封堵。
+    reads: Mutex<HashMap<PathBuf, (SystemTime, u64)>>,
+}
+
+impl ExecScope {
+    pub fn new(workspace: PathBuf, jail: bool) -> Self {
+        ExecScope {
+            workspace,
+            jail,
+            reads: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn workspace(&self) -> &Path {
+        &self.workspace
+    }
+
+    /// bash 的 cwd 是否强制落在工作区内(false = 维持改造前语义)
+    pub fn jail(&self) -> bool {
+        self.jail
+    }
+
+    /// 记录「刚读过 path」;`stamp` 由 [`ExecScope::stamp_of`] 取得。
+    /// 锁中毒按 into_inner 恢复(项目锁纪律:读记录不是不变量,失败方向不影响安全判定)。
+    pub fn note_read(&self, path: &Path, stamp: (SystemTime, u64)) {
+        self.reads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(path.to_path_buf(), stamp);
+    }
+
+    /// 单次 stat 取 (mtime, 长度);文件不存在/无权限时返回 Err。
+    pub fn stamp_of(path: &Path) -> std::io::Result<(SystemTime, u64)> {
+        let meta = std::fs::metadata(path)?;
+        let mtime = meta.modified()?;
+        Ok((mtime, meta.len()))
+    }
+
+    /// 先读后写校验(防盲写)。三种结果的文案即给模型的下一步动作。
+    pub fn check_read_before_write(&self, path: &Path) -> Result<(), String> {
+        let recorded = self
+            .reads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(path)
+            .copied();
+        let Some(recorded) = recorded else {
+            return Err("尚未读取该文件,请先用 fs_read 读取后再改(防盲写)".into());
+        };
+        let now = Self::stamp_of(path)
+            .map_err(|e| format!("无法确认文件当前状态(读取后被删除或不可访问?): {e}"))?;
+        if now != recorded {
+            return Err("文件在读取后被外部修改,请重新 fs_read 后再改".into());
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for ExecScope {
+    /// 只暴露「绑定了哪个工作区 + 是否 jail」,不打印读记录(体积大且与调试无关)
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExecScope")
+            .field("workspace", &self.workspace)
+            .field("jail", &self.jail)
+            .finish()
+    }
 }
 
 /// 工具执行器签名（**L1 契约**：工具注册表与各 L3 加载器共用）。
@@ -1247,6 +1335,15 @@ pub struct TaskRecord {
     /// (连接被删/被停用)按 5b 口径**明确报错,不静默回退默认连接**。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_id: Option<String>,
+    /// **任务绑定的工作区**(编码通道批次;空 = 未绑定,旧客户端/旧行零变化)。
+    ///
+    /// 语义:创建期就绪冻结的**绝对路径**——创建时校验「已存在的目录 + canonicalize
+    /// 成功 + 与 DATA_DIR 互不包含」,落库的是 canonicalize 后的结果,此后不再解析
+    /// 用户输入。绑定后任务获得工作区文件工具族(`fs_*`)并让 bash 的缺省 cwd 落在
+    /// 工作区内;未绑定的任务两者都不给(见 `services/task_engine/tool_policy.rs`)。
+    /// 该列追加在表尾,旧库经 `migration::ensure_tasks_workspace_column` 幂等补列。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
 }
 
 fn task_default_status() -> TaskStatus {
@@ -1749,6 +1846,7 @@ mod tests {
             flow_id: None,
             flow_ids: None,
             connection_id: None,
+            workspace: None,
         };
         let json = serde_json::to_string(&task).unwrap();
         assert!(!json.contains("flow_id"), "None 时不应落键: {json}");
@@ -1790,6 +1888,7 @@ mod tests {
             flow_id: None,
             flow_ids: None,
             connection_id: None,
+            workspace: None,
         };
         let json = serde_json::to_string(&task).unwrap();
         assert!(!json.contains("flow_ids"), "None 时不应落键: {json}");
@@ -1808,5 +1907,41 @@ mod tests {
         assert!(back.contains(r#""flow_ids":["f-b","f-a"]"#), "往返: {back}");
         let round: TaskRecord = serde_json::from_str(&back).unwrap();
         assert_eq!(round.flow_ids, Some(vec!["f-b".into(), "f-a".into()]));
+    }
+
+    /// ExecScope 的先读后写(编码通道批次 1):未读拒绝、读后被外部改动拒绝、刷新后放行。
+    /// stamp 用真实文件取((mtime, len)),不构造假时间戳——否则测不到「比对真实状态」。
+    #[test]
+    fn exec_scope_requires_read_before_write() {
+        let tmp = crate::utils::test_support::TempDataDir::new("exec-scope");
+        let file = tmp.join("a.txt");
+        std::fs::write(&file, "v1").unwrap();
+        let scope = ExecScope::new(tmp.path().to_path_buf(), true);
+
+        // 未读 → 拒绝,文案指明先读
+        let err = scope.check_read_before_write(&file).unwrap_err();
+        assert!(err.contains("fs_read"), "文案应指明先读: {err}");
+
+        // 读过且未变 → 放行
+        scope.note_read(&file, ExecScope::stamp_of(&file).unwrap());
+        assert!(scope.check_read_before_write(&file).is_ok());
+
+        // 读后被外部改动(长度变化即命中,不依赖 mtime 分辨率)→ 拒绝并要求重读
+        std::fs::write(&file, "v2-longer").unwrap();
+        let err = scope.check_read_before_write(&file).unwrap_err();
+        assert!(err.contains("重新"), "文案应要求重新读取: {err}");
+
+        // 刷新读记录后重新放行(否则同一次 run 里连改两次会被自己拦住)
+        scope.note_read(&file, ExecScope::stamp_of(&file).unwrap());
+        assert!(scope.check_read_before_write(&file).is_ok());
+    }
+
+    /// 作用域携带的工作区与 jail 标志(与 TaskRunContext.scope = None 的分支配套)
+    #[test]
+    fn exec_scope_carries_workspace_and_jail_flag() {
+        let tmp = crate::utils::test_support::TempDataDir::new("exec-scope-flags");
+        let scope = ExecScope::new(tmp.path().to_path_buf(), false);
+        assert_eq!(scope.workspace(), tmp.path());
+        assert!(!scope.jail());
     }
 }

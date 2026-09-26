@@ -13,6 +13,9 @@ pub mod bash;
 // agent 强化工具集拆分(按功能域分文件;agent_tools.rs 为聚合入口)。
 // 代际归属见本文件头部:tools/ 整体为 L2(2026-09-14 修正),不再是「青层工具域」。
 mod agent_tools_agent;
+// 工作区文件工具族(编码通道批次):工具**定义**在此,可见性由任务工具策略按
+// 「本任务是否绑定工作区」过滤(见 task_engine/tool_policy.rs 与 tool_sets::exclude_workspace)
+pub mod agent_tools_fs;
 mod agent_tools_read;
 mod agent_tools_search;
 mod agent_tools_shared;
@@ -32,6 +35,9 @@ pub mod submit;
 pub mod run_flow;
 pub mod tool_sets;
 pub mod variables;
+// 工作区路径闸门(编码通道批次,本批安全核心):fs_* 工具与 bash 的 cwd 校验共用;
+// 创建期的工作区校验也复用其判据(见 agent_tools_fs.rs / bash.rs / api/tasks.rs)
+pub mod workspace_guard;
 
 use agent_tools::ToolDeps;
 use registry::ToolRegistry;
@@ -81,5 +87,8 @@ pub fn register_builtin_tools(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
     // 动态调用流程(二维批次 7b):始终注册但**永不进正文列表**(见 tool_sets::META_TOOLS),
     // 只由 custom 执行器在对比模式的宽松节点上显式下发
     run_flow::register_run_flow_tool(registry);
+    // 工作区文件工具族(编码通道批次):始终注册,可见性由任务工具策略按工作区绑定过滤
+    // (未绑定任务与聊天路径都看不到它们——调了必然报「未绑定工作区」)
+    agent_tools_fs::register_fs_tools(registry, deps.clone());
     agent_tools::register_agent_tools(registry, deps);
 }

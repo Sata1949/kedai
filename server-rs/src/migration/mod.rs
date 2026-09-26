@@ -22,7 +22,7 @@ pub use ddl::{
     ensure_memory_entries_pinned_column, ensure_perf_indexes, ensure_skills_progressive_columns,
     ensure_task_llm_calls_finish_reason_column, ensure_task_messages_table,
     ensure_task_subtasks_finished_at_column, ensure_tasks_executor_id_column,
-    ensure_tasks_flow_columns, ensure_tasks_task_mode_column,
+    ensure_tasks_flow_columns, ensure_tasks_task_mode_column, ensure_tasks_workspace_column,
 };
 pub use merge::{merge_data_dirs, MergeReport, TableReport};
 
@@ -194,21 +194,30 @@ mod tests {
         .unwrap();
 
         ensure_tasks_flow_columns(&conn).unwrap();
+        // 编码通道批次:workspace 列同属表尾追加,Db::open 里紧随 flow 列执行,
+        // 本用例按同一顺序补齐,才能与新建库的列定义逐字一致
+        ensure_tasks_workspace_column(&conn).unwrap();
         let columns: Vec<String> = table_columns(&conn, "main", "tasks")
             .unwrap()
             .into_iter()
             .map(|c| c.name)
             .collect();
-        // 列序固定为 flow_id → flow_snapshot → flow_ids → connection_id
-        // (与新建库建表顺序一致,schema 比对依赖);connection_id 于 A 批 B1 追加在最后,
-        // 正是为了不打乱上面三列的既有相对顺序。
+        // 列序固定为 flow_id → flow_snapshot → flow_ids → connection_id → workspace
+        // (与新建库建表顺序一致,schema 比对依赖);后两列分别于 A 批 B1 与编码通道批次
+        // 追加在最后,正是为了不打乱上面三列的既有相对顺序。
         let tail = columns
-            .get(columns.len().saturating_sub(4)..)
+            .get(columns.len().saturating_sub(5)..)
             .unwrap_or(&[]);
         assert_eq!(
             tail,
-            ["flow_id", "flow_snapshot", "flow_ids", "connection_id"],
-            "四列应追加在表尾且顺序固定,实际: {columns:?}"
+            [
+                "flow_id",
+                "flow_snapshot",
+                "flow_ids",
+                "connection_id",
+                "workspace"
+            ],
+            "五列应追加在表尾且顺序固定,实际: {columns:?}"
         );
 
         // 旧行零迁移成本:三列均为 NULL(未绑定 / 尚无快照 / 强制模式)
@@ -229,6 +238,14 @@ mod tests {
             })
             .unwrap();
         assert_eq!(fids, None, "旧行是强制模式(名单为空)");
+
+        // 编码通道批次:workspace 同样补在表尾,旧行 NULL(未绑定工作区,零回填成本)
+        let ws: Option<String> = conn
+            .query_row("SELECT workspace FROM tasks WHERE id = 't1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(ws, None, "旧行未绑定工作区");
 
         // 幂等:重复执行不报错、不产生重复列
         ensure_tasks_flow_columns(&conn).unwrap();

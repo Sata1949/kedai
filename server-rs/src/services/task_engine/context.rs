@@ -38,4 +38,11 @@ pub(crate) struct TaskRunContext {
     /// 消费点在「工具循环参数装配」这一处;纯生成路径不必看它,那条路径由
     /// `TaskService::generate_text` 内部统一回退(单一出处,不两处各判一次)。
     pub connection_id: Option<String>,
+    /// **工作区作用域**(编码通道批次 1;空 = 未绑定工作区)。
+    ///
+    /// 由 `tasks.workspace` 在任务开始时经 `tools::workspace_guard::scope_for_task`
+    /// 构造一次,随上下文下传到每个工具调用:`fs_*` 工具族以它为路径闸门根,
+    /// `bash` 以它为 cwd 缺省与 jail 边界。`Arc` 共享让同一任务的所有工具调用
+    /// 共用一份「本 run 读过哪些文件」的记录(fs_write/fs_edit 的先读后写校验依赖它)。
+    pub scope: Option<std::sync::Arc<crate::models::types::ExecScope>>,
 }

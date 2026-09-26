@@ -80,6 +80,8 @@ impl ModeExecutor for FollowupExecutor {
                 label: "主 agent".into(),
                 // 任务级连接(A 批 B1):followup 续跑同样用任务的连接
                 connection_id: ctx.connection_id.clone(),
+                // 工作区作用域(编码通道批次 1):终态追加指令同样受工作区约束
+                scope: ctx.scope.clone(),
             };
             let result =
                 run_agent_loop(svc.clone(), self.engine.clone(), call, cancel.clone()).await;

@@ -49,7 +49,7 @@ pub(super) fn recover_orphan_tasks(db: &Db) -> Vec<String> {
 
 /// 任务主表列:0 id, 1 title, 2 status, 3 plan, 4 result, 5 error, 6 character_id,
 /// 7 created_at, 8 updated_at, 9 task_mode, 10 executor_id, 11 flow_id, 12 flow_ids,
-/// 13 connection_id (新增列一律追加在表尾,与 TASK_COLS 及建表顺序一致)
+/// 13 connection_id, 14 workspace (新增列一律追加在表尾,与 TASK_COLS 及建表顺序一致)
 ///
 /// **有意不含 flow_snapshot**:它是 O(流程库) 体积的 JSON,而 TASK_COLS 被列表与详情
 /// 每次事件刷新都用;要读快照走 [`TaskService::flow_snapshot`](本文件的单列查询)。
@@ -85,11 +85,17 @@ pub(super) fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<TaskRecord> {
         // 任务级连接(A 批 B1):纯 id 列,读取不做容错——引用失效由运行期按 5b 口径
         // **明确报错**(不静默回退默认连接),与 flow_ids 的 JSON 解析容错不同源。
         connection_id: row.get(13)?,
+        // 工作区(编码通道批次):创建期冻结的 canonical 绝对路径;NULL/空串都视为未绑定
+        // (空串只会来自手改 DB,一并归一为 None,免得下游把空路径当「绑定了一个根目录」)
+        workspace: row
+            .get::<_, Option<String>>(14)?
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
     })
 }
 
 pub(super) const TASK_COLS: &str = "id, title, status, plan, result, error, character_id, \
-     created_at, updated_at, task_mode, executor_id, flow_id, flow_ids, connection_id";
+     created_at, updated_at, task_mode, executor_id, flow_id, flow_ids, connection_id, workspace";
 
 /// 按字符截断(中文安全,不切 char 边界;调用追踪摘要用)
 fn truncate_chars(s: &str, max: usize) -> String {
