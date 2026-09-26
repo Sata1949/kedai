@@ -59,6 +59,17 @@ jobs:
       - name: Install npm deps (lockfile 严格一致)
         run: npm ci
 
+      # 前端产物必须先于 Rust 阶段存在。`server-rs/src/api/static_files.rs:202` 的
+      # `include_dir!("$CARGO_MANIFEST_DIR/../web/dist")` 是**编译期内嵌**,目录不存在
+      # 即 `proc macro panicked` 并编译失败——2026-09-26 首次真跑就撞上(cargo clippy
+      # exit=101,fmt 通过、后续阶段全部跳过)。`web/dist` 被 `.gitignore` 忽略
+      # (`.gitignore:3`),故**全新 clone 上必须显式构建一次**;本地看不出来是因为
+      # build.ps1 总是先构建前端。
+      # 代价:check-all.ps1 的 `web: vite build` 阶段随后还会再构建一次(该阶段只在
+      # `-Quick` 下跳过),属可接受的少量重复,换来 Rust 阶段可编译。
+      - name: Build web (Rust 阶段的 include_dir! 依赖它存在)
+        run: npm run build -w web
+
       # 审计口径与本地一致(批次 6.1):check-all.ps1 的独立「审计段」同时扫描
       # server-rs/Cargo.lock 与 src-tauri/Cargo.lock 两把锁(cargo audit 硬门禁),
       # 并执行 npm audit --omit=dev 生产依赖硬门禁。无法本地修复的 unmaintained 告警
