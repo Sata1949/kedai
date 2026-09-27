@@ -6,7 +6,7 @@ import type { AgentFlowStep } from '../api/types';
 
 /**
  * 步骤级输出上限(tokens)的允许区间——**与后端校验同口径**。
- * 后端单一出处:`server-rs/src/services/agent_flow_service.rs` 的 `validate_flow`
+ * 后端单一出处:`server-rs/src/services/agent_flow_service/` 的 `validate_flow`
  * 只收 1..=32768(超出即 400「输出上限需在 1-32768 之间」)。
  * 编辑器此前把 `max` 写死 131072,用户可填不可存(收口批 2026-09-24 对齐);
  * 两端若再改区间,必须同批改这里与后端,`AgentFlowStepEditor.limits.test.ts` 锁定。
@@ -16,7 +16,7 @@ export const STEP_OUTPUT_TOKENS_MAX = 32768;
 
 /**
  * 节点级上下文上限(tokens)的允许区间——**与后端校验同口径**。
- * 后端单一出处:`server-rs/src/services/agent_flow_service.rs` 的
+ * 后端单一出处:`server-rs/src/services/agent_flow_service/` 的
  * `MIN_STEP_MAX_CONTEXT` / `MAX_STEP_MAX_CONTEXT`(256..=1048576;上限与全局
  * `max_context_tokens` 同口径,下限刻意更低——本字段的用途正是「给单个节点设更小的窗口」)。
  * 缺省(留空)= **不裁剪**,与批次 8 之前的行为逐字节一致。

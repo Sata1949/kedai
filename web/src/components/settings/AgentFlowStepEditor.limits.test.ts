@@ -2,7 +2,7 @@
 // 步骤编辑器的**数值区间**测试(自定义流程收口批 2026-09-24)。
 //
 // 背景:后端 `validate_flow` 只收 `max_tokens` ∈ 1..=32768
-// (`server-rs/src/services/agent_flow_service.rs` 的「输出上限需在 1-32768 之间」),
+// (`server-rs/src/services/agent_flow_service/` 的「输出上限需在 1-32768 之间」),
 // 而编辑器此前把 `max` 写死 131072——用户在 32769~131072 之间填任何值都会
 // 「UI 看着能填、保存必 400」,且保存失败的提示只把后端中文错误整条展示
 // (`useAgentFlow` 不定位字段),用户无从判断是哪个字段越界。
@@ -59,7 +59,7 @@ function contextLimitInput(wrapper: ReturnType<typeof mount>) {
 
 describe('AgentFlowStepEditor 数值区间(输出上限)', () => {
   it('常量与后端校验区间一致(1..=32768)', () => {
-    // 后端单一出处:server-rs/src/services/agent_flow_service.rs 的 max_tokens 校验
+    // 后端单一出处:server-rs/src/services/agent_flow_service/ 的 max_tokens 校验
     expect(STEP_OUTPUT_TOKENS_MIN).toBe(1);
     expect(STEP_OUTPUT_TOKENS_MAX).toBe(32768);
   });
@@ -88,7 +88,7 @@ describe('AgentFlowStepEditor 数值区间(输出上限)', () => {
 
 describe('AgentFlowStepEditor 数值区间(上下文上限,二维批次 8)', () => {
   it('常量与后端校验区间一致(256..=1048576)', () => {
-    // 后端单一出处:server-rs/src/services/agent_flow_service.rs 的
+    // 后端单一出处:server-rs/src/services/agent_flow_service/ 的
     // MIN_STEP_MAX_CONTEXT / MAX_STEP_MAX_CONTEXT
     expect(STEP_MAX_CONTEXT_MIN).toBe(256);
     expect(STEP_MAX_CONTEXT_MAX).toBe(1048576);

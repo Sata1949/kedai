@@ -108,7 +108,7 @@ const MAPPINGS = [
   {
     label: '流程配置',
     rust: {
-      file: 'server-rs/src/services/agent_flow_service.rs',
+      file: 'server-rs/src/services/agent_flow_service/mod.rs',
       name: 'AgentFlowConfig',
     },
     ts: { file: 'web/src/api/types.ts', name: 'AgentFlowConfig', kind: 'interface' },
@@ -116,7 +116,7 @@ const MAPPINGS = [
   {
     label: '流程库',
     rust: {
-      file: 'server-rs/src/services/agent_flow_service.rs',
+      file: 'server-rs/src/services/agent_flow_service/mod.rs',
       name: 'AgentFlowLibrary',
     },
     ts: { file: 'web/src/api/types.ts', name: 'AgentFlowLibrary', kind: 'interface' },
@@ -126,7 +126,7 @@ const MAPPINGS = [
     // 「跳过 N 个 / M 个分配了新 id」静默消失,用户以为全都导进来了。
     label: '流程导入报告',
     rust: {
-      file: 'server-rs/src/services/agent_flow_service.rs',
+      file: 'server-rs/src/services/agent_flow_service/mod.rs',
       name: 'FlowImportReport',
     },
     ts: { file: 'web/src/api/types.ts', name: 'FlowImportReport', kind: 'interface' },
@@ -135,7 +135,7 @@ const MAPPINGS = [
     // 同上:报告条目(`renamed[]` 的元素)。
     label: '流程 id 重映射',
     rust: {
-      file: 'server-rs/src/services/agent_flow_service.rs',
+      file: 'server-rs/src/services/agent_flow_service/mod.rs',
       name: 'FlowIdRemap',
     },
     ts: { file: 'web/src/api/types.ts', name: 'FlowIdRemap', kind: 'interface' },
@@ -145,7 +145,7 @@ const MAPPINGS = [
     // 本批所有契约里漂移代价最高的一个,故必须机检(前端按 kedai_flow_bundle 判新旧格式)。
     label: '流程搬运包',
     rust: {
-      file: 'server-rs/src/services/agent_flow_service.rs',
+      file: 'server-rs/src/services/agent_flow_service/mod.rs',
       name: 'FlowBundle',
     },
     ts: { file: 'web/src/api/types.ts', name: 'AgentFlowBundle', kind: 'interface' },
@@ -156,7 +156,7 @@ const MAPPINGS = [
     // 前端运行态徽标按它对齐节点,漏字段会让徽标静默退化成「只认当前流程库」。
     label: '任务流程快照',
     rust: {
-      file: 'server-rs/src/services/agent_flow_service.rs',
+      file: 'server-rs/src/services/agent_flow_service/mod.rs',
       name: 'FlowSnapshot',
     },
     ts: { file: 'web/src/api/types.ts', name: 'TaskFlowSnapshot', kind: 'interface' },
