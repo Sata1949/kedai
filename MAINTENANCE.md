@@ -25,7 +25,17 @@
   windows-latest 跑同一套 `check-all.ps1`,触发面**刻意收窄**为 `push` 到 `main` + PR +
   手动 `workflow_dispatch`——平台分支与 `main` 逐字节同源(见「平台分支契约」),给它们
   各跑一遍只会重复烧私有仓额度(免费档 2000 分钟/月,Windows runner 按 2 倍计费)。
-  **不要依赖 CI 兜底**:CI 不覆盖平台分支推送,平台分支与本地提交仍靠前两条兜住。
+  ④ `.github/workflows/ci-linux.yml`(2026-09-27 增,QUALITY-FIX Q4):**平台可移植性档**,
+  `ubuntu-latest`、按 1 倍计费。`check-ubuntu` 只跑平台无关的几段(fmt / clippy / cargo test /
+  前端 typecheck+vitest+bundle budget,**不重复**纯 Node 的文档与架构门禁),用来捕获
+  `cfg(windows)` 之外的可移植性回归;`android-smoke` 仅手动(`workflow_dispatch` 选
+  `target=android`,默认 `none`)——NDK + `cargo-ndk` 对 `aarch64-linux-android` 交叉编译
+  `server-rs` 并自证产物是 `ARM aarch64` + `/system/bin/linker64`,覆盖 Android cfg 路径
+  (JNI / bindgen / 平台执行层)。**它不替代 ③**:③ 仍是唯一权威档(全量 15 段);本档红同样当门禁处理。
+  分档理由(为何独立文件而非同文件加 job)见 `经验.md` E66。
+  **不要依赖 CI 兜底**:CI 不覆盖平台分支推送,平台分支与本地提交仍靠前两条兜住;且服务端
+  **没有分支保护**(私有仓 + Free 计划,rulesets/保护规则双端点 403,见 `遗留.md` CI-PROT-1)——
+  CI 只能**如实报告**、不能**阻止合并**,`--no-verify` 也仍能把本地那两条绕过去。
   变更 `tools/check-*.mjs` 的检查规则时,同步更新本节与本文件的检查项清单。
 - **性能门禁(2026-09-14 起,可选)**:`tools/perf-baseline.mjs` 支持 p95 阈值判定
   (`--max-p95-factor`,默认 1.25),基线值存 `tools/perf-baseline.json`;
@@ -160,7 +170,7 @@ kedai/
 | 兼容别名 | `npm run build:all` / `npm run build:rs` | 均等价 `.\build.ps1`(双端同步);`npm run build:test` 等价 `.\build.ps1 -TestOnly` |
 | 统一改版本号 | `npm run version:bump -- x.y.z` | 7 处版本号一次改全(2 个 package.json、3 个 Cargo.toml、tauri.conf.json、本文档版本行);支持 `-DryRun` 预览 |
 | 后端测试 | `cd server-rs && cargo test` | **1462 个测试(1124 单测 + 338 集成,51 个集成文件)**,**需在 vcvars64 环境**;前端 `npm test -w web` **1195 个(113 文件;静态计数;vitest 运行时为 1213,差值 18 来自 `parser.contract.test.ts` 循环生成的 fixture 用例)**。数字由 `node tools/count-tests.mjs` 自动统计,勿手抄——`npm run count:tests` 查看当前值,`npm run check:tests` 校验文档是否漂移(**2026-09-26 起逐行扫描本节与根 `README.md` 的全部复写处,并校验集成文件数**;其余由代码/脚本派生的计数——表数、`ensure_*` 个数、映射组数、规则字母、ratchet 基线、枚举变体数、门禁阶段数、工具链版本——由 `npm run check:doc-claims` 守护) |
-| 全量检查(本地 CI) | `npm run check` | `tools/check-all.ps1`——**本行是本仓库门禁阶段清单的唯一展开处**,其余文档只写「见本节」。顺序:fmt → clippy → cargo test → **cargo audit(硬门禁,双 Cargo.lock)** → docs: check-docs → lock-sync(双锁漂移)→ contract → arch(规则集以 `tools/check-arch.mjs` 为准,A–L)→ count: tests → docs: check-doc-claims(计数类硬口径)→ 类型 ratchet → eslint → **npm audit(硬门禁)** → vue-tsc(**硬门禁**)→ vitest → vite build → bundle budget(体积预算)→ perf(-Perf 才跑)。**已接入 build.ps1 与 pre-push hook**(CI 工作流为纸面、未运行,见 §0 门禁纪律);`-Quick` 跳 vite build 与 bundle budget,`-SkipWeb` 跳 docs 之后全部 web+契约段,`-AuditOnly` 只跑两段 audit。 **工具链口径(2026-09-27 起,见 `经验.md` E60/E63)**:真值源是仓库根 **`rust-toolchain.toml`**——仓库内任何 rustup 代理调用(`cargo`/`rustc`/`rustfmt`/`clippy`)都解析到它的 `channel`,换机、换会话、`rustup update stable` 都不再改变口径。CI 的 `dtolnay/rust-toolchain@<版本>` 是**必须手写同步的第二处**(该 action 明确不支持读 toolchain 文件),它与本文档工具链行一起被 `npm run check:doc-claims` 逐条钉死——版本漂移**先在门禁转红**,而不是等 CI 炸。升版按 `rust-toolchain.toml` 头注释的五步走(改 channel → 装新工具链 → 同步 ci.yml 与本文档 → 本地 `npm run check` 复现并修掉新 lint → 一起提交),别拿 CI 当选 lint 的地方。 |
+| 全量检查(本地 CI) | `npm run check` | `tools/check-all.ps1`——**本行是本仓库门禁阶段清单的唯一展开处**,其余文档只写「见本节」。顺序:fmt → clippy → cargo test → **cargo audit(硬门禁,双 Cargo.lock)** → docs: check-docs → lock-sync(双锁漂移)→ contract → arch(规则集以 `tools/check-arch.mjs` 为准,A–L)→ count: tests → docs: check-doc-claims(计数类硬口径)→ 类型 ratchet → eslint → **npm audit(硬门禁)** → vue-tsc(**硬门禁**)→ vitest → vite build → bundle budget(体积预算)→ perf(-Perf 才跑)。**已接入 build.ps1 与 pre-push hook**;云端为 GitHub Actions 两档(权威档 `ci.yml` = 本清单全量,平台档 `ci-linux.yml` = fmt/clippy/cargo test/前端三段 + 手动 Android 交叉编译冒烟;2026-09-26 激活,见 §0 门禁纪律);`-Quick` 跳 vite build 与 bundle budget,`-SkipWeb` 跳 docs 之后全部 web+契约段,`-AuditOnly` 只跑两段 audit。 **工具链口径(2026-09-27 起,见 `经验.md` E60/E63)**:真值源是仓库根 **`rust-toolchain.toml`**——仓库内任何 rustup 代理调用(`cargo`/`rustc`/`rustfmt`/`clippy`)都解析到它的 `channel`,换机、换会话、`rustup update stable` 都不再改变口径。CI 各 workflow 里的 `dtolnay/rust-toolchain@<版本>` 是**必须逐处手写同步处**(该 action 明确不支持读 toolchain 文件;2026-09-27 起 `check-doc-claims` 扫 `.github/workflows` 下**每一处**取值与 toml 比对,不再只看第一处),它与本文档工具链行一起被 `npm run check:doc-claims` 逐条钉死——版本漂移**先在门禁转红**,而不是等 CI 炸。升版按 `rust-toolchain.toml` 头注释的五步走(改 channel → 装新工具链 → 同步各 workflow 与本文档 → 本地 `npm run check` 复现并修掉新 lint → 一起提交),别拿 CI 当选 lint 的地方。 |
 `check-arch` 规则自 2026-09-14 起含 C/D/E/G/H/I/J(代际归属与跨代方向以 `tools/arch-layers.json` 为 SSOT),**2026-09-17 起增规则 L**(JNI 按名调用桥类的登记完整性);`check-bundle` 自 2026-09-17 起(基线在脚本内,ratchet 只降不升) |
 | 开发模式 | `cd server-rs && cargo run` + `npm run dev -w web` | 后端 3001 / 前端 5173(代理到 3001) |
 | 前端构建 | `npm run build -w web` | 产出 web/dist(编译进 exe 用) |

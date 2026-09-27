@@ -18,6 +18,19 @@
 
 ---
 
+## 执行口径裁定（2026-09-27，Q4/Q6 落地时补记）
+
+| 项 | 计划稿原口径 | 执行裁定 | 理由 / 证据 |
+|---|---|---|---|
+| Q4 档位位置 | 「`ci.yml` jobs 增加 `check-ubuntu`」 | **独立 `.github/workflows/ci-linux.yml`**（两个 job：`check-ubuntu` + `android-smoke`） | workflow 的派发粒度是**文件级**，同文件会让新档每次迭代连带重跑 30~50 分钟的 Windows 档（×2 计费）。见 `../经验.md` E66 |
+| Q4 冒烟输入 | `workflow_dispatch` 增加 `target: [all, android]` | 改为 `target: [none, android]`，默认 `none` | 手动派发 Linux 档时不该顺带跑 Android 冒烟（默认 `all` 会） |
+| Q4 严格度 | 平台无关段（fmt / clippy / cargo test / 前端三段） | **硬门禁**：Linux 专属红按「Windows-only 语义断言 → 加 `#[cfg(windows)]`；真移植缺陷 → 改 `src`」处置并逐条记账 | 2026-09-27 裁定 |
+| Q6 分支保护 | 「在仓库 Settings 给 `main` 加分支保护：要求 `ci / check` 状态检查通过」 | **无法执行**（`branches/main/protection` 与 `rulesets` 双 403：私有仓 Free 计划不提供）；降级为 `AGENTS.md` 流程纪律 + `../遗留.md` CI-PROT-1 记录事实 | `gh api` 实测 403 `Upgrade to GitHub Pro`，见 `../经验.md` E67 |
+| Q5 issue 迁移 | 「逐条开 issue，文档原条目加 `→ 跟踪：#n`」 | **放弃**（见文末「不做的项」的 Q5 条） | 裁定：issue 创建成本在 AI 时代趋近于零，批量生成的 issue 只造成维护负担 |
+| Q6 走 PR | 「此后非琐碎改动走 功能分支 → PR → CI 状态检查绿 → merge」 | **按原文执行**，写入 `AGENTS.md`；实证为 Q4 落地的临时分支 PR | 单人项目不启用 required review，只看状态检查 |
+
+---
+
 ## 批次 1：拆分巨型文件（Q1）
 
 ### 现状证据
@@ -141,6 +154,10 @@
 
 ## 批次 4：CI 覆盖补强（Q4）
 
+> **执行修正（2026-09-27，已落地）**：本项**独立成 `.github/workflows/ci-linux.yml`**（而非往 `ci.yml`
+> 加 job），`target` 输入改为 `[none, android]` 默认 `none`，并按**硬门禁**口径处置 Linux 红面——
+> 三项偏离与理由见本文「执行口径裁定」表。以下原文保留作记录。
+
 - **改了什么**：
   1. `ci.yml` jobs 增加 `check-ubuntu`（同一套门禁中平台无关的部分：
      fmt / clippy / cargo test / 前端三段），捕获平台相关代码（`cfg(windows)` 之外）的可移植性问题；
@@ -156,7 +173,11 @@
 
 ---
 
-## 批次 5：技术债迁移到 GitHub Issues（Q5）
+## 批次 5：技术债迁移到 GitHub Issues（Q5）——**已放弃（2026-09-27 裁定）**
+
+> **本批不做**：裁定理由是「issue 的创建成本在 AI 时代趋近于零，过量由 AI 提出的 issue 只会造成
+> 维护负担」，全文见文末「不做的项（刻意排除）」的 Q5 条。以下原文保留作记录；其中「把本计划的
+> Q1~Q6 也各开一个 issue」随之不执行，执行中一度建好的两个标签已删除，仓库恢复到迁移前状态。
 
 - **改了什么**：把散落在 `docs/经验.md`（E60 升版欠账）、`docs/遗留.md`（TM-D6/D7/D8、TM-X2 等）
   中「未修复/知情接受」的条目逐条开 issue，打标签 `tech-debt` / `known-limitation`；
@@ -169,6 +190,11 @@
 ---
 
 ## 批次 6：给自己的 PR 流程（Q6）
+
+> **执行修正（2026-09-27，已落地）**：第 1 项（非琐碎改动走 PR）按原文执行并写入 `AGENTS.md`；
+> 第 2 项（Settings 加分支保护 / require status checks）在**私有仓 + GitHub Free 计划**下不可执行
+> ——`branches/main/protection` 与 `rulesets` 双端点均返回 403 `Upgrade to GitHub Pro`，已降级为
+> 流程纪律 + `../遗留.md` CI-PROT-1 的事实记录（见 `../经验.md` E67）。以下原文保留作记录。
 
 - **改了什么**：此后非琐碎改动走「功能分支 → PR → CI 状态检查绿 → merge」；
   在仓库 Settings 给 `main` 加分支保护：要求 `ci / check` 状态检查通过
@@ -193,6 +219,13 @@
 
 ## 不做的项（刻意排除）
 
+- **不做 issue 迁移（Q5，2026-09-27 裁定放弃）**：`docs/遗留.md` 与 `docs/经验.md` 登记的技术债**不迁往
+  GitHub Issues**，文档继续做唯一登记处。理由：**issue 的创建成本在 AI 时代趋近于零**——由 AI 批量
+  生成的 issue 不构成有效跟踪（绝大多数条目不会有人处理，却全部处于「open」状态），只是把叙述性的
+  现状清单变成一份需要长期维护的影子列表，新增的是维护负担而不是可执行性。**代价如实记录**：issue
+  「可指派 / 可关闭 / 可被 PR `Closes #n` 关联」这三项能力确实没有获得，Q6 的 PR 流程因此也没有
+  issue 关闭锚点可用。**复核触发条件**：将来若出现多人协作或外部贡献者、需要「谁在做哪一条」的
+  指派面时，重新评估本条。
 - **不引入新语言/新框架**：所有修复在现有技术栈内完成。
 - **不做行为性重构**：本计划只动结构、工具链与流程；任何「顺手优化逻辑」另立批次。
 - **不改 `docs/archive/**`**：按仓库纪律，归档引文停留在归档时状态。

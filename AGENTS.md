@@ -60,4 +60,10 @@ cargo build --manifest-path server-rs/Cargo.toml
   `node tools/count-tests.mjs --check` 确认门禁不漂移。
 - **分支**:主干 `main` + 平台分支 `kedai-Win` / `kedai-Android`(模型见 `docs/契约-协议与配置.md`)。
   远端 `origin` 为 **GitHub 私有仓**(2026-09-26 配置);推送前先确认当前分支,不要在平台分支上提交共享代码。
+- **非琐碎改动走 PR(2026-09-27 起)**:动生产代码、门禁脚本(`tools/check-*`)、`.github/workflows/`、
+  契约文档的批次,走「功能分支 → PR → **CI 状态检查绿** → merge」(单人项目不要求 review,看检查即可);
+  纯文档与注释批次可直接推 `main`。
+  **诚实边界**:本仓是 GitHub 私有仓 + Free 计划,服务端分支保护与 rulesets **不可用**
+  (实测 403 `Upgrade to GitHub Pro`,见 `docs/遗留.md` CI-PROT-1)——所以这条是**流程纪律,不是机器强制**:
+  直推 `main` 不会被服务端拦下,本地 `pre-push` 也仍可 `--no-verify` 绕过,唯一的机器信号是 CI 事后转红。
 - **不改写历史**:不 `rebase`/`amend` 已推送的提交;`docs/archive/` 下的历史文档只读不改。
