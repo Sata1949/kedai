@@ -112,8 +112,17 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       # -j 4(而非本地的 -j 8):runner 是 4 vCPU,再高只增内存峰值(见经验条目 29)。
+      #
+      # `KEDAI_ALLOW_INSECURE_PLAINTEXT_SECRETS=1`:Linux 没有平台安全凭据存储(Windows 走 DPAPI、
+      # Android 走 Keystore),按设计会**拒绝**持久化非空 API Key(`services/secret_store.rs`)——
+      # 那会让一批「经 API 写 Key 再断言遮蔽/往返」的集成用例在 Linux 上集体变红,把「平台无存储」
+      # 误读成移植缺陷。本档用的是合成 Key(sk-test-*),故走仓库文档化的逃生门放行明文;
+      # 断言「密文落盘」的用例已按平台门控,「无存储时拒绝明文」这条安全语义由
+      # `secret_store::non_windows_rejects_plaintext_by_default` 单独锁定(该用例自己会先删掉本变量)。
       - name: cargo test --workspace
         working-directory: server-rs
+        env:
+          KEDAI_ALLOW_INSECURE_PLAINTEXT_SECRETS: '1'
         run: cargo test --workspace -j 4
 
       - name: 'web: vue-tsc --noEmit'
