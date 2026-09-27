@@ -39,8 +39,9 @@ $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $Root "tools\Write-BuildStamp.ps1")
 
 # 版本一致性断言:全仓自身版本号必须一致,任一漏改即构建失败。
-# 覆盖 7 处声明(package.json / web/package.json / package-lock.json /
-# server-rs|src-tauri|launcher 的 Cargo.toml / tauri.conf.json)。
+# 覆盖 8 处声明(package.json / web/package.json / package-lock.json /
+# server-rs|src-tauri|launcher 的 Cargo.toml / tauri.conf.json /
+# AboutSection.vue 的 FALLBACK_VERSION 兜底常量)。
 # 由 tools/bump-version.ps1 统一维护;此处只读校验,不代改。
 function Assert-VersionConsistency {
     $declared = [ordered]@{}
@@ -60,6 +61,15 @@ function Assert-VersionConsistency {
         if ($m.Success) { return $m.Groups[1].Value }
         return "(解析失败)"
     }
+    # 前端关于页的兜底版本常量(后端不可达时展示,会编进 web/dist 与 exe):
+    # 与产品版本必须一致,漏改即 FAIL——历史上 0.3.0-A-beta → B-beta 就漏过这一处。
+    function Get-AboutFallbackVersion([string]$rel) {
+        $p = Join-Path $Root $rel
+        if (-not (Test-Path $p)) { return "(缺失)" }
+        $m = [regex]::Match([System.IO.File]::ReadAllText($p), "const FALLBACK_VERSION = '([^']*)'")
+        if ($m.Success) { return $m.Groups[1].Value }
+        return "(解析失败)"
+    }
     $declared["package.json"] = Get-JsonVersion "package.json"
     $declared["web/package.json"] = Get-JsonVersion "web\package.json"
     $declared["package-lock.json"] = Get-JsonVersion "package-lock.json"
@@ -67,6 +77,7 @@ function Assert-VersionConsistency {
     $declared["src-tauri/Cargo.toml"] = Get-TomlVersion "src-tauri\Cargo.toml"
     $declared["launcher/Cargo.toml"] = Get-TomlVersion "launcher\Cargo.toml"
     $declared["src-tauri/tauri.conf.json"] = Get-JsonVersion "src-tauri\tauri.conf.json"
+    $declared["AboutSection.vue(FALLBACK_VERSION)"] = Get-AboutFallbackVersion "web\src\components\settings\AboutSection.vue"
 
     $distinct = @($declared.Values | Select-Object -Unique)
     if ($distinct.Count -gt 1) {
@@ -76,7 +87,7 @@ function Assert-VersionConsistency {
         }
         throw "版本号不一致(详见上列)"
     }
-    Write-Host "版本一致性校验通过:$($distinct[0])(7 处声明)" -ForegroundColor DarkGray
+    Write-Host "版本一致性校验通过:$($distinct[0])(8 处声明)" -ForegroundColor DarkGray
 }
 
 
