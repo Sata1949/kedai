@@ -269,11 +269,15 @@ mod tests {
         // 绝对路径(工作区内)
         let abs = guard(&f, &f.ws.join("a.txt").to_string_lossy()).unwrap();
         assert!(abs.ends_with("a.txt"));
-        // 路径分隔符两种写法等价(模型可能给反斜杠)
-        assert_eq!(
-            guard(&f, "src\\mod.rs").unwrap(),
-            guard(&f, "src/mod.rs").unwrap()
-        );
+        // 路径分隔符两种写法等价(模型可能给反斜杠)。
+        // **只在 Windows 成立**:反斜杠在那里是分隔符;类 Unix 上它是普通文件名字符,
+        // 把 `src\mod.rs` 当分隔符解释反而是错的,故此处按平台判定。
+        if cfg!(windows) {
+            assert_eq!(
+                guard(&f, "src\\mod.rs").unwrap(),
+                guard(&f, "src/mod.rs").unwrap()
+            );
+        }
     }
 
     /// 空串 / 空白 / NUL 一律拒绝
@@ -312,6 +316,11 @@ mod tests {
     }
 
     /// 盘符/UNC 形态:不同盘符与 UNC 一律落不进 root
+    ///
+    /// **只在 Windows 成立**:盘符(`Z:\…`、`Z:foo`)与 UNC(`\\server\share\…`)是 Windows 的
+    /// 路径语义;类 Unix 上它们是含反斜杠的**普通相对路径**,拼到 root 下即在 root 内,本就不该拒。
+    /// `//server/share/x` 这种类 Unix 绝对路径形态由 `rejects_absolute_outside_root` 在两侧都覆盖。
+    #[cfg(windows)]
     #[test]
     fn rejects_other_drive_and_unc() {
         let f = fixture("drive");

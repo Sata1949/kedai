@@ -426,7 +426,13 @@ mod tests {
         crate::config::test_config()
     }
 
-    /// API Key 落盘应为密文(文件不含明文),load 后还原为明文
+    /// API Key 落盘应为密文(文件不含明文),load 后还原为明文。
+    ///
+    /// **只在 Windows 成立**:密文落盘依赖平台安全凭据存储(Windows DPAPI;Android 由
+    /// Keystore 承接),无存储的平台按设计**拒绝**写回明文 API Key(见 `secret_store::protect`)——
+    /// 那条拒绝路径由 `secret_store::non_windows_rejects_plaintext_by_default` 单独锁定,
+    /// 故此处不重复覆盖(2026-09-27 Linux 档实测:非 Windows 平台上本用例在 save 处即失败)。
+    #[cfg(windows)]
     #[test]
     fn api_key_is_encrypted_on_disk_and_restored_on_load() {
         let dir = tmp_dir("enc");
@@ -468,12 +474,19 @@ mod tests {
             loaded.openai_api_key, "sk-legacy-plain-1234",
             "旧版明文应能正常读取"
         );
-        let raw = std::fs::read_to_string(dir.join("settings.json")).unwrap();
-        assert!(
-            !raw.contains("sk-legacy-plain-1234"),
-            "load 后应已就地迁移为密文: {raw}"
-        );
-        // 迁移后再次 load 仍应得到同一明文
+        // 「load 时就地迁移为密文」依赖平台安全凭据存储(Windows DPAPI / Android Keystore);
+        // 无存储的平台按设计**拒绝**明文写回(见 `secret_store::protect`,并有独立用例锁定),
+        // 故该断言只在 Windows 成立。
+        #[cfg(windows)]
+        {
+            let raw = std::fs::read_to_string(dir.join("settings.json")).unwrap();
+            assert!(
+                !raw.contains("sk-legacy-plain-1234"),
+                "load 后应已就地迁移为密文: {raw}"
+            );
+        }
+        // 迁移后再次 load 仍应得到同一明文(有存储平台读的是密文,无存储平台读的仍是明文,
+        // 两种情形都必须读出同一值)
         let again = RuntimeSettings::load(&dir, &test_cfg());
         assert_eq!(again.openai_api_key, "sk-legacy-plain-1234");
     }
@@ -570,6 +583,13 @@ mod tests {
 
     /// embedding 向量化配置:默认关闭且空;旧配置缺字段 serde default 补齐;
     /// Key 落盘加密、load 解密还原;维度越界回退 0(自动探测);合法值往返。
+    ///
+    /// **只在 Windows 成立**:后半段(写入非空 Key 后 `save`/`load` 往返、越界值经 save 钳回)
+    /// 依赖平台安全凭据存储(Windows DPAPI / Android Keystore)——无存储的平台在 `save`
+    /// 写非空 Key 时按设计报错(见 `secret_store::protect`,拒绝行为有独立用例锁定)。
+    /// 前半段(默认值 / 旧配置缺字段补默认)是平台无关的,但与本用例的其余断言同处一体,
+    /// 单独拆出会让用例名与内容脱节,故整体按平台门控。
+    #[cfg(windows)]
     #[test]
     fn embedding_settings_defaults_clamp_and_roundtrip() {
         let cfg = test_cfg();
