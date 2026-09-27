@@ -220,7 +220,7 @@
   /* CTX 提示占宽且非操作项,手机上让位(侧栏抽屉内已有完整 token 统计) */
   .sv-input-toolbar .sv-hint { display: none; }
   .sv-mode button { padding: 6px 9px; font-size: 11px; }
-  .sv-model-select { max-width: 132px; }
+  /* .sv-model-select 的窄屏限宽随该类一起搬进 ChatInput.vue 的 scoped 块(2026-09-27 UIFIX-2) */
   .sv-btn-attach { padding: 6px 10px; font-size: 11.5px; }
   /* 音频入口已移到下方导航栏,隐藏悬浮钮避免压住工具行右端 */
   .sv-audio-toggle { display: none; }

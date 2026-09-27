@@ -460,20 +460,8 @@
   min-width: 240px;
 }
 
-/* 模型选择:去原生外观 + 自绘直角黑三角下拉箭头 */
-.sv-model-select {
-  -webkit-appearance: none;
-  appearance: none;
-  border: var(--bw) solid var(--sv-ink);
-  background: var(--sv-white);
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8'%3E%3Cpolygon points='0,0 8,0 4,8' fill='%23141414'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 7px center;
-  padding: 5px 22px 5px 8px;
-  font-size: 12px;
-  color: var(--sv-ink);
-  cursor: pointer;
-}
+/* .sv-model-select 随 UIFIX-2(2026-09-27)按 D-5「改到谁拆谁」搬进 components/ChatInput.vue
+   的 scoped 块(含本文件末尾那条 flex/width 工具规则与 mobile.css 的窄屏限宽)。 */
 
 /* 模式按钮编号色点 */
 .sv-mode-idx {
@@ -836,7 +824,6 @@
 /* --- 弹层锚点与布局工具 --- */
 .sv-rel { position: relative; }
 .sv-inputbox { position: relative; }             /* slash 联想弹层的定位锚 */
-.sv-model-select { flex: none; width: auto; min-width: 120px; } /* 工具栏内不拉伸 */
 .sv-ml-auto { margin-left: auto; }               /* flex 行内右推 */
 .sv-flex-1 { flex: 1; }                          /* flex 行内弹性占位 */
 
