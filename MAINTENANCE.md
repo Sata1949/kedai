@@ -524,7 +524,7 @@ cd server-rs && cargo test
 | 任务工作台(task) | `services/task_service/` + `services/task_engine/` | `docs/功能.md` §六模式任务引擎 |
 | 上下文压缩(compaction) | `agents/engine/compaction.rs` | `docs/功能.md` §上下文工程与压缩 |
 | 缓存感知压缩管线 | `services/cache_diagnostics.rs` + `api/diagnostics.rs` | `docs/功能.md` §上下文工程与压缩 |
-| 跨会话记忆蒸馏 | `services/memory_service.rs` + `api/memory.rs` | `docs/功能.md` §记忆 |
+| 跨会话记忆蒸馏 | `services/memory_service/` + `api/memory.rs` | `docs/功能.md` §记忆 |
 | 技能渐进披露与子代理守卫 | `services/skill_service.rs` + `tools/agent_tools_agent.rs` | `docs/功能.md` §技能与 MCP |
 | 可观测性与错误面收口 | `api/request_id.rs` + `utils/logging.rs` + `models/llm_error.rs` | `docs/功能.md` §可观测性与错误面 |
 

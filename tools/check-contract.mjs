@@ -31,12 +31,12 @@ const VERBOSE = process.argv.includes('--verbose');
 const MAPPINGS = [
   {
     label: '跨会话记忆条目',
-    rust: { file: 'server-rs/src/services/memory_service.rs', name: 'MemoryEntry' },
+    rust: { file: 'server-rs/src/services/memory_service/mod.rs', name: 'MemoryEntry' },
     ts: { file: 'web/src/api/memory.ts', name: 'MemoryEntry', kind: 'interface' },
   },
   {
     label: '记忆蒸馏结果',
-    rust: { file: 'server-rs/src/services/memory_service.rs', name: 'DistillOutcome' },
+    rust: { file: 'server-rs/src/services/memory_service/mod.rs', name: 'DistillOutcome' },
     ts: { file: 'web/src/api/memory.ts', name: 'DistillResult', kind: 'interface' },
     // 线格式由 api/memory.rs 手工拼 JSON,与结构体不完全同形:
     // new_ids 仅后端内部用于补向量,不下发;ok 是该 handler 固定附加的成功标记。
