@@ -292,6 +292,9 @@
   /* tab 内的序号/色点在窄条上冗余,隐藏以省宽度 */
   .sv-hub-nav-item .sv-hub-nav-idx,
   .sv-hub-nav-item .sv-supreme { display: none; }
+  /* 红斜线已改绝对定位(桌面端不再吃 14px 行宽);窄屏 tab 宽度只由文字撑开,
+     绝对定位的斜线会压在「连接与模型」上,故窄屏隐藏(2026-09-27 UIFIX-3) */
+  .sv-hub-nav-item.active::after { display: none; }
 
   /* 二级项:整行铺开并横向滚动 */
   .sv-hub-body .sv-hub-nav .hub-sub {

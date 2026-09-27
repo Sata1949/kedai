@@ -490,7 +490,9 @@ input[type="range"].sv-range::-moz-range-thumb {
   overflow: hidden;
 }
 .sv-hub-nav {
-  width: 180px;
+  /* 190px:一级标签最长是「对话与提示词」(6 个全角字 ≈84px),180px 下可用宽只剩 68px
+     →「连接与模型」实测差 2px 折成两行(2026-09-27 UIFIX-3) */
+  width: 190px;
   flex-shrink: 0;
   border-right: var(--bw) solid var(--sv-ink);
   background: var(--sv-pink-light);
@@ -511,6 +513,8 @@ input[type="range"].sv-range::-moz-range-thumb {
   cursor: pointer;
   text-align: left;
   margin-bottom: 3px;
+  /* active 态红斜线改为绝对定位后的定位锚(见下) */
+  position: relative;
 }
 .sv-hub-nav-item:hover {
   background: var(--sv-white);
@@ -537,15 +541,26 @@ input[type="range"].sv-range::-moz-range-thumb {
    active(黑底)态色点翻海报红,保持黑底上可见 */
 .sv-hub-nav .sv-hub-nav-item .sv-supreme { background: var(--sv-ink); }
 .sv-hub-nav .sv-hub-nav-item.active .sv-supreme { background: var(--sv-red); }
-/* active 态右缘红斜线指向(纯装饰) */
+/* 一级标签:不让它折行(长标签一律单行,改到需要时由省略号兜底)。
+   min-width:0 是 flex 项能收缩到内容宽以下的前提,否则 nowrap 会把整条导航撑出横向滚动 */
+.sv-hub-nav-label {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* active 态右缘红斜线指向(纯装饰)。**必须绝对定位**:它此前靠 margin-left:auto 参与布局,
+   吃掉 14px 行宽,正是「连接与模型」在 180px 导航下差 2px 折行的最后一根稻草。 */
 .sv-hub-nav-item.active::after {
   content: '';
+  position: absolute;
+  right: 10px;
+  top: 50%;
   width: 14px;
   height: 2px;
   background: var(--sv-red);
-  transform: rotate(-45deg);
-  margin-left: auto;
-  flex-shrink: 0;
+  transform: translateY(-50%) rotate(-45deg);
 }
 .sv-hub-content {
   flex: 1;
