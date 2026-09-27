@@ -49,8 +49,26 @@ env:
 jobs:
   check-ubuntu:
     runs-on: ubuntu-latest
+    env:
+      # 关掉调试信息:`cargo test` 会产出 55 个**带 debuginfo 的测试可执行文件**,
+      # ubuntu runner 的根分区(~20 GB 可用)装不下——2026-09-27 首跑在最后几个二进制上
+      # 以 `ld terminated with signal 7 [Bus error]` + `rustc-LLVM ERROR: IO failure on
+      # output stream: No space left on device` 失败(是**磁盘**不是测试;Windows 档的
+      # 磁盘余量更大故不暴露)。关调试信息对测试语义零影响,与本机重活时的
+      # `debuginfo=0` 口径一致(见 `docs/经验.md` 条目 29)。
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
     steps:
       - uses: actions/checkout@v4
+
+      # 根分区余量是本档的硬约束(见本 job 的 env 注释与 2026-09-27 首跑失败记录)。
+      # 先腾地方再编译:本档不用 Android SDK/NDK 与 .NET,删掉 runner 预装件可回收
+      # 十余 GB——这是「用不到就别留着」,不是绕过门禁。前后各打印一次余量作证据。
+      - name: 腾出根分区余量(本档不用 Android SDK / .NET)
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet
+          df -h / | tail -1
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -64,13 +82,16 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # 只缓存依赖源码(registry/git),**刻意不缓存 `server-rs/target`**:该目录在
+      # debuginfo=0 下也有数 GB,恢复它会与新一轮产物叠加,把本就吃紧的根分区推向
+      # 「No space left on device」(2026-09-27 首跑即栽在这里)。代价是每次重编依赖
+      # (约数分钟,本档按 1 倍计费、只在 main/PR 与手动时跑,可接受)。
       - name: Cache cargo
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            server-rs/target
           key: cargo-linux-${{ hashFiles('server-rs/Cargo.lock') }}
 
       # 前端产物必须先于 Rust 阶段存在:server-rs/src/api/static_files.rs 的
