@@ -47,7 +47,7 @@ const CLASSIFIED = [
 
 // docs/ 根下允许出现的条目(D2 白名单)
 const ROOT_ALLOW = new Set([...CLASSIFIED, 'docs/README.md']);
-const ROOT_ALLOW_DIRS = new Set(['docs/fixtures', 'docs/archive']);
+const ROOT_ALLOW_DIRS = new Set(['docs/fixtures', 'docs/archive', 'docs/plans']);
 
 const ARCHIVE_DIR = 'docs/archive/2026-09-16-consolidation';
 
@@ -107,7 +107,9 @@ if (!exists(README)) {
     if (t.startsWith('archive/') || t.startsWith('fixtures/')) continue;
     // 根文档(AGENTS/README/MAINTENANCE)用 ../ 形式指向仓库根,不算 docs 体系
     if (!src.slice(Math.max(0, m.index - 60), m.index).includes('../')) {
-      linked.add('docs/' + path.posix.basename(t));
+      // docs 相对解析(而非 basename):照 basename 会把 `plans/X.md` 塌缩成 `docs/X.md`
+      // 并误判为 citingGhost。对全部单段目标(六类文档都在 docs/ 根下)等价。
+      linked.add('docs/' + path.posix.normalize(t));
     }
   }
   const missingInIndex = CLASSIFIED.filter((f) => !linked.has(f));

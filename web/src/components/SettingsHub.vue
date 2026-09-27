@@ -221,7 +221,7 @@ const activeLabel = computed(() => {
           >
             <span class="sv-hub-nav-idx">{{ String(idx + 1).padStart(2, '0') }}</span>
             <span class="sv-supreme" :class="d.dot" style="width: 10px; height: 10px; flex: none" />
-            <span>{{ d.label }}</span>
+            <span class="sv-hub-nav-label">{{ d.label }}</span>
           </button>
 
           <!-- 二级:当前功能域下的分区与工具(缩进区分层级) -->
@@ -285,6 +285,9 @@ const activeLabel = computed(() => {
   color: var(--sv-ink-dim);
   text-align: left;
   cursor: pointer;
+  /* 二级标签同样不折行:最长是「授权与命令执行」(7 个全角字 ≈98px),在 180px 导航下
+     可用宽约 99px —— 与一级的「连接与模型」是同一类边缘问题(2026-09-27 UIFIX-3) */
+  white-space: nowrap;
   /* 2026-09 动效:二级项随功能域切换逐条淡入(40ms 递增,与 sv-list-in 语言一致) */
   animation: hub-sub-in var(--dur-normal) var(--ease-out) backwards;
   transition: background var(--transition-fast), color var(--transition-fast),

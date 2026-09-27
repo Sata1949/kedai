@@ -1,6 +1,6 @@
 [package]
 name = "kedai-server"
-version = "0.3.0-B-beta"
+version = "0.4.0-alpha"
 edition = "2021"
 description = "Kedai 后端:Rust + axum + SQLite + SSE + Agent 引擎"
 license = "MIT"

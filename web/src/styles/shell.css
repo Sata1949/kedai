@@ -1,0 +1,828 @@
+/* ============================================================================
+   shell.css —— 应用外壳:排版工具、三栏布局、顶栏、聊天画布、气泡、输入区、slash 下拉、底部工具栏、侧栏内部
+   ----------------------------------------------------------------------------
+   由 web/src/style.css 按域拆分而来（QUALITY-FIX Q1-4,2026-09-27）：
+   原 L266-L1086 整段搬来，规则一字未改（只新增本段头注释）。**顺序即级联**：
+   本文件在 style.css 清单里的 @import 位置决定它相对其它域的先後，移动前先读清单里的顺序说明。
+   ============================================================================ */
+
+/* ===== 排版工具 ===== */
+/* 数字等宽:Token 统计/用量仪表等数字密集处,防位数跳动 */
+.sv-tnum { font-variant-numeric: tabular-nums; }
+
+/* ===== 布局:三栏 ===== */
+
+.sv-frame-col {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-width: 1100px;
+  overflow: hidden;
+  background: var(--sv-paper);
+}
+.sv-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.sv-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 左栏 */
+.sv-sidebar {
+  width: 260px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--sv-surface);
+  border-right: var(--bw) solid var(--sv-ink);
+  transition: width var(--transition-normal);
+}
+/* 任务模式加宽:给「下达目标」输入区留出更多空间 */
+.sv-sidebar.wide {
+  width: 320px;
+}
+
+/* 右侧 Agent 面板 */
+.sv-agent-panel {
+  width: 0;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--sv-surface);
+  border-left: var(--bw) solid var(--sv-ink);
+  overflow: hidden;
+  transition: width var(--transition-normal);
+}
+.sv-agent-panel.open {
+  width: 340px;
+}
+
+/* 右侧边缘抽屉标识 */
+.sv-agent-toggle {
+  position: fixed;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: var(--z-toggle);
+  writing-mode: vertical-lr;
+  text-orientation: mixed;
+  padding: 20px 8px;
+  background: var(--sv-ink);
+  color: var(--sv-white);
+  border: none;
+  font-family: var(--font-display);
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.sv-agent-toggle:hover {
+  background: var(--sv-pink-deep);
+  padding-right: 12px;
+}
+.sv-agent-toggle.active {
+  background: var(--sv-pink-deep);
+}
+
+/* ===== 顶栏 ===== */
+/* 下边线:构成主义双线 rule(3px ink + 淡粉回声);装饰集中为标题左侧一组构成,右端控件区零叠印 */
+.sv-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-3) var(--space-5) var(--space-3) 46px; /* 左内边距 46px 加大:给标题前的构成装饰组留位 */
+  border-bottom: var(--bw) solid var(--sv-ink);
+  box-shadow: 0 4px 0 0 var(--sv-pink); /* 回声段:粉灰线升级为淡粉,暖档套版 */
+  background: var(--sv-surface);
+  position: relative;
+}
+/* 标题前构成组·方块对:海报红(上)+ 纯黑(右下错位),马列维奇式非对称;纯装饰 */
+.sv-topbar::before {
+  content: '';
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  background: var(--sv-red);
+  box-shadow: 11px 11px 0 0 var(--sv-ink-supreme);
+  transform: translateY(calc(-50% - 6px));
+  pointer-events: none;
+}
+/* 标题前构成组·红斜线:底部向右上挑起(构成主义第一签名),与方块对同组;
+   评审第二轮:自右端控件区挪来此处,拨杆/会话控件不再被装饰压印 */
+.sv-topbar::after {
+  content: '';
+  position: absolute;
+  left: 12px;
+  bottom: 5px;
+  width: 18px;
+  height: 3px;
+  background: var(--sv-red);
+  transform: rotate(-45deg);
+  transform-origin: left center;
+  pointer-events: none;
+}
+.sv-topbar-right { display: flex; align-items: center; gap: 12px; }
+.sv-topbar-title { font-family: var(--font-display); font-size: 13px; font-weight: 800; letter-spacing: 0.05em; }
+.sv-topbar-sub { font-size: 11px; color: var(--sv-ink-faint); letter-spacing: 0.05em; }
+
+/* Token 统计(顶栏紧凑版;数字用至上蓝——次强调位) */
+.sv-token-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-display);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--sv-blue);
+  border: var(--bw) solid var(--sv-ink);
+  padding: 4px 10px;
+}
+
+/* 单次生成 token 预算超限(HB-1):后端已按 warn/stop 处置,此处只做醒目提示 */
+.sv-budget-over {
+  color: var(--sv-red);
+  font-weight: 700;
+}
+
+/* 会话切换器 */
+.sv-session-select {
+  border: var(--bw) solid var(--sv-ink);
+  background: var(--sv-white);
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--sv-ink);
+  outline: none;
+  max-width: 320px;
+}
+.sv-session-select:focus { border-color: var(--sv-pink-deep); }
+
+/* ===== 聊天画布 ===== */
+/* 顶端海报 rule(红黑双色段带)共享定义见 :root 的 --sv-top-stripe。
+   实跑问题 6:段带画在画布 y=0 处,而 .sv-topbar 是定位元素、其
+   box-shadow: 0 4px 0 var(--sv-pink) 从顶栏下边框向下覆盖 4px(定位元素绘制在
+   非定位兄弟的画布之上),原 5px 段带只剩约 1px 可见 → 视觉断层。
+   修复:段带下移 4px 让开回声阴影,形成「粉回声 + 红黑段带」的清晰两层。 */
+.sv-canvas {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 32px clamp(24px, 5vw, 64px);
+  background: var(--sv-paper);
+  /* 批次 5:画布顶端红黑双色段带(构成主义海报 rule;背景层,固定于面板顶部不随内容滚动,
+     让开顶栏回声阴影,不压内容;克制档仅此一条带) */
+  background-image: var(--sv-top-stripe);
+  background-repeat: no-repeat;
+  background-size: 100% 5px;
+  background-position: 0 4px;
+}
+
+/* 空态:至上主义几何构成(方块序列 + 红色对角线) */
+.sv-empty { text-align: center; padding: 64px 24px; color: var(--sv-ink-faint); position: relative; }
+.sv-empty-geo {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.sv-empty-geo .sq { display: block; }
+.sv-empty-geo .sq.black { width: 18px; height: 18px; background: var(--sv-ink-supreme); }
+.sv-empty-geo .sq.pink { width: 12px; height: 12px; background: var(--sv-pink); }
+.sv-empty-geo .sq.deep { width: 8px; height: 8px; background: var(--sv-pink-deep); }
+.sv-empty-geo .diag {
+  position: absolute;
+  right: calc(50% - 56px);
+  top: -12px;
+  width: 34px;
+  height: 3px;
+  background: var(--sv-red);
+  box-shadow: 0 6px 0 0 var(--sv-pink); /* 套版双线回声 */
+  transform: rotate(-45deg);
+}
+/* 空态组合下缘距变体(替代模板内联 margin-bottom) */
+.sv-empty-geo.mb8 { margin-bottom: 8px; }
+.sv-empty-geo.mb10 { margin-bottom: 10px; }
+.sv-empty-geo.mb14 { margin-bottom: 14px; }
+.sv-empty .big {
+  font-family: var(--font-display);
+  font-size: 22px;
+  letter-spacing: 0.3em;
+  color: var(--sv-ink);
+  margin-bottom: 8px;
+}
+.sv-empty p { font-size: 13px; margin: 4px 0; }
+
+/* ===== 气泡 ===== */
+
+.sv-msg { display: flex; margin-bottom: 28px; gap: 12px; animation: sv-msg-in 0.18s ease; }
+.sv-msg.user { justify-content: flex-end; }
+
+.sv-msg-bubble {
+  max-width: min(560px, 78%);
+  padding: 14px 18px;
+  font-size: 14px;
+  line-height: 1.75;
+  white-space: pre-wrap;
+  word-break: break-word;
+  position: relative;
+}
+/* 用户消息:黑底白字(纯展示容器,按阴影规则不挂投影——黑块本身即至上主义实体) */
+.sv-msg.user .sv-msg-bubble {
+  background: var(--sv-ink);
+  color: var(--sv-white);
+}
+.sv-msg.user .sv-msg-bubble::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 16px;
+  height: 16px;
+  background: var(--sv-pink);
+}
+/* 角色消息:白底黑字(纯展示容器,按阴影规则不挂投影——3px 粗框 + 粉顶线承担立体感) */
+.sv-msg.assistant .sv-msg-bubble {
+  background: var(--sv-surface);
+  border: var(--bw) solid var(--sv-ink);
+  border-top: 4px solid var(--sv-pink);
+}
+/* 系统消息 */
+.sv-msg.system .sv-msg-bubble {
+  background: var(--sv-surface);
+  border: var(--bw-thin) solid var(--sv-line);
+  border-left: 4px solid var(--sv-ink);
+  color: var(--sv-ink-dim);
+}
+
+/* 状态栏 */
+.sv-status-bar {
+  display: inline-block;
+  margin-top: 8px;
+  max-width: min(560px, 78%);
+  padding: 6px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--sv-ink-dim);
+  background: var(--sv-surface);
+  border: var(--bw-thin) solid var(--sv-line);
+  border-left: 4px solid var(--sv-pink);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.sv-msg.assistant .min-w-0 { flex: 1; min-width: 0; }
+
+/* 状态栏/卡内 HTML 的渲染容器(实跑问题 5):酒馆状态栏按整幅聊天区宽度设计,
+   塞进 max-width:min(560px,78%) 的气泡后容易横向溢出/被裁,表现为「文案显示不全」。
+   含 data-kd-scope 卡片的气泡放宽到 92%,容器自身允许横向滚动兜底(不裁内容、不撑破布局)。
+   注::has() 在 WebView2/Chromium 均已支持;不支持时仅退回原宽度,不影响可用性。 */
+.sv-msg.assistant .sv-msg-bubble:has([data-kd-scope]) {
+  max-width: 92%;
+}
+.sv-msg-bubble [data-kd-scope] {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: visible;
+}
+
+/* 方块头像 */
+.sv-avatar {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 900;
+  overflow: hidden;
+}
+.sv-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.sv-avatar.char { background: var(--sv-ink); color: var(--sv-white); }
+.sv-avatar.char.alt-blue { background: var(--sv-blue); color: var(--sv-white); }
+.sv-avatar.char.alt-red { background: var(--sv-red); color: var(--sv-white); }
+
+/* 消息角色名 */
+.sv-msg-name {
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--sv-ink-faint);
+  margin-bottom: 4px;
+  font-weight: 700;
+}
+
+/* 思考中 */
+@keyframes sv-square-pulse {
+  0%, 80%, 100% { transform: scale(1); opacity: 0.3; }
+  40% { transform: scale(1.2); opacity: 1; }
+}
+.sv-thinking { display: flex; gap: 6px; align-items: center; padding: 6px 2px; }
+.sv-thinking i {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  background: var(--sv-ink);
+  animation: sv-square-pulse 1.2s infinite ease-in-out;
+}
+.sv-thinking i:nth-child(2) { background: var(--sv-pink); animation-delay: 0.15s; }
+.sv-thinking i:nth-child(3) { background: var(--sv-pink-deep); animation-delay: 0.3s; }
+
+/* 流式光标 */
+@keyframes sv-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+.sv-stream-cursor::after {
+  content: "▍";
+  color: var(--sv-pink-deep);
+  animation: sv-blink 1s infinite;
+}
+/* 流式光标的块级适配(修复用户实测「装饰线条错位/多余线段」):
+   markdown 气泡(sv-msg-md,v-html 渲染)内容以块级元素(p/ul/pre 等)结尾时,
+   气泡自身的内联 ::after 光标被末块挤到下一行,显示为气泡底部孤立粉竖线。
+   处理:md 气泡关闭气泡级光标,改由最后一个块级子元素承担——
+   段落/标题 inline 化使光标尾随同行;列表尾随末列表项;pre(工具调用块/代码块)
+   光标落入块内文本末尾(继承 pre 白字,黑底可见,不触深色兜底规则)。
+   末块为 table/hr/blockquote 等未覆盖形态时暂无光标(流式中间态,后续输出到达即恢复)。 */
+.sv-msg-bubble.sv-msg-md.sv-stream-cursor::after { content: none; }
+.sv-msg-bubble.sv-msg-md.sv-stream-cursor > p:last-child,
+.sv-msg-bubble.sv-msg-md.sv-stream-cursor > h1:last-child,
+.sv-msg-bubble.sv-msg-md.sv-stream-cursor > h2:last-child,
+.sv-msg-bubble.sv-msg-md.sv-stream-cursor > h3:last-child,
+.sv-msg-bubble.sv-msg-md.sv-stream-cursor > h4:last-child {
+  display: inline;
+}
+.sv-msg-bubble.sv-msg-md.sv-stream-cursor > p:last-child::after,
+.sv-msg-bubble.sv-msg-md.sv-stream-cursor > h1:last-child::after,
+.sv-msg-bubble.sv-msg-md.sv-stream-cursor > h2:last-child::after,
+.sv-msg-bubble.sv-msg-md.sv-stream-cursor > h3:last-child::after,
+.sv-msg-bubble.sv-msg-md.sv-stream-cursor > h4:last-child::after,
+.sv-msg-bubble.sv-msg-md.sv-stream-cursor > ul:last-child > li:last-child::after,
+.sv-msg-bubble.sv-msg-md.sv-stream-cursor > ol:last-child > li:last-child::after {
+  content: "▍";
+  color: var(--sv-pink-deep);
+  animation: sv-blink 1s infinite;
+}
+/* pre 结尾(工具调用块/代码块):光标尾随代码文本,颜色继承 pre 白字(黑底上可见) */
+.sv-msg-bubble.sv-msg-md.sv-stream-cursor > pre:last-child::after {
+  content: "▍";
+  animation: sv-blink 1s infinite;
+}
+
+/* 消息操作行 */
+.sv-msg-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+.sv-msg:hover .sv-msg-actions { opacity: 1; }
+.sv-msg-action {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--sv-ink-faint);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px 0;
+  text-transform: uppercase;
+}
+.sv-msg-action:hover { color: var(--sv-pink-deep); }
+.sv-msg-action:disabled { color: var(--sv-ink-faint); opacity: 0.4; cursor: default; }
+/* swipe 版本角标(阶段六 6f):n/N 只读指示,与操作按钮同列对齐 */
+.sv-msg-action-label {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--sv-ink-faint);
+  padding: 2px 0;
+  white-space: nowrap;
+}
+
+/* 编辑态 */
+.sv-edit-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  max-width: 560px;
+  border: var(--bw) solid var(--sv-ink);
+  background: var(--sv-surface);
+  padding: 12px;
+}
+.sv-edit-label {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--sv-ink-faint);
+}
+.sv-edit-box textarea {
+  border: var(--bw) solid var(--sv-line);
+  background: var(--sv-white);
+  padding: 10px 12px;
+  font-size: 14px;
+  font-family: var(--font-body);
+  color: var(--sv-ink);
+  outline: none;
+  resize: vertical;
+  min-height: 110px;
+  line-height: 1.7;
+}
+.sv-edit-box textarea:focus { border-color: var(--sv-pink-deep); }
+.sv-edit-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* ===== 输入区 ===== */
+
+.sv-inputbar {
+  border-top: var(--bw) solid var(--sv-ink);
+  background: var(--sv-surface);
+  padding: var(--space-4) var(--space-5);
+}
+.sv-inputbox { display: flex; gap: 12px; align-items: flex-end; }
+.sv-inputbox textarea {
+  flex: 1;
+  min-height: 48px;
+  max-height: 160px;
+  resize: none;
+  border: var(--bw) solid var(--sv-ink);
+  background: var(--sv-white);
+  padding: 12px 14px;
+  font-family: var(--font-body);
+  font-size: 14px;
+  color: var(--sv-ink);
+  outline: none;
+}
+.sv-inputbox textarea::placeholder { color: var(--sv-ink-faint); }
+.sv-inputbox textarea:focus {
+  border-color: var(--sv-pink-deep);
+  box-shadow: var(--shadow-pink-strong);
+}
+
+/* 发送按钮 */
+.sv-btn-send {
+  width: 48px;
+  height: 48px;
+  flex-shrink: 0;
+  border: var(--bw) solid var(--sv-ink);
+  background: var(--sv-ink);
+  color: var(--sv-white);
+  box-shadow: var(--shadow-card);
+  font-size: 18px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.sv-btn-send:hover:not(:disabled) {
+  background: var(--sv-pink-deep);
+  border-color: var(--sv-pink-deep);
+}
+.sv-btn-send:disabled {
+  background: var(--sv-line);
+  border-color: var(--sv-line);
+  cursor: not-allowed;
+}
+
+/* ===== slash 联想 / 快速回复下拉(ChatInput) ===== */
+
+.sv-slash-menu {
+  border: var(--bw) solid var(--sv-ink);
+  background: var(--sv-white);
+  box-shadow: var(--shadow-hover);
+  max-height: 248px;
+  overflow-y: auto;
+  padding: 4px;
+}
+.sv-slash-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: 8px 10px;
+  border: var(--bw-thin) solid transparent;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  min-width: 0;
+}
+.sv-slash-item:hover,
+.sv-slash-item.active {
+  background: var(--sv-pink-light);
+  border-color: var(--sv-ink);
+  box-shadow: var(--shadow-card);
+}
+.sv-slash-item b {
+  font-family: var(--font-display);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: var(--sv-accent);
+}
+.sv-slash-desc {
+  font-size: 11px;
+  color: var(--sv-ink-dim);
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sv-slash-empty {
+  padding: 14px 12px;
+  font-size: 12px;
+  color: var(--sv-ink-faint);
+  text-align: center;
+}
+.sv-hint {
+  font-family: var(--font-display);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--sv-ink-faint);
+  white-space: nowrap;
+}
+
+/* ===== 最底部工具栏 ===== */
+.sv-input-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--sv-line);
+  background: var(--sv-surface);
+  flex-wrap: wrap;
+}
+.sv-input-toolbar .sv-mode { flex-shrink: 0; }
+
+/* 模式切换 */
+.sv-mode {
+  display: flex;
+  border: var(--bw) solid var(--sv-ink);
+  overflow: hidden;
+  flex-shrink: 0;
+  box-shadow: var(--shadow-card); /* 阴影规则:可交互分段拨杆挂 card 影 */
+}
+.sv-mode button {
+  padding: 8px 14px;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  border: none;
+  background: var(--sv-white);
+  color: var(--sv-ink);
+  cursor: pointer;
+}
+.sv-mode button.active {
+  background: var(--sv-ink);
+  color: var(--sv-white);
+}
+.sv-mode button:not(.active):hover {
+  background: var(--sv-pink-light);
+}
+
+/* 授权模式切换 */
+.sv-auth-mode {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--sv-ink-soft);
+}
+.sv-auth-mode-label { letter-spacing: 0.05em; }
+.sv-auth-toggle {
+  display: flex;
+  border: var(--bw) solid var(--sv-ink);
+  overflow: hidden;
+  box-shadow: var(--shadow-card);
+}
+.sv-auth-toggle button {
+  padding: 6px 12px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  border: none;
+  background: var(--sv-white);
+  color: var(--sv-ink);
+  cursor: pointer;
+}
+.sv-auth-toggle button.active {
+  background: var(--sv-pink-deep);
+  color: var(--sv-white);
+}
+.sv-auth-toggle button:not(.active):hover {
+  background: var(--sv-pink-light);
+}
+
+/* 附件预览条 */
+.sv-attach-bar {
+  display: flex;
+  gap: 8px;
+  padding: 8px 20px 0;
+  flex-wrap: wrap;
+}
+.sv-attach-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: var(--bw-thin) solid var(--sv-ink);
+  background: var(--sv-white);
+  font-size: 11.5px;
+  color: var(--sv-ink);
+  max-width: 200px;
+}
+.sv-attach-chip .name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sv-attach-chip .remove {
+  background: none;
+  border: none;
+  color: var(--sv-red);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 2px;
+  flex-shrink: 0;
+}
+.sv-attach-chip img {
+  width: 20px;
+  height: 20px;
+  object-fit: cover;
+}
+
+/* 选择文件按钮 */
+.sv-btn-attach {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border: var(--bw) solid var(--sv-ink);
+  background: var(--sv-white);
+  color: var(--sv-ink);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: var(--shadow-card);
+}
+.sv-btn-attach:hover {
+  background: var(--sv-pink-light);
+  border-color: var(--sv-pink-deep);
+}
+.sv-btn-attach svg { width: 14px; height: 14px; }
+
+/* HTML 渲染开关 */
+.sv-render-toggle-v2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+.sv-render-toggle-v2 .toggle-track {
+  width: 40px;
+  height: 22px;
+  background: var(--sv-line);
+  position: relative;
+}
+.sv-render-toggle-v2 .toggle-track.on { background: var(--sv-pink-deep); }
+.sv-render-toggle-v2 .toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  background: var(--sv-white);
+  transition: transform var(--transition-fast);
+}
+.sv-render-toggle-v2 .toggle-track.on .toggle-thumb { transform: translateX(18px); }
+.sv-render-toggle-v2 .toggle-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--sv-ink-soft);
+}
+
+/* ===== 侧栏内部 ===== */
+
+.sv-side-head {
+  padding: var(--space-4);
+  border-bottom: var(--bw) solid var(--sv-ink);
+  background: var(--sv-surface);
+}
+.sv-brand { display: flex; align-items: center; gap: 10px; }
+.sv-brand .logo {
+  width: 32px; height: 32px;
+  object-fit: cover;
+  display: block;
+  flex-shrink: 0;
+}
+.sv-brand h1 {
+  font-family: var(--font-display);
+  font-size: 18px;
+  letter-spacing: 0.25em;
+  margin: 0;
+  font-weight: 900;
+  color: var(--sv-ink);
+}
+
+/* Token 统计(单列:色标 + 数值靠左 + 标签靠右,紧凑横排) */
+.sv-tokens {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  margin-top: 14px;
+}
+.sv-token-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: var(--bw) solid var(--sv-ink);
+  background: var(--sv-white);
+}
+.sv-token-cell .sv-supreme { flex-shrink: 0; }
+.sv-token-cell > div {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.sv-token-cell b {
+  display: block;
+  font-size: 14px;
+  font-family: var(--font-display);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sv-token-cell span { font-size: 10px; color: var(--sv-ink-faint); letter-spacing: 0.05em; flex-shrink: 0; }
+
+/* 搜索 */
+.sv-search {
+  width: 100%;
+  border: var(--bw) solid var(--sv-ink);
+  background: var(--sv-white);
+  padding: 10px 12px;
+  font-size: 13px;
+  outline: none;
+  margin: 12px 0;
+}
+.sv-search:focus { border-color: var(--sv-pink-deep); }
+
+/* 角色列表项 */
+.sv-char-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border: var(--bw-thin) solid transparent;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  margin-bottom: 3px;
+  /* 2026-09 动效补齐:角色列表原先 hover/active 为突变,补过渡与现有列表语言一致 */
+  transition: background var(--dur-fast) var(--ease-standard),
+    border-color var(--dur-fast) var(--ease-standard),
+    box-shadow var(--dur-fast) var(--ease-standard);
+}
+.sv-char-item:hover {
+  background: var(--sv-pink-light);
+  border-color: var(--sv-pink);
+  box-shadow: var(--shadow-card); /* 阴影规则:可点列表行 hover 挂 card 影 */
+}
+.sv-char-item.active {
+  background: var(--sv-ink);
+  border-color: var(--sv-ink);
+}
+.sv-char-item.active .sv-char-name { color: var(--sv-white); }
+.sv-char-item.active .sv-char-desc { color: rgba(255, 255, 255, 0.7); }
+.sv-char-item .sv-avatar.small { width: 32px; height: 32px; font-size: 14px; }
+.sv-char-name { display: block; font-size: 13px; font-weight: 700; color: var(--sv-ink); }
+.sv-char-desc {
+  display: block;
+  font-size: 11px;
+  color: var(--sv-ink-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 底部工具条 */
+.sv-side-foot { border-top: var(--bw) solid var(--sv-ink); padding: var(--space-3); }
+
+/* 连接状态灯 */
+.sv-conn { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--sv-ink-soft); }
+.sv-conn .dot { width: 8px; height: 8px; }
+.sv-conn .dot.ok { background: var(--sv-green); }
+.sv-conn .dot.fail { background: var(--sv-red); }
+.sv-conn .dot.unknown { background: var(--sv-yellow); }

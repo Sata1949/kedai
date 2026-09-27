@@ -1,7 +1,7 @@
 # Kedai 维护指南(MAINTENANCE)
 
 > 面向后续维护者的技术文档。涵盖架构、构建、启动、API 契约、数据库、日志与已知坑位。
-> 版本:v0.3.0-B-beta(前端 Vue3 + 后端 Rust + Tauri 桌面壳) 最后更新:2026-09-26
+> 版本:v0.4.0-alpha(前端 Vue3 + 后端 Rust + Tauri 桌面壳) 最后更新:2026-09-27
 
 ---
 
@@ -14,7 +14,7 @@
 - **Mutex 纪律**:全项目锁中毒一律恢复(`.lock().unwrap_or_else(|e| e.into_inner())`),不 panic;**禁止持 std::sync::Mutex guard 跨 `.await`**(Clippy `await_holding_lock` 防护)。
 - **DB 并发纪律**:api handler 的同步 DB 调用必须经 `db_call/db_read/db_write`(spawn_blocking),禁止 async 上下文直接持锁;细则见 §7「DB 并发纪律」。
 - **渲染性能纪律(前端)**:消息渲染必须走 ChatMessageItem 的缓存 computed,禁止在 v-for 里直接调渲染方法。
-- **样式分层纪律(前端,2026-09 D-5 起)**:`web/src/style.css` 只保留层① 设计变量(:root 令牌)与层② 全局基础层;新增组件样式一律 `<style scoped>` 或 Tailwind 工具类,禁止再写入 style.css;修改存量组件时顺手把该组件样式搬进 scoped(「改到谁拆谁」,文件头分层约定注释为准);新增样式不得引入 `!important`(存量 11 处见 style.css)。
+- **样式分层纪律(前端,2026-09 D-5 起;2026-09-27 起按域拆分为目录)**:样式在 `web/src/styles/` 下按域分文件(`tokens` 层① 设计变量 / `base` 层② 全局基础层 / `shell` / `panels` / `content` / `task` / `mobile`),`web/src/style.css` 只剩**清单**——`@import "tailwindcss"` + 7 条相对 import,**顺序即级联顺序(`mobile` 必须最后)**;新增组件样式一律 `<style scoped>` 或 Tailwind 工具类,**禁止再往 `styles/` 里加新域**;修改存量组件时顺手把该组件样式搬进 scoped(「改到谁拆谁」,`styles/` 各文件头注释为准);新增样式不得引入 `!important`(存量 13 处,2026-09-27 实测;原写 11 处为 stale,漂移记录见 `FRONTEND-REPORT.md` §3.6)。
 - **跨端协议**(前后端 mvu)以 `docs/契约-协议与配置.md` 锁定双端一致,防行为漂移。
 - **EJS 自研解释器冻结纪律**:`parsing/assistant/ejs/`(自研迷你 JS 引擎,约 4000 行)**只接受安全修复,不再扩展新能力**。任何新模板能力必须在 `scripts/runtime.rs` 的 rquickjs 沙箱侧实现(rquickjs 自带内存/中断/栈上限,见该文件 `set_memory_limit`/`set_interrupt_handler`)。理由:自研解释器缺引擎级沙箱限额,长期维护成本与风险高于复用;**已加固**(循环步数+墙钟预算、解析深度守卫,见 §10 踩坑记录),但债务不再增长。
 - **门禁纪律(2026-09-13 起;2026-09-26 起三处均生效)**:`tools/check-all.ps1` 是唯一的本地 CI 入口,现已接三处触发——
@@ -25,7 +25,17 @@
   windows-latest 跑同一套 `check-all.ps1`,触发面**刻意收窄**为 `push` 到 `main` + PR +
   手动 `workflow_dispatch`——平台分支与 `main` 逐字节同源(见「平台分支契约」),给它们
   各跑一遍只会重复烧私有仓额度(免费档 2000 分钟/月,Windows runner 按 2 倍计费)。
-  **不要依赖 CI 兜底**:CI 不覆盖平台分支推送,平台分支与本地提交仍靠前两条兜住。
+  ④ `.github/workflows/ci-linux.yml`(2026-09-27 增,QUALITY-FIX Q4):**平台可移植性档**,
+  `ubuntu-latest`、按 1 倍计费。`check-ubuntu` 只跑平台无关的几段(fmt / clippy / cargo test /
+  前端 typecheck+vitest+bundle budget,**不重复**纯 Node 的文档与架构门禁),用来捕获
+  `cfg(windows)` 之外的可移植性回归;`android-smoke` 仅手动(`workflow_dispatch` 选
+  `target=android`,默认 `none`)——NDK + `cargo-ndk` 对 `aarch64-linux-android` 交叉编译
+  `server-rs` 并自证产物是 `ARM aarch64` + `/system/bin/linker64`,覆盖 Android cfg 路径
+  (JNI / bindgen / 平台执行层)。**它不替代 ③**:③ 仍是唯一权威档(全量 15 段);本档红同样当门禁处理。
+  分档理由(为何独立文件而非同文件加 job)见 `经验.md` E66。
+  **不要依赖 CI 兜底**:CI 不覆盖平台分支推送,平台分支与本地提交仍靠前两条兜住;且服务端
+  **没有分支保护**(私有仓 + Free 计划,rulesets/保护规则双端点 403,见 `遗留.md` CI-PROT-1)——
+  CI 只能**如实报告**、不能**阻止合并**,`--no-verify` 也仍能把本地那两条绕过去。
   变更 `tools/check-*.mjs` 的检查规则时,同步更新本节与本文件的检查项清单。
 - **性能门禁(2026-09-14 起,可选)**:`tools/perf-baseline.mjs` 支持 p95 阈值判定
   (`--max-p95-factor`,默认 1.25),基线值存 `tools/perf-baseline.json`;
@@ -158,9 +168,9 @@ kedai/
 | 桌面安装包 | `.\build.ps1 -Tauri` | 双端同步之外追加 NSIS 安装程序(需 `@tauri-apps/cli`);安装后从开始菜单启动 |
 | 一键构建 | `.\build.ps1` | **默认双端同步产出**:前端 web/dist + Rust release(测试版)+ 便携版;`-TestOnly` 仅测试版快速通道 `-Dev` debug 构建 `-NoWeb` 仅 Rust `-Tauri` 追加 NSIS 打包 |
 | 兼容别名 | `npm run build:all` / `npm run build:rs` | 均等价 `.\build.ps1`(双端同步);`npm run build:test` 等价 `.\build.ps1 -TestOnly` |
-| 统一改版本号 | `npm run version:bump -- x.y.z` | 7 处版本号一次改全(2 个 package.json、3 个 Cargo.toml、tauri.conf.json、本文档版本行);支持 `-DryRun` 预览 |
-| 后端测试 | `cd server-rs && cargo test` | **1462 个测试(1124 单测 + 338 集成,40 个集成文件)**,**需在 vcvars64 环境**;前端 `npm test -w web` **1195 个(113 文件;静态计数;vitest 运行时为 1213,差值 18 来自 `parser.contract.test.ts` 循环生成的 fixture 用例)**。数字由 `node tools/count-tests.mjs` 自动统计,勿手抄——`npm run count:tests` 查看当前值,`npm run check:tests` 校验文档是否漂移(**2026-09-26 起逐行扫描本节与根 `README.md` 的全部复写处,并校验集成文件数**;其余由代码/脚本派生的计数——表数、`ensure_*` 个数、映射组数、规则字母、ratchet 基线、枚举变体数、门禁阶段数——由 `npm run check:doc-claims` 守护) |
-| 全量检查(本地 CI) | `npm run check` | `tools/check-all.ps1`——**本行是本仓库门禁阶段清单的唯一展开处**,其余文档只写「见本节」。顺序:fmt → clippy → cargo test → **cargo audit(硬门禁,双 Cargo.lock)** → docs: check-docs → lock-sync(双锁漂移)→ contract → arch(规则集以 `tools/check-arch.mjs` 为准,A–L)→ count: tests → docs: check-doc-claims(计数类硬口径)→ 类型 ratchet → eslint → **npm audit(硬门禁)** → vue-tsc(**硬门禁**)→ vitest → vite build → bundle budget(体积预算)→ perf(-Perf 才跑)。**已接入 build.ps1 与 pre-push hook**(CI 工作流为纸面、未运行,见 §0 门禁纪律);`-Quick` 跳 vite build 与 bundle budget,`-SkipWeb` 跳 docs 之后全部 web+契约段,`-AuditOnly` 只跑两段 audit。 **工具链口径(2026-09-26 踩坑,见 `经验.md` E60)**:CI 用 `dtolnay/rust-toolchain@stable`,本机 rustup 可能落后 → 新版 clippy lint 只在 CI 报(`chunks_exact_to_as_chunks` 一类),而本地全绿;推送前先 `rustup update stable`(或 `rustup toolchain install <ver>` + `cargo +<ver> clippy --all-targets -- -D warnings` 本地复现整轮),别拿 CI 当选 lint 的地方。 |
+| 统一改版本号 | `npm run version:bump -- x.y.z` | **9 个文件一次改全**(2 个 package.json、3 个 Cargo.toml、tauri.conf.json、package-lock.json 全部自身版本、`AboutSection.vue` 的 `FALLBACK_VERSION`、本文档版本行);其中 **8 处声明由 `build.ps1::Assert-VersionConsistency` 校验**(改漏即构建报错);支持 `-DryRun` 预览 |
+| 后端测试 | `cd server-rs && cargo test` | **1462 个测试(1124 单测 + 338 集成,51 个集成文件)**,**需在 vcvars64 环境**;前端 `npm test -w web` **1196 个(113 文件;静态计数;vitest 运行时为 1214,差值 18 来自 `parser.contract.test.ts` 循环生成的 fixture 用例)**。数字由 `node tools/count-tests.mjs` 自动统计,勿手抄——`npm run count:tests` 查看当前值,`npm run check:tests` 校验文档是否漂移(**2026-09-26 起逐行扫描本节与根 `README.md` 的全部复写处,并校验集成文件数**;其余由代码/脚本派生的计数——表数、`ensure_*` 个数、映射组数、规则字母、ratchet 基线、枚举变体数、门禁阶段数、工具链版本——由 `npm run check:doc-claims` 守护) |
+| 全量检查(本地 CI) | `npm run check` | `tools/check-all.ps1`——**本行是本仓库门禁阶段清单的唯一展开处**,其余文档只写「见本节」。顺序:fmt → clippy → cargo test → **cargo audit(硬门禁,双 Cargo.lock)** → docs: check-docs → lock-sync(双锁漂移)→ contract → arch(规则集以 `tools/check-arch.mjs` 为准,A–L)→ count: tests → docs: check-doc-claims(计数类硬口径)→ 类型 ratchet → eslint → **npm audit(硬门禁)** → vue-tsc(**硬门禁**)→ vitest → vite build → bundle budget(体积预算)→ perf(-Perf 才跑)。**已接入 build.ps1 与 pre-push hook**;云端为 GitHub Actions 两档(权威档 `ci.yml` = 本清单全量,平台档 `ci-linux.yml` = fmt/clippy/cargo test/前端三段 + 手动 Android 交叉编译冒烟;2026-09-26 激活,见 §0 门禁纪律);`-Quick` 跳 vite build 与 bundle budget,`-SkipWeb` 跳 docs 之后全部 web+契约段,`-AuditOnly` 只跑两段 audit。 **工具链口径(2026-09-27 起,见 `经验.md` E60/E63)**:真值源是仓库根 **`rust-toolchain.toml`**——仓库内任何 rustup 代理调用(`cargo`/`rustc`/`rustfmt`/`clippy`)都解析到它的 `channel`,换机、换会话、`rustup update stable` 都不再改变口径。CI 各 workflow 里的 `dtolnay/rust-toolchain@<版本>` 是**必须逐处手写同步处**(该 action 明确不支持读 toolchain 文件;2026-09-27 起 `check-doc-claims` 扫 `.github/workflows` 下**每一处**取值与 toml 比对,不再只看第一处),它与本文档工具链行一起被 `npm run check:doc-claims` 逐条钉死——版本漂移**先在门禁转红**,而不是等 CI 炸。升版按 `rust-toolchain.toml` 头注释的五步走(改 channel → 装新工具链 → 同步各 workflow 与本文档 → 本地 `npm run check` 复现并修掉新 lint → 一起提交),别拿 CI 当选 lint 的地方。 |
 `check-arch` 规则自 2026-09-14 起含 C/D/E/G/H/I/J(代际归属与跨代方向以 `tools/arch-layers.json` 为 SSOT),**2026-09-17 起增规则 L**(JNI 按名调用桥类的登记完整性);`check-bundle` 自 2026-09-17 起(基线在脚本内,ratchet 只降不升) |
 | 开发模式 | `cd server-rs && cargo run` + `npm run dev -w web` | 后端 3001 / 前端 5173(代理到 3001) |
 | 前端构建 | `npm run build -w web` | 产出 web/dist(编译进 exe 用) |
@@ -177,7 +187,7 @@ kedai/
 
 | 依赖 | 版本 | 安装方式 | 备注 |
 |---|---|---|---|
-| Rust 工具链 | 1.97.1 stable | `rustup`(本机经清华镜像安装) | rustup/cargo/rustc 在 `~/.cargo/bin`(可能不在 PATH,用全路径或加 PATH) |
+| Rust 工具链 | 1.97.1 stable | `rustup`(本机经清华镜像安装) | **口径真值源 = 仓库根 `rust-toolchain.toml`**(2026-09-27 起,见 §4 的「工具链口径」);rustup/cargo/rustc 在 `~/.cargo/bin`(可能不在 PATH,用全路径或加 PATH)。Android 交叉目标不在 toml 声明,按需 `rustup target add --toolchain 1.97.1 <target>` |
 | VS2022 Build Tools | 17.14(C++ 工作负载) | winget | 提供 MSVC 链接器 `link.exe` 与 cl.exe(必需) |
 | Node.js | ≥ 18(验证 24) | 已有 | 仅前端构建需要;发布 exe 运行时**不需要** Node |
 | cargo-audit | 0.22.2 | `cargo install cargo-audit --locked` | `check-all` 的依赖审计阶段(**硬门禁**;未安装时该阶段提示跳过)。advisory DB 当前经 Gitee 镜像拉取 |
@@ -450,7 +460,7 @@ cd server-rs && cargo test
 ```
 
 - 单元测试(源文件内 `#[test]`/`#[tokio::test]`,**1124 个**,以 `tools/count-tests.mjs` 为准):状态机迁移、planner(fast/deep/算式识别)、reflector(3 规则)、calculator(白名单解析)、censor(禁词同义替换)、token 编码映射与估算、工具注册表、世界书转换、世界书注入(`scan_depth` 扫描窗口:`scan_window_len` 优先/兜底/0/封顶、`scan_depth` 三来源解析、显式 scanDepth 覆盖 depth 兜底)、提示词注入(含禁词库)、mvu 变量系统(含 JSONPatch 转义/reason/delta 容错)、EJS 渲染器(含读取 API、escape-ejs 与**循环预算/解析深度守卫 5 例**)、角色卡解析、正则脚本、@INJECT 解析/应用、GENERATE 注入、运行时提示词内置默认回退、角色扮演默认提示词内置(from_config + load 空值回填)、结构化错误码(api/errors.rs)、任务编排工具契约(agentgo 逐项校验/子任务截断判失败/read subtask 多键命中/todo 跨 agent 可见/agentend interrupted)、任务工具策略(deny_dangerous 的 bash 例外不外溢:含 `bash2`/`mcp_x_bash` 精确匹配护栏)、**工作区机制(编码通道批次:路径闸门 `safe_workspace_path` 的符号链接/junction/UNC/盘符/`..` 越界/空路径/NUL/DATA_DIR 双向包含 10 例;`fs_*` 工具族的行号分页、先读后写、唯一性替换三态、glob/grep 排除表与稳定排序 7 例;工作区工具策略闸门「三档位未绑定即整族不下发 / 绑定时写类按名例外且 `defs` 与 `allowed` 同源」2 例;`bash` 的 `resolve_cwd` jail 分支 1 例;`ExecScope` 先读后写与标志 2 例;`CreateTaskBody.workspace` 校验 1 例;任务模式 D1 批:审计 `risk_flag` 分类器与往返落库 2 例、侦察白名单两档 `scout_tools` 1 例、规划器能力段两套文案 1 例;**任务模式提交 2 批:部分成果拼装器 `assemble_from_plan` 去空产出/保序与失败步清单/无成果返回 None/名称折叠假标题防回归/`fallback_terminal` 两分支 5 例;重启孤儿兜底补写成果 1 例(扩既有用例)**)**、任务白名单不豁免命令级高危硬门(custom_authorized + rm -rf/sudo 必须拒绝)、generate-raw 结构化预算下限与截断自愈(含显式值钳制)、**generate-raw 世界书窗口不认条目 depth(回归护栏)+ 吸血鬼卡真实形状格式条目必注入**、**密钥保留策略(批次 2:解密失败不覆盖磁盘密文 3 例)**、**pending_runs RAII 守卫(drop 与 panic 路径)**、**db writer 锁中毒回滚(未完成事务 ROLLBACK)**、**世界书概率门控不变式(常驻条目不参与概率 / 触发条目参与,2 例)**、**system 前缀不被概率扰动(构建侧锁定)**、**截断自愈预算四路合一(utils::retry 纯函数 8 例:翻倍/精确命中封顶/已封顶返回 None/饱和不溢出/零边界/带下限抬升小预算/仅 length 且轮次内触发/单轮限制;task_service 封顶回退 1 例见 [抽象收敛与残余修复-变更说明.md](docs/功能-变更史.md))**、**用量落库事务化(global_usage 写入失败回滚 1 例、会话与全局同进同退 1 例)**、**消息删除的 message 作用域变量清理(单条/截断/清空 3 例)**、mvu 变量系统(含 JSONPatch 转义/reason/delta 容错)、EJS 渲染器(含读取 API、escape-ejs 与**循环预算/解析深度守卫 5 例**)、角色卡解析、正则脚本、@INJECT 解析/应用、GENERATE 注入、运行时提示词内置默认回退、角色扮演默认提示词内置(from_config + load 空值回填)、结构化错误码(api/errors.rs)、任务编排工具契约(agentgo 逐项校验/子任务截断判失败/read subtask 多键命中/todo 跨 agent 可见/agentend interrupted)、任务工具策略(deny_dangerous 的 bash 例外不外溢:含 `bash2`/`mcp_x_bash` 精确匹配护栏)、任务白名单不豁免命令级高危硬门(custom_authorized + rm -rf/sudo 必须拒绝)、generate-raw 结构化预算下限与截断自愈(含显式值钳制)、**密钥保留策略(批次 2:解密失败不覆盖磁盘密文 3 例)**、**pending_runs RAII 守卫(drop 与 panic 路径)**、**db writer 锁中毒回滚(未完成事务 ROLLBACK)**、**世界书概率门控不变式(常驻条目不参与概率 / 触发条目参与,2 例)**、**system 前缀不被概率扰动(构建侧锁定)**、**截断自愈预算四路合一(utils::retry 纯函数 8 例:翻倍/精确命中封顶/已封顶返回 None/饱和不溢出/零边界/带下限抬升小预算/仅 length 且轮次内触发/单轮限制;task_service 封顶回退 1 例见 [抽象收敛与残余修复-变更说明.md](docs/功能-变更史.md))**、**用量落库事务化(global_usage 写入失败回滚 1 例、会话与全局同进同退 1 例)**、**消息删除的 message 作用域变量清理(单条/截断/清空 3 例)**
-- API 集成测试(`tests/` 40 个文件,**338 个**,以 `tools/count-tests.mjs` 为准,mock 连接器 + 临时数据目录):api_integration、assistant、agent_flows、tasks(含部分成果兜底批:汇总失败降级 partial/拼装成果、无成果不伪造、plan 去「## 最终计划」、取消保成果、plan 续跑取消保成果 5 例,2026-09-26)、task_events(含 `task_solo_offers_bash_tool`:任务模式确实下发 bash;**`workspace_less_task_binds_scratch_and_offers_fs_tools`:未绑定工作区的任务建任务级 scratch 且 `fs_*` 确实下发,2026-09-26**)、**task_custom_gate(工具闸门空名单 = 拒绝一切:空集拒臆造 / 非空名单不误伤 2 例,2026-09-24)**、generate_raw(自愈成功且 injected 保留 / 重发失败回退半截 / 自愈用尽返回末次文本 / max_tokens=0 400)、**schema_migration_meta(老库升级结构一致性,冻结基线见 `tests/fixtures/schema_baseline_v0_3_0_beta.sql`)**、prompt_inject、world_books、settings_connector、security、contracts_e2e、scripts_e2e、scripts_import、swipe_regenerate、undo、user_scripts、variables_scopes、db_concurrency、macros、repo_index、memory_embedding(P-5 记忆向量批量语义)——health、角色 CRUD(multipart 上传)、会话/消息/导入导出、设置与 token、agent plan、SSE 聊天流、任务引擎六模式、计算器工具 SSE、世界书/角色卡、提示词注入与酒馆预设导入、鉴权
+- API 集成测试(`tests/` 51 个文件,**338 个**,以 `tools/count-tests.mjs` 为准,mock 连接器 + 临时数据目录):api_character_session、api_chat_sse、api_agent_loop、api_tools_permissions、api_memory_diagnostics、api_misc_assets、api_errors_codes(后 7 份由原 `api_integration.rs` 按 `/api/*` 路由域拆分,2026-09-27)、assistant、agent_flows、tasks_crud、tasks_prompt、tasks_modes_solo_multi、tasks_modes_plan、tasks_modes_team、tasks_followup(后 6 份由原 `tasks.rs` 按 API 域拆分,2026-09-27;**每个测试文件是独立进程、各自持有 `%TEMP%\kedai-test-<pid>` 与单例 app,故不要把用例合回一个文件**;含部分成果兜底批:汇总失败降级 partial/拼装成果、无成果不伪造、plan 去「## 最终计划」、取消保成果、plan 续跑取消保成果 5 例,2026-09-26)、task_events(含 `task_solo_offers_bash_tool`:任务模式确实下发 bash;**`workspace_less_task_binds_scratch_and_offers_fs_tools`:未绑定工作区的任务建任务级 scratch 且 `fs_*` 确实下发,2026-09-26**)、**task_custom_gate(工具闸门空名单 = 拒绝一切:空集拒臆造 / 非空名单不误伤 2 例,2026-09-24)**、generate_raw(自愈成功且 injected 保留 / 重发失败回退半截 / 自愈用尽返回末次文本 / max_tokens=0 400)、**schema_migration_meta(老库升级结构一致性,冻结基线见 `tests/fixtures/schema_baseline_v0_3_0_beta.sql`)**、prompt_inject、world_books、settings_connector、security、contracts_e2e、scripts_e2e、scripts_import、swipe_regenerate、undo、user_scripts、variables_scopes、db_concurrency、macros、repo_index、memory_embedding(P-5 记忆向量批量语义)——health、角色 CRUD(multipart 上传)、会话/消息/导入导出、设置与 token、agent plan、SSE 聊天流、任务引擎六模式、计算器工具 SSE、世界书/角色卡、提示词注入与酒馆预设导入、鉴权
   - **已知 flaky**:`settings_connector::mock_auto_switches_to_openai_on_save` 偶发因 Windows 文件占用失败
     (`settings.json 应已持久化: Os { code: 32 }`;另实测全量负载下的 `Os { code: 2 } NotFound` 变体),
     隔离重跑即通过——非代码缺陷:PUT 保存是 `db_call` 同步 await(`api/settings.rs:657-662`),返回 200 时
@@ -459,7 +469,7 @@ cd server-rs && cargo test
     在 `-j 8` 全量下偶发失败——那是上文 **TEST-ISO-1**（用例共享可变设置 / 顺序依赖）的另一条断言，
     **不是新条目**（2026-09-24 曾一度误登记为 ENV-4，已撤销）；判别同 ENV-1：先
     `cargo test --test settings_connector <用例名> -- --exact` 隔离复跑，不要改代码或依赖。
-- 前端 `npm test -w web`(Vitest,**1195 个 / 113 文件**,数字以 `tools/count-tests.mjs` 为准;vitest 实际输出为 **1213**——差值 18 来自 `parser.contract.test.ts:68` 对 `mvu_patch_cases.json` 的 19 个 fixture 用例循环生成,静态计数把该 `it(` 计为 1):stores(**storeBridge 注册/降级/owner 诊断 14 例**)、**弹窗注册表单点派生三方一致(flag 无重复/label/组件已定义/MODAL_FLAGS 对应;registry ↔ uiPrefs 双向;App.vue v-for 派生且无硬编码残留,共 9 例)**、api client(含 ApiError 错误码分类)、**api stream(SSE 读循环跨 chunk 帧重组/CRLF/残留帧、非 JSON 错误体、上传成功失败与 401 重试,12 例)**、组件与 composables、**自定义流程二维图(线性兼容 / 有效上游与层级 / 成环拦截 / 成果选拔 17 例)**、**画布数据层(节点连线产出、连线拦截、拖拽坐标写回、重新布局 17 例)**、**画布组件(真实挂载 @vue-flow:节点渲染、连线拦截、Inspector、重排确认 11 例)**、**执行流程区(默认列表视图、异步画布切换、列表编辑未回归 6 例)**、**步骤表单数值区间(输出上限 1~32768、上下文上限 256~1048576,与后端同口径,7 例)**、CSS 清洗(含注释处理)与沙箱回归;类型门禁 `npm run typecheck -w web`(vue-tsc,**硬门禁**,存量 168 已于 2026-09-08 清偿归零,清偿记录见 docs/功能.md 附录 D);类型逃逸 ratchet `node tools/check-frontend-lint.mjs`(as never / as unknown as / 非空断言 / any,**只降不升**,基线见脚本内 BASELINE;2026-09-13 批次 5.2 后 as unknown as 71→70)
+- 前端 `npm test -w web`(Vitest,**1196 个 / 113 文件**,数字以 `tools/count-tests.mjs` 为准;vitest 实际输出为 **1214**——差值 18 来自 `parser.contract.test.ts:68` 对 `mvu_patch_cases.json` 的 19 个 fixture 用例循环生成,静态计数把该 `it(` 计为 1):stores(**storeBridge 注册/降级/owner 诊断 14 例**)、**弹窗注册表单点派生三方一致(flag 无重复/label/组件已定义/MODAL_FLAGS 对应;registry ↔ uiPrefs 双向;App.vue v-for 派生且无硬编码残留,共 9 例)**、api client(含 ApiError 错误码分类)、**api stream(SSE 读循环跨 chunk 帧重组/CRLF/残留帧、非 JSON 错误体、上传成功失败与 401 重试,12 例)**、组件与 composables、**自定义流程二维图(线性兼容 / 有效上游与层级 / 成环拦截 / 成果选拔 17 例)**、**画布数据层(节点连线产出、连线拦截、拖拽坐标写回、重新布局 17 例)**、**画布组件(真实挂载 @vue-flow:节点渲染、连线拦截、Inspector、重排确认 11 例)**、**执行流程区(默认列表视图、异步画布切换、列表编辑未回归 6 例)**、**步骤表单数值区间(输出上限 1~32768、上下文上限 256~1048576,与后端同口径,7 例)**、CSS 清洗(含注释处理)与沙箱回归;类型门禁 `npm run typecheck -w web`(vue-tsc,**硬门禁**,存量 168 已于 2026-09-08 清偿归零,清偿记录见 docs/功能.md 附录 D);类型逃逸 ratchet `node tools/check-frontend-lint.mjs`(as never / as unknown as / 非空断言 / any,**只降不升**,基线见脚本内 BASELINE;2026-09-13 批次 5.2 后 as unknown as 71→70)
   > **并发注意**:一次全量跑过 14 个文件报 `[vitest-pool] Failed to start forks worker ... spawn UNKNOWN`(worker 起不来,与用例无关,同后端全并行的资源现象同族);`npm test -w web -- --maxWorkers=3` 复跑即全绿。
 - **后端全量构建的同类注意(2026-09-24 二维批次 8 实测)**:本机全量 `cargo test` 曾两度报
   `error[E0463] can't find crate for kedai_server` / `crate X required to be available in rlib format`
@@ -524,7 +534,7 @@ cd server-rs && cargo test
 | 任务工作台(task) | `services/task_service/` + `services/task_engine/` | `docs/功能.md` §六模式任务引擎 |
 | 上下文压缩(compaction) | `agents/engine/compaction.rs` | `docs/功能.md` §上下文工程与压缩 |
 | 缓存感知压缩管线 | `services/cache_diagnostics.rs` + `api/diagnostics.rs` | `docs/功能.md` §上下文工程与压缩 |
-| 跨会话记忆蒸馏 | `services/memory_service.rs` + `api/memory.rs` | `docs/功能.md` §记忆 |
+| 跨会话记忆蒸馏 | `services/memory_service/` + `api/memory.rs` | `docs/功能.md` §记忆 |
 | 技能渐进披露与子代理守卫 | `services/skill_service.rs` + `tools/agent_tools_agent.rs` | `docs/功能.md` §技能与 MCP |
 | 可观测性与错误面收口 | `api/request_id.rs` + `utils/logging.rs` + `models/llm_error.rs` | `docs/功能.md` §可观测性与错误面 |
 

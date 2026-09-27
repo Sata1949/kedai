@@ -1935,7 +1935,7 @@ dependencies = [
 
 [[package]]
 name = "kedai-desktop"
-version = "0.3.0-B-beta"
+version = "0.4.0-alpha"
 dependencies = [
  "kedai-server",
  "reqwest 0.12.28",
@@ -1953,7 +1953,7 @@ dependencies = [
 
 [[package]]
 name = "kedai-server"
-version = "0.3.0-B-beta"
+version = "0.4.0-alpha"
 dependencies = [
  "async-stream",
  "axum",

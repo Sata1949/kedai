@@ -129,6 +129,7 @@
     "contracts": { "generation": "L1", "responsibility": "契约差异计算等纯函数" },
     "mvu": { "generation": "L1", "responsibility": "mvu 变量树协议解析/回放(与 Rust 侧同读 docs/fixtures 对拍)" },
     "utils": { "generation": "L1", "responsibility": "纯工具函数" },
+    "styles": { "generation": "L1", "responsibility": "全局样式域(设计变量 tokens + 基础层 + 各业务域样式;由 main.ts 单一入口按序 import,自身零依赖)", "notes": "2026-09-27 补登记(QUALITY-FIX Q1-4 把 style.css 按域拆分时新增本目录):纯 CSS,无 import 出边,故归 L1 基石层——L3 的语义是「新能力/实验/隔离执行」,与样式域不符" },
     "stores": { "generation": "L2", "responsibility": "Pinia 状态编排:唯一的状态变更入口(action)" },
     "composables": { "generation": "L2", "responsibility": "组合式编排逻辑(可复用业务流程)" },
     "components": { "generation": "L3", "responsibility": "UI 组件(展示层;不承载业务规则)" },

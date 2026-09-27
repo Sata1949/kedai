@@ -57,7 +57,7 @@ const retryInput = (w: ReturnType<typeof mount>) => numInput(w, '只在产出为
 
 describe('AgentFlowStepEditor 单次调用超时(A 批 A1)', () => {
   it('常量与后端校验区间一致(30..=3600 秒)', () => {
-    // 后端单一出处:server-rs/src/services/agent_flow_service.rs 的
+    // 后端单一出处:server-rs/src/services/agent_flow_service/ 的
     // MIN_STEP_CALL_TIMEOUT_SECS / MAX_STEP_CALL_TIMEOUT_SECS
     expect(STEP_CALL_TIMEOUT_MIN).toBe(30);
     expect(STEP_CALL_TIMEOUT_MAX).toBe(3600);
@@ -119,7 +119,7 @@ describe('AgentFlowStepEditor 单次调用超时(A 批 A1)', () => {
 
 describe('AgentFlowStepEditor 空产出重试(A 批 A2)', () => {
   it('常量与后端校验区间一致(1..=5 次)', () => {
-    // 后端单一出处:server-rs/src/services/agent_flow_service.rs 的
+    // 后端单一出处:server-rs/src/services/agent_flow_service/ 的
     // MIN_STEP_MAX_RETRIES / MAX_STEP_MAX_RETRIES
     expect(STEP_MAX_RETRIES_MIN).toBe(1);
     expect(STEP_MAX_RETRIES_MAX).toBe(5);
