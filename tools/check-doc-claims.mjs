@@ -124,6 +124,24 @@ function checkAllAuditSegments() {
   return (src.match(/Write-Host "`n===== (?:cargo|npm) audit/g) || []).length;
 }
 
+/** 仓库根 `rust-toolchain.toml` 的 channel —— 工具链口径的唯一真值源(经验 E60/E63)。 */
+function toolchainChannel() {
+  const m = readFile('rust-toolchain.toml').match(/^\s*channel\s*=\s*"([^"]+)"/m);
+  return m ? m[1] : null;
+}
+
+/** ci.yml 的 `uses: dtolnay/rust-toolchain@<版本>`(该 action 不读 toml,是必须手写同步的第二处)。 */
+function ciToolchainPin() {
+  const m = readFile('.github/workflows/ci.yml').match(/uses:\s*dtolnay\/rust-toolchain@([\d.]+)/);
+  return m ? m[1] : null;
+}
+
+/** MAINTENANCE.md 工具链表行的版本(句式:`| Rust 工具链 | 1.97.1 stable | …`)。 */
+function maintenanceToolchainVersion() {
+  const m = readFile('MAINTENANCE.md').match(/^\|\s*Rust 工具链\s*\|\s*([\d.]+)/m);
+  return m ? m[1] : null;
+}
+
 /** docs/契约.md 的 MAPPINGS 镜像表行数(「已登记的 N 组映射」与「守什么」之间的表格)。 */
 function contractMappingTableRows() {
   const src = readFile('docs/契约.md');
@@ -263,6 +281,28 @@ const CLAIMS = [
         file: 'docs/契约-协议与配置.md',
         re: /(\d+) 个独立审计段/,
         expected: 2,
+      },
+    ],
+  },
+  {
+    // 版本号是**字符串**,走 extra 的直比路径(checks 的 gotNorm 分支只支持数字与字母区间,
+    // 见执行段 `typeof gotNorm === 'number' ? … : Array.isArray(expected) && …`)。
+    id: 'toolchain-version',
+    desc: 'Rust 工具链版本三处一致(rust-toolchain.toml ⇄ ci.yml ⇄ MAINTENANCE.md)',
+    derive: toolchainChannel,
+    checks: [],
+    extra: [
+      {
+        desc: 'ci.yml 的 `dtolnay/rust-toolchain@` 版本与该 action 不支持读 toml(经验 E63)导致的必填第二处',
+        derive: ciToolchainPin,
+        file: '.github/workflows/ci.yml',
+        useClaimValue: true,
+      },
+      {
+        desc: 'MAINTENANCE.md 工具链行的版本',
+        derive: maintenanceToolchainVersion,
+        file: 'MAINTENANCE.md',
+        useClaimValue: true,
       },
     ],
   },
