@@ -1,0 +1,24 @@
+# Kedai 工具链口径的**单一出处**(2026-09-27 起)。解决经验 E60 的病根:
+# 版本号原先只存在于「CI yaml + 人的记忆」两处,漂移一次就造成「本地绿 / CI 红」。
+#
+# 生效范围:**仓库内任何 rustup 代理调用**(cargo / rustc / rustfmt / clippy)都解析到
+# 这里的 channel——换机、换会话、`rustup update stable` 都不会再悄悄改变口径。
+#
+# CI 侧**读不到本文件**:`dtolnay/rust-toolchain` 明确不支持 rust-toolchain.toml(见 E63),
+# 故 `.github/workflows/ci.yml` 仍写显式 `@<版本>`。三处(本文件 / ci.yml / MAINTENANCE.md
+# 的工具链行)由 `tools/check-doc-claims.mjs` 逐条比对钉死——**版本漂移现在会先在门禁转红**,
+# 而不是等 CI 炸。
+#
+# 升版流程(按序;只改版本号就把红推给 CI,那正是 E60 的原始事故形态):
+#   1. 改本文件 channel(全仓唯一需要手写的版本号)
+#   2. rustup toolchain install <新版本> --component rustfmt,clippy
+#   3. 同步 ci.yml 的 @<新版本> 与 MAINTENANCE.md 的工具链行(门禁会核对,漏了即红)
+#   4. 本机跑 npm run check,复现并修掉新版本带出的 lint
+#   5. 与代码一起提交
+#
+# 刻意**不**声明 targets:本仓 Android 交叉目标(aarch64 / armv7 / i686 / x86_64-linux-android)
+# 按需手动添加——声明后 CI 每次 run 都要为 4 个 rust-std 额外下载(`~/.rustup` 不在缓存面内)。
+# 需要时:`rustup target add --toolchain 1.97.1 aarch64-linux-android`(本机已装齐 4 个)。
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]

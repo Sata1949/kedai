@@ -388,3 +388,36 @@ async function onModelChange(e: Event): Promise<void> {
     </div>
   </footer>
 </template>
+
+<style scoped>
+/* 模型选择:去原生外观 + 自绘直角黑三角下拉箭头。
+   2026-09-27 UIFIX-2:本节 3 条规则原在 styles/task.css(含末尾的 flex/width 工具规则)与
+   styles/mobile.css(窄屏限宽),按 MAINTENANCE D-5「改到谁拆谁」随本次修复一并搬进 scoped
+   —— 该类全仓只此一处使用。
+   background-size 必须显式给像素对:三角是只有 viewBox、没有 width/height 的 SVG,
+   `auto` 会按定位区高度渲染(实测 35×35px,而右侧只预留 22px → 三角压住模型名)。 */
+.sv-model-select {
+  -webkit-appearance: none;
+  appearance: none;
+  border: var(--bw) solid var(--sv-ink);
+  background: var(--sv-white);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8'%3E%3Cpolygon points='0,0 8,0 4,8' fill='%23141414'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 7px center;
+  background-size: 10px 10px;
+  padding: 5px 22px 5px 8px;
+  font-size: 12px;
+  color: var(--sv-ink);
+  cursor: pointer;
+  flex: none; /* 工具栏内不拉伸 */
+  width: auto;
+  min-width: 120px;
+}
+
+/* 窄屏(<768px):工具栏拥挤,模型名限宽 */
+@media (max-width: 767px) {
+  .sv-model-select {
+    max-width: 132px;
+  }
+}
+</style>

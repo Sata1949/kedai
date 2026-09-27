@@ -213,7 +213,7 @@ pub struct PlanStep {
     pub enabled: bool,
     #[serde(default)]
     pub goal: String,
-    /// direct | reflect(校验见 `services/agent_flow_service.rs`;`tool` 不在支持范围)
+    /// direct | reflect(校验见 `services/agent_flow_service/`;`tool` 不在支持范围)
     #[serde(default)]
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -240,7 +240,7 @@ pub struct PlanStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallel_tool_calls: Option<bool>,
     /// 上游节点 id 列表(二维流程依赖边;空 = 线性串联或源节点,语义见
-    /// `services/agent_flow_service.rs` 的 `effective_inputs`)。缺省序列化省略:
+    /// `services/agent_flow_service/` 的 `effective_inputs`)。缺省序列化省略:
     /// 存量一维流程 JSON 读写逐字节不变。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<String>,

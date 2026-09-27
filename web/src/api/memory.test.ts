@@ -11,7 +11,7 @@ import {
 } from './memory';
 import { resetApiTokenForTest } from './client';
 
-// 样例条目(与后端 server-rs/src/services/memory_service.rs 的 MemoryEntry 字段对齐)
+// 样例条目(与后端 server-rs/src/services/memory_service/ 的 MemoryEntry 字段对齐)
 function entry(overrides: Partial<MemoryEntry> = {}): MemoryEntry {
   return {
     id: 7,

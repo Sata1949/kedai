@@ -1,0 +1,117 @@
+/* ============================================================================
+   base.css —— 全局基础层(层②):重置、滚动条、键盘焦点、硬边教义、文本选区、至上主义装饰元件
+   ----------------------------------------------------------------------------
+   由 web/src/style.css 按域拆分而来（QUALITY-FIX Q1-4,2026-09-27）：
+   原 L156-L265 整段搬来，规则一字未改（只新增本段头注释）。**顺序即级联**：
+   本文件在 style.css 清单里的 @import 位置决定它相对其它域的先後，移动前先读清单里的顺序说明。
+   ============================================================================ */
+
+* { box-sizing: border-box; }
+html, body, #app { height: 100%; margin: 0; }
+
+body {
+  font-family: var(--font-body);
+  background: var(--sv-paper);
+  color: var(--sv-ink);
+  font-size: 14px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 纸张噪点:全屏固定噪点层,模拟印刷纸面质感(纯装饰,pointer-events 穿透)。
+   SVG feTurbulence 生成去色噪点,multiply 混合压进纸色;静态无动画,不受 reduced-motion 影响。 */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--z-splash) + 1);
+  pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 220px 220px;
+  opacity: 0.05;
+  mix-blend-mode: multiply;
+}
+
+/* 滚动条:直角黑条 */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-thumb { background: var(--sv-ink); }
+::-webkit-scrollbar-thumb:hover { background: var(--sv-ink-soft); }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* 键盘焦点:2px 印刷黑外描边 + 2px 偏移(构成主义硬边框,非柔和发光)。
+   按钮/输入/导航/开关统一可见;点击鼠标时不显示,仅键盘 Tab 时出现。 */
+:focus-visible {
+  outline: 2px solid var(--sv-ink);
+  outline-offset: 2px;
+}
+
+/* 硬边教义(批次 5 第二轮):全局直角,拒绝圆角。
+   评审点名:原生表单控件(select/textarea/input/button)在 Chromium 新版默认外观
+   带微圆角,与卡片直角混用;此处对全部 sv-* 组件与原生控件统一归零,
+   三处散写的 border-radius: 0(resource-card / render-panel / model-select)收编于此。 */
+[class*="sv-"],
+select,
+input,
+textarea,
+button,
+output {
+  border-radius: 0;
+}
+
+/* 文本选区:淡粉底 + 印刷黑字(与画布同色系,非默认蓝) */
+::selection {
+  background: var(--sv-pink);
+  color: var(--sv-ink);
+}
+
+/* ===== 至上主义装饰元件:纯粹几何 ===== */
+
+/* 黑方块 */
+.sv-supreme {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  background: var(--sv-ink-supreme);
+}
+.sv-supreme.red { background: var(--sv-red); }
+.sv-supreme.blue { background: var(--sv-blue); }
+.sv-supreme.yellow { background: var(--sv-yellow); }
+.sv-supreme.pink { background: var(--sv-pink); }
+.sv-supreme.pink-deep { background: var(--sv-pink-deep); }
+.sv-supreme.green { background: var(--sv-green); }
+/* 橙(结构主义用色之一;settings 多处引用,须有定义而非回退黑色) */
+.sv-supreme.orange { background: var(--sv-orange); }
+.sv-supreme.purple { background: var(--sv-purple); }
+
+/* 对角线:构成主义第一签名(红斜线)。仅供装饰,不参与交互。 */
+.sv-diagonal {
+  display: inline-block;
+  width: 22px;
+  height: 3px;
+  background: var(--sv-red);
+  transform: rotate(-45deg);
+  flex-shrink: 0;
+}
+.sv-diagonal.sm { width: 16px; height: 2px; }
+.sv-diagonal.lg { width: 34px; height: 4px; }
+
+/* 标题前缀标记:收编散写的 ::before 装饰,统一为「方块/菱形/方块」三变体 */
+.sv-marker {
+  position: relative;
+  padding-left: 16px;
+}
+.sv-marker::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 10px;
+  height: 10px;
+  background: var(--sv-ink-supreme);
+}
+.sv-marker.diamond::before {
+  background: var(--sv-red);
+  transform: translateY(-50%) rotate(45deg);
+}
+.sv-marker.pink::before { background: var(--sv-pink); }

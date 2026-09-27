@@ -329,9 +329,13 @@ function collect(dir, exts) {
   return out;
 }
 
-/** 生产代码行(剔除 #[cfg(test)] 之后的内容)的行号集合。 */
+/** 生产代码行(剔除 #[cfg(test)] 之后的内容)的行号集合。
+ *  同时认 `#[cfg(test)]` 与 `#![cfg(test)]`(后者是**独立测试文件**的写法,如
+ *  services/agent_flow_service/tests.rs:测试模块搬出 mod.rs 后,标记只能写成内层属性,
+ *  否则本函数会返回 Infinity、整个测试文件被当成生产代码,规则 E 的空基线会把测试里的
+ *  断言全部判红)。对既有文件是严格超集:全仓列首 `#![cfg(test)]` 的命中数为 0。 */
 function productionLineCount(src) {
-  const idx = src.search(/^#\[cfg\(test\)\]/m);
+  const idx = src.search(/^#!?\[cfg\(test\)\]/m);
   return idx === -1 ? Infinity : src.slice(0, idx).split('\n').length;
 }
 
@@ -812,9 +816,10 @@ const backendWarnings = [];
     const isAllowedDir = (a, b) => backendAllowed.has(`${a}->${b}`);
     const isAllowedFeDir = (a, b) => frontendAllowed.has(`${a}->${b}`);
 
-    /** 生产代码切片:剔除 `#[cfg(test)]` 及其后(测试里的跨模块引用不是架构依赖)。 */
+    /** 生产代码切片:剔除 `#[cfg(test)]` 及其后(测试里的跨模块引用不是架构依赖)。
+     *  同样认 `#![cfg(test)]`——见上面 `productionLineCount` 的说明。 */
     const productionSource = (src) => {
-      const i = src.search(/^#\[cfg\(test\)\]/m);
+      const i = src.search(/^#!?\[cfg\(test\)\]/m);
       return i === -1 ? src : src.slice(0, i);
     };
 

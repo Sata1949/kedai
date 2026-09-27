@@ -41,14 +41,18 @@ jobs:
           node-version: 22
           cache: npm
 
-      # 工具链**锁到与本地一致的 1.97.1**,不用 `stable`。原因(2026-09-26 首跑实测):
+      # 工具链**锁到与本地一致的版本**,不用 `stable`。原因(2026-09-26 首跑实测):
       # `@stable` 当时已是 1.98.1,其 clippy 新增 `chunks_exact_to_as_chunks`,本地 1.97.1
       # 不报——`-D warnings` 下 CI 直接变红(`server-rs/src/services/memory_service.rs:109`)。
       # 本工作流的自我定位是「把同一套门禁搬到服务端」,门禁就得与本地**可复现地同版本**,
       # 否则上游每次发版都可能凭空变红。
-      # 升版方法:本机 `rustup update stable` → 改下面的版本号与 `rustc --version` 对齐 →
-      # 本地跑 `npm run check` 复现并修掉新 lint → 一起提交(勿只改版本号,那会把红推给 CI)。
-      - name: Setup Rust (锁 1.97.1,与本地一致)
+      #
+      # **版本号的真值源是仓库根 `rust-toolchain.toml`,不是这一行**(2026-09-27 起)。
+      # 本 action **不支持**读 toolchain 文件(维护者明确拒绝,见 `docs/经验.md` E63),
+      # 所以这里的 `@1.97.1` 是**必须手写同步的第二处**;三处(本行 / toml / MAINTENANCE.md
+      # 的工具链行)由 `tools/check-doc-claims.mjs` 逐条比对——漏改任意一处,本地门禁即红。
+      # 升版:先改 `rust-toolchain.toml` 的 channel,再按该文件的「升版流程」五步走。
+      - name: Setup Rust (锁 1.97.1,真值源 rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt, clippy

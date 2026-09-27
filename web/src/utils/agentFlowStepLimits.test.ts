@@ -25,7 +25,7 @@ function step(over: Partial<AgentFlowStep> = {}): AgentFlowStep {
 
 describe('agentFlowStepLimits 区间常量(与后端同源)', () => {
   it('超时 30..=3600 秒;重试 1..=5 次', () => {
-    // 后端单一出处:server-rs/src/services/agent_flow_service.rs 的
+    // 后端单一出处:server-rs/src/services/agent_flow_service/ 的
     // MIN/MAX_STEP_CALL_TIMEOUT_SECS 与 MIN/MAX_STEP_MAX_RETRIES
     expect(STEP_CALL_TIMEOUT_MIN).toBe(30);
     expect(STEP_CALL_TIMEOUT_MAX).toBe(3600);

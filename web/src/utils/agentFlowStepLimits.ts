@@ -1,6 +1,6 @@
 // Agent 执行流程节点的**调用预算**纯函数(A 批 A1/A2:单次调用超时 + 空产出重试)。
 //
-// 与后端同口径(`server-rs/src/services/agent_flow_service.rs` 的保存期校验):
+// 与后端同口径(`server-rs/src/services/agent_flow_service/` 的保存期校验):
 //   - `PlanStep.call_timeout_secs` ∈ 30..=3600 秒,缺省(无值)= 沿用宿主 300 秒看门狗;
 //   - `PlanStep.max_retries` ∈ 1..=5(额外尝试上限,总尝试 = 1 + n),缺省 = 不重试。
 // 两个字段都是**加性**的:置空即写回 null,序列化时整键省略(存量流程逐字节不变)。
