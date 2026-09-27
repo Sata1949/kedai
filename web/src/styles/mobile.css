@@ -1,0 +1,423 @@
+/* ============================================================================
+   mobile.css —— 移动端 / 窄屏适配(Android 移植,阶段 4)——**必须保持在样式表最后**:靠源序覆盖桌面规则
+   ----------------------------------------------------------------------------
+   由 web/src/style.css 按域拆分而来（QUALITY-FIX Q1-4,2026-09-27）：
+   原 L3749-L4164 整段搬来，规则一字未改（只新增本段头注释）。**顺序即级联**：
+   本文件在 style.css 清单里的 @import 位置决定它相对其它域的先後，移动前先读清单里的顺序说明。
+   ============================================================================ */
+
+/* ============================================================================
+   移动端 / 窄屏适配(Android 移植,阶段 4)
+   ----------------------------------------------------------------------------
+   设计原则:
+   1. 全部规则包在 media query 内 —— 桌面端(≥1100px)匹配不到任何一条,
+      渲染结果与移植前逐像素一致,零回归风险。
+   2. 断点与信息架构:
+      - ≥1100px  桌面:沿用原三栏(Sidebar 常驻 + 聊天 + AgentPanel 抽屉)
+      - 768–1099 平板/横屏:三栏收窄,取消 1100px 硬最小宽度(不再横向裁切)
+      - <768px   手机竖屏:三栏改为「抽屉 + 底部导航」,弹窗改全屏 Sheet
+   3. 触摸替代:hover 显示的操作改常显,触摸目标 ≥44px,禁用双击缩放。
+   4. 安全区:viewport-fit=cover 配合 env(safe-area-inset-*) 处理刘海/手势条。
+   ============================================================================ */
+
+/* 抽屉遮罩与底部导航:默认隐藏,仅手机断点启用。
+   基类必须 display:none —— 否则桌面端打开 Agent 面板时会多出一层遮罩。 */
+.sv-drawer-backdrop { display: none; }
+.sv-mobile-nav { display: none; }
+.sv-sidebar-close { display: none; }
+
+/* 触摸设备(无 hover 能力):消息操作按钮由「悬停显示」改为常显。
+   依据 media (hover: none) 而非宽度 —— 触摸笔记本/平板横屏同样适用。 */
+@media (hover: none) {
+  .sv-msg-actions { opacity: 1; }
+  /* 触摸端双击缩放易误触,交由浏览器单点手势处理 */
+  button, [role='button'], .sv-char-item, .sv-mode button { touch-action: manipulation; }
+}
+
+/* ---------- 平板 / 手机横屏(768–1099px):三栏收窄,去掉 1100px 硬约束 ---------- */
+@media (max-width: 1099px) and (min-width: 768px) {
+  .sv-frame-col { min-width: 0; }
+  .sv-sidebar { width: 220px; }
+  .sv-sidebar.wide { width: 258px; }
+  .sv-agent-panel.open { width: 300px; }
+  .sv-canvas { padding: 24px clamp(16px, 3vw, 36px); }
+  .sv-topbar { padding-left: 38px; }
+  .sv-session-select { max-width: 200px; }
+}
+
+/* ---------- 手机(<768px):抽屉 + 底部导航 ---------- */
+@media (max-width: 767px) {
+  :root {
+    --mobile-nav-h: 56px;
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  /* Android 原生壳(见 MainActivity.kt)已用 WindowInsets 把状态栏/导航栏/软键盘的
+     insets 作为 padding 让给内容,WebView 视口本身不再包含系统栏区域。
+     此处把 safe-area 兜底变量归零,避免「原生 padding + CSS env()」双重留白
+     (无刘海机 env() 本就是 0,归零只影响有切口的设备)。 */
+  :root.kd-native-insets {
+    --safe-top: 0px;
+    --safe-bottom: 0px;
+  }
+
+  /* --- 视口:释放 1100px 硬宽度,顶部让开状态栏,底部为导航栏留位 --- */
+  .sv-frame-col {
+    min-width: 0;
+    height: 100dvh; /* 动态视口:软键盘弹出时不被截断 */
+    /* 状态栏:不加这段顶栏会被状态栏时间/信号图标压住(实机截图确认) */
+    padding-top: var(--safe-top);
+    padding-bottom: calc(var(--mobile-nav-h) + var(--safe-bottom));
+  }
+
+  /* --- 左栏 → 左侧覆盖式抽屉 --- */
+  .sv-sidebar,
+  .sv-sidebar.wide {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 52;
+    width: min(84vw, 320px);
+    transform: translateX(-100%);
+    transition: transform var(--transition-normal);
+    padding-top: var(--safe-top);
+    overflow-y: auto;
+  }
+  .sv-sidebar.open {
+    transform: translateX(0);
+    box-shadow: 8px 0 0 rgba(0, 0, 0, 0.18);
+  }
+  /* 抽屉关闭键:桌面隐藏,手机在品牌行右端显示 */
+  .sv-sidebar-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 34px;
+    margin-left: 8px;
+    flex: none;
+    border: var(--bw-thin) solid var(--sv-ink);
+    background: var(--sv-white);
+    color: var(--sv-ink);
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+  }
+
+  /* --- 右栏 Agent 面板 → 右侧覆盖式抽屉 --- */
+  .sv-agent-panel,
+  .sv-agent-panel.open {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 52;
+    width: min(88vw, 380px);
+    transform: translateX(100%);
+    transition: transform var(--transition-normal);
+    padding-top: var(--safe-top);
+    padding-bottom: calc(var(--mobile-nav-h) + var(--safe-bottom));
+  }
+  .sv-agent-panel.open {
+    transform: translateX(0);
+    box-shadow: -8px 0 0 rgba(0, 0, 0, 0.18);
+  }
+  /* 右缘竖排 AGENT 条在手机上误触且无意义(底导航已有入口) */
+  .sv-agent-toggle { display: none; }
+
+  /* --- 抽屉遮罩 --- */
+  .sv-drawer-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 51;
+    background: rgba(0, 0, 0, 0.42);
+  }
+
+  /* --- 底部导航栏 --- */
+  .sv-mobile-nav {
+    display: flex;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 53;
+    height: calc(var(--mobile-nav-h) + var(--safe-bottom));
+    padding-bottom: var(--safe-bottom);
+    background: var(--sv-surface);
+    border-top: var(--bw) solid var(--sv-ink);
+    box-shadow: 0 -4px 0 0 var(--sv-pink);
+  }
+  .sv-mobile-nav-item {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    border: none;
+    background: none;
+    color: var(--sv-ink-soft);
+    font-size: 10px;
+    font-family: var(--font-display);
+    letter-spacing: 0.06em;
+    cursor: pointer;
+    padding: 0;
+  }
+  .sv-mobile-nav-item svg {
+    width: 21px;
+    height: 21px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: square;
+    stroke-linejoin: miter;
+  }
+  .sv-mobile-nav-item.active { color: var(--sv-pink-deep); }
+  .sv-mobile-nav-item:active { background: var(--sv-paper); }
+
+  /* --- 顶栏:压缩内边距,右侧控件横向可滚 --- */
+  .sv-topbar {
+    padding: 8px 12px 8px 34px;
+    gap: 8px;
+  }
+  .sv-topbar-title { font-size: 12px; }
+  /* 型号名与「会话」标签在手机上让位给可操作控件 */
+  .sv-topbar-sub { display: none; }
+  .sv-topbar-right {
+    gap: 8px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .sv-topbar-right::-webkit-scrollbar { display: none; }
+  .sv-session-select { max-width: 46vw; padding: 6px 8px; }
+  /* Token 统计已由侧栏抽屉承载,顶栏重复项隐藏 */
+  .sv-token-inline { display: none; }
+
+  /* 顶栏右侧的 AGENT 入口在手机上隐藏:该位置空间不足(实测被裁切),
+     功能已由底部导航「AGENT」完整承载,避免重复入口挤占 HTML/JS 开关的位置。 */
+  .sv-topbar-agent { display: none; }
+
+  /* --- 聊天画布与输入区 --- */
+  .sv-canvas { padding: 16px 12px; }
+  .sv-inputbar { padding: 8px 12px 10px; }
+  .sv-inputbox { gap: 8px; }
+  /* 16px 是 Android/iOS WebView 免「聚焦自动放大」的下限 */
+  .sv-inputbox textarea { font-size: 16px; min-height: 44px; padding: 10px 12px; }
+  /* 工具行:桌面为多行换行,手机上改成单行横向滚动。
+     原先 4 组控件折成 3 行占约 200px,挤压消息区;横滑后只占一行。 */
+  .sv-input-toolbar {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    gap: 8px;
+    padding: 8px 12px;
+  }
+  .sv-input-toolbar::-webkit-scrollbar { display: none; }
+  .sv-input-toolbar > * { flex: 0 0 auto; }
+  /* CTX 提示占宽且非操作项,手机上让位(侧栏抽屉内已有完整 token 统计) */
+  .sv-input-toolbar .sv-hint { display: none; }
+  .sv-mode button { padding: 6px 9px; font-size: 11px; }
+  .sv-model-select { max-width: 132px; }
+  .sv-btn-attach { padding: 6px 10px; font-size: 11.5px; }
+  /* 音频入口已移到下方导航栏,隐藏悬浮钮避免压住工具行右端 */
+  .sv-audio-toggle { display: none; }
+  /* 音频面板改为底部整宽浮层(导航栏之上) */
+  .sv-audio-float {
+    right: 0;
+    left: 0;
+    bottom: calc(var(--mobile-nav-h) + var(--safe-bottom));
+  }
+  .sv-audio-panel { width: 100%; max-width: none; }
+
+  /* --- 模态弹窗 → 全屏 Sheet --- */
+  .sv-modal-mask {
+    align-items: stretch;
+    justify-content: stretch;
+    padding: 0;
+  }
+  /* 统一覆盖所有尺寸变体。桌面端各模态有 sm/md/lg/pm-edit/macros-modal/wb-modal
+     等固定 px 宽度(480~1080px),手机上必然溢出;此处不动各自定义,
+     只在窄屏统一拉满。specificity 用 .sv-modal-mask 前缀保证压过 .sv-modal.lg 之类。 */
+  .sv-modal-mask .sv-modal,
+  .sv-modal-mask .sv-modal.sm,
+  .sv-modal-mask .sv-modal.md,
+  .sv-modal-mask .sv-modal.lg,
+  .sv-modal-mask .sv-modal.pm-edit,
+  .sv-modal-mask .sv-modal.macros-modal,
+  .sv-modal-mask .sv-modal.sv-hub-modal,
+  .sv-modal-mask .wb-modal,
+  .sv-modal-wide {
+    width: 100%;
+    max-width: none;
+    height: 100dvh;
+    max-height: none;
+    border: none;
+    border-top: var(--bw-heavy) solid var(--sv-ink);
+    padding-top: var(--safe-top);
+    padding-bottom: var(--safe-bottom);
+  }
+  .sv-modal-body { padding: var(--space-4); }
+  /* Sheet 头部吸顶,长内容滚动时关闭键始终可达 */
+  .sv-modal-head { position: sticky; top: 0; z-index: 1; }
+
+  /* --- 综合设置:左侧 180px 导航 + 内容双栏改为上下堆叠 ---
+     桌面双栏塞进 412px 会把内容区挤到视口外(实测截图确认)。
+     移动端改为两行导航条:第一行 = 一级功能域(横滑),第二行 = 当前域的分区/工具(横滑)。
+     注意 .sv-hub-nav 内除按钮外还有 .hub-sub 二级菜单与版本指纹块(DOM 顺序固定),
+     故用 flex-wrap + 二级块占满整行(flex-basis:100%),避免它们被挤成同排的畸形块。
+     二级菜单样式定义在 SettingsHub.vue 的 scoped 块内,此处需更高特异性(3 个类)才压得住。 */
+  .sv-hub-body { flex-direction: column; }
+  .sv-hub-nav {
+    width: 100%;
+    flex-shrink: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 10px;
+    max-height: none;
+    border-right: none;
+    border-bottom: var(--bw) solid var(--sv-ink);
+    overflow: visible;
+  }
+  .sv-hub-nav-item {
+    flex: 0 0 auto;
+    width: auto;
+    margin-bottom: 0;
+    padding: 8px 12px;
+    white-space: nowrap;
+  }
+  /* tab 内的序号/色点在窄条上冗余,隐藏以省宽度 */
+  .sv-hub-nav-item .sv-hub-nav-idx,
+  .sv-hub-nav-item .sv-supreme { display: none; }
+
+  /* 二级项:整行铺开并横向滚动 */
+  .sv-hub-body .sv-hub-nav .hub-sub {
+    flex-basis: 100%;
+    flex-direction: row;
+    gap: 6px;
+    margin: 2px 0 0;
+    padding-left: 0;
+    border-left: none;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .sv-hub-body .sv-hub-nav .hub-sub::-webkit-scrollbar { display: none; }
+  .sv-hub-body .sv-hub-nav .hub-sub-item {
+    flex: 0 0 auto;
+    width: auto;
+    white-space: nowrap;
+    padding: 6px 10px;
+  }
+  /* 版本/构建指纹块在窄屏占两行且非操作项,隐藏(桌面仍可见) */
+  .sv-hub-nav > div:not(.hub-sub) { display: none; }
+
+  .sv-hub-content { flex: 1; min-height: 0; overflow-y: auto; }
+  .sv-hub-modal { width: 100%; }
+
+  /* --- 设置面板表单行:窄屏堆叠(修输入框塌缩 / 下拉截断 / 横向溢出) ---
+     根因:.sv-input/.sv-select 的 `flex:1` 即 basis 0%,与同行的长中文说明
+     (.sv-note,basis:auto)竞争负自由空间时,收缩权重按 basis 摊 → basis 为 0 的
+     控件一点都不缩也长不大,恒定 0 内容宽,只剩 24px padding + 6px 边框,数字被裁空
+     (说明越长越空:实测只有说明最短的「子代理深度/并发」幸存)。.inject-num 的
+     width:110px 同样被 basis:0% 覆盖而失效。
+     改为:标签与控件同一行(控件吃满剩余宽),说明文字独占下一行。
+     min-width:60px 是关键——它让「流程名称+说明」这类同行双控件自动折成两行,无需改模板。 */
+  .sv-inp-row { flex-wrap: wrap; row-gap: 6px; align-items: center; }
+  .sv-inp-row > .sv-inp-tag { flex: 0 0 auto; }
+  .sv-inp-row > .sv-input,
+  .sv-inp-row > .sv-select {
+    flex: 1 1 0;
+    width: auto; /* 中和 .inject-num 的 width:110px(basis:0 已使其失效,此处写清意图) */
+    /* min-width 兜底:绝不收缩到 0 导致数值不可见;120px 同时是折行阈值——
+       「流程名称 + 说明」这类同行双控件(label 72×2 + 120×2 + 间距 30 = 414)超过
+       可用宽(约 210~282)时会自动折成两行,无需改模板。
+       取 120 而非更大值:320px 最窄视口下可用宽约 210,72+120+10 恰好放得下不溢出。 */
+    min-width: 120px;
+    min-height: 44px; /* 项目既有触摸目标下限 */
+  }
+  /* 说明文字换到下一行:既保证完整可读,也消除与控件抢空间的竞争本身 */
+  .sv-inp-row > .sv-note { flex: 1 1 100%; }
+  .sv-inp-row > .sv-btn:not(.sv-btn-fill) { flex: 0 0 auto; white-space: nowrap; }
+  /* 流程库操作按钮组:整体换到下一行右对齐,让流程下拉吃到整行宽度 */
+  .sv-inp-row > .flow-lib-actions {
+    flex: 1 1 100%;
+    display: flex;
+    gap: 6px;
+    justify-content: flex-end;
+  }
+  /* 「流程名称 / 说明」每组各自成行(否则「说明」标签孤立在上一行末尾) */
+  .sv-inp-row > .flow-meta-pair {
+    flex: 1 1 100%;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    row-gap: 6px;
+  }
+  .flow-meta-pair > .sv-inp-tag { flex: 0 0 auto; padding-top: 0; }
+  .flow-meta-pair > .sv-input {
+    flex: 1 1 0;
+    width: auto;
+    min-width: 120px;
+    min-height: 44px;
+  }
+
+  /* --- 执行流程步骤行:grid → flex-wrap ---
+     原 6 列 auto grid 最小内容宽合计约 350px > 可用约 282px,行盒溢出 →
+     .sv-hub-content 的 overflow-y:auto 使另一轴计算为 auto → 横向滚动,最右列
+     ✕ 被推出视口;grid 轨道缩到 min-content → select 只剩箭头、无 nowrap 的中文
+     按钮缩成 1 字宽竖排(「生成」竖排)。 */
+  .flow-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .flow-row > .floor-grip { flex: 0 0 auto; }
+  /* 步骤名称 basis 取 120px:实测 412px 视口下容器内宽约 306px,这样「把手+开关+
+     名称+动作下拉」正好落在第一行(名称伸展到约 145px),「生成/不生成」与操作按钮
+     落到第二行;basis 再大就会把下拉挤到第二行、多出一行。 */
+  .flow-row > .floor-name { flex: 1 1 120px; min-width: 0; }
+  .flow-row > .floor-select { flex: 0 0 auto; min-width: 84px; } /* 至少显示「执行」 */
+  .flow-row > .sv-btn:not(.sv-btn-fill) { flex: 0 0 auto; white-space: nowrap; }
+  /* 操作按钮组:margin-left:auto 推到自己那行的右端(原 grid 下在最右列,窄屏被挤出视口) */
+  .flow-row > .floor-actions { flex: 0 0 auto; margin-left: auto; }
+  .flow-row > .flow-edit { flex: 1 1 100%; } /* 原 grid-column:1/-1 在 flex 下失效 */
+  .flow-row > .flow-graph-note { flex: 1 1 100%; } /* 同上:摘要整行独占 */
+  .flow-edit { padding-left: 0; } /* 窄屏不再缩进,省出宽度给控件 */
+
+  /* --- 提示词楼层行:同病同治(PromptManager / PromptInjectSection 共用 7 列 grid) --- */
+  .floor-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .floor-row > .floor-grip { flex: 0 0 auto; }
+  .floor-row > .floor-name { flex: 1 1 120px; min-width: 0; }
+  .floor-row > .floor-select { flex: 0 0 auto; min-width: 84px; }
+  .floor-row > .floor-depth { flex: 0 0 auto; width: 76px; }
+  .floor-row > .sv-btn:not(.sv-btn-fill) { flex: 0 0 auto; white-space: nowrap; }
+  .floor-row > .floor-actions { flex: 0 0 auto; margin-left: auto; }
+  .floor-row > .floor-content { flex: 1 1 100%; } /* 原 grid-column:1/-1 在 flex 下失效 */
+
+  /* --- 音频浮层上移到导航栏之上,避开手势条 --- */
+  /* 音频浮层位置已在输入区小节统一处理(底部整宽浮层) */
+
+  /* --- 触摸目标放大(≥44px) --- */
+  .sv-icon-btn,
+  .sv-btn-sm,
+  .sv-char-item,
+  .sv-msg-action {
+    min-height: 44px;
+  }
+  .sv-msg-actions { gap: 14px; }
+
+  /* 滑块:加大拇指命中区便于手指拖动(音频音量/生成参数)。
+     选择器需带 .sv-range 才压得住原有样式(否则被更高优先级的原规则盖过)。 */
+  input[type='range'].sv-range { height: 10px; }
+  input[type='range'].sv-range::-webkit-slider-thumb {
+    width: 26px;
+    height: 26px;
+  }
+
+  /* --- 任务模式:空态与卡片的最小宽度在窄屏放宽,避免横向溢出 --- */
+  .sv-task-empty { min-width: 0; }
+  .sv-taskboard { padding: 12px; }
+  /* 任务详情内的操作按钮行改纵向堆叠,避免按钮被挤出视口 */
+  .sv-task-head { flex-direction: column; align-items: flex-start; gap: 8px; }
+  .sv-task-head-actions { flex-wrap: wrap; }
+}
+

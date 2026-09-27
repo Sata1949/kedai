@@ -1,0 +1,912 @@
+/* ============================================================================
+   task.css —— 任务模式全族:六模式界面、批准区、流式输出、计划编辑、构成主义深化(ChatInput/AgentPanel/ChatWindow/Sidebar/TaskBoard)、收编工具类、多轮输入
+   ----------------------------------------------------------------------------
+   由 web/src/style.css 按域拆分而来（QUALITY-FIX Q1-4,2026-09-27）：
+   原 L2844-L3748 整段搬来，规则一字未改（只新增本段头注释）。**顺序即级联**：
+   本文件在 style.css 清单里的 @import 位置决定它相对其它域的先後，移动前先读清单里的顺序说明。
+   ============================================================================ */
+
+/* ===== 任务模式(至上主义 × 结构主义) ===== */
+
+/* 侧栏顶层模式切换:角色扮演 / 任务(大号双态,黑框直角 + 几何装饰) */
+.sv-appmode {
+  display: flex;
+  margin: 10px 12px 4px;
+  border: var(--bw) solid var(--sv-ink);
+  overflow: hidden;
+  flex-shrink: 0;
+  box-shadow: var(--shadow-card);
+}
+.sv-appmode button {
+  flex: 1;
+  padding: 10px 4px;
+  font-size: 12.5px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  border: none;
+  background: var(--sv-white);
+  color: var(--sv-ink);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+.sv-appmode button.active {
+  background: var(--sv-ink-supreme);
+  color: var(--sv-white);
+}
+.sv-appmode button:not(.active):hover {
+  background: var(--sv-pink-light);
+}
+
+/* 任务工作台:详情区占满(下达目标与任务历史在左侧 Sidebar 内) */
+.sv-taskboard {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  background: var(--sv-paper);
+}
+
+/* 下达目标 + 任务历史(嵌于 Sidebar 260px 窄栏,水平内边距由外层容器提供) */
+.sv-task-new {
+  padding: var(--space-3) 0;
+  border-bottom: var(--bw) solid var(--sv-ink);
+}
+.sv-task-new-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  margin-bottom: 8px;
+  color: var(--sv-ink-soft);
+}
+.sv-task-new-title::before {
+  content: '';
+  width: 10px;
+  height: 10px;
+  background: var(--sv-ink-supreme);
+  display: inline-block;
+}
+
+.sv-task-list-head {
+  padding: 12px 0 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--sv-ink-faint);
+}
+
+.sv-task-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 0 12px;
+}
+.sv-task-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 10px;
+  margin-bottom: 4px;
+  border: var(--bw-thin) solid var(--sv-line-strong);
+  background: var(--sv-white);
+  color: var(--sv-ink);
+  cursor: pointer;
+  text-align: left;
+  font-size: 12px;
+  transition: all var(--transition-fast);
+  box-shadow: var(--shadow-card); /* 阴影规则:可点卡片静态挂 card 影 */
+}
+.sv-task-item:hover {
+  border-color: var(--sv-pink-deep);
+  box-shadow: var(--shadow-hover); /* hover 升 hover 影(原粉强调影让位统一规则) */
+}
+.sv-task-item.active {
+  border-color: var(--sv-ink);
+  box-shadow: var(--shadow-sunk);
+  background: var(--sv-pink-light);
+}
+.sv-task-item-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.sv-task-item-meta {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  color: var(--sv-ink-faint);
+}
+.sv-task-item-del {
+  flex-shrink: 0;
+  color: var(--sv-red);
+  font-size: 12px;
+  padding: 0 2px;
+}
+.sv-task-item-del:hover { color: var(--sv-ink); }
+
+.sv-task-detail {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 20px clamp(20px, 4vw, 48px);
+  animation: sv-task-detail-in 0.32s ease;
+  /* 批次 5:与聊天画布同款的红黑双色段带(--sv-top-stripe 单一来源);
+     实跑问题 6:同样下移 4px 让开顶栏回声阴影 */
+  background-image: var(--sv-top-stripe);
+  background-repeat: no-repeat;
+  background-size: 100% 5px;
+  background-position: 0 4px;
+}
+
+.sv-task-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+.sv-task-head-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-display);
+  font-size: 18px;
+  letter-spacing: 0.05em; /* 批次 5:加宽字距,海报标题节奏 */
+  line-height: 1.4;
+}
+.sv-task-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.sv-task-status-line {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.sv-task-usage {
+  font-size: 12px;
+  color: var(--sv-ink-soft, #666);
+}
+
+.sv-task-section {
+  margin-bottom: 24px;
+}
+.sv-task-section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-display); /* 批次 5:区块小标题也入海报字族(中文自动回退 sans) */
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: var(--sv-ink-soft);
+  padding-bottom: 8px;
+  margin-bottom: 10px;
+  border-bottom: var(--rule-strong); /* 粗网格分隔:3px 印刷黑 */
+}
+.sv-task-section-title::before {
+  content: '';
+  width: 10px;
+  height: 10px;
+  background: var(--sv-red);
+  display: inline-block;
+  transform: rotate(45deg);
+}
+
+.sv-task-step {
+  display: flex;
+  gap: 12px;
+  padding: 12px 14px;
+  margin-bottom: 8px;
+  border: var(--bw-thin) solid var(--sv-line-strong);
+  background: var(--sv-white);
+}
+.sv-task-step-idx {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-display);
+  font-size: 12px;
+  color: var(--sv-white);
+  background: var(--sv-ink);
+}
+.sv-task-step-idx.done { background: var(--sv-green); }
+.sv-task-step-idx.active { background: var(--sv-yellow); color: var(--sv-ink); }
+/* partial 是终态:橙系与「进行中」黄区分(实跑问题 2 观感修复) */
+.sv-task-step-idx.partial { background: var(--sv-orange); }
+.sv-task-step-idx.error { background: var(--sv-red); }
+.sv-task-step-body { flex: 1; min-width: 0; }
+.sv-task-step-name {
+  font-size: 13px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+/* 步骤目标行(plan 模式批准前审阅计划的关键内容;批次 5 token:弱墨色 + 紧凑行距) */
+.sv-task-step-goal {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--sv-ink-soft);
+}
+.sv-task-step-result {
+  margin-top: 8px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--sv-ink-soft);
+}
+.sv-task-step-result p { margin: 0.4em 0; }
+
+.sv-task-subtask {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 9px 12px;
+  margin-bottom: 6px;
+  border-left: 4px solid var(--sv-line-strong);
+  background: var(--sv-surface-elevated);
+}
+.sv-task-subtask-body { flex: 1; min-width: 0; }
+.sv-task-subtask-name {
+  font-size: 12px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.sv-task-error {
+  color: var(--sv-red-deep);
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+.sv-task-result {
+  padding: 16px 18px;
+  border: var(--bw) solid var(--sv-ink);
+  background: var(--sv-white);
+  font-size: 14px;
+  line-height: 1.8;
+  box-shadow: var(--shadow-hard); /* 批次 5:成果卡为任务流英雄元素,实黑硬投影 */
+}
+.sv-task-result h1,
+.sv-task-result h2,
+.sv-task-result h3 {
+  font-family: var(--font-display);
+  letter-spacing: 0.02em;
+  margin: 0.8em 0 0.4em;
+}
+.sv-task-result p { margin: 0.5em 0; }
+.sv-task-result pre {
+  background: var(--sv-surface);
+  border: 1px solid var(--sv-line-strong);
+  padding: 10px 12px;
+  overflow-x: auto;
+}
+.sv-task-result code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+/* ===== 批次 R4 流式输出:「正在生成」块(流式期间纯文本 + 光标,落库后消失) ===== */
+.sv-task-live-text {
+  padding: 14px 16px;
+  border: 1px dashed var(--sv-line-strong);
+  background: var(--sv-surface);
+  font-size: 14px;
+  line-height: 1.8;
+  white-space: pre-wrap; /* 纯文本保留换行(流式期间不跑 markdown) */
+  word-break: break-word;
+  color: var(--sv-ink);
+}
+
+/* ===== 批次 4 六模式:批准区 / 模式提示 / team 分工卡 / 计划简易编辑 ===== */
+/* plan 模式批准区(计划待批准);批次 5:边框跟随 --bw 升级 + 实黑硬投影(关键 CTA 英雄元素) */
+.sv-task-approve {
+  margin-bottom: 24px;
+  padding: 12px 14px;
+  border: var(--bw) solid var(--sv-yellow);
+  background: var(--sv-surface-elevated);
+  box-shadow: var(--shadow-hard);
+}
+.sv-task-approve .sv-task-section-title {
+  border-bottom-color: var(--sv-yellow);
+}
+.sv-task-approve-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* solo / multi 模式:调用情况面板入口提示行 */
+.sv-task-hint {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+  padding: 9px 12px;
+  border: var(--bw-thin) solid var(--sv-line-strong);
+  background: var(--sv-surface-elevated);
+}
+.sv-task-hint-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--sv-ink-soft);
+}
+
+/* team 模式:分工卡(按「【主Agent-N】」前缀分组);批次 5:边框跟随 --bw 升级;
+   第二轮:纯展示容器,按阴影规则摘除投影 */
+.sv-task-team-card {
+  margin-bottom: 12px;
+  border: var(--bw) solid var(--sv-ink);
+  background: var(--sv-white);
+}
+.sv-task-team-agent {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  border-bottom: var(--bw-thin) solid var(--sv-line);
+  background: var(--sv-surface-elevated);
+}
+/* team 分工卡内步骤:左右留 8px,竖向间距与默认一致(下 8px、上 0),
+   否则 8px 上边距会把「步骤下端 → 下一项」的连线断在半空(实跑问题 3)。 */
+.sv-task-team-card .sv-task-step {
+  margin: 0 8px 8px;
+  border-color: var(--sv-line-strong);
+  box-shadow: none;
+}
+.sv-task-team-card .sv-task-team-agent + .sv-task-step { margin-top: 8px; }
+
+/* plan 模式「修改后批准」:计划简易编辑行(序号 + 名称/目标两个输入框) */
+.sv-task-plan-edit {
+  display: flex;
+  gap: 12px;
+  padding: 8px 0;
+}
+.sv-task-plan-edit-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sv-task-plan-edit .sv-input { width: 100%; }
+
+/* team 模式:审计结论卡(复用 sv-task-result,左边条强调) */
+.sv-task-audit { border-left: 6px solid var(--sv-pink-deep); }
+
+/* plan 模式(批次 R1):最终计划卡(同族左边条强调,用至上主义蓝与审计结论卡区分);
+   批准区内待批准计划清单(与按钮组留距) */
+.sv-task-final-plan { border-left: 6px solid var(--sv-blue); }
+.sv-task-planned-plan { margin: 10px 0; }
+
+/* 提交 2:error/ended 态展示「已完成部分的成果」时的未完成标注(常显,不随卡收起;
+   复用错误文本的构成主义警示节奏:红左边线 + 浅粉底 + 深红字) */
+.sv-task-incomplete-note {
+  margin: 6px 0 8px;
+  padding: 6px 10px;
+  border-left: 3px solid var(--sv-red);
+  background: var(--sv-pink-light);
+  color: var(--sv-red-deep);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* 任务空态复用 .sv-empty-geo 几何构成 */
+.sv-task-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  color: var(--sv-ink-faint);
+  padding: 32px 16px;
+}
+
+/* 任务状态色块:结构主义三原色语义 */
+.sv-supreme.done { background: var(--sv-green); }
+.sv-supreme.active { background: var(--sv-yellow); }
+/* partial(部分完成)是终态:橙系与「进行中」黄区分(实跑问题 2 观感修复) */
+.sv-supreme.partial { background: var(--sv-orange); }
+.sv-supreme.error { background: var(--sv-red); }
+.sv-supreme.pending { background: var(--sv-line-strong); }
+
+.sv-tag.done { color: var(--sv-green-deep); border-color: var(--sv-green); }
+.sv-tag.active { color: var(--sv-yellow-deep); border-color: var(--sv-yellow); }
+/* partial(部分完成)是终态,与「进行中」的 active 黄区分:橙系表示「已结束但未达标」 */
+.sv-tag.partial { color: var(--sv-orange); border-color: var(--sv-orange); }
+.sv-tag.error { color: var(--sv-red-deep); border-color: var(--sv-red); }
+.sv-tag.pending { color: var(--sv-ink-faint); border-color: var(--sv-line-strong); }
+.sv-tag.sm { font-size: 9.5px; padding: 1px 6px; }
+
+/* ===== 构成主义深化:ChatInput 向上弹层公共类 ===== */
+.sv-popover {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  z-index: var(--z-popover);
+  border: var(--bw) solid var(--sv-ink);
+  background: var(--sv-white);
+  box-shadow: var(--shadow-sunk);
+  max-height: 260px;
+  overflow-y: auto;
+}
+/* 右对齐变体(快速回复下拉:锚右缘 + 最小宽度) */
+.sv-popover-right {
+  left: auto;
+  min-width: 240px;
+}
+
+/* 模型选择:去原生外观 + 自绘直角黑三角下拉箭头 */
+.sv-model-select {
+  -webkit-appearance: none;
+  appearance: none;
+  border: var(--bw) solid var(--sv-ink);
+  background: var(--sv-white);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8'%3E%3Cpolygon points='0,0 8,0 4,8' fill='%23141414'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 7px center;
+  padding: 5px 22px 5px 8px;
+  font-size: 12px;
+  color: var(--sv-ink);
+  cursor: pointer;
+}
+
+/* 模式按钮编号色点 */
+.sv-mode-idx {
+  font-family: var(--font-display);
+  font-size: 9px;
+  color: var(--sv-pink-deep);
+  margin-right: 4px;
+  letter-spacing: 0.05em;
+}
+/* active(黑底)态:编号用淡粉,保证黑底上的可读性 */
+.sv-mode button.active .sv-mode-idx {
+  color: var(--sv-pink);
+}
+
+/* ===== 构成主义深化:AudioPlayer 线性图标 ===== */
+.sv-audio-btn svg,
+.sv-audio-mini svg {
+  width: 16px;
+  height: 16px;
+  display: inline-block;
+  vertical-align: -3px;
+}
+
+/* ============================================================
+   构成主义深化:AgentPanel
+   工具入参/出参折叠卡 + 状态徽章 + 时间线当前步脉动
+   ============================================================ */
+
+/* 工具入参/出参折叠卡:细线边框容器 + 小号直角 toggle 按钮 */
+.sv-tool-io {
+  position: relative; /* 底部渐隐遮罩的定位上下文 */
+  border: 1px solid var(--sv-line-strong);
+  margin-top: 6px;
+}
+/* toggle + 复制按钮行 */
+.sv-tool-io-bar { display: flex; align-items: stretch; }
+.sv-tool-io-toggle {
+  font-size: 10px;
+  color: var(--sv-ink-dim);
+  background: var(--sv-pink-light);
+  border: none;
+  padding: 2px 6px;
+  cursor: pointer;
+  font-weight: 700;
+}
+.sv-tool-io-toggle:hover { color: var(--sv-ink); background: var(--sv-pink); }
+/* 复制按钮:复制完整 JSON(截断渐隐时不丢数据) */
+.sv-tool-io-copy {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--sv-ink-dim);
+  background: transparent;
+  border: none;
+  border-left: 1px solid var(--sv-line-strong);
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.sv-tool-io-copy:hover { color: var(--sv-ink); background: var(--sv-pink-light); }
+/* 用 .sv-tool-io .sv-tool-io-body 提升特异性,覆盖 .sv-tool-panel-card pre 的旧样式 */
+.sv-tool-io .sv-tool-io-body {
+  display: none;
+  max-height: 280px;
+  overflow: auto;
+  background: var(--sv-surface);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 8px;
+  margin: 0;
+}
+.sv-tool-io.open .sv-tool-io-body { display: block; }
+/* 内容溢出可滚时的底部渐隐(滚到底由 JS 移除;遮罩不拦截滚动) */
+.sv-tool-io.has-scroll::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 22px;
+  background: linear-gradient(transparent, var(--sv-surface));
+  pointer-events: none;
+}
+
+/* 面板内小字说明(状态详情/错误/空态提示):收编模板内联 10-11px */
+.sv-note-mini { font-size: var(--text-xs); font-weight: 500; color: var(--sv-ink-dim); }
+.sv-note-mini.err { color: var(--sv-red); }
+/* 状态总览「详情」行:value 字号降级(长错误文案可读性) */
+.sv-agent-summary-row .value.detail { font-family: var(--font-body); font-size: var(--text-xs); font-weight: 500; }
+/* 子任务状态字:色值逻辑集中进 CSS(替代模板内联色函数) */
+.sv-subtask-status { margin-left: auto; flex-shrink: 0; font-size: var(--text-2xs); font-weight: 700; color: var(--sv-ink-faint); }
+.sv-subtask-status.active { color: var(--sv-yellow-deep); }
+.sv-subtask-status.done { color: var(--sv-green-deep); }
+.sv-subtask-status.error { color: var(--sv-red); }
+
+/* 状态徽章类族:细边框 + 当前颜色描边,替代内联状态小字 */
+.sv-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  padding: 1px 6px;
+  border: 1px solid currentColor;
+}
+.sv-badge.pending { color: var(--sv-yellow-deep); }
+.sv-badge.done { color: var(--sv-green-deep); }
+.sv-badge.fail { color: var(--sv-red); }
+.sv-badge.run { color: var(--sv-pink-deep); }
+/* 截断徽标(可观测性:finish_reason=length,响应为半截文本;调用情况 tab 行内/详情各一处):
+   醒目档——海报红 2px 硬边框 + 白底小牌,比 fail(红字细边)高一档,沿用批次 5 token */
+.sv-badge.trunc {
+  color: var(--sv-red-deep);
+  border: var(--bw-thin) solid var(--sv-red);
+  background: var(--sv-white);
+}
+
+/* 时间线当前执行步:粉强调阴影 + 序号方块脉动(仅 transform) */
+.sv-timeline-item.running { box-shadow: var(--shadow-pink); }
+.sv-timeline-item.running::before {
+  animation: sv-tl-pulse 0.9s ease-in-out infinite;
+  transform-origin: center;
+}
+@keyframes sv-tl-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.15); }
+}
+
+/* ============================================================
+   构成主义深化:ChatWindow
+   swipe 方形切换按钮 + 顶栏控件分组
+   ============================================================ */
+
+/* swipe 版本切换:方形小按钮(硬偏移阴影按压联动,同 .sv-btn 纪律);
+   阴影规则特例:22px 微型按钮静态挂 --shadow-sm(挂 card 影会压过按钮本体) */
+.sv-swipe-btn {
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--sv-ink);
+  background: var(--sv-white);
+  color: var(--sv-ink);
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+  transition: transform var(--transition-fast), box-shadow var(--transition-fast);
+}
+.sv-swipe-btn:hover:not(:disabled) {
+  transform: translate(-1px, -1px);
+  box-shadow: var(--shadow-raise);
+}
+.sv-swipe-btn:active:not(:disabled) {
+  transform: translate(1px, 1px);
+  box-shadow: none;
+}
+.sv-swipe-btn:disabled { opacity: 0.4; cursor: default; }
+.sv-swipe-count {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--sv-ink-dim);
+  padding: 0 4px;
+}
+
+/* 顶栏右侧控件分组:会话操作 / 渲染开关 两组,细左分隔线 */
+.sv-topbar-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 12px;
+  border-left: var(--bw-thin) solid var(--sv-line);
+}
+.sv-topbar-group:first-child {
+  border-left: none;
+  padding-left: 0;
+}
+
+/* ============================================================
+   构成主义深化:Sidebar
+   底部全宽按钮抽类 + Token 统计仪表感
+   ============================================================ */
+
+/* 底部三按钮:全宽 flex 居中,图标与文字 gap 对齐 */
+.sv-side-btn {
+  width: 100%;
+  padding: 12px;
+  font-size: 13px;
+  letter-spacing: 0.1em;
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+/* 第一个按钮(综合设置,primary)无上间距,其余按钮 8px 间距 */
+.sv-side-btn:first-child { margin-top: 0; }
+.sv-side-btn-ico {
+  display: inline-flex;
+  align-items: center;
+}
+.sv-side-btn-ico svg {
+  width: 16px;
+  height: 16px;
+  vertical-align: middle;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.sv-ctx-item svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Token 数值:显示字体放大至 16px,仪表感 */
+.sv-tokens .sv-token-cell b {
+  font-family: var(--font-display);
+  font-size: 16px;
+  letter-spacing: 0.02em;
+}
+
+/* ============================================================
+   构成主义深化:TaskBoard
+   计划步骤竖向连线 + 最终成果黑顶线 + 错误文本卡式
+   ============================================================ */
+
+/* 计划步骤方块间竖向连线:从序号方块下端延续到下一项,表达进度。
+   几何对齐(实跑问题 3):卡片 padding 12px 14px + 序号方块 24×24,
+   方块中心 x = 14 + 12 = 26px、下端 y = 12 + 24 = 36px;
+   线宽 2px 故 left = 26 - 1 = 25px。旧值 left:14px/top:28px 既未穿过方块中心、
+   也不在方块下端,卡片被 goal/result 撑高或换行时线头即"飘逸"。 */
+.sv-task-step {
+  position: relative;
+}
+.sv-task-step::before {
+  content: '';
+  position: absolute;
+  top: 36px;
+  bottom: -8px;
+  left: 25px;
+  width: 2px;
+  background: var(--sv-line-strong);
+}
+.sv-task-step:last-child::before { display: none; }
+.sv-task-step.done::before { background: var(--sv-green); }
+.sv-task-step.error::before { background: var(--sv-red); }
+.sv-task-step.active::before {
+  background: var(--sv-pink-deep);
+}
+
+/* 「执行中」呼吸指示收敛到序号方块本身(实跑问题 3):整条竖线做 opacity 呼吸
+   既抢戏又因线定位漂移而显得乱;改为方块的 box-shadow 脉动,定位基准就是方块,
+   天生不会漂。复用 AgentPanel 时间线 running 的脉示范式。 */
+@keyframes sv-idx-breath {
+  0%, 100% { box-shadow: 0 0 0 0 var(--sv-yellow); }
+  50% { box-shadow: 0 0 0 5px rgb(0 0 0 / 0); }
+}
+.sv-task-step-idx.active {
+  animation: sv-idx-breath 1.2s ease-in-out infinite;
+}
+
+/* 最终成果卡:4px 印刷黑顶线强调 */
+.sv-task-result {
+  border-top: 4px solid var(--sv-ink);
+}
+
+/* 错误文本:带红左边线的卡片(构成主义警示节奏) */
+.sv-task-error {
+  padding: 6px 10px;
+  border-left: 3px solid var(--sv-red);
+  background: var(--sv-pink-light);
+  color: var(--sv-red-deep);
+}
+
+/* ===== 构成主义深化:列表入场 stagger(仅 transform/opacity,reduced-motion 已全局降级) ===== */
+@keyframes sv-list-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+/* 任务计划步骤:逐项延迟入场。
+   实跑问题 3:原用 :nth-child(N) 会把 section 标题等同级节点算进索引,
+   与视觉顺序错位;改 :nth-of-type 按同类元素计数,顺序稳定。 */
+.sv-task-step { animation: sv-list-in 0.22s ease backwards; }
+.sv-task-step:nth-of-type(1) { animation-delay: 0ms; }
+.sv-task-step:nth-of-type(2) { animation-delay: 40ms; }
+.sv-task-step:nth-of-type(3) { animation-delay: 80ms; }
+.sv-task-step:nth-of-type(4) { animation-delay: 120ms; }
+.sv-task-step:nth-of-type(5) { animation-delay: 160ms; }
+/* Agent 时间线项:同款 stagger */
+.sv-timeline-item { animation: sv-list-in 0.22s ease backwards; }
+.sv-timeline-item:nth-child(1) { animation-delay: 0ms; }
+.sv-timeline-item:nth-child(2) { animation-delay: 40ms; }
+.sv-timeline-item:nth-child(3) { animation-delay: 80ms; }
+.sv-timeline-item:nth-child(4) { animation-delay: 120ms; }
+.sv-timeline-item:nth-child(5) { animation-delay: 160ms; }
+.sv-timeline-item:nth-child(6) { animation-delay: 200ms; }
+
+/* ============================================================
+   收编工具类(2026-08 视觉精修)
+   高频视图模板(Sidebar / ChatWindow / ChatInput / TaskBoard /
+   AgentPanel)行内 style 的收编:sv-supreme 尺寸梯度、空态变体与
+   文案字级、文本域高度梯度、红色停止按钮、弹层锚点与少量间距工具。
+   值一律引用 token / 字阶变量,禁止裸色值。
+   ============================================================ */
+
+/* --- sv-supreme 尺寸梯度(默认 14px;装饰方块按语境缩放) --- */
+.sv-supreme.md { width: 12px; height: 12px; }   /* 顶栏标识(TaskBoard) */
+.sv-supreme.sm { width: 10px; height: 10px; }   /* 顶栏/品牌区标识 */
+.sv-supreme.xs { width: 8px; height: 8px; }     /* 列表行内状态点/面板头(收编自 9px,向 4px 网格靠拢) */
+.sv-supreme.xxs { width: 6px; height: 6px; }    /* Token 内联分隔点 */
+
+/* --- 空态变体:侧栏紧凑版 / 面板区块内嵌版 --- */
+.sv-empty.compact { padding: 40px 12px; }
+.sv-empty.panel { padding: 16px; }
+/* 空态文案字级(主行默认 13px 不变;lead 主标 / sub 次级 / hint 提示) */
+.sv-empty .lead, .sv-task-empty .lead { font-size: var(--text-md); }
+.sv-empty .sub, .sv-task-empty .sub { font-size: var(--text-sm); }
+.sv-empty .hint, .sv-task-empty .hint { font-size: var(--text-xs); }
+/* 空态几何构成·小号(侧栏任务列表空态:方块与对角线整体缩一档) */
+.sv-empty-geo.sm .sq.black { width: 10px; height: 10px; }
+.sv-empty-geo.sm .sq.pink { width: 8px; height: 8px; }
+.sv-empty-geo.sm .diag { top: -8px; right: calc(50% - 22px); width: 20px; height: 2px; }
+/* 空态几何构成·大号黑方块(任务工作台全幅空态) */
+.sv-empty-geo.lg .sq.black { width: 22px; height: 22px; }
+
+/* --- 文本域梯度:纵向缩放 + 宽松行高,配 min-height 档位 --- */
+.sv-area { resize: vertical; line-height: 1.7; }
+.sv-area.xl { min-height: 320px; }  /* 角色提示词主文本 */
+.sv-area.md { min-height: 130px; }  /* 主开场白 */
+.sv-area.sm { min-height: 96px; }   /* 备用开场 */
+
+/* --- 红色停止按钮:生成中/任务执行中的停止态,hover 保持红不转粉 --- */
+.sv-btn-send.stop,
+.sv-btn-send.stop:hover:not(:disabled) {
+  background: var(--sv-red);
+  border-color: var(--sv-red);
+}
+.sv-btn.stop {
+  background: var(--sv-red);
+  border-color: var(--sv-red);
+  color: var(--sv-white);
+}
+
+/* --- 思考中占位气泡:顶线降到 2px(区别于正式角色气泡的 4px 粉顶线) --- */
+.sv-msg.assistant .sv-msg-bubble.thinking { border-top-width: 2px; }
+
+/* --- 任务工作台细节 --- */
+.sv-task-empty.fill { height: 100%; }           /* 未选任务时的全幅居中空态 */
+.sv-task-list-empty {                            /* 侧栏任务历史空态说明 */
+  font-size: var(--text-xs);
+  color: var(--sv-ink-faint);
+  padding: 0 2px 10px;
+  margin: 0;
+}
+
+/* --- 弹层锚点与布局工具 --- */
+.sv-rel { position: relative; }
+.sv-inputbox { position: relative; }             /* slash 联想弹层的定位锚 */
+.sv-model-select { flex: none; width: auto; min-width: 120px; } /* 工具栏内不拉伸 */
+.sv-ml-auto { margin-left: auto; }               /* flex 行内右推 */
+.sv-flex-1 { flex: 1; }                          /* flex 行内弹性占位 */
+
+/* --- 间距工具(4px 网格;覆盖带默认 margin 的基类时依赖本小节位于文件末尾) --- */
+.sv-mt6 { margin-top: 6px; }
+.sv-mt8 { margin-top: 8px; }
+.sv-mt12 { margin-top: 12px; }
+.sv-mt14 { margin-top: 14px; }
+.sv-mt16 { margin-top: 16px; }
+.sv-mb6 { margin-bottom: 6px; }
+.sv-mb12 { margin-bottom: 12px; }
+.sv-mr8 { margin-right: 8px; }
+
+/* --- 侧栏「下达目标」区控件:窄栏内全宽纵向排列 --- */
+.sv-task-new .sv-select { width: 100%; margin-top: 8px; }
+.sv-task-new .sv-btn { width: 100%; margin-top: 10px; }
+
+/* --- 二维批次 7b:对比模式「可调用流程」名单(窄栏内纵向勾选列表) --- */
+.sv-task-new .flow-ids { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+.sv-task-new .flow-id-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--sv-ink-soft);
+  cursor: pointer;
+}
+/* 根流程与停用流程:只作展示(后端也会拒),故整行弱化 + 不可点 */
+.sv-task-new .flow-id-item.disabled { opacity: 0.55; cursor: not-allowed; }
+.sv-task-new .flow-id-box { margin: 0; flex: none; }
+.sv-task-new .flow-ids .sv-note { margin-top: 4px; }
+
+/* --- 侧栏底部反馈条:在按钮组上方,去掉默认上 margin 改下间距 --- */
+.sv-side-foot .sv-feedback { margin: 0 0 8px; }
+
+/* ===== 批次 R2:任务多轮用户输入(追加指令条 + 用户指令历史) ===== */
+/* 追加指令条:textarea + 发送按钮横排,底边对齐(仿 sv-task-new 轻量输入) */
+.sv-task-followup-bar { display: flex; gap: 8px; align-items: flex-end; }
+.sv-task-followup-bar .sv-input { flex: 1; resize: vertical; }
+.sv-task-followup-bar .sv-btn { flex: none; }
+.sv-task-followup-hint { margin-top: 6px; font-size: 12px; color: var(--sv-ink-soft); opacity: 0.75; }
+/* 追加模式选择(追加 / 重写):轻量内联下拉,置于「追加指令」标题右侧 */
+.sv-task-followup-mode {
+  margin-left: 8px;
+  font-size: 12px;
+  padding: 1px 4px;
+  border: 1px solid var(--sv-line-soft, #d8d3c8);
+  border-radius: 6px;
+  background: var(--sv-surface, transparent);
+  color: var(--sv-ink-soft);
+  cursor: pointer;
+}
+/* 指令历史行:user 气泡复用 .sv-msg.user/.sv-msg-bubble 全局样式;行距收紧(对话区默认 28px 过大) */
+.sv-task-messages .sv-msg { margin-bottom: 10px; }
+.sv-task-msg-kind { margin-right: 6px; }
+/* 对话记录的 assistant 行复用 .sv-msg.assistant/.min-w-0 全局布局(完整 markdown 气泡) */
+.sv-task-messages .sv-msg-name { font-size: 12px; color: var(--sv-ink-faint); margin-bottom: 4px; }
+/* 成果汇总卡展开/收起开关(默认收起:逐轮对话记录已是权威视图) */
+.sv-task-summary-toggle {
+  float: right;
+  border: var(--bw-thin) solid var(--sv-line-strong);
+  background: var(--sv-surface);
+  color: var(--sv-ink-soft);
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.sv-task-summary-toggle:hover { border-color: var(--sv-ink); color: var(--sv-ink); }
+/* 批准区「与规划器对话」(R2b):与操作按钮留距,记录区限高滚动 */
+.sv-task-plan-chat { margin-top: 14px; border-top: var(--bw-thin) solid var(--sv-line-strong); padding-top: 10px; }
+.sv-task-plan-chat-title { font-size: 13px; font-weight: 600; margin-bottom: 8px; }
+.sv-task-plan-chat-log { max-height: 260px; overflow-y: auto; margin-bottom: 8px; }
+.sv-task-plan-chat-log .sv-msg { margin-bottom: 10px; }

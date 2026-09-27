@@ -1,0 +1,125 @@
+/* ============================================================================
+   tokens.css —— 设计变量(层①):基底 / 黑阶段结构 / 淡粉红主色 / 结构主义三原色 / 语义别名 / 功能 / 边框宽度梯度 / 硬阴影
+   ----------------------------------------------------------------------------
+   由 web/src/style.css 按域拆分而来（QUALITY-FIX Q1-4,2026-09-27）：
+   原 L38-L155 整段搬来，规则一字未改（只新增本段头注释）。**顺序即级联**：
+   本文件在 style.css 清单里的 @import 位置决定它相对其它域的先後，移动前先读清单里的顺序说明。
+   ============================================================================ */
+:root {
+  /* ===== 基底:淡粉画布(肉眼可辨、柔和不刺眼;控件纯白形成层次) ===== */
+  --sv-paper: #fbeef1;          /* 主画布:淡粉 */
+  --sv-surface: #f4dbe2;        /* 表面:侧栏/顶栏/输入区/模态框(比画布深两档,栏位层次分明) */
+  --sv-surface-elevated: #fdf5f7;
+  --sv-white: #ffffff;          /* 纯白(控件白底/白字,多处引用须有定义) */
+
+  /* ===== 结构:黑色阶段(Black Square) ===== */
+  --sv-ink: #141414;            /* 印刷黑:文本/边框/黑底块(比纯黑柔和一档) */
+  --sv-ink-supreme: #000000;    /* 纯黑:仅至上主义方块本体 */
+  --sv-ink-soft: #2b2b2b;
+  --sv-ink-dim: #5c5c5c;
+  --sv-ink-faint: #6b6b6b;      /* 次级文字(淡粉画布上对比度 ≈4.7:1,过 WCAG AA 正文线) */
+  --sv-line: #e9d5db;           /* 粉灰线(与淡粉底协调) */
+  --sv-line-strong: #dcc3cb;
+
+  /* ===== 色彩阶段:淡粉红主色 ===== */
+  --sv-pink: #f7c8d8;
+  --sv-pink-light: #f9e6eb;     /* 淡粉(hover/模态脚/设置导航) */
+  --sv-pink-medium: #f0a8c0;
+  --sv-pink-deep: #e06890;
+  --sv-pink-dark: #c84878;
+
+  /* ===== 结构主义三原色:红 / 黑 / 白 ===== */
+  --sv-red: #d62b25;            /* 海报红——能量/危险/停止(比原 #e3342f 深一档,更贴构成主义原作) */
+  --sv-red-deep: #b92b27;       /* 深红:红字在浅底上的可读变体 */
+  /* 顶端海报 rule(红黑双色段带):画布与任务详情共用的单一来源(实跑问题 6 抽出共享定义) */
+  --sv-top-stripe: linear-gradient(
+    90deg,
+    var(--sv-red) 0 72px,
+    var(--sv-ink-supreme) 72px 96px,
+    transparent 96px
+  );
+  --sv-blue: #1e3a8a;           /* 至上主义蓝——深度/稳定 */
+  --sv-yellow: #f5b301;         /* 至上主义黄——注意力(仅色块,不作文字色) */
+  --sv-yellow-deep: #8a6203;    /* 深黄:黄系文字在浅底上的可读变体 */
+  --sv-green: #16a34a;          /* 功能绿(色块/边框;浅底上对比 ≈3.3:1,仅作图形色) */
+  --sv-green-deep: #1a7f37;     /* 深绿:绿系文字在浅底上的可读变体(对比 ≈4.6:1,过 WCAG AA;批次 5 第二轮评审点名绿徽标文字对比不足) */
+  --sv-purple: #8e44ad;         /* 第 6 层/速查面板专用色标(收编自散落的 #9b59b6) */
+  --sv-orange: #e8842e;         /* 橙:构成主义用色(settings 引用,收编自硬编码) */
+
+  /* ===== 语义别名(历史遗留变量,统一指向主 token) ===== */
+  --sv-accent: var(--sv-pink-deep);   /* 强调色(slash 菜单等) */
+  --sv-bg: var(--sv-paper);           /* 旧暗色主题残留变量的现值 */
+  --sv-bg-elev: var(--sv-surface-elevated);
+  --sv-border: var(--sv-line-strong);
+  --font-mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+
+  /* ===== 功能 ===== */
+  --radius: 0;                  /* 绝对直角 */
+  /* 粉阴影的统一 RGB 分量(与 --sv-pink-deep #e06890 = rgb(224,104,144) 一致;
+     历史硬编码 rgba(232,104,144) 有 8 单位色差,统一从这里取) */
+  --sv-pink-deep-rgb: 224, 104, 144;
+
+  /* ===== 边框宽度梯度(批次 5 海报化:结构边框 2px→3px,顶层浮层 3px→4px) ===== */
+  --bw: 3px;                    /* 标准:按钮/卡片/输入框/面板/结构分隔 */
+  --bw-heavy: 4px;              /* 重型:模态框/右键菜单等顶层浮层 */
+  --bw-thin: 2px;               /* 紧凑:chip/tag/列表行/时间线节点等密集组件(防抖动) */
+  --bw-hair: 1px;               /* 发丝:内嵌 pre/code/表格单元 */
+  /* 粗网格分隔:面板/区块分隔线(3px 印刷黑;回声段可叠红/蓝,见各组件) */
+  --rule-strong: var(--bw) solid var(--sv-ink);
+
+  /* ===== 硬阴影(批次 5:偏移加大到 4-6px 级、纯色无模糊、浓度加深) ===== */
+  --shadow-sm: 3px 3px 0 rgba(0, 0, 0, 0.09);
+  --shadow-card: 4px 4px 0 rgba(0, 0, 0, 0.12);
+  --shadow-pink: 4px 4px 0 rgba(var(--sv-pink-deep-rgb), 0.22);  /* 粉强调阴影(任务项 hover 等) */
+  --shadow-pink-strong: 4px 4px 0 rgba(var(--sv-pink-deep-rgb), 0.3); /* 粉强调阴影·深档 */
+  --shadow-hover: 6px 6px 0 rgba(0, 0, 0, 0.16);
+  --shadow-raise: 4px 4px 0 rgba(0, 0, 0, 0.16);  /* 按钮/面板 hover 上浮 */
+  --shadow-sunk: 4px 4px 0 rgba(0, 0, 0, 0.14);   /* 选中/按下(略沉于 raise) */
+  --shadow-card-soft: 5px 5px 0 rgba(0, 0, 0, 0.09); /* 大卡片轻投影(结果卡等) */
+  --shadow-modal: 10px 10px 0 rgba(0, 0, 0, 0.2); /* 模态框 */
+  --shadow-ctx: 8px 8px 0 rgba(0, 0, 0, 0.18);    /* 右键菜单 */
+  --shadow-hard: 5px 5px 0 var(--sv-ink);  /* 海报级实黑硬投影:仅英雄元素(primary 按钮/成果卡/批准区) */
+  --shadow-press: 0 0 0 rgba(0, 0, 0, 0);  /* 按下态:阴影归零(画贴回画布) */
+  --font-display: "Archivo Black", "Arial Black", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-body: "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+
+  /* 字阶:全站只允许这些字号(偶发微调除外) */
+  --text-2xs: 10px;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-base: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --text-2xl: 28px;
+
+  /* 层叠阶梯(z-index 唯一来源;常量命名防裸值漂移) */
+  --z-base: 0;
+  --z-toggle: 40;      /* 右缘 AGENT 条 / 音频悬浮钮 */
+  --z-popover: 45;     /* slash 联想 / 快速回复等向上弹出层 */
+  --z-modal: 50;       /* 模态遮罩 */
+  --z-ctx: 60;         /* 右键菜单遮罩 */
+  --z-ctx-menu: 61;    /* 右键菜单本体 */
+  --z-resource-wide: 70; /* 资源卡片宽屏态(盖过聊天区/右缘条,低于启动动画) */
+  --z-splash: 100;     /* 启动动画 */
+
+  /* 过渡(2026-09 动效令牌统一):新增 --dur-* / --ease-* 供新增动画使用;
+     --transition-* 保留为既有组件的兼容别名,值不变 */
+  --dur-fast: 0.1s;
+  --dur-normal: 0.15s;
+  --dur-slow: 0.22s;
+  --ease-standard: ease;
+  --ease-out: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --transition-fast: 0.1s ease;
+  --transition-normal: 0.15s ease;
+
+  /* 间距档位(4/8px 网格;批次 5 第二轮收编高频 padding——仅替换值不变的档位,
+     非倍数裸值(10/14px 等)留待下轮统一归档) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+}

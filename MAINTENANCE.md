@@ -14,7 +14,7 @@
 - **Mutex 纪律**:全项目锁中毒一律恢复(`.lock().unwrap_or_else(|e| e.into_inner())`),不 panic;**禁止持 std::sync::Mutex guard 跨 `.await`**(Clippy `await_holding_lock` 防护)。
 - **DB 并发纪律**:api handler 的同步 DB 调用必须经 `db_call/db_read/db_write`(spawn_blocking),禁止 async 上下文直接持锁;细则见 §7「DB 并发纪律」。
 - **渲染性能纪律(前端)**:消息渲染必须走 ChatMessageItem 的缓存 computed,禁止在 v-for 里直接调渲染方法。
-- **样式分层纪律(前端,2026-09 D-5 起)**:`web/src/style.css` 只保留层① 设计变量(:root 令牌)与层② 全局基础层;新增组件样式一律 `<style scoped>` 或 Tailwind 工具类,禁止再写入 style.css;修改存量组件时顺手把该组件样式搬进 scoped(「改到谁拆谁」,文件头分层约定注释为准);新增样式不得引入 `!important`(存量 11 处见 style.css)。
+- **样式分层纪律(前端,2026-09 D-5 起;2026-09-27 起按域拆分为目录)**:样式在 `web/src/styles/` 下按域分文件(`tokens` 层① 设计变量 / `base` 层② 全局基础层 / `shell` / `panels` / `content` / `task` / `mobile`),`web/src/style.css` 只剩**清单**——`@import "tailwindcss"` + 7 条相对 import,**顺序即级联顺序(`mobile` 必须最后)**;新增组件样式一律 `<style scoped>` 或 Tailwind 工具类,**禁止再往 `styles/` 里加新域**;修改存量组件时顺手把该组件样式搬进 scoped(「改到谁拆谁」,`styles/` 各文件头注释为准);新增样式不得引入 `!important`(存量 13 处,2026-09-27 实测;原写 11 处为 stale,漂移记录见 `FRONTEND-REPORT.md` §3.6)。
 - **跨端协议**(前后端 mvu)以 `docs/契约-协议与配置.md` 锁定双端一致,防行为漂移。
 - **EJS 自研解释器冻结纪律**:`parsing/assistant/ejs/`(自研迷你 JS 引擎,约 4000 行)**只接受安全修复,不再扩展新能力**。任何新模板能力必须在 `scripts/runtime.rs` 的 rquickjs 沙箱侧实现(rquickjs 自带内存/中断/栈上限,见该文件 `set_memory_limit`/`set_interrupt_handler`)。理由:自研解释器缺引擎级沙箱限额,长期维护成本与风险高于复用;**已加固**(循环步数+墙钟预算、解析深度守卫,见 §10 踩坑记录),但债务不再增长。
 - **门禁纪律(2026-09-13 起;2026-09-26 起三处均生效)**:`tools/check-all.ps1` 是唯一的本地 CI 入口,现已接三处触发——

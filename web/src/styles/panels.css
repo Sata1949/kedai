@@ -1,0 +1,849 @@
+/* ============================================================================
+   panels.css —— 弹层与面板:模态框、综合设置弹窗(SettingsHub)、Agent 面板与分区标签页、调用追踪面板、启动动画
+   ----------------------------------------------------------------------------
+   由 web/src/style.css 按域拆分而来（QUALITY-FIX Q1-4,2026-09-27）：
+   原 L1087-L1928 整段搬来，规则一字未改（只新增本段头注释）。**顺序即级联**：
+   本文件在 style.css 清单里的 @import 位置决定它相对其它域的先後，移动前先读清单里的顺序说明。
+   ============================================================================ */
+
+/* ===== 模态框 ===== */
+
+.sv-modal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.4);
+}
+.sv-modal {
+  width: 600px;
+  max-width: 92vw;
+  max-height: 84vh;
+  background: var(--sv-surface);
+  border: var(--bw-heavy) solid var(--sv-ink);
+  box-shadow: var(--shadow-modal);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.sv-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-4) var(--space-5);
+  border-bottom: var(--bw) solid var(--sv-ink);
+  background: var(--sv-ink); /* 黑条头部:放大的黑方块,全站模态统一节奏 */
+  color: var(--sv-white);
+  position: relative;
+}
+/* 红斜线角标:黑条头部右缘的构成主义签名(纯装饰,不遮关闭按钮);深粉回声成对出现。
+   定位修复(用户实测装饰压 ✕):right 52px 时斜线旋转(-45°)后包围盒右缘 ≈ right 49.6px
+   (半宽 8.1px + 回声阴影随旋转向右下扩 4.2px),而 ✕ 按钮(sv-btn-square ≈34px 宽 +
+   右内边距 20px)左缘 ≈ right 54px,二者相交。改为 calc(space-5 + 62px) = 82px:
+   20px 内边距 + 34px 按钮热区 + 12px 净距 + 16px 旋转/回声余量,✕ 周围留白干净。 */
+.sv-modal-head::after {
+  content: '';
+  position: absolute;
+  right: calc(var(--space-5) + 62px);
+  top: 50%;
+  width: 20px;
+  height: 3px;
+  background: var(--sv-red);
+  box-shadow: 0 6px 0 0 var(--sv-pink-deep);
+  transform: translateY(-50%) rotate(-45deg);
+  pointer-events: none;
+}
+/* 头部右侧带额外控件组的模态(聊天记录「＋ 新建」/脚本管理「导出·导入」):
+   装饰线无论怎么偏移都会与控件组相交,直接隐藏,保持功能控件区干净 */
+.wb-modal .sv-modal-head::after,
+.sv-scripts-modal .sv-modal-head::after { content: none; }
+.sv-modal-head h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 15px;
+  letter-spacing: 0.1em;
+  color: var(--sv-white);
+}
+/* 模态头色点:统一 18px,替代各模板的内联尺寸 */
+.sv-modal-head .sv-supreme { width: 18px; height: 18px; flex: none; }
+.sv-modal-head .sv-wb-count { color: rgba(255, 255, 255, 0.65); }
+/* 黑条头部内的次要文字(角色名/说明/标签):白字降透明度保证可读 */
+.sv-modal-head .sv-char-desc,
+.sv-modal-head .sv-note {
+  color: rgba(255, 255, 255, 0.72);
+}
+.sv-badge-off {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border: var(--bw-thin) solid var(--sv-red);
+  color: var(--sv-red-deep);
+  background: var(--sv-white);
+  white-space: nowrap;
+}
+.sv-modal-head .sv-badge-off {
+  color: #fff;
+  background: transparent;
+}
+/* 分区分隔线:构成主义双线(粗网格分隔 + 淡粉回声),替换模板内联 border-top */
+.sv-separator {
+  margin: 16px 0 12px;
+  padding-top: 12px;
+  border-top: var(--rule-strong);
+  box-shadow: 0 4px 0 0 var(--sv-pink);
+}
+/* 窄容器变体(如设置 Hub 左侧导航内) */
+.sv-separator.tight { margin: 10px 4px; padding-top: 10px; }
+.sv-modal-body { flex: 1; overflow-y: auto; padding: var(--space-5); }
+.sv-modal-foot {
+  padding: 14px 20px;
+  border-top: var(--bw) solid var(--sv-ink);
+  display: flex;
+  justify-content: flex-end;
+  background: var(--sv-pink-light);
+}
+
+.sv-modal.sm { width: 480px; }
+.sv-modal.md { width: 640px; }
+.sv-modal.lg { width: 720px; }
+/* 角色提示词编辑(大编辑区 + 开场白列表) */
+.sv-modal.pm-edit { width: 760px; }
+/* 宏调试面板(多字段区 + 速查) */
+.sv-modal.macros-modal { width: 1080px; }
+
+/* 设置字段 */
+.sv-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: var(--space-5);
+  border: var(--bw) solid var(--sv-ink);
+  padding: var(--space-4);
+  background: var(--sv-surface);
+}
+/* 设置字段(embedded 模式容器,无边框) */
+.sv-settings-embedded {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.sv-field-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  color: var(--sv-ink);
+  margin-bottom: 14px;
+  padding-bottom: 10px;
+  border-bottom: var(--bw-thin) solid var(--sv-line);
+}
+.sv-field-label .sv-supreme { width: 10px; height: 10px; }
+/* 次级小标题(区块内,不带上边框线节奏) */
+.sv-field-label.sub {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--sv-ink-faint);
+  letter-spacing: 0.04em;
+  margin-bottom: 0;
+  padding-bottom: 0;
+  border-bottom: none;
+}
+
+.sv-stack { display: flex; flex-direction: column; gap: 12px; }
+
+/* 输入行 */
+.sv-inp-row { display: flex; align-items: center; gap: 10px; }
+.sv-inp-tag {
+  flex-shrink: 0;
+  min-width: 72px;
+  width: auto;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  color: var(--sv-ink-faint);
+  text-align: left;
+  white-space: nowrap;
+}
+.sv-inp-tag::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  background: var(--sv-pink);
+  margin-right: 6px;
+  vertical-align: 1px;
+}
+
+.sv-input, .sv-select {
+  flex: 1;
+  min-width: 0;
+  /* 块级父容器下占满整行(textarea 不再塌缩回 cols 默认宽);
+     flex 行内被 flex:1 的 basis:0% 覆盖,无副作用 */
+  width: 100%;
+  border: var(--bw) solid var(--sv-ink);
+  background: var(--sv-white);
+  padding: 9px 12px;
+  font-size: 13px;
+  font-family: var(--font-body);
+  color: var(--sv-ink);
+  outline: none;
+}
+.sv-input:focus, .sv-select:focus {
+  border-color: var(--sv-pink-deep);
+  box-shadow: var(--shadow-pink-strong);
+}
+.sv-input::placeholder { color: var(--sv-ink-faint); }
+
+.sv-md-area {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 12px 14px;
+  font-family: ui-monospace, Consolas, 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.7;
+  min-height: 320px;
+  resize: vertical;
+}
+
+.sv-code {
+  flex: 1;
+  border: var(--bw-thin) solid var(--sv-line);
+  background: var(--sv-paper);
+  padding: 8px 10px;
+  font-size: 12px;
+  font-family: var(--font-body);
+}
+
+.sv-count {
+  font-size: 11px;
+  color: var(--sv-ink-faint);
+  letter-spacing: 0.04em;
+  text-align: right;
+  margin-top: -4px;
+}
+
+.sv-btn-row { display: flex; gap: 10px; }
+.sv-btn-fill { flex: 1; }
+
+.sv-note {
+  font-size: 11px;
+  color: var(--sv-ink-faint);
+  margin: 0;
+  line-height: 1.5;
+}
+.sv-note code { color: var(--sv-ink-soft); }
+/* F8(2026-09-10):流程步骤「工具」三态误配警示,用暖色区分于普通说明 */
+.sv-note.flow-tool-warn { color: #b45309; }
+
+/* 滑块 */
+.sv-range-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--sv-ink-soft);
+  margin-bottom: 6px;
+}
+.sv-range-val {
+  font-family: var(--font-display);
+  font-size: 12px;
+  color: var(--sv-pink-deep);
+  letter-spacing: 0.04em;
+}
+.sv-range-hints {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--sv-ink-faint);
+  margin-top: 4px;
+}
+.sv-feedback-flex { flex: 1; margin: 0; }
+
+.sv-range-row { display: flex; align-items: center; gap: 12px; }
+.sv-range-row output {
+  font-family: var(--font-display);
+  font-size: 15px;
+  min-width: 34px;
+  text-align: center;
+  border: var(--bw-thin) solid var(--sv-ink);
+  padding: 3px 8px;
+  background: var(--sv-white);
+}
+input[type="range"].sv-range {
+  flex: 1;
+  appearance: none;
+  height: 6px;
+  background: var(--sv-ink);
+  outline: none;
+}
+input[type="range"].sv-range::-webkit-slider-thumb {
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  background: var(--sv-pink);
+  border: var(--bw-thin) solid var(--sv-ink);
+  cursor: pointer;
+}
+input[type="range"].sv-range::-webkit-slider-thumb:hover { background: var(--sv-pink-deep); }
+input[type="range"].sv-range::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  background: var(--sv-pink);
+  border: var(--bw-thin) solid var(--sv-ink);
+  cursor: pointer;
+}
+
+/* 按钮:按压联动(hover 抬起 + 硬阴影生长,active 压下 + 阴影归零)。
+   批次 5 第二轮阴影规则:可交互元素静态挂 --shadow-card,hover 升 --shadow-hover;
+   纯展示容器不挂阴影;浮层(modal/ctx/popover/slash-menu)为分层例外保留投影;
+   --shadow-hard 实黑影仅英雄位(primary 按钮/成果卡/批准区)。 */
+.sv-btn, .sv-btn-send, .sv-btn-attach, .sv-icon-btn, .sv-agent-panel-close {
+  transition:
+    transform var(--transition-fast),
+    box-shadow var(--transition-fast),
+    background-color var(--transition-fast),
+    border-color var(--transition-fast),
+    color var(--transition-fast);
+}
+.sv-btn:hover:not(:disabled),
+.sv-btn-send:hover:not(:disabled),
+.sv-btn-attach:hover,
+.sv-icon-btn:hover,
+.sv-agent-panel-close:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: var(--shadow-hover);
+}
+.sv-btn:active:not(:disabled),
+.sv-btn-send:active:not(:disabled),
+.sv-btn-attach:active,
+.sv-icon-btn:active,
+.sv-agent-panel-close:active {
+  transform: translate(1px, 1px);
+  box-shadow: var(--shadow-press);
+}
+
+.sv-btn {
+  padding: 9px 18px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  border: var(--bw) solid var(--sv-ink);
+  box-shadow: var(--shadow-card); /* 阴影规则:可交互元素静态挂 card 影 */
+}
+/* 主按钮:海报级实黑硬投影(英雄元素;hover 抬起时阴影继续生长) */
+.sv-btn.primary {
+  background: var(--sv-ink);
+  color: var(--sv-white);
+  box-shadow: var(--shadow-hard);
+}
+.sv-btn.primary:hover {
+  background: var(--sv-pink-deep);
+  border-color: var(--sv-pink-deep);
+  box-shadow: 6px 6px 0 var(--sv-ink);
+}
+.sv-btn.ghost {
+  background: var(--sv-white);
+  color: var(--sv-ink);
+}
+.sv-btn.ghost:hover {
+  background: var(--sv-pink-light);
+  border-color: var(--sv-pink-deep);
+}
+.sv-btn.danger {
+  background: var(--sv-white);
+  color: var(--sv-red);
+  border-color: var(--sv-red);
+}
+.sv-btn.danger:hover {
+  background: var(--sv-red);
+  color: var(--sv-white);
+}
+.sv-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+.sv-btn-square { padding: 5px 10px; font-size: 12px; }
+.sv-btn-sm { padding: 6px 12px; font-size: 12px; }
+
+.sv-icon-btn {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: var(--bw) solid var(--sv-ink);
+  background: var(--sv-white);
+  cursor: pointer;
+  font-size: 14px;
+  box-shadow: var(--shadow-card);
+}
+.sv-icon-btn:hover { background: var(--sv-pink-light); }
+
+/* 状态反馈条 */
+.sv-feedback {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 10px 12px;
+  margin-top: 10px;
+  border: var(--bw-thin) solid;
+}
+.sv-feedback.ok { border-color: var(--sv-green); color: var(--sv-green-deep); background: rgba(22, 163, 74, 0.05); }
+.sv-feedback.err { border-color: var(--sv-red); color: var(--sv-red); background: rgba(227, 52, 47, 0.05); }
+.sv-feedback.info { border-color: var(--sv-blue); color: var(--sv-blue); background: rgba(30, 58, 138, 0.05); }
+
+/* 全局错误条:数据加载失败 / 弹窗懒加载失败(吸顶,可重试可关闭) */
+.sv-global-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 8px 14px;
+  font-size: 12px;
+  color: var(--sv-red);
+  background: rgba(227, 52, 47, 0.08);
+  border-bottom: var(--bw-thin) solid var(--sv-red);
+}
+.sv-global-error-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 渲染引导条:角色卡含界面脚本但当前纯文本显示时的一键开启提示(蓝色 info,可关闭) */
+.sv-render-hint {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 7px 14px;
+  font-size: 12px;
+  color: var(--sv-blue);
+  background: rgba(30, 58, 138, 0.06);
+  border-bottom: var(--bw-thin) solid var(--sv-blue);
+}
+.sv-render-hint-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 数据管理行 */
+.sv-datalist { display: flex; flex-direction: column; gap: 10px; }
+.sv-data-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: var(--bw) solid var(--sv-ink);
+  background: var(--sv-white);
+}
+.sv-data-row .info { font-size: 12.5px; }
+.sv-data-row .info b { display: block; font-size: 13px; }
+.sv-data-row .info span { color: var(--sv-ink-faint); font-size: 11px; }
+/* 开场选择器行:整行按钮化 + 预览文本限高滚动(收编模板内联) */
+.sv-greet-row {
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  align-items: flex-start;
+  font-family: var(--font-body);
+}
+.sv-greet-row .info { min-width: 0; }
+.sv-greet-row .info b { display: flex; align-items: center; gap: 8px; }
+.sv-greet-row .preview {
+  display: block;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 110px;
+  overflow-y: auto;
+  margin-top: 4px;
+}
+/* 脚本/会话元信息小字(脚本管理、优化面板、DevTools 共用) */
+.sv-script-meta {
+  color: var(--sv-ink-faint);
+  font-size: 11px;
+  white-space: nowrap;
+}
+/* 技能内容预览(技能管理) */
+.sv-skill-preview {
+  margin-top: 6px;
+  padding: 8px 10px;
+  border: var(--bw-thin) solid var(--sv-ink);
+  background: var(--sv-white);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 140px;
+  overflow: auto;
+}
+
+/* ===== 综合设置弹窗(SettingsHub) ===== */
+.sv-hub-modal {
+  width: min(960px, calc(100vw - 48px));
+  max-height: min(88vh, 760px);
+}
+.sv-hub-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.sv-hub-nav {
+  width: 180px;
+  flex-shrink: 0;
+  border-right: var(--bw) solid var(--sv-ink);
+  background: var(--sv-pink-light);
+  padding: 16px 10px;
+  overflow-y: auto;
+}
+.sv-hub-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 14px;
+  border: var(--bw-thin) solid transparent;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--sv-ink-soft);
+  cursor: pointer;
+  text-align: left;
+  margin-bottom: 3px;
+}
+.sv-hub-nav-item:hover {
+  background: var(--sv-white);
+  border-color: var(--sv-pink);
+  box-shadow: var(--shadow-card);
+}
+.sv-hub-nav-item.active {
+  background: var(--sv-ink);
+  color: var(--sv-white);
+  border-color: var(--sv-ink);
+}
+/* 导航序号:构成主义数字(display 字体,同 .sv-mode-idx 节奏);
+   批次 5 第二轮:编号 pink-deep → 海报红,与色点构成红黑海报对 */
+.sv-hub-nav-idx {
+  font-family: var(--font-display);
+  font-size: 9px;
+  color: var(--sv-red);
+  letter-spacing: 0.05em;
+  flex-shrink: 0;
+}
+.sv-hub-nav-item.active .sv-hub-nav-idx { color: var(--sv-pink); }
+/* 批次 5 第二轮:Hub 左栏色点配色收敛——模板 dot 类含橙/黄,出海报红/印刷黑/至上蓝
+   三色体系;不改 DOM,在 Hub 作用域统一为印刷黑(全组单色,克制档);
+   active(黑底)态色点翻海报红,保持黑底上可见 */
+.sv-hub-nav .sv-hub-nav-item .sv-supreme { background: var(--sv-ink); }
+.sv-hub-nav .sv-hub-nav-item.active .sv-supreme { background: var(--sv-red); }
+/* active 态右缘红斜线指向(纯装饰) */
+.sv-hub-nav-item.active::after {
+  content: '';
+  width: 14px;
+  height: 2px;
+  background: var(--sv-red);
+  transform: rotate(-45deg);
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.sv-hub-content {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: var(--space-5);
+  background: var(--sv-surface);
+}
+/* 右区当前分区标题(display 字体 + 红黑双色 rule 下缘:3px 印刷黑 + 海报红回声段) */
+.sv-hub-content-title {
+  margin: 0 0 16px;
+  padding-bottom: 12px;
+  border-bottom: var(--rule-strong);
+  box-shadow: 0 5px 0 0 var(--sv-red);
+  font-family: var(--font-display);
+  font-size: var(--text-md);
+  letter-spacing: 0.08em;
+}
+
+/* ===== Agent 面板内容 ===== */
+.sv-agent-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: var(--bw) solid var(--sv-ink);
+  background: var(--sv-ink); /* 黑条头部:与模态统一节奏 */
+  color: var(--sv-white);
+}
+.sv-agent-panel-head h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 13px;
+  letter-spacing: 0.12em;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sv-agent-panel-close {
+  background: none;
+  border: var(--bw-thin) solid var(--sv-white);
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--sv-white); /* 黑条头部上的白字白边(原 ink 深色在黑底上不可见) */
+}
+.sv-agent-panel-close:hover {
+  background: var(--sv-pink);
+  color: var(--sv-ink);
+  border-color: var(--sv-ink);
+}
+
+/* ===== Agent 面板分区标签页(「调用情况」面板合并入 AgentPanel 后的内部分区) ===== */
+.sv-agent-tabs {
+  display: flex;
+  flex: none;
+  border-bottom: var(--bw) solid var(--sv-ink);
+  background: var(--sv-surface);
+}
+.sv-agent-tab-btn {
+  flex: 1;
+  padding: 8px 10px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  background: var(--sv-white);
+  color: var(--sv-ink-dim);
+  border: none;
+  cursor: pointer;
+}
+.sv-agent-tab-btn + .sv-agent-tab-btn { border-left: var(--bw) solid var(--sv-ink); }
+.sv-agent-tab-btn:hover { background: var(--sv-pink-light); color: var(--sv-ink); }
+/* active 态:黑底白字 + 海报红底线下划(构成主义签名,与面板头黑条节奏一致) */
+.sv-agent-tab-btn.active {
+  background: var(--sv-ink);
+  color: var(--sv-white);
+  box-shadow: inset 0 -3px 0 0 var(--sv-red);
+}
+/* tab 内容容器:v-show 切换显隐;显示时继承面板体的纵向间距节奏 */
+.sv-agent-tab {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.sv-calltrace-tab {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.sv-agent-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/* Agent 状态总览 */
+.sv-agent-summary {
+  border: var(--bw) solid var(--sv-ink);
+  background: var(--sv-white);
+  padding: 12px;
+}
+.sv-agent-summary-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11.5px;
+  padding: 4px 0;
+}
+.sv-agent-summary-row .label { color: var(--sv-ink-faint); letter-spacing: 0.05em; }
+.sv-agent-summary-row .value { font-weight: 700; color: var(--sv-ink); font-family: var(--font-display); }
+.sv-agent-summary-row .value.phase { color: var(--sv-pink-deep); }
+
+/* 推理链:时间线布局 */
+.sv-agent-section-label {
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--sv-ink-faint);
+  margin-bottom: 10px;
+  font-weight: 800;
+}
+
+/* ===== 调用追踪面板(批次 3 L3,复用 sv-agent-panel 抽屉壳) ===== */
+.sv-calltrace-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--sv-ink-dim);
+}
+/* 摘要展开区:等宽 + 限高滚动(同 sv-tool-panel-card pre 纪律) */
+.sv-calltrace-pre {
+  margin: 6px 0 0;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--sv-ink-soft);
+  max-height: 160px;
+  overflow-y: auto;
+  background: var(--sv-paper);
+  padding: 8px;
+  border: 1px solid var(--sv-line);
+}
+.sv-timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  position: relative;
+}
+.sv-timeline::before {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 6px;
+  bottom: 6px;
+  width: 3px;
+  background: var(--sv-pink);
+}
+.sv-timeline-item {
+  position: relative;
+  padding-left: 24px;
+  margin-bottom: 12px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.sv-timeline-item::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 4px;
+  width: 14px;
+  height: 14px;
+  background: var(--sv-pink-deep);
+  border: var(--bw-thin) solid var(--sv-ink);
+}
+.sv-timeline-item .step-detail {
+  display: block;
+  font-size: 11px;
+  color: var(--sv-ink-faint);
+  margin-top: 2px;
+}
+
+/* 工具调用卡片 */
+.sv-tool-panel-card {
+  border: var(--bw) solid var(--sv-ink);
+  background: var(--sv-white);
+  padding: 12px;
+  font-size: 12px;
+  margin-bottom: 10px;
+}
+.sv-tool-panel-card.running { border-left: 4px solid var(--sv-yellow); }
+.sv-tool-panel-card.authorization_required { border-left: 4px solid var(--sv-red); }
+.sv-tool-panel-card.failed { border-left: 4px solid var(--sv-red); }
+.sv-tool-panel-card .tool-name {
+  font-family: var(--font-display);
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  color: var(--sv-ink);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.sv-tool-panel-card pre {
+  margin: 8px 0 0;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--sv-ink-soft);
+  max-height: 100px;
+  overflow-y: auto;
+  background: var(--sv-paper);
+  padding: 8px;
+  border: 1px solid var(--sv-line);
+}
+.sv-tool-panel-card .tool-status {
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  line-height: 18px;
+  text-align: center;
+  font-size: 10px;
+  font-weight: 900;
+  background: var(--sv-pink-light);
+  color: var(--sv-ink);
+  border: var(--bw-thin) solid var(--sv-ink);
+}
+.sv-tool-panel-card .tool-status.done { background: var(--sv-green); color: #fff; }
+.sv-tool-panel-card .tool-status.running { background: var(--sv-yellow); color: #000; }
+.sv-tool-panel-card .tool-status.error { background: var(--sv-red); color: #fff; }
+.sv-tool-panel-card .tool-status.authorization_required { background: var(--sv-red); color: #fff; }
+.sv-tool-panel-card .tool-auth-btns {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.sv-tool-panel-card .tool-auth-btns .sv-btn { font-size: 11px; padding: 6px 12px; }
+
+/* ===== 启动动画 ===== */
+.sv-splash {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-splash);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--sv-paper);
+}
+.sv-splash.fade-out { opacity: 0; pointer-events: none; transition: opacity 0.4s var(--ease-standard); }
+.sv-splash-content {
+  text-align: center;
+  position: relative;
+}
+.sv-splash-logo {
+  width: 80px;
+  height: 80px;
+  margin: 0 auto 20px;
+  object-fit: cover;
+  animation: sv-splash-logo-pulse 1.5s ease-in-out infinite;
+}
+@keyframes sv-splash-logo-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.05); }
+}
+.sv-splash-title {
+  font-family: var(--font-display);
+  font-size: 28px;
+  letter-spacing: 0.35em;
+  color: var(--sv-ink);
+  margin: 0;
+}
+.sv-splash-title span {
+  display: inline-block;
+  opacity: 0;
+  animation: sv-splash-letter 0.5s ease forwards;
+}
+@keyframes sv-splash-letter {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* 主界面淡入 */
+.sv-app-enter {
+  animation: sv-app-fade-in 0.3s ease;
+}
+@keyframes sv-app-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
