@@ -1,7 +1,8 @@
 ﻿# 统一修改全仓库版本号(单一入口,避免 7 处手工同步漏改)。
 # 覆盖:根 package.json、web/package.json、server-rs/Cargo.toml、
 #       src-tauri/Cargo.toml、launcher/Cargo.toml、src-tauri/tauri.conf.json、
-#       package-lock.json(顶层 + packages[""] 两处;依赖项版本不动)、
+#       package-lock.json(全部自身版本;依赖项版本不动)、
+#       web/src/components/settings/AboutSection.vue 的 FALLBACK_VERSION(关于页兜底版本)、
 #       MAINTENANCE.md 的版本行与「最后更新」日期。
 # Cargo.lock 中包自身版本无需手改,下次 cargo 构建会自动同步。
 # 一致性由 build.ps1 开头的 Assert-VersionConsistency 把关(改漏即构建报错)。
@@ -54,42 +55,40 @@ function Update-JsonVersion([string]$RelativePath) {
     $script:changed++
 }
 
-# lock 文件:package-lock.json v3 中前两处 "version" 恰为顶层与 packages[""] 的自身版本
-# (其余 version 都属于依赖包,一律不动)。逐个替换,不整文件重排格式。
+# lock 文件:package-lock.json v3 中「自身版本」是值等于产品版本号的 "version" 字段,
+# 当前有 3 处:顶层、packages[""](workspace 根)、packages["web"](对应 web/package.json);
+# 其余 version 都属依赖包,值不会等于产品版本号(带预发布后缀的如 0.3.0-B-beta 更不会撞值),
+# 故**按值精确匹配全部替换**,不按位置计数。
 #
-# 注意:必须**推进搜索偏移**再找第二处。早期实现每轮都从文件头 Match/Replace(count=1),
-# 结果第二处始终命中已被替换的同一位置(替换后仍是合法匹配),导致 packages[""] 的版本
-# 永远改不到——顶层改了、workspaces 根没改,校验严格时会被 npm ci 判为 lock 与 package.json
-# 不一致。
+# 为何改按值:旧实现写死「前 2 处」(靠「顶层 + packages[""] 恰为前两处」这一位置假设),
+# 而包按路径排序后 web 排在 packages 末尾(实测 package-lock.json 行 5853),永远漏改——
+# 顶层与 workspace 根改了、web 包没改,lock 与 web/package.json 不一致会被 npm ci 判不同步
+# (CI 红)。早期还踩过「不推进搜索偏移导致第二处原地打转」的坑,按值全替换后该问题一并消失。
 function Update-LockFileVersion([string]$RelativePath) {
     $path = Join-Path $Root $RelativePath
     $content = [System.IO.File]::ReadAllText($path)
-    $regex = New-Object regex '("version"\s*:\s*")[^"]*(")'
-    $new = $content
-    $offset = 0
-    $replaced = 0
-    for ($i = 0; $i -lt 2; $i++) {
-        $m = $regex.Match($new, $offset)
-        if (-not $m.Success) { break }
-        $prefix = $m.Groups[1].Value
-        $suffix = $m.Groups[2].Value
-        $new = $new.Substring(0, $m.Index) + $prefix + $Version + $suffix +
-               $new.Substring($m.Index + $m.Length)
-        # 跳过本次替换结果,使下一轮匹配到「下一处」而非原地
-        $offset = $m.Index + $prefix.Length + $Version.Length + $suffix.Length
-        $replaced++
-    }
-    if ($replaced -lt 2) {
-        Write-Host "[警告] $RelativePath 只匹配到 $replaced 处自身版本(预期 2),已跳过写入" -ForegroundColor Yellow
+    $first = [regex]::Match($content, '"version"\s*:\s*"([^"]*)"')
+    if (-not $first.Success) {
+        Write-Host "[警告] $RelativePath 未找到 version 字段,已跳过" -ForegroundColor Yellow
         $script:skipped++
         return
     }
-    if ($new -eq $content) {
+    $oldVersion = $first.Groups[1].Value
+    if ($oldVersion -eq $Version) {
         Write-Host "[跳过] $RelativePath 已是 $Version" -ForegroundColor DarkGray
         $script:skipped++
         return
     }
-    Write-Host "[$(if ($DryRun) { '预览' } else { '修改' })] $RelativePath : 自身版本 x$replaced 处 -> $Version" -ForegroundColor Green
+    $regex = New-Object regex ('("version"\s*:\s*")' + [regex]::Escape($oldVersion) + '(")')
+    $replaced = $regex.Matches($content).Count
+    if ($replaced -lt 3) {
+        # 少于 3 处说明 lock 结构变了(workspace 包被删/改名),不猜、不写,交人工核对
+        Write-Host "[警告] $RelativePath 只匹配到 $replaced 处自身版本($oldVersion),预期 3 处(顶层 + 两个 workspace 包),已跳过写入" -ForegroundColor Yellow
+        $script:skipped++
+        return
+    }
+    $new = $regex.Replace($content, "`${1}$Version`${2}")
+    Write-Host "[$(if ($DryRun) { '预览' } else { '修改' })] $RelativePath : 自身版本 $oldVersion x$replaced 处 -> $Version" -ForegroundColor Green
     if (-not $DryRun) { [System.IO.File]::WriteAllText($path, $new, $utf8NoBom) }
     $script:changed++
 }
@@ -144,6 +143,32 @@ function Update-MaintenanceDoc([string]$RelativePath) {
     }
 }
 
+# 前端关于页兜底版本常量:后端不可达时关于页展示的版本号,必须与产品版本同步。
+# 历史上 0.3.0-A-beta → 0.3.0-B-beta 漏改此常量(FALLBACK_VERSION 停在 A-beta),
+# 而该值会经 vite 编进 web/dist 与 exe——漏改即「离线时关于页显示旧号」,肉眼可见。
+# 由 build.ps1 的 Assert-VersionConsistency 作为第 8 处声明校验(改漏即构建报错)。
+function Update-AboutFallbackVersion([string]$RelativePath) {
+    $path = Join-Path $Root $RelativePath
+    $content = [System.IO.File]::ReadAllText($path)
+    $regex = New-Object regex "(const FALLBACK_VERSION = ')[^']*(')"
+    $m = $regex.Match($content)
+    if (-not $m.Success) {
+        Write-Host "[警告] $RelativePath 未找到 FALLBACK_VERSION 常量,已跳过" -ForegroundColor Yellow
+        $script:skipped++
+        return
+    }
+    $old = $m.Groups[0].Value
+    $new = $regex.Replace($content, "`${1}$Version`${2}", 1)
+    if ($new -eq $content) {
+        Write-Host "[跳过] $RelativePath 已是 $Version" -ForegroundColor DarkGray
+        $script:skipped++
+        return
+    }
+    Write-Host "[$(if ($DryRun) { '预览' } else { '修改' })] $RelativePath : $old -> FALLBACK_VERSION = '$Version'" -ForegroundColor Green
+    if (-not $DryRun) { [System.IO.File]::WriteAllText($path, $new, $utf8NoBom) }
+    $script:changed++
+}
+
 Write-Host "========== Kedai Bump Version -> $Version $(if ($DryRun) { '(DryRun 预览)' }) ==========" -ForegroundColor Cyan
 
 Update-JsonVersion "package.json"
@@ -152,6 +177,7 @@ Update-TomlVersion "server-rs\Cargo.toml"
 Update-TomlVersion "src-tauri\Cargo.toml"
 Update-TomlVersion "launcher\Cargo.toml"
 Update-JsonVersion "src-tauri\tauri.conf.json"
+Update-AboutFallbackVersion "web\src\components\settings\AboutSection.vue"
 Update-LockFileVersion "package-lock.json"
 Update-MaintenanceDoc "MAINTENANCE.md"
 
