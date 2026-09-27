@@ -72,26 +72,27 @@
 
 ## 过程稿目录(`plans/`)
 
-`plans/` 收纳**工作线过程稿**——某条线的执行计划、调查报告、方案稿。它们**不是六类活文档**:
-生命周期由各自抬头声明(多数写明「收口时删除」),不要求随代码同步,归档判据也不适用。
+`plans/` 收纳**工作线**过程稿——某条线的**调查报告**与**方案调研**。它们**不是六类活文档**:
+生命周期由各自抬头声明,不要求随代码同步,归档判据也不适用。
 2026-09-27 从仓库根移入本目录,理由是入口清晰(根目录只留 `README.md` / `AGENTS.md` /
 `MAINTENANCE.md`),**不是**把它们升格为活文档。`tools/check-docs.mjs` 的 D2 只登记本目录白名单,
 不校验其内部链接与内容时效——引用其中的事实时先复核现状。
 
-| 文档 | 工作线 |
-|---|---|
-| [plans/QUALITY-FIX-PLAN.md](plans/QUALITY-FIX-PLAN.md) | 代码质量修复计划(Q1~Q6 六批次) |
-| [plans/HARNESS-PLAN.md](plans/HARNESS-PLAN.md) | 编码 Harness 适配 |
-| [plans/TASK-MODE-FIX-PLAN.md](plans/TASK-MODE-FIX-PLAN.md) | 任务模式实测缺陷修复(D1~D8) |
-| [plans/COMPUTER-USE-REPORT.md](plans/COMPUTER-USE-REPORT.md) | computer use 能力调查报告 |
-| [plans/COMPUTER-USE-HARNESSES.md](plans/COMPUTER-USE-HARNESSES.md) | 成熟 harness 的 computer use 方案调研 |
-| [plans/COMPUTER-USE-PLAN.md](plans/COMPUTER-USE-PLAN.md) | computer use 能力建设(CU-1~CU-10) |
-| [plans/FRONTEND-REPORT.md](plans/FRONTEND-REPORT.md) | 前端调查报告 |
-| [plans/FRONTEND-FIX-PLAN.md](plans/FRONTEND-FIX-PLAN.md) | 前端修复计划(三批) |
+> **2026-09-27 台账收口**:原先各工作线的**执行计划稿**(`QUALITY-FIX-PLAN` / `HARNESS-PLAN` /
+> `TASK-MODE-FIX-PLAN` / `PRODUCT-CAPABILITY-PLAN` / `FRONTEND-FIX-PLAN` / `COMPUTER-USE-PLAN`)
+> 已把**开放项与待拍板决策**并入 [`计划.md`](计划.md) 的「产品能力批次(PRODCAP-1~5)」与
+> 「其余临时执行稿」两章,原稿删除;已完成部分见 `功能-变更史.md` 与 `遗留.md`。
+> **本目录自此只留调研产出**,不再放执行稿——执行稿的台账一律以 `计划.md` 为唯一出口。
 
-> **同名撞车提醒**:本目录的 `TASK-MODE-FIX-PLAN.md` 与
-> [archive/TASK-MODE-FIX-PLAN.md](archive/TASK-MODE-FIX-PLAN.md) **同名但不同文件**
-> (后者是更早的「Kimi 续做」交接稿)。在六类文档里引用时写全路径,别只写文件名。
+| 文档 | 性质 |
+|---|---|
+| [plans/FRONTEND-REPORT.md](plans/FRONTEND-REPORT.md) | 前端调查报告(三批修复的依据;开放项已并入 `计划.md` 的 FE-1~FE-12) |
+| [plans/COMPUTER-USE-REPORT.md](plans/COMPUTER-USE-REPORT.md) | computer use 能力调查报告(提交 1~6 的依据;缺陷清单 CU-1~CU-10 见 `计划.md`) |
+| [plans/COMPUTER-USE-HARNESSES.md](plans/COMPUTER-USE-HARNESSES.md) | 成熟 harness 的 computer use 方案调研(ZCode 本机实物 + 跨方案共识定律) |
+
+> **同名撞车提醒**:[archive/TASK-MODE-FIX-PLAN.md](archive/TASK-MODE-FIX-PLAN.md) 是更早的
+> 「Kimi 续做」交接稿(归档,只读);其同名的工作区执行稿已于 2026-09-27 并入 `计划.md` 并删除。
+> 在六类文档里引用时写全路径,别只写文件名。
 
 ## 归档
 

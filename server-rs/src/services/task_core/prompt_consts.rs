@@ -64,7 +64,8 @@ pub(crate) const TASK_INTERNAL_PLAN_PROMPT: &str = "你是任务内部规划者�
 ///
 /// 单一出处:与 `capability_note`(规划器侧「本轮可用能力」段)同族但**受众不同**
 /// (一个给规划器、一个给执行者),故各自成文;HARNESS 线的「编码执行者模板」
-/// (docs/plans/HARNESS-PLAN.md 提交 3 第 6 项)直接引用本常量,不写第二份。内置指令不经 untrusted 包裹。
+/// (原 docs/plans/HARNESS-PLAN.md 提交 3 第 6 项,该稿已并入 docs/计划.md 的
+/// 「其余临时执行稿」章 HARNESS3-6)直接引用本常量,不写第二份。内置指令不经 untrusted 包裹。
 pub(crate) const EXECUTOR_TOOL_DISCIPLINE: &str = "工具使用纪律:① 自测通过即收尾——同一事实不得反复验证,不要为「再确认一次」重跑已通过的检查;② 命令用本机 shell 语法(Windows 下由 cmd 解释:多命令用 && 连接,不支持 ; 分隔与 /d/ 这类 MSYS 路径);③ 改文件优先用 fs_write/fs_edit 工具,不要用 shell 重定向拼文件;④ 每轮只做一个动作,看完结果再决定下一步。";
 
 /// 「返回空内容」的用户可见错误文案(提交 3 · D6),任务侧三处消费点共用:
