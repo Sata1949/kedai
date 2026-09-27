@@ -3,7 +3,7 @@
 > 本目录分两类:**六类活文档**(契约/功能/计划/展望/经验/遗留,改代码时需同步)与
 > **归档**(已整合的历史文档,仅供溯源,不再更新)。
 >
-> **物理约定:`docs/` 根下只允许六类活文档 + 本索引 + `fixtures/` + `archive/`。**
+> **物理约定:`docs/` 根下只允许六类活文档 + 本索引 + `fixtures/` + `archive/` + `plans/`。**
 > 该约定由 `tools/check-docs.mjs` 强制(规则 D2),新增文档若不属于六类,须先在本文登记其分类。
 >
 > **2026-09-16 整合说明**:本目录原有 68 份散落文档(含根目录 `API.md`),内容已按六类
@@ -69,6 +69,29 @@
 | [../README.md](../README.md) | 对外产品说明,读者在仓库根找入口 |
 | [../MAINTENANCE.md](../MAINTENANCE.md) | **数字权威**;被 `tools/count-tests.mjs` 与 `tools/bump-version.ps1` 按路径硬读取,移动即门禁失效。§6/§10/§12/§14 的正文已迁入六类文档,原位保留小节标题 + 条目号索引 |
 | `../API.md`(已归档) | 端点字面契约全部移植到 [契约.md](契约.md),原文件移入 `archive/2026-09-16-consolidation/API.md` |
+
+## 过程稿目录(`plans/`)
+
+`plans/` 收纳**工作线过程稿**——某条线的执行计划、调查报告、方案稿。它们**不是六类活文档**:
+生命周期由各自抬头声明(多数写明「收口时删除」),不要求随代码同步,归档判据也不适用。
+2026-09-27 从仓库根移入本目录,理由是入口清晰(根目录只留 `README.md` / `AGENTS.md` /
+`MAINTENANCE.md`),**不是**把它们升格为活文档。`tools/check-docs.mjs` 的 D2 只登记本目录白名单,
+不校验其内部链接与内容时效——引用其中的事实时先复核现状。
+
+| 文档 | 工作线 |
+|---|---|
+| [plans/QUALITY-FIX-PLAN.md](plans/QUALITY-FIX-PLAN.md) | 代码质量修复计划(Q1~Q6 六批次) |
+| [plans/HARNESS-PLAN.md](plans/HARNESS-PLAN.md) | 编码 Harness 适配 |
+| [plans/TASK-MODE-FIX-PLAN.md](plans/TASK-MODE-FIX-PLAN.md) | 任务模式实测缺陷修复(D1~D8) |
+| [plans/COMPUTER-USE-REPORT.md](plans/COMPUTER-USE-REPORT.md) | computer use 能力调查报告 |
+| [plans/COMPUTER-USE-HARNESSES.md](plans/COMPUTER-USE-HARNESSES.md) | 成熟 harness 的 computer use 方案调研 |
+| [plans/COMPUTER-USE-PLAN.md](plans/COMPUTER-USE-PLAN.md) | computer use 能力建设(CU-1~CU-10) |
+| [plans/FRONTEND-REPORT.md](plans/FRONTEND-REPORT.md) | 前端调查报告 |
+| [plans/FRONTEND-FIX-PLAN.md](plans/FRONTEND-FIX-PLAN.md) | 前端修复计划(三批) |
+
+> **同名撞车提醒**:本目录的 `TASK-MODE-FIX-PLAN.md` 与
+> [archive/TASK-MODE-FIX-PLAN.md](archive/TASK-MODE-FIX-PLAN.md) **同名但不同文件**
+> (后者是更早的「Kimi 续做」交接稿)。在六类文档里引用时写全路径,别只写文件名。
 
 ## 归档
 
