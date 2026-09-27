@@ -95,13 +95,13 @@ jobs:
         working-directory: server-rs
         run: cargo test --workspace -j 4
 
-      - name: web: vue-tsc --noEmit
+      - name: 'web: vue-tsc --noEmit'
         run: npm run typecheck -w web
 
-      - name: web: vitest run
+      - name: 'web: vitest run'
         run: npm test -w web
 
-      - name: web: bundle budget
+      - name: 'web: bundle budget'
         run: node tools/check-bundle.mjs
 
   android-smoke:
