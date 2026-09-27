@@ -1,0 +1,169 @@
+# ci-linux.yml — 平台可移植性档(Q4,2026-09-27)
+#
+# 定位:ci.yml 仍是**唯一权威档**(windows-latest + 全量 15 段门禁);本档不替代它,
+# 只补两件 Windows 档**结构上测不到**的事:
+#   ① check-ubuntu:`cfg(windows)` 之外的可移植性回归只有换平台才暴露 ——
+#      把同一套门禁里与平台无关的几段(fmt / clippy / cargo test / 前端三段)在
+#      Linux 上跑一遍。刻意**不重复**跑纯 Node 的文档与架构门禁(check-docs /
+#      check-arch / check-contract / check-lock-sync / count-tests /
+#      check-doc-claims / type-ratchet / eslint):它们与平台无关,Windows 档已覆盖,
+#      重复只加成本、不给新信号。
+#   ② android-smoke(仅手动):对 aarch64-linux-android 交叉编译 server-rs,覆盖
+#      `cfg(target_os = "android")` 的 exec/android.rs、keystore_android.rs、
+#      native_bridge_android.rs 与 jni / rquickjs+bindgen 路径。**只编译不跑测试**
+#      ——Android 产物无法在 runner 上执行,本档验的是「还编得过」,不是「跑得对」。
+#
+# 为何独立成文件、而不是往 ci.yml 里加 job(Q4 执行时的口径偏离,理由见
+# docs/plans/QUALITY-FIX-PLAN.md 的「执行口径裁定」):本档在迭代期会被反复触发,
+# 而 ci.yml 的 Windows 档单次 30~50 分钟且按 2 倍计费;独立文件可单独
+# workflow_dispatch,迭代代价从「两档都跑」降到「只跑本档」。
+#
+# 工具链版本:与 ci.yml 一样必须**手写**(该 action 不读 toml,见经验 E63)。
+# 全仓 `.github/workflows` 下所有 `dtolnay/rust-toolchain` 版本字面量由
+# tools/check-doc-claims.mjs 扫全集与 rust-toolchain.toml 比对,漏改即本地门禁红。
+name: ci-linux
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: '附加档:none = 只跑 Ubuntu 档;android = 追加 Android 交叉编译冒烟'
+        type: choice
+        options:
+          - none
+          - android
+        default: none
+
+# 与 ci.yml 同策略、独立 group(本档按 1 倍计费,取消过期 run 省的是墙钟等待)。
+concurrency:
+  group: ci-linux-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 与 kedai-Android 的 minSdk 24 对齐(见该分支上的发布检查清单)。
+  CARGO_NDK_PLATFORM: '24'
+
+jobs:
+  check-ubuntu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # 版本字面量必须与 ci.yml / rust-toolchain.toml 一致(见文件头说明)。
+      - name: Setup Rust (锁 1.97.1,真值源 rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            server-rs/target
+          key: cargo-linux-${{ hashFiles('server-rs/Cargo.lock') }}
+
+      # 前端产物必须先于 Rust 阶段存在:server-rs/src/api/static_files.rs 的
+      # `include_dir!("$CARGO_MANIFEST_DIR/../web/dist")` 是编译期内嵌,目录不存在
+      # 即 proc macro panicked(2026-09-26 首跑撞过,见经验 E61)。web/dist 被 .gitignore
+      # 忽略,全新 clone 上必须显式构建一次。
+      - name: Install npm deps + Build web (Rust 阶段的 include_dir! 依赖它存在)
+        run: |
+          npm ci
+          npm run build -w web
+
+      - name: cargo fmt --check
+        working-directory: server-rs
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        working-directory: server-rs
+        run: cargo clippy --all-targets -- -D warnings
+
+      # -j 4(而非本地的 -j 8):runner 是 4 vCPU,再高只增内存峰值(见经验条目 29)。
+      - name: cargo test --workspace
+        working-directory: server-rs
+        run: cargo test --workspace -j 4
+
+      - name: web: vue-tsc --noEmit
+        run: npm run typecheck -w web
+
+      - name: web: vitest run
+        run: npm test -w web
+
+      - name: web: bundle budget
+        run: node tools/check-bundle.mjs
+
+  android-smoke:
+    # 只在手动触发且显式选 android 时跑:PR / push 上跑它是纯浪费(不产可发布产物)。
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'android'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust (锁 1.97.1) + Android 交叉目标
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: aarch64-linux-android
+
+      - name: Locate Android NDK (runner 镜像自带)
+        run: |
+          set -euo pipefail
+          ndk="${ANDROID_NDK_HOME:-}"
+          if [ -z "$ndk" ] || [ ! -d "$ndk" ]; then
+            # runner 把 NDK 装在 $ANDROID_HOME/ndk/<版本>;取版本号最大的一个。
+            ndk="$(ls -d "${ANDROID_HOME:-/usr/local/lib/android/sdk}"/ndk/* 2>/dev/null | sort -V | tail -1 || true)"
+          fi
+          if [ -z "$ndk" ] || [ ! -d "$ndk" ]; then
+            echo "未在 runner 上找到 Android NDK(候选:${ANDROID_HOME:-/usr/local/lib/android/sdk}/ndk/*)" >&2
+            exit 1
+          fi
+          echo "使用 NDK: $ndk"
+          echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
+
+      # rquickjs 无 aarch64-linux-android 预生成绑定,必须走 bindgen;NDK 自带 clang
+      # 但不含 libclang,须单独装(cargo-ndk 会自动配置 BINDGEN_EXTRA_CLANG_ARGS)。
+      - name: Install libclang (bindgen 需要)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libclang-dev
+
+      # 钉版本:本档的判据是「还能编得过」,工具链漂移会让结论失去可比性。
+      - name: Cache cargo-ndk
+        id: cargo-ndk-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-ndk
+          key: cargo-ndk-4.1.2
+
+      - name: Install cargo-ndk
+        if: steps.cargo-ndk-cache.outputs.cache-hit != 'true'
+        run: cargo install cargo-ndk --locked --version 4.1.2
+
+      # 本档只验编译路径,**不需要真实前端产物**:include_dir! 只要求目录存在
+      # (理由同 check-ubuntu 段的说明)。真实 dist 由发布流水线产出。
+      - name: 造一个空 web/dist 满足 include_dir!
+        run: mkdir -p web/dist
+
+      - name: Cross-compile server-rs (aarch64-linux-android)
+        working-directory: server-rs
+        run: cargo ndk -t arm64-v8a build
+
+      # 自证:产物必须是 aarch64 的 Android ELF。只看到「命令退出码 0」不足以说明
+      # 编译的是目标平台(历史上曾出现「编过了但编的是宿主」这类误读)。
+      - name: 产物自证(aarch64 + /system/bin/linker64)
+        run: |
+          set -euo pipefail
+          bin=server-rs/target/aarch64-linux-android/debug/kedai-server
+          ls -l "$bin"
+          file "$bin"
+          file "$bin" | grep -q 'ARM aarch64' || { echo "产物不是 aarch64 目标" >&2; exit 1; }
+          file "$bin" | grep -q '/system/bin/linker64' || { echo "产物不是 Android 链接器" >&2; exit 1; }

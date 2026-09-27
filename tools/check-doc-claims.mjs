@@ -130,10 +130,26 @@ function toolchainChannel() {
   return m ? m[1] : null;
 }
 
-/** ci.yml 的 `uses: dtolnay/rust-toolchain@<版本>`(该 action 不读 toml,是必须手写同步的第二处)。 */
-function ciToolchainPin() {
-  const m = readFile('.github/workflows/ci.yml').match(/uses:\s*dtolnay\/rust-toolchain@([\d.]+)/);
-  return m ? m[1] : null;
+/**
+ * `.github/workflows` 下**全部** workflow 文件里的 `dtolnay/rust-toolchain` 版本取值集合
+ * (去重 + 排序)。该 action 不读 `rust-toolchain.toml`(经验 E63),故每个 job 的版本
+ * 都只能手写 —— 2026-09-27 新增 ci-linux.yml 后版本字面量从 1 处变 3 处,
+ * 「只读 ci.yml 第一处」等于给新增档开天窗,故改为扫全集。
+ * 两种写法都收:`@1.97.1`(字面 pin)与 `with: toolchain: 1.97.1`(输入式);
+ * 写成 `@stable` / `@master` 而不给 `toolchain:` 输入时集合为空 → 断言失败(期望 [channel])。
+ */
+function workflowToolchainPins() {
+  const dir = '.github/workflows';
+  const files = fs.readdirSync(path.join(ROOT, dir)).filter((f) => /\.ya?ml$/.test(f));
+  const found = new Set();
+  for (const f of files) {
+    const src = readFile(`${dir}/${f}`);
+    for (const m of src.matchAll(/uses:\s*dtolnay\/rust-toolchain@(\S+)/g)) {
+      if (/^[\d.]+$/.test(m[1])) found.add(m[1]);
+    }
+    for (const m of src.matchAll(/^\s*toolchain:\s*["']?([\w.-]+)["']?\s*$/gm)) found.add(m[1]);
+  }
+  return [...found].sort();
 }
 
 /** MAINTENANCE.md 工具链表行的版本(句式:`| Rust 工具链 | 1.97.1 stable | …`)。 */
@@ -288,15 +304,16 @@ const CLAIMS = [
     // 版本号是**字符串**,走 extra 的直比路径(checks 的 gotNorm 分支只支持数字与字母区间,
     // 见执行段 `typeof gotNorm === 'number' ? … : Array.isArray(expected) && …`)。
     id: 'toolchain-version',
-    desc: 'Rust 工具链版本三处一致(rust-toolchain.toml ⇄ ci.yml ⇄ MAINTENANCE.md)',
+    desc: 'Rust 工具链版本全仓一致(rust-toolchain.toml ⇄ .github/workflows/*.yml 每一处 ⇄ MAINTENANCE.md)',
     derive: toolchainChannel,
     checks: [],
     extra: [
       {
-        desc: 'ci.yml 的 `dtolnay/rust-toolchain@` 版本与该 action 不支持读 toml(经验 E63)导致的必填第二处',
-        derive: ciToolchainPin,
-        file: '.github/workflows/ci.yml',
+        desc: '`.github/workflows` 下所有 `dtolnay/rust-toolchain` 版本(该 action 不支持读 toml,经验 E63,故每一处都必须手写同步)',
+        derive: workflowToolchainPins,
+        file: '.github/workflows/*.yml',
         useClaimValue: true,
+        wrapExpected: true,
       },
       {
         desc: 'MAINTENANCE.md 工具链行的版本',
@@ -378,7 +395,10 @@ for (const claim of CLAIMS) {
 
   for (const extra of claim.extra || []) {
     let got = extra.derive();
-    const target = extra.useClaimValue ? expected : extra.expected;
+    // useClaimValue 默认拿派生的**标量**直比;派生器返回集合、而语义是「集合里每个元素
+    // 都必须等于该标量」时(如「全部 workflow 的版本」),用 wrapExpected 把期望包成单元素集合。
+    let target = extra.useClaimValue ? expected : extra.expected;
+    if (extra.wrapExpected) target = [target];
     if (Array.isArray(got) && Array.isArray(extra.ignoreLetters)) {
       got = got.filter((l) => !extra.ignoreLetters.includes(l));
     }
