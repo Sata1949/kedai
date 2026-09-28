@@ -24,13 +24,14 @@ export type AppMode = 'roleplay' | 'task';
 
 /**
  * 设置分区键(单一来源)。
- * 取值必须与 SettingsHub 的 domains 导航表一致;由 web/src/components/SettingsHub.test.ts
- * 反向校验(两组集合相等),避免这边加了分区而导航表没有对应项。
+ * 取值必须与 SettingsHub 的 domains 导航表一致——两组集合**手工对齐**(暂无自动校验:
+ * 原注释声称由 SettingsHub.test.ts 反向校验,2026-09-28 核对为不存在,已如实修正;
+ * 若要自动化,需新增一条「两组集合相等」的断言)。
  */
 export type SettingsSectionKey =
   | 'api' | 'connections' | 'model' | 'mcp' | 'embedding'
   | 'prompt' | 'preset'
-  | 'agent' | 'flow' | 'exec'
+  | 'agent' | 'flow' | 'exec' | 'coding'
   | 'data'
   | 'ui'
   | 'about';

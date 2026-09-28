@@ -488,6 +488,11 @@ export interface RuntimeSettings {
   task_persona_full: boolean;
   /** 任务模式是否继承提示词注入(2026-09-10 实跑修复;默认 false = 隔离,不注入 prompt_floors.json)。仅任务模式生效 */
   task_prompt_inject_enabled: boolean;
+  /** 任务模式编码能力包显式启用开关(默认 false = 关闭,须用户显式开启)。仅任务模式生效:
+   *  开启后,任务执行者**未自定义**系统提示词时,默认值改用「编码执行者模板」
+   *  (强调先读后写 / 遵循既有风格 / 改完跑验证 / 最小改动);用户若在提示词框里自定义过,
+   *  则其自定义值优先,本开关只影响默认值。**不影响角色扮演模式** */
+  task_coding_bundle_enabled: boolean;
 }
 
 /** MCP 服务器配置(批次 6.2):name 会 sanitize 为工具名前缀段([a-z0-9_]) */
@@ -618,6 +623,8 @@ export interface RuntimeSettingsPatch {
   task_persona_full?: boolean;
   /** 任务模式是否继承提示词注入(2026-09-10 实跑修复;默认 false = 隔离) */
   task_prompt_inject_enabled?: boolean;
+  /** 任务模式编码能力包开关(默认 false = 关闭;缺省保持不变) */
+  task_coding_bundle_enabled?: boolean;
 }
 
 // ===== 音频播放器(阶段五 5a;契约对齐酒馆助手 audio.d.ts) =====

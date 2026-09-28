@@ -8,6 +8,7 @@ import { usePromptInject } from '../../composables/usePromptInject';
 import ConnectionProfilesSection from './ConnectionProfilesSection.vue';
 import ConnectionSection from './ConnectionSection.vue';
 import McpSection from './McpSection.vue';
+import CodingBundleSection from './CodingBundleSection.vue';
 import PresetImportExportSection from './PresetImportExportSection.vue';
 import AgentSettingsSection from './AgentSettingsSection.vue';
 import GenParamsSection from './GenParamsSection.vue';
@@ -126,6 +127,31 @@ describe('SettingsModal(壳)', () => {
     const embedded = await render(SettingsModal, { embedded: true, activeSection: 'mcp' });
     expect(embedded).toContain('sv-settings-embedded');
     expect(embedded).toContain('MCP 服务');
+  });
+
+  it('装配:编码能力包分区挂进壳(standalone 渲染;embedded 按 activeSection 可见)', async () => {
+    const standalone = await render(SettingsModal, { embedded: false });
+    expect(standalone).toContain('编码能力包');
+
+    const embedded = await render(SettingsModal, { embedded: true, activeSection: 'coding' });
+    expect(embedded).toContain('sv-settings-embedded');
+    expect(embedded).toContain('编码能力包');
+  });
+});
+
+describe('CodingBundleSection(编码能力包区,默认关)', () => {
+  it('渲染开关与语义说明(默认「已关闭」;仅任务模式生效 / 不影响角色扮演)', async () => {
+    const html = await render(CodingBundleSection);
+    expect(html).toContain('编码能力包');
+    expect(html).toContain('启用编码能力包');
+    expect(html).toContain('已关闭'); // 默认 task_coding_bundle_enabled=false
+    expect(html).toContain('编码执行者模板');
+    expect(html).toContain('不影响角色扮演模式');
+  });
+
+  it('show=false 时根节点 display:none(embedded 模式按 activeSection 切换)', async () => {
+    const html = await render(CodingBundleSection, { show: false });
+    expect(html).toMatch(/display:\s*none/);
   });
 });
 
