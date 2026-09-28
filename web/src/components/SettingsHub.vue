@@ -187,6 +187,12 @@ watch(
 
 /**
  * 「带我去设置」定位请求(新手教程,2026-09-27):把请求里的分区落到本组件的两级导航状态上。
+ *
+ * **必须 `immediate: true` 且应用后消费掉请求**:设置弹窗是 `v-if` + 懒加载,首次点
+ * 「带我去设置」时请求先于本组件挂载(点击 → 置开关 + 置请求 → chunk 加载完才 mount),
+ * 不带 immediate 的 watch 在挂载时不会触发,表现为「设置打开了但没定位」。
+ * 消费(清空)则避免用户日后手动打开综合设置又被上一次的请求带着跳分区。
+ *
  * 目标分区若在当前模式下不可见(如任务模式下的「提示词注入」是角色扮演专属),
  * **保持原分区、不报错**——教程只是指路,定位失败不该把设置弹窗弄成异常态。
  */
@@ -197,10 +203,12 @@ watch(
     const domain = visibleDomains.value.find((d) =>
       d.items.some((it) => it.type === 'section' && it.key === req.section),
     );
+    store.clearSettingsNav();
     if (!domain) return;
     activeDomain.value = domain.key;
     activeSection.value = req.section;
   },
+  { immediate: true },
 );
 
 /** 右侧标题:功能域 · 分区名(让用户知道自己在哪一层) */

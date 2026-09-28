@@ -148,6 +148,34 @@ describe('SettingsHub 分区定位(新手教程「带我去设置」)', () => {
     expect(activeNav[0]).toContain('Agent 与任务');
   });
 
+  it('请求先于挂载(首次「带我去设置」的真实路径):挂载后即定位到目标分区,并消费掉请求', async () => {
+    setActivePinia(createPinia());
+    const store = useAppStore();
+    // 教程点击时设置弹窗尚未挂载(chunk 懒加载):请求先落到 store,mount 才发生
+    store.openSettingsAt('exec');
+    const wrapper = mount(SettingsHub);
+    await nextTick();
+
+    expect(wrapper.find('.sv-hub-content-title').text()).toBe('Agent 与任务 · 授权与命令执行');
+    expect(store.settingsNav).toBeNull();
+  });
+
+  it('请求被消费后,用户自己再打开综合设置不会被上一次请求带着跳分区', async () => {
+    setActivePinia(createPinia());
+    const store = useAppStore();
+    store.openSettingsAt('exec');
+    const first = mount(SettingsHub);
+    await nextTick();
+    expect(first.find('.sv-hub-content-title').text()).toBe('Agent 与任务 · 授权与命令执行');
+
+    // 用户关掉设置后自己再点「综合设置」(没有新请求)→ 落回默认分区,不沿用上次定位
+    store.settingsOpen = false;
+    await nextTick();
+    const second = mount(SettingsHub);
+    await nextTick();
+    expect(second.find('.sv-hub-content-title').text()).toBe('连接与模型 · API 连接');
+  });
+
   it('连续两次请求同一分区都生效(nonce 递增,不因值相同被跳过)', async () => {
     const { store, wrapper } = mountHub();
     store.openSettingsAt('exec');

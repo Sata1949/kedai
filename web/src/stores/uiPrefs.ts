@@ -107,6 +107,17 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
     settingsOpen.value = true;
   }
 
+  /**
+   * 消费掉定位请求(接收方 SettingsHub 应用后调用)。
+   *
+   * 必须消费而不是留着:设置弹窗是 v-if + 懒加载,首次「带我去设置」时**请求先于挂载**,
+   * 接收方靠挂载时的 immediate 认领才定位得到;若不清空,用户日后手动打开综合设置会被
+   * 上一次的请求带着跳分区。
+   */
+  function clearSettingsNav(): void {
+    settingsNav.value = null;
+  }
+
   // ===== 合并面板内部分区记忆(原为批次 3 L3 独立「调用情况」面板开关;面板合并后改作 tab 记忆) =====
   // localStorage 键保持不变(kedai.call-trace-open.v1),旧偏好平滑迁移:
   // 之前开着调用面板的用户,升级后打开合并面板落在「调用情况」tab。
@@ -313,6 +324,7 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
     characterUploadRequested,
     settingsNav,
     openSettingsAt,
+    clearSettingsNav,
     callTraceOpen,
     taskResultSummaryOpen,
     renderHtml,
