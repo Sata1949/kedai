@@ -24,6 +24,33 @@ const { scriptAuthorizations } = storeToRefs(store);
   <div v-show="props.show" class="sv-field">
     <div class="sv-field-label"><span class="sv-supreme yellow" /> 界面</div>
     <div class="sv-datalist">
+      <!-- 默认模式(2026-09-27 首启引导批次):偏好决定每次启动进入的模式,
+           未设置时沿用旧行为「按上次用过的模式进入」。放在本区首行——它比下面几项
+           更基础(决定启动后落到哪个工作台),且与顶栏/底部导航的模式切换互为补充。 -->
+      <div class="sv-data-row">
+        <div class="info">
+          <b>默认模式</b>
+          <span>决定每次启动 Kedai 后默认进入的模式（未设置时按上次使用过的模式进入）。点击即切换并保存，首次启动的引导里选的也是这一项。</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <button
+            type="button"
+            class="sv-btn ghost"
+            :aria-pressed="store.defaultAppMode === 'roleplay'"
+            @click="store.setDefaultAppMode('roleplay')"
+          >
+            角色扮演
+          </button>
+          <button
+            type="button"
+            class="sv-btn ghost"
+            :aria-pressed="store.defaultAppMode === 'task'"
+            @click="store.setDefaultAppMode('task')"
+          >
+            任务
+          </button>
+        </div>
+      </div>
       <div class="sv-data-row">
         <div class="info">
           <b>Agent 面板</b>

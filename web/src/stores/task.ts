@@ -11,6 +11,12 @@ import { ref, watch } from 'vue';
 import * as api from '../api';
 import type { TaskFlowMode } from '../api/labels';
 import {
+  readDefaultAppMode,
+  resolveLaunchMode,
+  writeDefaultAppMode,
+  type AppMode,
+} from '../onboarding';
+import {
   reloadSettings,
   reportChatEvent,
   uiPrefsBridge,
@@ -67,11 +73,15 @@ const FALLBACK_POLL_MS = 5000;
 const TERMINAL_STATUSES = new Set(['done', 'partial', 'error', 'ended']);
 
 function readStoredAppMode(): 'roleplay' | 'task' {
+  // 启动默认模式偏好(onboarding.ts 的 DEFAULT_APP_MODE_KEY)优先:用户显式选过偏好后,
+  // 每次启动都按它进入;未设偏好才回退粘性记忆(老用户行为与改动前逐字一致)。
+  let sticky: string | null = null;
   try {
-    return localStorage.getItem(APP_MODE_KEY) === 'task' ? 'task' : 'roleplay';
+    sticky = localStorage.getItem(APP_MODE_KEY);
   } catch {
-    return 'roleplay';
+    sticky = null;
   }
+  return resolveLaunchMode(readDefaultAppMode(localStorage), sticky);
 }
 
 function readStoredTaskRunMode(): api.TaskRunMode {
@@ -152,6 +162,12 @@ export const useTaskStore = defineStore('app.task', () => {
   // ===== 状态 =====
   /** 顶层模式:roleplay = 角色扮演,task = 任务工作台;持久化到 localStorage */
   const appMode = ref<'roleplay' | 'task'>(readStoredAppMode());
+  /**
+   * 启动默认模式偏好(null = 未设,回退上面的粘性记忆)。
+   * 由首启引导第一问或「综合设置 → 界面」写入;设了它则每次启动都进入该模式,
+   * 会话内的临时切换只当次有效(见 onboarding.ts 的 DEFAULT_APP_MODE_KEY 注释)。
+   */
+  const defaultAppMode = ref<AppMode | null>(readDefaultAppMode(localStorage));
   /** 新建任务的执行模式(批次 4 六模式;持久化到 localStorage,写时经 watch) */
   const taskRunMode = ref<api.TaskRunMode>(readStoredTaskRunMode());
   /**
@@ -501,6 +517,17 @@ export const useTaskStore = defineStore('app.task', () => {
     persistAppMode();
   }
 
+  /**
+   * 设置「启动默认模式」(首启引导第一问与「综合设置 → 界面」共用)。
+   * 写偏好的同时**立即切换**当前模式:用户改这个设置项的意图就是「现在用它」,
+   * 只写偏好会让界面在下次启动前毫无变化(且与首启引导「选完即进入」的手感一致)。
+   */
+  function setDefaultAppMode(mode: AppMode): void {
+    defaultAppMode.value = mode;
+    writeDefaultAppMode(localStorage, mode);
+    if (appMode.value !== mode) setAppMode(mode);
+  }
+
   // ===== 任务事件 SSE 订阅(WP5) =====
 
   /** 事件分发:按 kind 驱动局部刷新;所有事件原样透传事件监控面板(DevTools) */
@@ -789,6 +816,7 @@ export const useTaskStore = defineStore('app.task', () => {
 
   return {
     appMode,
+    defaultAppMode,
     taskRunMode,
     taskFlowId,
     taskFlowMode,
@@ -803,6 +831,7 @@ export const useTaskStore = defineStore('app.task', () => {
     liveBuffers,
     lastAgentStatus,
     setAppMode,
+    setDefaultAppMode,
     loadTasks,
     loadGlobalTaskUsage,
     loadTaskCalls,
