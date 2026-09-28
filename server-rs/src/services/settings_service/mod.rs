@@ -27,8 +27,8 @@ pub use connection::{
 };
 pub use connector_pool::{connection_label, ConnectorPool};
 pub use params::{
-    default_roleplay_agent_prompt, default_task_agent_prompt, McpServerConfig, ModeSettings,
-    RoleplayPromptConfig, TaskPromptConfig,
+    default_coding_task_agent_prompt, default_roleplay_agent_prompt, default_task_agent_prompt,
+    McpServerConfig, ModeSettings, RoleplayPromptConfig, TaskPromptConfig,
 };
 
 // RuntimeSettings 字段的 serde(default = "...") 按名字在本模块作用域解析;
@@ -319,6 +319,13 @@ pub struct RuntimeSettings {
     /// task 覆盖层可覆盖,None 沿用本扁平值。
     #[serde(default)]
     pub task_prompt_inject_enabled: bool,
+    /// 编码能力包开关(2026-09-28;默认 false = 不启用,旧配置缺省由 serde default 填 false,
+    /// 零迁移)。启用后任务模式执行者/汇总者的**缺省**默认词改用编码执行者模板
+    /// (`default_coding_task_agent_prompt`);用户在提示词框自定义过的值逐字优先。
+    /// 只影响提示词缺省值,不改变工具面、不影响角色扮演模式。task 覆盖层可覆盖,
+    /// None 沿用本扁平值。
+    #[serde(default)]
+    pub task_coding_bundle_enabled: bool,
     /// 任务工作台的按模式覆盖项。扁平字段即角色扮演(roleplay)的权威值——引擎直接读
     /// 扁平字段,故 roleplay 不设覆盖层;task 用此覆盖层替换扁平字段的差异项。
     /// 旧 settings.json 无此字段,serde default 为空 = task 沿用扁平值。
@@ -1070,6 +1077,94 @@ mod tests {
         assert!(
             !s.for_mode(AppMode::Roleplay).task_prompt_inject_enabled,
             "roleplay 读扁平权威值(false),task 覆盖层不得污染"
+        );
+    }
+
+    /// 编码能力包(2026-09-28):缺省关、旧配置零迁移、覆盖层可覆盖;
+    /// 它只影响**缺省**默认词——用户自定义值逐字优先,角色扮演模式不受影响。
+    #[test]
+    fn task_coding_bundle_selects_coding_default_prompt() {
+        // 覆盖层 serde 三态:缺字段/null → None(沿用扁平);None 序列化省略字段
+        let missing: ModeSettings = serde_json::from_str("{}").unwrap();
+        assert!(
+            missing.task_coding_bundle_enabled.is_none(),
+            "缺字段应为 None(沿用扁平值)"
+        );
+        let null: ModeSettings =
+            serde_json::from_str(r#"{"task_coding_bundle_enabled": null}"#).unwrap();
+        assert!(null.task_coding_bundle_enabled.is_none(), "null 应为 None");
+        let some: ModeSettings =
+            serde_json::from_str(r#"{"task_coding_bundle_enabled": true}"#).unwrap();
+        assert_eq!(some.task_coding_bundle_enabled, Some(true));
+
+        let cfg = test_cfg();
+        // 旧版 settings.json:无 task 覆盖层、无扁平字段 → 读入后缺省关,
+        // 且任务缺省默认词仍是通用版(**零行为变更**是本批次的第一验收断言)
+        let dir = tmp_dir("task-coding-bundle");
+        let mut legacy = serde_json::to_value(RuntimeSettings::from_config(&cfg)).unwrap();
+        let obj = legacy.as_object_mut().unwrap();
+        obj.remove("task");
+        obj.remove("task_coding_bundle_enabled");
+        std::fs::write(
+            dir.join("settings.json"),
+            serde_json::to_string_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+        let loaded = RuntimeSettings::load(&dir, &cfg);
+        assert!(
+            !loaded.task_coding_bundle_enabled,
+            "旧配置缺省应为关(false)"
+        );
+        assert_eq!(
+            loaded.for_mode(AppMode::Task).agent_system_prompt.0,
+            default_task_agent_prompt(),
+            "包关时任务缺省默认词必须是通用版"
+        );
+
+        // 包开(扁平):任务缺省词改用编码模板;roleplay 默认词不经此处,不受影响
+        let mut s = RuntimeSettings::from_config(&cfg);
+        s.task_coding_bundle_enabled = true;
+        assert_eq!(
+            s.for_mode(AppMode::Task).agent_system_prompt.0,
+            default_coding_task_agent_prompt(),
+            "包开时任务缺省默认词应为编码执行者模板"
+        );
+        assert_eq!(
+            s.for_mode(AppMode::Roleplay).agent_system_prompt.0,
+            s.agent_system_prompt.0,
+            "角色扮演默认词不经本分支,包开关不得影响"
+        );
+
+        // 覆盖层分支:task 覆盖层 Some(true) 等价启用
+        let mut s2 = RuntimeSettings::from_config(&cfg);
+        s2.task.task_coding_bundle_enabled = Some(true);
+        assert_eq!(
+            s2.for_mode(AppMode::Task).agent_system_prompt.0,
+            default_coding_task_agent_prompt(),
+            "覆盖层 Some(true) 应等价启用"
+        );
+
+        // 用户自定义值逐字优先:包开也不覆盖用户填过的文本(开关只管缺省值)
+        let mut s3 = RuntimeSettings::from_config(&cfg);
+        s3.task_coding_bundle_enabled = true;
+        s3.task.agent_system_prompt = Some(TaskPromptConfig("我的任务词".into()));
+        assert_eq!(
+            s3.for_mode(AppMode::Task).agent_system_prompt.0,
+            "我的任务词",
+            "用户自定义提示词必须逐字优先,开关只影响缺省值"
+        );
+    }
+
+    /// 编码执行者模板的文本约束(与通用默认词同族,见 params.rs 函数文档的「约束」段)
+    #[test]
+    fn coding_default_prompt_keeps_task_constraints() {
+        let p = default_coding_task_agent_prompt();
+        assert!(!p.trim().is_empty(), "模板不得为空");
+        assert!(p.contains("任务执行智能体"), "必须保留任务向身份字样:{p}");
+        assert!(!p.contains("{{char}}"), "不得含角色扮演宏:{p}");
+        assert!(
+            p.contains("先读后写"),
+            "编码场景纪律(先读后写)必须在模板里:{p}"
         );
     }
 

@@ -85,6 +85,8 @@ const domains: Domain[] = [
       // 用户找不到 root/Shizuku 授权入口。移动端为主的场景下,授权是需要被
       // 主动发现的设置项,不应埋在 Agent 设置的长表单里。
       { type: 'section', key: 'exec', label: '授权与命令执行' },
+      // 编码能力包(默认关):任务模式执行者的默认系统提示词模板开关
+      { type: 'section', key: 'coding', label: '编码能力包' },
     ],
   },
   {
