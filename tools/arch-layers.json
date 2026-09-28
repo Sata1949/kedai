@@ -155,6 +155,7 @@
     "devTools.ts": { "generation": "L1", "responsibility": "开发者工具纯函数(事件类型映射/过滤/截断)" },
     "exportFile.ts": { "generation": "L1", "responsibility": "导出文件保存抽象(平台分支:Android 分享/桌面对话框/浏览器下载)" },
     "lastPosition.ts": { "generation": "L1", "responsibility": "上次浏览位置 localStorage 存储层(纯存储,零依赖)" },
+    "onboarding.ts": { "generation": "L1", "responsibility": "首启引导(新手教程)机制层:默认模式偏好与引导完成标记的存储、启动模式解析、教程步骤表纯函数(注入式 StorageLike,纯 node 可测);SettingsSectionKey 的单一来源(避免 L2 反向依赖 L3 的 SettingsHub)" },
     "renderHtmlPreference.ts": { "generation": "L1", "responsibility": "HTML 渲染开关按角色卡记忆的存储层(纯存储)" },
     "scriptAuthorization.ts": { "generation": "L1", "responsibility": "脚本授权台账存储层 + 规范化脚本哈希(与后端授权门共享哈希契约)" },
     "scriptTreeIO.ts": { "generation": "L1", "responsibility": "脚本树导入导出纯函数(id 重分配、export_with 剥离)" },

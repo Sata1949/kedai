@@ -7,6 +7,7 @@ import { nextTick, onMounted, onUnmounted, watch } from 'vue';
 import { useAppStore } from './store';
 import { lazyModal } from './asyncModal';
 import { MODALS, MODAL_FLAGS } from './modals';
+import { shouldShowOnboarding } from './onboarding';
 import { inTauri } from './platform';
 import { useExternalLinks } from './composables/useExternalLinks';
 import { useKeepAlive } from './composables/useKeepAlive';
@@ -293,6 +294,22 @@ watch(
   (open) => {
     if (open && narrowViewport?.matches) closeDrawers();
   },
+);
+
+/**
+ * 首启引导(2026-09-27):启动动画结束后判定一次,无「已完成」标记即弹新手教程。
+ *
+ * 挂点选 splash 之后而不是 onMounted:`splashDone` 是**纯内存态**(uiPrefs 里不持久化),
+ * 每次启动都会重放,故这里是天然的「每次启动判一次」位置;教程也因此不与启动动画叠加。
+ * 与设置深链接(`#settings`)同日出现时**教程优先**:它在 modals.ts 里声明在 settingsOpen
+ * 之后 = 渲染在上层,展开态盖住设置,用户看完教程再露出设置。
+ */
+watch(
+  () => store.splashDone,
+  (done) => {
+    if (done && shouldShowOnboarding(localStorage)) store.onboardingOpen = true;
+  },
+  { once: true },
 );
 </script>
 
