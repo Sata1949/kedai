@@ -513,8 +513,19 @@ function finish(): void {
   flex: none;
 }
 .ob-bar-text {
+  /* 窄屏(375px)实测:不加这三条时整条浮条会被文字挤成 3 行、按钮折成「继续教/程」。
+     改为文字可截断(ellipsis)、按钮不折行。 */
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-size: var(--text-sm);
   line-height: 1.4;
+}
+.ob-bar > .sv-btn {
+  flex: none;
+  white-space: nowrap;
 }
 @media (max-width: 767px) {
   .ob-bar {
