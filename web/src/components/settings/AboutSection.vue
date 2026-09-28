@@ -4,7 +4,10 @@
 // 教程为面向新用户的功能速览,与实现保持同步(改功能时同步此文件)。
 // 与 UiSection 同级的纯展示分区,无业务状态依赖。
 import { onMounted, ref } from 'vue';
+import { useAppStore } from '../../store';
 import { health } from '../../api/health';
+
+const store = useAppStore();
 
 const props = withDefaults(defineProps<{
   /** 是否显示(embedded 模式按 activeSection 切换;standalone 恒 true) */
@@ -76,6 +79,16 @@ const changelog: string[] = [
     </div>
 
     <div class="sv-field-label sub">使用教程</div>
+
+    <!-- 新手引导入口(2026-09-27 教程引导批次):首启会自己弹一次,这里供随时重看。
+         下面的六段速览是纯文字版本,与引导里的步骤同源(改功能时两处一起改)。 -->
+    <div class="sv-data-row about-block">
+      <div class="info">
+        <b>新手引导</b>
+        <span>首次启动时会依次问「偏好模式」与「要不要讲解」，再分步介绍常用功能；讲解里的「带我去设置」会打开综合设置并定位到对应分区。</span>
+      </div>
+      <button class="sv-btn ghost" @click="store.onboardingOpen = true">重新打开新手引导</button>
+    </div>
 
     <div class="sv-data-row about-block">
       <div class="info">

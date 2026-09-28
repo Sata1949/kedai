@@ -127,3 +127,53 @@ describe('SettingsHub 组件(阶段 A 补测)', () => {
     }
   });
 });
+
+// 分区定位请求(新手教程「带我去设置」,2026-09-27):openSettingsAt 置 uiPrefs.settingsNav,
+// 本组件 watch 它并把两级导航落到目标分区。断言按右栏标题(「功能域 · 分区」)判定——
+// 那是用户实际看到的定位结果,而不是内部 ref 的镜像。
+describe('SettingsHub 分区定位(新手教程「带我去设置」)', () => {
+  beforeEach(() => {
+    memStorage.clear();
+  });
+
+  it('openSettingsAt 落到目标分区并同时切到其所属功能域', async () => {
+    const { store, wrapper } = mountHub();
+    store.openSettingsAt('exec');
+    await nextTick();
+
+    expect(store.settingsOpen).toBe(true);
+    // 1 步跨域定位:授权与命令执行在「Agent 与任务」域下,而默认激活域是「连接与模型」
+    expect(wrapper.find('.sv-hub-content-title').text()).toBe('Agent 与任务 · 授权与命令执行');
+    const activeNav = wrapper.findAll('.sv-hub-nav-item.active').map((b) => b.text());
+    expect(activeNav[0]).toContain('Agent 与任务');
+  });
+
+  it('连续两次请求同一分区都生效(nonce 递增,不因值相同被跳过)', async () => {
+    const { store, wrapper } = mountHub();
+    store.openSettingsAt('exec');
+    await nextTick();
+    expect(wrapper.find('.sv-hub-content-title').text()).toBe('Agent 与任务 · 授权与命令执行');
+
+    // 用户手动切走后再来一次同一分区:必须重新落回去
+    const apiDomain = wrapper.findAll('.sv-hub-nav-item').find((b) => b.text().includes('连接与模型'));
+    await apiDomain?.trigger('click');
+    expect(wrapper.find('.sv-hub-content-title').text()).not.toBe('Agent 与任务 · 授权与命令执行');
+
+    store.openSettingsAt('exec');
+    await nextTick();
+    expect(wrapper.find('.sv-hub-content-title').text()).toBe('Agent 与任务 · 授权与命令执行');
+  });
+
+  it('目标分区在当前模式下不可见时保持原分区(不改动、不报错)', async () => {
+    const { store, wrapper } = mountHub();
+    store.appMode = 'task';
+    await nextTick();
+    const before = wrapper.find('.sv-hub-content-title').text();
+
+    // 「提示词注入」是角色扮演专属分区,任务模式下整域隐藏
+    store.openSettingsAt('prompt');
+    await nextTick();
+
+    expect(wrapper.find('.sv-hub-content-title').text()).toBe(before);
+  });
+});

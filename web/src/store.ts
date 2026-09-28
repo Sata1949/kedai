@@ -122,6 +122,8 @@ export const useAppStore = defineStore('app', () => {
     setRenderHtml: uiPrefs.setRenderHtml,
     toggleRenderHtml: uiPrefs.toggleRenderHtml,
     removeRenderHtmlOverride: uiPrefs.removeRenderHtmlOverride,
+    // 设置分区定位(新手教程「带我去设置」:打开综合设置并落到指定分区)
+    openSettingsAt: uiPrefs.openSettingsAt,
     // Agent 面板开合(自动展开一次 + 用户主动收起后不再打扰)
     openAgentPanel: uiPrefs.openAgentPanel,
     collapseAgentPanel: uiPrefs.collapseAgentPanel,

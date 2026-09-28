@@ -90,7 +90,7 @@ function mergeBranches(a: readonly AppMode[], b: readonly AppMode[]): AppMode[] 
  * 前者最坏只是多弹一次(用户点一次「不需要」即写回干净值)。
  */
 export function readOnboarding(storage: StorageLike): OnboardingState | null {
-  let raw: string | null = null;
+  let raw: string | null;
   try {
     raw = storage.getItem(ONBOARDING_KEY);
   } catch {

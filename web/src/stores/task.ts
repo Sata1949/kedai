@@ -79,7 +79,7 @@ function readStoredAppMode(): 'roleplay' | 'task' {
   try {
     sticky = localStorage.getItem(APP_MODE_KEY);
   } catch {
-    sticky = null;
+    /* 存储不可用:按「未设粘性记忆」处理,与 readDefaultAppMode 的容错一致 */
   }
   return resolveLaunchMode(readDefaultAppMode(localStorage), sticky);
 }
