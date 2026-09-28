@@ -87,7 +87,7 @@ const changelog: string[] = [
         <b>新手引导</b>
         <span>首次启动时会依次问「偏好模式」与「要不要讲解」，再分步介绍常用功能；讲解里的「带我去设置」会打开综合设置并定位到对应分区。</span>
       </div>
-      <button class="sv-btn ghost" @click="store.onboardingOpen = true">重新打开新手引导</button>
+      <button class="sv-btn ghost shrink-0 whitespace-nowrap" @click="store.onboardingOpen = true">重新打开新手引导</button>
     </div>
 
     <div class="sv-data-row about-block">

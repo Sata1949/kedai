@@ -32,10 +32,13 @@ const { scriptAuthorizations } = storeToRefs(store);
           <b>默认模式</b>
           <span>决定每次启动 Kedai 后默认进入的模式（未设置时按上次使用过的模式进入）。点击即切换并保存，首次启动的引导里选的也是这一项。</span>
         </div>
-        <div class="flex items-center gap-2">
+        <!-- 两按钮组:shrink-0 + nowrap 是必须的——行内说明文字会占满宽度,不给这两条则按钮被压成
+             竖排折行(实测「角色扮演」折成 4 行);选中态用 sv-btn-on(粉底)表示,未设置过时两者都不高亮。 -->
+        <div class="flex items-center gap-2 shrink-0 whitespace-nowrap">
           <button
             type="button"
             class="sv-btn ghost"
+            :class="{ 'sv-btn-on': store.defaultAppMode === 'roleplay' }"
             :aria-pressed="store.defaultAppMode === 'roleplay'"
             @click="store.setDefaultAppMode('roleplay')"
           >
@@ -44,6 +47,7 @@ const { scriptAuthorizations } = storeToRefs(store);
           <button
             type="button"
             class="sv-btn ghost"
+            :class="{ 'sv-btn-on': store.defaultAppMode === 'task' }"
             :aria-pressed="store.defaultAppMode === 'task'"
             @click="store.setDefaultAppMode('task')"
           >
