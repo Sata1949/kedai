@@ -1,5 +1,8 @@
 # ci-linux.yml — 平台可移植性档(Q4,2026-09-27)
 #
+# **2026-09-29 状态:已服务端停用**(`gh workflow disable`,状态 `disabled_manually`;缘见
+# `docs/遗留.md` CI-BILL-1)。文件保留在位、触发面未改;恢复 = `gh workflow enable ci-linux -R Sata1949/kedai`。
+#
 # 定位:ci.yml 仍是**唯一权威档**(windows-latest + 全量 15 段门禁);本档不替代它,
 # 只补两件 Windows 档**结构上测不到**的事:
 #   ① check-ubuntu:`cfg(windows)` 之外的可移植性回归只有换平台才暴露 ——
