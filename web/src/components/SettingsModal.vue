@@ -24,6 +24,8 @@ const AgentSettingsSection = lazyModal(() => import('./settings/AgentSettingsSec
 const AgentFlowSection = lazyModal(() => import('./settings/AgentFlowSection.vue'), '设置区:执行流程', 'settingsOpen');
 // 授权与命令执行(2026-09-17 独立分区):工具三档授权 + 命令执行/设备档位
 const ExecAuthSection = lazyModal(() => import('./settings/ExecAuthSection.vue'), '设置区:授权与命令执行', 'settingsOpen');
+// 编码能力包(默认关):任务模式执行者默认系统提示词模板开关
+const CodingBundleSection = lazyModal(() => import('./settings/CodingBundleSection.vue'), '设置区:编码能力包', 'settingsOpen');
 const PromptInjectSection = lazyModal(() => import('./settings/PromptInjectSection.vue'), '设置区:提示词注入', 'settingsOpen');
 const PresetImportExportSection = lazyModal(() => import('./settings/PresetImportExportSection.vue'), '设置区:预设导入', 'settingsOpen');
 const DataManagementSection = lazyModal(() => import('./settings/DataManagementSection.vue'), '设置区:数据管理', 'settingsOpen');
@@ -86,6 +88,7 @@ const close = (): void => {
     <AgentSettingsSection v-if="visitedSections.has('agent')" :show="props.activeSection === 'agent'" />
     <AgentFlowSection v-if="visitedSections.has('flow')" :show="props.activeSection === 'flow'" />
     <ExecAuthSection v-if="visitedSections.has('exec')" :show="props.activeSection === 'exec'" />
+    <CodingBundleSection v-if="visitedSections.has('coding')" :show="props.activeSection === 'coding'" />
     <PromptInjectSection v-if="visitedSections.has('prompt')" :state="promptInject" :show="props.activeSection === 'prompt'" />
     <PresetImportExportSection v-if="visitedSections.has('preset')" :state="promptInject" :show="props.activeSection === 'preset'" />
     <DataManagementSection v-if="visitedSections.has('data')" :state="dataManager" :show="props.activeSection === 'data'" />
@@ -114,6 +117,7 @@ const close = (): void => {
         <AgentSettingsSection />
         <AgentFlowSection />
         <ExecAuthSection />
+        <CodingBundleSection />
         <PromptInjectSection :state="promptInject" />
         <PresetImportExportSection :state="promptInject" />
         <DataManagementSection :state="dataManager" />

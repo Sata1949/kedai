@@ -8,6 +8,7 @@ import { useAppStore } from '../store';
 import { health, type HealthInfo } from '../api/health';
 // 独立面板 flag 的类型取弹窗注册表(web/src/modals.ts 单点定义,新增弹窗此处零改动)
 import type { ModalFlag } from '../modals';
+import type { SettingsSectionKey } from '../onboarding';
 import SettingsModal from './SettingsModal.vue';
 
 const store = useAppStore();
@@ -35,14 +36,10 @@ const close = (): void => {
   store.settingsOpen = false;
 };
 
-/** 设置分区键(与 SettingsModal 的 activeSection 一一对应) */
-type SectionKey =
-  | 'api' | 'connections' | 'model' | 'mcp' | 'embedding'
-  | 'prompt' | 'preset'
-  | 'agent' | 'flow' | 'exec'
-  | 'data'
-  | 'ui'
-  | 'about';
+/** 设置分区键(与 SettingsModal 的 activeSection 一一对应)。
+ *  字面量联合的单一来源在 `web/src/onboarding.ts`(L1):该键同时被 stores(L2) 的
+ *  openSettingsAt 使用,定义若留在本组件(L3)会让 L2 反向依赖 L3(check-arch 规则 J)。 */
+type SectionKey = SettingsSectionKey;
 
 /** 二级项:section 切右侧内容区;action 打开独立面板/执行操作后关闭 */
 type HubItem =
@@ -88,6 +85,8 @@ const domains: Domain[] = [
       // 用户找不到 root/Shizuku 授权入口。移动端为主的场景下,授权是需要被
       // 主动发现的设置项,不应埋在 Agent 设置的长表单里。
       { type: 'section', key: 'exec', label: '授权与命令执行' },
+      // 编码能力包(默认关):任务模式执行者的默认系统提示词模板开关
+      { type: 'section', key: 'coding', label: '编码能力包' },
     ],
   },
   {
@@ -186,6 +185,32 @@ watch(
       if (firstSection && firstSection.type === 'section') activeSection.value = firstSection.key;
     }
   },
+);
+
+/**
+ * 「带我去设置」定位请求(新手教程,2026-09-27):把请求里的分区落到本组件的两级导航状态上。
+ *
+ * **必须 `immediate: true` 且应用后消费掉请求**:设置弹窗是 `v-if` + 懒加载,首次点
+ * 「带我去设置」时请求先于本组件挂载(点击 → 置开关 + 置请求 → chunk 加载完才 mount),
+ * 不带 immediate 的 watch 在挂载时不会触发,表现为「设置打开了但没定位」。
+ * 消费(清空)则避免用户日后手动打开综合设置又被上一次的请求带着跳分区。
+ *
+ * 目标分区若在当前模式下不可见(如任务模式下的「提示词注入」是角色扮演专属),
+ * **保持原分区、不报错**——教程只是指路,定位失败不该把设置弹窗弄成异常态。
+ */
+watch(
+  () => store.settingsNav,
+  (req) => {
+    if (!req) return;
+    const domain = visibleDomains.value.find((d) =>
+      d.items.some((it) => it.type === 'section' && it.key === req.section),
+    );
+    store.clearSettingsNav();
+    if (!domain) return;
+    activeDomain.value = domain.key;
+    activeSection.value = req.section;
+  },
+  { immediate: true },
 );
 
 /** 右侧标题:功能域 · 分区名(让用户知道自己在哪一层) */

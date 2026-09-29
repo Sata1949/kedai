@@ -106,6 +106,7 @@ function makeSettings(overrides: Partial<RuntimeSettings> = {}): RuntimeSettings
     exec_allow_sandbox: false,
     task_persona_full: false,
     task_prompt_inject_enabled: false,
+    task_coding_bundle_enabled: false,
     // 多套连接(批次 4):默认空列表,具体连接由用例覆盖
     connections: [],
     active_connection_id: null,
@@ -355,6 +356,39 @@ describe('genSettings 执行者人设开关(R3a task_persona_full)', () => {
     await store.saveSettings({ task_persona_full: true });
     expect(saveSettingsMock).toHaveBeenCalledWith({ task_persona_full: true }, 'roleplay');
     expect(store.taskPersonaFull).toBe(true);
+  });
+});
+
+describe('genSettings 编码能力包开关(task_coding_bundle_enabled)', () => {
+  beforeEach(() => {
+    memStorage.clear();
+    setActivePinia(createPinia());
+  });
+
+  it('loadSettings 回填服务端值;缺字段兜底 false(默认关)', async () => {
+    const store = useGenSettingsStore();
+    getSettingsMock.mockReset().mockResolvedValue(makeSettings({ task_coding_bundle_enabled: true }));
+    await store.loadSettings();
+    expect(store.taskCodingBundleEnabled).toBe(true);
+
+    // 旧服务端/异常响应缺字段:不得污染 store,回退默认关
+    // (抹字段用 withoutFields,避免 `as unknown as` 推高 check-frontend-lint 的 ratchet 基线)
+    getSettingsMock.mockReset().mockResolvedValue(
+      withoutFields(makeSettings(), ['task_coding_bundle_enabled']),
+    );
+    await store.loadSettings();
+    expect(store.taskCodingBundleEnabled).toBe(false);
+  });
+
+  it('saveSettings 响应回填 taskCodingBundleEnabled(与 loadSettings 同口径)', async () => {
+    const store = useGenSettingsStore();
+    saveSettingsMock.mockReset().mockResolvedValue({
+      ok: true,
+      settings: makeSettings({ task_coding_bundle_enabled: true }),
+    });
+    await store.saveSettings({ task_coding_bundle_enabled: true });
+    expect(saveSettingsMock).toHaveBeenCalledWith({ task_coding_bundle_enabled: true }, 'roleplay');
+    expect(store.taskCodingBundleEnabled).toBe(true);
   });
 });
 
