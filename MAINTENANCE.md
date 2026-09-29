@@ -17,14 +17,14 @@
 - **样式分层纪律(前端,2026-09 D-5 起;2026-09-27 起按域拆分为目录)**:样式在 `web/src/styles/` 下按域分文件(`tokens` 层① 设计变量 / `base` 层② 全局基础层 / `shell` / `panels` / `content` / `task` / `mobile`),`web/src/style.css` 只剩**清单**——`@import "tailwindcss"` + 7 条相对 import,**顺序即级联顺序(`mobile` 必须最后)**;新增组件样式一律 `<style scoped>` 或 Tailwind 工具类,**禁止再往 `styles/` 里加新域**;修改存量组件时顺手把该组件样式搬进 scoped(「改到谁拆谁」,`styles/` 各文件头注释为准);新增样式不得引入 `!important`(存量 13 处,2026-09-27 实测;原写 11 处为 stale,漂移记录见 `FRONTEND-REPORT.md` §3.6)。
 - **跨端协议**(前后端 mvu)以 `docs/契约-协议与配置.md` 锁定双端一致,防行为漂移。
 - **EJS 自研解释器冻结纪律**:`parsing/assistant/ejs/`(自研迷你 JS 引擎,约 4000 行)**只接受安全修复,不再扩展新能力**。任何新模板能力必须在 `scripts/runtime.rs` 的 rquickjs 沙箱侧实现(rquickjs 自带内存/中断/栈上限,见该文件 `set_memory_limit`/`set_interrupt_handler`)。理由:自研解释器缺引擎级沙箱限额,长期维护成本与风险高于复用;**已加固**(循环步数+墙钟预算、解析深度守卫,见 §10 踩坑记录),但债务不再增长。
-- **门禁纪律(2026-09-13 起;2026-09-26 起三处均生效)**:`tools/check-all.ps1` 是唯一的本地 CI 入口,现已接三处触发——
+- **门禁纪律(2026-09-13 起;2026-09-26 起三处均生效;2026-09-29 起云端两档停用,生效面回到本机两处)**:`tools/check-all.ps1` 是唯一的本地 CI 入口,现已接三处触发——
   ① `build.ps1` 在构建前跑 `check-all -Quick`,失败即中止构建(`-SkipChecks` 仅限本地应急,
   **交付/试用前必须补跑一次完整 `check-all`**);② `tools/hooks/pre-push` 在推送前跑同一检查
   (装一次:`npm run hooks:install`;紧急可 `git push --no-verify`,同样须事后补跑);
-  ③ `.github/workflows/ci.yml`(2026-09-13 落盘,**2026-09-26 随 GitHub 私有远端配置而激活**):
+  ③ `.github/workflows/ci.yml`(2026-09-13 落盘,2026-09-26 随远端配置而激活,**2026-09-29 服务端停用**):
   windows-latest 跑同一套 `check-all.ps1`,触发面**刻意收窄**为 `push` 到 `main` + PR +
   手动 `workflow_dispatch`——平台分支与 `main` 逐字节同源(见「平台分支契约」),给它们
-  各跑一遍只会重复烧私有仓额度(免费档 2000 分钟/月,Windows runner 按 2 倍计费)。
+  各跑一遍只会重复烧额度(私有仓时代免费档 2000 分钟/月、Windows runner 按 2 倍计费;2026-09-29 转公开后按公共仓口径)。
   ④ `.github/workflows/ci-linux.yml`(2026-09-27 增,QUALITY-FIX Q4):**平台可移植性档**,
   `ubuntu-latest`、按 1 倍计费。`check-ubuntu` 只跑平台无关的几段(fmt / clippy / cargo test /
   前端 typecheck+vitest+bundle budget,**不重复**纯 Node 的文档与架构门禁),用来捕获
@@ -33,9 +33,13 @@
   `server-rs` 并自证产物是 `ARM aarch64` + `/system/bin/linker64`,覆盖 Android cfg 路径
   (JNI / bindgen / 平台执行层)。**它不替代 ③**:③ 仍是唯一权威档(全量 15 段);本档红同样当门禁处理。
   分档理由(为何独立文件而非同文件加 job)见 `经验.md` E66。
-  **不要依赖 CI 兜底**:CI 不覆盖平台分支推送,平台分支与本地提交仍靠前两条兜住;且服务端
-  **没有分支保护**(私有仓 + Free 计划,rulesets/保护规则双端点 403,见 `遗留.md` CI-PROT-1)——
-  CI 只能**如实报告**、不能**阻止合并**,`--no-verify` 也仍能把本地那两条绕过去。
+  **停用态(2026-09-29 起,临时)**:③④ 两档已服务端 `gh workflow disable`(状态 `disabled_manually`,
+  文件保留未删;缘见 `遗留.md` CI-BILL-1);恢复:`gh workflow enable ci|ci-linux -R Sata1949/kedai`。
+  停用期间提交默认只落本机、不推送(见 `AGENTS.md`),**只有 ①② 在本机生效**。
+  **不要依赖 CI 兜底(2026-09-29 起尤甚)**:两档停用 + 提交本地化后,CI 既跑不到、也不覆盖平台分支推送;
+  且服务端**没有分支保护**(私有仓时代双端点 403;2026-09-29 转公开后限制解除、**尚未开启**,见 `遗留.md`
+  CI-PROT-1 追注)——机器门禁只剩 ①②(`build.ps1 -Quick` 与 `pre-push`),`--no-verify` 也仍能把它们
+  绕过去;**绕过后的唯一兜底是本机全量 `npm run check`**。
   变更 `tools/check-*.mjs` 的检查规则时,同步更新本节与本文件的检查项清单。
 - **性能门禁(2026-09-14 起,可选)**:`tools/perf-baseline.mjs` 支持 p95 阈值判定
   (`--max-p95-factor`,默认 1.25),基线值存 `tools/perf-baseline.json`;
@@ -100,7 +104,8 @@
 
 ## 1. 项目概览与架构
 
-**定位**:本地运行的通用 LLM 智能体 harness——双顶层模式(角色扮演 / 文学创作会话 + 任务工作台),内置 Agent 引擎(计划 → 执行 → 反思)与工具 / 授权层,垂直能力以**官方能力包**形态交付(默认关、显式启用);SillyTavern 生态原生兼容落在解析层。
+**定位**:本地运行的通用 LLM 智能体 harness(**KedaiAgent**)——双顶层模式(角色扮演 / 文学创作会话 + 任务工作台),内置 Agent 引擎(计划 → 执行 → 反思)与工具 / 授权层,垂直能力以**官方能力包**形态交付(默认关、显式启用);SillyTavern 生态原生兼容落在解析层。
+**许可**:MIT(根 `LICENSE`);本应用免费分发,不存在针对软件本体的收费项目。**版本后缀**:`Alpha` 测试版(可能有恶性 BUG)/ `Beta` 预览版 / 大写字母 修复版 / 无后缀 稳定版。
 
 ```
 kedai/
@@ -170,7 +175,7 @@ kedai/
 | 兼容别名 | `npm run build:all` / `npm run build:rs` | 均等价 `.\build.ps1`(双端同步);`npm run build:test` 等价 `.\build.ps1 -TestOnly` |
 | 统一改版本号 | `npm run version:bump -- x.y.z` | **9 个文件一次改全**(2 个 package.json、3 个 Cargo.toml、tauri.conf.json、package-lock.json 全部自身版本、`AboutSection.vue` 的 `FALLBACK_VERSION`、本文档版本行);其中 **8 处声明由 `build.ps1::Assert-VersionConsistency` 校验**(改漏即构建报错);支持 `-DryRun` 预览 |
 | 后端测试 | `cd server-rs && cargo test -j 8` | **1464 个测试(1126 单测 + 338 集成,51 个集成文件)**,**需在 vcvars64 环境**;前端 `npm test -w web` **1254 个(116 文件;静态计数;vitest 运行时为 1272,差值 18 来自 `parser.contract.test.ts` 循环生成的 fixture 用例)**。数字由 `node tools/count-tests.mjs` 自动统计,勿手抄——`npm run count:tests` 查看当前值,`npm run check:tests` 校验文档是否漂移(**2026-09-26 起逐行扫描本节与根 `README.md` 的全部复写处,并校验集成文件数**;其余由代码/脚本派生的计数——表数、`ensure_*` 个数、映射组数、规则字母、ratchet 基线、枚举变体数、门禁阶段数、工具链版本——由 `npm run check:doc-claims` 守护) |
-| 全量检查(本地 CI) | `npm run check` | `tools/check-all.ps1`——**本行是本仓库门禁阶段清单的唯一展开处**,其余文档只写「见本节」。顺序:fmt → clippy → cargo test → **cargo audit(硬门禁,双 Cargo.lock)** → docs: check-docs → lock-sync(双锁漂移)→ contract → arch(规则集以 `tools/check-arch.mjs` 为准,A–L)→ count: tests → docs: check-doc-claims(计数类硬口径)→ 类型 ratchet → eslint → **npm audit(硬门禁)** → vue-tsc(**硬门禁**)→ vitest → vite build → bundle budget(体积预算)→ perf(-Perf 才跑)。**已接入 build.ps1 与 pre-push hook**;云端为 GitHub Actions 两档(权威档 `ci.yml` = 本清单全量,平台档 `ci-linux.yml` = fmt/clippy/cargo test/前端三段 + 手动 Android 交叉编译冒烟;2026-09-26 激活,见 §0 门禁纪律);`-Quick` 跳 vite build 与 bundle budget,`-SkipWeb` 跳 docs 之后全部 web+契约段,`-AuditOnly` 只跑两段 audit。 **工具链口径(2026-09-27 起,见 `经验.md` E60/E63)**:真值源是仓库根 **`rust-toolchain.toml`**——仓库内任何 rustup 代理调用(`cargo`/`rustc`/`rustfmt`/`clippy`)都解析到它的 `channel`,换机、换会话、`rustup update stable` 都不再改变口径。CI 各 workflow 里的 `dtolnay/rust-toolchain@<版本>` 是**必须逐处手写同步处**(该 action 明确不支持读 toolchain 文件;2026-09-27 起 `check-doc-claims` 扫 `.github/workflows` 下**每一处**取值与 toml 比对,不再只看第一处),它与本文档工具链行一起被 `npm run check:doc-claims` 逐条钉死——版本漂移**先在门禁转红**,而不是等 CI 炸。升版按 `rust-toolchain.toml` 头注释的五步走(改 channel → 装新工具链 → 同步各 workflow 与本文档 → 本地 `npm run check` 复现并修掉新 lint → 一起提交),别拿 CI 当选 lint 的地方。 |
+| 全量检查(本地 CI) | `npm run check` | `tools/check-all.ps1`——**本行是本仓库门禁阶段清单的唯一展开处**,其余文档只写「见本节」。顺序:fmt → clippy → cargo test → **cargo audit(硬门禁,双 Cargo.lock)** → docs: check-docs → lock-sync(双锁漂移)→ contract → arch(规则集以 `tools/check-arch.mjs` 为准,A–L)→ count: tests → docs: check-doc-claims(计数类硬口径)→ 类型 ratchet → eslint → **npm audit(硬门禁)** → vue-tsc(**硬门禁**)→ vitest → vite build → bundle budget(体积预算)→ perf(-Perf 才跑)。**已接入 build.ps1 与 pre-push hook**;云端为 GitHub Actions 两档(权威档 `ci.yml` = 本清单全量,平台档 `ci-linux.yml` = fmt/clippy/cargo test/前端三段 + 手动 Android 交叉编译冒烟;2026-09-26 激活,**2026-09-29 起停用**,见 §0 门禁纪律);`-Quick` 跳 vite build 与 bundle budget,`-SkipWeb` 跳 docs 之后全部 web+契约段,`-AuditOnly` 只跑两段 audit。 **工具链口径(2026-09-27 起,见 `经验.md` E60/E63)**:真值源是仓库根 **`rust-toolchain.toml`**——仓库内任何 rustup 代理调用(`cargo`/`rustc`/`rustfmt`/`clippy`)都解析到它的 `channel`,换机、换会话、`rustup update stable` 都不再改变口径。CI 各 workflow 里的 `dtolnay/rust-toolchain@<版本>` 是**必须逐处手写同步处**(该 action 明确不支持读 toolchain 文件;2026-09-27 起 `check-doc-claims` 扫 `.github/workflows` 下**每一处**取值与 toml 比对,不再只看第一处),它与本文档工具链行一起被 `npm run check:doc-claims` 逐条钉死——版本漂移**先在门禁转红**,而不是等 CI 炸。升版按 `rust-toolchain.toml` 头注释的五步走(改 channel → 装新工具链 → 同步各 workflow 与本文档 → 本地 `npm run check` 复现并修掉新 lint → 一起提交),别拿 CI 当选 lint 的地方。 |
 `check-arch` 规则自 2026-09-14 起含 C/D/E/G/H/I/J(代际归属与跨代方向以 `tools/arch-layers.json` 为 SSOT),**2026-09-17 起增规则 L**(JNI 按名调用桥类的登记完整性);`check-bundle` 自 2026-09-17 起(基线在脚本内,ratchet 只降不升) |
 | 开发模式 | `cd server-rs && cargo run` + `npm run dev -w web` | 后端 3001 / 前端 5173(代理到 3001) |
 | 前端构建 | `npm run build -w web` | 产出 web/dist(编译进 exe 用) |
@@ -464,7 +469,7 @@ cd server-rs && cargo test -j 8
   - **已知 flaky**:`settings_connector::mock_auto_switches_to_openai_on_save` 偶发因 Windows 文件占用失败
     (`settings.json 应已持久化: Os { code: 32 }`;另实测全量负载下的 `Os { code: 2 } NotFound` 变体),
     隔离重跑即通过——非代码缺陷:PUT 保存是 `db_call` 同步 await(`api/settings.rs:657-662`),返回 200 时
-    文件必已落盘,失败属环境文件锁/时序竞争。CI 接入时给该断言加重试或改经 API 校验。
+    文件必已落盘,失败属环境文件锁/时序竞争。CI 接入时给该断言加重试或改经 API 校验(**CI 两档 2026-09-29 起停用,校验面恢复后再落**,见 `遗留.md` CI-BILL-1)。
   - **已知 flaky（2026-09-24 复核）**：同文件的 `roleplay_default_prompt_visible_on_fresh_install` 也会
     在 `-j 8` 全量下偶发失败——那是上文 **TEST-ISO-1**（用例共享可变设置 / 顺序依赖）的另一条断言，
     **不是新条目**（2026-09-24 曾一度误登记为 ENV-4，已撤销）；判别同 ENV-1：先

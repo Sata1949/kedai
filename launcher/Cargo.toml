@@ -3,6 +3,7 @@ name = "kedai-launcher"
 version = "0.4.0-alpha"
 edition = "2021"
 description = "Kedai 图形启动器:双击即用,失败弹窗给出可读原因"
+license = "MIT"
 
 # 产物即用户双击的 Kedai.exe
 [[bin]]

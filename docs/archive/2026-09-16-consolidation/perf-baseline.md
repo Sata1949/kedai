@@ -62,8 +62,8 @@ Agent 生成期间的长 SQL 会阻塞 tokio worker 并队头阻塞一切读请�
 `cargo` 命令需在 vcvars64 环境执行。已新增包装脚本:
 
 ```bash
-cmd //c "C:\Users\LENOVO\Desktop\kedai\tools\cargo-vcvars.cmd cargo test"
-cmd //c "C:\Users\LENOVO\Desktop\kedai\tools\cargo-vcvars.cmd cargo clippy -- -D warnings"
+cmd //c "<项目根>\tools\cargo-vcvars.cmd cargo test"
+cmd //c "<项目根>\tools\cargo-vcvars.cmd cargo clippy -- -D warnings"
 ```
 
 ---

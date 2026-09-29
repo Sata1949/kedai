@@ -1,7 +1,7 @@
 # 借鉴 deepseek-harness 的落地建议
 
 > 学习对象:`deepseek-ai/deepseek-harness`(TypeScript pnpm monorepo,「一切皆插件」,基于 vendored Cordis)。
-> 源码已下载到 `C:\Users\LENOVO\Desktop\deepseek-harness-master\`(zip 在桌面,看完可删)。
+> 源码已下载到 `<本地目录>\deepseek-harness-master\`(zip 在桌面,看完可删)。
 > 本文档只做分析与落地建议,**未修改任何行为代码**。
 
 ## 结论概览
@@ -104,5 +104,5 @@ kedai 现在这些「执行后处理」散落在不同模块:censor 禁词兜底
 ## 当前状态与下一步
 
 - 未修改 kedai 任何代码。
-- harness 源码在 `C:\Users\LENOVO\Desktop\deepseek-harness-master\`,zip 包 `deepseek-harness.zip` 可自行删除。
+- harness 源码在 `<本地目录>\deepseek-harness-master\`,zip 包 `deepseek-harness.zip` 可自行删除。
 - 建议顺序:先落地借鉴点 1(补齐 Roadmap 空白、价值最高),再 2,最后评估是否做 3。
