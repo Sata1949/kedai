@@ -323,7 +323,199 @@ const CLAIMS = [
       },
     ],
   },
+  {
+    id: 'api-routes-covered',
+    desc: 'HTTP 端点清单穷尽性（后端注册 ↔ 契约.md 收录）',
+    // 本断言走 extra 的集合直比（checks 通道只能表达数字或字母区间）
+    checks: [],
+    derive: () => 0,
+    extra: [
+      {
+        desc: 'docs/契约.md 未收录的后端 (method,path)（有意缺口见 ROUTE_BASELINE）',
+        derive: uncoveredRoutes,
+        file: 'docs/契约.md',
+        expected: [],
+      },
+      {
+        desc: 'docs/契约.md 收录但后端未注册的 (method,path)',
+        derive: docOnlyRoutes,
+        file: 'docs/契约.md',
+        expected: [],
+      },
+      {
+        desc: 'docs/契约.md 声明的本脚本项数与实际条数一致',
+        derive: claimCountMismatch,
+        file: 'docs/契约.md',
+        expected: [],
+      },
+    ],
+  },
 ];
+
+// ===== 派生器：HTTP 路由穷尽性（2026-09-28 文档漂移收口批新增） =====
+// 目的：把「代码注册了端点、契约.md 没收录」与「契约.md 收录了、代码没有」这两类漂移
+// 变成硬红——它是本批最大的一类文档漂移（曾一次盘出 10 组缺录端点 + 3 处方法写错）。
+// 手法与 check-arch 的 registeredEdges 同型：集合差集 + 内联基线（有意缺口）。
+
+/** 有意不登记的 (method,path)：非 /api 路由已在下方过滤，此处仅放「确认为有意缺口」者。 */
+const ROUTE_BASELINE = [];
+
+/** 归一化路由字面：去查询、`:id`→`{id}`、去尾部通配与尾斜杠、去省略号。 */
+function normRoute(p) {
+  let s = p.split('?')[0].replace(/…/g, '');
+  s = s.replace(/:([A-Za-z_][A-Za-z0-9_]*)/g, '{$1}');
+  s = s.replace(/\*+$/, '');
+  s = s.replace(/\/+$/, '');
+  return s;
+}
+
+/** 该路径字面是否以通配结尾（`/api/skills*` 之类的集合写法）。 */
+const isWildcard = (p) => /\*+\s*$/.test(p.split('?')[0]);
+
+/** 扫出源码里全部 `.route(` 调用的括号内文本（圆括号深度配平，跨行安全）。 */
+function routeCallBodies(src) {
+  const res = [];
+  const needle = '.route(';
+  let i = 0;
+  while ((i = src.indexOf(needle, i)) !== -1) {
+    let j = i + needle.length;
+    let depth = 1;
+    while (j < src.length && depth > 0) {
+      const c = src[j];
+      if (c === '(') depth += 1;
+      else if (c === ')') depth -= 1;
+      j += 1;
+    }
+    res.push(src.slice(i + needle.length, j - 1));
+    i = j;
+  }
+  return res;
+}
+
+/** 后端实际注册的 (METHOD /api/path) 集合。 */
+function backendRoutes() {
+  const apiDir = path.join(ROOT, 'server-rs/src/api');
+  const files = [path.join(apiDir, 'mod.rs')];
+  for (const f of fs.readdirSync(path.join(apiDir, 'routes'))) {
+    if (f.endsWith('.rs')) files.push(path.join(apiDir, 'routes', f));
+  }
+  const out = new Set();
+  for (const f of files) {
+    for (const call of routeCallBodies(fs.readFileSync(f, 'utf8'))) {
+      const pm = call.match(/"([^"]+)"/);
+      if (!pm || !pm[1].startsWith('/api/')) continue;
+      const route = normRoute(pm[1]);
+      const methods = new Set(
+        [...call.matchAll(/\b(get|post|put|delete|patch)\s*\(/g)].map((m) => m[1].toUpperCase()),
+      );
+      for (const m of methods) out.add(`${m} ${route}`);
+    }
+  }
+  return out;
+}
+
+/** 标题行（形态 A）里「方法 → 路径」的配对：方法在前、路径随后；并列路径沿用前面的方法集。 */
+function pairTitle(title) {
+  const out = [];
+  let pending = [];
+  let lastMethods = [];
+  const re = /`(\/api\/[^`]*)`|(?<![\w/])(GET|POST|PUT|DELETE|PATCH)(?![A-Za-z])/g;
+  let m;
+  while ((m = re.exec(title))) {
+    if (m[1]) {
+      const methods = pending.length ? pending : lastMethods;
+      for (const x of methods) out.push({ method: x, route: m[1] });
+      lastMethods = methods;
+      pending = [];
+    } else {
+      pending.push(m[2]);
+    }
+  }
+  return out;
+}
+
+/** docs/契约.md 里声明的端点集合：`exact` 为精确 (METHOD 路径)，`prefix` 为通配 (METHOD 前缀)。 */
+function documentedRoutes() {
+  const lines = fs.readFileSync(path.join(ROOT, 'docs/契约.md'), 'utf8').split(/\r?\n/);
+  const exact = new Set();
+  const prefix = new Set();
+  const push = (method, rawRoute) => {
+    const route = normRoute(rawRoute);
+    if (!route.startsWith('/api/')) return;
+    (isWildcard(rawRoute) ? prefix : exact).add(`${method} ${route}`);
+  };
+  for (const raw of lines) {
+    const l = raw.trim();
+    // 形态 A：小节标题 `#### 方法…`/api/…`…`
+    if (l.startsWith('#### ')) {
+      for (const { method, route } of pairTitle(l)) push(method, route);
+      continue;
+    }
+    // 形态 B：表格 `| 方法 | /api/… |`（方法可写 `GET/PUT/DELETE`）
+    const b = l.match(
+      /^\|\s*((?:GET|POST|PUT|DELETE|PATCH)(?:\s*\/\s*(?:GET|POST|PUT|DELETE|PATCH))*)\s*\|\s*(\/api\/[^|\s]*)/,
+    );
+    if (b) {
+      for (const m of b[1].split('/').map((s) => s.trim())) push(m, b[2]);
+      continue;
+    }
+    // 形态 C：表格 `| `方法 /api/…` |`（方法与路径同格）
+    const c = l.match(/^\|\s*`((?:GET|POST|PUT|DELETE|PATCH)\s+\/api\/[^`]*)`/);
+    if (c) {
+      const parts = c[1].split(/\s+/);
+      push(parts[0].toUpperCase(), parts.slice(1).join(' '));
+    }
+  }
+  return { exact, prefix };
+}
+
+/** 代码侧条目是否被文档收录（精确或命中通配前缀）。 */
+function coveredByDoc(doc, pair) {
+  if (doc.exact.has(pair)) return true;
+  const [method, route] = pair.split(' ');
+  for (const pre of doc.prefix) {
+    const [pm, pr] = pre.split(' ');
+    if (pm === method && (route === pr || route.startsWith(`${pr}/`))) return true;
+  }
+  return false;
+}
+
+/** 代码有、文档无（扣掉有意缺口基线）。 */
+function uncoveredRoutes() {
+  const doc = documentedRoutes();
+  return [...backendRoutes()]
+    .filter((pair) => !coveredByDoc(doc, pair) && !ROUTE_BASELINE.includes(pair))
+    .sort();
+}
+
+/** 文档有、代码无（通配条目按「前缀下是否至少有一个同方法端点」判定）。 */
+function docOnlyRoutes() {
+  const be = backendRoutes();
+  const out = [];
+  for (const pair of documentedRoutes().exact) {
+    if (!be.has(pair)) out.push(pair);
+  }
+  for (const pre of documentedRoutes().prefix) {
+    const [method, route] = pre.split(' ');
+    const hit = [...be].some((x) => {
+      const [xm, xr] = x.split(' ');
+      return xm === method && (xr === route || xr.startsWith(`${route}/`));
+    });
+    if (!hit) out.push(`(通配)${pre}`);
+  }
+  return out.sort();
+}
+
+/** 自指：契约.md 声明的「已登记 N 项」必须等于 CLAIMS 实际条数。 */
+function claimCountMismatch() {
+  const m = fs
+    .readFileSync(path.join(ROOT, 'docs/契约.md'), 'utf8')
+    .match(/已登记\s*(\d+)\s*项/);
+  const declared = m ? Number(m[1]) : -1;
+  return declared === CLAIMS.length
+    ? []
+    : [`docs/契约.md 声明 ${declared} 项 ≠ 脚本实际 ${CLAIMS.length} 项（改脚本后须同步该文）`];
+}
 
 // ===== 执行 =====
 const failures = [];
