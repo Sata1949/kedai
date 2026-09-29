@@ -2,7 +2,8 @@
   "name": "kedai",
   "version": "0.4.0-alpha",
   "private": true,
-  "description": "通用 LLM 智能体 harness —— 前端 Vue 3,后端 Rust(axum)",
+  "license": "MIT",
+  "description": "KedaiAgent —— 通用 LLM 智能体 harness,一键启动的本地智能体运行框架",
   "workspaces": [
     "web"
   ],

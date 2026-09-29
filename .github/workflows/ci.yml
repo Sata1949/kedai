@@ -7,11 +7,12 @@
 # 触发:push 到 main + PR + 手动 workflow_dispatch。**平台分支(kedai-Win /
 # kedai-Android)刻意不单独触发**——它们与 main 逐字节同源(见
 # docs/契约-协议与配置.md「平台分支契约」),为每个分支各跑一遍只是重复烧额度
-# (私有仓免费 2000 分钟/月,Windows runner 按 2 倍计费);需要在平台分支上验证时
+# (私有仓时代免费 2000 分钟/月、Windows runner 按 2 倍计费;2026-09-29 转公开后
+# 按公共仓口径);需要在平台分支上验证时
 # 用网页的 Run workflow 手动触发。环境:windows-latest(需 MSVC;check-all.ps1 内已内置
 # vcvars64 定位逻辑,runner 自带 VS 即可)。
 #
-# 远端:2026-09-26 起 origin 指向 GitHub 私有仓;本地等价命令:
+# 远端:2026-09-26 起 origin 指向 GitHub 仓(2026-09-29 由私有转公开);本地等价命令:
 # `powershell -NoProfile -ExecutionPolicy Bypass -File tools/check-all.ps1`
 # (只跑快速档加 `-Quick`;跳过后端加 `-SkipRust`)。
 name: ci
