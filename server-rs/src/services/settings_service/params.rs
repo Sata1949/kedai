@@ -147,6 +147,10 @@ pub struct ModeSettings {
     /// true = 任务侧注入 prompt_floors.json(旧行为)。仅任务模式 system 拼装消费。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_prompt_inject_enabled: Option<bool>,
+    /// 编码能力包(2026-09-28):None 沿用扁平值(默认 false = 不启用)。
+    /// 仅影响任务模式执行者/汇总者的**缺省**默认词选择(见 `for_mode`),不改变工具面。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_coding_bundle_enabled: Option<bool>,
 }
 
 /// 默认工具循环轮次上限
@@ -369,6 +373,47 @@ pub fn default_task_agent_prompt() -> String {
         .into()
 }
 
+/// 编码能力包的「编码执行者」缺省词(2026-09-28,HARNESS3-6)。
+///
+/// 启用条件:设置项 `task_coding_bundle_enabled`(扁平 + task 覆盖层,默认 false)。
+/// **只替换缺省值**——用户在提示词框写过的自定义值逐字优先(见 `for_mode` 的 match),
+/// 故本模板永远只是默认姿态,不会覆盖用户意志;角色扮演模式不经此处,不受影响。
+///
+/// 与 `default_task_agent_prompt` 的关系:两者管同一件事(以什么姿态、按什么标准做事),
+/// 故本模板不逐段复制通用版,只在编码场景需要的方向上收紧(先读后写/最小改动/跑验证),
+/// 并保留通用版不可或缺的输出纪律。**工具使用纪律**(自测通过即收尾、本机 shell 语法、
+/// 优先 fs_* 而非重定向拼文件)另有单一出处 `task_core::prompt_consts::EXECUTOR_TOOL_DISCIPLINE`,
+/// 由执行侧按「本轮有工具」条件追加——HARNESS3-6 的口径即「直接引用该常量,不写第二份」,
+/// 本模板**不复制**其文本。
+///
+/// 约束(有测试锁,改文本时勿破坏):
+/// - 必须保留「任务执行智能体」字样(与 `default_task_agent_prompt` 同约束,
+///   `tests/tasks_prompt.rs` 断言缺省已注入默认词);
+/// - 不得出现 `{{char}}` 等角色扮演宏(settings_service 断言 task 默认词不得继承人设词)。
+///
+/// 可用占位符同 `default_task_agent_prompt`(`{{user}}` / `{{lastUserMessage}}`)。
+pub fn default_coding_task_agent_prompt() -> String {
+    "你是负责编码改动的任务执行智能体:在给定的工作区里读懂现状、做出最小必要改动、跑验证收尾。\n\
+     \n\
+     【工作方式】\n\
+     1. 先读后写:动手前先摸清相关文件、项目结构与既有约定(构建脚本、测试命令、目录布局),不凭猜测改代码;不确定某处的调用方就全仓搜索,不要只改「看起来像」的那一份。\n\
+     2. 遵循既有风格:改动要与周围代码的命名、分层、注释密度、错误处理方式一致;不顺手重构、不清理无关代码、不引入未要求的依赖或新文件。\n\
+     3. 最小改动:只改达成目标所必需的位置;同一事实只保留一个权威表述,不要留下互相矛盾的副本。\n\
+     4. 一次一步:每轮只做一个动作,看完结果再决定下一步。\n\
+     \n\
+     【验证纪律】\n\
+     1. 改完必须验证:用项目自身的检查手段跑一遍(构建/测试/静态检查),范围由小到大;命令在工作区根目录执行,用本机 shell 语法。\n\
+     2. 失败先读输出再动手:按报错与失败断言定位到具体文件和行为,不做试探性乱改;同一失败原因不要反复重试。\n\
+     3. 无法验证时如实说明:写清「没跑什么、为什么」,不得把「看起来没问题」写成「已验证通过」。\n\
+     \n\
+     【交付纪律】\n\
+     1. 结果里写清三件事:改了什么(文件与要点)、为什么这么改、验证证据(实际跑过的命令与结果)。\n\
+     2. 只输出结果本身:不复述指令、不解释思考过程、不模拟对话、不使用「以下是」这类元文本开场或收尾。\n\
+     3. 未完成的部分显式列出,不得以「已完成」收尾掩盖遗留问题。\n\
+     4. 输出语言跟随用户目标;代码、命令、路径、报错原文保留原文。"
+        .into()
+}
+
 /// 角色扮演 Agent 系统提示词的内置默认(新装/首次运行、数据目录尚无 settings.json 时兜底)。
 ///
 /// 存在意义:此前引擎侧只在 agents/engine/messages/build.rs 有一份措辞较早的兜底模板,
@@ -511,6 +556,8 @@ impl RuntimeSettings {
             task_persona_full: false,
             // 默认隔离:任务模式不继承 prompt_floors.json 注入(2026-09-10 实测修复)
             task_prompt_inject_enabled: false,
+            // 编码能力包默认关:新装与旧配置行为逐字不变,须用户显式启用
+            task_coding_bundle_enabled: false,
             task: ModeSettings::default(),
         };
         // 多套连接:新装(无 settings.json)也要有一条默认连接——本批次之后 connections 是真源,
@@ -541,13 +588,23 @@ impl RuntimeSettings {
         if let Some(v) = ov.max_context_tokens {
             out.max_context_tokens = v;
         }
+        // 编码能力包开关必须先合并:下一段按它选择缺省默认词(故不与其他字段同列在函数尾部)。
+        if let Some(v) = ov.task_coding_bundle_enabled {
+            out.task_coding_bundle_enabled = v;
+        }
         // agent_system_prompt 不回退扁平值:扁平值(RoleplayPromptConfig)多为角色扮演人设词,
         // 直接继承会污染任务执行;None 注入内置任务向默认词,Some("") 尊重用户显式留空。
         // TaskPromptConfig → RoleplayPromptConfig 的显式构造是本隔离的唯一转换点(类型不同源,
         // 绕过本 match 的隐式继承无法通过编译)。
+        // 缺省词的二选一(2026-09-28 编码能力包):开关只影响**缺省值**——Some(v) 分支
+        // (用户自定义)逐字优先,与开关无关;要退回通用默认词,清空提示词框即可。
         out.agent_system_prompt = match &ov.agent_system_prompt {
             Some(v) => RoleplayPromptConfig(v.0.clone()),
-            None => RoleplayPromptConfig(default_task_agent_prompt()),
+            None => RoleplayPromptConfig(if out.task_coding_bundle_enabled {
+                default_coding_task_agent_prompt()
+            } else {
+                default_task_agent_prompt()
+            }),
         };
         if let Some(v) = &ov.search_endpoint {
             out.search_endpoint = v.clone();

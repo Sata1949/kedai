@@ -2,7 +2,7 @@
   "name": "kedai",
   "version": "0.4.0-alpha",
   "private": true,
-  "description": "文学创作 / 角色扮演交互工具 —— 前端 Vue 3,后端 Rust(axum)",
+  "description": "通用 LLM 智能体 harness —— 前端 Vue 3,后端 Rust(axum)",
   "workspaces": [
     "web"
   ],

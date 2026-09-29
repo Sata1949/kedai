@@ -7,6 +7,7 @@
 import { defineStore } from 'pinia';
 import { ref, watch } from 'vue';
 import { LocalRenderHtmlPreferenceStore } from '../renderHtmlPreference';
+import type { SettingsSectionKey } from '../onboarding';
 import {
   currentCharacterIdValue,
   queueSettingsSave,
@@ -55,6 +56,11 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
   /** 任务执行者管理面板开关(执行者库 CRUD;任务创建下拉旁的「管理」入口打开) */
   const taskExecutorsOpen = ref(false);
   /**
+   * 新手教程弹窗开关(首启引导;启动后由 App.vue 判定是否打开,关于页可重开)。
+   * 教程关闭即写「已完成」标记(见 onboarding.ts),故本开关不需要持久化。
+   */
+  const onboardingOpen = ref(false);
+  /**
    * 退出确认弹窗开关。打开时机:桌面壳下发 kedai://close-requested(用户点了窗口关闭),
    * 或 Android 返回键已无弹窗/抽屉可退。确认后发 kedai://exit-app 退出,
    * 取消则发 kedai://close-cancelled 让壳复位二次关闭兜底标记。
@@ -79,6 +85,38 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
    * 计数器语义而非布尔开关:连续点两次也要各触发一次,不丢请求。
    */
   const characterUploadRequested = ref(0);
+
+  // ===== 设置分区定位请求(新手教程「带我去设置」) =====
+  /**
+   * 「打开综合设置并定位到某分区」的请求(`null` = 无请求)。
+   *
+   * 为什么用「状态 + watch」而不是让教程直接改 SettingsHub 内部的分区 ref:
+   * 分区状态(activeDomain/activeSection)是 SettingsHub 的私有 ref,跨组件戳它等于把
+   * 弹窗内部结构变成隐式契约;这里沿用仓库既有的「从别处触发另一处行为」惯例
+   * (characterUploadRequested 计数器 → 接收方 watch),接收方自己认领并落到自己的状态。
+   *
+   * `nonce` 递增:连续两次请求同一分区也要各触发一次(值相同不会让 watch 跳过)。
+   */
+  const settingsNav = ref<{ section: SettingsSectionKey; nonce: number } | null>(null);
+  let settingsNavNonce = 0;
+
+  /** 打开综合设置并定位到指定分区(教程/引导用;目标分区不存在时接收方保持原分区) */
+  function openSettingsAt(section: SettingsSectionKey): void {
+    settingsNavNonce += 1;
+    settingsNav.value = { section, nonce: settingsNavNonce };
+    settingsOpen.value = true;
+  }
+
+  /**
+   * 消费掉定位请求(接收方 SettingsHub 应用后调用)。
+   *
+   * 必须消费而不是留着:设置弹窗是 v-if + 懒加载,首次「带我去设置」时**请求先于挂载**,
+   * 接收方靠挂载时的 immediate 认领才定位得到;若不清空,用户日后手动打开综合设置会被
+   * 上一次的请求带着跳分区。
+   */
+  function clearSettingsNav(): void {
+    settingsNav.value = null;
+  }
 
   // ===== 合并面板内部分区记忆(原为批次 3 L3 独立「调用情况」面板开关;面板合并后改作 tab 记忆) =====
   // localStorage 键保持不变(kedai.call-trace-open.v1),旧偏好平滑迁移:
@@ -277,12 +315,16 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
     repoIndexOpen,
     chatRecordsOpen,
     taskExecutorsOpen,
+    onboardingOpen,
     exitConfirmOpen,
     splashDone,
     modalLoadError,
     dataLoadError,
     globalError,
     characterUploadRequested,
+    settingsNav,
+    openSettingsAt,
+    clearSettingsNav,
     callTraceOpen,
     taskResultSummaryOpen,
     renderHtml,

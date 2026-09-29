@@ -200,6 +200,10 @@ pub struct UpdateSettingsBody {
     /// (旧行为),false = 隔离(默认);缺省保持不变
     #[serde(default)]
     pub task_prompt_inject_enabled: Option<bool>,
+    /// 编码能力包开关(2026-09-28):true = 任务模式缺省默认词用编码执行者模板;
+    /// false = 通用任务默认词(默认);缺省保持不变。用户自定义提示词逐字优先。
+    #[serde(default)]
+    pub task_coding_bundle_enabled: Option<bool>,
     /// 工具循环历史保留的最近完整轮数(R3b;1..=32;缺省保持不变)
     #[serde(default)]
     pub tool_history_keep_rounds: Option<u32>,
@@ -319,6 +323,7 @@ fn settings_json(s: &RuntimeSettings) -> Value {
         "exec_allow_sandbox": s.exec_allow_sandbox,
         "task_persona_full": s.task_persona_full,
         "task_prompt_inject_enabled": s.task_prompt_inject_enabled,
+        "task_coding_bundle_enabled": s.task_coding_bundle_enabled,
         "tool_history_keep_rounds": s.tool_history_keep_rounds,
         "tool_history_budget_tokens": s.tool_history_budget_tokens,
         "session_token_budget": s.session_token_budget,
@@ -810,6 +815,11 @@ pub async fn update_settings(
             // 任务模式提示词注入继承开关(2026-09-10 实测修复;bool 免校验,task 写覆盖层)
             if let Some(v) = body.task_prompt_inject_enabled {
                 apply!(s, is_task, task_prompt_inject_enabled, v);
+            }
+            // 编码能力包开关(2026-09-28;bool 免校验,task 写覆盖层)。只影响提示词缺省值:
+            // 启用后任务模式缺省默认词改用编码执行者模板,用户自定义值仍逐字优先。
+            if let Some(v) = body.task_coding_bundle_enabled {
+                apply!(s, is_task, task_coding_bundle_enabled, v);
             }
             // 工具历史回灌上限(R3b):扁平全局字段(引擎 run_tool_loop 直读扁平值,
             // 不入模式覆盖层——任务/聊天工具循环共用同一上限,与 subagent 参数的

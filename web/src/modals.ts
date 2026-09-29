@@ -53,6 +53,10 @@ export const MODALS = [
   modal('quickRepliesOpen', '快速回复', () => import('./components/QuickRepliesModal.vue')),
   // 任务执行者管理(独立执行者库:任务模式的执行者与角色扮演角色卡解耦)
   modal('taskExecutorsOpen', '任务执行者', () => import('./components/TaskExecutorsModal.vue')),
+  // 新手教程(首启引导;2026-09-27 批次)。声明在设置弹窗**之后** = 渲染在其上层:
+  // 教程展开态要盖住由它打开的综合设置(点「带我去设置」时教程最小化为右下角浮条,
+  // 那时才露出下面的设置),故必须在 settingsOpen 之后声明。
+  modal('onboardingOpen', '新手教程', () => import('./components/OnboardingModal.vue')),
   // 退出确认(桌面:壳下发 kedai://close-requested;Android:返回键无处可退)。
   // 声明在**末尾** = 渲染在最上层:Android 返回键按 MODAL_FLAGS 逆序关闭,先关它。
   modal('exitConfirmOpen', '退出确认', () => import('./components/ExitConfirmModal.vue')),
