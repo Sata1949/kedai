@@ -19,7 +19,7 @@
 
 ## 1. 项目速览
 
-- **项目根**:`C:\Users\LENOVO\Desktop\kedai`
+- **项目根**:`<项目根>`
 - **技术栈**:Rust(axum)后端 `server-rs/`(crate 名 `kedai-server`,lib 供 Tauri 复用)+ Vue3 前端 `web/`(构建产物内嵌进服务端)+ Tauri 2 桌面壳 `src-tauri/`(加载 `http://127.0.0.1:3001`)。
 - **业务**:角色扮演/对话型 agent,含世界书(worldbook)、EJS 模板、mvu 变量系统(酒馆助手 MagVarUpdate 兼容)、反思(reflector)、任务工作台(task mode)、agentgo 子智能体。
 - **启动/构建**:`.\start.ps1`(桌面优先,回退浏览器);`.\build.ps1`(`-Tauri` 追加桌面打包)。**改前端后必须重建**:`npm run build -w web`。
