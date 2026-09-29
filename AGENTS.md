@@ -77,6 +77,8 @@ cargo build --manifest-path server-rs/Cargo.toml
   (`gh workflow disable`,状态 `disabled_manually`;文件保留未删,缘见 `docs/遗留.md` CI-BILL-1)。
   停用期间:**提交默认只落本机 `main`、不推送 `origin`**,上方 PR 流程随之暂停;本机两处
   (`build.ps1` 前置 `-Quick` 与 `pre-push`)照常生效,收口以全量 `tools/check-all.ps1` 为准。
-  恢复推送前补跑一次全量门禁;恢复 CI:`gh workflow enable ci|ci-linux -R Sata1949/kedai`;
+  **本机推送注意**:`pre-push` 钩子在本环境会因 `经验.md` E69 的 SIGPIPE 被杀(门禁已过、推送未完成)
+  ——等价做法是**预跑** `tools/check-all.ps1 -Quick` 后 `git push --no-verify`,推送后一律以
+  `git ls-remote` 验收,别读日志结论。恢复推送前补跑一次全量门禁;恢复 CI:`gh workflow enable ci|ci-linux -R Sata1949/kedai`;
   完整恢复清单见 `docs/遗留.md` CI-BILL-1 追注。
 - **不改写历史**:不 `rebase`/`amend` 已推送的提交;`docs/archive/` 下的历史文档只读不改。
