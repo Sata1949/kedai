@@ -83,8 +83,11 @@
   重新解析依赖树,同一后端源码可能编出不同版本依赖;**0 漂移为基线**,新增即 FAIL,
   例外登记在 `tools/lock-sync-baseline.json`);
   ② `cargo audit` 默认**硬门禁**(server-rs 锁历史 0 洞;仅 advisory DB 拉取失败时降级 WARN,
-  `-LooseAudit` 可临时降档);
+  `-LooseAudit` 可临时降档);**2026-09-30 追注**:当日依赖安全批双锁同步升 `rustls` 0.23.44→0.23.45
+  (RUSTSEC-2026-0285,方案 `>=0.23.45`),audit 双锁转绿;
   ③ `npm audit --omit=dev` 警告档(历史 2 洞——sanitize-html 存储型 XSS / nanoid——已修复)。
+  **2026-09-30 追注**:现行口径为**硬门禁**(批次 6.1 复核 0 告警后提升,见 `tools/check-all.ps1:14`),
+  本行「警告档」为历史层;同日又修复 `markdown-it` 15.0.0→15.0.2(GHSA-253c-mchw-3w2r)。
 - 新能力默认进 L3 隔离验证,成熟后按晋升通道(测试通过 + 不破坏协议 + 评审)升级。
 
 ### 新能力晋升状态(三结合梯队)
