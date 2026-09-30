@@ -59,6 +59,8 @@ pub mod task_change_service;
 pub mod undo_service;
 pub mod user_script_service;
 pub mod variable_apply;
+// 工作区画像(2026-09-30 编码能力包 CODE-4):项目类型探测,只读展示
+pub mod workspace_profile;
 pub mod world_book_service;
 
 /// DB 列表查询失败兜底(2026-08 裸 unwrap 审计):记 warn 并回退空列表。

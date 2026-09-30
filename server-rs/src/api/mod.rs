@@ -40,6 +40,7 @@ pub mod tool_permissions;
 pub mod undo;
 pub mod user_scripts;
 pub mod variables;
+pub mod workspace;
 pub mod world_books;
 
 mod errors;

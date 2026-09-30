@@ -41,6 +41,9 @@ pub mod workspace_guard;
 // 工作区树扫描(批次 4b):bash 侧命令前后各扫一次,供文件变更台账做启发式检出;
 // 遍历实现同时被 agent_tools_fs::walk_files(fs_glob/fs_grep)复用
 mod workspace_scan;
+// 遍历忽略集的**单一出处**(`.git`/`target`/`node_modules`/`dist`/`.kedai-index`/`data`):
+// 工作区画像探测(services/workspace_profile)沿用同一份,不复制第二份(复制必然漂移)
+pub(crate) use workspace_scan::EXCLUDED_SEGMENTS;
 
 use agent_tools::ToolDeps;
 use registry::ToolRegistry;

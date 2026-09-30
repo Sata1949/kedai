@@ -3,7 +3,7 @@
 use crate::api::app_state::AppState;
 use crate::api::{
     audio, characters, exec, import_export, macros, plugins, resource, skills, slash_commands,
-    tasks, user_scripts,
+    tasks, user_scripts, workspace,
 };
 use axum::routing::{get, post, put};
 use axum::Router;
@@ -82,6 +82,9 @@ pub(crate) fn misc_routes() -> Router<Arc<AppState>> {
             "/api/tasks/{id}/changes/patch",
             get(tasks::file_changes_patch),
         )
+        // 工作区画像(CODE-4,2026-09-30):创建表单在任务存在之前就要显示「这是什么项目」,
+        // 故探测必须有独立只读端点(与任务详情顶层的 workspace_profile 同一把尺)
+        .route("/api/workspace/profile", get(workspace::profile))
         // 音频播放器(bgm/ambient 双通道):读取 / 设置 / 播放列表
         .route("/api/audio", get(audio::get))
         .route("/api/audio/settings", put(audio::update_settings))
