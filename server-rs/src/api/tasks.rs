@@ -463,6 +463,206 @@ pub async fn file_change_rollback(
     }
 }
 
+/// POST /api/tasks/{id}/changes/rollback-all:整任务回滚(CODE-2;计划 Q2=(a))。
+///
+/// 对**本任务台账里的每个路径**逐项执行与单文件端点完全相同的语义:
+/// 取该路径最新一行;create → 删除;无基线 → 跳过(不动手)。三条纪律:
+/// 1. **逐项报告、不整体否决**:某一项无基线/落盘失败不拦住其余项(`results` 逐项列出);
+/// 2. running/planning → 409 **整单拒绝**(与单文件同口径:避免与模型写入互相覆盖);
+/// 3. 每项成功都再记 `op=rollback`(复用单文件同一核心函数,不写第二份)。
+/// 可逆性:对同一任务再调一次 = 逐项切回「改动后」状态(取最新一行的自然结果,非新语义)。
+pub async fn file_change_rollback_all(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(task) = state.tasks.get(&id) else {
+        return not_found("任务不存在");
+    };
+    let Some(workspace) = task.workspace.clone() else {
+        return validation("本任务未绑定工作区,没有可比对的文件变更基线");
+    };
+    if matches!(task.status, TaskStatus::Running | TaskStatus::Planning) {
+        return conflict("任务进行中,请先停止再回滚(避免与模型写入互相覆盖)");
+    }
+    let data_dir = state.config.data_dir.clone();
+    let db = state.db.clone();
+    let all_id = id.clone();
+    match state
+        .db_call(move || {
+            let root = std::path::Path::new(&workspace);
+            crate::services::task_change_service::rollback_all(&db, &all_id, |rel| {
+                crate::tools::workspace_guard::safe_workspace_path(root, rel, Some(&data_dir))
+            })
+        })
+        .await
+    {
+        Err(e) => db_err(&e),
+        Ok(items) => {
+            use crate::services::task_change_service::BulkRollbackResult as R;
+            let (mut restored, mut removed, mut skipped, mut failed) =
+                (0usize, 0usize, 0usize, 0usize);
+            let results: Vec<serde_json::Value> = items
+                .iter()
+                .map(|it| match &it.result {
+                    R::Restored(bytes) => {
+                        restored += 1;
+                        json!({ "path": it.rel_path, "result": "restored", "restored_bytes": bytes })
+                    }
+                    R::Removed => {
+                        removed += 1;
+                        json!({ "path": it.rel_path, "result": "removed", "note": "该文件由本任务新建,回滚即删除" })
+                    }
+                    R::Skipped(reason) => {
+                        skipped += 1;
+                        json!({ "path": it.rel_path, "result": "skipped", "reason": reason })
+                    }
+                    // 落盘失败原文可能含本机路径 → 只进日志,响应给固定文案(与单文件同口径)
+                    R::Failed(e) => {
+                        failed += 1;
+                        tracing::warn!(path = %it.rel_path, error = %e, "整任务回滚:单项落盘失败");
+                        json!({ "path": it.rel_path, "result": "failed", "reason": "落盘失败,详情见日志" })
+                    }
+                })
+                .collect();
+            Json(json!({
+                "ok": failed == 0,
+                "restored": restored,
+                "removed": removed,
+                "skipped": skipped,
+                "failed": failed,
+                "results": results,
+            }))
+            .into_response()
+        }
+    }
+}
+
+/// 组装整任务 patch 正文(纯函数,可单测;由 patch 端点调用)。
+///
+/// 由**可 diff 行**逐文件拼装:修改 = `diff --git` + 头 + 单 hunk(`git_hunk`,严格计数);
+/// 新建 = `new file mode` + `--- /dev/null` + 全量新增行。拿不到基线的(超留存上限/
+/// 读取失败/已删除)与「改动过大 / 无逐行变化 / 路径含空格或引号」不进正文,
+/// 统一进头部**注释区**列明——半截 patch 在 git 眼里是坏补丁,而静默丢掉的文件
+/// 在执行者眼里又会被读成「没改过」,两头都不能接受。
+fn build_task_patch(
+    db: &Arc<crate::models::db::Db>,
+    task_id: &str,
+    workspace_root: &std::path::Path,
+    data_dir: &std::path::Path,
+) -> String {
+    use crate::services::task_change_service as tcs;
+    use std::fmt::Write as _;
+    let mut included = String::new();
+    let mut notes: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for row in tcs::list(db, task_id) {
+        if !seen.insert(row.path.clone()) {
+            continue;
+        }
+        let rel = row.path.clone();
+        // 路径含空格/引号时 git 补丁需要 C 风格引用,本批不处理 → 明说未包含,
+        // 不产出一个会被 `git apply` 拒绝的坏条目
+        if rel.contains(' ') || rel.contains('"') {
+            notes.push(format!("{rel}(路径含空格或引号,patch 暂不包含)"));
+            continue;
+        }
+        let abs = match crate::tools::workspace_guard::safe_workspace_path(
+            workspace_root,
+            &rel,
+            Some(data_dir),
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                notes.push(format!("{rel}(路径被工作区闸门拒绝:{e})"));
+                continue;
+            }
+        };
+        match tcs::baseline_state(db, task_id, &rel) {
+            tcs::BaselineState::Unavailable(reason) => notes.push(format!("{rel}({reason})")),
+            tcs::BaselineState::NewFile => {
+                let after = std::fs::read(&abs)
+                    .map(|b| String::from_utf8_lossy(&b).into_owned())
+                    .unwrap_or_default();
+                let lines: Vec<&str> = after.lines().collect();
+                let _ = writeln!(included, "diff --git a/{rel} b/{rel}");
+                let _ = writeln!(included, "new file mode 100644");
+                let _ = writeln!(included, "--- /dev/null");
+                let _ = writeln!(included, "+++ b/{rel}");
+                let _ = writeln!(included, "@@ -0,0 +1,{} @@", lines.len());
+                for l in lines {
+                    let _ = writeln!(included, "+{l}");
+                }
+            }
+            tcs::BaselineState::Ready(bytes) => {
+                let before = String::from_utf8_lossy(&bytes).into_owned();
+                let after = std::fs::read(&abs)
+                    .map(|b| String::from_utf8_lossy(&b).into_owned())
+                    .unwrap_or_default();
+                match tcs::git_hunk(&before, &after) {
+                    Ok(hunk) => {
+                        let _ = writeln!(included, "diff --git a/{rel} b/{rel}");
+                        let _ = writeln!(included, "--- a/{rel}");
+                        let _ = writeln!(included, "+++ b/{rel}");
+                        included.push_str(&hunk);
+                    }
+                    Err(reason) => notes.push(format!("{rel}({reason})")),
+                }
+            }
+        }
+    }
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "# Kedai 任务变更 patch(自动生成;可用 `git apply` 应用)"
+    );
+    if !notes.is_empty() {
+        let _ = writeln!(out, "# 未包含 {} 个文件:", notes.len());
+        for n in &notes {
+            let _ = writeln!(out, "#   - {n}");
+        }
+    }
+    out.push_str(&included);
+    out
+}
+
+/// GET /api/tasks/{id}/changes/patch:整任务 unified patch(CODE-2)。
+///
+/// 文本响应(`text/plain`),由可 diff 行拼成 **git 可 apply** 的补丁(组装规则见
+/// `build_task_patch`)。前端取回走文本通道(不套 JSON 形状闸门),经保存对话框导出。
+/// 诚实边界:按行文本生成(行尾统一 LF),不含 `\ No newline at end of file` 处理;
+/// 空台账 → 只有头部注释的文本(不是 404、也不是空响应——那两者会被读成别的意思)。
+pub async fn file_changes_patch(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(task) = state.tasks.get(&id) else {
+        return not_found("任务不存在");
+    };
+    let Some(workspace) = task.workspace.clone() else {
+        return validation("本任务未绑定工作区,没有可比对的文件变更基线");
+    };
+    let data_dir = state.config.data_dir.clone();
+    let db = state.db.clone();
+    let patch_id = id.clone();
+    match state
+        .db_call(move || {
+            build_task_patch(&db, &patch_id, std::path::Path::new(&workspace), &data_dir)
+        })
+        .await
+    {
+        Err(e) => db_err(&e),
+        Ok(body) => (
+            StatusCode::OK,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            )],
+            body,
+        )
+            .into_response(),
+    }
+}
+
 /// 全部任务 token 累计(侧栏任务模式「全局累计」)。
 pub async fn usage_total(State(state): State<Arc<AppState>>) -> Response {
     let svc = state.tasks.clone();

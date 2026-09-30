@@ -308,21 +308,20 @@ pub enum RollbackOutcome {
 pub fn rollback(db: &Arc<Db>, task_id: &str, rel_path: &str, abs_path: &Path) -> RollbackOutcome {
     match baseline_state(db, task_id, rel_path) {
         BaselineState::Unavailable(reason) => RollbackOutcome::Unavailable(reason),
-        BaselineState::NewFile => match std::fs::remove_file(abs_path) {
-            Ok(_) => {
-                record(
-                    db,
-                    task_id,
-                    rel_path,
-                    "rollback",
-                    "rollback",
-                    &Baseline::capture(std::path::Path::new(abs_path)),
-                    None,
-                );
-                RollbackOutcome::Removed
+        BaselineState::NewFile => {
+            // **先取快照再删除**(CODE-2):删除之后再 capture 只会拍到「文件不存在」,
+            // 于是回滚行没有正文——那意味着「点错一次,文件永久消失」而且再点一次
+            // 只会得到「基线不可用」。先 capture 则回滚行带上被删内容,「回滚」本身
+            // 也可再被回滚(整任务回滚的逐项可逆由此成立)。
+            let before = Baseline::capture(abs_path);
+            match std::fs::remove_file(abs_path) {
+                Ok(_) => {
+                    record(db, task_id, rel_path, "rollback", "rollback", &before, None);
+                    RollbackOutcome::Removed
+                }
+                Err(e) => RollbackOutcome::Failed(format!("删除失败:{e}")),
             }
-            Err(e) => RollbackOutcome::Failed(format!("删除失败:{e}")),
-        },
+        }
         BaselineState::Ready(bytes) => {
             let before = Baseline::capture(abs_path);
             match crate::utils::fs_atomic::write_atomic(abs_path, &bytes) {
@@ -342,6 +341,129 @@ pub fn rollback(db: &Arc<Db>, task_id: &str, rel_path: &str, abs_path: &Path) ->
             }
         }
     }
+}
+
+/// 整任务回滚的**单项**结果(CODE-2;端点按此逐项拼响应)。
+pub struct BulkRollbackItem {
+    pub rel_path: String,
+    pub result: BulkRollbackResult,
+}
+
+/// 单项结果四态:成功两类 + 跳过(无基线/路径被拒) + 失败(IO)。
+pub enum BulkRollbackResult {
+    /// 恢复到改动前正文(字节数)
+    Restored(u64),
+    /// 该路径最新一条是 create:回滚 = 删除(成功)
+    Removed,
+    /// 无基线 / 路径被闸门拒绝:**跳过该项**,不否决其余(计划 CODE-2 的 Q2=(a))
+    Skipped(String),
+    /// 落盘失败(恢复写入或删除失败)
+    Failed(String),
+}
+
+/// 整任务回滚:对本任务台账里的**每个路径**逐项执行与单文件端点完全相同的语义
+/// (取该路径最新一行;create → 删除;无基线 → 跳过;每项成功再记 `op=rollback`)。
+///
+/// 顺序 = 首次出现在台账里的顺序(与清单展示一致);文件之间相互独立——
+/// 某一项无基线/失败**不拦住**其余项,由响应逐项报告。
+/// 路径解析由调用方注入(端点侧复用 `tools::workspace_guard::safe_workspace_path`
+/// 唯一闸门,本层不碰路径策略)。
+pub fn rollback_all<F>(db: &Arc<Db>, task_id: &str, resolve: F) -> Vec<BulkRollbackItem>
+where
+    F: Fn(&str) -> Result<std::path::PathBuf, String>,
+{
+    let mut seen = std::collections::HashSet::new();
+    let mut items = Vec::new();
+    for row in list(db, task_id) {
+        if !seen.insert(row.path.clone()) {
+            continue;
+        }
+        let result = match resolve(&row.path) {
+            Err(e) => BulkRollbackResult::Skipped(format!("路径被工作区闸门拒绝({e});该项跳过")),
+            Ok(abs) => match rollback(db, task_id, &row.path, &abs) {
+                RollbackOutcome::Restored(bytes) => BulkRollbackResult::Restored(bytes),
+                RollbackOutcome::Removed => BulkRollbackResult::Removed,
+                RollbackOutcome::Unavailable(reason) => {
+                    BulkRollbackResult::Skipped(reason.to_string())
+                }
+                RollbackOutcome::Failed(e) => BulkRollbackResult::Failed(e),
+            },
+        };
+        items.push(BulkRollbackItem {
+            rel_path: row.path,
+            result,
+        });
+    }
+    items
+}
+
+/// 生成 **git 可 apply** 的单文件 hunk(单个 `@@` 块,上下文各最多 3 行)。CODE-2 patch 导出用。
+///
+/// 与 `unified_diff` 的差别只在头部计数:那份是给前端**原样展示**的人读 diff,
+/// 前缀/后缀上下文不进 `@@` 行数(展示无从校验);而 patch 会被用户交给 `git apply`,
+/// 计数错了工具直接拒绝——故本函数严格按 unified diff 语义:起点取「首行上下文」,
+/// 行数 = 上下文 + 该侧中段行数(中段含共同行,' ' 两侧都算)。
+///
+/// 返回 Err = **不进 patch 正文**的两类(由调用方写进头部注释):改动过大 / 无逐行变化。
+/// 诚实边界:按行文本生成(行尾统一 LF),不含 git 的 `\ No newline at end of file`
+/// 标记处理——无尾换行的文件可能被 `git apply` 拒绝。
+pub fn git_hunk(before: &str, after: &str) -> Result<String, String> {
+    let a: Vec<&str> = before.lines().collect();
+    let b: Vec<&str> = after.lines().collect();
+    if a.len() > DIFF_MAX_LINES || b.len() > DIFF_MAX_LINES {
+        return Err(format!(
+            "改动过大,不生成逐行 diff:{} 行 vs {} 行",
+            a.len(),
+            b.len()
+        ));
+    }
+    if before.len() > DIFF_MAX_BYTES || after.len() > DIFF_MAX_BYTES {
+        return Err(format!(
+            "改动过大,不生成逐行 diff:{} 字节 vs {} 字节",
+            before.len(),
+            after.len()
+        ));
+    }
+    let mut head = 0usize;
+    while head < a.len() && head < b.len() && a[head] == b[head] {
+        head += 1;
+    }
+    let mut tail = 0usize;
+    while tail < a.len().saturating_sub(head)
+        && tail < b.len().saturating_sub(head)
+        && a[a.len() - 1 - tail] == b[b.len() - 1 - tail]
+    {
+        tail += 1;
+    }
+    let am = &a[head..a.len() - tail];
+    let bm = &b[head..b.len() - tail];
+    if am.is_empty() && bm.is_empty() {
+        return Err("无逐行变化(仅行尾差异或空改动)".into());
+    }
+    let script = lcs_script(am, bm);
+    let pre_n = head.min(3);
+    let post_n = tail.min(3);
+    let before_mid = script.iter().filter(|(m, _)| *m != '+').count();
+    let after_mid = script.iter().filter(|(m, _)| *m != '-').count();
+    let start = head - pre_n + 1; // 两侧起点相同(首行上下文是公共前缀)
+    let mut out = String::new();
+    use std::fmt::Write as _;
+    let _ = writeln!(
+        out,
+        "@@ -{start},{} +{start},{} @@",
+        pre_n + before_mid + post_n,
+        pre_n + after_mid + post_n
+    );
+    for l in &a[head - pre_n..head] {
+        let _ = writeln!(out, " {l}");
+    }
+    for (mark, line) in &script {
+        let _ = writeln!(out, "{mark}{line}");
+    }
+    for l in &b[b.len() - tail..b.len() - tail + post_n] {
+        let _ = writeln!(out, " {l}");
+    }
+    Ok(out)
 }
 
 /// unified diff(自实现,不引 crate:`Cargo.lock` 里没有 diff/similar/imara,
@@ -528,5 +650,44 @@ mod tests {
     fn unified_diff_no_line_change_is_explained() {
         let d = unified_diff("a\nb\n", "a\nb\n", "same.txt");
         assert!(d.contains("无逐行变化"), "{d}");
+    }
+
+    /// CODE-2:git_hunk 的头部计数严格按 unified diff 语义(起点含首行上下文、行数含两侧上下文)。
+    /// `git apply` 会按计数校验,这份计数错了工具直接拒绝(与「人读 diff」的 `unified_diff` 不同)。
+    #[test]
+    fn git_hunk_counts_follow_unified_diff_semantics() {
+        // 7 行文件改中间一行:head=3, tail=3;起点 = 3-3+1 = 1;行数 = 3(前置)+1(中段)+3(后置) = 7
+        let before = "l1\nl2\nl3\nl4\nl5\nl6\nl7\n";
+        let after = "l1\nl2\nl3\nX\nl5\nl6\nl7\n";
+        let h = git_hunk(before, after).expect("应生成 hunk");
+        assert!(h.starts_with("@@ -1,7 +1,7 @@\n"), "{h}");
+        assert!(h.contains("-l4\n"), "{h}");
+        assert!(h.contains("+X\n"), "{h}");
+        assert_eq!(
+            h.lines().filter(|l| l.starts_with(' ')).count(),
+            6,
+            "上下文行 = 前置 3 + 后置 3:{h}"
+        );
+    }
+
+    /// 改动靠后时起点要按「首行上下文的实际位置」前移(不能拿 head 直接当起点)。
+    #[test]
+    fn git_hunk_start_point_offsets_by_context() {
+        let before: String = (1..=12).map(|i| format!("l{i}\n")).collect();
+        let after = before.replace("l8\n", "X8\n");
+        let h = git_hunk(&before, &after).expect("应生成 hunk");
+        // head=7, pre_n=3 → 起点 5;中段该侧 = 1 行 → -5,7
+        assert!(h.starts_with("@@ -5,7 +5,7 @@\n"), "{h}");
+    }
+
+    /// 两类「不进 patch 正文」的情形要把原因作为 Err 文本交出(由调用方写进头部注释)。
+    #[test]
+    fn git_hunk_reports_non_content_cases_into_notes() {
+        assert!(git_hunk("same\n", "same\n")
+            .unwrap_err()
+            .contains("无逐行变化"));
+        let big: String = (0..3_000).map(|i| format!("l{i}\n")).collect();
+        let big2: String = (0..3_000).map(|i| format!("x{i}\n")).collect();
+        assert!(git_hunk(&big, &big2).unwrap_err().contains("改动过大"));
     }
 }

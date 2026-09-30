@@ -72,6 +72,16 @@ pub(crate) fn misc_routes() -> Router<Arc<AppState>> {
             "/api/tasks/{id}/changes/rollback",
             post(tasks::file_change_rollback),
         )
+        // 整任务回滚 + patch 导出(CODE-2):回滚有副作用走 POST;
+        // patch 是只读文本导出(GET,text/plain)。
+        .route(
+            "/api/tasks/{id}/changes/rollback-all",
+            post(tasks::file_change_rollback_all),
+        )
+        .route(
+            "/api/tasks/{id}/changes/patch",
+            get(tasks::file_changes_patch),
+        )
         // 音频播放器(bgm/ambient 双通道):读取 / 设置 / 播放列表
         .route("/api/audio", get(audio::get))
         .route("/api/audio/settings", put(audio::update_settings))

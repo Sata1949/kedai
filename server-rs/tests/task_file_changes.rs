@@ -62,6 +62,19 @@ async fn request(
     )
 }
 
+/// 文本响应取回(patch 端点是 `text/plain`,不 parse JSON)。
+async fn request_text(app: &axum::Router, method: &str, path: &str) -> (StatusCode, String) {
+    let req = Request::builder()
+        .method(method)
+        .uri(path)
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
 /// 建一个绑定**独立**工作区目录的任务,返回 (task_id, 工作区路径)。
 ///
 /// 每例一个目录 + 单调计数后缀:本文件的用例会真跑 bash 并对工作区做**全树扫描**,
@@ -673,4 +686,335 @@ async fn oversized_change_is_marked_instead_of_rowed() {
             .contains("超过留存上限"),
         "原因要说清是超上限而非预算打满:{list}"
     );
+}
+
+// ==================== CODE-2:整任务回滚 + patch 导出(2026-09-30 批次 A2)====================
+//
+// 整任务回滚 = 对台账里的**每个路径**逐项执行与单文件端点相同的语义;三条纪律:
+// 逐项报告不整体否决(Q2=(a))/ running/planning 409 整单拒绝 / 每项成功再记 op=rollback。
+// patch = 把可 diff 行拼成 git 可 apply 的补丁;拿不到基线与「改动过大」不进正文、
+// 只在头部注释列明(不产出半截 patch)。
+
+/// 夹具:写一份「改动前 → 改动后」并记账(与 rollback_restores_content_and_records_itself 同款)
+fn stage_modify(
+    db: &Arc<kedai_server::models::db::Db>,
+    id: &str,
+    abs: &std::path::Path,
+    rel: &str,
+    old: &str,
+    new: &str,
+) {
+    std::fs::write(abs, old).unwrap();
+    let before = tcs::Baseline::capture(abs);
+    std::fs::write(abs, new).unwrap();
+    tcs::record(db, id, rel, "modify", "tool", &before, Some(abs));
+}
+
+/// ⑨ 整任务回滚:两个修改恢复正文、一个新建回滚即删除;每条路径各留一条 op=rollback。
+#[tokio::test]
+async fn rollback_all_restores_every_path_and_records_each() {
+    let (state, app) = test_state();
+    let (id, ws) = task_with_workspace(app).await;
+    let db = state.db.clone();
+
+    stage_modify(
+        &db,
+        &id,
+        &ws.join("r1.txt"),
+        "r1.txt",
+        "one\n",
+        "one-changed\n",
+    );
+    stage_modify(
+        &db,
+        &id,
+        &ws.join("r2.txt"),
+        "r2.txt",
+        "two\n",
+        "two-changed\n",
+    );
+    let created = ws.join("r3-new.txt");
+    let before_new = tcs::Baseline::capture(&created);
+    std::fs::write(&created, "brand new\n").unwrap();
+    tcs::record(
+        &db,
+        &id,
+        "r3-new.txt",
+        "create",
+        "tool",
+        &before_new,
+        Some(&created),
+    );
+
+    let (status, json) = request(
+        app,
+        "POST",
+        &format!("/api/tasks/{id}/changes/rollback-all"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["ok"], json!(true), "{json}");
+    assert_eq!(json["restored"], json!(2), "{json}");
+    assert_eq!(json["removed"], json!(1), "{json}");
+    assert_eq!(json["skipped"], json!(0), "{json}");
+    assert_eq!(json["failed"], json!(0), "{json}");
+    let results = json["results"].as_array().unwrap();
+    assert_eq!(results.len(), 3, "逐项报告应有 3 条:{json}");
+
+    assert_eq!(std::fs::read_to_string(ws.join("r1.txt")).unwrap(), "one\n");
+    assert_eq!(std::fs::read_to_string(ws.join("r2.txt")).unwrap(), "two\n");
+    assert!(!created.exists(), "本任务新建的文件,回滚即删除");
+
+    let list = changes_of(app, &id).await;
+    let rows = list["changes"].as_array().unwrap();
+    let rb = rows.iter().filter(|r| r["op"] == json!("rollback")).count();
+    assert_eq!(rb, 3, "每个路径都要留一条回滚记录:{list}");
+}
+
+/// ⑩ Q2=(a):某项无基线(超上限)只跳过它自己,其余照做,逐项报告原因。
+#[tokio::test]
+async fn rollback_all_reports_skipped_without_blocking_the_rest() {
+    let (state, app) = test_state();
+    let (id, ws) = task_with_workspace(app).await;
+    let db = state.db.clone();
+
+    stage_modify(
+        &db,
+        &id,
+        &ws.join("ok.txt"),
+        "ok.txt",
+        "fine\n",
+        "mangled\n",
+    );
+
+    let big = ws.join("big.txt");
+    std::fs::write(&big, "x".repeat((tcs::MAX_BASELINE_BYTES as usize) + 64)).unwrap();
+    let before_big = tcs::Baseline::capture(&big);
+    assert!(before_big.truncated, "夹具前提:超上限基线应标 truncated");
+    std::fs::write(&big, "small-now\n").unwrap();
+    tcs::record(
+        &db,
+        &id,
+        "big.txt",
+        "modify",
+        "tool",
+        &before_big,
+        Some(&big),
+    );
+
+    let (status, json) = request(
+        app,
+        "POST",
+        &format!("/api/tasks/{id}/changes/rollback-all"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["restored"], json!(1), "{json}");
+    assert_eq!(json["skipped"], json!(1), "{json}");
+    assert_eq!(json["failed"], json!(0), "{json}");
+    assert_eq!(
+        std::fs::read_to_string(ws.join("ok.txt")).unwrap(),
+        "fine\n",
+        "其余项照做"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&big).unwrap(),
+        "small-now\n",
+        "无基线项不动手(绝不「恢复成空文件」)"
+    );
+    let results = json["results"].as_array().unwrap();
+    let skipped = results
+        .iter()
+        .find(|r| r["path"] == json!("big.txt"))
+        .expect("应有 big.txt 的逐项报告");
+    assert_eq!(skipped["result"], json!("skipped"), "{json}");
+    assert!(
+        skipped["reason"]
+            .as_str()
+            .unwrap_or("")
+            .contains("基线不可用"),
+        "{json}"
+    );
+}
+
+/// ⑪ 可逆性(与单文件语义一致):再调一次 = 逐项切回「改动后」状态(取最新一行的自然结果)。
+#[tokio::test]
+async fn rollback_all_second_call_flips_back() {
+    let (state, app) = test_state();
+    let (id, ws) = task_with_workspace(app).await;
+    let db = state.db.clone();
+
+    stage_modify(
+        &db,
+        &id,
+        &ws.join("flip.txt"),
+        "flip.txt",
+        "orig\n",
+        "changed\n",
+    );
+    let created = ws.join("flip-new.txt");
+    let before_new = tcs::Baseline::capture(&created);
+    std::fs::write(&created, "fresh\n").unwrap();
+    tcs::record(
+        &db,
+        &id,
+        "flip-new.txt",
+        "create",
+        "tool",
+        &before_new,
+        Some(&created),
+    );
+
+    // 第一次:回到改动前
+    let (status, _) = request(
+        app,
+        "POST",
+        &format!("/api/tasks/{id}/changes/rollback-all"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        std::fs::read_to_string(ws.join("flip.txt")).unwrap(),
+        "orig\n"
+    );
+    assert!(!created.exists());
+
+    // 第二次:切回改动后(回滚行自己的基线 = 当时被覆盖/删除的内容)
+    let (status, json) = request(
+        app,
+        "POST",
+        &format!("/api/tasks/{id}/changes/rollback-all"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(
+        std::fs::read_to_string(ws.join("flip.txt")).unwrap(),
+        "changed\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&created).unwrap(),
+        "fresh\n",
+        "新建文件按回滚记录被重建(可逆的另一半)"
+    );
+}
+
+/// ⑫ 空台账:200 + 空报告(不猜语义,不 404/不报错)。
+#[tokio::test]
+async fn rollback_all_on_empty_ledger_is_empty_report() {
+    let (_state, app) = test_state();
+    let (id, _ws) = task_with_workspace(app).await;
+
+    let (status, json) = request(
+        app,
+        "POST",
+        &format!("/api/tasks/{id}/changes/rollback-all"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["ok"], json!(true), "{json}");
+    assert_eq!(json["results"].as_array().unwrap().len(), 0, "{json}");
+    assert_eq!(json["restored"], json!(0), "{json}");
+}
+
+/// ⑬ patch 导出:修改 + 新建进正文、无基线(超上限)只在头部注释列明;
+/// 临时 git 仓库内 `git apply --check` 通过(仓库 = 改动前状态;有 git 才跑)。
+#[tokio::test]
+async fn patch_endpoint_emits_git_appliable_unified_diff() {
+    let (state, app) = test_state();
+    let (id, ws) = task_with_workspace(app).await;
+    let db = state.db.clone();
+
+    stage_modify(
+        &db,
+        &id,
+        &ws.join("mod.txt"),
+        "mod.txt",
+        "a\nb\nc\n",
+        "a\nX\nc\n",
+    );
+    let created = ws.join("new.txt");
+    let before_new = tcs::Baseline::capture(&created);
+    std::fs::write(&created, "hello\nworld\n").unwrap();
+    tcs::record(
+        &db,
+        &id,
+        "new.txt",
+        "create",
+        "tool",
+        &before_new,
+        Some(&created),
+    );
+    let big = ws.join("big.txt");
+    std::fs::write(&big, "y".repeat((tcs::MAX_BASELINE_BYTES as usize) + 64)).unwrap();
+    let before_big = tcs::Baseline::capture(&big);
+    std::fs::write(&big, "z\n").unwrap();
+    tcs::record(
+        &db,
+        &id,
+        "big.txt",
+        "modify",
+        "tool",
+        &before_big,
+        Some(&big),
+    );
+
+    let (status, body) = request_text(app, "GET", &format!("/api/tasks/{id}/changes/patch")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("diff --git a/mod.txt b/mod.txt"), "{body}");
+    assert!(body.contains("--- a/mod.txt"), "{body}");
+    assert!(body.contains("+++ b/mod.txt"), "{body}");
+    assert!(body.contains("-b\n"), "删除行要进正文:{body}");
+    assert!(body.contains("+X\n"), "新增行要进正文:{body}");
+    assert!(body.contains("new file mode"), "{body}");
+    assert!(body.contains("+++ b/new.txt"), "{body}");
+    assert!(body.contains("+hello\n"), "{body}");
+    assert!(body.contains("未包含"), "无基线文件要列进头部注释:{body}");
+    assert!(body.contains("big.txt"), "{body}");
+    assert!(
+        !body.contains("--- a/big.txt"),
+        "无基线文件不得进正文:{body}"
+    );
+
+    // git 可用才跑 apply 校验(本机与 CI 均有 git;缺 git 不静默冒充已验证)
+    let git_ok = std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !git_ok {
+        eprintln!("[skip] 环境无 git,跳过 `git apply --check` 断言(其余结构断言已跑)");
+        return;
+    }
+    let repo = std::env::temp_dir().join(format!(
+        "kedai-chg-patch-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .output()
+            .expect("git 应可执行")
+    };
+    assert!(git(&["init", "-q"]).status.success(), "git init 失败");
+    // 仓库 = 改动前状态(mod.txt 为 a/b/c;new.txt 不存在,由补丁创建)
+    std::fs::write(repo.join("mod.txt"), "a\nb\nc\n").unwrap();
+    std::fs::write(repo.join("patch.diff"), &body).unwrap();
+    let out = git(&["apply", "--check", "patch.diff"]);
+    assert!(
+        out.status.success(),
+        "git apply --check 应通过:{}\n{body}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&repo);
 }
