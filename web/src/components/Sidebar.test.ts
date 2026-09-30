@@ -26,6 +26,10 @@ vi.mock('../api', async (importOriginal) => {
   };
 });
 
+// CODE-4:画像探测走独立端点模块;此处统一 mock,避免防抖定时器晚发时打到真实网络
+const { probeWorkspaceMock } = vi.hoisted(() => ({ probeWorkspaceMock: vi.fn() }));
+vi.mock('../api/workspace', () => ({ probeWorkspace: probeWorkspaceMock }));
+
 import { useAppStore } from '../store';
 import Sidebar from './Sidebar.vue';
 
@@ -122,6 +126,8 @@ describe('Sidebar 组件(阶段 A 补测)', () => {
     );
     // 创建成功后目标草稿清空(既有行为不因新增行而变)
     expect((wrapper.find('.sv-task-new textarea').element as HTMLTextAreaElement).value).toBe('');
+    // 卸载:CODE-4 的探测防抖是 300ms,不卸载会把定时器与组件一起留给后面的用例
+    wrapper.unmount();
   });
 
   it('CODE-1:未填工作区创建时传 undefined(不下发该键),不写最近列表', async () => {
@@ -149,6 +155,7 @@ describe('Sidebar 组件(阶段 A 补测)', () => {
     await items[0].trigger('click');
     expect((wrapper.find('.sv-ws-row input').element as HTMLInputElement).value).toBe('D:\\a');
     expect(wrapper.find('.sv-ws-recent').exists()).toBe(false);
+    wrapper.unmount();
   });
 
   it('CODE-1:编码能力包开启且未选工作区时显示提示;选定后隐藏(缺省关 = 不显示)', async () => {
@@ -162,6 +169,7 @@ describe('Sidebar 组件(阶段 A 补测)', () => {
 
     await wrapper.find('.sv-ws-row input').setValue('D:\\proj');
     expect(wrapper.find('.sv-ws-hint').exists()).toBe(false);
+    wrapper.unmount();
   });
 
   it('CODE-1:浏览器形态不渲染原生「选择…」按钮;「清空」仅在有值时出现且能清空', async () => {
@@ -175,5 +183,83 @@ describe('Sidebar 组件(阶段 A 补测)', () => {
     expect(btns[0].text()).toBe('清空');
     await btns[0].trigger('click');
     expect((wrapper.find('.sv-ws-row input').element as HTMLInputElement).value).toBe('');
+    wrapper.unmount();
+  });
+
+  // ===== CODE-4:工作区画像(选定目录后 debounce 探测 + chips 展示) =====
+
+  beforeEach(() => {
+    probeWorkspaceMock.mockReset();
+    probeWorkspaceMock.mockResolvedValue({
+      root: '',
+      detected: [],
+      scanned_dirs: 0,
+      truncated: false,
+    });
+  });
+
+  it('CODE-4:填工作区后 debounce 探测并渲染 chips(展示名 · 建议命令)', async () => {
+    vi.useFakeTimers();
+    probeWorkspaceMock.mockResolvedValue({
+      root: 'D:\\proj\\demo',
+      detected: [
+        { kind: 'rust', marker: 'server-rs/Cargo.toml', suggested_command: 'cargo test', depth: 1 },
+        { kind: 'node', marker: 'package.json', suggested_command: 'npm test', depth: 0 },
+      ],
+      scanned_dirs: 1,
+      truncated: false,
+    });
+    const { wrapper } = await mountTaskSidebar();
+
+    await wrapper.find('.sv-ws-row input').setValue('D:\\proj\\demo');
+    await wrapper.vm.$nextTick();
+    expect(probeWorkspaceMock, '防抖期内不发请求').not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(300);
+    await wrapper.vm.$nextTick();
+    expect(probeWorkspaceMock).toHaveBeenCalledTimes(1);
+    expect(probeWorkspaceMock).toHaveBeenCalledWith('D:\\proj\\demo');
+    const chips = wrapper.findAll('.sv-ws-profile .sv-tag');
+    expect(chips.map((c) => c.text())).toEqual(['Rust · cargo test', 'Node · npm test']);
+    expect(chips[0].attributes('title')).toContain('server-rs/Cargo.toml');
+    vi.useRealTimers();
+  });
+
+  it('CODE-4:探测失败时把后端中文原因原样上屏,不渲染 chips', async () => {
+    vi.useFakeTimers();
+    probeWorkspaceMock.mockRejectedValue(new Error('工作区不存在或不是目录:D:\\nope'));
+    const { wrapper } = await mountTaskSidebar();
+
+    await wrapper.find('.sv-ws-row input').setValue('D:\\nope');
+    await wrapper.vm.$nextTick();
+    await vi.advanceTimersByTimeAsync(300);
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.find('.sv-ws-profile').exists()).toBe(false);
+    expect(wrapper.text()).toContain('工作区不存在或不是目录:D:\\nope');
+    vi.useRealTimers();
+  });
+
+  it('CODE-4:清空工作区即撤下 chips 与错误;连续改路径只发最后一次(防抖重置)', async () => {
+    vi.useFakeTimers();
+    const { wrapper } = await mountTaskSidebar();
+    const input = wrapper.find('.sv-ws-row input');
+
+    await input.setValue('D:\\a');
+    await wrapper.vm.$nextTick();
+    await vi.advanceTimersByTimeAsync(100);
+    await input.setValue('D:\\b');
+    await wrapper.vm.$nextTick();
+    await vi.advanceTimersByTimeAsync(300);
+    await wrapper.vm.$nextTick();
+    expect(probeWorkspaceMock.mock.calls).toEqual([['D:\\b']]);
+
+    await input.setValue('');
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('.sv-ws-profile').exists()).toBe(false);
+    // 清空后不再探测(定时器已撤)
+    await vi.advanceTimersByTimeAsync(300);
+    expect(probeWorkspaceMock).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
   });
 });

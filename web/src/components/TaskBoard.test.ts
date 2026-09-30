@@ -236,6 +236,57 @@ describe('TaskBoard 组件(M5 补测)', () => {
     expect(wrapper.find('.sv-task-workspace .sv-btn').text()).toBe('复制');
     wrapper.unmount();
   });
+
+  // ===== CODE-4:工作区画像(详情顶层的只读展示) =====
+
+  it('CODE-4:详情带画像时渲染 chips(展示名 · 建议命令)与截断留痕', async () => {
+    const store = useAppStore();
+    store.currentTask = {
+      ...makeTaskDetail({ workspace: 'D:\\proj\\demo' }),
+      workspace_profile: {
+        root: 'D:\\proj\\demo',
+        detected: [
+          { kind: 'rust', marker: 'server-rs/Cargo.toml', suggested_command: 'cargo test', depth: 1 },
+          { kind: 'dotnet', marker: 'src/App.csproj', suggested_command: 'dotnet test', depth: 1 },
+          { kind: 'unknown-kind', marker: 'x.toml', suggested_command: 'x test', depth: 0 },
+        ],
+        scanned_dirs: 3,
+        truncated: true,
+      },
+    };
+    const wrapper = mount(TaskBoard);
+
+    const chips = wrapper.findAll('.sv-task-workspace-profile .sv-tag');
+    expect(chips.map((c) => c.text())).toEqual([
+      'Rust · cargo test',
+      '.NET · dotnet test',
+      // 未登记类型原样回显标识:后端加新类型时前端不假装认识
+      'unknown-kind · x test',
+    ]);
+    expect(chips[0].attributes('title')).toContain('server-rs/Cargo.toml');
+    expect(wrapper.find('.sv-task-workspace-profile').text()).toContain('(未扫全)');
+    wrapper.unmount();
+  });
+
+  it('CODE-4:画像为 null 或未命中任何类型时不渲染该行(不把「没有」渲染成噪音)', async () => {
+    const store = useAppStore();
+    // 未绑定工作区 → 后端 workspace_profile 为 null
+    store.currentTask = makeTaskDetail();
+    let wrapper = mount(TaskBoard);
+    expect(wrapper.find('.sv-task-workspace-profile').exists()).toBe(false);
+    wrapper.unmount();
+
+    // 绑定了目录但一个标记都没命中 → 后端返回空 detected,同样不渲染
+    store.currentTask = {
+      ...makeTaskDetail({ workspace: 'D:\\empty' }),
+      workspace_profile: { root: 'D:\\empty', detected: [], scanned_dirs: 0, truncated: false },
+    };
+    wrapper = mount(TaskBoard);
+    expect(wrapper.find('.sv-task-workspace-profile').exists()).toBe(false);
+    // 工作区行本身照旧渲染(两行互不牵连)
+    expect(wrapper.find('.sv-task-workspace').exists()).toBe(true);
+    wrapper.unmount();
+  });
 });
 
 // 多缓冲的标签中文化(遗留.md IFW-7③):liveBuffers 的 key 是内部键

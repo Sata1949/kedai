@@ -11,6 +11,7 @@ import { splitTaskResult } from '../taskResult';
 import { taskStatusClass as statusClass, taskStatusLabel as statusLabel } from '../taskStatus';
 import { bufferLabel } from '../utils/phaseLabel';
 import { badgeFlowSource, planRowBadges, type NodeBadge } from '../utils/flowNodeBadges';
+import { projectHintTitle, projectKindLabel } from '../utils/workspaceProfile';
 import { callableFlows } from '../utils/flowCallStats';
 import { flowCandidates, staleMembers, type FlowCandidate } from '../utils/flowCandidates';
 import { APPROVE_EXEC_MODE_LABELS, APPROVE_EXEC_MODE_ORDER, FLOW_MODE_LABELS, MODE_LABELS, messageKindLabel } from '../api/labels';
@@ -378,6 +379,8 @@ function toggleSummary(): void {
 
 /** 任务工作区(CODE-1):创建期冻结的 canonical 绝对路径;未绑定为 null/空 → 该行不渲染 */
 const taskWorkspace = computed(() => currentTask.value?.task.workspace ?? '');
+/** 工作区画像(CODE-4):后端在详情读取时实时探测;未绑定/旧服务端为 null → 该行不渲染 */
+const taskWorkspaceProfile = computed(() => currentTask.value?.workspace_profile ?? null);
 /** 复制成功的短暂回执(1.5s 自动复位;失败保持原文案,不虚报「已复制」) */
 const workspaceCopied = ref(false);
 async function copyWorkspacePath(): Promise<void> {
@@ -738,6 +741,23 @@ async function removeTask(task: TaskRecord): Promise<void> {
               title="复制工作区路径"
               @click="copyWorkspacePath"
             >{{ workspaceCopied ? '已复制' : '复制' }}</button>
+          </div>
+          <!-- 工作区画像(CODE-4):只读展示,后端实时探测;未命中不渲染 -->
+          <div
+            v-if="taskWorkspaceProfile && taskWorkspaceProfile.detected.length > 0"
+            class="sv-task-workspace-profile"
+          >
+            <span
+              v-for="h in taskWorkspaceProfile.detected"
+              :key="`${h.kind}:${h.marker}`"
+              class="sv-tag sv-tag-muted"
+              :title="projectHintTitle(h.kind, h.marker, h.suggested_command)"
+            >{{ projectKindLabel(h.kind) }} · {{ h.suggested_command }}</span>
+            <span
+              v-if="taskWorkspaceProfile.truncated"
+              class="sv-note"
+              title="子目录过多,仅扫描了前若干个子目录——结果可能不全"
+            >(未扫全)</span>
           </div>
 
           <!-- 改绑流程(B 批 B3):仅 custom 模式且不在进行中/待批准时给入口
@@ -1190,6 +1210,15 @@ async function removeTask(task: TaskRecord): Promise<void> {
   white-space: nowrap;
   font-size: 12px;
   color: var(--sv-ink-soft, #666);
+}
+
+/* 工作区画像行(CODE-4):与工作区行同段、更轻;chips 由全局 .sv-tag 提供外观 */
+.sv-task-workspace-profile {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: -14px 0 20px;
 }
 
 /* 执行中进度行(2026-09-18):展示最近一条 agent_status 简述,长循环期间可见活性。

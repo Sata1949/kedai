@@ -1,10 +1,13 @@
 <script setup lang="ts">
 // 左侧功能区:品牌 + Token 统计 + 模式切换 + (角色列表 | 任务工作台) + 综合设置入口
-import { computed, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { useAppStore } from '../store';
 import { storeToRefs } from 'pinia';
 import { inTauri, isAndroidTauri } from '../platform';
 import { taskStatusClass as statusClass, taskStatusLabel as statusLabel } from '../taskStatus';
+import { probeWorkspace } from '../api/workspace';
+import { projectHintTitle, projectKindLabel } from '../utils/workspaceProfile';
+import type { WorkspaceProfile } from '../api';
 import TaskModeSelect from './TaskModeSelect.vue';
 import TaskFlowSelect from './TaskFlowSelect.vue';
 import TaskConnectionSelect from './TaskConnectionSelect.vue';
@@ -288,6 +291,55 @@ async function pickWorkspace(): Promise<void> {
   }
 }
 
+// ==================== 工作区画像(CODE-4) ====================
+//
+// 选定/手填后 debounce 探测,把「这是什么项目 + 建议怎么验证」显示在表单里——用户在**建任务之前**
+// 就知道这个目录是什么项目,而不是等任务跑起来才发现选错了目录。
+// 探测失败(路径不存在/非目录/数据目录)**不拦创建**:后端创建期还会再拦一次,此处只是提示;
+// 文案原样用后端的中文原因,不在前端另造一套。
+
+/** 探测结果(null = 无结果,含未填/探测失败) */
+const wsProfile = ref<WorkspaceProfile | null>(null);
+/** 探测失败的后端中文原因(空 = 无错误) */
+const wsProbeError = ref('');
+/** 请求序号:丢弃过期响应(用户连改路径时,先发的慢响应可能后到) */
+let wsProbeSeq = 0;
+let wsProbeTimer: ReturnType<typeof setTimeout> | null = null;
+
+function clearWsProbe(): void {
+  if (wsProbeTimer) {
+    clearTimeout(wsProbeTimer);
+    wsProbeTimer = null;
+  }
+}
+
+async function runWsProbe(p: string): Promise<void> {
+  const seq = ++wsProbeSeq;
+  try {
+    const profile = await probeWorkspace(p);
+    if (seq !== wsProbeSeq) return;
+    wsProfile.value = profile;
+    wsProbeError.value = '';
+  } catch (err) {
+    if (seq !== wsProbeSeq) return;
+    wsProfile.value = null;
+    wsProbeError.value = (err as Error).message;
+  }
+}
+
+/** 输入变化 → 清空旧结果并 debounce 重探(空输入不探测:没有可探的目录) */
+watch(workspacePath, () => {
+  clearWsProbe();
+  wsProfile.value = null;
+  wsProbeError.value = '';
+  const p = workspacePath.value.trim();
+  if (!p) return;
+  wsProbeTimer = setTimeout(() => void runWsProbe(p), 300);
+});
+
+// 组件卸载时清掉待发定时器(侧栏在模式切换时会重建,不清会留下一个悬空请求)
+onBeforeUnmount(clearWsProbe);
+
 /** 新建并立即执行 */
 async function createAndRun(): Promise<void> {
   const t = taskTitle.value.trim();
@@ -532,6 +584,25 @@ async function removeTask(task: TaskRecord): Promise<void> {
                 @click="workspacePath = p"
               >{{ p }}</button>
             </div>
+            <!-- 工作区画像(CODE-4):探测到项目类型才渲染;未命中不占位(不把「没有」渲染成噪音) -->
+            <div
+              v-if="wsProfile && wsProfile.detected.length > 0"
+              class="sv-ws-profile"
+            >
+              <span
+                v-for="h in wsProfile.detected"
+                :key="`${h.kind}:${h.marker}`"
+                class="sv-tag sv-tag-muted"
+                :title="projectHintTitle(h.kind, h.marker, h.suggested_command)"
+              >{{ projectKindLabel(h.kind) }} · {{ h.suggested_command }}</span>
+              <span
+                v-if="wsProfile.truncated"
+                class="sv-note"
+                title="子目录过多,仅扫描了前若干个子目录——结果可能不全"
+              >(未扫全)</span>
+            </div>
+            <!-- 探测失败:把后端中文原因原样上屏(与创建时的 400 同一套文案,前端不另造) -->
+            <p v-else-if="wsProbeError" class="sv-note sv-ws-hint">{{ wsProbeError }}</p>
             <p v-if="wsHintVisible" class="sv-note sv-ws-hint">
               编码能力包已启用:未绑定工作区的任务将在任务草稿目录内工作。
             </p>
@@ -761,6 +832,14 @@ async function removeTask(task: TaskRecord): Promise<void> {
   color: var(--sv-ink);
 }
 .sv-ws-hint {
+  margin-top: 6px;
+}
+/* 工作区画像(CODE-4):chips 与「(未扫全)」留痕同排;宽度不够时换行 */
+.sv-ws-profile {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
   margin-top: 6px;
 }
 </style>
