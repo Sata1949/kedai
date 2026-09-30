@@ -62,12 +62,19 @@ tracing-appender = "0.2"
 sha2 = "0.10"
 
 # Windows DPAPI:API Key 静态加密(CryptProtectData / CryptUnprotectData)
+# Windows Job Object:命令执行的进程树清理(services/exec/desktop.rs,HARNESS3-1)
+#   —— 需要 JobObjects(函数与结构) + Threading(IO_COUNTERS 是扩展限制结构体的字段类型)
+#   + Security(CreateJobObjectW 的属性参数类型)。仅加 feature,不新增 crate,
+#   Cargo.lock 不受影响(feature 不记入 lock)。
 # 版本与传递依赖(tokio/rustix/schannel 等)对齐到 0.61,消除 Cargo.lock 中 0.59/0.61 双版本并存
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Security",
     "Win32_Security_Cryptography",
     "Win32_Storage_FileSystem",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
 ] }
 
 # reqwest 按目标平台选 TLS 后端,以及 rquickjs 的绑定策略。

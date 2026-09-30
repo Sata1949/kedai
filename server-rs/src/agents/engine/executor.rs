@@ -1501,6 +1501,45 @@ async fn emit_authorization_outcome(
     .await;
 }
 
+/// 工具执行的取消闸门(HARNESS3-1):工具 future 与 abort 信号竞争,先到的胜出。
+///
+/// 为什么在**调用侧**竞争,而不是给 `ToolRegistry::execute*` 加取消形参:
+/// 执行器类型 `ToolExecutor` 是 L1 公共契约(`models::types::ToolExecutor`,
+/// `tools/registry.rs:17-21` 的下沉说明写明「`plugins/` 与 `mcp/` 都要构造它」),
+/// 加形参等于动 L1 类型 + 全部内置工具闭包 + 两个 L3 构造点,与本批「取消只在工具循环生效」
+/// 的需求不成比例。
+///
+/// `None` = 已取消。竞争赢时工具 future 被 drop:对 `bash` 而言这意味着 exec 层的
+/// future 被丢弃,进程由 `kill_on_drop` 与 Job Object 句柄关闭收掉
+/// (见 `services/exec/desktop.rs`)。
+///
+/// 循环而非单次 `select!` 的原因:`changed()` 返回 `Err` 只表示**发送端已全部 drop**
+/// (引擎 run 收尾),那不是取消信号——若把它当取消,正常完成的工具会被误判成
+/// 「已取消」;若不管它,`changed()` 会立刻重复就绪导致忙循环。故 `Err` 分支改为
+/// 等 future 自己跑完,`Ok` 分支回到循环顶重读当前值。
+async fn await_or_cancel<F>(fut: F, abort: &watch::Receiver<bool>) -> Option<F::Output>
+where
+    F: std::future::Future,
+{
+    tokio::pin!(fut);
+    let mut wait = abort.clone();
+    loop {
+        // borrow() 不标记 seen:标记会让克隆出的接收端再也等不到「变化」,
+        // 于是「起跑前已取消」反而要等工具自然结束(正是本条要修的行为)。
+        if *wait.borrow() {
+            return None;
+        }
+        tokio::select! {
+            biased;
+            value = &mut fut => return Some(value),
+            changed = wait.changed() => match changed {
+                Ok(()) => continue,
+                Err(_) => return Some((&mut fut).await),
+            }
+        }
+    }
+}
+
 /// 执行单个工具调用(已裁决)。未授权不执行:未注册 → 错误 JSON;已注册 → 错误 JSON
 /// (授权事件由收尾阶段按序推送)。执行失败 → 结构化错误 JSON + step 提示,不终止整轮。
 /// 返回 (输出, 耗时毫秒)。
@@ -1527,13 +1566,32 @@ async fn execute_call(
     let start = std::time::Instant::now();
     // 白名单放行:已裁决执行,避免 execute 二次权限裁决拒绝白名单危险工具
     // (旧实现外层 allowed=true 但 execute 内部再裁决,敏感/危险工具实际仍被拒)
-    let out = match engine
-        .tool_registry
-        .execute_with_decision(&call.name, &call.arguments, tool_ctx.clone(), permission)
-        .await
-    {
-        Ok(r) => serde_json::from_str(&r).unwrap_or(Value::String(r)),
-        Err(e) => {
+    let executed = await_or_cancel(
+        engine.tool_registry.execute_with_decision(
+            &call.name,
+            &call.arguments,
+            tool_ctx.clone(),
+            permission,
+        ),
+        abort,
+    )
+    .await;
+    let out = match executed {
+        // 取消:回填结构化错误(形状与「执行失败」同款,不终止整轮),真正的收场
+        // 由调用侧既有的轮末 / 串行路径 abort 检查负责。这里**不**返回 Err,
+        // 否则整轮被判失败会把已完成的工作一起丢掉(口径同步骤预算的「带着产出收尾」)。
+        None => {
+            tracing::info!(tool = call.name.as_str(), "工具执行中被取消,提前结束等待");
+            return (
+                json!({
+                    "error": "已取消:工具在执行中被中止(用户停止)",
+                    "code": "tool_cancelled"
+                }),
+                start.elapsed().as_millis() as i64,
+            );
+        }
+        Some(Ok(r)) => serde_json::from_str(&r).unwrap_or(Value::String(r)),
+        Some(Err(e)) => {
             let _ = send_event(
                 step_evt(
                     &format!("工具 {} 调用失败", call.name),
@@ -1883,6 +1941,80 @@ mod tests {
             budget_stop_content(String::new(), ""),
             "",
             "两者皆空如实返回空:不伪造正文"
+        );
+    }
+}
+
+#[cfg(test)]
+mod cancel_tests {
+    use super::await_or_cancel;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use tokio::sync::watch;
+
+    /// **正常路径必须仍然放行**(与下面两条同权重):取消守卫一旦误判,表现不是报错
+    /// 而是「工具永远返回已取消」——比现状(取消打断不了工具)更糟,所以必须单独钉。
+    #[tokio::test]
+    async fn not_cancelled_returns_tool_output() {
+        let (_tx, rx) = watch::channel(false);
+        let got = await_or_cancel(async { "工具输出" }, &rx).await;
+        assert_eq!(got, Some("工具输出"), "未取消时必须原样带回工具输出");
+    }
+
+    /// 本批的正面断言:工具执行途中取消 → **立即**返回,不等工具自身时长。
+    /// 修复前该用例要等满 5s(工具自身 sleep)才返回,故时间余量给到 1s 足以判别。
+    #[tokio::test]
+    async fn cancel_during_tool_execution_returns_immediately() {
+        let (tx, rx) = watch::channel(false);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            let _ = tx.send(true);
+        });
+        let start = Instant::now();
+        let got = await_or_cancel(tokio::time::sleep(Duration::from_secs(5)), &rx).await;
+        let elapsed = start.elapsed();
+        assert!(got.is_none(), "取消途中应返回 None(实际: {got:?})");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "取消应在毫秒级生效,实际等了一轮工具时长: {elapsed:?}"
+        );
+    }
+
+    /// 起跑前已置位:直接判取消,且**不轮询**工具 future(否则副作用已经发生才说「取消了」)。
+    #[tokio::test]
+    async fn already_aborted_before_start_skips_tool() {
+        let (tx, rx) = watch::channel(true);
+        let polled = Arc::new(AtomicBool::new(false));
+        let flag = polled.clone();
+        let got = await_or_cancel(
+            async move {
+                flag.store(true, Ordering::SeqCst);
+                1u8
+            },
+            &rx,
+        )
+        .await;
+        assert_eq!(got, None);
+        assert!(
+            !polled.load(Ordering::SeqCst),
+            "已取消时不该把工具放下去跑(否则取消只是事后通知)"
+        );
+        drop(tx);
+    }
+
+    /// `changed()` 返回 Err 只代表**发送端已全部 drop**(run 收尾的正常路径),那不是取消
+    /// 信号——必须等工具跑完并带回结果。此用例同时兜住「Err 分支被误写成 continue 造成忙循环」。
+    #[tokio::test]
+    async fn dropped_sender_is_not_treated_as_cancel() {
+        let (tx, rx) = watch::channel(false);
+        drop(tx);
+        let start = Instant::now();
+        let got = await_or_cancel(tokio::time::sleep(Duration::from_millis(40)), &rx).await;
+        assert!(got.is_some(), "发送端断开不等于取消,应等工具完成");
+        assert!(
+            start.elapsed() >= Duration::from_millis(30),
+            "应真的等完工具,而不是立刻返回"
         );
     }
 }
