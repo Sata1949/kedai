@@ -1,11 +1,13 @@
 // 任务模式路由:/api/tasks(列表/新建/详情/执行/批准/停止/删除/事件 SSE 流)
 use crate::api::app_state::AppState;
 use crate::api::json_body::JsonBody;
-use crate::api::{db_err, err_with_code, not_found, validation, ErrorCode, WithStatus};
+use crate::api::{
+    conflict, db_err, err_with_code, internal, not_found, validation, ErrorCode, WithStatus,
+};
 use crate::models::types::{
     TaskApproveExecMode, TaskFollowupMode, TaskRunMode, TaskStatus, TaskStep,
 };
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response};
@@ -278,6 +280,165 @@ pub async fn list_calls(State(state): State<Arc<AppState>>, Path(id): Path<Strin
     match state.db_call(move || svc.list_llm_calls(&id)).await {
         Err(e) => db_err(&e),
         Ok(calls) => Json(json!({ "calls": calls })).into_response(),
+    }
+}
+
+// ==================== 文件变更台账(2026-09-30 批次 4,PRODCAP-4「交付可审计」)====================
+
+/// `?path=` 查询体(工作区内**相对路径**;绝对路径与越界由 `safe_workspace_path` 拒绝)。
+#[derive(Deserialize)]
+pub struct ChangePathQuery {
+    pub path: String,
+}
+
+/// GET /api/tasks/{id}/changes:任务文件变更清单(按发生顺序)。
+///
+/// **空清单返回空数组**,端点不猜语义 —— 「本轮没改文件」与「没记账」由前端显式区分展示。
+/// 本批不发 `file_changed` 事件(实时推送留待 PRODCAP-1 的 `task_events` 回放落地,
+/// 理由见 `计划.md` PRODCAP-4 条目):前端在打开详情与任务进终态时各拉一次。
+pub async fn file_changes(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let db = state.db.clone();
+    match state
+        .db_call(move || crate::services::task_change_service::list(&db, &id))
+        .await
+    {
+        Err(e) => db_err(&e),
+        Ok(changes) => Json(json!({ "changes": changes })).into_response(),
+    }
+}
+
+/// 把 `?path=` 解析成工作区内绝对路径(与工具侧同一个闸门,不搞第二份路径策略)。
+/// 返回 `(绝对路径, 任务是否进行中)`;闸门拒绝时返回端点可直接下发的 400 响应。
+fn resolve_change_path(
+    state: &Arc<AppState>,
+    id: &str,
+    raw: &str,
+) -> Result<std::path::PathBuf, Box<Response>> {
+    let Some(task) = state.tasks.get(id) else {
+        return Err(Box::new(not_found("任务不存在")));
+    };
+    let Some(workspace) = task.workspace.as_ref() else {
+        return Err(Box::new(validation("本任务未绑定工作区,没有可比对的文件变更基线")));
+    };
+    let data_dir = state.config.data_dir.clone();
+    match crate::tools::workspace_guard::safe_workspace_path(
+        std::path::Path::new(workspace),
+        raw,
+        Some(&data_dir),
+    ) {
+        Ok(p) => Ok(p),
+        // 闸门拒绝是**用户可纠正**的输入问题(越界/符号链接/NUL),走 400 + VALIDATION,
+        // 原文里不含本机绝对路径(闸门文案只回显相对路径与原因)
+        Err(e) => Err(Box::new(validation(e))),
+    }
+}
+
+/// GET /api/tasks/{id}/changes/diff?path=:单文件 unified diff(改动前基线 vs 当前正文)。
+///
+/// 三种「拿不到基线」的形态**都返回可读说明,不返回空 diff**(空 diff 会被前端和
+/// 用户一起读成「没改动」,而那恰恰是本端点要区分掉的情形):
+/// - 该文件不在台账里 → `available:false` + 原因;
+/// - 新建 → `available:true` + note,正文全部按新增行给出(改动前本就没有该文件);
+/// - 基线超留存上限(256KB)或当时读取失败 → `available:false` + 「基线不可用」。
+pub async fn file_change_diff(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<ChangePathQuery>,
+) -> Response {
+    let abs = match resolve_change_path(&state, &id, &q.path) {
+        Ok(p) => p,
+        Err(r) => return *r,
+    };
+    use crate::services::task_change_service as tcs;
+    let baseline = tcs::baseline_state(&state.db, &id, &q.path);
+    // 当前正文:文件可能已被后续步骤删除,按空处理(于是 diff 全是删除行,仍然可读)
+    let after = std::fs::read(&abs)
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default();
+    match baseline {
+        tcs::BaselineState::Unavailable(reason) => Json(json!({
+            "available": false,
+            "reason": reason,
+            "path": q.path,
+        }))
+        .into_response(),
+        tcs::BaselineState::NewFile => Json(json!({
+            "available": true,
+            "path": q.path,
+            "note": "改动前不存在该文件(本次为新建),以下按全量新增行给出",
+            "diff": tcs::unified_diff("", &after, &q.path),
+        }))
+        .into_response(),
+        tcs::BaselineState::Ready(bytes) => {
+            let before = String::from_utf8_lossy(&bytes).into_owned();
+            Json(json!({
+                "available": true,
+                "path": q.path,
+                "diff": tcs::unified_diff(&before, &after, &q.path),
+            }))
+            .into_response()
+        }
+    }
+}
+
+/// POST /api/tasks/{id}/changes/rollback?path=:把单个文件恢复到它**本任务内最近一次改动前**
+/// 的状态(台账 Q4 取 (a))。
+///
+/// 三条纪律:
+/// 1. **基线不可用就不动手**(`available:false` + 原因),绝不「恢复成空文件」装作案发现场;
+/// 2. 若该条记录是 `create`,回滚 = 删除该文件(而不是写空文件);
+/// 3. **回滚本身再记一条 `op=rollback`** —— 它同样是一次改动,必须在清单里看得见、不隐身。
+///
+/// 任务进行中拒绝:模型还在写同一个文件时回滚会互相覆盖,那种竞态不靠「尽力而为」兜。
+pub async fn file_change_rollback(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<ChangePathQuery>,
+) -> Response {
+    let abs = match resolve_change_path(&state, &id, &q.path) {
+        Ok(p) => p,
+        Err(r) => return *r,
+    };
+    let task_running = state
+        .tasks
+        .get(&id)
+        .map(|t| {
+            matches!(
+                t.status,
+                crate::models::types::TaskStatus::Running
+                    | crate::models::types::TaskStatus::Planning
+            )
+        })
+        .unwrap_or(false);
+    if task_running {
+        return conflict("任务进行中,请先停止再回滚(避免与模型写入互相覆盖)");
+    }
+    use crate::services::task_change_service as tcs;
+    let outcome = tcs::rollback(&state.db, &id, &q.path, &abs);
+    match outcome {
+        tcs::RollbackOutcome::Restored(bytes) => Json(json!({
+            "ok": true,
+            "path": q.path,
+            "restored_bytes": bytes,
+            "note": "已恢复到改动前状态,并另记一条 rollback 变更",
+        }))
+        .into_response(),
+        tcs::RollbackOutcome::Removed => Json(json!({
+            "ok": true,
+            "path": q.path,
+            "removed": true,
+            "note": "该文件由本任务新建,回滚即删除",
+        }))
+        .into_response(),
+        tcs::RollbackOutcome::Unavailable(reason) => Json(json!({
+            "ok": false,
+            "available": false,
+            "path": q.path,
+            "reason": reason,
+        }))
+        .into_response(),
+        // 落盘失败原文只进日志(可能含本机绝对路径),响应给固定文案
+        tcs::RollbackOutcome::Failed(e) => internal(e),
     }
 }
 

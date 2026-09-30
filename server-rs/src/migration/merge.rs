@@ -15,11 +15,12 @@ use super::conflict::{
 use super::ddl::{
     ensure_agent_subtasks_finished_at_column, ensure_characters_derived_json_column,
     ensure_llm_requests_usage_columns, ensure_memory_entries_pinned_column,
-    ensure_skills_progressive_columns, ensure_task_llm_calls_finish_reason_column,
-    ensure_task_messages_table, ensure_task_subtasks_finished_at_column,
-    ensure_tasks_executor_id_column, ensure_tasks_flow_columns, ensure_tasks_task_mode_column,
-    CONTRACT_CHANGELOG_DDL, KALEIDO_STATE_DDL, LLM_REQUESTS_DDL, MEMORY_ENTRIES_DDL,
-    MEMORY_ENTRIES_FTS_DDL, SCOPE_VARIABLES_DDL, SESSION_COMPACTIONS_DDL, USER_SCRIPTS_DDL,
+    ensure_skills_progressive_columns, ensure_task_file_changes_table,
+    ensure_task_llm_calls_finish_reason_column, ensure_task_messages_table,
+    ensure_task_subtasks_finished_at_column, ensure_tasks_executor_id_column,
+    ensure_tasks_flow_columns, ensure_tasks_task_mode_column, CONTRACT_CHANGELOG_DDL,
+    KALEIDO_STATE_DDL, LLM_REQUESTS_DDL, MEMORY_ENTRIES_DDL, MEMORY_ENTRIES_FTS_DDL,
+    SCOPE_VARIABLES_DDL, SESSION_COMPACTIONS_DDL, USER_SCRIPTS_DDL,
 };
 use super::{DATABASE_FILE, SKIPPED_SIDECARS};
 use crate::models::db::SCHEMA_VERSION;
@@ -225,6 +226,9 @@ fn merge_databases(baseline: &Path, source: &Path) -> Result<MergeReport, String
     // 任务消息表(批次 R2):旧库缺失才建,保证两侧 schema 一致(比对在 DDL 补齐之后)
     ensure_task_messages_table(&conn)
         .map_err(|e| format!("补齐基线库 task_messages 表失败: {e}"))?;
+    // 任务文件变更台账(批次 4):两侧 schema 一致,漏本侧即报「基线缺少表」
+    ensure_task_file_changes_table(&conn)
+        .map_err(|e| format!("补齐基线库 task_file_changes 表失败: {e}"))?;
     // characters derived_json 列(P-11 派生列):旧库 ALTER 补齐,保证两侧 schema 一致;
     // merge_table 按「源表全列」取数,该列缺席会让合并报「基线缺少列」
     ensure_characters_derived_json_column(&conn)
@@ -280,6 +284,9 @@ fn merge_databases(baseline: &Path, source: &Path) -> Result<MergeReport, String
         .map_err(|e| format!("补齐源快照 memory_entries FTS 索引失败: {e}"))?;
     ensure_task_messages_table(&source_conn)
         .map_err(|e| format!("补齐源快照 task_messages 表失败: {e}"))?;
+    // 任务文件变更台账(批次 4):源快照侧同样补齐(与基线侧成对,漏一侧即报缺少表)
+    ensure_task_file_changes_table(&source_conn)
+        .map_err(|e| format!("补齐源快照 task_file_changes 表失败: {e}"))?;
     // characters derived_json 列(P-11):源快照侧同样补齐(与基线侧成对,漏一侧即报缺少列)
     ensure_characters_derived_json_column(&source_conn)
         .map_err(|e| format!("补齐源快照 characters derived_json 列失败: {e}"))?;

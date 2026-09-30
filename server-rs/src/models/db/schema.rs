@@ -438,6 +438,30 @@ CREATE TABLE IF NOT EXISTS script_authorizations (
   script_hash   TEXT NOT NULL,
   authorized_at TEXT NOT NULL
 );
+
+-- 任务文件变更台账(2026-09-30 批次 4,PRODCAP-4「交付可审计」)。
+-- 语义:任务执行期间工作区文件每被改动一次记一行,供任务详情回答「改了什么」、
+-- 查看 unified diff、并按需回滚单个文件。
+-- before_blob 存**改动前正文**(上限 256KB,超限只记长度并置 truncated=1):
+-- 台账原案只有 before_hash/after_hash,但「看 diff」与「回滚」都需要正文,哈希不可还原内容;
+-- 故按 undo_snapshots 的先例存正文,哈希仅用于判等与「基线是否可用」的展示。
+-- truncated=1 的行,diff 与回滚端点都返回「基线不可用」,不假装能恢复。
+CREATE TABLE IF NOT EXISTS task_file_changes (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id      TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  step_index   INTEGER,
+  path         TEXT NOT NULL,
+  op           TEXT NOT NULL CHECK (op IN ('create','modify','delete','rollback')),
+  source       TEXT NOT NULL CHECK (source IN ('tool','bash','rollback')),
+  before_hash  TEXT,
+  after_hash   TEXT NOT NULL,
+  before_bytes INTEGER NOT NULL DEFAULT 0,
+  after_bytes  INTEGER NOT NULL DEFAULT 0,
+  before_blob  BLOB,
+  truncated    INTEGER NOT NULL DEFAULT 0,
+  created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_file_changes_task ON task_file_changes(task_id, id);
 "#;
 
 /// 暴露建表 SQL 供迁移一致性测试比对(旧库 ALTER 补列后应与新建表 schema normalize 一致)

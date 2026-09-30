@@ -237,11 +237,7 @@ fn anchor_excerpt(arguments: &str, key: &str) -> String {
     const MAX_ANCHOR_CHARS: usize = 80;
     let raw = serde_json::from_str::<serde_json::Value>(arguments)
         .ok()
-        .and_then(|v| {
-            v.get(key)
-                .and_then(|x| x.as_str())
-                .map(|s| s.to_string())
-        })
+        .and_then(|v| v.get(key).and_then(|x| x.as_str()).map(|s| s.to_string()))
         .unwrap_or_default();
     let one_line = raw.lines().next().unwrap_or("").trim();
     if one_line.is_empty() {
@@ -851,7 +847,10 @@ mod tests {
         messages.extend(write_round(
             "c0",
             "fs_write",
-            &format!("{{\"path\":\"src/app/mod.rs\",\"content\":\"{}\"}}", "内".repeat(4000)),
+            &format!(
+                "{{\"path\":\"src/app/mod.rs\",\"content\":\"{}\"}}",
+                "内".repeat(4000)
+            ),
         ));
         messages.extend(write_round(
             "c1",
@@ -861,7 +860,10 @@ mod tests {
         messages.extend(write_round(
             "c2",
             "fs_read",
-            &format!("{{\"path\":\"src/x.rs\",\"content\":\"{}\"}}", "y".repeat(4000)),
+            &format!(
+                "{{\"path\":\"src/x.rs\",\"content\":\"{}\"}}",
+                "y".repeat(4000)
+            ),
         ));
         messages.extend(write_round("c3", "todo", "{}"));
         trim_tool_history(&mut messages, 1, 0, &mut ts, "gpt-4o-mini");
@@ -905,11 +907,9 @@ mod tests {
             LlmMessage::plain("system", "s"),
             LlmMessage::plain("user", "u"),
         ];
-        let long_cmd = "cargo test --all\r\n&& echo 一堆后续输出\r\n".to_string() + &"z".repeat(400);
-        let args = format!(
-            "{{\"command\":{}}}",
-            serde_json::Value::String(long_cmd)
-        );
+        let long_cmd =
+            "cargo test --all\r\n&& echo 一堆后续输出\r\n".to_string() + &"z".repeat(400);
+        let args = format!("{{\"command\":{}}}", serde_json::Value::String(long_cmd));
         messages.extend(write_round("b0", "bash", &args));
         messages.extend(write_round("b1", "bash", "{\"command\":\"echo second\"}"));
         trim_tool_history(&mut messages, 1, 0, &mut ts, "gpt-4o-mini");
@@ -956,11 +956,17 @@ mod tests {
                     .unwrap_or_else(|e| panic!("占位必须是合法 JSON: {} ({e})", c.arguments));
                 assert_eq!(parsed["_trimmed"], serde_json::json!(true));
                 assert!(
-                    parsed["path"].as_str().is_some_and(|p| p.starts_with("src/f")),
+                    parsed["path"]
+                        .as_str()
+                        .is_some_and(|p| p.starts_with("src/f")),
                     "回收后应仍留着目标路径: {}",
                     c.arguments
                 );
-                assert!(parsed["chars"].is_number(), "原始字符数要保留: {}", c.arguments);
+                assert!(
+                    parsed["chars"].is_number(),
+                    "原始字符数要保留: {}",
+                    c.arguments
+                );
             }
         }
     }

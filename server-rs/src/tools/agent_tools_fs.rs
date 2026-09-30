@@ -13,6 +13,7 @@
 // 依赖纪律:遍历用手写 `std::fs::read_dir` 递归(仓库无 walkdir/glob/ignore,本批不加依赖);
 // 输出排序稳定(同一输入两次调用结果一致),便于模型缓存与测试断言。
 use crate::models::types::{ExecScope, ToolContext, ToolDefinition};
+use crate::services::task_change_service;
 use crate::tools::registry::ToolRegistry;
 use crate::tools::workspace_guard::safe_workspace_path;
 use serde_json::json;
@@ -21,6 +22,27 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::agent_tools::ToolDeps;
+
+/// 任务侧文件变更记账(2026-09-30 批次 4,PRODCAP-4「交付可审计」)。
+///
+/// 只在**任务会话**记账(`ctx.session_id` 带 `task:` 前缀);聊天侧的文件写由
+/// `services/undo_service` 的 `undo_snapshots` 负责(角色文件区、键是 session_id),
+/// 两份语义不同,不合并。
+/// 记账失败**不改变写操作的结果**(`record` 内部只 warn)——台账少一行是可以解释的,
+/// 把已经落盘的成功写入判成失败反而更糟。
+fn note_change(
+    deps: &ToolDeps,
+    ctx: &ToolContext,
+    rel: &str,
+    path: &Path,
+    baseline: &task_change_service::Baseline,
+) {
+    let Some(task_id) = task_change_service::task_id_of(&ctx.session_id) else {
+        return;
+    };
+    let op = if baseline.exists { "modify" } else { "create" };
+    task_change_service::record(&deps.db, &task_id, rel, op, "tool", baseline, Some(path));
+}
 
 /// 工具名清单(任务工具策略的任务名例外与场景白名单以此为准:
 /// `tools::tool_sets::WORKSPACE_TOOLS` 必须与本清单一致)
@@ -231,6 +253,8 @@ fn run_write(
     if path.exists() {
         scope.check_read_before_write(&path)?;
     }
+    // 基线必须在落盘**之前** capture:落盘之后就拿不到「改动前正文」,diff 与回滚都无从谈起
+    let baseline = task_change_service::Baseline::capture(&path);
     crate::utils::fs_atomic::write_atomic(&path, content.as_bytes())
         .map_err(|e| format!("写入失败({raw}):{e}"))?;
     // 写后刷新读记录:否则本次写入会让 stamp 变化,连着改两次会被自己拦下
@@ -238,6 +262,7 @@ fn run_write(
         scope.note_read(&path, stamp);
     }
     let rel = display_rel(scope.workspace(), &path);
+    note_change(deps, ctx, &rel, &path, &baseline);
     Ok(format!("已写入 {rel}({} 字节)", content.len()))
 }
 
@@ -318,6 +343,7 @@ fn run_edit(
     } else {
         content.replacen(&old, &new, 1)
     };
+    let baseline = task_change_service::Baseline::capture(&path);
     crate::utils::fs_atomic::write_atomic(&path, updated.as_bytes())
         .map_err(|e| format!("写入失败({raw}):{e}"))?;
     // 写后刷新读记录(与 fs_write 同款:否则连续编辑第二次会被自己拦下)
@@ -325,6 +351,7 @@ fn run_edit(
         scope.note_read(&path, stamp);
     }
     let rel = display_rel(scope.workspace(), &path);
+    note_change(deps, ctx, &rel, &path, &baseline);
     Ok(format!("已修改 {rel}(替换 {hits} 处)"))
 }
 

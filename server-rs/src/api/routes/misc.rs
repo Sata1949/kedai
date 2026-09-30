@@ -64,6 +64,14 @@ pub(crate) fn misc_routes() -> Router<Arc<AppState>> {
         .route("/api/tasks/{id}/bind", post(tasks::bind))
         // 任务 LLM 调用追踪(批次 3「调用情况」面板全量补拉)
         .route("/api/tasks/{id}/calls", get(tasks::list_calls))
+        // 任务文件变更台账(2026-09-30 批次 4,PRODCAP-4「交付可审计」):
+        // 清单 / 单文件 diff / 单文件回滚。回滚是 POST(有副作用),diff 与清单只读。
+        .route("/api/tasks/{id}/changes", get(tasks::file_changes))
+        .route("/api/tasks/{id}/changes/diff", get(tasks::file_change_diff))
+        .route(
+            "/api/tasks/{id}/changes/rollback",
+            post(tasks::file_change_rollback),
+        )
         // 音频播放器(bgm/ambient 双通道):读取 / 设置 / 播放列表
         .route("/api/audio", get(audio::get))
         .route("/api/audio/settings", put(audio::update_settings))

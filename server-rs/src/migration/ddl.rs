@@ -635,6 +635,51 @@ pub fn ensure_task_messages_table(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// 任务文件变更台账(2026-09-30 批次 4,PRODCAP-4):工作区文件每次被改动记一行,
+/// 供任务详情展示「改了什么」/ 查看 diff / 单文件回滚。
+/// 文本与 models/db/schema.rs CREATE_TABLES 内的建表语句保持一致(normalize 比对依赖)。
+const TASK_FILE_CHANGES_DDL: &str = r#"
+CREATE TABLE IF NOT EXISTS task_file_changes (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id      TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  step_index   INTEGER,
+  path         TEXT NOT NULL,
+  op           TEXT NOT NULL CHECK (op IN ('create','modify','delete','rollback')),
+  source       TEXT NOT NULL CHECK (source IN ('tool','bash','rollback')),
+  before_hash  TEXT,
+  after_hash   TEXT NOT NULL,
+  before_bytes INTEGER NOT NULL DEFAULT 0,
+  after_bytes  INTEGER NOT NULL DEFAULT 0,
+  before_blob  BLOB,
+  truncated    INTEGER NOT NULL DEFAULT 0,
+  created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_file_changes_task ON task_file_changes(task_id, id);
+"#;
+
+/// 幂等 schema 升级:旧库补建 task_file_changes 表(PRAGMA 探测,已存在跳过)。
+/// 启动时(Db::open)与跨库合并前(merge_databases 两侧)各执行一次。
+pub fn ensure_task_file_changes_table(conn: &Connection) -> Result<(), String> {
+    let mut existing: Vec<String> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(task_file_changes)")
+            .map_err(|e| format!("读取 task_file_changes 列失败: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| format!("遍历 task_file_changes 列失败: {e}"))?;
+        for name in rows.flatten() {
+            existing.push(name);
+        }
+    }
+    if !existing.is_empty() {
+        return Ok(());
+    }
+    conn.execute_batch(TASK_FILE_CHANGES_DDL)
+        .map_err(|e| format!("创建 task_file_changes 表失败: {e}"))?;
+    Ok(())
+}
+
 /// 命令执行审计表(bash 工具与 Android 执行层):每次尝试执行(含被拒绝的)
 /// 落一行,供设置面板审计查看与事后追溯。
 /// 为什么必须落库:root/ADB 级命令不可逆,「谁在何时以什么等级跑了什么」

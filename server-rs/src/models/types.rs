@@ -1420,6 +1420,34 @@ pub struct TaskMessageRecord {
     pub created_at: String,
 }
 
+/// 任务文件变更(task_file_changes 表;2026-09-30 批次 4,PRODCAP-4「交付可审计」):
+/// 任务执行期间工作区文件每次被改动记一行。
+/// GET /api/tasks/{id}/changes 的数组元素;**不含基线正文**(那份在库里,只由 diff /
+/// 回滚端点按需取),清单里成千上万行时正文进响应会把详情点击变成大流量传输。
+/// 序列化字段 snake_case,与 TaskMessageRecord 同风格;任务删除经外键 ON DELETE CASCADE 一并清除。
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskFileChangeRecord {
+    pub id: i64,
+    pub task_id: String,
+    /// 工作区内相对路径(展示口径,不含绝对路径,避免本机路径外泄)
+    pub path: String,
+    /// create | modify | delete | rollback(建表 CHECK 约束)
+    pub op: String,
+    /// tool | bash | rollback —— 记账来源。`tool` 是 fs_write/fs_edit **精确**记录;
+    /// `bash` 是命令前后树扫描的**启发式**检出(检出预算打满时会显式缺项,见 undected 说明)
+    pub source: String,
+    /// 改动前内容哈希;None = 新建或当时读取失败
+    pub before_hash: Option<String>,
+    pub after_hash: String,
+    pub before_bytes: u64,
+    pub after_bytes: u64,
+    /// 基线正文超出留存上限(256KB)→ diff 与回滚都不可用,清单必须看得见这个标记
+    pub truncated: bool,
+    /// 库里是否留有可用的改动前正文(前端据此决定 diff / 回滚入口是否可点)
+    pub has_baseline: bool,
+    pub created_at: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
