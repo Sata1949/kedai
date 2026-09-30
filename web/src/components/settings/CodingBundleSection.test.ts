@@ -96,4 +96,30 @@ describe('CodingBundleSection(编码能力包区)', () => {
     expect(wrapper.text()).toContain('保存失败');
     expect((toggle(wrapper).element as HTMLInputElement).checked).toBe(false);
   });
+
+  // ===== CODE-5:开包并入流程后必须刷新流程库 =====
+
+  it('CODE-5:切换成功后刷新流程库(否则「绑定流程」下拉要重开设置才看得到新流程)', async () => {
+    const { store, wrapper } = mountSection();
+    vi.spyOn(store, 'queueSettingsSave').mockResolvedValue(undefined);
+    const loadSpy = vi.spyOn(store, 'loadAgentFlow').mockResolvedValue(undefined);
+
+    await toggle(wrapper).setValue(true);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(loadSpy, '开包成功后应重拉流程库').toHaveBeenCalledTimes(1);
+  });
+
+  it('CODE-5:保存失败时**不**刷新流程库(未落盘就没有新流程可看)', async () => {
+    const { store, wrapper } = mountSection();
+    vi.spyOn(store, 'queueSettingsSave').mockRejectedValue(new Error('503 服务不可用'));
+    const loadSpy = vi.spyOn(store, 'loadAgentFlow').mockResolvedValue(undefined);
+
+    await toggle(wrapper).setValue(true);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(loadSpy).not.toHaveBeenCalled();
+  });
 });
