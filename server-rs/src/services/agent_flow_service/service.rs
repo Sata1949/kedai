@@ -12,12 +12,39 @@ use super::bundle::{flow_fingerprint, is_reserved_flow_id};
 use super::subflow::{flow_index, sub_flow_ids, walk_sub_flows_from};
 
 impl AgentFlowService {
-    pub fn new(data_dir: PathBuf, registered_tools: Vec<String>) -> Self {
-        let library = AgentFlowLibrary::load(&data_dir);
+    /// `coding_bundle_enabled`:编码能力包开关(CODE-5)的**有效值**(按 task 覆盖层合并后的,
+    /// 见 `api/app_state.rs` 的读取口径)。构造期并入一次,覆盖「库文件已存在但从未注入」的
+    /// 升级路径;运行期用户开/关包由 `api/settings.rs` 的写入钩子调 [`Self::sync_pack_flows`]。
+    pub fn new(
+        data_dir: PathBuf,
+        registered_tools: Vec<String>,
+        coding_bundle_enabled: bool,
+    ) -> Self {
+        let mut library = AgentFlowLibrary::load(&data_dir);
+        if merge_pack_flows(&mut library, pack_flows(coding_bundle_enabled)) {
+            // 落盘失败只记错误:流程库已在内存里可用,下次启动会再试一次(不静默吞掉)
+            if let Err(e) = library.save(&data_dir) {
+                tracing::error!(error = e, "能力包流程并入后写入失败");
+            }
+        }
         AgentFlowService {
             data_dir,
             library,
             registered_tools: registered_tools.into_iter().collect(),
+        }
+    }
+
+    /// 按开关同步能力包流程(CODE-5;设置写入钩子与构造期共用)。
+    ///
+    /// 语义只有两条:**开包 → 并入缺失的包流程**(幂等,已注入过的跳过);
+    /// **关包 → 什么都不做**(已注入的副本留在用户库里,不回收——既定边界,同 LIT-5 Q2)。
+    /// 有变更才落盘,故重复开包不会反复写文件。
+    pub fn sync_pack_flows(&mut self, coding_bundle_enabled: bool) {
+        if !merge_pack_flows(&mut self.library, pack_flows(coding_bundle_enabled)) {
+            return;
+        }
+        if let Err(e) = self.save_library() {
+            tracing::error!(error = e, "能力包流程并入后写入失败");
         }
     }
 

@@ -986,6 +986,27 @@ pub async fn update_settings(
         *state.model.lock().unwrap_or_else(|e| e.into_inner()) = model_name;
     }
 
+    // 编码能力包开关 → 同步内置流程库(CODE-5):开包并入缺失的包流程(幂等),关包不回收。
+    // 放在设置**已落盘且内存已替换**之后,且不让失败反过来影响设置保存——流程库是增强面,
+    // 设置保存是主路径;真写失败时 sync 内部已记 error,这里只补一条「下次启动会再同步」的线索。
+    // 读有效值用 for_mode(Task):该字段是任务侧设置,task 覆盖层可能覆盖扁平值
+    // (与任务侧读法同源,见 settings_service::params)。
+    let coding_enabled = candidate.for_mode(AppMode::Task).task_coding_bundle_enabled;
+    let flow = state.flow.clone();
+    if let Err(e) = state
+        .db_call(move || {
+            flow.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .sync_pack_flows(coding_enabled);
+        })
+        .await
+    {
+        tracing::error!(
+            error = e,
+            "能力包流程同步失败(设置已保存,流程库下次启动会再同步)"
+        );
+    }
+
     Json(json!({ "ok": true, "settings": settings_json(&candidate.for_mode(mode)) }))
         .into_response()
 }

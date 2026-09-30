@@ -870,6 +870,12 @@ export interface AgentFlowConfig {
 export interface AgentFlowLibrary {
   current_flow_id: string | null;
   flows: AgentFlowConfig[];
+  /**
+   * 已注入过的**能力包流程 id**(CODE-5):后端的「防重复注入 + 删过/改过不复活」凭据。
+   * 前端不消费(纯后端簿记),但它确实在线上格式里(非空时才出现),故按可选声明——
+   * 漏声明会让 `check-contract` 判「前端缺字段」。
+   */
+  seeded_pack_ids?: string[];
 }
 
 /** 一条 id 重映射记录(二维批次 7a 导入报告):同 id 内容不同时,导入的那份被分配了新 id */

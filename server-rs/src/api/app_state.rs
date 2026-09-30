@@ -17,7 +17,7 @@ use crate::services::quick_reply_service::QuickReplyService;
 use crate::services::runtime_prompt_service::RuntimePromptService;
 use crate::services::script_authorization_service::ScriptAuthorizationService;
 use crate::services::session_service::SessionService;
-use crate::services::settings_service::{ConnectorPool, RuntimeSettings};
+use crate::services::settings_service::{AppMode, ConnectorPool, RuntimeSettings};
 use crate::services::skill_service::SkillService;
 use crate::services::task_service::TaskService;
 use crate::services::token_service::TokenService;
@@ -300,9 +300,18 @@ impl AppState {
             .into_iter()
             .map(|definition| definition.name)
             .collect();
+        // 编码能力包开关(CODE-5):按**有效值**读(扁平值 + task 覆盖层合并后的口径,
+        // 与任务侧读法同源——见 `settings_service::params::RuntimeSettings::for_mode`)。
+        // 构造期并入一次,运行期开关翻转由 `api/settings.rs` 的写入钩子补(无需重启)。
+        let coding_bundle_enabled = settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .for_mode(AppMode::Task)
+            .task_coding_bundle_enabled;
         let flow = Arc::new(Mutex::new(AgentFlowService::new(
             config.data_dir.clone(),
             registered_tools,
+            coding_bundle_enabled,
         )));
 
         // 任务执行者库(执行者与角色扮演角色卡解耦);空库即「只有通用执行者」

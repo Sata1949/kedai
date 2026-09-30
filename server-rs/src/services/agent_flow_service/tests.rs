@@ -195,7 +195,12 @@ fn load_legacy_single_flow_migrates() {
 #[test]
 fn service_set_select_remove_roundtrip() {
     let dir = TempDataDir::new("flow-svc");
-    let mut svc = AgentFlowService::new(dir.path().to_path_buf(), tools().into_iter().collect());
+    // 关包构造(CODE-5 起 new 多一个开关参数):本用例只验读写回合,与包无关
+    let mut svc = AgentFlowService::new(
+        dir.path().to_path_buf(),
+        tools().into_iter().collect(),
+        false,
+    );
     // 内置默认流程已在首次加载时注入
     assert_eq!(svc.get_library().flows.len(), 1);
 
@@ -223,7 +228,11 @@ fn service_set_select_remove_roundtrip() {
     );
 
     // 重新加载(持久化验证)
-    let svc2 = AgentFlowService::new(dir.path().to_path_buf(), tools().into_iter().collect());
+    let svc2 = AgentFlowService::new(
+        dir.path().to_path_buf(),
+        tools().into_iter().collect(),
+        false,
+    );
     assert_eq!(svc2.get_library().flows.len(), 1);
 }
 
@@ -592,6 +601,7 @@ fn library(flows: Vec<AgentFlowConfig>) -> AgentFlowLibrary {
     AgentFlowLibrary {
         current_flow_id: flows.first().map(|f| f.id.clone()),
         flows,
+        seeded_pack_ids: Vec::new(),
     }
 }
 
@@ -610,7 +620,12 @@ fn save_flow(svc: &mut AgentFlowService, name: &str, steps: Vec<PlanStep>) -> St
 }
 
 fn service(dir: &TempDataDir) -> AgentFlowService {
-    AgentFlowService::new(dir.path().to_path_buf(), tools().into_iter().collect())
+    // 关包构造:本文件绝大多数用例与能力包无关,保持「今天的内置集」是默认前提
+    AgentFlowService::new(
+        dir.path().to_path_buf(),
+        tools().into_iter().collect(),
+        false,
+    )
 }
 
 #[test]
@@ -1712,4 +1727,172 @@ fn flow_bundle_wire_key_matches_constant() {
     for key in ["exported_at", "root_id", "flows"] {
         assert!(value.get(key).is_some(), "线格式缺键:{key}");
     }
+}
+
+// ==================== CODE-5:编码流程预设集(包开关并入) ====================
+
+/// 包流程可用的工具集:从**单一出处**常量派生(工作区族清单 + bash),不手抄——
+/// 工具族改名时本函数自动跟随;而流程常量里写死的字面量由 `validate_flow` 兜底报错。
+fn pack_tools() -> BTreeSet<String> {
+    crate::tools::tool_sets::WORKSPACE_TOOLS
+        .iter()
+        .map(|s| (*s).to_string())
+        .chain(std::iter::once(crate::tools::bash::TOOL_NAME.to_string()))
+        .collect()
+}
+
+fn pack_service(dir: &TempDataDir, enabled: bool) -> AgentFlowService {
+    AgentFlowService::new(
+        dir.path().to_path_buf(),
+        pack_tools().into_iter().collect(),
+        enabled,
+    )
+}
+
+/// 关包:内置集与今天**逐条一致**,且库文件不多出 `seeded_pack_ids` 键
+/// (加性字段在空值时不落盘——旧格式逐字节不变)。
+#[test]
+fn pack_flows_absent_when_disabled() {
+    let dir = TempDataDir::new("pack-off");
+    let svc = pack_service(&dir, false);
+    assert_eq!(svc.get_library().flows.len(), 1);
+    assert_eq!(svc.get_library().flows[0].id, "builtin-coordination");
+    assert!(svc.get_library().seeded_pack_ids.is_empty());
+    let text = std::fs::read_to_string(dir.join("agent_flows.json")).unwrap();
+    assert!(
+        !text.contains("seeded_pack_ids"),
+        "关包时库文件不得多出该键:{text}"
+    );
+}
+
+/// 开包:1+2 条,且**既有条目各字段逐字不变**(按序列化形态比对,比字段级更严),
+/// `current_flow_id` 不因并入而改变(`seeded_pack_ids` 是顺序化「改过/删过不复活」的凭据)。
+#[test]
+fn pack_flows_merged_when_enabled_and_builtin_untouched() {
+    let dir = TempDataDir::new("pack-on");
+    let svc = pack_service(&dir, true);
+    let lib = svc.get_library();
+    assert_eq!(
+        lib.flows.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
+        vec![
+            "builtin-coordination",
+            "builtin-code-review",
+            "builtin-code-impl"
+        ],
+        "既有条目位置不变,包流程按常量表顺序追加"
+    );
+    let builtin = lib
+        .flows
+        .iter()
+        .find(|f| f.id == "builtin-coordination")
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(builtin).unwrap(),
+        serde_json::to_value(builtin_flow()).unwrap(),
+        "既有内置流程必须逐字不变(并入只 push 新条目)"
+    );
+    assert_eq!(
+        lib.seeded_pack_ids,
+        vec!["builtin-code-review", "builtin-code-impl"]
+    );
+    assert_eq!(
+        lib.current_flow_id.as_deref(),
+        Some("builtin-coordination"),
+        "并入不得改当前选中"
+    );
+}
+
+/// 升级路径:库文件已存在(关包时代建的)时开包 → 注入并落盘;重载后仍在。
+#[test]
+fn pack_flows_merge_into_existing_library_and_persist() {
+    let dir = TempDataDir::new("pack-upgrade");
+    let lib = AgentFlowLibrary {
+        current_flow_id: Some("builtin-coordination".into()),
+        flows: vec![builtin_flow()],
+        seeded_pack_ids: Vec::new(),
+    };
+    lib.save(dir.path()).unwrap();
+
+    let svc = pack_service(&dir, true);
+    assert_eq!(svc.get_library().flows.len(), 3);
+    // 落盘验证:重新 load 而不是只看内存
+    let reloaded = AgentFlowLibrary::load(dir.path());
+    assert_eq!(reloaded.flows.len(), 3, "注入结果必须已落盘");
+    assert_eq!(reloaded.seeded_pack_ids.len(), 2);
+}
+
+/// 幂等 + 不复活 + 不回收:重复 sync 不重复注入;用户删过的再 sync 不复活;
+/// 关包不回收已注入副本(既定边界,同 LIT-5 Q2)。
+#[test]
+fn pack_sync_is_idempotent_and_respects_user_changes() {
+    let dir = TempDataDir::new("pack-idem");
+    let mut svc = pack_service(&dir, true);
+    assert_eq!(svc.get_library().flows.len(), 3);
+
+    svc.sync_pack_flows(true);
+    svc.sync_pack_flows(true);
+    assert_eq!(svc.get_library().flows.len(), 3, "重复 sync 不重复注入");
+
+    // 删过不复活
+    svc.remove("builtin-code-review").unwrap();
+    assert_eq!(svc.get_library().flows.len(), 2);
+    svc.sync_pack_flows(true);
+    assert_eq!(svc.get_library().flows.len(), 2, "用户删过的包流程不得复活");
+
+    // 关包不回收
+    svc.sync_pack_flows(false);
+    assert_eq!(
+        svc.get_library().flows.len(),
+        2,
+        "关包不回收已注入副本(既定边界);被用户删掉的那条当然也不回来"
+    );
+}
+
+/// 用户改过的包流程:再 sync 不覆盖(同 id 已在 seeded 里 → 跳过)。
+#[test]
+fn edited_pack_flow_is_not_overwritten_by_sync() {
+    let dir = TempDataDir::new("pack-edit");
+    let mut svc = pack_service(&dir, true);
+    let mut edited = svc.flow_by_id("builtin-code-review").unwrap().clone();
+    edited.name = "我的审查流程".into();
+    svc.set(edited).unwrap();
+
+    svc.sync_pack_flows(true);
+    let got = svc.flow_by_id("builtin-code-review").unwrap();
+    assert_eq!(got.name, "我的审查流程", "用户改过的包流程不得被覆盖回去");
+}
+
+/// 常量自检:2 条、id 稳定、过 `validate_flow`(用真实工具集),
+/// 且**工具面刻意分工**——审查流程只读(物理上改不了文件),实现流程才放开写与 bash。
+#[test]
+fn coding_pack_flows_pass_validate_flow() {
+    let flows = coding_pack_flows();
+    assert_eq!(flows.len(), 2, "首版清单是 2 条(Q5=(a) 拍板)");
+    assert_eq!(
+        flows.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
+        vec!["builtin-code-review", "builtin-code-impl"]
+    );
+    for f in &flows {
+        validate_flow(f, &pack_tools())
+            .unwrap_or_else(|e| panic!("包流程「{}」未过 validate_flow:{e}", f.name));
+    }
+
+    let readonly: Vec<&str> = crate::tools::tool_sets::WORKSPACE_READONLY_TOOLS.to_vec();
+    let review = &flows[0];
+    for s in &review.steps {
+        let tools = s.tools.clone().unwrap_or_default();
+        assert!(
+            tools.iter().all(|t| readonly.contains(&t.as_str())),
+            "审查流程的步骤「{}」只能用只读工具,实际:{tools:?}",
+            s.name
+        );
+    }
+
+    let impl_flow = &flows[1];
+    let uses_bash = impl_flow.steps.iter().any(|s| {
+        s.tools
+            .as_ref()
+            .is_some_and(|t| t.iter().any(|x| x == "bash"))
+    });
+    assert!(uses_bash, "实现流程应包含可执行命令的自测步骤(D4=(a) 拍板)");
 }

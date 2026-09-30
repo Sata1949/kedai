@@ -55,6 +55,7 @@ impl AgentFlowLibrary {
                             let lib = AgentFlowLibrary {
                                 current_flow_id: Some(old.id.clone()),
                                 flows: vec![old],
+                                seeded_pack_ids: Vec::new(),
                             };
                             if let Err(e) = lib.save(data_dir) {
                                 tracing::error!(error = e, "旧配置迁移写入失败");
@@ -73,9 +74,12 @@ impl AgentFlowLibrary {
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // 首次运行:注入内置协调流程,开箱即用
+                // (能力包流程**不在这里**注入:load 读不到 settings,包并入统一走
+                //  `pack_flows`/`merge_pack_flows`,由构造期与设置写入钩子调用——单一出处)
                 let lib = AgentFlowLibrary {
                     current_flow_id: Some(builtin_flow().id.clone()),
                     flows: vec![builtin_flow()],
+                    seeded_pack_ids: Vec::new(),
                 };
                 let _ = lib.save(data_dir);
                 lib
@@ -104,6 +108,223 @@ fn finalize_library(mut lib: AgentFlowLibrary) -> AgentFlowLibrary {
         lib.current_flow_id = lib.flows.first().map(|f| f.id.clone());
     }
     lib
+}
+
+// ==================== 能力包流程并入(CODE-5,2026-09-30) ====================
+//
+// 并入缝的**单一出处**:`pack_flows`(选包)+ `merge_pack_flows`(合库)。LIT-5(文学包
+// 流程预设)落地时**在此加一行**、复用同一个 merge,不另开第二个缝(见 `计划.md` CODE 章)。
+//
+// 三条纪律(与 `builtin_flow` 的既有语义一致):
+//   ① 既有条目**逐字不动**——只 push 新条目、不改 `current_flow_id`(并入≠改选中);
+//   ② **幂等 + 不复活**:id 记进 `seeded_pack_ids` 后永不再注入,之后用户删它改它都不影响
+//      ——「注入过」本身就是凭据,故不需要墓碑字段(`计划.md` CODE-5 的 D3=(a));
+//   ③ **关包不回收**:已注入的副本留在用户库里(既定边界,同 LIT-5 的 Q2 裁定)。
+
+/// 按包开关给出**应并入**的包流程(每个包一行;谁开谁并入)。
+///
+/// 这是「开关 → 流程常量」的唯一映射点:调用方(构造期与设置写入钩子)只需把开关传进来,
+/// 不必知道包里有几条流程、id 叫什么。
+pub fn pack_flows(coding_bundle_enabled: bool) -> Vec<AgentFlowConfig> {
+    let mut packs: Vec<AgentFlowConfig> = Vec::new();
+    if coding_bundle_enabled {
+        packs.extend(coding_pack_flows());
+    }
+    // LIT-5 落地时在此追加文学包一行(`literary_pack_flows()`),不新开缝
+    packs
+}
+
+/// 把包流程**并入**库(加性):返回是否发生了变更(调用方据此决定要不要落盘)。
+///
+/// 判定只有一条:`id` 已在 `seeded_pack_ids` → 跳过;否则 push 并记 id。
+/// 因此「用户改过的包流程」与「用户删过的包流程」都不会被覆盖或复活——它们要么以用户版
+/// 存在于 `flows`(同 id)、要么已被删且 id 仍在 `seeded_pack_ids` 里。
+pub fn merge_pack_flows(lib: &mut AgentFlowLibrary, packs: Vec<AgentFlowConfig>) -> bool {
+    let mut changed = false;
+    for pack in packs {
+        if pack.id.trim().is_empty() || lib.seeded_pack_ids.iter().any(|id| id == &pack.id) {
+            continue;
+        }
+        lib.seeded_pack_ids.push(pack.id.clone());
+        lib.flows.push(pack);
+        changed = true;
+    }
+    changed
+}
+
+/// 编码能力包的内置流程(**常量**,首版 2 条;Q5=(a) 拍板)。
+///
+/// 每条都按 `validate_flow` 的约束自检(步骤非空、至少一个 `action=direct && generates=true`、
+/// reflect 步骤不带 `generates`/`system_prompt`/子流程、`tools ⊆ 已注册工具`),
+/// 由 `tests.rs::coding_pack_flows_pass_validate_flow` 用**真实注册工具集**锁死。
+///
+/// 两条流程的**工具面刻意不同**(内容级安全,不靠模型自觉):
+///   - 审查流程全程只用**只读三件套**,审查在物理上不可能改动工作区;
+///   - 实现流程才放开 `fs_write`/`fs_edit`/`bash`,并把「被拒/失败如实报告」写进正文。
+///
+/// 末步用**严格档**(`kind=strict`,单次调用、不下发任何工具):它的职责只是把结论写成报告,
+/// 不需要再动手;`tools` 留空,故严格档与「无工具步骤」在本流程里是同一执行路径。
+pub fn coding_pack_flows() -> Vec<AgentFlowConfig> {
+    // 工具名从**单一出处**常量取(`agent_tools_fs` 的逐工具名 + bash),不写字面量二次
+    use crate::tools::agent_tools_fs::{EDIT_TOOL, GLOB_TOOL, GREP_TOOL, READ_TOOL, WRITE_TOOL};
+    use crate::tools::bash::TOOL_NAME as BASH_TOOL;
+    let readonly: Vec<String> = vec![
+        READ_TOOL.to_string(),
+        GLOB_TOOL.to_string(),
+        GREP_TOOL.to_string(),
+    ];
+    let full: Vec<String> = vec![
+        READ_TOOL.to_string(),
+        WRITE_TOOL.to_string(),
+        EDIT_TOOL.to_string(),
+        GLOB_TOOL.to_string(),
+        GREP_TOOL.to_string(),
+        BASH_TOOL.to_string(),
+    ];
+    // 自测步骤:命令 + 读文件(看构建/测试输出)
+    let selftest_tools: Vec<String> = vec![BASH_TOOL.to_string(), READ_TOOL.to_string()];
+
+    vec![
+        AgentFlowConfig {
+            id: "builtin-code-review".into(),
+            name: "代码审查流程".into(),
+            description: Some(
+                "Kedai 内置编码流程:只读侦察 → 逐项审查 → 核验结论 → 出具报告。\
+                 全程只下发只读工具,审查不会改动工作区。"
+                    .into(),
+            ),
+            enabled: true,
+            max_parallel_nodes: None,
+            steps: vec![
+                PlanStep {
+                    id: "scope".into(),
+                    name: "确定审查范围".into(),
+                    enabled: true,
+                    goal: "先读工作区里的项目约定文件(AGENTS.md / CLAUDE.md / README 等)与相关代码,\
+                           确定本次审查的范围与关注点;本步只读不改,产出简短的审查清单。"
+                        .into(),
+                    action: "direct".into(),
+                    generates: None,
+                    tools: Some(readonly.clone()),
+                    tool_choice: Some("auto".into()),
+                    ..Default::default()
+                },
+                PlanStep {
+                    id: "review".into(),
+                    name: "逐项审查".into(),
+                    enabled: true,
+                    goal: "按清单逐项审查,对每个问题给出**位置(文件:行)**、严重度、依据与修复建议;\
+                           没有问题的项也如实说明已看过。只用只读工具,不得修改任何文件。"
+                        .into(),
+                    action: "direct".into(),
+                    generates: Some(true),
+                    tools: Some(readonly.clone()),
+                    tool_choice: Some("auto".into()),
+                    ..Default::default()
+                },
+                PlanStep {
+                    id: "verify".into(),
+                    name: "核验结论".into(),
+                    enabled: true,
+                    goal: "核验审查结论:是否覆盖全部待审文件、每条问题是否都有位置与依据、\
+                           是否把风格偏好当成缺陷、有无未经核实的猜测;输出 PASS 或 FAIL 并给出理由。"
+                        .into(),
+                    action: "reflect".into(),
+                    generates: None,
+                    ..Default::default()
+                },
+                PlanStep {
+                    id: "finalize".into(),
+                    name: "出具报告".into(),
+                    enabled: true,
+                    goal: "按核验结论补齐遗漏,输出最终审查报告:按严重度分组,每条含位置、问题、\
+                           依据与建议;未见问题的部分明确写出「未见问题」。"
+                        .into(),
+                    action: "direct".into(),
+                    generates: Some(true),
+                    kind: Some("strict".into()),
+                    ..Default::default()
+                },
+            ],
+        },
+        AgentFlowConfig {
+            id: "builtin-code-impl".into(),
+            name: "实现·自测·复盘流程".into(),
+            description: Some(
+                "Kedai 内置编码流程:阅读与计划 → 最小实现 → 跑验证并修复 → 复盘核验 → 交付摘要。\
+                 自测步骤可执行命令;命令被拒或失败时如实报告,不假装通过。"
+                    .into(),
+            ),
+            enabled: true,
+            max_parallel_nodes: None,
+            steps: vec![
+                PlanStep {
+                    id: "plan".into(),
+                    name: "阅读与计划".into(),
+                    enabled: true,
+                    goal: "先读项目约定文件(AGENTS.md / CLAUDE.md / README 等)与相关代码,\
+                           再产出不超过 300 字的实施计划:改哪些文件、怎么验证、风险点是什么;\
+                           本步只读不改。"
+                        .into(),
+                    action: "direct".into(),
+                    generates: None,
+                    tools: Some(readonly.clone()),
+                    tool_choice: Some("auto".into()),
+                    ..Default::default()
+                },
+                PlanStep {
+                    id: "implement".into(),
+                    name: "按计划实现".into(),
+                    enabled: true,
+                    goal: "按计划做**最小改动**:改前先读目标文件、只改与目标相关的部分,\
+                           不顺手重构无关代码;完成后简述改了哪些文件、为什么这么改。"
+                        .into(),
+                    action: "direct".into(),
+                    generates: Some(true),
+                    tools: Some(full.clone()),
+                    tool_choice: Some("auto".into()),
+                    ..Default::default()
+                },
+                PlanStep {
+                    id: "selftest".into(),
+                    name: "跑验证并修复".into(),
+                    enabled: true,
+                    goal: "运行计划里的验证命令(构建 / 测试 / lint)并按结果修复,直到通过;\
+                           命令被拒绝、工具不可用或命令失败,**都必须如实报告是哪一条没跑通、\
+                           为什么**,不得假装通过、不得把「没跑」说成「通过」。"
+                        .into(),
+                    action: "direct".into(),
+                    generates: None,
+                    tools: Some(selftest_tools.clone()),
+                    tool_choice: Some("auto".into()),
+                    ..Default::default()
+                },
+                PlanStep {
+                    id: "reflect".into(),
+                    name: "复盘核验".into(),
+                    enabled: true,
+                    goal: "核验本次实现:是否达成任务目标、有无未说明的副作用或未验证的改动、\
+                           验证证据是否真实(跑了什么命令、结果如何);输出 PASS 或 FAIL 并给出理由。"
+                        .into(),
+                    action: "reflect".into(),
+                    generates: None,
+                    ..Default::default()
+                },
+                PlanStep {
+                    id: "wrapup".into(),
+                    name: "交付摘要".into(),
+                    enabled: true,
+                    goal: "按复盘结论输出交付摘要:改了什么、为何这么改、验证证据(跑了什么、结果如何)、\
+                           未做或未验证的部分;不复述过程细节。"
+                        .into(),
+                    action: "direct".into(),
+                    generates: Some(true),
+                    kind: Some("strict".into()),
+                    ..Default::default()
+                },
+            ],
+        },
+    ]
 }
 
 /// 内置默认流程:与 Kedai harness 协调的文学创作/角色扮演流程。
