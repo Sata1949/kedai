@@ -294,16 +294,35 @@ pub struct ChangePathQuery {
 /// GET /api/tasks/{id}/changes:任务文件变更清单(按发生顺序)。
 ///
 /// **空清单返回空数组**,端点不猜语义 —— 「本轮没改文件」与「没记账」由前端显式区分展示。
+/// **扫描缺项(`undected`)是顶层字段,不是清单里的行**(2026-09-30 批次 4b):
+/// bash 侧树扫描没扫完时记一条 `task_scan_marks`,这里聚合成本字段下发——
+/// 缺项不是「一个文件改动」,混进 `changes` 会同时污染清单长度语义与回滚定位。
 /// 本批不发 `file_changed` 事件(实时推送留待 PRODCAP-1 的 `task_events` 回放落地,
 /// 理由见 `计划.md` PRODCAP-4 条目):前端在打开详情与任务进终态时各拉一次。
 pub async fn file_changes(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     let db = state.db.clone();
+    let list_id = id.clone();
     match state
-        .db_call(move || crate::services::task_change_service::list(&db, &id))
+        .db_call(move || crate::services::task_change_service::list(&db, &list_id))
         .await
     {
         Err(e) => db_err(&e),
-        Ok(changes) => Json(json!({ "changes": changes })).into_response(),
+        Ok(changes) => {
+            let mark_db = state.db.clone();
+            let undected_reason = state
+                .db_call(move || {
+                    crate::services::task_change_service::latest_scan_mark(&mark_db, &id)
+                })
+                .await
+                .ok()
+                .flatten();
+            Json(json!({
+                "changes": changes,
+                "undected": undected_reason.is_some(),
+                "undected_reason": undected_reason,
+            }))
+            .into_response()
+        }
     }
 }
 
@@ -318,7 +337,9 @@ fn resolve_change_path(
         return Err(Box::new(not_found("任务不存在")));
     };
     let Some(workspace) = task.workspace.as_ref() else {
-        return Err(Box::new(validation("本任务未绑定工作区,没有可比对的文件变更基线")));
+        return Err(Box::new(validation(
+            "本任务未绑定工作区,没有可比对的文件变更基线",
+        )));
     };
     let data_dir = state.config.data_dir.clone();
     match crate::tools::workspace_guard::safe_workspace_path(

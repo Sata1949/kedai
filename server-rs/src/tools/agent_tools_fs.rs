@@ -22,6 +22,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::agent_tools::ToolDeps;
+// 遍历实现与排除表/相对路径展示:2026-09-30 批次 4b 起统一在 workspace_scan
+// (fs_glob/fs_grep 与 bash 侧扫描共用同一份遍历,见该模块头注释)
+use super::workspace_scan::{display_rel, walk_tree, EXCLUDED_SEGMENTS};
 
 /// 任务侧文件变更记账(2026-09-30 批次 4,PRODCAP-4「交付可审计」)。
 ///
@@ -63,17 +66,6 @@ const READ_MAX_LINES: usize = 2000;
 const MATCH_DEFAULT_LIMIT: usize = 200;
 const MATCH_MAX_LIMIT: usize = 1000;
 
-/// 遍历时**任一路径段**命中即跳过的目录名(版本库/构建产物/依赖/索引/数据目录)。
-/// 这些目录要么体积巨大、要么内容不属于「工作区源码」的语义范围。
-const EXCLUDED_SEGMENTS: &[&str] = &[
-    ".git",
-    "target",
-    "node_modules",
-    "dist",
-    ".kedai-index",
-    "data",
-];
-
 /// 注册工作区文件工具族。`deps` 提供 DATA_DIR(路径闸门的二次防线用)。
 ///
 /// 可见性:始终注册,下发与否由任务工具策略按「本任务是否绑定工作区」过滤
@@ -92,14 +84,6 @@ fn scope_of(ctx: &ToolContext) -> Result<Arc<ExecScope>, String> {
     ctx.scope
         .clone()
         .ok_or_else(|| "本任务未绑定工作区,工作区文件工具不可用".to_string())
-}
-
-/// 工作区内的展示用相对路径(正斜杠分隔);不在工作区内时退回绝对路径
-fn display_rel(root: &Path, path: &Path) -> String {
-    match path.strip_prefix(root) {
-        Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
-        Err(_) => path.to_string_lossy().to_string(),
-    }
 }
 
 /// 解析工作区内的路径(闸门入口 + 作用域取值合一,五个工具共用)
@@ -542,36 +526,13 @@ fn run_grep(
 
 // ==================== 共用件 ====================
 
-/// 手写 `read_dir` 递归遍历文件(目录不存在/不可读即静默跳过——闸门已确保根可用;
+/// 遍历工作区文件(目录不存在/不可读即静默跳过——闸门已确保根可用;
 /// 排除表按**路径段**命中,故 `.git/objects/x` 与 `a/.git/x` 都跳过)。
-/// 回调收到的是文件的绝对路径;目录序不保证稳定,调用方自行排序。
+/// 回调收到的是文件的绝对路径;遍历按目录内子项排序,顺序稳定。
+/// 实现统一在 `tools::workspace_scan::walk_tree`(2026-09-30 批次 4b 收拢为单一出处,
+/// 并把每条目的元数据调用从三次降为一次 lstat)。
 fn walk_files(dir: &Path, f: &mut impl FnMut(&Path)) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut children: Vec<PathBuf> = entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
-    children.sort();
-    for path in children {
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-        // 符号链接不跟随:闸门已禁路径里的链接,这里再确保遍历本身不会绕到工作区外
-        if std::fs::symlink_metadata(&path)
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(true)
-        {
-            continue;
-        }
-        if path.is_dir() {
-            if EXCLUDED_SEGMENTS.contains(&name.as_str()) {
-                continue;
-            }
-            walk_files(&path, f);
-        } else if path.is_file() {
-            f(&path);
-        }
-    }
+    let _ = walk_tree(dir, EXCLUDED_SEGMENTS, None, &mut |path, _md| f(path));
 }
 
 /// 通配模式 → 正则:先归一分隔符,再 `**`→`.*`、`*`→`[^/]*`、`?`→`[^/]`,

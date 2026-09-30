@@ -419,6 +419,42 @@ fn merge_aligns_schema_version_on_output() {
     );
 }
 
+/// 【断言 8】合并预补 DDL:新表必须在**两侧**各建一次。
+/// 构造「N-1 库 ↔ N 库」的真实跨版本形态:基线侧是没有新表的旧库(拿当前库删掉新表模拟,
+/// 而不是用 0.3.0-beta 冻结基线——那份基线在别的表上本来就有差异,合并会先报 schema 冲突,
+/// 测不出新表这一项),源侧是含新表的当前库。
+/// 若基线侧漏补,合并会以「基线缺少源表 task_scan_marks」中止。
+#[test]
+fn merge_prealigns_new_table_on_both_sides() {
+    let baseline = temp_dir("merge-prealign-baseline");
+    Db::open(&baseline.join("kedai.db"), &baseline).expect("基线库应能建立");
+    {
+        let conn = Connection::open(baseline.join("kedai.db")).unwrap();
+        conn.execute_batch("DROP TABLE task_scan_marks")
+            .expect("应能删掉新表以模拟 N-1 旧库");
+    }
+    assert!(
+        !table_exists(&baseline.join("kedai.db"), "task_scan_marks"),
+        "前置条件:基线侧应已不含 task_scan_marks"
+    );
+
+    let source = temp_dir("merge-prealign-source");
+    Db::open(&source.join("kedai.db"), &source).expect("源侧全新库应能建立");
+    assert!(
+        table_exists(&source.join("kedai.db"), "task_scan_marks"),
+        "前置条件:全新库应含 task_scan_marks(建表批口径)"
+    );
+
+    let work_root = temp_dir("merge-prealign-work");
+    let work = work_root.join("work");
+    kedai_server::migration::merge_data_dirs(&baseline, &source, &work)
+        .expect("N-1 基线 + 当前源快照应能合并(新表须在两侧预补)");
+    assert!(
+        table_exists(&work.join("kedai.db"), "task_scan_marks"),
+        "合并产物应包含 task_scan_marks"
+    );
+}
+
 /// 【断言 7】静态护栏:migration/ddl.rs 每个 `*_DDL` 里的 CREATE 语句,
 /// 必须能在 schema.rs 的 CREATE_TABLES 原文里找到(normalize_sql 后)——
 /// 漏同步的后果是合并期 schema 比对把同一张表判成冲突 → 合并直接停止。

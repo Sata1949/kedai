@@ -21,9 +21,9 @@ pub use ddl::{
     ensure_exec_audit_table, ensure_llm_requests_usage_columns, ensure_memory_entries_fts_backfill,
     ensure_memory_entries_pinned_column, ensure_perf_indexes, ensure_skills_progressive_columns,
     ensure_task_file_changes_table, ensure_task_llm_calls_finish_reason_column,
-    ensure_task_messages_table, ensure_task_subtasks_finished_at_column,
-    ensure_tasks_executor_id_column, ensure_tasks_flow_columns, ensure_tasks_task_mode_column,
-    ensure_tasks_workspace_column,
+    ensure_task_messages_table, ensure_task_scan_marks_table,
+    ensure_task_subtasks_finished_at_column, ensure_tasks_executor_id_column,
+    ensure_tasks_flow_columns, ensure_tasks_task_mode_column, ensure_tasks_workspace_column,
 };
 pub use merge::{merge_data_dirs, MergeReport, TableReport};
 

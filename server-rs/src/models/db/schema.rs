@@ -462,6 +462,19 @@ CREATE TABLE IF NOT EXISTS task_file_changes (
   created_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_task_file_changes_task ON task_file_changes(task_id, id);
+
+-- 任务扫描标记(2026-09-30 批次 4b,PRODCAP-4「交付可审计」):bash 侧启发式树扫描
+-- **单次未能完整检出**时记一行(reason 为中文说明),供任务详情说清「不可检测 ≠ 没有变更」。
+-- 为什么不塞进 task_file_changes:那条台账的一行 = 一个**文件改动**,扫描缺项不是改动;
+-- 且「命令改了文件但扫描没扫完」与「命令什么都没改」都可能**零行**,把标记混进改动行
+-- 会同时污染清单长度语义与回滚定位(见 docs/契约.md「任务文件变更台账」小节)。
+CREATE TABLE IF NOT EXISTS task_scan_marks (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id    TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  reason     TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_scan_marks_task ON task_scan_marks(task_id, id);
 "#;
 
 /// 暴露建表 SQL 供迁移一致性测试比对(旧库 ALTER 补列后应与新建表 schema normalize 一致)

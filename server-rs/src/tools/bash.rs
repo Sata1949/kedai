@@ -211,6 +211,22 @@ async fn run(
         v
     };
 
+    // 批次 4b:前扫描(命令执行前的工作区快照,≤256KB 的文件按预算驻留正文)。
+    // 只在「任务 + 绑定了工作区」时扫——聊天路径不记账(与 task_change_service 同口径);
+    // 被总开关拒绝的命令在上方已 return,不会被扫到。
+    let scan_root = if is_task {
+        ctx.scope
+            .as_deref()
+            .map(|scope| scope.workspace().to_path_buf())
+    } else {
+        None
+    };
+    let scan_task_id = crate::services::task_change_service::task_id_of(&ctx.session_id);
+    let pre_scan = match &scan_root {
+        Some(root) => Some(scan_pre_blocking(root.clone()).await),
+        None => None,
+    };
+
     let result = exec::execute(
         ExecRequest {
             command: command.clone(),
@@ -220,6 +236,26 @@ async fn run(
         &allowed,
     )
     .await;
+
+    // 批次 4b:任务 + 绑定工作区时,命令**前后各扫一次**工作区(启发式检出)。
+    // 放在 exec 之后、分派之前:Ok/Err 两臂都要记账——命令失败也可能改了一半文件。
+    // 三条纪律:① 扫描是旁路观测,记账失败只能 warn,不改命令结果;
+    // ② 同步密集 IO 一律 spawn_blocking(直接占 tokio worker 会拖慢 SSE 与其它请求);
+    // ③ 取消(批次 1)只保证**调用方**立即返回,scan_blocking 里的扫描取消不掉,
+    //    会跑完本次预算才释放驻留——注释与留档都按这个措辞,不许承诺做不到的事。
+    if let (Some(root), Some(task_id), Some((pre_entries, pre_outcome))) =
+        (scan_root.as_ref(), scan_task_id.as_ref(), pre_scan.as_ref())
+    {
+        let (post_entries, post_outcome) = scan_post_blocking(root.clone()).await;
+        let plan = crate::tools::workspace_scan::plan_changes(
+            pre_entries,
+            pre_outcome,
+            &post_entries,
+            &post_outcome,
+            crate::tools::workspace_scan::SCAN_MAX_CHANGES,
+        );
+        crate::tools::workspace_scan::persist_plan(db, task_id, root, &plan);
+    }
 
     match result {
         Ok(out) => {
@@ -264,6 +300,51 @@ async fn run(
                 },
             );
             Err(e)
+        }
+    }
+}
+
+/// 前扫描(同步密集 IO → 阻塞线程池)。线程异常退出按「扫描失败」处理:
+/// 扫描是旁路观测,绝不让它的 panic 传染命令结果。
+async fn scan_pre_blocking(
+    root: std::path::PathBuf,
+) -> (
+    Vec<crate::tools::workspace_scan::PreEntry>,
+    crate::tools::workspace_scan::ScanOutcome,
+) {
+    use crate::tools::workspace_scan as scan;
+    match tokio::task::spawn_blocking(move || scan::scan_pre(&root, &scan::ScanBudget::default()))
+        .await
+    {
+        Ok(result) => result,
+        Err(e) => {
+            tracing::warn!(error = %e, "前扫描线程异常退出");
+            (
+                Vec::new(),
+                scan::ScanOutcome::Failed("扫描线程异常退出".into()),
+            )
+        }
+    }
+}
+
+/// 后扫描(同上;不驻留正文,改动文件由 `record` 现读)
+async fn scan_post_blocking(
+    root: std::path::PathBuf,
+) -> (
+    Vec<crate::tools::workspace_scan::PostEntry>,
+    crate::tools::workspace_scan::ScanOutcome,
+) {
+    use crate::tools::workspace_scan as scan;
+    match tokio::task::spawn_blocking(move || scan::scan_post(&root, &scan::ScanBudget::default()))
+        .await
+    {
+        Ok(result) => result,
+        Err(e) => {
+            tracing::warn!(error = %e, "后扫描线程异常退出");
+            (
+                Vec::new(),
+                scan::ScanOutcome::Failed("扫描线程异常退出".into()),
+            )
         }
     }
 }

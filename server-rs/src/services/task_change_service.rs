@@ -83,7 +83,9 @@ impl Baseline {
     }
 }
 
-fn hash_hex(bytes: &[u8]) -> String {
+/// SHA-256 的十六进制文本。除 `record`/`capture` 自用外,扫描侧
+/// (`tools::workspace_scan`)也用它给**驻留正文**算前态哈希——同一实现,不复制。
+pub(crate) fn hash_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     let mut s = String::with_capacity(64);
     for b in digest.iter() {
@@ -153,6 +155,40 @@ pub fn record(
             false
         }
     }
+}
+
+/// 记一条**扫描标记**:bash 侧的启发式树扫描单次未能完整检出时调用。
+///
+/// 为什么单独一张表、而不是混进变更行:台账一行 = 一个**文件改动**,而「扫不全」不是改动;
+/// 且「命令改了文件但没扫完」与「命令什么都没改」都可能零行,标记混进改动行会同时
+/// 污染清单长度语义与回滚定位(见 `docs/契约.md`「任务文件变更台账」小节)。
+/// 失败只 warn:标记是旁路观测,不影响命令结果。
+pub fn record_scan_mark(db: &Arc<Db>, task_id: &str, reason: &str) -> bool {
+    let conn = db.write();
+    let result = conn.execute(
+        "INSERT INTO task_scan_marks (task_id, reason, created_at) VALUES (?1, ?2, ?3)",
+        rusqlite::params![task_id, reason, now_iso()],
+    );
+    match result {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!(task_id, error = %e, "扫描标记写入失败");
+            false
+        }
+    }
+}
+
+/// 某任务**最近一次**扫描未完整检出的原因(None = 从未有过不完整扫描)。
+/// 端点把它作为顶层字段下发;前端横幅按它说明是哪一类缺项,不再用固定文案冒充。
+pub fn latest_scan_mark(db: &Arc<Db>, task_id: &str) -> Option<String> {
+    let conn = db.read().ok()?;
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT reason FROM task_scan_marks WHERE task_id = ?1 ORDER BY id DESC LIMIT 1",
+        )
+        .ok()?;
+    stmt.query_row(rusqlite::params![task_id], |row| row.get::<_, String>(0))
+        .ok()
 }
 
 /// 某任务的变更清单(不含基线正文;按发生顺序)。

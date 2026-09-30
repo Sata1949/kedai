@@ -62,10 +62,19 @@ async fn request(
     )
 }
 
-/// 建一个绑定独立工作区目录的任务,返回 (task_id, 工作区路径)。
+/// 建一个绑定**独立**工作区目录的任务,返回 (task_id, 工作区路径)。
+///
+/// 每例一个目录 + 单调计数后缀:本文件的用例会真跑 bash 并对工作区做**全树扫描**,
+/// 共用目录会让并发用例互相看见/删掉对方的文件(2026-09-30 批次 4b 用例实测踩到过:
+/// 旧版 `remove_dir_all` + 共用路径一度让另一个用例的扫描产出假删除行)。
 async fn task_with_workspace(app: &axum::Router) -> (String, std::path::PathBuf) {
-    let ws = std::env::temp_dir().join(format!("kedai-chg-ws-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&ws);
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let ws = std::env::temp_dir().join(format!(
+        "kedai-chg-ws-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
     std::fs::create_dir_all(&ws).expect("建工作区失败");
     let (status, json) = request(
         app,
@@ -358,4 +367,310 @@ fn service_diff_helpers_behave() {
     let big_a: String = (0..3_000).map(|i| format!("a{i}\n")).collect();
     let big_b: String = (0..3_000).map(|i| format!("b{i}\n")).collect();
     assert!(tcs::unified_diff(&big_a, &big_b, "big.txt").contains("改动过大"));
+}
+
+// ==================== 批次 4b:bash 侧启发式检出(2026-09-30)====================
+//
+// 这一组用**真实工具调用**驱动(不走 HTTP 建任务时的 mock 连接器):
+// `state.tool_registry.execute_with_decision` 与引擎的「已裁决放行」路径同形,
+// bash 的 command 交给平台 shell 真跑。判据都落在「清单里有没有那一行」上——
+// 扫描是旁路观测,任何一条断言失败都意味着用户看到的「改了什么」是错账。
+
+use kedai_server::models::types::ToolContext;
+use kedai_server::tools::permissions::{PermissionDecision, ToolRisk};
+
+/// 任务上下文(与任务引擎同形:虚拟 session + 工作区作用域)
+fn task_ctx(task_id: &str, ws: &std::path::Path) -> ToolContext {
+    let scope = kedai_server::tools::workspace_guard::scope_for_task(Some(&ws.to_string_lossy()))
+        .expect("作用域构造不应失败")
+        .expect("绑定工作区必有作用域");
+    ToolContext {
+        session_id: format!("task:{task_id}"),
+        character_id: String::new(),
+        agent_depth: 0,
+        scope: Some(scope),
+    }
+}
+
+/// 「已裁决放行」的许可(授权路径本身由 permissions 的既有用例覆盖)
+fn allow() -> PermissionDecision {
+    PermissionDecision {
+        allowed: true,
+        risk: ToolRisk::Dangerous,
+        reason: "测试放行".into(),
+    }
+}
+
+async fn call_tool(
+    state: &Arc<AppState>,
+    name: &str,
+    args: Value,
+    ctx: ToolContext,
+) -> Result<String, String> {
+    state
+        .tool_registry
+        .execute_with_decision(name, &args.to_string(), ctx, &allow())
+        .await
+}
+
+/// 跑一条真命令(顺带打开命令执行总开关——它默认关闭,与生产一致)
+async fn run_bash(
+    state: &Arc<AppState>,
+    task_id: &str,
+    ws: &std::path::Path,
+    command: &str,
+) -> Result<String, String> {
+    state.settings.lock().unwrap().exec_enabled = true;
+    call_tool(
+        state,
+        "bash",
+        json!({ "command": command }),
+        task_ctx(task_id, ws),
+    )
+    .await
+}
+
+async fn fs_write(
+    state: &Arc<AppState>,
+    task_id: &str,
+    ws: &std::path::Path,
+    rel: &str,
+    content: &str,
+) -> Result<String, String> {
+    call_tool(
+        state,
+        "fs_write",
+        json!({ "path": rel, "content": content }),
+        task_ctx(task_id, ws),
+    )
+    .await
+}
+
+async fn changes_of(app: &axum::Router, id: &str) -> Value {
+    let (status, json) = request(app, "GET", &format!("/api/tasks/{id}/changes"), None).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    json
+}
+
+/// ① bash 改文件 → 清单出现 `source='bash'` 的行(create 与 modify 两条)
+#[tokio::test]
+async fn bash_change_is_recorded_with_source_bash() {
+    let (state, app) = test_state();
+    let (id, ws) = task_with_workspace(app).await;
+
+    run_bash(state, &id, &ws, "echo hello > f.txt")
+        .await
+        .expect("命令应执行成功");
+    let list = changes_of(app, &id).await;
+    let rows = list["changes"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{list}");
+    assert_eq!(rows[0]["source"], "bash");
+    assert_eq!(rows[0]["op"], "create");
+    assert_eq!(rows[0]["path"], "f.txt");
+    assert!(
+        rows[0]["after_bytes"].as_u64().unwrap_or(0) >= 5,
+        "应记下改动后大小:{list}"
+    );
+    assert_eq!(list["undected"], json!(false), "完整扫描不该挂横幅:{list}");
+
+    run_bash(state, &id, &ws, "echo world >> f.txt")
+        .await
+        .expect("命令应执行成功");
+    let list = changes_of(app, &id).await;
+    let rows = list["changes"].as_array().unwrap();
+    assert_eq!(rows.len(), 2, "{list}");
+    assert_eq!(rows[1]["op"], "modify");
+    assert_eq!(rows[1]["source"], "bash");
+    assert_eq!(
+        rows[1]["has_baseline"],
+        json!(true),
+        "D6=(a):bash 行也要有可回滚基线:{list}"
+    );
+}
+
+/// ② 扫描缺项是**顶层字段**而不是清单里的假行:清单长度语义不被污染
+#[tokio::test]
+async fn scan_mark_is_surfaced_without_polluting_changes() {
+    let (state, app) = test_state();
+    let (id, _ws) = task_with_workspace(app).await;
+    let db = state.db.clone();
+
+    let list = changes_of(app, &id).await;
+    assert_eq!(list["undected"], json!(false), "没有标记就是 false:{list}");
+    assert!(list["undected_reason"].is_null(), "{list}");
+
+    assert!(tcs::record_scan_mark(
+        &db,
+        &id,
+        "后扫描未完成(扫到 20000 项即撞预算),已省略删除类改动"
+    ));
+    let list = changes_of(app, &id).await;
+    assert_eq!(list["undected"], json!(true), "{list}");
+    assert!(
+        list["undected_reason"]
+            .as_str()
+            .unwrap_or("")
+            .contains("后扫描"),
+        "原因要原样下发(前端按它分档):{list}"
+    );
+    assert_eq!(
+        list["changes"].as_array().map(|a| a.len()),
+        Some(0),
+        "标记不得混进改动清单:{list}"
+    );
+}
+
+/// ③ 同一路径双来源:fs_write 之后 bash 再改 → bash 只记自己那一次(不重报 tool 的改动)
+#[tokio::test]
+async fn fs_write_then_bash_same_file_records_one_bash_row() {
+    let (state, app) = test_state();
+    let (id, ws) = task_with_workspace(app).await;
+
+    fs_write(state, &id, &ws, "dual.txt", "a\n")
+        .await
+        .expect("fs_write 应成功");
+    run_bash(state, &id, &ws, "echo b >> dual.txt")
+        .await
+        .expect("命令应执行成功");
+
+    let list = changes_of(app, &id).await;
+    let rows = list["changes"].as_array().unwrap();
+    assert_eq!(rows.len(), 2, "两条独立改动,各记一行:{list}");
+    assert_eq!(rows[0]["source"], "tool");
+    assert_eq!(rows[0]["op"], "create");
+    assert_eq!(rows[1]["source"], "bash");
+    assert_eq!(
+        rows[1]["op"], "modify",
+        "bash 侧不得把 fs_write 建的文件误记成 create:{list}"
+    );
+}
+
+/// ④ bash 删文件 → op=delete 且 after_bytes=0
+#[tokio::test]
+async fn bash_delete_records_delete_row_with_zero_bytes() {
+    let (state, app) = test_state();
+    let (id, ws) = task_with_workspace(app).await;
+
+    fs_write(state, &id, &ws, "gone.txt", "bye\n")
+        .await
+        .expect("fs_write 应成功");
+    run_bash(state, &id, &ws, "del /q gone.txt")
+        .await
+        .expect("命令应执行成功");
+
+    let list = changes_of(app, &id).await;
+    let rows = list["changes"].as_array().unwrap();
+    let last = rows.last().unwrap();
+    assert_eq!(last["op"], "delete", "{list}");
+    assert_eq!(last["source"], "bash");
+    assert_eq!(last["after_bytes"], json!(0));
+}
+
+/// ⑤ 聊天路径(无工作区作用域)跑 bash → 零记账、零标记
+#[tokio::test]
+async fn chat_path_bash_records_nothing() {
+    let (state, app) = test_state();
+    let (id, _ws) = task_with_workspace(app).await;
+
+    state.settings.lock().unwrap().exec_enabled = true;
+    let ctx = ToolContext {
+        session_id: "chat-session-1".into(),
+        character_id: String::new(),
+        agent_depth: 0,
+        scope: None,
+    };
+    call_tool(state, "bash", json!({ "command": "echo chat" }), ctx)
+        .await
+        .expect("聊天路径命令应能执行(缺省 cwd = 数据目录)");
+
+    let list = changes_of(app, &id).await;
+    assert_eq!(list["changes"].as_array().map(|a| a.len()), Some(0));
+    assert_eq!(list["undected"], json!(false));
+}
+
+/// ⑥ D6=(a) 的验收主体:bash 检出的改动点开 diff **真给逐行内容**
+#[tokio::test]
+async fn bash_detected_change_yields_real_diff() {
+    let (state, app) = test_state();
+    let (id, ws) = task_with_workspace(app).await;
+
+    run_bash(state, &id, &ws, "echo one > g.txt")
+        .await
+        .expect("命令应执行成功");
+    run_bash(state, &id, &ws, "echo two >> g.txt")
+        .await
+        .expect("命令应执行成功");
+
+    let (status, json) = request(
+        app,
+        "GET",
+        &format!("/api/tasks/{id}/changes/diff?path=g.txt"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["available"], json!(true), "有基线就该给 diff:{json}");
+    let d = json["diff"].as_str().unwrap_or_default();
+    assert!(d.contains("+two"), "应看到追加行:{d}");
+    assert!(d.contains("--- a/g.txt"), "unified 头:{d}");
+}
+
+/// ⑦ 双来源同一路径的回滚取**最新一行**:bash 行的基线 = 命令执行前(= fs_write 的产物)
+#[tokio::test]
+async fn rollback_after_dual_source_returns_to_pre_command_state() {
+    let (state, app) = test_state();
+    let (id, ws) = task_with_workspace(app).await;
+
+    fs_write(state, &id, &ws, "dual2.txt", "A\n")
+        .await
+        .expect("fs_write 应成功");
+    run_bash(state, &id, &ws, "echo B >> dual2.txt")
+        .await
+        .expect("命令应执行成功");
+
+    let (status, json) = request(
+        app,
+        "POST",
+        &format!("/api/tasks/{id}/changes/rollback?path=dual2.txt"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["ok"], json!(true), "{json}");
+    let content = std::fs::read_to_string(ws.join("dual2.txt")).unwrap();
+    assert_eq!(
+        content, "A\n",
+        "必须回到「命令执行前」而不是「fs_write 之前」(那是错误的时间点)"
+    );
+    let list = changes_of(app, &id).await;
+    let last = list["changes"].as_array().unwrap().last().cloned().unwrap();
+    assert_eq!(last["op"], "rollback", "回滚自身要留痕:{list}");
+}
+
+/// ⑧ 改动后超 256KB → 不逐行记,但扫描级标记必须说出来(不是「没有变更」)
+#[tokio::test]
+async fn oversized_change_is_marked_instead_of_rowed() {
+    let (state, app) = test_state();
+    let (id, ws) = task_with_workspace(app).await;
+
+    let big = "x".repeat((tcs::MAX_BASELINE_BYTES as usize) + 64);
+    fs_write(state, &id, &ws, "huge.bin", &big)
+        .await
+        .expect("fs_write 应成功");
+    run_bash(state, &id, &ws, "echo tail >> huge.bin")
+        .await
+        .expect("命令应执行成功");
+
+    let list = changes_of(app, &id).await;
+    let rows = list["changes"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "只该有 fs_write 那一行:{list}");
+    assert_eq!(rows[0]["source"], "tool");
+    assert_eq!(list["undected"], json!(true), "必须明说没记全:{list}");
+    assert!(
+        list["undected_reason"]
+            .as_str()
+            .unwrap_or("")
+            .contains("超过留存上限"),
+        "原因要说清是超上限而非预算打满:{list}"
+    );
 }

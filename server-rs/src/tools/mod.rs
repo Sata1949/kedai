@@ -38,6 +38,9 @@ pub mod variables;
 // 工作区路径闸门(编码通道批次,本批安全核心):fs_* 工具与 bash 的 cwd 校验共用;
 // 创建期的工作区校验也复用其判据(见 agent_tools_fs.rs / bash.rs / api/tasks.rs)
 pub mod workspace_guard;
+// 工作区树扫描(批次 4b):bash 侧命令前后各扫一次,供文件变更台账做启发式检出;
+// 遍历实现同时被 agent_tools_fs::walk_files(fs_glob/fs_grep)复用
+mod workspace_scan;
 
 use agent_tools::ToolDeps;
 use registry::ToolRegistry;
