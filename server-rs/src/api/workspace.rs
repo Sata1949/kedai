@@ -110,6 +110,14 @@ mod tests {
             .expect_err("不存在的目录必须被拒");
         assert!(err.contains("不存在"), "文案应指明不存在: {err}");
 
+        // 存在但**不是目录**(普通文件)→ 同样拒绝(2026-09-30 CODE-4 复核补齐:
+        // 此前文档把这条列进「三条负路径」,但用例只覆盖了不存在与数据目录两种)
+        let as_file = tmp.join("a-file.txt");
+        std::fs::write(&as_file, "x").unwrap();
+        let err = validate_workspace(Some(&as_file.to_string_lossy()), &data_dir)
+            .expect_err("普通文件必须被拒");
+        assert!(err.contains("不是目录"), "文案应指明不是目录: {err}");
+
         // 落在数据目录内 → 拒绝
         let inside_data = data_dir.join("inner");
         std::fs::create_dir_all(&inside_data).unwrap();

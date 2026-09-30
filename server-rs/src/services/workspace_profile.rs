@@ -212,6 +212,10 @@ struct DirNames {
 }
 
 /// 采集目录内容。不可读返回 `None`(调用方按「没命中」处理)。
+///
+/// **链接先判**:`is_symlink()` 在 Windows 上对符号链接**与 junction(挂载点)都为真**,
+/// 而 junction 同时带目录属性——若先判 `is_dir()` 就会把它当普通子目录扫下去(等于跟随链接)。
+/// 故本函数先排除链接,与 `workspace_scan` 的「符号链接不下降」同一口径。
 fn read_dir_names(dir: &Path) -> Option<DirNames> {
     let entries = std::fs::read_dir(dir).ok()?;
     let mut files = Vec::new();
@@ -219,10 +223,10 @@ fn read_dir_names(dir: &Path) -> Option<DirNames> {
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         match entry.file_type() {
+            // 链接(含 junction)与无法判型的条目:既不当文件也不当子目录,一律不跟随
+            Ok(t) if t.is_symlink() => {}
             Ok(t) if t.is_dir() => subdirs.push(name),
             Ok(t) if t.is_file() => files.push(name),
-            // 符号链接与无法判型的条目:既不当文件也不当子目录(不跟随,与
-            // `workspace_scan` 的「符号链接不下降」同口径)
             _ => {}
         }
     }
@@ -394,5 +398,22 @@ mod tests {
                 "工作区画像不得执行命令,但源码出现了 {needle}"
             );
         }
+    }
+
+    /// 判型顺序钉子:链接分支必须排在目录分支**之前**。
+    ///
+    /// Windows 上 `is_symlink()` 对符号链接**与 junction 都为真**,而 junction 同时带目录属性
+    /// ——顺序反了就会跟随链接扫下去。这条特性在 Linux 上看不出来、也难以在测试里造链接
+    /// (需特权;且本模块禁 `Command`,不能 shell 出 `mklink /J`),故用源码顺序断言兜住。
+    /// 针带 `t.` 前缀,与文档注释里的裸 `is_symlink()` 区分开。
+    #[test]
+    fn symlink_arm_precedes_dir_arm() {
+        let src = include_str!("workspace_profile.rs");
+        let link = src.find("t.is_symlink()").expect("应有链接判型分支");
+        let dir = src.find("t.is_dir()").expect("应有目录判型分支");
+        assert!(
+            link < dir,
+            "链接必须先于目录判型(Windows junction 同时带目录属性)"
+        );
     }
 }
