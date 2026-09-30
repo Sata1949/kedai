@@ -64,6 +64,8 @@ describe('FileChangesPanel:四态文案(批次 4c)', () => {
     });
     expect(html).toContain('本轮未改动文件');
     expect(html).not.toContain('未能完整检出');
+    // 整任务操作(CODE-2)只在清单非空时出现(按元素类名断言——注释里也有这几个字)
+    expect(html).not.toContain('sv-fc-actions');
   });
 
   it('扫描缺项 → 横幅带**原因原文**;清单为空时明说「不代表没有改动」', async () => {
@@ -87,6 +89,10 @@ describe('FileChangesPanel:四态文案(批次 4c)', () => {
     expect(html).toContain('命令检出');
     expect(html).toContain('查看 diff');
     expect(html).toContain('回滚');
+    // 整任务操作(CODE-2):清单非空时两个入口都在(按元素类名断言)
+    expect(html).toContain('sv-fc-actions');
+    expect(html).toContain('全部回滚');
+    expect(html).toContain('导出 patch');
   });
 
   it('基线不可用(truncated)→ 回滚禁用并给出原因,不给可点的死按钮', async () => {

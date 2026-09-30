@@ -9,7 +9,9 @@ import {
   getTaskCalls,
   getTaskChangeDiff,
   getTaskChanges,
+  getTaskChangesPatch,
   getTaskUsageTotal,
+  rollbackAllTaskChanges,
   rollbackTaskChange,
   listTasks,
   planChatTask,
@@ -115,6 +117,27 @@ describe('api/tasks REST 封装', () => {
       }
       if (url.includes('/api/tasks/t1/changes/rollback?path=') && method === 'POST') {
         return json({ ok: true, path: 'src/a.rs', restored_bytes: 3, note: '已恢复' });
+      }
+      // CODE-2 整任务回滚:逐项报告(restored + skipped 各一条)
+      if (url.endsWith('/api/tasks/t1/changes/rollback-all') && method === 'POST') {
+        return json({
+          ok: true,
+          restored: 1,
+          removed: 0,
+          skipped: 1,
+          failed: 0,
+          results: [
+            { path: 'src/a.rs', result: 'restored', restored_bytes: 3 },
+            { path: 'src/big.rs', result: 'skipped', reason: '基线不可用(改动前正文超出留存上限或当时读取失败)' },
+          ],
+        });
+      }
+      // CODE-2 patch 导出:text/plain(不是 JSON)
+      if (url.endsWith('/api/tasks/t1/changes/patch') && method === 'GET') {
+        return new Response('# Kedai 任务变更 patch\ndiff --git a/x b/x\n', {
+          status: 200,
+          headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+        });
       }
       return json({ error: `未 mock 的请求: ${method} ${url}` }, 404);
     });
@@ -297,6 +320,54 @@ describe('api/tasks REST 封装', () => {
       task_mode: 'legacy',
       workspace: 'D:\\proj\\demo',
     });
+  });
+
+  it('rollbackAllTaskChanges:POST /changes/rollback-all,逐项报告原样返回(CODE-2)', async () => {
+    const r = await rollbackAllTaskChanges('t1');
+    expect(r.ok).toBe(true);
+    expect(r.results.length).toBe(2);
+    expect(r.results[1].result).toBe('skipped');
+    expect(r.results[1].reason).toContain('基线不可用');
+    const call = vi.mocked(fetch).mock.calls.find(
+      ([input, init]) =>
+        String(input) === '/api/tasks/t1/changes/rollback-all' &&
+        (init?.method ?? 'GET') === 'POST',
+    );
+    expect(call, '应 POST 到 rollback-all').toBeTruthy();
+  });
+
+  it('rollbackAllTaskChanges:响应缺 results 时抛错(形状闸门,不把 undefined 当成功)', async () => {
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/api/bootstrap')) return json({ token: 't' });
+      if (url.endsWith('/rollback-all')) return json({ ok: true }); // 缺 results
+      return json({ error: 'x' }, 404);
+    });
+    await expect(rollbackAllTaskChanges('t1')).rejects.toThrow(
+      '任务文件变更整任务回滚响应格式异常',
+    );
+  });
+
+  it('rollbackAllTaskChanges:409 时透传服务端原文(任务进行中)', async () => {
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/api/bootstrap')) return json({ token: 't' });
+      if (url.endsWith('/rollback-all')) {
+        return json({ error: '任务进行中,请先停止再回滚(避免与模型写入互相覆盖)', code: 'CONFLICT' }, 409);
+      }
+      return json({ error: 'x' }, 404);
+    });
+    await expect(rollbackAllTaskChanges('t1')).rejects.toThrow('任务进行中,请先停止再回滚');
+  });
+
+  it('getTaskChangesPatch:GET /changes/patch 取回文本(不套 JSON 形状闸门)', async () => {
+    const text = await getTaskChangesPatch('t1');
+    expect(text).toContain('diff --git a/x b/x');
+    const call = vi.mocked(fetch).mock.calls.find(
+      ([input, init]) =>
+        String(input) === '/api/tasks/t1/changes/patch' && (init?.method ?? 'GET') === 'GET',
+    );
+    expect(call, '应 GET 到 patch').toBeTruthy();
   });
 
   it('bindTask:POST /tasks/{id}/bind,flow_id 与 flow_ids 全量显式下发(B 批 B3)', async () => {

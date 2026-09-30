@@ -1212,3 +1212,28 @@ export interface TaskChangeRollback {
   available?: boolean;
   reason?: string;
 }
+
+/** `POST /api/tasks/{id}/changes/rollback-all` 的**单项**报告(CODE-2) */
+export interface TaskChangeRollbackItem {
+  path: string;
+  /** `restored`=恢复正文 / `removed`=新建项删除 / `skipped`=无基线跳过 / `failed`=落盘失败 */
+  result: 'restored' | 'removed' | 'skipped' | 'failed';
+  restored_bytes?: number;
+  note?: string;
+  /** skipped / failed 时的原因(原文展示给用户) */
+  reason?: string;
+}
+
+/**
+ * `POST /api/tasks/{id}/changes/rollback-all` 的载荷(CODE-2)。
+ * **逐项报告、不整体否决**(计划 Q2=(a)):某项无基线/落盘失败不拦住其余项;
+ * `ok = failed === 0`——skipped 不算失败,但必须在界面上说得出来(不静默)。
+ */
+export interface TaskChangeRollbackAll {
+  ok: boolean;
+  restored: number;
+  removed: number;
+  skipped: number;
+  failed: number;
+  results: TaskChangeRollbackItem[];
+}

@@ -21,6 +21,13 @@ const h = vi.hoisted(() => ({
   rollbackCalls: [] as string[],
   rollbackOk: true,
   confirmOk: true,
+  // CODE-2:整任务回滚 + patch 导出
+  bulkCalls: 0,
+  bulkReject: null as string | null,
+  batchRow: { path: 'src/a.rs', result: 'restored', restored_bytes: 3 } as Record<string, unknown>,
+  patchCalls: 0,
+  patchSaveOk: true,
+  patchSaveArgs: [] as Array<[string, string]>,
 }));
 
 /** mock 里用的最小 wire 行(字段与后端一致;避免依赖文件后部定义的 makeRow) */
@@ -47,7 +54,8 @@ vi.mock('../api', async (importOriginal) => {
     ...orig,
     getTaskChanges: vi.fn(async () => ({
       // 回滚发生后重拉:清单里应多出一条 op=rollback 行(组件据此重渲染)
-      changes: h.rollbackCalls.length ? [makeWireRow('rollback')] : [],
+      changes:
+        h.rollbackCalls.length || h.bulkCalls ? [makeWireRow('rollback')] : [],
       undected: false,
       undectedReason: null,
     })),
@@ -61,8 +69,45 @@ vi.mock('../api', async (importOriginal) => {
         ? { ok: true, path, restored_bytes: 3 }
         : { ok: false, path, available: false, reason: '基线不可用(改动前正文超出留存上限)' };
     }),
+    // CODE-2:整任务回滚(逐项报告;bulkReject 模拟 409 等失败)
+    rollbackAllTaskChanges: vi.fn(async () => {
+      h.bulkCalls += 1;
+      if (h.bulkReject) throw new Error(h.bulkReject);
+      return {
+        ok: true,
+        restored: 2,
+        removed: 0,
+        skipped: 1,
+        failed: 0,
+        results: [
+          h.batchRow,
+          { path: 'src/b.rs', result: 'restored', restored_bytes: 5 },
+          {
+            path: 'src/big.rs',
+            result: 'skipped',
+            reason: '基线不可用(改动前正文超出留存上限或当时读取失败)',
+          },
+        ],
+      };
+    }),
+    // CODE-2:patch 文本导出(不套 JSON 形状闸门)
+    getTaskChangesPatch: vi.fn(async () => {
+      h.patchCalls += 1;
+      return '# Kedai 任务变更 patch\ndiff --git a/x b/x\n';
+    }),
   };
 });
+
+// 保存通道整体 mock:测试只关心「内容与文件名进了保存调用」与取消语义,
+// 不落真实对话框/下载(jsdom 也没有 URL.createObjectURL 之外的那套能力)。
+vi.mock('../exportFile', () => ({
+  saveTextFile: vi.fn(async (name: string, content: string) => {
+    h.patchSaveArgs.push([name, content]);
+    return h.patchSaveOk;
+  }),
+  saveExportFile: vi.fn(async () => true),
+  downloadBlob: vi.fn(),
+}));
 
 import { useTaskStore } from '../stores/task';
 import FileChangesPanel from './FileChangesPanel.vue';
@@ -99,9 +144,10 @@ function mountPanel(rows: TaskFileChange[]): ReturnType<typeof mount> {
   return mount(FileChangesPanel);
 }
 
-/** 按按钮文案取按钮;找不到直接抛错(避免非空断言——前端 lint ratchet 只降不升) */
+/** 按按钮文案**精确**取按钮(动作行「全部回滚」与行内「回滚」必须分得开);
+ *  找不到直接抛错(避免非空断言——前端 lint ratchet 只降不升) */
 function findButton(wrapper: ReturnType<typeof mount>, text: string) {
-  const btn = wrapper.findAll('button').find((b) => b.text().includes(text));
+  const btn = wrapper.findAll('button').find((b) => b.text().trim() === text);
   if (!btn) throw new Error(`应存在按钮「${text}」`);
   return btn;
 }
@@ -118,6 +164,11 @@ beforeEach(() => {
   h.rollbackCalls = [];
   h.rollbackOk = true;
   h.confirmOk = true;
+  h.bulkCalls = 0;
+  h.bulkReject = null;
+  h.patchCalls = 0;
+  h.patchSaveOk = true;
+  h.patchSaveArgs = [];
   vi.stubGlobal('confirm', () => h.confirmOk);
 });
 
@@ -167,5 +218,55 @@ describe('FileChangesPanel 交互(批次 4c)', () => {
     const rollback = findButton(wrapper, '回滚');
     expect(rollback.attributes('disabled')).toBeDefined();
     expect(rollback.attributes('title')).toContain('基线不可用');
+  });
+
+  // ===== CODE-2:整任务回滚 + patch 导出 =====
+
+  it('「全部回滚」:确认后调接口、显示逐项汇总(含跳过原因)并重拉清单', async () => {
+    const wrapper = mountPanel([makeRow(), makeRow({ id: 2, path: 'src/big.rs' })]);
+    await clickByText(wrapper, '全部回滚');
+    expect(h.bulkCalls).toBe(1);
+    const html = wrapper.html();
+    expect(html).toContain('整任务回滚完成');
+    expect(html).toContain('成功 2 项');
+    expect(html).toContain('跳过 1 项');
+    expect(html).toContain('基线不可用(改动前正文超出留存上限或当时读取失败)');
+    // 重拉后的清单里出现 op=rollback 那一行(回滚自身不隐身)
+    expect(html).toContain('op-rollback');
+  });
+
+  it('「全部回滚」:确认框取消 → 不发请求', async () => {
+    const wrapper = mountPanel([makeRow()]);
+    h.confirmOk = false;
+    await clickByText(wrapper, '全部回滚');
+    expect(h.bulkCalls).toBe(0);
+  });
+
+  it('「全部回滚」:409 失败原文显示(任务进行中)', async () => {
+    h.bulkReject = '任务进行中,请先停止再回滚(避免与模型写入互相覆盖)';
+    const wrapper = mountPanel([makeRow()]);
+    await clickByText(wrapper, '全部回滚');
+    const html = wrapper.html();
+    expect(html).toContain('整任务回滚失败');
+    expect(html).toContain('任务进行中,请先停止再回滚');
+  });
+
+  it('「导出 patch」:取文本 + 经保存通道;文件名与内容正确', async () => {
+    const wrapper = mountPanel([makeRow()]);
+    await clickByText(wrapper, '导出 patch');
+    expect(h.patchCalls).toBe(1);
+    expect(h.patchSaveArgs.length).toBe(1);
+    expect(h.patchSaveArgs[0][0]).toContain('.patch');
+    expect(h.patchSaveArgs[0][1]).toContain('Kedai 任务变更 patch');
+    expect(wrapper.html()).toContain('已导出');
+  });
+
+  it('「导出 patch」:用户取消保存 → 不提示成功(也没报错)', async () => {
+    h.patchSaveOk = false;
+    const wrapper = mountPanel([makeRow()]);
+    await clickByText(wrapper, '导出 patch');
+    const html = wrapper.html();
+    expect(html).not.toContain('已导出');
+    expect(html).not.toContain('导出失败');
   });
 });

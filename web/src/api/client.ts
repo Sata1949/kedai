@@ -120,21 +120,35 @@ export async function retryOnUnauthorized(doFetch: () => Promise<Response>): Pro
   return refreshed ? doFetch() : res;
 }
 
+/** 非 2xx 统一转 ApiError(`request` 与 `requestText` 两条取回通道共用,口径不分叉)。 */
+async function ensureOk(res: Response): Promise<void> {
+  if (res.ok) return;
+  let body: ApiErrorBody = {};
+  try {
+    body = (await res.json()) as ApiErrorBody;
+  } catch {
+    /* 忽略非 JSON 错误体 */
+  }
+  // 401 即使未带 code 也按 token 失效处理(如代理/旧端点路径)
+  const code = body.code ?? (res.status === 401 ? 'UNAUTHORIZED' : undefined);
+  throw new ApiError(res.status, code, body.error, apiErrorMessage(res.status, code, body.error));
+}
+
 export async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await retryOnUnauthorized(() => authorizedFetch(`${BASE}${path}`, init));
-  if (!res.ok) {
-    let body: ApiErrorBody = {};
-    try {
-      body = (await res.json()) as ApiErrorBody;
-    } catch {
-      /* 忽略非 JSON 错误体 */
-    }
-    // 401 即使未带 code 也按 token 失效处理(如代理/旧端点路径)
-    const code = body.code ?? (res.status === 401 ? 'UNAUTHORIZED' : undefined);
-    throw new ApiError(res.status, code, body.error, apiErrorMessage(res.status, code, body.error));
-  }
+  await ensureOk(res);
   if (res.status === 204) return undefined as T;
   const text = await res.text();
   if (!text) return undefined as T;
   return JSON.parse(text) as T;
+}
+
+/**
+ * 文本响应取回:与 `request` 同款鉴权 / 401 重试 / 错误体处理,只**不 parse JSON**。
+ * 供 `text/plain` 端点使用(patch 导出)——JSON 形状闸门在那边不适用。
+ */
+export async function requestText(path: string, init: RequestInit = {}): Promise<string> {
+  const res = await retryOnUnauthorized(() => authorizedFetch(`${BASE}${path}`, init));
+  await ensureOk(res);
+  return res.text();
 }

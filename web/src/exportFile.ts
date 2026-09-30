@@ -34,11 +34,18 @@ export function downloadBlob(fileName: string, blob: Blob): void {
 }
 
 /**
- * 保存导出文件,返回是否成功保存。
+ * 保存文本文件,返回是否成功保存(CODE-2 起 patch 导出与 JSON 导出共用本实现)。
+ * - `filterName` / `extensions` / `mimeType` 决定保存对话框的过滤器与浏览器下载的 MIME;
  * - 返回 false = 用户在保存对话框点了「取消」(调用方不应提示成功/失败);
  * - 抛出异常 = 保存失败(调用方提示错误)。
  */
-export async function saveExportFile(fileName: string, content: string): Promise<boolean> {
+export async function saveTextFile(
+  fileName: string,
+  content: string,
+  filterName: string,
+  extensions: string[],
+  mimeType: string,
+): Promise<boolean> {
   if (isAndroidTauri) {
     // Android:插件 dialog.save 返回的是 SAF content:// URI,插件 fs 的 writeTextFile
     // 按文件系统路径 + 作用域校验写入,语义不匹配 → 改走「写缓存 + 系统分享 Intent」。
@@ -58,19 +65,24 @@ export async function saveExportFile(fileName: string, content: string): Promise
     const { writeTextFile } = await import('@tauri-apps/plugin-fs');
     const path = await save({
       defaultPath: fileName,
-      filters: [{ name: 'JSON', extensions: ['json'] }],
+      filters: [{ name: filterName, extensions }],
     });
     if (!path) return false; // 用户取消
     await writeTextFile(path, content);
     return true;
   }
   // 浏览器回退:优先保存对话框选位置,不可用时常规下载(位置由浏览器决定)
-  const blob = new Blob([content], { type: 'application/json' });
+  const blob = new Blob([content], { type: mimeType });
   if (window.showSaveFilePicker) {
     try {
       const handle = await window.showSaveFilePicker({
         suggestedName: fileName,
-        types: [{ description: 'JSON', accept: { 'application/json': ['.json'] } }],
+        types: [
+          {
+            description: filterName,
+            accept: { [mimeType]: extensions.map((e) => `.${e}`) },
+          },
+        ],
       });
       const writable = await handle.createWritable();
       await writable.write(blob);
@@ -84,4 +96,13 @@ export async function saveExportFile(fileName: string, content: string): Promise
   }
   downloadBlob(fileName, blob);
   return true;
+}
+
+/**
+ * 保存导出文件(JSON)。保留原签名供既有调用方,内部走 `saveTextFile`。
+ * - 返回 false = 用户在保存对话框点了「取消」(调用方不应提示成功/失败);
+ * - 抛出异常 = 保存失败(调用方提示错误)。
+ */
+export async function saveExportFile(fileName: string, content: string): Promise<boolean> {
+  return saveTextFile(fileName, content, 'JSON', ['json'], 'application/json');
 }

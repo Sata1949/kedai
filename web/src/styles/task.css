@@ -931,6 +931,12 @@
 .sv-fc-tag.op-rollback { color: var(--sv-amber, #d97706); border-color: currentColor; }
 .sv-fc-src { font-size: 11px; color: var(--sv-ink-soft); }
 .sv-fc-bytes { font-size: 11px; color: var(--sv-ink-soft); }
+/* 整任务操作行(CODE-2):全部回滚 / 导出 patch */
+.sv-fc-actions {
+  display: flex;
+  gap: 8px;
+  margin: 8px 0;
+}
 .sv-fc-btn {
   font-size: 11px;
   padding: 2px 8px;

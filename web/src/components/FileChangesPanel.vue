@@ -13,7 +13,14 @@
 import { onMounted, ref, watch } from 'vue';
 import { useAppStore } from '../store';
 import { storeToRefs } from 'pinia';
-import { getTaskChangeDiff, rollbackTaskChange, type TaskFileChange } from '../api';
+import {
+  getTaskChangeDiff,
+  getTaskChangesPatch,
+  rollbackAllTaskChanges,
+  rollbackTaskChange,
+  type TaskFileChange,
+} from '../api';
+import { saveTextFile } from '../exportFile';
 
 const store = useAppStore();
 const { appMode, currentTaskId, taskFileChanges, taskChangesUndected } = storeToRefs(store);
@@ -138,6 +145,73 @@ async function doRollback(row: TaskFileChange): Promise<void> {
     busy.value = null;
   }
 }
+
+/** 整任务回滚(CODE-2):二次确认 → 逐项报告;无基线项跳过也要说得出来 */
+const bulkBusy = ref(false);
+const bulkFeedback = ref<{ ok: boolean; text: string } | null>(null);
+
+async function doRollbackAll(): Promise<void> {
+  const taskId = currentTaskId.value;
+  if (!taskId || bulkBusy.value) return;
+  const paths = new Set(taskFileChanges.value.map((r) => r.path)).size;
+  const ok = window.confirm(
+    `把本任务涉及的 ${paths} 个文件逐项回滚到各自的上一次改动前?` +
+      '(无基线的项会跳过并逐项报告)',
+  );
+  if (!ok) return;
+  bulkBusy.value = true;
+  bulkFeedback.value = null;
+  try {
+    const r = await rollbackAllTaskChanges(taskId);
+    const parts = [`成功 ${r.restored + r.removed} 项`];
+    if (r.skipped) parts.push(`跳过 ${r.skipped} 项`);
+    if (r.failed) parts.push(`失败 ${r.failed} 项`);
+    const detail = r.results
+      .filter((x) => x.result === 'skipped' || x.result === 'failed')
+      .map((x) => `${x.path}:${x.reason ?? x.result}`)
+      .join(';');
+    bulkFeedback.value = {
+      ok: r.ok,
+      text: `整任务回滚${r.ok ? '完成' : '部分失败'}(${parts.join('、')})${detail ? `——${detail}` : ''}`,
+    };
+    // 回滚自身会多记 op=rollback 行,必须重拉清单(不隐身)
+    await store.loadTaskChanges(taskId);
+  } catch (e) {
+    // 409(任务进行中)与其它失败的原文都在这里;ApiError 已带服务端文案
+    bulkFeedback.value = {
+      ok: false,
+      text: `整任务回滚失败:${e instanceof Error ? e.message : '未知错误'}`,
+    };
+  } finally {
+    bulkBusy.value = false;
+  }
+}
+
+/** patch 导出(CODE-2):文本通道取回 → 保存对话框(取消不提示成功/失败) */
+const patchBusy = ref(false);
+const patchFeedback = ref<{ ok: boolean; text: string } | null>(null);
+
+async function exportPatch(): Promise<void> {
+  const taskId = currentTaskId.value;
+  if (!taskId || patchBusy.value) return;
+  patchBusy.value = true;
+  patchFeedback.value = null;
+  try {
+    const text = await getTaskChangesPatch(taskId);
+    const name = `kedai-task-${taskId.slice(0, 8)}-changes.patch`;
+    const saved = await saveTextFile(name, text, 'Patch', ['patch', 'diff'], 'text/x-patch');
+    if (saved) {
+      patchFeedback.value = { ok: true, text: `patch 已导出(${name}),可用 git apply 应用` };
+    }
+  } catch (e) {
+    patchFeedback.value = {
+      ok: false,
+      text: `导出失败:${e instanceof Error ? e.message : '未知错误'}`,
+    };
+  } finally {
+    patchBusy.value = false;
+  }
+}
 </script>
 
 <template>
@@ -145,6 +219,22 @@ async function doRollback(row: TaskFileChange): Promise<void> {
     <!-- 扫描缺项横幅:文案用后端给的原因原文(前端不许用固定文案冒充) -->
     <div v-if="taskChangesUndected" class="sv-fc-undected">
       本轮命令产生的改动未能完整检出:{{ taskChangesUndected }}
+    </div>
+
+    <!-- 整任务操作(CODE-2):仅清单非空时出现;「全部回滚」= 逐项报告,「导出 patch」= 文本通道 -->
+    <div v-if="taskFileChanges.length" class="sv-fc-actions">
+      <button class="sv-fc-btn" :disabled="bulkBusy" @click="doRollbackAll">
+        {{ bulkBusy ? '回滚中…' : '全部回滚' }}
+      </button>
+      <button class="sv-fc-btn" :disabled="patchBusy" @click="exportPatch">
+        {{ patchBusy ? '导出中…' : '导出 patch' }}
+      </button>
+    </div>
+    <div v-if="bulkFeedback" class="sv-feedback" :class="bulkFeedback.ok ? 'ok' : 'err'">
+      {{ bulkFeedback.text }}
+    </div>
+    <div v-if="patchFeedback" class="sv-feedback" :class="patchFeedback.ok ? 'ok' : 'err'">
+      {{ patchFeedback.text }}
     </div>
 
     <!-- 空清单:缺项时不许宣称「没有改动」(那正是本卡片要区分掉的歧义) -->

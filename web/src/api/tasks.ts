@@ -2,10 +2,10 @@
 // 后端契约:GET /api/tasks → { tasks };POST /api/tasks → { ok, task };
 // GET /api/tasks/{id} → { task, subtasks };POST /api/tasks/{id}/run | /stop | /bind;
 // DELETE /api/tasks/{id} → 204;GET /api/tasks/events → SSE(KeepAlive 30s)。
-import { BASE, authorizedFetch, request } from './client';
+import { BASE, authorizedFetch, request, requestText } from './client';
 import { requireArrayField, requireBoolField, requireObject, requireObjectField, requireStringField } from './shape';
 import { pumpSseFrames, toApiError } from './stream';
-import type { TaskApproveExecMode, TaskChangeDiff, TaskChangeRollback, TaskChangesPayload, TaskDetail, TaskEvent, TaskFileChange, TaskLlmCall, TaskRecord, TaskRunMode, TaskStep, TaskUsageTotal } from './types';
+import type { TaskApproveExecMode, TaskChangeDiff, TaskChangeRollback, TaskChangeRollbackAll, TaskChangeRollbackItem, TaskChangesPayload, TaskDetail, TaskEvent, TaskFileChange, TaskLlmCall, TaskRecord, TaskRunMode, TaskStep, TaskUsageTotal } from './types';
 
 /** 读取任务列表(最新在前) */
 export async function listTasks(): Promise<TaskRecord[]> {
@@ -220,6 +220,24 @@ export async function rollbackTaskChange(
   const payload = requireObject<TaskChangeRollback>(data, '任务文件变更回滚');
   requireBoolField(data, 'ok', '任务文件变更回滚');
   return payload;
+}
+
+/** 整任务回滚(CODE-2;任务进行中后端 409;逐项报告,不整体否决) */
+export async function rollbackAllTaskChanges(taskId: string): Promise<TaskChangeRollbackAll> {
+  const data = await request<unknown>(
+    `/tasks/${encodeURIComponent(taskId)}/changes/rollback-all`,
+    { method: 'POST' },
+  );
+  // 形状闸门:调用方按 ok 判成败并渲染逐项报告,undefined 会被当成功吞掉
+  const payload = requireObject<TaskChangeRollbackAll>(data, '任务文件变更整任务回滚');
+  requireBoolField(data, 'ok', '任务文件变更整任务回滚');
+  requireArrayField<TaskChangeRollbackItem>(data, 'results', '任务文件变更整任务回滚');
+  return payload;
+}
+
+/** 整任务 patch 导出(CODE-2;`text/plain` 文本通道,不套 JSON 形状闸门) */
+export async function getTaskChangesPatch(taskId: string): Promise<string> {
+  return requestText(`/tasks/${encodeURIComponent(taskId)}/changes/patch`);
 }
 
 /**
