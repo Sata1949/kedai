@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   requireArrayField,
+  requireBoolField,
   requireNumberField,
   requireObject,
   requireObjectField,
@@ -86,6 +87,18 @@ describe('requireNumberField', () => {
     expect(() => requireNumberField({ total: NaN }, 'total', 'Token 计数')).toThrow();
     expect(() => requireNumberField({ total: Infinity }, 'total', 'Token 计数')).toThrow();
     expect(() => requireNumberField({}, 'total', 'Token 计数')).toThrow();
+  });
+});
+
+describe('requireBoolField', () => {
+  it('布尔通过(true/false 都是合法业务值)', () => {
+    expect(requireBoolField({ ok: true }, 'ok', '任务文件变更回滚')).toBe(true);
+    expect(requireBoolField({ ok: false }, 'ok', '任务文件变更回滚')).toBe(false);
+  });
+
+  it('字符串真假值 / 缺失字段都不通过(避免把 undefined 当失败吞掉)', () => {
+    expect(() => requireBoolField({ ok: 'true' }, 'ok', '任务文件变更回滚')).toThrow();
+    expect(() => requireBoolField({}, 'ok', '任务文件变更回滚')).toThrow();
   });
 });
 

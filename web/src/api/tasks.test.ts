@@ -7,7 +7,10 @@ import {
   followupTask,
   getTask,
   getTaskCalls,
+  getTaskChangeDiff,
+  getTaskChanges,
   getTaskUsageTotal,
+  rollbackTaskChange,
   listTasks,
   planChatTask,
   runTask,
@@ -86,6 +89,33 @@ describe('api/tasks REST 封装', () => {
         return json({ ok: true, plan: [{ name: '修订步骤甲', goal: '修订目标甲', status: 'pending', result: '' }] });
       }
       if (url.endsWith('/api/tasks/t1') && method === 'DELETE') return new Response(null, { status: 204 });
+      if (url.endsWith('/api/tasks/t1/changes') && method === 'GET') {
+        return json({
+          changes: [{
+            id: 1, task_id: 't1', path: 'src/a.rs', op: 'modify', source: 'bash',
+            before_hash: 'h1', after_hash: 'h2', before_bytes: 3, after_bytes: 4,
+            truncated: false, has_baseline: true, created_at: '2026-09-30T00:00:00.000Z',
+          }],
+          undected: false,
+          undected_reason: null,
+        });
+      }
+      if (url.endsWith('/api/tasks/a%2Fb/changes') && method === 'GET') {
+        return json({ changes: [], undected: false, undected_reason: null });
+      }
+      if (url.endsWith('/api/tasks/t2/changes') && method === 'GET') {
+        return json({
+          changes: [],
+          undected: true,
+          undected_reason: '后扫描未完成(扫到 20000 项即撞预算),已省略删除类改动',
+        });
+      }
+      if (url.includes('/api/tasks/t1/changes/diff?path=') && method === 'GET') {
+        return json({ available: true, path: 'src/a.rs', diff: ['--- a/src/a.rs', '+++ b/src/a.rs', ''].join('\n') });
+      }
+      if (url.includes('/api/tasks/t1/changes/rollback?path=') && method === 'POST') {
+        return json({ ok: true, path: 'src/a.rs', restored_bytes: 3, note: '已恢复' });
+      }
       return json({ error: `未 mock 的请求: ${method} ${url}` }, 404);
     });
   });
@@ -363,6 +393,56 @@ describe('api/tasks REST 封装', () => {
     expect(headers.get('Authorization')).toBe('Bearer t');
     expect(headers.get('X-Kedai-Client')).toBe('kedai-web');
   });
+
+  // ==================== 任务文件变更三端点(批次 4c)====================
+
+  it('getTaskChanges:取 changes 数组 + 顶层 undected 字段(id 转义)', async () => {
+    const data = await getTaskChanges('t1');
+    expect(data.changes).toHaveLength(1);
+    expect(data.changes[0]).toMatchObject({
+      path: 'src/a.rs',
+      op: 'modify',
+      source: 'bash',
+      has_baseline: true,
+      truncated: false,
+    });
+    expect(data.undected).toBe(false);
+    expect(data.undectedReason).toBeNull();
+
+    await getTaskChanges('a/b');
+    const urls = vi.mocked(fetch).mock.calls.map(([input]) => String(input));
+    expect(urls).toContain('/api/tasks/t1/changes');
+    expect(urls).toContain('/api/tasks/a%2Fb/changes');
+  });
+
+  it('getTaskChanges:undected=true 时中文原因原样带出(前端按它分档显示)', async () => {
+    const data = await getTaskChanges('t2');
+    expect(data.undected).toBe(true);
+    expect(data.undectedReason).toContain('后扫描');
+    expect(data.changes).toHaveLength(0);
+  });
+
+  it('getTaskChangeDiff:path 必须编码,available/diff 原样返回', async () => {
+    const d = await getTaskChangeDiff('t1', 'src/a b.rs');
+    expect(d.available).toBe(true);
+    expect(d.diff).toContain('--- a/src/a.rs');
+    const urls = vi.mocked(fetch).mock.calls.map(([input]) => String(input));
+    expect(
+      urls.some((u) => u.includes('/api/tasks/t1/changes/diff?path=src%2Fa%20b.rs')),
+      `path 必须整体编码:${urls.join(' , ')}`,
+    ).toBe(true);
+  });
+
+  it('rollbackTaskChange:POST 到 changes/rollback 且 path 编码', async () => {
+    const r = await rollbackTaskChange('t1', 'src/a.rs');
+    expect(r.ok).toBe(true);
+    const call = vi
+      .mocked(fetch)
+      .mock.calls.find(([input]) => String(input).includes('/changes/rollback'));
+    expect(String(call?.[0])).toContain('/api/tasks/t1/changes/rollback?path=src%2Fa.rs');
+    expect(call?.[1]?.method).toBe('POST');
+  });
+
 });
 
 describe('api/tasks streamTaskEvents(SSE 订阅)', () => {
@@ -509,5 +589,16 @@ describe('api/tasks 形状闸门', () => {
       .mockResolvedValueOnce(json({ token: 't' }))
       .mockResolvedValueOnce(json({ ok: true }));
     await expect(bindTask('t1', null, [])).rejects.toThrow('任务响应格式异常');
+  });
+
+  it('形状闸门:缺 changes 数组 / 缺 path 字段时抛错', async () => {
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(json({ token: 't' }))
+      .mockResolvedValueOnce(json({ ok: true }));
+    await expect(getTaskChanges('t1')).rejects.toThrow('任务文件变更响应格式异常');
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(json({ token: 't' }))
+      .mockResolvedValueOnce(json({ ok: true }));
+    await expect(getTaskChangeDiff('t1', 'a.rs')).rejects.toThrow('任务文件变更 diff响应格式异常');
   });
 });

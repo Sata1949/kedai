@@ -3,9 +3,9 @@
 // GET /api/tasks/{id} → { task, subtasks };POST /api/tasks/{id}/run | /stop | /bind;
 // DELETE /api/tasks/{id} → 204;GET /api/tasks/events → SSE(KeepAlive 30s)。
 import { BASE, authorizedFetch, request } from './client';
-import { requireArrayField, requireObjectField } from './shape';
+import { requireArrayField, requireBoolField, requireObject, requireObjectField, requireStringField } from './shape';
 import { pumpSseFrames, toApiError } from './stream';
-import type { TaskApproveExecMode, TaskDetail, TaskEvent, TaskLlmCall, TaskRecord, TaskRunMode, TaskStep, TaskUsageTotal } from './types';
+import type { TaskApproveExecMode, TaskChangeDiff, TaskChangeRollback, TaskChangesPayload, TaskDetail, TaskEvent, TaskFileChange, TaskLlmCall, TaskRecord, TaskRunMode, TaskStep, TaskUsageTotal } from './types';
 
 /** 读取任务列表(最新在前) */
 export async function listTasks(): Promise<TaskRecord[]> {
@@ -170,6 +170,50 @@ export async function getTaskUsageTotal(): Promise<TaskUsageTotal> {
 export async function getTaskCalls(taskId: string): Promise<TaskLlmCall[]> {
   const data = await request<unknown>(`/tasks/${encodeURIComponent(taskId)}/calls`);
   return requireArrayField<TaskLlmCall>(data, 'calls', '任务调用记录');
+}
+
+/**
+ * 任务文件变更清单(批次 4 / 4b,PRODCAP-4)。
+ * 响应除 `changes` 数组外还有**顶层** `undected`/`undected_reason`(扫描是否完整),
+ * 故这里返回整个载荷而不是数组——调用方一次性拿全语义
+ * (「本轮未改动文件」「扫描缺项」「没有记账」是**三件不同的事**)。
+ */
+export async function getTaskChanges(taskId: string): Promise<TaskChangesPayload> {
+  const data = await request<unknown>(`/tasks/${encodeURIComponent(taskId)}/changes`);
+  const changes = requireArrayField<TaskFileChange>(data, 'changes', '任务文件变更');
+  const obj = data as Record<string, unknown>;
+  const reason = typeof obj.undected_reason === 'string' ? obj.undected_reason : null;
+  // `undected` 以服务端布尔为准,原因在场的兜底只在缺布尔时生效(旧服务端容错)
+  return { changes, undected: obj.undected === true || reason !== null, undectedReason: reason };
+}
+
+/** 单文件 unified diff(三种形态都 200,靠 `available` 区分;`path` 必须整体编码) */
+export async function getTaskChangeDiff(
+  taskId: string,
+  path: string,
+): Promise<TaskChangeDiff> {
+  const data = await request<unknown>(
+    `/tasks/${encodeURIComponent(taskId)}/changes/diff?path=${encodeURIComponent(path)}`,
+  );
+  // 形状闸门:组件按 available 分支渲染,解出 undefined 会把两种形态混成一种
+  const payload = requireObject<TaskChangeDiff>(data, '任务文件变更 diff');
+  requireStringField(data, 'path', '任务文件变更 diff');
+  return payload;
+}
+
+/** 单文件回滚(任务进行中后端 409;`ok:false` 时原因在 `reason`,原文显示给用户) */
+export async function rollbackTaskChange(
+  taskId: string,
+  path: string,
+): Promise<TaskChangeRollback> {
+  const data = await request<unknown>(
+    `/tasks/${encodeURIComponent(taskId)}/changes/rollback?path=${encodeURIComponent(path)}`,
+    { method: 'POST' },
+  );
+  // 形状闸门:调用方按 ok 判成败,undefined 会被当成功吞掉
+  const payload = requireObject<TaskChangeRollback>(data, '任务文件变更回滚');
+  requireBoolField(data, 'ok', '任务文件变更回滚');
+  return payload;
 }
 
 /**

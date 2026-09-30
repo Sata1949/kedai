@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
 import { useTaskStore } from './task';
 import { useUiPrefsStore } from './uiPrefs';
-import type { TaskDetail, TaskEvent, TaskLlmCall, TaskRecord, TaskStatus, TaskStep, TaskUsageTotal } from '../api';
+import type { TaskChangeDiff, TaskChangeRollback, TaskChangesPayload, TaskDetail, TaskEvent, TaskFileChange, TaskLlmCall, TaskRecord, TaskStatus, TaskStep, TaskUsageTotal } from '../api';
 
 // WP5 重写:任务事件 SSE 订阅驱动刷新(取代旧 1s 轮询)。
 // 覆盖:事件分发(created/status/plan/subtask/usage/deleted)、终态补全局累计、
@@ -30,6 +30,12 @@ const h = vi.hoisted(() => ({
   callsFetchCount: 0,
   /** true 时 getTaskCalls 抛错(验证 loadTaskCalls 失败静默) */
   callsFail: false,
+  /** getTaskChanges 调用次数(批次 4c:选任务/进终态驱动刷新断言用) */
+  changesFetchCount: 0,
+  /** true 时 getTaskChanges 抛错(验证失败静默保留旧值) */
+  changesFail: false,
+  /** 回滚调用收到的 (taskId, path) 序列(批次 4c 断言用) */
+  rollbackCalls: [] as Array<{ taskId: string; path: string }>,
   /** true 时新订阅在微任务中立即 onClose(模拟连接被拒,用于退避重连场景) */
   autoFailSubscribe: false,
   backendStatus: 'pending' as TaskStatus,
@@ -83,6 +89,20 @@ vi.mock('../api', async (importOriginal) => {
       h.callsFetchCount += 1;
       if (h.callsFail) throw new Error('调用记录加载失败');
       return [makeCall(taskId)];
+    }),
+    getTaskChanges: vi.fn(async (taskId: string): Promise<TaskChangesPayload> => {
+      h.changesFetchCount += 1;
+      if (h.changesFail) throw new Error('文件变更加载失败');
+      return { changes: [makeChange(taskId)], undected: false, undectedReason: null };
+    }),
+    getTaskChangeDiff: vi.fn(async (): Promise<TaskChangeDiff> => ({
+      available: true,
+      path: 'src/a.rs',
+      diff: ['--- a/src/a.rs', '+++ b/src/a.rs', ''].join('\n'),
+    })),
+    rollbackTaskChange: vi.fn(async (taskId: string, path: string): Promise<TaskChangeRollback> => {
+      h.rollbackCalls.push({ taskId, path });
+      return { ok: true, path, restored_bytes: 3 };
     }),
     runTask: vi.fn(async () => {}),
     stopTask: vi.fn(async () => {}),
@@ -158,6 +178,23 @@ function makeCall(taskId: string): TaskLlmCall {
     elapsed_ms: 123,
     status: 'ok',
     created_at: '2026-08-28T00:00:00.000Z',
+  };
+}
+
+function makeChange(taskId: string): TaskFileChange {
+  return {
+    id: 1,
+    task_id: taskId,
+    path: `src/${taskId}.rs`,
+    op: 'modify',
+    source: 'bash',
+    before_hash: 'h1',
+    after_hash: 'h2',
+    before_bytes: 3,
+    after_bytes: 4,
+    truncated: false,
+    has_baseline: true,
+    created_at: '2026-09-30T00:00:00.000Z',
   };
 }
 
@@ -1089,5 +1126,118 @@ describe('delta 流式缓冲(批次 R4 任务模式流式输出)', () => {
     h.emitEvent!({ type: 'task', task_id: 't2', kind: 'deleted' });
     await flush();
     expect(store.liveBuffers.size, '删除当前任务应清缓冲').toBe(0);
+  });
+});
+
+describe('任务文件变更(批次 4c)', () => {
+  beforeEach(() => {
+    memStorage.clear();
+    setActivePinia(createPinia());
+    h.subscribeCalls = 0;
+    h.closeCalls = 0;
+    h.listFetchCount = 0;
+    h.detailFetchCount = 0;
+    h.usageFetchCount = 0;
+    h.callsFetchCount = 0;
+    h.callsFail = false;
+    h.changesFetchCount = 0;
+    h.changesFail = false;
+    h.rollbackCalls = [];
+    h.autoFailSubscribe = false;
+    h.backendStatus = 'pending';
+    h.emitEvent = null;
+    h.emitClose = null;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('选中任务即拉一次清单;任务进终态再拉一次(无实时推送的两个时机)', async () => {
+    const store = useTaskStore();
+    store.appMode = 'task';
+    store.startTaskEvents();
+
+    await store.selectTask('t1');
+    await flush();
+    expect(h.changesFetchCount, '打开详情拉一次').toBe(1);
+    expect(store.taskFileChanges).toHaveLength(1);
+    expect(store.taskFileChanges[0].path).toBe('src/t1.rs');
+
+    // 进终态:补拉(模型写盘结束后的最终形态)
+    h.emitEvent!({ type: 'task', task_id: 't1', kind: 'status', status: 'done' });
+    await flush();
+    expect(h.changesFetchCount, '进终态补拉一次').toBe(2);
+
+    // 非终态事件不拉(此端点无事件驱动,只在进终态时对齐)
+    h.emitEvent!({ type: 'task', task_id: 't1', kind: 'status', status: 'running' });
+    await flush();
+    expect(h.changesFetchCount, '非终态不拉').toBe(2);
+
+    // 其它任务的终态不影响当前任务
+    h.emitEvent!({ type: 'task', task_id: 'other', kind: 'status', status: 'done' });
+    await flush();
+    expect(h.changesFetchCount, '非当前任务不拉').toBe(2);
+
+    store.stopTaskEvents();
+  });
+
+  it('切换任务清空并重拉;失败静默保留旧值', async () => {
+    const store = useTaskStore();
+    store.appMode = 'task';
+    store.startTaskEvents();
+    await store.selectTask('t1');
+    await flush();
+    expect(store.taskFileChanges[0].path).toBe('src/t1.rs');
+
+    // 失败:静默保留旧值(不能把「请求失败」显示成「没有改动」)
+    h.changesFail = true;
+    h.emitEvent!({ type: 'task', task_id: 't1', kind: 'status', status: 'done' });
+    await flush();
+    expect(h.changesFetchCount).toBe(2);
+    expect(store.taskFileChanges, '失败保留旧值').toHaveLength(1);
+
+    // 切换任务:清空 + 重拉新任务(签名同步重置,防被去重跳过)
+    h.changesFail = false;
+    await store.selectTask('t2');
+    await flush();
+    expect(store.taskFileChanges).toHaveLength(1);
+    expect(store.taskFileChanges[0].path).toBe('src/t2.rs');
+    expect(store.taskChangesUndected, 'undected 属于当前任务,切换即复位').toBeNull();
+
+    store.stopTaskEvents();
+  });
+
+  it('删除当前任务清空清单与 undected 标记', async () => {
+    const store = useTaskStore();
+    store.appMode = 'task';
+    store.startTaskEvents();
+    await store.selectTask('t1');
+    await flush();
+    store.taskChangesUndected = '后扫描未完成(扫到 20000 项即撞预算)';
+
+    await store.deleteTask('t1');
+    expect(store.taskFileChanges).toHaveLength(0);
+    expect(store.taskChangesUndected, '删除后不留别任务的缺项横幅').toBeNull();
+    store.stopTaskEvents();
+  });
+
+  it('扫描缺项(undected)随载荷带出:前端按原因分档而不是固定文案', async () => {
+    const store = useTaskStore();
+    store.appMode = 'task';
+    store.startTaskEvents();
+    // 让 mock 返回带缺项的载荷
+    const api = await import('../api');
+    vi.mocked(api.getTaskChanges).mockResolvedValueOnce({
+      changes: [],
+      undected: true,
+      undectedReason: '后扫描未完成(扫到 20000 项即撞预算),已省略删除类改动',
+    });
+    await store.selectTask('t9');
+    await flush();
+    expect(store.taskFileChanges).toHaveLength(0);
+    expect(store.taskChangesUndected).toContain('后扫描');
+    store.stopTaskEvents();
   });
 });

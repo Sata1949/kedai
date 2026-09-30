@@ -64,6 +64,11 @@ const MAPPINGS = [
     ts: { file: 'web/src/api/types.ts', name: 'TaskLlmCall', kind: 'interface' },
   },
   {
+    label: '任务文件变更行',
+    rust: { file: 'server-rs/src/models/types.rs', name: 'TaskFileChangeRecord' },
+    ts: { file: 'web/src/api/types.ts', name: 'TaskFileChange', kind: 'interface' },
+  },
+  {
     label: '命令执行审计行',
     rust: { file: 'server-rs/src/services/exec/audit.rs', name: 'ExecAuditEntry' },
     ts: { file: 'web/src/api/exec.ts', name: 'ExecAuditEntry', kind: 'interface' },

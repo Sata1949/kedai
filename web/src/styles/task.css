@@ -897,3 +897,60 @@
 .sv-task-plan-chat-title { font-size: 13px; font-weight: 600; margin-bottom: 8px; }
 .sv-task-plan-chat-log { max-height: 260px; overflow-y: auto; margin-bottom: 8px; }
 .sv-task-plan-chat-log .sv-msg { margin-bottom: 10px; }
+
+/* 文件变更卡片(批次 4c,PRODCAP-4):行 = 路径 + 类型 + 来源 + 字节 + diff/回滚入口;
+   缺项横幅与基线不可用行都必须「说得出来」,故各自有独立样式而不是留白 */
+.sv-fc-undected {
+  border-left: 3px solid var(--sv-amber, #d97706);
+  background: rgba(217, 119, 6, 0.06);
+  color: var(--sv-ink-soft);
+  font-size: 12px;
+  line-height: 1.6;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+}
+.sv-fc-list { list-style: none; margin: 0; padding: 0; }
+.sv-fc-row { padding: 6px 0; border-bottom: var(--bw-thin) solid var(--sv-line, #e5e5e5); }
+.sv-fc-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sv-fc-path {
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  color: var(--sv-ink);
+  word-break: break-all;
+  flex: 1 1 auto;
+  min-width: 160px;
+}
+.sv-fc-tag {
+  font-size: 11px;
+  padding: 1px 6px;
+  border: var(--bw-thin) solid var(--sv-line-strong, #ccc);
+  color: var(--sv-ink-soft);
+}
+.sv-fc-tag.op-create { color: var(--sv-green-deep, #15803d); border-color: currentColor; }
+.sv-fc-tag.op-delete { color: var(--sv-red, #e3342f); border-color: currentColor; }
+.sv-fc-tag.op-rollback { color: var(--sv-amber, #d97706); border-color: currentColor; }
+.sv-fc-src { font-size: 11px; color: var(--sv-ink-soft); }
+.sv-fc-bytes { font-size: 11px; color: var(--sv-ink-soft); }
+.sv-fc-btn {
+  font-size: 11px;
+  padding: 2px 8px;
+  border: var(--bw-thin) solid var(--sv-line-strong, #ccc);
+  background: var(--sv-surface);
+  color: var(--sv-ink-soft);
+  cursor: pointer;
+}
+.sv-fc-btn:hover:not(:disabled) { border-color: var(--sv-ink); color: var(--sv-ink); }
+.sv-fc-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.sv-fc-unavailable { font-size: 11px; color: var(--sv-ink-soft); margin-top: 4px; }
+.sv-fc-diff-wrap { margin-top: 6px; }
+.sv-fc-diff {
+  max-height: 320px;
+  overflow: auto;
+  background: var(--sv-surface);
+  border: var(--bw-thin) solid var(--sv-line, #e5e5e5);
+  padding: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre;
+  margin: 4px 0 0;
+}

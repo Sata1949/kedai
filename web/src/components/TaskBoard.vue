@@ -15,6 +15,7 @@ import { callableFlows } from '../utils/flowCallStats';
 import { flowCandidates, staleMembers, type FlowCandidate } from '../utils/flowCandidates';
 import { APPROVE_EXEC_MODE_LABELS, APPROVE_EXEC_MODE_ORDER, FLOW_MODE_LABELS, MODE_LABELS, messageKindLabel } from '../api/labels';
 import type { TaskApproveExecMode, TaskRecord, TaskRunMode, TaskStep } from '../api';
+import FileChangesPanel from './FileChangesPanel.vue';
 
 const store = useAppStore();
 const { currentTask, currentTaskId, model, currentTaskUsage, executorById } = storeToRefs(store);
@@ -1032,6 +1033,14 @@ async function removeTask(task: TaskRecord): Promise<void> {
               {{ resultIncompleteNote }}
             </div>
             <div v-if="summaryOpen" class="sv-task-result" v-html="resultMainHtml" />
+          </div>
+          <!-- 文件变更(批次 4c,PRODCAP-4「交付可审计」):任务结束后「改了什么」的结构化答案。
+               数据自取 store(与 CallTracePanel 同款:本组件只负责位置);空清单也**不隐藏卡片**——
+               「本轮未改动文件」「基线不可用」「扫描缺项」是三种必须说得出来的不同答案,
+               四态渲染纪律见 FileChangesPanel.vue 头注释与 docs/契约.md 台账小节。 -->
+          <div class="sv-task-section">
+            <div class="sv-task-section-title">文件变更</div>
+            <FileChangesPanel />
           </div>
           <div v-if="resultAuditHtml" class="sv-task-section">
             <div class="sv-task-section-title">审计结论</div>

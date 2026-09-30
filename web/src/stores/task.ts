@@ -203,6 +203,14 @@ export const useTaskStore = defineStore('app.task', () => {
   const globalTaskUsage = ref<api.TaskUsageTotal | null>(null);
   /** 当前任务 LLM 调用记录(批次 3 L3 调用追踪面板;GET /api/tasks/{id}/calls) */
   const taskCalls = ref<api.TaskLlmCall[]>([]);
+  /** 当前任务文件变更清单(批次 4c;GET /api/tasks/{id}/changes) */
+  const taskFileChanges = ref<api.TaskFileChange[]>([]);
+  /**
+   * 最近一次**扫描未完整检出**的中文原因(批次 4b 的顶层字段;null = 无缺项)。
+   * 与清单同生命周期:它描述的是**当前任务**的扫描边界,切任务即复位——
+   * 「没有变更」「基线不可用」「扫描缺项」在 UI 上是三件不同的事,不可合并显示。
+   */
+  const taskChangesUndected = ref<string | null>(null);
 
   /**
    * 流式增量缓冲(批次 R4 任务模式流式输出):key = `${phase}:${step_index ?? ''}`,
@@ -459,6 +467,32 @@ export const useTaskStore = defineStore('app.task', () => {
     }
   }
 
+  /**
+   * 文件变更清单刷新:同款内容签名去重(签名含顶层 undected 与原因,故缺项态变化也会触发替换)。
+   * **失败静默保留旧值**——把「请求失败」清成「没有改动」是最坏的一种谎报。
+   */
+  let changesSignature = '';
+  async function loadTaskChanges(taskId: string): Promise<void> {
+    try {
+      const data = await api.getTaskChanges(taskId);
+      const sig = contentSignature(data);
+      if (sig !== changesSignature) {
+        changesSignature = sig;
+        taskFileChanges.value = data.changes;
+        taskChangesUndected.value = data.undectedReason;
+      }
+    } catch {
+      // 静默:文件变更是辅助信息,失败不影响主流程
+    }
+  }
+
+  /** 清空当前任务的文件变更态(清单 + 缺项原因 + 签名;切任务/删除/清选择三处共用) */
+  function clearTaskChanges(): void {
+    taskFileChanges.value = [];
+    taskChangesUndected.value = null;
+    changesSignature = contentSignature([]);
+  }
+
   async function selectTask(id: string): Promise<void> {
     currentTaskId.value = id;
     persistCurrentTaskId(id);
@@ -467,10 +501,13 @@ export const useTaskStore = defineStore('app.task', () => {
     // 同步重置内容签名,防止新任务首屏记录与旧任务签名碰巧相同而被去重跳过
     taskCalls.value = [];
     callsSignature = contentSignature([]);
+    clearTaskChanges();
     clearAllLiveDeltas();
     // 最近 agent 状态同理:agent_status 不落库,新任务从空开始(等下一个事件)
     lastAgentStatus.value = null;
     await loadTaskDetail(id);
+    // 打开任务详情即拉一次变更清单(本端点无事件驱动,另一个时机是「任务进终态」)
+    void loadTaskChanges(id);
   }
 
   /** 清空当前任务选择(任务被删除/列表已无该 id 时;同步清持久化) */
@@ -479,6 +516,7 @@ export const useTaskStore = defineStore('app.task', () => {
     currentTask.value = null;
     currentTaskUsage.value = null;
     taskCalls.value = [];
+    clearTaskChanges();
     clearAllLiveDeltas();
     lastAgentStatus.value = null;
     persistCurrentTaskId(null);
@@ -548,6 +586,11 @@ export const useTaskStore = defineStore('app.task', () => {
         if (ev.task_id === currentTaskId.value) void loadTaskDetail(ev.task_id);
         if (ev.kind === 'status' && ev.status && TERMINAL_STATUSES.has(ev.status)) {
           void loadGlobalTaskUsage();
+          // 批次 4c:进终态是变更清单的第二个拉取时机(模型写盘已结束,拿最终形态;
+          // 本端点无 file_changed 事件,理由见 `计划.md` PRODCAP-4 的 D2 解耦档)
+          if (ev.task_id === currentTaskId.value) {
+            void loadTaskChanges(ev.task_id);
+          }
         }
         break;
       case 'usage':
@@ -596,6 +639,7 @@ export const useTaskStore = defineStore('app.task', () => {
           currentTaskUsage.value = null;
           taskCalls.value = [];
           callsSignature = contentSignature([]);
+          clearTaskChanges();
           clearAllLiveDeltas(); // 批次 R4:任务删除,其流式缓冲一并失效
           lastAgentStatus.value = null;
         }
@@ -809,6 +853,7 @@ export const useTaskStore = defineStore('app.task', () => {
       currentTaskUsage.value = null;
       taskCalls.value = [];
       callsSignature = contentSignature([]);
+      clearTaskChanges();
       clearAllLiveDeltas(); // 批次 R4:任务删除,其流式缓冲一并失效
       persistCurrentTaskId(null); // 实跑问题 4:删除当前任务时同步清持久化选择
     }
@@ -828,6 +873,8 @@ export const useTaskStore = defineStore('app.task', () => {
     currentTaskUsage,
     globalTaskUsage,
     taskCalls,
+    taskFileChanges,
+    taskChangesUndected,
     liveBuffers,
     lastAgentStatus,
     setAppMode,
@@ -835,6 +882,7 @@ export const useTaskStore = defineStore('app.task', () => {
     loadTasks,
     loadGlobalTaskUsage,
     loadTaskCalls,
+    loadTaskChanges,
     createTask,
     selectTask,
     clearSelectedTask,

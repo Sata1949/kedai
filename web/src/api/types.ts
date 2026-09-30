@@ -1150,3 +1150,65 @@ export interface TaskLlmCall {
   finish_reason?: string;
   created_at: string;
 }
+
+/**
+ * 任务文件变更台账的一行(批次 4 / 4b,PRODCAP-4「交付可审计」)。
+ * 与后端 `server-rs/src/models/types.rs::TaskFileChangeRecord` 一对一
+ * (登记在 `tools/check-contract.mjs` 的 MAPPINGS;改字段须两侧同改)。
+ */
+export interface TaskFileChange {
+  id: number;
+  task_id: string;
+  /** 工作区内**相对路径**(正斜杠);响应不携带绝对路径 */
+  path: string;
+  op: 'create' | 'modify' | 'delete' | 'rollback';
+  /** `tool` = fs_write/fs_edit 精确记账;`bash` = 命令前后树扫描的**启发式**检出;`rollback` = 回滚自身 */
+  source: 'tool' | 'bash' | 'rollback';
+  /** 改动前正文的哈希;null = 无前态(新建)或基线未知 */
+  before_hash: string | null;
+  after_hash: string;
+  before_bytes: number;
+  after_bytes: number;
+  /** 基线正文超留存上限(256KB)/ 驻留预算打满 / 读取失败 → 无正文可 diff、不可回滚 */
+  truncated: boolean;
+  /** 能否 diff / 回滚;`truncated` 或新建(可删除回滚)各有形态,以本字段为准 */
+  has_baseline: boolean;
+  created_at: string;
+}
+
+/**
+ * `GET /api/tasks/{id}/changes` 的载荷。
+ * **`undected` 是顶层字段而不是清单里的行**(批次 4b):`changes` 一行 = 一个文件改动,
+ * 而「扫描没扫完」不是改动,且零改动的命令也要能留痕;混进数组会污染长度语义。
+ */
+export interface TaskChangesPayload {
+  changes: TaskFileChange[];
+  /** 有过「未能完整检出」的扫描(bash 侧);true 时 `undectedReason` 给出最近一次原因 */
+  undected: boolean;
+  /** 最近一次缺项的中文原因(前端横幅按它分档,不得用固定文案冒充);null = 从未缺项 */
+  undectedReason: string | null;
+}
+
+/** `GET /api/tasks/{id}/changes/diff` 的载荷;三种形态都 200,靠 `available` 区分 */
+export interface TaskChangeDiff {
+  available: boolean;
+  path: string;
+  /** unified diff;**超预算时该字段本身是「改动过大…」说明文本**,不是空串 */
+  diff?: string;
+  /** 新建形态的补充说明(全量新增行) */
+  note?: string;
+  /** `available:false` 时为什么拿不到基线(绝不返回空 diff 冒充) */
+  reason?: string;
+}
+
+/** `POST /api/tasks/{id}/changes/rollback` 的载荷;`ok:false` 时原因在 `reason` */
+export interface TaskChangeRollback {
+  ok: boolean;
+  path: string;
+  restored_bytes?: number;
+  /** true = 该行是新建,回滚即删除 */
+  removed?: boolean;
+  note?: string;
+  available?: boolean;
+  reason?: string;
+}

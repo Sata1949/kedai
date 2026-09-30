@@ -89,6 +89,18 @@ export function requireNumberField(value: unknown, field: string, what: string):
 }
 
 /**
+ * 取对象的**布尔**字段(如 `{ ok: true }`)。
+ * 不吃 `'true'`/`'1'` 这类字符串真假值:JSON 契约里布尔就应是布尔,
+ * 隐式转换会把上游字段改名/改型静默吞成 false。
+ */
+export function requireBoolField(value: unknown, field: string, what: string): boolean {
+  const obj = isPlainObject(value) ? value : shapeFail(what, value);
+  const got = obj[field];
+  if (typeof got !== 'boolean') shapeFail(what, value);
+  return got;
+}
+
+/**
  * 取对象的**可空对象**字段(如 `{ trace: AgentTrace | null }`)。
  * 区分「字段缺失」(异常,抛错)与「显式 null」(合法:业务上无记录)。
  */

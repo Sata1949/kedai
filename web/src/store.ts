@@ -97,6 +97,7 @@ export const useAppStore = defineStore('app', () => {
     loadTasks: task.loadTasks,
     loadGlobalTaskUsage: task.loadGlobalTaskUsage,
     loadTaskCalls: task.loadTaskCalls,
+    loadTaskChanges: task.loadTaskChanges,
     createTask: task.createTask,
     selectTask: task.selectTask,
     clearSelectedTask: task.clearSelectedTask,
