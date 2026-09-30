@@ -93,6 +93,7 @@
 | [plans/COMPUTER-USE-REPORT.md](plans/COMPUTER-USE-REPORT.md) | computer use 能力调查报告(提交 1~6 的依据;缺陷清单 CU-1~CU-10 见 `计划.md`) |
 | [plans/COMPUTER-USE-HARNESSES.md](plans/COMPUTER-USE-HARNESSES.md) | 成熟 harness 的 computer use 方案调研(ZCode 本机实物 + 跨方案共识定律) |
 | [plans/DOC-DRIFT-REPORT.md](plans/DOC-DRIFT-REPORT.md) | 文档漂移盘点报告(六类 84 点:契约字面/状态过时/文档矛盾/ID 断链/漏登记/其他;修正项见 `计划.md` 文档漂移收口批) |
+| [plans/CODING-REPORT.md](plans/CODING-REPORT.md) | 编码能力包功能扩展调研(五家 harness 机制对照 / 仓库现状矩阵 / 出包判据;条目 CODE-1~CODE-5 见 `计划.md`) |
 
 > **同名撞车提醒**:[archive/TASK-MODE-FIX-PLAN.md](archive/TASK-MODE-FIX-PLAN.md) 是更早的
 > 「Kimi 续做」交接稿(归档,只读);其同名的工作区执行稿已于 2026-09-27 并入 `计划.md` 并删除。
