@@ -167,6 +167,27 @@ const MAPPINGS = [
     ts: { file: 'web/src/api/types.ts', name: 'TaskFlowSnapshot', kind: 'interface' },
   },
   {
+    // 工作区画像(CODE-4):任务详情顶层 `workspace_profile` 与独立探测端点
+    // `GET /api/workspace/profile` 两处出口的同一条目——前端按 kind 渲染展示名、
+    // 按 suggested_command 给「建议的验证命令」。**详情顶层字段本身不在 MAPPINGS 里**
+    // (TaskDetail 未登记),故这两个具名结构体是它唯一的机检锚点:漏字段即 FAIL。
+    label: '工作区画像',
+    rust: {
+      file: 'server-rs/src/services/workspace_profile.rs',
+      name: 'WorkspaceProfile',
+    },
+    ts: { file: 'web/src/api/types.ts', name: 'WorkspaceProfile', kind: 'interface' },
+  },
+  {
+    // 同上:画像的命中条目(`detected[]` 的元素)。
+    label: '工作区画像命中项',
+    rust: {
+      file: 'server-rs/src/services/workspace_profile.rs',
+      name: 'ProjectTypeHint',
+    },
+    ts: { file: 'web/src/api/types.ts', name: 'ProjectTypeHint', kind: 'interface' },
+  },
+  {
     // SSE 顶层事件判别式联合(Rust `#[serde(tag="type")]` ↔ TS 判别式联合)。
     // 此前**未登记**:新增一个顶层事件要手改 Rust 枚举 + TS 手写 union + 前端两个 switch
     // (sseReducer.ts / stores/task.ts)共 3 处,其中 Rust→TS 这一步完全靠人,漏改不报错。
