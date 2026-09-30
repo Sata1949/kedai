@@ -470,6 +470,7 @@ pub async fn file_change_rollback(
 /// 1. **逐项报告、不整体否决**:某一项无基线/落盘失败不拦住其余项(`results` 逐项列出);
 /// 2. running/planning → 409 **整单拒绝**(与单文件同口径:避免与模型写入互相覆盖);
 /// 3. 每项成功都再记 `op=rollback`(复用单文件同一核心函数,不写第二份)。
+///
 /// 可逆性:对同一任务再调一次 = 逐项切回「改动后」状态(取最新一行的自然结果,非新语义)。
 pub async fn file_change_rollback_all(
     State(state): State<Arc<AppState>>,
