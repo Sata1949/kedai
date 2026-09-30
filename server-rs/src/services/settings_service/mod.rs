@@ -1170,6 +1170,12 @@ mod tests {
             p.contains("先读后写"),
             "编码场景纪律(先读后写)必须在模板里:{p}"
         );
+        // CODE-3(2026-09-30):项目约定文件从「泛指」升为「点名」——五家编码 harness 的
+        // 主路径都是点名机制(CLAUDE.md / AGENTS.md),只写「既有约定」模型会漏读
+        assert!(
+            p.contains("AGENTS.md") && p.contains("CLAUDE.md"),
+            "项目约定文件应被点名(CODE-3):{p}"
+        );
     }
 
     /// 新装(含 Android 首装)角色扮演默认提示词不再为空:from_config 直接物化 Win 端正用版,
