@@ -3,6 +3,7 @@
 import { computed, ref, watch } from 'vue';
 import { useAppStore } from '../store';
 import { storeToRefs } from 'pinia';
+import { inTauri, isAndroidTauri } from '../platform';
 import { taskStatusClass as statusClass, taskStatusLabel as statusLabel } from '../taskStatus';
 import TaskModeSelect from './TaskModeSelect.vue';
 import TaskFlowSelect from './TaskFlowSelect.vue';
@@ -233,22 +234,69 @@ const taskTitle = ref('');
 const executorId = ref('');
 const creatingTask = ref(false);
 
-// 任务模式进入时拉执行者库(下拉数据源);失败仅记错误,不影响创建任务(可选通用执行者)
-watch(
-  () => appMode.value,
-  (m) => {
-    if (m === 'task' && executors.value.length === 0) void store.loadExecutors();
-  },
-  { immediate: true },
+/** 任务工作区(CODE-1;空 = 未绑定,任务在草稿目录工作)。绑定即冻结:创建期后端
+ *  canonical 化并校验(不存在 / 指向数据目录 → 400 中文原因原样上屏)。 */
+const workspacePath = ref('');
+/** 原生目录选择仅桌面 Tauri 提供:Android 的 SAF 返回 content:// URI,与后端路径语义不符;
+ *  浏览器形态退化为手填(输入框始终可编辑,这只是一个便利按钮)。 */
+const canPickDir = inTauri && !isAndroidTauri;
+/** 编码能力包开启且未选工作区 → 显式提示(把「退化为草稿目录」说在前面,不静默) */
+const wsHintVisible = computed(
+  () => store.taskCodingBundleEnabled && !workspacePath.value.trim(),
 );
+
+/** 最近工作区(CODE-1;localStorage,去重 + 上限 8 + 最多展示 3 条)。
+ *  失效路径不静默删——点了由后端 400 说明原因,与「手填」同一条错误路径。 */
+const WS_RECENT_KEY = 'kedai.taskWorkspace.recent.v1';
+const WS_RECENT_MAX = 8;
+const WS_RECENT_SHOW = 3;
+function loadRecentWorkspaces(): string[] {
+  try {
+    const raw = localStorage.getItem(WS_RECENT_KEY);
+    if (!raw) return [];
+    const arr: unknown = JSON.parse(raw);
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .filter((x): x is string => typeof x === 'string' && x.trim() !== '')
+      .slice(0, WS_RECENT_MAX);
+  } catch {
+    // 解析失败(手改 / 旧格式)= 视为无历史;不影响创建流程
+    return [];
+  }
+}
+const recentWorkspaces = ref<string[]>(loadRecentWorkspaces());
+const recentWorkspacesShown = computed(() => recentWorkspaces.value.slice(0, WS_RECENT_SHOW));
+
+function rememberWorkspace(p: string): void {
+  const next = [p, ...recentWorkspaces.value.filter((x) => x !== p)].slice(0, WS_RECENT_MAX);
+  recentWorkspaces.value = next;
+  try {
+    localStorage.setItem(WS_RECENT_KEY, JSON.stringify(next));
+  } catch {
+    // 隐私模式等写入失败:不影响任务创建
+  }
+}
+
+/** 原生目录选择(仅桌面 Tauri 渲染该按钮;取消返回 null = 不改动输入) */
+async function pickWorkspace(): Promise<void> {
+  try {
+    const { open } = await import('@tauri-apps/plugin-dialog');
+    const picked = await open({ directory: true, multiple: false, title: '选择任务工作区' });
+    if (typeof picked === 'string') workspacePath.value = picked;
+  } catch (err) {
+    alert(`选择目录失败:${(err as Error).message}`);
+  }
+}
 
 /** 新建并立即执行 */
 async function createAndRun(): Promise<void> {
   const t = taskTitle.value.trim();
   if (!t || creatingTask.value) return;
   creatingTask.value = true;
+  const ws = workspacePath.value.trim();
   try {
-    const task = await store.createTask(t, executorId.value || undefined);
+    const task = await store.createTask(t, executorId.value || undefined, ws || undefined);
+    if (ws) rememberWorkspace(ws);
     taskTitle.value = '';
     await store.runTask(task.id);
   } catch (err) {
@@ -257,6 +305,15 @@ async function createAndRun(): Promise<void> {
     creatingTask.value = false;
   }
 }
+
+// 任务模式进入时拉执行者库(下拉数据源);失败仅记错误,不影响创建任务(可选通用执行者)
+watch(
+  () => appMode.value,
+  (m) => {
+    if (m === 'task' && executors.value.length === 0) void store.loadExecutors();
+  },
+  { immediate: true },
+);
 
 /** 删除任务 */
 async function removeTask(task: TaskRecord): Promise<void> {
@@ -441,6 +498,43 @@ async function removeTask(task: TaskRecord): Promise<void> {
                 @click="store.taskExecutorsOpen = true"
               >管理</button>
             </div>
+            <!-- 工作区(CODE-1;可选,空 = 未绑定,任务在草稿目录工作;绑定即冻结) -->
+            <div class="sv-inp-row sv-ws-row">
+              <input
+                v-model="workspacePath"
+                class="sv-input"
+                placeholder="工作区:项目目录绝对路径(可选)"
+                spellcheck="false"
+                :disabled="creatingTask"
+              />
+              <button
+                v-if="canPickDir"
+                class="sv-btn ghost sv-btn-sm"
+                title="从本机选择项目目录"
+                :disabled="creatingTask"
+                @click="pickWorkspace"
+              >选择…</button>
+              <button
+                v-if="workspacePath"
+                class="sv-btn ghost sv-btn-sm"
+                title="清空工作区(将创建为未绑定任务)"
+                :disabled="creatingTask"
+                @click="workspacePath = ''"
+              >清空</button>
+            </div>
+            <div v-if="recentWorkspacesShown.length > 0 && !workspacePath" class="sv-ws-recent">
+              <span class="sv-note">最近:</span>
+              <button
+                v-for="p in recentWorkspacesShown"
+                :key="p"
+                class="sv-ws-recent-item"
+                :title="p"
+                @click="workspacePath = p"
+              >{{ p }}</button>
+            </div>
+            <p v-if="wsHintVisible" class="sv-note sv-ws-hint">
+              编码能力包已启用:未绑定工作区的任务将在任务草稿目录内工作。
+            </p>
             <button
               class="sv-btn primary"
               :disabled="creatingTask || !taskTitle.trim()"
@@ -636,5 +730,37 @@ async function removeTask(task: TaskRecord): Promise<void> {
 .sidebar-exit:hover {
   border-color: var(--sv-red);
   color: var(--sv-red);
+}
+
+/* 工作区行(CODE-1):输入框占满剩余宽度;「选择…」「清空」按钮不换行 */
+.sv-ws-row .sv-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.sv-ws-recent {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.sv-ws-recent-item {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 1px 6px;
+  font-size: 11px;
+  background: transparent;
+  border: var(--bw-thin) solid var(--sv-line-strong);
+  color: var(--sv-ink-soft);
+  cursor: pointer;
+}
+.sv-ws-recent-item:hover {
+  border-color: var(--sv-ink);
+  color: var(--sv-ink);
+}
+.sv-ws-hint {
+  margin-top: 6px;
 }
 </style>

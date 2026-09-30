@@ -262,6 +262,43 @@ describe('api/tasks REST 封装', () => {
     });
   });
 
+  it('createTask 的 workspace 仅在非空时下发(CODE-1 任务工作区入口)', async () => {
+    const lastCreateBody = (): Record<string, unknown> => {
+      const posts = vi.mocked(fetch).mock.calls.filter(
+        ([input, init]) => String(input) === '/api/tasks' && (init?.method ?? 'GET') === 'POST',
+      );
+      return JSON.parse(String(posts[posts.length - 1]?.[1]?.body)) as Record<string, unknown>;
+    };
+
+    // 不给(= 未绑定):请求体不得出现 workspace 键,旧客户端请求体逐字节不变
+    await createTask('目标');
+    expect(lastCreateBody()).not.toHaveProperty('workspace');
+
+    // 空串 / 纯空白同样不下发:UI 的「清空」与「从未填写」落同一条请求
+    await createTask('目标', undefined, undefined, undefined, undefined, undefined, undefined, '');
+    expect(lastCreateBody()).not.toHaveProperty('workspace');
+    await createTask('目标', undefined, undefined, undefined, undefined, undefined, undefined, '   ');
+    expect(lastCreateBody()).not.toHaveProperty('workspace');
+
+    // 非空:去两端空白后原样下发(是否合法由后端创建期校验并 canonical 冻结)
+    await createTask(
+      '目标',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      '  D:\\proj\\demo  ',
+    );
+    expect(lastCreateBody()).toEqual({
+      title: '目标',
+      executor_id: null,
+      task_mode: 'legacy',
+      workspace: 'D:\\proj\\demo',
+    });
+  });
+
   it('bindTask:POST /tasks/{id}/bind,flow_id 与 flow_ids 全量显式下发(B 批 B3)', async () => {
     /** 取最后一次 bind 的请求体(同一用例内多次调用,find 只命中第一次) */
     const lastBindBody = (): Record<string, unknown> => {

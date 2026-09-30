@@ -52,6 +52,8 @@ const h = vi.hoisted(() => ({
   createTaskFlowIdLists: [] as (string[] | undefined)[],
   /** createTask 收到的 connection_id 参数序列(B 批 B1 逐任务选用连接透传断言用) */
   createTaskConnectionIds: [] as (string | undefined)[],
+  /** createTask 收到的 workspace 参数序列(CODE-1 工作区透传断言用) */
+  createTaskWorkspaces: [] as (string | undefined)[],
   /** approveTask 收到的 (id, plan) 参数序列(批次 4 批准断言用) */
   approveCalls: [] as Array<{ id: string; plan?: TaskStep[] }>,
   /** followupTask 收到的 (id, content, mode) 参数序列(批次 R2a;R2b+ 扩 mode) */
@@ -116,11 +118,13 @@ vi.mock('../api', async (importOriginal) => {
         flowId?: string,
         flowIds?: string[],
         connectionId?: string,
+        workspace?: string,
       ) => {
         h.createTaskModes.push(taskMode);
         h.createTaskFlowIds.push(flowId);
         h.createTaskFlowIdLists.push(flowIds);
         h.createTaskConnectionIds.push(connectionId);
+        h.createTaskWorkspaces.push(workspace);
         return makeTask('pending', title);
       },
     ),
@@ -603,6 +607,7 @@ describe('批次 4 六模式:taskRunMode / approveTask / 新事件分支', () =>
     h.createTaskFlowIds = [];
     h.createTaskFlowIdLists = [];
     h.createTaskConnectionIds = [];
+    h.createTaskWorkspaces = [];
     h.approveCalls = [];
     h.followupCalls = [];
     h.planChatCalls = [];
@@ -784,6 +789,19 @@ describe('批次 4 六模式:taskRunMode / approveTask / 新事件分支', () =>
     store.taskConnectionId = '';
     await store.createTask('清空后');
     expect(h.createTaskConnectionIds[3]).toBeUndefined();
+  });
+
+  // ===== CODE-1:任务工作区(workspace)=====
+
+  it('createTask 透传 workspace(CODE-1;空 = undefined 不下发,与未绑定逐字节一致)', async () => {
+    const store = useTaskStore();
+    // 不给:workspace 为 undefined(api 层据此不下发该键)
+    await store.createTask('未绑定目标');
+    expect(h.createTaskWorkspaces[0], '缺省应不下发 workspace').toBeUndefined();
+
+    // 显式给:原样透传(是否合法/是否存在由后端创建期校验;非法路径 400 上抛给组件显示)
+    await store.createTask('绑定目标', undefined, 'D:\\proj\\demo');
+    expect(h.createTaskWorkspaces[1], '给定工作区应透传').toBe('D:\\proj\\demo');
   });
 
   it('approveTask 透传 (id, plan) 并在成功后刷新任务详情;不给 plan 时 plan 为 undefined', async () => {

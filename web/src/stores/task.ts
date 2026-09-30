@@ -750,10 +750,16 @@ export const useTaskStore = defineStore('app.task', () => {
    *  (名单为空 = 不下发该键,后端会 400;UI 侧已在选择器给出即时警示)。
    *  B 批 B1:`taskConnectionId` 非空即随请求下发(逐任务选用连接;**与模式无关**——
    *  它绑的是 provider 而不是编排,legacy 到 custom 六模式都吃它),空则跟随设置的默认连接。
+   *  CODE-1:`workspace` 非空即随请求下发(后端创建期 canonical 化并冻结;非法路径 400
+   *  中文文案原样上抛);空/缺省 = 未绑定(与工作区功能上线前逐字节一致)。
    *
    *  模式门控放在 store 而不是组件:非 custom 模式下选择器不渲染,但持久化的名单/绑定
    *  仍在内存里——若照原样下发,后端会以「只有自定义流程模式可以…」400 掉一次**正常**创建。 */
-  async function createTask(title: string, executorId?: string): Promise<api.TaskRecord> {
+  async function createTask(
+    title: string,
+    executorId?: string,
+    workspace?: string,
+  ): Promise<api.TaskRecord> {
     const isCustom = taskRunMode.value === 'custom';
     // 空名单不下发:后端把「给了空数组」判 400(空名单 = 名存实亡),
     // 「要跑强制模式」的正确写法是不带这个键。UI 同时给出即时警示。
@@ -770,6 +776,7 @@ export const useTaskStore = defineStore('app.task', () => {
       compareIds,
       // 连接不做模式门控:六模式都会用到 provider,空串 = 跟随默认连接(不下发该键)
       taskConnectionId.value || undefined,
+      workspace,
     );
     tasks.value = [task, ...tasks.value];
     listSignature = contentSignature(tasks.value); // 本地乐观改写后同步签名(下次事件刷新同内容时不再替换)

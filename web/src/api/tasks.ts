@@ -29,6 +29,9 @@ export async function listTasks(): Promise<TaskRecord[]> {
  *   provider 而不是编排)。语义 = 该任务所有 LLM 调用的缺省连接(节点级 `connection_id`
  *   优先);仅非空时下发,缺省即跟随设置的默认连接(零行为变化)。
  *   创建期后端即校验「引用存在且启用」,不存在/停用 → 400 点名该连接。
+ * - `workspace`:CODE-1 的**任务工作区**(可选;项目目录的绝对路径)。非空时随请求下发,
+ *   后端创建期 canonical 化并冻结(**不存在 / 指向数据目录 → 400 点名原因**);空/缺省
+ *   = 未绑定(任务在草稿目录工作)。仅在显式给出时下发,旧调用方请求体逐字节不变。
  */
 export async function createTask(
   title: string,
@@ -38,6 +41,7 @@ export async function createTask(
   flowId?: string,
   flowIds?: string[],
   connectionId?: string,
+  workspace?: string,
 ): Promise<TaskRecord> {
   const data = await request<unknown>('/tasks', {
     method: 'POST',
@@ -53,6 +57,8 @@ export async function createTask(
       ...(flowIds && flowIds.length > 0 ? { flow_ids: flowIds } : {}),
       // 逐任务选用连接:仅非空时下发(空 = 跟随设置的默认连接,与 B 批之前逐字节一致)
       ...(connectionId ? { connection_id: connectionId } : {}),
+      // 工作区(CODE-1):仅非空下发(空/纯空白 = 未绑定,不下发该键);值去两端空白
+      ...(workspace && workspace.trim() ? { workspace: workspace.trim() } : {}),
     }),
   });
   return requireObjectField<TaskRecord>(data, 'task', '任务');

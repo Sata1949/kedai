@@ -376,6 +376,22 @@ function toggleSummary(): void {
   store.taskResultSummaryOpen = !store.taskResultSummaryOpen;
 }
 
+/** 任务工作区(CODE-1):创建期冻结的 canonical 绝对路径;未绑定为 null/空 → 该行不渲染 */
+const taskWorkspace = computed(() => currentTask.value?.task.workspace ?? '');
+/** 复制成功的短暂回执(1.5s 自动复位;失败保持原文案,不虚报「已复制」) */
+const workspaceCopied = ref(false);
+async function copyWorkspacePath(): Promise<void> {
+  const p = taskWorkspace.value;
+  if (!p) return;
+  try {
+    await navigator.clipboard.writeText(p);
+    workspaceCopied.value = true;
+    setTimeout(() => (workspaceCopied.value = false), 1500);
+  } catch {
+    // 剪贴板不可用(权限/非安全上下文):不做任何声称成功的改文案
+  }
+}
+
 /** 发送追加指令:成功后草稿清空(详情经 store.followupTask 内刷新带出 messages/result) */
 async function sendFollowup(): Promise<void> {
   const id = currentTaskId.value;
@@ -711,6 +727,17 @@ async function removeTask(task: TaskRecord): Promise<void> {
             >{{ taskCompareLabel }}</span>
             <span v-if="taskTotalTokens > 0" class="sv-task-usage">累计 token {{ taskTotalTokens.toLocaleString() }}</span>
             <span v-if="currentTask.task.error" class="sv-task-error">{{ currentTask.task.error }}</span>
+          </div>
+
+          <!-- 工作区(CODE-1):创建期冻结;未绑定不显示该行(不把「没有」渲染成一行噪音) -->
+          <div v-if="taskWorkspace" class="sv-task-workspace">
+            <span class="sv-note">工作区:</span>
+            <span class="sv-task-workspace-path" :title="taskWorkspace">{{ taskWorkspace }}</span>
+            <button
+              class="sv-btn ghost sv-btn-sm"
+              title="复制工作区路径"
+              @click="copyWorkspacePath"
+            >{{ workspaceCopied ? '已复制' : '复制' }}</button>
           </div>
 
           <!-- 改绑流程(B 批 B3):仅 custom 模式且不在进行中/待批准时给入口
@@ -1145,6 +1172,25 @@ async function removeTask(task: TaskRecord): Promise<void> {
 }
 .sv-task-approve-exec .sv-select { flex: 1; min-width: 0; }
 .approve-exec-hint { margin: 6px 0 0; }
+
+/* 工作区行(CODE-1):状态行下方一行;长路径单行省略(完整值在 title 与复制里),
+   复制按钮固定宽度不参与压缩。样式纪律同下:只写 scoped、只复用既有令牌。 */
+.sv-task-workspace {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 20px;
+}
+.sv-task-workspace .sv-btn {
+  flex: none;
+}
+.sv-task-workspace-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--sv-ink-soft, #666);
+}
 
 /* 执行中进度行(2026-09-18):展示最近一条 agent_status 简述,长循环期间可见活性。
    脉冲圆点用既有动画节奏;文字单行省略,避免长工具名把状态行撑开。 */

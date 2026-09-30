@@ -6,7 +6,7 @@
 //   ③ 执行/停止按钮按 taskRunning 切换——这是用户最主要的操作入口。
 // api 模块整体 mock:组件直接调 api,不 mock 会打真实网络。
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { mount } from '@vue/test-utils';
+import { flushPromises, mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
 import type { TaskDetail } from '../api';
 
@@ -195,6 +195,45 @@ describe('TaskBoard 组件(M5 补测)', () => {
     const running = wrapper.findAll('.sv-task-head-actions button').map((b) => b.text());
     expect(running.some((t) => t.includes('停止'))).toBe(true);
     expect(running.some((t) => t.includes('执行'))).toBe(false);
+    wrapper.unmount();
+  });
+
+  it('CODE-1:绑定工作区时展示路径与复制入口;未绑定不渲染该行', async () => {
+    const store = useAppStore();
+    store.currentTask = makeTaskDetail({ workspace: 'D:\\proj\\demo' });
+    const wrapper = mount(TaskBoard);
+    expect(wrapper.find('.sv-task-workspace').exists()).toBe(true);
+    expect(wrapper.find('.sv-task-workspace-path').text()).toBe('D:\\proj\\demo');
+    expect(wrapper.find('.sv-task-workspace .sv-btn').text()).toContain('复制');
+
+    // 切到未绑定任务 → 整行消失(不把「没有」渲染成一行噪音)
+    store.currentTask = makeTaskDetail();
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('.sv-task-workspace').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it('CODE-1:复制工作区路径写入剪贴板并给「已复制」回执;剪贴板不可用时不虚报', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    const store = useAppStore();
+    store.currentTask = makeTaskDetail({ workspace: 'D:\\proj\\demo' });
+    let wrapper = mount(TaskBoard);
+    await wrapper.find('.sv-task-workspace .sv-btn').trigger('click');
+    await flushPromises();
+    expect(writeText).toHaveBeenCalledWith('D:\\proj\\demo');
+    expect(wrapper.find('.sv-task-workspace .sv-btn').text()).toBe('已复制');
+    wrapper.unmount();
+
+    // 剪贴板抛错:文案保持「复制」,不做无证据的成功声称
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText: vi.fn().mockRejectedValue(new Error('denied')) },
+      configurable: true,
+    });
+    wrapper = mount(TaskBoard);
+    await wrapper.find('.sv-task-workspace .sv-btn').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.sv-task-workspace .sv-btn').text()).toBe('复制');
     wrapper.unmount();
   });
 });
