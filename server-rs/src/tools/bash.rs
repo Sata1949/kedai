@@ -54,7 +54,13 @@ pub fn register_bash_tool(
                 },
                 "timeout_ms": {
                     "type": "integer",
-                    "description": "超时毫秒(默认 60000,上限 300000);超时会强杀进程"
+                    // 文案由常量插值:这是**模型可见**的说明,写死数字会与 exec 层的钳制漂移
+                    // (抬上限时漏改这里,模型会以为 300s 就是天花板,永远要不到长预算)。
+                    "description": format!(
+                        "超时毫秒(默认 {},上限 {});超时会强杀进程(Windows 连同整棵进程树)",
+                        crate::services::exec::DEFAULT_TIMEOUT_MS,
+                        crate::services::exec::MAX_TIMEOUT_MS
+                    )
                 }
             },
             "required": ["command"]
@@ -71,8 +77,13 @@ pub fn register_bash_tool(
             let dir = data_dir.clone();
             Box::pin(async move { run(&args, &ctx, &db, &st, &dir).await })
         }),
-        // 执行器自带超时强杀,注册表超时给足余量(命令上限 300s + 收尾)
-        Some(std::time::Duration::from_secs(330)),
+        // 执行器自带超时强杀,注册表超时给足余量(命令上限 + 30s 收尾)。
+        // **由 `MAX_TIMEOUT_MS` 派生,不写第二份数字**:2026-09-30 之前这里是硬编码 330s,
+        // 抬 exec 上限若不同步改它,注册表会先超时并把 future drop 掉——
+        // 拿不到 exec 层的强杀路径与审计文案,长命令表现为「工具超时」而不是「命令超时」。
+        Some(std::time::Duration::from_millis(
+            crate::services::exec::MAX_TIMEOUT_MS + 30_000,
+        )),
     );
 }
 

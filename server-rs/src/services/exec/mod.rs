@@ -80,13 +80,25 @@ pub struct ExecResult {
     pub timed_out: bool,
 }
 
-/// 输出保留上限(字符):超出部分截断并附说明。
+/// 输出保留上限(字符):超出部分截断并附省略说明。
 /// 与 tools/registry 的 64KB 结果截断同量级,避免一条命令把上下文灌满。
 pub const MAX_OUTPUT_CHARS: usize = 32_768;
 
+/// 尾部保留份额(批次 2 HARNESS3-4):构建/测试类命令的**失败摘要在尾部**
+/// (`error[E...]`、`test result:` 那几行),只保头会把「哪一步失败」整段切掉。
+/// 头:尾 = 3:1——头部留上下文(命令回显与前段进度),尾部留结论。
+const TAIL_KEEP_CHARS: usize = MAX_OUTPUT_CHARS / 4;
+/// 头部保留份额(= 总额 - 尾部,保证两者之和恰为 `MAX_OUTPUT_CHARS`)。
+const HEAD_KEEP_CHARS: usize = MAX_OUTPUT_CHARS - TAIL_KEEP_CHARS;
+
 /// 默认与上限超时(毫秒)。上限防止模型给出超大值导致挂起。
+/// **1800s(批次 2 HARNESS3-4)**:编码类任务的自测闭环要能跑完 `cargo test` 级校验
+/// (本机实测 1~16 分钟),旧值 300s 恰好卡在门槛下——自测跑不完,「改完先验证」的纪律就落空。
+/// 抬这个值**不是单点改动**:注册表侧 `tools/bash.rs` 的整工具超时、任务空闲看守下限、
+/// 任务步骤墙钟预算三处都按它推导(见 `settings_service::params::task_idle_floor_secs`),
+/// 漏改任何一处都会让合法长命令被上层闸门掐掉或误判成空闲。
 pub const DEFAULT_TIMEOUT_MS: u64 = 60_000;
-pub const MAX_TIMEOUT_MS: u64 = 300_000;
+pub const MAX_TIMEOUT_MS: u64 = 1_800_000;
 
 /// 夹取超时到 [1s, MAX_TIMEOUT_MS]。
 pub fn clamp_timeout(ms: Option<u64>) -> u64 {
@@ -94,14 +106,18 @@ pub fn clamp_timeout(ms: Option<u64>) -> u64 {
         .clamp(1_000, MAX_TIMEOUT_MS)
 }
 
-/// 截断输出并附省略说明(按字符,避免切坏多字节)。
+/// 截断输出并附省略说明(按字符,避免切坏多字节);**保头 + 保尾**。
 pub fn truncate_output(s: &str) -> String {
     let count = s.chars().count();
     if count <= MAX_OUTPUT_CHARS {
         return s.to_string();
     }
-    let head: String = s.chars().take(MAX_OUTPUT_CHARS).collect();
-    format!("{head}\n…(输出超 {MAX_OUTPUT_CHARS} 字符已截断,完整内容见审计日志)")
+    let head: String = s.chars().take(HEAD_KEEP_CHARS).collect();
+    let tail: String = s.chars().skip(count - TAIL_KEEP_CHARS).collect();
+    let omitted = count - HEAD_KEEP_CHARS - TAIL_KEEP_CHARS;
+    format!(
+        "{head}\n…(输出超 {MAX_OUTPUT_CHARS} 字符已截断:保留头 {HEAD_KEEP_CHARS} + 尾 {TAIL_KEEP_CHARS} 字符,中间省略 {omitted} 字符,完整内容见审计日志)\n{tail}"
+    )
 }
 
 /// 命令执行的单一入口:按当前可用等级执行。
@@ -205,9 +221,15 @@ mod tests {
         assert_eq!(
             clamp_timeout(Some(10_000_000)),
             MAX_TIMEOUT_MS,
-            "超上限夹到 300s"
+            "超上限夹到 1800s"
         );
         assert_eq!(clamp_timeout(Some(5_000)), 5_000);
+        // 批次 2 的正面断言:`cargo test` 级时长必须落在合法区间内(旧上限 300s 卡在门槛下)
+        assert_eq!(
+            clamp_timeout(Some(900_000)),
+            900_000,
+            "15 分钟的自测命令应被原样接受,而不是被夹到 300s"
+        );
     }
 
     #[test]
@@ -223,6 +245,45 @@ mod tests {
         assert!(out.contains("已截断"));
         // 截断后总长受控
         assert!(out.chars().count() < long.chars().count());
+    }
+
+    /// **保尾是本批的目的**(HARNESS3-4):构建/测试输出的失败摘要在尾部,
+    /// 只保头就等于「跑完了但看不见为什么失败」。
+    #[test]
+    fn truncate_keeps_both_head_and_tail() {
+        // 头尾各放可识别标记,中间是不可区分的大量填充
+        let mut s = String::from("HEAD-MARKER\n");
+        s.push_str(&"x".repeat(MAX_OUTPUT_CHARS * 2));
+        s.push_str("\nTAIL-MARKER: 3 tests failed");
+        let out = truncate_output(&s);
+        assert!(out.contains("HEAD-MARKER"), "头部被丢: {out}");
+        assert!(
+            out.contains("TAIL-MARKER: 3 tests failed"),
+            "尾部被丢(旧实现只保头,失败摘要整段消失): {out}"
+        );
+        assert!(out.contains("已截断"), "必须留可见的省略说明");
+        // 总量受控:头 + 尾 + 一行说明,不得接近原文的两倍预算
+        assert!(
+            out.chars().count() <= MAX_OUTPUT_CHARS + 200,
+            "截断后仍应受预算约束: {}",
+            out.chars().count()
+        );
+    }
+
+    /// **两层预算的关系**(实测才定下来):内层按字符、外层 `tools/registry` 按 64KB 字节。
+    /// CJK 下 32768 字符可达 ~98KB,外层会再切一次——所以外层也必须保尾,
+    /// 否则内层辛苦留下的尾部又被外层削掉。这里锁住内层的最坏字节量,供外层预算对照。
+    #[test]
+    fn truncate_budget_under_multibyte_worst_case() {
+        let long = "字".repeat(MAX_OUTPUT_CHARS * 2);
+        let out = truncate_output(&long);
+        assert!(out.chars().count() <= MAX_OUTPUT_CHARS + 200);
+        // 每个汉字 3 字节:内层结果的最坏字节量 > 外层 64KB,故外层保尾是**必需**的
+        assert!(
+            out.len() > 64 * 1024,
+            "本用例的前提(内层最坏字节量超外层预算)不成立: {}",
+            out.len()
+        );
     }
 
     #[test]

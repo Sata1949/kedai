@@ -350,16 +350,31 @@ impl ToolRegistry {
         }
         // 超长结果截断(保留字节计数元数据,调用方按字符串回填模型/前端)
         if output.len() > MAX_TOOL_OUTPUT_BYTES {
-            let mut boundary = MAX_TOOL_OUTPUT_BYTES;
-            while boundary > 0 && !output.is_char_boundary(boundary) {
-                boundary -= 1;
+            // **保头 + 保尾**(批次 2 HARNESS3-4):工具结果的结论在尾部(构建日志、错误清单)。
+            // 这一层与 exec 层的 32K **字符**预算是两层:CJK 下内层结果可达 ~98KB > 本层 64KB,
+            // 若本层仍只保前缀,内层辛苦留下的尾部会在这里被二次切掉
+            // (对照用例:`services/exec/mod.rs::truncate_budget_under_multibyte_worst_case`)。
+            let tail_bytes = MAX_TOOL_OUTPUT_BYTES / 4;
+            let head_bytes = MAX_TOOL_OUTPUT_BYTES - tail_bytes;
+            let mut head_cut = head_bytes;
+            while head_cut > 0 && !output.is_char_boundary(head_cut) {
+                head_cut -= 1;
             }
-            let mut truncated = output[..boundary].to_string();
+            // 尾部要从**下一个**合法边界起(向前推进),否则会切坏多字节
+            let mut tail_cut = output.len() - tail_bytes;
+            while tail_cut < output.len() && !output.is_char_boundary(tail_cut) {
+                tail_cut += 1;
+            }
+            let tail_kept = output.len() - tail_cut;
+            let mut truncated = String::with_capacity(MAX_TOOL_OUTPUT_BYTES + 128);
+            truncated.push_str(&output[..head_cut]);
             truncated.push_str(&format!(
-                "\n...\n[输出已截断:原始 {} 字节,保留前 {} 字符]",
+                "\n...\n[输出已截断:原始 {} 字节,保留前 {} + 后 {} 字节]\n",
                 output.len(),
-                MAX_TOOL_OUTPUT_BYTES
+                head_cut,
+                tail_kept
             ));
+            truncated.push_str(&output[tail_cut..]);
             return Ok(truncated);
         }
         Ok(output)
@@ -741,6 +756,46 @@ mod tests {
         let out = reg.execute("unicode-big", "{}", ctx()).await.unwrap();
         assert!(out.contains("输出已截断"));
         assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+    }
+
+    /// **外层也必须保尾**(批次 2 HARNESS3-4):这一层的 64KB 字节预算在 exec 层的
+    /// 32K **字符**预算之外,两者是两层——CJK 输出下内层结果可达 ~98KB,若外层仍只保前缀,
+    /// 内层辛苦留下的失败摘要(构建/测试的结论都在尾部)会在这里被二次切掉。
+    #[tokio::test]
+    async fn tool_output_truncation_keeps_head_and_tail() {
+        let reg = ToolRegistry::new().with_tool_timeout(Duration::from_secs(5));
+        reg.register(
+            ToolDefinition {
+                name: "head-tail".into(),
+                description: "头尾标记".into(),
+                parameters: serde_json::json!({}),
+            },
+            Arc::new(|_, _| {
+                Box::pin(async {
+                    let mut s = String::from("HEAD-MARKER");
+                    s.push_str(&"y".repeat(100 * 1024));
+                    s.push_str("TAIL-MARKER: 2 tests failed");
+                    Ok(s)
+                })
+            }),
+        );
+        reg.permissions()
+            .authorize("head-tail", "session", "s")
+            .unwrap();
+        let out = reg.execute("head-tail", "{}", ctx()).await.unwrap();
+        assert!(out.contains("HEAD-MARKER"), "头部被丢");
+        assert!(
+            out.contains("TAIL-MARKER: 2 tests failed"),
+            "尾部被外层切掉(旧实现只保前缀): 末尾 {}/{}",
+            out.len(),
+            MAX_TOOL_OUTPUT_BYTES
+        );
+        assert!(out.contains("输出已截断"));
+        assert!(
+            out.len() <= MAX_TOOL_OUTPUT_BYTES + 256,
+            "保尾不等于放宽预算: {}",
+            out.len()
+        );
     }
 
     /// M2:工具输出超长截断——超限输出带截断标记,不整段撑爆上下文

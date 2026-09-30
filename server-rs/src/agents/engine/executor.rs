@@ -117,7 +117,13 @@ pub(super) async fn maybe_run_tool(
 ///
 /// 风险:会中断「极慢但最终能返回」的上游请求。取 300s 而非更小值,是因为推理模型
 /// 单轮生成数十秒属正常;与 planner/step 既有 300s 口径一致,不对同类调用双标。
-const TASK_TOOL_LOOP_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+///
+/// `pub(crate)` 的用途(2026-09-30 批次 2):任务空闲看守的**合法下限**按
+/// 「单条命令上限 + 单次模型调用上限 + 1」推导,这里就是第二项的唯一出处
+/// (消费点 `services::settings_service::params::task_idle_floor_secs`)——
+/// 此前该下限被硬编码成 601 三份,抬 bash 上限时漏改任何一份都会误杀合法长命令。
+pub(crate) const TASK_TOOL_LOOP_CALL_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(300);
 
 /// 总时长看门狗包装:`watchdog=None` 时行为与裸调完全一致;`Some(limit)` 时超过
 /// `limit` 未完成即放弃 future 并返回 `timeout_error()`。

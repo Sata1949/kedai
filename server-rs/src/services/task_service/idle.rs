@@ -76,7 +76,8 @@ impl TaskService {
     /// `timeout_secs` 由调用方给(看守从设置读 `task_idle_timeout_secs`);`0` = 关闭,
     /// 直接返回空。`pub` 是**有意的测试缝**:`tests/` 是外部 crate,`pub(crate)` 不可达
     /// (先例:`TaskService::stop` 也是 pub),集成测试靠它直调短阈值验证机制——
-    /// 真机无法把阈值调到秒级(下限 601s,见设置项注释)。
+    /// 真机无法把阈值调到秒级(下限按「单条命令上限 + 单次模型调用上限 + 1」派生,
+    /// 见 `settings_service::params::task_idle_floor_secs`)。
     pub fn scan_idle_tasks(&self, timeout_secs: u64) -> Vec<String> {
         if timeout_secs == 0 {
             return Vec::new();
@@ -190,5 +191,32 @@ mod tests {
         let r = idle_reason(1234, 900);
         assert!(r.contains("空闲超时自动收尾"), "{r}");
         assert!(r.contains("1234") && r.contains("900"), "{r}");
+    }
+
+    /// **批次 2 的耦合钉子(把「抬 bash 上限必须同抬看守下限」变成机器可见事实)**:
+    /// 一条跑满上限的合法长命令,期间**没有任何事件心跳**
+    /// (工具循环不落库、不发事件,见模块头注释与 `touch_activity` 的三处调用点),
+    /// 静默时长 = `exec::MAX_TIMEOUT_MS`;按下限阈值判定必须**不算空闲**。
+    ///
+    /// 为什么单独锁这一条:看守下限此前被硬编码成 601 三份(默认值注释 / PUT 校验文案 /
+    /// load 钳制),而它的两个来源(命令上限、模型调用上限)在别的模块——
+    /// 只改一处就会让 `cargo test` 级命令在跑到一半时被自动收尾,且现象伪装成「任务超时结束」。
+    /// 现在下限由 `task_idle_floor_secs()` 派生,这条断言守住派生关系不被反向改坏。
+    #[test]
+    fn full_length_command_silence_is_not_idle() {
+        use crate::services::exec::MAX_TIMEOUT_MS;
+        use crate::services::settings_service::task_idle_floor_secs;
+        let command_secs = (MAX_TIMEOUT_MS / 1_000) as i64;
+        let floor = task_idle_floor_secs() as i64;
+        assert!(
+            floor > command_secs,
+            "看守下限({floor}s)必须严格大于单条命令上限({command_secs}s),否则跑满上限的合法命令会被误杀"
+        );
+        assert!(
+            !is_idle(TaskStatus::Running, false, command_secs, floor as u64),
+            "静默 = 命令上限({command_secs}s)不得被判空闲(阈值 {floor}s)"
+        );
+        // 下限本身仍要在设置允许区间内(86400 上限,越界的下限会让任何取值都被拒)
+        assert!(floor <= 86_400, "看守下限越界: {floor}");
     }
 }

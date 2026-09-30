@@ -16,7 +16,7 @@ use super::params::{
     default_subagent_result_max_chars, default_task_idle_timeout_secs,
     default_task_step_budget_secs, default_task_tool_policy,
     default_tool_authorization_timeout_secs, default_tool_history_budget_tokens,
-    default_tool_history_keep_rounds, migrate_authorization_mode,
+    default_tool_history_keep_rounds, migrate_authorization_mode, task_idle_floor_secs,
 };
 use super::{RoleplayPromptConfig, RuntimeSettings};
 
@@ -175,13 +175,14 @@ impl RuntimeSettings {
                 }
                 // 提交 3(D3/D7):任务侧两道闸的参数钳制。step_budget 刻意不设下限
                 // (1 秒合法:低于单次调用看门狗的值 = 「第一轮结束就收尾」的合法语义,
-                // 测试也靠它触发预算路径);idle 下限 601 的依据见默认值函数注释。
+                // 测试也靠它触发预算路径);idle 下限走 `task_idle_floor_secs()` 单一出处
+                // (批次 2 之前这里与 PUT 校验各写一份 601,抬 bash 上限就会两处漂移)。
                 if s.task_step_budget_secs != 0 && !(1..=86_400).contains(&s.task_step_budget_secs)
                 {
                     s.task_step_budget_secs = default_task_step_budget_secs();
                 }
                 if s.task_idle_timeout_secs != 0
-                    && !(601..=86_400).contains(&s.task_idle_timeout_secs)
+                    && !(task_idle_floor_secs()..=86_400).contains(&s.task_idle_timeout_secs)
                 {
                     s.task_idle_timeout_secs = default_task_idle_timeout_secs();
                 }

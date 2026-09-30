@@ -28,7 +28,7 @@ pub use connection::{
 pub use connector_pool::{connection_label, ConnectorPool};
 pub use params::{
     default_coding_task_agent_prompt, default_roleplay_agent_prompt, default_task_agent_prompt,
-    McpServerConfig, ModeSettings, RoleplayPromptConfig, TaskPromptConfig,
+    task_idle_floor_secs, McpServerConfig, ModeSettings, RoleplayPromptConfig, TaskPromptConfig,
 };
 
 // RuntimeSettings 字段的 serde(default = "...") 按名字在本模块作用域解析;
@@ -215,9 +215,13 @@ pub struct RuntimeSettings {
     /// 不设 60s 之类下限是刻意的:1 秒合法(测试靠它触发预算路径),文档注「建议 ≥300」。
     #[serde(default = "default_task_step_budget_secs")]
     pub task_step_budget_secs: u32,
-    /// 任务空闲超时秒数(提交 3 · D7;默认 900,0 = 关,否则钳 601..=86400):
-    /// 运行中任务若连续该时长既无模型调用行、也无事件心跳,由看守以 stop 同源路径收尾
-    /// 并标注「空闲超时自动收尾」。下限 601 = bash 单命令 300s + 单次模型调用 300s + 1。
+    /// 任务空闲超时秒数(提交 3 · D7;默认 2400,0 = 关,否则钳
+    /// `task_idle_floor_secs()`..=86400):运行中任务若连续该时长既无模型调用行、也无事件心跳,
+    /// 由看守以 stop 同源路径收尾并标注「空闲超时自动收尾」。
+    /// **下限不写死数字**——它由「单条命令上限(`exec::MAX_TIMEOUT_MS`,现 1800s)」与
+    /// 「单次模型调用上限(`executor::TASK_TOOL_LOOP_CALL_TIMEOUT`,300s)」再加 1 派生,
+    /// 单一出处在 `params::task_idle_floor_secs`(批次 2 之前这里与 PUT 校验各写一份 601,
+    /// 抬 bash 上限就会两处漂移并把合法长命令误杀)。
     /// **扁平字段、只被任务侧消费**(`task_service/idle.rs` 的看守)。
     #[serde(default = "default_task_idle_timeout_secs")]
     pub task_idle_timeout_secs: u32,
@@ -1259,6 +1263,56 @@ mod tests {
                 .0
                 .contains("{{char}}"),
             "roleplay 默认词应含宏占位符"
+        );
+    }
+
+    /// 看守下限的两个来源:命令上限 + 模型调用上限 + 1(直接引用引擎那个常量,不留第二份 300)。
+    #[test]
+    fn task_idle_floor_is_derived_from_both_timeouts() {
+        let call_secs = crate::agents::engine::executor::TASK_TOOL_LOOP_CALL_TIMEOUT.as_secs();
+        assert_eq!(
+            task_idle_floor_secs() as u64,
+            crate::services::exec::MAX_TIMEOUT_MS / 1_000 + call_secs + 1,
+            "看守下限必须等于「单条命令上限 + 单次模型调用上限 + 1」"
+        );
+    }
+
+    /// 批次 2(HARNESS3-4)的耦合钉子:**两个任务闸门的默认值都要容得下
+    /// 「一条跑满上限的命令 + 一次模型调用」**。
+    ///
+    /// 为什么锁默认值而不是锁行为:两处闸门都在**轮末 / 无心跳**时判定,而 bash 上限抬到
+    /// 1800s 后,旧默认值(看守 900 / 步骤预算 1200)会分别在「命令跑到一半被自动收尾」与
+    /// 「自测跑完即收尾、没有下一轮去修」两处把自测闭环打死——后者尤其隐蔽,因为命令本身
+    /// 没被截断(预算在轮末判),丢的是后续轮次。
+    #[test]
+    fn task_gate_defaults_cover_one_full_command_plus_a_call() {
+        let worst_silence = crate::services::exec::MAX_TIMEOUT_MS / 1_000
+            + crate::agents::engine::executor::TASK_TOOL_LOOP_CALL_TIMEOUT.as_secs()
+            + 1;
+        let idle_default = default_task_idle_timeout_secs() as u64;
+        assert!(
+            idle_default >= task_idle_floor_secs() as u64,
+            "看守默认 {idle_default}s 低于自己的下限 {}s:首装即被 load 钳制改写",
+            task_idle_floor_secs()
+        );
+        assert!(
+            idle_default >= worst_silence,
+            "看守默认 {idle_default}s 容不下一条满时长命令 + 一次模型调用({worst_silence}s)"
+        );
+        let step_budget = default_task_step_budget_secs() as u64;
+        assert!(
+            step_budget >= worst_silence,
+            "步骤预算默认 {step_budget}s 容不下一条满时长命令 + 一次模型调用({worst_silence}s):\
+             自测闭环会退化成一轮抽签"
+        );
+        // 注册表侧整工具超时由同一常量派生 + 收尾余量:它只需盖住**命令本身**
+        // (模型调用不在这条 future 里,不能拿 worst_silence 来要求它)。
+        // 写死 330s 的旧形态下,命令上限一旦抬高,注册表会先掐断——长命令表现为
+        // 「工具超时」而不是「命令超时」,exec 层的强杀与审计路径全部失效。
+        let registry_allows = crate::services::exec::MAX_TIMEOUT_MS + 30_000;
+        assert!(
+            registry_allows > crate::services::exec::MAX_TIMEOUT_MS,
+            "bash 的注册表超时须留出收尾余量: {registry_allows}"
         );
     }
 }

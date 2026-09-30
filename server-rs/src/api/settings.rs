@@ -7,9 +7,9 @@ use crate::services::agent_flow_service::{
     MIN_FLOW_CALL_DEPTH,
 };
 use crate::services::settings_service::{
-    normalize_base_url, resolve_connector_target, AppMode, ConnectionProfile, McpServerConfig,
-    RuntimeSettings, CONNECTOR_TYPE_MOCK, CONNECTOR_TYPE_OPENAI, DEFAULT_SEARCH_ENDPOINT,
-    MAX_CONNECTIONS,
+    normalize_base_url, resolve_connector_target, task_idle_floor_secs, AppMode, ConnectionProfile,
+    McpServerConfig, RuntimeSettings, CONNECTOR_TYPE_MOCK, CONNECTOR_TYPE_OPENAI,
+    DEFAULT_SEARCH_ENDPOINT, MAX_CONNECTIONS,
 };
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -228,7 +228,8 @@ pub struct UpdateSettingsBody {
     /// 任务步骤墙钟预算秒数(提交 3 · D3;0 = 关,否则 1..=86400;缺省保持不变)
     #[serde(default)]
     pub task_step_budget_secs: Option<u32>,
-    /// 任务空闲超时秒数(提交 3 · D7;0 = 关,否则 601..=86400;缺省保持不变)
+    /// 任务空闲超时秒数(提交 3 · D7;0 = 关,否则 `task_idle_floor_secs()`..=86400;
+    /// 下限由「单条命令上限 + 单次模型调用上限 + 1」派生,勿在此手写数值)
     #[serde(default)]
     pub task_idle_timeout_secs: Option<u32>,
     /// 变量两步生成独立模型(HB-7;空串 = 清除(回到与正文共用);非空 = 覆盖;缺省保持不变)
@@ -879,10 +880,14 @@ pub async fn update_settings(
                 s.task_step_budget_secs = v;
             }
             if let Some(v) = body.task_idle_timeout_secs {
-                if v != 0 && !(601..=86_400).contains(&v) {
-                    return validation(
-                        "task_idle_timeout_secs 须为 0(关闭)或 601..=86400(下限 = 单命令 300s + 单次调用 300s + 1)",
-                    );
+                // 下限走 `task_idle_floor_secs()` 单一出处(= 单条命令上限 + 单次模型调用上限 + 1);
+                // 文案里也插值同一个数,**不再手写「601」与它的推导式**——批次 2 抬 bash 上限时,
+                // 手写文案会与真实区间不一致,用户照文案调参会被莫名拒绝。
+                let floor = task_idle_floor_secs();
+                if v != 0 && !(floor..=86_400).contains(&v) {
+                    return validation(format!(
+                        "task_idle_timeout_secs 须为 0(关闭)或 {floor}..=86400(下限 = 单条命令上限 + 单次模型调用上限 + 1)"
+                    ));
                 }
                 s.task_idle_timeout_secs = v;
             }
