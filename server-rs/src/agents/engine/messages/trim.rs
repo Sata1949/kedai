@@ -228,6 +228,33 @@ pub(in crate::agents::engine) fn trim_tool_history(
     outcome
 }
 
+/// 从工具参数 JSON 里取「工作状态锚点」摘要(批次 3)。
+///
+/// - 只取**首行**并按字符截断(命令可能是多行长串,路径不会长),避免占位被撑大;
+/// - 解析失败(非 JSON / 该键非字符串)返回空串——宁可不带锚点,也不得让摘要化本身报错;
+/// - 已被回收过的参数占位里同样带着锚点,所以重复调用取到的值一致(幂等)。
+fn anchor_excerpt(arguments: &str, key: &str) -> String {
+    const MAX_ANCHOR_CHARS: usize = 80;
+    let raw = serde_json::from_str::<serde_json::Value>(arguments)
+        .ok()
+        .and_then(|v| {
+            v.get(key)
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_default();
+    let one_line = raw.lines().next().unwrap_or("").trim();
+    if one_line.is_empty() {
+        return String::new();
+    }
+    if one_line.chars().count() > MAX_ANCHOR_CHARS {
+        let cut: String = one_line.chars().take(MAX_ANCHOR_CHARS).collect();
+        format!("{cut}…")
+    } else {
+        one_line.to_string()
+    }
+}
+
 /// 回收一轮的工具参数空间(2026-09-14):把该轮 assistant 的 `tool_calls[].arguments`
 /// 替换为合法 JSON 占位,保留 `id`/`name` → OpenAI 的 assistant(tool_calls)↔tool
 /// 配对不破坏,严格后端不会 400。
@@ -242,7 +269,18 @@ fn reclaim_round_arguments(messages: &mut [LlmMessage], a_idx: usize) -> bool {
             continue;
         }
         let chars = c.arguments.chars().count();
-        c.arguments = format!("{TOOL_ARGUMENTS_TRIMMED_PREFIX}\"chars\":{chars}}}");
+        // 参数被回收,但**工作状态锚点留在占位里**(批次 3):模型跨压缩后仍要知道
+        // 自己改过哪个文件 / 跑过什么命令,否则会重复读、重复改。占位仍是合法 JSON。
+        let anchor = crate::tools::tool_sets::state_anchor_arg(&c.name)
+            .map(|key| (key, anchor_excerpt(&c.arguments, key)))
+            .filter(|(_, value)| !value.is_empty());
+        c.arguments = match &anchor {
+            Some((key, value)) => format!(
+                "{TOOL_ARGUMENTS_TRIMMED_PREFIX}\"{key}\":{},\"chars\":{chars}}}",
+                serde_json::Value::String(value.clone())
+            ),
+            None => format!("{TOOL_ARGUMENTS_TRIMMED_PREFIX}\"chars\":{chars}}}"),
+        };
         changed = true;
     }
     changed
@@ -263,15 +301,31 @@ fn summarize_round(messages: &mut [LlmMessage], round: &(usize, Vec<usize>)) {
         }
         // 工具名:按 tool_call_id 从该轮 assistant 的 tool_calls 反查;查不到用 id 兜底
         let call_id = messages[ti].tool_call_id.clone().unwrap_or_default();
-        let name = messages[*a_idx]
+        let matched = messages[*a_idx]
             .tool_calls
             .as_ref()
-            .and_then(|cs| cs.iter().find(|c| c.id == call_id))
+            .and_then(|cs| cs.iter().find(|c| c.id == call_id));
+        let name = matched
             .map(|c| c.name.clone())
             .unwrap_or_else(|| call_id.clone());
+        // 工作状态锚点(批次 3):写类/命令类工具在占位里保留「改了哪个文件 / 跑了什么命令」。
+        // 只补这一句坐标,不豁免摘要——整轮结果与参数照旧回收,
+        // 否则会重新打开「历史回灌无界膨胀」这条已被 R3b 关掉的口子(实测单任务 150 万 token)。
+        let anchor = matched
+            .and_then(|c| {
+                crate::tools::tool_sets::state_anchor_arg(&c.name)
+                    .map(|key| (key, anchor_excerpt(&c.arguments, key)))
+            })
+            .filter(|(_, value)| !value.is_empty());
         let chars = messages[ti].content.chars().count();
-        messages[ti].content =
-            format!("{TOOL_HISTORY_SUMMARY_PREFIX}工具 \"{name}\" 原输出约 {chars} 字符)");
+        messages[ti].content = match &anchor {
+            Some((key, value)) => format!(
+                "{TOOL_HISTORY_SUMMARY_PREFIX}工具 \"{name}\" {key}={value},原输出约 {chars} 字符)"
+            ),
+            None => {
+                format!("{TOOL_HISTORY_SUMMARY_PREFIX}工具 \"{name}\" 原输出约 {chars} 字符)")
+            }
+        };
     }
     messages[*a_idx].reasoning_content = None;
     // 参数与工具结果同属「历史调用记录」,模型无需凭旧参数复现调用 → 一并回收
@@ -775,5 +829,197 @@ mod tests {
                 .is_some_and(|cs| cs.iter().any(|c| c.arguments.contains("path")))),
             "参数原文应保留"
         );
+    }
+
+    /// 批次 3(HARNESS3-3)的公共构造:写类工具轮,参数含长正文(4000 字符)必然被回收。
+    fn write_round(call_id: &str, name: &str, args: &str) -> Vec<LlmMessage> {
+        tool_round_with_args(name, call_id, &"结果".repeat(600), args)
+    }
+
+    /// **写类工具被摘要后,目标路径仍留在占位里** —— 这是台账那条实测缺陷的正解:
+    /// 旧占位只剩「工具 "fs_write" 原输出约 N 字符」,模型跨压缩后不知道自己改过哪些文件,
+    /// 于是重复读、重复改。
+    #[test]
+    fn tool_history_summary_keeps_state_anchor_for_write_tools() {
+        let mut ts = crate::services::token_service::TokenService::new();
+        let mut messages = vec![
+            LlmMessage::plain("system", "s"),
+            LlmMessage::plain("user", "u"),
+        ];
+        // 四轮:keep_rounds=1 → 前三轮被摘要化,最后一轮**原样保留**(所以断言只看前三条;
+        // 早期版本拿最后一轮的 fs_read 断言「不带锚点」是错的——那一轮压根没被摘要)
+        messages.extend(write_round(
+            "c0",
+            "fs_write",
+            &format!("{{\"path\":\"src/app/mod.rs\",\"content\":\"{}\"}}", "内".repeat(4000)),
+        ));
+        messages.extend(write_round(
+            "c1",
+            "fs_edit",
+            "{\"path\":\"src/db/repo.rs\",\"old\":\"a\",\"new\":\"b\"}",
+        ));
+        messages.extend(write_round(
+            "c2",
+            "fs_read",
+            &format!("{{\"path\":\"src/x.rs\",\"content\":\"{}\"}}", "y".repeat(4000)),
+        ));
+        messages.extend(write_round("c3", "todo", "{}"));
+        trim_tool_history(&mut messages, 1, 0, &mut ts, "gpt-4o-mini");
+
+        let tool_contents: Vec<&str> = messages
+            .iter()
+            .filter(|m| m.role == "tool")
+            .map(|m| m.content.as_str())
+            .collect();
+        assert_eq!(tool_contents.len(), 4);
+        assert!(
+            tool_contents[0].starts_with(TOOL_HISTORY_SUMMARY_PREFIX),
+            "前置:第一轮应已被摘要化: {}",
+            tool_contents[0]
+        );
+        assert!(
+            tool_contents[0].contains("src/app/mod.rs"),
+            "fs_write 的占位应带目标路径,实际: {}",
+            tool_contents[0]
+        );
+        assert!(
+            tool_contents[1].contains("src/db/repo.rs"),
+            "fs_edit 同理,实际: {}",
+            tool_contents[1]
+        );
+        // 只读工具**不带**锚点(回收口径不退化:读操作的 path 没必要进历史)
+        assert!(
+            tool_contents[2].starts_with(TOOL_HISTORY_SUMMARY_PREFIX)
+                && !tool_contents[2].contains("src/x.rs"),
+            "只读工具被摘要但不带锚点,实际: {}",
+            tool_contents[2]
+        );
+        assert!(tool_contents[0].contains("fs_write"), "工具名仍须可见");
+    }
+
+    /// bash 的锚点是**命令首行**:多行命令不得整条塞回历史。
+    #[test]
+    fn bash_anchor_keeps_only_first_line() {
+        let mut ts = crate::services::token_service::TokenService::new();
+        let mut messages = vec![
+            LlmMessage::plain("system", "s"),
+            LlmMessage::plain("user", "u"),
+        ];
+        let long_cmd = "cargo test --all\r\n&& echo 一堆后续输出\r\n".to_string() + &"z".repeat(400);
+        let args = format!(
+            "{{\"command\":{}}}",
+            serde_json::Value::String(long_cmd)
+        );
+        messages.extend(write_round("b0", "bash", &args));
+        messages.extend(write_round("b1", "bash", "{\"command\":\"echo second\"}"));
+        trim_tool_history(&mut messages, 1, 0, &mut ts, "gpt-4o-mini");
+        let first = messages
+            .iter()
+            .find(|m| m.role == "tool")
+            .map(|m| m.content.clone())
+            .unwrap_or_default();
+        assert!(
+            first.contains("cargo test --all"),
+            "应保留命令首行: {first}"
+        );
+        assert!(
+            !first.contains("一堆后续输出"),
+            "只取首行,不得把整条多行命令塞回历史: {first}"
+        );
+    }
+
+    /// **参数回收后锚点仍在占位 JSON 里,且仍是合法 JSON**
+    /// (严格后端会解析 `arguments`,非法即 400;而参数恰恰是路径的唯一来源)。
+    #[test]
+    fn reclaimed_arguments_keep_anchor_and_stay_valid_json() {
+        let mut ts = crate::services::token_service::TokenService::new();
+        let mut messages = vec![
+            LlmMessage::plain("system", "s"),
+            LlmMessage::plain("user", "u"),
+        ];
+        for i in 0..3 {
+            messages.extend(write_round(
+                &format!("c{i}"),
+                "fs_write",
+                &format!(
+                    "{{\"path\":\"src/f{i}.rs\",\"content\":\"{}\"}}",
+                    "x".repeat(4000)
+                ),
+            ));
+        }
+        // 极小预算:逼出「摘要 + 参数回收」两步都跑
+        let outcome = trim_tool_history(&mut messages, 4, 200, &mut ts, "gpt-4o-mini");
+        assert!(outcome.reclaimed_argument_rounds > 0, "{outcome:?}");
+        for m in messages.iter().filter(|m| m.role == "assistant") {
+            for c in m.tool_calls.as_ref().unwrap() {
+                let parsed: serde_json::Value = serde_json::from_str(&c.arguments)
+                    .unwrap_or_else(|e| panic!("占位必须是合法 JSON: {} ({e})", c.arguments));
+                assert_eq!(parsed["_trimmed"], serde_json::json!(true));
+                assert!(
+                    parsed["path"].as_str().is_some_and(|p| p.starts_with("src/f")),
+                    "回收后应仍留着目标路径: {}",
+                    c.arguments
+                );
+                assert!(parsed["chars"].is_number(), "原始字符数要保留: {}", c.arguments);
+            }
+        }
+    }
+
+    /// **锚点不等于放宽预算**:带锚点的摘要仍须远小于原文,且重复调用幂等
+    /// (否则本批就成了「为了记状态把历史灌回去」,正是 R3b 关掉的口子)。
+    #[test]
+    fn anchor_does_not_defeat_reclamation_and_is_idempotent() {
+        let mut ts = crate::services::token_service::TokenService::new();
+        let model = "gpt-4o-mini";
+        let build = || {
+            let mut messages = vec![
+                LlmMessage::plain("system", "s"),
+                LlmMessage::plain("user", "u"),
+            ];
+            for i in 0..4 {
+                messages.extend(write_round(
+                    &format!("c{i}"),
+                    "fs_write",
+                    &format!(
+                        "{{\"path\":\"src/m{}.rs\",\"content\":\"{}\"}}",
+                        i,
+                        "x".repeat(4000)
+                    ),
+                ));
+            }
+            messages
+        };
+        let mut messages = build();
+        let before = ts.count_message_tokens(&messages, model);
+        trim_tool_history(&mut messages, 1, 0, &mut ts, model);
+        let after = ts.count_message_tokens(&messages, model);
+        // 回收力度不退化的**可直接核验形态**:每条被摘要化的 tool 消息都必须是有界短句。
+        // (不用「总量必须降到 1/N」这类断言:最近一轮按设计整轮保留,比例随轮数浮动,
+        //  早期版本据此写 20 倍就是把断言定在了被测性质之外 —— 自己踩到并改正。)
+        let summarized: Vec<&str> = messages
+            .iter()
+            .filter(|m| m.role == "tool")
+            .map(|m| m.content.as_str())
+            .filter(|c| c.starts_with(TOOL_HISTORY_SUMMARY_PREFIX))
+            .collect();
+        assert_eq!(summarized.len(), 3, "四轮 keep_rounds=1 → 前三轮应被摘要化");
+        for c in &summarized {
+            assert!(
+                c.chars().count() < 200,
+                "带锚点的占位必须仍是有界短句(否则等于没摘),实际 {} 字符: {}",
+                c.chars().count(),
+                c
+            );
+        }
+        assert!(
+            after * 3 < before,
+            "总回收量应大幅下降:before={before} after={after}"
+        );
+        // 幂等:再摘要一轮不应有任何字面变化(锚点也不得重复追加)
+        let snapshot: Vec<String> = messages.iter().map(|m| m.content.clone()).collect();
+        trim_tool_history(&mut messages, 1, 0, &mut ts, model);
+        for (m, old) in messages.iter().zip(snapshot.iter()) {
+            assert_eq!(m.content, *old, "重复调用必须幂等");
+        }
     }
 }

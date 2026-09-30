@@ -52,6 +52,29 @@ pub const WORKSPACE_TOOLS: &[&str] = &["fs_read", "fs_write", "fs_edit", "fs_glo
 /// 「只规划不执行」的零副作用纪律(零副作用靠白名单保证,不靠模型自觉)。
 pub const WORKSPACE_READONLY_TOOLS: &[&str] = &["fs_read", "fs_glob", "fs_grep"];
 
+/// 工具 → 「工作状态锚点」所在的参数键名(2026-09-30 批次 3,HARNESS3-3)。
+///
+/// 用途:工具历史摘要化时**把这个键留在占位里**(消费点 `agents/engine/messages/trim.rs`)。
+/// 编码类任务的长循环里,旧轮次被摘要后模型若只看见「工具 "fs_write" 原输出约 N 字符」,
+/// 就不知道自己改过哪些文件、跑过什么命令 → 重复读、重复改(台账登记的实测缺陷)。
+/// 锚点只占几十字符,**不是**撤销回收能力:整轮结果/参数照旧回收,只留这一句坐标。
+///
+/// 成员口径 = 会改变工作区或角色文件区状态的工具:工作区写族
+/// (`WORKSPACE_TOOLS` 去掉 `WORKSPACE_READONLY_TOOLS` 的三个只读成员)+ 角色文件区写族
+/// (`write`/`replace`/`create`)+ 命令执行(`bash`,锚点是命令首行)。
+/// **不要**与 `services/undo_service.rs` 的 `WRITE_TOOLS` 合并:那份管「可回退快照」
+/// (含 `update_variables`/`memory_write`、不含 `bash`),语义不同,各自演进。
+/// 也别与 `tools/action_class.rs::classify` 混用——那份只 match
+/// `read/write/create/replace/bash`,**不含 `fs_write`/`fs_edit`**(它们落 `other()`),
+/// 拿它判「写类」会静默恒假。
+pub fn state_anchor_arg(name: &str) -> Option<&'static str> {
+    match name {
+        "fs_write" | "fs_edit" | "write" | "replace" | "create" => Some("path"),
+        "bash" => Some("command"),
+        _ => None,
+    }
+}
+
 /// 剔除正文元工具(get_state/apply_patch),保留其余工具与原顺序。
 /// 顺序稳定性是前缀缓存的前提,故不做排序。
 pub fn exclude_meta(defs: Vec<ToolDefinition>) -> Vec<ToolDefinition> {
