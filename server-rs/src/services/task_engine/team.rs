@@ -426,6 +426,8 @@ impl TeamExecutor {
             &ctx.settings.task_tool_allowlist,
             &self.engine.tool_registry(),
             ctx.scope.is_some(),
+            // 包专属工具随编码能力包开关(口径同 solo.rs)
+            ctx.settings.task_coding_bundle_enabled,
         )
         .allowed;
         sys.push_str(&format!(

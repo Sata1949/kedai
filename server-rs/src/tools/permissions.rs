@@ -492,13 +492,14 @@ fn default_risk(tool: &str) -> ToolRisk {
         "run_flow" => ToolRisk::Sensitive,
         "memory_write" | "update_variables" | "write" | "replace" | "create" => ToolRisk::Dangerous,
         // 工作区文件工具族(编码通道批次):读/检索三个是安全级(只读,且路径被
-        // workspace_guard 收口在工作区内);写/改两个与 write/replace 同级归危险级
+        // workspace_guard 收口在工作区内);写/改/补丁三个与 write/replace 同级归危险级
         // ——它们会真的改动工作区里的源码,风险面与既有写工具同类。
         // 归危险级不影响可用性:任务模式默认策略(deny_dangerous)按**工具名**开例外放行
         // 它们(见 services/task_engine/tool_policy.rs),例外的安全前提是路径被 jail 在
-        // 工作区内,而不是「工具不危险」。
+        // 工作区内,而不是「工具不危险」。fs_patch 还多一道编码包闸门:关包时在策略层
+        // **早于例外**被整族剔除(例外只在开包时生效)。
         "fs_read" | "fs_glob" | "fs_grep" => ToolRisk::Safe,
-        "fs_write" | "fs_edit" => ToolRisk::Dangerous,
+        "fs_write" | "fs_edit" | "fs_patch" => ToolRisk::Dangerous,
         // 命令执行恒危险级:与文件写工具同级,但额外走「命令级风险强制确认」
         // (tools/command_risk.rs)。显式登记而非依赖下面的通配兜底,便于后续审查。
         "bash" => ToolRisk::Dangerous,

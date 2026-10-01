@@ -741,6 +741,9 @@ impl TaskService {
             &settings.task_tool_allowlist,
             &self.engine.tool_registry(),
             has_scope,
+            // 包专属工具随编码能力包开关(口径同 solo.rs;规划器被告知的工具面
+            // 必须与执行者实际拿到的同源)
+            settings.task_coding_bundle_enabled,
         )
         .allowed
     }

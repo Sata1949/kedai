@@ -78,6 +78,9 @@ pub(crate) async fn run_agent_loop(
         // 传 `scope.is_some()` 而非恒 true,是为守住「没有作用域就不给文件工具」这条不变量
         // (作用域缺失时那些工具必然报错,不如不给)。
         call.scope.is_some(),
+        // 包专属工具(fs_patch)随编码能力包开关下发(task 合并值;关包整族剔除,
+        // 见 tool_policy::coding_pack_gate)
+        settings.task_coding_bundle_enabled,
     );
     // 闸门名单先取出(allowed 借用生命周期需覆盖整个工具循环),再取走 defs
     let allowed = policy.allowed;

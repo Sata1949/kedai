@@ -4,11 +4,12 @@
 // 一律使用 ToolGate { no_ui_authorization: true } —— 名单内工具放行,名单外立即拒绝。
 // 策略档位:
 //   all            → 全量(剔除正文元工具),等价改造前的全放行行为
-//   deny_dangerous → 全量 − 元工具 − 危险级 + 例外 bash/fs_write/fs_edit(默认;无人值守
-//                    任务不默认放行写类操作,但保留命令执行与工作区写能力)
+//   deny_dangerous → 全量 − 元工具 − 危险级 + 例外 bash/fs_write/fs_edit/fs_patch
+//                    (默认;无人值守任务不默认放行写类操作,但保留命令执行与工作区写能力)
 //   allowlist      → 仅配置白名单 ∩ 已注册(最严格)
-// 两道正交闸门(先过闸门再套档位):platform_gate(平台/档位可用性)、
-// workspace_gate(本任务是否绑定工作区)。空集必须 fail-closed(docs/经验.md E56)。
+// 三道正交闸门(先过闸门再套档位):platform_gate(平台/档位可用性)、
+// workspace_gate(本任务是否绑定工作区)、coding_pack_gate(2026-10-01 Q6:包专属工具
+// fs_patch 仅编码能力包开启时下发)。空集必须 fail-closed(docs/经验.md E56)。
 //
 // bash 例外说明:bash 在权限矩阵里恒为 Dangerous(见 tools/permissions.rs 的 default_risk),
 // 若按风险级一刀切就会被默认策略整体剔除,任务模式连 `ls`/`echo` 都用不了。用户要求任务
@@ -16,11 +17,12 @@
 // permissions::check 的命令级硬门在任何自动放行之前判定,破坏性/提权命令在任务模式下
 // 仍被直接拒绝(无 UI 可确认),只有 safe/sensitive 命令经白名单授权放行。
 //
-// 工作区写工具例外说明(编码通道批次):`fs_write`/`fs_edit` 与 write/replace 同级归
-// Dangerous,同样按工具名开例外 —— 否则「绑定工作区」这件事在默认策略下只剩读能力,
+// 工作区写工具例外说明(编码通道批次):`fs_write`/`fs_edit`/`fs_patch` 与 write/replace
+// 同级归 Dangerous,同样按工具名开例外 —— 否则「绑定工作区」这件事在默认策略下只剩读能力,
 // 模型改不了文件,本批的目标(结构化改代码,替代 sed/echo 拼命令)就落空。
 // 例外的安全前提是**路径被 jail 在工作区内**(tools/workspace_guard.rs 逐段拒符号链接
-// 与越界),而不是「工具不危险」;未绑定工作区的任务根本看不到这五个工具(见 workspace_gate)。
+// 与越界),而不是「工具不危险」;未绑定工作区的任务根本看不到这六个工具(见 workspace_gate)。
+// fs_patch 还多一道编码包闸门:关包时它**先**在 coding_pack_gate 被剔除,例外只在开包时生效。
 use crate::models::types::ToolDefinition;
 // 工具风险词汇已下沉 L1(2026-09-14):L2 直连 models,不经 tools 转发。
 use crate::models::tool_policy::ToolRisk;
@@ -51,20 +53,26 @@ impl TaskToolPolicy {
 /// `allowlist`:仅 allowlist 档位使用。
 /// `has_workspace`:本任务是否**有执行作用域**(绑定的工作区,或 D1 起的任务 scratch)——
 /// 决定 fs_* 族是否下发,见 [`workspace_gate`]。
+/// `coding_pack_enabled`:编码能力包开关(**task 合并值**,与提示词缺省值同源口径)——
+/// 决定包专属工具(`fs_patch`)是否下发,见 [`coding_pack_gate`]。
 pub(crate) fn compile(
     policy: &str,
     allowlist: &[String],
     registry: &ToolRegistry,
     has_workspace: bool,
+    coding_pack_enabled: bool,
 ) -> TaskToolPolicy {
-    let all = workspace_gate(
-        platform_gate(tool_sets::exclude_meta(registry.list_definitions())),
-        has_workspace,
+    let all = coding_pack_gate(
+        workspace_gate(
+            platform_gate(tool_sets::exclude_meta(registry.list_definitions())),
+            has_workspace,
+        ),
+        coding_pack_enabled,
     );
     let selected: Vec<ToolDefinition> = match policy {
         "all" => all,
         "allowlist" => tool_sets::filter_by_names(all, allowlist),
-        // 默认(含非法值回退):拒绝危险级;bash 与工作区写/改工具按工具名开例外
+        // 默认(含非法值回退):拒绝危险级;bash 与工作区写/改/补丁工具按工具名开例外
         //(见文件头「bash 例外说明」与「工作区写工具例外说明」),危险动作仍由
         // permissions 的命令级硬门/路径闸门拦截,不因本例外放行。
         _ => {
@@ -74,6 +82,7 @@ pub(crate) fn compile(
                     d.name == crate::tools::bash::TOOL_NAME
                         || d.name == crate::tools::agent_tools_fs::WRITE_TOOL
                         || d.name == crate::tools::agent_tools_fs::EDIT_TOOL
+                        || d.name == crate::tools::agent_tools_fs::PATCH_TOOL
                         || risk.risk_for(&d.name) != ToolRisk::Dangerous
                 })
                 .collect()
@@ -131,6 +140,25 @@ fn workspace_gate(defs: Vec<ToolDefinition>, has_workspace: bool) -> Vec<ToolDef
     tool_sets::exclude_workspace(defs)
 }
 
+/// 编码能力包闸门(2026-10-01,Q6「首个包专属工具」)。
+///
+/// 与平台/工作区闸门正交:本函数按**编码能力包开关**(`task_coding_bundle_enabled` 的
+/// task 合并值)决定包专属工具(`fs_patch`)该不该出现在模型面前。关包(默认)整族剔除
+/// ——「包开关 = 包专属工具的总闸」;开包才进后续档位过滤(默认档下再由按名例外放行)。
+/// 其余工具不受影响:包是**只加不锁**的——关包不改变任何既有工具面。
+///
+/// 为什么在策略层而不是注册层过滤:与 platform_gate 同理——工具始终注册,权限面板与
+/// 契约类型才有一致的工具面;过滤只影响「本轮下发给模型什么」。开关在**每轮编译时**
+/// 由调用方按任务有效设置求值(执行途中开/关包,下一轮的工具清单即随之变化)。
+fn coding_pack_gate(defs: Vec<ToolDefinition>, coding_pack_enabled: bool) -> Vec<ToolDefinition> {
+    if coding_pack_enabled {
+        return defs;
+    }
+    defs.into_iter()
+        .filter(|d| d.name != crate::tools::agent_tools_fs::PATCH_TOOL)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,6 +198,9 @@ mod tests {
             "fs_glob",
             "fs_grep",
             "fs_write2",
+            // 包专属工具(Q6):fs_patch2 是对照项,锁死包闸门与例外一律按精确名匹配
+            "fs_patch",
+            "fs_patch2",
         ] {
             reg.register(
                 ToolDefinition {
@@ -186,7 +217,7 @@ mod tests {
     #[test]
     fn deny_dangerous_excludes_dangerous_and_meta() {
         let reg = registry_with_tools();
-        let p = compile("deny_dangerous", &[], &reg, false);
+        let p = compile("deny_dangerous", &[], &reg, false, false);
         let names: Vec<&str> = p.defs.iter().map(|d| d.name.as_str()).collect();
         for banned in [
             "write",
@@ -214,7 +245,7 @@ mod tests {
     #[test]
     fn deny_dangerous_bash_exception_does_not_leak_to_other_dangerous() {
         let reg = registry_with_tools();
-        let p = compile("deny_dangerous", &[], &reg, false);
+        let p = compile("deny_dangerous", &[], &reg, false, false);
         let names: Vec<&str> = p.defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"bash"));
         // 精确匹配护栏:名字包含 "bash" 的其它危险工具不得被例外带出
@@ -247,6 +278,7 @@ mod tests {
             &["read".to_string(), "not_registered".to_string()],
             &reg,
             false,
+            false,
         );
         let names: Vec<&str> = p.defs.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(names, vec!["read"]);
@@ -255,7 +287,7 @@ mod tests {
     #[test]
     fn all_keeps_everything_except_meta() {
         let reg = registry_with_tools();
-        let p = compile("all", &[], &reg, false);
+        let p = compile("all", &[], &reg, false, false);
         let names: Vec<&str> = p.defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"write"));
         assert!(!names.contains(&"get_state"));
@@ -264,7 +296,7 @@ mod tests {
     #[test]
     fn allowed_names_match_defs() {
         let reg = registry_with_tools();
-        let p = compile("deny_dangerous", &[], &reg, false);
+        let p = compile("deny_dangerous", &[], &reg, false, false);
         let defs: Vec<&str> = p.defs.iter().map(|d| d.name.as_str()).collect();
         let allowed: Vec<&str> = p.allowed.iter().map(|s| s.as_str()).collect();
         assert_eq!(defs, allowed);
@@ -280,7 +312,7 @@ mod tests {
     #[test]
     fn submit_filtered_out_when_unavailable() {
         let reg = registry_with_tools();
-        let p = compile("all", &[], &reg, false);
+        let p = compile("all", &[], &reg, false, false);
         let defs: Vec<&str> = p.defs.iter().map(|d| d.name.as_str()).collect();
         assert!(
             !defs.contains(&"submit"),
@@ -299,7 +331,7 @@ mod tests {
     #[test]
     fn gate_never_waits_for_authorization() {
         let reg = registry_with_tools();
-        let p = compile("deny_dangerous", &[], &reg, false);
+        let p = compile("deny_dangerous", &[], &reg, false, false);
         assert!(p.gate().no_ui_authorization, "任务模式闸门不得等待授权");
     }
 
@@ -318,7 +350,9 @@ mod tests {
             ("deny_dangerous", Vec::new()),
             ("allowlist", all_names),
         ] {
-            let p = compile(policy, &names, &reg, false);
+            // 包开(true):关包的剔除路径由 coding_pack_gate_hides_fs_patch_only_when_disabled
+            // 单独覆盖;本用例盯的是工作区闸门本身。
+            let p = compile(policy, &names, &reg, false, true);
             let got: Vec<&str> = p.defs.iter().map(|d| d.name.as_str()).collect();
             for banned in crate::tools::tool_sets::WORKSPACE_TOOLS {
                 assert!(
@@ -329,22 +363,68 @@ mod tests {
         }
     }
 
-    /// 绑定了工作区时:整族下发,`fs_write`/`fs_edit` 在 deny_dangerous 档按名开例外,
-    /// 且 `allowed` 与 `defs` 同源(否则模型看得见却调不动)。
+    /// 绑定了工作区时:整族下发(包开,fs_patch 在列),`fs_write`/`fs_edit`/`fs_patch`
+    /// 在 deny_dangerous 档按名开例外,且 `allowed` 与 `defs` 同源(否则模型看得见却调不动)。
     #[test]
     fn workspace_tools_visible_and_writes_excepted_when_bound() {
         let reg = registry_with_tools();
-        let p = compile("deny_dangerous", &[], &reg, true);
+        let p = compile("deny_dangerous", &[], &reg, true, true);
         let defs: Vec<&str> = p.defs.iter().map(|d| d.name.as_str()).collect();
         for name in crate::tools::tool_sets::WORKSPACE_TOOLS {
             assert!(defs.contains(name), "绑定工作区后应下发 {name}");
         }
-        // 例外只按精确名:对照项 fs_write2 仍属危险级且不在族内 → 必须被剔除
+        // 例外只按精确名:对照项 fs_write2 / fs_patch2 仍属危险级且不在族内 → 必须被剔除
         assert!(
             !defs.contains(&"fs_write2"),
             "例外不得按前缀/包含匹配放行 fs_write2:{defs:?}"
         );
+        assert!(
+            !defs.contains(&"fs_patch2"),
+            "例外/包闸门不得按前缀/包含匹配放行 fs_patch2:{defs:?}"
+        );
         let allowed: Vec<&str> = p.allowed.iter().map(|s| s.as_str()).collect();
         assert_eq!(defs, allowed, "allowed 与 defs 必须同源");
+    }
+
+    /// 编码能力包闸门(2026-10-01,Q6「首个包专属工具」):
+    /// `fs_patch` 仅当包开启时下发——关包时三档策略全不可见、`allowed` 同源剔除;
+    /// 开包后 deny_dangerous 由按名例外放行;其余工作区族成员不受包开关影响(包「只加不锁」)。
+    #[test]
+    fn coding_pack_gate_hides_fs_patch_only_when_disabled() {
+        let reg = registry_with_tools();
+        for (policy, names) in [
+            ("all", Vec::new()),
+            ("deny_dangerous", Vec::new()),
+            (
+                "allowlist",
+                vec!["fs_patch".to_string(), "fs_read".to_string()],
+            ),
+        ] {
+            let p = compile(policy, &names, &reg, true, false);
+            let got: Vec<&str> = p.defs.iter().map(|d| d.name.as_str()).collect();
+            assert!(
+                !got.contains(&"fs_patch"),
+                "{policy} 档关包时不得下发 fs_patch:{got:?}"
+            );
+            assert!(
+                !p.allowed.iter().any(|n| n == "fs_patch"),
+                "{policy} 档 allowed 与 defs 必须同源剔除"
+            );
+            assert!(
+                got.contains(&"fs_read"),
+                "{policy} 档关包不得误伤工作区族其余成员:{got:?}"
+            );
+        }
+        // 开包:deny_dangerous 下由按名例外放行;allowed 同源
+        let p = compile("deny_dangerous", &[], &reg, true, true);
+        let got: Vec<&str> = p.defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(
+            got.contains(&"fs_patch"),
+            "开包 + deny_dangerous 应下发 fs_patch:{got:?}"
+        );
+        assert!(
+            p.allowed.iter().any(|n| n == "fs_patch"),
+            "defs 与 allowed 必须同源"
+        );
     }
 }

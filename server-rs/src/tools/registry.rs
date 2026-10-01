@@ -413,6 +413,7 @@ fn tool_when(name: &str) -> String {
         "fs_edit" => "需要定点修改工作区文件里的一段文本时调用(比 fs_write 省 token);先 fs_read,且原文需能唯一匹配。",
         "fs_glob" => "需要按通配模式(如 **/*.rs)列出工作区里的文件、确认路径拼写时调用。",
         "fs_grep" => "需要按正则在工作区里检索文本、定位到具体文件与行号时调用。",
+        "fs_patch" => "需要一次改动多个文件(批量重构 / 重命名 / 跨文件同步)时调用;以 *** Update File 等分块的结构化补丁给出,每段旧内容需在文件中唯一匹配,改前先 fs_read。",
         _ => return String::new(),
     };
     s.to_string()
@@ -429,7 +430,7 @@ pub fn render_kind_for(name: &str) -> Option<&'static str> {
         | "agentend" | "sleep" | "censor_text" | "memory_read" | "memory_write"
         | "update_variables" | "get_state" | "apply_patch" | "submit" | "run_flow"
         // 工作区写/列族(编码通道批次)走通用渲染
-        | "fs_write" | "fs_edit" | "fs_glob" => Some("generic"),
+        | "fs_write" | "fs_edit" | "fs_glob" | "fs_patch" => Some("generic"),
         _ => None,
     }
 }

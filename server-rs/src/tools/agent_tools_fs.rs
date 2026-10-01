@@ -1,4 +1,5 @@
-// 工作区文件工具族(编码通道批次):fs_read / fs_write / fs_edit / fs_glob / fs_grep。
+// 工作区文件工具族(编码通道批次):fs_read / fs_write / fs_edit / fs_glob / fs_grep /
+// fs_patch(Q6,2026-10-01 第六员——结构化补丁,见 agent_tools_fs_patch.rs)。
 //
 // 为什么叫 `fs_*` 而不是复用 `read`/`write`/`replace`/`create`:既有四个工具是**角色扮演
 // 语义**(target=bubble|file、相对路径经 safe_rel_path 收口在 data/character_files/{id}/),
@@ -33,7 +34,9 @@ use super::workspace_scan::{display_rel, walk_tree, EXCLUDED_SEGMENTS};
 /// 两份语义不同,不合并。
 /// 记账失败**不改变写操作的结果**(`record` 内部只 warn)——台账少一行是可以解释的,
 /// 把已经落盘的成功写入判成失败反而更糟。
-fn note_change(
+///
+/// `pub(super)`:fs_patch(第六员)与单文件工具共用同一份记账口径,不复制第二份。
+pub(super) fn note_change(
     deps: &ToolDeps,
     ctx: &ToolContext,
     rel: &str,
@@ -54,9 +57,12 @@ pub const WRITE_TOOL: &str = "fs_write";
 pub const EDIT_TOOL: &str = "fs_edit";
 pub const GLOB_TOOL: &str = "fs_glob";
 pub const GREP_TOOL: &str = "fs_grep";
+/// 结构化补丁(Q6;实现与语法见 `agent_tools_fs_patch.rs`;包专属工具,
+/// 任务工具策略按 `task_coding_bundle_enabled` 开闸,见 task_engine/tool_policy.rs)
+pub const PATCH_TOOL: &str = "fs_patch";
 
 /// 单文件读写上限(超过即**明确报错**,不静默截断——截断一个源码文件再写回就是数据损坏)
-const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
+pub(super) const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 /// fs_grep 的单文件扫描上限(超过即跳过并计数;grep 是只读检索,跳过比报错更可用)
 const MAX_GREP_FILE_BYTES: u64 = 4 * 1024 * 1024;
 /// fs_read 单页行数默认与上限
@@ -76,11 +82,14 @@ pub fn register_fs_tools(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
     register_write_tool(registry, deps.clone());
     register_edit_tool(registry, deps.clone());
     register_glob_tool(registry, deps.clone());
-    register_grep_tool(registry, deps);
+    register_grep_tool(registry, deps.clone());
+    // 第六员(Q6):结构化补丁;可见性在策略层另受包开关闸门(仅编码能力包开启时下发)
+    super::agent_tools_fs_patch::register_patch_tool(registry, deps);
 }
 
 /// 取本调用的工作区作用域。未绑定即不可用(文案说明原因与出路,不给「未注册」这种误导)。
-fn scope_of(ctx: &ToolContext) -> Result<Arc<ExecScope>, String> {
+/// `pub(super)`:fs_patch 同口径。
+pub(super) fn scope_of(ctx: &ToolContext) -> Result<Arc<ExecScope>, String> {
     ctx.scope
         .clone()
         .ok_or_else(|| "本任务未绑定工作区,工作区文件工具不可用".to_string())

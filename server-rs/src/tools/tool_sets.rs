@@ -43,7 +43,12 @@ pub const REFLECT: &[&str] = &["censor_text", "revise_passage"];
 /// 规划侦察轮(READONLY_SCOUT)自任务模式 D1 起**有条件**放开只读子集:
 /// 见 `WORKSPACE_READONLY_TOOLS` 与 `scout_tools`——规划器看不到工作区就只能盲规划
 /// (实测缺陷 D5:`read` 走角色扮演文件区语义,报「读取文件 package.json 失败」)。
-pub const WORKSPACE_TOOLS: &[&str] = &["fs_read", "fs_write", "fs_edit", "fs_glob", "fs_grep"];
+pub const WORKSPACE_TOOLS: &[&str] = &[
+    "fs_read", "fs_write", "fs_edit", "fs_glob", "fs_grep",
+    // Q6(2026-10-01)第六员:结构化补丁;另受任务工具策略的**编码包闸门**约束
+    // (关包时不下发,见 task_engine/tool_policy.rs::coding_pack_gate)
+    "fs_patch",
+];
 
 /// 工作区文件工具族的**只读子集**:`fs_read`/`fs_glob`/`fs_grep`。
 ///
@@ -62,6 +67,10 @@ pub const WORKSPACE_READONLY_TOOLS: &[&str] = &["fs_read", "fs_glob", "fs_grep"]
 /// 成员口径 = 会改变工作区或角色文件区状态的工具:工作区写族
 /// (`WORKSPACE_TOOLS` 去掉 `WORKSPACE_READONLY_TOOLS` 的三个只读成员)+ 角色文件区写族
 /// (`write`/`replace`/`create`)+ 命令执行(`bash`,锚点是命令首行)。
+/// **`fs_patch`(Q6,2026-10-01)是写族成员但走「值制」锚点**——补丁首行
+/// (「*** Begin Patch」)无信息量,其锚点取**补丁目标路径清单**,提取在
+/// `agent_tools_fs_patch::patch_anchor`,消费在 `trim.rs::anchor_of`;**不要**在本函数
+/// 里给 fs_patch 补键制映射(那会得到无意义的首行锚点)。
 /// **不要**与 `services/undo_service.rs` 的 `WRITE_TOOLS` 合并:那份管「可回退快照」
 /// (含 `update_variables`/`memory_write`、不含 `bash`),语义不同,各自演进。
 /// 也别与 `tools/action_class.rs::classify` 混用——那份只 match
@@ -169,7 +178,8 @@ mod tests {
     }
 
     /// 常量内容与改造前的字面量逐一比对,防止无意改动导致能力漂移
-    /// (META_TOOLS 于二维批次 7b 追加 `run_flow`,属**有意**扩列,理由见常量文档)
+    /// (META_TOOLS 于二维批次 7b 追加 `run_flow`;WORKSPACE_TOOLS 于 2026-10-01 Q6
+    /// 追加 `fs_patch`——两者均属**有意**扩列,理由见常量文档)
     #[test]
     fn constants_match_legacy_literals() {
         assert_eq!(META_TOOLS, &["get_state", "apply_patch", "run_flow"]);
@@ -191,7 +201,7 @@ mod tests {
         assert_eq!(REFLECT, &["censor_text", "revise_passage"]);
         assert_eq!(
             WORKSPACE_TOOLS,
-            &["fs_read", "fs_write", "fs_edit", "fs_glob", "fs_grep"]
+            &["fs_read", "fs_write", "fs_edit", "fs_glob", "fs_grep", "fs_patch"]
         );
         assert_eq!(WORKSPACE_READONLY_TOOLS, &["fs_read", "fs_glob", "fs_grep"]);
     }

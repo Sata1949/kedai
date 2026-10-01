@@ -16,6 +16,7 @@ mod agent_tools_agent;
 // 工作区文件工具族(编码通道批次):工具**定义**在此,可见性由任务工具策略按
 // 「本任务是否绑定工作区」过滤(见 task_engine/tool_policy.rs 与 tool_sets::exclude_workspace)
 pub mod agent_tools_fs;
+pub(crate) mod agent_tools_fs_patch;
 mod agent_tools_read;
 mod agent_tools_search;
 mod agent_tools_shared;

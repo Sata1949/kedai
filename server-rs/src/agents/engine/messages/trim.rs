@@ -251,6 +251,23 @@ fn anchor_excerpt(arguments: &str, key: &str) -> String {
     }
 }
 
+/// 工作状态锚点取值(批次 3;**2026-10-01 Q6 扩展为值制分派**)——摘要句与参数回收
+/// 两处消费的统一入口:
+/// - `fs_patch` 是结构化补丁,首行(「*** Begin Patch」)无信息量——锚点取**补丁目标
+///   路径清单**(提取在 `agent_tools_fs_patch::patch_anchor`,与执行解析共用头部前缀
+///   常量,单一出处);
+/// - 其余写类/命令类按 `state_anchor_arg` 的键取参数值首行(截断与判空在原路径)。
+///
+/// 返回 (标签, 值):标签进占位 JSON 的键名与摘要句的 `{key}=` 前缀。
+fn anchor_of(name: &str, arguments: &str) -> Option<(String, String)> {
+    if let Some(v) = crate::tools::agent_tools_fs_patch::patch_anchor(name, arguments) {
+        return Some(("files".to_string(), v));
+    }
+    crate::tools::tool_sets::state_anchor_arg(name)
+        .map(|key| (key.to_string(), anchor_excerpt(arguments, key)))
+        .filter(|(_, value)| !value.is_empty())
+}
+
 /// 回收一轮的工具参数空间(2026-09-14):把该轮 assistant 的 `tool_calls[].arguments`
 /// 替换为合法 JSON 占位,保留 `id`/`name` → OpenAI 的 assistant(tool_calls)↔tool
 /// 配对不破坏,严格后端不会 400。
@@ -267,9 +284,7 @@ fn reclaim_round_arguments(messages: &mut [LlmMessage], a_idx: usize) -> bool {
         let chars = c.arguments.chars().count();
         // 参数被回收,但**工作状态锚点留在占位里**(批次 3):模型跨压缩后仍要知道
         // 自己改过哪个文件 / 跑过什么命令,否则会重复读、重复改。占位仍是合法 JSON。
-        let anchor = crate::tools::tool_sets::state_anchor_arg(&c.name)
-            .map(|key| (key, anchor_excerpt(&c.arguments, key)))
-            .filter(|(_, value)| !value.is_empty());
+        let anchor = anchor_of(&c.name, &c.arguments);
         c.arguments = match &anchor {
             Some((key, value)) => format!(
                 "{TOOL_ARGUMENTS_TRIMMED_PREFIX}\"{key}\":{},\"chars\":{chars}}}",
@@ -307,12 +322,7 @@ fn summarize_round(messages: &mut [LlmMessage], round: &(usize, Vec<usize>)) {
         // 工作状态锚点(批次 3):写类/命令类工具在占位里保留「改了哪个文件 / 跑了什么命令」。
         // 只补这一句坐标,不豁免摘要——整轮结果与参数照旧回收,
         // 否则会重新打开「历史回灌无界膨胀」这条已被 R3b 关掉的口子(实测单任务 150 万 token)。
-        let anchor = matched
-            .and_then(|c| {
-                crate::tools::tool_sets::state_anchor_arg(&c.name)
-                    .map(|key| (key, anchor_excerpt(&c.arguments, key)))
-            })
-            .filter(|(_, value)| !value.is_empty());
+        let anchor = matched.and_then(|c| anchor_of(&c.name, &c.arguments));
         let chars = messages[ti].content.chars().count();
         messages[ti].content = match &anchor {
             Some((key, value)) => format!(
@@ -926,6 +936,74 @@ mod tests {
             !first.contains("一堆后续输出"),
             "只取首行,不得把整条多行命令塞回历史: {first}"
         );
+    }
+
+    /// `fs_patch` 的锚点是**补丁目标路径清单**(值制),不是无信息量的首行
+    /// 「*** Begin Patch」——跨压缩后模型仍知道这轮补丁动过哪些文件(Q6)。
+    #[test]
+    fn patch_tool_anchor_lists_target_files_in_summary() {
+        let mut ts = crate::services::token_service::TokenService::new();
+        let mut messages = vec![
+            LlmMessage::plain("system", "s"),
+            LlmMessage::plain("user", "u"),
+        ];
+        let patch = "*** Begin Patch\n*** Update File: src/a.rs\n@@\n-x\n+y\n*** Add File: src/b.rs\n+z\n*** End Patch";
+        let args = format!(
+            "{{\"patch\":{}}}",
+            serde_json::Value::String(patch.to_string())
+        );
+        messages.extend(write_round("p0", "fs_patch", &args));
+        messages.extend(write_round("p1", "todo", "{}"));
+        messages.extend(write_round("p2", "todo", "{}"));
+        messages.extend(write_round("p3", "todo", "{}"));
+        trim_tool_history(&mut messages, 1, 0, &mut ts, "gpt-4o-mini");
+        let first = messages
+            .iter()
+            .find(|m| m.role == "tool")
+            .map(|m| m.content.clone())
+            .unwrap_or_default();
+        assert!(
+            first.contains("files=src/a.rs, src/b.rs"),
+            "锚点应为补丁目标路径清单: {first}"
+        );
+        assert!(
+            !first.contains("*** Begin Patch"),
+            "不得把无信息量的补丁首行当锚点: {first}"
+        );
+    }
+
+    /// `fs_patch` 的参数回收占位同样是**合法 JSON**,且 `files` 键带同一清单
+    /// (摘要句与占位两处消费同源,由 anchor_of 统一分派)。
+    #[test]
+    fn patch_tool_anchor_survives_argument_reclaim() {
+        let mut ts = crate::services::token_service::TokenService::new();
+        let mut messages = vec![
+            LlmMessage::plain("system", "s"),
+            LlmMessage::plain("user", "u"),
+        ];
+        for i in 0..3 {
+            let args = format!(
+                "{{\"patch\":{},\"pad\":\"{}\"}}",
+                serde_json::Value::String("*** Update File: src/a.rs\n@@\n-x\n+y\n".to_string()),
+                "x".repeat(4000)
+            );
+            messages.extend(write_round(&format!("p{i}"), "fs_patch", &args));
+        }
+        let outcome = trim_tool_history(&mut messages, 4, 200, &mut ts, "gpt-4o-mini");
+        assert!(outcome.reclaimed_argument_rounds > 0, "{outcome:?}");
+        for m in messages.iter().filter(|m| m.role == "assistant") {
+            for c in m.tool_calls.as_ref().unwrap() {
+                let parsed: serde_json::Value = serde_json::from_str(&c.arguments)
+                    .unwrap_or_else(|e| panic!("占位必须是合法 JSON: {} ({e})", c.arguments));
+                assert_eq!(parsed["_trimmed"], serde_json::json!(true));
+                assert_eq!(
+                    parsed["files"],
+                    serde_json::json!("src/a.rs"),
+                    "回收后应仍留着补丁目标路径: {}",
+                    c.arguments
+                );
+            }
+        }
     }
 
     /// **参数回收后锚点仍在占位 JSON 里,且仍是合法 JSON**

@@ -295,6 +295,8 @@ impl CustomExecutor {
             // 作用域——工作区或任务 scratch;传 is_some() 是为守住「没有作用域就不给
             // 文件工具」这条不变量)
             ctx.scope.is_some(),
+            // 包专属工具随编码能力包开关(口径同 solo.rs)
+            settings.task_coding_bundle_enabled,
         );
         // Some([]) = 策略全量集;Some(list) = 策略集 ∩ 步骤白名单
         let mut tools: Vec<_> = if whitelist.is_empty() {
