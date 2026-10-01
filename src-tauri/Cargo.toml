@@ -1,6 +1,6 @@
 [package]
 name = "kedai-desktop"
-version = "0.4.0-alpha"
+version = "0.4.1-alpha"
 description = "Kedai 桌面应用(Tauri 壳 + 内嵌 Rust 服务)"
 edition = "2021"
 license = "MIT"

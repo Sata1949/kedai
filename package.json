@@ -1,6 +1,6 @@
 {
   "name": "kedai",
-  "version": "0.4.0-alpha",
+  "version": "0.4.1-alpha",
   "private": true,
   "license": "MIT",
   "description": "KedaiAgent —— 通用 LLM 智能体 harness,一键启动的本地智能体运行框架",
