@@ -20,7 +20,9 @@ use std::sync::Arc;
 /// 不在这里另写一份比较逻辑——创建期与运行期的口径必须只有一个出处。
 ///
 /// 抽成自由函数以便单测覆盖三条负路径,不必起整个 AppState。
-pub(crate) fn validate_workspace(
+/// `pub`(2026-10-01 HARNESS3-5):headless 单次入口(`bin/kedai-agent.rs`)在进程外
+/// 复用它做创建前校验——「同一把尺」的第三个调用点,不是新实现。
+pub fn validate_workspace(
     raw: Option<&str>,
     data_dir: &std::path::Path,
 ) -> Result<Option<String>, String> {
