@@ -46,6 +46,15 @@ impl Connector {
         }
     }
 
+    /// 连接能力位(视觉能力包 D2/D3):mock 无能力位,返回默认全关。
+    /// 大图自动拆分(executor 下发前)与请求体图像 parts 序列化都以此为准。
+    pub fn capabilities(&self) -> ConnectorCapabilities {
+        match self {
+            Connector::Mock(_) => ConnectorCapabilities::default(),
+            Connector::OpenAi(c) => c.capabilities(),
+        }
+    }
+
     pub async fn available_models(&self) -> Vec<String> {
         match self {
             Connector::Mock(m) => m.list_models(),

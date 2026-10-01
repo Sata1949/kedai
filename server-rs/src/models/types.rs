@@ -407,6 +407,10 @@ pub struct ImageRef {
     /// data URL(仅下发形态携带;存储形态为空并被 serde 省略)
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub data_url: String,
+    /// 下发标注(仅大图拆分产物携带,如「原图总览」「第 r 行/第 c 列」)。
+    /// 连接器序列化时在图像 part 前以 text part 输出(三方言同款);存储形态为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 impl ImageRef {

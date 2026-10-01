@@ -41,6 +41,10 @@ uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 dotenvy = "0.15"
 base64 = "0.22"
+# 图像解码/缩放(2026-10-02 视觉能力包 D3 大图自动拆分):仅启最小格式组件
+# (解码 PNG/JPEG/GIF/WebP + 编码 PNG 作为拆分块输出);default-features=false 不引入全家桶。
+# 引入时已做 USTC 镜像 fetch 预检(本机用户级 mirror 配置,见 docs/经验.md),双锁同步见 check-lock-sync。
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 include_dir = "0.7"
 async-stream = "0.3"
 regex = "1.13"

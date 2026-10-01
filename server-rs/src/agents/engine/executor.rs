@@ -190,13 +190,35 @@ pub(crate) async fn execute_generation(
     // 任务模式(session_id 带 task: 前缀)跳过 llm_requests 落库:该表 FK 到 sessions(id),
     // 虚拟 id 会 FK 失败刷 warn;任务侧调用追踪统一走 task_llm_calls(批次 3 起)。
     let is_task_run = session_id.starts_with("task:");
+
+    // 连接器按本次调用的 connection_id 解析(二维批次 5b):None = 默认连接(5b 之前
+    // 的读锁快照口径不变);节点级连接由 `resolve_connector` 单点解析,两条执行路径共用。
+    // (先于快照与拆分解析:大图拆分要以目标连接的 image_auto_split 能力位为准。)
+    let (connector, _model) = engine
+        .resolve_connector(params.connection_id.as_deref())
+        .await?;
+
+    // 大图自动拆分(视觉能力包 D3):目标连接勾了 `image_auto_split` 且本轮带图时,
+    // 把超阈值图像替换为「总览 + 行/列块」(派生块走磁盘缓存)。图像解码/重编码是
+    // CPU 重活,park_worker 让出 async worker;未勾选/无图时零拷贝走原引用。
+    let prepared: Option<Vec<LlmMessage>> = if connector.capabilities().image_auto_split
+        && messages.iter().any(|m| !m.images.is_empty())
+    {
+        let mut v = messages.to_vec();
+        crate::utils::blocking::park_worker(|| engine.images.expand_for_auto_split(&mut v));
+        Some(v)
+    } else {
+        None
+    };
+    let messages: &[LlmMessage] = prepared.as_deref().unwrap_or(messages);
+
     {
         // 设置快照:不留锁跨 await(锁在 settings_snapshot 内即释放)
         let log_enabled = engine.settings_snapshot().llm_request_log;
         if log_enabled && !is_task_run {
             // 图像 data URL 可达数十 MB(视觉能力包 D2):快照只留文字与图像引用元数据,
             // 清空 data_url 再序列化——排查「模型看到了什么文字/哪张图」不需要重复存像素
-            // (像素真身在 DATA_DIR/images/,按引用可复现)。
+            // (像素真身在 DATA_DIR/images/,按引用可复现;拆分标注 label 保留,便于诊断)。
             let mut log_messages = messages.to_vec();
             for m in &mut log_messages {
                 for img in &mut m.images {
@@ -226,11 +248,6 @@ pub(crate) async fn execute_generation(
     // 任务模式经 run_tool_loop 一路带到 task_llm_calls 落库点;聊天路径不消费本字段。
     let mut finish_reason: Option<String> = None;
 
-    // 连接器按本次调用的 connection_id 解析(二维批次 5b):None = 默认连接(5b 之前
-    // 的读锁快照口径不变);节点级连接由 `resolve_connector` 单点解析,两条执行路径共用。
-    let (connector, _model) = engine
-        .resolve_connector(params.connection_id.as_deref())
-        .await?;
     let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel();
     let generate = connector.generate_stream(messages, params.clone(), abort.clone(), chunk_tx);
     tokio::pin!(generate);

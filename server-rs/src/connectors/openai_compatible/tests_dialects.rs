@@ -641,6 +641,7 @@ fn image_message() -> LlmMessage {
         name: "a.png".into(),
         mime: "image/png".into(),
         data_url: "data:image/png;base64,AAAA".into(),
+        label: None,
     }];
     m
 }
@@ -718,4 +719,67 @@ fn anthropic_body_strips_data_url_prefix_for_image_source() {
             "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}
         })
     );
+}
+
+// ===== 视觉能力包 D3:大图拆分标注(label 以 text 紧贴图像之前)=====
+
+fn labeled_image_message() -> LlmMessage {
+    let mut m = LlmMessage::plain("user", "看图");
+    m.images = vec![
+        crate::models::types::ImageRef {
+            id: "o".into(),
+            name: "x.png".into(),
+            mime: "image/png".into(),
+            data_url: "data:image/png;base64,AA".into(),
+            label: Some("（原图总览:100×100）".into()),
+        },
+        crate::models::types::ImageRef {
+            id: "b".into(),
+            name: "x.png".into(),
+            mime: "image/png".into(),
+            data_url: "data:image/png;base64,BB".into(),
+            label: Some("（大图拆分:第1行/第1列,共1行×2列）".into()),
+        },
+    ];
+    m
+}
+
+/// chat:标注以 text part 紧贴各自图像之前输出(总览 → 块序保持)
+#[test]
+fn chat_labeled_images_emit_text_parts() {
+    let body = build_chat_body(
+        "m",
+        &[labeled_image_message()],
+        &test_params(),
+        vision_caps(),
+    );
+    let content = body["messages"][0]["content"].as_array().unwrap();
+    assert_eq!(content[0], json!({"type": "text", "text": "看图"}));
+    assert_eq!(
+        content[1],
+        json!({"type": "text", "text": "（原图总览:100×100）"})
+    );
+    assert_eq!(content[2]["type"], "image_url");
+    assert_eq!(content[3]["text"], "（大图拆分:第1行/第1列,共1行×2列）");
+    assert_eq!(content[4]["type"], "image_url");
+}
+
+/// anthropic:标注同为 text 块(与图像块交错)
+#[test]
+fn anthropic_labeled_images_emit_text_blocks() {
+    let body = build_anthropic_body(
+        "m",
+        &[labeled_image_message()],
+        &test_params(),
+        vision_caps(),
+    );
+    let content = body["messages"][0]["content"].as_array().unwrap();
+    assert_eq!(content[0], json!({"type": "text", "text": "看图"}));
+    assert_eq!(
+        content[1],
+        json!({"type": "text", "text": "（原图总览:100×100）"})
+    );
+    assert_eq!(content[2]["type"], "image");
+    assert_eq!(content[3]["text"], "（大图拆分:第1行/第1列,共1行×2列）");
+    assert_eq!(content[4]["type"], "image");
 }

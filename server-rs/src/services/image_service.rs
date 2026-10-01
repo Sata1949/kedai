@@ -92,6 +92,7 @@ impl ImageService {
             name: name.to_string(),
             mime: mime.to_string(),
             data_url: String::new(),
+            label: None,
         })
     }
 
@@ -132,6 +133,254 @@ impl ImageService {
             });
         }
     }
+
+    // ===== 大图自动拆分(视觉能力包 D3;仅 image_auto_split 连接在下发前调用)=====
+
+    /// 大图自动拆分(2026-10-02 视觉能力包 D3):`image_auto_split` 连接在**下发前**
+    /// 对每条消息调用。任一边超 [`AUTO_SPLIT_MAX_SIDE`] 的图像替换为
+    /// 「全局总览 + 行/列块」的有序引用(`ImageRef.label` 携带标注文本);
+    /// 尺寸达标 / 解码失败 / data_url 为空 → 原样保留,不阻断本轮。
+    /// 派生块经 `derived/{key}/` 磁盘缓存复用(见 [`Self::split_large_image`])。
+    pub fn expand_for_auto_split(&self, messages: &mut [crate::models::types::LlmMessage]) {
+        for m in messages.iter_mut() {
+            if m.images.is_empty() {
+                continue;
+            }
+            let mut next: Vec<ImageRef> = Vec::with_capacity(m.images.len());
+            for img in m.images.drain(..) {
+                match self.split_large_image(&img) {
+                    Some(parts) => next.extend(parts),
+                    None => next.push(img),
+                }
+            }
+            m.images = next;
+        }
+    }
+
+    /// 单图拆分:返回 `Some(零件)` 表示已拆分(总览在最前),`None` = 无需/无法拆分。
+    /// 网格:列/行 = ceil(w/S) / ceil(h/S)(等比均分);块数超上限先整图等比缩小;
+    /// 块以 PNG 输出(无损),总览长边 ≤ S。整图解码失败(损坏/未知格式)原样透传。
+    pub fn split_large_image(&self, img: &ImageRef) -> Option<Vec<ImageRef>> {
+        if img.data_url.is_empty() {
+            return None;
+        }
+        let bytes = decode_data_url_bytes(&img.data_url)?;
+        let decoded = image::load_from_memory(&bytes).ok()?;
+        let (w, h) = (decoded.width(), decoded.height());
+        let (scale, cols, rows) = split_plan(w, h)?;
+        // 磁盘缓存:派生块只依赖源文件与参数,manifest 命中即复用(不重复解码/裁剪/编码)
+        let key = cache_key_of(img);
+        if let Some(hit) = self.load_derived(&key, &img.name) {
+            return Some(hit);
+        }
+        let base = if scale < 1.0 {
+            let (sw, sh) = scaled_dims(w, h, scale);
+            decoded.resize(sw, sh, image::imageops::FilterType::Lanczos3)
+        } else {
+            decoded
+        };
+        let (bw, bh) = (base.width(), base.height());
+        let mut parts: Vec<ImageRef> = Vec::with_capacity((cols * rows + 1) as usize);
+        // 首块前附全局总览(长边 ≤ S;等比缩)
+        let overview = base.resize(
+            AUTO_SPLIT_MAX_SIDE,
+            AUTO_SPLIT_MAX_SIDE,
+            image::imageops::FilterType::Lanczos3,
+        );
+        parts.push(part_ref(
+            &key,
+            "overview",
+            &img.name,
+            &format!("（原图总览:{w}×{h}）"),
+            &overview,
+        )?);
+        for r in 0..rows {
+            for c in 0..cols {
+                let x0 = c * bw / cols;
+                let y0 = r * bh / rows;
+                let x1 = ((c + 1) * bw / cols).min(bw);
+                let y1 = ((r + 1) * bh / rows).min(bh);
+                let block = base.crop_imm(x0, y0, x1 - x0, y1 - y0);
+                parts.push(part_ref(
+                    &key,
+                    &format!("r{}c{}", r + 1, c + 1),
+                    &img.name,
+                    &format!(
+                        "（大图拆分:第{}行/第{}列,共{}行×{}列）",
+                        r + 1,
+                        c + 1,
+                        rows,
+                        cols
+                    ),
+                    &block,
+                )?);
+            }
+        }
+        self.save_derived(&key, &parts);
+        Some(parts)
+    }
+
+    /// 读派生缓存:`derived/{key}/manifest.json` 参数匹配且全部块文件可读 → 重建引用;
+    /// 任一环节失败返回 `None`(调用方重算并覆盖)。
+    fn load_derived(&self, key: &str, name: &str) -> Option<Vec<ImageRef>> {
+        let dir = self.dir.join("derived").join(key);
+        let manifest_raw = std::fs::read_to_string(dir.join("manifest.json")).ok()?;
+        let manifest: DerivedManifest = serde_json::from_str(&manifest_raw).ok()?;
+        if manifest.version != DERIVED_MANIFEST_VERSION
+            || manifest.max_side != AUTO_SPLIT_MAX_SIDE
+            || manifest.max_blocks != AUTO_SPLIT_MAX_BLOCKS
+        {
+            return None;
+        }
+        let mut parts = Vec::with_capacity(manifest.parts.len());
+        for p in manifest.parts {
+            let bytes = std::fs::read(dir.join(&p.file)).ok()?;
+            parts.push(ImageRef {
+                id: p.id,
+                name: name.to_string(),
+                mime: "image/png".to_string(),
+                data_url: format!(
+                    "data:image/png;base64,{}",
+                    base64::engine::general_purpose::STANDARD.encode(&bytes)
+                ),
+                label: p.label,
+            });
+        }
+        Some(parts)
+    }
+
+    /// 写派生缓存(块文件 + manifest;失败仅告警——缓存是加速,不是正确性前提)。
+    fn save_derived(&self, key: &str, parts: &[ImageRef]) {
+        let dir = self.dir.join("derived").join(key);
+        let mut manifest_parts = Vec::with_capacity(parts.len());
+        for (i, p) in parts.iter().enumerate() {
+            let Some(bytes) = decode_data_url_bytes(&p.data_url) else {
+                return;
+            };
+            let file = format!("p{i}.png");
+            if let Err(e) = write_atomic(&dir.join(&file), &bytes) {
+                tracing::warn!(error = %e, "派生图像缓存写入失败(下次将重算)");
+                return;
+            }
+            manifest_parts.push(DerivedPart {
+                id: p.id.clone(),
+                label: p.label.clone(),
+                file,
+            });
+        }
+        let manifest = DerivedManifest {
+            version: DERIVED_MANIFEST_VERSION,
+            max_side: AUTO_SPLIT_MAX_SIDE,
+            max_blocks: AUTO_SPLIT_MAX_BLOCKS,
+            parts: manifest_parts,
+        };
+        match serde_json::to_string_pretty(&manifest) {
+            Ok(text) => {
+                if let Err(e) = write_atomic(&dir.join("manifest.json"), text.as_bytes()) {
+                    tracing::warn!(error = %e, "派生图像 manifest 写入失败(下次将重算)");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "派生图像 manifest 序列化失败"),
+        }
+    }
+}
+
+/// 派生缓存格式版本(参数不匹配即重算;格式变更时递增)
+const DERIVED_MANIFEST_VERSION: u32 = 1;
+
+/// 大图拆分阈值(长边像素;DeepSeek 等对图像尺寸较严的端点)
+pub const AUTO_SPLIT_MAX_SIDE: u32 = 1300;
+/// 单图最大块数(超出先把整图等比缩小到块数 ≤ 此值)
+pub const AUTO_SPLIT_MAX_BLOCKS: u32 = 12;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DerivedManifest {
+    version: u32,
+    max_side: u32,
+    max_blocks: u32,
+    parts: Vec<DerivedPart>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DerivedPart {
+    id: String,
+    label: Option<String>,
+    file: String,
+}
+
+/// 拆分计划(纯函数,便于对极端尺寸做数学单测):
+/// 返回 `None` = 任一边 ≤ S(无需拆分);`Some((scale, cols, rows))` 中 scale < 1.0
+/// 表示需先整图等比缩小(块数超上限时按 0.9 步长收敛求最小缩放)。
+fn split_plan(w: u32, h: u32) -> Option<(f64, u32, u32)> {
+    if w <= AUTO_SPLIT_MAX_SIDE && h <= AUTO_SPLIT_MAX_SIDE {
+        return None;
+    }
+    let mut scale = 1.0f64;
+    loop {
+        let (sw, sh) = scaled_dims(w, h, scale);
+        let cols = sw.div_ceil(AUTO_SPLIT_MAX_SIDE);
+        let rows = sh.div_ceil(AUTO_SPLIT_MAX_SIDE);
+        if cols * rows <= AUTO_SPLIT_MAX_BLOCKS || scale < 0.05 {
+            return Some((scale, cols, rows));
+        }
+        scale *= 0.9;
+    }
+}
+
+/// 按比例缩放尺寸(至少 1 像素)
+fn scaled_dims(w: u32, h: u32, scale: f64) -> (u32, u32) {
+    (
+        ((w as f64 * scale).round() as u32).max(1),
+        ((h as f64 * scale).round() as u32).max(1),
+    )
+}
+
+/// 组装一个派生部件(PNG 编码失败返回 None,整体降级为不拆分)
+fn part_ref(
+    key: &str,
+    suffix: &str,
+    name: &str,
+    label: &str,
+    img: &image::DynamicImage,
+) -> Option<ImageRef> {
+    let mut buf = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+        .ok()?;
+    Some(ImageRef {
+        id: format!("{key}#{suffix}"),
+        name: name.to_string(),
+        mime: "image/png".to_string(),
+        data_url: format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&buf)
+        ),
+        label: Some(label.to_string()),
+    })
+}
+
+/// 派生缓存键:优先用源文件 id(白名单外字符剔除);无可用 id 时退回 data_url 哈希。
+fn cache_key_of(img: &ImageRef) -> String {
+    let safe: String = img
+        .id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-' || *c == '_')
+        .collect();
+    if !safe.is_empty() {
+        return safe;
+    }
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(img.data_url.as_bytes());
+    let hex = format!("{:x}", h.finalize());
+    hex[..16].to_string()
+}
+
+/// data URL → 原始字节(base64 段;拆解或解码失败返回 None)
+fn decode_data_url_bytes(data_url: &str) -> Option<Vec<u8>> {
+    let (_, payload) = split_data_url(data_url)?;
+    base64::engine::general_purpose::STANDARD
+        .decode(payload.trim())
+        .ok()
 }
 
 /// 拆 `data:<mime>;base64,<payload>`(mime 大小写归一到小写,`image/jpg` 归一为 jpeg;
@@ -266,5 +515,127 @@ mod tests {
         assert!(per_message[5][0]
             .data_url
             .starts_with("data:image/png;base64,"));
+    }
+
+    // ===== 大图自动拆分(视觉能力包 D3)=====
+
+    /// 生成指定尺寸的真实 PNG data URL(内容为渐变,编码快且非单调白)
+    fn png_data_url_of(w: u32, h: u32, seed: u8) -> String {
+        let img = image::RgbImage::from_fn(w, h, |x, y| {
+            image::Rgb([(x % 251) as u8, (y % 251) as u8, seed])
+        });
+        let mut buf = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .unwrap();
+        format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&buf)
+        )
+    }
+
+    fn image_ref(id: &str, url: String) -> ImageRef {
+        ImageRef {
+            id: id.into(),
+            name: format!("{id}.png"),
+            mime: "image/png".into(),
+            data_url: url,
+            label: None,
+        }
+    }
+
+    /// 网格数学(纯函数,极端尺寸不真编码):1300 直通;各档列/行;8192² 先缩到 ≤12 块
+    #[test]
+    fn split_plan_grid_math() {
+        assert!(split_plan(1300, 1300).is_none(), "1300 及以下直通");
+        assert!(split_plan(400, 1300).is_none());
+        assert_eq!(split_plan(1301, 700), Some((1.0, 2, 1)));
+        assert_eq!(split_plan(2600, 1300), Some((1.0, 2, 1)));
+        assert_eq!(split_plan(2000, 2000), Some((1.0, 2, 2)));
+        assert_eq!(split_plan(3840, 2160), Some((1.0, 3, 2)));
+        let (scale, cols, rows) = split_plan(8192, 8192).unwrap();
+        assert!(scale < 1.0, "块数超上限必须先整图缩小");
+        assert!(
+            cols * rows <= AUTO_SPLIT_MAX_BLOCKS,
+            "块数 {cols}x{rows} 超上限"
+        );
+        assert!(cols * rows >= 2, "拆分应至少两块");
+    }
+
+    /// 端到端:1400×1400 → 总览 + 2×2 块;首件是总览;每件带行/列标注;统一 PNG 输出
+    #[test]
+    fn split_large_image_emits_overview_and_labeled_blocks() {
+        let dir = TempDataDir::new("image-split");
+        let svc = ImageService::new(dir.path().to_path_buf());
+        let img = image_ref("src.png", png_data_url_of(1400, 1400, 7));
+        let parts = svc.split_large_image(&img).expect("1400 应拆分");
+        assert_eq!(parts.len(), 5, "总览 + 4 块,实际 {}", parts.len());
+        assert!(
+            parts[0].label.as_deref().unwrap().contains("总览"),
+            "{:?}",
+            parts[0].label
+        );
+        assert!(parts[1].label.as_deref().unwrap().contains("第1行/第1列"));
+        assert!(parts[4].label.as_deref().unwrap().contains("第2行/第2列"));
+        for p in &parts {
+            assert!(
+                p.data_url.starts_with("data:image/png;base64,"),
+                "块统一 PNG"
+            );
+            assert!(p.id.starts_with("src.png#"), "派生 id 带源前缀:{}", p.id);
+        }
+        // derived 目录已落缓存
+        assert!(dir
+            .path()
+            .join("images")
+            .join("derived")
+            .join("src.png")
+            .join("manifest.json")
+            .exists());
+    }
+
+    /// 缓存命中:篡改块文件后二次拆分读到的是缓存(证明未重算)
+    #[test]
+    fn split_cache_hit_reuses_derived_files() {
+        let dir = TempDataDir::new("image-split-cache");
+        let svc = ImageService::new(dir.path().to_path_buf());
+        let img = image_ref("src2.png", png_data_url_of(1400, 700, 3));
+        let first = svc.split_large_image(&img).unwrap();
+        // 用另一张 8x8 有效 PNG 覆写第 1 个块文件
+        let other = png_data_url_of(8, 8, 99);
+        let other_bytes = decode_data_url_bytes(&other).unwrap();
+        let block_file = dir
+            .path()
+            .join("images")
+            .join("derived")
+            .join("src2.png")
+            .join("p1.png");
+        std::fs::write(&block_file, &other_bytes).unwrap();
+        let second = svc.split_large_image(&img).unwrap();
+        assert_eq!(second.len(), first.len(), "缓存命中不改变件数");
+        assert_eq!(second[1].data_url, other, "块内容应来自缓存文件(未重算)");
+        assert_eq!(second[0].data_url, first[0].data_url, "总览照常复用");
+    }
+
+    /// 小图/坏图不拆:原样保留(「无需拆分 → 引用逐字段不变」的判别),不落 derived
+    #[test]
+    fn split_skips_small_and_broken_images() {
+        let dir = TempDataDir::new("image-split-skip");
+        let svc = ImageService::new(dir.path().to_path_buf());
+        let small = image_ref("s.png", png_data_url_of(200, 200, 1));
+        assert!(svc.split_large_image(&small).is_none(), "≤1300 直通");
+        let broken = image_ref("b.png", "data:image/png;base64,!!!!".into());
+        assert!(svc.split_large_image(&broken).is_none(), "解码失败原样透传");
+        let empty = image_ref("e.png", String::new());
+        assert!(svc.split_large_image(&empty).is_none(), "无 data_url 跳过");
+        // expand_for_auto_split:含小图的消息原样(引用逐字段相等,无 label)
+        let mut msgs = vec![crate::models::types::LlmMessage::plain("user", "x")];
+        msgs[0].images = vec![small.clone()];
+        svc.expand_for_auto_split(&mut msgs);
+        assert_eq!(msgs[0].images, vec![small], "无需拆分时引用逐字段不变");
+        assert!(
+            !dir.path().join("images").join("derived").exists(),
+            "未拆分不产生派生缓存"
+        );
     }
 }

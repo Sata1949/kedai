@@ -1055,6 +1055,7 @@ fn history_images_attach_by_index() {
         name: "a.png".into(),
         mime: "image/png".into(),
         data_url: "data:image/png;base64,AAAA".into(),
+        label: None,
     };
     let images = vec![vec![img], vec![], vec![]];
     let (msgs, _) = build_llm_messages_with_position(

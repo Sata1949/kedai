@@ -479,6 +479,10 @@ fn insert_chat_content(
         parts.push(json!({ "type": "text", "text": content }));
     }
     for img in images {
+        // 拆分产物带标注(大图总览/行-列):以 text part 紧贴图像之前输出(D3)
+        if let Some(label) = &img.label {
+            parts.push(json!({ "type": "text", "text": label }));
+        }
         parts.push(json!({ "type": "image_url", "image_url": { "url": img.data_url } }));
     }
     obj.insert("content".into(), Value::Array(parts));
@@ -599,6 +603,10 @@ fn build_responses_body(
                         parts.push(json!({ "type": "input_text", "text": m.content }));
                     }
                     for img in images {
+                        // 拆分产物带标注(大图总览/行-列):text 项紧贴图像之前(D3)
+                        if let Some(label) = &img.label {
+                            parts.push(json!({ "type": "input_text", "text": label }));
+                        }
                         parts.push(json!({ "type": "input_image", "image_url": img.data_url }));
                     }
                     input.push(json!({ "role": "user", "content": parts }));
@@ -725,8 +733,16 @@ fn build_anthropic_body(
                 // user 会被 400):纯文本并入文本;tool_result 块消息后跟文本时,
                 // 文本并作同一 user 消息的 text 块(块数组本就允许多块混排))
                 let images = usable_images(m, caps);
-                let mut image_blocks: Vec<Value> =
-                    images.iter().filter_map(|img| image_block(img)).collect();
+                let mut image_blocks: Vec<Value> = Vec::new();
+                for img in &images {
+                    // 拆分产物带标注(大图总览/行-列):text 块紧贴 image 块之前(D3)
+                    if let Some(label) = &img.label {
+                        image_blocks.push(json!({ "type": "text", "text": label }));
+                    }
+                    if let Some(block) = image_block(img) {
+                        image_blocks.push(block);
+                    }
+                }
                 if image_blocks.is_empty() {
                     if let Some(last) = out.last_mut() {
                         if last.get("role").and_then(Value::as_str) == Some("user") {
