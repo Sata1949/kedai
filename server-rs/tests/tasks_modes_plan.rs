@@ -16,6 +16,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use kedai_server::build_test_app;
+use kedai_server::utils::test_support::TempDataDir;
 use serde_json::{json, Value};
 use std::sync::OnceLock;
 use tower::ServiceExt;
@@ -778,6 +779,83 @@ async fn task_plan_mode_planner_scout_collects_then_plans() {
         scout["finish_reason"].as_str(),
         Some("tool_calls"),
         "带工具调用的侦察轮 finish_reason 应为 tool_calls: {scout}"
+    );
+}
+
+/// TM-SCOUT-1 D1(b):绑定工作区的 plan 任务,规划器**输入**含系统侧预取的
+/// 「工作区侦察快照」段(user 消息 · 目标段之后,prompt_summary 可观测):
+/// 真实目录清单 + 入口文档摘要 + 项目类型,机器说明句在 untrusted 包裹外、
+/// 采集正文经包裹(source=workspace_snapshot);未绑定任务的 scratch 空目录
+/// 注入「当前无可见文件」形态(不假装有内容,计划照常产出)。
+#[tokio::test]
+async fn task_plan_mode_planner_gets_workspace_scout_snapshot() {
+    let app = test_app();
+    let ws_guard = TempDataDir::new("tm-scout1-snap");
+    std::fs::write(ws_guard.path().join("README.md"), "快照取证入口文档").unwrap();
+    std::fs::write(ws_guard.path().join("package.json"), "{}").unwrap();
+    std::fs::create_dir_all(ws_guard.path().join("src")).unwrap();
+    std::fs::write(
+        ws_guard.path().join("src/main.mjs"),
+        "export const x = 1;\n",
+    )
+    .unwrap();
+
+    let title =
+        r#"[[reply_if:任务规划器|[{"name":"快照步","goal":"基于快照规划"}] ]] 快照规划目标"#;
+    let (status, created) = send_json(
+        app,
+        "POST",
+        "/api/tasks",
+        json!({
+            "title": title,
+            "task_mode": "plan",
+            "workspace": ws_guard.path().to_string_lossy(),
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "创建任务失败: {created}");
+    let id = created["task"]["id"].as_str().unwrap().to_string();
+    let (status, r) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200: {r}");
+    wait_status(app, &id, "planned").await;
+
+    let calls = wait_calls(app, &id, |cs| cs.iter().any(|c| c["phase"] == "planner")).await;
+    let first = calls
+        .iter()
+        .find(|c| c["phase"] == "planner")
+        .expect("应有 planner 调用行");
+    let ps = first["prompt_summary"].as_str().unwrap_or("");
+    // 五要素:段标头、untrusted 包裹与来源名、可见清单、入口文档摘要、项目类型行
+    for needle in [
+        "【工作区侦察快照】",
+        r#"source="workspace_snapshot""#,
+        "- README.md",
+        "- src/",
+        "- main.mjs",
+        "入口文档摘要:",
+        "- README.md: 快照取证入口文档",
+        "项目类型: node(package.json → npm test)",
+    ] {
+        assert!(ps.contains(needle), "规划器输入应含「{needle}」: {ps}");
+    }
+
+    // 未绑定任务 = scratch 空目录:注入「当前无可见文件」形态,计划照常产出
+    let title2 =
+        r#"[[reply_if:任务规划器|[{"name":"空目录步","goal":"照常出计划"}] ]] 空目录规划目标"#;
+    let id2 = create_task_with_mode(app, title2, "plan").await;
+    let (status, r) = send_json(app, "POST", &format!("/api/tasks/{id2}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200: {r}");
+    wait_status(app, &id2, "planned").await;
+    let calls2 = wait_calls(app, &id2, |cs| cs.iter().any(|c| c["phase"] == "planner")).await;
+    let ps2 = calls2
+        .iter()
+        .find(|c| c["phase"] == "planner")
+        .and_then(|c| c["prompt_summary"].as_str())
+        .unwrap_or("");
+    assert!(ps2.contains("【工作区侦察快照】"), "{ps2}");
+    assert!(
+        ps2.contains("当前无可见文件"),
+        "空 scratch 应有显式留痕: {ps2}"
     );
 }
 

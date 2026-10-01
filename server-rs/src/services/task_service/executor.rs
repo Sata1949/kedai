@@ -748,6 +748,77 @@ impl TaskService {
         .allowed
     }
 
+    /// 侦察轮的工具定义(白名单 ∩ 已注册;未注册的环境静默缺席,如裁剪版工具集)。
+    /// `plan_scout_loop` 的装配与「侦察指引」的 defs 非空判据**共用同一来源**
+    /// (TM-SCOUT-1),防「指引说了有工具、循环却没下发」的漂移。
+    fn scout_defs(&self, has_scope: bool) -> Vec<ToolDefinition> {
+        let whitelist = crate::tools::tool_sets::scout_tools(has_scope);
+        self.engine
+            .tool_definitions()
+            .into_iter()
+            .filter(|d| whitelist.contains(&d.name.as_str()))
+            .collect()
+    }
+
+    /// 规划调用 system 组装(plan_task / plan_revise 共用同一构建,防两处文案漂移;
+    /// TM-SCOUT-1 把原先两处逐字重复的拼接抽到这里):
+    /// PLANNER_PROMPT + 能力段 + 侦察指引(defs 非空时) + 世界书(untrusted 包裹)。
+    /// 修订轮在此之上追加 PLANNER_REVISE_GUIDANCE(调用方补,首轮/修订轮的区分保持)。
+    fn planner_system_prompt(
+        &self,
+        character_id: Option<&str>,
+        scope: Option<&crate::models::types::ExecScope>,
+        capability: crate::services::task_core::prompt_consts::StepCapability,
+    ) -> String {
+        use crate::services::task_core::prompt_consts::{capability_note, planner_scout_guidance};
+        let mut sys = String::from(super::prompt::PLANNER_PROMPT);
+        // 执行阶段能力段(D1):不告诉规划器执行者有什么,它就会把交付物规划成文件
+        sys.push_str(&format!(
+            "\n\n{}",
+            capability_note(
+                capability,
+                &self.planned_step_tools(scope.is_some()),
+                scope.map(|s| s.workspace()),
+            )
+        ));
+        // 侦察指引(TM-SCOUT-1 D1(a)):仅在确有可用只读工具时追加;指引含工作区根,
+        // 故仅作用域存在时构造(无作用域时 defs 本就为空,此处是双保险)
+        if let Some(ws) = scope {
+            let defs = self.scout_defs(true);
+            if !defs.is_empty() {
+                let names: Vec<String> = defs.iter().map(|d| d.name.clone()).collect();
+                sys.push_str(&format!(
+                    "\n\n{}",
+                    planner_scout_guidance(&names, ws.workspace())
+                ));
+            }
+        }
+        // 世界书为外部文本(WP7):untrusted 边界包裹,内置规划器指令不包裹
+        let world = self.world_context(character_id);
+        if !world.is_empty() {
+            sys.push_str(&format!(
+                "\n\n{}",
+                crate::services::prompt_kit::untrusted_boundary("world_book", &world)
+            ));
+        }
+        sys
+    }
+
+    /// 工作区侦察快照的注入块(TM-SCOUT-1 D1(b)):系统侧确定性采集(见
+    /// `workspace_profile::scout_snapshot`),机器说明句在 untrusted 包裹**外**,
+    /// 采集正文整体经 `untrusted_boundary` 包裹(source=`workspace_snapshot`,外部文本
+    /// 防注入口径同 world_book)。空文本返回空串(调用方空串即不注入)。
+    fn scout_snapshot_block(scope: &crate::models::types::ExecScope) -> String {
+        let body = crate::services::workspace_profile::scout_snapshot(scope.workspace());
+        if body.trim().is_empty() {
+            return String::new();
+        }
+        format!(
+            "【工作区侦察快照】以下为系统在工作区实时采集的真实信息(机器扫描,非模型推断)。\n{}",
+            crate::services::prompt_kit::untrusted_boundary("workspace_snapshot", &body)
+        )
+    }
+
     /// 规划(单次规划尝试,含只读侦察;解析与重试在 plan_task_retry):
     /// 把目标交给规划器,允许先用只读白名单工具(PLANNER_SCOUT_TOOLS,最多
     /// PLANNER_SCOUT_MAX_ROUNDS 轮)收集与目标相关的信息,再产出计划 JSON 数组文本
@@ -756,6 +827,8 @@ impl TaskService {
     /// 温度保持低温(JSON 解析稳定是结构约束,非用户可调生成风格),top_p 读取任务模式设置;
     /// max_tokens 由调用方按重试级别递增(推理模型 reasoning 与正文共用预算)。
     /// 仅注入世界书常驻设定作为背景;不注入提示词注入(输出要求会破坏 JSON)与 Agent 系统提示词。
+    /// TM-SCOUT-1(2026-10-01)起 system 追加「侦察指引」条件段、user 追加「工作区侦察快照」
+    /// 块(见 `planner_system_prompt` / `scout_snapshot_block`)——信息在场不再只靠模型配合。
     /// 侦察轮也经 generate_text 统一出口落 task_llm_calls(phase=planner);
     /// 侦察轮调用失败(如半截 tool_call 被判协议损坏)不沉规划——记 warn 回退
     /// 无工具最终轮,与侦察能力缺席时的旧行为等价。
@@ -770,27 +843,24 @@ impl TaskService {
         scope: Option<Arc<crate::models::types::ExecScope>>,
         capability: crate::services::task_core::prompt_consts::StepCapability,
     ) -> Result<TaskGenOutput, String> {
-        let mut sys = String::from(super::prompt::PLANNER_PROMPT);
-        // 执行阶段能力段(D1):不告诉规划器执行者有什么,它就会把交付物规划成文件
-        sys.push_str(&format!(
-            "\n\n{}",
-            crate::services::task_core::prompt_consts::capability_note(
-                capability,
-                &self.planned_step_tools(scope.is_some()),
-                scope.as_deref().map(|s| s.workspace()),
-            )
-        ));
-        // 世界书为外部文本(WP7):untrusted 边界包裹,内置规划器指令不包裹
-        let world = self.world_context(character_id);
-        if !world.is_empty() {
-            sys.push_str(&format!(
-                "\n\n{}",
-                crate::services::prompt_kit::untrusted_boundary("world_book", &world)
-            ));
-        }
+        let sys = self.planner_system_prompt(character_id, scope.as_deref(), capability);
+        // 工作区侦察快照(TM-SCOUT-1 D1(b)):注入 user 消息「目标段之后」——位置与
+        // prompt_summary 的可见性(每消息截 800 字符)配套;不拆独立消息是因为
+        // anthropic 方言要求 user/assistant 交替,连续两条 user 会被拒。
+        let user = match scope.as_deref() {
+            Some(s) => {
+                let block = Self::scout_snapshot_block(s);
+                if block.is_empty() {
+                    title.to_string()
+                } else {
+                    format!("{title}\n\n{block}")
+                }
+            }
+            None => title.to_string(),
+        };
         let messages = vec![
             LlmMessage::plain("system", &sys),
-            LlmMessage::plain("user", title),
+            LlmMessage::plain("user", &user),
         ];
         self.plan_scout_loop(task_id, character_id, messages, max_tokens, cancel, scope)
             .await
@@ -812,23 +882,10 @@ impl TaskService {
         scope: Option<Arc<crate::models::types::ExecScope>>,
         capability: crate::services::task_core::prompt_consts::StepCapability,
     ) -> Result<TaskGenOutput, String> {
-        let mut sys = String::from(super::prompt::PLANNER_PROMPT);
-        // 能力段口径与首轮规划一致(D1):修订同样不得规划执行者做不到的步骤
-        sys.push_str(&format!(
-            "\n\n{}",
-            crate::services::task_core::prompt_consts::capability_note(
-                capability,
-                &self.planned_step_tools(scope.is_some()),
-                scope.as_deref().map(|s| s.workspace()),
-            )
-        ));
-        let world = self.world_context(task.character_id.as_deref());
-        if !world.is_empty() {
-            sys.push_str(&format!(
-                "\n\n{}",
-                crate::services::prompt_kit::untrusted_boundary("world_book", &world)
-            ));
-        }
+        // system 与首轮规划共用同一构建(TM-SCOUT-1):能力段口径一致(D1),
+        // 侦察指引与快照条件、世界书包裹随之同源
+        let mut sys =
+            self.planner_system_prompt(task.character_id.as_deref(), scope.as_deref(), capability);
         // 内置修订指引段(不包裹,与内置规划器指令同口径)
         sys.push_str(&format!("\n\n{}", super::prompt::PLANNER_REVISE_GUIDANCE));
 
@@ -849,10 +906,17 @@ impl TaskService {
         let hist: String = hist.chars().take(4000).collect();
 
         let plan_json = serde_json::to_string(&task.plan).unwrap_or_else(|_| "[]".into());
-        let mut user = format!(
-            "原始目标:\n{}\n\n当前计划(JSON):\n{}\n",
-            task.title, plan_json
-        );
+        let mut user = format!("原始目标:\n{}\n\n", task.title);
+        // 工作区侦察快照(TM-SCOUT-1 D1(b)):与首轮同口径,插在目标段之后
+        // (修订时工作区可能已变化,快照按当下实时采集)
+        if let Some(s) = scope.as_deref() {
+            let block = Self::scout_snapshot_block(s);
+            if !block.is_empty() {
+                user.push_str(&block);
+                user.push_str("\n\n");
+            }
+        }
+        user.push_str(&format!("当前计划(JSON):\n{}\n", plan_json));
         if !hist.is_empty() {
             user.push_str(&format!("\n此前的修订对话(按时间顺序):\n{hist}\n"));
         }
@@ -896,12 +960,9 @@ impl TaskService {
         // 侦察白名单 ∩ 已注册工具(未注册的环境静默缺席,如裁剪版工具集);
         // 有作用域时并入工作区只读三件(单一出处:tool_sets::scout_tools)
         let scout_whitelist = crate::tools::tool_sets::scout_tools(scope.is_some());
-        let defs: Vec<ToolDefinition> = self
-            .engine
-            .tool_definitions()
-            .into_iter()
-            .filter(|d| scout_whitelist.contains(&d.name.as_str()))
-            .collect();
+        // 与 `planner_system_prompt` 的侦察指引判据同源(TM-SCOUT-1:防「指引说有工具、
+        // 循环没下发」的两处漂移)
+        let defs: Vec<ToolDefinition> = self.scout_defs(scope.is_some());
         // 虚拟 session_id(task: 前缀,与 run_agent_loop 同口径;不建影子行)
         let tool_ctx = ToolContext {
             session_id: format!("task:{task_id}"),
