@@ -83,6 +83,8 @@ pub(crate) async fn run_agent_loop(
         settings.task_coding_bundle_enabled,
         // 视觉三件随生效连接的「视觉输入」能力位(口径单一出处;见 tool_policy::vision_gate)
         crate::services::settings_service::vision_enabled(settings),
+        // 截图工具随「视觉与截图」总开关(默认关;见 tool_policy::screenshot_gate)
+        settings.vision_screenshot_enabled,
     );
     // 闸门名单先取出(allowed 借用生命周期需覆盖整个工具循环),再取走 defs
     let allowed = policy.allowed;

@@ -29,6 +29,9 @@ pub mod multistep;
 pub mod permissions;
 pub mod registry;
 pub mod revise;
+// 截图工具(视觉能力包 D5;Windows 原生 GDI / 非 Windows 明示不支持):
+// 可见性由「视觉与截图」总开关过滤(见 tool_policy::screenshot_gate 与 tool_sets::filter_screenshot)
+pub mod screenshot;
 // 产物提交(仅 Android 沙箱档下发;可见性过滤见 task_engine/tool_policy.rs)
 pub mod submit;
 // 动态调用名单内流程(二维批次 7b):工具**定义**在此,「谁可被调用」由 custom 执行器
@@ -101,5 +104,7 @@ pub fn register_builtin_tools(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
     agent_tools_fs::register_fs_tools(registry, deps.clone());
     // 视觉工具三件(视觉能力包 D4):始终注册;可见性 = 工作区族闸门 ∩ 视觉能力位闸门
     vision_tools::register_vision_tools(registry, deps.clone());
+    // 截图工具(视觉能力包 D5):始终注册;可见性由「视觉与截图」总开关过滤(默认关)
+    screenshot::register_screenshot_tool(registry, deps.clone());
     agent_tools::register_agent_tools(registry, deps);
 }

@@ -430,6 +430,8 @@ impl TeamExecutor {
             ctx.settings.task_coding_bundle_enabled,
             // 视觉三件随生效连接的「视觉输入」能力位(口径单一出处)
             crate::services::settings_service::vision_enabled(&ctx.settings),
+            // 截图工具随「视觉与截图」总开关(默认关)
+            ctx.settings.vision_screenshot_enabled,
         )
         .allowed;
         sys.push_str(&format!(

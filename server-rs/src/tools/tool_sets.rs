@@ -72,6 +72,18 @@ pub fn has_vision_tools(defs: &[ToolDefinition]) -> bool {
     defs.iter().any(|d| VISION_TOOLS.contains(&d.name.as_str()))
 }
 
+/// 按「视觉与截图」总开关过滤截图工具(视觉能力包 D5):关(默认)时剔除。
+/// 聊天路径(api/chat.rs)与任务路径(tool_policy::screenshot_gate)共用本判据,
+/// 单点维护工具名(crate::tools::screenshot::TOOL_NAME)。
+pub fn filter_screenshot(defs: Vec<ToolDefinition>, enabled: bool) -> Vec<ToolDefinition> {
+    if enabled {
+        return defs;
+    }
+    defs.into_iter()
+        .filter(|d| d.name != crate::tools::screenshot::TOOL_NAME)
+        .collect()
+}
+
 /// 工作区文件工具族的**只读子集**:`fs_read`/`fs_glob`/`fs_grep`。
 ///
 /// 用途只有一个:任务绑定了作用域时并入规划侦察轮白名单(D5),让规划器能看见工作区里的
@@ -295,5 +307,22 @@ mod tests {
             .map(|d| d.name)
             .collect();
         assert_eq!(names, vec!["read", "fs_read2"]);
+    }
+
+    /// 截图开关过滤(视觉能力包 D5):关(默认)只剔截图工具本身(精确名匹配),
+    /// 开时原样;对照项 screenshot2 不受影响。聊天路径与任务闸门共用本判据。
+    #[test]
+    fn filter_screenshot_is_exact_and_switchable() {
+        let defs = vec![def("read"), def("screenshot"), def("screenshot2")];
+        let off: Vec<String> = filter_screenshot(defs.clone(), false)
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        assert_eq!(off, vec!["read", "screenshot2"]);
+        let on: Vec<String> = filter_screenshot(defs, true)
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        assert_eq!(on, vec!["read", "screenshot", "screenshot2"]);
     }
 }

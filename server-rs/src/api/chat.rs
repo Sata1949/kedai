@@ -195,8 +195,14 @@ pub async fn send(
     if mode == "agent" {
         // 工作区工具族(fs_*)只随任务的工作区绑定下发:聊天没有工作区上下文,
         // 留在列表里只会让模型看到 5 个注定报「未绑定工作区」的工具。
+        // 截图工具(视觉能力包 D5)随「视觉与截图」总开关过滤(默认关;与任务路径
+        // 同一判据 tool_sets::filter_screenshot,单点维护工具名)。
         params.tools = crate::tools::tool_sets::exclude_workspace(
             crate::tools::tool_sets::exclude_meta(state.tool_registry.list_definitions()),
+        );
+        params.tools = crate::tools::tool_sets::filter_screenshot(
+            params.tools,
+            state.settings_snapshot().vision_screenshot_enabled,
         );
     }
     // 自定义流程(custom 模式):校验启用与合法性,步骤快照随请求传入引擎

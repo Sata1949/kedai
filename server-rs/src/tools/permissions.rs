@@ -505,6 +505,10 @@ fn default_risk(tool: &str) -> ToolRisk {
         // 必须显式登记:未登记会落下面的通配兜底被误判 Dangerous,任务默认策略
         // (deny_dangerous)将整族剔除,而它们正是要在默认策略下可用的。
         "view_image" | "zoom_image" | "image_diff" => ToolRisk::Safe,
+        // 截图工具(视觉能力包 D5):读屏即读敏感内容(屏幕可能有用户隐私),归敏感级;
+        // 不写文件系统、无破坏性动作,归危险级会被任务默认策略整体剔除。可见性另由
+        // 「视觉与截图」总开关(默认关)在策略层过滤。
+        "screenshot" => ToolRisk::Sensitive,
         // 命令执行恒危险级:与文件写工具同级,但额外走「命令级风险强制确认」
         // (tools/command_risk.rs)。显式登记而非依赖下面的通配兜底,便于后续审查。
         "bash" => ToolRisk::Dangerous,

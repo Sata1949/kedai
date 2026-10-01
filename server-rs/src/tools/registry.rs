@@ -418,6 +418,8 @@ fn tool_when(name: &str) -> String {
         "view_image" => "需要真的「看」工作区里的图像(截图/设计稿/照片)内容时调用;直接把图像交给模型查看,返回图像本身与尺寸信息。",
         "zoom_image" => "需要放大查看图像局部细节(小字/图标/某块区域)时调用;给出原图像素坐标裁剪并放大,看不清细节先用它。",
         "image_diff" => "需要对比两张图像(改版前后截图等)的差异时调用;返回差异像素统计与可视化差异图。",
+        // 截图工具(视觉能力包 D5;仅「视觉与截图」开关开启时下发)
+        "screenshot" => "需要查看当前屏幕画面时调用(全屏 / 指定显示器 / 区域 / 窗口标题);用于读屏视觉验证(UI 检查、改版前后对比)。",
         _ => return String::new(),
     };
     s.to_string()
@@ -430,8 +432,9 @@ pub fn render_kind_for(name: &str) -> Option<&'static str> {
     match name {
         "read" | "fs_read" | "fs_grep" => Some("read"),
         "search" => Some("search"),
-        // 视觉工具族(视觉能力包 D4):前端按 image 分派渲染缩略图(输出含 images 引用)
-        "view_image" | "zoom_image" | "image_diff" => Some("image"),
+        // 视觉工具族(视觉能力包 D4):前端按 image 分派渲染缩略图(输出含 images 引用);
+        // 截图工具(D5)同款
+        "view_image" | "zoom_image" | "image_diff" | "screenshot" => Some("image"),
         "calculator" | "role" | "write" | "replace" | "create" | "todo" | "agentgo"
         | "agentend" | "sleep" | "censor_text" | "memory_read" | "memory_write"
         | "update_variables" | "get_state" | "apply_patch" | "submit" | "run_flow"
