@@ -43,17 +43,23 @@ beforeEach(() => {
   h.savedPatches = [];
 });
 
+/** 取最后一次保存的 patch(不存在即断言失败并回退空对象——避免非空断言,ratchet 只降不升) */
+function lastSavedPatch(): Record<string, unknown> {
+  const patch = h.savedPatches.at(-1);
+  expect(patch).toBeDefined();
+  return patch ?? {};
+}
+
 describe('Agent 设置保存按模式过滤(TM-SET-3)', () => {
   it('角色扮演(缺省):patch 含变量组与反思提示词', async () => {
     const { saveAgentNow } = useAgentSettings();
     await saveAgentNow();
-    const patch = h.savedPatches.at(-1);
-    expect(patch).toBeDefined();
-    expect(patch!.mvu_vars_position).toBeDefined();
-    expect(patch!.mvu_model).toBeDefined();
-    expect(patch!.mvu_temperature).toBeDefined();
-    expect(patch!.reflect_prompt).toBeDefined();
-    expect(patch!.agent_system_prompt).toBeDefined();
+    const patch = lastSavedPatch();
+    expect(patch.mvu_vars_position).toBeDefined();
+    expect(patch.mvu_model).toBeDefined();
+    expect(patch.mvu_temperature).toBeDefined();
+    expect(patch.reflect_prompt).toBeDefined();
+    expect(patch.agent_system_prompt).toBeDefined();
   });
 
   it('任务模式:patch 不含变量组与反思提示词;系统提示词与搜索端点照常', async () => {
@@ -61,13 +67,12 @@ describe('Agent 设置保存按模式过滤(TM-SET-3)', () => {
     store.appMode = 'task';
     const { saveAgentNow } = useAgentSettings();
     await saveAgentNow();
-    const patch = h.savedPatches.at(-1);
-    expect(patch).toBeDefined();
-    expect(patch!.mvu_vars_position, '任务模式不得写变量注入位置').toBeUndefined();
-    expect(patch!.mvu_model, '任务模式不得写变量模型').toBeUndefined();
-    expect(patch!.mvu_temperature, '任务模式不得写变量温度').toBeUndefined();
-    expect(patch!.reflect_prompt, '任务模式不得写反思提示词').toBeUndefined();
-    expect(patch!.agent_system_prompt).toBeDefined();
-    expect(patch!.search_endpoint).toBeDefined();
+    const patch = lastSavedPatch();
+    expect(patch.mvu_vars_position, '任务模式不得写变量注入位置').toBeUndefined();
+    expect(patch.mvu_model, '任务模式不得写变量模型').toBeUndefined();
+    expect(patch.mvu_temperature, '任务模式不得写变量温度').toBeUndefined();
+    expect(patch.reflect_prompt, '任务模式不得写反思提示词').toBeUndefined();
+    expect(patch.agent_system_prompt).toBeDefined();
+    expect(patch.search_endpoint).toBeDefined();
   });
 });

@@ -49,18 +49,24 @@ beforeEach(() => {
   h.saveFail = false;
 });
 
+/** 取最后一次保存的 patch(不存在即断言失败并回退空对象——避免非空断言,ratchet 只降不升) */
+function lastSavedPatch(): Record<string, unknown> {
+  const patch = h.savedPatches.at(-1);
+  expect(patch).toBeDefined();
+  return patch ?? {};
+}
+
 describe('批量保存按模式过滤(TM-SET-3)', () => {
   it('角色扮演模式:patch 含聊天专属项(最大上下文窗口/压缩/记忆)与全局项', async () => {
     const { saveParamsNow } = useGenerationParams();
     await saveParamsNow();
-    const patch = h.savedPatches.at(-1);
-    expect(patch).toBeDefined();
-    expect(patch!.max_context_tokens, '角色扮演保留最大上下文窗口').toBeDefined();
-    expect(patch!.compaction_mode, '角色扮演保留压缩模式').toBeDefined();
-    expect(patch!.memory_inject_limit, '角色扮演保留记忆注入条数').toBeDefined();
+    const patch = lastSavedPatch();
+    expect(patch.max_context_tokens, '角色扮演保留最大上下文窗口').toBeDefined();
+    expect(patch.compaction_mode, '角色扮演保留压缩模式').toBeDefined();
+    expect(patch.memory_inject_limit, '角色扮演保留记忆注入条数').toBeDefined();
     // 全局字段(直写扁平)两模式都携带
-    expect(patch!.subagent_max_depth).toBeDefined();
-    expect(patch!.undo_enabled).toBeDefined();
+    expect(patch.subagent_max_depth).toBeDefined();
+    expect(patch.undo_enabled).toBeDefined();
   });
 
   it('任务模式:patch 不含聊天专属项(隐藏项不写覆盖层),全局与任务项照常', async () => {
@@ -68,18 +74,17 @@ describe('批量保存按模式过滤(TM-SET-3)', () => {
     store.appMode = 'task';
     const { saveParamsNow } = useGenerationParams();
     await saveParamsNow();
-    const patch = h.savedPatches.at(-1);
-    expect(patch).toBeDefined();
-    expect(patch!.max_context_tokens, '任务模式不得写最大上下文窗口').toBeUndefined();
-    expect(patch!.compaction_mode, '任务模式不得写压缩模式').toBeUndefined();
-    expect(patch!.compaction_snip_bytes).toBeUndefined();
-    expect(patch!.memory_inject_limit, '任务模式不得写记忆注入条数').toBeUndefined();
-    expect(patch!.memory_distill_enabled).toBeUndefined();
+    const patch = lastSavedPatch();
+    expect(patch.max_context_tokens, '任务模式不得写最大上下文窗口').toBeUndefined();
+    expect(patch.compaction_mode, '任务模式不得写压缩模式').toBeUndefined();
+    expect(patch.compaction_snip_bytes).toBeUndefined();
+    expect(patch.memory_inject_limit, '任务模式不得写记忆注入条数').toBeUndefined();
+    expect(patch.memory_distill_enabled).toBeUndefined();
     // 全局字段与任务侧项保留
-    expect(patch!.subagent_max_depth).toBeDefined();
-    expect(patch!.undo_enabled).toBeDefined();
-    expect(patch!.default_temperature).toBeDefined();
-    expect(patch!.task_step_budget_secs).toBeDefined();
+    expect(patch.subagent_max_depth).toBeDefined();
+    expect(patch.undo_enabled).toBeDefined();
+    expect(patch.default_temperature).toBeDefined();
+    expect(patch.task_step_budget_secs).toBeDefined();
   });
 });
 

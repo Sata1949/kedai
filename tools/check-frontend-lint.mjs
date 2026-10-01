@@ -47,7 +47,8 @@ const BASELINE = {
   asNever: 31,
   // 二维批次 7a 下调 70 → 69:导入归一(useAgentFlow)重写后少掉 4 处双重断言,
   // 新增 2 处(测试里的 fetch/Blob 捕获桩),净 −1。ratchet 只降不升,顺势收紧。
-  asUnknownAs: 69,
+  // TM-SET-2(2026-10-01)再下调 69 → 68:退役 R3a 测试删掉 1 处 `undefined as unknown as`。
+  asUnknownAs: 68,
   tsExpectError: 6,
   nonNull: 33,
 };
