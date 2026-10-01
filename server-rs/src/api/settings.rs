@@ -2,6 +2,7 @@
 use crate::api::app_state::AppState;
 use crate::api::json_body::JsonBody;
 use crate::api::{err_with_code, internal, not_found, validation, ErrorCode};
+use crate::connectors::openai_compatible::{normalize_api_style, API_STYLE_CHAT};
 use crate::services::agent_flow_service::{
     MAX_FLOW_CALLS_PER_TASK_LIMIT, MAX_FLOW_CALL_DEPTH_LIMIT, MIN_FLOW_CALLS_PER_TASK,
     MIN_FLOW_CALL_DEPTH,
@@ -258,6 +259,10 @@ pub struct ConnectionProfileInput {
     pub api_key: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+    /// 接口方言显式覆盖(`chat-completions` | `responses` | `anthropic`;非法值回退默认档)。
+    /// 缺省 = 沿用已有值,并在 sanitize 时按 URL 端点后缀推断(默认档才会被推断改写)。
+    #[serde(default)]
+    pub api_style: Option<String>,
     #[serde(default)]
     pub enabled: Option<bool>,
 }
@@ -356,6 +361,7 @@ fn settings_json(s: &RuntimeSettings) -> Value {
                     "connector_type": p.connector_type,
                     "base_url": p.base_url,
                     "model": p.model,
+                    "api_style": p.api_style,
                     "enabled": p.enabled,
                     "api_key_masked": p.masked_api_key(),
                     "has_api_key": p.has_api_key(),
@@ -485,6 +491,12 @@ pub async fn update_settings(
                         .model
                         .clone()
                         .unwrap_or_else(|| existing.map(|p| p.model.clone()).unwrap_or_default()),
+                    api_style: item
+                        .api_style
+                        .as_deref()
+                        .map(|s| normalize_api_style(s).to_string())
+                        .or_else(|| existing.map(|p| p.api_style.clone()))
+                        .unwrap_or_else(|| API_STYLE_CHAT.to_string()),
                     enabled: item
                         .enabled
                         .unwrap_or_else(|| existing.map(|p| p.enabled).unwrap_or(true)),
@@ -964,19 +976,31 @@ pub async fn update_settings(
     // (一个显式 mock、一个走真实 API),只看扁平字段就漏判了。
     let target = resolve_connector_target(candidate.active_connection(), &current_type);
     let target_changed = target != resolve_connector_target(old_active.as_ref(), &current_type);
+    // 接口方言变化同样要重建:只改「接口格式」而地址/密钥/模型逐字不变时,
+    // 若不判它,连接器会继续用旧方言解析到下次重启。
+    let old_style = old_active
+        .as_ref()
+        .map(|p| p.api_style.clone())
+        .unwrap_or_default();
+    let new_style = candidate
+        .active_connection()
+        .map(|p| p.api_style.clone())
+        .unwrap_or_else(|| API_STYLE_CHAT.to_string());
+    let style_changed = old_style != new_style;
     *state.settings.lock().unwrap_or_else(|e| e.into_inner()) = candidate.clone();
 
-    // Base URL / API Key / 模型 / 目标类型变更 → 重建连接器。
+    // Base URL / API Key / 模型 / 目标类型 / 接口方言变更 → 重建连接器。
     // 目标类型由默认连接解析(与启动装配同一个函数):显式 mock 用 mock、无可用连接用 mock、
     // 空配置保持 mock、其余 openai-compatible —— 否则用户填写的 API 设置永远不会生效
     // (模型列表始终只有 mock-demo)。
-    if connector_changed || model_changed || target_changed {
+    if connector_changed || model_changed || target_changed || style_changed {
         let (base_url, api_key, model) = (
             candidate.openai_base_url.clone(),
             candidate.openai_api_key.clone(),
             candidate.model.clone(),
         );
-        let new_connector = crate::connectors::build_connector(target, &base_url, &api_key, &model);
+        let new_connector =
+            crate::connectors::build_connector(target, &base_url, &api_key, &model, &new_style);
         *state.engine.connector.write().await = new_connector;
     }
 
@@ -1016,9 +1040,10 @@ pub async fn refresh_models(State(state): State<Arc<AppState>>) -> Json<serde_js
     let connector = state.engine.connector.read().await.clone();
     let models = connector.available_models().await;
     // openai-compatible 下若只拿到回退的 1 个当前模型,大概率是服务不支持 /models 接口
+    // 或 Base URL / 接口格式与真实端点不匹配(后者会让 /models 也 404/400)
     let message = if connector.type_name() == "openai-compatible" && models.len() <= 1 {
         Some(format!(
-            "API 未返回完整模型列表(该服务可能不支持 /models 接口);已保留当前模型「{}」",
+            "API 未返回完整模型列表(该服务可能不支持 /models 接口,或 Base URL 与接口格式不匹配);已保留当前模型「{}」",
             models.first().cloned().unwrap_or_default()
         ))
     } else {

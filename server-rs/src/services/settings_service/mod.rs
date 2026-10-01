@@ -22,8 +22,9 @@ mod params;
 mod secret;
 
 pub use connection::{
-    mask_key, normalize_base_url, resolve_connector_target, ConnectionProfile, CONNECTOR_TYPE_MOCK,
-    CONNECTOR_TYPE_OPENAI, DEFAULT_SEARCH_ENDPOINT, MAX_CONNECTIONS,
+    mask_key, normalize_base_url, resolve_connector_target, strip_endpoint_suffix,
+    ConnectionProfile, CONNECTOR_TYPE_MOCK, CONNECTOR_TYPE_OPENAI, DEFAULT_SEARCH_ENDPOINT,
+    MAX_CONNECTIONS,
 };
 pub use connector_pool::{connection_label, ConnectorPool};
 pub use params::{
@@ -385,6 +386,103 @@ mod tests {
         assert_eq!(normalize_base_url("   "), "");
     }
 
+    /// 端点后缀剥离(A 档,2026-10-01):用户在设置里粘贴的常是**完整端点 URL**
+    /// (控制台文档形态),连接器把 base 当目录再拼端点 —— 不剥离就会拼出
+    /// `…/chat/completions/models` 一类双段路径。真实事故:百炼 workspace 端点
+    /// 被整体粘入 → 模型列表静默回退成 1 个当前模型。
+    #[test]
+    fn strip_endpoint_suffix_covers_full_endpoint_paste() {
+        use crate::connectors::openai_compatible::{
+            API_STYLE_ANTHROPIC, API_STYLE_CHAT, API_STYLE_RESPONSES,
+        };
+        // 完整端点 + 方言推断
+        let (u, s) = strip_endpoint_suffix(
+            "https://ws-x.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions",
+        );
+        assert_eq!(
+            u,
+            "https://ws-x.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+        );
+        assert_eq!(s, Some(API_STYLE_CHAT));
+        // 尾部斜杠也要能匹配(trim 后再剥)
+        let (u, s) = strip_endpoint_suffix("https://api.example.com/v1/chat/completions/");
+        assert_eq!(u, "https://api.example.com/v1");
+        assert_eq!(s, Some(API_STYLE_CHAT));
+        // Responses / Anthropic(含 /v1/messages 先于 /messages 的顺序)
+        let (u, s) = strip_endpoint_suffix(
+            "https://ws-x.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/responses",
+        );
+        assert_eq!(
+            u,
+            "https://ws-x.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+        );
+        assert_eq!(s, Some(API_STYLE_RESPONSES));
+        let (u, s) = strip_endpoint_suffix("https://api.anthropic.com/v1/messages");
+        assert_eq!(u, "https://api.anthropic.com");
+        assert_eq!(s, Some(API_STYLE_ANTHROPIC));
+        let (u, s) = strip_endpoint_suffix(
+            "https://ws-x.aliyuncs.com/api/v2/apps/claude-code-proxy/v1/messages",
+        );
+        assert_eq!(u, "https://ws-x.aliyuncs.com/api/v2/apps/claude-code-proxy");
+        assert_eq!(s, Some(API_STYLE_ANTHROPIC));
+        // /models 也剥(仅剥地址,不改方言)
+        let (u, s) = strip_endpoint_suffix("https://api.example.com/v1/models");
+        assert_eq!(u, "https://api.example.com/v1");
+        assert_eq!(s, None);
+        // 正常 base 不动;去尾斜杠后原样返回
+        let (u, s) = strip_endpoint_suffix("https://api.deepseek.com/v1/");
+        assert_eq!(u, "https://api.deepseek.com/v1");
+        assert_eq!(s, None);
+        // 剥离后再走常规规范化(无路径补 /v1 等)
+        assert_eq!(
+            normalize_base_url("https://api.openai.com/v1/chat/completions"),
+            "https://api.openai.com/v1"
+        );
+        assert_eq!(
+            normalize_base_url("api.deepseek.com/chat/completions"),
+            "https://api.deepseek.com/v1"
+        );
+    }
+
+    /// 方言推断只填补默认档;显式非默认档不被覆盖;两轮 sanitize 幂等(2026-10-01 批次)。
+    #[test]
+    fn sanitize_infers_api_style_and_is_idempotent() {
+        use crate::connectors::openai_compatible::{
+            API_STYLE_ANTHROPIC, API_STYLE_CHAT, API_STYLE_RESPONSES,
+        };
+        let mut p = ConnectionProfile {
+            id: "c".to_string(),
+            name: "连接".to_string(),
+            connector_type: CONNECTOR_TYPE_OPENAI.to_string(),
+            base_url: "https://ws-x/compatible-mode/v1/responses".to_string(),
+            api_key: "sk".to_string(),
+            model: "m".to_string(),
+            api_style: String::new(),
+            enabled: true,
+        };
+        p.sanitize(0);
+        assert_eq!(p.base_url, "https://ws-x/compatible-mode/v1");
+        assert_eq!(p.api_style, API_STYLE_RESPONSES, "后缀推断应写入方言");
+        // 幂等:第二轮 base 已无后缀,方言保持
+        p.sanitize(0);
+        assert_eq!(p.api_style, API_STYLE_RESPONSES);
+        // 显式非默认档不被推断覆盖(URL 后缀与显式档冲突时,以显式档为准)
+        p.base_url = "https://api.anthropic.com/v1/messages".to_string();
+        p.api_style = API_STYLE_CHAT.to_string(); // chat 属默认档 → 会被推断改写
+        p.sanitize(0);
+        assert_eq!(p.api_style, API_STYLE_ANTHROPIC);
+        let mut q = ConnectionProfile {
+            api_style: API_STYLE_RESPONSES.to_string(),
+            ..p.clone()
+        };
+        q.base_url = "https://api.anthropic.com/v1/messages".to_string();
+        q.sanitize(0);
+        assert_eq!(
+            q.api_style, API_STYLE_RESPONSES,
+            "显式非默认档不被 URL 后缀推断覆盖"
+        );
+    }
+
     /// 临时数据目录(测试隔离用;作用域结束自动清理)
     fn tmp_dir(tag: &str) -> TempDataDir {
         TempDataDir::new(&format!("settings-test-{tag}"))
@@ -402,6 +500,7 @@ mod tests {
             base_url: "https://api.openai.com/v1".to_string(),
             api_key: String::new(),
             model: "m".to_string(),
+            api_style: crate::connectors::openai_compatible::API_STYLE_CHAT.to_string(),
             enabled: true,
         };
         // 只有地址(环境默认值即如此)→ 保持 mock,不切真实连接器

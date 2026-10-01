@@ -2,6 +2,10 @@
 // 多套连接配置(ConnectionProfile)的规范化与「默认连接 → 扁平字段」投影。
 use serde::{Deserialize, Serialize};
 
+use crate::connectors::openai_compatible::{
+    normalize_api_style, API_STYLE_ANTHROPIC, API_STYLE_CHAT, API_STYLE_RESPONSES,
+};
+
 use super::RuntimeSettings;
 
 /// 默认搜索端点(DuckDuckGo HTML 免费接口,无需 API Key)
@@ -34,8 +38,46 @@ pub struct ConnectionProfile {
     /// API Key:内存明文 / 落盘密文(与 openai_api_key 同策略,见 secret.rs)
     pub api_key: String,
     pub model: String,
+    /// 接口方言(取值域 `chat-completions` | `responses` | `anthropic`,定义见
+    /// `connectors::openai_compatible`)。旧 settings.json 无此键 → 默认 chat-completions
+    /// (既有行为);粘贴带端点后缀的 URL 时在 sanitize 里按后缀推断(见 `strip_endpoint_suffix`)。
+    #[serde(default = "default_api_style")]
+    pub api_style: String,
     /// 停用的连接保留配置但不再是默认连接的候选,也不出现在后续批次的节点选择器里
     pub enabled: bool,
+}
+
+fn default_api_style() -> String {
+    API_STYLE_CHAT.to_string()
+}
+
+/// 已知端点后缀 → (剥离后的地址, 推断出的方言;`None` = 不改变方言)。
+/// 用户在设置里粘贴的往往是**完整端点**(控制台文档的形态),而连接器会把 base 当
+/// 目录再拼端点——不剥离就会拼出 `…/chat/completions/models` 一类双段路径(404/400)。
+/// 只精确匹配这些固定尾段;剥离后由 `normalize_base_url` 继续补 /v1 等常规规范化。
+/// 顺序敏感:`/chat/completions` 必须先于 `/completions`、`/v1/messages` 先于 `/messages`。
+pub fn strip_endpoint_suffix(url: &str) -> (String, Option<&'static str>) {
+    const SUFFIXES: [(&str, Option<&str>); 6] = [
+        ("/chat/completions", Some(API_STYLE_CHAT)),
+        ("/completions", Some(API_STYLE_CHAT)),
+        ("/responses", Some(API_STYLE_RESPONSES)),
+        ("/v1/messages", Some(API_STYLE_ANTHROPIC)),
+        ("/messages", Some(API_STYLE_ANTHROPIC)),
+        // 只剥 /models(保留 /v1),使 base 仍以 /v1 结尾、各方言端点拼接规则不变
+        ("/models", None),
+    ];
+    let trimmed = url.trim().trim_end_matches('/');
+    for (suffix, style) in SUFFIXES {
+        if let Some(stripped) = trimmed.strip_suffix(suffix) {
+            // 防误伤空主机:https://host/chat/completions 剥到 https://host 是正确形态;
+            // 但若剥离结果只剩协议头(异常输入)则放弃剥离
+            if stripped.ends_with("://") {
+                continue;
+            }
+            return (stripped.to_string(), style);
+        }
+    }
+    (trimmed.to_string(), None)
 }
 
 impl ConnectionProfile {
@@ -48,14 +90,23 @@ impl ConnectionProfile {
         !self.api_key.is_empty()
     }
 
-    /// 卫生清理(load 与 PUT 共用):trim、URL 规范化、类型回退、空名补默认名、超长截断。
+    /// 卫生清理(load 与 PUT 共用):trim、URL 规范化(含端点后缀剥离)、类型回退、
+    /// 方言推断与回退、空名补默认名、超长截断。
     pub fn sanitize(&mut self, index: usize) {
         self.name = truncate_chars(self.name.trim(), MAX_NAME_CHARS);
         if self.name.is_empty() {
             self.name = format!("连接 {}", index + 1);
         }
         self.connector_type = normalize_connector_type(&self.connector_type);
-        self.base_url = truncate_chars(&normalize_base_url(&self.base_url), MAX_BASE_URL_CHARS);
+        let (stripped, inferred) = strip_endpoint_suffix(&self.base_url);
+        self.base_url = truncate_chars(&normalize_base_url(&stripped), MAX_BASE_URL_CHARS);
+        // 方言:非法值回退默认;后缀推断只填补默认档——显式选择的非默认档不被覆盖
+        // (想用非默认档又不想被推断改写的场景:把 URL 的清到尾段即可,推断是幂等的)
+        let current = normalize_api_style(&self.api_style);
+        self.api_style = match inferred {
+            Some(s) if current == API_STYLE_CHAT => s.to_string(),
+            _ => current.to_string(),
+        };
         self.model = truncate_chars(self.model.trim(), MAX_MODEL_CHARS);
     }
 }
@@ -123,6 +174,7 @@ impl RuntimeSettings {
             base_url: self.openai_base_url.clone(),
             api_key: self.openai_api_key.clone(),
             model: self.model.clone(),
+            api_style: default_api_style(),
             enabled: true,
         });
         self.active_connection_id = Some(DEFAULT_CONNECTION_ID.to_string());
@@ -193,6 +245,7 @@ impl RuntimeSettings {
                     base_url: String::new(),
                     api_key: String::new(),
                     model: String::new(),
+                    api_style: default_api_style(),
                     enabled: true,
                 });
                 self.active_connection_id = Some(id);
@@ -222,11 +275,13 @@ pub fn mask_key(key: &str) -> String {
 }
 
 /// 规范化 OpenAI 兼容 API 地址(自动补全格式):
-/// - 去空白与尾部斜杠
+/// - 先去空白与端点后缀(`strip_endpoint_suffix`:用户粘贴的完整端点 URL 会被剥回 base)
+/// - 去尾部斜杠
 /// - 无协议时补协议:本机地址(localhost/127.x/0.0.0.0/[::1])补 http://,其余补 https://
 /// - 无路径时补 `/v1`(OpenAI 兼容服务普遍要求 /v1,缺它请求 /models 会 404)
 pub fn normalize_base_url(input: &str) -> String {
-    let mut s = input.trim().to_string();
+    let (stripped, _) = strip_endpoint_suffix(input);
+    let mut s = stripped;
     if s.is_empty() {
         return s;
     }

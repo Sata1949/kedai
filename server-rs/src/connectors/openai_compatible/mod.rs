@@ -1,19 +1,67 @@
 // OpenAI 兼容连接器(与 Node 版 connectors/openai-compatible.ts 对齐)
 // 重试助手在 retry.rs;SSE 解析在 sse_parser.rs;单测在 tests.rs。
+// 三方言(chat-completions / responses / anthropic)共用本连接器的重试、看门狗与
+// 错误分类边界;差异面只有:端点路径、请求体映射、鉴权头、流式事件解析。
+mod anthropic_parser;
+mod responses_parser;
 mod retry;
 mod sse_parser;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_dialects;
+mod tool_accum;
 
 use crate::models::llm_error::{LlmError, TransportFailure};
 use crate::models::types::{GenerationParams, LlmMessage, LlmStreamChunk};
+use anthropic_parser::AnthropicParser;
 use futures::StreamExt;
 use reqwest::Client;
+use responses_parser::ResponsesParser;
 use retry::{log_retry, notify_retry, retry_delay, wait_retry, MAX_ATTEMPTS};
 use serde_json::{json, Value};
 use sse_parser::SseParser;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
+
+/// 接口方言取值(settings 层 `ConnectionProfile.api_style` 的线格式,serde 字符串):
+/// - `chat-completions`:OpenAI Chat Completions(既有默认,`{base}/chat/completions`);
+/// - `responses`:OpenAI Responses(`{base}/responses`);
+/// - `anthropic`:Anthropic Messages(`{base}/v1/messages`,base 已以 /v1 结尾时用 `{base}/messages`)。
+pub const API_STYLE_CHAT: &str = "chat-completions";
+pub const API_STYLE_RESPONSES: &str = "responses";
+pub const API_STYLE_ANTHROPIC: &str = "anthropic";
+
+/// 方言枚举(解析口径与 `normalize_connector_type` 同纪律:未知值回退默认档,不报错)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApiStyle {
+    ChatCompletions,
+    Responses,
+    Anthropic,
+}
+
+impl ApiStyle {
+    pub fn from_str_lossy(s: &str) -> Self {
+        match s.trim() {
+            API_STYLE_RESPONSES => ApiStyle::Responses,
+            API_STYLE_ANTHROPIC => ApiStyle::Anthropic,
+            _ => ApiStyle::ChatCompletions,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ApiStyle::ChatCompletions => API_STYLE_CHAT,
+            ApiStyle::Responses => API_STYLE_RESPONSES,
+            ApiStyle::Anthropic => API_STYLE_ANTHROPIC,
+        }
+    }
+}
+
+/// settings 字段规范化(空/未知回退 chat-completions;与 TS 侧取值域一一对应)
+pub fn normalize_api_style(s: &str) -> &'static str {
+    ApiStyle::from_str_lossy(s).as_str()
+}
 
 /// 连接/响应头阶段超时(SSE 流开始前;流开始后读取不受此限制)
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -63,15 +111,22 @@ pub struct OpenAiCompatibleConnector {
     base_url: String,
     api_key: String,
     model: String,
+    style: ApiStyle,
     client: Client,
 }
 
 impl OpenAiCompatibleConnector {
+    /// 默认 Chat Completions 方言(既有构造口径;新增方言走 `new_with_style`)
     pub fn new(base_url: &str, api_key: &str, model: &str) -> Self {
+        Self::new_with_style(base_url, api_key, model, ApiStyle::ChatCompletions)
+    }
+
+    pub fn new_with_style(base_url: &str, api_key: &str, model: &str, style: ApiStyle) -> Self {
         OpenAiCompatibleConnector {
             base_url: base_url.to_string(),
             api_key: api_key.to_string(),
             model: model.to_string(),
+            style,
             client: make_client(),
         }
     }
@@ -81,26 +136,61 @@ impl OpenAiCompatibleConnector {
         &self.model
     }
 
-    /// 切换模型(保留 base_url / api_key)
+    /// 当前接口方言
+    pub fn style(&self) -> ApiStyle {
+        self.style
+    }
+
+    /// 切换模型(保留 base_url / api_key / 方言)
     pub fn with_model(&self, model: &str) -> Self {
         OpenAiCompatibleConnector {
             base_url: self.base_url.clone(),
             api_key: self.api_key.clone(),
             model: model.to_string(),
+            style: self.style,
             client: make_client(),
         }
     }
 
+    /// 鉴权头。Chat / Responses 用 Bearer;Anthropic 官方用 `x-api-key` + `anthropic-version`,
+    /// 兼容网关(百炼 claude-code-proxy 等)两种都收——故三者一齐携带,任一网关放行即可。
     fn auth_headers(&self) -> reqwest::header::HeaderMap {
         let mut h = reqwest::header::HeaderMap::new();
-        if !self.api_key.is_empty() {
-            if let Ok(v) =
-                reqwest::header::HeaderValue::from_str(&format!("Bearer {}", self.api_key))
-            {
-                h.insert(reqwest::header::AUTHORIZATION, v);
+        if self.api_key.is_empty() {
+            return h;
+        }
+        if self.style == ApiStyle::Anthropic {
+            if let Ok(v) = reqwest::header::HeaderValue::from_str(&self.api_key) {
+                h.insert("x-api-key", v);
             }
+            h.insert(
+                "anthropic-version",
+                reqwest::header::HeaderValue::from_static("2023-06-01"),
+            );
+        }
+        if let Ok(v) = reqwest::header::HeaderValue::from_str(&format!("Bearer {}", self.api_key)) {
+            h.insert(reqwest::header::AUTHORIZATION, v);
         }
         h
+    }
+
+    /// 各方言的生成端点路径(base 由 settings 层规范化,保证无路径时已补 /v1):
+    /// - chat:`{base}/chat/completions`(既有口径);
+    /// - responses:`{base}/responses`;
+    /// - anthropic:`{base}/v1/messages`;base 已以 `/v1` 结尾时用 `{base}/messages`
+    ///   (官方 Anthropic SDK 的 base 约定是不含 /v1,而用户手填的官方地址常是 …/v1)。
+    fn generate_url(&self) -> String {
+        match self.style {
+            ApiStyle::ChatCompletions => format!("{}/chat/completions", self.base_url),
+            ApiStyle::Responses => format!("{}/responses", self.base_url),
+            ApiStyle::Anthropic => {
+                if self.base_url.ends_with("/v1") {
+                    format!("{}/messages", self.base_url)
+                } else {
+                    format!("{}/v1/messages", self.base_url)
+                }
+            }
+        }
     }
 
     /// 拉取模型列表;失败或格式不符时回退当前模型(不致命)。
@@ -230,64 +320,14 @@ impl OpenAiCompatibleConnector {
         mut abort: watch::Receiver<bool>,
         tx: mpsc::UnboundedSender<LlmStreamChunk>,
     ) -> Result<(), LlmError> {
-        let url = format!("{}/chat/completions", self.base_url);
+        let url = self.generate_url();
         let tool_names: Vec<Value> = params
             .tools
             .iter()
             .map(|tool| Value::String(tool.name.clone()))
             .collect();
-        tracing::info!(mode = "stream", model = self.model.clone(), provider_host = provider_host(&self.base_url), step = "generate", tool_names = %crate::utils::logging::JsonField(serde_json::Value::Array(tool_names)), tool_count = params.tools.len(), tool_choice = format!("{:?}", params.tool_choice), "provider_round_start");
-        let mut body = json!({
-            "model": self.model,
-            "messages": to_openai_messages(messages),
-            "stream": true,
-            "temperature": params.temperature,
-            "top_p": params.top_p,
-            "max_tokens": params.max_tokens,
-            // 让上游在流末尾下发 usage(OpenAI 需要;DeepSeek 默认下发,重复声明无副作用)。
-            // 无此字段时部分提供商流式不返回 usage,任务模式诊断/落库将拿不到 token 数
-            "stream_options": { "include_usage": true },
-        });
-        if let Some(stop) = &params.stop {
-            if !stop.is_empty() {
-                body["stop"] = json!(stop);
-            }
-        }
-        if !params.tools.is_empty() {
-            // OpenAI function calling 标准格式:{"type":"function","function":{name,description,parameters}}
-            // 部分兼容后端严格要求 type 字段,缺省会 400
-            body["tools"] = Value::Array(
-                params
-                    .tools
-                    .iter()
-                    .map(|t| {
-                        json!({
-                            "type": "function",
-                            "function": {
-                                "name": t.name,
-                                "description": t.description,
-                                "parameters": t.parameters,
-                            }
-                        })
-                    })
-                    .collect(),
-            );
-            // tool_choice:按 GenerationParams 策略序列化(默认 auto,保持原行为);
-            // 支持 none(禁止调用)/ required(强制调用至少一个)/ function(name)(指定工具)
-            body["tool_choice"] = match &params.tool_choice {
-                crate::models::types::ToolChoice::Auto => Value::from("auto"),
-                crate::models::types::ToolChoice::None => Value::from("none"),
-                crate::models::types::ToolChoice::Required => Value::from("required"),
-                crate::models::types::ToolChoice::Function(name) => json!({
-                    "type": "function",
-                    "function": { "name": name }
-                }),
-            };
-            // 并行工具调用开关:仅在显式指定时下发(缺省让后端自行决定)
-            if let Some(parallel) = params.parallel_tool_calls {
-                body["parallel_tool_calls"] = Value::from(parallel);
-            }
-        }
+        tracing::info!(mode = "stream", model = self.model.clone(), style = self.style.as_str(), provider_host = provider_host(&self.base_url), step = "generate", tool_names = %crate::utils::logging::JsonField(serde_json::Value::Array(tool_names)), tool_count = params.tools.len(), tool_choice = format!("{:?}", params.tool_choice), "provider_round_start");
+        let body = self.build_request_body(messages, &params);
 
         // 请求 + 读响应头阶段:可重试。一旦进入 SSE 读取阶段(收到首个字节)即不再重试。
         let mut attempt = 0usize;
@@ -360,7 +400,317 @@ impl OpenAiCompatibleConnector {
         };
 
         // 流读取收口到独立函数(便于用合成流 + 毫秒级空闲阈值单测,不必真等 120s)
-        read_sse_stream(resp.bytes_stream(), abort, tx, STREAM_IDLE_TIMEOUT).await
+        let parser = match self.style {
+            ApiStyle::ChatCompletions => StreamParser::Chat(SseParser::default()),
+            ApiStyle::Responses => StreamParser::Responses(ResponsesParser::default()),
+            ApiStyle::Anthropic => StreamParser::Anthropic(AnthropicParser::default()),
+        };
+        read_sse_stream(resp.bytes_stream(), abort, tx, STREAM_IDLE_TIMEOUT, parser).await
+    }
+
+    /// 按方言构建请求体(chat / responses / anthropic 的映射差异全部收口在此)
+    fn build_request_body(&self, messages: &[LlmMessage], params: &GenerationParams) -> Value {
+        match self.style {
+            ApiStyle::ChatCompletions => build_chat_body(&self.model, messages, params),
+            ApiStyle::Responses => build_responses_body(&self.model, messages, params),
+            ApiStyle::Anthropic => build_anthropic_body(&self.model, messages, params),
+        }
+    }
+}
+
+/// chat-completions 请求体(自 generate_stream 原样提取,行为逐字节不变)
+fn build_chat_body(model: &str, messages: &[LlmMessage], params: &GenerationParams) -> Value {
+    let mut body = json!({
+        "model": model,
+        "messages": to_openai_messages(messages),
+        "stream": true,
+        "temperature": params.temperature,
+        "top_p": params.top_p,
+        "max_tokens": params.max_tokens,
+        // 让上游在流末尾下发 usage(OpenAI 需要;DeepSeek 默认下发,重复声明无副作用)。
+        // 无此字段时部分提供商流式不返回 usage,任务模式诊断/落库将拿不到 token 数
+        "stream_options": { "include_usage": true },
+    });
+    if let Some(stop) = &params.stop {
+        if !stop.is_empty() {
+            body["stop"] = json!(stop);
+        }
+    }
+    if !params.tools.is_empty() {
+        // OpenAI function calling 标准格式:{"type":"function","function":{name,description,parameters}}
+        // 部分兼容后端严格要求 type 字段,缺省会 400
+        body["tools"] = Value::Array(
+            params
+                .tools
+                .iter()
+                .map(|t| {
+                    json!({
+                        "type": "function",
+                        "function": {
+                            "name": t.name,
+                            "description": t.description,
+                            "parameters": t.parameters,
+                        }
+                    })
+                })
+                .collect(),
+        );
+        // tool_choice:按 GenerationParams 策略序列化(默认 auto,保持原行为);
+        // 支持 none(禁止调用)/ required(强制调用至少一个)/ function(name)(指定工具)
+        body["tool_choice"] = match &params.tool_choice {
+            crate::models::types::ToolChoice::Auto => Value::from("auto"),
+            crate::models::types::ToolChoice::None => Value::from("none"),
+            crate::models::types::ToolChoice::Required => Value::from("required"),
+            crate::models::types::ToolChoice::Function(name) => json!({
+                "type": "function",
+                "function": { "name": name }
+            }),
+        };
+        // 并行工具调用开关:仅在显式指定时下发(缺省让后端自行决定)
+        if let Some(parallel) = params.parallel_tool_calls {
+            body["parallel_tool_calls"] = Value::from(parallel);
+        }
+    }
+    body
+}
+
+/// responses 请求体映射:
+/// - system 消息 → 顶层 `instructions`(多条以空行拼接;Responses 无 system 角色输入项);
+/// - user/assistant 文本 → `{role, content}` 输入项;assistant 的工具调用 → `function_call`
+///   输入项(带 call_id);tool 结果 → `function_call_output`(带 call_id);
+/// - tools 为扁平格式 `{type:"function", name, description, parameters}`(无嵌套 function);
+/// - `max_tokens` → `max_output_tokens`;
+/// - **不下发 stop**:Responses 契约无停用序列参数。
+fn build_responses_body(model: &str, messages: &[LlmMessage], params: &GenerationParams) -> Value {
+    let mut instructions: Vec<String> = Vec::new();
+    let mut input: Vec<Value> = Vec::new();
+    for m in messages {
+        match m.role.as_str() {
+            "system" => {
+                if !m.content.is_empty() {
+                    instructions.push(m.content.clone());
+                }
+            }
+            "tool" => input.push(json!({
+                "type": "function_call_output",
+                "call_id": m.tool_call_id.clone().unwrap_or_default(),
+                "output": m.content,
+            })),
+            "assistant" => {
+                if !m.content.is_empty() {
+                    input.push(json!({ "role": "assistant", "content": m.content }));
+                }
+                if let Some(calls) = &m.tool_calls {
+                    for c in calls {
+                        input.push(json!({
+                            "type": "function_call",
+                            "call_id": c.id,
+                            "name": c.name,
+                            "arguments": c.arguments,
+                        }));
+                    }
+                }
+            }
+            _ => input.push(json!({ "role": "user", "content": m.content })),
+        }
+    }
+    let mut body = json!({
+        "model": model,
+        "input": input,
+        "stream": true,
+        "temperature": params.temperature,
+        "top_p": params.top_p,
+        "max_output_tokens": params.max_tokens,
+    });
+    if !instructions.is_empty() {
+        body["instructions"] = Value::String(instructions.join("\n\n"));
+    }
+    if !params.tools.is_empty() {
+        body["tools"] = Value::Array(
+            params
+                .tools
+                .iter()
+                .map(|t| {
+                    json!({
+                        "type": "function",
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters,
+                    })
+                })
+                .collect(),
+        );
+        body["tool_choice"] = match &params.tool_choice {
+            crate::models::types::ToolChoice::Auto => Value::from("auto"),
+            crate::models::types::ToolChoice::None => Value::from("none"),
+            crate::models::types::ToolChoice::Required => Value::from("required"),
+            crate::models::types::ToolChoice::Function(name) => json!({
+                "type": "function",
+                "name": name
+            }),
+        };
+        if let Some(parallel) = params.parallel_tool_calls {
+            body["parallel_tool_calls"] = Value::from(parallel);
+        }
+    }
+    body
+}
+
+/// anthropic 请求体映射:
+/// - system 消息 → 顶层 `system`(字符串,多条空行拼接;Anthropic 无 system 角色消息);
+/// - tool 结果 → user 消息的 `tool_result` 块,**连续多条合并进同一条 user 消息**
+///   (Anthropic 要求 user/assistant 交替,多个结果必须是同一消息的多个块);
+/// - assistant 工具调用 → `tool_use` 块(input 为解析后的 JSON 对象);
+/// - 连续的同角色纯文本消息合并(避免角色不交替被 400);
+/// - `max_tokens` 必填;temperature 钳制到官方区间 0..=1(超界时向合法值收敛,不静默丢弃);
+/// - stop → `stop_sequences`;tools 为 `{name, description, input_schema}`;
+/// - tool_choice:none 档 Anthropic 无对应表达 → **不下发 tools**(模型无从调用,语义等价);
+/// - reasoning_content 不回传(Anthropic thinking 块需签名,原样拼接必被 400)。
+fn build_anthropic_body(model: &str, messages: &[LlmMessage], params: &GenerationParams) -> Value {
+    let mut system_parts: Vec<String> = Vec::new();
+    let mut out: Vec<Value> = Vec::new();
+    let mut pending_tool_results: Vec<Value> = Vec::new();
+
+    fn flush_tool_results(out: &mut Vec<Value>, pending: &mut Vec<Value>) {
+        if !pending.is_empty() {
+            out.push(json!({ "role": "user", "content": Value::Array(std::mem::take(pending)) }));
+        }
+    }
+
+    for m in messages {
+        if m.role == "tool" {
+            pending_tool_results.push(json!({
+                "type": "tool_result",
+                "tool_use_id": m.tool_call_id.clone().unwrap_or_default(),
+                "content": m.content,
+            }));
+            continue;
+        }
+        flush_tool_results(&mut out, &mut pending_tool_results);
+        match m.role.as_str() {
+            "system" => {
+                if !m.content.is_empty() {
+                    system_parts.push(m.content.clone());
+                }
+            }
+            "assistant" => {
+                let mut blocks: Vec<Value> = Vec::new();
+                if !m.content.is_empty() {
+                    blocks.push(json!({ "type": "text", "text": m.content }));
+                }
+                if let Some(calls) = &m.tool_calls {
+                    for c in calls {
+                        blocks.push(json!({
+                            "type": "tool_use",
+                            "id": c.id,
+                            "name": c.name,
+                            "input": serde_json::from_str::<Value>(&c.arguments)
+                                .unwrap_or_else(|_| json!({})),
+                        }));
+                    }
+                }
+                if !blocks.is_empty() {
+                    out.push(json!({ "role": "assistant", "content": blocks }));
+                }
+            }
+            _ => {
+                // 连续同角色消息合并(Anthropic 要求 user/assistant 交替,连发两条
+                // user 会被 400):纯文本并入文本;tool_result 块消息后跟文本时,
+                // 文本并作同一 user 消息的 text 块(块数组本就允许多块混排)
+                if let Some(last) = out.last_mut() {
+                    if last.get("role").and_then(Value::as_str) == Some("user") {
+                        match last.get_mut("content") {
+                            Some(Value::String(s)) => {
+                                *s = format!("{s}\n\n{}", m.content);
+                                continue;
+                            }
+                            Some(Value::Array(blocks)) => {
+                                blocks.push(json!({ "type": "text", "text": m.content }));
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                out.push(json!({ "role": "user", "content": m.content }));
+            }
+        }
+    }
+    flush_tool_results(&mut out, &mut pending_tool_results);
+
+    let mut body = json!({
+        "model": model,
+        "messages": out,
+        "stream": true,
+        "max_tokens": params.max_tokens.max(1),
+        "temperature": params.temperature.clamp(0.0, 1.0),
+        "top_p": params.top_p,
+    });
+    if !system_parts.is_empty() {
+        body["system"] = Value::String(system_parts.join("\n\n"));
+    }
+    if let Some(stop) = &params.stop {
+        if !stop.is_empty() {
+            body["stop_sequences"] = json!(stop);
+        }
+    }
+    if !params.tools.is_empty() && params.tool_choice != crate::models::types::ToolChoice::None {
+        body["tools"] = Value::Array(
+            params
+                .tools
+                .iter()
+                .map(|t| {
+                    json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "input_schema": t.parameters,
+                    })
+                })
+                .collect(),
+        );
+        body["tool_choice"] = match &params.tool_choice {
+            crate::models::types::ToolChoice::Auto => json!({ "type": "auto" }),
+            crate::models::types::ToolChoice::None => json!({ "type": "auto" }),
+            crate::models::types::ToolChoice::Required => json!({ "type": "any" }),
+            crate::models::types::ToolChoice::Function(name) => {
+                json!({ "type": "tool", "name": name })
+            }
+        };
+    }
+    body
+}
+
+/// 三方言解析器统一门面(读取循环与空闲看门狗只依赖 push/finish/is_done 三件事)。
+/// 与 `read_sse_stream` 同为模块内私有(crate 内无其它调用者),可见性对齐避免告警。
+enum StreamParser {
+    Chat(SseParser),
+    Responses(ResponsesParser),
+    Anthropic(AnthropicParser),
+}
+
+impl StreamParser {
+    fn push(&mut self, bytes: &[u8], out: &mut Vec<LlmStreamChunk>) -> Result<usize, LlmError> {
+        match self {
+            StreamParser::Chat(p) => p.push(bytes, out),
+            StreamParser::Responses(p) => p.push(bytes, out),
+            StreamParser::Anthropic(p) => p.push(bytes, out),
+        }
+    }
+
+    fn finish(&mut self, out: &mut Vec<LlmStreamChunk>) -> Result<(), LlmError> {
+        match self {
+            StreamParser::Chat(p) => p.finish(out),
+            StreamParser::Responses(p) => p.finish(out),
+            StreamParser::Anthropic(p) => p.finish(out),
+        }
+    }
+
+    fn is_done(&self) -> bool {
+        match self {
+            StreamParser::Chat(p) => p.is_done(),
+            StreamParser::Responses(p) => p.is_done(),
+            StreamParser::Anthropic(p) => p.is_done(),
+        }
     }
 }
 
@@ -374,11 +724,12 @@ impl OpenAiCompatibleConnector {
 /// `abort` 优先于读取(`biased`):用户停止时立即返回,不被上游的连续字节拖住。
 /// 不用 `Sleep::reset`:经 Pin 包装 reset 在 select 循环中会立即完成(已实测踩坑),
 /// 故改为每轮按「剩余额度」新建 sleep。
-pub(super) async fn read_sse_stream<S, B, E>(
+async fn read_sse_stream<S, B, E>(
     stream: S,
     mut abort: watch::Receiver<bool>,
     tx: mpsc::UnboundedSender<LlmStreamChunk>,
     idle_timeout: Duration,
+    mut parser: StreamParser,
 ) -> Result<(), LlmError>
 where
     S: futures::Stream<Item = Result<B, E>>,
@@ -387,7 +738,6 @@ where
 {
     // 就地 pin:不为调用方附加 Unpin 约束(组合流如 then/chain 常非 Unpin)
     tokio::pin!(stream);
-    let mut parser = SseParser::default();
     // 最近一次「有效数据事件」的时刻;空闲计时以它为基准
     let mut last_progress = std::time::Instant::now();
     loop {

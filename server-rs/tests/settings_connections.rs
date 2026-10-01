@@ -271,3 +271,108 @@ async fn put_rejects_too_many_connections() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["connections"].as_array().unwrap().len(), 1);
 }
+
+/// 接口方言批次(2026-10-01):api_style 落盘/回读;粘贴完整端点 URL 时剥离后缀并推断方言;
+/// 显式非默认档不被覆盖;缺省 = 沿用已有值(旧客户端写入不丢方言)
+#[tokio::test]
+async fn api_style_roundtrip_infers_from_url_suffix() {
+    let _guard = test_lock().await;
+    let app = test_app();
+    reset_to_baseline(app).await;
+
+    // 1) 粘贴完整端点(百炼形态)不带 api_style → 剥离后缀并推断 responses
+    let (status, body, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({"connections": [{
+            "name": "百炼", "connector_type": "openai-compatible",
+            "base_url": "https://ws-x.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/responses",
+            "api_key": "sk-x-9999", "model": "m", "enabled": true
+        }]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    let settings = settings_body(&body);
+    let conns = settings["connections"].as_array().unwrap();
+    assert_eq!(
+        conns[0]["base_url"], "https://ws-x.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+        "完整端点 URL 应剥离 /responses 后缀"
+    );
+    assert_eq!(conns[0]["api_style"], "responses", "应由后缀推断方言");
+
+    // 2) GET 回读一致(落盘 → 读入 往返不漂移)
+    let (status, body, _) = send_json(app, "GET", "/api/settings", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let conns = body["connections"].as_array().unwrap().clone();
+    assert_eq!(conns[0]["api_style"], "responses");
+    assert_eq!(
+        conns[0]["base_url"],
+        "https://ws-x.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+    );
+
+    // 3) 显式选择非默认档(anthropic)+ 普通 base → 保持;无路径 base 照常补 /v1
+    let id = conns[0]["id"].as_str().unwrap().to_string();
+    let (status, body, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({"connections": [{
+            "id": id, "name": "官方", "connector_type": "openai-compatible",
+            "base_url": "https://api.anthropic.com", "api_key": "",
+            "model": "claude-x", "api_style": "anthropic", "enabled": true
+        }]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    let conns = settings_body(&body)["connections"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(conns[0]["base_url"], "https://api.anthropic.com/v1");
+    assert_eq!(conns[0]["api_style"], "anthropic");
+
+    // 4) 显式 chat 档(默认档)+ 带后缀 URL → 后缀推断覆盖默认档(文档口径:只改写默认档)
+    let (status, body, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({"connections": [{
+            "id": id, "name": "官方", "connector_type": "openai-compatible",
+            "base_url": "https://api.anthropic.com/v1/messages", "api_key": "",
+            "model": "claude-x", "api_style": "chat-completions", "enabled": true
+        }]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    let conns = settings_body(&body)["connections"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(conns[0]["base_url"], "https://api.anthropic.com/v1");
+    assert_eq!(
+        conns[0]["api_style"], "anthropic",
+        "chat 属默认档,应被后缀推断改写"
+    );
+
+    // 5) 缺省 api_style = 沿用已有值(旧客户端不认识该键,写入不丢方言)
+    let (status, body, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({"connections": [{
+            "id": id, "name": "官方改名", "connector_type": "openai-compatible",
+            "base_url": "https://api.anthropic.com", "model": "claude-x", "enabled": true
+        }]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    let conns = settings_body(&body)["connections"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        conns[0]["api_style"], "anthropic",
+        "缺省 api_style = 沿用已有值"
+    );
+}

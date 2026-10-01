@@ -172,11 +172,21 @@ impl AppState {
             loaded_settings.active_connection(),
             &config.connector,
         );
+        // 接口方言随默认连接(与 PUT 重建同一来源);无可用连接时用默认档
+        let api_style = loaded_settings
+            .active_connection()
+            .map(|p| p.api_style.clone())
+            .unwrap_or_else(|| crate::connectors::openai_compatible::API_STYLE_CHAT.to_string());
         let settings = Arc::new(Mutex::new(loaded_settings));
         // 记忆服务接入运行期设置(淘汰容量/字符预算阈值来源;OnceLock 幂等注入)
         memory.attach_settings(settings.clone());
-        let connector =
-            crate::connectors::build_connector(connector_type, &base_url, &api_key, &initial_model);
+        let connector = crate::connectors::build_connector(
+            connector_type,
+            &base_url,
+            &api_key,
+            &initial_model,
+            &api_style,
+        );
         let connector = Arc::new(RwLock::new(connector));
 
         // 工具注册(calculator / memory / agent 强化工具集)

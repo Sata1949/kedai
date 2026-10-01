@@ -61,6 +61,7 @@ impl ConnectorPool {
             &profile.base_url,
             &profile.api_key,
             &profile.model,
+            &profile.api_style,
         );
         if cache.len() >= MAX_CACHED {
             cache.clear();
@@ -76,12 +77,12 @@ impl ConnectorPool {
     }
 }
 
-/// 连接配置指纹:只含连接器构建真正消费的四个字段。
+/// 连接配置指纹:只含连接器构建真正消费的五个字段(类型/地址/密钥/模型/接口方言)。
 /// 不含 `name`/`enabled`/`id` —— 改名与启停不该导致重建(id 本就是缓存键)。
 fn fingerprint_of(p: &ConnectionProfile) -> String {
     format!(
-        "{}\u{1}{}\u{1}{}\u{1}{}",
-        p.connector_type, p.base_url, p.api_key, p.model
+        "{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}",
+        p.connector_type, p.base_url, p.api_key, p.model, p.api_style
     )
 }
 
@@ -107,6 +108,7 @@ mod tests {
             base_url: "https://api.example.com/v1".to_string(),
             api_key: "sk-test".to_string(),
             model: "model-a".to_string(),
+            api_style: crate::connectors::openai_compatible::API_STYLE_CHAT.to_string(),
             enabled: true,
         }
     }
@@ -134,6 +136,24 @@ mod tests {
         // 类型改成 mock:模型名回落到连接器固定值,证明走的是重建而不是缓存
         p.connector_type = CONNECTOR_TYPE_MOCK.to_string();
         assert_eq!(pool.connector_for(&p).type_name(), "mock");
+    }
+
+    /// 接口方言进指纹:方言变化必须重建(只改「接口格式」而地址/密钥/模型逐字不变时,
+    /// 若不进指纹,连接器会继续用旧方言解析到下次重启)
+    #[test]
+    fn api_style_change_rebuilds_connector() {
+        use crate::connectors::openai_compatible::API_STYLE_ANTHROPIC;
+        let pool = ConnectorPool::new();
+        let mut p = profile("a");
+        pool.connector_for(&p);
+        let fingerprint_before = pool.cache.lock().unwrap()["a"].fingerprint.clone();
+        p.api_style = API_STYLE_ANTHROPIC.to_string();
+        pool.connector_for(&p);
+        assert_ne!(
+            pool.cache.lock().unwrap()["a"].fingerprint,
+            fingerprint_before,
+            "方言变更应使指纹变化(触发重建)"
+        );
     }
 
     /// 改名与启停不触发重建(指纹只含连接器构建消费的四字段)

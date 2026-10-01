@@ -457,6 +457,7 @@ mod tests {
             base_url: format!("https://{id}.example/v1"),
             api_key: key.to_string(),
             model: "m".to_string(),
+            api_style: crate::connectors::openai_compatible::API_STYLE_CHAT.to_string(),
             enabled: true,
         }
     }
@@ -659,6 +660,7 @@ mod tests {
                 base_url: "127.0.0.1:1234".to_string(),
                 api_key: String::new(),
                 model: "m".repeat(250),
+                api_style: String::new(),
                 enabled: true,
             },
             profile("dup", ""),

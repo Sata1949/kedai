@@ -254,7 +254,8 @@ fn sse_parser_emits_finish_chunk() {
 }
 
 /// 启动一个模拟上游:捕获请求体后返回固定 SSE 流;返回 (base_url, body 持有者)
-async fn capture_request_server() -> (String, Arc<std::sync::Mutex<Option<String>>>) {
+/// (pub(super):同目录 tests_dialects.rs 也用它)
+pub(super) async fn capture_request_server() -> (String, Arc<std::sync::Mutex<Option<String>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let holder = Arc::new(std::sync::Mutex::new(None::<String>));
@@ -626,9 +627,15 @@ async fn heartbeat_only_stream_times_out_instead_of_hanging() {
     let (tx, mut rx) = mpsc::unbounded_channel();
 
     let started = tokio::time::Instant::now();
-    let err = read_sse_stream(heartbeats, abort_rx, tx, StdDuration::from_millis(300))
-        .await
-        .expect_err("只发注释心跳必须超时报错,而非永久挂起");
+    let err = read_sse_stream(
+        heartbeats,
+        abort_rx,
+        tx,
+        StdDuration::from_millis(300),
+        StreamParser::Chat(SseParser::default()),
+    )
+    .await
+    .expect_err("只发注释心跳必须超时报错,而非永久挂起");
     assert!(err.message().contains("停滞超时"), "实际:{}", err.message());
     // 断言真的在阈值量级返回(自动化用例不能等 120s)
     assert!(
@@ -658,9 +665,15 @@ async fn steady_data_events_do_not_trigger_idle_timeout() {
     let (_abort_tx, abort_rx) = watch::channel(false);
     let (tx, mut rx) = mpsc::unbounded_channel();
 
-    read_sse_stream(paced, abort_rx, tx, StdDuration::from_millis(400))
-        .await
-        .expect("有数据推进时不应超时");
+    read_sse_stream(
+        paced,
+        abort_rx,
+        tx,
+        StdDuration::from_millis(400),
+        StreamParser::Chat(SseParser::default()),
+    )
+    .await
+    .expect("有数据推进时不应超时");
 
     let mut texts = Vec::new();
     while let Ok(c) = rx.try_recv() {
@@ -682,7 +695,14 @@ async fn abort_wins_over_continuous_heartbeats() {
     let (tx, _rx) = mpsc::unbounded_channel();
 
     let task = tokio::spawn(async move {
-        read_sse_stream(heartbeats, abort_rx, tx, StdDuration::from_secs(30)).await
+        read_sse_stream(
+            heartbeats,
+            abort_rx,
+            tx,
+            StdDuration::from_secs(30),
+            StreamParser::Chat(SseParser::default()),
+        )
+        .await
     });
     tokio::time::sleep(StdDuration::from_millis(80)).await;
     abort_tx.send(true).unwrap();

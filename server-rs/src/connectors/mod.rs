@@ -110,12 +110,25 @@ impl Connector {
     }
 }
 
-/// 构建连接器(按 config.connector;未知回退 mock)
-pub fn build_connector(connector: &str, base_url: &str, api_key: &str, model: &str) -> Connector {
+/// 构建连接器(按 config.connector;未知回退 mock)。
+/// `api_style` 为接口方言线格式字符串(`chat-completions` | `responses` | `anthropic`),
+/// 未知值回退默认 chat-completions(与 settings 层 normalize 同口径)。
+pub fn build_connector(
+    connector: &str,
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+    api_style: &str,
+) -> Connector {
     if connector == "openai-compatible" {
-        Connector::OpenAi(openai_compatible::OpenAiCompatibleConnector::new(
-            base_url, api_key, model,
-        ))
+        Connector::OpenAi(
+            openai_compatible::OpenAiCompatibleConnector::new_with_style(
+                base_url,
+                api_key,
+                model,
+                openai_compatible::ApiStyle::from_str_lossy(api_style),
+            ),
+        )
     } else {
         Connector::Mock(mock::MockConnector::new())
     }
