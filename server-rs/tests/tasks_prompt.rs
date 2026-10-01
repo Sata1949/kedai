@@ -228,10 +228,7 @@ async fn task_character_persona_never_injected_after_retirement() {
         !echo.contains("写作风格参考"),
         "人设段应随 TM-SET-2 退役,不得再出现: {echo}"
     );
-    assert!(
-        !echo.contains("人设:"),
-        "人设正文段标题不得出现: {echo}"
-    );
+    assert!(!echo.contains("人设:"), "人设正文段标题不得出现: {echo}");
 }
 
 /// R3b:工具循环历史回灌上限(trim_tool_history 全链路集成)。

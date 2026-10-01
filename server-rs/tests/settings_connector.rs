@@ -371,8 +371,7 @@ async fn retired_task_switches_ignored_by_settings_api() {
 
     // GET 两视图都不得再出现退役键
     for mode in ["task", "roleplay"] {
-        let (_, s) = send_json(app, "GET", &format!("/api/settings?mode={mode}"), json!({}))
-            .await;
+        let (_, s) = send_json(app, "GET", &format!("/api/settings?mode={mode}"), json!({})).await;
         assert!(
             s.get("task_persona_full").is_none() && s.get("task_prompt_inject_enabled").is_none(),
             "{mode} 视图不应含退役字段: {s}"
@@ -421,7 +420,9 @@ async fn task_generation_defaults_visible_in_task_view() {
     let app = test_app();
 
     let (_, rp) = send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
-    let flat_max = rp["default_max_tokens"].as_u64().expect("扁平 max_tokens 应为数字");
+    let flat_max = rp["default_max_tokens"]
+        .as_u64()
+        .expect("扁平 max_tokens 应为数字");
     let (status, t) = send_json(app, "GET", "/api/settings?mode=task", json!({})).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(

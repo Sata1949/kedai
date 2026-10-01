@@ -243,9 +243,10 @@ impl TaskEngine {
         // 任务级连接(A 批 B1):随上下文下传,供工具循环参数装配回退;
         // 第三级回退 = 任务模式默认连接(TM-SET-1),失效时软回退默认连接
         // (仅任务模式消费;roleplay 引擎不经本上下文)。
-        let connection_id = task.connection_id.clone().or_else(|| {
-            crate::services::settings_service::task_mode_default_connection(&settings)
-        });
+        let connection_id = task
+            .connection_id
+            .clone()
+            .or_else(|| crate::services::settings_service::task_mode_default_connection(&settings));
         let ctx = TaskRunContext {
             task_id: task.id.clone(),
             token,

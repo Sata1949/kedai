@@ -497,7 +497,9 @@ impl TaskService {
             .map(str::to_string)
             .or_else(|| self.get(task_id).and_then(|t| t.connection_id))
             .or_else(|| {
-                crate::services::settings_service::task_mode_default_connection(&self.task_settings())
+                crate::services::settings_service::task_mode_default_connection(
+                    &self.task_settings(),
+                )
             });
         let connection_id = task_connection.as_deref();
         let params = GenerationParams {
