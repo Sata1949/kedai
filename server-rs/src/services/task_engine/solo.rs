@@ -274,8 +274,7 @@ pub(crate) async fn run_agent_loop(
     let row_usage = if retry_budget_used.is_some() {
         TokenUsage {
             prompt_tokens: total_usage.prompt_tokens - usage_before_retry.prompt_tokens,
-            completion_tokens: total_usage.completion_tokens
-                - usage_before_retry.completion_tokens,
+            completion_tokens: total_usage.completion_tokens - usage_before_retry.completion_tokens,
             total_tokens: total_usage.total_tokens - usage_before_retry.total_tokens,
             context_tokens: total_usage.context_tokens - usage_before_retry.context_tokens,
             prompt_cache_hit_tokens: total_usage.prompt_cache_hit_tokens

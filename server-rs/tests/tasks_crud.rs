@@ -972,7 +972,11 @@ async fn executor_temperature_reaches_agent_and_step_generation() {
         json!({ "title": title, "task_mode": "legacy", "executor_id": exec_id }),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED, "创建 legacy 任务应 201: {json}");
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "创建 legacy 任务应 201: {json}"
+    );
     let id3 = json["task"]["id"].as_str().unwrap().to_string();
     let (status, _) = send_json(app, "POST", &format!("/api/tasks/{id3}/run"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "run 应 200");

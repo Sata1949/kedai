@@ -53,8 +53,7 @@ impl TaskService {
     /// 默认温度」一致);单点解析式对线程内外同源(`solo::run_agent_loop` 与
     /// `generate_step` 两处调用点,勿在任一侧复制判定)。
     pub(crate) fn executor_temperature(&self, executor_id: Option<&str>) -> Option<f64> {
-        self.executor_for(executor_id)
-            .and_then(|e| e.temperature)
+        self.executor_for(executor_id).and_then(|e| e.temperature)
     }
 
     /// 执行者 system 提示词组装(单一实现):内置执行者指令 → 执行者身份段 → 世界书 →

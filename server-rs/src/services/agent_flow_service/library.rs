@@ -492,9 +492,10 @@ pub fn builtin_demo_flows() -> Vec<AgentFlowConfig> {
                 id: "verify".into(),
                 name: "交叉核验".into(),
                 enabled: true,
-                goal: "核验两路调研:目标覆盖是否完整、每条结论是否有依据、有无未核实的臆测、\
+                goal:
+                    "核验两路调研:目标覆盖是否完整、每条结论是否有依据、有无未核实的臆测、\
                        两路之间有无矛盾。输出 PASS 或 FAIL 并给出理由;FAIL 时逐条列明需要补齐的点。"
-                    .into(),
+                        .into(),
                 action: "reflect".into(),
                 inputs: vec!["facts".into(), "risks".into()],
                 x: Some(134.0),

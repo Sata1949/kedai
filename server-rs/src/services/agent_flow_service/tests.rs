@@ -1950,12 +1950,15 @@ fn builtin_demo_flow_passes_validate_flow_and_is_two_dimensional() {
     let demo = &flows[0];
     assert_eq!(demo.id, "builtin-research-demo");
     assert!(demo.enabled, "示范流程开箱启用");
-    validate_flow(demo, &pack_tools())
-        .unwrap_or_else(|e| panic!("示范流程未过 validate_flow:{e}"));
+    validate_flow(demo, &pack_tools()).unwrap_or_else(|e| panic!("示范流程未过 validate_flow:{e}"));
 
     // 坐标齐备:五节点 x/y 均为数字(画布式的前提),且结构上单点层居中(134)、双点层 0/268
     for s in &demo.steps {
-        assert!(s.x.is_some() && s.y.is_some(), "节点「{}」缺画布坐标", s.name);
+        assert!(
+            s.x.is_some() && s.y.is_some(),
+            "节点「{}」缺画布坐标",
+            s.name
+        );
     }
     let pos = |id: &str| {
         let s = demo.steps.iter().find(|s| s.id == id).unwrap();
