@@ -23,8 +23,8 @@ mod secret;
 
 pub use connection::{
     mask_key, normalize_base_url, resolve_connector_target, strip_endpoint_suffix,
-    task_mode_default_connection, ConnectionProfile, CONNECTOR_TYPE_MOCK, CONNECTOR_TYPE_OPENAI,
-    DEFAULT_SEARCH_ENDPOINT, MAX_CONNECTIONS,
+    task_mode_default_connection, vision_enabled, ConnectionProfile, CONNECTOR_TYPE_MOCK,
+    CONNECTOR_TYPE_OPENAI, DEFAULT_SEARCH_ENDPOINT, MAX_CONNECTIONS,
 };
 pub use connector_pool::{connection_label, ConnectorPool};
 pub use params::{
@@ -313,6 +313,13 @@ pub struct RuntimeSettings {
     /// Android 执行层:允许沙箱档(应用自身 UID)。默认关闭(统一由 exec_enabled 控制)。
     #[serde(default)]
     pub exec_allow_sandbox: bool,
+    /// 「视觉与截图」总开关(2026-10-02 视觉能力包 D5 起消费):true = 允许截图工具
+    /// 在此设备取屏(Windows 原生 GDI;安卓无障碍见移动端批次)。默认**关闭**,
+    /// 须用户显式开启——隐私敏感:截图内容会经所配置的连接发往模型端点。
+    /// 全局扁平字段(与 exec_* 同口径:能力开关是进程级事实,不进模式覆盖层,
+    /// 故 roleplay/task 共用一份)。
+    #[serde(default)]
+    pub vision_screenshot_enabled: bool,
     /// 编码能力包开关(2026-09-28;默认 false = 不启用,旧配置缺省由 serde default 填 false,
     /// 零迁移)。启用后任务模式执行者/汇总者的**缺省**默认词改用编码执行者模板
     /// (`default_coding_task_agent_prompt`);用户在提示词框自定义过的值逐字优先。

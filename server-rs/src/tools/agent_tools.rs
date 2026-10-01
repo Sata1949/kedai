@@ -50,6 +50,9 @@ pub struct ToolDeps {
     pub settings: Arc<Mutex<RuntimeSettings>>,
     pub connector: Arc<RwLock<Connector>>,
     pub data_dir: PathBuf,
+    /// 图像通道(视觉能力包 D4):视觉工具的图像输出落盘与引用构造复用同一实例
+    /// (与引擎/图像路由共用的那份,启动时经 AppState 注入同一 Arc)
+    pub images: Arc<crate::services::image_service::ImageService>,
     /// 跨会话记忆蒸馏(落地项 2):memory_write / memory_read 共用
     pub memory: Arc<crate::services::memory_service::MemoryService>,
     /// 聊天引擎(批次 4.3b 子 agent 工具化:run_subtask 经 run_tool_loop 跑白名单
@@ -98,6 +101,9 @@ impl ToolDeps {
                 crate::connectors::mock::MockConnector::new(),
             ))),
             data_dir: dir.path().to_path_buf(),
+            images: Arc::new(crate::services::image_service::ImageService::new(
+                dir.path().to_path_buf(),
+            )),
             memory: Arc::new(crate::services::memory_service::MemoryService::new(db)),
             // 测试缺省不注入引擎/任务服务:子任务走纯生成回退路径
             engine: std::sync::OnceLock::new(),

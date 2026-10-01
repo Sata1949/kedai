@@ -104,6 +104,7 @@ function makeSettings(overrides: Partial<RuntimeSettings> = {}): RuntimeSettings
     exec_allow_root: false,
     exec_allow_shizuku: false,
     exec_allow_sandbox: false,
+    vision_screenshot_enabled: false,
     task_coding_bundle_enabled: false,
     task_default_connection_id: '',
     // 多套连接(批次 4):默认空列表,具体连接由用例覆盖

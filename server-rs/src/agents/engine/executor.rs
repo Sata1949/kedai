@@ -1136,12 +1136,13 @@ pub(crate) async fn run_tool_loop(
             )
             .await?;
             // tool 结果消息:与循环前的 assistant(tool_calls) 成对,供下一轮生成参考。
-            // 图像通道(视觉能力包 D4 的接缝,本批恒空):工具返回约定式 `{text, images}`
-            // 时图像引用将挂在此处;当前全部工具返回纯文本,故为空 vec。
-            let tool_images: Vec<crate::models::types::ImageRef> = Vec::new();
+            // 工具图像通道(视觉能力包 D4):约定式返回 `{text, images:[引用]}` 时,
+            // 把引用解析成 data URL 挂到 tool 消息上(内容取 text 字段);其它返回形状
+            // 原样透传(既有工具零改动)。SSE 的 ToolResult 沿用原值,前端按 images 渲染缩略图。
+            let (tool_content, tool_images) = engine.images.parse_tool_output(&e.output);
             llm_messages.push(LlmMessage {
                 role: "tool".into(),
-                content: e.output.to_string(),
+                content: tool_content,
                 reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: Some(e.call.id.clone()),

@@ -193,6 +193,10 @@ pub struct UpdateSettingsBody {
     /// Android 允许沙箱档(缺省保持不变)。默认关闭。
     #[serde(default)]
     pub exec_allow_sandbox: Option<bool>,
+    /// 「视觉与截图」总开关(2026-10-02 视觉能力包 D5;缺省保持不变)。默认关闭;
+    /// 全局扁平字段(与 exec_* 同口径:能力开关是进程级事实,不分模式)。
+    #[serde(default)]
+    pub vision_screenshot_enabled: Option<bool>,
     /// 编码能力包开关(2026-09-28):true = 任务模式缺省默认词用编码执行者模板;
     /// false = 通用任务默认词(默认);缺省保持不变。用户自定义提示词逐字优先。
     #[serde(default)]
@@ -335,6 +339,8 @@ fn settings_json(s: &RuntimeSettings) -> Value {
         "exec_allow_root": s.exec_allow_root,
         "exec_allow_shizuku": s.exec_allow_shizuku,
         "exec_allow_sandbox": s.exec_allow_sandbox,
+        // 视觉与截图总开关(视觉能力包 D5;全局扁平)
+        "vision_screenshot_enabled": s.vision_screenshot_enabled,
         "task_coding_bundle_enabled": s.task_coding_bundle_enabled,
         "task_default_connection_id": s.task_default_connection_id,
         "tool_history_keep_rounds": s.tool_history_keep_rounds,
@@ -868,6 +874,10 @@ pub async fn update_settings(
             if let Some(v) = body.exec_allow_sandbox {
                 s.exec_allow_sandbox = v;
             }
+            // 视觉与截图总开关(视觉能力包 D5):全局能力开关,直写扁平(口径同 exec_*)。
+            if let Some(v) = body.vision_screenshot_enabled {
+                s.vision_screenshot_enabled = v;
+            }
             // 编码能力包开关(2026-09-28;bool 免校验,task 写覆盖层)。只影响提示词缺省值:
             // 启用后任务模式缺省默认词改用编码执行者模板,用户自定义值仍逐字优先。
             if let Some(v) = body.task_coding_bundle_enabled {
@@ -1355,6 +1365,16 @@ pub async fn prompt_preview(
             "system",
             5,
             task_prompts::EXECUTOR_TOOL_DISCIPLINE,
+        );
+        // 视觉验证纪律段(视觉能力包 D4):同样是**条件注入**——仅当本轮工具面含视觉
+        // 三件(view_image/zoom_image/image_diff)时追加在工具纪律之后。预览按「工具档」
+        // 形态展示(与上一条同口径)。
+        push_preview_layer(
+            &mut layers,
+            "task_executor_vision_discipline",
+            "system",
+            5,
+            task_prompts::VISION_VERIFY_DISCIPLINE,
         );
         push_preview_layer(
             &mut layers,

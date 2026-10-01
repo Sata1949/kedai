@@ -759,6 +759,8 @@ impl TaskService {
             // 包专属工具随编码能力包开关(口径同 solo.rs;规划器被告知的工具面
             // 必须与执行者实际拿到的同源)
             settings.task_coding_bundle_enabled,
+            // 视觉三件随生效连接的「视觉输入」能力位(口径单一出处;见 tool_policy::vision_gate)
+            crate::services::settings_service::vision_enabled(&settings),
         )
         .allowed
     }
@@ -1167,12 +1169,13 @@ impl TaskService {
         // 外部来源段落逐一 untrusted 包裹,内置指令不包裹(WP7)。
         // 执行者优先:executor_id 命中即独占身份段,character_id 仅为旧任务回退。
         // `has_tools = false`:本原语是 legacy 三段的纯文本步骤生成,恒不下发工具
-        // (tools 传空),故不追加工具纪律段(提交 3 · D3-c)。
+        // (tools 传空),故不追加工具纪律段(提交 3 · D3-c);无工具自然也无视觉工具。
         let sys = self.assemble_executor_system_prompt(
             &settings,
             task.executor_id.as_deref(),
             task.character_id.as_deref(),
             &task.title,
+            false,
             false,
         );
         let messages = vec![

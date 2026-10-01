@@ -500,6 +500,11 @@ fn default_risk(tool: &str) -> ToolRisk {
         // **早于例外**被整族剔除(例外只在开包时生效)。
         "fs_read" | "fs_glob" | "fs_grep" => ToolRisk::Safe,
         "fs_write" | "fs_edit" | "fs_patch" => ToolRisk::Dangerous,
+        // 视觉工具族(2026-10-02 视觉能力包 D4):只读工作区图像、图像输出重定向到
+        // DATA_DIR/images,不改工作区、不执行命令 → 安全级(与 fs_read 同档)。
+        // 必须显式登记:未登记会落下面的通配兜底被误判 Dangerous,任务默认策略
+        // (deny_dangerous)将整族剔除,而它们正是要在默认策略下可用的。
+        "view_image" | "zoom_image" | "image_diff" => ToolRisk::Safe,
         // 命令执行恒危险级:与文件写工具同级,但额外走「命令级风险强制确认」
         // (tools/command_risk.rs)。显式登记而非依赖下面的通配兜底,便于后续审查。
         "bash" => ToolRisk::Dangerous,

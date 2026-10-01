@@ -134,6 +134,44 @@ impl ImageService {
         }
     }
 
+    /// 解析约定式工具返回(视觉能力包 D4):`{"text": "...", "images": [引用]}`。
+    /// 命中形状 → (text 字段, 已解析 data URL 的图像引用)——图像先落 DATA_DIR/images
+    /// (工具侧保存),此处只做引用→data URL;其它形状 → (原始 JSON 文本, 空),
+    /// 既有工具零改动。引用解析失败的单张跳过(留 warn);文本与图像都为空时回退原文。
+    pub fn parse_tool_output(&self, output: &serde_json::Value) -> (String, Vec<ImageRef>) {
+        let fallback = || output.to_string();
+        let Some(obj) = output.as_object() else {
+            return (fallback(), Vec::new());
+        };
+        let Some(images_val) = obj.get("images") else {
+            return (fallback(), Vec::new());
+        };
+        let Ok(raw) = serde_json::from_value::<Vec<ImageRef>>(images_val.clone()) else {
+            return (fallback(), Vec::new());
+        };
+        if raw.is_empty() {
+            return (fallback(), Vec::new());
+        }
+        let text = obj
+            .get("text")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string();
+        let mut images = Vec::with_capacity(raw.len());
+        for r in raw {
+            match self.resolve_data_url(&r.id) {
+                Ok(url) => images.push(ImageRef { data_url: url, ..r }),
+                Err(e) => {
+                    tracing::warn!(image_id = %r.id, error = %e, "工具图像解析失败,已跳过");
+                }
+            }
+        }
+        if text.is_empty() && images.is_empty() {
+            return (fallback(), Vec::new());
+        }
+        (text, images)
+    }
+
     // ===== 大图自动拆分(视觉能力包 D3;仅 image_auto_split 连接在下发前调用)=====
 
     /// 大图自动拆分(2026-10-02 视觉能力包 D3):`image_auto_split` 连接在**下发前**
@@ -402,13 +440,14 @@ mod tests {
     use super::*;
     use crate::utils::test_support::TempDataDir;
 
-    /// 1x1 PNG(真实魔数,内容不重要)
+    /// 1x1 PNG(真实魔数**且 CRC 合法**——D4 起图像会真解码,魔数对但 CRC 错的字节
+    /// 会被 `image` 解码器拒绝;此字节由 zlib 正确编码生成)
     const PNG_1PX: &[u8] = &[
         0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
-        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
-        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
-        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
-        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x78, 0xDA, 0x63, 0x38,
+        0x21, 0x27, 0x07, 0x00, 0x02, 0xB6, 0x01, 0x05, 0x0A, 0x5B, 0xA6, 0x06, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
     ];
 
     fn png_data_url() -> String {
@@ -637,5 +676,40 @@ mod tests {
             !dir.path().join("images").join("derived").exists(),
             "未拆分不产生派生缓存"
         );
+    }
+
+    /// 工具图像通道(视觉能力包 D4):约定式 `{text, images}` 解析出 text 与已解析引用;
+    /// 其它形状原样回退;引用解析失败跳过;images 空数组视为非约定形状。
+    #[test]
+    fn parse_tool_output_convention_and_fallback() {
+        let dir = TempDataDir::new("tool-out");
+        let svc = ImageService::new(dir.path().to_path_buf());
+        let saved = svc.save("a.png", "image/png", PNG_1PX).unwrap();
+        // 命中:返回 text + 解析后的引用(带 data URL)
+        let out = serde_json::json!({
+            "text": "已加载图像:1×1",
+            "images": [{ "id": saved.id, "name": "a.png", "mime": "image/png" }]
+        });
+        let (text, images) = svc.parse_tool_output(&out);
+        assert_eq!(text, "已加载图像:1×1");
+        assert_eq!(images.len(), 1);
+        assert!(images[0].data_url.starts_with("data:image/png;base64,"));
+        // 非约定形状:原文 JSON 与空图像(既有工具零改动)
+        let out = serde_json::json!({ "results": [1, 2] });
+        let (text, images) = svc.parse_tool_output(&out);
+        assert!(text.contains("results"), "{text}");
+        assert!(images.is_empty());
+        // 引用解析失败(文件不存在)→ 跳过,text 仍在
+        let out = serde_json::json!({
+            "text": "x",
+            "images": [{ "id": "missing.png", "name": "m.png", "mime": "image/png" }]
+        });
+        let (text, images) = svc.parse_tool_output(&out);
+        assert_eq!(text, "x");
+        assert!(images.is_empty(), "解析失败的引用应被跳过");
+        // images 为空数组 → 视为非约定形状(回退原文)
+        let out = serde_json::json!({ "text": "x", "images": [] });
+        let (text, _) = svc.parse_tool_output(&out);
+        assert!(text.contains("images"));
     }
 }

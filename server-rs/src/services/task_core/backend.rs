@@ -137,6 +137,9 @@ pub(crate) trait TaskPromptKit: Send + Sync {
     /// 编译结果算,策略收窄到空集时为 false)。true 时在内置指令后追加
     /// [`crate::services::task_core::prompt_consts::EXECUTOR_TOOL_DISCIPLINE`];
     /// legacy 的步骤没有工具(传 false),不追加——那条纪律讲的是怎么用工具。
+    /// `has_vision_tools`(视觉能力包 D4):本轮工具面是否含视觉三件
+    /// (`tool_sets::VISION_TOOLS`)——true 时再追加
+    /// [`crate::services::task_core::prompt_consts::VISION_VERIFY_DISCIPLINE`]。
     fn assemble_executor_system_prompt(
         &self,
         settings: &RuntimeSettings,
@@ -144,6 +147,7 @@ pub(crate) trait TaskPromptKit: Send + Sync {
         character_id: Option<&str>,
         user_goal: &str,
         has_tools: bool,
+        has_vision_tools: bool,
     ) -> String;
 
     /// 世界书常驻条目文本。

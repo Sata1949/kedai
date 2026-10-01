@@ -87,6 +87,8 @@ const domains: Domain[] = [
       { type: 'section', key: 'exec', label: '授权与命令执行' },
       // 编码能力包(默认关):任务模式执行者的默认系统提示词模板开关
       { type: 'section', key: 'coding', label: '编码能力包' },
+      // 视觉与截图(默认关;视觉能力包):截图工具总开关 + 与连接「视觉输入」能力位的配合说明
+      { type: 'section', key: 'vision', label: '视觉与截图' },
     ],
   },
   {

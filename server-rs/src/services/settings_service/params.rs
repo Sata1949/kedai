@@ -568,6 +568,8 @@ impl RuntimeSettings {
             exec_allow_root: false,
             exec_allow_shizuku: false,
             exec_allow_sandbox: false,
+            // 视觉与截图默认关(隐私敏感,须用户显式开启;视觉能力包 D5)
+            vision_screenshot_enabled: false,
             // 编码能力包默认关:新装与旧配置行为逐字不变,须用户显式启用
             task_coding_bundle_enabled: false,
             // 任务模式默认连接默认空 = 跟随默认连接(active_connection),零迁移

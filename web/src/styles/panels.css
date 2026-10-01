@@ -765,6 +765,20 @@ input[type="range"].sv-range::-moz-range-thumb {
 }
 .sv-tool-panel-card.running { border-left: 4px solid var(--sv-yellow); }
 .sv-tool-panel-card.authorization_required { border-left: 4px solid var(--sv-red); }
+/* 视觉工具图像缩略图(视觉能力包 D4):引用式渲染,多图换行限高 */
+.sv-tool-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.sv-tool-images img {
+  display: block;
+  max-width: 220px;
+  max-height: 220px;
+  border: var(--bw-thin) solid var(--sv-line-strong);
+  background: var(--sv-white);
+}
 .sv-tool-panel-card.failed { border-left: 4px solid var(--sv-red); }
 .sv-tool-panel-card .tool-name {
   font-family: var(--font-display);

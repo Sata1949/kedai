@@ -70,6 +70,16 @@ pub(crate) const TASK_INTERNAL_PLAN_PROMPT: &str = "你是任务内部规划者�
 /// 「其余临时执行稿」章 HARNESS3-6)直接引用本常量,不写第二份。内置指令不经 untrusted 包裹。
 pub(crate) const EXECUTOR_TOOL_DISCIPLINE: &str = "工具使用纪律:① 自测通过即收尾——同一事实不得反复验证,不要为「再确认一次」重跑已通过的检查;② 命令用本机 shell 语法(Windows 下由 cmd 解释:多命令用 && 连接,不支持 ; 分隔与 /d/ 这类 MSYS 路径);③ 改文件优先用 fs_write/fs_edit 工具,不要用 shell 重定向拼文件;④ 每轮只做一个动作,看完结果再决定下一步。";
 
+/// 视觉验证纪律(视觉能力包 D4,2026-10-02):仅当本轮工具面含视觉三件
+/// (`tool_sets::VISION_TOOLS`)时追加——讲的是「拿到图像后怎么用」。
+///
+/// 为什么需要:视觉工具的价值在「模型真的看图」;实测常见失效模式是模型凭文件名、
+/// 尺寸或调用参数臆断图像内容(如「截图看起来正常」),而视觉验证纪律把它压回到
+/// 「先描述看到的具体信息,再据此判断」。条件段口径与 EXECUTOR_TOOL_DISCIPLINE 同族
+/// (仅相关工具在场时出现),进设置预览(按「工具档」形态展示,口径见
+/// docs/契约-协议与配置.md 第五节)。内置指令,不经 untrusted 包裹。
+pub(crate) const VISION_VERIFY_DISCIPLINE: &str = "视觉验证纪律:调用 view_image/zoom_image/image_diff 拿到图像后,必须以图像实际内容为准作结论——先描述你在图里看到的关键信息(文字/布局/颜色/差异点),再据此判断;不得凭文件名、尺寸或调用参数猜测图像内容。看不清细节时先用 zoom_image 放大对应区域再回答。";
+
 /// 执行者**收尾提醒**(TM-EMPTY-1,2026-10-01):工具循环正常结束但正文为空时,
 /// 追加的一次「无工具收尾轮」的 user 消息——只提醒直接产出最终成果,不引入新契约;
 /// 是否发起与预算/温度分级由执行侧(`solo::run_agent_loop`)判定。
@@ -192,6 +202,17 @@ pub(crate) fn capability_note(
                 );
             } else {
                 s.push_str("执行者不能执行命令,步骤不得依赖运行命令。");
+            }
+            // 视觉工具(视觉能力包 D4):仅当工具面含视觉三件时说明「真的能看图」
+            let has_vision = allowed
+                .iter()
+                .any(|n| crate::tools::tool_sets::VISION_TOOLS.contains(&n.as_str()));
+            if has_vision {
+                s.push_str(
+                    "另有视觉工具 view_image/zoom_image/image_diff:可直接查看工作区图像\
+                     (截图/设计稿/照片)、放大局部细节、对比两图差异——图像会真的交给模型查看,\
+                     涉及图像判断的步骤应据此核实而不是靠猜。",
+                );
             }
             s.push_str("交付物正文必须由执行者直接产出:文件只是过程物,不得只把成果留在文件里。");
         }

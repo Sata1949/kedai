@@ -36,6 +36,9 @@ pub mod submit;
 pub mod run_flow;
 pub mod tool_sets;
 pub mod variables;
+// 视觉工具三件(视觉能力包 D4):工具**定义**在此,可见性 = 工作区族闸门 ∩ 视觉闸门
+// (见 task_engine/tool_policy.rs 的 workspace_gate / vision_gate)
+pub mod vision_tools;
 // 工作区路径闸门(编码通道批次,本批安全核心):fs_* 工具与 bash 的 cwd 校验共用;
 // 创建期的工作区校验也复用其判据(见 agent_tools_fs.rs / bash.rs / api/tasks.rs)
 pub mod workspace_guard;
@@ -44,11 +47,10 @@ pub mod workspace_guard;
 mod workspace_scan;
 // 遍历忽略集的**单一出处**(`.git`/`target`/`node_modules`/`dist`/`.kedai-index`/`data`):
 // 工作区画像探测(services/workspace_profile)沿用同一份,不复制第二份(复制必然漂移)
-pub(crate) use workspace_scan::EXCLUDED_SEGMENTS;
-
 use agent_tools::ToolDeps;
 use registry::ToolRegistry;
 use std::sync::Arc;
+pub(crate) use workspace_scan::EXCLUDED_SEGMENTS;
 
 /// 启动时注册全部内置工具(calculator / censor_text / memory_read / memory_write / agent 强化工具集)
 pub fn register_builtin_tools(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
@@ -97,5 +99,7 @@ pub fn register_builtin_tools(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
     // 工作区文件工具族(编码通道批次):始终注册,可见性由任务工具策略按工作区绑定过滤
     // (未绑定任务与聊天路径都看不到它们——调了必然报「未绑定工作区」)
     agent_tools_fs::register_fs_tools(registry, deps.clone());
+    // 视觉工具三件(视觉能力包 D4):始终注册;可见性 = 工作区族闸门 ∩ 视觉能力位闸门
+    vision_tools::register_vision_tools(registry, deps.clone());
     agent_tools::register_agent_tools(registry, deps);
 }

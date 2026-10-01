@@ -98,6 +98,8 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
   const execAllowRoot = ref(false);
   const execAllowShizuku = ref(false);
   const execAllowSandbox = ref(false);
+  /** 「视觉与截图」总开关(视觉能力包;默认 false = 关闭,须用户显式开启;全局字段) */
+  const visionScreenshotEnabled = ref(false);
   /** 授权模式三档(服务端默认 loose):strict=读/写/删都需授权;loose=读/写放行、删需授权;bypass=除系统路径写删外全放行 */
   const authorizationMode = ref<api.AuthorizationMode>('loose');
   /** 「始终需授权」清单(名单内工具在三档模式下都需授权) */
@@ -199,6 +201,7 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
       execAllowRoot.value = s.exec_allow_root ?? false;
       execAllowShizuku.value = s.exec_allow_shizuku ?? false;
       execAllowSandbox.value = s.exec_allow_sandbox ?? false;
+      visionScreenshotEnabled.value = s.vision_screenshot_enabled ?? false;
       const modelConn = useModelConnStore();
       if (!modelConn.model) modelConn.model = s.model;
     } catch {
@@ -266,6 +269,7 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     execAllowRoot.value = s.exec_allow_root ?? false;
     execAllowShizuku.value = s.exec_allow_shizuku ?? false;
     execAllowSandbox.value = s.exec_allow_sandbox ?? false;
+    visionScreenshotEnabled.value = s.vision_screenshot_enabled ?? false;
   }
 
   // 设置写入统一串行,避免 renderHtml 自动保存与设置面板保存交错回写旧响应。
@@ -407,6 +411,7 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     execAllowRoot,
     execAllowShizuku,
     execAllowSandbox,
+    visionScreenshotEnabled,
     authorizationMode,
     authorizationAlwaysRequired,
     toolAuthorizationTimeoutSecs,

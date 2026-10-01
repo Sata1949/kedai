@@ -507,6 +507,10 @@ export interface RuntimeSettings {
   exec_allow_shizuku: boolean;
   /** Android 执行层:允许沙箱档(应用自身 UID;默认 false) */
   exec_allow_sandbox: boolean;
+  /** 「视觉与截图」总开关(视觉能力包;默认 false = 关闭,须用户显式开启):
+   *  true = 允许截图工具取屏(Windows 原生 GDI;安卓无障碍见移动端批次)。
+   *  隐私敏感:截图内容会经所配置的连接发往模型端点。全局字段(不分模式)。 */
+  vision_screenshot_enabled: boolean;
   /** 任务模式编码能力包显式启用开关(默认 false = 关闭,须用户显式开启)。仅任务模式生效:
    *  开启后,任务执行者**未自定义**系统提示词时,默认值改用「编码执行者模板」
    *  (强调先读后写 / 遵循既有风格 / 改完跑验证 / 最小改动);用户若在提示词框里自定义过,
@@ -641,6 +645,8 @@ export interface RuntimeSettingsPatch {
   exec_allow_shizuku?: boolean;
   /** Android 允许沙箱档(缺省保持不变) */
   exec_allow_sandbox?: boolean;
+  /** 「视觉与截图」总开关(缺省保持不变;全局字段) */
+  vision_screenshot_enabled?: boolean;
   /** 任务模式编码能力包开关(默认 false = 关闭;缺省保持不变) */
   task_coding_bundle_enabled?: boolean;
   /** 任务模式默认连接(TM-SET-1;空串 = 清除,跟随默认连接;非空须为已存在且启用的连接) */

@@ -81,6 +81,8 @@ pub(crate) async fn run_agent_loop(
         // 包专属工具(fs_patch)随编码能力包开关下发(task 合并值;关包整族剔除,
         // 见 tool_policy::coding_pack_gate)
         settings.task_coding_bundle_enabled,
+        // 视觉三件随生效连接的「视觉输入」能力位(口径单一出处;见 tool_policy::vision_gate)
+        crate::services::settings_service::vision_enabled(settings),
     );
     // 闸门名单先取出(allowed 借用生命周期需覆盖整个工具循环),再取走 defs
     let allowed = policy.allowed;
@@ -88,6 +90,10 @@ pub(crate) async fn run_agent_loop(
     // 既决定 system 是否追加工具纪律段,也与「能力事实」的实际形态一致。
     // 必须在 `tools: policy.defs` 把 defs 移走之前算。
     let has_tools = !policy.defs.is_empty();
+    // 视觉验证纪律段的条件(D4):工具面含视觉三件才追加(单一出处 tool_sets::VISION_TOOLS)
+    let has_vision_tools = allowed
+        .iter()
+        .any(|n| crate::tools::tool_sets::VISION_TOOLS.contains(&n.as_str()));
     // system 提示词组装:统一走 TaskBackend::assemble_executor_system_prompt
     // (单一实现,宿主侧 prompt.rs);拼装顺序与 untrusted 包裹纪律同 legacy,
     // 勿在本文件复制实现(WP7)。
@@ -97,6 +103,7 @@ pub(crate) async fn run_agent_loop(
         call.character_id.as_deref(),
         &call.goal,
         has_tools,
+        has_vision_tools,
     );
 
     let mut messages = vec![

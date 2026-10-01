@@ -216,6 +216,8 @@ impl AppState {
             settings: settings.clone(),
             connector: connector.clone(),
             data_dir: config.data_dir.clone(),
+            // 图像通道(视觉能力包 D4 视觉工具):与引擎/路由共用同一实例
+            images: images.clone(),
             memory: memory.clone(),
             // bash 工具审计落库用(exec_audit);与 AppState 同源同一 Arc<Db>
             db: db.clone(),

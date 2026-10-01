@@ -11,6 +11,7 @@ import ConnectionProfilesSection from './ConnectionProfilesSection.vue';
 import ConnectionSection from './ConnectionSection.vue';
 import McpSection from './McpSection.vue';
 import CodingBundleSection from './CodingBundleSection.vue';
+import VisionScreenshotSection from './VisionScreenshotSection.vue';
 import DataManagementSection from './DataManagementSection.vue';
 import PresetImportExportSection from './PresetImportExportSection.vue';
 import AgentSettingsSection from './AgentSettingsSection.vue';
@@ -352,5 +353,28 @@ describe('GenParamsSection(生成参数区:记忆槽预算/容量上限)', () =>
     expect(html).toContain('任务模式缺省');
     expect(html).toContain('写入任务推荐值');
     expect(html).toContain('温度 0.3');
+  });
+});
+
+describe('VisionScreenshotSection(视觉与截图区,默认关)', () => {
+  it('渲染开关与隐私提示(默认「已关闭」;未开视觉位时图像不会随请求发送)', async () => {
+    const html = await render(VisionScreenshotSection);
+    expect(html).toContain('视觉与截图');
+    expect(html).toContain('允许截图工具取屏');
+    expect(html).toContain('已关闭'); // 默认 vision_screenshot_enabled=false
+    expect(html).toContain('视觉输入'); // 与连接能力位的配合说明
+    expect(html).toContain('隐私提示');
+  });
+
+  it('show=false 时根节点 display:none(embedded 模式按 activeSection 切换)', async () => {
+    const html = await render(VisionScreenshotSection, { show: false });
+    expect(html).toMatch(/display:\s*none/);
+  });
+});
+
+describe('SettingsModal 装配 · 视觉与截图', () => {
+  it('standalone 渲染包含「视觉与截图」分区(挂进壳)', async () => {
+    const standalone = await render(SettingsModal, { embedded: false });
+    expect(standalone).toContain('视觉与截图');
   });
 });

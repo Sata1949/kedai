@@ -104,6 +104,15 @@ fn map_event(ev: &SseEvent, streamed_chars: usize, label: &str) -> Option<String
                 } else {
                     format!("工具 {name} 被任务策略拒绝:{reason}")
                 }
+            } else if let Some(text) = output
+                .as_object()
+                .and_then(|o| o.get("text"))
+                .and_then(|t| t.as_str())
+                .filter(|t| !t.trim().is_empty())
+            {
+                // 约定式返回(视觉工具等)自带摘要(含尺寸/差异统计):进展行直接采用,
+                // 信息量远大于「已返回结果」;长度截断交既有 200 字符上限统一处理。
+                format!("工具 {name}:{text}")
             } else {
                 format!("工具 {name} 已返回结果")
             }

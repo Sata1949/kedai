@@ -136,3 +136,37 @@ describe('AgentPanel 面板开合不再被生成状态锁死', () => {
     expect(html).not.toMatch(/class="sv-agent-panel open"/);
   });
 });
+
+describe('AgentPanel 视觉工具缩略图(视觉能力包 D4)', () => {
+  it('约定式出参 {text, images} 渲染 /api/images 缩略图;无 images 不渲染该块', async () => {
+    const html = await renderPanel((store) => {
+      store.agent = {
+        ...idleAgent(),
+        toolCalls: [
+          {
+            name: 'view_image',
+            input: { path: 'shot.png' },
+            output: {
+              text: '已加载图像「shot.png」:400×300,12KB',
+              images: [{ id: 'abc.png', name: 'shot.png', mime: 'image/png' }],
+            },
+            status: 'done',
+            callId: 'c1',
+          },
+          {
+            name: 'read',
+            input: { path: 'a.md' },
+            output: { results: [] },
+            status: 'done',
+            callId: 'c2',
+          },
+        ],
+      };
+    });
+    expect(html).toContain('sv-tool-images');
+    expect(html).toContain('src="/api/images/abc.png"');
+    expect(html).toContain('alt="shot.png"');
+    // 普通工具出参不渲染图像块(仅一处)
+    expect(html.match(/sv-tool-images/g)).toHaveLength(1);
+  });
+});

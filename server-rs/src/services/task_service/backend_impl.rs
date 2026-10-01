@@ -128,6 +128,7 @@ impl TaskPromptKit for TaskService {
         character_id: Option<&str>,
         user_goal: &str,
         has_tools: bool,
+        has_vision_tools: bool,
     ) -> String {
         TaskService::assemble_executor_system_prompt(
             self,
@@ -136,6 +137,7 @@ impl TaskPromptKit for TaskService {
             character_id,
             user_goal,
             has_tools,
+            has_vision_tools,
         )
     }
 

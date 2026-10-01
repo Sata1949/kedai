@@ -297,6 +297,8 @@ impl CustomExecutor {
             ctx.scope.is_some(),
             // 包专属工具随编码能力包开关(口径同 solo.rs)
             settings.task_coding_bundle_enabled,
+            // 视觉三件随生效连接的「视觉输入」能力位(口径单一出处;见 tool_policy::vision_gate)
+            crate::services::settings_service::vision_enabled(settings),
         );
         // Some([]) = 策略全量集;Some(list) = 策略集 ∩ 步骤白名单
         let mut tools: Vec<_> = if whitelist.is_empty() {

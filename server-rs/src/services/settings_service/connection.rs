@@ -174,6 +174,18 @@ pub fn resolve_connector_target(
     CONNECTOR_TYPE_OPENAI
 }
 
+/// 视觉能力位闸门的取值口径(视觉能力包 D2/D4;**单一出处**):默认连接是否开启
+/// 「视觉输入」。聊天贴图闸门(api/chat.rs)、任务工具策略(vision_gate)与角色扮演
+/// 视觉纪律提示词共用本判据。
+/// 已知简化:任务的工具清单按运行编译一次,跨节点不重编,故节点级显式连接的能力位
+/// 差异不细判(按默认连接口径;登记于 docs/遗留.md)。
+pub fn vision_enabled(settings: &RuntimeSettings) -> bool {
+    settings
+        .active_connection()
+        .map(|p| p.supports_vision)
+        .unwrap_or(false)
+}
+
 /// 任务模式默认连接(TM-SET-1)的**有效解析**——任务连接回退链的第三级
 /// (逐任务/节点显式 `connection_id` → 本项 → 默认连接)。传入值为任务模式合并视图
 /// (`for_mode(Task)`)。

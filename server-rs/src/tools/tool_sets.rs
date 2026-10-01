@@ -43,12 +43,34 @@ pub const REFLECT: &[&str] = &["censor_text", "revise_passage"];
 /// 规划侦察轮(READONLY_SCOUT)自任务模式 D1 起**有条件**放开只读子集:
 /// 见 `WORKSPACE_READONLY_TOOLS` 与 `scout_tools`——规划器看不到工作区就只能盲规划
 /// (实测缺陷 D5:`read` 走角色扮演文件区语义,报「读取文件 package.json 失败」)。
+///
+/// 视觉工具族(2026-10-02 视觉能力包 D4)并入本族:三件同样以工作区文件为输入,聊天
+/// 路径(`exclude_workspace`)与无作用域任务(`workspace_gate`)对它们一体剔除;
+/// 另受 `tool_policy::vision_gate` 按连接能力位约束(见 `VISION_TOOLS`)。
 pub const WORKSPACE_TOOLS: &[&str] = &[
-    "fs_read", "fs_write", "fs_edit", "fs_glob", "fs_grep",
+    "fs_read",
+    "fs_write",
+    "fs_edit",
+    "fs_glob",
+    "fs_grep",
     // Q6(2026-10-01)第六员:结构化补丁;另受任务工具策略的**编码包闸门**约束
     // (关包时不下发,见 task_engine/tool_policy.rs::coding_pack_gate)
     "fs_patch",
+    // 视觉三件(2026-10-02):view_image / zoom_image / image_diff
+    "view_image",
+    "zoom_image",
+    "image_diff",
 ];
+
+/// 视觉工具族(视觉能力包 D4;单一出处:注册名、风险级、工作区族、视觉闸门与提示词
+/// 条件段都以它为准)。三件都只读工作区文件(图像输出重定向到 DATA_DIR/images),
+/// 可见性 = 工作区族闸门 ∩ `vision_gate`(生效连接开启「视觉输入」能力位)。
+pub const VISION_TOOLS: &[&str] = &["view_image", "zoom_image", "image_diff"];
+
+/// defs 是否含视觉工具成员(条件提示词段与相关判据共用)
+pub fn has_vision_tools(defs: &[ToolDefinition]) -> bool {
+    defs.iter().any(|d| VISION_TOOLS.contains(&d.name.as_str()))
+}
 
 /// 工作区文件工具族的**只读子集**:`fs_read`/`fs_glob`/`fs_grep`。
 ///
@@ -201,9 +223,33 @@ mod tests {
         assert_eq!(REFLECT, &["censor_text", "revise_passage"]);
         assert_eq!(
             WORKSPACE_TOOLS,
-            &["fs_read", "fs_write", "fs_edit", "fs_glob", "fs_grep", "fs_patch"]
+            &[
+                "fs_read",
+                "fs_write",
+                "fs_edit",
+                "fs_glob",
+                "fs_grep",
+                "fs_patch",
+                "view_image",
+                "zoom_image",
+                "image_diff"
+            ]
         );
         assert_eq!(WORKSPACE_READONLY_TOOLS, &["fs_read", "fs_glob", "fs_grep"]);
+        assert_eq!(VISION_TOOLS, &["view_image", "zoom_image", "image_diff"]);
+        for n in VISION_TOOLS {
+            assert!(
+                WORKSPACE_TOOLS.contains(n),
+                "视觉工具必须并入工作区族(聊天路径与无作用域任务一体剔除):{n}"
+            );
+        }
+    }
+
+    /// 视觉工具判据(条件提示词段用)
+    #[test]
+    fn has_vision_tools_detects_membership() {
+        assert!(!has_vision_tools(&[def("read")]));
+        assert!(has_vision_tools(&[def("read"), def("view_image")]));
     }
 
     /// 侦察白名单的两档(D1):无作用域 = 既有只读清单(逐字不变),有作用域 = 追加

@@ -99,6 +99,27 @@ function ioText(v: unknown): string {
   return JSON.stringify(v, null, 2);
 }
 
+/**
+ * 视觉工具出参里的图像引用(视觉能力包 D4;约定式 `{text, images:[{id,name,mime}]}`)。
+ * 只认 id 为字符串的条目(形状不符静默返回空,既有工具输出不受影响);
+ * 渲染走 `/api/images/{id}`(免 Bearer,与聊天贴图同一通道)。
+ */
+function toolImages(v: unknown): Array<{ id: string; name: string }> {
+  if (!v || typeof v !== 'object') return [];
+  const imgs = (v as Record<string, unknown>).images;
+  if (!Array.isArray(imgs)) return [];
+  const out: Array<{ id: string; name: string }> = [];
+  for (const r of imgs) {
+    if (r && typeof r === 'object') {
+      const obj = r as Record<string, unknown>;
+      if (typeof obj.id === 'string' && obj.id) {
+        out.push({ id: obj.id, name: typeof obj.name === 'string' ? obj.name : '' });
+      }
+    }
+  }
+  return out;
+}
+
 /** 最近一次复制成功的折叠卡 key(短暂显示「已复制」) */
 const copiedKey = ref<string | null>(null);
 let copiedTimer: ReturnType<typeof setTimeout> | null = null;
@@ -509,6 +530,19 @@ function subtaskDot(status: TaskSubtaskStatus): { cls: string; icon: string } {
                 <button type="button" class="sv-tool-io-copy" @click="copyIo(callKey(t), ioText(t.output))">{{ copiedKey === callKey(t) ? '已复制' : '复制' }}</button>
               </div>
               <pre class="sv-tool-io-body" @scroll="ioScroll">{{ ioText(t.output) }}</pre>
+            </div>
+            <!-- 视觉工具图像(视觉能力包 D4):引用式渲染 /api/images,点击新窗口看原图 -->
+            <div v-if="toolImages(t.output).length" class="sv-tool-images">
+              <a
+                v-for="img in toolImages(t.output)"
+                :key="img.id"
+                :href="`/api/images/${img.id}`"
+                target="_blank"
+                rel="noopener"
+                :title="img.name"
+              >
+                <img :src="`/api/images/${img.id}`" :alt="img.name" loading="lazy" />
+              </a>
             </div>
           </div>
         </template>

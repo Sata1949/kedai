@@ -414,18 +414,24 @@ fn tool_when(name: &str) -> String {
         "fs_glob" => "需要按通配模式(如 **/*.rs)列出工作区里的文件、确认路径拼写时调用。",
         "fs_grep" => "需要按正则在工作区里检索文本、定位到具体文件与行号时调用。",
         "fs_patch" => "需要一次改动多个文件(批量重构 / 重命名 / 跨文件同步)时调用;以 *** Update File 等分块的结构化补丁给出,每段旧内容需在文件中唯一匹配,改前先 fs_read。",
+        // 视觉工具族(视觉能力包 D4;仅工作区任务且连接开启「视觉输入」时下发)
+        "view_image" => "需要真的「看」工作区里的图像(截图/设计稿/照片)内容时调用;直接把图像交给模型查看,返回图像本身与尺寸信息。",
+        "zoom_image" => "需要放大查看图像局部细节(小字/图标/某块区域)时调用;给出原图像素坐标裁剪并放大,看不清细节先用它。",
+        "image_diff" => "需要对比两张图像(改版前后截图等)的差异时调用;返回差异像素统计与可视化差异图。",
         _ => return String::new(),
     };
     s.to_string()
 }
 
 /// 内置工具的展示意图(render intent),供 SSE ToolCall/ToolResult 透传、前端分派渲染。
-/// 取值:read(读文件/条目,代码块展示)、search(搜索结果,列表化)、generic(其余通用)。
-/// 未知名(脚本插件工具)返回 None,前端回退 JSON 直出。
+/// 取值:read(读文件/条目,代码块展示)、search(搜索结果,列表化)、image(视觉工具,
+/// 缩略图渲染)、generic(其余通用)。未知名(脚本插件工具)返回 None,前端回退 JSON 直出。
 pub fn render_kind_for(name: &str) -> Option<&'static str> {
     match name {
         "read" | "fs_read" | "fs_grep" => Some("read"),
         "search" => Some("search"),
+        // 视觉工具族(视觉能力包 D4):前端按 image 分派渲染缩略图(输出含 images 引用)
+        "view_image" | "zoom_image" | "image_diff" => Some("image"),
         "calculator" | "role" | "write" | "replace" | "create" | "todo" | "agentgo"
         | "agentend" | "sleep" | "censor_text" | "memory_read" | "memory_write"
         | "update_variables" | "get_state" | "apply_patch" | "submit" | "run_flow"

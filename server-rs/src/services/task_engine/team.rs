@@ -428,6 +428,8 @@ impl TeamExecutor {
             ctx.scope.is_some(),
             // 包专属工具随编码能力包开关(口径同 solo.rs)
             ctx.settings.task_coding_bundle_enabled,
+            // 视觉三件随生效连接的「视觉输入」能力位(口径单一出处)
+            crate::services::settings_service::vision_enabled(&ctx.settings),
         )
         .allowed;
         sys.push_str(&format!(

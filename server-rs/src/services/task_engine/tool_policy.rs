@@ -9,7 +9,9 @@
 //   allowlist      → 仅配置白名单 ∩ 已注册(最严格)
 // 三道正交闸门(先过闸门再套档位):platform_gate(平台/档位可用性)、
 // workspace_gate(本任务是否绑定工作区)、coding_pack_gate(2026-10-01 Q6:包专属工具
-// fs_patch 仅编码能力包开启时下发)。空集必须 fail-closed(docs/经验.md E56)。
+// fs_patch 仅编码能力包开启时下发)。**2026-10-02 D4 起增第四道 vision_gate**:
+// 视觉工具族(view_image/zoom_image/image_diff)仅生效连接开启「视觉输入」能力位时下发。
+// 空集必须 fail-closed(docs/经验.md E56)。
 //
 // bash 例外说明:bash 在权限矩阵里恒为 Dangerous(见 tools/permissions.rs 的 default_risk),
 // 若按风险级一刀切就会被默认策略整体剔除,任务模式连 `ls`/`echo` 都用不了。用户要求任务
@@ -55,17 +57,23 @@ impl TaskToolPolicy {
 /// 决定 fs_* 族是否下发,见 [`workspace_gate`]。
 /// `coding_pack_enabled`:编码能力包开关(**task 合并值**,与提示词缺省值同源口径)——
 /// 决定包专属工具(`fs_patch`)是否下发,见 [`coding_pack_gate`]。
+/// `vision_enabled`:生效连接的「视觉输入」能力位(取值口径单一出处
+/// `settings_service::vision_enabled`;默认连接口径)——决定视觉三件是否下发,见 [`vision_gate`]。
 pub(crate) fn compile(
     policy: &str,
     allowlist: &[String],
     registry: &ToolRegistry,
     has_workspace: bool,
     coding_pack_enabled: bool,
+    vision_enabled: bool,
 ) -> TaskToolPolicy {
     let all = coding_pack_gate(
-        workspace_gate(
-            platform_gate(tool_sets::exclude_meta(registry.list_definitions())),
-            has_workspace,
+        vision_gate(
+            workspace_gate(
+                platform_gate(tool_sets::exclude_meta(registry.list_definitions())),
+                has_workspace,
+            ),
+            vision_enabled,
         ),
         coding_pack_enabled,
     );
@@ -159,6 +167,29 @@ fn coding_pack_gate(defs: Vec<ToolDefinition>, coding_pack_enabled: bool) -> Vec
         .collect()
 }
 
+/// 视觉能力闸门(视觉能力包 D4,2026-10-02)。
+///
+/// 与其余闸门正交:本函数按**生效连接的「视觉输入」能力位**决定视觉工具族
+/// (`view_image`/`zoom_image`/`image_diff`)该不该出现在模型面前。关位整族剔除——
+/// 能力位没开时,模型即使调用,图像也无法随请求下发(连接器序列化会丢弃),只会
+/// 浪费轮次;执行侧同样有兜底(解析不出 data URL 时引用被跳过)。
+///
+/// 取值口径:`settings_service::vision_enabled`(默认连接的 supports_vision,与聊天
+/// 贴图闸门同源)。**已知简化**:任务的工具清单按运行编译一次,不跨节点重编,
+/// 故节点级显式连接的视觉能力差异不细判(按默认连接口径;在 docs/遗留.md 登记)。
+///
+/// 为什么在策略层而不是注册层过滤:与 platform_gate 同理——工具始终注册,权限面板与
+/// 契约类型才有一致的工具面;过滤只影响「本轮下发给模型什么」。能力位在**每轮编译时**
+/// 由调用方按当前设置求值(勾选/取消能力位,下一轮的工具清单即随之变化)。
+fn vision_gate(defs: Vec<ToolDefinition>, vision_enabled: bool) -> Vec<ToolDefinition> {
+    if vision_enabled {
+        return defs;
+    }
+    defs.into_iter()
+        .filter(|d| !tool_sets::VISION_TOOLS.contains(&d.name.as_str()))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,6 +232,12 @@ mod tests {
             // 包专属工具(Q6):fs_patch2 是对照项,锁死包闸门与例外一律按精确名匹配
             "fs_patch",
             "fs_patch2",
+            // 视觉工具族(D4):view_image2 是「名字含 view_image」的对照项,
+            // 锁死视觉闸门按精确名匹配
+            "view_image",
+            "zoom_image",
+            "image_diff",
+            "view_image2",
         ] {
             reg.register(
                 ToolDefinition {
@@ -217,7 +254,7 @@ mod tests {
     #[test]
     fn deny_dangerous_excludes_dangerous_and_meta() {
         let reg = registry_with_tools();
-        let p = compile("deny_dangerous", &[], &reg, false, false);
+        let p = compile("deny_dangerous", &[], &reg, false, false, false);
         let names: Vec<&str> = p.defs.iter().map(|d| d.name.as_str()).collect();
         for banned in [
             "write",
@@ -245,7 +282,7 @@ mod tests {
     #[test]
     fn deny_dangerous_bash_exception_does_not_leak_to_other_dangerous() {
         let reg = registry_with_tools();
-        let p = compile("deny_dangerous", &[], &reg, false, false);
+        let p = compile("deny_dangerous", &[], &reg, false, false, false);
         let names: Vec<&str> = p.defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"bash"));
         // 精确匹配护栏:名字包含 "bash" 的其它危险工具不得被例外带出
@@ -279,6 +316,7 @@ mod tests {
             &reg,
             false,
             false,
+            false,
         );
         let names: Vec<&str> = p.defs.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(names, vec!["read"]);
@@ -287,7 +325,7 @@ mod tests {
     #[test]
     fn all_keeps_everything_except_meta() {
         let reg = registry_with_tools();
-        let p = compile("all", &[], &reg, false, false);
+        let p = compile("all", &[], &reg, false, false, false);
         let names: Vec<&str> = p.defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"write"));
         assert!(!names.contains(&"get_state"));
@@ -296,7 +334,7 @@ mod tests {
     #[test]
     fn allowed_names_match_defs() {
         let reg = registry_with_tools();
-        let p = compile("deny_dangerous", &[], &reg, false, false);
+        let p = compile("deny_dangerous", &[], &reg, false, false, false);
         let defs: Vec<&str> = p.defs.iter().map(|d| d.name.as_str()).collect();
         let allowed: Vec<&str> = p.allowed.iter().map(|s| s.as_str()).collect();
         assert_eq!(defs, allowed);
@@ -312,7 +350,7 @@ mod tests {
     #[test]
     fn submit_filtered_out_when_unavailable() {
         let reg = registry_with_tools();
-        let p = compile("all", &[], &reg, false, false);
+        let p = compile("all", &[], &reg, false, false, false);
         let defs: Vec<&str> = p.defs.iter().map(|d| d.name.as_str()).collect();
         assert!(
             !defs.contains(&"submit"),
@@ -331,7 +369,7 @@ mod tests {
     #[test]
     fn gate_never_waits_for_authorization() {
         let reg = registry_with_tools();
-        let p = compile("deny_dangerous", &[], &reg, false, false);
+        let p = compile("deny_dangerous", &[], &reg, false, false, false);
         assert!(p.gate().no_ui_authorization, "任务模式闸门不得等待授权");
     }
 
@@ -351,8 +389,9 @@ mod tests {
             ("allowlist", all_names),
         ] {
             // 包开(true):关包的剔除路径由 coding_pack_gate_hides_fs_patch_only_when_disabled
-            // 单独覆盖;本用例盯的是工作区闸门本身。
-            let p = compile(policy, &names, &reg, false, true);
+            // 单独覆盖;本用例盯的是工作区闸门本身。视觉闸门关闭(false)不干扰本断言
+            // (无工作区时整族先被剔除)。
+            let p = compile(policy, &names, &reg, false, true, false);
             let got: Vec<&str> = p.defs.iter().map(|d| d.name.as_str()).collect();
             for banned in crate::tools::tool_sets::WORKSPACE_TOOLS {
                 assert!(
@@ -368,7 +407,8 @@ mod tests {
     #[test]
     fn workspace_tools_visible_and_writes_excepted_when_bound() {
         let reg = registry_with_tools();
-        let p = compile("deny_dangerous", &[], &reg, true, true);
+        // 视觉能力位开(true):本用例断言「整族下发」,视觉三件现属工作区族
+        let p = compile("deny_dangerous", &[], &reg, true, true, true);
         let defs: Vec<&str> = p.defs.iter().map(|d| d.name.as_str()).collect();
         for name in crate::tools::tool_sets::WORKSPACE_TOOLS {
             assert!(defs.contains(name), "绑定工作区后应下发 {name}");
@@ -400,7 +440,7 @@ mod tests {
                 vec!["fs_patch".to_string(), "fs_read".to_string()],
             ),
         ] {
-            let p = compile(policy, &names, &reg, true, false);
+            let p = compile(policy, &names, &reg, true, false, false);
             let got: Vec<&str> = p.defs.iter().map(|d| d.name.as_str()).collect();
             assert!(
                 !got.contains(&"fs_patch"),
@@ -415,8 +455,8 @@ mod tests {
                 "{policy} 档关包不得误伤工作区族其余成员:{got:?}"
             );
         }
-        // 开包:deny_dangerous 下由按名例外放行;allowed 同源
-        let p = compile("deny_dangerous", &[], &reg, true, true);
+        // 开包:deny_dangerous 下由按名例外放行;allowed 同源(视觉位开:过视觉闸门)
+        let p = compile("deny_dangerous", &[], &reg, true, true, true);
         let got: Vec<&str> = p.defs.iter().map(|d| d.name.as_str()).collect();
         assert!(
             got.contains(&"fs_patch"),
@@ -426,5 +466,40 @@ mod tests {
             p.allowed.iter().any(|n| n == "fs_patch"),
             "defs 与 allowed 必须同源"
         );
+    }
+
+    /// 视觉闸门(2026-10-02,D4):生效连接未开「视觉输入」→ 视觉三件整族剔除
+    /// (defs 与 allowed 同源),工作区族其余成员与对照项不受影响;开位后正常下发。
+    #[test]
+    fn vision_gate_hides_vision_tools_without_capability() {
+        let reg = registry_with_tools();
+        // 绑定工作区 + 包开,仅视觉位关:三件必须不可见,其余照常
+        let p = compile("deny_dangerous", &[], &reg, true, true, false);
+        let got: Vec<&str> = p.defs.iter().map(|d| d.name.as_str()).collect();
+        for banned in crate::tools::tool_sets::VISION_TOOLS {
+            assert!(
+                !got.contains(banned),
+                "未开视觉位时不得下发 {banned}:{got:?}"
+            );
+            assert!(
+                !p.allowed.iter().any(|n| n == banned),
+                "allowed 与 defs 必须同源剔除:{banned}"
+            );
+        }
+        assert!(got.contains(&"fs_read"), "闸门不得误伤工作区族:{got:?}");
+        // 对照项 view_image2:用 all 档验证(deny_dangerous 会按风险级剔除未登记的
+        // 危险名,那是风险过滤的另一条路径,与本闸门无关)——精确名匹配下它必须仍在
+        let p_all = compile("all", &[], &reg, true, true, false);
+        let got_all: Vec<&str> = p_all.defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(
+            got_all.contains(&"view_image2"),
+            "闸门只按精确名匹配,不得误伤对照项:{got_all:?}"
+        );
+        // 开位:三件下发
+        let p = compile("deny_dangerous", &[], &reg, true, true, true);
+        let got: Vec<&str> = p.defs.iter().map(|d| d.name.as_str()).collect();
+        for name in crate::tools::tool_sets::VISION_TOOLS {
+            assert!(got.contains(name), "开位后应下发 {name}:{got:?}");
+        }
     }
 }
