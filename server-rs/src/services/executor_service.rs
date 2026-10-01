@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 /// 执行者指令长度上限(字符):执行者指令会整段注入 system 提示词,不设上限时
-/// 一张超长卡会直接吃满上下文(角色卡人设段有 persona_style 精简开关兜底,
-/// 执行者指令没有,故在写入侧硬限)。
+/// 一条超长指令会直接吃满上下文。TM-SET-2 起执行者指令是执行者身份段的唯一来源
+/// (角色卡人设段与其精简开关已退役),没有兜底可依赖,故在写入侧硬限。
 pub const INSTRUCTION_MAX_CHARS: usize = 8_000;
 
 /// 任务执行者服务:持有 data_dir,内存缓存执行者库,读写 data/task_executors.json

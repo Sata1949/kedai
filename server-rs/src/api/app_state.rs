@@ -372,7 +372,6 @@ impl AppState {
             characters.clone(),
             settings.clone(),
             world_books.clone(),
-            prompt_inject.clone(),
             engine.clone(),
             flow.clone(),
             agent_subtasks.clone(),

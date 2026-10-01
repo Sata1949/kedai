@@ -143,15 +143,6 @@ pub struct ModeSettings {
     /// MCP 服务器列表(覆盖语义与 bypass_blacklist 一致)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_servers: Option<Vec<McpServerConfig>>,
-    /// 执行者人设完整开关(R3a):None/false = 精简(description+personality 两段),
-    /// true = 完整(再加 scenario+mes_example)。仅任务模式人设拼装消费;
-    /// roleplay 引擎侧无人设注入点,扁平值仅作 task 覆盖层 None 时的沿用值。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_persona_full: Option<bool>,
-    /// 任务模式是否继承提示词注入(2026-09-10 实测修复):None 沿用扁平值(默认 false = 隔离),
-    /// true = 任务侧注入 prompt_floors.json(旧行为)。仅任务模式 system 拼装消费。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_prompt_inject_enabled: Option<bool>,
     /// 编码能力包(2026-09-28):None 沿用扁平值(默认 false = 不启用)。
     /// 仅影响任务模式执行者/汇总者的**缺省**默认词选择(见 `for_mode`),不改变工具面。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -594,9 +585,6 @@ impl RuntimeSettings {
             exec_allow_root: false,
             exec_allow_shizuku: false,
             exec_allow_sandbox: false,
-            task_persona_full: false,
-            // 默认隔离:任务模式不继承 prompt_floors.json 注入(2026-09-10 实测修复)
-            task_prompt_inject_enabled: false,
             // 编码能力包默认关:新装与旧配置行为逐字不变,须用户显式启用
             task_coding_bundle_enabled: false,
             // 任务模式默认连接默认空 = 跟随默认连接(active_connection),零迁移
@@ -756,12 +744,6 @@ impl RuntimeSettings {
         }
         if let Some(v) = &ov.mcp_servers {
             out.mcp_servers = v.clone();
-        }
-        if let Some(v) = ov.task_persona_full {
-            out.task_persona_full = v;
-        }
-        if let Some(v) = ov.task_prompt_inject_enabled {
-            out.task_prompt_inject_enabled = v;
         }
         if let Some(v) = &ov.task_default_connection_id {
             out.task_default_connection_id = v.clone();

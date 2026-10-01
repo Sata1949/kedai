@@ -1233,19 +1233,8 @@ impl TaskService {
                 crate::services::prompt_kit::untrusted_boundary("world_book", &world)
             ));
         }
-        // 提示词注入默认隔离(2026-09-10 实测修复,同 generate_step_with):
-        // 仅显式开启 task_prompt_inject_enabled 才继承 prompt_floors.json
-        let inject = if settings.task_prompt_inject_enabled {
-            self.inject_text()
-        } else {
-            String::new()
-        };
-        if !inject.is_empty() {
-            sys.push_str(&format!(
-                "\n\n{}",
-                crate::services::prompt_kit::untrusted_boundary("prompt_inject", &inject)
-            ));
-        }
+        // 提示词注入**恒隔离**(TM-SET-2):原 task_prompt_inject_enabled 开关退役后,
+        // 汇总者固定不继承 prompt_floors.json(与 generate_step_with 同口径)。
         // 同 generate_step_with:字段内容已是 task 有效值,.0 取字符串
         if !settings.agent_system_prompt.0.trim().is_empty() {
             let rendered = self.render_agent_prompt(

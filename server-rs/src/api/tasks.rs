@@ -25,8 +25,10 @@ pub struct CreateTaskBody {
     /// 不存在的 id 由服务层静默丢弃(执行者属可选增强,不该让创建失败)。
     #[serde(default)]
     pub executor_id: Option<String>,
-    /// 兼容字段:旧客户端的角色卡执行者。服务端**一律忽略**(执行者已与角色卡解耦,
-    /// 落库时 character_id 显式置 NULL)——保留字段只为旧客户端请求不 400。
+    /// 兼容字段:旧客户端的角色卡执行者。执行身份已与角色卡解耦(执行者只认
+    /// `executor_id`;两者同时给出时以执行者为准),但本字段仍被接受并**原样落库**,
+    /// 供旧任务语义使用(世界书按角色过滤 / 占位符渲染 / `character_prompt` 工具读取)。
+    /// 新前端不再发送;保留接受只为旧客户端请求不 400。
     #[serde(default)]
     pub character_id: Option<String>,
     /// 执行模式(批次 4 六模式):缺省 legacy;未知值严格拒绝(400),

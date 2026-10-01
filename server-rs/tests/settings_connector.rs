@@ -347,57 +347,37 @@ async fn mcp_settings_put_get_roundtrip() {
     .await;
 }
 
-/// R3a:task_persona_full 执行者人设开关的 API 往返。
-/// 默认(旧配置)= false(精简);PUT ?mode=task true → task 视图 true、roleplay 视图
-/// 仍为扁平默认 false(覆盖层不污染扁平);还原后回 false。
+/// TM-SET-2:两开关退役后,设置 API 不再认识 `task_persona_full` /
+/// `task_prompt_inject_enabled`——PUT 带旧键**静默忽略**(serde 未声明字段不进
+/// UpdateSettingsBody),200 且不落任何有效值;GET 响应不再含这两个键。
 #[tokio::test]
-async fn task_persona_full_roundtrip_via_settings_api() {
+async fn retired_task_switches_ignored_by_settings_api() {
     let _guard = test_lock().await;
     let app = test_app();
 
-    // 默认:两视图均为 false(精简,旧配置兼容)
-    let (status, s0) = send_json(app, "GET", "/api/settings?mode=task", json!({})).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        s0["task_persona_full"],
-        json!(false),
-        "默认应为精简(false): {s0}"
-    );
-
-    // PUT task 覆盖层 true → task 视图 true;roleplay 视图读扁平值不受影响
+    // 旧客户端带旧键 PUT:不 400、不报错(向后兼容由 serde 缺省容忍提供)
     let (status, r) = send_json(
         app,
         "PUT",
         "/api/settings?mode=task",
-        json!({ "task_persona_full": true }),
+        json!({ "task_persona_full": true, "task_prompt_inject_enabled": true }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "写入设置应 200: {r}");
-    assert_eq!(r["settings"]["task_persona_full"], json!(true));
-    let (_, task_view) = send_json(app, "GET", "/api/settings?mode=task", json!({})).await;
-    assert_eq!(
-        task_view["task_persona_full"],
-        json!(true),
-        "task 覆盖应生效(完整人设)"
-    );
-    let (_, rp_view) = send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
-    assert_eq!(
-        rp_view["task_persona_full"],
-        json!(false),
-        "扁平层(roleplay 视图)不受 task 覆盖影响"
+    assert_eq!(status, StatusCode::OK, "旧键应被静默忽略: {r}");
+    assert!(
+        r["settings"].get("task_persona_full").is_none(),
+        "响应不应再投影已退役字段: {r}"
     );
 
-    // 还原现场(覆盖层无「清除」语义,Some(false) 与 None 同效 = 精简)
-    let (status, _) = send_json(
-        app,
-        "PUT",
-        "/api/settings?mode=task",
-        json!({ "task_persona_full": false }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let (_, after) = send_json(app, "GET", "/api/settings?mode=task", json!({})).await;
-    assert_eq!(after["task_persona_full"], json!(false));
+    // GET 两视图都不得再出现退役键
+    for mode in ["task", "roleplay"] {
+        let (_, s) = send_json(app, "GET", &format!("/api/settings?mode={mode}"), json!({}))
+            .await;
+        assert!(
+            s.get("task_persona_full").is_none() && s.get("task_prompt_inject_enabled").is_none(),
+            "{mode} 视图不应含退役字段: {s}"
+        );
+    }
 }
 
 /// 新装/首装(含 Android)设置接口返回非空的角色扮演默认提示词:

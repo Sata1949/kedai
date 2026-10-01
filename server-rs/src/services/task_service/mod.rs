@@ -24,7 +24,6 @@ use crate::models::types::{
 use crate::services::agent_flow_service::{AgentFlowService, FlowSnapshot};
 use crate::services::agent_subtask_service::AgentSubtaskService;
 use crate::services::character_service::CharacterService;
-use crate::services::prompt_inject_service::PromptInjectService;
 use crate::services::settings_service::{connection_label, AppMode, RuntimeSettings};
 use crate::services::world_book_service::WorldBookService;
 use rusqlite::{params, OptionalExtension};
@@ -97,8 +96,6 @@ pub struct TaskService {
     settings: Arc<Mutex<RuntimeSettings>>,
     /// 世界书(注入执行者人设的世界观设定)
     world_books: Arc<WorldBookService>,
-    /// 提示词注入配置(简单合成文本 / 复杂 system 楼层)
-    prompt_inject: Arc<Mutex<PromptInjectService>>,
     /// 执行者库(任务创建时校验 executor_id 是否存在;执行期按 id 取执行者指令
     /// 注入 system 提示词;与 AppState 共享同一实例)
     executors: Arc<Mutex<crate::services::executor_service::ExecutorService>>,
@@ -126,7 +123,6 @@ impl TaskService {
         characters: Arc<CharacterService>,
         settings: Arc<Mutex<RuntimeSettings>>,
         world_books: Arc<WorldBookService>,
-        prompt_inject: Arc<Mutex<PromptInjectService>>,
         engine: Arc<crate::agents::engine::AgentEngine>,
         flow: Arc<Mutex<AgentFlowService>>,
         agent_subtasks: Arc<AgentSubtaskService>,
@@ -142,7 +138,6 @@ impl TaskService {
             agent_subtasks,
             settings,
             world_books,
-            prompt_inject,
             executors,
             cancels: Mutex::new(HashMap::new()),
             activity: Mutex::new(HashMap::new()),
@@ -193,8 +188,10 @@ impl TaskService {
     ///
     /// 两个执行者入参的兼容关系(2026-09-17 执行者库批次):
     ///   - `executor_id`:独立执行者库 id(前端唯一的绑定入口);
-    ///   - `character_id`:**兼容入参**,保留给旧客户端与旧任务语义——前端已不再发送,
-    ///     但 API 层面继续接受,避免破坏既有客户端与 R3a(task_persona_full)契约。
+    ///   - `character_id`:**兼容入参**,前端已不再发送,但 API 层面继续接受,避免
+    ///     破坏既有客户端。接受后**原样落库**——旧任务语义(世界书按角色过滤 /
+    ///     占位符渲染 / `character_prompt` 工具读取)仍以它为准;不做执行者绑定。
+    ///     (「执行者人设档位」注入已随 TM-SET-2 退役,本字段不再影响提示词人设段。)
     ///
     /// 两者同时给出时执行期以 executor_id 为准(见 prompt.rs 的分支顺序)。
     ///

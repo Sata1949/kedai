@@ -18,7 +18,7 @@ withDefaults(defineProps<{
 const store = useAppStore();
 // Agent 设置直接绑定 store(storeToRefs),与 useAgentSettings 保存逻辑读写同一 store;
 // appMode 用于「系统提示词按模式独立存储」的 UI 标注(徽标/说明/按钮文案随模式即时切换)
-const { agentSystemPrompt, searchEndpoint, mvuVarsPosition, reflectPrompt, taskPersonaFull, taskPromptInjectEnabled, appMode, mvuModel, mvuTemperatureInput, model, models } = storeToRefs(store);
+const { agentSystemPrompt, searchEndpoint, mvuVarsPosition, reflectPrompt, appMode, mvuModel, mvuTemperatureInput, model, models } = storeToRefs(store);
 
 /** 变量生成模型下拉的候选:当前正文模型 + 已拉取到的可用模型列表(HB-7) */
 const modelOptions = computed(() => {
@@ -138,30 +138,6 @@ watch(appMode, () => void loadPromptPreview());
         深度 / Agent 模式的反思步骤:留空时用内置规则(空输出、截断、未答疑问)检查;填写后改为调用模型,按本提示词检查
         草稿是否满足人设、字数、格式等要求,判定输出须以 <code>PASS</code> 或 <code>FAIL</code> 开头,失败自动重新生成
         (最多 3 次)。模型输出无法解析时自动回退内置规则,不影响流程。
-      </p>
-      <div class="sv-inp-row">
-        <label class="sv-inp-tag">执行者人设</label>
-        <select v-model="taskPersonaFull" class="sv-input">
-          <option :value="false">精简(默认)</option>
-          <option :value="true">完整</option>
-        </select>
-      </div>
-      <p class="sv-note">
-        仅任务模式生效:任务执行者绑定角色卡时注入的「写作风格参考」人设段。<b>精简</b>只注入人设描述与人格两段(去掉
-        情境与文风示例,显著省 token);<b>完整</b>为旧行为,注入角色卡全部四段。角色扮演模式下修改将作为任务模式未单独
-        设置时的沿用值。
-      </p>
-      <div class="sv-inp-row">
-        <label class="sv-inp-tag">任务继承提示词注入</label>
-        <select v-model="taskPromptInjectEnabled" class="sv-input">
-          <option :value="false">不继承(默认)</option>
-          <option :value="true">继承</option>
-        </select>
-      </div>
-      <p class="sv-note">
-        仅任务模式生效:「提示词注入」配置(角色扮演的文章要求,如字数 / 视角 / 禁词)是否也注入任务执行、汇总与追加指令。
-        <b>不继承(默认)</b>可避免角色扮演的写作要求与任务目标冲突(例如追加「压缩到 200 字」却因注入的「1200 字」要求
-        反而变长);<b>继承</b>为旧行为,任务与角色扮演共用同一注入源。
       </p>
       <div class="sv-btn-row">
         <button class="sv-btn primary sv-btn-fill" :disabled="agentSaving" @click="saveAgentNow">

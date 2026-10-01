@@ -824,6 +824,8 @@ async fn executor_library_crud_roundtrip() {
 
 /// 解耦的核心断言:绑定执行者时,注入的是执行者指令而非角色卡人设。
 /// 用 [[floors]] 钩子回显 mock 执行者实际收到的完整消息序列(system 含身份段)。
+/// TM-SET-2 起角色卡人设段整体退役:兼容字段 character_id 仍被接受并落库
+/// (旧任务语义),但任何人设文本都不再进任务 system——part ② 锁这一现状。
 #[tokio::test]
 async fn task_executor_replaces_character_persona() {
     let app = test_app();
@@ -872,7 +874,9 @@ async fn task_executor_replaces_character_persona() {
         );
     }
 
-    // ② 兼容路径未回归:不绑执行者、只给 character_id(旧客户端形态)仍注入人设
+    // ② 兼容字段 character_id:仍被接受并原样落库(旧任务语义:世界书按角色过滤 /
+    //    占位符渲染 / character_prompt 工具读取),但人设段已随 TM-SET-2 退役——
+    //    旧路径同样不再注入角色卡人设;未绑执行者也不注入执行者指令。
     let (status, json) = send_json(
         app,
         "POST",
@@ -881,6 +885,11 @@ async fn task_executor_replaces_character_persona() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "兼容创建应 201: {json}");
+    assert_eq!(
+        json["task"]["character_id"].as_str(),
+        Some(cid.as_str()),
+        "兼容字段应原样落库: {json}"
+    );
     let legacy_id = json["task"]["id"].as_str().unwrap().to_string();
     let (status, _) = send_json(
         app,
@@ -894,8 +903,8 @@ async fn task_executor_replaces_character_persona() {
     assert_eq!(st, "done", "兼容路径任务应完成: {detail}");
     let echo = detail["task"]["result"].as_str().unwrap_or("");
     assert!(
-        echo.contains("R3A-DESC-MARK"),
-        "旧路径(character_id)应仍注入角色人设: {echo}"
+        !echo.contains("R3A-DESC-MARK") && !echo.contains("R3A-PERS-MARK"),
+        "人设段已退役,旧路径也不得再注入角色卡人设: {echo}"
     );
     assert!(
         !echo.contains("EXECUTOR-INSTRUCTION-MARK"),

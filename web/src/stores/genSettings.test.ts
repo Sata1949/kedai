@@ -104,8 +104,6 @@ function makeSettings(overrides: Partial<RuntimeSettings> = {}): RuntimeSettings
     exec_allow_root: false,
     exec_allow_shizuku: false,
     exec_allow_sandbox: false,
-    task_persona_full: false,
-    task_prompt_inject_enabled: false,
     task_coding_bundle_enabled: false,
     task_default_connection_id: '',
     // 多套连接(批次 4):默认空列表,具体连接由用例覆盖
@@ -325,38 +323,6 @@ describe('genSettings 记忆槽预算与容量上限(B2/B3)', () => {
     await store.saveSettings({ memory_inject_char_budget: 0, memory_max_entries: 0 });
     expect(store.memoryInjectCharBudget).toBe(0);
     expect(store.memoryMaxEntries).toBe(0);
-  });
-});
-
-describe('genSettings 执行者人设开关(R3a task_persona_full)', () => {
-  beforeEach(() => {
-    memStorage.clear();
-    setActivePinia(createPinia());
-  });
-
-  it('loadSettings 回填服务端值;缺字段(null/undefined)兜底 false(精简)', async () => {
-    const store = useGenSettingsStore();
-    getSettingsMock.mockReset().mockResolvedValue(makeSettings({ task_persona_full: true }));
-    await store.loadSettings();
-    expect(store.taskPersonaFull).toBe(true);
-
-    // 旧服务端/异常响应缺字段:不得污染 store,回退精简
-    getSettingsMock.mockReset().mockResolvedValue(
-      makeSettings({ task_persona_full: undefined as unknown as boolean }),
-    );
-    await store.loadSettings();
-    expect(store.taskPersonaFull).toBe(false);
-  });
-
-  it('saveSettings 响应回填 taskPersonaFull(与 loadSettings 同口径)', async () => {
-    const store = useGenSettingsStore();
-    saveSettingsMock.mockReset().mockResolvedValue({
-      ok: true,
-      settings: makeSettings({ task_persona_full: true }),
-    });
-    await store.saveSettings({ task_persona_full: true });
-    expect(saveSettingsMock).toHaveBeenCalledWith({ task_persona_full: true }, 'roleplay');
-    expect(store.taskPersonaFull).toBe(true);
   });
 });
 

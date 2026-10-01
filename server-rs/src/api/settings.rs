@@ -193,14 +193,6 @@ pub struct UpdateSettingsBody {
     /// Android 允许沙箱档(缺省保持不变)。默认关闭。
     #[serde(default)]
     pub exec_allow_sandbox: Option<bool>,
-    /// 执行者人设完整开关(R3a):true = 完整(含 scenario+mes_example),false = 精简;
-    /// 缺省保持不变
-    #[serde(default)]
-    pub task_persona_full: Option<bool>,
-    /// 任务模式是否继承提示词注入(2026-09-10 实测修复):true = 继承 prompt_floors.json
-    /// (旧行为),false = 隔离(默认);缺省保持不变
-    #[serde(default)]
-    pub task_prompt_inject_enabled: Option<bool>,
     /// 编码能力包开关(2026-09-28):true = 任务模式缺省默认词用编码执行者模板;
     /// false = 通用任务默认词(默认);缺省保持不变。用户自定义提示词逐字优先。
     #[serde(default)]
@@ -331,8 +323,6 @@ fn settings_json(s: &RuntimeSettings) -> Value {
         "exec_allow_root": s.exec_allow_root,
         "exec_allow_shizuku": s.exec_allow_shizuku,
         "exec_allow_sandbox": s.exec_allow_sandbox,
-        "task_persona_full": s.task_persona_full,
-        "task_prompt_inject_enabled": s.task_prompt_inject_enabled,
         "task_coding_bundle_enabled": s.task_coding_bundle_enabled,
         "task_default_connection_id": s.task_default_connection_id,
         "tool_history_keep_rounds": s.tool_history_keep_rounds,
@@ -826,14 +816,6 @@ pub async fn update_settings(
             if let Some(v) = body.exec_allow_sandbox {
                 s.exec_allow_sandbox = v;
             }
-            // 执行者人设完整开关(R3a;bool 免校验,task 模式写覆盖层)
-            if let Some(v) = body.task_persona_full {
-                apply!(s, is_task, task_persona_full, v);
-            }
-            // 任务模式提示词注入继承开关(2026-09-10 实测修复;bool 免校验,task 写覆盖层)
-            if let Some(v) = body.task_prompt_inject_enabled {
-                apply!(s, is_task, task_prompt_inject_enabled, v);
-            }
             // 编码能力包开关(2026-09-28;bool 免校验,task 写覆盖层)。只影响提示词缺省值:
             // 启用后任务模式缺省默认词改用编码执行者模板,用户自定义值仍逐字优先。
             if let Some(v) = body.task_coding_bundle_enabled {
@@ -1319,9 +1301,10 @@ pub async fn prompt_preview(
         );
     }
 
-    // 任务模式注入默认隔离(2026-09-10 实测修复):task 模式且未显式开启继承时,
-    // 不推送注入层——预览必须与真实下发一致(docs/契约-协议与配置.md 第五节)。
-    let inject_gated = matches!(mode, AppMode::Task) && !settings.task_prompt_inject_enabled;
+    // 任务模式注入**恒隔离**(TM-SET-2):task 模式一律不推送注入层——预览必须与真实
+    // 下发一致(docs/契约-协议与配置.md 第五节)。该行为原由 task_prompt_inject_enabled
+    // 门控(2026-09-10 F2 实跑修复的默认侧);开关退役后固定为「不注入」,无恢复通道。
+    let inject_gated = matches!(mode, AppMode::Task);
     if !inject_gated {
         let inject = state
             .prompt_inject

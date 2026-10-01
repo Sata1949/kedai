@@ -124,14 +124,6 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
   const reflectAdvicePrompt = ref('');
   /** 反思失败建议注入角色(user / assistant) */
   const reflectAdviceRole = ref<'user' | 'assistant'>('user');
-  /** 执行者人设完整开关(R3a;服务端默认 false = 精简:仅 description+personality)。
-   *  仅任务模式执行者人设注入生效;角色扮演模式下修改的是 task 覆盖层 None 时的沿用值 */
-  const taskPersonaFull = ref(false);
-
-  /** 任务模式是否继承提示词注入(2026-09-10 实跑修复;服务端默认 false = 隔离)。
-   *  关闭时任务执行/汇总/追加轮不注入 prompt_floors.json(通常含角色扮演的
-   *  「1200 字/第三人称/禁词表」等文章要求,会与任务目标冲突);开启恢复旧行为。 */
-  const taskPromptInjectEnabled = ref(false);
 
   /** 任务模式编码能力包开关(服务端默认 false = 关闭)。
    *  开启后任务执行者**未自定义**系统提示词时,默认值改用「编码执行者模板」
@@ -179,8 +171,6 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
       presetTailRole.value = s.preset_tail_role === 'assistant' ? 'assistant' : 'user';
       reflectAdvicePrompt.value = s.reflect_advice_prompt ?? '';
       reflectAdviceRole.value = s.reflect_advice_role === 'assistant' ? 'assistant' : 'user';
-      taskPersonaFull.value = s.task_persona_full ?? false;
-      taskPromptInjectEnabled.value = s.task_prompt_inject_enabled ?? false;
       taskCodingBundleEnabled.value = s.task_coding_bundle_enabled ?? false;
       taskDefaultConnectionId.value = s.task_default_connection_id ?? '';
       authorizationMode.value = readAuthorizationMode(s);
@@ -249,8 +239,6 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     presetTailRole.value = s.preset_tail_role === 'assistant' ? 'assistant' : 'user';
     reflectAdvicePrompt.value = s.reflect_advice_prompt ?? '';
     reflectAdviceRole.value = s.reflect_advice_role === 'assistant' ? 'assistant' : 'user';
-    taskPersonaFull.value = s.task_persona_full ?? false;
-    taskPromptInjectEnabled.value = s.task_prompt_inject_enabled ?? false;
     taskCodingBundleEnabled.value = s.task_coding_bundle_enabled ?? false;
     taskDefaultConnectionId.value = s.task_default_connection_id ?? '';
     authorizationMode.value = readAuthorizationMode(s);
@@ -434,8 +422,6 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     presetTailRole,
     reflectAdvicePrompt,
     reflectAdviceRole,
-    taskPersonaFull,
-    taskPromptInjectEnabled,
     taskCodingBundleEnabled,
     taskDefaultConnectionId,
     promptInject,

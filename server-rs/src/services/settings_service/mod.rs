@@ -313,18 +313,6 @@ pub struct RuntimeSettings {
     /// Android 执行层:允许沙箱档(应用自身 UID)。默认关闭(统一由 exec_enabled 控制)。
     #[serde(default)]
     pub exec_allow_sandbox: bool,
-    /// 执行者人设完整开关(R3a):false = 精简(默认,旧配置缺省由 serde default 填 false,
-    /// 零迁移),true = 完整(含 scenario+mes_example)。权威消费在任务模式人设拼装
-    /// (persona_style);task 覆盖层可覆盖,None 沿用本扁平值。
-    #[serde(default)]
-    pub task_persona_full: bool,
-    /// 任务模式是否继承提示词注入(2026-09-10 六模式实测修复;默认 false = 隔离)。
-    /// false:任务执行/汇总/追加轮不注入 `prompt_floors.json`(该配置通常承载角色扮演的
-    /// 文章要求,如「1200 字/第三人称/禁词表」,进任务模式会与任务目标冲突——实测
-    /// legacy 追加「压缩到 200 字」后结果反而变长)。true:沿用旧行为,与角色扮演共用注入源。
-    /// task 覆盖层可覆盖,None 沿用本扁平值。
-    #[serde(default)]
-    pub task_prompt_inject_enabled: bool,
     /// 编码能力包开关(2026-09-28;默认 false = 不启用,旧配置缺省由 serde default 填 false,
     /// 零迁移)。启用后任务模式执行者/汇总者的**缺省**默认词改用编码执行者模板
     /// (`default_coding_task_agent_prompt`);用户在提示词框自定义过的值逐字优先。
@@ -1196,114 +1184,36 @@ mod tests {
         );
     }
 
-    /// R3a:task_persona_full 默认精简(None/false 同义),旧配置零迁移;
-    /// 覆盖层 Some(true) = 完整人设(现状四段);serde 线格式 None 省略不落 null。
-    /// 口径见 docs/契约-协议与配置.md 第一节。
+    /// TM-SET-2:两开关退役后,旧 settings.json 里残留的 `task_persona_full` /
+    /// `task_prompt_inject_enabled`(扁平与覆盖层)必须被 serde **静默忽略**——
+    /// 零迁移:不报错、不影响任何有效值,行为固定为现行默认(无档位、注入恒隔离)。
     #[test]
-    fn task_persona_full_defaults_slim_and_roundtrips() {
-        // 覆盖层 serde 三态:缺字段/null → None(沿用扁平);None 序列化省略字段
-        let missing: ModeSettings = serde_json::from_str("{}").unwrap();
-        assert!(
-            missing.task_persona_full.is_none(),
-            "缺字段应为 None(沿用扁平值)"
-        );
-        let null: ModeSettings = serde_json::from_str(r#"{"task_persona_full": null}"#).unwrap();
-        assert!(null.task_persona_full.is_none(), "null 应为 None");
-        let some: ModeSettings = serde_json::from_str(r#"{"task_persona_full": true}"#).unwrap();
-        assert_eq!(some.task_persona_full, Some(true));
-        assert!(
-            !serde_json::to_string(&missing)
-                .unwrap()
-                .contains("task_persona_full"),
-            "None 应省略字段而不是落 null"
-        );
-
+    fn retired_task_switches_are_ignored_on_load() {
         let cfg = test_cfg();
-        // 旧版 settings.json:无 task 覆盖层、无扁平字段 → 读入后默认精简(false)
-        let dir = tmp_dir("persona-full");
+        let dir = tmp_dir("retired-task-switches");
         let mut legacy = serde_json::to_value(RuntimeSettings::from_config(&cfg)).unwrap();
         let obj = legacy.as_object_mut().unwrap();
-        obj.remove("task");
-        obj.remove("task_persona_full");
+        // 旧扁平字段与旧覆盖层字段一并回灌(模拟升级前落盘的 settings.json)
+        obj.insert("task_persona_full".into(), serde_json::json!(true));
+        obj.insert("task_prompt_inject_enabled".into(), serde_json::json!(true));
+        obj.insert(
+            "task".into(),
+            serde_json::json!({
+                "task_persona_full": true,
+                "task_prompt_inject_enabled": true
+            }),
+        );
         std::fs::write(
             dir.join("settings.json"),
             serde_json::to_string_pretty(&legacy).unwrap(),
         )
         .unwrap();
+        // 不 panic、不缺字段:两字段已不在线格式里,忽略后其余设置照常读入
         let loaded = RuntimeSettings::load(&dir, &cfg);
-        assert!(!loaded.task_persona_full, "旧配置缺省应为精简(false)");
-        assert!(
-            !loaded.for_mode(AppMode::Task).task_persona_full,
-            "None 覆盖层沿用扁平值 = 精简(旧配置兼容)"
-        );
-
-        // 覆盖层三分支:Some(true)=完整;Some(false)/None=精简;roleplay 读扁平权威值
-        let mut s = RuntimeSettings::from_config(&cfg);
-        s.task.task_persona_full = Some(true);
-        assert!(
-            s.for_mode(AppMode::Task).task_persona_full,
-            "Some(true) = 完整人设"
-        );
-        assert!(
-            !s.for_mode(AppMode::Roleplay).task_persona_full,
-            "roleplay 读扁平权威值(false),task 覆盖层不得污染"
-        );
-        s.task.task_persona_full = Some(false);
-        assert!(
-            !s.for_mode(AppMode::Task).task_persona_full,
-            "Some(false) = 精简"
-        );
-    }
-
-    /// 2026-09-10 实跑修复:任务模式提示词注入默认隔离(false),旧配置零迁移;
-    /// 覆盖层 Some(true) 可恢复与角色扮演共用注入源的旧行为。
-    #[test]
-    fn task_prompt_inject_isolated_by_default_and_overridable() {
-        // 覆盖层 serde 三态:缺字段/null → None(沿用扁平);None 序列化省略字段
-        let missing: ModeSettings = serde_json::from_str("{}").unwrap();
-        assert!(
-            missing.task_prompt_inject_enabled.is_none(),
-            "缺字段应为 None(沿用扁平值)"
-        );
-        let null: ModeSettings =
-            serde_json::from_str(r#"{"task_prompt_inject_enabled": null}"#).unwrap();
-        assert!(null.task_prompt_inject_enabled.is_none(), "null 应为 None");
-        let some: ModeSettings =
-            serde_json::from_str(r#"{"task_prompt_inject_enabled": true}"#).unwrap();
-        assert_eq!(some.task_prompt_inject_enabled, Some(true));
-
-        let cfg = test_cfg();
-        // 旧版 settings.json:无 task 覆盖层、无扁平字段 → 读入后默认隔离(false)
-        let dir = tmp_dir("task-prompt-inject");
-        let mut legacy = serde_json::to_value(RuntimeSettings::from_config(&cfg)).unwrap();
-        let obj = legacy.as_object_mut().unwrap();
-        obj.remove("task");
-        obj.remove("task_prompt_inject_enabled");
-        std::fs::write(
-            dir.join("settings.json"),
-            serde_json::to_string_pretty(&legacy).unwrap(),
-        )
-        .unwrap();
-        let loaded = RuntimeSettings::load(&dir, &cfg);
-        assert!(
-            !loaded.task_prompt_inject_enabled,
-            "旧配置缺省应为隔离(false)"
-        );
-        assert!(
-            !loaded.for_mode(AppMode::Task).task_prompt_inject_enabled,
-            "None 覆盖层沿用扁平值 = 隔离(旧配置兼容)"
-        );
-
-        // 覆盖层分支:Some(true)=继承注入;roleplay 读扁平权威值,覆盖层不污染
-        let mut s = RuntimeSettings::from_config(&cfg);
-        s.task.task_prompt_inject_enabled = Some(true);
-        assert!(
-            s.for_mode(AppMode::Task).task_prompt_inject_enabled,
-            "Some(true) = 任务侧继承注入"
-        );
-        assert!(
-            !s.for_mode(AppMode::Roleplay).task_prompt_inject_enabled,
-            "roleplay 读扁平权威值(false),task 覆盖层不得污染"
+        assert_eq!(
+            loaded.for_mode(AppMode::Task).task_default_connection_id,
+            "",
+            "退役字段不得影响其余设置读入"
         );
     }
 

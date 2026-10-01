@@ -1,6 +1,7 @@
 // 提示词组装:任务模式有效设置读取(task_settings)、世界书常驻段落(world_context)、
-// 提示词注入文本(inject_text)、Agent 系统提示词占位符渲染(render_agent_prompt)、
-// 执行者人设参考文本(persona_style)。
+// Agent 系统提示词占位符渲染(render_agent_prompt)。
+// 注:提示词注入文本(inject_text)与执行者人设参考(persona_style)已随 TM-SET-2
+// 退役——任务 system 恒不注入 prompt_floors.json,执行者身份段只认执行者指令。
 // 自 task_service.rs 拆分迁入,纯代码移动,逻辑不变;依赖经 `use super::*` 取自 mod.rs。
 use super::*;
 
@@ -109,17 +110,10 @@ impl TaskService {
                     crate::services::prompt_kit::untrusted_boundary("task_executor", instruction)
                 ));
             }
-        } else if let Some(c) = &character {
-            // 人设精简/完整按任务模式有效设置(task_persona_full,R3a;None/false=精简)
-            let style = persona_style(c, settings.task_persona_full);
-            if !style.is_empty() {
-                sys.push_str(&format!(
-                    "\n\n写作风格参考(角色「{}」):\n{}",
-                    c.chara_name,
-                    crate::services::prompt_kit::untrusted_boundary("character", &style)
-                ));
-            }
         }
+        // 角色卡人设段已随「执行者人设档位」一并退役(TM-SET-2):执行者身份段只认执行者
+        // 指令;旧任务(仅读侧可达,含 character_id)不再注入「写作风格参考」。character
+        // 仍参与下方世界书过滤口径与占位符渲染({{char}} 等),那两项维持现状。
         // 世界书过滤口径与身份来源一致:执行者库路径只取全局(传 None,
         // 执行者与角色卡无关联关系),角色卡路径按该角色过滤(旧语义:原样传 character_id,
         // 即使该角色已被删除也与改造前一致);无身份时也是全局
@@ -135,19 +129,9 @@ impl TaskService {
                 crate::services::prompt_kit::untrusted_boundary("world_book", &world)
             ));
         }
-        // 提示词注入默认隔离(2026-09-10 实测修复):solo/multi/team 主 agent 与 followup
-        // 续跑共用本函数;仅显式开启 task_prompt_inject_enabled 才继承 prompt_floors.json
-        let inject = if settings.task_prompt_inject_enabled {
-            self.inject_text()
-        } else {
-            String::new()
-        };
-        if !inject.is_empty() {
-            sys.push_str(&format!(
-                "\n\n{}",
-                crate::services::prompt_kit::untrusted_boundary("prompt_inject", &inject)
-            ));
-        }
+        // 提示词注入**恒隔离**(TM-SET-2):原 task_prompt_inject_enabled 开关退役后固定为
+        // 不继承 prompt_floors.json(2026-09-10 F2 实跑修复的默认侧)。solo/multi/team 主
+        // agent 与 followup 续跑共用本函数,行为不再有恢复通道。
         // settings 为 for_mode(Task) 合并值;agent_system_prompt 字段类型 RoleplayPromptConfig
         // (RuntimeSettings 共用成员),此处内容已是 task 有效值(覆盖层计算结果),.0 取字符串
         if !settings.agent_system_prompt.0.trim().is_empty() {
@@ -175,15 +159,6 @@ impl TaskService {
         crate::services::prompt_kit::constant_world_text(&entries)
     }
 
-    /// 提示词注入文本:简单模式取合成文本;复杂模式取 role=system 的启用楼层内容。
-    /// 任务模式无对话历史,楼层 before/after/depth 位置语义不适用,仅注入 system 楼层。
-    /// 逻辑下沉 prompt_kit::system_inject_text(WP7)。
-    /// pub(crate):任务引擎 solo 提示词组装复用。
-    pub(crate) fn inject_text(&self) -> String {
-        let guard = self.prompt_inject.lock().unwrap_or_else(|e| e.into_inner());
-        crate::services::prompt_kit::system_inject_text(guard.get())
-    }
-
     /// 渲染任务模式 Agent 系统提示词占位符(与角色扮演同款占位符语义):
     /// {{char}}/{{character_name}}/{{character_description}}/{{personality}}/{{scenario}}/
     /// {{world_info}}/{{user}}/{{lastUserMessage}}(任务模式取任务目标)。
@@ -209,129 +184,9 @@ impl TaskService {
     }
 }
 
-/// 从角色卡构建执行者人设参考文本。
-/// full=false(精简,默认):人设(description)+ 人格(personality)两段——scenario 与
-/// mes_example 文风示例对任务执行大部分无用(实测是 system 膨胀来源之一),精简模式不注入;
-/// full=true(完整):现状四段全量(再加 世界观/情境 scenario + 文风示例 mes_example),
-/// 与改造前逐字节一致。字段均为 V2 角色卡 data 对象的顶层字段。
-/// 任一字段为空则跳过;全部为空返回空串(此时不注入人设)。
-/// pub(crate):任务引擎 solo 提示词组装复用(勿复制实现)。
-/// 开关口径见 docs/契约-协议与配置.md 第一节(task_persona_full,None/false=精简)。
-pub(crate) fn persona_style(c: &CharacterRecord, full: bool) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if !c.description.trim().is_empty() {
-        parts.push(format!("人设:\n{}", c.description.trim()));
-    }
-    if let Some(raw) = c.data_raw.as_ref() {
-        if let Some(p) = raw
-            .get("personality")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.trim().is_empty())
-        {
-            parts.push(format!("人格:\n{}", p.trim()));
-        }
-        // 完整模式才注入 scenario / mes_example(精简模式跳过,见函数文档)
-        if full {
-            if let Some(s) = raw
-                .get("scenario")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.trim().is_empty())
-            {
-                parts.push(format!("世界观/情境:\n{}", s.trim()));
-            }
-            if let Some(m) = raw
-                .get("mes_example")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.trim().is_empty())
-            {
-                parts.push(format!("文风示例:\n{}", m.trim()));
-            }
-        }
-    }
-    parts.join("\n\n")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// 四段人设字段各带唯一标记的测试角色卡
-    fn mk_character() -> CharacterRecord {
-        CharacterRecord {
-            id: "c1".into(),
-            name: "测试".into(),
-            chara_name: "测试".into(),
-            description: "DESCRIPTION-MARK 人设正文".into(),
-            file_path: "test.json".into(),
-            avatar_path: None,
-            data_raw: Some(serde_json::json!({
-                "personality": "PERSONALITY-MARK 人格",
-                "scenario": "SCENARIO-MARK 情境",
-                "mes_example": "MES-EXAMPLE-MARK 文风示例"
-            })),
-            first_mes: None,
-            alternate_greetings: None,
-            regex_scripts: None,
-            card_plugins: None,
-            creator: None,
-            character_version: None,
-            creator_notes: None,
-            created_at: "2026-09-02".into(),
-        }
-    }
-
-    /// 精简模式(R3a 默认):去掉 scenario 与 mes_example,保留 description + personality
-    #[test]
-    fn persona_style_slim_omits_scenario_and_mes_example() {
-        let c = mk_character();
-        let slim = persona_style(&c, false);
-        assert!(slim.contains("DESCRIPTION-MARK"), "精简应保留人设: {slim}");
-        assert!(slim.contains("PERSONALITY-MARK"), "精简应保留人格: {slim}");
-        assert!(
-            !slim.contains("SCENARIO-MARK"),
-            "精简不得含 scenario 内容: {slim}"
-        );
-        assert!(
-            !slim.contains("MES-EXAMPLE-MARK"),
-            "精简不得含 mes_example 内容: {slim}"
-        );
-        assert!(
-            !slim.contains("世界观/情境"),
-            "精简不得含 scenario 段标题: {slim}"
-        );
-        assert!(
-            !slim.contains("文风示例"),
-            "精简不得含 mes_example 段标题: {slim}"
-        );
-    }
-
-    /// 完整模式(R3a 开关打开):四段全量,与改造前逐字节一致
-    #[test]
-    fn persona_style_full_keeps_all_sections() {
-        let c = mk_character();
-        let full = persona_style(&c, true);
-        for marker in [
-            "DESCRIPTION-MARK",
-            "PERSONALITY-MARK",
-            "SCENARIO-MARK",
-            "MES-EXAMPLE-MARK",
-        ] {
-            assert!(full.contains(marker), "完整模式应含 {marker}: {full}");
-        }
-        for title in ["人设:", "人格:", "世界观/情境:", "文风示例:"] {
-            assert!(full.contains(title), "完整模式应含段标题 {title}: {full}");
-        }
-    }
-
-    /// 全字段为空返回空串(两种模式同口径,此时不注入人设)
-    #[test]
-    fn persona_style_empty_when_all_blank() {
-        let mut c = mk_character();
-        c.description = String::new();
-        c.data_raw = Some(serde_json::json!({}));
-        assert!(persona_style(&c, false).is_empty(), "精简全空应返回空串");
-        assert!(persona_style(&c, true).is_empty(), "完整全空应返回空串");
-    }
 
     /// 提示词契约加固(审计项 G):mock 钩子 [[empty_if:任务执行者]] /
     /// [[reply_if:任务规划器]] 依赖的独特子串不得丢失;新增契约纪律须就位。

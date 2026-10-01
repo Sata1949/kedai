@@ -65,45 +65,9 @@ async fn wait_terminal(app: &axum::Router, id: &str) -> (String, Value) {
     panic!("任务 {id} 未在超时内到达终态");
 }
 
-/// 上传四段人设字段各带唯一标记的角色卡(R3a 测试夹具),返回角色 id。
-/// 平铺(V1 风格)顶层字段:persona_style 读取口径为 data_raw 顶层
-/// (description 入 CharacterRecord.description,其余经 data_raw 顶层取;
-/// V2 卡的 data 包装层不在本批读取语义内,不动既有行为)。
-async fn upload_persona_marked_character(app: &axum::Router) -> String {
-    let card = json!({
-        "name": "人设标记角色",
-        "description": "R3A-DESC-MARK 人设正文",
-        "personality": "R3A-PERS-MARK 人格",
-        "scenario": "R3A-SCEN-MARK 情境",
-        "mes_example": "R3A-MESEX-MARK 文风示例",
-        "first_mes": "你好"
-    });
-    let body = format!(
-        "--BOUND\r\nContent-Disposition: form-data; name=\"file\"; filename=\"persona-mark.json\"\r\nContent-Type: application/json\r\n\r\n{}\r\n--BOUND--\r\n",
-        card
-    );
-    let req = Request::builder()
-        .method("POST")
-        .uri("/api/characters/upload")
-        .header("content-type", "multipart/form-data; boundary=BOUND")
-        .body(Body::from(body))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let status = resp.status();
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let json: Value = serde_json::from_slice(&bytes).unwrap();
-    assert!(
-        status == StatusCode::OK || status == StatusCode::CREATED,
-        "上传角色卡应 2xx,实际 {status}: {json}"
-    );
-    json["character"]["id"]
-        .as_str()
-        .or_else(|| json["id"].as_str())
-        .expect("上传响应应含角色 id")
-        .to_string()
-}
-
-/// 创建 solo 任务(绑定执行者角色)并跑到终态,返回任务详情
+/// 创建 solo 任务(兼容字段 character_id 绑定旧角色卡)并跑到终态,返回任务详情。
+/// character_id 仍被接受并原样落库(旧任务语义:世界书按角色过滤 / 占位符渲染 /
+/// character_prompt 工具读取),故本夹具供依赖角色关联的用例如实取用。
 async fn run_solo_task_with_character(
     app: &axum::Router,
     title: &str,
@@ -140,9 +104,9 @@ async fn create_task_with_mode(app: &axum::Router, title: &str, mode: &str) -> S
 
 /// 上传「工具输出标记」角色卡(R3b 测试夹具),返回角色 id。
 /// 标记放在 first_mes:read(type=character_prompt) 的工具输出含 first_mes,
-/// 而 R3a 人设段(persona_style)只取 description/personality(/scenario/mes_example)
-/// 四段、不取 first_mes —— 故 prompt_summary 中 R3B-TOOLOUT-MARK 只可能来自
-/// tool 消息,可按出现次数精确断言「完整保留了几轮工具结果」。
+/// 而任务执行者 system 的人设段已随 TM-SET-2 退役(人设不再注入)——
+/// 故 prompt_summary 中 R3B-TOOLOUT-MARK 只可能来自 tool 消息,
+/// 可按出现次数精确断言「完整保留了几轮工具结果」。
 async fn upload_tool_marked_character(app: &axum::Router) -> String {
     let card = json!({
         "name": "工具循环标记角色",
@@ -248,65 +212,26 @@ async fn task_executor_prompt_not_contaminated_by_roleplay_persona() {
     .await;
 }
 
-/// R3a:执行者人设精简/完整自选(task_persona_full)。
-/// 默认(None/false)= 精简:solo 执行者 system 只含 description+personality,
-/// 不含 scenario/mes_example;打开开关 = 完整:四段全量注入(与改造前一致)。
-/// 单函数顺序执行:共享 app 的设置是全局态,拆两个并发测试会互相干扰开关。
+/// TM-SET-2:角色卡人设段**退役**——绑角色卡的 solo 任务(兼容字段 character_id,
+/// 仅旧客户端可达)执行者 system 不再注入「写作风格参考」,执行者身份段只认执行者指令。
+/// 断言人设段标题与正文全部缺席(世界书按角色过滤与占位符渲染不受影响)。
+/// [[floors]] 钩子让 mock 执行者回显其实际收到的完整消息序列。
 #[tokio::test]
-async fn task_persona_slim_by_default_and_full_when_enabled() {
+async fn task_character_persona_never_injected_after_retirement() {
     let app = test_app();
-    let cid = upload_persona_marked_character(app).await;
-
-    // ===== 1) 默认精简(旧配置兼容:None = 精简)=====
-    // [[floors]] 钩子让 mock 执行者回显其实际收到的完整消息序列(system 含人设段)
+    let cid = upload_tool_marked_character(app).await;
     let detail = run_solo_task_with_character(app, "[[floors]]", &cid).await;
     let echo = detail["task"]["result"].as_str().unwrap_or("");
     assert!(!echo.is_empty(), "回显应有结果: {detail}");
+    // 绑定角色卡不再向 system 注入任何人设文本(世界书/占位符路径不受本断言影响)
     assert!(
-        echo.contains("R3A-DESC-MARK"),
-        "精简模式应保留人设 description: {echo}"
+        !echo.contains("写作风格参考"),
+        "人设段应随 TM-SET-2 退役,不得再出现: {echo}"
     );
     assert!(
-        echo.contains("R3A-PERS-MARK"),
-        "精简模式应保留人格 personality: {echo}"
+        !echo.contains("人设:"),
+        "人设正文段标题不得出现: {echo}"
     );
-    assert!(
-        !echo.contains("R3A-SCEN-MARK"),
-        "精简模式不得含 scenario 内容: {echo}"
-    );
-    assert!(
-        !echo.contains("R3A-MESEX-MARK"),
-        "精简模式不得含 mes_example 文风示例: {echo}"
-    );
-
-    // ===== 2) 打开开关 = 完整(四段全量)=====
-    let (status, json) = send_json(
-        app,
-        "PUT",
-        "/api/settings?mode=task",
-        json!({ "task_persona_full": true }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "写入设置应 200: {json}");
-    let detail = run_solo_task_with_character(app, "[[floors]]", &cid).await;
-    let echo = detail["task"]["result"].as_str().unwrap_or("");
-    for marker in [
-        "R3A-DESC-MARK",
-        "R3A-PERS-MARK",
-        "R3A-SCEN-MARK",
-        "R3A-MESEX-MARK",
-    ] {
-        assert!(echo.contains(marker), "完整模式应含 {marker}: {echo}");
-    }
-
-    // 还原现场(共享 app;Some(false) 与 None 同效 = 精简)
-    let _ = send_json(
-        app,
-        "PUT",
-        "/api/settings?mode=task",
-        json!({ "task_persona_full": false }),
-    )
-    .await;
 }
 
 /// R3b:工具循环历史回灌上限(trim_tool_history 全链路集成)。
@@ -410,13 +335,13 @@ async fn task_solo_tool_history_trimmed_in_prompt_summary() {
 
 // ==================== 批次 R2a:终态追加输入(followup) ====================
 
-/// 2026-09-10 六模式实跑修复(F2):任务模式提示词注入默认隔离。
+/// TM-SET-2:任务模式提示词注入**恒隔离**(原 2026-09-10 F2 实跑修复的默认侧固化)。
 /// 角色扮演的 prompt_floors.json 通常承载「1200 字/第三人称/禁词表」等文章要求,
 /// 注入任务 system 会与任务目标冲突(实测 legacy 追加「压缩到 200 字」后结果反而变长)。
-/// 本用例:注入配置含唯一哨兵文本 → 默认(隔离)时任务 system 不含哨兵;
-/// 显式开启 task_prompt_inject_enabled 后哨兵出现;最后恢复默认(隔离)。
+/// 本用例:注入配置含唯一哨兵文本 → 任务 system **恒不含**哨兵(开关已退役,无恢复通道);
+/// 用例末恢复注入配置,避免影响同 binary 其他用例。
 #[tokio::test]
-async fn task_prompt_inject_isolated_by_default() {
+async fn task_prompt_inject_never_injected() {
     let app = test_app();
     const NEEDLE: &str = "注入哨兵ABCXYZ";
 
@@ -447,16 +372,7 @@ async fn task_prompt_inject_isolated_by_default() {
     .await;
     assert_eq!(status, StatusCode::OK, "设置注入配置应 200");
 
-    // 关闭继承(默认)→ solo 任务 system 不含哨兵
-    let (status, _) = send_json(
-        app,
-        "PUT",
-        "/api/settings?mode=task",
-        json!({ "task_prompt_inject_enabled": false }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "关闭注入继承应 200");
-
+    // 注入配置在场的前提下,任务 system **恒不含**哨兵(开关退役,无恢复通道)
     let id = create_task_with_mode(app, "写一句关于秋天的话", "solo").await;
     let (status, _) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
     assert_eq!(status, StatusCode::OK);
@@ -465,37 +381,10 @@ async fn task_prompt_inject_isolated_by_default() {
     let off_text = calls.to_string();
     assert!(
         !off_text.contains(NEEDLE),
-        "默认隔离时任务调用提示词不得含注入哨兵: {off_text}"
+        "任务模式注入恒隔离,任务调用提示词不得含注入哨兵: {off_text}"
     );
 
-    // 显式开启继承 → system 含哨兵
-    let (status, _) = send_json(
-        app,
-        "PUT",
-        "/api/settings?mode=task",
-        json!({ "task_prompt_inject_enabled": true }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "开启注入继承应 200");
-
-    let id = create_task_with_mode(app, "写一句关于春天的话", "solo").await;
-    let (status, _) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
-    assert_eq!(status, StatusCode::OK);
-    let (_st, _) = wait_terminal(app, &id).await;
-    let (_, calls) = send_json(app, "GET", &format!("/api/tasks/{id}/calls"), json!({})).await;
-    assert!(
-        calls.to_string().contains(NEEDLE),
-        "显式开启后任务调用提示词应含注入哨兵: {calls}"
-    );
-
-    // 恢复默认:关闭继承 + 清空注入内容(避免影响后续并行用例)
-    let _ = send_json(
-        app,
-        "PUT",
-        "/api/settings?mode=task",
-        json!({ "task_prompt_inject_enabled": false }),
-    )
-    .await;
+    // 还原注入配置(避免影响后续并行用例)
     let _ = send_json(
         app,
         "PUT",

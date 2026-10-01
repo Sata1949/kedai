@@ -491,10 +491,6 @@ export interface RuntimeSettings {
   exec_allow_shizuku: boolean;
   /** Android 执行层:允许沙箱档(应用自身 UID;默认 false) */
   exec_allow_sandbox: boolean;
-  /** 执行者人设完整开关(R3a;默认 false = 精简:仅 description+personality;true = 完整:再加 scenario+mes_example)。仅任务模式生效 */
-  task_persona_full: boolean;
-  /** 任务模式是否继承提示词注入(2026-09-10 实跑修复;默认 false = 隔离,不注入 prompt_floors.json)。仅任务模式生效 */
-  task_prompt_inject_enabled: boolean;
   /** 任务模式编码能力包显式启用开关(默认 false = 关闭,须用户显式开启)。仅任务模式生效:
    *  开启后,任务执行者**未自定义**系统提示词时,默认值改用「编码执行者模板」
    *  (强调先读后写 / 遵循既有风格 / 改完跑验证 / 最小改动);用户若在提示词框里自定义过,
@@ -629,10 +625,6 @@ export interface RuntimeSettingsPatch {
   exec_allow_shizuku?: boolean;
   /** Android 允许沙箱档(缺省保持不变) */
   exec_allow_sandbox?: boolean;
-  /** 执行者人设完整开关(R3a;仅任务模式生效) */
-  task_persona_full?: boolean;
-  /** 任务模式是否继承提示词注入(2026-09-10 实跑修复;默认 false = 隔离) */
-  task_prompt_inject_enabled?: boolean;
   /** 任务模式编码能力包开关(默认 false = 关闭;缺省保持不变) */
   task_coding_bundle_enabled?: boolean;
   /** 任务模式默认连接(TM-SET-1;空串 = 清除,跟随默认连接;非空须为已存在且启用的连接) */
@@ -1006,8 +998,9 @@ export interface TaskRecord {
   result: string;
   error: string;
   /**
-   * 执行者人设角色 id。**兼容字段**:执行者已改由 executor_id 承担(独立执行者库),
-   * 新任务不再写它;旧任务读出该值时仍按旧语义注入角色人设,故类型保留。
+   * 旧角色卡执行者关联 id。**兼容字段**:执行身份已改由 executor_id 承担(独立执行者库),
+   * 新前端不再发送;服务端仍接受并原样落库,供旧任务语义使用(世界书按角色过滤 /
+   * 占位符渲染 / character_prompt 工具读取)。「执行者人设档位」注入已随 TM-SET-2 退役。
    */
   character_id?: string | null;
   created_at: string;

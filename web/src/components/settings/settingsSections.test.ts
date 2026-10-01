@@ -208,19 +208,16 @@ describe('McpSection(MCP 服务区,批次 6.2)', () => {
 });
 
 describe('AgentSettingsSection(Agent 设置区)', () => {
-  it('渲染执行者人设精简/完整选择器(R3a;常显,仅任务模式生效说明)', async () => {
-    const html = await render(AgentSettingsSection);
-    expect(html).toContain('执行者人设');
-    expect(html).toContain('精简(默认)');
-    expect(html).toContain('完整');
-    expect(html).toContain('仅任务模式生效');
-  });
-
-  it('渲染任务继承提示词注入开关(2026-09-10 实跑修复;默认不继承)', async () => {
-    const html = await render(AgentSettingsSection);
-    expect(html).toContain('任务继承提示词注入');
-    expect(html).toContain('不继承(默认)');
-    expect(html).toContain('继承');
+  it('两开关退役后不再渲染(TM-SET-2);其余字段照常(系统提示词 / 搜索端点 / 反思提示词)', async () => {
+    const html = stripComments(await render(AgentSettingsSection));
+    // 退役控件不得再出现
+    expect(html).not.toContain('执行者人设');
+    expect(html).not.toContain('任务继承提示词注入');
+    // 其余 Agent 设置仍在
+    expect(html).toContain('系统提示词');
+    expect(html).toContain('搜索端点');
+    expect(html).toContain('反思提示词');
+    expect(html).toContain('保存 Agent 设置');
   });
 });
 
