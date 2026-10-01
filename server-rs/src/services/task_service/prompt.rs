@@ -48,6 +48,15 @@ impl TaskService {
             .cloned()
     }
 
+    /// 执行者「建议温度」(TM-GEN-1):执行者库命中且配置了温度时返回该值,否则 None。
+    /// 调用方语义 = `执行者温度 ?? 任务有效缺省温度`(与前端占位「留空 = 沿用任务模式
+    /// 默认温度」一致);单点解析式对线程内外同源(`solo::run_agent_loop` 与
+    /// `generate_step` 两处调用点,勿在任一侧复制判定)。
+    pub(crate) fn executor_temperature(&self, executor_id: Option<&str>) -> Option<f64> {
+        self.executor_for(executor_id)
+            .and_then(|e| e.temperature)
+    }
+
     /// 执行者 system 提示词组装(单一实现):内置执行者指令 → 执行者身份段 → 世界书 →
     /// 提示词注入 → 用户可编辑 Agent 提示词,外部来源段落逐一 untrusted 边界包裹,
     /// 内置指令不包裹(WP7 纪律)。

@@ -107,8 +107,14 @@ pub(crate) async fn run_agent_loop(
     // 任务侧工具循环的两道限制(提交 3 · D3):单步墙钟预算 + 语义熔断收紧,
     // 与 custom 的工具节点共用同一映射(单一出处,见 task_loop_limits 文档)。
     let (step_budget, semantic_guard) = super::task_loop_limits(settings);
+    // 执行者建议温度(TM-GEN-1):命中执行者库且配置了温度时优先于任务有效缺省温度;
+    // 未配置/无执行者 = 沿用缺省(单点解析式见 TaskPromptKit::executor_temperature,
+    // generate_step 侧同一口径)。
+    let temperature = svc
+        .executor_temperature(call.executor_id.as_deref())
+        .unwrap_or(settings.default_temperature);
     let params = GenerationParams {
-        temperature: settings.default_temperature,
+        temperature,
         top_p: settings.default_top_p,
         max_tokens: settings.default_max_tokens,
         stop: None,

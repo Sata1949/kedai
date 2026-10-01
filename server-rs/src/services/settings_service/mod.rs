@@ -30,6 +30,7 @@ pub use connector_pool::{connection_label, ConnectorPool};
 pub use params::{
     default_coding_task_agent_prompt, default_roleplay_agent_prompt, default_task_agent_prompt,
     task_idle_floor_secs, McpServerConfig, ModeSettings, RoleplayPromptConfig, TaskPromptConfig,
+    TASK_MIN_OUTPUT_TOKENS,
 };
 
 // RuntimeSettings 字段的 serde(default = "...") 按名字在本模块作用域解析;
@@ -871,6 +872,44 @@ mod tests {
                 .0
                 .contains("{{char}}"),
             "roleplay 扁平值不受 task 缺省词影响"
+        );
+    }
+
+    /// TM-GEN-1:任务侧输出预算下限——`None` 沿用扁平值但**只抬不压**到任务下限,
+    /// `Some` 显式值逐字优先;温度字段零变化(D4(a) 拍板:不设任务上限);
+    /// roleplay 侧逐字节不变。
+    #[test]
+    fn task_output_budget_floor_is_lift_only_and_some_wins() {
+        let cfg = test_cfg();
+        let mut s = RuntimeSettings::from_config(&cfg);
+        assert_eq!(
+            s.for_mode(AppMode::Task).default_max_tokens,
+            TASK_MIN_OUTPUT_TOKENS,
+            "None + 扁平 1024 → 抬到任务下限"
+        );
+        s.default_max_tokens = 8192;
+        assert_eq!(
+            s.for_mode(AppMode::Task).default_max_tokens,
+            8192,
+            "扁平值更大时保持更大(只抬不压)"
+        );
+        s.task.default_max_tokens = Some(2048);
+        assert_eq!(
+            s.for_mode(AppMode::Task).default_max_tokens,
+            2048,
+            "显式任务值逐字优先(低于下限也不动)"
+        );
+        s.task.default_max_tokens = Some(32768);
+        assert_eq!(s.for_mode(AppMode::Task).default_max_tokens, 32768);
+        // 温度维持「None=沿用扁平值」:D4(a) 拍板不设任务上限,只锁不变防未来漂移
+        s.default_temperature = 1.1;
+        assert_eq!(s.for_mode(AppMode::Task).default_temperature, 1.1);
+        s.task.default_temperature = Some(0.3);
+        assert_eq!(s.for_mode(AppMode::Task).default_temperature, 0.3);
+        assert_eq!(
+            s.for_mode(AppMode::Roleplay).default_max_tokens,
+            8192,
+            "roleplay 读扁平权威值,不受任务下限影响"
         );
     }
 

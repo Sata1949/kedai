@@ -44,7 +44,8 @@ fn truncated_retry_budget(current: u32) -> u32 {
 
 /// 空输出分级重试骨架(步骤/汇总共用;WP2-A 收敛两份逐行同构的重试,逻辑不变):
 /// 首次产出非空即返回;空输出退避 EMPTY_RETRY_BACKOFF 后按 finish_reason 分级重试一次——
-/// finish_reason=length:max_tokens 翻倍(上限 RETRY_MAX_TOKENS_CAP),温度保持默认;
+/// finish_reason=length:max_tokens 翻倍(上限 RETRY_MAX_TOKENS_CAP),温度保持
+/// `base_temperature`(调用方给出的基点温度,已应用执行者建议温度;TM-GEN-1);
 /// 其他原因/无原因:同 max_tokens,temperature 调至 0.7(沿用 mvu.rs 先例)。
 /// 仍空返回带 label 与原因的 Err;网络/超时等硬错误不重试直接透传。
 /// call 按 (max_tokens, temperature) 发起重试调用,复用同一 cancel,不重建 system 提示词。
@@ -58,6 +59,7 @@ async fn retry_if_empty_output<F, Fut>(
     label: &str,
     first: TaskGenOutput,
     cancel: &watch::Receiver<bool>,
+    base_temperature: f64,
     call: F,
 ) -> Result<TaskGenOutput, String>
 where
@@ -85,7 +87,7 @@ where
         settings.default_max_tokens
     };
     let retried = if reason == "length" {
-        call(used_cap, settings.default_temperature).await
+        call(used_cap, base_temperature).await
     } else {
         call(used_cap, 0.7).await
     };
@@ -109,6 +111,8 @@ where
 /// - 其他原因/无原因:temperature 调至 0.7 重试(沿用 mvu.rs 先例)。
 ///
 /// 重试走 generate_step_with 单参数覆盖变体,复用同一 cancel,不重建 system 提示词。
+/// `base_temperature` 与首调口径一致 = 执行者建议温度 ?? 任务有效缺省温度(TM-GEN-1;
+/// 首调在 `generate_step` 内用同一解析式,此处仅复算给 length 分支保持温度不变)。
 pub(crate) async fn generate_step_retry(
     deps: &dyn TaskBackend,
     task: &TaskRecord,
@@ -116,6 +120,9 @@ pub(crate) async fn generate_step_retry(
     step_index: Option<usize>,
     cancel: &watch::Receiver<bool>,
 ) -> Result<TaskGenOutput, String> {
+    let base_temperature = deps
+        .executor_temperature(task.executor_id.as_deref())
+        .unwrap_or_else(|| deps.task_settings().default_temperature);
     let first = deps.generate_step(task, step, step_index, cancel).await?;
     retry_if_empty_output(
         deps,
@@ -125,6 +132,7 @@ pub(crate) async fn generate_step_retry(
         "子任务",
         first,
         cancel,
+        base_temperature,
         |max_tokens, temperature| {
             deps.generate_step_with(task, step, step_index, max_tokens, temperature, cancel)
         },
@@ -250,12 +258,14 @@ pub(crate) async fn plan_revise_retry(
 }
 
 /// 汇总:与步骤同款的分级重试(空输出按 finish_reason 分别加倍 max_tokens 或调温)。
+/// 汇总者无人设语境,基点温度 = 任务有效缺省温度(TM-GEN-1 口径下不接执行者建议温度)。
 pub(crate) async fn summarize_task_retry(
     deps: &dyn TaskBackend,
     task: &TaskRecord,
     plan: &[TaskStep],
     cancel: &watch::Receiver<bool>,
 ) -> Result<TaskGenOutput, String> {
+    let base_temperature = deps.task_settings().default_temperature;
     let first = deps.summarize_task(task, plan, cancel).await?;
     retry_if_empty_output(
         deps,
@@ -265,6 +275,7 @@ pub(crate) async fn summarize_task_retry(
         "汇总",
         first,
         cancel,
+        base_temperature,
         |max_tokens, temperature| {
             deps.summarize_task_with(task, plan, max_tokens, temperature, cancel)
         },

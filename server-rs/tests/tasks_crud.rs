@@ -903,6 +903,88 @@ async fn task_executor_replaces_character_persona() {
     );
 }
 
+/// TM-GEN-1:执行者「建议温度」接通——执行者库配置了温度时,solo 主 agent 与 legacy
+/// 步骤生成都以它优先于任务缺省温度;未配置(或未绑执行者)沿用缺省(0.8)。
+/// 观测手段:mock `[[echo_temp]]` 回显请求温度——请求参数不落库,只能靠回显断言;
+/// 回显值同时锁定 f32→f64 拓宽噪声已被消除(0.42 不得变成 0.41999998…)。
+#[tokio::test]
+async fn executor_temperature_reaches_agent_and_step_generation() {
+    let app = test_app();
+
+    // 带温度的执行者(0.42)
+    let (status, json) = send_json(
+        app,
+        "POST",
+        "/api/task-executors",
+        json!({ "config": { "name": "EXEC-TEMP-温度执行者", "instruction": "按要求产出", "temperature": 0.42 } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "建执行者应 200: {json}");
+    let exec_id = json["saved"]["id"].as_str().unwrap().to_string();
+
+    // ① solo 主 agent(经 run_agent_loop):命中执行者建议温度
+    let (status, json) = send_json(
+        app,
+        "POST",
+        "/api/tasks",
+        json!({ "title": "[[echo_temp]] solo 温度目标", "task_mode": "solo", "executor_id": exec_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "创建任务应 201: {json}");
+    let id = json["task"]["id"].as_str().unwrap().to_string();
+    let (status, _) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200");
+    let (st, detail) = wait_terminal(app, &id).await;
+    assert_eq!(st, "done", "solo 任务应完成: {detail}");
+    assert!(
+        detail["task"]["result"]
+            .as_str()
+            .unwrap_or("")
+            .contains("温度=0.42"),
+        "solo 主 agent 应使用执行者建议温度(且无 f32 拓宽噪声): {detail}"
+    );
+
+    // ② 无执行者:solo 沿用任务缺省温度(温度字段不设任务上限——D4(a))
+    let id2 = create_task_with_mode(app, "[[echo_temp]] 无执行者温度目标", "solo").await;
+    let (status, _) = send_json(app, "POST", &format!("/api/tasks/{id2}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let (st, detail) = wait_terminal(app, &id2).await;
+    assert_eq!(st, "done", "无执行者 solo 应完成: {detail}");
+    assert!(
+        detail["task"]["result"]
+            .as_str()
+            .unwrap_or("")
+            .contains("温度=0.8"),
+        "无执行者应沿用任务缺省温度 0.8: {detail}"
+    );
+
+    // ③ legacy 步骤生成(经 generate_step):同解析式命中执行者温度
+    //    规划器出 1 步;步骤 goal 内嵌 [[echo_temp]](unicode 转义写入计划 JSON,
+    //    serde 还原为真实钩子——与既有 legacy 用例同款布局)
+    let title = concat!(
+        r#"[[reply:[{"name":"温度步","goal":"\u005b\u005becho_temp\u005d\u005d 回显温度"}]]]"#,
+        " legacy 温度目标"
+    );
+    let (status, json) = send_json(
+        app,
+        "POST",
+        "/api/tasks",
+        json!({ "title": title, "task_mode": "legacy", "executor_id": exec_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "创建 legacy 任务应 201: {json}");
+    let id3 = json["task"]["id"].as_str().unwrap().to_string();
+    let (status, _) = send_json(app, "POST", &format!("/api/tasks/{id3}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200");
+    let (st, detail) = wait_terminal(app, &id3).await;
+    assert_eq!(st, "done", "legacy 任务应完成: {detail}");
+    let step_result = detail["task"]["plan"][0]["result"].as_str().unwrap_or("");
+    assert!(
+        step_result.contains("温度=0.42"),
+        "legacy 步骤生成应使用执行者建议温度: {step_result}"
+    );
+}
+
 /// 引用不存在的执行者 → 静默丢弃(任务照建,回退通用执行者),不报错。
 /// 与「执行期查不到配置即回退通用执行者」同口径,避免创建期/执行期语义分叉。
 #[tokio::test]

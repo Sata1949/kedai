@@ -152,6 +152,10 @@ impl TaskPromptKit for TaskService {
     ) -> String {
         TaskService::render_agent_prompt(self, prompt, character, world_text, user_goal)
     }
+
+    fn executor_temperature(&self, executor_id: Option<&str>) -> Option<f64> {
+        TaskService::executor_temperature(self, executor_id)
+    }
 }
 
 // ==================== TaskFlowAccess:自定义 Agent 流程访问 ====================

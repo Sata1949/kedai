@@ -1083,7 +1083,8 @@ impl TaskService {
     }
 
     /// 执行单个步骤:注入执行者人设 + 世界书 + 提示词注入 + Agent 系统提示词。
-    /// 生成参数读任务模式设置。
+    /// 生成参数读任务模式设置;温度走执行者建议温度解析(TM-GEN-1,与
+    /// `solo::run_agent_loop` 同一口径)。
     pub(crate) async fn generate_step(
         &self,
         task: &TaskRecord,
@@ -1092,12 +1093,15 @@ impl TaskService {
         cancel: &watch::Receiver<bool>,
     ) -> Result<TaskGenOutput, String> {
         let settings = self.task_settings();
+        let temperature = self
+            .executor_temperature(task.executor_id.as_deref())
+            .unwrap_or(settings.default_temperature);
         self.generate_step_with(
             task,
             step,
             step_index,
             settings.default_max_tokens,
-            settings.default_temperature,
+            temperature,
             cancel,
         )
         .await

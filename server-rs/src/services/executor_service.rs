@@ -104,9 +104,11 @@ pub struct TaskExecutorConfig {
     /// 执行者指令:该执行者的职责/工作方式/身份描述,整段注入执行者 system 提示词
     #[serde(default)]
     pub instruction: String,
-    /// 该执行者的建议温度(可选;None = 沿用任务模式默认温度)
+    /// 该执行者的建议温度(可选;None = 沿用任务模式默认温度)。
+    /// 类型取 f64 与引擎/节点级温度同域(TM-GEN-1):f32 拓宽到 f64 会引入尾数噪声
+    /// (0.42f32 → 0.41999998688697815),直传上游。JSON 线格式两者同为 number,零迁移。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f32>,
+    pub temperature: Option<f64>,
     #[serde(default)]
     pub created_at: String,
     #[serde(default)]

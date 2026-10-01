@@ -11,8 +11,10 @@ use tokio::sync::watch;
 
 /// [[tool_raw:]] 钩子的截断预算门限:max_tokens 低于该值视为「输出预算不足」,
 /// 返回左半 arguments(非法 JSON)+ Finish{length};达到即返回完整 tool_call。
-/// 默认输出上限 1024 → 截断;自愈翻倍 2048 → 完整(与 RETRY 翻倍语义对齐)。
-const TOOL_RAW_MIN_BUDGET: u32 = 2048;
+/// 取值须落在任务侧首轮输出预算(4096,TM-GEN-1 起的任务下限)与自愈翻倍值(8192)之间,
+/// 使首轮截断、重发充足——与 `TRUNC_TEXT_MIN_BUDGET` 同款「夹在首轮与翻倍值之间」口径
+/// (TM-GEN-1 前首轮为 1024、翻倍 2048,故此门限原为 2048)。
+const TOOL_RAW_MIN_BUDGET: u32 = 8192;
 
 /// [[trunc_text:]]/[[trunc_fail:]] 钩子的截断预算门限:max_tokens 低于该值视为
 /// 「输出预算不足」返回半截文本 + Finish{length};达到即视为「自愈翻倍后的重发」。
@@ -63,6 +65,26 @@ impl MockConnector {
             // models/llm_error.rs 关于删除字符串猜测路径的说明)。
             let (msg, kind) = split_fail_kind(&msg);
             return Err(LlmError::new(kind, msg));
+        }
+
+        // 测试钩子:[[echo_temp]] → 回显本次请求的 temperature(TM-GEN-1:执行者建议温度
+        // 接线的端到端观测口——请求参数不落库,温度只能靠回显断言;与 TRUNC 系列同属
+        // 「mock 是测试脚手架而非模拟器」的既有形态)。
+        if last_user.contains("[[echo_temp]]") {
+            let reply = format!("温度={}", params.temperature);
+            chunks.push(LlmStreamChunk::Token(reply.clone()));
+            chunks.push(LlmStreamChunk::Usage {
+                prompt_tokens: 5,
+                completion_tokens: reply.chars().count() as i64,
+                total_tokens: 5 + reply.chars().count() as i64,
+                prompt_cache_hit_tokens: 0,
+                prompt_cache_miss_tokens: 0,
+                reasoning_tokens: 0,
+            });
+            chunks.push(LlmStreamChunk::Finish {
+                reason: "stop".into(),
+            });
+            return Ok(chunks);
         }
 
         // 测试钩子:[[tool_loop:name|N args...]] → 前 N 轮持续返回 ToolCall(工具循环轮次

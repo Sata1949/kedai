@@ -157,6 +157,13 @@ pub(crate) trait TaskPromptKit: Send + Sync {
         world_text: &str,
         user_goal: &str,
     ) -> String;
+
+    /// 执行者「建议温度」(TM-GEN-1,2026-10-01):`Some` = 执行者库命中且显式配置了温度,
+    /// 调用方以它优先于任务有效缺省温度;`None` = 无执行者/未配置/已删除(沿用缺省)。
+    /// 与 [`Self::assemble_executor_system_prompt`] 同一消费面:只有注入执行者身份段的
+    /// 执行路径(solo/plan 续跑/team 主 agent/followup 经 `run_agent_loop`;legacy/plan
+    /// 步骤经 `generate_step`)才消费。前端占位「留空 = 沿用任务模式默认温度」即此语义。
+    fn executor_temperature(&self, executor_id: Option<&str>) -> Option<f64>;
 }
 
 // ==================== 窄接口(5/9):自定义 Agent 流程访问 ====================
