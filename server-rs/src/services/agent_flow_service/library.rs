@@ -134,11 +134,12 @@ pub fn pack_flows(coding_bundle_enabled: bool) -> Vec<AgentFlowConfig> {
     packs
 }
 
-/// 把包流程**并入**库(加性):返回是否发生了变更(调用方据此决定要不要落盘)。
+/// 把**内置流程**(示范流程 + 包流程,FLOW-DEMO-1 起合并为一个并入缝)**并入**库(加性):
+/// 返回是否发生了变更(调用方据此决定要不要落盘)。
 ///
 /// 判定只有一条:`id` 已在 `seeded_pack_ids` → 跳过;否则 push 并记 id。
-/// 因此「用户改过的包流程」与「用户删过的包流程」都不会被覆盖或复活——它们要么以用户版
-/// 存在于 `flows`(同 id)、要么已被删且 id 仍在 `seeded_pack_ids` 里。
+/// 因此「用户改过的内置流程」与「用户删过的内置流程」都不会被覆盖或复活——它们要么以
+/// 用户版存在于 `flows`(同 id)、要么已被删且 id 仍在 `seeded_pack_ids` 里。
 pub fn merge_pack_flows(lib: &mut AgentFlowLibrary, packs: Vec<AgentFlowConfig>) -> bool {
     let mut changed = false;
     for pack in packs {
@@ -395,6 +396,130 @@ pub fn builtin_flow() -> AgentFlowConfig {
             },
         ],
     }
+}
+
+/// 内置**画布示范流程**(FLOW-DEMO-1,2026-10-01):「多路调研示范流程」。
+///
+/// 与既有三条内置(全为线性,进画布只是一条竖链)不同,本条是**二维形态**:显式
+/// `inputs` 连边 + 画布坐标 `x/y`,打开画布即分叉—汇合结构,演示四种组织形态——
+/// 并行分支 / 多上游汇合 / 反思核验 / 严格收档。通用「调研—核验—报告」链路,
+/// 不绑定任何能力包(构造期随内置簇并入,见 `service.rs::new`)。
+///
+/// 结构(5 节点,拓扑序 = 数组序):
+///   `decompose`(源,内部规划)→ `facts` ‖ `risks`(两路并行)→ `verify`(reflect 汇合)
+///   → `report`(strict 终稿,显式 `is_output`)。
+///
+/// 坐标按画布常量口径(NODE_W 220 / GAP_X 48 / NODE_H 64 / GAP_Y 56)预置:单点层横坐标
+/// 居中 134,双点层 0/268,层距 120——前端 `savedPosition` 直接命中,「打开即二维」。
+///
+/// 工具面与编码审查流程同款**只读三件**(fs_read/fs_glob/fs_grep;工具名取单一出处常量):
+/// 调研只读取,严格终稿不下发工具。节点不叠加 max_retries/超时等参数花样(示范结构,
+/// 保持 canonical);`max_parallel_nodes` 留空跟随默认 2——两条支路天然并行(并行成本
+/// 提示写进 description,WF-11 口径)。
+///
+/// 三条并入纪律与包流程一致(幂等、「删过/改过不复活」、关包不回收——同一 merge 缝);
+/// 由 `tests.rs::builtin_demo_flow_passes_validate_flow` 等用例用**真实注册工具集**锁死。
+pub fn builtin_demo_flows() -> Vec<AgentFlowConfig> {
+    // 工具名从单一出处常量取(agent_tools_fs 逐工具名),不写字面量二次
+    use crate::tools::agent_tools_fs::{GLOB_TOOL, GREP_TOOL, READ_TOOL};
+    let readonly: Vec<String> = vec![
+        READ_TOOL.to_string(),
+        GLOB_TOOL.to_string(),
+        GREP_TOOL.to_string(),
+    ];
+    vec![AgentFlowConfig {
+        id: "builtin-research-demo".into(),
+        name: "多路调研示范流程".into(),
+        description: Some(
+            "Kedai 内置画布示范流程:拆解研究目标 → 两路并行调研(事实与现状 / 问题与风险)\
+             → 交叉核验 → 严格档输出综合报告。演示二维画布的四种组织形态:并行分支、\
+             多上游汇合、反思核验、收紧输出的最终节点(两条支路并行执行,会成倍消耗 token)。"
+                .into(),
+        ),
+        enabled: true,
+        // 两条支路天然并行;缺省 = DEFAULT_MAX_PARALLEL_NODES(2),留 None 跟随默认演进
+        max_parallel_nodes: None,
+        steps: vec![
+            PlanStep {
+                id: "decompose".into(),
+                name: "拆解研究目标".into(),
+                enabled: true,
+                goal: "阅读任务目标(必要时用只读工具查看工作区资料),把研究拆解为两个视角:\
+                       「事实与现状」与「问题与风险」,为每路给出 2~4 条要调研的要点清单。\
+                       本步只做内部分析,不产出面向用户的最终正文。"
+                    .into(),
+                action: "direct".into(),
+                generates: Some(false),
+                tools: Some(readonly.clone()),
+                tool_choice: Some("auto".into()),
+                x: Some(134.0),
+                y: Some(0.0),
+                ..Default::default()
+            },
+            PlanStep {
+                id: "facts".into(),
+                name: "事实与现状".into(),
+                enabled: true,
+                goal: "围绕「事实与现状」视角调研:梳理与主题相关的事实、数据与当前状态,\
+                       每条注明依据来源(读过的文件/资料);读不到的部分如实标注「未能核实」。"
+                    .into(),
+                action: "direct".into(),
+                generates: Some(true),
+                tools: Some(readonly.clone()),
+                tool_choice: Some("auto".into()),
+                inputs: vec!["decompose".into()],
+                x: Some(0.0),
+                y: Some(120.0),
+                ..Default::default()
+            },
+            PlanStep {
+                id: "risks".into(),
+                name: "问题与风险".into(),
+                enabled: true,
+                goal: "围绕「问题与风险」视角调研:梳理约束、风险、反例与不确定点,\
+                       每条注明依据;与事实路重复的结论只做交叉引用,不重复展开。"
+                    .into(),
+                action: "direct".into(),
+                generates: Some(true),
+                tools: Some(readonly.clone()),
+                tool_choice: Some("auto".into()),
+                inputs: vec!["decompose".into()],
+                x: Some(268.0),
+                y: Some(120.0),
+                ..Default::default()
+            },
+            PlanStep {
+                id: "verify".into(),
+                name: "交叉核验".into(),
+                enabled: true,
+                goal: "核验两路调研:目标覆盖是否完整、每条结论是否有依据、有无未核实的臆测、\
+                       两路之间有无矛盾。输出 PASS 或 FAIL 并给出理由;FAIL 时逐条列明需要补齐的点。"
+                    .into(),
+                action: "reflect".into(),
+                inputs: vec!["facts".into(), "risks".into()],
+                x: Some(134.0),
+                y: Some(240.0),
+                ..Default::default()
+            },
+            PlanStep {
+                id: "report".into(),
+                name: "综合报告".into(),
+                enabled: true,
+                goal: "按核验结论补齐遗漏,输出最终综合报告:先给结论,再分「事实与现状」\
+                       「问题与风险」两节展开,每条保留依据;核验未通过且无法补齐的部分,\
+                       在报告末尾单独列为「未核实事项」。"
+                    .into(),
+                action: "direct".into(),
+                generates: Some(true),
+                kind: Some("strict".into()),
+                is_output: Some(true),
+                inputs: vec!["verify".into()],
+                x: Some(134.0),
+                y: Some(360.0),
+                ..Default::default()
+            },
+        ],
+    }]
 }
 
 // ==================== 二维流程原语(二维批次 1) ====================

@@ -1,5 +1,6 @@
 // 编码能力包流程预设集集成测试(2026-09-30 CODE-5):
-//  - 关包 → 内置库与今天逐条一致(1 条);开包 → 立刻 1+2 条(运行期钩子,无需重启)
+//  - 关包 → 内置库 = 协调 + 示范两条(FLOW-DEMO-1 起示范流程随构造期并入,与包无关);
+//    开包 → 立刻 2+2 条(运行期钩子,无需重启)
 //  - 幂等 / 关包不回收 / 删过不复活 / 既有条目逐字不变
 //
 // **独立测试二进制**:本文件独占一个进程与一套 `%TEMP%\kedai-test-<pid>`(见 tasks_crud.rs
@@ -74,23 +75,24 @@ async fn set_coding_bundle(app: &axum::Router, enabled: bool) -> Value {
 async fn coding_pack_flows_follow_the_switch() {
     let app = test_app();
 
-    // ① 关包(默认):只有内置协调流程
+    // ① 关包(默认):内置协调流程 + 内置示范流程(FLOW-DEMO-1;示范不随任何包)
     assert_eq!(
         flow_ids(app).await,
-        vec!["builtin-coordination"],
-        "关包时内置集应与今天逐条一致"
+        vec!["builtin-coordination", "builtin-research-demo"],
+        "关包时内置集 = 协调 + 示范两条(包流程一条都不在)"
     );
 
     // 记下既有条目与库文件形态(后面比对「逐字不变」)
     let (_, before) = send_json(app, "GET", "/api/agent-flows", json!({})).await;
     let builtin_before = before["library"]["flows"][0].clone();
 
-    // ② 开包(PUT 设置):**立即**可见 1+2 条 —— 走的是运行期钩子,不需要重启
+    // ② 开包(PUT 设置):**立即**可见 2+2 条 —— 走的是运行期钩子,不需要重启
     set_coding_bundle(app, true).await;
     assert_eq!(
         flow_ids(app).await,
         vec![
             "builtin-coordination",
+            "builtin-research-demo",
             "builtin-code-review",
             "builtin-code-impl"
         ],
@@ -110,11 +112,11 @@ async fn coding_pack_flows_follow_the_switch() {
 
     // ④ 幂等:重复开包不重复注入
     set_coding_bundle(app, true).await;
-    assert_eq!(flow_ids(app).await.len(), 3, "重复开包不得重复注入");
+    assert_eq!(flow_ids(app).await.len(), 4, "重复开包不得重复注入");
 
     // ⑤ 关包不回收已注入副本(既定边界,同 LIT-5 Q2)
     set_coding_bundle(app, false).await;
-    assert_eq!(flow_ids(app).await.len(), 3, "关包不回收已注入的副本");
+    assert_eq!(flow_ids(app).await.len(), 4, "关包不回收已注入的副本");
 
     // ⑥ 可导出:注入进库后就是普通流程,导出闭包应当带上它(LIT-5 同款断言)
     let (status, bundle) = send_json(app, "GET", "/api/agent-flows/export", json!({})).await;
@@ -146,7 +148,11 @@ async fn coding_pack_flows_follow_the_switch() {
     set_coding_bundle(app, true).await;
     assert_eq!(
         flow_ids(app).await,
-        vec!["builtin-coordination", "builtin-code-impl"],
+        vec![
+            "builtin-coordination",
+            "builtin-research-demo",
+            "builtin-code-impl"
+        ],
         "用户删过的包流程不得复活"
     );
 }

@@ -201,8 +201,8 @@ fn service_set_select_remove_roundtrip() {
         tools().into_iter().collect(),
         false,
     );
-    // 内置默认流程已在首次加载时注入
-    assert_eq!(svc.get_library().flows.len(), 1);
+    // 首次加载注入内置簇:协调 + 示范(FLOW-DEMO-1;示范与包开关无关)
+    assert_eq!(svc.get_library().flows.len(), 2);
 
     // 新建流程(set 空 id → 自动分配)
     let cfg = flow("my", vec![step("生成", "direct", Some(true))]);
@@ -210,7 +210,7 @@ fn service_set_select_remove_roundtrip() {
     new_cfg.id = String::new();
     svc.set(new_cfg).unwrap();
     let lib = svc.get_library();
-    assert_eq!(lib.flows.len(), 2);
+    assert_eq!(lib.flows.len(), 3);
     let mine = lib.flows.iter().find(|f| f.name == "my").unwrap();
     assert!(!mine.id.is_empty());
     assert_eq!(lib.current_flow_id.as_deref(), Some(mine.id.as_str()));
@@ -221,19 +221,20 @@ fn service_set_select_remove_roundtrip() {
 
     // 删除当前流程 → 回退到第一个
     svc.remove("builtin-coordination").unwrap();
-    assert_eq!(svc.get_library().flows.len(), 1);
+    assert_eq!(svc.get_library().flows.len(), 2);
     assert_eq!(
         svc.get_library().current_flow_id.as_deref(),
         Some(svc.get_library().flows[0].id.as_str())
     );
 
-    // 重新加载(持久化验证)
+    // 重新加载(持久化验证):删过的协调流程不复活(并入账目已有其 id)
     let svc2 = AgentFlowService::new(
         dir.path().to_path_buf(),
         tools().into_iter().collect(),
         false,
     );
-    assert_eq!(svc2.get_library().flows.len(), 1);
+    assert_eq!(svc2.get_library().flows.len(), 2);
+    assert!(svc2.flow_by_id("builtin-coordination").is_none());
 }
 
 // ===== 二维流程原语(二维批次 1) =====
@@ -1749,24 +1750,30 @@ fn pack_service(dir: &TempDataDir, enabled: bool) -> AgentFlowService {
     )
 }
 
-/// 关包:内置集与今天**逐条一致**,且库文件不多出 `seeded_pack_ids` 键
-/// (加性字段在空值时不落盘——旧格式逐字节不变)。
+/// 关包:内置集 = 协调 + 示范(FLOW-DEMO-1 起示范流程随构造期并入、与包无关);
+/// 库文件只多出内置示范流程的 id 账目,包流程一条都不在。
 #[test]
 fn pack_flows_absent_when_disabled() {
     let dir = TempDataDir::new("pack-off");
     let svc = pack_service(&dir, false);
-    assert_eq!(svc.get_library().flows.len(), 1);
+    assert_eq!(svc.get_library().flows.len(), 2);
     assert_eq!(svc.get_library().flows[0].id, "builtin-coordination");
-    assert!(svc.get_library().seeded_pack_ids.is_empty());
+    assert_eq!(svc.get_library().flows[1].id, "builtin-research-demo");
+    assert_eq!(
+        svc.get_library().seeded_pack_ids,
+        vec!["builtin-research-demo"],
+        "关包时账目只记内置示范流程,不记包 id"
+    );
     let text = std::fs::read_to_string(dir.join("agent_flows.json")).unwrap();
     assert!(
-        !text.contains("seeded_pack_ids"),
-        "关包时库文件不得多出该键:{text}"
+        text.contains("builtin-research-demo") && !text.contains("builtin-code-review"),
+        "库文件应含示范流程与其 id 账目、不得含包流程:{text}"
     );
 }
 
-/// 开包:1+2 条,且**既有条目各字段逐字不变**(按序列化形态比对,比字段级更严),
-/// `current_flow_id` 不因并入而改变(`seeded_pack_ids` 是顺序化「改过/删过不复活」的凭据)。
+/// 开包:2+2 条(协调 + 示范 + 两条包流程),且**既有条目各字段逐字不变**(按序列化
+/// 形态比对,比字段级更严),`current_flow_id` 不因并入而改变(`seeded_pack_ids` 是
+/// 顺序化「改过/删过不复活」的凭据)。
 #[test]
 fn pack_flows_merged_when_enabled_and_builtin_untouched() {
     let dir = TempDataDir::new("pack-on");
@@ -1776,10 +1783,11 @@ fn pack_flows_merged_when_enabled_and_builtin_untouched() {
         lib.flows.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
         vec![
             "builtin-coordination",
+            "builtin-research-demo",
             "builtin-code-review",
             "builtin-code-impl"
         ],
-        "既有条目位置不变,包流程按常量表顺序追加"
+        "内置簇位置不变(示范排协调之后),包流程按常量表追加"
     );
     let builtin = lib
         .flows
@@ -1793,7 +1801,11 @@ fn pack_flows_merged_when_enabled_and_builtin_untouched() {
     );
     assert_eq!(
         lib.seeded_pack_ids,
-        vec!["builtin-code-review", "builtin-code-impl"]
+        vec![
+            "builtin-research-demo",
+            "builtin-code-review",
+            "builtin-code-impl"
+        ]
     );
     assert_eq!(
         lib.current_flow_id.as_deref(),
@@ -1802,7 +1814,8 @@ fn pack_flows_merged_when_enabled_and_builtin_untouched() {
     );
 }
 
-/// 升级路径:库文件已存在(关包时代建的)时开包 → 注入并落盘;重载后仍在。
+/// 升级路径:库文件已存在(旧版本时代建的)时构造 → 注入内置示范 + 包流程并落盘;
+/// 重载后仍在。
 #[test]
 fn pack_flows_merge_into_existing_library_and_persist() {
     let dir = TempDataDir::new("pack-upgrade");
@@ -1814,11 +1827,11 @@ fn pack_flows_merge_into_existing_library_and_persist() {
     lib.save(dir.path()).unwrap();
 
     let svc = pack_service(&dir, true);
-    assert_eq!(svc.get_library().flows.len(), 3);
+    assert_eq!(svc.get_library().flows.len(), 4);
     // 落盘验证:重新 load 而不是只看内存
     let reloaded = AgentFlowLibrary::load(dir.path());
-    assert_eq!(reloaded.flows.len(), 3, "注入结果必须已落盘");
-    assert_eq!(reloaded.seeded_pack_ids.len(), 2);
+    assert_eq!(reloaded.flows.len(), 4, "注入结果必须已落盘");
+    assert_eq!(reloaded.seeded_pack_ids.len(), 3);
 }
 
 /// 幂等 + 不复活 + 不回收:重复 sync 不重复注入;用户删过的再 sync 不复活;
@@ -1827,24 +1840,54 @@ fn pack_flows_merge_into_existing_library_and_persist() {
 fn pack_sync_is_idempotent_and_respects_user_changes() {
     let dir = TempDataDir::new("pack-idem");
     let mut svc = pack_service(&dir, true);
-    assert_eq!(svc.get_library().flows.len(), 3);
+    assert_eq!(svc.get_library().flows.len(), 4);
 
     svc.sync_pack_flows(true);
     svc.sync_pack_flows(true);
-    assert_eq!(svc.get_library().flows.len(), 3, "重复 sync 不重复注入");
+    assert_eq!(svc.get_library().flows.len(), 4, "重复 sync 不重复注入");
 
     // 删过不复活
     svc.remove("builtin-code-review").unwrap();
-    assert_eq!(svc.get_library().flows.len(), 2);
+    assert_eq!(svc.get_library().flows.len(), 3);
     svc.sync_pack_flows(true);
-    assert_eq!(svc.get_library().flows.len(), 2, "用户删过的包流程不得复活");
+    assert_eq!(svc.get_library().flows.len(), 3, "用户删过的包流程不得复活");
 
     // 关包不回收
     svc.sync_pack_flows(false);
     assert_eq!(
         svc.get_library().flows.len(),
-        2,
+        3,
         "关包不回收已注入副本(既定边界);被用户删掉的那条当然也不回来"
+    );
+}
+
+/// 内置**示范流程**的并入生命周期(FLOW-DEMO-1):与包流程同一账目——删过不复活
+/// (重建服务不重注入)、用户改过不被覆盖(sync 只认账目)。
+#[test]
+fn builtin_demo_flow_respects_delete_and_edit_like_packs() {
+    let dir = TempDataDir::new("demo-lifecycle");
+    let mut svc = pack_service(&dir, false);
+    assert!(svc.flow_by_id("builtin-research-demo").is_some());
+
+    // 删过不复活:重建服务(构造期会再走一次并入)也不回来
+    svc.remove("builtin-research-demo").unwrap();
+    let svc2 = pack_service(&dir, false);
+    assert!(
+        svc2.flow_by_id("builtin-research-demo").is_none(),
+        "用户删过的示范流程不得复活"
+    );
+
+    // 用户改过不被覆盖:改一个再重建,仍是用户版
+    let dir2 = TempDataDir::new("demo-edit");
+    let mut svc3 = pack_service(&dir2, false);
+    let mut edited = svc3.flow_by_id("builtin-research-demo").unwrap().clone();
+    edited.name = "我的调研流程".into();
+    svc3.set(edited).unwrap();
+    let svc4 = pack_service(&dir2, false);
+    assert_eq!(
+        svc4.flow_by_id("builtin-research-demo").unwrap().name,
+        "我的调研流程",
+        "用户改过的示范流程不得被覆盖回去"
     );
 }
 
@@ -1895,4 +1938,63 @@ fn coding_pack_flows_pass_validate_flow() {
             .is_some_and(|t| t.iter().any(|x| x == "bash"))
     });
     assert!(uses_bash, "实现流程应包含可执行命令的自测步骤(D4=(a) 拍板)");
+}
+
+/// FLOW-DEMO-1:内置画布示范流程「多路调研示范流程」的常量自检——真实工具集过
+/// `validate_flow`、五节点坐标齐备(前端 `savedPosition` 要求 x/y 均为数字)、
+/// 图语义为 分叉 → 并行两路 → 汇合(reflect)→ 严格终稿,且终稿为显式 `is_output`。
+#[test]
+fn builtin_demo_flow_passes_validate_flow_and_is_two_dimensional() {
+    let flows = builtin_demo_flows();
+    assert_eq!(flows.len(), 1, "首版示范清单是 1 条");
+    let demo = &flows[0];
+    assert_eq!(demo.id, "builtin-research-demo");
+    assert!(demo.enabled, "示范流程开箱启用");
+    validate_flow(demo, &pack_tools())
+        .unwrap_or_else(|e| panic!("示范流程未过 validate_flow:{e}"));
+
+    // 坐标齐备:五节点 x/y 均为数字(画布式的前提),且结构上单点层居中(134)、双点层 0/268
+    for s in &demo.steps {
+        assert!(s.x.is_some() && s.y.is_some(), "节点「{}」缺画布坐标", s.name);
+    }
+    let pos = |id: &str| {
+        let s = demo.steps.iter().find(|s| s.id == id).unwrap();
+        (s.x.unwrap(), s.y.unwrap())
+    };
+    assert_eq!(pos("decompose"), (134.0, 0.0));
+    assert_eq!(pos("facts"), (0.0, 120.0));
+    assert_eq!(pos("risks"), (268.0, 120.0));
+    assert_eq!(pos("verify"), (134.0, 240.0));
+    assert_eq!(pos("report"), (134.0, 360.0));
+
+    // 图语义:拓扑序 = 数组序;facts/risks 各以 decompose 为唯一上游(分叉),
+    // verify 汇合两路,report 接 verify;终稿由显式 is_output 选中
+    let graph = resolve_graph(&demo.steps).expect("示范流程应无环");
+    assert_eq!(graph.order, vec![0, 1, 2, 3, 4], "拓扑序应为数组序");
+    assert_eq!(graph.inputs[0], Vec::<usize>::new(), "decompose 是源节点");
+    assert_eq!(graph.inputs[1], vec![0], "facts 的上游是 decompose");
+    assert_eq!(graph.inputs[2], vec![0], "risks 的上游是 decompose");
+    assert_eq!(graph.inputs[3], vec![1, 2], "verify 汇合两路(下标升序)");
+    assert_eq!(graph.inputs[4], vec![3], "report 接 verify");
+    assert_eq!(
+        output_index(&demo.steps, &graph.inputs),
+        Some(4),
+        "终稿应为显式 is_output 的 report"
+    );
+    let report = &demo.steps[4];
+    assert_eq!(report.kind.as_deref(), Some("strict"), "终稿用严格档收口");
+    assert!(
+        report.tools.is_none(),
+        "严格档终稿不下发工具(结构上也不需要)"
+    );
+    let verify = &demo.steps[3];
+    assert_eq!(verify.action, "reflect", "核验节点应为 reflect");
+    assert!(
+        verify.system_prompt.is_none() && verify.generates.is_none(),
+        "reflect 节点的 validate_flow 约束:无 system_prompt、不生成正文"
+    );
+    assert!(
+        demo.steps[0].generates == Some(false),
+        "拆解节点是内部规划(不产出面向用户的正文)"
+    );
 }

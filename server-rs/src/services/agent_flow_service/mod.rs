@@ -31,11 +31,11 @@ pub use graph::{
     validate_flow,
 };
 pub use library::builtin_flow;
-// 能力包流程并入缝(CODE-5):生产侧由 service.rs 经 super::* 使用;
+// 内置流程并入缝(CODE-5 包流程 + FLOW-DEMO-1 示范流程):生产侧由 service.rs 经 super::* 使用;
 // `coding_pack_flows` 只有测试直接引用(生产只经 pack_flows 间接消费),故单独标 cfg(test) 免 unused 告警
 #[cfg(test)]
 pub(crate) use library::coding_pack_flows;
-pub(crate) use library::{merge_pack_flows, pack_flows};
+pub(crate) use library::{builtin_demo_flows, merge_pack_flows, pack_flows};
 pub use subflow::{expand_sub_flows, flow_label, validate_sub_flows};
 
 #[cfg(test)]
@@ -57,10 +57,11 @@ pub struct AgentFlowLibrary {
     /// 全部流程(按数组顺序展示)
     #[serde(default)]
     pub flows: Vec<AgentFlowConfig>,
-    /// **已注入过的能力包流程 id**(CODE-5,2026-09-30):防重复注入,兼作「删过/改过不复活」
-    /// 的凭据——注入过就不再注入,与之后被删被改无关,故无需单独墓碑。
+    /// **已注入过的内置流程 id**(CODE-5;FLOW-DEMO-1 起含非包的内置示范流程):
+    /// 防重复注入,兼作「删过/改过不复活」的凭据——注入过就不再注入,与之后被删被改无关,
+    /// 故无需单独墓碑。字段名与线格式保持不变(改名会动库文件键)。
     ///
-    /// 加性字段:`skip_serializing_if` 让空值(从未开过任何包)时的库文件**逐字节不变**;
+    /// 加性字段:`skip_serializing_if` 让空值(从未注入过任何内置流程)时的库文件**逐字节不变**;
     /// 旧库文件缺该键时按空表解析(serde default)。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub seeded_pack_ids: Vec<String>,
