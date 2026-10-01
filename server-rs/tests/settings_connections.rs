@@ -376,3 +376,84 @@ async fn api_style_roundtrip_infers_from_url_suffix() {
         "缺省 api_style = 沿用已有值"
     );
 }
+
+/// 视觉能力包 D1:连接能力位落盘/回读;缺省 = 沿用(旧客户端写入不清空);未勾选项缺省 false
+#[tokio::test]
+async fn connection_capability_flags_roundtrip_and_survive_omitted_keys() {
+    let _guard = test_lock().await;
+    let app = test_app();
+    reset_to_baseline(app).await;
+
+    // 1) 勾选 supports_vision / image_auto_split 保存 → 响应即回读 true;未传的三项 false
+    let (status, body, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({"connections": [{
+            "name": "能力位", "connector_type": "mock",
+            "base_url": "", "model": "", "enabled": true,
+            "supports_vision": true, "image_auto_split": true
+        }]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    let conns = settings_body(&body)["connections"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(conns[0]["supports_vision"], true);
+    assert_eq!(conns[0]["image_auto_split"], true);
+    assert_eq!(
+        conns[0]["supports_structured_output"], false,
+        "未勾选的仅声明能力位缺省 false"
+    );
+    assert_eq!(conns[0]["supports_prefix_completion"], false);
+    assert_eq!(conns[0]["supports_mid_conversation_system"], false);
+
+    // 2) GET 回读一致(落盘 → 读入 往返不漂移)
+    let (status, body, _) = send_json(app, "GET", "/api/settings", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let conns = body["connections"].as_array().unwrap().clone();
+    assert_eq!(conns[0]["supports_vision"], true);
+    assert_eq!(conns[0]["image_auto_split"], true);
+
+    // 3) 该 id 再次 PUT 但不带能力位键(旧客户端全量数组)→ 沿用 true,不被清空
+    let id = conns[0]["id"].as_str().unwrap().to_string();
+    let (status, body, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({"connections": [{
+            "id": id, "name": "能力位改名", "connector_type": "mock",
+            "base_url": "", "model": "", "enabled": true
+        }]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    let conns = settings_body(&body)["connections"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(conns[0]["supports_vision"], true, "缺省 = 沿用(不清空)");
+    assert_eq!(conns[0]["image_auto_split"], true);
+
+    // 4) 显式 false 才清空(前端取消勾选路径)
+    let (status, body, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({"connections": [{
+            "id": id, "name": "能力位改名", "connector_type": "mock",
+            "base_url": "", "model": "", "enabled": true,
+            "supports_vision": false, "image_auto_split": false
+        }]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    let conns = settings_body(&body)["connections"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(conns[0]["supports_vision"], false, "显式 false 应生效");
+    assert_eq!(conns[0]["image_auto_split"], false);
+}

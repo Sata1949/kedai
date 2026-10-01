@@ -6,9 +6,9 @@
 // 立即失效。
 //
 // 失效口径:**指纹比对**而不是「在 PUT 路径上挂钩清缓存」。缓存的键是 profile id,值带着
-// 构建时的指纹(类型/地址/密钥/模型四段);解析时指纹不一致即重建。这样设置保存路径
-// (api/settings.rs)不需要知道本池子的存在,也就不会出现「漏挂一处失效钩子 → 改完设置
-// 不生效」的经典缺陷。
+// 构建时的指纹(类型/地址/密钥/模型/方言 + 视觉与拆分能力位);解析时指纹不一致即重建。
+// 这样设置保存路径(api/settings.rs)不需要知道本池子的存在,也就不会出现「漏挂一处
+// 失效钩子 → 改完设置不生效」的经典缺陷。
 //
 // 单一出处:本池子只在 AppState 装配一次,经 EngineCore 注入 AgentEngine;TaskService
 // 复用引擎上的同一实例(计划改动点 1 明令「不要在 TaskService 里另建一份连接器缓存」,
@@ -62,6 +62,7 @@ impl ConnectorPool {
             &profile.api_key,
             &profile.model,
             &profile.api_style,
+            profile.connector_capabilities(),
         );
         if cache.len() >= MAX_CACHED {
             cache.clear();
@@ -77,12 +78,20 @@ impl ConnectorPool {
     }
 }
 
-/// 连接配置指纹:只含连接器构建真正消费的五个字段(类型/地址/密钥/模型/接口方言)。
-/// 不含 `name`/`enabled`/`id` —— 改名与启停不该导致重建(id 本就是缓存键)。
+/// 连接配置指纹:含连接器构建真正消费的所有字段(类型/地址/密钥/模型/接口方言 +
+/// 视觉能力包 D1 的 supports_vision / image_auto_split —— 它们改变序列化行为,
+/// 必须触发重建)。不含 `name`/`enabled`/`id`,其余三个仅声明的能力位也不进指纹
+/// —— 改名、启停与未消费能力位切换都不该导致重建(id 本就是缓存键)。
 fn fingerprint_of(p: &ConnectionProfile) -> String {
     format!(
-        "{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}",
-        p.connector_type, p.base_url, p.api_key, p.model, p.api_style
+        "{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}",
+        p.connector_type,
+        p.base_url,
+        p.api_key,
+        p.model,
+        p.api_style,
+        p.supports_vision,
+        p.image_auto_split
     )
 }
 
@@ -110,6 +119,11 @@ mod tests {
             model: "model-a".to_string(),
             api_style: crate::connectors::openai_compatible::API_STYLE_CHAT.to_string(),
             enabled: true,
+            supports_vision: false,
+            supports_structured_output: false,
+            supports_prefix_completion: false,
+            supports_mid_conversation_system: false,
+            image_auto_split: false,
         }
     }
 
@@ -156,7 +170,7 @@ mod tests {
         );
     }
 
-    /// 改名与启停不触发重建(指纹只含连接器构建消费的四字段)
+    /// 改名与启停不触发重建(指纹只含连接器构建消费的字段)
     #[test]
     fn rename_and_toggle_do_not_rebuild() {
         let pool = ConnectorPool::new();
@@ -169,6 +183,42 @@ mod tests {
         assert_eq!(
             pool.cache.lock().unwrap()["a"].fingerprint,
             fingerprint_before
+        );
+    }
+
+    /// 能力位进指纹(视觉能力包 D1):supports_vision / image_auto_split 变化必须重建
+    /// —— 它们改变序列化行为(图像是否随请求发送、大图是否拆分),缓存必须失效;
+    /// 仅声明的三项(结构化输出/前缀续写/中途系统插入)不进指纹,切换不重建。
+    #[test]
+    fn vision_and_split_flags_change_fingerprint() {
+        let pool = ConnectorPool::new();
+        let mut p = profile("a");
+        pool.connector_for(&p);
+        let before = pool.cache.lock().unwrap()["a"].fingerprint.clone();
+        p.supports_vision = true;
+        pool.connector_for(&p);
+        assert_ne!(
+            pool.cache.lock().unwrap()["a"].fingerprint,
+            before,
+            "supports_vision 变更应使指纹变化(触发重建)"
+        );
+        let before = pool.cache.lock().unwrap()["a"].fingerprint.clone();
+        p.image_auto_split = true;
+        pool.connector_for(&p);
+        assert_ne!(
+            pool.cache.lock().unwrap()["a"].fingerprint,
+            before,
+            "image_auto_split 变更应使指纹变化(触发重建)"
+        );
+        let before = pool.cache.lock().unwrap()["a"].fingerprint.clone();
+        p.supports_structured_output = true;
+        p.supports_prefix_completion = true;
+        p.supports_mid_conversation_system = true;
+        pool.connector_for(&p);
+        assert_eq!(
+            pool.cache.lock().unwrap()["a"].fingerprint,
+            before,
+            "仅声明能力位不应进指纹"
         );
     }
 

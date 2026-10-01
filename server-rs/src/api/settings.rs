@@ -261,6 +261,18 @@ pub struct ConnectionProfileInput {
     pub api_style: Option<String>,
     #[serde(default)]
     pub enabled: Option<bool>,
+    /// 模型能力位(2026-10-02 视觉能力包):缺省 = 沿用该 id 的现有值(新建缺省 false)。
+    /// 只有显式传 false 才会清空既有声明——与其它字段的「缺省=沿用」同口径。
+    #[serde(default)]
+    pub supports_vision: Option<bool>,
+    #[serde(default)]
+    pub supports_structured_output: Option<bool>,
+    #[serde(default)]
+    pub supports_prefix_completion: Option<bool>,
+    #[serde(default)]
+    pub supports_mid_conversation_system: Option<bool>,
+    #[serde(default)]
+    pub image_auto_split: Option<bool>,
 }
 
 /// 序列化运行期设置(API Key 脱敏)。
@@ -358,6 +370,12 @@ fn settings_json(s: &RuntimeSettings) -> Value {
                     "model": p.model,
                     "api_style": p.api_style,
                     "enabled": p.enabled,
+                    // 模型能力位(2026-10-02 视觉能力包 D1;五项均为连接级声明)
+                    "supports_vision": p.supports_vision,
+                    "supports_structured_output": p.supports_structured_output,
+                    "supports_prefix_completion": p.supports_prefix_completion,
+                    "supports_mid_conversation_system": p.supports_mid_conversation_system,
+                    "image_auto_split": p.image_auto_split,
                     "api_key_masked": p.masked_api_key(),
                     "has_api_key": p.has_api_key(),
                 })
@@ -495,6 +513,33 @@ pub async fn update_settings(
                     enabled: item
                         .enabled
                         .unwrap_or_else(|| existing.map(|p| p.enabled).unwrap_or(true)),
+                    supports_vision: item
+                        .supports_vision
+                        .unwrap_or_else(|| existing.map(|p| p.supports_vision).unwrap_or(false)),
+                    supports_structured_output: item.supports_structured_output.unwrap_or_else(
+                        || {
+                            existing
+                                .map(|p| p.supports_structured_output)
+                                .unwrap_or(false)
+                        },
+                    ),
+                    supports_prefix_completion: item.supports_prefix_completion.unwrap_or_else(
+                        || {
+                            existing
+                                .map(|p| p.supports_prefix_completion)
+                                .unwrap_or(false)
+                        },
+                    ),
+                    supports_mid_conversation_system: item
+                        .supports_mid_conversation_system
+                        .unwrap_or_else(|| {
+                            existing
+                                .map(|p| p.supports_mid_conversation_system)
+                                .unwrap_or(false)
+                        }),
+                    image_auto_split: item
+                        .image_auto_split
+                        .unwrap_or_else(|| existing.map(|p| p.image_auto_split).unwrap_or(false)),
                 });
             }
             s.connections = next;
@@ -1009,20 +1054,32 @@ pub async fn update_settings(
         .map(|p| p.api_style.clone())
         .unwrap_or_else(|| API_STYLE_CHAT.to_string());
     let style_changed = old_style != new_style;
+    // 能力位变化(视觉能力包 D1):supports_vision / image_auto_split 改变序列化行为
+    // (图像是否随请求发送、大图是否拆分),与地址/密钥/模型/方言同款触发重建。
+    let caps_of = |p: Option<&ConnectionProfile>| {
+        p.map(|p| (p.supports_vision, p.image_auto_split))
+            .unwrap_or((false, false))
+    };
+    let caps_changed = caps_of(candidate.active_connection()) != caps_of(old_active.as_ref());
     *state.settings.lock().unwrap_or_else(|e| e.into_inner()) = candidate.clone();
 
-    // Base URL / API Key / 模型 / 目标类型 / 接口方言变更 → 重建连接器。
+    // Base URL / API Key / 模型 / 目标类型 / 接口方言 / 能力位变更 → 重建连接器。
     // 目标类型由默认连接解析(与启动装配同一个函数):显式 mock 用 mock、无可用连接用 mock、
     // 空配置保持 mock、其余 openai-compatible —— 否则用户填写的 API 设置永远不会生效
     // (模型列表始终只有 mock-demo)。
-    if connector_changed || model_changed || target_changed || style_changed {
+    if connector_changed || model_changed || target_changed || style_changed || caps_changed {
         let (base_url, api_key, model) = (
             candidate.openai_base_url.clone(),
             candidate.openai_api_key.clone(),
             candidate.model.clone(),
         );
-        let new_connector =
-            crate::connectors::build_connector(target, &base_url, &api_key, &model, &new_style);
+        let new_caps = candidate
+            .active_connection()
+            .map(|p| p.connector_capabilities())
+            .unwrap_or_default();
+        let new_connector = crate::connectors::build_connector(
+            target, &base_url, &api_key, &model, &new_style, new_caps,
+        );
         *state.engine.connector.write().await = new_connector;
     }
 

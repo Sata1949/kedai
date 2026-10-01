@@ -110,15 +110,31 @@ impl Connector {
     }
 }
 
+/// 连接能力位中**影响请求构建**的两项(视觉能力包 D1)。
+///
+/// 为什么只这两项入构建:它们改变序列化行为(`supports_vision` 决定图像 parts 是否
+/// 发送,`image_auto_split` 决定大图是否在序列化前拆分),因而必须随连接器池指纹
+/// 变化触发重建;`ConnectionProfile` 的其余三个能力位(结构化输出/前缀续写/中途
+/// 系统插入)当前无消费点,不进构建也不进指纹——待接入时按同款口径加入。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ConnectorCapabilities {
+    /// 该连接对应模型能接收图像输入(聊天贴图 / 截图与视觉工具的图像随请求发送)
+    pub supports_vision: bool,
+    /// 对图像尺寸限制较严的端点(如 DeepSeek):超阈值大图在序列化前自动拆分
+    pub image_auto_split: bool,
+}
+
 /// 构建连接器(按 config.connector;未知回退 mock)。
 /// `api_style` 为接口方言线格式字符串(`chat-completions` | `responses` | `anthropic`),
 /// 未知值回退默认 chat-completions(与 settings 层 normalize 同口径)。
+/// `capabilities` 见 [`ConnectorCapabilities`]。
 pub fn build_connector(
     connector: &str,
     base_url: &str,
     api_key: &str,
     model: &str,
     api_style: &str,
+    capabilities: ConnectorCapabilities,
 ) -> Connector {
     if connector == "openai-compatible" {
         Connector::OpenAi(
@@ -127,7 +143,8 @@ pub fn build_connector(
                 api_key,
                 model,
                 openai_compatible::ApiStyle::from_str_lossy(api_style),
-            ),
+            )
+            .with_capabilities(capabilities),
         )
     } else {
         Connector::Mock(mock::MockConnector::new())

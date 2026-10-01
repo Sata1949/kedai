@@ -340,6 +340,16 @@ export interface ConnectionProfile {
   api_style: ApiStyle;
   /** 停用的连接保留配置,但不会成为默认连接,也不出现在后续批次的节点选择器里 */
   enabled: boolean;
+  /** 支持视觉输入(2026-10-02 视觉能力包):图像随请求发送;聊天贴图与视觉工具的门控 */
+  supports_vision: boolean;
+  /** 支持结构化输出(预留:当前版本仅记录,引擎尚未消费) */
+  supports_structured_output: boolean;
+  /** 支持前缀续写(预留:当前版本仅记录,引擎尚未消费) */
+  supports_prefix_completion: boolean;
+  /** 支持中途系统插入(预留:当前版本仅记录,引擎尚未消费) */
+  supports_mid_conversation_system: boolean;
+  /** 大图自动拆分(DeepSeek 等尺寸限制较严的端点):超阈值大图在发送前自动切块 */
+  image_auto_split: boolean;
   /** 密钥掩码(仅保留后 4 位) */
   api_key_masked: string;
   /** 该连接是否已配置密钥 */
@@ -357,6 +367,12 @@ export interface ConnectionProfilePatch {
   /** 接口方言显式覆盖;缺省 = 沿用已有值并按 URL 端点后缀推断(仅改写默认档) */
   api_style?: string;
   enabled?: boolean;
+  /** 模型能力位(2026-10-02 视觉能力包):缺省 = 沿用该 id 的现有值;显式 false 才清空 */
+  supports_vision?: boolean;
+  supports_structured_output?: boolean;
+  supports_prefix_completion?: boolean;
+  supports_mid_conversation_system?: boolean;
+  image_auto_split?: boolean;
 }
 
 /** 运行期设置(API 连接 + 生成参数);api_key 仅回传脱敏值 */

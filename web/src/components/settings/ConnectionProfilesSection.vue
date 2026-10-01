@@ -3,7 +3,13 @@
 // 任务模式默认连接选择 TM-SET-1:仅任务模式显示,切换即存)。
 // 状态由壳(SettingsModal)创建一次后经 prop 传入 —— 与 ApiSettingsSection 同范式。
 import { computed, onMounted } from 'vue';
-import { API_STYLE_LABELS, API_STYLE_ORDER, CONNECTOR_TYPE_LABELS, CONNECTOR_TYPE_ORDER } from '../../api/labels';
+import {
+  API_STYLE_LABELS,
+  API_STYLE_ORDER,
+  CONNECTION_CAPABILITIES,
+  CONNECTOR_TYPE_LABELS,
+  CONNECTOR_TYPE_ORDER,
+} from '../../api/labels';
 import type { useConnectionProfiles } from '../../composables/useConnectionProfiles';
 
 const props = withDefaults(
@@ -140,6 +146,24 @@ onMounted(() => {
             spellcheck="false"
           />
         </div>
+
+        <!-- 模型能力位(2026-10-02 视觉能力包 D1):视觉输入 / 大图拆分已接入消费;
+             其余三项为预留声明(如实标注,勾选仅记录) -->
+        <div class="sv-inp-row sv-conn-caps">
+          <label class="sv-inp-tag">模型能力</label>
+          <div class="sv-conn-cap-list">
+            <label
+              v-for="cap in CONNECTION_CAPABILITIES"
+              :key="cap.key"
+              class="sv-conn-cap"
+              :class="{ reserved: cap.reserved }"
+              :title="cap.tip"
+            >
+              <input v-model="d[cap.key]" type="checkbox" />
+              <span>{{ cap.label }}</span>
+            </label>
+          </div>
+        </div>
       </div>
 
       <div class="sv-btn-row">
@@ -224,6 +248,31 @@ onMounted(() => {
 /* 「启用」不是字段标签而是开关说明,卡头里不再占标签列宽(默认格仍保持 72px 以维持列对齐) */
 .sv-conn-head .sv-inp-tag:not(.sv-conn-def) {
   min-width: 0;
+}
+
+/* 模型能力勾选组(2026-10-02 视觉能力包 D1):多行紧排;预留项降饱和并虚线提示,
+   与功能项(视觉输入 / 大图自动拆分)在观感上可区分。 */
+.sv-conn-caps {
+  align-items: flex-start;
+}
+.sv-conn-cap-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  padding-top: 3px;
+}
+.sv-conn-cap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  cursor: help;
+}
+.sv-conn-cap.reserved {
+  opacity: 0.62;
+}
+.sv-conn-cap.reserved span {
+  border-bottom: 1px dashed var(--sv-line-strong);
 }
 
 /* 按钮行:全局 `.sv-btn-fill` 让两个按钮各占半宽(本卡实测 342.3×44.1px 的黑白大方块)。

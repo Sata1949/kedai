@@ -45,6 +45,22 @@ pub struct ConnectionProfile {
     pub api_style: String,
     /// 停用的连接保留配置但不再是默认连接的候选,也不出现在后续批次的节点选择器里
     pub enabled: bool,
+    /// 模型能力位(2026-10-02 视觉能力包 D1;连接级声明)。五个新键**必须带 serde
+    /// default** —— 旧 settings.json 的连接条目缺键时按 false 读入,漏写会让整文件
+    /// 反序列化失败、用户设置静默丢失(契约「新增键必须 serde default」同一纪律)。
+    /// 消费状态:`supports_vision` 门控聊天贴图与视觉工具、`image_auto_split` 触发
+    /// 大图拆分(这两项进连接器构建与连接器池指纹);其余三项**仅声明**(预留,
+    /// 当前无消费点,进设置面与线格式以便后续批次接入)。
+    #[serde(default)]
+    pub supports_vision: bool,
+    #[serde(default)]
+    pub supports_structured_output: bool,
+    #[serde(default)]
+    pub supports_prefix_completion: bool,
+    #[serde(default)]
+    pub supports_mid_conversation_system: bool,
+    #[serde(default)]
+    pub image_auto_split: bool,
 }
 
 fn default_api_style() -> String {
@@ -81,6 +97,14 @@ pub fn strip_endpoint_suffix(url: &str) -> (String, Option<&'static str>) {
 }
 
 impl ConnectionProfile {
+    /// 连接器构建消费的两项能力位(视觉能力包 D1;其余三项仅声明,不进构建与指纹)
+    pub fn connector_capabilities(&self) -> crate::connectors::ConnectorCapabilities {
+        crate::connectors::ConnectorCapabilities {
+            supports_vision: self.supports_vision,
+            image_auto_split: self.image_auto_split,
+        }
+    }
+
     /// API Key 脱敏展示(仅保留后 4 位)
     pub fn masked_api_key(&self) -> String {
         mask_key(&self.api_key)
@@ -203,6 +227,11 @@ impl RuntimeSettings {
             model: self.model.clone(),
             api_style: default_api_style(),
             enabled: true,
+            supports_vision: false,
+            supports_structured_output: false,
+            supports_prefix_completion: false,
+            supports_mid_conversation_system: false,
+            image_auto_split: false,
         });
         self.active_connection_id = Some(DEFAULT_CONNECTION_ID.to_string());
     }
@@ -274,6 +303,11 @@ impl RuntimeSettings {
                     model: String::new(),
                     api_style: default_api_style(),
                     enabled: true,
+                    supports_vision: false,
+                    supports_structured_output: false,
+                    supports_prefix_completion: false,
+                    supports_mid_conversation_system: false,
+                    image_auto_split: false,
                 });
                 self.active_connection_id = Some(id);
                 self.connections.len() - 1

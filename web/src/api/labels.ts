@@ -23,6 +23,53 @@ export const CONNECTOR_TYPE_LABELS: Record<string, string> = {
 /** 连接器类型下拉顺序(与后端定义顺序一致,便于对照) */
 export const CONNECTOR_TYPE_ORDER: ConnectorType[] = ['openai-compatible', 'mock'];
 
+/** 连接能力位 → 展示文案与说明(2026-10-02 视觉能力包 D1)。
+ *  键与后端 `ConnectionProfile` 的 supports_* / image_auto_split 字段一一对应;
+ *  `reserved` = 仅声明、当前版本引擎未消费(UI 如实标注,避免「勾了没反应」的困惑)。 */
+export interface ConnectionCapabilityMeta {
+  key:
+    | 'supports_vision'
+    | 'supports_structured_output'
+    | 'supports_prefix_completion'
+    | 'supports_mid_conversation_system'
+    | 'image_auto_split';
+  label: string;
+  tip: string;
+  reserved?: boolean;
+}
+
+/** 勾选组展示顺序:先功能项、后预留项 */
+export const CONNECTION_CAPABILITIES: ConnectionCapabilityMeta[] = [
+  {
+    key: 'supports_vision',
+    label: '视觉输入',
+    tip: '该连接对应模型可接收图像:聊天贴图、截图与视觉工具的图像会随请求发送。纯文本模型(不支持视觉)请勿勾选——未勾选时贴图不会随请求发送,避免无效报错。',
+  },
+  {
+    key: 'image_auto_split',
+    label: '大图自动拆分',
+    tip: '对图像尺寸限制较严的端点(如 DeepSeek):长边超过 1300px 的大图会在发送前自动等比切块,提升识别成功率。可直接接收大图的模型(如 Kimi / GPT-4o 等)无需勾选。',
+  },
+  {
+    key: 'supports_structured_output',
+    label: '结构化输出',
+    tip: '预留能力位:当前版本仅记录,引擎尚未消费。',
+    reserved: true,
+  },
+  {
+    key: 'supports_prefix_completion',
+    label: '前缀续写',
+    tip: '预留能力位:当前版本仅记录,引擎尚未消费。',
+    reserved: true,
+  },
+  {
+    key: 'supports_mid_conversation_system',
+    label: '中途系统插入',
+    tip: '预留能力位:当前版本仅记录,引擎尚未消费。',
+    reserved: true,
+  },
+];
+
 /** 接口方言 → 展示文案(接口方言批次;键与后端 `connectors::openai_compatible` 取值域一致) */
 export const API_STYLE_LABELS: Record<string, string> = {
   'chat-completions': 'OpenAI Chat Completions',

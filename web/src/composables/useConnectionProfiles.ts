@@ -24,6 +24,12 @@ export interface ConnectionDraft {
   /** 只写字段:留空 = 不改动该连接的密钥(与后端「空 Key 忽略」同口径,接口层面无法清空密钥) */
   api_key: string;
   enabled: boolean;
+  /** 模型能力位(2026-10-02 视觉能力包;其余三项为预留声明,当前版本引擎未消费) */
+  supports_vision: boolean;
+  supports_structured_output: boolean;
+  supports_prefix_completion: boolean;
+  supports_mid_conversation_system: boolean;
+  image_auto_split: boolean;
   /** 服务端密钥掩码(仅展示用) */
   api_key_masked: string;
   has_api_key: boolean;
@@ -39,6 +45,11 @@ function toDraft(p: ConnectionProfile): ConnectionDraft {
     api_style: p.api_style ?? 'chat-completions',
     api_key: '',
     enabled: p.enabled,
+    supports_vision: p.supports_vision ?? false,
+    supports_structured_output: p.supports_structured_output ?? false,
+    supports_prefix_completion: p.supports_prefix_completion ?? false,
+    supports_mid_conversation_system: p.supports_mid_conversation_system ?? false,
+    image_auto_split: p.image_auto_split ?? false,
     api_key_masked: p.api_key_masked ?? '',
     has_api_key: p.has_api_key ?? false,
   };
@@ -90,6 +101,11 @@ export function useConnectionProfiles() {
       api_style: 'chat-completions',
       api_key: '',
       enabled: true,
+      supports_vision: false,
+      supports_structured_output: false,
+      supports_prefix_completion: false,
+      supports_mid_conversation_system: false,
+      image_auto_split: false,
       api_key_masked: '',
       has_api_key: false,
     });
@@ -127,6 +143,12 @@ export function useConnectionProfiles() {
         model: d.model.trim(),
         api_style: d.api_style,
         enabled: d.enabled,
+        // 能力位显式全量下发(布尔):取消勾选 = 显式 false 清空;旧客户端的「缺省=沿用」不受影响
+        supports_vision: d.supports_vision,
+        supports_structured_output: d.supports_structured_output,
+        supports_prefix_completion: d.supports_prefix_completion,
+        supports_mid_conversation_system: d.supports_mid_conversation_system,
+        image_auto_split: d.image_auto_split,
       };
       if (d.id) row.id = d.id;
       if (d.api_key.trim()) row.api_key = d.api_key.trim();

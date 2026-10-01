@@ -430,6 +430,11 @@ function conn(id: string, name: string, enabled = true, model = 'model-x'): Conn
     model,
     api_style: 'chat-completions',
     enabled,
+    supports_vision: false,
+    supports_structured_output: false,
+    supports_prefix_completion: false,
+    supports_mid_conversation_system: false,
+    image_auto_split: false,
     api_key_masked: '****abcd',
     has_api_key: true,
   };

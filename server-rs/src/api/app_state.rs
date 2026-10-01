@@ -177,6 +177,11 @@ impl AppState {
             .active_connection()
             .map(|p| p.api_style.clone())
             .unwrap_or_else(|| crate::connectors::openai_compatible::API_STYLE_CHAT.to_string());
+        // 能力位随默认连接(视觉能力包 D1;与 PUT 重建同一来源),无可用连接时全关
+        let connector_caps = loaded_settings
+            .active_connection()
+            .map(|p| p.connector_capabilities())
+            .unwrap_or_default();
         let settings = Arc::new(Mutex::new(loaded_settings));
         // 记忆服务接入运行期设置(淘汰容量/字符预算阈值来源;OnceLock 幂等注入)
         memory.attach_settings(settings.clone());
@@ -186,6 +191,7 @@ impl AppState {
             &api_key,
             &initial_model,
             &api_style,
+            connector_caps,
         );
         let connector = Arc::new(RwLock::new(connector));
 

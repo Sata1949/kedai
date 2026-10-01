@@ -48,6 +48,15 @@ async function render(
  *  源码注释里的同名文案会误伤,先剥注释再断言) */
 const stripComments = (html: string): string => html.replace(/<!--[\s\S]*?-->/g, '');
 
+/** 连接能力位缺省档(2026-10-02 视觉能力包 D1;fixture 用,具体用例再按需覆盖) */
+const noCaps = {
+  supports_vision: false,
+  supports_structured_output: false,
+  supports_prefix_completion: false,
+  supports_mid_conversation_system: false,
+  image_auto_split: false,
+} as const;
+
 beforeEach(() => {
   // composable 在测试直接调用(构造 prop 状态)时需要活动 pinia
   setActivePinia(createPinia());
@@ -76,11 +85,13 @@ describe('ConnectionProfilesSection(连接配置区)', () => {
         id: 'c1', name: '主连接', connector_type: 'openai-compatible',
         base_url: 'https://a.example/v1', model: 'ma', api_style: 'chat-completions',
         api_key: '', enabled: true, api_key_masked: '****1111', has_api_key: true,
+        ...noCaps,
       },
       {
         id: 'c2', name: '备用', connector_type: 'mock',
         base_url: '', model: '', api_style: 'anthropic',
         api_key: '', enabled: false, api_key_masked: '', has_api_key: false,
+        ...noCaps,
       },
     ];
     state.activeIndex.value = 0;
@@ -119,6 +130,7 @@ describe('ConnectionProfilesSection(连接配置区)', () => {
         id: 'c1', name: '主连接', connector_type: 'openai-compatible',
         base_url: 'https://a.example/v1', model: 'ma', api_style: 'chat-completions',
         api_key: '', enabled: true, api_key_masked: '****1111', has_api_key: true,
+        ...noCaps,
       },
     ];
     state.taskDefaultConnectionId.value = 'c1';
@@ -126,6 +138,36 @@ describe('ConnectionProfilesSection(连接配置区)', () => {
     expect(html).toContain('任务模式默认连接');
     expect(html).toContain('跟随默认连接');
     expect(html).toContain('逐任务');
+  });
+
+  it('渲染「模型能力」勾选组:功能项与预留项均在(预留项如实标注未消费)', async () => {
+    const state = useConnectionProfiles();
+    state.addDraft();
+    const html = stripComments(await render(ConnectionProfilesSection, { state }));
+    expect(html).toContain('模型能力');
+    expect(html).toContain('视觉输入');
+    expect(html).toContain('大图自动拆分');
+    // 预留项的 tooltip 进入 title 属性(如实标注「仅记录、未消费」)
+    expect(html).toContain('预留能力位:当前版本仅记录');
+  });
+
+  it('勾选能力位写入 patch(布尔全量下发;新建草稿缺省 false)', () => {
+    const state = useConnectionProfiles();
+    state.addDraft();
+    const d = state.drafts.value[0];
+    if (!d) throw new Error('addDraft 应产生一行草稿');
+    const before = state.buildPatch().connections?.[0];
+    expect(before?.supports_vision).toBe(false);
+    expect(before?.image_auto_split).toBe(false);
+    d.supports_vision = true;
+    d.image_auto_split = true;
+    const row = state.buildPatch().connections?.[0];
+    expect(row?.supports_vision).toBe(true);
+    expect(row?.image_auto_split).toBe(true);
+    // 仅声明能力位随行全量下发(缺省 false,不被省略)
+    expect(row?.supports_structured_output).toBe(false);
+    expect(row?.supports_prefix_completion).toBe(false);
+    expect(row?.supports_mid_conversation_system).toBe(false);
   });
 });
 

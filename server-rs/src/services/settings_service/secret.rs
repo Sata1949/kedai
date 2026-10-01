@@ -459,6 +459,11 @@ mod tests {
             model: "m".to_string(),
             api_style: crate::connectors::openai_compatible::API_STYLE_CHAT.to_string(),
             enabled: true,
+            supports_vision: false,
+            supports_structured_output: false,
+            supports_prefix_completion: false,
+            supports_mid_conversation_system: false,
+            image_auto_split: false,
         }
     }
 
@@ -515,6 +520,40 @@ mod tests {
         assert_eq!(loaded.model, "kept-model");
         assert_eq!(loaded.connections.len(), 1, "缺键 → 空数组 → 播种");
         assert_eq!(loaded.connections[0].base_url, "https://kept.example/v1");
+    }
+
+    /// 能力位兼容(视觉能力包 D1):旧 JSON 的连接条目缺 5 个能力位新键 → 一律读作 false。
+    /// 同上一用例的锁死纪律:漏写 serde(default) 会让整文件反序列化失败、设置静默丢失。
+    #[test]
+    fn old_connection_entries_without_capability_keys_default_false() {
+        let dir = temp_dir("legacy-no-caps");
+        let mut base = RuntimeSettings::from_config(&test_config());
+        base.search_endpoint = "https://kept-caps.example/search".to_string();
+        let mut json = serde_json::to_value(&base).unwrap();
+        let conn = json["connections"][0]
+            .as_object_mut()
+            .expect("from_config 应播种一条默认连接");
+        for key in [
+            "supports_vision",
+            "supports_structured_output",
+            "supports_prefix_completion",
+            "supports_mid_conversation_system",
+            "image_auto_split",
+        ] {
+            conn.remove(key);
+        }
+        write_settings(&dir, &serde_json::to_string_pretty(&json).unwrap());
+
+        let loaded = RuntimeSettings::load(&dir, &test_config());
+        // 判别性:整文件回退 env 时这里会是默认搜索端点,不是标记值
+        assert_eq!(loaded.search_endpoint, "https://kept-caps.example/search");
+        assert_eq!(loaded.connections.len(), 1);
+        let p = &loaded.connections[0];
+        assert!(!p.supports_vision);
+        assert!(!p.supports_structured_output);
+        assert!(!p.supports_prefix_completion);
+        assert!(!p.supports_mid_conversation_system);
+        assert!(!p.image_auto_split);
     }
 
     /// 密文按 id 匹配而非按下标(用例 3):顺序颠倒后保存,每条仍拿回自己的密文
@@ -662,6 +701,11 @@ mod tests {
                 model: "m".repeat(250),
                 api_style: String::new(),
                 enabled: true,
+                supports_vision: false,
+                supports_structured_output: false,
+                supports_prefix_completion: false,
+                supports_mid_conversation_system: false,
+                image_auto_split: false,
             },
             profile("dup", ""),
             profile("dup", ""),

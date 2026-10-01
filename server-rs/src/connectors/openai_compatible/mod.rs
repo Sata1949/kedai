@@ -112,6 +112,8 @@ pub struct OpenAiCompatibleConnector {
     api_key: String,
     model: String,
     style: ApiStyle,
+    /// 连接能力位(视觉能力包 D1):序列化层据此决定图像 parts 是否发送 / 大图是否拆分
+    capabilities: crate::connectors::ConnectorCapabilities,
     client: Client,
 }
 
@@ -127,8 +129,23 @@ impl OpenAiCompatibleConnector {
             api_key: api_key.to_string(),
             model: model.to_string(),
             style,
+            capabilities: crate::connectors::ConnectorCapabilities::default(),
             client: make_client(),
         }
+    }
+
+    /// 附加连接能力位(视觉能力包 D1;`build_connector` 装配路径使用)
+    pub fn with_capabilities(
+        mut self,
+        capabilities: crate::connectors::ConnectorCapabilities,
+    ) -> Self {
+        self.capabilities = capabilities;
+        self
+    }
+
+    /// 当前能力位(序列化层与测试读取)
+    pub fn capabilities(&self) -> crate::connectors::ConnectorCapabilities {
+        self.capabilities
     }
 
     /// 当前模型名
@@ -141,13 +158,14 @@ impl OpenAiCompatibleConnector {
         self.style
     }
 
-    /// 切换模型(保留 base_url / api_key / 方言)
+    /// 切换模型(保留 base_url / api_key / 方言 / 能力位)
     pub fn with_model(&self, model: &str) -> Self {
         OpenAiCompatibleConnector {
             base_url: self.base_url.clone(),
             api_key: self.api_key.clone(),
             model: model.to_string(),
             style: self.style,
+            capabilities: self.capabilities,
             client: make_client(),
         }
     }

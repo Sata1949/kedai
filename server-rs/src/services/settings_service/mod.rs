@@ -454,6 +454,11 @@ mod tests {
             model: "m".to_string(),
             api_style: String::new(),
             enabled: true,
+            supports_vision: false,
+            supports_structured_output: false,
+            supports_prefix_completion: false,
+            supports_mid_conversation_system: false,
+            image_auto_split: false,
         };
         p.sanitize(0);
         assert_eq!(p.base_url, "https://ws-x/compatible-mode/v1");
@@ -497,6 +502,11 @@ mod tests {
             model: "m".to_string(),
             api_style: crate::connectors::openai_compatible::API_STYLE_CHAT.to_string(),
             enabled: true,
+            supports_vision: false,
+            supports_structured_output: false,
+            supports_prefix_completion: false,
+            supports_mid_conversation_system: false,
+            image_auto_split: false,
         };
         // 只有地址(环境默认值即如此)→ 保持 mock,不切真实连接器
         assert_eq!(resolve_connector_target(Some(&p), "mock"), "mock");
