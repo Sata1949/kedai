@@ -187,4 +187,75 @@ describe('ChatMessageItem', () => {
     await w.vm.$nextTick();
     expect(w.text()).toContain('xyz');
   });
+
+  it('编辑框进入编辑态时按内容自适应高度:上下限内按 scrollHeight,短内容保持下限', async () => {
+    // jsdom 无真实布局(scrollHeight 恒 0),以原型 getter 桩模拟内容高度
+    const restore = stubTextareaScrollHeight(300);
+    try {
+      const w = mountItem(msg({ role: 'assistant', content: '很长的消息内容' }));
+      await w.setProps({ editing: true });
+      await w.vm.$nextTick();
+      const ta = w.find('.sv-edit-box textarea').element as HTMLTextAreaElement;
+      expect(ta.style.height).toBe('300px');
+    } finally {
+      restore();
+    }
+
+    // 短内容(小于下限 110px)保持下限,不缩成一两行
+    const restore2 = stubTextareaScrollHeight(40);
+    try {
+      const w2 = mountItem(msg({ role: 'assistant', content: '短' }));
+      await w2.setProps({ editing: true });
+      await w2.vm.$nextTick();
+      const ta2 = w2.find('.sv-edit-box textarea').element as HTMLTextAreaElement;
+      expect(ta2.style.height).toBe('110px');
+    } finally {
+      restore2();
+    }
+  });
+
+  it('编辑框自适应封顶 60vh:超长内容不超过视口六成', async () => {
+    const restore = stubTextareaScrollHeight(5000);
+    try {
+      const w = mountItem(msg({ role: 'assistant', content: '超长消息' }));
+      await w.setProps({ editing: true });
+      await w.vm.$nextTick();
+      const ta = w.find('.sv-edit-box textarea').element as HTMLTextAreaElement;
+      expect(ta.style.height).toBe(`${Math.round(window.innerHeight * 0.6)}px`);
+    } finally {
+      restore();
+    }
+  });
+
+  it('编辑框击键输入时重算高度(user 编辑框同样生效)', async () => {
+    const stub = { value: 120 };
+    const restore = stubTextareaScrollHeight(() => stub.value);
+    try {
+      const w = mountItem(msg({ role: 'user', content: '用户消息' }));
+      await w.setProps({ editing: true });
+      await w.vm.$nextTick();
+      const ta = w.find('.sv-edit-box textarea').element as HTMLTextAreaElement;
+      expect(ta.style.height).toBe('120px');
+
+      stub.value = 240;
+      await w.find('.sv-edit-box textarea').setValue('用户消息（加长）');
+      expect(ta.style.height).toBe('240px');
+    } finally {
+      restore();
+    }
+  });
 });
+
+/** 以原型 getter 桩模拟 textarea.scrollHeight(jsdom 无布局,真实值恒 0);返回还原函数 */
+function stubTextareaScrollHeight(px: number | (() => number)): () => void {
+  const desc = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'scrollHeight');
+  const read = typeof px === 'function' ? px : () => px;
+  Object.defineProperty(HTMLTextAreaElement.prototype, 'scrollHeight', {
+    configurable: true,
+    get: read,
+  });
+  return () => {
+    if (desc) Object.defineProperty(HTMLTextAreaElement.prototype, 'scrollHeight', desc);
+    else Reflect.deleteProperty(HTMLTextAreaElement.prototype, 'scrollHeight');
+  };
+}

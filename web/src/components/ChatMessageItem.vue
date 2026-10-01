@@ -4,7 +4,7 @@
 // 依赖精确到 (消息 id/content/content_display/extra、正则脚本版本 hash、renderHtml 偏好);
 // 流式 token 到达时仅当前生成中的消息重算,历史消息零重渲染。
 // 注意:样式类名与 DOM 结构语义与迁入前完全一致(style.css 全局选择器依赖),不得随意改名。
-import { computed, onUnmounted, ref, watch } from 'vue';
+import { computed, nextTick, onUnmounted, ref, watch } from 'vue';
 import { useAppStore } from '../store';
 import type { UiMessage } from '../sseReducer';
 import type { RegexScript } from '../api';
@@ -278,11 +278,34 @@ function messagePlain(content: string): string {
 
 // ===== 编辑态(文本本地管理,击键不触发父组件重渲染;保存时经事件上抛) =====
 const editText = ref('');
+
+/** 编辑框高度下限(与 shell.css .sv-edit-box textarea 的 min-height 对齐) */
+const EDIT_BOX_MIN_HEIGHT = 110;
+
+/**
+ * 编辑框自适应高度:按内容撑高(下限 110px、上限视口 60%,超出后内部滚动)。
+ * 固定 rows 的小窗只能看到长消息一角,滚动态易被误认为「内容缺失」;此处
+ * 进入编辑态与击键时重算,resize: vertical 保留供手动拖拽覆盖。
+ * 高度按 border-box 计(全局 * 规则),需补上边框厚,否则恒差几像素出滚动条。
+ */
+function autosizeEditBox(el: EventTarget | null): void {
+  if (typeof HTMLTextAreaElement === 'undefined' || !(el instanceof HTMLTextAreaElement)) return;
+  el.style.height = 'auto';
+  const max = Math.round(window.innerHeight * 0.6);
+  const borders = el.offsetHeight - el.clientHeight;
+  el.style.height = `${Math.min(Math.max(el.scrollHeight + borders, EDIT_BOX_MIN_HEIGHT), max)}px`;
+}
+
 watch(
   () => props.editing,
-  (on) => {
+  async (on) => {
     editText.value = on ? props.m.content : '';
+    if (!on) return;
+    // 文本写入 DOM 后再量内容高度(覆盖虚拟滚动重挂时 editing 已为 true 的场景)
+    await nextTick();
+    autosizeEditBox(rootEl.value?.querySelector('textarea') ?? null);
   },
+  { immediate: true },
 );
 
 /** swipe 版本切换:store 替换消息对象(新引用),渲染缓存自动失效;
@@ -303,7 +326,7 @@ defineExpose({ rootEl });
     <!-- 编辑态 -->
     <div v-if="editing" class="sv-edit-box">
       <div class="sv-edit-label">编辑用户消息</div>
-      <textarea v-model="editText" rows="5"></textarea>
+      <textarea v-model="editText" rows="5" @input="autosizeEditBox($event.target)"></textarea>
       <div class="sv-edit-actions">
         <button class="sv-btn ghost sv-btn-sm" @click="emit('cancel-edit')">取消</button>
         <button class="sv-btn ghost sv-btn-sm" @click="emit('save-edit', { id: m.id, text: editText, resend: false })">保存</button>
@@ -343,7 +366,7 @@ defineExpose({ rootEl });
       <!-- 编辑态 -->
       <div v-if="editing" class="sv-edit-box">
         <div class="sv-edit-label">编辑消息 · {{ characterName }}</div>
-        <textarea v-model="editText" rows="6"></textarea>
+        <textarea v-model="editText" rows="6" @input="autosizeEditBox($event.target)"></textarea>
         <div class="sv-edit-actions">
           <button class="sv-btn ghost sv-btn-sm" @click="emit('cancel-edit')">取消</button>
           <button class="sv-btn primary sv-btn-sm" @click="emit('save-edit', { id: m.id, text: editText, resend: false })">保存</button>

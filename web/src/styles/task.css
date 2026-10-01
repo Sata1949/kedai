@@ -297,11 +297,22 @@
   background: var(--sv-surface);
   border: 1px solid var(--sv-line-strong);
   padding: 10px 12px;
+  /* 长行换行(2026-10-01 实跑):与角色扮演消息代码块同口径,长行不再需要横拖 */
+  white-space: pre-wrap;
+  word-break: break-word;
   overflow-x: auto;
 }
 .sv-task-result code {
   font-family: var(--font-mono);
   font-size: 12px;
+}
+/* 步骤结果内的代码块:此前无任何样式,落回 UA pre(不换行、不滚动),长行把
+   整个任务详情栏(overflow-y: auto 连带横向)拖成横向滚动、只能拖拽看行尾
+   (2026-10-01 实跑);与消息代码块同口径换行 */
+.sv-task-step-result pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
 }
 
 /* ===== 批次 R4 流式输出:「正在生成」块(流式期间纯文本 + 光标,落库后消失) ===== */
