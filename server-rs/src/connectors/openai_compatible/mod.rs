@@ -426,21 +426,74 @@ impl OpenAiCompatibleConnector {
         read_sse_stream(resp.bytes_stream(), abort, tx, STREAM_IDLE_TIMEOUT, parser).await
     }
 
-    /// 按方言构建请求体(chat / responses / anthropic 的映射差异全部收口在此)
+    /// 按方言构建请求体(chat / responses / anthropic 的映射差异全部收口在此)。
+    /// 能力位(视觉能力包 D2)随构筑下传:仅 `supports_vision` 打开且有可用图像时
+    /// 才把 content 变成 parts 数组;**无图路径的请求体逐字节不变**。
     fn build_request_body(&self, messages: &[LlmMessage], params: &GenerationParams) -> Value {
         match self.style {
-            ApiStyle::ChatCompletions => build_chat_body(&self.model, messages, params),
-            ApiStyle::Responses => build_responses_body(&self.model, messages, params),
-            ApiStyle::Anthropic => build_anthropic_body(&self.model, messages, params),
+            ApiStyle::ChatCompletions => {
+                build_chat_body(&self.model, messages, params, self.capabilities)
+            }
+            ApiStyle::Responses => {
+                build_responses_body(&self.model, messages, params, self.capabilities)
+            }
+            ApiStyle::Anthropic => {
+                build_anthropic_body(&self.model, messages, params, self.capabilities)
+            }
         }
     }
 }
 
+/// 本消息可下发的图像:能力位打开 + data_url 已解析(空 data_url 是解析失败的兜底剔除)。
+fn usable_images(
+    m: &LlmMessage,
+    caps: crate::connectors::ConnectorCapabilities,
+) -> Vec<&crate::models::types::ImageRef> {
+    if !caps.supports_vision {
+        return Vec::new();
+    }
+    m.images.iter().filter(|i| !i.data_url.is_empty()).collect()
+}
+
+/// 拆 `data:<mime>;base64,<payload>`(仅 anthropic 需要裸 base64 段;失败返回 None)
+fn split_data_url(url: &str) -> Option<(&str, &str)> {
+    let rest = url.strip_prefix("data:")?;
+    let (meta, payload) = rest.split_once(',')?;
+    let mime = meta.strip_suffix(";base64")?;
+    Some((mime, payload))
+}
+
+/// chat 方言的 content 落位:无图 = 纯字符串(与既有行为逐字节一致);
+/// 有图 = parts 数组(text 仅非空时出现 + image_url data URL)。
+fn insert_chat_content(
+    obj: &mut serde_json::Map<String, Value>,
+    content: &str,
+    images: &[&crate::models::types::ImageRef],
+) {
+    if images.is_empty() {
+        obj.insert("content".into(), json!(content));
+        return;
+    }
+    let mut parts: Vec<Value> = Vec::new();
+    if !content.is_empty() {
+        parts.push(json!({ "type": "text", "text": content }));
+    }
+    for img in images {
+        parts.push(json!({ "type": "image_url", "image_url": { "url": img.data_url } }));
+    }
+    obj.insert("content".into(), Value::Array(parts));
+}
+
 /// chat-completions 请求体(自 generate_stream 原样提取,行为逐字节不变)
-fn build_chat_body(model: &str, messages: &[LlmMessage], params: &GenerationParams) -> Value {
+fn build_chat_body(
+    model: &str,
+    messages: &[LlmMessage],
+    params: &GenerationParams,
+    caps: crate::connectors::ConnectorCapabilities,
+) -> Value {
     let mut body = json!({
         "model": model,
-        "messages": to_openai_messages(messages),
+        "messages": to_openai_messages(messages, caps),
         "stream": true,
         "temperature": params.temperature,
         "top_p": params.top_p,
@@ -499,7 +552,12 @@ fn build_chat_body(model: &str, messages: &[LlmMessage], params: &GenerationPara
 /// - tools 为扁平格式 `{type:"function", name, description, parameters}`(无嵌套 function);
 /// - `max_tokens` → `max_output_tokens`;
 /// - **不下发 stop**:Responses 契约无停用序列参数。
-fn build_responses_body(model: &str, messages: &[LlmMessage], params: &GenerationParams) -> Value {
+fn build_responses_body(
+    model: &str,
+    messages: &[LlmMessage],
+    params: &GenerationParams,
+    caps: crate::connectors::ConnectorCapabilities,
+) -> Value {
     let mut instructions: Vec<String> = Vec::new();
     let mut input: Vec<Value> = Vec::new();
     for m in messages {
@@ -529,7 +587,23 @@ fn build_responses_body(model: &str, messages: &[LlmMessage], params: &Generatio
                     }
                 }
             }
-            _ => input.push(json!({ "role": "user", "content": m.content })),
+            _ => {
+                // user 消息:有图 → content parts(input_text + input_image data URL);
+                // 无图 → 纯字符串(与既有行为逐字节一致)
+                let images = usable_images(m, caps);
+                if images.is_empty() {
+                    input.push(json!({ "role": "user", "content": m.content }));
+                } else {
+                    let mut parts: Vec<Value> = Vec::new();
+                    if !m.content.is_empty() {
+                        parts.push(json!({ "type": "input_text", "text": m.content }));
+                    }
+                    for img in images {
+                        parts.push(json!({ "type": "input_image", "image_url": img.data_url }));
+                    }
+                    input.push(json!({ "role": "user", "content": parts }));
+                }
+            }
         }
     }
     let mut body = json!({
@@ -584,10 +658,24 @@ fn build_responses_body(model: &str, messages: &[LlmMessage], params: &Generatio
 /// - stop → `stop_sequences`;tools 为 `{name, description, input_schema}`;
 /// - tool_choice:none 档 Anthropic 无对应表达 → **不下发 tools**(模型无从调用,语义等价);
 /// - reasoning_content 不回传(Anthropic thinking 块需签名,原样拼接必被 400)。
-fn build_anthropic_body(model: &str, messages: &[LlmMessage], params: &GenerationParams) -> Value {
+fn build_anthropic_body(
+    model: &str,
+    messages: &[LlmMessage],
+    params: &GenerationParams,
+    caps: crate::connectors::ConnectorCapabilities,
+) -> Value {
     let mut system_parts: Vec<String> = Vec::new();
     let mut out: Vec<Value> = Vec::new();
     let mut pending_tool_results: Vec<Value> = Vec::new();
+
+    /// data URL → Anthropic image 块(base64 段不带前缀);形状不符返回 None(该图跳过)
+    fn image_block(img: &crate::models::types::ImageRef) -> Option<Value> {
+        let (media_type, data) = split_data_url(&img.data_url)?;
+        Some(json!({
+            "type": "image",
+            "source": { "type": "base64", "media_type": media_type, "data": data }
+        }))
+    }
 
     fn flush_tool_results(out: &mut Vec<Value>, pending: &mut Vec<Value>) {
         if !pending.is_empty() {
@@ -632,25 +720,47 @@ fn build_anthropic_body(model: &str, messages: &[LlmMessage], params: &Generatio
                 }
             }
             _ => {
-                // 连续同角色消息合并(Anthropic 要求 user/assistant 交替,连发两条
+                // user 消息:有图 → 块数组(text + image 块);无图 → 既有字符串/合并路径
+                // (连续同角色消息合并(Anthropic 要求 user/assistant 交替,连发两条
                 // user 会被 400):纯文本并入文本;tool_result 块消息后跟文本时,
-                // 文本并作同一 user 消息的 text 块(块数组本就允许多块混排)
-                if let Some(last) = out.last_mut() {
-                    if last.get("role").and_then(Value::as_str) == Some("user") {
-                        match last.get_mut("content") {
-                            Some(Value::String(s)) => {
-                                *s = format!("{s}\n\n{}", m.content);
-                                continue;
+                // 文本并作同一 user 消息的 text 块(块数组本就允许多块混排))
+                let images = usable_images(m, caps);
+                let mut image_blocks: Vec<Value> =
+                    images.iter().filter_map(|img| image_block(img)).collect();
+                if image_blocks.is_empty() {
+                    if let Some(last) = out.last_mut() {
+                        if last.get("role").and_then(Value::as_str) == Some("user") {
+                            match last.get_mut("content") {
+                                Some(Value::String(s)) => {
+                                    *s = format!("{s}\n\n{}", m.content);
+                                    continue;
+                                }
+                                Some(Value::Array(blocks)) => {
+                                    blocks.push(json!({ "type": "text", "text": m.content }));
+                                    continue;
+                                }
+                                _ => {}
                             }
-                            Some(Value::Array(blocks)) => {
-                                blocks.push(json!({ "type": "text", "text": m.content }));
-                                continue;
-                            }
-                            _ => {}
                         }
                     }
+                    out.push(json!({ "role": "user", "content": m.content }));
+                } else {
+                    let mut blocks: Vec<Value> = Vec::new();
+                    if !m.content.is_empty() {
+                        blocks.push(json!({ "type": "text", "text": m.content }));
+                    }
+                    blocks.append(&mut image_blocks);
+                    // 合并规则与纯文本路径一致:上一条也是 user 时并入其块数组
+                    if let Some(last) = out.last_mut() {
+                        if last.get("role").and_then(Value::as_str) == Some("user") {
+                            if let Some(Value::Array(prev)) = last.get_mut("content") {
+                                prev.append(&mut blocks);
+                                continue;
+                            }
+                        }
+                    }
+                    out.push(json!({ "role": "user", "content": blocks }));
                 }
-                out.push(json!({ "role": "user", "content": m.content }));
             }
         }
     }
@@ -845,19 +955,24 @@ where
     Ok(())
 }
 
-/// LlmMessage → OpenAI 兼容 messages 数组(处理 assistant.tool_calls 与 role=tool)
-fn to_openai_messages(messages: &[LlmMessage]) -> Vec<Value> {
+/// LlmMessage → OpenAI 兼容 messages 数组(处理 assistant.tool_calls 与 role=tool;
+/// 图像仅在能力位打开且有 data_url 时以 parts 数组下发)
+fn to_openai_messages(
+    messages: &[LlmMessage],
+    caps: crate::connectors::ConnectorCapabilities,
+) -> Vec<Value> {
     messages
         .iter()
         .map(|m| {
             let mut obj = serde_json::Map::new();
             obj.insert("role".into(), json!(m.role));
+            let images = usable_images(m, caps);
             if m.role == "tool" {
                 obj.insert(
                     "tool_call_id".into(),
                     json!(m.tool_call_id.clone().unwrap_or_default()),
                 );
-                obj.insert("content".into(), json!(m.content));
+                insert_chat_content(&mut obj, &m.content, &images);
             } else if let Some(calls) = &m.tool_calls {
                 obj.insert("content".into(), Value::Null);
                 // DeepSeek 系后端要求思考模式多轮调用时回传 reasoning_content,否则 400
@@ -882,7 +997,7 @@ fn to_openai_messages(messages: &[LlmMessage]) -> Vec<Value> {
                     ),
                 );
             } else {
-                obj.insert("content".into(), json!(m.content));
+                insert_chat_content(&mut obj, &m.content, &images);
             }
             Value::Object(obj)
         })

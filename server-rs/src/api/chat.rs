@@ -3,7 +3,8 @@ use crate::agents::engine::AgentRunRequest;
 use crate::api::app_state::AppState;
 use crate::api::json_body::JsonBody;
 use crate::api::{db_err, err_status, upstream};
-use crate::models::types::{GenerationParams, PlanStep, SseEvent};
+use crate::models::types::{GenerationParams, ImageRef, PlanStep, SseEvent};
+use crate::services::image_service::{ImageService, MAX_IMAGES_PER_MESSAGE, MAX_TOTAL_IMAGE_BYTES};
 use crate::services::prompt_inject_service::{output_budget_for_word_count, InjectMode};
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -58,6 +59,22 @@ pub struct SendBody {
     /// 生成新版本时原地更新该消息(swipes 追加),不新增消息行;与 resend_message_id 互斥。
     #[serde(default)]
     pub regenerate_assistant_id: Option<i64>,
+    /// 图像附件(视觉能力包 D2;仅常规发送路径接收,重发/重生成拒绝):
+    /// data URL 形态,落盘后消息 extra 的 `image_refs` 只存引用。
+    #[serde(default)]
+    pub attachments: Option<Vec<ChatAttachment>>,
+}
+
+/// 一条聊天图像附件(前端读取 File 为 data URL 后提交;`mime` 为冗余提示,
+/// 真实类型以 data URL 声明 + 魔数校验为准,见 `ImageService::decode_data_url`)。
+#[derive(Deserialize, Clone)]
+pub struct ChatAttachment {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub mime: String,
+    #[serde(default)]
+    pub data_url: String,
 }
 
 #[derive(Deserialize)]
@@ -78,7 +95,8 @@ pub async fn send(
     JsonBody(body): JsonBody<SendBody>,
 ) -> Response {
     let message = body.message.unwrap_or_default().trim().to_string();
-    if message.is_empty() {
+    let attachments = body.attachments.clone().unwrap_or_default();
+    if message.is_empty() && attachments.is_empty() {
         return err_status("消息不能为空", StatusCode::BAD_REQUEST);
     }
 
@@ -230,6 +248,50 @@ pub async fn send(
         return err_status("生成参数超出安全上限", StatusCode::BAD_REQUEST);
     }
 
+    // 视觉能力包 D2:图像附件校验(全部发生在占位与任何落盘之前)。
+    // 1) 锚点路径(重发/重生成)不接收附件——原图随消息 extra 已在历史里,重复载荷会被
+    //    静默丢掉或重复落盘,显式 400 更诚实;2) 张数/单张/合计限额;3) 能力闸门:
+    //    当前默认连接必须开启「视觉输入」,否则上游必然失败——此处拒绝并给可操作指引。
+    // 解码产物(decoded)在占位之后随消息写入一并落盘,校验失败不写任何字节。
+    let mut decoded: Vec<(String, String, Vec<u8>)> = Vec::new();
+    if !attachments.is_empty() {
+        if body.resend_message_id.is_some() || body.regenerate_assistant_id.is_some() {
+            return err_status(
+                "重发/重生成不接收附件载荷(原图随历史自动携带)",
+                StatusCode::BAD_REQUEST,
+            );
+        }
+        if attachments.len() > MAX_IMAGES_PER_MESSAGE {
+            return err_status(
+                format!("单条消息最多 {MAX_IMAGES_PER_MESSAGE} 张图片"),
+                StatusCode::BAD_REQUEST,
+            );
+        }
+        let vision_enabled = state
+            .settings_snapshot()
+            .active_connection()
+            .map(|p| p.supports_vision)
+            .unwrap_or(false);
+        if !vision_enabled {
+            return err_status(
+                "当前默认连接未开启「视觉输入」:请在 设置 → 连接配置 → 模型能力 勾选后重试",
+                StatusCode::BAD_REQUEST,
+            );
+        }
+        let mut total = 0usize;
+        for att in &attachments {
+            let (mime, bytes) = match ImageService::decode_data_url(&att.name, &att.data_url) {
+                Ok(v) => v,
+                Err(e) => return err_status(&e, StatusCode::BAD_REQUEST),
+            };
+            total += bytes.len();
+            if total > MAX_TOTAL_IMAGE_BYTES {
+                return err_status("图片合计超过 20MB 限制", StatusCode::BAD_REQUEST);
+            }
+            decoded.push((att.name.clone(), mime, bytes));
+        }
+    }
+
     // 原子占位必须发生在任何消息写入之前;所有前置校验已完成。
     // 守卫随作用域自动清理:早退 / panic / 任务丢弃都必然移除条目(见 PendingRunGuard)。
     let pending_guard = {
@@ -287,16 +349,29 @@ pub async fn send(
             ts.count_tokens(&message, &model)
         };
         let sessions = state.sessions.clone();
+        let images_svc = state.images.clone();
         let write_session_id = session_id.clone();
         let write_message = message.clone();
+        // 图像落盘与消息写入同一阻塞段(视觉能力包 D2):先存文件拿到引用,
+        // 再连同 ts/prompt_tokens 一起写进 extra 的 `image_refs`——
+        // 落盘失败则消息不写(500),不留「有引用没文件」的半截状态;
+        // 极端情况下已写入的部分文件成为孤儿(仅占磁盘,日志留痕)。
         let write_result = tokio::task::spawn_blocking(move || {
-            sessions.add_message(
-                &write_session_id,
-                "user",
-                &write_message,
-                json!({ "ts": chrono::Utc::now().timestamp_millis(), "prompt_tokens": prompt_tokens }),
-            )
-        }).await;
+            let mut refs: Vec<ImageRef> = Vec::with_capacity(decoded.len());
+            for (name, mime, bytes) in &decoded {
+                refs.push(images_svc.save(name, mime, bytes)?);
+            }
+            let mut extra = json!({
+                "ts": chrono::Utc::now().timestamp_millis(),
+                "prompt_tokens": prompt_tokens,
+            });
+            if !refs.is_empty() {
+                extra["image_refs"] =
+                    serde_json::to_value(&refs).unwrap_or(serde_json::Value::Null);
+            }
+            sessions.add_message(&write_session_id, "user", &write_message, extra)
+        })
+        .await;
         if let Err(e) = write_result.unwrap_or_else(|e| Err(format!("消息写入任务失败: {e}")))
         {
             return err_status(&e, StatusCode::INTERNAL_SERVER_ERROR);
@@ -649,6 +724,8 @@ pub async fn generate_raw(
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
+            // 作者页自组历史不支持图像(generate-raw 通道;视觉能力包 D2 范围之外)
+            images: Vec::new(),
         })
         .collect();
     let params = {

@@ -259,3 +259,31 @@ function stubTextareaScrollHeight(px: number | (() => number)): () => void {
     else Reflect.deleteProperty(HTMLTextAreaElement.prototype, 'scrollHeight');
   };
 }
+
+describe('ChatMessageItem · 用户图像附件(视觉能力包 D2)', () => {
+  it('extra.image_refs 渲染为 /api/images 缩略图;无引用不渲染该块', () => {
+    const w = mountItem(
+      msg({
+        role: 'user',
+        content: '看图\n\n[图片: a.png]',
+        extra: { image_refs: [{ id: 'x1.png', name: 'a.png', mime: 'image/png' }] },
+      }),
+    );
+    const strip = w.find('.sv-msg-images');
+    expect(strip.exists()).toBe(true);
+    expect(strip.find('img').attributes('src')).toBe('/api/images/x1.png');
+    expect(strip.find('a').attributes('href')).toBe('/api/images/x1.png');
+    expect(strip.find('img').attributes('alt')).toBe('a.png');
+    // 正文与图像并存
+    expect(w.text()).toContain('[图片: a.png]');
+
+    // 无引用(旧消息/纯文本)→ 不渲染图像块
+    const plain = mountItem(msg({ role: 'user', content: '纯文本' }));
+    expect(plain.find('.sv-msg-images').exists()).toBe(false);
+    // 形状不符的引用(缺 id)静默跳过
+    const bad = mountItem(
+      msg({ role: 'user', content: 'x', extra: { image_refs: [{ name: 'no-id.png' }] } }),
+    );
+    expect(bad.find('.sv-msg-images').exists()).toBe(false);
+  });
+});

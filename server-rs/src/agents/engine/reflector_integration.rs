@@ -188,6 +188,7 @@ pub(super) async fn reflect_with_tools(
             reasoning_content: None,
             tool_calls: Some(tool_calls.clone()),
             tool_call_id: None,
+            images: Vec::new(),
         });
         for call in &tool_calls {
             let output = engine
@@ -206,6 +207,7 @@ pub(super) async fn reflect_with_tools(
                 reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: Some(call.id.clone()),
+                images: Vec::new(),
             });
         }
     }

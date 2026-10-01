@@ -6,10 +6,12 @@
 //       `loop_guard.rs` 的重复指纹熔断同为通用纯逻辑(2026-09-14 抽出);
 //       `win.rs` 的 CREATE_NO_WINDOW 是跨 crate 共用的进程派生常量(2026-09-18),
 //       仅 windows 编译;`test_support.rs` 的 TempDataDir 是测试专用 RAII 守卫
-//       (2026-09-15),仅 cfg(test)/test-support feature 编译,不进生产产物。
+//       (2026-09-15),仅 cfg(test)/test-support feature 编译,不进生产产物;
+//       `image_sniff.rs` 的图片魔数嗅探是跨层共用的纯函数(2026-10-02 视觉能力包)。
 // 纪律: 保持无状态、无业务语义依赖。
 pub mod blocking;
 pub mod fs_atomic;
+pub mod image_sniff;
 pub mod logging;
 pub mod loop_guard;
 pub mod retry;

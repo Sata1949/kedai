@@ -38,7 +38,8 @@ pub(crate) async fn avatar_file(
         Ok(bytes) => {
             // 头像真实字节嗅探优先:上传的头像一律存为 .png(历史行为),但 JSON 卡可能
             // 携带 JPEG/WebP 头像,扩展名猜测会给出错误 Content-Type,nosniff 下无法显示
-            let mime = sniff_image_mime(&bytes).unwrap_or_else(|| guess_mime(&file));
+            let mime = crate::utils::image_sniff::sniff_image_mime(&bytes)
+                .unwrap_or_else(|| guess_mime(&file));
             Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, mime)
@@ -50,20 +51,28 @@ pub(crate) async fn avatar_file(
     }
 }
 
-/// 按魔数嗅探图片真实格式(头像字节与扩展名不一致时纠正 Content-Type)
-fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
-        Some("image/png")
-    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        Some("image/jpeg")
-    } else if bytes.starts_with(b"GIF8") {
-        Some("image/gif")
-    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
-        Some("image/webp")
-    } else if bytes.starts_with(b"BM") {
-        Some("image/bmp")
-    } else {
-        None
+/// GET /api/images/{file}:从 DATA_DIR/images 读取(聊天贴图与工具图像;视觉能力包 D2)。
+/// 文件名白名单 + 魔数嗅探,与头像路由同一安全模型;该路由在 security.rs 白名单豁免
+/// token(`<img src>` 无法携带 Authorization 头,理由与头像同)。
+pub(crate) async fn image_file(
+    State(state): State<Arc<AppState>>,
+    Path(file): Path<String>,
+) -> Response {
+    let Some(path) = state.images.file_path(&file) else {
+        // 目录穿越/非法文件名拒绝:与头像路由同口径,真实 404 + code
+        return err_with_code(ErrorCode::NotFound, "Not Found", StatusCode::NOT_FOUND);
+    };
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => {
+            let mime = crate::utils::image_sniff::sniff_image_mime(&bytes)
+                .unwrap_or_else(|| guess_mime(&file));
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, mime)
+                .body(axum::body::Body::from(bytes))
+                .unwrap_or_else(|_| StatusCode::NOT_FOUND.into_response())
+        }
+        Err(_) => err_with_code(ErrorCode::NotFound, "Not Found", StatusCode::NOT_FOUND),
     }
 }
 
@@ -554,7 +563,9 @@ mod cache_policy_tests {
 
 #[cfg(test)]
 mod avatar_mime_tests {
-    use super::sniff_image_mime;
+    // 嗅探实现在 utils::image_sniff(2026-10-02 视觉能力包 D2 收敛;本测试保留
+    // 头像场景的判别性,验证「字节优先于扩展名」这一历史行为)
+    use crate::utils::image_sniff::sniff_image_mime;
 
     #[test]
     fn sniffs_real_format_over_extension() {

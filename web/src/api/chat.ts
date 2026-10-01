@@ -6,6 +6,14 @@ import type { AgentMode, SseEvent, TokenUsage } from './types';
 
 export type SseHandler = (event: SseEvent) => void;
 
+/** 一条图像附件(视觉能力包 D2):前端把 File 读成 data URL 提交;
+ *  后端落盘后消息 extra 只存引用(`image_refs`),历史渲染走 `GET /api/images/{id}`。 */
+export interface ChatAttachment {
+  name: string;
+  mime: string;
+  data_url: string;
+}
+
 export interface ChatStreamPayload {
   session_id?: string;
   character_id?: string;
@@ -20,6 +28,8 @@ export interface ChatStreamPayload {
   regenerate_assistant_id?: number;
   /** 手动压缩标记:true 时本轮生成前对较早历史做摘要压缩(仅 compaction_mode=manual 时生效)。 */
   compact?: boolean;
+  /** 图像附件(仅常规发送携带;重发/重生成路径服务端拒绝——原图随历史自动携带) */
+  attachments?: ChatAttachment[];
 }
 
 /** 通知后端中止指定会话的生成任务。 */

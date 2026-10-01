@@ -98,3 +98,45 @@ describe('模型选择器样式(.sv-model-select 的自绘三角)', () => {
     );
   });
 });
+
+describe('ChatInput 图像附件(视觉能力包 D2)', () => {
+  it('图片只留 [图片: 名称] 标记且不拼 base64;载荷走 attachments;预览 URL 每附件一次且用完回收', async () => {
+    const createUrl = vi.fn(() => 'blob:mock-1');
+    const revokeUrl = vi.fn();
+    Object.defineProperty(URL, 'createObjectURL', { value: createUrl, writable: true, configurable: true });
+    Object.defineProperty(URL, 'revokeObjectURL', { value: revokeUrl, writable: true, configurable: true });
+
+    const { store, wrapper } = mountInput();
+    store.currentCharacterId = 'c1';
+    const sendSpy = vi.spyOn(store, 'sendMessage').mockResolvedValue(undefined);
+
+    const file = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], '图标.png', { type: 'image/png' });
+    const fileInput = wrapper.find('input[type="file"]');
+    Object.defineProperty(fileInput.element, 'files', { value: [file], configurable: true });
+    await fileInput.trigger('change');
+    await wrapper.vm.$nextTick();
+
+    // 预览条:同一附件在模板中两次取值仍只创建一次对象 URL(修复双倍泄漏)
+    expect(wrapper.find('.sv-attach-chip img').exists()).toBe(true);
+    expect(createUrl).toHaveBeenCalledTimes(1);
+
+    await wrapper.find('textarea').setValue('看这张图');
+    await wrapper.find('.sv-btn-send').trigger('click');
+    // FileReader 异步读取:等待提交
+    await vi.waitFor(() => expect(sendSpy).toHaveBeenCalled());
+
+    const [content, payload] = sendSpy.mock.calls[0] as [
+      string,
+      Array<{ name: string; mime: string; data_url: string }>,
+    ];
+    expect(content).toContain('看这张图');
+    expect(content).toContain('[图片: 图标.png]');
+    expect(content).not.toContain('base64');
+    expect(payload).toHaveLength(1);
+    expect(payload[0].name).toBe('图标.png');
+    expect(payload[0].mime).toBe('image/png');
+    expect(payload[0].data_url.startsWith('data:image/png;base64,')).toBe(true);
+    // 发送后回收预览 URL(不再泄漏)
+    expect(revokeUrl).toHaveBeenCalledWith('blob:mock-1');
+  });
+});

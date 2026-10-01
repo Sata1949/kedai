@@ -191,7 +191,7 @@ export const useChatStore = defineStore('app.chat', () => {
   }
 
   // ===== 发送与流式生成 =====
-  async function sendMessage(text: string): Promise<void> {
+  async function sendMessage(text: string, attachments: api.ChatAttachment[] = []): Promise<void> {
     const cid = currentCharacterIdValue();
     if (!cid || generating.value) return;
 
@@ -199,13 +199,18 @@ export const useChatStore = defineStore('app.chat', () => {
     if (!currentSessionId.value) await newSession();
 
     messages.value.push({ id: -Date.now(), role: 'user', content: text, extra: {}, streaming: false });
-    await startStream(text);
+    await startStream(text, { attachments });
   }
 
   /** 发起流式生成(用户消息已就位时不重复 push,供「编辑后重发」复用) */
   async function startStream(
     text: string,
-    opts: { resendMessageId?: number; regenerateAssistantId?: number } = {},
+    opts: {
+      resendMessageId?: number;
+      regenerateAssistantId?: number;
+      /** 图像附件(仅常规发送路径;重发/重生成不携带,见 ChatStreamPayload.attachments) */
+      attachments?: api.ChatAttachment[];
+    } = {},
   ): Promise<void> {
     const cid = currentCharacterIdValue();
     if (!cid || generating.value) return;
@@ -231,6 +236,7 @@ export const useChatStore = defineStore('app.chat', () => {
         max_tokens: genSettings.maxTokens,
         resend_message_id: opts.resendMessageId,
         regenerate_assistant_id: opts.regenerateAssistantId,
+        attachments: opts.attachments,
       },
       onSseEvent,
     );

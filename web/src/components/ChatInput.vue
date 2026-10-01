@@ -2,7 +2,7 @@
 // 底部输入区:多行文本域,Enter 发送 / Shift+Enter 换行;
 // slash 联想(输入 / 开头时下拉补全命令)+ 快速回复(快捷填入常用消息);
 // 最底部工具栏:模式切换 + 授权模式 + 模型选择 + 文件上传
-import { ref, computed, onMounted, watch, nextTick } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
 import { useAppStore } from '../store';
 import { storeToRefs } from 'pinia';
 import * as api from '../api';
@@ -62,31 +62,55 @@ function onFilePicked(e: Event): void {
 }
 
 function removeAttachment(index: number): void {
-  attachments.value.splice(index, 1);
+  const [removed] = attachments.value.splice(index, 1);
+  if (removed) releasePreviews([removed]);
 }
 
 function isImage(file: File): boolean {
   return file.type.startsWith('image/');
 }
 
+/** 附件预览 URL 缓存(2026-10-02 视觉能力包 D2 修 blob 泄漏):
+ *  原实现每次 getFilePreview 都 createObjectURL、模板对同一图两次调用(双倍泄漏)且全程
+ *  无 revoke —— 改为每附件缓存一个 URL,移除/发送/卸载时统一 revoke。 */
+const previewUrls = new Map<File, string>();
+
 function getFilePreview(file: File): string | null {
-  if (isImage(file)) {
-    return URL.createObjectURL(file);
-  }
-  return null;
+  if (!isImage(file)) return null;
+  const cached = previewUrls.get(file);
+  if (cached) return cached;
+  const url = URL.createObjectURL(file);
+  previewUrls.set(file, url);
+  return url;
 }
 
-/** 读取文件为 base64 或文本 */
-function readFileContent(file: File): Promise<string> {
+function releasePreviews(files: readonly File[]): void {
+  for (const f of files) {
+    const url = previewUrls.get(f);
+    if (url) {
+      URL.revokeObjectURL(url);
+      previewUrls.delete(f);
+    }
+  }
+}
+
+/** 读取非图片文件为文本(既有「[文件: 名称]+正文」内联形态不变) */
+function readFileText(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(reader.result as string);
     reader.onerror = reject;
-    if (isImage(file)) {
-      reader.readAsDataURL(file);
-    } else {
-      reader.readAsText(file);
-    }
+    reader.readAsText(file);
+  });
+}
+
+/** 读取图片为 data URL(视觉能力包 D2:不再拼进正文,作为 attachments 载荷单独提交) */
+function readImageDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
   });
 }
 
@@ -94,24 +118,41 @@ async function send(): Promise<void> {
   const value = text.value.trim();
   if ((!value && attachments.value.length === 0) || generating.value) return;
 
-  // 构建消息内容(含附件)
+  // 视觉能力包 D2:图片正文只保留 `[图片: 名称]` 标记(可读性 + 旧渲染降级),
+  // 像素经 attachments(data URL)单独提交;非图片文件维持既有内联形态。
+  const images = attachments.value.filter(isImage);
+  const others = attachments.value.filter((f) => !isImage(f));
+  const parts: string[] = [];
+  for (const f of images) {
+    parts.push(`[图片: ${f.name}]`);
+  }
+  for (const f of others) {
+    const data = await readFileText(f);
+    parts.push(`[文件: ${f.name}]\n${data}`);
+  }
   let content = value;
-  if (attachments.value.length) {
-    const parts: string[] = [];
-    for (const f of attachments.value) {
-      const data = await readFileContent(f);
-      if (isImage(f)) {
-        parts.push(`[图片: ${f.name}]\n${data}`);
-      } else {
-        parts.push(`[文件: ${f.name}]\n${data}`);
-      }
-    }
+  if (parts.length) {
     content = content ? `${content}\n\n${parts.join('\n\n')}` : parts.join('\n\n');
   }
 
+  const payload: api.ChatAttachment[] = [];
+  for (const f of images) {
+    try {
+      payload.push({
+        name: f.name,
+        mime: f.type || 'application/octet-stream',
+        data_url: await readImageDataUrl(f),
+      });
+    } catch {
+      alert(`读取图片「${f.name}」失败,已跳过该附件`);
+    }
+  }
+
+  const released = [...attachments.value];
   text.value = '';
   attachments.value = [];
-  await store.sendMessage(content);
+  releasePreviews(released);
+  await store.sendMessage(content, payload);
 }
 
 function onKeydown(e: KeyboardEvent): void {
@@ -212,6 +253,11 @@ onMounted(() => {
   // 联想数据与快速回复列表:加载失败静默(输入功能不受影响)
   void api.listSlashCommands().then((cmds) => (slashCommands.value = cmds)).catch(() => {});
   void api.listQuickReplies().then((rs) => (quickReplies.value = rs)).catch(() => {});
+});
+
+onUnmounted(() => {
+  // 卸载时回收未发送附件的预览 URL(视觉能力包 D2 的 blob 泄漏收口)
+  releasePreviews([...attachments.value]);
 });
 
 /** 模型切换 */

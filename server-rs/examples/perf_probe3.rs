@@ -28,6 +28,7 @@ fn main() {
                 arguments: format!("{{\"content\":\"{}\"}}", "参".repeat(2000)),
             }]),
             tool_call_id: None,
+            images: Vec::new(),
         });
         msgs.push(kedai_server::models::types::LlmMessage {
             role: "tool".into(),
@@ -35,6 +36,7 @@ fn main() {
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: Some(format!("call-{i}")),
+            images: Vec::new(),
         });
     }
 

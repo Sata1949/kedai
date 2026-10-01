@@ -39,6 +39,7 @@ fn prompt_order_golden_with_untrusted_boundaries() {
         &[inj("system", "常驻世界书")],
         &[inj("user", "激发世界书")],
         &history,
+        &[],
         Some("CUSTOM 模板 {{character_description}} {{world_info}}"),
         Some(&inject),
         Some("PRESET TAIL"),
@@ -84,6 +85,7 @@ fn mvu_position_system_keeps_world_in_system() {
         &world_constant,
         &[],
         &history,
+        &[],
         None,
         None,
         None,
@@ -126,6 +128,7 @@ fn mvu_position_user_tail_moves_world_to_last_user_message() {
         &[],
         &world_triggered,
         &history,
+        &[],
         None,
         None,
         None,
@@ -172,6 +175,7 @@ fn mvu_position_user_tail_with_custom_prompt() {
         &[],
         &world_triggered,
         &history,
+        &[],
         Some(tpl),
         None,
         None,
@@ -210,6 +214,7 @@ fn preset_tail_appended_after_triggered_world() {
         &[],
         &world_triggered,
         &history,
+        &[],
         None,
         None,
         preset_tail,
@@ -247,6 +252,7 @@ fn preset_tail_falls_back_to_system_without_user() {
         &[],
         &world_triggered,
         &history,
+        &[],
         None,
         None,
         preset_tail,
@@ -292,6 +298,7 @@ fn world_and_tail_role_injection() {
         &world_constant,
         &world_triggered,
         &history,
+        &[],
         None,
         None,
         preset_tail,
@@ -352,6 +359,7 @@ fn reflect_advice_injected_before_preset_tail_after_triggered() {
         &[],
         &world_triggered,
         &history,
+        &[],
         None,
         None,
         preset_tail,
@@ -388,6 +396,7 @@ fn reflect_advice_assistant_before_preset_tail_assistant() {
         &[],
         &[],
         &history,
+        &[],
         None,
         None,
         preset_tail,
@@ -420,6 +429,7 @@ fn reflect_advice_falls_back_to_system_before_preset_tail() {
         &[],
         &[],
         &history,
+        &[],
         None,
         None,
         preset_tail,
@@ -478,6 +488,7 @@ fn build_prefix_case(
         &constant,
         &triggered,
         history,
+        &[],
         None,
         None,
         Some("预设尾部。"),
@@ -530,6 +541,7 @@ fn probability_entries_do_not_perturb_system_prefix() {
             &constant,
             &triggered,
             &history,
+            &[],
             None,
             None,
             Some("预设尾部。"),
@@ -1026,4 +1038,49 @@ fn recall_slot_keeps_prior_prefix_stable() {
         serde_json::to_string(recall_in_new).unwrap(),
         "召回槽内容应逐字节稳定"
     );
+}
+
+/// 视觉能力包 D2:图像引用按历史下标挂到对应 LlmMessage;无图消息为空
+/// (空 vec 在 LlmMessage 序列化时被 skip,不改变既有消息形态)。
+#[test]
+fn history_images_attach_by_index() {
+    let mut vars = HashMap::new();
+    let history = vec![
+        ("user".to_string(), "带图消息".to_string()),
+        ("assistant".to_string(), "回应".to_string()),
+        ("user".to_string(), "无图消息".to_string()),
+    ];
+    let img = crate::models::types::ImageRef {
+        id: "a.png".into(),
+        name: "a.png".into(),
+        mime: "image/png".into(),
+        data_url: "data:image/png;base64,AAAA".into(),
+    };
+    let images = vec![vec![img], vec![], vec![]];
+    let (msgs, _) = build_llm_messages_with_position(
+        "芽衣",
+        "描述",
+        "",
+        "",
+        &[],
+        &[],
+        &history,
+        &images,
+        None,
+        None,
+        None,
+        "user",
+        None,
+        "user",
+        &mut vars,
+        &mut AssistantVars::new(),
+        None,
+    );
+    // msgs = [system, user(带图), assistant, user(无图)]
+    assert_eq!(msgs.len(), 4);
+    assert_eq!(msgs[1].images.len(), 1);
+    assert_eq!(msgs[1].images[0].id, "a.png");
+    assert!(msgs[2].images.is_empty());
+    assert!(msgs[3].images.is_empty());
+    assert!(msgs[0].images.is_empty(), "system 不携带图像");
 }

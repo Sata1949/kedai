@@ -7,7 +7,7 @@
 // 本模块上半为纯函数与提示词文本;引擎侧 LLM 调用与落库方法
 // (clear_compaction/compact_session/maybe_compact)自 engine/mod.rs 拆分迁入文件尾 impl 块。
 use super::*;
-use crate::models::types::MessageRecord;
+use crate::models::types::{ImageRef, MessageRecord};
 
 /// 压缩后保留的最近消息条数默认值(约等于最近 2 轮对话),避免摘要后模型丢失当前语境。
 /// 可经设置项 compaction_keep_recent 覆盖(默认 4)。
@@ -24,6 +24,10 @@ pub(super) const SNIP_THRESHOLD: f64 = 0.6;
 pub(super) struct ProjectedHistory {
     pub summary: Option<String>,
     pub tuples: Vec<(String, String)>,
+    /// 与 `tuples` 逐条对齐的图像引用(视觉能力包 D2;存储形态,data_url 留空)。
+    /// 解析成 data URL 由引擎侧 `ImageService::resolve_recent` 完成——
+    /// 本函数保持纯函数(不触盘),压缩截断点与 tuples 用同一过滤条件,天然对齐。
+    pub images: Vec<Vec<ImageRef>>,
 }
 
 /// 按已存在的压缩摘要投影历史:
@@ -42,6 +46,10 @@ pub(super) fn project_history(
                 .iter()
                 .map(|m| (m.role.clone(), m.content.clone()))
                 .collect(),
+            images: history
+                .iter()
+                .map(|m| ImageRef::refs_from_extra(&m.extra))
+                .collect(),
         },
         Some((upto, summary)) => ProjectedHistory {
             summary: Some(summary),
@@ -49,6 +57,11 @@ pub(super) fn project_history(
                 .iter()
                 .filter(|m| m.id > upto)
                 .map(|m| (m.role.clone(), m.content.clone()))
+                .collect(),
+            images: history
+                .iter()
+                .filter(|m| m.id > upto)
+                .map(|m| ImageRef::refs_from_extra(&m.extra))
                 .collect(),
         },
     }
@@ -433,6 +446,29 @@ mod tests {
         assert_eq!(projected.tuples.len(), 3);
         assert_eq!(projected.tuples[0], ("user".into(), "c".into()));
         assert!(projected.tuples.iter().all(|(_, c)| c != "a" && c != "b"));
+    }
+
+    /// 视觉能力包 D2:图像列与 tuples 逐条对齐;压缩过滤(只保留 id > upto)同源作用,
+    /// 不会出现「文字截了、图还挂着」的错位。
+    #[test]
+    fn project_history_carries_aligned_image_refs() {
+        let mut with_img = msg(1, "user", "带图");
+        with_img.extra = json!({"image_refs": [{"id": "a.png","name": "a","mime": "image/png"}]});
+        let mut tail_img = msg(3, "user", "尾部带图");
+        tail_img.extra = json!({"image_refs": [{"id": "b.png","name": "b","mime": "image/png"}]});
+        let history = vec![with_img, msg(2, "assistant", "回应"), tail_img];
+
+        let projected = project_history(&history, None);
+        assert_eq!(projected.images.len(), 3, "与 tuples 等长");
+        assert_eq!(projected.images[0][0].id, "a.png");
+        assert!(projected.images[1].is_empty());
+
+        // 压缩到 id=1:文字只留 2 条,图像列同步只剩尾部两条(且第一条为空)
+        let projected = project_history(&history, Some((1, "摘要".into())));
+        assert_eq!(projected.tuples.len(), 2);
+        assert_eq!(projected.images.len(), 2);
+        assert!(projected.images[0].is_empty());
+        assert_eq!(projected.images[1][0].id, "b.png");
     }
 
     #[test]

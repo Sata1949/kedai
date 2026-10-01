@@ -161,6 +161,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/bootstrap", get(static_files::bootstrap))
         // 头像静态服务
         .route("/api/avatars/{file}", get(static_files::avatar_file))
+        // 图像静态服务(聊天贴图与工具图像;视觉能力包 D2;免 Bearer 理由见 security.rs)
+        .route("/api/images/{file}", get(static_files::image_file))
         // 角色卡脚本沙箱文档(独立 CSP,绕过全站 script-src 'self' 对内联脚本的限制)
         .route("/sandbox.html", get(static_files::sandbox_document))
         // 角色卡远程资源界面宿主文档(独立 CSP:允许作者页面脚本/网络,断掉与宿主的一切共享)

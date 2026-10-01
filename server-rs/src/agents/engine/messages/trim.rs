@@ -547,6 +547,7 @@ mod tests {
                     arguments: arguments.into(),
                 }]),
                 tool_call_id: None,
+                images: Vec::new(),
             },
             LlmMessage {
                 role: "tool".into(),
@@ -554,6 +555,7 @@ mod tests {
                 reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: Some(call_id.into()),
+                images: Vec::new(),
             },
         ]
     }

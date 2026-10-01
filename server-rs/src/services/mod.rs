@@ -26,6 +26,8 @@ pub mod embedding_service;
 pub mod exec;
 // 任务执行者库:任务模式的执行者与角色扮演角色卡解耦(独立实体 + 指令段注入)
 pub mod executor_service;
+// 图像通道落盘/校验/data URL 组装(2026-10-02 视觉能力包 D2)
+pub mod image_service;
 pub mod kaleido_state_service;
 // Android Keystore 桥接(JNI):API Key 加密存储,仅 android 目标编译
 #[cfg(target_os = "android")]

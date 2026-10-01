@@ -87,6 +87,9 @@ pub struct CoreServices {
     /// 任务执行者库(任务模式的执行者,与角色扮演角色卡解耦),
     /// 持久化到 data/task_executors.json
     pub executors: Arc<Mutex<crate::services::executor_service::ExecutorService>>,
+    /// 图像通道(DATA_DIR/images;视觉能力包 D2):聊天附件落盘、
+    /// /api/images 路由与引擎历史图像解析共用同一实例
+    pub images: Arc<crate::services::image_service::ImageService>,
 }
 
 /// 并发与限流脚手架(M4.3 归组):只服务于「串行化 / 取消 / 防滥用」,
@@ -127,6 +130,10 @@ impl AppState {
         let kaleido_state = Arc::new(KaleidoStateService::new(db.clone()));
         let sessions = Arc::new(SessionService::new(db.clone()));
         let agent_sessions = Arc::new(AgentSessionService::new(db.clone()));
+        // 图像通道(DATA_DIR/images;视觉能力包 D2):附件落盘 / 历史解析 / 图像路由
+        let images = Arc::new(crate::services::image_service::ImageService::new(
+            config.data_dir.clone(),
+        ));
         let world_books = Arc::new(WorldBookService::new(db.clone()));
         let skills = Arc::new(SkillService::new(db.clone()));
         // Skill 库加载情况(供启动器/控制台确认;与下方工具插件日志保持一致)
@@ -352,6 +359,7 @@ impl AppState {
                 world_books: world_books.clone(),
                 contract_registry: contract_registry.clone(),
                 kaleido_state: kaleido_state.clone(),
+                images: images.clone(),
             },
             EnginePrompt {
                 prompt_inject: prompt_inject.clone(),
@@ -422,6 +430,7 @@ impl AppState {
                 runtime_prompt,
                 flow,
                 executors,
+                images,
                 tasks,
             },
             guards: ConcurrencyGuards {

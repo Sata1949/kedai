@@ -386,6 +386,40 @@ pub struct TokenUsage {
 }
 
 // ---------- LLM ----------
+
+/// 一条随消息下发的图像引用(视觉能力包 D2)。
+///
+/// 双形态一体化:
+/// - **存储形态**(消息 extra 的 `image_refs`):只有 `id/name/mime`,`data_url` 留空
+///   (skip_serializing_if 省略)——落库/导出透传的永远只是引用,不含像素;
+/// - **下发形态**(`LlmMessage.images`):引擎组装历史时把 `data_url` 解析为
+///   `data:<mime>;base64,...`(见 `services::image_service::resolve_recent`),
+///   连接器序列化时直接消费,不再触盘。
+///
+/// `id` 是 DATA_DIR/images 下的文件名(含扩展名,uuid 生成)——**独立于消息 id**:
+/// 聊天导入会重排消息 id,按文件 id 关联才不会悬空。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImageRef {
+    pub id: String,
+    /// 原始文件名(展示用;前端渲染与导出保留)
+    pub name: String,
+    pub mime: String,
+    /// data URL(仅下发形态携带;存储形态为空并被 serde 省略)
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub data_url: String,
+}
+
+impl ImageRef {
+    /// 从消息 extra 解析引用列表(存储形态);缺键/形状不符一律返回空
+    /// (旧数据无此键,静默兼容)。
+    pub fn refs_from_extra(extra: &Value) -> Vec<ImageRef> {
+        extra
+            .get("image_refs")
+            .and_then(|v| serde_json::from_value::<Vec<ImageRef>>(v.clone()).ok())
+            .unwrap_or_default()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmMessage {
     pub role: String, // system | user | assistant | tool
@@ -399,10 +433,15 @@ pub struct LlmMessage {
     /// role="tool" 消息对应的工具调用 id
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// 随消息下发的图像(视觉能力包 D2;空 = 纯文本消息,序列化形态与加字段前逐字节一致)。
+    /// **不进 token 计数**——token_service 只数 content/tool_calls,图像按引用与
+    /// 上游计费口径由提供商自行折算。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageRef>,
 }
 
 impl LlmMessage {
-    /// 构造普通消息(system/user/assistant)
+    /// 构造普通消息(system/user/assistant;不含图像)
     pub fn plain(role: &str, content: &str) -> Self {
         LlmMessage {
             role: role.to_string(),
@@ -410,6 +449,7 @@ impl LlmMessage {
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
+            images: Vec::new(),
         }
     }
 }

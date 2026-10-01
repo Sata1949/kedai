@@ -150,6 +150,7 @@ async fn responses_body_maps_instructions_input_and_tools() {
                 arguments: r#"{"q":1}"#.into(),
             }]),
             tool_call_id: None,
+            images: Vec::new(),
         },
         LlmMessage {
             role: "tool".into(),
@@ -157,6 +158,7 @@ async fn responses_body_maps_instructions_input_and_tools() {
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: Some("call_1".into()),
+            images: Vec::new(),
         },
     ];
     connector
@@ -366,6 +368,7 @@ async fn anthropic_body_maps_system_tool_blocks_and_clamps() {
                 arguments: r#"{"q":1}"#.into(),
             }]),
             tool_call_id: None,
+            images: Vec::new(),
         },
         LlmMessage {
             role: "tool".into(),
@@ -373,6 +376,7 @@ async fn anthropic_body_maps_system_tool_blocks_and_clamps() {
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: Some("toolu_1".into()),
+            images: Vec::new(),
         },
         LlmMessage {
             role: "tool".into(),
@@ -380,6 +384,7 @@ async fn anthropic_body_maps_system_tool_blocks_and_clamps() {
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: Some("toolu_1".into()),
+            images: Vec::new(),
         },
         LlmMessage::plain("user", "继续"),
     ];
@@ -431,16 +436,31 @@ fn anthropic_tool_choice_mapping() {
         parameters: serde_json::json!({"type": "object"}),
     }];
     params.tool_choice = crate::models::types::ToolChoice::None;
-    let body = build_anthropic_body("m", &[LlmMessage::plain("user", "hi")], &params);
+    let body = build_anthropic_body(
+        "m",
+        &[LlmMessage::plain("user", "hi")],
+        &params,
+        Default::default(),
+    );
     assert!(
         body.get("tools").is_none(),
         "none 档应整体隐去 tools: {body}"
     );
     params.tool_choice = crate::models::types::ToolChoice::Required;
-    let body = build_anthropic_body("m", &[LlmMessage::plain("user", "hi")], &params);
+    let body = build_anthropic_body(
+        "m",
+        &[LlmMessage::plain("user", "hi")],
+        &params,
+        Default::default(),
+    );
     assert_eq!(body["tool_choice"], json!({"type": "any"}));
     params.tool_choice = crate::models::types::ToolChoice::Function("read".into());
-    let body = build_anthropic_body("m", &[LlmMessage::plain("user", "hi")], &params);
+    let body = build_anthropic_body(
+        "m",
+        &[LlmMessage::plain("user", "hi")],
+        &params,
+        Default::default(),
+    );
     assert_eq!(body["tool_choice"], json!({"type": "tool", "name": "read"}));
 }
 
@@ -609,4 +629,93 @@ fn anthropic_parser_tool_flow_and_error_events() {
         .unwrap_err();
     assert_eq!(err.kind(), LlmErrorKind::AuthFailed);
     assert!(!err.retryable(), "鉴权失败不得重试");
+}
+
+// ===== 视觉能力包 D2:图像映射(chat image_url / responses input_image / anthropic image)=====
+
+/// 一条带图像的 user 消息(下发音以 data URL 就绪;id/name 仅引用元数据)
+fn image_message() -> LlmMessage {
+    let mut m = LlmMessage::plain("user", "看图");
+    m.images = vec![crate::models::types::ImageRef {
+        id: "a.png".into(),
+        name: "a.png".into(),
+        mime: "image/png".into(),
+        data_url: "data:image/png;base64,AAAA".into(),
+    }];
+    m
+}
+
+fn vision_caps() -> crate::connectors::ConnectorCapabilities {
+    crate::connectors::ConnectorCapabilities {
+        supports_vision: true,
+        image_auto_split: false,
+    }
+}
+
+/// chat:能力位关闭时与纯文本路径逐字节一致(images 被忽略);
+/// 打开且有 data_url 时 content 变 parts 数组(text + image_url)。
+#[test]
+fn chat_body_serializes_images_only_when_vision_enabled() {
+    let params = test_params();
+    let msgs = vec![image_message()];
+    // 关闭:content 仍是纯字符串(无图路径逐字节不变)
+    let body = build_chat_body("m", &msgs, &params, Default::default());
+    assert_eq!(body["messages"][0]["content"], "看图");
+    // 打开:text + image_url data URL 两段
+    let body = build_chat_body("m", &msgs, &params, vision_caps());
+    assert_eq!(
+        body["messages"][0]["content"][0],
+        json!({"type": "text", "text": "看图"})
+    );
+    assert_eq!(
+        body["messages"][0]["content"][1],
+        json!({"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}})
+    );
+    // 纯图消息(正文为空):parts 只有 image_url 一段
+    let mut only_img = image_message();
+    only_img.content = String::new();
+    let body = build_chat_body("m", &[only_img], &params, vision_caps());
+    assert_eq!(body["messages"][0]["content"].as_array().unwrap().len(), 1);
+    assert_eq!(body["messages"][0]["content"][0]["type"], "image_url");
+}
+
+/// responses:user 图像映射为 input_text + input_image 两个 input 项;
+/// 能力位关闭时保持纯字符串 content(旧行为)。
+#[test]
+fn responses_body_maps_user_images_to_input_parts() {
+    let params = test_params();
+    let msgs = vec![image_message()];
+    let body = build_responses_body("m", &msgs, &params, Default::default());
+    assert_eq!(body["input"][0]["content"], "看图");
+    let body = build_responses_body("m", &msgs, &params, vision_caps());
+    assert_eq!(
+        body["input"][0]["content"][0],
+        json!({"type": "input_text", "text": "看图"})
+    );
+    assert_eq!(
+        body["input"][0]["content"][1],
+        json!({"type": "input_image", "image_url": "data:image/png;base64,AAAA"})
+    );
+}
+
+/// anthropic:user 图像变块数组 text + image 块;source.data 是**裸 base64**
+/// (data URL 前缀必须剥掉,否则上游 400)。
+#[test]
+fn anthropic_body_strips_data_url_prefix_for_image_source() {
+    let params = test_params();
+    let msgs = vec![image_message()];
+    let body = build_anthropic_body("m", &msgs, &params, Default::default());
+    assert_eq!(body["messages"][0]["content"], "看图");
+    let body = build_anthropic_body("m", &msgs, &params, vision_caps());
+    assert_eq!(
+        body["messages"][0]["content"][0],
+        json!({"type": "text", "text": "看图"})
+    );
+    assert_eq!(
+        body["messages"][0]["content"][1],
+        json!({
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}
+        })
+    );
 }

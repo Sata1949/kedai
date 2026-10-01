@@ -101,6 +101,8 @@ pub struct EngineStorage {
     pub contract_registry: Arc<crate::contracts::ContractRegistry>,
     /// 契约运行态服务(收尾把 KaleidoState/changelog 提交到 SQLite)
     pub kaleido_state: Arc<crate::services::kaleido_state_service::KaleidoStateService>,
+    /// 图像通道(DATA_DIR/images;视觉能力包 D2):历史图像引用解析
+    pub images: Arc<crate::services::image_service::ImageService>,
 }
 
 /// AgentEngine 构造依赖分组三:提示词与上下文(注入配置 / 快速回复 / 运行提示词 / 记忆 / 技能)。
@@ -139,6 +141,8 @@ pub struct AgentEngine {
     sessions: Arc<SessionService>,
     agent_sessions: Arc<AgentSessionService>,
     world_books: Arc<WorldBookService>,
+    /// 图像通道(DATA_DIR/images):聊天附件与工具图像的历史解析(视觉能力包 D2)
+    images: Arc<crate::services::image_service::ImageService>,
     tool_registry: Arc<ToolRegistry>,
     token_service: Arc<Mutex<TokenService>>,
     /// 运行时设置(agent 系统提示词、搜索端点等)
@@ -192,6 +196,7 @@ impl AgentEngine {
             sessions: storage.sessions,
             agent_sessions: storage.agent_sessions,
             world_books: storage.world_books,
+            images: storage.images,
             tool_registry: ext.tool_registry,
             token_service: Arc::new(Mutex::new(TokenService::new())),
             settings: core.settings,

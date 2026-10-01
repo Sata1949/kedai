@@ -1065,6 +1065,7 @@ impl TaskService {
                 reasoning_content: None,
                 tool_calls: Some(out.tool_calls.clone()),
                 tool_call_id: None,
+                images: Vec::new(),
             });
             for call in &out.tool_calls {
                 // 白名单双保险:下发定义已是子集,执行时仍逐一核对(防模型幻觉工具名);
@@ -1117,6 +1118,7 @@ impl TaskService {
                     reasoning_content: None,
                     tool_calls: None,
                     tool_call_id: Some(call.id.clone()),
+                    images: Vec::new(),
                 });
             }
             if *cancel.borrow() {

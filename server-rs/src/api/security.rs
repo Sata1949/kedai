@@ -74,8 +74,12 @@ pub async fn guard(State(state): State<Arc<AppState>>, request: Request, next: N
         }
         // 头像接口豁免 token:<img src="/api/avatars/..." 无法携带 Authorization 头,
         // 且头像文件仅从 DATA_DIR/avatars 读取、无敏感信息;host/origin 校验仍生效。
-        let public =
-            matches!(path, "/api/health" | "/api/bootstrap") || path.starts_with("/api/avatars/");
+        // 图像接口同理(视觉能力包 D2):`<img src="/api/images/...">` 无法带头,
+        // 文件仅从 DATA_DIR/images 按文件名白名单 + 魔数嗅探读取(见 static_files::image_file),
+        // 内容本就是用户自己发送/生成的图像,无凭证信息。
+        let public = matches!(path, "/api/health" | "/api/bootstrap")
+            || path.starts_with("/api/avatars/")
+            || path.starts_with("/api/images/");
         if state.config.auth_required
             && !public
             && !valid_token(&state, request.headers().get(header::AUTHORIZATION))

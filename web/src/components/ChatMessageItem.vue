@@ -58,6 +58,26 @@ function displayText(m: { content: string; content_display?: string }): string {
   return m.content_display ?? m.content;
 }
 
+/** 用户消息附带的图像引用(视觉能力包 D2;extra.image_refs = [{id,name,mime}])。
+ *  只认 id 为字符串的条目(形状不符静默跳过,兼容旧消息与手改数据)。 */
+function messageImages(m: UiMessage): Array<{ id: string; name: string }> {
+  const refs = m.extra?.image_refs;
+  if (!Array.isArray(refs)) return [];
+  const out: Array<{ id: string; name: string }> = [];
+  for (const r of refs) {
+    if (typeof r === 'object' && r !== null) {
+      const obj = r as Record<string, unknown>;
+      if (typeof obj.id === 'string' && obj.id) {
+        out.push({ id: obj.id, name: typeof obj.name === 'string' ? obj.name : '' });
+      }
+    }
+  }
+  return out;
+}
+
+/** 当前消息的图像(仅用户消息携带;独立于 html 渲染缓存) */
+const userImages = computed(() => (props.m.role === 'user' ? messageImages(props.m) : []));
+
 /** 消息状态栏文本(两步生成落库 extra.status_bar;无则 null) */
 function statusBar(m: { extra?: Record<string, unknown> }): string | null {
   const bar = m.extra?.status_bar;
@@ -343,6 +363,20 @@ defineExpose({ rootEl });
     <template v-else>
       <div class="sv-msg-bubble" :class="{ 'sv-stream-cursor': m.streaming }">
         {{ messagePlain(displayText(m)) }}
+        <!-- 图像附件(视觉能力包 D2):extra.image_refs 只存引用,渲染走 /api/images(免 Bearer)。
+             放在气泡内、文本之后;模板层渲染,不进 v-html 渲染缓存(缓存键不含 extra)。 -->
+        <div v-if="userImages.length" class="sv-msg-images">
+          <a
+            v-for="img in userImages"
+            :key="img.id"
+            :href="`/api/images/${img.id}`"
+            target="_blank"
+            rel="noopener"
+            :title="img.name"
+          >
+            <img :src="`/api/images/${img.id}`" :alt="img.name" loading="lazy" />
+          </a>
+        </div>
       </div>
       <div v-if="!m.streaming" class="sv-msg-actions">
         <button class="sv-msg-action" @click="emit('start-edit', m)">编辑</button>
@@ -453,5 +487,21 @@ defineExpose({ rootEl });
 .sv-trunc-note .sv-badge {
   flex-shrink: 0;
   margin-top: 1px;
+}
+
+/* 用户消息图像附件(视觉能力包 D2):引用式渲染(extra.image_refs → GET /api/images),
+   多图换行、限高缩略;点击/新窗口打开原图 */
+.sv-msg-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.sv-msg-images img {
+  display: block;
+  max-width: 220px;
+  max-height: 220px;
+  border: var(--bw-thin) solid var(--sv-line-strong);
+  background: var(--sv-white);
 }
 </style>

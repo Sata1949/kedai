@@ -94,6 +94,7 @@ pub(super) async fn maybe_run_tool(
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
+            images: Vec::new(),
         });
     }
     state_machine.transition_best_effort(AgentState::Executing, session_id);
@@ -193,7 +194,16 @@ pub(crate) async fn execute_generation(
         // 设置快照:不留锁跨 await(锁在 settings_snapshot 内即释放)
         let log_enabled = engine.settings_snapshot().llm_request_log;
         if log_enabled && !is_task_run {
-            if let Ok(payload) = serde_json::to_string(messages) {
+            // 图像 data URL 可达数十 MB(视觉能力包 D2):快照只留文字与图像引用元数据,
+            // 清空 data_url 再序列化——排查「模型看到了什么文字/哪张图」不需要重复存像素
+            // (像素真身在 DATA_DIR/images/,按引用可复现)。
+            let mut log_messages = messages.to_vec();
+            for m in &mut log_messages {
+                for img in &mut m.images {
+                    img.data_url.clear();
+                }
+            }
+            if let Ok(payload) = serde_json::to_string(&log_messages) {
                 if let Err(e) = engine.sessions.save_llm_request(
                     session_id,
                     run_id,
@@ -939,6 +949,7 @@ pub(crate) async fn run_tool_loop(
             reasoning_content: reasoning,
             tool_calls: Some(result.tool_calls.clone()),
             tool_call_id: None,
+            images: Vec::new(),
         });
         // ===== 本轮工具执行 =====
         // 1) 裁决(顺序,无副作用):白名单工具自动放行,其余走三档授权模式裁决
@@ -1107,13 +1118,17 @@ pub(crate) async fn run_tool_loop(
                 flag,
             )
             .await?;
-            // tool 结果消息:与循环前的 assistant(tool_calls) 成对,供下一轮生成参考
+            // tool 结果消息:与循环前的 assistant(tool_calls) 成对,供下一轮生成参考。
+            // 图像通道(视觉能力包 D4 的接缝,本批恒空):工具返回约定式 `{text, images}`
+            // 时图像引用将挂在此处;当前全部工具返回纯文本,故为空 vec。
+            let tool_images: Vec<crate::models::types::ImageRef> = Vec::new();
             llm_messages.push(LlmMessage {
                 role: "tool".into(),
                 content: e.output.to_string(),
                 reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: Some(e.call.id.clone()),
+                images: tool_images,
             });
             // 语义熔断登记(HB-2):输出经归一化(抹时间戳/耗时/计数)后取指纹;
             // 同一工具在窗口内调用 ≥N 次且指纹去重 ≤K 即判定空转。只记录首个命中,

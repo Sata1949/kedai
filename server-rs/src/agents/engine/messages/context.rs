@@ -35,6 +35,10 @@ pub(in crate::agents::engine) struct CollectedCtx {
     pub(in crate::agents::engine) scenario: String,
     pub(in crate::agents::engine) history: Vec<MessageRecord>,
     pub(in crate::agents::engine) history_tuples: Vec<(String, String)>,
+    /// 与 history_tuples 逐条对齐的图像引用(视觉能力包 D2;已解析为 data URL,
+    /// 且只保留最近 4 张——解析与截断在 collect_context 内完成)。
+    /// 消息构建层按 index 把引用挂到各自 LlmMessage 上。
+    pub(in crate::agents::engine) history_images: Vec<Vec<crate::models::types::ImageRef>>,
     /// 历史压缩摘要(可空):存在时拼入 system 作为早期历史回顾,替代被压缩的原文段
     pub(in crate::agents::engine) history_summary: Option<String>,
     pub(in crate::agents::engine) custom_prompt: Option<String>,
@@ -369,6 +373,12 @@ impl AgentEngine {
         // 模型可见历史 = 投影(摘要截止点之后)经 snip 零成本裁剪后的视图;
         // 原文 history(完整)继续供世界书/EJS 等读取
         let history_tuples: Vec<(String, String)> = tuples;
+        // 视觉能力包 D2:图像引用随历史携带(与 history_tuples 逐条对齐,project_history
+        // 用同一过滤条件产出)。只保留最近 4 张并解析成 data URL——读盘走 park_worker
+        // 让出 async worker(与 finalize_messages 里读运行时提示词同款纪律);
+        // 单张解析失败跳过留 warn,不阻断本轮。
+        let mut history_images = projected.images;
+        crate::utils::blocking::park_worker(|| self.images.resolve_recent(&mut history_images));
         let history_summary = projected.summary;
         // 自定义 Agent 系统提示词(设置里编辑;为空则用内置默认)
         // 扁平字段类型为 RoleplayPromptConfig(WP7 模式隔离):roleplay 权威值,.0 取字符串
@@ -413,6 +423,7 @@ impl AgentEngine {
             scenario,
             history,
             history_tuples,
+            history_images,
             history_summary,
             custom_prompt,
             inject_snapshot,
@@ -453,6 +464,7 @@ impl AgentEngine {
             &ctx.world_constant,
             &ctx.world_triggered,
             &ctx.history_tuples,
+            &ctx.history_images,
             ctx.custom_prompt.as_deref(),
             Some(&ctx.inject_snapshot),
             ctx.preset_tail.as_deref(),

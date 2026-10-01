@@ -5,7 +5,7 @@
 // 可见性说明:原 messages.rs 中 pub(super)(= 对 engine 可见)的导出条目在此改为
 // pub(in crate::agents::engine),供 messages/mod.rs 以相同可见性再导出,范围不变。
 use crate::agents::engine::worldbook::WorldInjection;
-use crate::models::types::LlmMessage;
+use crate::models::types::{ImageRef, LlmMessage};
 use crate::parsing::assistant::AssistantVars;
 use crate::parsing::macros::{expand_macros, MacroCtx};
 use crate::services::prompt_inject_service::{FloorRole, InjectMode, PromptInjectConfig};
@@ -60,6 +60,8 @@ fn build_llm_messages(
         &constant,
         &[],
         history,
+        // 测试兼容入口不带图像(视觉能力包 D2 前既有行为)
+        &[],
         custom_prompt,
         inject,
         None,
@@ -86,6 +88,8 @@ pub(in crate::agents::engine) fn build_llm_messages_with_position(
     world_constant: &[WorldInjection],
     world_triggered: &[WorldInjection],
     history: &[(String, String)],
+    // 与 history 逐条对齐的图像引用(视觉能力包 D2;空 slice = 无图,行为与加字段前一致)
+    history_images: &[Vec<ImageRef>],
     custom_prompt: Option<&str>,
     inject: Option<&PromptInjectConfig>,
     preset_tail: Option<&str>,
@@ -335,7 +339,12 @@ pub(in crate::agents::engine) fn build_llm_messages_with_position(
                     final_content.push_str(&format!("\n\n{t}"));
                 }
             }
-            messages.push(LlmMessage::plain(role, &final_content));
+            let mut msg = LlmMessage::plain(role, &final_content);
+            // 视觉能力包 D2:图像引用按 index 挂到对应历史消息上(无图为空 vec,序列化省略)
+            if let Some(imgs) = history_images.get(i) {
+                msg.images = imgs.clone();
+            }
+            messages.push(msg);
             // assistant 尾部注入紧跟最新 user 消息之后(位置1 → 位置0 顺序)
             if i == idx {
                 for at in &assistant_tail {
@@ -345,11 +354,15 @@ pub(in crate::agents::engine) fn build_llm_messages_with_position(
         }
     } else {
         // 无 user 消息:激发与预设尾部已并入 system,历史原样输出
-        for (role, content) in history.iter() {
+        for (i, (role, content)) in history.iter().enumerate() {
             if role == "system" {
                 continue;
             }
-            messages.push(LlmMessage::plain(role, content));
+            let mut msg = LlmMessage::plain(role, content);
+            if let Some(imgs) = history_images.get(i) {
+                msg.images = imgs.clone();
+            }
+            messages.push(msg);
         }
     }
     (messages, protected_tail)

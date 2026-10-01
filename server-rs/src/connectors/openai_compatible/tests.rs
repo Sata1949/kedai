@@ -66,6 +66,7 @@ fn tool_messages_echo_reasoning() {
                 arguments: r#"{"sides":6}"#.into(),
             }]),
             tool_call_id: None,
+            images: Vec::new(),
         },
         LlmMessage {
             role: "tool".into(),
@@ -73,9 +74,10 @@ fn tool_messages_echo_reasoning() {
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: Some("call_1".into()),
+            images: Vec::new(),
         },
     ];
-    let out = to_openai_messages(&msgs);
+    let out = to_openai_messages(&msgs, crate::connectors::ConnectorCapabilities::default());
     // assistant:tool_calls 标准结构 + reasoning_content 回传
     assert_eq!(out[0]["role"], "assistant");
     assert_eq!(out[0]["tool_calls"][0]["type"], "function");
