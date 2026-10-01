@@ -81,6 +81,9 @@ const isTaskMode = computed(() => store.appMode === 'task');
         </div>
         <div class="sv-range-hints"><span>128 · 省钱</span><span>131072 · 上限</span></div>
       </div>
+      <!-- 最大上下文窗口 / 压缩 / 记忆:仅角色扮演(聊天)消费;任务模式下隐藏(TM-SET-3),
+           避免「改了在任务里不生效」的死写(批量保存路径同步按模式过滤,见 useDataManager)。 -->
+      <template v-if="!isTaskMode">
       <div>
         <div class="sv-range-label">
           最大上下文窗口(Token) <span class="sv-range-val">{{ ctxLabel }}</span>
@@ -99,6 +102,7 @@ const isTaskMode = computed(() => store.appMode === 'task');
         <div class="sv-range-hints"><span>64k · 最低</span><span>1M · 上限</span></div>
         <p class="sv-note">超出上限时按时间裁剪最旧的历史消息(角色设定始终保留)。</p>
       </div>
+      </template>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">工具轮次上限</label>
         <input
@@ -267,6 +271,8 @@ const isTaskMode = computed(() => store.appMode === 'task');
         />
         <span class="sv-note">任务侧:无活动自动收尾(默认 900;0 = 关;601-86400)</span>
       </div>
+      <!-- 压缩 + 记忆:仅角色扮演(聊天)消费,任务模式隐藏(TM-SET-3) -->
+      <template v-if="!isTaskMode">
       <div class="sv-inp-row">
         <label class="sv-inp-tag">压缩模式</label>
         <select v-model="compactionMode" class="sv-select" title="上下文压缩模式:off 不压缩 / manual 手动触发 / auto token 超阈值自动压缩">
@@ -364,6 +370,10 @@ const isTaskMode = computed(() => store.appMode === 'task');
         />
         <span class="sv-note">每角色记忆条数上限(0-10000,0 = 不限制,默认 200)</span>
       </div>
+      </template>
+      <p v-if="isTaskMode" class="sv-note">
+        最大上下文窗口、压缩与记忆参数仅角色扮演(聊天)使用,已在任务模式下隐藏;如需调整请切到角色扮演模式。
+      </p>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">子代理深度</label>
         <input
@@ -403,6 +413,11 @@ const isTaskMode = computed(() => store.appMode === 'task');
         />
         <span class="sv-note">子智能体结果字符上限(500-8000,默认 2000)</span>
       </div>
+      <!-- 子代理三参数与回退快照为**全局字段**(TM-SET-3 直写扁平):两模式共用一份,
+           任务模式下编辑立即生效(此前经覆盖层是静默死写)。 -->
+      <p v-if="isTaskMode" class="sv-note">
+        子代理参数为全局设置(角色扮演与任务共用一份),修改立即对两者生效。
+      </p>
       <!-- 任务模式缺省生成配置(TM-SET-1):仅任务模式显示。任务覆盖层未显式配置时,
            任务运行取任务缺省(0.3 / 1.0 / 8192,不沿用角色扮演风味值);
            本页「保存为默认参数」会把滑块当前值写成**任务显式值**并冻结,故给一键写推荐值。 -->

@@ -548,3 +548,52 @@ async fn task_default_connection_roundtrip_and_validation() {
     .await;
     assert_eq!(status, StatusCode::OK);
 }
+
+/// TM-SET-3:全局字段(task 模式编辑也生效)——搜索端点 / 授权三档 / 子代理三参数 /
+/// 回退快照改为**直写扁平**(执行期读全局快照,模式覆盖永不生效)。本用例锁定:
+/// PUT ?mode=task 写入后,task 视图与 roleplay 视图读到同一个值(两模式共用一份),
+/// 不再是「写覆盖层但运行期不读」的静默死写。
+#[tokio::test]
+async fn global_fields_written_from_task_mode_are_effective() {
+    let _guard = test_lock().await;
+    let app = test_app();
+
+    // 现场值(共享 app;净零复位目标)
+    let (_, before) = send_json(app, "GET", "/api/settings?mode=task", json!({})).await;
+    let before_depth = before["subagent_max_depth"].clone();
+    let before_undo = before["undo_enabled"].clone();
+
+    // 任务模式写入 → 两视图一致(直写扁平)
+    let (status, r) = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=task",
+        json!({ "subagent_max_depth": 3, "undo_enabled": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "任务模式写全局字段应 200: {r}");
+    let (_, task_view) = send_json(app, "GET", "/api/settings?mode=task", json!({})).await;
+    let (_, rp_view) = send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
+    assert_eq!(
+        task_view["subagent_max_depth"],
+        json!(3),
+        "task 视图应读到新值: {task_view}"
+    );
+    assert_eq!(
+        rp_view["subagent_max_depth"],
+        json!(3),
+        "全局字段两模式共用(roleplay 视图同值): {rp_view}"
+    );
+    assert_eq!(task_view["undo_enabled"], json!(false));
+    assert_eq!(rp_view["undo_enabled"], json!(false));
+
+    // 卫生复位(写回现场值;同样是全局写入路径)
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({ "subagent_max_depth": before_depth, "undo_enabled": before_undo }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}

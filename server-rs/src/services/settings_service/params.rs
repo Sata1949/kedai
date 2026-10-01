@@ -38,6 +38,11 @@ pub use crate::models::tool_policy::McpServerConfig;
 /// 按模式的设置覆盖项:所有字段 `Option`,`Some` 表示覆盖共享默认,`None` 表示沿用共享值。
 /// 仅覆盖生成参数与 Agent 配置;连接信息(openai_base_url/openai_api_key/model)始终共享。
 ///
+/// **不在此列的全局字段**(TM-SET-3 起直写扁平、无覆盖层):搜索端点 / 授权三档 /
+/// 始终需授权清单 / 授权等待超时 / 子代理三参数 / 回退快照开关 / 工具历史回灌等——
+/// 它们的运行期消费点都读**全局设置快照**(非 `for_mode`),模式覆盖永不生效,
+/// 写覆盖层是静默死写;UI 也改为「全局设置,两模式共用」呈现。
+///
 /// **例外(TM-GEN-1 / TM-SET-1)**:`default_temperature` / `default_top_p` /
 /// `default_max_tokens` 的 `None` 不是纯沿用——合并时取任务向缺省(见
 /// [`TASK_DEFAULT_TEMPERATURE`] 一组常量),`default_max_tokens` 只抬不压;
@@ -56,8 +61,6 @@ pub struct ModeSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_system_prompt: Option<TaskPromptConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub search_endpoint: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mvu_vars_position: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reflect_prompt: Option<String>,
@@ -71,14 +74,6 @@ pub struct ModeSettings {
     pub reflect_advice_role: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bypass_mode: Option<bool>,
-    /// task 覆盖层的授权模式(三档);None 沿用扁平值
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub authorization_mode: Option<AuthorizationMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bypass_blacklist: Option<Vec<String>>,
-    /// task 覆盖层的授权等待超时(秒)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_authorization_timeout_secs: Option<u32>,
     /// task 覆盖层的任务工具策略
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_tool_policy: Option<String>,
@@ -125,18 +120,6 @@ pub struct ModeSettings {
     /// 技能渐进披露开关(落地项 3;默认 true)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_progressive_disclosure: Option<bool>,
-    /// 回退快照开关(批次 6.1;默认 true):写工具执行前留逆操作快照,可「回退到此处」
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub undo_enabled: Option<bool>,
-    /// 子智能体最大嵌套深度(默认 2,钳 1..=4;主 Agent 为第 0 层)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub subagent_max_depth: Option<u32>,
-    /// 子智能体并发上限(默认 6,钳 1..=16;顺序执行下为在飞计数守卫)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub subagent_max_concurrency: Option<u32>,
-    /// 子智能体结果最大字符数(默认 2000,钳 500..=8000;超出截断并附尾注)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub subagent_result_max_chars: Option<u32>,
     /// MCP stdio 客户端总开关(批次 6.2;默认关,仅启动时装配,改后重启生效)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_enabled: Option<bool>,
@@ -643,9 +626,6 @@ impl RuntimeSettings {
                 default_task_agent_prompt()
             }),
         };
-        if let Some(v) = &ov.search_endpoint {
-            out.search_endpoint = v.clone();
-        }
         if let Some(v) = &ov.mvu_vars_position {
             out.mvu_vars_position = v.clone();
         }
@@ -666,15 +646,6 @@ impl RuntimeSettings {
         }
         if let Some(v) = ov.bypass_mode {
             out.bypass_mode = v;
-        }
-        if let Some(v) = ov.authorization_mode {
-            out.authorization_mode = v;
-        }
-        if let Some(v) = &ov.bypass_blacklist {
-            out.bypass_blacklist = v.clone();
-        }
-        if let Some(v) = ov.tool_authorization_timeout_secs {
-            out.tool_authorization_timeout_secs = v;
         }
         if let Some(v) = &ov.task_tool_policy {
             out.task_tool_policy = v.clone();
@@ -726,18 +697,6 @@ impl RuntimeSettings {
         }
         if let Some(v) = ov.skill_progressive_disclosure {
             out.skill_progressive_disclosure = v;
-        }
-        if let Some(v) = ov.undo_enabled {
-            out.undo_enabled = v;
-        }
-        if let Some(v) = ov.subagent_max_depth {
-            out.subagent_max_depth = v;
-        }
-        if let Some(v) = ov.subagent_max_concurrency {
-            out.subagent_max_concurrency = v;
-        }
-        if let Some(v) = ov.subagent_result_max_chars {
-            out.subagent_result_max_chars = v;
         }
         if let Some(v) = ov.mcp_enabled {
             out.mcp_enabled = v;

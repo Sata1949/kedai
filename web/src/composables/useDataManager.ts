@@ -127,11 +127,14 @@ export function useGenerationParams() {
     saveParams.value = true;
     paramsMsg.value = '';
     try {
+      // 模式过滤(TM-SET-3):最大上下文窗口/压缩/记忆为聊天专属(任务侧零消费),
+      // 任务模式下已隐藏——批量保存不得把它们写进任务覆盖层(否则是永不生效的死写)。
+      // 子代理三参数与回退快照为全局字段(直写扁平),两模式都保留在 patch 里。
+      const isTask = store.appMode === 'task';
       await store.saveSettings({
         default_temperature: temperature.value,
         default_top_p: topP.value,
         default_max_tokens: maxTokens.value,
-        max_context_tokens: maxContextTokens.value,
         max_tool_rounds: maxToolRounds.value,
         // 流程调用闸与节点默认上下文(A 批 A3/A4;三者都是任务侧设置)
         max_flow_call_depth: maxFlowCallDepth.value,
@@ -146,18 +149,23 @@ export function useGenerationParams() {
         loop_guard_semantic_max_distinct: loopGuardSemanticMaxDistinct.value,
         task_step_budget_secs: taskStepBudgetSecs.value,
         task_idle_timeout_secs: taskIdleTimeoutSecs.value,
-        compaction_mode: compactionMode.value,
-        compaction_threshold: compactionThreshold.value,
-        compaction_keep_recent: compactionKeepRecent.value,
-        compaction_snip_bytes: compactionSnipBytes.value,
-        memory_distill_enabled: memoryDistillEnabled.value,
-        memory_inject_limit: memoryInjectLimit.value,
-        memory_inject_char_budget: memoryInjectCharBudget.value,
-        memory_max_entries: memoryMaxEntries.value,
         subagent_max_depth: subagentMaxDepth.value,
         subagent_max_concurrency: subagentMaxConcurrency.value,
         subagent_result_max_chars: subagentResultMaxChars.value,
         undo_enabled: undoEnabled.value,
+        ...(isTask
+          ? {}
+          : {
+              max_context_tokens: maxContextTokens.value,
+              compaction_mode: compactionMode.value,
+              compaction_threshold: compactionThreshold.value,
+              compaction_keep_recent: compactionKeepRecent.value,
+              compaction_snip_bytes: compactionSnipBytes.value,
+              memory_distill_enabled: memoryDistillEnabled.value,
+              memory_inject_limit: memoryInjectLimit.value,
+              memory_inject_char_budget: memoryInjectCharBudget.value,
+              memory_max_entries: memoryMaxEntries.value,
+            }),
       });
       paramsMsg.value = '已保存为默认生成参数';
       setTimeout(() => (paramsMsg.value = ''), 2500);

@@ -824,14 +824,21 @@ mod tests {
         assert_eq!(rt.subagent_max_concurrency, 1);
         assert_eq!(rt.subagent_result_max_chars, 8000);
 
-        // task 模式覆盖层:Some 覆盖扁平值,None 沿用
+        // TM-SET-3:子代理三参数改直写扁平(执行期读全局快照,模式覆盖永不生效)——
+        // task 视图 = 扁平值,两模式共用;旧覆盖层残留字段已从 ModeSettings 移除
+        // (编译期即不可写,旧 settings.json 里的残留键由 serde 忽略)。
         let mut s4 = RuntimeSettings::from_config(&cfg);
-        s4.task.subagent_max_depth = Some(1);
-        let task_view = s4.for_mode(AppMode::Task);
-        assert_eq!(task_view.subagent_max_depth, 1, "task 覆盖应生效");
-        assert_eq!(task_view.subagent_max_concurrency, 6, "未覆盖项沿用扁平值");
-        let rp_view = s4.for_mode(AppMode::Roleplay);
-        assert_eq!(rp_view.subagent_max_depth, 2, "roleplay 读扁平权威值");
+        s4.subagent_max_depth = 1;
+        assert_eq!(
+            s4.for_mode(AppMode::Task).subagent_max_depth,
+            1,
+            "task 视图读扁平值(全局设置)"
+        );
+        assert_eq!(
+            s4.for_mode(AppMode::Roleplay).subagent_max_depth,
+            1,
+            "roleplay 同读扁平值"
+        );
 
         // task 模式 agent_system_prompt 不回退 roleplay 人设词:
         // None → 内置任务向默认提示词;Some(v) → 覆盖;Some("") → 显式留空(注入方跳过)

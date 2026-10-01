@@ -1,7 +1,9 @@
 <script setup lang="ts">
-// 设置区:数据管理(聊天导出 / 导入 / 清空当前会话)。
+// 设置区:数据管理(聊天导出 / 导入 / 清空当前会话 + 回退快照开关)。
 // 从 SettingsModal.vue 双模板合并而来:两分支内容一致。
 // 状态由壳(SettingsModal)创建一次后经 prop 传入,与 UiSection 共享 useDataManager。
+// TM-SET-3:导出/导入/清空为聊天(会话)专属,任务模式下隐藏;回退快照为全局开关常显。
+import { computed } from 'vue';
 import { useAppStore } from '../../store';
 import { storeToRefs } from 'pinia';
 import type { useDataManager } from '../../composables/useDataManager';
@@ -21,13 +23,17 @@ const {
   undoEnabled, undoMsg, saveUndoEnabled,
 } = props.state;
 
-const { currentSessionId } = storeToRefs(useAppStore());
+const store = useAppStore();
+const { currentSessionId } = storeToRefs(store);
+/** 任务模式:无会话概念,聊天导出/导入/清空隐藏 */
+const isTaskMode = computed(() => store.appMode === 'task');
 </script>
 
 <template>
   <div v-show="props.show" class="sv-field">
     <div class="sv-field-label"><span class="sv-supreme blue" /> 数据管理</div>
     <div class="sv-datalist">
+      <template v-if="!isTaskMode">
       <div class="sv-data-row">
         <div class="info">
           <b>导出聊天</b>
@@ -49,10 +55,11 @@ const { currentSessionId } = storeToRefs(useAppStore());
         </div>
         <button class="sv-btn danger" :disabled="!currentSessionId" @click="clearAllData">清空</button>
       </div>
+      </template>
       <div class="sv-data-row">
         <div class="info">
           <b>回退快照(undo)</b>
-          <span>写工具(写文件/改变量等)执行前自动存档,可在 Agent 面板回退到该次修改前</span>
+          <span>写工具(写文件/改变量等)执行前自动存档,可在 Agent 面板回退到该次修改前(全局设置,两模式共用)</span>
         </div>
         <label style="display: flex; gap: 6px; align-items: center; cursor: pointer" title="开启后写工具执行前自动保存快照,Agent 面板工具调用项出现「回退到此处」入口">
           <input v-model="undoEnabled" type="checkbox" style="flex-shrink: 0" @change="saveUndoEnabled" />
@@ -65,8 +72,11 @@ const { currentSessionId } = storeToRefs(useAppStore());
     <div v-if="clearMsg" class="sv-feedback ok">{{ clearMsg }}</div>
     <div v-if="undoMsg" class="sv-feedback" :class="undoMsg.startsWith('保存失败') ? 'err' : 'ok'">{{ undoMsg }}</div>
     <input ref="importInput" type="file" accept=".json,application/json" class="hidden" @change="onImportFile" />
-    <p class="sv-note">
+    <p v-if="!isTaskMode" class="sv-note">
       导入格式与 SillyTavern 兼容:<code>[{"role":"user","content":"..."}]</code>
+    </p>
+    <p v-else class="sv-note">
+      任务模式没有会话概念,聊天导出 / 导入 / 清空已隐藏;回退快照为全局开关,两模式共用。
     </p>
   </div>
 </template>

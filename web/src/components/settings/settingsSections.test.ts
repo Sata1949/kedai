@@ -4,12 +4,14 @@ import { renderToString } from 'vue/server-renderer';
 import { createPinia, setActivePinia } from 'pinia';
 import { useApiSettings } from '../../composables/useApiSettings';
 import { useConnectionProfiles } from '../../composables/useConnectionProfiles';
+import { useDataManager } from '../../composables/useDataManager';
 import { usePromptInject } from '../../composables/usePromptInject';
 import { useTaskStore } from '../../stores/task';
 import ConnectionProfilesSection from './ConnectionProfilesSection.vue';
 import ConnectionSection from './ConnectionSection.vue';
 import McpSection from './McpSection.vue';
 import CodingBundleSection from './CodingBundleSection.vue';
+import DataManagementSection from './DataManagementSection.vue';
 import PresetImportExportSection from './PresetImportExportSection.vue';
 import AgentSettingsSection from './AgentSettingsSection.vue';
 import GenParamsSection from './GenParamsSection.vue';
@@ -204,6 +206,66 @@ describe('McpSection(MCP 服务区,批次 6.2)', () => {
   it('show=false 时根节点 display:none(embedded 模式按 activeSection 切换)', async () => {
     const html = await render(McpSection, { show: false });
     expect(html).toMatch(/display:\s*none/);
+  });
+});
+
+describe('任务模式隐藏清单(TM-SET-3)', () => {
+  /** 以任务模式的 pinia 渲染组件(组件内部读 store.appMode,必须共享同一实例) */
+  async function renderTask(comp: Component, props: Record<string, unknown> = {}): Promise<string> {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    useTaskStore().appMode = 'task';
+    return stripComments(await render(comp, props, pinia));
+  }
+
+  it('生成参数:任务模式隐藏最大上下文窗口/压缩/记忆;保留子代理与任务缺省块', async () => {
+    const taskHtml = await renderTask(GenParamsSection);
+    expect(taskHtml).not.toContain('最大上下文窗口(Token)');
+    expect(taskHtml).not.toContain('压缩模式');
+    expect(taskHtml).not.toContain('记忆蒸馏');
+    expect(taskHtml).not.toContain('记忆容量上限');
+    expect(taskHtml).toContain('子代理深度');
+    expect(taskHtml).toContain('任务模式缺省');
+    expect(taskHtml).toContain('已在任务模式下隐藏');
+
+    // 角色扮演视图照常
+    const rpHtml = stripComments(await render(GenParamsSection));
+    expect(rpHtml).toContain('最大上下文窗口(Token)');
+    expect(rpHtml).toContain('压缩模式');
+    expect(rpHtml).toContain('记忆蒸馏');
+  });
+
+  it('Agent 设置:任务模式隐藏变量组与反思提示词;保留系统提示词与搜索端点', async () => {
+    const taskHtml = await renderTask(AgentSettingsSection);
+    expect(taskHtml).not.toContain('变量状态注入位置');
+    expect(taskHtml).not.toContain('变量生成模型');
+    expect(taskHtml).not.toContain('留空 = 内置规则检查'); // 反思提示词 placeholder
+    expect(taskHtml).toContain('搜索端点');
+    expect(taskHtml).toContain('系统提示词');
+
+    const rpHtml = stripComments(await render(AgentSettingsSection));
+    expect(rpHtml).toContain('变量状态注入位置');
+    expect(rpHtml).toContain('反思提示词');
+  });
+
+  it('数据管理:任务模式隐藏导出/导入/清空;保留回退快照;角色扮演视图照常', async () => {
+    // 任务模式:state 的 pinia 与渲染 pinia 必须同一个(isTaskMode 由它求值)
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    useTaskStore().appMode = 'task';
+    const state = useDataManager();
+    const taskHtml = stripComments(await render(DataManagementSection, { state }, pinia));
+    expect(taskHtml).not.toContain('导出聊天');
+    expect(taskHtml).not.toContain('导入聊天');
+    expect(taskHtml).not.toContain('清空当前会话');
+    expect(taskHtml).toContain('回退快照');
+
+    const rpPinia = createPinia();
+    setActivePinia(rpPinia);
+    const rpState = useDataManager();
+    const rpHtml = stripComments(await render(DataManagementSection, { state: rpState }, rpPinia));
+    expect(rpHtml).toContain('导出聊天');
+    expect(rpHtml).toContain('清空当前会话');
   });
 });
 

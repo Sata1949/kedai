@@ -36,6 +36,8 @@ const promptPlaceholder = computed(() =>
 );
 /** 「恢复默认」按钮文案:task 模式点明恢复的是任务模式默认词(与角色扮演默认词不同) */
 const resetPromptLabel = computed(() => (appMode.value === 'task' ? '恢复任务模式默认提示词' : '恢复默认提示词'));
+/** 任务模式:变量组与反思提示词(聊天专属消费)隐藏(TM-SET-3) */
+const isTaskMode = computed(() => appMode.value === 'task');
 
 const { agentSaving, agentMsg, resetAgentPrompt, saveAgentNow } = useAgentSettings();
 
@@ -87,6 +89,9 @@ watch(appMode, () => void loadPromptPreview());
         />
       </div>
       <p class="sv-note">search 工具联网搜索使用的端点;自定义服务需返回相似 HTML 结构。</p>
+      <!-- 变量组与反思提示词:仅角色扮演(聊天)消费,任务模式隐藏(TM-SET-3);
+           批量保存路径同步按模式过滤(useAgentSettings)。 -->
+      <template v-if="!isTaskMode">
       <div class="sv-inp-row">
         <label class="sv-inp-tag">变量状态注入位置</label>
         <select v-model="mvuVarsPosition" class="sv-input">
@@ -138,6 +143,10 @@ watch(appMode, () => void loadPromptPreview());
         深度 / Agent 模式的反思步骤:留空时用内置规则(空输出、截断、未答疑问)检查;填写后改为调用模型,按本提示词检查
         草稿是否满足人设、字数、格式等要求,判定输出须以 <code>PASS</code> 或 <code>FAIL</code> 开头,失败自动重新生成
         (最多 3 次)。模型输出无法解析时自动回退内置规则,不影响流程。
+      </p>
+      </template>
+      <p v-if="isTaskMode" class="sv-note">
+        变量与状态栏、反思提示词仅角色扮演(聊天)使用,已在任务模式下隐藏;如需调整请切到角色扮演模式。
       </p>
       <div class="sv-btn-row">
         <button class="sv-btn primary sv-btn-fill" :disabled="agentSaving" @click="saveAgentNow">

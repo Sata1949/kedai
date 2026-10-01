@@ -586,7 +586,9 @@ pub async fn update_settings(
                         crate::services::settings_service::RoleplayPromptConfig(v.clone());
                 }
             }
-            // 搜索端点:允许清空(空 = 用默认 DDG 端点)
+            // 搜索端点:允许清空(空 = 用默认 DDG 端点)。
+            // TM-SET-3:直写扁平(全局字段)——search 工具运行期读全局快照,模式覆盖
+            // 永不生效;此前 task 模式写入覆盖层是「改了不生效」的静默死写。
             if let Some(v) = &body.search_endpoint {
                 let t = v.trim().to_string();
                 let endpoint = if t.is_empty() {
@@ -594,7 +596,7 @@ pub async fn update_settings(
                 } else {
                     t
                 };
-                apply!(s, is_task, search_endpoint, endpoint);
+                s.search_endpoint = endpoint;
             }
             // mvu 变量注入位置:仅接受 system / user_tail
             if let Some(v) = &body.mvu_vars_position {
@@ -629,7 +631,10 @@ pub async fn update_settings(
                     apply!(s, is_task, reflect_advice_role, t);
                 }
             }
-            // 授权模式(三档;旧 bypass_mode 仍接受并映射为对应档位)
+            // 授权模式(三档;旧 bypass_mode 仍接受并映射为对应档位)。
+            // TM-SET-3:三档/黑名单/等待超时直写扁平(全局字段)——工具授权裁决不经
+            // for_mode,写覆盖层是静默死写;任务工具循环同样读全局矩阵(名单外直接拒绝,
+            // 不空等),故「两模式共用一份」就是运行期事实,写侧与之对齐。
             if let Some(v) = &body.authorization_mode {
                 let parsed = match crate::tools::permissions::AuthorizationMode::parse(v.trim()) {
                     Some(m) => m,
@@ -637,7 +642,7 @@ pub async fn update_settings(
                         return validation("authorization_mode 仅支持 strict / loose / bypass");
                     }
                 };
-                apply!(s, is_task, authorization_mode, parsed);
+                s.authorization_mode = parsed;
             }
             // 旧字段兼容:bypass_mode=true → bypass,false → strict
             if let Some(v) = body.bypass_mode {
@@ -646,18 +651,18 @@ pub async fn update_settings(
                 } else {
                     crate::tools::permissions::AuthorizationMode::Strict
                 };
-                apply!(s, is_task, authorization_mode, mapped);
+                s.authorization_mode = mapped;
             }
             // 「始终需授权」清单:校验工具名存在性,未知名返回 warning(不阻塞保存)
             if let Some(v) = &body.bypass_blacklist {
-                apply!(s, is_task, bypass_blacklist, v.clone());
+                s.bypass_blacklist = v.clone();
             }
             // 授权等待超时(秒):30..=1800
             if let Some(v) = body.tool_authorization_timeout_secs {
                 if !(30..=1800).contains(&v) {
                     return validation("tool_authorization_timeout_secs 必须在 30..=1800");
                 }
-                apply!(s, is_task, tool_authorization_timeout_secs, v);
+                s.tool_authorization_timeout_secs = v;
             }
             // 任务模式工具策略:all / deny_dangerous / allowlist
             if let Some(v) = &body.task_tool_policy {
@@ -762,30 +767,32 @@ pub async fn update_settings(
             if let Some(v) = body.skill_progressive_disclosure {
                 apply!(s, is_task, skill_progressive_disclosure, v);
             }
-            // 回退快照开关(批次 6.1)
+            // 回退快照开关(批次 6.1)。TM-SET-3:直写扁平(全局字段)——UndoService
+            // 直接读基础值,模式覆盖永不生效。
             if let Some(v) = body.undo_enabled {
-                apply!(s, is_task, undo_enabled, v);
+                s.undo_enabled = v;
             }
-            // 子智能体嵌套深度上限(1..=4,越界拒绝)
+            // 子智能体嵌套深度上限(1..=4,越界拒绝)。TM-SET-3:直写扁平(全局字段)——
+            // agentgo 工具运行期读全局快照,模式覆盖永不生效。
             if let Some(v) = body.subagent_max_depth {
                 if !(1..=4).contains(&v) {
                     return validation("subagent_max_depth 必须在 1..=4");
                 }
-                apply!(s, is_task, subagent_max_depth, v);
+                s.subagent_max_depth = v;
             }
-            // 子智能体并发上限(1..=16,越界拒绝)
+            // 子智能体并发上限(1..=16,越界拒绝;同直写扁平口径)
             if let Some(v) = body.subagent_max_concurrency {
                 if !(1..=16).contains(&v) {
                     return validation("subagent_max_concurrency 必须在 1..=16");
                 }
-                apply!(s, is_task, subagent_max_concurrency, v);
+                s.subagent_max_concurrency = v;
             }
-            // 子智能体结果字符上限(500..=8000,越界拒绝)
+            // 子智能体结果字符上限(500..=8000,越界拒绝;同直写扁平口径)
             if let Some(v) = body.subagent_result_max_chars {
                 if !(500..=8000).contains(&v) {
                     return validation("subagent_result_max_chars 必须在 500..=8000");
                 }
-                apply!(s, is_task, subagent_result_max_chars, v);
+                s.subagent_result_max_chars = v;
             }
             // MCP 总开关(批次 6.2):仅启动时装配,运行期改动不回溯重连,重启后生效
             if let Some(v) = body.mcp_enabled {
