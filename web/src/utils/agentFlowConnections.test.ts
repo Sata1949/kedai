@@ -30,6 +30,7 @@ function profile(id: string, overrides: Partial<ConnectionProfile> = {}): Connec
     connector_type: 'openai-compatible',
     base_url: 'https://api.example/v1',
     model: 'model-x',
+    api_style: 'chat-completions',
     enabled: true,
     api_key_masked: '****abcd',
     has_api_key: true,

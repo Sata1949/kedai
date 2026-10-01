@@ -38,6 +38,7 @@ function connection(overrides: Partial<ConnectionProfile> = {}): ConnectionProfi
     connector_type: 'openai-compatible',
     base_url: 'https://api.example/v1',
     model: 'gpt-x',
+    api_style: 'chat-completions',
     enabled: true,
     api_key_masked: '****zzzz',
     has_api_key: true,
