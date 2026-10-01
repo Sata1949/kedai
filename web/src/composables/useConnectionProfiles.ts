@@ -19,6 +19,8 @@ export interface ConnectionDraft {
   connector_type: string;
   base_url: string;
   model: string;
+  /** 接口方言(取值域见 api/types.ts 的 ApiStyle;后端保存时会按 URL 后缀推断默认档) */
+  api_style: string;
   /** 只写字段:留空 = 不改动该连接的密钥(与后端「空 Key 忽略」同口径,接口层面无法清空密钥) */
   api_key: string;
   enabled: boolean;
@@ -34,6 +36,7 @@ function toDraft(p: ConnectionProfile): ConnectionDraft {
     connector_type: p.connector_type,
     base_url: p.base_url,
     model: p.model,
+    api_style: p.api_style ?? 'chat-completions',
     api_key: '',
     enabled: p.enabled,
     api_key_masked: p.api_key_masked ?? '',
@@ -78,6 +81,7 @@ export function useConnectionProfiles() {
       connector_type: 'openai-compatible',
       base_url: '',
       model: '',
+      api_style: 'chat-completions',
       api_key: '',
       enabled: true,
       api_key_masked: '',
@@ -115,6 +119,7 @@ export function useConnectionProfiles() {
         connector_type: d.connector_type,
         base_url: d.base_url.trim(),
         model: d.model.trim(),
+        api_style: d.api_style,
         enabled: d.enabled,
       };
       if (d.id) row.id = d.id;

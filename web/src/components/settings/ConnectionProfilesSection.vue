@@ -2,7 +2,7 @@
 // 设置区:连接配置(多套 API 连接:新增 / 编辑 / 删除 / 设为默认 / 启停)。
 // 状态由壳(SettingsModal)创建一次后经 prop 传入 —— 与 ApiSettingsSection 同范式。
 import { onMounted } from 'vue';
-import { CONNECTOR_TYPE_LABELS, CONNECTOR_TYPE_ORDER } from '../../api/labels';
+import { API_STYLE_LABELS, API_STYLE_ORDER, CONNECTOR_TYPE_LABELS, CONNECTOR_TYPE_ORDER } from '../../api/labels';
 import type { useConnectionProfiles } from '../../composables/useConnectionProfiles';
 
 const props = withDefaults(
@@ -32,6 +32,8 @@ const {
 
 /** 未登记的类型原样展示(与 labels.ts 的「未登记原样」语义一致) */
 const typeLabel = (t: string): string => CONNECTOR_TYPE_LABELS[t] ?? t;
+/** 未登记的方言原样展示(同上) */
+const apiStyleLabel = (s: string): string => API_STYLE_LABELS[s] ?? s;
 
 onMounted(() => {
   void load();
@@ -76,6 +78,15 @@ onMounted(() => {
           <select v-model="d.connector_type" class="sv-select">
             <option v-for="t in CONNECTOR_TYPE_ORDER" :key="t" :value="t">
               {{ typeLabel(t) }}
+            </option>
+          </select>
+        </div>
+
+        <div class="sv-inp-row">
+          <label class="sv-inp-tag" title="接口方言:决定请求端点与流式协议;保存时按 BASE URL 端点后缀自动识别,此处可显式指定">接口格式</label>
+          <select v-model="d.api_style" class="sv-select">
+            <option v-for="s in API_STYLE_ORDER" :key="s" :value="s">
+              {{ apiStyleLabel(s) }}
             </option>
           </select>
         </div>

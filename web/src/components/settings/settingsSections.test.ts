@@ -62,12 +62,12 @@ describe('ConnectionProfilesSection(连接配置区)', () => {
     state.drafts.value = [
       {
         id: 'c1', name: '主连接', connector_type: 'openai-compatible',
-        base_url: 'https://a.example/v1', model: 'ma',
+        base_url: 'https://a.example/v1', model: 'ma', api_style: 'chat-completions',
         api_key: '', enabled: true, api_key_masked: '****1111', has_api_key: true,
       },
       {
         id: 'c2', name: '备用', connector_type: 'mock',
-        base_url: '', model: '',
+        base_url: '', model: '', api_style: 'anthropic',
         api_key: '', enabled: false, api_key_masked: '', has_api_key: false,
       },
     ];
@@ -77,6 +77,8 @@ describe('ConnectionProfilesSection(连接配置区)', () => {
     expect(html).toContain('主连接');
     expect(html).toContain('****1111'); // 密钥只回显掩码
     expect(html).toContain('OpenAI 兼容'); // 类型文案来自 api/labels.ts
+    expect(html).toContain('接口格式'); // 方言下拉(接口方言批次)
+    expect(html).toContain('Anthropic Messages'); // 方言文案来自 api/labels.ts
     expect(html).toContain('新增连接');
     expect(html).toContain('保存连接配置');
     expect(html).toContain('连接信息全局共享'); // 本批只做配置管理,聊天/任务仍用默认连接

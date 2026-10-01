@@ -324,6 +324,9 @@ export interface ConnectorInfo {
 /** 连接器类型(取值域与后端 `connectors::available_connector_types()` 一致) */
 export type ConnectorType = 'openai-compatible' | 'mock';
 
+/** 接口方言(取值域与后端 `connectors::openai_compatible` 的 API_STYLE_* 一致) */
+export type ApiStyle = 'chat-completions' | 'responses' | 'anthropic';
+
 /** 一套 API 连接配置(GET /api/settings 的 connections 元素);api_key 只回传掩码 */
 export interface ConnectionProfile {
   /** 稳定 id:保存时按它命中已有连接(缺省/未命中 = 新建) */
@@ -333,6 +336,8 @@ export interface ConnectionProfile {
   connector_type: ConnectorType;
   base_url: string;
   model: string;
+  /** 接口方言;旧数据(无此键)按 chat-completions 处理 */
+  api_style: ApiStyle;
   /** 停用的连接保留配置,但不会成为默认连接,也不出现在后续批次的节点选择器里 */
   enabled: boolean;
   /** 密钥掩码(仅保留后 4 位) */
@@ -349,6 +354,8 @@ export interface ConnectionProfilePatch {
   base_url?: string;
   api_key?: string;
   model?: string;
+  /** 接口方言显式覆盖;缺省 = 沿用已有值并按 URL 端点后缀推断(仅改写默认档) */
+  api_style?: string;
   enabled?: boolean;
 }
 

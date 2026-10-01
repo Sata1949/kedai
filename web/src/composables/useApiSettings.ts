@@ -5,12 +5,38 @@ import { useAppStore } from '../store';
 import { storeToRefs } from 'pinia';
 import * as api from '../api';
 
+/** 已知端点后缀 → (剥离后的地址, 推断出的接口方言;null = 不改变方言)。
+ *  与后端 `settings_service::strip_endpoint_suffix` 逐例一致(顺序敏感:
+ *  /chat/completions 先于 /completions、/v1/messages 先于 /messages)。 */
+const ENDPOINT_SUFFIXES: Array<[string, string | null]> = [
+  ['/chat/completions', 'chat-completions'],
+  ['/completions', 'chat-completions'],
+  ['/responses', 'responses'],
+  ['/v1/messages', 'anthropic'],
+  ['/messages', 'anthropic'],
+  // 只剥 /models(保留 /v1),使 base 仍以 /v1 结尾、各方言端点拼接规则不变
+  ['/models', null],
+];
+
+/** 剥离用户粘贴的完整端点 URL(如 …/v1/chat/completions、…/v1/messages)后缀,
+ *  并给出推断的接口方言。 */
+export function stripEndpointSuffix(input: string): { url: string; style: string | null } {
+  const trimmed = input.trim().replace(/\/+$/, '');
+  for (const [suffix, style] of ENDPOINT_SUFFIXES) {
+    if (trimmed.endsWith(suffix)) {
+      const stripped = trimmed.slice(0, -suffix.length);
+      if (stripped.endsWith('://')) continue;
+      return { url: stripped, style };
+    }
+  }
+  return { url: trimmed, style: null };
+}
+
 /** 规范化 OpenAI 兼容 API 地址(与后端 normalize_base_url 规则一致):
- * 无协议补协议(本机补 http,其余补 https)、无路径补 /v1。 */
+ * 先剥端点后缀、无协议补协议(本机补 http,其余补 https)、无路径补 /v1。 */
 export function normalizeUrl(input: string): string {
-  let s = input.trim();
+  let s = stripEndpointSuffix(input).url;
   if (!s) return s;
-  while (s.endsWith('/')) s = s.slice(0, -1);
   if (!/^https?:\/\//i.test(s)) {
     s = /^(localhost|127\.|0\.0\.0\.0|\[::1\])/i.test(s) ? `http://${s}` : `https://${s}`;
   }
@@ -79,7 +105,7 @@ export function useApiSettings() {
     const normalized = normalizeUrl(apiBaseUrl.value);
     if (normalized && normalized !== apiBaseUrl.value) {
       apiBaseUrl.value = normalized;
-      apiFeedback.value = { kind: 'info', text: '已自动补全 API 地址(协议与 /v1)' };
+      apiFeedback.value = { kind: 'info', text: '已自动修正 API 地址(协议 / 端点后缀 / /v1)' };
     }
   }
 
