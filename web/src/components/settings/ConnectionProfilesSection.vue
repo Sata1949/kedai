@@ -1,7 +1,8 @@
 <script setup lang="ts">
-// 设置区:连接配置(多套 API 连接:新增 / 编辑 / 删除 / 设为默认 / 启停)。
+// 设置区:连接配置(多套 API 连接:新增 / 编辑 / 删除 / 设为默认 / 启停;
+// 任务模式默认连接选择 TM-SET-1:仅任务模式显示,切换即存)。
 // 状态由壳(SettingsModal)创建一次后经 prop 传入 —— 与 ApiSettingsSection 同范式。
-import { onMounted } from 'vue';
+import { computed, onMounted } from 'vue';
 import { API_STYLE_LABELS, API_STYLE_ORDER, CONNECTOR_TYPE_LABELS, CONNECTOR_TYPE_ORDER } from '../../api/labels';
 import type { useConnectionProfiles } from '../../composables/useConnectionProfiles';
 
@@ -28,12 +29,25 @@ const {
   requestRemove,
   setActive,
   save,
+  taskDefaultConnectionId,
+  isTaskMode,
+  saveTaskDefaultConnection,
 } = props.state;
 
 /** 未登记的类型原样展示(与 labels.ts 的「未登记原样」语义一致) */
 const typeLabel = (t: string): string => CONNECTOR_TYPE_LABELS[t] ?? t;
 /** 未登记的方言原样展示(同上) */
 const apiStyleLabel = (s: string): string => API_STYLE_LABELS[s] ?? s;
+
+/** 任务默认连接引用悬空(已不存在/停用):运行期后端软回退默认连接,这里给出显式提示 */
+const taskDefaultDangling = computed(() =>
+  !!taskDefaultConnectionId.value
+  && !drafts.value.some((d) => d.id === taskDefaultConnectionId.value && d.enabled),
+);
+
+function onTaskDefaultChange(e: Event): void {
+  void saveTaskDefaultConnection((e.target as HTMLSelectElement).value);
+}
 
 onMounted(() => {
   void load();
@@ -136,8 +150,43 @@ onMounted(() => {
           {{ saving ? '保存中...' : '保存连接配置' }}
         </button>
       </div>
-      <p class="sv-note" title="逐节点 / 逐任务选用连接在后续批次">
-        连接信息全局共享:聊天与任务当前都使用「默认」那套连接。
+
+      <!-- 任务模式默认连接(TM-SET-1):仅任务模式显示。回退链:
+           逐任务/节点显式连接 → 本项 → 默认连接;引用失效时运行期软回退默认连接。 -->
+      <div v-if="isTaskMode" class="sv-separator">
+        <div class="sv-field-label sub">任务模式默认连接</div>
+        <div class="sv-inp-row">
+          <label class="sv-inp-tag">默认连接</label>
+          <select
+            :value="taskDefaultConnectionId"
+            class="sv-select"
+            title="任务未单独指定连接时的缺省;逐任务与流程节点的显式选择仍优先。引用失效(被删/停用)时任务回退默认连接"
+            @change="onTaskDefaultChange"
+          >
+            <option value="">跟随默认连接</option>
+            <option
+              v-for="d in drafts"
+              :key="d.id || d.name"
+              :value="d.id"
+              :disabled="!d.id || !d.enabled"
+            >
+              {{ d.name || '(未命名)' }}{{ d.model ? `｜${d.model}` : '' }}{{ d.enabled ? '' : '(已停用)' }}
+            </option>
+          </select>
+        </div>
+        <p class="sv-note">
+          任务模式未单独指定连接时使用(聊天的角色扮演不受影响)。新增的连接先「保存连接配置」后才能被选为任务默认。
+        </p>
+        <p v-if="taskDefaultDangling" class="sv-note flow-tool-warn">
+          当前任务默认连接已不存在或已停用,运行任务时将回退默认连接;请改选或清除。
+        </p>
+      </div>
+
+      <p class="sv-note">
+        连接信息全局共享:角色扮演使用「默认」那套连接。
+        <template v-if="isTaskMode">
+          任务模式未单独选择时也走它,可用上方「任务模式默认连接」改指其它连接(逐任务 / 流程节点的显式选择仍优先)。
+        </template>
         密钥只写不回显,留空表示不修改已有密钥。
       </p>
     </div>

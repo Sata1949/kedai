@@ -86,9 +86,9 @@ watch(settingsOpen, (open, prev) => {
       <select
         v-model="taskConnectionId"
         class="sv-select"
-        title="本任务所有模型调用走哪一套 API 连接(节点级连接优先);默认连接 = 设置里的默认那条,创建任务时后端会校验所选连接存在且已启用"
+        title="本任务所有模型调用走哪一套 API 连接(节点级连接优先);默认 = 跟随「任务模式默认连接」,该连接也未配置时用默认连接。创建任务时后端会校验所选连接存在且已启用"
       >
-        <option value="">连接:默认连接（跟随设置）</option>
+        <option value="">连接:默认（跟随任务模式默认连接）</option>
         <option v-for="c in conn.options.value" :key="c.id" :value="c.id" :disabled="!c.enabled">
           连接:{{ c.name }}{{ c.model ? `｜${c.model}` : '' }}{{ c.enabled ? '' : '(已停用)' }}
         </option>

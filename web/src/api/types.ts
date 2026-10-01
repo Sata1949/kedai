@@ -500,6 +500,9 @@ export interface RuntimeSettings {
    *  (强调先读后写 / 遵循既有风格 / 改完跑验证 / 最小改动);用户若在提示词框里自定义过,
    *  则其自定义值优先,本开关只影响默认值。**不影响角色扮演模式** */
   task_coding_bundle_enabled: boolean;
+  /** 任务模式默认连接(TM-SET-1;空串 = 跟随默认连接)。任务连接回退链:
+   *  逐任务/节点显式连接 → 本项 → 默认连接;指向的连接被删/停用时运行期软回退默认连接 */
+  task_default_connection_id: string;
 }
 
 /** MCP 服务器配置(批次 6.2):name 会 sanitize 为工具名前缀段([a-z0-9_]) */
@@ -632,6 +635,8 @@ export interface RuntimeSettingsPatch {
   task_prompt_inject_enabled?: boolean;
   /** 任务模式编码能力包开关(默认 false = 关闭;缺省保持不变) */
   task_coding_bundle_enabled?: boolean;
+  /** 任务模式默认连接(TM-SET-1;空串 = 清除,跟随默认连接;非空须为已存在且启用的连接) */
+  task_default_connection_id?: string;
 }
 
 // ===== 音频播放器(阶段五 5a;契约对齐酒馆助手 audio.d.ts) =====

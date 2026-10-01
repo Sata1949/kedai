@@ -430,3 +430,141 @@ async fn roleplay_default_prompt_visible_on_fresh_install() {
         "task 默认词不得继承角色扮演宏: {tp:.80}"
     );
 }
+
+/// TM-SET-1:任务向缺省生成参数的 API 可见性——task 视图返回任务缺省
+/// (温度 0.3 / Top-P 1.0 / 输出上限「任务缺省与扁平值只抬不压的较大者」),
+/// roleplay 视图仍读扁平权威值,互不影响。
+/// 断言取现场值推导(本 binary 共享 app,其他用例可能已改扁平值),不做固定数假设。
+#[tokio::test]
+async fn task_generation_defaults_visible_in_task_view() {
+    let _guard = test_lock().await;
+    let app = test_app();
+
+    let (_, rp) = send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
+    let flat_max = rp["default_max_tokens"].as_u64().expect("扁平 max_tokens 应为数字");
+    let (status, t) = send_json(app, "GET", "/api/settings?mode=task", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        t["default_temperature"],
+        json!(0.3),
+        "任务缺省温度 0.3(不沿用扁平值): {t}"
+    );
+    assert_eq!(
+        t["default_top_p"],
+        json!(1.0),
+        "任务缺省 Top-P 1.0(不沿用扁平值): {t}"
+    );
+    assert_eq!(
+        t["default_max_tokens"].as_u64(),
+        Some(flat_max.max(8192)),
+        "任务输出上限 = max(扁平值, 8192)(只抬不压)"
+    );
+
+    // 显式写任务覆盖值 → task 视图切换、扁平(roleplay 视图)不变
+    let flat_temp = rp["default_temperature"].clone();
+    let (status, r) = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=task",
+        json!({ "default_temperature": 0.55 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "写任务覆盖应 200: {r}");
+    let (_, t2) = send_json(app, "GET", "/api/settings?mode=task", json!({})).await;
+    assert_eq!(t2["default_temperature"], json!(0.55), "task 覆盖应生效");
+    let (_, rp2) = send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
+    assert_eq!(
+        rp2["default_temperature"], flat_temp,
+        "roleplay 扁平值不得被任务覆盖污染"
+    );
+
+    // 卫生复位:写回现场原值(覆盖层无「复位 None」操作,写回等值即净零)
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=task",
+        json!({ "default_temperature": 0.3 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+/// TM-SET-1:任务模式默认连接的 API 往返与校验——
+/// 非空必须是已存在且启用的连接(否则 400 点名连接);写入后 task 视图读到、
+/// roleplay 视图(扁平层)不受影响;空串 = 清除(跟随默认连接)。
+#[tokio::test]
+async fn task_default_connection_roundtrip_and_validation() {
+    let _guard = test_lock().await;
+    let app = test_app();
+
+    // 现场值(共享 app;本用例净零复位目标)
+    let (_, before_task) = send_json(app, "GET", "/api/settings?mode=task", json!({})).await;
+    let task_before = before_task["task_default_connection_id"].clone();
+    let (_, before_rp) = send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
+    let flat_before = before_rp["task_default_connection_id"].clone();
+
+    // 不存在的连接 → 400
+    let (status, r) = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=task",
+        json!({ "task_default_connection_id": "no-such-connection" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "无效引用应 400: {r}");
+
+    // 取一条真实的启用连接(默认连接由 from_config 播种,测试环境必然存在)
+    let (_, s) = send_json(app, "GET", "/api/settings?mode=task", json!({})).await;
+    let conn_id = s["connections"]
+        .as_array()
+        .expect("connections 应为数组")
+        .iter()
+        .find(|c| c["enabled"].as_bool() == Some(true))
+        .and_then(|c| c["id"].as_str())
+        .expect("应存在至少一条启用连接")
+        .to_string();
+
+    // 设置 → task 视图读到;roleplay 视图(扁平层)不变
+    let (status, r) = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=task",
+        json!({ "task_default_connection_id": conn_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "写任务默认连接应 200: {r}");
+    assert_eq!(r["settings"]["task_default_connection_id"], json!(conn_id));
+    let (_, task_view) = send_json(app, "GET", "/api/settings?mode=task", json!({})).await;
+    assert_eq!(
+        task_view["task_default_connection_id"],
+        json!(conn_id),
+        "task 视图应读到覆盖值"
+    );
+    let (_, rp_view) = send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
+    assert_eq!(
+        rp_view["task_default_connection_id"], flat_before,
+        "扁平层(roleplay 视图)不受 task 覆盖影响"
+    );
+
+    // 空串 = 清除(回到跟随默认连接)
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=task",
+        json!({ "task_default_connection_id": "" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, cleared) = send_json(app, "GET", "/api/settings?mode=task", json!({})).await;
+    assert_eq!(cleared["task_default_connection_id"], json!(""));
+
+    // 卫生复位:写回现场原值(Some("") 与缺省同效 = 跟随默认连接)
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=task",
+        json!({ "task_default_connection_id": task_before }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}

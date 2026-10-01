@@ -11,10 +11,11 @@ use tokio::sync::watch;
 
 /// [[tool_raw:]] 钩子的截断预算门限:max_tokens 低于该值视为「输出预算不足」,
 /// 返回左半 arguments(非法 JSON)+ Finish{length};达到即返回完整 tool_call。
-/// 取值须落在任务侧首轮输出预算(4096,TM-GEN-1 起的任务下限)与自愈翻倍值(8192)之间,
-/// 使首轮截断、重发充足——与 `TRUNC_TEXT_MIN_BUDGET` 同款「夹在首轮与翻倍值之间」口径
-/// (TM-GEN-1 前首轮为 1024、翻倍 2048,故此门限原为 2048)。
-const TOOL_RAW_MIN_BUDGET: u32 = 8192;
+/// 取值须落在任务侧首轮输出预算与自愈翻倍值之间,使首轮截断、重发充足
+/// ——与 `TRUNC_TEXT_MIN_BUDGET` 同款「夹在首轮与翻倍值之间」口径。
+/// 首轮预算随任务缺省演进:TM-GEN-1 前 1024(门限 2048)→ TM-GEN-1 起 4096(门限 8192)
+/// → TM-SET-1 起 8192(门限本值 16384,翻倍后 16384 充足)。
+const TOOL_RAW_MIN_BUDGET: u32 = 16_384;
 
 /// [[trunc_text:]]/[[trunc_fail:]] 钩子的截断预算门限:max_tokens 低于该值视为
 /// 「输出预算不足」返回半截文本 + Finish{length};达到即视为「自愈翻倍后的重发」。

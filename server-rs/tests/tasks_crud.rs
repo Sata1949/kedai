@@ -903,8 +903,9 @@ async fn task_executor_replaces_character_persona() {
     );
 }
 
-/// TM-GEN-1:执行者「建议温度」接通——执行者库配置了温度时,solo 主 agent 与 legacy
-/// 步骤生成都以它优先于任务缺省温度;未配置(或未绑执行者)沿用缺省(0.8)。
+/// TM-GEN-1 / TM-SET-1:执行者「建议温度」接通——执行者库配置了温度时,solo 主 agent 与
+/// legacy 步骤生成都以它优先于任务缺省温度;未配置(或未绑执行者)沿用任务缺省
+/// (TM-SET-1 起为 0.3,< 0.8 = 角色扮演侧扁平缺省)。
 /// 观测手段:mock `[[echo_temp]]` 回显请求温度——请求参数不落库,只能靠回显断言;
 /// 回显值同时锁定 f32→f64 拓宽噪声已被消除(0.42 不得变成 0.41999998…)。
 #[tokio::test]
@@ -944,7 +945,7 @@ async fn executor_temperature_reaches_agent_and_step_generation() {
         "solo 主 agent 应使用执行者建议温度(且无 f32 拓宽噪声): {detail}"
     );
 
-    // ② 无执行者:solo 沿用任务缺省温度(温度字段不设任务上限——D4(a))
+    // ② 无执行者:solo 沿用任务缺省温度(TM-SET-1 起为 0.3)
     let id2 = create_task_with_mode(app, "[[echo_temp]] 无执行者温度目标", "solo").await;
     let (status, _) = send_json(app, "POST", &format!("/api/tasks/{id2}/run"), json!({})).await;
     assert_eq!(status, StatusCode::OK);
@@ -954,8 +955,8 @@ async fn executor_temperature_reaches_agent_and_step_generation() {
         detail["task"]["result"]
             .as_str()
             .unwrap_or("")
-            .contains("温度=0.8"),
-        "无执行者应沿用任务缺省温度 0.8: {detail}"
+            .contains("温度=0.3"),
+        "无执行者应沿用任务缺省温度 0.3(TM-SET-1): {detail}"
     );
 
     // ③ legacy 步骤生成(经 generate_step):同解析式命中执行者温度

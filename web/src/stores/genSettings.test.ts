@@ -107,6 +107,7 @@ function makeSettings(overrides: Partial<RuntimeSettings> = {}): RuntimeSettings
     task_persona_full: false,
     task_prompt_inject_enabled: false,
     task_coding_bundle_enabled: false,
+    task_default_connection_id: '',
     // 多套连接(批次 4):默认空列表,具体连接由用例覆盖
     connections: [],
     active_connection_id: null,

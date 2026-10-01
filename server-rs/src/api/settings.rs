@@ -205,6 +205,10 @@ pub struct UpdateSettingsBody {
     /// false = 通用任务默认词(默认);缺省保持不变。用户自定义提示词逐字优先。
     #[serde(default)]
     pub task_coding_bundle_enabled: Option<bool>,
+    /// 任务模式默认连接(TM-SET-1):空串 = 清除(跟随默认连接);非空必须是已存在且
+    /// 启用的连接 id(否则 400);缺省 = 保持不变
+    #[serde(default)]
+    pub task_default_connection_id: Option<String>,
     /// 工具循环历史保留的最近完整轮数(R3b;1..=32;缺省保持不变)
     #[serde(default)]
     pub tool_history_keep_rounds: Option<u32>,
@@ -330,6 +334,7 @@ fn settings_json(s: &RuntimeSettings) -> Value {
         "task_persona_full": s.task_persona_full,
         "task_prompt_inject_enabled": s.task_prompt_inject_enabled,
         "task_coding_bundle_enabled": s.task_coding_bundle_enabled,
+        "task_default_connection_id": s.task_default_connection_id,
         "tool_history_keep_rounds": s.tool_history_keep_rounds,
         "tool_history_budget_tokens": s.tool_history_budget_tokens,
         "session_token_budget": s.session_token_budget,
@@ -833,6 +838,34 @@ pub async fn update_settings(
             // 启用后任务模式缺省默认词改用编码执行者模板,用户自定义值仍逐字优先。
             if let Some(v) = body.task_coding_bundle_enabled {
                 apply!(s, is_task, task_coding_bundle_enabled, v);
+            }
+            // 任务模式默认连接(TM-SET-1):空串 = 清除(回到跟随默认连接);非空必须在
+            // **本请求应用后的**连接列表里存在且启用,否则 400(本块位于连接数组处理与
+            // normalize_connections 之后,故同请求里先改连接再设默认也能正确校验)。
+            // 校验只拦「此刻无效」;用户之后删/停用该连接时,运行期 `task_mode_default_connection`
+            // 软回退默认连接(创建期的硬校验 + 运行期的软回退,两处口径并存不矛盾)。
+            if let Some(v) = &body.task_default_connection_id {
+                let t = v.trim().to_string();
+                if t.is_empty() {
+                    apply!(s, is_task, task_default_connection_id, String::new());
+                } else {
+                    match s.connections.iter().find(|p| p.id == t) {
+                        Some(p) if p.enabled => {
+                            apply!(s, is_task, task_default_connection_id, t);
+                        }
+                        Some(p) => {
+                            return validation(format!(
+                                "选择的连接「{}」已停用;请启用它,或选其它连接",
+                                crate::services::settings_service::connection_label(p)
+                            ));
+                        }
+                        None => {
+                            return validation(
+                                "选择的连接不存在(可能已被删除);请在设置里恢复该连接,或选其它连接",
+                            );
+                        }
+                    }
+                }
             }
             // 工具历史回灌上限(R3b):扁平全局字段(引擎 run_tool_loop 直读扁平值,
             // 不入模式覆盖层——任务/聊天工具循环共用同一上限,与 subagent 参数的

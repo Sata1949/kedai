@@ -150,6 +150,33 @@ pub fn resolve_connector_target(
     CONNECTOR_TYPE_OPENAI
 }
 
+/// 任务模式默认连接(TM-SET-1)的**有效解析**——任务连接回退链的第三级
+/// (逐任务/节点显式 `connection_id` → 本项 → 默认连接)。传入值为任务模式合并视图
+/// (`for_mode(Task)`)。
+///
+/// 语义:
+/// - 未配置(空串)→ `None`(调用方回退默认连接,与改造前逐字节一致);
+/// - 指向存在且启用的连接 → `Some(id)`;
+/// - 指向的连接已被删除 / 已停用 → 记 warn 并回退 `None`(默认连接)。
+///
+/// **软回退是有意的**:本项是任务模式的跨任务便利偏好,用户后来删掉那条连接时任务应照常
+/// 可跑;与逐任务/逐节点**显式引用**「失效即报错,不静默回退」刻意不同——显式引用是用户
+/// 对**本任务**的直接指定,静默换连接会打出与预期不同的账单,故失败优于猜。
+pub fn task_mode_default_connection(settings: &RuntimeSettings) -> Option<String> {
+    let id = settings.task_default_connection_id.trim();
+    if id.is_empty() {
+        return None;
+    }
+    if settings.connections.iter().any(|p| p.id == id && p.enabled) {
+        return Some(id.to_string());
+    }
+    tracing::warn!(
+        connection_id = id,
+        "任务模式默认连接不存在或已停用,回退默认连接"
+    );
+    None
+}
+
 impl RuntimeSettings {
     /// API Key 脱敏展示(仅保留后 4 位)
     pub fn masked_api_key(&self) -> String {

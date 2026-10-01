@@ -2,7 +2,7 @@
 //
 // 保存走既有 store.saveSettings 通道(与 useApiSettings 同一路径,patch 里多带
 // connections / active_connection_id),不新增端点;语言与错误提示同 useApiSettings。
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 import { useAppStore } from '../store';
 import * as api from '../api';
 import type {
@@ -53,12 +53,18 @@ export function useConnectionProfiles() {
   const loading = ref(false);
   const saving = ref(false);
   const feedback = ref<{ kind: 'ok' | 'err' | 'info'; text: string } | null>(null);
+  /** 任务模式默认连接(TM-SET-1;空串 = 跟随默认连接)。仅任务模式展示与修改;
+   *  引用的连接须**已保存**(未保存的新增草稿没有 id,不能作为引用目标)。 */
+  const taskDefaultConnectionId = ref('');
+  /** 是否任务模式(任务默认连接下拉的可见性判据;角色扮演侧无此设置) */
+  const isTaskMode = computed(() => store.appMode === 'task');
 
   /** 用服务端设置体回填草稿与默认连接选择 */
   function applyServer(s: RuntimeSettings): void {
     drafts.value = (s.connections ?? []).map(toDraft);
     const i = drafts.value.findIndex((d) => d.id === s.active_connection_id);
     activeIndex.value = i >= 0 ? i : null;
+    taskDefaultConnectionId.value = s.task_default_connection_id ?? '';
   }
 
   /** 载入(组件挂载时调用) */
@@ -161,8 +167,29 @@ export function useConnectionProfiles() {
     }
   }
 
+  /** 任务模式默认连接切换即存(TM-SET-1;与授权三档同款「切换即存 + 失败回滚」)。
+   *  走独立 patch(不随「保存连接配置」的全量数组一起提交):引用目标必须是**已保存**的
+   *  连接 id,保存按钮的草稿数组里含未保存新行,不能混在一起判有效性。 */
+  async function saveTaskDefaultConnection(id: string): Promise<void> {
+    const prev = taskDefaultConnectionId.value;
+    if (prev === id) return;
+    taskDefaultConnectionId.value = id;
+    feedback.value = null;
+    try {
+      await store.saveSettings({ task_default_connection_id: id });
+      feedback.value = {
+        kind: 'ok',
+        text: id ? '任务模式默认连接已保存' : '任务模式已改为跟随默认连接',
+      };
+    } catch (e) {
+      taskDefaultConnectionId.value = prev;
+      feedback.value = { kind: 'err', text: `保存失败:${(e as Error).message}` };
+    }
+  }
+
   return {
     drafts, activeIndex, loading, saving, feedback,
+    taskDefaultConnectionId, isTaskMode, saveTaskDefaultConnection,
     load, addDraft, requestRemove, removeDraft, setActive, buildPatch, save,
   };
 }

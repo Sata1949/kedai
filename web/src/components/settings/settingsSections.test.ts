@@ -5,6 +5,7 @@ import { createPinia, setActivePinia } from 'pinia';
 import { useApiSettings } from '../../composables/useApiSettings';
 import { useConnectionProfiles } from '../../composables/useConnectionProfiles';
 import { usePromptInject } from '../../composables/usePromptInject';
+import { useTaskStore } from '../../stores/task';
 import ConnectionProfilesSection from './ConnectionProfilesSection.vue';
 import ConnectionSection from './ConnectionSection.vue';
 import McpSection from './McpSection.vue';
@@ -29,12 +30,21 @@ vi.stubGlobal('localStorage', {
   get length() { return memStorage.size; },
 });
 
-/** 以 pinia 上下文 SSR 渲染组件为 HTML 字符串 */
-async function render(comp: Component, props: Record<string, unknown> = {}): Promise<string> {
+/** 以 pinia 上下文 SSR 渲染组件为 HTML 字符串(可传入共享 pinia:组件内部读 store
+ *  的用例需要在渲染前设定 appMode 等状态,与 beforeEach 的活动 pinia 必须是同一个) */
+async function render(
+  comp: Component,
+  props: Record<string, unknown> = {},
+  pinia?: ReturnType<typeof createPinia>,
+): Promise<string> {
   const app = createSSRApp({ render: () => h(comp, props) });
-  app.use(createPinia());
+  app.use(pinia ?? createPinia());
   return renderToString(app);
 }
+
+/** 剥掉 SSR 输出里的 HTML 注释(dev 模式注释会进 HTML;断言「某块未渲染」时
+ *  源码注释里的同名文案会误伤,先剥注释再断言) */
+const stripComments = (html: string): string => html.replace(/<!--[\s\S]*?-->/g, '');
 
 beforeEach(() => {
   // composable 在测试直接调用(构造 prop 状态)时需要活动 pinia
@@ -91,6 +101,29 @@ describe('ConnectionProfilesSection(连接配置区)', () => {
     const state = useConnectionProfiles();
     const html = await render(ConnectionProfilesSection, { state, show: false });
     expect(html).toMatch(/display:\s*none/);
+  });
+
+  it('任务模式渲染「任务模式默认连接」下拉;角色扮演模式不渲染(TM-SET-1)', async () => {
+    // 角色扮演:任务模式专属块不得出现(先剥源码注释,防注释同名文案误伤)
+    const rpState = useConnectionProfiles();
+    const rpHtml = stripComments(await render(ConnectionProfilesSection, { state: rpState }));
+    expect(rpHtml).not.toContain('任务模式默认连接');
+
+    // 任务模式:渲染下拉(含「跟随默认连接」项)与回退链说明
+    useTaskStore().appMode = 'task';
+    const state = useConnectionProfiles();
+    state.drafts.value = [
+      {
+        id: 'c1', name: '主连接', connector_type: 'openai-compatible',
+        base_url: 'https://a.example/v1', model: 'ma', api_style: 'chat-completions',
+        api_key: '', enabled: true, api_key_masked: '****1111', has_api_key: true,
+      },
+    ];
+    state.taskDefaultConnectionId.value = 'c1';
+    const html = stripComments(await render(ConnectionProfilesSection, { state }));
+    expect(html).toContain('任务模式默认连接');
+    expect(html).toContain('跟随默认连接');
+    expect(html).toContain('逐任务');
   });
 });
 
@@ -204,5 +237,19 @@ describe('GenParamsSection(生成参数区:记忆槽预算/容量上限)', () =>
   it('show=false 时根节点 display:none(embedded 模式按 activeSection 切换)', async () => {
     const html = await render(GenParamsSection, { show: false });
     expect(html).toMatch(/display:\s*none/);
+  });
+
+  it('任务模式渲染「任务缺省」块与「写入任务推荐值」;角色扮演模式不渲染(TM-SET-1)', async () => {
+    const rpHtml = stripComments(await render(GenParamsSection));
+    expect(rpHtml).not.toContain('任务模式缺省');
+
+    // 组件内部读 store.appMode:pinia 必须与设定状态的实例同一个
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    useTaskStore().appMode = 'task';
+    const html = stripComments(await render(GenParamsSection, {}, pinia));
+    expect(html).toContain('任务模式缺省');
+    expect(html).toContain('写入任务推荐值');
+    expect(html).toContain('温度 0.3');
   });
 });

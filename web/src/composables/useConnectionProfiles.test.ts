@@ -3,6 +3,7 @@ import { createPinia, setActivePinia } from 'pinia';
 import * as api from '../api';
 import type { ConnectionProfile, RuntimeSettings, RuntimeSettingsPatch } from '../api/types';
 import { useConnectionProfiles } from './useConnectionProfiles';
+import { useTaskStore } from '../stores/task';
 
 // 多套连接配置 composable 测试(批次 4)。
 // 这里直接调用 composable(不经 SSR):保存/删除等交互在 SSR 下点不到,而契约的核心
@@ -151,6 +152,44 @@ describe('useConnectionProfiles 删除二次确认', () => {
     state.requestRemove(0);
     expect(state.drafts.value.map((d) => d.name)).toEqual(['备用']);
     expect(state.activeIndex.value).toBe(0);
+  });
+});
+
+describe('useConnectionProfiles 任务模式默认连接(TM-SET-1)', () => {
+  it('载入回填 taskDefaultConnectionId(空串 = 跟随默认连接)', async () => {
+    installServer({
+      ...makeSettings([connection()], 'c1'),
+      task_default_connection_id: 'c1',
+    } as RuntimeSettings);
+    const state = useConnectionProfiles();
+    await state.load();
+    expect(state.taskDefaultConnectionId.value).toBe('c1');
+  });
+
+  it('切换即存:成功回显反馈;失败回滚本地值', async () => {
+    installServer(makeSettings([connection()], 'c1'));
+    const state = useConnectionProfiles();
+    await state.load();
+    expect(state.taskDefaultConnectionId.value).toBe('');
+    await state.saveTaskDefaultConnection('c1');
+    expect(saveSettingsMock).toHaveBeenCalledWith({ task_default_connection_id: 'c1' }, 'roleplay');
+    expect(state.taskDefaultConnectionId.value).toBe('c1');
+    expect(state.feedback.value?.kind).toBe('ok');
+
+    // 失败回滚:本地值退回切换前,提示中文错误
+    saveSettingsMock.mockRejectedValue(new Error('服务端拒绝'));
+    await state.saveTaskDefaultConnection('');
+    expect(state.taskDefaultConnectionId.value).toBe('c1');
+    expect(state.feedback.value?.kind).toBe('err');
+    expect(state.feedback.value?.text).toContain('服务端拒绝');
+  });
+
+  it('isTaskMode 跟随 appMode(该设置仅任务模式显示)', async () => {
+    installServer(makeSettings([connection()], 'c1'));
+    const state = useConnectionProfiles();
+    expect(state.isTaskMode.value).toBe(false);
+    useTaskStore().appMode = 'task';
+    expect(state.isTaskMode.value).toBe(true);
   });
 });
 

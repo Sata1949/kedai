@@ -168,5 +168,32 @@ export function useGenerationParams() {
     }
   }
 
-  return { tempLabel, topPLabel, ctxLabel, saveParams, paramsMsg, saveParamsNow };
+  /** 写入任务推荐值(TM-SET-1):把 0.3 / 1.0 / 8192 显式写为**任务覆盖层**值。
+   *  与后端 `TASK_DEFAULT_TEMPERATURE` / `TASK_DEFAULT_TOP_P` / `TASK_DEFAULT_OUTPUT_TOKENS`
+   *  逐值对应(前端本就有默认值镜像先例,genSettings 的 `?? 0.8` 一族同款);
+   *  仅任务模式调用(按钮仅在任务模式渲染)。用途:历史批量保存冻结过旧值的用户一键采用新缺省。 */
+  const taskRecSaving = ref(false);
+  const taskRecMsg = ref('');
+  async function applyTaskRecommended(): Promise<void> {
+    taskRecSaving.value = true;
+    taskRecMsg.value = '';
+    try {
+      await store.saveSettings({
+        default_temperature: 0.3,
+        default_top_p: 1.0,
+        default_max_tokens: 8192,
+      });
+      taskRecMsg.value = '已写入任务模式显式值:温度 0.3 / Top-P 1.0 / 输出上限 8192';
+      setTimeout(() => (taskRecMsg.value = ''), 3000);
+    } catch (e) {
+      taskRecMsg.value = `写入失败:${(e as Error).message}`;
+    } finally {
+      taskRecSaving.value = false;
+    }
+  }
+
+  return {
+    tempLabel, topPLabel, ctxLabel, saveParams, paramsMsg, saveParamsNow,
+    taskRecSaving, taskRecMsg, applyTaskRecommended,
+  };
 }

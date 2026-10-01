@@ -38,8 +38,10 @@ pub use crate::models::tool_policy::McpServerConfig;
 /// 按模式的设置覆盖项:所有字段 `Option`,`Some` 表示覆盖共享默认,`None` 表示沿用共享值。
 /// 仅覆盖生成参数与 Agent 配置;连接信息(openai_base_url/openai_api_key/model)始终共享。
 ///
-/// **例外(TM-GEN-1)**:`default_max_tokens` 的 `None` 不是纯沿用——合并时抬到任务下限
-/// ([`TASK_MIN_OUTPUT_TOKENS`],只抬不压);其余字段语义不变。
+/// **例外(TM-GEN-1 / TM-SET-1)**:`default_temperature` / `default_top_p` /
+/// `default_max_tokens` 的 `None` 不是纯沿用——合并时取任务向缺省(见
+/// [`TASK_DEFAULT_TEMPERATURE`] 一组常量),`default_max_tokens` 只抬不压;
+/// 其余字段 `None` 仍沿用扁平值。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ModeSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -154,6 +156,11 @@ pub struct ModeSettings {
     /// 仅影响任务模式执行者/汇总者的**缺省**默认词选择(见 `for_mode`),不改变工具面。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_coding_bundle_enabled: Option<bool>,
+    /// 任务模式默认连接(TM-SET-1):None 沿用扁平值,Some("") = 显式清除(回到跟随默认
+    /// 连接),Some(id) = 覆盖。仅任务模式消费(逐任务/节点显式连接之后的一级回退,
+    /// 软回退语义见 `task_mode_default_connection`)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_default_connection_id: Option<String>,
 }
 
 /// 默认工具循环轮次上限
@@ -506,13 +513,17 @@ pub fn default_reflect_prompt() -> String {
         .into()
 }
 
-/// 任务侧单次输出预算下限(TM-GEN-1,2026-10-01):任务覆盖层未显式配置时,任务模式的
-/// 有效 `default_max_tokens` 取 `max(扁平值, 本值)`——**只抬不压**。
+/// 任务向缺省生成参数(TM-SET-1,2026-10-01):任务覆盖层未显式配置时,任务模式的有效
+/// 温度 / Top-P / 单次输出上限取本组值。任务执行以工具循环与多步执行为主,低温 + 不截断
+/// 采样 + 足够产出预算是更稳的档位;角色扮演侧的扁平缺省(0.8 / 0.9 / 1024)不受影响。
 ///
-/// 理由:扁平缺省 1024 是为角色扮演调的,带工具/推理的 agent 轮会被推理 token 吃光
-/// (TM-D6 实测主因:1024 曾被 reasoning 整体烧尽导致正文零输出)。任务覆盖层的显式值
-/// (`Some`)逐字优先,不受本下限影响——语义是「任务模式单次产出不低于 4096」,不是硬钳制。
-pub const TASK_MIN_OUTPUT_TOKENS: u32 = 4096;
+/// `TASK_DEFAULT_OUTPUT_TOKENS` 沿用 TM-GEN-1 的「只抬不压」语义:None 时任务有效值取
+/// `max(扁平值, 本值)` 而非直接替换——扁平值更大时保持更大,不被本值压低(理由:带工具/
+/// 推理的 agent 轮会被推理 token 吃光,TM-D6 实测 1024 曾被 reasoning 整体烧尽导致正文零输出)。
+/// 任务覆盖层的显式值(`Some`)一律逐字优先。
+pub const TASK_DEFAULT_TEMPERATURE: f64 = 0.3;
+pub const TASK_DEFAULT_TOP_P: f64 = 1.0;
+pub const TASK_DEFAULT_OUTPUT_TOKENS: u32 = 8192;
 
 impl RuntimeSettings {
     /// 从环境配置构建默认设置
@@ -588,6 +599,8 @@ impl RuntimeSettings {
             task_prompt_inject_enabled: false,
             // 编码能力包默认关:新装与旧配置行为逐字不变,须用户显式启用
             task_coding_bundle_enabled: false,
+            // 任务模式默认连接默认空 = 跟随默认连接(active_connection),零迁移
+            task_default_connection_id: String::new(),
             task: ModeSettings::default(),
         };
         // 多套连接:新装(无 settings.json)也要有一条默认连接——本批次之后 connections 是真源,
@@ -601,9 +614,11 @@ impl RuntimeSettings {
     /// task 模式则把 task 覆盖层(Some)替换到扁平字段上,None 沿用扁平值。
     /// 旧 settings.json 无覆盖层时 task 返回扁平值,行为与改造前一致。
     ///
-    /// **两处任务向例外**(TM-GEN-1,2026-10-01):
-    /// - `default_max_tokens`:None 时沿用扁平值但**抬到任务下限**
-    ///   [`TASK_MIN_OUTPUT_TOKENS`](只抬不压;Some 显式值逐字优先);
+    /// **两处任务向例外**(TM-GEN-1 / TM-SET-1,2026-10-01):
+    /// - `default_temperature` / `default_top_p` / `default_max_tokens`:None 时取
+    ///   任务向缺省([`TASK_DEFAULT_TEMPERATURE`] / [`TASK_DEFAULT_TOP_P`] /
+    ///   [`TASK_DEFAULT_OUTPUT_TOKENS`]),**不沿用扁平值**——扁平缺省(0.8 / 0.9 / 1024)
+    ///   是为角色扮演调的;`default_max_tokens` 保持「只抬不压」(扁平值更大时保持更大);
     /// - `agent_system_prompt`:None 注入内置任务向默认词(不回退 roleplay 人设词,见下)。
     pub fn for_mode(&self, mode: AppMode) -> RuntimeSettings {
         let ov = match mode {
@@ -611,17 +626,13 @@ impl RuntimeSettings {
             AppMode::Task => &self.task,
         };
         let mut out = self.clone();
-        if let Some(v) = ov.default_temperature {
-            out.default_temperature = v;
-        }
-        if let Some(v) = ov.default_top_p {
-            out.default_top_p = v;
-        }
-        // 任务侧输出预算下限(TM-GEN-1):Some 显式值逐字优先;None 沿用扁平值但只抬不压
-        // ——扁平值更大时保持更大,不被下限压低。
+        // 任务向缺省生成参数(TM-SET-1):None 取任务缺省,Some 显式值逐字优先。
+        // max_tokens 保持「只抬不压」:扁平值更大时保持更大,不被任务缺省压低。
+        out.default_temperature = ov.default_temperature.unwrap_or(TASK_DEFAULT_TEMPERATURE);
+        out.default_top_p = ov.default_top_p.unwrap_or(TASK_DEFAULT_TOP_P);
         out.default_max_tokens = match ov.default_max_tokens {
             Some(v) => v,
-            None => out.default_max_tokens.max(TASK_MIN_OUTPUT_TOKENS),
+            None => out.default_max_tokens.max(TASK_DEFAULT_OUTPUT_TOKENS),
         };
         if let Some(v) = ov.max_context_tokens {
             out.max_context_tokens = v;
@@ -751,6 +762,9 @@ impl RuntimeSettings {
         }
         if let Some(v) = ov.task_prompt_inject_enabled {
             out.task_prompt_inject_enabled = v;
+        }
+        if let Some(v) = &ov.task_default_connection_id {
+            out.task_default_connection_id = v.clone();
         }
         out
     }

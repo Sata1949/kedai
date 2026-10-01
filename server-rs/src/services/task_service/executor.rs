@@ -491,9 +491,14 @@ impl TaskService {
         // 任务级连接回退(A 批 B1):调用方未给节点级连接时,回退到**该任务**的连接。
         // 收在这里的原因:规划/步骤/汇总/team/legacy 五条路径都经本函数发调用,
         // 在这一处回退等于一次覆盖,不必在每处调用点各写一遍(单一出处)。
+        // 第三级(TM-SET-1):前两级都未给时取「任务模式默认连接」;该默认值失效
+        // (连接被删/停用)时软回退默认连接——便利偏好不该让任务失败(见 helper 文档)。
         let task_connection = connection_id
             .map(str::to_string)
-            .or_else(|| self.get(task_id).and_then(|t| t.connection_id));
+            .or_else(|| self.get(task_id).and_then(|t| t.connection_id))
+            .or_else(|| {
+                crate::services::settings_service::task_mode_default_connection(&self.task_settings())
+            });
         let connection_id = task_connection.as_deref();
         let params = GenerationParams {
             temperature,

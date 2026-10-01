@@ -4,6 +4,7 @@
 // 压缩模式/记忆蒸馏/子代理等字段,属模板漂移,合并后两模式一致)。
 // 数值字段的默认值由 stores/genSettings.ts 的 loadSettings 集中 `?? 默认` 兜底,
 // 本组件不再逐个兜(onMounted 里曾只兜 3 个字段,既冗余又误导)。
+import { computed } from 'vue';
 import { useAppStore } from '../../store';
 import { storeToRefs } from 'pinia';
 import { useGenerationParams } from '../../composables/useDataManager';
@@ -29,7 +30,13 @@ const {
   subagentMaxDepth, subagentMaxConcurrency, subagentResultMaxChars,
 } = storeToRefs(store);
 
-const { tempLabel, topPLabel, ctxLabel, saveParams, paramsMsg, saveParamsNow } = useGenerationParams();
+const {
+  tempLabel, topPLabel, ctxLabel, saveParams, paramsMsg, saveParamsNow,
+  taskRecSaving, taskRecMsg, applyTaskRecommended,
+} = useGenerationParams();
+
+/** 任务模式缺省块(TM-SET-1)仅任务模式显示;角色扮演侧缺省不同(0.8 / 0.9 / 扁平输出上限) */
+const isTaskMode = computed(() => store.appMode === 'task');
 </script>
 
 <template>
@@ -395,6 +402,27 @@ const { tempLabel, topPLabel, ctxLabel, saveParams, paramsMsg, saveParamsNow } =
           title="子智能体结果最大字符数(500-8000;默认 2000,超出截断并附原长尾注)"
         />
         <span class="sv-note">子智能体结果字符上限(500-8000,默认 2000)</span>
+      </div>
+      <!-- 任务模式缺省生成配置(TM-SET-1):仅任务模式显示。任务覆盖层未显式配置时,
+           任务运行取任务缺省(0.3 / 1.0 / 8192,不沿用角色扮演风味值);
+           本页「保存为默认参数」会把滑块当前值写成**任务显式值**并冻结,故给一键写推荐值。 -->
+      <div v-if="isTaskMode" class="sv-separator">
+        <div class="sv-field-label sub">任务模式缺省</div>
+        <p class="sv-note">
+          任务未单独设置时使用:温度 0.3 · Top-P 1.0 · 输出上限 8192(输出上限只抬不压:
+          更大时保持更大)。显式保存过的值优先于缺省。
+        </p>
+        <div class="sv-btn-row">
+          <button
+            class="sv-btn ghost sv-btn-fill"
+            :disabled="taskRecSaving"
+            title="把温度 0.3 / Top-P 1.0 / 输出上限 8192 显式写入任务模式设置(此前批量保存冻结过旧值的用户可用它一键采用新缺省)"
+            @click="applyTaskRecommended"
+          >
+            {{ taskRecSaving ? '写入中...' : '写入任务推荐值(0.3 / 1.0 / 8192)' }}
+          </button>
+        </div>
+        <div v-if="taskRecMsg" class="sv-feedback ok sv-feedback-flex">{{ taskRecMsg }}</div>
       </div>
       <div class="sv-btn-row">
         <button class="sv-btn ghost sv-btn-fill" :disabled="saveParams" @click="saveParamsNow">

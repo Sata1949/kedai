@@ -23,14 +23,14 @@ mod secret;
 
 pub use connection::{
     mask_key, normalize_base_url, resolve_connector_target, strip_endpoint_suffix,
-    ConnectionProfile, CONNECTOR_TYPE_MOCK, CONNECTOR_TYPE_OPENAI, DEFAULT_SEARCH_ENDPOINT,
-    MAX_CONNECTIONS,
+    task_mode_default_connection, ConnectionProfile, CONNECTOR_TYPE_MOCK, CONNECTOR_TYPE_OPENAI,
+    DEFAULT_SEARCH_ENDPOINT, MAX_CONNECTIONS,
 };
 pub use connector_pool::{connection_label, ConnectorPool};
 pub use params::{
     default_coding_task_agent_prompt, default_roleplay_agent_prompt, default_task_agent_prompt,
     task_idle_floor_secs, McpServerConfig, ModeSettings, RoleplayPromptConfig, TaskPromptConfig,
-    TASK_MIN_OUTPUT_TOKENS,
+    TASK_DEFAULT_OUTPUT_TOKENS, TASK_DEFAULT_TEMPERATURE, TASK_DEFAULT_TOP_P,
 };
 
 // RuntimeSettings 字段的 serde(default = "...") 按名字在本模块作用域解析;
@@ -332,6 +332,12 @@ pub struct RuntimeSettings {
     /// None 沿用本扁平值。
     #[serde(default)]
     pub task_coding_bundle_enabled: bool,
+    /// 任务模式默认连接(TM-SET-1;默认空 = 跟随默认连接 active_connection,零迁移)。
+    /// 逐任务显式 `connection_id`(任务级/节点级)之后的一级回退,仅任务模式消费;
+    /// 指向的连接被删/停用时**软回退**默认连接(便利设置不该让任务失败,见
+    /// `task_mode_default_connection`)。task 覆盖层可覆盖,None 沿用本扁平值。
+    #[serde(default)]
+    pub task_default_connection_id: String,
     /// 任务工作台的按模式覆盖项。扁平字段即角色扮演(roleplay)的权威值——引擎直接读
     /// 扁平字段,故 roleplay 不设覆盖层;task 用此覆盖层替换扁平字段的差异项。
     /// 旧 settings.json 无此字段,serde default 为空 = task 沿用扁平值。
@@ -875,41 +881,120 @@ mod tests {
         );
     }
 
-    /// TM-GEN-1:任务侧输出预算下限——`None` 沿用扁平值但**只抬不压**到任务下限,
-    /// `Some` 显式值逐字优先;温度字段零变化(D4(a) 拍板:不设任务上限);
-    /// roleplay 侧逐字节不变。
+    /// TM-GEN-1 / TM-SET-1:任务向缺省生成参数——`None` 时温度/Top-P 取任务缺省,
+    /// 输出上限取「任务缺省与扁平值只抬不压」的较大者;`Some` 显式值逐字优先;
+    /// roleplay 侧逐字节不变(读扁平权威值)。
     #[test]
-    fn task_output_budget_floor_is_lift_only_and_some_wins() {
+    fn task_generation_defaults_apply_and_some_wins() {
         let cfg = test_cfg();
         let mut s = RuntimeSettings::from_config(&cfg);
         assert_eq!(
             s.for_mode(AppMode::Task).default_max_tokens,
-            TASK_MIN_OUTPUT_TOKENS,
-            "None + 扁平 1024 → 抬到任务下限"
+            TASK_DEFAULT_OUTPUT_TOKENS,
+            "None + 扁平 1024 → 抬到任务缺省 8192"
         );
-        s.default_max_tokens = 8192;
+        assert_eq!(
+            s.for_mode(AppMode::Task).default_temperature,
+            TASK_DEFAULT_TEMPERATURE,
+            "None → 任务缺省温度 0.3(不沿用扁平 0.8)"
+        );
+        assert_eq!(
+            s.for_mode(AppMode::Task).default_top_p,
+            TASK_DEFAULT_TOP_P,
+            "None → 任务缺省 Top-P 1.0(不沿用扁平 0.9)"
+        );
+        s.default_max_tokens = 16384;
         assert_eq!(
             s.for_mode(AppMode::Task).default_max_tokens,
-            8192,
+            16384,
             "扁平值更大时保持更大(只抬不压)"
         );
         s.task.default_max_tokens = Some(2048);
         assert_eq!(
             s.for_mode(AppMode::Task).default_max_tokens,
             2048,
-            "显式任务值逐字优先(低于下限也不动)"
+            "显式任务值逐字优先(低于任务缺省也不动)"
         );
         s.task.default_max_tokens = Some(32768);
         assert_eq!(s.for_mode(AppMode::Task).default_max_tokens, 32768);
-        // 温度维持「None=沿用扁平值」:D4(a) 拍板不设任务上限,只锁不变防未来漂移
         s.default_temperature = 1.1;
-        assert_eq!(s.for_mode(AppMode::Task).default_temperature, 1.1);
+        assert_eq!(
+            s.for_mode(AppMode::Task).default_temperature,
+            TASK_DEFAULT_TEMPERATURE,
+            "扁平温度变化不影响任务缺省"
+        );
         s.task.default_temperature = Some(0.3);
         assert_eq!(s.for_mode(AppMode::Task).default_temperature, 0.3);
+        s.task.default_top_p = Some(0.95);
+        assert_eq!(s.for_mode(AppMode::Task).default_top_p, 0.95);
         assert_eq!(
             s.for_mode(AppMode::Roleplay).default_max_tokens,
-            8192,
-            "roleplay 读扁平权威值,不受任务下限影响"
+            16384,
+            "roleplay 读扁平权威值,不受任务缺省影响"
+        );
+        assert_eq!(
+            s.for_mode(AppMode::Roleplay).default_temperature,
+            1.1,
+            "roleplay 温度读扁平权威值"
+        );
+    }
+
+    /// TM-SET-1:任务模式默认连接的**软回退**解析——未配置/指向已删/已停用 → None
+    /// (调用方回退默认连接,不使任务失败);指向存在且启用 → Some(id);
+    /// 任务覆盖层可覆盖扁平值(Some("") 显式清除回到跟随默认连接)。
+    #[test]
+    fn task_mode_default_connection_soft_fallback_and_override() {
+        let cfg = test_cfg();
+        let mut s = RuntimeSettings::from_config(&cfg);
+        assert!(
+            task_mode_default_connection(&s.for_mode(AppMode::Task)).is_none(),
+            "未配置 → None(跟随默认连接,零迁移)"
+        );
+        s.task.task_default_connection_id = Some("ghost".into());
+        assert!(
+            task_mode_default_connection(&s.for_mode(AppMode::Task)).is_none(),
+            "指向已删除的连接 → 软回退 None(不报错)"
+        );
+        // from_config 已播种固定 id "default" 的默认连接且启用
+        s.task.task_default_connection_id = Some("default".into());
+        assert_eq!(
+            task_mode_default_connection(&s.for_mode(AppMode::Task)).as_deref(),
+            Some("default"),
+            "存在且启用 → Some(id)"
+        );
+        for p in s.connections.iter_mut() {
+            if p.id == "default" {
+                p.enabled = false;
+            }
+        }
+        assert!(
+            task_mode_default_connection(&s.for_mode(AppMode::Task)).is_none(),
+            "指向已停用的连接 → 软回退 None"
+        );
+        // 恢复启用,继续验合并优先级
+        for p in s.connections.iter_mut() {
+            if p.id == "default" {
+                p.enabled = true;
+            }
+        }
+        // task 覆盖层优先于扁平值;Some("") = 显式清除
+        s.task_default_connection_id = "default".into();
+        s.task.task_default_connection_id = None;
+        assert_eq!(
+            task_mode_default_connection(&s.for_mode(AppMode::Task)).as_deref(),
+            Some("default"),
+            "None 沿用扁平值"
+        );
+        s.task.task_default_connection_id = Some(String::new());
+        assert!(
+            task_mode_default_connection(&s.for_mode(AppMode::Task)).is_none(),
+            "Some(\"\") 显式清除 → None"
+        );
+        // roleplay 视图不读本字段的消费点,但扁平值不受任务覆盖影响(隔离不变量)
+        assert_eq!(
+            s.for_mode(AppMode::Roleplay).task_default_connection_id,
+            "default",
+            "roleplay 视图 = 扁平权威值"
         );
     }
 

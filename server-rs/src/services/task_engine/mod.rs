@@ -239,16 +239,22 @@ impl TaskEngine {
                 return;
             }
         };
+        let settings = self.svc.task_settings();
+        // 任务级连接(A 批 B1):随上下文下传,供工具循环参数装配回退;
+        // 第三级回退 = 任务模式默认连接(TM-SET-1),失效时软回退默认连接
+        // (仅任务模式消费;roleplay 引擎不经本上下文)。
+        let connection_id = task.connection_id.clone().or_else(|| {
+            crate::services::settings_service::task_mode_default_connection(&settings)
+        });
         let ctx = TaskRunContext {
             task_id: task.id.clone(),
             token,
             goal: goal.unwrap_or_else(|| task.title.clone()),
-            settings: self.svc.task_settings(),
+            settings,
             executor_id: task.executor_id.clone(),
             character_id: task.character_id.clone(),
             cancel: cancel.clone(),
-            // 任务级连接(A 批 B1):随上下文下传,供工具循环参数装配回退
-            connection_id: task.connection_id.clone(),
+            connection_id,
             scope,
         };
         // 单一收尾出口(批次 B 依赖倒置):执行器返回终态值,引擎按值分派落库;

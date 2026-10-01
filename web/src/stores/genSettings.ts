@@ -138,6 +138,10 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
    *  (先读后写/遵循既有风格/改完跑验证/最小改动);自定义值优先。不影响角色扮演模式。 */
   const taskCodingBundleEnabled = ref(false);
 
+  /** 任务模式默认连接(TM-SET-1;空串 = 跟随默认连接)。
+   *  任务连接回退链:逐任务/节点显式连接 → 本项 → 默认连接;仅任务模式消费。 */
+  const taskDefaultConnectionId = ref('');
+
   // ===== 提示词注入(简单模式 + 楼层系统;全局配置) =====
   const promptInject = ref<api.PromptInjectConfig | null>(null);
   // ===== 自定义 Agent 执行流程(custom 模式;全局配置) =====
@@ -178,6 +182,7 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
       taskPersonaFull.value = s.task_persona_full ?? false;
       taskPromptInjectEnabled.value = s.task_prompt_inject_enabled ?? false;
       taskCodingBundleEnabled.value = s.task_coding_bundle_enabled ?? false;
+      taskDefaultConnectionId.value = s.task_default_connection_id ?? '';
       authorizationMode.value = readAuthorizationMode(s);
       authorizationAlwaysRequired.value = Array.isArray(s.bypass_blacklist) ? s.bypass_blacklist : [];
       toolAuthorizationTimeoutSecs.value = s.tool_authorization_timeout_secs ?? 300;
@@ -247,6 +252,7 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     taskPersonaFull.value = s.task_persona_full ?? false;
     taskPromptInjectEnabled.value = s.task_prompt_inject_enabled ?? false;
     taskCodingBundleEnabled.value = s.task_coding_bundle_enabled ?? false;
+    taskDefaultConnectionId.value = s.task_default_connection_id ?? '';
     authorizationMode.value = readAuthorizationMode(s);
     authorizationAlwaysRequired.value = Array.isArray(s.bypass_blacklist) ? s.bypass_blacklist : [];
     toolAuthorizationTimeoutSecs.value = s.tool_authorization_timeout_secs ?? 300;
@@ -431,6 +437,7 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     taskPersonaFull,
     taskPromptInjectEnabled,
     taskCodingBundleEnabled,
+    taskDefaultConnectionId,
     promptInject,
     agentFlowLibrary,
     loadSettings,

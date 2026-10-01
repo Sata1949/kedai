@@ -72,11 +72,11 @@ beforeEach(() => {
 });
 
 describe('TaskConnectionSelect:任务级连接选择器(B 批 B1)', () => {
-  it('恒显示「默认连接（跟随设置）」且缺省值为空(不下发 connection_id)', async () => {
+  it('恒显示「默认（跟随任务模式默认连接）」且缺省值为空(不下发 connection_id)', async () => {
     const store = useTaskStore();
     const wrapper = await mountSelect();
     const options = wrapper.findAll('option').map((o) => o.text());
-    expect(options[0]).toBe('连接:默认连接（跟随设置）');
+    expect(options[0]).toBe('连接:默认（跟随任务模式默认连接）');
     expect((wrapper.find('select').element as HTMLSelectElement).value).toBe('');
     // 缺省 = 跟随设置的默认连接:store 里必须是空串,createTask 才不会下发该键
     expect(store.taskConnectionId).toBe('');
