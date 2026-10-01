@@ -475,22 +475,22 @@ async fn task_plan_resume_summary_failure_falls_back_to_step_outputs() {
 
 /// 含失败步骤时终态 partial(对齐 legacy「有产出则 partial」语义),失败信息落在
 /// **plan 结构**里(每步 status=error + result=失败原因),result 只放汇总文本。
-/// 注:ApprovedPlanExecutor 每步 user 消息都携带完整计划上下文,[[fail:]]/[[empty]]
-/// 等 user 侧无条件钩子会毒化全部步骤;[[empty_if:任务执行者]] 只匹配步骤执行的
-/// system 提示词(EXECUTOR_PROMPT),规划器(任务规划器)/汇总器(任务汇总者)不命中,
-/// 是 mock 下可精确只让步骤失败的钩子(mock 条件钩子仅匹配 system 消息)。
+///
+/// 恒失败形态(TM-EMPTY-1 起):步骤 goal 内**转义**嵌入 `[[empty_any]]`——
+/// 计划 JSON 解析后还原为真实标记,只出现在步骤调用的消息里(标题里是转义序列,
+/// 规划器/汇总器不受影响);它从**全量消息**提取,跨收尾提醒轮持续命中,故步骤必然失败
+/// (两行空调用后走原错误路径)。旧的 `[[empty_if:任务执行者]]` 会被收尾提醒轮救回
+/// (提醒语替换末条 user 后 empty_if 丢了标记),不再是「恒失败」形态,故本用例改用新钩子。
 #[tokio::test]
 async fn task_plan_resume_error_step_marks_partial_in_plan() {
     let app = test_app();
 
-    // 钩子布局:规划器吃首个 [[reply:]] 出计划;步骤轮 system 含「任务执行者」
-    // → empty_if 命中返回空内容,run_agent_loop 报错「步骤 N返回空内容」;
+    // 钩子布局:规划器吃首个 [[reply:]] 出计划;步骤 goal 内转义 [[empty_any]] 恒空;
     // 汇总轮吃 reply_if(任务汇总者)出确定性汇总文本。
     let title = concat!(
-        r#"[[reply:[{"name":"步骤一","goal":"写第一段"},"#,
-        r#"{"name":"步骤二","goal":"写第二段"}] ]]"#,
+        r#"[[reply:[{"name":"步骤一","goal":"\u005b\u005bempty_any\u005d\u005d 写第一段"},"#,
+        r#"{"name":"步骤二","goal":"\u005b\u005bempty_any\u005d\u005d 写第二段"}] ]]"#,
         "[[reply_if:任务汇总者|有失败步的汇总成果]]",
-        "[[empty_if:任务执行者]]",
         " 失败步计划目标"
     );
     let id = create_task_with_mode(app, title, "plan").await;
@@ -779,6 +779,64 @@ async fn task_plan_mode_planner_scout_collects_then_plans() {
         scout["finish_reason"].as_str(),
         Some("tool_calls"),
         "带工具调用的侦察轮 finish_reason 应为 tool_calls: {scout}"
+    );
+}
+
+/// TM-EMPTY-1:侦察终轮「空文本 + tool_calls」异常形态的定向缓解——
+/// [[tool_loop:read|3 …]] 前 2 轮为正常侦察(工具结果已回填),第 3 次调用起已是**终轮**
+/// (侦察轮用尽、未下发工具)却仍返回 tool_call 且正文为空(端点对「中途移除工具定义」
+/// 的会话继续出 tool_call 的实测形态,TM-SCOUT-1 §二 run4)。修复后同 attempt 内追加一次
+/// 纯文本提醒,[[reply_if_any:任务规划器|计划 JSON]] 在提醒轮命中(标记从全量消息提取,
+/// 提醒语追加后原目标消息仍可见)→ 本轮直接出计划。
+/// planner 恰 4 行(2 侦察 + 异常终轮 + 提醒轮),对照修复前:3 attempt × 3 调用 = 9 条放大。
+#[tokio::test]
+async fn task_plan_scout_final_round_tool_call_gets_nudged_once() {
+    let app = test_app();
+
+    // 侦察工具 read 在只读白名单内;N=3 → 第 3 次调用(终轮)仍出 tool_call;
+    // 提醒轮起 tool_loop 标记随末条 user 变化而失效,reply_if_any 接管产出计划 JSON。
+    let title = concat!(
+        r#"[[tool_loop:read|3 {"type":"file","name":"notes.md"}]]"#,
+        r#"[[reply_if_any:任务规划器|[{"name":"提醒步","goal":"汇总要点"}] ]]"#,
+        " 侦察终轮提醒目标"
+    );
+    let id = create_task_with_mode(app, title, "plan").await;
+
+    let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
+
+    let detail = wait_status(app, &id, "planned").await;
+    let plan = detail["task"]["plan"].as_array().unwrap();
+    assert_eq!(plan.len(), 1, "提醒轮应产出计划(1 步): {detail}");
+    assert_eq!(
+        plan[0]["name"], "提醒步",
+        "计划内容应为提醒轮产出: {detail}"
+    );
+
+    // planner 调用行恰 4 条:2 侦察 + 异常终轮(空) + 提醒轮(成功)——对照修复前 9 条
+    let calls = wait_calls(app, &id, |cs| {
+        cs.iter().filter(|c| c["phase"] == "planner").count() >= 4
+    })
+    .await;
+    let planner_calls: Vec<&Value> = calls.iter().filter(|c| c["phase"] == "planner").collect();
+    assert_eq!(
+        planner_calls.len(),
+        4,
+        "提醒应把 9 条放大压到 4 条(2 侦察 + 终轮 + 提醒): {calls:?}"
+    );
+    let abnormal = planner_calls[2];
+    assert_eq!(
+        abnormal["finish_reason"].as_str(),
+        Some("tool_calls"),
+        "异常终轮应为 tool_calls 收尾且正文为空: {abnormal}"
+    );
+    let nudged = planner_calls[3];
+    assert!(
+        nudged["response_summary"]
+            .as_str()
+            .unwrap_or("")
+            .contains("提醒步"),
+        "提醒轮应产出计划 JSON: {nudged}"
     );
 }
 

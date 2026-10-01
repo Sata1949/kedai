@@ -430,6 +430,7 @@ async fn run_subtask_with_tools(
                     reasoning_tokens: 0,
                     reasoning_chars: 0,
                     tool_calls: Vec::new(),
+                    dropped_tool_calls: 0,
                 };
                 svc.record_llm_call(
                     tid,
@@ -462,6 +463,7 @@ async fn run_subtask_with_tools(
                     reasoning_tokens: 0,
                     reasoning_chars: 0,
                     tool_calls: Vec::new(),
+                    dropped_tool_calls: 0,
                 };
                 (text, Some(out), status)
             }

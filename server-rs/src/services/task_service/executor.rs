@@ -547,6 +547,10 @@ impl TaskService {
                 (0i64, 0i64, 0i64);
             let mut reasoning_chars = 0usize;
             let mut tool_calls: Vec<ToolCallArgs> = Vec::new();
+            // 未下发工具却到达的 ToolCall 块计数(TM-EMPTY-1):按既有纪律丢弃不入
+            // `tool_calls`,但计数透给调用方——规划器侦察终轮据此识别「空文本 + tool_call」
+            // 异常形态并追加一次纯文本提醒(见 plan_scout_loop)。
+            let mut dropped_tool_calls = 0usize;
             while let Some(c) = chunk_rx.recv().await {
                 match c {
                     LlmStreamChunk::Token(t) => {
@@ -585,6 +589,7 @@ impl TaskService {
                         if tools_given {
                             tool_calls.push(call);
                         } else {
+                            dropped_tool_calls += 1;
                             tracing::warn!("任务模式 LLM 流出现非预期 ToolCall 块(generate_text 未注册工具,已忽略)")
                         }
                     }
@@ -600,6 +605,7 @@ impl TaskService {
                 reasoning_tokens,
                 reasoning_chars,
                 tool_calls,
+                dropped_tool_calls,
             )
         };
         let (
@@ -612,6 +618,7 @@ impl TaskService {
                 reasoning_tokens,
                 reasoning_chars,
                 tool_calls,
+                dropped_tool_calls,
             ),
         ) = tokio::join!(
             tokio::time::timeout(call_timeout.unwrap_or(TASK_LLM_TOTAL_TIMEOUT), call),
@@ -671,6 +678,7 @@ impl TaskService {
             reasoning_tokens,
             reasoning_chars,
             tool_calls,
+            dropped_tool_calls,
         };
         // 调用追踪落库先于日志字段构建:log_fields 会 move model,此处只借用。
         // 空内容判定须排除「带 tool_calls 的轮次」(问题②规划器侦察轮:模型请求
@@ -973,6 +981,8 @@ impl TaskService {
             scope: scope.clone(),
         };
         let mut scout_round = 0usize;
+        // 终轮提醒至多一次(TM-EMPTY-1):见下方「空文本 + tool_calls」分支
+        let mut nudged = false;
         loop {
             // 侦察轮(带白名单工具)或最终轮(侦察轮用尽/无可用工具 → 不带工具,
             // 强制纯文本产出计划 JSON,契约不变)
@@ -1004,9 +1014,35 @@ impl TaskService {
                     return Err(e);
                 }
             };
-            if out.tool_calls.is_empty() || !give_tools {
-                // 模型未请求工具(直接产出计划,零侦察)或已是最终轮:正文 = 计划 JSON
+            if out.tool_calls.is_empty() && out.dropped_tool_calls == 0 {
+                // 模型未请求工具(直接产出计划,零侦察)或已是最终轮的正常形态:
+                // 正文 = 计划 JSON。注意 `dropped_tool_calls`(未下发工具仍到达、
+                // 被聚合层按协议异常丢弃的 ToolCall 块)也是「请求了工具」的证据——
+                // TM-EMPTY-1 的实测形态正是这种被丢弃后的空文本。
                 return Ok(out);
+            }
+            if !give_tools {
+                // 终轮(未下发工具)仍返回 tool_call:端点对「中途移除工具定义」的会话
+                // 继续出 tool_call 的异常形态(TM-SCOUT-1 §二 run4 实测:外层 attempt
+                // 重跑完整侦察,9 条调用放大)。TM-EMPTY-1:正文为空时至多追加一次
+                // user 提醒,同 attempt 内再发一次无工具调用(把「工具调用轮不算输出」
+                // 的既有澄清落到动作上);提醒前先为这次空调用入账——它已落
+                // task_llm_calls 行,usage 必须进总账,否则「各行求和 == usage_total」破。
+                // 正文非空或已提醒过 → 原样返回,走既有解析失败/重试路径。
+                if nudged || !out.text.trim().is_empty() {
+                    return Ok(out);
+                }
+                self.record_usage(task_id, "planner", None, &out);
+                nudged = true;
+                tracing::warn!(
+                    task_id = task_id,
+                    "规划器终轮未下发工具仍返回 tool_calls 且正文为空:追加一次纯文本提醒"
+                );
+                messages.push(LlmMessage::plain(
+                    "user",
+                    crate::services::task_core::prompt_consts::PLANNER_FINAL_NUDGE,
+                ));
+                continue;
             }
             // 侦察轮入账(2026-09-10 实测修复):此前侦察轮只落 task_llm_calls 不落
             // task_usage,导致 usage_total 与调用明细求和不等(实测 legacy/plan 各少计

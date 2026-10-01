@@ -36,4 +36,8 @@ pub(crate) struct TaskGenOutput {
     /// 本次调用模型请求的工具调用(仅下发 tools 的调用可能非空;问题②规划器侦察轮用,
     /// 其余调用方恒空)。来自流式 ToolCall 块聚合(与 execute_generation 同口径)。
     pub tool_calls: Vec<ToolCallArgs>,
+    /// **未下发工具**的本轮仍到达的 ToolCall 块数(TM-EMPTY-1):协议异常形态,
+    /// 聚合层按既有纪律丢弃(不入 `tool_calls`、记 warn),此处只留计数供
+    /// 规划器侦察终轮判定「空文本 + tool_call」并触发一次纯文本提醒;其余调用方恒 0。
+    pub dropped_tool_calls: usize,
 }

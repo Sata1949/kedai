@@ -349,13 +349,14 @@ async fn task_solo_truncated_tool_call_self_heals() {
     );
 }
 
-/// 问题①截断自愈失败路径:solo 任务经 [[finish:length|]] 钩子模拟「空正文 +
-/// finish=length」且重发后依旧(同消息数组原样重发,钩子再次命中)——
-/// 单轮只自愈一次,仍失败走原错误路径:任务 error 终态;
-/// 错误文案含「返回空内容」与 finish_reason(问题③:错误原因可读落库);
-/// 调用追踪两行(截断自愈标注行 + 空内容行)。
+/// TM-EMPTY-1:截断自愈 + 收尾提醒两级都在场——[[finish:length|]] 钩子模拟「空正文 +
+/// finish=length」:循环内自愈重发一次(预算翻倍)仍空 → 循环结束正文为空 → 收尾重试
+/// 追加一次无工具提醒轮(预算按 length 分级抬升、温度保持)→ 提醒轮末条 user 已换、
+/// 钩子不再命中,落到 mock 默认回复 → 任务 done。
+/// 调用追踪三行(截断自愈标注行 + 空内容行 + 提醒轮成功行);对照修复前:
+/// 同场景直接 error 终态(收尾重试救回,本用例即其回归锁)。
 #[tokio::test]
-async fn task_solo_empty_truncation_heals_once_then_errors() {
+async fn task_solo_truncation_heals_then_final_nudge_rescues() {
     let app = test_app();
 
     // [[finish:length|]]:内容为空串(标记 '|' 后即 "]]")→ 空正文 + finish=length
@@ -366,25 +367,23 @@ async fn task_solo_empty_truncation_heals_once_then_errors() {
     assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
 
     let (st, detail) = wait_terminal(app, &id).await;
-    assert_eq!(st, "error", "自愈重发仍空应为 error 终态,详情: {detail}");
-    let error = detail["task"]["error"].as_str().unwrap_or("");
+    assert_eq!(st, "done", "收尾提醒轮应救回任务(done),详情: {detail}");
     assert!(
-        error.contains("返回空内容") && error.contains("finish_reason=length"),
-        "错误文案应含「返回空内容」与 finish_reason(问题③),实际: {error}"
-    );
-    // 提交 3 · D6:推理吃光预算是最常见成因,文案要给出「当前输出上限 + 该怎么调」
-    assert!(
-        error.contains("提高单次生成上限") && error.contains("当前输出上限"),
-        "错误文案应含当前上限与建议动作,实际: {error}"
+        !detail["task"]["result"].as_str().unwrap_or("").is_empty(),
+        "结果应为提醒轮产出: {detail}"
     );
 
-    // 调用追踪:截断自愈标注行(error)+ 空内容行(empty),共两行 phase=agent
+    // 调用追踪:截断自愈标注行(error)+ 空内容行(empty)+ 提醒轮成功行(ok)
     let calls = wait_calls(app, &id, |cs| {
-        cs.iter().filter(|c| c["phase"] == "agent").count() >= 2
+        cs.iter().filter(|c| c["phase"] == "agent").count() >= 3
     })
     .await;
     let agent_calls: Vec<&Value> = calls.iter().filter(|c| c["phase"] == "agent").collect();
-    assert_eq!(agent_calls.len(), 2, "应恰好两次调用记录: {calls:?}");
+    assert_eq!(
+        agent_calls.len(),
+        3,
+        "应恰好三条调用记录(自愈 + 首轮空 + 提醒轮): {calls:?}"
+    );
     assert!(
         agent_calls.iter().any(|c| c["status"] == "error"
             && c["response_summary"]
@@ -396,6 +395,93 @@ async fn task_solo_empty_truncation_heals_once_then_errors() {
     assert!(
         agent_calls.iter().any(|c| c["status"] == "empty"),
         "应有空内容行: {calls:?}"
+    );
+    assert!(
+        agent_calls.iter().any(|c| c["status"] == "ok"),
+        "应有提醒轮成功行: {calls:?}"
+    );
+}
+
+/// TM-EMPTY-1(无 length 形态):[[empty]] 钩子让首轮返回空文本(无 finish、无工具)——solo
+/// 修复前直接判 Failed;修复后追加一次无工具提醒轮,提醒轮钩子不再命中(末条 user 换成
+/// 提醒语)→ mock 默认回复救回任务。两行调用记录(空 + 成功),即「空回不再等于失败」。
+#[tokio::test]
+async fn task_solo_empty_final_answer_gets_nudge_once() {
+    let app = test_app();
+
+    let title = "[[empty]] 恒空首轮目标";
+    let id = create_task_with_mode(app, title, "solo").await;
+
+    let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
+
+    let (st, detail) = wait_terminal(app, &id).await;
+    assert_eq!(st, "done", "提醒轮应救回任务: {detail}");
+    assert!(
+        !detail["task"]["result"].as_str().unwrap_or("").is_empty(),
+        "结果应为提醒轮产出: {detail}"
+    );
+
+    let calls = wait_calls(app, &id, |cs| {
+        cs.iter().filter(|c| c["phase"] == "agent").count() >= 2
+    })
+    .await;
+    let agent_calls: Vec<&Value> = calls.iter().filter(|c| c["phase"] == "agent").collect();
+    assert_eq!(
+        agent_calls.len(),
+        2,
+        "首轮空 + 提醒轮成功 = 两行(有界 +1): {calls:?}"
+    );
+    assert!(
+        agent_calls.iter().any(|c| c["status"] == "empty"),
+        "应有空内容行: {calls:?}"
+    );
+    assert!(
+        agent_calls.iter().any(|c| c["status"] == "ok"),
+        "应有提醒轮成功行: {calls:?}"
+    );
+}
+
+/// TM-EMPTY-1(提醒后仍空):[[empty_any]] 从**全量消息**命中——提醒语追加后原目标消息
+/// 仍在数组内,故首轮与提醒轮都空。收尾重试**有界**(恰 +1 次),仍空走原错误路径:
+/// error 终态、文案保留 finish_reason/输出上限/建议句(单一出处 empty_output_error);
+/// 两行调用记录(空 + 空),不因修复放大重试。
+#[tokio::test]
+async fn task_solo_final_nudge_persistent_empty_stays_error() {
+    let app = test_app();
+
+    let title = "[[empty_any]] 恒空目标";
+    let id = create_task_with_mode(app, title, "solo").await;
+
+    let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
+
+    let (st, detail) = wait_terminal(app, &id).await;
+    assert_eq!(st, "error", "提醒后仍空应走原错误路径: {detail}");
+    let error = detail["task"]["error"].as_str().unwrap_or("");
+    assert!(
+        error.contains("返回空内容"),
+        "错误文案应含「返回空内容」: {error}"
+    );
+    // 提交 3 · D6 的口径在收尾重试后不丢:输出上限与建议句仍在(且上限=重试所用值)
+    assert!(
+        error.contains("提高单次生成上限") && error.contains("当前输出上限"),
+        "错误文案应含当前上限与建议动作: {error}"
+    );
+
+    let calls = wait_calls(app, &id, |cs| {
+        cs.iter().filter(|c| c["phase"] == "agent").count() >= 2
+    })
+    .await;
+    let agent_calls: Vec<&Value> = calls.iter().filter(|c| c["phase"] == "agent").collect();
+    assert_eq!(
+        agent_calls.len(),
+        2,
+        "恰 +1 次收尾重试(首轮空 + 仍空): {calls:?}"
+    );
+    assert!(
+        agent_calls.iter().all(|c| c["status"] == "empty"),
+        "两行都应为空内容: {calls:?}"
     );
 }
 

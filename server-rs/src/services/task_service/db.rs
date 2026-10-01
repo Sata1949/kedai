@@ -679,6 +679,7 @@ impl TaskService {
                 reasoning_tokens: 0,
                 reasoning_chars: 0,
                 tool_calls: Vec::new(),
+                dropped_tool_calls: 0,
             };
             self.record_llm_call(
                 task_id,

@@ -161,7 +161,7 @@ pub(crate) async fn run_agent_loop(
     if let Err(e) = state_machine.transition(AgentState::Executing, &call.session_id) {
         tracing::warn!(error = %e, session = %call.session_id, "状态迁移被拒");
     }
-    let result = run_tool_loop(
+    let mut result = run_tool_loop(
         &engine,
         &mut state_machine,
         None, // 任务模式无 agent_sessions 行:跳过状态/工具调用落库
@@ -179,14 +179,113 @@ pub(crate) async fn run_agent_loop(
         None,
     )
     .await;
+    let model = engine.model();
+
+    // ===== 空正文收尾重试(TM-EMPTY-1)=====
+    // 工具循环正常结束(未中断/未取消)但正文 trim 后为空时——主成因是推理吃光输出预算,
+    // 或「只发工具调用、不给正文」的收尾轮——追加**一次**无工具单轮收尾:user 提醒 +
+    // 与 `generate_step_retry` 同款的分级参数(length→预算翻倍含下限、温度保持;
+    // 其他/无原因→同预算、温度 0.7)。仍空才走原 `empty_output_error` 错误路径;
+    // 硬错误(Err)/用户中断不重试(既有语义)。影响面:本函数是 solo/multi/plan 续跑/
+    // team 主 agent/followup 五条链路的单一收口点。
+    // 记账:首轮(空)先单独落一行(usage=首轮累计),最终行取**增量**(total − 首轮)
+    // ——usage_total 由调用方按整轮累计一次入账,「各行 token 求和 == usage_total」不变量保持。
+    let mut retry_budget_used: Option<u32> = None;
+    let mut usage_before_retry = TokenUsage::default();
+    if let Ok(res) = &result {
+        if !res.interrupted && !*cancel.borrow() && res.content.trim().is_empty() {
+            svc.record_self_heals(
+                &call.task_id,
+                call.phase,
+                call.step_index,
+                &model,
+                &messages,
+                &super::executor::to_self_heals(&res.self_heals),
+            );
+            let mut out = usage_as_output(&total_usage);
+            out.finish_reason = res.finish_reason.clone();
+            svc.record_llm_call(
+                &call.task_id,
+                call.phase,
+                call.step_index,
+                &model,
+                &messages,
+                "",
+                Some(&out),
+                started.elapsed(),
+                "empty",
+            );
+            let reason = res.finish_reason.as_deref().unwrap_or("");
+            let (retry_max_tokens, retry_temperature) = if reason == "length" {
+                (
+                    super::retry::truncated_retry_budget(params.max_tokens),
+                    params.temperature,
+                )
+            } else {
+                (params.max_tokens, 0.7)
+            };
+            tracing::warn!(
+                task_id = call.task_id.as_str(),
+                finish_reason = reason,
+                max_tokens = params.max_tokens,
+                retry_max_tokens,
+                "任务执行者空正文:追加一次无工具收尾轮"
+            );
+            usage_before_retry = total_usage.clone();
+            retry_budget_used = Some(retry_max_tokens);
+            messages.push(LlmMessage::plain(
+                "user",
+                crate::services::task_core::prompt_consts::EXECUTOR_FINAL_NUDGE,
+            ));
+            let mut retry_params = params.clone();
+            retry_params.tools = Vec::new();
+            retry_params.max_tool_rounds = Some(1);
+            retry_params.max_tokens = retry_max_tokens;
+            retry_params.temperature = retry_temperature;
+            // 不下发任何工具:空名单闸门(fail-closed)——意外工具调用被拒,不放行
+            let retry_gate = crate::agents::engine::executor::ToolGate::listed(&[]);
+            result = run_tool_loop(
+                &engine,
+                &mut state_machine,
+                None,
+                &call.session_id,
+                &mut messages,
+                &retry_params,
+                &tool_ctx,
+                &tx,
+                &cancel,
+                &flag,
+                &mut total_usage,
+                &run_id,
+                retry_gate,
+                None,
+            )
+            .await;
+        }
+    }
     // 先关通道再等 drain 收尾,保证进度事件全部转发完毕
     drop(tx);
     let _ = drain.await;
 
     // 调用追踪统一出口:成功/空/中断/错误均落一行 task_llm_calls;
-    // token 用整轮累计 total_usage;messages 此时含完整工具循环历史,摘要自截断。
+    // token 用整轮累计 total_usage(重试场景取**增量**:首轮已单独落行,防双计);
+    // messages 此时含完整工具循环历史(含收尾提醒),摘要自截断。
     let elapsed = started.elapsed();
-    let model = engine.model();
+    let row_usage = if retry_budget_used.is_some() {
+        TokenUsage {
+            prompt_tokens: total_usage.prompt_tokens - usage_before_retry.prompt_tokens,
+            completion_tokens: total_usage.completion_tokens
+                - usage_before_retry.completion_tokens,
+            total_tokens: total_usage.total_tokens - usage_before_retry.total_tokens,
+            context_tokens: total_usage.context_tokens - usage_before_retry.context_tokens,
+            prompt_cache_hit_tokens: total_usage.prompt_cache_hit_tokens
+                - usage_before_retry.prompt_cache_hit_tokens,
+            prompt_cache_miss_tokens: total_usage.prompt_cache_miss_tokens
+                - usage_before_retry.prompt_cache_miss_tokens,
+        }
+    } else {
+        total_usage.clone()
+    };
     match result {
         Ok(res) if !res.interrupted => {
             // 截断自愈留痕落库(问题①):被截断的调用补落一行 + 补 usage,
@@ -204,7 +303,7 @@ pub(crate) async fn run_agent_loop(
             // token/字段构造统一走 usage_as_output(批次 B.4 单一出处);text 由
             // record_llm_call 的 response 参数单独承载,finish_reason 是本调用特有的
             // 诊断(问题①)故单独覆盖——上游未下发时为 None,落库 ''。
-            let mut out = usage_as_output(&total_usage);
+            let mut out = usage_as_output(&row_usage);
             out.finish_reason = res.finish_reason.clone();
             svc.record_llm_call(
                 &call.task_id,
@@ -222,6 +321,7 @@ pub(crate) async fn run_agent_loop(
                 // 比例 +「提高上限/改非推理模型」建议,区分「预算被推理吃光」(实测主因)
                 // 与其他成因。`out` 的 completion/reasoning token 来自本轮累计(工具循环
                 // 聚合口径不含推理拆分,故那边恒 0,文案会退化为「占比未知」——不报假数)。
+                // TM-EMPTY-1:收尾重试已发起过(若条件满足),仍空才走到这里。
                 if let Err(e) = state_machine.transition(AgentState::Error, &call.session_id) {
                     tracing::warn!(error = %e, session = %call.session_id, "状态迁移被拒");
                 }
@@ -229,7 +329,7 @@ pub(crate) async fn run_agent_loop(
                     crate::services::task_core::prompt_consts::empty_output_error(
                         &call.label,
                         &out,
-                        Some(params.max_tokens),
+                        Some(retry_budget_used.unwrap_or(params.max_tokens)),
                     ),
                 );
             }

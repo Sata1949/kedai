@@ -203,6 +203,16 @@ impl MockConnector {
             return Ok(chunks);
         }
 
+        // 测试钩子:[[reply_if_any:子串|内容]] → **任一消息**含标记、且任一 system 消息含
+        // 「子串」时回复「内容」。与 [[reply_if:]] 的分工:后者的标记从**末条 user** 提取,
+        // 收尾提醒轮(TM-EMPTY-1)追加新 user 消息后会丢标记;本钩子从全量消息提取,
+        // 含标记的原消息仍在数组内即持续命中(子串仍只匹配 system,与 [[empty_if:]] 同口径,
+        // 提醒轮 system 不变故语义稳定)。置于 [[tool_loop:]] 之后、has_tool_result 之前:
+        // 侦察轮的 tool_call 由 tool_loop 分支先行接管,提醒轮(带 tool 结果)由本钩子接住。
+        if let Some(reply) = extract_reply_if_any_marker(messages) {
+            return Ok(text_reply_chunks(reply, messages));
+        }
+
         if has_tool_result {
             // 回复钩子守卫(问题②规划器侦察):工具结果回填后的再生成,若消息仍携带
             // [[reply_if:]]/[[reply:]] 钩子,应产出钩子指定内容(如规划器侦察轮后的
@@ -332,6 +342,22 @@ impl MockConnector {
                 });
                 return Ok(chunks);
             }
+        }
+
+        // 测试钩子:[[empty_any]] → **任一消息**含该标记即返回空内容(仅 Usage)。
+        // 与 [[empty_if:]] 的分工:后者从**末条 user** 提取标记,收尾提醒轮(TM-EMPTY-1)
+        // 追加新 user 消息后会丢标记;本钩子从全量消息提取,含标记的原目标消息仍在数组内
+        // 即持续命中——供「提醒后仍空 → 走原错误路径」的用例锁定(其余形态均无法构造)。
+        if messages.iter().any(|m| m.content.contains("[[empty_any]]")) {
+            chunks.push(LlmStreamChunk::Usage {
+                prompt_tokens: 3,
+                completion_tokens: 0,
+                total_tokens: 3,
+                prompt_cache_hit_tokens: 0,
+                prompt_cache_miss_tokens: 0,
+                reasoning_tokens: 0,
+            });
+            return Ok(chunks);
         }
 
         // 测试钩子:[[empty_below:N|内容]] → **单次输出预算**(max_tokens)低于 N 时返回空内容
@@ -884,6 +910,33 @@ fn system_contains_needle(messages: &[LlmMessage], needle: &str) -> bool {
             .match_indices(needle)
             .any(|(idx, _)| !m.content[..idx].ends_with("[[reply_if:"))
     })
+}
+
+/// 提取 [[reply_if_any:子串|内容]] 标记:从**全量消息**扫描标记(而非只认末条 user),
+/// 子串命中任一 system 消息即返回内容。TM-EMPTY-1:收尾提醒轮追加新 user 消息后,
+/// 末条 user 提取的钩子会丢标记,本钩子供「规划器侦察终轮空文本+tool_calls →
+/// 提醒轮产出计划 JSON」的端到端用例构造。
+/// 截断语义与子串命中口径与 `extract_reply_if_marker` 完全一致(同一 helper),
+/// 差异只在标记来源。
+fn extract_reply_if_any_marker(messages: &[LlmMessage]) -> Option<String> {
+    const MARK: &str = "[[reply_if_any:";
+    for m in messages {
+        let mut search_from = 0usize;
+        while let Some(rel) = m.content[search_from..].find(MARK) {
+            let start = search_from + rel;
+            let rest = &m.content[start + MARK.len()..];
+            let end = rest.find("]]")?;
+            let inner = &rest[..end];
+            if let Some((needle, content)) = inner.split_once('|') {
+                let needle = needle.trim();
+                if !needle.is_empty() && system_contains_needle(messages, needle) {
+                    return Some(content.to_string());
+                }
+            }
+            search_from = start + MARK.len();
+        }
+    }
+    None
 }
 
 /// 提取 [[fail:消息]] 标记;返回错误消息(模拟模型请求失败)

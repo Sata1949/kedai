@@ -70,6 +70,19 @@ pub(crate) const TASK_INTERNAL_PLAN_PROMPT: &str = "你是任务内部规划者�
 /// 「其余临时执行稿」章 HARNESS3-6)直接引用本常量,不写第二份。内置指令不经 untrusted 包裹。
 pub(crate) const EXECUTOR_TOOL_DISCIPLINE: &str = "工具使用纪律:① 自测通过即收尾——同一事实不得反复验证,不要为「再确认一次」重跑已通过的检查;② 命令用本机 shell 语法(Windows 下由 cmd 解释:多命令用 && 连接,不支持 ; 分隔与 /d/ 这类 MSYS 路径);③ 改文件优先用 fs_write/fs_edit 工具,不要用 shell 重定向拼文件;④ 每轮只做一个动作,看完结果再决定下一步。";
 
+/// 执行者**收尾提醒**(TM-EMPTY-1,2026-10-01):工具循环正常结束但正文为空时,
+/// 追加的一次「无工具收尾轮」的 user 消息——只提醒直接产出最终成果,不引入新契约;
+/// 是否发起与预算/温度分级由执行侧(`solo::run_agent_loop`)判定。
+/// 属动态重试辅助语:不上设置预览(与 `planner_scout_guidance` 的登记口径一致)。
+pub(crate) const EXECUTOR_FINAL_NUDGE: &str =
+    "请基于以上进展直接输出最终成果(不要再调用工具;不要复述过程,只给结果)。";
+
+/// 规划器**收尾提醒**(TM-EMPTY-1,2026-10-01):侦察终轮(未下发工具)仍返回
+/// tool_calls 且正文为空时,追加的一次无工具调用的 user 提醒——把「工具调用轮不算输出、
+/// 不违反 JSON 契约」的既有澄清(`planner_scout_guidance`)落到具体动作上。
+pub(crate) const PLANNER_FINAL_NUDGE: &str =
+    "不要再调用任何工具,直接按要求输出计划 JSON(只输出 JSON 数组,不要任何解释)。";
+
 /// 「返回空内容」的用户可见错误文案(提交 3 · D6),任务侧三处消费点共用:
 /// legacy/plan/team 的步骤与汇总(`task_engine::retry`)、solo 系主循环
 /// (`task_engine::solo`)、自定义流程节点(`task_engine::custom` 的落库侧)。
@@ -256,6 +269,21 @@ mod tests {
         }
     }
 
+    /// 收尾提醒两条(TM-EMPTY-1):核心指令是「不要再调用工具」——轻改为不减指令
+    /// 强度的表述;行为侧断言在 tests/tasks_modes_solo_multi.rs 与 tasks_modes_plan.rs。
+    #[test]
+    fn final_nudges_keep_no_tool_directive() {
+        assert!(
+            EXECUTOR_FINAL_NUDGE.contains("不要再调用工具"),
+            "执行者收尾提醒应含停用工具指令: {EXECUTOR_FINAL_NUDGE}"
+        );
+        assert!(
+            PLANNER_FINAL_NUDGE.contains("不要再调用任何工具")
+                && PLANNER_FINAL_NUDGE.contains("计划 JSON"),
+            "规划器收尾提醒应含停用工具指令与产出形态: {PLANNER_FINAL_NUDGE}"
+        );
+    }
+
     /// 侦察指引段(TM-SCOUT-1 D1(a)):四要素必须齐备——可用工具名、工作区根、
     /// 「工具调用轮不违反 JSON 契约」澄清、建议首动作。文案是防回退断言。
     #[test]
@@ -309,6 +337,7 @@ mod tests {
             reasoning_tokens: rt,
             reasoning_chars: 0,
             tool_calls: Vec::new(),
+            dropped_tool_calls: 0,
         };
 
         let msg = empty_output_error("子任务", &mk(Some("length"), 78, 100), Some(10_000));

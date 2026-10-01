@@ -33,7 +33,8 @@ const PLAN_MAX_ATTEMPTS: u32 = 3;
 /// 同预算再试一次好过直接失败(与 chat/engine/team 三处「封顶即放弃」语义不同)。
 /// `default_max_tokens` 经 `PUT /api/settings` 校验为 1..=131072;手改 settings.json 可超出
 /// 该区间(加载期无钳制),此时保持原预算不缩小——见 `truncated_retry_budget_doubles_and_keeps_cap`。
-fn truncated_retry_budget(current: u32) -> u32 {
+/// `pub(super)`:`solo::run_agent_loop` 的收尾重试(TM-EMPTY-1)复用同一预算算法,不另立一份。
+pub(super) fn truncated_retry_budget(current: u32) -> u32 {
     crate::utils::retry::heal_budget_with_floor(
         current,
         RETRY_MAX_TOKENS_CAP,

@@ -444,6 +444,7 @@ impl CustomExecutor {
                     reasoning_tokens: 0,
                     reasoning_chars: 0,
                     tool_calls: Vec::new(),
+                    dropped_tool_calls: 0,
                 };
                 self.svc.record_llm_call(
                     &ctx.task_id,
@@ -633,6 +634,7 @@ impl CustomExecutor {
                             reasoning_tokens: 0,
                             reasoning_chars: 0,
                             tool_calls: Vec::new(),
+                            dropped_tool_calls: 0,
                         },
                     );
                 }
