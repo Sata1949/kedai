@@ -107,7 +107,7 @@ async function saveNow(): Promise<void> {
             />
           </div>
         </div>
-        <div style="display: grid; gap: 6px; justify-items: end">
+        <div style="display: grid; gap: var(--space-1-5); justify-items: end">
           <button type="button" class="sv-btn ghost" :aria-pressed="s.enabled" @click="s.enabled = !s.enabled">
             {{ s.enabled ? '启用中' : '已停用' }}
           </button>

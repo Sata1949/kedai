@@ -168,7 +168,7 @@ onMounted(() => {
             <span class="sv-wb-count">{{ executors.length }} 个</span>
           </div>
 
-          <div v-if="executorsError" class="sv-feedback err" style="margin: 8px 0">{{ executorsError }}</div>
+          <div v-if="executorsError" class="sv-feedback err" style="margin: var(--space-2) 0">{{ executorsError }}</div>
           <div v-else-if="executorsLoading && executors.length === 0" class="sv-note">加载中…</div>
           <div v-else class="exec-layout">
             <!-- 左:执行者列表 -->
@@ -184,10 +184,10 @@ onMounted(() => {
                 :class="{ active: e.id === draft.id }"
                 @click="selectExecutor(e)"
               >
-                <span class="exec-item-name">{{ e.name }}</span>
+                <span class="exec-item-name" :title="e.name">{{ e.name }}</span>
                 <span class="exec-item-desc">{{ e.instruction }}</span>
               </button>
-              <p v-if="executors.length === 0" class="sv-note" style="padding: 8px 4px">
+              <p v-if="executors.length === 0" class="sv-note" style="padding: var(--space-2) var(--space-1)">
                 还没有执行者,点上方「＋ 新建执行者」创建第一个。
               </p>
             </div>
@@ -199,7 +199,7 @@ onMounted(() => {
                 <input v-model="draft.name" type="text" class="sv-input" placeholder="如:审稿员 / 数据分析师" spellcheck="false" />
               </div>
               <div class="sv-inp-row" style="align-items: flex-start">
-                <label class="sv-inp-tag" style="padding-top: 8px">执行者指令</label>
+                <label class="sv-inp-tag" style="padding-top: var(--space-2)">执行者指令</label>
                 <textarea
                   v-model="draft.instruction"
                   rows="10"
@@ -261,8 +261,8 @@ onMounted(() => {
 .exec-layout {
   display: grid;
   grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
-  gap: 12px;
-  margin-top: 8px;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
 }
 @media (max-width: 640px) {
   .exec-layout { grid-template-columns: minmax(0, 1fr); }
@@ -271,11 +271,11 @@ onMounted(() => {
 .exec-list {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
   max-height: 380px;
   overflow-y: auto;
   border: var(--bw-thin) solid var(--sv-line);
-  padding: 4px;
+  padding: var(--space-1);
 }
 
 .exec-item {
@@ -284,7 +284,7 @@ onMounted(() => {
   gap: 2px;
   align-items: flex-start;
   width: 100%;
-  padding: 6px 8px;
+  padding: var(--space-1-5) var(--space-2);
   border: var(--bw-thin) solid transparent;
   background: transparent;
   text-align: left;
@@ -293,7 +293,8 @@ onMounted(() => {
 .exec-item:hover { background: var(--sv-white); border-color: var(--sv-pink); }
 .exec-item.active { background: var(--sv-ink); border-color: var(--sv-ink); color: var(--sv-white); }
 
-.exec-item-name { font-size: 12px; font-weight: 700; }
+/* UIP-10:长名截断(原无截断,长执行者名把卡片顶宽);全文走 title */
+.exec-item-name { font-size: 12px; font-weight: 700; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 指令预览截断成一行:列表只做识别,全文在右侧表单看 */
 .exec-item-desc {
   font-size: 11px;
@@ -303,7 +304,7 @@ onMounted(() => {
   white-space: nowrap;
   max-width: 100%;
 }
-.exec-item.active .exec-item-desc { color: var(--sv-ink-soft); }
+.exec-item.active .exec-item-desc { color: var(--sv-on-ink-soft); }
 
-.exec-form { display: flex; flex-direction: column; gap: 6px; }
+.exec-form { display: flex; flex-direction: column; gap: var(--space-1-5); }
 </style>

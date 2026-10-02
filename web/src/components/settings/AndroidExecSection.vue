@@ -281,23 +281,23 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.sv-audit-list { max-height: 320px; overflow: auto; display: flex; flex-direction: column; gap: 8px; }
+.sv-audit-list { max-height: 320px; overflow: auto; display: flex; flex-direction: column; gap: var(--space-2); }
 .sv-audit-row {
   border: 1px solid var(--sv-line, #d8d8d8);
-  padding: 6px 8px;
+  padding: var(--space-1-5) var(--space-2);
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
   font-size: 12px;
 }
 .sv-audit-row.denied { border-color: var(--sv-red, #c0392b); opacity: 0.85; }
-.sv-audit-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.sv-audit-head { display: flex; align-items: center; gap: var(--space-1-5); flex-wrap: wrap; }
 .sv-audit-cmd {
   display: block;
   white-space: pre-wrap;
   word-break: break-all;
   background: rgba(0, 0, 0, 0.04);
-  padding: 2px 4px;
+  padding: 2px var(--space-1);
 }
 .sv-audit-out { white-space: pre-wrap; word-break: break-all; opacity: 0.8; }
 .sv-audit-err { white-space: pre-wrap; word-break: break-all; color: var(--sv-red, #c0392b); }

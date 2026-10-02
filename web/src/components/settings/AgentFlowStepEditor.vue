@@ -183,7 +183,7 @@ function staleSubFlowOption(): string {
     <div class="sv-inp-row">
       <label class="sv-inp-tag">子流程</label>
       <select
-        class="sv-select flow-select-wide"
+        class="sv-select"
         :value="subFlowId(step) ?? ''"
         title="挂载后本节点把该流程当子图执行,成果即本节点产出;本节点自身的目标/档位/工具/提示词都不参与执行(配置保留)"
         @change="setSubFlowId(step, ($event.target as HTMLSelectElement).value || null)"
@@ -223,7 +223,7 @@ function staleSubFlowOption(): string {
       <div class="sv-inp-row">
         <label class="sv-inp-tag">模型连接</label>
         <select
-          class="sv-select flow-select-wide"
+          class="sv-select"
           :value="stepConnectionId(step) ?? ''"
           title="该步骤用哪一套 API 连接(连接里的模型一并生效);默认连接 = 设置里的默认那条"
           @change="setStepConnectionId(step, ($event.target as HTMLSelectElement).value)"
@@ -257,7 +257,7 @@ function staleSubFlowOption(): string {
       <div class="sv-inp-row">
         <label class="sv-inp-tag">档位</label>
         <select
-          class="sv-select flow-select-wide"
+          class="sv-select"
           :value="stepKind(step)"
           title="严格 = 单次模型调用、不下发任何工具(适合压缩/抽取这类原子步骤);宽松 = 可与工具多轮循环"
           @change="setStepKind(step, ($event.target as HTMLSelectElement).value as StepKind)"
@@ -295,7 +295,7 @@ function staleSubFlowOption(): string {
           <div class="sv-inp-row">
             <label class="sv-inp-tag">工具</label>
             <select
-              class="sv-select flow-select-wide"
+              class="sv-select"
               :value="stepToolMode(step)"
               @change="setStepToolMode(step, ($event.target as HTMLSelectElement).value as StepToolMode)"
             >
@@ -327,7 +327,7 @@ function staleSubFlowOption(): string {
           </p>
           <div class="sv-inp-row">
             <label class="sv-inp-tag">工具策略</label>
-            <select v-model="step.tool_choice" class="sv-select flow-select-wide">
+            <select v-model="step.tool_choice" class="sv-select">
               <option value="auto">auto（模型决定）</option>
               <option value="none">none（禁止调用）</option>
               <option value="required">required（至少调用一个）</option>
@@ -341,7 +341,7 @@ function staleSubFlowOption(): string {
               spellcheck="false"
             />
             <label class="sv-inp-tag">并行调用</label>
-            <select v-model="step.parallel_tool_calls" class="sv-select flow-select-wide">
+            <select v-model="step.parallel_tool_calls" class="sv-select">
               <option :value="null">后端默认</option>
               <option :value="true">允许</option>
               <option :value="false">禁止</option>

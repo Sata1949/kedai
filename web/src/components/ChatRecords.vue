@@ -158,13 +158,13 @@ onMounted(() => {
       </div>
 
       <div class="sv-modal-body">
-        <div v-if="feedback" class="sv-feedback" :class="feedback.kind" style="margin-bottom: 10px">{{ feedback.text }}</div>
+        <div v-if="feedback" class="sv-feedback" :class="feedback.kind" style="margin-bottom: var(--space-2-5)">{{ feedback.text }}</div>
         <p class="sv-note" style="margin-top: 0">
           全部会话列表(按最近活动排序)。选择切换会话、新建当前角色会话、删除会话,或对单个会话导出 / 导入 JSON(导入将替换该会话全部内容)。
         </p>
 
-        <div v-if="loading" class="sv-empty" style="padding: 30px 12px">加载中…</div>
-        <div v-else-if="sessions.length === 0" class="sv-empty" style="padding: 30px 12px">
+        <div v-if="loading" class="sv-empty" style="padding: 30px var(--space-3)">加载中…</div>
+        <div v-else-if="sessions.length === 0" class="sv-empty" style="padding: 30px var(--space-3)">
           <p style="font-size: 12px">暂无会话记录。选择角色后发送第一条消息,或点击「新建」。</p>
         </div>
         <div v-else class="sv-datalist">
@@ -176,7 +176,7 @@ onMounted(() => {
           >
             <div class="min-w-0 flex-1">
               <div class="flex items-center gap-2">
-                <b>{{ s.title }}</b>
+                <b class="truncate min-w-0" :title="s.title">{{ s.title }}</b>
                 <span class="sv-tag">{{ charName(s) }}</span>
                 <span v-if="s.id === currentSessionId" class="sv-tag sv-tag-on">当前</span>
               </div>
@@ -193,7 +193,7 @@ onMounted(() => {
             </div>
           </div>
         </div>
-        <div v-if="importError" class="sv-feedback err" style="margin-top: 10px">{{ importError }}</div>
+        <div v-if="importError" class="sv-feedback err" style="margin-top: var(--space-2-5)">{{ importError }}</div>
         <input ref="importInput" type="file" accept=".json,application/json" class="hidden" @change="onImportFile" />
       </div>
 

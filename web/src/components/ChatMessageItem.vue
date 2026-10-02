@@ -471,9 +471,9 @@ defineExpose({ rootEl });
 .sv-trunc-note {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
-  margin-top: 8px;
-  padding: 6px 10px;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  padding: var(--space-1-5) var(--space-2-5);
   border-left: var(--bw) solid var(--sv-red);
   background: var(--sv-white);
   box-shadow: var(--shadow-card);
@@ -494,8 +494,8 @@ defineExpose({ rootEl });
 .sv-msg-images {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 6px;
+  gap: var(--space-1-5);
+  margin-top: var(--space-1-5);
 }
 .sv-msg-images img {
   display: block;

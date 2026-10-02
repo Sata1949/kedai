@@ -30,6 +30,8 @@
    · 新增组件样式:一律 <style scoped> 或 Tailwind 工具类,**禁止**再写入本文件;
    · 修改存量组件时:顺手把该组件样式从本文件搬进组件 scoped 块;
    · !important 存量以 tools/check-css-discipline.mjs 的门禁计数为准(只降不升),新增样式不得再引入(用更具体选择器解决)。
+   · 文本截断 canon(2026-10-02 UIP-10):组件内用 Tailwind `truncate` + `min-w-0`(flex 行内缺
+     min-w-0 省略号不生效);全局域类用三件套(overflow:hidden + text-overflow:ellipsis + white-space:nowrap)。
    层③ 各节以「===== 标题 =====」注释带划分,搬迁时整节移走并删节标题。
    ============================================================ */
 

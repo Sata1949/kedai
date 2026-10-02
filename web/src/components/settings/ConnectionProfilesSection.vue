@@ -226,7 +226,7 @@ onMounted(() => {
 .sv-conn-card {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-3);
   padding: var(--space-3);
   border: var(--bw-thin) solid var(--sv-line-strong);
   background: var(--sv-white);
@@ -237,7 +237,7 @@ onMounted(() => {
 .sv-conn-def {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-1-5);
 }
 .sv-conn-def input[type='radio'] {
   flex: none;
@@ -258,18 +258,19 @@ onMounted(() => {
 .sv-conn-cap-list {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px 16px;
+  gap: var(--space-1-5) var(--space-4);
   padding-top: 3px;
 }
 .sv-conn-cap {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-1-5);
   font-size: 12px;
   cursor: help;
 }
 .sv-conn-cap.reserved {
-  opacity: 0.62;
+  /* UIP-10:原 opacity .62 连勾选框一起压暗(12px 字 ≈4.0:1);改字色实降,勾选框不再变灰 */
+  color: var(--sv-ink-faint);
 }
 .sv-conn-cap.reserved span {
   border-bottom: 1px dashed var(--sv-line-strong);

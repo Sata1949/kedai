@@ -118,7 +118,7 @@ watch(
       <div class="sv-modal-body">
         <!-- ===== 角色卡内嵌插件 ===== -->
         <div class="sv-field-label"><span class="sv-supreme green" /> 角色卡内嵌插件</div>
-        <p class="sv-note" style="margin: 4px 0 10px">
+        <p class="sv-note" style="margin: var(--space-1) 0 var(--space-2-5)">
           自动检测当前角色卡内嵌的插件(如酒馆助手 SillyTavern-Assistant)。kedai 已内置完整兼容实现,无需安装或启用。
         </p>
 
@@ -165,13 +165,13 @@ watch(
 
         <!-- ===== 自定义工具插件 ===== -->
         <div class="sv-field-label" style="margin-top: 22px"><span class="sv-supreme blue" /> 自定义工具插件</div>
-        <p class="sv-note" style="margin: 4px 0 10px">
+        <p class="sv-note" style="margin: var(--space-1) 0 var(--space-2-5)">
           以 JSON 文件形式存放在 <code>data/plugins/tools/</code> 目录,由后端白名单脚本执行器加载
           (不使用 eval,仅支持字面量/算术/字符串方法/JSON 等安全子集)。导入后即可被 Agent 调用。
         </p>
 
         <!-- 操作区 -->
-        <div class="flex items-center gap-2" style="margin-bottom: 12px">
+        <div class="flex items-center gap-2" style="margin-bottom: var(--space-3)">
           <button class="sv-btn primary sv-btn-sm" @click="fileInput?.click()">导入插件</button>
           <button class="sv-btn ghost sv-btn-sm" :disabled="loading" @click="onReload">
             重载插件
@@ -186,7 +186,7 @@ watch(
           @change="onFilePicked"
         />
 
-        <div v-if="msg" class="sv-feedback" :class="msg.kind === 'err' ? 'err' : msg.kind === 'ok' ? 'ok' : ''" style="margin-bottom: 10px">
+        <div v-if="msg" class="sv-feedback" :class="msg.kind === 'err' ? 'err' : msg.kind === 'ok' ? 'ok' : ''" style="margin-bottom: var(--space-2-5)">
           {{ msg.text }}
         </div>
 
@@ -200,13 +200,13 @@ watch(
               <div class="sv-char-desc">{{ t.description || '无描述' }}</div>
             </div>
           </div>
-          <div v-if="tools.length === 0" class="sv-note" style="padding: 8px 0">
+          <div v-if="tools.length === 0" class="sv-note" style="padding: var(--space-2) 0">
             暂无自定义工具插件(内置 calculator / memory 不在此列表)。
           </div>
         </div>
 
         <!-- 插件文件 -->
-        <div class="sv-field-label" style="margin-top: 16px"><span class="sv-supreme red" /> 插件文件</div>
+        <div class="sv-field-label" style="margin-top: var(--space-4)"><span class="sv-supreme red" /> 插件文件</div>
         <div class="sv-plugin-list">
           <div v-for="f in files" :key="f" class="sv-plugin-item">
             <div class="min-w-0 flex-1">
@@ -214,7 +214,7 @@ watch(
             </div>
             <button class="sv-btn ghost sv-btn-sm" @click="onDelete(f)">删除</button>
           </div>
-          <div v-if="files.length === 0" class="sv-note" style="padding: 8px 0">
+          <div v-if="files.length === 0" class="sv-note" style="padding: var(--space-2) 0">
             目录为空。可导入 JSON 插件,或参考 <code>data/plugins/tools/greeting.json</code> 示例。
           </div>
         </div>

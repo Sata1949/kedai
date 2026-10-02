@@ -1187,24 +1187,26 @@ async function removeTask(task: TaskRecord): Promise<void> {
 .sv-task-approve-exec {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin: 12px 0 0;
+  gap: var(--space-2-5);
+  margin: var(--space-3) 0 0;
 }
 .sv-task-approve-exec .sv-select { flex: 1; min-width: 0; }
-.approve-exec-hint { margin: 6px 0 0; }
+.approve-exec-hint { margin: var(--space-1-5) 0 0; }
 
 /* 工作区行(CODE-1):状态行下方一行;长路径单行省略(完整值在 title 与复制里),
    复制按钮固定宽度不参与压缩。样式纪律同下:只写 scoped、只复用既有令牌。 */
 .sv-task-workspace {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin: 0 0 20px;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-5);
 }
 .sv-task-workspace .sv-btn {
   flex: none;
 }
 .sv-task-workspace-path {
+  flex: 1; /* UIP-10:与「复制」键同行时吃掉余量,长路径走省略号而不顶出按钮 */
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1217,8 +1219,8 @@ async function removeTask(task: TaskRecord): Promise<void> {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 6px;
-  margin: -14px 0 20px;
+  gap: var(--space-1-5);
+  margin: calc(-1 * var(--space-3-5)) 0 var(--space-5);
 }
 
 /* 执行中进度行(2026-09-18):展示最近一条 agent_status 简述,长循环期间可见活性。
@@ -1226,12 +1228,13 @@ async function removeTask(task: TaskRecord): Promise<void> {
 .sv-task-progress-line {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin: 8px 0 0;
+  gap: var(--space-2);
+  margin: var(--space-2) 0 0;
   font-size: 0.85em;
   color: var(--sv-ink-dim);
 }
 .sv-task-progress-text {
+  min-width: 0; /* UIP-10:flex 行内省略号前置条件 */
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1252,13 +1255,13 @@ async function removeTask(task: TaskRecord): Promise<void> {
 /* 改绑流程(B 批 B3):内联入选区。样式纪律(MAINTENANCE D-5)同下:只写 scoped、
    只复用既有 :root 令牌与 .sv-* 基础类(直角体系,不引入圆角)。 */
 .sv-task-flow-bind {
-  margin: 10px 0 18px;
+  margin: var(--space-2-5) 0 18px;
 }
 .sv-task-flow-bind-panel {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 10px 12px;
+  gap: var(--space-1-5);
+  padding: var(--space-2-5) var(--space-3);
   border: var(--bw-thin) solid var(--sv-line-strong);
   background: var(--sv-surface-elevated);
 }
@@ -1273,7 +1276,7 @@ async function removeTask(task: TaskRecord): Promise<void> {
 .sv-task-flow-bind-panel .flow-id-item {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-1-5);
   font-size: 13px;
   cursor: pointer;
 }
@@ -1289,8 +1292,8 @@ async function removeTask(task: TaskRecord): Promise<void> {
 }
 .sv-task-flow-bind-actions {
   display: flex;
-  gap: 8px;
-  margin-top: 4px;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
 }
 
 /* 自定义流程的运行态节点徽标(遗留.md IFW-5):与画布节点卡片的 .flow-tag 同一套

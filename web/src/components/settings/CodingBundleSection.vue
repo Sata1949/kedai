@@ -65,7 +65,7 @@ async function onToggle(next: boolean): Promise<void> {
           <span>任务模式执行者的默认系统提示词改用「编码执行者模板」(先读后写 / 遵循既有风格 / 改完跑验证 / 最小改动)</span>
         </div>
         <label
-          style="display: flex; gap: 6px; align-items: center; cursor: pointer"
+          style="display: flex; gap: var(--space-1-5); align-items: center; cursor: pointer"
           title="开启后任务模式执行者未自定义系统提示词时按编码执行者模板执行;已自定义过则自定义值优先"
         >
           <input

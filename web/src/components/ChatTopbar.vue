@@ -111,7 +111,7 @@ const budgetOver = computed(() => budgetLimit.value > 0 && budgetUsed.value >= b
   <header class="sv-topbar">
     <span class="flex items-center gap-2">
       <span class="sv-supreme blue sm" />
-      <span class="sv-topbar-title">{{ currentCharacterName }}</span>
+      <span class="sv-topbar-title truncate min-w-0" :title="currentCharacterName">{{ currentCharacterName }}</span>
       <span v-if="model" class="sv-topbar-sub">{{ model }}</span>
     </span>
 
@@ -229,3 +229,11 @@ const budgetOver = computed(() => budgetLimit.value > 0 && budgetUsed.value >= b
     <button type="button" class="sv-icon-btn" title="不再提示(仅此角色)" @click="dismissJsAuthHint">✕</button>
   </div>
 </template>
+
+<style scoped>
+/* UIP-10:角色名超长时截断(truncate/min-w-0 负责收窄与省略号,此处给宽度上限),
+   不再把右侧开关组挤出顶栏;全文走 title */
+.sv-topbar-title {
+  max-width: 320px;
+}
+</style>

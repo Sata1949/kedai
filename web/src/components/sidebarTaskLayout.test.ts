@@ -3,10 +3,8 @@
 // 「最隐蔽、一改就悄悄回退」的几条规则。注意 `.css` 的 `?raw` 在本仓返回空串
 // (见 ChatInput.test.ts 顶部注释;2026-10-02 再次实测确认),故 .css 一律走 node:fs 读取。
 import { describe, expect, it } from 'vitest';
-// 本仓库未安装 @types/node(前端源码不需要),测试里用 node: 内置模块须压制类型错误
-// ——与 parser.contract.test.ts / characterScriptSandbox.test.ts 的既有约定一致。
-// 为把压制面收窄到最小,只用 readFileSync 一个内置,路径一律 `new URL(…, import.meta.url)`。
-// @ts-expect-error -- node:fs 缺少类型声明
+// 本仓库未安装 @types/node(前端源码不需要),测试里用 node: 内置模块的类型来自
+// src/test-node-shim.d.ts 的最小声明(2026-10-02 UIP-10 起),不再逐文件写显式压错注释。
 import { readFileSync } from 'node:fs';
 import sidebarSource from './Sidebar.vue?raw';
 
@@ -19,9 +17,9 @@ const mobileCss = readText('../styles/mobile.css');
 
 describe('UIP 批次源码级布局契约', () => {
   it('UIP-1:行内控件不被「下达目标」区全宽规则吃掉(执行者行豁免在)', () => {
-    // 全宽规则本身必须保留(纵向堆叠控件依赖它)
-    expect(taskCss).toContain('.sv-task-new .sv-select { width: 100%; margin-top: 8px; }');
-    expect(taskCss).toContain('.sv-task-new .sv-btn { width: 100%; margin-top: 10px; }');
+    // 全宽规则本身必须保留(纵向堆叠控件依赖它);UIP-10 起间距值走 --space-* 令牌
+    expect(taskCss).toContain('.sv-task-new .sv-select { width: 100%; margin-top: var(--space-2); }');
+    expect(taskCss).toContain('.sv-task-new .sv-btn { width: 100%; margin-top: var(--space-2-5); }');
     // 行内豁免:复位为行内布局,否则按钮 basis=整行把 select 压成只剩箭头的窄块
     expect(taskCss).toMatch(
       /\.sv-task-new \.sv-inp-row \.sv-btn\s*\{\s*width: auto;\s*margin-top: 0;\s*\}/,

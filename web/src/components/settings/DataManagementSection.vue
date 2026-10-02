@@ -61,7 +61,7 @@ const isTaskMode = computed(() => store.appMode === 'task');
           <b>回退快照(undo)</b>
           <span>写工具(写文件/改变量等)执行前自动存档,可在 Agent 面板回退到该次修改前(全局设置,两模式共用)</span>
         </div>
-        <label style="display: flex; gap: 6px; align-items: center; cursor: pointer" title="开启后写工具执行前自动保存快照,Agent 面板工具调用项出现「回退到此处」入口">
+        <label style="display: flex; gap: var(--space-1-5); align-items: center; cursor: pointer" title="开启后写工具执行前自动保存快照,Agent 面板工具调用项出现「回退到此处」入口">
           <input v-model="undoEnabled" type="checkbox" style="flex-shrink: 0" @change="saveUndoEnabled" />
           <span class="sv-note">{{ undoEnabled ? '已开启' : '已关闭' }}</span>
         </label>

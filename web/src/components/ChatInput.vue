@@ -451,7 +451,7 @@ async function onModelChange(e: Event): Promise<void> {
   background-repeat: no-repeat;
   background-position: right 7px center;
   background-size: 10px 10px;
-  padding: 5px 22px 5px 8px;
+  padding: 5px 22px 5px var(--space-2);
   font-size: 12px;
   color: var(--sv-ink);
   cursor: pointer;

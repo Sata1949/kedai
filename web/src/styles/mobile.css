@@ -40,7 +40,7 @@
   .sv-sidebar { width: 220px; }
   .sv-sidebar.wide { width: 258px; }
   .sv-agent-panel.open { width: 300px; }
-  .sv-canvas { padding: 24px clamp(16px, 3vw, 36px); }
+  .sv-canvas { padding: var(--space-6) clamp(16px, 3vw, 36px); }
   .sv-topbar { padding-left: 38px; }
   .sv-session-select { max-width: 200px; }
 }
@@ -96,7 +96,7 @@
     justify-content: center;
     width: 34px;
     height: 34px;
-    margin-left: 8px;
+    margin-left: var(--space-2);
     flex: none;
     border: var(--bw-thin) solid var(--sv-ink);
     background: var(--sv-white);
@@ -180,19 +180,19 @@
 
   /* --- 顶栏:压缩内边距,右侧控件横向可滚 --- */
   .sv-topbar {
-    padding: 8px 12px 8px 34px;
-    gap: 8px;
+    padding: var(--space-2) var(--space-3) var(--space-2) 34px;
+    gap: var(--space-2);
   }
   .sv-topbar-title { font-size: 12px; }
   /* 型号名与「会话」标签在手机上让位给可操作控件 */
   .sv-topbar-sub { display: none; }
   .sv-topbar-right {
-    gap: 8px;
+    gap: var(--space-2);
     overflow-x: auto;
     scrollbar-width: none;
   }
   .sv-topbar-right::-webkit-scrollbar { display: none; }
-  .sv-session-select { max-width: 46vw; padding: 6px 8px; }
+  .sv-session-select { max-width: 46vw; padding: var(--space-1-5) var(--space-2); }
   /* Token 统计已由侧栏抽屉承载,顶栏重复项隐藏 */
   .sv-token-inline { display: none; }
 
@@ -201,27 +201,27 @@
   .sv-topbar-agent { display: none; }
 
   /* --- 聊天画布与输入区 --- */
-  .sv-canvas { padding: 16px 12px; }
-  .sv-inputbar { padding: 8px 12px 10px; }
-  .sv-inputbox { gap: 8px; }
+  .sv-canvas { padding: var(--space-4) var(--space-3); }
+  .sv-inputbar { padding: var(--space-2) var(--space-3) var(--space-2-5); }
+  .sv-inputbox { gap: var(--space-2); }
   /* 16px 是 Android/iOS WebView 免「聚焦自动放大」的下限 */
-  .sv-inputbox textarea { font-size: 16px; min-height: 44px; padding: 10px 12px; }
+  .sv-inputbox textarea { font-size: 16px; min-height: 44px; padding: var(--space-2-5) var(--space-3); }
   /* 工具行:桌面为多行换行,手机上改成单行横向滚动。
      原先 4 组控件折成 3 行占约 200px,挤压消息区;横滑后只占一行。 */
   .sv-input-toolbar {
     flex-wrap: nowrap;
     overflow-x: auto;
     scrollbar-width: none;
-    gap: 8px;
-    padding: 8px 12px;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
   }
   .sv-input-toolbar::-webkit-scrollbar { display: none; }
   .sv-input-toolbar > * { flex: 0 0 auto; }
   /* CTX 提示占宽且非操作项,手机上让位(侧栏抽屉内已有完整 token 统计) */
   .sv-input-toolbar .sv-hint { display: none; }
-  .sv-mode button { padding: 6px 9px; font-size: 11px; }
+  .sv-mode button { padding: var(--space-1-5) 9px; font-size: 11px; }
   /* .sv-model-select 的窄屏限宽随该类一起搬进 ChatInput.vue 的 scoped 块(2026-09-27 UIFIX-2) */
-  .sv-btn-attach { padding: 6px 10px; font-size: 11.5px; }
+  .sv-btn-attach { padding: var(--space-1-5) var(--space-2-5); font-size: 11.5px; }
   /* 音频入口已移到下方导航栏,隐藏悬浮钮避免压住工具行右端 */
   .sv-audio-toggle { display: none; }
   /* 音频面板改为底部整宽浮层(导航栏之上) */
@@ -275,8 +275,8 @@
     flex-shrink: 0;
     display: flex;
     flex-wrap: wrap;
-    gap: 6px;
-    padding: 10px;
+    gap: var(--space-1-5);
+    padding: var(--space-2-5);
     max-height: none;
     border-right: none;
     border-bottom: var(--bw) solid var(--sv-ink);
@@ -286,7 +286,7 @@
     flex: 0 0 auto;
     width: auto;
     margin-bottom: 0;
-    padding: 8px 12px;
+    padding: var(--space-2) var(--space-3);
     white-space: nowrap;
   }
   /* tab 内的序号/色点在窄条上冗余,隐藏以省宽度 */
@@ -300,7 +300,7 @@
   .sv-hub-body .sv-hub-nav .hub-sub {
     flex-basis: 100%;
     flex-direction: row;
-    gap: 6px;
+    gap: var(--space-1-5);
     margin: 2px 0 0;
     padding-left: 0;
     border-left: none;
@@ -312,7 +312,7 @@
     flex: 0 0 auto;
     width: auto;
     white-space: nowrap;
-    padding: 6px 10px;
+    padding: var(--space-1-5) var(--space-2-5);
   }
   /* 版本/构建指纹块在窄屏占两行且非操作项,隐藏(桌面仍可见) */
   .sv-hub-nav > div:not(.hub-sub) { display: none; }
@@ -328,7 +328,7 @@
      width:110px 同样被 basis:0% 覆盖而失效。
      改为:标签与控件同一行(控件吃满剩余宽),说明文字独占下一行。
      min-width:60px 是关键——它让「流程名称+说明」这类同行双控件自动折成两行,无需改模板。 */
-  .sv-inp-row { flex-wrap: wrap; row-gap: 6px; align-items: center; }
+  .sv-inp-row { flex-wrap: wrap; row-gap: var(--space-1-5); align-items: center; }
   .sv-inp-row > .sv-inp-tag { flex: 0 0 auto; }
   .sv-inp-row > .sv-input,
   .sv-inp-row > .sv-select {
@@ -348,7 +348,7 @@
   .sv-inp-row > .flow-lib-actions {
     flex: 1 1 100%;
     display: flex;
-    gap: 6px;
+    gap: var(--space-1-5);
     justify-content: flex-end;
   }
   /* 「流程名称 / 说明」每组各自成行(否则「说明」标签孤立在上一行末尾) */
@@ -357,7 +357,7 @@
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    row-gap: 6px;
+    row-gap: var(--space-1-5);
   }
   .flow-meta-pair > .sv-inp-tag { flex: 0 0 auto; padding-top: 0; }
   .flow-meta-pair > .sv-input {
@@ -372,7 +372,7 @@
      .sv-hub-content 的 overflow-y:auto 使另一轴计算为 auto → 横向滚动,最右列
      ✕ 被推出视口;grid 轨道缩到 min-content → select 只剩箭头、无 nowrap 的中文
      按钮缩成 1 字宽竖排(「生成」竖排)。 */
-  .flow-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .flow-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1-5); }
   .flow-row > .floor-grip { flex: 0 0 auto; }
   /* 步骤名称 basis 取 120px:实测 412px 视口下容器内宽约 306px,这样「把手+开关+
      名称+动作下拉」正好落在第一行(名称伸展到约 145px),「生成/不生成」与操作按钮
@@ -387,7 +387,7 @@
   .flow-edit { padding-left: 0; } /* 窄屏不再缩进,省出宽度给控件 */
 
   /* --- 提示词楼层行:同病同治(PromptManager / PromptInjectSection 共用 7 列 grid) --- */
-  .floor-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .floor-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1-5); }
   .floor-row > .floor-grip { flex: 0 0 auto; }
   .floor-row > .floor-name { flex: 1 1 120px; min-width: 0; }
   .floor-row > .floor-select { flex: 0 0 auto; min-width: 84px; }
@@ -406,7 +406,7 @@
   .sv-msg-action {
     min-height: 44px;
   }
-  .sv-msg-actions { gap: 14px; }
+  .sv-msg-actions { gap: var(--space-3-5); }
 
   /* 滑块:加大拇指命中区便于手指拖动(音频音量/生成参数)。
      选择器需带 .sv-range 才压得住原有样式(否则被更高优先级的原规则盖过)。 */
@@ -418,9 +418,9 @@
 
   /* --- 任务模式:空态与卡片的最小宽度在窄屏放宽,避免横向溢出 --- */
   .sv-task-empty { min-width: 0; }
-  .sv-taskboard { padding: 12px; }
+  .sv-taskboard { padding: var(--space-3); }
   /* 任务详情内的操作按钮行改纵向堆叠,避免按钮被挤出视口 */
-  .sv-task-head { flex-direction: column; align-items: flex-start; gap: 8px; }
+  .sv-task-head { flex-direction: column; align-items: flex-start; gap: var(--space-2); }
   .sv-task-head-actions { flex-wrap: wrap; }
   /* UIP-4:手机上任务中部维持「抽屉整滚 + 列表内滚」既有形态——侧栏本身即滚动抽屉,
      中部再开内滚动会形成嵌套滚动(内层先滚、页脚常驻不可达);还原列表内部滚动。 */

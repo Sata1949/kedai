@@ -65,13 +65,13 @@ const entryRows = computed(() =>
 <template>
   <div class="sv-field">
     <div class="sv-field-label"><span class="sv-supreme orange" /> 缓存健康</div>
-    <p class="sv-note" style="margin: 0 0 8px; line-height: 1.8">
+    <p class="sv-note" style="margin: 0 0 var(--space-2); line-height: 1.8">
       近 N 轮请求的 token 加权缓存命中率、费用估算与上下文水位(DeepSeek 等提供商的
       prompt_cache 字段口径;命中率按 token 加权,非按请求条数)。
     </p>
 
     <!-- 窗口切换 + 刷新 -->
-    <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 8px">
+    <div style="display: flex; gap: var(--space-2); align-items: center; margin-bottom: var(--space-2)">
       <select
         v-model.number="windowSize"
         class="sv-select"
@@ -88,14 +88,14 @@ const entryRows = computed(() =>
 
     <div v-if="error" class="sv-feedback err">{{ error }}</div>
 
-    <div v-if="data" class="sv-stack" style="gap: 6px">
+    <div v-if="data" class="sv-stack" style="gap: var(--space-1-5)">
       <!-- 加权命中率与 token 汇总 -->
-      <div class="sv-data-row" style="display: flex; gap: 12px; align-items: center">
+      <div class="sv-data-row" style="display: flex; gap: var(--space-3); align-items: center">
         <b style="font-size: 12px; width: 120px">加权命中率</b>
         <span v-if="data.totals.hit_rate !== null" class="sv-tag">{{ hitRateText }}</span>
         <span v-else class="sv-script-meta" style="font-size: 11px">{{ hitRateText }}</span>
       </div>
-      <div class="sv-data-row" style="display: flex; gap: 12px; align-items: center">
+      <div class="sv-data-row" style="display: flex; gap: var(--space-3); align-items: center">
         <b style="font-size: 12px; width: 120px">窗口 token</b>
         <span class="sv-script-meta" style="font-size: 12px">
           命中 {{ data.totals.total_hit }} · 未命中 {{ data.totals.total_miss }} · 输出 {{ data.totals.total_completion }}
@@ -115,7 +115,7 @@ const entryRows = computed(() =>
       </div>
 
       <!-- 费用估算(后端已按 0.27/2/8 元每百万算好) -->
-      <div class="sv-data-row" style="display: flex; gap: 12px; align-items: center">
+      <div class="sv-data-row" style="display: flex; gap: var(--space-3); align-items: center">
         <b style="font-size: 12px; width: 120px">费用估算</b>
         <span class="sv-script-meta" style="font-size: 12px">
           窗口花费 {{ formatCny(data.cost) }} · 缓存节省 {{ formatCny(data.saved) }}
@@ -135,7 +135,7 @@ const entryRows = computed(() =>
             {{ step }}
           </div>
         </div>
-        <p class="sv-script-meta" style="font-size: 11px; margin: 4px 0 0">
+        <p class="sv-script-meta" style="font-size: 11px; margin: var(--space-1) 0 0">
           输入 {{ data.watermark.input_tokens }} / {{ data.watermark.max_context_tokens }} token
           <template v-if="ratioText">({{ ratioText }})</template>
           · {{ gapText }}
@@ -176,7 +176,7 @@ const entryRows = computed(() =>
   align-items: flex-end;
   gap: 2px;
   height: 48px;
-  padding: 2px 4px;
+  padding: 2px var(--space-1);
   border: 1px solid var(--sv-line);
   overflow: hidden;
 }
@@ -193,7 +193,7 @@ const entryRows = computed(() =>
 /* 四级水位横条:soft/snip/compact/force 各占一段,达标段点亮为档位色 */
 .cache-wm-track {
   display: flex;
-  gap: 4px;
+  gap: var(--space-1);
 }
 .cache-wm-step {
   flex: 1 1 0;
@@ -226,7 +226,7 @@ const entryRows = computed(() =>
 
 /* 明细表:四列等宽栅格(时间/命中/未命中/命中率) */
 .cache-entry-table {
-  margin-top: 6px;
+  margin-top: var(--space-1-5);
   font-size: 11px;
   font-family: var(--font-mono);
 }
@@ -234,8 +234,8 @@ const entryRows = computed(() =>
 .cache-entry-row {
   display: grid;
   grid-template-columns: 1.6fr 1fr 1fr 1fr;
-  gap: 4px;
-  padding: 2px 4px;
+  gap: var(--space-1);
+  padding: 2px var(--space-1);
 }
 .cache-entry-head {
   color: var(--sv-ink-faint);

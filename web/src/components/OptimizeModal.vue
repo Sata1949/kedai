@@ -148,15 +148,15 @@ const close = (): void => {
         <!-- 提示词检查 -->
         <div class="sv-field">
           <div class="sv-field-label"><span class="sv-supreme blue" /> 提示词检查</div>
-          <p class="sv-note" style="margin: 0 0 8px; line-height: 1.8">
+          <p class="sv-note" style="margin: 0 0 var(--space-2); line-height: 1.8">
             按 source / role / layer / order 展示最终提示词(历史已脱敏,不返回聊天正文或
             API Key);每层附 token 估算。
           </p>
           <button class="sv-btn ghost sv-btn-sm" :disabled="previewLoading || tokenCounting" @click="refreshPreview">
             {{ previewLoading ? '加载中…' : tokenCounting ? '估算中…' : '刷新最终提示词预览' }}
           </button>
-          <div v-if="previewError" class="sv-feedback err" style="margin-top: 6px">{{ previewError }}</div>
-          <div v-if="promptPreview" class="sv-stack" style="margin-top: 10px">
+          <div v-if="previewError" class="sv-feedback err" style="margin-top: var(--space-1-5)">{{ previewError }}</div>
+          <div v-if="promptPreview" class="sv-stack" style="margin-top: var(--space-2-5)">
             <div v-for="(layer, i) in promptPreview.layers" :key="`${layer.order}-${layer.source}`" class="sv-data-row">
               <div class="info">
                 <div class="flex items-center gap-2">
@@ -175,15 +175,15 @@ const close = (): void => {
         <!-- 一键推荐设置 -->
         <div class="sv-field">
           <div class="sv-field-label"><span class="sv-supreme yellow" /> 一键推荐设置</div>
-          <p class="sv-note" style="margin: 0 0 8px; line-height: 1.8">
+          <p class="sv-note" style="margin: 0 0 var(--space-2); line-height: 1.8">
             勾选后「一键套用」:仅应用勾选项(不自动改其它配置),走既有串行保存队列。
           </p>
-          <div class="sv-stack" style="gap: 6px">
+          <div class="sv-stack" style="gap: var(--space-1-5)">
             <label
               v-for="s in RECOMMENDED_SETTINGS"
               :key="s.key"
               class="sv-data-row"
-              style="display: flex; gap: 8px; align-items: flex-start; justify-content: flex-start; cursor: pointer"
+              style="display: flex; gap: var(--space-2); align-items: flex-start; justify-content: flex-start; cursor: pointer"
             >
               <input v-model="checked[s.key]" type="checkbox" style="margin-top: 3px; flex-shrink: 0" />
               <div style="flex: 1; min-width: 0">
@@ -197,26 +197,26 @@ const close = (): void => {
               {{ applying ? '应用成功…' : `一键套用(${selectedSettings.length} 项)` }}
             </button>
           </div>
-          <div v-if="applyMsg" class="sv-feedback" :class="applyMsg.kind" style="margin-top: 6px">{{ applyMsg.text }}</div>
+          <div v-if="applyMsg" class="sv-feedback" :class="applyMsg.kind" style="margin-top: var(--space-1-5)">{{ applyMsg.text }}</div>
         </div>
 
         <!-- 上下文健康度 -->
         <div class="sv-field">
           <div class="sv-field-label"><span class="sv-supreme green" /> 上下文健康度</div>
-          <p class="sv-note" style="margin: 0 0 8px; line-height: 1.8">
+          <p class="sv-note" style="margin: 0 0 var(--space-2); line-height: 1.8">
             缓存命中率 = 缓存命中 token ÷ prompt token(DeepSeek 等提供商);无缓存字段时不显示。
           </p>
-          <div class="sv-stack" style="gap: 6px">
-            <div class="sv-data-row" style="display: flex; gap: 12px; align-items: center">
+          <div class="sv-stack" style="gap: var(--space-1-5)">
+            <div class="sv-data-row" style="display: flex; gap: var(--space-3); align-items: center">
               <b style="font-size: 12px; width: 120px">缓存命中率</b>
               <span v-if="hitRate !== null" class="sv-tag">{{ hitRate }}%</span>
               <span v-else class="sv-script-meta" style="font-size: 11px">暂无数据</span>
             </div>
-            <div v-for="r in usageRows" :key="r.label" class="sv-data-row" style="display: flex; gap: 12px; align-items: center">
+            <div v-for="r in usageRows" :key="r.label" class="sv-data-row" style="display: flex; gap: var(--space-3); align-items: center">
               <b style="font-size: 12px; width: 120px">{{ r.label }}</b>
               <span class="sv-script-meta" style="font-size: 12px">{{ r.value }}</span>
             </div>
-            <div v-if="usageRows.length === 0" class="sv-empty" style="padding: 14px 0 4px">
+            <div v-if="usageRows.length === 0" class="sv-empty" style="padding: var(--space-3-5) 0 var(--space-1)">
               <div class="sv-empty-geo mb8">
                 <span class="sq black" />
                 <span class="sq pink" />
@@ -238,7 +238,7 @@ const close = (): void => {
         <!-- 上下文压缩 -->
         <div class="sv-field">
           <div class="sv-field-label"><span class="sv-supreme purple" /> 上下文压缩</div>
-          <p class="sv-note" style="margin: 0 0 8px; line-height: 1.8">
+          <p class="sv-note" style="margin: 0 0 var(--space-2); line-height: 1.8">
             把较早对话压成一条摘要注入给模型,原文不删除、可随时恢复。当前占比
             <b v-if="compactionNeed.ratio !== null" class="sv-tag">{{ Math.round(compactionNeed.ratio * 100) }}%</b>
             <span v-else>暂无数据</span>
@@ -252,7 +252,7 @@ const close = (): void => {
               恢复完整历史
             </button>
           </div>
-          <div v-if="compactMsg" class="sv-feedback" :class="compactMsg.kind" style="margin-top: 6px">{{ compactMsg.text }}</div>
+          <div v-if="compactMsg" class="sv-feedback" :class="compactMsg.kind" style="margin-top: var(--space-1-5)">{{ compactMsg.text }}</div>
         </div>
       </div>
 

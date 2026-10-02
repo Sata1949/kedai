@@ -12,9 +12,9 @@
 import { describe, it, expect } from 'vitest';
 import { parseUpdateVariable } from './parser';
 
-// 本仓库未安装 @types/node(前端源码不需要),测试里用 node: 内置模块须逐行压制类型错误
-// ——与 characterScriptSandbox.test.ts / sandbox/*.test.ts 处理 node:vm 的既有约定一致。
-// @ts-expect-error -- node:fs 缺少类型声明
+// 本仓库未安装 @types/node(前端源码不需要),测试里用 node: 内置模块的类型来自
+// src/test-node-shim.d.ts 的最小声明(2026-10-02 UIP-10 起,node:fs 不再压错),
+// node:url / node:path 沿既有逐行压制约定。
 import { readFileSync } from 'node:fs';
 // @ts-expect-error -- node:url 缺少类型声明
 import { fileURLToPath } from 'node:url';

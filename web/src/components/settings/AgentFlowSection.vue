@@ -104,7 +104,7 @@ onMounted(async () => {
         <label class="sv-inp-tag">当前流程</label>
         <select
           v-model="flowId"
-          class="sv-select flow-select-wide"
+          class="sv-select"
           :disabled="!flowLibFlows.length"
           @change="onFlowSelect"
         >

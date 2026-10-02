@@ -404,14 +404,14 @@ function finish(): void {
 .ob-body {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-2-5);
 }
 .ob-step-label {
   font-size: var(--text-xs);
   letter-spacing: 0.08em;
   color: var(--sv-ink-dim);
   display: flex;
-  gap: 10px;
+  gap: var(--space-2-5);
   align-items: center;
 }
 .ob-step-nav {
@@ -445,14 +445,14 @@ function finish(): void {
 .ob-opts {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-2-5);
 }
 .ob-opt {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
   width: 100%;
-  padding: 12px 14px;
+  padding: var(--space-3) var(--space-3-5);
   text-align: left;
   cursor: pointer;
   background: var(--sv-white);
@@ -481,11 +481,11 @@ function finish(): void {
 }
 .ob-goto {
   align-self: flex-start;
-  margin-top: 4px;
+  margin-top: var(--space-1);
 }
 .ob-foot {
   align-items: center;
-  gap: 10px;
+  gap: var(--space-2-5);
 }
 .ob-foot .ob-foot-hint {
   margin-right: auto;
@@ -500,9 +500,9 @@ function finish(): void {
   z-index: var(--z-tour);
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-2-5);
   max-width: min(560px, calc(100vw - 40px));
-  padding: 10px 12px;
+  padding: var(--space-2-5) var(--space-3);
   background: var(--sv-surface-elevated);
   border: var(--bw-heavy) solid var(--sv-ink);
   box-shadow: var(--shadow-modal);

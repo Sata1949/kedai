@@ -56,7 +56,7 @@ async function onToggle(next: boolean): Promise<void> {
           <span>截图工具可读取屏幕内容(全屏 / 指定显示器 / 区域 / 窗口);图像交给模型查看</span>
         </div>
         <label
-          style="display: flex; gap: 6px; align-items: center; cursor: pointer"
+          style="display: flex; gap: var(--space-1-5); align-items: center; cursor: pointer"
           title="开启后模型可在对话/任务中调用截图工具;截图内容会发往「连接配置」里的模型端点,请确认端点可信"
         >
           <input

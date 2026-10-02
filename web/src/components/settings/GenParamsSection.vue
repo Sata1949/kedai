@@ -326,7 +326,7 @@ const isTaskMode = computed(() => store.appMode === 'task');
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">记忆蒸馏</label>
-        <label style="display: flex; gap: 6px; align-items: center; cursor: pointer" title="开启后允许在优化面板把当前会话蒸馏为角色跨会话记忆">
+        <label style="display: flex; gap: var(--space-1-5); align-items: center; cursor: pointer" title="开启后允许在优化面板把当前会话蒸馏为角色跨会话记忆">
           <input v-model="memoryDistillEnabled" type="checkbox" style="flex-shrink: 0" />
           <span class="sv-note">开启跨会话记忆蒸馏(优化面板 → 记忆库)</span>
         </label>

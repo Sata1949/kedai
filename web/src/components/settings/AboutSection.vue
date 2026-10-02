@@ -159,7 +159,7 @@ const changelog: string[] = [
 .about-block .info {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-1-5);
   line-height: 1.55;
 }
 .about-block .info b {
@@ -168,7 +168,7 @@ const changelog: string[] = [
 /* 更新内容每行带序号:序号固定宽度对齐,正文可换行 */
 .about-line {
   display: flex;
-  gap: 6px;
+  gap: var(--space-1-5);
 }
 .about-num {
   flex: none;

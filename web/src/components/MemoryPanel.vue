@@ -57,14 +57,14 @@ onServerPrefetch(load);
 <template>
   <div class="sv-field">
     <div class="sv-field-label"><span class="sv-supreme pink-deep" /> 记忆库</div>
-    <p class="sv-note" style="margin: 0 0 8px; line-height: 1.8">
+    <p class="sv-note" style="margin: 0 0 var(--space-2); line-height: 1.8">
       当前角色的跨会话记忆:由会话蒸馏、工具写入或手动补录;勾选「注入」的条目按
       使用热度注入提示词(条数上限见 设置 → 生成参数)。置顶条目优先注入。
     </p>
 
     <template v-if="characterId">
       <!-- 蒸馏 + 刷新 -->
-      <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 8px">
+      <div style="display: flex; gap: var(--space-2); align-items: center; margin-bottom: var(--space-2)">
         <button
           class="sv-btn primary sv-btn-sm"
           :disabled="distilling || !sessionId"
@@ -77,10 +77,10 @@ onServerPrefetch(load);
           {{ loading ? '加载中…' : '刷新' }}
         </button>
       </div>
-      <div v-if="distillMsg" class="sv-feedback" :class="distillMsg.kind" style="margin-bottom: 8px">
+      <div v-if="distillMsg" class="sv-feedback" :class="distillMsg.kind" style="margin-bottom: var(--space-2)">
         {{ distillMsg.text }}
       </div>
-      <div v-if="error" class="sv-feedback err" style="margin-bottom: 8px">{{ error }}</div>
+      <div v-if="error" class="sv-feedback err" style="margin-bottom: var(--space-2)">{{ error }}</div>
 
       <!-- 搜索 + kind 筛选 + 清理已归档 -->
       <div class="memory-toolbar">
@@ -117,7 +117,7 @@ onServerPrefetch(load);
       </div>
 
       <!-- 手动补录 -->
-      <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 8px">
+      <div style="display: flex; gap: var(--space-2); align-items: center; margin-bottom: var(--space-2)">
         <input
           v-model="newContent"
           class="sv-input"
@@ -129,7 +129,7 @@ onServerPrefetch(load);
           {{ adding ? '添加中…' : '添加' }}
         </button>
       </div>
-      <div v-if="actionMsg" class="sv-feedback" :class="actionMsg.kind" style="margin-bottom: 8px">
+      <div v-if="actionMsg" class="sv-feedback" :class="actionMsg.kind" style="margin-bottom: var(--space-2)">
         {{ actionMsg.text }}
       </div>
 
@@ -197,21 +197,21 @@ onServerPrefetch(load);
 /* 顶部工具栏:搜索框 + kind 筛选 + 清理已归档(窄屏换行) */
 .memory-toolbar {
   display: flex;
-  gap: 6px;
+  gap: var(--space-1-5);
   align-items: center;
   flex-wrap: wrap;
-  margin-bottom: 8px;
+  margin-bottom: var(--space-2);
 }
 .memory-search {
   flex: 1;
   min-width: 140px;
-  padding: 6px 10px;
+  padding: var(--space-1-5) var(--space-2-5);
   font-size: 12px;
 }
 .memory-kind-select {
   flex: none;
   width: 110px;
-  padding: 6px 8px;
+  padding: var(--space-1-5) var(--space-2);
   font-size: 12px;
 }
 
@@ -219,14 +219,14 @@ onServerPrefetch(load);
 .memory-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-1-5);
 }
 .memory-row {
   border: 1px solid var(--sv-line);
-  padding: 6px 8px;
+  padding: var(--space-1-5) var(--space-2);
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
   /* 2026-09 动效补齐:行进入 + 置顶态切换过渡(原先为突变);
      2026-10-02 UIP-9:入场改走全局唯一 sv-list-in,并补逐项 stagger(原无) */
   animation: sv-list-in var(--dur-normal) var(--ease-out) backwards;
@@ -248,13 +248,13 @@ onServerPrefetch(load);
 }
 .memory-row-head {
   display: flex;
-  gap: 8px;
+  gap: var(--space-2);
   align-items: center;
 }
 .memory-sel {
   margin-left: auto;
   display: flex;
-  gap: 4px;
+  gap: var(--space-1);
   align-items: center;
   font-size: 11px;
   color: var(--sv-ink-dim);
@@ -275,24 +275,27 @@ onServerPrefetch(load);
 }
 .memory-edit {
   display: flex;
-  gap: 6px;
+  gap: var(--space-1-5);
   align-items: center;
 }
 .memory-ops {
   display: flex;
-  gap: 6px;
+  gap: var(--space-1-5);
   align-items: center;
 }
 
-/* kind 标签配色:蓝=蒸馏 / 黄=工具 / 绿=手动;未知中性灰(与 memoryPanel.ts 的 kindClass 对应) */
+/* kind 标签配色:蓝=蒸馏 / 黄=工具 / 绿=手动;未知中性灰(与 memoryPanel.ts 的 kindClass 对应)。
+   2026-10-02 UIP-10 字色按底色分型:深底(蓝/灰)白字;亮底(黄/绿) ink 字
+   ——原白字在黄底仅 1.85:1、绿底 3.30:1,过不了 WCAG AA */
 .kind-tag {
   font-size: 10px;
-  padding: 1px 6px;
-  color: var(--sv-white);
+  padding: 1px var(--space-1-5);
+  color: var(--sv-ink);
   flex-shrink: 0;
 }
 .kind-distilled {
   background: var(--sv-blue);
+  color: var(--sv-white);
 }
 .kind-tool {
   background: var(--sv-yellow);
@@ -302,14 +305,17 @@ onServerPrefetch(load);
 }
 .kind-unknown {
   background: var(--sv-ink-faint);
+  color: var(--sv-white);
 }
 
-/* 置顶标记:深粉描边小标签,与 kind 实心色块区分层级 */
+/* 置顶标记:深粉描边小标签,与 kind 实心色块区分层级。
+   UIP-10:字色 pink-deep→pink-dark 且加白底(3.2→4.5:1;置顶行粉底上亦稳) */
 .memory-pin-tag {
   font-size: 10px;
   padding: 1px 5px;
   border: 1px solid var(--sv-pink-deep);
-  color: var(--sv-pink-deep);
+  color: var(--sv-pink-dark);
+  background: var(--sv-white);
   flex-shrink: 0;
 }
 

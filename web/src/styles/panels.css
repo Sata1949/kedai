@@ -78,7 +78,7 @@
   flex-shrink: 0;
   font-size: 10.5px;
   font-weight: 700;
-  padding: 2px 8px;
+  padding: 2px var(--space-2);
   border: var(--bw-thin) solid var(--sv-red);
   color: var(--sv-red-deep);
   background: var(--sv-white);
@@ -90,16 +90,16 @@
 }
 /* 分区分隔线:构成主义双线(粗网格分隔 + 淡粉回声),替换模板内联 border-top */
 .sv-separator {
-  margin: 16px 0 12px;
-  padding-top: 12px;
+  margin: var(--space-4) 0 var(--space-3);
+  padding-top: var(--space-3);
   border-top: var(--rule-strong);
   box-shadow: 0 4px 0 0 var(--sv-pink);
 }
 /* 窄容器变体(如设置 Hub 左侧导航内) */
-.sv-separator.tight { margin: 10px 4px; padding-top: 10px; }
+.sv-separator.tight { margin: var(--space-2-5) var(--space-1); padding-top: var(--space-2-5); }
 .sv-modal-body { flex: 1; overflow-y: auto; padding: var(--space-5); }
 .sv-modal-foot {
-  padding: 14px 20px;
+  padding: var(--space-3-5) var(--space-5);
   border-top: var(--bw) solid var(--sv-ink);
   display: flex;
   justify-content: flex-end;
@@ -118,7 +118,7 @@
 .sv-field {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-1-5);
   margin-bottom: var(--space-5);
   border: var(--bw) solid var(--sv-ink);
   padding: var(--space-4);
@@ -133,13 +133,13 @@
 .sv-field-label {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   font-size: 12px;
   font-weight: 800;
   letter-spacing: 0.06em;
   color: var(--sv-ink);
-  margin-bottom: 14px;
-  padding-bottom: 10px;
+  margin-bottom: var(--space-3-5);
+  padding-bottom: var(--space-2-5);
   border-bottom: var(--bw-thin) solid var(--sv-line);
 }
 .sv-field-label .sv-supreme { width: 10px; height: 10px; }
@@ -154,10 +154,10 @@
   border-bottom: none;
 }
 
-.sv-stack { display: flex; flex-direction: column; gap: 12px; }
+.sv-stack { display: flex; flex-direction: column; gap: var(--space-3); }
 
 /* 输入行 */
-.sv-inp-row { display: flex; align-items: center; gap: 10px; }
+.sv-inp-row { display: flex; align-items: center; gap: var(--space-2-5); }
 .sv-inp-tag {
   flex-shrink: 0;
   min-width: 72px;
@@ -175,7 +175,7 @@
   width: 8px;
   height: 8px;
   background: var(--sv-pink);
-  margin-right: 6px;
+  margin-right: var(--space-1-5);
   vertical-align: 1px;
 }
 
@@ -187,7 +187,7 @@
   width: 100%;
   border: var(--bw) solid var(--sv-ink);
   background: var(--sv-white);
-  padding: 9px 12px;
+  padding: 9px var(--space-3);
   font-size: 13px;
   font-family: var(--font-body);
   color: var(--sv-ink);
@@ -196,6 +196,14 @@
 .sv-input:focus, .sv-select:focus {
   border-color: var(--sv-pink-deep);
   box-shadow: var(--shadow-pink-strong);
+}
+/* 单行控件显式高度(UIP-10 控件高度档位):与按钮同档 40px、同排天然等高;
+   只限 input/select——textarea 与其他元素共用 .sv-input 类,不得套固定高度 */
+input.sv-input,
+.sv-select {
+  height: var(--control-h);
+  padding-top: 0;
+  padding-bottom: 0;
 }
 .sv-input::placeholder { color: var(--sv-ink-faint); }
 /* 禁用输入/下拉(UIP-3):与按钮禁用态同套表达(落回粉灰面),不用半透明 */
@@ -210,7 +218,7 @@
   display: block;
   width: 100%;
   box-sizing: border-box;
-  padding: 12px 14px;
+  padding: var(--space-3) var(--space-3-5);
   font-family: ui-monospace, Consolas, 'Courier New', monospace;
   font-size: 12px;
   line-height: 1.7;
@@ -222,7 +230,7 @@
   flex: 1;
   border: var(--bw-thin) solid var(--sv-line);
   background: var(--sv-paper);
-  padding: 8px 10px;
+  padding: var(--space-2) var(--space-2-5);
   font-size: 12px;
   font-family: var(--font-body);
 }
@@ -232,10 +240,10 @@
   color: var(--sv-ink-faint);
   letter-spacing: 0.04em;
   text-align: right;
-  margin-top: -4px;
+  margin-top: calc(-1 * var(--space-1));
 }
 
-.sv-btn-row { display: flex; gap: 10px; }
+.sv-btn-row { display: flex; gap: var(--space-2-5); }
 .sv-btn-fill { flex: 1; }
 
 .sv-note {
@@ -255,7 +263,7 @@
   justify-content: space-between;
   font-size: 11px;
   color: var(--sv-ink-soft);
-  margin-bottom: 6px;
+  margin-bottom: var(--space-1-5);
 }
 .sv-range-val {
   font-family: var(--font-display);
@@ -268,18 +276,18 @@
   justify-content: space-between;
   font-size: 10px;
   color: var(--sv-ink-faint);
-  margin-top: 4px;
+  margin-top: var(--space-1);
 }
 .sv-feedback-flex { flex: 1; margin: 0; }
 
-.sv-range-row { display: flex; align-items: center; gap: 12px; }
+.sv-range-row { display: flex; align-items: center; gap: var(--space-3); }
 .sv-range-row output {
   font-family: var(--font-display);
   font-size: 15px;
   min-width: 34px;
   text-align: center;
   border: var(--bw-thin) solid var(--sv-ink);
-  padding: 3px 8px;
+  padding: 3px var(--space-2);
   background: var(--sv-white);
 }
 input[type="range"].sv-range {
@@ -336,7 +344,8 @@ input[type="range"].sv-range::-moz-range-thumb {
 }
 
 .sv-btn {
-  padding: 9px 18px;
+  min-height: var(--control-h); /* UIP-10 控件高度档位(主档 40px;折行内容可自然撑高) */
+  padding: var(--space-1-5) 18px;
   font-size: 13px;
   font-weight: 700;
   cursor: pointer;
@@ -383,8 +392,8 @@ input[type="range"].sv-range::-moz-range-thumb {
   box-shadow: none;
 }
 
-.sv-btn-square { padding: 5px 10px; font-size: 12px; }
-.sv-btn-sm { padding: 6px 12px; font-size: 12px; }
+.sv-btn-square { min-height: var(--control-h-sm); padding: var(--space-1) var(--space-2-5); font-size: 12px; }
+.sv-btn-sm { min-height: var(--control-h-sm); padding: var(--space-1) var(--space-3); font-size: 12px; }
 
 .sv-icon-btn {
   width: 28px;
@@ -404,10 +413,10 @@ input[type="range"].sv-range::-moz-range-thumb {
 .sv-feedback {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   font-size: 12px;
-  padding: 10px 12px;
-  margin-top: 10px;
+  padding: var(--space-2-5) var(--space-3);
+  margin-top: var(--space-2-5);
   border: var(--bw-thin) solid;
   animation: sv-list-in var(--dur-normal) var(--ease-out) backwards;
 }
@@ -420,8 +429,8 @@ input[type="range"].sv-range::-moz-range-thumb {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 10px;
-  padding: 8px 14px;
+  gap: var(--space-2-5);
+  padding: var(--space-2) var(--space-3-5);
   font-size: 12px;
   color: var(--sv-red);
   background: rgba(227, 52, 47, 0.08);
@@ -434,8 +443,8 @@ input[type="range"].sv-range::-moz-range-thumb {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 10px;
-  padding: 7px 14px;
+  gap: var(--space-2-5);
+  padding: 7px var(--space-3-5);
   font-size: 12px;
   color: var(--sv-blue);
   background: rgba(30, 58, 138, 0.06);
@@ -444,13 +453,13 @@ input[type="range"].sv-range::-moz-range-thumb {
 .sv-render-hint-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* 数据管理行 */
-.sv-datalist { display: flex; flex-direction: column; gap: 10px; }
+.sv-datalist { display: flex; flex-direction: column; gap: var(--space-2-5); }
 .sv-data-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 12px 14px;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-3-5);
   border: var(--bw) solid var(--sv-ink);
   background: var(--sv-white);
 }
@@ -466,14 +475,14 @@ input[type="range"].sv-range::-moz-range-thumb {
   font-family: var(--font-body);
 }
 .sv-greet-row .info { min-width: 0; }
-.sv-greet-row .info b { display: flex; align-items: center; gap: 8px; }
+.sv-greet-row .info b { display: flex; align-items: center; gap: var(--space-2); }
 .sv-greet-row .preview {
   display: block;
   white-space: pre-wrap;
   word-break: break-word;
   max-height: 110px;
   overflow-y: auto;
-  margin-top: 4px;
+  margin-top: var(--space-1);
 }
 /* 脚本/会话元信息小字(脚本管理、优化面板、DevTools 共用) */
 .sv-script-meta {
@@ -483,8 +492,8 @@ input[type="range"].sv-range::-moz-range-thumb {
 }
 /* 技能内容预览(技能管理) */
 .sv-skill-preview {
-  margin-top: 6px;
-  padding: 8px 10px;
+  margin-top: var(--space-1-5);
+  padding: var(--space-2) var(--space-2-5);
   border: var(--bw-thin) solid var(--sv-ink);
   background: var(--sv-white);
   font-family: var(--font-mono, ui-monospace, monospace);
@@ -514,15 +523,15 @@ input[type="range"].sv-range::-moz-range-thumb {
   flex-shrink: 0;
   border-right: var(--bw) solid var(--sv-ink);
   background: var(--sv-pink-light);
-  padding: 16px 10px;
+  padding: var(--space-4) var(--space-2-5);
   overflow-y: auto;
 }
 .sv-hub-nav-item {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-2-5);
   width: 100%;
-  padding: 10px 14px;
+  padding: var(--space-2-5) var(--space-3-5);
   border: var(--bw-thin) solid transparent;
   background: transparent;
   font-size: 13px;
@@ -589,8 +598,8 @@ input[type="range"].sv-range::-moz-range-thumb {
 }
 /* 右区当前分区标题(display 字体 + 红黑双色 rule 下缘:3px 印刷黑 + 海报红回声段) */
 .sv-hub-content-title {
-  margin: 0 0 16px;
-  padding-bottom: 12px;
+  margin: 0 0 var(--space-4);
+  padding-bottom: var(--space-3);
   border-bottom: var(--rule-strong);
   box-shadow: 0 5px 0 0 var(--sv-red);
   font-family: var(--font-display);
@@ -603,7 +612,7 @@ input[type="range"].sv-range::-moz-range-thumb {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 16px;
+  padding: var(--space-3-5) var(--space-4);
   border-bottom: var(--bw) solid var(--sv-ink);
   background: var(--sv-ink); /* 黑条头部:与模态统一节奏 */
   color: var(--sv-white);
@@ -615,7 +624,7 @@ input[type="range"].sv-range::-moz-range-thumb {
   letter-spacing: 0.12em;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
 }
 .sv-agent-panel-close {
   background: none;
@@ -644,7 +653,7 @@ input[type="range"].sv-range::-moz-range-thumb {
 }
 .sv-agent-tab-btn {
   flex: 1;
-  padding: 8px 10px;
+  padding: var(--space-2) var(--space-2-5);
   font-size: 11px;
   font-weight: 800;
   letter-spacing: 0.12em;
@@ -686,14 +695,14 @@ input[type="range"].sv-range::-moz-range-thumb {
 .sv-agent-summary {
   border: var(--bw) solid var(--sv-ink);
   background: var(--sv-white);
-  padding: 12px;
+  padding: var(--space-3);
 }
 .sv-agent-summary-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   font-size: 11.5px;
-  padding: 4px 0;
+  padding: var(--space-1) 0;
 }
 .sv-agent-summary-row .label { color: var(--sv-ink-faint); letter-spacing: 0.05em; }
 .sv-agent-summary-row .value { font-weight: 700; color: var(--sv-ink); font-family: var(--font-display); }
@@ -705,7 +714,7 @@ input[type="range"].sv-range::-moz-range-thumb {
   letter-spacing: 0.18em;
   text-transform: uppercase;
   color: var(--sv-ink-faint);
-  margin-bottom: 10px;
+  margin-bottom: var(--space-2-5);
   font-weight: 800;
 }
 
@@ -713,14 +722,14 @@ input[type="range"].sv-range::-moz-range-thumb {
 .sv-calltrace-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 12px;
-  margin-top: 6px;
+  gap: var(--space-1) var(--space-3);
+  margin-top: var(--space-1-5);
   font-size: 11px;
   color: var(--sv-ink-dim);
 }
 /* 摘要展开区:等宽 + 限高滚动(同 sv-tool-panel-card pre 纪律) */
 .sv-calltrace-pre {
-  margin: 6px 0 0;
+  margin: var(--space-1-5) 0 0;
   font-family: ui-monospace, Consolas, monospace;
   font-size: 11px;
   white-space: pre-wrap;
@@ -729,7 +738,7 @@ input[type="range"].sv-range::-moz-range-thumb {
   max-height: 160px;
   overflow-y: auto;
   background: var(--sv-paper);
-  padding: 8px;
+  padding: var(--space-2);
   border: 1px solid var(--sv-line);
 }
 .sv-timeline {
@@ -749,8 +758,8 @@ input[type="range"].sv-range::-moz-range-thumb {
 }
 .sv-timeline-item {
   position: relative;
-  padding-left: 24px;
-  margin-bottom: 12px;
+  padding-left: var(--space-6);
+  margin-bottom: var(--space-3);
   font-size: 12px;
   line-height: 1.5;
 }
@@ -775,9 +784,9 @@ input[type="range"].sv-range::-moz-range-thumb {
 .sv-tool-panel-card {
   border: var(--bw) solid var(--sv-ink);
   background: var(--sv-white);
-  padding: 12px;
+  padding: var(--space-3);
   font-size: 12px;
-  margin-bottom: 10px;
+  margin-bottom: var(--space-2-5);
 }
 .sv-tool-panel-card.running { border-left: 4px solid var(--sv-yellow); }
 .sv-tool-panel-card.authorization_required { border-left: 4px solid var(--sv-red); }
@@ -785,8 +794,8 @@ input[type="range"].sv-range::-moz-range-thumb {
 .sv-tool-images {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 8px;
+  gap: var(--space-1-5);
+  margin-top: var(--space-2);
 }
 .sv-tool-images img {
   display: block;
@@ -803,10 +812,10 @@ input[type="range"].sv-range::-moz-range-thumb {
   color: var(--sv-ink);
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-1-5);
 }
 .sv-tool-panel-card pre {
-  margin: 8px 0 0;
+  margin: var(--space-2) 0 0;
   font-family: ui-monospace, Consolas, monospace;
   font-size: 11px;
   white-space: pre-wrap;
@@ -815,7 +824,7 @@ input[type="range"].sv-range::-moz-range-thumb {
   max-height: 100px;
   overflow-y: auto;
   background: var(--sv-paper);
-  padding: 8px;
+  padding: var(--space-2);
   border: 1px solid var(--sv-line);
 }
 .sv-tool-panel-card .tool-status {
@@ -836,10 +845,10 @@ input[type="range"].sv-range::-moz-range-thumb {
 .sv-tool-panel-card .tool-status.authorization_required { background: var(--sv-red); color: #fff; }
 .sv-tool-panel-card .tool-auth-btns {
   display: flex;
-  gap: 8px;
-  margin-top: 10px;
+  gap: var(--space-2);
+  margin-top: var(--space-2-5);
 }
-.sv-tool-panel-card .tool-auth-btns .sv-btn { font-size: 11px; padding: 6px 12px; }
+.sv-tool-panel-card .tool-auth-btns .sv-btn { min-height: var(--control-h-sm); font-size: 11px; padding: var(--space-1) var(--space-3); }
 
 /* ===== 启动动画 ===== */
 .sv-splash {
@@ -859,7 +868,7 @@ input[type="range"].sv-range::-moz-range-thumb {
 .sv-splash-logo {
   width: 80px;
   height: 80px;
-  margin: 0 auto 20px;
+  margin: 0 auto var(--space-5);
   object-fit: cover;
   animation: sv-splash-logo-pulse var(--dur-pulse-slow) var(--ease-in-out) infinite;
 }

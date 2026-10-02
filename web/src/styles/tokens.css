@@ -17,7 +17,7 @@
   --sv-ink-supreme: #000000;    /* 纯黑:仅至上主义方块本体 */
   --sv-ink-soft: #2b2b2b;
   --sv-ink-dim: #5c5c5c;
-  --sv-ink-faint: #6b6b6b;      /* 次级文字(淡粉画布上对比度 ≈4.7:1,过 WCAG AA 正文线) */
+  --sv-ink-faint: #616161;      /* 次级文字(2026-10-02 UIP-10 由 #6b6b6b 加深:surface 上 4.08→4.7:1,过 WCAG AA 正文线;paper 上 5.5:1) */
   --sv-line: #e9d5db;           /* 粉灰线(与淡粉底协调) */
   --sv-line-strong: #dcc3cb;
 
@@ -121,13 +121,24 @@
   --ease-out: cubic-bezier(0.22, 0.61, 0.36, 1);
   --ease-in-out: ease-in-out;  /* 循环脉冲的对称缓动:时间线节点/呼吸/状态点闪点 */
 
-  /* 间距档位(4/8px 网格;批次 5 第二轮收编高频 padding——仅替换值不变的档位,
-     非倍数裸值(10/14px 等)留待下轮统一归档) */
+  /* 间距档位(4px 步进 + 半步档,对齐 Tailwind 间距刻度;批次 5 第二轮收编等值档位,
+     2026-10-02 UIP-10 补齐 6/10/14 三个高频半步档并全站等值替换。负值写法:calc(-1 * var(--space-x))) */
   --space-1: 4px;
+  --space-1-5: 6px;
   --space-2: 8px;
+  --space-2-5: 10px;
   --space-3: 12px;
+  --space-3-5: 14px;
   --space-4: 16px;
   --space-5: 20px;
   --space-6: 24px;
   --space-8: 32px;
+
+  /* 控件高度档位(2026-10-02 UIP-10):单行控件显式档位,同排天然等高;
+     手机端触摸下限 44px 由 mobile.css 的 min-height 规则兜底(不在此收缩) */
+  --control-h: 40px;      /* 主档:按钮/输入框/下拉/分段控件 */
+  --control-h-sm: 34px;   /* 紧凑档:btn-sm/btn-square/工具卡内小按钮 */
+
+  /* 黑底上的次级文字(2026-10-02 UIP-10):替代「原色 + opacity」写法,保证实色对比度 */
+  --sv-on-ink-soft: rgba(255, 255, 255, 0.72);
 }

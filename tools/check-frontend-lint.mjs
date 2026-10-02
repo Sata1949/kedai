@@ -47,6 +47,11 @@ const VERBOSE = process.argv.includes('--verbose');
  *   (vitest `css:false`,2026-10-02 再次实测确认),只能用 `node:fs`——与上一条同一类
  *   必要且合规的新增;压制面已收窄到最小(只 readFileSync 一个内置,路径用
  *   `new URL(…, import.meta.url)`,不再引 node:url/node:path)。
+ * `@ts-expect-error` 由 7 下调至 5 的理由(2026-10-02,UIP-10 批):
+ *   上一条留的口子已按「将来补装 @types/node 就删」的预案兑现——本批新增
+ *   `web/src/test-node-shim.d.ts`,只给 `node:fs` 的 readFileSync 一条最小声明;
+ *   UIP 批(sidebarTaskLayout)与新批(motion/contrast 两契约测试)共 4 处压制随之删除,
+ *   基线 7→5(余下 5 处为 node:vm ×3 与 node:url/path ×2,仍走既有逐行压制约定)。
  */
 const BASELINE = {
   any: 0,
@@ -55,7 +60,7 @@ const BASELINE = {
   // 新增 2 处(测试里的 fetch/Blob 捕获桩),净 −1。ratchet 只降不升,顺势收紧。
   // TM-SET-2(2026-10-01)再下调 69 → 68:退役 R3a 测试删掉 1 处 `undefined as unknown as`。
   asUnknownAs: 68,
-  tsExpectError: 7,
+  tsExpectError: 5,
   nonNull: 33,
 };
 

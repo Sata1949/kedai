@@ -287,7 +287,7 @@ async function loadWorldBooksChecked(): Promise<void> {
         <!-- 自动分配机制自检 -->
         <div class="sv-field">
           <div class="sv-field-label"><span class="sv-supreme green" /> 自动分配机制</div>
-          <p class="sv-note" style="margin: 0 0 8px; line-height: 1.8">
+          <p class="sv-note" style="margin: 0 0 var(--space-2); line-height: 1.8">
             条目「注入角色」选<code>自动</code>时按 常驻→系统提示词、激发→用户 自动分配;
             上传时自动转换关键词拆分、常态/激发判定与属性默认自动。可一键自检链路是否可用。
           </p>
@@ -295,9 +295,9 @@ async function loadWorldBooksChecked(): Promise<void> {
             <button class="sv-btn ghost sv-btn-sm" :disabled="autoCheck.running" @click="runAutoAssignCheck">
               {{ autoCheck.running ? '检查中…' : '检查自动分配机制' }}
             </button>
-            <div v-if="autoCheck.error" class="sv-feedback err" style="margin-top: 6px">{{ autoCheck.error }}</div>
+            <div v-if="autoCheck.error" class="sv-feedback err" style="margin-top: var(--space-1-5)">{{ autoCheck.error }}</div>
             <div v-else-if="autoCheck.result" class="sv-wb-check">
-              <div class="sv-feedback" :class="autoCheck.result.ok ? 'ok' : 'err'" style="margin: 6px 0">{{ autoCheck.result.summary }}</div>
+              <div class="sv-feedback" :class="autoCheck.result.ok ? 'ok' : 'err'" style="margin: var(--space-1-5) 0">{{ autoCheck.result.summary }}</div>
               <div v-for="c in autoCheck.result.checks" :key="c.name" class="sv-wb-check-item">
                 <span class="sv-tag" :class="c.status === 'ok' ? 'sv-tag-on' : ''">{{ c.status === 'ok' ? '正常' : '异常' }}</span>
                 <span class="sv-wb-check-name">{{ c.label }}</span>
@@ -314,7 +314,7 @@ async function loadWorldBooksChecked(): Promise<void> {
             <span class="sv-wb-count">{{ currentCharacter?.chara_name ?? '未选择角色' }}</span>
           </div>
           <p v-if="currentCharacterId && !charEntriesLoaded" class="sv-note">加载中…</p>
-          <div v-else-if="currentCharacterId && charMsg?.kind === 'err'" class="sv-empty" style="padding: 16px 12px">
+          <div v-else-if="currentCharacterId && charMsg?.kind === 'err'" class="sv-empty" style="padding: var(--space-4) var(--space-3)">
             <div class="sv-empty-geo mb8">
               <span class="sq black" />
               <span class="sq pink" />
@@ -323,7 +323,7 @@ async function loadWorldBooksChecked(): Promise<void> {
             </div>
             <p class="sv-note-mini err">{{ charMsg.text }}</p>
           </div>
-          <div v-else-if="currentCharacterId && charEntries.length === 0" class="sv-empty" style="padding: 20px 12px">
+          <div v-else-if="currentCharacterId && charEntries.length === 0" class="sv-empty" style="padding: var(--space-5) var(--space-3)">
             <div class="sv-empty-geo mb8">
               <span class="sq black" />
               <span class="sq pink" />
@@ -333,7 +333,7 @@ async function loadWorldBooksChecked(): Promise<void> {
             <p style="font-size: 12px">该角色卡未内嵌世界书</p>
             <p style="font-size: 11px">在角色卡 JSON 中提供 character_book 后即可在此编辑</p>
           </div>
-          <div v-else-if="!currentCharacterId" class="sv-empty" style="padding: 20px 12px">
+          <div v-else-if="!currentCharacterId" class="sv-empty" style="padding: var(--space-5) var(--space-3)">
             <div class="sv-empty-geo mb8">
               <span class="sq black" />
               <span class="sq pink" />
@@ -462,7 +462,7 @@ async function loadWorldBooksChecked(): Promise<void> {
               {{ busy ? '上传中…' : '选择 JSON 文件上传' }}
             </button>
             <input ref="fileInput" type="file" accept=".json,application/json" class="hidden" @change="onFilePicked" />
-            <p class="sv-note" style="margin-top: 6px">支持 SillyTavern 世界书导出格式(顶层 <code>entries</code> 对象/数组)与角色卡 <code>character_book</code> 结构。</p>
+            <p class="sv-note" style="margin-top: var(--space-1-5)">支持 SillyTavern 世界书导出格式(顶层 <code>entries</code> 对象/数组)与角色卡 <code>character_book</code> 结构。</p>
           </div>
           <div v-if="uploadError" class="sv-feedback err">{{ uploadError }}</div>
           <div v-if="uploadMsg" class="sv-feedback ok">{{ uploadMsg }}</div>
@@ -474,9 +474,9 @@ async function loadWorldBooksChecked(): Promise<void> {
             <span class="sv-supreme yellow" /> 独立世界书列表
             <span class="sv-wb-count">{{ worldBooks.length }} 本</span>
           </div>
-          <div v-if="listLoadError" class="sv-feedback err" style="margin: 8px 0">{{ listLoadError }}</div>
-          <div v-else-if="listOpError" class="sv-feedback err" style="margin: 8px 0">{{ listOpError }}</div>
-          <div v-else-if="worldBooks.length === 0" class="sv-empty" style="padding: 28px 12px">
+          <div v-if="listLoadError" class="sv-feedback err" style="margin: var(--space-2) 0">{{ listLoadError }}</div>
+          <div v-else-if="listOpError" class="sv-feedback err" style="margin: var(--space-2) 0">{{ listOpError }}</div>
+          <div v-else-if="worldBooks.length === 0" class="sv-empty" style="padding: 28px var(--space-3)">
             <div class="sv-empty-geo mb10">
               <span class="sq black" />
               <span class="sq pink" />

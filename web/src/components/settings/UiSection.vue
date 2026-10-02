@@ -77,7 +77,7 @@ const { scriptAuthorizations } = storeToRefs(store);
         <div class="info">
           <b>角色卡 JavaScript 授权</b>
           <span>默认禁用；按角色 ID 与脚本哈希授权，内容变化后自动失效。授权记录仅保存在当前浏览器配置中。</span>
-          <div v-if="scriptAuthorizations.length" style="display: grid; gap: 8px; margin-top: 10px">
+          <div v-if="scriptAuthorizations.length" style="display: grid; gap: var(--space-2); margin-top: var(--space-2-5)">
             <div v-for="grant in scriptAuthorizations" :key="grant.characterId" class="flex items-center gap-2">
               <span>{{ characterLabel(grant.characterId) }} · {{ new Date(grant.authorizedAt).toLocaleString('zh-CN', { hour12: false }) }}</span>
               <button type="button" class="sv-btn ghost sv-btn-sm" @click="confirmRevokeScriptAuthorization(grant.characterId)">撤销</button>

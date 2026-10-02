@@ -130,7 +130,7 @@ watch(appMode, () => void loadPromptPreview());
       </div>
       <p class="sv-note">变量更新/状态栏调用独立于正文:模型留空即共用,温度留空用内置 0.3(0-2,越小越稳)。</p>
       <div class="sv-inp-row" style="align-items: flex-start">
-        <label class="sv-inp-tag" style="padding-top: 8px">反思提示词</label>
+        <label class="sv-inp-tag" style="padding-top: var(--space-2)">反思提示词</label>
         <textarea
           v-model="reflectPrompt"
           rows="3"
@@ -203,7 +203,7 @@ watch(appMode, () => void loadPromptPreview());
           {{ previewLoading ? '加载中...' : '刷新最终提示词预览' }}
         </button>
         <div v-if="previewError" class="sv-feedback err">{{ previewError }}</div>
-        <div v-if="promptPreview" class="sv-stack" style="margin-top: 10px">
+        <div v-if="promptPreview" class="sv-stack" style="margin-top: var(--space-2-5)">
           <div v-for="layer in promptPreview.layers" :key="`${layer.order}-${layer.source}`" class="sv-data-row">
             <div class="info">
               <b>#{{ layer.order }} · L{{ layer.layer }} · {{ layer.role }} · {{ layer.source }}</b>

@@ -116,14 +116,14 @@ onMounted(() => void store.loadSkills());
       </div>
 
       <div class="sv-modal-body">
-        <p class="sv-note" style="margin-bottom: 12px">
+        <p class="sv-note" style="margin-bottom: var(--space-3)">
           提示词技能库:导入 JSON(<code>[{&quot;name&quot;:&quot;…&quot;,&quot;description&quot;:&quot;…&quot;,&quot;content&quot;:&quot;…&quot;}]</code>
           或单对象 / <code>{&quot;skills&quot;:[…]}</code> 包壳)。同名导入会覆盖。Agent 模式的
           <code>read</code> 工具可按名称或关键词读取技能内容。
         </p>
 
         <!-- 操作区 -->
-        <div class="flex items-center gap-2" style="margin-bottom: 12px">
+        <div class="flex items-center gap-2" style="margin-bottom: var(--space-3)">
           <button class="sv-btn primary sv-btn-sm" @click="fileInput?.click()">导入技能</button>
         </div>
         <input
@@ -134,7 +134,7 @@ onMounted(() => void store.loadSkills());
           @change="onFilePicked"
         />
 
-        <div v-if="msg" class="sv-feedback" :class="msg.kind === 'err' ? 'err' : msg.kind === 'ok' ? 'ok' : ''" style="margin-bottom: 10px">
+        <div v-if="msg" class="sv-feedback" :class="msg.kind === 'err' ? 'err' : msg.kind === 'ok' ? 'ok' : ''" style="margin-bottom: var(--space-2-5)">
           {{ msg.text }}
         </div>
 
@@ -195,7 +195,7 @@ onMounted(() => void store.loadSkills());
               </button>
             </div>
           </div>
-          <div v-if="skills.length === 0" class="sv-empty" style="padding: 20px 8px">
+          <div v-if="skills.length === 0" class="sv-empty" style="padding: var(--space-5) var(--space-2)">
             <div class="sv-empty-geo mb8">
               <span class="sq black" />
               <span class="sq pink" />

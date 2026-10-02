@@ -810,7 +810,7 @@ async function removeTask(task: TaskRecord): Promise<void> {
    输入框保 170px 下限——让 placeholder 完整可读优先于一行塞下全部控件 */
 .sv-ws-row {
   flex-wrap: wrap;
-  row-gap: 6px;
+  row-gap: var(--space-1-5);
 }
 .sv-ws-row .sv-input {
   flex: 1 1 170px;
@@ -820,15 +820,15 @@ async function removeTask(task: TaskRecord): Promise<void> {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 6px;
+  gap: var(--space-1-5);
+  margin-top: var(--space-1-5);
 }
 .sv-ws-recent-item {
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  padding: 1px 6px;
+  padding: 1px var(--space-1-5);
   font-size: 11px;
   background: transparent;
   border: var(--bw-thin) solid var(--sv-line-strong);
@@ -840,14 +840,14 @@ async function removeTask(task: TaskRecord): Promise<void> {
   color: var(--sv-ink);
 }
 .sv-ws-hint {
-  margin-top: 6px;
+  margin-top: var(--space-1-5);
 }
 /* 工作区画像(CODE-4):chips 与「(未扫全)」留痕同排;宽度不够时换行 */
 .sv-ws-profile {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 6px;
+  gap: var(--space-1-5);
+  margin-top: var(--space-1-5);
 }
 </style>

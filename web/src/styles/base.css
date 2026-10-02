@@ -98,7 +98,7 @@ output {
 /* 标题前缀标记:收编散写的 ::before 装饰,统一为「方块/菱形/方块」三变体 */
 .sv-marker {
   position: relative;
-  padding-left: 16px;
+  padding-left: var(--space-4);
 }
 .sv-marker::before {
   content: '';

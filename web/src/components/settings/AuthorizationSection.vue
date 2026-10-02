@@ -201,17 +201,17 @@ const grantedCount = computed(() => grants.value.session.length + grants.value.r
 </template>
 
 <style scoped>
-.sv-auth-modes { display: flex; gap: 8px; flex-wrap: wrap; }
+.sv-auth-modes { display: flex; gap: var(--space-2); flex-wrap: wrap; }
 .sv-auth-mode-card {
-  flex: 1 1 140px; text-align: left; padding: 8px 10px; cursor: pointer;
+  flex: 1 1 140px; text-align: left; padding: var(--space-2) var(--space-2-5); cursor: pointer;
   border: 1px solid var(--sv-line, #d8d8d8); background: transparent;
   display: flex; flex-direction: column; gap: 2px;
 }
 .sv-auth-mode-card.active { border-color: #111; box-shadow: inset 0 -2px 0 #111; }
 .sv-auth-mode-card b { font-size: 13px; }
 .sv-auth-mode-card span { font-size: 11px; opacity: 0.7; }
-.sv-auth-tools { max-height: 260px; overflow: auto; display: flex; flex-direction: column; gap: 4px; }
-.sv-auth-tool-row { display: flex; align-items: center; gap: 6px; font-size: 12px; }
-.sv-auth-tool-row .sv-note { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sv-auth-grant-row { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+.sv-auth-tools { max-height: 260px; overflow: auto; display: flex; flex-direction: column; gap: var(--space-1); }
+.sv-auth-tool-row { display: flex; align-items: center; gap: var(--space-1-5); font-size: 12px; }
+.sv-auth-tool-row .sv-note { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sv-auth-grant-row { display: flex; align-items: center; gap: var(--space-2); justify-content: space-between; }
 </style>

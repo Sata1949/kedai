@@ -237,8 +237,8 @@ onMounted(() => {
           <span class="sv-supreme pink" /> 脚本管理
         </h2>
         <!-- 导出 / 导入(阶段六 6e) -->
-        <div class="flex items-center gap-2" style="margin-right: 8px">
-          <label class="sv-note" style="white-space: nowrap; display: flex; align-items: center; gap: 4px" title="导出时按酒馆 export_with 语义仅保留 data/button,剥离 content/info">
+        <div class="flex items-center gap-2" style="margin-right: var(--space-2)">
+          <label class="sv-note" style="white-space: nowrap; display: flex; align-items: center; gap: var(--space-1)" title="导出时按酒馆 export_with 语义仅保留 data/button,剥离 content/info">
             <input v-model="onlyDataButton" type="checkbox" />
             仅 data/button
           </label>
@@ -278,9 +278,9 @@ onMounted(() => {
         </div>
 
         <!-- 作用域与角色选择 -->
-        <div class="sv-field sv-stack" style="gap: 10px">
+        <div class="sv-field sv-stack" style="gap: var(--space-2-5)">
           <div class="sv-field-label"><span class="sv-supreme green" /> 作用域</div>
-          <div class="sv-stack" style="flex-direction: row; gap: 8px">
+          <div class="sv-stack" style="flex-direction: row; gap: var(--space-2)">
             <button
               class="sv-btn"
               :class="scope === 'global' ? 'primary' : 'ghost'"
@@ -292,7 +292,7 @@ onMounted(() => {
               @click="switchScope('character')"
             >角色卡</button>
           </div>
-          <div v-if="scope === 'character'" class="sv-stack" style="flex-direction: row; gap: 8px; align-items: center">
+          <div v-if="scope === 'character'" class="sv-stack" style="flex-direction: row; gap: var(--space-2); align-items: center">
             <select class="sv-wb-select" :value="characterId" @change="characterId = ($event.target as HTMLSelectElement).value; onCharacterChange()">
               <option value="">选择角色…</option>
               <option v-for="c in characters" :key="c.id" :value="c.id">{{ c.chara_name }}</option>
@@ -304,18 +304,18 @@ onMounted(() => {
         <!-- 工具栏 -->
         <div class="sv-field">
           <div class="sv-field-label"><span class="sv-supreme red" /> 脚本树</div>
-          <div class="sv-stack" style="flex-direction: row; gap: 8px; margin-bottom: 8px">
+          <div class="sv-stack" style="flex-direction: row; gap: var(--space-2); margin-bottom: var(--space-2)">
             <button class="sv-btn ghost sv-btn-sm" @click="newScript">＋ 新增脚本</button>
             <button class="sv-btn ghost sv-btn-sm" @click="newFolder">＋ 新增文件夹</button>
           </div>
           <p v-if="!loaded" class="sv-note">加载中…</p>
-          <div v-else-if="msg?.kind === 'err' && trees.length === 0" class="sv-empty" style="padding: 16px 12px">
+          <div v-else-if="msg?.kind === 'err' && trees.length === 0" class="sv-empty" style="padding: var(--space-4) var(--space-3)">
             <p style="font-size: 12px; color: var(--sv-red)">{{ msg.text }}</p>
           </div>
-          <div v-else-if="scope === 'character' && !characterId" class="sv-empty" style="padding: 16px 12px">
+          <div v-else-if="scope === 'character' && !characterId" class="sv-empty" style="padding: var(--space-4) var(--space-3)">
             <p style="font-size: 12px">请选择角色以查看/编辑其角色卡脚本。</p>
           </div>
-          <div v-else-if="trees.length === 0" class="sv-empty" style="padding: 16px 12px">
+          <div v-else-if="trees.length === 0" class="sv-empty" style="padding: var(--space-4) var(--space-3)">
             <p style="font-size: 12px">暂无脚本,点击「新增脚本」创建。</p>
           </div>
           <div v-else class="sv-scripts-layout">
@@ -408,7 +408,7 @@ onMounted(() => {
                   </div>
                 </template>
               </template>
-              <div v-else class="sv-empty" style="padding: 16px 12px">
+              <div v-else class="sv-empty" style="padding: var(--space-4) var(--space-3)">
                 <p style="font-size: 12px">选中左侧节点进行编辑。</p>
               </div>
             </div>
@@ -416,7 +416,7 @@ onMounted(() => {
         </div>
 
         <!-- 反馈 -->
-        <div v-if="msg" class="sv-feedback" :class="msg.kind" style="margin-top: 8px">{{ msg.text }}</div>
+        <div v-if="msg" class="sv-feedback" :class="msg.kind" style="margin-top: var(--space-2)">{{ msg.text }}</div>
       </div>
 
       <!-- 底部 -->
@@ -437,31 +437,31 @@ onMounted(() => {
 .sv-scripts-layout {
   display: grid;
   grid-template-columns: minmax(220px, 1fr) minmax(320px, 1.4fr);
-  gap: 12px;
+  gap: var(--space-3);
   min-height: 320px;
 }
 .sv-scripts-tree {
   border: 2px solid var(--sv-line-strong);
   background: var(--sv-surface-elevated);
-  padding: 8px;
+  padding: var(--space-2);
   overflow-y: auto;
   max-height: 420px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
 }
 .sv-scripts-editor {
   border: 2px solid var(--sv-line-strong);
   background: var(--sv-surface-elevated);
-  padding: 10px;
+  padding: var(--space-2-5);
   overflow-y: auto;
   max-height: 420px;
 }
 .sv-script-row {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 8px;
+  gap: var(--space-1-5);
+  padding: var(--space-1-5) var(--space-2);
   border: 2px solid transparent;
   background: transparent;
   cursor: pointer;
@@ -496,17 +496,17 @@ onMounted(() => {
 .sv-script-subs {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
 }
 .sv-script-addsub {
-  margin: 2px 0 6px 18px;
+  margin: 2px 0 var(--space-1-5) 18px;
   width: fit-content;
 }
 .sv-script-enabled {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin: 0 0 8px;
+  gap: var(--space-1-5);
+  margin: 0 0 var(--space-2);
 }
 .sv-script-code {
   font-family: var(--font-mono);
@@ -518,7 +518,7 @@ onMounted(() => {
 .sv-script-btnrow {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 6px;
+  gap: var(--space-2);
+  margin-bottom: var(--space-1-5);
 }
 </style>

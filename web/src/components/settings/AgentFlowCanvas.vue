@@ -193,7 +193,7 @@ function onRelayout(): void {
 .flow-canvas {
   display: flex;
   align-items: stretch;
-  gap: 8px;
+  gap: var(--space-2);
 }
 .flow-canvas-main {
   flex: 1 1 auto;
@@ -202,9 +202,9 @@ function onRelayout(): void {
 .flow-canvas-bar {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-1-5);
   flex-wrap: wrap;
-  margin-bottom: 6px;
+  margin-bottom: var(--space-1-5);
 }
 .flow-canvas-msg {
   font-size: 11px;
@@ -225,15 +225,15 @@ function onRelayout(): void {
   flex: 0 0 300px;
   max-height: 520px;
   overflow: auto;
-  padding: 8px;
+  padding: var(--space-2);
   border: var(--bw-thin) solid var(--sv-ink);
   background: var(--sv-white);
 }
 .flow-side-head {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-bottom: 6px;
+  gap: var(--space-1-5);
+  margin-bottom: var(--space-1-5);
 }
 /* 窄屏(手机/分栏窄)改为上下叠放,画布不再被 Inspector 挤扁 */
 @media (max-width: 900px) {

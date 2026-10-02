@@ -129,8 +129,8 @@ async function load(): Promise<void> {
             <span class="sv-supreme yellow" /> 快速回复列表
             <span class="sv-wb-count">{{ drafts.length }} 条(启用 {{ enabledCount }} 条)</span>
           </div>
-          <div v-if="loadError" class="sv-feedback err" style="margin: 8px 0">{{ loadError }}</div>
-          <div v-else-if="drafts.length === 0" class="sv-empty" style="padding: 28px 12px">
+          <div v-if="loadError" class="sv-feedback err" style="margin: var(--space-2) 0">{{ loadError }}</div>
+          <div v-else-if="drafts.length === 0" class="sv-empty" style="padding: 28px var(--space-3)">
             <div class="sv-empty-geo mb10">
               <span class="sq black" />
               <span class="sq pink" />
@@ -147,8 +147,8 @@ async function load(): Promise<void> {
                   <input v-model="d.name" type="text" class="sv-input sv-wb-comment" placeholder="名称(name)" spellcheck="false" />
                   <input v-model="d.label" type="text" class="sv-input sv-wb-comment" placeholder="显示标签(可选)" spellcheck="false" />
                 </div>
-                <textarea v-model="d.content" rows="2" class="sv-input sv-wb-entry-content" placeholder="回复内容" spellcheck="false" style="margin-top: 6px" />
-                <div class="flex items-center gap-2" style="margin-top: 6px">
+                <textarea v-model="d.content" rows="2" class="sv-input sv-wb-entry-content" placeholder="回复内容" spellcheck="false" style="margin-top: var(--space-1-5)" />
+                <div class="flex items-center gap-2" style="margin-top: var(--space-1-5)">
                   <button
                     class="sv-btn ghost sv-btn-sm"
                     :class="{ 'sv-btn-on': d.enabled }"

@@ -107,11 +107,11 @@ async function expandNow(): Promise<void> {
         <!-- 展开结果 -->
         <div class="sv-field">
           <div class="sv-field-label"><span class="sv-supreme green" /> 展开结果</div>
-          <div v-if="!expanded && !msg" class="sv-empty" style="padding: 16px 12px">
+          <div v-if="!expanded && !msg" class="sv-empty" style="padding: var(--space-4) var(--space-3)">
             <p style="font-size: 12px">点击「展开」查看结果;未知宏会原样保留在输出中。</p>
           </div>
           <pre v-else class="sv-input" style="white-space: pre-wrap; line-height: 1.7; margin: 0; min-height: 60px">{{ expanded }}</pre>
-          <div v-if="msg" class="sv-feedback" :class="msg.kind" style="margin-top: 6px">{{ msg.text }}</div>
+          <div v-if="msg" class="sv-feedback" :class="msg.kind" style="margin-top: var(--space-1-5)">{{ msg.text }}</div>
         </div>
 
         <!-- 常用宏速查 -->

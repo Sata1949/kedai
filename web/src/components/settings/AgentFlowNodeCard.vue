@@ -82,7 +82,7 @@ function connectionLabel(): string {
 .flow-card {
   width: 196px;
   box-sizing: border-box;
-  padding: 8px 10px;
+  padding: var(--space-2) var(--space-2-5);
   border: var(--bw-thin) solid var(--sv-ink);
   background: var(--sv-white);
   font-size: 12px;
@@ -101,10 +101,11 @@ function connectionLabel(): string {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 6px;
+  gap: var(--space-1-5);
 }
 .flow-card-name {
   font-weight: 700;
+  min-width: 0; /* UIP-10:flex 行内省略号前置条件(缺它则长名不收缩、省略号不生效) */
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -117,11 +118,11 @@ function connectionLabel(): string {
 .flow-card-tags {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
-  margin-top: 6px;
+  gap: var(--space-1);
+  margin-top: var(--space-1-5);
 }
 .flow-tag {
-  padding: 0 4px;
+  padding: 0 var(--space-1);
   border: 1px solid var(--sv-line-strong);
   font-size: 10px;
   color: var(--sv-ink-dim);

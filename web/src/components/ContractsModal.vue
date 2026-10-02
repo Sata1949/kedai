@@ -239,7 +239,7 @@ async function onRollback(entry: ContractChangeEntry): Promise<void> {
         <button class="sv-btn ghost sv-btn-square" @click="close">✕</button>
       </div>
 
-      <div class="sv-modal-body flex flex-col" style="gap: 10px; min-height: 0">
+      <div class="sv-modal-body flex flex-col" style="gap: var(--space-2-5); min-height: 0">
         <p v-if="!characterId" class="sv-note">请先在左侧选择角色。</p>
         <template v-else>
           <div class="flex items-center gap-2" style="flex: none">
@@ -271,9 +271,9 @@ async function onRollback(entry: ContractChangeEntry): Promise<void> {
               <button v-if="saved" class="sv-btn danger sv-btn-sm" :disabled="busy" @click="onRemove">移除契约</button>
             </div>
 
-            <div class="flex" style="gap: 10px; flex: 1; min-height: 0">
+            <div class="flex" style="gap: var(--space-2-5); flex: 1; min-height: 0">
               <!-- JSON 编辑器 -->
-              <div class="flex flex-col" style="flex: 1; min-width: 0; gap: 4px">
+              <div class="flex flex-col" style="flex: 1; min-width: 0; gap: var(--space-1)">
                 <textarea
                   v-model="editorText"
                   class="sv-contract-editor"
@@ -285,7 +285,7 @@ async function onRollback(entry: ContractChangeEntry): Promise<void> {
 
               <!-- diff 预览 -->
               <div class="sv-contract-diff" style="flex: none">
-                <div style="font-size: 11px; color: var(--sv-ink-faint); letter-spacing: 0.1em; margin-bottom: 6px">
+                <div style="font-size: 11px; color: var(--sv-ink-faint); letter-spacing: 0.1em; margin-bottom: var(--space-1-5)">
                   变更预览
                 </div>
                 <div v-if="!diffItems.length" class="sv-note" style="font-size: 12px">无变更</div>
@@ -302,7 +302,7 @@ async function onRollback(entry: ContractChangeEntry): Promise<void> {
           </template>
 
           <!-- 历史 tab:变更记录列表 + 恢复入口 -->
-          <div v-else class="flex flex-col" style="flex: 1; min-height: 0; gap: 10px">
+          <div v-else class="flex flex-col" style="flex: 1; min-height: 0; gap: var(--space-2-5)">
             <div class="flex items-center gap-2" style="flex: none">
               <button class="sv-btn ghost sv-btn-sm" :disabled="historyLoading" @click="loadHistory">刷新</button>
               <span v-if="historyLoading" style="font-size: 12px; color: var(--sv-ink-faint)">加载中…</span>
@@ -347,7 +347,7 @@ async function onRollback(entry: ContractChangeEntry): Promise<void> {
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.5;
-  padding: 10px;
+  padding: var(--space-2-5);
   border: 2px solid var(--sv-ink);
   background: var(--sv-white);
   color: var(--sv-ink);
@@ -362,7 +362,7 @@ async function onRollback(entry: ContractChangeEntry): Promise<void> {
   width: 300px;
   max-height: 100%;
   overflow-y: auto;
-  padding: 10px;
+  padding: var(--space-2-5);
   border: 2px solid var(--sv-line-strong);
   background: var(--sv-surface-elevated);
 }
@@ -396,15 +396,15 @@ async function onRollback(entry: ContractChangeEntry): Promise<void> {
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .sv-history-item {
   flex: none;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 10px;
+  gap: var(--space-1);
+  padding: var(--space-2-5);
   border: 2px solid var(--sv-line-strong);
   background: var(--sv-white);
 }
@@ -412,7 +412,7 @@ async function onRollback(entry: ContractChangeEntry): Promise<void> {
 .sv-history-head {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .sv-history-time {
@@ -424,7 +424,7 @@ async function onRollback(entry: ContractChangeEntry): Promise<void> {
 .sv-history-source {
   flex: none;
   font-size: 11px;
-  padding: 1px 8px;
+  padding: 1px var(--space-2);
   border: 2px solid var(--sv-line);
   color: var(--sv-ink-dim);
   background: var(--sv-white);

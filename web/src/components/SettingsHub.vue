@@ -273,7 +273,7 @@ const activeLabel = computed(() => {
           <div
             v-if="buildInfoText"
             :title="'构建指纹 = 内嵌前端的内容哈希;两端一致即同步'"
-            style="margin-top: auto; padding: 8px 12px 10px; font-size: var(--text-2xs); color: var(--sv-ink-faint); letter-spacing: 0.02em; user-select: text"
+            style="margin-top: auto; padding: var(--space-2) var(--space-3) var(--space-2-5); font-size: var(--text-2xs); color: var(--sv-ink-faint); letter-spacing: 0.02em; user-select: text"
           >{{ buildInfoText }}</div>
         </div>
 
@@ -293,8 +293,8 @@ const activeLabel = computed(() => {
 /* 二级导航(2026-09 两级结构):缩进 + 左侧细线区分层级。
    样式写在 scoped 内(MAINTENANCE D-5:新增组件样式禁止进 style.css)。 */
 .hub-sub {
-  margin: 2px 0 8px 12px;
-  padding-left: 10px;
+  margin: 2px 0 var(--space-2) var(--space-3);
+  padding-left: var(--space-2-5);
   border-left: var(--bw-thin) solid var(--sv-line);
   display: flex;
   flex-direction: column;
@@ -303,9 +303,9 @@ const activeLabel = computed(() => {
 .hub-sub-item {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   width: 100%;
-  padding: 6px 10px;
+  padding: var(--space-1-5) var(--space-2-5);
   border: var(--bw-thin) solid transparent;
   background: transparent;
   font-size: var(--text-sm);

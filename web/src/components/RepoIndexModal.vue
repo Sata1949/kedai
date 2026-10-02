@@ -92,7 +92,7 @@ onServerPrefetch(load);
         </div>
 
         <!-- 索引未生成:空态 -->
-        <div v-if="result && !result.available" class="sv-empty" style="padding: 28px 12px">
+        <div v-if="result && !result.available" class="sv-empty" style="padding: 28px var(--space-3)">
           <div class="sv-empty-geo mb10">
             <span class="sq black" />
             <span class="sq pink" />
@@ -109,7 +109,7 @@ onServerPrefetch(load);
         <template v-else>
           <!-- 顶部控件:搜索 + kind 筛选 -->
           <div class="sv-field">
-            <div class="sv-stack" style="flex-direction: row; gap: 8px; align-items: center; flex-wrap: wrap">
+            <div class="sv-stack" style="flex-direction: row; gap: var(--space-2); align-items: center; flex-wrap: wrap">
               <input
                 v-model="query"
                 class="sv-input repo-index-search"
@@ -127,16 +127,16 @@ onServerPrefetch(load);
                 {{ shown.length }} / {{ items.length }} 个文件
               </span>
             </div>
-            <div v-if="error" class="sv-feedback err" style="margin-top: 8px">{{ error }}</div>
+            <div v-if="error" class="sv-feedback err" style="margin-top: var(--space-2)">{{ error }}</div>
           </div>
 
           <!-- 文件列表(按 importance 降序,后端已排序;点行展开详情) -->
           <div class="sv-field">
             <div class="sv-field-label"><span class="sv-supreme yellow" /> 文件清单</div>
-            <div v-if="loading && items.length === 0" class="sv-empty" style="padding: 28px 12px">
+            <div v-if="loading && items.length === 0" class="sv-empty" style="padding: 28px var(--space-3)">
               <p style="font-size: 12px">加载中…</p>
             </div>
-            <div v-else-if="shown.length === 0" class="sv-empty" style="padding: 28px 12px">
+            <div v-else-if="shown.length === 0" class="sv-empty" style="padding: 28px var(--space-3)">
               <div class="sv-empty-geo mb10">
                 <span class="sq black" />
                 <span class="sq pink" />
@@ -158,7 +158,7 @@ onServerPrefetch(load);
                   <div class="flex items-center gap-2">
                     <span class="sv-tag repo-index-kind">{{ repoKindLabel(it.kind) }}</span>
                     <b style="font-size: 12px">{{ baseName(it.path) }}</b>
-                    <span class="sv-script-meta" style="font-size: 11px">{{ it.path }}</span>
+                    <span class="sv-script-meta truncate min-w-0" style="font-size: 11px">{{ it.path }}</span>
                     <span
                       class="sv-script-meta"
                       style="font-size: 11px; margin-left: auto; white-space: nowrap"
@@ -204,7 +204,7 @@ onServerPrefetch(load);
 .repo-index-search {
   flex: 1;
   min-width: 200px;
-  padding: 6px 10px;
+  padding: var(--space-1-5) var(--space-2-5);
   font-size: 12px;
 }
 /* 类别标签:实心蓝底(与 kind-tag 同族的只读展示) */
@@ -215,17 +215,17 @@ onServerPrefetch(load);
   flex-shrink: 0;
 }
 .repo-index-summary {
-  margin: 4px 0 0;
+  margin: var(--space-1) 0 0;
   font-size: 11px;
   line-height: 1.6;
 }
 .repo-index-detail {
-  margin-top: 6px;
-  padding-top: 6px;
+  margin-top: var(--space-1-5);
+  padding-top: var(--space-1-5);
   border-top: 1px dashed var(--sv-line-strong);
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
 }
 .repo-index-deep {
   margin: 0;
@@ -237,12 +237,12 @@ onServerPrefetch(load);
 .repo-index-symbols {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 10px;
+  gap: var(--space-1) var(--space-2-5);
   align-items: center;
 }
 .repo-index-symbol {
   display: inline-flex;
-  gap: 4px;
+  gap: var(--space-1);
   align-items: baseline;
 }
 </style>

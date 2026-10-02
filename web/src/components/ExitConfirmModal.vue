@@ -115,7 +115,7 @@ async function confirm(): Promise<void> {
 .sv-head-title {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 /* 主体提问:最大字号,作为视觉主标题(用户第一眼要读到的就是它) */
@@ -128,7 +128,7 @@ async function confirm(): Promise<void> {
 }
 
 .exit-sub {
-  margin: 8px 0 0;
+  margin: var(--space-2) 0 0;
   font-size: 12px;
   color: var(--sv-ink-soft);
   line-height: 1.6;
@@ -136,18 +136,18 @@ async function confirm(): Promise<void> {
 
 /* 后果清单:每项一个黑方块标记 + 「标题 + 说明」两行,层次比纯列表清楚 */
 .exit-warn {
-  margin: 14px 0 0;
+  margin: var(--space-3-5) 0 0;
   padding: 0;
   list-style: none;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-2-5);
 }
 
 .exit-warn li {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
+  gap: var(--space-2-5);
   font-size: 12px;
   line-height: 1.6;
 }
@@ -179,8 +179,8 @@ async function confirm(): Promise<void> {
 
 /* 二次返回键提示:描边小条,与后果清单区分层级(这是操作提示,不是后果) */
 .exit-tip {
-  margin: 14px 0 0;
-  padding: 8px 10px;
+  margin: var(--space-3-5) 0 0;
+  padding: var(--space-2) var(--space-2-5);
   border: var(--bw-hair) dashed var(--sv-line-strong);
   font-size: 12px;
   line-height: 1.6;
@@ -193,7 +193,7 @@ async function confirm(): Promise<void> {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 10px;
+  gap: var(--space-2-5);
   margin-top: 18px;
 }
 
@@ -205,7 +205,7 @@ async function confirm(): Promise<void> {
 /* 按钮区:退出(危险)给更大的点击面积并占主位,取消退居次位——
    但取消仍是默认焦点(误触退出代价高,不鼓励盲按回车) */
 .exit-foot {
-  gap: 10px;
+  gap: var(--space-2-5);
 }
 .exit-cancel {
   flex: 0 0 auto;

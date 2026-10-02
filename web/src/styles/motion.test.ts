@@ -3,7 +3,6 @@
 // 一改就悄悄回退的规则。`.css` 的 `?raw` 在本仓返回空串(见 sidebarTaskLayout.test.ts 顶部),
 // 故 .css 一律走 node:fs 读取,`.vue` 用 `?raw`。
 import { describe, expect, it } from 'vitest';
-// @ts-expect-error -- node:fs 缺少类型声明(沿 sidebarTaskLayout.test.ts 约定)
 import { readFileSync } from 'node:fs';
 import settingsHubSource from '../components/SettingsHub.vue?raw';
 import memoryPanelSource from '../components/MemoryPanel.vue?raw';

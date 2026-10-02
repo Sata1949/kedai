@@ -111,12 +111,12 @@ const close = (): void => {
 
         <!-- 顶部控件 -->
         <div class="sv-field">
-          <div class="sv-stack" style="flex-direction: row; gap: 8px; align-items: center; flex-wrap: wrap">
+          <div class="sv-stack" style="flex-direction: row; gap: var(--space-2); align-items: center; flex-wrap: wrap">
             <select v-model="typeFilter" class="sv-wb-select" style="width: 150px">
               <option value="all">全部类型</option>
               <option v-for="t in EVENT_TYPES" :key="t" :value="t">{{ eventTypeLabel(t) }}</option>
             </select>
-            <label class="sv-note" style="white-space: nowrap; display: flex; align-items: center; gap: 4px">
+            <label class="sv-note" style="white-space: nowrap; display: flex; align-items: center; gap: var(--space-1)">
               <input v-model="sessionOnly" type="checkbox" /> 仅当前会话
             </label>
             <button class="sv-btn ghost sv-btn-sm" @click="togglePause">
@@ -130,7 +130,7 @@ const close = (): void => {
         <!-- 事件列表 -->
         <div class="sv-field">
           <div class="sv-field-label"><span class="sv-supreme yellow" /> 事件日志</div>
-          <div v-if="shown.length === 0" class="sv-empty" style="padding: 28px 12px">
+          <div v-if="shown.length === 0" class="sv-empty" style="padding: 28px var(--space-3)">
             <div class="sv-empty-geo mb10">
               <span class="sq black" />
               <span class="sq pink" />
@@ -161,7 +161,7 @@ const close = (): void => {
                 </div>
                 <pre
                   class="sv-code"
-                  style="white-space: pre-wrap; font-size: 11px; margin: 4px 0 0; max-height: 200px; overflow: auto"
+                  style="white-space: pre-wrap; font-size: 11px; margin: var(--space-1) 0 0; max-height: 200px; overflow: auto"
                 >{{ displayText(e) }}</pre>
               </div>
             </div>
