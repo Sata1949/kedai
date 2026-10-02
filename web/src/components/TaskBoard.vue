@@ -1040,7 +1040,7 @@ async function removeTask(task: TaskRecord): Promise<void> {
               :key="st.id"
               class="sv-task-subtask"
             >
-              <span class="sv-supreme xs" :class="statusClass(st.status)" />
+              <span class="sv-supreme xs sv-dot-flash" :class="statusClass(st.status)" :key="st.status" />
               <div class="sv-task-subtask-body">
                 <div class="sv-task-subtask-name">
                   {{ st.name }}
@@ -1242,7 +1242,7 @@ async function removeTask(task: TaskRecord): Promise<void> {
   height: 7px;
   border-radius: 50%;
   background: var(--sv-pink-deep);
-  animation: sv-progress-pulse var(--dur-pulse) ease-in-out infinite;
+  animation: sv-progress-pulse var(--dur-pulse) var(--ease-in-out) infinite;
 }
 @keyframes sv-progress-pulse {
   0%, 100% { opacity: 1; }

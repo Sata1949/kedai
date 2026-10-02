@@ -639,7 +639,7 @@
   justify-content: center;
   cursor: pointer;
   box-shadow: var(--shadow-card);
-  transition: transform var(--transition-fast), box-shadow var(--transition-fast), background var(--transition-fast);
+  transition: transform var(--dur-fast) var(--ease-standard), box-shadow var(--dur-fast) var(--ease-standard), background var(--dur-fast) var(--ease-standard);
 }
 .sv-audio-toggle svg { width: 18px; height: 18px; }
 .sv-audio-toggle:hover {
@@ -872,9 +872,9 @@
    动效体系(克制档):只动 transform / opacity
    ============================================================ */
 
-/* 消息入场:新插入的 .sv-msg 自动播放(v-for 追加节点触发 animation) */
-@keyframes sv-msg-in {
-  from { opacity: 0; transform: translateY(6px); }
+/* 入场动画唯一来源(2026-10-02 UIP-9):消息/列表/回执条/面板 tab 共用同一 keyframes 与令牌 */
+@keyframes sv-list-in {
+  from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: translateY(0); }
 }
 
@@ -927,13 +927,15 @@
   to { opacity: 1; }
 }
 
-/* 无障碍:用户偏好减少动效时,全部动效即时完成 */
+/* 无障碍:用户偏好减少动效时全部动效即时完成(UIP-9 补 delay 归零——原仅截 duration,stagger 仍会延迟出现) */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
+    animation-delay: 0.01ms !important;
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
+    transition-delay: 0.01ms !important;
     transition-duration: 0.01ms !important;
   }
 }

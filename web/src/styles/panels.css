@@ -312,11 +312,11 @@ input[type="range"].sv-range::-moz-range-thumb {
    --shadow-hard 实黑影仅英雄位(primary 按钮/成果卡/批准区)。 */
 .sv-btn, .sv-btn-send, .sv-btn-attach, .sv-icon-btn, .sv-agent-panel-close {
   transition:
-    transform var(--transition-fast),
-    box-shadow var(--transition-fast),
-    background-color var(--transition-fast),
-    border-color var(--transition-fast),
-    color var(--transition-fast);
+    transform var(--dur-fast) var(--ease-standard),
+    box-shadow var(--dur-fast) var(--ease-standard),
+    background-color var(--dur-fast) var(--ease-standard),
+    border-color var(--dur-fast) var(--ease-standard),
+    color var(--dur-fast) var(--ease-standard);
 }
 .sv-btn:hover:not(:disabled),
 .sv-btn-send:hover:not(:disabled),
@@ -400,7 +400,7 @@ input[type="range"].sv-range::-moz-range-thumb {
 }
 .sv-icon-btn:hover { background: var(--sv-pink-light); }
 
-/* 状态反馈条 */
+/* 状态反馈条(2026-10-02 UIP-9:入场走共用 sv-list-in——原为瞬时出现) */
 .sv-feedback {
   display: flex;
   align-items: center;
@@ -409,6 +409,7 @@ input[type="range"].sv-range::-moz-range-thumb {
   padding: 10px 12px;
   margin-top: 10px;
   border: var(--bw-thin) solid;
+  animation: sv-list-in var(--dur-normal) var(--ease-out) backwards;
 }
 .sv-feedback.ok { border-color: var(--sv-green); color: var(--sv-green-deep); background: rgba(22, 163, 74, 0.05); }
 .sv-feedback.err { border-color: var(--sv-red); color: var(--sv-red); background: rgba(227, 52, 47, 0.05); }
@@ -661,16 +662,14 @@ input[type="range"].sv-range::-moz-range-thumb {
   color: var(--sv-white);
   box-shadow: inset 0 -3px 0 0 var(--sv-red);
 }
-/* tab 内容容器:v-show 切换显隐;显示时继承面板体的纵向间距节奏 */
-.sv-agent-tab {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
-}
+/* tab 内容容器:v-show 切换显隐;显示时继承面板体的纵向间距节奏。
+   2026-10-02 UIP-9:两容器同体合并,并挂共用入场 sv-list-in(v-show 显示恢复即重播) */
+.sv-agent-tab,
 .sv-calltrace-tab {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
+  animation: sv-list-in var(--dur-normal) var(--ease-out) backwards;
 }
 
 .sv-agent-panel-body {
@@ -862,7 +861,7 @@ input[type="range"].sv-range::-moz-range-thumb {
   height: 80px;
   margin: 0 auto 20px;
   object-fit: cover;
-  animation: sv-splash-logo-pulse var(--dur-pulse-slow) ease-in-out infinite;
+  animation: sv-splash-logo-pulse var(--dur-pulse-slow) var(--ease-in-out) infinite;
 }
 @keyframes sv-splash-logo-pulse {
   0%, 100% { transform: scale(1); }

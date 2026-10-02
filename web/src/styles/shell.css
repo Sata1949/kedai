@@ -40,7 +40,7 @@
   flex-direction: column;
   background: var(--sv-surface);
   border-right: var(--bw) solid var(--sv-ink);
-  transition: width var(--transition-normal);
+  transition: width var(--dur-normal) var(--ease-standard);
 }
 /* 任务模式加宽:给「下达目标」输入区留出更多空间 */
 .sv-sidebar.wide {
@@ -56,7 +56,7 @@
   background: var(--sv-surface);
   border-left: var(--bw) solid var(--sv-ink);
   overflow: hidden;
-  transition: width var(--transition-normal);
+  transition: width var(--dur-normal) var(--ease-standard);
 }
 .sv-agent-panel.open {
   width: 340px;
@@ -79,7 +79,7 @@
   font-size: 11px;
   letter-spacing: 0.2em;
   cursor: pointer;
-  transition: all var(--transition-fast);
+  transition: all var(--dur-fast) var(--ease-standard);
 }
 .sv-agent-toggle:hover {
   background: var(--sv-pink-deep);
@@ -196,7 +196,7 @@
 .sv-empty-geo .sq { display: block; }
 .sv-empty-geo .sq.black { width: 18px; height: 18px; background: var(--sv-ink-supreme); }
 .sv-empty-geo .sq.pink { width: 12px; height: 12px; background: var(--sv-pink); }
-.sv-empty-geo .sq.deep { width: 8px; height: 8px; background: var(--sv-pink-deep); }
+.sv-empty-geo .sq.deep { width: 8px; height: 8px; background: var(--sv-pink-deep); animation: sv-pulse-scale var(--dur-pulse-slow) var(--ease-in-out) infinite; }
 .sv-empty-geo .diag {
   position: absolute;
   right: calc(50% - 56px);
@@ -222,7 +222,7 @@
 
 /* ===== 气泡 ===== */
 
-.sv-msg { display: flex; margin-bottom: 28px; gap: 12px; animation: sv-msg-in var(--dur-normal) var(--ease-standard); }
+.sv-msg { display: flex; margin-bottom: 28px; gap: 12px; animation: sv-list-in var(--dur-normal) var(--ease-out) backwards; }
 .sv-msg.user { justify-content: flex-end; }
 
 .sv-msg-bubble {
@@ -332,7 +332,7 @@
   width: 10px;
   height: 10px;
   background: var(--sv-ink);
-  animation: sv-square-pulse var(--dur-pulse) infinite ease-in-out;
+  animation: sv-square-pulse var(--dur-pulse) infinite var(--ease-in-out);
 }
 .sv-thinking i:nth-child(2) { background: var(--sv-pink); animation-delay: var(--dur-normal); }
 .sv-thinking i:nth-child(3) { background: var(--sv-pink-deep); animation-delay: calc(var(--dur-normal) * 2); }
@@ -382,7 +382,7 @@
   gap: 8px;
   margin-top: 6px;
   opacity: 0;
-  transition: opacity var(--transition-fast);
+  transition: opacity var(--dur-fast) var(--ease-standard);
 }
 .sv-msg:hover .sv-msg-actions { opacity: 1; }
 .sv-msg-action {
@@ -699,7 +699,7 @@
   width: 18px;
   height: 18px;
   background: var(--sv-white);
-  transition: transform var(--transition-fast);
+  transition: transform var(--dur-fast) var(--ease-standard);
 }
 .sv-render-toggle-v2 .toggle-track.on .toggle-thumb { transform: translateX(18px); }
 .sv-render-toggle-v2 .toggle-label {

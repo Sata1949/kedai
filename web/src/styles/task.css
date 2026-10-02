@@ -27,7 +27,7 @@
   background: var(--sv-white);
   color: var(--sv-ink);
   cursor: pointer;
-  transition: background var(--transition-fast);
+  transition: background var(--dur-fast) var(--ease-standard);
 }
 .sv-appmode button.active {
   background: var(--sv-ink-supreme);
@@ -104,7 +104,7 @@
   cursor: pointer;
   text-align: left;
   font-size: 12px;
-  transition: all var(--transition-fast);
+  transition: all var(--dur-fast) var(--ease-standard);
   box-shadow: var(--shadow-card); /* 阴影规则:可点卡片静态挂 card 影 */
 }
 .sv-task-item:hover {
@@ -452,6 +452,8 @@
 .sv-supreme.partial { background: var(--sv-orange); }
 .sv-supreme.error { background: var(--sv-red); }
 .sv-supreme.pending { background: var(--sv-line-strong); }
+/* 任务状态点变更闪点(UIP-9):消费方挂 :key="status" 令状态变更时节点重建、重播此动画(首渲染同播一次,知情接受) */
+.sv-dot-flash { animation: sv-pulse-scale var(--dur-slow) var(--ease-out); }
 
 .sv-tag.done { color: var(--sv-green-deep); border-color: var(--sv-green); }
 .sv-tag.active { color: var(--sv-yellow-deep); border-color: var(--sv-yellow); }
@@ -597,13 +599,14 @@
   background: var(--sv-white);
 }
 
-/* 时间线当前执行步:粉强调阴影 + 序号方块脉动(仅 transform) */
+/* 时间线当前执行步:粉强调阴影 + 序号方块脉动(仅 transform)。
+   2026-10-02 UIP-9:更名 sv-pulse-scale——时间线节点/状态点闪点/空态呼吸共用同一 keyframes。 */
 .sv-timeline-item.running { box-shadow: var(--shadow-pink); }
 .sv-timeline-item.running::before {
-  animation: sv-tl-pulse var(--dur-pulse) ease-in-out infinite;
+  animation: sv-pulse-scale var(--dur-pulse) var(--ease-in-out) infinite;
   transform-origin: center;
 }
-@keyframes sv-tl-pulse {
+@keyframes sv-pulse-scale {
   0%, 100% { transform: scale(1); }
   50% { transform: scale(1.15); }
 }
@@ -625,7 +628,7 @@
   line-height: 1;
   cursor: pointer;
   box-shadow: var(--shadow-sm);
-  transition: transform var(--transition-fast), box-shadow var(--transition-fast);
+  transition: transform var(--dur-fast) var(--ease-standard), box-shadow var(--dur-fast) var(--ease-standard);
 }
 .sv-swipe-btn:hover:not(:disabled) {
   transform: translate(-1px, -1px);
@@ -744,7 +747,7 @@
   50% { box-shadow: 0 0 0 5px rgb(0 0 0 / 0); }
 }
 .sv-task-step-idx.active {
-  animation: sv-idx-breath var(--dur-pulse) ease-in-out infinite;
+  animation: sv-idx-breath var(--dur-pulse) var(--ease-in-out) infinite;
 }
 
 /* 最终成果卡:4px 印刷黑顶线强调 */
@@ -760,22 +763,20 @@
   color: var(--sv-red-deep);
 }
 
-/* ===== 构成主义深化:列表入场 stagger(仅 transform/opacity,reduced-motion 已全局降级) ===== */
-@keyframes sv-list-in {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: translateY(0); }
-}
+/* ===== 构成主义深化:列表入场 stagger(仅 transform/opacity,reduced-motion 已全局降级)。
+   keyframes 是 content.css 动效体系的唯一 sv-list-in(UIP-9 起跨域共用);
+   时长/缓动统一 --dur-normal + --ease-out(任务步骤原 0.22/ease 属同档归一) ===== */
 /* 任务计划步骤:逐项延迟入场。
    实跑问题 3:原用 :nth-child(N) 会把 section 标题等同级节点算进索引,
    与视觉顺序错位;改 :nth-of-type 按同类元素计数,顺序稳定。 */
-.sv-task-step { animation: sv-list-in var(--dur-slow) var(--ease-standard) backwards; }
+.sv-task-step { animation: sv-list-in var(--dur-normal) var(--ease-out) backwards; }
 .sv-task-step:nth-of-type(1) { animation-delay: 0ms; }
 .sv-task-step:nth-of-type(2) { animation-delay: var(--stagger-step); }
 .sv-task-step:nth-of-type(3) { animation-delay: calc(var(--stagger-step) * 2); }
 .sv-task-step:nth-of-type(4) { animation-delay: calc(var(--stagger-step) * 3); }
 .sv-task-step:nth-of-type(5) { animation-delay: calc(var(--stagger-step) * 4); }
 /* Agent 时间线项:同款 stagger */
-.sv-timeline-item { animation: sv-list-in var(--dur-slow) var(--ease-standard) backwards; }
+.sv-timeline-item { animation: sv-list-in var(--dur-normal) var(--ease-out) backwards; }
 .sv-timeline-item:nth-child(1) { animation-delay: 0ms; }
 .sv-timeline-item:nth-child(2) { animation-delay: var(--stagger-step); }
 .sv-timeline-item:nth-child(3) { animation-delay: calc(var(--stagger-step) * 2); }

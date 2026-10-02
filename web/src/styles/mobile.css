@@ -81,7 +81,7 @@
     z-index: 52;
     width: min(84vw, 320px);
     transform: translateX(-100%);
-    transition: transform var(--transition-normal);
+    transition: transform var(--dur-normal) var(--ease-standard);
     padding-top: var(--safe-top);
     overflow-y: auto;
   }
@@ -116,7 +116,7 @@
     z-index: 52;
     width: min(88vw, 380px);
     transform: translateX(100%);
-    transition: transform var(--transition-normal);
+    transition: transform var(--dur-normal) var(--ease-standard);
     padding-top: var(--safe-top);
     padding-bottom: calc(var(--mobile-nav-h) + var(--safe-bottom));
   }

@@ -353,13 +353,16 @@ watch(
       <AgentPanel />
     </div>
 
-    <!-- 移动端抽屉遮罩:点击空白处收起当前抽屉(桌面端由 CSS 隐藏) -->
-    <div
-      v-if="store.sidebarOpen || store.agentPanelOpen"
-      class="sv-drawer-backdrop"
-      aria-hidden="true"
-      @click="closeDrawers"
-    />
+    <!-- 移动端抽屉遮罩:点击空白处收起当前抽屉(桌面端由 CSS 隐藏)。
+         2026-10-02 UIP-9:遮罩随抽屉一起淡入淡出(原为瞬时出现) -->
+    <Transition name="sv-fade">
+      <div
+        v-if="store.sidebarOpen || store.agentPanelOpen"
+        class="sv-drawer-backdrop"
+        aria-hidden="true"
+        @click="closeDrawers"
+      />
+    </Transition>
 
     <!-- 右侧边缘抽屉标识(两种模式;移动端隐藏,由底部导航「AGENT」替代) -->
     <button

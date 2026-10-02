@@ -32,25 +32,29 @@ const STYLES = join(WEB_SRC, 'styles');
 const VERBOSE = process.argv.includes('--verbose');
 
 /**
- * 行数基线(2026-10-02,UIP-6 收编动效令牌后的实测值;只降不升)。键为相对 web/src 的路径。
+ * 行数基线(2026-10-02 UIP-9 收编动效词汇后的实测值;只降不升)。
+ * UIP-9 变动:content 939→941(无障碍 delay 归零 +2 行,keyframes 迁移等量置换);
+ * task 995→996(状态点闪点规则 +1);panels 895→894(tab 容器同体合并 −2、回执条入场 +1);
+ * tokens 134→133(删 --transition-* 兼容别名 −2、新增 --ease-in-out +1)。
  */
 const LINE_BASELINE = {
   'style.css': 47,
-  'styles/tokens.css': 134,
+  'styles/tokens.css': 133,
   'styles/base.css': 117,
   'styles/shell.css': 828,
-  'styles/panels.css': 895,
-  'styles/content.css': 939,
-  'styles/task.css': 995,
+  'styles/panels.css': 894,
+  'styles/content.css': 941,
+  'styles/task.css': 996,
   'styles/mobile.css': 434,
 };
 
 /**
- * !important 基线(2026-10-02 实测;去注释后计数;只降不升)。
- * 全局域仅 content.css 有 10 处 = 7 条深底正文色双保险(文件尾「置于文件末尾」段)
- * + 3 条 prefers-reduced-motion 强制降级;新增样式不得引入(用更具体选择器解决)。
+ * !important 基线(2026-10-02 UIP-9 实测;去注释后计数;只降不升)。
+ * 全局域仅 content.css 有 12 处 = 7 条深底正文色双保险(文件尾「置于文件末尾」段)
+ * + 5 条 prefers-reduced-motion 强制降级(UIP-9 补 delay 归零 +2);新增样式不得引入
+ * (用更具体选择器解决)。
  */
-const IMPORTANT_BASELINE = { 'styles/content.css': 10 };
+const IMPORTANT_BASELINE = { 'styles/content.css': 12 };
 /** 组件 scoped(.vue)的 !important 合计基线:当前 0(一旦出现即 FAIL)。 */
 const VUE_IMPORTANT_BASELINE = 0;
 

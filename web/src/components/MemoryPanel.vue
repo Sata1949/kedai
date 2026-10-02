@@ -227,21 +227,20 @@ onServerPrefetch(load);
   display: flex;
   flex-direction: column;
   gap: 4px;
-  /* 2026-09 动效补齐:行进入 + 置顶态切换过渡(原先为突变) */
-  animation: memory-row-in var(--dur-normal) var(--ease-out) backwards;
+  /* 2026-09 动效补齐:行进入 + 置顶态切换过渡(原先为突变);
+     2026-10-02 UIP-9:入场改走全局唯一 sv-list-in,并补逐项 stagger(原无) */
+  animation: sv-list-in var(--dur-normal) var(--ease-out) backwards;
   transition: border-color var(--dur-fast) var(--ease-standard),
     background var(--dur-fast) var(--ease-standard);
 }
-@keyframes memory-row-in {
-  from {
-    opacity: 0;
-    transform: translateY(4px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
+/* 列表逐项延迟入场(与任务侧列表同款语言;第 7 项起并入同一档) */
+.memory-row:nth-child(1) { animation-delay: 0ms; }
+.memory-row:nth-child(2) { animation-delay: var(--stagger-step); }
+.memory-row:nth-child(3) { animation-delay: calc(var(--stagger-step) * 2); }
+.memory-row:nth-child(4) { animation-delay: calc(var(--stagger-step) * 3); }
+.memory-row:nth-child(5) { animation-delay: calc(var(--stagger-step) * 4); }
+.memory-row:nth-child(6) { animation-delay: calc(var(--stagger-step) * 5); }
+.memory-row:nth-child(n + 7) { animation-delay: calc(var(--stagger-step) * 6); }
 /* 置顶行:左侧粉色竖条 + 浅粉底,与列表其余行区分 */
 .memory-pinned {
   border-left: 3px solid var(--sv-pink-deep);
