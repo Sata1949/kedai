@@ -279,7 +279,9 @@ const activeLabel = computed(() => {
 
         <!-- 右侧内容区:嵌入 SettingsModal(完整设置功能) -->
         <div class="sv-hub-content">
-          <h3 class="sv-hub-content-title">{{ activeLabel }}</h3>
+          <Transition name="sv-fade" mode="out-in">
+            <h3 :key="activeSection" class="sv-hub-content-title">{{ activeLabel }}</h3>
+          </Transition>
 
           <!-- 嵌入原 SettingsModal 全部内容 -->
           <SettingsModal embedded :active-section="activeSection" />

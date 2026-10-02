@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs';
 import settingsHubSource from '../components/SettingsHub.vue?raw';
 import memoryPanelSource from '../components/MemoryPanel.vue?raw';
 import skeletonBlockSource from '../components/SkeletonBlock.vue?raw';
+import splashScreenSource from '../components/SplashScreen.vue?raw';
 import sidebarSource from '../components/Sidebar.vue?raw';
 import taskBoardSource from '../components/TaskBoard.vue?raw';
 import appSource from '../App.vue?raw';
@@ -104,6 +105,24 @@ describe('UIP-9 动效词汇源码契约', () => {
     );
     // 构成主义硬边体系:骨架只允许纯透明度呼吸,禁止 shimmer 扫光类渐变
     expect(skeletonBlockSource).not.toMatch(/gradient/i);
+  });
+
+  it('UIP-14:splash 逐字延迟令牌化(JS 只传序号)+ 分区标题挂 sv-fade', () => {
+    expect(settingsHubSource).toMatch(
+      /<Transition name="sv-fade" mode="out-in">[\s\S]*?sv-hub-content-title/,
+    );
+    // 启动逐字:全仓最后一处 JS 裸时长收编——JS 侧只传 --i,延迟由 scoped CSS 令牌 calc 求值
+    expect(splashScreenSource).toContain("'--i': i");
+    expect(splashScreenSource).not.toContain('animationDelay');
+    // 旧写法为模板串 `${0.3 + i * 0.08}s`(注释里保留数值说明不算引用)
+    expect(splashScreenSource).not.toMatch(/\$\{0\.3/);
+    expect(splashScreenSource).toMatch(
+      /animation-delay: calc\(var\(--dur-slower\) \+ var\(--stagger-step\) \* 2 \* var\(--i, 0\)\);/,
+    );
+    // 深底焦点反色(UIP-14 探针实测 2 例:sv-modal-head / sv-agent-panel-head 为 ink 底)
+    expect(baseCss).toContain('.sv-modal-head :focus-visible');
+    expect(baseCss).toContain('.sv-agent-panel-head :focus-visible');
+    expect(baseCss).toContain('outline-color: var(--sv-white);');
   });
 
   it('UIP-12 焦点样式消费点:指针模态下收窄 select 焦点,且只收窄 select', () => {

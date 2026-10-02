@@ -105,7 +105,7 @@
   cursor: pointer;
   text-align: left;
   font-size: 12px;
-  transition: all var(--dur-fast) var(--ease-standard);
+  transition: border-color var(--dur-fast) var(--ease-standard), background var(--dur-fast) var(--ease-standard), box-shadow var(--dur-fast) var(--ease-standard);
   box-shadow: var(--shadow-card); /* 阴影规则:可点卡片静态挂 card 影 */
 }
 .sv-task-item:hover {

@@ -45,6 +45,11 @@ body::after {
   outline-offset: 2px;
 }
 
+/* UIP-14 深底焦点:模态头/Agent 面板头为 ink 底,黑描边与其同色不可见 → 反色为白(探针实测) */
+.sv-modal-head :focus-visible, .sv-agent-panel-head :focus-visible {
+  outline-color: var(--sv-white);
+}
+
 /* 硬边教义(批次 5 第二轮):全局直角,拒绝圆角。
    评审点名:原生表单控件(select/textarea/input/button)在 Chromium 新版默认外观
    带微圆角,与卡片直角混用;此处对全部 sv-* 组件与原生控件统一归零,

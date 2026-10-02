@@ -79,7 +79,7 @@
   font-size: 11px;
   letter-spacing: 0.2em;
   cursor: pointer;
-  transition: all var(--dur-fast) var(--ease-standard);
+  transition: background var(--dur-fast) var(--ease-standard), padding-right var(--dur-fast) var(--ease-standard);
 }
 .sv-agent-toggle:hover {
   background: var(--sv-pink-deep);

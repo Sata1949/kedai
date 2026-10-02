@@ -42,11 +42,12 @@ const VERBOSE = process.argv.includes('--verbose');
  * shell 828→832(控件高度档位 +2、角色名截断与附件 chip min-width +2);task 996→997(appmode 高度 +1);
  * tokens 133→144(半步档 6/10/14 令牌 3 + 控件高度档 2 + 黑底次级文字 1 + 注释 5)。
  * UIP-12 变动:panels 903→911(指针模态下 select 焦点收窄规则 8 行)。
+ * UIP-14 变动:base 117→122(深底焦点反色规则 5 行——模态头/Agent 面板头为 ink 底,ink 描边不可见)。
  */
 const LINE_BASELINE = {
   'style.css': 49,
   'styles/tokens.css': 144,
-  'styles/base.css': 117,
+  'styles/base.css': 122,
   'styles/shell.css': 832,
   'styles/panels.css': 911,
   'styles/content.css': 941,
