@@ -518,8 +518,10 @@ async function removeTask(task: TaskRecord): Promise<void> {
           </div>
         </div>
 
-        <!-- 任务模式:下达目标 + 任务历史(承接任务工作台左栏,单列布局) -->
-        <div v-else key="task" class="flex min-h-0 flex-1 flex-col">
+        <!-- 任务模式:下达目标 + 任务历史(承接任务工作台左栏,单列布局)。
+             sv-task-scroll(UIP-4):表单+历史合并为单一滚动区,页脚恒固定;
+             自定义流程表单超高时不再压住「综合设置」(规则在 styles/task.css)。 -->
+        <div v-else key="task" class="sv-task-scroll flex min-h-0 flex-1 flex-col">
           <!-- 下达目标 -->
           <div class="sv-task-new">
             <div class="sv-task-new-title">下达目标</div>
@@ -555,7 +557,8 @@ async function removeTask(task: TaskRecord): Promise<void> {
               <input
                 v-model="workspacePath"
                 class="sv-input"
-                placeholder="工作区:项目目录绝对路径(可选)"
+                placeholder="工作区:项目目录绝对路径"
+                title="工作区:项目目录绝对路径(可选);留空 = 未绑定,任务在草稿目录内工作"
                 spellcheck="false"
                 :disabled="creatingTask"
               />
@@ -803,10 +806,15 @@ async function removeTask(task: TaskRecord): Promise<void> {
   color: var(--sv-red);
 }
 
-/* 工作区行(CODE-1):输入框占满剩余宽度;「选择…」「清空」按钮不换行 */
+/* 工作区行(CODE-1;UIP-2):输入框占满剩余宽度;窄栏下整行可折行,
+   输入框保 170px 下限——让 placeholder 完整可读优先于一行塞下全部控件 */
+.sv-ws-row {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
 .sv-ws-row .sv-input {
-  flex: 1 1 auto;
-  min-width: 0;
+  flex: 1 1 170px;
+  min-width: 170px;
 }
 .sv-ws-recent {
   display: flex;

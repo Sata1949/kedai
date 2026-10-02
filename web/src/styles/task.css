@@ -82,6 +82,15 @@
   overflow-y: auto;
   padding: 0 0 12px;
 }
+/* UIP-4:任务模式中部改单滚动区——自定义流程下表单(流程下拉+勾选名单)超高时,
+   溢出内容曾直接画到 .sv-side-foot(综合设置/退出)上形成重叠。现在表单+历史
+   合并进同一滚动区、页脚恒固定;列表不再单独承担内部滚动。
+   手机断点还原「抽屉整滚+列表内滚」既有形态,见 mobile.css。 */
+.sv-task-scroll { overflow-y: auto; }
+.sv-task-scroll .sv-task-list {
+  flex: none;
+  overflow: visible;
+}
 .sv-task-item {
   display: flex;
   align-items: center;
@@ -851,6 +860,19 @@
 /* --- 侧栏「下达目标」区控件:窄栏内全宽纵向排列 --- */
 .sv-task-new .sv-select { width: 100%; margin-top: 8px; }
 .sv-task-new .sv-btn { width: 100%; margin-top: 10px; }
+/* 行内豁免(UIP-1):上面两条全宽规则只服务纵向堆叠控件;行内控件(执行者/工作区行)
+   复位为行内布局,否则按钮 basis=整行、select basis=0,负自由空间全摊给按钮,
+   select 会被压成只剩箭头的窄块(同一塌陷机制见 mobile.css:325 段注释)。
+   不可改成子代选择器:TaskFlowSelect 的 select 包在 .flow-select-group 里、
+   TaskConnectionSelect 的 select 包在 .sv-inp-row 里,全宽规则必须继续按后代匹配。
+   行间距归一行容器(margin-top:8px),补偿被豁免掉的控件 margin。 */
+.sv-task-new .sv-inp-row { margin-top: 8px; }
+.sv-task-new .sv-inp-row .sv-select,
+.sv-task-new .sv-inp-row .sv-input,
+.sv-task-new .sv-inp-row .sv-btn {
+  width: auto;
+  margin-top: 0;
+}
 
 /* --- 二维批次 7b:对比模式「可调用流程」名单(窄栏内纵向勾选列表) --- */
 .sv-task-new .flow-ids { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }

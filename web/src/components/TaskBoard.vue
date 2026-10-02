@@ -1229,7 +1229,7 @@ async function removeTask(task: TaskRecord): Promise<void> {
   gap: 8px;
   margin: 8px 0 0;
   font-size: 0.85em;
-  color: var(--sv-text-dim, #999);
+  color: var(--sv-ink-dim);
 }
 .sv-task-progress-text {
   overflow: hidden;
@@ -1241,7 +1241,7 @@ async function removeTask(task: TaskRecord): Promise<void> {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: var(--sv-accent, #4ea1ff);
+  background: var(--sv-pink-deep);
   animation: sv-progress-pulse 1.4s ease-in-out infinite;
 }
 @keyframes sv-progress-pulse {

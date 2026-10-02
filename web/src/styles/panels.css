@@ -198,6 +198,13 @@
   box-shadow: var(--shadow-pink-strong);
 }
 .sv-input::placeholder { color: var(--sv-ink-faint); }
+/* 禁用输入/下拉(UIP-3):与按钮禁用态同套表达(落回粉灰面),不用半透明 */
+.sv-input:disabled,
+.sv-select:disabled {
+  background: var(--sv-line);
+  color: var(--sv-ink-dim);
+  cursor: not-allowed;
+}
 
 .sv-md-area {
   display: block;
@@ -342,7 +349,7 @@ input[type="range"].sv-range::-moz-range-thumb {
   color: var(--sv-white);
   box-shadow: var(--shadow-hard);
 }
-.sv-btn.primary:hover {
+.sv-btn.primary:hover:not(:disabled) {
   background: var(--sv-pink-deep);
   border-color: var(--sv-pink-deep);
   box-shadow: 6px 6px 0 var(--sv-ink);
@@ -351,7 +358,7 @@ input[type="range"].sv-range::-moz-range-thumb {
   background: var(--sv-white);
   color: var(--sv-ink);
 }
-.sv-btn.ghost:hover {
+.sv-btn.ghost:hover:not(:disabled) {
   background: var(--sv-pink-light);
   border-color: var(--sv-pink-deep);
 }
@@ -360,11 +367,21 @@ input[type="range"].sv-range::-moz-range-thumb {
   color: var(--sv-red);
   border-color: var(--sv-red);
 }
-.sv-btn.danger:hover {
+.sv-btn.danger:hover:not(:disabled) {
   background: var(--sv-red);
   color: var(--sv-white);
 }
-.sv-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+/* 禁用态显式压平(UIP-3):不再用 opacity 半透明——黑底按钮被压成半透明灰条,
+   在粉画布上像一条遮罩(用户截图点名)。改与 .sv-btn-send:disabled 同一套
+   「落回粉灰面」表达:无阴影、无位移暗示,文字降到次级灰。 */
+.sv-btn:disabled {
+  opacity: 1;
+  cursor: not-allowed;
+  background: var(--sv-line);
+  border-color: var(--sv-line);
+  color: var(--sv-ink-dim);
+  box-shadow: none;
+}
 
 .sv-btn-square { padding: 5px 10px; font-size: 12px; }
 .sv-btn-sm { padding: 6px 12px; font-size: 12px; }

@@ -422,5 +422,13 @@
   /* 任务详情内的操作按钮行改纵向堆叠,避免按钮被挤出视口 */
   .sv-task-head { flex-direction: column; align-items: flex-start; gap: 8px; }
   .sv-task-head-actions { flex-wrap: wrap; }
+  /* UIP-4:手机上任务中部维持「抽屉整滚 + 列表内滚」既有形态——侧栏本身即滚动抽屉,
+     中部再开内滚动会形成嵌套滚动(内层先滚、页脚常驻不可达);还原列表内部滚动。 */
+  .sv-task-scroll { overflow-y: visible; }
+  .sv-task-scroll .sv-task-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+  }
 }
 
