@@ -78,10 +78,14 @@ pub fn has_image_tools(defs: &[ToolDefinition]) -> bool {
     defs.iter().any(|d| is_image_tool(&d.name))
 }
 
-/// 按「视觉与截图」总开关过滤截图工具(视觉能力包 D5):关(默认)时剔除。
+/// 按「视觉与截图」总开关过滤截图工具(视觉能力包 D5;移动端视觉能力包 A3 起并入平台判据):
+/// 关(默认)时剔除;**Android 上无障碍截图服务未启用时同样剔除**——取不到屏的工具留着
+/// 只会浪费轮次(判据 `crate::tools::screenshot::platform_capture_available`,单点维护;
+/// 宿主桌面恒可用,既有单测不因平台分支漂移)。
 /// 聊天路径(api/chat.rs)与任务路径(tool_policy::screenshot_gate)共用本判据,
 /// 单点维护工具名(crate::tools::screenshot::TOOL_NAME)。
 pub fn filter_screenshot(defs: Vec<ToolDefinition>, enabled: bool) -> Vec<ToolDefinition> {
+    let enabled = enabled && crate::tools::screenshot::platform_capture_available();
     if enabled {
         return defs;
     }

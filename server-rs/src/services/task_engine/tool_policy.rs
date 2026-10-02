@@ -201,6 +201,8 @@ fn vision_gate(defs: Vec<ToolDefinition>, vision_enabled: bool) -> Vec<ToolDefin
 /// (`tool_sets::filter_screenshot`,单点维护工具名)。理由与其它闸门同型:开关关着时
 /// 下发只会让执行侧兜底拒绝(浪费轮次);且截图属隐私敏感能力,默认关的开关必须真实
 /// 阻断工具面,不能只挡执行。开关在**每轮编译时**由调用方按当前设置求值。
+/// 另(移动端视觉能力包 A3):判据并入 `screenshot::platform_capture_available()`——
+/// Android 上无障碍截图服务未启用时同样隐藏(单一出处在 `tool_sets::filter_screenshot`)。
 fn screenshot_gate(defs: Vec<ToolDefinition>, screenshot_enabled: bool) -> Vec<ToolDefinition> {
     tool_sets::filter_screenshot(defs, screenshot_enabled)
 }

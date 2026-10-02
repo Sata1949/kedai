@@ -56,6 +56,9 @@ pub mod token_service;
 // 回退快照(批次 6.1「undo」):写工具执行前逆操作负载落 undo_snapshots 表
 // 角色卡脚本授权台账(2026-09-14):后端脚本执行门(fail-closed),补 known-limitations L12
 pub mod script_authorization_service;
+// 安卓无障碍截图桥(Rust 侧字符串进出;status 解析/PNG 魔数等纯函数跨平台可宿主单测,
+// 2026-10-02 移动端视觉能力包 A3)
+pub mod screen_capture_android;
 // 任务文件变更台账(2026-09-30 批次 4,PRODCAP-4):任务改了什么、能否看 diff、能否回滚
 pub mod task_change_service;
 pub mod undo_service;

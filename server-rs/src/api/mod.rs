@@ -28,6 +28,7 @@ pub mod prompt_inject;
 pub mod quick_replies;
 pub mod repo_index;
 pub mod resource;
+pub mod screen;
 pub mod security;
 pub mod sessions;
 pub mod settings;

@@ -11,8 +11,9 @@
 // bash 专属,见 docs/遗留.md 的工具级审计登记)。
 //
 // 平台:`#[cfg(windows)]` 走原生 GDI(PrintWindow(PW_RENDERFULLCONTENT) 兜遮挡窗口,
-// 线程级 PER_MONITOR_AWARE_V2——server 与 Tauri 同进程,不做进程级);非 Windows
-// 注册一个**明确报错**的实现(文案指向移动端批次),编译与工具面在安卓/其它平台上不变。
+// 线程级 PER_MONITOR_AWARE_V2——server 与 Tauri 同进程,不做进程级);`#[cfg(target_os =
+// "android")]` 走无障碍截图服务(移动端视觉能力包 A3;v1 仅整屏,区域/窗口明确报错);
+// 其它平台注册一个**明确报错**的实现,编译与工具面不变。
 
 use crate::models::types::{ToolContext, ToolDefinition};
 use crate::tools::registry::ToolRegistry;
@@ -24,8 +25,24 @@ use super::agent_tools::ToolDeps;
 /// 工具名(单一出处:策略闸门与执行侧兜底都以它为准)
 pub const TOOL_NAME: &str = "screenshot";
 
-/// 截图目标(纯函数 `plan_target` 产出,便于参数校验单测)
+/// 当前平台取屏通道是否可用(闸门判据的单一出处;执行侧另有兜底)。
+///
+/// - Android:以无障碍截图服务启用状态为准(进程内缓存,设置页「刷新」清缓存重探);
+/// - Windows 与其它桌面平台:恒 true(真截成功与否在调用时由系统决定,不在闸门预判)。
+pub fn platform_capture_available() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        crate::services::screen_capture_android::service_enabled(false).0
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        true
+    }
+}
+
+/// 截图目标(纯函数 `plan_target` 产出,便于参数校验单测;仅 Windows 侧消费)
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) enum Target {
     /// 全屏:整个虚拟屏(多显示器拼合)的物理像素
     Fullscreen,
@@ -38,6 +55,7 @@ pub(crate) enum Target {
 }
 
 /// 参数校验(纯函数):display / region / window_title 三种范围互斥;region 宽高 ≥1。
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn plan_target(
     display: Option<i64>,
     region: Option<(i64, i64, u64, u64)>,
@@ -72,6 +90,7 @@ pub(crate) fn plan_target(
 
 /// 按标题从候选里选窗口(纯函数):精确匹配(忽略大小写/首尾空白)优先,唯一即中;
 /// 多个精确或仅子串命中多个 → 报错并列出候选(要求更精确的标题);零命中 → 报错。
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn pick_window(titles: &[String], wanted: &str) -> Result<usize, String> {
     let wanted = wanted.trim();
     if wanted.is_empty() {
@@ -115,6 +134,7 @@ pub(crate) fn pick_window(titles: &[String], wanted: &str) -> Result<usize, Stri
     }
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn list_titles(titles: &[String], idx: &[usize]) -> String {
     idx.iter()
         .take(5)
@@ -129,6 +149,7 @@ fn list_titles(titles: &[String], idx: &[usize]) -> String {
 /// - 坐标极端值由 `saturating_add` 兜底,不 panic。
 ///
 /// 入参均为虚拟屏物理像素(原点在主显示器左上,可为负)。
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn clamp_region(
     region: (i64, i64, u32, u32),
     screen: (i32, i32, u32, u32),
@@ -147,11 +168,17 @@ pub(crate) fn clamp_region(
     Some((left, top, nw, nh, clamped))
 }
 
-/// 注册截图工具(始终注册;可见性由「视觉与截图」开关在策略层过滤)
+/// 注册截图工具(始终注册;可见性由「视觉与截图」开关 + 平台可用性在策略层过滤)
 pub fn register_screenshot_tool(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
+    // 描述按平台收敛(安卓 v1 仅整屏;桌面全范围)——不让模型下发注定报错的参数
+    #[cfg(target_os = "android")]
+    let description = "截取屏幕画面(安卓:仅整屏),把图像交给模型查看。用于读屏视觉验证(UI 检查)。";
+    #[cfg(not(target_os = "android"))]
+    let description =
+        "截取屏幕画面(全屏 / 指定显示器 / 区域 / 窗口标题),把图像交给模型查看。用于读屏视觉验证(UI 检查、改版前后对比)。";
     let definition = ToolDefinition {
         name: TOOL_NAME.into(),
-        description: "截取屏幕画面(全屏 / 指定显示器 / 区域 / 窗口标题),把图像交给模型查看。用于读屏视觉验证(UI 检查、改版前后对比)。".into(),
+        description: description.into(),
         parameters: json!({
             "type": "object",
             "properties": {
@@ -179,14 +206,24 @@ pub fn register_screenshot_tool(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
             }),
         );
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "android")]
+    {
+        registry.register(
+            definition,
+            Arc::new(move |args: serde_json::Value, ctx: ToolContext| {
+                let deps = deps.clone();
+                Box::pin(async move { screenshot_impl(&deps, &ctx, &args).await })
+            }),
+        );
+    }
+    #[cfg(not(any(windows, target_os = "android")))]
     {
         let _ = deps;
         registry.register(
             definition,
             Arc::new(|_args: serde_json::Value, _ctx: ToolContext| {
                 Box::pin(async move {
-                    Err("截图工具当前仅支持 Windows 桌面(安卓截图见移动端批次)".to_string())
+                    Err("截图工具当前仅支持 Windows 桌面与 Android(其它平台暂不支持)".to_string())
                 })
             }),
         );
@@ -247,7 +284,96 @@ async fn screenshot_impl(
     Ok(json!({ "text": text, "images": [reference] }).to_string())
 }
 
+/// 安卓取屏实现(移动端视觉能力包 A3):无障碍 takeScreenshot → PNG → 既有图像通道。
+/// v1 仅整屏(默认显示器);区域 / 窗口 / 其它显示器明确报错(登记为后续,见 docs/遗留.md)。
+#[cfg(target_os = "android")]
+async fn screenshot_impl(
+    deps: &ToolDeps,
+    ctx: &ToolContext,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    use crate::services::screen_capture_android as cap;
+
+    // 执行侧兜底 1:总开关(与桌面同口径;下发侧已剔除,防模型凭历史上下文臆造调用)
+    if !deps.settings_snapshot().vision_screenshot_enabled {
+        return Err("截图未启用:请在 设置 → 视觉与截图 中开启「允许截图工具取屏」".to_string());
+    }
+    // 执行侧兜底 2:无障碍服务未启用(下发侧闸门同样会隐藏工具,双保险)
+    let (enabled, why) = cap::service_enabled(false);
+    if !enabled {
+        return Err(format!(
+            "安卓截图不可用:{why};请在 系统设置 → 无障碍 中开启 Kedai 的截图服务(或到 设置 → 视觉与截图 跳转)"
+        ));
+    }
+    // v1 仅整屏:区域 / 窗口 / 其它显示器明确报错,不给「看似支持」的假象
+    if args
+        .get("window_title")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.trim().is_empty())
+    {
+        return Err(
+            "安卓暂不支持窗口截图(v1 仅整屏);如需窗口级画面,请先切到目标窗口再整屏截图".to_string(),
+        );
+    }
+    if args.get("region").is_some() {
+        return Err("安卓暂不支持区域截图(v1 仅整屏)".to_string());
+    }
+    match args.get("display").and_then(|v| v.as_i64()) {
+        None | Some(0) => {}
+        Some(i) => {
+            return Err(format!(
+                "安卓暂不支持指定显示器(请求 display={i};v1 仅默认显示器整屏)"
+            ))
+        }
+    }
+
+    // 走既有图像通道:无障碍服务 PNG 原子落盘 → Rust 校验 → ImageService.save → 约定式返回
+    let temp_path = deps
+        .images
+        .dir()
+        .join(format!("cap-{}.png", uuid::Uuid::new_v4()));
+    let capture_path = temp_path.to_string_lossy().into_owned();
+    tokio::task::spawn_blocking(move || {
+        cap::capture_to_file(&capture_path, cap::CAPTURE_TIMEOUT_MS)
+    })
+    .await
+    .map_err(|e| format!("截图任务失败: {e}"))??;
+    let bytes = match std::fs::read(&temp_path) {
+        Ok(b) => b,
+        Err(e) => {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(format!("截图回读失败:{e}"));
+        }
+    };
+    // 临时文件随后清理(失败无妨;成图在 save 时已按 uuid 名另存)
+    let _ = std::fs::remove_file(&temp_path);
+    if !cap::is_png(&bytes) {
+        return Err(
+            "截图回读校验失败:输出不是有效 PNG(可重试;持续失败请重新开启无障碍截图服务)"
+                .to_string(),
+        );
+    }
+    let (width, height) =
+        cap::png_dimensions(&bytes).ok_or_else(|| "截图回读校验失败:PNG 头部无效".to_string())?;
+    // 审计只记元数据(不含像素)
+    tracing::info!(
+        session_id = ctx.session_id.as_str(),
+        width,
+        height,
+        png_bytes = bytes.len(),
+        "安卓截图完成(仅元数据)"
+    );
+    let reference = deps.images.save(
+        &format!("shot-{}.png", chrono::Utc::now().format("%Y%m%d-%H%M%S")),
+        "image/png",
+        &bytes,
+    )?;
+    let text = format!("已截图(安卓整屏):输出 {width}×{height}。请基于图像实际内容回答。");
+    Ok(json!({ "text": text, "images": [reference] }).to_string())
+}
+
 /// 一次截图的产物(png 字节 + 元数据;像素只落盘,不进日志)
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) struct Shot {
     pub png: Vec<u8>,
     pub width: u32,
@@ -261,6 +387,7 @@ pub(crate) struct Shot {
 
 /// BGRA(自顶向下 32bpp)→ RGBA(编码 PNG 与单色检测的公共前置;
 /// 尺寸由调用方保证与 bgra 长度一致)
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn rgba_from_bgra(bgra: &[u8], _width: u32, _height: u32) -> Vec<u8> {
     let mut rgba = vec![0u8; bgra.len()];
     for (src, dst) in bgra.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {
@@ -273,6 +400,7 @@ pub(crate) fn rgba_from_bgra(bgra: &[u8], _width: u32, _height: u32) -> Vec<u8> 
 }
 
 /// 单色检测(全黑/全白等):与首个像素逐通道比对(纯函数,便于单测)
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn is_uniform(rgba: &[u8]) -> bool {
     let Some(first) = rgba.get(..4) else {
         return false;
@@ -604,6 +732,13 @@ mod win {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 平台取屏判据:宿主桌面恒可用(安卓侧由无障碍服务状态决定,由模拟器全链验证)
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn platform_capture_available_true_on_desktop() {
+        assert!(platform_capture_available());
+    }
 
     #[test]
     fn plan_target_defaults_and_conflicts() {
