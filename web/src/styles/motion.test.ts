@@ -95,4 +95,15 @@ describe('UIP-9 动效词汇源码契约', () => {
   it('UIP-9e:移动端抽屉遮罩经 sv-fade 过渡(与抽屉本体同步淡入)', () => {
     expect(appSource).toMatch(/<Transition name="sv-fade">[\s\S]*sv-drawer-backdrop/);
   });
+
+  it('UIP-12 焦点样式消费点:指针模态下收窄 select 焦点,且只收窄 select', () => {
+    // 消费 web/src/inputModality.ts 写入的 html[data-input-mode];JS 侧见 inputModality.test.ts
+    expect(panelsCss).toMatch(
+      /html\[data-input-mode='pointer'\] \.sv-select:focus \{[^}]*box-shadow: none;[^}]*\}/,
+    );
+    // 文本框与「无标记/键盘」路径维持原焦样式(不得被本批改动;打字反馈保留,UIP-7 口径)
+    expect(panelsCss).toMatch(
+      /\.sv-input:focus, \.sv-select:focus \{[^}]*box-shadow: var\(--shadow-pink-strong\);[^}]*\}/,
+    );
+  });
 });

@@ -197,6 +197,14 @@
   border-color: var(--sv-pink-deep);
   box-shadow: var(--shadow-pink-strong);
 }
+/* 输入模态收窄(R-UIP1 落地 / UIP-12,消费 web/src/inputModality.ts 的标记):
+   Chromium 对 select 的点选也命中 :focus-visible(纯 CSS 不可分型),故按输入模态收窄——
+   指针点选不显粉框;键盘聚焦与「尚无交互」(无属性)维持上面的现状样式。
+   只收窄 select;文本框的焦点粉框=打字反馈,保留(UIP-7 口径)。 */
+html[data-input-mode='pointer'] .sv-select:focus {
+  border-color: var(--sv-ink);
+  box-shadow: none;
+}
 /* 单行控件显式高度(UIP-10 控件高度档位):与按钮同档 40px、同排天然等高;
    只限 input/select——textarea 与其他元素共用 .sv-input 类,不得套固定高度 */
 input.sv-input,
