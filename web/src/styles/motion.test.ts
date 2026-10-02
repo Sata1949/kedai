@@ -8,6 +8,8 @@ import settingsHubSource from '../components/SettingsHub.vue?raw';
 import memoryPanelSource from '../components/MemoryPanel.vue?raw';
 import skeletonBlockSource from '../components/SkeletonBlock.vue?raw';
 import splashScreenSource from '../components/SplashScreen.vue?raw';
+import chatRecordsSource from '../components/ChatRecords.vue?raw';
+import chatWindowSource from '../components/ChatWindow.vue?raw';
 import sidebarSource from '../components/Sidebar.vue?raw';
 import taskBoardSource from '../components/TaskBoard.vue?raw';
 import appSource from '../App.vue?raw';
@@ -123,6 +125,32 @@ describe('UIP-9 动效词汇源码契约', () => {
     expect(baseCss).toContain('.sv-modal-head :focus-visible');
     expect(baseCss).toContain('.sv-agent-panel-head :focus-visible');
     expect(baseCss).toContain('outline-color: var(--sv-white);');
+  });
+
+  it('UIP-15:退场/重排过渡 sv-list 唯一来源;试点两处均在非虚拟列表', () => {
+    expect(contentCss).toMatch(/\.sv-list-enter-active,\s*\n\.sv-list-leave-active \{/);
+    expect(contentCss).toMatch(/\.sv-list-move \{[^}]*transition: transform var\(--dur-normal\) var\(--ease-out\);/);
+    expect(memoryPanelSource).toContain('name="sv-list"');
+    expect(chatRecordsSource).toContain('name="sv-list"');
+    // 列表有内容时静默刷新(骨架只在无内容时占位),否则刷新会卸载 TransitionGroup 丢了退场
+    expect(chatRecordsSource).toMatch(/v-if="loading && sessions\.length === 0"/);
+    // 退场行钉位:flex 容器里 absolute 静态位置会跑到顶端,须在 before-leave 里量取 offset 钉住
+    for (const src of [memoryPanelSource, chatRecordsSource]) {
+      expect(src).toContain('@before-leave="pinLeavingRow"');
+      expect(src).toContain("e.style.position = 'absolute'");
+    }
+    // 行自带 transition 与 sv-list-* 类同特异性(scoped 后注入会覆盖类)——
+    // 记忆行须把 opacity/transform 并入自身 transition,退场/重排才生效
+    expect(memoryPanelSource).toMatch(/opacity var\(--dur-normal\) var\(--ease-standard\)/);
+    expect(memoryPanelSource).toMatch(/transform var\(--dur-normal\) var\(--ease-out\)/);
+    // 入场动画播完置 settled(animation:none)——否则 move 检测判 type=animation 跳过、位移还重播动画
+    expect(memoryPanelSource).toContain('memory-row-settled');
+    expect(memoryPanelSource).toContain('@animationend="onRowSettled(row, $event)"');
+    // 容器须为定位上下文(memory-list 在 scoped 内;sv-datalist 在全局域原位加段、不增行数)
+    expect(memoryPanelSource).toMatch(/\.memory-list \{[\s\S]*?position: relative;/);
+    expect(panelsCss).toContain('.sv-datalist { display: flex; flex-direction: column; gap: var(--space-2-5); position: relative; }');
+    // 消息流是虚拟滚动列表,明示不试点
+    expect(chatWindowSource).not.toContain('TransitionGroup');
   });
 
   it('UIP-12 焦点样式消费点:指针模态下收窄 select 焦点,且只收窄 select', () => {

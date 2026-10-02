@@ -31,6 +31,15 @@ function fmtTime(iso: string): string {
   }
 }
 
+/** UIP-15:退场行钉在原位(absolute + 原宽),脱离 flex 流让剩余行立即补位并走 sv-list-move */
+function pinLeavingRow(el: Element): void {
+  const e = el as HTMLElement;
+  e.style.position = 'absolute';
+  e.style.top = `${e.offsetTop}px`;
+  e.style.left = `${e.offsetLeft}px`;
+  e.style.width = `${e.offsetWidth}px`;
+}
+
 async function load(): Promise<void> {
   loading.value = true;
   try {
@@ -164,13 +173,15 @@ onMounted(() => {
           全部会话列表(按最近活动排序)。选择切换会话、新建当前角色会话、删除会话,或对单个会话导出 / 导入 JSON(导入将替换该会话全部内容)。
         </p>
 
-        <div v-if="loading" class="sv-empty" style="padding: 30px var(--space-3)">
+        <!-- UIP-15:骨架只在无内容时占位;有列表时刷新保持可见(删除后由 sv-list 播放退场/重排) -->
+        <div v-if="loading && sessions.length === 0" class="sv-empty" style="padding: 30px var(--space-3)">
           <SkeletonBlock :lines="5" />
         </div>
         <div v-else-if="sessions.length === 0" class="sv-empty" style="padding: 30px var(--space-3)">
           <p style="font-size: 12px">暂无会话记录。选择角色后发送第一条消息,或点击「新建」。</p>
         </div>
-        <div v-else class="sv-datalist">
+        <!-- UIP-15:会话删除/新建走 sv-list 过渡(删除入口见行内「删除」) -->
+        <TransitionGroup v-else name="sv-list" tag="div" class="sv-datalist" @before-leave="pinLeavingRow">
           <div
             v-for="s in sessions"
             :key="s.id"
@@ -195,7 +206,7 @@ onMounted(() => {
               <button class="sv-btn danger sv-btn-sm" :disabled="busy" @click="removeSession(s)">删除</button>
             </div>
           </div>
-        </div>
+        </TransitionGroup>
         <div v-if="importError" class="sv-feedback err" style="margin-top: var(--space-2-5)">{{ importError }}</div>
         <input ref="importInput" type="file" accept=".json,application/json" class="hidden" @change="onImportFile" />
       </div>

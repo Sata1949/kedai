@@ -43,6 +43,7 @@ const VERBOSE = process.argv.includes('--verbose');
  * tokens 133→144(半步档 6/10/14 令牌 3 + 控件高度档 2 + 黑底次级文字 1 + 注释 5)。
  * UIP-12 变动:panels 903→911(指针模态下 select 焦点收窄规则 8 行)。
  * UIP-14 变动:base 117→122(深底焦点反色规则 5 行——模态头/Agent 面板头为 ink 底,ink 描边不可见)。
+ * UIP-15 变动:content 941→959(列表增删/重排过渡 sv-list 18 行——两处试点:记忆行/会话行)。
  */
 const LINE_BASELINE = {
   'style.css': 49,
@@ -50,7 +51,7 @@ const LINE_BASELINE = {
   'styles/base.css': 122,
   'styles/shell.css': 832,
   'styles/panels.css': 911,
-  'styles/content.css': 941,
+  'styles/content.css': 959,
   'styles/task.css': 997,
   'styles/mobile.css': 434,
 };

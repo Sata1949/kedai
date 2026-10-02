@@ -7,7 +7,7 @@
 // 置顶开关(pinned)、「清理已归档」(POST /api/memory/prune,两段式确认)、
 // 「蒸馏当前会话」(未开启时 400 带去设置指引)。
 // onServerPrefetch:服务端渲染测试通道(renderToString 会等待预取完成)。
-import { onMounted, onServerPrefetch } from 'vue';
+import { onMounted, onServerPrefetch, ref } from 'vue';
 import { useMemoryPanel } from '../composables/useMemoryPanel';
 import {
   highlightSegments,
@@ -48,6 +48,26 @@ function onKindChange(ev: Event): void {
 /** 内容高亮分段(搜索命中标 <mark>,无查询时单段) */
 function segments(row: MemoryRow) {
   return highlightSegments(row.content, query.value);
+}
+
+/** UIP-15:退场行钉在原位(absolute + 原宽),脱离 flex 流让剩余行立即补位并走 sv-list-move */
+function pinLeavingRow(el: Element): void {
+  const e = el as HTMLElement;
+  e.style.position = 'absolute';
+  e.style.top = `${e.offsetTop}px`;
+  e.style.left = `${e.offsetLeft}px`;
+  e.style.width = `${e.offsetWidth}px`;
+}
+
+/** UIP-15:入场动画结束后置 settled——Vue move 检测要求 transition 时长 > animation 时长,
+    行自带 sv-list-in(0.15s+错峰延迟)会把类型判成 animation 致 move 整体跳过;
+    置 settled 同时避免 DOM 位移时入场动画重播(位移重插会重启 CSS 动画) */
+const settledIds = ref<Set<number>>(new Set());
+function onRowSettled(row: MemoryRow, ev: AnimationEvent): void {
+  if (ev.target !== ev.currentTarget || settledIds.value.has(row.id)) return;
+  const next = new Set(settledIds.value);
+  next.add(row.id);
+  settledIds.value = next;
 }
 
 onMounted(load);
@@ -133,9 +153,15 @@ onServerPrefetch(load);
         {{ actionMsg.text }}
       </div>
 
-      <!-- 记忆列表(置顶优先,其次 id 降序;按 kind/query 本地筛选) -->
-      <div v-if="shownRows.length" class="memory-list">
-        <div v-for="row in shownRows" :key="row.id" class="memory-row" :class="{ 'memory-pinned': row.pinned }">
+      <!-- 记忆列表(置顶优先,其次 id 降序;按 kind/query 本地筛选)。UIP-15:删除/置顶重排走 sv-list 过渡 -->
+      <TransitionGroup v-if="shownRows.length" name="sv-list" tag="div" class="memory-list" @before-leave="pinLeavingRow">
+        <div
+          v-for="row in shownRows"
+          :key="row.id"
+          class="memory-row"
+          :class="{ 'memory-pinned': row.pinned, 'memory-row-settled': settledIds.has(row.id) }"
+          @animationend="onRowSettled(row, $event)"
+        >
           <div class="memory-row-head">
             <span v-if="row.pinned" class="memory-pin-tag" title="置顶:优先注入">置顶</span>
             <span class="kind-tag" :class="row.kindClass">{{ row.kindLabel }}</span>
@@ -182,7 +208,7 @@ onServerPrefetch(load);
             </template>
           </div>
         </div>
-      </div>
+      </TransitionGroup>
       <p v-else-if="!error && !loading && !searching" class="sv-script-meta" style="font-size: 11px">
         {{ query.trim() || kindFilter !== 'all' ? '没有匹配的记忆:可调整搜索词或筛选条件。' : '暂无记忆:可蒸馏当前会话或上方手动补录。' }}
       </p>
@@ -220,6 +246,8 @@ onServerPrefetch(load);
   display: flex;
   flex-direction: column;
   gap: var(--space-1-5);
+  /* UIP-15:退场行以 absolute 钉位,容器须为定位上下文 */
+  position: relative;
 }
 .memory-row {
   border: 1px solid var(--sv-line);
@@ -228,10 +256,14 @@ onServerPrefetch(load);
   flex-direction: column;
   gap: var(--space-1);
   /* 2026-09 动效补齐:行进入 + 置顶态切换过渡(原先为突变);
-     2026-10-02 UIP-9:入场改走全局唯一 sv-list-in,并补逐项 stagger(原无) */
+     2026-10-02 UIP-9:入场改走全局唯一 sv-list-in,并补逐项 stagger(原无)
+     UIP-15:本行自带 transition 与 sv-list-* 类同特异性、scoped 后注入会覆盖类——
+     故把 opacity/transform 并入本行 transition(时长与 sv-list 一致,退场/重排才生效) */
   animation: sv-list-in var(--dur-normal) var(--ease-out) backwards;
   transition: border-color var(--dur-fast) var(--ease-standard),
-    background var(--dur-fast) var(--ease-standard);
+    background var(--dur-fast) var(--ease-standard),
+    opacity var(--dur-normal) var(--ease-standard),
+    transform var(--dur-normal) var(--ease-out);
 }
 /* 列表逐项延迟入场(与任务侧列表同款语言;第 7 项起并入同一档) */
 .memory-row:nth-child(1) { animation-delay: 0ms; }
@@ -241,6 +273,10 @@ onServerPrefetch(load);
 .memory-row:nth-child(5) { animation-delay: calc(var(--stagger-step) * 4); }
 .memory-row:nth-child(6) { animation-delay: calc(var(--stagger-step) * 5); }
 .memory-row:nth-child(n + 7) { animation-delay: calc(var(--stagger-step) * 6); }
+/* UIP-15:入场播完即摘动画——行上任何 animation 都会让 Vue 的 move 检测判 type=animation 而跳过 */
+.memory-row-settled {
+  animation: none;
+}
 /* 置顶行:左侧粉色竖条 + 浅粉底,与列表其余行区分 */
 .memory-pinned {
   border-left: 3px solid var(--sv-pink-deep);
