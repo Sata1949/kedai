@@ -852,7 +852,7 @@ input[type="range"].sv-range::-moz-range-thumb {
   justify-content: center;
   background: var(--sv-paper);
 }
-.sv-splash.fade-out { opacity: 0; pointer-events: none; transition: opacity 0.4s var(--ease-standard); }
+.sv-splash.fade-out { opacity: 0; pointer-events: none; transition: opacity var(--dur-slower) var(--ease-standard); }
 .sv-splash-content {
   text-align: center;
   position: relative;
@@ -862,7 +862,7 @@ input[type="range"].sv-range::-moz-range-thumb {
   height: 80px;
   margin: 0 auto 20px;
   object-fit: cover;
-  animation: sv-splash-logo-pulse 1.5s ease-in-out infinite;
+  animation: sv-splash-logo-pulse var(--dur-pulse-slow) ease-in-out infinite;
 }
 @keyframes sv-splash-logo-pulse {
   0%, 100% { transform: scale(1); }
@@ -878,7 +878,7 @@ input[type="range"].sv-range::-moz-range-thumb {
 .sv-splash-title span {
   display: inline-block;
   opacity: 0;
-  animation: sv-splash-letter 0.5s ease forwards;
+  animation: sv-splash-letter var(--dur-splash) ease forwards;
 }
 @keyframes sv-splash-letter {
   from { opacity: 0; transform: translateY(12px); }
@@ -887,7 +887,7 @@ input[type="range"].sv-range::-moz-range-thumb {
 
 /* 主界面淡入 */
 .sv-app-enter {
-  animation: sv-app-fade-in 0.3s ease;
+  animation: sv-app-fade-in var(--dur-slower) var(--ease-standard);
 }
 @keyframes sv-app-fade-in {
   from { opacity: 0; }

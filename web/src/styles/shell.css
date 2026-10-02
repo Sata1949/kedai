@@ -222,7 +222,7 @@
 
 /* ===== 气泡 ===== */
 
-.sv-msg { display: flex; margin-bottom: 28px; gap: 12px; animation: sv-msg-in 0.18s ease; }
+.sv-msg { display: flex; margin-bottom: 28px; gap: 12px; animation: sv-msg-in var(--dur-normal) var(--ease-standard); }
 .sv-msg.user { justify-content: flex-end; }
 
 .sv-msg-bubble {
@@ -332,17 +332,17 @@
   width: 10px;
   height: 10px;
   background: var(--sv-ink);
-  animation: sv-square-pulse 1.2s infinite ease-in-out;
+  animation: sv-square-pulse var(--dur-pulse) infinite ease-in-out;
 }
-.sv-thinking i:nth-child(2) { background: var(--sv-pink); animation-delay: 0.15s; }
-.sv-thinking i:nth-child(3) { background: var(--sv-pink-deep); animation-delay: 0.3s; }
+.sv-thinking i:nth-child(2) { background: var(--sv-pink); animation-delay: var(--dur-normal); }
+.sv-thinking i:nth-child(3) { background: var(--sv-pink-deep); animation-delay: calc(var(--dur-normal) * 2); }
 
 /* 流式光标 */
 @keyframes sv-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
 .sv-stream-cursor::after {
   content: "▍";
   color: var(--sv-pink-deep);
-  animation: sv-blink 1s infinite;
+  animation: sv-blink var(--dur-pulse) infinite;
 }
 /* 流式光标的块级适配(修复用户实测「装饰线条错位/多余线段」):
    markdown 气泡(sv-msg-md,v-html 渲染)内容以块级元素(p/ul/pre 等)结尾时,
@@ -368,12 +368,12 @@
 .sv-msg-bubble.sv-msg-md.sv-stream-cursor > ol:last-child > li:last-child::after {
   content: "▍";
   color: var(--sv-pink-deep);
-  animation: sv-blink 1s infinite;
+  animation: sv-blink var(--dur-pulse) infinite;
 }
 /* pre 结尾(工具调用块/代码块):光标尾随代码文本,颜色继承 pre 白字(黑底上可见) */
 .sv-msg-bubble.sv-msg-md.sv-stream-cursor > pre:last-child::after {
   content: "▍";
-  animation: sv-blink 1s infinite;
+  animation: sv-blink var(--dur-pulse) infinite;
 }
 
 /* 消息操作行 */

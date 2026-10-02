@@ -242,6 +242,10 @@ if (-not $SkipWeb -and -not $AuditOnly) {
         # 前端类型逃逸 ratchet:as never / as unknown as / 非空断言 / any 只降不升
         # (纯 Node 零依赖,与 check-arch/check-contract 同风格;基线见脚本内 BASELINE)
         Invoke-Stage 'web: type-ratchet'        { node tools/check-frontend-lint.mjs }
+        # 样式纪律 ratchet(2026-10-02 UIP-8 新增;FRONTEND-REPORT §七第 10 条 / FE-12 落点):
+        # 全局域(style.css + styles/*.css)逐文件行数与 !important 只降不升 + 组件 scoped
+        # !important 合计 + animation/transition 裸时长归零(动效令牌 --dur-*/--stagger-step)。
+        Invoke-Stage 'web: css-discipline'      { node tools/check-css-discipline.mjs }
         # 前端代码质量(ESLint flat config + eslint-plugin-vue):0 error 硬门禁。
         # 与上面 type-ratchet 目的不同(ratchet 管类型逃逸、此管代码质量),两者并存。
         # 规则集首轮克制:存量问题降级为 warn(见 web/eslint.config.js),故 0 error 可过;

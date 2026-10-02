@@ -1242,7 +1242,7 @@ async function removeTask(task: TaskRecord): Promise<void> {
   height: 7px;
   border-radius: 50%;
   background: var(--sv-pink-deep);
-  animation: sv-progress-pulse 1.4s ease-in-out infinite;
+  animation: sv-progress-pulse var(--dur-pulse) ease-in-out infinite;
 }
 @keyframes sv-progress-pulse {
   0%, 100% { opacity: 1; }

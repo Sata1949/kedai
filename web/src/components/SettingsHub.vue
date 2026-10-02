@@ -315,16 +315,17 @@ const activeLabel = computed(() => {
   /* 二级标签同样不折行:最长是「授权与命令执行」(7 个全角字 ≈98px),在 180px 导航下
      可用宽约 99px —— 与一级的「连接与模型」是同一类边缘问题(2026-09-27 UIFIX-3) */
   white-space: nowrap;
-  /* 2026-09 动效:二级项随功能域切换逐条淡入(40ms 递增,与 sv-list-in 语言一致) */
+  /* 2026-09 动效:二级项随功能域切换逐条淡入;UIP-6 起逐项延迟走 --stagger-step 令牌
+     (与 sv-list-in 语言一致) */
   animation: hub-sub-in var(--dur-normal) var(--ease-out) backwards;
   transition: background var(--transition-fast), color var(--transition-fast),
     border-color var(--transition-fast);
 }
 .hub-sub-item:nth-child(1) { animation-delay: 0ms; }
-.hub-sub-item:nth-child(2) { animation-delay: 40ms; }
-.hub-sub-item:nth-child(3) { animation-delay: 80ms; }
-.hub-sub-item:nth-child(4) { animation-delay: 120ms; }
-.hub-sub-item:nth-child(n + 5) { animation-delay: 160ms; }
+.hub-sub-item:nth-child(2) { animation-delay: var(--stagger-step); }
+.hub-sub-item:nth-child(3) { animation-delay: calc(var(--stagger-step) * 2); }
+.hub-sub-item:nth-child(4) { animation-delay: calc(var(--stagger-step) * 3); }
+.hub-sub-item:nth-child(n + 5) { animation-delay: calc(var(--stagger-step) * 4); }
 @keyframes hub-sub-in {
   from {
     opacity: 0;

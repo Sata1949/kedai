@@ -143,7 +143,7 @@
   min-height: 0;
   overflow-y: auto;
   padding: 20px clamp(20px, 4vw, 48px);
-  animation: sv-task-detail-in 0.32s ease;
+  animation: sv-task-detail-in var(--dur-slower) var(--ease-standard);
   /* 批次 5:与聊天画布同款的红黑双色段带(--sv-top-stripe 单一来源);
      实跑问题 6:同样下移 4px 让开顶栏回声阴影 */
   background-image: var(--sv-top-stripe);
@@ -600,7 +600,7 @@
 /* 时间线当前执行步:粉强调阴影 + 序号方块脉动(仅 transform) */
 .sv-timeline-item.running { box-shadow: var(--shadow-pink); }
 .sv-timeline-item.running::before {
-  animation: sv-tl-pulse 0.9s ease-in-out infinite;
+  animation: sv-tl-pulse var(--dur-pulse) ease-in-out infinite;
   transform-origin: center;
 }
 @keyframes sv-tl-pulse {
@@ -744,7 +744,7 @@
   50% { box-shadow: 0 0 0 5px rgb(0 0 0 / 0); }
 }
 .sv-task-step-idx.active {
-  animation: sv-idx-breath 1.2s ease-in-out infinite;
+  animation: sv-idx-breath var(--dur-pulse) ease-in-out infinite;
 }
 
 /* 最终成果卡:4px 印刷黑顶线强调 */
@@ -768,20 +768,20 @@
 /* 任务计划步骤:逐项延迟入场。
    实跑问题 3:原用 :nth-child(N) 会把 section 标题等同级节点算进索引,
    与视觉顺序错位;改 :nth-of-type 按同类元素计数,顺序稳定。 */
-.sv-task-step { animation: sv-list-in 0.22s ease backwards; }
+.sv-task-step { animation: sv-list-in var(--dur-slow) var(--ease-standard) backwards; }
 .sv-task-step:nth-of-type(1) { animation-delay: 0ms; }
-.sv-task-step:nth-of-type(2) { animation-delay: 40ms; }
-.sv-task-step:nth-of-type(3) { animation-delay: 80ms; }
-.sv-task-step:nth-of-type(4) { animation-delay: 120ms; }
-.sv-task-step:nth-of-type(5) { animation-delay: 160ms; }
+.sv-task-step:nth-of-type(2) { animation-delay: var(--stagger-step); }
+.sv-task-step:nth-of-type(3) { animation-delay: calc(var(--stagger-step) * 2); }
+.sv-task-step:nth-of-type(4) { animation-delay: calc(var(--stagger-step) * 3); }
+.sv-task-step:nth-of-type(5) { animation-delay: calc(var(--stagger-step) * 4); }
 /* Agent 时间线项:同款 stagger */
-.sv-timeline-item { animation: sv-list-in 0.22s ease backwards; }
+.sv-timeline-item { animation: sv-list-in var(--dur-slow) var(--ease-standard) backwards; }
 .sv-timeline-item:nth-child(1) { animation-delay: 0ms; }
-.sv-timeline-item:nth-child(2) { animation-delay: 40ms; }
-.sv-timeline-item:nth-child(3) { animation-delay: 80ms; }
-.sv-timeline-item:nth-child(4) { animation-delay: 120ms; }
-.sv-timeline-item:nth-child(5) { animation-delay: 160ms; }
-.sv-timeline-item:nth-child(6) { animation-delay: 200ms; }
+.sv-timeline-item:nth-child(2) { animation-delay: var(--stagger-step); }
+.sv-timeline-item:nth-child(3) { animation-delay: calc(var(--stagger-step) * 2); }
+.sv-timeline-item:nth-child(4) { animation-delay: calc(var(--stagger-step) * 3); }
+.sv-timeline-item:nth-child(5) { animation-delay: calc(var(--stagger-step) * 4); }
+.sv-timeline-item:nth-child(6) { animation-delay: calc(var(--stagger-step) * 5); }
 
 /* ============================================================
    收编工具类(2026-08 视觉精修)
