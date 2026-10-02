@@ -135,7 +135,8 @@ object KedaiNative {
      * 分层回退(按 API 级别,免存储权限):
      *   - API ≥ 29:`MediaStore.Downloads` 插入 —— 免权限写入系统「下载」目录,
      *     用户在文件管理器/下载应用里直接可见;
-     *   - API < 29(本项目 minSdk 24):MediaStore 尚无 Downloads 集合,且写公共目录
+     *   - API < 29(历史 minSdk 24 时代的回退;2026-10-02 起 minSdk 30,本分支已不可达,
+     *     保留以维持 API 语义完整):MediaStore 尚无 Downloads 集合,且写公共目录
      *     需要 `WRITE_EXTERNAL_STORAGE`(本项目**刻意不申请**任何存储权限),
      *     故回退到应用自己的外部目录 `Android/data/<pkg>/files/Download/`,
      *     并把**真实路径**回传,由 UI/模型如实告知用户去哪找。

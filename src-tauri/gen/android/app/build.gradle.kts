@@ -30,7 +30,10 @@ android {
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
         applicationId = "com.kedai.app"
-        minSdk = 24
+        // Kedai:2026-10-02 由 24 抬到 30(Android 11)——移动端视觉能力包需要
+        // AccessibilityService.takeScreenshot(API 30+);低于 30 的设备不再可安装,
+        // 详见 docs/功能-变更史.md 移动端视觉能力包章。
+        minSdk = 30
         targetSdk = 36
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
