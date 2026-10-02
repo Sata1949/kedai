@@ -6,6 +6,7 @@ import { ref, computed, onMounted } from 'vue';
 import { storeToRefs } from 'pinia';
 import { useAppStore } from '../store';
 import * as api from '../api';
+import SkeletonBlock from './SkeletonBlock.vue';
 
 const store = useAppStore();
 const { worldBooks, characters, currentCharacter, currentCharacterId } = storeToRefs(store);
@@ -313,7 +314,7 @@ async function loadWorldBooksChecked(): Promise<void> {
             <span class="sv-supreme red" /> 角色卡内嵌世界书
             <span class="sv-wb-count">{{ currentCharacter?.chara_name ?? '未选择角色' }}</span>
           </div>
-          <p v-if="currentCharacterId && !charEntriesLoaded" class="sv-note">加载中…</p>
+          <SkeletonBlock v-if="currentCharacterId && !charEntriesLoaded" :lines="3" />
           <div v-else-if="currentCharacterId && charMsg?.kind === 'err'" class="sv-empty" style="padding: var(--space-4) var(--space-3)">
             <div class="sv-empty-geo mb8">
               <span class="sq black" />

@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import settingsHubSource from '../components/SettingsHub.vue?raw';
 import memoryPanelSource from '../components/MemoryPanel.vue?raw';
+import skeletonBlockSource from '../components/SkeletonBlock.vue?raw';
 import sidebarSource from '../components/Sidebar.vue?raw';
 import taskBoardSource from '../components/TaskBoard.vue?raw';
 import appSource from '../App.vue?raw';
@@ -94,6 +95,15 @@ describe('UIP-9 动效词汇源码契约', () => {
 
   it('UIP-9e:移动端抽屉遮罩经 sv-fade 过渡(与抽屉本体同步淡入)', () => {
     expect(appSource).toMatch(/<Transition name="sv-fade">[\s\S]*sv-drawer-backdrop/);
+  });
+
+  it('UIP-13:骨架脉冲唯一名与令牌化,且不引渐变(构成主义约束)', () => {
+    expect(skeletonBlockSource).toContain('@keyframes sv-skeleton-pulse');
+    expect(skeletonBlockSource).toMatch(
+      /animation: sv-skeleton-pulse var\(--dur-pulse\) var\(--ease-in-out\)/,
+    );
+    // 构成主义硬边体系:骨架只允许纯透明度呼吸,禁止 shimmer 扫光类渐变
+    expect(skeletonBlockSource).not.toMatch(/gradient/i);
   });
 
   it('UIP-12 焦点样式消费点:指针模态下收窄 select 焦点,且只收窄 select', () => {

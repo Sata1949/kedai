@@ -12,6 +12,7 @@ import { ref, onMounted, computed } from 'vue';
 import { useAppStore } from '../store';
 import { storeToRefs } from 'pinia';
 import * as api from '../api';
+import SkeletonBlock from './SkeletonBlock.vue';
 
 const store = useAppStore();
 const {
@@ -502,7 +503,7 @@ async function saveAll(): Promise<void> {
                 <span class="pm-book-caret">{{ charBookExpanded ? '▾' : '▸' }}</span>
               </div>
               <div v-if="charBookExpanded" class="pm-book-body">
-                <div v-if="!charEntriesLoaded" class="sv-note">加载中…</div>
+                <SkeletonBlock v-if="!charEntriesLoaded" :lines="3" />
                 <template v-else>
                   <div v-if="!charConstantEntries().length" class="sv-note">该角色卡未内嵌常驻世界书条目</div>
                   <div v-for="(e, i) in charConstantEntries()" :key="e.id" class="pm-entry-row">
@@ -533,7 +534,7 @@ async function saveAll(): Promise<void> {
                 <span class="pm-book-caret">{{ expandedBook === book.id ? '▾' : '▸' }}</span>
               </div>
               <div v-if="expandedBook === book.id" class="pm-book-body">
-                <div v-if="!bookEntries[book.id]" class="sv-note">加载中…</div>
+                <SkeletonBlock v-if="!bookEntries[book.id]" :lines="3" />
                 <template v-else>
                   <div v-if="!constantEntries(book.id).length" class="sv-note">无常驻条目</div>
                   <div v-for="(e, i) in constantEntries(book.id)" :key="e.id" class="pm-entry-row">
@@ -575,7 +576,7 @@ async function saveAll(): Promise<void> {
                 <span class="pm-book-caret">{{ charBookExpanded ? '▾' : '▸' }}</span>
               </div>
               <div v-if="charBookExpanded" class="pm-book-body">
-                <div v-if="!charEntriesLoaded" class="sv-note">加载中…</div>
+                <SkeletonBlock v-if="!charEntriesLoaded" :lines="3" />
                 <template v-else>
                   <div v-if="!charTriggeredEntries().length" class="sv-note">该角色卡未内嵌激发世界书条目</div>
                   <div v-for="(e, i) in charTriggeredEntries()" :key="e.id" class="pm-entry-row">
@@ -609,7 +610,7 @@ async function saveAll(): Promise<void> {
                 <span class="pm-book-caret">{{ expandedBook === book.id ? '▾' : '▸' }}</span>
               </div>
               <div v-if="expandedBook === book.id" class="pm-book-body">
-                <div v-if="!bookEntries[book.id]" class="sv-note">加载中…</div>
+                <SkeletonBlock v-if="!bookEntries[book.id]" :lines="3" />
                 <template v-else>
                   <div v-if="!triggeredEntries(book.id).length" class="sv-note">无激发条目</div>
                   <div v-for="(e, i) in triggeredEntries(book.id)" :key="e.id" class="pm-entry-row">

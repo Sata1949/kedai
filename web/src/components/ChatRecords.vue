@@ -5,6 +5,7 @@ import { storeToRefs } from 'pinia';
 import { useAppStore } from '../store';
 import * as api from '../api';
 import { saveExportFile } from '../exportFile';
+import SkeletonBlock from './SkeletonBlock.vue';
 
 const store = useAppStore();
 const { characters, currentSessionId, currentCharacterId } = storeToRefs(store);
@@ -163,7 +164,9 @@ onMounted(() => {
           全部会话列表(按最近活动排序)。选择切换会话、新建当前角色会话、删除会话,或对单个会话导出 / 导入 JSON(导入将替换该会话全部内容)。
         </p>
 
-        <div v-if="loading" class="sv-empty" style="padding: 30px var(--space-3)">加载中…</div>
+        <div v-if="loading" class="sv-empty" style="padding: 30px var(--space-3)">
+          <SkeletonBlock :lines="5" />
+        </div>
         <div v-else-if="sessions.length === 0" class="sv-empty" style="padding: 30px var(--space-3)">
           <p style="font-size: 12px">暂无会话记录。选择角色后发送第一条消息,或点击「新建」。</p>
         </div>

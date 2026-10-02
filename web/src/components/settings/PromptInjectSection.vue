@@ -7,6 +7,7 @@
 import { onMounted } from 'vue';
 import type { usePromptInject } from '../../composables/usePromptInject';
 import { FLOOR_ROLE_LABELS, FLOOR_POS_LABELS, MACRO_HINTS } from '../../composables/usePromptInject';
+import SkeletonBlock from '../SkeletonBlock.vue';
 
 const props = withDefaults(defineProps<{
   /** usePromptInject 的返回对象(壳共享实例) */
@@ -43,7 +44,7 @@ onMounted(async () => {
             复杂
           </button>
         </div>
-        <span v-else class="sv-note">加载中...</span>
+        <SkeletonBlock v-else :lines="1" width="132px" />
       </div>
 
       <!-- 禁词库:输出含禁用词时注入此提示词(所有模式);deep/agent/custom 另由引擎收尾工具同义替换 -->

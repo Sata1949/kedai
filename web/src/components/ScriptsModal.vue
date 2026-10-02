@@ -10,6 +10,7 @@ import { useAppStore } from '../store';
 import * as api from '../api';
 import { parseScriptTreeImport, stripByExportWith } from '../scriptTreeIO';
 import { saveExportFile } from '../exportFile';
+import SkeletonBlock from './SkeletonBlock.vue';
 
 const store = useAppStore();
 const { characters, currentCharacterId } = storeToRefs(store);
@@ -308,7 +309,7 @@ onMounted(() => {
             <button class="sv-btn ghost sv-btn-sm" @click="newScript">＋ 新增脚本</button>
             <button class="sv-btn ghost sv-btn-sm" @click="newFolder">＋ 新增文件夹</button>
           </div>
-          <p v-if="!loaded" class="sv-note">加载中…</p>
+          <SkeletonBlock v-if="!loaded" :lines="3" />
           <div v-else-if="msg?.kind === 'err' && trees.length === 0" class="sv-empty" style="padding: var(--space-4) var(--space-3)">
             <p style="font-size: 12px; color: var(--sv-red)">{{ msg.text }}</p>
           </div>

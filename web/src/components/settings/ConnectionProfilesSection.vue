@@ -11,6 +11,7 @@ import {
   CONNECTOR_TYPE_ORDER,
 } from '../../api/labels';
 import type { useConnectionProfiles } from '../../composables/useConnectionProfiles';
+import SkeletonBlock from '../SkeletonBlock.vue';
 
 const props = withDefaults(
   defineProps<{
@@ -64,7 +65,7 @@ onMounted(() => {
   <div v-show="props.show" class="sv-field sv-conn-section">
     <div class="sv-field-label"><span class="sv-supreme red" /> 连接配置</div>
     <div class="sv-stack">
-      <div v-if="loading" class="sv-count">加载中...</div>
+      <SkeletonBlock v-if="loading" :lines="2" />
       <div v-else-if="!drafts.length" class="sv-count">暂无连接,点「新增连接」添加一条。</div>
 
       <div v-for="(d, i) in drafts" :key="d.id || 'new-' + i" class="sv-conn-card">

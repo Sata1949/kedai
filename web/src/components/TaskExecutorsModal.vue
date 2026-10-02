@@ -11,6 +11,7 @@ import { computed, onMounted, ref } from 'vue';
 import { storeToRefs } from 'pinia';
 import { useAppStore } from '../store';
 import type { TaskExecutor } from '../api';
+import SkeletonBlock from './SkeletonBlock.vue';
 
 const store = useAppStore();
 const { executors, executorsError, executorsLoading } = storeToRefs(store);
@@ -169,7 +170,7 @@ onMounted(() => {
           </div>
 
           <div v-if="executorsError" class="sv-feedback err" style="margin: var(--space-2) 0">{{ executorsError }}</div>
-          <div v-else-if="executorsLoading && executors.length === 0" class="sv-note">加载中…</div>
+          <SkeletonBlock v-else-if="executorsLoading && executors.length === 0" :lines="3" />
           <div v-else class="exec-layout">
             <!-- 左:执行者列表 -->
             <div class="exec-list">

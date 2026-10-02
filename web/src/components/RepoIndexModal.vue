@@ -9,6 +9,7 @@
 import { computed, onMounted, onServerPrefetch, ref } from 'vue';
 import { useAppStore } from '../store';
 import { fetchRepoIndex, type RepoIndexItem, type RepoIndexResult } from '../api';
+import SkeletonBlock from './SkeletonBlock.vue';
 import {
   baseName,
   filterRepoByKind,
@@ -134,7 +135,7 @@ onServerPrefetch(load);
           <div class="sv-field">
             <div class="sv-field-label"><span class="sv-supreme yellow" /> 文件清单</div>
             <div v-if="loading && items.length === 0" class="sv-empty" style="padding: 28px var(--space-3)">
-              <p style="font-size: 12px">加载中…</p>
+              <SkeletonBlock :lines="4" />
             </div>
             <div v-else-if="shown.length === 0" class="sv-empty" style="padding: 28px var(--space-3)">
               <div class="sv-empty-geo mb10">

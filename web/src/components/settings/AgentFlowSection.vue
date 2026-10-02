@@ -18,6 +18,7 @@ import { connectionSummary } from '../../utils/agentFlowConnections';
 import type { ToolPolicyCtx } from '../../utils/agentFlowTools';
 import { loadFlowCanvas } from '../../utils/flowCanvasChunk';
 import AgentFlowStepEditor from './AgentFlowStepEditor.vue';
+import SkeletonBlock from '../SkeletonBlock.vue';
 
 // 画布重(@vue-flow 及其 d3/@vueuse 传递依赖),做成异步组件:切到画布视图才下载。
 // 与 lazyModal 同一纪律「失败自动重试一次」——静默失败在这里表现为一块空白画布,
@@ -175,7 +176,7 @@ onMounted(async () => {
         >
           {{ flowDraft.enabled ? '已启用' : '已关闭' }}
         </button>
-        <span v-else class="sv-note">加载中...</span>
+        <SkeletonBlock v-else :lines="1" width="96px" />
       </div>
       <div v-if="flowDraft" class="sv-inp-row">
         <label class="sv-inp-tag">并行上限</label>
