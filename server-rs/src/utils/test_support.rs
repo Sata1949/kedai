@@ -71,6 +71,45 @@ impl AsRef<Path> for TempDataDir {
     }
 }
 
+/// 构造「声明尺寸巨大、像素数据极小」的合法 PNG:以真实 1×1 PNG 为骨架(保证
+/// 块序列完整、含 IDAT),改写 IHDR 的宽高并重算其 CRC。
+/// 用途:验证尺寸上限在**分配像素缓冲之前**即被拒(解压炸弹防线)——解码器从 IHDR
+/// 读尺寸,判定发生在任何像素分配之前;仅测试用(避免为构造超大图真分配内存)。
+pub fn png_header_with_dims(width: u32, height: u32) -> Vec<u8> {
+    /// PNG chunk CRC32(IEEE 802.3);测试内自备,不引入新依赖
+    fn crc32(kind: &[u8], data: &[u8]) -> u32 {
+        let mut table = [0u32; 256];
+        for (i, entry) in table.iter_mut().enumerate() {
+            let mut c = i as u32;
+            for _ in 0..8 {
+                c = if c & 1 != 0 {
+                    0xEDB8_8320 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
+            }
+            *entry = c;
+        }
+        let mut crc = 0xFFFF_FFFFu32;
+        for byte in kind.iter().chain(data.iter()) {
+            crc = table[((crc ^ *byte as u32) & 0xFF) as usize] ^ (crc >> 8);
+        }
+        crc ^ 0xFFFF_FFFF
+    }
+    let mut buf = Vec::new();
+    image::DynamicImage::new_rgb8(1, 1)
+        .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+        .expect("测试用 1×1 PNG 编码不应失败");
+    // PNG 布局:签名(8) + 长度(4) + 类型(4) → IHDR 数据自偏移 16 起(宽 4 / 高 4 / ...),
+    // IHDR 数据 13 字节后是 4 字节 CRC(偏移 29..33)
+    assert_eq!(&buf[12..16], b"IHDR", "PNG 首块必须是 IHDR");
+    buf[16..20].copy_from_slice(&width.to_be_bytes());
+    buf[20..24].copy_from_slice(&height.to_be_bytes());
+    let crc = crc32(b"IHDR", &buf[16..29]);
+    buf[29..33].copy_from_slice(&crc.to_be_bytes());
+    buf
+}
+
 impl Drop for TempDataDir {
     fn drop(&mut self) {
         if self.keep {

@@ -783,3 +783,158 @@ fn anthropic_labeled_images_emit_text_blocks() {
     assert_eq!(content[3]["text"], "（大图拆分:第1行/第1列,共1行×2列）");
     assert_eq!(content[4]["type"], "image");
 }
+
+// ===== 修复批次(2026-10-02):工具图像下发落位 + Anthropic 连发 user 合并 =====
+//
+// 背景:此前工具图像统一挂在 role="tool" 消息上——chat 方言把 image_url part 塞进
+// tool 消息(OpenAI 契约只允许文本 part,严格后端整轮 400),responses/anthropic
+// 只取文本则静默丢图。本组用例锁定修复后的落位:
+//   chat      → tool 消息纯文本;图像在本轮工具组末尾收口为一条 user 消息
+//   responses → function_call_output.output 纯文本;图像随后以 user 输入项承载
+//   anthropic → 图像内嵌 tool_result 的 content 块数组(官方支持,不新增消息)
+
+/// assistant(tool_calls) 消息(空正文;与执行器产出的形态一致)
+fn assistant_tool_call(id: &str) -> LlmMessage {
+    let mut m = LlmMessage::plain("assistant", "");
+    m.tool_calls = Some(vec![ToolCallArgs {
+        id: id.into(),
+        name: "screenshot".into(),
+        arguments: "{}".into(),
+    }]);
+    m
+}
+
+/// tool 消息(带一张图像;label 为可选拆分标注)
+fn tool_image_message(call_id: &str, label: Option<&str>) -> LlmMessage {
+    let mut m = LlmMessage::plain("tool", "已截图:输出 100×100");
+    m.tool_call_id = Some(call_id.into());
+    m.images = vec![crate::models::types::ImageRef {
+        id: "shot.png".into(),
+        name: "shot.png".into(),
+        mime: "image/png".into(),
+        data_url: "data:image/png;base64,AAAA".into(),
+        label: label.map(str::to_string),
+    }];
+    m
+}
+
+/// chat:tool 消息恒为纯文本字符串,图像落在组末尾的 user 消息(含来源说明);
+/// 能力位关闭时图像整条不出现(tool 消息形状不变)
+#[test]
+fn chat_tool_images_land_in_trailing_user_message() {
+    let msgs = vec![
+        assistant_tool_call("c1"),
+        tool_image_message("c1", Some("（大图拆分:第1行/第1列,共1行×1列）")),
+    ];
+    let body = build_chat_body("m", &msgs, &test_params(), vision_caps());
+    let arr = body["messages"].as_array().unwrap();
+    assert_eq!(arr.len(), 3);
+    assert_eq!(arr[1]["role"], "tool");
+    assert_eq!(arr[1]["content"], "已截图:输出 100×100");
+    assert_eq!(arr[2]["role"], "user");
+    assert_eq!(arr[2]["content"][0]["type"], "text"); // 来源说明行
+    assert_eq!(
+        arr[2]["content"][1],
+        json!({"type": "text", "text": "（大图拆分:第1行/第1列,共1行×1列）"})
+    );
+    assert_eq!(
+        arr[2]["content"][2],
+        json!({"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}})
+    );
+    // 能力位关闭:不新增 user 消息,tool 消息仍为纯文本
+    let body = build_chat_body("m", &msgs, &test_params(), Default::default());
+    let arr = body["messages"].as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+    assert_eq!(arr[1]["content"], "已截图:输出 100×100");
+}
+
+/// chat:并行工具调用组内不得插其它角色——两条工具结果相邻,图像统一在本组末尾收口
+#[test]
+fn chat_parallel_tool_images_flush_after_whole_group() {
+    let msgs = vec![
+        assistant_tool_call("c1"),
+        tool_image_message("c1", None),
+        tool_image_message("c2", None),
+    ];
+    let body = build_chat_body("m", &msgs, &test_params(), vision_caps());
+    let arr = body["messages"].as_array().unwrap();
+    assert_eq!(arr.len(), 4);
+    assert_eq!(arr[1]["role"], "tool");
+    assert_eq!(arr[2]["role"], "tool");
+    assert_eq!(arr[3]["role"], "user");
+    assert_eq!(arr[3]["content"].as_array().unwrap().len(), 3); // 说明 + 两张图
+}
+
+/// responses:function_call_output.output 保持纯文本,图像以 user 输入项
+/// (input_text/input_image 词表)追加在工具组之后
+#[test]
+fn responses_tool_images_land_in_trailing_user_item() {
+    let msgs = vec![assistant_tool_call("c1"), tool_image_message("c1", None)];
+    let body = build_responses_body("m", &msgs, &test_params(), vision_caps());
+    let input = body["input"].as_array().unwrap();
+    assert_eq!(input[0]["type"], "function_call");
+    assert_eq!(input[1]["type"], "function_call_output");
+    assert_eq!(input[1]["output"], "已截图:输出 100×100");
+    assert_eq!(input[2]["role"], "user");
+    assert_eq!(input[2]["content"][0]["type"], "input_text");
+    assert_eq!(
+        input[2]["content"][1],
+        json!({"type": "input_image", "image_url": "data:image/png;base64,AAAA"})
+    );
+}
+
+/// anthropic:图像内嵌 tool_result 的 content 块数组(官方支持),不新增 user 消息;
+/// 能力位关闭时 content 回退纯字符串(与改造前一致)
+#[test]
+fn anthropic_tool_images_embed_in_tool_result() {
+    let msgs = vec![
+        assistant_tool_call("c1"),
+        tool_image_message("c1", Some("（原图总览:100×100）")),
+    ];
+    let body = build_anthropic_body("m", &msgs, &test_params(), vision_caps());
+    let arr = body["messages"].as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+    assert_eq!(arr[1]["role"], "user");
+    let tr = &arr[1]["content"][0];
+    assert_eq!(tr["type"], "tool_result");
+    assert_eq!(tr["tool_use_id"], "c1");
+    assert_eq!(
+        tr["content"][0],
+        json!({"type": "text", "text": "已截图:输出 100×100"})
+    );
+    assert_eq!(
+        tr["content"][1],
+        json!({"type": "text", "text": "（原图总览:100×100）"})
+    );
+    assert_eq!(tr["content"][2]["type"], "image");
+    assert_eq!(tr["content"][2]["source"]["data"], "AAAA");
+    let body = build_anthropic_body("m", &msgs, &test_params(), Default::default());
+    assert_eq!(
+        body["messages"][1]["content"][0]["content"],
+        "已截图:输出 100×100"
+    );
+}
+
+/// anthropic:上一条 user 是纯文本 + 本轮 user 带图 → 并入同一条(升级为块数组),
+/// 不得产生连续 user 消息(Anthropic 要求角色交替,连发 user 会被 400)
+#[test]
+fn anthropic_image_message_merges_into_plain_text_user() {
+    let first = LlmMessage::plain("user", "第一段");
+    let body = build_anthropic_body(
+        "m",
+        &[first, image_message()],
+        &test_params(),
+        vision_caps(),
+    );
+    let arr = body["messages"].as_array().unwrap();
+    assert_eq!(arr.len(), 1, "连续 user 必须合并为一条");
+    assert_eq!(
+        arr[0]["content"][0],
+        json!({"type": "text", "text": "第一段"})
+    );
+    assert_eq!(
+        arr[0]["content"][1],
+        json!({"type": "text", "text": "看图"})
+    );
+    assert_eq!(arr[0]["content"][2]["type"], "image");
+}

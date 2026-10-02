@@ -92,10 +92,11 @@ pub(crate) async fn run_agent_loop(
     // 既决定 system 是否追加工具纪律段,也与「能力事实」的实际形态一致。
     // 必须在 `tools: policy.defs` 把 defs 移走之前算。
     let has_tools = !policy.defs.is_empty();
-    // 视觉验证纪律段的条件(D4):工具面含视觉三件才追加(单一出处 tool_sets::VISION_TOOLS)
-    let has_vision_tools = allowed
+    // 视觉验证纪律段的条件(D4;修复批次并含截图):工具面含任一图像工具才追加
+    // (单一判据出处 tool_sets::is_image_tool:视觉三件 ∪ 截图)
+    let has_image_tools = allowed
         .iter()
-        .any(|n| crate::tools::tool_sets::VISION_TOOLS.contains(&n.as_str()));
+        .any(|n| crate::tools::tool_sets::is_image_tool(n));
     // system 提示词组装:统一走 TaskBackend::assemble_executor_system_prompt
     // (单一实现,宿主侧 prompt.rs);拼装顺序与 untrusted 包裹纪律同 legacy,
     // 勿在本文件复制实现(WP7)。
@@ -105,7 +106,7 @@ pub(crate) async fn run_agent_loop(
         call.character_id.as_deref(),
         &call.goal,
         has_tools,
-        has_vision_tools,
+        has_image_tools,
     );
 
     let mut messages = vec![

@@ -488,6 +488,49 @@ fn insert_chat_content(
     obj.insert("content".into(), Value::Array(parts));
 }
 
+/// 工具图像 → chat content parts(修复批次):label 紧贴图像之前;词表为 chat 的
+/// `text` / `image_url`。仅在能力位打开且有 data_url 时调用(调用方已过滤)。
+fn push_tool_image_parts(parts: &mut Vec<Value>, images: &[&crate::models::types::ImageRef]) {
+    for img in images {
+        if let Some(label) = &img.label {
+            parts.push(json!({ "type": "text", "text": label }));
+        }
+        parts.push(json!({ "type": "image_url", "image_url": { "url": img.data_url } }));
+    }
+}
+
+/// 工具组结束:如本轮工具返回了图像,追加一条 user 消息承载(chat 契约的 tool
+/// 消息 content 只接受字符串/文本 part,图像必须落在 user 消息——修复批次)。
+fn flush_tool_images(out: &mut Vec<Value>, pending: &mut Vec<Value>) {
+    if pending.is_empty() {
+        return;
+    }
+    let mut parts = vec![json!({ "type": "text", "text": "（本轮工具调用返回的图像）" })];
+    parts.append(pending);
+    out.push(json!({ "role": "user", "content": Value::Array(parts) }));
+}
+
+/// 工具图像 → responses input 项(词表为 `input_text` / `input_image`)
+fn push_tool_image_items(parts: &mut Vec<Value>, images: &[&crate::models::types::ImageRef]) {
+    for img in images {
+        if let Some(label) = &img.label {
+            parts.push(json!({ "type": "input_text", "text": label }));
+        }
+        parts.push(json!({ "type": "input_image", "image_url": img.data_url }));
+    }
+}
+
+/// 工具组结束:responses 侧同款兜底——`function_call_output.output` 只承载文本,
+/// 图像累积后追加一条 user 输入项(与 chat 同策略,避免依赖各端对输出内图像的支持)
+fn flush_tool_image_items(input: &mut Vec<Value>, pending: &mut Vec<Value>) {
+    if pending.is_empty() {
+        return;
+    }
+    let mut parts = vec![json!({ "type": "input_text", "text": "（本轮工具调用返回的图像）" })];
+    parts.append(pending);
+    input.push(json!({ "role": "user", "content": Value::Array(parts) }));
+}
+
 /// chat-completions 请求体(自 generate_stream 原样提取,行为逐字节不变)
 fn build_chat_body(
     model: &str,
@@ -564,18 +607,27 @@ fn build_responses_body(
 ) -> Value {
     let mut instructions: Vec<String> = Vec::new();
     let mut input: Vec<Value> = Vec::new();
+    let mut pending_tool_images: Vec<Value> = Vec::new();
     for m in messages {
+        if m.role == "tool" {
+            // 工具输出恒为纯文本(修复批次):图像由 `flush_tool_image_items` 在工具组
+            // 末尾以 user 输入项承载——不塞 `function_call_output.output`,避免依赖
+            // 各端对「函数输出内图像项」的支持差异(不支持即静默丢图)。
+            input.push(json!({
+                "type": "function_call_output",
+                "call_id": m.tool_call_id.clone().unwrap_or_default(),
+                "output": m.content,
+            }));
+            push_tool_image_items(&mut pending_tool_images, &usable_images(m, caps));
+            continue;
+        }
+        flush_tool_image_items(&mut input, &mut pending_tool_images);
         match m.role.as_str() {
             "system" => {
                 if !m.content.is_empty() {
                     instructions.push(m.content.clone());
                 }
             }
-            "tool" => input.push(json!({
-                "type": "function_call_output",
-                "call_id": m.tool_call_id.clone().unwrap_or_default(),
-                "output": m.content,
-            })),
             "assistant" => {
                 if !m.content.is_empty() {
                     input.push(json!({ "role": "assistant", "content": m.content }));
@@ -614,6 +666,7 @@ fn build_responses_body(
             }
         }
     }
+    flush_tool_image_items(&mut input, &mut pending_tool_images);
     let mut body = json!({
         "model": model,
         "input": input,
@@ -693,10 +746,34 @@ fn build_anthropic_body(
 
     for m in messages {
         if m.role == "tool" {
+            // 工具图像(修复批次):放进 tool_result 的 content 块数组——Anthropic
+            // 官方允许 tool_result 内嵌 image 块;此前只取文本会静默丢图。
+            let images = usable_images(m, caps);
+            let content = if images.is_empty() {
+                json!(m.content)
+            } else {
+                let mut blocks: Vec<Value> = Vec::new();
+                if !m.content.is_empty() {
+                    blocks.push(json!({ "type": "text", "text": m.content }));
+                }
+                for img in &images {
+                    if let Some(label) = &img.label {
+                        blocks.push(json!({ "type": "text", "text": label }));
+                    }
+                    if let Some(block) = image_block(img) {
+                        blocks.push(block);
+                    }
+                }
+                if blocks.is_empty() {
+                    json!(m.content)
+                } else {
+                    Value::Array(blocks)
+                }
+            };
             pending_tool_results.push(json!({
                 "type": "tool_result",
                 "tool_use_id": m.tool_call_id.clone().unwrap_or_default(),
-                "content": m.content,
+                "content": content,
             }));
             continue;
         }
@@ -766,12 +843,28 @@ fn build_anthropic_body(
                         blocks.push(json!({ "type": "text", "text": m.content }));
                     }
                     blocks.append(&mut image_blocks);
-                    // 合并规则与纯文本路径一致:上一条也是 user 时并入其块数组
+                    // 合并规则与纯文本路径一致:上一条也是 user 时并入其内容
+                    // (修复批次:字符串 content 先升级为块数组再并入——此前只并块数组,
+                    // 上一条 user 是纯文本时会产生连续 user 消息,Anthropic 直接 400)
                     if let Some(last) = out.last_mut() {
                         if last.get("role").and_then(Value::as_str) == Some("user") {
-                            if let Some(Value::Array(prev)) = last.get_mut("content") {
-                                prev.append(&mut blocks);
-                                continue;
+                            if let Some(slot) = last.get_mut("content") {
+                                match slot {
+                                    Value::Array(prev) => {
+                                        prev.append(&mut blocks);
+                                        continue;
+                                    }
+                                    Value::String(prev_text) => {
+                                        let mut merged = vec![json!({
+                                            "type": "text",
+                                            "text": prev_text.as_str()
+                                        })];
+                                        merged.append(&mut blocks);
+                                        *slot = Value::Array(merged);
+                                        continue;
+                                    }
+                                    _ => {}
+                                }
                             }
                         }
                     }
@@ -972,52 +1065,66 @@ where
 }
 
 /// LlmMessage → OpenAI 兼容 messages 数组(处理 assistant.tool_calls 与 role=tool;
-/// 图像仅在能力位打开且有 data_url 时以 parts 数组下发)
+/// 图像仅在能力位打开且有 data_url 时以 parts 数组下发)。
+///
+/// 工具图像落位(2026-10-02 修复批次):chat 契约的 `tool` 消息 content 只接受
+/// 字符串/文本 part,带 `image_url` part 是非法输入(严格后端整轮 400)。故 tool
+/// 消息恒为纯文本,图像(含拆分标注)累积后在本轮工具组**末尾**追加一条 user
+/// 消息承载——中间不得插入其它角色:契约要求 assistant(tool_calls) 之后紧跟全部
+/// tool 结果。无工具图像的形状与改造前逐字节一致。
 fn to_openai_messages(
     messages: &[LlmMessage],
     caps: crate::connectors::ConnectorCapabilities,
 ) -> Vec<Value> {
-    messages
-        .iter()
-        .map(|m| {
+    let mut out: Vec<Value> = Vec::with_capacity(messages.len());
+    let mut pending_tool_images: Vec<Value> = Vec::new();
+    for m in messages {
+        if m.role == "tool" {
             let mut obj = serde_json::Map::new();
-            obj.insert("role".into(), json!(m.role));
-            let images = usable_images(m, caps);
-            if m.role == "tool" {
-                obj.insert(
-                    "tool_call_id".into(),
-                    json!(m.tool_call_id.clone().unwrap_or_default()),
-                );
-                insert_chat_content(&mut obj, &m.content, &images);
-            } else if let Some(calls) = &m.tool_calls {
-                obj.insert("content".into(), Value::Null);
-                // DeepSeek 系后端要求思考模式多轮调用时回传 reasoning_content,否则 400
-                if let Some(rc) = &m.reasoning_content {
-                    if !rc.is_empty() {
-                        obj.insert("reasoning_content".into(), json!(rc));
-                    }
+            obj.insert("role".into(), json!("tool"));
+            obj.insert(
+                "tool_call_id".into(),
+                json!(m.tool_call_id.clone().unwrap_or_default()),
+            );
+            obj.insert("content".into(), json!(m.content));
+            out.push(Value::Object(obj));
+            push_tool_image_parts(&mut pending_tool_images, &usable_images(m, caps));
+            continue;
+        }
+        flush_tool_images(&mut out, &mut pending_tool_images);
+        let mut obj = serde_json::Map::new();
+        obj.insert("role".into(), json!(m.role));
+        let images = usable_images(m, caps);
+        if let Some(calls) = &m.tool_calls {
+            obj.insert("content".into(), Value::Null);
+            // DeepSeek 系后端要求思考模式多轮调用时回传 reasoning_content,否则 400
+            if let Some(rc) = &m.reasoning_content {
+                if !rc.is_empty() {
+                    obj.insert("reasoning_content".into(), json!(rc));
                 }
-                obj.insert(
-                    "tool_calls".into(),
-                    Value::Array(
-                        calls
-                            .iter()
-                            .map(|tc| {
-                                json!({
-                                    "id": tc.id,
-                                    "type": "function",
-                                    "function": { "name": tc.name, "arguments": tc.arguments }
-                                })
-                            })
-                            .collect(),
-                    ),
-                );
-            } else {
-                insert_chat_content(&mut obj, &m.content, &images);
             }
-            Value::Object(obj)
-        })
-        .collect()
+            obj.insert(
+                "tool_calls".into(),
+                Value::Array(
+                    calls
+                        .iter()
+                        .map(|tc| {
+                            json!({
+                                "id": tc.id,
+                                "type": "function",
+                                "function": { "name": tc.name, "arguments": tc.arguments }
+                            })
+                        })
+                        .collect(),
+                ),
+            );
+        } else {
+            insert_chat_content(&mut obj, &m.content, &images);
+        }
+        out.push(Value::Object(obj));
+    }
+    flush_tool_images(&mut out, &mut pending_tool_images);
+    out
 }
 
 /// 连接器统一枚举(与 Node 版 connectors/index.ts 对齐)

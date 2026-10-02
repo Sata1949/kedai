@@ -67,8 +67,10 @@ fn load_image(
         ));
     }
     let bytes = std::fs::read(&path).map_err(|e| format!("读取文件失败: {e}"))?;
-    let img = image::load_from_memory(&bytes)
-        .map_err(|e| format!("不是可解码的图像(支持 PNG/JPEG/GIF/WebP):{e}"))?;
+    // 有上限解码(2026-10-02 修复批次):头部尺寸硬校验 + image::Limits 二次防线,
+    // 防「压缩字节达标、展开巨大」的解压炸弹(与附件路径同一条防线,单一实现)
+    let img = crate::services::image_service::decode_bounded(&bytes)
+        .map_err(|e| format!("不是可解码的图像或超出尺寸上限(支持 PNG/JPEG/GIF/WebP):{e}"))?;
     Ok((img, meta.len()))
 }
 
@@ -104,7 +106,11 @@ fn register_view(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
         },
         Arc::new(move |args: serde_json::Value, ctx: ToolContext| {
             let deps = deps.clone();
-            Box::pin(async move { view_impl(&deps, &ctx, &args) })
+            // 解码/裁剪/重编码都是同步重活:让出 async worker(park_worker 与截图工具的
+            // spawn_blocking 同纪律;修复批次补齐——此前直接跑在 worker 上)
+            Box::pin(async move {
+                crate::utils::blocking::park_worker(|| view_impl(&deps, &ctx, &args))
+            })
         }),
     );
 }
@@ -158,7 +164,10 @@ fn register_zoom(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
         },
         Arc::new(move |args: serde_json::Value, ctx: ToolContext| {
             let deps = deps.clone();
-            Box::pin(async move { zoom_impl(&deps, &ctx, &args) })
+            // 同上:同步重活让出 async worker(修复批次补齐)
+            Box::pin(async move {
+                crate::utils::blocking::park_worker(|| zoom_impl(&deps, &ctx, &args))
+            })
         }),
     );
 }
@@ -256,7 +265,10 @@ fn register_diff(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
         },
         Arc::new(move |args: serde_json::Value, ctx: ToolContext| {
             let deps = deps.clone();
-            Box::pin(async move { diff_impl(&deps, &ctx, &args) })
+            // 同上:同步重活让出 async worker(修复批次补齐)
+            Box::pin(async move {
+                crate::utils::blocking::park_worker(|| diff_impl(&deps, &ctx, &args))
+            })
         }),
     );
 }
@@ -398,6 +410,14 @@ mod tests {
         std::fs::write(root.join("bad.png"), b"not an image").unwrap();
         let e = view_impl(&deps, &ctx, &json!({ "path": "bad.png" })).unwrap_err();
         assert!(e.contains("不是可解码的图像"), "{e}");
+        // 解压炸弹防线(修复批次):头部尺寸超限在分配像素缓冲之前即拒
+        std::fs::write(
+            root.join("huge.png"),
+            crate::utils::test_support::png_header_with_dims(100_000, 100_000),
+        )
+        .unwrap();
+        let e = view_impl(&deps, &ctx, &json!({ "path": "huge.png" })).unwrap_err();
+        assert!(e.contains("尺寸过大"), "{e}");
     }
 
     /// 未绑定工作区:三件都报可操作错误(执行侧兜底)

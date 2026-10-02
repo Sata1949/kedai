@@ -18,10 +18,17 @@ use crate::utils::image_sniff::{extension_for_mime, sniff_image_mime};
 
 /// 单条消息附件张数上限(与前端 ChatInput 的提示文案同口径)
 pub const MAX_IMAGES_PER_MESSAGE: usize = 4;
-/// 单张解码后字节上限
+/// 单张图像上限(**压缩字节**,base64 解码后的原始文件字节)
 pub const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
-/// 单条消息附件合计字节上限(解码后)
+/// 单条消息附件合计字节上限(压缩字节)
 pub const MAX_TOTAL_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+/// 解码尺寸硬上限:单边像素(2026-10-02 修复批次,防解压炸弹——压缩字节达标、
+/// 展开后数 GB 的图会在解码时分配爆内存;8K 屏截图 7680 宽在限内)
+pub const MAX_DECODE_SIDE: u32 = 32768;
+/// 解码尺寸硬上限:总像素数(64MP;按头部尺寸判定,超限直接拒绝而非尝试分配)
+pub const MAX_DECODE_PIXELS: u64 = 64 * 1024 * 1024;
+/// 解码期分配上限(non-strict,image::Limits 二次防线;默认 512MiB 再收紧一档)
+const MAX_DECODE_ALLOC: u64 = 256 * 1024 * 1024;
 
 /// data URL 的声明 mime 白名单(仅这些类型允许落盘;真实类型仍以魔数为准)
 const UPLOAD_MIME_WHITELIST: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
@@ -79,6 +86,9 @@ impl ImageService {
         }
         let mime = sniff_image_mime(&bytes)
             .ok_or_else(|| format!("附件「{name}」不是有效图像(魔数校验未通过)"))?;
+        // 尺寸硬校验(2026-10-02 修复批次):只读头部、不分配像素;超限在入口即拒
+        // (压缩字节达标但展开巨大的「解压炸弹」不允许进入后续解码与下发路径)
+        check_decode_limits(&bytes).map_err(|e| format!("附件「{name}」{e}"))?;
         Ok((mime.to_string(), bytes))
     }
 
@@ -203,14 +213,34 @@ impl ImageService {
             return None;
         }
         let bytes = decode_data_url_bytes(&img.data_url)?;
-        let decoded = image::load_from_memory(&bytes).ok()?;
-        let (w, h) = (decoded.width(), decoded.height());
-        let (scale, cols, rows) = split_plan(w, h)?;
-        // 磁盘缓存:派生块只依赖源文件与参数,manifest 命中即复用(不重复解码/裁剪/编码)
+        // 头部尺寸先行(不分配像素,修复批次):小图免解码直接透传;超大图同路径拒绝
+        let (sw, sh) = match read_dimensions(&bytes) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(error = %e, image = %img.name, "大图拆分跳过(无法读取图像尺寸),原样下发");
+                return None;
+            }
+        };
+        if let Err(e) = check_limits_of(sw, sh) {
+            tracing::warn!(error = %e, image = %img.name, "大图拆分跳过(图像超限),原样下发");
+            return None;
+        }
+        let (scale, cols, rows) = split_plan(sw, sh)?;
+        // 磁盘缓存:派生块只依赖源文件与参数,manifest 命中即复用(不重复解码/裁剪/编码;
+        // 修复批次:命中检查提前到解码之前——此前先全量解码再查 manifest,与注释口径相悖)
         let key = cache_key_of(img);
         if let Some(hit) = self.load_derived(&key, &img.name) {
             return Some(hit);
         }
+        // 有上限解码(修复批次):单边 >32768 或 >64MP 的图在分配像素缓冲前即拒
+        let decoded = match decode_bounded(&bytes) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(error = %e, image = %img.name, "大图拆分跳过(超限或不可解码),原样下发");
+                return None;
+            }
+        };
+        let (w, h) = (decoded.width(), decoded.height());
         let base = if scale < 1.0 {
             let (sw, sh) = scaled_dims(w, h, scale);
             decoded.resize(sw, sh, image::imageops::FilterType::Lanczos3)
@@ -421,6 +451,47 @@ fn decode_data_url_bytes(data_url: &str) -> Option<Vec<u8>> {
         .ok()
 }
 
+/// 只读图像头部拿尺寸(**不分配像素缓冲**;修复批次)。
+/// 各格式的头部解析由 image crate 提供,这里只做统一的错误文案。
+fn read_dimensions(bytes: &[u8]) -> Result<(u32, u32), String> {
+    image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| format!("图像格式识别失败:{e}"))?
+        .into_dimensions()
+        .map_err(|e| format!("不是有效的图像文件:{e}"))
+}
+
+/// 尺寸上限判定(纯函数,便于单测):单边与总像素都必须落在硬上限内
+fn check_limits_of(w: u32, h: u32) -> Result<(), String> {
+    if w > MAX_DECODE_SIDE || h > MAX_DECODE_SIDE || (w as u64) * (h as u64) > MAX_DECODE_PIXELS {
+        return Err(format!(
+            "图像尺寸过大({w}×{h};上限 {MAX_DECODE_SIDE}×{MAX_DECODE_SIDE} 且 {MAX_DECODE_PIXELS} 像素),已拒绝以防内存耗尽"
+        ));
+    }
+    Ok(())
+}
+
+/// 头部尺寸校验(不分配;入口与拆分路径共用;修复批次)
+fn check_decode_limits(bytes: &[u8]) -> Result<(), String> {
+    let (w, h) = read_dimensions(bytes)?;
+    check_limits_of(w, h)
+}
+
+/// 带上限解码(修复批次):先按头部尺寸硬校验(解压炸弹防线),再以 `image::Limits`
+/// 作二次防线解码。全仓需解码用户/模型来源图像处统一走本函数,勿直接 `load_from_memory`。
+pub fn decode_bounded(bytes: &[u8]) -> Result<image::DynamicImage, String> {
+    check_decode_limits(bytes)?;
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| format!("图像格式识别失败:{e}"))?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_DECODE_SIDE);
+    limits.max_image_height = Some(MAX_DECODE_SIDE);
+    limits.max_alloc = Some(MAX_DECODE_ALLOC);
+    reader.limits(limits);
+    reader.decode().map_err(|e| format!("图像解码失败:{e}"))
+}
+
 /// 拆 `data:<mime>;base64,<payload>`(mime 大小写归一到小写,`image/jpg` 归一为 jpeg;
 /// 不接受缺 `;base64` 标记的形态——本通道只收 base64 图像)
 fn split_data_url(data_url: &str) -> Option<(String, &str)> {
@@ -439,6 +510,7 @@ fn split_data_url(data_url: &str) -> Option<(String, &str)> {
 mod tests {
     use super::*;
     use crate::utils::test_support::TempDataDir;
+    use image::GenericImageView;
 
     /// 1x1 PNG(真实魔数**且 CRC 合法**——D4 起图像会真解码,魔数对但 CRC 错的字节
     /// 会被 `image` 解码器拒绝;此字节由 zlib 正确编码生成)
@@ -511,6 +583,64 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("10MB"), "{e}");
+    }
+
+    /// 解压炸弹防线(2026-10-02 修复批次):头部尺寸超限在**分配像素缓冲之前**即拒;
+    /// 限内小图正常解码
+    #[test]
+    fn decode_bounded_rejects_oversize_dimensions_before_alloc() {
+        use crate::utils::test_support::png_header_with_dims;
+        // 100000×100000(由 1×1 PNG 骨架改写 IHDR 尺寸):尺寸判定即拒,不会尝试分配像素
+        let huge = png_header_with_dims(100_000, 100_000);
+        let err = decode_bounded(&huge).unwrap_err();
+        assert!(err.contains("尺寸过大"), "{err}");
+        // 单边超限(32769)同样拒
+        let wide = png_header_with_dims(MAX_DECODE_SIDE + 1, 8);
+        assert!(decode_bounded(&wide).unwrap_err().contains("尺寸过大"));
+        // 限内小图:正常解码且尺寸原样
+        let mut png = Vec::new();
+        image::DynamicImage::new_rgb8(4, 3)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        assert_eq!(decode_bounded(&png).unwrap().dimensions(), (4, 3));
+    }
+
+    /// 附件入口尺寸校验(修复批次):超限 data URL 在 decode_data_url 阶段即拒(报错点名附件)
+    #[test]
+    fn decode_data_url_rejects_oversize_dimensions() {
+        use crate::utils::test_support::png_header_with_dims;
+        let huge = png_header_with_dims(100_000, 100_000);
+        let url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&huge)
+        );
+        let e = ImageService::decode_data_url("huge.png", &url).unwrap_err();
+        assert!(e.contains("huge.png") && e.contains("尺寸过大"), "{e}");
+    }
+
+    /// 块数上限的保证域(修复批次):在解码尺寸上限内(单边 ≤32768 且 ≤64MP)的任意
+    /// 尺寸,「>12 块先缩」都在缩放下限 0.05 之前收敛(块数 ≤ 12)——0.05 只是远超
+    /// 调用域的数学兜底,不参与真实路径
+    #[test]
+    fn split_plan_honours_block_cap_within_decode_limits() {
+        let cases = [
+            (32768u32, 32768u32),
+            (32768, 1),
+            (1, 32768),
+            (8000, 8000), // = 64MP 上限
+            (15360, 4320),
+            (1301, 1301),
+            (4096, 1301),
+        ];
+        for (w, h) in cases {
+            let (scale, cols, rows) = split_plan(w, h).unwrap();
+            assert!(scale >= 0.05, "{w}×{h} 不应触碰 0.05 下限:scale={scale}");
+            assert!(
+                cols * rows <= AUTO_SPLIT_MAX_BLOCKS,
+                "{w}×{h} 块数 {} 超上限(scale={scale})",
+                cols * rows
+            );
+        }
     }
 
     #[test]

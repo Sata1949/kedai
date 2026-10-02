@@ -1366,9 +1366,9 @@ pub async fn prompt_preview(
             5,
             task_prompts::EXECUTOR_TOOL_DISCIPLINE,
         );
-        // 视觉验证纪律段(视觉能力包 D4):同样是**条件注入**——仅当本轮工具面含视觉
-        // 三件(view_image/zoom_image/image_diff)时追加在工具纪律之后。预览按「工具档」
-        // 形态展示(与上一条同口径)。
+        // 视觉验证纪律段(视觉能力包 D4;修复批次扩充到「任一图像工具」):同样是
+        // **条件注入**——仅当本轮工具面含图像工具(视觉三件 ∪ screenshot)时追加在
+        // 工具纪律之后。预览按「工具档」形态展示(与上一条同口径)。
         push_preview_layer(
             &mut layers,
             "task_executor_vision_discipline",

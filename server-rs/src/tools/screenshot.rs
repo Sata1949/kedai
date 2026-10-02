@@ -123,6 +123,30 @@ fn list_titles(titles: &[String], idx: &[usize]) -> String {
         .join("、")
 }
 
+/// 区域与虚拟屏求交(纯函数,跨平台单测;2026-10-02 修复批次):
+/// - 完全在屏外 → `None`(调用方给可操作报错并列出虚拟屏范围);
+/// - 部分越界 → 返回钳制后的 `(x, y, w, h)` 与 `clamped=true`(调用方在描述里注明);
+/// - 坐标极端值由 `saturating_add` 兜底,不 panic。
+///
+/// 入参均为虚拟屏物理像素(原点在主显示器左上,可为负)。
+pub(crate) fn clamp_region(
+    region: (i64, i64, u32, u32),
+    screen: (i32, i32, u32, u32),
+) -> Option<(i64, i64, u32, u32, bool)> {
+    let (x, y, w, h) = region;
+    let (vs_x, vs_y, vs_w, vs_h) = screen;
+    let left = x.max(vs_x as i64);
+    let top = y.max(vs_y as i64);
+    let right = x.saturating_add(w as i64).min(vs_x as i64 + vs_w as i64);
+    let bottom = y.saturating_add(h as i64).min(vs_y as i64 + vs_h as i64);
+    if right <= left || bottom <= top {
+        return None;
+    }
+    let (nw, nh) = ((right - left) as u32, (bottom - top) as u32);
+    let clamped = left != x || top != y || nw != w || nh != h;
+    Some((left, top, nw, nh, clamped))
+}
+
 /// 注册截图工具(始终注册;可见性由「视觉与截图」开关在策略层过滤)
 pub fn register_screenshot_tool(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
     let definition = ToolDefinition {
@@ -258,7 +282,7 @@ pub(crate) fn is_uniform(rgba: &[u8]) -> bool {
 
 #[cfg(windows)]
 mod win {
-    use super::{is_uniform, rgba_from_bgra, Shot, Target};
+    use super::{clamp_region, is_uniform, rgba_from_bgra, Shot, Target};
     use std::io::Cursor;
     use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT};
     use windows_sys::Win32::Graphics::Gdi;
@@ -334,8 +358,22 @@ mod win {
                 )
             }
             Target::Region { x, y, w, h } => {
-                let (w, h) = (*w, *h);
-                capture_rect(*x, *y, w, h, format!("区域 ({x},{y}) {w}×{h}"))
+                // 钳制到虚拟屏(修复批次):越界部分此前会截出未定义/黑块;完全在屏外
+                // 给可操作报错(附虚拟屏范围),部分越界钳制并在描述中注明
+                let (vs_x, vs_y, vs_w, vs_h) = virtual_screen()?;
+                match clamp_region((*x, *y, *w, *h), (vs_x, vs_y, vs_w, vs_h)) {
+                    Some((cx, cy, cw, ch, clamped)) => {
+                        let desc = if clamped {
+                            format!("区域 ({x},{y}) {w}×{h} → 钳制为 ({cx},{cy}) {cw}×{ch}")
+                        } else {
+                            format!("区域 ({cx},{cy}) {cw}×{ch}")
+                        };
+                        capture_rect(cx, cy, cw, ch, desc)
+                    }
+                    None => Err(format!(
+                        "区域 ({x},{y}) {w}×{h} 完全在屏幕范围外(虚拟屏原点 ({vs_x},{vs_y}),尺寸 {vs_w}×{vs_h})"
+                    )),
+                }
             }
             Target::Window(title) => capture_window(title),
         }
@@ -397,7 +435,11 @@ mod win {
     fn capture_rect(x: i64, y: i64, w: u32, h: u32, desc: String) -> Result<Shot, String> {
         let clamp32 = |v: i64| v.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
         let (x, y) = (clamp32(x), clamp32(y));
-        let (w, h) = (w as i32, h as i32);
+        // 修复批次:w/h 收敛为 i32 前先做上限校验(此前 `as i32` 对超大值会静默回绕)
+        let (w, h) = match (i32::try_from(w), i32::try_from(h)) {
+            (Ok(w), Ok(h)) => (w, h),
+            _ => return Err("截图区域尺寸超出上限".to_string()),
+        };
         unsafe {
             let screen_dc = Gdi::GetDC(std::ptr::null_mut());
             if screen_dc.is_null() {
@@ -616,6 +658,33 @@ mod tests {
         // 零命中
         let e = pick_window(&titles, "不存在窗口").unwrap_err();
         assert!(e.contains("未找到"), "{e}");
+    }
+
+    /// 区域钳制(修复批次):屏内不变、部分越界钳制并标注、完全屏外 None、负原点屏兼容
+    #[test]
+    fn clamp_region_intersects_virtual_screen() {
+        // 单屏 1920×1080,原点 (0,0):屏内区域原样返回
+        assert_eq!(
+            clamp_region((100, 100, 800, 600), (0, 0, 1920, 1080)),
+            Some((100, 100, 800, 600, false))
+        );
+        // 右下越界:钳到屏边并标注 clamped
+        assert_eq!(
+            clamp_region((1800, 1000, 500, 500), (0, 0, 1920, 1080)),
+            Some((1800, 1000, 120, 80, true))
+        );
+        // 完全在屏外(右侧)→ None(调用方给可操作报错)
+        assert_eq!(clamp_region((2000, 0, 100, 100), (0, 0, 1920, 1080)), None);
+        // 负原点虚拟屏(副屏在主屏左/上):负坐标是合法区域,不误判
+        assert_eq!(
+            clamp_region((-1000, -500, 400, 300), (-1000, -500, 2940, 1580)),
+            Some((-1000, -500, 400, 300, false))
+        );
+        // 极端坐标不 panic 且判为屏外
+        assert_eq!(
+            clamp_region((i64::MAX, 0, 10, 10), (0, 0, 1920, 1080)),
+            None
+        );
     }
 
     #[test]

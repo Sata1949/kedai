@@ -77,8 +77,9 @@ impl TaskService {
     /// `user_goal` 供 {{lastUserMessage}} 占位符渲染(步骤生成传任务目标,主 agent 传 goal)。
     /// `has_tools`(提交 3 · D3-c):本轮是否真的下发了工具——true 时在内置执行者指令后
     /// 追加工具使用纪律段(单一出处 `EXECUTOR_TOOL_DISCIPLINE`);legacy(无工具)传 false。
-    /// `has_vision_tools`(视觉能力包 D4):本轮工具面是否含视觉三件——true 时再追加
-    /// 视觉验证纪律段(单一出处 `VISION_VERIFY_DISCIPLINE`);无视觉工具时该段不出现。
+    /// `has_image_tools`(视觉能力包 D4;修复批次并含截图):本轮工具面是否含任一图像
+    /// 工具(视觉三件 ∪ 截图)——true 时再追加视觉验证纪律段(单一出处
+    /// `VISION_VERIFY_DISCIPLINE`);无图像工具时该段不出现。
     pub(crate) fn assemble_executor_system_prompt(
         &self,
         settings: &RuntimeSettings,
@@ -86,7 +87,7 @@ impl TaskService {
         character_id: Option<&str>,
         user_goal: &str,
         has_tools: bool,
-        has_vision_tools: bool,
+        has_image_tools: bool,
     ) -> String {
         let executor = self.executor_for(executor_id);
         // 执行者库命中即独占身份段:角色卡不参与(含世界书过滤口径)
@@ -104,8 +105,9 @@ impl TaskService {
                 crate::services::task_core::prompt_consts::EXECUTOR_TOOL_DISCIPLINE
             ));
         }
-        // 视觉验证纪律段(D4):仅当工具面含视觉三件时追加(条件段,与工具纪律同族)
-        if has_vision_tools {
+        // 视觉验证纪律段(D4;修复批次并含截图):仅当工具面含图像工具时追加
+        // (条件段,与工具纪律同族)
+        if has_image_tools {
             sys.push_str(&format!(
                 "\n\n{}",
                 crate::services::task_core::prompt_consts::VISION_VERIFY_DISCIPLINE

@@ -67,9 +67,15 @@ pub const WORKSPACE_TOOLS: &[&str] = &[
 /// 可见性 = 工作区族闸门 ∩ `vision_gate`(生效连接开启「视觉输入」能力位)。
 pub const VISION_TOOLS: &[&str] = &["view_image", "zoom_image", "image_diff"];
 
-/// defs 是否含视觉工具成员(条件提示词段与相关判据共用)
-pub fn has_vision_tools(defs: &[ToolDefinition]) -> bool {
-    defs.iter().any(|d| VISION_TOOLS.contains(&d.name.as_str()))
+/// 名称是否属「图像工具」:视觉三件 ∪ 截图(2026-10-02 修复批次——截图同样把图像
+/// 交回模型,视觉验证纪律段的条件判据必须含它,否则截图路径静默无纪律段)。
+pub fn is_image_tool(name: &str) -> bool {
+    VISION_TOOLS.contains(&name) || name == crate::tools::screenshot::TOOL_NAME
+}
+
+/// defs 是否含任一图像工具(条件提示词段与相关判据共用)
+pub fn has_image_tools(defs: &[ToolDefinition]) -> bool {
+    defs.iter().any(|d| is_image_tool(&d.name))
 }
 
 /// 按「视觉与截图」总开关过滤截图工具(视觉能力包 D5):关(默认)时剔除。
@@ -257,11 +263,25 @@ mod tests {
         }
     }
 
-    /// 视觉工具判据(条件提示词段用)
+    /// 图像工具判据(条件提示词段用):视觉三件 ∪ 截图;精确名匹配,前缀同名不误伤
+    /// (修复批次:判据此前只认视觉三件,截图在聊天可下发却拿不到纪律段)
     #[test]
-    fn has_vision_tools_detects_membership() {
-        assert!(!has_vision_tools(&[def("read")]));
-        assert!(has_vision_tools(&[def("read"), def("view_image")]));
+    fn has_image_tools_detects_membership() {
+        assert!(!has_image_tools(&[def("read")]));
+        assert!(has_image_tools(&[def("read"), def("view_image")]));
+        assert!(has_image_tools(&[def("screenshot")]));
+        assert!(!has_image_tools(&[def("screenshot2"), def("view_image2")]));
+        assert!(is_image_tool("screenshot"));
+        assert!(!is_image_tool("screenshot_full"));
+    }
+
+    /// 视觉三件名单与注册常量单一出处一致:vision_tools 的三个 TOOL 常量改名时锁死,
+    /// 防止常量漂移导致闸门/提示词条件静默失效
+    #[test]
+    fn vision_tools_match_registration_constants() {
+        use crate::tools::vision_tools::{DIFF_TOOL, VIEW_TOOL, ZOOM_TOOL};
+        assert_eq!(VISION_TOOLS, &[VIEW_TOOL, ZOOM_TOOL, DIFF_TOOL]);
+        assert!(is_image_tool(crate::tools::screenshot::TOOL_NAME));
     }
 
     /// 侦察白名单的两档(D1):无作用域 = 既有只读清单(逐字不变),有作用域 = 追加

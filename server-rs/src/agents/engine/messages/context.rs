@@ -516,18 +516,17 @@ impl AgentEngine {
                 "运行时主 Agent 提示词读取失败，已回退其余提示词层"
             ),
         }
-        // 视觉验证纪律(视觉能力包 D4):本轮工具面含视觉三件(view_image 等)时,
-        // 追加到 system 末尾——要求模型「先描述看到的图像内容,再据此判断」。
-        // 条件段:无视觉工具时不出现(避免恒在文本干扰前缀缓存与 prompt 语义);
-        // 与任务侧 EXECUTOR/VISION 纪律同源口径(单一常量出处 prompt_consts)。
-        if crate::tools::tool_sets::has_vision_tools(&req.params.tools) {
-            if let Some(s0) = llm_messages.first_mut() {
-                if s0.role == "system" {
-                    s0.content.push_str(&format!(
-                        "\n\n{}",
-                        crate::services::task_core::prompt_consts::VISION_VERIFY_DISCIPLINE
-                    ));
-                }
+        // 视觉验证纪律(视觉能力包 D4;修复批次改判据并收敛为共享实现):本轮工具面
+        // 含任一图像工具(视觉三件 ∪ 截图,判据单一出处 `tool_sets::is_image_tool`)
+        // 时追加到 system 末尾——要求模型「先描述看到的图像内容,再据此判断」。
+        // 条件段:无图像工具时不出现(避免恒在文本干扰前缀缓存与 prompt 语义);
+        // 判据与文案单一出处见 prompt_kit 实现,与 custom 工具节点共用。
+        if let Some(s0) = llm_messages.first_mut() {
+            if s0.role == "system" {
+                crate::services::prompt_kit::append_vision_discipline_if_needed(
+                    &mut s0.content,
+                    &req.params.tools,
+                );
             }
         }
         // 历史压缩摘要:独立 system 消息槽(缓存感知管线·改造 A),插在首个 system

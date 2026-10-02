@@ -330,6 +330,18 @@ impl CustomExecutor {
                 ),
             ));
         }
+        // 视觉验证纪律段(2026-10-02 修复批次):本节点工具面含任一图像工具时追加到
+        // system——判据以**实际下发名单**为准(视觉三件 ∪ 截图),与 solo 主循环、
+        // 聊天路径同源(单一实现 prompt_kit::append_vision_discipline_if_needed);
+        // 此前 custom 工具节点只贴工具纪律,漏了视觉验证纪律(截图/看图节点静默无段)。
+        if let Some(s0) = messages.first_mut() {
+            if s0.role == "system" {
+                crate::services::prompt_kit::append_vision_discipline_if_needed(
+                    &mut s0.content,
+                    &tools,
+                );
+            }
+        }
         // 闸门名单与下发工具一致:名单外立即拒绝(任务模式无 UI 授权上下文)
         let gate_list: Vec<String> = tools.iter().map(|d| d.name.clone()).collect();
         let gate = crate::agents::engine::executor::ToolGate::listed(&gate_list);

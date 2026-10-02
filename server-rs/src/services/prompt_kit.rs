@@ -190,6 +190,25 @@ pub fn untrusted_boundary(source: &str, content: &str) -> String {
     )
 }
 
+/// 图像工具面的视觉验证纪律段追加(2026-10-02 修复批次):本轮工具面含任一图像工具
+/// (视觉三件 ∪ 截图;判据单一出处 `tool_sets::is_image_tool`)时,把
+/// `VISION_VERIFY_DISCIPLINE` 追加到 system 末尾。返回是否追加。
+///
+/// 两个手工装配点共用本实现:聊天 Agent 模式(`agents/engine/messages/context.rs`)
+/// 与 custom 流程工具节点(`task_engine/custom.rs`)——判据与文案都不在调用点复制。
+/// (solo 主循环走 `TaskService::assemble_executor_system_prompt` 布尔入参,同源同判据。)
+pub fn append_vision_discipline_if_needed(
+    system: &mut String,
+    defs: &[crate::models::types::ToolDefinition],
+) -> bool {
+    if !crate::tools::tool_sets::has_image_tools(defs) {
+        return false;
+    }
+    system.push_str("\n\n");
+    system.push_str(crate::services::task_core::prompt_consts::VISION_VERIFY_DISCIPLINE);
+    true
+}
+
 /// 被上下文预算裁掉的上游产出段的正文标记(二维批次 8)。
 /// 段**标签行保留**、正文替换为本标记——让模型知道「这里原本有内容」而不是静默少一段。
 pub const OMITTED_SEGMENT_MARKER: &str = "(因本节点上下文上限省略)";
@@ -450,5 +469,37 @@ mod tests {
     #[test]
     fn budget_with_no_segments_keeps_head() {
         assert_eq!(select_segments_within_budget(80, &[], 100).unwrap(), 0);
+    }
+
+    /// 视觉验证纪律条件追加(修复批次):判据 = 图像工具(视觉三件 ∪ 截图),
+    /// 精确名匹配;无图像工具时不改 system(前缀稳定)。
+    #[test]
+    fn vision_discipline_appends_only_for_image_tools() {
+        let def = |name: &str| crate::models::types::ToolDefinition {
+            name: name.into(),
+            description: String::new(),
+            parameters: serde_json::json!({ "type": "object" }),
+        };
+        let mut sys = "系统提示".to_string();
+        let plain = vec![def("read"), def("bash")];
+        assert!(!append_vision_discipline_if_needed(&mut sys, &plain));
+        assert_eq!(sys, "系统提示", "无图像工具时 system 必须逐字节不变");
+
+        // 视觉三件与截图任一在场即追加(含末尾同款分隔)
+        for name in ["view_image", "zoom_image", "image_diff", "screenshot"] {
+            let mut sys = "系统提示".to_string();
+            assert!(append_vision_discipline_if_needed(
+                &mut sys,
+                &[def("read"), def(name)]
+            ));
+            assert!(sys.contains("视觉验证纪律"), "{name} 应触发纪律段: {sys}");
+            assert!(sys.starts_with("系统提示\n\n"), "{name}: 追加格式不变");
+        }
+        // 精确名匹配:前缀同名不误伤
+        let mut sys = "系统提示".to_string();
+        assert!(!append_vision_discipline_if_needed(
+            &mut sys,
+            &[def("screenshot2"), def("view_image2")]
+        ));
     }
 }
