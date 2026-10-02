@@ -186,8 +186,9 @@ mod tests {
         assert!(ok);
         assert!(why.contains("已启用"), "{why}");
 
-        let (ok, why) =
-            parse_status(&format!("disabled{SEP}无障碍截图服务未启用(系统设置 → 无障碍)"));
+        let (ok, why) = parse_status(&format!(
+            "disabled{SEP}无障碍截图服务未启用(系统设置 → 无障碍)"
+        ));
         assert!(!ok);
         assert!(why.contains("未启用"), "{why}");
     }

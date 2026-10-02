@@ -55,6 +55,9 @@ pub async fn status(
 pub async fn open_settings(State(_state): State<Arc<AppState>>) -> Response {
     match crate::services::screen_capture_android::open_settings() {
         Ok(()) => Json(json!({ "ok": true })).into_response(),
-        Err(e) => err_status(format!("打开系统无障碍设置失败:{e}"), StatusCode::BAD_REQUEST),
+        Err(e) => err_status(
+            format!("打开系统无障碍设置失败:{e}"),
+            StatusCode::BAD_REQUEST,
+        ),
     }
 }
