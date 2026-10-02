@@ -40,7 +40,13 @@ const VERBOSE = process.argv.includes('--verbose');
  *   而本仓库未安装 `@types/node`(前端源码不需要),故按**既有约定**逐行压制类型错误
  *   ——与 `characterScriptSandbox.test.ts:11`、`sandbox/uma-creation.test.ts:12`、
  *   `sandbox/wuwa-sim.test.ts:8` 处理 `node:vm` 的写法完全一致。属必要且合规的新增,
- *   非「用断言绕过类型检查」。若将来补装 @types/node,应把这 6 处一并删除并下调基线。
+ *   非「用断言绕过类型检查」。若将来补装 @types/node,应把这些处一并删除并下调基线。
+ * `@ts-expect-error` 由 6 上调至 7 的理由(2026-10-02,UIP 批):
+ *   新增的 `web/src/components/sidebarTaskLayout.test.ts` 需读 `web/src/styles/*.css`
+ *   源码文本做布局契约断言(jsdom 无布局引擎),而 `.css` 的 `?raw` 在本仓返回空串
+ *   (vitest `css:false`,2026-10-02 再次实测确认),只能用 `node:fs`——与上一条同一类
+ *   必要且合规的新增;压制面已收窄到最小(只 readFileSync 一个内置,路径用
+ *   `new URL(…, import.meta.url)`,不再引 node:url/node:path)。
  */
 const BASELINE = {
   any: 0,
@@ -49,7 +55,7 @@ const BASELINE = {
   // 新增 2 处(测试里的 fetch/Blob 捕获桩),净 −1。ratchet 只降不升,顺势收紧。
   // TM-SET-2(2026-10-01)再下调 69 → 68:退役 R3a 测试删掉 1 处 `undefined as unknown as`。
   asUnknownAs: 68,
-  tsExpectError: 6,
+  tsExpectError: 7,
   nonNull: 33,
 };
 

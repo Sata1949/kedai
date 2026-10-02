@@ -1,20 +1,17 @@
 // UIP 批次布局/观感源码契约(2026-10-02)。jsdom 无布局引擎、vitest `css:false` 连样式
 // 都不加载,尺寸/滚动类回归无法用组件测试断言;沿用 UIFIX 章同一口径,用源码文本守住
 // 「最隐蔽、一改就悄悄回退」的几条规则。注意 `.css` 的 `?raw` 在本仓返回空串
-// (见 ChatInput.test.ts 顶部注释),故 .css 一律走 node:fs 读取。
+// (见 ChatInput.test.ts 顶部注释;2026-10-02 再次实测确认),故 .css 一律走 node:fs 读取。
 import { describe, expect, it } from 'vitest';
-// 本仓库未安装 @types/node(前端源码不需要),测试里用 node: 内置模块须逐行压制类型错误
+// 本仓库未安装 @types/node(前端源码不需要),测试里用 node: 内置模块须压制类型错误
 // ——与 parser.contract.test.ts / characterScriptSandbox.test.ts 的既有约定一致。
+// 为把压制面收窄到最小,只用 readFileSync 一个内置,路径一律 `new URL(…, import.meta.url)`。
 // @ts-expect-error -- node:fs 缺少类型声明
 import { readFileSync } from 'node:fs';
-// @ts-expect-error -- node:url 缺少类型声明
-import { fileURLToPath } from 'node:url';
-// @ts-expect-error -- node:path 缺少类型声明
-import { dirname, join } from 'node:path';
 import sidebarSource from './Sidebar.vue?raw';
 
-const HERE = dirname(fileURLToPath(import.meta.url));
-const readText = (rel: string): string => readFileSync(join(HERE, rel), 'utf8');
+/** 读取相对本测试文件的源码文本(readFileSync 直接接受 file: URL)。 */
+const readText = (rel: string): string => readFileSync(new URL(rel, import.meta.url), 'utf8');
 
 const taskCss = readText('../styles/task.css');
 const panelsCss = readText('../styles/panels.css');
