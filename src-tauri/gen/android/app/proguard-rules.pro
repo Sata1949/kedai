@@ -51,6 +51,19 @@
 # ============================================================================
 -keep class com.kedai.app.ShellExecutorBridge { *; }
 
+# ============================================================================
+# Kedai:安卓无障碍截图桥(移动端视觉能力包 A2)同样被 native 按名调用
+# (server-rs/src/services/screen_capture_android.rs 经 jni_bridge 的
+#  FindClass("com/kedai/app/ScreenCaptureBridge") + CallStaticMethod 反射调用)。
+# 方法:capture / status / openSettings。整类保留(逐成员签名写法在 KeystoreBridge
+# 上已证明不可靠)。
+# ============================================================================
+-keep class com.kedai.app.ScreenCaptureBridge { *; }
+
+# 无障碍截图服务由系统按类名绑定(同 KeepAliveService 理由:清单按类名声明,混淆后
+# 系统找不到服务;release 下 R8 改名不在编译期报错,只在运行期静默失效)
+-keep class com.kedai.app.KedaiAccessibilityService { *; }
+
 # If your project uses WebView with JS, uncomment the following
 # and specify the fully qualified class name to the JavaScript interface
 # class:

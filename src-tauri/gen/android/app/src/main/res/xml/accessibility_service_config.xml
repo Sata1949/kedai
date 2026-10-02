@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Kedai 无障碍截图服务配置(移动端视觉能力包 A2,2026-10-02)。
+
+     最小权限口径:**仅 canTakeScreenshot=true**——不读窗口内容
+     (canRetrieveWindowContent=false)、不做手势(canPerformGestures 缺省即 false)、
+     不注入输入、不监听按键。事件类型仅为绑定所需的占位(系统要求声明事件类型),
+     服务侧 onAccessibilityEvent 为空实现,不消费任何事件。
+
+     canTakeScreenshot 为 API 30+ 属性(minSdk 30 起可用),对应
+     AccessibilityService.takeScreenshot —— 截图能力的唯一来源。
+     AOSP android-14.0.0_r1 源码实测:该 API 只要求 canTakeScreenshot 能力位,
+     不存在 FLAG_REQUEST_SCREENSHOT 标志,无需额外 accessibilityFlags。 -->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault"
+    android:canRetrieveWindowContent="false"
+    android:canTakeScreenshot="true"
+    android:description="@string/accessibility_service_description"
+    android:summary="@string/accessibility_service_summary"
+    android:notificationTimeout="100" />

@@ -1,4 +1,7 @@
 <resources>
     <string name="app_name">"Kedai"</string>
     <string name="main_activity_title">"Kedai"</string>
+    <!-- 移动端视觉能力包 A2(2026-10-02):无障碍截图服务在系统「无障碍」列表里的说明 -->
+    <string name="accessibility_service_description">仅用于截图:应用主动调用截图工具时抓取屏幕画面,交给所配置的视觉模型查看。不读取窗口内容、不执行手势、不注入输入。</string>
+    <string name="accessibility_service_summary">仅用于截图(应用主动调用时取屏)</string>
 </resources>

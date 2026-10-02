@@ -56,5 +56,20 @@
             android:name=".KeepAliveService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- 无障碍截图服务(移动端视觉能力包 A2):仅承载 takeScreenshot(API 30+),
+             不读窗口内容、不做手势/输入注入(能力位见 res/xml/accessibility_service_config.xml)。
+             由系统在用户于「设置 → 无障碍」显式启用后绑定,权限 BIND_ACCESSIBILITY_SERVICE 保护。 -->
+        <service
+            android:name=".KedaiAccessibilityService"
+            android:exported="true"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
     </application>
 </manifest>

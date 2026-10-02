@@ -26,7 +26,8 @@ use std::sync::{Mutex, OnceLock};
 /// 需要按名调用的桥接类(Kotlin object,静态方法入参/出参均为 String)。
 ///
 /// **类名常量的单一出处**:调用方(`keystore_android` / `native_bridge_android` /
-/// `exec/android`)一律 `use` 本处的常量,`BRIDGE_CLASSES` 亦由同一批常量组装——
+/// `exec/android` / `screen_capture_android`)一律 `use` 本处的常量,`BRIDGE_CLASSES`
+/// 亦由同一批常量组装——
 /// 「给类起名」与「登记缓存」因此是同一个动作,新增桥类时不可能只做一半。
 ///
 /// 历史教训(2026-09-17 实测):`ShellExecutorBridge` 曾被漏登记,后果是 Android 端
@@ -37,9 +38,15 @@ use std::sync::{Mutex, OnceLock};
 pub const KEYSTORE_CLASS: &str = "com/kedai/app/KeystoreBridge";
 pub const NATIVE_CLASS: &str = "com/kedai/app/KedaiNative";
 pub const EXEC_CLASS: &str = "com/kedai/app/ShellExecutorBridge";
+pub const SCREEN_CAPTURE_CLASS: &str = "com/kedai/app/ScreenCaptureBridge";
 
 /// 全部桥接类(组装自上方常量,勿另起字面量)
-const BRIDGE_CLASSES: &[&str] = &[KEYSTORE_CLASS, NATIVE_CLASS, EXEC_CLASS];
+const BRIDGE_CLASSES: &[&str] = &[
+    KEYSTORE_CLASS,
+    NATIVE_CLASS,
+    EXEC_CLASS,
+    SCREEN_CAPTURE_CLASS,
+];
 
 /// 桥接方法签名:入参 String,返回 String
 const BRIDGE_SIG_STR_IN: &str = "(Ljava/lang/String;)Ljava/lang/String;";
