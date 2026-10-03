@@ -23,9 +23,9 @@ export const CONNECTOR_TYPE_LABELS: Record<string, string> = {
 /** 连接器类型下拉顺序(与后端定义顺序一致,便于对照) */
 export const CONNECTOR_TYPE_ORDER: ConnectorType[] = ['openai-compatible', 'mock'];
 
-/** 连接能力位 → 展示文案与说明(2026-10-02 视觉能力包 D1)。
+/** 连接能力位 → 展示文案与说明(2026-10-02 视觉能力包 D1;2026-10-03 VISION-L6 收口)。
  *  键与后端 `ConnectionProfile` 的 supports_* / image_auto_split 字段一一对应;
- *  `reserved` = 仅声明、当前版本引擎未消费(UI 如实标注,避免「勾了没反应」的困惑)。 */
+ *  `reserved` = 效果面暂无消费、勾选不改变行为(如实标注,避免「勾了没反应」的困惑)。 */
 export interface ConnectionCapabilityMeta {
   key:
     | 'supports_vision'
@@ -53,20 +53,18 @@ export const CONNECTION_CAPABILITIES: ConnectionCapabilityMeta[] = [
   {
     key: 'supports_structured_output',
     label: '结构化输出',
-    tip: '预留能力位:当前版本仅记录,引擎尚未消费。',
-    reserved: true,
+    tip: '勾选后,引擎的结构化产物调用(如变量状态更新)会随请求要求 JSON 模式(Chat Completions: response_format;Responses: text.format)。Anthropic 方言无等价参数,自动走提示词约定。',
   },
   {
     key: 'supports_prefix_completion',
     label: '前缀续写',
-    tip: '预留能力位:当前版本仅记录,引擎尚未消费。',
+    tip: '预留能力位:已接入连接构建与指纹,引擎当前没有前缀续写生成路径,勾选暂不改变行为。',
     reserved: true,
   },
   {
     key: 'supports_mid_conversation_system',
     label: '中途系统插入',
-    tip: '预留能力位:当前版本仅记录,引擎尚未消费。',
-    reserved: true,
+    tip: '勾选后,对话中途插入的系统级内容(世界书 @INJECT、生成前激发条目)在 Anthropic / Responses 方言下就地以 user 消息承载(保留位置);不勾选时这类内容上提合并到顶部系统提示。Chat Completions 方言本就原样透传。',
   },
 ];
 

@@ -11,6 +11,7 @@ import type {
   RuntimeSettings,
   RuntimeSettingsPatch,
 } from '../api/types';
+import type { ConnectionProbeParams } from '../api/settings';
 
 /** 行内编辑草稿;id 为空 = 后端尚未分配(新增行,保存后才拿到 id) */
 export interface ConnectionDraft {
@@ -21,10 +22,14 @@ export interface ConnectionDraft {
   model: string;
   /** 接口方言(取值域见 api/types.ts 的 ApiStyle;后端保存时会按 URL 后缀推断默认档) */
   api_style: string;
-  /** 只写字段:留空 = 不改动该连接的密钥(与后端「空 Key 忽略」同口径,接口层面无法清空密钥) */
+  /** 只写字段:留空 = 不改动该连接的密钥(与后端「空 Key 忽略」同口径);
+   *  要清除已保存密钥,置 clearApiKey(瞬态)后保存 */
   api_key: string;
+  /** 瞬态清除标记(不落服务端字段名):置 true 且 api_key 留空时,保存会下发
+   *  clear_api_key=true 显式清空该连接已保存密钥(2026-10-03 API 设置补全) */
+  clearApiKey: boolean;
   enabled: boolean;
-  /** 模型能力位(2026-10-02 视觉能力包;其余三项为预留声明,当前版本引擎未消费) */
+  /** 模型能力位(2026-10-02 视觉能力包;2026-10-03 VISION-L6 收口:前缀续写仍为预留) */
   supports_vision: boolean;
   supports_structured_output: boolean;
   supports_prefix_completion: boolean;
@@ -44,6 +49,7 @@ function toDraft(p: ConnectionProfile): ConnectionDraft {
     model: p.model,
     api_style: p.api_style ?? 'chat-completions',
     api_key: '',
+    clearApiKey: false,
     enabled: p.enabled,
     supports_vision: p.supports_vision ?? false,
     supports_structured_output: p.supports_structured_output ?? false,
@@ -100,6 +106,7 @@ export function useConnectionProfiles() {
       model: '',
       api_style: 'chat-completions',
       api_key: '',
+      clearApiKey: false,
       enabled: true,
       supports_vision: false,
       supports_structured_output: false,
@@ -120,6 +127,7 @@ export function useConnectionProfiles() {
   }
 
   function removeDraft(index: number): void {
+    clearRowProbeState(index);
     drafts.value.splice(index, 1);
     if (activeIndex.value === index) {
       // 被删的就是默认连接:交给后端回退到第一个启用连接(保存后回填真实选择)
@@ -151,7 +159,12 @@ export function useConnectionProfiles() {
         image_auto_split: d.image_auto_split,
       };
       if (d.id) row.id = d.id;
-      if (d.api_key.trim()) row.api_key = d.api_key.trim();
+      if (d.api_key.trim()) {
+        row.api_key = d.api_key.trim();
+      } else if (d.clearApiKey && d.id) {
+        // 显式清空已保存密钥(与 api_key 互斥,新输入优先);新行无密钥可清,不下发
+        row.clear_api_key = true;
+      }
       return row;
     });
     const patch: RuntimeSettingsPatch = { connections: list };
@@ -209,9 +222,102 @@ export function useConnectionProfiles() {
     }
   }
 
+  // ---------- 逐连接探测(2026-10-03 API 设置补全:测试连接 / 从 API 加载模型列表) ----------
+
+  /** 行键:已保存行用 id(applyServer 回填后仍能对上),新增行用 `new-<行下标>`(临时) */
+  function rowKey(index: number): string {
+    const d = drafts.value[index];
+    return d?.id ? d.id : `new-${index}`;
+  }
+
+  /** 逐行探测状态(纯 UI 态,不落库):key 见 rowKey */
+  const testing = ref<Record<string, boolean>>({});
+  const loadingModels = ref<Record<string, boolean>>({});
+  const modelsByConn = ref<Record<string, string[]>>({});
+  const testFeedback = ref<Record<string, { kind: 'ok' | 'err' | 'info'; text: string } | null>>(
+    {},
+  );
+
+  /** 组装该行探测参数:显式草稿字段(未保存新行也可测)+ id(缺省字段与密钥回退已存值)。
+   *  base_url/model 按草稿原样下发(显式空 = 按空值探测,与「显式清空地址」保存语义一致);
+   *  api_key 仅在输入了新值时下发(留空 = 用已存密钥测)。 */
+  function probePayload(index: number): ConnectionProbeParams {
+    const d = drafts.value[index];
+    if (!d) return {};
+    const payload: ConnectionProbeParams = {
+      connection: {
+        connector_type: d.connector_type,
+        base_url: d.base_url.trim(),
+        api_style: d.api_style,
+        model: d.model.trim(),
+      },
+    };
+    const typedKey = d.api_key.trim();
+    if (typedKey) payload.connection.api_key = typedKey;
+    if (d.id) payload.connection_id = d.id;
+    return payload;
+  }
+
+  /** 逐连接「测试连接」:打参数化探测端点,不影响已生效连接器与连接配置 */
+  async function testConnection(index: number): Promise<void> {
+    const key = rowKey(index);
+    if (testing.value[key]) return;
+    testing.value = { ...testing.value, [key]: true };
+    testFeedback.value = { ...testFeedback.value, [key]: null };
+    try {
+      const res = await api.testConnect(probePayload(index));
+      testFeedback.value = {
+        ...testFeedback.value,
+        [key]: res.ok
+          ? { kind: 'ok', text: res.message ? `连接成功:${res.message}` : '连接成功' }
+          : { kind: 'err', text: res.message || '连接失败' },
+      };
+    } catch (e) {
+      testFeedback.value = {
+        ...testFeedback.value,
+        [key]: { kind: 'err', text: `测试失败:${(e as Error).message}` },
+      };
+    } finally {
+      testing.value = { ...testing.value, [key]: false };
+    }
+  }
+
+  /** 逐连接「从 API 加载模型列表」:结果写入该行 MODEL 输入的建议下拉 */
+  async function refreshModelsFor(index: number): Promise<void> {
+    const key = rowKey(index);
+    if (loadingModels.value[key]) return;
+    loadingModels.value = { ...loadingModels.value, [key]: true };
+    try {
+      const res = await api.refreshModels(probePayload(index));
+      modelsByConn.value = { ...modelsByConn.value, [key]: res.models };
+      if (res.message) {
+        // 上游的「可能不支持 /models 接口」类提示按 info 呈现,不算失败
+        testFeedback.value = { ...testFeedback.value, [key]: { kind: 'info', text: res.message } };
+      }
+    } catch (e) {
+      testFeedback.value = {
+        ...testFeedback.value,
+        [key]: { kind: 'err', text: `加载模型列表失败:${(e as Error).message}` },
+      };
+    } finally {
+      loadingModels.value = { ...loadingModels.value, [key]: false };
+    }
+  }
+
+  /** 行删除时顺手清掉该行的临时探测状态(键可能随行下标漂移,不清理也只是残留) */
+  function clearRowProbeState(index: number): void {
+    const key = rowKey(index);
+    delete testing.value[key];
+    delete loadingModels.value[key];
+    delete modelsByConn.value[key];
+    delete testFeedback.value[key];
+  }
+
   return {
     drafts, activeIndex, loading, saving, feedback,
     taskDefaultConnectionId, isTaskMode, saveTaskDefaultConnection,
     load, addDraft, requestRemove, removeDraft, setActive, buildPatch, save,
+    rowKey, testing, loadingModels, modelsByConn, testFeedback,
+    probePayload, testConnection, refreshModelsFor, clearRowProbeState,
   };
 }

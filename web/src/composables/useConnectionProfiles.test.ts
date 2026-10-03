@@ -26,11 +26,15 @@ vi.mock('../api', async (importOriginal) => {
     ...orig,
     getSettings: vi.fn(),
     saveSettings: vi.fn(),
+    testConnect: vi.fn(),
+    refreshModels: vi.fn(),
   };
 });
 
 const getSettingsMock = vi.mocked(api.getSettings);
 const saveSettingsMock = vi.mocked(api.saveSettings);
+const testConnectMock = vi.mocked(api.testConnect);
+const refreshModelsMock = vi.mocked(api.refreshModels);
 
 function connection(overrides: Partial<ConnectionProfile> = {}): ConnectionProfile {
   return {
@@ -100,6 +104,8 @@ beforeEach(() => {
   setActivePinia(createPinia());
   getSettingsMock.mockReset();
   saveSettingsMock.mockReset();
+  testConnectMock.mockReset();
+  refreshModelsMock.mockReset();
 });
 
 describe('useConnectionProfiles 载入与选择', () => {
@@ -225,5 +231,113 @@ describe('useConnectionProfiles 保存', () => {
     await state.save();
     expect(state.feedback.value?.kind).toBe('err');
     expect(state.feedback.value?.text).toContain('服务端拒绝');
+  });
+});
+
+// ---------- 逐连接探测与清空密钥(2026-10-03 API 设置补全) ----------
+
+describe('useConnectionProfiles 逐连接探测与 clear_api_key(2026-10-03)', () => {
+  it('probePayload:草稿字段全量下发,输入了新 Key 才带 api_key,已保存行带 connection_id', async () => {
+    installServer(makeSettings([connection()], 'c1'));
+    const state = useConnectionProfiles();
+    await state.load();
+    state.drafts.value[0].api_key = ' sk-new ';
+    expect(state.probePayload(0)).toEqual({
+      connection_id: 'c1',
+      connection: {
+        connector_type: 'openai-compatible',
+        base_url: 'https://api.example/v1',
+        api_style: 'chat-completions',
+        model: 'gpt-x',
+        api_key: 'sk-new',
+      },
+    });
+    // 未保存新行:无 connection_id,api_key 留空不下发(留空 = 用已存密钥测,新行无已存值)
+    state.addDraft();
+    expect(state.probePayload(1)).toEqual({
+      connection: {
+        connector_type: 'openai-compatible',
+        base_url: '',
+        api_style: 'chat-completions',
+        model: '',
+      },
+    });
+  });
+
+  it('testConnection:成功/失败都写入该行反馈与逐行 busy 态,不碰全局 feedback', async () => {
+    installServer(makeSettings([connection()], 'c1'));
+    const state = useConnectionProfiles();
+    await state.load();
+    testConnectMock.mockResolvedValue({ ok: true, message: '连接成功', models: ['m1'] });
+    await state.testConnection(0);
+    expect(state.testFeedback.value[state.rowKey(0)]?.kind).toBe('ok');
+    expect(state.testing.value[state.rowKey(0)]).toBe(false);
+    expect(state.feedback.value).toBeNull();
+
+    testConnectMock.mockResolvedValue({ ok: false, message: '上游 401', models: [] });
+    await state.testConnection(0);
+    expect(state.testFeedback.value[state.rowKey(0)]?.kind).toBe('err');
+    expect(state.testFeedback.value[state.rowKey(0)]?.text).toContain('上游 401');
+
+    testConnectMock.mockRejectedValue(new Error('网络不可达'));
+    await state.testConnection(0);
+    expect(state.testFeedback.value[state.rowKey(0)]?.text).toContain('网络不可达');
+  });
+
+  it('refreshModelsFor:列表写入该行建议;上游 info 提示按 info 呈现', async () => {
+    installServer(makeSettings([connection()], 'c1'));
+    const state = useConnectionProfiles();
+    await state.load();
+    refreshModelsMock.mockResolvedValue({ models: ['m1', 'm2'], message: null });
+    await state.refreshModelsFor(0);
+    expect(state.modelsByConn.value[state.rowKey(0)]).toEqual(['m1', 'm2']);
+
+    refreshModelsMock.mockResolvedValue({
+      models: ['gpt-x'],
+      message: 'API 未返回完整模型列表',
+    });
+    await state.refreshModelsFor(0);
+    expect(state.testFeedback.value[state.rowKey(0)]?.kind).toBe('info');
+
+    refreshModelsMock.mockRejectedValue(new Error('超时'));
+    await state.refreshModelsFor(0);
+    expect(state.testFeedback.value[state.rowKey(0)]?.kind).toBe('err');
+    expect(state.testFeedback.value[state.rowKey(0)]?.text).toContain('超时');
+  });
+
+  it('buildPatch:clearApiKey 置位且留空密钥 → 下发 clear_api_key;新输入优先;新行忽略', async () => {
+    installServer(makeSettings([connection()], 'c1'));
+    const state = useConnectionProfiles();
+    await state.load();
+
+    // 1) 置位 + 留空 → clear_api_key: true,api_key 不下发
+    state.drafts.value[0].clearApiKey = true;
+    let row = state.buildPatch().connections?.[0];
+    expect(row?.clear_api_key).toBe(true);
+    expect(row?.api_key).toBeUndefined();
+
+    // 2) 同时输入了新 Key → 新输入优先(不下发 clear_api_key)
+    state.drafts.value[0].api_key = 'sk-new';
+    row = state.buildPatch().connections?.[0];
+    expect(row?.api_key).toBe('sk-new');
+    expect(row?.clear_api_key).toBeUndefined();
+
+    // 3) 新行(无 id):置位被忽略(无密钥可清)
+    state.addDraft();
+    state.drafts.value[1].clearApiKey = true;
+    row = state.buildPatch().connections?.[1];
+    expect(row?.clear_api_key).toBeUndefined();
+  });
+
+  it('removeDraft 清掉该行的探测状态,不残留脏键', async () => {
+    installServer(makeSettings([connection()], 'c1'));
+    const state = useConnectionProfiles();
+    await state.load();
+    testConnectMock.mockResolvedValue({ ok: true, message: '', models: [] });
+    await state.testConnection(0);
+    expect(state.testFeedback.value['c1']).not.toBeNull();
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    state.requestRemove(0);
+    expect(state.testFeedback.value['c1']).toBeUndefined();
   });
 });

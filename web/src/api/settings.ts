@@ -17,8 +17,24 @@ import type {
   RuntimeSettingsPatch,
 } from './types';
 
-export async function testConnect(): Promise<{ ok: boolean; message: string; models: string[] }> {
-  return request('/settings/connect', { method: 'POST', body: '{}' });
+/** 逐连接探测参数(2026-10-03 API 设置补全):显式 `connection` 草稿字段级覆盖 >
+ *  `connection_id` 命中已存连接(缺省字段与密钥取已存值)> 皆缺省 = 测当前生效连接器 */
+export interface ConnectionProbeParams {
+  connection_id?: string;
+  connection?: {
+    connector_type?: string;
+    base_url?: string;
+    /** 留空/缺省 = 用已存密钥(密钥仅服务端持有);非空 = 显式覆盖 */
+    api_key?: string;
+    api_style?: string;
+    model?: string;
+  };
+}
+
+export async function testConnect(
+  probe?: ConnectionProbeParams,
+): Promise<{ ok: boolean; message: string; models: string[] }> {
+  return request('/settings/connect', { method: 'POST', body: JSON.stringify(probe ?? {}) });
 }
 
 /** POST /api/settings/embedding/test:测试向量化连接(嵌入固定文本,回传实际维度与耗时) */
@@ -57,11 +73,13 @@ export async function getSettings(mode?: 'roleplay' | 'task'): Promise<RuntimeSe
   return request(`/settings${q}`);
 }
 
-/** POST /api/settings/refresh-models:向已保存的 API 请求可用模型列表 */
-export async function refreshModels(): Promise<{ models: string[]; message: string | null }> {
+/** POST /api/settings/refresh-models:向已保存的 API 请求可用模型列表;带探测参数时按连接探测 */
+export async function refreshModels(
+  probe?: ConnectionProbeParams,
+): Promise<{ models: string[]; message: string | null }> {
   const data = await request<unknown>('/settings/refresh-models', {
     method: 'POST',
-    body: '{}',
+    body: JSON.stringify(probe ?? {}),
   });
   // 形状闸门:models 直接决定下拉框内容,解出 undefined 会让模型列表永久为空
   const models = requireArrayField<string>(data, 'models', '模型列表');

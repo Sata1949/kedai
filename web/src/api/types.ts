@@ -342,11 +342,11 @@ export interface ConnectionProfile {
   enabled: boolean;
   /** 支持视觉输入(2026-10-02 视觉能力包):图像随请求发送;聊天贴图与视觉工具的门控 */
   supports_vision: boolean;
-  /** 支持结构化输出(预留:当前版本仅记录,引擎尚未消费) */
+  /** 支持结构化输出(2026-10-03 VISION-L6):引擎的结构化产物调用(如变量状态更新)会随请求要求 JSON 模式 */
   supports_structured_output: boolean;
-  /** 支持前缀续写(预留:当前版本仅记录,引擎尚未消费) */
+  /** 支持前缀续写(预留:已接入连接构建与指纹,引擎暂无前缀续写生成路径,勾选暂不改变行为) */
   supports_prefix_completion: boolean;
-  /** 支持中途系统插入(预留:当前版本仅记录,引擎尚未消费) */
+  /** 支持中途系统插入(2026-10-03 VISION-L6):Anthropic/Responses 方言下中途系统内容就地以 user 消息保序,而非上提拼顶 */
   supports_mid_conversation_system: boolean;
   /** 大图自动拆分(DeepSeek 等尺寸限制较严的端点):超阈值大图在发送前自动切块 */
   image_auto_split: boolean;
@@ -356,13 +356,16 @@ export interface ConnectionProfile {
   has_api_key: boolean;
 }
 
-/** 连接配置的写入项:各字段可选,按 id 命中已有连接;**api_key 空/缺省 = 保持该连接原密钥** */
+/** 连接配置的写入项:各字段可选,按 id 命中已有连接;**api_key 空/缺省 = 保持该连接原密钥**;
+ *  要把已配置的密钥改为空,须显式传 `clear_api_key: true`(与 api_key 互斥,新输入优先) */
 export interface ConnectionProfilePatch {
   id?: string;
   name?: string;
   connector_type?: string;
   base_url?: string;
   api_key?: string;
+  /** 显式清空该连接已保存的密钥(2026-10-03 API 设置补全);仅命中已有 id 时生效,新建连接忽略 */
+  clear_api_key?: boolean;
   model?: string;
   /** 接口方言显式覆盖;缺省 = 沿用已有值并按 URL 端点后缀推断(仅改写默认档) */
   api_style?: string;

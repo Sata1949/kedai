@@ -1,6 +1,6 @@
 <script setup lang="ts">
-// 设置区:连接配置(多套 API 连接:新增 / 编辑 / 删除 / 设为默认 / 启停;
-// 任务模式默认连接选择 TM-SET-1:仅任务模式显示,切换即存)。
+// 设置区:连接配置(多套 API 连接:新增 / 编辑 / 删除 / 设为默认 / 启停 / 逐连接测试 /
+// 逐连接模型列表 / 清除密钥;任务模式默认连接选择 TM-SET-1:仅任务模式显示,切换即存)。
 // 状态由壳(SettingsModal)创建一次后经 prop 传入 —— 与 ApiSettingsSection 同范式。
 import { computed, onMounted } from 'vue';
 import {
@@ -10,7 +10,7 @@ import {
   CONNECTOR_TYPE_LABELS,
   CONNECTOR_TYPE_ORDER,
 } from '../../api/labels';
-import type { useConnectionProfiles } from '../../composables/useConnectionProfiles';
+import type { useConnectionProfiles, ConnectionDraft } from '../../composables/useConnectionProfiles';
 import SkeletonBlock from '../SkeletonBlock.vue';
 
 const props = withDefaults(
@@ -39,12 +39,45 @@ const {
   taskDefaultConnectionId,
   isTaskMode,
   saveTaskDefaultConnection,
+  rowKey,
+  testing,
+  loadingModels,
+  modelsByConn,
+  testFeedback,
+  testConnection,
+  refreshModelsFor,
 } = props.state;
 
 /** 未登记的类型原样展示(与 labels.ts 的「未登记原样」语义一致) */
 const typeLabel = (t: string): string => CONNECTOR_TYPE_LABELS[t] ?? t;
 /** 未登记的方言原样展示(同上) */
 const apiStyleLabel = (s: string): string => API_STYLE_LABELS[s] ?? s;
+
+/** API KEY 输入框占位:清除待生效 / 已配置掩码 / 未配置 */
+const keyPlaceholder = (d: ConnectionDraft): string => {
+  if (d.clearApiKey) return '将清除已配置密钥 · 保存后生效';
+  return d.has_api_key ? `已配置 ${d.api_key_masked} · 留空保持现有` : '粘贴 API Key';
+};
+
+/** 清除已保存密钥(二次确认,与删除连接同款 confirm);再点一次撤销。
+ *  置位后仍需点「保存连接配置」才真正生效 —— 与其它草稿字段同生命周期。 */
+function requestClearKey(d: ConnectionDraft): void {
+  if (d.clearApiKey) {
+    d.clearApiKey = false;
+    return;
+  }
+  if (
+    !confirm(
+      `确定清除连接「${d.name}」已保存的 API 密钥?该连接将无法鉴权;若它是默认连接,保存后立即影响聊天与任务。`,
+    )
+  ) {
+    return;
+  }
+  d.clearApiKey = true;
+}
+
+/** 该行已加载的模型建议(datalist):加载过才出现,未加载时不影响手填 */
+const rowModels = (i: number): string[] => modelsByConn.value[rowKey(i)] ?? [];
 
 /** 任务默认连接引用悬空(已不存在/停用):运行期后端软回退默认连接,这里给出显式提示 */
 const taskDefaultDangling = computed(() =>
@@ -129,12 +162,19 @@ onMounted(() => {
             v-model="d.api_key"
             type="password"
             class="sv-input"
-            :placeholder="
-              d.has_api_key ? `已配置 ${d.api_key_masked} · 留空保持现有` : '粘贴 API Key'
-            "
+            :placeholder="keyPlaceholder(d)"
             autocomplete="off"
             spellcheck="false"
+            @input="d.clearApiKey = false"
           />
+          <!-- 清除已保存密钥(2026-10-03 API 设置补全):仅已保存且配置过密钥的行可见;
+               置位后由「保存连接配置」提交 clear_api_key,未生效前可一键撤销 -->
+          <button
+            v-if="d.has_api_key && d.id"
+            class="sv-btn danger"
+            :title="d.clearApiKey ? '撤销清除(尚未保存生效)' : '清除已保存的密钥,保存后生效'"
+            @click="requestClearKey(d)"
+          >{{ d.clearApiKey ? '撤销清除' : '清除' }}</button>
         </div>
 
         <div class="sv-inp-row">
@@ -143,13 +183,23 @@ onMounted(() => {
             v-model="d.model"
             type="text"
             class="sv-input"
-            placeholder="模型名"
+            :list="`conn-model-list-${i}`"
+            placeholder="模型名(可手填,或用「从 API 加载」拉取建议)"
             spellcheck="false"
           />
+          <datalist :id="`conn-model-list-${i}`">
+            <option v-for="m in rowModels(i)" :key="m" :value="m" />
+          </datalist>
+          <button
+            class="sv-btn ghost"
+            :disabled="d.connector_type === 'mock' || loadingModels[rowKey(i)]"
+            title="向该连接的 API 请求可用模型列表,填入手填建议(mock 无真实端点)"
+            @click="refreshModelsFor(i)"
+          >{{ loadingModels[rowKey(i)] ? '加载中...' : '从 API 加载' }}</button>
         </div>
 
-        <!-- 模型能力位(2026-10-02 视觉能力包 D1):视觉输入 / 大图拆分已接入消费;
-             其余三项为预留声明(如实标注,勾选仅记录) -->
+        <!-- 模型能力位(2026-10-02 视觉能力包 D1;2026-10-03 VISION-L6 收口:
+             结构化输出 / 中途系统插入已接入引擎消费,前缀续写仍为预留声明) -->
         <div class="sv-inp-row sv-conn-caps">
           <label class="sv-inp-tag">模型能力</label>
           <div class="sv-conn-cap-list">
@@ -164,6 +214,19 @@ onMounted(() => {
               <span>{{ cap.label }}</span>
             </label>
           </div>
+        </div>
+
+        <!-- 逐连接测试(2026-10-03 API 设置补全):打参数化探测端点,不影响已生效连接器;
+             结果只在本卡展示(mock 连接也会直接回 ok,无需真实端点) -->
+        <div class="sv-inp-row sv-conn-test">
+          <button class="sv-btn ghost" :disabled="testing[rowKey(i)]" @click="testConnection(i)">
+            {{ testing[rowKey(i)] ? '测试中...' : '测试连接' }}
+          </button>
+          <span
+            v-if="testFeedback[rowKey(i)]"
+            class="sv-conn-test-result"
+            :class="testFeedback[rowKey(i)]?.kind"
+          >{{ testFeedback[rowKey(i)]?.text }}</span>
         </div>
       </div>
 
@@ -212,7 +275,7 @@ onMounted(() => {
         <template v-if="isTaskMode">
           任务模式未单独选择时也走它,可用上方「任务模式默认连接」改指其它连接(逐任务 / 流程节点的显式选择仍优先)。
         </template>
-        密钥只写不回显,留空表示不修改已有密钥。
+        密钥只写不回显,留空表示不修改已有密钥;要清除已保存的密钥,用「清除」按钮并保存。
       </p>
     </div>
     <div v-if="feedback" class="sv-feedback" :class="feedback.kind">{{ feedback.text }}</div>
@@ -286,4 +349,24 @@ onMounted(() => {
 .sv-conn-section .sv-btn-row .sv-btn-fill {
   flex: 0 0 auto;
 }
+
+/* 逐连接测试行(2026-10-03 API 设置补全):结果文字与按钮同行,超长换行不挤压按钮。
+   配色复用全局 .sv-feedback 的 ok/err/info 三档变量,但这里不用块级反馈条——
+   结果是「本卡局部、临时性」的,块级条会打破卡片内 5+1 行的字段节奏。 */
+.sv-conn-test {
+  align-items: center;
+}
+.sv-conn-test .sv-btn {
+  flex: 0 0 auto;
+}
+.sv-conn-test-result {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.sv-conn-test-result.ok { color: var(--sv-green-deep); }
+.sv-conn-test-result.err { color: var(--sv-red); }
+.sv-conn-test-result.info { color: var(--sv-blue); }
 </style>

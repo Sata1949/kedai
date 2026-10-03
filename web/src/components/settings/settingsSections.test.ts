@@ -141,15 +141,20 @@ describe('ConnectionProfilesSection(连接配置区)', () => {
     expect(html).toContain('逐任务');
   });
 
-  it('渲染「模型能力」勾选组:功能项与预留项均在(预留项如实标注未消费)', async () => {
+  it('渲染「模型能力」勾选组:功能项与预留项均在(预留项如实标注「已接入但无消费路径」)', async () => {
     const state = useConnectionProfiles();
     state.addDraft();
     const html = stripComments(await render(ConnectionProfilesSection, { state }));
     expect(html).toContain('模型能力');
     expect(html).toContain('视觉输入');
     expect(html).toContain('大图自动拆分');
-    // 预留项的 tooltip 进入 title 属性(如实标注「仅记录、未消费」)
-    expect(html).toContain('预留能力位:当前版本仅记录');
+    // VISION-L6 收口(2026-10-03):三项预留位接入引擎,唯一仍预留的是前缀续写;
+    // tooltip 如实标注「已接入连接构建与指纹,无生成路径」
+    expect(html).toContain('预留能力位:已接入连接构建与指纹');
+    expect(html).not.toContain('当前版本仅记录');
+    // 逐连接三件套(2026-10-03 API 设置补全)进入模板
+    expect(html).toContain('测试连接');
+    expect(html).toContain('从 API 加载');
   });
 
   it('勾选能力位写入 patch(布尔全量下发;新建草稿缺省 false)', () => {
