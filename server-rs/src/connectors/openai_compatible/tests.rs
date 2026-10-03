@@ -866,3 +866,42 @@ async fn non_retryable_status_fails_without_retry_notice() {
         "不可重试错误不得产出任何块(含重试提示)"
     );
 }
+
+/// 缺陷修复(2026-10-03):上游 CDN/WAF 会拦截无 User-Agent 的请求(实测某
+/// OpenAI 中转站对空 UA 返回 412 Precondition Failed,用户侧表现为「无法拉取
+/// 模型列表」)——make_client 构建的客户端必须自带默认 UA。
+#[tokio::test]
+async fn client_sends_default_user_agent() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let holder = Arc::new(std::sync::Mutex::new(None::<String>));
+    let holder2 = holder.clone();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0; 8192];
+        let n = socket.read(&mut buf).await.unwrap();
+        *holder2.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(String::from_utf8_lossy(&buf[..n]).to_string());
+        let body = br#"{"data":[{"id":"x"}]}"#;
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        let _ = socket.write_all(resp.as_bytes()).await;
+        let _ = socket.write_all(body).await;
+        let _ = socket.flush().await;
+    });
+    let connector = OpenAiCompatibleConnector::new(&format!("http://{addr}"), "key", "model");
+    let models = connector.list_models_async().await;
+    assert_eq!(models, vec!["x".to_string()], "mock 上游应返回模型列表");
+    let raw = holder
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_default();
+    assert!(
+        raw.to_ascii_lowercase()
+            .contains("\r\nuser-agent: kedai-server/"),
+        "请求必须携带默认 User-Agent,实际请求头:\n{raw}"
+    );
+}

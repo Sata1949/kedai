@@ -69,6 +69,8 @@ fn shared_client() -> reqwest::Client {
             CLIENT_INIT_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             reqwest::Client::builder()
                 .timeout(Duration::from_secs(EMBED_TIMEOUT_SECS))
+                // 与连接器同款:空 UA 会被部分上游 CDN 拦 412(2026-10-03)
+                .user_agent(concat!("kedai-server/", env!("CARGO_PKG_VERSION")))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new())
         })

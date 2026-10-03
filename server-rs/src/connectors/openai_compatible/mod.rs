@@ -78,6 +78,9 @@ const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 fn make_client() -> Client {
     Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
+        // reqwest 默认不发 User-Agent;部分上游 CDN/WAF 会对空 UA 拦 412
+        // (2026-10-03 实测某中转站如此,表现为模型列表/生成全部不可用)
+        .user_agent(concat!("kedai-server/", env!("CARGO_PKG_VERSION")))
         .build()
         .unwrap_or_else(|_| Client::new())
 }
