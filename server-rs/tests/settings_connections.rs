@@ -457,3 +457,260 @@ async fn connection_capability_flags_roundtrip_and_survive_omitted_keys() {
     assert_eq!(conns[0]["supports_vision"], false, "显式 false 应生效");
     assert_eq!(conns[0]["image_auto_split"], false);
 }
+
+// ---------- 逐连接探测(2026-10-03 API 设置补全) ----------
+
+/// 起一个校验 Bearer Key 的本地 mock 上游,返回监听地址(供探测目标)
+async fn spawn_key_checking_provider() -> String {
+    use axum::response::IntoResponse;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = axum::Router::new().route(
+        "/v1/models",
+        axum::routing::get(|headers: axum::http::HeaderMap| async move {
+            let authorized = headers.get("authorization").and_then(|v| v.to_str().ok())
+                == Some("Bearer sk-saved-secret");
+            if authorized {
+                axum::Json(json!({ "data": [{ "id": "saved-key-model" }] })).into_response()
+            } else {
+                axum::http::StatusCode::UNAUTHORIZED.into_response()
+            }
+        }),
+    );
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://{address}/v1")
+}
+
+/// 探测三态之「按 id」:未配 Key 的探测用已存密钥(密钥仅服务端持有),显式 Key 覆盖
+/// 已存值;探测不改动当前生效连接器
+#[tokio::test]
+async fn probe_connect_by_id_uses_saved_key_and_explicit_key_wins() {
+    let _guard = test_lock().await;
+    let app = test_app();
+    let base_url = spawn_key_checking_provider().await;
+    let (status, body, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({"connections": [{
+            "name": "有钥连接", "connector_type": "openai-compatible",
+            "base_url": base_url, "api_key": "sk-saved-secret",
+            "model": "m", "enabled": true
+        }]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    let id = settings_body(&body)["connections"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // 探测前后生效连接器必须逐字一致(该 PUT 本身可能已把生效连接器切到
+    // openai-compatible,那是保存路径的职责;探测自身不得再动它)
+    let (_, info_before, _) = send_json(app, "GET", "/api/settings/info", json!({})).await;
+
+    // 1) 按 id 探测、不传 Key → 用已存密钥,鉴权通过
+    let (status, r, _) = send_json(
+        app,
+        "POST",
+        "/api/settings/connect",
+        json!({ "connection_id": id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={r}");
+    assert_eq!(r["ok"], true, "应已用已存密钥鉴权:{r}");
+    assert_eq!(r["authenticated"], true, "body={r}");
+
+    // 2) 按 id 探测 + 显式错误 Key → 显式值优先,鉴权失败
+    let (_, r, _) = send_json(
+        app,
+        "POST",
+        "/api/settings/connect",
+        json!({ "connection_id": id, "connection": { "api_key": "sk-wrong" } }),
+    )
+    .await;
+    assert_eq!(r["ok"], false, "显式错误 Key 应覆盖已存值:{r}");
+    assert_eq!(r["authenticated"], false, "body={r}");
+
+    // 3) 探测不改当前生效连接器
+    let (_, info_after, _) = send_json(app, "GET", "/api/settings/info", json!({})).await;
+    assert_eq!(
+        info_after["connector"], info_before["connector"],
+        "探测不得重建生效连接器"
+    );
+}
+
+/// 探测三态之「显式草稿」:未保存的新行也能测;空体 = 旧行为(测当前生效连接器);
+/// 畸形体 400 收口
+#[tokio::test]
+async fn probe_connect_accepts_draft_params_and_keeps_legacy_behavior() {
+    let _guard = test_lock().await;
+    let app = test_app();
+    let id = reset_to_baseline(app).await;
+    assert!(!id.is_empty());
+
+    // 1) 显式草稿参数(未保存的新行):指向真实上游 → ok
+    let base_url = spawn_key_checking_provider().await;
+    let draft = json!({ "connection": {
+        "connector_type": "openai-compatible",
+        "base_url": base_url, "api_style": "chat-completions",
+        "api_key": "sk-saved-secret", "model": "probe-model"
+    } });
+    let (_, r, _) = send_json(app, "POST", "/api/settings/connect", draft.clone()).await;
+    assert_eq!(r["ok"], true, "草稿参数探测应直连上游:{r}");
+    assert_eq!(r["endpoint_reachable"], true, "body={r}");
+    assert_eq!(r["models"][0], json!("saved-key-model"), "body={r}");
+
+    // 2) 逐连接探测模型列表:同一参数打到 refresh-models
+    let (_, r, _) = send_json(app, "POST", "/api/settings/refresh-models", draft).await;
+    assert_eq!(r["ok"], true, "body={r}");
+    assert_eq!(r["models"][0], json!("saved-key-model"), "body={r}");
+
+    // 3) 空体 = 旧行为:测当前生效连接器(基线 mock → ok:true)
+    let (status, r, _) = send_json(app, "POST", "/api/settings/connect", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "body={r}");
+    assert_eq!(r["ok"], true, "mock 生效连接器应直接 ok:{r}");
+
+    // 4) 提供了但畸形的 body → 400 + VALIDATION(区别于「未提供」)
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/settings/connect")
+        .header("content-type", "application/json")
+        .body(Body::from("{不是合法 JSON".to_string()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let v: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(v["code"], "VALIDATION", "body={v}");
+}
+
+/// 逐连接模型列表按 id 探测:用已存密钥拉 /models
+#[tokio::test]
+async fn probe_refresh_models_by_connection_id() {
+    let _guard = test_lock().await;
+    let app = test_app();
+    let base_url = spawn_key_checking_provider().await;
+    let (status, body, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({"connections": [{
+            "name": "列表连接", "connector_type": "openai-compatible",
+            "base_url": base_url, "api_key": "sk-saved-secret",
+            "model": "m", "enabled": true
+        }]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    let id = settings_body(&body)["connections"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (_, r, _) = send_json(
+        app,
+        "POST",
+        "/api/settings/refresh-models",
+        json!({ "connection_id": id }),
+    )
+    .await;
+    assert_eq!(r["models"][0], json!("saved-key-model"), "body={r}");
+}
+
+// ---------- clear_api_key 显式清空(2026-10-03 API 设置补全) ----------
+
+/// 清空语义:clear_api_key=true 且未给新 Key → 密钥清空(has_api_key=false);
+/// 同时给新 Key → 新输入优先;未命中已有 id 的新行忽略标记;不影响其他连接
+#[tokio::test]
+async fn clear_api_key_via_connections_patch() {
+    let _guard = test_lock().await;
+    let app = test_app();
+    // 基线:两条连接,各配一个 Key
+    let (status, body, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({"connections": [
+            {"name": "甲", "connector_type": "openai-compatible",
+             "base_url": "https://a.example/v1", "api_key": "sk-aaaa-9999",
+             "model": "m", "enabled": true},
+            {"name": "乙", "connector_type": "openai-compatible",
+             "base_url": "https://b.example/v1", "api_key": "sk-bbbb-8888",
+             "model": "m", "enabled": true}
+        ]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    let conns = settings_body(&body)["connections"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(conns.len(), 2);
+    let id_a = conns[0]["id"].as_str().unwrap().to_string();
+    let id_b = conns[1]["id"].as_str().unwrap().to_string();
+
+    // 1) 甲:仅 clear_api_key=true → 密钥清空;乙不受影响
+    let (status, body, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({"connections": [
+            {"id": id_a, "name": "甲", "clear_api_key": true},
+            {"id": id_b, "name": "乙"}
+        ]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    let conns = settings_body(&body)["connections"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        conns[0]["has_api_key"], false,
+        "显式清空应生效:{}",
+        conns[0]
+    );
+    assert_eq!(conns[0]["api_key_masked"], "", "掩码应同步为空");
+    assert_eq!(conns[1]["has_api_key"], true, "乙的密钥不得被牵连");
+
+    // 2) 同时给新 Key + clear_api_key=true → 新输入优先(不清空)
+    let (status, body, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({"connections": [
+            {"id": id_a, "name": "甲", "api_key": "sk-new-1111", "clear_api_key": true}
+        ]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    let conns = settings_body(&body)["connections"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        conns[0]["has_api_key"], true,
+        "新输入应优先于清空标记:{}",
+        conns[0]
+    );
+    assert_eq!(conns[0]["api_key_masked"], "****1111", "应保存的是新 Key");
+
+    // 3) 新行(无 id)带 clear_api_key → 忽略(无密钥可清),新建正常
+    let (status, body, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({"connections": [
+            {"id": id_a, "name": "甲"},
+            {"id": id_b, "name": "乙"},
+            {"name": "丙", "connector_type": "mock", "clear_api_key": true}
+        ]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    let conns = settings_body(&body)["connections"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(conns.len(), 3, "新行应正常创建");
+    assert_eq!(conns[2]["has_api_key"], false, "新行本就无密钥");
+}

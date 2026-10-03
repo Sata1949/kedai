@@ -17,11 +17,13 @@ use crate::api::WithStatus;
 // `FromRequest` 根本不执行——要统一 413 的 JSON 形状必须自定义 tower 层拦截 body
 // `Frame` 错误,成本(改动全站 body 流)远高于收益(体积超限本就罕见且前端上传前已校验),
 // 故本轮登记为已知例外,不做改造。
+use axum::body::to_bytes;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::FromRequest;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use serde::de::DeserializeOwned;
 use serde_json::json;
 
 /// 畸形/不可解析 JSON 体的用户文案:不含 serde 内部类型名与行列细节
@@ -59,6 +61,45 @@ fn invalid_json_response() -> Response {
     }))
     .into_response()
     .with_status(StatusCode::BAD_REQUEST)
+}
+
+/// 可选 JSON 体提取器(2026-10-03 API 设置补全):请求体缺失/空白时得到 `None`,
+/// 畸形 JSON 仍按本模块口径 400 收口。
+///
+/// 服务于「新旧客户端共存」的端点(如连接探测):旧客户端发 `{}` 或不带体,
+/// 新客户端带探测参数,同一 handler 内统一处理。注意 `Some("")` 与字段缺省
+/// 依然可区分(serde 层面),调用方据此实现「显式空值 ≠ 未提供」的语义。
+pub struct JsonBodyOpt<T>(pub Option<T>);
+
+/// 探测参数体积极小(几十字节),给个远小于全站 35MB 的本地上限防误用
+const JSON_BODY_OPT_LIMIT: usize = 1024 * 1024;
+
+impl<S, T> FromRequest<S> for JsonBodyOpt<T>
+where
+    T: DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request(
+        req: axum::extract::Request,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let bytes = to_bytes(req.into_body(), JSON_BODY_OPT_LIMIT)
+            .await
+            .map_err(|_| invalid_json_response())?;
+        // 无体/纯空白体 = 未提供参数(区别于「提供了但畸形」)
+        if bytes.iter().all(|b| b.is_ascii_whitespace()) {
+            return Ok(JsonBodyOpt(None));
+        }
+        match serde_json::from_slice::<T>(&bytes) {
+            Ok(value) => Ok(JsonBodyOpt(Some(value))),
+            Err(e) => {
+                tracing::warn!(error = %e, "JSON 请求体解析失败(可选体)");
+                Err(invalid_json_response())
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -164,5 +205,75 @@ mod tests {
             ct.starts_with("application/json"),
             "content-type 应为 JSON:{ct}"
         );
+    }
+
+    // ---------- JsonBodyOpt(可选体提取器) ----------
+
+    fn opt_app() -> Router {
+        Router::new().route(
+            "/probe",
+            post(|JsonBodyOpt(p): JsonBodyOpt<Payload>| async move {
+                match p {
+                    Some(p) => p.name,
+                    None => "no-body".to_string(),
+                }
+            }),
+        )
+    }
+
+    async fn call_opt(body: Option<&str>) -> (StatusCode, String) {
+        let mut builder = axum::http::Request::builder().method("POST").uri("/probe");
+        if body.is_some() {
+            builder = builder.header("content-type", "application/json");
+        }
+        let req = builder
+            .body(Body::from(body.unwrap_or("").to_string()))
+            .unwrap();
+        let resp = opt_app().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8_lossy(&bytes).to_string())
+    }
+
+    #[tokio::test]
+    async fn opt_missing_body_yields_none() {
+        let (status, body) = call_opt(None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "no-body");
+    }
+
+    #[tokio::test]
+    async fn opt_empty_and_whitespace_body_yield_none() {
+        for probe in ["", "   ", "\n\t"] {
+            let (status, body) = call_opt(Some(probe)).await;
+            assert_eq!(status, StatusCode::OK, "空白体 {probe:?} 应视为未提供");
+            assert_eq!(body, "no-body");
+        }
+    }
+
+    #[tokio::test]
+    async fn opt_valid_body_parses_some() {
+        let (status, body) = call_opt(Some(r#"{"name":"kedai"}"#)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "kedai");
+    }
+
+    #[tokio::test]
+    async fn opt_provided_but_invalid_for_type_is_400() {
+        // `{}` 是合法 JSON 但缺必填字段:与「未提供」不同,必须 400 收口
+        let (status, body) = call_opt(Some("{}")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["code"], "VALIDATION");
+    }
+
+    #[tokio::test]
+    async fn opt_malformed_body_is_json_400() {
+        let (status, body) = call_opt(Some("{不是合法 JSON")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["code"], "VALIDATION");
     }
 }

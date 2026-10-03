@@ -240,9 +240,21 @@ impl RuntimeSettings {
     /// (视为未配置,避免把密文当 Key 发上游),若直接保存就会用 `protect("")` 的
     /// 空串覆盖磁盘上的密文 —— 用户密钥从此永久丢失且无提示。故保存前读一次磁盘:
     /// 内存为空而磁盘仍是非空 `enc:v1:` 密文时,原样回写该密文(保留原值)。
-    /// 该规则不会误伤「用户主动清空」:PUT /api/settings 对空值直接忽略
-    /// (`api/settings.rs:300-305`),接口层面无法把已配置的 Key 由非空改为空。
+    /// PUT /api/settings 对空值直接忽略(`api/settings.rs` 连接信息路径),
+    /// 要把已配置密钥改为空须走连接数组路径的 `clear_api_key` 显式标记,
+    /// 由 [`Self::save_with_cleared_connection_keys`] 携带名单绕开本保真兜底。
     pub fn save(&self, data_dir: &Path) -> Result<(), String> {
+        self.save_with_cleared_connection_keys(data_dir, &[])
+    }
+
+    /// 带显式清空名单的保存(2026-10-03 API 设置补全):`cleared_key_ids` 中的
+    /// profile id 绕开「磁盘密文保真」兜底,密钥落盘为空。仅 PUT /api/settings 的
+    /// 连接数组路径(`clear_api_key: true`)会传入;其余保存调用一律走 [`Self::save`]。
+    pub fn save_with_cleared_connection_keys(
+        &self,
+        data_dir: &Path,
+        cleared_key_ids: &[String],
+    ) -> Result<(), String> {
         // 仅持久化副本加密,不改动内存中的明文 Key(连接器仍需直接使用)
         let mut persisted = self.clone();
         // 落盘前重算投影:扁平三字段始终是「默认连接的派生视图」,保证磁盘自洽
@@ -255,6 +267,7 @@ impl RuntimeSettings {
         let active_id = persisted.active_connection_id.clone();
         for p in persisted.connections.iter_mut() {
             let is_active = active_id.as_deref() == Some(p.id.as_str());
+            let explicitly_cleared = cleared_key_ids.iter().any(|id| id == &p.id);
             let preserved = on_disk
                 .by_profile_id
                 .get(&p.id)
@@ -264,7 +277,7 @@ impl RuntimeSettings {
                 } else {
                     None
                 });
-            p.api_key = encrypt_or_preserve(&p.api_key, preserved)?;
+            p.api_key = encrypt_or_preserve(&p.api_key, preserved, explicitly_cleared)?;
         }
         // 顶层兼容字段 = 默认连接的密文(直接取上一步的结果,不二次加密);
         // 没有可用连接(全停用/删空)时写空 —— 那是用户的显式操作,不属于「解密失败要保真」的场景。
@@ -274,7 +287,7 @@ impl RuntimeSettings {
             .unwrap_or_default();
         persisted.openai_api_key = active_key;
         persisted.embedding_api_key =
-            encrypt_or_preserve(&self.embedding_api_key, on_disk.embedding.as_deref())?;
+            encrypt_or_preserve(&self.embedding_api_key, on_disk.embedding.as_deref(), false)?;
         let text = serde_json::to_string_pretty(&persisted).map_err(|e| e.to_string())?;
         crate::utils::fs_atomic::write_atomic(&data_dir.join("settings.json"), text.as_bytes())
             .map_err(|e| e.to_string())
@@ -330,16 +343,21 @@ fn read_preserved_ciphertexts(data_dir: &Path) -> OnDiskCiphertexts {
 }
 
 /// 加密待落盘值;内存为空但磁盘仍有密文时保留磁盘原密文(防静默清空)。
+/// `explicitly_cleared`(2026-10-03 API 设置补全):该 profile 被 `clear_api_key`
+/// 显式标记清空时为 true —— 跳过保真兜底直接落空,否则用户永远无法清除已配密钥。
 fn encrypt_or_preserve(
     in_memory: &str,
     on_disk_ciphertext: Option<&str>,
+    explicitly_cleared: bool,
 ) -> Result<String, String> {
     if in_memory.is_empty() {
-        if let Some(ct) = on_disk_ciphertext {
-            eprintln!(
-                "[settings] API Key 在内存中为空但磁盘仍为密文(此前解密失败?),保留原密文不覆盖;请在设置页重填以恢复"
-            );
-            return Ok(ct.to_string());
+        if !explicitly_cleared {
+            if let Some(ct) = on_disk_ciphertext {
+                eprintln!(
+                    "[settings] API Key 在内存中为空但磁盘仍为密文(此前解密失败?),保留原密文不覆盖;请在设置页重填以恢复"
+                );
+                return Ok(ct.to_string());
+            }
         }
         return secret_store::protect(""); // 空串保持空串
     }
@@ -601,6 +619,47 @@ mod tests {
         let json = read_json(&dir);
         assert_eq!(json["connections"][0]["api_key"], "enc:v1:CT-MAIN");
         assert_eq!(json["openai_api_key"], "enc:v1:CT-MAIN");
+    }
+
+    /// 显式清空(2026-10-03 API 设置补全):名单中的 id 绕过保真兜底,密钥落空;
+    /// 名单外的密文仍保真;活跃连接被清时顶层投影同步为空
+    #[test]
+    fn explicitly_cleared_key_bypasses_preservation() {
+        let dir = temp_dir("explicit-clear");
+        write_settings(
+            &dir,
+            r#"{"connections":[
+                {"id":"main","api_key":"enc:v1:CT-MAIN"},
+                {"id":"side","api_key":"enc:v1:CT-SIDE"}]}"#,
+        );
+        let mut s = RuntimeSettings::from_config(&test_config());
+        s.connections = vec![profile("main", ""), profile("side", "")];
+        s.active_connection_id = Some("main".to_string());
+
+        s.save_with_cleared_connection_keys(&dir, &["main".to_string()])
+            .unwrap();
+
+        let json = read_json(&dir);
+        assert_eq!(json["connections"][0]["api_key"], "", "被清连接应落空");
+        assert_eq!(
+            json["openai_api_key"], "",
+            "活跃连接被清 → 顶层投影同步为空"
+        );
+        assert_eq!(
+            json["connections"][1]["api_key"], "enc:v1:CT-SIDE",
+            "名单外密文仍保真"
+        );
+
+        // 对照:名单为空的常规 save 对同一空内存仍保真(防保真兜底被误伤回归)
+        let mut again = RuntimeSettings::from_config(&test_config());
+        again.connections = vec![profile("side", "")];
+        again.active_connection_id = Some("side".to_string());
+        again.save(&dir).unwrap();
+        let json = read_json(&dir);
+        assert_eq!(
+            json["connections"][0]["api_key"], "enc:v1:CT-SIDE",
+            "未在名单中的空内存密钥仍走保真回写"
+        );
     }
 
     /// 落盘无明文(用例 5):多套连接的明文 Key 都不得出现在文件里,load 后逐条还原

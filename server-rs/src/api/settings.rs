@@ -1,6 +1,6 @@
 // 设置路由:/api/settings(连接测试/模型列表/信息/模型切换/运行期设置读写)
 use crate::api::app_state::AppState;
-use crate::api::json_body::JsonBody;
+use crate::api::json_body::{JsonBody, JsonBodyOpt};
 use crate::api::{err_with_code, internal, not_found, validation, ErrorCode};
 use crate::connectors::openai_compatible::{normalize_api_style, API_STYLE_CHAT};
 use crate::services::agent_flow_service::{
@@ -242,7 +242,8 @@ pub struct UpdateSettingsBody {
 }
 
 /// 多套连接的写入项(与 `ConnectionProfile` 的差异:各字段可选,缺省 = 沿用该 id 的现有值)。
-/// `api_key` 与顶层 `openai_api_key` 同口径:**空/缺省表示保持不变**(接口层面无法把已配置的密钥改成空)。
+/// `api_key` 与顶层 `openai_api_key` 同口径:**空/缺省表示保持不变**;
+/// 要把已配置的密钥改为空,须显式传 `clear_api_key: true`(与 api_key 互斥,新输入优先)。
 #[derive(Deserialize, Default)]
 pub struct ConnectionProfileInput {
     /// 缺省或未命中已有 id = 新建(uuid);命中则沿用原 id(它是磁盘密文的配对键)
@@ -257,6 +258,11 @@ pub struct ConnectionProfileInput {
     pub base_url: Option<String>,
     #[serde(default)]
     pub api_key: Option<String>,
+    /// 显式清空该连接已保存的密钥(2026-10-03 API 设置补全;空串已被「保持不变」占用,
+    /// 故清除语义用独立布尔表达)。与 `api_key` 互斥——新输入的非空 Key 优先;
+    /// 仅对命中已有 id 的条目生效,新建连接无密钥可清。
+    #[serde(default)]
+    pub clear_api_key: Option<bool>,
     #[serde(default)]
     pub model: Option<String>,
     /// 接口方言显式覆盖(`chat-completions` | `responses` | `anthropic`;非法值回退默认档)。
@@ -277,6 +283,36 @@ pub struct ConnectionProfileInput {
     pub supports_mid_conversation_system: Option<bool>,
     #[serde(default)]
     pub image_auto_split: Option<bool>,
+}
+
+/// 逐连接探测请求体(connect / refresh-models 共用;2026-10-03 API 设置补全)。
+/// 取数优先级:显式 `connection` 草稿参数(字段级覆盖)> `connection_id` 命中已存连接
+/// (缺省字段取已存值)> 两者皆缺省 = 当前生效连接器(旧客户端行为不变)。
+#[derive(Deserialize, Default)]
+pub struct ConnectionProbeBody {
+    /// 已保存连接 id:探测参数缺省时取该连接的已存值(含密钥;密钥仅服务端持有)
+    #[serde(default)]
+    pub connection_id: Option<String>,
+    /// 显式草稿参数:未保存的新行也可测试;字段级优先于已存值
+    #[serde(default)]
+    pub connection: Option<ConnectionProbeInput>,
+}
+
+/// 探测目标连接的显式参数。字段缺省(None)= 回退 `connection_id` 对应已存值;
+/// `base_url`/`model` 显式空串 = 按空值探测(与连接保存的「允许显式清空地址」同口径);
+/// `api_key` 空/缺省 = 回退已存密钥(与「空 Key 忽略」同口径,探测已存连接不要求重填 Key)。
+#[derive(Deserialize, Default)]
+pub struct ConnectionProbeInput {
+    #[serde(default)]
+    pub connector_type: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub api_style: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// 序列化运行期设置(API Key 脱敏)。
@@ -429,6 +465,9 @@ pub async fn update_settings(
             current.active_connection().cloned(),
         )
     };
+    // 显式清空密钥的连接 id(2026-10-03 API 设置补全):由连接数组路径收集,
+    // 传给 save 绕开「磁盘密文保真」兜底 —— 否则内存空 + 磁盘密文会被原样回写(密钥复活)。
+    let mut cleared_key_ids: Vec<String> = Vec::new();
     {
         let s = &mut candidate;
 
@@ -487,6 +526,13 @@ pub async fn update_settings(
                     .map(str::trim)
                     .filter(|k| !k.is_empty())
                     .map(str::to_string);
+                // 显式清空密钥(clear_api_key):仅命中已有条目且未同时给出新 Key 时生效
+                // (新输入优先);新建连接无密钥可清,忽略标记
+                if item.clear_api_key == Some(true) && new_key.is_none() {
+                    if let Some(p) = existing {
+                        cleared_key_ids.push(p.id.clone());
+                    }
+                }
                 next.push(ConnectionProfile {
                     id: existing
                         .map(|p| p.id.clone())
@@ -503,9 +549,17 @@ pub async fn update_settings(
                     base_url: item.base_url.clone().unwrap_or_else(|| {
                         existing.map(|p| p.base_url.clone()).unwrap_or_default()
                     }),
-                    api_key: new_key
-                        .or_else(|| existing.map(|p| p.api_key.clone()))
-                        .unwrap_or_default(),
+                    api_key: if item.clear_api_key == Some(true)
+                        && new_key.is_none()
+                        && existing.is_some()
+                    {
+                        // 显式清空:不回退已存密钥(清空名单已收集,save 侧同步绕开保真兜底)
+                        String::new()
+                    } else {
+                        new_key
+                            .or_else(|| existing.map(|p| p.api_key.clone()))
+                            .unwrap_or_default()
+                    },
                     model: item
                         .model
                         .clone()
@@ -1012,7 +1066,7 @@ pub async fn update_settings(
     let data_dir = state.config.data_dir.clone();
     let save_outcome = state
         .db_call(move || {
-            let result = candidate.save(&data_dir);
+            let result = candidate.save_with_cleared_connection_keys(&data_dir, &cleared_key_ids);
             (candidate, result)
         })
         .await;
@@ -1124,9 +1178,81 @@ pub async fn update_settings(
         .into_response()
 }
 
-/// POST /api/settings/refresh-models:向已保存的 API 请求可用模型列表(立即生效,不保存)
-pub async fn refresh_models(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let connector = state.engine.connector.read().await.clone();
+/// 解析逐连接探测的目标连接器(2026-10-03 API 设置补全):
+/// 显式 `connection` 草稿参数(字段级覆盖)> `connection_id` 命中已存连接(缺省字段取
+/// 已存值,密钥仅服务端持有)> 两者皆缺省 = 当前生效连接器快照(旧客户端行为不变)。
+/// 探测用一次性临时连接器:不落库、不改动 `engine.connector`、不进连接器池缓存。
+async fn resolve_probe_connector(
+    state: &Arc<AppState>,
+    body: Option<ConnectionProbeBody>,
+) -> crate::connectors::Connector {
+    let Some(body) = body else {
+        return state.engine.connector.read().await.clone();
+    };
+    let saved = body
+        .connection_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .and_then(|id| {
+            state
+                .settings_snapshot()
+                .connections
+                .into_iter()
+                .find(|p| p.id == id)
+        });
+    if body.connection.is_none() && saved.is_none() {
+        return state.engine.connector.read().await.clone();
+    }
+    let explicit = body.connection.unwrap_or_default();
+    let trim_non_empty =
+        |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let connector_type = trim_non_empty(explicit.connector_type)
+        .or_else(|| saved.as_ref().map(|p| p.connector_type.clone()))
+        .unwrap_or_else(|| CONNECTOR_TYPE_OPENAI.to_string());
+    // 显式空串 = 按空值探测(draft 清空地址后探测应如实报不可达,而非拿旧地址测试);
+    // normalize 与保存路径同口径,「host:1234」这类裸地址在探测时也能按补全后的形态访问
+    let base_url = explicit
+        .base_url
+        .map(|v| normalize_base_url(&v))
+        .or_else(|| saved.as_ref().map(|p| p.base_url.clone()))
+        .unwrap_or_default();
+    // api_key 空/缺省 = 回退已存密钥(与「空 Key 忽略」同口径:已存连接不要求重填 Key)
+    let api_key = trim_non_empty(explicit.api_key)
+        .or_else(|| saved.as_ref().map(|p| p.api_key.clone()))
+        .unwrap_or_default();
+    let api_style = trim_non_empty(explicit.api_style)
+        .map(|s| normalize_api_style(&s).to_string())
+        .or_else(|| saved.as_ref().map(|p| p.api_style.clone()))
+        .unwrap_or_else(|| API_STYLE_CHAT.to_string());
+    let model = explicit
+        .model
+        .or_else(|| saved.as_ref().map(|p| p.model.clone()))
+        .unwrap_or_default();
+    // 类型白名单:探测不走「未知类型回退 mock」的兜底(那会把手滑的类型测成假绿),
+    // 未知/空一律按 openai-compatible
+    let connector_type = if connector_type == CONNECTOR_TYPE_MOCK {
+        CONNECTOR_TYPE_MOCK.to_string()
+    } else {
+        CONNECTOR_TYPE_OPENAI.to_string()
+    };
+    crate::connectors::build_connector(
+        &connector_type,
+        &base_url,
+        &api_key,
+        &model,
+        &api_style,
+        crate::connectors::ConnectorCapabilities::default(),
+    )
+}
+
+/// POST /api/settings/refresh-models:向已保存的 API 请求可用模型列表(立即生效,不保存)。
+/// 支持逐连接探测(可选 body,见 [`ConnectionProbeBody`]);缺省行为不变(测当前生效连接器)。
+pub async fn refresh_models(
+    State(state): State<Arc<AppState>>,
+    JsonBodyOpt(body): JsonBodyOpt<ConnectionProbeBody>,
+) -> Json<serde_json::Value> {
+    let connector = resolve_probe_connector(&state, body).await;
     let models = connector.available_models().await;
     // openai-compatible 下若只拿到回退的 1 个当前模型,大概率是服务不支持 /models 接口
     // 或 Base URL / 接口格式与真实端点不匹配(后者会让 /models 也 404/400)
@@ -1141,10 +1267,13 @@ pub async fn refresh_models(State(state): State<Arc<AppState>>) -> Json<serde_js
     Json(json!({ "ok": true, "models": models, "message": message }))
 }
 
-/// POST /api/settings/connect:测试连接
-pub async fn connect(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let diagnostic = state.engine.connector.read().await.clone().test().await;
-    Json(diagnostic)
+/// POST /api/settings/connect:测试连接(支持逐连接探测,可选 body 见 [`ConnectionProbeBody`])
+pub async fn connect(
+    State(state): State<Arc<AppState>>,
+    JsonBodyOpt(body): JsonBodyOpt<ConnectionProbeBody>,
+) -> Json<serde_json::Value> {
+    let connector = resolve_probe_connector(&state, body).await;
+    Json(connector.test().await)
 }
 
 /// GET /api/settings/models:可用模型列表
