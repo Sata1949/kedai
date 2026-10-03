@@ -541,6 +541,17 @@ pub enum ToolChoice {
     Function(String),
 }
 
+/// 结构化输出请求(2026-10-03 能力位接入;VISION-L6 收口)。
+/// 调用方声明「本产物希望是 JSON」的**意图**,是否真正下发协议参数由连接器
+/// 按自身能力位(`ConnectorCapabilities::supports_structured_output`)与方言决定:
+/// chat 方言下发 `response_format:{type:"json_object"}`、responses 下发
+/// `text.format`,anthropic 无等价参数不下发(维持提示词契约路径)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseFormat {
+    /// JSON 模式(OpenAI json_object 语义;要求提示词里出现「JSON」字样)
+    Json,
+}
+
 #[derive(Debug, Clone)]
 pub struct GenerationParams {
     pub temperature: f64,
@@ -571,6 +582,9 @@ pub struct GenerationParams {
     /// Some = 任务侧经 `utils::loop_guard::clamp_for_task` **收紧**后的值(只收不放,
     /// 0 = 关闭位原样保持)。引擎不做模式嗅探:是不是任务由调用方显式传值表达。
     pub semantic_guard: Option<(usize, usize, usize)>,
+    /// 结构化输出意图(None = 不要求,既有行为;见 [`ResponseFormat`])。
+    /// 现注入点:mvu 两步生成的状态调用(mvu.rs);连接器按能力位决定是否下发。
+    pub response_format: Option<ResponseFormat>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

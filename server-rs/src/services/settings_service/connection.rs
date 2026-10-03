@@ -48,9 +48,11 @@ pub struct ConnectionProfile {
     /// 模型能力位(2026-10-02 视觉能力包 D1;连接级声明)。五个新键**必须带 serde
     /// default** —— 旧 settings.json 的连接条目缺键时按 false 读入,漏写会让整文件
     /// 反序列化失败、用户设置静默丢失(契约「新增键必须 serde default」同一纪律)。
-    /// 消费状态:`supports_vision` 门控聊天贴图与视觉工具、`image_auto_split` 触发
-    /// 大图拆分(这两项进连接器构建与连接器池指纹);其余三项**仅声明**(预留,
-    /// 当前无消费点,进设置面与线格式以便后续批次接入)。
+    /// 消费状态(2026-10-03 VISION-L6 收口:五项全部进连接器构建与连接器池指纹):
+    /// `supports_vision` 门控聊天贴图与视觉工具、`image_auto_split` 触发大图拆分、
+    /// `supports_structured_output` 配合生成意图下发结构化输出参数、
+    /// `supports_mid_conversation_system` 决定 responses/anthropic 对中途 system 的
+    /// 处置;`supports_prefix_completion` 效果面暂无消费(引擎无前缀续写路径,如实预留)。
     #[serde(default)]
     pub supports_vision: bool,
     #[serde(default)]
@@ -97,11 +99,14 @@ pub fn strip_endpoint_suffix(url: &str) -> (String, Option<&'static str>) {
 }
 
 impl ConnectionProfile {
-    /// 连接器构建消费的两项能力位(视觉能力包 D1;其余三项仅声明,不进构建与指纹)
+    /// 连接器构建消费的能力位(2026-10-03 VISION-L6 收口:五项全投影)
     pub fn connector_capabilities(&self) -> crate::connectors::ConnectorCapabilities {
         crate::connectors::ConnectorCapabilities {
             supports_vision: self.supports_vision,
             image_auto_split: self.image_auto_split,
+            supports_structured_output: self.supports_structured_output,
+            supports_prefix_completion: self.supports_prefix_completion,
+            supports_mid_conversation_system: self.supports_mid_conversation_system,
         }
     }
 

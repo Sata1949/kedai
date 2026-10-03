@@ -362,6 +362,7 @@ async fn run_subtask_with_tools(
         // 缺口已登记 docs/遗留.md(任务模式 TM-D3 派生)。
         step_budget: None,
         semantic_guard: None,
+        response_format: None,
     };
 
     // 运行身份:任务模式用派生虚拟 id(task: 前缀,llm_requests 跳过守卫同源);
@@ -585,6 +586,7 @@ async fn run_subtask_plain(
         parallel_tool_calls: None,
         step_budget: None,
         semantic_guard: None,
+        response_format: None,
     };
 
     let connector = deps.connector.read().await.clone();

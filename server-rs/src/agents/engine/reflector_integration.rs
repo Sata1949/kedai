@@ -39,6 +39,7 @@ pub(super) async fn reflect_with_llm(
         parallel_tool_calls: None,
         step_budget: None,
         semantic_guard: None,
+        response_format: None,
     };
     let connector = engine.connector.read().await.clone();
     let chunks = connector
@@ -137,6 +138,7 @@ pub(super) async fn reflect_with_tools(
             parallel_tool_calls: None,
             step_budget: None,
             semantic_guard: None,
+            response_format: None,
         };
         let connector = engine.connector.read().await.clone();
         let chunks = connector
@@ -260,6 +262,7 @@ pub(super) async fn generate_reflect_advice(
         parallel_tool_calls: None,
         step_budget: None,
         semantic_guard: None,
+        response_format: None,
     };
     let connector = engine.connector.read().await.clone();
     let chunks = connector

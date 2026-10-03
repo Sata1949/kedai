@@ -21,6 +21,7 @@ fn test_params() -> GenerationParams {
         parallel_tool_calls: None,
         step_budget: None,
         semantic_guard: None,
+        response_format: None,
     }
 }
 

@@ -314,6 +314,10 @@ pub(super) async fn generate_mvu_status(
     };
     p.temperature = mvu_temperature.unwrap_or(0.3);
     p.tools = mvu_status_tools();
+    // 结构化输出意图(2026-10-03 VISION-L6 首批消费点):本调用产出本就是工具的 JSON
+    // 参数,连接声明 supports_structured_output 时由连接器按方言下发(response_format /
+    // text.format);anthropic 或位关路径自动跳过,工具调用与既有回退协议不受影响。
+    p.response_format = Some(crate::models::types::ResponseFormat::Json);
     let base = engine.connector.read().await.clone();
     // HB-7:变量两步生成的独立模型档(此前是「可落盘、无通路、无消费」的死配置)。
     // 非空时用 with_model 复制一个连接器(保留 base_url/api_key),只影响这一次调用。

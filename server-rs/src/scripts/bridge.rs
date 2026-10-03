@@ -231,6 +231,7 @@ globalThis.TavernHelper = {{
             parallel_tool_calls: None,
             step_budget: None,
             semantic_guard: None,
+            response_format: None,
         };
         let (_, abort) = tokio::sync::watch::channel(false);
         let (text, _usage) =

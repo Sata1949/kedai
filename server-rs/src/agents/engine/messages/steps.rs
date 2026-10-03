@@ -164,6 +164,7 @@ mod tests {
             parallel_tool_calls: None,
             step_budget: None,
             semantic_guard: None,
+            response_format: None,
         };
         let step = PlanStep {
             tools: Some(vec!["read".into()]),
@@ -199,6 +200,7 @@ mod tests {
             parallel_tool_calls: None,
             step_budget: None,
             semantic_guard: None,
+            response_format: None,
         };
 
         // 宽松档:两个字段都带上

@@ -137,6 +137,7 @@ pub(crate) async fn run_agent_loop(
         parallel_tool_calls: None,
         step_budget,
         semantic_guard,
+        response_format: None,
     };
     let gate = crate::agents::engine::executor::ToolGate::listed(&allowed);
 

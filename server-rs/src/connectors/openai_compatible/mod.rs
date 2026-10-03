@@ -557,6 +557,13 @@ fn build_chat_body(
             body["stop"] = json!(stop);
         }
     }
+    // 结构化输出(2026-10-03 VISION-L6):调用方意图 + 连接能力位同时满足才下发;
+    // 位关/无意图走既有提示词契约路径,请求体逐字节不变
+    if params.response_format == Some(crate::models::types::ResponseFormat::Json)
+        && caps.supports_structured_output
+    {
+        body["response_format"] = json!({ "type": "json_object" });
+    }
     if !params.tools.is_empty() {
         // OpenAI function calling 标准格式:{"type":"function","function":{name,description,parameters}}
         // 部分兼容后端严格要求 type 字段,缺省会 400
@@ -596,12 +603,15 @@ fn build_chat_body(
 }
 
 /// responses 请求体映射:
-/// - system 消息 → 顶层 `instructions`(多条以空行拼接;Responses 无 system 角色输入项);
+/// - system 消息 → 顶层 `instructions`(多条以空行拼接;Responses 无 system 角色输入项)。
+///   例外(2026-10-03 VISION-L6):连接声明「中途系统插入」且该 system 位于对话中途
+///   (此前已出现 user/assistant/tool)时,就地转 user 输入项保序——位关维持上提(既有行为);
 /// - user/assistant 文本 → `{role, content}` 输入项;assistant 的工具调用 → `function_call`
 ///   输入项(带 call_id);tool 结果 → `function_call_output`(带 call_id);
 /// - tools 为扁平格式 `{type:"function", name, description, parameters}`(无嵌套 function);
 /// - `max_tokens` → `max_output_tokens`;
-/// - **不下发 stop**:Responses 契约无停用序列参数。
+/// - **不下发 stop**:Responses 契约无停用序列参数;
+/// - 结构化输出:意图 + 能力位同时满足时下发 `text.format: json_object`。
 fn build_responses_body(
     model: &str,
     messages: &[LlmMessage],
@@ -611,11 +621,14 @@ fn build_responses_body(
     let mut instructions: Vec<String> = Vec::new();
     let mut input: Vec<Value> = Vec::new();
     let mut pending_tool_images: Vec<Value> = Vec::new();
+    // 中途 system 判据:此前已出现非 system 消息(头部的首 system / 摘要槽不算中途)
+    let mut seen_non_system = false;
     for m in messages {
         if m.role == "tool" {
             // 工具输出恒为纯文本(修复批次):图像由 `flush_tool_image_items` 在工具组
             // 末尾以 user 输入项承载——不塞 `function_call_output.output`,避免依赖
             // 各端对「函数输出内图像项」的支持差异(不支持即静默丢图)。
+            seen_non_system = true;
             input.push(json!({
                 "type": "function_call_output",
                 "call_id": m.tool_call_id.clone().unwrap_or_default(),
@@ -628,10 +641,18 @@ fn build_responses_body(
         match m.role.as_str() {
             "system" => {
                 if !m.content.is_empty() {
-                    instructions.push(m.content.clone());
+                    if seen_non_system && caps.supports_mid_conversation_system {
+                        // 中途系统插入(位开):就地转 user 保序(ST 生态惯例;
+                        // Responses 协议无中途 system 角色,这是唯一保位置表达)
+                        input.push(json!({ "role": "user", "content": m.content }));
+                    } else {
+                        instructions.push(m.content.clone());
+                    }
                 }
+                // system 自身不置位 seen_non_system:头部连续多条 system 仍全属头部
             }
             "assistant" => {
+                seen_non_system = true;
                 if !m.content.is_empty() {
                     input.push(json!({ "role": "assistant", "content": m.content }));
                 }
@@ -647,6 +668,7 @@ fn build_responses_body(
                 }
             }
             _ => {
+                seen_non_system = true;
                 // user 消息:有图 → content parts(input_text + input_image data URL);
                 // 无图 → 纯字符串(与既有行为逐字节一致)
                 let images = usable_images(m, caps);
@@ -681,6 +703,12 @@ fn build_responses_body(
     if !instructions.is_empty() {
         body["instructions"] = Value::String(instructions.join("\n\n"));
     }
+    // 结构化输出(2026-10-03 VISION-L6):Responses 的等价参数是 text.format
+    if params.response_format == Some(crate::models::types::ResponseFormat::Json)
+        && caps.supports_structured_output
+    {
+        body["text"] = json!({ "format": { "type": "json_object" } });
+    }
     if !params.tools.is_empty() {
         body["tools"] = Value::Array(
             params
@@ -713,7 +741,9 @@ fn build_responses_body(
 }
 
 /// anthropic 请求体映射:
-/// - system 消息 → 顶层 `system`(字符串,多条空行拼接;Anthropic 无 system 角色消息);
+/// - system 消息 → 顶层 `system`(字符串,多条空行拼接;Anthropic 无 system 角色消息)。
+///   例外(2026-10-03 VISION-L6):连接声明「中途系统插入」且该 system 位于对话中途
+///   (此前已出现 user/assistant/tool)时,就地转 user 保序——位关维持上提(既有行为);
 /// - tool 结果 → user 消息的 `tool_result` 块,**连续多条合并进同一条 user 消息**
 ///   (Anthropic 要求 user/assistant 交替,多个结果必须是同一消息的多个块);
 /// - assistant 工具调用 → `tool_use` 块(input 为解析后的 JSON 对象);
@@ -721,6 +751,7 @@ fn build_responses_body(
 /// - `max_tokens` 必填;temperature 钳制到官方区间 0..=1(超界时向合法值收敛,不静默丢弃);
 /// - stop → `stop_sequences`;tools 为 `{name, description, input_schema}`;
 /// - tool_choice:none 档 Anthropic 无对应表达 → **不下发 tools**(模型无从调用,语义等价);
+/// - 结构化输出:Anthropic 无 response_format 等价参数,**不下发**(维持提示词契约路径);
 /// - reasoning_content 不回传(Anthropic thinking 块需签名,原样拼接必被 400)。
 fn build_anthropic_body(
     model: &str,
@@ -731,6 +762,8 @@ fn build_anthropic_body(
     let mut system_parts: Vec<String> = Vec::new();
     let mut out: Vec<Value> = Vec::new();
     let mut pending_tool_results: Vec<Value> = Vec::new();
+    // 中途 system 判据:此前已出现非 system 消息(头部的首 system / 摘要槽不算中途)
+    let mut seen_non_system = false;
 
     /// data URL → Anthropic image 块(base64 段不带前缀);形状不符返回 None(该图跳过)
     fn image_block(img: &crate::models::types::ImageRef) -> Option<Value> {
@@ -751,6 +784,7 @@ fn build_anthropic_body(
         if m.role == "tool" {
             // 工具图像(修复批次):放进 tool_result 的 content 块数组——Anthropic
             // 官方允许 tool_result 内嵌 image 块;此前只取文本会静默丢图。
+            seen_non_system = true;
             let images = usable_images(m, caps);
             let content = if images.is_empty() {
                 json!(m.content)
@@ -781,13 +815,24 @@ fn build_anthropic_body(
             continue;
         }
         flush_tool_results(&mut out, &mut pending_tool_results);
-        match m.role.as_str() {
+        // 中途系统插入(2026-10-03 VISION-L6):位开时,对话中途的 system 就地转 user
+        // 保序(Anthropic 协议无 system 角色消息,这是唯一保位置表达);头部 system 与
+        // 位关路径维持上提拼顶(既有行为)。user 分支的连续同角色合并对转位消息同样生效。
+        let effective_role =
+            if m.role == "system" && seen_non_system && caps.supports_mid_conversation_system {
+                "user"
+            } else {
+                m.role.as_str()
+            };
+        match effective_role {
             "system" => {
                 if !m.content.is_empty() {
                     system_parts.push(m.content.clone());
                 }
+                // system 自身不置位 seen_non_system:头部连续多条 system 仍全属头部
             }
             "assistant" => {
+                seen_non_system = true;
                 let mut blocks: Vec<Value> = Vec::new();
                 if !m.content.is_empty() {
                     blocks.push(json!({ "type": "text", "text": m.content }));
@@ -808,6 +853,7 @@ fn build_anthropic_body(
                 }
             }
             _ => {
+                seen_non_system = true;
                 // user 消息:有图 → 块数组(text + image 块);无图 → 既有字符串/合并路径
                 // (连续同角色消息合并(Anthropic 要求 user/assistant 交替,连发两条
                 // user 会被 400):纯文本并入文本;tool_result 块消息后跟文本时,

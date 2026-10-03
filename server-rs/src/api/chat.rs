@@ -158,6 +158,7 @@ pub async fn send(
                 parallel_tool_calls: None,
                 step_budget: None,
                 semantic_guard: None,
+                response_format: None,
             },
             Some(s.max_context_tokens),
         )
@@ -749,6 +750,7 @@ pub async fn generate_raw(
             parallel_tool_calls: None,
             step_budget: None,
             semantic_guard: None,
+            response_format: None,
         }
     };
     // 结构化输出预算:作者页(吸血鬼卡等)要求整个回复有且仅有一个 JSON,截断即等于失败。

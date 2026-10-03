@@ -378,6 +378,7 @@ impl CustomExecutor {
             // (单一出处 task_engine::task_loop_limits,勿在此另算一份)。
             step_budget: limits.0,
             semantic_guard: limits.1,
+            response_format: None,
         };
         // 会话 id 保留既有形状 `task:{任务 id}:step:{下标}`(入口流程逐字节不变);
         // 子图用 phase 段替换 `step`,避免同一下标在父子两层撞 key(取值仍可用

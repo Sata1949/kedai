@@ -56,6 +56,7 @@ fn test_params() -> GenerationParams {
         parallel_tool_calls: None,
         step_budget: None,
         semantic_guard: None,
+        response_format: None,
     }
 }
 
@@ -650,6 +651,9 @@ fn vision_caps() -> crate::connectors::ConnectorCapabilities {
     crate::connectors::ConnectorCapabilities {
         supports_vision: true,
         image_auto_split: false,
+        supports_structured_output: false,
+        supports_prefix_completion: false,
+        supports_mid_conversation_system: false,
     }
 }
 
@@ -937,4 +941,136 @@ fn anthropic_image_message_merges_into_plain_text_user() {
         json!({"type": "text", "text": "看图"})
     );
     assert_eq!(arr[0]["content"][2]["type"], "image");
+}
+
+// ---------- 能力位消费(2026-10-03 VISION-L6 收口) ----------
+
+fn json_intent_params() -> GenerationParams {
+    let mut p = test_params();
+    p.response_format = Some(crate::models::types::ResponseFormat::Json);
+    p
+}
+
+fn structured_caps() -> crate::connectors::ConnectorCapabilities {
+    crate::connectors::ConnectorCapabilities {
+        supports_structured_output: true,
+        ..Default::default()
+    }
+}
+
+/// 结构化输出下发矩阵:意图 + 能力位共同决定;chat → response_format、
+/// responses → text.format、anthropic 无等价参数恒不下发。
+#[test]
+fn structured_output_intent_gated_by_capability_and_dialect() {
+    let msgs = vec![LlmMessage::plain("user", "输出 JSON")];
+    // chat:位开 + 意图 → 下发;位关 / 无意图 → 不下发(请求体与既有路径一致)
+    let body = build_chat_body("m", &msgs, &json_intent_params(), structured_caps());
+    assert_eq!(body["response_format"]["type"], "json_object");
+    let body = build_chat_body("m", &msgs, &json_intent_params(), Default::default());
+    assert!(body.get("response_format").is_none(), "能力位关不得下发");
+    let body = build_chat_body("m", &msgs, &test_params(), structured_caps());
+    assert!(body.get("response_format").is_none(), "无意图不得下发");
+
+    // responses:等价参数是 text.format
+    let body = build_responses_body("m", &msgs, &json_intent_params(), structured_caps());
+    assert_eq!(body["text"]["format"]["type"], "json_object");
+    let body = build_responses_body("m", &msgs, &json_intent_params(), Default::default());
+    assert!(body.get("text").is_none(), "能力位关不得下发");
+
+    // anthropic:协议无等价参数,位开 + 意图也不下发
+    let body = build_anthropic_body("m", &msgs, &json_intent_params(), structured_caps());
+    assert!(body.get("response_format").is_none());
+    assert!(body.get("text").is_none());
+}
+
+/// 中途系统插入(anthropic):位开时对话中途的 system 就地转 user 保序;
+/// 头部 system 恒上提;位关路径逐字节维持既有行为(全部上提)。
+#[test]
+fn anthropic_mid_conversation_system_converts_to_user_when_enabled() {
+    let msgs = vec![
+        LlmMessage::plain("system", "头部系统"),
+        LlmMessage::plain("user", "u1"),
+        LlmMessage::plain("assistant", "a1"),
+        LlmMessage::plain("system", "中途注入"),
+        LlmMessage::plain("assistant", "a2"),
+    ];
+    let mut caps = crate::connectors::ConnectorCapabilities::default();
+    caps.supports_mid_conversation_system = true;
+
+    // 位开:头部上提;中途注入出现在 a1 与 a2 之间、角色为 user
+    let body = build_anthropic_body("m", &msgs, &test_params(), caps);
+    assert_eq!(body["system"], "头部系统", "头部 system 仍应上提");
+    let arr = body["messages"].as_array().unwrap();
+    assert_eq!(arr.len(), 4);
+    assert_eq!(arr[0]["role"], "user");
+    assert_eq!(arr[1]["role"], "assistant");
+    assert_eq!(arr[2]["role"], "user", "中途 system 应转 user 保序");
+    assert_eq!(arr[2]["content"], "中途注入");
+    assert_eq!(arr[3]["role"], "assistant");
+
+    // 位关:既有行为——全部上提拼顶,中途注入不得残留消息数组
+    let body = build_anthropic_body("m", &msgs, &test_params(), Default::default());
+    assert_eq!(body["system"], "头部系统\n\n中途注入");
+    let arr = body["messages"].as_array().unwrap();
+    assert_eq!(arr.len(), 3);
+    assert!(
+        !serde_json::to_string(&arr).unwrap().contains("中途注入"),
+        "位关时中途注入只进顶部 system"
+    );
+
+    // 头部连续多条 system 恒属头部:即便位开也不转 user
+    let head_only = vec![
+        LlmMessage::plain("system", "首条"),
+        LlmMessage::plain("system", "次条"),
+        LlmMessage::plain("user", "u1"),
+    ];
+    let body = build_anthropic_body("m", &head_only, &test_params(), caps);
+    assert_eq!(body["system"], "首条\n\n次条");
+    assert_eq!(body["messages"].as_array().unwrap().len(), 1);
+}
+
+/// 中途系统插入(responses):位开时中途 system 转 user 输入项保序;位关上提 instructions。
+#[test]
+fn responses_mid_conversation_system_converts_to_user_when_enabled() {
+    let msgs = vec![
+        LlmMessage::plain("system", "头部系统"),
+        LlmMessage::plain("user", "u1"),
+        LlmMessage::plain("assistant", "a1"),
+        LlmMessage::plain("system", "中途注入"),
+        LlmMessage::plain("assistant", "a2"),
+    ];
+    let mut caps = crate::connectors::ConnectorCapabilities::default();
+    caps.supports_mid_conversation_system = true;
+
+    let body = build_responses_body("m", &msgs, &test_params(), caps);
+    assert_eq!(body["instructions"], "头部系统");
+    let input = body["input"].as_array().unwrap();
+    assert_eq!(input.len(), 4);
+    assert_eq!(input[2]["role"], "user", "中途 system 应转 user 保序");
+    assert_eq!(input[2]["content"], "中途注入");
+
+    // 位关:既有行为——上提 instructions
+    let body = build_responses_body("m", &msgs, &test_params(), Default::default());
+    assert_eq!(body["instructions"], "头部系统\n\n中途注入");
+    assert_eq!(body["input"].as_array().unwrap().len(), 3);
+}
+
+/// chat 方言对中途 system 天然透传:能力位开/关都逐字节保留原角色与位置(行为不变)。
+#[test]
+fn chat_dialect_passes_mid_system_through_regardless_of_flag() {
+    let msgs = vec![
+        LlmMessage::plain("system", "头部"),
+        LlmMessage::plain("user", "u1"),
+        LlmMessage::plain("system", "中途注入"),
+        LlmMessage::plain("assistant", "a1"),
+    ];
+    let mut caps = crate::connectors::ConnectorCapabilities::default();
+    caps.supports_mid_conversation_system = true;
+    for (label, caps) in [("位开", caps), ("位关", Default::default())] {
+        let body = build_chat_body("m", &msgs, &test_params(), caps);
+        let arr = body["messages"].as_array().unwrap();
+        assert_eq!(arr.len(), 4, "{label}:chat 应逐条透传");
+        assert_eq!(arr[2]["role"], "system", "{label}:中途 system 角色不变");
+        assert_eq!(arr[2]["content"], "中途注入");
+    }
 }

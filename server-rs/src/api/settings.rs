@@ -1118,11 +1118,12 @@ pub async fn update_settings(
         .map(|p| p.api_style.clone())
         .unwrap_or_else(|| API_STYLE_CHAT.to_string());
     let style_changed = old_style != new_style;
-    // 能力位变化(视觉能力包 D1):supports_vision / image_auto_split 改变序列化行为
-    // (图像是否随请求发送、大图是否拆分),与地址/密钥/模型/方言同款触发重建。
+    // 能力位变化(视觉能力包 D1;2026-10-03 VISION-L6 收口:五项全部参与)——
+    // 或改变序列化行为(图像发送/大图拆分),或改变请求参数(结构化输出/中途 system
+    // 处置),与地址/密钥/模型/方言同款触发重建。
     let caps_of = |p: Option<&ConnectionProfile>| {
-        p.map(|p| (p.supports_vision, p.image_auto_split))
-            .unwrap_or((false, false))
+        p.map(ConnectionProfile::connector_capabilities)
+            .unwrap_or_default()
     };
     let caps_changed = caps_of(candidate.active_connection()) != caps_of(old_active.as_ref());
     *state.settings.lock().unwrap_or_else(|e| e.into_inner()) = candidate.clone();

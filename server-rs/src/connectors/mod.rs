@@ -119,18 +119,29 @@ impl Connector {
     }
 }
 
-/// 连接能力位中**影响请求构建**的两项(视觉能力包 D1)。
+/// 连接能力位(视觉能力包 D1 声明五项;2026-10-03 VISION-L6 收口为**全部消费**)。
 ///
-/// 为什么只这两项入构建:它们改变序列化行为(`supports_vision` 决定图像 parts 是否
-/// 发送,`image_auto_split` 决定大图是否在序列化前拆分),因而必须随连接器池指纹
-/// 变化触发重建;`ConnectionProfile` 的其余三个能力位(结构化输出/前缀续写/中途
-/// 系统插入)当前无消费点,不进构建也不进指纹——待接入时按同款口径加入。
+/// 入构建与指纹的判据是「是否改变请求行为」:
+/// - `supports_vision` / `image_auto_split` 改变序列化(图像 parts 与大图拆分);
+/// - `supports_structured_output` 与 `GenerationParams::response_format` 意图共同决定
+///   是否下发结构化输出参数(chat: response_format / responses: text.format);
+/// - `supports_mid_conversation_system` 决定 responses / anthropic 方言对**中途 system
+///   消息**的处置(位开:就地转 user 保序;位关:上提拼顶——协议限制的降级);
+/// - `supports_prefix_completion` 已随构建与指纹接入,但引擎当前无前缀续写生成路径,
+///   效果面暂无消费(如实预留,见 docs/遗留.md VISION-L6)。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ConnectorCapabilities {
     /// 该连接对应模型能接收图像输入(聊天贴图 / 截图与视觉工具的图像随请求发送)
     pub supports_vision: bool,
     /// 对图像尺寸限制较严的端点(如 DeepSeek):超阈值大图在序列化前自动拆分
     pub image_auto_split: bool,
+    /// 模型支持结构化输出(JSON 模式):配合调用方的 response_format 意图下发协议参数
+    pub supports_structured_output: bool,
+    /// 模型支持前缀续写(assistant 预填充):已接入构建与指纹,生成路径暂无消费
+    pub supports_prefix_completion: bool,
+    /// 对话中途可插入 system 消息:chat 方言本就透传;responses / anthropic 方言
+    /// 在位开时把中途 system 就地转 user 保序(位关:上提拼顶,既有行为)
+    pub supports_mid_conversation_system: bool,
 }
 
 /// 构建连接器(按 config.connector;未知回退 mock)。

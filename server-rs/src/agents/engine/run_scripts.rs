@@ -314,6 +314,7 @@ mod tests {
             parallel_tool_calls: None,
             step_budget: None,
             semantic_guard: None,
+            response_format: None,
         }
     }
 
