@@ -994,8 +994,10 @@ fn anthropic_mid_conversation_system_converts_to_user_when_enabled() {
         LlmMessage::plain("system", "中途注入"),
         LlmMessage::plain("assistant", "a2"),
     ];
-    let mut caps = crate::connectors::ConnectorCapabilities::default();
-    caps.supports_mid_conversation_system = true;
+    let caps = crate::connectors::ConnectorCapabilities {
+        supports_mid_conversation_system: true,
+        ..Default::default()
+    };
 
     // 位开:头部上提;中途注入出现在 a1 与 a2 之间、角色为 user
     let body = build_anthropic_body("m", &msgs, &test_params(), caps);
@@ -1039,8 +1041,10 @@ fn responses_mid_conversation_system_converts_to_user_when_enabled() {
         LlmMessage::plain("system", "中途注入"),
         LlmMessage::plain("assistant", "a2"),
     ];
-    let mut caps = crate::connectors::ConnectorCapabilities::default();
-    caps.supports_mid_conversation_system = true;
+    let caps = crate::connectors::ConnectorCapabilities {
+        supports_mid_conversation_system: true,
+        ..Default::default()
+    };
 
     let body = build_responses_body("m", &msgs, &test_params(), caps);
     assert_eq!(body["instructions"], "头部系统");
@@ -1064,8 +1068,10 @@ fn chat_dialect_passes_mid_system_through_regardless_of_flag() {
         LlmMessage::plain("system", "中途注入"),
         LlmMessage::plain("assistant", "a1"),
     ];
-    let mut caps = crate::connectors::ConnectorCapabilities::default();
-    caps.supports_mid_conversation_system = true;
+    let caps = crate::connectors::ConnectorCapabilities {
+        supports_mid_conversation_system: true,
+        ..Default::default()
+    };
     for (label, caps) in [("位开", caps), ("位关", Default::default())] {
         let body = build_chat_body("m", &msgs, &test_params(), caps);
         let arr = body["messages"].as_array().unwrap();
