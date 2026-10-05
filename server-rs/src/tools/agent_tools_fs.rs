@@ -47,7 +47,19 @@ pub(super) fn note_change(
         return;
     };
     let op = if baseline.exists { "modify" } else { "create" };
-    task_change_service::record(&deps.db, &task_id, rel, op, "tool", baseline, Some(path));
+    // PRODCAP-1:记账成功后经任务服务(弱引用,可能未注入)补发 file_changed 事件——
+    // 「文件变更」卡片据此实时刷新(此前靠「打开详情 + 进终态各拉一次」)。
+    let tasks = deps.tasks.get().and_then(|w| w.upgrade());
+    task_change_service::record_and_notify(
+        &deps.db,
+        tasks.as_deref(),
+        &task_id,
+        rel,
+        op,
+        "tool",
+        baseline,
+        Some(path),
+    );
 }
 
 /// 工具名清单(任务工具策略的任务名例外与场景白名单以此为准:

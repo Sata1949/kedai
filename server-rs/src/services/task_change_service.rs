@@ -157,6 +157,43 @@ pub fn record(
     }
 }
 
+/// 记一次改动并广播 `file_changed` 事件(PRODCAP-1 回补 PRODCAP-4 追注)。
+///
+/// 语义:`record` 成功落行后才发事件(失败已 warn,不假装有变更);`tasks` 为 `None`
+/// (聊天路径 / 未注入任务服务)时只记账不发事件。事件的权威数据仍是
+/// `GET /api/tasks/{id}/changes`,事件只是「现在去重拉」的信号。
+///
+/// **句柄来源**:文件工具族经 `ToolDeps.tasks`(弱引用)注入的任务服务,拿得到
+/// `TaskService`,故不引入进程级全局。**边界(如实登记)**:`bash` 侧启发式检出
+/// (`tools/workspace_scan::persist_plan`)当前**不发**本事件——其调用链(`bash::run`)
+/// 不携带任务服务句柄,需句柄穿透(见 `计划.md` PRODCAP-4 追注的后续项);bash 检出的
+/// 变更在前端仍由「打开详情 + 进终态各拉一次」覆盖(与 PRODCAP-4 现状一致)。
+#[allow(clippy::too_many_arguments)] // 与 record 同参 + 事件句柄;与 persist_event 同款豁免
+pub fn record_and_notify(
+    db: &Arc<Db>,
+    tasks: Option<&crate::services::task_service::TaskService>,
+    task_id: &str,
+    rel_path: &str,
+    op: &str,
+    source: &str,
+    before: &Baseline,
+    after_path: Option<&Path>,
+) -> bool {
+    let ok = record(db, task_id, rel_path, op, source, before, after_path);
+    if ok {
+        if let Some(svc) = tasks {
+            svc.emit_event(
+                crate::models::types::TaskEventKind::FileChanged,
+                task_id,
+                None,
+                None,
+                Some(format!("文件变更:{rel_path}({op})")),
+            );
+        }
+    }
+    ok
+}
+
 /// 记一条**扫描标记**:bash 侧的启发式树扫描单次未能完整检出时调用。
 ///
 /// 为什么单独一张表、而不是混进变更行:台账一行 = 一个**文件改动**,而「扫不全」不是改动;

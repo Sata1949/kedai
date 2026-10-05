@@ -184,24 +184,17 @@ impl TaskService {
     pub(super) fn reset_task(&self, id: &str) -> bool {
         Self::blocking(|| {
             let conn = self.db.write();
-            let changed = conn
-                .execute(
-                    "UPDATE tasks SET status = 'planning', plan = '[]', result = '', error = '', updated_at = ?1 WHERE id = ?2",
-                    params![now_iso(), id],
-                )
-                .map(|n| n > 0)
-                .unwrap_or(false);
-            if changed {
-                // 重跑入口即进入规划态,与 set_status 同款 kind="status" 事件
-                self.emit_event(
-                    TaskEventKind::Status,
-                    id,
-                    None,
-                    Some(TaskStatus::Planning),
-                    Some("任务进入规划阶段".into()),
-                );
-            }
-            changed
+            // PRODCAP-1:事实写 + 事件落库**同事务**,提交后广播(见 exec_with_event)
+            self.exec_with_event(
+                &conn,
+                Some(id),
+                "UPDATE tasks SET status = 'planning', plan = '[]', result = '', error = '', updated_at = ?1 WHERE id = ?2",
+                params![now_iso(), id],
+                TaskEventKind::Status,
+                None,
+                Some(TaskStatus::Planning),
+                Some("任务进入规划阶段".into()),
+            )
         })
     }
 
@@ -209,23 +202,17 @@ impl TaskService {
     pub(crate) fn set_status(&self, id: &str, status: TaskStatus) -> bool {
         Self::blocking(|| {
             let conn = self.db.write();
-            let changed = conn
-                .execute(
-                    "UPDATE tasks SET status = ?1, updated_at = ?2 WHERE id = ?3",
-                    params![status.as_str(), now_iso(), id],
-                )
-                .map(|n| n > 0)
-                .unwrap_or(false);
-            if changed {
-                self.emit_event(
-                    TaskEventKind::Status,
-                    id,
-                    None,
-                    Some(status),
-                    Some(format!("任务状态更新为 {}", status.as_str())),
-                );
-            }
-            changed
+            // PRODCAP-1:事实写 + 事件落库同事务,提交后广播
+            self.exec_with_event(
+                &conn,
+                Some(id),
+                "UPDATE tasks SET status = ?1, updated_at = ?2 WHERE id = ?3",
+                params![status.as_str(), now_iso(), id],
+                TaskEventKind::Status,
+                None,
+                Some(status),
+                Some(format!("任务状态更新为 {}", status.as_str())),
+            )
         })
     }
 
@@ -234,23 +221,17 @@ impl TaskService {
         Self::blocking(|| {
             let json = serde_json::to_string(plan).unwrap_or_else(|_| "[]".into());
             let conn = self.db.write();
-            let changed = conn
-                .execute(
-                    "UPDATE tasks SET plan = ?1, updated_at = ?2 WHERE id = ?3",
-                    params![json, now_iso(), id],
-                )
-                .map(|n| n > 0)
-                .unwrap_or(false);
-            if changed {
-                self.emit_event(
-                    TaskEventKind::Plan,
-                    id,
-                    None,
-                    None,
-                    Some(format!("执行计划已更新(共 {} 步)", plan.len())),
-                );
-            }
-            changed
+            // PRODCAP-1:事实写 + 事件落库同事务,提交后广播
+            self.exec_with_event(
+                &conn,
+                Some(id),
+                "UPDATE tasks SET plan = ?1, updated_at = ?2 WHERE id = ?3",
+                params![json, now_iso(), id],
+                TaskEventKind::Plan,
+                None,
+                None,
+                Some(format!("执行计划已更新(共 {} 步)", plan.len())),
+            )
         })
     }
 
@@ -328,30 +309,18 @@ impl TaskService {
     ) -> bool {
         Self::blocking(|| {
             let conn = self.db.write();
-            let changed = conn
-                .execute(
-                    "UPDATE tasks SET result = ?1, status = ?2, error = ?3, updated_at = ?4 WHERE id = ?5",
-                    params![
-                        result,
-                        status.as_str(),
-                        error.unwrap_or(""),
-                        now_iso(),
-                        id
-                    ],
-                )
-                .map(|n| n > 0)
-                .unwrap_or(false);
-            drop(conn);
-            if changed {
-                self.emit_event(
-                    TaskEventKind::Status,
-                    id,
-                    None,
-                    Some(status),
-                    Some("任务已产出最终结果".into()),
-                );
-            }
-            changed
+            // PRODCAP-1:事实写 + 事件落库同事务,提交后广播(原「先 drop(conn) 再发射」
+            // 已收敛——同事务要求连接活到提交之后)
+            self.exec_with_event(
+                &conn,
+                Some(id),
+                "UPDATE tasks SET result = ?1, status = ?2, error = ?3, updated_at = ?4 WHERE id = ?5",
+                params![result, status.as_str(), error.unwrap_or(""), now_iso(), id],
+                TaskEventKind::Status,
+                None,
+                Some(status),
+                Some("任务已产出最终结果".into()),
+            )
         })
     }
 
@@ -365,23 +334,17 @@ impl TaskService {
     pub(crate) fn set_planned_result(&self, id: &str, result: &str) -> bool {
         Self::blocking(|| {
             let conn = self.db.write();
-            let changed = conn
-                .execute(
-                    "UPDATE tasks SET result = ?1, updated_at = ?2 WHERE id = ?3",
-                    params![result, now_iso(), id],
-                )
-                .map(|n| n > 0)
-                .unwrap_or(false);
-            if changed {
-                self.emit_event(
-                    TaskEventKind::Status,
-                    id,
-                    None,
-                    Some(TaskStatus::Planned),
-                    Some("计划清单已写入,待批准".into()),
-                );
-            }
-            changed
+            // PRODCAP-1:事实写 + 事件落库同事务,提交后广播
+            self.exec_with_event(
+                &conn,
+                Some(id),
+                "UPDATE tasks SET result = ?1, updated_at = ?2 WHERE id = ?3",
+                params![result, now_iso(), id],
+                TaskEventKind::Status,
+                None,
+                Some(TaskStatus::Planned),
+                Some("计划清单已写入,待批准".into()),
+            )
         })
     }
 
@@ -394,24 +357,17 @@ impl TaskService {
     pub(super) fn set_result_only(&self, id: &str, result: &str) -> bool {
         Self::blocking(|| {
             let conn = self.db.write();
-            let changed = conn
-                .execute(
-                    "UPDATE tasks SET result = ?1, updated_at = ?2 WHERE id = ?3",
-                    params![result, now_iso(), id],
-                )
-                .map(|n| n > 0)
-                .unwrap_or(false);
-            drop(conn);
-            if changed {
-                self.emit_event(
-                    TaskEventKind::Status,
-                    id,
-                    None,
-                    None,
-                    Some("已保存已完成步骤的产出(任务未完成)".into()),
-                );
-            }
-            changed
+            // PRODCAP-1:事实写 + 事件落库同事务,提交后广播
+            self.exec_with_event(
+                &conn,
+                Some(id),
+                "UPDATE tasks SET result = ?1, updated_at = ?2 WHERE id = ?3",
+                params![result, now_iso(), id],
+                TaskEventKind::Status,
+                None,
+                None,
+                Some("已保存已完成步骤的产出(任务未完成)".into()),
+            )
         })
     }
 
@@ -442,45 +398,38 @@ impl TaskService {
     pub(super) fn set_error_only(&self, id: &str, error: &str) -> bool {
         Self::blocking(|| {
             let conn = self.db.write();
-            let changed = conn
-                .execute(
-                    "UPDATE tasks SET error = ?1, updated_at = ?2 WHERE id = ?3",
-                    params![error, now_iso(), id],
-                )
-                .map(|n| n > 0)
-                .unwrap_or(false);
-            drop(conn);
-            if changed {
-                // detail 截断防超长文本撑大事件帧(口径同 set_error)
-                let detail: String = error.chars().take(120).collect();
-                self.emit_event(TaskEventKind::Status, id, None, None, Some(detail));
-            }
-            changed
+            // detail 截断防超长文本撑大事件帧(口径同 set_error)
+            let detail: String = error.chars().take(120).collect();
+            // PRODCAP-1:事实写 + 事件落库同事务,提交后广播
+            self.exec_with_event(
+                &conn,
+                Some(id),
+                "UPDATE tasks SET error = ?1, updated_at = ?2 WHERE id = ?3",
+                params![error, now_iso(), id],
+                TaskEventKind::Status,
+                None,
+                None,
+                Some(detail),
+            )
         })
     }
 
     pub(super) fn set_error(&self, id: &str, error: &str) -> bool {
         Self::blocking(|| {
             let conn = self.db.write();
-            let changed = conn
-                .execute(
-                    "UPDATE tasks SET error = ?1, status = 'error', updated_at = ?2 WHERE id = ?3",
-                    params![error, now_iso(), id],
-                )
-                .map(|n| n > 0)
-                .unwrap_or(false);
-            if changed {
-                // detail 截断防超长错误文本撑大事件帧
-                let detail: String = error.chars().take(120).collect();
-                self.emit_event(
-                    TaskEventKind::Status,
-                    id,
-                    None,
-                    Some(TaskStatus::Error),
-                    Some(detail),
-                );
-            }
-            changed
+            // detail 截断防超长错误文本撑大事件帧
+            let detail: String = error.chars().take(120).collect();
+            // PRODCAP-1:事实写 + 事件落库同事务,提交后广播
+            self.exec_with_event(
+                &conn,
+                Some(id),
+                "UPDATE tasks SET error = ?1, status = 'error', updated_at = ?2 WHERE id = ?3",
+                params![error, now_iso(), id],
+                TaskEventKind::Status,
+                None,
+                Some(TaskStatus::Error),
+                Some(detail),
+            )
         })
     }
 
@@ -535,8 +484,25 @@ impl TaskService {
     ) {
         Self::blocking(|| {
             let model = self.task_settings().model;
+            let detail = format!(
+                "已记录 {phase} 阶段 token 用量(prompt {} / completion {})",
+                out.prompt_tokens, out.completion_tokens
+            );
             let conn = self.db.write();
-            let result = conn.execute(
+            // PRODCAP-1:usage 行 + 事件行**同事务**,提交后广播。失败语义与合并前
+            // 对齐「用法行有没有落库」:落库失败 → warn 留痕、不发事件(事件与行同进同退)。
+            let tx = match conn.unchecked_transaction() {
+                Ok(tx) => tx,
+                Err(e) => {
+                    tracing::warn!(
+                        op = "task_usage transaction",
+                        error = e.to_string(),
+                        "任务 usage 落库失败"
+                    );
+                    return;
+                }
+            };
+            let result = tx.execute(
                 "INSERT INTO task_usage (id, task_id, phase, step_index, model, prompt_tokens, completion_tokens, reasoning_tokens, created_at)              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     Uuid::new_v4().to_string(),
@@ -556,18 +522,49 @@ impl TaskService {
                     error = e.to_string(),
                     "任务 usage 落库失败"
                 );
-            } else {
-                self.emit_event(
-                    TaskEventKind::Usage,
-                    task_id,
-                    None,
-                    None,
-                    Some(format!(
-                        "已记录 {phase} 阶段 token 用量(prompt {} / completion {})",
-                        out.prompt_tokens, out.completion_tokens
-                    )),
-                );
+                return; // tx 未提交 → 回滚
             }
+            let seq_at = match Self::persist_event(
+                &tx,
+                task_id,
+                TaskEventKind::Usage,
+                None,
+                None,
+                Some(detail.as_str()),
+                None,
+                None,
+                None,
+            ) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        op = "task_usage event",
+                        error = e,
+                        "任务 usage 落库失败(事件行)"
+                    );
+                    return; // 行与事件同回滚
+                }
+            };
+            if let Err(e) = tx.commit() {
+                tracing::warn!(
+                    op = "task_usage commit",
+                    error = e.to_string(),
+                    "任务 usage 落库失败(提交)"
+                );
+                return;
+            }
+            self.broadcast_event(Self::task_event_payload(
+                task_id,
+                TaskEventKind::Usage,
+                None,
+                None,
+                Some(detail),
+                None,
+                None,
+                None,
+                Some(seq_at.0),
+                Some(seq_at.1),
+            ));
         })
     }
 
@@ -608,8 +605,26 @@ impl TaskService {
                 .unwrap_or((0, 0, 0));
             // finish_reason:None(失败/工具循环旧路径/上游未下发)与 Some(空串)统一落 ''
             let finish_reason = out.and_then(|o| o.finish_reason.as_deref()).unwrap_or("");
+            let step = step_index
+                .map(|i| format!(" #{}", i + 1))
+                .unwrap_or_default();
+            // phase/step_index 随事件透出(批次 R4):前端据此清对应流式缓冲
+            let detail = format!("{phase}{step} · {model} · {} tokens", p + c);
             let conn = self.db.write();
-            let result = conn.execute(
+            // PRODCAP-1:调用行 + 事件行**同事务**,提交后广播;失败语义对齐合并前
+            // (落库失败 → warn 留痕、不发事件)
+            let tx = match conn.unchecked_transaction() {
+                Ok(tx) => tx,
+                Err(e) => {
+                    tracing::warn!(
+                        op = "task_llm_calls transaction",
+                        error = e.to_string(),
+                        "任务 LLM 调用追踪落库失败"
+                    );
+                    return;
+                }
+            };
+            let result = tx.execute(
                 "INSERT INTO task_llm_calls (id, task_id, phase, step_index, model, prompt_summary, response_summary, prompt_tokens, completion_tokens, reasoning_tokens, elapsed_ms, status, created_at, finish_reason) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
@@ -635,19 +650,56 @@ impl TaskService {
                     error = e.to_string(),
                     "任务 LLM 调用追踪落库失败"
                 );
-            } else {
-                let step = step_index
-                    .map(|i| format!(" #{}", i + 1))
-                    .unwrap_or_default();
-                // phase/step_index 随事件透出(批次 R4):前端据此清对应流式缓冲
-                self.emit_llm_call(
-                    task_id,
-                    phase,
-                    step_index,
-                    format!("{phase}{step} · {model} · {} tokens", p + c),
-                    Some(finish_reason.to_string()),
-                );
+                return; // tx 未提交 → 回滚
             }
+            let fr = finish_reason.to_string();
+            let (seq, at) = match Self::persist_event(
+                &tx,
+                task_id,
+                TaskEventKind::LlmCall,
+                None,
+                None,
+                Some(detail.as_str()),
+                Some(fr.as_str()),
+                Some(phase),
+                step_index,
+            ) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        op = "task_llm_calls event",
+                        error = e,
+                        "任务 LLM 调用追踪落库失败(事件行)"
+                    );
+                    return; // 行与事件同回滚
+                }
+            };
+            if let Err(e) = tx.commit() {
+                tracing::warn!(
+                    op = "task_llm_calls commit",
+                    error = e.to_string(),
+                    "任务 LLM 调用追踪落库失败(提交)"
+                );
+                return;
+            }
+            let finish_reason = fr;
+            let finish_reason = if finish_reason.is_empty() {
+                None
+            } else {
+                Some(finish_reason)
+            };
+            self.broadcast_event(Self::task_event_payload(
+                task_id,
+                TaskEventKind::LlmCall,
+                None,
+                None,
+                Some(detail),
+                finish_reason,
+                Some(phase.to_string()),
+                step_index,
+                Some(seq),
+                Some(at),
+            ));
         })
     }
 
@@ -823,20 +875,44 @@ impl TaskService {
         Self::blocking(|| {
             let id = Uuid::new_v4().to_string();
             let now = now_iso();
+            let detail = format!("子任务「{name}」开始执行");
             let conn = self.db.write();
-            conn.execute(
+            // PRODCAP-1:事实行 + 事件行**同事务**;失败按既有语义报 Err(不静默丢)
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(|e| format!("创建子任务失败(事务开启): {e}"))?;
+            tx.execute(
                 "INSERT INTO task_subtasks (id, task_id, name, instruction, status, result, error, created_at, updated_at, finished_at) \
                  VALUES (?1, ?2, ?3, ?4, 'running', '', '', ?5, ?5, '')",
                 params![id, task_id, name, instruction, now],
             )
             .map_err(|e| format!("创建子任务失败: {e}"))?;
-            self.emit_event(
-                TaskEventKind::Subtask,
+            let (seq, at) = Self::persist_event(
+                &tx,
                 task_id,
+                TaskEventKind::Subtask,
                 None,
                 None,
-                Some(format!("子任务「{name}」开始执行")),
-            );
+                Some(detail.as_str()),
+                None,
+                None,
+                None,
+            )
+            .map_err(|e| format!("创建子任务失败(事件落库): {e}"))?;
+            tx.commit()
+                .map_err(|e| format!("创建子任务失败(提交): {e}"))?;
+            self.broadcast_event(Self::task_event_payload(
+                task_id,
+                TaskEventKind::Subtask,
+                None,
+                None,
+                Some(detail),
+                None,
+                None,
+                None,
+                Some(seq),
+                Some(at),
+            ));
             Ok(id)
         })
     }
@@ -879,25 +955,17 @@ impl TaskService {
             } else {
                 finished
             };
-            let changed = conn
-                .execute(
-                    "UPDATE task_subtasks SET status = ?1, result = ?2, error = ?3, updated_at = ?4, finished_at = ?5 WHERE id = ?6",
-                    params![status.as_str(), res, err, now_iso(), finished_at, id],
-                )
-                .map(|n| n > 0)
-                .unwrap_or(false);
-            if changed {
-                if let Some(tid) = task_id {
-                    self.emit_event(
-                        TaskEventKind::Subtask,
-                        &tid,
-                        None,
-                        None,
-                        Some(format!("子任务状态更新为 {}", status.as_str())),
-                    );
-                }
-            }
-            changed
+            // PRODCAP-1:事实写 + 事件落库同事务,提交后广播;task_id 缺失的子任务不发事件
+            self.exec_with_event(
+                &conn,
+                task_id.as_deref(),
+                "UPDATE task_subtasks SET status = ?1, result = ?2, error = ?3, updated_at = ?4, finished_at = ?5 WHERE id = ?6",
+                params![status.as_str(), res, err, now_iso(), finished_at, id],
+                TaskEventKind::Subtask,
+                None,
+                None,
+                Some(format!("子任务状态更新为 {}", status.as_str())),
+            )
         })
     }
 

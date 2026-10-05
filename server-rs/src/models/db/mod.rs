@@ -194,6 +194,9 @@ impl Db {
                 // 幂等 schema 升级(批次 4b):旧库补建 task_scan_marks 扫描标记表
                 crate::migration::ensure_task_scan_marks_table(&conn)
                     .map_err(|e| format!("升级 task_scan_marks 表失败: {e}"))?;
+                // 幂等 schema 升级(PRODCAP-1):旧库补建 task_events 事件表(补拉与回放的地基)
+                crate::migration::ensure_task_events_table(&conn)
+                    .map_err(|e| format!("升级 task_events 表失败: {e}"))?;
                 // 幂等 schema 升级(批次 3 性能):旧库补建 sessions/tasks 列表查询索引
                 crate::migration::ensure_perf_indexes(&conn)
                     .map_err(|e| format!("升级性能索引失败: {e}"))?;

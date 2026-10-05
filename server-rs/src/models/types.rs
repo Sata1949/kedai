@@ -666,6 +666,34 @@ pub enum TaskEventKind {
     /// 「这个任务按哪份编排跑」与 `flow_snapshot`(任务看台的编排徽标据此渲染);
     /// 复用 `Status` 会让「状态没变却收到状态事件」成为常态,读日志的人无从分辨。
     FlowBound,
+    /// 任务文件变更台账新增一行(PRODCAP-1 回补;PRODCAP-4 的加性升级)。
+    ///
+    /// 任务详情的「文件变更」卡片此前靠「打开详情 + 进终态各拉一次」刷新(无实时推送,
+    /// 见 PRODCAP-4 状态段);本 kind 落地后改为事件驱动(`loadTaskChanges`)。
+    /// `detail` 为人类可读摘要(如「3 个文件变更(2 改 / 1 增)」),权威数据仍以
+    /// `GET /api/tasks/{id}/changes` 为准。
+    FileChanged,
+}
+
+impl TaskEventKind {
+    /// 文本形态(与 serde 输出一致;`task_events.kind` 参数化写入与日志用)。
+    /// 有单测逐变体比对 serde 输出,两者漂移即红。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Status => "status",
+            Self::Plan => "plan",
+            Self::Subtask => "subtask",
+            Self::Usage => "usage",
+            Self::Deleted => "deleted",
+            Self::LlmCall => "llm_call",
+            Self::AgentStatus => "agent_status",
+            Self::ApprovalRequired => "approval_required",
+            Self::Delta => "delta",
+            Self::FlowBound => "flow_bound",
+            Self::FileChanged => "file_changed",
+        }
+    }
 }
 
 /// SSE 事件,serde 序列化为 {"type":"...", ...}
@@ -779,6 +807,15 @@ pub enum SseEvent {
         /// 仅步骤类调用携带,非步骤阶段 None 省略;前端缓冲 key 的后半)
         #[serde(default, skip_serializing_if = "Option::is_none")]
         step_index: Option<usize>,
+        /// 任务内单调事件序号(PRODCAP-1;来源 `task_events.seq`,与该行逐字一致)。
+        /// 前端据 `seq > lastSeq + 1` 判定丢帧并补拉;`delta` 为暂态事件不落库,故
+        /// **不携带** seq(序列化省略)。None = 未知/不适用。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seq: Option<u64>,
+        /// 事件落库时间(ISO-8601,与 `task_events.created_at` 同源)。
+        /// 同样仅落库事件携带;delta 省略。旧客户端忽略本字段(加性,线格式兼容)。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<String>,
     },
 }
 
@@ -1572,6 +1609,9 @@ mod tests {
             finish_reason: None,
             phase: None,
             step_index: None,
+            // PRODCAP-1:未持久化的事件构造 seq/at 省略(序列化断言据此保持原样)
+            seq: None,
+            at: None,
         };
         let v = serde_json::to_value(&ev).unwrap();
         assert_eq!(
@@ -1599,6 +1639,8 @@ mod tests {
             finish_reason: Some("length".into()),
             phase: None,
             step_index: None,
+            seq: None,
+            at: None,
         };
         let v = serde_json::to_value(&ev).unwrap();
         assert_eq!(v["finish_reason"], serde_json::json!("length"));
@@ -1673,6 +1715,8 @@ mod tests {
             finish_reason: None,
             phase: Some("step".into()),
             step_index: Some(0),
+            seq: None,
+            at: None,
         };
         let v = serde_json::to_value(&ev).unwrap();
         assert_eq!(
@@ -1702,6 +1746,8 @@ mod tests {
             finish_reason: None,
             phase: Some("step".into()),
             step_index: Some(0),
+            seq: None,
+            at: None,
         };
         let v = serde_json::to_value(&ev).unwrap();
         assert_eq!(v["phase"], serde_json::json!("step"));
@@ -1716,6 +1762,8 @@ mod tests {
             finish_reason: None,
             phase: Some("planner".into()),
             step_index: None,
+            seq: None,
+            at: None,
         };
         let v = serde_json::to_value(&ev).unwrap();
         assert_eq!(v["phase"], serde_json::json!("planner"));

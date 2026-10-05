@@ -587,7 +587,8 @@ export const useTaskStore = defineStore('app.task', () => {
         if (ev.kind === 'status' && ev.status && TERMINAL_STATUSES.has(ev.status)) {
           void loadGlobalTaskUsage();
           // 批次 4c:进终态是变更清单的第二个拉取时机(模型写盘已结束,拿最终形态;
-          // 本端点无 file_changed 事件,理由见 `计划.md` PRODCAP-4 的 D2 解耦档)
+          // PRODCAP-1 起工具侧另有 file_changed 事件驱动刷新,而在 bash 侧检出等
+          // 「无事件」路径上终态补拉仍是唯一保证,故保留)
           if (ev.task_id === currentTaskId.value) {
             void loadTaskChanges(ev.task_id);
           }
@@ -643,6 +644,13 @@ export const useTaskStore = defineStore('app.task', () => {
           clearAllLiveDeltas(); // 批次 R4:任务删除,其流式缓冲一并失效
           lastAgentStatus.value = null;
         }
+        break;
+      case 'file_changed':
+        // PRODCAP-1:文件变更台账新增一行(工具侧 fs_write/fs_edit/fs_patch 与回滚端点
+        // 触发;bash 侧检出暂不发本事件,见 task_change_service::record_and_notify 的边界)。
+        // 只刷当前任务的变更清单——loadTaskChanges 有按 task_id 的签名去重与 in-flight 合并,
+        // 大批量改动(如一次补丁几十个文件)不会叠加并发请求。
+        if (ev.task_id === currentTaskId.value) void loadTaskChanges(ev.task_id);
         break;
       case undefined:
         // kind 缺失(旧服务端/未知分类):仅透传事件面板,不触发刷新。

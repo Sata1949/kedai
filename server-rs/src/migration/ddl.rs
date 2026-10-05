@@ -717,6 +717,51 @@ pub fn ensure_task_scan_marks_table(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// 任务事件表(PRODCAP-1,2026-10-05):任务生命周期事件按任务内单调 seq 落库。
+/// 文本与 models/db/schema.rs CREATE_TABLES 内的建表语句保持一致(normalize 比对依赖)。
+const TASK_EVENTS_DDL: &str = r#"
+CREATE TABLE IF NOT EXISTS task_events (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id       TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  seq           INTEGER NOT NULL,
+  kind          TEXT NOT NULL,
+  title         TEXT,
+  status        TEXT,
+  detail        TEXT,
+  finish_reason TEXT,
+  phase         TEXT,
+  step_index    INTEGER,
+  created_at    TEXT NOT NULL,
+  UNIQUE(task_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_task_events_task_seq ON task_events(task_id, seq);
+"#;
+
+/// 幂等 schema 升级:旧库补建 task_events 表(PRAGMA 探测,已存在跳过)。
+/// 启动时(Db::open)与跨库合并前(merge_databases 两侧)各执行一次——
+/// **两侧各调一次是硬要求**:N-1 库与当前库互相合并时,漏补的一侧会被
+/// schema 比对判为「基线缺少源表」并中止合并。
+pub fn ensure_task_events_table(conn: &Connection) -> Result<(), String> {
+    let mut existing: Vec<String> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(task_events)")
+            .map_err(|e| format!("读取 task_events 列失败: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| format!("遍历 task_events 列失败: {e}"))?;
+        for name in rows.flatten() {
+            existing.push(name);
+        }
+    }
+    if !existing.is_empty() {
+        return Ok(());
+    }
+    conn.execute_batch(TASK_EVENTS_DDL)
+        .map_err(|e| format!("创建 task_events 表失败: {e}"))?;
+    Ok(())
+}
+
 /// 命令执行审计表(bash 工具与 Android 执行层):每次尝试执行(含被拒绝的)
 /// 落一行,供设置面板审计查看与事后追溯。
 /// 为什么必须落库:root/ADB 级命令不可逆,「谁在何时以什么等级跑了什么」

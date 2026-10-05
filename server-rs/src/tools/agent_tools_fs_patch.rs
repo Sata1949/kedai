@@ -706,8 +706,17 @@ fn run_patch(
                 match std::fs::remove_file(path) {
                     Ok(()) => {
                         if let Some(task_id) = task_change_service::task_id_of(&ctx.session_id) {
-                            task_change_service::record(
-                                &deps.db, &task_id, rel, "delete", "tool", &baseline, None,
+                            // PRODCAP-1:记账 + file_changed 事件(与 fs_write/fs_edit 同口径)
+                            let tasks = deps.tasks.get().and_then(|w| w.upgrade());
+                            task_change_service::record_and_notify(
+                                &deps.db,
+                                tasks.as_deref(),
+                                &task_id,
+                                rel,
+                                "delete",
+                                "tool",
+                                &baseline,
+                                None,
                             );
                         }
                         Ok(())

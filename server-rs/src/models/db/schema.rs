@@ -475,6 +475,28 @@ CREATE TABLE IF NOT EXISTS task_scan_marks (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_task_scan_marks_task ON task_scan_marks(task_id, id);
+
+-- 任务事件持久化(PRODCAP-1,2026-10-05「进度可续」):任务生命周期事件按任务内单调
+-- seq 落库,支持断点补拉与 SSE 回放——断开/重连/通道拥挤后前端仍能拿到权威完整进度,
+-- 不再依赖「5s 兜底轮询 + 丢帧容忍」。
+-- 语义:一行 = 一条已广播的事件(kind/status/detail/finish_reason/phase/step_index 与
+-- SseEvent::Task 载荷逐字段同源);kind=delta 为暂态流式增量**不落库**(80 字/批会灌满表)。
+-- 保留窗口:每任务 2000 条,写事务末尾按 seq 删除最旧(window 外补拉返回 truncated 标记)。
+CREATE TABLE IF NOT EXISTS task_events (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id       TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  seq           INTEGER NOT NULL,
+  kind          TEXT NOT NULL,
+  title         TEXT,
+  status        TEXT,
+  detail        TEXT,
+  finish_reason TEXT,
+  phase         TEXT,
+  step_index    INTEGER,
+  created_at    TEXT NOT NULL,
+  UNIQUE(task_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_task_events_task_seq ON task_events(task_id, seq);
 "#;
 
 /// 暴露建表 SQL 供迁移一致性测试比对(旧库 ALTER 补列后应与新建表 schema normalize 一致)

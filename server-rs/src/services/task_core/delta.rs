@@ -110,6 +110,9 @@ impl DeltaBatcher {
             finish_reason: None,
             phase: Some(self.phase.clone()),
             step_index: self.step_index,
+            // PRODCAP-1:delta 为暂态事件不落库 → 不携带 seq/at(前端不对其做缺口判定)
+            seq: None,
+            at: None,
         });
     }
 }
