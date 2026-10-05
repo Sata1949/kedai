@@ -71,8 +71,24 @@ fn build_llm_messages(
         vars,
         assistant_vars,
         None,
+        // 文学能力包:测试兼容入口不带三段文本(行为与加参数前一致)
+        LiteraryTexts::default(),
     )
 }
+/// 文学能力包的文本参数(LIT-2 起;LIT-3 追加位置 4/位置 0 两段)。**文本单一出处**在
+/// 设置层(`services::settings_service::params` 的常量)，由装配层(`messages/context.rs`)
+/// 按扁平快照取好传入——build 层不读设置，保持纯粹、测试可直接注入字面文本。
+///
+/// - `default_suffix`：**兜底模板增强段**(LIT-2)——仅「用户清空提示词框」的内置兜底
+///   路径生效；自定义/物化缺省提示词路径不由它追加。
+///
+/// 全 `None` 时行为与加本参数前**逐字节一致**(开关关的回归钉子)。
+/// 结构体传参(而非逐个位置参数)：三段文本同源同判据，后续加字段不再改动各调用点。
+#[derive(Default, Clone, Copy)]
+pub(in crate::agents::engine) struct LiteraryTexts<'a> {
+    pub(in crate::agents::engine) default_suffix: Option<&'a str>,
+}
+
 /// build_llm_messages 的 6 层位置版本(位置定义见 build_llm_messages 文档)。
 /// 世界书常驻(role=system)并入 system;激发与预设尾部追加到最新用户消息尾部
 /// (system + 早期历史前缀保持稳定 → 前缀缓存命中率显著提升,缓存友好)。
@@ -100,6 +116,9 @@ pub(in crate::agents::engine) fn build_llm_messages_with_position(
     assistant_vars: &mut AssistantVars,
     // 7 作用域变量(计划二);None = 无作用域上下文(宏/EJS 走旧行为)
     scopes: Option<&mut crate::parsing::scopes::ScopeVars>,
+    // 文学能力包三段文本(LIT-2/LIT-3;见 LiteraryTexts 文档)。默认全 None 时与
+    // 加本参数前逐字节一致。
+    literary: LiteraryTexts<'_>,
 ) -> (Vec<LlmMessage>, usize) {
     let mut messages = Vec::new();
     // 角色卡字段属于不可信素材。只包裹宏展开后的替换值，不改写原始角色扮演文本。
@@ -200,6 +219,13 @@ pub(in crate::agents::engine) fn build_llm_messages_with_position(
                  【输出纪律】\n\
                  一次只输出角色回应本身;若需要分段,使用空行,不使用 Markdown 标题。",
             );
+            // 文学能力包(LIT-2):兜底模板追加文学增强段(开关开时由装配层传入;
+            // 文本不在此复制,单一出处见 settings_service::params)
+            if let Some(extra) = literary.default_suffix {
+                if !extra.trim().is_empty() {
+                    s.push_str(&format!("\n\n{extra}"));
+                }
+            }
             s
         }
     };
@@ -486,6 +512,97 @@ mod tests {
             msgs[0].content
         );
     }
+    /// 文学能力包(LIT-2):引擎兜底模板(用户清空提示词框路径)在装配层传入增强段时
+    /// 追加该段;不传(None)时与加参数前逐字节一致;自定义提示词路径不受本参数影响
+    /// (那是 LIT-3 两段注入的职责)。
+    #[test]
+    fn fallback_template_appends_literary_enhancement() {
+        let mut vars = HashMap::new();
+        let (msgs, _) = build_llm_messages_with_position(
+            "芽衣",
+            "兔族少女。",
+            "",
+            "",
+            &[],
+            &[],
+            &[],
+            &[],
+            None,
+            None,
+            None,
+            "user",
+            None,
+            "user",
+            &mut vars,
+            &mut AssistantVars::new(),
+            None,
+            LiteraryTexts::default(),
+        );
+        assert!(msgs[0].content.contains("文学创作系统"), "兜底模板应生效");
+        assert!(
+            !msgs[0].content.contains("【文学增强纪律】"),
+            "未传增强段时不得出现本段(开关关逐字等同)"
+        );
+
+        let mut vars2 = HashMap::new();
+        let (msgs2, _) = build_llm_messages_with_position(
+            "芽衣",
+            "兔族少女。",
+            "",
+            "",
+            &[],
+            &[],
+            &[],
+            &[],
+            None,
+            None,
+            None,
+            "user",
+            None,
+            "user",
+            &mut vars2,
+            &mut AssistantVars::new(),
+            None,
+            LiteraryTexts {
+                default_suffix: Some("【文学增强纪律】\n测试增强段"),
+            },
+        );
+        let sys = &msgs2[0].content;
+        assert!(sys.contains("【文学增强纪律】"), "增强段应追加进 system");
+        assert!(
+            sys.find("文学创作系统").unwrap() < sys.find("【文学增强纪律】").unwrap(),
+            "增强段应在兜底模板之后"
+        );
+
+        let mut vars3 = HashMap::new();
+        let (msgs3, _) = build_llm_messages_with_position(
+            "芽衣",
+            "兔族少女。",
+            "",
+            "",
+            &[],
+            &[],
+            &[],
+            &[],
+            Some("CUSTOM"),
+            None,
+            None,
+            "user",
+            None,
+            "user",
+            &mut vars3,
+            &mut AssistantVars::new(),
+            None,
+            LiteraryTexts {
+                default_suffix: Some("【文学增强纪律】\n测试增强段"),
+            },
+        );
+        assert!(
+            !msgs3[0].content.contains("【文学增强纪律】"),
+            "自定义提示词路径不由本参数追加(归 LIT-3)"
+        );
+    }
+
     /// build_llm_messages:简单模式合成文本拼入 system;楼层按位置插入历史
     #[test]
     fn build_messages_injects_simple_and_floors() {

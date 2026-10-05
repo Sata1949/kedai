@@ -11,9 +11,8 @@ use super::params::{
     default_compaction_threshold, default_loop_guard_semantic_max_distinct,
     default_loop_guard_semantic_min_calls, default_loop_guard_semantic_window,
     default_memory_inject_char_budget, default_memory_inject_limit, default_memory_max_entries,
-    default_roleplay_agent_prompt, default_session_budget_action, default_session_token_budget,
-    default_subagent_max_concurrency, default_subagent_max_depth,
-    default_subagent_result_max_chars, default_task_idle_timeout_secs,
+    default_session_budget_action, default_session_token_budget, default_subagent_max_concurrency,
+    default_subagent_max_depth, default_subagent_result_max_chars, default_task_idle_timeout_secs,
     default_task_step_budget_secs, default_task_tool_policy,
     default_tool_authorization_timeout_secs, default_tool_history_budget_tokens,
     default_tool_history_keep_rounds, migrate_authorization_mode, task_idle_floor_secs,
@@ -72,8 +71,10 @@ impl RuntimeSettings {
                 // 空串语义 = 使用内置默认模板(设置页文案与 docs/契约-协议与配置.md 同口径),
                 // 故此前安装(settings.json 已存在且该字段为空)也回退到内置默认,与首装/Android 端一致;
                 // 用户已保存的非空文本优先,不会被本回填覆盖。
+                // LIT-2:经唯一判据入口——文学能力包开关开时物化文学增强版(开关值已由上面
+                // 反序列化读出,此处直接用)。
                 if s.agent_system_prompt.0.trim().is_empty() {
-                    s.agent_system_prompt = RoleplayPromptConfig(default_roleplay_agent_prompt());
+                    s.agent_system_prompt = RoleplayPromptConfig(s.roleplay_default_prompt());
                 }
 
                 // 变量独立温度钳制到 0..=2.0;非法值(旧配置/越界)回退 None(沿用内置默认)

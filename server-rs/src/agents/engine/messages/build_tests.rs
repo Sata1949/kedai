@@ -13,7 +13,7 @@ use crate::parsing::assistant::AssistantVars;
 use crate::services::prompt_inject_service::PromptInjectConfig;
 use std::collections::HashMap;
 
-use super::build::build_llm_messages_with_position;
+use super::build::{build_llm_messages_with_position, LiteraryTexts};
 
 /// 构造带角色的世界书注入(6 层规范测试用)
 fn inj(role: &str, text: &str) -> WorldInjection {
@@ -49,6 +49,7 @@ fn prompt_order_golden_with_untrusted_boundaries() {
         &mut vars,
         &mut AssistantVars::new(),
         None,
+        LiteraryTexts::default(),
     );
     let system = &messages[0].content;
     assert!(
@@ -95,6 +96,7 @@ fn mvu_position_system_keeps_world_in_system() {
         &mut vars,
         &mut AssistantVars::new(),
         None,
+        LiteraryTexts::default(),
     );
     assert_eq!(msgs.len(), 4, "消息序列: {msgs:?}");
     assert!(
@@ -138,6 +140,7 @@ fn mvu_position_user_tail_moves_world_to_last_user_message() {
         &mut vars,
         &mut AssistantVars::new(),
         None,
+        LiteraryTexts::default(),
     );
     assert_eq!(msgs.len(), 4, "消息序列: {msgs:?}");
     assert!(
@@ -185,6 +188,7 @@ fn mvu_position_user_tail_with_custom_prompt() {
         &mut vars,
         &mut AssistantVars::new(),
         None,
+        LiteraryTexts::default(),
     );
     assert!(
         !msgs[0].content.contains("图书馆"),
@@ -224,6 +228,7 @@ fn preset_tail_appended_after_triggered_world() {
         &mut vars,
         &mut AssistantVars::new(),
         None,
+        LiteraryTexts::default(),
     );
     assert_eq!(msgs.len(), 2);
     let last = &msgs[1];
@@ -262,6 +267,7 @@ fn preset_tail_falls_back_to_system_without_user() {
         &mut vars,
         &mut AssistantVars::new(),
         None,
+        LiteraryTexts::default(),
     );
     assert_eq!(msgs.len(), 2, "system + assistant 开场白: {msgs:?}");
     assert!(
@@ -308,6 +314,7 @@ fn world_and_tail_role_injection() {
         &mut vars,
         &mut AssistantVars::new(),
         None,
+        LiteraryTexts::default(),
     );
     // system + 常驻assistant + 历史user(含激发user)+ 激发assistant + 预设尾部assistant
     assert_eq!(msgs.len(), 5, "消息序列: {msgs:?}");
@@ -369,6 +376,7 @@ fn reflect_advice_injected_before_preset_tail_after_triggered() {
         &mut vars,
         &mut AssistantVars::new(),
         None,
+        LiteraryTexts::default(),
     );
     assert_eq!(msgs.len(), 2, "system + user: {msgs:?}");
     let last = &msgs[1];
@@ -406,6 +414,7 @@ fn reflect_advice_assistant_before_preset_tail_assistant() {
         &mut vars,
         &mut AssistantVars::new(),
         None,
+        LiteraryTexts::default(),
     );
     // system + user + 建议(assistant) + 预设尾部(assistant)
     assert_eq!(msgs.len(), 4, "消息序列: {msgs:?}");
@@ -439,6 +448,7 @@ fn reflect_advice_falls_back_to_system_before_preset_tail() {
         &mut vars,
         &mut AssistantVars::new(),
         None,
+        LiteraryTexts::default(),
     );
     let sys = &msgs[0].content;
     let a_idx = sys.find("建议正文").unwrap();
@@ -498,6 +508,7 @@ fn build_prefix_case(
         vars,
         &mut AssistantVars::new(),
         None,
+        LiteraryTexts::default(),
     )
     .0
 }
@@ -551,6 +562,7 @@ fn probability_entries_do_not_perturb_system_prefix() {
             vars,
             &mut AssistantVars::new(),
             None,
+            LiteraryTexts::default(),
         )
         .0
     };
@@ -1076,6 +1088,7 @@ fn history_images_attach_by_index() {
         &mut vars,
         &mut AssistantVars::new(),
         None,
+        LiteraryTexts::default(),
     );
     // msgs = [system, user(带图), assistant, user(无图)]
     assert_eq!(msgs.len(), 4);

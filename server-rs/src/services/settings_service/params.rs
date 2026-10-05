@@ -466,6 +466,61 @@ pub fn default_roleplay_agent_prompt() -> String {
         .into()
 }
 
+/// 文学能力包的「文学增强纪律」段(角色扮演侧;LIT-2,2026-10-05)。
+///
+/// **单一出处**:① 缺省词增强版 [`default_literary_roleplay_agent_prompt`] 内嵌本段;
+/// ② 引擎内置兜底模板(`agents/engine/messages/build.rs`,用户清空提示词框路径)经装配层
+/// 把本段作为文本参数注入——build 层不读设置,故经参数传递而非直接引用(与 LIT-3 两段同款)。
+/// 文本必须同轮恒定(无时间戳/随机序),保前缀缓存假设;不写 `{{...}}` 宏(兜底路径不经宏展开)。
+pub const LITERARY_RP_ENHANCEMENT: &str = "\
+【文学增强纪律】
+在上述创作总纲之外,以下纪律同等生效:
+1. 视角与人称锚定:开篇先确定人称(第一 / 第三人称)与叙述距离,全篇保持一致;时态与叙事时间线不得漂移,回忆与当下之间要有可辨的界线。
+2. 反 AI 腔(禁用清单):\"不禁\"\"不由得\"\"心中一颤\"\"眼底闪过一丝……\"式套语;三项排比连用;先否后肯句式(\"不是……而是……\");结尾强行升华或总结全文;\"仿佛 / 似乎\"式空比喻;把情绪直接命名(如\"他感到悲伤\")。正例锚定:用具体动作、器物、身体反应与环境细节承载情绪,让读者自己读出来。
+3. 展示而非陈述:关键情绪与关系变化必须落到可观察的行为与对话上,不替读者下结论。
+4. 句式与节奏:长短句交错,段落长度参差;对话与描写按需配比,不连续堆叠对话,也不连续多段纯环境描写;相邻段落的起句方式避免雷同。
+5. 防复读与防代答:不得复述上文已写过的场景、比喻与对话;不得替用户角色说话、代做决定或推进其主观行动。
+6. 一致性与事实不回退:已确立的事实、称呼、设定、时间线与数值不得回退;人物声音(用词习惯、语速、口头禅、句式偏好)前后一致;角色不得知晓不该知道的信息。
+7. 收束与钩子:每次输出的结尾要留有余味与互动余地——新信息、悬念或关系变化,不写无信息量的收尾句。
+8. 篇幅纪律:按用户要求的篇幅执行(未要求时以完整推进一个事件为准);宁可把一个场景写透,不要罗列多个空洞场景。";
+
+/// 角色扮演缺省词的文学增强版(LIT-2):现行缺省词 + [`LITERARY_RP_ENHANCEMENT`]。
+/// 只在**缺省值**路径生效——用户保存过自定义文本时逐字优先(调用方判断,见
+/// [`RuntimeSettings::roleplay_default_prompt`])。
+pub fn default_literary_roleplay_agent_prompt() -> String {
+    format!(
+        "{}\n\n{}",
+        default_roleplay_agent_prompt(),
+        LITERARY_RP_ENHANCEMENT
+    )
+}
+
+/// 文学能力包的「文学写作任务增补」段(任务侧;LIT-2,Q5=(a):任务侧单独一份文学变体,
+/// 不逐字复用角色扮演文本)。约束同任务向默认词:含「任务执行智能体」字样、不得含
+/// `{{char}}` 等角色扮演宏(测试锁);不写 `{{...}}` 占位符。
+pub const LITERARY_TASK_ENHANCEMENT: &str = "\
+【文学写作任务增补】
+执行文学创作类任务(续写 / 润色 / 改写 / 人物声音校准等)时,在上述通用标准之外,以下纪律同样生效:
+1. 视角与人称锚定:动笔前先确定人称与叙述距离,全文保持一致;时态与叙事时间线不得漂移。
+2. 反 AI 腔(禁用清单):\"不禁\"\"不由得\"\"心中一颤\"式套语;三项排比连用;先否后肯句式(\"不是……而是……\");结尾强行升华;\"仿佛 / 似乎\"式空比喻;把情绪直接命名。正例锚定:用具体动作、物件、身体反应与对话承载情绪,让读者自己读出来。
+3. 展示而非陈述:关键情绪与关系变化落到可观察的行为与对话上,不替读者下结论。
+4. 句式与节奏:长短句交错,段落长度参差;对话与描写按需配比,相邻段落起句避免雷同。
+5. 防复读:不得复述已有正文或与之雷同的开头、结尾与比喻。
+6. 一致性与事实不回退:已确立的事实、称呼、设定与上文数值不得回退或矛盾;人物声音前后一致。
+7. 收束与钩子:段落 / 章节结尾要有推动力(悬念、新信息、关系变化),不写无信息量的收尾句。
+8. 篇幅纪律:按目标篇幅执行;宁可把一个场景写扎实,不要罗列多个空洞场景。";
+
+/// 任务侧文学变体(Q5=(a)):通用任务缺省词 + [`LITERARY_TASK_ENHANCEMENT`]。
+/// 只在任务的**缺省值**路径生效(用户自定义值逐字优先);与编码包同开时以编码模板优先
+/// (见 `for_mode` 的优先级注释)。
+pub fn default_literary_task_agent_prompt() -> String {
+    format!(
+        "{}\n\n{}",
+        default_task_agent_prompt(),
+        LITERARY_TASK_ENHANCEMENT
+    )
+}
+
 /// 角色扮演模式缺省反思提示词(deep / agent 模式的反思步骤用;空 = 走机械规则)。
 ///
 /// 与 Win 端调好的版本一致,使全新安装(含 Android 首装)开箱即有 LLM 质量判定,
@@ -505,6 +560,25 @@ pub const TASK_DEFAULT_TOP_P: f64 = 1.0;
 pub const TASK_DEFAULT_OUTPUT_TOKENS: u32 = 8192;
 
 impl RuntimeSettings {
+    /// 角色扮演**缺省词**的唯一判据入口(LIT-2):开关开 → 文学增强版,否则现行版。
+    /// 消费者两处——① `from_config`(新装物化默认值);② load 空值回填(`secret.rs`)。
+    /// 用户已保存的非空文本不经过本入口(逐字优先,见回填处的判据)。
+    pub fn roleplay_default_prompt(&self) -> String {
+        if self.literary_bundle_enabled {
+            default_literary_roleplay_agent_prompt()
+        } else {
+            default_roleplay_agent_prompt()
+        }
+    }
+
+    /// 引擎内置兜底模板(用户**清空**提示词框时的分段兜底)的文学增强段(LIT-2):
+    /// 开关开 → Some(段文本),否则 None。由装配层(`messages/context.rs`)取本值经参数
+    /// 传给 build 层——build 层保持无设置依赖(测试可直接注入字面文本)。
+    pub fn literary_rp_enhancement(&self) -> Option<&'static str> {
+        self.literary_bundle_enabled
+            .then_some(LITERARY_RP_ENHANCEMENT)
+    }
+
     /// 从环境配置构建默认设置
     pub fn from_config(cfg: &AppConfig) -> Self {
         let mut s = RuntimeSettings {
@@ -517,7 +591,9 @@ impl RuntimeSettings {
             default_top_p: cfg.default_top_p,
             default_max_tokens: cfg.default_max_tokens,
             max_context_tokens: cfg.default_max_context_tokens,
-            agent_system_prompt: RoleplayPromptConfig(default_roleplay_agent_prompt()),
+            // 缺省词经唯一判据入口物化(此处开关必为 false = 现行版;文学版由 load 回填
+            // 路径按用户已保存的开关值生效——出口唯一,杜绝第三份副本)
+            agent_system_prompt: RoleplayPromptConfig(String::new()),
             search_endpoint: DEFAULT_SEARCH_ENDPOINT.to_string(),
             mvu_vars_position: "system".to_string(),
             mvu_temperature: None,
@@ -589,6 +665,8 @@ impl RuntimeSettings {
         // 不播种则设置页与 API 会拿到空列表。内容与扁平字段一致,故与播种前行为等价;
         // 这里不调 normalize_connections:避免把 .env 里未规范化的地址在启动时就改写。
         s.seed_connections_from_flat();
+        // 角色扮演缺省词物化(经唯一判据入口;from_config 场景开关恒 false → 现行版)
+        s.agent_system_prompt = RoleplayPromptConfig(s.roleplay_default_prompt());
         s
     }
 
@@ -633,12 +711,16 @@ impl RuntimeSettings {
         // 直接继承会污染任务执行;None 注入内置任务向默认词,Some("") 尊重用户显式留空。
         // TaskPromptConfig → RoleplayPromptConfig 的显式构造是本隔离的唯一转换点(类型不同源,
         // 绕过本 match 的隐式继承无法通过编译)。
-        // 缺省词的二选一(2026-09-28 编码能力包):开关只影响**缺省值**——Some(v) 分支
-        // (用户自定义)逐字优先,与开关无关;要退回通用默认词,清空提示词框即可。
+        // 缺省词的二选一(2026-09-28 编码能力包;2026-10-05 LIT-2 增文学包):开关只影响
+        // **缺省值**——Some(v) 分支(用户自定义)逐字优先,与开关无关;要退回通用默认词,
+        // 清空提示词框即可。优先级 **coding > literary > general**:新增开关不得改变既有
+        // 开关用户的既有行为(两包同开时编码模板优先,有测试锁)。
         out.agent_system_prompt = match &ov.agent_system_prompt {
             Some(v) => RoleplayPromptConfig(v.0.clone()),
             None => RoleplayPromptConfig(if out.task_coding_bundle_enabled {
                 default_coding_task_agent_prompt()
+            } else if out.task_literary_bundle_enabled {
+                default_literary_task_agent_prompt()
             } else {
                 default_task_agent_prompt()
             }),

@@ -23,7 +23,7 @@ use serde_json::Value;
 use super::{
     append_memory_notice, apply_inject_insertions, build_llm_messages_with_position,
     insert_memory_slot, insert_recall_slot, insert_summary_slot, parse_inject_insertion,
-    trim_to_context, InjectAt, InjectInsertion,
+    trim_to_context, InjectAt, InjectInsertion, LiteraryTexts,
 };
 
 /// 阶段 2「上下文收集」的只读产物:字符卡/历史/世界书/设置快照等,
@@ -42,6 +42,9 @@ pub(in crate::agents::engine) struct CollectedCtx {
     /// 历史压缩摘要(可空):存在时拼入 system 作为早期历史回顾,替代被压缩的原文段
     pub(in crate::agents::engine) history_summary: Option<String>,
     pub(in crate::agents::engine) custom_prompt: Option<String>,
+    /// 文学能力包(LIT-2):开关开时引擎内置兜底模板的文学增强段(单一出处常量;
+    /// build 层不读设置,由本层按扁平快照取好、经参数传入)。
+    pub(in crate::agents::engine) literary_default_suffix: Option<&'static str>,
     pub(in crate::agents::engine) inject_snapshot: PromptInjectConfig,
     pub(in crate::agents::engine) reflect_prompt: String,
     pub(in crate::agents::engine) reflect_advice_supplement: String,
@@ -388,6 +391,10 @@ impl AgentEngine {
         } else {
             Some(agent_system_prompt)
         };
+        // 文学能力包(LIT-2):开关开时,内置兜底模板(用户清空提示词框路径)追加文学增强段。
+        // 判据与文本的单一出处都在设置层(`RuntimeSettings::literary_rp_enhancement` + 常量),
+        // 本层只做取值与传参——build 层保持无设置依赖。
+        let literary_default_suffix = settings_snap.literary_rp_enhancement();
         // 反思提示词(空 = 机械规则检查;非空 = 反思步骤调用 LLM 判定)
         let reflect_prompt = settings_snap.reflect_prompt.clone();
         // 反思失败建议的补充说明(可选;主体建议由引擎自动生成,见 reflect_integration):
@@ -426,6 +433,7 @@ impl AgentEngine {
             history_images,
             history_summary,
             custom_prompt,
+            literary_default_suffix,
             inject_snapshot,
             reflect_prompt,
             reflect_advice_supplement,
@@ -474,6 +482,11 @@ impl AgentEngine {
             rctx.session_vars,
             rctx.assistant_vars,
             Some(&mut *scopes_guard),
+            // 文学能力包(LIT-2):兜底模板增强段(开关关为 None,行为与加参数前一致);
+            // 位置 4 / 位置 0 两段(LIT-3)在后续提交接入本结构
+            LiteraryTexts {
+                default_suffix: ctx.literary_default_suffix,
+            },
         );
         drop(scopes_guard);
         // 会话变量(session_vars 表):宏 {{setvar}}/{{addvar}} 写入、{{getvar}} 读取;

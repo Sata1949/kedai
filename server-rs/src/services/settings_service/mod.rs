@@ -28,7 +28,8 @@ pub use connection::{
 };
 pub use connector_pool::{connection_label, ConnectorPool};
 pub use params::{
-    default_coding_task_agent_prompt, default_roleplay_agent_prompt, default_task_agent_prompt,
+    default_coding_task_agent_prompt, default_literary_roleplay_agent_prompt,
+    default_literary_task_agent_prompt, default_roleplay_agent_prompt, default_task_agent_prompt,
     task_idle_floor_secs, McpServerConfig, ModeSettings, RoleplayPromptConfig, TaskPromptConfig,
     TASK_DEFAULT_OUTPUT_TOKENS, TASK_DEFAULT_TEMPERATURE, TASK_DEFAULT_TOP_P,
 };
@@ -1347,9 +1348,8 @@ mod tests {
         );
     }
 
-    /// 文学能力包双开关骨架(LIT-1,2026-10-05):默认关、旧配置零迁移、覆盖层三态、
-    /// 角色扮演侧不受任务开关影响。**本提交是纯骨架**——开关全开时提示词无任何行为变化
-    /// (消费点在 LIT-2 缺省词 / LIT-3 注入段,届时按下新行为更新本断言的第三段)。
+    /// 文学能力包双开关骨架(LIT-1,2026-10-05;LIT-2 起任务侧开关在缺省词二选一处生效):
+    /// 默认关、旧配置零迁移、覆盖层三态、角色扮演侧不受任务开关影响。
     #[test]
     fn literary_bundle_switch_skeleton() {
         // 覆盖层 serde 三态:缺字段/null → None(沿用扁平);None 序列化省略字段
@@ -1392,15 +1392,15 @@ mod tests {
             "开关全关时任务缺省词必须是通用版"
         );
 
-        // 开关全开(扁平 + 覆盖层):LIT-1 提交内**无消费点**,缺省词不因本开关改变
+        // 开关全开(扁平 + 覆盖层):任务侧缺省词改取文学变体(LIT-2 生效;优先级见下条用例)
         let mut s = RuntimeSettings::from_config(&cfg);
         s.literary_bundle_enabled = true;
         s.task_literary_bundle_enabled = true;
         s.task.task_literary_bundle_enabled = Some(true);
         assert_eq!(
             s.for_mode(AppMode::Task).agent_system_prompt.0,
-            default_task_agent_prompt(),
-            "LIT-1 骨架提交内开关无消费点:任务缺省词不得改变"
+            default_literary_task_agent_prompt(),
+            "任务侧开关开 → 任务缺省词取文学变体(LIT-2)"
         );
         // 角色扮演侧全程不经任务开关:for_mode(Roleplay) 与扁平值逐字段相等
         assert_eq!(
@@ -1430,6 +1430,101 @@ mod tests {
         assert!(
             s3.for_mode(AppMode::Task).task_literary_bundle_enabled,
             "Some(true) 应等价启用"
+        );
+    }
+
+    /// 文学包缺省词文本约束与优先级(LIT-2,2026-10-05):
+    /// ① 角色扮演文学增强版 = 现行缺省词 + 增强段(前缀逐字节相同,保「开关关逐字等同」);
+    /// ② 任务向变体含「任务执行智能体」、不含 `{{char}}`(既有测试锁同款约束);
+    /// ③ 优先级 coding > literary > general(新增开关不得改变既有开关用户的既有行为);
+    /// ④ 用户自定义值逐字优先(开关只影响缺省值);
+    /// ⑤ load 空值回填经唯一判据入口:开关开物化文学增强版、关则现行版(对照)。
+    #[test]
+    fn literary_default_prompts_text_constraints_and_priority() {
+        // ① 宏占位符齐全 + 增强段存在 + 现行词为逐字节前缀
+        let rp_lit = default_literary_roleplay_agent_prompt();
+        for ph in [
+            "{{char}}",
+            "{{personality}}",
+            "{{scenario}}",
+            "{{world_info}}",
+        ] {
+            assert!(rp_lit.contains(ph), "文学增强版必须保留占位符 {ph}");
+        }
+        assert!(rp_lit.contains("【文学增强纪律】"), "应含增强段标题");
+        assert!(
+            rp_lit.starts_with(&default_roleplay_agent_prompt()),
+            "文学增强版 = 现行缺省词前缀 + 增强段"
+        );
+
+        // ② 任务向变体约束(与 default_task_agent_prompt 同款测试锁)
+        let task_lit = default_literary_task_agent_prompt();
+        assert!(
+            task_lit.contains("任务执行智能体"),
+            "任务向变体必须保留身份字样:{task_lit}"
+        );
+        assert!(!task_lit.contains("{{char}}"), "任务向变体不得含角色扮演宏");
+        assert!(task_lit.contains("【文学写作任务增补】"));
+
+        // ③ 优先级:coding 与 literary 同开 → 编码模板优先;仅文学开 → 文学变体
+        let cfg = test_cfg();
+        let mut s = RuntimeSettings::from_config(&cfg);
+        s.task_coding_bundle_enabled = true;
+        s.task_literary_bundle_enabled = true;
+        assert_eq!(
+            s.for_mode(AppMode::Task).agent_system_prompt.0,
+            default_coding_task_agent_prompt(),
+            "两包同开时编码模板优先(既有开关用户行为不变)"
+        );
+        s.task_coding_bundle_enabled = false;
+        assert_eq!(
+            s.for_mode(AppMode::Task).agent_system_prompt.0,
+            default_literary_task_agent_prompt(),
+            "仅文学包开 → 任务缺省词取文学变体"
+        );
+
+        // ④ 用户自定义值逐字优先(开关只影响缺省值)
+        s.task.agent_system_prompt = Some(TaskPromptConfig("我的文学任务词".into()));
+        assert_eq!(
+            s.for_mode(AppMode::Task).agent_system_prompt.0,
+            "我的文学任务词",
+            "用户自定义提示词必须逐字优先"
+        );
+
+        // ⑤ load 空值回填走唯一判据入口(存量缺省路径)
+        let dir = tmp_dir("literary-default-backfill");
+        let mut v = serde_json::to_value(RuntimeSettings::from_config(&cfg)).unwrap();
+        {
+            let obj = v.as_object_mut().unwrap();
+            obj.insert("agent_system_prompt".into(), serde_json::json!(""));
+            obj.insert("literary_bundle_enabled".into(), serde_json::json!(true));
+        }
+        std::fs::write(
+            dir.join("settings.json"),
+            serde_json::to_string_pretty(&v).unwrap(),
+        )
+        .unwrap();
+        let loaded = RuntimeSettings::load(&dir, &cfg);
+        assert_eq!(
+            loaded.agent_system_prompt.0,
+            default_literary_roleplay_agent_prompt(),
+            "开关开 + 空提示词 → 回填文学增强版"
+        );
+
+        // 对照:同一份配置开关关 → 现行版逐字(开关关逐字等同的回归钉子)
+        v.as_object_mut()
+            .unwrap()
+            .insert("literary_bundle_enabled".into(), serde_json::json!(false));
+        std::fs::write(
+            dir.join("settings.json"),
+            serde_json::to_string_pretty(&v).unwrap(),
+        )
+        .unwrap();
+        let loaded2 = RuntimeSettings::load(&dir, &cfg);
+        assert_eq!(
+            loaded2.agent_system_prompt.0,
+            default_roleplay_agent_prompt(),
+            "开关关 → 回填现行缺省词(逐字不变)"
         );
     }
 
