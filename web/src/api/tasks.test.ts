@@ -10,6 +10,7 @@ import {
   getTaskChangeDiff,
   getTaskChanges,
   getTaskChangesPatch,
+  getTaskEvents,
   getTaskUsageTotal,
   rollbackAllTaskChanges,
   rollbackTaskChange,
@@ -138,6 +139,28 @@ describe('api/tasks REST 封装', () => {
           status: 200,
           headers: { 'Content-Type': 'text/plain; charset=utf-8' },
         });
+      }
+      // PRODCAP-1 事件补拉:帧与 SSE 同形(含 seq/at)
+      if (url.includes('/api/tasks/t1/events?') && method === 'GET') {
+        return json({
+          events: [
+            {
+              type: 'task',
+              task_id: 't1',
+              kind: 'status',
+              status: 'running',
+              seq: 4,
+              at: '2026-10-05T00:00:00.000Z',
+            },
+          ],
+          truncated: false,
+        });
+      }
+      if (url.includes('/api/tasks/t3/events?') && method === 'GET') {
+        return json({ events: [], truncated: true });
+      }
+      if (url.includes('/api/tasks/a%2Fb/events?') && method === 'GET') {
+        return json({ events: [], truncated: false });
       }
       return json({ error: `未 mock 的请求: ${method} ${url}` }, 404);
     });
@@ -551,6 +574,30 @@ describe('api/tasks REST 封装', () => {
     expect(call?.[1]?.method).toBe('POST');
   });
 
+  // ==================== 任务事件补拉端点(PRODCAP-1)====================
+
+  it('getTaskEvents:after 必带、limit 可选;事件与 truncated 原样带出', async () => {
+    const pull = await getTaskEvents('t1', 3);
+    expect(pull.truncated).toBe(false);
+    expect(pull.events[0]).toMatchObject({ kind: 'status', seq: 4, at: '2026-10-05T00:00:00.000Z' });
+
+    const truncated = await getTaskEvents('t3', 0, 500);
+    expect(truncated.truncated).toBe(true);
+    expect(truncated.events).toHaveLength(0);
+
+    const urls = vi.mocked(fetch).mock.calls.map(([input]) => String(input));
+    expect(urls, `after 必带、limit 仅在给出时拼接:${urls.join(' , ')}`).toContain(
+      '/api/tasks/t1/events?after=3',
+    );
+    expect(urls).toContain('/api/tasks/t3/events?after=0&limit=500');
+  });
+
+  it('getTaskEvents:id 整体编码(与其余任务端点同款)', async () => {
+    await getTaskEvents('a/b', 0);
+    const urls = vi.mocked(fetch).mock.calls.map(([input]) => String(input));
+    expect(urls).toContain('/api/tasks/a%2Fb/events?after=0');
+  });
+
 });
 
 describe('api/tasks streamTaskEvents(SSE 订阅)', () => {
@@ -708,5 +755,16 @@ describe('api/tasks 形状闸门', () => {
       .mockResolvedValueOnce(json({ token: 't' }))
       .mockResolvedValueOnce(json({ ok: true }));
     await expect(getTaskChangeDiff('t1', 'a.rs')).rejects.toThrow('任务文件变更 diff响应格式异常');
+  });
+
+  it('GET /tasks/:id/events 缺 events 数组 / 缺 truncated 布尔时抛错(PRODCAP-1)', async () => {
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(json({ token: 't' }))
+      .mockResolvedValueOnce(json({ truncated: false }));
+    await expect(getTaskEvents('t1', 0)).rejects.toThrow('任务事件补拉响应格式异常');
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(json({ token: 't' }))
+      .mockResolvedValueOnce(json({ events: [] }));
+    await expect(getTaskEvents('t1', 0)).rejects.toThrow('任务事件补拉响应格式异常');
   });
 });

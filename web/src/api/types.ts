@@ -120,6 +120,17 @@ export type TaskEvent = {
   at?: string;
 };
 
+/**
+ * 任务事件补拉响应(PRODCAP-1;`GET /api/tasks/{id}/events?after=&limit=`)。
+ * `events` 元素与 SSE 帧**同形**(可直接走同一分发,不搞第二套形状),按 `seq` 升序;
+ * `truncated=true` 表示请求起点早于保留窗口(每任务 2000 条)——更早事件已被清理,
+ * 前端接受并前进,不把它当失败。
+ */
+export type TaskEventsPull = {
+  events: TaskEvent[];
+  truncated: boolean;
+};
+
 export type SseEvent =
   | { type: 'token'; text: string }
   | { type: 'step'; step: string; detail?: string; index?: number; total?: number }

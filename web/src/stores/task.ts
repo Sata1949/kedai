@@ -283,6 +283,19 @@ export const useTaskStore = defineStore('app.task', () => {
   /** 兜底轮询定时器(SSE 断开期间) */
   let taskPollTimer: ReturnType<typeof setInterval> | null = null;
 
+  // ===== 事件断点记账(PRODCAP-1:seq 缺口检测 + 补拉) =====
+  /**
+   * 每任务最近一次已处理的事件 seq(非响应式,内存态)。
+   * 断线重连 / 通道拥挤(Lagged)造成的漏帧由它判定:`seq > lastSeq + 1` 即缺口。
+   * **不持久化**:应用重载后详情本就从 REST 全量重建,持久化 lastSeq 只会引入
+   * 「补拉起点与新会话状态不一致」的复杂度;跨进程续传不在本批语义内。
+   */
+  const lastSeqByTask = new Map<string, number>();
+  /** 待补拉的起点(每任务一条;在飞补拉收尾时消费——见 pullTaskEvents 的合并语义) */
+  const pullAfter = new Map<string, number>();
+  /** 有补拉在飞的 task_id 集合(缺口密集时不叠加并发请求) */
+  const pullRunning = new Set<string>();
+
   function persistAppMode(): void {
     try {
       localStorage.setItem(APP_MODE_KEY, appMode.value);
@@ -568,9 +581,76 @@ export const useTaskStore = defineStore('app.task', () => {
 
   // ===== 任务事件 SSE 订阅(WP5) =====
 
-  /** 事件分发:按 kind 驱动局部刷新;所有事件原样透传事件监控面板(DevTools) */
+  /**
+   * 断点记账(PRODCAP-1):维护每任务 `lastSeq`;发现 `seq > lastSeq + 1` 即缺口
+   * ——补拉缺失区间(服务端权威行),缺口本身留一行可诊断告警。
+   * `seq` 缺失(旧服务端 / delta 暂态帧)不参与判定,分发照旧。
+   */
+  function trackEventSeq(ev: api.TaskEvent): void {
+    if (typeof ev.seq !== 'number') return;
+    const prev = lastSeqByTask.get(ev.task_id);
+    if (prev !== undefined && ev.seq > prev + 1) {
+      console.warn(
+        `[kedai] 任务事件缺口(任务 ${ev.task_id}:已见 seq=${prev},收到 seq=${ev.seq}),开始补拉`,
+      );
+      void pullTaskEvents(ev.task_id, prev);
+    }
+    if (prev === undefined || ev.seq > prev) lastSeqByTask.set(ev.task_id, ev.seq);
+  }
+
+  /**
+   * 断点补拉(PRODCAP-1):从 `after` 起取该任务的权威事件,逐帧走**与实时帧相同**的分发。
+   * 并发合并:缺口密集时同任务的多个起点合并为更早的那个,在飞请求收尾后再补一轮,
+   * 不叠加并发请求;补拉失败不重试(下一次缺口 / 重连补偿会再触发),只留告警。
+   * `truncated=true`(起点早于保留窗口)记一行 warn 后**接受并前进**——更早的事件
+   * 确实已被清理,装作无事或反复重试都更糟。
+   */
+  async function pullTaskEvents(taskId: string, after: number): Promise<void> {
+    const queued = pullAfter.get(taskId);
+    pullAfter.set(taskId, queued === undefined ? after : Math.min(queued, after));
+    if (pullRunning.has(taskId)) return; // 在飞收尾时会消费新起点
+    pullRunning.add(taskId);
+    try {
+      let start: number | undefined;
+      while ((start = pullAfter.get(taskId)) !== undefined) {
+        pullAfter.delete(taskId);
+        let events: api.TaskEvent[];
+        try {
+          const pull = await api.getTaskEvents(taskId, start);
+          if (pull.truncated) {
+            console.warn(
+              `[kedai] 任务事件保留窗口已截断(任务 ${taskId},起点 seq=${start}),更早的进度事件不可补回`,
+            );
+          }
+          events = pull.events;
+        } catch (e) {
+          console.warn('[kedai] 任务事件补拉失败(等待下一次缺口或重连补偿)', e);
+          break;
+        }
+        for (const ev of events) {
+          const last = lastSeqByTask.get(taskId);
+          if (typeof ev.seq === 'number' && (last === undefined || ev.seq > last)) {
+            lastSeqByTask.set(taskId, ev.seq);
+          }
+          // 补拉帧不再重复上报事件面板(reportChatEvent 只反映实时流),其余分发逐帧同款
+          dispatchTaskEvent(ev);
+        }
+      }
+    } finally {
+      pullRunning.delete(taskId);
+    }
+  }
+
+  /** 事件分发:按 kind 驱动局部刷新;所有事件原样透传事件监控面板(DevTools)。
+   *  先做断点记账(PRODCAP-1),再走各 kind 的刷新分支。 */
   function onTaskEvent(ev: api.TaskEvent): void {
     reportChatEvent(ev);
+    trackEventSeq(ev);
+    dispatchTaskEvent(ev);
+  }
+
+  /** 一条任务事件的刷新分发(实时帧与补拉帧共用同一开关) */
+  function dispatchTaskEvent(ev: api.TaskEvent): void {
     switch (ev.kind) {
       case 'created':
         void loadTasks();
@@ -634,6 +714,9 @@ export const useTaskStore = defineStore('app.task', () => {
         break;
       case 'deleted':
         void loadTasks();
+        // PRODCAP-1:任务已删,其 seq 断点记账一并失效(级联删除了事件行,再补拉只会空转)
+        lastSeqByTask.delete(ev.task_id);
+        pullAfter.delete(ev.task_id);
         if (currentTaskId.value === ev.task_id) {
           currentTaskId.value = null;
           currentTask.value = null;
@@ -684,6 +767,11 @@ export const useTaskStore = defineStore('app.task', () => {
       void loadTasks();
       if (currentTaskId.value) void loadTaskDetail(currentTaskId.value);
       void loadGlobalTaskUsage();
+      // 断点补偿(PRODCAP-1):断开期间丢的事件按 seq 缺口补回。loadTaskDetail 给的是
+      // 详情快照,这里把「事件语义」(进度 / 台账刷新链)补齐——两者互补,都保留。
+      const resumeTask = currentTaskId.value;
+      const resumeAfter = resumeTask ? lastSeqByTask.get(resumeTask) : undefined;
+      if (resumeTask && resumeAfter !== undefined) void pullTaskEvents(resumeTask, resumeAfter);
     }, CONNECT_SETTLE_MS);
   }
 

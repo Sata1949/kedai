@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
 import { useTaskStore } from './task';
 import { useUiPrefsStore } from './uiPrefs';
-import type { TaskChangeDiff, TaskChangeRollback, TaskChangesPayload, TaskDetail, TaskEvent, TaskFileChange, TaskLlmCall, TaskRecord, TaskStatus, TaskStep, TaskUsageTotal } from '../api';
+import type { TaskChangeDiff, TaskChangeRollback, TaskChangesPayload, TaskDetail, TaskEvent, TaskEventsPull, TaskFileChange, TaskLlmCall, TaskRecord, TaskStatus, TaskStep, TaskUsageTotal } from '../api';
 
 // WP5 重写:任务事件 SSE 订阅驱动刷新(取代旧 1s 轮询)。
 // 覆盖:事件分发(created/status/plan/subtask/usage/deleted)、终态补全局累计、
@@ -60,6 +60,14 @@ const h = vi.hoisted(() => ({
   followupCalls: [] as Array<{ id: string; content: string; mode?: string }>,
   /** planChatTask 收到的 (id, message) 参数序列(批次 R2b 规划对话断言用) */
   planChatCalls: [] as Array<{ id: string; message: string }>,
+  /** PRODCAP-1:getTaskEvents 收到的 (taskId, after) 序列(seq 缺口补拉断言用) */
+  pullCalls: [] as Array<{ taskId: string; after: number }>,
+  /** PRODCAP-1:补拉返回的事件序列(默认空;测试按需设置) */
+  pullEvents: [] as TaskEvent[],
+  /** PRODCAP-1:补拉响应是否标记窗口截断 */
+  pullTruncated: false,
+  /** PRODCAP-1:true 时补拉抛错(验证失败不重试、只留告警) */
+  pullFail: false,
 }));
 
 vi.mock('../api', async (importOriginal) => {
@@ -91,6 +99,11 @@ vi.mock('../api', async (importOriginal) => {
       h.callsFetchCount += 1;
       if (h.callsFail) throw new Error('调用记录加载失败');
       return [makeCall(taskId)];
+    }),
+    getTaskEvents: vi.fn(async (taskId: string, after: number): Promise<TaskEventsPull> => {
+      h.pullCalls.push({ taskId, after });
+      if (h.pullFail) throw new Error('补拉失败');
+      return { events: h.pullEvents, truncated: h.pullTruncated };
     }),
     getTaskChanges: vi.fn(async (taskId: string): Promise<TaskChangesPayload> => {
       h.changesFetchCount += 1;
@@ -1256,6 +1269,131 @@ describe('任务文件变更(批次 4c)', () => {
     await flush();
     expect(store.taskFileChanges).toHaveLength(0);
     expect(store.taskChangesUndected).toContain('后扫描');
+    store.stopTaskEvents();
+  });
+});
+
+describe('任务事件断点补拉(PRODCAP-1:seq 缺口检测 + 补拉)', () => {
+  beforeEach(() => {
+    memStorage.clear();
+    setActivePinia(createPinia());
+    h.subscribeCalls = 0;
+    h.closeCalls = 0;
+    h.listFetchCount = 0;
+    h.detailFetchCount = 0;
+    h.usageFetchCount = 0;
+    h.pullCalls = [];
+    h.pullEvents = [];
+    h.pullTruncated = false;
+    h.pullFail = false;
+    h.emitEvent = null;
+    h.emitClose = null;
+    h.backendStatus = 'pending';
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('seq 缺口触发补拉(after=已见 seq);补拉帧走同一分发并推进断点', async () => {
+    const store = useTaskStore();
+    store.appMode = 'task';
+    store.startTaskEvents();
+    await store.selectTask('t1');
+
+    // 首见 seq=3:无前值,不补拉(「中途进入」不是缺口)
+    h.emitEvent!({ type: 'task', task_id: 't1', kind: 'status', status: 'running', seq: 3 });
+    await flush();
+    expect(h.pullCalls).toEqual([]);
+
+    // 跳到 seq=5:缺口 → 以 after=3 补拉;补拉帧(seq=4)按同一分发刷新详情
+    const baseDetail = h.detailFetchCount;
+    h.backendStatus = 'running';
+    h.pullEvents = [{ type: 'task', task_id: 't1', kind: 'status', status: 'running', seq: 4 }];
+    h.emitEvent!({ type: 'task', task_id: 't1', kind: 'status', status: 'running', seq: 5 });
+    await flush();
+    expect(h.pullCalls).toEqual([{ taskId: 't1', after: 3 }]);
+    expect(h.detailFetchCount, '补拉帧应走同一分发(刷新详情)').toBeGreaterThan(baseDetail);
+
+    // 连续 seq=6:不再补拉;重复 seq=6:同样不补拉
+    h.emitEvent!({ type: 'task', task_id: 't1', kind: 'status', status: 'running', seq: 6 });
+    await flush();
+    h.emitEvent!({ type: 'task', task_id: 't1', kind: 'status', status: 'running', seq: 6 });
+    await flush();
+    expect(h.pullCalls).toHaveLength(1);
+    store.stopTaskEvents();
+  });
+
+  it('seq 缺失(旧服务端 / delta 暂态帧)不参与断点判定', async () => {
+    const store = useTaskStore();
+    store.appMode = 'task';
+    store.startTaskEvents();
+    await store.selectTask('t1');
+
+    h.emitEvent!({ type: 'task', task_id: 't1', kind: 'delta', detail: '字' });
+    h.emitEvent!({ type: 'task', task_id: 't1', kind: 'status', status: 'running' });
+    await flush();
+    expect(h.pullCalls).toEqual([]);
+    store.stopTaskEvents();
+  });
+
+  it('重连 settle 后按上次 lastSeq 补拉当前任务(断线补偿)', async () => {
+    vi.useFakeTimers();
+    const store = useTaskStore();
+    store.appMode = 'task';
+    store.startTaskEvents();
+    await vi.advanceTimersByTimeAsync(0);
+    await store.selectTask('t1');
+
+    h.emitEvent!({ type: 'task', task_id: 't1', kind: 'status', status: 'running', seq: 7 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.pullCalls).toEqual([]);
+
+    // 断线 → 1s 后退避重连 → settle(1500ms)触发补偿
+    h.emitClose!(new Error('network down'));
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(1600);
+    expect(h.pullCalls, '重连补偿应带上次 lastSeq').toContainEqual({ taskId: 't1', after: 7 });
+    store.stopTaskEvents();
+  });
+
+  it('truncated=true 记 warn 但照常分发(接受并前进,不反复重试)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const store = useTaskStore();
+    store.appMode = 'task';
+    store.startTaskEvents();
+    await store.selectTask('t1');
+
+    h.emitEvent!({ type: 'task', task_id: 't1', kind: 'status', status: 'running', seq: 2 });
+    await flush();
+    h.pullTruncated = true;
+    h.backendStatus = 'done';
+    h.pullEvents = [{ type: 'task', task_id: 't1', kind: 'status', status: 'done', seq: 2001 }];
+    h.emitEvent!({ type: 'task', task_id: 't1', kind: 'status', status: 'done', seq: 2003 });
+    await flush();
+    expect(h.pullCalls).toEqual([{ taskId: 't1', after: 2 }]);
+    expect(
+      warn.mock.calls.some((c) => String(c[0]).includes('保留窗口已截断')),
+      '窗口截断应有可诊断告警',
+    ).toBe(true);
+    warn.mockRestore();
+    store.stopTaskEvents();
+  });
+
+  it('补拉失败只留告警:不重试、不抛错,等下一次缺口 / 重连补偿', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const store = useTaskStore();
+    store.appMode = 'task';
+    store.startTaskEvents();
+    await store.selectTask('t1');
+
+    h.pullFail = true;
+    h.emitEvent!({ type: 'task', task_id: 't1', kind: 'status', status: 'running', seq: 2 });
+    h.emitEvent!({ type: 'task', task_id: 't1', kind: 'status', status: 'running', seq: 4 });
+    await flush();
+    expect(h.pullCalls, '一次缺口一次尝试,不自动重试').toHaveLength(1);
+    expect(warn.mock.calls.some((c) => String(c[0]).includes('补拉失败'))).toBe(true);
+    warn.mockRestore();
     store.stopTaskEvents();
   });
 });

@@ -5,7 +5,7 @@
 import { BASE, authorizedFetch, request, requestText } from './client';
 import { requireArrayField, requireBoolField, requireObject, requireObjectField, requireStringField } from './shape';
 import { pumpSseFrames, toApiError } from './stream';
-import type { TaskApproveExecMode, TaskChangeDiff, TaskChangeRollback, TaskChangeRollbackAll, TaskChangeRollbackItem, TaskChangesPayload, TaskDetail, TaskEvent, TaskFileChange, TaskLlmCall, TaskRecord, TaskRunMode, TaskStep, TaskUsageTotal } from './types';
+import type { TaskApproveExecMode, TaskChangeDiff, TaskChangeRollback, TaskChangeRollbackAll, TaskChangeRollbackItem, TaskChangesPayload, TaskDetail, TaskEvent, TaskEventsPull, TaskFileChange, TaskLlmCall, TaskRecord, TaskRunMode, TaskStep, TaskUsageTotal } from './types';
 
 /** 读取任务列表(最新在前) */
 export async function listTasks(): Promise<TaskRecord[]> {
@@ -176,6 +176,29 @@ export async function getTaskUsageTotal(): Promise<TaskUsageTotal> {
 export async function getTaskCalls(taskId: string): Promise<TaskLlmCall[]> {
   const data = await request<unknown>(`/tasks/${encodeURIComponent(taskId)}/calls`);
   return requireArrayField<TaskLlmCall>(data, 'calls', '任务调用记录');
+}
+
+/**
+ * 任务事件补拉(PRODCAP-1;`GET /api/tasks/{id}/events?after=&limit=`)。
+ * 无流场景的权威来源:前端检测到 `seq` 缺口 / 重连补偿时调用。
+ * `events` 元素与 SSE 帧**同形**(含 `seq`/`at`),可直接走同一分发;
+ * `truncated=true` 表示起点早于保留窗口(每任务 2000 条),更早事件已被清理——
+ * 明确告知而不是假装「没有更多」,调用方记一行日志后接受并前进。
+ */
+export async function getTaskEvents(
+  taskId: string,
+  after: number,
+  limit?: number,
+): Promise<TaskEventsPull> {
+  const qs = new URLSearchParams({ after: String(after) });
+  if (limit !== undefined) qs.set('limit', String(limit));
+  const data = await request<unknown>(
+    `/tasks/${encodeURIComponent(taskId)}/events?${qs.toString()}`,
+  );
+  const payload = requireObject<TaskEventsPull>(data, '任务事件补拉');
+  requireArrayField<TaskEvent>(data, 'events', '任务事件补拉');
+  requireBoolField(data, 'truncated', '任务事件补拉');
+  return payload;
 }
 
 /**
