@@ -109,12 +109,7 @@ impl TaskService {
             .query_row(
                 "SELECT MIN(seq), MAX(seq) FROM task_events WHERE task_id = ?1",
                 params![task_id],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<i64>>(0)?,
-                        row.get::<_, Option<i64>>(1)?,
-                    ))
-                },
+                |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?)),
             )
             .ok()
             .and_then(|(min, max)| min.zip(max));
@@ -139,7 +134,11 @@ impl TaskService {
             if kind.is_none() {
                 // 只有本进程写入过的 kind 才会进表;读不出枚举 = 数据被外部改动或版本回退,
                 // 属真实异常而非噪声(照仓内「绝不静默放过」纪律留痕),该帧仍原样下发。
-                tracing::warn!(task_id = task_id, kind = kind_wire, "任务事件分类无法识别,按未知分类下发");
+                tracing::warn!(
+                    task_id = task_id,
+                    kind = kind_wire,
+                    "任务事件分类无法识别,按未知分类下发"
+                );
             }
             let status_wire: Option<String> = row.get(3)?;
             Ok(SseEvent::Task {
@@ -660,7 +659,11 @@ mod tests {
         .expect("建任务行");
 
         // 三条:seq 1/2/3
-        for detail in ["任务已创建", "任务状态更新为 running", "执行计划已更新(共 1 步)"] {
+        for detail in [
+            "任务已创建",
+            "任务状态更新为 running",
+            "执行计划已更新(共 1 步)",
+        ] {
             TaskService::persist_event(
                 &conn,
                 "t1",
@@ -687,7 +690,11 @@ mod tests {
         // ① after=1 → 只要 2/3,升序,且帧与广播同形(含 seq/at 与逐字字段)
         let (events, truncated) = TaskService::scan_events(&conn, "t1", 1, 100);
         assert!(!truncated, "起点在窗口内不应标截断");
-        assert_eq!(seqs_of(&events), vec![2, 3], "应按 seq 升序且只回 after 之后的行");
+        assert_eq!(
+            seqs_of(&events),
+            vec![2, 3],
+            "应按 seq 升序且只回 after 之后的行"
+        );
         let Some(SseEvent::Task {
             kind,
             detail,
@@ -730,9 +737,16 @@ mod tests {
         }
         let (events, truncated) =
             TaskService::scan_events(&conn, "t1", 0, EVENTS_KEEP_PER_TASK as usize);
-        assert!(truncated, "起点早于保留窗口应显式标记(不得假装「没有更多」)");
+        assert!(
+            truncated,
+            "起点早于保留窗口应显式标记(不得假装「没有更多」)"
+        );
         assert_eq!(events.len(), EVENTS_KEEP_PER_TASK as usize);
-        assert_eq!(seqs_of(&events).first(), Some(&2), "窗口删除后首条应为 seq=2");
+        assert_eq!(
+            seqs_of(&events).first(),
+            Some(&2),
+            "窗口删除后首条应为 seq=2"
+        );
 
         // ⑤ 恰在窗口边缘(after+1 == 最小 seq)= 无缺口,不标截断
         let (events, truncated) = TaskService::scan_events(&conn, "t1", 1, 10);

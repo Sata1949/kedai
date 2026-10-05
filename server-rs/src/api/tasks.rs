@@ -281,7 +281,11 @@ pub async fn events(
                 history = h;
             }
             Err(e) => {
-                tracing::warn!(task_id = tid.as_str(), error = e, "任务事件回放读取失败,仅续实时流")
+                tracing::warn!(
+                    task_id = tid.as_str(),
+                    error = e,
+                    "任务事件回放读取失败,仅续实时流"
+                )
             }
         }
     }

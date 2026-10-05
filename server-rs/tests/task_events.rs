@@ -484,7 +484,8 @@ async fn task_solo_offers_bash_tool() {
 async fn wait_task_terminal(app: &axum::Router, task_id: &str) -> Value {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
-        let (status, json) = send_json(app, "GET", &format!("/api/tasks/{task_id}"), json!({})).await;
+        let (status, json) =
+            send_json(app, "GET", &format!("/api/tasks/{task_id}"), json!({})).await;
         assert_eq!(status, StatusCode::OK, "详情应 200: {json}");
         let st = json["task"]["status"].as_str().unwrap_or("").to_string();
         if matches!(st.as_str(), "done" | "partial" | "error" | "ended") {
@@ -520,13 +521,21 @@ async fn task_events_pull_returns_tail_and_empty_after_max() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "补拉应 200: {json}");
-    assert_eq!(json["truncated"], Value::Bool(false), "窗口内无截断: {json}");
+    assert_eq!(
+        json["truncated"],
+        Value::Bool(false),
+        "窗口内无截断: {json}"
+    );
     let events = json["events"].as_array().expect("events 应为数组");
     assert!(!events.is_empty(), "跑完的任务应有事件: {json}");
     let mut last_seq = 1u64;
     for ev in events {
         assert_eq!(ev["type"].as_str(), Some("task"), "帧应与 SSE 同形: {ev}");
-        assert_eq!(ev["task_id"].as_str(), Some(id.as_str()), "task_id 应一致: {ev}");
+        assert_eq!(
+            ev["task_id"].as_str(),
+            Some(id.as_str()),
+            "task_id 应一致: {ev}"
+        );
         let seq = ev["seq"].as_u64().expect("补拉帧必带 seq");
         assert!(seq > last_seq, "seq 应升序且全部 > after: {ev}");
         last_seq = seq;
@@ -568,7 +577,13 @@ async fn task_events_pull_returns_tail_and_empty_after_max() {
     assert_eq!(json["truncated"], Value::Bool(false));
 
     // ④ 不存在的任务 → 404
-    let (status, _) = send_json(app, "GET", "/api/tasks/不存在的任务/events?after=0", json!({})).await;
+    let (status, _) = send_json(
+        app,
+        "GET",
+        "/api/tasks/不存在的任务/events?after=0",
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -604,7 +619,8 @@ async fn task_events_pull_reports_truncated_window() {
                 )
                 .expect("准备插入");
             for i in 1..=2100i64 {
-                stmt.execute(rusqlite::params![id, base + i]).expect("插入事件行");
+                stmt.execute(rusqlite::params![id, base + i])
+                    .expect("插入事件行");
             }
         }
         // 与 persist_event 同款窗口清理 SQL:保留最新 2000 条
@@ -715,9 +731,9 @@ async fn task_events_sse_replays_history_before_live() {
     );
     let mut prev = 0u64;
     for ev in &replayed {
-        let seq = ev["seq"].as_u64().unwrap_or_else(|| {
-            panic!("回放帧必带 seq(暂态 delta 不落库,不会出现在回放里): {ev}")
-        });
+        let seq = ev["seq"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("回放帧必带 seq(暂态 delta 不落库,不会出现在回放里): {ev}"));
         assert!(seq > prev, "回放帧 seq 应严格升序: {replayed:?}");
         prev = seq;
     }
