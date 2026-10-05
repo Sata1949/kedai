@@ -85,13 +85,13 @@ describe('ConnectionProfilesSection(连接配置区)', () => {
       {
         id: 'c1', name: '主连接', connector_type: 'openai-compatible',
         base_url: 'https://a.example/v1', model: 'ma', api_style: 'chat-completions',
-        api_key: '', enabled: true, api_key_masked: '****1111', has_api_key: true,
+        api_key: '', clearApiKey: false, enabled: true, api_key_masked: '****1111', has_api_key: true,
         ...noCaps,
       },
       {
         id: 'c2', name: '备用', connector_type: 'mock',
         base_url: '', model: '', api_style: 'anthropic',
-        api_key: '', enabled: false, api_key_masked: '', has_api_key: false,
+        api_key: '', clearApiKey: false, enabled: false, api_key_masked: '', has_api_key: false,
         ...noCaps,
       },
     ];
@@ -130,7 +130,7 @@ describe('ConnectionProfilesSection(连接配置区)', () => {
       {
         id: 'c1', name: '主连接', connector_type: 'openai-compatible',
         base_url: 'https://a.example/v1', model: 'ma', api_style: 'chat-completions',
-        api_key: '', enabled: true, api_key_masked: '****1111', has_api_key: true,
+        api_key: '', clearApiKey: false, enabled: true, api_key_masked: '****1111', has_api_key: true,
         ...noCaps,
       },
     ];

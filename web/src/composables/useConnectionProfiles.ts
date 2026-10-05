@@ -244,16 +244,15 @@ export function useConnectionProfiles() {
   function probePayload(index: number): ConnectionProbeParams {
     const d = drafts.value[index];
     if (!d) return {};
-    const payload: ConnectionProbeParams = {
-      connection: {
-        connector_type: d.connector_type,
-        base_url: d.base_url.trim(),
-        api_style: d.api_style,
-        model: d.model.trim(),
-      },
+    const connection: NonNullable<ConnectionProbeParams['connection']> = {
+      connector_type: d.connector_type,
+      base_url: d.base_url.trim(),
+      api_style: d.api_style,
+      model: d.model.trim(),
     };
     const typedKey = d.api_key.trim();
-    if (typedKey) payload.connection.api_key = typedKey;
+    if (typedKey) connection.api_key = typedKey;
+    const payload: ConnectionProbeParams = { connection };
     if (d.id) payload.connection_id = d.id;
     return payload;
   }
