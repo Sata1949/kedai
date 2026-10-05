@@ -130,6 +130,11 @@ pub struct ModeSettings {
     /// 仅影响任务模式执行者/汇总者的**缺省**默认词选择(见 `for_mode`),不改变工具面。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_coding_bundle_enabled: Option<bool>,
+    /// 任务模式文学能力包开关(2026-10-05,LIT-1):None 沿用扁平值(默认 false = 不启用)。
+    /// 与 `task_coding_bundle_enabled` 同构;仅影响任务执行者/汇总者的**缺省**默认词选择
+    /// (见 `for_mode`),不改变工具面。角色扮演侧开关是纯扁平字段,不在本覆盖层内。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_literary_bundle_enabled: Option<bool>,
     /// 任务模式默认连接(TM-SET-1):None 沿用扁平值,Some("") = 显式清除(回到跟随默认
     /// 连接),Some(id) = 覆盖。仅任务模式消费(逐任务/节点显式连接之后的一级回退,
     /// 软回退语义见 `task_mode_default_connection`)。
@@ -572,6 +577,10 @@ impl RuntimeSettings {
             vision_screenshot_enabled: false,
             // 编码能力包默认关:新装与旧配置行为逐字不变,须用户显式启用
             task_coding_bundle_enabled: false,
+            // 文学能力包默认关(LIT-1):角色扮演侧为纯扁平字段(该侧无覆盖层),
+            // 任务侧为「扁平 + task 覆盖层」,两者均须用户显式启用
+            literary_bundle_enabled: false,
+            task_literary_bundle_enabled: false,
             // 任务模式默认连接默认空 = 跟随默认连接(active_connection),零迁移
             task_default_connection_id: String::new(),
             task: ModeSettings::default(),
@@ -613,6 +622,12 @@ impl RuntimeSettings {
         // 编码能力包开关必须先合并:下一段按它选择缺省默认词(故不与其他字段同列在函数尾部)。
         if let Some(v) = ov.task_coding_bundle_enabled {
             out.task_coding_bundle_enabled = v;
+        }
+        // 文学能力包任务侧开关(LIT-1):同款前置合并。消费点在缺省词二选一
+        // (提交 2 起)——优先级 coding > literary > general:新增开关不得改变既有
+        // 开关用户的既有行为,故编码包先判。
+        if let Some(v) = ov.task_literary_bundle_enabled {
+            out.task_literary_bundle_enabled = v;
         }
         // agent_system_prompt 不回退扁平值:扁平值(RoleplayPromptConfig)多为角色扮演人设词,
         // 直接继承会污染任务执行;None 注入内置任务向默认词,Some("") 尊重用户显式留空。

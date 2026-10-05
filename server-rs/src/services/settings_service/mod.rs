@@ -327,6 +327,18 @@ pub struct RuntimeSettings {
     /// None 沿用本扁平值。
     #[serde(default)]
     pub task_coding_bundle_enabled: bool,
+    /// 文学能力包开关(2026-10-05,LIT-1;默认 false = 不启用,旧配置缺省由 serde default
+    /// 填 false,零迁移)。启用后角色扮演侧三件事生效(自 LIT-2/LIT-3 起):缺省提示词取
+    /// 文学增强版、system 尾追加文学增强段、最新用户消息尾追加 Author's Note 段;
+    /// 用户自定义提示词逐字优先。**纯扁平字段**:角色扮演侧没有覆盖层
+    /// (`for_mode` 对 Roleplay 直接 clone),故不加覆盖层、不进任务设置面。
+    #[serde(default)]
+    pub literary_bundle_enabled: bool,
+    /// 任务模式文学能力包开关(2026-10-05;默认 false = 不启用)。完全对称
+    /// `task_coding_bundle_enabled`:扁平 + task 覆盖层,仅影响任务执行者/汇总者的
+    /// **缺省**默认词选择(限文学向任务),不改变工具面、不影响角色扮演模式。
+    #[serde(default)]
+    pub task_literary_bundle_enabled: bool,
     /// 任务模式默认连接(TM-SET-1;默认空 = 跟随默认连接 active_connection,零迁移)。
     /// 逐任务显式 `connection_id`(任务级/节点级)之后的一级回退,仅任务模式消费;
     /// 指向的连接被删/停用时**软回退**默认连接(便利设置不该让任务失败,见
@@ -1332,6 +1344,92 @@ mod tests {
         assert!(
             p.contains("AGENTS.md") && p.contains("CLAUDE.md"),
             "项目约定文件应被点名(CODE-3):{p}"
+        );
+    }
+
+    /// 文学能力包双开关骨架(LIT-1,2026-10-05):默认关、旧配置零迁移、覆盖层三态、
+    /// 角色扮演侧不受任务开关影响。**本提交是纯骨架**——开关全开时提示词无任何行为变化
+    /// (消费点在 LIT-2 缺省词 / LIT-3 注入段,届时按下新行为更新本断言的第三段)。
+    #[test]
+    fn literary_bundle_switch_skeleton() {
+        // 覆盖层 serde 三态:缺字段/null → None(沿用扁平);None 序列化省略字段
+        let missing: ModeSettings = serde_json::from_str("{}").unwrap();
+        assert!(
+            missing.task_literary_bundle_enabled.is_none(),
+            "缺字段应为 None(沿用扁平值)"
+        );
+        let null: ModeSettings =
+            serde_json::from_str(r#"{"task_literary_bundle_enabled": null}"#).unwrap();
+        assert!(
+            null.task_literary_bundle_enabled.is_none(),
+            "null 应为 None"
+        );
+        let some: ModeSettings =
+            serde_json::from_str(r#"{"task_literary_bundle_enabled": true}"#).unwrap();
+        assert_eq!(some.task_literary_bundle_enabled, Some(true));
+
+        // 旧版 settings.json:无两开关键 → 读入后均为 false(零迁移)
+        let cfg = test_cfg();
+        let dir = tmp_dir("literary-bundle-skeleton");
+        let mut legacy = serde_json::to_value(RuntimeSettings::from_config(&cfg)).unwrap();
+        let obj = legacy.as_object_mut().unwrap();
+        obj.remove("literary_bundle_enabled");
+        obj.remove("task_literary_bundle_enabled");
+        std::fs::write(
+            dir.join("settings.json"),
+            serde_json::to_string_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+        let loaded = RuntimeSettings::load(&dir, &cfg);
+        assert!(!loaded.literary_bundle_enabled, "旧配置缺省应为关(false)");
+        assert!(
+            !loaded.task_literary_bundle_enabled,
+            "旧配置缺省应为关(false)"
+        );
+        assert_eq!(
+            loaded.for_mode(AppMode::Task).agent_system_prompt.0,
+            default_task_agent_prompt(),
+            "开关全关时任务缺省词必须是通用版"
+        );
+
+        // 开关全开(扁平 + 覆盖层):LIT-1 提交内**无消费点**,缺省词不因本开关改变
+        let mut s = RuntimeSettings::from_config(&cfg);
+        s.literary_bundle_enabled = true;
+        s.task_literary_bundle_enabled = true;
+        s.task.task_literary_bundle_enabled = Some(true);
+        assert_eq!(
+            s.for_mode(AppMode::Task).agent_system_prompt.0,
+            default_task_agent_prompt(),
+            "LIT-1 骨架提交内开关无消费点:任务缺省词不得改变"
+        );
+        // 角色扮演侧全程不经任务开关:for_mode(Roleplay) 与扁平值逐字段相等
+        assert_eq!(
+            s.for_mode(AppMode::Roleplay).agent_system_prompt.0,
+            s.agent_system_prompt.0,
+            "角色扮演默认词不经任务开关"
+        );
+        assert_eq!(
+            s.for_mode(AppMode::Roleplay).literary_bundle_enabled,
+            s.literary_bundle_enabled
+        );
+
+        // 覆盖层三态:None 沿用扁平 / Some(false) 压过扁平 true / Some(true) 等价启用
+        let mut s2 = RuntimeSettings::from_config(&cfg);
+        s2.task_literary_bundle_enabled = true;
+        assert!(
+            s2.for_mode(AppMode::Task).task_literary_bundle_enabled,
+            "None 应沿用扁平 true"
+        );
+        s2.task.task_literary_bundle_enabled = Some(false);
+        assert!(
+            !s2.for_mode(AppMode::Task).task_literary_bundle_enabled,
+            "Some(false) 应压过扁平 true"
+        );
+        let mut s3 = RuntimeSettings::from_config(&cfg);
+        s3.task.task_literary_bundle_enabled = Some(true);
+        assert!(
+            s3.for_mode(AppMode::Task).task_literary_bundle_enabled,
+            "Some(true) 应等价启用"
         );
     }
 

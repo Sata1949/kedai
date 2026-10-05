@@ -598,3 +598,77 @@ async fn global_fields_written_from_task_mode_are_effective() {
     .await;
     assert_eq!(status, StatusCode::OK);
 }
+
+/// 文学能力包双开关(LIT-1,2026-10-05):角色扮演侧开关是**纯扁平字段**——经任一模式写入
+/// 都直写扁平、**不得产生** task 覆盖层(该侧没有覆盖层,走 apply! 会写出无意义的死写);
+/// 任务侧开关对称编码包:mode=task 写覆盖层、roleplay 视图不受其影响。
+/// 共享 app 下取现场值写入 + 卫生复位(净零影响,顺序无关)。
+#[tokio::test]
+async fn literary_bundle_switches_are_flat_and_overlay_respectively() {
+    let _guard = test_lock().await;
+    let app = test_app();
+
+    // 现场值(共享 app;净零复位目标)
+    let (_, before_rp) = send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
+    let flat_before = before_rp["literary_bundle_enabled"].clone();
+    assert!(flat_before.is_boolean(), "扁平开关应为布尔:{before_rp}");
+    let (_, before_task) = send_json(app, "GET", "/api/settings?mode=task", json!({})).await;
+    let task_before = before_task["task_literary_bundle_enabled"].clone();
+
+    // 角色扮演视图写角色扮演侧开关:直写扁平,两视图都读到(全局扁平字段)
+    let (status, r) = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=roleplay",
+        json!({ "literary_bundle_enabled": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "写角色扮演侧开关失败:{r}");
+    let (_, rp_view) = send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
+    assert_eq!(rp_view["literary_bundle_enabled"], json!(true));
+    let (_, task_view) = send_json(app, "GET", "/api/settings?mode=task", json!({})).await;
+    assert_eq!(
+        task_view["literary_bundle_enabled"],
+        json!(true),
+        "扁平字段两模式共用(且不得因 task 视图读而变)"
+    );
+    assert_eq!(
+        task_view["task_literary_bundle_enabled"], task_before,
+        "角色扮演侧开关写入不得带动任务侧开关(防 apply! 误用:纯粹扁平、不落覆盖层)"
+    );
+
+    // 任务视图写任务侧开关:进 task 覆盖层;roleplay 视图的扁平值不受影响
+    let (status, r) = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=task",
+        json!({ "task_literary_bundle_enabled": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "写任务侧开关失败:{r}");
+    let (_, task_view2) = send_json(app, "GET", "/api/settings?mode=task", json!({})).await;
+    assert_eq!(task_view2["task_literary_bundle_enabled"], json!(true));
+    let (_, rp_view2) = send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
+    assert_eq!(
+        rp_view2["task_literary_bundle_enabled"], task_before,
+        "任务覆盖层不得泄漏进角色扮演视图(任务侧开关走覆盖层,角色扮演视图读扁平值)"
+    );
+
+    // 卫生复位(写回现场值;共享 app 对本用例之外零影响)
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=roleplay",
+        json!({ "literary_bundle_enabled": flat_before }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=task",
+        json!({ "task_literary_bundle_enabled": task_before }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}

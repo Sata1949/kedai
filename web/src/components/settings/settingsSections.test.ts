@@ -11,6 +11,7 @@ import ConnectionProfilesSection from './ConnectionProfilesSection.vue';
 import ConnectionSection from './ConnectionSection.vue';
 import McpSection from './McpSection.vue';
 import CodingBundleSection from './CodingBundleSection.vue';
+import LiteraryBundleSection from './LiteraryBundleSection.vue';
 import VisionScreenshotSection from './VisionScreenshotSection.vue';
 import DataManagementSection from './DataManagementSection.vue';
 import PresetImportExportSection from './PresetImportExportSection.vue';
@@ -221,6 +222,33 @@ describe('SettingsModal(壳)', () => {
     const embedded = await render(SettingsModal, { embedded: true, activeSection: 'coding' });
     expect(embedded).toContain('sv-settings-embedded');
     expect(embedded).toContain('编码能力包');
+  });
+
+  it('装配:文学能力包分区挂进壳(standalone 渲染;embedded 按 activeSection 可见;LIT-1)', async () => {
+    const standalone = await render(SettingsModal, { embedded: false });
+    expect(standalone).toContain('文学能力包');
+
+    const embedded = await render(SettingsModal, { embedded: true, activeSection: 'literary' });
+    expect(embedded).toContain('sv-settings-embedded');
+    expect(embedded).toContain('文学能力包');
+  });
+});
+
+describe('LiteraryBundleSection(文学能力包区,默认关;LIT-1)', () => {
+  it('渲染两开关与语义说明(默认「已关闭」;两模式各自生效 / 只影响默认值)', async () => {
+    const html = await render(LiteraryBundleSection);
+    expect(html).toContain('文学能力包');
+    expect(html).toContain('启用文学能力包(角色扮演)');
+    expect(html).toContain('任务模式启用文学能力包');
+    expect(html).toContain('已关闭'); // 默认 literary_bundle_enabled / task_literary_bundle_enabled 均 false
+    expect(html).toContain('以自定义值为准');
+    expect(html).toContain('只影响角色扮演模式');
+    expect(html).toContain('只影响任务模式');
+  });
+
+  it('show=false 时根节点 display:none(embedded 模式按 activeSection 切换)', async () => {
+    const html = await render(LiteraryBundleSection, { show: false });
+    expect(html).toMatch(/display:\s*none/);
   });
 });
 

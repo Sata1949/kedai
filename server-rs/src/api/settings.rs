@@ -201,6 +201,14 @@ pub struct UpdateSettingsBody {
     /// false = 通用任务默认词(默认);缺省保持不变。用户自定义提示词逐字优先。
     #[serde(default)]
     pub task_coding_bundle_enabled: Option<bool>,
+    /// 文学能力包开关(2026-10-05,LIT-1;缺省保持不变)。默认关闭。角色扮演侧为纯扁平
+    /// 字段(该侧无覆盖层,即使请求带 mode=task 也直写扁平);生效面见 LIT-2/LIT-3。
+    #[serde(default)]
+    pub literary_bundle_enabled: Option<bool>,
+    /// 任务模式文学能力包开关(2026-10-05;缺省保持不变)。扁平 + task 覆盖层,
+    /// 与 `task_coding_bundle_enabled` 同构。
+    #[serde(default)]
+    pub task_literary_bundle_enabled: Option<bool>,
     /// 任务模式默认连接(TM-SET-1):空串 = 清除(跟随默认连接);非空必须是已存在且
     /// 启用的连接 id(否则 400);缺省 = 保持不变
     #[serde(default)]
@@ -378,6 +386,9 @@ fn settings_json(s: &RuntimeSettings) -> Value {
         // 视觉与截图总开关(视觉能力包 D5;全局扁平)
         "vision_screenshot_enabled": s.vision_screenshot_enabled,
         "task_coding_bundle_enabled": s.task_coding_bundle_enabled,
+        // 文学能力包两开关(LIT-1;角色扮演侧为纯扁平、任务侧为扁平+覆盖层)
+        "literary_bundle_enabled": s.literary_bundle_enabled,
+        "task_literary_bundle_enabled": s.task_literary_bundle_enabled,
         "task_default_connection_id": s.task_default_connection_id,
         "tool_history_keep_rounds": s.tool_history_keep_rounds,
         "tool_history_budget_tokens": s.tool_history_budget_tokens,
@@ -936,6 +947,16 @@ pub async fn update_settings(
             // 启用后任务模式缺省默认词改用编码执行者模板,用户自定义值仍逐字优先。
             if let Some(v) = body.task_coding_bundle_enabled {
                 apply!(s, is_task, task_coding_bundle_enabled, v);
+            }
+            // 文学能力包开关(LIT-1;bool 免校验)。角色扮演侧开关是**纯扁平字段**——
+            // 该侧没有覆盖层(for_mode 对 Roleplay 直接 clone),走 apply! 会写出无意义的
+            // task 覆盖层,故照 exec_* 直写(s.xxx = v,与请求的 mode 无关);
+            // 任务侧开关对称编码包,走覆盖层。
+            if let Some(v) = body.literary_bundle_enabled {
+                s.literary_bundle_enabled = v;
+            }
+            if let Some(v) = body.task_literary_bundle_enabled {
+                apply!(s, is_task, task_literary_bundle_enabled, v);
             }
             // 任务模式默认连接(TM-SET-1):空串 = 清除(回到跟随默认连接);非空必须在
             // **本请求应用后的**连接列表里存在且启用,否则 400(本块位于连接数组处理与

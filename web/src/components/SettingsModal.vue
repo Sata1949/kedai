@@ -26,6 +26,8 @@ const AgentFlowSection = lazyModal(() => import('./settings/AgentFlowSection.vue
 const ExecAuthSection = lazyModal(() => import('./settings/ExecAuthSection.vue'), '设置区:授权与命令执行', 'settingsOpen');
 // 编码能力包(默认关):任务模式执行者默认系统提示词模板开关
 const CodingBundleSection = lazyModal(() => import('./settings/CodingBundleSection.vue'), '设置区:编码能力包', 'settingsOpen');
+// 文学能力包(默认关;LIT-1):角色扮演侧 / 任务侧各一个开关
+const LiteraryBundleSection = lazyModal(() => import('./settings/LiteraryBundleSection.vue'), '设置区:文学能力包', 'settingsOpen');
 // 视觉与截图(默认关;视觉能力包):截图工具总开关(隐私提示见分区内)
 const VisionScreenshotSection = lazyModal(() => import('./settings/VisionScreenshotSection.vue'), '设置区:视觉与截图', 'settingsOpen');
 const PromptInjectSection = lazyModal(() => import('./settings/PromptInjectSection.vue'), '设置区:提示词注入', 'settingsOpen');
@@ -91,6 +93,7 @@ const close = (): void => {
     <AgentFlowSection v-if="visitedSections.has('flow')" :show="props.activeSection === 'flow'" />
     <ExecAuthSection v-if="visitedSections.has('exec')" :show="props.activeSection === 'exec'" />
     <CodingBundleSection v-if="visitedSections.has('coding')" :show="props.activeSection === 'coding'" />
+    <LiteraryBundleSection v-if="visitedSections.has('literary')" :show="props.activeSection === 'literary'" />
     <VisionScreenshotSection v-if="visitedSections.has('vision')" :show="props.activeSection === 'vision'" />
     <PromptInjectSection v-if="visitedSections.has('prompt')" :state="promptInject" :show="props.activeSection === 'prompt'" />
     <PresetImportExportSection v-if="visitedSections.has('preset')" :state="promptInject" :show="props.activeSection === 'preset'" />
@@ -121,6 +124,7 @@ const close = (): void => {
         <AgentFlowSection />
         <ExecAuthSection />
         <CodingBundleSection />
+        <LiteraryBundleSection />
         <VisionScreenshotSection />
         <PromptInjectSection :state="promptInject" />
         <PresetImportExportSection :state="promptInject" />

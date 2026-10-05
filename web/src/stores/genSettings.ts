@@ -132,6 +132,16 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
    *  (先读后写/遵循既有风格/改完跑验证/最小改动);自定义值优先。不影响角色扮演模式。 */
   const taskCodingBundleEnabled = ref(false);
 
+  /** 文学能力包开关(服务端默认 false = 关闭;LIT-1)。仅角色扮演模式生效:
+   *  开启后角色扮演侧**缺省**提示词取文学增强版、并追加两段文学注入;
+   *  用户在提示词框自定义过则自定义值优先,本开关只影响默认值。纯扁平字段。 */
+  const literaryBundleEnabled = ref(false);
+
+  /** 任务模式文学能力包开关(服务端默认 false = 关闭;LIT-1)。对称编码包:
+   *  开启后任务执行者**未自定义**系统提示词时,默认值改用文学向变体;
+   *  自定义值优先。不影响角色扮演模式。 */
+  const taskLiteraryBundleEnabled = ref(false);
+
   /** 任务模式默认连接(TM-SET-1;空串 = 跟随默认连接)。
    *  任务连接回退链:逐任务/节点显式连接 → 本项 → 默认连接;仅任务模式消费。 */
   const taskDefaultConnectionId = ref('');
@@ -174,6 +184,8 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
       reflectAdvicePrompt.value = s.reflect_advice_prompt ?? '';
       reflectAdviceRole.value = s.reflect_advice_role === 'assistant' ? 'assistant' : 'user';
       taskCodingBundleEnabled.value = s.task_coding_bundle_enabled ?? false;
+      literaryBundleEnabled.value = s.literary_bundle_enabled ?? false;
+      taskLiteraryBundleEnabled.value = s.task_literary_bundle_enabled ?? false;
       taskDefaultConnectionId.value = s.task_default_connection_id ?? '';
       authorizationMode.value = readAuthorizationMode(s);
       authorizationAlwaysRequired.value = Array.isArray(s.bypass_blacklist) ? s.bypass_blacklist : [];
@@ -243,6 +255,8 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     reflectAdvicePrompt.value = s.reflect_advice_prompt ?? '';
     reflectAdviceRole.value = s.reflect_advice_role === 'assistant' ? 'assistant' : 'user';
     taskCodingBundleEnabled.value = s.task_coding_bundle_enabled ?? false;
+    literaryBundleEnabled.value = s.literary_bundle_enabled ?? false;
+    taskLiteraryBundleEnabled.value = s.task_literary_bundle_enabled ?? false;
     taskDefaultConnectionId.value = s.task_default_connection_id ?? '';
     authorizationMode.value = readAuthorizationMode(s);
     authorizationAlwaysRequired.value = Array.isArray(s.bypass_blacklist) ? s.bypass_blacklist : [];
@@ -428,6 +442,8 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     reflectAdvicePrompt,
     reflectAdviceRole,
     taskCodingBundleEnabled,
+    literaryBundleEnabled,
+    taskLiteraryBundleEnabled,
     taskDefaultConnectionId,
     promptInject,
     agentFlowLibrary,

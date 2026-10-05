@@ -106,6 +106,8 @@ function makeSettings(overrides: Partial<RuntimeSettings> = {}): RuntimeSettings
     exec_allow_sandbox: false,
     vision_screenshot_enabled: false,
     task_coding_bundle_enabled: false,
+    literary_bundle_enabled: false,
+    task_literary_bundle_enabled: false,
     task_default_connection_id: '',
     // 多套连接(批次 4):默认空列表,具体连接由用例覆盖
     connections: [],
@@ -357,6 +359,43 @@ describe('genSettings 编码能力包开关(task_coding_bundle_enabled)', () => 
     await store.saveSettings({ task_coding_bundle_enabled: true });
     expect(saveSettingsMock).toHaveBeenCalledWith({ task_coding_bundle_enabled: true }, 'roleplay');
     expect(store.taskCodingBundleEnabled).toBe(true);
+  });
+});
+
+describe('genSettings 文学能力包双开关(LIT-1)', () => {
+  beforeEach(() => {
+    memStorage.clear();
+    setActivePinia(createPinia());
+  });
+
+  it('loadSettings 回填服务端值;缺字段兜底 false(默认关)', async () => {
+    const store = useGenSettingsStore();
+    getSettingsMock.mockReset().mockResolvedValue(
+      makeSettings({ literary_bundle_enabled: true, task_literary_bundle_enabled: true }),
+    );
+    await store.loadSettings();
+    expect(store.literaryBundleEnabled).toBe(true);
+    expect(store.taskLiteraryBundleEnabled).toBe(true);
+
+    // 旧服务端/异常响应缺字段:不得污染 store,回退默认关
+    getSettingsMock.mockReset().mockResolvedValue(
+      withoutFields(makeSettings(), ['literary_bundle_enabled', 'task_literary_bundle_enabled']),
+    );
+    await store.loadSettings();
+    expect(store.literaryBundleEnabled).toBe(false);
+    expect(store.taskLiteraryBundleEnabled).toBe(false);
+  });
+
+  it('saveSettings 响应回填两个开关(与 loadSettings 同口径)', async () => {
+    const store = useGenSettingsStore();
+    saveSettingsMock.mockReset().mockResolvedValue({
+      ok: true,
+      settings: makeSettings({ literary_bundle_enabled: true, task_literary_bundle_enabled: false }),
+    });
+    await store.saveSettings({ literary_bundle_enabled: true });
+    expect(saveSettingsMock).toHaveBeenCalledWith({ literary_bundle_enabled: true }, 'roleplay');
+    expect(store.literaryBundleEnabled).toBe(true);
+    expect(store.taskLiteraryBundleEnabled).toBe(false);
   });
 });
 
