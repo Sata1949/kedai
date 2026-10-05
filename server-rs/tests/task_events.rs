@@ -477,6 +477,270 @@ async fn task_solo_offers_bash_tool() {
     );
 }
 
+// ==================== PRODCAP-1:补拉端点与 SSE 回放(2026-10-05)====================
+
+/// 轮询任务详情直到终态(REST 轮询,**不依赖事件流**——补拉类断言的可复现前置;
+/// 事件流的到达顺序/完整性是另一条线,见下方回放用例)。
+async fn wait_task_terminal(app: &axum::Router, task_id: &str) -> Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let (status, json) = send_json(app, "GET", &format!("/api/tasks/{task_id}"), json!({})).await;
+        assert_eq!(status, StatusCode::OK, "详情应 200: {json}");
+        let st = json["task"]["status"].as_str().unwrap_or("").to_string();
+        if matches!(st.as_str(), "done" | "partial" | "error" | "ended") {
+            return json;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "等待任务 {task_id} 终态超时,当前状态: {st}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// 验收②:补拉端点 —— `after` 之后按 seq 升序、帧与 SSE 同形(含 seq/at);
+/// `after` 超过最新 seq 返回空数组(**不是 404**);不存在的任务 404。
+#[tokio::test]
+async fn task_events_pull_returns_tail_and_empty_after_max() {
+    let app = test_app();
+    // mock 规划器 1 步(与既有用例同款 reply 钩子)
+    let title = r#"[[reply:[{"name":"步骤一","goal":"写第一段"}] ]]"#;
+    let id = create_task(app, title).await;
+    let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
+    let detail = wait_task_terminal(app, &id).await;
+    let final_status = detail["task"]["status"].as_str().unwrap_or("").to_string();
+
+    // ① after=1 → 只回 seq ≥ 2 且升序;帧与 SSE 同形(type/task_id/kind/seq/at)
+    let (status, json) = send_json(
+        app,
+        "GET",
+        &format!("/api/tasks/{id}/events?after=1"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "补拉应 200: {json}");
+    assert_eq!(json["truncated"], Value::Bool(false), "窗口内无截断: {json}");
+    let events = json["events"].as_array().expect("events 应为数组");
+    assert!(!events.is_empty(), "跑完的任务应有事件: {json}");
+    let mut last_seq = 1u64;
+    for ev in events {
+        assert_eq!(ev["type"].as_str(), Some("task"), "帧应与 SSE 同形: {ev}");
+        assert_eq!(ev["task_id"].as_str(), Some(id.as_str()), "task_id 应一致: {ev}");
+        let seq = ev["seq"].as_u64().expect("补拉帧必带 seq");
+        assert!(seq > last_seq, "seq 应升序且全部 > after: {ev}");
+        last_seq = seq;
+        assert!(
+            ev["at"].as_str().is_some_and(|s| !s.is_empty()),
+            "补拉帧必带 at: {ev}"
+        );
+    }
+    // 终态 status 帧应在补拉结果里(done/partial/error/ended 之一,与实际终态一致)
+    assert!(
+        events.iter().any(|e| {
+            e["kind"].as_str() == Some("status")
+                && e["status"].as_str() == Some(final_status.as_str())
+        }),
+        "应含终态 status 帧({final_status}): {events:?}"
+    );
+
+    // ② limit 生效:`limit=1` 只回 1 条
+    let (status, json) = send_json(
+        app,
+        "GET",
+        &format!("/api/tasks/{id}/events?after=0&limit=1"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["events"].as_array().map(|a| a.len()), Some(1));
+
+    // ③ after 超过最新 seq → 空数组 + truncated=false(不是 404)
+    let (status, json) = send_json(
+        app,
+        "GET",
+        &format!("/api/tasks/{id}/events?after=99999"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "超界 after 应 200(空数组): {json}");
+    assert_eq!(json["events"].as_array().map(|a| a.len()), Some(0));
+    assert_eq!(json["truncated"], Value::Bool(false));
+
+    // ④ 不存在的任务 → 404
+    let (status, _) = send_json(app, "GET", "/api/tasks/不存在的任务/events?after=0", json!({})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// 验收③(端点级):保留窗口外的补拉显式返回 `truncated:true`,且首条恰为窗口内最旧一条。
+/// 窗口清理发生在写事务末尾(2000 条),这里直接向应用自有库补写 2100 行再按同款 SQL
+/// 模拟一次窗口清理——比驱动 2000+ 次真实事件快,得到的状态与真实运行完全同形。
+#[tokio::test]
+async fn task_events_pull_reports_truncated_window() {
+    let app = test_app();
+    let id = create_task(app, "窗口截断用例").await;
+
+    // 应用库位置与 build_test_app 的构造一致(process::id 同进程,路径可复算)
+    let db_path = std::env::temp_dir()
+        .join(format!("kedai-test-{}", std::process::id()))
+        .join("kedai.db");
+    let conn = rusqlite::Connection::open(&db_path).expect("打开测试库");
+    conn.busy_timeout(Duration::from_secs(10))
+        .expect("设置 busy_timeout(并行用例可能有写竞争)");
+    let base: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM task_events WHERE task_id = ?1",
+            rusqlite::params![id],
+            |r| r.get(0),
+        )
+        .expect("读当前最大 seq");
+    {
+        let tx = conn.unchecked_transaction().expect("开启写事务");
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT INTO task_events (task_id, seq, kind, detail, created_at) \
+                     VALUES (?1, ?2, 'usage', '窗口压力行', '2026-10-05T00:00:00Z')",
+                )
+                .expect("准备插入");
+            for i in 1..=2100i64 {
+                stmt.execute(rusqlite::params![id, base + i]).expect("插入事件行");
+            }
+        }
+        // 与 persist_event 同款窗口清理 SQL:保留最新 2000 条
+        tx.execute(
+            "DELETE FROM task_events WHERE task_id = ?1 AND seq <= ?2",
+            rusqlite::params![id, base + 2100 - 2000],
+        )
+        .expect("窗口清理");
+        tx.commit().expect("提交");
+    }
+    drop(conn);
+
+    // ① after=0 落在窗口之前 → truncated=true,首条 = 窗口内最旧(seq = base+101),行数 = limit
+    let (status, json) = send_json(
+        app,
+        "GET",
+        &format!("/api/tasks/{id}/events?after=0&limit=1000"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "补拉应 200: {json}");
+    assert_eq!(
+        json["truncated"],
+        Value::Bool(true),
+        "起点早于保留窗口必须显式标记(不得假装「没有更多」): {json}"
+    );
+    let events = json["events"].as_array().expect("events 应为数组");
+    assert_eq!(events.len(), 1000, "limit 应生效: {json}");
+    assert_eq!(
+        events.first().and_then(|e| e["seq"].as_u64()),
+        Some((base + 101) as u64),
+        "首条应为窗口内最旧一条: {json}"
+    );
+
+    // ② 恰在窗口边缘(after+1 == 最小 seq)→ 不标截断
+    let (status, json) = send_json(
+        app,
+        "GET",
+        &format!("/api/tasks/{id}/events?after={}", base + 100),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json["truncated"],
+        Value::Bool(false),
+        "after+1 == 最小 seq 时没有丢行: {json}"
+    );
+    assert_eq!(
+        json["events"]
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|e| e["seq"].as_u64()),
+        Some((base + 101) as u64)
+    );
+}
+
+/// 验收④:SSE `?task_id=&after=` —— **先回放历史、再续实时**,回放帧 seq 严格升序
+/// 且首帧即任务首事件;删除后的 `deleted` 帧经实时流到达(证明回放→实时已交接)。
+#[tokio::test]
+async fn task_events_sse_replays_history_before_live() {
+    let app = test_app();
+    let title = r#"[[reply:[{"name":"步骤一","goal":"写第一段"}] ]]"#;
+    let id = create_task(app, title).await;
+    let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
+    wait_task_terminal(app, &id).await;
+
+    // 任务已终态后再开流:after=0 时收到的**全部**帧只能来自回放(实时没有新事件)
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/api/tasks/events?task_id={id}&after=0"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let mut body = resp.into_body();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut replayed: Vec<Value> = Vec::new();
+    loop {
+        let got = tokio::time::timeout_at(deadline, read_event(&mut body)).await;
+        let Ok(Some(ev)) = got else {
+            panic!("等待回放帧超时,已收 {} 条", replayed.len());
+        };
+        if ev["task_id"].as_str() != Some(id.as_str()) {
+            continue; // 带 task_id 的流只应转发本任务;防御性跳过(挂掉即上报告警)
+        }
+        let is_terminal = ev["kind"].as_str() == Some("status")
+            && matches!(
+                ev["status"].as_str(),
+                Some("done") | Some("partial") | Some("error") | Some("ended")
+            );
+        replayed.push(ev);
+        if is_terminal {
+            break;
+        }
+    }
+    assert_eq!(
+        replayed.first().and_then(|e| e["kind"].as_str()),
+        Some("created"),
+        "首帧应为任务首事件 created: {replayed:?}"
+    );
+    assert_eq!(
+        replayed.first().and_then(|e| e["seq"].as_u64()),
+        Some(1),
+        "回放首帧 seq 应为 1: {replayed:?}"
+    );
+    let mut prev = 0u64;
+    for ev in &replayed {
+        let seq = ev["seq"].as_u64().unwrap_or_else(|| {
+            panic!("回放帧必带 seq(暂态 delta 不落库,不会出现在回放里): {ev}")
+        });
+        assert!(seq > prev, "回放帧 seq 应严格升序: {replayed:?}");
+        prev = seq;
+    }
+
+    // 回放→实时交接:新事件(删除)能实时到达本流
+    let status = send_empty(app, "DELETE", &format!("/api/tasks/{id}")).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let got = tokio::time::timeout_at(deadline, read_event(&mut body)).await;
+        match got {
+            Ok(Some(ev))
+                if ev["task_id"].as_str() == Some(id.as_str())
+                    && ev["kind"].as_str() == Some("deleted") =>
+            {
+                break;
+            }
+            Ok(Some(_)) => continue,
+            _ => panic!("回放后续实时流应收到 deleted(交接失败)"),
+        }
+    }
+}
+
 /// 未绑定工作区的任务也有执行作用域(D1):开跑时建 `<scratch_root>/<task_id>` 并作为
 /// 作用域下发,`fs_*` 族随之下发。
 ///

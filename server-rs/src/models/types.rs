@@ -694,6 +694,28 @@ impl TaskEventKind {
             Self::FileChanged => "file_changed",
         }
     }
+
+    /// `as_str` 的逆:把 `task_events.kind` 的文本读回枚举(PRODCAP-1 补拉/回放用)。
+    /// 未知值返回 `None`,由调用方降级处理——补拉帧的 kind 落 `None` 时前端
+    /// 只透传事件面板、不驱动刷新(与「旧服务端未知分类」同一分支,不静默错刷)。
+    /// 与 `as_str` 的互逆由单测全变体往返钉死(`task_service::events` 测试模块)。
+    pub fn from_wire(s: &str) -> Option<Self> {
+        Some(match s {
+            "created" => Self::Created,
+            "status" => Self::Status,
+            "plan" => Self::Plan,
+            "subtask" => Self::Subtask,
+            "usage" => Self::Usage,
+            "deleted" => Self::Deleted,
+            "llm_call" => Self::LlmCall,
+            "agent_status" => Self::AgentStatus,
+            "approval_required" => Self::ApprovalRequired,
+            "delta" => Self::Delta,
+            "flow_bound" => Self::FlowBound,
+            "file_changed" => Self::FileChanged,
+            _ => return None,
+        })
+    }
 }
 
 /// SSE 事件,serde 序列化为 {"type":"...", ...}

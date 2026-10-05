@@ -6,7 +6,7 @@ use crate::api::{
     conflict, db_err, err_with_code, internal, not_found, validation, ErrorCode, WithStatus,
 };
 use crate::models::types::{
-    TaskApproveExecMode, TaskFollowupMode, TaskRunMode, TaskStatus, TaskStep,
+    SseEvent, TaskApproveExecMode, TaskFollowupMode, TaskRunMode, TaskStatus, TaskStep,
 };
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -231,22 +231,96 @@ pub async fn get(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> 
     }
 }
 
+/// `GET /api/tasks/events` 查询体(PRODCAP-1,均为**加性**参数):
+/// 两个都缺省时与改造前逐字一致(全局实时流)。
+#[derive(Deserialize)]
+pub struct EventsStreamQuery {
+    /// 只订阅该任务的事件,并从 `after` 起**回放其历史**(见 handler 文档);
+    /// 缺省 = 全局流(所有任务的实时帧,不过滤、不回放)。
+    #[serde(default)]
+    pub task_id: Option<String>,
+    /// 回放起点:补发 `seq > after` 的历史帧;仅带 `task_id` 时生效,缺省 0。
+    #[serde(default)]
+    pub after: Option<u64>,
+}
+
 /// GET /api/tasks/events:任务事件 SSE 流(WP4 任务模式实时化,取代前端轮询)。
 /// 订阅 TaskService 的 broadcast 通道并逐条转发为 data 帧(与 /api/chat/send 同款
 /// KeepAlive 30s + CACHE_CONTROL no-cache);接收滞后(Lagged)记 warn 后跳过积压
 /// 继续,通道关闭(Closed)结束流。
-pub async fn events(State(state): State<Arc<AppState>>) -> Response {
+///
+/// **PRODCAP-1 回放(加性)**:带 `task_id` 时**先订阅、再回放**该任务 `seq > after`
+/// 的历史帧,然后续实时;回放集合与实时流重复的 seq 按 `last_yielded` 单调过滤去重,
+/// 调用方「从断点接上」无需自己处理历史与实时的交错。不带 `task_id` 时 `after` 被忽略、
+/// 行为与改造前一致——旧客户端零变化。
+pub async fn events(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<EventsStreamQuery>,
+) -> Response {
+    // ① 先订阅(同步、瞬时):订阅之后的实时帧都进 rx,与随后读的历史之间无缝隙
     let mut rx = state.tasks.subscribe();
+    let scoped = q.task_id.clone();
+    let after = q.after.unwrap_or(0);
+    // ② 再读历史(经 blocking 池,不在 async 线程上做同步 IO)
+    let mut history: Vec<SseEvent> = Vec::new();
+    if let Some(tid) = scoped.clone() {
+        let svc = state.tasks.clone();
+        let query_id = tid.clone();
+        match state
+            .db_call(move || svc.list_events_replay(&query_id, after))
+            .await
+        {
+            Ok((h, truncated)) => {
+                if truncated {
+                    tracing::warn!(
+                        task_id = tid.as_str(),
+                        after = after,
+                        "任务事件回放起点早于保留窗口,更早事件已清理(客户端将看到 seq 缺口)"
+                    );
+                }
+                history = h;
+            }
+            Err(e) => {
+                tracing::warn!(task_id = tid.as_str(), error = e, "任务事件回放读取失败,仅续实时流")
+            }
+        }
+    }
     let stream = async_stream::stream! {
+        // 回放:按 seq 升序逐帧下发,并记录最后下发位置供实时流去重
+        let mut last_yielded: u64 = after;
+        for event in history {
+            if let SseEvent::Task { seq: Some(s), .. } = &event {
+                last_yielded = last_yielded.max(*s);
+            }
+            let json_str = serde_json::to_string(&event).unwrap_or_else(|_| "{}".into());
+            yield Ok::<Event, Infallible>(Event::default().data(json_str));
+        }
         loop {
             match rx.recv().await {
                 Ok(event) => {
+                    if let Some(tid) = scoped.as_deref() {
+                        // 带 task_id = 只转发该任务的 Task 帧(非 Task 帧与他任务帧一律丢弃)
+                        let SseEvent::Task { task_id, seq, .. } = &event else {
+                            continue;
+                        };
+                        if task_id != tid {
+                            continue;
+                        }
+                        if let Some(s) = seq {
+                            if *s <= last_yielded {
+                                // 与回放集合重复的实时帧(订阅先于回放,必然存在重叠)
+                                continue;
+                            }
+                            last_yielded = *s;
+                        }
+                    }
                     let json_str = serde_json::to_string(&event).unwrap_or_else(|_| "{}".into());
                     yield Ok::<Event, Infallible>(Event::default().data(json_str));
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                     // 滞后意味着前端已丢失事件(面板会短暂与后端不一致),属真实可观测
-                    // 异常而非调试噪声,故记 warn;前端依 5s 兜底轮询/重连补拉恢复一致。
+                    // 异常而非调试噪声,故记 warn;前端依 5s 兜底轮询 + PRODCAP-1 的
+                    // `seq > lastSeq + 1` 补拉恢复一致。
                     tracing::warn!(skipped = skipped, "任务事件 SSE 接收滞后,跳过积压事件");
                     continue;
                 }
@@ -257,6 +331,48 @@ pub async fn events(State(state): State<Arc<AppState>>) -> Response {
     // 装配单点在 api::util::sse_response(KeepAlive 30s + no-transform),
     // 与 /api/chat/send 共用——两处必须一致,见该函数注释。
     super::sse_response(stream)
+}
+
+/// `GET /api/tasks/{id}/events` 查询体(补拉,PRODCAP-1)。
+#[derive(Deserialize)]
+pub struct TaskEventsQuery {
+    /// 只要 `seq > after` 的事件;缺省 0 = 从窗口内最早一条起。
+    #[serde(default)]
+    pub after: Option<u64>,
+    /// 返回条数上限;缺省 500,夹取 `1..=1000`(防一次拉爆)。
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// GET /api/tasks/{id}/events:任务事件补拉(PRODCAP-1)。
+///
+/// 无流场景的**权威来源**(前端检测到 `seq` 缺口 / 重连补偿 / 兜底轮询):
+/// 返回与 SSE 帧**同形**的事件数组(`seq` 升序,含 `type`/`task_id`/`seq`/`at`),
+/// 前端可原样走同一分发,不搞第二套形状。
+/// `truncated=true` 表示请求起点早于保留窗口(每任务 2000 条),更早事件已被清理——
+/// 明确告知而不是假装「没有更多」;**`after` 超过最新 seq 返回空数组,不是 404**。
+pub async fn list_events(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<TaskEventsQuery>,
+) -> Response {
+    if state.tasks.get(&id).is_none() {
+        return not_found("任务不存在");
+    }
+    let svc = state.tasks.clone();
+    let after = q.after.unwrap_or(0);
+    let limit = q.limit.unwrap_or(500).clamp(1, 1000);
+    match state
+        .db_call(move || svc.list_events(&id, after, limit))
+        .await
+    {
+        Err(e) => db_err(&e),
+        Ok((events, truncated)) => Json(json!({
+            "events": events,
+            "truncated": truncated,
+        }))
+        .into_response(),
+    }
 }
 
 /// GET /api/tasks/{id}/calls:任务 LLM 调用追踪全量列表(批次 3「调用情况」面板;

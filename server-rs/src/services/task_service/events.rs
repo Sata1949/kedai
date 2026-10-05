@@ -89,6 +89,99 @@ impl TaskService {
         Ok((seq as u64, at))
     }
 
+    /// 补拉/回放共用的历史扫描(静态、显式传连接,可内存库单测)。
+    ///
+    /// 读 `seq > after` 的行,按 seq 升序取至多 `limit` 条,映射为与实时广播**同形**的
+    /// `SseEvent::Task` 帧(含 `seq`/`at`)——补拉结果可原样走前端的同一分发,不搞第二套形状。
+    ///
+    /// 返回 `(帧列表, truncated)`:`truncated` = 请求的起点落在保留窗口之前
+    /// (`after + 1 < 现存最小 seq`)——那意味着「窗口外的更早事件确实存在过但已被清理」,
+    /// 与「本来就没有事件」必须区分,故显式标记而不是假装空。`after` 已达/超过最新 seq
+    /// 则返回空列表 + `truncated=false`(调用方据此回空数组,**不是 404**)。
+    pub(crate) fn scan_events(
+        conn: &Connection,
+        task_id: &str,
+        after: u64,
+        limit: usize,
+    ) -> (Vec<SseEvent>, bool) {
+        // 窗口边界先读:同时决定 truncated 与「无新行」短路
+        let bounds: Option<(i64, i64)> = conn
+            .query_row(
+                "SELECT MIN(seq), MAX(seq) FROM task_events WHERE task_id = ?1",
+                params![task_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                    ))
+                },
+            )
+            .ok()
+            .and_then(|(min, max)| min.zip(max));
+        let Some((min_seq, max_seq)) = bounds else {
+            return (Vec::new(), false);
+        };
+        let after = after as i64;
+        if after >= max_seq {
+            return (Vec::new(), false);
+        }
+        let truncated = after + 1 < min_seq;
+        let mut stmt = match conn.prepare_cached(
+            "SELECT seq, kind, title, status, detail, finish_reason, phase, step_index, created_at \
+             FROM task_events WHERE task_id = ?1 AND seq > ?2 ORDER BY seq ASC LIMIT ?3",
+        ) {
+            Ok(s) => s,
+            Err(e) => return (log_query_failure("任务事件补拉 prepare", e), truncated),
+        };
+        let query = stmt.query_map(params![task_id, after, limit as i64], |row| {
+            let kind_wire: String = row.get(1)?;
+            let kind = TaskEventKind::from_wire(&kind_wire);
+            if kind.is_none() {
+                // 只有本进程写入过的 kind 才会进表;读不出枚举 = 数据被外部改动或版本回退,
+                // 属真实异常而非噪声(照仓内「绝不静默放过」纪律留痕),该帧仍原样下发。
+                tracing::warn!(task_id = task_id, kind = kind_wire, "任务事件分类无法识别,按未知分类下发");
+            }
+            let status_wire: Option<String> = row.get(3)?;
+            Ok(SseEvent::Task {
+                task_id: task_id.to_string(),
+                kind,
+                title: row.get(2)?,
+                status: status_wire.as_deref().map(TaskStatus::from_str_lossy),
+                detail: row.get(4)?,
+                finish_reason: row.get(5)?,
+                phase: row.get(6)?,
+                step_index: row.get::<_, Option<i64>>(7)?.map(|i| i as usize),
+                seq: Some(row.get::<_, i64>(0)? as u64),
+                at: Some(row.get(8)?),
+            })
+        });
+        // query_map 结果先绑定局部变量再 match(与 list_llm_calls 同口径,防 E0597)
+        match query {
+            Ok(rows) => (rows.filter_map(|r| r.ok()).collect(), truncated),
+            Err(e) => (log_query_failure("任务事件补拉 query_map", e), truncated),
+        }
+    }
+
+    /// 任务事件补拉(端点用;只读池):`GET /api/tasks/{id}/events` 的数据源,
+    /// 语义见 `scan_events`。
+    pub(crate) fn list_events(
+        &self,
+        task_id: &str,
+        after: u64,
+        limit: usize,
+    ) -> (Vec<SseEvent>, bool) {
+        let Some(conn) = read_or_log(&self.db, "任务事件 read") else {
+            return (Vec::new(), false);
+        };
+        Self::scan_events(&conn, task_id, after, limit)
+    }
+
+    /// SSE 回放用的一次性历史读取:窗口内历史**全部**补发(`limit` = 保留上限),
+    /// 与补拉端点的分页语义分开——回放要的是「一条流从断点接上」,不是翻页。
+    pub(crate) fn list_events_replay(&self, task_id: &str, after: u64) -> (Vec<SseEvent>, bool) {
+        self.list_events(task_id, after, EVENTS_KEEP_PER_TASK as usize)
+    }
+
     /// 任务行是否已不存在(persist 失败后判「瞬态广播」用;只读一次主键查询)。
     fn task_row_missing(conn: &Connection, task_id: &str) -> bool {
         conn.query_row(
@@ -430,7 +523,18 @@ mod tests {
                 serde_json::Value::String(kind.as_str().to_string()),
                 "as_str 与 serde 线格式不一致: {kind:?}"
             );
+            // PRODCAP-1:from_wire 与 as_str 互为逆(补拉读回「广播的帧」同一分类名)
+            assert_eq!(
+                TaskEventKind::from_wire(kind.as_str()),
+                Some(kind),
+                "from_wire 未能读回 as_str 的输出: {kind:?}"
+            );
         }
+        assert_eq!(
+            TaskEventKind::from_wire("no_such_kind"),
+            None,
+            "未知分类应返回 None(降级为「不驱动刷新」),不得猜值"
+        );
     }
 
     /// PRODCAP-1:事件落库分配任务内单调 seq、字段逐字入库、窗口按 2000 条清理。
@@ -539,5 +643,100 @@ mod tests {
             .expect("统计");
         assert_eq!(count, EVENTS_KEEP_PER_TASK, "窗口应恰保留 2000 条");
         assert_eq!(min_seq, 2, "最旧一条应为 seq=2(seq=1 已被窗口删除)");
+    }
+
+    /// PRODCAP-1 补拉/回放共用的 `scan_events`:seq 升序、`after` 过滤、
+    /// 窗口截断显式标记、`after` 超过最新 seq 回空(不假装有)。
+    /// 静态函数直接在裸连接上验证(与端点/回放共用同一实现,见 api::tasks 两个 handler)。
+    #[test]
+    fn scan_events_filters_orders_and_marks_truncation() {
+        let conn = rusqlite::Connection::open_in_memory().expect("内存库");
+        conn.execute_batch(crate::models::db::create_tables_sql())
+            .expect("建表");
+        conn.execute(
+            "INSERT INTO tasks (id, title, created_at, updated_at) VALUES ('t1', 't', '2026-10-05T00:00:00Z', '2026-10-05T00:00:00Z')",
+            [],
+        )
+        .expect("建任务行");
+
+        // 三条:seq 1/2/3
+        for detail in ["任务已创建", "任务状态更新为 running", "执行计划已更新(共 1 步)"] {
+            TaskService::persist_event(
+                &conn,
+                "t1",
+                TaskEventKind::Status,
+                None,
+                Some(TaskStatus::Running),
+                Some(detail),
+                None,
+                None,
+                None,
+            )
+            .expect("落库");
+        }
+        let seqs_of = |events: &[SseEvent]| -> Vec<u64> {
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    SseEvent::Task { seq, .. } => *seq,
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // ① after=1 → 只要 2/3,升序,且帧与广播同形(含 seq/at 与逐字字段)
+        let (events, truncated) = TaskService::scan_events(&conn, "t1", 1, 100);
+        assert!(!truncated, "起点在窗口内不应标截断");
+        assert_eq!(seqs_of(&events), vec![2, 3], "应按 seq 升序且只回 after 之后的行");
+        let Some(SseEvent::Task {
+            kind,
+            detail,
+            at,
+            task_id,
+            ..
+        }) = events.first()
+        else {
+            panic!("应为 Task 帧");
+        };
+        assert_eq!(*kind, Some(TaskEventKind::Status));
+        assert_eq!(task_id, "t1");
+        assert_eq!(detail.as_deref(), Some("任务状态更新为 running"));
+        assert!(at.as_deref().is_some_and(|s| !s.is_empty()), "at 应非空");
+
+        // ② limit 生效(夹取在端点层,扫描层按调用方给定值截断)
+        let (events, _) = TaskService::scan_events(&conn, "t1", 0, 1);
+        assert_eq!(events.len(), 1);
+
+        // ③ after 已达/超过最新 seq → 空 + 不标截断(端点据此回空数组,不是 404)
+        let (events, truncated) = TaskService::scan_events(&conn, "t1", 3, 100);
+        assert!(events.is_empty() && !truncated);
+        let (events, truncated) = TaskService::scan_events(&conn, "t1", 99, 100);
+        assert!(events.is_empty() && !truncated);
+
+        // ④ 窗口截断:补到 2001 条 → after=0 标 truncated、首条 seq=2、恰回 2000 条
+        for _ in 0..(EVENTS_KEEP_PER_TASK as usize + 1 - 3) {
+            TaskService::persist_event(
+                &conn,
+                "t1",
+                TaskEventKind::Usage,
+                None,
+                None,
+                Some("用量"),
+                None,
+                None,
+                None,
+            )
+            .expect("落库");
+        }
+        let (events, truncated) =
+            TaskService::scan_events(&conn, "t1", 0, EVENTS_KEEP_PER_TASK as usize);
+        assert!(truncated, "起点早于保留窗口应显式标记(不得假装「没有更多」)");
+        assert_eq!(events.len(), EVENTS_KEEP_PER_TASK as usize);
+        assert_eq!(seqs_of(&events).first(), Some(&2), "窗口删除后首条应为 seq=2");
+
+        // ⑤ 恰在窗口边缘(after+1 == 最小 seq)= 无缺口,不标截断
+        let (events, truncated) = TaskService::scan_events(&conn, "t1", 1, 10);
+        assert!(!truncated, "after+1 == 最小 seq 时没有丢行");
+        assert_eq!(seqs_of(&events).first(), Some(&2));
     }
 }
