@@ -116,7 +116,9 @@ impl TaskService {
         let Some((min_seq, max_seq)) = bounds else {
             return (Vec::new(), false);
         };
-        let after = after as i64;
+        // u64 → i64 用饱和转换:`after > i64::MAX` 的入参(如 u64::MAX)直接回绕成负数会把
+        // 「超过最新 seq」误判成「窗口前起点」——饱和到 i64::MAX 后按超界处理(回空 + 不标截断)
+        let after = i64::try_from(after).unwrap_or(i64::MAX);
         if after >= max_seq {
             return (Vec::new(), false);
         }
@@ -719,6 +721,13 @@ mod tests {
         assert!(events.is_empty() && !truncated);
         let (events, truncated) = TaskService::scan_events(&conn, "t1", 99, 100);
         assert!(events.is_empty() && !truncated);
+        // u64 超界(如 ?after=18446744073709551615)按「超过最新 seq」处理:
+        // 回绕成负数会把「超界」误判成「窗口前起点」(返回全量 + 误标 truncated),故饱和转换
+        let (events, truncated) = TaskService::scan_events(&conn, "t1", u64::MAX, 100);
+        assert!(
+            events.is_empty() && !truncated,
+            "u64 超界入参应回空且不标截断(不得回绕为负数)"
+        );
 
         // ④ 窗口截断:补到 2001 条 → after=0 标 truncated、首条 seq=2、恰回 2000 条
         for _ in 0..(EVENTS_KEEP_PER_TASK as usize + 1 - 3) {
