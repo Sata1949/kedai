@@ -1470,6 +1470,10 @@ pub async fn prompt_preview(
     };
     // 设置快照:不留锁跨 await(for_mode 为纯计算,锁在 snapshot 内即释放)
     let settings = state.settings_snapshot().for_mode(mode);
+    // 文学能力包(LIT-3):两段值取自设置层方法(开关判定 + 文本单一出处)。此处先取好——
+    // 下方若干 push 会按值移动 settings 的字段(如 reflect_advice_prompt),之后再借用会编译错。
+    let literary_tail = settings.literary_system_tail();
+    let literary_note = settings.literary_user_note();
     // agent_system_prompt 为 RoleplayPromptConfig(WP7),.0 取字符串
     if settings.agent_system_prompt.0.trim().is_empty() {
         // 空值回退文案按模式区分:roleplay 空 = 用内置人设模板;
@@ -1566,6 +1570,15 @@ pub async fn prompt_preview(
                     );
                 }
             }
+        }
+    }
+
+    // 文学能力包(LIT-3):位置 4(system 尾)增强段——在注入层之后(真实下发顺序:
+    // 简单注入/楼层 → 禁词提示 → 文学增强段 → system 压入消息)。判据与文本单一出处
+    // 在设置层方法;角色扮演侧专属(task 模式不经引擎装配点,不推送)。
+    if matches!(mode, AppMode::Roleplay) {
+        if let Some(tail) = literary_tail {
+            push_preview_layer(&mut layers, "literary_enhancement", "system", 4, tail);
         }
     }
 
@@ -1696,6 +1709,20 @@ pub async fn prompt_preview(
             0,
             settings.reflect_advice_prompt,
         );
+    }
+    // 文学能力包(LIT-3):位置 0 Author's Note 段——在反思建议之后、预设尾部之前;
+    // 随尾部角色(preset_tail_role,与真实下发同判据);按 untrusted_boundary 包裹展示
+    // (「预览即真实下发」:真实拼装侧即按此包裹)。
+    if matches!(mode, AppMode::Roleplay) {
+        if let Some(note) = literary_note {
+            push_preview_layer(
+                &mut layers,
+                "literary_note",
+                settings.preset_tail_role.clone(),
+                0,
+                crate::services::prompt_kit::untrusted_boundary("literary_note", note),
+            );
+        }
     }
     if !settings.preset_tail_prompt.trim().is_empty() {
         push_preview_layer(

@@ -27,9 +27,12 @@ function mountSection(props: { show?: boolean } = {}) {
   return { store, wrapper };
 }
 
-/** 本区有两个开关:0 = 角色扮演侧,1 = 任务侧 */
-function toggles(wrapper: ReturnType<typeof mount>) {
-  return wrapper.findAll('input[type="checkbox"]');
+/** 本区有两个开关:0 = 角色扮演侧,1 = 任务侧。取不到即抛——
+ *  不用非空断言(`x!`),避免推高 `check-frontend-lint` 的 ratchet 基线(只降不升)。 */
+function toggleAt(wrapper: ReturnType<typeof mount>, index: number) {
+  const box = wrapper.findAll('input[type="checkbox"]')[index];
+  if (!box) throw new Error(`缺少第 ${index} 个开关`);
+  return box;
 }
 
 describe('LiteraryBundleSection(文学能力包区)', () => {
@@ -43,10 +46,9 @@ describe('LiteraryBundleSection(文学能力包区)', () => {
     expect(wrapper.text()).toContain('启用文学能力包(角色扮演)');
     expect(wrapper.text()).toContain('任务模式启用文学能力包');
     expect(wrapper.text()).toContain('已关闭');
-    const boxes = toggles(wrapper);
-    expect(boxes).toHaveLength(2);
-    expect((boxes[0]!.element as HTMLInputElement).checked).toBe(false);
-    expect((boxes[1]!.element as HTMLInputElement).checked).toBe(false);
+    expect(wrapper.findAll('input[type="checkbox"]')).toHaveLength(2);
+    expect((toggleAt(wrapper, 0).element as HTMLInputElement).checked).toBe(false);
+    expect((toggleAt(wrapper, 1).element as HTMLInputElement).checked).toBe(false);
   });
 
   it('说明写清语义:只影响默认值 / 自定义优先 / 两模式各自生效 / 与编码包同开时编码优先', () => {
@@ -68,7 +70,7 @@ describe('LiteraryBundleSection(文学能力包区)', () => {
     const { store, wrapper } = mountSection();
     const spy = vi.spyOn(store, 'queueSettingsSave').mockResolvedValue(undefined);
 
-    await toggles(wrapper)[0]!.setValue(true);
+    await toggleAt(wrapper, 0).setValue(true);
     await Promise.resolve();
 
     expect(spy).toHaveBeenCalledWith({ literary_bundle_enabled: true });
@@ -81,12 +83,12 @@ describe('LiteraryBundleSection(文学能力包区)', () => {
     const { store, wrapper } = mountSection();
     const spy = vi.spyOn(store, 'queueSettingsSave').mockResolvedValue(undefined);
 
-    await toggles(wrapper)[1]!.setValue(true);
+    await toggleAt(wrapper, 1).setValue(true);
     await Promise.resolve();
     expect(spy).toHaveBeenCalledWith({ task_literary_bundle_enabled: true });
     expect(store.taskLiteraryBundleEnabled).toBe(true);
 
-    await toggles(wrapper)[1]!.setValue(false);
+    await toggleAt(wrapper, 1).setValue(false);
     await Promise.resolve();
     expect(spy).toHaveBeenLastCalledWith({ task_literary_bundle_enabled: false });
     expect(store.taskLiteraryBundleEnabled).toBe(false);
@@ -98,13 +100,13 @@ describe('LiteraryBundleSection(文学能力包区)', () => {
     await wrapper.vm.$nextTick();
     vi.spyOn(store, 'queueSettingsSave').mockRejectedValue(new Error('503 服务不可用'));
 
-    await toggles(wrapper)[0]!.setValue(true);
+    await toggleAt(wrapper, 0).setValue(true);
     await Promise.resolve();
     await Promise.resolve();
 
     expect(store.literaryBundleEnabled).toBe(false);
     expect(store.taskLiteraryBundleEnabled).toBe(true);
     expect(wrapper.text()).toContain('保存失败');
-    expect((toggles(wrapper)[0]!.element as HTMLInputElement).checked).toBe(false);
+    expect((toggleAt(wrapper, 0).element as HTMLInputElement).checked).toBe(false);
   });
 });

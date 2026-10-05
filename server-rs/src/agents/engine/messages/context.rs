@@ -45,6 +45,11 @@ pub(in crate::agents::engine) struct CollectedCtx {
     /// 文学能力包(LIT-2):开关开时引擎内置兜底模板的文学增强段(单一出处常量;
     /// build 层不读设置,由本层按扁平快照取好、经参数传入)。
     pub(in crate::agents::engine) literary_default_suffix: Option<&'static str>,
+    /// 文学能力包(LIT-3):位置 4(system 尾)增强段(开关开才 Some;计入 protected_tail)。
+    pub(in crate::agents::engine) literary_tail: Option<&'static str>,
+    /// 文学能力包(LIT-3):位置 0(最新消息尾)Author's Note 段(开关开才 Some;
+    /// 构建侧按 untrusted_boundary("literary_note") 包裹)。
+    pub(in crate::agents::engine) literary_note: Option<&'static str>,
     pub(in crate::agents::engine) inject_snapshot: PromptInjectConfig,
     pub(in crate::agents::engine) reflect_prompt: String,
     pub(in crate::agents::engine) reflect_advice_supplement: String,
@@ -395,6 +400,10 @@ impl AgentEngine {
         // 判据与文本的单一出处都在设置层(`RuntimeSettings::literary_rp_enhancement` + 常量),
         // 本层只做取值与传参——build 层保持无设置依赖。
         let literary_default_suffix = settings_snap.literary_rp_enhancement();
+        // 文学能力包(LIT-3):位置 4 增强段与位置 0 AN 段(同一开关、方法在设置层;
+        // 本层只取值传参,判据与文本不在调用点复制)
+        let literary_tail = settings_snap.literary_system_tail();
+        let literary_note = settings_snap.literary_user_note();
         // 反思提示词(空 = 机械规则检查;非空 = 反思步骤调用 LLM 判定)
         let reflect_prompt = settings_snap.reflect_prompt.clone();
         // 反思失败建议的补充说明(可选;主体建议由引擎自动生成,见 reflect_integration):
@@ -434,6 +443,8 @@ impl AgentEngine {
             history_summary,
             custom_prompt,
             literary_default_suffix,
+            literary_tail,
+            literary_note,
             inject_snapshot,
             reflect_prompt,
             reflect_advice_supplement,
@@ -482,10 +493,11 @@ impl AgentEngine {
             rctx.session_vars,
             rctx.assistant_vars,
             Some(&mut *scopes_guard),
-            // 文学能力包(LIT-2):兜底模板增强段(开关关为 None,行为与加参数前一致);
-            // 位置 4 / 位置 0 两段(LIT-3)在后续提交接入本结构
+            // 文学能力包(LIT-2/LIT-3):三段文本(全 None 时行为与加参数前一致)
             LiteraryTexts {
                 default_suffix: ctx.literary_default_suffix,
+                tail: ctx.literary_tail,
+                note: ctx.literary_note,
             },
         );
         drop(scopes_guard);

@@ -75,18 +75,24 @@ fn build_llm_messages(
         LiteraryTexts::default(),
     )
 }
-/// 文学能力包的文本参数(LIT-2 起;LIT-3 追加位置 4/位置 0 两段)。**文本单一出处**在
-/// 设置层(`services::settings_service::params` 的常量)，由装配层(`messages/context.rs`)
+/// 文学能力包的文本参数(LIT-2 / LIT-3)。**文本单一出处**在设置层
+/// (`services::settings_service::params` 的常量)，由装配层(`messages/context.rs`)
 /// 按扁平快照取好传入——build 层不读设置，保持纯粹、测试可直接注入字面文本。
 ///
 /// - `default_suffix`：**兜底模板增强段**(LIT-2)——仅「用户清空提示词框」的内置兜底
-///   路径生效；自定义/物化缺省提示词路径不由它追加。
+///   路径生效；自定义/物化缺省提示词路径不由它追加；
+/// - `tail`：**位置 4 system 尾增强段**(LIT-3)——任何路径都追加，计入 `protected_tail`，
+///   不经 untrusted 包裹(强制语气)；
+/// - `note`：**位置 0 Author's Note 段**(LIT-3)——随尾部角色落 user/assistant 尾，
+///   经 `untrusted_boundary("literary_note")` 包裹(素材语气)，不计 `protected_tail`。
 ///
 /// 全 `None` 时行为与加本参数前**逐字节一致**(开关关的回归钉子)。
 /// 结构体传参(而非逐个位置参数)：三段文本同源同判据，后续加字段不再改动各调用点。
 #[derive(Default, Clone, Copy)]
 pub(in crate::agents::engine) struct LiteraryTexts<'a> {
     pub(in crate::agents::engine) default_suffix: Option<&'a str>,
+    pub(in crate::agents::engine) tail: Option<&'a str>,
+    pub(in crate::agents::engine) note: Option<&'a str>,
 }
 
 /// build_llm_messages 的 6 层位置版本(位置定义见 build_llm_messages 文档)。
@@ -143,6 +149,12 @@ pub(in crate::agents::engine) fn build_llm_messages_with_position(
     // 无用户消息时(空历史/仅 assistant 历史):位置1 激发与位置0 预设尾部没有可追加的
     // user 消息,退化为并入 system 兜底(避免凭空新增 user 消息干扰对话流)。
     let has_user = history.iter().any(|(r, _)| r == "user");
+    // 文学能力包(LIT-3):位置 0 Author's Note 段(空则 None)。经 untrusted 包裹 = 素材语气
+    // (强制语气归位置 4 段);不计 protected_tail —— 诚实边界:极端裁剪下可被切。
+    let literary_note = literary
+        .note
+        .filter(|n| !n.trim().is_empty())
+        .map(|n| untrusted_boundary("literary_note", n));
     // 位置3 常驻 system 角色 → 并入 system 文本;无 user 时激发/预设尾部也并入兜底
     let sys_world: String = if has_user {
         world_constant
@@ -161,6 +173,11 @@ pub(in crate::agents::engine) fn build_llm_messages_with_position(
             if !a.trim().is_empty() {
                 parts.push(a.to_string());
             }
+        }
+        // 文学能力包(LIT-3):位置 0 AN 段(退化分支并入 system 兜底;顺序同 live 分支:
+        // 激发 → 反思建议 → AN → 预设尾部)
+        if let Some(n) = &literary_note {
+            parts.push(n.clone());
         }
         if let Some(t) = preset_tail {
             parts.push(t.to_string());
@@ -271,6 +288,16 @@ pub(in crate::agents::engine) fn build_llm_messages_with_position(
         }
     }
 
+    // 文学能力包(LIT-3):位置 4 增强段 —— 插在 system 压入消息**之前**(此后 sys 不再使用),
+    // 计入 protected_tail(极端裁剪下不可被切);不经 untrusted 包裹(可用强制语气)。
+    // 段文本同轮恒定(无时间戳/随机序),不破坏前缀缓存假设。
+    if let Some(t) = literary.tail {
+        if !t.trim().is_empty() {
+            protected_tail += t.chars().count();
+            sys.push_str(&format!("\n\n{t}"));
+        }
+    }
+
     messages.push(LlmMessage::plain("system", &sys));
     // 位置4 非系统角色楼层:紧随 system,保持楼层 order 顺序
     // (空内容跳过:导入 ST 预设时纯 {{addvar}} 累积宏楼层展开为空,避免产生空 user/assistant 消息)
@@ -317,6 +344,13 @@ pub(in crate::agents::engine) fn build_llm_messages_with_position(
                 }
             }
         }
+        // 文学能力包(LIT-3):位置 0 AN 段(反思建议之后、预设尾部之前;随尾部角色,
+        // 与该侧预设尾部同命 —— 都在位置 0、都可被极端裁剪切掉)
+        if tail_role == "user" {
+            if let Some(n) = &literary_note {
+                user_tail.push(n.clone());
+            }
+        }
         if let Some(t) = preset_tail {
             if tail_role == "user" {
                 let expanded = expand_macros(t, &mut mctx);
@@ -344,6 +378,12 @@ pub(in crate::agents::engine) fn build_llm_messages_with_position(
                 if !a.trim().is_empty() {
                     assistant_tail.push(a.to_string());
                 }
+            }
+        }
+        // 文学能力包(LIT-3):位置 0 AN 段(assistant 侧对称:反思建议之后、预设尾部之前)
+        if tail_role == "assistant" {
+            if let Some(n) = &literary_note {
+                assistant_tail.push(n.clone());
             }
         }
         if let Some(t) = preset_tail {
@@ -565,6 +605,7 @@ mod tests {
             None,
             LiteraryTexts {
                 default_suffix: Some("【文学增强纪律】\n测试增强段"),
+                ..Default::default()
             },
         );
         let sys = &msgs2[0].content;
@@ -595,6 +636,7 @@ mod tests {
             None,
             LiteraryTexts {
                 default_suffix: Some("【文学增强纪律】\n测试增强段"),
+                ..Default::default()
             },
         );
         assert!(

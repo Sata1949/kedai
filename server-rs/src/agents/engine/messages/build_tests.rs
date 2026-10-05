@@ -14,6 +14,7 @@ use crate::services::prompt_inject_service::PromptInjectConfig;
 use std::collections::HashMap;
 
 use super::build::{build_llm_messages_with_position, LiteraryTexts};
+use super::trim_to_context;
 
 /// 构造带角色的世界书注入(6 层规范测试用)
 fn inj(role: &str, text: &str) -> WorldInjection {
@@ -1097,4 +1098,161 @@ fn history_images_attach_by_index() {
     assert!(msgs[2].images.is_empty());
     assert!(msgs[3].images.is_empty());
     assert!(msgs[0].images.is_empty(), "system 不携带图像");
+}
+
+/// 文学能力包(LIT-3):位置 4 段落 system 末尾且计入 protected_tail;位置 0 AN 段落尾部
+/// 消息(不新增消息),顺序 激发 < 反思建议 < AN < 预设尾部;AN 经
+/// `untrusted_boundary("literary_note")` 包裹;assistant 侧尾部角色时对称落 assistant 消息。
+#[test]
+fn literary_tail_and_note_land_at_positions() {
+    const TAIL: &str = "【文学增强段】测试用位置4段";
+    const NOTE: &str = "本轮创作倾向:测试用位置0段";
+    let mut vars = HashMap::new();
+    let (messages, protected_tail) = build_llm_messages_with_position(
+        "芽衣",
+        "兔族少女。",
+        "",
+        "",
+        &[],
+        &[inj("user", "TRIGGERED 激发")],
+        &[("user".to_string(), "用户正文".to_string())],
+        &[],
+        Some("CUSTOM 模板"),
+        None,
+        Some("PRESET TAIL"),
+        "user",
+        Some("REFLECT ADVICE"),
+        "user",
+        &mut vars,
+        &mut AssistantVars::new(),
+        None,
+        LiteraryTexts {
+            tail: Some(TAIL),
+            note: Some(NOTE),
+            ..Default::default()
+        },
+    );
+    // 段并入既有消息,不新增消息(恰 system + 尾部 user)
+    assert_eq!(messages.len(), 2, "消息序列: {messages:?}");
+    assert!(
+        messages[0].content.ends_with(TAIL),
+        "位置 4 段应在 system 末尾: {}",
+        messages[0].content
+    );
+    assert!(
+        protected_tail >= TAIL.chars().count(),
+        "位置 4 段长度应计入 protected_tail"
+    );
+    let tail = &messages[1].content;
+    let pos = |needle: &str| {
+        tail.find(needle)
+            .unwrap_or_else(|| panic!("尾部消息缺 {needle}: {tail}"))
+    };
+    assert!(pos("TRIGGERED 激发") < pos("REFLECT ADVICE"));
+    assert!(pos("REFLECT ADVICE") < pos(NOTE), "AN 应在反思建议之后");
+    assert!(pos(NOTE) < pos("PRESET TAIL"), "AN 应在预设尾部之前");
+    assert!(
+        tail.contains(r#"<UNTRUSTED_PROMPT_SOURCE source="literary_note">"#),
+        "AN 段应经 untrusted 包裹: {tail}"
+    );
+
+    // assistant 侧尾部角色:AN 对称落 assistant 尾部消息(在预设尾部之前,不重复落 user 侧)
+    let mut vars2 = HashMap::new();
+    let (msgs2, _) = build_llm_messages_with_position(
+        "芽衣",
+        "兔族少女。",
+        "",
+        "",
+        &[],
+        &[],
+        &[("user".to_string(), "用户正文".to_string())],
+        &[],
+        Some("CUSTOM 模板"),
+        None,
+        Some("PRESET TAIL"),
+        "assistant",
+        None,
+        "user",
+        &mut vars2,
+        &mut AssistantVars::new(),
+        None,
+        LiteraryTexts {
+            tail: Some(TAIL),
+            note: Some(NOTE),
+            ..Default::default()
+        },
+    );
+    // assistant 侧尾部角色:AN 对称落 assistant 尾部(该侧尾部各项为独立消息,逐条 push;
+    // AN 在预设尾部那条之前,且不重复落 user 侧)
+    let asst_msgs: Vec<&LlmMessage> = msgs2.iter().filter(|m| m.role == "assistant").collect();
+    assert_eq!(
+        asst_msgs.len(),
+        2,
+        "应有两条 assistant 尾部消息(AN + 预设尾部): {msgs2:?}"
+    );
+    assert!(
+        asst_msgs[0].content.contains(NOTE),
+        "AN 应为首条 assistant 尾部消息: {}",
+        asst_msgs[0].content
+    );
+    assert!(
+        asst_msgs[1].content.contains("PRESET TAIL"),
+        "预设尾部应在其后: {}",
+        asst_msgs[1].content
+    );
+    assert!(
+        !msgs2[1].content.contains(NOTE),
+        "assistant 侧时 AN 不重复落 user 侧"
+    );
+}
+
+/// 文学能力包(LIT-3)诚实边界(机器可见断言):位置 4 段计入 protected_tail —— 极端裁剪后
+/// 仍在 system 里;位置 0 AN 段不计,随其所在消息被裁掉。
+#[test]
+fn literary_tail_survives_extreme_trim_while_note_can_be_cut() {
+    const TAIL: &str = "【文学增强段】测试用位置4段";
+    const NOTE: &str = "本轮创作倾向:测试用位置0段";
+    let mut vars = HashMap::new();
+    let (mut messages, protected_tail) = build_llm_messages_with_position(
+        "芽衣",
+        "兔族少女。",
+        "",
+        "",
+        &[inj("system", &"长".repeat(2000))],
+        &[],
+        &[("user".to_string(), "你好".to_string())],
+        &[],
+        None,
+        None,
+        None,
+        "user",
+        None,
+        "user",
+        &mut vars,
+        &mut AssistantVars::new(),
+        None,
+        LiteraryTexts {
+            tail: Some(TAIL),
+            note: Some(NOTE),
+            ..Default::default()
+        },
+    );
+    assert!(messages[1].content.contains(NOTE), "初始构建应含 AN 段");
+    let mut ts = crate::services::token_service::TokenService::new();
+    trim_to_context(
+        &mut messages,
+        Some(50),
+        &mut ts,
+        "deepseek-v4-flash",
+        protected_tail,
+    );
+    assert_eq!(messages.len(), 1, "极端预算下仅剩 system");
+    assert!(
+        messages[0].content.contains(TAIL),
+        "位置 4 段因计入 protected_tail 必须保留"
+    );
+    assert!(
+        !messages[0].content.contains(NOTE),
+        "位置 0 AN 段随其消息被裁掉(诚实边界,写成机器可见断言)"
+    );
 }

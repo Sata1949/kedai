@@ -672,3 +672,87 @@ async fn literary_bundle_switches_are_flat_and_overlay_respectively() {
     .await;
     assert_eq!(status, StatusCode::OK);
 }
+
+/// 文学能力包(LIT-3)预览同步:开关开时角色扮演预览应含「位置 4 增强段」与「位置 0 AN 段」
+/// 两层(层号 4/0,AN 段经 untrusted 包裹);task 模式预览不含(角色扮演侧专属)。
+/// 共享 app 下取现场值写入 + 卫生复位(净零影响,顺序无关)。
+#[tokio::test]
+async fn prompt_preview_shows_literary_layers_when_enabled() {
+    let _guard = test_lock().await;
+    let app = test_app();
+
+    // 现场值(共享 app;净零复位目标)
+    let (_, before_rp) = send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
+    let flat_before = before_rp["literary_bundle_enabled"].clone();
+
+    // 先关(确保下游断言可判别),再开
+    let (status, r) = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=roleplay",
+        json!({ "literary_bundle_enabled": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "关包失败:{r}");
+    let (status, r) = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=roleplay",
+        json!({ "literary_bundle_enabled": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "开包失败:{r}");
+
+    // 角色扮演预览:两层都在,层号与 source 名正确;AN 段经 untrusted 包裹
+    let (status, preview) = send_json(app, "GET", "/api/settings/prompt-preview", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let layers = preview["layers"].as_array().cloned().unwrap_or_default();
+    let find = |src: &str| layers.iter().find(|l| l["source"] == json!(src));
+    let tail = find("literary_enhancement").unwrap_or_else(|| panic!("缺位置 4 层:{preview}"));
+    assert_eq!(tail["role"], "system");
+    assert_eq!(tail["layer"], 4);
+    assert!(tail["content"]
+        .as_str()
+        .unwrap_or("")
+        .contains("【文学增强段】"));
+    let note = find("literary_note").unwrap_or_else(|| panic!("缺位置 0 层:{preview}"));
+    assert_eq!(note["role"], "user");
+    assert_eq!(note["layer"], 0);
+    assert!(
+        note["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains(r#"<UNTRUSTED_PROMPT_SOURCE source="literary_note">"#),
+        "AN 层应经 untrusted 包裹(与真实下发一致):{note}"
+    );
+
+    // task 模式预览不含这两层(角色扮演侧专属)
+    let (_, task_preview) = send_json(
+        app,
+        "GET",
+        "/api/settings/prompt-preview?mode=task",
+        json!({}),
+    )
+    .await;
+    let task_layers = task_preview["layers"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !task_layers
+            .iter()
+            .any(|l| l["source"] == json!("literary_enhancement")
+                || l["source"] == json!("literary_note")),
+        "task 预览不得含文学包两层:{task_preview}"
+    );
+
+    // 卫生复位(写回现场值;共享 app 对本用例之外零影响)
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=roleplay",
+        json!({ "literary_bundle_enabled": flat_before }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
