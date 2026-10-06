@@ -4,7 +4,7 @@
 #
 # 背景:.git/hooks/ 不在版本控制内(换机/重新 clone 会丢失),故把 hook 脚本放在
 # tools/hooks/ 纳入版本控制,由本脚本复制安装。装了 hook 的分支在 push 前会跑
-# check-all.ps1 -Quick,失败即中止推送。
+# check-all.ps1 -Quick -Bundle(体积两段自 2026-10-06 FE-10 起纳入),失败即中止推送。
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $src = Join-Path $PSScriptRoot 'hooks\pre-push'
@@ -24,5 +24,5 @@ if ($bash) {
     & $bash.Source -c "chmod +x '$($dst -replace '\\','/')'" 2>$null
 }
 
-Write-Host "    推送前将运行:tools/check-all.ps1 -Quick" -ForegroundColor Cyan
+Write-Host "    推送前将运行:tools/check-all.ps1 -Quick -Bundle(含 vite build + 体积预算)" -ForegroundColor Cyan
 Write-Host "    紧急绕过:git push --no-verify(交付前须补跑完整检查)" -ForegroundColor Yellow

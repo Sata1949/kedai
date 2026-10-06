@@ -1,6 +1,9 @@
 ﻿# check-all.ps1 — 本地 CI 一键检查:后端 fmt/clippy/test + 前端 typecheck/test/build
 # 用法: npm run check  |  或 powershell -NoProfile -ExecutionPolicy Bypass -File tools/check-all.ps1
 # 参数: -SkipRust 跳过后端编译; -SkipWeb 跳过前端编译; -Quick 只跑 test 不跑 build;
+#       -Bundle 即便在 -Quick 下也运行体积两段(web: vite build + bundle budget):
+#       pre-push 用「-Quick -Bundle」兜住体积退化(FE-10);build.ps1 的 -Quick 不带它,
+#       以避开与 [1/3] 的重复构建。
 #       -AuditOnly 只跑审计段(两把 Cargo.lock + npm 生产依赖),跳过全部编译/测试/构建;
 #       -StrictTypecheck 历史保留参数(2026-09-08 起 typecheck 已是硬门禁,此开关无差异)
 #       -StrictAudit 历史保留参数(2026-09-13 起 cargo audit 已是硬门禁,此开关无差异)
@@ -16,6 +19,9 @@ param(
     [switch]$SkipRust,
     [switch]$SkipWeb,
     [switch]$Quick,
+    # FE-10(2026-10-06):pre-push 走 -Quick -Bundle,把「体积预算」纳入推送前路径。
+    # 体积段 fail-closed 且消费 web/dist,故必须与 vite build 成对运行(先构建后判定)。
+    [switch]$Bundle,
     [switch]$AuditOnly,
     [switch]$StrictTypecheck,
     [switch]$StrictAudit,
@@ -259,11 +265,12 @@ if (-not $SkipWeb -and -not $AuditOnly) {
         # -StrictTypecheck 参数保留兼容(已无分支差异)
         Invoke-Stage 'web: vue-tsc --noEmit'    { npm run typecheck -w web }
         Invoke-Stage 'web: vitest run'          { npm test -w web }
-        if (-not $Quick) {
+        if (-not $Quick -or $Bundle) {
             Invoke-Stage 'web: vite build'      { npm run build -w web }
             # 体积预算门禁(2026-09-17 P-12 新增):断言首屏 gzip 总量、各 chunk gzip 体积、
             # 以及「首屏不得预载 modal-* 弹窗 chunk」(P-8 的固化护栏)。构建成功 ≠ 体积没退化,
             # 故必须紧跟 build 后跑;fail-closed(web/dist 缺失即 FAIL)。基线与 ratchet 纪律见脚本头。
+            # FE-10:本段此前只在完整档跑,pre-push(-Quick)看不到;现由 -Bundle 纳入推送前路径。
             Invoke-Stage 'web: bundle budget'   { node tools/check-bundle.mjs }
         }
     } finally { Pop-Location }
