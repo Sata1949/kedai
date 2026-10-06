@@ -128,7 +128,10 @@ fn finalize_library(mut lib: AgentFlowLibrary) -> AgentFlowLibrary {
 ///
 /// **LIT-5(2026-10-06)**:文学包流程(a) 不复活**已落地**——用户改过 / 删过就是用户资产,
 /// 语义由 [`merge_pack_flows`] 的账目承担,本函数只管「该并入哪些」。
-pub fn pack_flows(coding_bundle_enabled: bool, literary_bundle_enabled: bool) -> Vec<AgentFlowConfig> {
+pub fn pack_flows(
+    coding_bundle_enabled: bool,
+    literary_bundle_enabled: bool,
+) -> Vec<AgentFlowConfig> {
     let mut packs: Vec<AgentFlowConfig> = Vec::new();
     if coding_bundle_enabled {
         packs.extend(coding_pack_flows());

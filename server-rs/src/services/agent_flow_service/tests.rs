@@ -2068,12 +2068,8 @@ fn literary_pack_flows_merge_and_respect_user_changes() {
     );
     let dir5 = TempDataDir::new("litpack-import");
     let mut dst = service(&dir5); // 目标库:两包都关,包流程靠导入进来
-    dst.import_bundle(
-        bundle.flows.clone(),
-        None,
-        ImportConflictMode::Rename,
-    )
-    .unwrap();
+    dst.import_bundle(bundle.flows.clone(), None, ImportConflictMode::Rename)
+        .unwrap();
     let got = dst
         .flow_by_id("builtin-lit-consistency")
         .expect("导入后应可检索到文学包流程");

@@ -1257,7 +1257,9 @@ pub async fn update_settings(
     // 流程库是双模式共用设施,任一侧显式启用即并入。
     let coding_enabled = candidate.for_mode(AppMode::Task).task_coding_bundle_enabled;
     let literary_enabled = candidate.literary_bundle_enabled
-        || candidate.for_mode(AppMode::Task).task_literary_bundle_enabled;
+        || candidate
+            .for_mode(AppMode::Task)
+            .task_literary_bundle_enabled;
     let flow = state.flow.clone();
     if let Err(e) = state
         .db_call(move || {

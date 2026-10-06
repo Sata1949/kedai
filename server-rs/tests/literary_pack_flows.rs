@@ -158,7 +158,11 @@ async fn literary_pack_flows_follow_either_switch() {
         .iter()
         .map(|f| f["id"].as_str().unwrap())
         .collect();
-    for id in ["builtin-lit-chapter", "builtin-lit-polish", "builtin-lit-consistency"] {
+    for id in [
+        "builtin-lit-chapter",
+        "builtin-lit-polish",
+        "builtin-lit-consistency",
+    ] {
         assert!(exported.contains(&id), "导出应含 {id}: {exported:?}");
     }
 }

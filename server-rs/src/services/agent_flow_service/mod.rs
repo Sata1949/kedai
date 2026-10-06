@@ -34,9 +34,9 @@ pub use library::builtin_flow;
 // 内置流程并入缝(CODE-5 包流程 + FLOW-DEMO-1 示范流程 + LIT-5 文学包流程):
 // 生产侧由 service.rs 经 super::* 使用;`coding_pack_flows` / `literary_pack_flows`
 // 只有测试直接引用(生产只经 pack_flows 间接消费),故单独标 cfg(test) 免 unused 告警
+pub(crate) use library::{builtin_demo_flows, merge_pack_flows, pack_flows};
 #[cfg(test)]
 pub(crate) use library::{coding_pack_flows, literary_pack_flows};
-pub(crate) use library::{builtin_demo_flows, merge_pack_flows, pack_flows};
 pub use subflow::{expand_sub_flows, flow_label, validate_sub_flows};
 
 #[cfg(test)]

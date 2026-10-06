@@ -1741,7 +1741,10 @@ mod tests {
         s.literary_style_preset = "hardboiled".into();
         let text = s.literary_style_note().expect("命中档应注入");
         assert!(text.contains("悬疑冷硬"), "应取到「悬疑冷硬」档:{text}");
-        assert!(text.contains("忌讳"), "档文本应含忌讳条(可编辑常量的一部分)");
+        assert!(
+            text.contains("忌讳"),
+            "档文本应含忌讳条(可编辑常量的一部分)"
+        );
 
         // ③ 合法性判据
         for ok in ["", "plain", "classical", "lightnovel", "hardboiled"] {
@@ -1810,7 +1813,10 @@ mod tests {
                 matches!(v.compaction_mode, "off" | "manual" | "auto"),
                 "{k} 的压缩模式取值非法"
             );
-            assert!((0.5..=0.95).contains(&v.compaction_threshold), "{k} 阈值越界");
+            assert!(
+                (0.5..=0.95).contains(&v.compaction_threshold),
+                "{k} 阈值越界"
+            );
             assert!(
                 (2..=200).contains(&v.compaction_keep_recent),
                 "{k} 保留条数越界"
@@ -1835,7 +1841,10 @@ mod tests {
         )
         .unwrap();
         let loaded = RuntimeSettings::load(&dir, &cfg);
-        assert_eq!(loaded.literary_recommend_preset, "", "存量未知档应归一化为空串");
+        assert_eq!(
+            loaded.literary_recommend_preset, "",
+            "存量未知档应归一化为空串"
+        );
     }
 
     /// 模式隔离不因新增角色扮演默认词而退化:

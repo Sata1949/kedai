@@ -4,7 +4,9 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use kedai_server::build_test_app;
-use kedai_server::services::settings_service::{default_literary_reflect_prompt, default_reflect_prompt};
+use kedai_server::services::settings_service::{
+    default_literary_reflect_prompt, default_reflect_prompt,
+};
 use serde_json::{json, Value};
 use std::sync::OnceLock;
 use tokio::sync::{Mutex, MutexGuard};
@@ -747,10 +749,7 @@ async fn prompt_preview_shows_literary_layers_when_enabled() {
         .iter()
         .position(|l| l["source"] == json!("literary_note"))
         .unwrap();
-    assert!(
-        style_idx < note_idx,
-        "预览层序应为「文风 → AN」:{preview}"
-    );
+    assert!(style_idx < note_idx, "预览层序应为「文风 → AN」:{preview}");
 
     // task 模式预览不含这三层(角色扮演侧专属)
     let (_, task_preview) = send_json(
@@ -970,7 +969,11 @@ async fn flipping_literary_bundle_rehydrates_reflect_prompt_without_restart() {
     .await;
     assert_eq!(status, StatusCode::OK, "预置失败:{r}");
     let (_, v) = send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
-    assert_eq!(v["reflect_prompt"], json!(plain_default), "开关关 → 逐字等于现行版");
+    assert_eq!(
+        v["reflect_prompt"],
+        json!(plain_default),
+        "开关关 → 逐字等于现行版"
+    );
 
     // ② 开包(同一实例、不重启)→ 立即重物化为文学版
     let (status, r) = send_json(
@@ -998,7 +1001,11 @@ async fn flipping_literary_bundle_rehydrates_reflect_prompt_without_restart() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let (_, v) = send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
-    assert_eq!(v["reflect_prompt"], json!(plain_default), "关包 → 回落现行版");
+    assert_eq!(
+        v["reflect_prompt"],
+        json!(plain_default),
+        "关包 → 回落现行版"
+    );
 
     // ④ 自定义文本不被覆盖(开关开也不动)
     let (status, _) = send_json(
