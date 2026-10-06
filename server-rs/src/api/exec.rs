@@ -26,7 +26,7 @@ pub struct AuditQuery {
     /// chat | task | android
     #[serde(default)]
     pub source: Option<String>,
-    /// safe | sensitive | destructive | admin
+    /// safe | sensitive | destructive | admin | screen_input
     #[serde(default)]
     pub risk: Option<String>,
 }

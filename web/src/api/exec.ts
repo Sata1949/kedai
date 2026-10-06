@@ -5,8 +5,8 @@ import { request } from './client';
 /** 执行器等级(与 Rust ShellTier serde snake_case 对齐) */
 export type ShellTier = 'root' | 'shizuku' | 'sandbox' | 'disabled';
 
-/** 命令风险级别(与 Rust CommandRisk serde snake_case 对齐) */
-export type CommandRiskLevel = 'safe' | 'sensitive' | 'destructive' | 'admin';
+/** 命令风险级别(与 Rust CommandRisk serde snake_case 对齐;CU-1 新增 screen_input) */
+export type CommandRiskLevel = 'safe' | 'sensitive' | 'destructive' | 'admin' | 'screen_input';
 
 /** 执行器等级状态(含 Shizuku 环境信息;与 api/exec.rs 的响应对齐) */
 export interface ExecTierInfo {

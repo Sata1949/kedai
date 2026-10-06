@@ -143,6 +143,23 @@ describe('AndroidExecSection 组件(阶段 E)', () => {
     expect(wrapper.text()).toContain('已拒绝');
   });
 
+  it('CU-1 屏幕/输入类审计行渲染类别标签(screen_input → 屏幕/输入)', async () => {
+    vi.mocked(execApi.listExecAudit).mockResolvedValue([
+      {
+        id: 3, ts: '2026-10-06T12:00:00Z', source: 'chat', task_id: null, session_id: 's1',
+        command: 'input tap 100 200', shell: 'sh', tier: 'sandbox', risk: 'screen_input',
+        decision: 'denied', exit_code: null,
+        stdout_summary: '', stderr_summary: '屏幕/输入类命令需逐条确认', risk_flag: '',
+      },
+    ]);
+    const { wrapper } = await mountSection();
+
+    expect(wrapper.text()).toContain('input tap 100 200');
+    // 类别标签必须展示中文名而不是裸 wire 值(screen_input)
+    expect(wrapper.text()).toContain('屏幕/输入');
+    expect(wrapper.findAll('.sv-audit-row.denied').length).toBe(1);
+  });
+
   it('Android 平台展示当前执行器等级(等级可见)', async () => {
     platform.isAndroidTauri = true;
     vi.mocked(execApi.getExecTier).mockResolvedValue(

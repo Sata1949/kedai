@@ -45,6 +45,8 @@ const RISK_LABEL: Record<string, string> = {
   sensitive: '写入',
   destructive: '破坏性',
   admin: '提权/系统',
+  // CU-1:屏幕/输入类(input/screencap/uiautomator/dumpsys/ime;任何模式不自动放行)
+  screen_input: '屏幕/输入',
 };
 const TIER_LABEL: Record<string, string> = {
   root: 'ROOT 提权',
@@ -252,6 +254,7 @@ onMounted(() => {
         <option value="sensitive">写入</option>
         <option value="destructive">破坏性</option>
         <option value="admin">提权/系统</option>
+        <option value="screen_input">屏幕/输入</option>
       </select>
       <button class="sv-btn ghost sv-btn-sm" :disabled="auditLoading" @click="loadAudit">刷新</button>
       <button class="sv-btn ghost sv-btn-sm" @click="clearAudit">清空</button>

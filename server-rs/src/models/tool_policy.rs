@@ -84,11 +84,16 @@ impl AuthorizationMode {
 
 /// 命令风险级别（执行类工具的判定依据）。
 ///
-/// 四级，危险度递增：`Safe < Sensitive < Destructive < Admin`。
+/// 五级，取最高危聚合序：`Safe < Sensitive < Destructive < Admin < ScreenInput`。
 /// - `Safe`：只读检视类，不修改任何状态
 /// - `Sensitive`：工作区内写（建文件/复制/移动/就地编辑/重定向）
 /// - `Destructive`：可能造成不可逆数据丢失（删除、格式化、覆写设备）
 /// - `Admin`：提权或系统级控制（su/sudo/服务管理/网络配置/包管理/设备控制）
+/// - `ScreenInput`：屏幕/输入类（Android 设备控制原语：input/screencap/uiautomator/
+///   dumpsys/ime）。**任何授权模式都不自动放行**（与 Destructive/Admin 同级硬门）；
+///   单列成类是因为它的后果既非「破坏数据」也非「提权」，而是「代替用户操作真实设备/
+///   读取屏幕」——确认卡与审计需要不同措辞。**Ord 位置在最右只是「多段取最高危」的
+///   聚合语义，不代表它比 Admin 更危险。**
 ///
 /// **定位**：本枚举只做**语义标注**，不构成安全边界。命令字符串可被混淆/拼接/编码绕过，
 /// 静态匹配天然不完备——真正的边界是「三档授权矩阵 + 高风险逐条确认 + 审计留痕」，
@@ -102,6 +107,7 @@ pub enum CommandRisk {
     Sensitive,
     Destructive,
     Admin,
+    ScreenInput,
 }
 
 impl CommandRisk {
@@ -111,13 +117,15 @@ impl CommandRisk {
             Self::Sensitive => "sensitive",
             Self::Destructive => "destructive",
             Self::Admin => "admin",
+            Self::ScreenInput => "screen_input",
         }
     }
 
     /// 是否必须逐条确认（不受授权模式影响）。
     /// 这是风险分级与权限裁决之间的**唯一接口契约**：危险级永远要人点头。
+    /// 屏幕/输入类与 Destructive/Admin 同级受此硬门保护（CU-1，2026-10-06）。
     pub fn requires_explicit_confirm(&self) -> bool {
-        matches!(self, Self::Destructive | Self::Admin)
+        matches!(self, Self::Destructive | Self::Admin | Self::ScreenInput)
     }
 
     /// 面向用户的中文标签（确认卡与审计面板用）。
@@ -127,6 +135,7 @@ impl CommandRisk {
             Self::Sensitive => "写入",
             Self::Destructive => "破坏性",
             Self::Admin => "提权/系统",
+            Self::ScreenInput => "屏幕/输入",
         }
     }
 }
@@ -195,6 +204,11 @@ mod tests {
             serde_json::to_string(&CommandRisk::Destructive).unwrap(),
             "\"destructive\""
         );
+        // CU-1 新增值（线格式加性变更，既有四值不变）
+        assert_eq!(
+            serde_json::to_string(&CommandRisk::ScreenInput).unwrap(),
+            "\"screen_input\""
+        );
     }
 
     #[test]
@@ -216,19 +230,23 @@ mod tests {
     }
 
     /// 危险级必须逐条确认；这是「危险级永远要人点头」的最小断言。
+    /// CU-1 起屏幕/输入类（ScreenInput）与 Destructive/Admin 同级受硬门保护。
     #[test]
-    fn only_destructive_and_admin_require_explicit_confirm() {
+    fn explicit_confirm_covers_destructive_admin_and_screen_input() {
         assert!(!CommandRisk::Safe.requires_explicit_confirm());
         assert!(!CommandRisk::Sensitive.requires_explicit_confirm());
         assert!(CommandRisk::Destructive.requires_explicit_confirm());
         assert!(CommandRisk::Admin.requires_explicit_confirm());
+        assert!(CommandRisk::ScreenInput.requires_explicit_confirm());
     }
 
     /// 派生序用于「多命令串联取最高危」，顺序不可调换。
+    /// ScreenInput 置最右：多段聚合时它必须胜出（否则「ls && screencap」会被降级放行）。
     #[test]
     fn severity_order_is_ascending() {
         assert!(CommandRisk::Safe < CommandRisk::Sensitive);
         assert!(CommandRisk::Sensitive < CommandRisk::Destructive);
         assert!(CommandRisk::Destructive < CommandRisk::Admin);
+        assert!(CommandRisk::Admin < CommandRisk::ScreenInput);
     }
 }

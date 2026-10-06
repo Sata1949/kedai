@@ -146,13 +146,22 @@ impl ToolPermissionManager {
         if action.is_exec_op() {
             let cmd_risk = action.exec_risk.unwrap_or(CommandRisk::Admin);
             if cmd_risk.requires_explicit_confirm() {
+                // 屏幕/输入类单列措辞(CU-1,2026-10-06):它的后果既非「破坏数据」也非
+                // 「提权」,而是代替用户操作真实设备/读取屏幕——确认卡与审计需能区分。
+                let reason = if cmd_risk == CommandRisk::ScreenInput {
+                    "屏幕/输入类命令需逐条确认(会代替用户操作真实设备/读取屏幕),\
+                     不受任何授权豁免;任务模式不支持"
+                        .to_string()
+                } else {
+                    format!(
+                        "高危命令({})需逐条确认,不受任何授权豁免;任务模式不支持高危命令",
+                        cmd_risk.label()
+                    )
+                };
                 return PermissionDecision {
                     allowed: false,
                     risk,
-                    reason: format!(
-                        "高危命令({})需逐条确认,不受任何授权豁免;任务模式不支持高危命令",
-                        cmd_risk.label()
-                    ),
+                    reason,
                 };
             }
         }
@@ -949,6 +958,76 @@ mod tests {
             false,
         );
         assert!(d.allowed, "普通命令应经任务白名单放行:{}", d.reason);
+    }
+
+    /// ★ CU-1(2026-10-06):屏幕/输入类命令提级的核心契约——任何授权模式都不自动放行,
+    /// 含 Bypass、任务白名单(custom_authorized=true)与工具级显式授权;
+    /// 理由须带「屏幕/输入」类别标签与后果说明(确认卡据此展示)。
+    #[test]
+    fn screen_input_commands_never_auto_allowed_in_any_mode() {
+        let m = ToolPermissionManager::in_memory();
+        for cmd in ["screencap -p /sdcard/a.png", "input tap 100 200"] {
+            let a = exec_action(cmd);
+            assert!(a.is_exec_op(), "{cmd} 应归类为 Exec");
+            assert_eq!(
+                a.exec_risk,
+                Some(crate::tools::command_risk::CommandRisk::ScreenInput),
+                "{cmd} 应判为屏幕/输入类"
+            );
+            for mode in [
+                AuthorizationMode::Strict,
+                AuthorizationMode::Loose,
+                AuthorizationMode::Bypass,
+            ] {
+                let d = decide_with(&m, "bash", mode, &a);
+                assert!(
+                    !d.allowed,
+                    "{cmd} 在 {mode:?} 下不应自动放行;理由:{}",
+                    d.reason
+                );
+                assert!(
+                    d.reason.contains("屏幕/输入"),
+                    "理由应含类别标签:{}",
+                    d.reason
+                );
+                assert!(
+                    d.reason.contains("逐条确认"),
+                    "理由应说明需确认:{}",
+                    d.reason
+                );
+                assert!(
+                    d.reason.contains("代替用户操作真实设备"),
+                    "理由应含后果说明:{}",
+                    d.reason
+                );
+            }
+            // 任务白名单(无人值守)→ 直接拒绝,不得放行
+            let ctx = ToolContext {
+                session_id: "task:s1".into(),
+                character_id: String::new(),
+                agent_depth: 0,
+                scope: None,
+                budget: None,
+            };
+            let d = m.decide_with_policy(
+                "bash",
+                &ctx,
+                true,
+                true,
+                AuthorizationMode::Loose,
+                &a,
+                false,
+            );
+            assert!(
+                !d.allowed,
+                "任务白名单不得放行屏幕/输入类命令 {cmd};理由:{}",
+                d.reason
+            );
+            // 工具级显式授权不得豁免(与 rm -rf 同款回归)
+            m.authorize("bash", "session", "s").unwrap();
+            let d = decide_with(&m, "bash", AuthorizationMode::Loose, &a);
+            assert!(!d.allowed, "已授权 bash 亦不得放行 {cmd};理由:{}", d.reason);
+        }
     }
 
     /// 非高危命令仍受工具级授权放行(授权 bash 后 ls 不再重复问)。

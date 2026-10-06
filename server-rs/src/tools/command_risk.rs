@@ -7,13 +7,17 @@
 // - 分级结果用于:① 决定是否走「独立于三档的强制确认」;② 写入审计行的 risk 字段;
 //   ③ 确认卡与审计面板向用户展示风险标签。
 //
-// 四级(危险度递增):Safe < Sensitive < Destructive < Admin。
+// 五级(取最高危聚合序):Safe < Sensitive < Destructive < Admin < ScreenInput。
 //   Safe        只读检视类,不修改任何状态
 //   Sensitive   工作区内写(建文件/复制/移动/就地编辑/重定向)
 //   Destructive 可能造成不可逆数据丢失(删除、格式化、覆写设备)
 //   Admin       提权或系统级控制(su/sudo/服务管理/网络配置/包管理/设备控制)
+//   ScreenInput 屏幕/输入类(Android 设备控制原语:input/screencap/uiautomator/
+//               dumpsys/ime)——任何授权模式都不自动放行(与 Destructive/Admin
+//               同级硬门);单列是因为后果是「代替用户操作真实设备/读取屏幕」,
+//               需与「破坏数据/提权」用不同措辞(2026-10-06 CU-1 安全前提批)
 //
-// 判定顺序:Admin → Destructive → Sensitive → Safe(取最高危)。多命令串联
+// 判定顺序:Admin → ScreenInput → Destructive → Sensitive → Safe(取最高危)。多命令串联
 // (`&&`/`;`/`|`)逐段判定后取最高危,避免「安全命令 && 危险命令」被降级放行。
 
 /// 命令风险级别。
@@ -84,6 +88,29 @@ const ADMIN_COMMANDS: &[&str] = &[
     "diskpart",
     "takeown",
     "icacls",
+];
+
+/// 屏幕/输入类命令名(Android 设备控制原语;2026-10-06 CU-1 安全前提批)。
+///
+/// 提级理由:这些命令除「代替用户操作真实设备(注入触摸/按键)或读取屏幕」外无正当用途。
+/// 此前它们不在任何词表 → 按未识别兜底落 Sensitive → 任务白名单档(以及放行档)会**自动放行**,
+/// 等价于键鼠注入与读屏通道在无人值守场景下已开。
+///
+/// **诚实边界(与模块头一致)**:按命令名静态收紧必然不完备——桌面侧通用解释器
+/// (powershell/python/node/mshta/wscript 等)同样事实可达屏幕与键鼠,但静态清单无法穷尽
+/// 且会误伤常规开发工作流,故**本轮不纳入**(裁定见 `docs/计划.md` CU 章);
+/// 桌面侧留待结构化工具族 + 能力总闸(提交 3/4)。
+const SCREEN_INPUT_COMMANDS: &[&str] = &[
+    // 输入注入(tap/swipe/text/keyevent)
+    "input",
+    // 截屏
+    "screencap",
+    // UI 层级 dump(读屏)
+    "uiautomator",
+    // 系统服务状态 dump(含窗口/输入法等敏感面)
+    "dumpsys",
+    // 输入法管理(可切换/启用输入法,影响用户输入通道)
+    "ime",
 ];
 
 /// 破坏性命令名(不可逆数据丢失或覆写)。
@@ -287,6 +314,10 @@ fn classify_segment(seg: &str) -> CommandRisk {
     // 提权:Admin
     if ADMIN_COMMANDS.contains(&name.as_str()) {
         return CommandRisk::Admin;
+    }
+    // 屏幕/输入类:与 Admin/Destructive 同级硬门(任何模式不自动放行),单列以区分后果措辞
+    if SCREEN_INPUT_COMMANDS.contains(&name.as_str()) {
+        return CommandRisk::ScreenInput;
     }
     // 破坏性:Destructive;chmod/chattr 仅在其参数含广泛开放位时视为破坏性
     if DESTRUCTIVE_COMMANDS.contains(&name.as_str()) {
@@ -504,12 +535,52 @@ mod tests {
         );
     }
 
+    /// CU-1(2026-10-06):屏幕/输入类命令提级——Android 设备控制原语
+    /// (input/screencap/uiautomator/dumpsys/ime)单列为 ScreenInput,
+    /// 任何授权模式都不自动放行(此前按未识别归 Sensitive,任务白名单档可自动放行)。
+    #[test]
+    fn screen_input_commands_are_escalated() {
+        for c in [
+            "input tap 100 200",
+            "input text hello",
+            "screencap -p /sdcard/a.png",
+            "uiautomator dump /sdcard/ui.xml",
+            "dumpsys window",
+            "ime list",
+            "/system/bin/ime enable com.example/.Ime",
+        ] {
+            assert_eq!(
+                classify_command(c, "sh"),
+                CommandRisk::ScreenInput,
+                "应为屏幕/输入类: {c}"
+            );
+        }
+    }
+
+    /// 多段串联时屏幕/输入类必须胜出(与 rm/sudo 同款「不得降级放行」契约)。
+    #[test]
+    fn chained_screen_input_takes_highest() {
+        assert_eq!(
+            classify_command("ls && screencap -p /sdcard/a.png", "sh"),
+            CommandRisk::ScreenInput
+        );
+        assert_eq!(
+            classify_command("echo start; input tap 1 1", "sh"),
+            CommandRisk::ScreenInput
+        );
+        assert_eq!(
+            classify_command("dumpsys window | grep mCurrent", "sh"),
+            CommandRisk::ScreenInput
+        );
+    }
+
     #[test]
     fn confirm_requirement_matrix() {
         assert!(!CommandRisk::Safe.requires_explicit_confirm());
         assert!(!CommandRisk::Sensitive.requires_explicit_confirm());
         assert!(CommandRisk::Destructive.requires_explicit_confirm());
         assert!(CommandRisk::Admin.requires_explicit_confirm());
+        assert!(CommandRisk::ScreenInput.requires_explicit_confirm());
     }
 
     #[test]
@@ -517,6 +588,7 @@ mod tests {
         assert!(CommandRisk::Safe < CommandRisk::Sensitive);
         assert!(CommandRisk::Sensitive < CommandRisk::Destructive);
         assert!(CommandRisk::Destructive < CommandRisk::Admin);
+        assert!(CommandRisk::Admin < CommandRisk::ScreenInput);
     }
 
     #[test]
