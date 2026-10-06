@@ -319,6 +319,10 @@ npm run check
 
 > 测试数量以 `node tools/count-tests.mjs` 现取为准，不在此复写——它由门禁 `--check` 与 [MAINTENANCE.md](MAINTENANCE.md) 双向钉死。
 
+> **验收基准（2026-10-06 起）**：所有批次以**真实模型实测**为唯一验收口径（commandcode 网关 +
+> `deepseek/deepseek-v4.1-flash`）；上方 mock 单测 / 集成测试定位为回归网。凭据只存本机仓外，
+> 不入库（本仓为公开仓）——口径正文见 [AGENTS.md](AGENTS.md) 的「真实模型实测」节。
+
 ## Roadmap
 
 - [x] 世界书（World Info）按 key 注入

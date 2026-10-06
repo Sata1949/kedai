@@ -498,6 +498,13 @@ cd server-rs && cargo test -j 8
   > Git Bash 里:`export CARGO_PROFILE_DEV_DEBUG=0 && MSYS_NO_PATHCONV=1 cmd /c "tools\cargo-vcvars.cmd cargo test -j 4"`
   > (注意 `//c` 会被 MSYS 处理成字面 `//c` 并让 cmd 起交互式 shell,必须 `MSYS_NO_PATHCONV=1` + `/c`)。
 - 新增接口建议同步补集成测试;测试环境变量 `CONNECTOR=mock` 强制隔离
+- **真实模型实测(2026-10-06 起:批次收口强制)**:所有批次的收口验收一律以**真实模型实测**为准,
+  mock / 桩只是回归网、不构成验收证据(母源见 `AGENTS.md`「真实模型实测」节,机制与坑见
+  `docs/经验.md` E76)。要点:provider 固定 commandcode 网关 + `deepseek/deepseek-v4.1-flash`;
+  **凭据只存本机仓外**(`D:\kedai-bench-run\realmodel.env` 与各隔离实例 `settings.json`,禁止入仓);
+  隔离实例一律环境变量前缀启动并**先验 `data_dir` 日志行**(E75);证据落
+  `D:\kedai-bench-run\<批次>-evidence\`,提交正文带「真实模型实测通过 + 证据路径 + 关键结论」。
+  配置回退链注意:**目标 DATA_DIR 已有 `settings.json` 时,`.env` 的 `OPENAI_*` 不生效**。
 
 ---
 

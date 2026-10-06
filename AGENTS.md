@@ -36,6 +36,17 @@ cargo build --manifest-path server-rs/Cargo.toml
 
 - **`cargo test` 统一带 `-j 8`**:本机历史上默认并行度下 rustc 自身可能崩溃(`STATUS_STACK_BUFFER_OVERRUN`),报错却伪装成「依赖 rlib 缺失」,照它改依赖只会越改越偏;遇到该形态先降并发复跑,不要改依赖(详见 `docs/经验.md` 条目 29)。**2026-09-17 P-13 实测**:冷 target 全并行(16 jobs)与 `-j 4/6/8` 五轮均 1157 passed / 0 failed,历史故障**未复现**,故上限由 2 放宽到 8(取 8 而非不限制,是为与 `build.ps1` 等重活并发时留内存余量);矩阵与依据见 `docs/经验.md` 条目 29。
 
+## 真实模型实测(2026-10-06 起:测试与验收的唯一基准)
+
+- **口径**:所有批次的收口验收一律以**真实模型实测**为准——mock / 桩(`CONNECTOR=mock`、`stub-llm.mjs` 类工具)只是回归网,不构成验收证据;「测试全绿」仅在真实模型实测同样通过时才算数。单测 / 集成测试照常带 mock 隔离跑,职责是回归保护。
+- **provider(固定)**:commandcode 网关 `https://api.commandcode.ai/provider/v1`(设置页可整段粘贴含 `/chat/completions` 的完整 URL,后端自动剥后缀),模型 `deepseek/deepseek-v4.1-flash`。该模型带推理(`reasoning_tokens`):探针 `max_tokens` 给太小会出现「HTTP 200 但 `content` 为空」——连通性判据看状态码与 `usage`,取可见回复把 `max_tokens` 抬到 ≥256。
+- **凭据**:只存本机**仓外**(`D:\kedai-bench-run\realmodel.env` 与各隔离实例 DATA_DIR 的 `settings.json`)。本仓为公开仓:**禁止**把 key 写进仓库任何文件、提交正文或文档值。注意配置回退链——**目标 DATA_DIR 已有 `settings.json` 时,`.env` 的 `OPENAI_*` 不生效**(机制见 `docs/经验.md` E76)。
+- **流程(隔离实例,前置纪律见 `docs/经验.md` E75)**:环境变量前缀启动
+  `MSYS_NO_PATHCONV=1 DATA_DIR=D:/kedai-bench-run/data-<批次> PORT=30xx LOG_DIR=... server-rs/target/debug/kedai-server.exe`,
+  启动后**先核对日志 `"data_dir":"..."` 行**再做任何写操作;连接经 `PUT /api/settings` 配置(base_url / key / model)。探针:角色扮演 `node tools/bench/e2e-probe.mjs`、任务 `node tools/bench/task-probe.mjs`、最小连通 `POST /api/chat/generate-raw`(或直连上游 `D:\kedai-bench-run\probe-provider.mjs`)。
+- **证据**:命令与关键输出(JSON / 日志)落 `D:\kedai-bench-run\<批次>-evidence\`;提交正文写「真实模型实测通过 + 证据路径 + 关键结论」。
+- **豁免**:纯文档 / 样式批次至少跑一次最小连通冒烟并在提交正文说明;确实不可测时(如离线)显式说明理由。
+
 ## 构建提醒(后续模型必读)
 
 - **改完任何前后端代码后,`dist\` 下的 exe 与项目根 `Kedai.exe` 不会自动更新。** 用 `target\debug\` 二进制验证通过后,交付/试用 exe 版前必须跑一次 `.\build.ps1`(默认双端同步:前端 + release + 便携版 + 构建指纹 sidecar;详见 MAINTENANCE.md §4)。只改了代码只跑过 debug,不等于 exe 版已更新。
@@ -58,7 +69,8 @@ cargo build --manifest-path server-rs/Cargo.toml
   用户数据(`data/`)、密钥(`.env`)、开发 agent 的会话目录(`.zcode/`)。
 - **提交前的最低验证**:改了后端跑 `cargo test --manifest-path server-rs/Cargo.toml -j 8`;
   改了前端跑 `npm test -w web`;只改文档可跳过测试,但仍要跑 `node tools/check-arch.mjs` 与
-  `node tools/count-tests.mjs --check` 确认门禁不漂移。
+  `node tools/count-tests.mjs --check` 确认门禁不漂移。**涉及模型链路的改动另须附真实模型实测
+  证据(见上「真实模型实测」节);纯文档 / 样式批次按其豁免条款执行。**
 - **分支**:主干 `main` + 平台分支 `kedai-Win` / `kedai-Android`(模型见 `docs/契约-协议与配置.md`)。
   远端 `origin` 为 **GitHub 公开仓**(2026-09-29 由私有转公开);推送前先确认当前分支,不要在平台分支上提交共享代码。
   公开仓意味着**提交历史、分支、PR/Issue 全部对外可见**——勿把密钥、本机路径、用户数据写进任何提交。
