@@ -1238,7 +1238,8 @@ impl CustomExecutor {
                 Some("任务总预算用尽:部分节点未启动,以已完成部分收尾".into()),
             );
             any_error = true;
-            if let Some(p) = plan.as_deref_mut() {
+            // 最后一次使用 plan(后续不再借用),直接取所有权避免冗余重借
+            if let Some(p) = plan {
                 for s in p.iter_mut() {
                     if s.status == TaskStepStatus::Pending {
                         s.status = TaskStepStatus::Error;
