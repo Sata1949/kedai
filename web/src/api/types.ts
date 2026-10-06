@@ -1293,6 +1293,23 @@ export interface TaskChangesPayload {
   undectedReason: string | null;
 }
 
+/**
+ * `POST /api/tasks/scratch/cleanup` 的载荷(PRODCAP-5):立即执行一次任务草稿回收。
+ * `keep_days = 0` 表示保留策略已关闭(`KEDAI_TASK_SCRATCH_KEEP_DAYS=0`,不清理)。
+ */
+export interface TaskScratchCleanup {
+  /** 被删除的任务目录名(任务 id) */
+  removed: string[];
+  /** 因任务在跑/待批准而跳过的目录名 */
+  skipped_active: string[];
+  /** 未超过保留期而保留的目录数 */
+  kept_fresh: number;
+  /** 删除失败的目录名(原因见服务端日志) */
+  failed: string[];
+  /** 生效的保留天数(0 = 已关闭,未执行清理) */
+  keep_days: number;
+}
+
 /** `GET /api/tasks/{id}/changes/diff` 的载荷;三种形态都 200,靠 `available` 区分 */
 export interface TaskChangeDiff {
   available: boolean;

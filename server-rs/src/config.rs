@@ -15,6 +15,10 @@ pub struct AppConfig {
     /// 刻意与 data_dir **同级**而非其内:后者会与「fs_* 不得落在数据目录」的
     /// 既有不变量(data_dir_conflict 二次防线)冲突。启动期不建目录,首次使用时建。
     pub task_scratch_dir: PathBuf,
+    /// 任务 scratch 产物的自动保留天数(PRODCAP-5;`KEDAI_TASK_SCRATCH_KEEP_DAYS`,
+    /// 默认 30,`0` = 不自动清理):由空闲看守的同一 tick 顺带回收——只删
+    /// 「超过保留期且不归属任何非终态任务」的任务目录;设置页另有「立即清理」入口。
+    pub task_scratch_keep_days: u64,
     /// 日志目录(绝对路径)
     pub log_dir: PathBuf,
     /// web 前端产物目录;仅 `KEDAI_WEB_DIST` 显式配置时启用磁盘资源
@@ -117,6 +121,7 @@ pub(crate) fn test_config() -> AppConfig {
         port: 0,
         data_dir: std::env::temp_dir(),
         task_scratch_dir: std::env::temp_dir().join("kedai-test-scratch"),
+        task_scratch_keep_days: 30,
         log_dir: std::env::temp_dir(),
         web_dist: None,
         connector: "mock".into(),
@@ -161,6 +166,12 @@ impl AppConfig {
                 .unwrap_or(root.as_path())
                 .join("task_scratch"),
         };
+        // 任务 scratch 自动保留天数(PRODCAP-5):默认 30 天;0 = 关闭自动清理。
+        // 上限 3650(10 年)防手滑写成天文数;非法值回默认,不阻断启动。
+        let task_scratch_keep_days = env_str("KEDAI_TASK_SCRATCH_KEEP_DAYS")
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v == 0 || (1..=3650).contains(v))
+            .unwrap_or(30);
         // LOG_DIR 支持环境变量(Tauri 桌面场景注入,避免写入不可写的安装目录);缺省与 data 同级
         let log_dir = match env_str("LOG_DIR") {
             Some(d) => absolutize(Path::new(&d), &root),
@@ -222,6 +233,7 @@ impl AppConfig {
             port,
             data_dir,
             task_scratch_dir,
+            task_scratch_keep_days,
             log_dir,
             web_dist,
             connector,

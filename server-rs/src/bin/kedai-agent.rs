@@ -204,8 +204,10 @@ async fn run() -> i32 {
             .unwrap_or_else(|e| e.into_inner())
             .exec_enabled = true;
     }
-    // 与 run_server 同款空闲看守(阈值读设置;0 = 关)
-    state.tasks.spawn_idle_watchdog(Duration::from_secs(60));
+    // 与 run_server 同款空闲看守(阈值读设置;0 = 关);草稿回收按同一保留期配置
+    state
+        .tasks
+        .spawn_idle_watchdog(Duration::from_secs(60), state.config.task_scratch_keep_days);
 
     let title = prompt.trim().to_string();
     let svc = state.tasks.clone();

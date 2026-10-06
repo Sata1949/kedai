@@ -25,6 +25,12 @@ use std::sync::Once;
 /// 数据目录为**进程级共享**(`OnceLock` 单例 + `static INIT: Once`),其生命周期等于
 /// 测试进程而非单个用例,故**不得**套 `utils::test_support::TempDataDir`——
 /// 第一个用例结束时就会删掉后续所有用例要用的库。保持现状,由 OS 临时目录清理。
+///
+/// **仅供 tests/ 集成测试**(无 `#[cfg(test)]` 门控是刻意的:集成测试链接的是非
+/// `cfg(test)` 构建的 lib,加门控会让 56 个测试文件断链);生产入口零引用由
+/// `tools/check-arch.mjs` 规则 M 机器断言(历史上有过「误读为生产启动路径」的教训,
+/// 见 `docs/计划.md` PRODCAP-5 论据更正)。
+#[doc(hidden)]
 pub fn build_test_app() -> Result<axum::Router, String> {
     static INIT: Once = Once::new();
     let mut data_dir = std::env::temp_dir();
@@ -116,13 +122,16 @@ pub async fn run_server(config: config::AppConfig) -> Result<(), String> {
     // 单台握手最坏 30s 超时(有界),失败仅禁用该台,不阻断启动。
     state.start_mcp().await;
 
-    // 任务空闲看守(提交 3 · D7):周期扫描「运行中但无任何活动」的任务并自动收尾——
-    // 客户端放弃轮询/关闭 UI 不等于任务永生(实测孤儿任务会继续烧 token)。
-    // tick 60s,阈值每轮从设置读(`task_idle_timeout_secs`,0 = 关),改设置即生效。
+    // 任务空闲看守(提交 3 · D7;PRODCAP-5 起同一 tick 顺带回收任务草稿):
+    // 周期扫描「运行中但无任何活动」的任务并自动收尾——客户端放弃轮询/关闭 UI
+    // 不等于任务永生(实测孤儿任务会继续烧 token);同 tick 按保留期
+    // (`KEDAI_TASK_SCRATCH_KEEP_DAYS`,0 = 不自动清)回收超期的任务草稿目录。
+    // tick 60s,空闲阈值每轮从设置读(`task_idle_timeout_secs`,0 = 关),改设置即生效。
     // **刻意不挂 `build_test_app`**:测试 app 不该带常驻定时器(见 idle.rs 模块头)。
-    state
-        .tasks
-        .spawn_idle_watchdog(std::time::Duration::from_secs(60));
+    state.tasks.spawn_idle_watchdog(
+        std::time::Duration::from_secs(60),
+        state.config.task_scratch_keep_days,
+    );
 
     let addr = format!("{}:{}", state.config.host, state.config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {

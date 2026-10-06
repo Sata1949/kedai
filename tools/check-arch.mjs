@@ -31,6 +31,10 @@
  *      2026-09-17 实测:ShellExecutorBridge 漏登记 + detectTier 等四个无参方法被按
  *      带参调用,两缺陷叠加致 Android 命令执行永久不可用(后者被前者掩盖,修前者才暴露)。
  *      相关文件均 `cfg(target_os = "android")`,Rust 单测在 Windows 上不编译,故只能本脚本守。
+ *   M. 测试专用构造器不得被生产入口引用(PRODCAP-5,2026-10-05 起)——`build_test_app()`
+ *      无 `cfg(test)` 门控(集成测试链接非 test 构建的 lib,加了会断 56 个文件),故由本
+ *      脚本扫 `main.rs` / `bin/*.rs` / `src-tauri/src` 断言零引用;历史教训:它曾被误读为
+ *      生产启动路径(见 `计划.md` PRODCAP-5 论据更正),机器断言消除该误读面。
  *
  * 用法:
  *   node tools/check-arch.mjs
@@ -751,6 +755,54 @@ const backendWarnings = [];
   }
 }
 
+// --- 规则 M:测试专用构造器不得被生产入口引用(PRODCAP-5,2026-10-05 起) ---
+//
+// 背景:`lib.rs::build_test_app()` 是 tests/ 集成测试的建 app 帮手(mock 连接器 + 临时
+// 数据目录),但它是一个普通 `pub fn`、**没有 `#[cfg(test)]` 门控**——集成测试链接的是
+// 非 `cfg(test)` 构建的 lib,加门控会让 56 个测试文件全部断链,故「它只属于测试」这条
+// 不变量只能由本脚本(源文本扫描)守。
+//
+// 历史教训(`计划.md` PRODCAP-5 论据更正):该函数曾被误读为「非 release 构建的生产
+// 启动路径」(「启动时 remove_dir_all 清空 scratch」),一次误读直接改变了条目的定级;
+// 机器断言「生产入口零引用」,是消除这类误读的结构性手段。
+{
+  const exists = (p) => {
+    try {
+      return statSync(p).isFile();
+    } catch {
+      return false;
+    }
+  };
+  const collectIfDir = (dir) => {
+    try {
+      return statSync(dir).isDirectory() ? collect(dir, ['.rs']) : [];
+    } catch {
+      return [];
+    }
+  };
+  const targets = [
+    join(SERVER, 'main.rs'),
+    ...collectIfDir(join(SERVER, 'bin')),
+    // 桌面壳(Tauri):若后续在壳侧起服务/复用后端构造,同样不得引用测试构造器
+    ...collectIfDir(join(ROOT, 'src-tauri', 'src')),
+  ].filter(exists);
+  let hits = 0;
+  for (const f of targets) {
+    const src = readFileSync(f, 'utf8');
+    if (/\bbuild_test_app\b/.test(src)) {
+      hits += 1;
+      backendFailures.push(
+        `[M] 生产入口引用测试构造器 build_test_app:${relative(ROOT, f)}——` +
+          `该函数仅供 tests/ 集成测试建 app(mock 连接器 + 临时数据目录);` +
+          `生产启动必须走 AppState::new/AppConfig::from_env`,
+      );
+    }
+  }
+  if (VERBOSE) {
+    console.log(`  [M] 生产入口扫描 ${targets.length} 个文件,build_test_app 引用 ${hits} 处`);
+  }
+}
+
 // ========== 三结合代际归属与依赖方向(规则 I / J) ==========
 //
 // 单一事实源:`tools/arch-layers.json`(代际定义、模块归属、允许方向、已知偏离登记)。
@@ -1004,7 +1056,7 @@ const backendWarnings = [];
 // 使前端报告段永不输出——前端规则 J 的结论被静默吞掉。现将两者的报告与退出
 // 统一到本段末尾:任一侧非空即 exit(1),门禁强度不变,可见性恢复。
 
-console.log('\n========== Kedai 后端分层与冻结护栏(C/D/E/G/H/I/J/K/L) ==========');
+console.log('\n========== Kedai 后端分层与冻结护栏(C/D/E/G/H/I/J/K/L/M) ==========');
 if (backendFailures.length) {
   console.log(`[FAIL] ${backendFailures.length} 处分层违规(全部规则均为硬门禁):`);
   for (const f of backendFailures.slice(0, 40)) console.log(`  - ${f}`);

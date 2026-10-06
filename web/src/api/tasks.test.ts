@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   approveTask,
   bindTask,
+  cleanupTaskScratch,
   createTask,
   deleteTask,
   followupTask,
@@ -90,6 +91,9 @@ describe('api/tasks REST 封装', () => {
       }
       if (url.endsWith('/api/tasks/t1/plan-chat') && method === 'POST') {
         return json({ ok: true, plan: [{ name: '修订步骤甲', goal: '修订目标甲', status: 'pending', result: '' }] });
+      }
+      if (url.endsWith('/api/tasks/scratch/cleanup') && method === 'POST') {
+        return json({ removed: ['t-old'], skipped_active: ['t-live'], kept_fresh: 2, failed: [], keep_days: 30 });
       }
       if (url.endsWith('/api/tasks/t1') && method === 'DELETE') return new Response(null, { status: 204 });
       if (url.endsWith('/api/tasks/t1/changes') && method === 'GET') {
@@ -205,6 +209,22 @@ describe('api/tasks REST 封装', () => {
       ([input, init]) => String(input) === '/api/tasks' && (init?.method ?? 'GET') === 'POST',
     );
     expect(JSON.parse(String(createCall?.[1]?.body))).toEqual({ title: '目标', executor_id: null, task_mode: 'team' });
+  });
+
+  it('cleanupTaskScratch 走 POST /api/tasks/scratch/cleanup 并按形状解析(PRODCAP-5)', async () => {
+    const r = await cleanupTaskScratch();
+    const calls = vi.mocked(fetch).mock.calls.map(([input, init]) => [
+      String(input),
+      (init?.method ?? 'GET').toUpperCase(),
+    ]);
+    expect(calls).toContainEqual(['/api/tasks/scratch/cleanup', 'POST']);
+    expect(r).toEqual({
+      removed: ['t-old'],
+      skipped_active: ['t-live'],
+      kept_fresh: 2,
+      failed: [],
+      keep_days: 30,
+    });
   });
 
   it('createTask 的 characterId 兼容入参仅在显式给出时下发(新代码不应使用)', async () => {

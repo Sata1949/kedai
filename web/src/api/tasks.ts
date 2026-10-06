@@ -5,7 +5,7 @@
 import { BASE, authorizedFetch, request, requestText } from './client';
 import { requireArrayField, requireBoolField, requireObject, requireObjectField, requireStringField } from './shape';
 import { pumpSseFrames, toApiError } from './stream';
-import type { TaskApproveExecMode, TaskChangeDiff, TaskChangeRollback, TaskChangeRollbackAll, TaskChangeRollbackItem, TaskChangesPayload, TaskDetail, TaskEvent, TaskEventsPull, TaskFileChange, TaskLlmCall, TaskRecord, TaskRunMode, TaskStep, TaskUsageTotal } from './types';
+import type { TaskApproveExecMode, TaskChangeDiff, TaskChangeRollback, TaskChangeRollbackAll, TaskChangeRollbackItem, TaskChangesPayload, TaskDetail, TaskEvent, TaskEventsPull, TaskFileChange, TaskLlmCall, TaskRecord, TaskRunMode, TaskScratchCleanup, TaskStep, TaskUsageTotal } from './types';
 
 /** 读取任务列表(最新在前) */
 export async function listTasks(): Promise<TaskRecord[]> {
@@ -261,6 +261,25 @@ export async function rollbackAllTaskChanges(taskId: string): Promise<TaskChange
 /** 整任务 patch 导出(CODE-2;`text/plain` 文本通道,不套 JSON 形状闸门) */
 export async function getTaskChangesPatch(taskId: string): Promise<string> {
   return requestText(`/tasks/${encodeURIComponent(taskId)}/changes/patch`);
+}
+
+/**
+ * 立即清理任务草稿(PRODCAP-5):对 scratch 根执行一次保留期回收,与空闲看守的
+ * 自动清理共用同一实现。`keep_days = 0` 时服务端不执行清理、原样回报 0(文案由调用方给)。
+ */
+export async function cleanupTaskScratch(): Promise<TaskScratchCleanup> {
+  const data = await request<unknown>('/tasks/scratch/cleanup', { method: 'POST' });
+  const removed = requireArrayField<string>(data, 'removed', '任务草稿清理');
+  const skipped = requireArrayField<string>(data, 'skipped_active', '任务草稿清理');
+  const failed = requireArrayField<string>(data, 'failed', '任务草稿清理');
+  const obj = data as Record<string, unknown>;
+  return {
+    removed,
+    skipped_active: skipped,
+    failed,
+    kept_fresh: typeof obj.kept_fresh === 'number' ? obj.kept_fresh : 0,
+    keep_days: typeof obj.keep_days === 'number' ? obj.keep_days : 0,
+  };
 }
 
 /**

@@ -130,15 +130,42 @@ impl TaskService {
         reaped
     }
 
-    /// 常驻看守(提交 3 · D7):每 `tick` 扫一轮,逐轮读设置(`0` = 关,不扫)。
+    /// 常驻看守(提交 3 · D7;PRODCAP-5 起附带任务草稿回收):每 `tick` 一轮——
+    /// 先做 scratch 保留期回收(`scratch_keep_days` 启动期从 `KEDAI_TASK_SCRATCH_KEEP_DAYS`
+    /// 读定,`0` = 不自动清),再按 `task_idle_timeout_secs` 扫空闲任务(`0` = 关;
+    /// 逐轮读设置,改设置即生效)。
     /// 只在 `run_server` 挂载——测试 app 不挂(见模块头注释)。
-    pub fn spawn_idle_watchdog(self: &Arc<Self>, tick: Duration) {
+    pub fn spawn_idle_watchdog(self: &Arc<Self>, tick: Duration, scratch_keep_days: u64) {
         let svc = self.clone();
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(tick);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 ticker.tick().await;
+                // 草稿回收不受 idle 看守开关影响(独立的保留期闸门);文件系统 IO 放
+                // blocking 池,不阻塞 tick 循环
+                if scratch_keep_days > 0 {
+                    let svc_clean = svc.clone();
+                    let job = tokio::task::spawn_blocking(move || {
+                        svc_clean.cleanup_task_scratch(scratch_keep_days)
+                    })
+                    .await;
+                    match job {
+                        Ok(r) if !r.removed.is_empty() || !r.failed.is_empty() => {
+                            tracing::info!(
+                                removed = r.removed.len(),
+                                failed = r.failed.len(),
+                                kept_fresh = r.kept_fresh,
+                                skipped_active = r.skipped_active.len(),
+                                "任务草稿保留期回收完成"
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!(error = %e, "任务草稿回收任务执行失败");
+                        }
+                    }
+                }
                 let timeout = svc.task_settings().task_idle_timeout_secs as u64;
                 if timeout == 0 {
                     continue; // 关:本轮不扫(下一轮重读设置,改设置即生效)

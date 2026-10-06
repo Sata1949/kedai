@@ -54,6 +54,8 @@ pub(crate) fn misc_routes() -> Router<Arc<AppState>> {
         .route("/api/tasks/usage-total", get(tasks::usage_total))
         // 任务事件 SSE 流(WP4):同为静态段,axum 静态段优先于 {id},不会被通配吃掉
         .route("/api/tasks/events", get(tasks::events))
+        // 任务草稿手动回收(PRODCAP-5):同为静态段(先于 {id} 注册,同 usage-total/events)
+        .route("/api/tasks/scratch/cleanup", post(tasks::scratch_cleanup))
         .route("/api/tasks/{id}", get(tasks::get).delete(tasks::delete))
         .route("/api/tasks/{id}/run", post(tasks::run))
         .route("/api/tasks/{id}/stop", post(tasks::stop))
@@ -87,6 +89,13 @@ pub(crate) fn misc_routes() -> Router<Arc<AppState>> {
         .route(
             "/api/tasks/{id}/changes/patch",
             get(tasks::file_changes_patch),
+        )
+        // 任务草稿产物(PRODCAP-5):清单 / 单文件下载(只读;回收走上面的静态段
+        // `scratch/cleanup`)。路径闸门与 fs_* 工具族同一把(见 tasks::task_artifact_download)
+        .route("/api/tasks/{id}/artifacts", get(tasks::task_artifacts))
+        .route(
+            "/api/tasks/{id}/artifacts/download",
+            get(tasks::task_artifact_download),
         )
         // 工作区画像(CODE-4,2026-09-30):创建表单在任务存在之前就要显示「这是什么项目」,
         // 故探测必须有独立只读端点(与任务详情顶层的 workspace_profile 同一把尺)

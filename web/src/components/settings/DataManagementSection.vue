@@ -3,10 +3,11 @@
 // 从 SettingsModal.vue 双模板合并而来:两分支内容一致。
 // 状态由壳(SettingsModal)创建一次后经 prop 传入,与 UiSection 共享 useDataManager。
 // TM-SET-3:导出/导入/清空为聊天(会话)专属,任务模式下隐藏;回退快照为全局开关常显。
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import { useAppStore } from '../../store';
 import { storeToRefs } from 'pinia';
 import type { useDataManager } from '../../composables/useDataManager';
+import * as api from '../../api';
 
 const props = withDefaults(defineProps<{
   /** useDataManager 的返回对象(壳共享实例) */
@@ -27,6 +28,27 @@ const store = useAppStore();
 const { currentSessionId } = storeToRefs(store);
 /** 任务模式:无会话概念,聊天导出/导入/清空隐藏 */
 const isTaskMode = computed(() => store.appMode === 'task');
+
+/** 任务草稿立即清理(PRODCAP-5):与空闲看守的自动清理共用同一实现 */
+const scratchBusy = ref(false);
+const scratchMsg = ref('');
+async function onCleanupScratch(): Promise<void> {
+  scratchBusy.value = true;
+  scratchMsg.value = '';
+  try {
+    const r = await api.cleanupTaskScratch();
+    scratchMsg.value =
+      r.keep_days === 0
+        ? '保留策略已关闭(KEDAI_TASK_SCRATCH_KEEP_DAYS=0),未执行清理'
+        : `已清理 ${r.removed.length} 个任务草稿目录(保留中 ${r.kept_fresh},跳过进行中 ${r.skipped_active.length}${
+            r.failed.length > 0 ? `,失败 ${r.failed.length}(见服务端日志)` : ''
+          })`;
+  } catch (e) {
+    scratchMsg.value = `清理失败:${e instanceof Error ? e.message : String(e)}`;
+  } finally {
+    scratchBusy.value = false;
+  }
+}
 </script>
 
 <template>
@@ -66,11 +88,19 @@ const isTaskMode = computed(() => store.appMode === 'task');
           <span class="sv-note">{{ undoEnabled ? '已开启' : '已关闭' }}</span>
         </label>
       </div>
+      <div class="sv-data-row">
+        <div class="info">
+          <b>清理任务草稿</b>
+          <span>删除任务产物目录中超过保留期(默认 30 天,见 KEDAI_TASK_SCRATCH_KEEP_DAYS)且不在运行/待批准任务的内容;自动清理由空闲看守顺带执行</span>
+        </div>
+        <button class="sv-btn ghost" :disabled="scratchBusy" @click="onCleanupScratch">立即清理</button>
+      </div>
     </div>
     <div v-if="importError" class="sv-feedback err">{{ importError }}</div>
     <div v-if="exportMsg" class="sv-feedback ok">{{ exportMsg }}</div>
     <div v-if="clearMsg" class="sv-feedback ok">{{ clearMsg }}</div>
     <div v-if="undoMsg" class="sv-feedback" :class="undoMsg.startsWith('保存失败') ? 'err' : 'ok'">{{ undoMsg }}</div>
+    <div v-if="scratchMsg" class="sv-feedback" :class="scratchMsg.startsWith('清理失败') ? 'err' : 'ok'">{{ scratchMsg }}</div>
     <input ref="importInput" type="file" accept=".json,application/json" class="hidden" @change="onImportFile" />
     <p v-if="!isTaskMode" class="sv-note">
       导入格式与 SillyTavern 兼容:<code>[{"role":"user","content":"..."}]</code>

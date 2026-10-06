@@ -13,6 +13,7 @@
 //   prompt.rs   提示词组装(任务设置/世界书/注入/Agent 系统提示词/人设)
 //   executor.rs 后台执行引擎(run/stop、LLM 单次生成原语、后台主体)
 //   idle.rs     任务级空闲看守(提交 3 · D7:活动心跳判据 + 自动收尾 + 常驻 tick)
+//   scratch.rs  任务 scratch 产物的清单与回收(PRODCAP-5:浏览/下载/保留期清理)
 use super::log_query_failure;
 use crate::models::db::{now_iso, Db, PooledRead};
 use crate::models::types::{
@@ -42,6 +43,7 @@ pub(crate) mod events;
 pub(crate) mod executor;
 pub(crate) mod idle;
 pub(crate) mod prompt;
+pub(crate) mod scratch;
 
 use self::db::{row_to_task, TASK_COLS};
 
@@ -180,6 +182,35 @@ impl TaskService {
             )
         })?;
         Ok(dir)
+    }
+
+    // ===== scratch 产物清单与回收(PRODCAP-5;实现在 scratch.rs) =====
+
+    /// 已存在的任务 scratch 目录(不创建;`None` = 该任务从未落过产物)
+    pub(crate) fn existing_scratch_dir(&self, task_id: &str) -> Option<std::path::PathBuf> {
+        scratch::existing_task_dir(&self.scratch_root, task_id)
+    }
+
+    /// 列出任务 scratch 产物(递归文件清单;同步文件系统 IO,调用方放 blocking 池)
+    pub(crate) fn list_task_artifacts(&self, task_id: &str) -> (Vec<scratch::ArtifactEntry>, bool) {
+        match self.existing_scratch_dir(task_id) {
+            Some(dir) => scratch::list_artifacts_in(&dir),
+            None => (Vec::new(), false),
+        }
+    }
+
+    /// 回收 scratch(调用方保证 `keep_days > 0`;「活跃」判定 = 归属任务**非终态**——
+    /// pending/running/planning/planned 的产物都不许清:在跑、在规划、或待批准
+    /// (approve 后还要用)的任务都要能继续用它的草稿目录)
+    pub(crate) fn cleanup_task_scratch(&self, keep_days: u64) -> scratch::ScratchCleanupReport {
+        scratch::cleanup_scratch_root(&self.scratch_root, keep_days, |name| {
+            self.get(name).is_some_and(|t| {
+                !matches!(
+                    t.status,
+                    TaskStatus::Done | TaskStatus::Partial | TaskStatus::Error | TaskStatus::Ended
+                )
+            })
+        })
     }
 
     // ===== CRUD =====
