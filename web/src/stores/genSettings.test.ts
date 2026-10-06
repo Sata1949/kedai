@@ -110,6 +110,8 @@ function makeSettings(overrides: Partial<RuntimeSettings> = {}): RuntimeSettings
     task_coding_bundle_enabled: false,
     literary_bundle_enabled: false,
     task_literary_bundle_enabled: false,
+    literary_style_preset: '',
+    literary_recommend_preset: '',
     task_default_connection_id: '',
     // 多套连接(批次 4):默认空列表,具体连接由用例覆盖
     connections: [],
