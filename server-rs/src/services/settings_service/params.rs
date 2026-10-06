@@ -584,6 +584,33 @@ pub fn default_reflect_prompt() -> String {
         .into()
 }
 
+/// 文学能力包的「反思追加检查项」段(LIT-4,2026-10-06)。
+///
+/// **单一出处**:只被 [`default_literary_reflect_prompt`] 引用,不内嵌进现行反射提示词。
+/// 以**追加块**形态拼在现行文本之后(与 LIT-2 的缺省词增强同款),故现行文本逐字节成为前缀
+/// ——「开关关逐字等同」由前缀保证。**判定协议不得改动**:首行四值(PASS / 通过 / FAIL / 不通过)
+/// 与「只判定不重写」是解析契约,故本段末尾重申协议——追加检查项不得稀释「输出协议在末尾」
+/// 的模型注意力位置。文本必须同轮恒定(无时间戳/随机序),保前缀缓存假设;不写 `{{...}}` 宏。
+pub const LITERARY_REFLECT_ENHANCEMENT: &str = "\
+【文学维度追加检查】
+在上述五组标准之外,以下四项同样计入判定(问题标签:文风漂移 / 复读 / 代答 / 时间线矛盾):
+6. 文风漂移:词汇、句式、人称与叙述距离是否与上文不一致(含突然的书面化 / 口语化、人称跳换、时态漂移)。
+7. 复读:开头、结尾、比喻与场景调度是否与上一轮或上文雷同;有无复述已写过的情节。
+8. 代答:是否替用户角色说话、代其做决定或推进其主观行动。
+9. 时间线矛盾:是否与前文已发生的事件、时间顺序或已确立的事实冲突。
+判定协议不变:第一行只能是 PASS / 通过 / FAIL / 不通过 之一,第二行起用一句话指出主要问题(可用新增标签),只判定不重写。";
+
+/// 角色扮演反思提示词的文学版(LIT-4):现行反思提示词 + [`LITERARY_REFLECT_ENHANCEMENT`]。
+/// 只在**缺省值**路径生效——用户保存过自定义文本时逐字优先(调用方判断,见
+/// [`RuntimeSettings::reflect_default_prompt`])。
+pub fn default_literary_reflect_prompt() -> String {
+    format!(
+        "{}\n\n{}",
+        default_reflect_prompt(),
+        LITERARY_REFLECT_ENHANCEMENT
+    )
+}
+
 /// 任务向缺省生成参数(TM-SET-1,2026-10-01):任务覆盖层未显式配置时,任务模式的有效
 /// 温度 / Top-P / 单次输出上限取本组值。任务执行以工具循环与多步执行为主,低温 + 不截断
 /// 采样 + 足够产出预算是更稳的档位;角色扮演侧的扁平缺省(0.8 / 0.9 / 1024)不受影响。
@@ -605,6 +632,21 @@ impl RuntimeSettings {
             default_literary_roleplay_agent_prompt()
         } else {
             default_roleplay_agent_prompt()
+        }
+    }
+
+    /// 角色扮演**反思提示词缺省值**的唯一判据入口(LIT-4):开关开 → 文学版(追加四项文学维度
+    /// 检查),否则现行版。消费者两处——① `from_config`(新装物化默认值);② load 期
+    /// 「未自定义」重物化(`secret.rs`)。
+    ///
+    /// **「未自定义」判据与缺省词不同**:该字段的空串是「显式关闭反思、回退机械规则」的有效
+    /// 值,故 load 期的判据是**逐字等于内置默认文本**而非空串(见 `secret.rs` 回填处注释);
+    /// 用户自定义文本不经过本入口。
+    pub fn reflect_default_prompt(&self) -> String {
+        if self.literary_bundle_enabled {
+            default_literary_reflect_prompt()
+        } else {
+            default_reflect_prompt()
         }
     }
 
@@ -647,7 +689,9 @@ impl RuntimeSettings {
             mvu_vars_position: "system".to_string(),
             mvu_temperature: None,
             mvu_model: None,
-            reflect_prompt: default_reflect_prompt(),
+            // 反思提示词占位(空串):函数尾经唯一判据入口物化——LIT-4 起该判据随文学包开关
+            // 分化,故不在结构体字面量里直调文本函数(避免绕过判据入口生成第三份副本)
+            reflect_prompt: String::new(),
             preset_tail_prompt: String::new(),
             preset_tail_role: "user".to_string(),
             reflect_advice_prompt: String::new(),
@@ -717,6 +761,8 @@ impl RuntimeSettings {
         s.seed_connections_from_flat();
         // 角色扮演缺省词物化(经唯一判据入口;from_config 场景开关恒 false → 现行版)
         s.agent_system_prompt = RoleplayPromptConfig(s.roleplay_default_prompt());
+        // 反思提示词缺省物化(同一口径;LIT-4 起判据入口随开关分化,此处恒为现行版)
+        s.reflect_prompt = s.reflect_default_prompt();
         s
     }
 

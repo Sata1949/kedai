@@ -363,6 +363,7 @@ pub struct RuntimeSettings {
 
 #[cfg(test)]
 mod tests {
+    use super::params::{default_literary_reflect_prompt, default_reflect_prompt};
     use super::*;
     use crate::utils::test_support::TempDataDir;
 
@@ -1603,6 +1604,97 @@ mod tests {
             loaded_custom.agent_system_prompt.0, "CUSTOM-RP-MARK 用户自己的提示词",
             "用户非空文本优先,回填不得覆盖"
         );
+    }
+
+    /// 反思提示词文学变体与判定协议(LIT-4,2026-10-06):
+    /// ① 判据入口两态:开关关 → 逐字等于现行版;开关开 → 现行文本为逐字节前缀 + 追加检查项;
+    /// ② 判定协议不破:四值首行与「只判定不重写」纪律逐字保留(反思解析侧既有断言依赖)。
+    #[test]
+    fn literary_reflect_prompt_variant_and_protocol() {
+        let cfg = test_cfg();
+        let mut s = RuntimeSettings::from_config(&cfg);
+
+        assert_eq!(
+            s.reflect_default_prompt(),
+            default_reflect_prompt(),
+            "开关关 → 反思缺省词逐字等于现行版"
+        );
+
+        s.literary_bundle_enabled = true;
+        let lit = s.reflect_default_prompt();
+        assert!(
+            lit.starts_with(&default_reflect_prompt()),
+            "文学版 = 现行反思提示词前缀 + 追加检查项(开关关逐字等同由前缀保证)"
+        );
+        for item in ["文风漂移", "复读", "代答", "时间线矛盾"] {
+            assert!(lit.contains(item), "文学版应含追加检查项:{item}");
+        }
+        // ② 协议与纪律逐字保留(解析侧只认四值首行;首行之外的判定纪律不得改动)
+        for seg in [
+            "第一行只能是 PASS / 通过 / FAIL / 不通过 之一",
+            "不要修改或重写草稿",
+            "不要让正文出现草稿",
+        ] {
+            assert!(lit.contains(seg), "文学版不得改动判定协议:{seg}");
+        }
+        assert!(
+            lit.trim_end().ends_with("只判定不重写。"),
+            "追加检查项后应以协议重申收尾,防稀释「输出协议在末尾」的注意力位置"
+        );
+    }
+
+    /// 反思提示词「未自定义」判据 = **逐字等于内置默认文本**(LIT-4)。
+    ///
+    /// 该字段的**空串是「显式关闭反思、回退机械规则」的有效值**(见 `api/settings.rs` 同名注释),
+    /// 故不能照抄 `agent_system_prompt` 的「空串即未自定义」回填——此处逐字比对两个内置版本:
+    /// ① 存量默认文本 + 开关开 → 重物化为文学版;② + 开关关 → 逐字仍是现行版;
+    /// ③ 存量文学版文本 + 开关关 → 回落现行版;④ 自定义文本 / 空串 → 两侧都不动。
+    #[test]
+    fn load_rehydrates_reflect_prompt_only_when_verbatim_builtin() {
+        let cfg = test_cfg();
+        let write = |dir: &std::path::Path, prompt: &str, on: bool| {
+            let mut v = serde_json::to_value(RuntimeSettings::from_config(&cfg)).unwrap();
+            let obj = v.as_object_mut().unwrap();
+            obj.insert("reflect_prompt".into(), serde_json::json!(prompt));
+            obj.insert("literary_bundle_enabled".into(), serde_json::json!(on));
+            std::fs::write(
+                dir.join("settings.json"),
+                serde_json::to_string_pretty(&v).unwrap(),
+            )
+            .unwrap();
+            RuntimeSettings::load(dir, &cfg)
+        };
+
+        // ① 存量默认文本 + 开关开 → 重物化为文学版
+        let dir = tmp_dir("reflect-lit-rehydrate");
+        let got = write(&dir, &default_reflect_prompt(), true);
+        assert_eq!(
+            got.reflect_prompt,
+            default_literary_reflect_prompt(),
+            "存量默认文本 + 开关开 → 重物化为文学版"
+        );
+        // ② 存量默认文本 + 开关关 → 逐字不变(回归钉子)
+        let got = write(&dir, &default_reflect_prompt(), false);
+        assert_eq!(
+            got.reflect_prompt,
+            default_reflect_prompt(),
+            "开关关 → 逐字等同现行版"
+        );
+        // ③ 存量文学版文本 + 开关关 → 回落现行版(关包不得留在文学文本上)
+        let got = write(&dir, &default_literary_reflect_prompt(), false);
+        assert_eq!(
+            got.reflect_prompt,
+            default_reflect_prompt(),
+            "关包应回落现行版"
+        );
+        // ④ 自定义文本 / 空串:两侧都不动
+        let got = write(&dir, "CUSTOM-REFLECT-MARK 我的判定词", true);
+        assert_eq!(
+            got.reflect_prompt, "CUSTOM-REFLECT-MARK 我的判定词",
+            "自定义文本不得被覆盖"
+        );
+        let got = write(&dir, "", true);
+        assert_eq!(got.reflect_prompt, "", "空串 = 显式关闭反思,不得回填");
     }
 
     /// 模式隔离不因新增角色扮演默认词而退化:
