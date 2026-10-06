@@ -185,11 +185,14 @@ if (Get-Command cargo-audit -ErrorAction SilentlyContinue) {
 
 # npm 生产依赖审计:批次 1 接入(警告档),批次 6.1 复核 --omit=dev 为 0 告警后**提升为硬门禁**。
 # 离线(拉不到 registry)时降 WARN,避免断网误拦;真漏洞输出无「离线」特征,仍按 FAIL 处理。
+# 漏洞输出两种形态都要按 FAIL 处理(2026-10-06 实测):旧版 npm 是「found N vulnerabilities」,
+# 新版是「N high severity vulnerabilities」(**无 found 字样**)——只认旧形态会把真漏洞误报成
+# 「异常退出」,排查方向被引偏(2026-10-05 批次收口时 vue/source-map-js 两条 high 即此形态)。
 Write-Host "`n===== npm audit(生产依赖,硬门禁)=====" -ForegroundColor Cyan
 $npmAuditOut = (npm audit --omit=dev 2>&1 | Out-String)
 if ($LASTEXITCODE -eq 0) {
     Write-Host '[ OK ] npm audit 无生产依赖漏洞' -ForegroundColor Green
-} elseif ($npmAuditOut -match 'found\s+(\d+)\s+vulnerabilit') {
+} elseif ($npmAuditOut -match 'found\s+(\d+)\s+vulnerabilit' -or $npmAuditOut -match '(\d+)\s+(?:low|moderate|high|critical)\s+severity vulnerabilit') {
     Write-Host ($npmAuditOut.Trim() -split "`n" | Select-Object -Last 8 | Out-String).Trim() -ForegroundColor Yellow
     Write-Host '[FAIL] npm audit 报告生产依赖漏洞(硬门禁;评估修复,勿裸升依赖)' -ForegroundColor Red
     exit 1
