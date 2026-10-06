@@ -83,10 +83,45 @@ export function cssUrlsSafe(value: string): boolean {
   const re = /url\s*\(\s*(['"]?)([^'")]*)\1\s*\)/gi;
   let m: RegExpExecArray | null;
   while ((m = re.exec(value)) !== null) {
-    const u = m[2].trim();
-    if (!/^https:\/\//i.test(u) && !/^data:image\//i.test(u)) return false;
+    if (!cssUrlAllowed(m[2])) return false;
+  }
+  // FE-8:image-set()/-webkit-image-set() 的**裸字符串**形态是 URL 的另一条入口
+  // (CSS 允许 `image-set("https://…" 1x)`),不走 url() 正则——同一白名单逐条校验。
+  for (const arg of imageSetArgs(value)) {
+    for (const q of arg.matchAll(/'([^']*)'|"([^"]*)"/g)) {
+      if (!cssUrlAllowed(q[1] ?? q[2])) return false;
+    }
   }
   return true;
+}
+
+/** 单条 URL 白名单:仅 https 与 data:image。 */
+function cssUrlAllowed(raw: string): boolean {
+  const u = raw.trim();
+  return /^https:\/\//i.test(u) || /^data:image\//i.test(u);
+}
+
+/** 取所有 `image-set(…)` / `-webkit-image-set(…)` 的括号内文本(引号感知的括号配平)。 */
+function imageSetArgs(value: string): string[] {
+  const args: string[] = [];
+  const re = /(?:-webkit-)?image-set\s*\(/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(value)) !== null) {
+    let depth = 1;
+    let i = m.index + m[0].length;
+    let quote: string | null = null;
+    const start = i;
+    for (; i < value.length && depth > 0; i++) {
+      const ch = value[i];
+      if (quote) {
+        if (ch === quote) quote = null;
+      } else if (ch === '"' || ch === "'") quote = ch;
+      else if (ch === '(') depth++;
+      else if (ch === ')') depth--;
+    }
+    args.push(value.slice(start, depth === 0 ? i - 1 : i));
+  }
+  return args;
 }
 
 /**
@@ -153,6 +188,21 @@ function scopeSelector(s: string, attr: string): string {
 }
 
 /**
+ * 越界守卫(FE-7):前缀拼接后,`~`(后继兄弟)/ `+`(相邻兄弟)/ `||`(列)组合器
+ * 的效果落在**容器的兄弟节点**上——即作用域之外(`[attr] ~ .x` 的匹配集不属于
+ * `[attr]` 子树),配合放行的 position:fixed / z-index 可做界面遮挡与点击劫持
+ * (例:盖住「停止生成」按钮)。这类选择器一律拒绝。
+ *
+ * `>`(子)不越界:`[attr] > .x` 仍是容器自身的子元素,原样保留。
+ * 注意 `body ~ .x` 这类形态经 scopeSelector 的 body 重写后同样会变成
+ * `[attr] ~ .x`,故本守卫检查的是**重写后**的文本,而非原始选择器。
+ */
+function escapesScope(scoped: string, attr: string): boolean {
+  const rest = scoped.startsWith(attr) ? scoped.slice(attr.length) : scoped;
+  return /^\s*(?:[~+]|\|\|)/.test(rest);
+}
+
+/**
  * CSS 作用域化:每条规则加祖先前缀 `[data-kd-scope="scopeId"]`。
  * - 普通规则:选择器加前缀(已是前缀则跳过;前导 body/html 重写为容器,见 scopeSelector)
  * - @media/@supports:内部规则递归加前缀
@@ -189,8 +239,13 @@ export function scopeCss(css: string, scopeId: string): { css: string; keyframes
       if (!sel) continue;
       const scopedSel = sel
         .split(',')
-        .map((s) => scopeSelector(s.trim(), attr))
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .map((s) => scopeSelector(s, attr))
+        // FE-7:越界守卫(见 escapesScope)。全被剔除则整条规则丢弃。
+        .filter((s) => !escapesScope(s, attr))
         .join(', ');
+      if (!scopedSel) continue;
       out.push(`${scopedSel} {${inner}}`);
     }
   }

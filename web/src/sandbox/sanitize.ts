@@ -1,6 +1,6 @@
 // sanitize.ts — 脚本注入 HTML 的白名单清洗配置(setter/append/游离元素落 DOM 共用)
 import sanitizeHtml from 'sanitize-html';
-import { applyKeyframeRename, sanitizeScopedCss, scopeCss } from '../cssSanitize';
+import { applyKeyframeRename, sanitizeScopedCss, sanitizeStyleAttribute, scopeCss } from '../cssSanitize';
 
 /** 脚本注入 HTML 的白名单(setter/append 共用):含表格/图片/表单控件(角色卡界面结构所需);
  *  img/a 仅 https 与 data 协议,事件处理器仍剥离(脚本交互走 on() 绑定) */
@@ -28,6 +28,21 @@ const SCRIPT_HTML_WHITELIST: sanitizeHtml.IOptions = {
   allowedSchemes: ['https', 'data'],
   allowedSchemesByTag: { img: ['https', 'data'] },
   allowProtocolRelative: false,
+  // FE-6:style 属性声明级清洗(与静态通道 render.ts::sanitizeVisibleHtml 的
+  // transformTags 同一形态——收紧前本通道把 style 属性整体放行,同一份作者 CSS
+  // 写在 <style> 里被清洗、写在 style="" 里不清洗,两通道口径不一致)。
+  // 布局声明(position/z-index/inset/vw·vh/https url/data:image)照常放行,
+  // 只剥 expression()/@import/javascript:/behavior 与非白名单 url()。
+  transformTags: {
+    '*': (tagName, attribs) => {
+      if (typeof attribs.style !== 'string') return { tagName, attribs };
+      const clean = sanitizeStyleAttribute(attribs.style);
+      const next = { ...attribs };
+      if (clean) next.style = clean;
+      else delete next.style;
+      return { tagName, attribs: next };
+    },
+  },
 };
 
 /**

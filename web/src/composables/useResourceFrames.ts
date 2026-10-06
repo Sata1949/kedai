@@ -20,6 +20,25 @@ import { ApiError, apiErrorMessage, authorizedFetch, BASE } from '../api/client'
 import { getCharacter } from '../api/characters';
 import type { CharacterRecord } from '../api/types';
 import { applyResourceSync, loadResourceSnapshot, type ResourceSyncMessage } from '../resourceStore';
+import { allowResourceDomain, isResourceDomainAllowed, resourceDomainOf } from '../resourceDomains';
+
+/** 卡片说明区默认文案(与 render.ts::buildRemoteResourceHtml 的初值同源,单处维护) */
+const DEFAULT_RESOURCE_NOTE =
+  '资源页面由角色卡作者提供,已隔离加载;若未显示,请使用上方链接在新窗口打开。';
+
+/**
+ * FE-5 C(2026-10-06 R1 裁决):TavernHelper.generate 的节流与上限。
+ *
+ * 资源页是**不可信的第三方代码**,generate 消耗用户额度(经宿主带 token 转发
+ * /api/chat/generate-raw)。正常卡片(吸血鬼卡等)的开场白/总结是个人规模调用,
+ * 门槛取「够用但不失控」:60s 滑动窗口内最多 6 次;单框架生命周期最多 120 次
+ * (reload 自举不重置计数——同一卡反复重生成也会触顶)。超限回**显式 error**:
+ * 作者页的 await 得到 reject,不再静默挂起。
+ */
+const TAVERN_CALL_WINDOW_MS = 60_000;
+const TAVERN_CALL_WINDOW_MAX = 6;
+const TAVERN_CALL_TOTAL_MAX = 120;
+const TAVERN_CALL_THROTTLED = '资源页生成调用过于频繁(已限流)';
 
 export interface UseResourceFramesOptions {
   /** 消息画布滚动容器(RenderPanelHost 根元素;卡片 DOM 扫描与宽屏点击委托的挂载点) */
@@ -40,6 +59,10 @@ interface ResourceEntry {
   attempts: number;
   /** nonce 丢失修复次数(防重建循环) */
   repairs: number;
+  /** 已受理的 tavern-call 时间戳(滑动窗口限流用,见 TAVERN_CALL_WINDOW_MS) */
+  callStamps: number[];
+  /** 已受理的 tavern-call 累计数(生命周期上限用;reload 不重置) */
+  callCount: number;
 }
 
 /** iframe srcdoc 注入用:HTML 属性转义(资源页原文仅作 srcdoc 字符串,不拼接进本页面) */
@@ -175,7 +198,7 @@ export function useResourceFrames(opts: UseResourceFramesOptions) {
     btn.className = 'sv-btn ghost sv-btn-sm';
     btn.textContent = '重试';
     btn.onclick = () => {
-      note.textContent = '资源页面由角色卡作者提供,已隔离加载;若未显示,请使用上方链接在新窗口打开。';
+      note.textContent = DEFAULT_RESOURCE_NOTE;
       entry.attempts = 0;
       entry.booted = false;
       void bootResourceFrame(entry);
@@ -183,12 +206,68 @@ export function useResourceFrames(opts: UseResourceFramesOptions) {
     note.appendChild(btn);
   }
 
+  /**
+   * FE-5 A(2026-10-06 R1 裁决):首次遇新域名的**一次性确认**。
+   *
+   * 未确认的域名不注册框架、不预拉取(不触碰作者服务器),只在卡片说明区就地
+   * 加一个确认按钮;用户确认后把域名记进本机白名单并重跑 hydrate(幂等)。
+   * 「在新窗口打开」链接不受影响(T1 既有裁决的兼容面保留)。
+   */
+  function showResourceDomainConfirm(frame: HTMLIFrameElement, url: string): void {
+    const card = frame.closest('[data-kd-resource-url]') as HTMLElement | null;
+    const note = card?.querySelector<HTMLElement>('.sv-resource-card-note');
+    const host = resourceDomainOf(url) ?? url;
+    if (!card || !note) return;
+    // 幂等闩锁:重渲染/重复扫描不叠第二个按钮
+    if (card.dataset.kdDomainPending === host) return;
+    card.dataset.kdDomainPending = host;
+    note.textContent = `资源界面来自 ${host}:加载将在隔离沙箱内执行该站点的脚本,首次需确认。`;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'sv-btn ghost sv-btn-sm';
+    btn.textContent = '加载此域名';
+    btn.onclick = () => {
+      allowResourceDomain(url);
+      delete card.dataset.kdDomainPending;
+      note.textContent = DEFAULT_RESOURCE_NOTE;
+      void hydrate();
+    };
+    note.appendChild(btn);
+  }
+
   /** 常驻消息分发:ready(首载/reload 自举)、store-sync(shim 持久化桥) */
   function handleMessage(ev: MessageEvent): void {
-    const entry = resourceFrames.get(ev.source as Window);
-    if (!entry) return;
-    const m = ev.data as ({ channel?: string; nonce?: string; type?: string } & Partial<ResourceSyncMessage>) | null;
+    const m = ev.data as
+      | ({ channel?: string; nonce?: string; type?: string; callId?: string; method?: string } & Partial<ResourceSyncMessage>)
+      | null;
     if (!m || m.channel !== 'kedai-resource-frame-v1') return;
+    const entry = resourceFrames.get(ev.source as Window);
+    if (!entry) {
+      // FE-5 C:认不出的来源以前是**静默丢帧**——作者页 await TavernHelper.generate
+      // 会一直悬挂(身份不匹配时整条上行通道全哑,如 WebView2 包装 event.source)。
+      // 改为尽力回显式 error:回包由宿主窗口发出,满足模板侧 `event.source ===
+      // REAL_PARENT` 校验;模板 handleTavernResult 只按 callId 路由、不校验 nonce,
+      // 故不依赖来源身份也能送达。回包失败(跨源对象不可 postMessage)才退化为
+      // 模板侧 120s 超时兜底。
+      if (m.type === 'tavern-call' && typeof m.callId === 'string') {
+        logTavernCall({ phase: 'unmatched', callId: m.callId, method: m.method ?? null });
+        try {
+          (ev.source as Window | null)?.postMessage?.(
+            {
+              channel: 'kedai-resource-frame-v1',
+              type: 'tavern-result',
+              callId: m.callId,
+              ok: false,
+              error: '资源页会话未授权或已失效',
+            },
+            '*',
+          );
+        } catch {
+          /* 跨源对象不可回包:保持静默(退化到模板超时) */
+        }
+      }
+      return;
+    }
     if (m.type === 'ready') {
       if (m.nonce === entry.nonce) {
         // 首次加载或作者页面 reload 自举:新文档需要重新 boot(携带最新快照)
@@ -236,6 +315,16 @@ export function useResourceFrames(opts: UseResourceFramesOptions) {
       reply(false, undefined, `不支持的调用:${m.method}`);
       return;
     }
+    // FE-5 C:限流在组装参数/发起上游请求**之前**判定(超限调用不消费任何上游资源)
+    const now = Date.now();
+    entry.callStamps = entry.callStamps.filter((t) => now - t < TAVERN_CALL_WINDOW_MS);
+    if (entry.callStamps.length >= TAVERN_CALL_WINDOW_MAX || entry.callCount >= TAVERN_CALL_TOTAL_MAX) {
+      logTavernCall({ method: m.method ?? 'generate', callId: m.callId, ok: false, error: 'throttled' });
+      reply(false, undefined, TAVERN_CALL_THROTTLED);
+      return;
+    }
+    entry.callStamps.push(now);
+    entry.callCount += 1;
     try {
       const a = (m.args ?? {}) as {
         user_input?: string;
@@ -322,6 +411,11 @@ export function useResourceFrames(opts: UseResourceFramesOptions) {
       const nonce = card?.dataset.kdResourceNonce;
       if (!rawUrl || !nonce) continue;
       const url = decodeURIComponent(rawUrl);
+      // FE-5 A:未确认的域名不注册框架、不预拉取(只在卡片内就地确认,见 showResourceDomainConfirm)
+      if (!isResourceDomainAllowed(url)) {
+        showResourceDomainConfirm(frame, url);
+        continue;
+      }
       const win = frame.contentWindow;
       if (!win) {
         // iframe 宿主文档尚未加载完成(contentWindow 为 null):延迟重试,
@@ -339,7 +433,16 @@ export function useResourceFrames(opts: UseResourceFramesOptions) {
         continue;
       }
       frame.dataset.kdWired = '1';
-      const entry: ResourceEntry = { url, nonce, frame, booted: false, attempts: 0, repairs: 0 };
+      const entry: ResourceEntry = {
+        url,
+        nonce,
+        frame,
+        booted: false,
+        attempts: 0,
+        repairs: 0,
+        callStamps: [],
+        callCount: 0,
+      };
       resourceFrames.set(win, entry);
       // 预拉取作者页面 HTML(与模板加载并行;失败不缓存,boot 分支会退避重试)
       void fetchResourceHtml(url).catch(() => undefined);
