@@ -139,4 +139,45 @@ describe('ChatInput 图像附件(视觉能力包 D2)', () => {
     // 发送后回收预览 URL(不再泄漏)
     expect(revokeUrl).toHaveBeenCalledWith('blob:mock-1');
   });
+
+  it('移除附件后回收其预览 URL,且不再渲染该预览(FE-2 验收)', async () => {
+    const createUrl = vi.fn(() => 'blob:mock-rm');
+    const revokeUrl = vi.fn();
+    Object.defineProperty(URL, 'createObjectURL', { value: createUrl, writable: true, configurable: true });
+    Object.defineProperty(URL, 'revokeObjectURL', { value: revokeUrl, writable: true, configurable: true });
+
+    const { wrapper } = mountInput();
+    const file = new File([new Uint8Array([1, 2, 3])], '待移除.png', { type: 'image/png' });
+    const fileInput = wrapper.find('input[type="file"]');
+    Object.defineProperty(fileInput.element, 'files', { value: [file], configurable: true });
+    await fileInput.trigger('change');
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('.sv-attach-chip img').exists()).toBe(true);
+    expect(createUrl).toHaveBeenCalledTimes(1);
+
+    await wrapper.find('.sv-attach-chip .remove').trigger('click');
+
+    expect(revokeUrl).toHaveBeenCalledWith('blob:mock-rm');
+    expect(wrapper.find('.sv-attach-chip').exists()).toBe(false);
+  });
+
+  it('组件卸载时回收未发送附件的预览 URL(FE-2 验收)', async () => {
+    const createUrl = vi.fn(() => 'blob:mock-unmount');
+    const revokeUrl = vi.fn();
+    Object.defineProperty(URL, 'createObjectURL', { value: createUrl, writable: true, configurable: true });
+    Object.defineProperty(URL, 'revokeObjectURL', { value: revokeUrl, writable: true, configurable: true });
+
+    const { wrapper } = mountInput();
+    const file = new File([new Uint8Array([9])], '未发送.png', { type: 'image/png' });
+    const fileInput = wrapper.find('input[type="file"]');
+    Object.defineProperty(fileInput.element, 'files', { value: [file], configurable: true });
+    await fileInput.trigger('change');
+    await wrapper.vm.$nextTick();
+    expect(createUrl).toHaveBeenCalledTimes(1);
+    expect(revokeUrl).not.toHaveBeenCalled();
+
+    wrapper.unmount();
+
+    expect(revokeUrl).toHaveBeenCalledWith('blob:mock-unmount');
+  });
 });

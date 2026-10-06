@@ -140,6 +140,13 @@ function readStoragePart(): Record<string, { local?: Record<string, string>; ses
   }
 }
 
+/** 只补目标中尚不存在的键:持久化旧值不得覆盖内存里可能更新的值(FE-3) */
+function mergeMissing(target: Record<string, string>, source: Record<string, string>): void {
+  for (const k of Object.keys(source)) {
+    if (!(k in target)) target[k] = source[k];
+  }
+}
+
 function writeStoragePart(): void {
   if (!hasLocalStorage()) return;
   try {
@@ -221,9 +228,14 @@ export async function loadResourceSnapshot(url: string): Promise<ResourceSnapsho
   const snap = hit ?? emptyResourceSnapshot();
   if (!loaded.has(url)) {
     loaded.add(url);
+    // 先登记活对象再做异步恢复:同步段内 memory 即持有唯一对象,窗口期内
+    // applyResourceSync / 并发 load 命中同一对象。旧实现 memory.set 在 await 之后,
+    // 窗口内同步进来的新值落在第二份快照上,随后被本函数的旧快照写回覆盖
+    // (FE-3「双快照分裂 + 丢失更新」)。
+    memory.set(url, snap);
     const storagePart = readStoragePart()[url];
-    if (storagePart?.local) Object.assign(snap.local, storagePart.local);
-    if (storagePart?.session) Object.assign(snap.session, storagePart.session);
+    if (storagePart?.local) mergeMissing(snap.local, storagePart.local);
+    if (storagePart?.session) mergeMissing(snap.session, storagePart.session);
     const caches = await idbGet(url);
     if (caches) {
       // 旧格式兼容:首版以 bodyB64(base64 字符串)入库,统一转成 body(ArrayBuffer)
@@ -235,7 +247,12 @@ export async function loadResourceSnapshot(url: string): Promise<ResourceSnapsho
             delete e.bodyB64;
           }
         }
-        snap.caches[name] = { ...(snap.caches[name] ?? {}), ...caches[name] };
+        // 只补内存尚无的键:恢复期间同步进来的新值(更高写序)不得被持久化旧值覆盖。
+        // 已知边界:删除类操作无墓碑,极短窗口内被删的键可能被旧值补回(不改变「新值胜出」语义)
+        const target = (snap.caches[name] ??= {});
+        for (const req of Object.keys(caches[name] ?? {})) {
+          if (!(req in target)) target[req] = caches[name][req];
+        }
       }
     }
   }

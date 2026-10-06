@@ -141,3 +141,32 @@ describe('resourceStore 持久化桥', () => {
     expect(b.local.k).toBe('v');
   });
 });
+
+describe('FE-3 快照加载竞态(双快照分裂 / 丢失更新)', () => {
+  beforeEach(() => {
+    resetResourceStoreForTest();
+    installLocalStorageStub();
+  });
+
+  it('并发两次 loadResourceSnapshot 返回同一活对象(不分裂第二份快照)', async () => {
+    const url = 'https://a.b/race.html';
+    const [a, b] = await Promise.all([loadResourceSnapshot(url), loadResourceSnapshot(url)]);
+    expect(a).toBe(b);
+  });
+
+  it('加载窗口内同步进来的新值不丢:与持久化旧值冲突时新值胜出', async () => {
+    const url = 'https://a.b/conflict.html';
+    // 预置持久化旧值(模拟上一会话已落盘、内存已清)
+    (globalThis.localStorage as Storage).setItem(
+      'kedai.resource-storage.v1',
+      JSON.stringify({ [url]: { local: { k: 'old' }, session: {} } }),
+    );
+
+    const pending = loadResourceSnapshot(url); // 挂起在 IndexedDB 读取窗口
+    applyResourceSync(url, { subtype: 'storage', which: 'local', op: 'set', key: 'k', value: 'new' });
+    const snap = await pending;
+
+    expect(snap.local.k, '持久化旧值不得覆盖窗口内同步进来的新值').toBe('new');
+    expect(await loadResourceSnapshot(url), '全程应为同一活对象').toBe(snap);
+  });
+});

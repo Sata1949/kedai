@@ -153,7 +153,9 @@ export const useCharacterStore = defineStore('app.character', () => {
     // 顶栏 JS 授权按钮常驻可授权/撤销;执行层因脚本数组为空永不执行,无安全影响。
     // 先算 regex-only 哈希(立即可用);后台拉详情,若卡带酒馆助手卡级脚本则重算
     // 含卡级脚本的哈希——执行面变化使旧授权自动失效(需重新授权一次,安全语义如此)。
-    currentScriptHash.value = await hashRegexScripts(selected?.regex_scripts ?? []);
+    const regexHash = await hashRegexScripts(selected?.regex_scripts ?? []);
+    // 迟到守卫:等待期间已切到别的角色则丢弃(否则旧角色的哈希覆盖新角色的)
+    if (currentCharacterId.value === id) currentScriptHash.value = regexHash;
     void fetchCharacterDetail(id).then(async (detail) => {
       if (!detail || currentCharacterId.value !== id) return;
       const cardScripts = collectCardScripts(detail.data_raw as Record<string, unknown> | undefined);
@@ -172,11 +174,15 @@ export const useCharacterStore = defineStore('app.character', () => {
     chat.mvuVariables = { stat_data: {}, display_data: {} };
     // 加载该角色 [InitVar] 初始变量条目(mvu 初始化数据)
     try {
-      chat.initVarEntries = await api.fetchInitVars(id);
+      const initVars = await api.fetchInitVars(id);
+      // 迟到守卫:以下每个 await 之后都要先核对当前角色,已切走则停止本次加载
+      if (currentCharacterId.value !== id) return;
+      chat.initVarEntries = initVars;
       // 兜底:端点为空时拉详情从 data_raw 世界书前端侧再过滤(谓词与解析全在前端,
       // 覆盖旧后端谓词大小写敏感漏掉小写 [initvar] 标签的场景——碧蓝卡状态栏全兜底值)
       if (Object.keys(chat.initVarEntries).length === 0) {
         const detail = await fetchCharacterDetail(id);
+        if (currentCharacterId.value !== id) return;
         const rawEntries = (detail?.data_raw as { character_book?: { entries?: unknown } } | undefined)
           ?.character_book?.entries;
         const list = Array.isArray(rawEntries)
@@ -193,10 +199,13 @@ export const useCharacterStore = defineStore('app.character', () => {
         if (Object.keys(fallback).length > 0) chat.initVarEntries = fallback;
       }
     } catch {
-      chat.initVarEntries = {};
+      // 失败兜底为空表同样受守卫约束:已切走时不得把新角色的已加载值清掉
+      if (currentCharacterId.value === id) chat.initVarEntries = {};
     }
     try {
       await chat.loadSessions(id);
+      // 迟到守卫:已切走则停止(否则 A 的会话列表与 sessionId 会覆盖 B)
+      if (currentCharacterId.value !== id) return;
       if (chat.sessions.length > 0) {
         // 优先恢复该角色上次打开的会话;已删除则回退最近会话并刷新记忆
         const lastSid = readLastSessionId(id);
@@ -210,7 +219,10 @@ export const useCharacterStore = defineStore('app.character', () => {
       }
     } catch (e) {
       console.error('加载会话失败', e);
-      useUiPrefsStore().dataLoadError = `加载会话失败:${(e as Error).message ?? e}`;
+      // 已切走时不把旧角色的失败写到全局提示上(重新选中该角色时会再次暴露)
+      if (currentCharacterId.value === id) {
+        useUiPrefsStore().dataLoadError = `加载会话失败:${(e as Error).message ?? e}`;
+      }
     }
   }
 

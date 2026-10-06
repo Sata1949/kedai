@@ -33,7 +33,8 @@ const props = defineProps<{
   renderHtml: boolean;
   /** 当前角色正则脚本(渲染依赖;引用替换或字段变化都会使 computed 失效) */
   scripts: RegexScript[];
-  /** 消息楼层深度(0 = 最新一条):脚本 min_depth/max_depth 过滤依据;缺省不过滤 */
+  /** 消息楼层深度(0 = 最新一条):脚本 min_depth/max_depth 过滤依据;缺省按 0 处理
+   *  (2026-10-06 FE-4:此前键取 `?? 0`、渲染传原始 undefined,两者过滤语义不同) */
   depth?: number;
   /** 正则脚本内容版本 hash:作为缓存失效兜底依赖(脚本变化时必变) */
   scriptHash: string;
@@ -242,20 +243,27 @@ const html = computed<string>(() => {
   // 渲染只读按帧推进的 paintText(不直接依赖 m.content):见上方节流说明
   const text = paintText.value;
   const scopeId = `m${props.m.id}`;
+  // depth 一处归一化,缓存键与渲染同源:此前键取 `?? 0`、渲染传原始 undefined,
+  // 而两者对脚本 min_depth/max_depth 的过滤语义不同(undefined=不过滤),
+  // 键与渲染输入不等价(同一键可能命中不同渲染结果)
+  const depth = props.depth ?? 0;
   // 模块级缓存(2026-09-17 P-9):虚拟滚动卸载重挂时组件内 computed 缓存随之销毁,
   // 同一条消息来回滚动会反复重付 markdown / scoped 脚本 / sanitize 成本,故提到模块级。
   const key = buildMessageRenderKey({
     text,
     renderHtml: props.renderHtml,
     scriptHash: props.scriptHash,
-    depth: props.depth ?? 0,
+    depth,
     scopeId,
     charName: store.currentCharacterName,
   });
   const cached = messageHtmlCache.get(key);
   if (cached !== undefined) return cached;
-  const result = renderMessageHtml(text, scopeId);
-  messageHtmlCache.set(key, result);
+  const result = renderMessageHtml(text, scopeId, depth);
+  // 流式中的每一帧都是「前缀」:逐帧入缓存会以每帧一条的速度把 500 容量全换成
+  // 该消息的历史前缀(流式期间每帧一个新的键),稳定历史条目被挤光、P-9 缓存
+  // 在生成时段完全失效;终态帧(m.streaming=false)才入缓存。
+  if (!props.m.streaming) messageHtmlCache.set(key, result);
   return result;
 });
 
@@ -263,7 +271,7 @@ const html = computed<string>(() => {
  * 实际渲染(缓存未命中时执行)。分支优先级见上方说明;
  * 提取为独立函数是为了让缓存命中路径**完全不触碰** sanitize/脚本解析。
  */
-function renderMessageHtml(text: string, scopeId: string): string {
+function renderMessageHtml(text: string, scopeId: string, depth: number): string {
   const resourceUrl = extractBodyLoadUrl(text);
   if (resourceUrl) {
     return buildRemoteResourceHtml(resourceUrl, scopeId);
@@ -274,12 +282,12 @@ function renderMessageHtml(text: string, scopeId: string): string {
   if (props.renderHtml && props.scripts.length > 0) {
     // 脚本替换串新引入的 {{user}}/{{char}} 宏随渲染展开(对齐 ST substituteParams;
     // userName 缺省「用户」,与后端 content_display 展开一致)
-    const scoped = renderScopedScripts(text, props.scripts, `msg-${props.m.id}`, props.depth, {
+    const scoped = renderScopedScripts(text, props.scripts, `msg-${props.m.id}`, depth, {
       charName: store.currentCharacterName,
     });
     if (scoped) return scoped.html;
   }
-  const clean = stripHiddenPlaceholders(text, props.scripts, props.depth);
+  const clean = stripHiddenPlaceholders(text, props.scripts, depth);
   return renderMarkdown(clean);
 }
 

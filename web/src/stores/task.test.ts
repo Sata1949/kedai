@@ -19,6 +19,13 @@ vi.stubGlobal('localStorage', {
   get length() { return memStorage.size; },
 });
 
+/** FE-1:迟到响应时序控制的挂起项(命中 fn+key 时该 api 返回给定 Promise,模拟旧响应迟到) */
+interface PendingApiResponse {
+  fn: 'getTask' | 'getTaskCalls' | 'getTaskChanges';
+  key: string;
+  promise: Promise<unknown>;
+}
+
 /** mock 控制句柄(vi.hoisted 保证 vi.mock 工厂内可安全引用) */
 const h = vi.hoisted(() => ({
   subscribeCalls: 0,
@@ -68,6 +75,8 @@ const h = vi.hoisted(() => ({
   pullTruncated: false,
   /** PRODCAP-1:true 时补拉抛错(验证失败不重试、只留告警) */
   pullFail: false,
+  /** FE-1:迟到响应时序控制——命中 (fn,key) 时该 api 返回给定挂起 Promise(旧响应迟到场景) */
+  delay: null as PendingApiResponse | null,
 }));
 
 vi.mock('../api', async (importOriginal) => {
@@ -87,9 +96,11 @@ vi.mock('../api', async (importOriginal) => {
       h.listFetchCount += 1;
       return [makeTask(h.backendStatus)];
     }),
-    getTask: vi.fn(async (): Promise<TaskDetail> => {
+    getTask: vi.fn(async (id: string): Promise<TaskDetail> => {
       h.detailFetchCount += 1;
-      return makeDetail(h.backendStatus);
+      // FE-1:命中挂起项时返回未决 Promise(迟到响应时序控制)
+      if (h.delay?.fn === 'getTask' && h.delay.key === id) return h.delay.promise as Promise<TaskDetail>;
+      return makeDetail(h.backendStatus, id);
     }),
     getTaskUsageTotal: vi.fn(async (): Promise<TaskUsageTotal> => {
       h.usageFetchCount += 1;
@@ -98,6 +109,7 @@ vi.mock('../api', async (importOriginal) => {
     getTaskCalls: vi.fn(async (taskId: string): Promise<TaskLlmCall[]> => {
       h.callsFetchCount += 1;
       if (h.callsFail) throw new Error('调用记录加载失败');
+      if (h.delay?.fn === 'getTaskCalls' && h.delay.key === taskId) return h.delay.promise as Promise<TaskLlmCall[]>;
       return [makeCall(taskId)];
     }),
     getTaskEvents: vi.fn(async (taskId: string, after: number): Promise<TaskEventsPull> => {
@@ -108,6 +120,7 @@ vi.mock('../api', async (importOriginal) => {
     getTaskChanges: vi.fn(async (taskId: string): Promise<TaskChangesPayload> => {
       h.changesFetchCount += 1;
       if (h.changesFail) throw new Error('文件变更加载失败');
+      if (h.delay?.fn === 'getTaskChanges' && h.delay.key === taskId) return h.delay.promise as Promise<TaskChangesPayload>;
       return { changes: [makeChange(taskId)], undected: false, undectedReason: null };
     }),
     getTaskChangeDiff: vi.fn(async (): Promise<TaskChangeDiff> => ({
@@ -172,9 +185,9 @@ function makeTask(status: TaskStatus, title = '写一首关于秋天的短诗'):
   };
 }
 
-function makeDetail(status: TaskStatus): TaskDetail {
+function makeDetail(status: TaskStatus, id = 't1'): TaskDetail {
   return {
-    task: makeTask(status),
+    task: { ...makeTask(status), id },
     subtasks: [],
     usage_total: { prompt_tokens: 0, completion_tokens: 0, reasoning_tokens: 0 },
   };
@@ -219,6 +232,20 @@ function makeChange(taskId: string): TaskFileChange {
 async function flush(): Promise<void> {
   await new Promise((r) => setTimeout(r, 0));
   await new Promise((r) => setTimeout(r, 0));
+}
+
+/** 手工控制时序的 Promise(FE-1 迟到响应测试用) */
+function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
+  let resolveFn: ((v: T) => void) | null = null;
+  const promise = new Promise<T>((res) => {
+    resolveFn = res;
+  });
+  return {
+    promise,
+    resolve: (v: T) => {
+      if (resolveFn) resolveFn(v);
+    },
+  };
 }
 
 describe('任务事件 SSE 订阅(WP5)', () => {
@@ -1395,5 +1422,87 @@ describe('任务事件断点补拉(PRODCAP-1:seq 缺口检测 + 补拉)', () => 
     expect(warn.mock.calls.some((c) => String(c[0]).includes('补拉失败'))).toBe(true);
     warn.mockRestore();
     store.stopTaskEvents();
+  });
+});
+
+describe('FE-1 迟到响应守卫(切任务不丢新选择)', () => {
+  beforeEach(() => {
+    memStorage.clear();
+    setActivePinia(createPinia());
+    h.detailFetchCount = 0;
+    h.callsFetchCount = 0;
+    h.changesFetchCount = 0;
+    h.backendStatus = 'pending';
+    h.delay = null;
+    h.callsFail = false;
+    h.changesFail = false;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('切任务 A→B:A 的详情迟到到达不覆盖 B(迟到响应守卫)', async () => {
+    const late = deferred<TaskDetail>();
+    h.delay = { fn: 'getTask', key: 'A', promise: late.promise };
+    const store = useTaskStore();
+
+    const pA = store.selectTask('A'); // 挂起在 getTask('A')
+    await store.selectTask('B'); // 切到 B 并完成加载
+    expect(store.currentTaskId).toBe('B');
+    expect(store.currentTask?.task.id).toBe('B');
+
+    late.resolve(makeDetail('pending', 'A')); // A 的旧响应迟到
+    await pA;
+
+    expect(store.currentTaskId).toBe('B');
+    expect(store.currentTask?.task.id, '迟到响应不得覆盖当前选择').toBe('B');
+  });
+
+  it('正常路径:单次 selectTask 仍加载详情(守卫不误伤)', async () => {
+    const store = useTaskStore();
+    await store.selectTask('A');
+    expect(store.currentTaskId).toBe('A');
+    expect(store.currentTask?.task.id).toBe('A');
+  });
+
+  it('切任务 A→B:A 的调用记录迟到到达不覆盖 B', async () => {
+    const late = deferred<TaskLlmCall[]>();
+    h.delay = { fn: 'getTaskCalls', key: 'A', promise: late.promise };
+    const store = useTaskStore();
+
+    await store.selectTask('A');
+    const pCalls = store.loadTaskCalls('A'); // 挂起在 getTaskCalls('A')
+    await store.selectTask('B');
+    await store.loadTaskCalls('B');
+    expect(store.taskCalls.map((c) => c.task_id)).toEqual(['B']);
+
+    late.resolve([makeCall('A')]); // A 的旧响应迟到
+    await pCalls;
+
+    expect(store.taskCalls.map((c) => c.task_id), '迟到响应不得覆盖当前任务记录').toEqual(['B']);
+  });
+
+  it('正常路径:loadTaskCalls 仍刷新当前任务记录(守卫不误伤)', async () => {
+    const store = useTaskStore();
+    await store.selectTask('A');
+    await store.loadTaskCalls('A');
+    expect(store.taskCalls.map((c) => c.task_id)).toEqual(['A']);
+  });
+
+  it('切任务 A→B:A 的文件变更迟到到达不覆盖 B', async () => {
+    const late = deferred<TaskChangesPayload>();
+    h.delay = { fn: 'getTaskChanges', key: 'A', promise: late.promise };
+    const store = useTaskStore();
+
+    await store.selectTask('A'); // 其 void loadTaskChanges('A') 命中挂起项
+    await store.selectTask('B'); // 切走并用 B 的清单就位
+    await flush();
+    expect(store.taskFileChanges.map((c) => c.task_id)).toEqual(['B']);
+
+    late.resolve({ changes: [makeChange('A')], undected: false, undectedReason: null });
+    await flush();
+
+    expect(store.taskFileChanges.map((c) => c.task_id), '迟到响应不得覆盖当前任务变更清单').toEqual(['B']);
   });
 });

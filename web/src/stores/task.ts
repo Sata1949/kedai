@@ -447,6 +447,10 @@ export const useTaskStore = defineStore('app.task', () => {
         detailInflight.set(id, false);
         try {
           const detail = await api.getTask(id);
+          // 迟到守卫:响应到达时已切到别的任务/已清选择则丢弃。此前只比对「已展示详情」
+          // 的 id(currentTask.value?.task.id),旧任务 A 的迟到响应到达时该条件恒真,
+          // 会把 A 强制覆盖到已选中的 B 上。
+          if (currentTaskId.value !== id) return;
           const sig = contentSignature(detail);
           // id 检查兜底:切任务后旧签名残留时,即便内容碰巧相同也必须替换(现状是别的任务/null)
           if (sig !== detailSignature || currentTask.value?.task.id !== id) {
@@ -470,6 +474,8 @@ export const useTaskStore = defineStore('app.task', () => {
   async function loadTaskCalls(taskId: string): Promise<void> {
     try {
       const calls = await api.getTaskCalls(taskId);
+      // 迟到守卫:响应到达时已切任务则丢弃(签名是全局限定,不能替代归属校验)
+      if (currentTaskId.value !== taskId) return;
       const sig = contentSignature(calls);
       if (sig !== callsSignature) {
         callsSignature = sig;
@@ -488,6 +494,8 @@ export const useTaskStore = defineStore('app.task', () => {
   async function loadTaskChanges(taskId: string): Promise<void> {
     try {
       const data = await api.getTaskChanges(taskId);
+      // 迟到守卫:同 loadTaskCalls(报告未列的同族第五处)
+      if (currentTaskId.value !== taskId) return;
       const sig = contentSignature(data);
       if (sig !== changesSignature) {
         changesSignature = sig;

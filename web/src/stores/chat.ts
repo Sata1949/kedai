@@ -57,7 +57,10 @@ export const useChatStore = defineStore('app.chat', () => {
 
   // ===== 会话管理 =====
   async function loadSessions(characterId: string): Promise<void> {
-    sessions.value = await api.listSessions(characterId);
+    const list = await api.listSessions(characterId);
+    // 迟到守卫:等待期间已切角色则丢弃(旧角色的会话列表不得覆盖新角色的)
+    if (currentCharacterIdValue() !== characterId) return;
+    sessions.value = list;
   }
 
   /** 新建会话并切换过去(后端会注入角色开场白作为首条消息);greetingIndex=0 主开场,1..=备用开场 */
@@ -99,6 +102,10 @@ export const useChatStore = defineStore('app.chat', () => {
   async function loadHistory(sessionId: string): Promise<void> {
     try {
       const msgs = await api.fetchHistory(sessionId);
+      // 会话已切换:迟到的响应不得覆盖当前会话(与 restoreAgentTrace 同款守卫)。
+      // 缺此守卫时切会话 A→B、A 的响应后到会显示 A 的消息而 currentSessionId 是 B,
+      // 随后发送/重发(按 A 的锚点 truncate)会污染甚至误删 B 的历史。
+      if (currentSessionId.value !== sessionId) return;
       messages.value = msgs.map((m) => ({ ...m, streaming: false }));
       mvuVariables.value = replayMvuVariables(msgs);
       updateContextTokens(msgs);
@@ -148,7 +155,9 @@ export const useChatStore = defineStore('app.chat', () => {
     try {
       const sid = sessionId ?? currentSessionId.value;
       if (sid) {
-        sessionTotalTokens.value = await api.getSessionTotalTokens(sid);
+        const total = await api.getSessionTotalTokens(sid);
+        // 迟到守卫:等待期间已切会话则丢弃(累计值属于旧会话,写上去会张冠李戴)
+        if (currentSessionId.value === sid) sessionTotalTokens.value = total;
       }
       globalTotalTokens.value = await api.getGlobalTotalTokens();
     } catch {
@@ -183,8 +192,12 @@ export const useChatStore = defineStore('app.chat', () => {
   }
 
   async function updateContextTokens(msgs: Array<{ role: string; content: string }>): Promise<void> {
+    const expectSessionId = currentSessionId.value;
     try {
-      contextTokens.value = await api.countTokens(msgs);
+      const count = await api.countTokens(msgs);
+      // 迟到守卫:等待期间切了会话则丢弃(计数属于旧会话的消息集)
+      if (currentSessionId.value !== expectSessionId) return;
+      contextTokens.value = count;
     } catch {
       /* 忽略 */
     }
