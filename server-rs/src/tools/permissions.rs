@@ -529,6 +529,7 @@ mod tests {
             character_id: "r".into(),
             agent_depth: 0,
             scope: None,
+            budget: None,
         }
     }
 
@@ -757,6 +758,7 @@ mod tests {
             character_id: String::new(),
             agent_depth: 0,
             scope: None,
+            budget: None,
         };
         let d = m.decide("memory_write", &anon);
         assert!(!d.allowed, "空角色不应命中 role_grants[\"\"]");
@@ -797,6 +799,7 @@ mod tests {
             character_id: "r".into(),
             agent_depth: 0,
             scope: None,
+            budget: None,
         };
         assert!(m.decide("search", &alive).allowed);
         let dead = ToolContext {
@@ -804,6 +807,7 @@ mod tests {
             character_id: "r".into(),
             agent_depth: 0,
             scope: None,
+            budget: None,
         };
         assert!(!m.decide("search", &dead).allowed);
     }
@@ -915,6 +919,7 @@ mod tests {
             character_id: String::new(),
             agent_depth: 0,
             scope: None,
+            budget: None,
         };
         for cmd in ["rm -rf /important", "sudo reboot"] {
             let a = exec_action(cmd);

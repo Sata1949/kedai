@@ -82,6 +82,8 @@ impl ModeExecutor for FollowupExecutor {
                 connection_id: ctx.connection_id.clone(),
                 // 工作区作用域(编码通道批次 1):终态追加指令同样受工作区约束
                 scope: ctx.scope.clone(),
+                // 任务级总预算(PRODCAP-2):续跑同受本轮截止期约束
+                deadline: ctx.deadline,
             };
             let result =
                 run_agent_loop(svc.clone(), self.engine.clone(), call, cancel.clone()).await;

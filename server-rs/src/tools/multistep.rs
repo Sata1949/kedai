@@ -201,6 +201,7 @@ mod tests {
             character_id: character_id.into(),
             agent_depth: 0,
             scope: None,
+            budget: None,
         }
     }
 

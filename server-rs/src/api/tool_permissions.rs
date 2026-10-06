@@ -50,6 +50,7 @@ pub async fn list(
         agent_depth: 0,
         // 本处只借 ctx 的会话身份列工具清单,与工作区绑定无关
         scope: None,
+        budget: None,
     };
     let tools: Vec<_> = state
         .tool_registry

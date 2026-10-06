@@ -402,6 +402,8 @@ fn task_ctx(task_id: &str, ws: &std::path::Path) -> ToolContext {
         character_id: String::new(),
         agent_depth: 0,
         scope: Some(scope),
+        // 预算载体(PRODCAP-2)本文件不涉及(只测变更台账):置 None
+        budget: None,
     }
 }
 
@@ -591,6 +593,8 @@ async fn chat_path_bash_records_nothing() {
         character_id: String::new(),
         agent_depth: 0,
         scope: None,
+        // 聊天路径恒无任务预算(PRODCAP-2)
+        budget: None,
     };
     call_tool(state, "bash", json!({ "command": "echo chat" }), ctx)
         .await

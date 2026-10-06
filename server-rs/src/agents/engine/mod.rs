@@ -540,6 +540,8 @@ impl AgentEngine {
                 agent_depth: 0,
                 // 聊天主链路无工作区绑定(工作区在任务创建期冻结,见 task_engine::context)
                 scope: None,
+                // 聊天路径恒无任务预算(PRODCAP-2;任务侧预算只经任务引擎装配)
+                budget: None,
             };
 
             // ===== 2. 执行阶段 =====
@@ -660,6 +662,7 @@ impl AgentEngine {
                                 agent_depth: 0,
                                 // 禁词替换工具不触达文件系统,无工作区语义
                                 scope: None,
+                                budget: None,
                             };
                             let args = json!({ "text": clean_content, "entries": entries });
                             match self

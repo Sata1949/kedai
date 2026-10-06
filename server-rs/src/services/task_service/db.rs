@@ -75,6 +75,26 @@ pub(super) fn recover_orphan_tasks(db: &Db) -> Vec<String> {
             "服务启动:中断任务已补写已完成步骤的产出(部分成果兜底)"
         );
     }
+    // PRODCAP-3:孤儿任务的未完成子任务同批收编(与 `TaskService::end_unfinished_subtasks`
+    // 同口径:只置 ended、不伪造——绝不置 done、result 原样;finished_at 只补空值 = 幂等)。
+    // 启动期无客户端连接,不发 Subtask 事件(任务行的 status 事件由调用方补发)。
+    let mut reaped = 0usize;
+    for (id, _) in &rows {
+        reaped += conn
+            .execute(
+                "UPDATE task_subtasks SET status = 'ended', error = '服务重启,任务中断', updated_at = ?1, \
+                 finished_at = CASE WHEN finished_at = '' THEN ?1 ELSE finished_at END \
+                 WHERE task_id = ?2 AND status IN ('pending', 'running')",
+                params![now_iso(), id],
+            )
+            .unwrap_or(0);
+    }
+    if reaped > 0 {
+        tracing::info!(
+            count = reaped,
+            "服务启动:中断任务的未完成子任务已收编(终态不留中间态)"
+        );
+    }
     ids
 }
 
@@ -1164,5 +1184,84 @@ mod tests {
         assert_eq!(st, "ended", "重开后新孤儿应被终结");
         assert!(err.contains("服务重启"), "error 文本应标注中断原因: {err}");
         drop(db2);
+    }
+
+    /// PRODCAP-3:孤儿恢复同批收编未完成子任务——pending/running 置 ended、error 记原因、
+    /// finished_at 补空值;done 与已有 finished_at 的行**逐字不变**(不伪造、不改写);
+    /// 重复执行幂等(零命中)。
+    #[test]
+    fn recover_orphan_tasks_reaps_unfinished_subtasks() {
+        let dir = TempDataDir::new("task-recover-subtasks");
+        let db_path = dir.join("kedai.db");
+        let db = Db::open(&db_path, &dir).expect("开库失败");
+        {
+            let conn = db.write();
+            conn.execute(
+                "INSERT INTO tasks (id, title, status, created_at, updated_at) \
+                 VALUES ('t-orphan', '孤儿', 'running', 'c', 'u')",
+                [],
+            )
+            .unwrap();
+            // 子任务四态:running / pending 待收编;done / 已 finished 的行不得被改写
+            for (id, status, finished) in [
+                ("s-running", "running", ""),
+                ("s-pending", "pending", ""),
+                ("s-done", "done", "2026-01-01T00:00:00Z"),
+                ("s-ended", "ended", "2026-01-01T00:00:00Z"),
+            ] {
+                conn.execute(
+                    "INSERT INTO task_subtasks \
+                     (id, task_id, name, instruction, status, result, error, created_at, updated_at, finished_at) \
+                     VALUES (?1, 't-orphan', 'n', 'i', ?2, '既有产出', '', 'c', 'u', ?3)",
+                    params![id, status, finished],
+                )
+                .unwrap();
+            }
+        }
+        assert_eq!(recover_orphan_tasks(&db), vec!["t-orphan".to_string()]);
+        let sub = |db: &Db, id: &str| -> (String, String, String, String) {
+            db.read()
+                .unwrap()
+                .query_row(
+                    "SELECT status, result, error, finished_at FROM task_subtasks WHERE id = ?1",
+                    params![id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .unwrap()
+        };
+        let (st, result, err, fin) = sub(&db, "s-running");
+        assert_eq!(st, "ended", "运行中子任务应被收编");
+        assert_eq!(result, "既有产出", "收编不得改写 result(不伪造)");
+        assert!(err.contains("服务重启"), "原因应写入 error: {err}");
+        assert!(!fin.is_empty(), "finished_at 应补记");
+        let (st_pending, _, _, fin_pending) = sub(&db, "s-pending");
+        assert_eq!(st_pending, "ended", "pending 子任务同样收编");
+        assert!(!fin_pending.is_empty());
+        assert_eq!(
+            sub(&db, "s-done"),
+            (
+                "done".into(),
+                "既有产出".into(),
+                "".into(),
+                "2026-01-01T00:00:00Z".into()
+            ),
+            "已 done 的行逐字不变"
+        );
+        assert_eq!(
+            sub(&db, "s-ended"),
+            (
+                "ended".into(),
+                "既有产出".into(),
+                "".into(),
+                "2026-01-01T00:00:00Z".into()
+            ),
+            "已终态的行逐字不变(幂等,不覆盖 finished_at)"
+        );
+        // 幂等:再跑一次零命中,收编行各列仍逐字不变
+        assert!(recover_orphan_tasks(&db).is_empty(), "重复执行应零命中");
+        let (st_again, result_again, _, fin_again) = sub(&db, "s-running");
+        assert_eq!(st_again, "ended");
+        assert_eq!(result_again, "既有产出");
+        assert_eq!(fin_again, fin, "finished_at 不得被二次改写");
     }
 }

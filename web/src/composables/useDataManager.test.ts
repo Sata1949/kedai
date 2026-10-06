@@ -85,6 +85,8 @@ describe('批量保存按模式过滤(TM-SET-3)', () => {
     expect(patch.undo_enabled).toBeDefined();
     expect(patch.default_temperature).toBeDefined();
     expect(patch.task_step_budget_secs).toBeDefined();
+    // 任务级总预算(PRODCAP-2):装配漏一处即类型/UI 断裂,在此钉住
+    expect(patch.task_total_budget_secs).toBeDefined();
   });
 });
 

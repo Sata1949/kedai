@@ -231,6 +231,14 @@ pub(super) fn default_task_step_budget_secs() -> u32 {
     3600
 }
 
+/// 默认任务级总预算(PRODCAP-2):**0 = 关**(不改变既有用户体感;单步预算已覆盖
+/// 主要失控场景,总预算防的是「每步都不超、整任务失控」的少数形态,按需显式开启)。
+/// 区间与步骤预算同款:0 或 1..=86400;到点后多步执行器不再启动新步骤/节点/子目标,
+/// 在跑步由 `min(步骤预算, 剩余)` 收窄后**带产出收尾**(不制造失败)。
+pub(super) fn default_task_total_budget_secs() -> u32 {
+    0
+}
+
 /// 默认任务空闲超时(提交 3 · D7):2400 秒无任何活动即由看守收尾。
 /// 下限见 `task_idle_floor_secs`(现值 = 命令上限 1800 + 模型调用 300 + 1 = 2101),
 /// 默认在下限之上留一档余量。**这是有限值,不是关掉看守**(关掉要显式设 0);
@@ -662,6 +670,7 @@ impl RuntimeSettings {
             loop_guard_semantic_min_calls: default_loop_guard_semantic_min_calls(),
             loop_guard_semantic_max_distinct: default_loop_guard_semantic_max_distinct(),
             task_step_budget_secs: default_task_step_budget_secs(),
+            task_total_budget_secs: default_task_total_budget_secs(),
             task_idle_timeout_secs: default_task_idle_timeout_secs(),
             render_html: false,
             compaction_mode: default_compaction_mode(),

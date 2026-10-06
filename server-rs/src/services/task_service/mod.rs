@@ -18,8 +18,8 @@ use crate::models::db::{now_iso, Db, PooledRead};
 use crate::models::types::{
     CharacterRecord, GenerationParams, LlmMessage, LlmStreamChunk, SseEvent, TaskEventKind,
     TaskFollowupMode, TaskLlmCallRecord, TaskMessageRecord, TaskRecord, TaskRunMode, TaskStatus,
-    TaskStep, TaskSubtaskRecord, TaskSubtaskStatus, ToolCallArgs, ToolChoice, ToolContext,
-    ToolDefinition,
+    TaskStep, TaskSubtaskRecord, TaskSubtaskStatus, ToolBudget, ToolCallArgs, ToolChoice,
+    ToolContext, ToolDefinition,
 };
 use crate::services::agent_flow_service::{AgentFlowService, FlowSnapshot};
 use crate::services::agent_subtask_service::AgentSubtaskService;

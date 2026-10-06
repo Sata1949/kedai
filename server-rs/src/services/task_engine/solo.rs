@@ -12,7 +12,8 @@ use crate::agents::engine::executor::run_tool_loop;
 use crate::agents::engine::{AbortFlag, AgentEngine};
 use crate::agents::state_machine::{AgentState, StateMachine};
 use crate::models::types::{
-    GenerationParams, LlmMessage, TaskStatus, TokenUsage, ToolChoice, ToolContext,
+    GenerationParams, LlmMessage, TaskEventKind, TaskStatus, TokenUsage, ToolBudget, ToolChoice,
+    ToolContext,
 };
 use crate::services::settings_service::RuntimeSettings;
 use crate::services::task_core::{TaskBackend, TaskTerminal};
@@ -51,6 +52,10 @@ pub(crate) struct AgentLoopCall {
     /// **工作区作用域**(编码通道批次 1;空 = 未绑定工作区)。从执行上下文原样下传,
     /// 供工具循环构造 `ToolContext.scope`(fs_* 工具族与 bash 的 cwd jail 消费它)。
     pub scope: Option<Arc<crate::models::types::ExecScope>>,
+    /// **任务级总预算截止期**(PRODCAP-2;None = 未开启)。
+    /// 消费点两处:① 本步墙钟预算按 `min(步骤预算, deadline - now)` 取小
+    /// (见 `effective_step_budget`);② 多步执行器在启动下一步前判定是否已到点。
+    pub deadline: Option<Instant>,
 }
 
 /// 单主 agent 工具自循环(solo/multi 执行器主体;team 各主 agent 复用):
@@ -116,7 +121,10 @@ pub(crate) async fn run_agent_loop(
 
     // 任务侧工具循环的两道限制(提交 3 · D3):单步墙钟预算 + 语义熔断收紧,
     // 与 custom 的工具节点共用同一映射(单一出处,见 task_loop_limits 文档)。
+    // PRODCAP-2:本步墙钟预算再按任务级截止期取小——总预算开启时,单步不得超过
+    // 「距截止期剩余时间」,到点复用既有「带产出收尾」路径(总预算关 = None,行为不变)。
     let (step_budget, semantic_guard) = super::task_loop_limits(settings);
+    let step_budget = super::effective_step_budget(step_budget, call.deadline);
     // 执行者建议温度(TM-GEN-1):命中执行者库且配置了温度时优先于任务有效缺省温度;
     // 未配置/无执行者 = 沿用缺省(单点解析式见 TaskPromptKit::executor_temperature,
     // generate_step 侧同一口径)。
@@ -154,6 +162,9 @@ pub(crate) async fn run_agent_loop(
         character_id: call.character_id.clone().unwrap_or_default(),
         agent_depth: 0,
         scope: call.scope.clone(),
+        // 任务侧预算载体(PRODCAP-2):子 agent 派发路径(agentgo/subtask)据此
+        // 透传语义熔断三值进子循环;墙钟预算不在其中(父层轮末闸门即上限)
+        budget: Some(ToolBudget { semantic_guard }),
     };
     // 事件桥:引擎事件 → 任务事件(agent_status);drain 持续消费到 tx drop。
     // phase/step_index 随桥传入(批次 R4):Token 攒批 delta 携带调用归属,
@@ -346,6 +357,18 @@ pub(crate) async fn run_agent_loop(
             if let Err(e) = state_machine.transition(AgentState::Finished, &call.session_id) {
                 tracing::warn!(error = %e, session = %call.session_id, "状态迁移被拒");
             }
+            // PRODCAP-2:本步被墙钟预算收尾且任务级截止期已过 → 收尾的真实约束来源是
+            // 「任务总预算」(引擎事件只报被收窄后的本步数字,不复述总预算)。补一条任务侧
+            // 事件说明成因;单步预算自行到点(截止期未过)不补,保持既有事件形态不变。
+            if res.budget_stopped && super::deadline_exhausted(call.deadline) {
+                svc.emit_event(
+                    TaskEventKind::Status,
+                    &call.task_id,
+                    None,
+                    None,
+                    Some("任务总预算用尽:工具循环在任务总预算处收尾,已保留本轮产出".into()),
+                );
+            }
             Ok((text, total_usage))
         }
         Ok(_) => {
@@ -417,6 +440,8 @@ impl SoloExecutor {
             // 任务级连接(A 批 B1):从执行上下文原样下传
             connection_id: ctx.connection_id.clone(),
             scope: ctx.scope.clone(),
+            // 任务级总预算(PRODCAP-2):0 = 关时恒 None,行为逐字节不变
+            deadline: ctx.deadline,
         };
         let (text, usage) = run_agent_loop(
             self.svc.clone(),

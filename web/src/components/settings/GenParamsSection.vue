@@ -24,7 +24,7 @@ const {
   toolHistoryKeepRounds, toolHistoryBudgetTokens,
   sessionTokenBudget, sessionBudgetAction,
   loopGuardSemanticWindow, loopGuardSemanticMinCalls, loopGuardSemanticMaxDistinct,
-  taskStepBudgetSecs, taskIdleTimeoutSecs,
+  taskStepBudgetSecs, taskTotalBudgetSecs, taskIdleTimeoutSecs,
   compactionMode, compactionThreshold, compactionKeepRecent, compactionSnipBytes,
   memoryDistillEnabled, memoryInjectLimit, memoryInjectCharBudget, memoryMaxEntries,
   subagentMaxDepth, subagentMaxConcurrency, subagentResultMaxChars,
@@ -257,6 +257,19 @@ const isTaskMode = computed(() => store.appMode === 'task');
           title="任务模式**单步工具循环**的墙钟上限(秒):到点带着已有产出收尾并记完成,不判失败;0 = 关闭本闸门"
         />
         <span class="sv-note">任务侧:单步工具循环上限(默认 1200;0 = 关;建议 ≥300)</span>
+      </div>
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">任务总预算</label>
+        <input
+          v-model.number="taskTotalBudgetSecs"
+          type="number"
+          min="0"
+          max="86400"
+          step="1"
+          class="sv-input inject-num"
+          title="任务模式:一次任务执行(含多步/多节点/多子目标)的总墙钟上限(秒):到点后不再启动新步骤,以已完成部分收尾并说明原因;0 = 关闭本闸门(默认关)"
+        />
+        <span class="sv-note">任务侧:整任务上限(默认 0 = 关;0 或 1-86400)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">任务空闲超时</label>

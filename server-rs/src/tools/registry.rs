@@ -454,6 +454,7 @@ mod tests {
             character_id: "c".into(),
             agent_depth: 0,
             scope: None,
+            budget: None,
         }
     }
 

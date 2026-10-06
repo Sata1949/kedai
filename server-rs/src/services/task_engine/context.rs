@@ -45,4 +45,10 @@ pub(crate) struct TaskRunContext {
     /// `bash` 以它为 cwd 缺省与 jail 边界。`Arc` 共享让同一任务的所有工具调用
     /// 共用一份「本 run 读过哪些文件」的记录(fs_write/fs_edit 的先读后写校验依赖它)。
     pub scope: Option<std::sync::Arc<crate::models::types::ExecScope>>,
+    /// **任务级总预算截止期**(PRODCAP-2;`None` = 总预算关,行为逐字节不变)。
+    ///
+    /// 由 `spawn_run` 从设置 `task_total_budget_secs` 起算一次,随上下文下传到各
+    /// 执行器;消费口径见 `task_engine::effective_step_budget`(单步预算取小)与
+    /// `task_engine::deadline_exhausted`(多步执行器启动新步骤/节点前的守卫)。
+    pub deadline: Option<std::time::Instant>,
 }

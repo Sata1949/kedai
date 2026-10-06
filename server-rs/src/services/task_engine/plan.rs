@@ -58,8 +58,29 @@ impl ApprovedPlanExecutor {
         for i in 0..count {
             if *ctx.cancel.borrow() {
                 // 取消:剩余 pending 步骤统一置 error「任务已停止」再收尾(与 team 口径对齐)
-                fail_pending_steps_on_cancel(svc, &ctx.task_id, &mut plan);
+                fail_pending_steps(svc, &ctx.task_id, &mut plan, "任务已停止");
                 return Err("任务已停止".into());
+            }
+            // 任务总预算用尽(PRODCAP-2):不再启动新步骤——剩余未执行步骤统一标错
+            //(与取消同款「不留永远 pending 的步骤」纪律),以已完成部分收尾;
+            // 无任何已完成产出时 fallback_terminal 自然回落 Failed(不伪造成果)。
+            if super::deadline_exhausted(ctx.deadline) {
+                svc.emit_event(
+                    TaskEventKind::Status,
+                    &ctx.task_id,
+                    None,
+                    None,
+                    Some(format!(
+                        "任务总预算用尽:不再启动第 {} 步起的 {} 个步骤,以已完成部分收尾",
+                        i + 1,
+                        count - i
+                    )),
+                );
+                fail_pending_steps(svc, &ctx.task_id, &mut plan, "任务总预算用尽(未执行)");
+                return Ok((
+                    fallback_terminal(&plan, "任务总预算用尽,剩余步骤未执行".into()),
+                    total,
+                ));
             }
             plan[i].status = TaskStepStatus::Running;
             svc.set_plan(&ctx.task_id, &plan);
@@ -88,6 +109,8 @@ impl ApprovedPlanExecutor {
                 connection_id: ctx.connection_id.clone(),
                 // 工作区作用域(编码通道批次 1):批准后的逐步执行同样受工作区约束
                 scope: ctx.scope.clone(),
+                // 任务级总预算(PRODCAP-2):每步墙钟预算按其取小,到点不再启动新步骤
+                deadline: ctx.deadline,
             };
             match run_agent_loop(svc.clone(), self.engine.clone(), call, ctx.cancel.clone()).await {
                 Ok((text, usage)) => {
@@ -104,7 +127,7 @@ impl ApprovedPlanExecutor {
                     svc.set_plan(&ctx.task_id, &plan);
                     if *ctx.cancel.borrow() {
                         // 取消:剩余 pending 步骤统一置 error「任务已停止」再收尾(与 team 口径对齐)
-                        fail_pending_steps_on_cancel(svc, &ctx.task_id, &mut plan);
+                        fail_pending_steps(svc, &ctx.task_id, &mut plan, "任务已停止");
                         return Err("任务已停止".into());
                     }
                     // 单步失败记 error 继续后续步骤(对齐 legacy 执行段语义)
@@ -155,16 +178,22 @@ impl ApprovedPlanExecutor {
     }
 }
 
-/// 取消兜底:剩余 pending 步骤统一置 error「任务已停止」并落库(与 team 口径对齐:
-/// 收尾只写任务终态,步骤态归执行器负责,不留永远 pending 的步骤)。
+/// 剩余 pending 步骤统一置 error 并落库(与 team 口径对齐:收尾只写任务终态,
+/// 步骤态归执行器负责,不留永远 pending 的步骤)。取消与任务总预算用尽共用本条
+/// (PRODCAP-2 起 reason 参数化:取消 =「任务已停止」,预算 =「任务总预算用尽(未执行)」)。
 /// 本执行器单线程逐步推进,取消检查点不存在 running 态步骤(当前步已在 Err 分支置
 /// error),故只需扫 pending。
-fn fail_pending_steps_on_cancel(svc: &Arc<dyn TaskBackend>, task_id: &str, plan: &mut [TaskStep]) {
+fn fail_pending_steps(
+    svc: &Arc<dyn TaskBackend>,
+    task_id: &str,
+    plan: &mut [TaskStep],
+    reason: &str,
+) {
     let mut dirty = false;
     for s in plan.iter_mut() {
         if s.status == TaskStepStatus::Pending {
             s.status = TaskStepStatus::Error;
-            s.result = "任务已停止".into();
+            s.result = reason.to_string();
             dirty = true;
         }
     }

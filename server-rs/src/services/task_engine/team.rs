@@ -545,6 +545,21 @@ impl TeamExecutor {
                 }
                 break;
             }
+            // 任务总预算用尽(PRODCAP-2):剩余子目标不再启动,统一标错(与取消同款
+            // 「每步都有终态」纪律);已产出的子目标结果照常聚合。
+            if super::deadline_exhausted(ctx.deadline) {
+                for (k2, g2) in main.goals.iter().enumerate().skip(k) {
+                    if goal_filter.is_some_and(|only| !only.contains(&k2)) {
+                        continue;
+                    }
+                    results.push((
+                        step_idxs[k2],
+                        g2.name.clone(),
+                        Err("任务总预算用尽(未执行)".into()),
+                    ));
+                }
+                break;
+            }
             let mut goal = format!(
                 "总体目标:\n{}\n\n你是主 Agent-{n},负责分工「{}」。当前子目标(第 {}/{} 个):{}\n{}\n",
                 ctx.goal,
@@ -581,6 +596,8 @@ impl TeamExecutor {
                 connection_id: ctx.connection_id.clone(),
                 // 工作区作用域(编码通道批次 1):各主 agent 共享同一任务的工作区
                 scope: ctx.scope.clone(),
+                // 任务级总预算(PRODCAP-2):各主 agent 的循环同受截止期约束
+                deadline: ctx.deadline,
             };
             let result = run_agent_loop(
                 self.svc.clone(),
@@ -640,6 +657,22 @@ impl TeamExecutor {
             .await;
         if cancelled {
             return Err("任务已停止".into());
+        }
+        // 任务总预算用尽(PRODCAP-2):各主 agent 的循环已被截止期收窄的步骤预算收口;
+        // 截止期已过则审计/汇总不再发起新调用(总预算的目的就是停止继续开销),
+        // 以已完成部分收尾(无产出时 fallback_terminal 自然回落 Failed)。
+        if super::deadline_exhausted(ctx.deadline) {
+            svc.emit_event(
+                TaskEventKind::Status,
+                &ctx.task_id,
+                None,
+                None,
+                Some("任务总预算用尽:审计与汇总未执行,以已完成部分收尾".into()),
+            );
+            return Ok((
+                fallback_terminal(&plan, "任务总预算用尽,审计与汇总未执行".into()),
+                total,
+            ));
         }
         if outputs.iter().all(|o| o.is_none()) {
             // 全灭时 helper 自然回落 Failed(无 done 步骤可拼),措辞与旧实现一致
@@ -983,6 +1016,8 @@ impl TeamExecutor {
                 connection_id: ctx.connection_id.clone(),
                 // 工作区作用域(编码通道批次 1):打回补做轮沿用同一工作区
                 scope: ctx.scope.clone(),
+                // 任务级总预算(PRODCAP-2):补做轮沿用同一截止期
+                deadline: ctx.deadline,
             };
             let main = mains[i].clone();
             let step_idxs = step_ranges[i].clone();

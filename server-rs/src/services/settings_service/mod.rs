@@ -46,7 +46,7 @@ use params::{
     default_session_budget_action, default_session_token_budget,
     default_skill_progressive_disclosure, default_subagent_max_concurrency,
     default_subagent_max_depth, default_subagent_result_max_chars, default_task_idle_timeout_secs,
-    default_task_step_budget_secs, default_task_tool_policy,
+    default_task_step_budget_secs, default_task_tool_policy, default_task_total_budget_secs,
     default_tool_authorization_timeout_secs, default_tool_history_budget_tokens,
     default_tool_history_keep_rounds, default_undo_enabled, default_user_role,
 };
@@ -218,6 +218,14 @@ pub struct RuntimeSettings {
     /// 不设 60s 之类下限是刻意的:1 秒合法(测试靠它触发预算路径),文档注「建议 ≥300」。
     #[serde(default = "default_task_step_budget_secs")]
     pub task_step_budget_secs: u32,
+    /// 任务级总预算秒数(PRODCAP-2;默认 **0 = 关**,否则钳 1..=86400):
+    /// 一次任务执行(含多步/多节点/多子目标)的墙钟上限——到点后多步执行器**不再
+    /// 启动新步骤/节点/子目标**,在跑步由 `min(步骤预算, 剩余)` 收窄后**带产出收尾**
+    /// (不制造失败)。**扁平字段、只被任务侧消费**(`task_engine::spawn_run` 起算
+    /// `TaskRunContext.deadline`);聊天路径不读、不传。
+    /// 默认关的判据:单步预算已覆盖主要失控场景,总预算防「每步都不超、整任务失控」。
+    #[serde(default = "default_task_total_budget_secs")]
+    pub task_total_budget_secs: u32,
     /// 任务空闲超时秒数(提交 3 · D7;默认 2400,0 = 关,否则钳
     /// `task_idle_floor_secs()`..=86400):运行中任务若连续该时长既无模型调用行、也无事件心跳,
     /// 由看守以 stop 同源路径收尾并标注「空闲超时自动收尾」。

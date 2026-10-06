@@ -35,8 +35,8 @@ use crate::agents::engine::executor::run_tool_loop;
 use crate::agents::engine::{AbortFlag, AgentEngine};
 use crate::agents::state_machine::StateMachine;
 use crate::models::types::{
-    GenerationParams, LlmMessage, PlanStep, TaskStatus, TaskStep, TaskStepStatus, TokenUsage,
-    ToolChoice, ToolContext,
+    GenerationParams, LlmMessage, PlanStep, TaskEventKind, TaskStatus, TaskStep, TaskStepStatus,
+    TokenUsage, ToolBudget, ToolChoice, ToolContext,
 };
 use crate::services::agent_flow_service::{
     effective_max_parallel, flow_label, output_index, resolve_graph, AgentFlowConfig,
@@ -376,7 +376,8 @@ impl CustomExecutor {
             parallel_tool_calls: step.parallel_tool_calls,
             // 任务侧工具循环的两道限制(提交 3 · D3):与 solo 主循环共用同一映射
             // (单一出处 task_engine::task_loop_limits,勿在此另算一份)。
-            step_budget: limits.0,
+            // PRODCAP-2:本节点墙钟预算再按任务级截止期取小(总预算关 = None)
+            step_budget: super::effective_step_budget(limits.0, ctx.deadline),
             semantic_guard: limits.1,
             response_format: None,
         };
@@ -397,6 +398,10 @@ impl CustomExecutor {
             character_id: String::new(), // custom 不吃角色卡
             agent_depth: 0,
             scope: ctx.scope.clone(),
+            // 任务侧预算载体(PRODCAP-2):子 agent 派发路径据此透传语义三值
+            budget: Some(ToolBudget {
+                semantic_guard: limits.1,
+            }),
         };
         // 事件桥(批次 R4 携 phase/step_index):custom 工具步骤的调用追踪口径为
         // phase + 本步骤下标(与下方 record_llm_call 一致;子图为 subflow.<路径>)
@@ -1106,12 +1111,20 @@ impl CustomExecutor {
         // 各节点产出(下标对齐 steps):失败或空产出留空串,下游据此拿到空段
         let mut outputs: Vec<String> = vec![String::new(); node_count];
         let mut any_error = false;
+        // 任务总预算跳过标记(PRODCAP-2):截止期已过且仍有可启动节点未被启动
+        let mut budget_skipped = false;
         let mut total = TokenUsage::default();
 
         while finished < node_count {
             // 补满在飞槽位(上限 = 本层流程的 max_parallel_nodes,默认 2:并行成倍消耗 token)
             while inflight.len() < g.max_parallel {
                 let Some(&i) = ready.iter().next() else { break };
+                // 任务总预算用尽(PRODCAP-2):不再启动新节点——在飞节点各自由被
+                // 截止期收窄的步骤预算收口(不 drop:硬切断会把在飞调用留给「中断」语义)
+                if super::deadline_exhausted(ctx.deadline) {
+                    budget_skipped = true;
+                    break;
+                }
                 ready.remove(&i);
                 if *ctx.cancel.borrow() {
                     // 取消:丢弃在飞 future 即中止分支(与串行口径一致:在飞行保持 running),
@@ -1212,6 +1225,27 @@ impl CustomExecutor {
                 if missing_parents[child] == 0 {
                     ready.insert(child);
                 }
+            }
+        }
+        // 任务总预算用尽:未启动的节点统一标错(与取消同款「不留永远 pending 的步骤」
+        // 纪律),并计入 any_error——整条链未走完,任务不得报 done(如实降级 partial)。
+        if budget_skipped {
+            svc.emit_event(
+                TaskEventKind::Status,
+                &ctx.task_id,
+                None,
+                None,
+                Some("任务总预算用尽:部分节点未启动,以已完成部分收尾".into()),
+            );
+            any_error = true;
+            if let Some(p) = plan.as_deref_mut() {
+                for s in p.iter_mut() {
+                    if s.status == TaskStepStatus::Pending {
+                        s.status = TaskStepStatus::Error;
+                        s.result = "任务总预算用尽(未执行)".into();
+                    }
+                }
+                svc.set_plan(&ctx.task_id, p);
             }
         }
         Ok(GraphOutcome {

@@ -156,6 +156,7 @@ mod tests {
             character_id: "charM".into(),
             agent_depth: 0,
             scope: None,
+            budget: None,
         };
 
         // 写入:落新表(memory_write 为危险级工具,测试以已裁决放行路径执行)
@@ -224,6 +225,7 @@ mod tests {
                     character_id: "charM".into(),
                     agent_depth: 0,
                     scope: None,
+                    budget: None,
                 }
             )
             .await

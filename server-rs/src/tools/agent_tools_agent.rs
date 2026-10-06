@@ -7,7 +7,9 @@
 // 批次 4.3b 子 agent 工具化:引擎就绪时 run_subtask 改走 run_tool_loop + 工具白名单
 //(读/搜索类安全工具,写类剔除;agent_depth+1 深度守卫,子 agent 不得再派子 agent);
 // 任务模式(task: 前缀虚拟 session)落库走内存覆盖层,进度经任务事件桥发 agent_status。
-use crate::models::types::{GenerationParams, LlmMessage, SseEvent, ToolContext, ToolDefinition};
+use crate::models::types::{
+    GenerationParams, LlmMessage, SseEvent, ToolBudget, ToolContext, ToolDefinition,
+};
 use crate::tools::registry::ToolRegistry;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -175,6 +177,9 @@ pub(super) fn register_agentgo(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
                     // 工作区工具,但继承语义必须成立——否则日后扩白名单会出现
                     // 「工具在,却恒报未绑定工作区」的静默降级。
                     let scope = ctx.scope.clone();
+                    // 任务侧预算载体随子 agent 继承(PRODCAP-2):子循环据此套用任务侧
+                    // 收紧的语义熔断三值;聊天路径 ctx.budget 恒 None(行为不变)
+                    let budget = ctx.budget;
                     tokio::spawn(async move {
                         run_subtask(
                             deps2,
@@ -185,6 +190,7 @@ pub(super) fn register_agentgo(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
                             max_tokens,
                             agent_depth,
                             scope,
+                            budget,
                         )
                         .await;
                     });
@@ -242,6 +248,8 @@ async fn run_subtask(
     agent_depth: u32,
     // 父调用的工作区作用域(空 = 父任务未绑定工作区);见 `models::types::ExecScope`
     scope: Option<std::sync::Arc<crate::models::types::ExecScope>>,
+    // 父调用携带的任务侧预算(PRODCAP-2;聊天路径恒 None)
+    budget: Option<ToolBudget>,
 ) {
     // 已被 agentend 提前结束 → 不再启动
     if deps.subtasks.is_ended(&task_id) {
@@ -298,12 +306,13 @@ async fn run_subtask(
                 agent_depth,
                 cancel,
                 scope,
+                budget,
             )
             .await;
         }
         None => {
             // 回退路径:引擎未就绪(单测/早期构造)——保持原纯生成行为
-            run_subtask_plain(&deps, &task_id, &messages, max_tokens, cancel).await;
+            run_subtask_plain(&deps, &task_id, &messages, max_tokens, cancel, budget).await;
         }
     }
     deps.subtasks.unregister_cancel(&task_id);
@@ -326,6 +335,7 @@ async fn run_subtask_with_tools(
     agent_depth: u32,
     cancel: tokio::sync::watch::Receiver<bool>,
     scope: Option<std::sync::Arc<crate::models::types::ExecScope>>,
+    budget: Option<ToolBudget>,
 ) {
     use crate::agents::engine::executor::run_tool_loop;
     use crate::agents::engine::AbortFlag;
@@ -356,12 +366,13 @@ async fn run_subtask_with_tools(
         tool_choice: crate::models::types::ToolChoice::Auto,
         connection_id: None,
         parallel_tool_calls: None,
-        // 子 agent 工具循环(agentgo)不套任务侧步骤墙钟预算:本路径是聊天 AGENT 模式
-        // 与任务 multi/team 的**共用**实现,设置来自扁平快照而非任务侧 for_mode(Task)
-        // 快照,装预算就得把任务上下文穿透进工具层(改动面与回归面都大)。
-        // 缺口已登记 docs/遗留.md(任务模式 TM-D3 派生)。
+        // 子 agent 工具循环(agentgo)不套任务侧**墙钟**预算:本路径是聊天 AGENT 模式
+        // 与任务 multi/team 的**共用**实现,墙钟在父循环一轮之内由父层轮末闸门兜底;
+        // 两处各记一次账必然漂移(PRODCAP-2 沿用任务模式提交 3 D3 的既定口径)。
         step_budget: None,
-        semantic_guard: None,
+        // 语义熔断三值(PRODCAP-2):任务路径经父 `ToolContext.budget` 透传(已过
+        // clamp_for_task,不重复钳制);聊天路径恒 None → 引擎用扁平设置,行为逐字节不变。
+        semantic_guard: budget.and_then(|b| b.semantic_guard),
         response_format: None,
     };
 
@@ -380,6 +391,8 @@ async fn run_subtask_with_tools(
         // 深度 +1:子 agent 内再触 agentgo 时守卫按嵌套层判定(白名单已剔除,双保险)
         agent_depth: agent_depth + 1,
         scope,
+        // 预算载体原样继承(PRODCAP-2):嵌套派发不断链
+        budget,
     };
     let (tx, drain) = match (&svc, &task_ref) {
         // 批次 R4:事件桥携 phase=subagent(与下方 record_llm_call 落库口径一致,
@@ -573,6 +586,7 @@ async fn run_subtask_plain(
     messages: &[LlmMessage],
     max_tokens: u32,
     cancel: tokio::sync::watch::Receiver<bool>,
+    budget: Option<ToolBudget>,
 ) {
     let params = GenerationParams {
         temperature: 0.7,
@@ -585,7 +599,8 @@ async fn run_subtask_plain(
         connection_id: None,
         parallel_tool_calls: None,
         step_budget: None,
-        semantic_guard: None,
+        // 本路径无工具循环,语义熔断无消费点;透传为「任务路径不静默丢预算」的一致性
+        semantic_guard: budget.and_then(|b| b.semantic_guard),
         response_format: None,
     };
 

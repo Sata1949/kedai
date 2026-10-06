@@ -849,6 +849,22 @@ pub struct ToolDefinition {
     pub parameters: Value,
 }
 
+/// 任务侧工具链路的预算载体(PRODCAP-2)。
+///
+/// 只承载**语义熔断三值**(窗口 / 同工具次数下限 / 输出指纹去重上限,已过
+/// [`crate::utils::loop_guard::clamp_for_task`] 收紧):子 agent 派发路径
+/// (agentgo / subtask)从父 `ToolContext.budget` 读取并透传进子循环的
+/// `GenerationParams.semantic_guard`;聊天路径 `budget` 恒 `None`(行为逐字节不变)。
+///
+/// **墙钟预算刻意不在此结构内**:子 agent 运行在父循环一轮之内,父层轮末闸门即其上限;
+/// 两处各记一次账必然漂移(任务模式提交 3 D3 的既定口径,PRODCAP-2 沿用)。
+/// 任务级总预算的到点收尾走 `TaskRunContext.deadline`(见 `task_engine`),亦不在此。
+#[derive(Debug, Clone, Copy)]
+pub struct ToolBudget {
+    /// 任务侧收紧后的语义熔断三值(`0` = 该位关闭,原样保持)
+    pub semantic_guard: Option<(usize, usize, usize)>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ToolContext {
     pub session_id: String,
@@ -860,6 +876,9 @@ pub struct ToolContext {
     /// 工作区作用域(任务绑定了工作区时非空;聊天路径恒 None)。
     /// 子 agent 继承父 ctx 的 scope(同一个 Arc,读写记录共享)。
     pub scope: Option<Arc<ExecScope>>,
+    /// 任务侧预算载体(PRODCAP-2;聊天路径恒 None)。
+    /// 子 agent 派发路径经它透传语义熔断三值;子 agent 自身 ctx 原样继承(嵌套派发不断链)。
+    pub budget: Option<ToolBudget>,
 }
 
 /// 运行期工作区作用域:任务绑定了工作区时由任务引擎构造,随 ToolContext 逐调用传递。

@@ -237,6 +237,9 @@ pub struct UpdateSettingsBody {
     /// 任务步骤墙钟预算秒数(提交 3 · D3;0 = 关,否则 1..=86400;缺省保持不变)
     #[serde(default)]
     pub task_step_budget_secs: Option<u32>,
+    /// 任务级总预算秒数(PRODCAP-2;0 = 关,否则 1..=86400;缺省保持不变)
+    #[serde(default)]
+    pub task_total_budget_secs: Option<u32>,
     /// 任务空闲超时秒数(提交 3 · D7;0 = 关,否则 `task_idle_floor_secs()`..=86400;
     /// 下限由「单条命令上限 + 单次模型调用上限 + 1」派生,勿在此手写数值)
     #[serde(default)]
@@ -399,6 +402,8 @@ fn settings_json(s: &RuntimeSettings) -> Value {
         "loop_guard_semantic_max_distinct": s.loop_guard_semantic_max_distinct,
         // 任务侧两道闸(提交 3 · D3/D7):扁平字段,任务侧消费(步骤墙钟预算 / 空闲看守)
         "task_step_budget_secs": s.task_step_budget_secs,
+        // 任务级总预算(PRODCAP-2):扁平字段,任务侧消费(0 = 关)
+        "task_total_budget_secs": s.task_total_budget_secs,
         "task_idle_timeout_secs": s.task_idle_timeout_secs,
         // HB-7 接线:变量两步生成的独立模型/温度档(此前可落盘但无 API 通路)
         "mvu_model": s.mvu_model,
@@ -1042,6 +1047,13 @@ pub async fn update_settings(
                     return validation("task_step_budget_secs 须为 0(关闭)或 1..=86400");
                 }
                 s.task_step_budget_secs = v;
+            }
+            // 任务级总预算(PRODCAP-2):同款区间(0 = 关,否则 1..=86400)
+            if let Some(v) = body.task_total_budget_secs {
+                if v != 0 && !(1..=86_400).contains(&v) {
+                    return validation("task_total_budget_secs 须为 0(关闭)或 1..=86400");
+                }
+                s.task_total_budget_secs = v;
             }
             if let Some(v) = body.task_idle_timeout_secs {
                 // 下限走 `task_idle_floor_secs()` 单一出处(= 单条命令上限 + 单次模型调用上限 + 1);

@@ -676,6 +676,7 @@ mod tests {
                 character_id: String::new(),
                 agent_depth: 0,
                 scope: Some(self.scope()),
+                budget: None,
             }
         }
 
@@ -685,6 +686,7 @@ mod tests {
                 character_id: String::new(),
                 agent_depth: 0,
                 scope: None,
+                budget: None,
             }
         }
 

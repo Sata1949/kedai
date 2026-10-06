@@ -366,6 +366,7 @@ mod tests {
             character_id: String::new(),
             agent_depth: 0,
             scope: Some(Arc::new(ExecScope::new(root.to_path_buf(), false))),
+            budget: None,
         }
     }
 
@@ -429,6 +430,7 @@ mod tests {
             character_id: String::new(),
             agent_depth: 0,
             scope: None,
+            budget: None,
         };
         let e = view_impl(&deps, &ctx, &json!({ "path": "a.png" })).unwrap_err();
         assert!(e.contains("未绑定工作区"), "{e}");

@@ -127,6 +127,11 @@ impl TaskService {
             if !text.is_empty() {
                 let _ = self.add_task_message(task_id, "assistant", "result", text);
             }
+            // PRODCAP-3:终态收编未完成子任务(绝不置 done、result 原样;幂等)
+            self.end_unfinished_subtasks(
+                task_id,
+                &format!("任务已结束({}),该子任务未完成", status.as_str()),
+            );
         }
         self.remove_cancel_if(task_id, token);
     }
@@ -148,6 +153,11 @@ impl TaskService {
             // set_result 的 status 事件驱动前端重拉)
             let _ = self.add_task_message(task_id, "assistant", "followup", msg_text);
             let _ = self.set_result(task_id, new_result, status);
+            // PRODCAP-3:终态收编未完成子任务(与 complete_mode_run 同口径)
+            self.end_unfinished_subtasks(
+                task_id,
+                &format!("任务已结束({}),该子任务未完成", status.as_str()),
+            );
         }
         self.remove_cancel_if(task_id, token);
     }
@@ -411,14 +421,38 @@ impl TaskService {
             self.set_error_only(id, r);
         }
         self.signal_cancel(id);
-        for st in self.list_subtasks(id) {
-            if st.status == TaskSubtaskStatus::Running || st.status == TaskSubtaskStatus::Pending {
-                self.set_subtask_status(&st.id, TaskSubtaskStatus::Ended, None, None);
-            }
-        }
+        // 终态收编:先 DB 子任务表(PRODCAP-3 核心),再中断 agentgo 后台子 agent
+        //(D7 既有语义:stop/空闲自愈时真中断在跑的子 agent,防 stop 后残留继续烧 token)
+        self.end_unfinished_subtasks(id, "任务已结束(ended),该子任务未完成");
         self.agent_subtasks
             .end_by_session_prefix(&format!("task:{id}"));
         changed
+    }
+
+    /// 终态收编未完成子任务(PRODCAP-3):把该任务在**子任务表(task_subtasks)**里仍挂
+    /// `pending`/`running` 的行统一置 `ended`(error 记原因、`finished_at` 记首次终态时刻)
+    /// ——**只收编、不伪造**:绝不置 `done`、`result` 原样保留;已终态的行不碰(过滤条件 +
+    /// `set_subtask_status` 的首值语义共同保证幂等,重复调用各列不变)。
+    ///
+    /// 覆盖范围(实现期裁定的边界,就地登记):
+    ///   - **DB 行**:所有终态路径都收编——成功/followup 收尾(`complete_*`)、失败收尾
+    ///     (`finalize_run`)、stop/空闲自愈(`finish_ended`);重启孤儿恢复同口径
+    ///     (`recover_orphan_tasks` 批量 SQL,启动期无客户端故不发事件)。
+    ///   - **agentgo 内存覆盖层不在此方法内**:后台子 agent 的**中断**保持 D7 口径
+    ///     (仅 stop/空闲自愈,见 `finish_ended` 的显式调用)。成功/失败终态**不中断**
+    ///     在跑的子 agent——它们自行完成并落各自终态(截断/失败定性对用户可读;
+    ///     既有回归用例以该语义锁定),防烧边界由 PRODCAP-2 的语义熔断承担。
+    ///     曾尝试在成功路径一并中断,命中真实回归(子 agent 未跑完即被收编为 ended),
+    ///     故收窄回本范围。
+    ///   - `planned` 不是终态,不收编。
+    pub(crate) fn end_unfinished_subtasks(&self, task_id: &str, reason: &str) {
+        for st in self.list_subtasks(task_id) {
+            if st.status == TaskSubtaskStatus::Running || st.status == TaskSubtaskStatus::Pending {
+                // 覆盖层记录不落 DB:这里的 UPDATE 对其零命中(no-op),其生命周期由
+                // `AgentSubtaskService` 自己的路径管理(见上「覆盖范围」)
+                self.set_subtask_status(&st.id, TaskSubtaskStatus::Ended, None, Some(reason));
+            }
+        }
     }
 
     // ===== LLM 调用 =====
@@ -991,6 +1025,11 @@ impl TaskService {
             // 与白名单同源:有作用域才有工作区工具,无作用域时 scope 也必须为 None
             // (否则工具会被闸门拒绝却仍出现在列表里,白烧侦察轮)
             scope: scope.clone(),
+            // 任务侧预算载体(PRODCAP-2):侦察白名单不含派发类工具,当前无消费点;
+            // 填真实值保持「任务侧 ctx 恒带预算」不变量(与 solo/custom 装配同源)。
+            budget: Some(ToolBudget {
+                semantic_guard: crate::services::task_engine::task_loop_limits(&settings).1,
+            }),
         };
         let mut scout_round = 0usize;
         // 终轮提醒至多一次(TM-EMPTY-1):见下方「空文本 + tool_calls」分支
@@ -1319,6 +1358,8 @@ fn finalize_run(
                     "任务终态落库失败(取消路径):任务可能停留在 Running,请检查数据库写入"
                 );
             }
+            // PRODCAP-3:终态收编未完成子任务(与 stop 同口径;幂等、不伪造)
+            deps.end_unfinished_subtasks(task_id, "任务已结束(ended),该子任务未完成");
         } else if let Some(e) = error {
             if !deps.set_error(task_id, e) {
                 tracing::error!(
@@ -1329,6 +1370,8 @@ fn finalize_run(
                     "任务终态落库失败(错误路径):任务可能停留在 Running,请检查数据库写入"
                 );
             }
+            // PRODCAP-3:错误终态同样不留 running/pending 子任务
+            deps.end_unfinished_subtasks(task_id, "任务已结束(error),该子任务未完成");
         }
     }
     deps.remove_cancel_if(task_id, token);

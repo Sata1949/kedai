@@ -76,6 +76,29 @@ pub(crate) fn task_loop_limits(
     (budget, Some(guard))
 }
 
+/// 任务级总预算的到点判定(纯函数,PRODCAP-2):`deadline = None`(总预算关)恒 false。
+/// 消费点 = 多步执行器启动新步骤/节点/子目标前的守卫(到点不再启动,复用既有收尾路径)。
+pub(crate) fn deadline_exhausted(deadline: Option<std::time::Instant>) -> bool {
+    deadline.is_some_and(|d| std::time::Instant::now() >= d)
+}
+
+/// 单步墙钟预算与任务级截止期取小(PRODCAP-2):deadline 存在时,本步预算不得超过
+/// 「距截止期的剩余时间」(`saturating` 到 0——到点后本步以零预算走引擎既有
+/// 「带产出收尾」路径,不制造失败)。base 为 None(单步关)时以剩余时间为本步预算。
+/// 两条预算都不设 = None(行为逐字节不变)。
+pub(crate) fn effective_step_budget(
+    base: Option<Duration>,
+    deadline: Option<std::time::Instant>,
+) -> Option<Duration> {
+    match deadline {
+        None => base,
+        Some(d) => {
+            let remaining = d.saturating_duration_since(std::time::Instant::now());
+            Some(base.map_or(remaining, |b| b.min(remaining)))
+        }
+    }
+}
+
 /// 任务引擎:持有任务后端与聊天引擎,按 task_mode 派发后台执行。
 /// 轻量句柄(两个 Arc),在 TaskService::run/approve 处即时构造,无状态。
 pub struct TaskEngine {
@@ -247,6 +270,13 @@ impl TaskEngine {
             .connection_id
             .clone()
             .or_else(|| crate::services::settings_service::task_mode_default_connection(&settings));
+        // 任务级总预算截止期(PRODCAP-2):0 = 关(None,行为逐字节不变);否则从本轮
+        // 执行起点起算——到点后多步执行器不再启动新步骤/节点/子目标,在跑步由
+        // `effective_step_budget` 收窄后的步骤预算收口(见两函数文档)。
+        let deadline = (settings.task_total_budget_secs > 0).then(|| {
+            std::time::Instant::now()
+                + Duration::from_secs(u64::from(settings.task_total_budget_secs))
+        });
         let ctx = TaskRunContext {
             task_id: task.id.clone(),
             token,
@@ -257,6 +287,7 @@ impl TaskEngine {
             cancel: cancel.clone(),
             connection_id,
             scope,
+            deadline,
         };
         // 单一收尾出口(批次 B 依赖倒置):执行器返回终态值,引擎按值分派落库;
         // Err 分支兜底为 Failed(ended_by_cancel 以取消通道求值)。收尾判定所需的
@@ -346,6 +377,66 @@ mod tests {
             task_loop_limits(&s).1.map(|g| g.1),
             Some(0),
             "0 必须保持关闭"
+        );
+    }
+
+    /// 总预算关(None)→ 单步预算原样通过(行为逐字节不变,PRODCAP-2 的回归口)。
+    #[test]
+    fn effective_step_budget_is_identity_without_deadline() {
+        assert_eq!(effective_step_budget(None, None), None);
+        assert_eq!(
+            effective_step_budget(Some(Duration::from_secs(1200)), None),
+            Some(Duration::from_secs(1200))
+        );
+    }
+
+    /// 截止期在时取 min(步骤预算, 剩余):剩余更小 → 用剩余(含精度容差);
+    /// 步骤预算更小 → 原样用步骤预算;步骤预算关(None)→ 以剩余为本步预算;
+    /// 截止期已过 → 饱和到 0(既有的「带产出收尾」在此立即生效,不 panic)。
+    #[test]
+    fn effective_step_budget_takes_min_with_deadline() {
+        // 剩余(≈5s)小于步骤预算(10s):结果落在 (4s, 5s]
+        let near = std::time::Instant::now() + Duration::from_secs(5);
+        let by_remaining = effective_step_budget(Some(Duration::from_secs(10)), Some(near))
+            .expect("deadline 在时必有值");
+        assert!(
+            by_remaining <= Duration::from_secs(5) && by_remaining > Duration::from_secs(4),
+            "剩余更小应按剩余:{by_remaining:?}"
+        );
+        // 步骤预算(1s)小于剩余(≈1h):原样用步骤预算
+        let far = std::time::Instant::now() + Duration::from_secs(3600);
+        assert_eq!(
+            effective_step_budget(Some(Duration::from_secs(1)), Some(far)),
+            Some(Duration::from_secs(1)),
+            "步骤预算更小不放大"
+        );
+        // 步骤预算关:以剩余为本步预算
+        let by_remaining_only = effective_step_budget(None, Some(near)).expect("必有值");
+        assert!(
+            by_remaining_only <= Duration::from_secs(5)
+                && by_remaining_only > Duration::from_secs(4),
+            "单步关时以剩余为本步预算:{by_remaining_only:?}"
+        );
+        // 已过截止期:饱和 0
+        let past = std::time::Instant::now() - Duration::from_secs(1);
+        assert_eq!(
+            effective_step_budget(Some(Duration::from_secs(10)), Some(past)),
+            Some(Duration::ZERO),
+            "到点饱和为 0,不得下溢"
+        );
+    }
+
+    /// 截止期判定:关(None)→ 恒 false;未来 → false;已过(含恰好相等)→ true。
+    #[test]
+    fn deadline_exhausted_covers_none_past_and_future() {
+        assert!(!deadline_exhausted(None), "总预算关:恒 false");
+        assert!(
+            !deadline_exhausted(Some(std::time::Instant::now() + Duration::from_secs(60))),
+            "未到点:false"
+        );
+        assert!(
+            deadline_exhausted(Some(std::time::Instant::now() - Duration::from_secs(1))),
+            "已过:true"
         );
     }
 }

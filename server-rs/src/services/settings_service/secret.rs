@@ -13,7 +13,7 @@ use super::params::{
     default_memory_inject_char_budget, default_memory_inject_limit, default_memory_max_entries,
     default_session_budget_action, default_session_token_budget, default_subagent_max_concurrency,
     default_subagent_max_depth, default_subagent_result_max_chars, default_task_idle_timeout_secs,
-    default_task_step_budget_secs, default_task_tool_policy,
+    default_task_step_budget_secs, default_task_tool_policy, default_task_total_budget_secs,
     default_tool_authorization_timeout_secs, default_tool_history_budget_tokens,
     default_tool_history_keep_rounds, migrate_authorization_mode, task_idle_floor_secs,
 };
@@ -181,6 +181,12 @@ impl RuntimeSettings {
                 if s.task_step_budget_secs != 0 && !(1..=86_400).contains(&s.task_step_budget_secs)
                 {
                     s.task_step_budget_secs = default_task_step_budget_secs();
+                }
+                // 任务级总预算(PRODCAP-2):同款区间钳制(0 = 关,否则 1..=86400)
+                if s.task_total_budget_secs != 0
+                    && !(1..=86_400).contains(&s.task_total_budget_secs)
+                {
+                    s.task_total_budget_secs = default_task_total_budget_secs();
                 }
                 if s.task_idle_timeout_secs != 0
                     && !(task_idle_floor_secs()..=86_400).contains(&s.task_idle_timeout_secs)

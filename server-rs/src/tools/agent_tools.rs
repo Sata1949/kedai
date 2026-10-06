@@ -241,6 +241,7 @@ mod tests {
                     character_id: "c".into(),
                     agent_depth: 0,
                     scope: None,
+                    budget: None,
                 },
             )
             .await
@@ -264,6 +265,7 @@ mod tests {
                     character_id: "c".into(),
                     agent_depth: 0,
                     scope: None,
+                    budget: None,
                 },
             )
             .await
@@ -288,6 +290,7 @@ mod tests {
             character_id: "c".into(),
             agent_depth: 0,
             scope: None,
+            budget: None,
         };
         for tool in ["write", "create"] {
             reg.permissions()
@@ -384,6 +387,7 @@ mod tests {
             character_id: crate::services::character_service::BUILTIN_SYSTEM_ID.into(),
             agent_depth: 0,
             scope: None,
+            budget: None,
         };
         for tool in ["write", "replace"] {
             reg.permissions()
@@ -471,6 +475,7 @@ mod tests {
             character_id: "c".into(),
             agent_depth: 0,
             scope: None,
+            budget: None,
         };
         for tool in ["write", "replace"] {
             reg.permissions()
@@ -559,6 +564,7 @@ mod tests {
             character_id: "c".into(),
             agent_depth: 0,
             scope: None,
+            budget: None,
         };
         for tool in ["write", "replace"] {
             reg.permissions()
@@ -667,6 +673,7 @@ mod tests {
             character_id: "c".into(),
             agent_depth: 2,
             scope: None,
+            budget: None,
         };
         let err = reg
             .execute(
@@ -728,6 +735,7 @@ mod tests {
             character_id: "c".into(),
             agent_depth: 0,
             scope: None,
+            budget: None,
         };
         let err = reg
             .execute(
@@ -804,6 +812,7 @@ mod tests {
             character_id: crate::services::character_service::BUILTIN_SYSTEM_ID.into(),
             agent_depth: 0,
             scope: None,
+            budget: None,
         }
     }
 
@@ -925,6 +934,7 @@ mod tests {
             character_id: "c".into(),
             agent_depth: 0,
             scope: None,
+            budget: None,
         };
 
         // 结果项统一结构化:命中 ok=true + content;未命中 ok=false + error + candidates
@@ -1029,6 +1039,7 @@ mod tests {
             character_id: "c".into(),
             agent_depth: 0,
             scope: None,
+            budget: None,
         };
         let args = serde_json::json!({
             "queries": [{ "type": "subtask", "name": "probe" }]
@@ -1170,6 +1181,7 @@ mod tests {
             character_id: "c".into(),
             agent_depth: 0,
             scope: None,
+            budget: None,
         };
         let raw = reg.execute("todo", "{}", ctx).await.unwrap();
         let v: Value = serde_json::from_str(&raw).unwrap();
