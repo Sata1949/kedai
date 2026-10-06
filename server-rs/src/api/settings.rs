@@ -1192,13 +1192,17 @@ pub async fn update_settings(
     // 设置保存是主路径;真写失败时 sync 内部已记 error,这里只补一条「下次启动会再同步」的线索。
     // 读有效值用 for_mode(Task):该字段是任务侧设置,task 覆盖层可能覆盖扁平值
     // (与任务侧读法同源,见 settings_service::params)。
+    // 文学包流程(LIT-5)取**两侧开关的并**(同 `api/app_state.rs` 的构造期口径):
+    // 流程库是双模式共用设施,任一侧显式启用即并入。
     let coding_enabled = candidate.for_mode(AppMode::Task).task_coding_bundle_enabled;
+    let literary_enabled = candidate.literary_bundle_enabled
+        || candidate.for_mode(AppMode::Task).task_literary_bundle_enabled;
     let flow = state.flow.clone();
     if let Err(e) = state
         .db_call(move || {
             flow.lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .sync_pack_flows(coding_enabled);
+                .sync_pack_flows(coding_enabled, literary_enabled);
         })
         .await
     {

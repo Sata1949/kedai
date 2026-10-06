@@ -125,12 +125,17 @@ fn finalize_library(mut lib: AgentFlowLibrary) -> AgentFlowLibrary {
 ///
 /// 这是「开关 → 流程常量」的唯一映射点:调用方(构造期与设置写入钩子)只需把开关传进来,
 /// 不必知道包里有几条流程、id 叫什么。
-pub fn pack_flows(coding_bundle_enabled: bool) -> Vec<AgentFlowConfig> {
+///
+/// **LIT-5(2026-10-06)**:文学包流程(a) 不复活**已落地**——用户改过 / 删过就是用户资产,
+/// 语义由 [`merge_pack_flows`] 的账目承担,本函数只管「该并入哪些」。
+pub fn pack_flows(coding_bundle_enabled: bool, literary_bundle_enabled: bool) -> Vec<AgentFlowConfig> {
     let mut packs: Vec<AgentFlowConfig> = Vec::new();
     if coding_bundle_enabled {
         packs.extend(coding_pack_flows());
     }
-    // LIT-5 落地时在此追加文学包一行(`literary_pack_flows()`),不新开缝
+    if literary_bundle_enabled {
+        packs.extend(literary_pack_flows());
+    }
     packs
 }
 
@@ -321,6 +326,252 @@ pub fn coding_pack_flows() -> Vec<AgentFlowConfig> {
                     action: "direct".into(),
                     generates: Some(true),
                     kind: Some("strict".into()),
+                    ..Default::default()
+                },
+            ],
+        },
+    ]
+}
+
+/// 文学能力包的内置流程(**常量**,首版 4 条;LIT-5,2026-10-06)。
+///
+/// 每条都按 `validate_flow` 的约束自检(步骤非空、至少一个 `action=direct && generates=true`、
+/// reflect 步骤不带 `generates`/`system_prompt`/子流程),由
+/// `tests.rs::literary_pack_flows_pass_validate_flow` 用**真实注册工具集**锁死。
+///
+/// **工具面刻意收窄**(与编码包「工具面刻意不同」同思路,内容级安全):
+/// 四条文学流程**一律不下发工具**——它们只改文本,不碰工作区;需要素材时由用户在目标里给。
+/// 末步用**严格档**(`kind=strict`,单次调用、不下发任何工具):它的职责只是把结论定稿,
+/// 不需要再动手;`tools` 留空,故严格档与「无工具步骤」在本流程里是同一执行路径。
+///
+/// 归属规则(Q2=(a) 不复活):注入后即用户库里的普通流程,用户改过 / 删过都不会被覆盖或复活;
+/// 关包也不回收已注入副本(与编码包同款边界,见 `merge_pack_flows` 头注)。
+pub fn literary_pack_flows() -> Vec<AgentFlowConfig> {
+    vec![
+        AgentFlowConfig {
+            id: "builtin-lit-chapter".into(),
+            name: "章节续写流程".into(),
+            description: Some(
+                "Kedai 内置文学流程:列推进要点 → 成文 → 反思 → 修订定稿。\
+                 用于按目标与上文续写章节;全程不下发工具,只改文本。"
+                    .into(),
+            ),
+            enabled: true,
+            max_parallel_nodes: None,
+            steps: vec![
+                PlanStep {
+                    id: "outline".into(),
+                    name: "列推进要点".into(),
+                    enabled: true,
+                    goal: "先读任务目标与上文,列出本章的推进要点:视角与人称、场景与时间、\
+                           关键动作与转折、出场人物、收束钩子;只列要点不写正文,控制在 300 字内,供下一步成文。"
+                        .into(),
+                    action: "direct".into(),
+                    generates: None,
+                    ..Default::default()
+                },
+                PlanStep {
+                    id: "draft".into(),
+                    name: "成文".into(),
+                    enabled: true,
+                    goal: "按要点写出正文:人称与叙述距离全程一致;用可观察的动作、器物、身体反应与对话\
+                           承载情绪,不直接命名情绪、不写解释性旁白;不复述上文已写过的场景与比喻;\
+                           不替用户角色说话或代做决定;按目标篇幅执行,把一个场景写透。"
+                        .into(),
+                    action: "direct".into(),
+                    generates: Some(true),
+                    ..Default::default()
+                },
+                PlanStep {
+                    id: "reflect".into(),
+                    name: "反思核验".into(),
+                    enabled: true,
+                    goal: "核验草稿:是否服从目标篇幅与走向要求、人称与视角有无漂移、有无 AI 腔套语与\
+                           排比堆砌、有无复读上文的比喻、有无替用户角色代答、时间线与已确立事实有无矛盾;\
+                           输出 PASS 或 FAIL 并给出理由(只判定,不重写)。"
+                        .into(),
+                    action: "reflect".into(),
+                    generates: None,
+                    ..Default::default()
+                },
+                PlanStep {
+                    id: "revise".into(),
+                    name: "修订定稿".into(),
+                    enabled: true,
+                    goal: "按反思结论只改被指出问题的部分,输出修订后的**完整正文**;未指出问题处保持原样;\
+                           不复述修改说明之外的创作过程,不附检查清单。"
+                        .into(),
+                    action: "direct".into(),
+                    generates: Some(true),
+                    kind: Some("strict".into()),
+                    ..Default::default()
+                },
+            ],
+        },
+        AgentFlowConfig {
+            id: "builtin-lit-polish".into(),
+            name: "润色去 AI 腔流程".into(),
+            description: Some(
+                "Kedai 内置文学流程:标出 AI 腔重灾区 → 重写 → 复查 → 定稿。\
+                 用于把已有正文改写成更自然的文字;不改情节走向,全程不下发工具。"
+                    .into(),
+            ),
+            enabled: true,
+            max_parallel_nodes: None,
+            steps: vec![
+                PlanStep {
+                    id: "locate".into(),
+                    name: "标出 AI 腔重灾区".into(),
+                    enabled: true,
+                    goal: "逐段标出 AI 腔问题:套语(「不禁」「不由得」「心中一颤」「眼底闪过一丝……」)、\
+                           三段排比连用、先否后肯句式(「不是……而是……」)、结尾强行升华、\
+                           「仿佛 / 似乎」式空比喻、直接命名情绪、解释性旁白与总结句;\
+                           每条给位置与替换方向。本步**不重写**。"
+                        .into(),
+                    action: "direct".into(),
+                    generates: None,
+                    ..Default::default()
+                },
+                PlanStep {
+                    id: "rewrite".into(),
+                    name: "重写".into(),
+                    enabled: true,
+                    goal: "按标出的问题重写文本:用具体动作、器物、身体反应与对话承载情绪;\
+                           长短句交错、段落长度参差;删除解释性旁白与总结句;\
+                           **保留原意与情节走向不变**,不增删事件。"
+                        .into(),
+                    action: "direct".into(),
+                    generates: Some(true),
+                    ..Default::default()
+                },
+                PlanStep {
+                    id: "reflect".into(),
+                    name: "复查".into(),
+                    enabled: true,
+                    goal: "对照禁用清单复查改写稿:套语与排比是否清除、情绪是否由细节承载、\
+                           是否引入了新的事实或情节变化(润色不得改动情节)、篇幅是否与原文相当;\
+                           输出 PASS 或 FAIL 并给出理由。"
+                        .into(),
+                    action: "reflect".into(),
+                    generates: None,
+                    ..Default::default()
+                },
+                PlanStep {
+                    id: "finalize".into(),
+                    name: "定稿".into(),
+                    enabled: true,
+                    goal: "按复查结论修订后输出**最终稿**:只输出润色后的正文,不附修改说明、\
+                           不附前后对比、不复述过程。"
+                        .into(),
+                    action: "direct".into(),
+                    generates: Some(true),
+                    kind: Some("strict".into()),
+                    ..Default::default()
+                },
+            ],
+        },
+        AgentFlowConfig {
+            id: "builtin-lit-consistency".into(),
+            name: "一致性校对流程".into(),
+            description: Some(
+                "Kedai 内置文学流程:提取既定事实 → 比对矛盾 → 出具问题清单;\
+                 只校对、不改写正文,全程不下发工具。"
+                    .into(),
+            ),
+            enabled: true,
+            max_parallel_nodes: None,
+            steps: vec![
+                PlanStep {
+                    id: "extract".into(),
+                    name: "提取既定事实".into(),
+                    enabled: true,
+                    goal: "从既有正文与设定中提取既定事实清单:人物(称呼、外貌、身份、已经知道的信息)、\
+                           时间线(已发生事件及其先后)、世界设定与数值、已用过的比喻与场景。\
+                           只摘录,不评判。"
+                        .into(),
+                    action: "direct".into(),
+                    generates: None,
+                    ..Default::default()
+                },
+                PlanStep {
+                    id: "compare".into(),
+                    name: "比对矛盾".into(),
+                    enabled: true,
+                    goal: "用事实清单逐项比对待校文本,列出矛盾点:事实 / 称呼回退、时间顺序冲突、\
+                           人物知晓了不该知道的信息、设定与数值不一致、同一比喻重复使用;\
+                           每条给位置、依据与建议改法。"
+                        .into(),
+                    action: "direct".into(),
+                    generates: None,
+                    ..Default::default()
+                },
+                PlanStep {
+                    id: "report".into(),
+                    name: "出具问题清单".into(),
+                    enabled: true,
+                    goal: "输出一致性问题清单:按严重度分组,每条含位置、矛盾点、依据、建议改法;\
+                           未见问题的部分明确写出「未见问题」;本流程只校对,**不改写正文**。"
+                        .into(),
+                    action: "direct".into(),
+                    generates: Some(true),
+                    kind: Some("strict".into()),
+                    ..Default::default()
+                },
+            ],
+        },
+        AgentFlowConfig {
+            id: "builtin-lit-voice".into(),
+            name: "人物声音校准流程".into(),
+            description: Some(
+                "Kedai 内置文学流程:摘既有台词特征 → 形成声音卡 → 按卡改写 → 复查。\
+                 用于让角色说话「像他自己」;不改情节走向,全程不下发工具。"
+                    .into(),
+            ),
+            enabled: true,
+            max_parallel_nodes: None,
+            steps: vec![
+                PlanStep {
+                    id: "sample".into(),
+                    name: "摘既有台词特征".into(),
+                    enabled: true,
+                    goal: "摘出各角色已有的台词与行动片段,归纳每个角色的声音特征:用词习惯、\
+                           句长与语速、口头禅、称呼方式、情绪表达方式。只归纳,不改写。"
+                        .into(),
+                    action: "direct".into(),
+                    generates: None,
+                    ..Default::default()
+                },
+                PlanStep {
+                    id: "profile".into(),
+                    name: "形成声音卡".into(),
+                    enabled: true,
+                    goal: "为每个出场角色写一张声音卡:一句定位 + 3~5 条可检核的特征(用词、句式、\
+                           称呼、反应模式),各附一句正例(可用原文或改写示例)。"
+                        .into(),
+                    action: "direct".into(),
+                    generates: None,
+                    ..Default::default()
+                },
+                PlanStep {
+                    id: "apply".into(),
+                    name: "按卡改写".into(),
+                    enabled: true,
+                    goal: "按声音卡改写目标段落中的角色台词与行动描写,使声音与卡一致;\
+                           **不改动情节走向与他人的台词**;改写幅度以最小必要为准。"
+                        .into(),
+                    action: "direct".into(),
+                    generates: Some(true),
+                    ..Default::default()
+                },
+                PlanStep {
+                    id: "reflect".into(),
+                    name: "复查".into(),
+                    enabled: true,
+                    goal: "复查改写结果:每个角色的台词是否与声音卡一致、有无把不同角色写成同一种语气、\
+                           情节是否被改动;输出 PASS 或 FAIL 并给出理由。"
+                        .into(),
+                    action: "reflect".into(),
+                    generates: None,
                     ..Default::default()
                 },
             ],

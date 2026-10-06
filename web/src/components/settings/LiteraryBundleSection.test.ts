@@ -69,29 +69,38 @@ describe('LiteraryBundleSection(文学能力包区)', () => {
   it('角色扮演侧开关走 queueSettingsSave,补丁字段名逐字为 literary_bundle_enabled', async () => {
     const { store, wrapper } = mountSection();
     const spy = vi.spyOn(store, 'queueSettingsSave').mockResolvedValue(undefined);
+    const loadSpy = vi.spyOn(store, 'loadAgentFlow').mockResolvedValue(undefined);
 
     await toggleAt(wrapper, 0).setValue(true);
+    await Promise.resolve();
     await Promise.resolve();
 
     expect(spy).toHaveBeenCalledWith({ literary_bundle_enabled: true });
     expect(store.literaryBundleEnabled).toBe(true);
     expect(store.taskLiteraryBundleEnabled).toBe(false); // 另一个开关不被波及
     expect(wrapper.text()).toContain('已开启');
+    // LIT-5:开包会在服务端并入四条文学流程 → 保存成功后必须刷新流程库缓存
+    expect(loadSpy).toHaveBeenCalled();
   });
 
   it('任务侧开关走 queueSettingsSave,补丁字段名逐字为 task_literary_bundle_enabled;再次关闭携带 false', async () => {
     const { store, wrapper } = mountSection();
     const spy = vi.spyOn(store, 'queueSettingsSave').mockResolvedValue(undefined);
+    const loadSpy = vi.spyOn(store, 'loadAgentFlow').mockResolvedValue(undefined);
 
     await toggleAt(wrapper, 1).setValue(true);
+    await Promise.resolve();
     await Promise.resolve();
     expect(spy).toHaveBeenCalledWith({ task_literary_bundle_enabled: true });
     expect(store.taskLiteraryBundleEnabled).toBe(true);
 
     await toggleAt(wrapper, 1).setValue(false);
     await Promise.resolve();
+    await Promise.resolve();
     expect(spy).toHaveBeenLastCalledWith({ task_literary_bundle_enabled: false });
     expect(store.taskLiteraryBundleEnabled).toBe(false);
+    // 开/关都要刷新:关包不回收已注入副本,刷新只是让缓存与服务端一致
+    expect(loadSpy).toHaveBeenCalledTimes(2);
   });
 
   it('保存失败回滚开关并给出失败提示(不留下与服务端分叉的 UI 态)', async () => {
@@ -99,8 +108,10 @@ describe('LiteraryBundleSection(文学能力包区)', () => {
     store.taskLiteraryBundleEnabled = true; // 另一开关已开:失败回滚不得波及它
     await wrapper.vm.$nextTick();
     vi.spyOn(store, 'queueSettingsSave').mockRejectedValue(new Error('503 服务不可用'));
+    const loadSpy = vi.spyOn(store, 'loadAgentFlow').mockResolvedValue(undefined);
 
     await toggleAt(wrapper, 0).setValue(true);
+    await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
 
@@ -108,5 +119,6 @@ describe('LiteraryBundleSection(文学能力包区)', () => {
     expect(store.taskLiteraryBundleEnabled).toBe(true);
     expect(wrapper.text()).toContain('保存失败');
     expect((toggleAt(wrapper, 0).element as HTMLInputElement).checked).toBe(false);
+    expect(loadSpy).not.toHaveBeenCalled(); // 保存失败不刷新(服务端没并入任何东西)
   });
 });

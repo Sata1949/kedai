@@ -327,16 +327,22 @@ impl AppState {
             .collect();
         // 编码能力包开关(CODE-5):按**有效值**读(扁平值 + task 覆盖层合并后的口径,
         // 与任务侧读法同源——见 `settings_service::params::RuntimeSettings::for_mode`)。
+        // 文学包流程(LIT-5)取**两侧开关的并**:流程库是双模式共用设施(聊天侧与任务侧都消费),
+        // 任一侧显式启用即视为需要包内容——只按任务侧会漏掉「只想在聊天里用预设流程」的用户。
         // 构造期并入一次,运行期开关翻转由 `api/settings.rs` 的写入钩子补(无需重启)。
-        let coding_bundle_enabled = settings
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .for_mode(AppMode::Task)
-            .task_coding_bundle_enabled;
+        let (coding_bundle_enabled, literary_bundle_enabled) = {
+            let s = settings.lock().unwrap_or_else(|e| e.into_inner());
+            let task = s.for_mode(AppMode::Task);
+            (
+                task.task_coding_bundle_enabled,
+                s.literary_bundle_enabled || task.task_literary_bundle_enabled,
+            )
+        };
         let flow = Arc::new(Mutex::new(AgentFlowService::new(
             config.data_dir.clone(),
             registered_tools,
             coding_bundle_enabled,
+            literary_bundle_enabled,
         )));
 
         // 任务执行者库(执行者与角色扮演角色卡解耦);空库即「只有通用执行者」

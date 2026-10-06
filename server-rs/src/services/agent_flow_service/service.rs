@@ -12,9 +12,11 @@ use super::bundle::{flow_fingerprint, is_reserved_flow_id};
 use super::subflow::{flow_index, sub_flow_ids, walk_sub_flows_from};
 
 impl AgentFlowService {
-    /// `coding_bundle_enabled`:编码能力包开关(CODE-5)的**有效值**(按 task 覆盖层合并后的,
-    /// 见 `api/app_state.rs` 的读取口径)。构造期并入一次,覆盖「库文件已存在但从未注入」的
-    /// 升级路径;运行期用户开/关包由 `api/settings.rs` 的写入钩子调 [`Self::sync_pack_flows`]。
+    /// `coding_bundle_enabled` / `literary_bundle_enabled`:能力包开关(CODE-5 / LIT-5)的
+    /// **有效值**——编码包按 task 覆盖层合并后的口径,文学包取**两侧开关的并**
+    /// (流程库是双模式共用设施,任一侧显式启用即视为需要文学包内容;见 `api/app_state.rs`
+    /// 的读取口径)。构造期并入一次,覆盖「库文件已存在但从未注入」的升级路径;
+    /// 运行期用户开/关包由 `api/settings.rs` 的写入钩子调 [`Self::sync_pack_flows`]。
     ///
     /// FLOW-DEMO-1:内置**画布示范流程**同构造期并入一次(与开关无关——demo 不随任何能力包);
     /// 排在内置簇(协调 → 示范)之后,包流程按常量表追加——同一并入缝、同一幂等账目。
@@ -22,10 +24,11 @@ impl AgentFlowService {
         data_dir: PathBuf,
         registered_tools: Vec<String>,
         coding_bundle_enabled: bool,
+        literary_bundle_enabled: bool,
     ) -> Self {
         let mut library = AgentFlowLibrary::load(&data_dir);
         let mut seeded = builtin_demo_flows();
-        seeded.extend(pack_flows(coding_bundle_enabled));
+        seeded.extend(pack_flows(coding_bundle_enabled, literary_bundle_enabled));
         if merge_pack_flows(&mut library, seeded) {
             // 落盘失败只记错误:流程库已在内存里可用,下次启动会再试一次(不静默吞掉)
             if let Err(e) = library.save(&data_dir) {
@@ -39,13 +42,16 @@ impl AgentFlowService {
         }
     }
 
-    /// 按开关同步能力包流程(CODE-5;设置写入钩子与构造期共用)。
+    /// 按开关同步能力包流程(CODE-5;LIT-5 起为两包各一开关;设置写入钩子与构造期共用)。
     ///
     /// 语义只有两条:**开包 → 并入缺失的包流程**(幂等,已注入过的跳过);
     /// **关包 → 什么都不做**(已注入的副本留在用户库里,不回收——既定边界,同 LIT-5 Q2)。
     /// 有变更才落盘,故重复开包不会反复写文件。
-    pub fn sync_pack_flows(&mut self, coding_bundle_enabled: bool) {
-        if !merge_pack_flows(&mut self.library, pack_flows(coding_bundle_enabled)) {
+    pub fn sync_pack_flows(&mut self, coding_bundle_enabled: bool, literary_bundle_enabled: bool) {
+        if !merge_pack_flows(
+            &mut self.library,
+            pack_flows(coding_bundle_enabled, literary_bundle_enabled),
+        ) {
             return;
         }
         if let Err(e) = self.save_library() {

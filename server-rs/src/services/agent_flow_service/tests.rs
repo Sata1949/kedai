@@ -195,10 +195,11 @@ fn load_legacy_single_flow_migrates() {
 #[test]
 fn service_set_select_remove_roundtrip() {
     let dir = TempDataDir::new("flow-svc");
-    // 关包构造(CODE-5 起 new 多一个开关参数):本用例只验读写回合,与包无关
+    // 关包构造(CODE-5 起 new 多开关参数;LIT-5 起为两包各一):本用例只验读写回合,与包无关
     let mut svc = AgentFlowService::new(
         dir.path().to_path_buf(),
         tools().into_iter().collect(),
+        false,
         false,
     );
     // 首次加载注入内置簇:协调 + 示范(FLOW-DEMO-1;示范与包开关无关)
@@ -231,6 +232,7 @@ fn service_set_select_remove_roundtrip() {
     let svc2 = AgentFlowService::new(
         dir.path().to_path_buf(),
         tools().into_iter().collect(),
+        false,
         false,
     );
     assert_eq!(svc2.get_library().flows.len(), 2);
@@ -625,6 +627,7 @@ fn service(dir: &TempDataDir) -> AgentFlowService {
     AgentFlowService::new(
         dir.path().to_path_buf(),
         tools().into_iter().collect(),
+        false,
         false,
     )
 }
@@ -1742,11 +1745,12 @@ fn pack_tools() -> BTreeSet<String> {
         .collect()
 }
 
-fn pack_service(dir: &TempDataDir, enabled: bool) -> AgentFlowService {
+fn pack_service(dir: &TempDataDir, coding: bool, literary: bool) -> AgentFlowService {
     AgentFlowService::new(
         dir.path().to_path_buf(),
         pack_tools().into_iter().collect(),
-        enabled,
+        coding,
+        literary,
     )
 }
 
@@ -1755,7 +1759,7 @@ fn pack_service(dir: &TempDataDir, enabled: bool) -> AgentFlowService {
 #[test]
 fn pack_flows_absent_when_disabled() {
     let dir = TempDataDir::new("pack-off");
-    let svc = pack_service(&dir, false);
+    let svc = pack_service(&dir, false, false);
     assert_eq!(svc.get_library().flows.len(), 2);
     assert_eq!(svc.get_library().flows[0].id, "builtin-coordination");
     assert_eq!(svc.get_library().flows[1].id, "builtin-research-demo");
@@ -1777,7 +1781,7 @@ fn pack_flows_absent_when_disabled() {
 #[test]
 fn pack_flows_merged_when_enabled_and_builtin_untouched() {
     let dir = TempDataDir::new("pack-on");
-    let svc = pack_service(&dir, true);
+    let svc = pack_service(&dir, true, false);
     let lib = svc.get_library();
     assert_eq!(
         lib.flows.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
@@ -1826,7 +1830,7 @@ fn pack_flows_merge_into_existing_library_and_persist() {
     };
     lib.save(dir.path()).unwrap();
 
-    let svc = pack_service(&dir, true);
+    let svc = pack_service(&dir, true, false);
     assert_eq!(svc.get_library().flows.len(), 4);
     // 落盘验证:重新 load 而不是只看内存
     let reloaded = AgentFlowLibrary::load(dir.path());
@@ -1839,21 +1843,21 @@ fn pack_flows_merge_into_existing_library_and_persist() {
 #[test]
 fn pack_sync_is_idempotent_and_respects_user_changes() {
     let dir = TempDataDir::new("pack-idem");
-    let mut svc = pack_service(&dir, true);
+    let mut svc = pack_service(&dir, true, false);
     assert_eq!(svc.get_library().flows.len(), 4);
 
-    svc.sync_pack_flows(true);
-    svc.sync_pack_flows(true);
+    svc.sync_pack_flows(true, false);
+    svc.sync_pack_flows(true, false);
     assert_eq!(svc.get_library().flows.len(), 4, "重复 sync 不重复注入");
 
     // 删过不复活
     svc.remove("builtin-code-review").unwrap();
     assert_eq!(svc.get_library().flows.len(), 3);
-    svc.sync_pack_flows(true);
+    svc.sync_pack_flows(true, false);
     assert_eq!(svc.get_library().flows.len(), 3, "用户删过的包流程不得复活");
 
     // 关包不回收
-    svc.sync_pack_flows(false);
+    svc.sync_pack_flows(false, false);
     assert_eq!(
         svc.get_library().flows.len(),
         3,
@@ -1866,12 +1870,12 @@ fn pack_sync_is_idempotent_and_respects_user_changes() {
 #[test]
 fn builtin_demo_flow_respects_delete_and_edit_like_packs() {
     let dir = TempDataDir::new("demo-lifecycle");
-    let mut svc = pack_service(&dir, false);
+    let mut svc = pack_service(&dir, false, false);
     assert!(svc.flow_by_id("builtin-research-demo").is_some());
 
     // 删过不复活:重建服务(构造期会再走一次并入)也不回来
     svc.remove("builtin-research-demo").unwrap();
-    let svc2 = pack_service(&dir, false);
+    let svc2 = pack_service(&dir, false, false);
     assert!(
         svc2.flow_by_id("builtin-research-demo").is_none(),
         "用户删过的示范流程不得复活"
@@ -1879,11 +1883,11 @@ fn builtin_demo_flow_respects_delete_and_edit_like_packs() {
 
     // 用户改过不被覆盖:改一个再重建,仍是用户版
     let dir2 = TempDataDir::new("demo-edit");
-    let mut svc3 = pack_service(&dir2, false);
+    let mut svc3 = pack_service(&dir2, false, false);
     let mut edited = svc3.flow_by_id("builtin-research-demo").unwrap().clone();
     edited.name = "我的调研流程".into();
     svc3.set(edited).unwrap();
-    let svc4 = pack_service(&dir2, false);
+    let svc4 = pack_service(&dir2, false, false);
     assert_eq!(
         svc4.flow_by_id("builtin-research-demo").unwrap().name,
         "我的调研流程",
@@ -1895,12 +1899,12 @@ fn builtin_demo_flow_respects_delete_and_edit_like_packs() {
 #[test]
 fn edited_pack_flow_is_not_overwritten_by_sync() {
     let dir = TempDataDir::new("pack-edit");
-    let mut svc = pack_service(&dir, true);
+    let mut svc = pack_service(&dir, true, false);
     let mut edited = svc.flow_by_id("builtin-code-review").unwrap().clone();
     edited.name = "我的审查流程".into();
     svc.set(edited).unwrap();
 
-    svc.sync_pack_flows(true);
+    svc.sync_pack_flows(true, false);
     let got = svc.flow_by_id("builtin-code-review").unwrap();
     assert_eq!(got.name, "我的审查流程", "用户改过的包流程不得被覆盖回去");
 }
@@ -1938,6 +1942,146 @@ fn coding_pack_flows_pass_validate_flow() {
             .is_some_and(|t| t.iter().any(|x| x == "bash"))
     });
     assert!(uses_bash, "实现流程应包含可执行命令的自测步骤(D4=(a) 拍板)");
+}
+
+/// LIT-5:四条文学包流程常量自检——id 稳定、过 `validate_flow`(真实工具集)、
+/// **全程不下发工具**(内容级:文学流程只改文本、不碰工作区;同编码包「工具面刻意不同」思路),
+/// 且每步 `action` 取值在既有集合内。
+#[test]
+fn literary_pack_flows_pass_validate_flow() {
+    let flows = literary_pack_flows();
+    assert_eq!(flows.len(), 4, "首版清单是 4 条");
+    assert_eq!(
+        flows.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
+        vec![
+            "builtin-lit-chapter",
+            "builtin-lit-polish",
+            "builtin-lit-consistency",
+            "builtin-lit-voice"
+        ]
+    );
+    for f in &flows {
+        validate_flow(f, &pack_tools())
+            .unwrap_or_else(|e| panic!("包流程「{}」未过 validate_flow:{e}", f.name));
+        for s in &f.steps {
+            assert!(
+                s.tools.clone().unwrap_or_default().is_empty(),
+                "文学流程不得下发工具(内容级安全):{} / {}",
+                f.name,
+                s.name
+            );
+            assert!(
+                matches!(s.action.as_str(), "direct" | "reflect"),
+                "未知 action:{}({})",
+                s.action,
+                f.name
+            );
+        }
+    }
+}
+
+/// LIT-5:文学包流程的并入生命周期——关 → 一条都不在;开 → 按常量表追加且**既有条目逐字不变**;
+/// 幂等;删过不复活;关包不回收(同 Q2=(a) 裁定);两包同开各追加、互不影响。
+#[test]
+fn literary_pack_flows_merge_and_respect_user_changes() {
+    let dir = TempDataDir::new("litpack-off");
+    let svc = pack_service(&dir, false, false);
+    assert_eq!(svc.get_library().flows.len(), 2, "关包时只有内置簇两条");
+    assert!(svc.flow_by_id("builtin-lit-chapter").is_none());
+
+    let dir2 = TempDataDir::new("litpack-on");
+    let mut svc2 = pack_service(&dir2, false, true);
+    assert_eq!(
+        svc2.get_library()
+            .flows
+            .iter()
+            .map(|f| f.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "builtin-coordination",
+            "builtin-research-demo",
+            "builtin-lit-chapter",
+            "builtin-lit-polish",
+            "builtin-lit-consistency",
+            "builtin-lit-voice"
+        ],
+        "文学包流程按常量表追加在内置簇之后"
+    );
+    let builtin = svc2
+        .get_library()
+        .flows
+        .iter()
+        .find(|f| f.id == "builtin-coordination")
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(builtin).unwrap(),
+        serde_json::to_value(builtin_flow()).unwrap(),
+        "既有内置流程必须逐字不变(并入只 push 新条目)"
+    );
+    assert_eq!(
+        svc2.get_library().current_flow_id.as_deref(),
+        Some("builtin-coordination"),
+        "并入不得改当前选中"
+    );
+    assert_eq!(
+        svc2.get_library().seeded_pack_ids.len(),
+        1 + 4,
+        "账目 = 示范 1 + 文学 4"
+    );
+
+    // 幂等:重复同步不重复注入
+    svc2.sync_pack_flows(false, true);
+    assert_eq!(svc2.get_library().flows.len(), 6, "重复同步不重复注入");
+
+    // 删过不复活
+    svc2.remove("builtin-lit-polish").unwrap();
+    svc2.sync_pack_flows(false, true);
+    assert_eq!(
+        svc2.get_library().flows.len(),
+        5,
+        "用户删过的包流程不得复活"
+    );
+
+    // 关包不回收已注入副本(既定边界)
+    svc2.sync_pack_flows(false, false);
+    assert_eq!(svc2.get_library().flows.len(), 5, "关包不回收已注入副本");
+
+    // 两包同开:编码 2 + 文学 4 各自追加,内置簇仍是前两条
+    let dir3 = TempDataDir::new("litpack-both");
+    let svc3 = pack_service(&dir3, true, true);
+    assert_eq!(
+        svc3.get_library().flows.len(),
+        8,
+        "两包同开 → 内置 2 + 编码 2 + 文学 4"
+    );
+    assert_eq!(svc3.get_library().flows[0].id, "builtin-coordination");
+    assert_eq!(svc3.get_library().flows[1].id, "builtin-research-demo");
+
+    // 导出 → 导入闭包往返:注入进库后就是普通流程,可搬运且逐字不变
+    let dir4 = TempDataDir::new("litpack-roundtrip");
+    let src = pack_service(&dir4, false, true);
+    let bundle = src.export_bundle(None).unwrap();
+    let exported: Vec<&str> = bundle.flows.iter().map(|f| f.id.as_str()).collect();
+    assert!(
+        exported.contains(&"builtin-lit-consistency"),
+        "导出闭包应含文学包流程:{exported:?}"
+    );
+    let dir5 = TempDataDir::new("litpack-import");
+    let mut dst = service(&dir5); // 目标库:两包都关,包流程靠导入进来
+    dst.import_bundle(
+        bundle.flows.clone(),
+        None,
+        ImportConflictMode::Rename,
+    )
+    .unwrap();
+    let got = dst
+        .flow_by_id("builtin-lit-consistency")
+        .expect("导入后应可检索到文学包流程");
+    assert_eq!(
+        serde_json::to_value(got).unwrap(),
+        serde_json::to_value(src.flow_by_id("builtin-lit-consistency").unwrap()).unwrap(),
+        "包流程导出 / 导入往返必须逐字一致"
+    );
 }
 
 /// FLOW-DEMO-1:内置画布示范流程「多路调研示范流程」的常量自检——真实工具集过

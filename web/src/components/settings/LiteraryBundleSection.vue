@@ -39,6 +39,11 @@ async function persist(
   msg.value = '';
   try {
     await store.queueSettingsSave(patch);
+    // 开包会在服务端**并入四条文学流程**(LIT-5)。流程库缓存在 store 里,而各消费点
+    // (「绑定流程」下拉 / 流程列表 / 执行流程区)都只在「未加载」时拉一次——不刷新的话,
+    // 要重开设置或重启才看得到新流程(与 CODE-5 收尾复核时实测的同类缺陷一致)。
+    // 关包不回收已注入副本,故不需要「反向移除」;刷新失败只记日志(loadAgentFlow 内部吞错)。
+    await store.loadAgentFlow();
     msgKind.value = 'ok';
     msg.value = okText;
   } catch (e) {
