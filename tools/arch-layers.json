@@ -168,6 +168,7 @@
     "audioController.ts": { "generation": "L2", "responsibility": "音频控制器注册表(宿主能力桥;被 sandbox 音频 RPC 调用)" },
     "chatStreamService.ts": { "generation": "L2", "responsibility": "聊天流服务编排(依赖注入 streamChat/stopChat,可测编排层)" },
     "resourceStore.ts": { "generation": "L2", "responsibility": "资源界面存储快照桥(localStorage + IndexedDB 持久化编排)" },
+    "resourceDomains.ts": { "generation": "L2", "responsibility": "资源卡域名确认记忆(localStorage 白名单;FE-5 A 首次遇新域名一次性确认,未确认不注册不预拉取)" },
     "inputModality.ts": { "generation": "L2", "responsibility": "输入模态标记安装(捕获阶段 pointerdown/keydown → html[data-input-mode];供 styles/panels.css 收窄 select 焦点样式;默认不写标记 = 现状行为)" },
 
     "cardScriptHost.ts": { "generation": "L3", "responsibility": "卡级脚本长驻沙箱宿主(事件流/轮询/宿主 RPC 转发)" },

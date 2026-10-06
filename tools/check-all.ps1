@@ -4,7 +4,10 @@
 #       -Bundle 即便在 -Quick 下也运行体积两段(web: vite build + bundle budget):
 #       pre-push 用「-Quick -Bundle」兜住体积退化(FE-10);build.ps1 的 -Quick 不带它,
 #       以避开与 [1/3] 的重复构建。
-#       -AuditOnly 只跑审计段(两把 Cargo.lock + npm 生产依赖),跳过全部编译/测试/构建;
+#       **注意(GATE-1,2026-10-06)**:文档两段(docs: check-docs / docs: check-doc-claims)
+#       与审计段一样**不受 -SkipWeb/-SkipRust 影响**,只有 -AuditOnly 会跳过;
+#       `-SkipWeb` 不再能制造「口径全绿」的假信号。
+#       -AuditOnly 只跑审计段(两把 Cargo.lock + npm 生产依赖)+ 跳过文档段与全部编译/测试/构建;
 #       -StrictTypecheck 历史保留参数(2026-09-08 起 typecheck 已是硬门禁,此开关无差异)
 #       -StrictAudit 历史保留参数(2026-09-13 起 cargo audit 已是硬门禁,此开关无差异)
 #       -LooseAudit 把 cargo audit 降回警告档(仅在 advisory DB 不可用等特殊场景临时使用)
@@ -210,15 +213,27 @@ if ($LASTEXITCODE -eq 0) {
     exit 1
 }
 
-# ===== 文档一致性门禁(纯 Node 零依赖,与 -SkipWeb 解耦)=====
+# ===== 文档一致性门禁(纯 Node 零依赖,与 -SkipRust/-SkipWeb 解耦)=====
 # 2026-09-16 文档整合:68 份散落 md → 六类体系(契约/功能/计划/展望/经验/遗留),
 # 原文档归档到 docs/archive/2026-09-16-consolidation/。此前 docs/ 没有任何机器校验,
 # 本阶段把「根下只放六类活文档 + 索引双向一致 + 链接不失效 + 归档映射覆盖」变成硬门禁。
 # 规则清单见 tools/check-docs.mjs 头部注释(D1~D6)。
+#
+# GATE-1(2026-10-06 修复):`docs: check-doc-claims` 此前被包在 `-SkipWeb` 守卫内,
+# 而段注释却声称「与 -SkipWeb 解耦」——带 `-SkipWeb` 跑时文档口径(含路由总表穷尽性
+# 与十余项由代码派生的计数)不校验且无任何提示,「口径全绿」成为假信号。现与
+# `docs: check-docs` 并列在本段内:只有 `-AuditOnly` 能跳过它们。本段与后端编译、
+# 前端测试/构建都无依赖,可独立运行。
 if (-not $AuditOnly) {
     Push-Location $root
     try {
         Invoke-Stage 'docs: check-docs' { node tools/check-docs.mjs }
+        # 文档口径检查(2026-09-26 起,硬门禁):把「由代码/脚本派生」的计数(表数、ensure_* 个数、
+        # check-contract 映射组数与镜像表行数、check-arch 规则字母与两个 ratchet 基线、
+        # SseEvent/TaskEventKind 变体数、check-all 阶段数)与文档字面逐条比对——这批事实
+        # 原先散在多份文档各写一个数、且不在任何门禁内(count-tests 只管测试数字)。
+        # 历史层(「原文 + 变更标注」体例)保留旧值不判失配。
+        Invoke-Stage 'docs: check-doc-claims' { node tools/check-doc-claims.mjs }
     } finally { Pop-Location }
 }
 
@@ -242,15 +257,13 @@ if (-not $SkipWeb -and -not $AuditOnly) {
         # 历史教训是同一数字在 5 份文档并存(923/697、975/733、977/745、971/763、1017/768),
         # 根因就是多处手抄且无人守护。新增测试后请跑 `npm run count:tests` 并同步该文档。
         Invoke-Stage 'count: tests' { node tools/count-tests.mjs --check }
-        # 文档口径检查(2026-09-26 起,硬门禁):把「由代码/脚本派生」的计数(表数、ensure_* 个数、
-        # check-contract 映射组数与镜像表行数、check-arch 规则字母与两个 ratchet 基线、
-        # SseEvent/TaskEventKind 变体数、check-all 阶段数)与文档字面逐条比对——这批事实
-        # 原先散在多份文档各写一个数、且不在任何门禁内(count-tests 只管测试数字)。
-        # 历史层(「原文 + 变更标注」体例)保留旧值不判失配。
-        Invoke-Stage 'docs: check-doc-claims' { node tools/check-doc-claims.mjs }
         # 前端类型逃逸 ratchet:as never / as unknown as / 非空断言 / any 只降不升
         # (纯 Node 零依赖,与 check-arch/check-contract 同风格;基线见脚本内 BASELINE)
         Invoke-Stage 'web: type-ratchet'        { node tools/check-frontend-lint.mjs }
+        # 零测试文件 ratchet(2026-10-06 FE-11 新增,FRONTEND-REPORT §七第 9 条的零依赖
+        # 替代方案——覆盖率工具链因本机网络拉不到新依赖而不可用):新增源码文件若没有任何
+        # 测试 import 引用即 FAIL;基线为显式清单(只减不增),见脚本头注释与 BASELINE。
+        Invoke-Stage 'web: test-ratchet'        { node tools/check-test-ratchet.mjs }
         # 样式纪律 ratchet(2026-10-02 UIP-8 新增;FRONTEND-REPORT §七第 10 条 / FE-12 落点):
         # 全局域(style.css + styles/*.css)逐文件行数与 !important 只降不升 + 组件 scoped
         # !important 合计 + animation/transition 裸时长归零(动效令牌 --dur-*/--stagger-step)。

@@ -79,6 +79,17 @@ const MAPPINGS = [
     ts: { file: 'web/src/api/types.ts', name: 'TaskEventKind', kind: 'union' },
   },
   {
+    // FE-9(2026-10-06):`SseEvent::Task` 的**载荷字段**此前无守卫——映射表里只有
+    // TaskEventKind 的变体名比对,`phase` / `step_index` 改名时检查仍全绿、TS 也全绿,
+    // 前端静默读到 undefined(而这两个字段正是流式缓冲 liveBuffers 的 key)。
+    // 用枚举结构体变体形态登记:字段集合与可选性逐条比对。
+    label: '任务事件载荷',
+    rust: { file: 'server-rs/src/models/types.rs', name: 'SseEvent', variant: 'Task' },
+    ts: { file: 'web/src/api/types.ts', name: 'TaskEvent', kind: 'type-literal' },
+    // 线格式判别式:serde 由 `#[serde(tag = "type")]` 注入,TS 侧手写 `type: 'task'`
+    tsIgnore: ['type'],
+  },
+  {
     label: '任务执行模式枚举',
     rust: { file: 'server-rs/src/models/types.rs', name: 'TaskRunMode' },
     ts: { file: 'web/src/api/types.ts', name: 'TaskRunMode', kind: 'union' },
@@ -214,19 +225,52 @@ const MAPPINGS = [
 
 const read = (rel) => readFileSync(join(ROOT, rel), 'utf8');
 
-/** 取 `pub struct Name {` 的花括号体内文本(Rust;按大括号配平)。 */
+/** 取 `pub struct Name {` 的花括号体内文本(Rust;按大括号配平)。
+ *
+ *  先剥注释再配平:注释里的 `{`/`}`(文档示例、泛型说明)会让朴素配平算错深度、
+ *  把结构体后面的代码也吞进体内(产出幽灵字段)。 */
 function rustBlock(src, name, keyword) {
+  const text = stripRustComments(src);
   const head = new RegExp(`pub\\s+${keyword}\\s+${name}\\b[^{]*\\{`);
-  const m = head.exec(src);
+  const m = head.exec(text);
   if (!m) return null;
   let depth = 1;
   let i = m.index + m[0].length;
   const start = i;
-  for (; i < src.length && depth > 0; i++) {
-    if (src[i] === '{') depth++;
-    else if (src[i] === '}') depth--;
+  for (; i < text.length && depth > 0; i++) {
+    if (text[i] === '{') depth++;
+    else if (text[i] === '}') depth--;
   }
-  return src.slice(start, i - 1);
+  return text.slice(start, i - 1);
+}
+
+/** 剥 Rust 注释(块注释 + 行注释)。
+ *
+ *  行注释扫描跳过 `"` 字符串(含 `\\` 转义),避免 `rename = "http://…"` 这类
+ *  属性值被当成注释截断;`'` 字符字面量不参与识别(字段声明里生命周期 `&'a`
+ *  远多于含 `//` 的字符字面量,而后者在声明中不合法)。
+ *
+ *  **必须先剥再切分**:行注释里出现的顶格逗号(如「旧库经 `migration::xx` 幂等补列」)
+ *  会把字段声明切成两段,后段以注释残句开头——残句里的 `migration::` 会被字段正则
+ *  当成 `migration` 字段名,而真正的 `pub workspace:` 被并进它的类型里(FE-9 实施期
+ *  实测:该形态让 TaskRecord 少一个字段、多一个幽灵字段)。 */
+function stripRustComments(src) {
+  const noBlocks = src.replace(/\/\*[\s\S]*?\*\//g, '');
+  return noBlocks
+    .split('\n')
+    .map((line) => {
+      let inStr = false;
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (inStr) {
+          if (ch === '\\') i++;
+          else if (ch === '"') inStr = false;
+        } else if (ch === '"') inStr = true;
+        else if (ch === '/' && line[i + 1] === '/') return line.slice(0, i);
+      }
+      return line;
+    })
+    .join('\n');
 }
 
 /**
@@ -237,8 +281,34 @@ function rustBlock(src, name, keyword) {
 function rustFields(src, name) {
   const body = rustBlock(src, name, 'struct');
   if (body === null) return null;
-  // 按顶层逗号切分字段声明(<> () [] 内逗号不算分隔符);
-  // Rust 结构体字段以逗号收尾,类型可跨行,故不能按行解析。
+  return fieldsFromSegments(splitTopLevelCommas(body));
+}
+
+/**
+ * 解析枚举**结构体变体**的字段(`SseEvent::Task { … }`)。
+ *
+ * 与结构体字段的唯一差别:变体字段**没有 `pub`**(故 fieldsFromSegments 的字段
+ * 正则把 `pub` 视为可选);注释已由 rustBlock 剥除。
+ * 用法:映射里写 `rust: { file, name: 'SseEvent', variant: 'Task' }`。
+ */
+function rustVariantFields(src, enumName, variant) {
+  const body = rustBlock(src, enumName, 'enum');
+  if (body === null) return null;
+  const head = new RegExp(`(?:^|\\n)\\s*${variant}\\s*\\{`);
+  const m = head.exec(body);
+  if (!m) return null;
+  const start = m.index + m[0].length;
+  let depth = 1;
+  let i = start;
+  for (; i < body.length && depth > 0; i++) {
+    if (body[i] === '{') depth++;
+    else if (body[i] === '}') depth--;
+  }
+  return fieldsFromSegments(splitTopLevelCommas(body.slice(start, i - 1)));
+}
+
+/** 按顶层逗号切分字段声明(<> () [] 内逗号不算分隔符;类型可跨行,故不能按行解析)。 */
+function splitTopLevelCommas(body) {
   const segments = [];
   let buf = '';
   let depth = 0;
@@ -253,17 +323,17 @@ function rustFields(src, name) {
     buf += ch;
   }
   if (buf.trim()) segments.push(buf);
+  return segments;
+}
 
+/** 把字段声明段解析为 Map<线格式字段名, { optional }>;`pub` 可有可无(枚举变体字段无 pub)。 */
+function fieldsFromSegments(segments) {
   const fields = new Map();
   for (const seg of segments) {
-    // 去掉注释行,保留属性行
-    const cleaned = seg
-      .split('\n')
-      .filter((l) => !/^\s*\/\//.test(l))
-      .join('\n');
-    const attrs = [...cleaned.matchAll(/#\[[^\]]*\]/g)].map((m) => m[0]).join(' ');
-    const decl = cleaned.replace(/#\[[^\]]*\]/g, '');
-    const m = /pub\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([\s\S]*)/.exec(decl);
+    // 属性行保留,注释应在切分前剥净(见 stripRustComments);此处再兜一次尾注释
+    const attrs = [...seg.matchAll(/#\[[^\]]*\]/g)].map((m) => m[0]).join(' ');
+    const decl = seg.replace(/#\[[^\]]*\]/g, '');
+    const m = /(?:^|\s)(?:pub\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([\s\S]*)/.exec(decl);
     if (!m) continue;
     if (/#\[serde\(skip\)\]/.test(attrs)) continue;
     const rename = /serde\([^)]*rename\s*=\s*"([^"]+)"/.exec(attrs);
@@ -287,8 +357,12 @@ function rustVariants(src, name) {
   return variants;
 }
 
-/** 取 TS `export interface Name {` 的体内文本(按大括号配平,字符串内大括号不敏感于此用途)。 */
+/**
+ * 取 TS `export interface Name {` 的体内文本(按大括号配平,字符串内大括号不敏感于此用途)。
+ * kind='type-literal' 走 `export type Name = { … };`(对象字面量别名,如 TaskEvent)。
+ */
 function tsBlock(src, name, kind) {
+  if (kind === 'type-literal') return tsTypeBlock(src, name);
   const head =
     kind === 'union'
       ? new RegExp(`export\\s+type\\s+${name}\\b[^=]*=`)
@@ -431,10 +505,16 @@ for (const map of MAPPINGS) {
     continue;
   }
 
-  const rust = rustFields(rustSrc, map.rust.name);
+  const rust = map.rust.variant
+    ? rustVariantFields(rustSrc, map.rust.name, map.rust.variant)
+    : rustFields(rustSrc, map.rust.name);
   const ts = tsFields(tsSrc, map.ts.name, map.ts.kind);
   if (!rust) {
-    fail(`${map.label}:Rust 未找到结构体 ${map.rust.name}(${map.rust.file})`);
+    fail(
+      `${map.label}:Rust 未找到${
+        map.rust.variant ? `枚举变体 ${map.rust.name}::${map.rust.variant}` : `结构体 ${map.rust.name}`
+      }(${map.rust.file})`,
+    );
     continue;
   }
   if (!ts) {
