@@ -50,6 +50,9 @@ pub(in crate::agents::engine) struct CollectedCtx {
     /// 文学能力包(LIT-3):位置 0(最新消息尾)Author's Note 段(开关开才 Some;
     /// 构建侧按 untrusted_boundary("literary_note") 包裹)。
     pub(in crate::agents::engine) literary_note: Option<&'static str>,
+    /// 文学能力包(LIT-6):位置 0(最新消息尾)文风素材段(开关开且预设非空才 Some;
+    /// 构建侧按 untrusted_boundary("literary_style") 包裹,拼在 AN 段之前)。
+    pub(in crate::agents::engine) literary_style: Option<&'static str>,
     pub(in crate::agents::engine) inject_snapshot: PromptInjectConfig,
     pub(in crate::agents::engine) reflect_prompt: String,
     pub(in crate::agents::engine) reflect_advice_supplement: String,
@@ -404,6 +407,8 @@ impl AgentEngine {
         // 本层只取值传参,判据与文本不在调用点复制)
         let literary_tail = settings_snap.literary_system_tail();
         let literary_note = settings_snap.literary_user_note();
+        // 文学能力包(LIT-6):位置 0 文风素材段(开关关或预设为空 → None)
+        let literary_style = settings_snap.literary_style_note();
         // 反思提示词(空 = 机械规则检查;非空 = 反思步骤调用 LLM 判定)
         let reflect_prompt = settings_snap.reflect_prompt.clone();
         // 反思失败建议的补充说明(可选;主体建议由引擎自动生成,见 reflect_integration):
@@ -445,6 +450,7 @@ impl AgentEngine {
             literary_default_suffix,
             literary_tail,
             literary_note,
+            literary_style,
             inject_snapshot,
             reflect_prompt,
             reflect_advice_supplement,
@@ -493,11 +499,12 @@ impl AgentEngine {
             rctx.session_vars,
             rctx.assistant_vars,
             Some(&mut *scopes_guard),
-            // 文学能力包(LIT-2/LIT-3):三段文本(全 None 时行为与加参数前一致)
+            // 文学能力包(LIT-2/LIT-3/LIT-6):四段文本(全 None 时行为与加参数前一致)
             LiteraryTexts {
                 default_suffix: ctx.literary_default_suffix,
                 tail: ctx.literary_tail,
                 note: ctx.literary_note,
+                style: ctx.literary_style,
             },
         );
         drop(scopes_guard);

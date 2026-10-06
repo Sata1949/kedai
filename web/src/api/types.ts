@@ -547,6 +547,12 @@ export interface RuntimeSettings {
   /** 任务模式文学能力包开关(2026-10-05;默认 false)。对称 task_coding_bundle_enabled:
    *  扁平 + task 覆盖层,仅影响任务执行者/汇总者的**缺省**提示词(文学向变体) */
   task_literary_bundle_enabled: boolean;
+  /** 文学包文风预设(LIT-6;空串 = 不注入)。取值 `plain` / `classical` / `lightnovel` /
+   *  `hardboiled`;未知取值服务端 400。纯扁平字段,仅角色扮演模式生效 */
+  literary_style_preset: string;
+  /** 文学包长程一致性推荐档(LIT-7;空串 = 不改变)。取值 `medium`(中篇)/ `long`(长篇);
+   *  选档会写入压缩三项数值,选回空串按服务端快照恢复写入前原值 */
+  literary_recommend_preset: string;
   /** 任务模式默认连接(TM-SET-1;空串 = 跟随默认连接)。任务连接回退链:
    *  逐任务/节点显式连接 → 本项 → 默认连接;指向的连接被删/停用时运行期软回退默认连接 */
   task_default_connection_id: string;
@@ -687,6 +693,10 @@ export interface RuntimeSettingsPatch {
   literary_bundle_enabled?: boolean;
   /** 任务模式文学能力包开关(默认 false = 关闭;缺省保持不变)。扁平 + task 覆盖层 */
   task_literary_bundle_enabled?: boolean;
+  /** 文学包文风预设(LIT-6;空串 = 不注入;缺省保持不变;未知取值服务端 400) */
+  literary_style_preset?: string;
+  /** 文学包长程一致性推荐档(LIT-7;空串 = 不改变(有快照则恢复);缺省保持不变) */
+  literary_recommend_preset?: string;
   /** 任务模式默认连接(TM-SET-1;空串 = 清除,跟随默认连接;非空须为已存在且启用的连接) */
   task_default_connection_id?: string;
 }

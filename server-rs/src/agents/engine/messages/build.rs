@@ -84,15 +84,19 @@ fn build_llm_messages(
 /// - `tail`：**位置 4 system 尾增强段**(LIT-3)——任何路径都追加，计入 `protected_tail`，
 ///   不经 untrusted 包裹(强制语气)；
 /// - `note`：**位置 0 Author's Note 段**(LIT-3)——随尾部角色落 user/assistant 尾，
-///   经 `untrusted_boundary("literary_note")` 包裹(素材语气)，不计 `protected_tail`。
+///   经 `untrusted_boundary("literary_note")` 包裹(素材语气)，不计 `protected_tail`；
+/// - `style`：**位置 0 文风素材段**(LIT-6)——与 `note` 同处位置 0、同样经 untrusted 包裹、
+///   同样不计 `protected_tail`；拼装顺序钉死「激发 → 反思建议 → **style** → note → 预设尾部」
+///   (AN 保持最后)。
 ///
 /// 全 `None` 时行为与加本参数前**逐字节一致**(开关关的回归钉子)。
-/// 结构体传参(而非逐个位置参数)：三段文本同源同判据，后续加字段不再改动各调用点。
+/// 结构体传参(而非逐个位置参数)：各段文本同源同判据，后续加字段不再改动各调用点。
 #[derive(Default, Clone, Copy)]
 pub(in crate::agents::engine) struct LiteraryTexts<'a> {
     pub(in crate::agents::engine) default_suffix: Option<&'a str>,
     pub(in crate::agents::engine) tail: Option<&'a str>,
     pub(in crate::agents::engine) note: Option<&'a str>,
+    pub(in crate::agents::engine) style: Option<&'a str>,
 }
 
 /// build_llm_messages 的 6 层位置版本(位置定义见 build_llm_messages 文档)。
@@ -155,6 +159,12 @@ pub(in crate::agents::engine) fn build_llm_messages_with_position(
         .note
         .filter(|n| !n.trim().is_empty())
         .map(|n| untrusted_boundary("literary_note", n));
+    // 文学能力包(LIT-6):位置 0 文风素材段(空则 None)。与 AN 段同处位置 0、同样经
+    // untrusted 包裹;拼装顺序钉死「激发 → 反思建议 → 文风 → AN → 预设尾部」(AN 最后)。
+    let literary_style = literary
+        .style
+        .filter(|n| !n.trim().is_empty())
+        .map(|n| untrusted_boundary("literary_style", n));
     // 位置3 常驻 system 角色 → 并入 system 文本;无 user 时激发/预设尾部也并入兜底
     let sys_world: String = if has_user {
         world_constant
@@ -174,8 +184,11 @@ pub(in crate::agents::engine) fn build_llm_messages_with_position(
                 parts.push(a.to_string());
             }
         }
-        // 文学能力包(LIT-3):位置 0 AN 段(退化分支并入 system 兜底;顺序同 live 分支:
-        // 激发 → 反思建议 → AN → 预设尾部)
+        // 文学能力包(LIT-3/LIT-6):位置 0 文风段 → AN 段(退化分支并入 system 兜底;
+        // 顺序同 live 分支:激发 → 反思建议 → 文风 → AN → 预设尾部)
+        if let Some(s) = &literary_style {
+            parts.push(s.clone());
+        }
         if let Some(n) = &literary_note {
             parts.push(n.clone());
         }
@@ -344,9 +357,12 @@ pub(in crate::agents::engine) fn build_llm_messages_with_position(
                 }
             }
         }
-        // 文学能力包(LIT-3):位置 0 AN 段(反思建议之后、预设尾部之前;随尾部角色,
-        // 与该侧预设尾部同命 —— 都在位置 0、都可被极端裁剪切掉)
+        // 文学能力包(LIT-3/LIT-6):位置 0 文风段 → AN 段(反思建议之后、预设尾部之前;
+        // 随尾部角色,与该侧预设尾部同命 —— 都在位置 0、都可被极端裁剪切掉)
         if tail_role == "user" {
+            if let Some(s) = &literary_style {
+                user_tail.push(s.clone());
+            }
             if let Some(n) = &literary_note {
                 user_tail.push(n.clone());
             }
@@ -380,8 +396,12 @@ pub(in crate::agents::engine) fn build_llm_messages_with_position(
                 }
             }
         }
-        // 文学能力包(LIT-3):位置 0 AN 段(assistant 侧对称:反思建议之后、预设尾部之前)
+        // 文学能力包(LIT-3/LIT-6):位置 0 文风段 → AN 段(assistant 侧对称:反思建议之后、
+        // 预设尾部之前)
         if tail_role == "assistant" {
+            if let Some(s) = &literary_style {
+                assistant_tail.push(s.clone());
+            }
             if let Some(n) = &literary_note {
                 assistant_tail.push(n.clone());
             }

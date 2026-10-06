@@ -18,7 +18,10 @@ use super::params::{
     default_tool_authorization_timeout_secs, default_tool_history_budget_tokens,
     default_tool_history_keep_rounds, migrate_authorization_mode, task_idle_floor_secs,
 };
-use super::{RoleplayPromptConfig, RuntimeSettings};
+use super::{
+    is_valid_literary_recommend_preset, is_valid_literary_style_preset, RoleplayPromptConfig,
+    RuntimeSettings,
+};
 
 impl RuntimeSettings {
     /// 从 data/settings.json 加载;缺失或损坏则回退环境配置。
@@ -59,6 +62,15 @@ impl RuntimeSettings {
                     "all" | "deny_dangerous" | "allowlist"
                 ) {
                     s.task_tool_policy = default_task_tool_policy();
+                }
+                // LIT-6/LIT-7:两个选择型字段的存量归一化——未知取值回退空串(对齐上一段
+                // 「非法回退默认」的先例)。API 层对**新写入**是 400,此处只兜存量配置与手改
+                // 的 settings.json,避免把未知档静默注入提示词。
+                if !is_valid_literary_style_preset(&s.literary_style_preset) {
+                    s.literary_style_preset.clear();
+                }
+                if !is_valid_literary_recommend_preset(&s.literary_recommend_preset) {
+                    s.literary_recommend_preset.clear();
                 }
                 // 旧版 settings.json 无 search_endpoint:回退默认搜索端点
                 if s.search_endpoint.trim().is_empty() {

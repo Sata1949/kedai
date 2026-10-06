@@ -8,9 +8,10 @@ use crate::services::agent_flow_service::{
     MIN_FLOW_CALL_DEPTH,
 };
 use crate::services::settings_service::{
+    is_valid_literary_recommend_preset, is_valid_literary_style_preset, literary_recommend_values,
     normalize_base_url, resolve_connector_target, task_idle_floor_secs, AppMode, ConnectionProfile,
-    McpServerConfig, RuntimeSettings, CONNECTOR_TYPE_MOCK, CONNECTOR_TYPE_OPENAI,
-    DEFAULT_SEARCH_ENDPOINT, MAX_CONNECTIONS,
+    LiteraryRecommendSnapshot, McpServerConfig, RuntimeSettings, CONNECTOR_TYPE_MOCK,
+    CONNECTOR_TYPE_OPENAI, DEFAULT_SEARCH_ENDPOINT, MAX_CONNECTIONS,
 };
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -209,6 +210,15 @@ pub struct UpdateSettingsBody {
     /// 与 `task_coding_bundle_enabled` 同构。
     #[serde(default)]
     pub task_literary_bundle_enabled: Option<bool>,
+    /// 文学包文风预设(LIT-6;缺省保持不变)。空串 = 不注入;非空必须是
+    /// `plain` / `classical` / `lightnovel` / `hardboiled` 之一(否则 400)。
+    /// 角色扮演侧纯扁平字段。
+    #[serde(default)]
+    pub literary_style_preset: Option<String>,
+    /// 文学包长程一致性推荐档(LIT-7;缺省保持不变)。空串 = 不改变(有快照则按快照恢复);
+    /// 非空必须是 `medium` / `long` 之一(否则 400)。
+    #[serde(default)]
+    pub literary_recommend_preset: Option<String>,
     /// 任务模式默认连接(TM-SET-1):空串 = 清除(跟随默认连接);非空必须是已存在且
     /// 启用的连接 id(否则 400);缺省 = 保持不变
     #[serde(default)]
@@ -392,6 +402,9 @@ fn settings_json(s: &RuntimeSettings) -> Value {
         // 文学能力包两开关(LIT-1;角色扮演侧为纯扁平、任务侧为扁平+覆盖层)
         "literary_bundle_enabled": s.literary_bundle_enabled,
         "task_literary_bundle_enabled": s.task_literary_bundle_enabled,
+        // 文学包选择型字段(LIT-6/LIT-7;快照是内部状态,不投影给前端)
+        "literary_style_preset": s.literary_style_preset,
+        "literary_recommend_preset": s.literary_recommend_preset,
         "task_default_connection_id": s.task_default_connection_id,
         "tool_history_keep_rounds": s.tool_history_keep_rounds,
         "tool_history_budget_tokens": s.tool_history_budget_tokens,
@@ -963,6 +976,50 @@ pub async fn update_settings(
             if let Some(v) = body.task_literary_bundle_enabled {
                 apply!(s, is_task, task_literary_bundle_enabled, v);
             }
+            // 文学包文风预设(LIT-6):空 = 不注入;未知取值 400(不静默回退)。
+            // 角色扮演侧纯扁平字段(同上方开关的直写口径)。
+            if let Some(v) = &body.literary_style_preset {
+                let t = v.trim().to_string();
+                if !is_valid_literary_style_preset(&t) {
+                    return validation(
+                        "literary_style_preset 仅支持 plain / classical / lightnovel / hardboiled(空 = 不注入)",
+                    );
+                }
+                s.literary_style_preset = t;
+            }
+            // 文学包长程一致性推荐档(LIT-7):**显式选档才写入既有三项数值**,可回退。
+            //  - 首次选档:先拍「写入前原值」快照再写档值;档间切换**不重拍**(快照始终是采纳前);
+            //  - 选回空串:有快照按快照恢复(**写入前原值,不是默认值**),无快照则不动;
+            //  - 未知取值 400;越界仍由 secret.rs 的既有钳制兜底(不新增校验口径)。
+            // 位置:本块在 compaction_* 直写之后——同一请求里两者同时出现时以「选档」为准
+            // (选档是更明确的用户意图);前端同一分区不会同时发两者。
+            if let Some(v) = &body.literary_recommend_preset {
+                let t = v.trim().to_string();
+                if !is_valid_literary_recommend_preset(&t) {
+                    return validation(
+                        "literary_recommend_preset 仅支持 medium / long(空 = 不改变)",
+                    );
+                }
+                if t.is_empty() {
+                    if let Some(snap) = s.literary_recommend_snapshot.take() {
+                        s.compaction_mode = snap.compaction_mode;
+                        s.compaction_threshold = snap.compaction_threshold;
+                        s.compaction_keep_recent = snap.compaction_keep_recent;
+                    }
+                } else if let Some(values) = literary_recommend_values(&t) {
+                    if s.literary_recommend_snapshot.is_none() {
+                        s.literary_recommend_snapshot = Some(LiteraryRecommendSnapshot {
+                            compaction_mode: s.compaction_mode.clone(),
+                            compaction_threshold: s.compaction_threshold,
+                            compaction_keep_recent: s.compaction_keep_recent,
+                        });
+                    }
+                    s.compaction_mode = values.compaction_mode.to_string();
+                    s.compaction_threshold = values.compaction_threshold;
+                    s.compaction_keep_recent = values.compaction_keep_recent;
+                }
+                s.literary_recommend_preset = t;
+            }
             // 任务模式默认连接(TM-SET-1):空串 = 清除(回到跟随默认连接);非空必须在
             // **本请求应用后的**连接列表里存在且启用,否则 400(本块位于连接数组处理与
             // normalize_connections 之后,故同请求里先改连接再设默认也能正确校验)。
@@ -1490,6 +1547,8 @@ pub async fn prompt_preview(
     // 下方若干 push 会按值移动 settings 的字段(如 reflect_advice_prompt),之后再借用会编译错。
     let literary_tail = settings.literary_system_tail();
     let literary_note = settings.literary_user_note();
+    // 文学能力包(LIT-6):位置 0 文风素材段(开关关或预设为空 → None)
+    let literary_style = settings.literary_style_note();
     // agent_system_prompt 为 RoleplayPromptConfig(WP7),.0 取字符串
     if settings.agent_system_prompt.0.trim().is_empty() {
         // 空值回退文案按模式区分:roleplay 空 = 用内置人设模板;
@@ -1726,10 +1785,20 @@ pub async fn prompt_preview(
             settings.reflect_advice_prompt,
         );
     }
-    // 文学能力包(LIT-3):位置 0 Author's Note 段——在反思建议之后、预设尾部之前;
-    // 随尾部角色(preset_tail_role,与真实下发同判据);按 untrusted_boundary 包裹展示
+    // 文学能力包(LIT-3/LIT-6):位置 0 文风段与 Author's Note 段——都在反思建议之后、
+    // 预设尾部之前,且**文风段在 AN 段之前**(与真实拼装同序);随尾部角色
+    // (preset_tail_role,与真实下发同判据);按 untrusted_boundary 包裹展示
     // (「预览即真实下发」:真实拼装侧即按此包裹)。
     if matches!(mode, AppMode::Roleplay) {
+        if let Some(style) = literary_style {
+            push_preview_layer(
+                &mut layers,
+                "literary_style",
+                settings.preset_tail_role.clone(),
+                0,
+                crate::services::prompt_kit::untrusted_boundary("literary_style", style),
+            );
+        }
         if let Some(note) = literary_note {
             push_preview_layer(
                 &mut layers,

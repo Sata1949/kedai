@@ -35,6 +35,13 @@ function toggleAt(wrapper: ReturnType<typeof mount>, index: number) {
   return box;
 }
 
+/** 本区有两个下拉:0 = 文风预设(LIT-6),1 = 长程一致性推荐档(LIT-7)。取不到即抛(同上)。 */
+function selectAt(wrapper: ReturnType<typeof mount>, index: number) {
+  const sel = wrapper.findAll('select')[index];
+  if (!sel) throw new Error(`缺少第 ${index} 个下拉`);
+  return sel;
+}
+
 describe('LiteraryBundleSection(文学能力包区)', () => {
   beforeEach(() => {
     memStorage.clear();
@@ -120,5 +127,65 @@ describe('LiteraryBundleSection(文学能力包区)', () => {
     expect(wrapper.text()).toContain('保存失败');
     expect((toggleAt(wrapper, 0).element as HTMLInputElement).checked).toBe(false);
     expect(loadSpy).not.toHaveBeenCalled(); // 保存失败不刷新(服务端没并入任何东西)
+  });
+
+  it('文风预设下拉:选项键与服务端常量逐字对齐,改动走 queueSettingsSave 且字段名逐字正确', async () => {
+    const { store, wrapper } = mountSection();
+    const spy = vi.spyOn(store, 'queueSettingsSave').mockResolvedValue(undefined);
+    vi.spyOn(store, 'loadAgentFlow').mockResolvedValue(undefined);
+
+    expect(wrapper.findAll('select')).toHaveLength(2);
+    const style = selectAt(wrapper, 0);
+    expect(style.findAll('option').map((o) => o.attributes('value'))).toEqual([
+      '',
+      'plain',
+      'classical',
+      'lightnovel',
+      'hardboiled',
+    ]);
+
+    await style.setValue('hardboiled');
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(spy).toHaveBeenCalledWith({ literary_style_preset: 'hardboiled' });
+    expect(store.literaryStylePreset).toBe('hardboiled');
+    expect(store.literaryRecommendPreset).toBe(''); // 另一个控件不被波及
+    expect(wrapper.text()).toContain('悬疑冷硬');
+  });
+
+  it('推荐档下拉:选项键对齐;选回空串=回到「不改变」(服务端按快照恢复原值)', async () => {
+    const { store, wrapper } = mountSection();
+    const spy = vi.spyOn(store, 'queueSettingsSave').mockResolvedValue(undefined);
+    vi.spyOn(store, 'loadAgentFlow').mockResolvedValue(undefined);
+
+    const rec = selectAt(wrapper, 1);
+    expect(rec.findAll('option').map((o) => o.attributes('value'))).toEqual(['', 'medium', 'long']);
+
+    await rec.setValue('long');
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(spy).toHaveBeenCalledWith({ literary_recommend_preset: 'long' });
+    expect(store.literaryRecommendPreset).toBe('long');
+
+    await rec.setValue('');
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(spy).toHaveBeenLastCalledWith({ literary_recommend_preset: '' });
+    expect(store.literaryRecommendPreset).toBe('');
+  });
+
+  it('选择型控件保存失败时回滚本地值(不留下与服务端分叉的 UI 态)', async () => {
+    const { store, wrapper } = mountSection();
+    vi.spyOn(store, 'queueSettingsSave').mockRejectedValue(new Error('503 服务不可用'));
+    vi.spyOn(store, 'loadAgentFlow').mockResolvedValue(undefined);
+
+    const style = selectAt(wrapper, 0);
+    await style.setValue('plain');
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(store.literaryStylePreset).toBe('');
+    expect(wrapper.text()).toContain('保存失败');
   });
 });

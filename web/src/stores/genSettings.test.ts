@@ -478,3 +478,43 @@ describe('genSettings 授权模式三档(2026-09 授权改造)', () => {
     expect(store.taskToolAllowlist).toEqual(['read']);
   });
 });
+
+describe('genSettings 文学包选择型字段(LIT-6/LIT-7)', () => {
+  beforeEach(() => {
+    memStorage.clear();
+    setActivePinia(createPinia());
+  });
+
+  it('loadSettings 回填两个选择型字段;缺字段兜底空串(不注入 / 不改变)', async () => {
+    const store = useGenSettingsStore();
+    getSettingsMock.mockReset().mockResolvedValue(
+      makeSettings({ literary_style_preset: 'hardboiled', literary_recommend_preset: 'long' }),
+    );
+    await store.loadSettings();
+    expect(store.literaryStylePreset).toBe('hardboiled');
+    expect(store.literaryRecommendPreset).toBe('long');
+
+    // 旧服务端/异常响应缺字段:不得污染 store,回退空串(= 不注入 / 不改变)
+    getSettingsMock.mockReset().mockResolvedValue(
+      withoutFields(makeSettings(), ['literary_style_preset', 'literary_recommend_preset']),
+    );
+    await store.loadSettings();
+    expect(store.literaryStylePreset).toBe('');
+    expect(store.literaryRecommendPreset).toBe('');
+  });
+
+  it('saveSettings 响应回填两个选择型字段(与 loadSettings 同口径)', async () => {
+    const store = useGenSettingsStore();
+    saveSettingsMock.mockReset().mockResolvedValue({
+      ok: true,
+      settings: makeSettings({
+        literary_style_preset: 'classical',
+        literary_recommend_preset: 'medium',
+      }),
+    });
+    await store.saveSettings({ literary_style_preset: 'classical' });
+    expect(store.literaryStylePreset).toBe('classical');
+    // 推荐档写入会顺带改压缩三项,故保存响应必须整份回填(否则 UI 与已落库值分叉)
+    expect(store.literaryRecommendPreset).toBe('medium');
+  });
+});

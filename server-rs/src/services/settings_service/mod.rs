@@ -30,8 +30,10 @@ pub use connector_pool::{connection_label, ConnectorPool};
 pub use params::{
     default_coding_task_agent_prompt, default_literary_roleplay_agent_prompt,
     default_literary_task_agent_prompt, default_roleplay_agent_prompt, default_task_agent_prompt,
-    task_idle_floor_secs, McpServerConfig, ModeSettings, RoleplayPromptConfig, TaskPromptConfig,
-    TASK_DEFAULT_OUTPUT_TOKENS, TASK_DEFAULT_TEMPERATURE, TASK_DEFAULT_TOP_P,
+    is_valid_literary_recommend_preset, is_valid_literary_style_preset, literary_recommend_values,
+    literary_style_text, task_idle_floor_secs, LiteraryRecommendSnapshot, McpServerConfig,
+    ModeSettings, RoleplayPromptConfig, TaskPromptConfig, TASK_DEFAULT_OUTPUT_TOKENS,
+    TASK_DEFAULT_TEMPERATURE, TASK_DEFAULT_TOP_P,
 };
 
 // RuntimeSettings 字段的 serde(default = "...") 按名字在本模块作用域解析;
@@ -348,6 +350,23 @@ pub struct RuntimeSettings {
     /// **缺省**默认词选择(限文学向任务),不改变工具面、不影响角色扮演模式。
     #[serde(default)]
     pub task_literary_bundle_enabled: bool,
+    /// 文学包**文风预设**(LIT-6,2026-10-06;默认空 = 不注入)。纯扁平字段(该侧无覆盖层)。
+    /// 取值集合见 `params::LITERARY_STYLE_PRESETS`(`plain` / `classical` / `lightnovel` /
+    /// `hardboiled`);**未知取值在新写入时 400、load 时归一化为空串**(不静默注入未知档)。
+    /// 生效面:开关开且取值非空时,在位置 0(最新消息尾)追加一段经 untrusted 包裹的文风素材段。
+    #[serde(default)]
+    pub literary_style_preset: String,
+    /// 文学包**长程一致性推荐档**(LIT-7,2026-10-06;默认空 = 不改变任何既有值)。
+    /// 取值 `""` / `medium`(中篇)/ `long`(长篇);用户**显式选档**才把该档的一组值写入
+    /// `compaction_mode` / `compaction_threshold` / `compaction_keep_recent` 三项,写入前原值
+    /// 存进 [`Self::literary_recommend_snapshot`],选回空串即按快照恢复。
+    /// 该档**不随文学包开关门控**——它只写通用字段,门控会让「回退」入口不可达。
+    #[serde(default)]
+    pub literary_recommend_preset: String,
+    /// 采纳推荐档**之前**的压缩三项快照(LIT-7):仅在用户选档时拍摄,选回「不改变」时恢复并清空。
+    /// `#[serde(default)]` = 旧配置零迁移;为空时序列化省略(不给空配置引入新键)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub literary_recommend_snapshot: Option<LiteraryRecommendSnapshot>,
     /// 任务模式默认连接(TM-SET-1;默认空 = 跟随默认连接 active_connection,零迁移)。
     /// 逐任务显式 `connection_id`(任务级/节点级)之后的一级回退,仅任务模式消费;
     /// 指向的连接被删/停用时**软回退**默认连接(便利设置不该让任务失败,见
@@ -1695,6 +1714,127 @@ mod tests {
         );
         let got = write(&dir, "", true);
         assert_eq!(got.reflect_prompt, "", "空串 = 显式关闭反思,不得回填");
+    }
+
+    /// 文风预设判据与选择型字段归一化(LIT-6,2026-10-06):
+    /// ① 新装默认:两个选择型字段为空(不注入 / 不改变),快照为 None;
+    /// ② 判据入口三态:开关关 → None(即使选了档);开关开 + 空 → None;开关开 + 命中档 → Some(档文本);
+    /// ③ 合法性判据:空与四档键合法、其余非法(API 校验与 load 归一化**共用同一判据**);
+    /// ④ load 归一化:存量未知取值清空、合法值原样保留。
+    #[test]
+    fn literary_style_preset_judgement_and_load_normalization() {
+        let cfg = test_cfg();
+        let mut s = RuntimeSettings::from_config(&cfg);
+
+        // ① 新装默认
+        assert_eq!(s.literary_style_preset, "");
+        assert_eq!(s.literary_recommend_preset, "");
+        assert!(s.literary_recommend_snapshot.is_none());
+
+        // ② 判据入口三态
+        s.literary_style_preset = "plain".into();
+        assert!(s.literary_style_note().is_none(), "开关关 → 不注入");
+        s.literary_bundle_enabled = true;
+        s.literary_style_preset = String::new();
+        assert!(s.literary_style_note().is_none(), "空 = 不注入");
+        s.literary_style_preset = "hardboiled".into();
+        let text = s.literary_style_note().expect("命中档应注入");
+        assert!(text.contains("悬疑冷硬"), "应取到「悬疑冷硬」档:{text}");
+        assert!(text.contains("忌讳"), "档文本应含忌讳条(可编辑常量的一部分)");
+
+        // ③ 合法性判据
+        for ok in ["", "plain", "classical", "lightnovel", "hardboiled"] {
+            assert!(is_valid_literary_style_preset(ok), "{ok} 应合法");
+        }
+        for bad in ["noir", "PLAIN", " plain", "plain "] {
+            assert!(!is_valid_literary_style_preset(bad), "{bad:?} 应非法");
+        }
+
+        // ④ load 归一化
+        let dir = tmp_dir("lit-style-normalize");
+        let cfg2 = test_cfg();
+        let mut v = serde_json::to_value(RuntimeSettings::from_config(&cfg2)).unwrap();
+        v.as_object_mut()
+            .unwrap()
+            .insert("literary_style_preset".into(), serde_json::json!("noir"));
+        std::fs::write(
+            dir.join("settings.json"),
+            serde_json::to_string_pretty(&v).unwrap(),
+        )
+        .unwrap();
+        let loaded = RuntimeSettings::load(&dir, &cfg2);
+        assert_eq!(loaded.literary_style_preset, "", "存量未知档应归一化为空串");
+
+        v.as_object_mut().unwrap().insert(
+            "literary_style_preset".into(),
+            serde_json::json!("classical"),
+        );
+        std::fs::write(
+            dir.join("settings.json"),
+            serde_json::to_string_pretty(&v).unwrap(),
+        )
+        .unwrap();
+        let loaded2 = RuntimeSettings::load(&dir, &cfg2);
+        assert_eq!(
+            loaded2.literary_style_preset, "classical",
+            "合法值必须原样保留"
+        );
+    }
+
+    /// 推荐档数值与合法性(LIT-7):两档取值固定、且全部落在 `secret.rs` 的既有钳制区间内
+    /// (不新增校验口径);空与两档键合法、其余非法;load 归一化同款。
+    #[test]
+    fn literary_recommend_preset_values_and_validation() {
+        let medium = literary_recommend_values("medium").expect("中篇档应在清单里");
+        assert_eq!(
+            (
+                medium.compaction_mode,
+                medium.compaction_threshold,
+                medium.compaction_keep_recent
+            ),
+            ("auto", 0.75, 6)
+        );
+        let long = literary_recommend_values("long").expect("长篇档应在清单里");
+        assert_eq!(
+            (
+                long.compaction_mode,
+                long.compaction_threshold,
+                long.compaction_keep_recent
+            ),
+            ("auto", 0.7, 8)
+        );
+        for k in ["medium", "long"] {
+            let v = literary_recommend_values(k).unwrap();
+            assert!(
+                matches!(v.compaction_mode, "off" | "manual" | "auto"),
+                "{k} 的压缩模式取值非法"
+            );
+            assert!((0.5..=0.95).contains(&v.compaction_threshold), "{k} 阈值越界");
+            assert!(
+                (2..=200).contains(&v.compaction_keep_recent),
+                "{k} 保留条数越界"
+            );
+        }
+        assert!(literary_recommend_values("").is_none(), "空键不是档");
+        assert!(is_valid_literary_recommend_preset(""));
+        assert!(is_valid_literary_recommend_preset("long"));
+        assert!(!is_valid_literary_recommend_preset("epic"));
+
+        // load 归一化:存量未知档清空(合法值与空串见上)
+        let dir = tmp_dir("lit-recommend-normalize");
+        let cfg = test_cfg();
+        let mut v = serde_json::to_value(RuntimeSettings::from_config(&cfg)).unwrap();
+        v.as_object_mut().unwrap().insert(
+            "literary_recommend_preset".into(),
+            serde_json::json!("epic"),
+        );
+        std::fs::write(
+            dir.join("settings.json"),
+            serde_json::to_string_pretty(&v).unwrap(),
+        )
+        .unwrap();
+        let loaded = RuntimeSettings::load(&dir, &cfg);
+        assert_eq!(loaded.literary_recommend_preset, "", "存量未知档应归一化为空串");
     }
 
     /// 模式隔离不因新增角色扮演默认词而退化:

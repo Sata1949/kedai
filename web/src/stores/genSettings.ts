@@ -144,6 +144,14 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
    *  自定义值优先。不影响角色扮演模式。 */
   const taskLiteraryBundleEnabled = ref(false);
 
+  /** 文学包文风预设(LIT-6;空串 = 不注入)。取值见服务端常量清单(四档);
+   *  未知取值服务端 400,故前端只经下拉常量给值。纯扁平字段、仅角色扮演模式生效。 */
+  const literaryStylePreset = ref('');
+
+  /** 文学包长程一致性推荐档(LIT-7;空串 = 不改变)。选档会写入压缩三项数值,
+   *  选回空串由服务端按写入前快照恢复(与「恢复默认值」不同)。 */
+  const literaryRecommendPreset = ref('');
+
   /** 任务模式默认连接(TM-SET-1;空串 = 跟随默认连接)。
    *  任务连接回退链:逐任务/节点显式连接 → 本项 → 默认连接;仅任务模式消费。 */
   const taskDefaultConnectionId = ref('');
@@ -189,6 +197,8 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
       taskCodingBundleEnabled.value = s.task_coding_bundle_enabled ?? false;
       literaryBundleEnabled.value = s.literary_bundle_enabled ?? false;
       taskLiteraryBundleEnabled.value = s.task_literary_bundle_enabled ?? false;
+      literaryStylePreset.value = s.literary_style_preset ?? '';
+      literaryRecommendPreset.value = s.literary_recommend_preset ?? '';
       taskDefaultConnectionId.value = s.task_default_connection_id ?? '';
       authorizationMode.value = readAuthorizationMode(s);
       authorizationAlwaysRequired.value = Array.isArray(s.bypass_blacklist) ? s.bypass_blacklist : [];
@@ -261,6 +271,8 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     taskCodingBundleEnabled.value = s.task_coding_bundle_enabled ?? false;
     literaryBundleEnabled.value = s.literary_bundle_enabled ?? false;
     taskLiteraryBundleEnabled.value = s.task_literary_bundle_enabled ?? false;
+    literaryStylePreset.value = s.literary_style_preset ?? '';
+    literaryRecommendPreset.value = s.literary_recommend_preset ?? '';
     taskDefaultConnectionId.value = s.task_default_connection_id ?? '';
     authorizationMode.value = readAuthorizationMode(s);
     authorizationAlwaysRequired.value = Array.isArray(s.bypass_blacklist) ? s.bypass_blacklist : [];
@@ -449,6 +461,8 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     taskCodingBundleEnabled,
     literaryBundleEnabled,
     taskLiteraryBundleEnabled,
+    literaryStylePreset,
+    literaryRecommendPreset,
     taskDefaultConnectionId,
     promptInject,
     agentFlowLibrary,

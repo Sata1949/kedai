@@ -558,6 +558,125 @@ pub const LITERARY_NOTE: &str = "\
 - 收尾:留一个可继续的钩子(新信息、悬念或关系变化),不做总结陈词。
 - 忌讳:套语、排比堆砌、复读上文的比喻、替用户角色做决定。";
 
+// ==================== 文学包 · 文风预设(LIT-6,2026-10-06)====================
+//
+// 四档常量是**可编辑清单**:改文本只改这里;键(`plain` / `classical` / `lightnovel` /
+// `hardboiled`)是 settings.json 的存储值,必須稳定,改名等于破坏既有配置。
+// 写法原则(调研报告 §3.3):人称 / 视角 / 时态锚定 + **正例锚定**(few-shot 正例优于禁令)。
+// 位置 0 是素材位、经 untrusted 包裹——故一律写**倾向**语气,写强制语气会被包裹规则降级
+// (与 LITERARY_NOTE 同款设计,刻意为之)。文本同轮恒定;不写 `{{...}}` 宏。
+
+/// 文风档「白描冷峻」。
+pub const LITERARY_STYLE_PLAIN: &str = "\
+本轮文风:白描冷峻。
+- 视角:第三人称限知,贴住主视角人物的感官,不进他人内心。
+- 句式:短句为主,少用形容词与副词;叙述者不表态、不抒情。
+- 正例:他把碗推回去,汤面晃出一圈油花。「不吃了。」——情绪靠动作与留白承载。
+- 忌讳:比喻堆叠、形容词串联、替人物解释感受。";
+
+/// 文风档「古典雅致」。
+pub const LITERARY_STYLE_CLASSICAL: &str = "\
+本轮文风:古典雅致。
+- 视角:第三人称为主,可带节制的评点式口吻。
+- 用词:文白相间而不生造,多用具体名物(灯、炉、卷、盏)与节候天色;对仗求工而不滥。
+- 正例:雨脚斜过窗棂,灯芯爆了一星。他搁下笔,把案上那页纸轻轻压平。
+- 忌讳:半文半白的夹生句、生僻字堆砌、无节制的骈偶。";
+
+/// 文风档「轻小说」。
+pub const LITERARY_STYLE_LIGHTNOVEL: &str = "\
+本轮文风:轻小说。
+- 视角:第一人称或贴近的第三人称,叙述带说话感,允许短促的内心吐槽。
+- 节奏:对话密度高,场景推进快;段落短,一句成段可用。
+- 正例:「……你认真的?」我把筷子停在空中。这次的委托,大概又要加班了。
+- 忌讳:大段景物描写、书面腔的解释、把吐槽写成议论。";
+
+/// 文风档「悬疑冷硬」。
+pub const LITERARY_STYLE_HARDBOILED: &str = "\
+本轮文风:悬疑冷硬。
+- 视角:第三人称限知,始终贴着调查者的怀疑视角。
+- 语言:简硬、克制,环境细节服务于线索与气氛;信息给一半、留一半。
+- 正例:楼道灯闪了两下才亮。门没锁。他把手套戴上,才伸手去推。
+- 忌讳:提前解释真相、情绪外露的抒情、与线索无关的景物铺陈。";
+
+/// 文风预设清单:键(存储值)→ 段文本。**单一出处**,查找与校验都经本表。
+pub const LITERARY_STYLE_PRESETS: &[(&str, &str)] = &[
+    ("plain", LITERARY_STYLE_PLAIN),
+    ("classical", LITERARY_STYLE_CLASSICAL),
+    ("lightnovel", LITERARY_STYLE_LIGHTNOVEL),
+    ("hardboiled", LITERARY_STYLE_HARDBOILED),
+];
+
+/// 按存储键取文风预设文本;空键与未知键都返回 `None`(不静默注入未知档)。
+pub fn literary_style_text(key: &str) -> Option<&'static str> {
+    LITERARY_STYLE_PRESETS
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, text)| *text)
+}
+
+/// 文风预设键是否合法(**空 = 不注入,合法**)。API 校验与 load 归一化共用同一判据
+/// ——两处若各写一份,漂移后会出现「API 放行但 load 清空」的静默丢配置。
+pub fn is_valid_literary_style_preset(key: &str) -> bool {
+    key.is_empty() || literary_style_text(key).is_some()
+}
+
+// ==================== 文学包 · 长程一致性推荐档(LIT-7,2026-10-06)====================
+//
+// **只动三项**:压缩模式 / 压缩阈值 / 压缩保留条数——外部经验里唯一有数字依据的两个旋钮
+// (「硬性超 70% 按优先序保留」→ 阈值 0.7~0.75;「至少回看 4 条行动」→ 保留条数取 6~8 留余量);
+// snip 与记忆注入字段缺可靠依据,本轮不动。取值全部落在 `secret.rs` 的既有钳制区间内。
+
+/// 推荐档的一组数值(三项;类型与 `RuntimeSettings` 的字段一致)。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LiteraryRecommendValues {
+    pub compaction_mode: &'static str,
+    pub compaction_threshold: f32,
+    pub compaction_keep_recent: u32,
+}
+
+/// 推荐档清单:键(存储值)→ 一组数值。中篇 / 长篇两档(Q6 拍板)。
+pub const LITERARY_RECOMMEND_PRESETS: &[(&str, LiteraryRecommendValues)] = &[
+    (
+        "medium",
+        LiteraryRecommendValues {
+            compaction_mode: "auto",
+            compaction_threshold: 0.75,
+            compaction_keep_recent: 6,
+        },
+    ),
+    (
+        "long",
+        LiteraryRecommendValues {
+            compaction_mode: "auto",
+            compaction_threshold: 0.7,
+            compaction_keep_recent: 8,
+        },
+    ),
+];
+
+/// 按存储键取推荐档数值;空键与未知键都返回 `None`。
+pub fn literary_recommend_values(key: &str) -> Option<LiteraryRecommendValues> {
+    LITERARY_RECOMMEND_PRESETS
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, v)| *v)
+}
+
+/// 推荐档键是否合法(空 = 不改变,合法)。同 [`is_valid_literary_style_preset`] 的单一判据纪律。
+pub fn is_valid_literary_recommend_preset(key: &str) -> bool {
+    key.is_empty() || literary_recommend_values(key).is_some()
+}
+
+/// 采纳推荐档**之前**的压缩三项快照(LIT-7):只在用户显式选档时拍摄一次,选回「不改变」时
+/// 按它恢复到**写入前原值**——与「恢复默认值」是两回事(有测试锁,两者必须区分)。
+/// 档间切换**不重拍**:快照始终是「采纳前」的状态。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LiteraryRecommendSnapshot {
+    pub compaction_mode: String,
+    pub compaction_threshold: f32,
+    pub compaction_keep_recent: u32,
+}
+
 /// 角色扮演模式缺省反思提示词(deep / agent 模式的反思步骤用;空 = 走机械规则)。
 ///
 /// 与 Win 端调好的版本一致,使全新安装(含 Android 首装)开箱即有 LLM 质量判定,
@@ -670,6 +789,17 @@ impl RuntimeSettings {
         self.literary_bundle_enabled.then_some(LITERARY_NOTE)
     }
 
+    /// 位置 0(最新消息尾)**文风素材段**(LIT-6):开关开且预设键命中清单 → Some(段文本),
+    /// 否则 None——**缺省空串与未知键都不注入**(未知键在 API 层 400、load 层归一化为空,
+    /// 故运行期不会有第三种状态)。与 AN 段同处位置 0,拼装顺序钉死
+    /// 「激发 → 反思建议 → 文风 → AN → 预设尾部」(见 `agents/engine/messages/build.rs`)。
+    pub fn literary_style_note(&self) -> Option<&'static str> {
+        if !self.literary_bundle_enabled {
+            return None;
+        }
+        literary_style_text(&self.literary_style_preset)
+    }
+
     /// 从环境配置构建默认设置
     pub fn from_config(cfg: &AppConfig) -> Self {
         let mut s = RuntimeSettings {
@@ -751,6 +881,10 @@ impl RuntimeSettings {
             // 任务侧为「扁平 + task 覆盖层」,两者均须用户显式启用
             literary_bundle_enabled: false,
             task_literary_bundle_enabled: false,
+            // 文学包选择型字段(LIT-6/LIT-7)默认空 = 不注入 / 不改变任何既有值
+            literary_style_preset: String::new(),
+            literary_recommend_preset: String::new(),
+            literary_recommend_snapshot: None,
             // 任务模式默认连接默认空 = 跟随默认连接(active_connection),零迁移
             task_default_connection_id: String::new(),
             task: ModeSettings::default(),

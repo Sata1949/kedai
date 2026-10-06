@@ -673,8 +673,9 @@ async fn literary_bundle_switches_are_flat_and_overlay_respectively() {
     assert_eq!(status, StatusCode::OK);
 }
 
-/// 文学能力包(LIT-3)预览同步:开关开时角色扮演预览应含「位置 4 增强段」与「位置 0 AN 段」
-/// 两层(层号 4/0,AN 段经 untrusted 包裹);task 模式预览不含(角色扮演侧专属)。
+/// 文学能力包(LIT-3/LIT-6)预览同步:开关开时角色扮演预览应含「位置 4 增强段」「位置 0 文风段」
+/// 与「位置 0 AN 段」三层(层号 4/0/0;文风段与 AN 段都经 untrusted 包裹,且**文风在 AN 之前**
+/// ——与真实拼装同序);task 模式预览不含(角色扮演侧专属)。
 /// 共享 app 下取现场值写入 + 卫生复位(净零影响,顺序无关)。
 #[tokio::test]
 async fn prompt_preview_shows_literary_layers_when_enabled() {
@@ -684,8 +685,9 @@ async fn prompt_preview_shows_literary_layers_when_enabled() {
     // 现场值(共享 app;净零复位目标)
     let (_, before_rp) = send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
     let flat_before = before_rp["literary_bundle_enabled"].clone();
+    let style_before = before_rp["literary_style_preset"].clone();
 
-    // 先关(确保下游断言可判别),再开
+    // 先关(确保下游断言可判别),再开;同时选一档文风预设
     let (status, r) = send_json(
         app,
         "PUT",
@@ -698,12 +700,12 @@ async fn prompt_preview_shows_literary_layers_when_enabled() {
         app,
         "PUT",
         "/api/settings?mode=roleplay",
-        json!({ "literary_bundle_enabled": true }),
+        json!({ "literary_bundle_enabled": true, "literary_style_preset": "plain" }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "开包失败:{r}");
 
-    // 角色扮演预览:两层都在,层号与 source 名正确;AN 段经 untrusted 包裹
+    // 角色扮演预览:三层都在,层号与 source 名正确;文风段与 AN 段都经 untrusted 包裹
     let (status, preview) = send_json(app, "GET", "/api/settings/prompt-preview", json!({})).await;
     assert_eq!(status, StatusCode::OK);
     let layers = preview["layers"].as_array().cloned().unwrap_or_default();
@@ -715,6 +717,16 @@ async fn prompt_preview_shows_literary_layers_when_enabled() {
         .as_str()
         .unwrap_or("")
         .contains("【文学增强段】"));
+    let style = find("literary_style").unwrap_or_else(|| panic!("缺位置 0 文风层:{preview}"));
+    assert_eq!(style["role"], "user");
+    assert_eq!(style["layer"], 0);
+    assert!(
+        style["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains(r#"<UNTRUSTED_PROMPT_SOURCE source="literary_style">"#),
+        "文风层应经 untrusted 包裹(与真实下发一致):{style}"
+    );
     let note = find("literary_note").unwrap_or_else(|| panic!("缺位置 0 层:{preview}"));
     assert_eq!(note["role"], "user");
     assert_eq!(note["layer"], 0);
@@ -725,8 +737,21 @@ async fn prompt_preview_shows_literary_layers_when_enabled() {
             .contains(r#"<UNTRUSTED_PROMPT_SOURCE source="literary_note">"#),
         "AN 层应经 untrusted 包裹(与真实下发一致):{note}"
     );
+    // 顺序钉死:文风段排在 AN 段之前(与 build 层拼装同序)
+    let style_idx = layers
+        .iter()
+        .position(|l| l["source"] == json!("literary_style"))
+        .unwrap();
+    let note_idx = layers
+        .iter()
+        .position(|l| l["source"] == json!("literary_note"))
+        .unwrap();
+    assert!(
+        style_idx < note_idx,
+        "预览层序应为「文风 → AN」:{preview}"
+    );
 
-    // task 模式预览不含这两层(角色扮演侧专属)
+    // task 模式预览不含这三层(角色扮演侧专属)
     let (_, task_preview) = send_json(
         app,
         "GET",
@@ -742,8 +767,9 @@ async fn prompt_preview_shows_literary_layers_when_enabled() {
         !task_layers
             .iter()
             .any(|l| l["source"] == json!("literary_enhancement")
-                || l["source"] == json!("literary_note")),
-        "task 预览不得含文学包两层:{task_preview}"
+                || l["source"] == json!("literary_note")
+                || l["source"] == json!("literary_style")),
+        "task 预览不得含文学包三层:{task_preview}"
     );
 
     // 卫生复位(写回现场值;共享 app 对本用例之外零影响)
@@ -751,7 +777,168 @@ async fn prompt_preview_shows_literary_layers_when_enabled() {
         app,
         "PUT",
         "/api/settings?mode=roleplay",
-        json!({ "literary_bundle_enabled": flat_before }),
+        json!({ "literary_bundle_enabled": flat_before, "literary_style_preset": style_before }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+/// 文学包选择型字段(LIT-6/LIT-7):未知取值 400(不静默回退、不落库);合法值往返;
+/// 推荐档**显式选档才写入**既有三项数值、档间切换不重拍快照、选回空串**恢复写入前原值**
+/// ——这一条与「恢复默认值」是两回事,故本用例特意把原值置成非默认值来判别。
+/// 共享 app 下取现场值写入 + 卫生复位(净零影响,顺序无关)。
+#[tokio::test]
+async fn literary_presets_validate_and_recommend_round_trips() {
+    let _guard = test_lock().await;
+    let app = test_app();
+
+    // 现场值(共享 app;净零复位目标)
+    let (_, before) = send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
+    let style_before = before["literary_style_preset"].clone();
+    let rec_before = before["literary_recommend_preset"].clone();
+    let mode_before = before["compaction_mode"].clone();
+    let thr_before = before["compaction_threshold"].clone();
+    let keep_before = before["compaction_keep_recent"].clone();
+
+    // ❶ 阈值是 f32(字段类型),JSON 往返后 0.7 会读成 0.699999988079071 —— 用容差比较
+    let near = |v: &serde_json::Value, want: f32| {
+        let got = v.as_f64().unwrap_or_default();
+        assert!(
+            (got - f64::from(want)).abs() < 1e-6,
+            "阈值期望 {want},实际 {got}"
+        );
+    };
+
+    // ① 未知取值 400(文风与推荐档各一),且不得落库
+    let (status, r) = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=roleplay",
+        json!({ "literary_style_preset": "noir" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "未知文风档应 400:{r}");
+    assert!(
+        r["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("literary_style_preset"),
+        "错误文案应指明字段:{r}"
+    );
+    let (status, r) = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=roleplay",
+        json!({ "literary_recommend_preset": "epic" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "未知推荐档应 400:{r}");
+
+    // ② 文风档往返(合法值;空 = 不注入也是合法值,见复位段)
+    let (status, r) = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=roleplay",
+        json!({ "literary_style_preset": "hardboiled" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "写文风档失败:{r}");
+    let (_, after) = send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
+    assert_eq!(
+        after["literary_style_preset"],
+        json!("hardboiled"),
+        "文风档应往返一致"
+    );
+
+    // ⑦ 400 的未知取值不得落库(上面两次 400 之后读回现场值应原样)
+    let (_, after_400) = send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
+    assert_eq!(
+        after_400["literary_recommend_preset"], rec_before,
+        "400 的未知推荐档不得落库"
+    );
+    assert_eq!(
+        after_400["compaction_threshold"].as_f64(),
+        thr_before.as_f64(),
+        "400 不得顺手改动既有数值"
+    );
+
+    // ③ 预置**非默认**原值:证明「恢复原值」不是「恢复默认值」
+    let (status, r) = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=roleplay",
+        json!({
+            "compaction_mode": "manual",
+            "compaction_threshold": 0.62,
+            "compaction_keep_recent": 13,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "预置非默认原值失败:{r}");
+
+    // ④ 首次选档 → 写入档值(长篇:auto / 0.7 / 8)
+    let (status, r) = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=roleplay",
+        json!({ "literary_recommend_preset": "long" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "选档失败:{r}");
+    let (_, v) = send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
+    assert_eq!(v["literary_recommend_preset"], json!("long"));
+    assert_eq!(v["compaction_mode"], json!("auto"));
+    near(&v["compaction_threshold"], 0.7);
+    assert_eq!(v["compaction_keep_recent"], json!(8));
+
+    // ⑤ 档间切换 → 换档值,快照仍是「采纳前」(中篇:auto / 0.75 / 6)
+    let (status, r) = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=roleplay",
+        json!({ "literary_recommend_preset": "medium" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "换档失败:{r}");
+    let (_, v) = send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
+    near(&v["compaction_threshold"], 0.75);
+    assert_eq!(v["compaction_keep_recent"], json!(6));
+
+    // ⑥ 选回「不改变」→ 恢复**写入前原值**(0.62 / 13 / manual),不是默认值(0.8 / 4 / off)
+    let (status, r) = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=roleplay",
+        json!({ "literary_recommend_preset": "" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "回退失败:{r}");
+    let (_, v) = send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
+    assert_eq!(v["literary_recommend_preset"], json!(""));
+    assert_eq!(
+        v["compaction_mode"],
+        json!("manual"),
+        "应恢复写入前原值(非默认 off)"
+    );
+    near(&v["compaction_threshold"], 0.62); // 应恢复写入前原值(非默认 0.8)
+    assert_eq!(
+        v["compaction_keep_recent"],
+        json!(13),
+        "应恢复写入前原值(非默认 4)"
+    );
+
+    // 卫生复位(写回现场值;共享 app 对本用例之外零影响)
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=roleplay",
+        json!({
+            "literary_style_preset": style_before,
+            "literary_recommend_preset": rec_before,
+            "compaction_mode": mode_before,
+            "compaction_threshold": thr_before,
+            "compaction_keep_recent": keep_before,
+        }),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
