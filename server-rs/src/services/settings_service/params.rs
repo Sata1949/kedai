@@ -769,6 +769,21 @@ impl RuntimeSettings {
         }
     }
 
+    /// 反思提示词的「未自定义」**重物化**(LIT-4):逐字等于任一内置默认 → 按当前开关重物化。
+    ///
+    /// **两处调用**:① load 期(`secret.rs`);② 设置写入期(`api/settings.rs`)——只在 load 期做
+    /// 会让开关翻转**要重启才生效**,与能力包「运行期翻转无需重启」的既有口径不一致
+    /// (2026-10-06 真实模型实测抓到)。
+    /// **空串不得回填**:它是「显式关闭反思、回退机械规则」的有效值,不是「未自定义」。
+    /// 伪装的边界:用户若把内置默认文本逐字粘进提示词框(且未改动),会被视为未自定义。
+    pub fn rehydrate_default_reflect_prompt(&mut self) {
+        if self.reflect_prompt == default_reflect_prompt()
+            || self.reflect_prompt == default_literary_reflect_prompt()
+        {
+            self.reflect_prompt = self.reflect_default_prompt();
+        }
+    }
+
     /// 引擎内置兜底模板(用户**清空**提示词框时的分段兜底)的文学增强段(LIT-2):
     /// 开关开 → Some(段文本),否则 None。由装配层(`messages/context.rs`)取本值经参数
     /// 传给 build 层——build 层保持无设置依赖(测试可直接注入字面文本)。

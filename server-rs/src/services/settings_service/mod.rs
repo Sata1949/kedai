@@ -28,8 +28,9 @@ pub use connection::{
 };
 pub use connector_pool::{connection_label, ConnectorPool};
 pub use params::{
-    default_coding_task_agent_prompt, default_literary_roleplay_agent_prompt,
-    default_literary_task_agent_prompt, default_roleplay_agent_prompt, default_task_agent_prompt,
+    default_coding_task_agent_prompt, default_literary_reflect_prompt,
+    default_literary_roleplay_agent_prompt, default_literary_task_agent_prompt,
+    default_reflect_prompt, default_roleplay_agent_prompt, default_task_agent_prompt,
     is_valid_literary_recommend_preset, is_valid_literary_style_preset, literary_recommend_values,
     literary_style_text, task_idle_floor_secs, LiteraryRecommendSnapshot, McpServerConfig,
     ModeSettings, RoleplayPromptConfig, TaskPromptConfig, TASK_DEFAULT_OUTPUT_TOKENS,

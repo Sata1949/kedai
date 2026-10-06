@@ -4,6 +4,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use kedai_server::build_test_app;
+use kedai_server::services::settings_service::{default_literary_reflect_prompt, default_reflect_prompt};
 use serde_json::{json, Value};
 use std::sync::OnceLock;
 use tokio::sync::{Mutex, MutexGuard};
@@ -939,6 +940,100 @@ async fn literary_presets_validate_and_recommend_round_trips() {
             "compaction_threshold": thr_before,
             "compaction_keep_recent": keep_before,
         }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+/// LIT-4:开关翻转**运行期即时生效**(不等重启)——设置写入期按同一判据重物化反思提示词:
+/// 逐字等于内置默认才动;自定义文本与空串(显式关闭反思)都不动。
+/// 2026-10-06 真实模型实测抓到「只在 load 期重物化 → 开关翻转要等重启」,本用例是回归钉子。
+#[tokio::test]
+async fn flipping_literary_bundle_rehydrates_reflect_prompt_without_restart() {
+    let _guard = test_lock().await;
+    let app = test_app();
+
+    // 现场值(共享 app;净零复位目标)
+    let (_, before) = send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
+    let prompt_before = before["reflect_prompt"].clone();
+    let bundle_before = before["literary_bundle_enabled"].clone();
+    let lit_default = default_literary_reflect_prompt();
+    let plain_default = default_reflect_prompt();
+
+    // ① 置成「未自定义」(= 内置现行默认)、开关关
+    let (status, r) = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=roleplay",
+        json!({ "literary_bundle_enabled": false, "reflect_prompt": plain_default }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "预置失败:{r}");
+    let (_, v) = send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
+    assert_eq!(v["reflect_prompt"], json!(plain_default), "开关关 → 逐字等于现行版");
+
+    // ② 开包(同一实例、不重启)→ 立即重物化为文学版
+    let (status, r) = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=roleplay",
+        json!({ "literary_bundle_enabled": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "开包失败:{r}");
+    let (_, v) = send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
+    assert_eq!(
+        v["reflect_prompt"],
+        json!(lit_default),
+        "开关开 → 运行期即时重物化为文学版"
+    );
+
+    // ③ 关包 → 回落现行版(逐字)
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=roleplay",
+        json!({ "literary_bundle_enabled": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, v) = send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
+    assert_eq!(v["reflect_prompt"], json!(plain_default), "关包 → 回落现行版");
+
+    // ④ 自定义文本不被覆盖(开关开也不动)
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=roleplay",
+        json!({ "literary_bundle_enabled": true, "reflect_prompt": "CUSTOM-REFLECT-MARK" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, v) = send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
+    assert_eq!(
+        v["reflect_prompt"],
+        json!("CUSTOM-REFLECT-MARK"),
+        "自定义文本必须逐字优先"
+    );
+
+    // ⑤ 空串是「显式关闭反思」的有效值,不得被回填
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=roleplay",
+        json!({ "reflect_prompt": "" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, v) = send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
+    assert_eq!(v["reflect_prompt"], json!(""), "空串不得回填");
+
+    // 卫生复位(写回现场值;共享 app 对本用例之外零影响)
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=roleplay",
+        json!({ "literary_bundle_enabled": bundle_before, "reflect_prompt": prompt_before }),
     )
     .await;
     assert_eq!(status, StatusCode::OK);

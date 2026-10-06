@@ -8,10 +8,9 @@ use std::path::Path;
 use super::connection::DEFAULT_SEARCH_ENDPOINT;
 use super::params::{
     default_compaction_keep_recent, default_compaction_mode, default_compaction_snip_bytes,
-    default_compaction_threshold, default_literary_reflect_prompt,
-    default_loop_guard_semantic_max_distinct, default_loop_guard_semantic_min_calls,
-    default_loop_guard_semantic_window, default_memory_inject_char_budget,
-    default_memory_inject_limit, default_memory_max_entries, default_reflect_prompt,
+    default_compaction_threshold, default_loop_guard_semantic_max_distinct,
+    default_loop_guard_semantic_min_calls, default_loop_guard_semantic_window,
+    default_memory_inject_char_budget, default_memory_inject_limit, default_memory_max_entries,
     default_session_budget_action, default_session_token_budget, default_subagent_max_concurrency,
     default_subagent_max_depth, default_subagent_result_max_chars, default_task_idle_timeout_secs,
     default_task_step_budget_secs, default_task_tool_policy, default_task_total_budget_secs,
@@ -90,14 +89,11 @@ impl RuntimeSettings {
                     s.agent_system_prompt = RoleplayPromptConfig(s.roleplay_default_prompt());
                 }
                 // LIT-4:反思提示词的「未自定义」判定**不是空串**——该字段的空串是「显式关闭
-                // 反思、回退机械规则」的有效值(见 `api/settings.rs` 同名注释),故改用
-                // **逐字等于内置默认文本**作判据:命中任一版本 → 视为未自定义,按当前包开关
-                // 重物化(关 → 逐字不变;开 → 追加文学维度检查项)。自定义文本与空串都不动。
-                if s.reflect_prompt == default_reflect_prompt()
-                    || s.reflect_prompt == default_literary_reflect_prompt()
-                {
-                    s.reflect_prompt = s.reflect_default_prompt();
-                }
+                // 反思、回退机械规则」的有效值(见 `api/settings.rs` 同名注释),故判据是
+                // **逐字等于内置默认文本**:命中任一版本 → 按当前包开关重物化(关 → 逐字不变;
+                // 开 → 追加文学维度检查项)。自定义文本与空串都不动。设置写入期同款调用在
+                // `api/settings.rs`(开关翻转运行期即时生效,不等重启)。
+                s.rehydrate_default_reflect_prompt();
 
                 // 变量独立温度钳制到 0..=2.0;非法值(旧配置/越界)回退 None(沿用内置默认)
                 if let Some(t) = s.mvu_temperature {

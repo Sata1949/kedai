@@ -1020,6 +1020,10 @@ pub async fn update_settings(
                 }
                 s.literary_recommend_preset = t;
             }
+            // LIT-4:开关翻转**运行期即时生效**——按「逐字等于内置默认」的同一判据重物化
+            // 反思提示词(与 load 期同源;自定义文本与空串都不动)。放在文学字段全部应用之后,
+            // 保证用的是本次请求后的开关值。
+            s.rehydrate_default_reflect_prompt();
             // 任务模式默认连接(TM-SET-1):空串 = 清除(回到跟随默认连接);非空必须在
             // **本请求应用后的**连接列表里存在且启用,否则 400(本块位于连接数组处理与
             // normalize_connections 之后,故同请求里先改连接再设默认也能正确校验)。
