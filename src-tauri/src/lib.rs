@@ -109,11 +109,6 @@ fn terminate_other_port_owners(port: u16) {
     }
 }
 
-/// 应用入口。
-///
-/// `mobile_entry_point` 在 Android/iOS 上生成 JNI/FFI 入口符号(`Java_<pkg>_<cls>_...`),
-/// 供 TauriActivity 在应用启动时回调;桌面端该属性被 cfg 排除,行为不变。
-/// 缺此属性时 Android 能编译通过但启动即闪退(找不到原生入口)。
 /// app_data_dir() 失败时的回退目录。
 /// - 桌面:沿用历史行为 %APPDATA%\com.kedai.app;
 /// - Android:无 %APPDATA%,返回错误由启动流程记录并退出(宁可明确报错也不写错位置)。
@@ -191,6 +186,11 @@ fn exit_now(app: &tauri::AppHandle) {
     app.exit(0);
 }
 
+/// 应用入口。
+///
+/// `mobile_entry_point` 在 Android/iOS 上生成 JNI/FFI 入口符号(`Java_<pkg>_<cls>_...`),
+/// 供 TauriActivity 在应用启动时回调;桌面端该属性被 cfg 排除,行为不变。
+/// 缺此属性时 Android 能编译通过但启动即闪退(找不到原生入口)。
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()

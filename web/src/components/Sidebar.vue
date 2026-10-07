@@ -33,13 +33,11 @@ watch(
   },
 );
 
-// 头像文件名
 function avatarFile(avatarPath: string | null): string {
   if (!avatarPath) return '';
   return avatarPath.split(/[\\/]/).pop() ?? '';
 }
 
-// 头像占位颜色
 function avatarClass(id: string): string {
   const n = id.charCodeAt(0) || 0;
   if (n % 3 === 1) return 'alt-blue';
@@ -47,7 +45,6 @@ function avatarClass(id: string): string {
   return '';
 }
 
-// 连接状态
 const connColor = computed(() => store.connStatus);
 const connLabel = computed(() => {
   switch (store.connStatus) {

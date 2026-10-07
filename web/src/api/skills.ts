@@ -1,4 +1,5 @@
-// 技能库(提示词技能)API
+// 技能库(提示词技能)API。后端契约见 server-rs/src/api/skills.rs:
+//   GET /api/skills、POST /api/skills(单对象/数组)、PUT/DELETE /api/skills/{id}
 import { request } from './client';
 import type { SkillImportItem, SkillRecord } from './types';
 

@@ -70,7 +70,6 @@ pub(super) async fn send_event(
     }
 }
 
-/// 检查中断
 pub(super) fn check_aborted(abort: &watch::Receiver<bool>) -> Result<(), String> {
     if *abort.borrow() {
         Err("已中断".to_string())

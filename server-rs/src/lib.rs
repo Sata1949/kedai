@@ -59,12 +59,13 @@ pub fn build_test_app() -> Result<axum::Router, String> {
     Ok(api::build_router(state))
 }
 
-/// 构建启用鉴权的隔离测试应用。
+/// 启用鉴权的隔离测试应用:每次调用新建独立随机数据目录(对比 `build_test_app` 的
+/// 进程级共享目录),`auth_required=true` 且注入 `token`,bootstrap 开启。
 pub fn build_secure_test_app(token: &str) -> Result<axum::Router, String> {
     secure_test_app(token, false)
 }
 
-/// 构建启用鉴权且开启 `strict_client_header` 写请求强化校验的隔离测试应用。
+/// 同 `build_secure_test_app`,另启用 `strict_client_header` 写请求强化校验。
 pub fn build_strict_test_app(token: &str) -> Result<axum::Router, String> {
     secure_test_app(token, true)
 }

@@ -232,7 +232,6 @@ onMounted(() => {
 <template>
   <div class="sv-modal-mask" @click.self="close">
     <div class="sv-modal sv-scripts-modal">
-      <!-- 头部 -->
       <div class="sv-modal-head">
         <h2 class="flex items-center gap-2">
           <span class="sv-supreme pink" /> 脚本管理
@@ -261,7 +260,6 @@ onMounted(() => {
       </div>
 
       <div class="sv-modal-body">
-        <!-- 说明 -->
         <div class="sv-field">
           <div class="sv-field-label"><span class="sv-supreme blue" /> 说明</div>
           <p class="sv-note" style="margin: 0; line-height: 1.8">
@@ -302,7 +300,6 @@ onMounted(() => {
           </div>
         </div>
 
-        <!-- 工具栏 -->
         <div class="sv-field">
           <div class="sv-field-label"><span class="sv-supreme red" /> 脚本树</div>
           <div class="sv-stack" style="flex-direction: row; gap: var(--space-2); margin-bottom: var(--space-2)">
@@ -416,11 +413,9 @@ onMounted(() => {
           </div>
         </div>
 
-        <!-- 反馈 -->
         <div v-if="msg" class="sv-feedback" :class="msg.kind" style="margin-top: var(--space-2)">{{ msg.text }}</div>
       </div>
 
-      <!-- 底部 -->
       <div class="sv-modal-foot">
         <button class="sv-btn primary" :disabled="saving" @click="save">
           {{ saving ? '保存中…' : imported ? '保存导入的脚本' : '保存脚本' }}

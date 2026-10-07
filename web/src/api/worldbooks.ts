@@ -1,4 +1,7 @@
-// 世界书 API
+// 世界书 API。后端契约见 server-rs/src/api/world_books.rs:
+//   GET /api/world-books、POST /api/world-books/upload、PUT/DELETE /api/world-books/{id}
+//   GET/PUT/POST /api/world-books/{id}/entries、GET/PUT /api/characters/{id}/world-entries
+//   GET /api/world-books/auto-assign-check(属性自动分配机制自检)
 import { request } from './client';
 import { requireArrayField, requireObjectField } from './shape';
 import { uploadForm } from './stream';

@@ -55,7 +55,6 @@ function findSetCalls(content: string): string[] {
       stmtEnd++;
     }
     if (stmtEnd < content.length && content[stmtEnd] === ';') {
-      // 检查分号后是否为 // 注释
       let k = stmtEnd + 1;
       while (k < content.length && /\s/.test(content[k])) k++;
       if (content[k] === '/' && content[k + 1] === '/') {

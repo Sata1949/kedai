@@ -1,4 +1,5 @@
-// 插件(自定义工具)API
+// 插件(自定义工具)API。后端契约见 server-rs/src/api/plugins.rs:
+//   GET /api/plugins/tools、POST /api/plugins/tools/upload、POST /api/plugins/tools/reload、DELETE /api/plugins/tools/{name}
 import { request } from './client';
 import { uploadForm } from './stream';
 import type { PluginToolsStatus } from './types';

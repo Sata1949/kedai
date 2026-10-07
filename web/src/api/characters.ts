@@ -1,4 +1,5 @@
-// 角色卡 API
+// 角色卡 API。后端契约见 server-rs/src/api/characters.rs:
+//   GET /api/characters(列表)、GET/PUT/DELETE /api/characters/{id}、POST /api/characters/upload(multipart 上传)
 import { request } from './client';
 import { uploadForm } from './stream';
 import type { CharacterRecord } from './types';

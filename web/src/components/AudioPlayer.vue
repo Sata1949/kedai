@@ -346,7 +346,6 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="sv-audio-panel" :class="{ collapsed }">
-    <!-- 标题栏 -->
     <div class="sv-audio-head">
       <span class="sv-audio-title">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M9 18V6l10-2v12" /><circle cx="6.5" cy="18" r="2.5" /><circle cx="16.5" cy="16" r="2.5" /></svg>
@@ -365,7 +364,6 @@ onBeforeUnmount(() => {
     </div>
 
     <template v-if="!collapsed">
-      <!-- 通道切换 -->
       <div class="sv-audio-tabs">
         <button
           class="sv-audio-tab"
@@ -379,7 +377,6 @@ onBeforeUnmount(() => {
         >音效</button>
       </div>
 
-      <!-- 通道控制 -->
       <div class="sv-audio-channel">
         <div class="sv-audio-row">
           <label class="sv-audio-toggle-label">

@@ -84,7 +84,6 @@ async fn upload_character(app: &axum::Router, name: &str) -> (StatusCode, Value)
 #[tokio::test]
 async fn character_crud() {
     let app = test_app();
-    // 上传
     let (status, char) = upload_character(app, "测试卡.json").await;
     assert_eq!(status, StatusCode::CREATED, "上传失败: {char}");
     let id = char["id"].as_str().unwrap().to_string();
@@ -95,11 +94,9 @@ async fn character_crud() {
     let (_, list) = send_json(app, "GET", "/api/characters", json!({})).await;
     assert!(!list["characters"].as_array().unwrap().is_empty());
     assert!(list["characters"][0].get("data_raw").is_none());
-    // 详情
     let (status, detail) = send_json(app, "GET", &format!("/api/characters/{id}"), json!({})).await;
     assert_eq!(status, StatusCode::OK);
     assert!(detail["data_raw"].is_object());
-    // 更新
     let (status, updated) = send_json(
         app,
         "PUT",
@@ -110,7 +107,6 @@ async fn character_crud() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(updated["chara_name"], json!("新名字"));
     assert_eq!(updated["data_raw"]["name"], json!("新名字"));
-    // 删除
     let status = send_empty(app, "DELETE", &format!("/api/characters/{id}")).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     // 删除后 404

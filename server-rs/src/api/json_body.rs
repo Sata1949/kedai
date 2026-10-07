@@ -1,4 +1,3 @@
-use crate::api::WithStatus;
 // JSON 请求体提取器统一收口(批次 1 · 错误面收口)。
 //
 // 背景(实测):axum 内建 `Json<T>` 的 `JsonRejection` 直接 `IntoResponse` 时,
@@ -17,6 +16,8 @@ use crate::api::WithStatus;
 // `FromRequest` 根本不执行——要统一 413 的 JSON 形状必须自定义 tower 层拦截 body
 // `Frame` 错误,成本(改动全站 body 流)远高于收益(体积超限本就罕见且前端上传前已校验),
 // 故本轮登记为已知例外,不做改造。
+
+use crate::api::WithStatus;
 use axum::body::to_bytes;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::FromRequest;

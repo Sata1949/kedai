@@ -340,7 +340,6 @@ watch(showPanel, (open) => {
 
 <template>
   <aside class="sv-agent-panel" :class="{ open: showPanel }">
-    <!-- 面板头 -->
     <div class="sv-agent-panel-head">
       <h2>
         <span class="sv-supreme pink xs" />
@@ -393,7 +392,6 @@ watch(showPanel, (open) => {
       <div v-show="activeTab === 'agent'" class="sv-agent-tab">
       <!-- 任务模式:当前任务执行状态(阶段/流程进度/计划步骤/子任务) -->
       <template v-if="appMode === 'task'">
-        <!-- 状态总览 -->
         <div class="sv-agent-summary">
           <div class="sv-agent-summary-row">
             <span class="label">阶段</span>
@@ -516,7 +514,6 @@ watch(showPanel, (open) => {
       <div>
         <div class="sv-agent-section-label">工具调用({{ agent.toolCalls.length }})</div>
 
-        <!-- 执行中 -->
         <template v-if="groupedTools.running.length">
           <div v-for="(t, i) in groupedTools.running" :key="'r'+i" class="sv-tool-panel-card running">
             <div class="tool-name">
@@ -534,7 +531,6 @@ watch(showPanel, (open) => {
           </div>
         </template>
 
-        <!-- 待授权 -->
         <template v-if="groupedTools.auth.length">
           <div v-for="(t, i) in groupedTools.auth" :key="'a'+i" class="sv-tool-panel-card authorization_required">
             <div class="tool-name">
@@ -564,7 +560,6 @@ watch(showPanel, (open) => {
           <div v-if="authMsg" class="sv-feedback sv-mt6" :class="authMsg.startsWith('授权失败') ? 'err' : 'ok'">{{ authMsg }}</div>
         </template>
 
-        <!-- 已完成 -->
         <template v-if="groupedTools.done.length">
           <div v-for="(t, i) in groupedTools.done" :key="'d'+i" class="sv-tool-panel-card">
             <div class="tool-name">
@@ -609,7 +604,6 @@ watch(showPanel, (open) => {
           </div>
         </template>
 
-        <!-- 失败 -->
         <template v-if="groupedTools.error.length">
           <div v-for="(t, i) in groupedTools.error" :key="'e'+i" class="sv-tool-panel-card failed">
             <div class="tool-name">
@@ -636,7 +630,6 @@ watch(showPanel, (open) => {
         <!-- 回退反馈(成功/失败) -->
         <div v-if="undoMsg" class="sv-feedback sv-mt6" :class="undoMsg.startsWith('回退失败') ? 'err' : 'ok'">{{ undoMsg }}</div>
 
-        <!-- 空态 -->
         <div v-if="!agent.toolCalls.length && !agent.pendingTool" class="sv-empty panel">
           <p class="sv-note-mini">暂无工具调用</p>
         </div>

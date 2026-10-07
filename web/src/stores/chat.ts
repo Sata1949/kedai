@@ -109,7 +109,6 @@ export const useChatStore = defineStore('app.chat', () => {
       messages.value = msgs.map((m) => ({ ...m, streaming: false }));
       mvuVariables.value = replayMvuVariables(msgs);
       updateContextTokens(msgs);
-      // 加载 Token 累计统计
       void loadTokenTotals(sessionId);
       // 恢复该会话的 Agent 记录(实跑问题 4:此前 agent 纯内存,切会话/重启即丢;
       // 后端 tool_calls 已持久化,这里按会话读回工具调用列表)
@@ -428,7 +427,8 @@ export const useChatStore = defineStore('app.chat', () => {
       session_id: event.type === 'task' ? '' : (currentSessionId.value ?? ''),
       event,
     });
-    if (eventLog.value.length > 500) eventLog.value.splice(0, eventLog.value.length - 500);    // 事件语义处理在 sseReducer.ts(reduceSseEvent 纯函数);此处仅应用变更到响应式状态
+    if (eventLog.value.length > 500) eventLog.value.splice(0, eventLog.value.length - 500);
+    // 事件语义处理在 sseReducer.ts(reduceSseEvent 纯函数);此处仅应用变更到响应式状态
     const changes = reduceSseEvent(
       {
         agent: agent.value,

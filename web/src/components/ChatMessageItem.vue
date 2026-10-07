@@ -109,9 +109,6 @@ function swipeTotal(m: { extra?: Record<string, unknown> }): number {
   return Array.isArray(arr) ? arr.length : 0;
 }
 
-// 消息渲染文本的组装已内联到下方 renderTextSource computed(需参与节流依赖链),
-// 原独立函数 renderText() 随之移除。
-
 /** iframe srcdoc 注入用:HTML 属性转义(资源页原文仅作 srcdoc 字符串,不拼接进本页面) */
 function escapeAttr(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
