@@ -126,6 +126,17 @@ impl McpManager {
             .clone()
     }
 
+    /// 注入注册表窄接口(幂等覆盖)。**与总开关无关**:组合根在启动路径**无条件**注入——
+    /// 运行期「改配置 → 重连」(PLGM 3)完全可能发生在启动时 `mcp_enabled=false` 的实例上,
+    /// 那时若未注入,restart/start 会以「尚未注入注册表」失败(2026-10-07 真实模型实测抓出)。
+    pub fn install_registry(&self, registry: Arc<dyn ToolRegistrar>) {
+        *self
+            .inner
+            .registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(registry);
+    }
+
     /// 运行中(running)的服务器数(启动日志/测试断言用)
     pub fn server_count(&self) -> usize {
         self.lock_servers()
@@ -159,11 +170,7 @@ impl McpManager {
     /// 单台失败(spawn 失败/握手失败/协议错误)记 `state=failed` + `last_error`,不影响其余
     /// 服务器;服务器名 sanitize 冲突**先到者生效、后到者跳过并记错**(不覆盖,裁定 7)。
     pub async fn start(&self, servers: Vec<McpServerConfig>, registry: Arc<dyn ToolRegistrar>) {
-        *self
-            .inner
-            .registry
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(registry);
+        self.install_registry(registry);
         // 冲突预检(不起进程):sanitize 名唯一,后到者跳过并记 last_error
         let mut seen: HashMap<String, String> = HashMap::new();
         for rt in self.lock_servers().values() {
@@ -955,6 +962,25 @@ mod tests {
             "失败不留台账(由调用方 set_failed 记录)"
         );
         assert!(reg.list_definitions().is_empty());
+    }
+
+    /// 回归(2026-10-07 真实模型实测抓出):注册表注入与总开关**解耦**——启动时
+    /// `mcp_enabled=false`(start 未跑)的实例,经 `install_registry` 注入后,
+    /// 运行期手动 start/restart 必须可用(否则「改配置 → 重连」整条路直接失败)。
+    #[tokio::test]
+    async fn registry_installed_at_boot_enables_runtime_start() {
+        let reg = Arc::new(ToolRegistry::new());
+        let mgr = McpManager::empty();
+        mgr.install_registry(reg.clone());
+        let (client, server_io) = client_pair();
+        let server_task = mock_server(server_io);
+        let n = mgr
+            .attach(cfg_mem("fs"), "fs".into(), client, None)
+            .await
+            .expect("注入注册表后运行期装配应成功");
+        assert_eq!(n, 1);
+        assert!(reg.get("mcp_fs_read_file").is_some());
+        server_task.abort();
     }
 
     /// 停止(PLGM 2.5):注销工具、state=stopped、未知服务器返回 false;

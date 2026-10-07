@@ -522,6 +522,9 @@ impl AppState {
     /// 运行期改配置经 `POST /api/mcp/servers/{name}/restart` 一键生效(PLGM 3)。
     /// 由 run_server 在 serve 之前调用。
     pub async fn start_mcp(&self) {
+        // 注册表注入与总开关**无关**:运行期「改配置 → 重连」(PLGM 3)可能发生在启动时
+        // mcp_enabled=false 的实例上,那时 restart/start 仍需注册表引用(2026-10-07 实测抓出)。
+        self.mcp.install_registry(self.tool_registry.clone());
         // 快照语义:不留锁跨 await(读开关与服务器清单用同一快照,避免锁守卫进入异步装配)
         let snapshot = self.settings_snapshot();
         if !snapshot.mcp_enabled {
