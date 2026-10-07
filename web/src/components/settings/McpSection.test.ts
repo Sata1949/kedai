@@ -107,7 +107,8 @@ describe('McpSection(MCP 服务区,PLGM 3.2)', () => {
     await Promise.resolve();
     const btn = wrapper.findAll('button').find((b) => b.text() === '重连');
     expect(btn).toBeTruthy();
-    await btn!.trigger('click');
+    if (!btn) throw new Error('未找到按钮');
+    await btn.trigger('click');
     await Promise.resolve();
     await Promise.resolve();
     expect(mcpApi.restartMcpServer).toHaveBeenCalledWith('fs');
@@ -120,7 +121,8 @@ describe('McpSection(MCP 服务区,PLGM 3.2)', () => {
     const spy = vi.spyOn(store, 'saveSettings').mockResolvedValue(undefined);
     const btn = wrapper.findAll('button').find((b) => b.text() === '保存 MCP 设置');
     expect(btn).toBeTruthy();
-    await btn!.trigger('click');
+    if (!btn) throw new Error('未找到按钮');
+    await btn.trigger('click');
     await Promise.resolve();
     await Promise.resolve();
     expect(spy).toHaveBeenCalled();

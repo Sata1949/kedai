@@ -82,7 +82,8 @@ describe('PluginsModal(插件管理弹窗)', () => {
     await Promise.resolve();
     const btn = wrapper.findAll('button').find((b) => b.text().includes('重载插件'));
     expect(btn).toBeTruthy();
-    await btn!.trigger('click');
+    if (!btn) throw new Error('未找到按钮');
+    await btn.trigger('click');
     await Promise.resolve();
     await Promise.resolve();
     expect(reloadMock).toHaveBeenCalledTimes(1);
@@ -97,7 +98,8 @@ describe('PluginsModal(插件管理弹窗)', () => {
     await Promise.resolve();
     const btn = wrapper.findAll('button').find((b) => b.text() === '删除');
     expect(btn).toBeTruthy();
-    await btn!.trigger('click');
+    if (!btn) throw new Error('未找到按钮');
+    await btn.trigger('click');
     await Promise.resolve();
     await Promise.resolve();
     expect(pluginApi.deletePluginTool).toHaveBeenCalledWith('x.json');
