@@ -328,9 +328,29 @@ mod tests {
         assert_ne!(a, sha256_hex(b"other-bytes"));
     }
 
-    /// 保留策略:超过上限只留最近 N 行(N 取小值不易构造,故直接验证上限常量为正且有界)
+    /// 保留策略（写满上限 +1 行 → 最旧一条被裁、总量恰为上限）。
+    /// 为什么写行为断言而不是 `assert!(CONST > 0)`：常量断言被 clippy 的
+    /// `assertions_on_constants` 直接拦下（-D warnings），且常量断言本身无信息量。
     #[test]
-    fn retention_bound_is_positive() {
-        assert!(CU_AUDIT_KEEP_ROWS > 0);
+    fn retention_prunes_oldest_beyond_limit() {
+        let (_guard, db) = temp_db("cu-audit-prune");
+        for i in 0..=CU_AUDIT_KEEP_ROWS {
+            let mut r = rec("allowed");
+            r.target = format!("全屏 #{i}");
+            assert!(record(&db, &r));
+        }
+        let conn = db.read().unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM cu_audit", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(n, CU_AUDIT_KEEP_ROWS, "超限后应恰保留上限行数");
+        let oldest: String = conn
+            .query_row(
+                "SELECT target FROM cu_audit ORDER BY id ASC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(oldest, "全屏 #1", "被裁的应是最旧的 #0 那条");
     }
 }

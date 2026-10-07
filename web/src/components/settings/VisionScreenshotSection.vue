@@ -297,6 +297,6 @@ onMounted(() => {
   white-space: pre-wrap;
   word-break: break-all;
   background: rgba(0, 0, 0, 0.04);
-  padding: 2px var(--space-1);
+  padding: var(--space-1);
 }
 </style>
