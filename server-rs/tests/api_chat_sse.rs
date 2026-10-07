@@ -314,6 +314,13 @@ async fn token_calculator_sse() {
     let types: Vec<&str> = events.iter().filter_map(|e| e["type"].as_str()).collect();
     assert!(types.contains(&"tool_call"), "缺 tool_call: {types:?}");
     assert!(types.contains(&"tool_result"), "缺 tool_result: {types:?}");
+    // PLGM 3.3:工具事件带来源(builtin/plugin/mcp),前端据此渲染来源徽章
+    let tool_call = events.iter().find(|e| e["type"] == "tool_call").unwrap();
+    assert_eq!(
+        tool_call["origin"],
+        json!("builtin"),
+        "工具事件应带来源: {tool_call}"
+    );
     let tool_result = events.iter().find(|e| e["type"] == "tool_result").unwrap();
     assert_eq!(tool_result["output"]["result"].as_f64(), Some(408.0));
 }

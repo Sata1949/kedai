@@ -24,6 +24,8 @@ export interface AgentActivity {
     reason?: string;
     /** 工具展示意图(render intent),缺省 undefined → 前端回退 JSON 直出 */
     renderKind?: string;
+    /** 工具来源(`builtin`/`plugin`/`mcp`;PLGM 3.3 起由 SSE 事件携带,缺省不显示徽章) */
+    origin?: string;
   }>;
   /** 自定义流程(custom 模式)步骤进度;其余模式为 null */
   flowProgress: { index: number; total: number; name: string } | null;
@@ -126,7 +128,7 @@ export function reduceSseEvent(state: SseStateSlice, event: SseEvent): SseStateC
       break;
     case 'tool_call':
       a.pendingTool = { name: event.name, input: event.input };
-      a.toolCalls.push({ name: event.name, input: event.input, status: 'running', callId: event.call_id, renderKind: event.render_kind });
+      a.toolCalls.push({ name: event.name, input: event.input, status: 'running', callId: event.call_id, renderKind: event.render_kind, origin: event.origin });
       a.phase = 'tool_call';
       a.chain.push({ at: Date.now(), text: `调用工具 ${event.name}`, detail: JSON.stringify(event.input) });
       break;

@@ -69,6 +69,8 @@ export interface AgentTrace {
     output: unknown;
     duration_ms: number;
     created_at: string;
+    /** 工具来源(`builtin`/`plugin`/`mcp`;PLGM 3.3 起后端按当前注册表回填,已注销工具缺省) */
+    origin?: string;
   }>;
 }
 

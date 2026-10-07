@@ -282,8 +282,8 @@ async fn prompt_preview_follows_mode() {
     }
 }
 
-/// MCP 设置(批次 6.2):GET 透出默认 关/空列表;PUT 全量替换并做卫生清理
-/// (缺命令条目被丢弃);GET 往返还原;task 覆盖层与扁平层互不影响。
+/// MCP 设置(批次 6.2;PLGM 3.4 起**无模式覆盖层**):GET 透出默认 关/空列表;
+/// PUT 全量替换并做卫生清理(缺命令条目被丢弃);GET 往返还原;`PUT ?mode=task` 也直写扁平。
 #[tokio::test]
 async fn mcp_settings_put_get_roundtrip() {
     let _guard = test_lock().await;
@@ -321,7 +321,8 @@ async fn mcp_settings_put_get_roundtrip() {
     assert_eq!(after["mcp_enabled"], json!(true));
     assert_eq!(after["mcp_servers"].as_array().unwrap().len(), 1);
 
-    // task 覆盖层独立:PUT ?mode=task 只写覆盖层,扁平层(roleplay 视图)不变
+    // PLGM 3.4(DC-2/CFG-2 收口):MCP 是进程级全局能力,**不支持模式级覆盖**——
+    // `PUT ?mode=task` 也直写扁平(两视图同值),不再有「写覆盖层」语义。
     let (status, _) = send_json(
         app,
         "PUT",
@@ -330,17 +331,20 @@ async fn mcp_settings_put_get_roundtrip() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let (_, task_view) = send_json(app, "GET", "/api/settings?mode=task", json!({})).await;
-    assert_eq!(task_view["mcp_enabled"], json!(false), "task 覆盖应生效");
     let (_, rp_view) = send_json(app, "GET", "/api/settings", json!({})).await;
     assert_eq!(
         rp_view["mcp_enabled"],
-        json!(true),
-        "扁平层不受 task 覆盖影响"
+        json!(false),
+        "task 模式 PUT 直写扁平:roleplay 视图同值"
+    );
+    let (_, task_view) = send_json(app, "GET", "/api/settings?mode=task", json!({})).await;
+    assert_eq!(
+        task_view["mcp_enabled"],
+        json!(false),
+        "task 视图读同一扁平值"
     );
 
-    // 还原现场:共享 app,别给同 binary 其他测试留状态(扁平层回默认;
-    // task 覆盖层无「清除」语义,留着 Some(false) 不影响其他测试——无断言依赖 task 的 mcp 字段)
+    // 还原现场:共享 app,别给同 binary 其他测试留状态
     let _ = send_json(
         app,
         "PUT",

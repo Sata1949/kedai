@@ -519,6 +519,7 @@ watch(showPanel, (open) => {
             <div class="tool-name">
               <span class="tool-status running">...</span>
               {{ t.name }}
+              <span v-if="t.origin === 'plugin' || t.origin === 'mcp'" class="sv-badge" :title="t.origin === 'mcp' ? '来自 MCP 服务器' : '来自工具插件'">{{ t.origin === 'mcp' ? 'MCP' : '插件' }}</span>
               <span class="sv-badge run sv-ml-auto">执行中</span>
             </div>
             <div class="sv-tool-io" :class="{ open: isIoOpen(callKey(t) + ':in') }" :ref="(el) => registerIoBox(callKey(t) + ':in', el)">
@@ -536,6 +537,7 @@ watch(showPanel, (open) => {
             <div class="tool-name">
               <span class="tool-status" :class="isGranted(t) ? 'done' : 'authorization_required'">{{ isGranted(t) ? '✓' : '!' }}</span>
               {{ t.name }}
+              <span v-if="t.origin === 'plugin' || t.origin === 'mcp'" class="sv-badge" :title="t.origin === 'mcp' ? '来自 MCP 服务器' : '来自工具插件'">{{ t.origin === 'mcp' ? 'MCP' : '插件' }}</span>
               <span v-if="isGranted(t)" class="sv-badge done sv-ml-auto">{{ t.risk }} · 已授权</span>
               <span v-else class="sv-badge pending sv-ml-auto">{{ t.risk }} · 等待授权</span>
             </div>
@@ -565,6 +567,7 @@ watch(showPanel, (open) => {
             <div class="tool-name">
               <span class="tool-status done">✓</span>
               {{ t.name }}
+              <span v-if="t.origin === 'plugin' || t.origin === 'mcp'" class="sv-badge" :title="t.origin === 'mcp' ? '来自 MCP 服务器' : '来自工具插件'">{{ t.origin === 'mcp' ? 'MCP' : '插件' }}</span>
               <button
                 v-if="undoEnabled && currentSessionId && isUndoableTool(t.name)"
                 type="button"
@@ -609,6 +612,7 @@ watch(showPanel, (open) => {
             <div class="tool-name">
               <span class="tool-status error">✗</span>
               {{ t.name }}
+              <span v-if="t.origin === 'plugin' || t.origin === 'mcp'" class="sv-badge" :title="t.origin === 'mcp' ? '来自 MCP 服务器' : '来自工具插件'">{{ t.origin === 'mcp' ? 'MCP' : '插件' }}</span>
             </div>
             <div class="sv-tool-io" :class="{ open: isIoOpen(callKey(t) + ':in') }" :ref="(el) => registerIoBox(callKey(t) + ':in', el)">
               <div class="sv-tool-io-bar">

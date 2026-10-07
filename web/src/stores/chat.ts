@@ -142,6 +142,7 @@ export const useChatStore = defineStore('app.chat', () => {
         input: c.input,
         output: c.output,
         status: 'done' as const,
+        origin: c.origin,
       }));
       agent.value = base;
     } catch {

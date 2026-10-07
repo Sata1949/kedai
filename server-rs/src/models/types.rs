@@ -743,6 +743,10 @@ pub enum SseEvent {
         /// 工具展示意图(render intent):前端据此分派渲染,缺省走 JSON 直出
         #[serde(skip_serializing_if = "Option::is_none")]
         render_kind: Option<String>,
+        /// 工具来源(`builtin`/`plugin`/`mcp`;PLGM 3.3 加性字段——前端据此渲染来源徽章,
+        /// 旧客户端忽略即可;线格式向后兼容)
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<String>,
     },
     /// 工具未获授权，因此没有执行；前端可据此提供会话/角色授权入口。
     ToolAuthorizationRequired {
@@ -751,6 +755,9 @@ pub enum SseEvent {
         reason: String,
         run_id: String,
         call_id: String,
+        /// 工具来源(`builtin`/`plugin`/`mcp`;PLGM 3.3 加性字段)
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<String>,
     },
     ToolResult {
         name: String,
@@ -760,6 +767,9 @@ pub enum SseEvent {
         /// 工具展示意图(render intent):前端据此分派渲染,缺省走 JSON 直出
         #[serde(skip_serializing_if = "Option::is_none")]
         render_kind: Option<String>,
+        /// 工具来源(`builtin`/`plugin`/`mcp`;PLGM 3.3 加性字段)
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<String>,
     },
     /// 酒馆助手变量树同步(每次应用 <UpdateVariable> 补丁后推送最新 stat_data)
     Vars {

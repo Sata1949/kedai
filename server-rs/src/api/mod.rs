@@ -23,6 +23,7 @@ pub mod exec;
 pub mod import_export;
 pub mod kaleido;
 pub mod macros;
+pub mod mcp;
 pub mod memory;
 pub mod plugins;
 pub mod prompt_inject;

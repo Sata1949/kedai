@@ -174,6 +174,25 @@ pub async fn session_trace(
         .db_call(move || svc2.list_tool_calls(&agent_id))
         .await
         .unwrap_or_default();
+    // PLGM 3.3:回填工具来源(仍注册者才有)——恢复的历史工具卡据此渲染来源徽章;
+    // 工具已注销/改名时不加字段(前端按无来源处理,不猜测)
+    let calls: Vec<serde_json::Value> = calls
+        .into_iter()
+        .map(|c| {
+            let mut v = serde_json::to_value(&c).unwrap_or_else(|_| json!({}));
+            if let Some(obj) = v.as_object_mut() {
+                let origin = obj
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .and_then(|n| state.tool_registry.origin_of(n))
+                    .map(|o| o.as_str());
+                if let Some(o) = origin {
+                    obj.insert("origin".to_string(), json!(o));
+                }
+            }
+            v
+        })
+        .collect();
     Json(json!({
         "trace": {
             "state": agent_state,

@@ -43,6 +43,14 @@ describe('reduceSseEvent', () => {
     expect(current.agent.toolCalls[0].renderKind).toBe('read');
   });
 
+  it('tool_call 透传 origin 到 toolCalls(PLGM 3.3 来源徽章);旧服务端缺省不误标', () => {
+    const current = state();
+    reduceSseEvent(current, { type: 'tool_call', name: 'mcp_fs_read', input: {}, call_id: 'c9', origin: 'mcp' });
+    expect(current.agent.toolCalls[0]).toMatchObject({ name: 'mcp_fs_read', origin: 'mcp' });
+    reduceSseEvent(current, { type: 'tool_call', name: 'read', input: {}, call_id: 'c10' });
+    expect(current.agent.toolCalls[1].origin).toBeUndefined();
+  });
+
   it('授权事件按 call_id 标记对应的同名工具，不误改其他调用', () => {
     const current = state();
     reduceSseEvent(current, { type: 'tool_call', name: 'write', input: { path: 'a' }, call_id: 'call-a' });

@@ -928,9 +928,12 @@ pub async fn update_settings(
                 }
                 s.subagent_result_max_chars = v;
             }
-            // MCP 总开关(批次 6.2):仅启动时装配,运行期改动不回溯重连,重启后生效
+            // MCP 总开关(批次 6.2;PLGM 3.4 起**直写扁平**):MCP 是进程级全局能力
+            // (装配与 restart 端点读扁平权威值),不走模式覆盖层——原 `apply!` 的覆盖语义
+            // 只会制造「看似可配、实际无效」的字段,DC-2/CFG-2 收口时删除。
+            // 运行期改动经 POST /api/mcp/servers/{name}/restart 一键生效。
             if let Some(v) = body.mcp_enabled {
-                apply!(s, is_task, mcp_enabled, v);
+                s.mcp_enabled = v;
             }
             // MCP 服务器列表(全量替换):卫生清理同 load(trim 名称/命令,丢弃不可用条目)
             if let Some(v) = &body.mcp_servers {
@@ -940,7 +943,7 @@ pub async fn update_settings(
                     srv.command = srv.command.trim().to_string();
                     !srv.name.is_empty() && !srv.command.is_empty()
                 });
-                apply!(s, is_task, mcp_servers, servers);
+                s.mcp_servers = servers;
             }
             // 命令执行开关(阶段 E):bool 免校验。这些是**全局**能力开关,
             // 不随 roleplay/task 覆盖层分叉(exec: 权限是进程级事实,不是模式偏好),

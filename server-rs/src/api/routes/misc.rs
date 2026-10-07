@@ -2,7 +2,7 @@
 // (自 api/mod.rs build_router 迁入)
 use crate::api::app_state::AppState;
 use crate::api::{
-    audio, characters, computer_use, exec, import_export, macros, plugins, resource, screen,
+    audio, characters, computer_use, exec, import_export, macros, mcp, plugins, resource, screen,
     skills, slash_commands, tasks, user_scripts, workspace,
 };
 use axum::routing::{get, post, put};
@@ -48,6 +48,12 @@ pub(crate) fn misc_routes() -> Router<Arc<AppState>> {
             "/api/plugins/tools/{name}",
             axum::routing::delete(plugins::delete_tool),
         )
+        // MCP 管理面(PLGM 3.1):状态查询 + 单台启停/重启
+        // (restart/start 读当前扁平设置快照——改配置一键生效;手动动作不受该条 enabled 阻断)
+        .route("/api/mcp/servers", get(mcp::list_servers))
+        .route("/api/mcp/servers/{name}/restart", post(mcp::restart))
+        .route("/api/mcp/servers/{name}/stop", post(mcp::stop))
+        .route("/api/mcp/servers/{name}/start", post(mcp::start))
         // 技能库(提示词技能)
         .route("/api/skills", get(skills::list).post(skills::import_skills))
         .route(

@@ -155,6 +155,17 @@ pub enum ToolOrigin {
     Mcp,
 }
 
+impl ToolOrigin {
+    /// 线格式小写串(`builtin`/`plugin`/`mcp`;SSE 工具事件 origin 字段与展示共用,PLGM 3.3)
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ToolOrigin::Builtin => "builtin",
+            ToolOrigin::Plugin => "plugin",
+            ToolOrigin::Mcp => "mcp",
+        }
+    }
+}
+
 /// MCP 服务器配置（stdio 托管子进程）。
 ///
 /// **为何在 L1**（2026-09-14 下沉）：`mcp/`（L3 客户端）需要读它来 spawn 子进程，

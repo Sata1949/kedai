@@ -6,6 +6,12 @@ use std::sync::atomic::{AtomicI64, Ordering};
 /// 跨 run 也单调,比「run 内自增」更强,prune 按 id 删除不受影响)。
 static LLM_REQUEST_SEQ: AtomicI64 = AtomicI64::new(0);
 
+/// 工具来源串(`builtin`/`plugin`/`mcp`;PLGM 3.3 的 SSE 工具事件 origin 字段填充)。
+/// 未注册/未知工具返回 None(字段随 `skip_serializing_if` 省略,旧客户端零变化)。
+fn tool_origin_str(registry: &crate::tools::registry::ToolRegistry, name: &str) -> Option<String> {
+    registry.origin_of(name).map(|o| o.as_str().to_string())
+}
+
 /// 工具触发(每个生成周期最多一次;失败不致命)
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn maybe_run_tool(
@@ -36,6 +42,7 @@ pub(super) async fn maybe_run_tool(
             input: json!({ "expression": expression }),
             call_id: None,
             render_kind: Some("generic".into()),
+            origin: tool_origin_str(&engine.tool_registry, "calculator"),
         },
         tx,
         abort,
@@ -78,6 +85,7 @@ pub(super) async fn maybe_run_tool(
             output: output.clone(),
             call_id: None,
             render_kind: Some("generic".into()),
+            origin: tool_origin_str(&engine.tool_registry, "calculator"),
         },
         tx,
         abort,
@@ -260,7 +268,7 @@ pub(crate) async fn execute_generation(
             }
             chunk = chunk_rx.recv() => match chunk {
                 Some(chunk) => {
-                    if process_chunk(chunk, &mut content, &mut reasoning, &mut tool_calls, &mut usage, &mut finish_reason, tx, abort, flag).await? {
+                    if process_chunk(chunk, &mut content, &mut reasoning, &mut tool_calls, &mut usage, &mut finish_reason, &engine.tool_registry, tx, abort, flag).await? {
                         return Ok(ExecutorResult { content, usage, interrupted: true, tool_calls, reasoning, finish_reason, self_heals: Vec::new(), budget_stopped: false });
                     }
                 }
@@ -326,6 +334,7 @@ async fn process_chunk(
     tool_calls: &mut Vec<ToolCallArgs>,
     usage: &mut TokenUsage,
     finish_reason: &mut Option<String>,
+    registry: &crate::tools::registry::ToolRegistry,
     tx: &mpsc::Sender<SseEvent>,
     abort: &watch::Receiver<bool>,
     flag: &AbortFlag,
@@ -354,6 +363,7 @@ async fn process_chunk(
                     call_id: (!call.id.is_empty()).then_some(call.id),
                     render_kind: crate::tools::registry::render_kind_for(&call.name)
                         .map(|s| s.to_string()),
+                    origin: tool_origin_str(registry, &call.name),
                 },
                 tx,
                 abort,
@@ -1129,6 +1139,7 @@ pub(crate) async fn run_tool_loop(
                     call_id: Some(e.call.id.clone()),
                     render_kind: crate::tools::registry::render_kind_for(&e.call.name)
                         .map(|s| s.to_string()),
+                    origin: tool_origin_str(&engine.tool_registry, &e.call.name),
                 },
                 tx,
                 abort,
@@ -1418,6 +1429,7 @@ async fn execute_serial_tool(
                 reason: e.permission.reason.clone(),
                 run_id: run_id.to_string(),
                 call_id: e.call.id.clone(),
+                origin: tool_origin_str(&engine.tool_registry, &e.call.name),
             },
             tx,
             abort,

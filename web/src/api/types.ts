@@ -134,9 +134,9 @@ export type TaskEventsPull = {
 export type SseEvent =
   | { type: 'token'; text: string }
   | { type: 'step'; step: string; detail?: string; index?: number; total?: number }
-  | { type: 'tool_call'; name: string; input: unknown; call_id?: string; render_kind?: string }
-  | { type: 'tool_authorization_required'; name: string; risk: ToolRisk; reason: string; run_id: string; call_id: string }
-  | { type: 'tool_result'; name: string; output: unknown; call_id?: string; render_kind?: string }
+  | { type: 'tool_call'; name: string; input: unknown; call_id?: string; render_kind?: string; origin?: string }
+  | { type: 'tool_authorization_required'; name: string; risk: ToolRisk; reason: string; run_id: string; call_id: string; origin?: string }
+  | { type: 'tool_result'; name: string; output: unknown; call_id?: string; render_kind?: string; origin?: string }
   | { type: 'vars'; stat_data: Record<string, unknown> }
   | { type: 'interrupted' }
   /** 上游请求重试中(HB-4):非终态提示事件,成功后照常继续 token/finish */

@@ -1052,10 +1052,12 @@ mod tests {
         );
     }
 
-    /// MCP 设置(批次 6.2):默认 关/空列表;旧版 settings.json 缺字段时 serde default 补齐;
-    /// 保存往返还原;缺名/缺命令条目被清理;task 覆盖层生效。
+    /// MCP 设置(批次 6.2;**PLGM 3.4 起无模式覆盖层**):默认 关/空列表;旧版
+    /// settings.json 缺字段时 serde default 补齐;保存往返还原;缺名/缺命令条目被清理。
+    /// 「不支持模式级覆盖」由类型承载——ModeSettings 已无 mcp_* 字段(引用即编译失败),
+    /// 写入路径直写扁平(见 api/settings.rs 的注释)。
     #[test]
-    fn mcp_settings_defaults_sanitize_roundtrip_and_mode_override() {
+    fn mcp_settings_defaults_sanitize_and_roundtrip() {
         let cfg = test_cfg();
         let s = RuntimeSettings::from_config(&cfg);
         assert!(!s.mcp_enabled, "MCP 默认关闭");
@@ -1100,22 +1102,19 @@ mod tests {
         assert_eq!(loaded2.mcp_servers[0].name, "fs", "名称应 trim");
         assert_eq!(loaded2.mcp_servers[0].args.len(), 2);
 
+        // task 视图与 roleplay 视图读同一份扁平权威值(PLGM 3.4:无覆盖层可偏离)
+        let s3 = RuntimeSettings::from_config(&cfg);
+        assert_eq!(
+            s3.for_mode(AppMode::Task).mcp_enabled,
+            s3.for_mode(AppMode::Roleplay).mcp_enabled,
+            "两模式视图的 MCP 值恒一致(进程级全局能力)"
+        );
+
         // 缺省字段(旧客户端手写条目只给 name/command):args 默认空、enabled 默认 true
         let partial: McpServerConfig =
             serde_json::from_str(r#"{"name":"a","command":"b"}"#).unwrap();
         assert!(partial.args.is_empty());
         assert!(partial.enabled, "条目 enabled 缺省应为 true");
-
-        // task 覆盖层:Some 覆盖扁平值,None 沿用
-        let mut s3 = RuntimeSettings::from_config(&cfg);
-        s3.task.mcp_enabled = Some(true);
-        let task_view = s3.for_mode(AppMode::Task);
-        assert!(task_view.mcp_enabled, "task 覆盖应生效");
-        assert!(task_view.mcp_servers.is_empty(), "未覆盖项沿用扁平值");
-        assert!(
-            !s3.for_mode(AppMode::Roleplay).mcp_enabled,
-            "roleplay 读扁平权威值"
-        );
     }
 
     /// 类型级模式隔离(WP7):RoleplayPromptConfig/TaskPromptConfig 的 serde 线格式

@@ -208,7 +208,7 @@ describe('SettingsModal(壳)', () => {
   it('装配:MCP 分区挂进壳(standalone 渲染;embedded 挂载不炸)', async () => {
     const standalone = await render(SettingsModal, { embedded: false });
     expect(standalone).toContain('MCP 服务');
-    expect(standalone).toContain('重启后生效');
+    expect(standalone).toContain('「重连」即生效');
 
     const embedded = await render(SettingsModal, { embedded: true, activeSection: 'mcp' });
     expect(embedded).toContain('sv-settings-embedded');
@@ -268,14 +268,14 @@ describe('CodingBundleSection(编码能力包区,默认关)', () => {
   });
 });
 
-describe('McpSection(MCP 服务区,批次 6.2)', () => {
-  it('渲染总开关/新增表单/「重启后生效」提示(默认关)', async () => {
+describe('McpSection(MCP 服务区,批次 6.2 / PLGM 3.2)', () => {
+  it('渲染总开关/新增表单/「重连」生效提示(默认关)', async () => {
     const html = await render(McpSection);
     expect(html).toContain('MCP 服务');
     expect(html).toContain('启用 MCP 服务');
     expect(html).toContain('已关闭'); // 默认 mcp_enabled=false
     expect(html).toContain('新增服务器');
-    expect(html).toContain('重启后生效');
+    expect(html).toContain('「重连」即生效');
     expect(html).toContain('保存 MCP 设置');
   });
 

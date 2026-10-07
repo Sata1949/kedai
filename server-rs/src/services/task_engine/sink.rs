@@ -143,6 +143,7 @@ mod tests {
             output: json!({ "error": "写入角色文件 a.md(宽松模式需授权)", "code": "tool_policy_denied" }),
             call_id: Some("c1".into()),
             render_kind: None,
+            origin: None,
         };
         let detail = map_event(&ev, 0, "主 agent").unwrap();
         assert!(detail.contains("被任务策略拒绝"), "实际:{detail}");
@@ -159,6 +160,7 @@ mod tests {
             output: json!({ "ok": true }),
             call_id: Some("c1".into()),
             render_kind: None,
+            origin: None,
         };
         let detail = map_event(&ev, 0, "主 agent").unwrap();
         assert_eq!(detail, "工具 read 已返回结果");

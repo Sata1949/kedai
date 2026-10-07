@@ -120,12 +120,9 @@ pub struct ModeSettings {
     /// 技能渐进披露开关(落地项 3;默认 true)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_progressive_disclosure: Option<bool>,
-    /// MCP stdio 客户端总开关(批次 6.2;默认关,仅启动时装配,改后重启生效)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mcp_enabled: Option<bool>,
-    /// MCP 服务器列表(覆盖语义与 bypass_blacklist 一致)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mcp_servers: Option<Vec<McpServerConfig>>,
+    // MCP 的 mcp_enabled / mcp_servers **不提供模式覆盖层**（PLGM 3.4 / DC-2 / 展望 CFG-2
+    // 收口,2026-10-07 删除）:MCP 是进程级全局能力,装配与 restart 端点读的都是扁平权威值,
+    // 覆盖层只会制造「看似可配、实际无效」的双事实源。原两字段与 `for_mode` 合并点已移除。
     /// 编码能力包(2026-09-28):None 沿用扁平值(默认 false = 不启用)。
     /// 仅影响任务模式执行者/汇总者的**缺省**默认词选择(见 `for_mode`),不改变工具面。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1041,12 +1038,6 @@ impl RuntimeSettings {
         }
         if let Some(v) = ov.skill_progressive_disclosure {
             out.skill_progressive_disclosure = v;
-        }
-        if let Some(v) = ov.mcp_enabled {
-            out.mcp_enabled = v;
-        }
-        if let Some(v) = &ov.mcp_servers {
-            out.mcp_servers = v.clone();
         }
         if let Some(v) = &ov.task_default_connection_id {
             out.task_default_connection_id = v.clone();

@@ -226,6 +226,7 @@ watch(callTraceOpen, (open) => {
                 {{ toolStatusDot(t.status).icon }}
               </span>
               {{ t.name }}
+              <span v-if="t.origin === 'plugin' || t.origin === 'mcp'" class="sv-badge" :title="t.origin === 'mcp' ? '来自 MCP 服务器' : '来自工具插件'">{{ t.origin === 'mcp' ? 'MCP' : '插件' }}</span>
               <span
                 v-if="t.risk"
                 class="sv-badge sv-ml-auto"
