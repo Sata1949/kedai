@@ -14,9 +14,9 @@ export async function uploadPluginTool(file: File): Promise<{ ok: boolean; name:
   return uploadForm<{ ok: boolean; name: string; file: string }>('/plugins/tools/upload', file);
 }
 
-/** 热重载全部工具插件 */
-export async function reloadPluginTools(): Promise<{ ok: boolean; loaded: number; errors?: string[] }> {
-  return request<{ ok: boolean; loaded: number; errors?: string[] }>('/plugins/tools/reload', { method: 'POST' });
+/** 热重载全部工具插件(全量同步:增删都收敛;`removed` = 本次差集注销数) */
+export async function reloadPluginTools(): Promise<{ ok: boolean; loaded: number; removed?: number; errors?: string[] }> {
+  return request<{ ok: boolean; loaded: number; removed?: number; errors?: string[] }>('/plugins/tools/reload', { method: 'POST' });
 }
 
 /** 删除已导入的工具插件文件 */

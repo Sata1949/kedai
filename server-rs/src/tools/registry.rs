@@ -142,6 +142,22 @@ impl ToolRegistry {
     pub fn is_builtin(&self, name: &str) -> bool {
         self.origin_of(name) == Some(ToolOrigin::Builtin)
     }
+
+    /// 按来源列出全部工具名(排序,确定性)。
+    /// 供插件 `sync_plugins` 做「注册表 ↔ 新集合」差集(R2 增删同步)与 MCP 注销台账核对;
+    /// 只读,不触碰定义快照缓存。
+    pub fn names_by_origin(&self, origin: ToolOrigin) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .tools
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .filter(|t| t.origin == origin)
+            .map(|t| t.definition.name.clone())
+            .collect();
+        names.sort();
+        names
+    }
 }
 
 /// 实现 L1 的 [`crate::models::types::ToolRegistrar`] 窄接口：让 L3（`mcp/`）能经
@@ -557,6 +573,41 @@ mod tests {
         let snap = reg.definitions_snapshot();
         assert_eq!(snap.len(), 2, "经窄接口注册后快照必须失效");
         assert!(snap.iter().any(|d| d.name == "mcp_demo_tool"));
+    }
+
+    /// 按来源列名(R2 插件 sync 差集的地基):只回该来源、排序确定、与内置互不混入。
+    #[test]
+    fn names_by_origin_filters_and_sorts() {
+        let reg = ToolRegistry::new();
+        let ex = || {
+            Arc::new(
+                |_: serde_json::Value, _: crate::models::types::ToolContext| {
+                    Box::pin(async { Ok("ok".into()) })
+                        as futures::future::BoxFuture<'static, Result<String, String>>
+                },
+            )
+        };
+        let def = |name: &str| ToolDefinition {
+            name: name.into(),
+            description: String::new(),
+            parameters: serde_json::json!({}),
+        };
+        reg.register(def("builtin_b"), ex());
+        reg.register_external(def("plugin_z"), ex(), None, ToolOrigin::Plugin);
+        reg.register_external(def("plugin_a"), ex(), None, ToolOrigin::Plugin);
+        reg.register_external(def("mcp_x_t"), ex(), None, ToolOrigin::Mcp);
+
+        assert_eq!(
+            reg.names_by_origin(ToolOrigin::Plugin),
+            vec!["plugin_a".to_string(), "plugin_z".to_string()],
+            "插件名应过滤 + 排序"
+        );
+        assert_eq!(reg.names_by_origin(ToolOrigin::Mcp), vec!["mcp_x_t"]);
+        assert_eq!(reg.names_by_origin(ToolOrigin::Builtin), vec!["builtin_b"]);
+
+        // 注销后差集收缩
+        reg.unregister("plugin_a");
+        assert_eq!(reg.names_by_origin(ToolOrigin::Plugin), vec!["plugin_z"]);
     }
 
     #[test]

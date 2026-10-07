@@ -751,11 +751,14 @@ export interface CurrentAudio {
   progress: number;
 }
 
-/** 插件工具信息(自定义工具插件) */
+/** 插件工具信息(自定义工具插件;后端只回 Plugin 来源,内置/MCP 工具不在此列) */
 export interface ToolPluginInfo {
   name: string;
   description: string;
-  parameters: Record<string, unknown>;
+  /** 来源标识(本端点恒为 'plugin';与 SSE 工具事件 origin 字段同词表) */
+  origin: string;
+  /** 来源文件基名(UI 按文件分组展示) */
+  file: string;
 }
 
 export interface PluginToolsStatus {

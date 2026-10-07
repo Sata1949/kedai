@@ -2,7 +2,7 @@
 // 插件管理弹窗:
 //   1) 角色卡内嵌插件 —— 从当前角色卡自动检测(酒馆助手 SillyTavern-Assistant 等),kedai 内置实现
 //   2) 自定义工具插件 —— 导入/删除/热重载(JSON 白名单脚本),已注册工具 + 磁盘文件
-import { ref, onMounted, watch } from 'vue';
+import { computed, ref, onMounted, watch } from 'vue';
 import { useAppStore } from '../store';
 import * as api from '../api';
 import { detectCardPluginsClient } from '../plugins';
@@ -14,6 +14,18 @@ const tools = ref<api.ToolPluginInfo[]>([]);
 const files = ref<string[]>([]);
 const msg = ref<{ kind: 'ok' | 'err' | 'info'; text: string } | null>(null);
 const fileInput = ref<HTMLInputElement | null>(null);
+
+/** 已注册工具按来源文件分组(组头 = 文件基名;后端已保证 file 非空,兜底组仅防御) */
+const groupedTools = computed<[string, api.ToolPluginInfo[]][]>(() => {
+  const groups = new Map<string, api.ToolPluginInfo[]>();
+  for (const t of tools.value) {
+    const key = t.file || '未知来源';
+    const list = groups.get(key);
+    if (list) list.push(t);
+    else groups.set(key, [t]);
+  }
+  return [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+});
 
 // 角色卡内嵌插件
 const cardPlugins = ref<api.CardPluginInfo[]>([]);
@@ -75,7 +87,7 @@ async function onReload(): Promise<void> {
   try {
     const r = await api.reloadPluginTools();
     msg.value = r.ok
-      ? { kind: 'ok', text: `已重载 ${r.loaded} 个工具插件` }
+      ? { kind: 'ok', text: `已重载 ${r.loaded} 个,注销 ${r.removed ?? 0} 个` }
       : { kind: 'err', text: `重载部分失败:${(r.errors ?? []).join('; ')}` };
     await refresh();
   } catch (err) {
@@ -167,7 +179,8 @@ watch(
         <div class="sv-field-label" style="margin-top: 22px"><span class="sv-supreme blue" /> 自定义工具插件</div>
         <p class="sv-note" style="margin: var(--space-1) 0 var(--space-2-5)">
           以 JSON 文件形式存放在 <code>data/plugins/tools/</code> 目录,由后端白名单脚本执行器加载
-          (不使用 eval,仅支持字面量/算术/字符串方法/JSON 等安全子集)。导入后即可被 Agent 调用。
+          (不使用 eval;支持多级参数如 <code>args.user.name</code>、中间变量与字符串拼接)。
+          导入/重载时即校验脚本语法,语法错误会直接报出,不会等到 Agent 调用才失败。
         </p>
 
         <!-- 操作区 -->
@@ -190,18 +203,24 @@ watch(
           {{ msg.text }}
         </div>
 
-        <!-- 已注册工具 -->
+        <!-- 已注册工具(按来源文件分组) -->
         <div class="sv-field-label"><span class="sv-supreme green" /> 已注册工具</div>
         <div class="sv-plugin-list">
-          <div v-for="t in tools" :key="t.name" class="sv-plugin-item">
-            <span class="sv-plugin-item-dot" />
-            <div class="min-w-0 flex-1">
-              <div class="sv-char-name">{{ t.name }}</div>
-              <div class="sv-char-desc">{{ t.description || '无描述' }}</div>
+          <template v-for="[file, list] in groupedTools" :key="file">
+            <div
+              class="sv-char-desc"
+              style="font-family: ui-monospace, Consolas, monospace; margin-top: var(--space-2)"
+            >{{ file }}</div>
+            <div v-for="t in list" :key="t.name" class="sv-plugin-item">
+              <span class="sv-plugin-item-dot" />
+              <div class="min-w-0 flex-1">
+                <div class="sv-char-name">{{ t.name }}</div>
+                <div class="sv-char-desc">{{ t.description || '无描述' }}</div>
+              </div>
             </div>
-          </div>
+          </template>
           <div v-if="tools.length === 0" class="sv-note" style="padding: var(--space-2) 0">
-            暂无自定义工具插件(内置 calculator / memory 不在此列表)。
+            暂无自定义工具插件(内置工具与 MCP 工具不在此列表)。
           </div>
         </div>
 
@@ -215,7 +234,8 @@ watch(
             <button class="sv-btn ghost sv-btn-sm" @click="onDelete(f)">删除</button>
           </div>
           <div v-if="files.length === 0" class="sv-note" style="padding: var(--space-2) 0">
-            目录为空。可导入 JSON 插件,或参考 <code>data/plugins/tools/greeting.json</code> 示例。
+            目录为空。可导入 JSON 插件,或参考仓库 <code>examples/plugins/tools/</code> 下的示例
+            (复制到数据目录后重载,或直接上传)。
           </div>
         </div>
       </div>

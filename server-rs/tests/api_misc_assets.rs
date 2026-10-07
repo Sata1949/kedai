@@ -526,6 +526,88 @@ async fn plugin_delete_sanitizes_filename() {
     assert_eq!(status, StatusCode::OK, "合法文件名应通过校验");
 }
 
+/// 列表与 reload 的增删同步(PLGM 1.1/1.4):
+/// ① `tools` 只回插件来源,每项带 `origin`/`file`;② 删文件(API 或盘上直删)+ reload
+/// → 工具从列表消失、`removed` 计数如实回传(修「reload 只增不减」)。
+#[tokio::test]
+async fn plugin_reload_removes_deleted_tool() {
+    let app = test_app();
+    let _guard = test_lock().await;
+    let upload = |filename: &str, tool: &str| {
+        let body = format!(
+            "--BOUND\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: application/json\r\n\r\n{}\r\n--BOUND--\r\n",
+            json!({ "name": tool, "description": "同步测试插件", "script": "return args.x" })
+        );
+        Request::builder()
+            .method("POST")
+            .uri("/api/plugins/tools/upload")
+            .header("content-type", "multipart/form-data; boundary=BOUND")
+            .body(Body::from(body))
+            .unwrap()
+    };
+
+    // 上传 → 列表可见(带 origin/file 字段;列表只含插件来源)
+    let resp = app
+        .clone()
+        .oneshot(upload("b4-sync_plugin.json", "b4_sync_tool"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let (_, list) = send_json(app, "GET", "/api/plugins/tools", json!({})).await;
+    let tools = list["tools"].as_array().expect("tools 应为数组");
+    let mine = tools
+        .iter()
+        .find(|t| t["name"] == json!("b4_sync_tool"))
+        .expect("上传后工具应可见");
+    assert_eq!(mine["origin"], json!("plugin"));
+    assert_eq!(mine["file"], json!("b4-sync_plugin.json"));
+    assert!(
+        tools.iter().all(|t| t["origin"] == json!("plugin")),
+        "列表只应含插件来源工具: {list}"
+    );
+
+    // 盘上直删文件(模拟外部删除)→ reload → removed 计数 ≥ 1 且工具消失
+    let dir = std::env::temp_dir()
+        .join(format!("kedai-test-{}", std::process::id()))
+        .join("plugins")
+        .join("tools");
+    std::fs::remove_file(dir.join("b4-sync_plugin.json")).unwrap();
+    let (status, body) = send_json(app, "POST", "/api/plugins/tools/reload", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body["removed"].as_u64().unwrap_or(0) >= 1,
+        "removed 计数应含本次删除: {body}"
+    );
+    let (_, list) = send_json(app, "GET", "/api/plugins/tools", json!({})).await;
+    assert!(
+        list["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["name"] != json!("b4_sync_tool")),
+        "注销后不应再可见: {list}"
+    );
+
+    // 再上传同名文件走 DELETE API 路径 → 同样收敛(共用 sync 语义)
+    let resp = app
+        .clone()
+        .oneshot(upload("b4-sync_plugin.json", "b4_sync_tool"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let status = send_empty(app, "DELETE", "/api/plugins/tools/b4-sync_plugin.json").await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, list) = send_json(app, "GET", "/api/plugins/tools", json!({})).await;
+    assert!(
+        list["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["name"] != json!("b4_sync_tool")),
+        "DELETE API 后不应再可见: {list}"
+    );
+}
+
 /// SPA 回退边界(2026-09 修复「面板加载失败」):静态资源未命中必须 404,
 /// 不能回退成 index.html——否则浏览器把 HTML 当 JS 解析,前端表现为
 /// 「面板加载失败」且懒加载重试永远失败(典型触发:前端重建后 chunk hash 变化)。

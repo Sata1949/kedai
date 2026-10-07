@@ -285,13 +285,15 @@ impl AppState {
         );
 
         // 工具插件加载:data/plugins/tools/*.json(白名单脚本)
-        // 两段式:L3 plugins/ 负责解析,本层负责注册(含内置重名防护,见 api::plugins::register_plugins)。
+        // 两段式:L3 plugins/ 负责解析,本层负责注册——全量同步(差集注销 + 冲突三查),
+        // 与 reload/upload/delete 同一条路径(见 api::plugins::sync_plugins)。
         {
             let loader = crate::plugins::ToolPluginLoader::new(
                 config.data_dir.join("plugins").join("tools"),
             );
             let (loaded, mut errors) = loader.parse_all();
-            let (count, reg_errors) = crate::api::plugins::register_plugins(loaded, &tool_registry);
+            let (count, _removed, reg_errors) =
+                crate::api::plugins::sync_plugins(loaded, &tool_registry);
             errors.extend(reg_errors);
             if !errors.is_empty() {
                 eprintln!("[工具插件] 加载部分失败: {}", errors.join("; "));

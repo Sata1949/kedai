@@ -2,7 +2,8 @@
 //
 // 代际位置:本层是**组合根的一部分**(L2 · 暴露面)。插件解析在 L3(`plugins/`),
 // 但**注册是装配动作**,按三结合纪律由宿主(本层)执行——L3 不得依赖 L2 的工具注册表。
-// 故下方统一走「解析(L3) → 宿主注册(L2)」两段式:`parse_all`/`parse_file` + `register_plugin`。
+// 故下方统一走「解析(L3) → 宿主全量同步(L2)」两段式:解析 `parse_all` +
+// 同步 `sync_plugins`(启动装配与 reload/upload/delete 四个入口共用同一条路径)。
 use crate::api::app_state::AppState;
 use crate::api::{err_status, internal, validation, ErrorCode, WithStatus};
 use crate::plugins::ToolPluginLoader;
@@ -13,56 +14,103 @@ use axum::Json;
 use serde_json::json;
 use std::sync::Arc;
 
-/// 把一批已解析插件注册进工具表（宿主侧装配动作）。
+/// 把插件目录的解析结果**全量同步**进工具表(宿主侧装配动作;PLGM 1.1,2026-10-07)。
 ///
-/// **命名冲突防护（已知限制 L19）**：注册前校验是否与内置工具重名——插件不得**劫持**
-/// 内置工具（`bash`/`write` 等）。冲突时跳过并计入 errors，**不覆盖**。
-/// 这是「注册表即隔离边界」的不变量：注册动作必须先证明「不抢占已有名字」。
+/// 语义 = 「差集注销 + 注册」两段,替代旧版「只注册不注销」:
+/// - **注销**:注册表中 `origin=Plugin` 且**不在本批新集合**的名字(删文件/改名的旧注册由此收敛);
+/// - **注册**:逐条登记,三查防冲突且**不覆盖**——
+///   ① 与内置工具重名拒绝(插件不得劫持内置,已知限制 L19);
+///   ② 批内跨文件重名**先到者注册、后到者进 errors**(文件按名排序,确定性);
+///   ③ 同名插件重载 = 覆盖「自己」的旧注册(允许,即热更新语义)。
 ///
-/// `pub(crate)`：`api::app_state` 的启动装配复用同一入口，保证
-/// 「启动加载」与「热重载」走完全一致的冲突校验口径。
-pub(crate) fn register_plugins(
+/// `pub(crate)`:启动装配(`api::app_state`)与 reload/upload/delete 四个入口全部走本函数
+/// ——同一条路径即同一口径。返回 `(注册数, 注销数, 逐项错误)`。
+pub(crate) fn sync_plugins(
     loaded: Vec<crate::plugins::LoadedToolPlugin>,
     registry: &crate::tools::registry::ToolRegistry,
-) -> (usize, Vec<String>) {
-    let mut count = 0;
+) -> (usize, usize, Vec<String>) {
     let mut errors = Vec::new();
+    // 1) 差集注销:现存 Plugin 名字 - 本批名字
+    let incoming: std::collections::HashSet<&str> =
+        loaded.iter().map(|p| p.definition.name.as_str()).collect();
+    let mut removed = 0usize;
+    for name in registry.names_by_origin(crate::models::tool_policy::ToolOrigin::Plugin) {
+        if !incoming.contains(name.as_str()) {
+            registry.unregister(&name);
+            removed += 1;
+        }
+    }
+    // 2) 注册:先到者生效;同批内同名到第二次即报错并跳过(不覆盖先到者)
+    let mut registered = 0usize;
+    let mut first_file: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     for plugin in loaded {
         let name = plugin.definition.name.clone();
-        // 内置名与已注册名都不可被插件覆盖:前者会劫持内置工具执行体,
-        // 后者会让「插件 A 静默替换插件 B」成为可能,两者都属越权。
         if registry.is_builtin(&name) {
             errors.push(format!(
-                "{name}: 与内置工具重名，已拒绝注册（插件不得劫持内置工具）"
+                "{}: 工具名 {name} 与内置工具重名，已拒绝注册（插件不得劫持内置工具）",
+                plugin.file
             ));
             continue;
         }
+        if let Some(other) = first_file.get(&name) {
+            errors.push(format!(
+                "{}: 工具名 {name} 与 {other} 重复，已跳过（同一批次先到者生效）",
+                plugin.file
+            ));
+            continue;
+        }
+        first_file.insert(name.clone(), plugin.file.clone());
         registry.register_external(
             plugin.definition,
             crate::plugins::plugin_executor(&plugin.script),
             None,
             crate::models::tool_policy::ToolOrigin::Plugin,
         );
-        count += 1;
+        registered += 1;
     }
-    (count, errors)
+    (registered, removed, errors)
 }
 
-/// GET /api/plugins/tools:列出已注册工具 + 磁盘插件文件 + 加载错误
+/// GET /api/plugins/tools:列出**插件来源**工具(每项带来源文件)+ 磁盘插件文件
+///
+/// 口径(PLGM 1.4):`tools` 只回 `origin=Plugin` 的已注册工具——内置/MCP 工具不属本面板
+/// (此前回全量注册表,与面板文案「内置不在此列表」自相矛盾)。`file` 取目录解析结果
+/// (与注册同目录同快照):文件被删/解析失败而尚未 reload 的旧注册项不回列,reload 即收敛。
 pub async fn list_tools(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let tools = state.tool_registry.list_definitions();
     let dir = state.config.data_dir.join("plugins").join("tools");
-    // list_files 是同步目录遍历,挪阻塞线程池(B-1:不在 tokio worker 上做同步文件 IO)
-    let files = tokio::task::spawn_blocking(move || ToolPluginLoader::new(dir).list_files())
-        .await
-        .unwrap_or_default();
+    let registry = state.tool_registry.clone();
+    // list_files/parse_all 是同步目录遍历 + 逐文件解析,挪阻塞线程池(B-1:不在 tokio worker 上做同步文件 IO)
+    let (files, parsed) = tokio::task::spawn_blocking(move || {
+        let loader = ToolPluginLoader::new(dir);
+        let files = loader.list_files();
+        let (loaded, _errors) = loader.parse_all();
+        (files, loaded)
+    })
+    .await
+    .unwrap_or_default();
+    let tools: Vec<serde_json::Value> = parsed
+        .into_iter()
+        .filter(|p| {
+            registry.origin_of(&p.definition.name)
+                == Some(crate::models::tool_policy::ToolOrigin::Plugin)
+        })
+        .map(|p| {
+            json!({
+                "name": p.definition.name,
+                "description": p.definition.description,
+                "origin": "plugin",
+                "file": p.file,
+            })
+        })
+        .collect();
     Json(json!({
         "tools": tools,
         "files": files,
     }))
 }
 
-/// POST /api/plugins/tools/reload:重新加载磁盘上的工具插件(注册覆盖)
+/// POST /api/plugins/tools/reload:重新加载磁盘上的工具插件(全量同步:增删都收敛)
 pub async fn reload_tools(State(state): State<Arc<AppState>>) -> Response {
     let dir = state.config.data_dir.join("plugins").join("tools");
     let registry = state.tool_registry.clone();
@@ -80,21 +128,22 @@ pub async fn reload_tools(State(state): State<Arc<AppState>>) -> Response {
                     vec!["插件重载任务失败,详情见服务端日志".to_string()],
                 )
             });
-    let (count, reg_errors) = register_plugins(loaded, &registry);
+    let (count, removed, reg_errors) = sync_plugins(loaded, &registry);
     errors.extend(reg_errors);
     if errors.is_empty() {
-        Json(json!({ "ok": true, "loaded": count }))
+        Json(json!({ "ok": true, "loaded": count, "removed": removed }))
             .into_response()
             .with_status(StatusCode::OK)
     } else {
-        // 形状(批次 1):`loaded`(已注册数)与 `errors`(逐项失败原因)是**业务数据**,
-        // 必须保留;仅补 `code` 供前端统一分支。errors 原文由解析器产生(面向插件的
+        // 形状(批次 1):`loaded`(已注册数)/`removed`(注销数)与 `errors`(逐项失败原因)是
+        // **业务数据**,必须保留;仅补 `code` 供前端统一分支。errors 原文由解析器产生(面向插件的
         // 文件名/语法错误,不含密钥/路径绝对化),属用户排障必需信息,保留透出。
         Json(json!({
             "ok": false,
             "code": ErrorCode::Validation.as_str(),
             "error": "部分插件加载失败",
             "loaded": count,
+            "removed": removed,
             "errors": errors,
         }))
         .into_response()
@@ -160,35 +209,41 @@ pub async fn upload_tool(
                 // 500:入参含 io 错误原文(可能带盘符路径),按泄露策略只进日志
                 return internal(format!("写文件失败: {e}"));
             }
-            // 解析该插件(parse_file 同步读文件,挪阻塞线程池),注册由本层执行
+            // 全量同步(与启动/reload/delete 同一条路径):先解析整目录,再 diff 注册。
+            // 本文件若解析失败(含加载期语法校验)或注册冲突,以其归属错误回 400;
+            // 其余文件的既有错误只进日志(它们属于那些文件的 reload 反馈)。
             let registry = state.tool_registry.clone();
-            let load_path = path.clone();
-            let parse_result = tokio::task::spawn_blocking(move || {
-                ToolPluginLoader::new(dir).parse_file(&load_path)
-            })
-            .await
-            .map_err(|e| e.to_string())
-            .and_then(|r| r);
-            match parse_result {
-                Ok(plugin) => {
-                    let (_, reg_errors) = register_plugins(vec![plugin], &registry);
-                    if let Some(e) = reg_errors.first() {
-                        return validation(format!("插件注册失败: {e}"));
-                    }
-                }
-                Err(e) => {
-                    return validation(format!("插件注册失败: {e}"));
-                }
+            let sync_dir = dir.clone();
+            let (loaded, parse_errors) =
+                tokio::task::spawn_blocking(move || ToolPluginLoader::new(sync_dir).parse_all())
+                    .await
+                    .unwrap_or_default();
+            let mine = format!("{safe}:");
+            if let Some(err) = parse_errors.iter().find(|e| e.starts_with(&mine)) {
+                return validation(format!("插件注册失败: {err}"));
             }
-            Json(json!({ "ok": true, "name": c.name, "file": safe }))
-                .into_response()
-                .with_status(StatusCode::CREATED)
+            let (count, removed, reg_errors) = sync_plugins(loaded, &registry);
+            if let Some(e) = reg_errors.iter().find(|e| e.starts_with(&mine)) {
+                return validation(format!("插件注册失败: {e}"));
+            }
+            for e in parse_errors.iter().chain(reg_errors.iter()) {
+                tracing::warn!(plugin_error = %e, "插件目录存在其他加载错误");
+            }
+            Json(json!({
+                "ok": true,
+                "name": c.name,
+                "file": safe,
+                "loaded": count,
+                "removed": removed,
+            }))
+            .into_response()
+            .with_status(StatusCode::CREATED)
         }
         Err(e) => validation(format!("插件 JSON 解析失败: {e}")),
     }
 }
 
-/// DELETE /api/plugins/tools/{name}:删除已导入的工具插件(文件 + 注册)
+/// DELETE /api/plugins/tools/{name}:删除已导入的工具插件文件(工具随之注销)
 pub async fn delete_tool(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
@@ -202,28 +257,24 @@ pub async fn delete_tool(
     }
     let dir = state.config.data_dir.join("plugins").join("tools");
     let path = dir.join(&safe);
-    // 注销对应工具:删除文件前解析其 name(删除后无法反查);文件无效时跳过注册但保留删除
-    // (B-1:文件 IO 走 tokio::fs;load_all 同步目录遍历,挪阻塞线程池)
+    // 删文件后全量同步:B-1 文件 IO 走 tokio::fs;同步里 parse_all 是同步遍历,挪阻塞线程池。
+    // 工具的注销不再手工「删前解析反查名字」——差集注销天然覆盖(含「删掉的是重名先到者、
+    // 后到者应补位」这类情形)。
     if tokio::fs::try_exists(&path).await.unwrap_or(false) {
-        if let Ok(bytes) = tokio::fs::read(&path).await {
-            if let Ok(cfg) = serde_json::from_slice::<crate::plugins::ToolPluginConfig>(&bytes) {
-                state.tool_registry.unregister(&cfg.name);
-            }
-        }
         let _ = tokio::fs::remove_file(&path).await;
     }
-    // 重载剩余插件文件(与 reload 语义一致):解析在阻塞池,注册在本层
     let registry = state.tool_registry.clone();
     let (loaded, _) = tokio::task::spawn_blocking(move || ToolPluginLoader::new(dir).parse_all())
         .await
         .unwrap_or_default();
-    let (count, _) = register_plugins(loaded, &registry);
+    let (count, _unregistered, _) = sync_plugins(loaded, &registry);
     Json(json!({ "ok": true, "removed": name, "reloaded": count })).into_response()
 }
 
 #[cfg(test)]
 mod tests {
     use super::sanitize_plugin_filename;
+    use super::sync_plugins;
 
     /// 净化策略统一(优化项 B-4):上传与删除入口同一判定——
     /// 净化结果与原始文件名不一致即拒绝,不再静默改写/回退默认名。
@@ -260,6 +311,87 @@ mod tests {
         assert_eq!(
             sanitize_plugin_filename("..json"),
             Some("..json".to_string())
+        );
+    }
+
+    fn plugin(name: &str, file: &str, desc: &str) -> crate::plugins::LoadedToolPlugin {
+        crate::plugins::LoadedToolPlugin {
+            definition: crate::models::types::ToolDefinition {
+                name: name.into(),
+                description: desc.into(),
+                parameters: serde_json::json!({}),
+            },
+            script: "return args.x".into(),
+            file: file.into(),
+        }
+    }
+
+    /// 全量同步语义(PLGM 1.1):删文件 → 差集注销;跨文件重名 → 先到者生效且不覆盖;
+    /// 同名重载 → 覆盖自己;内置重名 → 拒绝(不劫持)。
+    #[test]
+    fn sync_plugins_removes_stale_and_keeps_first_wins() {
+        use crate::models::tool_policy::ToolOrigin;
+        let reg = crate::tools::registry::ToolRegistry::new();
+        // 初始:两个插件 → 全部注册
+        let (n, removed, errs) = sync_plugins(
+            vec![
+                plugin("a_tool", "a.json", "v1"),
+                plugin("b_tool", "b.json", "旧"),
+            ],
+            &reg,
+        );
+        assert_eq!((n, removed, errs.len()), (2, 0, 0), "{errs:?}");
+        assert_eq!(
+            reg.names_by_origin(ToolOrigin::Plugin),
+            vec!["a_tool", "b_tool"]
+        );
+
+        // b.json 被删、a.json 改名 → 差集注销两个旧名,注册新名
+        let (n, removed, errs) = sync_plugins(vec![plugin("a_tool2", "a.json", "v2")], &reg);
+        assert_eq!((n, removed, errs.len()), (1, 2, 0), "{errs:?}");
+        assert_eq!(reg.names_by_origin(ToolOrigin::Plugin), vec!["a_tool2"]);
+
+        // 跨文件重名:先到者(c.json)注册,后到者(d.json)进 errors 且不覆盖
+        let (n, _, errs) = sync_plugins(
+            vec![
+                plugin("dup_tool", "c.json", "先"),
+                plugin("dup_tool", "d.json", "后"),
+            ],
+            &reg,
+        );
+        assert_eq!(n, 1, "先到者注册");
+        assert_eq!(errs.len(), 1, "后到者应报错: {errs:?}");
+        assert!(
+            errs[0].contains("d.json") && errs[0].contains("c.json"),
+            "错误应指明两方文件: {errs:?}"
+        );
+        assert_eq!(
+            reg.get("dup_tool").unwrap().definition.description,
+            "先",
+            "后到者不得覆盖先到者"
+        );
+
+        // 同名重载 = 覆盖自己(热更新):新描述生效、无注销
+        let (n, removed, errs) = sync_plugins(vec![plugin("dup_tool", "c.json", "更新")], &reg);
+        assert_eq!((n, removed, errs.len()), (1, 0, 0), "{errs:?}");
+        assert_eq!(reg.get("dup_tool").unwrap().definition.description, "更新");
+
+        // 内置重名:拒绝注册,内置注册不被顶替
+        reg.register(
+            crate::models::types::ToolDefinition {
+                name: "read".into(),
+                description: "内置".into(),
+                parameters: serde_json::json!({}),
+            },
+            std::sync::Arc::new(|_, _| Box::pin(async { Ok(String::new()) })),
+        );
+        let (n, _, errs) = sync_plugins(vec![plugin("read", "evil.json", "劫持")], &reg);
+        assert_eq!(n, 0);
+        assert!(errs[0].contains("内置"), "{errs:?}");
+        assert_eq!(
+            reg.origin_of("read"),
+            Some(ToolOrigin::Builtin),
+            "内置工具不得被插件顶替"
         );
     }
 }

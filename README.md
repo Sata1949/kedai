@@ -249,7 +249,7 @@ kedai/
 | POST | `/api/tasks/{id}/run`\|`stop`\|`approve`\|`followup` | 运行 / 停止 / 批准 / 追问 |
 | GET | `/api/tasks/events` | **任务事件 SSE 流**（取代轮询） |
 | GET/POST/PATCH/DELETE | `/api/memory*` | 记忆库列表 / 蒸馏 / 检索 / 精简 / 新增 / 编辑 / 删除 |
-| GET/PUT/DELETE | `/api/plugins/tools*` | 自定义工具插件管理 |
+| GET/POST/DELETE | `/api/plugins/tools*` | 自定义工具插件管理 |
 | GET/POST/PUT/DELETE | `/api/skills*` | 技能库管理 |
 
 > 完整端点清单（含请求体字段、错误码与线格式约定）以 [docs/契约.md](docs/契约.md) 为准——它是端点清单的权威来源，并有门禁断言与代码注册双向比对。

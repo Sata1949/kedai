@@ -1,0 +1,24 @@
+{
+  "name": "tag_brief",
+  "description": "角色标签导语(演示插件):取用户名与标签首项、总数,拼成一句导语。演示多级属性链(args.user.name)、下标(args.tags[0])、.length 与中间变量。示例:user={name:\"阿明\"}, tags=[\"勇气\",\"温柔\"] → 「勇气」是 阿明 的第 1/2 个标签",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "user": {
+        "type": "object",
+        "description": "用户信息对象(需含 name)",
+        "properties": {
+          "name": { "type": "string", "description": "用户显示名" }
+        },
+        "required": ["name"]
+      },
+      "tags": {
+        "type": "array",
+        "description": "标签列表(取首项与总数)",
+        "items": { "type": "string" }
+      }
+    },
+    "required": ["user", "tags"]
+  },
+  "script": "who = args.user.name\nfirst = args.tags[0]\ncount = args.tags.length\nresult = \"「\" + first + \"」是 \" + who + \" 的第 1/\" + count + \" 个标签\""
+}
