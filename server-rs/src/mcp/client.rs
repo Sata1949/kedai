@@ -21,8 +21,35 @@ pub const LIST_TOOLS_TIMEOUT: Duration = Duration::from_secs(30);
 /// 注册表 120s 硬超时只做兜底(错误文案带「下一步」指引)。
 pub const CALL_TOOL_TIMEOUT: Duration = Duration::from_secs(110);
 
-/// initialize 握手声明的协议版本(2024-11-05 为广泛支持的稳定版)
-const PROTOCOL_VERSION: &str = "2024-11-05";
+/// initialize 握手声明的协议版本(2025-06-18;PLGM 2.1,2026-10-07 由 2024-11-05 升级)。
+/// 旧服务器在 initialize 响应里声明旧版本时**容忍并记录**(降级不拒连,见 [`McpClient::initialize`])。
+const PROTOCOL_VERSION: &str = "2025-06-18";
+
+/// tools/list 分页遍历上限(保护:防服务器给不完的游标把装配拖死)
+const MAX_LIST_PAGES: usize = 50;
+/// tools/list 工具总数上限(保护:超限按 Err 上报,不静默截断)
+const MAX_LIST_TOOLS: usize = 1000;
+
+/// initialize 协商结果(PLGM 2.1):服务器声明的版本 / 能力 / 标识,存档供管理器读取。
+#[derive(Debug, Clone)]
+pub struct InitializeOutcome {
+    /// 服务器声明的协议版本(缺失为空串)
+    pub protocol_version: String,
+    /// 服务器能力对象(如 `{"tools":{"listChanged":true}}`)
+    pub capabilities: Value,
+    /// 服务器标识(serverInfo)
+    pub server_info: Value,
+}
+
+impl InitializeOutcome {
+    /// 服务器是否声明「工具列表可变更」通知(PLGM 2.3 的重列门控)
+    pub fn supports_tools_list_changed(&self) -> bool {
+        self.capabilities
+            .pointer("/tools/listChanged")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+}
 
 /// tools/list 返回的单个工具描述
 #[derive(Debug, Clone, PartialEq)]
@@ -36,6 +63,11 @@ pub struct McpToolInfo {
 type BoxedReader = BufReader<Box<dyn AsyncRead + Unpin + Send>>;
 type BoxedWriter = Box<dyn AsyncWrite + Unpin + Send>;
 
+/// 通知回调(服务器→客户端,如 `notifications/tools/list_changed`)
+pub type NotificationHook = Arc<dyn Fn(&str, &Value) + Send + Sync>;
+/// 读循环终止回调(EOF/读错误/行长超限;死亡注销用;主动 close 不触发)
+pub type ExitHook = Arc<dyn Fn() + Send + Sync>;
+
 /// 共享内部状态:reader 任务与 request() 都要访问(等待表按 id 派发响应)
 struct Shared {
     writer: tokio::sync::Mutex<BoxedWriter>,
@@ -45,6 +77,12 @@ struct Shared {
     /// 关停标志:close()/Drop 后新请求立即失败(执行器闭包可能仍持 Arc,
     /// 不能依赖「最后一个 Arc 析构」来表达关停语义)
     closed: AtomicBool,
+    /// initialize 协商结果(PLGM 2.1;供管理器读取能力位与版本记录)
+    info: Mutex<Option<InitializeOutcome>>,
+    /// 通知回调(构造后可设,读循环运行期读取;见 [`McpClient::set_notification_hook`])
+    notification_hook: Mutex<Option<NotificationHook>>,
+    /// 读循环终止回调(见 [`McpClient::set_exit_hook`])
+    exit_hook: Mutex<Option<ExitHook>>,
 }
 
 /// MCP stdio 客户端:一个后台 reader 任务按 id 把响应派发给在飞请求。
@@ -62,6 +100,9 @@ impl McpClient {
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             closed: AtomicBool::new(false),
+            info: Mutex::new(None),
+            notification_hook: Mutex::new(None),
+            exit_hook: Mutex::new(None),
         });
         let reader_shared = shared.clone();
         let reader_task = tokio::spawn(async move {
@@ -75,45 +116,121 @@ impl McpClient {
 
     /// initialize 握手:发送 initialize(clientInfo: kedai/0.2.0,capabilities 空),
     /// 成功后回 notifications/initialized 通知(无 id,不等响应)。
+    ///
+    /// PLGM 2.1(2026-10-07):声明版本升级到 2025-06-18;响应里的 protocolVersion/
+    /// capabilities/serverInfo 存档供管理器读取(能力位门控 list_changed 重列);
+    /// 服务器声明旧版本时**容忍并警告**(降级不拒连——MCP 协商语义本就允许回退)。
     pub async fn initialize(&self) -> Result<(), String> {
         let params = json!({
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {},
             "clientInfo": { "name": "kedai", "version": env!("CARGO_PKG_VERSION") },
         });
-        self.request("initialize", params, INITIALIZE_TIMEOUT)
+        let result = self
+            .request("initialize", params, INITIALIZE_TIMEOUT)
             .await?;
+        let protocol_version = result
+            .get("protocolVersion")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if protocol_version != PROTOCOL_VERSION {
+            tracing::warn!(
+                declared = %protocol_version,
+                requested = PROTOCOL_VERSION,
+                "MCP 服务器声明的协议版本与请求不一致,按声明版本降级使用(容忍)"
+            );
+        }
+        *self.shared.info.lock().unwrap_or_else(|e| e.into_inner()) = Some(InitializeOutcome {
+            protocol_version,
+            capabilities: result.get("capabilities").cloned().unwrap_or(json!({})),
+            server_info: result.get("serverInfo").cloned().unwrap_or(Value::Null),
+        });
         self.notify("notifications/initialized", json!({})).await
     }
 
-    /// tools/list:列出服务器全部工具
+    /// initialize 协商结果(先于 `initialize()` 完成时为 None)
+    pub fn initialize_outcome(&self) -> Option<InitializeOutcome> {
+        self.shared
+            .info
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// 注册通知回调(服务器→客户端通知,如 `notifications/tools/list_changed`);
+    /// 构造后运行期可设,重复设置覆盖。回调在 reader 任务内同步调用,不得做重活。
+    pub fn set_notification_hook(&self, hook: NotificationHook) {
+        *self
+            .shared
+            .notification_hook
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(hook);
+    }
+
+    /// 注册读循环终止回调(EOF/读错误/行长超限触发;`close()`/Drop 主动关停**不触发**,
+    /// 由 reader task abort 保证)。回调在 reader 任务内同步调用,不得做重活。
+    pub fn set_exit_hook(&self, hook: ExitHook) {
+        *self
+            .shared
+            .exit_hook
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(hook);
+    }
+
+    /// tools/list:列出服务器全部工具(**分页遍历**,PLGM 2.2)。
+    ///
+    /// 逐页跟随 `nextCursor` 直到缺席;超页数/超工具数上限按 `Err` 上报(不静默截断)。
     pub async fn list_tools(&self) -> Result<Vec<McpToolInfo>, String> {
-        let result = self
-            .request("tools/list", json!({}), LIST_TOOLS_TIMEOUT)
-            .await?;
-        let tools = result
-            .get("tools")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        Ok(tools
-            .into_iter()
-            .filter_map(|t| {
-                let name = t.get("name")?.as_str()?.to_string();
-                Some(McpToolInfo {
-                    name,
-                    description: t
-                        .get("description")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string(),
-                    input_schema: t
-                        .get("inputSchema")
-                        .cloned()
-                        .unwrap_or_else(|| json!({ "type": "object" })),
-                })
-            })
-            .collect())
+        let mut tools: Vec<McpToolInfo> = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..MAX_LIST_PAGES {
+            let mut params = serde_json::Map::new();
+            if let Some(c) = &cursor {
+                params.insert("cursor".to_string(), Value::String(c.clone()));
+            }
+            let result = self
+                .request("tools/list", Value::Object(params), LIST_TOOLS_TIMEOUT)
+                .await?;
+            if let Some(items) = result.get("tools").and_then(Value::as_array) {
+                for t in items {
+                    let Some(name) = t.get("name").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    tools.push(McpToolInfo {
+                        name: name.to_string(),
+                        description: t
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                        input_schema: t
+                            .get("inputSchema")
+                            .cloned()
+                            .unwrap_or_else(|| json!({ "type": "object" })),
+                    });
+                }
+            }
+            if tools.len() > MAX_LIST_TOOLS {
+                return Err(format!(
+                    "tools/list 工具数超过上限 {MAX_LIST_TOOLS},疑似服务器分页异常,已中止装配"
+                ));
+            }
+            cursor = result
+                .get("nextCursor")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            match &cursor {
+                None => return Ok(tools),
+                Some(c) => {
+                    tracing::debug!(cursor = %c, page_tools = tools.len(), "MCP tools/list 继续翻页")
+                }
+            }
+        }
+        Err(format!(
+            "tools/list 翻页超过上限 {MAX_LIST_PAGES} 页,疑似游标不收敛,已中止装配"
+        ))
     }
 
     /// tools/call:调用工具,把 result.content[] 中的 text 项拼接为 String 返回;
@@ -174,7 +291,7 @@ impl McpClient {
     ) -> Result<Value, String> {
         if self.shared.closed.load(Ordering::Relaxed) {
             return Err(format!(
-                "MCP 请求 \"{method}\" 失败:连接已关闭(客户端已关停)"
+                "MCP 请求 \"{method}\" 失败:连接已关闭(客户端已关停)。下一步:可在设置 → MCP 服务 中重启该服务器"
             ));
         }
         let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
@@ -217,7 +334,7 @@ impl McpClient {
             }
             // oneshot 发送端被 drop = reader 任务结束(连接关闭/进程退出)
             Ok(Err(_)) => Err(format!(
-                "MCP 请求 \"{method}\" 失败:连接已关闭(服务器进程可能已退出)"
+                "MCP 请求 \"{method}\" 失败:连接已关闭(服务器进程可能已退出)。下一步:可在设置 → MCP 服务 中重启该服务器"
             )),
             Err(_) => {
                 self.shared
@@ -248,7 +365,8 @@ impl Drop for McpClient {
 const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 
 /// 后台读循环:逐行读取 NDJSON,按 id 派发给等待表;
-/// 坏行/通知/未知 id 一律跳过(容错,不中断会话);EOF 或读错误即结束。
+/// 坏行跳过、通知派发给注册回调、未知 id 记警告(容错,不中断会话);
+/// EOF / 读错误 / 行长超限即结束,结束时触发退出回调(死亡注销)。
 async fn read_loop(reader: Box<BoxedReader>, shared: Arc<Shared>) {
     let mut reader = reader;
     let mut line = String::new();
@@ -279,10 +397,33 @@ async fn read_loop(reader: Box<BoxedReader>, shared: Arc<Shared>) {
             );
             continue;
         };
-        // 只关心带 id 的响应;通知(无 id)/请求(服务器→客户端)v1 不处理
+        // 只关心带 id 的响应;通知(无 id)/请求(服务器→客户端)分别派发或记警告(PLGM 2.1/2.3)
         let Some(id) = msg.get("id").and_then(Value::as_u64) else {
+            if let Some(method) = msg.get("method").and_then(Value::as_str) {
+                let hook = shared
+                    .notification_hook
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                if let Some(hook) = hook {
+                    hook(method, &msg);
+                } else {
+                    tracing::debug!(method, "MCP 收到通知(未注册回调,已忽略)");
+                }
+            } else {
+                tracing::warn!(
+                    line_preview = trimmed.chars().take(120).collect::<String>(),
+                    "MCP 收到无 id 且无 method 的报文,已跳过"
+                );
+            }
             continue;
         };
+        // 服务器→客户端**请求**(带 id 且有 method):v1 不支持,记警告日志(便于诊断)
+        if msg.get("method").is_some() {
+            let m = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
+            tracing::warn!(id, method = m, "MCP 服务器发起了客户端未支持的请求,已忽略");
+            continue;
+        }
         let tx = shared
             .pending
             .lock()
@@ -291,30 +432,82 @@ async fn read_loop(reader: Box<BoxedReader>, shared: Arc<Shared>) {
         if let Some(tx) = tx {
             // 接收端可能已因超时被清走;发送失败忽略
             let _ = tx.send(msg);
+        } else {
+            // 未知/已超时 id:丢弃但留痕(PLGM 2.1 的「未知 id 记警告」)
+            tracing::warn!(id, "MCP 收到未知或已超时的响应 id,已丢弃");
         }
-        // 未知/已超时 id:丢弃(乱序容错)
     }
-    // 读循环结束(EOF/错误):清空等待表,让所有在飞请求以「连接已关闭」失败
+    // 读循环结束(EOF/错误/行长超限):清空等待表,让所有在飞请求以「连接已关闭」失败
     shared
         .pending
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clear();
+    // 终止回调(死亡注销;close()/Drop 走 abort 不走这里——两条路径语义不同)
+    let hook = shared
+        .exit_hook
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    if let Some(hook) = hook {
+        hook();
+    }
 }
 
-/// 拼接 result.content[] 中所有 type=text 项的 text;无 content 时回退整段 JSON
-/// (部分服务器只返回 structuredContent)。空结果给占位文案,避免模型拿到空串困惑。
+/// 提取 tools/call 的文本结果(PLGM 2.1,2026-10-07 升级)。
+///
+/// 规则:
+/// - `content[]` 逐项转文本:`text` 原样;`resource_link`/`resource` 给 URI 占位;
+///   `image` 给「base64 已省略」占位;其余类型给类型占位——**不再静默丢弃非文本项**;
+/// - 文本拼接为空时,**优先取 `structuredContent`**(JSON 文本;部分服务器只回结构化结果),
+///   再退整段 JSON 兜底;
+/// - 全空给占位文案,避免模型拿到空串困惑。
 fn extract_content_text(result: &Value) -> String {
+    let mut parts: Vec<String> = Vec::new();
     if let Some(content) = result.get("content").and_then(Value::as_array) {
-        let text = content
-            .iter()
-            .filter(|item| item.get("type").and_then(Value::as_str) == Some("text"))
-            .filter_map(|item| item.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join("\n");
-        if !text.is_empty() {
-            return text;
+        for item in content {
+            match item.get("type").and_then(Value::as_str) {
+                Some("text") => {
+                    if let Some(t) = item.get("text").and_then(Value::as_str) {
+                        parts.push(t.to_string());
+                    }
+                }
+                Some("resource_link") => {
+                    let uri = item.get("uri").and_then(Value::as_str).unwrap_or("未知");
+                    parts.push(format!("[resource_link: {uri}]"));
+                }
+                Some("resource") => {
+                    let uri = item
+                        .pointer("/resource/uri")
+                        .and_then(Value::as_str)
+                        .unwrap_or("未知");
+                    parts.push(format!("[resource: {uri}]"));
+                }
+                Some("image") => {
+                    let mime = item
+                        .get("mimeType")
+                        .and_then(Value::as_str)
+                        .unwrap_or("未知类型");
+                    parts.push(format!("[image: {mime}(base64 已省略)]"));
+                }
+                Some(other) => parts.push(format!("[{other} 内容]")),
+                None => {}
+            }
         }
+    }
+    let text = parts
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !text.is_empty() {
+        return text;
+    }
+    if let Some(sc) = result.get("structuredContent").filter(|v| !v.is_null()) {
+        return match sc {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
     }
     if result.is_null() {
         return "(MCP 工具返回空结果)".to_string();
@@ -421,8 +614,8 @@ mod tests {
             .call_tool("echo", json!({ "text": "你好" }))
             .await
             .expect("tools/call 应成功");
-        // 只拼接 type=text 项,跳过 resource 项
-        assert_eq!(out, "第一行\n回显:你好");
+        // 非文本项不再静默丢弃:resource 项给 URI 占位(PLGM 2.1)
+        assert_eq!(out, "第一行\n[resource: x://y]\n回显:你好");
 
         let err = client.call_tool("fail", json!({})).await.unwrap_err();
         assert!(err.contains("炸了"), "isError 应按失败返回: {err}");
@@ -510,5 +703,194 @@ mod tests {
             err.contains("连接已关闭") || err.contains("写入失败"),
             "断连应明确报错: {err}"
         );
+    }
+
+    /// PLGM 2.2:tools/list 跟随 nextCursor 翻页;第二页请求应带 cursor 参数。
+    #[tokio::test]
+    async fn tools_list_follows_pagination_cursor() {
+        let (client, server) = client_pair();
+        let seen = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let seen_srv = seen.clone();
+        let server_task = mock_server(server, move |req| {
+            let Some(id) = req.get("id").cloned() else {
+                return Vec::new();
+            };
+            let method = req.get("method").and_then(Value::as_str).unwrap_or("");
+            let result = match method {
+                "initialize" => {
+                    json!({ "protocolVersion": PROTOCOL_VERSION, "capabilities": {}, "serverInfo": { "name": "m", "version": "1" } })
+                }
+                "tools/list" => {
+                    seen_srv
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(req["params"].clone());
+                    match req["params"].get("cursor").and_then(Value::as_str) {
+                        None => json!({ "tools": [{ "name": "t1" }], "nextCursor": "page2" }),
+                        Some("page2") => json!({ "tools": [{ "name": "t2" }] }),
+                        _ => json!({ "tools": [] }),
+                    }
+                }
+                _ => json!({}),
+            };
+            vec![json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string()]
+        });
+
+        client.initialize().await.unwrap();
+        let tools = client.list_tools().await.expect("分页遍历应成功");
+        assert_eq!(
+            tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+            vec!["t1", "t2"],
+            "两页工具应合并"
+        );
+        let calls = seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(calls.len(), 2, "应发出两次 tools/list");
+        assert_eq!(calls[1]["cursor"], json!("page2"), "第二页请求应带游标");
+
+        drop(client);
+        let _ = server_task.await;
+    }
+
+    /// PLGM 2.1:协商结果存档(版本/能力/serverInfo),旧版本声明容忍不拒连。
+    #[tokio::test]
+    async fn initialize_outcome_records_capabilities_and_tolerates_downgrade() {
+        let (client, server) = client_pair();
+        let server_task = mock_server(server, |req| {
+            let Some(id) = req.get("id").cloned() else {
+                return Vec::new();
+            };
+            let result = json!({
+                "protocolVersion": "2024-11-05", // 旧版本声明:容忍
+                "capabilities": { "tools": { "listChanged": true } },
+                "serverInfo": { "name": "mock", "version": "0" }
+            });
+            vec![json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string()]
+        });
+
+        client
+            .initialize()
+            .await
+            .expect("旧版本声明应容忍(降级不拒连)");
+        let info = client.initialize_outcome().expect("应存档协商结果");
+        assert_eq!(info.protocol_version, "2024-11-05");
+        assert!(info.supports_tools_list_changed(), "能力位应可读");
+        assert_eq!(info.server_info["name"], json!("mock"));
+
+        drop(client);
+        let _ = server_task.await;
+    }
+
+    /// PLGM 2.3:服务器通知(无 id,带 method)派发给注册的回调。
+    #[tokio::test]
+    async fn notification_hook_receives_method() {
+        let (client, server) = client_pair();
+        let server_task = tokio::spawn(async move {
+            let mut reader = BufReader::new(server);
+            let mut line = String::new();
+            // 抓 initialize 请求 → 回响应 → 主动推一条通知
+            reader.read_line(&mut line).await.unwrap();
+            let resp = json!({ "jsonrpc": "2.0", "id": 1, "result": { "protocolVersion": PROTOCOL_VERSION, "capabilities": {}, "serverInfo": { "name": "m", "version": "1" } } });
+            reader
+                .get_mut()
+                .write_all(format!("{resp}\n").as_bytes())
+                .await
+                .unwrap();
+            let note = json!({ "jsonrpc": "2.0", "method": "notifications/tools/list_changed" });
+            reader
+                .get_mut()
+                .write_all(format!("{note}\n").as_bytes())
+                .await
+                .unwrap();
+            let _ = reader.get_mut().flush().await;
+            loop {
+                line.clear();
+                match reader.read_line(&mut line).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        });
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(4);
+        client.set_notification_hook(Arc::new(move |method, _params| {
+            let _ = tx.try_send(method.to_string());
+        }));
+        client.initialize().await.unwrap();
+        let method = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("2s 内应收到通知")
+            .unwrap();
+        assert_eq!(method, "notifications/tools/list_changed");
+
+        drop(client);
+        let _ = server_task.await;
+    }
+
+    /// PLGM 2.4:EOF 触发退出回调;close() 主动关停(reader abort)不触发。
+    #[tokio::test]
+    async fn exit_hook_fires_on_eof_but_not_on_close() {
+        let (client, server) = client_pair();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(4);
+        client.set_exit_hook(Arc::new(move || {
+            let _ = tx.try_send(());
+        }));
+        drop(server); // EOF
+        tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("EOF 应触发退出回调");
+
+        let (client2, _server2) = client_pair();
+        let (tx2, mut rx2) = tokio::sync::mpsc::channel::<()>(4);
+        client2.set_exit_hook(Arc::new(move || {
+            let _ = tx2.try_send(());
+        }));
+        client2.close();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            rx2.try_recv().is_err(),
+            "close() 主动关停不应触发退出回调(仅死亡路径触发)"
+        );
+    }
+
+    /// PLGM 2.1:结果提取——仅结构化结果时优先 structuredContent;非文本项给占位不静默丢。
+    #[tokio::test]
+    async fn call_tool_extracts_structured_and_placeholder_content() {
+        let (client, server) = client_pair();
+        let server_task = mock_server(server, |req| {
+            let Some(id) = req.get("id").cloned() else {
+                return Vec::new();
+            };
+            let method = req.get("method").and_then(Value::as_str).unwrap_or("");
+            let result = match method {
+                "initialize" => {
+                    json!({ "protocolVersion": PROTOCOL_VERSION, "capabilities": {}, "serverInfo": { "name": "m", "version": "1" } })
+                }
+                "tools/call" => match req["params"]["name"].as_str().unwrap_or("") {
+                    "structured" => json!({ "structuredContent": { "score": 7 } }),
+                    "media" => json!({ "content": [
+                        { "type": "resource_link", "uri": "https://x/y" },
+                        { "type": "image", "mimeType": "image/png", "data": "AAAA" },
+                    ]}),
+                    _ => json!({}),
+                },
+                _ => json!({}),
+            };
+            vec![json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string()]
+        });
+
+        client.initialize().await.unwrap();
+        let out = client.call_tool("structured", json!({})).await.unwrap();
+        assert_eq!(
+            out, "{\"score\":7}",
+            "仅结构化结果应优先取 structuredContent"
+        );
+        let out = client.call_tool("media", json!({})).await.unwrap();
+        assert_eq!(
+            out,
+            "[resource_link: https://x/y]\n[image: image/png(base64 已省略)]"
+        );
+
+        drop(client);
+        let _ = server_task.await;
     }
 }

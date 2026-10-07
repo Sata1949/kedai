@@ -518,8 +518,9 @@ impl AppState {
 
     /// 装配 MCP stdio 服务器(批次 6.2,L3 隔离):mcp_enabled=false 时完全跳过
     /// (零进程、零注册)。读扁平权威设置,不按模式合并——MCP 是进程级全局能力,
-    /// 不随请求模式切换;v1 仅启动时装配,PUT 改 mcp_* 后重启生效。
-    /// 单台失败仅记 warn 并禁用该台,不 panic、不阻断启动;由 run_server 在 serve 之前调用。
+    /// 不随请求模式切换;启动装配失败单台隔离(状态与原因落台账,GET /api/mcp/servers 可见),
+    /// 运行期改配置经 `POST /api/mcp/servers/{name}/restart` 一键生效(PLGM 3)。
+    /// 由 run_server 在 serve 之前调用。
     pub async fn start_mcp(&self) {
         // 快照语义:不留锁跨 await(读开关与服务器清单用同一快照,避免锁守卫进入异步装配)
         let snapshot = self.settings_snapshot();
@@ -527,7 +528,8 @@ impl AppState {
             return;
         }
         // 宿主负责过滤 enabled 并传参:L3 的 mcp 模块不读 L2 的 RuntimeSettings,
-        // 只收 McpServerConfig 列表与 L1 的 &dyn ToolRegistrar(依赖倒置,见 mcp/mod.rs 头部)。
+        // 只收 McpServerConfig 列表与 L1 的 Arc<dyn ToolRegistrar>(依赖倒置,见 mcp/mod.rs 头部;
+        // Arc 供死亡注销/list_changed 重列的异步回调复用)。
         let servers: Vec<crate::models::tool_policy::McpServerConfig> = snapshot
             .mcp_servers
             .iter()
@@ -535,7 +537,7 @@ impl AppState {
             .cloned()
             .collect();
         let n_before = self.tool_registry.list_definitions().len();
-        self.mcp.start(servers, &self.tool_registry).await;
+        self.mcp.start(servers, self.tool_registry.clone()).await;
         let servers = self.mcp.server_count();
         if servers > 0 {
             let added = self.tool_registry.list_definitions().len() - n_before;
