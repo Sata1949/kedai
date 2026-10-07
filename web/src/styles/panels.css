@@ -651,6 +651,36 @@ input[type="range"].sv-range::-moz-range-thumb {
   color: var(--sv-ink);
   border-color: var(--sv-ink);
 }
+/* CU-1 急停按钮:黑条头部上的白字白边(与关闭按钮同族);置位后粉底黑字以示「已停止」 */
+.sv-cu-stop {
+  margin-left: auto;
+  margin-right: var(--space-2);
+  background: none;
+  border: var(--bw-thin) solid var(--sv-white);
+  color: var(--sv-white);
+  font-size: 11px;
+  line-height: 1;
+  padding: var(--space-1) var(--space-1-5);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.sv-cu-stop:hover:not(:disabled) {
+  background: var(--sv-pink);
+  color: var(--sv-ink);
+  border-color: var(--sv-ink);
+}
+.sv-cu-stop.stopping {
+  background: var(--sv-pink);
+  color: var(--sv-ink);
+  border-color: var(--sv-pink);
+}
+.sv-cu-stop:disabled { opacity: 0.6; cursor: default; }
+/* 急停操作反馈(面板头下方一行;样式随主题走 sv-note-mini,失败加红) */
+.sv-cu-msg {
+  padding: var(--space-1-5) var(--space-4);
+  border-bottom: var(--bw-thin) solid var(--sv-line);
+}
+.sv-cu-msg.err { color: var(--sv-red, #c0392b); }
 
 /* ===== Agent 面板分区标签页(「调用情况」面板合并入 AgentPanel 后的内部分区) ===== */
 .sv-agent-tabs {

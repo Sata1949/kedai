@@ -420,6 +420,8 @@ fn tool_when(name: &str) -> String {
         "image_diff" => "需要对比两张图像(改版前后截图等)的差异时调用;返回差异像素统计与可视化差异图。",
         // 截图工具(视觉能力包 D5;仅「视觉与截图」开关开启时下发)
         "screenshot" => "需要查看当前屏幕画面时调用(全屏 / 指定显示器 / 区域 / 窗口标题);用于读屏视觉验证(UI 检查、改版前后对比)。",
+        // 急停工具(CU-1;始终下发)
+        "stop_computer_control" => "用户要求你停止查看/操作其电脑,或你察觉当前屏幕读取并非用户所愿时调用;置位后电脑操作类工具(当前含截图)在用户恢复前一律拒绝执行。",
         _ => return String::new(),
     };
     s.to_string()
@@ -439,7 +441,9 @@ pub fn render_kind_for(name: &str) -> Option<&'static str> {
         | "agentend" | "sleep" | "censor_text" | "memory_read" | "memory_write"
         | "update_variables" | "get_state" | "apply_patch" | "submit" | "run_flow"
         // 工作区写/列族(编码通道批次)走通用渲染
-        | "fs_write" | "fs_edit" | "fs_glob" | "fs_patch" => Some("generic"),
+        | "fs_write" | "fs_edit" | "fs_glob" | "fs_patch"
+        // 急停工具(CU-1)走通用渲染
+        | "stop_computer_control" => Some("generic"),
         _ => None,
     }
 }

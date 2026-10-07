@@ -497,6 +497,30 @@ CREATE TABLE IF NOT EXISTS task_events (
   UNIQUE(task_id, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_task_events_task_seq ON task_events(task_id, seq);
+
+-- 电脑操作审计(CU-1,2026-10-06「安全前提」批):每次 cu 类工具调用尝试落一行
+-- (成功/被拒都落),回答「模型看了几次屏幕、什么时候被急停/未启用拦下」。
+-- 与 exec_audit 分表而非合并:那份是**命令执行**审计(含命令原文与输出摘要),
+-- 本表是**屏幕/输入类动作**审计,字段与保留口径同型但语义不同;
+-- **屏幕像素一律不入库**:只记范围描述/字节数/sha256/图像引用名(frame_id)。
+-- 保留窗口:最近 2000 行(写事务末尾按 id 删除最旧,与 exec_audit 同口径)。
+CREATE TABLE IF NOT EXISTS cu_audit (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts         TEXT NOT NULL,
+  source     TEXT NOT NULL DEFAULT 'chat',
+  task_id    TEXT,
+  session_id TEXT,
+  platform   TEXT NOT NULL DEFAULT '',
+  action     TEXT NOT NULL DEFAULT '',
+  target     TEXT NOT NULL DEFAULT '',
+  decision   TEXT NOT NULL DEFAULT 'allowed',
+  result     TEXT NOT NULL DEFAULT '',
+  error_code TEXT NOT NULL DEFAULT '',
+  image_ref  TEXT NOT NULL DEFAULT '',
+  png_bytes  INTEGER,
+  sha256     TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_cu_audit_ts ON cu_audit(ts DESC);
 "#;
 
 /// 暴露建表 SQL 供迁移一致性测试比对(旧库 ALTER 补列后应与新建表 schema normalize 一致)

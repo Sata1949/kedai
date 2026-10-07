@@ -2,8 +2,8 @@
 // (自 api/mod.rs build_router 迁入)
 use crate::api::app_state::AppState;
 use crate::api::{
-    audio, characters, exec, import_export, macros, plugins, resource, screen, skills,
-    slash_commands, tasks, user_scripts, workspace,
+    audio, characters, computer_use, exec, import_export, macros, plugins, resource, screen,
+    skills, slash_commands, tasks, user_scripts, workspace,
 };
 use axum::routing::{get, post, put};
 use axum::Router;
@@ -16,6 +16,14 @@ pub(crate) fn misc_routes() -> Router<Arc<AppState>> {
         .route(
             "/api/exec/audit",
             get(exec::list_audit).delete(exec::clear_audit),
+        )
+        // 电脑操作治理(CU-1):急停开关 + 操作审计(当前消费方 = screenshot 读屏通道)
+        .route("/api/computer-use/stop", post(computer_use::stop))
+        .route("/api/computer-use/resume", post(computer_use::resume))
+        .route("/api/computer-use/status", get(computer_use::status))
+        .route(
+            "/api/computer-use/audit",
+            get(computer_use::list_audit).delete(computer_use::clear_audit),
         )
         // 截图 / 无障碍状态(移动端视觉能力包 A3):状态查询与系统设置页跳转
         .route("/api/screen/status", get(screen::status))

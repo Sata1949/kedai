@@ -15,6 +15,7 @@ pub mod app_state;
 pub mod audio;
 pub mod characters;
 pub mod chat;
+pub mod computer_use;
 pub mod contract_history;
 pub mod contracts;
 pub mod diagnostics;

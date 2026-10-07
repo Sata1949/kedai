@@ -29,3 +29,4 @@ export * from './memory';
 export * from './repoIndex';
 export * from './undo';
 export * from './exec';
+export * from './computerUse';

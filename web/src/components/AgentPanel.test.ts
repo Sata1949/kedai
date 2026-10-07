@@ -106,6 +106,19 @@ describe('AgentPanel 合并结构(调用情况收编为内部 tab)', () => {
   });
 });
 
+// CU-1:电脑操作急停入口(与 Agent 的 stop_computer_control 工具写同一后端状态)
+describe('AgentPanel 电脑操作急停按钮(CU-1)', () => {
+  it('面板头渲染「停止操作电脑」入口(默认未停止)', async () => {
+    const html = await renderPanel((store) => {
+      store.currentSessionId = 's1';
+    });
+    // SSR 不跑 onMounted:cuStopped 默认 false → 显示「停止」形态与完整提示
+    expect(html).toContain('停止操作电脑');
+    expect(html).toContain('立即停止电脑操作');
+    expect(html).not.toContain('恢复操作电脑');
+  });
+});
+
 // 回归:面板开合只由 agentPanelOpen 决定,生成状态不再强行锁死展开。
 // 历史 bug:showPanel = generating || agentPanelOpen,生成期间关闭按钮写 false 无效。
 describe('AgentPanel 面板开合不再被生成状态锁死', () => {

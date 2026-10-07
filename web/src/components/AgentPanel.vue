@@ -3,10 +3,17 @@
 //   + 「调用情况」tab——原独立 CallTracePanel 面板收编为内部 tab 内容组件,两模式共用)
 // 角色扮演模式 = 聊天 Agent 推理链/工具调用;任务模式 = 当前任务的计划步骤/子任务执行
 // 生成中(或任务执行中)自动展开,用户可手动收起/展开
-import { computed, onUpdated, ref, type ComponentPublicInstance } from 'vue';
+import { computed, onMounted, onUpdated, ref, watch, type ComponentPublicInstance } from 'vue';
 import { useAppStore } from '../store';
 import { storeToRefs } from 'pinia';
-import { listUndoSnapshots, resolveToolAuthorization, restoreUndoSnapshot } from '../api';
+import {
+  getCuStatus,
+  listUndoSnapshots,
+  resolveToolAuthorization,
+  restoreUndoSnapshot,
+  resumeComputerUse,
+  stopComputerUse,
+} from '../api';
 import type { TaskSubtaskStatus, UndoSnapshot } from '../api';
 import { taskStatusClass, taskStatusLabel } from '../taskStatus';
 import CallTracePanel from './CallTracePanel.vue';
@@ -291,6 +298,44 @@ function subtaskDot(status: TaskSubtaskStatus): { cls: string; icon: string } {
   return { cls: '', icon: '·' };
 }
 
+// ===== CU-1:电脑操作急停(读屏/截图类工具的全局面板按钮) =====
+// 与后端 services::computer_use::ComputerUseControl 同源(Agent 的 stop_computer_control
+// 工具写同一状态);本按钮是**用户侧**入口,置位后截图类工具一律拒绝执行,直到点「恢复」。
+const cuStopped = ref(false);
+const cuBusy = ref(false);
+const cuMsg = ref('');
+
+/** 拉取急停状态(失败静默:面板按钮是辅助入口,不应因状态查询干扰主流程) */
+async function refreshCuStatus(): Promise<void> {
+  try {
+    cuStopped.value = (await getCuStatus()).stopped;
+  } catch {
+    /* 保持上次已知状态 */
+  }
+}
+
+/** 置位/解除急停(按钮点击);成功后即时切换标签,失败就近提示 */
+async function toggleCuStop(): Promise<void> {
+  if (cuBusy.value) return;
+  cuBusy.value = true;
+  cuMsg.value = '';
+  try {
+    const r = cuStopped.value ? await resumeComputerUse() : await stopComputerUse();
+    cuStopped.value = r.stopped;
+    cuMsg.value = r.stopped ? '已停止电脑操作(截图/读屏):点「恢复」前不会执行' : '已恢复电脑操作';
+  } catch (e) {
+    cuMsg.value = `操作失败:${e instanceof Error ? e.message : String(e)}`;
+  } finally {
+    cuBusy.value = false;
+  }
+}
+
+onMounted(() => void refreshCuStatus());
+// 面板展开时对齐一次服务端状态(急停也可能由 Agent 的 stop 工具置位)
+watch(showPanel, (open) => {
+  if (open) void refreshCuStatus();
+});
+
 </script>
 
 <template>
@@ -301,10 +346,27 @@ function subtaskDot(status: TaskSubtaskStatus): { cls: string; icon: string } {
         <span class="sv-supreme pink xs" />
         AGENT
       </h2>
+      <!-- CU-1 急停:置位后截图/读屏类工具一律拒绝执行(与 Agent 的 stop_computer_control 同一状态) -->
+      <button
+        class="sv-cu-stop"
+        :class="{ stopping: cuStopped }"
+        :disabled="cuBusy"
+        :title="
+          cuStopped
+            ? '恢复电脑操作:截图/读屏类工具重新可用'
+            : '立即停止电脑操作:截图/读屏类工具在恢复前一律拒绝执行'
+        "
+        @click="toggleCuStop"
+      >
+        {{ cuStopped ? '恢复操作电脑' : '停止操作电脑' }}
+      </button>
       <button class="sv-agent-panel-close" title="收起" @click="store.collapseAgentPanel()">
         ✕
       </button>
     </div>
+    <p v-if="cuMsg" class="sv-cu-msg sv-note-mini" :class="{ err: cuMsg.startsWith('操作失败') }">
+      {{ cuMsg }}
+    </p>
 
     <!-- 分区标签页(面板合并:Agent 状态 / 调用情况;选择经 uiPrefs.callTraceOpen 持久化记忆) -->
     <div class="sv-agent-tabs" role="tablist">

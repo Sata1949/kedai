@@ -101,6 +101,10 @@ pub struct ConcurrencyGuards {
     pub pending_runs: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
     /// bootstrap 令牌桶限频(每对端 IP 一窗口计数),防本地恶意网页/脚本高频枚举 token。
     pub bootstrap_limiter: Arc<Mutex<HashMap<String, (std::time::Instant, u32)>>>,
+    /// 电脑操作急停开关(CU-1,2026-10-06):与 ToolDeps 同源同一实例。
+    /// 放本组(setting「取消类」脚手架)而非 Core 的理由:它是运行期控制位,不承载业务语义——
+    /// 与 pending_runs(取消生成)同类;业务侧只有一个消费者(screenshot 执行侧闸门)。
+    pub cu_control: Arc<crate::services::computer_use::ComputerUseControl>,
 }
 
 /// 应用共享状态(axum State):核心服务 + 并发脚手架。
@@ -206,6 +210,8 @@ impl AppState {
         let tool_registry = Arc::new(ToolRegistry::with_permissions(ToolPermissionManager::load(
             config.data_dir.join("tool_permissions.json"),
         )));
+        // 电脑操作急停开关(CU-1):AppState(端点/按钮)与 ToolDeps(工具执行侧)同源同一实例
+        let cu_control = Arc::new(crate::services::computer_use::ComputerUseControl::new());
         let deps = Arc::new(ToolDeps {
             sessions: sessions.clone(),
             characters: characters.clone(),
@@ -224,6 +230,8 @@ impl AppState {
             // engine/tasks 尚不存在(构造顺序在其后),由下方 OnceLock 注入(批次 4.3b)
             engine: std::sync::OnceLock::new(),
             tasks: std::sync::OnceLock::new(),
+            // 电脑操作急停开关(CU-1):与 AppState 同源同一实例(见上方构造)
+            cu_control: cu_control.clone(),
         });
         crate::tools::register_builtin_tools(&tool_registry, deps.clone());
 
@@ -445,6 +453,8 @@ impl AppState {
                 settings_update: Arc::new(AsyncMutex::new(())),
                 pending_runs: Arc::new(Mutex::new(HashMap::new())),
                 bootstrap_limiter: Arc::new(Mutex::new(HashMap::new())),
+                // 与 ToolDeps 注入的是同一个 Arc(上方构造后 clone 两处)
+                cu_control,
             },
         }))
     }

@@ -20,6 +20,9 @@ pub mod cache_diagnostics;
 pub(crate) mod character_data;
 pub mod character_service;
 pub mod contract_changelog_service;
+// 电脑操作(computer use)运行期治理(CU-1,2026-10-06):急停开关 + 操作审计(cu_audit)。
+// 当前消费点:既有 screenshot 工具(读屏通道);GUI 工具族随 CU 提交 3/4 引入。
+pub mod computer_use;
 // 向量化服务(Phase 3):OpenAI 兼容 /embeddings 客户端 + 余弦/归一化工具
 pub mod embedding_service;
 // 命令执行抽象层(阶段 C):bash 工具与 Android 执行层共用的单一入口

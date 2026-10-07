@@ -65,6 +65,9 @@ pub struct ToolDeps {
     /// 任务服务(批次 4.3b:task: 前缀虚拟 session 的子 agent 进度经任务事件桥
     /// 发 agent_status,并落 task_llm_calls/task_usage;Weak 防循环,缺省 = 非任务模式)
     pub tasks: std::sync::OnceLock<std::sync::Weak<crate::services::task_service::TaskService>>,
+    /// 电脑操作急停开关(CU-1,2026-10-06):与 AppState 同源同一 `Arc`——
+    /// 工具执行侧(当前 = screenshot)置位后返回 CONTROL_STOPPED;端点/按钮负责置位与恢复。
+    pub cu_control: Arc<crate::services::computer_use::ComputerUseControl>,
 }
 
 impl ToolDeps {
@@ -108,6 +111,8 @@ impl ToolDeps {
             // 测试缺省不注入引擎/任务服务:子任务走纯生成回退路径
             engine: std::sync::OnceLock::new(),
             tasks: std::sync::OnceLock::new(),
+            // 测试各自的急停实例(默认未置位;用例可直接 stop() 验证拒绝路径)
+            cu_control: Arc::new(crate::services::computer_use::ComputerUseControl::new()),
         };
         (dir, deps)
     }

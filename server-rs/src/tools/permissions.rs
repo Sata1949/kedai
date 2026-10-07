@@ -518,6 +518,11 @@ fn default_risk(tool: &str) -> ToolRisk {
         // 不写文件系统、无破坏性动作,归危险级会被任务默认策略整体剔除。可见性另由
         // 「视觉与截图」总开关(默认关)在策略层过滤。
         "screenshot" => ToolRisk::Sensitive,
+        // 急停工具(CU-1,2026-10-06):**必须是安全级**——它是收紧动作,任何授权模式下
+        // (含严格/等待授权场景)都应能立即生效;若归危险级,任务默认策略(deny_dangerous)
+        // 会把它剔掉,恰恰让无人值守任务失去急停能力(与 screenshot 的取舍不同)。
+        // 只置位不解除(解除是用户决策,见 tools/stop_control.rs 文件头)。
+        "stop_computer_control" => ToolRisk::Safe,
         // 命令执行恒危险级:与文件写工具同级,但额外走「命令级风险强制确认」
         // (tools/command_risk.rs)。显式登记而非依赖下面的通配兜底,便于后续审查。
         "bash" => ToolRisk::Dangerous,

@@ -15,6 +15,7 @@ import { storeToRefs } from 'pinia';
 import { useAppStore } from '../../store';
 import { isAndroidTauri } from '../../platform';
 import * as screenApi from '../../api/screen';
+import * as cuApi from '../../api/computerUse';
 
 withDefaults(defineProps<{
   /** 是否显示(embedded 模式按 activeSection 切换;standalone 恒 true) */
@@ -34,6 +35,68 @@ const msgKind = ref<'ok' | 'err'>('ok');
 const screenStatus = ref<screenApi.ScreenStatus | null>(null);
 const screenLoading = ref(false);
 const screenMsg = ref('');
+
+// ===== CU-1:电脑操作治理(急停 + 操作审计) =====
+// 与 Agent 面板头的急停按钮写同一后端状态(services::computer_use::ComputerUseControl);
+// 本区是设置侧的常驻入口 + 审计查看(每次截图尝试恰一条,只记元数据不存画面)。
+const cuStopped = ref(false);
+const cuBusy = ref(false);
+const cuLoading = ref(false);
+const cuMsg = ref('');
+const cuEntries = ref<cuApi.CuAuditEntry[]>([]);
+
+/** 审计结果 → 展示标签(错误码优先;成功显示「已截图」) */
+const CU_RESULT_LABEL: Record<string, string> = {
+  '': '已截图',
+  CONTROL_STOPPED: '急停拒绝',
+  CAPTURE_DISABLED: '未启用',
+  CAPTURE_FAILED: '执行失败',
+};
+
+/** 读取急停状态 + 最近审计(进设置区时加载;失败就近提示,不清空已有列表) */
+async function loadCu(): Promise<void> {
+  cuLoading.value = true;
+  cuMsg.value = '';
+  try {
+    cuStopped.value = (await cuApi.getCuStatus()).stopped;
+    cuEntries.value = await cuApi.listCuAudit(100);
+  } catch (e) {
+    cuMsg.value = `读取失败:${(e as Error).message}`;
+  } finally {
+    cuLoading.value = false;
+  }
+}
+
+/** 置位/解除急停(与 Agent 面板同一后端状态;成功后刷新审计) */
+async function toggleCu(): Promise<void> {
+  if (cuBusy.value) return;
+  cuBusy.value = true;
+  cuMsg.value = '';
+  try {
+    const r = cuStopped.value ? await cuApi.resumeComputerUse() : await cuApi.stopComputerUse();
+    cuStopped.value = r.stopped;
+    cuMsg.value = r.stopped ? '已停止电脑操作:截图/读屏类工具在恢复前一律拒绝执行' : '已恢复电脑操作';
+  } catch (e) {
+    cuMsg.value = `操作失败:${(e as Error).message}`;
+  } finally {
+    cuBusy.value = false;
+  }
+}
+
+/** 清空审计(仅删行,不影响急停状态) */
+async function clearCu(): Promise<void> {
+  cuBusy.value = true;
+  cuMsg.value = '';
+  try {
+    const n = await cuApi.clearCuAudit();
+    cuEntries.value = [];
+    cuMsg.value = `已清空 ${n} 条记录`;
+  } catch (e) {
+    cuMsg.value = `清空失败:${(e as Error).message}`;
+  } finally {
+    cuBusy.value = false;
+  }
+}
 
 async function onToggle(next: boolean): Promise<void> {
   const prev = visionScreenshotEnabled.value;
@@ -84,6 +147,8 @@ async function openSystemAccessibility(): Promise<void> {
 onMounted(() => {
   // 仅 Android 壳内探测;桌面/浏览器无此概念(不发起无意义请求)
   if (isAndroidTauri) void loadScreenStatus();
+  // CU-1:急停状态与操作审计两平台都有(桌面 GDI 截图 / 安卓无障碍截图同一审计面)
+  void loadCu();
 });
 </script>
 
@@ -143,8 +208,95 @@ onMounted(() => {
           Android 13+ 侧载应用开启无障碍时,系统可能要求先在应用信息页允许「受限设置」。
         </p>
       </template>
+
+      <!-- CU-1:操作审计与急停(与 Agent 面板头按钮同一后端状态;两平台都有) -->
+      <div class="sv-separator" />
+      <div class="sv-field-label sub">操作审计与急停</div>
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">急停</label>
+        <span class="sv-tag" :class="cuStopped ? 'sensitive' : ''">
+          {{ cuLoading ? '读取中…' : cuStopped ? '已停止' : '未停止' }}
+        </span>
+        <button class="sv-btn ghost sv-btn-sm" :disabled="cuBusy" @click="toggleCu">
+          {{ cuStopped ? '恢复操作电脑' : '停止操作电脑' }}
+        </button>
+        <button class="sv-btn ghost sv-btn-sm" :disabled="cuLoading" @click="loadCu">刷新</button>
+      </div>
+      <p class="sv-note">
+        急停后截图/读屏类工具一律拒绝执行(结果码 CONTROL_STOPPED),直到点「恢复操作电脑」;
+        Agent 也内置了同名的自停能力,在你表示「别看我屏幕」时它会主动置位。
+        每次截图尝试(成功 / 被急停 / 未启用 / 执行失败)<b>都会</b>在此留一条记录:
+        <b>只记范围、尺寸与图像哈希,不保存屏幕画面</b>。
+      </p>
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">最近记录({{ cuEntries.length }})</label>
+        <button
+          class="sv-btn ghost sv-btn-sm"
+          :disabled="cuBusy || !cuEntries.length"
+          @click="clearCu"
+        >清空</button>
+      </div>
+      <div v-if="cuEntries.length" class="sv-cu-audit-list">
+        <div
+          v-for="e in cuEntries"
+          :key="e.id"
+          class="sv-cu-audit-row"
+          :class="{ denied: e.decision !== 'allowed' }"
+        >
+          <div class="sv-cu-audit-head">
+            <span class="sv-badge" :class="e.error_code ? 'destructive' : 'safe'">
+              {{ CU_RESULT_LABEL[e.error_code] ?? e.error_code }}
+            </span>
+            <span class="sv-tag sm">{{ e.platform }}</span>
+            <span class="sv-tag sm">{{ e.source === 'task' ? '任务' : '聊天' }}</span>
+            <span class="sv-note">{{ e.target }}</span>
+            <span class="sv-note">{{ e.ts }}</span>
+          </div>
+          <code v-if="e.image_ref" class="sv-cu-audit-ref">
+            图像 {{ e.image_ref }} · {{ e.png_bytes ?? 0 }} 字节 · sha256 {{ e.sha256.slice(0, 12) }}…
+          </code>
+        </div>
+      </div>
+      <p v-else class="sv-note">暂无电脑操作记录</p>
+      <p v-if="cuMsg" class="sv-note">{{ cuMsg }}</p>
     </div>
     <div v-if="msg" class="sv-feedback" :class="msgKind === 'err' ? 'err' : 'ok'">{{ msg }}</div>
     <div v-if="screenMsg" class="sv-feedback">{{ screenMsg }}</div>
   </div>
 </template>
+
+<style scoped>
+/* CU-1 操作审计列表(形态照 AndroidExecSection 的审计行;不引裸间距值) */
+.sv-cu-audit-list {
+  max-height: 320px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.sv-cu-audit-row {
+  border: 1px solid var(--sv-line, #d8d8d8);
+  padding: var(--space-1-5) var(--space-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: 12px;
+}
+.sv-cu-audit-row.denied {
+  border-color: var(--sv-red, #c0392b);
+  opacity: 0.85;
+}
+.sv-cu-audit-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  flex-wrap: wrap;
+}
+.sv-cu-audit-ref {
+  display: block;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: rgba(0, 0, 0, 0.04);
+  padding: 2px var(--space-1);
+}
+</style>

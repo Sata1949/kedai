@@ -797,6 +797,39 @@ pub fn ensure_exec_audit_table(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// 电脑操作审计表(CU-1,2026-10-06):每次 cu 类工具调用尝试落一行(成功/被拒都落)。
+/// 与 exec_audit 分表的理由见 schema.rs 同名表注释;**屏幕像素一律不入库**。
+/// 文本与 models/db/schema.rs CREATE_TABLES 内的建表语句保持一致(normalize 比对依赖)。
+pub(super) const CU_AUDIT_DDL: &str = r#"
+CREATE TABLE IF NOT EXISTS cu_audit (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts         TEXT NOT NULL,
+  source     TEXT NOT NULL DEFAULT 'chat',
+  task_id    TEXT,
+  session_id TEXT,
+  platform   TEXT NOT NULL DEFAULT '',
+  action     TEXT NOT NULL DEFAULT '',
+  target     TEXT NOT NULL DEFAULT '',
+  decision   TEXT NOT NULL DEFAULT 'allowed',
+  result     TEXT NOT NULL DEFAULT '',
+  error_code TEXT NOT NULL DEFAULT '',
+  image_ref  TEXT NOT NULL DEFAULT '',
+  png_bytes  INTEGER,
+  sha256     TEXT NOT NULL DEFAULT ''
+)"#;
+/// 审计按时间倒序查询的辅助索引。
+pub(super) const CU_AUDIT_INDEX_DDL: &str =
+    "CREATE INDEX IF NOT EXISTS idx_cu_audit_ts ON cu_audit(ts DESC)";
+
+/// 幂等补建电脑操作审计表(旧库无此表时创建;同 exec_audit 模式,启动与跨库合并前各跑一次均安全)。
+pub fn ensure_cu_audit_table(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(CU_AUDIT_DDL)
+        .map_err(|e| format!("创建 cu_audit 表失败: {e}"))?;
+    conn.execute_batch(CU_AUDIT_INDEX_DDL)
+        .map_err(|e| format!("创建 cu_audit 索引失败: {e}"))?;
+    Ok(())
+}
+
 /// 幂等补列(D1 审计增强,2026-09-26):exec_audit 加 `risk_flag`。
 ///
 /// 取值 `''` | `data_dir_touch`(命令文本命中数据目录绝对路径)| `parent_climb`

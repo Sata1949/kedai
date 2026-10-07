@@ -44,13 +44,15 @@ const VERBOSE = process.argv.includes('--verbose');
  * UIP-12 变动:panels 903→911(指针模态下 select 焦点收窄规则 8 行)。
  * UIP-14 变动:base 117→122(深底焦点反色规则 5 行——模态头/Agent 面板头为 ink 底,ink 描边不可见)。
  * UIP-15 变动:content 941→959(列表增删/重排过渡 sv-list 18 行——两处试点:记忆行/会话行)。
+ * CU-1 变动:panels 911→941(电脑操作急停按钮 + 反馈行 30 行——Agent 面板头新增用户侧急停
+ * 入口,与既有 .sv-agent-panel-close 同族样式;全局域行数上调仅为此一处新增控件)。
  */
 const LINE_BASELINE = {
   'style.css': 49,
   'styles/tokens.css': 144,
   'styles/base.css': 122,
   'styles/shell.css': 832,
-  'styles/panels.css': 911,
+  'styles/panels.css': 941,
   'styles/content.css': 959,
   'styles/task.css': 997,
   'styles/mobile.css': 434,

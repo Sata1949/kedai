@@ -7,8 +7,14 @@
 // 下发侧:任务路径经 `tool_policy::screenshot_gate`、聊天路径经
 // `tool_sets::filter_screenshot`,两处同一判据;执行侧再兜底校验一次(防凭历史臆造调用)。
 // 风险级 **Sensitive**(读屏即读敏感内容;但不写文件系统、不可回退,归危险级会被任务
-// 默认策略剔除)。**审计只记元数据**(范围/尺寸/DPI/窗口名,不含像素——exec_audit 仍是
-// bash 专属,见 docs/遗留.md 的工具级审计登记)。
+// 默认策略剔除)。
+//
+// CU-1(2026-10-06)起,本工具是「电脑操作治理」的第一个消费者:
+// - **急停闸**(`services::computer_use::ComputerUseControl`):置位后拒绝执行并返回稳定
+//   错误码 `CONTROL_STOPPED`;闸在最前(优先于开关判定,急停语义不能被开关掩盖);
+// - **审计落库**(`cu_audit` 表):每次尝试**有且只有一条**——成功、被急停/未启用拒绝、
+//   执行失败都落;只记元数据(范围/尺寸/字节数/sha256/图像引用名),**屏幕像素不入库**。
+//   (此前只打 tracing 元数据日志,缺口登记为 docs/遗留.md VISION-L8,本批收口。)
 //
 // 平台:`#[cfg(windows)]` 走原生 GDI(PrintWindow(PW_RENDERFULLCONTENT) 兜遮挡窗口,
 // 线程级 PER_MONITOR_AWARE_V2——server 与 Tauri 同进程,不做进程级);`#[cfg(target_os =
@@ -236,6 +242,138 @@ async fn screenshot_impl(
     ctx: &ToolContext,
     args: &serde_json::Value,
 ) -> Result<String, String> {
+    // CU-1:每次尝试恰一条审计(成功/被拒/执行失败都落),故统一在外层收口
+    let outcome = capture_once(deps, ctx, args).await;
+    audit_attempt(deps, ctx, PLATFORM, args, &outcome);
+    outcome.map(|o| o.into_payload())
+}
+
+/// 一次成功截图的产物(审计 + 返回载荷共用;像素只落盘,不进日志/审计)
+#[cfg_attr(not(any(windows, target_os = "android")), allow(dead_code))]
+struct CaptureOutcome {
+    /// 面向模型的说明文本
+    text: String,
+    /// 图像引用(ImageService 落盘产物;序列化进 `images` 数组)
+    reference: crate::models::types::ImageRef,
+    /// 范围描述(审计 target;成功行)
+    desc: String,
+    png_bytes: i64,
+    sha256: String,
+}
+
+#[cfg_attr(not(any(windows, target_os = "android")), allow(dead_code))]
+impl CaptureOutcome {
+    fn into_payload(self) -> String {
+        json!({ "text": self.text, "images": [self.reference] }).to_string()
+    }
+}
+
+/// 当前平台的审计口径(与编译分支一致;stub 平台不产生审计)
+#[cfg(windows)]
+const PLATFORM: &str = "windows";
+#[cfg(target_os = "android")]
+const PLATFORM: &str = "android";
+
+/// 参数级范围提示:失败路径拿不到解析后的 Target,审计仍要留下可读的范围意图
+#[cfg_attr(not(any(windows, target_os = "android")), allow(dead_code))]
+fn target_hint(args: &serde_json::Value) -> String {
+    if let Some(t) = args.get("window_title").and_then(|v| v.as_str()) {
+        if !t.trim().is_empty() {
+            return format!("窗口「{}」", t.trim());
+        }
+    }
+    if let Some(o) = args.get("region").and_then(|v| v.as_object()) {
+        let g = |k: &str| o.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
+        return format!(
+            "区域 ({},{}) {}×{}",
+            g("x"),
+            g("y"),
+            g("width"),
+            g("height")
+        );
+    }
+    match args.get("display").and_then(|v| v.as_i64()) {
+        Some(i) => format!("显示器 {i}"),
+        None => "全屏".to_string(),
+    }
+}
+
+/// 稳定错误码归类(前端与模型据此区分「被急停 / 未启用 / 执行出错」)
+#[cfg_attr(not(any(windows, target_os = "android")), allow(dead_code))]
+fn error_code_of(msg: &str) -> &'static str {
+    if msg.starts_with(crate::services::computer_use::CONTROL_STOPPED_CODE) {
+        "CONTROL_STOPPED"
+    } else if msg.contains("未启用") {
+        "CAPTURE_DISABLED"
+    } else {
+        "CAPTURE_FAILED"
+    }
+}
+
+/// 审计落一行(每次尝试恰一行;与 exec_audit 同款旁路语义:写入失败只告警不阻断)。
+#[cfg_attr(not(any(windows, target_os = "android")), allow(dead_code))]
+fn audit_attempt(
+    deps: &ToolDeps,
+    ctx: &ToolContext,
+    platform: &'static str,
+    args: &serde_json::Value,
+    outcome: &Result<CaptureOutcome, String>,
+) {
+    use crate::services::computer_use::{self, CuAuditRecord};
+    let (source, task_id) = computer_use::source_of(ctx);
+    let session_id = task_id.is_none().then(|| ctx.session_id.clone());
+    let rec = match outcome {
+        Ok(o) => CuAuditRecord {
+            source,
+            task_id,
+            session_id,
+            platform,
+            action: "read_screen",
+            target: o.desc.clone(),
+            decision: "allowed",
+            result: "ok",
+            error_code: String::new(),
+            image_ref: o.reference.id.clone(),
+            png_bytes: Some(o.png_bytes),
+            sha256: o.sha256.clone(),
+        },
+        Err(e) => CuAuditRecord {
+            source,
+            task_id,
+            session_id,
+            platform,
+            action: "read_screen",
+            // 失败路径用参数级提示(见 target_hint 注释)
+            target: target_hint(args),
+            // 与 exec_audit 同口径:denied = 未完成(授权拒绝或执行失败),
+            // result 与 error_code 给细分(急停/未启用 vs 其它失败)
+            decision: "denied",
+            result: if e.starts_with(computer_use::CONTROL_STOPPED_CODE)
+                || error_code_of(e) == "CAPTURE_DISABLED"
+            {
+                "refused"
+            } else {
+                "error"
+            },
+            error_code: error_code_of(e).to_string(),
+            image_ref: String::new(),
+            png_bytes: None,
+            sha256: String::new(),
+        },
+    };
+    computer_use::record(&deps.db, &rec);
+}
+
+/// 单次截图实现(不含审计;急停闸在最前,理由见文件头)
+#[cfg(windows)]
+async fn capture_once(
+    deps: &ToolDeps,
+    ctx: &ToolContext,
+    args: &serde_json::Value,
+) -> Result<CaptureOutcome, String> {
+    if deps.cu_control.is_stopped() {
+        return Err(crate::services::computer_use::stopped_message());
+    }
     // 执行侧兜底:开关关闭时明确拒绝(下发侧已剔除;防模型凭历史上下文臆造调用)
     if !deps.settings_snapshot().vision_screenshot_enabled {
         return Err("截图未启用:请在 设置 → 视觉与截图 中开启「允许截图工具取屏」".to_string());
@@ -257,7 +395,7 @@ async fn screenshot_impl(
     let shot = tokio::task::spawn_blocking(move || win::capture(&plan))
         .await
         .map_err(|e| format!("截图任务失败: {e}"))??;
-    // 审计只记元数据(不含像素):范围 / 尺寸 / DPI / 窗口名
+    // 日志仍只记元数据(不含像素);落库审计由外层 audit_attempt 统一收口
     tracing::info!(
         session_id = ctx.session_id.as_str(),
         target = target_desc.as_str(),
@@ -281,7 +419,13 @@ async fn screenshot_impl(
         "image/png",
         &shot.png,
     )?;
-    Ok(json!({ "text": text, "images": [reference] }).to_string())
+    Ok(CaptureOutcome {
+        text,
+        reference,
+        desc: shot.desc,
+        png_bytes: shot.png.len() as i64,
+        sha256: crate::services::computer_use::sha256_hex(&shot.png),
+    })
 }
 
 /// 安卓取屏实现(移动端视觉能力包 A3):无障碍 takeScreenshot → PNG → 既有图像通道。
@@ -292,8 +436,24 @@ async fn screenshot_impl(
     ctx: &ToolContext,
     args: &serde_json::Value,
 ) -> Result<String, String> {
+    // CU-1:每次尝试恰一条审计(与桌面同款,外层统一收口)
+    let outcome = capture_once(deps, ctx, args).await;
+    audit_attempt(deps, ctx, PLATFORM, args, &outcome);
+    outcome.map(|o| o.into_payload())
+}
+
+#[cfg(target_os = "android")]
+async fn capture_once(
+    deps: &ToolDeps,
+    ctx: &ToolContext,
+    args: &serde_json::Value,
+) -> Result<CaptureOutcome, String> {
     use crate::services::screen_capture_android as cap;
 
+    // CU-1 急停闸(最前:急停语义优先于开关判定,与桌面同口径)
+    if deps.cu_control.is_stopped() {
+        return Err(crate::services::computer_use::stopped_message());
+    }
     // 执行侧兜底 1:总开关(与桌面同口径;下发侧已剔除,防模型凭历史上下文臆造调用)
     if !deps.settings_snapshot().vision_screenshot_enabled {
         return Err("截图未启用:请在 设置 → 视觉与截图 中开启「允许截图工具取屏」".to_string());
@@ -355,7 +515,7 @@ async fn screenshot_impl(
     }
     let (width, height) =
         cap::png_dimensions(&bytes).ok_or_else(|| "截图回读校验失败:PNG 头部无效".to_string())?;
-    // 审计只记元数据(不含像素)
+    // 日志仍只记元数据(不含像素);落库审计由外层 audit_attempt 统一收口
     tracing::info!(
         session_id = ctx.session_id.as_str(),
         width,
@@ -369,7 +529,13 @@ async fn screenshot_impl(
         &bytes,
     )?;
     let text = format!("已截图(安卓整屏):输出 {width}×{height}。请基于图像实际内容回答。");
-    Ok(json!({ "text": text, "images": [reference] }).to_string())
+    Ok(CaptureOutcome {
+        text,
+        reference,
+        desc: format!("安卓整屏 {width}×{height}"),
+        png_bytes: bytes.len() as i64,
+        sha256: crate::services::computer_use::sha256_hex(&bytes),
+    })
 }
 
 /// 一次截图的产物(png 字节 + 元数据;像素只落盘,不进日志)
@@ -857,6 +1023,108 @@ mod tests {
             // 非 Windows:注册的实现直接给平台文案(本测试在桌面跑,此分支不执行)
             let _ = (&deps, &ctx);
         }
+    }
+
+    /// CU-1:急停置位 → 执行侧拒绝(CONTROL_STOPPED),审计恰一条 denied/refused、不落图
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn screenshot_refused_when_control_stopped_and_audited() {
+        use crate::services::computer_use;
+        let (_guard, deps) = ToolDeps::dummy_for_test();
+        // 打开截图开关:确保这一条是「急停」拦下的,而不是「未启用」(两者错误码必须可区分)
+        deps.settings.lock().unwrap().vision_screenshot_enabled = true;
+        deps.cu_control.stop();
+        let ctx = crate::models::types::ToolContext {
+            session_id: "s".into(),
+            character_id: String::new(),
+            agent_depth: 0,
+            scope: None,
+            budget: None,
+        };
+        let e = screenshot_impl(&deps, &ctx, &json!({})).await.unwrap_err();
+        assert!(e.starts_with(computer_use::CONTROL_STOPPED_CODE), "{e}");
+
+        let rows = computer_use::list(&deps.db, 10);
+        assert_eq!(rows.len(), 1, "每次尝试恰一条审计");
+        assert_eq!(rows[0].decision, "denied");
+        assert_eq!(rows[0].result, "refused");
+        assert_eq!(rows[0].error_code, "CONTROL_STOPPED");
+        assert_eq!(rows[0].platform, "windows");
+        assert_eq!(rows[0].action, "read_screen");
+        assert_eq!(rows[0].source, "chat");
+        assert!(
+            rows[0].sha256.is_empty()
+                && rows[0].image_ref.is_empty()
+                && rows[0].png_bytes.is_none(),
+            "被拒行不得带任何图像载荷痕迹"
+        );
+
+        // 恢复后同一调用不再走急停分支(用非法 region 在触碰 GDI 之前短路,不真截屏)
+        deps.cu_control.resume();
+        let e2 = screenshot_impl(
+            &deps,
+            &ctx,
+            &json!({ "region": { "x": 0, "y": 0, "width": 0, "height": 0 } }),
+        )
+        .await
+        .unwrap_err();
+        assert!(e2.contains("width/height 必须 ≥ 1"), "{e2}");
+        let rows = computer_use::list(&deps.db, 10);
+        assert_eq!(rows.len(), 2, "第二次尝试同样恰一条");
+        assert_eq!(rows[0].error_code, "CAPTURE_FAILED");
+        assert_ne!(rows[0].error_code, "CONTROL_STOPPED");
+    }
+
+    /// CU-1:未启用(开关关)也落审计,错误码 CAPTURE_DISABLED(与急停可区分、也与执行错误可区分)
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn screenshot_disabled_attempt_is_audited() {
+        use crate::services::computer_use;
+        let (_guard, deps) = ToolDeps::dummy_for_test();
+        // 默认开关关;不置急停
+        let ctx = crate::models::types::ToolContext {
+            session_id: "task:t7".into(),
+            character_id: String::new(),
+            agent_depth: 0,
+            scope: None,
+            budget: None,
+        };
+        let e = screenshot_impl(&deps, &ctx, &json!({"window_title": "记事本"}))
+            .await
+            .unwrap_err();
+        assert!(e.contains("未启用"), "{e}");
+        let rows = computer_use::list(&deps.db, 10);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].error_code, "CAPTURE_DISABLED");
+        assert_eq!(rows[0].result, "refused");
+        // 任务模式虚拟会话:source=task 且 task_id 落库(与 bash 审计同口径)
+        assert_eq!(rows[0].source, "task");
+        assert_eq!(rows[0].task_id.as_deref(), Some("t7"));
+        assert!(rows[0].session_id.is_none());
+        // 失败行用参数级范围提示(拿不到解析后的 Target)
+        assert_eq!(rows[0].target, "窗口「记事本」");
+    }
+
+    /// 参数级范围提示(审计失败行的 target):窗口优先,其次 region,再 display,缺省全屏
+    #[test]
+    fn target_hint_prefers_specific_scope() {
+        assert_eq!(target_hint(&json!({})), "全屏");
+        assert_eq!(target_hint(&json!({"display": 1})), "显示器 1");
+        assert_eq!(
+            target_hint(&json!({"region": {"x": 1, "y": 2, "width": 30, "height": 40}})),
+            "区域 (1,2) 30×40"
+        );
+        assert_eq!(
+            target_hint(&json!({"window_title": " 记事本 "})),
+            "窗口「记事本」"
+        );
+        // 窗口优先于 region/display(与 plan_target 的互斥校验互补:提示取最具体者)
+        assert_eq!(
+            target_hint(&json!({"window_title": "x", "display": 0})),
+            "窗口「x」"
+        );
+        // 空白标题视为缺省
+        assert_eq!(target_hint(&json!({"window_title": "   "})), "全屏");
     }
 
     /// 真机手动验证(默认 `#[ignore]`,按 docs/经验.md 纪律以 `--ignored` 显式跑):
