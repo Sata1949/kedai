@@ -29,6 +29,19 @@ export const MACRO_HINTS = [
   '{{trim}} 修饰下一宏去空白', '{{//注释}} 注释到行尾',
 ];
 
+export type InjectFileShape = 'st' | 'kedai' | 'unknown';
+
+/** 判定导入文件形状:顶层 prompts 数组 → 酒馆预设(与后端 parsing/preset.rs 的唯一依据对齐);
+ *  mode 字符串 + simple 字段 → 本工具导出配置(顶层形状见 exportInjectConfig);其余 → unknown。
+ *  注意 floors 不是酒馆预设判据(那是本工具自有楼层形状,导出配置里也有,故置于 kedai 之后) */
+export function detectInjectFileShape(data: unknown): InjectFileShape {
+  if (!data || typeof data !== 'object') return 'unknown';
+  const d = data as Record<string, unknown>;
+  if (Array.isArray(d.prompts)) return 'st';
+  if (typeof d.mode === 'string' && d.simple !== undefined) return 'kedai';
+  return 'unknown';
+}
+
 export function usePromptInject() {
   const store = useAppStore();
 
@@ -101,9 +114,9 @@ export function usePromptInject() {
     fs.forEach((f, i) => (f.order = i));
   }
 
-  /** 导入 JSON(智能识别格式):
-   *  - 有 floors 字段且条目带 role/position → 酒馆预设(替换楼层,自动切复杂模式)
-   *  - 有 mode/simple 字段 → 本工具导出 JSON(恢复完整配置含禁词库) */
+  /** 导入 JSON(智能识别格式,判定见 detectInjectFileShape):
+   *  - 顶层 prompts 数组 → 酒馆预设(替换楼层,自动切复杂模式)
+   *  - mode 字符串 + simple 字段 → 本工具导出 JSON(恢复完整配置含禁词库) */
   async function onImportPreset(e: Event): Promise<void> {
     const input = e.target as HTMLInputElement;
     const file = input.files?.[0];
@@ -120,18 +133,16 @@ export function usePromptInject() {
         throw new Error('文件不是有效的 JSON');
       }
 
-      const isStPreset = Array.isArray(data.floors) && data.floors.length > 0
-        && data.floors.every((f: Record<string, unknown>) => typeof f === 'object' && f !== null && 'role' in f && 'position' in f);
-      const isKedaiExport = typeof data.mode === 'string' && data.simple !== undefined;
+      const shape = detectInjectFileShape(data);
 
-      if (isStPreset) {
+      if (shape === 'st') {
         const count = injectDraft.value?.floors.length ?? 0;
         if (!window.confirm(`导入酒馆预设将替换当前 ${count} 条楼层配置,确定继续?`)) return;
         const result = await api.importPromptPreset(file);
         injectDraft.value = JSON.parse(JSON.stringify(result.config)) as api.PromptInjectConfig;
         store.promptInject = result.config;
         injectMsg.value = `已导入 ${result.imported} 条楼层(替换原配置)`;
-      } else if (isKedaiExport) {
+      } else if (shape === 'kedai') {
         const count = injectDraft.value?.floors.length ?? 0;
         if (!window.confirm(`导入配置将替换当前设置(含禁词库),确定继续?`)) return;
         // 迁移:若导入数据含 banned_words 且 banned_prompt 为空,自动迁移
