@@ -16,6 +16,7 @@ vi.stubGlobal('localStorage', {
 
 vi.mock('../api', () => ({
   fetchHistory: vi.fn(),
+  fetchAgentTrace: vi.fn(),
   swipeMessage: vi.fn(),
   getSessionTotalTokens: vi.fn(),
   getGlobalTotalTokens: vi.fn(),
@@ -31,6 +32,7 @@ vi.mock('../characterScriptSandbox', () => ({
 
 import * as api from '../api';
 import { broadcastCardEvent } from '../characterScriptSandbox';
+import { registerCharacterIdProvider } from './storeBridge';
 import { useChatStore } from './chat';
 
 const mocked = api as unknown as Record<string, ReturnType<typeof vi.fn>>;
@@ -78,10 +80,14 @@ beforeEach(() => {
   memStorage.clear();
   vi.clearAllMocks();
   setActivePinia(createPinia());
+  // 角色 id 经 storeBridge 提供(chat 的发送守卫依赖它;未注册时降级为 null,发送会被静默拦下)
+  registerCharacterIdProvider(() => 'c1');
   mocked.fetchHistory.mockResolvedValue(HISTORY.map((m) => ({ ...m })));
+  mocked.fetchAgentTrace.mockResolvedValue(null);
   mocked.getSessionTotalTokens.mockResolvedValue(0);
   mocked.getGlobalTotalTokens.mockResolvedValue(0);
   mocked.countTokens.mockResolvedValue(0);
+  mocked.stopChat.mockResolvedValue({ ok: true });
 });
 
 describe('swipeMessage 广播(卡级脚本事件流)', () => {
@@ -177,5 +183,114 @@ describe('FE-1 迟到响应守卫(切会话不丢新选择)', () => {
     late.resolve(999); // 旧响应迟到
     await flush();
     expect(store.contextTokens, '迟到计数属于旧会话消息集,应丢弃').toBe(7);
+  });
+});
+
+describe('SENDFIX-1 失败可见性(错误条 + trace 恢复尊重 error 态)', () => {
+  it('error 终态落错误条,成功 finish 清除', async () => {
+    const store = useChatStore();
+    await store.switchSession('s1');
+
+    store.onSseEvent({ type: 'error', code: 'rate_limit', message: '上游限流', retryable: true });
+    expect(store.lastError).toMatchObject({ code: 'rate_limit', message: '上游限流', retryable: true, rejected: false });
+    expect(store.agent.phase).toBe('error');
+
+    store.onSseEvent({
+      type: 'finish',
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2, context_tokens: 1, prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: 0 },
+      content: 'ok',
+    });
+    expect(store.lastError).toBeNull();
+  });
+
+  it('历史回拉不得把已落 error 的终态擦成空闲(旧判据:工具列表为空即 idleAgent)', async () => {
+    const store = useChatStore();
+    await store.switchSession('s1');
+    // 本地未落库草稿在场:error 终态会削草稿并请求回拉历史(从而触发 restoreAgentTrace)
+    store.messages.push({ id: -1, role: 'user', content: '草稿', extra: {}, streaming: false });
+    mocked.fetchAgentTrace.mockResolvedValue({ state: 'error', tool_calls: [], plan: [], step_index: 0 });
+
+    store.onSseEvent({ type: 'error', code: 'rate_limit', message: '上游限流', retryable: true });
+    await flush();
+    await flush();
+
+    expect(store.agent.phase, '错误态被历史回拉擦除=界面表现为「消息发出后什么都没发生」').toBe('error');
+    expect(store.agent.stepText).toBe('执行出错');
+  });
+
+  it('在途残留态(executing 且无工具调用)仍空闲化,不出现幽灵「执行中」', async () => {
+    mocked.fetchAgentTrace.mockResolvedValue({ state: 'executing', tool_calls: [], plan: [], step_index: 0 });
+    const store = useChatStore();
+    await store.switchSession('s1');
+    await flush();
+    await flush();
+    expect(store.agent.phase).toBe('idle');
+  });
+
+  it('HTTP 未受理(409):sendMessage 返回未受理,错误条标「发送失败」且不给重试按钮', async () => {
+    mocked.streamChat.mockImplementation((_p: unknown, handler: (e: api.SseEvent) => void) => {
+      handler({ type: 'error', code: 'http_409', message: '该会话正在生成中', retryable: true });
+      return { controller: { abort: vi.fn() }, accepted: Promise.resolve({ accepted: false, status: 409, message: '该会话正在生成中' }) };
+    });
+    const store = useChatStore();
+    await store.switchSession('s1');
+
+    const outcome = await store.sendMessage('你好');
+    expect(outcome.accepted).toBe(false);
+    expect(store.lastError).toMatchObject({ rejected: true, retryable: false, message: '该会话正在生成中' });
+  });
+
+  it('受理成功时 sendMessage 返回 accepted,不产生错误条', async () => {
+    mocked.streamChat.mockReturnValue({ controller: { abort: vi.fn() }, accepted: Promise.resolve({ accepted: true, status: 200 }) });
+    const store = useChatStore();
+    await store.switchSession('s1');
+
+    const outcome = await store.sendMessage('你好');
+    expect(outcome.accepted).toBe(true);
+    expect(store.lastError).toBeNull();
+  });
+});
+
+describe('SENDFIX-2 停止竞态(停止中过渡态)', () => {
+  it('stop 后保持生成态直到服务端 interrupted 到达(旧实现立即复位=可发送窗口)', async () => {
+    vi.useFakeTimers();
+    try {
+      mocked.streamChat.mockReturnValue({ controller: { abort: vi.fn() }, accepted: Promise.resolve({ accepted: true, status: 200 }) });
+      const store = useChatStore();
+      await store.switchSession('s1');
+      await store.sendMessage('你好');
+      expect(store.generating).toBe(true);
+
+      store.stop();
+      expect(store.stopping).toBe(true);
+      expect(store.generating, '停止中必须保持生成态,否则窗口期重发被后端 409 静默吞掉').toBe(true);
+
+      store.onSseEvent({ type: 'interrupted' });
+      expect(store.stopping).toBe(false);
+      expect(store.generating).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('服务端终态未达:兜底计时器到点后本地收尾并中止本地流', async () => {
+    vi.useFakeTimers();
+    const abort = vi.fn();
+    try {
+      mocked.streamChat.mockReturnValue({ controller: { abort }, accepted: Promise.resolve({ accepted: true, status: 200 }) });
+      const store = useChatStore();
+      await store.switchSession('s1');
+      await store.sendMessage('你好');
+
+      store.stop();
+      expect(store.stopping).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(abort).toHaveBeenCalled();
+      expect(store.stopping).toBe(false);
+      expect(store.generating).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

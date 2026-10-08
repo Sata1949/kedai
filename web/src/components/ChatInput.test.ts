@@ -79,6 +79,45 @@ describe('ChatInput 组件(阶段 A 补测)', () => {
     // 初始无 currentCharacterId 且无输入 → 禁用
     expect(wrapper.find('.sv-btn-send').attributes('disabled')).toBeDefined();
   });
+
+  it('停止中:停止按钮禁用并标注「正在停止」(SENDFIX-2 过渡态)', async () => {
+    const { store, wrapper } = mountInput();
+    store.generating = true;
+    await wrapper.vm.$nextTick();
+    store.stopping = true;
+    await wrapper.vm.$nextTick();
+
+    const btn = wrapper.find('.sv-btn-send.stop');
+    expect(btn.exists()).toBe(true);
+    expect(btn.attributes('disabled')).toBeDefined();
+    expect(btn.attributes('title')).toBe('正在停止…');
+  });
+});
+
+describe('ChatInput 发送失败草稿保留(SENDFIX-2)', () => {
+  it('未被受理(409/网络等)时原文留在输入框,不清空', async () => {
+    const { store, wrapper } = mountInput();
+    store.currentCharacterId = 'c1';
+    const sendSpy = vi.spyOn(store, 'sendMessage').mockResolvedValue({ accepted: false });
+
+    await wrapper.find('textarea').setValue('这条会被拒');
+    await wrapper.find('.sv-btn-send').trigger('click');
+    await vi.waitFor(() => expect(sendSpy).toHaveBeenCalled());
+    await wrapper.vm.$nextTick();
+
+    expect((wrapper.find('textarea').element as HTMLTextAreaElement).value, '发送失败必须保留原文').toBe('这条会被拒');
+  });
+
+  it('受理成功后清空输入框(正常路径不受影响)', async () => {
+    const { store, wrapper } = mountInput();
+    store.currentCharacterId = 'c1';
+    const sendSpy = vi.spyOn(store, 'sendMessage').mockResolvedValue({ accepted: true });
+
+    await wrapper.find('textarea').setValue('正常发送');
+    await wrapper.find('.sv-btn-send').trigger('click');
+    await vi.waitFor(() => expect(sendSpy).toHaveBeenCalled());
+    await vi.waitFor(() => expect((wrapper.find('textarea').element as HTMLTextAreaElement).value).toBe(''));
+  });
 });
 
 // 为什么这条断言在测试里而不是靠人看:.sv-model-select 的三角是 data-URI SVG,只带 viewBox
@@ -108,7 +147,7 @@ describe('ChatInput 图像附件(视觉能力包 D2)', () => {
 
     const { store, wrapper } = mountInput();
     store.currentCharacterId = 'c1';
-    const sendSpy = vi.spyOn(store, 'sendMessage').mockResolvedValue(undefined);
+    const sendSpy = vi.spyOn(store, 'sendMessage').mockResolvedValue({ accepted: true });
 
     const file = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], '图标.png', { type: 'image/png' });
     const fileInput = wrapper.find('input[type="file"]');
@@ -136,8 +175,8 @@ describe('ChatInput 图像附件(视觉能力包 D2)', () => {
     expect(payload[0].name).toBe('图标.png');
     expect(payload[0].mime).toBe('image/png');
     expect(payload[0].data_url.startsWith('data:image/png;base64,')).toBe(true);
-    // 发送后回收预览 URL(不再泄漏)
-    expect(revokeUrl).toHaveBeenCalledWith('blob:mock-1');
+    // 发送后回收预览 URL(不再泄漏);清空/回收发生在受理结果返回之后(SENDFIX-2),故等它落定
+    await vi.waitFor(() => expect(revokeUrl).toHaveBeenCalledWith('blob:mock-1'));
   });
 
   it('移除附件后回收其预览 URL,且不再渲染该预览(FE-2 验收)', async () => {

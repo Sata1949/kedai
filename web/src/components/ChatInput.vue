@@ -10,7 +10,7 @@ import type { AgentMode } from '../api';
 import { filterCommands, wordBeforeCursor } from './slashSuggest';
 
 const store = useAppStore();
-const { generating, currentCharacterId, agentMode, authorizationMode, model, models } = storeToRefs(store);
+const { generating, stopping, currentCharacterId, agentMode, authorizationMode, model, models } = storeToRefs(store);
 
 /** 授权三档:严格(读/写/删都需授权)/ 宽松(读/写放行,删需授权)/ 放行(仅系统路径写删需授权) */
 const AUTH_MODES = [
@@ -149,10 +149,14 @@ async function send(): Promise<void> {
   }
 
   const released = [...attachments.value];
-  text.value = '';
+  // SENDFIX-2:先不清空——等 HTTP 层受理结果;未受理(400/409/网络不可达)时原文与附件
+  // 留在输入框、由对话区错误条说明原因,避免「消息与输入文本一起消失」。
+  const outcome = await store.sendMessage(content, payload);
+  if (!outcome.accepted) return;
+  // 受理成功才清空;若等待期间用户已输入新内容则不动(极短窗口,防御性判定)
+  if (text.value === value) text.value = '';
   attachments.value = [];
   releasePreviews(released);
-  await store.sendMessage(content, payload);
 }
 
 function onKeydown(e: KeyboardEvent): void {
@@ -317,14 +321,19 @@ async function onModelChange(e: Event): Promise<void> {
         </button>
       </div>
 
-      <!-- 停止 / 发送 -->
+      <!-- 停止 / 发送(SENDFIX-2:「停止中」为等服务端收尾的过渡态,期间不可发送) -->
       <button
         v-if="generating"
         class="sv-btn-send stop"
-        title="停止生成"
+        :disabled="stopping"
+        :title="stopping ? '正在停止…' : '停止生成'"
+        :aria-label="stopping ? '正在停止' : '停止生成'"
         @click="store.stop()"
       >
-        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
+        <svg v-if="stopping" viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
+          <circle cx="12" cy="12" r="5" opacity="0.45" />
+        </svg>
+        <svg v-else viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
           <rect x="6" y="6" width="12" height="12" />
         </svg>
       </button>

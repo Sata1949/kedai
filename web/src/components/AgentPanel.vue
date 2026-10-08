@@ -459,7 +459,7 @@ watch(showPanel, (open) => {
       <div class="sv-agent-summary">
         <div class="sv-agent-summary-row">
           <span class="label">阶段</span>
-          <span class="value phase">{{ generating ? phaseText : (agent.chain.length ? phaseText : '就绪') }}</span>
+          <span class="value phase">{{ generating ? phaseText : (agent.chain.length || agent.phase === 'error' ? phaseText : '就绪') }}</span>
         </div>
         <div class="sv-agent-summary-row">
           <span class="label">模式</span>

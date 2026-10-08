@@ -22,8 +22,23 @@ import RenderPanelHost from './RenderPanelHost.vue';
 const store = useAppStore();
 const {
   messages, generating, currentSessionId, currentCharacterId, currentCharacter, currentCharacterName,
-  renderHtml, currentScriptHash, currentScriptAuthorized, mvuVariables, initVarEntries,
+  renderHtml, currentScriptHash, currentScriptAuthorized, mvuVariables, initVarEntries, lastError,
 } = storeToRefs(store);
+
+/** 错误条「重试」锚点:最后一条**已落库**用户消息(与服务端重发校验口径一致,见 resendMessage) */
+const retryTarget = computed<number | null>(() => {
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    const m = messages.value[i];
+    if (m.role === 'user' && m.id > 0) return m.id;
+  }
+  return null;
+});
+
+/** 重试上一次失败的生成:重发锚点消息(成功 finish 会清掉错误条) */
+function retryLastError(): void {
+  if (retryTarget.value === null) return;
+  void store.resendMessage(retryTarget.value);
+}
 
 /** 消息画布宿主(渲染面板折叠切换与水合的实现组件;el 为原 scrollArea 容器) */
 const panelHost = ref<InstanceType<typeof RenderPanelHost> | null>(null);
@@ -413,6 +428,32 @@ function bindRowRef(id: number, target: unknown): void {
       </div>
     </RenderPanelHost>
 
+    <!-- 发送/生成失败条(SENDFIX-1):错误必须可见——旧版错误只写进 Agent 面板且随即被
+         历史回拉擦除,界面表现为「消息发出后什么都没发生」;此处为对话区内的常驻可见层 -->
+    <div v-if="lastError" class="sv-feedback err sv-chat-error" role="alert">
+      <span class="sv-chat-error-text">
+        <b>{{ lastError.rejected ? '发送失败' : '生成失败' }}</b>
+        <span class="sv-chat-error-msg">{{ lastError.message }}</span>
+        <span v-if="lastError.code" class="sv-chat-error-code">({{ lastError.code }})</span>
+      </span>
+      <button
+        v-if="!lastError.rejected && lastError.retryable && retryTarget !== null"
+        type="button"
+        class="sv-btn primary sv-btn-sm"
+        :disabled="generating || !currentSessionId"
+        title="以同一条用户消息重新生成(上游限流/超时/网络类错误适用)"
+        @click="retryLastError()"
+      >重试</button>
+      <span v-else-if="lastError.rejected" class="sv-chat-error-hint">输入框已保留原文，可直接重新发送</span>
+      <button
+        type="button"
+        class="sv-icon-btn sv-chat-error-close"
+        aria-label="关闭错误提示"
+        title="关闭"
+        @click="store.dismissLastError()"
+      >✕</button>
+    </div>
+
     <!-- 底部输入区 -->
     <ChatInput />
 
@@ -420,3 +461,23 @@ function bindRowRef(id: number, target: unknown): void {
     <GreetingPickerModal v-if="greetingPickerOpen" :mode="greetingPickerMode" @close="greetingPickerOpen = false" />
   </section>
 </template>
+
+<style scoped>
+/* 发送/生成失败条(SENDFIX-1):对话区内的常驻可见层;间距走 --space-* 令牌(UIP-10 纪律)。
+   仅本组件作用域覆盖 .sv-feedback 的外边距(margin-top 来自全局域,此处按对话区版式改写)。 */
+.sv-chat-error {
+  flex-wrap: wrap;
+  margin: 0 var(--space-3) var(--space-2);
+}
+.sv-chat-error-text {
+  display: flex;
+  align-items: baseline;
+  flex: 1;
+  min-width: 0;
+  gap: var(--space-1-5);
+}
+.sv-chat-error-msg { word-break: break-word; }
+.sv-chat-error-code { font-size: 11px; opacity: 0.7; }
+.sv-chat-error-hint { font-size: 11px; opacity: 0.85; }
+.sv-chat-error-close { flex: none; }
+</style>

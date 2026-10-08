@@ -54,6 +54,37 @@ export const useChatStore = defineStore('app.chat', () => {
   const initVarEntries = ref<Record<string, string>>({});
   /** SSE 事件日志(前端采集,cap 500 丢最旧;事件监控面板数据源) */
   const eventLog = ref<ApiEventLogEntry[]>([]);
+  /** 停止生成进行中(SENDFIX-2):点停止后保持到服务端 interrupted 终态到达或兜底超时。
+   *  期间发送入口禁用——此前本地立即复位生成态存在约 2 秒可发送窗口,窗口内重发会被
+   *  后端 409「该会话正在生成中」拒掉,消息与输入文本被静默吞掉。 */
+  const stopping = ref(false);
+  /** 最近一次发送/生成失败(SENDFIX-1):对话区错误条数据源。
+   *  `rejected=true` = HTTP 层未受理(原文由输入框保留,无重试按钮);
+   *  `rejected=false` = 生成期失败(消息已落库,`retryable` 时可「重试」重发)。 */
+  const lastError = ref<{
+    code: string;
+    message: string;
+    retryable: boolean;
+    rejected: boolean;
+    at: number;
+  } | null>(null);
+
+  /** 停止兜底时长:服务端终态迟迟未达(流已断/后端异常)时本地收尾,避免「停止中」卡死 */
+  const STOP_FALLBACK_MS = 6000;
+  let stopFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** 清掉停止兜底计时器(终态到达或新一轮生成时调用) */
+  function clearStopFallback(): void {
+    if (stopFallbackTimer !== null) {
+      clearTimeout(stopFallbackTimer);
+      stopFallbackTimer = null;
+    }
+  }
+
+  /** 关闭错误条(用户主动 dismiss;新一轮发送/成功 finish 也会自动清) */
+  function dismissLastError(): void {
+    lastError.value = null;
+  }
 
   // ===== 会话管理 =====
   async function loadSessions(characterId: string): Promise<void> {
@@ -72,6 +103,7 @@ export const useChatStore = defineStore('app.chat', () => {
     currentSessionId.value = session.id;
     writeLastSessionId(cid, session.id);
     lastUsage.value = null;
+    lastError.value = null;
     agent.value = idleAgent();
     // 新会话恢复自动展开语义
     useUiPrefsStore().resetAgentPanelAutoSuppress();
@@ -125,18 +157,26 @@ export const useChatStore = defineStore('app.chat', () => {
    * 恢复角色扮演模式的 Agent 记录(只读):读 agent_sessions + tool_calls,
    * 把工具调用列表回填到 agent.value(状态置 done,历史记录不会处于 running)。
    * 无记录 / 请求失败时保持空闲态,不阻断聊天主流程。
+   *
+   * 非空闲**终态**必须保留(SENDFIX-1):旧判据「trace 缺失或工具列表为空」一律空闲化,
+   * 会把刚由 error 事件写入的错误态在历史回拉瞬间擦掉——界面表现为「消息发出后
+   * 什么都没发生」。在途态(planning/executing/tool_call,如进程被杀后的残留行)
+   * 仍按旧口径空闲化,避免幽灵「执行中」。
    */
   async function restoreAgentTrace(sessionId: string): Promise<void> {
     try {
       const trace = await api.fetchAgentTrace(sessionId);
       // 会话已切换:迟到的响应不得覆盖当前会话(loadHistory 并发可重入)
       if (currentSessionId.value !== sessionId) return;
-      if (!trace || trace.tool_calls.length === 0) {
+      const failed = trace?.state === 'error' || trace?.state === 'interrupted';
+      if (!trace || (!failed && trace.tool_calls.length === 0)) {
         agent.value = idleAgent();
         return;
       }
       const base = idleAgent();
       base.phase = trace.state === 'idle' ? 'finished' : trace.state;
+      if (trace.state === 'error') base.stepText = '执行出错';
+      if (trace.state === 'interrupted') base.stepText = '已中断';
       base.toolCalls = trace.tool_calls.map((c) => ({
         name: c.name,
         input: c.input,
@@ -204,15 +244,16 @@ export const useChatStore = defineStore('app.chat', () => {
   }
 
   // ===== 发送与流式生成 =====
-  async function sendMessage(text: string, attachments: api.ChatAttachment[] = []): Promise<void> {
+  /** 发送一条用户消息;返回 HTTP 层受理结果——未受理时调用方(ChatInput)保留用户草稿 */
+  async function sendMessage(text: string, attachments: api.ChatAttachment[] = []): Promise<api.SendOutcome> {
     const cid = currentCharacterIdValue();
-    if (!cid || generating.value) return;
+    if (!cid || generating.value) return { accepted: false };
 
     // 无会话时先新建(后端注入开场白,保证角色上下文完整)
     if (!currentSessionId.value) await newSession();
 
     messages.value.push({ id: -Date.now(), role: 'user', content: text, extra: {}, streaming: false });
-    await startStream(text, { attachments });
+    return startStream(text, { attachments });
   }
 
   /** 发起流式生成(用户消息已就位时不重复 push,供「编辑后重发」复用) */
@@ -224,11 +265,13 @@ export const useChatStore = defineStore('app.chat', () => {
       /** 图像附件(仅常规发送路径;重发/重生成不携带,见 ChatStreamPayload.attachments) */
       attachments?: api.ChatAttachment[];
     } = {},
-  ): Promise<void> {
+  ): Promise<api.SendOutcome> {
     const cid = currentCharacterIdValue();
-    if (!cid || generating.value) return;
+    if (!cid || generating.value) return { accepted: false };
     if (!currentSessionId.value) await newSession();
 
+    // 新一轮尝试:清掉上一轮错误条(成功 finish 也会清,见 onSseEvent)
+    lastError.value = null;
     generating.value = true;
     agent.value = { ...idleAgent(), phase: 'planning', stepText: '计划中…' };
     // 生成开始时自动展开右侧 Agent 面板(仅 Deep/Agent/Custom 模式,且用户本轮未主动收起过)。
@@ -238,7 +281,7 @@ export const useChatStore = defineStore('app.chat', () => {
     }
 
     const genSettings = useGenSettingsStore();
-    chatStream.start(
+    const outcome = await chatStream.start(
       {
         session_id: currentSessionId.value ?? undefined,
         character_id: cid,
@@ -253,6 +296,20 @@ export const useChatStore = defineStore('app.chat', () => {
       },
       onSseEvent,
     );
+    // HTTP 层未受理(400/409/网络不可达等):标「发送失败」并抑制重试按钮——此时没有
+    // 已落库的消息可作重发锚点,原文由输入框保留,用户改完原因直接在输入框重发。
+    // 文案与 api 层发出的 error 事件同源(api/chat.ts 的同一 message 交两条通道),此处
+    // 只补 rejected 标记;写法上不读 lastError.value,避免上文置 null 造成的控制流收窄。
+    if (!outcome.accepted) {
+      lastError.value = {
+        code: outcome.code ?? `http_${outcome.status ?? 0}`,
+        message: outcome.message ?? '发送未被受理',
+        retryable: false,
+        rejected: true,
+        at: Date.now(),
+      };
+    }
+    return outcome;
   }
 
   /**
@@ -429,6 +486,24 @@ export const useChatStore = defineStore('app.chat', () => {
       event,
     });
     if (eventLog.value.length > 500) eventLog.value.splice(0, eventLog.value.length - 500);
+    // 终态事件:清「停止中」与兜底计时器(SENDFIX-2;服务端 interrupted 到达即收尾)
+    if (event.type === 'finish' || event.type === 'interrupted' || event.type === 'error') {
+      stopping.value = false;
+      clearStopFallback();
+    }
+    // 失败可见性(SENDFIX-1):错误终态落错误条(对话区渲染 + 可重试入口),
+    // 成功 finish 清掉上一轮错误;其余事件不动错误条。
+    if (event.type === 'error') {
+      lastError.value = {
+        code: event.code,
+        message: event.message,
+        retryable: event.retryable,
+        rejected: false,
+        at: Date.now(),
+      };
+    } else if (event.type === 'finish') {
+      lastError.value = null;
+    }
     // 事件语义处理在 sseReducer.ts(reduceSseEvent 纯函数);此处仅应用变更到响应式状态
     const changes = reduceSseEvent(
       {
@@ -461,10 +536,25 @@ export const useChatStore = defineStore('app.chat', () => {
     if (changes.reloadHistory && currentSessionId.value) void loadHistory(currentSessionId.value);
   }
 
+  /**
+   * 停止生成(SENDFIX-2):只通知后端并进入「停止中」,保持生成态与服务端 interrupted
+   * 终态对齐;超时兜底本地收尾,避免服务端异常时「停止中」卡死。
+   * 旧实现本地立即复位生成态并中止流,存在约 2 秒可发送窗口——窗口内重发会被后端
+   * 409「该会话正在生成中」拒掉,且失败无提示,消息与输入被静默吞掉。
+   */
   function stop(): void {
+    if (!generating.value || stopping.value) return;
+    stopping.value = true;
     void chatStream.stop(currentSessionId.value)
       .catch((e) => console.warn('通知后端停止生成失败', e));
-    onSseEvent({ type: 'interrupted' });
+    clearStopFallback();
+    stopFallbackTimer = setTimeout(() => {
+      stopFallbackTimer = null;
+      if (!stopping.value) return;
+      // 兜底:中止本地流 + 本地合成中断终态(仅服务端终态未达的异常路径)
+      chatStream.abortLocal();
+      onSseEvent({ type: 'interrupted' });
+    }, STOP_FALLBACK_MS);
   }
 
   // ===== 会话压缩(阶段借鉴 harness) =====
@@ -563,6 +653,11 @@ export const useChatStore = defineStore('app.chat', () => {
     sessions,
     messages,
     generating,
+    /** 停止生成进行中(SENDFIX-2):发送入口据此禁用并显示「停止中…」 */
+    stopping,
+    /** 最近一次发送/生成失败(SENDFIX-1):对话区错误条数据源 */
+    lastError,
+    dismissLastError,
     agent,
     lastUsage,
     contextTokens,

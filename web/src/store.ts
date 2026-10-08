@@ -64,6 +64,8 @@ export const useAppStore = defineStore('app', () => {
     clearEventLog: chat.clearEventLog,
     setAgentMode: chat.setAgentMode,
     stop: chat.stop,
+    /** 关闭发送/生成失败条(SENDFIX-1) */
+    dismissLastError: chat.dismissLastError,
     removeMessage: chat.removeMessage,
     updateMessage: chat.updateMessage,
     resendMessage: chat.resendMessage,

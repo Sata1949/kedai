@@ -61,6 +61,26 @@ function emptyUsage(): TokenUsage {
   return { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, context_tokens: 0, prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: 0 };
 }
 
+/** 发送受理结果(SENDFIX):`accepted=false` = 本轮消息未被服务端受理(HTTP 非 2xx / 网络错误),
+ *  调用方应保留用户草稿(输入框不清空)并展示错误条。 */
+export interface SendOutcome {
+  accepted: boolean;
+  status?: number;
+  code?: string;
+  message?: string;
+}
+
+export interface ChatStreamHandle {
+  controller: AbortController;
+  /** HTTP 层是否受理(2xx 且拿到事件流);在响应到达时 settle,不等待生成结束 */
+  accepted: Promise<SendOutcome>;
+}
+
+/** 可重试判定(与后端 llm_error 分类同口径的粗判):限流/超时/服务端错误可重试,参数/鉴权类不可 */
+function retryableStatus(status: number): boolean {
+  return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
 export interface SseParser {
   push(chunk: Uint8Array): void;
   /** 喂入**已解出的 data 文本**(与 push 二选一):供共享读循环 stream.ts 复用同一解析器 */
@@ -102,12 +122,22 @@ export function createSseParser(onEvent: SseHandler): SseParser {
   };
 }
 
-/** 发起 Agent 聊天流;返回用于中断的 AbortController */
+/**
+ * 发起 Agent 聊天流;返回中止控制器与「HTTP 层是否受理」的承诺(SENDFIX)。
+ *
+ * 失败口径(2026-10-08 SENDFIX-1):HTTP 非 2xx / 网络异常 / 流未收终态即结束,
+ * 一律发 **error 终态事件**(携带服务端文案与可重试位),不再合成「step + 空 finish」——
+ * 旧口径把错误塞进 step 后即被 finish 覆盖,再被历史回拉擦除,界面表现为「什么都没发生」。
+ */
 export function streamChat(
   payload: ChatStreamPayload,
   onEvent: SseHandler,
-): AbortController {
+): ChatStreamHandle {
   const controller = new AbortController();
+  let settleAccepted: (outcome: SendOutcome) => void = () => {};
+  const accepted = new Promise<SendOutcome>((resolve) => {
+    settleAccepted = resolve;
+  });
   void (async () => {
     try {
       const res = await authorizedFetch(`${BASE}/chat/send`, {
@@ -116,28 +146,46 @@ export function streamChat(
         signal: controller.signal,
       });
       if (!res.ok || !res.body) {
-        // 失败必须发 finish(空 content),否则 store 的 generating 永远不复位,UI 卡在生成中。
         // 错误口径与 request() 一致:按结构化 code 分类(见 client.ts apiErrorMessage),
         // 错误体解析与 tasks 流共用 stream.ts 的单点实现。
         const { status, code, detail } = await readErrorParts(res);
-        onEvent({ type: 'step', step: '请求失败', detail: apiErrorMessage(status, code, detail) });
-        onEvent({ type: 'finish', usage: emptyUsage(), content: '' });
+        const message = apiErrorMessage(status, code, detail);
+        settleAccepted({ accepted: false, status, code, message });
+        onEvent({
+          type: 'error',
+          code: code || `http_${status}`,
+          message,
+          retryable: retryableStatus(status),
+        });
         return;
       }
+      settleAccepted({ accepted: true, status: res.status });
       // 读循环与帧解析走共享底座(stream.ts),终态判定仍由本层的 createSseParser 负责
       const parser = createSseParser(onEvent);
       await pumpSseFrames(res, (data) => parser.pushData(data));
       if (!parser.finish()) {
-        onEvent({ type: 'step', step: '连接中断', detail: '流在收到终态事件前结束' });
-        onEvent({ type: 'finish', usage: emptyUsage(), content: '' });
+        // 流在终态前结束:消息可能已受理,但本轮没有结果——必须让用户看见并可重试
+        onEvent({
+          type: 'error',
+          code: 'stream_interrupted',
+          message: '连接中断:流在收到终态事件前结束',
+          retryable: true,
+        });
       }
     } catch (e) {
-      // 网络异常同样必须发 finish 复位 generating(AbortError 是用户主动停止,由 interrupted 语义处理)
+      // 网络异常:请求可能未送达(accepted 已按未受理处理,调用方保留草稿);
+      // AbortError 是用户主动停止/上层切换流,由 interrupted 语义处理,不发事件。
       if ((e as Error).name !== 'AbortError') {
-        onEvent({ type: 'step', step: '网络错误', detail: (e as Error).message });
-        onEvent({ type: 'finish', usage: emptyUsage(), content: '' });
+        const message = (e as Error).message;
+        settleAccepted({ accepted: false, message });
+        onEvent({
+          type: 'error',
+          code: 'network_error',
+          message: `网络错误:${message}`,
+          retryable: true,
+        });
       }
     }
   })();
-  return controller;
+  return { controller, accepted };
 }
