@@ -31,6 +31,9 @@ server-rs/probe.ps1
 build-debug.log
 build-full.log
 
+# 仓库根 target/(本机日志、提交草稿等临时转储,非构建产物;cargo 产物在各自 crate 的 target/ 名下)
+/target/
+
 # 运行期用户数据:数据目录默认在 %APPDATA%\com.kedai.app\(见 README 目录结构一节);
 # 仅当 DATA_DIR 指回项目根时才会出现 data/,一律忽略
 data/
