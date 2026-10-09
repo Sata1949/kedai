@@ -199,6 +199,7 @@ pub(crate) async fn run_agent_loop(
         gate,
         // 单次调用超时覆盖(A 批 A1):solo 无节点级配置,恒走宿主既有判定
         None,
+        true,
     )
     .await;
     let model = engine.model();
@@ -281,6 +282,7 @@ pub(crate) async fn run_agent_loop(
                 &run_id,
                 retry_gate,
                 None,
+                true,
             )
             .await;
         }

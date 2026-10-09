@@ -117,6 +117,12 @@ pub struct ModeSettings {
     /// 每角色记忆容量上限(默认 200;0 = 不淘汰,钳 0..=10000)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_max_entries: Option<u32>,
+    /// 剧情推演词条同步·角色档开关(RPFLOW-2;默认 true = 开启)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worldbook_sync_character_enabled: Option<bool>,
+    /// 剧情推演词条同步·全局档开关(RPFLOW-2;默认 false = 关闭)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worldbook_sync_global_enabled: Option<bool>,
     /// 技能渐进披露开关(落地项 3;默认 true)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_progressive_disclosure: Option<bool>,
@@ -325,6 +331,13 @@ pub(super) fn default_memory_max_entries() -> u32 {
 
 /// 默认开启技能渐进披露(落地项 3)
 pub(super) fn default_skill_progressive_disclosure() -> bool {
+    true
+}
+
+/// 默认开启「剧情推演词条同步·角色档」(RPFLOW-2):deep/agent 归档步可更新
+/// 「绑定到当前角色的世界书 + 角色卡内嵌条目」里的绿灯(触发)词条;蓝灯(常驻)
+/// 条目只新建、不改写。
+pub(super) fn default_worldbook_sync_character_enabled() -> bool {
     true
 }
 
@@ -682,8 +695,37 @@ pub struct LiteraryRecommendSnapshot {
 ///
 /// 代价提示:非空时反思步骤会额外调用一次 LLM(判定失败可重试,存在有界次数上限)。
 /// 文本内不使用 `{{char}}` 等占位符(反思提示词不由宏系统展开),角色信息只以中性词指代。
+///
+/// RPFLOW-1(2026-10-08)改版口径:旧版把「只判定不重写」写进默认文本,与「强制批判+
+/// 用工具定点修改」的新流程冲突(且模型常见变体如 `**PASS**` 会解析失败 → 回退机械规则
+/// → 反思形同虚设)。新版:先逐项批判、发现问题**优先用工具定点修改**、最后单独一行判定。
 pub fn default_reflect_prompt() -> String {
-    r#"你是 Kedai 的草稿质量检查员。你会收到 [用户输入] 与 [模型草稿] 两部分,请只判定草稿是否合格,不要修改或重写草稿。
+    r#"你是 Kedai 的正文质量审查员。你会收到 [用户输入] 与 [模型草稿] 两部分,请先逐项批判,再给出判定。
+
+按以下标准逐项检查:
+1. 需求符合度:草稿是否服从用户提出的字数(如1200字)、风格、视角、情节走向要求;用户提问是否被正面回答,未回答即不合格。
+2. 人设与世界观:是否与角色设定、世界书内容一致,有无明显冲突或臆造事实。
+3. 输出纪律:是否遵循提示词要求的视角(用户指定视角时按要求叙述,未指定时默认角色视角);有无旁白标题、「以上是回复」「作为AI」等元文本;有无除 <UpdateVariable> 外的自定义 XML/HTML 标签;是否包含反思或推理过程本身。
+4. 完整性:草稿是否被截断(结尾半句、段落不完整);若上下文存在「当前状态」且状态发生变化,是否已输出格式正确的 <UpdateVariable> 块(<UpdateVariable><JSONPatch>[JSON 数组]</JSONPatch></UpdateVariable>);状态无变化时是否画蛇添足输出空块。
+5. 语言质量:有无明显语病、错别字、前后矛盾。
+
+修改要求:
+- 发现任何问题时,优先用工具做最小必要的定点修改(revise_passage 改段落、censor_text 做同义词替换),不要整段重写,也不要直接删词;没有可用工具时才只报告问题。
+- 不要把修改过程或审查意见写进正文。
+
+判定输出(严格遵守):
+- 全部达标:单独一行输出 PASS 或「通过」。
+- 任一不达标:单独一行输出 FAIL 或「不通过」,并用一句话指出主要问题(如:字数不足 / 未答疑问 / 视角漂移 / 结尾截断 / 状态未更新 / 非法标签 / 人设冲突),供修订参考。
+- 判定词只能单独成行(PASS / 通过 / FAIL / 不通过),否则视为无效判定。"#
+        .into()
+}
+
+/// 旧版内置反思提示词(v1,RPFLOW-1 之前的默认文本,2026-10-08 前的出厂值)。
+///
+/// 仅用于**升级迁移**:存量 settings.json 里逐字等于旧默认(或其文学版)的文本,
+/// 在 load / 设置写入期被重物化为新版默认(见 `rehydrate_default_reflect_prompt`);
+/// 用户自定义文本逐字优先,不经过本迁移。文本不得修改——它是迁移判据本身。
+pub const LEGACY_REFLECT_PROMPT_V1: &str = r#"你是 Kedai 的草稿质量检查员。你会收到 [用户输入] 与 [模型草稿] 两部分,请只判定草稿是否合格,不要修改或重写草稿。
 
 按以下标准逐项检查:
 1. 需求符合度:草稿是否服从用户提出的字数(如1200字)、风格、视角、情节走向要求;用户提问是否被正面回答,未回答即不合格。
@@ -696,9 +738,7 @@ pub fn default_reflect_prompt() -> String {
 - 不要让正文出现草稿。
 - 全部达标:第一行输出 PASS 或「通过」。
 - 任一不达标:第一行输出 FAIL 或「不通过」,第二行起用一句话指出主要问题(如:字数不足 / 未答疑问 / 视角漂移 / 结尾截断 / 状态未更新 / 非法标签 / 人设冲突),供修订参考。
-- 第一行只能是 PASS / 通过 / FAIL / 不通过 之一,否则视为无效判定。"#
-        .into()
-}
+- 第一行只能是 PASS / 通过 / FAIL / 不通过 之一,否则视为无效判定。"#;
 
 /// 文学能力包的「反思追加检查项」段(LIT-4,2026-10-06)。
 ///
@@ -774,8 +814,16 @@ impl RuntimeSettings {
     /// **空串不得回填**:它是「显式关闭反思、回退机械规则」的有效值,不是「未自定义」。
     /// 伪装的边界:用户若把内置默认文本逐字粘进提示词框(且未改动),会被视为未自定义。
     pub fn rehydrate_default_reflect_prompt(&mut self) {
+        // RPFLOW-1:旧版默认(v1)同样视为「未自定义」——升级后自动重物化为新版默认,
+        // 否则存量安装会因文本变了却逐字不等而永远停留在旧版(「只判定不重写」)。
+        let legacy_literary = format!(
+            "{}\n\n{}",
+            LEGACY_REFLECT_PROMPT_V1, LITERARY_REFLECT_ENHANCEMENT
+        );
         if self.reflect_prompt == default_reflect_prompt()
             || self.reflect_prompt == default_literary_reflect_prompt()
+            || self.reflect_prompt == LEGACY_REFLECT_PROMPT_V1
+            || self.reflect_prompt == legacy_literary
         {
             self.reflect_prompt = self.reflect_default_prompt();
         }
@@ -866,6 +914,8 @@ impl RuntimeSettings {
             llm_request_log: false,
             memory_distill_enabled: false,
             memory_inject_limit: default_memory_inject_limit(),
+            worldbook_sync_character_enabled: default_worldbook_sync_character_enabled(),
+            worldbook_sync_global_enabled: false,
             memory_inject_char_budget: default_memory_inject_char_budget(),
             memory_max_entries: default_memory_max_entries(),
             embedding_enabled: false,
@@ -1026,6 +1076,12 @@ impl RuntimeSettings {
         }
         if let Some(v) = ov.memory_distill_enabled {
             out.memory_distill_enabled = v;
+        }
+        if let Some(v) = ov.worldbook_sync_character_enabled {
+            out.worldbook_sync_character_enabled = v;
+        }
+        if let Some(v) = ov.worldbook_sync_global_enabled {
+            out.worldbook_sync_global_enabled = v;
         }
         if let Some(v) = ov.memory_inject_limit {
             out.memory_inject_limit = v;

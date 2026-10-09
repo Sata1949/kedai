@@ -190,6 +190,9 @@ pub(crate) async fn execute_generation(
     tx: &mpsc::Sender<SseEvent>,
     abort: &watch::Receiver<bool>,
     flag: &AbortFlag,
+    // 是否把正文增量透出为 Token 事件(RPFLOW-1):草稿步/归档步等隐藏步骤传 false,
+    // 产物不进消息气泡;工具调用/重试等其余事件照常透出。
+    emit_tokens: bool,
 ) -> Result<ExecutorResult, EngineError> {
     // LLM 请求快照(第四点·主题 A):开关开启时,把真正下发的完整消息数组落盘,
     // 供回放/调试「模型到底看到了什么」。失败仅告警,不阻塞生成。
@@ -268,7 +271,7 @@ pub(crate) async fn execute_generation(
             }
             chunk = chunk_rx.recv() => match chunk {
                 Some(chunk) => {
-                    if process_chunk(chunk, &mut content, &mut reasoning, &mut tool_calls, &mut usage, &mut finish_reason, &engine.tool_registry, tx, abort, flag).await? {
+                    if process_chunk(chunk, &mut content, &mut reasoning, &mut tool_calls, &mut usage, &mut finish_reason, &engine.tool_registry, tx, abort, flag, emit_tokens).await? {
                         return Ok(ExecutorResult { content, usage, interrupted: true, tool_calls, reasoning, finish_reason, self_heals: Vec::new(), budget_stopped: false });
                     }
                 }
@@ -338,6 +341,8 @@ async fn process_chunk(
     tx: &mpsc::Sender<SseEvent>,
     abort: &watch::Receiver<bool>,
     flag: &AbortFlag,
+    // 是否透出 Token 事件(RPFLOW-1;草稿/归档等隐藏步骤传 false)
+    emit_tokens: bool,
 ) -> Result<bool, String> {
     if *abort.borrow() {
         return Ok(true);
@@ -345,7 +350,9 @@ async fn process_chunk(
     match chunk {
         LlmStreamChunk::Token(text) => {
             content.push_str(&text);
-            send_event(SseEvent::Token { text }, tx, abort, flag).await?;
+            if emit_tokens {
+                send_event(SseEvent::Token { text }, tx, abort, flag).await?;
+            }
         }
         LlmStreamChunk::Reasoning(rc) => reasoning.push_str(&rc),
         LlmStreamChunk::ToolCall(call) => {
@@ -600,7 +607,9 @@ impl<'a> ToolGate<'a> {
 /// 单次生成 token 预算是否已达上限(HB-1,纯函数便于边界单测):
 /// 预算 0 = 关闭;口径 = 本 run 内工具循环累计 prompt+completion,「达到」即算超限
 /// (等于预算也停,与轮次上限的 `round >= max_rounds` 同口径)。
-fn budget_reached(used_tokens: i64, budget: u32) -> bool {
+/// token 预算是否已达(达到即算超限)。pub(super):run_loop 的归档步闸门复用同一判定
+/// (预算越线后不再追加自动调用),避免两处各写一份比较逻辑而漂移。
+pub(super) fn budget_reached(used_tokens: i64, budget: u32) -> bool {
     budget > 0 && used_tokens >= budget as i64
 }
 
@@ -644,6 +653,8 @@ pub(crate) async fn run_tool_loop(
     // Some = 该节点每次调用的时间预算(可收紧也可放宽),唯一来源是自定义流程节点的
     // `call_timeout_secs`。放在末位是为了让既有 5 个调用点只在传值处改动。
     call_timeout: Option<std::time::Duration>,
+    // 是否透出正文增量(RPFLOW-1):隐藏步骤(草稿/归档)传 false,工具调用照常透出
+    emit_tokens: bool,
 ) -> Result<ExecutorResult, EngineError> {
     // 轮次上限:缺省 32(settings 可调);至少 1 轮,防止配置异常导致死循环
     let max_rounds = params.max_tool_rounds.unwrap_or(32).max(1) as usize;
@@ -773,6 +784,7 @@ pub(crate) async fn run_tool_loop(
                     tx,
                     abort,
                     flag,
+                    emit_tokens,
                 ),
                 call_watchdog,
                 || {

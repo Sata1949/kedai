@@ -57,8 +57,9 @@ fn validate_config(_cfg: &PromptInjectConfig) -> Result<(), String> {
     Ok(())
 }
 
-/// 禁词条目:输出中出现 word 时,注入自省提示词要求换表达(所有模式),
-/// deep/agent/custom 模式另由引擎收尾调用 censor_text 工具替换为 replacement(同义改写)。
+/// 禁词条目(旧格式兼容)。**替换语义已退役(RPFLOW-2)**:旧实现由引擎在生成后
+/// 以空替换词调 `censor_text` 做「纯删除」,观感不自然;现在同义改写由反思模型的
+/// `revise_passage`/`censor_text`(带真实替换词)承担,注入侧仍要求模型自觉规避。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BannedWordEntry {
     /// 禁词(精确子串匹配)
@@ -153,8 +154,17 @@ impl SimplePromptConfig {
         )
     }
 
-    /// 从禁词提示词中提取禁用词列表(供引擎 censor_text 工具兜底替换用)
-    /// 规则:按 逗号/顿号/换行 分割,取首个冒号/冒号前的词
+    /// 从禁词配置中提取**显式词表**(仅显式词表标记「禁止出现:」/「禁止:」/「禁用:」
+    /// 或旧格式词条表时有值)。
+    ///
+    /// RPFLOW-2 语义修正:散文式提示词返回空——旧实现对无标记文本按标点整体切分,
+    /// 把「输出中禁止出现以下词语」这类指导语本身切成伪「禁词」,再被机械空替换删词,
+    /// 是「顾此失彼 + 观感不自然」的直接成因。
+    ///
+    /// **当前无生产调用方**(2026-10-09 审查确认):机械删词退役后,禁词纪律改由
+    /// [`Self::banned_words_hint`] 原文交给反思模型;本函数保留给「调用方需要列举具体词」
+    /// 的场景(如未来把命中词写进事件明细),行为由单测锁定。旧格式词条表
+    /// (banned_prompt 为空)仍直接返回词,兼容未迁移的历史数据。
     pub fn banned_words_extract(&self) -> Vec<String> {
         let text = if !self.banned_prompt.trim().is_empty() {
             self.banned_prompt.clone()
@@ -182,11 +192,8 @@ impl SimplePromptConfig {
                 }
             }
         }
-        // 无标记词时,按分隔符整体切分
-        text.split([',', '、', '\n', '，', '。'])
-            .map(|w| w.trim().to_string())
-            .filter(|w| !w.is_empty())
-            .collect()
+        // 无显式词表标记:散文提示词不提供机械词表(改由反思 LLM 按提示词自主改写)
+        Vec::new()
     }
 }
 
@@ -555,18 +562,26 @@ mod tests {
 
     #[test]
     fn banned_words_extract_from_prompt() {
-        // 从纯文本提示词提取禁用词(供 censor_text 工具)
+        // 显式词表标记:提取标记后的词
         let mut cfg = PromptInjectConfig::default();
         cfg.simple.banned_prompt = "输出中禁止出现:笨蛋、脏话、滚".to_string();
         let words = cfg.simple.banned_words_extract();
         assert_eq!(words, vec!["笨蛋", "脏话", "滚"]);
 
-        // 无标记词时按分隔符整体切分
+        // RPFLOW-2:散文提示词(无显式词表标记)不再按标点整体切分——
+        // 旧行为把指导语本身切碎当「禁词」,再被机械空替换删词(观感不自然的成因)
         cfg.simple.banned_prompt = "笨蛋、脏话".to_string();
-        let words2 = cfg.simple.banned_words_extract();
-        assert_eq!(words2, vec!["笨蛋", "脏话"]);
+        assert!(
+            cfg.simple.banned_words_extract().is_empty(),
+            "无标记的散文提示词不得给出机械词表"
+        );
+        cfg.simple.banned_prompt = "输出中禁止出现以下词语,如:笨蛋、脏话、滚".to_string();
+        assert!(
+            cfg.simple.banned_words_extract().is_empty(),
+            "「禁止出现以下词语,如:…」无精确标记,同样不给机械词表"
+        );
 
-        // 旧格式:直接从词条表取词
+        // 旧格式:直接从词条表取词(兼容未迁移的历史数据)
         cfg.simple.banned_prompt = String::new();
         cfg.simple.banned_words = vec![BannedWordEntry {
             word: "笨蛋".into(),

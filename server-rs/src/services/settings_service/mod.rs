@@ -52,6 +52,7 @@ use params::{
     default_task_step_budget_secs, default_task_tool_policy, default_task_total_budget_secs,
     default_tool_authorization_timeout_secs, default_tool_history_budget_tokens,
     default_tool_history_keep_rounds, default_undo_enabled, default_user_role,
+    default_worldbook_sync_character_enabled,
 };
 
 #[cfg(test)]
@@ -272,6 +273,15 @@ pub struct RuntimeSettings {
     /// 超限时把最低分条目置 selected=0 归档(只归档不删除)
     #[serde(default = "default_memory_max_entries")]
     pub memory_max_entries: u32,
+    /// 剧情推演词条同步·角色档(RPFLOW-2):deep/agent 归档步的 `worldbook_update`
+    /// 可更新「绑定到当前角色的世界书 + 角色卡内嵌条目」中的绿灯(触发)词条;
+    /// 命中蓝灯(常驻)条目时不改写,改为新建绿灯条目。默认开启。
+    #[serde(default = "default_worldbook_sync_character_enabled")]
+    pub worldbook_sync_character_enabled: bool,
+    /// 剧情推演词条同步·全局档(RPFLOW-2):同上,作用范围为全局世界书(未绑定角色)。
+    /// 默认关闭——全局书常服务多个角色,改动影响面更大。
+    #[serde(default)]
+    pub worldbook_sync_global_enabled: bool,
     /// 向量化(embedding)开关:开启且凭据齐全时,记忆写入同步生成向量、召回走混合打分
     #[serde(default)]
     pub embedding_enabled: bool,
@@ -383,7 +393,10 @@ pub struct RuntimeSettings {
 
 #[cfg(test)]
 mod tests {
-    use super::params::{default_literary_reflect_prompt, default_reflect_prompt};
+    use super::params::{
+        default_literary_reflect_prompt, default_reflect_prompt, LEGACY_REFLECT_PROMPT_V1,
+        LITERARY_REFLECT_ENHANCEMENT,
+    };
     use super::*;
     use crate::utils::test_support::TempDataDir;
 
@@ -1625,9 +1638,9 @@ mod tests {
         );
     }
 
-    /// 反思提示词文学变体与判定协议(LIT-4,2026-10-06):
+    /// 反思提示词文学变体与判定协议(LIT-4,2026-10-06;RPFLOW-1 随默认词改版同步):
     /// ① 判据入口两态:开关关 → 逐字等于现行版;开关开 → 现行文本为逐字节前缀 + 追加检查项;
-    /// ② 判定协议不破:四值首行与「只判定不重写」纪律逐字保留(反思解析侧既有断言依赖)。
+    /// ② 判定协议不破:判定标记与「不把修改写进正文」纪律逐字保留(反思解析侧既有断言依赖)。
     #[test]
     fn literary_reflect_prompt_variant_and_protocol() {
         let cfg = test_cfg();
@@ -1648,11 +1661,11 @@ mod tests {
         for item in ["文风漂移", "复读", "代答", "时间线矛盾"] {
             assert!(lit.contains(item), "文学版应含追加检查项:{item}");
         }
-        // ② 协议与纪律逐字保留(解析侧只认四值首行;首行之外的判定纪律不得改动)
+        // ② 协议与纪律逐字保留(RPFLOW-1 改版后的判定协议;解析侧只认标记行)
         for seg in [
-            "第一行只能是 PASS / 通过 / FAIL / 不通过 之一",
-            "不要修改或重写草稿",
-            "不要让正文出现草稿",
+            "判定词只能单独成行(PASS / 通过 / FAIL / 不通过)",
+            "不要整段重写,也不要直接删词",
+            "不要把修改过程或审查意见写进正文",
         ] {
             assert!(lit.contains(seg), "文学版不得改动判定协议:{seg}");
         }
@@ -1714,6 +1727,80 @@ mod tests {
         );
         let got = write(&dir, "", true);
         assert_eq!(got.reflect_prompt, "", "空串 = 显式关闭反思,不得回填");
+    }
+
+    /// RPFLOW-1:旧版默认反思提示词(v1)迁移——存量 settings.json 里逐字等于旧版默认
+    /// (或旧版文学版)的文本,升级后自动重物化为新版默认(否则存量安装永远停留在
+    /// 「只判定不重写」的旧文本上,新流程的批判修改纪律只对新装生效);自定义逐字优先。
+    #[test]
+    fn load_migrates_legacy_reflect_prompt() {
+        let cfg = test_cfg();
+        let write = |dir: &std::path::Path, prompt: &str, on: bool| {
+            let mut v = serde_json::to_value(RuntimeSettings::from_config(&cfg)).unwrap();
+            let obj = v.as_object_mut().unwrap();
+            obj.insert("reflect_prompt".into(), serde_json::json!(prompt));
+            obj.insert("literary_bundle_enabled".into(), serde_json::json!(on));
+            std::fs::write(
+                dir.join("settings.json"),
+                serde_json::to_string_pretty(&v).unwrap(),
+            )
+            .unwrap();
+            RuntimeSettings::load(dir, &cfg)
+        };
+        let dir = tmp_dir("reflect-legacy-migrate");
+        // ① 旧版默认 + 开关关 → 迁到新版默认
+        let got = write(&dir, LEGACY_REFLECT_PROMPT_V1, false);
+        assert_eq!(
+            got.reflect_prompt,
+            default_reflect_prompt(),
+            "旧版默认应迁移为新版默认"
+        );
+        // ② 旧版文学版(旧默认 + 文学增强段)+ 开关开 → 迁到新版文学默认
+        let legacy_lit = format!(
+            "{}\n\n{}",
+            LEGACY_REFLECT_PROMPT_V1, LITERARY_REFLECT_ENHANCEMENT
+        );
+        let got = write(&dir, &legacy_lit, true);
+        assert_eq!(
+            got.reflect_prompt,
+            default_literary_reflect_prompt(),
+            "旧版文学默认应迁移为新版文学默认"
+        );
+        // ③ 自定义文本 → 逐字优先,不迁移
+        let got = write(&dir, "CUSTOM-LEGACY-CHECK", true);
+        assert_eq!(
+            got.reflect_prompt, "CUSTOM-LEGACY-CHECK",
+            "自定义文本不得被迁移覆盖"
+        );
+    }
+
+    /// RPFLOW-2:剧情推演词条同步两档开关——默认值(角色档 true / 全局档 false)与落盘往返。
+    #[test]
+    fn worldbook_sync_switches_defaults_and_roundtrip() {
+        let cfg = test_cfg();
+        let s = RuntimeSettings::from_config(&cfg);
+        assert!(s.worldbook_sync_character_enabled, "角色档默认开启");
+        assert!(!s.worldbook_sync_global_enabled, "全局档默认关闭");
+        // 往返:写入 false/true → 重载还原(缺字段回默认的路径由 serde default 保证)
+        let dir = tmp_dir("worldbook-sync-roundtrip");
+        let mut v = serde_json::to_value(&s).unwrap();
+        let obj = v.as_object_mut().unwrap();
+        obj.insert(
+            "worldbook_sync_character_enabled".into(),
+            serde_json::json!(false),
+        );
+        obj.insert(
+            "worldbook_sync_global_enabled".into(),
+            serde_json::json!(true),
+        );
+        std::fs::write(
+            dir.join("settings.json"),
+            serde_json::to_string_pretty(&v).unwrap(),
+        )
+        .unwrap();
+        let got = RuntimeSettings::load(&dir, &cfg);
+        assert!(!got.worldbook_sync_character_enabled, "关掉角色档应还原");
+        assert!(got.worldbook_sync_global_enabled, "打开全局档应还原");
     }
 
     /// 文风预设判据与选择型字段归一化(LIT-6,2026-10-06):

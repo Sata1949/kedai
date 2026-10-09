@@ -146,6 +146,12 @@ pub struct UpdateSettingsBody {
     /// 每角色记忆容量上限(0..=10000;0 = 不淘汰)
     #[serde(default)]
     pub memory_max_entries: Option<u32>,
+    /// 剧情推演词条同步·角色档(RPFLOW-2;默认 true)
+    #[serde(default)]
+    pub worldbook_sync_character_enabled: Option<bool>,
+    /// 剧情推演词条同步·全局档(RPFLOW-2;默认 false)
+    #[serde(default)]
+    pub worldbook_sync_global_enabled: Option<bool>,
     /// 向量化开关(开启后记忆写入生成向量、召回走混合打分)
     #[serde(default)]
     pub embedding_enabled: Option<bool>,
@@ -377,6 +383,8 @@ fn settings_json(s: &RuntimeSettings) -> Value {
         "memory_inject_limit": s.memory_inject_limit,
         "memory_inject_char_budget": s.memory_inject_char_budget,
         "memory_max_entries": s.memory_max_entries,
+        "worldbook_sync_character_enabled": s.worldbook_sync_character_enabled,
+        "worldbook_sync_global_enabled": s.worldbook_sync_global_enabled,
     });
     let rest = json!({
         "embedding_enabled": s.embedding_enabled,
@@ -878,6 +886,13 @@ pub async fn update_settings(
             // 记忆蒸馏开关(落地项 2)
             if let Some(v) = body.memory_distill_enabled {
                 apply!(s, is_task, memory_distill_enabled, v);
+            }
+            // 剧情推演词条同步两档(RPFLOW-2):角色档默认开、全局档默认关
+            if let Some(v) = body.worldbook_sync_character_enabled {
+                apply!(s, is_task, worldbook_sync_character_enabled, v);
+            }
+            if let Some(v) = body.worldbook_sync_global_enabled {
+                apply!(s, is_task, worldbook_sync_global_enabled, v);
             }
             // 记忆注入上限(0..=50;0 = 关闭注入,越界忽略)
             if let Some(v) = body.memory_inject_limit {

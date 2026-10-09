@@ -236,19 +236,21 @@ async fn agent_plan() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    // deep 模式:计划生成步(先写 ≤200 字计划再输出正文)+ 反思步(理解意图步已废弃)
+    // deep 模式(RPFLOW-1 改版):草稿步(隐藏草稿) → 正文步 → 反思步 → 归档步
     let steps = deep["plan"]["steps"].as_array().unwrap();
-    assert_eq!(steps.len(), 2);
-    assert_eq!(steps[0]["generates"], json!(true));
-    assert_eq!(steps[1]["action"], json!("reflect"));
+    assert_eq!(steps.len(), 4);
+    assert_eq!(steps[0]["action"], json!("draft"));
     assert!(
         steps[0]["system_prompt"]
             .as_str()
             .unwrap_or("")
             .contains("200 字"),
-        "deep 生成步应先写 ≤200 字计划: {:?}",
+        "草稿步应限定 ≤200 字: {:?}",
         steps[0]["system_prompt"]
     );
+    assert_eq!(steps[1]["generates"], json!(true));
+    assert_eq!(steps[2]["action"], json!("reflect"));
+    assert_eq!(steps[3]["action"], json!("archive"));
 
     // 缺少 message → 400
     let (status, _) = send_json(app, "POST", "/api/agent/plan", json!({})).await;

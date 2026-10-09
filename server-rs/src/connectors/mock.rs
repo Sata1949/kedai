@@ -4,6 +4,9 @@
 // [[tool_raw:name {...}]] 模拟「max_tokens 把 tool_call 参数 JSON 切成半截」
 // (任务引擎截断自愈,问题①);has_tool_result 固定回复分支内含回复钩子守卫
 // ([[reply_if:]]/[[reply:]] 优先,规划器侦察轮后的计划 JSON 产出用,问题②)。
+// [[tool_if:子串|name {...}]] 为**系统门控版工具钩子**(RPFLOW):仅当任一 system 含
+// 该子串时产出 ToolCall,用于按步骤精确投喂(deep 流程草稿/正文步无工具,
+// [[tool:]] 在 mock 的「空列表=全放行」语义下无法区分步骤)。
 use crate::models::llm_error::{LlmError, LlmErrorKind};
 use crate::models::types::{GenerationParams, LlmMessage, LlmStreamChunk, ToolCallArgs};
 use std::time::Duration;
@@ -50,6 +53,23 @@ impl MockConnector {
         // 工具循环第二轮:已有 tool 结果 → 返回固定完成回复
         // (先于通用分支检查 tool_loop 多轮钩子,保证显式多轮测试钩子不被通用完成回复短路)
         let has_tool_result = messages.iter().any(|m| m.role == "tool");
+        // RPFLOW 非主线步骤判据:草稿/反思/归档步的 system 都带引擎追加的固定段。
+        // 主线工具钩子([[tool_loop:]] 家族与 [[tool:]]/[[tool_echo:]]/[[tool_raw:]]/
+        // [[mvu_tool:]])是为「同一条 user 消息驱动的一轮工具循环」设计的;这些步骤
+        // 复跑同一 user 消息时会让钩子再次产出,造成与主线**重复的工具流量**
+        // (实测:9 轮用例被反思/归档步翻倍)。非主线步骤的接线测试统一用
+        // [[tool_if:]] / [[reply_if_any:]] 门控(见 engine_characterization 的 RPFLOW 用例)。
+        // **刻意不按 `tool_choice=None` 闸钩子**:严格档自定义步骤也传 None,而既有覆盖
+        // 依赖 mock 仍产出 ToolCall(证明引擎拒绝派发)——钩子只认步骤 needle。
+        // (跨层耦合点:NON_MAINLINE_STEP_NEEDLES 三个 needle 分别取自
+        //  planner::DRAFT_PROMPT / planner::ARCHIVE_PROMPT / 反思纪律段,改文案须同步本处。)
+        let non_mainline_step = messages.iter().any(|m| {
+            m.role == "system"
+                && NON_MAINLINE_STEP_NEEDLES
+                    .iter()
+                    .any(|n| m.content.contains(n))
+        });
+        let tool_hooks_on = !non_mainline_step;
 
         // 取最后一个 user 消息,截 60 字符
         let last_user = messages
@@ -100,7 +120,9 @@ impl MockConnector {
         // 它保持参数逐字相同(供重复调用熔断的回归测试);
         // [[tool_loop_text:name|N args]] 同 plain,但每轮附带一句短正文(HB-1 用例)。
         // 注入的判别字段会被工具忽略(read 等只读已知键),不影响工具行为。
-        if let Some((name, n, args, repeat, text)) = extract_tool_loop_marker(&last_user) {
+        if let Some((name, n, args, repeat, text)) =
+            gate_tool(tool_hooks_on, extract_tool_loop_marker(&last_user))
+        {
             let executed = messages.iter().filter(|m| m.role == "tool").count();
             if executed < n {
                 let arguments = if repeat {
@@ -152,7 +174,7 @@ impl MockConnector {
         // 后续轮(已有 tool 结果)回显完整 LLM 消息结构:assistant 消息带 `[calls:N]` 标记
         // (N = 该 assistant 消息携带的 tool_calls 数),tool 消息为 `[tool] 内容`。
         // 供集成测试断言「一轮并行调用回填为 1 条 assistant(tool_calls=[2]) + 2 条 tool」。
-        if let Some((name, args)) = extract_tool_echo_marker(&last_user) {
+        if let Some((name, args)) = gate_tool(tool_hooks_on, extract_tool_echo_marker(&last_user)) {
             if messages.iter().any(|m| m.role == "tool") {
                 let lines: Vec<String> = messages
                     .iter()
@@ -242,13 +264,41 @@ impl MockConnector {
             return Ok(chunks);
         }
 
+        // 测试钩子:[[tool_if:子串|name {json}]] → 返回 ToolCall(**系统门控版**)
+        // 与 [[tool:]] 的分工:标记从**末条 user** 提取,但仅当任一 system 消息含「子串」
+        // 时产出。用于按步骤精确投喂工具调用(RPFLOW:deep 模式的草稿/正文步无工具,
+        // 标志必须只在反思/归档步生效——[[tool:]] 对「无工具列表」的草稿步同样放行,
+        // 无法区分步骤)。反射轮只下发 censor_text/revise_passage/read,同样按
+        // tool_offered 过滤(与 [[tool:]] 同口径,防凭空调用未下发工具);
+        // 本钩子**不受 non_mainline_step 闸限制**(它就是为定向投喂非主线步骤而设的)。
+        if let Some((name, args)) =
+            extract_tool_if_marker(&last_user, messages).filter(|(n, _)| tool_offered(&params, n))
+        {
+            chunks.push(LlmStreamChunk::ToolCall(ToolCallArgs {
+                id: "mock-tool-if-1".into(),
+                name,
+                arguments: args,
+            }));
+            chunks.push(LlmStreamChunk::Usage {
+                prompt_tokens: 5,
+                completion_tokens: 3,
+                total_tokens: 8,
+                prompt_cache_hit_tokens: 0,
+                prompt_cache_miss_tokens: 0,
+                reasoning_tokens: 0,
+            });
+            chunks.push(tool_calls_finish());
+            return Ok(chunks);
+        }
+
         // 测试钩子:[[tool:name {"json"}]] → 返回 ToolCall
         // 仅当该工具在本轮 tools 白名单内才产出(见 tool_offered):反射轮只下发
         // censor_text/revise_passage/read,若无视白名单会凭空再执行一次 write,
         // 产生重复副作用与多余快照——真实模型受 tools 参数约束,不可能这样调用。
-        if let Some((name, args)) =
-            extract_tool_marker(&last_user).filter(|(n, _)| tool_offered(&params, n))
-        {
+        if let Some((name, args)) = gate_tool(
+            tool_hooks_on,
+            extract_tool_marker(&last_user).filter(|(n, _)| tool_offered(&params, n)),
+        ) {
             chunks.push(LlmStreamChunk::ToolCall(ToolCallArgs {
                 id: "mock-call-1".into(),
                 name,
@@ -271,7 +321,7 @@ impl MockConnector {
         // (max_tokens < TOOL_RAW_MIN_BUDGET)时返回 ToolCall(arguments = args 左半,
         // 非法 JSON)+ Finish{reason:"length"};预算充足(自愈翻倍重发后)返回完整
         // ToolCall(arguments = args 原文)。重发为同消息数组原样重发,故按预算区分两轮。
-        if let Some((name, args)) = extract_tool_raw_marker(&last_user) {
+        if let Some((name, args)) = gate_tool(tool_hooks_on, extract_tool_raw_marker(&last_user)) {
             if params.max_tokens < TOOL_RAW_MIN_BUDGET {
                 let half: String = args.chars().take(args.chars().count() / 2).collect();
                 chunks.push(LlmStreamChunk::ToolCall(ToolCallArgs {
@@ -456,7 +506,7 @@ impl MockConnector {
         // 测试钩子:[[mvu_tool:name|json]] → 返回 ToolCall(两步生成第二轮专用)。
         // 与 [[reply:...]] 配合:reply 解析在首个 "]]" 截断,标记残余随角色回复保留到
         // 第二轮 user 消息;约定 args 为单行 JSON,此处取到行尾/首个 "]]" 即可还原。
-        if let Some((name, args)) = extract_mvu_tool_marker(&last_user) {
+        if let Some((name, args)) = gate_tool(tool_hooks_on, extract_mvu_tool_marker(&last_user)) {
             chunks.push(LlmStreamChunk::ToolCall(ToolCallArgs {
                 id: "mock-mvu-call-1".into(),
                 name,
@@ -793,6 +843,28 @@ fn extract_mvu_text_marker(input: &str) -> Option<String> {
 /// 导致「工具白名单被收窄」的轮次(如反射轮仅 censor_text/revise_passage/read)
 /// 仍会重复产出同一写工具调用,凭空多出副作用与快照——那是 mock 不忠实,而非真实行为。
 /// tools 为空表示本轮未启用工具(不靠白名单限制,保留旧行为,兼容既有用例)。
+/// 非主线步骤的 system 判据(RPFLOW):草稿/归档/反思步的 system 各带一个固定段。
+/// 见 `generate` 内 `non_mainline_step` 的说明(主线工具钩子在这些步骤不产出)。
+const NON_MAINLINE_STEP_NEEDLES: &[&str] = &[
+    "【本步指令·草稿】",
+    "【本步指令·归档与同步】",
+    "【反思纪律(本轮强制)】",
+];
+
+/// 工具钩子总闸(RPFLOW-1):非主线步骤(草稿/归档/反思,见 `NON_MAINLINE_STEP_NEEDLES`)
+/// 时主线工具钩子一律不产出——这些步骤复跑同一条 user 消息,不放闸会与主线重复产出
+/// 工具流量(实测:9 轮用例被反思/归档步翻倍)。
+/// **不要改回按 `tool_choice` 闸**:`tool_choice=None` 在严格档自定义步骤上同样成立,
+/// 而既有覆盖(`custom_strict_step_does_not_dispatch_tools`)依赖 mock 仍产出 ToolCall
+/// 来证明「引擎拒绝派发工具」——按 tool_choice 闸会直接压垮该用例。
+fn gate_tool<T>(on: bool, v: Option<T>) -> Option<T> {
+    if on {
+        v
+    } else {
+        None
+    }
+}
+
 fn tool_offered(params: &GenerationParams, name: &str) -> bool {
     params.tools.is_empty() || params.tools.iter().any(|t| t.name == name)
 }
@@ -911,6 +983,26 @@ fn system_contains_needle(messages: &[LlmMessage], needle: &str) -> bool {
             .match_indices(needle)
             .any(|(idx, _)| !m.content[..idx].ends_with("[[reply_if:"))
     })
+}
+
+/// 提取 [[tool_if:子串|name {json}]] 标记(RPFLOW):标记从**末条 user** 提取,
+/// 仅当任一 system 消息含「子串」时返回 (工具名, 参数 JSON)。
+/// 与 [[tool:]] 的唯一差异 = **系统门控**:deep 模式的草稿/正文步在 mock 的
+/// `tool_offered`「空列表 = 全放行」语义下同样会命中 [[tool:]],无法只让反思步触发;
+/// 本钩子按 system 内容精确定位步骤(命中口径与 reply_if 完全一致)。
+fn extract_tool_if_marker(input: &str, messages: &[LlmMessage]) -> Option<(String, String)> {
+    const MARK: &str = "[[tool_if:";
+    let start = input.find(MARK)?;
+    let rest = &input[start + MARK.len()..];
+    let end = rest.find("]]")?;
+    let inner = &rest[..end];
+    let (needle, payload) = inner.split_once('|')?;
+    let needle = needle.trim();
+    if needle.is_empty() || !system_contains_needle(messages, needle) {
+        return None;
+    }
+    let (name, args) = payload.trim().split_once(' ')?;
+    Some((name.trim().to_string(), args.trim().to_string()))
 }
 
 /// 提取 [[reply_if_any:子串|内容]] 标记:从**全量消息**扫描标记(而非只认末条 user),

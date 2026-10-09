@@ -294,8 +294,10 @@ pub(in crate::agents::engine) fn build_llm_messages_with_position(
                     floors_in_chat.push((floor.role.as_str().to_string(), content));
                 }
             }
-            // 禁词库自省提示:所有模式生效(简单模式由 simple_inject_text 追加,
-            // 复杂模式在此追加;deep/agent/custom 另由引擎收尾工具替换兜底)。
+            // 禁词库自省提示:所有模式生效(简单模式由 simple_inject_text 追加,复杂模式在此追加)。
+            // 机械空替换删除已退役(RPFLOW-2,观感不自然):deep/agent 由反思纪律段 +
+            // 反思模型的工具同义改写承担,custom 走 reflect_with_tools(同段纪律);
+            // 其余模式仅注入本自省提示,不在引擎侧做任何机械替换。
             let banned_hint = cfg.simple.banned_words_hint();
             if !banned_hint.is_empty() {
                 let expanded = expand_macros(&banned_hint, &mut mctx);

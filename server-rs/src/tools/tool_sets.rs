@@ -13,7 +13,16 @@ use crate::models::types::ToolDefinition;
 /// 释放**的工具——名单是运行期数据,全局可见毫无意义(聊天与 solo/multi/team 都不该
 /// 看到它);真正用得着它的那条路径由 `task_engine/custom.rs` 显式把定义塞进
 /// `params.tools` 并进闸门名单,不依赖本清单。
-pub const META_TOOLS: &[&str] = &["get_state", "apply_patch", "run_flow"];
+///
+/// `worldbook_update`(RPFLOW-2 归档步)同为按名单释放:由 deep/agent 流程第 4 步经
+/// `step.tools = ARCHIVE_TOOLS` 显式下发;不进默认列表,避免正文生成轮被诱导改写
+/// 用户的世界书条目(角色原文设定)。
+///
+/// 生效口径(与本清单其它成员一致,`run_flow` 先例):请求级默认工具列表
+/// (`api/chat.rs`)与任务全量模式(`task_engine/tool_policy.rs`)经 [`exclude_meta`]
+/// 剔除;自定义流程步骤显式选「全部工具」(`tools: []`)时**不剔除**——那是用户的
+/// 显式选择,元工具随之可见(`messages/steps.rs` 只做工作区剔除;既有口径,非本批引入)。
+pub const META_TOOLS: &[&str] = &["get_state", "apply_patch", "run_flow", "worldbook_update"];
 
 /// 规划器只读侦察白名单:规划阶段允许模型先收集信息再产出计划 JSON;
 /// 严禁写操作(违背 plan/legacy「只规划不执行」零副作用纪律)与编排类(会把规划变成执行)。
@@ -32,6 +41,15 @@ pub const SUBAGENT: &[&str] = &[
 
 /// 反思阶段工具白名单:仅禁词替换与定点修订;dirty 文本修正不引入检索类工具。
 pub const REFLECT: &[&str] = &["censor_text", "revise_passage"];
+
+/// 归档步工具白名单(RPFLOW-2:deep/agent 流程第 4 步「剧情归档与词条同步」)。
+///
+/// 成员:角色文件区读写(`read`/`write`/`replace`/`create`,file target 语义)+
+/// 世界书词条同步(`worldbook_update`,行为见 `tools/worldbook.rs`)。
+/// **只按名单释放**:归档步在计划里显式配置 `step.tools = ARCHIVE_TOOLS`,
+/// 不依赖默认工具列表(`worldbook_update` 已在 [`META_TOOLS`] 中剔除,
+/// 同 `run_flow` 先例——名单是运行期数据,全局可见毫无意义)。
+pub const ARCHIVE_TOOLS: &[&str] = &["read", "write", "replace", "create", "worldbook_update"];
 
 /// 工作区文件工具族(编码通道批次)的名字清单(**单一出处**:注册侧、风险级、任务工具策略
 /// 的工作区闸门与「何时调用」指南都以它为准)。
@@ -226,7 +244,10 @@ mod tests {
     /// 追加 `fs_patch`——两者均属**有意**扩列,理由见常量文档)
     #[test]
     fn constants_match_legacy_literals() {
-        assert_eq!(META_TOOLS, &["get_state", "apply_patch", "run_flow"]);
+        assert_eq!(
+            META_TOOLS,
+            &["get_state", "apply_patch", "run_flow", "worldbook_update"]
+        );
         assert_eq!(
             READONLY_SCOUT,
             &["read", "search", "memory_read", "calculator"]

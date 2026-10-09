@@ -56,7 +56,8 @@ impl AgentEngine {
 
         let mut idx = 0usize;
         // 反思重试回退时,丢弃上一个 direct 步骤里工具循环追加的中间消息
-        let base_len = rctx.llm_messages.len();
+        // (可变:草稿步把下界抬到注记之后,见 draft 分支——注记必须在场)
+        let mut base_len = rctx.llm_messages.len();
         while idx < plan.steps.len() {
             check_aborted(abort)?;
             let step = &plan.steps[idx];
@@ -99,54 +100,71 @@ impl AgentEngine {
                 // 含补丁时视为有效输出(纯变量更新响应不再被规则 1/3 误判而白重试)。
                 let (mut reflect_text, reflect_patches) = parse_update_variable(&content);
                 let has_updates = !reflect_patches.is_empty();
-                // 反思加强:禁词检测与工具修正。正文(剥离补丁块后)含启用禁词时,
-                // 直接调用 censor_text 修改工具做删除/同义替换,而非仅靠提示词约束或
-                // 重生成(模型重生成可能再次写出同一批禁词)。修正只作用于正文,
-                // <UpdateVariable> 补丁块原样保留,避免误伤 JSONPatch 中的变量键/值。
-                // fast 模式不带工具,维持既有「仅自省提示预防」策略。
-                if req.mode != "fast" && !reflect_text.trim().is_empty() {
-                    let simple = &ctx.inject_snapshot.simple;
-                    if simple.banned_words_enabled {
-                        let words = simple.banned_words_extract();
-                        let hits: Vec<&String> = words
-                            .iter()
-                            .filter(|w| !w.trim().is_empty() && reflect_text.contains(w.trim()))
-                            .collect();
-                        if !hits.is_empty() {
-                            let entries: Vec<serde_json::Value> = hits
-                                .iter()
-                                .map(|w| json!({ "word": w.trim(), "replacement": "" }))
-                                .collect();
-                            let cctx = ToolContext {
-                                session_id: session_id.to_string(),
-                                character_id: req.character_id.clone(),
-                                agent_depth: 0,
-                                // 角色扮演链路不绑工作区:工作区文件工具不会在此下发
-                                scope: None,
-                                budget: None,
-                            };
-                            let args = json!({ "text": reflect_text, "entries": entries });
-                            match self
-                                .tool_registry
-                                .execute("censor_text", &args.to_string(), cctx)
-                                .await
-                            {
-                                Ok(censored)
-                                    if !censored.trim().is_empty() && censored != reflect_text =>
-                                {
-                                    let words_text = hits
-                                        .iter()
-                                        .map(|w| w.trim())
-                                        .collect::<Vec<_>>()
-                                        .join("、");
-                                    content = rebuild_content_keeping_blocks(&content, &censored);
-                                    reflect_text = censored;
+                // 反思双轨(RPFLOW-1 扩展为三档):deep/agent → 强制批判 + 定点修改
+                // (上限 deep 2 / agent 4,critique_and_revise);custom/其余 → 既有
+                // 「LLM 判定或机械规则」二轨。禁词的机械空替换删除已废除(观感不自然,
+                // 同义改写由反思模型经 revise_passage 承担,纪律段见 critique_and_revise)。
+                let reflect_tool_ctx = ToolContext {
+                    session_id: session_id.to_string(),
+                    character_id: req.character_id.clone(),
+                    agent_depth: 0,
+                    // 反思阶段的文本修正工具不触达文件系统,无工作区语义
+                    scope: None,
+                    budget: None,
+                };
+                // deep/agent 的修改轮上限(RPFLOW-1):deep 2 次、agent 4 次;
+                // custom 与其余模式保持既有二轨(custom 流程语义冻结)。
+                let revise_cap = match req.mode.as_str() {
+                    "deep" => Some(2usize),
+                    "agent" => Some(4usize),
+                    _ => None,
+                };
+                // 禁词纪律素材(RPFLOW-2):禁词库启用时把用户的提示词(或显式词表)交给反思
+                // 模型,由它在上下文中用 revise_passage/censor_text 做同义改写;引擎不再做
+                // 任何机械空替换删除(旧实现即实测投诉的「暴力去除」)。
+                let banned_hint = ctx.inject_snapshot.simple.banned_words_hint();
+                // 达修改上限后采纳(不再整篇重生成)的标记与已用修改轮数
+                let mut accept_capped = false;
+                let mut revisions_used = 0usize;
+                // 批判摘要(事件展示用;无 LLM 批判时为空串)
+                let mut critique_summary = String::new();
+                let verdict = if let Some(cap) = revise_cap {
+                    if !ctx.reflect_prompt.trim().is_empty() && !reflect_text.trim().is_empty() {
+                        let mut llm_verdict = None;
+                        if let Some(mut outcome) = critique_and_revise(
+                            self,
+                            &ctx.reflect_prompt,
+                            &banned_hint,
+                            user_input,
+                            &reflect_text,
+                            &reflect_tool_ctx,
+                            cap,
+                            tx,
+                            abort,
+                            flag,
+                        )
+                        .await
+                        {
+                            rctx.total_usage.prompt_tokens += outcome.usage.prompt_tokens;
+                            rctx.total_usage.completion_tokens += outcome.usage.completion_tokens;
+                            rctx.total_usage.total_tokens += outcome.usage.total_tokens;
+                            rctx.total_usage.prompt_cache_hit_tokens +=
+                                outcome.usage.prompt_cache_hit_tokens;
+                            rctx.total_usage.prompt_cache_miss_tokens +=
+                                outcome.usage.prompt_cache_miss_tokens;
+                            revisions_used = outcome.revisions;
+                            critique_summary = outcome.summary.clone();
+                            // 模型定点修改的正文写回(保留 <UpdateVariable> 补丁块,
+                            // 与既有修正路径 rebuild_content_keeping_blocks 同语义)
+                            if let Some(revised_text) = outcome.revised.take() {
+                                let trimmed = revised_text.trim().to_string();
+                                if !trimmed.is_empty() && trimmed != reflect_text {
+                                    content = rebuild_content_keeping_blocks(&content, &trimmed);
+                                    reflect_text = trimmed;
                                     send_event(
                                         step_evt(
-                                            "禁词修正",
-                                            Some(format!(
-                                                "检测到禁词「{words_text}」,已用 censor_text 修正正文"
-                                            )),
+                                            "反思修正",
+                                            Some(format!("已定点修改 {} 次", outcome.revisions)),
                                             progress.0,
                                             progress.1,
                                         ),
@@ -155,37 +173,48 @@ impl AgentEngine {
                                         flag,
                                     )
                                     .await?;
-                                    logging::agent_step(
-                                        session_id,
-                                        "censor",
-                                        Some(&format!("反思修正禁词:{words_text}")),
-                                    );
                                 }
-                                Ok(_) => {}
-                                Err(e) => tracing::warn!(error = e, "反思禁词修正失败,保留原文"),
+                            }
+                            llm_verdict = outcome.verdict;
+                        }
+                        // 机械安全闸:结构性问题(空/截断/字数/未答疑问)仍走重生成兜底;
+                        // 机械通过后按 LLM 判定:达标 → 通过;达上限仍 FAIL → 采纳当前文本;
+                        // 未给判定(不可解析/未配置)→ 机械通过即通过。
+                        let mech = reflect(
+                            &reflect_text,
+                            user_input,
+                            attempt,
+                            max_attempts,
+                            has_updates,
+                            min_chars,
+                        );
+                        if !mech.passed {
+                            mech
+                        } else {
+                            match llm_verdict {
+                                Some(v) if v.passed => v,
+                                Some(v) => {
+                                    accept_capped = true;
+                                    v
+                                }
+                                None => mech,
                             }
                         }
+                    } else {
+                        reflect(
+                            &reflect_text,
+                            user_input,
+                            attempt,
+                            max_attempts,
+                            has_updates,
+                            min_chars,
+                        )
                     }
-                }
-                // 反思双轨:配置了反思提示词且正文非空 → 调用 LLM 按提示词判定
-                // (输出无法解析/调用失败回退机械规则,反思路径永远可判定、有界);
-                // 未配置或纯变量更新(正文为空)→ 机械规则(含补丁放行)。
-                // 第四点·阶段 C:反思模型带文本修正工具(censor_text / revise_passage),
-                // 发现禁词/不合理段落时自主定点修正正文,修正结果写回 content。
-                let verdict = if !ctx.reflect_prompt.trim().is_empty()
-                    && !reflect_text.trim().is_empty()
-                {
-                    let reflect_tool_ctx = ToolContext {
-                        session_id: session_id.to_string(),
-                        character_id: req.character_id.clone(),
-                        agent_depth: 0,
-                        // 反思阶段的文本修正工具不触达文件系统,无工作区语义
-                        scope: None,
-                        budget: None,
-                    };
+                } else if !ctx.reflect_prompt.trim().is_empty() && !reflect_text.trim().is_empty() {
                     match reflect_with_tools(
                         self,
                         &ctx.reflect_prompt,
+                        &banned_hint,
                         user_input,
                         &reflect_text,
                         &reflect_tool_ctx,
@@ -246,7 +275,11 @@ impl AgentEngine {
                     send_event(
                         step_evt(
                             "反思通过",
-                            Some(verdict.reason.clone()),
+                            Some(if critique_summary.is_empty() {
+                                verdict.reason.clone()
+                            } else {
+                                critique_summary.chars().take(160).collect()
+                            }),
                             progress.0,
                             progress.1,
                         ),
@@ -255,6 +288,37 @@ impl AgentEngine {
                         flag,
                     )
                     .await?;
+                    idx += 1;
+                    continue;
+                }
+                if accept_capped {
+                    // deep/agent:修改轮已达上限仍判 FAIL → 采纳当前文本(不再整篇重生成,
+                    // RPFLOW-1:反思靠工具定点修改收敛,重生成只服务结构性问题兜底)
+                    send_event(
+                        step_evt(
+                            "反思已达修改上限",
+                            Some(format!(
+                                "已定点修改 {revisions_used}/{} 次,采纳当前文本;遗留:{}",
+                                revise_cap.unwrap_or(0),
+                                if critique_summary.is_empty() {
+                                    verdict.reason.clone()
+                                } else {
+                                    critique_summary.chars().take(160).collect()
+                                }
+                            )),
+                            progress.0,
+                            progress.1,
+                        ),
+                        tx,
+                        abort,
+                        flag,
+                    )
+                    .await?;
+                    logging::agent_step(
+                        session_id,
+                        "reflect_capped",
+                        Some(&format!("反思达修改上限({revisions_used})后采纳当前文本")),
+                    );
                     idx += 1;
                     continue;
                 }
@@ -366,6 +430,232 @@ impl AgentEngine {
                 continue;
             }
 
+            // ===== 草稿步(deep/agent 流程第 1 步,RPFLOW-1)=====
+            // 产物**默认隐藏**:不写 content、不透出 token(emit_tokens=false);
+            // 仅经 SseEvent::Draft 供 Agent 面板折叠展示,并以 **system 角色**注记并入
+            // 上下文供正文步参考(不落库、不进气泡;user 角色会把用户原文顶出「末条 user」位)。
+            if step.action == "draft" {
+                state_machine.transition(AgentState::Executing, session_id)?;
+                self.agent_sessions
+                    .update(
+                        &agent_session.id,
+                        Some("executing"),
+                        None,
+                        Some((idx + 1) as i64),
+                        None,
+                    )
+                    .map_err(|e| e.to_string())?;
+                send_event(
+                    step_evt(
+                        "草稿中…",
+                        Some("撰写剧情草稿(默认隐藏,面板可展开)".into()),
+                        progress.0,
+                        progress.1,
+                    ),
+                    tx,
+                    abort,
+                    flag,
+                )
+                .await?;
+                let step_msgs = step_messages(rctx, ctx, user_input, step);
+                let mut step_params = step_params_for(&req.params, step, &self.tool_registry);
+                // 草稿步恒无工具:纯规划性输出;工具调用留给正文步与反思步。
+                // tool_choice=None 显式禁止(provider 语义:不会返回 tool_calls);
+                // 测试侧由 mock 的「非主线步骤」判据兜住(草稿步 system 带步骤前缀,
+                // 主线工具钩子不产出——见 mock::NON_MAINLINE_STEP_NEEDLES)。
+                step_params.tools.clear();
+                step_params.tool_choice = crate::models::types::ToolChoice::None;
+                let mut result = execute_generation(
+                    self,
+                    session_id,
+                    &run_id.to_string(),
+                    &step_msgs,
+                    &step_params,
+                    tx,
+                    abort,
+                    flag,
+                    false,
+                )
+                .await?;
+                // 推理耗尽防护(2026-10-09 真实模型实测):草稿预算被 reasoning 吃光时
+                // content 为空(HTTP 200 + completion_tokens>0、草稿静默缺失)——
+                // 提额重试一次,判定见 `draft_heal_budget`(纯函数带单测)。
+                if !result.interrupted {
+                    if let Some(next_budget) = draft_heal_budget(
+                        &result.content,
+                        result.usage.completion_tokens,
+                        step_params.max_tokens,
+                    ) {
+                        let mut retry_params = step_params.clone();
+                        retry_params.max_tokens = next_budget;
+                        let retry = execute_generation(
+                            self,
+                            session_id,
+                            &run_id.to_string(),
+                            &step_msgs,
+                            &retry_params,
+                            tx,
+                            abort,
+                            flag,
+                            false,
+                        )
+                        .await?;
+                        // 两轮 usage 均计入(与反思链路 generate_collect_healing 同口径)
+                        let mut merged = result.usage;
+                        merged.prompt_tokens += retry.usage.prompt_tokens;
+                        merged.completion_tokens += retry.usage.completion_tokens;
+                        merged.total_tokens += retry.usage.total_tokens;
+                        merged.prompt_cache_hit_tokens += retry.usage.prompt_cache_hit_tokens;
+                        merged.prompt_cache_miss_tokens += retry.usage.prompt_cache_miss_tokens;
+                        result = retry;
+                        result.usage = merged;
+                    }
+                }
+                rctx.total_usage.prompt_tokens += result.usage.prompt_tokens;
+                rctx.total_usage.completion_tokens += result.usage.completion_tokens;
+                rctx.total_usage.total_tokens += result.usage.total_tokens;
+                rctx.total_usage.prompt_cache_hit_tokens += result.usage.prompt_cache_hit_tokens;
+                rctx.total_usage.prompt_cache_miss_tokens += result.usage.prompt_cache_miss_tokens;
+                if result.interrupted {
+                    break;
+                }
+                let draft_text = result.content.trim().to_string();
+                if !draft_text.is_empty() {
+                    send_event(
+                        SseEvent::Draft {
+                            text: draft_text.clone(),
+                        },
+                        tx,
+                        abort,
+                        flag,
+                    )
+                    .await?;
+                    // 内部草稿以 **system** 角色注记进上下文(与位置3 世界书注入同型):
+                    // ① 对真实模型 = 内部素材而非「用户刚说的话」,不会把草稿当末条
+                    //    用户输入来回应;② 不占据「末条 user」位,避免遮蔽用户消息
+                    //    对下游步骤可见性(RPFLOW 实测:注记用 user 角色时把用户原文
+                    //    顶掉,mock 钩子与真实语义都受影响)。
+                    rctx.llm_messages.push(LlmMessage::plain(
+                        "system",
+                        &format!("【内部草稿·仅你可见,请勿在正文中复述】\n{draft_text}"),
+                    ));
+                    // 反思回退的截断下界抬到草稿注记**之后**(RPFLOW-1 审查回归):
+                    // 回退重生成只该丢正文步工具循环追加的中间消息,不能把注记一并截掉
+                    // ——正文步提示词恒引用「内部草稿」(deep_retreat_regeneration_keeps_draft_note)。
+                    base_len = rctx.llm_messages.len();
+                    logging::agent_step(session_id, "draft", Some("已生成隐藏草稿"));
+                } else {
+                    // 空草稿可见化(2026-10-09 实测):提额重试后仍为空(模型把预算全烧在
+                    // reasoning 上,HTTP 200 但 content 空)——不再静默跳过:step 事件让
+                    // 推理链可查、warn 带用量便于排查;正文步按用户原文照常生成。
+                    tracing::warn!(
+                        session_id,
+                        completion_tokens = result.usage.completion_tokens,
+                        max_tokens = step_params.max_tokens,
+                        "草稿步输出为空(推理耗尽预算),已跳过"
+                    );
+                    send_event(
+                        step_evt(
+                            "草稿为空",
+                            Some("模型未产出草稿(推理耗尽预算),已跳过;不影响正文".into()),
+                            progress.0,
+                            progress.1,
+                        ),
+                        tx,
+                        abort,
+                        flag,
+                    )
+                    .await?;
+                    logging::agent_step(session_id, "draft", Some("草稿为空(推理耗尽预算),已跳过"));
+                }
+                idx += 1;
+                continue;
+            }
+
+            // ===== 归档步(deep/agent 流程第 4 步,RPFLOW-2)=====
+            // 产物不进正文(emit_tokens=false,最终文本丢弃):本步只做副作用——
+            // 更新角色文件区 大纲.md/人物关系.md,并按开关同步世界书词条(RPFLOW-2)。
+            // 失败绝不影响本轮正文(仅告警);工具调用经 Agent 面板可见。
+            if step.action == "archive" {
+                // 无正文可归档 / 轮内已中断 / token 预算已越线(无论 stop/warn 档):
+                // 跳过归档——预算超额后不再追加自动调用(判定与 executor 轮末闸门
+                // 同源:单一实现 budget_reached)。
+                let budget = self.settings_snapshot().session_token_budget;
+                let used = rctx.total_usage.prompt_tokens + rctx.total_usage.completion_tokens;
+                if content.trim().is_empty() || rctx.budget_stopped || budget_reached(used, budget)
+                {
+                    idx += 1;
+                    continue;
+                }
+                state_machine.transition(AgentState::Executing, session_id)?;
+                self.agent_sessions
+                    .update(
+                        &agent_session.id,
+                        Some("executing"),
+                        None,
+                        Some((idx + 1) as i64),
+                        None,
+                    )
+                    .map_err(|e| e.to_string())?;
+                send_event(
+                    step_evt(
+                        "归档与词条同步中…",
+                        Some("更新大纲/人物关系,并同步世界书词条".into()),
+                        progress.0,
+                        progress.1,
+                    ),
+                    tx,
+                    abort,
+                    flag,
+                )
+                .await?;
+                let mut step_msgs = step_messages(rctx, ctx, user_input, step);
+                // 归档模型需要看到本轮最终正文(生成侧产物不在 llm_messages 里)。
+                // 以 **system** 角色注记(同草稿注记口径):不占据「末条 user」位,
+                // 用户原文对下游工具钩子/模型保持可见。
+                step_msgs.push(LlmMessage::plain(
+                    "system",
+                    &format!("【本轮最终正文·供归档】\n{}", content.trim()),
+                ));
+                let step_params = step_params_for(&req.params, step, &self.tool_registry);
+                // 步骤白名单闸门(同 custom 用法):名单内自动放行,名单外回到等待授权
+                let gate = match step.tools.as_deref() {
+                    Some(list) if !list.is_empty() => crate::agents::engine::executor::ToolGate {
+                        whitelist: Some(list),
+                        no_ui_authorization: false,
+                    },
+                    _ => crate::agents::engine::executor::ToolGate::wait(),
+                };
+                match run_tool_loop(
+                    self,
+                    state_machine,
+                    Some(agent_session),
+                    session_id,
+                    &mut step_msgs,
+                    &step_params,
+                    tool_ctx,
+                    tx,
+                    abort,
+                    flag,
+                    rctx.total_usage,
+                    &run_id.to_string(),
+                    gate,
+                    // 聊天路径无节点级超时;emit_tokens=false(产物不进气泡)
+                    None,
+                    false,
+                )
+                .await
+                {
+                    Ok(_res) => {
+                        logging::agent_step(session_id, "archive", Some("归档与词条同步完成"));
+                    }
+                    // 归档失败不影响本轮正文:仅告警(中断会在循环顶 check_aborted 兜住)
+                    Err(e) => tracing::warn!(error = %e, "归档步执行失败(不影响本轮正文)"),
+                }
+                idx += 1;
+                continue;
+            }
+
             // ===== 执行步骤(direct / tool)=====
             state_machine.transition(AgentState::Executing, session_id)?;
             self.agent_sessions
@@ -431,40 +721,11 @@ impl AgentEngine {
             if req.mode == "custom" {
                 step_vars_baseline.insert(idx, rctx.assistant_vars.clone());
             }
-            // 步骤级消息视图(agent/deep/custom 统一):步骤 system_prompt 宏展开后以
-            // 「[本步指令]」追加到 system 末尾;agent 模式额外在末尾注入动态工具指南。
-            // 独立视图不污染共享 llm_messages,反思回退后按步骤重建、无中间消息残留。
-            // 计划二:展开前同步 scopes 镜像,保证 getvar/get_*_variable 读到本步骤
-            // 之前的 setvar 副作用(步骤循环内多次展开,回合边界同步不够)。
-            {
-                let mut s = rctx.scopes.lock().unwrap_or_else(|e| e.into_inner());
-                s.sync_chat_tree(rctx.assistant_vars);
-                s.sync_chat_flat(rctx.session_vars);
-            }
-            let mut step_msgs = rctx.llm_messages.clone();
-            if step
-                .system_prompt
-                .as_deref()
-                .map(|s| !s.trim().is_empty())
-                .unwrap_or(false)
-            {
-                {
-                    let mut scopes_guard = rctx.scopes.lock().unwrap_or_else(|e| e.into_inner());
-                    let mut mctx = MacroCtx {
-                        character_name: &ctx.chara_name,
-                        character_description: &ctx.chara_desc,
-                        user_name: "用户",
-                        user_input,
-                        personality: &ctx.personality,
-                        scenario: &ctx.scenario,
-                        history: &ctx.history_tuples,
-                        vars: &mut *rctx.session_vars,
-                        assistant_vars: Some(&mut *rctx.assistant_vars),
-                        scopes: Some(&mut *scopes_guard),
-                    };
-                    step_msgs = with_step_prompt(rctx.llm_messages, step, &mut mctx);
-                }
-            }
+            // 步骤级消息视图(agent/deep/custom 统一,装配语义见 `step_messages`):
+            // 步骤 system_prompt 宏展开后以「[本步指令]」追加到 system 末尾,下方再按
+            // mode 追加动态工具指南。独立视图不污染共享 llm_messages,反思回退后
+            // 按步骤重建、无中间消息残留。
+            let mut step_msgs = step_messages(rctx, ctx, user_input, step);
             // 先计算本步骤实际下发的工具,再按 effective tools 注入指南。
             // Custom 的 null/[]/白名单语义只影响能力与永久授权,不能只做可见性过滤。
             let mut step_params = step_params_for(&req.params, step, &self.tool_registry);
@@ -539,6 +800,7 @@ impl AgentEngine {
                     gate,
                     // 聊天路径无节点级超时(A 批 A1):恒走宿主既有判定(聊天侧本无总时长上限)
                     None,
+                    true,
                 )
                 .await?
             } else if req.mode == "custom" {
@@ -552,6 +814,7 @@ impl AgentEngine {
                         tx,
                         abort,
                         flag,
+                        true,
                     )
                     .await?
                 } else {
@@ -584,6 +847,7 @@ impl AgentEngine {
                         // 聊天 custom 步骤无节点级超时(A 批 A1:该字段只服务任务侧的
                         // `PlanStep`);恒走宿主既有判定
                         None,
+                        true,
                     )
                     .await?
                 };
@@ -602,6 +866,7 @@ impl AgentEngine {
                     tx,
                     abort,
                     flag,
+                    true,
                 )
                 .await?
             };
@@ -707,4 +972,44 @@ impl AgentEngine {
             custom_contract_pending,
         ))
     }
+}
+
+/// 构造步骤级消息视图(RPFLOW-1:草稿步与既有生成步共用同一装配语义):
+/// 先把 scopes 镜像同步到当前变量树(步骤提示词的 getvar 类宏能读到本步骤之前的
+/// setvar 副作用),再把步骤 system_prompt 宏展开后以「[本步指令]」追加到 system 末尾。
+/// 返回独立视图,不污染共享 llm_messages(反思回退后按步骤重建、无中间消息残留)。
+fn step_messages(
+    rctx: &mut RunContext<'_>,
+    ctx: &CollectedCtx,
+    user_input: &str,
+    step: &crate::models::types::PlanStep,
+) -> Vec<LlmMessage> {
+    {
+        let mut s = rctx.scopes.lock().unwrap_or_else(|e| e.into_inner());
+        s.sync_chat_tree(rctx.assistant_vars);
+        s.sync_chat_flat(rctx.session_vars);
+    }
+    let mut step_msgs = rctx.llm_messages.clone();
+    if step
+        .system_prompt
+        .as_deref()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false)
+    {
+        let mut scopes_guard = rctx.scopes.lock().unwrap_or_else(|e| e.into_inner());
+        let mut mctx = MacroCtx {
+            character_name: &ctx.chara_name,
+            character_description: &ctx.chara_desc,
+            user_name: "用户",
+            user_input,
+            personality: &ctx.personality,
+            scenario: &ctx.scenario,
+            history: &ctx.history_tuples,
+            vars: &mut *rctx.session_vars,
+            assistant_vars: Some(&mut *rctx.assistant_vars),
+            scopes: Some(&mut *scopes_guard),
+        };
+        step_msgs = with_step_prompt(rctx.llm_messages, step, &mut mctx);
+    }
+    step_msgs
 }

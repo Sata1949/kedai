@@ -1,9 +1,11 @@
 // 规划器(与 Node 版 planner.ts 对齐)
 use crate::models::types::{Plan, PlanStep};
 use crate::services::agent_flow_service::resolve_graph;
+use crate::tools::tool_sets::ARCHIVE_TOOLS;
 
-/// fast: 单步直接生成;deep: 理解意图(不生成) → 生成草稿(生成) → 反思;
-/// agent: 同 deep 结构,但执行阶段启用完整 function calling 工具循环(模型可多轮自主调用工具);
+/// fast: 单步直接生成;deep/agent: 草稿(隐藏) → 正文 → 反思(强制批判+定点修改)
+/// → 归档与词条同步(RPFLOW-2);
+/// agent 的正文步启用完整 function calling 工具循环(模型可多轮自主调用工具);
 /// custom: 自定义流程(见 make_custom_plan),由设置中编辑的步骤序列驱动。
 pub fn make_plan(user_input: &str, mode: &str) -> Plan {
     if mode == "agent" {
@@ -11,13 +13,21 @@ pub fn make_plan(user_input: &str, mode: &str) -> Plan {
         Plan {
             steps: vec![
                 PlanStep {
-                    goal: "制定写作计划并生成回复".into(),
+                    goal: "撰写剧情草稿(默认隐藏)".into(),
+                    action: "draft".into(),
+                    generates: None,
+                    system_prompt: Some(DRAFT_PROMPT.into()),
+                    // ≤200 字草稿的硬界:提示词约束之外再压输出上限(推理模型留余量)
+                    max_tokens: Some(DRAFT_MAX_TOKENS),
+                    ..Default::default()
+                },
+                PlanStep {
+                    goal: "生成正文回复".into(),
                     action: "direct".into(),
                     generates: Some(true),
                     system_prompt: Some(
-                        "【本步指令·计划并回复】开始输出正文前,先在草稿区撰写一份 200 字以内的写作计划\
-                         (段落结构、核心要点、情节走向、节奏安排),随后严格按该计划输出正文;\
-                         正文中不得包含计划本身,不得出现「计划」「草稿」等字样。\
+                        "【本步指令·正文】严格依据上方「内部草稿」扩写为完整正文:\
+                         可自由充实细节与对话,但不得复述草稿本身,不得出现「草稿」「计划」等字样。\
                          以 {{char}} 的视角与口吻输出:视角遵循系统提示词与用户要求\
                          (用户未指定时以角色自身视角叙述);服从用户字数与风格要求,用户提问必须正面回答。\
                          你可以通过 function calling 自主调用下方列出的工具:\
@@ -28,40 +38,50 @@ pub fn make_plan(user_input: &str, mode: &str) -> Plan {
                     ..Default::default()
                 },
                 PlanStep {
-                    goal: "反思输出质量与连贯性".into(),
+                    goal: "批判与定点修改正文".into(),
                     action: "reflect".into(),
                     generates: None,
                     ..Default::default()
                 },
+                archive_step(),
             ],
-            summary: "Agent 模式:计划 + 工具调用 + 生成 + 反思,可多轮调用工具。".into(),
+            summary:
+                "Agent 模式:草稿(隐藏) → 正文(工具循环) → 强制批判与修改(最多 4 次) → 归档与词条同步。"
+                    .into(),
         }
     } else if mode == "deep" {
         Plan {
             steps: vec![
                 PlanStep {
-                    goal: "制定写作计划并生成草稿".into(),
+                    goal: "撰写剧情草稿(默认隐藏)".into(),
+                    action: "draft".into(),
+                    generates: None,
+                    system_prompt: Some(DRAFT_PROMPT.into()),
+                    max_tokens: Some(DRAFT_MAX_TOKENS),
+                    ..Default::default()
+                },
+                PlanStep {
+                    goal: "生成正文回复".into(),
                     action: "direct".into(),
                     generates: Some(true),
                     system_prompt: Some(
-                        "【本步指令·计划并起草】开始输出正文前,先在草稿区撰写一份 200 字以内的写作计划\
-                         (段落结构、核心要点、情节走向、节奏安排),随后严格按该计划输出正文草稿;\
-                         正文中不得包含计划本身,不得出现「计划」「草稿」等字样。\
+                        "【本步指令·正文】严格依据上方「内部草稿」扩写为完整正文:\
+                         可自由充实细节与对话,但不得复述草稿本身,不得出现「草稿」「计划」等字样。\
                          以 {{char}} 的视角与口吻输出:视角遵循系统提示词与用户要求\
-                         (用户未指定时以角色自身视角叙述);服从用户字数与风格要求,用户提问必须正面回答。\
-                         本步为草稿,反思步骤会检查质量,必要时回到本步重生成。"
+                         (用户未指定时以角色自身视角叙述);服从用户字数与风格要求,用户提问必须正面回答。"
                             .into(),
                     ),
                     ..Default::default()
                 },
                 PlanStep {
-                    goal: "反思输出质量与连贯性".into(),
+                    goal: "批判与定点修改正文".into(),
                     action: "reflect".into(),
                     generates: None,
                     ..Default::default()
                 },
+                archive_step(),
             ],
-            summary: "深度模式:先写计划,再生成草稿,最后反思优化。".into(),
+            summary: "深度模式:草稿(隐藏) → 正文 → 强制批判与修改(最多 2 次) → 归档与词条同步。".into(),
         }
     } else {
         let _ = user_input;
@@ -74,6 +94,52 @@ pub fn make_plan(user_input: &str, mode: &str) -> Plan {
             }],
             summary: "快速模式:直接生成回复".into(),
         }
+    }
+}
+
+/// 草稿步输出上限(步骤级 max_tokens 硬界):≤200 字中文正文的合理预算,
+/// 同时给推理模型留 reasoning 余量。
+///
+/// **2026-10-09 真实模型实测(deepseek-v4.1-flash)**:512 必空(整段预算被 reasoning
+/// 吃光,HTTP 200 + `content` 空,草稿静默缺失);2048 通常够(复刻请求 132 字成功、
+/// 全流程实测 699/131/174 字三例),但在「禁止出现:霓虹」这类强约束题面上偶发仍被
+/// 烧空。故取 4096(普通情形只是上限、不额外花钱;烧空时由引擎侧提额重试兜底,
+/// 见 `messages::steps::draft_heal_budget`),重试封顶见 [`DRAFT_HEAL_MAX_TOKENS`]。
+pub const DRAFT_MAX_TOKENS: u32 = 4096;
+
+/// 草稿「推理耗尽」提额重试的封顶(翻倍一次、封顶 4×;与 executor 截断自愈同口径)
+pub const DRAFT_HEAL_MAX_TOKENS: u32 = DRAFT_MAX_TOKENS * 4;
+
+/// 草稿步系统提示词(deep/agent 共用):产物默认隐藏、只服务正文步,
+/// 以 **system 角色**注记并入上下文(见 engine/run_loop.rs 的 draft 分支)。
+pub const DRAFT_PROMPT: &str = "【本步指令·草稿】为 {{char}} 的下一轮回复做准备,\
+     只输出一段不超过 200 字的剧情草稿:本回合要推进的情节、情绪走向、\
+     关键动作/台词要点、需要呼应或埋设的线索。\
+     只输出草稿本身,不要写正文,不要解释,不要复述用户输入。";
+
+/// 归档步(RPFLOW-2:deep/agent 流程第 4 步;产物不进正文,失败不影响本轮):
+/// 更新角色文件区的 大纲.md / 人物关系.md,并按开关同步世界书词条
+/// (绿灯=触发条目可更新;蓝灯=常驻条目不改写,改为新建绿灯条目)。
+pub const ARCHIVE_PROMPT: &str = "【本步指令·归档与同步】本步不面向用户,不要输出给用户看的正文。\
+     按顺序处理,无变化就跳过(不要为打卡而写入):\
+     ① 用 read(type=file) 查看角色文件区的 大纲.md 与 人物关系.md(不存在则用 create 新建);\
+     依据本轮正文只更新有变化的部分——大纲.md 记剧情主线与当前进展,人物关系.md 记角色关系与状态变化;\
+     保持精炼(每次增量几十字以内),不要复述全文。\
+     ② 若本轮剧情推演导致角色设定或世界观发生变化:先用 read(type=world_book) 查看相关条目,\
+     再用 worldbook_update(topic, content, keywords) 写入最新情况——对应条目是绿灯(触发)条目则更新它;\
+     是蓝灯(常驻)条目则**不要改写它**,改为新建一条绿灯条目。\
+     ③ 无变化时不要做任何写入。完成后用一两句话报告你做了什么。";
+
+/// 归档步骤构造(deep/agent 共用):工具白名单 = [`ARCHIVE_TOOLS`](只按名单释放;
+/// `worldbook_update` 不在默认工具列表内,见 tools::tool_sets::META_TOOLS)。
+fn archive_step() -> PlanStep {
+    PlanStep {
+        goal: "归档剧情与同步词条".into(),
+        action: "archive".into(),
+        generates: None,
+        system_prompt: Some(ARCHIVE_PROMPT.into()),
+        tools: Some(ARCHIVE_TOOLS.iter().map(|s| s.to_string()).collect()),
+        ..Default::default()
     }
 }
 
@@ -250,54 +316,91 @@ mod tests {
     #[test]
     fn test_deep_plan() {
         let p = make_plan("你好", "deep");
-        assert_eq!(p.steps.len(), 2);
-        assert_eq!(p.steps[1].action, "reflect");
+        // RPFLOW 流程:草稿(隐藏) → 正文 → 反思(批判+定点修改) → 归档与词条同步
+        assert_eq!(p.steps.len(), 4);
+        assert_eq!(p.steps[0].action, "draft");
+        assert_eq!(p.steps[1].action, "direct");
+        assert_eq!(p.steps[1].generates, Some(true));
+        assert_eq!(p.steps[2].action, "reflect");
+        assert_eq!(p.steps[3].action, "archive");
+        let expected: Vec<String> = ARCHIVE_TOOLS.iter().map(|s| s.to_string()).collect();
+        assert_eq!(p.steps[3].tools.as_ref(), Some(&expected));
     }
 
     #[test]
     fn test_agent_plan_step_prompts() {
         let p = make_plan("你好", "agent");
-        // 计划生成步 + 反思步(理解意图步已废弃,不再有不生成的 direct 步骤)
-        assert_eq!(p.steps.len(), 2);
-        let gen = &p.steps[0];
+        assert_eq!(p.steps.len(), 4);
+        // 草稿步:隐藏、≤200 字、有硬性输出上限
+        let draft = &p.steps[0];
+        assert_eq!(draft.action, "draft");
+        let dp = draft.system_prompt.as_deref().unwrap_or("");
+        assert!(dp.contains("200 字"), "草稿步应限定 ≤200 字: {dp}");
+        assert_eq!(draft.max_tokens, Some(DRAFT_MAX_TOKENS));
+        // 正文步:扩写自草稿、仍保留工具说明
+        let gen = &p.steps[1];
         assert_eq!(gen.generates, Some(true));
         let sp = gen.system_prompt.as_deref().unwrap_or("");
         assert!(
-            sp.contains("200 字") && sp.contains("计划"),
-            "生成步应先写 ≤200 字计划再输出正文: {sp}"
+            sp.contains("内部草稿") && sp.contains("不得复述"),
+            "正文步应基于内部草稿扩写且禁止复述: {sp}"
+        );
+        assert!(
+            !sp.contains("先在草稿区撰写"),
+            "草稿已独立成步,正文步不应再要求先写计划: {sp}"
         );
         assert!(
             sp.contains("function calling"),
-            "生成步应提 function calling: {sp}"
+            "正文步应提 function calling: {sp}"
         );
         assert!(
             sp.contains("role") && sp.contains("search"),
-            "生成步应含工具名: {sp}"
+            "正文步应含工具名: {sp}"
         );
         // 反思步:reflect 不带 system_prompt
-        assert_eq!(p.steps[1].action, "reflect");
-        assert!(p.steps[1].system_prompt.is_none());
+        assert_eq!(p.steps[2].action, "reflect");
+        assert!(p.steps[2].system_prompt.is_none());
+        // 归档步:白名单含 worldbook_update,提示词含蓝/绿灯规则
+        let ar = &p.steps[3];
+        assert_eq!(ar.action, "archive");
+        let ap = ar.system_prompt.as_deref().unwrap_or("");
+        assert!(
+            ap.contains("大纲.md") && ap.contains("人物关系.md"),
+            "归档步应点名两份 md: {ap}"
+        );
+        assert!(
+            ap.contains("worldbook_update"),
+            "归档步应提词条同步工具: {ap}"
+        );
+        assert!(
+            ap.contains("蓝灯") && ap.contains("绿灯"),
+            "归档步应带蓝/绿灯规则: {ap}"
+        );
     }
 
     #[test]
     fn test_deep_plan_step_prompts() {
         let p = make_plan("你好", "deep");
-        assert_eq!(p.steps.len(), 2);
+        assert_eq!(p.steps.len(), 4);
+        assert_eq!(p.steps[0].action, "draft");
         assert!(
             p.steps[0]
                 .system_prompt
                 .as_deref()
                 .unwrap_or("")
-                .contains("200 字")
-                && p.steps[0]
-                    .system_prompt
-                    .as_deref()
-                    .unwrap_or("")
-                    .contains("计划"),
-            "deep 生成步应先写计划再输出正文"
+                .contains("200 字"),
+            "deep 草稿步应限定 ≤200 字"
         );
-        assert_eq!(p.steps[0].generates, Some(true));
-        assert!(p.steps[1].system_prompt.is_none());
+        let sp = p.steps[1].system_prompt.as_deref().unwrap_or("");
+        assert!(sp.contains("内部草稿"), "deep 正文步应基于内部草稿: {sp}");
+        assert!(
+            !sp.contains("function calling"),
+            "deep 正文步不带工具说明(主生成无工具属既有裁剪): {sp}"
+        );
+        assert_eq!(p.steps[1].generates, Some(true));
+        assert_eq!(p.steps[2].action, "reflect");
+        assert!(p.steps[2].system_prompt.is_none());
+        assert_eq!(p.steps[3].action, "archive");
     }
 
     #[test]

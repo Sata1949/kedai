@@ -725,6 +725,11 @@ pub enum SseEvent {
     Token {
         text: String,
     },
+    /// 隐藏草稿(deep/agent 流程第 1 步产物,RPFLOW-1):**不进消息气泡**,
+    /// 仅推给前端在 Agent 面板折叠展示(默认隐藏);正文由后续步骤另行生成。
+    Draft {
+        text: String,
+    },
     Step {
         step: String,
         #[serde(skip_serializing_if = "Option::is_none")]

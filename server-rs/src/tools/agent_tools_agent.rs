@@ -424,6 +424,7 @@ async fn run_subtask_with_tools(
         gate,
         // 单次调用超时覆盖(A 批 A1):子 agent 无节点级配置,恒走宿主既有判定
         None,
+        true,
     )
     .await;
     drop(tx);

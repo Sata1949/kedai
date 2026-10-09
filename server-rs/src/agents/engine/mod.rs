@@ -60,13 +60,13 @@ pub(super) mod run_scripts;
 pub(super) mod types;
 pub(super) mod util;
 
-use self::executor::{execute_generation, maybe_run_tool, run_tool_loop};
+use self::executor::{budget_reached, execute_generation, maybe_run_tool, run_tool_loop};
 use self::messages::{
-    inject_reflect_advice, retreat_to_generating_step, step_params_for, trim_tool_history,
-    with_step_prompt, CollectedCtx, TOOL_HISTORY_SUMMARY_PREFIX,
+    draft_heal_budget, inject_reflect_advice, retreat_to_generating_step, step_params_for,
+    trim_tool_history, with_step_prompt, CollectedCtx, TOOL_HISTORY_SUMMARY_PREFIX,
 };
 use self::mvu::{apply_mvu_patches, generate_mvu_status, strip_status_bar_tag};
-use self::reflector_integration::{build_reflect_advice, reflect_with_tools};
+use self::reflector_integration::{build_reflect_advice, critique_and_revise, reflect_with_tools};
 pub use self::types::{AbortFlag, AgentRunRequest, EngineError};
 use self::types::{RunContext, RunHandle};
 use self::util::{check_aborted, rebuild_content_keeping_blocks, send_event, step_evt};
@@ -637,51 +637,12 @@ impl AgentEngine {
                 // 其余模式在此原子应用(反思重试丢弃内容时补丁不提前生效,保持整轮原子)。
                 let (clean_content, patches) = parse_update_variable(&content);
                 // <StatusBar> 是两步生成的输出协议标签(状态栏文本单独落库),不进入正文渲染/存储
-                let mut clean_content = strip_status_bar_tag(&clean_content);
-                // 禁词库工具兜底(deep/agent/custom):输出含禁词时,引擎收尾调 censor_text 工具
-                // 做同义替换(替换后同时作用于落库与 Finish.content,前端 finish 覆盖流式文本)。
-                // fast 模式不带工具,仅靠 simple_inject_text 注入的自省提示词预防。
-                if req.mode != "fast" && !clean_content.trim().is_empty() {
-                    let inject = self
-                        .prompt_inject
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .get()
-                        .clone();
-                    if inject.simple.banned_words_enabled {
-                        // 从禁词提示词(新格式)或词条表(旧格式)提取禁用词列表
-                        let words: Vec<String> = inject.simple.banned_words_extract();
-                        let entries: Vec<serde_json::Value> = words
-                            .into_iter()
-                            .map(|w| json!({ "word": w, "replacement": "" }))
-                            .collect();
-                        if !entries.is_empty() {
-                            let ctx = ToolContext {
-                                session_id: session_id.clone(),
-                                character_id: req.character_id.clone(),
-                                agent_depth: 0,
-                                // 禁词替换工具不触达文件系统,无工作区语义
-                                scope: None,
-                                budget: None,
-                            };
-                            let args = json!({ "text": clean_content, "entries": entries });
-                            match self
-                                .tool_registry
-                                .execute("censor_text", &args.to_string(), ctx)
-                                .await
-                            {
-                                Ok(censored) => {
-                                    if !censored.trim().is_empty() {
-                                        clean_content = censored;
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!(error = e, "禁词替换工具调用失败,保留原文");
-                                }
-                            }
-                        }
-                    }
-                }
+                let clean_content = strip_status_bar_tag(&clean_content);
+                // 禁词机械兜底已废除(RPFLOW-2,2026-10-08):旧实现从提示词切出伪「禁词」后
+                // 以空替换词调 censor_text(等价于直接删词),把「别废话了快说」改成
+                // 「别了快说」这类不通顺结果是实测投诉的直接成因。同义改写现在由反思链路承担
+                // (deep/agent 的 critique_and_revise 带禁词纪律段 + revise_passage;
+                // custom 的 reflect_with_tools 同段;fast 维持既有「仅注入自省提示」策略)。
                 let mut vars_snapshot = custom_vars_snapshot.clone();
                 let mut status_bar: Option<String> = None;
                 // 本轮最终响应的上游结束原因与截断判定(可观测性问题①,2026-09-15)。

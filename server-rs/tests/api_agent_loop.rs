@@ -262,10 +262,11 @@ async fn pure_mvu_update_message_persists_with_snapshot() {
     );
 }
 
-/// 配置反思提示词后,deep 模式反思步骤调用 LLM 判定:
-/// mock [[reply:FAIL ...]] 让草稿与反思判定都输出 FAIL → 反思失败重试 3 次(共 4 次判定)后有界结束。
-/// 未配置提示词时,机械规则对该草稿(非空、非截断、无提问)会直接通过——
-/// 因此「反思未通过」恰好 4 次即证明 LLM 判定生效。
+/// 配置反思提示词后,deep 模式反思步骤调用 LLM 判定(RPFLOW-1 新语义):
+/// 模型连续判 FAIL 但**无法调用工具做出修改**(mock 只回文本)时,修改轮有界
+/// (deep 上限 2 + 首尾判定轮)后**采纳当前文本**——不再整篇重生成。
+/// 判定「LLM 判定确实生效」的观测量:反思通过事件的 detail 携带模型最后一轮输出
+/// 文本(机械规则路径的 detail 恒为固定文案「质量检查通过」)。
 #[tokio::test]
 async fn reflect_prompt_triggers_llm_reflection() {
     let _guard = test_lock().await;
@@ -297,13 +298,32 @@ async fn reflect_prompt_triggers_llm_reflection() {
         "deep",
     )
     .await;
-    let failed_reflects = events
+    // 旧语义(FAIL → 整篇重生成)已退役:不应再出现「重新生成」/「反思未通过」
+    let retries = events
+        .iter()
+        .filter(|e| e["type"] == "step" && e["step"] == "重新生成")
+        .count();
+    assert_eq!(
+        retries, 0,
+        "RPFLOW-1:FAIL 不再触发整篇重生成(改为定点修改、有界后采纳): {events:?}"
+    );
+    let failed = events
         .iter()
         .filter(|e| e["type"] == "step" && e["step"] == "反思未通过")
         .count();
     assert_eq!(
-        failed_reflects, 4,
-        "LLM 反思应判定失败 4 次(重试 3 次)后有界结束(机械规则不会判该草稿失败): {events:?}"
+        failed, 0,
+        "FAIL 判定走修改/采纳路径,不发「反思未通过」: {events:?}"
+    );
+    // LLM 判定生效:通过事件携带模型输出(而非机械规则的固定文案)
+    let passed = events
+        .iter()
+        .find(|e| e["type"] == "step" && e["step"] == "反思通过")
+        .expect("应有反思通过事件(有界后采纳)");
+    let detail = passed["detail"].as_str().unwrap_or("");
+    assert!(
+        !detail.contains("质量检查通过"),
+        "反思通过应携带 LLM 批判摘要而非机械文案(证明 LLM 反思生效): {passed}"
     );
     assert!(events.iter().any(|e| e["type"] == "finish"), "应有 finish");
     // 恢复默认(机械规则)
@@ -739,9 +759,11 @@ async fn agent_tool_loop_respects_configured_limit() {
 /// token 预算 stop 档(HB-1,2026-09-18):达到预算即停工具循环,但仍按正常终态收尾——
 /// 正文落库、用量记账、extra.budget_exceeded 留痕(刷新后仍看得出停止原因)。
 ///
-/// 触发确定性:预算下限 1024,mock 工具轮每轮 8 token(5+3)→ 第 128 轮越线。
+/// 触发确定性:预算下限 1024,mock 工具轮每轮 8 token(5+3);RPFLOW-1 起流程多了
+/// 一个草稿步(其用量同样计入预算),故越线轮数比 128 提前若干——断言钉「远早于
+/// 200 轮上限」的区间而不钉死具体轮数(草稿步回复长度一变,具体值就变)。
 /// 用 [[tool_loop_text:...]] 让工具轮带正文:否则工具轮正文恒空,on-stop 无内容可落库,
-/// 「停止时保留产出」这条断言就无从校验。
+/// 「停止时保留产出」这条断言就无从校验。预算越线后归档步跳过(不再追加自动调用)。
 #[tokio::test]
 async fn token_budget_stop_halts_tool_loop_and_keeps_output() {
     // 全局设置是进程级共享:预算/轮次上限类用例必须串行(同文件并发会互相踩踏)
@@ -796,9 +818,12 @@ async fn token_budget_stop_halts_tool_loop_and_keeps_output() {
     );
     let tool_calls = events.iter().filter(|e| e["type"] == "tool_call").count();
     let tool_results = events.iter().filter(|e| e["type"] == "tool_result").count();
-    assert_eq!(
-        tool_calls, 128,
-        "每轮 8 token、预算 1024 → 第 128 轮越线: {tool_calls}"
+    // 预算(1024)先于 200 轮上限触发。每轮工具轮 8 token;RPFLOW-1 起草稿步先消耗
+    // 约 300+ token(整段上下文的 prompt + 默认回复),故越线早于 128 轮基线
+    // (实测约 82 轮)。区间断言:过小=提前误杀,接近 200=预算闸门未生效。
+    assert!(
+        (50..200).contains(&tool_calls),
+        "每轮 8 token、预算 1024 → 应在远早于 200 轮上限处触发: {tool_calls}"
     );
     assert_eq!(
         tool_results, tool_calls,
@@ -818,7 +843,8 @@ async fn token_budget_stop_halts_tool_loop_and_keeps_output() {
         "停止理由应含已用 token 与预算: {budget_step}"
     );
 
-    // 停止时保留产出:正文落库(第 128 轮的短正文)+ extra.budget_exceeded 留痕
+    // 停止时保留产出:正文落库(停止轮的短正文——具体轮数随草稿步用量前移,见上)
+    // + extra.budget_exceeded 留痕
     let (status, history) = send_json(
         app,
         "GET",
@@ -834,11 +860,8 @@ async fn token_budget_stop_halts_tool_loop_and_keeps_output() {
         .find(|m| m["role"] == "assistant")
         .unwrap_or_else(|| panic!("停止时应落库一条 assistant 消息: {history}"));
     assert!(
-        last["content"]
-            .as_str()
-            .unwrap_or("")
-            .contains("第128轮说明"),
-        "落库正文应为停止轮的正文: {last}"
+        last["content"].as_str().unwrap_or("").contains("轮说明"),
+        "落库正文应为停止轮的正文(工具轮短正文): {last}"
     );
     assert_eq!(
         last["extra"]["budget_exceeded"],

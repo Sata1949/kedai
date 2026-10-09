@@ -24,5 +24,7 @@ pub(super) use inject::{
     append_memory_notice, apply_inject_insertions, inject_reflect_advice, insert_memory_slot,
     insert_recall_slot, insert_summary_slot, parse_inject_insertion, InjectAt, InjectInsertion,
 };
-pub(super) use steps::{retreat_to_generating_step, step_params_for, with_step_prompt};
+pub(super) use steps::{
+    draft_heal_budget, retreat_to_generating_step, step_params_for, with_step_prompt,
+};
 pub(super) use trim::{trim_to_context, trim_tool_history, TOOL_HISTORY_SUMMARY_PREFIX};

@@ -45,6 +45,9 @@ pub mod variables;
 // 视觉工具三件(视觉能力包 D4):工具**定义**在此,可见性 = 工作区族闸门 ∩ 视觉闸门
 // (见 task_engine/tool_policy.rs 的 workspace_gate / vision_gate)
 pub mod vision_tools;
+// 世界书词条同步(RPFLOW-2):按名单释放的元工具(deep/agent 归档步经 ARCHIVE_TOOLS 下发,
+// 见 tool_sets.rs);**不进默认工具列表**,避免正文生成轮被诱导改写用户的世界书设定
+pub mod worldbook;
 // 工作区路径闸门(编码通道批次,本批安全核心):fs_* 工具与 bash 的 cwd 校验共用;
 // 创建期的工作区校验也复用其判据(见 agent_tools_fs.rs / bash.rs / api/tasks.rs)
 pub mod workspace_guard;
@@ -111,5 +114,8 @@ pub fn register_builtin_tools(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
     screenshot::register_screenshot_tool(registry, deps.clone());
     // 急停工具(CU-1):始终注册且始终可见(不随截图开关隐藏——「停止操作电脑」任何时刻都要有出口)
     stop_control::register_stop_control_tool(registry, deps.clone());
+    // 世界书词条同步(RPFLOW-2 归档步):始终注册,可见性由 `tool_sets::META_TOOLS` 与
+    // 归档名单(ARCHIVE_TOOLS)决定——默认不下发,只由归档步显式下发
+    worldbook::register_worldbook_tool(registry, deps.clone());
     agent_tools::register_agent_tools(registry, deps);
 }

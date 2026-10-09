@@ -595,6 +595,239 @@ impl WorldBookService {
     }
 }
 
+// ==================== 条目级写回(RPFLOW-2 `worldbook_update` 归档步) ====================
+//
+// 为什么不用 PUT /entries 那条全量回写通道:它按「视图整组 merge」落盘
+// (`merge_entries_into`),没进视图的兄弟条目会被整体删除(含归一化不了的条目)。
+// 归档工具只需动**一条**条目,故这里按最小改动面实现:定位一条 → 只改它的 content 键;
+// 其余字段(keys/position/enabled/order/extensions、content 里的 `@@` 装饰器行)与
+// 全部兄弟条目原样保留——即 `merge_entries_into` 承诺的字段叠加语义,但改动面更小。
+
+/// 原始条目 uid(兼容 uid / id;直接读 JSON 值,不做条目归一化)
+fn raw_entry_uid(v: &Value) -> Option<i64> {
+    v.get("uid")
+        .or_else(|| v.get("id"))
+        .and_then(|x| x.as_i64())
+}
+
+/// 条目容器内现有最大 uid:**计入未归一化条目**(空条目等),对象形态同时计入数字键。
+/// 只按归一化条目取 max 会让新 uid 与「隐性」条目撞车(对象形态直接覆盖旧条目)。
+fn max_entry_uid(entries_value: &Value) -> Option<i64> {
+    let mut max: Option<i64> = None;
+    let mut bump = |u: Option<i64>| {
+        if let Some(u) = u {
+            max = Some(max.map_or(u, |m| m.max(u)));
+        }
+    };
+    match entries_value {
+        Value::Object(map) => {
+            for (k, v) in map {
+                bump(k.parse::<i64>().ok());
+                bump(raw_entry_uid(v));
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr {
+                bump(raw_entry_uid(v));
+            }
+        }
+        _ => {}
+    }
+    max
+}
+
+/// 按 uid 定位条目容器内的条目(对象/数组两种形态;匹配口径与 `normalize_entry` 一致)
+fn find_entry_mut(entries_value: &mut Value, uid: i64) -> Option<&mut Value> {
+    match entries_value {
+        Value::Object(map) => map.values_mut().find(|v| raw_entry_uid(v) == Some(uid)),
+        Value::Array(arr) => arr.iter_mut().find(|v| raw_entry_uid(v) == Some(uid)),
+        _ => None,
+    }
+}
+
+/// 按 `compose` 改写条目对象的 content 键(原值为非字符串/缺失时按空串处理)
+fn write_entry_content<F>(entry: &mut Value, compose: F) -> Option<()>
+where
+    F: FnOnce(&str) -> String,
+{
+    let map = entry.as_object_mut()?;
+    let old = map.get("content").and_then(|c| c.as_str()).unwrap_or("");
+    map.insert("content".into(), Value::String(compose(old)));
+    Some(())
+}
+
+/// 新建绿灯(触发)条目的编辑视图:constant=false / enabled=true,其余取项目缺省
+/// (position 0 / depth 4 / order 100,与 `add_entry` 的新建缺省同口径)。
+fn trigger_entry_view(
+    id: i64,
+    comment: &str,
+    keys: &[String],
+    content: &str,
+) -> WorldBookEntryView {
+    WorldBookEntryView {
+        id,
+        comment: comment.to_string(),
+        keys: keys.to_vec(),
+        keys_secondary: Vec::new(),
+        regex: None,
+        use_regex: false,
+        constant: false,
+        enabled: true,
+        content: content.to_string(),
+        position: 0,
+        depth: 4,
+        order: 100,
+        case_sensitive: false,
+        sticky: 0,
+        cooldown: 0,
+        probability: 100,
+        use_probability: false,
+        role: None,
+    }
+}
+
+/// 定位角色卡 data_raw 中的内嵌世界书(V2 顶层 character_book / V3 data.character_book);
+/// 判据与 `save_character_book` 一致。
+fn character_book_mut(raw: &mut Value) -> Option<&mut Value> {
+    if raw.get("character_book").is_some() {
+        raw.get_mut("character_book")
+    } else {
+        raw.get_mut("data")
+            .and_then(|d| d.get_mut("character_book"))
+    }
+}
+
+/// 内嵌世界书的条目容器(character_book.entries)。
+/// `create_entries` = true 时 entries 键缺失会补一个空对象(新建条目用);false 时缺失返回 None。
+fn character_book_entries_mut(raw: &mut Value, create_entries: bool) -> Option<&mut Value> {
+    let cb = character_book_mut(raw)?.as_object_mut()?;
+    if cb.get("entries").is_none() {
+        if !create_entries {
+            return None;
+        }
+        cb.insert("entries".into(), Value::Object(serde_json::Map::new()));
+    }
+    cb.get_mut("entries")
+}
+
+impl WorldBookService {
+    /// 更新指定世界书内一条条目的内容(RPFLOW-2 归档步·绿灯路径):按 uid 定位 →
+    /// 由 `compose` 以**原始 content** 生成新内容 → 只改 `content` 键写回 `data_raw`。
+    ///
+    /// 为什么基于原始 content 而不是归一化视图内容:`@@` 装饰器行在归一化时被剥离
+    /// (解析层存进 decorators),基于视图追加会把装饰器行静默抹掉,改变条目的条件注入
+    /// 与变量写入行为。条目不存在 / 世界书不存在或缺少 data_raw → None(无写入)。
+    pub fn update_entry_content<F>(&self, id: &str, uid: i64, compose: F) -> Option<()>
+    where
+        F: FnOnce(&str) -> String,
+    {
+        let rec = self.get(id)?;
+        let mut raw = rec.data_raw?;
+        let target = find_entry_mut(raw.get_mut("entries")?, uid)?;
+        write_entry_content(target, compose)?;
+        self.save_data_raw(&rec.id, &raw)
+    }
+
+    /// 在指定世界书内**追加**一条绿灯(触发)条目,返回新条目 uid。
+    /// 新 uid = 现有原始条目最大 uid + 1(空书为 1,同 `add_entry`);
+    /// entries 为对象 → 插数字键;为数组 → 追加;缺失 → 建空数组后追加。
+    pub fn create_trigger_entry(
+        &self,
+        id: &str,
+        comment: &str,
+        keys: &[String],
+        content: &str,
+    ) -> Option<i64> {
+        let rec = self.get(id)?;
+        let mut raw = rec.data_raw?;
+        if raw.get("entries").is_none() {
+            raw.as_object_mut()?
+                .insert("entries".into(), Value::Array(Vec::new()));
+        }
+        let new_id = max_entry_uid(raw.get("entries")?).map_or(1, |m| m + 1);
+        let value = crate::parsing::world_book::view_to_value(&trigger_entry_view(
+            new_id, comment, keys, content,
+        ));
+        match raw.get_mut("entries")? {
+            Value::Object(map) => {
+                map.insert(new_id.to_string(), value);
+            }
+            Value::Array(arr) => arr.push(value),
+            _ => return None,
+        }
+        self.save_data_raw(&rec.id, &raw)?;
+        Some(new_id)
+    }
+
+    /// 更新角色卡内嵌世界书里一条条目的内容(语义同 [`Self::update_entry_content`]),
+    /// 写回 `characters.data_raw`——经 `character_data::update_data_raw` 的**写锁事务**
+    /// 读改写(与 `save_character_book` 同一底层通道;本条只改 content 键,不整组重写
+    /// entries,未归一化兄弟条目与 `@@` 装饰器行均不受影响)。
+    /// 角色不存在 / 卡无 character_book / 找不到 uid → None(无写入)。
+    pub fn update_character_book_entry_content<F>(
+        &self,
+        character_id: &str,
+        uid: i64,
+        compose: F,
+    ) -> Option<()>
+    where
+        F: FnOnce(&str) -> String,
+    {
+        let done =
+            crate::services::character_data::update_data_raw(&self.db, character_id, |raw| {
+                let target = character_book_entries_mut(raw, false)
+                    .and_then(|entries| find_entry_mut(entries, uid))
+                    .ok_or_else(|| format!("角色卡内嵌世界书缺少条目 uid={uid}"))?;
+                write_entry_content(target, compose).ok_or_else(|| "内嵌条目结构异常".to_string())
+            });
+        // Ok(false)=角色不存在;Err=闭包拒绝或 SQL 失败。调用方只看到 None 并回
+        // 「条目可能刚被改动,请重试」——具体原因(条目缺失 / 结构异常)留 warn 便于排查。
+        match done {
+            Ok(true) => Some(()),
+            Ok(false) => None,
+            Err(e) => {
+                tracing::warn!(character_id, uid, error = %e, "角色卡内嵌世界书条目更新未生效");
+                None
+            }
+        }
+    }
+
+    /// 在角色卡内嵌世界书内**追加**一条绿灯条目,返回新条目 uid。
+    /// 新 uid = 卡内内嵌原始条目最大 uid + 1;写回经写锁事务。
+    /// 卡无 character_book 时 None(不新建卡内结构)。
+    pub fn create_character_book_entry(
+        &self,
+        character_id: &str,
+        comment: &str,
+        keys: &[String],
+        content: &str,
+    ) -> Option<i64> {
+        let mut new_id = 0i64;
+        let done =
+            crate::services::character_data::update_data_raw(&self.db, character_id, |raw| {
+                let entries = character_book_entries_mut(raw, true)
+                    .ok_or_else(|| "角色卡缺少 character_book".to_string())?;
+                let uid = max_entry_uid(entries).map_or(1, |m| m + 1);
+                let value = crate::parsing::world_book::view_to_value(&trigger_entry_view(
+                    uid, comment, keys, content,
+                ));
+                match entries {
+                    Value::Object(map) => {
+                        map.insert(uid.to_string(), value);
+                    }
+                    Value::Array(arr) => arr.push(value),
+                    _ => return Err("character_book.entries 结构异常".to_string()),
+                }
+                new_id = uid;
+                Ok(())
+            });
+        match done {
+            Ok(true) => Some(new_id),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

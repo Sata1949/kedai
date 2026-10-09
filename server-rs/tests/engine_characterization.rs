@@ -521,3 +521,370 @@ async fn plain_text_path_emits_no_tool_events() {
         "finish 应携带生成正文: {finish}"
     );
 }
+
+// ==================== RPFLOW-1:deep/agent 流程(草稿隐藏 + 强制批判修改) ====================
+
+/// **草稿步默认隐藏(RPFLOW-1)**:deep 模式第 1 步产物经 `draft` 事件透出、
+/// **不进正文**(无任何携带草稿文本的 token 事件),正文以正文步产物收口,
+/// 反思步强制发生且通过时在推理链可见。
+///
+/// mock 钩子靠 system 子串门控,天然按步骤分派:
+///   - 草稿步 system 含「本步指令·草稿」→ 回「草稿XYZ」;
+///   - 正文步 system 含「本步指令·正文」→ 回「正式正文ABC」;
+///   - 反思调用 system 含「反思纪律」(引擎追加的纪律段)→ 回「PASS」(无工具调用 → 达标)。
+#[tokio::test]
+async fn deep_mode_draft_is_hidden_and_reflect_accepts() {
+    let _guard = test_lock().await;
+    let app = test_app();
+    let cid = upload_character(app, "流程特征化-草稿.json").await;
+    let sid = new_session(app, &cid).await;
+
+    let events = sse_events(
+        app,
+        &sid,
+        &cid,
+        "[[reply_if_any:本步指令·草稿|草稿XYZ]] [[reply_if_any:本步指令·正文|正式正文ABC]] [[reply_if_any:反思纪律|PASS]]",
+        "deep",
+    )
+    .await;
+
+    // 1) 草稿经 draft 事件透出(面板折叠展示的数据源)
+    let draft = events
+        .iter()
+        .find(|e| e["type"] == "draft")
+        .expect("deep 模式应有 draft 事件");
+    assert!(
+        draft["text"].as_str().unwrap_or("").contains("草稿XYZ"),
+        "draft 事件应携带草稿文本: {draft}"
+    );
+    // 2) 草稿默认隐藏:任何 token 事件都不得携带草稿文本
+    for e in events.iter().filter(|e| e["type"] == "token") {
+        assert!(
+            !e["text"].as_str().unwrap_or("").contains("草稿XYZ"),
+            "草稿不得经 token 事件透出(默认隐藏): {e}"
+        );
+    }
+    // 3) 正文以正文步产物收口,草稿不污染
+    let finish = events.iter().find(|e| e["type"] == "finish").unwrap();
+    let content = finish["content"].as_str().unwrap_or("");
+    assert!(
+        content.contains("正式正文ABC"),
+        "finish 应为正文步产物: {finish}"
+    );
+    assert!(
+        !content.contains("草稿XYZ"),
+        "finish 不得包含草稿: {finish}"
+    );
+    // 4) 步骤事件可见:草稿步 + 反思通过(反思不再静默)
+    let steps: Vec<String> = events
+        .iter()
+        .filter(|e| e["type"] == "step")
+        .filter_map(|e| e["step"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        steps.iter().any(|s| s == "草稿中…"),
+        "应有草稿步事件: {steps:?}"
+    );
+    assert!(
+        steps.iter().any(|s| s == "反思通过"),
+        "应有反思通过事件: {steps:?}"
+    );
+}
+
+/// **批判与定点修改(RPFLOW-1)**:反思步模型调用 revise_passage 后,引擎把修改后的
+/// 正文回写并收口到 finish,推理链发出「批判与修改」进度事件;工具的 `text` 参数由
+/// 引擎覆写为当前正文(模型传的过期全文被忽略)。
+///
+/// mock:正文步回「第一句。旧句。」;**[[tool_if:]] 以「反思纪律」子串门控**——该子串
+/// 只出现在反思调用的 system(引擎追加的纪律段),草稿/正文步不命中,故工具调用
+/// 只由反思步发出;后续轮无判定输出 → 有界结束,机械闸通过后采纳修订文本。
+#[tokio::test]
+async fn deep_mode_reflect_applies_targeted_revision() {
+    let _guard = test_lock().await;
+    let app = test_app();
+    let cid = upload_character(app, "流程特征化-修改.json").await;
+    let sid = new_session(app, &cid).await;
+
+    let events = sse_events(
+        app,
+        &sid,
+        &cid,
+        "[[reply_if_any:本步指令·草稿|草稿DR]] [[reply_if_any:本步指令·正文|第一句。旧句。]] \
+         [[tool_if:反思纪律|revise_passage {\"find\":\"旧句\",\"replace\":\"新句\",\"text\":\"模型传的过期全文\"}]]",
+        "deep",
+    )
+    .await;
+
+    // 修改进度事件(反思过程可见)
+    let modify = events
+        .iter()
+        .find(|e| e["type"] == "step" && e["step"].as_str() == Some("批判与修改"))
+        .expect("应有「批判与修改」事件");
+    assert!(
+        modify["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("第 1/2 次"),
+        "修改事件应带次数(deep 上限 2): {modify}"
+    );
+    // 修订文本回写并收口(旧句被新句替换;且未因重生成被丢弃)
+    let finish = events.iter().find(|e| e["type"] == "finish").unwrap();
+    let content = finish["content"].as_str().unwrap_or("");
+    assert!(
+        content.contains("新句"),
+        "finish 应包含修订后的文本: {finish}"
+    );
+    assert!(!content.contains("旧句"), "旧文本应已被替换: {finish}");
+}
+
+/// **反思回退重生成正文时草稿注记必须在场(RPFLOW-1 审查回归)**:正文步提示词恒写
+/// 「严格依据上方「内部草稿」扩写」,而回退重生成走 `llm_messages.truncate(base_len)`。
+/// 旧实现 base_len 取在步骤循环之前,草稿注记(循环内 push)会被一并截掉 →
+/// 重生成时正文步提示词引用一个不存在的「内部草稿」。
+///
+/// 构造:正文以中间标点「，」结尾 → 机械闸判「疑似截断」→ 回退到正文步重生成。
+/// 正文内容由「内部草稿·仅你可见」子串门控 —— 注记仍在消息里才回得出该短语,
+/// 被丢则落到 mock 默认回复(不含门控短语),足以区分两种实现。
+#[tokio::test]
+async fn deep_retreat_regeneration_keeps_draft_note() {
+    let _guard = test_lock().await;
+    let app = test_app();
+    let cid = upload_character(app, "流程特征化-回退注记.json").await;
+    let sid = new_session(app, &cid).await;
+
+    let events = sse_events(
+        app,
+        &sid,
+        &cid,
+        "[[reply_if_any:本步指令·草稿|草稿RT]] \
+         [[reply_if_any:内部草稿·仅你可见|依据草稿扩写的正文，]]",
+        "deep",
+    )
+    .await;
+
+    // 先确认确实进了回退重生成分支(否则本用例会退化成「无判别性」的绿)
+    let steps: Vec<String> = events
+        .iter()
+        .filter(|e| e["type"] == "step")
+        .filter_map(|e| e["step"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        steps.iter().any(|s| s == "重新生成"),
+        "正文以中间标点结尾应触发回退重生成: {steps:?}"
+    );
+    // 重生成后的正文仍来自「内部草稿在场」那条路径
+    let finish = events.iter().find(|e| e["type"] == "finish").unwrap();
+    let content = finish["content"].as_str().unwrap_or("");
+    assert!(
+        content.contains("依据草稿扩写的正文"),
+        "回退重生成丢了草稿注记,正文步提示词引用落空: {finish}"
+    );
+}
+
+/// **空草稿可见化(RPFLOW-1 实测回归)**:草稿步输出为空(推理耗尽预算,真实模型两轮
+/// 实测中各出现过一次)时不再静默跳过——发「草稿为空」step 事件、不产生 draft 事件,
+/// 且正文步照常收口(不因缺草稿而失败)。
+///
+/// mock 用 `[[empty_if:本步指令·草稿]]` 令草稿步返回空(completion=0,不触发提额重试;
+/// 提额判定本身由 `draft_heal_budget` 单测覆盖),正文步由 `[[reply_if_any:]]` 门控。
+#[tokio::test]
+async fn deep_empty_draft_is_visible_and_main_step_continues() {
+    let _guard = test_lock().await;
+    let app = test_app();
+    let cid = upload_character(app, "流程特征化-空草稿.json").await;
+    let sid = new_session(app, &cid).await;
+
+    let events = sse_events(
+        app,
+        &sid,
+        &cid,
+        "[[empty_if:本步指令·草稿]] [[reply_if_any:本步指令·正文|正文照常]]",
+        "deep",
+    )
+    .await;
+
+    assert!(
+        events.iter().all(|e| e["type"] != "draft"),
+        "空草稿不应产生 draft 事件(无内容可展示)"
+    );
+    let steps: Vec<String> = events
+        .iter()
+        .filter(|e| e["type"] == "step")
+        .filter_map(|e| e["step"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        steps.iter().any(|s| s == "草稿为空"),
+        "空草稿应有可见 step 事件(不静默): {steps:?}"
+    );
+    let finish = events.iter().find(|e| e["type"] == "finish").unwrap();
+    assert!(
+        finish["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains("正文照常"),
+        "缺草稿不应影响正文步收口: {finish}"
+    );
+}
+
+/// **归档步(RPFLOW-2)**:deep 流程第 4 步执行且**产物不进气泡**——归档模型回吐的
+/// 文本不产生 token 事件、不影响 finish 正文;可观测的只有 step 事件。
+/// 归档步的工具白名单(含 worldbook_update)由 planner 单测锁定;工具行为见
+/// `tools/worldbook.rs` 单测。
+///
+/// mock 用 [[reply_if_any:]] 门控「归档与同步」子串:该子串只出现在归档步的
+/// system(步骤提示词),且钩子扫描**全量消息**(归档步的末条 user 是引擎追加的
+/// 「本轮最终正文」注记,末条提取的钩子会丢标记——与 TM-EMPTY-1 提醒轮同型)。
+#[tokio::test]
+async fn deep_mode_archive_step_runs_without_leaking_into_bubble() {
+    let _guard = test_lock().await;
+    let app = test_app();
+    let cid = upload_character(app, "流程特征化-归档.json").await;
+    let sid = new_session(app, &cid).await;
+
+    let events = sse_events(
+        app,
+        &sid,
+        &cid,
+        "[[reply_if_any:本步指令·草稿|草稿DR]] [[reply_if_any:本步指令·正文|正文ABC]] \
+         [[reply_if_any:反思纪律|PASS]] [[reply_if_any:归档与同步|归档正文MNX]]",
+        "deep",
+    )
+    .await;
+
+    // 归档步确实执行(step 事件可见)
+    let steps: Vec<String> = events
+        .iter()
+        .filter(|e| e["type"] == "step")
+        .filter_map(|e| e["step"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        steps.iter().any(|s| s == "归档与词条同步中…"),
+        "应有归档步事件: {steps:?}"
+    );
+    // 归档产物不进气泡:token 事件与 finish 正文都不得携带归档话术
+    for e in events.iter().filter(|e| e["type"] == "token") {
+        assert!(
+            !e["text"].as_str().unwrap_or("").contains("归档正文MNX"),
+            "归档产物不得经 token 透出: {e}"
+        );
+    }
+    let finish = events.iter().find(|e| e["type"] == "finish").unwrap();
+    let content = finish["content"].as_str().unwrap_or("");
+    assert!(
+        !content.contains("归档正文MNX"),
+        "finish 不得含归档产物: {finish}"
+    );
+    assert!(
+        content.contains("正文ABC"),
+        "finish 应为正文步产物: {finish}"
+    );
+}
+
+/// **词条同步(RPFLOW-2,端到端)**:归档步调用 `worldbook_update` 命中**蓝灯(常驻)**
+/// 条目时,不改写它,而是**新建绿灯(触发)条目**;调用的下落也要能在角色卡内嵌
+/// character_book 里读回。
+///
+/// mock:正文步回「正文WB」;`[[tool_if:归档与同步|worldbook_update {...}]]` 只在归档步
+/// 生效(子串只出现在归档步 system;该步白名单 ARCHIVE_TOOLS 含 worldbook_update);
+/// 工具结果回填后一轮走固定完成回复,归档循环收敛。
+#[tokio::test]
+async fn deep_mode_archive_syncs_worldbook_entry() {
+    let _guard = test_lock().await;
+    let app = test_app();
+    // 角色卡带内嵌世界书:一条蓝灯(常驻)条目
+    let card = json!({
+        "spec": "chara_card_v2",
+        "spec_version": "2.0",
+        "name": "词条同步角色",
+        "description": "RPFLOW-2 词条同步测试",
+        "first_mes": "你好",
+        "data": {
+            "name": "词条同步角色",
+            "description": "RPFLOW-2 词条同步测试",
+            "character_book": {
+                "entries": [{
+                    "id": 0,
+                    "comment": "世界观·书店",
+                    "content": "书店叫「晚灯书屋」。",
+                    "constant": true,
+                    "enabled": true,
+                    "position": 0,
+                    "order": 100,
+                    "keys": []
+                }]
+            }
+        }
+    });
+    let body = format!(
+        "--BOUND\r\nContent-Disposition: form-data; name=\"file\"; filename=\"词条同步.json\"\r\nContent-Type: application/json\r\n\r\n{card}\r\n--BOUND--\r\n"
+    );
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/characters/upload")
+        .header("content-type", "multipart/form-data; boundary=BOUND")
+        .body(Body::from(body))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let char: Value = serde_json::from_slice(&bytes).unwrap();
+    let cid = char["id"].as_str().unwrap().to_string();
+    let sid = new_session(app, &cid).await;
+
+    let events = sse_events(
+        app,
+        &sid,
+        &cid,
+        "我把书店招牌换成了霓虹灯。 \
+         [[reply_if_any:本步指令·草稿|草稿WB]] [[reply_if_any:本步指令·正文|正文WB]] \
+         [[reply_if_any:反思纪律|PASS]] \
+         [[tool_if:归档与同步|worldbook_update {\"topic\":\"书店\",\"content\":\"招牌已换成霓虹灯\",\"keywords\":[\"招牌\",\"霓虹灯\"]}]]",
+        "deep",
+    )
+    .await;
+
+    // 工具确实在归档步被调用并返回结构化结果
+    let call = events
+        .iter()
+        .find(|e| e["type"] == "tool_call" && e["name"] == "worldbook_update")
+        .expect("归档步应调用 worldbook_update: 见 events");
+    assert!(call["name"].as_str().unwrap_or("") == "worldbook_update");
+    let result = events
+        .iter()
+        .find(|e| e["type"] == "tool_result" && e["name"] == "worldbook_update")
+        .expect("worldbook_update 应有 tool_result");
+    let output = &result["output"];
+    assert!(output.get("error").is_none(), "工具不应报错: {output}");
+    assert_eq!(
+        output["action"], "created",
+        "命中蓝灯(常驻)条目 → 应新建绿灯条目而非改写: {output}"
+    );
+
+    // 角色卡内嵌词条:原常驻条目逐字未动 + 新增一条绿灯条目
+    let (status, payload) = send_json(
+        app,
+        "GET",
+        &format!("/api/characters/{cid}/world-entries"),
+        json!(null),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let list = payload["entries"].as_array().cloned().unwrap_or_default();
+    let constant = list
+        .iter()
+        .find(|e| e["comment"] == "世界观·书店")
+        .expect("原常驻条目应仍在");
+    assert_eq!(constant["constant"], json!(true), "蓝灯条目不得被改写");
+    assert_eq!(
+        constant["content"], "书店叫「晚灯书屋」。",
+        "蓝灯条目内容必须逐字未动: {constant}"
+    );
+    let created = list
+        .iter()
+        .find(|e| e["comment"] != "世界观·书店")
+        .expect("应新建绿灯条目");
+    assert_eq!(created["constant"], json!(false), "新条目必须是绿灯");
+    assert!(
+        created["content"].as_str().unwrap_or("").contains("霓虹灯"),
+        "新条目应含最新情况: {created}"
+    );
+}

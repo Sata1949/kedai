@@ -434,6 +434,7 @@ impl CustomExecutor {
             &run_id,
             gate,
             call_timeout,
+            true,
         )
         .await;
         drop(tx);

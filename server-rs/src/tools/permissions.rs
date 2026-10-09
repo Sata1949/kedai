@@ -500,6 +500,11 @@ fn default_risk(tool: &str) -> ToolRisk {
         // 在对比模式下把它一并剔掉(可见性本就由 META_TOOLS 与逐节点下发决定)。
         "run_flow" => ToolRisk::Sensitive,
         "memory_write" | "update_variables" | "write" | "replace" | "create" => ToolRisk::Dangerous,
+        // 世界书词条同步(RPFLOW-2 `worldbook_update`):会改写用户数据(世界书条目 /
+        // 角色卡内嵌 character_book),与文件写工具同级归危险级。可见性本就由
+        // 「按名单释放」(META_TOOLS + 归档步 ARCHIVE_TOOLS)决定,不看风险级;
+        // 显式登记而非依赖下方通配兜底,便于后续审查(同 bash 先例)。
+        "worldbook_update" => ToolRisk::Dangerous,
         // 工作区文件工具族(编码通道批次):读/检索三个是安全级(只读,且路径被
         // workspace_guard 收口在工作区内);写/改/补丁三个与 write/replace 同级归危险级
         // ——它们会真的改动工作区里的源码,风险面与既有写工具同类。

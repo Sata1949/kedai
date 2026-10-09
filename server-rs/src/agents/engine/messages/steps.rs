@@ -23,6 +23,25 @@ pub(in crate::agents::engine) fn retreat_to_generating_step(
     None
 }
 
+/// 草稿步「推理耗尽」提额判定(RPFLOW-1 实测回归):正文为空但已消耗 completion token
+/// (预算被 reasoning 吃光,HTTP 200 + 空 `content`)时,给出翻倍后的输出上限;
+/// 其余情况(有正文 / 未消耗 token / 已达封顶)返回 None。
+/// 与 executor 的 `heal_budget_for` 同型:纯函数,便于单测边界。
+pub(in crate::agents::engine) fn draft_heal_budget(
+    content: &str,
+    completion_tokens: i64,
+    current_max_tokens: u32,
+) -> Option<u32> {
+    if !content.trim().is_empty() || completion_tokens <= 0 {
+        return None;
+    }
+    crate::utils::retry::heal_budget_with_floor(
+        current_max_tokens,
+        crate::agents::planner::DRAFT_HEAL_MAX_TOKENS,
+        crate::agents::planner::DRAFT_MAX_TOKENS,
+    )
+}
+
 /// 自定义流程步骤消息视图:步骤级系统提示词(宏展开)追加到 system 末尾;
 /// 无提示词时返回共享消息的克隆(不修改原数组,保证反思回退后视图可重建)。
 pub(in crate::agents::engine) fn with_step_prompt(
@@ -113,16 +132,22 @@ mod tests {
     use serde_json::json;
 
     /// 反思失败回退必须落在「会生成内容」的 direct 步骤(regression:旧逻辑停在反思步骤本身
-    /// 导致 attempt 永不递增、无限紧密循环,见 2026-08-06 日志 1ms 间隔的 reflect 洪流)
+    /// 导致 attempt 永不递增、无限紧密循环,见 2026-08-06 日志 1ms 间隔的 reflect 洪流)。
+    /// RPFLOW-1 计划改版后步骤序为 [草稿, 正文, 反思, 归档]——反思在 idx=2、
+    /// 归档在 idx=3,两者回退都必须落在 idx=1 的正文步(generates=true)。
     #[test]
     fn retreat_lands_on_generating_step() {
-        // agent / deep plan:反思在 idx=1,应回退到 0(计划生成步骤,generates=true)
         for mode in ["agent", "deep"] {
             let plan = make_plan("你好", mode);
             assert_eq!(
-                retreat_to_generating_step(&plan.steps, 1),
-                Some(0),
+                retreat_to_generating_step(&plan.steps, 2),
+                Some(1),
                 "mode={mode}"
+            );
+            assert_eq!(
+                retreat_to_generating_step(&plan.steps, 3),
+                Some(1),
+                "mode={mode}(从归档步回退)"
             );
         }
         // 无生成步骤可回退 → None(调用方应放弃反思而非死循环)
@@ -141,6 +166,27 @@ mod tests {
         }];
         assert_eq!(retreat_to_generating_step(&steps, 0), None);
     }
+    /// 草稿步推理耗尽提额(2026-10-09 真实模型实测回归):只认「空正文 + 已消耗
+    /// completion token」这一形态;封顶后不再重发(纯函数边界逐条钉住)。
+    #[test]
+    fn draft_heal_budget_only_when_reasoning_burned_the_budget() {
+        use crate::agents::planner::{DRAFT_HEAL_MAX_TOKENS, DRAFT_MAX_TOKENS};
+        // 空正文 + 已消耗 token(推理吃光预算)→ 翻倍(不低于 DRAFT_MAX_TOKENS)
+        assert_eq!(
+            draft_heal_budget("", 512, DRAFT_MAX_TOKENS),
+            Some(DRAFT_MAX_TOKENS * 2)
+        );
+        assert_eq!(
+            draft_heal_budget("  \n ", 3, DRAFT_MAX_TOKENS),
+            Some(DRAFT_MAX_TOKENS * 2)
+        );
+        // 有正文 / 未消耗 token → 不提额(不是本防护的形态,别误重发)
+        assert_eq!(draft_heal_budget("一段草稿", 512, DRAFT_MAX_TOKENS), None);
+        assert_eq!(draft_heal_budget("", 0, DRAFT_MAX_TOKENS), None);
+        // 已达封顶:翻倍还会撞顶 → None(与 heal_budget_with_floor 同口径)
+        assert_eq!(draft_heal_budget("", 10, DRAFT_HEAL_MAX_TOKENS), None);
+    }
+
     #[test]
     fn step_params_apply_tool_choice_and_parallel_calls() {
         let registry = ToolRegistry::new();
