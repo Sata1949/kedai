@@ -817,6 +817,16 @@ const TavernHelper=Object.freeze({
   getChatMessages:function(id,opts){return rpc('chat-messages',Number(id)||0,opts&&typeof opts==='object'?opts:{});},
 });
 globalThis.TavernHelper=TavernHelper;
+// ---- kedai 扩展能力(Kedai 命名空间;悬浮窗/面板类脚本的宿主管理桥) ----
+// 酒馆悬浮窗的常见功能是管理「预设条目」;在 kedai 里对应物是**提示词注入楼层**。
+// 该桥只暴露保守面:读楼层摘要(顺序/角色/启停/字数,**不含正文**)与单条启停写入;
+// 能力清单 capabilities 供脚本先探测再降级(缺能力时显示「需平台支持」而不是静默失败)。
+const Kedai=Object.freeze({
+  capabilities:Object.freeze({floors:true,chatWrite:false,network:false,generate:false}),
+  getFloors:function(){return rpc('floors-get');},
+  setFloorEnabled:function(id,enabled){return rpc('floors-set-enabled',String(id??''),!!enabled);},
+});
+globalThis.Kedai=Kedai;
 // ---- 剪贴板桥(实跑问题 7 R4)----
 // 沙箱是不透明来源 + display:none 隐藏框架,无焦点/无用户激活,navigator.clipboard.writeText
 // 与 document.execCommand('copy') 都不可能成功(权限与焦点双缺),「复制提示词」类按钮静默失效。

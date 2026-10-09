@@ -6,11 +6,16 @@ vi.mock('./api/worldbooks', () => ({
   getCharacterWorldEntries: vi.fn(),
   saveCharacterWorldEntries: vi.fn(),
 }));
+vi.mock('./api/settings', () => ({
+  getPromptInject: vi.fn(),
+  savePromptInject: vi.fn(),
+}));
 vi.mock('./characterScriptSandbox', () => ({
   executeSandboxedCharacterScript: vi.fn(),
 }));
 
 import { getCharacterWorldEntries, saveCharacterWorldEntries } from './api/worldbooks';
+import { getPromptInject, savePromptInject } from './api/settings';
 import { executeSandboxedCharacterScript } from './characterScriptSandbox';
 import {
   cleanupCardScriptSandbox,
@@ -23,6 +28,9 @@ import type { WorldBookEntry } from './api/types';
 
 const mockedGet = getCharacterWorldEntries as unknown as ReturnType<typeof vi.fn>;
 const mockedSave = saveCharacterWorldEntries as unknown as ReturnType<typeof vi.fn>;
+// 新用例用 vi.mocked(类型安全,不再新增 as unknown as 逃逸)
+const mockedGetInject = vi.mocked(getPromptInject);
+const mockedSaveInject = vi.mocked(savePromptInject);
 const mockedExec = executeSandboxedCharacterScript as unknown as ReturnType<typeof vi.fn>;
 
 function entry(id: number, enabled: boolean, extra: Partial<WorldBookEntry> = {}): WorldBookEntry {
@@ -140,6 +148,84 @@ describe('makeCardScriptRpcExtensions(lorebook-set:uid+enabled 白名单)', () =
     });
     expect(mockedGet).not.toHaveBeenCalled();
     expect(mockedSave).not.toHaveBeenCalled();
+  });
+});
+
+describe('makeCardScriptRpcExtensions(floors:提示词注入楼层读写)', () => {
+  function floorConfig() {
+    return {
+      mode: 'complex' as const,
+      simple: {
+        word_count_enabled: false,
+        word_count: 200,
+        paraphrase_enabled: false,
+        dialogue_enabled: false,
+        perspective_enabled: false,
+        perspective: '第三人称',
+        order: [] as string[],
+        banned_words_enabled: false,
+        banned_prompt: '',
+        banned_words: [],
+      },
+      floors: [
+        {
+          id: 'f1',
+          name: '基线',
+          content: '不应外泄的正文',
+          role: 'system' as const,
+          position: 'system' as const,
+          depth: 0,
+          enabled: true,
+          order: 0,
+        },
+        {
+          id: 'f2',
+          name: '文风',
+          content: 'x',
+          role: 'user' as const,
+          position: 'system' as const,
+          depth: 0,
+          enabled: false,
+          order: 1,
+        },
+      ],
+    };
+  }
+
+  it('floors-get 返回摘要(顺序原样、只给字数不给正文)', async () => {
+    mockedGetInject.mockResolvedValue(floorConfig());
+    const res = await makeCardScriptRpcExtensions({
+      characterId: 'c1',
+      lorebookName: null,
+      readMessages: () => [],
+    })('floors-get', []);
+    expect(res.handled).toBe(true);
+    const list = res.value as Array<Record<string, unknown>>;
+    expect(list).toHaveLength(2);
+    expect(list[0]).toMatchObject({ id: 'f1', name: '基线', role: 'system', enabled: true, order: 0, chars: 7 });
+    expect(list[1]).toMatchObject({ id: 'f2', enabled: false, chars: 1 });
+    expect(list[0]).not.toHaveProperty('content');
+  });
+
+  it('floors-set-enabled 落库并回读新列表;未知 id 不改不写', async () => {
+    mockedGetInject.mockResolvedValue(floorConfig());
+    mockedSaveInject.mockImplementation(async (cfg) => cfg);
+    const rpc = makeCardScriptRpcExtensions({
+      characterId: 'c1',
+      lorebookName: null,
+      readMessages: () => [],
+    });
+    const ok = await rpc('floors-set-enabled', ['f1', false]);
+    const okVal = ok.value as { ok: boolean; floors: Array<Record<string, unknown>> };
+    expect(okVal.ok).toBe(true);
+    expect(mockedSaveInject).toHaveBeenCalledTimes(1);
+    const written = mockedSaveInject.mock.calls[0][0] as { floors: Array<{ id: string; enabled: boolean }> };
+    expect(written.floors.find((f) => f.id === 'f1')?.enabled).toBe(false);
+    expect(okVal.floors[0].enabled).toBe(false);
+
+    const miss = await rpc('floors-set-enabled', ['nope', true]);
+    expect((miss.value as { ok: boolean }).ok).toBe(false);
+    expect(mockedSaveInject).toHaveBeenCalledTimes(1); // 未新增写入
   });
 });
 

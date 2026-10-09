@@ -64,6 +64,18 @@ describe('sandboxScript', () => {
     expect(() => new vm.Script(out)).not.toThrow();
   });
 
+  it('暴露 Kedai 命名空间:楼层读写 op 与能力清单(悬浮窗移植的宿主桥)', () => {
+    // 悬浮窗(预设条目管理)类脚本在 kedai 里要管理的是「提示词注入楼层」。
+    // 宿主未提供该能力前,脚本只能靠 capabilities 探测降级;此处锁定生成物
+    // 必须带上 Kedai 命名空间与两个 op 名,防止后续重构静默摘掉这座桥。
+    const out = sandboxScript('x();', 'nonce-kedai', { stat_data: {}, display_data: {} });
+    expect(out).toContain('globalThis.Kedai=Kedai');
+    expect(out).toContain("rpc('floors-get'");
+    expect(out).toContain("rpc('floors-set-enabled'");
+    expect(out).toContain('capabilities');
+    expect(() => new vm.Script(out)).not.toThrow();
+  });
+
   it('沙箱 localStorage 持久化到宿主、sessionStorage 保持会话级且两者独立(协议状态互不污染)', () => {
     const out = sandboxScript('x();', 'nonce-ls', { stat_data: {}, display_data: {} }, {}, { kk: 'vv' });
     expect(out).toContain('__kdMemoryStorage');

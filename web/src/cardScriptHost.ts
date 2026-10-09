@@ -17,6 +17,7 @@ import {
 } from './characterScriptSandbox';
 import { emptyVariables } from './mvu/variables';
 import { getCharacterWorldEntries, saveCharacterWorldEntries } from './api/worldbooks';
+import { getPromptInject, savePromptInject } from './api/settings';
 import type { WorldBookEntry } from './api/types';
 import type { CardScript } from './cardScripts';
 
@@ -122,8 +123,62 @@ function toHelperChatMessage(m: CardChatMessage): Record<string, unknown> {
   };
 }
 
+/** 给卡脚本的楼层摘要(保守视图:不含正文,只给字数;顺序与配置一致) */
+export interface FloorSummary {
+  id: string;
+  name: string;
+  role: string;
+  enabled: boolean;
+  order: number;
+  chars: number;
+}
+
+function toFloorSummary(f: {
+  id: string;
+  name: string;
+  role: string;
+  enabled: boolean;
+  order: number;
+  content: string;
+}): FloorSummary {
+  return {
+    id: f.id,
+    name: f.name,
+    role: f.role,
+    enabled: f.enabled,
+    order: f.order,
+    chars: f.content.length,
+  };
+}
+
+/** 读楼层摘要(GET /api/prompt-inject) */
+export async function readFloorSummaries(): Promise<FloorSummary[]> {
+  const cfg = await getPromptInject();
+  return cfg.floors.map(toFloorSummary);
+}
+
 /**
- * 沙箱 RPC 扩展:世界书读写 / 聊天消息读取(纯数据 op,不过 DOM 白名单)。
+ * 单条楼层启停(PUT /api/prompt-inject;未变化不写,省一次全量落盘)。
+ * 找不到 id 时返回 ok:false + 原列表(脚本可据此提示,而不是静默失败)。
+ */
+export async function setFloorEnabled(
+  id: string,
+  enabled: boolean,
+): Promise<{ ok: boolean; floors: FloorSummary[]; error?: string }> {
+  const cfg = await getPromptInject();
+  const hit = cfg.floors.find((f) => f.id === id);
+  if (!hit) {
+    return { ok: false, error: `未找到楼层: ${id}`, floors: cfg.floors.map(toFloorSummary) };
+  }
+  if (hit.enabled !== enabled) {
+    cfg.floors = cfg.floors.map((f) => (f.id === id ? { ...f, enabled } : f));
+    await savePromptInject(cfg);
+  }
+  return { ok: true, floors: cfg.floors.map(toFloorSummary) };
+}
+
+/**
+ * 沙箱 RPC 扩展:世界书读写 / 聊天消息读取 / 楼层读写(纯数据 op,不过 DOM 白名单)。
  * name 与 boot 下发的主世界书名不符时返回 null/false(对齐资源帧 shim 语义,
  * 防脚本读写其他角色的世界书——kedai 一角色一内嵌世界书)。
  */
@@ -151,6 +206,16 @@ export function makeCardScriptRpcExtensions(
         const idx = Number.isInteger(id) ? (id >= 0 ? id : msgs.length + id) : -1;
         if (idx < 0 || idx >= msgs.length) return { handled: true, value: [] };
         return { handled: true, value: [toHelperChatMessage(msgs[idx])] };
+      }
+      case 'floors-get': {
+        return { handled: true, value: await readFloorSummaries() };
+      }
+      case 'floors-set-enabled': {
+        const id = String(args[0] ?? '');
+        if (!id) {
+          return { handled: true, value: { ok: false, error: '缺少楼层 id', floors: [] } };
+        }
+        return { handled: true, value: await setFloorEnabled(id, Boolean(args[1])) };
       }
       default:
         return { handled: false };
