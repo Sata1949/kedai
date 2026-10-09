@@ -91,6 +91,14 @@ pub struct AgentFlowConfig {
     /// 且不触碰 settings.json 的双模式继承/隔离契约。并行会成倍消耗 token(WF-11)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_parallel_nodes: Option<u32>,
+    /// 虚拟文件夹路径(IMPHUB「附件管理」;空串 = 未分组)。仅元数据,不做真实目录。
+    ///
+    /// **空值省略序列化是硬要求(不是风格)**:`flow_fingerprint`(重复导入幂等判定)
+    /// 与搬运包都以本结构的序列化字节为准,写空串会让升级后已导出的旧搬运包与
+    /// 「同一份流程的本机副本」指纹不等,重复导入判定随之漂移。由
+    /// `tests.rs::empty_folder_keeps_fingerprint_bytewise_stable` 逐字节锁定。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub folder: String,
 }
 
 /// **流程搬运包**(二维批次 7a):导出文件的线格式。

@@ -77,7 +77,12 @@ fn get_u32(v: &Value, keys: &[&str]) -> Option<u32> {
         .and_then(|n| u32::try_from(n).ok())
 }
 
-fn normalize_script(v: &Value) -> Option<RegexScript> {
+/// 归一化单条外部正则脚本条目(键名 camelCase/snake_case 都收)。
+///
+/// **调用方不止角色卡**:全局正则库(IMPHUB ⑥,`services/regex_service.rs`)的落盘文件与
+/// 导入入参也走这里——同一套键名映射只有这一处实现,库里的条目与卡里的条目口径不会分叉。
+/// 取不到查找模式的条目返回 `None`(调用方负责跳过并计数,不得静默丢弃)。
+pub(crate) fn normalize_script(v: &Value) -> Option<RegexScript> {
     let find_regex = get_str(v, &["findRegex", "find_regex"])
         .unwrap_or("")
         .trim()
@@ -93,7 +98,12 @@ fn normalize_script(v: &Value) -> Option<RegexScript> {
         }
         return None;
     }
-    let enabled = get_bool(v, &["disabled"]).map(|d| !d).unwrap_or(true);
+    // 启用态:本机形态写 `enabled`,酒馆形态写 `disabled`(取反)。**先认 enabled**——
+    // 全局正则库的往返读写用的就是本机形态,若只认 disabled,库里停用的条目会在
+    // 「读—归一—写回」后被静默复活(找不到 disabled 键 → 缺省 true)。
+    let enabled = get_bool(v, &["enabled"])
+        .or_else(|| get_bool(v, &["disabled"]).map(|d| !d))
+        .unwrap_or(true);
     Some(RegexScript {
         id: get_str(v, &["id"]).unwrap_or("").to_string(),
         script_name: get_str(v, &["scriptName", "script_name"])
@@ -350,5 +360,23 @@ mod tests {
         assert_eq!(scripts.len(), 1);
         assert_eq!(scripts[0].find_regex, "/A/g");
         assert_eq!(scripts[0].replace_string, "B");
+    }
+
+    /// 归一化对**本机序列化形态**往返安全(全局正则库整库读写要经它重新归一):
+    /// `enabled: false` 必须保住——只认 `disabled` 会让停用条目在读—写往返后静默复活。
+    #[test]
+    fn serialized_script_roundtrip_keeps_enabled() {
+        let s = script("A", "B", false, true);
+        let value = serde_json::to_value(&s).unwrap();
+        let back = normalize_script(&value).expect("本机形态应可归一");
+        assert!(!back.enabled, "停用条目往返后不得复活");
+        assert_eq!(back.find_regex, "A");
+        assert_eq!(back.replace_string, "B");
+        assert!(back.markdown_only);
+        // 酒馆形态仍按 disabled 取反(旧口径零变化)
+        let st_off = json!({ "findRegex": "/A/g", "replaceString": "B", "disabled": true });
+        assert!(!normalize_script(&st_off).unwrap().enabled);
+        let st_on = json!({ "findRegex": "/A/g", "replaceString": "B", "disabled": false });
+        assert!(normalize_script(&st_on).unwrap().enabled);
     }
 }

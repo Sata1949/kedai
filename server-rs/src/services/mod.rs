@@ -45,6 +45,8 @@ pub mod native_bridge_android;
 pub mod prompt_inject_service;
 pub mod prompt_kit;
 pub mod quick_reply_service;
+// 全局正则库(IMPHUB ⑥,2026-10-09):跨角色的显示层正则,data/regex_scripts.json
+pub mod regex_service;
 pub mod runtime_prompt_service;
 pub mod secret_store;
 pub mod session_service;
