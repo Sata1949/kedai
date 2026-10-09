@@ -16,6 +16,13 @@ use super::*;
 pub(crate) struct WorldInjection {
     pub role: String,
     pub text: String,
+    /// 本条目是**引擎生成的变量状态块**,而非用户世界书条目。
+    ///
+    /// 用途单一(2026-10-09 修复批次):自定义系统提示词模板漏写 `{{world_info}}` 时,
+    /// 用户世界书常驻条目按「Custom Prompt 完整替换、不是追加」契约确实不注入
+    /// (设置页已明示),但状态块是变量更新通道的载体——模型看不到状态就永远不会输出
+    /// `<UpdateVariable>`。此时由 `messages/build.rs` 把它补回 system 尾部,不静默丢弃。
+    pub state_block: bool,
 }
 
 /// 世界书收集结果(6 层规范):按注入位置分为两组——
@@ -31,6 +38,24 @@ pub(crate) struct WorldText {
 }
 
 impl WorldInjection {
+    /// 用户世界书条目(角色卡内嵌 character_book + 独立世界书)
+    pub(crate) fn entry(role: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            text: text.into(),
+            state_block: false,
+        }
+    }
+
+    /// 引擎生成的变量状态块(见 [`WorldInjection::state_block`] 字段说明)
+    pub(crate) fn state_block(role: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            text: text.into(),
+            state_block: true,
+        }
+    }
+
     /// 解析条目注入角色:显式 role 优先;缺省 constant → system,激发 → user
     fn from_entry(e: &crate::parsing::world_book::WorldEntry, default_role: &str) -> String {
         e.role.as_deref().unwrap_or(default_role).to_string()
@@ -84,14 +109,12 @@ pub(crate) fn collect_world_text_grouped_with(
             // 酒馆助手渲染(EJS/宏/状态占位符),渲染后为空不注入
             let rendered = render_assistant_content_with(&e.content, ctx);
             if !rendered.trim().is_empty() {
-                constant_parts.push(WorldInjection {
-                    role: WorldInjection::from_entry(e, "system"),
+                constant_parts.push(WorldInjection::entry(
+                    WorldInjection::from_entry(e, "system"),
                     // keep_empty_bracket=true:保持存量卡的逐字节行为(空 comment 也出 `[]`)。
                     // 差异化约定与单点实现见 services::prompt_kit::world_entry_text。
-                    text: crate::services::prompt_kit::world_entry_text(
-                        &e.comment, &rendered, true,
-                    ),
-                });
+                    crate::services::prompt_kit::world_entry_text(&e.comment, &rendered, true),
+                ));
             }
             continue;
         }
@@ -110,12 +133,10 @@ pub(crate) fn collect_world_text_grouped_with(
         if !e.content.trim().is_empty() {
             let rendered = render_assistant_content_with(&e.content, ctx);
             if !rendered.trim().is_empty() {
-                triggered_parts.push(WorldInjection {
-                    role: WorldInjection::from_entry(e, "user"),
-                    text: crate::services::prompt_kit::world_entry_text(
-                        &e.comment, &rendered, true,
-                    ),
-                });
+                triggered_parts.push(WorldInjection::entry(
+                    WorldInjection::from_entry(e, "user"),
+                    crate::services::prompt_kit::world_entry_text(&e.comment, &rendered, true),
+                ));
             }
         }
     }
@@ -203,10 +224,7 @@ pub(super) fn make_state_block_with_contract(
         // 无契约(存量卡):整树兼容路径,与历史 make_state_block 行为逐字一致
         None => state_block_text(vars),
     };
-    Some(WorldInjection {
-        role: role.to_string(),
-        text,
-    })
+    Some(WorldInjection::state_block(role, text))
 }
 
 /// 兼容视图(测试用):状态块并入既有世界书文本末尾

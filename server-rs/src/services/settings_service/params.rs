@@ -744,10 +744,35 @@ pub const LEGACY_REFLECT_PROMPT_V1: &str = r#"你是 Kedai 的草稿质量检查
 ///
 /// **单一出处**:只被 [`default_literary_reflect_prompt`] 引用,不内嵌进现行反射提示词。
 /// 以**追加块**形态拼在现行文本之后(与 LIT-2 的缺省词增强同款),故现行文本逐字节成为前缀
-/// ——「开关关逐字等同」由前缀保证。**判定协议不得改动**:首行四值(PASS / 通过 / FAIL / 不通过)
-/// 与「只判定不重写」是解析契约,故本段末尾重申协议——追加检查项不得稀释「输出协议在末尾」
-/// 的模型注意力位置。文本必须同轮恒定(无时间戳/随机序),保前缀缓存假设;不写 `{{...}}` 宏。
+/// ——「开关关逐字等同」由前缀保证。**判定协议不得改动**:判定标记(PASS / 通过 / FAIL /
+/// 不通过)与「不整段重写」是解析契约,故本段末尾重申协议——追加检查项不得稀释「输出协议
+/// 在末尾」的模型注意力位置。
+///
+/// **2026-10-09 修复批次**:收尾句曾逐字照抄 v1 默认词的「只判定不重写」,而 RPFLOW-1
+/// 已把现行默认词改成「优先用工具做最小必要的定点修改」——文学包用户每轮反思都吃到
+/// 两组互斥纪律,且旧句恰在 system 末尾(注意力最强位)。收尾句现与现行版同口径
+/// (工具优先 + 判定词单独成行)。**再改本段时**:先把当前文本冻结成新的 legacy 常量
+/// (见 [`LEGACY_LITERARY_REFLECT_ENHANCEMENT_V1`] 的做法)再接迁移判据,
+/// 否则存量安装匹配不上、永远停在旧文本上。
+/// 文本必须同轮恒定(无时间戳/随机序),保前缀缓存假设;不写 `{{...}}` 宏。
 pub const LITERARY_REFLECT_ENHANCEMENT: &str = "\
+【文学维度追加检查】
+在上述五组标准之外,以下四项同样计入判定(问题标签:文风漂移 / 复读 / 代答 / 时间线矛盾):
+6. 文风漂移:词汇、句式、人称与叙述距离是否与上文不一致(含突然的书面化 / 口语化、人称跳换、时态漂移)。
+7. 复读:开头、结尾、比喻与场景调度是否与上一轮或上文雷同;有无复述已写过的情节。
+8. 代答:是否替用户角色说话、代其做决定或推进其主观行动。
+9. 时间线矛盾:是否与前文已发生的事件、时间顺序或已确立的事实冲突。
+判定协议不变:发现问题同样优先用工具做最小必要的定点修改(不整段重写、不直接删词);
+判定词单独成行输出 PASS / 通过 / FAIL / 不通过,不达标时用一句话指出主要问题(可用上述新增标签)。";
+
+/// 旧版文学反思增强段(v1,2026-10-09 修复批次之前的文本)。
+///
+/// 仅用于**升级迁移判据**:存量 settings.json 里由「旧版默认词 + 本段」拼成的文学版反思
+/// 提示词,靠本常量逐字识别后重物化为新版(见 [`RuntimeSettings::rehydrate_default_reflect_prompt`])。
+/// 与 [`LEGACY_REFLECT_PROMPT_V1`] 同款纪律:**文本不得修改**——它是迁移判据本身;
+/// 若直接引用现行 [`LITERARY_REFLECT_ENHANCEMENT`],本段一改,存量文学版就再也匹配不上,
+/// 升级后永远停留在自相矛盾的旧文本上。
+pub const LEGACY_LITERARY_REFLECT_ENHANCEMENT_V1: &str = "\
 【文学维度追加检查】
 在上述五组标准之外,以下四项同样计入判定(问题标签:文风漂移 / 复读 / 代答 / 时间线矛盾):
 6. 文风漂移:词汇、句式、人称与叙述距离是否与上文不一致(含突然的书面化 / 口语化、人称跳换、时态漂移)。
@@ -814,16 +839,28 @@ impl RuntimeSettings {
     /// **空串不得回填**:它是「显式关闭反思、回退机械规则」的有效值,不是「未自定义」。
     /// 伪装的边界:用户若把内置默认文本逐字粘进提示词框(且未改动),会被视为未自定义。
     pub fn rehydrate_default_reflect_prompt(&mut self) {
-        // RPFLOW-1:旧版默认(v1)同样视为「未自定义」——升级后自动重物化为新版默认,
-        // 否则存量安装会因文本变了却逐字不等而永远停留在旧版(「只判定不重写」)。
-        let legacy_literary = format!(
+        // RPFLOW-1 + 2026-10-09 修复批次:凡「逐字等于任一历史内置默认」者视为未自定义,
+        // 升级后重物化为当前默认——否则存量安装会因文本变了却逐字不等而永远停留在
+        // 旧文本上(v1 的「只判定不重写」,以及旧文学段末尾的同一句)。
+        // 判据文本一律用**冻结**常量(见各 legacy 常量的「不得修改」注释):
+        //   ① v1 默认词(开关关)
+        //   ② v1 默认词 + v1 文学增强段(文学包用户的出厂文本)
+        //   ③ RPFLOW-1 默认词 + v1 文学增强段(修复批次之前的文学包出厂文本)
+        // 现行两版(开关关 / 开)由上方两个函数现算,不冻结。
+        let legacy_literary_v1 = format!(
             "{}\n\n{}",
-            LEGACY_REFLECT_PROMPT_V1, LITERARY_REFLECT_ENHANCEMENT
+            LEGACY_REFLECT_PROMPT_V1, LEGACY_LITERARY_REFLECT_ENHANCEMENT_V1
+        );
+        let legacy_literary_rpflow1 = format!(
+            "{}\n\n{}",
+            default_reflect_prompt(),
+            LEGACY_LITERARY_REFLECT_ENHANCEMENT_V1
         );
         if self.reflect_prompt == default_reflect_prompt()
             || self.reflect_prompt == default_literary_reflect_prompt()
             || self.reflect_prompt == LEGACY_REFLECT_PROMPT_V1
-            || self.reflect_prompt == legacy_literary
+            || self.reflect_prompt == legacy_literary_v1
+            || self.reflect_prompt == legacy_literary_rpflow1
         {
             self.reflect_prompt = self.reflect_default_prompt();
         }

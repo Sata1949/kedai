@@ -45,12 +45,7 @@ fn build_llm_messages(
     // 兼容入口:旧单一世界书视为常态组(位置3,role=system);无尾部注入(测试与旧调用路径不变)
     // 测试用空作用域上下文(None 语义,行为与旧一致)
     let constant: Vec<WorldInjection> = world_text
-        .map(|t| {
-            vec![WorldInjection {
-                role: "system".to_string(),
-                text: t.to_string(),
-            }]
-        })
+        .map(|t| vec![WorldInjection::entry("system", t)])
         .unwrap_or_default();
     build_llm_messages_with_position(
         character_name,
@@ -201,9 +196,31 @@ pub(in crate::agents::engine) fn build_llm_messages_with_position(
         Some(tpl) if !tpl.trim().is_empty() => {
             // {{world_info}} 宏层不认,先替换为位置3 世界书常驻文本;{{character_name}}/{{character_description}}
             // /{{char}}/{{user}}/{{random}}/{{getvar}} 等由宏系统统一展开
+            let has_world_placeholder = tpl.contains("{{world_info}}");
             let bounded_world = untrusted_boundary("world_book", &sys_world);
             let pre = tpl.replace("{{world_info}}", &bounded_world);
-            expand_macros(&pre, &mut mctx)
+            let mut s = expand_macros(&pre, &mut mctx);
+            // 变量状态块兜底(2026-10-09 冲突修复):模板漏写 {{world_info}} 时,世界书**常驻
+            // 条目**按「Custom Prompt 完整替换、不是追加」契约确实不注入(设置页已明示);
+            // 但状态块是引擎状态而非世界书素材——漏掉它,模型看不到当前状态就永远不会输出
+            // <UpdateVariable>,变量更新通道整体静默停摆。此处只补回状态块,世界书条目语义不变。
+            // 口径与占位符路径一致:同样经宏展开(变量值里的宏两路径同解),同样经
+            // world_book 边界包裹(占位符路径的整段 sys_world 也包在其中)。
+            if !has_world_placeholder {
+                if let Some(block) = world_constant
+                    .iter()
+                    .find(|i| i.state_block && i.role == "system")
+                {
+                    if !block.text.trim().is_empty() {
+                        let expanded = expand_macros(&block.text, &mut mctx);
+                        s.push_str(&format!(
+                            "\n\n{}",
+                            untrusted_boundary("world_book", &expanded)
+                        ));
+                    }
+                }
+            }
+            s
         }
         _ => {
             // 内置默认模板(用户清空自定义系统提示词时兜底):文学创作定位,融合「可待」预设精华

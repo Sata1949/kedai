@@ -75,7 +75,8 @@ watch(appMode, () => void loadPromptPreview());
       <p class="sv-note">该提示词按模式独立存储,互不影响。</p>
       <p class="sv-note">
         <b>Custom Prompt 会完整替换内置模板，不是追加。</b>占位符替换为当前角色与已命中的世界书内容。不写
-        <code v-pre>{{world_info}}</code> 时世界书不会自动注入。可用工具清单与「何时调用」由引擎在
+        <code v-pre>{{world_info}}</code> 时世界书不会自动注入（<b>变量状态块除外</b>：它是变量更新的唯一
+        载体，漏写占位符时由引擎兜底注入到系统提示词末尾，避免变量更新静默停摆）。可用工具清单与「何时调用」由引擎在
         Agent 模式下动态注入到系统提示词末尾,无需在此手写工具说明。
       </p>
       <div class="sv-inp-row">
@@ -179,6 +180,8 @@ watch(appMode, () => void loadPromptPreview());
         <p class="sv-note">
           运行时主提示词保存在 DATA_DIR/AGENTS_RUNTIME.md，保存后下次会话生效；
           内容会注入到模型 system 消息开头(角色定位 / 创作原则 / 工具使用原则 / 输出纪律)。
+          其中「工具使用原则」段只在<b>带工具的模式</b>(Agent / 自定义流程)下发——快速 / 深度模式
+          没有工具调用能力，该段由引擎整段省略，无需为此改文本。
           项目根 AGENTS.md 仅供开发 agent 使用，不在此编辑，也绝不会注入运行时模型。
         </p>
         <div class="sv-btn-row">
