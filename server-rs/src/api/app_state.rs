@@ -14,6 +14,7 @@ use crate::services::kaleido_state_service::KaleidoStateService;
 use crate::services::memory_service::MemoryService;
 use crate::services::prompt_inject_service::PromptInjectService;
 use crate::services::quick_reply_service::QuickReplyService;
+use crate::services::regex_service::RegexScriptService;
 use crate::services::runtime_prompt_service::RuntimePromptService;
 use crate::services::script_authorization_service::ScriptAuthorizationService;
 use crate::services::session_service::SessionService;
@@ -62,6 +63,9 @@ pub struct CoreServices {
     pub settings: Arc<Mutex<RuntimeSettings>>,
     /// 提示词注入配置(简单模式 + 楼层系统),持久化到 data/prompt_floors.json
     pub prompt_inject: Arc<Mutex<PromptInjectService>>,
+    /// 全局正则库(IMPHUB ⑥,2026-10-09):跨角色的**显示层**正则,
+    /// 持久化到 data/regex_scripts.json;前端与卡级正则合并后应用(全局在前、卡级在后)
+    pub regex: Arc<Mutex<RegexScriptService>>,
     /// 音频播放器状态(bgm/ambient 双通道),持久化到 data/audio.json
     pub audio: Arc<Mutex<AudioService>>,
     /// 快速回复(Quick Replies):getqr 的渲染数据源,SQLite 持久化
@@ -308,6 +312,10 @@ impl AppState {
             config.data_dir.clone(),
         )));
 
+        // 全局正则库(IMPHUB ⑥):跨角色的显示层正则;渲染侧消费点在前端
+        // (与卡级脚本合并后应用),后端只负责整体读写与落盘
+        let regex = Arc::new(Mutex::new(RegexScriptService::new(config.data_dir.clone())));
+
         // 音频播放器状态(bgm/ambient 双通道);仅 URL 播放,播放列表/设置持久化到 data/audio.json
         let audio = Arc::new(Mutex::new(AudioService::new(config.data_dir.clone())));
 
@@ -435,6 +443,7 @@ impl AppState {
                 model: Arc::new(Mutex::new(engine_model)),
                 settings,
                 prompt_inject,
+                regex,
                 audio,
                 quick_replies,
                 user_scripts,

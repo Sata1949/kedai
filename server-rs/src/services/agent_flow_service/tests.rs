@@ -2210,3 +2210,71 @@ fn bundle_carries_folder_through_export_import() {
         .expect("导入后应在库内");
     assert_eq!(imported.folder, "写作/草稿");
 }
+
+/// 移动分组(IMPHUB 附件管理):只改 folder、**不动 current_flow_id**、路径规整、
+/// 落盘后重读仍在;未知 id 报错点名(组织动作不得顺手改变 custom 模式的执行对象)
+#[test]
+fn move_to_folder_keeps_selection_and_persists() {
+    let dir = TempDataDir::new("flow-move");
+    let mut svc = service(&dir);
+    // 保存两个流程:后保存的「乙」成为当前选中
+    svc.set(flow("甲", vec![step("s1", "direct", Some(true))]))
+        .unwrap();
+    svc.set(flow("乙", vec![step("s1", "direct", Some(true))]))
+        .unwrap();
+    let current = svc.get_library().current_flow_id.clone();
+    assert!(current.is_some(), "保存即选中");
+    let other = svc
+        .get_library()
+        .flows
+        .iter()
+        .find(|f| Some(&f.id) != current.as_ref())
+        .map(|f| f.id.clone())
+        .expect("库里应有非当前流程");
+
+    // 移动非当前流程:路径规整入库,当前选中不变
+    svc.move_to_folder(&other, " /写作// 草稿/ ").unwrap();
+    assert_eq!(
+        svc.get_library().current_flow_id,
+        current,
+        "移动不得改变当前选中"
+    );
+    let moved = svc
+        .get_library()
+        .flows
+        .iter()
+        .find(|f| f.id == other)
+        .unwrap();
+    assert_eq!(moved.folder, "写作/草稿");
+
+    // 落盘后重读:分组与选中都在
+    let reloaded = service(&dir);
+    let moved = reloaded
+        .get_library()
+        .flows
+        .iter()
+        .find(|f| f.id == other)
+        .unwrap();
+    assert_eq!(moved.folder, "写作/草稿");
+    assert_eq!(reloaded.get_library().current_flow_id, current);
+
+    // 移到未分组(空串)与重复移动到同一目标都应是成功且无副作用
+    svc.move_to_folder(&other, "").unwrap();
+    assert_eq!(
+        svc.get_library()
+            .flows
+            .iter()
+            .find(|f| f.id == other)
+            .unwrap()
+            .folder,
+        ""
+    );
+    svc.move_to_folder(&other, "").unwrap();
+
+    // 未知 id:报错点名
+    let err = svc.move_to_folder("no-such-flow", "A").unwrap_err();
+    assert!(
+        err.contains("不存在") && err.contains("no-such-flow"),
+        "{err}"
+    );
+}

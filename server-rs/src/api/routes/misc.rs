@@ -40,10 +40,17 @@ pub(crate) fn misc_routes() -> Router<Arc<AppState>> {
         // 导入导出
         .route("/api/export/chat", get(import_export::export_chat))
         .route("/api/import/chat", post(import_export::import_chat))
+        // 综合导出(IMPHUB bundle v1):一次取回当前模式可用的全部段(下载件 = 综合导入的输入)
+        .route("/api/export/bundle", get(import_export::export_bundle))
         // 插件(自定义工具)
         .route("/api/plugins/tools", get(plugins::list_tools))
         .route("/api/plugins/tools/reload", post(plugins::reload_tools))
         .route("/api/plugins/tools/upload", post(plugins::upload_tool))
+        // 综合导入⑦ / 导出⑦ / 移动分组(IMPHUB 附件管理,2026-10-09)。
+        // 与 `/api/plugins/tools/{name}` 并存不冲突:axum 静态段优先匹配
+        .route("/api/plugins/tools/import", post(plugins::import_tools))
+        .route("/api/plugins/tools/export", get(plugins::export_tools))
+        .route("/api/plugins/tools/move", post(plugins::move_tool))
         .route(
             "/api/plugins/tools/{name}",
             axum::routing::delete(plugins::delete_tool),
