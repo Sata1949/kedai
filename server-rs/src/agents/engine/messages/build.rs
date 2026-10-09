@@ -283,9 +283,13 @@ pub(in crate::agents::engine) fn build_llm_messages_with_position(
             for floor in cfg.enabled_floors_sorted() {
                 let content = expand_macros(&floor.content, &mut mctx);
                 if matches!(floor.role, FloorRole::System) {
-                    // system 角色始终进系统提示词(避免对话中间夹 system 消息)
-                    protected_tail += content.chars().count();
-                    sys.push_str(&format!("\n\n{content}"));
+                    // system 角色始终进系统提示词(避免对话中间夹 system 消息);
+                    // 空内容跳过(与下方非 system 分支同口径):导入 ST 预设的空锚点/
+                    // 组头块展开后为空,继续拼 "\n\n" 会在系统提示词尾部留下空白。
+                    if !content.trim().is_empty() {
+                        protected_tail += content.chars().count();
+                        sys.push_str(&format!("\n\n{content}"));
+                    }
                 } else {
                     floors_in_chat.push((floor.role.as_str().to_string(), content));
                 }
@@ -763,5 +767,97 @@ mod tests {
         assert_eq!(msgs[3].content, "你好");
         // setvar 写入了 vars,可被持久化
         assert_eq!(vars.get("地点").map(|s| s.as_str()), Some("酒馆"));
+    }
+
+    /// 空 system 楼层不得向系统提示词注入空白(回归:此前 system 分支无空检查,
+    /// 导入 ST 预设的锚点/组头空块会以 "\n\n" 形式拼进系统提示词尾部;
+    /// 非 system 空楼层已有跳过,见上方 order 分支)。
+    #[test]
+    fn build_messages_skips_empty_system_floor() {
+        let mut vars = HashMap::new();
+        let mut with_empty = PromptInjectConfig {
+            mode: InjectMode::Complex,
+            ..PromptInjectConfig::default()
+        };
+        with_empty.floors = vec![
+            PromptFloor {
+                id: "empty".into(),
+                name: "空锚点".into(),
+                content: "".into(),
+                role: FloorRole::System,
+                position: FloorPosition::System,
+                depth: 0,
+                enabled: true,
+                order: 0,
+            },
+            PromptFloor {
+                id: "comment".into(),
+                name: "仅注释".into(),
+                content: "{{// 仅注释,展开后为空 }}".into(),
+                role: FloorRole::System,
+                position: FloorPosition::System,
+                depth: 0,
+                enabled: true,
+                order: 1,
+            },
+            PromptFloor {
+                id: "real".into(),
+                name: "有内容".into(),
+                content: "有效指令".into(),
+                role: FloorRole::System,
+                position: FloorPosition::System,
+                depth: 0,
+                enabled: true,
+                order: 2,
+            },
+        ];
+        let mut reference = PromptInjectConfig {
+            mode: InjectMode::Complex,
+            ..PromptInjectConfig::default()
+        };
+        reference.floors = vec![PromptFloor {
+            id: "real".into(),
+            name: "有内容".into(),
+            content: "有效指令".into(),
+            role: FloorRole::System,
+            position: FloorPosition::System,
+            depth: 0,
+            enabled: true,
+            order: 0,
+        }];
+        let mut vars_ref = HashMap::new();
+        let (msgs, _) = build_llm_messages(
+            "芽衣",
+            "兔族少女。",
+            "",
+            "",
+            None,
+            &[],
+            None,
+            Some(&with_empty),
+            &mut vars,
+            &mut AssistantVars::new(),
+        );
+        let (base, _) = build_llm_messages(
+            "芽衣",
+            "兔族少女。",
+            "",
+            "",
+            None,
+            &[],
+            None,
+            Some(&reference),
+            &mut vars_ref,
+            &mut AssistantVars::new(),
+        );
+        assert!(
+            msgs[0].content.contains("有效指令"),
+            "有内容的 system 楼层仍须注入: {}",
+            msgs[0].content
+        );
+        assert_eq!(
+            msgs[0].content, base[0].content,
+            "空 system 楼层不得改变系统提示词(预期与无空楼层一致)"
+        );
     }
 }
