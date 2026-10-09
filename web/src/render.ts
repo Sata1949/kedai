@@ -223,6 +223,58 @@ export function sanitizeVisibleHtml(html: string): string {
   });
 }
 
+/**
+ * 消息专用 HTML 白名单(酒馆式消息渲染,RPFLOW 提交 3)。
+ * 与 sanitizeVisibleHtml(角色卡 scoped 信任模型:style/id/class/表单全放行)不同,
+ * 本 profile 面向「未命中角色卡脚本的消息正文」:只放行核心结构标签,卡片自带的
+ * 样式一律剥除(口径:style/class/id/事件全剥),细节观感由 Kedai 统一定义
+ * (content.css 的 .sv-msg-bubble.sv-msg-html 段)。
+ *  - 标签:结构/标题/列表/表格/details+summary + a/img;
+ *  - 属性:仅 a(href/title)、img(src/alt/title/width/height)、details(open)、
+ *    th/td(colspan/rowspan);class 只为注入的 sv-status-block 开门(余者剥除);
+ *  - 协议:a 仅 https;img 仅 data:/https:(与 sanitizeVisibleHtml 同口径);
+ *  - <statusblock> 映射为 div.sv-status-block(酒馆无此核心标签,按「卡片自带
+ *    约定标签」对待,映射为 Kedai 状态面板);
+ *  - 未知标签与注释整体丢弃(disallowedTagsMode: discard)。
+ */
+export function sanitizeMessageHtml(html: string): string {
+  return sanitizeHtml(html, {
+    allowedTags: [
+      'div', 'span', 'p', 'br', 'hr',
+      'strong', 'em', 'b', 'i', 'u', 's', 'small', 'sub', 'sup', 'mark',
+      'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+      'ul', 'ol', 'li', 'dl', 'dt', 'dd',
+      'blockquote', 'code', 'pre',
+      'table', 'caption', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td',
+      'details', 'summary',
+      'a', 'img',
+    ],
+    allowedAttributes: {
+      a: ['href', 'title', 'target', 'rel'],
+      img: ['src', 'alt', 'title', 'width', 'height'],
+      details: ['open'],
+      th: ['colspan', 'rowspan'],
+      td: ['colspan', 'rowspan'],
+      // class 仅为 transformTags 注入的 sv-status-block 开门(allowedClasses 逐个白名单)
+      div: ['class'],
+    },
+    allowedClasses: { div: ['sv-status-block'] },
+    allowedSchemes: ['https'],
+    allowedSchemesByTag: { a: ['https'], img: ['data', 'https'] },
+    allowProtocolRelative: false,
+    transformTags: {
+      // 卡片约定标签 <StatusBlock> → Kedai 状态面板(原属性全丢,只留注入类名)
+      statusblock: () => ({ tagName: 'div', attribs: { class: 'sv-status-block' } }),
+      // 链接:新窗口 + rel 安全属性(href 协议白名单在属性过滤阶段把关)
+      a: (_tagName, attribs) => ({
+        tagName: 'a',
+        attribs: { ...attribs, target: '_blank', rel: 'noopener noreferrer' },
+      }),
+    },
+    disallowedTagsMode: 'discard',
+  });
+}
+
 /** 移除 head/script/style 骨架,仅保留 body 内部可见内容 */
 function extractBody(s: string): string {
   let t = s;

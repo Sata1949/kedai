@@ -457,6 +457,55 @@
   max-width: 100%;
 }
 
+/* 酒馆式消息 HTML 子集渲染(RPFLOW 提交 3):逐角色「HTML 渲染」开启且消息未命中
+   角色卡脚本时,正文按 HTML 白名单渲染(白名单见 render.ts 的 sanitizeMessageHtml)。
+   卡片自带样式一律剥除(styles/class/事件),折叠块/状态块/分隔段的观感由 Kedai
+   统一定义——全部走上至主义 token(黑框 + 粉底 + 海报红方块,直角硬边)。 */
+.sv-msg-bubble.sv-msg-html details {
+  margin: 0.65em 0;
+  border: var(--bw-thin) solid var(--sv-ink);
+  background: var(--sv-white);
+}
+.sv-msg-bubble.sv-msg-html summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  padding: var(--space-1) var(--space-2);
+  background: var(--sv-pink-light);
+  cursor: pointer;
+  font-weight: 700;
+  list-style: none;
+}
+.sv-msg-bubble.sv-msg-html summary::before {
+  content: '';
+  flex: none;
+  width: 9px;
+  height: 9px;
+  background: var(--sv-red);
+}
+/* 去掉浏览器默认三角标记(marker 的双前缀覆盖) */
+.sv-msg-bubble.sv-msg-html summary::-webkit-details-marker { display: none; }
+.sv-msg-bubble.sv-msg-html details[open] > summary { border-bottom: var(--bw-thin) solid var(--sv-ink); }
+.sv-msg-bubble.sv-msg-html details > :not(summary) {
+  margin-left: var(--space-2-5);
+  margin-right: var(--space-2-5);
+}
+/* <StatusBlock> 映射容器(卡片约定标签 → Kedai 状态面板):左红重边做几何分隔 */
+.sv-msg-bubble.sv-msg-html .sv-status-block {
+  margin: 0.65em 0;
+  padding: var(--space-2) var(--space-2-5);
+  border: var(--bw-thin) solid var(--sv-ink);
+  border-left: var(--bw-heavy) solid var(--sv-red);
+  background: var(--sv-white);
+}
+/* 消息内分隔段:黑底 + 左红段(覆盖 .sv-msg-md 的细线 hr,开关开启时生效) */
+.sv-msg-bubble.sv-msg-html hr {
+  border: none;
+  height: var(--bw);
+  background: linear-gradient(90deg, var(--sv-red) 0 48px, var(--sv-ink) 48px);
+  margin: 0.9em 0;
+}
+
 /* 提示词注入(设置弹窗楼层系统) */
 .inject-num { width: 110px; }
 .inject-empty { opacity: 0.5; }

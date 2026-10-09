@@ -48,6 +48,9 @@ const VERBOSE = process.argv.includes('--verbose');
  * 入口,与既有 .sv-agent-panel-close 同族样式;全局域行数上调仅为此一处新增控件)。
  * RPFLOW 变动:panels 941→971(草稿折叠区 30 行——AgentPanel 无 scoped 块,样式按纪律
  * 落全局域:草稿步产物默认隐藏,面板提供可展开的只读视图)。
+ * RPFLOW 提交 3 变动:content 959→1008(酒馆式消息 HTML 子集渲染 49 行——details/summary
+ * 折叠块 + .sv-status-block 状态块 + 分隔段 hr;消息正文经 v-html 注入,scoped 样式
+ * 不作用于 v-html 内容,故必须落全局域)。
  */
 const LINE_BASELINE = {
   'style.css': 49,
@@ -55,7 +58,7 @@ const LINE_BASELINE = {
   'styles/base.css': 122,
   'styles/shell.css': 832,
   'styles/panels.css': 971,
-  'styles/content.css': 959,
+  'styles/content.css': 1008,
   'styles/task.css': 997,
   'styles/mobile.css': 434,
 };

@@ -14,6 +14,7 @@ import {
   buildRemoteResourceHtml,
   stableFrameNonce,
   demoteInlineHandlers,
+  sanitizeMessageHtml,
 } from './render';
 import type { RegexScript } from './api';
 
@@ -688,5 +689,84 @@ describe('demoteInlineHandlers(inline 事件降级桥)', () => {
     expect(scoped.html).toContain('id="identity-desc-box"');
     // 尾部脚本被提取进 scripts[](沙箱执行面)
     expect(scoped.scripts.join('\n')).toContain('function submitCreation()');
+  });
+});
+
+describe('sanitizeMessageHtml(酒馆式消息白名单,RPFLOW 提交 3)', () => {
+  it('结构标签放行:details/summary、表格、标题、列表、引用、代码', () => {
+    const html = sanitizeMessageHtml(
+      '<details open><summary>面板</summary><table><tr><th colspan="2">属性</th></tr><tr><td>体力</td><td>80</td></tr></table></details>' +
+        '<h2>标题</h2><ul><li>项</li></ul><dl><dt>词</dt><dd>解</dd></dl>' +
+        '<blockquote>引</blockquote><pre><code>x=1</code></pre><hr>',
+    );
+    expect(html).toContain('<details open>');
+    expect(html).toContain('<summary>面板</summary>');
+    expect(html).toContain('<table>');
+    expect(html).toContain('colspan="2"');
+    expect(html).toContain('<h2>标题</h2>');
+    expect(html).toContain('<li>项</li>');
+    expect(html).toContain('<dt>词</dt>');
+    expect(html).toContain('<blockquote>引</blockquote>');
+    expect(html).toContain('<pre><code>x=1</code></pre>');
+    expect(html).toContain('<hr />');
+  });
+
+  it('卡片自带样式一律剥除:style/class/id/事件属性全丢,内容保留', () => {
+    const html = sanitizeMessageHtml(
+      '<div style="color:red" class="evil" id="x" onclick="bad()">内容</div><span style="font-size:99px">行内</span>',
+    );
+    expect(html).toContain('内容');
+    expect(html).toContain('行内');
+    expect(html).not.toContain('style=');
+    expect(html).not.toContain('class=');
+    expect(html).not.toContain('id=');
+    expect(html).not.toContain('onclick');
+  });
+
+  it('XSS 向量:script/事件/javascript 协议/未知标签全部丢弃', () => {
+    expect(sanitizeMessageHtml('<script>alert(1)</script>正文')).not.toContain('script');
+    const img = sanitizeMessageHtml('<img src=x onerror=alert(1)>');
+    expect(img).not.toContain('onerror');
+    const a = sanitizeMessageHtml('<a href="javascript:alert(1)">链接</a>');
+    expect(a).not.toContain('javascript:');
+    expect(a).toContain('链接');
+    const iframe = sanitizeMessageHtml('<iframe src="https://evil.example"></iframe>后');
+    expect(iframe).not.toContain('iframe');
+    expect(iframe).toContain('后');
+    // 未知标签(卡片自定义)按 discard 丢弃,文本内容保留
+    const custom = sanitizeMessageHtml('<MyWidget>部件</MyWidget>');
+    expect(custom).not.toContain('<MyWidget>');
+    expect(custom).toContain('部件');
+  });
+
+  it('<StatusBlock> 映射为 div.sv-status-block(原属性全丢,大小写不敏感)', () => {
+    const html = sanitizeMessageHtml('<StatusBlock style="color:red" onclick="x()">体力:80</StatusBlock>');
+    expect(html).toContain('<div class="sv-status-block">体力:80</div>');
+    expect(html).not.toContain('style=');
+    expect(html).not.toContain('onclick');
+    expect(sanitizeMessageHtml('<statusblock>a</statusblock>')).toContain('class="sv-status-block"');
+  });
+
+  it('class 只为注入的 sv-status-block 开门:div 上其余类名被剥', () => {
+    const html = sanitizeMessageHtml('<div class="sv-status-block other">x</div>');
+    expect(html).toContain('class="sv-status-block"');
+    expect(html).not.toContain('other');
+  });
+
+  it('a:仅 https 保留 + 新窗口属性;img:仅 data:/https:', () => {
+    const a = sanitizeMessageHtml('<a href="https://example.com/x" title="t">链接</a>');
+    expect(a).toContain('href="https://example.com/x"');
+    expect(a).toContain('target="_blank"');
+    expect(a).toContain('rel="noopener noreferrer"');
+    // http 被拒(scheme 白名单仅 https)
+    expect(sanitizeMessageHtml('<a href="http://example.com">x</a>')).not.toContain('href=');
+    expect(sanitizeMessageHtml('<img src="data:image/png;base64,AAA" alt="a">')).toContain('data:image/png');
+    expect(sanitizeMessageHtml('<img src="https://example.com/a.png" width="120">')).toContain('width="120"');
+    expect(sanitizeMessageHtml('<img src="http://example.com/a.png">')).not.toContain('src=');
+  });
+
+  it('注释剥除;s 标签放行(删除线卡片常用)', () => {
+    expect(sanitizeMessageHtml('a<!-- 隐藏 -->b')).toBe('ab');
+    expect(sanitizeMessageHtml('原价<s>99</s>现价')).toContain('<s>99</s>');
   });
 });

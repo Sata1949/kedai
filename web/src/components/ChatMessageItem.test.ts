@@ -287,3 +287,73 @@ describe('ChatMessageItem · 用户图像附件(视觉能力包 D2)', () => {
     expect(bad.find('.sv-msg-images').exists()).toBe(false);
   });
 });
+
+describe('ChatMessageItem · 酒馆式 HTML 子集渲染(RPFLOW 提交 3)', () => {
+  it('HTML 渲染开启且无脚本:结构标签按 HTML 渲染(不再转义)', () => {
+    const w = mountItem(msg({ content: '<details><summary>状态</summary>正文</details>' }), {
+      renderHtml: true,
+    });
+    const html = w.find('.sv-msg-bubble').html();
+    expect(html).toContain('<details>');
+    expect(html).toContain('<summary>状态</summary>');
+    expect(html).not.toContain('&lt;details');
+  });
+
+  it('HTML 渲染关闭:同一输入按 markdown 基线转义为字面(默认关,不回归)', () => {
+    const w = mountItem(msg({ content: '<details><summary>状态</summary>正文</details>' }));
+    const html = w.find('.sv-msg-bubble').html();
+    expect(html).toContain('&lt;details');
+    expect(html).not.toContain('<details>');
+  });
+
+  it('HTML 渲染开启:<StatusBlock> 映射为状态块容器', () => {
+    const w = mountItem(msg({ content: '<StatusBlock>体力:80</StatusBlock>' }), { renderHtml: true });
+    const block = w.find('.sv-msg-bubble .sv-status-block');
+    expect(block.exists()).toBe(true);
+    expect(block.text()).toContain('体力:80');
+  });
+
+  it('HTML 渲染开启:XSS 向量被白名单剥除,正文保留', () => {
+    const w = mountItem(
+      msg({ content: '<script>alert(1)</script><img src=x onerror=alert(1)>安全文本' }),
+      { renderHtml: true },
+    );
+    const html = w.find('.sv-msg-bubble').html();
+    expect(html).not.toContain('<script');
+    expect(html).not.toContain('onerror');
+    expect(html).toContain('安全文本');
+  });
+
+  it('气泡类挂载点:HTML 渲染开启带 sv-msg-html,关闭不带', () => {
+    const on = mountItem(msg({ content: 'x' }), { renderHtml: true });
+    expect(on.find('.sv-msg-bubble').classes()).toContain('sv-msg-html');
+    const off = mountItem(msg({ content: 'x' }));
+    expect(off.find('.sv-msg-bubble').classes()).not.toContain('sv-msg-html');
+  });
+
+  it('HTML 注释不进入渲染(两条路径都剥)', () => {
+    const on = mountItem(msg({ content: '前<!-- 隐藏 -->后' }), { renderHtml: true });
+    expect(on.find('.sv-msg-bubble').text()).not.toContain('隐藏');
+    const off = mountItem(msg({ content: '前<!-- 隐藏 -->后' }));
+    expect(off.find('.sv-msg-bubble').text()).not.toContain('隐藏');
+  });
+
+  it('脚本命中时仍走 scoped HTML 路径(子集路径不抢渲染)', () => {
+    const scripts: RegexScript[] = [
+      {
+        id: 's1',
+        script_name: '状态栏',
+        find_regex: '<StatusPlaceHolderImpl/>',
+        replace_string: '<div class="ui">界面</div>',
+        markdown_only: false,
+        enabled: true,
+      },
+    ];
+    const w = mountItem(msg({ content: '<StatusPlaceHolderImpl/>' }), {
+      renderHtml: true,
+      scripts,
+    });
+    expect(w.find('.sv-msg-bubble [data-kd-scope]').exists()).toBe(true);
+    expect(w.find('.sv-msg-bubble').text()).toContain('界面');
+  });
+});

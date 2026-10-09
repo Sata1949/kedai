@@ -10,6 +10,7 @@ import type { UiMessage } from '../sseReducer';
 import type { RegexScript } from '../api';
 import {
   renderScopedScripts,
+  sanitizeMessageHtml,
   stripHiddenPlaceholders,
   hasStatusPlaceholderScript,
   buildMessageRenderText,
@@ -17,7 +18,7 @@ import {
   buildRemoteResourceHtml,
   stableFrameNonce,
 } from '../render';
-import { renderMarkdown } from '../markdown';
+import { renderMarkdown, renderMarkdownWithHtml, stripHtmlComments } from '../markdown';
 import { isRenderCodeBlock } from '../renderPanel';
 import { messageHtmlCache, buildMessageRenderKey } from '../renderCache';
 
@@ -226,7 +227,8 @@ onUnmounted(() => {
  * assistant 消息渲染(缓存于 computed,键见下):
  *  - 远程资源界面优先:消息含 `$('body').load('https://…')` → 沙箱 iframe 资源卡片,独立于 HTML 开关。
  *  - 渲染面板:消息正文含整页 HTML 代码块 → 面板壳(与 scoped 注入互斥,独立 iframe 隔离执行)。
- *  - HTML 渲染开启:脚本命中走 scoped HTML(样式作用域化 + 脚本受控执行);未命中走 markdown。
+ *  - HTML 渲染开启:脚本命中走 scoped HTML(样式作用域化 + 脚本受控执行);
+ *    脚本未命中走 HTML 子集路径(酒馆式:白名单放行结构标签,剥样式/事件,见 renderMessageHtml)。
  *  - HTML 渲染关闭:先剥隐藏占位符(<StatusPlaceHolderImpl/> 等),再 markdown。
  *
  * 缓存键(被读取即成为依赖):**paintText**(按帧推进的渲染文本快照,见上方节流说明;
@@ -276,15 +278,24 @@ function renderMessageHtml(text: string, scopeId: string, depth: number): string
   if (isRenderCodeBlock(text)) {
     return buildRenderPanelHtml(text, scopeId);
   }
-  if (props.renderHtml && props.scripts.length > 0) {
-    // 脚本替换串新引入的 {{user}}/{{char}} 宏随渲染展开(对齐 ST substituteParams;
-    // userName 缺省「用户」,与后端 content_display 展开一致)
-    const scoped = renderScopedScripts(text, props.scripts, `msg-${props.m.id}`, depth, {
-      charName: store.currentCharacterName,
-    });
-    if (scoped) return scoped.html;
+  // 两条 markdown 路径共用的清洗文本:先剥隐藏类脚本命中片段(<StatusPlaceHolderImpl/>
+  // 等),再剥 HTML 注释(关闭路径此前会把注释当字面文本展示;注释不是消息内容)
+  const clean = stripHtmlComments(stripHiddenPlaceholders(text, props.scripts, depth));
+  if (props.renderHtml) {
+    if (props.scripts.length > 0) {
+      // 脚本替换串新引入的 {{user}}/{{char}} 宏随渲染展开(对齐 ST substituteParams;
+      // userName 缺省「用户」,与后端 content_display 展开一致)
+      const scoped = renderScopedScripts(text, props.scripts, `msg-${props.m.id}`, depth, {
+        charName: store.currentCharacterName,
+      });
+      if (scoped) return scoped.html;
+    }
+    // HTML 子集路径(酒馆式,RPFLOW 提交 3):脚本未命中的消息正文按 HTML 白名单渲染
+    // (renderMarkdownWithHtml 保留原始标签 → sanitizeMessageHtml 剥样式/事件/未知标签);
+    // 产出为空(如正文仅 style 块/注释,被白名单剥空)时回退 markdown,避免气泡空白
+    const subset = sanitizeMessageHtml(renderMarkdownWithHtml(clean));
+    if (subset.trim()) return subset;
   }
-  const clean = stripHiddenPlaceholders(text, props.scripts, depth);
   return renderMarkdown(clean);
 }
 
@@ -416,7 +427,7 @@ defineExpose({ rootEl });
       <template v-else>
         <div
           class="sv-msg-bubble sv-msg-md"
-          :class="{ 'sv-stream-cursor': m.streaming }"
+          :class="{ 'sv-stream-cursor': m.streaming, 'sv-msg-html': renderHtml }"
           v-html="html"
         ></div>
         <!-- 截断提示(可观测性问题①,2026-09-15):上游 finish_reason=length 表示
