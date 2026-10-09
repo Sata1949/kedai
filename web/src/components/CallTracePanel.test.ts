@@ -128,6 +128,8 @@ describe('CallTracePanel(调用追踪内容,面板合并后为 AgentPanel「调�
         phase: 'executing',
         stepText: '正在调用工具',
         detail: '',
+        // RPFLOW:draft 事件产出的隐藏草稿(本用例只关心推理链/工具调用渲染)
+        draft: '',
         chain: [{ at: 1, text: '规划完成', detail: '3 步' }],
         pendingTool: null,
         toolCalls: [{ name: 'web_search', input: {}, output: '结果', status: 'done', risk: 'safe' }],

@@ -89,6 +89,9 @@ function makeSettings(overrides: Partial<RuntimeSettings> = {}): RuntimeSettings
     memory_inject_limit: 8,
     memory_inject_char_budget: 2000,
     memory_max_entries: 200,
+    // 剧情推演词条同步两档(RPFLOW-2):角色档默认开、全局档默认关
+    worldbook_sync_character_enabled: true,
+    worldbook_sync_global_enabled: false,
     embedding_enabled: false,
     embedding_base_url: '',
     embedding_api_key_masked: '',
@@ -334,6 +337,52 @@ describe('genSettings 记忆槽预算与容量上限(B2/B3)', () => {
     await store.saveSettings({ memory_inject_char_budget: 0, memory_max_entries: 0 });
     expect(store.memoryInjectCharBudget).toBe(0);
     expect(store.memoryMaxEntries).toBe(0);
+  });
+});
+
+describe('genSettings 剧情推演词条同步两档(RPFLOW-2)', () => {
+  beforeEach(() => {
+    memStorage.clear();
+    setActivePinia(createPinia());
+  });
+
+  it('store 默认值与后端缺省一致(角色档开 / 全局档关)', () => {
+    const store = useGenSettingsStore();
+    expect(store.worldbookSyncCharacterEnabled).toBe(true);
+    expect(store.worldbookSyncGlobalEnabled).toBe(false);
+  });
+
+  it('loadSettings 回填服务端值;缺字段兜底 true / false', async () => {
+    const store = useGenSettingsStore();
+    getSettingsMock.mockReset().mockResolvedValue(
+      makeSettings({ worldbook_sync_character_enabled: false, worldbook_sync_global_enabled: true }),
+    );
+    await store.loadSettings();
+    expect(store.worldbookSyncCharacterEnabled).toBe(false);
+    expect(store.worldbookSyncGlobalEnabled).toBe(true);
+
+    // 旧服务端/异常响应缺字段:回退默认(角色档开 / 全局档关,与后端缺省一致)
+    getSettingsMock.mockReset().mockResolvedValue(
+      withoutFields(makeSettings(), ['worldbook_sync_character_enabled', 'worldbook_sync_global_enabled']),
+    );
+    await store.loadSettings();
+    expect(store.worldbookSyncCharacterEnabled).toBe(true);
+    expect(store.worldbookSyncGlobalEnabled).toBe(false);
+  });
+
+  it('saveSettings 响应回填两个字段(与 loadSettings 同口径)', async () => {
+    const store = useGenSettingsStore();
+    saveSettingsMock.mockReset().mockResolvedValue({
+      ok: true,
+      settings: makeSettings({ worldbook_sync_character_enabled: false, worldbook_sync_global_enabled: true }),
+    });
+    await store.saveSettings({ worldbook_sync_character_enabled: false, worldbook_sync_global_enabled: true });
+    expect(saveSettingsMock).toHaveBeenCalledWith(
+      { worldbook_sync_character_enabled: false, worldbook_sync_global_enabled: true },
+      'roleplay',
+    );
+    expect(store.worldbookSyncCharacterEnabled).toBe(false);
+    expect(store.worldbookSyncGlobalEnabled).toBe(true);
   });
 });
 

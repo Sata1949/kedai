@@ -110,6 +110,7 @@ export function useGenerationParams() {
     taskStepBudgetSecs, taskTotalBudgetSecs, taskIdleTimeoutSecs,
     compactionMode, compactionThreshold, compactionKeepRecent, compactionSnipBytes,
     memoryDistillEnabled, memoryInjectLimit, memoryInjectCharBudget, memoryMaxEntries,
+    worldbookSyncCharacterEnabled, worldbookSyncGlobalEnabled,
     subagentMaxDepth, subagentMaxConcurrency, subagentResultMaxChars,
     undoEnabled,
   } = storeToRefs(store);
@@ -166,6 +167,9 @@ export function useGenerationParams() {
               memory_inject_limit: memoryInjectLimit.value,
               memory_inject_char_budget: memoryInjectCharBudget.value,
               memory_max_entries: memoryMaxEntries.value,
+              // 剧情推演词条同步两档(RPFLOW-2):deep/agent 流程专属(聊天侧),同随记忆组过滤
+              worldbook_sync_character_enabled: worldbookSyncCharacterEnabled.value,
+              worldbook_sync_global_enabled: worldbookSyncGlobalEnabled.value,
             }),
       });
       paramsMsg.value = '已保存为默认生成参数';

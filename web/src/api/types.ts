@@ -133,6 +133,8 @@ export type TaskEventsPull = {
 
 export type SseEvent =
   | { type: 'token'; text: string }
+  /** 隐藏草稿(deep/agent 流程第 1 步产物,RPFLOW):不进消息气泡,仅 Agent 面板折叠展示 */
+  | { type: 'draft'; text: string }
   | { type: 'step'; step: string; detail?: string; index?: number; total?: number }
   | { type: 'tool_call'; name: string; input: unknown; call_id?: string; render_kind?: string; origin?: string }
   | { type: 'tool_authorization_required'; name: string; risk: ToolRisk; reason: string; run_id: string; call_id: string; origin?: string }
@@ -497,6 +499,13 @@ export interface RuntimeSettings {
   memory_inject_char_budget: number;
   /** 每角色记忆容量上限(0..=10000;0 = 不淘汰,默认 200):超出后最低分条目置 selected=0 */
   memory_max_entries: number;
+  /** 剧情推演词条同步·角色档(RPFLOW-2;默认 true):deep/agent 归档步可更新
+   *  「绑定到当前角色的世界书 + 角色卡内嵌条目」中的绿灯(关键词触发)词条;
+   *  命中蓝灯(常驻 constant)条目时不改写,改为新建一条绿灯条目 */
+  worldbook_sync_character_enabled: boolean;
+  /** 剧情推演词条同步·全局档(RPFLOW-2;默认 false):同上,作用范围为全局世界书
+   *  (未绑定角色的世界书);默认关——全局书常服务多个角色,改动影响面更大 */
+  worldbook_sync_global_enabled: boolean;
   /** 向量化(embedding)开关:开启后记忆写入生成向量、召回走「向量+Jaccard」混合打分 */
   embedding_enabled: boolean;
   /** embedding 服务地址(OpenAI 兼容 /embeddings;独立于聊天 Base URL) */
@@ -659,6 +668,10 @@ export interface RuntimeSettingsPatch {
   memory_inject_char_budget?: number;
   /** 每角色记忆容量上限(0..=10000;0 = 不淘汰) */
   memory_max_entries?: number;
+  /** 剧情推演词条同步·角色档(RPFLOW-2;默认 true = 开启;缺省保持不变) */
+  worldbook_sync_character_enabled?: boolean;
+  /** 剧情推演词条同步·全局档(RPFLOW-2;默认 false = 关闭;缺省保持不变) */
+  worldbook_sync_global_enabled?: boolean;
   /** 向量化开关 */
   embedding_enabled?: boolean;
   /** embedding 服务地址(自动补协议与 /v1) */

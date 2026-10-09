@@ -8,6 +8,8 @@ export interface AgentActivity {
   phase: string;
   stepText: string;
   detail: string;
+  /** 隐藏草稿(deep/agent 流程第 1 步产物;默认隐藏,仅面板折叠展示) */
+  draft: string;
   /** 推理链(完整步骤记录) */
   chain: Array<{ at: number; text: string; detail?: string }>;
   /** 工具调用预告 */
@@ -42,6 +44,7 @@ export function idleAgent(): AgentActivity {
     phase: 'idle',
     stepText: '',
     detail: '',
+    draft: '',
     chain: [],
     pendingTool: null,
     toolCalls: [],
@@ -185,6 +188,11 @@ export function reduceSseEvent(state: SseStateSlice, event: SseEvent): SseStateC
       }
       // 上游已开始出块:重试等待结束,阶段行交还给后续 step/finish
       if (a.stepText.startsWith('正在重试')) a.stepText = '生成中…';
+      break;
+    }
+    case 'draft': {
+      // 隐藏草稿(deep/agent 流程第 1 步):只进 Agent 面板折叠区,不产生消息气泡
+      a.draft = event.text;
       break;
     }
     case 'interrupted': {

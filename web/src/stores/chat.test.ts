@@ -2,6 +2,7 @@
 // 只 mock api 层与沙箱广播函数,store 内部逻辑(消息加载/替换)走真实代码。
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
+import { nextTick } from 'vue';
 
 // node 环境无 localStorage,补内存桩(与 character.test.ts 同款)
 const memStorage = new Map<string, string>();
@@ -248,6 +249,40 @@ describe('SENDFIX-1 失败可见性(错误条 + trace 恢复尊重 error 态)', 
     const outcome = await store.sendMessage('你好');
     expect(outcome.accepted).toBe(true);
     expect(store.lastError).toBeNull();
+  });
+});
+
+describe('RPFLOW 聊天档位持久化(deep/agent/custom 不静默回落 fast)', () => {
+  // 键名是**持久化格式契约**(与 store 内 AGENT_MODE_KEY 同源):升级改名即丢档位,
+  // 故在测试里钉住字面量,防止单侧漂移。
+  const MODE_KEY = 'kedai.agent-mode.v1';
+
+  it('无持久化值时默认 fast', () => {
+    expect(useChatStore().agentMode).toBe('fast');
+  });
+
+  it('非法持久化值(损坏/旧版本)回退 fast,不抛错', () => {
+    memStorage.set(MODE_KEY, 'super-deep');
+    expect(useChatStore().agentMode).toBe('fast');
+  });
+
+  it('持久化值在 store 创建时还原(重启不回落 fast)', () => {
+    memStorage.set(MODE_KEY, 'agent');
+    expect(useChatStore().agentMode).toBe('agent');
+    memStorage.set(MODE_KEY, 'deep');
+    setActivePinia(createPinia());
+    expect(useChatStore().agentMode).toBe('deep');
+  });
+
+  it('档位变更写回 localStorage(setAgentMode 后重读可还原)', async () => {
+    const store = useChatStore();
+    store.setAgentMode('custom');
+    await nextTick();
+    expect(memStorage.get(MODE_KEY)).toBe('custom');
+
+    // 模拟「下次启动」:新 pinia 实例读同一份存储
+    setActivePinia(createPinia());
+    expect(useChatStore().agentMode).toBe('custom');
   });
 });
 

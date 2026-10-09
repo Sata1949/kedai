@@ -265,6 +265,23 @@ describe('reduceSseEvent', () => {
   });
 });
 
+describe('draft 隐藏草稿(RPFLOW:deep/agent 流程第 1 步)', () => {
+  it('写入 agent.draft,且不产生消息气泡', () => {
+    const current = state();
+
+    const changes = reduceSseEvent(current, { type: 'draft', text: 'abc' });
+
+    expect(current.agent.draft).toBe('abc');
+    // 草稿不进对话区:正文由后续步骤另行生成(reducer 不 push 任何消息)
+    expect(current.messages).toHaveLength(0);
+    expect(changes).toEqual({});
+  });
+
+  it('idleAgent 初始草稿为空(空草稿时面板不渲染折叠区)', () => {
+    expect(idleAgent().draft).toBe('');
+  });
+});
+
 describe('swipe 版本纯函数(阶段六 6f)', () => {
   it('无 swipes(单版本)返回 -1 / 0,隐藏切换 UI', () => {
     expect(swipeIndex({})).toBe(-1);

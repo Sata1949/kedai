@@ -300,6 +300,9 @@ describe('任务模式隐藏清单(TM-SET-3)', () => {
     expect(taskHtml).not.toContain('压缩模式');
     expect(taskHtml).not.toContain('记忆蒸馏');
     expect(taskHtml).not.toContain('记忆容量上限');
+    // 剧情推演词条同步两档(RPFLOW-2)随记忆组隐藏(deep/agent 流程为聊天侧专属)
+    expect(taskHtml).not.toContain('剧情推演同步角色词条');
+    expect(taskHtml).not.toContain('剧情推演同步全局词条');
     expect(taskHtml).toContain('子代理深度');
     expect(taskHtml).toContain('任务模式缺省');
     expect(taskHtml).toContain('已在任务模式下隐藏');
@@ -309,6 +312,8 @@ describe('任务模式隐藏清单(TM-SET-3)', () => {
     expect(rpHtml).toContain('最大上下文窗口(Token)');
     expect(rpHtml).toContain('压缩模式');
     expect(rpHtml).toContain('记忆蒸馏');
+    expect(rpHtml).toContain('剧情推演同步角色词条');
+    expect(rpHtml).toContain('剧情推演同步全局词条');
   });
 
   it('Agent 设置:任务模式隐藏变量组与反思提示词;保留系统提示词与搜索端点', async () => {
@@ -360,6 +365,16 @@ describe('AgentSettingsSection(Agent 设置区)', () => {
 });
 
 describe('GenParamsSection(生成参数区:记忆槽预算/容量上限)', () => {
+  it('渲染剧情推演词条同步两档开关(RPFLOW-2;角色档默认勾选、全局档默认不勾选)', async () => {
+    const html = await render(GenParamsSection);
+    expect(html).toContain('剧情推演同步角色词条');
+    expect(html).toContain('剧情推演同步全局词条');
+    // 默认态由 store 缺省值决定(角色档 true / 全局档 false);SSR 输出里 v-model
+    // 的 checkbox 以 checked 属性体现,按「标签行内紧跟的 input」定位
+    expect(html).toMatch(/剧情推演同步角色词条[\s\S]*?<input checked type="checkbox"/);
+    expect(html).toMatch(/剧情推演同步全局词条[\s\S]*?<input type="checkbox"/);
+  });
+
   it('渲染记忆字符预算与容量上限两个 number 输入(0 = 不限制说明)', async () => {
     const html = await render(GenParamsSection);
     expect(html).toContain('记忆字符预算');

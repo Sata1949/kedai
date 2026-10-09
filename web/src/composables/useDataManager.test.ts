@@ -64,6 +64,9 @@ describe('批量保存按模式过滤(TM-SET-3)', () => {
     expect(patch.max_context_tokens, '角色扮演保留最大上下文窗口').toBeDefined();
     expect(patch.compaction_mode, '角色扮演保留压缩模式').toBeDefined();
     expect(patch.memory_inject_limit, '角色扮演保留记忆注入条数').toBeDefined();
+    // 剧情推演词条同步两档(RPFLOW-2):deep/agent 流程专属,同随记忆组保留
+    expect(patch.worldbook_sync_character_enabled, '角色扮演保留角色词条同步开关').toBeDefined();
+    expect(patch.worldbook_sync_global_enabled, '角色扮演保留全局词条同步开关').toBeDefined();
     // 全局字段(直写扁平)两模式都携带
     expect(patch.subagent_max_depth).toBeDefined();
     expect(patch.undo_enabled).toBeDefined();
@@ -80,6 +83,8 @@ describe('批量保存按模式过滤(TM-SET-3)', () => {
     expect(patch.compaction_snip_bytes).toBeUndefined();
     expect(patch.memory_inject_limit, '任务模式不得写记忆注入条数').toBeUndefined();
     expect(patch.memory_distill_enabled).toBeUndefined();
+    expect(patch.worldbook_sync_character_enabled, '任务模式不得写词条同步开关').toBeUndefined();
+    expect(patch.worldbook_sync_global_enabled, '任务模式不得写词条同步开关').toBeUndefined();
     // 全局字段与任务侧项保留
     expect(patch.subagent_max_depth).toBeDefined();
     expect(patch.undo_enabled).toBeDefined();

@@ -32,6 +32,8 @@ const activeTab = computed<'agent' | 'trace'>({
   set: (v) => { store.callTraceOpen = v === 'trace'; },
 });
 const authorizing = ref<string | null>(null);
+/** 隐藏草稿折叠区展开态(RPFLOW):默认收起,点击标题才展示草稿正文 */
+const draftOpen = ref(false);
 
 /**
  * 错误终态「重试」的锚点(HB-4):最后一条**已落库**用户消息的 id。
@@ -494,6 +496,16 @@ watch(showPanel, (open) => {
             <span v-else class="sv-note-mini">该错误不可重试(检查模型连接与参数后手动重发)</span>
           </span>
         </div>
+      </div>
+
+      <!-- 隐藏草稿(deep/agent 流程第 1 步;默认隐藏,点击展开) -->
+      <div v-if="agent.draft">
+        <div class="sv-agent-section-label">
+          <button type="button" class="sv-draft-toggle" :aria-expanded="draftOpen" @click="draftOpen = !draftOpen">
+            草稿(默认隐藏) {{ draftOpen ? '▾' : '▸' }}
+          </button>
+        </div>
+        <pre v-if="draftOpen" class="sv-draft-body">{{ agent.draft }}</pre>
       </div>
 
       <!-- 推理链(时间线) -->

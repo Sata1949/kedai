@@ -756,6 +756,36 @@ input[type="range"].sv-range::-moz-range-thumb {
   font-weight: 800;
 }
 
+/* RPFLOW:草稿折叠区(deep/agent 流程第 1 步的隐藏草稿;默认收起,标题按钮即开关) */
+/* 开关:等宽小按钮 + 幽灵底(与 .sv-tool-io-toggle 同族,收起时不占视觉重量) */
+.sv-draft-toggle {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--sv-ink-dim);
+  background: var(--sv-pink-light);
+  border: none;
+  padding: var(--space-1) var(--space-2);
+  cursor: pointer;
+}
+.sv-draft-toggle:hover { color: var(--sv-ink); background: var(--sv-pink); }
+/* 草稿正文:白底 + 印刷黑细边 + 等宽换行,限高滚动(长草稿不撑爆面板) */
+.sv-draft-body {
+  margin: 0;
+  background: var(--sv-white);
+  border: var(--bw-thin) solid var(--sv-ink);
+  padding: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--sv-ink-soft);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
 /* ===== 调用追踪面板(批次 3 L3,复用 sv-agent-panel 抽屉壳) ===== */
 .sv-calltrace-meta {
   display: flex;

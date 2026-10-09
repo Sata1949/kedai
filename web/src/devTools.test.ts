@@ -14,10 +14,11 @@ function entry(ts: number, event: SseEvent, sessionId = 's1'): ApiEventLogEntry 
 }
 
 describe('事件类型标签映射(6c)', () => {
-  it('10 类事件全覆盖', () => {
-    expect(EVENT_TYPES).toHaveLength(10);
+  it('11 类事件全覆盖', () => {
+    expect(EVENT_TYPES).toHaveLength(11);
     expect(EVENT_TYPE_LABELS).toEqual({
       token: '文本流',
+      draft: '隐藏草稿',
       step: '步骤',
       tool_call: '工具调用',
       tool_authorization_required: '工具待授权',

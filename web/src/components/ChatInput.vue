@@ -34,11 +34,12 @@ watch(text, () => void nextTick(autoGrow));
 /** 四档模式按钮(自定义模式需先在设置中启用执行流程) */
 const MODES: Array<{ key: AgentMode; label: string; title: string }> = [
   { key: 'fast', label: 'FAST', title: '快速模式:单步直接生成' },
-  { key: 'deep', label: 'DEEP', title: '深度模式:计划 → 执行 → 反思' },
+  { key: 'deep', label: 'DEEP', title: '深度模式:草稿(隐藏)→ 正文 → 批判与修改 → 归档与词条同步' },
   {
     key: 'agent',
     label: 'AGENT',
-    title: 'Agent 模式:完整工具调用(read/write/replace/agentgo/search 等),模型可多轮自主调用工具',
+    title:
+      'Agent 模式:草稿(隐藏)→ 正文(完整工具调用 read/write/replace/agentgo/search 等,可多轮自主调用)→ 批判与修改 → 归档与词条同步',
   },
   { key: 'custom', label: 'CUSTOM', title: '自定义流程:按设置中的步骤序列执行(含步骤提示词/参数/工具)' },
 ];

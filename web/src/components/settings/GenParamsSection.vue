@@ -27,6 +27,7 @@ const {
   taskStepBudgetSecs, taskTotalBudgetSecs, taskIdleTimeoutSecs,
   compactionMode, compactionThreshold, compactionKeepRecent, compactionSnipBytes,
   memoryDistillEnabled, memoryInjectLimit, memoryInjectCharBudget, memoryMaxEntries,
+  worldbookSyncCharacterEnabled, worldbookSyncGlobalEnabled,
   subagentMaxDepth, subagentMaxConcurrency, subagentResultMaxChars,
 } = storeToRefs(store);
 
@@ -382,6 +383,22 @@ const isTaskMode = computed(() => store.appMode === 'task');
           title="每角色记忆容量上限(0-10000;0 = 不淘汰,默认 200):超出后最低分条目置为已归档(不删除)"
         />
         <span class="sv-note">每角色记忆条数上限(0-10000,0 = 不限制,默认 200)</span>
+      </div>
+      <!-- 剧情推演词条同步两档(RPFLOW-2):deep/agent 流程「归档步」改写世界书词条的放行开关。
+           拆两档是因为全局书常服务多个角色(默认关,影响面更大);仅聊天侧消费,随记忆组隐藏。 -->
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">剧情推演同步角色词条</label>
+        <label style="display: flex; gap: var(--space-1-5); align-items: center; cursor: pointer" title="deep/agent 归档时把剧情变化写入角色绑定/卡内嵌世界书的绿灯(触发)词条;蓝灯(常驻)条目不改写、只新建绿灯条目。默认开启。">
+          <input v-model="worldbookSyncCharacterEnabled" type="checkbox" style="flex-shrink: 0" />
+          <span class="sv-note">归档步同步角色绑定与卡内嵌世界书(默认开)</span>
+        </label>
+      </div>
+      <div class="sv-inp-row">
+        <label class="sv-inp-tag">剧情推演同步全局词条</label>
+        <label style="display: flex; gap: var(--space-1-5); align-items: center; cursor: pointer" title="deep/agent 归档时把剧情变化写入全局世界书(未绑定角色)的绿灯(触发)词条;蓝灯(常驻)条目不改写、只新建绿灯条目。可能影响多个角色,默认关闭。">
+          <input v-model="worldbookSyncGlobalEnabled" type="checkbox" style="flex-shrink: 0" />
+          <span class="sv-note">同上,作用范围为全局世界书(默认关)</span>
+        </label>
       </div>
       </template>
       <p v-if="isTaskMode" class="sv-note">

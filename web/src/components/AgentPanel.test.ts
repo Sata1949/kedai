@@ -183,3 +183,26 @@ describe('AgentPanel 视觉工具缩略图(视觉能力包 D4)', () => {
     expect(html.match(/sv-tool-images/g)).toHaveLength(1);
   });
 });
+
+// RPFLOW:draft 事件产出的隐藏草稿只在面板折叠区展示(默认收起 SSR 输出不含正文)
+describe('AgentPanel 隐藏草稿折叠区(RPFLOW)', () => {
+  it('有草稿时渲染折叠标题(默认收起,正文不输出)', async () => {
+    const html = await renderPanel((store) => {
+      store.currentSessionId = 's1';
+      store.agent = { ...idleAgent(), draft: '第一版草稿正文' };
+    });
+    expect(html).toContain('草稿(默认隐藏)');
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain('sv-draft-toggle');
+    expect(html, '默认收起:正文不得直接输出').not.toContain('第一版草稿正文');
+    expect(html).not.toContain('sv-draft-body');
+  });
+
+  it('无草稿(空闲/未进 deep/agent 流程)时不渲染该区块', async () => {
+    const html = await renderPanel((store) => {
+      store.currentSessionId = 's1';
+    });
+    expect(html).not.toContain('草稿(默认隐藏)');
+    expect(html).not.toContain('sv-draft-toggle');
+  });
+});

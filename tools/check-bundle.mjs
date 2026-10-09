@@ -77,6 +77,11 @@ const VERBOSE = process.argv.includes('--verbose');
  *   **未跑 bundle budget**,故当时未被发现——只跑部分门禁不等于门禁绿)。
  * 历史基线(2026-09-20):首屏 264,388 / 全部资产 459,928 / index 97,480 / flow-vendor 71,594 /
  *   vendor 70,815 / content-rendering 44,786 / vue-vendor 34,067 / index css 16,868。
+ * index 118,600 → 131,300(2026-10-09,RPFLOW 批后重测):该批前端新增草稿事件在 Agent 面板
+ *   的折叠展示、聊天档位持久化、设置「剧情推演词条同步」两档开关;index 实测 119,378 gz,
+ *   越过 118,600(超 778)。属功能正常增长,按协议上调到 119,378 + 10% ≈ 131,300。
+ *   同批记录:首屏实测 290,508 / 预算 317,030(余 26,522)、全部资产实测 516,895 / 预算
+ *   557,300(余 40,405),两项本批未动。
  *
  * flow-vendor 必须单列一条(不能走默认上限):二维批次 3 引入的流程画布库
  *   (`@vue-flow/*` + 传递依赖 d3-* / @vueuse/core / vue-demi)整体 71,594 gz。
@@ -95,7 +100,7 @@ const ALL_ASSETS_BUDGET_GZ = 557300;
  * 哈希会随内容变化,故**必须按去哈希名索引**,不能写死文件名。
  */
 const CHUNK_BUDGETS_GZ = {
-  'index.js': 118600,
+  'index.js': 131300,
   'flow-vendor.js': 79000,
   'vendor.js': 78000,
   'content-rendering.js': 49500,

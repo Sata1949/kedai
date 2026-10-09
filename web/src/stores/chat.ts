@@ -4,7 +4,7 @@
 // (任务事件的合成上报也经 onSseEvent 入口)。跨 store 引用(currentCharacterId /
 // 生成参数 / agentPanelOpen)均在动作或回调运行时解析,setup 阶段不实例化其他 store。
 import { defineStore } from 'pinia';
-import { ref } from 'vue';
+import { ref, watch } from 'vue';
 import * as api from '../api';
 import { emitMvuEvent } from '../mvu/host';
 import { parseUpdateVariable } from '../mvu/parser';
@@ -29,6 +29,19 @@ const chatStream = createChatStreamService({
   stopChat: api.stopChat,
 });
 
+/** 聊天档位持久化(RPFLOW):刷新/重启后保持上次选择的 deep/agent/custom,避免静默回落 fast */
+const AGENT_MODE_KEY = 'kedai.agent-mode.v1';
+const AGENT_MODES: api.AgentMode[] = ['fast', 'deep', 'agent', 'custom'];
+function readPersistedAgentMode(): api.AgentMode {
+  try {
+    const v = localStorage.getItem(AGENT_MODE_KEY);
+    if (v && (AGENT_MODES as string[]).includes(v)) return v as api.AgentMode;
+  } catch {
+    /* localStorage 不可用/损坏:回退默认 fast */
+  }
+  return 'fast';
+}
+
 export const useChatStore = defineStore('app.chat', () => {
   // ===== 状态 =====
   const currentSessionId = ref<string | null>(null);
@@ -38,7 +51,15 @@ export const useChatStore = defineStore('app.chat', () => {
   const agent = ref<AgentActivity>(idleAgent());
   const lastUsage = ref<api.TokenUsage | null>(null);
   const contextTokens = ref(0);
-  const agentMode = ref<api.AgentMode>('fast');
+  const agentMode = ref<api.AgentMode>(readPersistedAgentMode());
+  // 档位变更即持久化(损坏/不可写时静默忽略,仅本会话内生效)
+  watch(agentMode, (v) => {
+    try {
+      localStorage.setItem(AGENT_MODE_KEY, v);
+    } catch {
+      /* 忽略 */
+    }
+  });
   /** 缓存命中率连续为 0 的次数(连续两次为 0 则隐藏命中率显示) */
   const cacheZeroStreak = ref(0);
   /** 当前会话累计 token(后端接口返回) */

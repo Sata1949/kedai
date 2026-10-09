@@ -80,6 +80,13 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
   const memoryInjectCharBudget = ref(2000);
   /** 每角色记忆容量上限(0..=10000;0 = 不淘汰;服务端默认 200):超出后最低分条目置 selected=0 */
   const memoryMaxEntries = ref(200);
+  /** 剧情推演词条同步·角色档(RPFLOW-2;服务端默认 true):deep/agent 归档步可更新
+   *  「绑定到当前角色的世界书 + 角色卡内嵌条目」中的绿灯(触发)词条;
+   *  命中蓝灯(常驻)条目时不改写,改为新建绿灯条目 */
+  const worldbookSyncCharacterEnabled = ref(true);
+  /** 剧情推演词条同步·全局档(RPFLOW-2;服务端默认 false = 关闭):同上,作用范围为
+   *  全局世界书(未绑定角色);默认关——全局书常服务多个角色,改动影响面更大 */
+  const worldbookSyncGlobalEnabled = ref(false);
   /** 技能渐进披露开关(服务端默认 true):system 只注入「名称:用途」清单,正文按需 read */
   const skillProgressiveDisclosure = ref(true);
   /** 子智能体最大嵌套深度(1..=4;服务端默认 2) */
@@ -215,6 +222,9 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
       memoryInjectLimit.value = s.memory_inject_limit ?? 8;
       memoryInjectCharBudget.value = s.memory_inject_char_budget ?? 2000;
       memoryMaxEntries.value = s.memory_max_entries ?? 200;
+      // 剧情推演词条同步两档(RPFLOW-2):角色档缺字段兜底 true(与后端默认一致)
+      worldbookSyncCharacterEnabled.value = s.worldbook_sync_character_enabled ?? true;
+      worldbookSyncGlobalEnabled.value = s.worldbook_sync_global_enabled ?? false;
       skillProgressiveDisclosure.value = s.skill_progressive_disclosure ?? true;
       subagentMaxDepth.value = s.subagent_max_depth ?? 2;
       subagentMaxConcurrency.value = s.subagent_max_concurrency ?? 6;
@@ -288,6 +298,9 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     memoryInjectLimit.value = s.memory_inject_limit ?? 8;
     memoryInjectCharBudget.value = s.memory_inject_char_budget ?? 2000;
     memoryMaxEntries.value = s.memory_max_entries ?? 200;
+    // 剧情推演词条同步两档(RPFLOW-2):与 loadSettings 同口径回填
+    worldbookSyncCharacterEnabled.value = s.worldbook_sync_character_enabled ?? true;
+    worldbookSyncGlobalEnabled.value = s.worldbook_sync_global_enabled ?? false;
     skillProgressiveDisclosure.value = s.skill_progressive_disclosure ?? true;
     subagentMaxDepth.value = s.subagent_max_depth ?? 2;
     subagentMaxConcurrency.value = s.subagent_max_concurrency ?? 6;
@@ -431,6 +444,8 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     memoryInjectLimit,
     memoryInjectCharBudget,
     memoryMaxEntries,
+    worldbookSyncCharacterEnabled,
+    worldbookSyncGlobalEnabled,
     skillProgressiveDisclosure,
     subagentMaxDepth,
     subagentMaxConcurrency,

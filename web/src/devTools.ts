@@ -14,6 +14,7 @@ export interface ApiEventLogEntry {
 /** 事件类型 → 中文标签(未知类型回退原样) */
 export const EVENT_TYPE_LABELS: Record<string, string> = {
   token: '文本流',
+  draft: '隐藏草稿',
   step: '步骤',
   tool_call: '工具调用',
   tool_authorization_required: '工具待授权',
