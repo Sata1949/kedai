@@ -8,7 +8,7 @@
 // 本区只保留注入配置的编辑与保存。
 import { onMounted } from 'vue';
 import type { usePromptInject } from '../../composables/usePromptInject';
-import { FLOOR_ROLE_LABELS, FLOOR_POS_LABELS, MACRO_HINTS } from '../../composables/usePromptInject';
+import { FLOOR_ROLE_LABELS, MACRO_HINTS } from '../../composables/usePromptInject';
 import SkeletonBlock from '../SkeletonBlock.vue';
 
 const props = withDefaults(defineProps<{
@@ -140,7 +140,7 @@ onMounted(async () => {
       <!-- 复杂模式:楼层系统(仿 SillyTavern Prompt Manager) -->
       <template v-else-if="injectDraft">
         <p class="sv-note">
-          楼层按从上到下的顺序注入:可拖拽排序,自由选择消息角色与位置,内容支持完整酒馆宏。
+          楼层按从上到下的顺序注入:可拖拽排序,自由选择消息角色,内容支持完整酒馆宏。
           <code v-pre>{{setvar::键::值}}</code> 会持久化到会话变量,后续楼层可
           <code v-pre>{{getvar::键}}</code> 读取。
         </p>
@@ -169,17 +169,6 @@ onMounted(async () => {
           <select v-model="floor.role" class="sv-select floor-select" title="消息角色">
             <option v-for="(label, val) in FLOOR_ROLE_LABELS" :key="val" :value="val">{{ label }}</option>
           </select>
-          <select v-model="floor.position" class="sv-select floor-select" title="注入位置(before/after/depth 已废弃,引擎统一归位系统提示词;仅兼容导入的酒馆预设)">
-            <option v-for="(label, val) in FLOOR_POS_LABELS" :key="val" :value="val">{{ label }}</option>
-          </select>
-          <input
-            v-if="floor.position === 'depth'"
-            v-model.number="floor.depth"
-            type="number"
-            min="0"
-            class="sv-input floor-depth"
-            title="从最新消息往前数第 N 条之后插入(0 = 最新消息后)"
-          />
           <div class="floor-actions">
             <button class="sv-btn ghost sv-btn-square" title="上移" @click="moveFloor(floor.id, -1)">↑</button>
             <button class="sv-btn ghost sv-btn-square" title="下移" @click="moveFloor(floor.id, 1)">↓</button>

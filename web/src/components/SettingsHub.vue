@@ -287,8 +287,8 @@ const activeLabel = computed(() => {
             <h3 :key="activeSection" class="sv-hub-content-title">{{ activeLabel }}</h3>
           </Transition>
 
-          <!-- 嵌入原 SettingsModal 全部内容 -->
-          <SettingsModal embedded :active-section="activeSection" />
+          <!-- 嵌入原 SettingsModal 全部内容(单模式壳,按 activeSection 切换分区) -->
+          <SettingsModal :active-section="activeSection" />
         </div>
       </div>
     </div>

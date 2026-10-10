@@ -6,8 +6,9 @@
 //   位置2 = 历史上下文(固定块)
 //   位置1 = 世界书激发(触发)
 //   位置0 尾部 = Dvar 变量(留位,即将上线) / 反思失败建议(自动生成,激发之后、预设尾部之前) / 复杂模式预设尾部
-// 楼层与世界书条目支持 ↑↓ 排序(楼层另支持拖拽),角色可自由选择;保存写回服务端
-// (prompt_floors.json / settings.json / 世界书条目 order)。
+// 世界书条目支持 ↑↓ 排序,角色可自由选择;保存写回服务端(settings.json / 世界书条目 order)。
+// 位置4(简单模式注入 / 复杂模式楼层)的编辑面在「综合设置 → 对话与提示词 → 提示词注入」,
+// 本面板只保留 6 大层总览与只读摘要,不再写 prompt_floors.json。
 import { ref, onMounted, computed } from 'vue';
 import { useAppStore } from '../store';
 import { storeToRefs } from 'pinia';
@@ -38,12 +39,6 @@ const bookEntries = ref<Record<string, api.WorldBookEntry[]>>({});
 /** 世界书条目发生过移动的书 id(保存时统一写回) */
 const dirtyBooks = ref<Set<string>>(new Set());
 
-const FLOOR_ROLE_LABELS: Record<api.FloorRole, string> = {
-  system: '系统提示词',
-  user: '用户',
-  assistant: '角色',
-};
-
 /** 世界书条目角色标签(空 = 自动) */
 const ENTRY_ROLE_LABELS: Record<string, string> = {
   '': '自动',
@@ -57,48 +52,6 @@ function truncate(text: string, n: number): string {
   const t = text.trim();
   return t.length > n ? `${t.slice(0, n)}…` : t;
 }
-
-// ===== 位置4 楼层草稿(克隆自 store,保存时才提交) =====
-const injectMode = ref<api.InjectMode>('simple');
-const floorsDraft = ref<api.PromptFloor[]>([]);
-const SIMPLE_ORDER_DEFAULT = ['word_count', 'paraphrase', 'dialogue', 'perspective'];
-const SIMPLE_ITEM_LABELS: Record<string, string> = {
-  word_count: '字数',
-  paraphrase: '转述',
-  dialogue: '对话',
-  perspective: '视角',
-};
-const simpleDraft = ref<api.SimplePromptConfig>({
-  word_count_enabled: false,
-  word_count: 200,
-  paraphrase_enabled: false,
-  dialogue_enabled: false,
-  perspective_enabled: false,
-  perspective: '第三人称',
-  order: [...SIMPLE_ORDER_DEFAULT],
-  banned_words_enabled: false,
-  banned_prompt: '',
-});
-/** 简单模式四项按 order 排序的键(旧配置无 order 时用默认顺序) */
-const orderedSimpleKeys = computed(() => {
-  const order = (simpleDraft.value.order?.length ? simpleDraft.value.order : SIMPLE_ORDER_DEFAULT).filter((k) => k in SIMPLE_ITEM_LABELS);
-  // 兜底补全未出现的启用项(保证四项都在)
-  for (const k of SIMPLE_ORDER_DEFAULT) {
-    if (!order.includes(k)) order.push(k);
-  }
-  return order;
-});
-/** 简单模式四项 ↑↓ 重排(同步 order) */
-function moveSimple(key: string, dir: -1 | 1): void {
-  const order = simpleDraft.value.order ?? [...SIMPLE_ORDER_DEFAULT];
-  const idx = order.indexOf(key);
-  const to = idx + dir;
-  if (idx < 0 || to < 0 || to >= order.length) return;
-  [order[idx], order[to]] = [order[to], order[idx]];
-  simpleDraft.value.order = [...order];
-}
-const editingFloorId = ref<string | null>(null);
-const dragFloorId = ref<string | null>(null);
 
 /** 位置4 agent 执行流程摘要(只读,编辑在设置面板) */
 const currentFlow = computed(() => {
@@ -178,68 +131,8 @@ function setEntryRole(bookId: string, e: api.WorldBookEntry, val: string): void 
   dirtyBooks.value.add(bookId);
 }
 
-// ===== 位置4 楼层排序 =====
-function moveFloor(id: string, dir: -1 | 1): void {
-  const fs = floorsDraft.value;
-  const idx = fs.findIndex((f) => f.id === id);
-  const to = idx + dir;
-  if (idx < 0 || to < 0 || to >= fs.length) return;
-  [fs[idx], fs[to]] = [fs[to], fs[idx]];
-  fs.forEach((f, i) => (f.order = i));
-}
-
-function addFloor(): void {
-  const id = (crypto.randomUUID?.() ?? `f-${Date.now()}`) as string;
-  floorsDraft.value.push({
-    id,
-    name: '新楼层',
-    content: '',
-    role: 'user',
-    position: 'system',
-    depth: 0,
-    enabled: true,
-    order: floorsDraft.value.length,
-  });
-  editingFloorId.value = id;
-}
-
-function removeFloor(id: string): void {
-  floorsDraft.value = floorsDraft.value.filter((f) => f.id !== id);
-  floorsDraft.value.forEach((f, i) => (f.order = i));
-  if (editingFloorId.value === id) editingFloorId.value = null;
-}
-
-function onFloorDragStart(e: DragEvent, id: string): void {
-  dragFloorId.value = id;
-  if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
-}
-function onFloorDragOver(e: DragEvent, id: string): void {
-  e.preventDefault();
-  if (!dragFloorId.value || dragFloorId.value === id) return;
-  const fs = floorsDraft.value;
-  const from = fs.findIndex((f) => f.id === dragFloorId.value);
-  const to = fs.findIndex((f) => f.id === id);
-  if (from < 0 || to < 0) return;
-  fs.splice(to, 0, fs.splice(from, 1)[0]);
-  fs.forEach((f, i) => (f.order = i));
-}
-function onFloorDrop(e: DragEvent): void {
-  e.preventDefault();
-  dragFloorId.value = null;
-}
-function onFloorDragEnd(): void {
-  dragFloorId.value = null;
-}
-
 // ===== 加载 =====
 onMounted(async () => {
-  await store.loadPromptInject();
-  const cfg = store.promptInject;
-  if (cfg) {
-    injectMode.value = cfg.mode;
-    floorsDraft.value = JSON.parse(JSON.stringify(cfg.floors)) as api.PromptFloor[];
-    simpleDraft.value = JSON.parse(JSON.stringify(cfg.simple)) as api.SimplePromptConfig;
-  }
   await store.loadWorldBooks();
   // 当前角色卡内嵌世界书(character_book)条目
   const cid = store.currentCharacterId;
@@ -265,29 +158,20 @@ async function saveAll(): Promise<void> {
   saving.value = true;
   msg.value = '';
   try {
-    // 1. 位置4:简单模式 + 楼层(全量写回 prompt_floors.json)
-    if (store.promptInject) {
-      const cfg: api.PromptInjectConfig = {
-        mode: injectMode.value,
-        simple: simpleDraft.value,
-        floors: floorsDraft.value,
-      };
-      await store.savePromptInjectConfig(cfg);
-    }
-    // 2. 位置0:预设尾部 + 反思建议(含注入角色,写回 settings.json)
+    // 位置0:预设尾部 + 反思建议(含注入角色,写回 settings.json)
     await store.saveSettings({
       preset_tail_prompt: presetTailPrompt.value,
       preset_tail_role: presetTailRole.value,
       reflect_advice_prompt: reflectAdvicePrompt.value,
       reflect_advice_role: reflectAdviceRole.value,
     });
-    // 3. 位置3/位置1:世界书条目顺序(逐本写回)
+    // 位置3/位置1:世界书条目顺序(逐本写回)
     for (const bookId of dirtyBooks.value) {
       const entries = bookEntries.value[bookId];
       if (entries) await api.saveWorldBookEntries(bookId, entries);
     }
     dirtyBooks.value.clear();
-    // 4. 位置3/位置1:角色卡内嵌世界书(顺序/角色改动写回)
+    // 位置3/位置1:角色卡内嵌世界书(顺序/角色改动写回)
     const cid = store.currentCharacterId;
     if (charEntriesDirty.value && cid) {
       charEntries.value = await api.saveCharacterWorldEntries(cid, charEntries.value);
@@ -335,151 +219,14 @@ async function saveAll(): Promise<void> {
           </div>
         </div>
 
-        <!-- 位置4 -->
+        <!-- 位置4:编辑面已收编「综合设置 → 对话与提示词 → 提示词注入」(IMPHUB 步骤 E),
+             本面板只保留层序总览与只读摘要,避免与设置区重复维护 -->
         <div class="sv-field">
           <div class="sv-field-label"><span class="sv-supreme orange" /> 位置4 · 模式注入与预设</div>
           <div class="sv-stack">
-            <div class="sv-inp-row">
-              <label class="sv-inp-tag">注入模式</label>
-              <div class="sv-mode">
-                <button :class="{ active: injectMode === 'simple' }" @click="injectMode = 'simple'">简单</button>
-                <button :class="{ active: injectMode === 'complex' }" @click="injectMode = 'complex'">复杂</button>
-              </div>
+            <div class="pm-summary">
+              简单模式四项、禁词库、复杂模式楼层与 agent 执行流程的编辑,在「综合设置 → 对话与提示词 → 提示词注入」与「执行流程」区完成。
             </div>
-
-            <!-- 禁词库:输出含禁用词时注入此提示词(所有模式);deep/agent/custom 另由引擎收尾工具同义替换 -->
-            <div class="sv-inp-row" style="align-items: flex-start">
-              <label class="sv-inp-tag">禁词库</label>
-              <button
-                class="sv-btn ghost"
-                :class="{ 'sv-btn-on': simpleDraft.banned_words_enabled }"
-                @click="simpleDraft.banned_words_enabled = !simpleDraft.banned_words_enabled"
-              >
-                {{ simpleDraft.banned_words_enabled ? '已启用' : '已关闭' }}
-              </button>
-              <textarea
-                v-model="simpleDraft.banned_prompt"
-                rows="2"
-                class="sv-input"
-                placeholder="输出中禁止出现以下词语,如:笨蛋、脏话、滚"
-                :disabled="!simpleDraft.banned_words_enabled"
-                spellcheck="false"
-              />
-            </div>
-            <p class="sv-note">输出含禁用词时注入此提示词,对所有模式生效;deep/agent/custom 模式另由引擎收尾做同义替换。</p>
-
-            <!-- 简单模式四项(可 ↑↓ 调整注入顺序) -->
-            <template v-if="injectMode === 'simple'">
-              <div v-for="(key, i) in orderedSimpleKeys" :key="key" class="sv-inp-row">
-                <button class="sv-btn ghost sv-btn-square" title="上移" :disabled="i === 0" @click="moveSimple(key, -1)">↑</button>
-                <button class="sv-btn ghost sv-btn-square" title="下移" :disabled="i === orderedSimpleKeys.length - 1" @click="moveSimple(key, 1)">↓</button>
-                <label class="sv-inp-tag">{{ SIMPLE_ITEM_LABELS[key] }}</label>
-                <template v-if="key === 'word_count'">
-                  <button
-                    class="sv-btn ghost"
-                    :class="{ 'sv-btn-on': simpleDraft.word_count_enabled }"
-                    @click="simpleDraft.word_count_enabled = !simpleDraft.word_count_enabled"
-                  >
-                    {{ simpleDraft.word_count_enabled ? '已启用' : '已关闭' }}
-                  </button>
-                  <input v-model.number="simpleDraft.word_count" type="number" min="1" max="100000" class="sv-input inject-num" :disabled="!simpleDraft.word_count_enabled" />
-                </template>
-                <template v-else-if="key === 'paraphrase'">
-                  <button
-                    class="sv-btn ghost"
-                    :class="{ 'sv-btn-on': simpleDraft.paraphrase_enabled }"
-                    @click="simpleDraft.paraphrase_enabled = !simpleDraft.paraphrase_enabled"
-                  >
-                    {{ simpleDraft.paraphrase_enabled ? '已启用' : '已关闭' }}
-                  </button>
-                  <span class="sv-note">用自己的话复述内容,不直接照抄原文</span>
-                </template>
-                <template v-else-if="key === 'dialogue'">
-                  <button
-                    class="sv-btn ghost"
-                    :class="{ 'sv-btn-on': simpleDraft.dialogue_enabled }"
-                    @click="simpleDraft.dialogue_enabled = !simpleDraft.dialogue_enabled"
-                  >
-                    {{ simpleDraft.dialogue_enabled ? '已启用' : '已关闭' }}
-                  </button>
-                  <span class="sv-note">只输出台词与必要动作描写,不输出旁白段落</span>
-                </template>
-                <template v-else>
-                  <button
-                    class="sv-btn ghost"
-                    :class="{ 'sv-btn-on': simpleDraft.perspective_enabled }"
-                    @click="simpleDraft.perspective_enabled = !simpleDraft.perspective_enabled"
-                  >
-                    {{ simpleDraft.perspective_enabled ? '已启用' : '已关闭' }}
-                  </button>
-                  <select v-model="simpleDraft.perspective" class="sv-select" :disabled="!simpleDraft.perspective_enabled">
-                    <option>第一人称</option>
-                    <option>第二人称</option>
-                    <option>第三人称</option>
-                  </select>
-                </template>
-              </div>
-              <p class="sv-note">启用项合成一条注入提示词拼入系统提示词末尾;↑↓ 可调整各项注入顺序。</p>
-            </template>
-
-            <!-- 位置4 预设楼层(始终显示,可拖拽/↑↓ 排序;简单模式下不注入,切到复杂模式生效) -->
-            <p class="sv-note">
-              楼层按列表顺序注入(系统角色进系统提示词,用户/角色紧随其后);可拖拽或 ↑↓ 排序,消息角色可自由选择。
-              <template v-if="injectMode === 'simple'"><b>当前为简单模式,楼层不注入</b>——切到「复杂」即生效。</template>
-              <code v-pre>{{setvar::键::值}}</code> 持久化到会话变量,后续楼层可
-              <code v-pre>{{getvar::键}}</code> 读取。
-            </p>
-            <div v-if="!floorsDraft.length" class="sv-note inject-empty">尚未添加楼层,点击下方「新增楼层」。</div>
-            <div
-              v-for="floor in floorsDraft"
-              :key="floor.id"
-              class="floor-row"
-              :class="{ dragging: dragFloorId === floor.id }"
-              draggable="true"
-              @dragstart="onFloorDragStart($event, floor.id)"
-              @dragover="onFloorDragOver($event, floor.id)"
-              @drop="onFloorDrop"
-              @dragend="onFloorDragEnd"
-            >
-              <span class="floor-grip" title="拖拽排序">⋮⋮</span>
-              <button
-                class="sv-btn ghost"
-                :class="{ 'sv-btn-on': floor.enabled }"
-                :title="floor.enabled ? '点击停用' : '点击启用'"
-                @click="floor.enabled = !floor.enabled"
-              >
-                {{ floor.enabled ? '开' : '关' }}
-              </button>
-              <input v-model="floor.name" type="text" class="sv-input floor-name" placeholder="楼层名称" spellcheck="false" />
-              <select v-model="floor.role" class="sv-select floor-select" title="消息角色">
-                <option v-for="(label, val) in FLOOR_ROLE_LABELS" :key="val" :value="val">{{ label }}</option>
-              </select>
-              <div class="floor-actions">
-                <button class="sv-btn ghost sv-btn-square" title="上移" @click="moveFloor(floor.id, -1)">↑</button>
-                <button class="sv-btn ghost sv-btn-square" title="下移" @click="moveFloor(floor.id, 1)">↓</button>
-                <button
-                  class="sv-btn ghost sv-btn-square"
-                  :title="editingFloorId === floor.id ? '收起编辑' : '编辑内容'"
-                  @click="editingFloorId = editingFloorId === floor.id ? null : floor.id"
-                >
-                  ✎
-                </button>
-                <button class="sv-btn danger sv-btn-square" title="删除楼层" @click="removeFloor(floor.id)">✕</button>
-              </div>
-              <textarea
-                v-if="editingFloorId === floor.id"
-                v-model="floor.content"
-                rows="5"
-                class="sv-input floor-content"
-                placeholder="楼层内容,支持酒馆宏。例如:{{char}}内心提醒:{{setvar::场景::酒馆}}今晚在{{getvar::场景}}见面。"
-                spellcheck="false"
-              />
-            </div>
-            <div class="sv-btn-row">
-              <button class="sv-btn ghost sv-btn-fill" @click="addFloor">＋ 新增楼层</button>
-            </div>
-
-            <!-- agent 执行流程摘要 -->
             <div class="sv-inp-row">
               <label class="sv-inp-tag">执行流程</label>
               <span v-if="currentFlow" class="sv-note">{{ currentFlow.name }}({{ currentFlow.steps.length }} 步)按步骤注入,编辑在设置面板</span>
