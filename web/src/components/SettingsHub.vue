@@ -74,6 +74,8 @@ const domains: Domain[] = [
     items: [
       // 综合导入 / 综合导出(IMPHUB 步骤 C):两模式可见(任务模式按段过滤,①⑥ 不适用)
       { type: 'action', key: 'importBundle', label: '综合导入 / 导出', run: openPanel('importBundleOpen') },
+      // 附件管理(IMPHUB 步骤 D):技能 / 流程 / 插件 / 预设正则 的统一组织面
+      { type: 'action', key: 'assets', label: '附件管理', run: openPanel('assetsOpen') },
       { type: 'section', key: 'prompt', label: '提示词注入' },
     ],
   },
@@ -109,8 +111,6 @@ const domains: Domain[] = [
       { type: 'action', key: 'records', label: '聊天记录', run: openPanel('chatRecordsOpen') },
       { type: 'action', key: 'worldbooks', label: '世界书', run: openPanel('worldBooksOpen') },
       { type: 'action', key: 'contracts', label: '契约编辑', run: openPanel('contractsOpen') },
-      { type: 'action', key: 'plugins', label: '插件', run: openPanel('pluginsOpen') },
-      { type: 'action', key: 'skills', label: '技能库', run: openPanel('skillsOpen') },
       { type: 'action', key: 'prompts', label: '提示词管理', run: openPanel('promptsOpen') },
       { type: 'action', key: 'scripts', label: '脚本管理', run: openPanel('scriptsOpen') },
       { type: 'action', key: 'quickReplies', label: '快速回复', run: openPanel('quickRepliesOpen') },

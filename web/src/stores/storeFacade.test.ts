@@ -43,7 +43,7 @@ const STATE_KEYS = [
   'appMode', 'tasks', 'currentTaskId', 'currentTask', 'currentTaskUsage', 'globalTaskUsage',
   'taskCalls', 'callTraceOpen', 'taskRunMode',
   'worldBooks', 'worldBooksOpen', 'quickReplies', 'quickRepliesOpen',
-  'audio', 'audioOpen', 'pluginsOpen', 'skillsOpen', 'skills', 'contractsOpen', 'scriptsOpen',
+  'audio', 'audioOpen', 'assetsOpen', 'skills', 'contractsOpen', 'scriptsOpen',
   'macrosOpen', 'eventLog', 'eventsOpen', 'optimizeOpen', 'memoryOpen', 'repoIndexOpen',
   'agentSystemPrompt', 'searchEndpoint', 'mvuVarsPosition', 'reflectPrompt',
   'presetTailPrompt', 'presetTailRole', 'reflectAdvicePrompt', 'reflectAdviceRole',

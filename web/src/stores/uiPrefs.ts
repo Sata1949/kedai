@@ -39,9 +39,8 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
   const worldBooksOpen = ref(false);
   const quickRepliesOpen = ref(false);
   const audioOpen = ref(false);
-  /** 插件管理弹窗开关 */
-  const pluginsOpen = ref(false);
-  const skillsOpen = ref(false);
+  /** 附件管理弹窗开关(IMPHUB 步骤 D) */
+  const assetsOpen = ref(false);
   /** 综合导入 / 导出弹窗开关(IMPHUB 步骤 C) */
   const importBundleOpen = ref(false);
   const contractsOpen = ref(false);
@@ -300,8 +299,7 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
     worldBooksOpen,
     quickRepliesOpen,
     audioOpen,
-    pluginsOpen,
-    skillsOpen,
+    assetsOpen,
     importBundleOpen,
     contractsOpen,
     scriptsOpen,
