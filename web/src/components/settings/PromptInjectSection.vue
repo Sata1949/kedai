@@ -3,7 +3,9 @@
 // 从 SettingsModal.vue 双模板合并而来:取 embedded 版本——禁词库统一为 banned_prompt
 // 纯文本编辑(注入配置即以该文本承载);standalone 分支的「禁词词条表」是旧版可视化
 // 编辑入口(编辑结果同样写回 banned_prompt),合并后废弃,能力由纯文本编辑保留。
-// 状态由壳(SettingsModal)创建一次后经 prop 传入,与 PresetImportExportSection 共享。
+// 状态由壳(SettingsModal)创建一次后经 prop 传入。
+// IMPHUB 步骤 C:导入酒馆预设 / 导出注入配置两个散点按钮收编「综合导入 / 导出」窗口,
+// 本区只保留注入配置的编辑与保存。
 import { onMounted } from 'vue';
 import type { usePromptInject } from '../../composables/usePromptInject';
 import { FLOOR_ROLE_LABELS, FLOOR_POS_LABELS, MACRO_HINTS } from '../../composables/usePromptInject';
@@ -19,8 +21,8 @@ const props = withDefaults(defineProps<{
 });
 
 const {
-  injectDraft, injectSaving, injectMsg, editingFloorId, dragFloorId, injectImportInput, injectImporting,
-  loadInjectConfig, saveInjectNow, addFloor, removeFloor, moveFloor, onImportPreset, exportInjectConfig,
+  injectDraft, injectSaving, injectMsg, editingFloorId, dragFloorId,
+  loadInjectConfig, saveInjectNow, addFloor, removeFloor, moveFloor,
   onDragStart, onDragOver, onDrop, onDragEnd,
 } = props.state;
 
@@ -208,26 +210,8 @@ onMounted(async () => {
         </details>
       </template>
 
-      <div class="sv-btn-row">
-        <button
-          class="sv-btn ghost sv-btn-fill"
-          :disabled="injectImporting"
-          title="导入 SillyTavern 预设 JSON,替换当前全部楼层(保留各条目启用状态)"
-          @click="injectImportInput?.click()"
-        >
-          {{ injectImporting ? '导入中...' : '导入酒馆预设(替换楼层)' }}
-        </button>
-        <button class="sv-btn ghost sv-btn-fill" :disabled="!injectDraft" @click="exportInjectConfig">
-          导出注入配置(JSON)
-        </button>
-        <input
-          ref="injectImportInput"
-          type="file"
-          accept=".json,application/json"
-          class="hidden"
-          @change="onImportPreset"
-        />
-      </div>
+      <!-- 导入酒馆预设 / 导出注入配置已收编「综合导入 / 导出」窗口(IMPHUB 步骤 C):
+           入口 = 综合设置 → 对话与提示词 → 综合导入 / 导出 -->
       <div class="sv-btn-row">
         <button class="sv-btn primary sv-btn-fill" :disabled="injectSaving || !injectDraft" @click="saveInjectNow">
           {{ injectSaving ? '保存中...' : '保存注入设置' }}

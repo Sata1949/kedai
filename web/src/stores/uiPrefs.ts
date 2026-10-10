@@ -42,6 +42,8 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
   /** 插件管理弹窗开关 */
   const pluginsOpen = ref(false);
   const skillsOpen = ref(false);
+  /** 综合导入 / 导出弹窗开关(IMPHUB 步骤 C) */
+  const importBundleOpen = ref(false);
   const contractsOpen = ref(false);
   const scriptsOpen = ref(false);
   const macrosOpen = ref(false);
@@ -79,12 +81,6 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
    * 仅内存态:下次异常覆盖、用户关闭即清除,不持久化。
    */
   const globalError = ref<string | null>(null);
-  /**
-   * 上传角色卡请求计数器(跨组件通信,取代 document.querySelector 戳 Sidebar 内部 DOM):
-   * 发起方(如 SettingsHub 快速操作)自增;Sidebar watch 本计数器触发自身隐藏 file input 的 click。
-   * 计数器语义而非布尔开关:连续点两次也要各触发一次,不丢请求。
-   */
-  const characterUploadRequested = ref(0);
 
   // ===== 设置分区定位请求(新手教程「带我去设置」) =====
   /**
@@ -306,6 +302,7 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
     audioOpen,
     pluginsOpen,
     skillsOpen,
+    importBundleOpen,
     contractsOpen,
     scriptsOpen,
     macrosOpen,
@@ -321,7 +318,6 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
     modalLoadError,
     dataLoadError,
     globalError,
-    characterUploadRequested,
     settingsNav,
     openSettingsAt,
     clearSettingsNav,

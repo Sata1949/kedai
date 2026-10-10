@@ -4,7 +4,8 @@
 // 两个模式共享同一组 section 组件(src/components/settings/),业务逻辑在 src/composables/。
 // 历史背景:原实现 embedded / standalone 两套模板复制粘贴且已漂移(standalone 缺失
 // 预设导入导出、提示词预览、工具策略行与压缩参数),现已合并为单组共享 section。
-// 分区懒加载(M2-C5):默认首 tab(API 连接)两个分区同步导入(打开即见);其余 8 个分区
+// IMPHUB 步骤 C:「预设导入 / 导出」区整区删除,能力并入「综合导入 / 导出」弹窗。
+// 分区懒加载(M2-C5):默认首 tab(API 连接)两个分区同步导入(打开即见);其余分区
 // 经 lazyModal 拆 chunk,embedded 模式首次切到对应 tab 才挂载加载,挂载后常驻不丢编辑态;
 // 加载失败语义同弹窗(自动重试一次 → 全局错误条手动重试,重开综合设置触发重新加载)。
 import { ref, watch } from 'vue';
@@ -31,7 +32,6 @@ const LiteraryBundleSection = lazyModal(() => import('./settings/LiteraryBundleS
 // 视觉与截图(默认关;视觉能力包):截图工具总开关(隐私提示见分区内)
 const VisionScreenshotSection = lazyModal(() => import('./settings/VisionScreenshotSection.vue'), '设置区:视觉与截图', 'settingsOpen');
 const PromptInjectSection = lazyModal(() => import('./settings/PromptInjectSection.vue'), '设置区:提示词注入', 'settingsOpen');
-const PresetImportExportSection = lazyModal(() => import('./settings/PresetImportExportSection.vue'), '设置区:预设导入', 'settingsOpen');
 const DataManagementSection = lazyModal(() => import('./settings/DataManagementSection.vue'), '设置区:数据管理', 'settingsOpen');
 const McpSection = lazyModal(() => import('./settings/McpSection.vue'), '设置区:MCP 服务', 'settingsOpen');
 const UiSection = lazyModal(() => import('./settings/UiSection.vue'), '设置区:界面', 'settingsOpen');
@@ -96,7 +96,6 @@ const close = (): void => {
     <LiteraryBundleSection v-if="visitedSections.has('literary')" :show="props.activeSection === 'literary'" />
     <VisionScreenshotSection v-if="visitedSections.has('vision')" :show="props.activeSection === 'vision'" />
     <PromptInjectSection v-if="visitedSections.has('prompt')" :state="promptInject" :show="props.activeSection === 'prompt'" />
-    <PresetImportExportSection v-if="visitedSections.has('preset')" :state="promptInject" :show="props.activeSection === 'preset'" />
     <DataManagementSection v-if="visitedSections.has('data')" :state="dataManager" :show="props.activeSection === 'data'" />
     <McpSection v-if="visitedSections.has('mcp')" :show="props.activeSection === 'mcp'" />
     <EmbeddingSection v-if="visitedSections.has('embedding')" :show="props.activeSection === 'embedding'" />
@@ -127,7 +126,6 @@ const close = (): void => {
         <LiteraryBundleSection />
         <VisionScreenshotSection />
         <PromptInjectSection :state="promptInject" />
-        <PresetImportExportSection :state="promptInject" />
         <DataManagementSection :state="dataManager" />
         <McpSection />
     <EmbeddingSection />

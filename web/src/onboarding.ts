@@ -30,7 +30,7 @@ export type AppMode = 'roleplay' | 'task';
  */
 export type SettingsSectionKey =
   | 'api' | 'connections' | 'model' | 'mcp' | 'embedding'
-  | 'prompt' | 'preset'
+  | 'prompt'
   | 'agent' | 'flow' | 'exec' | 'coding' | 'literary' | 'vision'
   | 'data'
   | 'ui'

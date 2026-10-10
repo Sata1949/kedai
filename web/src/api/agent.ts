@@ -103,6 +103,16 @@ export async function deleteAgentFlow(id: string): Promise<AgentFlowLibrary> {
   return data.library;
 }
 
+/** POST /api/agent-flows/move:移动流程到虚拟文件夹(IMPHUB 附件管理)。
+ *  **不动当前选中**(整理分组不是选择动作);空串 = 移回未分组。 */
+export async function moveAgentFlow(id: string, folder: string): Promise<AgentFlowLibrary> {
+  const data = await request<{ ok: boolean; library: AgentFlowLibrary }>('/agent-flows/move', {
+    method: 'POST',
+    body: JSON.stringify({ id, folder }),
+  });
+  return data.library;
+}
+
 /** 导出搬运包(二维批次 7a):给 id 导出该流程 + 可达子流程闭包,缺省导出全库 */
 export async function exportAgentFlows(id?: string): Promise<AgentFlowBundle> {
   const qs = id ? `?id=${encodeURIComponent(id)}` : '';

@@ -42,6 +42,8 @@ export const MODALS = [
   modal('chatRecordsOpen', '聊天记录', () => import('./components/ChatRecords.vue')),
   modal('pluginsOpen', '插件', () => import('./components/PluginsModal.vue')),
   modal('skillsOpen', '技能库', () => import('./components/SkillsModal.vue')),
+  // 综合导入 / 导出(IMPHUB 步骤 C):一个文件多段导入 + 综合导出件导出
+  modal('importBundleOpen', '综合导入', () => import('./components/ImportBundleModal.vue')),
   modal('contractsOpen', '契约编辑', () => import('./components/ContractsModal.vue')),
   modal('promptsOpen', '提示词管理', () => import('./components/PromptManager.vue')),
   modal('scriptsOpen', '脚本管理', () => import('./components/ScriptsModal.vue')),

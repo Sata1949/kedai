@@ -5,7 +5,6 @@ import { createPinia, setActivePinia } from 'pinia';
 import { useApiSettings } from '../../composables/useApiSettings';
 import { useConnectionProfiles } from '../../composables/useConnectionProfiles';
 import { useDataManager } from '../../composables/useDataManager';
-import { usePromptInject } from '../../composables/usePromptInject';
 import { useTaskStore } from '../../stores/task';
 import ConnectionProfilesSection from './ConnectionProfilesSection.vue';
 import ConnectionSection from './ConnectionSection.vue';
@@ -14,7 +13,6 @@ import CodingBundleSection from './CodingBundleSection.vue';
 import LiteraryBundleSection from './LiteraryBundleSection.vue';
 import VisionScreenshotSection from './VisionScreenshotSection.vue';
 import DataManagementSection from './DataManagementSection.vue';
-import PresetImportExportSection from './PresetImportExportSection.vue';
 import AgentSettingsSection from './AgentSettingsSection.vue';
 import GenParamsSection from './GenParamsSection.vue';
 import SettingsModal from '../SettingsModal.vue';
@@ -178,21 +176,11 @@ describe('ConnectionProfilesSection(连接配置区)', () => {
   });
 });
 
-describe('PresetImportExportSection(预设导入/导出区)', () => {
-  it('渲染导入/导出两行(合并后 standalone 也包含本区,防回归)', async () => {
-    const state = usePromptInject();
-    const html = await render(PresetImportExportSection, { state });
-    expect(html).toContain('预设导入 / 导出');
-    expect(html).toContain('导入酒馆预设');
-    expect(html).toContain('导出注入配置');
-  });
-});
-
 describe('SettingsModal(壳)', () => {
-  it('standalone 模式渲染遮罩/头部,且包含预设导入导出区(原 standalone 缺失)', async () => {
+  it('standalone 模式渲染遮罩/头部(预设导入导出区已随 IMPHUB 步骤 C 删除)', async () => {
     const html = await render(SettingsModal, { embedded: false });
     expect(html).toContain('sv-modal-mask');
-    expect(html).toContain('预设导入 / 导出');
+    expect(html).not.toContain('预设导入 / 导出');
     expect(html).toContain('API 设置');
     expect(html).toContain('提示词注入');
   });

@@ -2,7 +2,9 @@
 import { ref } from 'vue';
 import { useAppStore } from '../store';
 import * as api from '../api';
-import { downloadBlob } from '../exportFile';
+// 形状判定迁入 utils/importBundle(IMPHUB 步骤 C):纯函数集中一处供综合导入与测试共用;
+// 此处 re-export 保持既有调用方零改动。
+export { detectInjectFileShape, type InjectFileShape } from '../utils/importBundle';
 
 export const FLOOR_ROLE_LABELS: Record<api.FloorRole, string> = {
   system: '系统提示词',
@@ -29,19 +31,6 @@ export const MACRO_HINTS = [
   '{{trim}} 修饰下一宏去空白', '{{//注释}} 注释到行尾',
 ];
 
-export type InjectFileShape = 'st' | 'kedai' | 'unknown';
-
-/** 判定导入文件形状:顶层 prompts 数组 → 酒馆预设(与后端 parsing/preset.rs 的唯一依据对齐);
- *  mode 字符串 + simple 字段 → 本工具导出配置(顶层形状见 exportInjectConfig);其余 → unknown。
- *  注意 floors 不是酒馆预设判据(那是本工具自有楼层形状,导出配置里也有,故置于 kedai 之后) */
-export function detectInjectFileShape(data: unknown): InjectFileShape {
-  if (!data || typeof data !== 'object') return 'unknown';
-  const d = data as Record<string, unknown>;
-  if (Array.isArray(d.prompts)) return 'st';
-  if (typeof d.mode === 'string' && d.simple !== undefined) return 'kedai';
-  return 'unknown';
-}
-
 export function usePromptInject() {
   const store = useAppStore();
 
@@ -50,9 +39,6 @@ export function usePromptInject() {
   const injectMsg = ref('');
   const editingFloorId = ref<string | null>(null);
   const dragFloorId = ref<string | null>(null);
-  /** 酒馆预设导入(替换现有楼层;导入前弹窗确认) */
-  const injectImportInput = ref<HTMLInputElement | null>(null);
-  const injectImporting = ref(false);
 
   /** 从服务端加载配置并克隆为可编辑草稿(保存时才提交) */
   async function loadInjectConfig(): Promise<void> {
@@ -114,79 +100,9 @@ export function usePromptInject() {
     fs.forEach((f, i) => (f.order = i));
   }
 
-  /** 导入 JSON(智能识别格式,判定见 detectInjectFileShape):
-   *  - 顶层 prompts 数组 → 酒馆预设(替换楼层,自动切复杂模式)
-   *  - mode 字符串 + simple 字段 → 本工具导出 JSON(恢复完整配置含禁词库) */
-  async function onImportPreset(e: Event): Promise<void> {
-    const input = e.target as HTMLInputElement;
-    const file = input.files?.[0];
-    input.value = '';
-    if (!file || injectImporting.value) return;
-    injectImporting.value = true;
-    injectMsg.value = '';
-    try {
-      const text = await file.text();
-      let data: Record<string, unknown>;
-      try {
-        data = JSON.parse(text) as Record<string, unknown>;
-      } catch {
-        throw new Error('文件不是有效的 JSON');
-      }
-
-      const shape = detectInjectFileShape(data);
-
-      if (shape === 'st') {
-        const count = injectDraft.value?.floors.length ?? 0;
-        if (!window.confirm(`导入酒馆预设将替换当前 ${count} 条楼层配置,确定继续?`)) return;
-        const result = await api.importPromptPreset(file);
-        injectDraft.value = JSON.parse(JSON.stringify(result.config)) as api.PromptInjectConfig;
-        store.promptInject = result.config;
-        injectMsg.value = `已导入 ${result.imported} 条楼层(替换原配置)`;
-      } else if (shape === 'kedai') {
-        const count = injectDraft.value?.floors.length ?? 0;
-        if (!window.confirm(`导入配置将替换当前设置(含禁词库),确定继续?`)) return;
-        // 迁移:若导入数据含 banned_words 且 banned_prompt 为空,自动迁移
-        const cfg = data as unknown as api.PromptInjectConfig;
-        if (cfg.simple?.banned_words && !cfg.simple?.banned_prompt) {
-          const words = cfg.simple.banned_words
-            .map((b) => b.word?.trim())
-            .filter((w): w is string => !!w);
-          if (words.length > 0) {
-            cfg.simple.banned_prompt = `输出中禁止出现以下词语,若涉及请用含义相近、更得体的表达替换:${words.join('、')}`;
-          }
-        }
-        const saved = await api.savePromptInject(cfg);
-        injectDraft.value = JSON.parse(JSON.stringify(saved)) as api.PromptInjectConfig;
-        store.promptInject = saved;
-        injectMsg.value = `已导入配置(含 ${saved.simple.banned_words_enabled ? '禁词库' : '无禁词库'})`;
-      } else {
-        throw new Error('无法识别的 JSON 格式(非酒馆预设,也非本工具导出配置)');
-      }
-      setTimeout(() => (injectMsg.value = ''), 3000);
-    } catch (err) {
-      injectMsg.value = `导入失败:${(err as Error).message}`;
-    } finally {
-      injectImporting.value = false;
-    }
-  }
-
-  /** 导出当前注入配置(模式 + 简单项 + 全部楼层)为 JSON 文件;导入端可原样回导 */
-  function exportInjectConfig(): void {
-    const cur = injectDraft.value;
-    if (!cur) return;
-    const payload = {
-      mode: cur.mode,
-      simple: cur.simple,
-      floors: cur.floors,
-    };
-    // 直接下载,不弹保存对话框(统一走 downloadBlob,延时回收 ObjectURL)
-    downloadBlob(
-      `kedai-inject-${new Date().toISOString().slice(0, 10)}.json`,
-      new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }),
-    );
-    injectMsg.value = '注入配置已导出';
-    setTimeout(() => (injectMsg.value = ''), 2500);
-  }
+  /** 导入 JSON / 导出注入配置已收编「综合导入 / 导出」(IMPHUB 步骤 C):
+   *  原 onImportPreset / exportInjectConfig 在此删除;ST 预设与 kedai 注入配置的
+   *  导入走 ImportBundleModal(形状判定与禁词迁移见 utils/importBundle)。 */
 
   // ===== 楼层拖拽(HTML5 DnD;drop 后重排 order) =====
   function onDragStart(e: DragEvent, id: string): void {
@@ -216,8 +132,8 @@ export function usePromptInject() {
   }
 
   return {
-    injectDraft, injectSaving, injectMsg, editingFloorId, dragFloorId, injectImportInput, injectImporting,
-    loadInjectConfig, saveInjectNow, addFloor, removeFloor, moveFloor, onImportPreset, exportInjectConfig,
+    injectDraft, injectSaving, injectMsg, editingFloorId, dragFloorId,
+    loadInjectConfig, saveInjectNow, addFloor, removeFloor, moveFloor,
     onDragStart, onDragOver, onDrop, onDragEnd,
   };
 }

@@ -99,15 +99,22 @@ describe('SettingsHub 组件(阶段 A 补测)', () => {
     expect(labels).toContain('执行流程');
   });
 
-  it('任务模式下角色扮演专属域仍整体隐藏(防过度放行)', async () => {
+  it('任务模式下角色扮演专属 section 仍隐藏,但「对话与提示词」域的双模式入口可见(IMPHUB 步骤 C)', async () => {
     const { store, wrapper } = mountHub();
     store.appMode = 'task';
     await nextTick();
 
-    // 「对话与提示词」只含 prompt/preset,两者都属角色扮演专属 → 整域被过滤
-    const navLabels = wrapper.findAll('.sv-hub-nav-item').map((b) => b.text());
-    expect(navLabels.some((t) => t.includes('对话与提示词'))).toBe(false);
-    expect(navLabels.some((t) => t.includes('Agent 与任务'))).toBe(true);
+    // 「对话与提示词」域含双模式 action(综合导入 / 导出)→ 域整体保留;
+    // 但角色扮演专属 section(提示词注入)不得出现
+    const dialogDomain = wrapper
+      .findAll('.sv-hub-nav-item')
+      .find((b) => b.text().includes('对话与提示词'));
+    expect(dialogDomain, '任务模式应有「对话与提示词」域(综合导入为两模式入口)').toBeTruthy();
+    await dialogDomain?.trigger('click');
+    const labels = wrapper.findAll('.hub-sub-item').map((it) => it.text());
+    // action 项尾部带「→」箭头(提示点开是独立面板),故用包含判定
+    expect(labels.some((l) => l.includes('综合导入 / 导出'))).toBe(true);
+    expect(labels).not.toContain('提示词注入');
   });
 
   it('「授权与命令执行」是独立二级项且两种模式下都可见(2026-09-17:授权入口曾被埋在 Agent 设置内)', async () => {

@@ -559,33 +559,18 @@ describe('AgentFlowSection 流程搬运', () => {
     return urls;
   }
 
-  it('导出区:两个导出按钮都在,且说明导出范围与「不含连接与密钥」', async () => {
+  it('导出区:保留单流程导出按钮,说明导出范围与「不含连接与密钥」', async () => {
     mockByUrl({ ok: true, bundle: { kedai_flow_bundle: 1, flows: [] } });
     const wrapper = mount(AgentFlowSection);
     await flushPromises();
 
     const texts = wrapper.findAll('button').map((b) => b.text());
     expect(texts).toContain('导出流程(JSON)');
-    expect(texts).toContain('导出全部流程');
+    // 「导出全部流程」随 IMPHUB 步骤 C 收编「综合导入 / 导出」窗口(整库搬运场景)
+    expect(texts).not.toContain('导出全部流程');
     // 提示须说清:带上子流程、不含连接/密钥
     expect(wrapper.text()).toContain('挂载的子流程');
     expect(wrapper.text()).toContain('不含 API 连接与密钥');
-  });
-
-  it('点「导出全部流程」:不带 id 调搬运包端点,并提示流程总数', async () => {
-    const urls = mockByUrl({
-      ok: true,
-      bundle: { kedai_flow_bundle: 1, root_id: 'f1', flows: [sampleFlow()] },
-    });
-    const wrapper = mount(AgentFlowSection);
-    await flushPromises();
-
-    await wrapper.findAll('button').find((b) => b.text() === '导出全部流程')?.trigger('click');
-    await flushPromises();
-
-    const call = urls.find((u) => u.includes('/agent-flows/export'));
-    expect(call, '导出必须走搬运包端点').toBe('/api/agent-flows/export');
-    expect(wrapper.text()).toContain('已导出全部 1 个流程');
   });
 
   it('点「导出流程」:带当前流程 id 调端点,并提示带上的子流程数', async () => {
@@ -608,108 +593,4 @@ describe('AgentFlowSection 流程搬运', () => {
   });
 });
 
-// ==================== 导入「覆盖」模式(B 批 B4)====================
-//
-// 覆盖是**不可逆**动作(同 id 那份被替换),故这里锁两件事:默认不勾选、勾选后
-// 请求体真的带 on_conflict=replace,并且导入前有二次确认(取消则一个请求都不发)。
-describe('AgentFlowSection 导入覆盖模式(B 批 B4)', () => {
-  /** 捕获 import 请求体;report 由用例给出 */
-  function mockImport(report: unknown): Array<Record<string, unknown>> {
-    const bodies: Array<Record<string, unknown>> = [];
-    vi.spyOn(globalThis, 'fetch').mockImplementation(
-      async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = String(input);
-        if (url.includes('/api/bootstrap')) {
-          return new Response(JSON.stringify({ token: 'test-secret' }), { status: 200 });
-        }
-        if (url.includes('/agent-flows/import')) {
-          bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
-          return new Response(
-            JSON.stringify({
-              ok: true,
-              library: { current_flow_id: 'f1', flows: [sampleFlow()] },
-              report,
-            }),
-            { status: 200 },
-          );
-        }
-        if (url.includes('/agent-flows')) {
-          return new Response(
-            JSON.stringify({ ok: true, library: { current_flow_id: 'f1', flows: [sampleFlow()] }, config: null }),
-            { status: 200 },
-          );
-        }
-        return new Response(JSON.stringify({ connections: [], active_connection_id: null }), {
-          status: 200,
-        });
-      },
-    );
-    return bodies;
-  }
-
-  /** 选择文件:jsdom 里 input.files 只读,故就地定义一个带 text() 的伪 File */
-  async function pickFile(wrapper: ReturnType<typeof mount>, payload: unknown): Promise<void> {
-    const input = wrapper.find('input[type="file"]');
-    Object.defineProperty(input.element, 'files', {
-      value: [{ text: async () => JSON.stringify(payload) }],
-      configurable: true,
-    });
-    await input.trigger('change');
-    await flushPromises();
-  }
-
-  it('复选框默认未勾选;此时导入请求体不带 on_conflict(现状:新增副本 + 新 id)', async () => {
-    const bodies = mockImport({ imported: 1, skipped: 0, renamed: [], replaced: [] });
-    const wrapper = mount(AgentFlowSection);
-    await flushPromises();
-
-    const box = wrapper.find('#flow-import-replace-box');
-    expect(box.exists(), '导入按钮旁应有「覆盖同名流程」复选框').toBe(true);
-    expect((box.element as HTMLInputElement).checked).toBe(false);
-    expect(wrapper.text()).toContain('覆盖同名流程(同 id 内容不同时替换本机那份)');
-
-    await pickFile(wrapper, { config: sampleFlow() });
-    expect(bodies).toHaveLength(1);
-    expect(bodies[0]).not.toHaveProperty('on_conflict');
-    wrapper.unmount();
-  });
-
-  it('勾选后:二次确认通过才带 on_conflict=replace,报告文案点名被覆盖的流程', async () => {
-    const bodies = mockImport({
-      imported: 1,
-      skipped: 0,
-      renamed: [],
-      replaced: [{ id: 'f1', name: '测试流程' }],
-    });
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
-    const wrapper = mount(AgentFlowSection);
-    await flushPromises();
-
-    await wrapper.find('#flow-import-replace-box').setValue(true);
-    expect(wrapper.text()).toContain('覆盖不可撤销');
-
-    await pickFile(wrapper, { config: sampleFlow() });
-    expect(confirmSpy).toHaveBeenCalledTimes(1);
-    expect(String(confirmSpy.mock.calls[0][0])).toContain('无法撤销');
-    expect(bodies[0]).toMatchObject({ on_conflict: 'replace' });
-    expect(wrapper.text()).toContain('覆盖 1 个同 id 流程');
-    expect(wrapper.text()).toContain('「测试流程」');
-    wrapper.unmount();
-  });
-
-  it('二次确认被取消:一个请求都不发(库一字不动),也不卡在「导入中...」', async () => {
-    const bodies = mockImport({ imported: 1, skipped: 0, renamed: [], replaced: [] });
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
-    const wrapper = mount(AgentFlowSection);
-    await flushPromises();
-
-    await wrapper.find('#flow-import-replace-box').setValue(true);
-    await pickFile(wrapper, { config: sampleFlow() });
-
-    expect(confirmSpy).toHaveBeenCalledTimes(1);
-    expect(bodies).toEqual([]);
-    expect(wrapper.findAll('button').some((b) => b.text().includes('导入中'))).toBe(false);
-    wrapper.unmount();
-  });
-});
 

@@ -772,6 +772,8 @@ export interface ToolPluginInfo {
   origin: string;
   /** 来源文件基名(UI 按文件分组展示) */
   file: string;
+  /** 虚拟文件夹路径(IMPHUB 附件管理;空串 = 未分组) */
+  folder: string;
 }
 
 export interface PluginToolsStatus {
@@ -851,12 +853,20 @@ export interface SkillRecord {
   run_as_subagent: boolean;
   /** 技能级模型覆盖(空 = 沿用当前连接器模型) */
   model: string;
+  /** 虚拟文件夹路径(IMPHUB 附件管理;空串 = 未分组) */
+  folder: string;
 }
 
 export interface SkillImportItem {
   name: string;
   description?: string;
   content?: string;
+  /** 工具白名单(数组形态;后端 SkillImport 同名口径) */
+  allowed_tools?: string[];
+  run_as_subagent?: boolean;
+  model?: string;
+  /** 虚拟文件夹路径(同名覆盖时以导入值为准) */
+  folder?: string;
 }
 
 export interface AgentPlan {
@@ -954,6 +964,11 @@ export interface AgentFlowConfig {
   steps: AgentFlowStep[];
   /** 并行节点数上限(1-8;缺省 2;1 = 完全串行)。并行会成倍消耗 token */
   max_parallel_nodes?: number | null;
+  /**
+   * 虚拟文件夹路径(IMPHUB 附件管理;空串 = 未分组)。
+   * 后端空值**省略序列化**(保 flow_fingerprint 逐字节不变),故本字段可缺省。
+   */
+  folder?: string;
 }
 
 /** 流程库(全局):当前选中的流程 + 全部流程 */
@@ -1383,4 +1398,33 @@ export interface TaskChangeRollbackAll {
   skipped: number;
   failed: number;
   results: TaskChangeRollbackItem[];
+}
+
+// ===== 综合导入 / 综合导出(IMPHUB,bundle v1)=====
+
+/**
+ * 综合导出件(bundle v1;与后端 `import_export::ImportBundleEnvelope` 对齐)。
+ * 顶层只放元信息,全部内容进 `sections`(未知段键天然可忽略,前向兼容规则清晰);
+ * 段序契约由后端具名结构体锁定:preset_entries → flows → prompts → skills → regex_scripts → plugins。
+ */
+export interface KedaiImportBundle {
+  /** 版本键;导入侧 `> 1` 拒绝(「文件由更新版本导出」) */
+  kedai_import_bundle: number;
+  exported_at: string;
+  generator: { app: string; version: string };
+  /** 导出方模式(仅供人工识别;导入取段一律以本机当前模式为准) */
+  app_mode: string;
+  /** 6 段载荷(段缺省 = 该段不导入;`task` 导出天然不含 ①⑥) */
+  sections: Record<string, unknown>;
+}
+
+/**
+ * 综合导入的**逐段回执**(§2.1.4):`ok | skipped | failed`,一段 failed 不阻断其余段。
+ * `section` 为段键(如 'flows'),`summary` 面向用户。
+ */
+export interface ImportSectionResult {
+  section: string;
+  status: 'ok' | 'skipped' | 'failed';
+  summary: string;
+  errors: string[];
 }

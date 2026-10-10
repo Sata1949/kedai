@@ -72,8 +72,9 @@ const domains: Domain[] = [
   {
     key: 'dialog', label: '对话与提示词', dot: 'orange',
     items: [
+      // 综合导入 / 综合导出(IMPHUB 步骤 C):两模式可见(任务模式按段过滤,①⑥ 不适用)
+      { type: 'action', key: 'importBundle', label: '综合导入 / 导出', run: openPanel('importBundleOpen') },
       { type: 'section', key: 'prompt', label: '提示词注入' },
-      { type: 'section', key: 'preset', label: '预设导入' },
     ],
   },
   {
@@ -105,7 +106,6 @@ const domains: Domain[] = [
     key: 'tools', label: '界面与工具', dot: 'blue',
     items: [
       { type: 'section', key: 'ui', label: '界面' },
-      { type: 'action', key: 'upload', label: '上传角色卡', run: () => { store.characterUploadRequested++; } },
       { type: 'action', key: 'records', label: '聊天记录', run: openPanel('chatRecordsOpen') },
       { type: 'action', key: 'worldbooks', label: '世界书', run: openPanel('worldBooksOpen') },
       { type: 'action', key: 'contracts', label: '契约编辑', run: openPanel('contractsOpen') },
@@ -131,8 +131,10 @@ const domains: Domain[] = [
 
 /** 角色扮演专属分区:任务模式下隐藏。'flow'(执行流程)不在此列——任务模式的 custom 依赖
  *  流程库(后端 TaskFlowAccess::current_flow 读不到已启用流程即报错),必须两种模式下都可见
- *  (IFW-3 入口错位修复,见 docs/遗留.md §九 已封堵项索引) */
-const ROLEPLAY_ONLY: ReadonlySet<SectionKey> = new Set<SectionKey>(['prompt', 'preset']);
+ *  (IFW-3 入口错位修复,见 docs/遗留.md §九 已封堵项索引)。
+ *  'preset'(预设导入)随 IMPHUB 步骤 C 删除:能力并入「综合导入」①;「对话与提示词」
+ *  域的 action(综合导入/导出)两模式可见,故任务模式下本域不再整域隐藏。 */
+const ROLEPLAY_ONLY: ReadonlySet<SectionKey> = new Set<SectionKey>(['prompt']);
 
 /** 按顶层模式过滤二级 section 项;过滤后为空的功能域整域隐藏 */
 const visibleDomains = computed<Domain[]>(() =>

@@ -10,9 +10,11 @@ import {
 } from './shape';
 import type {
   ConnectorInfo,
+  KedaiImportBundle,
   PromptInjectConfig,
   PromptPreview,
   PromptPresetImportResult,
+  RegexScript,
   RuntimeSettings,
   RuntimeSettingsPatch,
 } from './types';
@@ -131,9 +133,48 @@ export async function savePromptInject(config: PromptInjectConfig): Promise<Prom
   return requireObjectField<PromptInjectConfig>(data, 'config', '提示词注入配置');
 }
 
-/** POST /api/prompt-inject/import:导入酒馆(SillyTavern)预设 JSON,替换现有楼层 */
-export async function importPromptPreset(file: File): Promise<PromptPresetImportResult> {
-  return uploadForm<PromptPresetImportResult>('/prompt-inject/import', file);
+/** POST /api/prompt-inject/import:导入酒馆(SillyTavern)预设 JSON。
+ *  `mode='append'` 追加到现有楼层之后;缺省/`replace` = 替换(后端 multipart mode 字段)。 */
+export async function importPromptPreset(
+  file: File,
+  mode?: 'replace' | 'append',
+): Promise<PromptPresetImportResult> {
+  return uploadForm<PromptPresetImportResult>(
+    '/prompt-inject/import',
+    file,
+    mode ? { mode } : {},
+  );
+}
+
+// ===== 全局正则库(IMPHUB ⑥)与综合导出(bundle v1) =====
+
+/** GET /api/regex-scripts:读取全局正则库(整体;跨角色生效的显示层正则) */
+export async function getRegexScripts(): Promise<RegexScript[]> {
+  const data = await request<{ ok: boolean; scripts: RegexScript[] }>('/regex-scripts');
+  return data.scripts;
+}
+
+/** PUT /api/regex-scripts:全量替换全局正则库(启停/删除/导入都走整体写)。
+ *  条目宽进:取不到查找模式的条目由后端跳过,`skipped` 如实回报。 */
+export async function saveRegexScripts(
+  scripts: unknown[],
+): Promise<{ count: number; skipped: number; scripts: RegexScript[] }> {
+  const data = await request<{ ok: boolean; count: number; skipped: number; scripts: RegexScript[] }>(
+    '/regex-scripts',
+    { method: 'PUT', body: JSON.stringify({ scripts }) },
+  );
+  return { count: data.count, skipped: data.skipped, scripts: data.scripts };
+}
+
+/** GET /api/export/bundle?mode=…:综合导出件(bundle v1;段序与归一由后端锁定)。
+ *  `warnings` = 插件目录里解析失败、未导出的文件(不影响其余段)。 */
+export async function exportBundle(
+  mode: 'roleplay' | 'task',
+): Promise<{ bundle: KedaiImportBundle; warnings: string[] }> {
+  const data = await request<{ ok: boolean; bundle: KedaiImportBundle; warnings: string[] }>(
+    `/export/bundle?mode=${mode}`,
+  );
+  return { bundle: data.bundle, warnings: data.warnings ?? [] };
 }
 
 // ===== Token 计数 =====
