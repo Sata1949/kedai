@@ -302,7 +302,7 @@ impl AgentFlowService {
     /// - **不跑校验**:folder 不参与 `validate_flow` / `validate_sub_flows`(纯展示元数据),
     ///   组内流程结构有历史脏数据也不该拦住一次搬家;
     /// - 落盘失败**内存回滚**(与 `import_bundle` 同款):不给「重启即消失」的幻影分组。
-    /// 路径规整走 `utils::folder_path`(与技能/插件同一口径),空串 = 移回未分组。
+    ///   路径规整走 `utils::folder_path`(与技能/插件同一口径),空串 = 移回未分组。
     pub fn move_to_folder(&mut self, id: &str, folder: &str) -> Result<(), String> {
         let folder = crate::utils::folder_path::normalize_folder_path(folder);
         let Some(idx) = self.library.flows.iter().position(|f| f.id == id) else {

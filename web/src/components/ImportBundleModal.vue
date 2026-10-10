@@ -12,7 +12,8 @@ import { storeToRefs } from 'pinia';
 import { useAppStore } from '../store';
 import * as api from '../api';
 import { downloadBlob } from '../exportFile';
-import type { ImportSection, ImportSectionResult, ParsedBundle } from '../utils/importBundle';
+import type { ImportSection, ParsedBundle } from '../utils/importBundle';
+import type { ImportSectionResult } from '../api';
 import {
   IMPORT_FILE_HINT,
   ROLEPLAY_ONLY_SECTIONS,
@@ -166,7 +167,7 @@ async function runSection(section: ImportSection): Promise<ImportSectionResult> 
       }
       case 'regex_scripts': {
         if (regexStrategy.value === 'append') {
-          const current = (await api.getRegexScripts()) as unknown as Record<string, unknown>[];
+          const current = await api.getRegexScripts();
           const { merged, added } = mergeRegexEntries(current, section.payload);
           const res = await store.saveRegexScripts(merged);
           return {

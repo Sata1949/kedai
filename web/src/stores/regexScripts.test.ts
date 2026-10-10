@@ -10,7 +10,7 @@ vi.mock('../api', () => ({
 import * as api from '../api';
 import { useRegexScriptsStore } from './regexScripts';
 
-const mocked = api as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const mocked = vi.mocked(api);
 
 function script(id: string) {
   return { id, script_name: id, find_regex: id, replace_string: '', markdown_only: false, enabled: true };

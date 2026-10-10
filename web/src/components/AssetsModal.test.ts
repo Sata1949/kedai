@@ -147,7 +147,6 @@ describe('AssetsModal(附件管理)', () => {
       },
     ]);
     vi.mocked(api.saveRegexScripts).mockResolvedValue({
-      ok: true,
       scripts: [],
       count: 1,
       skipped: 0,

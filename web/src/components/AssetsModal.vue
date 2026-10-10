@@ -115,13 +115,14 @@ const pluginList = computed(() => entriesInFolder(pluginEntries.value, activeFol
 // ===== 「移动到…」下拉 =====
 // 选中「新建…」时就地弹 prompt 拿路径(校验复用 assetFolders.validateFolderPath),
 // 处理后把 select 复位成占位项,便于对同一目标再操作一次。
-function onMoveSelect(evt: Event, doMove: (folder: string) => Promise<void>): void {
+/** 移动动作是「就地发起、由 run() 统一回报」的 fire-and-forget,故回调返回 void 而非 Promise */
+function onMoveSelect(evt: Event, doMove: (folder: string) => void): void {
   const el = evt.target as HTMLSelectElement;
   const value = el.value;
   el.value = '';
   if (!value) return;
   if (value === '__root__') {
-    void doMove('');
+    doMove('');
     return;
   }
   if (value === '__new__') {
@@ -134,10 +135,10 @@ function onMoveSelect(evt: Event, doMove: (folder: string) => Promise<void>): vo
     }
     const path = normalizeFolderPath(input);
     if (!path) return;
-    void doMove(path);
+    doMove(path);
     return;
   }
-  void doMove(value);
+  doMove(value);
 }
 
 // ===== 技能页签 =====
@@ -480,7 +481,7 @@ onMounted(() => {
 .asset-folders {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--space-1);
   border-right: var(--bw-thin) solid var(--sv-line);
   padding-right: var(--space-2);
   max-height: 52vh;

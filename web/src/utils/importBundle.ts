@@ -222,6 +222,19 @@ export const SECTION_KEYS: readonly ImportSectionKey[] = [
  * 旧格式只带 `banned_words`(词条表)、`banned_prompt` 为空时,把词条拼成自省提示词。
  * 迁移只补空值,不覆盖已有 banned_prompt。
  */
+/**
+ * 把「已判定为对象」的注入配置载荷收敛成 `PromptInjectConfig`(缺 `floors` 视为空数组)。
+ * 字段值本身不在此校验——导入落点 `PUT /api/prompt-inject` 的后端侧才是权威校验方,
+ * 前端只做形状收敛(避免整对象的双重断言逃逸)。
+ */
+function toInjectConfig(v: Record<string, unknown>): PromptInjectConfig {
+  return {
+    mode: v.mode as PromptInjectConfig['mode'],
+    simple: v.simple as PromptInjectConfig['simple'],
+    floors: (v.floors ?? []) as PromptInjectConfig['floors'],
+  };
+}
+
 export function migrateBannedWordsPrompt(config: PromptInjectConfig): PromptInjectConfig {
   const cfg = JSON.parse(JSON.stringify(config)) as PromptInjectConfig;
   if (cfg.simple?.banned_words?.length && !cfg.simple?.banned_prompt) {
@@ -259,21 +272,23 @@ export function appendFloors(
 }
 
 /** 正则条目的去重键:兼容 kedai snake_case 与酒馆 camelCase 两套键名(与后端宽进口径对称) */
-export function regexDedupeKey(entry: Record<string, unknown>): string {
+export function regexDedupeKey(entry: unknown): string {
+  const obj = entry && typeof entry === 'object' ? (entry as Record<string, unknown>) : {};
   const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
-  const name = str(entry.script_name) || str(entry.scriptName);
-  const find = str(entry.find_regex) || str(entry.findRegex);
+  const name = str(obj.script_name) || str(obj.scriptName);
+  const find = str(obj.find_regex) || str(obj.findRegex);
   return `${name}\u0000${find}`;
 }
 
 /**
  * 正则**追加**合并:按 name+find_regex 去重(本机已有同键条目时不重复导入);
  * 返回 (合并后全量, 实际新增数)。替换策略走整体 PUT,不经本函数。
+ * 入参取 `unknown`(本机库的 `RegexScript` 与文件里的任意键名形态都要能进来)。
  */
 export function mergeRegexEntries(
-  current: Record<string, unknown>[],
-  incoming: Record<string, unknown>[],
-): { merged: Record<string, unknown>[]; added: number } {
+  current: readonly unknown[],
+  incoming: readonly unknown[],
+): { merged: unknown[]; added: number } {
   const seen = new Set(current.map(regexDedupeKey));
   const merged = [...current];
   let added = 0;
@@ -364,7 +379,7 @@ function parseBundleSection(key: ImportSectionKey, raw: unknown): SectionParseRe
         };
       }
       // kedai_inject:本体是 PromptInjectConfig(mode/simple/floors 与顶层导出同形)
-      const cfg = migrateBannedWordsPrompt(raw as unknown as PromptInjectConfig);
+      const cfg = migrateBannedWordsPrompt(toInjectConfig(raw));
       if (typeof cfg.mode !== 'string' || !cfg.simple) return null;
       return {
         entry: {
@@ -427,7 +442,7 @@ function parseBundleSection(key: ImportSectionKey, raw: unknown): SectionParseRe
     case 'skills': {
       const items = Array.isArray(raw) ? raw : null;
       if (!items || items.length === 0) return null;
-      const skills = items.filter(isObject) as unknown as SkillImportItem[];
+      const skills = items.filter((v): boolean => isObject(v)) as SkillImportItem[];
       if (skills.length === 0) return null;
       if (skills.length !== items.length) {
         skipped.push({
@@ -636,7 +651,7 @@ export function parseImportBundle(
 
   // 4. kedai 注入配置
   if (typeof obj.mode === 'string' && obj.simple !== undefined) {
-    const cfg = migrateBannedWordsPrompt(data as unknown as PromptInjectConfig);
+    const cfg = migrateBannedWordsPrompt(toInjectConfig(obj));
     if (mode === 'task') {
       return {
         source: 'kedai 注入配置',
