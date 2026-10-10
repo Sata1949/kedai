@@ -13,8 +13,9 @@
 // 文案纪律:
 //   ① 界面名一律用**屏幕上真实存在的字**(导航 label / 按钮文字 / 分区标题),不得用内部枚举名;
 //   ② `lines` 是**中性事实句**,弹窗与关于页共用;只向导才说的话放 `tourNote`;
-//   ③ 不得出现已删除的 UI 名(「预设导入」「楼层位置」「技能库」「Agent 执行流程」…),
-//      由 `tools/check-tutorial.mjs` 黑名单机检。
+//   ③ 标题与跳转标签里不得出现**已退役的入口名**(「预设导入」「楼层位置」「技能库」——三个都是
+//      真被删掉的入口,由 `tools/check-tutorial.mjs` 的 R4 机检);与导航路径字面不同但仍是
+//      分区内标题的(如「Agent 执行流程」)不属此列,那类由 R2 的 navLabel 逐字相等来管。
 import type { SettingsNavRequest, TutorialStepId } from '../onboarding';
 
 /** 一步的文案 */

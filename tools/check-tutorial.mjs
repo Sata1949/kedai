@@ -97,7 +97,13 @@ const UI_NOUNS = [
 
 // ===== 2. 已删除/已改名界面的旧叫法:不得出现在步骤标题或跳转标签里 =====
 // 只管 title/navLabel(散文正文里作为「已被取代」的历史说明是允许的,如 s-assets 那句)。
-const RETIRED_LABELS = ['预设导入', 'Agent 执行流程', '楼层位置', '技能库', '插件库', '执行器档位'];
+// 三条都对应**真实被删的入口**:`预设导入` 分区随 IMPHUB 步骤 C 删除(
+// `settingsSections.test.ts:187` 锁不复活);`楼层位置` 选择器随 IMPHUB 步骤 E 删除
+// (`settingsSections.test.ts:211`);`技能库` 独立窗口随 IMPHUB 步骤 D 删除(改由「附件管理」承载)。
+// 反例(不要加进来):`Agent 执行流程` 仍是 `AgentFlowSection.vue:101` 的**分区内标题**、
+// `执行器等级` 仍是 `AndroidExecSection.vue:189` 的实标签——它们不是退役名,只是与
+// 导航路径「Agent 与任务 · 执行流程」字面不同(那由 R2 的 navLabel 逐字相等来管)。
+const RETIRED_LABELS = ['预设导入', '楼层位置', '技能库'];
 
 // ===== 3. 解析 SettingsHub 的两级导航(行契约,见文件头) =====
 function parseHubNav() {
