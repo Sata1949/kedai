@@ -1,152 +1,34 @@
 <script setup lang="ts">
-// 新手教程(首启引导,0.4.0):一个组件两种形态。
+// 新手教程(首启引导,0.4.0;文案与跳转目标收口见 TUTSYNC 批,2026-10-10):一个组件两种形态。
 //   展开态 = 分步模态(三问 + 讲解步骤);点「带我去设置」后 **最小化为右下角浮条**
 //   (浮条不渲染遮罩,综合设置照常可操作),浮条上再点「继续教程」回到展开态。
 //
 // 状态全部在组件内:关掉教程即回到第一问重来(下次启动再弹),不越过 check-arch 的
 // 「组件不得直改非模态 store state」纪律;跨组件的两件事只走 action 与白名单内的模态开关
-// (openSettingsAt / settingsOpen / onboardingOpen)。
+// (openSettingsAt / openSettingsPanel / settingsOpen / onboardingOpen)。
 //
-// 文案表放本文件而不是 onboarding.ts:本组件走 lazyModal 懒加载,文案不膨胀首屏 index chunk。
-// 界面名一律用真实标题(「API 连接」是导航名、分区内标题是「API 设置」;custom 的 UI 名是
-// 「自定义流程」),与 settings/AboutSection.vue 的「使用教程」同源。
+// 文案表在 `utils/tutorialCopy.ts`(与关于页速览**同一份**):原先文案内联在本文件、
+// 靠注释与 AboutSection 约定同源,结果两处各自腐烂(2026-10-10 盘点实测 12 条硬错而 54 例测试全绿)。
+// 本组件仍是懒加载,文案不膨胀首屏 index chunk(共享模块被 Vite hoist 成异步共享 chunk)。
 import { computed, ref } from 'vue';
 import { useAppStore } from '../store';
 import { isAndroidTauri } from '../platform';
+import { STEP_COPY, type StepCopy } from '../utils/tutorialCopy';
 import {
+  PANEL_STORE_FLAG,
   buildTutorialPlan,
   planBranches,
   readDefaultAppMode,
   writeDefaultAppMode,
   writeOnboarding,
   type AppMode,
-  type SettingsSectionKey,
+  type SettingsNavRequest,
+  type TutorialPanelKey,
   type TutorialScope,
   type TutorialStepId,
 } from '../onboarding';
 
 const store = useAppStore();
-
-/** 一步的文案;nav 非空时该步带「带我去设置」按钮(浮条上显示 nav.label) */
-interface StepCopy {
-  title: string;
-  lines: string[];
-  nav?: { section: SettingsSectionKey; label: string };
-}
-
-/** 讲解步骤文案(与 docs/功能-变更史.md 该章、AboutSection「使用教程」保持同步) */
-const STEP_COPY: Record<TutorialStepId, StepCopy> = {
-  'r-intro': {
-    title: '角色卡与开场',
-    lines: [
-      '左侧「角色库」里选择角色卡即可开始对话。',
-      '顶栏「开场」可切换多条开场白；切换会清空当前会话并重新开始。',
-    ],
-  },
-  'r-display': {
-    title: '卡片显示不全怎么办',
-    lines: [
-      '只显示文字、没有样式：打开顶栏「HTML」开关（按角色卡分别记忆）。',
-      '界面能显示、但下拉或按钮点了没反应：开启顶栏「JS」授权（会先弹风险确认，仅对当前角色与当前脚本版本生效）。',
-    ],
-  },
-  's-enter': {
-    title: '综合设置',
-    lines: [
-      '请点开左上角侧栏底部的「综合设置」按钮 —— 我们的绝大部分系统设置都整合于此。',
-      '下面几步带您走一遍最常打交道的几项，可随时点「继续教程」回到这里。',
-    ],
-    nav: { section: 'api', label: '综合设置' },
-  },
-  's-api': {
-    title: '连接与模型 · API 连接',
-    lines: [
-      'BASE URL / API KEY / MODEL 三项在这里填；相关内容获取请前往各大模型厂商的云文档与 API／套餐界面。',
-      '默认连接就在本区编辑；需要多套连接（不同厂商、不同密钥）可在「连接配置」里保存并切换。',
-    ],
-    nav: { section: 'api', label: '连接与模型 · API 连接' },
-  },
-  's-flow': {
-    title: 'Agent 与任务 · 执行流程',
-    lines: [
-      '这里可自定义模型的执行流程：节点＝一次模型调用，连线＝先后依赖，另有列表与画布两种编辑方式。',
-      '自定义的执行流程会在任务模式的「自定义流程」执行模式中释放：新建任务时选中它并绑定（绑定即冻结，之后改流程不影响该任务）。',
-    ],
-    nav: { section: 'flow', label: 'Agent 与任务 · 执行流程' },
-  },
-  's-exec': {
-    title: 'Agent 与任务 · 授权与命令执行',
-    lines: [
-      '授权模式三档（严格 / 宽松 / 放行）决定工具执行前的确认策略；「始终需授权」可点名哪些工具必须逐个确认。',
-      '命令执行总开关与执行审计也在本区。破坏性与提权命令（删除/格式化/su/sudo/包管理等）不受授权模式豁免，一律逐条确认；任务模式下这类高危命令不可用（无确认通道，直接拒绝）。',
-    ],
-    nav: { section: 'exec', label: 'Agent 与任务 · 授权与命令执行' },
-  },
-  's-android-exec': {
-    title: '执行器等级（Android）',
-    lines: [
-      'Android 环境通过执行器等级进行权限区分：沙箱档 / Shizuku（ADB 权限）/ ROOT 提权（最高风险）。',
-      '「执行审计」按来源与风险（只读 / 写入 / 破坏性 / 提权·系统）列出每一次命令执行记录。',
-    ],
-    nav: { section: 'exec', label: 'Agent 与任务 · 授权与命令执行' },
-  },
-  'r-prompt': {
-    title: '对话与提示词',
-    lines: [
-      '「提示词注入」配置常驻楼层；「预设导入」用于导入预设。',
-      '「Agent 设置」里角色扮演与任务各有独立的提示词（按页面上的模式徽标区分当前在改哪一套），互不影响。',
-    ],
-    nav: { section: 'prompt', label: '对话与提示词 · 提示词注入' },
-  },
-  'r-memory': {
-    title: '世界书与记忆',
-    lines: [
-      '世界书条目按关键词自动激发；角色卡内嵌的世界书随卡导入。',
-      '「向量化模型」开启后可做语义召回；记忆库面板可查看与蒸馏长期记忆。',
-    ],
-  },
-  't-switch': {
-    title: '切到任务模式',
-    lines: [
-      '左栏顶部（移动端是底部导航）切到「任务」，在「下达目标」里写下目标并提交。',
-      '目标会成为任务标题，模型据此拆解计划并执行。',
-    ],
-  },
-  't-mode': {
-    title: '执行模式六选一',
-    lines: [
-      '三段式（默认）/ 单 Agent / 多 Agent / 先规划后批准 / 团队协作 / 自定义流程。',
-      '复杂目标建议「先规划后批准」（先出计划、您批准后执行）或「团队协作」（分派子目标并做审计）。',
-    ],
-  },
-  't-custom-flow': {
-    title: '自定义流程',
-    lines: [
-      '选「自定义流程」后可绑定某份流程（绑定即冻结，之后改流程不影响该任务）。',
-      '流程模式还能选「对比」：把名单内的流程作为工具交给模型自主调用。',
-    ],
-  },
-  't-board': {
-    title: '任务工作台',
-    lines: [
-      '计划、子任务列表、步骤进度与逐轮记录都在这里；被取消或超时的任务也会保留已完成的部分成果。',
-      '右侧可展开 Agent 面板查看更细的过程。',
-    ],
-  },
-  't-agent': {
-    title: 'Agent 面板',
-    lines: [
-      '生成或任务开始时会自动展开一次，里面是推理链、工具调用与调用记录。',
-      '收起后本会话不再自动弹出；需要时点右缘的「AGENT」条（移动端是底部导航）。',
-    ],
-  },
-  't-workspace': {
-    title: '编码类目标',
-    lines: [
-      '给任务绑定工作区（项目目录）后，任务会用文件读写与搜索工具在目录内工作，越界路径会被拦截。',
-    ],
-  },
-};
 
 /** 一屏 */
 type Screen =
@@ -163,6 +45,16 @@ const scope = ref<TutorialScope | null>(null);
 const minimized = ref(false);
 /** 设置弹窗是否由本教程打开(完成/跳过时只关自己开过的那个) */
 const openedSettingsByTour = ref(false);
+/**
+ * 由本教程打开过的独立面板(panel 型落点)。
+ * 结束/跳过时逐个关掉——与 `openedSettingsByTour` 对综合设置的处理同一条原则:
+ * **教程开的教程关,用户自己开的不碰**。「都需要」一路走下来可能攒下三块面板,
+ * 不关的话结束屏后面还叠着它们(2026-10-10 GUI 实测发现)。
+ */
+const openedPanelsByTour = ref<TutorialPanelKey[]>([]);
+
+/** 讲解步骤文案(单一来源在 utils/tutorialCopy.ts) */
+const copy = STEP_COPY;
 
 /** 本次讲解的步骤序列:第二问作答后冻结(教程期间用户切模式不重算,防步骤跳变) */
 const plan = computed<TutorialStepId[]>(() =>
@@ -202,15 +94,15 @@ const progress = computed(() => {
 /** 当前步骤的文案 */
 const stepCopy = computed<StepCopy | null>(() => {
   const s = current.value;
-  return s.kind === 'step' ? STEP_COPY[s.id] : null;
+  return s.kind === 'step' ? copy[s.id] : null;
 });
 
-/** 浮条上的位置说明(功能域 · 分区;无 nav 的步骤显示标题) */
+/** 浮条上的位置说明(功能域 · 二级项;无 nav 的步骤显示标题) */
 const barInfo = computed(() => {
-  const copy = stepCopy.value;
+  const c = stepCopy.value;
   const p = progress.value;
-  if (!copy || !p) return null;
-  return { n: p.n, m: p.m, label: copy.nav?.label ?? copy.title };
+  if (!c || !p) return null;
+  return { n: p.n, m: p.m, label: c.navLabel ?? c.title };
 });
 
 const isLastStep = computed(() => progress.value !== null && progress.value.n === progress.value.m);
@@ -243,11 +135,22 @@ function go(delta: number): void {
   screenIndex.value = next;
 }
 
-/** 「带我去设置」:记下设置弹窗由教程打开,最小化为浮条,并定位到目标分区 */
-function openSettings(section: SettingsSectionKey): void {
+/**
+ * 「带我去设置」:记下由教程打开的窗口,最小化为浮条,并定位到目标落点。
+ *
+ * `panel` 型落点由 `SettingsHub` 执行同名 action 项——它把 Hub 关掉、把独立面板打开
+ * (综合导入 / 导出、附件管理、记忆库都是独立面板,不是分区)。打开过的记进
+ * `openedPanelsByTour`,结束/跳过时逐个关掉(见那段注释)。
+ */
+function goSettings(nav: SettingsNavRequest): void {
   openedSettingsByTour.value = true;
   minimized.value = true;
-  store.openSettingsAt(section);
+  if (nav.kind === 'panel') {
+    if (!openedPanelsByTour.value.includes(nav.panel)) openedPanelsByTour.value.push(nav.panel);
+    store.openSettingsPanel(nav.panel);
+  } else {
+    store.openSettingsAt(nav.section);
+  }
 }
 
 /** 浮条「继续教程」:回到展开态(设置弹窗保持打开,被教程遮罩盖住;结束后再关) */
@@ -256,8 +159,8 @@ function resume(): void {
 }
 
 /**
- * 结束教程(「完成」与「跳过」共用):写标记 + 只在设置是教程打开时才关它。
- * 用户自己打开的综合设置不被顺手关掉。
+ * 结束教程(「完成」与「跳过」共用):写标记 + 只关**由教程打开**的窗口。
+ * 用户自己打开的综合设置与面板不被顺手关掉。
  */
 function finish(): void {
   const pref = preference.value ?? 'roleplay';
@@ -266,6 +169,7 @@ function finish(): void {
     tutorials: scope.value ? planBranches(scope.value, pref) : [],
   });
   if (openedSettingsByTour.value) store.settingsOpen = false;
+  for (const panel of openedPanelsByTour.value) store[PANEL_STORE_FLAG[panel]] = false;
   store.onboardingOpen = false;
 }
 </script>
@@ -308,7 +212,7 @@ function finish(): void {
               :class="{ on: preference === 'task' }"
               @click="pickPreference('task')"
             >
-              <span class="ob-opt-title">2. 任务执行</span>
+              <span class="ob-opt-title">2. 任务</span>
               <span class="ob-opt-desc">我喜欢通过 agent 执行交互完成现实中的工作任务</span>
             </button>
           </div>
@@ -343,19 +247,20 @@ function finish(): void {
         <template v-else-if="current.kind === 'step' && stepCopy">
           <div class="ob-step-label">
             新手教程 · 第 {{ progress?.n }} / {{ progress?.m }} 步
-            <span v-if="stepCopy.nav" class="ob-step-nav">{{ stepCopy.nav.label }}</span>
+            <span v-if="stepCopy.navLabel" class="ob-step-nav">{{ stepCopy.navLabel }}</span>
           </div>
           <h3 class="ob-title">{{ stepCopy.title }}</h3>
           <p v-for="(line, i) in stepCopy.lines" :key="i" class="ob-line">{{ line }}</p>
+          <p v-if="stepCopy.tourNote" class="ob-line">{{ stepCopy.tourNote }}</p>
           <button
             v-if="stepCopy.nav"
             class="sv-btn primary ob-goto"
-            @click="openSettings(stepCopy.nav.section)"
+            @click="goSettings(stepCopy.nav)"
           >
             带我去设置 →
           </button>
           <p v-if="stepCopy.nav" class="ob-note">
-            点击后教程会缩到右下角，综合设置会打开并定位到该分区；看完点浮条上的「继续教程」回到这里。
+            点击后教程会缩到右下角，综合设置会打开并定位到{{ stepCopy.nav.kind === 'panel' ? '该项对应的独立面板' : '该分区' }}；看完点浮条上的「继续教程」回到这里。
           </p>
         </template>
 

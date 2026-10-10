@@ -1,11 +1,14 @@
 <script setup lang="ts">
 // 设置区:关于 + 文字教程。
 // 关于文案由项目方提供(版本/作者/协议/更新内容),原样呈现;
-// 教程为面向新用户的功能速览,与实现保持同步(改功能时同步此文件)。
+// 教程速览**不在本文件手写**:逐段逐句由 `utils/tutorialCopy.ts` 的 ABOUT_SECTIONS 派生自
+// 教程步骤表,与分步弹窗共用同一份文字(2026-10-10 TUTSYNC OB-11;此前这里是平行手写文案,
+// 界面改名后就烂了)。改功能只改步骤表。
 // 与 UiSection 同级的纯展示分区,无业务状态依赖。
 import { onMounted, ref } from 'vue';
 import { useAppStore } from '../../store';
 import { health } from '../../api/health';
+import { ABOUT_SECTIONS, aboutSectionLines } from '../../utils/tutorialCopy';
 
 const store = useAppStore();
 
@@ -85,66 +88,21 @@ const changelog: string[] = [
     <div class="sv-field-label sub">使用教程</div>
 
     <!-- 新手引导入口(2026-09-27 教程引导批次):首启会自己弹一次,这里供随时重看。
-         下面的六段速览是纯文字版本,与引导里的步骤同源(改功能时两处一起改)。 -->
+         下面的速览**逐句取自教程步骤表**(`utils/tutorialCopy.ts` 的 ABOUT_SECTIONS),
+         与分步弹窗同一份文字——2026-10-10 TUTSYNC 前这里是一份手写的平行文案,
+         界面改名后两处各自腐烂。改功能时只改步骤表。 -->
     <div class="sv-data-row about-block">
       <div class="info">
         <b>新手引导</b>
-        <span>首次启动时会依次问「偏好模式」与「要不要讲解」，再分步介绍常用功能；讲解里的「带我去设置」会打开综合设置并定位到对应分区。</span>
+        <span>首次启动时会依次问「偏好模式」与「要不要讲解」，再分步介绍常用功能；讲解里的「带我去设置」会打开综合设置并定位到对应分区或独立面板。</span>
       </div>
       <button class="sv-btn ghost shrink-0 whitespace-nowrap" @click="store.onboardingOpen = true">重新打开新手引导</button>
     </div>
 
-    <div class="sv-data-row about-block">
+    <div v-for="section in ABOUT_SECTIONS" :key="section.heading" class="sv-data-row about-block">
       <div class="info">
-        <b>角色扮演模式</b>
-        <span>在左侧角色列表选择角色卡 → 顶栏「开场」可切换多条开场白。</span>
-        <span>若卡片界面只显示文字、没有样式:打开顶栏「HTML」开关(按角色卡记忆)。</span>
-        <span>若界面能显示但下拉、按钮点了没反应:开启顶栏「JS」授权(会先弹出风险确认,仅对当前角色与当前脚本版本生效)。</span>
-        <span>多个「开场」= 多条开场白,切换会清空当前会话并重新开始。</span>
-      </div>
-    </div>
-
-    <div class="sv-data-row about-block">
-      <div class="info">
-        <b>任务模式</b>
-        <span>顶栏切换到「任务」,输入目标即可;支持 solo / multi / plan / team / custom 等多种执行模式(见「执行流程」)。</span>
-        <span>复杂目标建议用 plan 或 team:plan 先出计划、确认后执行;team 会分派子目标并做审计。</span>
-        <span>执行过程与工具调用可在右侧 Agent 面板查看。</span>
-        <span>编码类目标可给任务绑定工作区(项目目录):任务用文件读写/搜索工具在目录内工作,越界路径会被拦截。</span>
-        <span>绑定工作区后:建任务时即可看到工作区画像;任务详情可查文件变更——单文件看 diff / 回滚、整任务全部回滚、导出 patch。</span>
-      </div>
-    </div>
-
-    <div class="sv-data-row about-block">
-      <div class="info">
-        <b>自定义流程</b>
-        <span>在设置区「Agent 执行流程」编排流程:列表视图默认,画布视图可视化编辑(节点 = 一次模型调用,连线 = 先后依赖)。</span>
-        <span>任务模式选「自定义流程」后可绑定某份流程(绑定即冻结,之后改流程不影响该任务);流程模式可选「对比」,把名单内流程作为工具交给模型自主调用。</span>
-        <span>节点可单独配置连接、上下文上限、工具轮次、超时/重试与严格/宽松档位;流程可整体导出/导入。</span>
-        <span>开启编码能力包后,内置流程库会多出编码流程预设,可在任务里一键选用。</span>
-      </div>
-    </div>
-
-    <div class="sv-data-row about-block">
-      <div class="info">
-        <b>记忆与世界书</b>
-        <span>世界书条目按关键词自动激发;角色卡内嵌世界书随卡导入。</span>
-        <span>「向量化模型」开启后可做语义召回,记忆库面板可查看与蒸馏长期记忆。</span>
-      </div>
-    </div>
-
-    <div class="sv-data-row about-block">
-      <div class="info">
-        <b>提示词与授权</b>
-        <span>「Agent 设置」可编辑角色扮演与任务两套提示词;「提示词注入」配置常驻楼层。</span>
-        <span>「授权」三档(严格 / 宽松 / 放行)决定工具执行前的确认策略,涉及系统路径写删恒需授权。</span>
-      </div>
-    </div>
-
-    <div class="sv-data-row about-block">
-      <div class="info">
-        <b>快捷键与输入</b>
-        <span>Enter 发送,Shift+Enter 换行;输入「/」触发命令联想。</span>
+        <b>{{ section.heading }}</b>
+        <span v-for="(line, i) in aboutSectionLines(section)" :key="i" class="ob-fact">{{ line }}</span>
       </div>
     </div>
   </div>

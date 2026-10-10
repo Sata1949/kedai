@@ -7,7 +7,7 @@
 import { defineStore } from 'pinia';
 import { ref, watch } from 'vue';
 import { LocalRenderHtmlPreferenceStore } from '../renderHtmlPreference';
-import type { SettingsSectionKey } from '../onboarding';
+import type { SettingsNavRequest, SettingsSectionKey, TutorialPanelKey } from '../onboarding';
 import {
   currentCharacterIdValue,
   queueSettingsSave,
@@ -83,22 +83,36 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
 
   // ===== 设置分区定位请求(新手教程「带我去设置」) =====
   /**
-   * 「打开综合设置并定位到某分区」的请求(`null` = 无请求)。
+   * 「打开综合设置并落到某个二级项」的请求(`null` = 无请求)。
    *
    * 为什么用「状态 + watch」而不是让教程直接改 SettingsHub 内部的分区 ref:
    * 分区状态(activeDomain/activeSection)是 SettingsHub 的私有 ref,跨组件戳它等于把
    * 弹窗内部结构变成隐式契约;这里沿用仓库既有的「从别处触发另一处行为」惯例
    * (characterUploadRequested 计数器 → 接收方 watch),接收方自己认领并落到自己的状态。
    *
-   * `nonce` 递增:连续两次请求同一分区也要各触发一次(值相同不会让 watch 跳过)。
+   * `request` 是判别联合(TUTSYNC OB-9):section 型切右侧内容区,panel 型执行 action 项
+   * (打开独立面板并关掉 Hub)——IMPHUB 后的「综合导入 / 导出」「附件管理」只有 action 形态,
+   * 只支持 section 的旧载荷讲不了它们。
+   *
+   * `nonce` 递增:连续两次请求同一目标也要各触发一次(值相同不会让 watch 跳过)。
    */
-  const settingsNav = ref<{ section: SettingsSectionKey; nonce: number } | null>(null);
+  const settingsNav = ref<{ request: SettingsNavRequest; nonce: number } | null>(null);
   let settingsNavNonce = 0;
 
   /** 打开综合设置并定位到指定分区(教程/引导用;目标分区不存在时接收方保持原分区) */
   function openSettingsAt(section: SettingsSectionKey): void {
     settingsNavNonce += 1;
-    settingsNav.value = { section, nonce: settingsNavNonce };
+    settingsNav.value = { request: { kind: 'section', section }, nonce: settingsNavNonce };
+    settingsOpen.value = true;
+  }
+
+  /**
+   * 打开综合设置并执行某个 action 型二级项(教程用)。
+   * 接收方找不到同名 action 时**什么都不做、不报错**——指路失败不该把设置弹窗弄成异常态。
+   */
+  function openSettingsPanel(panel: TutorialPanelKey): void {
+    settingsNavNonce += 1;
+    settingsNav.value = { request: { kind: 'panel', panel }, nonce: settingsNavNonce };
     settingsOpen.value = true;
   }
 
@@ -318,6 +332,7 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
     globalError,
     settingsNav,
     openSettingsAt,
+    openSettingsPanel,
     clearSettingsNav,
     callTraceOpen,
     taskResultSummaryOpen,

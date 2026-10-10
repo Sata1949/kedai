@@ -5,7 +5,8 @@
 //   ② `SettingsSectionKey` 的**单一来源**放这里:该字面量联合被 stores(L2) 的
 //      openSettingsAt 与 components(L3) 的 SettingsHub 共用,类型若留在 SettingsHub
 //      会让 L2 反向依赖 L3(check-arch 规则 J 判 FAIL)。
-// **本文件不含任何面向用户的文案**:教程文案随 OnboardingModal.vue 懒加载,不膨胀首屏 chunk。
+// **本文件不含任何面向用户的文案**:教程文案在 `utils/tutorialCopy.ts`(L1 纯数据,与关于页
+// 共用一份),随弹窗/设置两个懒加载 chunk 走,不膨胀首屏 index chunk。
 
 /** 首启引导完成标记键:无此键 = 第一次使用(损坏值按未走过处理,只会多弹一次) */
 export const ONBOARDING_KEY = 'kedai.onboarding.v1';
@@ -24,9 +25,9 @@ export type AppMode = 'roleplay' | 'task';
 
 /**
  * 设置分区键(单一来源)。
- * 取值必须与 SettingsHub 的 domains 导航表一致——两组集合**手工对齐**(暂无自动校验:
- * 原注释声称由 SettingsHub.test.ts 反向校验,2026-09-28 核对为不存在,已如实修正;
- * 若要自动化,需新增一条「两组集合相等」的断言)。
+ * 取值必须与 SettingsHub 的 domains 导航表一致。2026-10-10 TUTSYNC OB-12 起这不再只是注释:
+ * `tools/check-tutorial.mjs` 按行解析 SettingsHub 的 domains 表,校验教程每个跳转落点与
+ * 位置名是否存在(原注释声称的反向校验断言此前确实不存在,见该脚本 R2/R3/R4 三组规则)。
  */
 export type SettingsSectionKey =
   | 'api' | 'connections' | 'model' | 'mcp' | 'embedding'
@@ -43,15 +44,47 @@ export type SettingsSectionKey =
 export type TutorialScope = 'both' | 'preferred' | 'none';
 
 /**
+ * 「带我去设置」的两类落点。
+ *
+ * 综合设置的二级项有两种形态(`SettingsHub.vue` 的 `HubItem`):
+ *   - section:切换右侧内容区到某个设置分区;
+ *   - action:关闭 Hub 并打开一个独立面板(综合导入/导出、附件管理、记忆库…)。
+ * 教程初版只支持 section(2026-09-27),于是 IMPHUB 之后新出现的两个最该带新手去的入口
+ * (综合导入 / 导出、附件管理)**结构上讲不了**——本联合类型补上这一侧。
+ *
+ * `TutorialPanelKey` 的取值必须与 `SettingsHub` 里 action 项的 `key` 同名(两侧手工对齐,
+ * 由 `SettingsHub.test.ts` 的「每个 panel 键都能反查到同名 action 项」断言兜住,见 TUTSYNC OB-12)。
+ */
+export type TutorialPanelKey = 'importBundle' | 'assets' | 'memory';
+
+/** 一个跳转落点:分区 or 独立面板 */
+export type SettingsNavRequest =
+  | { readonly kind: 'section'; readonly section: SettingsSectionKey }
+  | { readonly kind: 'panel'; readonly panel: TutorialPanelKey };
+
+/**
+ * panel 键 → 该独立面板在 store 里的开关名。
+ *
+ * 教程用它实现「只关自己打开过的面板」(与 `openedSettingsByTour` 对综合设置的处理同源)。
+ * 取值必须与 `web/src/modals.ts` 的 `MODALS` flag 同名——由 `tools/check-tutorial.mjs` 的 R7 校验,
+ * 不靠这里的手写注释(类型写成字面量联合是为了让 `store[key] = false` 在 vue-tsc 下也受穷尽约束)。
+ */
+export const PANEL_STORE_FLAG: Record<TutorialPanelKey, 'importBundleOpen' | 'assetsOpen' | 'memoryOpen'> = {
+  importBundle: 'importBundleOpen',
+  assets: 'assetsOpen',
+  memory: 'memoryOpen',
+};
+
+/**
  * 教程步骤 id。命名前缀表明归属:
  *   r-* 角色扮演分支专属;t-* 任务分支专属;s-* 设置导航共同段(只随**第一条**分支出现,
  *   两条分支都讲时不重复讲一遍设置)。
- * 文案与目标分区的映射在 OnboardingModal.vue 内(随组件懒加载)。
+ * 文案在 `utils/tutorialCopy.ts`(L1 纯数据,与关于页共用同一份)。
  */
 export type TutorialStepId =
-  | 'r-intro' | 'r-display' | 'r-prompt' | 'r-memory'
+  | 'r-import' | 'r-intro' | 'r-display' | 'r-sendfail' | 'r-prompt' | 'r-memory'
   | 't-switch' | 't-mode' | 't-custom-flow' | 't-board' | 't-agent' | 't-workspace'
-  | 's-enter' | 's-api' | 's-flow' | 's-exec' | 's-android-exec';
+  | 's-enter' | 's-api' | 's-import' | 's-assets' | 's-ext' | 's-flow' | 's-exec' | 's-android-exec';
 
 /** 存储接口(注入式;浏览器传 localStorage,单测传内存实现) */
 export interface StorageLike {
@@ -176,16 +209,18 @@ export function resolveLaunchMode(preference: AppMode | null, stickyRaw: string 
 
 /** 设置导航共同段(角色扮演/任务分支共用;Android 专属的执行器等级按平台门控) */
 function settingsSteps(isAndroid: boolean): TutorialStepId[] {
-  const steps: TutorialStepId[] = ['s-enter', 's-api', 's-flow', 's-exec'];
+  const steps: TutorialStepId[] = [
+    's-enter', 's-api', 's-import', 's-assets', 's-ext', 's-flow', 's-exec',
+  ];
   if (isAndroid) steps.push('s-android-exec');
   return steps;
 }
 
 /** 角色扮演分支步骤(includeSettings = 是否带设置共同段) */
 function roleplaySteps(includeSettings: boolean, isAndroid: boolean): TutorialStepId[] {
-  const steps: TutorialStepId[] = ['r-intro', 'r-display'];
+  const steps: TutorialStepId[] = ['r-import', 'r-intro', 'r-display'];
   if (includeSettings) steps.push(...settingsSteps(isAndroid));
-  steps.push('r-prompt', 'r-memory');
+  steps.push('r-sendfail', 'r-prompt', 'r-memory');
   return steps;
 }
 

@@ -58,7 +58,16 @@ function openPanel(flag: ModalFlag): () => void {
   return () => { store[flag] = true; close(); };
 }
 
-/** 五大功能域(左栏一级;dot 用 .sv-supreme 几何色块,与至上主义黑白风格一致) */
+/**
+ * 五大功能域(左栏一级;dot 用 .sv-supreme 几何色块,与至上主义黑白风格一致)。
+ *
+ * **解析契约(`tools/check-tutorial.mjs` 依赖,改格式先改那个脚本)**:
+ *   功能域头写成单独一行 `key: '…', label: '…', dot: '…',`;
+ *   二级项写成单独一行 `{ type: 'section', key: '…', label: '…' }` 或
+ *   `{ type: 'action', key: '…', label: '…', run: … }`。
+ *   门禁按行解析本表来校验「新手教程的每个跳转落点与位置名是否还存在」——
+ *   拆成多行、换引号或换字段顺序都会让教程防漂移机检失明。
+ */
 const domains: Domain[] = [
   {
     key: 'conn', label: '连接与模型', dot: 'red',
@@ -194,27 +203,40 @@ watch(
 );
 
 /**
- * 「带我去设置」定位请求(新手教程,2026-09-27):把请求里的分区落到本组件的两级导航状态上。
+ * 「带我去设置」定位请求(新手教程,2026-09-27;action 型目标见 TUTSYNC OB-9,2026-10-10):
+ * 把请求里的落点落到本组件的两级导航状态上。
  *
  * **必须 `immediate: true` 且应用后消费掉请求**:设置弹窗是 `v-if` + 懒加载,首次点
  * 「带我去设置」时请求先于本组件挂载(点击 → 置开关 + 置请求 → chunk 加载完才 mount),
  * 不带 immediate 的 watch 在挂载时不会触发,表现为「设置打开了但没定位」。
  * 消费(清空)则避免用户日后手动打开综合设置又被上一次的请求带着跳分区。
  *
- * 目标分区若在当前模式下不可见(如任务模式下的「提示词注入」是角色扮演专属),
- * **保持原分区、不报错**——教程只是指路,定位失败不该把设置弹窗弄成异常态。
+ * 两类落点:
+ *   - `section`:反查所属功能域后切内容区;目标分区在当前模式下不可见(如任务模式下的
+ *     「提示词注入」是角色扮演专属)时**保持原分区、不报错**——教程只是指路,定位失败不该
+ *     把设置弹窗弄成异常态。
+ *   - `panel`:执行同名 action 项(`item.run()` = 打开独立面板 + 关掉 Hub),复用 `openPanel`
+ *     的既有语义,不另开一条通往 store 开关的路;找不到时同样什么都不做。
  */
 watch(
   () => store.settingsNav,
   (req) => {
     if (!req) return;
-    const domain = visibleDomains.value.find((d) =>
-      d.items.some((it) => it.type === 'section' && it.key === req.section),
-    );
+    const request = req.request;
     store.clearSettingsNav();
+    if (request.kind === 'panel') {
+      const item = visibleDomains.value
+        .flatMap((d) => d.items)
+        .find((it) => it.type === 'action' && it.key === request.panel);
+      if (item && item.type === 'action') item.run();
+      return;
+    }
+    const domain = visibleDomains.value.find((d) =>
+      d.items.some((it) => it.type === 'section' && it.key === request.section),
+    );
     if (!domain) return;
     activeDomain.value = domain.key;
-    activeSection.value = req.section;
+    activeSection.value = request.section;
   },
   { immediate: true },
 );

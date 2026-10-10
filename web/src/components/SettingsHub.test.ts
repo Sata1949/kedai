@@ -41,6 +41,8 @@ vi.mock('../asyncModal', () => ({
 
 import { useAppStore } from '../store';
 import SettingsHub from './SettingsHub.vue';
+import { STEP_COPY } from '../utils/tutorialCopy';
+import type { SettingsNavRequest, TutorialPanelKey, TutorialStepId } from '../onboarding';
 
 function mountHub() {
   setActivePinia(createPinia());
@@ -210,5 +212,94 @@ describe('SettingsHub 分区定位(新手教程「带我去设置」)', () => {
     await nextTick();
 
     expect(wrapper.find('.sv-hub-content-title').text()).toBe(before);
+  });
+});
+
+// TUTSYNC OB-9 + OB-12(2026-10-10):action 型落点与「教程每个落点必须落得下去」。
+//
+// 为什么这两组断言必须存在:设置二级项有两种形态——section(切内容区)与 action(打开独立面板)。
+// 教程原先只支持 section,于是 IMPHUB 后的「综合导入 / 导出」「附件管理」根本没法带用户去;
+// 而「教程引用的分区/面板改名或删掉」这件事此前**没有任何信号**(2026-10-10 实测:教程承诺的
+// 「预设导入」早在 IMPHUB 步骤 C 被删,54 例测试全绿)。本组断言把「落点存在」变成机器约束。
+describe('SettingsHub · action 型落点与教程落点穷尽校验', () => {
+  beforeEach(() => {
+    memStorage.clear();
+  });
+
+  /** panel 键 → 独立面板开关(store 门面键) */
+  const PANEL_FLAG: Record<TutorialPanelKey, string> = {
+    importBundle: 'importBundleOpen',
+    assets: 'assetsOpen',
+    memory: 'memoryOpen',
+  };
+
+  it('openSettingsPanel 执行同名 action:打开独立面板并关掉 Hub', async () => {
+    const { store } = mountHub();
+    store.openSettingsPanel('importBundle');
+    await nextTick();
+
+    expect(store.importBundleOpen).toBe(true);
+    expect(store.settingsOpen).toBe(false); // openPanel 的既有语义:不叠两层弹窗
+    expect(store.settingsNav).toBeNull(); // 请求已被消费
+  });
+
+  it('三种 panel 键都能落到各自的独立面板', async () => {
+    for (const panel of ['importBundle', 'assets', 'memory'] as const) {
+      setActivePinia(createPinia());
+      const store = useAppStore();
+      store.openSettingsPanel(panel);
+      const wrapper = mount(SettingsHub);
+      await nextTick();
+      const flag = PANEL_FLAG[panel] as keyof ReturnType<typeof useAppStore>;
+      expect(store[flag], `${panel} 没有对应的 action 项`).toBe(true);
+      wrapper.unmount();
+    }
+  });
+
+  it('找不到同名 action 时不报错(请求仍被消费)', async () => {
+    setActivePinia(createPinia());
+    const store = useAppStore();
+    store.openSettingsPanel('assets');
+    store.assetsOpen = false; // 模拟面板被用户随手关掉后,Hub 再次挂载不应重复弹面板
+    const wrapper = mount(SettingsHub);
+    await nextTick();
+    expect(store.settingsNav).toBeNull();
+    wrapper.unmount();
+  });
+
+  it('教程每个步骤的落点都存在:section 型标题逐字命中、panel 型面板打开', async () => {
+    const navSteps = (Object.keys(STEP_COPY) as TutorialStepId[]).filter(
+      (id) => STEP_COPY[id].nav,
+    );
+    // 断言「有落点的步骤」数量本身也是信号:落点集合变动时这里会提醒复核教程
+    expect(navSteps.length).toBe(10);
+
+    for (const id of navSteps) {
+      setActivePinia(createPinia());
+      const store = useAppStore();
+      const nav = STEP_COPY[id].nav as SettingsNavRequest;
+      const label = STEP_COPY[id].navLabel ?? '';
+      if (nav.kind === 'section') store.openSettingsAt(nav.section);
+      else store.openSettingsPanel(nav.panel);
+      const wrapper = mount(SettingsHub);
+      await nextTick();
+
+      if (nav.kind === 'section') {
+        // section 型:右栏标题 = 「功能域 · 分区」,应与教程写的 navLabel **逐字相同**
+        expect(
+          wrapper.find('.sv-hub-content-title').text(),
+          `${id} 的 navLabel 与真实标题不符`,
+        ).toBe(label);
+      } else {
+        // panel 型:能置起开关 = Hub 里存在同名 action 项(它被删掉时这里会红,
+        // 因为 watch 找不到 item 就什么都不做)。navLabel 与 action 标签的逐字比对
+        // 归 tools/check-tutorial.mjs(它读得到 SettingsHub 的 domains 字面量)。
+        expect(
+          store[PANEL_FLAG[nav.panel] as keyof ReturnType<typeof useAppStore>],
+          `${id} 指向的独立面板不存在(action 项被删或改名?)`,
+        ).toBe(true);
+      }
+      wrapper.unmount();
+    }
   });
 });
