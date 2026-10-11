@@ -450,26 +450,9 @@ impl WorldBookService {
         let raw = rec.data_raw?;
         let views = collect_entries(&raw)
             .into_iter()
-            .map(|e| WorldBookEntryView {
-                id: e.id,
-                comment: e.comment,
-                keys: e.keys,
-                keys_secondary: e.keys_secondary,
-                regex: e.regex,
-                use_regex: e.use_regex,
-                constant: e.constant,
-                enabled: e.enabled,
-                content: e.content,
-                position: e.position,
-                depth: e.depth,
-                order: e.order,
-                case_sensitive: e.case_sensitive,
-                sticky: e.sticky,
-                cooldown: e.cooldown,
-                probability: e.probability,
-                use_probability: e.use_probability,
-                role: e.role,
-            })
+            // 与角色卡侧 `character_book_views` 共用同一转换(此前此处是 entry_to_view 的
+            // 内联重复实现,视图新增字段时两处不同步会导致独立书 GET 丢字段而角色卡 GET 有)
+            .map(|e| crate::parsing::world_book::entry_to_view(&e))
             .collect();
         Some(views)
     }
@@ -500,6 +483,8 @@ impl WorldBookService {
             content: String::new(),
             position: 0,
             depth: 4,
+            // 新条目不预置扫描窗口:None = 未声明,窗口由上面的 depth 兜底(与改前行为一致)
+            scan_depth: None,
             order: 100,
             case_sensitive: false,
             sticky: 0,
@@ -676,6 +661,7 @@ fn trigger_entry_view(
         content: content.to_string(),
         position: 0,
         depth: 4,
+        scan_depth: None,
         order: 100,
         case_sensitive: false,
         sticky: 0,

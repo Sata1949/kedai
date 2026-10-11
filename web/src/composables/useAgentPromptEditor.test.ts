@@ -17,7 +17,7 @@ import { useAppStore } from '../store';
 import * as api from '../api';
 
 // 只桩掉预览请求,其余 api 原样(store 门面引用众多,不能整体替身)
-vi.spyOn(api, 'getPromptPreview').mockResolvedValue({ ok: true, note: '', layers: [] });
+vi.spyOn(api, 'getPromptPreview').mockResolvedValue({ ok: true, note: '', layers: [], warnings: [] });
 
 describe('useAgentPromptEditor', () => {
   beforeEach(() => {

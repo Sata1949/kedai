@@ -221,6 +221,21 @@ const MAPPINGS = [
     rustIgnore: ['api_key'],
     tsIgnore: ['api_key_masked', 'has_api_key'],
   },
+  {
+    // 世界书条目编辑视图(WB-D 批 2,遗留 L30 登记):此前无守卫——本批给后端视图新增
+    // `scan_depth` 时,前端 `types.ts` 漏改不会报错,编辑面静默丢字段(独立书 GET 此前还是
+    // `entry_to_view` 的内联重复实现,两侧线格式更容易各走各路)。
+    label: '世界书条目编辑视图',
+    rust: { file: 'server-rs/src/models/types.rs', name: 'WorldBookEntryView' },
+    ts: { file: 'web/src/api/types.ts', name: 'WorldBookEntry', kind: 'interface' },
+  },
+  {
+    // 提示词预览响应(WB-E 批 2,遗留 L31 登记):新增 `warnings` 数组,前后端字段集合
+    // 首次机检(响应此前由 json! 手工拼,现改结构体承载,见 PromptPreviewResponse 注释)。
+    label: '提示词预览响应',
+    rust: { file: 'server-rs/src/api/settings.rs', name: 'PromptPreviewResponse' },
+    ts: { file: 'web/src/api/types.ts', name: 'PromptPreview', kind: 'interface' },
+  },
 ];
 
 const read = (rel) => readFileSync(join(ROOT, rel), 'utf8');

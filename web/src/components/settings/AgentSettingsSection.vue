@@ -7,6 +7,7 @@ import { useAppStore } from '../../store';
 import { storeToRefs } from 'pinia';
 import { useAgentSettings } from '../../composables/useAgentSettings';
 import { useAgentPromptEditor } from '../../composables/useAgentPromptEditor';
+import { promptWarningText } from '../../utils/promptWarnings';
 
 withDefaults(defineProps<{
   /** 是否显示(embedded 模式按 activeSection 切换;standalone 恒 true) */
@@ -207,6 +208,10 @@ watch(appMode, () => void loadPromptPreview());
         </button>
         <div v-if="previewError" class="sv-feedback err">{{ previewError }}</div>
         <div v-if="promptPreview" class="sv-stack" style="margin-top: var(--space-2-5)">
+          <!-- 结构化告警(WB-E):后端只回码,文案在 utils/promptWarnings 单一出处映射 -->
+          <div v-for="code in promptPreview.warnings" :key="code" class="sv-feedback info">
+            {{ promptWarningText(code) }}
+          </div>
           <div v-for="layer in promptPreview.layers" :key="`${layer.order}-${layer.source}`" class="sv-data-row">
             <div class="info">
               <b>#{{ layer.order }} · L{{ layer.layer }} · {{ layer.role }} · {{ layer.source }}</b>

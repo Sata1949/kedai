@@ -1042,6 +1042,10 @@ pub async fn update_settings(
             // 反思提示词(与 load 期同源;自定义文本与空串都不动)。放在文学字段全部应用之后,
             // 保证用的是本次请求后的开关值。
             s.rehydrate_default_reflect_prompt();
+            // WB-E 批 2(遗留 L32 配套):角色扮演默认词同款重物化——逐字等于旧内置默认
+            // (或其文学版)者升级为新版(常驻说明头已移到引擎,旧串不升级会成两处说明头)。
+            // 与 load 期同源;放在文学开关应用之后,保证开关翻转运行期即时生效、不等重启。
+            s.rehydrate_default_roleplay_prompt();
             // 任务模式默认连接(TM-SET-1):空串 = 清除(回到跟随默认连接);非空必须在
             // **本请求应用后的**连接列表里存在且启用,否则 400(本块位于连接数组处理与
             // normalize_connections 之后,故同请求里先改连接再设默认也能正确校验)。
@@ -1513,6 +1517,19 @@ struct PromptPreviewLayer {
     content: String,
 }
 
+/// 预览响应的线格式载体(WB-E 批 2,遗留 L31):此前响应由 `json!` 手工拼,字段集合与
+/// `web/src/api/types.ts` 的 `PromptPreview` 无机器比对——后端加字段、前端漏改不报错。
+/// 改为结构体后即可登记进 `tools/check-contract.mjs`(该脚本按 `pub struct` 取字段集合)。
+/// `warnings` 恒下发数组(空集也带),内容是**结构化码**,中文文案在
+/// `web/src/utils/promptWarnings.ts` 单一出处映射。
+#[derive(Serialize)]
+pub struct PromptPreviewResponse {
+    ok: bool,
+    note: &'static str,
+    layers: Vec<PromptPreviewLayer>,
+    warnings: Vec<&'static str>,
+}
+
 fn push_preview_layer(
     layers: &mut Vec<PromptPreviewLayer>,
     source: impl Into<String>,
@@ -1550,6 +1567,11 @@ pub async fn prompt_preview(
     Query(query): Query<PromptPreviewQuery>,
 ) -> Response {
     let mut layers = Vec::new();
+    // WB-E 提示层(遗留 L31):告警以**结构化码**输出,中文文案在前端单一出处映射
+    // (`web/src/utils/promptWarnings.ts`),避免提示词面文案在两侧分叉。
+    let mut warnings: Vec<&'static str> = Vec::new();
+    // 角色卡里是否有「会进 system 的常驻条目」:None = 本次预览没带角色卡上下文(无从判定)。
+    let mut constant_system_entry: Option<bool> = None;
     match state.runtime_prompt.read_optional() {
         Ok(Some(runtime)) => {
             push_preview_layer(&mut layers, "runtime_prompt", "system", 5, runtime)
@@ -1573,6 +1595,13 @@ pub async fn prompt_preview(
     let literary_note = settings.literary_user_note();
     // 文学能力包(LIT-6):位置 0 文风素材段(开关关或预设为空 → None)
     let literary_style = settings.literary_style_note();
+    // 自定义模板缺 `{{world_info}}` → 角色卡常驻条目按「Custom Prompt 完整替换」契约不注入
+    // (引擎状态块除外)。判据与引擎侧 `messages/build.rs` 的 `has_world_placeholder` 同一占位符字面;
+    // 契约不改,只补可见性。任务模式不适用(世界书由引擎拼装,不经模板占位符)。
+    let template_missing_world_info = matches!(mode, AppMode::Roleplay)
+        && !settings.agent_system_prompt.0.trim().is_empty()
+        && !settings.agent_system_prompt.0.contains("{{world_info}}");
+
     // agent_system_prompt 为 RoleplayPromptConfig(WP7),.0 取字符串
     if settings.agent_system_prompt.0.trim().is_empty() {
         // 空值回退文案按模式区分:roleplay 空 = 用内置人设模板;
@@ -1707,6 +1736,12 @@ pub async fn prompt_preview(
                 v.extend(wb_entries);
                 v
             };
+            // 常驻条目中真正会被 {{world_info}} 带走的子集(role 缺省即 system,与引擎 sys_world 同判据)
+            constant_system_entry = Some(entries.iter().any(|entry| {
+                entry.enabled
+                    && entry.constant
+                    && entry.role.as_deref().unwrap_or("system") == "system"
+            }));
             push_preview_layer(
                 &mut layers,
                 "character_card",
@@ -1742,6 +1777,12 @@ pub async fn prompt_preview(
                 .join("\n");
             push_preview_layer(&mut layers, "world_book", "metadata", 3, summary);
         }
+    }
+
+    // 带角色卡上下文时以「确有常驻条目会被静默丢弃」为准,避免在全激发卡上报无信号的警;
+    // 裸预览(设置页不选角色)无从判定条目集合,保守告警。
+    if template_missing_world_info && constant_system_entry.unwrap_or(true) {
+        warnings.push("template_missing_world_info");
     }
 
     if let Some(session_id) = query.session_id.as_deref() {
@@ -1843,11 +1884,12 @@ pub async fn prompt_preview(
         );
     }
 
-    Json(json!({
-        "ok": true,
-        "note": "历史仅显示角色、长度与哈希；预览不包含聊天正文或 API Key。步骤指令与工具指南在具体运行步骤确定后追加。",
-        "layers": layers,
-    }))
+    Json(PromptPreviewResponse {
+        ok: true,
+        note: "历史仅显示角色、长度与哈希；预览不包含聊天正文或 API Key。步骤指令与工具指南在具体运行步骤确定后追加。",
+        layers,
+        warnings,
+    })
     .into_response()
 }
 

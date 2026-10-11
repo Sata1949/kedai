@@ -88,6 +88,9 @@ impl RuntimeSettings {
                 if s.agent_system_prompt.0.trim().is_empty() {
                     s.agent_system_prompt = RoleplayPromptConfig(s.roleplay_default_prompt());
                 }
+                // WB-E 批 2(遗留 L32 配套):逐字等于旧内置默认(或其文学版)者视为未自定义,
+                // 重物化为新版——常驻说明头已从模板字面移到引擎,旧串不升级会与引擎头同屏成两处。
+                s.rehydrate_default_roleplay_prompt();
                 // LIT-4:反思提示词的「未自定义」判定**不是空串**——该字段的空串是「显式关闭
                 // 反思、回退机械规则」的有效值(见 `api/settings.rs` 同名注释),故判据是
                 // **逐字等于内置默认文本**:命中任一版本 → 按当前包开关重物化(关 → 逐字不变;

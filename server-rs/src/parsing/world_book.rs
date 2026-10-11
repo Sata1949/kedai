@@ -621,6 +621,7 @@ pub fn entry_to_view(e: &WorldEntry) -> crate::models::types::WorldBookEntryView
         content: e.content.clone(),
         position: e.position,
         depth: e.depth,
+        scan_depth: e.scan_depth,
         order: e.order,
         case_sensitive: e.case_sensitive,
         sticky: e.sticky,
@@ -656,6 +657,12 @@ pub fn view_to_value(v: &crate::models::types::WorldBookEntryView) -> Value {
     m.insert("content".into(), serde_json::json!(v.content));
     m.insert("position".into(), serde_json::json!(v.position));
     m.insert("depth".into(), serde_json::json!(v.depth));
+    // 扫描窗口:仅在有值时写顶层(顶层优先于 extensions,见 parse 侧优先级)。
+    // None 刻意**不产出键、也不写 null**:null/0 经 scan_window_len 会把已声明窗口打回
+    // depth 兜底(0 = 扫全部),一次无关编辑即静默改变触发行为——与 regex/role 的清空惯例相反。
+    if let Some(sd) = v.scan_depth {
+        m.insert("scan_depth".into(), serde_json::json!(sd));
+    }
     m.insert("order".into(), serde_json::json!(v.order));
     m.insert("case_sensitive".into(), serde_json::json!(v.case_sensitive));
     m.insert("sticky".into(), serde_json::json!(v.sticky));
@@ -1272,6 +1279,7 @@ mod tests {
             content: "内容".into(),
             position: 2,
             depth: 1,
+            scan_depth: None,
             order: 100,
             case_sensitive: true,
             sticky: 3,
@@ -1310,6 +1318,68 @@ mod tests {
         assert!(re.use_probability);
     }
 
+    /// WB-D 编辑面 roundtrip:视图必须承载关键词扫描窗口 `scan_depth`(读 / 写 / 未声明三态)。
+    ///
+    /// 与 `regex`/`role` 的「为空写显式 null」惯例**相反**,这里刻意不写 null:
+    /// 显式 null(或 0)经 `scan_window_len` 会把窗口从已声明的 scan_depth 打回条目 `depth` 兜底
+    /// (0 更是「扫全部」),于是旧客户端一次不带该字段的 PUT 就静默改变触发行为。
+    /// 故 None = 不产出键 = 由 `overlay_view` 保持原值;清空窗口因此无 UI 入口(有意边界)。
+    #[test]
+    fn view_roundtrip_scan_depth() {
+        let raw = json!({
+            "entries": [
+                { "uid": 1, "comment": "窗口5", "keys": ["k"], "content": "c", "constant": false,
+                  "extensions": { "scan_depth": 5, "depth": 1 } },
+                { "uid": 2, "comment": "未声明", "keys": ["k"], "content": "c", "constant": false,
+                  "extensions": { "depth": 2 } }
+            ]
+        });
+        let entries = collect_entries(&raw);
+        assert_eq!(entries[0].scan_depth, Some(5), "前置:extensions 形态可解析");
+
+        let declared = entry_to_view(&entries[0]);
+        assert_eq!(
+            declared.scan_depth,
+            Some(5),
+            "视图须承载 scan_depth,否则 UI 无编辑入口"
+        );
+        assert_eq!(declared.depth, 1, "depth 仍是插入深度,与扫描窗口分离");
+        let undeclared = entry_to_view(&entries[1]);
+        assert_eq!(undeclared.scan_depth, None);
+
+        // 有值 → 写顶层 scan_depth(解析优先级顶层 > scanDepth > extensions,顶层遮蔽 extensions 属已知形态)
+        let val = view_to_value(&declared);
+        assert_eq!(val["scan_depth"], json!(5));
+
+        // 无值 → 不得产出该键,序列化亦省略
+        let val = view_to_value(&undeclared);
+        assert!(
+            val.get("scan_depth").is_none(),
+            "None 不得写显式 null/0:会把已声明窗口打回 depth 兜底"
+        );
+        let serialized = serde_json::to_value(&undeclared).unwrap();
+        assert!(
+            serialized.get("scan_depth").is_none(),
+            "线格式省略未声明字段"
+        );
+
+        // 端到端:不带窗口的视图叠加到 scan_depth=5 的原条目 → 原值保留
+        let mut stale = declared.clone();
+        stale.scan_depth = None;
+        let mut entries_value = raw["entries"].clone();
+        merge_entries_into(&mut entries_value, &[stale]);
+        let after = collect_entries(&json!({ "entries": entries_value }));
+        assert_eq!(
+            after[0].scan_depth,
+            Some(5),
+            "PUT 不带 scan_depth 必须保持原窗口"
+        );
+
+        // 往返:写回后重新解析仍读到窗口
+        let re = collect_entries(&view_to_value(&declared));
+        assert_eq!(re[0].scan_depth, Some(5));
+    }
+
     /// 回归:对象 map 格式合并后必须删除已移除的条目(前端删除条目后 PUT 保存,
     /// 原实现只插入/覆盖,删除的条目留在 data_raw 里,下次 GET 复活)
     #[test]
@@ -1333,6 +1403,7 @@ mod tests {
                 content: "A".into(),
                 position: 0,
                 depth: 4,
+                scan_depth: None,
                 order: 100,
                 case_sensitive: false,
                 sticky: 0,
@@ -1353,6 +1424,7 @@ mod tests {
                 content: "新C".into(),
                 position: 0,
                 depth: 4,
+                scan_depth: None,
                 order: 100,
                 case_sensitive: false,
                 sticky: 0,

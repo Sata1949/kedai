@@ -10,6 +10,7 @@ import { storeToRefs } from 'pinia';
 import { useAppStore } from '../store';
 import * as api from '../api';
 import { useAgentPromptEditor } from '../composables/useAgentPromptEditor';
+import { promptWarningText } from '../utils/promptWarnings';
 import { computeHitRate, computeCompactionNeed, RECOMMENDED_SETTINGS, buildRecommendedPatch, type RecommendedSetting } from '../contextStats';
 import CacheHealthPanel from './CacheHealthPanel.vue';
 import MemoryPanel from './MemoryPanel.vue';
@@ -157,6 +158,10 @@ const close = (): void => {
           </button>
           <div v-if="previewError" class="sv-feedback err" style="margin-top: var(--space-1-5)">{{ previewError }}</div>
           <div v-if="promptPreview" class="sv-stack" style="margin-top: var(--space-2-5)">
+            <!-- 结构化告警(WB-E):与 AgentSettingsSection 共用 utils/promptWarnings 文案出处 -->
+            <div v-for="code in promptPreview.warnings" :key="code" class="sv-feedback info">
+              {{ promptWarningText(code) }}
+            </div>
             <div v-for="(layer, i) in promptPreview.layers" :key="`${layer.order}-${layer.source}`" class="sv-data-row">
               <div class="info">
                 <div class="flex items-center gap-2">

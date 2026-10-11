@@ -29,6 +29,12 @@ function normalizeRoles(entries: api.WorldBookEntry[]): void {
   for (const e of entries) e.role = e.role ?? null;
 }
 
+/** 提交前把「被清空的可选数值」转成缺省:数字输入框清空时 Vue 交出空串,
+ *  而 scan_depth 的后端语义是「不带该键 = 保持原值」("" 会被反序列化判为非法类型)。 */
+function omitClearedOptional(entries: api.WorldBookEntry[]): api.WorldBookEntry[] {
+  return entries.map((e) => ((e.scan_depth as unknown) === '' ? { ...e, scan_depth: undefined } : e));
+}
+
 async function loadCharacterEntries(): Promise<void> {
   const cid = currentCharacterId.value;
   if (!cid) return;
@@ -50,7 +56,7 @@ async function saveCharacterEntries(): Promise<void> {
   charSaving.value = true;
   charMsg.value = null;
   try {
-    charEntries.value = await api.saveCharacterWorldEntries(cid, charEntries.value);
+    charEntries.value = await api.saveCharacterWorldEntries(cid, omitClearedOptional(charEntries.value));
     normalizeRoles(charEntries.value);
     charMsg.value = { kind: 'ok', text: '角色卡世界书已保存(下次发送生效)' };
     setTimeout(() => (charMsg.value = null), 2500);
@@ -125,7 +131,7 @@ async function saveEntries(b: api.WorldBookRecord): Promise<void> {
   entrySaving.value[id] = true;
   entryMsg.value = null;
   try {
-    const saved = await api.saveWorldBookEntries(id, draft);
+    const saved = await api.saveWorldBookEntries(id, omitClearedOptional(draft));
     normalizeRoles(saved);
     entryDrafts.value[id] = saved;
     entryMsg.value = { kind: 'ok', text: '条目已保存(下次发送生效)' };
@@ -277,7 +283,7 @@ async function loadWorldBooksChecked(): Promise<void> {
             <b>独立世界书</b>:上传 SillyTavern 世界书 JSON 后,默认全局启用,也可绑定到指定角色;<br />
             条目编辑完整支持酒馆惯例:<code>位置</code>/<code>注入顺序</code>(排序)、
             <code>关键词</code>/<code>副关键词</code>(子串匹配)、<code>正则</code>、
-            <code>扫描深度</code>(扫最近 N 条)、<code>常驻</code>(始终注入)、
+            <code>插入深度</code>/<code>扫描窗口</code>(酒馆 depth 与 scanDepth,语义分离)、<code>常驻</code>(始终注入)、
             <code>命中概率</code>、<code>大小写敏感</code>与<code>激活状态</code>(总开关)。<br />
             <b>状态定义</b>:<code>激活</code> = 该条目参与注入的总开关(停用 = 完全不注入);
             <code>触发</code> = 激活且非常驻的条目,按关键词/正则命中最近对话才注入;
@@ -416,8 +422,10 @@ async function loadWorldBooksChecked(): Promise<void> {
                   </button>
                 </div>
                 <div class="sv-wb-entry-fields">
-                  <label class="sv-wb-field-tag">扫描深度</label>
-                  <input v-model.number="en.depth" type="number" min="0" class="sv-input sv-wb-num" title="从最新消息往前扫最近 N 条用户消息(0 = 全部历史)" placeholder="0=全部" />
+                  <label class="sv-wb-field-tag">插入深度</label>
+                  <input v-model.number="en.depth" type="number" min="0" class="sv-input sv-wb-num" title="插入深度(酒馆 depth):position=atDepth 时从末尾算注入位置;条目未声明扫描窗口时兼作窗口兜底" placeholder="4" />
+                  <label class="sv-wb-field-tag">扫描窗口</label>
+                  <input v-model.number="en.scan_depth" type="number" min="0" class="sv-input sv-wb-num" title="关键词扫描窗口(酒馆 scanDepth):关键词只扫最近 N 条消息(0 = 全部);留空 = 保持原值不改动" placeholder="未声明" />
                   <label class="sv-wb-field-tag">注入顺序</label>
                   <input v-model.number="en.order" type="number" min="0" class="sv-input sv-wb-num" title="同位置内按此值从小到大注入(酒馆 order)" placeholder="100" />
                   <label class="sv-wb-field-tag">命中概率</label>
@@ -535,7 +543,7 @@ async function loadWorldBooksChecked(): Promise<void> {
             <b>状态定义</b>:<code>激活</code> = 条目参与注入的总开关(停用则不注入);
             <code>常驻</code> = 始终注入,归位「位置3(常态)」并入系统提示词;<code>触发</code> = 激活且非常驻时按关键词/正则命中,归位「位置1(激发)」追加到最新用户消息尾部。<br />
             注入顺序:同位置内按列表顺序注入(可 ↑↓ 排序);关键词/副关键词:逗号分隔,命中最近对话即注入;
-            扫描深度:只扫最近 N 条用户消息(0 = 全部);
+            插入深度:酒馆 <code>depth</code>,仅作注入位置(atDepth)与窗口兜底;扫描窗口:酒馆 <code>scanDepth</code>,关键词只扫最近 N 条消息(0 = 全部,留空 = 保持原值);
             命中概率:按百分比随机决定是否注入;粘性/冷却:命中后 N 条内持续注入 / 不触发。
           </p>
           <div class="sv-wb-edit">
@@ -609,8 +617,10 @@ async function loadWorldBooksChecked(): Promise<void> {
                 </button>
               </div>
               <div class="sv-wb-entry-fields">
-                <label class="sv-wb-field-tag">扫描深度</label>
-                <input v-model.number="en.depth" type="number" min="0" class="sv-input sv-wb-num" title="从最新消息往前扫最近 N 条用户消息(0 = 全部历史)" placeholder="0=全部" />
+                <label class="sv-wb-field-tag">插入深度</label>
+                <input v-model.number="en.depth" type="number" min="0" class="sv-input sv-wb-num" title="插入深度(酒馆 depth):position=atDepth 时从末尾算注入位置;条目未声明扫描窗口时兼作窗口兜底" placeholder="4" />
+                <label class="sv-wb-field-tag">扫描窗口</label>
+                <input v-model.number="en.scan_depth" type="number" min="0" class="sv-input sv-wb-num" title="关键词扫描窗口(酒馆 scanDepth):关键词只扫最近 N 条消息(0 = 全部);留空 = 保持原值不改动" placeholder="未声明" />
                 <label class="sv-wb-field-tag">注入顺序</label>
                 <input v-model.number="en.order" type="number" min="0" class="sv-input sv-wb-num" title="同位置内按此值从小到大注入(酒馆 order)" placeholder="100" />
                 <label class="sv-wb-field-tag">命中概率</label>
