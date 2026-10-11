@@ -1590,7 +1590,11 @@ fn literary_tail_survives_extreme_trim_while_note_can_be_cut() {
 
 /// 便捷封装:只取 system 文本(常驻说明头随内容走的一组用例用)
 /// `tpl = None` 走引擎内置兜底模板路径,`Some(tpl)` 走自定义模板(含占位符判定)路径。
-fn system_text(constant: &[WorldInjection], triggered: &[WorldInjection], tpl: Option<&str>) -> String {
+fn system_text(
+    constant: &[WorldInjection],
+    triggered: &[WorldInjection],
+    tpl: Option<&str>,
+) -> String {
     let mut vars = HashMap::new();
     let mut assistant = AssistantVars::new();
     let history = vec![("user".to_string(), "你好".to_string())];
