@@ -574,7 +574,11 @@ async fn bash_delete_records_delete_row_with_zero_bytes() {
         state,
         &id,
         &ws,
-        if cfg!(windows) { "del /q gone.txt" } else { "rm gone.txt" },
+        if cfg!(windows) {
+            "del /q gone.txt"
+        } else {
+            "rm gone.txt"
+        },
     )
     .await
     .expect("命令应执行成功");
