@@ -366,7 +366,6 @@ fn triggered_group_with_only_state_block_has_no_header() {
 }
 
 /// 变量状态块兜底(2026-10-09 冲突修复):自定义模板漏写 {{world_info}} 时,
-
 /// 世界书**常驻条目**按「Custom Prompt 完整替换、不是追加」契约确实不注入(既有语义不变),
 /// 但引擎状态块必须补回 system 尾部——否则模型看不到状态就不会输出 <UpdateVariable>,
 /// 变量更新通道整体静默停摆(改动前正是这个形态)。
