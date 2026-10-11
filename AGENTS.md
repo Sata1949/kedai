@@ -86,8 +86,9 @@ cargo build --manifest-path server-rs/Cargo.toml
   走 PR 后 CI 在分支上给出独立校验。配置 GET 实测与沿革见 `docs/遗留.md` CI-PROT-1 追注。
 - **云端 CI 恢复(2026-10-11)**:`ci` / `ci-linux` 两档已 `gh workflow enable` 回 active——2026-09-29 起的
   服务端停用系账号计费阻断,经实测已解除(dispatch run `38101599784` 正常启动执行;同轮暴露并修复一处
-  Linux 专属 clippy 缺陷,提交 `e631ea4`)。提交纪律恢复「完成验证后推送 `origin`」:当前积压 14 笔
-  (IMPHUB / TUTSYNC 两批 + 该修复)待推,推送前须跑全量 `tools/check-all.ps1`,并以 PR 合并(保护规则,见上条)。
+  Linux 专属 clippy 缺陷,提交 `e631ea4`)。提交纪律恢复「完成验证后推送 `origin`」:积压 20 笔已于
+  2026-10-11 经 **PR #7** 推送闭合(合并 `99bd700`;含停用期全部内容的云端复核补齐);今后一律走
+  「临时分支 → PR → CI 绿 → merge」,推送前跑全量 `tools/check-all.ps1`。
   **本机推送注意**:`pre-push` 钩子在本环境会因 `经验.md` E69 的 SIGPIPE 被杀(门禁已过、推送未完成)
   ——等价做法是**预跑** `tools/check-all.ps1 -Quick` 后 `git push --no-verify`,推送后一律以
   `git ls-remote` 验收,别读日志结论。始末与恢复清单执行情况见 `docs/遗留.md` CI-BILL-1 追注。
