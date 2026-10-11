@@ -569,9 +569,15 @@ async fn bash_delete_records_delete_row_with_zero_bytes() {
     fs_write(state, &id, &ws, "gone.txt", "bye\n")
         .await
         .expect("fs_write 应成功");
-    run_bash(state, &id, &ws, "del /q gone.txt")
-        .await
-        .expect("命令应执行成功");
+    // 平台专有删除:cmd 用 del /q、sh 用 rm(其余用例的 echo 重定向两壳通用)。
+    run_bash(
+        state,
+        &id,
+        &ws,
+        if cfg!(windows) { "del /q gone.txt" } else { "rm gone.txt" },
+    )
+    .await
+    .expect("命令应执行成功");
 
     let list = changes_of(app, &id).await;
     let rows = list["changes"].as_array().unwrap();
