@@ -1,6 +1,8 @@
-// 世界书 / 契约 / 契约历史 / 变量引擎 / 提示词注入 / 快速回复路由(自 api/mod.rs build_router 迁入)
+// 世界书 / 契约 / 契约历史 / 变量引擎 / 提示词注入 / 全局正则 / 快速回复路由(自 api/mod.rs build_router 迁入)
 use crate::api::app_state::AppState;
-use crate::api::{contract_history, contracts, kaleido, prompt_inject, quick_replies, world_books};
+use crate::api::{
+    contract_history, contracts, kaleido, prompt_inject, quick_replies, regex_scripts, world_books,
+};
 use axum::routing::{get, post, put};
 use axum::Router;
 use std::sync::Arc;
@@ -56,6 +58,11 @@ pub(crate) fn content_routes() -> Router<Arc<AppState>> {
             get(prompt_inject::get_prompt_inject).put(prompt_inject::update_prompt_inject),
         )
         .route("/api/prompt-inject/import", post(prompt_inject::import))
+        // 全局正则库(IMPHUB ⑥):跨角色的显示层正则,整体读写(导入/启停/删除都走 PUT)
+        .route(
+            "/api/regex-scripts",
+            get(regex_scripts::get_regex_scripts).put(regex_scripts::update_regex_scripts),
+        )
         // 快速回复(Quick Replies):getqr 的渲染数据源 + 管理 CRUD
         .route(
             "/api/quick-replies",

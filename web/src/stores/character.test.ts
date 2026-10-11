@@ -30,11 +30,14 @@ vi.mock('../api', () => ({
   // 卡级脚本收集/授权哈希/initvar 兜底经 fetchCharacterDetail 拉详情;拒绝=无详情(不缓存,下
   // 次重试),selectCharacter 后台预拉静默退化为纯 regex 哈希
   getCharacter: vi.fn().mockRejectedValue(new Error('测试环境无详情')),
+  // 全局正则库(IMPHUB ⑥):选角链路的授权哈希闸门会幂等拉取;缺省空库
+  getRegexScripts: vi.fn().mockResolvedValue([]),
 }));
 
 import * as api from '../api';
 import { useCharacterStore } from './character';
 import { useChatStore } from './chat';
+import { useRegexScriptsStore } from './regexScripts';
 import { writeLastCharacterId, writeLastSessionId, readLastSessionId, readLastCharacterId } from '../lastPosition';
 
 const mocked = api as unknown as Record<string, ReturnType<typeof vi.fn>>;
@@ -172,5 +175,51 @@ describe('FE-1 迟到响应守卫(切角色不丢新选择)', () => {
     expect(useChatStore().currentSessionId).toBe('s9');
     expect(mocked.fetchHistory).toHaveBeenCalledWith('s9');
     expect(readLastSessionId('c2')).toBe('s9');
+  });
+});
+
+describe('全局正则库纳入授权哈希(IMPHUB ⑥ 缓存键闸门)', () => {
+  const globalScript = {
+    id: 'g1',
+    script_name: '全局替换',
+    find_regex: 'A',
+    replace_string: 'B',
+    markdown_only: false,
+    enabled: true,
+  };
+
+  it('全局库变化 → currentScriptHash 变化(缓存键必须覆盖全局库)', async () => {
+    const character = useCharacterStore();
+    const regexStore = useRegexScriptsStore();
+    await character.selectCharacter('c1');
+    const without = character.currentScriptHash;
+    expect(without).toMatch(/^[a-f0-9]{64}$/);
+
+    // 全局库出现一条脚本(预置为已加载,免网络)→ 同一角色哈希必须不同
+    regexStore.regexScripts = [globalScript];
+    await character.selectCharacter('c1');
+    expect(character.currentScriptHash, '全局库变化必须使缓存键失效').not.toBe(without);
+
+    // 全局库清空 → 回到无全局的哈希(顺序与可逆性同时锁定)
+    regexStore.regexScripts = [];
+    await character.selectCharacter('c1');
+    expect(character.currentScriptHash).toBe(without);
+  });
+
+  it('ensure 幂等:已加载后选角不再拉取;首次失败不置 loaded,下次可重试', async () => {
+    const character = useCharacterStore();
+    await character.selectCharacter('c1');
+    const calls = mocked.getRegexScripts.mock.calls.length;
+    await character.selectCharacter('c2');
+    expect(mocked.getRegexScripts.mock.calls.length, '已加载后不应重复拉取').toBe(calls);
+
+    // 失败路径:重新开局,首次拒绝 → 不置 loaded;第二次成功 → 置位且只成功那次合并生效
+    setActivePinia(createPinia());
+    const c2 = useCharacterStore();
+    mocked.getRegexScripts.mockRejectedValueOnce(new Error('网络失败'));
+    await c2.selectCharacter('c1');
+    expect(useRegexScriptsStore().regexScriptsLoaded).toBe(false);
+    await c2.selectCharacter('c2');
+    expect(useRegexScriptsStore().regexScriptsLoaded).toBe(true);
   });
 });

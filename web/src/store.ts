@@ -14,6 +14,7 @@ import { useTaskStore } from './stores/task';
 import { useExecutorStore } from './stores/executor';
 import { useUiPrefsStore } from './stores/uiPrefs';
 import { useResourcesStore } from './stores/resources';
+import { useRegexScriptsStore } from './stores/regexScripts';
 
 // 类型别名:保持 store 对外的类型导出(AgentActivity / UiMessage)不变
 export type { AgentActivity, UiMessage } from './sseReducer';
@@ -27,6 +28,7 @@ export const useAppStore = defineStore('app', () => {
   const executor = useExecutorStore();
   const uiPrefs = useUiPrefsStore();
   const resources = useResourcesStore();
+  const regexScriptsStore = useRegexScriptsStore();
 
   return {
     // ===== 状态与派生(storeToRefs 转发,读写穿透到子 store 同一响应式源) =====
@@ -38,6 +40,8 @@ export const useAppStore = defineStore('app', () => {
     ...storeToRefs(executor),
     ...storeToRefs(uiPrefs),
     ...storeToRefs(resources),
+    // 全局正则库(IMPHUB ⑥)
+    ...storeToRefs(regexScriptsStore),
 
     // ===== 动作(函数引用转发) =====
     // 角色
@@ -93,6 +97,10 @@ export const useAppStore = defineStore('app', () => {
     selectAgentFlow: genSettings.selectAgentFlow,
     deleteAgentFlow: genSettings.deleteAgentFlow,
     importAgentFlows: genSettings.importAgentFlows,
+    // 全局正则库(IMPHUB ⑥):整体读写(启停/删除/导入都走整体写)
+    loadRegexScripts: regexScriptsStore.loadRegexScripts,
+    ensureRegexScriptsLoaded: regexScriptsStore.ensureRegexScriptsLoaded,
+    saveRegexScripts: regexScriptsStore.saveRegexScripts,
     // 任务模式
     setAppMode: task.setAppMode,
     setDefaultAppMode: task.setDefaultAppMode,
@@ -125,8 +133,9 @@ export const useAppStore = defineStore('app', () => {
     setRenderHtml: uiPrefs.setRenderHtml,
     toggleRenderHtml: uiPrefs.toggleRenderHtml,
     removeRenderHtmlOverride: uiPrefs.removeRenderHtmlOverride,
-    // 设置分区定位(新手教程「带我去设置」:打开综合设置并落到指定分区)
+    // 设置二级项定位(新手教程「带我去设置」:打开综合设置并落到指定分区/独立面板)
     openSettingsAt: uiPrefs.openSettingsAt,
+    openSettingsPanel: uiPrefs.openSettingsPanel,
     clearSettingsNav: uiPrefs.clearSettingsNav,
     // Agent 面板开合(自动展开一次 + 用户主动收起后不再打扰)
     openAgentPanel: uiPrefs.openAgentPanel,

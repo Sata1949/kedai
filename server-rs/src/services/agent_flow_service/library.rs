@@ -204,6 +204,7 @@ pub fn coding_pack_flows() -> Vec<AgentFlowConfig> {
             ),
             enabled: true,
             max_parallel_nodes: None,
+            folder: String::new(),
             steps: vec![
                 PlanStep {
                     id: "scope".into(),
@@ -266,6 +267,7 @@ pub fn coding_pack_flows() -> Vec<AgentFlowConfig> {
             ),
             enabled: true,
             max_parallel_nodes: None,
+            folder: String::new(),
             steps: vec![
                 PlanStep {
                     id: "plan".into(),
@@ -361,6 +363,7 @@ pub fn literary_pack_flows() -> Vec<AgentFlowConfig> {
             ),
             enabled: true,
             max_parallel_nodes: None,
+            folder: String::new(),
             steps: vec![
                 PlanStep {
                     id: "outline".into(),
@@ -421,6 +424,7 @@ pub fn literary_pack_flows() -> Vec<AgentFlowConfig> {
             ),
             enabled: true,
             max_parallel_nodes: None,
+            folder: String::new(),
             steps: vec![
                 PlanStep {
                     id: "locate".into(),
@@ -483,6 +487,7 @@ pub fn literary_pack_flows() -> Vec<AgentFlowConfig> {
             ),
             enabled: true,
             max_parallel_nodes: None,
+            folder: String::new(),
             steps: vec![
                 PlanStep {
                     id: "extract".into(),
@@ -532,6 +537,7 @@ pub fn literary_pack_flows() -> Vec<AgentFlowConfig> {
             ),
             enabled: true,
             max_parallel_nodes: None,
+            folder: String::new(),
             steps: vec![
                 PlanStep {
                     id: "sample".into(),
@@ -597,6 +603,7 @@ pub fn builtin_flow() -> AgentFlowConfig {
         // 并行上限缺省 = DEFAULT_MAX_PARALLEL_NODES(2):内置流程是线性三步,
         // 并发度无实际影响,留 None 以便跟随默认值演进
         max_parallel_nodes: None,
+        folder: String::new(),
         steps: vec![
             PlanStep {
                 id: "draft".into(),
@@ -693,6 +700,7 @@ pub fn builtin_demo_flows() -> Vec<AgentFlowConfig> {
         enabled: true,
         // 两条支路天然并行;缺省 = DEFAULT_MAX_PARALLEL_NODES(2),留 None 跟随默认演进
         max_parallel_nodes: None,
+        folder: String::new(),
         steps: vec![
             PlanStep {
                 id: "decompose".into(),

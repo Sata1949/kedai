@@ -70,7 +70,6 @@ const BASELINE = [
   'web/src/components/OptimizeModal.vue',
   'web/src/components/QuickRepliesModal.vue',
   'web/src/components/RenderPanelHost.vue',
-  'web/src/components/SkillsModal.vue',
   'web/src/components/TaskExecutorsModal.vue',
   'web/src/components/settings/AboutSection.vue',
   'web/src/components/settings/AgentFlowEdge.vue',

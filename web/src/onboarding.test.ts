@@ -14,7 +14,9 @@ import {
   writeOnboarding,
   type AppMode,
   type StorageLike,
+  type TutorialStepId,
 } from './onboarding';
+import { STEP_COPY } from './utils/tutorialCopy';
 
 /** 内存 StorageLike(测试桩;可预置初始值) */
 function memStorage(init: Record<string, string> = {}): StorageLike & { raw: Map<string, string> } {
@@ -171,6 +173,63 @@ describe('教程步骤表 buildTutorialPlan', () => {
     expect(bothRoleplayFirst).toContain('r-prompt');
     expect(bothRoleplayFirst).toContain('t-agent');
     expect(buildTutorialPlan({ preference: 'task', scope: 'preferred', isAndroid: false })).not.toContain('r-prompt');
+  });
+});
+
+// TUTSYNC OB-8/OB-12(2026-10-10):教程步骤表的**完整性**不变量。
+// 原有断言只锁顺序与门控、读不出「某一步被漏掉」或「某条文案没有对应步骤」——
+// 这正是 2026-09-28 之后教程烂掉而 54 例测试全绿的原因之一,故本组断言是新加的机器信号。
+describe('教程步骤表完整性(TUTSYNC 不变量)', () => {
+  /** 四种组合能讲到的全部步骤 id(偏好 × 范围 × 平台) */
+  const allPlanIds = (): Set<TutorialStepId> => {
+    const out = new Set<TutorialStepId>();
+    for (const preference of ['roleplay', 'task'] as const) {
+      for (const scope of ['both', 'preferred'] as const) {
+        for (const isAndroid of [false, true] as const) {
+          for (const id of buildTutorialPlan({ preference, scope, isAndroid })) out.add(id);
+        }
+      }
+    }
+    return out;
+  };
+
+  it('步数:角色扮演 13 / 任务 13 / 都需要 19(桌面),Android 各 +1', () => {
+    expect(buildTutorialPlan({ preference: 'roleplay', scope: 'preferred', isAndroid: false })).toHaveLength(13);
+    expect(buildTutorialPlan({ preference: 'task', scope: 'preferred', isAndroid: false })).toHaveLength(13);
+    expect(buildTutorialPlan({ preference: 'roleplay', scope: 'both', isAndroid: false })).toHaveLength(19);
+    expect(buildTutorialPlan({ preference: 'task', scope: 'both', isAndroid: false })).toHaveLength(19);
+    expect(buildTutorialPlan({ preference: 'roleplay', scope: 'preferred', isAndroid: true })).toHaveLength(14);
+    expect(buildTutorialPlan({ preference: 'task', scope: 'both', isAndroid: true })).toHaveLength(20);
+  });
+
+  it('每条文案都有对应步骤、每个步骤都有文案(无孤儿、无漏写)', () => {
+    const ids = allPlanIds();
+    const copyIds = Object.keys(STEP_COPY) as TutorialStepId[];
+    for (const id of copyIds) expect(ids, `步骤 ${id} 有文案但永远不会被讲到`).toContain(id);
+    for (const id of ids) expect(STEP_COPY[id], `步骤 ${id} 缺文案`).toBeTruthy();
+    expect(copyIds).toHaveLength(ids.size);
+  });
+
+  it('每条文案非空:有标题、至少一句正文', () => {
+    for (const [id, c] of Object.entries(STEP_COPY)) {
+      expect(c.title.trim(), `${id} 标题为空`).not.toBe('');
+      expect(c.lines.length, `${id} 正文为空`).toBeGreaterThan(0);
+      for (const line of c.lines) expect(line.trim(), `${id} 有空行`).not.toBe('');
+    }
+  });
+
+  it('带跳转的步骤必须有 navLabel(浮条与步骤条靠它显示位置)', () => {
+    for (const [id, c] of Object.entries(STEP_COPY)) {
+      if (c.nav) expect(c.navLabel, `${id} 有 nav 却没有 navLabel`).toBeTruthy();
+    }
+  });
+
+  it('共同段步骤 id 全部以 s- 开头且顺序固定(新增项按导航顺序插入)', () => {
+    const p = buildTutorialPlan({ preference: 'roleplay', scope: 'preferred', isAndroid: false });
+    const shared = p.filter((id) => id.startsWith('s-'));
+    expect(shared).toEqual([
+      's-enter', 's-api', 's-import', 's-assets', 's-ext', 's-flow', 's-exec',
+    ]);
   });
 });
 

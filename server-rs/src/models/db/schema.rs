@@ -80,7 +80,8 @@ CREATE TABLE IF NOT EXISTS skills (
   created_at  TEXT NOT NULL,
   allowed_tools TEXT NOT NULL DEFAULT '[]',
   run_as_subagent INTEGER NOT NULL DEFAULT 0,
-  model       TEXT NOT NULL DEFAULT ''
+  model       TEXT NOT NULL DEFAULT '',
+  folder      TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS agent_subtasks (
   id           TEXT PRIMARY KEY,

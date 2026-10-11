@@ -58,7 +58,16 @@ function openPanel(flag: ModalFlag): () => void {
   return () => { store[flag] = true; close(); };
 }
 
-/** 五大功能域(左栏一级;dot 用 .sv-supreme 几何色块,与至上主义黑白风格一致) */
+/**
+ * 五大功能域(左栏一级;dot 用 .sv-supreme 几何色块,与至上主义黑白风格一致)。
+ *
+ * **解析契约(`tools/check-tutorial.mjs` 依赖,改格式先改那个脚本)**:
+ *   功能域头写成单独一行 `key: '…', label: '…', dot: '…',`;
+ *   二级项写成单独一行 `{ type: 'section', key: '…', label: '…' }` 或
+ *   `{ type: 'action', key: '…', label: '…', run: … }`。
+ *   门禁按行解析本表来校验「新手教程的每个跳转落点与位置名是否还存在」——
+ *   拆成多行、换引号或换字段顺序都会让教程防漂移机检失明。
+ */
 const domains: Domain[] = [
   {
     key: 'conn', label: '连接与模型', dot: 'red',
@@ -72,8 +81,11 @@ const domains: Domain[] = [
   {
     key: 'dialog', label: '对话与提示词', dot: 'orange',
     items: [
+      // 综合导入 / 综合导出(IMPHUB 步骤 C):两模式可见(任务模式按段过滤,①⑥ 不适用)
+      { type: 'action', key: 'importBundle', label: '综合导入 / 导出', run: openPanel('importBundleOpen') },
+      // 附件管理(IMPHUB 步骤 D):技能 / 流程 / 插件 / 预设正则 的统一组织面
+      { type: 'action', key: 'assets', label: '附件管理', run: openPanel('assetsOpen') },
       { type: 'section', key: 'prompt', label: '提示词注入' },
-      { type: 'section', key: 'preset', label: '预设导入' },
     ],
   },
   {
@@ -105,12 +117,9 @@ const domains: Domain[] = [
     key: 'tools', label: '界面与工具', dot: 'blue',
     items: [
       { type: 'section', key: 'ui', label: '界面' },
-      { type: 'action', key: 'upload', label: '上传角色卡', run: () => { store.characterUploadRequested++; } },
       { type: 'action', key: 'records', label: '聊天记录', run: openPanel('chatRecordsOpen') },
       { type: 'action', key: 'worldbooks', label: '世界书', run: openPanel('worldBooksOpen') },
       { type: 'action', key: 'contracts', label: '契约编辑', run: openPanel('contractsOpen') },
-      { type: 'action', key: 'plugins', label: '插件', run: openPanel('pluginsOpen') },
-      { type: 'action', key: 'skills', label: '技能库', run: openPanel('skillsOpen') },
       { type: 'action', key: 'prompts', label: '提示词管理', run: openPanel('promptsOpen') },
       { type: 'action', key: 'scripts', label: '脚本管理', run: openPanel('scriptsOpen') },
       { type: 'action', key: 'quickReplies', label: '快速回复', run: openPanel('quickRepliesOpen') },
@@ -131,8 +140,10 @@ const domains: Domain[] = [
 
 /** 角色扮演专属分区:任务模式下隐藏。'flow'(执行流程)不在此列——任务模式的 custom 依赖
  *  流程库(后端 TaskFlowAccess::current_flow 读不到已启用流程即报错),必须两种模式下都可见
- *  (IFW-3 入口错位修复,见 docs/遗留.md §九 已封堵项索引) */
-const ROLEPLAY_ONLY: ReadonlySet<SectionKey> = new Set<SectionKey>(['prompt', 'preset']);
+ *  (IFW-3 入口错位修复,见 docs/遗留.md §九 已封堵项索引)。
+ *  'preset'(预设导入)随 IMPHUB 步骤 C 删除:能力并入「综合导入」①;「对话与提示词」
+ *  域的 action(综合导入/导出)两模式可见,故任务模式下本域不再整域隐藏。 */
+const ROLEPLAY_ONLY: ReadonlySet<SectionKey> = new Set<SectionKey>(['prompt']);
 
 /** 按顶层模式过滤二级 section 项;过滤后为空的功能域整域隐藏 */
 const visibleDomains = computed<Domain[]>(() =>
@@ -192,27 +203,40 @@ watch(
 );
 
 /**
- * 「带我去设置」定位请求(新手教程,2026-09-27):把请求里的分区落到本组件的两级导航状态上。
+ * 「带我去设置」定位请求(新手教程,2026-09-27;action 型目标见 TUTSYNC OB-9,2026-10-10):
+ * 把请求里的落点落到本组件的两级导航状态上。
  *
  * **必须 `immediate: true` 且应用后消费掉请求**:设置弹窗是 `v-if` + 懒加载,首次点
  * 「带我去设置」时请求先于本组件挂载(点击 → 置开关 + 置请求 → chunk 加载完才 mount),
  * 不带 immediate 的 watch 在挂载时不会触发,表现为「设置打开了但没定位」。
  * 消费(清空)则避免用户日后手动打开综合设置又被上一次的请求带着跳分区。
  *
- * 目标分区若在当前模式下不可见(如任务模式下的「提示词注入」是角色扮演专属),
- * **保持原分区、不报错**——教程只是指路,定位失败不该把设置弹窗弄成异常态。
+ * 两类落点:
+ *   - `section`:反查所属功能域后切内容区;目标分区在当前模式下不可见(如任务模式下的
+ *     「提示词注入」是角色扮演专属)时**保持原分区、不报错**——教程只是指路,定位失败不该
+ *     把设置弹窗弄成异常态。
+ *   - `panel`:执行同名 action 项(`item.run()` = 打开独立面板 + 关掉 Hub),复用 `openPanel`
+ *     的既有语义,不另开一条通往 store 开关的路;找不到时同样什么都不做。
  */
 watch(
   () => store.settingsNav,
   (req) => {
     if (!req) return;
-    const domain = visibleDomains.value.find((d) =>
-      d.items.some((it) => it.type === 'section' && it.key === req.section),
-    );
+    const request = req.request;
     store.clearSettingsNav();
+    if (request.kind === 'panel') {
+      const item = visibleDomains.value
+        .flatMap((d) => d.items)
+        .find((it) => it.type === 'action' && it.key === request.panel);
+      if (item && item.type === 'action') item.run();
+      return;
+    }
+    const domain = visibleDomains.value.find((d) =>
+      d.items.some((it) => it.type === 'section' && it.key === request.section),
+    );
     if (!domain) return;
     activeDomain.value = domain.key;
-    activeSection.value = req.section;
+    activeSection.value = request.section;
   },
   { immediate: true },
 );
@@ -285,8 +309,8 @@ const activeLabel = computed(() => {
             <h3 :key="activeSection" class="sv-hub-content-title">{{ activeLabel }}</h3>
           </Transition>
 
-          <!-- 嵌入原 SettingsModal 全部内容 -->
-          <SettingsModal embedded :active-section="activeSection" />
+          <!-- 嵌入原 SettingsModal 全部内容(单模式壳,按 activeSection 切换分区) -->
+          <SettingsModal :active-section="activeSection" />
         </div>
       </div>
     </div>

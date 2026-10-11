@@ -51,6 +51,9 @@ const VERBOSE = process.argv.includes('--verbose');
  * RPFLOW 提交 3 变动:content 959→1008(酒馆式消息 HTML 子集渲染 49 行——details/summary
  * 折叠块 + .sv-status-block 状态块 + 分隔段 hr;消息正文经 v-html 注入,scoped 样式
  * 不作用于 v-html 内容,故必须落全局域)。
+ * IMPHUB 步骤 E 变动(只降):content 1008→1007 / mobile 434→433——楼层「注入位置」下拉与
+ * depth 输入删除后 `.floor-depth` 孤儿规则随之清除,`.floor-row` grid 由 7 轨收到 5 轨
+ * (与现存子节点数一致,消掉尾部空轨的多余 gap)。
  */
 const LINE_BASELINE = {
   'style.css': 49,
@@ -58,9 +61,9 @@ const LINE_BASELINE = {
   'styles/base.css': 122,
   'styles/shell.css': 832,
   'styles/panels.css': 971,
-  'styles/content.css': 1008,
+  'styles/content.css': 1007,
   'styles/task.css': 997,
-  'styles/mobile.css': 434,
+  'styles/mobile.css': 433,
 };
 
 /**

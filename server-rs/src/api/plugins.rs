@@ -5,12 +5,14 @@
 // 故下方统一走「解析(L3) → 宿主全量同步(L2)」两段式:解析 `parse_all` +
 // 同步 `sync_plugins`(启动装配与 reload/upload/delete 四个入口共用同一条路径)。
 use crate::api::app_state::AppState;
-use crate::api::{err_status, internal, validation, ErrorCode, WithStatus};
+use crate::api::json_body::JsonBody;
+use crate::api::{err_status, internal, not_found, validation, ErrorCode, WithStatus};
 use crate::plugins::ToolPluginLoader;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -101,6 +103,8 @@ pub async fn list_tools(State(state): State<Arc<AppState>>) -> Json<serde_json::
                 "description": p.definition.description,
                 "origin": "plugin",
                 "file": p.file,
+                // 虚拟文件夹路径(IMPHUB 附件管理;空串 = 未分组)
+                "folder": p.folder,
             })
         })
         .collect();
@@ -243,6 +247,220 @@ pub async fn upload_tool(
     }
 }
 
+#[derive(Deserialize)]
+pub struct MoveToolBody {
+    /// 插件文件名(净化口径与上传/删除同一把)
+    pub file: String,
+    /// 目标文件夹路径(空串 = 移回未分组;入库/入文件前由 utils::folder_path 规整)
+    #[serde(default)]
+    pub folder: String,
+}
+
+/// 移动的两种失败:404 与 500 的对外出口不同,不让调用方按错误串猜
+enum MoveFolderError {
+    NotFound,
+    Failed(String),
+}
+
+/// 读插件文件 → 只改 `folder` 键 → 原子写回(在阻塞池内调用:同步 IO + JSON 解析)。
+/// 空 folder **删键**(文件回到旧形状,不留 `"folder": ""` 噪声)。
+fn rewrite_plugin_folder(path: &std::path::Path, folder: &str) -> Result<(), MoveFolderError> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(MoveFolderError::NotFound);
+        }
+        Err(e) => return Err(MoveFolderError::Failed(format!("读取插件文件失败: {e}"))),
+    };
+    let mut value: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| MoveFolderError::Failed(format!("插件 JSON 解析失败: {e}")))?;
+    let Some(obj) = value.as_object_mut() else {
+        return Err(MoveFolderError::Failed("插件文件不是 JSON 对象".into()));
+    };
+    if folder.is_empty() {
+        obj.remove("folder");
+    } else {
+        obj.insert(
+            "folder".to_string(),
+            serde_json::Value::String(folder.to_string()),
+        );
+    }
+    let text = serde_json::to_string_pretty(&value)
+        .map_err(|e| MoveFolderError::Failed(format!("插件序列化失败: {e}")))?;
+    crate::utils::fs_atomic::write_atomic(path, text.as_bytes())
+        .map_err(|e| MoveFolderError::Failed(format!("写入插件文件失败: {e}")))
+}
+
+/// POST /api/plugins/tools/move:把插件移到虚拟文件夹(IMPHUB「附件管理」,2026-10-09)。
+///
+/// folder 是**插件文件自带的元数据**(与技能的列、流程的 JSON 字段同一种「资产自带元数据」
+/// 口径),故移动 = 原地改写该文件。**不重注册**:folder 不参与注册语义(name/script 才是),
+/// 注册表里的定义与执行器都不变,故省掉一次全量同步。
+pub async fn move_tool(
+    State(state): State<Arc<AppState>>,
+    JsonBody(body): JsonBody<MoveToolBody>,
+) -> Response {
+    let Some(safe) = sanitize_plugin_filename(&body.file) else {
+        return err_status("非法文件名", StatusCode::BAD_REQUEST);
+    };
+    if !safe.to_lowercase().ends_with(".json") {
+        return err_status("非法文件名", StatusCode::BAD_REQUEST);
+    }
+    let folder = crate::utils::folder_path::normalize_folder_path(&body.folder);
+    let path = state
+        .config
+        .data_dir
+        .join("plugins")
+        .join("tools")
+        .join(&safe);
+    let folder_for_write = folder.clone();
+    let result =
+        tokio::task::spawn_blocking(move || rewrite_plugin_folder(&path, &folder_for_write)).await;
+    match result {
+        Ok(Ok(())) => Json(json!({ "ok": true, "file": safe, "folder": folder })).into_response(),
+        Ok(Err(MoveFolderError::NotFound)) => not_found("插件文件不存在"),
+        Ok(Err(MoveFolderError::Failed(e))) => internal(e),
+        Err(e) => internal(format!("插件移动任务失败: {e}")),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ImportToolsBody {
+    /// 插件条目(综合导入 ⑦ 段):每项 = `{file, folder?, ...ToolPluginConfig}`。
+    /// 用 `Value` 整项收下、原样落盘:未知字段无损保留(与「导出件即文件」的口径对称)
+    pub plugins: Vec<serde_json::Value>,
+}
+
+/// POST /api/plugins/tools/import:批量导入插件(综合导入 ⑦)。
+///
+/// 三条语义:
+/// - **逐项校验、全部通过才落盘**(与 upload 的「先校验后写」同款):任一项不过 → 400,
+///   且一个文件都不写——避免半批插件落盘后「列表里多一半」这种要人工清理的中间态;
+/// - 校验走 `plugins::parse_plugin_json`(名称格式 + 脚本语法的**单一出处**),文件名净化
+///   与上传/删除同一把;写入覆盖同名文件;空 folder 不写键;
+/// - 写完后**一次** `parse_all` + `sync_plugins`(与 reload 同一条全量同步路径),
+///   本批文件的加载/注册问题如实回 400(目录里其它文件的既有问题只进日志,同 upload)。
+pub async fn import_tools(
+    State(state): State<Arc<AppState>>,
+    JsonBody(body): JsonBody<ImportToolsBody>,
+) -> Response {
+    if body.plugins.is_empty() {
+        return validation("导入内容为空");
+    }
+    // 阶段 1:逐项校验 + 生成落盘正文(不写任何文件)
+    let prepared = (|| -> Result<Vec<(String, Vec<u8>)>, String> {
+        let mut writes: Vec<(String, Vec<u8>)> = Vec::with_capacity(body.plugins.len());
+        for (idx, item) in body.plugins.iter().enumerate() {
+            let n = idx + 1;
+            let Some(obj) = item.as_object() else {
+                return Err(format!("第 {n} 个插件不是 JSON 对象"));
+            };
+            let file = obj.get("file").and_then(|v| v.as_str()).unwrap_or("");
+            let Some(safe) = sanitize_plugin_filename(file) else {
+                return Err(format!("第 {n} 个插件文件名非法:{file}"));
+            };
+            if !safe.to_lowercase().ends_with(".json") {
+                return Err(format!("第 {n} 个插件文件须为 .json:{safe}"));
+            }
+            // 落盘内容 = 原条目去掉 `file` 键,并规整 folder(空值不写键)
+            let mut config = obj.clone();
+            config.remove("file");
+            let folder = config
+                .get("folder")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let folder = crate::utils::folder_path::normalize_folder_path(&folder);
+            if folder.is_empty() {
+                config.remove("folder");
+            } else {
+                config.insert("folder".to_string(), json!(folder));
+            }
+            let text = serde_json::to_string_pretty(&serde_json::Value::Object(config))
+                .map_err(|e| format!("第 {n} 个插件序列化失败: {e}"))?;
+            if let Err(e) = crate::plugins::parse_plugin_json(&text) {
+                return Err(format!("第 {n} 个插件({safe})无效:{e}"));
+            }
+            writes.push((safe, text.into_bytes()));
+        }
+        Ok(writes)
+    })();
+    let writes = match prepared {
+        Ok(writes) => writes,
+        Err(e) => return validation(e),
+    };
+    let names: Vec<String> = writes.iter().map(|(n, _)| n.clone()).collect();
+
+    // 阶段 2:写文件(覆盖同名;原子写)
+    let dir = state.config.data_dir.join("plugins").join("tools");
+    let dir_for_write = dir.clone();
+    let written = tokio::task::spawn_blocking(move || -> Result<(), String> {
+        std::fs::create_dir_all(&dir_for_write).map_err(|e| format!("创建插件目录失败: {e}"))?;
+        for (name, bytes) in &writes {
+            crate::utils::fs_atomic::write_atomic(&dir_for_write.join(name), bytes)
+                .map_err(|e| format!("写入 {name} 失败: {e}"))?;
+        }
+        Ok(())
+    })
+    .await;
+    match written {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return internal(e),
+        Err(e) => return internal(format!("插件导入任务失败: {e}")),
+    }
+
+    // 阶段 3:一次全量同步(与 reload/upload 同一条路径)
+    let registry = state.tool_registry.clone();
+    let (loaded, mut errors) =
+        tokio::task::spawn_blocking(move || ToolPluginLoader::new(dir).parse_all())
+            .await
+            .unwrap_or_default();
+    let (count, removed, reg_errors) = sync_plugins(loaded, &registry);
+    errors.extend(reg_errors);
+    let mine = |e: &String| names.iter().any(|n| e.starts_with(&format!("{n}:")));
+    let my_errors: Vec<String> = errors.iter().filter(|e| mine(e)).cloned().collect();
+    for e in errors.iter().filter(|e| !mine(e)) {
+        tracing::warn!(plugin_error = %e, "插件目录存在其他加载错误");
+    }
+    if !my_errors.is_empty() {
+        return validation(format!("插件注册失败: {}", my_errors.join("; ")));
+    }
+    Json(json!({
+        "ok": true,
+        "imported": names.len(),
+        "loaded": count,
+        "removed": removed,
+    }))
+    .into_response()
+}
+
+/// GET /api/plugins/tools/export:导出全部插件文件(综合导出的 ⑦ 段数据源)。
+///
+/// 每项 = `{file, folder, name, description, parameters, script}`(ToolPluginConfig 同形 + 文件名),
+/// 供导入侧原样写回。解析失败的文件**不导出**,原因随 `errors` 回报——导出件必须是能用的一批。
+pub async fn export_tools(State(state): State<Arc<AppState>>) -> Response {
+    let dir = state.config.data_dir.join("plugins").join("tools");
+    // parse_all 是同步目录遍历 + 逐文件解析,挪阻塞线程池(B-1)
+    let (loaded, errors) =
+        tokio::task::spawn_blocking(move || ToolPluginLoader::new(dir).parse_all())
+            .await
+            .unwrap_or_default();
+    let plugins: Vec<serde_json::Value> = loaded
+        .into_iter()
+        .map(|p| {
+            json!({
+                "file": p.file,
+                "folder": p.folder,
+                "name": p.definition.name,
+                "description": p.definition.description,
+                "parameters": p.definition.parameters,
+                "script": p.script,
+            })
+        })
+        .collect();
+    Json(json!({ "ok": true, "plugins": plugins, "errors": errors })).into_response()
+}
+
 /// DELETE /api/plugins/tools/{name}:删除已导入的工具插件文件(工具随之注销)
 pub async fn delete_tool(
     State(state): State<Arc<AppState>>,
@@ -323,6 +541,7 @@ mod tests {
             },
             script: "return args.x".into(),
             file: file.into(),
+            folder: String::new(),
         }
     }
 

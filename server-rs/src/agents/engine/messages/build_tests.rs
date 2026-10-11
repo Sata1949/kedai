@@ -18,10 +18,12 @@ use super::trim_to_context;
 
 /// 构造带角色的世界书注入(6 层规范测试用)
 fn inj(role: &str, text: &str) -> WorldInjection {
-    WorldInjection {
-        role: role.to_string(),
-        text: text.to_string(),
-    }
+    WorldInjection::entry(role, text)
+}
+
+/// 构造引擎变量状态块注入(2026-10-09 修复批次:`state_block` 标记的兜底路径测试用)
+fn state_inj(role: &str, text: &str) -> WorldInjection {
+    WorldInjection::state_block(role, text)
 }
 /// 黄金顺序：系统契约 → 自定义模板（替换默认）→ 简单注入 → 角色/世界书边界；
 /// 尾部保持世界书激发 → 反思建议 → preset tail。
@@ -201,6 +203,150 @@ fn mvu_position_user_tail_with_custom_prompt() {
     assert!(
         msgs[1].content.contains("图书馆"),
         "最后 user 消息应含世界书: {}",
+        msgs[1].content
+    );
+}
+
+/// 变量状态块兜底(2026-10-09 冲突修复):自定义模板漏写 {{world_info}} 时,
+/// 世界书**常驻条目**按「Custom Prompt 完整替换、不是追加」契约确实不注入(既有语义不变),
+/// 但引擎状态块必须补回 system 尾部——否则模型看不到状态就不会输出 <UpdateVariable>,
+/// 变量更新通道整体静默停摆(改动前正是这个形态)。
+#[test]
+fn state_block_falls_back_when_template_lacks_world_info() {
+    let mut vars = HashMap::new();
+    // 块内含宏:兜底路径与占位符路径都要经宏展开,变量值里的宏两路径同解
+    let block =
+        "[当前状态]\n{\"who\":\"{{user}}\",\"hp\":88}\n\n[状态更新协议]\n状态变化时必须在本轮输出 <UpdateVariable> 块";
+    let constant = vec![inj("system", "常驻世界书"), state_inj("system", block)];
+    let history = vec![("user".to_string(), "你好".to_string())];
+    let tpl = "你是{{character_name}},自定义要求(没写世界书占位符)。";
+    let (msgs, _) = build_llm_messages_with_position(
+        "芽衣",
+        "兔族少女。",
+        "",
+        "",
+        &constant,
+        &[],
+        &history,
+        &[],
+        Some(tpl),
+        None,
+        None,
+        "user",
+        None,
+        "user",
+        &mut vars,
+        &mut AssistantVars::new(),
+        None,
+        LiteraryTexts::default(),
+    );
+    assert!(msgs[0].content.contains("自定义要求"));
+    assert!(
+        msgs[0].content.contains("[当前状态]"),
+        "状态块应兜底补进 system: {}",
+        msgs[0].content
+    );
+    assert!(
+        msgs[0].content.contains("\"who\":\"用户\""),
+        "兜底路径同样要经宏展开(与占位符路径同解): {}",
+        msgs[0].content
+    );
+    assert!(
+        !msgs[0].content.contains("{{user}}"),
+        "不得残留未展开的宏: {}",
+        msgs[0].content
+    );
+    assert_eq!(
+        msgs[0].content.matches("[当前状态]").count(),
+        1,
+        "状态块只应出现一次"
+    );
+    assert!(
+        !msgs[0].content.contains("常驻世界书"),
+        "世界书条目按「完整替换」契约仍不注入: {}",
+        msgs[0].content
+    );
+}
+
+/// 反向钉子:模板写了 {{world_info}} 时不得多补一次(状态块在 system 里只能出现一次)
+#[test]
+fn state_block_not_duplicated_when_placeholder_present() {
+    let mut vars = HashMap::new();
+    // 同一段含宏的状态块:占位符路径的展开结果应为「用户」(与兜底路径同解)
+    let block = "[当前状态]\n{\"who\":\"{{user}}\",\"hp\":88}";
+    let constant = vec![inj("system", "常驻世界书"), state_inj("system", block)];
+    let history = vec![("user".to_string(), "你好".to_string())];
+    let tpl = "你是{{character_name}},世界书:\n{{world_info}}\n自定义要求。";
+    let (msgs, _) = build_llm_messages_with_position(
+        "芽衣",
+        "兔族少女。",
+        "",
+        "",
+        &constant,
+        &[],
+        &history,
+        &[],
+        Some(tpl),
+        None,
+        None,
+        "user",
+        None,
+        "user",
+        &mut vars,
+        &mut AssistantVars::new(),
+        None,
+        LiteraryTexts::default(),
+    );
+    assert!(msgs[0].content.contains("常驻世界书"));
+    assert_eq!(
+        msgs[0].content.matches("[当前状态]").count(),
+        1,
+        "占位符路径已含状态块,不得再补一次: {}",
+        msgs[0].content
+    );
+    assert!(
+        msgs[0].content.contains("\"who\":\"用户\""),
+        "占位符路径的状态块同样经宏展开(与兜底路径同解): {}",
+        msgs[0].content
+    );
+}
+
+/// 位置随设置:状态块在 user_tail 位置(triggered 组)时,兜底不介入——
+/// 模板漏写占位符也不补进 system,仍随最新 user 消息尾部注入(既有行为不变)。
+#[test]
+fn state_block_user_tail_position_ignores_missing_placeholder() {
+    let mut vars = HashMap::new();
+    let triggered = vec![state_inj("user", "[当前状态]\n{\"hp\":88}")];
+    let history = vec![("user".to_string(), "你好".to_string())];
+    let tpl = "你是{{character_name}},自定义要求。";
+    let (msgs, _) = build_llm_messages_with_position(
+        "芽衣",
+        "兔族少女。",
+        "",
+        "",
+        &[],
+        &triggered,
+        &history,
+        &[],
+        Some(tpl),
+        None,
+        None,
+        "user",
+        None,
+        "user",
+        &mut vars,
+        &mut AssistantVars::new(),
+        None,
+        LiteraryTexts::default(),
+    );
+    assert!(
+        !msgs[0].content.contains("[当前状态]"),
+        "user_tail 位置不得补进 system: {}",
+        msgs[0].content
+    );
+    assert!(
+        msgs[1].content.contains("[当前状态]"),
+        "状态块应仍随最新 user 消息注入: {}",
         msgs[1].content
     );
 }

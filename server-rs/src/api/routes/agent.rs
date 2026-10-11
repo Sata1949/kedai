@@ -40,6 +40,8 @@ pub(crate) fn agent_routes() -> Router<Arc<AppState>> {
             "/api/agent-flows/import",
             post(agent_flows::import_agent_flows),
         )
+        // 移动分组(IMPHUB 附件管理):同为静态段,须与 `/{id}` 并存不冲突(见 bundle.rs 保留段清单)
+        .route("/api/agent-flows/move", post(agent_flows::move_agent_flow))
         .route(
             "/api/agent-flows/{id}",
             axum::routing::delete(agent_flows::delete_agent_flow),

@@ -34,6 +34,11 @@ pub struct ToolPluginConfig {
     pub parameters: Value,
     #[serde(default)]
     pub script: String,
+    /// 虚拟文件夹路径(IMPHUB「附件管理」;空 = 未分组)。**仅元数据**:
+    /// 加载器不消费它(注册语义只看 name/script),移动分组 = 原地改写文件里的这个字段;
+    /// 旧插件文件缺该键 → 空串(零迁移)。
+    #[serde(default)]
+    pub folder: String,
 }
 
 /// 已解析待注册的工具插件。
@@ -48,6 +53,34 @@ pub struct LoadedToolPlugin {
     pub script: String,
     /// 来源文件基名(供 UI「按文件分组」展示与错误定位;非完整路径)
     pub file: String,
+    /// 虚拟文件夹路径(IMPHUB「附件管理」;空 = 未分组;仅供管理面展示/移动)
+    pub folder: String,
+}
+
+/// 校验并解析一份工具插件 JSON 正文(**不落盘、不注册**)。
+///
+/// 校验规则与 `parse_file` **同一套**(单一出处,`parse_file` 也走本函数):name/script 非空
+/// 之外,还有名称格式与脚本语法两道加载期闸门。批量导入(`POST /api/plugins/tools/import`)
+/// 在**写入前**逐项调它把关——写了坏文件再回滚会污染插件目录,也会覆盖掉同名旧文件。
+pub fn parse_plugin_json(raw: &str) -> Result<ToolPluginConfig, String> {
+    let cfg: ToolPluginConfig =
+        serde_json::from_str(raw).map_err(|e| format!("JSON 解析失败: {e}"))?;
+    if cfg.name.trim().is_empty() {
+        return Err("name 不能为空".into());
+    }
+    if cfg.script.trim().is_empty() {
+        return Err("script 不能为空".into());
+    }
+    // 名称格式校验（2026-09-14 安全加固，见 known-limitations L19）：
+    // ① 只允许小写字母/数字/下划线，且首字符为字母——防注入怪异字符与不可见字符；
+    // ② **不得占用保留前缀** `mcp_`（MCP 工具命名空间）与 `agent` 系内置域，
+    //    否则插件可在授权裁决的「未知外部工具」语义上伪装成已知工具族。
+    //    跨命名空间的名称伪造比单纯重名更隐蔽（重名由 register_plugins 拦），
+    //    故在解析期就拒绝。
+    validate_plugin_name(&cfg.name)?;
+    // 加载期脚本语法校验(PLGM 1.2):语法形态错误在这里就报,不再等模型调用才失败
+    validate_script(&cfg.script)?;
+    Ok(cfg)
 }
 
 pub struct ToolPluginLoader {
@@ -90,23 +123,7 @@ impl ToolPluginLoader {
     /// 解析单个工具插件文件(**不注册**;供导入 API 复用)
     pub fn parse_file(&self, file: &Path) -> Result<LoadedToolPlugin, String> {
         let raw = std::fs::read_to_string(file).map_err(|e| format!("读取失败: {e}"))?;
-        let cfg: ToolPluginConfig =
-            serde_json::from_str(&raw).map_err(|e| format!("JSON 解析失败: {e}"))?;
-        if cfg.name.trim().is_empty() {
-            return Err("name 不能为空".into());
-        }
-        if cfg.script.trim().is_empty() {
-            return Err("script 不能为空".into());
-        }
-        // 名称格式校验（2026-09-14 安全加固，见 known-limitations L19）：
-        // ① 只允许小写字母/数字/下划线，且首字符为字母——防注入怪异字符与不可见字符；
-        // ② **不得占用保留前缀** `mcp_`（MCP 工具命名空间）与 `agent` 系内置域，
-        //    否则插件可在授权裁决的「未知外部工具」语义上伪装成已知工具族。
-        //    跨命名空间的名称伪造比单纯重名更隐蔽（重名由 register_plugins 拦），
-        //    故在解析期就拒绝。
-        validate_plugin_name(&cfg.name)?;
-        // 加载期脚本语法校验(PLGM 1.2):语法形态错误在这里就报,不再等模型调用才失败
-        validate_script(&cfg.script)?;
+        let cfg = parse_plugin_json(&raw)?;
         Ok(LoadedToolPlugin {
             definition: ToolDefinition {
                 name: cfg.name,
@@ -114,6 +131,7 @@ impl ToolPluginLoader {
                 parameters: cfg.parameters,
             },
             script: cfg.script,
+            folder: cfg.folder,
             file: file
                 .file_name()
                 .map(|s| s.to_string_lossy().to_string())
@@ -1086,6 +1104,66 @@ mod tests {
 
     fn eval(script: &str, args: Value) -> Result<String, String> {
         eval_tool_script(script, args)
+    }
+
+    /// 批量导入的预校验(单一出处):JSON 结构 / name / script 非空 / 名称格式 / 脚本语法,
+    /// 与 `parse_file` 走同一函数——写入前就把坏条目拦住,不落坏文件、不覆盖同名旧文件
+    #[test]
+    fn parse_plugin_json_enforces_load_time_gates() {
+        let ok = r#"{"name":"weather_tool","description":"d","script":"return args.x"}"#;
+        assert_eq!(parse_plugin_json(ok).unwrap().name, "weather_tool");
+        // folder 是可选元数据:缺省空串,给了就透传
+        assert_eq!(parse_plugin_json(ok).unwrap().folder, "");
+        let grouped =
+            r#"{"name":"a_tool","description":"d","script":"return 1","folder":"工具/天气"}"#;
+        assert_eq!(parse_plugin_json(grouped).unwrap().folder, "工具/天气");
+
+        assert!(parse_plugin_json("{不是 JSON").is_err(), "非法 JSON 应拒");
+        assert!(
+            parse_plugin_json(r#"{"name":"a_tool","script":"return 1"}"#).is_err(),
+            "description 缺失按既有线格式拒绝(与 upload 口径一致)"
+        );
+        assert!(parse_plugin_json(r#"{"name":"","description":"d","script":"x"}"#).is_err());
+        assert!(parse_plugin_json(r#"{"name":"a_tool","description":"d","script":""}"#).is_err());
+        // 名称格式闸门(L19)对批量导入同样生效:大写/保留前缀都拒
+        assert!(
+            parse_plugin_json(r#"{"name":"Weather","description":"d","script":"return 1"}"#)
+                .is_err()
+        );
+        assert!(
+            parse_plugin_json(r#"{"name":"mcp_tool","description":"d","script":"return 1"}"#)
+                .is_err()
+        );
+        // 脚本语法闸门(PLGM 1.2):形态错误在写入前拦下
+        assert!(parse_plugin_json(
+            r#"{"name":"a_tool","description":"d","script":"if (args.x) { return 1 }"}"#
+        )
+        .is_err());
+    }
+
+    /// folder(IMPHUB 附件管理):旧插件文件(无 folder 键)照常加载且 folder 为空串;
+    /// 带 folder 的文件解析后携带该值。加载器**不消费** folder——注册语义与它无关。
+    #[test]
+    fn loader_reads_folder_and_tolerates_legacy_files() {
+        let dir = crate::utils::test_support::TempDataDir::new("plugin-folder");
+        std::fs::write(
+            dir.join("legacy.json"),
+            r#"{"name":"legacy_tool","description":"旧","script":"return args.x"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("grouped.json"),
+            r#"{"name":"grouped_tool","description":"新","script":"return args.x","folder":"工具/天气"}"#,
+        )
+        .unwrap();
+        let loader = ToolPluginLoader::new(dir.path().to_path_buf());
+        let (loaded, errors) = loader.parse_all();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(loaded.len(), 2, "两条都应解析成功");
+        let legacy = loaded.iter().find(|p| p.file == "legacy.json").unwrap();
+        assert_eq!(legacy.folder, "", "旧文件缺 folder 键 → 空串");
+        let grouped = loaded.iter().find(|p| p.file == "grouped.json").unwrap();
+        assert_eq!(grouped.folder, "工具/天气");
     }
 
     /// 回归:top_level_find 必须先判断目标字符再更新括号深度,

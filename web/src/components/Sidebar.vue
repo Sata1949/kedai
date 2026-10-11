@@ -24,14 +24,13 @@ const {
 const fileInput = ref<HTMLInputElement | null>(null);
 const uploadError = ref('');
 
-// 上传角色卡请求(SettingsHub 快速操作等发起方自增 uiPrefs.characterUploadRequested):
-// 在本组件内响应,触发自身隐藏 file input;消除跨组件 document.querySelector 耦合
-watch(
-  () => store.characterUploadRequested,
-  (n, prev) => {
-    if (n !== prev) fileInput.value?.click();
-  },
-);
+// 角色卡导入入口(IMPHUB 步骤 C):按钮在下方 sv-side-foot(「综合设置」上侧),
+// 直接触发本组件隐藏 file input;原先「SettingsHub 快速操作 → characterUploadRequested
+// 计数器 → watch」的跨组件通道已删除(入口在侧栏,不需要间接通道)。
+function pickCharacterFile(): void {
+  uploadError.value = '';
+  fileInput.value?.click();
+}
 
 function avatarFile(avatarPath: string | null): string {
   if (!avatarPath) return '';
@@ -487,7 +486,7 @@ async function removeTask(task: TaskRecord): Promise<void> {
             <i class="diag" />
             </div>
             <p class="sub">暂无角色</p>
-            <p class="hint">点击下方「综合设置」→「上传角色卡」开始</p>
+            <p class="hint">点击下方「导入角色卡」开始</p>
           </div>
 
           <div class="min-h-0 flex-1 overflow-y-auto pr-1">
@@ -644,10 +643,24 @@ async function removeTask(task: TaskRecord): Promise<void> {
       </Transition>
     </div>
 
-    <!-- 底部:仅保留综合设置入口(2026-09 入口整合:工具面板统一收进综合设置的二级分类,
+    <!-- 底部:角色卡导入(IMPHUB 步骤 C:综合设置上侧)+ 综合设置入口
+         (2026-09 入口整合:工具面板统一收进综合设置的二级分类,
          原脚本管理/宏调试/记忆库/仓库索引 4 个按钮已移除,避免与 Hub 内入口重复) -->
     <div class="sv-side-foot">
       <div v-if="uploadError" class="sv-feedback err">{{ uploadError }}</div>
+      <button
+        class="sv-btn sv-side-btn"
+        title="导入角色卡(PNG 卡片或 JSON;导入后自动选中)"
+        @click="pickCharacterFile"
+      >
+        <span class="sv-side-btn-ico">
+          <svg viewBox="0 0 24 24">
+            <path d="M12 5v14" />
+            <path d="M5 12h14" />
+          </svg>
+        </span>
+        导入角色卡
+      </button>
       <button
         class="sv-btn primary sv-side-btn"
         @click="store.settingsOpen = true"

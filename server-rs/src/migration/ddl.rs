@@ -91,13 +91,15 @@ pub fn ensure_llm_requests_usage_columns(conn: &Connection) -> Result<(), String
 
 /// skills 渐进披露列(落地项 3):(列名, DDL 片段)。旧库经 ALTER ADD COLUMN 补齐;
 /// 列追加在表尾,与新版 CREATE_TABLES 建出的 schema normalize 后一致。
-const SKILLS_PROGRESSIVE_COLUMNS: [(&str, &str); 3] = [
+/// `folder`(IMPHUB 附件管理,2026-10-09)复用本缝:同是 skills 加性列,同为表尾追加。
+const SKILLS_PROGRESSIVE_COLUMNS: [(&str, &str); 4] = [
     ("allowed_tools", "allowed_tools TEXT NOT NULL DEFAULT '[]'"),
     (
         "run_as_subagent",
         "run_as_subagent INTEGER NOT NULL DEFAULT 0",
     ),
     ("model", "model TEXT NOT NULL DEFAULT ''"),
+    ("folder", "folder TEXT NOT NULL DEFAULT ''"),
 ];
 
 /// 幂等 schema 升级:为 skills 补渐进披露列(缺失才 ALTER,已存在跳过)。

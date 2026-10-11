@@ -1,4 +1,7 @@
-// 自定义 Agent 执行流程(custom 模式):流程库选择/新建/复制/删除/导入/导出 + 步骤编辑/拖拽。
+// 自定义 Agent 执行流程(custom 模式):流程库选择/新建/复制/删除/导出 + 步骤编辑/拖拽。
+// IMPHUB 步骤 C:导入流程与「导出全部流程」收编「综合导入 / 导出」窗口——本 composable
+// 只保留编辑与单流程导出;归一/报告等纯函数迁入 utils/importBundle(此处 re-export,
+// 既有测试与调用方零改动)。
 import { computed, ref } from 'vue';
 import { useAppStore } from '../store';
 import * as api from '../api';
@@ -17,6 +20,14 @@ import {
   toggleStepOutput as toggleStepOutputUtil,
 } from '../utils/agentFlowGraph';
 
+export {
+  FLOW_BUNDLE_KEY,
+  FLOW_BUNDLE_VERSION,
+  importReplaceHint,
+  importReportMessage,
+  normalizeFlowFile,
+} from '../utils/importBundle';
+
 /** 工具模式选择(与后端 tools 语义对齐:null=不使用,[]=全部,list=白名单) */
 export const TOOL_MODE_LABELS = {
   none: '不使用工具',
@@ -24,93 +35,9 @@ export const TOOL_MODE_LABELS = {
   list: '白名单',
 } as const;
 
-/** 搬运包版本键与版本号(与后端 `agent_flow_service::FLOW_BUNDLE_*` 对齐) */
-export const FLOW_BUNDLE_KEY = 'kedai_flow_bundle';
-export const FLOW_BUNDLE_VERSION = 1;
-
 /** 有未保存修改时的导出确认文案(导出取服务端已保存的那一份,不能静默给旧版) */
 export const UNSAVED_EXPORT_HINT =
   '有未保存的修改:导出的是**已保存**的版本(不含当前编辑)。要继续吗?\n(先点「保存执行流程」即导出最新版)';
-
-/**
- * **覆盖模式**导入的二次确认文案(B 批 B4;覆盖不可逆,故每次导入前都问一遍)。
- * 说清三件事:只动同 id 的那几份、id 不变引用不破、无法撤销——「本机其它流程不动」
- * 一并写明,否则用户会以为整库被替换。
- */
-export function importReplaceHint(count: number): string {
-  return (
-    `本次将导入 ${count} 个流程,并开启「覆盖同名流程」。\n` +
-    '与本机同 id 且内容不同的流程会被替换(id 不变,引用不会断),该操作无法撤销;\n' +
-    '本机其它流程不受影响。确定继续吗?'
-  );
-}
-
-/**
- * 归一流程文件 → 待导入的 flows[](+ 可选入口 root_id)。
- *
- * 支持四种形状(旧文件必须继续能导,新增的搬运包才有版本键):
- *  - 搬运包 `{kedai_flow_bundle:1, root_id, flows:[…]}`:整包导入,root_id 一并带上;
- *  - 库格式 `{flows:[…], current_flow_id}`:**整库**导入(此前只取当前/第一个,会静默丢流程);
- *  - `{config:{…}}` 包装:取其中的单流程;
- *  - 单流程 `{name,enabled,steps:[…]}`:一份。
- *
- * 版本键存在但不是 1 → 明确拒绝(新版字段旧端读不懂,静默丢字段比报错更糟)。
- */
-export function normalizeFlowFile(raw: unknown): {
-  flows: api.AgentFlowConfig[];
-  rootId?: string;
-} {
-  if (!raw || typeof raw !== 'object') {
-    throw new Error('无法识别的流程文件:内容不是 JSON 对象');
-  }
-  const obj = raw as Record<string, unknown>;
-  if (obj[FLOW_BUNDLE_KEY] !== undefined && obj[FLOW_BUNDLE_KEY] !== FLOW_BUNDLE_VERSION) {
-    throw new Error(
-      `流程包版本不支持(${String(obj[FLOW_BUNDLE_KEY])}),请升级 Kedai 后再导入`,
-    );
-  }
-  const asFlow = (v: unknown): api.AgentFlowConfig | null =>
-    v && typeof v === 'object' && Array.isArray((v as api.AgentFlowConfig).steps)
-      ? (v as api.AgentFlowConfig)
-      : null;
-  if (Array.isArray(obj.flows)) {
-    const flows = (obj.flows as unknown[]).map(asFlow);
-    if (flows.length === 0 || flows.some((f) => f === null)) {
-      throw new Error('流程文件里的 flows 不含合法流程(每项都需要 steps 数组)');
-    }
-    // 入口:搬运包用 root_id;库格式用 current_flow_id(否则导入后只选中「第一个」)
-    const root =
-      typeof obj.root_id === 'string'
-        ? obj.root_id
-        : typeof obj.current_flow_id === 'string'
-          ? obj.current_flow_id
-          : undefined;
-    return { flows: flows as api.AgentFlowConfig[], rootId: root };
-  }
-  const single = asFlow(obj.config) ?? asFlow(obj);
-  if (!single) {
-    throw new Error('无法识别的流程文件:需包含 steps 数组(单流程 / {config} 包装 / 流程库 / 搬运包)');
-  }
-  return { flows: [single] };
-}
-
-/** 导入报告 → 用户文案(导入 N / 跳过 M / 其中 K 个分配了新 id / 覆盖 J 个) */
-export function importReportMessage(report: api.FlowImportReport): string {
-  const parts = [`已导入 ${report.imported} 个流程`];
-  if (report.skipped > 0) parts.push(`跳过 ${report.skipped} 个(内容已存在)`);
-  if (report.renamed.length > 0) {
-    const names = report.renamed.map((r) => `「${r.name || r.old_id}」`).join('、');
-    parts.push(`${report.renamed.length} 个因 id 冲突分配了新 id:${names}`);
-  }
-  // 覆盖段(B 批 B4):仅 `on_conflict=replace` 才可能非空。容缺读取(replaced 缺失 =
-  // 旧服务端的报告,不给用户报「导入失败」),空数组则一字不出现(缺省的 rename 路径不变)
-  const replaced = report.replaced ?? [];
-  if (replaced.length > 0) {
-    const names = replaced.map((r) => `「${r.name || r.id}」`).join('、');
-    parts.push(`覆盖 ${replaced.length} 个同 id 流程(本机原有那份已被替换):${names}`);
-  }
-  return parts.join(';');
-}
 
 /** 下载 JSON(文件名净化非法字符后交给 downloadBlob;helper 只管落盘) */
 function downloadJson(base: string, payload: unknown): void {
@@ -132,14 +59,6 @@ export function useAgentFlow() {
   const flowId = ref<string | null>(null);
   const flowName = ref('');
   const flowDesc = ref('');
-  const flowImportInput = ref<HTMLInputElement | null>(null);
-  const flowImporting = ref(false);
-  /**
-   * 导入的**冲突处理**(B 批 B4):false(缺省)= 现状「新增副本 + 分配新 id」;
-   * true = 覆盖本机同 id 那份(不可逆,故 onFlowImport 里每次导入前二次确认)。
-   * 默认**不勾选**:覆盖会替换本机既有流程,绝不能是一个「顺手就带上」的默认项。
-   */
-  const flowImportReplace = ref(false);
 
   /** 流程库全部流程(选择器选项) */
   const flowLibFlows = computed(() => store.agentFlowLibrary?.flows ?? []);
@@ -232,35 +151,8 @@ export function useAgentFlow() {
     }
   }
 
-  /** 导入流程 JSON:支持单流程 {name,enabled,steps}、{config:{…}} 包装、库格式 {flows:[…]}
-   *  与搬运包 {kedai_flow_bundle:1,…};归一为 flows[] 后**一次**请求导入(失败库不变)。
-   *  搬运包版本键不是 1 时明确拒绝(提示升级),不静默丢字段。
-   *  B 批 B4:勾选「覆盖同名流程」时以 `on_conflict=replace` 导入——覆盖**不可逆**,
-   *  故发请求前二次确认(取消 = 什么都不做,本库一字不动);未勾选则不下发该键(现状)。 */
-  async function onFlowImport(e: Event): Promise<void> {
-    const input = e.target as HTMLInputElement;
-    const file = input.files?.[0];
-    input.value = '';
-    if (!file || flowImporting.value) return;
-    flowImporting.value = true;
-    flowMsg.value = '';
-    try {
-      const raw = JSON.parse(await file.text()) as unknown;
-      const { flows, rootId } = normalizeFlowFile(raw);
-      const onConflict: api.FlowImportConflict | undefined = flowImportReplace.value
-        ? 'replace'
-        : undefined;
-      if (onConflict && !window.confirm(importReplaceHint(flows.length))) return;
-      const report = await store.importAgentFlows(flows, rootId, onConflict);
-      await loadFlowConfig();
-      flowMsg.value = importReportMessage(report);
-      setTimeout(() => (flowMsg.value = ''), 4000);
-    } catch (err) {
-      flowMsg.value = `导入失败:${(err as Error).message}`;
-    } finally {
-      flowImporting.value = false;
-    }
-  }
+  /** 导入流程与其冲突处理(新增副本 / 覆盖同 id)已收编「综合导入 / 导出」窗口
+   *  (IMPHUB 步骤 C):形状归一与报告文案见 utils/importBundle;段级策略在窗口内选择。 */
 
   /** 导出当前流程 + 其**可达子流程闭包**为搬运包(含 id,故子流程引用跨机仍可达) */
   async function exportFlowNow(): Promise<void> {
@@ -277,19 +169,6 @@ export function useAgentFlow() {
       const extra = bundle.flows.length - 1;
       flowMsg.value =
         extra > 0 ? `已导出「${storedName}」及其 ${extra} 个子流程` : `已导出「${storedName}」`;
-      setTimeout(() => (flowMsg.value = ''), 3000);
-    } catch (e) {
-      flowMsg.value = `导出失败:${(e as Error).message}`;
-    }
-  }
-
-  /** 导出**全部流程**(库整体搬运:目标机器导入后即为同一套库) */
-  async function exportAllFlows(): Promise<void> {
-    if (draftDirty() && !window.confirm(UNSAVED_EXPORT_HINT)) return;
-    try {
-      const bundle = await api.exportAgentFlows();
-      downloadJson('kedai-flows-all', bundle);
-      flowMsg.value = `已导出全部 ${bundle.flows.length} 个流程`;
       setTimeout(() => (flowMsg.value = ''), 3000);
     } catch (e) {
       flowMsg.value = `导出失败:${(e as Error).message}`;
@@ -442,9 +321,9 @@ export function useAgentFlow() {
 
   return {
     flowDraft, flowSaving, flowMsg, editingStepId, dragStepId, flowId, flowName, flowDesc,
-    flowImportInput, flowImporting, flowImportReplace, flowLibFlows,
-    loadFlowConfig, onFlowSelect, newFlow, duplicateFlow, deleteFlowNow, onFlowImport,
-    exportFlowNow, exportAllFlows, saveFlowNow, addStep, removeStep, moveStep, onStepActionChange,
+    flowLibFlows,
+    loadFlowConfig, onFlowSelect, newFlow, duplicateFlow, deleteFlowNow,
+    exportFlowNow, saveFlowNow, addStep, removeStep, moveStep, onStepActionChange,
     onStepDragStart, onStepDragOver, onStepDrop, onStepDragEnd,
     // 二维依赖(二维批次 1/2):上游勾选 / 成果标注 / 并行上限
     toggleStepInput, toggleStepOutput, setFlowParallel,

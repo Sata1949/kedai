@@ -1,7 +1,8 @@
 # ci-linux.yml — 平台可移植性档(Q4,2026-09-27)
 #
-# **2026-09-29 状态:已服务端停用**(`gh workflow disable`,状态 `disabled_manually`;缘见
-# `docs/遗留.md` CI-BILL-1)。文件保留在位、触发面未改;恢复 = `gh workflow enable ci-linux -R Sata1949/kedai`。
+# **2026-10-11 状态:已恢复**(`gh workflow enable` 回 active;账号计费阻断解除经实测,始末见
+# `docs/遗留.md` CI-BILL-1 的 2026-10-11 追注)。2026-09-29~10-11 曾因计费阻断服务端停用
+# (状态 `disabled_manually`),文件全程保留、触发面未改。
 #
 # 定位:ci.yml 仍是**唯一权威档**(windows-latest + 全量 15 段门禁);本档不替代它,
 # 只补两件 Windows 档**结构上测不到**的事:

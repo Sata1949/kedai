@@ -4,12 +4,12 @@
 use super::*;
 use std::collections::BTreeSet;
 
-/// 路由**保留段**:这些字符串是 `/api/agent-flows/{export,import,select}` 的静态路径段,
-/// 而 axum 的静态段优先于 `/{id}`——所以 id 恰为它们的流程**删不掉**
+/// 路由**保留段**:这些字符串是 `/api/agent-flows/{export,import,select,move}` 的静态
+/// 路径段,而 axum 的静态段优先于 `/{id}`——所以 id 恰为它们的流程**删不掉**
 /// (`DELETE /api/agent-flows/export` 命中静态路由后按方法不匹配回 405,不会回落到 `/{id}`)。
 /// 导入是唯一能引入任意 id 的入口(旧路径恒分配 UUID),故这类 id 在导入侧一律重映射,
 /// 不让库里出现「建得出来、删不掉」的流程。
-const RESERVED_FLOW_IDS: &[&str] = &["export", "import", "select"];
+const RESERVED_FLOW_IDS: &[&str] = &["export", "import", "select", "move"];
 
 /// 是否为保留段 id(见 [`RESERVED_FLOW_IDS`])
 pub(super) fn is_reserved_flow_id(id: &str) -> bool {

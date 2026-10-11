@@ -85,6 +85,36 @@ pub async fn select_agent_flow(
     }
 }
 
+#[derive(Deserialize)]
+pub struct MoveFlowBody {
+    pub id: String,
+    /// 目标文件夹路径(空串 = 移回未分组;入库前由服务层规整)
+    #[serde(default)]
+    pub folder: String,
+}
+
+/// POST /api/agent-flows/move:移动流程到虚拟文件夹(IMPHUB「附件管理」,2026-10-09)。
+/// **不动 `current_flow_id`**(整理分组不是选择动作);返回与 GET 同形的库,前端一次刷新。
+pub async fn move_agent_flow(
+    State(state): State<Arc<AppState>>,
+    JsonBody(body): JsonBody<MoveFlowBody>,
+) -> Response {
+    // B-1:move 内含同步落盘,持锁 + 写文件整体挪阻塞线程池
+    let flow = state.flow.clone();
+    let result = state
+        .db_call(move || {
+            let mut svc = flow.lock().unwrap_or_else(|e| e.into_inner());
+            svc.move_to_folder(&body.id, &body.folder)
+                .map(|()| svc.get_library().clone())
+        })
+        .await;
+    match result {
+        Ok(Ok(lib)) => Json(flow_payload(&lib)).into_response(),
+        Ok(Err(e)) => validation(e),
+        Err(e) => internal(e),
+    }
+}
+
 /// DELETE /api/agent-flows/{id}:删除流程(删除当前流程时回退到第一个)
 pub async fn delete_agent_flow(
     State(state): State<Arc<AppState>>,

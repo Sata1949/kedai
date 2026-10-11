@@ -1,8 +1,9 @@
 # Kedai CI(批次 1,2026-09-13;2026-09-26 远端配置后受控启用)
 #
-# **2026-09-29 状态:已服务端停用**(`gh workflow disable`,状态 `disabled_manually`;缘见
-# `docs/遗留.md` CI-BILL-1)。文件保留在位、触发面未改;恢复 = `gh workflow enable ci -R Sata1949/kedai`。
-# 本地门禁 `tools/check-all.ps1` 不受影响。
+# **2026-10-11 状态:已恢复**(`gh workflow enable` 回 active;账号计费阻断解除经实测,始末见
+# `docs/遗留.md` CI-BILL-1 的 2026-10-11 追注)。2026-09-29~10-11 曾因计费阻断服务端停用
+# (状态 `disabled_manually`),文件全程保留、触发面未改。
+# 本地门禁 `tools/check-all.ps1` 与其并行(提交纪律见 `AGENTS.md`)。
 #
 # 背景:仓库此前只有本地门禁(tools/check-all.ps1 + pre-push hook),可被
 # `git push --no-verify` / `build.ps1 -SkipChecks` 绕过,且换机后 hook 需重装

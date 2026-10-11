@@ -394,8 +394,8 @@ pub struct RuntimeSettings {
 #[cfg(test)]
 mod tests {
     use super::params::{
-        default_literary_reflect_prompt, default_reflect_prompt, LEGACY_REFLECT_PROMPT_V1,
-        LITERARY_REFLECT_ENHANCEMENT,
+        default_literary_reflect_prompt, default_reflect_prompt,
+        LEGACY_LITERARY_REFLECT_ENHANCEMENT_V1, LEGACY_REFLECT_PROMPT_V1,
     };
     use super::*;
     use crate::utils::test_support::TempDataDir;
@@ -1669,8 +1669,16 @@ mod tests {
         ] {
             assert!(lit.contains(seg), "文学版不得改动判定协议:{seg}");
         }
+        // ③ 追加段末尾的协议重申必须与现行版**同口径**(2026-10-09 修复批次):
+        // 旧句「只判定不重写」与现行版「优先用工具做最小必要的定点修改」正面矛盾,
+        // 而该句位于 system 末尾(注意力最强位)——文学包用户每轮反思都吃这两句互斥纪律。
         assert!(
-            lit.trim_end().ends_with("只判定不重写。"),
+            !lit.contains("只判定不重写"),
+            "追加段不得再出现旧版「只判定不重写」纪律(与现行版的工具定点修改纪律冲突)"
+        );
+        assert!(
+            lit.trim_end()
+                .ends_with("判定词单独成行输出 PASS / 通过 / FAIL / 不通过,不达标时用一句话指出主要问题(可用上述新增标签)。"),
             "追加检查项后应以协议重申收尾,防稀释「输出协议在末尾」的注意力位置"
         );
     }
@@ -1729,9 +1737,10 @@ mod tests {
         assert_eq!(got.reflect_prompt, "", "空串 = 显式关闭反思,不得回填");
     }
 
-    /// RPFLOW-1:旧版默认反思提示词(v1)迁移——存量 settings.json 里逐字等于旧版默认
-    /// (或旧版文学版)的文本,升级后自动重物化为新版默认(否则存量安装永远停留在
-    /// 「只判定不重写」的旧文本上,新流程的批判修改纪律只对新装生效);自定义逐字优先。
+    /// RPFLOW-1 + 2026-10-09 修复批次:旧版默认反思提示词(v1,或 v1/RPFLOW-1 窗口期
+    /// 与旧文学增强段拼成的文学版)迁移——存量 settings.json 里逐字等于这些历史文本者,
+    /// 升级后自动重物化为当前默认(否则存量安装永远停留在「只判定不重写」的旧文本上,
+    /// 新流程的批判修改纪律只对新装生效);自定义逐字优先。
     #[test]
     fn load_migrates_legacy_reflect_prompt() {
         let cfg = test_cfg();
@@ -1755,10 +1764,10 @@ mod tests {
             default_reflect_prompt(),
             "旧版默认应迁移为新版默认"
         );
-        // ② 旧版文学版(旧默认 + 文学增强段)+ 开关开 → 迁到新版文学默认
+        // ② 旧版文学版(v1 默认词 + v1 文学增强段)+ 开关开 → 迁到新版文学默认
         let legacy_lit = format!(
             "{}\n\n{}",
-            LEGACY_REFLECT_PROMPT_V1, LITERARY_REFLECT_ENHANCEMENT
+            LEGACY_REFLECT_PROMPT_V1, LEGACY_LITERARY_REFLECT_ENHANCEMENT_V1
         );
         let got = write(&dir, &legacy_lit, true);
         assert_eq!(
@@ -1766,7 +1775,20 @@ mod tests {
             default_literary_reflect_prompt(),
             "旧版文学默认应迁移为新版文学默认"
         );
-        // ③ 自定义文本 → 逐字优先,不迁移
+        // ③ RPFLOW-1 窗口的文学版(现行默认词 + v1 文学增强段)+ 开关开 → 同样重物化
+        // (2026-10-09 修复批次:该组合的末尾是旧句「只判定不重写」,不迁移就永久自相矛盾)
+        let rpflow1_lit = format!(
+            "{}\n\n{}",
+            default_reflect_prompt(),
+            LEGACY_LITERARY_REFLECT_ENHANCEMENT_V1
+        );
+        let got = write(&dir, &rpflow1_lit, true);
+        assert_eq!(
+            got.reflect_prompt,
+            default_literary_reflect_prompt(),
+            "RPFLOW-1 窗口的文学默认应迁移为修复后的文学默认"
+        );
+        // ④ 自定义文本 → 逐字优先,不迁移
         let got = write(&dir, "CUSTOM-LEGACY-CHECK", true);
         assert_eq!(
             got.reflect_prompt, "CUSTOM-LEGACY-CHECK",

@@ -386,12 +386,11 @@
   .flow-row > .flow-graph-note { flex: 1 1 100%; } /* 同上:摘要整行独占 */
   .flow-edit { padding-left: 0; } /* 窄屏不再缩进,省出宽度给控件 */
 
-  /* --- 提示词楼层行:同病同治(PromptManager / PromptInjectSection 共用 7 列 grid) --- */
+  /* --- 提示词楼层行:同病同治(提示词注入区的楼层行共用 grid,窄屏改 flex) --- */
   .floor-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1-5); }
   .floor-row > .floor-grip { flex: 0 0 auto; }
   .floor-row > .floor-name { flex: 1 1 120px; min-width: 0; }
   .floor-row > .floor-select { flex: 0 0 auto; min-width: 84px; }
-  .floor-row > .floor-depth { flex: 0 0 auto; width: 76px; }
   .floor-row > .sv-btn:not(.sv-btn-fill) { flex: 0 0 auto; white-space: nowrap; }
   .floor-row > .floor-actions { flex: 0 0 auto; margin-left: auto; }
   .floor-row > .floor-content { flex: 1 1 100%; } /* 原 grid-column:1/-1 在 flex 下失效 */

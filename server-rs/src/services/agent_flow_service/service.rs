@@ -294,6 +294,32 @@ impl AgentFlowService {
         self.save_library()
     }
 
+    /// 移动流程到虚拟文件夹(IMPHUB 附件管理):只改 `folder` 元数据。
+    ///
+    /// 三条刻意的边界:
+    /// - **不动 `current_flow_id`**:整理分组不是选择动作,「移个文件夹顺手把当前流程换了」
+    ///   是静默改变 custom 模式的执行对象;
+    /// - **不跑校验**:folder 不参与 `validate_flow` / `validate_sub_flows`(纯展示元数据),
+    ///   组内流程结构有历史脏数据也不该拦住一次搬家;
+    /// - 落盘失败**内存回滚**(与 `import_bundle` 同款):不给「重启即消失」的幻影分组。
+    ///   路径规整走 `utils::folder_path`(与技能/插件同一口径),空串 = 移回未分组。
+    pub fn move_to_folder(&mut self, id: &str, folder: &str) -> Result<(), String> {
+        let folder = crate::utils::folder_path::normalize_folder_path(folder);
+        let Some(idx) = self.library.flows.iter().position(|f| f.id == id) else {
+            return Err(format!("流程不存在:{}", id));
+        };
+        let previous = self.library.flows[idx].folder.clone();
+        if previous == folder {
+            return Ok(());
+        }
+        self.library.flows[idx].folder = folder;
+        if let Err(e) = self.save_library() {
+            self.library.flows[idx].folder = previous;
+            return Err(e);
+        }
+        Ok(())
+    }
+
     /// 删除流程;删除当前选中时回退到第一个流程(库空则 None)。至少保留一个流程时不允许删空。
     ///
     /// 被其它流程当作子流程引用时**拒绝删除**(二维批次 6b):否则会留下悬空引用,

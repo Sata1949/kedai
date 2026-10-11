@@ -15,7 +15,7 @@ export async function importSkills(items: SkillImportItem[]): Promise<{ ok: bool
   return request('/skills', { method: 'POST', body: JSON.stringify(body) });
 }
 
-/** 更新技能(启用/停用、改名、改内容、工具白名单/子智能体/模型覆盖,仅提供字段生效) */
+/** 更新技能(启用/停用、改名、改内容、移动分组、工具白名单/子智能体/模型覆盖,仅提供字段生效) */
 export async function updateSkill(
   id: string,
   patch: {
@@ -29,6 +29,8 @@ export async function updateSkill(
     run_as_subagent?: boolean;
     /** 技能级模型覆盖(空 = 沿用当前连接器模型) */
     model?: string;
+    /** 虚拟文件夹路径(IMPHUB 附件管理;空串 = 移回未分组) */
+    folder?: string;
   },
 ): Promise<{ ok: boolean; skill: SkillRecord }> {
   return request(`/skills/${id}`, { method: 'PUT', body: JSON.stringify(patch) });

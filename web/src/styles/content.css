@@ -511,7 +511,7 @@
 .inject-empty { opacity: 0.5; }
 .floor-row {
   display: grid;
-  grid-template-columns: auto auto 1fr auto auto auto auto;
+  grid-template-columns: auto auto 1fr auto auto;
   gap: var(--space-1-5);
   align-items: center;
   padding: var(--space-2);
@@ -522,7 +522,6 @@
 .floor-grip { cursor: grab; color: var(--sv-ink-faint); user-select: none; letter-spacing: -2px; }
 .floor-name { min-width: 0; }
 .floor-select { width: auto; }
-.floor-depth { width: 76px; }
 .floor-actions { display: flex; gap: var(--space-1); justify-content: flex-end; }
 .floor-content { grid-column: 1 / -1; font-size: 12px; line-height: 1.6; }
 

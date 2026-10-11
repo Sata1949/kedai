@@ -12,6 +12,7 @@ import { cleanupCardScriptSandbox, ensureCardScriptSandbox, makeCardScriptRpcExt
 import { useVirtualMessages } from '../composables/useVirtualMessages';
 import { useResourceFrames } from '../composables/useResourceFrames';
 import { scriptBlocksCache, buildScriptBlocksKey } from '../renderCache';
+import { mergedRegexScripts } from '../utils/regexMerge';
 import type { UiMessage } from '../sseReducer';
 import ChatInput from './ChatInput.vue';
 import ChatMessageItem from './ChatMessageItem.vue';
@@ -23,6 +24,7 @@ const store = useAppStore();
 const {
   messages, generating, currentSessionId, currentCharacterId, currentCharacter, currentCharacterName,
   renderHtml, currentScriptHash, currentScriptAuthorized, mvuVariables, initVarEntries, lastError,
+  regexScripts,
 } = storeToRefs(store);
 
 /** 错误条「重试」锚点:最后一条**已落库**用户消息(与服务端重发校验口径一致,见 resendMessage) */
@@ -46,8 +48,11 @@ const scrollArea = computed<HTMLElement | null>(() => panelHost.value?.el ?? nul
 /** 脚本执行器(内部含 [InitVar] 解析缓存;角色切换/条目变化自动失效) */
 const scriptRunner = new ScriptRunner();
 
-/** 当前角色正则脚本(用于 HTML 渲染) */
-const currentScripts = computed(() => currentCharacter.value?.regex_scripts ?? []);
+/** 当前角色正则脚本 + 全局正则库(显示层生效;合并顺序:全局在前、卡级在后,
+ *  见 utils/regexMerge.ts。全局库变化会同时改 currentScriptHash 使渲染缓存失效) */
+const currentScripts = computed(() =>
+  mergedRegexScripts(regexScripts.value, currentCharacter.value?.regex_scripts ?? []),
+);
 
 /** 角色卡是否含渲染 HTML 状态栏的脚本(命中 <StatusPlaceHolderImpl/> 占位符) */
 const hasStatusScript = computed(() => hasStatusPlaceholderScript(currentScripts.value));
@@ -155,6 +160,8 @@ async function hydrateRenderPanels(): Promise<void> {
 
 onMounted(async () => {
   installMvuGlobals();
+  // 全局正则库(IMPHUB ⑥):幂等确保已加载(选角链路通常已拉过;此处兜底,失败不挡渲染)
+  void store.ensureRegexScriptsLoaded();
   // 资源框架常驻消息监听(ready 重 boot / store-sync 持久化),生命周期与组件一致
   window.addEventListener('message', frames.handleMessage);
   await executeCurrentMessageScripts();

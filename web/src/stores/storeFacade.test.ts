@@ -8,6 +8,7 @@ import { useGenSettingsStore } from './genSettings';
 import { useTaskStore } from './task';
 import { useUiPrefsStore } from './uiPrefs';
 import { useResourcesStore } from './resources';
+import { useRegexScriptsStore } from './regexScripts';
 
 // store.ts 兼容门面测试:门面 useAppStore('app') 组合 stores/ 各子 store,
 // 导出与原单一 store 完全相同的键集合。此处锁定三件事:
@@ -42,7 +43,7 @@ const STATE_KEYS = [
   'appMode', 'tasks', 'currentTaskId', 'currentTask', 'currentTaskUsage', 'globalTaskUsage',
   'taskCalls', 'callTraceOpen', 'taskRunMode',
   'worldBooks', 'worldBooksOpen', 'quickReplies', 'quickRepliesOpen',
-  'audio', 'audioOpen', 'pluginsOpen', 'skillsOpen', 'skills', 'contractsOpen', 'scriptsOpen',
+  'audio', 'audioOpen', 'assetsOpen', 'skills', 'contractsOpen', 'scriptsOpen',
   'macrosOpen', 'eventLog', 'eventsOpen', 'optimizeOpen', 'memoryOpen', 'repoIndexOpen',
   'agentSystemPrompt', 'searchEndpoint', 'mvuVarsPosition', 'reflectPrompt',
   'presetTailPrompt', 'presetTailRole', 'reflectAdvicePrompt', 'reflectAdviceRole',
@@ -143,6 +144,7 @@ describe('useAppStore 兼容门面', () => {
       ['task', useTaskStore()],
       ['uiPrefs', useUiPrefsStore()],
       ['resources', useResourcesStore()],
+      ['regexScripts', useRegexScriptsStore()],
     ];
     for (const [name, sub] of subs) {
       for (const key of Object.keys(sub)) {

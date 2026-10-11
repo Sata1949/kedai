@@ -18,6 +18,7 @@ import {
   hashRegexScripts,
   type ScriptAuthorizationGrant,
 } from '../scriptAuthorization';
+import { mergedRegexScripts } from '../utils/regexMerge';
 import {
   readLastCharacterId,
   readLastSessionId,
@@ -31,6 +32,7 @@ import {
 // 记忆/加载错误提示)不构成环,保持直接调用。
 import { registerCharacterIdProvider } from './storeBridge';
 import { useChatStore } from './chat';
+import { useRegexScriptsStore } from './regexScripts';
 import { useUiPrefsStore } from './uiPrefs';
 
 export const useCharacterStore = defineStore('app.character', () => {
@@ -148,19 +150,29 @@ export const useCharacterStore = defineStore('app.character', () => {
     // HTML 渲染开关按角色卡记忆:有记忆用记忆,无记忆回退全局默认
     useUiPrefsStore().syncRenderHtmlToCurrent();
     const selected = characters.value.find((c) => c.id === id);
+    // 全局正则库(IMPHUB ⑥):先确保已加载——授权哈希与渲染缓存键都必须覆盖它,
+    // 否则「改了全局正则不重渲染」(缓存键闸门)。加载失败静默退化为无全局,不挡选角。
+    const regexStore = useRegexScriptsStore();
+    await regexStore.ensureRegexScriptsLoaded();
     // 无条件计算脚本哈希:无脚本卡也得到合法哈希(空数组 SHA-256),使
     // currentScriptAuthorized 与 authorizeCurrentCharacterScripts 对无脚本卡同样生效,
     // 顶栏 JS 授权按钮常驻可授权/撤销;执行层因脚本数组为空永不执行,无安全影响。
     // 先算 regex-only 哈希(立即可用);后台拉详情,若卡带酒馆助手卡级脚本则重算
     // 含卡级脚本的哈希——执行面变化使旧授权自动失效(需重新授权一次,安全语义如此)。
-    const regexHash = await hashRegexScripts(selected?.regex_scripts ?? []);
+    // 合并顺序(全局在前、卡级在后)见 utils/regexMerge.ts。
+    const regexHash = await hashRegexScripts(
+      mergedRegexScripts(regexStore.regexScripts, selected?.regex_scripts ?? []),
+    );
     // 迟到守卫:等待期间已切到别的角色则丢弃(否则旧角色的哈希覆盖新角色的)
     if (currentCharacterId.value === id) currentScriptHash.value = regexHash;
     void fetchCharacterDetail(id).then(async (detail) => {
       if (!detail || currentCharacterId.value !== id) return;
       const cardScripts = collectCardScripts(detail.data_raw as Record<string, unknown> | undefined);
       if (cardScripts.length === 0) return;
-      const next = await hashRegexScripts(selected?.regex_scripts ?? [], cardScripts);
+      const next = await hashRegexScripts(
+        mergedRegexScripts(regexStore.regexScripts, selected?.regex_scripts ?? []),
+        cardScripts,
+      );
       if (currentCharacterId.value === id && next !== currentScriptHash.value) {
         currentScriptHash.value = next;
       }
@@ -249,12 +261,17 @@ export const useCharacterStore = defineStore('app.character', () => {
   async function authorizeCurrentCharacterScripts(): Promise<void> {
     const id = currentCharacterId.value;
     if (!id) return;
+    const regexStore = useRegexScriptsStore();
+    await regexStore.ensureRegexScriptsLoaded();
     const detail = await fetchCharacterDetail(id);
     const selected = characters.value.find((c) => c.id === id);
     const cardScripts = detail
       ? collectCardScripts(detail.data_raw as Record<string, unknown> | undefined)
       : [];
-    const hash = await hashRegexScripts(selected?.regex_scripts ?? [], cardScripts);
+    const hash = await hashRegexScripts(
+      mergedRegexScripts(regexStore.regexScripts, selected?.regex_scripts ?? []),
+      cardScripts,
+    );
     if (currentCharacterId.value === id) currentScriptHash.value = hash;
     scriptAuthorizationStore.grant(id, hash);
     scriptAuthorizations.value = scriptAuthorizationStore.list();

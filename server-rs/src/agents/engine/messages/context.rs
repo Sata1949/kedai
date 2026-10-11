@@ -527,8 +527,16 @@ impl AgentEngine {
         // 作为最高层约定(角色定位/创作原则/工具使用原则/输出纪律),其余内容随其后。
         // 宏 {{char}} 等已由 build 阶段对 system 展开,此处为外层拼接,不再二次展开。
         // 读取已按指纹缓存(P-4),命中时只剩 metadata();未命中仍会读盘,故一并让出。
-        let runtime_prompt =
-            crate::utils::blocking::park_worker(|| self.runtime_prompt.read_optional());
+        //
+        // 工具面判据(2026-10-09 冲突修复):其中的「工具使用原则」段只在**可能带工具**的
+        // 模式注入——快速 / 深度无工具循环(params.tools 恒空,也不追加【可用工具】段),
+        // 保留该段等于每轮宣告一批不存在的工具,且与状态块的「必须输出 <UpdateVariable>」
+        // 互斥。按**模式**判断而非本轮工具列表:custom 的工具逐步下发(step_params_for),
+        // 请求级列表恒空,按列表判断会把有工具的流程误判成无工具。
+        let has_tools = matches!(req.mode.as_str(), "agent" | "custom");
+        let runtime_prompt = crate::utils::blocking::park_worker(|| {
+            self.runtime_prompt.read_optional_for(has_tools)
+        });
         match runtime_prompt {
             Ok(Some(rt)) => {
                 // 替换角色/用户宏为实际值(其余宏已在 build 阶段对 system 展开,此处仅做角色替换)

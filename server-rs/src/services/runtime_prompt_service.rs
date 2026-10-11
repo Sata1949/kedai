@@ -15,6 +15,12 @@ pub const MAX_RUNTIME_PROMPT_BYTES: u64 = 512 * 1024;
 /// (保存即落盘为 AGENTS_RUNTIME.md,文件优先于本默认)。
 ///
 /// 内容与 Win 端调好的版本一致:`{{char}}` 由引擎按角色名替换(见 messages/context.rs)。
+///
+/// **条件省略(2026-10-09 冲突修复)**:其中的「工具使用原则」段([`RUNTIME_TOOL_PRINCIPLES`])
+/// 由引擎在**无工具模式**(快速 / 深度)整段省略——该段宣称可用 function calling 工具并
+/// 点名工具清单,而这两个模式不下发任何工具、也不追加【可用工具】段(见
+/// [`RuntimePromptService::read_optional_for`])。本常量文本本身不因该修复而变,
+/// 存量用户文件里逐字粘着同段文本的,同样按逐字判据省略。
 pub const DEFAULT_RUNTIME_PROMPT: &str = "\
 # 主 Agent 提示词（运行时）
 
@@ -40,6 +46,36 @@ pub const DEFAULT_RUNTIME_PROMPT: &str = "\
 
 一次只输出角色回应本身；若需分段，使用空行，不使用 Markdown 标题。工具调用与正文创作分离：先按需调用工具获取资料或写入状态，再输出正文。
 ";
+
+/// 「工具使用原则」段——引擎在**无工具模式**下整段省略(见 [`RuntimePromptService::read_optional_for`])。
+///
+/// 与 [`DEFAULT_RUNTIME_PROMPT`] 内嵌的那一段**逐字节相同**(下方有断言锁):省略判据就是
+/// 「文本逐字命中本常量」,故本常量既是省略目标,也是「这一段没被改过」的判据——
+/// 用户改过一字即视为自定义文本,原样保留(不代改用户意志)。
+///
+/// **为何要省略(2026-10-09 冲突修复)**:本段宣称「可通过 function calling 调用工具,
+/// 见 system 消息末尾的【可用工具】段」并点名 role / search / read / memory_read 等工具;
+/// 而快速 / 深度模式 `params.tools` 恒空、也不追加【可用工具】段(api/chat.rs 只在
+/// agent 模式下发工具),恒注入等于每轮给模型一批不存在的工具与一段无法执行的纪律——
+/// 同一轮 system 里的变量状态块又要求「必须输出 <UpdateVariable>」,两段互斥指令并存。
+/// 带工具的模式(agent / 自定义流程)注入本段时的文本不变。
+pub const RUNTIME_TOOL_PRINCIPLES: &str = "\
+## 工具使用原则
+
+- 你可以通过 function calling 调用工具（可用清单由系统注入，见 system 消息末尾的【可用工具】段）。需要时再调用，不必每轮都调；工具是辅助手段，不要因调用工具而中断创作节奏。
+- 需要随机数 / 掷骰决定走向时用 `role`；需要联网查最新信息时用 `search`；需要读取世界书、角色设定、长期记忆等资料时用 `read` / `memory_read`。
+- 需要把内容写入对话气泡或角色文件时用 `write` / `replace` / `create`；需要把可并行的子任务交给后台处理时用 `agentgo`，并用 `todo` / `read` 轮询结果，用 `agentend` 结束任务。
+- 变量状态更新优先经 function calling 工具完成；仅在未走工具时才使用 `<UpdateVariable>` 文本协议作为回退。除该块外不使用任何自定义标签。";
+
+/// 省略「工具使用原则」段(连同其前的空行分隔),其余内容逐字节不动。
+/// 仅当文本**逐字包含**该段时才省略:用户改过一字即视为自定义文本,原样返回。
+fn strip_tool_principles(text: &str) -> String {
+    if !text.contains(RUNTIME_TOOL_PRINCIPLES) {
+        return text.to_string();
+    }
+    text.replace(&format!("\n\n{RUNTIME_TOOL_PRINCIPLES}"), "")
+        .replace(RUNTIME_TOOL_PRINCIPLES, "")
+}
 
 #[derive(Debug)]
 pub struct RuntimePromptService {
@@ -253,6 +289,20 @@ impl RuntimePromptService {
         }
     }
 
+    /// 引擎注入用:按「本轮是否可能带工具」取运行时提示词。
+    ///
+    /// `has_tools = false`(快速 / 深度)时省略 [`RUNTIME_TOOL_PRINCIPLES`] 段;其余情况与
+    /// [`Self::read_optional`] 逐字节相同。判据由调用方(`messages/context.rs`)按**模式**给出:
+    /// 自定义流程的工具是**逐步**下发的(`step_params_for`),请求级工具列表恒空,
+    /// 按列表判断会把有工具的流程误判成无工具。
+    pub fn read_optional_for(&self, has_tools: bool) -> Result<Option<String>, String> {
+        match self.read_optional()? {
+            None => Ok(None),
+            Some(text) if has_tools => Ok(Some(text)),
+            Some(text) => Ok(Some(strip_tool_principles(&text))),
+        }
+    }
+
     pub fn write(&self, content: &str) -> Result<(), String> {
         validate_bytes(content.as_bytes()).map_err(|e| e.message(&self.path, "写入"))?;
         let parent = self
@@ -450,6 +500,81 @@ mod tests {
             Some(content.as_str()),
             "read_optional 也应拿到内置默认(否则引擎不注入)"
         );
+    }
+
+    /// 工具使用原则段与内置默认**逐字节**一致——省略判据就是「逐字命中本常量」,
+    /// 漂一个字符就失效(改默认文本里的该段必须同步改常量,本断言即是那道闸)。
+    #[test]
+    fn tool_principles_snippet_is_verbatim_inside_default() {
+        assert!(
+            DEFAULT_RUNTIME_PROMPT.contains(RUNTIME_TOOL_PRINCIPLES),
+            "默认文本必须逐字包含 RUNTIME_TOOL_PRINCIPLES(省略判据依赖它)"
+        );
+        assert!(
+            DEFAULT_RUNTIME_PROMPT
+                .contains(&format!("\n\n{RUNTIME_TOOL_PRINCIPLES}\n\n## 输出纪律")),
+            "该段前后应各由一个空行与相邻标题分隔(省略后才不残留多余空行)"
+        );
+    }
+
+    /// 无工具模式省略「工具使用原则」段(2026-10-09 冲突修复):
+    /// ① 内置默认(全新安装)→ 省略后不含工具宣称与工具名,其余段落逐字保留;
+    /// ② 带工具模式的文本与内置默认逐字节相同(本修复不改带工具路径)。
+    #[test]
+    fn no_tools_omits_tool_principles_section() {
+        let root = dir("tools-strip");
+        let service = RuntimePromptService::new(root.path().to_path_buf(), None);
+
+        let without = service.read_optional_for(false).unwrap().unwrap();
+        assert!(
+            !without.contains("工具使用原则"),
+            "无工具模式不得保留该段标题"
+        );
+        assert!(
+            !without.contains("function calling"),
+            "无工具模式不得再宣称 function calling"
+        );
+        assert!(!without.contains("agentgo"), "无工具模式不得点名工具");
+        assert!(without.contains("## 角色定位"), "其余段落应原样保留");
+        assert!(without.contains("## 创作原则"), "其余段落应原样保留");
+        assert!(without.contains("## 输出纪律"), "其余段落应原样保留");
+        assert!(without.contains("{{char}}"), "角色宏应保留");
+        assert!(
+            !without.contains("\n\n\n"),
+            "省略后不应残留连续空行:\n{without}"
+        );
+
+        let with = service.read_optional_for(true).unwrap().unwrap();
+        assert_eq!(
+            with, DEFAULT_RUNTIME_PROMPT,
+            "带工具模式应与内置默认逐字节相同"
+        );
+    }
+
+    /// 逐字判据的诚实边界:用户改过工具段(哪怕一字)→ 原样保留,引擎不代改用户意志;
+    /// 反之,存量用户文件里逐字粘着内置工具段的 → 一并省略(升级不要求用户改文件)。
+    #[test]
+    fn tool_section_stripping_is_verbatim_only() {
+        let root = dir("tools-verbatim");
+        let data = root.path().to_path_buf();
+        let service = RuntimePromptService::new(data.clone(), None);
+
+        // ① 改过一字的自定义文本 → 一字不动
+        let custom = "我的主提示词\n\n## 工具使用原则\n\n- 我自己的工具说明:用 read 读文件。\n";
+        service.write(custom).unwrap();
+        assert_eq!(
+            service.read_optional_for(false).unwrap().as_deref(),
+            Some(custom),
+            "自定义文本(逐字不等于内置段)不得被改动"
+        );
+
+        // ② 逐字粘着内置段的存量文件 → 省略该段,其余内容保留
+        service
+            .write(&format!("开头标记\n\n{DEFAULT_RUNTIME_PROMPT}"))
+            .unwrap();
+        let text = service.read_optional_for(false).unwrap().unwrap();
+        assert!(text.starts_with("开头标记"), "其余内容应保留:{text}");
+        assert!(!text.contains("## 工具使用原则"), "逐字段应被省略");
     }
 
     /// 文件优先于内置默认:用户保存过的内容不被默认覆盖

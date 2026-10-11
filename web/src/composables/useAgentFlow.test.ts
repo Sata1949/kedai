@@ -227,7 +227,7 @@ describe('流程搬运 7a:文件归一', () => {
   });
 });
 
-describe('流程搬运 7a:导入/导出接线', () => {
+describe('流程搬运 7a:导出接线(导入侧已收编「综合导入」窗口)', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
     resetApiTokenForTest();
@@ -235,121 +235,9 @@ describe('流程搬运 7a:导入/导出接线', () => {
     downloadMock.mockClear();
   });
 
-  it('导入:一次 POST 归一后的 flows + root_id,并按报告提示', async () => {
-    const api = mockApi([
-      {
-        url: '/api/agent-flows/import',
-        body: {
-          ok: true,
-          library: { current_flow_id: 'f1', flows: [flowOf('f1', '主')] },
-          report: { imported: 1, skipped: 1, renamed: [{ old_id: 'f1', new_id: 'new', name: '主' }] },
-        },
-      },
-      {
-        url: '/api/agent-flows',
-        body: { ok: true, library: { current_flow_id: 'f1', flows: [flowOf('f1', '主')] }, config: null },
-      },
-    ]);
-    const flow = useAgentFlow();
-    await flow.onFlowImport(
-      filePickEvent({
-        kedai_flow_bundle: 1,
-        root_id: 'f1',
-        flows: [flowOf('f1', '主'), flowOf('f2', '子')],
-      }),
-    );
-
-    const post = api.bodies.find((b) => b.url.includes('/agent-flows/import'));
-    if (!post) throw new Error('必须走搬运包导入端点(旧路径逐个 PUT 做不到原子)');
-    const sent = JSON.parse(post.body ?? '{}') as { flows: AgentFlowConfig[]; root_id?: string };
-    expect(sent.flows.map((f) => f.id)).toEqual(['f1', 'f2']);
-    expect(sent.root_id).toBe('f1');
-    expect(api.urls.filter((u) => u.includes('/agent-flows/import'))).toHaveLength(1);
-    expect(flow.flowMsg.value).toContain('已导入 1 个流程');
-    expect(flow.flowMsg.value).toContain('跳过 1 个');
-    expect(flow.flowImporting.value).toBe(false);
-  });
-
-  it('导入失败:后端 400 文案进 flowMsg,不抛穿', async () => {
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.includes('/api/bootstrap')) {
-        return new Response(JSON.stringify({ token: 't' }), { status: 200 });
-      }
-      return new Response(
-        JSON.stringify({ error: '流程「悬空」的步骤「挂载」引用的子流程不存在:x', code: 'VALIDATION' }),
-        { status: 400 },
-      );
-    });
-    const flow = useAgentFlow();
-    await flow.onFlowImport(filePickEvent({ config: flowOf('', '悬空') }));
-    expect(flow.flowMsg.value).toContain('导入失败');
-    expect(flow.flowMsg.value).toContain('子流程不存在');
-  });
-
-  // ===== B 批 B4:导入「覆盖」模式(默认仍为新增改名)=====
-
-  it('未勾选覆盖:请求体不带 on_conflict(现状 rename),也不弹二次确认', async () => {
-    const api = mockApi([
-      {
-        url: '/api/agent-flows/import',
-        body: {
-          ok: true,
-          library: { current_flow_id: 'f1', flows: [flowOf('f1', '主')] },
-          report: { imported: 1, skipped: 0, renamed: [], replaced: [] },
-        },
-      },
-      {
-        url: '/api/agent-flows',
-        body: { ok: true, library: { current_flow_id: 'f1', flows: [flowOf('f1', '主')] }, config: null },
-      },
-    ]);
-    const confirm = vi.spyOn(window, 'confirm');
-    const flow = useAgentFlow();
-    expect(flow.flowImportReplace.value, '覆盖默认不勾选').toBe(false);
-    await flow.onFlowImport(filePickEvent({ config: flowOf('f1', '主') }));
-
-    const sent = JSON.parse(
-      api.bodies.find((b) => b.url.includes('/agent-flows/import'))?.body ?? '{}',
-    ) as Record<string, unknown>;
-    expect(sent).not.toHaveProperty('on_conflict');
-    expect(confirm).not.toHaveBeenCalled();
-  });
-
-  it('勾选覆盖:二次确认(讲清不可撤销)通过才带 on_conflict=replace;取消则一字不发', async () => {
-    const api = mockApi([
-      {
-        url: '/api/agent-flows/import',
-        body: {
-          ok: true,
-          library: { current_flow_id: 'f1', flows: [flowOf('f1', '主')] },
-          report: { imported: 1, skipped: 0, renamed: [], replaced: [{ id: 'f1', name: '主' }] },
-        },
-      },
-      {
-        url: '/api/agent-flows',
-        body: { ok: true, library: { current_flow_id: 'f1', flows: [flowOf('f1', '主')] }, config: null },
-      },
-    ]);
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
-    const flow = useAgentFlow();
-    flow.flowImportReplace.value = true;
-
-    // 不可逆动作:先问一次;取消 = 库一字不动,且不会卡在「导入中」
-    await flow.onFlowImport(filePickEvent({ config: flowOf('f1', '主') }));
-    expect(confirm).toHaveBeenCalledTimes(1);
-    expect(String(confirm.mock.calls[0][0])).toContain('无法撤销');
-    expect(api.urls.some((u) => u.includes('/agent-flows/import'))).toBe(false);
-    expect(flow.flowImporting.value).toBe(false);
-
-    // 确认后才真的导入:请求体带 replace,报告文案含覆盖
-    confirm.mockReturnValue(true);
-    await flow.onFlowImport(filePickEvent({ config: flowOf('f1', '主') }));
-    const posts = api.bodies.filter((b) => b.url.includes('/agent-flows/import'));
-    expect(posts).toHaveLength(1);
-    expect(JSON.parse(posts[0].body ?? '{}')).toMatchObject({ on_conflict: 'replace' });
-    expect(flow.flowMsg.value).toContain('覆盖 1 个同 id 流程');
-  });
+  // IMPHUB 步骤 C:导入流程(含 on_conflict 覆盖模式)与「导出全部流程」收编
+  // ImportBundleModal;导入侧的归一/报告断言仍在上一个 describe,组件级接线见
+  // components/ImportBundleModal.test.ts(含 on_conflict=replace 的请求体断言)。
 
   it('导出当前流程:走搬运包端点(带 id),文件名与提示含子流程数', async () => {
     const api = mockApi([
@@ -435,22 +323,5 @@ describe('流程搬运 7a:导入/导出接线', () => {
     await flow.exportFlowNow();
     expect(confirm).not.toHaveBeenCalled();
     expect(downloadMock).toHaveBeenCalledTimes(1);
-  });
-
-  it('导出全部流程:不带 id 调端点,提示流程总数', async () => {
-    const api = mockApi([
-      {
-        url: '/api/agent-flows/export',
-        body: {
-          ok: true,
-          bundle: { kedai_flow_bundle: 1, root_id: 'f1', flows: [flowOf('f1', 'A'), flowOf('f2', 'B')] },
-        },
-      },
-    ]);
-    const flow = await loadedFlow();
-    await flow.exportAllFlows();
-    const call = api.urls.find((u) => u.includes('/agent-flows/export'));
-    expect(call).toBe('/api/agent-flows/export');
-    expect(flow.flowMsg.value).toContain('已导出全部 2 个流程');
   });
 });

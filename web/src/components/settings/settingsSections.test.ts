@@ -5,7 +5,6 @@ import { createPinia, setActivePinia } from 'pinia';
 import { useApiSettings } from '../../composables/useApiSettings';
 import { useConnectionProfiles } from '../../composables/useConnectionProfiles';
 import { useDataManager } from '../../composables/useDataManager';
-import { usePromptInject } from '../../composables/usePromptInject';
 import { useTaskStore } from '../../stores/task';
 import ConnectionProfilesSection from './ConnectionProfilesSection.vue';
 import ConnectionSection from './ConnectionSection.vue';
@@ -14,7 +13,6 @@ import CodingBundleSection from './CodingBundleSection.vue';
 import LiteraryBundleSection from './LiteraryBundleSection.vue';
 import VisionScreenshotSection from './VisionScreenshotSection.vue';
 import DataManagementSection from './DataManagementSection.vue';
-import PresetImportExportSection from './PresetImportExportSection.vue';
 import AgentSettingsSection from './AgentSettingsSection.vue';
 import GenParamsSection from './GenParamsSection.vue';
 import SettingsModal from '../SettingsModal.vue';
@@ -178,59 +176,43 @@ describe('ConnectionProfilesSection(连接配置区)', () => {
   });
 });
 
-describe('PresetImportExportSection(预设导入/导出区)', () => {
-  it('渲染导入/导出两行(合并后 standalone 也包含本区,防回归)', async () => {
-    const state = usePromptInject();
-    const html = await render(PresetImportExportSection, { state });
-    expect(html).toContain('预设导入 / 导出');
-    expect(html).toContain('导入酒馆预设');
-    expect(html).toContain('导出注入配置');
-  });
-});
-
-describe('SettingsModal(壳)', () => {
-  it('standalone 模式渲染遮罩/头部,且包含预设导入导出区(原 standalone 缺失)', async () => {
-    const html = await render(SettingsModal, { embedded: false });
-    expect(html).toContain('sv-modal-mask');
-    expect(html).toContain('预设导入 / 导出');
-    expect(html).toContain('API 设置');
-    expect(html).toContain('提示词注入');
-  });
-
-  it('embedded 模式仅渲染内容区,且只显示 activeSection 对应分区', async () => {
-    const html = await render(SettingsModal, { embedded: true, activeSection: 'data' });
-    expect(html).not.toContain('sv-modal-mask');
+describe('SettingsModal(壳 · 单模式)', () => {
+  // IMPHUB 步骤 E:standalone 模态分支已删(生产无入口,原为旧深链接兜底),
+  // 壳只保留供 SettingsHub 嵌入的一种形态。
+  it('只渲染内容区:无遮罩无头部,首屏分区可见', async () => {
+    const html = stripComments(await render(SettingsModal, { activeSection: 'api' }));
     expect(html).toContain('sv-settings-embedded');
-    // 数据管理区可见;API 设置区应被 v-show 隐藏
+    expect(html).not.toContain('sv-modal-mask');
+    expect(html).toContain('API 设置');
+    expect(html).not.toContain('预设导入 / 导出');
+  });
+
+  it('按 activeSection 只显示对应分区,常驻分区由 v-show 隐藏', async () => {
+    const html = await render(SettingsModal, { activeSection: 'data' });
     expect(html).toContain('数据管理');
+    // 首屏 API 分区同步挂载后常驻,切走时 display:none(不丢编辑态)
+    expect(html).toMatch(/display:\s*none/);
   });
 
-  it('装配:MCP 分区挂进壳(standalone 渲染;embedded 挂载不炸)', async () => {
-    const standalone = await render(SettingsModal, { embedded: false });
-    expect(standalone).toContain('MCP 服务');
-    expect(standalone).toContain('「重连」即生效');
-
-    const embedded = await render(SettingsModal, { embedded: true, activeSection: 'mcp' });
-    expect(embedded).toContain('sv-settings-embedded');
-    expect(embedded).toContain('MCP 服务');
+  it('装配:MCP 分区挂进壳(懒加载分区首次切到才挂载)', async () => {
+    const html = await render(SettingsModal, { activeSection: 'mcp' });
+    expect(html).toContain('sv-settings-embedded');
+    expect(html).toContain('MCP 服务');
+    expect(html).toContain('「重连」即生效');
   });
 
-  it('装配:编码能力包分区挂进壳(standalone 渲染;embedded 按 activeSection 可见)', async () => {
-    const standalone = await render(SettingsModal, { embedded: false });
-    expect(standalone).toContain('编码能力包');
-
-    const embedded = await render(SettingsModal, { embedded: true, activeSection: 'coding' });
-    expect(embedded).toContain('sv-settings-embedded');
-    expect(embedded).toContain('编码能力包');
+  it('装配:能力包分区按 activeSection 挂载(编码 / 文学;LIT-1)', async () => {
+    const coding = await render(SettingsModal, { activeSection: 'coding' });
+    expect(coding).toContain('编码能力包');
+    const literary = await render(SettingsModal, { activeSection: 'literary' });
+    expect(literary).toContain('文学能力包');
   });
 
-  it('装配:文学能力包分区挂进壳(standalone 渲染;embedded 按 activeSection 可见;LIT-1)', async () => {
-    const standalone = await render(SettingsModal, { embedded: false });
-    expect(standalone).toContain('文学能力包');
-
-    const embedded = await render(SettingsModal, { embedded: true, activeSection: 'literary' });
-    expect(embedded).toContain('sv-settings-embedded');
-    expect(embedded).toContain('文学能力包');
+  it('装配:提示词注入分区挂进壳(位置4 编辑面唯一入口,废弃楼层位置选择器已删)', async () => {
+    const html = stripComments(await render(SettingsModal, { activeSection: 'prompt' }));
+    expect(html).toContain('提示词注入');
+    expect(html).not.toContain('对话开头');
+    expect(html).not.toContain('深度 N');
   });
 });
 
@@ -421,8 +403,8 @@ describe('VisionScreenshotSection(视觉与截图区,默认关)', () => {
 });
 
 describe('SettingsModal 装配 · 视觉与截图', () => {
-  it('standalone 渲染包含「视觉与截图」分区(挂进壳)', async () => {
-    const standalone = await render(SettingsModal, { embedded: false });
-    expect(standalone).toContain('视觉与截图');
+  it('切到 vision 分区时渲染「视觉与截图」(挂进壳)', async () => {
+    const html = await render(SettingsModal, { activeSection: 'vision' });
+    expect(html).toContain('视觉与截图');
   });
 });

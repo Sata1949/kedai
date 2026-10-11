@@ -26,6 +26,9 @@ pub struct SkillImport {
     /// 可选模型名覆盖(空 = 用当前模型)
     #[serde(default)]
     pub model: String,
+    /// 虚拟文件夹路径(IMPHUB 附件管理;空 = 未分组)。旧格式缺字段 → 空
+    #[serde(default)]
+    pub folder: String,
 }
 
 /// 渐进披露技能清单(落地项 3):只列 name + description,每技能一行
@@ -61,11 +64,12 @@ fn row_to_skill(row: &rusqlite::Row) -> rusqlite::Result<SkillRecord> {
         allowed_tools: row.get(6)?,
         run_as_subagent: row.get::<_, i64>(7)? != 0,
         model: row.get(8)?,
+        folder: row.get(9)?,
     })
 }
 
 const SKILL_COLS: &str =
-    "id, name, description, content, enabled, created_at, allowed_tools, run_as_subagent, model";
+    "id, name, description, content, enabled, created_at, allowed_tools, run_as_subagent, model, folder";
 
 pub struct SkillService {
     db: Arc<Db>,
@@ -82,9 +86,9 @@ impl SkillService {
             Err(e) => return log_read_pool_failure("技能列表", e),
         };
         let sql = if only_enabled {
-            "SELECT id, name, description, content, enabled, created_at, allowed_tools, run_as_subagent, model FROM skills WHERE enabled = 1 ORDER BY name ASC"
+            "SELECT id, name, description, content, enabled, created_at, allowed_tools, run_as_subagent, model, folder FROM skills WHERE enabled = 1 ORDER BY name ASC"
         } else {
-            "SELECT id, name, description, content, enabled, created_at, allowed_tools, run_as_subagent, model FROM skills ORDER BY name ASC"
+            "SELECT id, name, description, content, enabled, created_at, allowed_tools, run_as_subagent, model, folder FROM skills ORDER BY name ASC"
         };
         let mut stmt = match conn.prepare(sql) {
             Ok(s) => s,
@@ -101,7 +105,7 @@ impl SkillService {
     pub fn get_by_name(&self, name: &str) -> Option<SkillRecord> {
         let conn = self.db.read().ok()?;
         conn.query_row(
-            "SELECT id, name, description, content, enabled, created_at, allowed_tools, run_as_subagent, model FROM skills WHERE lower(name) = lower(?1) LIMIT 1",
+            "SELECT id, name, description, content, enabled, created_at, allowed_tools, run_as_subagent, model, folder FROM skills WHERE lower(name) = lower(?1) LIMIT 1",
             params![name],
             row_to_skill,
         )
@@ -122,7 +126,9 @@ impl SkillService {
         .flatten()
     }
 
-    /// 导入(同名覆盖):返回导入/更新条数
+    /// 导入(同名覆盖):返回导入/更新条数。
+    /// folder 与其余字段同款语义:**以导入值为准**(同名覆盖时一并改写),
+    /// 与「同名覆盖」的既有口径一致——不做「保留本机分组」的特例。
     pub fn import(&self, items: Vec<SkillImport>) -> Result<usize, String> {
         let conn = self.db.write();
         let mut count = 0usize;
@@ -133,12 +139,14 @@ impl SkillService {
             }
             let allowed_tools =
                 serde_json::to_string(&it.allowed_tools).unwrap_or_else(|_| "[]".into());
+            let folder = crate::utils::folder_path::normalize_folder_path(&it.folder);
             let now = now_iso();
             conn.execute(
-                "INSERT INTO skills (id, name, description, content, enabled, created_at, allowed_tools, run_as_subagent, model) \
-                 VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?7, ?8) \
+                "INSERT INTO skills (id, name, description, content, enabled, created_at, allowed_tools, run_as_subagent, model, folder) \
+                 VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?7, ?8, ?9) \
                  ON CONFLICT(name) DO UPDATE SET description = excluded.description, content = excluded.content, \
-                 allowed_tools = excluded.allowed_tools, run_as_subagent = excluded.run_as_subagent, model = excluded.model",
+                 allowed_tools = excluded.allowed_tools, run_as_subagent = excluded.run_as_subagent, model = excluded.model, \
+                 folder = excluded.folder",
                 params![
                     Uuid::new_v4().to_string(),
                     name,
@@ -147,7 +155,8 @@ impl SkillService {
                     now,
                     allowed_tools,
                     it.run_as_subagent as i64,
-                    it.model.trim()
+                    it.model.trim(),
+                    folder
                 ],
             )
             .map_err(|e| format!("导入 skill 失败: {e}"))?;
@@ -156,7 +165,7 @@ impl SkillService {
         Ok(count)
     }
 
-    /// 更新:enabled / name / description / content 及渐进披露元数据(仅提供者生效)
+    /// 更新:enabled / name / description / content / folder 及渐进披露元数据(仅提供者生效)
     #[allow(clippy::too_many_arguments)] // 编排函数参数即上下文,拆 struct 收益低
     pub fn update(
         &self,
@@ -168,6 +177,7 @@ impl SkillService {
         allowed_tools: Option<&str>,
         run_as_subagent: Option<bool>,
         model: Option<&str>,
+        folder: Option<&str>,
     ) -> Option<SkillRecord> {
         let existing = self.get(id)?;
         let new_enabled = enabled.unwrap_or(existing.enabled);
@@ -186,11 +196,15 @@ impl SkillService {
         let new_model = model
             .map(|s| s.trim().to_string())
             .unwrap_or(existing.model);
+        // 提供 folder 即生效(空串 = 移回未分组,与「允许清空」的字段同款语义)
+        let new_folder = folder
+            .map(crate::utils::folder_path::normalize_folder_path)
+            .unwrap_or(existing.folder);
         let conn = self.db.write();
         let n = conn
             .execute(
                 "UPDATE skills SET name = ?1, description = ?2, content = ?3, enabled = ?4, \
-                 allowed_tools = ?5, run_as_subagent = ?6, model = ?7 WHERE id = ?8",
+                 allowed_tools = ?5, run_as_subagent = ?6, model = ?7, folder = ?8 WHERE id = ?9",
                 params![
                     new_name,
                     new_desc,
@@ -199,6 +213,7 @@ impl SkillService {
                     new_tools,
                     new_sub as i64,
                     new_model,
+                    new_folder,
                     id
                 ],
             )
@@ -248,6 +263,7 @@ mod tests {
                 allowed_tools: "[]".into(),
                 run_as_subagent: false,
                 model: String::new(),
+                folder: String::new(),
             },
             SkillRecord {
                 id: "2".into(),
@@ -259,6 +275,7 @@ mod tests {
                 allowed_tools: "[]".into(),
                 run_as_subagent: false,
                 model: String::new(),
+                folder: String::new(),
             },
         ];
         let m = skill_manifest(&skills);
@@ -283,6 +300,7 @@ mod tests {
             allowed_tools: "[]".into(),
             run_as_subagent: false,
             model: String::new(),
+            folder: String::new(),
         }];
         assert_eq!(skill_manifest(&skills), "- 旧技能:");
     }
@@ -300,6 +318,7 @@ mod tests {
             allowed_tools: "[]".into(),
             run_as_subagent: false,
             model: String::new(),
+            folder: String::new(),
         }];
         assert_eq!(skill_manifest(&skills), "- 技能:描述");
     }
@@ -309,7 +328,7 @@ mod tests {
     #[test]
     fn import_and_update_progressive_metadata() {
         let (_dir, svc) = service();
-        // 旧格式导入:缺三个新字段 → 默认 [] / false / ''
+        // 旧格式导入:缺三个新字段 → 默认 [] / false / '';folder 同样缺省为空
         svc.import(vec![SkillImport {
             name: "旧技能".into(),
             description: "旧".into(),
@@ -317,12 +336,14 @@ mod tests {
             allowed_tools: Vec::new(),
             run_as_subagent: false,
             model: String::new(),
+            folder: String::new(),
         }])
         .unwrap();
         let legacy = svc.get_by_name("旧技能").unwrap();
         assert_eq!(legacy.allowed_tools, "[]");
         assert!(!legacy.run_as_subagent);
         assert_eq!(legacy.model, "");
+        assert_eq!(legacy.folder, "");
 
         // 新格式导入:同名覆盖,元数据生效
         svc.import(vec![SkillImport {
@@ -332,6 +353,7 @@ mod tests {
             allowed_tools: vec!["read".into(), "write".into()],
             run_as_subagent: true,
             model: "deepseek-chat".into(),
+            folder: String::new(),
         }])
         .unwrap();
         let fresh = svc.get_by_name("新技能").unwrap();
@@ -354,6 +376,7 @@ mod tests {
                 None,
                 None,
                 Some("other-model"),
+                None,
             )
             .unwrap();
         assert!(!updated.enabled);
@@ -364,6 +387,62 @@ mod tests {
         let manifest = skill_manifest(&svc.list(true));
         assert!(manifest.contains("旧技能"));
         assert!(!manifest.contains("新技能"));
+    }
+
+    /// folder(IMPHUB 附件管理):导入携带、入库规整、同名覆盖以导入值为准、
+    /// 更新可改可清空、未提供则保持;列表/详情同样携带。
+    #[test]
+    fn skill_folder_import_overwrite_and_update() {
+        let (_dir, svc) = service();
+        let item = |folder: &str| SkillImport {
+            name: "写作".into(),
+            description: String::new(),
+            content: "c".into(),
+            allowed_tools: Vec::new(),
+            run_as_subagent: false,
+            model: String::new(),
+            folder: folder.into(),
+        };
+
+        // 入库规整:与 utils::folder_path 同口径(书写差异不在库里裂成两份)
+        svc.import(vec![item("/写作//草稿/")]).unwrap();
+        let s = svc.get_by_name("写作").unwrap();
+        assert_eq!(s.folder, "写作/草稿");
+
+        // 同名覆盖:folder 以导入值为准(与其余字段同款语义)
+        svc.import(vec![item("")]).unwrap();
+        assert_eq!(svc.get_by_name("写作").unwrap().folder, "");
+
+        // 更新:提供才生效;空串 = 移回未分组;未提供 = 保持现值
+        svc.import(vec![item("A/B")]).unwrap();
+        let id = svc.get_by_name("写作").unwrap().id;
+        let moved = svc
+            .update(
+                &id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("新分组/子"),
+            )
+            .unwrap();
+        assert_eq!(moved.folder, "新分组/子");
+        let kept = svc
+            .update(&id, None, None, None, None, None, None, None, None)
+            .unwrap();
+        assert_eq!(kept.folder, "新分组/子", "未提供 folder 应保持");
+        let cleared = svc
+            .update(&id, None, None, None, None, None, None, None, Some(""))
+            .unwrap();
+        assert_eq!(cleared.folder, "", "空串应移回未分组");
+
+        // 列表携带(folder 是列表页签分组的数据源)
+        let listed = svc.list(false);
+        assert!(listed.iter().all(|s| s.folder.is_empty()));
+        assert_eq!(svc.get(&id).unwrap().folder, "");
     }
 
     /// parse_allowed_tools 容错:非法 JSON / 非数组 / 空白项回退空表。

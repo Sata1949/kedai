@@ -1066,6 +1066,9 @@ pub struct SkillRecord {
     pub run_as_subagent: bool,
     /// 可选模型名覆盖(空 = 用当前模型)
     pub model: String,
+    /// 虚拟文件夹路径(IMPHUB「附件管理」;空串 = 未分组)。
+    /// 仅元数据,不做真实目录;库内统一存「A/B」形式(规整见 `utils::folder_path`)
+    pub folder: String,
 }
 
 // ---------- 子智能体任务(agentgo / agentend) ----------

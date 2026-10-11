@@ -234,6 +234,11 @@ if (-not $AuditOnly) {
         # 原先散在多份文档各写一个数、且不在任何门禁内(count-tests 只管测试数字)。
         # 历史层(「原文 + 变更标注」体例)保留旧值不判失配。
         Invoke-Stage 'docs: check-doc-claims' { node tools/check-doc-claims.mjs }
+        # 新手教程防漂移机检(2026-10-10 TUTSYNC OB-12,硬门禁):教程步骤表的跳转落点、
+        # 引用的界面真实名、退役入口叫法、关于页速览覆盖与步数派生,逐条与真实界面对比。
+        # 放在文档口径段而不是 web 段:它校验的是「内容与界面一致性」这类口径事实,
+        # 与 GATE-1 的教训同理——不该被 -SkipWeb 跳过(纯后端批次同样可能改改名/删入口而忘改教程)。
+        Invoke-Stage 'docs: check-tutorial' { node tools/check-tutorial.mjs }
     } finally { Pop-Location }
 }
 

@@ -39,6 +39,9 @@ pub struct UpdateSkillBody {
     /// 可选模型名覆盖(空 = 用当前模型)
     #[serde(default)]
     pub model: Option<String>,
+    /// 虚拟文件夹路径(IMPHUB 附件管理;空串 = 移回未分组;缺省 = 保持现值)
+    #[serde(default)]
+    pub folder: Option<String>,
 }
 
 /// GET /api/skills:全部技能(含已停用,前端按钮可切换)
@@ -69,7 +72,7 @@ pub async fn import_skills(
     }
 }
 
-/// PUT /api/skills/{id}:更新(启用/停用、改名、改内容,仅提供字段生效)
+/// PUT /api/skills/{id}:更新(启用/停用、改名、改内容、移动分组,仅提供字段生效)
 pub async fn update(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -87,6 +90,7 @@ pub async fn update(
                 body.allowed_tools.as_deref(),
                 body.run_as_subagent,
                 body.model.as_deref(),
+                body.folder.as_deref(),
             )
         })
         .await;

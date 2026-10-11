@@ -4,6 +4,7 @@
 //! `productionLineCount`/`productionSource` 靠 `^#!?\[cfg\(test\)\]` 切出生产区,否则本文件会被
 //! 当成生产代码,规则 E(`services` 生产代码禁用 `.expect(`,基线为空集)会把测试里的断言全部判红。
 #![cfg(test)]
+use super::bundle::flow_fingerprint;
 use super::*;
 use crate::utils::test_support::TempDataDir;
 
@@ -34,6 +35,7 @@ fn flow(name: &str, steps: Vec<PlanStep>) -> AgentFlowConfig {
         enabled: true,
         steps,
         max_parallel_nodes: None,
+        folder: String::new(),
     }
 }
 
@@ -2139,5 +2141,140 @@ fn builtin_demo_flow_passes_validate_flow_and_is_two_dimensional() {
     assert!(
         demo.steps[0].generates == Some(false),
         "拆解节点是内部规划(不产出面向用户的正文)"
+    );
+}
+
+// ==================== folder(IMPHUB 附件管理,2026-10-09) ====================
+
+/// 空 folder 必须**逐字节不进指纹与落盘**:旧库文件与旧搬运包都没有 folder 键,
+/// 升级后同一份流程的指纹若因空串多出一个键而改变,重复导入的幂等判定会静默漂移。
+#[test]
+fn empty_folder_keeps_fingerprint_bytewise_stable() {
+    // 旧形态(无 folder 键)解析后重新序列化:字节不变(空值省略序列化)
+    let old = r#"{"id":"f1","name":"旧流程","enabled":true,"steps":[]}"#;
+    let cfg: AgentFlowConfig = serde_json::from_str(old).unwrap();
+    assert_eq!(cfg.folder, "", "缺 folder 键 → 空串");
+    assert_eq!(
+        serde_json::to_string(&cfg).unwrap(),
+        old,
+        "空 folder 不得在序列化里多出键"
+    );
+
+    // 指纹:空 folder 与旧形态一致;非空 folder 计入内容(不同分组的两份是两份)
+    let mut moved = cfg.clone();
+    moved.folder = "写作/草稿".into();
+    assert_ne!(
+        flow_fingerprint(&cfg).unwrap(),
+        flow_fingerprint(&moved).unwrap(),
+        "非空 folder 应计入指纹"
+    );
+    assert!(
+        serde_json::to_string(&moved)
+            .unwrap()
+            .contains("\"folder\":\"写作/草稿\""),
+        "非空 folder 应落盘"
+    );
+}
+
+/// folder 随搬运包走:导出携带、导入保留(闭包导出与全库导出同一份结构)
+#[test]
+fn bundle_carries_folder_through_export_import() {
+    let dir = TempDataDir::new("flow-folder-export");
+    let mut svc = service(&dir);
+    let mut cfg = flow("带分组", vec![step("s1", "direct", Some(true))]);
+    cfg.folder = "写作/草稿".into();
+    svc.set(cfg).unwrap();
+
+    let bundle = svc.export_bundle(None).unwrap();
+    let json = serde_json::to_value(&bundle).unwrap();
+    let exported = json["flows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["name"] == "带分组")
+        .expect("导出的搬运包应含该流程");
+    assert_eq!(exported["folder"], "写作/草稿");
+
+    // 导入到另一份库:folder 保留
+    let dir2 = TempDataDir::new("flow-folder-import");
+    let mut svc2 = service(&dir2);
+    let report = svc2
+        .import_bundle(bundle.flows, None, ImportConflictMode::Rename)
+        .unwrap();
+    assert_eq!(report.imported, 1);
+    let imported = svc2
+        .get_library()
+        .flows
+        .iter()
+        .find(|f| f.name == "带分组")
+        .expect("导入后应在库内");
+    assert_eq!(imported.folder, "写作/草稿");
+}
+
+/// 移动分组(IMPHUB 附件管理):只改 folder、**不动 current_flow_id**、路径规整、
+/// 落盘后重读仍在;未知 id 报错点名(组织动作不得顺手改变 custom 模式的执行对象)
+#[test]
+fn move_to_folder_keeps_selection_and_persists() {
+    let dir = TempDataDir::new("flow-move");
+    let mut svc = service(&dir);
+    // 保存两个流程:后保存的「乙」成为当前选中
+    svc.set(flow("甲", vec![step("s1", "direct", Some(true))]))
+        .unwrap();
+    svc.set(flow("乙", vec![step("s1", "direct", Some(true))]))
+        .unwrap();
+    let current = svc.get_library().current_flow_id.clone();
+    assert!(current.is_some(), "保存即选中");
+    let other = svc
+        .get_library()
+        .flows
+        .iter()
+        .find(|f| Some(&f.id) != current.as_ref())
+        .map(|f| f.id.clone())
+        .expect("库里应有非当前流程");
+
+    // 移动非当前流程:路径规整入库,当前选中不变
+    svc.move_to_folder(&other, " /写作// 草稿/ ").unwrap();
+    assert_eq!(
+        svc.get_library().current_flow_id,
+        current,
+        "移动不得改变当前选中"
+    );
+    let moved = svc
+        .get_library()
+        .flows
+        .iter()
+        .find(|f| f.id == other)
+        .unwrap();
+    assert_eq!(moved.folder, "写作/草稿");
+
+    // 落盘后重读:分组与选中都在
+    let reloaded = service(&dir);
+    let moved = reloaded
+        .get_library()
+        .flows
+        .iter()
+        .find(|f| f.id == other)
+        .unwrap();
+    assert_eq!(moved.folder, "写作/草稿");
+    assert_eq!(reloaded.get_library().current_flow_id, current);
+
+    // 移到未分组(空串)与重复移动到同一目标都应是成功且无副作用
+    svc.move_to_folder(&other, "").unwrap();
+    assert_eq!(
+        svc.get_library()
+            .flows
+            .iter()
+            .find(|f| f.id == other)
+            .unwrap()
+            .folder,
+        ""
+    );
+    svc.move_to_folder(&other, "").unwrap();
+
+    // 未知 id:报错点名
+    let err = svc.move_to_folder("no-such-flow", "A").unwrap_err();
+    assert!(
+        err.contains("不存在") && err.contains("no-such-flow"),
+        "{err}"
     );
 }
