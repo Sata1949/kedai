@@ -124,9 +124,16 @@ pub struct WorldBookEntryView {
     /// 注入位置权重(0=before_char ... 4=after_char;本项目统一并入 system,仅用于排序)
     #[serde(default)]
     pub position: i64,
-    /// 扫描深度(酒馆 depth):从最新消息往前扫最近 N 条(0 = 全部)
+    /// 插入深度(酒馆 `depth` / `extensions.depth`):`position=atDepth` 时从末尾算注入位置。
+    /// **不是关键词扫描窗口**——窗口是下面的 `scan_depth`(2026-10-11 WB-D 前本字段注释误标为「扫描深度」)。
+    /// 仅在条目未声明 `scan_depth` 时充当窗口兜底(引擎侧 `scan_window_len` 的 fallback)。
     #[serde(default)]
     pub depth: i64,
+    /// 关键词扫描窗口(酒馆 `scanDepth` / `extensions.scan_depth`):只扫最近 N 条消息(0 = 全部)。
+    /// `None` = 条目未声明,**写回时不产出该键**(保持原值)——与 `regex`/`role` 的「为空写显式 null」
+    /// 惯例相反:这里写 null/0 会把已声明窗口打回 `depth` 兜底(0 = 扫全部),静默改变触发行为。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan_depth: Option<i64>,
     /// 注入顺序(酒馆 order / insertion_order):同 position 内先后
     #[serde(default)]
     pub order: i64,

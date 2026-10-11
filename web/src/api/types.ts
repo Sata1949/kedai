@@ -266,8 +266,10 @@ export interface WorldBookEntry {
   content: string;
   /** 注入位置权重(0-4,酒馆 position) */
   position?: number;
-  /** 扫描深度(酒馆 depth:从最新消息往前扫 N 条,0=全部) */
+  /** 插入深度(酒馆 depth:position=atDepth 时从末尾算注入位置;未声明扫描窗口时兼作窗口兜底) */
   depth?: number;
+  /** 关键词扫描窗口(酒馆 scanDepth):关键词只扫最近 N 条消息(0=全部);缺省=未声明,保存时保持原值 */
+  scan_depth?: number | null;
   /** 注入顺序(酒馆 order) */
   order?: number;
   /** 关键词大小写敏感 */
@@ -591,6 +593,8 @@ export interface PromptPreview {
   ok: boolean;
   note: string;
   layers: PromptPreviewLayer[];
+  /** 结构化告警码(WB-E;文案映射见 utils/promptWarnings.ts)。后端恒返回数组,空集表示无告警。 */
+  warnings: string[];
 }
 
 export interface RuntimeSettingsPatch {

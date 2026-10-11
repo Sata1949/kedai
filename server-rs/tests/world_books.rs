@@ -254,6 +254,64 @@ async fn world_book_bind_to_character() {
     assert!(updated.get("character_id").is_none() || updated["character_id"].is_null());
 }
 
+/// WB-D 编辑面:`scan_depth`(关键词扫描窗口)经 API 可读可写,且**PUT 不带该字段时不得清空已声明值**
+/// (清空会把窗口打回条目 depth 兜底,静默改变世界书触发行为)。
+#[tokio::test]
+async fn world_book_scan_depth_roundtrip() {
+    let _guard = test_lock().await;
+    let app = test_app();
+    let (status, book) = upload_world_book(app, &sample_book(), None).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = book["id"].as_str().unwrap().to_string();
+
+    let entry = |with_window: bool| {
+        let mut e = json!({
+            "id": 0, "comment": "窗口", "keys": ["车站"], "regex": null, "use_regex": false,
+            "constant": false, "enabled": true, "content": "车站很繁忙。", "position": 2,
+            "depth": 1
+        });
+        if with_window {
+            e.as_object_mut()
+                .unwrap()
+                .insert("scan_depth".into(), json!(2));
+        }
+        json!({ "entries": [e] })
+    };
+
+    // 写入显式窗口 → GET 回显
+    let (status, saved) = send_json(
+        app,
+        "PUT",
+        &format!("/api/world-books/{id}/entries"),
+        entry(true),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        saved["entries"][0]["scan_depth"],
+        json!(2),
+        "PUT 响应回显窗口"
+    );
+
+    let url = format!("/api/world-books/{id}/entries");
+    let (_, got) = send_json(app, "GET", &url, json!({})).await;
+    assert_eq!(
+        got["entries"][0]["scan_depth"],
+        json!(2),
+        "视图必须承载 scan_depth,前端才有编辑入口"
+    );
+
+    // 旧客户端形态:同一条目但不带 scan_depth → 窗口保持,不被清空
+    let (status, _) = send_json(app, "PUT", &url, entry(false)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, got) = send_json(app, "GET", &url, json!({})).await;
+    assert_eq!(
+        got["entries"][0]["scan_depth"],
+        json!(2),
+        "PUT 不带 scan_depth 不得清空已声明窗口"
+    );
+}
+
 /// 独立世界书条目编辑:PUT /entries 全量回写(关键词/常驻/激发/位置)→ GET 验证
 #[tokio::test]
 async fn world_book_entries_editable() {
