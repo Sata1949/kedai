@@ -13,6 +13,12 @@ use crate::services::prompt_inject_service::{FloorRole, InjectMode, PromptInject
 use crate::services::prompt_kit::untrusted_boundary;
 use std::collections::HashMap;
 
+/// 位置1 激发条目的统一说明头(WB-C,2026-10-11):与常驻侧默认模板里的
+/// 「世界书(当前已命中的设定,…)」句同口径,措辞按「本轮命中」区分。
+/// 说明头落在 `untrusted_boundary` **之外**(与常驻侧「句在模板里、内容在边界里」同构),
+/// 条目组整体包成一块。
+const TRIGGERED_WORLD_HEADER: &str = "世界书(本轮命中设定,必须严格遵循,冲突时以世界书为准):";
+
 /// 构建发送给 LLM 的消息数组(6 层规范落地的核心拼装点)。
 /// 位置5(头部)= 系统提示词/主 agent 提示词;位置4 = 简单注入 + 复杂模式楼层;
 /// 位置3 = 角色卡 + 世界书常态(constant);位置2 = 历史上下文;位置1 = 世界书激发(触发);
@@ -364,13 +370,34 @@ pub(in crate::agents::engine) fn build_llm_messages_with_position(
             "user"
         };
         // 位置1 user 激发(含 system 钳制为 user)+ 位置0 反思建议 + 位置0 预设尾部(user)→ 拼最新 user 消息尾部
-        let mut user_tail: Vec<String> = Vec::new();
+        // WB-C(2026-10-11 决策 D4):普通条目与常驻同口径——先落统一说明头,整组经
+        // untrusted_boundary("world_book") 包成单块(旧实现为裸 `[comment]\ncontent` 拼接,
+        // 无头无包裹,注入内容不可归因;常驻侧的「必须严格遵循」句在全激发卡上还会悬空)。
+        // **引擎变量状态块不参与包裹**:它是引擎产物、承载 <UpdateVariable> 更新协议,
+        // 包进「不可信素材」边界等于自我削弱。尾部顺序固定:
+        // 头 → 条目组 → 状态块 → 反思建议 → 文风段 → AN 段 → 预设尾部。
+        let mut triggered_entries: Vec<String> = Vec::new();
+        let mut state_blocks: Vec<String> = Vec::new();
         for inj in world_triggered.iter().filter(|i| i.role != "assistant") {
             let expanded = expand_macros(&inj.text, &mut mctx);
-            if !expanded.trim().is_empty() {
-                user_tail.push(expanded);
+            if expanded.trim().is_empty() {
+                continue;
+            }
+            if inj.state_block {
+                state_blocks.push(expanded);
+            } else {
+                triggered_entries.push(expanded);
             }
         }
+        let mut user_tail: Vec<String> = Vec::new();
+        if !triggered_entries.is_empty() {
+            user_tail.push(TRIGGERED_WORLD_HEADER.to_string());
+            user_tail.push(untrusted_boundary(
+                "world_book",
+                &triggered_entries.join("\n\n"),
+            ));
+        }
+        user_tail.extend(state_blocks);
         // 反思失败建议(位置0):自动生成的改进建议,注入在激发之后、预设尾部之前。
         // 按 reflect_advice_role 选边:user 并入最新 user 消息尾部;assistant 走下方 assistant_tail。
         if reflect_advice_role != "assistant" {
