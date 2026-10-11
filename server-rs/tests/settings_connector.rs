@@ -282,6 +282,74 @@ async fn prompt_preview_follows_mode() {
     }
 }
 
+/// WB-E 提示层(遗留 L31):自定义角色扮演模板缺 `{{world_info}}` 时,预览必须给出结构化告警。
+/// 契约本身不变(Custom Prompt 完整替换、不是追加,常驻条目确实不注入),缺的是可见性。
+/// task 模式不适用该告警(任务侧世界书由引擎拼装,不经模板占位符)。
+#[tokio::test]
+async fn prompt_preview_warns_when_template_lacks_world_info() {
+    let _guard = test_lock().await;
+    let app = test_app();
+
+    // 现场值(共享 app;净零复位目标)
+    let (_, before) = send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
+    let prompt_before = before["agent_system_prompt"].clone();
+
+    let put_prompt = |text: &str| {
+        let body = json!({ "agent_system_prompt": text });
+        async move { send_json(app, "PUT", "/api/settings?mode=roleplay", body).await }
+    };
+    async fn preview_warnings(query: &str) -> Value {
+        let (status, preview) = send_json(test_app(), "GET", query, json!({})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            preview["warnings"].is_array(),
+            "响应必须始终带 warnings 数组(空集也要可判别):{preview}"
+        );
+        preview["warnings"].clone()
+    }
+
+    // 1) 缺占位符 → 告警
+    let (status, r) = put_prompt("你是{{char}},按设定回答,不要出戏。").await;
+    assert_eq!(status, StatusCode::OK, "写模板失败:{r}");
+    assert!(
+        preview_warnings("/api/settings/prompt-preview")
+            .await
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| *w == json!("template_missing_world_info")),
+        "缺 {{{{world_info}}}} 的自定义模板必须告警"
+    );
+
+    // 2) 写了占位符 → 无告警(空数组仍在)
+    let (status, r) = put_prompt("你是{{char}}:\n{{world_info}}\n按设定回答。").await;
+    assert_eq!(status, StatusCode::OK, "写模板失败:{r}");
+    assert_eq!(
+        preview_warnings("/api/settings/prompt-preview").await,
+        json!([]),
+        "写了 {{{{world_info}}}} 不应告警"
+    );
+
+    // 3) task 模式不适用:同样的缺占位符模板,任务侧世界书走引擎拼装
+    let (status, r) = put_prompt("你是{{char}},按设定回答,不要出戏。").await;
+    assert_eq!(status, StatusCode::OK, "写模板失败:{r}");
+    assert_eq!(
+        preview_warnings("/api/settings/prompt-preview?mode=task").await,
+        json!([]),
+        "任务模式不得告警角色扮演模板"
+    );
+
+    // 卫生复位:写回现场值
+    let (status, r) = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=roleplay",
+        json!({ "agent_system_prompt": prompt_before }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "复位失败:{r}");
+}
+
 /// MCP 设置(批次 6.2;PLGM 3.4 起**无模式覆盖层**):GET 透出默认 关/空列表;
 /// PUT 全量替换并做卫生清理(缺命令条目被丢弃);GET 往返还原;`PUT ?mode=task` 也直写扁平。
 #[tokio::test]

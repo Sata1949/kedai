@@ -1587,3 +1587,120 @@ fn literary_tail_survives_extreme_trim_while_note_can_be_cut() {
         "位置 0 文风段同样不进 protected_tail,随其消息被裁掉(诚实边界)"
     );
 }
+
+/// 便捷封装:只取 system 文本(常驻说明头随内容走的一组用例用)
+/// `tpl = None` 走引擎内置兜底模板路径,`Some(tpl)` 走自定义模板(含占位符判定)路径。
+fn system_text(constant: &[WorldInjection], triggered: &[WorldInjection], tpl: Option<&str>) -> String {
+    let mut vars = HashMap::new();
+    let mut assistant = AssistantVars::new();
+    let history = vec![("user".to_string(), "你好".to_string())];
+    let (msgs, _) = build_llm_messages_with_position(
+        "芽衣",
+        "兔族少女。",
+        "",
+        "",
+        constant,
+        triggered,
+        &history,
+        &[],
+        tpl,
+        None,
+        None,
+        "user",
+        None,
+        "user",
+        &mut vars,
+        &mut assistant,
+        None,
+        LiteraryTexts::default(),
+    );
+    msgs[0].content.clone()
+}
+
+/// 常驻说明头随内容走(WB-E / 遗留 L32,批 2):内置默认模板不再字面写那句
+/// 「世界书(当前已命中的设定,…)」,该头改由引擎在 `{{world_info}}` 展开处拥有——
+/// 有常驻条目正文才出头,且头落在 untrusted 包裹**之外**(与尾部 `TRIGGERED_WORLD_HEADER` 同构);
+/// 只有状态块或全空时整段消失,不再留「句在、内容空」的悬空强制语气句。
+#[test]
+fn constant_world_header_travels_with_content() {
+    const HEADER: &str = "世界书(当前已命中的设定,必须严格遵循,冲突时以世界书为准):";
+    const SHELL: &str = "<UNTRUSTED_PROMPT_SOURCE source=\"world_book\">";
+    const TPL: &str = "你是{{character_name}},世界书:\n{{world_info}}\n自定义要求。";
+
+    // 1) 有常驻条目 → 头 + 包裹;头在壳之前、整段只出现一次
+    let with_constant = system_text(
+        &[
+            inj("system", "常驻世界书"),
+            state_inj("system", "[当前状态]\n{}"),
+        ],
+        &[],
+        Some(TPL),
+    );
+    assert!(
+        with_constant.contains(HEADER),
+        "有常驻条目应出说明头: {with_constant}"
+    );
+    assert!(
+        with_constant.find(HEADER) < with_constant.find(SHELL),
+        "说明头应落在包裹之外(在壳之前): {with_constant}"
+    );
+    assert_eq!(
+        with_constant.matches(HEADER).count(),
+        1,
+        "引擎只出一处头,不得重复: {with_constant}"
+    );
+
+    // 2) 只有状态块(全激发卡的常见形态)→ 无悬空头,状态块照常注入
+    let state_only = system_text(&[state_inj("system", "[当前状态]\n{}")], &[], Some(TPL));
+    assert!(
+        !state_only.contains(HEADER),
+        "无常驻条目正文时不得出现说明头: {state_only}"
+    );
+    assert!(
+        state_only.contains("[当前状态]"),
+        "状态块仍照常进 system(变量更新通道不停摆): {state_only}"
+    );
+
+    // 3) 模板没写占位符 → 「完整替换」契约不变,自然也没有头
+    let no_placeholder = system_text(
+        &[inj("system", "常驻世界书")],
+        &[],
+        Some("你是{{character_name}},没写占位符。"),
+    );
+    assert!(
+        !no_placeholder.contains(HEADER),
+        "不经占位符路径不出头: {no_placeholder}"
+    );
+    assert!(
+        !no_placeholder.contains("常驻世界书"),
+        "缺占位符时常驻条目按契约不注入: {no_placeholder}"
+    );
+}
+
+/// 常驻说明头在**两条路径**一致(WB-E 批 2):模板留空 → 走引擎内置兜底模板,
+/// 同样带常驻说明头(用户视角「留空使用内置默认」与物化的默认词模板是同一件事,
+/// 不该一条有头一条没头);只剩状态块时同样不出头。
+#[test]
+fn constant_world_header_is_uniform_across_template_paths() {
+    const HEADER: &str = "世界书(当前已命中的设定,必须严格遵循,冲突时以世界书为准):";
+
+    let fallback_with_constant = system_text(&[inj("system", "常驻世界书")], &[], None);
+    assert!(
+        fallback_with_constant.contains(HEADER),
+        "内置兜底模板路径同样应带常驻说明头: {fallback_with_constant}"
+    );
+    assert!(
+        fallback_with_constant.contains("常驻世界书"),
+        "兜底路径常驻条目照常注入: {fallback_with_constant}"
+    );
+
+    let fallback_state_only = system_text(&[state_inj("system", "[当前状态]\n{}")], &[], None);
+    assert!(
+        !fallback_state_only.contains(HEADER),
+        "兜底路径只剩状态块时不得出悬空头: {fallback_state_only}"
+    );
+    assert!(
+        fallback_state_only.contains("[当前状态]"),
+        "状态块仍照常进 system: {fallback_state_only}"
+    );
+}

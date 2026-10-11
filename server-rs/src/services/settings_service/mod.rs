@@ -394,8 +394,9 @@ pub struct RuntimeSettings {
 #[cfg(test)]
 mod tests {
     use super::params::{
-        default_literary_reflect_prompt, default_reflect_prompt,
-        LEGACY_LITERARY_REFLECT_ENHANCEMENT_V1, LEGACY_REFLECT_PROMPT_V1,
+        default_literary_reflect_prompt, default_literary_roleplay_agent_prompt,
+        default_reflect_prompt, LEGACY_LITERARY_REFLECT_ENHANCEMENT_V1, LEGACY_REFLECT_PROMPT_V1,
+        LEGACY_ROLEPLAY_AGENT_PROMPT_V1, LITERARY_RP_ENHANCEMENT,
     };
     use super::*;
     use crate::utils::test_support::TempDataDir;
@@ -1566,6 +1567,85 @@ mod tests {
             loaded2.agent_system_prompt.0,
             default_roleplay_agent_prompt(),
             "开关关 → 回填现行缺省词(逐字不变)"
+        );
+    }
+
+    /// 说明头随内容走(遗留 L32):内置默认角色扮演模板不再字面写「世界书(当前已命中的设定,…):」
+    /// 那句——该头由引擎在 `{{world_info}}` 展开处拥有,无常驻条目时不会留下句下空转的强制语气句。
+    /// 占位符本身必须保留(常驻条目仍靠它注入)。
+    #[test]
+    fn roleplay_default_prompt_does_not_write_world_header_line() {
+        let p = default_roleplay_agent_prompt();
+        assert!(
+            !p.contains("世界书(当前已命中的设定"),
+            "默认模板不应再字面写常驻说明头: {p}"
+        );
+        assert!(p.contains("{{world_info}}"), "占位符必须保留");
+        assert!(
+            !default_literary_roleplay_agent_prompt().contains("世界书(当前已命中的设定"),
+            "文学增强版由默认版拼接而来,同样不得含该句"
+        );
+    }
+
+    /// 存量迁移(遗留 L32 配套):load 期逐字等于**旧**内置默认(或其文学版)者视为未自定义,
+    /// 重物化为现行默认——否则旧串里那句字面头会与引擎新头同屏成双头,而这批用户从未自定义过文本。
+    /// 追加过内容的自定义文本必须逐字保留(不得被迁移覆盖);空串走既有回填分支,本迁移不动。
+    #[test]
+    fn legacy_roleplay_default_prompt_rehydrates_on_load() {
+        let cfg = test_cfg();
+
+        // 分支一:逐字旧默认(开关关)→ 现行默认
+        let dir_plain = tmp_dir("rp-prompt-legacy-plain");
+        let mut j = serde_json::to_value(RuntimeSettings::from_config(&cfg)).unwrap();
+        j["agent_system_prompt"] = serde_json::Value::from(LEGACY_ROLEPLAY_AGENT_PROMPT_V1);
+        j["literary_bundle_enabled"] = serde_json::Value::from(false);
+        std::fs::write(
+            dir_plain.join("settings.json"),
+            serde_json::to_string_pretty(&j).unwrap(),
+        )
+        .unwrap();
+        let loaded = RuntimeSettings::load(&dir_plain, &cfg);
+        assert_eq!(
+            loaded.agent_system_prompt.0,
+            default_roleplay_agent_prompt(),
+            "逐字旧默认应重物化为现行默认"
+        );
+
+        // 分支二:逐字旧文学版出厂文本(旧默认 + 文学增强段)+ 开关开 → 现行文学版默认
+        let dir_lit = tmp_dir("rp-prompt-legacy-literary");
+        let legacy_literary = format!(
+            "{}\n\n{}",
+            LEGACY_ROLEPLAY_AGENT_PROMPT_V1, LITERARY_RP_ENHANCEMENT
+        );
+        let mut j = serde_json::to_value(RuntimeSettings::from_config(&cfg)).unwrap();
+        j["agent_system_prompt"] = serde_json::Value::from(legacy_literary);
+        j["literary_bundle_enabled"] = serde_json::Value::from(true);
+        std::fs::write(
+            dir_lit.join("settings.json"),
+            serde_json::to_string_pretty(&j).unwrap(),
+        )
+        .unwrap();
+        let loaded = RuntimeSettings::load(&dir_lit, &cfg);
+        assert_eq!(
+            loaded.agent_system_prompt.0,
+            default_literary_roleplay_agent_prompt(),
+            "旧文学版出厂文本应按当前开关重物化"
+        );
+
+        // 分支三:在旧默认上追加过内容 = 自定义,逐字保留
+        let dir_custom = tmp_dir("rp-prompt-legacy-custom");
+        let custom = format!("{LEGACY_ROLEPLAY_AGENT_PROMPT_V1}\n我的追加规则");
+        let mut j = serde_json::to_value(RuntimeSettings::from_config(&cfg)).unwrap();
+        j["agent_system_prompt"] = serde_json::Value::from(custom.clone());
+        std::fs::write(
+            dir_custom.join("settings.json"),
+            serde_json::to_string_pretty(&j).unwrap(),
+        )
+        .unwrap();
+        let loaded = RuntimeSettings::load(&dir_custom, &cfg);
+        assert_eq!(
+            loaded.agent_system_prompt.0, custom,
+            "自定义文本(哪怕以旧默认为前缀)不得被迁移覆盖"
         );
     }
 

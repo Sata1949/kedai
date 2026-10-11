@@ -13,11 +13,17 @@ use crate::services::prompt_inject_service::{FloorRole, InjectMode, PromptInject
 use crate::services::prompt_kit::untrusted_boundary;
 use std::collections::HashMap;
 
-/// 位置1 激发条目的统一说明头(WB-C,2026-10-11):与常驻侧默认模板里的
-/// 「世界书(当前已命中的设定,…)」句同口径,措辞按「本轮命中」区分。
-/// 说明头落在 `untrusted_boundary` **之外**(与常驻侧「句在模板里、内容在边界里」同构),
-/// 条目组整体包成一块。
+/// 位置1 激发条目的统一说明头(WB-C,2026-10-11):与常驻侧 [`CONSTANT_WORLD_HEADER`] 同口径,
+/// 措辞按「本轮命中」区分。说明头落在 `untrusted_boundary` **之外**,条目组整体包成一块。
 const TRIGGERED_WORLD_HEADER: &str = "世界书(本轮命中设定,必须严格遵循,冲突时以世界书为准):";
+
+/// 位置3 常驻条目的统一说明头(WB-E 批 2,遗留 L32):文案沿用原**内置默认模板**里那句字面
+/// 「世界书(当前已命中的设定,…)」,改由引擎在 `{{world_info}}` 展开处拥有——**说明头随内容走**:
+/// 有常驻条目正文才出头,只剩状态块或全空时整段消失(不再句下空转)。与
+/// [`TRIGGERED_WORLD_HEADER`] 同构,同样落在 `untrusted_boundary` **之外**。
+/// 默认模板(`settings_service::params::default_roleplay_agent_prompt`)因此删掉了那行字面文案,
+/// 存量逐字旧默认由 `rehydrate_default_roleplay_prompt` 升级,避免两处说明头。
+const CONSTANT_WORLD_HEADER: &str = "世界书(当前已命中的设定,必须严格遵循,冲突时以世界书为准):";
 
 /// 构建发送给 LLM 的消息数组(6 层规范落地的核心拼装点)。
 /// 位置5(头部)= 系统提示词/主 agent 提示词;位置4 = 简单注入 + 复杂模式楼层;
@@ -198,13 +204,26 @@ pub(in crate::agents::engine) fn build_llm_messages_with_position(
         }
         parts.join("\n\n")
     };
+    // 常驻说明头随内容走(遗留 L32,WB-E 批 2):内置默认模板不再字面写那句「世界书(当前已命中的
+    // 设定,…)」,该头由引擎拥有——**两条注入路径共用同一段判定与文案**(占位符路径与「留空即用
+    // 内置兜底模板」路径在用户视角是同一件事,不该一条有头一条没头)。
+    // 有常驻条目正文才出头;只剩变量状态块(全激发卡的常见形态)或全空时整段消失,
+    // 不再留「句在、内容空」的悬空强制语气句;状态块是引擎产物,不套「必须严格遵循」的设定头(与 WB-C 同判据)。
+    let constant_body_present = world_constant
+        .iter()
+        .any(|i| i.role == "system" && !i.state_block);
+    let bounded_world = untrusted_boundary("world_book", &sys_world);
+    let world_block = if constant_body_present && !bounded_world.is_empty() {
+        format!("{CONSTANT_WORLD_HEADER}\n{bounded_world}")
+    } else {
+        bounded_world
+    };
     let mut sys = match custom_prompt {
         Some(tpl) if !tpl.trim().is_empty() => {
             // {{world_info}} 宏层不认,先替换为位置3 世界书常驻文本;{{character_name}}/{{character_description}}
             // /{{char}}/{{user}}/{{random}}/{{getvar}} 等由宏系统统一展开
             let has_world_placeholder = tpl.contains("{{world_info}}");
-            let bounded_world = untrusted_boundary("world_book", &sys_world);
-            let pre = tpl.replace("{{world_info}}", &bounded_world);
+            let pre = tpl.replace("{{world_info}}", &world_block);
             let mut s = expand_macros(&pre, &mut mctx);
             // 变量状态块兜底(2026-10-09 冲突修复):模板漏写 {{world_info}} 时,世界书**常驻
             // 条目**按「Custom Prompt 完整替换、不是追加」契约确实不注入(设置页已明示);
@@ -243,11 +262,8 @@ pub(in crate::agents::engine) fn build_llm_messages_with_position(
                     )
                 ));
             }
-            if !sys_world.is_empty() {
-                s.push_str(&format!(
-                    "\n\n{}",
-                    untrusted_boundary("world_book", &sys_world)
-                ));
+            if !world_block.is_empty() {
+                s.push_str(&format!("\n\n{world_block}"));
             }
             s.push_str(
                 "\n\n【创作总纲】\n\
