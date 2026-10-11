@@ -100,18 +100,23 @@ pub fn triggered_entry_hits(
 /// - `scan_depth` 或兜底值 ≤0 → 不限制,全部消息入池;
 /// - 无 user 消息可锚定 → 空池不命中(与 [`triggered_entry_hits`] 同不变式)。
 ///
-/// `messages` 按时间从旧到新,且**已由调用方剔除 system**(与消息数组侧跳过 system 消息同口径)。
+/// `texts` 为按时间从旧到新的扫描候选文本,**已由调用方剔除 system**(与消息数组侧跳过 system
+/// 消息同口径);`is_user` 与 `texts` 逐条对齐(窗口长度只按 user 消息计数,故角色必须随行)。
+/// 跨度以 `&texts[start..]` **借用**参与匹配,不逐条目复制文本池
+/// (每轮只由调用方克隆一次候选;大卡 × `scan_depth=0` 的长会话下这是 O(历史) 而非 O(历史×条目数))。
 /// 判定顺序与 [`triggered_entry_hits`] 同为「窗口 → 匹配 → 概率」。
 pub fn triggered_entry_hits_scoped(
     e: &WorldEntry,
-    messages: &[(&str, &str)],
+    texts: &[String],
+    is_user: &[bool],
     window_fallback: i64,
     roll: i64,
 ) -> bool {
     use crate::parsing::world_book::{
         entry_matches_texts, entry_probability_pass, scan_window_len,
     };
-    let user_total = messages.iter().filter(|(role, _)| *role == "user").count();
+    debug_assert_eq!(texts.len(), is_user.len(), "扫描文本与角色标记必须逐条对齐");
+    let user_total = is_user.iter().filter(|u| **u).count();
     if user_total == 0 {
         return false;
     }
@@ -120,8 +125,8 @@ pub fn triggered_entry_hits_scoped(
     let mut start = 0usize;
     if window_users < user_total {
         let mut seen = 0usize;
-        for (i, (role, _)) in messages.iter().enumerate().rev() {
-            if *role == "user" {
+        for (i, u) in is_user.iter().enumerate().rev() {
+            if *u {
                 seen += 1;
                 if seen == window_users {
                     start = i;
@@ -130,11 +135,7 @@ pub fn triggered_entry_hits_scoped(
             }
         }
     }
-    let pool: Vec<String> = messages[start..]
-        .iter()
-        .map(|(_, content)| content.to_string())
-        .collect();
-    entry_matches_texts(e, &pool) && entry_probability_pass(e, roll)
+    entry_matches_texts(e, &texts[start..]) && entry_probability_pass(e, roll)
 }
 
 /// 激发条目的概率 roll(单点):返回 `0..100` 的整数。
@@ -437,35 +438,69 @@ mod tests {
 
     /// 引擎口径(WB-A,决策 D1=B2)的单点契约:窗口长度按 **user 消息**计数,
     /// 匹配池取该跨度内的**全部消息**;概率闸仍在匹配之后;无 user 消息即空池不命中。
+    /// 由 (role, content) 序列构造 scoped 原语入参:文本池 + 逐条对齐的角色标记。
+    fn scan_pool(messages: &[(&str, &str)]) -> (Vec<String>, Vec<bool>) {
+        (
+            messages.iter().map(|(_, c)| c.to_string()).collect(),
+            messages.iter().map(|(r, _)| *r == "user").collect(),
+        )
+    }
+
     #[test]
     fn triggered_entry_hits_scoped_windows_by_user_count_matches_all_roles() {
         let entry = triggered_entry(&["触发词"], 100);
-        let in_span: &[(&str, &str)] = &[
+        let (in_span, roles_span) = scan_pool(&[
             ("user", "u1"),
             ("assistant", "甲触发词"),
             ("user", "u2"),
             ("assistant", "乙触发词"),
             ("user", "u3"),
-        ];
+        ]);
         // 窗口=最近 2 条 user 消息 → 跨度起点 u2 → u2 之后的 assistant 文本命中
-        assert!(triggered_entry_hits_scoped(&entry, in_span, 2, 0));
+        assert!(triggered_entry_hits_scoped(
+            &entry,
+            &in_span,
+            &roles_span,
+            2,
+            0
+        ));
         // 窗口=1 条 user 消息 → 起点即最后一条 user,含触发词的 assistant 全在跨度之外
-        let tail_only: &[(&str, &str)] =
-            &[("user", "u1"), ("assistant", "甲触发词"), ("user", "u2")];
-        assert!(!triggered_entry_hits_scoped(&entry, tail_only, 1, 0));
+        let (tail_only, roles_tail) =
+            scan_pool(&[("user", "u1"), ("assistant", "甲触发词"), ("user", "u2")]);
+        assert!(!triggered_entry_hits_scoped(
+            &entry,
+            &tail_only,
+            &roles_tail,
+            1,
+            0
+        ));
         // 窗口未被 user 消息撑满(会话尚短)→ 跨度自会话起点计,开场白入池
-        let with_prologue: &[(&str, &str)] = &[("assistant", "开场白含触发词"), ("user", "u1")];
-        assert!(triggered_entry_hits_scoped(&entry, with_prologue, 4, 0));
+        let (with_prologue, roles_prologue) =
+            scan_pool(&[("assistant", "开场白含触发词"), ("user", "u1")]);
+        assert!(triggered_entry_hits_scoped(
+            &entry,
+            &with_prologue,
+            &roles_prologue,
+            4,
+            0
+        ));
         // 匹配成功后仍要过概率闸(顺序与 triggered_entry_hits 一致)
         assert!(!triggered_entry_hits_scoped(
             &triggered_entry(&["触发词"], 0),
-            in_span,
+            &in_span,
+            &roles_span,
             2,
             0
         ));
         // 无 user 消息可锚定 → 空池不命中
-        let no_user: &[(&str, &str)] = &[("assistant", "开场白含触发词")];
-        assert!(!triggered_entry_hits_scoped(&entry, no_user, 4, 0));
+        let (no_user, roles_none) = scan_pool(&[("assistant", "开场白含触发词")]);
+        assert!(!triggered_entry_hits_scoped(
+            &entry,
+            &no_user,
+            &roles_none,
+            4,
+            0
+        ));
     }
 
     /// 格式化单点:两种既有约定经 `keep_empty_bracket` 显式区分。

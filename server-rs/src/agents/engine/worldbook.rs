@@ -89,13 +89,20 @@ pub(crate) fn collect_world_text_grouped_with(
     if entries.is_empty() {
         return world;
     }
-    // 扫描池(WB-A,2026-10-11 决策 D1=B2):按时间从旧到新备好 (role, content) 序列,
-    // 剔除 system(与消息数组侧同口径);窗口跨度由 prompt_kit 逐条目划定。
-    let scan_messages: Vec<(&str, &str)> = history
-        .iter()
-        .filter(|m| m.role == "user" || m.role == "assistant")
-        .map(|m| (m.role.as_str(), m.content.as_str()))
-        .collect();
+    // 扫描池(WB-A,2026-10-11 决策 D1=B2):候选文本按时间从旧到新、剔除 system(与消息数组侧
+    // 同口径),角色标记逐条对齐(窗口长度只按 user 消息计数)。跨度切片由原语借用——
+    // 每轮只在此处克隆一次(旧实现亦是一次性克隆 user 消息池)。
+    let mut scan_texts: Vec<String> = Vec::new();
+    let mut scan_is_user: Vec<bool> = Vec::new();
+    for m in history {
+        if m.role == "user" {
+            scan_texts.push(m.content.clone());
+            scan_is_user.push(true);
+        } else if m.role == "assistant" {
+            scan_texts.push(m.content.clone());
+            scan_is_user.push(false);
+        }
+    }
 
     let mut constant_parts: Vec<WorldInjection> = Vec::new();
     let mut triggered_parts: Vec<WorldInjection> = Vec::new();
@@ -127,7 +134,8 @@ pub(crate) fn collect_world_text_grouped_with(
         // 与 generate-raw 侧的 subsec_nanos 不同源,现已统一)。
         if !crate::services::prompt_kit::triggered_entry_hits_scoped(
             e,
-            &scan_messages,
+            &scan_texts,
+            &scan_is_user,
             e.depth,
             crate::services::prompt_kit::world_entry_roll(),
         ) {
