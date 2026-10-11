@@ -5,7 +5,8 @@ use super::*;
 /// 规则:
 ///   - constant=true 的条目始终注入
 ///   - 非 constant 条目:enabled 前提下按 keys / keys_secondary(副关键词)/ regex 命中;
-///     keys 命中按条目 depth 限制扫描最近 N 条用户消息(0 = 全部历史,缺省 4)
+///     窗口长度按条目 depth 限制为最近 N 条**用户消息**(0 = 全部历史,缺省 4),
+///     匹配池取该窗口跨度内的全部消息(user + assistant,WB-A / 决策 D1=B2)
 ///   - case_sensitive=true 时大小写敏感匹配
 ///   - use_probability 时按 probability% 随机决定命中后是否注入
 ///   - 注入顺序:entries 已按 position → order → id 排序,输出保持该顺序
@@ -88,11 +89,12 @@ pub(crate) fn collect_world_text_grouped_with(
     if entries.is_empty() {
         return world;
     }
-    // 全部用户消息(从旧到新),按条目 depth 截取尾部;缺省扫描深度 4
-    let all_user: Vec<String> = history
+    // 扫描池(WB-A,2026-10-11 决策 D1=B2):按时间从旧到新备好 (role, content) 序列,
+    // 剔除 system(与消息数组侧同口径);窗口跨度由 prompt_kit 逐条目划定。
+    let scan_messages: Vec<(&str, &str)> = history
         .iter()
-        .filter(|m| m.role == "user")
-        .map(|m| m.content.clone())
+        .filter(|m| m.role == "user" || m.role == "assistant")
+        .map(|m| (m.role.as_str(), m.content.as_str()))
         .collect();
 
     let mut constant_parts: Vec<WorldInjection> = Vec::new();
@@ -118,13 +120,14 @@ pub(crate) fn collect_world_text_grouped_with(
             }
             continue;
         }
-        // 激发判定(「窗口→匹配→概率」三步已收敛到 prompt_kit::triggered_entry_hits):
-        // 本场景只扫 **user 消息**,未声明 scan_depth 时兜底用条目 depth(存量卡行为)。
+        // 激发判定(「窗口→匹配→概率」三步已收敛到 prompt_kit::triggered_entry_hits_scoped):
+        // 引擎口径 = 窗口按「最近 N 条 user 消息」计、匹配池取该跨度内的**全部消息**(WB-A,
+        // 2026-10-11 决策 D1=B2);未声明 scan_depth 时窗口长度兜底用条目 depth(存量卡行为)。
         // 概率 roll 统一走 prompt_kit::world_entry_roll(收敛前用本模块的 simple_roll,
         // 与 generate-raw 侧的 subsec_nanos 不同源,现已统一)。
-        if !crate::services::prompt_kit::triggered_entry_hits(
+        if !crate::services::prompt_kit::triggered_entry_hits_scoped(
             e,
-            &all_user,
+            &scan_messages,
             e.depth,
             crate::services::prompt_kit::world_entry_roll(),
         ) {
@@ -438,15 +441,87 @@ mod tests {
         assert!(collect_world_text(&[], &[], &mut AssistantVars::new()).is_none());
     }
 
-    /// 仅扫描用户消息,assistant 回复中的词不触发
+    /// WB-A(2026-10-11,决策 D1=B2):扫描池 = 窗口跨度内的**全部消息**,窗口仍按
+    /// 「最近 N 条 user 消息」计。会话尚短、窗口未被 user 消息数撑满时,跨度自起点计,
+    /// 开场白(首条 assistant 消息)随之入池——旧语义「只扫 user 消息」下本例恒不命中,
+    /// 实测 6/6 轮零注入(触发词只存在于 assistant 叙述中,条目永不激发)。
     #[test]
-    fn assistant_text_does_not_trigger() {
+    fn assistant_text_in_window_triggers() {
         let entries = vec![entry("地点", vec!["图书馆"], "图书馆安静。", false, true)];
         let history = vec![
             message("assistant", "这里是图书馆,很安静"),
             message("user", "你好"),
         ];
-        // assistant 内容含 key,但不应触发
+        assert!(
+            collect_world_text(&entries, &history, &mut AssistantVars::new()).is_some(),
+            "窗口跨度内的 assistant 文本应参与触发扫描"
+        );
+    }
+
+    /// WB-A 的窗口仍以 user 消息计数:条目 depth=2、历史有 3 条 user 消息时,
+    /// 跨度起点=倒数第 2 条 user 消息,其**之前**的 assistant 叙述掉出窗口不命中;
+    /// 起点之后(user 消息之间与其后)的 assistant 叙述命中。
+    #[test]
+    fn assistant_text_window_still_counted_by_user_messages() {
+        let mut e = entry("地点", vec!["触发词"], "图书馆安静。", false, true);
+        e.depth = 2;
+        // 触发词只在跨度起点之前的 assistant 消息里
+        let out_of_window = vec![
+            message("assistant", "甲触发词甲"),
+            message("user", "u1"),
+            message("assistant", "乙触发词乙"),
+            message("user", "u2"),
+            message("user", "u3"),
+        ];
+        assert!(
+            collect_world_text(&[e.clone()], &out_of_window, &mut AssistantVars::new()).is_none(),
+            "倒数第 2 条 user 消息(u2)之前的 assistant 文本应已滑出窗口"
+        );
+        // 同一条目,把触发词挪到跨度起点之后的 assistant 消息里
+        let in_window = vec![
+            message("user", "u1"),
+            message("assistant", "甲"),
+            message("user", "u2"),
+            message("assistant", "乙触发词乙"),
+            message("user", "u3"),
+        ];
+        assert!(
+            collect_world_text(&[e], &in_window, &mut AssistantVars::new()).is_some(),
+            "跨度起点(u2)之后的 assistant 文本应命中"
+        );
+    }
+
+    /// WB-A:scan_depth=0(不限制)时全部消息入池,含早已滑出 user 窗口的开场白
+    #[test]
+    fn scan_depth_zero_scans_all_messages() {
+        let mut e = entry("旧图", vec!["地图"], "地图设定。", false, true);
+        e.depth = 1;
+        e.scan_depth = Some(0);
+        let history = vec![
+            message("assistant", "开场白里有地图"),
+            message("user", "u1"),
+            message("user", "u2"),
+        ];
+        assert!(collect_world_text(&[e], &history, &mut AssistantVars::new()).is_some());
+    }
+
+    /// WB-A 保持「空池不命中」不变式:历史里没有 user 消息时窗口无从锚定,不激发
+    /// (与改动前的空 user 池语义一致,避免全新会话/纯 assistant 历史下的意外注入)
+    #[test]
+    fn history_without_user_message_does_not_trigger() {
+        let entries = vec![entry("地点", vec!["图书馆"], "图书馆安静。", false, true)];
+        let history = vec![message("assistant", "这里是图书馆,很安静")];
+        assert!(collect_world_text(&entries, &history, &mut AssistantVars::new()).is_none());
+    }
+
+    /// system 角色消息不入扫描池(与消息数组侧「history 中的 system 跳过」同口径)
+    #[test]
+    fn system_message_text_does_not_trigger() {
+        let entries = vec![entry("地点", vec!["图书馆"], "图书馆安静。", false, true)];
+        let history = vec![
+            message("system", "系统提示里提到图书馆"),
+            message("user", "你好"),
+        ];
         assert!(collect_world_text(&entries, &history, &mut AssistantVars::new()).is_none());
     }
 
