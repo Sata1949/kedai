@@ -351,6 +351,10 @@ mod tests {
 
     /// 探针落点:两个用例各用独立目录(同一测试二进制里 `std::process::id()` 相同)。
     /// 返回 (目录, 孙进程要写的日志路径)。
+    ///
+    /// `cfg(windows)`:仅服务下方两个 `#[cfg(windows)]` 用例;缺此门控时 Linux 的
+    /// `cargo clippy --all-targets` 会以 dead_code 报错(ci-linux 首跑暴露)。
+    #[cfg(windows)]
     fn tree_probe(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("kedai-tree-{}-{}", std::process::id(), tag));
         let _ = std::fs::remove_dir_all(&dir);
@@ -370,6 +374,9 @@ mod tests {
     }
 
     /// 日志当前字节数(不存在 = 0)。
+    ///
+    /// `cfg(windows)`:同上,只被 `#[cfg(windows)]` 用例调用。
+    #[cfg(windows)]
     fn tick_len(log: &std::path::Path) -> u64 {
         std::fs::metadata(log).map(|m| m.len()).unwrap_or(0)
     }
