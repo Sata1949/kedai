@@ -4,13 +4,16 @@
 //   triggered_entry_hits / world_entry_roll / world_entry_text
 //                                             激发条目「窗口→匹配→概率」判定与格式化
 //                                             (2026-09-14 收敛,见下文原语注释)
+//   triggered_entry_hits_scoped               引擎侧口径:窗口按最近 N 条 user 消息计、
+//                                             匹配池取跨度内全部消息(2026-10-11 WB-A)
 //   system_inject_text           提示词注入文本(简单合成 / 复杂 system 楼层)
 //   render_character_placeholders 角色占位符渲染({{char}} 等 6 个共享 + 模式专属 extra)
 //   untrusted_boundary           外部文本防注入包裹(自 agents/engine/messages/build.rs 迁入)
 // 模式隔离(哪些设置字段 task 不回退 roleplay)属 settings_service 职责,不在此模块。
 //
 // **防第四份**:世界书注入的判定逻辑只应存在于本模块。新增注入场景时,
-// 请复用 triggered_entry_hits / world_entry_text 并按场景传参,不要在新位置重写组合逻辑。
+// 请复用 triggered_entry_hits / triggered_entry_hits_scoped / world_entry_text 并按场景传参,
+// 不要在新位置重写组合逻辑(两者的差别只在池的构成,见各自文档注释)。
 use crate::models::types::CharacterRecord;
 use crate::parsing::world_book::WorldEntry;
 use crate::services::prompt_inject_service::{FloorRole, InjectMode, PromptInjectConfig};
