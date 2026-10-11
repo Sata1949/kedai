@@ -55,10 +55,11 @@
 | **字面契约权威** | HTTP 端点字段、SSE 负载、线格式冻结值 | [契约.md](契约.md) / [契约-协议与配置.md](契约-协议与配置.md) | `tools/check-contract.mjs`(25 组 MAPPINGS,未登记不校验) |
 | **条目编号权威** | 遗留 L/T/D 编号、计划批次号、经验条目 1~33（含重复的 11）与 E1 起 | [遗留.md](遗留.md) / [计划.md](计划.md) / [经验.md](经验.md) | **编号不得重编** —— 源码注释按编号引用 |
 
-**CI 现状(2026-09-29)**:两个 workflow 文件在位(`ci.yml` 权威档 / `ci-linux.yml` 平台可移植性档;
-触发面限 `push` 到 `main` + PR + 手动 `workflow_dispatch`,平台分支刻意不触发),但**服务端已停用**
-(`gh workflow disable`,状态 `disabled_manually`;缘见 `遗留.md` CI-BILL-1)、**提交暂转本地**——
-恢复用 `gh workflow enable ci|ci-linux -R Sata1949/kedai`,完整清单见 CI-BILL-1 追注。
+**CI 现状(2026-10-11)**:两个 workflow 文件在位(`ci.yml` 权威档 / `ci-linux.yml` 平台可移植性档;
+触发面限 `push` 到 `main` + PR + 手动 `workflow_dispatch`,平台分支刻意不触发),两档已
+`gh workflow enable` 回 active——2026-09-29~10-11 曾因账号计费阻断服务端停用(`disabled_manually`),
+解除经实测(缘见 `遗留.md` CI-BILL-1 的 2026-10-11 追注);**main 分支保护同日首次开启**
+(require PR + required checks `check`/`check-ubuntu` + `enforce_admins`,见 CI-PROT-1 追注)。
 生效的闸门是 `build.ps1` 的 `[0]` 阶段、`tools/check-all.ps1` 与 `tools/hooks/pre-push`(详见 `../MAINTENANCE.md` §0)。
 
 **纪律**:架构文档不再硬编码测试数字(那类事实一律引用 `../MAINTENANCE.md`);若与代码实测不符,

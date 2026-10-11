@@ -76,21 +76,19 @@ cargo build --manifest-path server-rs/Cargo.toml
   公开仓意味着**提交历史、分支、PR/Issue 全部对外可见**——勿把密钥、本机路径、用户数据写进任何提交。
 - **分支创建**:不得随意新建分支;长期分支只有 `main` + 两个平台分支,临时分支仅限 PR 流程,
   合并后即刻删除(本地与远端)——规则见 `docs/契约-协议与配置.md` 的「平台分支契约」§三。
-- **非琐碎改动走 PR(2026-09-27 起;2026-09-29 起暂停)**:动生产代码、门禁脚本(`tools/check-*`)、`.github/workflows/`、
+- **非琐碎改动走 PR(2026-09-27 起;2026-09-29~10-11 暂停;2026-10-11 起为服务端强制)**:动生产代码、门禁脚本(`tools/check-*`)、`.github/workflows/`、
   契约文档的批次,走「功能分支 → PR → **CI 状态检查绿** → merge」(单人项目不要求 review,看检查即可);
-  纯文档与注释批次可直接推 `main`。**暂停原因见下条**——云端 CI 停用 + 提交暂转本地。
-  **诚实边界(2026-09-29 更新)**:本仓于 2026-09-29 由私有转**公开仓**(Free 计划);服务端分支保护与
-  rulesets 随之**不再受计划限制**(私有仓时代双端点 403「Upgrade to GitHub Pro or make this repository
-  public」,见 `docs/遗留.md` CI-PROT-1 的追注)——但**尚未实际开启**,故在当前时点这条**仍是流程纪律,
-  不是机器强制**:直推 `main` 不会被服务端拦下,本地 `pre-push` 也仍可 `--no-verify` 绕过。叠加下条的
-  「云端 CI 停用 + 提交暂转本地」,**当前没有任何远端机器信号**——破的代码进 `main` 的唯一机器信号是
-  本机全量 `tools/check-all.ps1`(`npm run check`)。是否开启保护见 CI-PROT-1 的追注。
-- **云端 CI 停用 + 提交暂转本地(2026-09-29 起,临时)**:`ci` / `ci-linux` 两档已在服务端**停用**
-  (`gh workflow disable`,状态 `disabled_manually`;文件保留未删,缘见 `docs/遗留.md` CI-BILL-1)。
-  停用期间:**提交默认只落本机 `main`、不推送 `origin`**,上方 PR 流程随之暂停;本机两处
-  (`build.ps1` 前置 `-Quick` 与 `pre-push`)照常生效,收口以全量 `tools/check-all.ps1` 为准。
+  2026-10-11 分支保护开启后,**任何改动(含纯文档)都须过 PR**——直推 `main` 被 GitHub 一律拒绝(含 admin);
+  原「纯文档与注释批次可直接推 `main`」例外作废。保护配置见下条与 `docs/遗留.md` CI-PROT-1 追注。
+  **分支保护已开启(2026-10-11,原「诚实边界」表述退役)**:main 实配 require PR(0 approval)+
+  required status checks(`check` / `check-ubuntu`)+ `enforce_admins` + 禁 force-push / 禁删除——
+  **直推 `main` 被服务端拒绝(含 admin),流程纪律首次成为机器强制**;本机 `pre-push` 与本机门禁照旧,
+  走 PR 后 CI 在分支上给出独立校验。配置 GET 实测与沿革见 `docs/遗留.md` CI-PROT-1 追注。
+- **云端 CI 恢复(2026-10-11)**:`ci` / `ci-linux` 两档已 `gh workflow enable` 回 active——2026-09-29 起的
+  服务端停用系账号计费阻断,经实测已解除(dispatch run `38101599784` 正常启动执行;同轮暴露并修复一处
+  Linux 专属 clippy 缺陷,提交 `e631ea4`)。提交纪律恢复「完成验证后推送 `origin`」:当前积压 14 笔
+  (IMPHUB / TUTSYNC 两批 + 该修复)待推,推送前须跑全量 `tools/check-all.ps1`,并以 PR 合并(保护规则,见上条)。
   **本机推送注意**:`pre-push` 钩子在本环境会因 `经验.md` E69 的 SIGPIPE 被杀(门禁已过、推送未完成)
   ——等价做法是**预跑** `tools/check-all.ps1 -Quick` 后 `git push --no-verify`,推送后一律以
-  `git ls-remote` 验收,别读日志结论。恢复推送前补跑一次全量门禁;恢复 CI:`gh workflow enable ci|ci-linux -R Sata1949/kedai`;
-  完整恢复清单见 `docs/遗留.md` CI-BILL-1 追注。
+  `git ls-remote` 验收,别读日志结论。始末与恢复清单执行情况见 `docs/遗留.md` CI-BILL-1 追注。
 - **不改写历史**:不 `rebase`/`amend` 已推送的提交;`docs/archive/` 下的历史文档只读不改。
