@@ -207,6 +207,164 @@ fn mvu_position_user_tail_with_custom_prompt() {
     );
 }
 
+/// 本轮命中说明头(WB-C,2026-10-11 决策 D4)
+const TRIGGERED_WORLD_HEADER: &str = "世界书(本轮命中设定,必须严格遵循,冲突时以世界书为准):";
+
+/// WB-C:激发条目与常驻同口径——最新 user 消息尾部先落统一说明头,条目组整体包进
+/// **单个** `untrusted_boundary("world_book")`;`role=assistant` 的激发条目是对话侧示例,
+/// 仍作独立 assistant 消息原文注入,不套头、不包裹。
+/// (改动前为裸 `[comment]\ncontent` 拼接,无头无包裹——实测字节抓包见遗留 L29)
+#[test]
+fn triggered_world_entries_get_header_and_single_boundary_group() {
+    let mut vars = HashMap::new();
+    let world_triggered = vec![
+        inj("user", "[地点]\n图书馆安静。"),
+        inj("user", "[人物]\n芽衣是兔族少女。"),
+        inj("assistant", "[示例]\n芽衣微笑着点头。"),
+    ];
+    let history = vec![("user".to_string(), "你好".to_string())];
+    let (msgs, _) = build_llm_messages_with_position(
+        "芽衣",
+        "兔族少女。",
+        "",
+        "",
+        &[],
+        &world_triggered,
+        &history,
+        &[],
+        None,
+        None,
+        None,
+        "user",
+        None,
+        "user",
+        &mut vars,
+        &mut AssistantVars::new(),
+        None,
+        LiteraryTexts::default(),
+    );
+    let user_msg = msgs
+        .iter()
+        .find(|m| m.role == "user")
+        .expect("应有 user 消息");
+    let tail = &user_msg.content;
+    let header_idx = tail
+        .find(TRIGGERED_WORLD_HEADER)
+        .unwrap_or_else(|| panic!("尾部应含本轮命中说明头: {tail}"));
+    let open = tail
+        .find("--- 内容开始 ---")
+        .unwrap_or_else(|| panic!("条目组应经 untrusted_boundary 包裹: {tail}"));
+    let close = tail.find("--- 内容结束 ---").expect("包裹应有内容结束标记");
+    assert!(header_idx < open, "说明头应在边界块之前: {tail}");
+    let a = tail.find("[地点]\n图书馆安静。").expect("条目一应在尾部");
+    let b = tail
+        .find("[人物]\n芽衣是兔族少女。")
+        .expect("条目二应在尾部");
+    assert!(
+        a > open && a < close && b > open && b < close,
+        "两组条目应同在边界块内: {tail}"
+    );
+    assert!(tail.contains(r#"source="world_book""#));
+    assert_eq!(
+        tail.matches("</UNTRUSTED_PROMPT_SOURCE>").count(),
+        1,
+        "条目组应共用单个边界块,不逐条包裹: {tail}"
+    );
+    // assistant 侧激发条目:独立消息、原文,不套头不包裹
+    let asst = msgs
+        .iter()
+        .find(|m| m.role == "assistant")
+        .expect("assistant 侧激发应作独立消息");
+    assert_eq!(asst.content, "[示例]\n芽衣微笑着点头。");
+}
+
+/// WB-C:引擎生成的变量状态块随激发组注入,但**不参与**包裹、且落在条目组之后
+/// (它是引擎产物、承载 `<UpdateVariable>` 更新协议,包进「不可信素材」边界会削弱协议)。
+/// 顺序固定为 头 → 条目组 → 状态块。
+#[test]
+fn triggered_state_block_stays_outside_boundary_group() {
+    let mut vars = HashMap::new();
+    let world_triggered = vec![
+        inj("user", "[地点]\n图书馆安静。"),
+        state_inj("user", "[当前状态]\n{\"hp\":88}"),
+    ];
+    let history = vec![("user".to_string(), "你好".to_string())];
+    let (msgs, _) = build_llm_messages_with_position(
+        "芽衣",
+        "兔族少女。",
+        "",
+        "",
+        &[],
+        &world_triggered,
+        &history,
+        &[],
+        None,
+        None,
+        None,
+        "user",
+        None,
+        "user",
+        &mut vars,
+        &mut AssistantVars::new(),
+        None,
+        LiteraryTexts::default(),
+    );
+    let tail = &msgs.iter().find(|m| m.role == "user").unwrap().content;
+    let open = tail.find("--- 内容开始 ---").expect("条目组应被包裹");
+    let close = tail.find("--- 内容结束 ---").expect("包裹应有结束标记");
+    let entry_idx = tail.find("[地点]\n图书馆安静。").expect("条目应在尾部");
+    let state_idx = tail.find("[当前状态]").expect("状态块应仍随激发组注入");
+    assert!(
+        entry_idx > open && entry_idx < close,
+        "条目在边界块内: {tail}"
+    );
+    assert!(state_idx > close, "状态块应在边界块之外: {tail}");
+    assert!(
+        tail.find(TRIGGERED_WORLD_HEADER).unwrap() < entry_idx,
+        "说明头应在条目之前: {tail}"
+    );
+    assert!(tail.contains("{\"hp\":88}"), "状态内容不得丢失: {tail}");
+}
+
+/// WB-C 边界:说明头只服务「本轮命中的世界书条目」——激发组里只有状态块(无普通条目)时
+/// 不套头、不包裹,状态块照旧原文注入。
+#[test]
+fn triggered_group_with_only_state_block_has_no_header() {
+    let mut vars = HashMap::new();
+    let world_triggered = vec![state_inj("user", "[当前状态]\n{\"hp\":88}")];
+    let history = vec![("user".to_string(), "你好".to_string())];
+    let (msgs, _) = build_llm_messages_with_position(
+        "芽衣",
+        "兔族少女。",
+        "",
+        "",
+        &[],
+        &world_triggered,
+        &history,
+        &[],
+        None,
+        None,
+        None,
+        "user",
+        None,
+        "user",
+        &mut vars,
+        &mut AssistantVars::new(),
+        None,
+        LiteraryTexts::default(),
+    );
+    let tail = &msgs.iter().find(|m| m.role == "user").unwrap().content;
+    assert!(tail.contains("[当前状态]"), "状态块应注入: {tail}");
+    assert!(
+        !tail.contains(TRIGGERED_WORLD_HEADER),
+        "无普通条目时不得出现说明头: {tail}"
+    );
+    assert!(
+        !tail.contains("--- 内容开始 ---"),
+        "状态块不得被包裹: {tail}"
+    );
+}
+
 /// 变量状态块兜底(2026-10-09 冲突修复):自定义模板漏写 {{world_info}} 时,
 /// 世界书**常驻条目**按「Custom Prompt 完整替换、不是追加」契约确实不注入(既有语义不变),
 /// 但引擎状态块必须补回 system 尾部——否则模型看不到状态就不会输出 <UpdateVariable>,

@@ -4,13 +4,16 @@
 //   triggered_entry_hits / world_entry_roll / world_entry_text
 //                                             激发条目「窗口→匹配→概率」判定与格式化
 //                                             (2026-09-14 收敛,见下文原语注释)
+//   triggered_entry_hits_scoped               引擎侧口径:窗口按最近 N 条 user 消息计、
+//                                             匹配池取跨度内全部消息(2026-10-11 WB-A)
 //   system_inject_text           提示词注入文本(简单合成 / 复杂 system 楼层)
 //   render_character_placeholders 角色占位符渲染({{char}} 等 6 个共享 + 模式专属 extra)
 //   untrusted_boundary           外部文本防注入包裹(自 agents/engine/messages/build.rs 迁入)
 // 模式隔离(哪些设置字段 task 不回退 roleplay)属 settings_service 职责,不在此模块。
 //
 // **防第四份**:世界书注入的判定逻辑只应存在于本模块。新增注入场景时,
-// 请复用 triggered_entry_hits / world_entry_text 并按场景传参,不要在新位置重写组合逻辑。
+// 请复用 triggered_entry_hits / triggered_entry_hits_scoped / world_entry_text 并按场景传参,
+// 不要在新位置重写组合逻辑(两者的差别只在池的构成,见各自文档注释)。
 use crate::models::types::CharacterRecord;
 use crate::parsing::world_book::WorldEntry;
 use crate::services::prompt_inject_service::{FloorRole, InjectMode, PromptInjectConfig};
@@ -58,10 +61,13 @@ pub fn constant_world_text(entries: &[WorldEntry]) -> String {
 /// 激发条目命中判定:统一「窗口 → 匹配 → 概率」三步与顺序。
 ///
 /// 参数化的两处场景差异(**调用方必须显式选定,不得隐式继承**):
-/// - `texts`:参与扫描的文本集合。引擎侧只传 **user 消息**;generate-raw 侧传**全部消息**
-///   (作者页自组的是扁平完整上下文,触发词常落在 assistant 侧注释行上)。
-/// - `window_fallback`:条目未声明 `scan_depth` 时的窗口兜底。引擎侧传 `e.depth`
-///   (保持存量卡行为);generate-raw 侧传 `0`(= 扫全部,该场景无「最近聊天」概念)。
+/// - `texts`:参与扫描的文本集合。generate-raw 侧传**全部消息**(作者页自组的是扁平完整
+///   上下文,触发词常落在 assistant 侧注释行上,且该场景无「最近聊天」概念)。
+///   **引擎侧不再走本函数**,改走 [`triggered_entry_hits_scoped`](窗口按 user 消息计、
+///   池取跨度内全部消息;2026-10-11 WB-A 前引擎侧在此传 user 消息子集,是「世界书遵循过差」
+///   的第一根因)。
+/// - `window_fallback`:条目未声明 `scan_depth` 时的窗口兜底。generate-raw 侧传 `0`
+///   (= 扫全部)。
 ///
 /// 判定顺序固定为「先算窗口 → 空窗口直接不命中 → 匹配 → 概率」,与三处原实现一致;
 /// 概率在匹配**之后**判定,保证 `use_probability` 只对命中条目生效。
@@ -80,6 +86,56 @@ pub fn triggered_entry_hits(
         return false;
     }
     entry_matches_texts(e, window) && entry_probability_pass(e, roll)
+}
+
+/// 引擎侧激发命中判定(WB-A,2026-10-11 决策 D1=B2):**窗口按「最近 N 条 user 消息」划定,
+/// 匹配池 = 该窗口跨度内的全部消息**(user + assistant)。
+///
+/// 与 [`triggered_entry_hits`] 的差别只在**池的构成**:旧实现引擎侧把池收窄成 user 消息子集,
+/// 于是只出现在开场白与 assistant 叙述里的触发词永不激活条目(实测:取证卡 6/6 轮零注入;
+/// 同一条目在 user 消息里出现时被完美遵循)。窗口长度 N 仍以 user 消息计数
+/// (`scan_depth`,未声明时兜底 `window_fallback`),使存量卡的窗口语义逐字不变:
+/// - N ≥ user 消息总数(会话尚短,窗口未被 user 消息撑满)→ 跨度自会话起点计,开场白随之入池;
+/// - 否则 → 跨度起点 = 倒数第 N 条 user 消息,其前的消息(含更早的 assistant 叙述)已滑出窗口;
+/// - `scan_depth` 或兜底值 ≤0 → 不限制,全部消息入池;
+/// - 无 user 消息可锚定 → 空池不命中(与 [`triggered_entry_hits`] 同不变式)。
+///
+/// `texts` 为按时间从旧到新的扫描候选文本,**已由调用方剔除 system**(与消息数组侧跳过 system
+/// 消息同口径);`is_user` 与 `texts` 逐条对齐(窗口长度只按 user 消息计数,故角色必须随行)。
+/// 跨度以 `&texts[start..]` **借用**参与匹配,不逐条目复制文本池
+/// (每轮只由调用方克隆一次候选;大卡 × `scan_depth=0` 的长会话下这是 O(历史) 而非 O(历史×条目数))。
+/// 判定顺序与 [`triggered_entry_hits`] 同为「窗口 → 匹配 → 概率」。
+pub fn triggered_entry_hits_scoped(
+    e: &WorldEntry,
+    texts: &[String],
+    is_user: &[bool],
+    window_fallback: i64,
+    roll: i64,
+) -> bool {
+    use crate::parsing::world_book::{
+        entry_matches_texts, entry_probability_pass, scan_window_len,
+    };
+    debug_assert_eq!(texts.len(), is_user.len(), "扫描文本与角色标记必须逐条对齐");
+    let user_total = is_user.iter().filter(|u| **u).count();
+    if user_total == 0 {
+        return false;
+    }
+    let window_users = scan_window_len(e, user_total, window_fallback);
+    // 跨度起点:窗口撑满全部 user 消息时自会话起点计,否则落在倒数第 window_users 条 user 消息
+    let mut start = 0usize;
+    if window_users < user_total {
+        let mut seen = 0usize;
+        for (i, u) in is_user.iter().enumerate().rev() {
+            if *u {
+                seen += 1;
+                if seen == window_users {
+                    start = i;
+                    break;
+                }
+            }
+        }
+    }
+    entry_matches_texts(e, &texts[start..]) && entry_probability_pass(e, roll)
 }
 
 /// 激发条目的概率 roll(单点):返回 `0..100` 的整数。
@@ -375,6 +431,73 @@ mod tests {
         assert!(!triggered_entry_hits(
             &triggered_entry(&["x"], 100),
             &[],
+            4,
+            0
+        ));
+    }
+
+    /// 引擎口径(WB-A,决策 D1=B2)的单点契约:窗口长度按 **user 消息**计数,
+    /// 匹配池取该跨度内的**全部消息**;概率闸仍在匹配之后;无 user 消息即空池不命中。
+    /// 由 (role, content) 序列构造 scoped 原语入参:文本池 + 逐条对齐的角色标记。
+    fn scan_pool(messages: &[(&str, &str)]) -> (Vec<String>, Vec<bool>) {
+        (
+            messages.iter().map(|(_, c)| c.to_string()).collect(),
+            messages.iter().map(|(r, _)| *r == "user").collect(),
+        )
+    }
+
+    #[test]
+    fn triggered_entry_hits_scoped_windows_by_user_count_matches_all_roles() {
+        let entry = triggered_entry(&["触发词"], 100);
+        let (in_span, roles_span) = scan_pool(&[
+            ("user", "u1"),
+            ("assistant", "甲触发词"),
+            ("user", "u2"),
+            ("assistant", "乙触发词"),
+            ("user", "u3"),
+        ]);
+        // 窗口=最近 2 条 user 消息 → 跨度起点 u2 → u2 之后的 assistant 文本命中
+        assert!(triggered_entry_hits_scoped(
+            &entry,
+            &in_span,
+            &roles_span,
+            2,
+            0
+        ));
+        // 窗口=1 条 user 消息 → 起点即最后一条 user,含触发词的 assistant 全在跨度之外
+        let (tail_only, roles_tail) =
+            scan_pool(&[("user", "u1"), ("assistant", "甲触发词"), ("user", "u2")]);
+        assert!(!triggered_entry_hits_scoped(
+            &entry,
+            &tail_only,
+            &roles_tail,
+            1,
+            0
+        ));
+        // 窗口未被 user 消息撑满(会话尚短)→ 跨度自会话起点计,开场白入池
+        let (with_prologue, roles_prologue) =
+            scan_pool(&[("assistant", "开场白含触发词"), ("user", "u1")]);
+        assert!(triggered_entry_hits_scoped(
+            &entry,
+            &with_prologue,
+            &roles_prologue,
+            4,
+            0
+        ));
+        // 匹配成功后仍要过概率闸(顺序与 triggered_entry_hits 一致)
+        assert!(!triggered_entry_hits_scoped(
+            &triggered_entry(&["触发词"], 0),
+            &in_span,
+            &roles_span,
+            2,
+            0
+        ));
+        // 无 user 消息可锚定 → 空池不命中
+        let (no_user, roles_none) = scan_pool(&[("assistant", "开场白含触发词")]);
+        assert!(!triggered_entry_hits_scoped(
+            &entry,
+            &no_user,
+            &roles_none,
             4,
             0
         ));
