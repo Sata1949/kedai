@@ -31,6 +31,7 @@ vi.mock('../api', async (importOriginal) => {
 });
 
 import { getWorldBookEntries, saveWorldBookEntries } from '../api';
+import type { WorldBookEntry, WorldBookRecord } from '../api';
 import { useAppStore } from '../store';
 import WorldBooksModal from './WorldBooksModal.vue';
 
@@ -91,43 +92,52 @@ describe('WorldBooksModal 组件(M5 补测)', () => {
     setActivePinia(createPinia());
     const store = useAppStore();
     store.loadWorldBooks = vi.fn().mockResolvedValue(undefined);
-    store.worldBooks = [{ id: 'wb1', name: '设定集', entry_count: 1, enabled: true }] as never;
-    vi.mocked(getWorldBookEntries).mockResolvedValue([
-      {
-        id: 0, comment: '地点', keys: ['车站'], constant: false, enabled: true,
-        content: '车站很繁忙。', position: 2, depth: 1, scan_depth: 2,
-      },
-    ] as never);
+    const book: WorldBookRecord = {
+      id: 'wb1', name: '设定集', entry_count: 1, enabled: true,
+      source: 'upload', created_at: '2026-10-11T00:00:00Z',
+    };
+    store.worldBooks = [book];
+    const entry: WorldBookEntry = {
+      id: 0, comment: '地点', keys: ['车站'], constant: false, enabled: true,
+      content: '车站很繁忙。', position: 2, depth: 1, scan_depth: 2,
+    };
+    vi.mocked(getWorldBookEntries).mockResolvedValue([{ ...entry }]);
     const wrapper = mount(WorldBooksModal);
     await flushPromises();
 
-    const openBtn = wrapper.find('.sv-wb-row').findAll('button').find((b) => b.text() === '条目');
-    expect(openBtn, '世界书行应有「条目」按钮').toBeTruthy();
-    await openBtn!.trigger('click');
+    // 取控件并在缺失时抛可读断言(类型护栏 ratchet:不用 x! 逃逸,见 tools/check-type-ratchet.mjs)
+    const btn = (txt: string) => {
+      const found = wrapper.findAll('button').find((b) => b.text().trim() === txt);
+      if (!found) throw new Error(`缺「${txt}」按钮`);
+      return found;
+    };
+    const windowInput = () => {
+      const found = wrapper.find('input[title*="scanDepth"]');
+      if (!found.exists()) throw new Error('扫描窗口输入项缺失');
+      return found;
+    };
+
+    await btn('条目').trigger('click');
     await flushPromises();
 
     const texts = wrapper.text();
     expect(texts).toContain('插入深度');
     expect(texts).not.toContain('扫描深度');
     expect(texts).toContain('扫描窗口');
-
-    const windowInput = () => wrapper.find('input[title*="scanDepth"]');
-    expect(windowInput().exists(), '扫描窗口应有独立输入项').toBe(true);
     expect((windowInput().element as HTMLInputElement).value, 'GET 回显的窗口应出现在输入框').toBe('2');
 
-    const saveBtn = () => wrapper.findAll('button').find((b) => b.text() === '保存条目');
     // 留空 = 不改动:请求体不得出现 scan_depth 键(写 null/0 会把已声明窗口打回 depth 兜底)
     await windowInput().setValue('');
-    await saveBtn()!.trigger('click');
+    await btn('保存条目').trigger('click');
     await flushPromises();
-    const firstBody = JSON.stringify(vi.mocked(saveWorldBookEntries).mock.calls[0][1]);
+    const firstBody = JSON.stringify(vi.mocked(saveWorldBookEntries).mock.calls[0]?.[1]);
     expect(firstBody).not.toContain('scan_depth');
     expect(firstBody).toContain('"depth":1');
 
     // 填写数值 = 提交该窗口
     await windowInput().setValue('5');
-    await saveBtn()!.trigger('click');
+    await btn('保存条目').trigger('click');
     await flushPromises();
-    expect(JSON.stringify(vi.mocked(saveWorldBookEntries).mock.calls[1][1])).toContain('"scan_depth":5');
+    expect(JSON.stringify(vi.mocked(saveWorldBookEntries).mock.calls[1]?.[1])).toContain('"scan_depth":5');
   });
 });

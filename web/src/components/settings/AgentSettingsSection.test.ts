@@ -25,17 +25,14 @@ vi.mock('../../api', async (importOriginal) => {
 });
 
 import { getPromptPreview } from '../../api';
+import type { PromptPreview } from '../../api';
 import { promptWarningText } from '../../utils/promptWarnings';
 import AgentSettingsSection from './AgentSettingsSection.vue';
 
 async function mountWithWarnings(warnings: string[]) {
   setActivePinia(createPinia());
-  vi.mocked(getPromptPreview).mockResolvedValue({
-    ok: true,
-    note: '脱敏说明',
-    layers: [],
-    warnings,
-  } as never);
+  const preview: PromptPreview = { ok: true, note: '脱敏说明', layers: [], warnings };
+  vi.mocked(getPromptPreview).mockResolvedValue(preview);
   const wrapper = mount(AgentSettingsSection);
   await flushPromises();
   return wrapper;
