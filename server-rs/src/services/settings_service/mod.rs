@@ -395,8 +395,9 @@ pub struct RuntimeSettings {
 mod tests {
     use super::params::{
         default_literary_reflect_prompt, default_literary_roleplay_agent_prompt,
-        default_reflect_prompt, LEGACY_LITERARY_REFLECT_ENHANCEMENT_V1, LEGACY_REFLECT_PROMPT_V1,
-        LEGACY_ROLEPLAY_AGENT_PROMPT_V1, LITERARY_RP_ENHANCEMENT,
+        default_reflect_prompt, LEGACY_LITERARY_REFLECT_ENHANCEMENT_V1,
+        LEGACY_LITERARY_RP_ENHANCEMENT_V1, LEGACY_REFLECT_PROMPT_V1,
+        LEGACY_ROLEPLAY_AGENT_PROMPT_V1,
     };
     use super::*;
     use crate::utils::test_support::TempDataDir;
@@ -1615,7 +1616,7 @@ mod tests {
         let dir_lit = tmp_dir("rp-prompt-legacy-literary");
         let legacy_literary = format!(
             "{}\n\n{}",
-            LEGACY_ROLEPLAY_AGENT_PROMPT_V1, LITERARY_RP_ENHANCEMENT
+            LEGACY_ROLEPLAY_AGENT_PROMPT_V1, LEGACY_LITERARY_RP_ENHANCEMENT_V1
         );
         let mut j = serde_json::to_value(RuntimeSettings::from_config(&cfg)).unwrap();
         j["agent_system_prompt"] = serde_json::Value::from(legacy_literary);
