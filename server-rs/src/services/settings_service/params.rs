@@ -539,6 +539,26 @@ pub const LITERARY_RP_ENHANCEMENT: &str = "\
 7. 收束与钩子:每次输出的结尾要留有余味与互动余地——新信息、悬念或关系变化,不写无信息量的收尾句。
 8. 篇幅纪律:按用户要求的篇幅执行(未要求时以完整推进一个事件为准);宁可把一个场景写透,不要罗列多个空洞场景。";
 
+/// 旧版文学增强段(v1,2026-10-12 世界书批 2 修复之前的出厂文本)。
+///
+/// 仅用于**升级迁移判据**:存量 settings.json 里由「旧版角色扮演默认词 + 本段」拼成的文学版
+/// 提示词,靠本常量逐字识别后重物化为新版(见
+/// [`RuntimeSettings::rehydrate_default_roleplay_prompt`])。与
+/// [`LEGACY_LITERARY_REFLECT_ENHANCEMENT_V1`] 同款纪律:**文本不得修改**——它是迁移判据本身;
+/// 若直接引用现行 [`LITERARY_RP_ENHANCEMENT`],本段一改,存量文学版就再也匹配不上,
+/// 升级后永远停留在旧文本上(该缺陷形态与反思侧 LIT-4 修复批次完全同型)。
+pub const LEGACY_LITERARY_RP_ENHANCEMENT_V1: &str = "\
+【文学增强纪律】
+在上述创作总纲之外,以下纪律同等生效:
+1. 视角与人称锚定:开篇先确定人称(第一 / 第三人称)与叙述距离,全篇保持一致;时态与叙事时间线不得漂移,回忆与当下之间要有可辨的界线。
+2. 反 AI 腔(禁用清单):\"不禁\"\"不由得\"\"心中一颤\"\"眼底闪过一丝……\"式套语;三项排比连用;先否后肯句式(\"不是……而是……\");结尾强行升华或总结全文;\"仿佛 / 似乎\"式空比喻;把情绪直接命名(如\"他感到悲伤\")。正例锚定:用具体动作、器物、身体反应与环境细节承载情绪,让读者自己读出来。
+3. 展示而非陈述:关键情绪与关系变化必须落到可观察的行为与对话上,不替读者下结论。
+4. 句式与节奏:长短句交错,段落长度参差;对话与描写按需配比,不连续堆叠对话,也不连续多段纯环境描写;相邻段落的起句方式避免雷同。
+5. 防复读与防代答:不得复述上文已写过的场景、比喻与对话;不得替用户角色说话、代做决定或推进其主观行动。
+6. 一致性与事实不回退:已确立的事实、称呼、设定、时间线与数值不得回退;人物声音(用词习惯、语速、口头禅、句式偏好)前后一致;角色不得知晓不该知道的信息。
+7. 收束与钩子:每次输出的结尾要留有余味与互动余地——新信息、悬念或关系变化,不写无信息量的收尾句。
+8. 篇幅纪律:按用户要求的篇幅执行(未要求时以完整推进一个事件为准);宁可把一个场景写透,不要罗列多个空洞场景。";
+
 /// 角色扮演缺省词的文学增强版(LIT-2):现行缺省词 + [`LITERARY_RP_ENHANCEMENT`]。
 /// 只在**缺省值**路径生效——用户保存过自定义文本时逐字优先(调用方判断,见
 /// [`RuntimeSettings::roleplay_default_prompt`])。
@@ -917,7 +937,7 @@ impl RuntimeSettings {
     pub fn rehydrate_default_roleplay_prompt(&mut self) {
         let legacy_literary_v1 = format!(
             "{}\n\n{}",
-            LEGACY_ROLEPLAY_AGENT_PROMPT_V1, LITERARY_RP_ENHANCEMENT
+            LEGACY_ROLEPLAY_AGENT_PROMPT_V1, LEGACY_LITERARY_RP_ENHANCEMENT_V1
         );
         if self.agent_system_prompt.0 == default_roleplay_agent_prompt()
             || self.agent_system_prompt.0 == default_literary_roleplay_agent_prompt()
