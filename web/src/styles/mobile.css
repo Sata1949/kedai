@@ -83,6 +83,10 @@
     transform: translateX(-100%);
     transition: transform var(--dur-normal) var(--ease-standard);
     padding-top: var(--safe-top);
+    /* ANDUI-2:底导航(z 53)恒盖在抽屉之上,底部必须让出导航高,否则页脚最后一项
+       (「退出 Kedai」)整枚落在导航之下不可点(实机+411×914 实测:按钮 y853..902
+       vs 导航顶 858)。与 .sv-agent-panel 的同款先例对齐。 */
+    padding-bottom: calc(var(--mobile-nav-h) + var(--safe-bottom));
     overflow-y: auto;
   }
   .sv-sidebar.open {
@@ -257,7 +261,10 @@
     border: none;
     border-top: var(--bw-heavy) solid var(--sv-ink);
     padding-top: var(--safe-top);
-    padding-bottom: var(--safe-bottom);
+    /* ANDUI-1:底导航(z 53)恒盖在弹窗之上,Sheet 内容区必须让出导航高,
+       否则页脚/末行落在导航之下不可点(实测:聊天记录「完成」860..900 整枚被盖、
+       契约编辑底部说明 849..899 被切)。与 .sv-agent-panel 的先例同一算式。 */
+    padding-bottom: calc(var(--mobile-nav-h) + var(--safe-bottom));
   }
   .sv-modal-body { padding: var(--space-4); }
   /* Sheet 头部吸顶,长内容滚动时关闭键始终可达 */
@@ -366,6 +373,15 @@
     min-width: 120px;
     min-height: 44px;
   }
+
+  /* --- 数据行/按钮行:窄屏按钮不被压缩(ANDUI-3) ---
+     根因:.sv-btn 没有 white-space:nowrap,行内 flex 压缩把它压到一字宽后逐字换行
+     (实测 MCP 开关「已关闭」被压成 56×80 竖排、「刷新状态」折两行)。
+     照 .sv-inp-row > .sv-btn:not(.sv-btn-fill) 的既有豁免先例:.sv-btn-fill(占满剩余宽)
+     不豁免;其余按钮不收缩、不折行,空间不足由行级 flex-wrap 折行承接。 */
+  .sv-data-row > .sv-btn:not(.sv-btn-fill) { flex: 0 0 auto; white-space: nowrap; }
+  .sv-btn-row { flex-wrap: wrap; }
+  .sv-btn-row > .sv-btn { white-space: nowrap; }
 
   /* --- 执行流程步骤行:grid → flex-wrap ---
      原 6 列 auto grid 最小内容宽合计约 350px > 可用约 282px,行盒溢出 →
