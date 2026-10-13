@@ -270,6 +270,13 @@
   /* Sheet 头部吸顶,长内容滚动时关闭键始终可达 */
   .sv-modal-head { position: sticky; top: 0; z-index: 1; }
 
+  /* --- 会话/条目行(聊天记录、世界书、快速回复)窄屏改纵向堆叠(ANDUI-5) ---
+     根因:.sv-wb-row 是 flex 行,左块 Tailwind flex-1(basis 0%)+min-w-0 可缩到 0,
+     而其中标签(nowrap)只溢出不换行 → 实测会话标题被压成 0 宽(完全不可见)、
+     角色与「当前」标签溢出左块边界压到「打开/导出」按钮之下。
+     竖排后标题拿到整行宽,操作按钮行独占下一行(四钮一行 231px < 可用宽)。 */
+  .sv-modal-mask .sv-wb-row { flex-direction: column; align-items: stretch; }
+
   /* --- 综合设置:左侧 180px 导航 + 内容双栏改为上下堆叠 ---
      桌面双栏塞进 412px 会把内容区挤到视口外(实测截图确认)。
      移动端改为两行导航条:第一行 = 一级功能域(横滑),第二行 = 当前域的分区/工具(横滑)。
@@ -437,6 +444,14 @@
   /* 任务详情内的操作按钮行改纵向堆叠,避免按钮被挤出视口 */
   .sv-task-head { flex-direction: column; align-items: flex-start; gap: var(--space-2); }
   .sv-task-head-actions { flex-wrap: wrap; }
+  /* ANDUI-4:任务中部不再被压缩(抽屉整滚)。
+     根因:中部 wrapper(Sidebar.vue 的 flex-1 min-h-0)与 .sv-task-scroll(flex-1 min-h-0)
+     双重可缩 → 表单(438px,min-height:auto 不缩)+标题头(36px)吃满中部 474px,
+     列表实测被压成 12px(clientH;scrollHeight 148,3 条任务),后两条全不可见。
+     UIP-4 的「抽屉整滚」意图要求滚动落在抽屉(aside, overflow-y:auto)上,故中部改
+     grow-不缩:空间富余时仍撑满(页脚恒固定),内容超高时抽屉整滚(foot 随后可达,
+     底部让位见上文本文件的 .sv-sidebar 规则)。钩子只挂任务模式,roleplay 不受影响。 */
+  .sv-side-body-task { flex: 1 0 auto; }
   /* UIP-4:手机上任务中部维持「抽屉整滚 + 列表内滚」既有形态——侧栏本身即滚动抽屉,
      中部再开内滚动会形成嵌套滚动(内层先滚、页脚常驻不可达);还原列表内部滚动。 */
   .sv-task-scroll { overflow-y: visible; }

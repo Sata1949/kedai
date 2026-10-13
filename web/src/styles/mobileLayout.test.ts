@@ -6,6 +6,8 @@
 // 故样式一律走 node:fs 读取。
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
+import sidebarSource from '../components/Sidebar.vue?raw';
+import contractsSource from '../components/ContractsModal.vue?raw';
 
 /** 读取相对本测试文件的源码文本(readFileSync 直接接受 file: URL)。 */
 const readText = (rel: string): string => readFileSync(new URL(rel, import.meta.url), 'utf8');
@@ -36,5 +38,30 @@ describe('ANDUI 批移动端源码级布局契约', () => {
     );
     expect(mobileCss).toMatch(/\.sv-btn-row \{ flex-wrap: wrap; \}/);
     expect(mobileCss).toMatch(/\.sv-btn-row > \.sv-btn \{ white-space: nowrap; \}/);
+  });
+
+  it('ANDUI-4:任务中部不再被压缩(抽屉整滚;UIP-4 两条规则保留防回退)', () => {
+    // wrapper 的 grow-不缩钩子只在任务模式挂(Sidebar.vue);实测中部双重可缩时
+    // 列表被压成 12px(3 条任务后两条全不可见)
+    expect(sidebarSource).toContain("'sv-side-body-task': appMode === 'task'");
+    expect(mobileCss).toMatch(/\.sv-side-body-task \{ flex: 1 0 auto; \}/);
+    // UIP-4 既有规则必须保留:中部不另开内滚、列表让出内部滚动
+    expect(mobileCss).toContain('.sv-task-scroll { overflow-y: visible; }');
+    expect(mobileCss).toMatch(
+      /\.sv-task-scroll \.sv-task-list \{\s*flex: 1;\s*min-height: 0;\s*overflow-y: auto;\s*\}/,
+    );
+  });
+
+  it('ANDUI-5:会话/条目行窄屏竖排(标题不再被压成 0 宽、标签不再压按钮)', () => {
+    expect(mobileCss).toMatch(
+      /\.sv-modal-mask \.sv-wb-row \{\s*flex-direction: column;\s*align-items: stretch;\s*\}/,
+    );
+  });
+
+  it('ANDUI-6:契约编辑双栏窄屏竖排(编辑器不再被 diff 固定宽挤成一列字)', () => {
+    expect(contractsSource).toContain('sv-contract-split');
+    expect(contractsSource).toMatch(
+      /@media \(max-width: 767px\) \{[\s\S]*?\.sv-contract-split \{ flex-direction: column; \}[\s\S]*?\.sv-contract-diff \{ width: auto; max-height: 40%; \}[\s\S]*?\.sv-contract-editor \{ min-height: 180px; \}/,
+    );
   });
 });

@@ -271,7 +271,7 @@ async function onRollback(entry: ContractChangeEntry): Promise<void> {
               <button v-if="saved" class="sv-btn danger sv-btn-sm" :disabled="busy" @click="onRemove">移除契约</button>
             </div>
 
-            <div class="flex" style="gap: var(--space-2-5); flex: 1; min-height: 0">
+            <div class="flex sv-contract-split" style="gap: var(--space-2-5); flex: 1; min-height: 0">
               <!-- JSON 编辑器 -->
               <div class="flex flex-col" style="flex: 1; min-width: 0; gap: var(--space-1)">
                 <textarea
@@ -444,5 +444,14 @@ async function onRollback(entry: ContractChangeEntry): Promise<void> {
   font-size: 11px;
   color: var(--sv-ink-faint);
   font-style: italic;
+}
+
+/* ANDUI-6:窄屏(手机)编辑器与 diff 预览由横排改竖排——横排时固定 300px 的
+   diff 把编辑器挤到 69px(411×914 实测),占位符一列一字;竖排后编辑器拿到近全宽,
+   diff 限高 40% 并可内部滚动,编辑器 min-height 同步下调以适配矮屏。 */
+@media (max-width: 767px) {
+  .sv-contract-split { flex-direction: column; }
+  .sv-contract-diff { width: auto; max-height: 40%; }
+  .sv-contract-editor { min-height: 180px; }
 }
 </style>
