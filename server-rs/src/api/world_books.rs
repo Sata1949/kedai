@@ -1,4 +1,8 @@
 // 世界书路由:/api/world-books(列表/上传/详情/更新/删除/条目编辑/自检)+ 角色卡内嵌条目
+//
+// 缓存失效口径(2026-10-14 修复批):条目缓存与契约缓存统一在 WorldBookService 的
+// 写路径内失效(见 services/world_book_service.rs 的 `write_hook`),本文件不再显式
+// 清契约缓存——API 之外还有工具/脚本写路径,挂在服务层唯一汇聚点才不会漏。
 use crate::api::app_state::AppState;
 use crate::api::characters::{parse_boundary, parse_multipart};
 use crate::api::{err_status, not_found, validation, WithStatus};
@@ -68,10 +72,7 @@ pub async fn upload(
         .world_books
         .upload(&file.content, &file_name, character_id.as_deref())
     {
-        Ok(b) => {
-            state.clear_all_contracts();
-            Json(b).into_response().with_status(StatusCode::CREATED)
-        }
+        Ok(b) => Json(b).into_response().with_status(StatusCode::CREATED),
         Err(e) => validation(e),
     }
 }
@@ -105,18 +106,13 @@ pub async fn update(
         cid.as_ref().map(|c| c.as_deref()),
         body.name.as_deref(),
     ) {
-        Some(b) => {
-            // 绑定关系/启停变化影响哪些角色能收到该世界书(含其契约条目)
-            state.clear_all_contracts();
-            Json(b).into_response()
-        }
+        Some(b) => Json(b).into_response(),
         None => not_found("世界书不存在"),
     }
 }
 
 pub async fn delete(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     if state.world_books.delete(&id) {
-        state.clear_all_contracts();
         StatusCode::NO_CONTENT.into_response()
     } else {
         not_found("世界书不存在")
@@ -157,11 +153,7 @@ pub async fn save_entries(
         crate::parsing::world_book::merge_entries_into(entries, &body.entries);
     }
     match state.world_books.save_data_raw(&id, &raw) {
-        Some(()) => {
-            // 条目内容变化可能改动 [nlkaleido_contract];世界书可能被多角色引用,清全部缓存
-            state.clear_all_contracts();
-            Json(json!({ "ok": true, "id": id, "entries": body.entries })).into_response()
-        }
+        Some(()) => Json(json!({ "ok": true, "id": id, "entries": body.entries })).into_response(),
         // "保存失败"是给用户的固定文案(非内部错误原文),故走 err_status 保留原文,
         // 只补 code;若改成 internal() 会把文案降级为通用提示,反而丢信息。
         None => err_status("保存失败", StatusCode::INTERNAL_SERVER_ERROR),
@@ -171,10 +163,7 @@ pub async fn save_entries(
 /// POST /api/world-books/{id}/entries — 新增一条空条目
 pub async fn add_entry(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     match state.world_books.add_entry(&id) {
-        Some(view) => {
-            state.clear_all_contracts();
-            Json(json!({ "ok": true, "entry": view })).into_response()
-        }
+        Some(view) => Json(json!({ "ok": true, "entry": view })).into_response(),
         None => not_found("世界书不存在或保存失败"),
     }
 }
@@ -198,8 +187,9 @@ pub async fn save_character_entries(
 ) -> Response {
     match state.world_books.save_character_book(&id, &body.entries) {
         Some(()) => {
-            // 角色卡内嵌世界书条目可能含 [nlkaleido_contract],契约来源变化
-            state.invalidate_contracts_for_character(&id);
+            // 无缓存失效动作:内嵌书每轮现读 characters.data_raw(条目缓存只覆盖独立书),
+            // 且契约注册表的条目源只读独立书(collect_entries_for_character)——
+            // 内嵌书条目不是 [nlkaleido_contract] 来源,不存在需要失效的缓存。
             Json(json!({ "ok": true, "character_id": id, "entries": body.entries })).into_response()
         }
         None => validation("角色卡无内嵌世界书,或保存失败"),

@@ -7,7 +7,7 @@ use crate::parsing::world_book_convert::{convert_world_book, normalize_entry_val
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use uuid::Uuid;
 
 pub struct WorldBookService {
@@ -25,6 +25,15 @@ pub struct WorldBookService {
     /// 注意 `save_character_book` 写的是 characters.data_raw,而本函数只读
     /// `world_books` 表,故与它无关,不需要失效。
     entries_cache: Mutex<HashMap<String, Arc<Vec<WorldEntry>>>>,
+    /// 世界书写入后的附加失效回调(可选;由 app_state 接线为「清空契约缓存」)。
+    ///
+    /// 为什么挂在这里:契约缓存(ContractRegistry)的来源之一是独立世界书的
+    /// `[nlkaleido_contract]` 条目,而写路径**并非只有 API 端点**——worldbook_update
+    /// 归档工具与脚本 `importRawWorldbook` 都绕过 API 直写本结构体。钩子挂在
+    /// 全部写路径的唯一汇聚点(`invalidate_entries_cache`),这些路径自动覆盖,
+    /// 不会「漏挂一个失效点」(与条目缓存自包含失效同一理由)。
+    /// 只注入一次(OnceLock);不消费本服务的场景不注入即可。
+    write_hook: OnceLock<Arc<dyn Fn() + Send + Sync>>,
 }
 
 /// 条目缓存容量上限:条目缓存按 character_id 计价,正常角色数量远小于此;
@@ -56,16 +65,28 @@ impl WorldBookService {
         WorldBookService {
             db,
             entries_cache: Mutex::new(HashMap::new()),
+            write_hook: OnceLock::new(),
         }
+    }
+
+    /// 注入写路径的附加失效回调(由 app_state 接线:清空契约缓存)。
+    /// 见字段 `write_hook` 的文档注释;只生效一次(OnceLock),重复注入忽略。
+    pub fn set_write_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        let _ = self.write_hook.set(hook);
     }
 
     /// 清空条目缓存:**每个 world_books 写路径都必须调用**。
     /// 漏调会让生成读到旧世界书(fail-safe 由本结构体自包含性保证:写路径都在这里)。
+    /// 钩子(契约缓存失效)在此统一触发——唯一汇聚点,API/工具/脚本写路径全覆盖。
     fn invalidate_entries_cache(&self) {
         self.entries_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
+        // 回调在条目缓存锁释放后执行:契约注册表读条目会经本服务,避免跨模块锁序
+        if let Some(hook) = self.write_hook.get() {
+            hook();
+        }
     }
 
     /// 列表(不含 data_raw),按 created_at DESC。
@@ -934,6 +955,73 @@ mod tests {
         let c2 = svc.collect_entries_for_character("c2");
         assert_eq!(c1.len(), 1, "c1 应有自己的世界书");
         assert_eq!(c2.len(), 0, "c2 不应看到 c1 的世界书");
+
+        drop(svc);
+    }
+
+    /// 写钩子(2026-10-14 修复批):契约缓存失效必须跟随**所有**世界书写路径。
+    ///
+    /// 背景:契约来源之一是独立世界书的 [nlkaleido_contract] 条目,但失效此前只在
+    /// API 端点显式调用——worldbook_update 归档工具与脚本 importRawWorldbook 都
+    /// 绕过 API 直写本服务,改到契约条目时契约缓存会继续供应旧契约直到重启。
+    /// 断言:5 条写路径各触发一次;只读不触发;失败写不触发;内嵌卡书写入不触发
+    /// (内嵌书不是契约来源:注册表只读独立书 collect_entries_for_character)。
+    #[test]
+    fn write_hook_fires_on_every_write_path_only() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (_dir, svc) = service();
+        let count = Arc::new(AtomicUsize::new(0));
+        {
+            let c = count.clone();
+            svc.set_write_hook(Arc::new(move || {
+                c.fetch_add(1, Ordering::SeqCst);
+            }));
+        }
+        let hits = || count.load(Ordering::SeqCst);
+
+        // 只读路径:一次都不触发
+        let _ = svc.list();
+        let _ = svc.collect_entries_for_character("c1");
+        assert_eq!(hits(), 0, "只读路径不得触发写钩子");
+
+        // ① upload
+        let id = upload_book(&svc, "书一", "关键词一", None);
+        assert_eq!(hits(), 1, "upload 应触发");
+
+        // ② update;失败写(不存在的 id)不触发
+        svc.update(&id, Some(false), None, None).unwrap();
+        assert_eq!(hits(), 2, "update 应触发");
+        assert!(svc.update("不存在的书", Some(true), None, None).is_none());
+        assert_eq!(hits(), 2, "失败的 update 不得触发");
+
+        // ③ save_data_raw(条目回写接口;update_entry_content/create_trigger_entry 均经此路)
+        let raw = json!({ "name": "书一", "entries": [] });
+        svc.save_data_raw(&id, &raw).unwrap();
+        assert_eq!(hits(), 3, "save_data_raw 应触发");
+
+        // ④ add_entry(经 save_data_raw 落库)
+        svc.add_entry(&id).unwrap();
+        assert_eq!(hits(), 4, "add_entry 应触发");
+
+        // ⑤ delete;失败的删除不触发
+        assert!(!svc.delete("不存在的书"));
+        assert_eq!(hits(), 4, "失败的 delete 不得触发");
+        assert!(svc.delete(&id));
+        assert_eq!(hits(), 5, "delete 应触发");
+
+        // 内嵌卡书(save_character_book)写的是 characters.data_raw,不是契约来源,
+        // 也不被条目缓存覆盖——不触发
+        {
+            let conn = svc.db.write();
+            conn.execute(
+                "INSERT INTO characters (id, name, chara_name, description, file_path, data_raw, created_at) \
+                 VALUES ('c1','n','n','','', ?1, '')",
+                params![json!({ "character_book": { "entries": {} } }).to_string()],
+            )
+            .unwrap();
+        }
+        svc.save_character_book("c1", &[]).unwrap();
+        assert_eq!(hits(), 5, "内嵌卡书写入不属于契约来源,不得触发写钩子");
 
         drop(svc);
     }

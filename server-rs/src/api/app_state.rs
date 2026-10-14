@@ -278,6 +278,15 @@ impl AppState {
                 move |id: &str| world_books.collect_entries_for_character(id)
             },
         ));
+        // 世界书写路径 → 契约缓存失效钩子(2026-10-14 修复批):独立世界书是
+        // [nlkaleido_contract] 契约来源之一,而 worldbook_update 归档工具与脚本
+        // importRawWorldbook 都绕过 API 端点直写 WorldBookService——钩子挂在服务层
+        // 唯一写汇聚点,这些路径自动覆盖,防止「改世界书后引擎继续用旧契约直到重启」。
+        // 全局书影响任意角色,无法定位单条 → 整体清空(与 API 层原口径一致)。
+        {
+            let registry = contract_registry.clone();
+            world_books.set_write_hook(Arc::new(move || registry.clear()));
+        }
         // P4:多步模式工具(get_state/apply_patch)。契约经共享 registry(与引擎同缓存);
         // 不进入 agent 正文模式的默认下发列表(chat.rs 过滤)。P6:apply_patch 契约生效时
         // 经 kaleido 服务留痕(changelog + meta.pending 维护)。
@@ -482,13 +491,10 @@ impl AppState {
     }
 
     /// 失效契约缓存(角色卡写路径调用:契约来源之一变化)。
+    /// 世界书写路径不再经此方法——契约缓存随 WorldBookService 的写钩子整体清空
+    /// (见 AppState::new 的接线;工具/脚本写路径同样覆盖)。
     pub fn invalidate_contracts_for_character(&self, character_id: &str) {
         self.engine.invalidate_character_contract(character_id);
-    }
-
-    /// 清空全部契约缓存(世界书写路径调用:全局世界书可能影响任意角色的契约来源)。
-    pub fn clear_all_contracts(&self) {
-        self.engine.contract_registry.clear();
     }
 
     /// 在阻塞线程池执行只读 DB 闭包(2026-08 DB 并发改造:把同步 rusqlite 调用

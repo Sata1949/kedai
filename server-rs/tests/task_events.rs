@@ -261,8 +261,61 @@ async fn collect_full_until_terminal(body: &mut Body, task_id: &str) -> Vec<Valu
     }
 }
 
-/// 批次 R4 流式输出(generate_text 链路):legacy 三段式执行期间事件流应含
-/// kind=delta 暂态增量。断言:① planner/step/summarize 三阶段均有 delta 且
+/// REST 补拉(权威来源,PRODCAP-1):返回与 SSE 同形的任务帧数组(seq 升序,seq > after)。
+async fn pull_events_after(app: &axum::Router, task_id: &str, after: u64) -> Vec<Value> {
+    let (status, json) = send_json(
+        app,
+        "GET",
+        &format!("/api/tasks/{task_id}/events?after={after}&limit=1000"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "补拉应 200: {json}");
+    json["events"].as_array().cloned().unwrap_or_default()
+}
+
+/// 任务帧的 seq(补拉帧必带;SSE 任务帧同形)
+fn frame_seq(v: &Value) -> Option<u64> {
+    v["seq"].as_u64()
+}
+
+/// 判据集合 = SSE 实时帧 ∪ REST 补拉,按 seq 去重后按 seq 升序(WBC 批,2026-10-14):
+///
+/// SSE 实时窗口在并行负载下可能被 broadcast **Lagged 跳过**(设计内——`api/tasks.rs::events`
+/// 明确「任务事件允许丢,前端依 seq 缺口补拉恢复」),于是「某帧出现 / 恰好一次」类断言
+/// 只看实时窗口会概率性误红(本文件既有注释同样记载过该形态;WBC 批门禁并行负载下实测
+/// 同一用例 2/2 红、`--test-threads=1` 串行全绿)。改成并集后**判据强度不变**:
+/// 重复发射在补拉里同样会多出第 2 条,丢帧只削减实时窗口、不会削减补拉。
+fn merge_by_seq(sse: &[Value], pulled: &[Value]) -> Vec<Value> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<Value> = Vec::new();
+    for v in sse.iter().chain(pulled.iter()) {
+        if let Some(s) = frame_seq(v) {
+            if !seen.insert(s) {
+                continue;
+            }
+        }
+        out.push(v.clone());
+    }
+    // 无 seq 的帧(防御)排在末尾,不参与 seq 去重
+    out.sort_by_key(|v| frame_seq(v).unwrap_or(u64::MAX));
+    out
+}
+
+/// 帧 → (kind, status) 对,供 assert_subsequence 使用
+fn frame_pairs(frames: &[Value]) -> Vec<(String, Option<String>)> {
+    frames
+        .iter()
+        .map(|v| {
+            (
+                v["kind"].as_str().unwrap_or("").to_string(),
+                v["status"].as_str().map(str::to_string),
+            )
+        })
+        .collect()
+}
+
+/// 批次 R4 流式输出(generate_text 链路):legacy 三段式执行期间事件流应含/// kind=delta 暂态增量。断言:① planner/step/summarize 三阶段均有 delta 且
 /// phase 正确、step 的 delta 带 step_index=0(planner 不带);② 攒批生效——
 /// 步骤逐字流式输出约百字(每字一个 token),delta 条数远小于字符数;
 /// ③ 权威对齐——各阶段 delta 拼接 == task_llm_calls 对应行 response_summary
@@ -898,8 +951,18 @@ async fn task_followup_emits_status_events() {
     let id = created["task"]["id"].as_str().unwrap().to_string();
     let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
-    let seq = collect_until_terminal(&mut body, &id).await;
-    assert_subsequence(&seq, &["created", "status:running", "status:done"]);
+    // 判据 = 实时帧 ∪ REST 补拉(见 merge_by_seq 注释;实时窗口允许 Lagged 丢帧)
+    let w1_frames = collect_full_until_terminal(&mut body, &id).await;
+    let w1_last = w1_frames
+        .iter()
+        .filter_map(frame_seq)
+        .max()
+        .expect("首轮应有带 seq 的帧");
+    let w1 = frame_pairs(&merge_by_seq(
+        &w1_frames,
+        &pull_events_after(app, &id, 0).await,
+    ));
+    assert_subsequence(&w1, &["created", "status:running", "status:done"]);
 
     // 追加:followup 产出确定文本([[reply:]] 钩子),事件 = status:running → status:done
     let (status, json) = send_json(
@@ -910,10 +973,15 @@ async fn task_followup_emits_status_events() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "followup 应 200: {json}");
-    let seq = collect_until_terminal(&mut body, &id).await;
-    assert_subsequence(&seq, &["status:running", "status:done"]);
+    // 第二轮窗口 = 首轮终态 seq 之后:实时帧 ∪ 补拉(after=w1_last)
+    let w2_frames = collect_full_until_terminal(&mut body, &id).await;
+    let w2 = frame_pairs(&merge_by_seq(
+        &w2_frames,
+        &pull_events_after(app, &id, w1_last).await,
+    ));
+    assert_subsequence(&w2, &["status:running", "status:done"]);
     // 无新事件 kind:followup 生命周期只出现既有 kind(status/usage/llm_call/delta 等)
-    for (kind, _) in &seq {
+    for (kind, _) in &w2 {
         assert!(
             matches!(
                 kind.as_str(),
@@ -928,7 +996,7 @@ async fn task_followup_emits_status_events() {
                     | "approval_required"
                     | "delta"
             ),
-            "followup 不得引入新事件 kind,实际: {seq:?}"
+            "followup 不得引入新事件 kind,实际: {w2:?}"
         );
     }
 }
@@ -1066,8 +1134,12 @@ async fn task_tool_events_are_not_duplicated() {
     let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
 
-    let seq = collect_full_until_terminal(&mut body, &id).await;
-    let details: Vec<&str> = seq
+    let sse = collect_full_until_terminal(&mut body, &id).await;
+    // 判据取「实时帧 ∪ REST 补拉」按 seq 去重的并集(见 merge_by_seq 注释):
+    // 只看实时窗口时,并行负载下 Lagged 丢帧会让本断言概率性误红(WBC 批门禁 2/2 实测);
+    // 并集口径下丢帧不影响判据,重复发射仍在补拉里多出第 2 条——检查强度不变。
+    let merged = merge_by_seq(&sse, &pull_events_after(app, &id, 0).await);
+    let details: Vec<&str> = merged
         .iter()
         .filter(|e| e["kind"].as_str() == Some("agent_status"))
         .filter_map(|e| e["detail"].as_str())
