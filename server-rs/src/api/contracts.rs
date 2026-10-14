@@ -396,4 +396,44 @@ mod tests {
             "PUT 后 registry 应立即加载到新契约"
         );
     }
+
+    /// 接线级回归(2026-10-14 修复批):独立世界书是 [nlkaleido_contract] 契约来源之一,
+    /// 而 worldbook_update 归档工具与脚本 importRawWorldbook 都**绕过 API** 直写
+    /// WorldBookService——本测试直接经服务层写路径(与工具/脚本同一通道)验证
+    /// app_state 的写钩子接线:直写后契约缓存必须失效,否则引擎继续用旧契约到重启。
+    /// 与单测的分工:服务/工具单测锁定钩子被调用,本测试锁定**接线**——漏挂
+    /// `set_write_hook` 时单测仍绿而本测试红。
+    #[tokio::test]
+    async fn world_book_direct_write_invalidates_registry_cache_via_wiring() {
+        let (_dir, _router, state) = app();
+        seed_character(&state, "c-wb");
+        // 全局世界书承载契约(comment 含标记,内容为契约 JSON;世界书兜底来源)
+        let book = json!({
+            "name": "契约书",
+            "entries": [
+                {
+                    "uid": 0,
+                    "comment": "[nlkaleido_contract]",
+                    "content": contract_body().to_string(),
+                    "constant": true
+                }
+            ]
+        });
+        let rec = state
+            .world_books
+            .upload(&serde_json::to_vec(&book).unwrap(), "book.json", None)
+            .unwrap();
+        assert!(
+            state.engine.contract_registry.load("c-wb").is_some(),
+            "世界书兜底来源应能提取到契约"
+        );
+
+        // 非 API 写路径:直接经服务层改写条目(工具 worldbook_update / 脚本导入同通道)
+        let without = json!({ "name": "契约书", "entries": [] });
+        assert!(state.world_books.save_data_raw(&rec.id, &without).is_some());
+        assert!(
+            state.engine.contract_registry.load("c-wb").is_none(),
+            "世界书直写后契约缓存必须失效(写钩子接线),否则引擎继续用旧契约"
+        );
+    }
 }

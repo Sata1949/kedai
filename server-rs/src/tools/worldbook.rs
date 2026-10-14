@@ -916,4 +916,44 @@ mod tests {
         );
         drop(registry);
     }
+
+    /// 修复批回归(2026-10-14):worldbook_update 不经 API 层,必须经服务层写钩子触发
+    /// 契约缓存失效——修复前 updated 路径不会清契约缓存,工具改到承载
+    /// [nlkaleido_contract] 的绿灯条目时,引擎会一直用旧契约直到重启或下次 API 写入。
+    /// 本测试锁定「updated / created 两条写路径都触发钩子」。
+    #[tokio::test]
+    async fn writes_fire_contract_invalidation_hook() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (_dir, registry, deps) = setup();
+        seed_character(&deps, json!({ "name": "卡" }));
+        upload(
+            &deps,
+            "角色书",
+            json!([
+                { "uid": 0, "comment": "码头", "keys": ["码头"], "content": "旧", "constant": false }
+            ]),
+            Some(CHAR),
+        );
+        set_gates(&deps, true, false);
+        // 钩子在播下世界书之后挂,计数器只反映工具写入
+        let count = Arc::new(AtomicUsize::new(0));
+        {
+            let c = count.clone();
+            deps.world_books.set_write_hook(Arc::new(move || {
+                c.fetch_add(1, Ordering::SeqCst);
+            }));
+        }
+        let hits = || count.load(Ordering::SeqCst);
+
+        // 绿灯命中 → update_content 写路径
+        let out = call(&registry, json!({ "topic": "码头", "content": "新码头" })).await;
+        assert_eq!(out["action"], json!("updated"));
+        assert_eq!(hits(), 1, "updated 路径必须触发契约失效钩子");
+
+        // 未命中 → 在首选书新建绿灯条目
+        let out = call(&registry, json!({ "topic": "新主题", "content": "内容" })).await;
+        assert_eq!(out["action"], json!("created"));
+        assert_eq!(hits(), 2, "created 路径必须触发契约失效钩子");
+        drop(registry);
+    }
 }
