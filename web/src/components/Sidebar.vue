@@ -467,8 +467,11 @@ async function removeTask(task: TaskRecord): Promise<void> {
       </button>
     </div>
 
-    <!-- 中部:角色扮演模式 = 搜索 + 角色列表;任务模式 = 下达目标 + 任务历史 -->
-    <div class="flex min-h-0 flex-1 flex-col px-3 pb-2">
+    <!-- 中部:角色扮演模式 = 搜索 + 角色列表;任务模式 = 下达目标 + 任务历史。
+         ANDUI-4:任务模式挂 sv-side-body-task(grow-不缩,见 mobile.css 窄屏区)——
+         否则 wrapper 与 .sv-task-scroll 双重可缩会把任务列表压成 12px 细条;
+         角色扮演分支不挂钩子,行为与改前逐字一致。 -->
+    <div class="flex min-h-0 flex-1 flex-col px-3 pb-2" :class="{ 'sv-side-body-task': appMode === 'task' }">
       <Transition name="sv-fade" mode="out-in">
         <div v-if="appMode === 'roleplay'" key="roleplay" class="min-h-0 flex-1 flex flex-col">
           <input

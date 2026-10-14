@@ -54,6 +54,11 @@ const VERBOSE = process.argv.includes('--verbose');
  * IMPHUB 步骤 E 变动(只降):content 1008→1007 / mobile 434→433——楼层「注入位置」下拉与
  * depth 输入删除后 `.floor-depth` 孤儿规则随之清除,`.floor-row` grid 由 7 轨收到 5 轨
  * (与现存子节点数一致,消掉尾部空轨的多余 gap)。
+ * ANDUI 变动(2026-10-13):mobile 433→464(安卓窄屏布局修复批 +31 行,五处新增各带实测注释:
+ * 模态 Sheet 底部让位底导航 + 左抽屉同款让位 + 行内按钮豁免(3 条) + 任务中部 grow-不缩钩子 +
+ * 会话条目行竖排——全部发生在既有 <768px 断点内、无新域。理由:mobile.css 是唯一的移动端适配层
+ * (UIP 批起的既定形态),窄屏专用规则无处可去;新增规则仍遵守「不改桌面、不加 !important、
+ * 间距走 --space-*」三条既有纪律)。
  */
 const LINE_BASELINE = {
   'style.css': 49,
@@ -63,7 +68,7 @@ const LINE_BASELINE = {
   'styles/panels.css': 971,
   'styles/content.css': 1007,
   'styles/task.css': 997,
-  'styles/mobile.css': 433,
+  'styles/mobile.css': 464,
 };
 
 /**

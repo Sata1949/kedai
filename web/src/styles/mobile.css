@@ -83,6 +83,10 @@
     transform: translateX(-100%);
     transition: transform var(--dur-normal) var(--ease-standard);
     padding-top: var(--safe-top);
+    /* ANDUI-2:底导航(z 53)恒盖在抽屉之上,底部必须让出导航高,否则页脚最后一项
+       (「退出 Kedai」)整枚落在导航之下不可点(实机+411×914 实测:按钮 y853..902
+       vs 导航顶 858)。与 .sv-agent-panel 的同款先例对齐。 */
+    padding-bottom: calc(var(--mobile-nav-h) + var(--safe-bottom));
     overflow-y: auto;
   }
   .sv-sidebar.open {
@@ -257,11 +261,21 @@
     border: none;
     border-top: var(--bw-heavy) solid var(--sv-ink);
     padding-top: var(--safe-top);
-    padding-bottom: var(--safe-bottom);
+    /* ANDUI-1:底导航(z 53)恒盖在弹窗之上,Sheet 内容区必须让出导航高,
+       否则页脚/末行落在导航之下不可点(实测:聊天记录「完成」860..900 整枚被盖、
+       契约编辑底部说明 849..899 被切)。与 .sv-agent-panel 的先例同一算式。 */
+    padding-bottom: calc(var(--mobile-nav-h) + var(--safe-bottom));
   }
   .sv-modal-body { padding: var(--space-4); }
   /* Sheet 头部吸顶,长内容滚动时关闭键始终可达 */
   .sv-modal-head { position: sticky; top: 0; z-index: 1; }
+
+  /* --- 会话/条目行(聊天记录、世界书、快速回复)窄屏改纵向堆叠(ANDUI-5) ---
+     根因:.sv-wb-row 是 flex 行,左块 Tailwind flex-1(basis 0%)+min-w-0 可缩到 0,
+     而其中标签(nowrap)只溢出不换行 → 实测会话标题被压成 0 宽(完全不可见)、
+     角色与「当前」标签溢出左块边界压到「打开/导出」按钮之下。
+     竖排后标题拿到整行宽,操作按钮行独占下一行(四钮一行 231px < 可用宽)。 */
+  .sv-modal-mask .sv-wb-row { flex-direction: column; align-items: stretch; }
 
   /* --- 综合设置:左侧 180px 导航 + 内容双栏改为上下堆叠 ---
      桌面双栏塞进 412px 会把内容区挤到视口外(实测截图确认)。
@@ -367,6 +381,15 @@
     min-height: 44px;
   }
 
+  /* --- 数据行/按钮行:窄屏按钮不被压缩(ANDUI-3) ---
+     根因:.sv-btn 没有 white-space:nowrap,行内 flex 压缩把它压到一字宽后逐字换行
+     (实测 MCP 开关「已关闭」被压成 56×80 竖排、「刷新状态」折两行)。
+     照 .sv-inp-row > .sv-btn:not(.sv-btn-fill) 的既有豁免先例:.sv-btn-fill(占满剩余宽)
+     不豁免;其余按钮不收缩、不折行,空间不足由行级 flex-wrap 折行承接。 */
+  .sv-data-row > .sv-btn:not(.sv-btn-fill) { flex: 0 0 auto; white-space: nowrap; }
+  .sv-btn-row { flex-wrap: wrap; }
+  .sv-btn-row > .sv-btn { white-space: nowrap; }
+
   /* --- 执行流程步骤行:grid → flex-wrap ---
      原 6 列 auto grid 最小内容宽合计约 350px > 可用约 282px,行盒溢出 →
      .sv-hub-content 的 overflow-y:auto 使另一轴计算为 auto → 横向滚动,最右列
@@ -421,6 +444,14 @@
   /* 任务详情内的操作按钮行改纵向堆叠,避免按钮被挤出视口 */
   .sv-task-head { flex-direction: column; align-items: flex-start; gap: var(--space-2); }
   .sv-task-head-actions { flex-wrap: wrap; }
+  /* ANDUI-4:任务中部不再被压缩(抽屉整滚)。
+     根因:中部 wrapper(Sidebar.vue 的 flex-1 min-h-0)与 .sv-task-scroll(flex-1 min-h-0)
+     双重可缩 → 表单(438px,min-height:auto 不缩)+标题头(36px)吃满中部 474px,
+     列表实测被压成 12px(clientH;scrollHeight 148,3 条任务),后两条全不可见。
+     UIP-4 的「抽屉整滚」意图要求滚动落在抽屉(aside, overflow-y:auto)上,故中部改
+     grow-不缩:空间富余时仍撑满(页脚恒固定),内容超高时抽屉整滚(foot 随后可达,
+     底部让位见上文本文件的 .sv-sidebar 规则)。钩子只挂任务模式,roleplay 不受影响。 */
+  .sv-side-body-task { flex: 1 0 auto; }
   /* UIP-4:手机上任务中部维持「抽屉整滚 + 列表内滚」既有形态——侧栏本身即滚动抽屉,
      中部再开内滚动会形成嵌套滚动(内层先滚、页脚常驻不可达);还原列表内部滚动。 */
   .sv-task-scroll { overflow-y: visible; }
