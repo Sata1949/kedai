@@ -274,9 +274,9 @@ export interface WorldBookEntry {
   order?: number;
   /** 关键词大小写敏感 */
   case_sensitive?: boolean;
-  /** 粘性(命中后接下来 N 条持续注入) */
+  /** 粘性(酒馆 sticky;当前版本尚未参与注入判定,仅原样保留) */
   sticky?: number;
-  /** 冷却(命中后 N 条内不再次触发) */
+  /** 冷却(酒馆 cooldown;当前版本尚未参与注入判定,仅原样保留) */
   cooldown?: number;
   /** 命中概率%(酒馆 probability) */
   probability?: number;

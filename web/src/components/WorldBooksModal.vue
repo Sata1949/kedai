@@ -441,9 +441,9 @@ async function loadWorldBooksChecked(): Promise<void> {
                 </div>
                 <div class="sv-wb-entry-fields">
                   <label class="sv-wb-field-tag">粘性</label>
-                  <input v-model.number="en.sticky" type="number" min="0" class="sv-input sv-wb-num" title="命中后接下来 N 条消息持续注入(酒馆 sticky)" placeholder="0" />
+                  <input v-model.number="en.sticky" type="number" min="0" class="sv-input sv-wb-num" title="酒馆 sticky 字段:命中后接下来 N 条消息持续注入;当前版本尚未参与注入判定(编辑值仅原样保留)" placeholder="0" />
                   <label class="sv-wb-field-tag">冷却</label>
-                  <input v-model.number="en.cooldown" type="number" min="0" class="sv-input sv-wb-num" title="命中后 N 条消息内不再触发(酒馆 cooldown)" placeholder="0" />
+                  <input v-model.number="en.cooldown" type="number" min="0" class="sv-input sv-wb-num" title="酒馆 cooldown 字段:命中后 N 条消息内不再触发;当前版本尚未参与注入判定(编辑值仅原样保留)" placeholder="0" />
                 </div>
                 <textarea v-model="en.content" rows="6" class="sv-input sv-wb-entry-content" placeholder="注入内容(留空则该条不注入)" spellcheck="false" />
               </div>
@@ -544,7 +544,7 @@ async function loadWorldBooksChecked(): Promise<void> {
             <code>常驻</code> = 始终注入,归位「位置3(常态)」并入系统提示词;<code>触发</code> = 激活且非常驻时按关键词/正则命中,归位「位置1(激发)」追加到最新用户消息尾部。<br />
             注入顺序:同位置内按列表顺序注入(可 ↑↓ 排序);关键词/副关键词:逗号分隔,命中最近对话即注入;
             插入深度:酒馆 <code>depth</code>,仅作注入位置(atDepth)与窗口兜底;扫描窗口:酒馆 <code>scanDepth</code>,关键词只扫最近 N 条消息(0 = 全部,留空 = 保持原值);
-            命中概率:按百分比随机决定是否注入;粘性/冷却:命中后 N 条内持续注入 / 不触发。
+            命中概率:按百分比随机决定是否注入;粘性/冷却:酒馆 sticky/cooldown 字段,当前版本尚未参与注入判定(编辑值仅原样保留)。
           </p>
           <div class="sv-wb-edit">
             <div v-for="(en, i) in entryDrafts[editingBookId]" :key="`e-${editingBookId}-${en.id}-${i}`" class="sv-wb-entry">
@@ -636,9 +636,9 @@ async function loadWorldBooksChecked(): Promise<void> {
               </div>
               <div class="sv-wb-entry-fields">
                 <label class="sv-wb-field-tag">粘性</label>
-                <input v-model.number="en.sticky" type="number" min="0" class="sv-input sv-wb-num" title="命中后接下来 N 条消息持续注入(酒馆 sticky)" placeholder="0" />
+                <input v-model.number="en.sticky" type="number" min="0" class="sv-input sv-wb-num" title="酒馆 sticky 字段:命中后接下来 N 条消息持续注入;当前版本尚未参与注入判定(编辑值仅原样保留)" placeholder="0" />
                 <label class="sv-wb-field-tag">冷却</label>
-                <input v-model.number="en.cooldown" type="number" min="0" class="sv-input sv-wb-num" title="命中后 N 条消息内不再触发(酒馆 cooldown)" placeholder="0" />
+                <input v-model.number="en.cooldown" type="number" min="0" class="sv-input sv-wb-num" title="酒馆 cooldown 字段:命中后 N 条消息内不再触发;当前版本尚未参与注入判定(编辑值仅原样保留)" placeholder="0" />
               </div>
               <textarea v-model="en.content" rows="6" class="sv-input sv-wb-entry-content" placeholder="注入内容(留空则该条不注入)" spellcheck="false" />
             </div>
