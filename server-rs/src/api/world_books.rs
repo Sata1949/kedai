@@ -137,26 +137,23 @@ pub async fn save_entries(
     Path(id): Path<String>,
     Json(body): Json<SaveEntriesBody>,
 ) -> Response {
+    // 预检只为区分 404/422 文案;真正的读改写已下沉到服务层写锁事务
+    // (2026-10-15 并发修复批:原实现「get → merge → save_data_raw」三步分离,
+    // 与工具/脚本的并发写互不感知,后写整份覆盖先写)。
     let rec = match state.world_books.get(&id) {
         Some(r) => r,
         None => return not_found("世界书不存在"),
     };
-    let mut raw = match rec.data_raw {
-        Some(r) => r,
-        None => return validation("世界书缺少原始数据"),
-    };
-    if raw.get("entries").is_none() {
-        raw.as_object_mut()
-            .map(|o| o.insert("entries".into(), serde_json::Value::Array(Vec::new())));
+    if rec.data_raw.is_none() {
+        return validation("世界书缺少原始数据");
     }
-    if let Some(entries) = raw.get_mut("entries") {
-        crate::parsing::world_book::merge_entries_into(entries, &body.entries);
-    }
-    match state.world_books.save_data_raw(&id, &raw) {
-        Some(()) => Json(json!({ "ok": true, "id": id, "entries": body.entries })).into_response(),
+    match state.world_books.save_entries_merged(&id, &body.entries) {
+        Ok(true) => Json(json!({ "ok": true, "id": id, "entries": body.entries })).into_response(),
+        // 预检与提交之间书被并发删除:与预检同文案(极少见的竞态窗口)
+        Ok(false) => not_found("世界书不存在"),
         // "保存失败"是给用户的固定文案(非内部错误原文),故走 err_status 保留原文,
         // 只补 code;若改成 internal() 会把文案降级为通用提示,反而丢信息。
-        None => err_status("保存失败", StatusCode::INTERNAL_SERVER_ERROR),
+        Err(_) => err_status("保存失败", StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
