@@ -52,23 +52,29 @@ fn row_to_session_with_char(row: &rusqlite::Row) -> rusqlite::Result<SessionWith
 /// 调用(删后子查询已取不到消息 id)。只清 message 作用域,不涉及 undo_snapshots /
 /// kaleido_changelog(那属于会话删除,见 cleanup_dependent_rows_before_delete)。
 /// `filter` 是 messages 表的会话内筛选片段(仅本文件内字面量,无注入面);`ps` 与调用方
-/// 删消息的 SQL 参数一致。失败记日志且不阻断消息删除(残留仅占存储,读写均按 id 过滤)。
+/// 删消息的 SQL 参数一致。失败记日志且不阻断消息删除(残留仅占存储,读写均按 id 过滤)
+/// ——**宽松路径**;导入替换(`import_chat`)要求错误传播,见 [`message_scope_cleanup_sql`]。
 fn cleanup_message_scope_variables<P: rusqlite::Params>(
     conn: &rusqlite::Connection,
     filter: &str,
     ps: P,
 ) {
-    let sql = format!(
-        "DELETE FROM scope_variables WHERE scope = 'message' AND scope_id IN (
-           SELECT CAST(id AS TEXT) FROM messages WHERE {filter}
-         )"
-    );
-    if let Err(e) = conn.execute(&sql, ps) {
+    if let Err(e) = conn.execute(&message_scope_cleanup_sql(filter), ps) {
         tracing::warn!(
             error = e.to_string(),
             "消息作用域变量清理失败(不阻断消息删除)"
         );
     }
+}
+
+/// message 作用域变量清理语句(**单处维护**):宽松路径与导入原子替换共用同一 SQL,
+/// 差别只在错误处理——导入路径直接 `?` 传播(失败即回滚),不沿用「记日志继续」。
+fn message_scope_cleanup_sql(filter: &str) -> String {
+    format!(
+        "DELETE FROM scope_variables WHERE scope = 'message' AND scope_id IN (
+           SELECT CAST(id AS TEXT) FROM messages WHERE {filter}
+         )"
+    )
 }
 
 impl SessionService {
@@ -611,10 +617,22 @@ impl SessionService {
             .collect()
     }
 
-    /// 导入:先清空再逐条追加,id 重新分配;返回导入条数
+    /// 导入:整体**原子替换**——全量预校验通过后,在单事务内完成
+    /// 「清理旧 message 作用域变量 → 删除旧消息 → 插入全部新消息 → 更新会话时间」,
+    /// 任一步失败整体回滚,旧数据原样(KEDAI-01,2026-10-15 审查修复批 A)。
+    ///
+    /// 修复前是先 `clear_messages` 再「校验一条、`add_message` 一条」:第 N 条校验失败时
+    /// 旧消息已删、前 N-1 条已落库,留下「半截替换」；且逐条走 `add_message`(各取一次
+    /// 写锁并 touch)不在同一事务内。改为预校验 + 单事务后:
+    /// - 返回 Err 的失败导入**不改变任何原数据**(消息与 message 作用域变量);
+    /// - 写入期间持唯一写连接,并发读者看到的是替换前或替换后的完整状态。
+    ///
+    /// 语义保持:成功导入 = 完整替换(id 重新分配);**空数组 = 清空**(现有契约,不改变);
+    /// HTTP(`/api/import/chat`)与脚本(`TavernHelper.importRawChat`)两条入口共用本方法。
     pub fn import_chat(&self, session_id: &str, messages: Vec<StMessage>) -> Result<usize, String> {
-        self.clear_messages(session_id);
-        let mut count = 0;
+        // 1) 全量预校验(不碰数据库):role 归一化、正文非空、extra 预序列化。
+        //    任何一条非法都在「改库之前」直接拒绝,这是原子性的第一道闸。
+        let mut prepared: Vec<(String, String, String)> = Vec::with_capacity(messages.len());
         for m in messages {
             let role = m.role.trim().to_lowercase();
             if !matches!(role.as_str(), "user" | "assistant" | "system") {
@@ -624,10 +642,43 @@ impl SessionService {
                 return Err("消息格式无效,须为 {role, content}".into());
             }
             let extra = m.extra.unwrap_or_else(|| Value::Object(Default::default()));
-            self.add_message(session_id, &role, &m.content, extra)?;
-            count += 1;
+            let extra_str = serde_json::to_string(&extra).unwrap_or_else(|_| "{}".to_string());
+            prepared.push((role, m.content, extra_str));
         }
-        Ok(count)
+
+        // 2) 单事务替换:一个写连接走完全程。注意**不要**在事务内调用 add_message /
+        //    touch / clear_messages(它们会再次取写锁,形成嵌套锁等待);这里只发原生 SQL。
+        let now = now_iso();
+        let mut conn = self.db.write();
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("开启导入事务失败: {e}"))?;
+        // 旧 message 作用域变量必须先于删消息清理(删后按旧 id 已查不到);此处错误**传播**
+        // (失败即整体回滚,不留「变量已清、消息未换」的半写状态)
+        tx.execute(
+            &message_scope_cleanup_sql("session_id = ?1"),
+            params![session_id],
+        )
+        .map_err(|e| format!("清理消息作用域变量失败: {e}"))?;
+        tx.execute(
+            "DELETE FROM messages WHERE session_id = ?1",
+            params![session_id],
+        )
+        .map_err(|e| format!("清空旧消息失败: {e}"))?;
+        for (role, content, extra_str) in &prepared {
+            tx.execute(
+                "INSERT INTO messages (session_id, role, content, extra, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![session_id, role, content, extra_str, now],
+            )
+            .map_err(|e| format!("写入消息失败: {e}"))?;
+        }
+        tx.execute(
+            "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+            params![now, session_id],
+        )
+        .map_err(|e| format!("更新会话时间失败: {e}"))?;
+        tx.commit().map_err(|e| format!("提交导入事务失败: {e}"))?;
+        Ok(prepared.len())
     }
 
     // ===== 会话变量(酒馆宏 {{setvar}}/{{addvar}}/{{getvar}} 持久化) =====

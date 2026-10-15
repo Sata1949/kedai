@@ -56,7 +56,7 @@ pub async fn export_chat(
     Json(json!({ "session_id": sid, "messages": messages })).into_response()
 }
 
-/// POST /api/import/chat:导入消息(先清空再逐条追加)
+/// POST /api/import/chat:导入消息(**原子替换**——失败不改动原数据;空数组 = 清空)
 pub async fn import_chat(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ImportBody>,
