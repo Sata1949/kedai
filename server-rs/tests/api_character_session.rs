@@ -467,3 +467,164 @@ async fn multi_greeting_seed_and_switch() {
         "空数组应清空备用开场: {cleared}"
     );
 }
+
+// ==================== KEDAI-01:导入原子性(审查修复批 A)====================
+
+/// 建角色 + 会话并返回 (cid, sid, 开场白消息 id)。开场白由建会话自动播种,是会话首条消息。
+async fn session_with_greeting(app: &axum::Router, name: &str) -> (String, String, i64) {
+    let (_, char) = upload_character(app, name).await;
+    let cid = char["id"].as_str().unwrap().to_string();
+    let (_, session) = send_json(
+        app,
+        "POST",
+        "/api/chat/sessions",
+        json!({ "character_id": cid }),
+    )
+    .await;
+    let sid = session["id"].as_str().unwrap().to_string();
+    let (_, history) = send_json(
+        app,
+        "GET",
+        &format!("/api/chat/history?session_id={sid}"),
+        json!({}),
+    )
+    .await;
+    let mid = history["messages"].as_array().unwrap()[0]["id"]
+        .as_i64()
+        .unwrap();
+    (cid, sid, mid)
+}
+
+async fn history_of(app: &axum::Router, sid: &str) -> Vec<Value> {
+    let (_, history) = send_json(
+        app,
+        "GET",
+        &format!("/api/chat/history?session_id={sid}"),
+        json!({}),
+    )
+    .await;
+    history["messages"].as_array().unwrap().clone()
+}
+
+/// KEDAI-01:导入失败必须**整体不生效**——旧消息与 message 作用域变量原样保留。
+/// 修复前:import_chat 先清空再逐条校验后写入,第二条 role 非法时
+/// 旧记录已被删、只剩半截新消息(2026-10-15 隔离实例端到端复现)。
+#[tokio::test]
+async fn import_failure_is_atomic_for_messages_and_vars() {
+    let app = test_app();
+    let (_cid, sid, mid) = session_with_greeting(app, "导入原子性.json").await;
+
+    // 给开场白挂 message 作用域变量(scope_variables 镜像):失败导入必须不动它
+    let (status, res) = send_json(
+        app,
+        "PUT",
+        "/api/variables",
+        json!({
+            "session_id": sid, "scope": "message", "scope_id": mid.to_string(),
+            "data": { "hp": 7 },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "写 message 作用域变量应 200: {res}");
+
+    // 失败导入:第二条 role 非法
+    let (status, err) = send_json(
+        app,
+        "POST",
+        "/api/import/chat",
+        json!({ "session_id": sid, "messages": [
+            { "role": "user", "content": "新消息一" },
+            { "role": "invalid-role", "content": "新消息二" },
+        ] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "非法 role 应 400: {err}");
+
+    // 消息原样:仍是开场白一条(修复前此处只剩「新消息一」)
+    let msgs = history_of(app, &sid).await;
+    assert_eq!(msgs.len(), 1, "失败导入不得改变原消息: {msgs:?}");
+    assert_eq!(msgs[0]["content"], json!("你好,我是测试角色"));
+    assert_eq!(msgs[0]["id"], json!(mid), "原消息应连 id 一起保留");
+
+    // 变量原样(修复前该行被 clear 的变量清理一并删掉)
+    let (status, vars) = send_json(
+        app,
+        "GET",
+        &format!("/api/variables?session_id={sid}&scope=message&scope_id={mid}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(vars["scope"], json!("message"));
+    assert_eq!(vars["scope_id"], json!(mid.to_string()));
+    assert_eq!(
+        vars["data"]["hp"],
+        json!(7),
+        "失败导入不得清掉旧消息的作用域变量: {vars}"
+    );
+}
+
+/// KEDAI-01:中间消息正文为空同样**整体拒绝**,不残留任何新消息(旧数据不动)。
+#[tokio::test]
+async fn import_failure_on_empty_content_keeps_old_messages() {
+    let app = test_app();
+    let (_cid, sid, mid) = session_with_greeting(app, "导入空正文.json").await;
+
+    let (status, err) = send_json(
+        app,
+        "POST",
+        "/api/import/chat",
+        json!({ "session_id": sid, "messages": [
+            { "role": "user", "content": "有效一条" },
+            { "role": "assistant", "content": "" },
+        ] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "空正文应 400: {err}");
+
+    let msgs = history_of(app, &sid).await;
+    assert_eq!(msgs.len(), 1, "不得残留任何新消息: {msgs:?}");
+    assert_eq!(msgs[0]["id"], json!(mid));
+}
+
+/// KEDAI-01:成功导入照旧替换(条数/归一化/extra 保留);空数组 = 清空——
+/// 这是**现有契约**,修复只加原子性、不顺手改变它(显式锁定)。
+#[tokio::test]
+async fn import_success_and_empty_array_semantics() {
+    let app = test_app();
+    let (_cid, sid, _mid) = session_with_greeting(app, "导入成功.json").await;
+
+    let (status, imp) = send_json(
+        app,
+        "POST",
+        "/api/import/chat",
+        json!({ "session_id": sid, "messages": [
+            { "role": "User", "content": "a" },
+            { "role": "assistant", "content": "b", "extra": { "kind": "memory" } },
+        ] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(imp["imported"], json!(2));
+
+    let msgs = history_of(app, &sid).await;
+    assert_eq!(msgs.len(), 2, "成功导入应完整替换: {msgs:?}");
+    assert_eq!(msgs[0]["role"], json!("user"), "role 应归一化为小写");
+    assert_eq!(msgs[1]["extra"]["kind"], json!("memory"), "extra 应保留");
+
+    // 空数组 = 清空(imported=0)
+    let (status, imp0) = send_json(
+        app,
+        "POST",
+        "/api/import/chat",
+        json!({ "session_id": sid, "messages": [] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(imp0["imported"], json!(0));
+    assert_eq!(
+        history_of(app, &sid).await.len(),
+        0,
+        "空数组 = 清空(现有语义,不得改变)"
+    );
+}

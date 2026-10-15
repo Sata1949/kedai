@@ -7,12 +7,19 @@
 //     · Unix **仅杀直接子进程**(2026-09-30 实测口径,此前注释谎称已做):
 //       进程组方案(`process_group(0)` + `killpg`)未实现,登记在 `docs/遗留.md` EXEC-TREE-1。
 // - stdin 置 null,禁止交互式命令挂起等待输入;
-// - 输出按字符截断(见 mod.rs::truncate_output);
+// - 输出**边读边截**(`PipeCapture`,KEDAI-02 起):并发排空管道 + 头尾有界保留,
+//   内存上界与输出总量解耦,截断文案与 `mod.rs::truncation_marker` 同源;
 // - 不拼接额外字符串:命令原文交平台 shell 解释。
 #![cfg(not(target_os = "android"))]
 
-use super::{clamp_timeout, truncate_output, ExecRequest, ExecResult, ShellTier};
+use super::{
+    clamp_timeout, truncation_marker, ExecRequest, ExecResult, ShellTier, HEAD_KEEP_CHARS,
+    TAIL_KEEP_CHARS,
+};
+use std::collections::VecDeque;
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
+use tokio::task::JoinHandle;
 
 /// Windows 进程树闸门:Job Object(HARNESS3-1)。
 ///
@@ -178,13 +185,28 @@ pub async fn execute(req: ExecRequest) -> Result<ExecResult, String> {
         }
     }
 
-    // 限时等待:超时则显式 kill(连同 kill_on_drop 双保险),再回收输出。
+    // 并发排空(KEDAI-02,2026-10-15 审查修复批 B):spawn 后**立即** take 两个管道并起读
+    // 任务,命令运行期间持续消费输出。旧实现「先 wait 后 read_to_end」在输出写满管道
+    // (Windows ≈64 KiB)时是互相等待——子进程阻塞在 write、父进程等它退出,构建/测试类
+    // 大输出命令必然拖到超时误杀,且超时路径不读管道、已写出的输出全部丢弃。
+    let out_cap = Arc::new(Mutex::new(PipeCapture::default()));
+    let err_cap = Arc::new(Mutex::new(PipeCapture::default()));
+    let out_task = child
+        .stdout
+        .take()
+        .map(|p| tokio::spawn(drain_pipe(p, out_cap.clone())));
+    let err_task = child
+        .stderr
+        .take()
+        .map(|p| tokio::spawn(drain_pipe(p, err_cap.clone())));
+
+    // 限时等待:超时则显式 kill(连同 kill_on_drop 双保险),再收掉读任务。
     // Windows:作业清理覆盖孙进程;Unix:kill 只作用于直接子进程,孙进程残留
     // 登记在 `docs/遗留.md` EXEC-TREE-1(与 mcp/process.rs 的 v1 保守语义同源)。
     let deadline = std::time::Duration::from_millis(timeout);
     match tokio::time::timeout(deadline, child.wait()).await {
         Ok(Ok(status)) => {
-            // 正常结束也**先收作业、再读管道**:`read_to_end` 要等**所有**写端关闭才返回,
+            // 正常结束也**先收作业、再收读任务**:`read` 要等**所有**写端关闭才 EOF,
             // 而继承了 stdout/stderr 的后台进程握着的正是这些写端。外壳 cmd 会等 `start /B`
             // 的子孙(2026-09-30 实测),但真正脱离外壳的派生方式(常驻/服务化)不会——
             // 那时旧实现会一路挂到注册表超时。顺序同时就是本批的清理语义:
@@ -193,18 +215,30 @@ pub async fn execute(req: ExecRequest) -> Result<ExecResult, String> {
             if let Some(job) = job.as_ref() {
                 job.terminate();
             }
-            // wait() 后输出仍可读(piped);用 take 避免重复消费
-            let stdout = read_pipe(child.stdout.take()).await;
-            let stderr = read_pipe(child.stderr.take()).await;
+            // 读任务收尾**有界**(宽限 + 放弃 + 取已捕获部分):子孙持写端时 EOF 可能
+            // 永不到来,不能让它挂住返回值(见 PIPE_DRAIN_GRACE)。
+            let stdout = match out_task {
+                Some(handle) => finish_reader(handle, &out_cap).await,
+                None => String::new(),
+            };
+            let stderr = match err_task {
+                Some(handle) => finish_reader(handle, &err_cap).await,
+                None => String::new(),
+            };
             Ok(ExecResult {
                 exit_code: status.code().unwrap_or(-1),
-                stdout: truncate_output(&stdout),
-                stderr: truncate_output(&stderr),
+                stdout,
+                stderr,
                 tier: ShellTier::Sandbox,
                 timed_out: false,
             })
         }
-        Ok(Err(e)) => Err(format!("命令执行失败: {e}")),
+        Ok(Err(e)) => {
+            // wait 失败:读任务没有收尾价值,直接放弃(abort 即释放管道句柄)
+            abort_reader(out_task.as_ref());
+            abort_reader(err_task.as_ref());
+            Err(format!("命令执行失败: {e}"))
+        }
         Err(_) => {
             // 超时:显式强杀并 wait 回收,避免僵尸;作业内全部进程(含孙进程)一并收掉
             let _ = child.start_kill();
@@ -213,6 +247,9 @@ pub async fn execute(req: ExecRequest) -> Result<ExecResult, String> {
                 job.terminate();
             }
             let _ = child.wait().await;
+            // 读任务直接放弃:等写端关闭可能永远不返回,收尾必须有界
+            abort_reader(out_task.as_ref());
+            abort_reader(err_task.as_ref());
             Err(format!(
                 "命令超时({timeout} ms)已终止。建议:拆小步骤、或调高 timeout_ms(上限 {} ms)。",
                 super::MAX_TIMEOUT_MS
@@ -221,15 +258,154 @@ pub async fn execute(req: ExecRequest) -> Result<ExecResult, String> {
     }
 }
 
-/// 读干一个管道到字符串(进程已退出,读不会阻塞)。
-async fn read_pipe(pipe: Option<impl tokio::io::AsyncRead + Unpin>) -> String {
+/// 读任务收尾宽限:直接子进程已结束、但**子孙进程仍持有管道写端**时(Unix 无作业对象),
+/// EOF 可能永不到来——宽限内没结束就放弃等待并取已捕获部分,保证收尾有界。
+/// Windows 正常路径由 `JobTree::terminate()` 关闭继承写端后立即 EOF,走不到宽限;
+/// Unix 进程树清理是已登记限制(EXEC-TREE-1),本宽限只保证「不无限等」。
+const PIPE_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_millis(1_000);
+
+/// 有界地收掉一个读任务并取回捕获结果。
+async fn finish_reader(mut handle: JoinHandle<()>, shared: &Arc<Mutex<PipeCapture>>) -> String {
+    if tokio::time::timeout(PIPE_DRAIN_GRACE, &mut handle)
+        .await
+        .is_err()
+    {
+        // 宽限内未结束:放弃等待,取已捕获部分(不丢已读输出)
+        handle.abort();
+        let _ = handle.await;
+    }
+    shared.lock().unwrap_or_else(|e| e.into_inner()).render()
+}
+
+/// 放弃一个读任务(超时/失败路径):不等写端关闭,abort 即释放管道句柄。
+fn abort_reader(handle: Option<&JoinHandle<()>>) {
+    if let Some(h) = handle {
+        h.abort();
+    }
+}
+
+/// 排空一个管道到**有界**捕获:一直读到 EOF,内容边读边喂给 [`PipeCapture`]。
+/// 达到保留上限后仍继续读取并丢弃多余内容——**不能中途停止排空**,否则又会回到
+/// 「写端填满管道、子进程阻塞」的老问题。读取错误按 EOF 收场(与旧实现
+/// `let _ = read_to_end(...)` 的容错口径一致)。
+async fn drain_pipe(mut pipe: impl tokio::io::AsyncRead + Unpin, shared: Arc<Mutex<PipeCapture>>) {
     use tokio::io::AsyncReadExt;
-    let Some(mut p) = pipe else {
-        return String::new();
-    };
-    let mut buf = Vec::new();
-    let _ = p.read_to_end(&mut buf).await;
-    String::from_utf8_lossy(&buf).into_owned()
+    let mut buf = [0u8; 8192];
+    loop {
+        match pipe.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => {
+                shared
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .feed(&buf[..n]);
+            }
+            Err(_) => break,
+        }
+    }
+    shared.lock().unwrap_or_else(|e| e.into_inner()).finish();
+}
+
+/// 单管道输出的**有界捕获**(KEDAI-02):内存只保留头/尾窗口
+/// (头 `HEAD_KEEP_CHARS` + 尾 `TAIL_KEEP_CHARS` 字符,与 [`truncation_marker`] 同口径),
+/// 中间内容边读边丢——只计数、不驻留,内存上界与输出总量解耦(≈128 KiB/管道)。
+///
+/// 「先 wait 后读」的旧实现里截断发生在读完之后(`truncate_output`),峰值内存等于
+/// 输出总量;本结构把截断前移到读取过程中,呈现文案经 `truncation_marker` 单处维护。
+///
+/// 「任务被取消/超时」时本结构可能只喂了前半段——调用方经共享引用取已捕获部分,
+/// 不丢已读输出(见 `finish_reader`)。
+#[derive(Default)]
+struct PipeCapture {
+    /// 头部窗口(前 `HEAD_KEEP_CHARS` 个字符)
+    head: String,
+    head_chars: usize,
+    /// 尾部窗口(末尾 `TAIL_KEEP_CHARS` 个字符的环形缓冲)
+    tail: VecDeque<char>,
+    /// 中间省略的字符数
+    dropped: usize,
+    /// 跨块未收尾的 UTF-8 序列(≤3 字节):块边界不得切坏多字节字符
+    pending: Vec<u8>,
+}
+
+impl PipeCapture {
+    /// 喂入一块字节。按 UTF-8 边界逐字符清算;非法字节按 `from_utf8_lossy` 语义
+    /// 记一个替换字符(与旧实现「整串 lossy 解码」对非法字节的呈现一致)。
+    fn feed(&mut self, chunk: &[u8]) {
+        let mut data = std::mem::take(&mut self.pending);
+        data.extend_from_slice(chunk);
+        let mut idx = 0;
+        while idx < data.len() {
+            match std::str::from_utf8(&data[idx..]) {
+                Ok(s) => {
+                    for c in s.chars() {
+                        self.push_char(c);
+                    }
+                    idx = data.len();
+                }
+                Err(e) => {
+                    let valid = e.valid_up_to();
+                    if valid > 0 {
+                        // valid_up_to 保证该前缀合法;`unwrap_or("")` 仅为满足
+                        // 「services 生产代码不得 panic」护栏(该分支实际不可达)
+                        let s = std::str::from_utf8(&data[idx..idx + valid]).unwrap_or("");
+                        for c in s.chars() {
+                            self.push_char(c);
+                        }
+                        idx += valid;
+                    }
+                    match e.error_len() {
+                        Some(n) => {
+                            // 非法序列:按 lossy 语义记一个替换字符
+                            self.push_char('\u{FFFD}');
+                            idx += n;
+                        }
+                        None => {
+                            // 末尾不完整序列:留待下一块拼接
+                            self.pending.extend_from_slice(&data[idx..]);
+                            idx = data.len();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// 收尾:残留的不完整序列按 lossy 语义记一个替换字符(与整串 lossy 解码一致)。
+    fn finish(&mut self) {
+        if !self.pending.is_empty() {
+            self.pending.clear();
+            self.push_char('\u{FFFD}');
+        }
+    }
+
+    fn push_char(&mut self, c: char) {
+        if self.head_chars < HEAD_KEEP_CHARS {
+            self.head.push(c);
+            self.head_chars += 1;
+            return;
+        }
+        self.tail.push_back(c);
+        if self.tail.len() > TAIL_KEEP_CHARS {
+            self.tail.pop_front();
+            self.dropped += 1;
+        }
+    }
+
+    /// 组装最终文本:未丢弃 → 全文(总量 ≤ 头+尾窗口);有丢弃 → 头 + 截断说明 + 尾。
+    fn render(&self) -> String {
+        let tail: String = self.tail.iter().collect();
+        if self.dropped == 0 {
+            format!("{}{}", self.head, tail)
+        } else {
+            format!(
+                "{}\n{}\n{}",
+                self.head,
+                truncation_marker(self.dropped),
+                tail
+            )
+        }
+    }
 }
 
 #[cfg(test)]
@@ -380,7 +556,6 @@ mod tests {
     fn tick_len(log: &std::path::Path) -> u64 {
         std::fs::metadata(log).map(|m| m.len()).unwrap_or(0)
     }
-
     /// **超时出口收掉孙进程**(HARNESS3-1 的验收断言「点停止后沙箱不再被改」)。
     ///
     /// ## 为什么断言「日志不再增长」而不是「进程已死」
@@ -476,6 +651,190 @@ mod tests {
         assert_eq!(
             tick_before, tick_after,
             "孙进程在调用被取消后仍在写文件({tick_before} → {tick_after}):drop 路径未清理进程树"
+        );
+    }
+
+    // ==================== KEDAI-02:大输出管道排空(审查修复批 B)====================
+
+    /// 探针输出目标。
+    #[derive(Clone, Copy)]
+    enum OutTarget {
+        Stdout,
+        Stderr,
+        /// 两个通道各输出约 1 MiB
+        Both,
+        /// 持续输出不停止(超时/取消用例)
+        Endless,
+    }
+
+    /// 生成「超管道容量输出」探针:写脚本到独立临时目录,返回 (命令, 工作目录)。
+    ///
+    /// 为什么独立目录 + 脚本文件:Windows `cmd /C` 对嵌套引号/`&`/`>` 的解析脆弱,
+    /// 落成 .cmd/.sh 文件后由外壳按文件语义解析,探针形态可读且跨平台(先例见 tree_probe)。
+    /// 每个探针 1 MiB ≫ Windows 管道容量(≈64 KiB)——旧实现「先 wait 后读」必然被写满的
+    /// 管道钉死,这正是本批要修的缺陷(2026-10-15 独立探针复现:不排空 1.5s 仍阻塞)。
+    fn big_output_probe(tag: &str, target: OutTarget) -> (String, String) {
+        let dir = std::env::temp_dir().join(format!("kedai-bigout-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("建探针目录失败");
+        let line = "0123456789".repeat(20); // 200 字符/行(cmd echo 单行安全长度内)
+        if cfg!(windows) {
+            let to_err = if matches!(target, OutTarget::Stderr) {
+                " 1>&2"
+            } else {
+                ""
+            };
+            // 5200 行 × 202 字节(含 CRLF)≈ 1.0 MiB;Endless 用 200 万次确保超时窗口内仍在写
+            let loops = if matches!(target, OutTarget::Endless) {
+                2_000_000
+            } else {
+                5_200
+            };
+            let mut script = String::from("@echo off\r\n");
+            script.push_str(&format!(
+                "for /L %%i in (1,1,{loops}) do @echo {line}{to_err}\r\n"
+            ));
+            if matches!(target, OutTarget::Both) {
+                script.push_str(&format!(
+                    "for /L %%i in (1,1,5200) do @echo {line} 1>&2\r\n"
+                ));
+            }
+            std::fs::write(dir.join("big-output.cmd"), script).expect("写探针失败");
+            (
+                "big-output.cmd".to_string(),
+                dir.to_string_lossy().into_owned(),
+            )
+        } else {
+            let to_err = if matches!(target, OutTarget::Stderr) {
+                " 1>&2"
+            } else {
+                ""
+            };
+            let mut script = String::from("#!/bin/sh\n");
+            if matches!(target, OutTarget::Endless) {
+                // yes 无限写;直接指向管道,命令被强杀时随之收场
+                script.push_str(&format!("yes {line}{to_err}\n"));
+            } else {
+                // head -c 精确截到 1 MiB;head 退出后 yes 收 SIGPIPE,不留残余
+                script.push_str(&format!("yes {line} | head -c 1048576{to_err}\n"));
+                if matches!(target, OutTarget::Both) {
+                    script.push_str(&format!("yes {line} | head -c 1048576 1>&2\n"));
+                }
+            }
+            std::fs::write(dir.join("big-output.sh"), script).expect("写探针失败");
+            (
+                "sh big-output.sh".to_string(),
+                dir.to_string_lossy().into_owned(),
+            )
+        }
+    }
+
+    /// KEDAI-02:stdout 输出约 1 MiB(≫ 64 KiB 管道容量)必须正常跑完——
+    /// 旧实现「先 wait 后读」会被写满的管道钉死,只能等到超时误杀。
+    #[tokio::test]
+    async fn large_stdout_does_not_block_to_timeout() {
+        let (cmd, cwd) = big_output_probe("stdout", OutTarget::Stdout);
+        let mut r = req(&cmd);
+        r.cwd = Some(cwd.clone());
+        r.timeout_ms = Some(15_000);
+        let out = super::super::execute(r, &[ShellTier::Sandbox])
+            .await
+            .expect("大输出命令应正常完成(而非阻塞到超时)");
+        let _ = std::fs::remove_dir_all(&cwd);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.timed_out, "不得误报超时");
+        assert!(out.stdout.starts_with("0123456789"), "头部窗口应保留");
+        assert!(out.stdout.contains("已截断"), "超上限应附截断说明");
+        assert!(
+            out.stdout.chars().count() <= super::super::MAX_OUTPUT_CHARS + 256,
+            "保留量应有界,实际 {} 字符",
+            out.stdout.chars().count()
+        );
+    }
+
+    /// KEDAI-02:stderr 侧同样必须被并发排空(旧实现里它和 stdout 一样只在 wait 后才读)
+    #[tokio::test]
+    async fn large_stderr_does_not_block_to_timeout() {
+        let (cmd, cwd) = big_output_probe("stderr", OutTarget::Stderr);
+        let mut r = req(&cmd);
+        r.cwd = Some(cwd.clone());
+        r.timeout_ms = Some(15_000);
+        let out = super::super::execute(r, &[ShellTier::Sandbox])
+            .await
+            .expect("大 stderr 输出命令应正常完成");
+        let _ = std::fs::remove_dir_all(&cwd);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.timed_out, "不得误报超时");
+        assert!(out.stderr.starts_with("0123456789"), "stderr 头部应保留");
+        assert!(out.stderr.contains("已截断"), "stderr 超上限应附截断说明");
+        assert!(
+            out.stderr.chars().count() <= super::super::MAX_OUTPUT_CHARS + 256,
+            "stderr 保留量应有界,实际 {} 字符",
+            out.stderr.chars().count()
+        );
+    }
+
+    /// KEDAI-02:两个通道同时各输出约 1 MiB——两者都要被消费,且保留量都有界。
+    #[tokio::test]
+    async fn both_pipes_large_output_are_consumed() {
+        let (cmd, cwd) = big_output_probe("both", OutTarget::Both);
+        let mut r = req(&cmd);
+        r.cwd = Some(cwd.clone());
+        r.timeout_ms = Some(20_000);
+        let out = super::super::execute(r, &[ShellTier::Sandbox])
+            .await
+            .expect("双通道大输出命令应正常完成");
+        let _ = std::fs::remove_dir_all(&cwd);
+        assert_eq!(out.exit_code, 0);
+        assert!(out.stdout.starts_with("0123456789"), "stdout 应被消费");
+        assert!(out.stderr.starts_with("0123456789"), "stderr 应被消费");
+        assert!(out.stdout.contains("已截断"));
+        assert!(out.stderr.contains("已截断"));
+        assert!(out.stdout.chars().count() <= super::super::MAX_OUTPUT_CHARS + 256);
+        assert!(out.stderr.chars().count() <= super::super::MAX_OUTPUT_CHARS + 256);
+    }
+
+    /// KEDAI-02:大输出 + 强制超时 → 必须在预算内返回(读取任务与管道不得让收尾挂死)。
+    #[tokio::test]
+    async fn timeout_with_large_output_returns_in_budget() {
+        let (cmd, cwd) = big_output_probe("timeout", OutTarget::Endless);
+        let mut r = req(&cmd);
+        r.cwd = Some(cwd.clone());
+        r.timeout_ms = Some(1_000);
+        let started = std::time::Instant::now();
+        let err = super::super::execute(r, &[ShellTier::Sandbox])
+            .await
+            .unwrap_err();
+        let elapsed = started.elapsed();
+        let _ = std::fs::remove_dir_all(&cwd);
+        assert!(err.contains("超时"), "{err}");
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "超时收尾应有界,实际 {elapsed:?}"
+        );
+    }
+
+    /// KEDAI-02:后代进程仍持有管道写端时,收尾也必须**有界**(Unix 无作业对象;
+    /// Windows 由 Job Object 覆盖,见 `timeout_terminates_whole_process_tree`)。
+    /// 旧实现 `read_to_end` 会一直等写端关闭(≈ sleep 时长);新实现宽限后放弃并保留已读输出。
+    #[tokio::test]
+    #[cfg(not(windows))]
+    async fn descendant_holding_pipe_does_not_hang() {
+        let mut r = req("sleep 8 & echo 后代持有管道写端");
+        r.timeout_ms = Some(30_000); // 远大于宽限:能否及时返回由「有界收尾」决定
+        let started = std::time::Instant::now();
+        let out = super::super::execute(r, &[ShellTier::Sandbox])
+            .await
+            .expect("直接子进程本身应成功");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "子孙持写端时收尾应有界(旧实现会一直等到写端关闭): {elapsed:?}"
+        );
+        assert!(
+            out.stdout.contains("后代持有管道写端"),
+            "宽限收尾不得丢掉已读输出: {}",
+            out.stdout
         );
     }
 }

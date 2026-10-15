@@ -87,9 +87,10 @@ pub const MAX_OUTPUT_CHARS: usize = 32_768;
 /// 尾部保留份额(批次 2 HARNESS3-4):构建/测试类命令的**失败摘要在尾部**
 /// (`error[E...]`、`test result:` 那几行),只保头会把「哪一步失败」整段切掉。
 /// 头:尾 = 3:1——头部留上下文(命令回显与前段进度),尾部留结论。
-const TAIL_KEEP_CHARS: usize = MAX_OUTPUT_CHARS / 4;
+/// 桌面的有界管道捕获(`desktop::PipeCapture`)按同一窗口配置保留,两个截断层口径一致。
+pub const TAIL_KEEP_CHARS: usize = MAX_OUTPUT_CHARS / 4;
 /// 头部保留份额(= 总额 - 尾部,保证两者之和恰为 `MAX_OUTPUT_CHARS`)。
-const HEAD_KEEP_CHARS: usize = MAX_OUTPUT_CHARS - TAIL_KEEP_CHARS;
+pub const HEAD_KEEP_CHARS: usize = MAX_OUTPUT_CHARS - TAIL_KEEP_CHARS;
 
 /// 默认与上限超时(毫秒)。上限防止模型给出超大值导致挂起。
 /// **1800s(批次 2 HARNESS3-4)**:编码类任务的自测闭环要能跑完 `cargo test` 级校验
@@ -106,7 +107,21 @@ pub fn clamp_timeout(ms: Option<u64>) -> u64 {
         .clamp(1_000, MAX_TIMEOUT_MS)
 }
 
+/// 截断说明文案(**单处维护**):字符截断(`truncate_output`)与桌面的有界管道捕获
+/// (`desktop::PipeCapture`)共用同一措辞,避免两条路径漂移。
+///
+/// 诚实边界(2026-10-15 审查修复批 B):此前文案尾句是「完整内容见审计日志」,但审计表
+/// 经 `audit::summarize` 只存摘要、并不存在完整副本——该句为失实表述,随本批移除。
+pub fn truncation_marker(omitted: usize) -> String {
+    format!(
+        "…(输出超 {MAX_OUTPUT_CHARS} 字符已截断:保留头 {HEAD_KEEP_CHARS} + 尾 {TAIL_KEEP_CHARS} 字符,中间省略 {omitted} 字符)"
+    )
+}
+
 /// 截断输出并附省略说明(按字符,避免切坏多字节);**保头 + 保尾**。
+///
+/// 现由 Android 桥(`android.rs`)等「整串在手」的路径使用;桌面执行器已改为
+/// `desktop::PipeCapture` 的**边读边截**版本(内存有界),渲染文案与本函数同源。
 pub fn truncate_output(s: &str) -> String {
     let count = s.chars().count();
     if count <= MAX_OUTPUT_CHARS {
@@ -115,9 +130,7 @@ pub fn truncate_output(s: &str) -> String {
     let head: String = s.chars().take(HEAD_KEEP_CHARS).collect();
     let tail: String = s.chars().skip(count - TAIL_KEEP_CHARS).collect();
     let omitted = count - HEAD_KEEP_CHARS - TAIL_KEEP_CHARS;
-    format!(
-        "{head}\n…(输出超 {MAX_OUTPUT_CHARS} 字符已截断:保留头 {HEAD_KEEP_CHARS} + 尾 {TAIL_KEEP_CHARS} 字符,中间省略 {omitted} 字符,完整内容见审计日志)\n{tail}"
-    )
+    format!("{head}\n{}\n{tail}", truncation_marker(omitted))
 }
 
 /// 命令执行的单一入口:按当前可用等级执行。
