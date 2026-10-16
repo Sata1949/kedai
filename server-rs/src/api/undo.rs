@@ -55,7 +55,15 @@ pub async fn restore_snapshot(
     let undo = state.undo.clone();
     match state.db_call(move || undo.restore(&id)).await {
         Err(e) => db_err(&e),
-        Ok(Err(e)) => err_status(&e, StatusCode::INTERNAL_SERVER_ERROR),
+        // 复审 P1-1 的忙碌拒绝走 409(与发送侧同语义);其余执行失败 500
+        Ok(Err(e)) => err_status(
+            &e,
+            if e == crate::services::undo_service::RESTORE_BUSY_MESSAGE {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            },
+        ),
         Ok(Ok(None)) => err_status("快照不存在或已被回退", StatusCode::NOT_FOUND),
         Ok(Ok(Some(receipt))) => Json(json!({
             "ok": true,

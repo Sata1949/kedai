@@ -18,6 +18,7 @@ use crate::tools::agent_tools::safe_rel_path;
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -32,6 +33,9 @@ const WRITE_TOOLS: [&str; 5] = [
 
 /// 单文件快照内容上限(256KB):超出记 truncated=true,restore 拒绝并中文提示
 const MAX_SNAPSHOT_FILE_BYTES: usize = 256 * 1024;
+
+/// 恢复被同会话生成占位拒绝时的固定文案(API 层据此映射 409;codex 复审 P1-1)。
+pub const RESTORE_BUSY_MESSAGE: &str = "该会话正在生成中,请先停止生成再回退";
 
 /// 列表项(不含 payload,供 GET /api/chat/sessions/{id}/undo 输出)
 #[derive(Debug, Clone, Serialize)]
@@ -76,6 +80,11 @@ pub struct UndoService {
     /// 逆操作会互相踩(各自读到同一批快照,交错写文件/删快照)。粗粒度单锁,
     /// 回退是低频用户动作,不按会话细分。
     restore_gate: Mutex<()>,
+    /// 每会话「生成/恢复」协调锁(codex 复审 P1-1):同会话的生成任务与 restore
+    /// 双侧都对本锁 try-lock,原子互斥——单靠 API 的 is_active 预检存在检查与
+    /// 注册之间的 TOCTOU 窗口(生成可在两者之间开始)、且 commit_staged 不参与
+    /// 任何协调。锁条目随会话惰性创建(数量与会话同量级,句柄极小,不清理)。
+    session_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 /// 执行前暂存的快照(未落库);commit/discard 两段式收口
@@ -122,7 +131,22 @@ impl UndoService {
             settings,
             data_dir,
             restore_gate: Mutex::new(()),
+            session_locks: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// 取(或惰性创建)某会话的「生成/恢复」协调锁(codex 复审 P1-1)。
+    /// 生成侧在异步任务内 `try_lock_owned`(常态瞬时获得;restore 持锁期间失败并
+    /// 以可见错误结束本次流);restore 侧在阻塞上下文 `try_lock`(生成进行中即
+    /// 失败,返回 [`RESTORE_BUSY_MESSAGE`])。双侧都是 try 语义,不排队、不等待。
+    pub fn session_lock(&self, session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut map = self
+            .session_locks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        map.entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     }
 
     /// 全局开关(锁中毒恢复取值,不 panic;只读取立即释放,不跨 .await)
@@ -558,6 +582,13 @@ impl UndoService {
         let Some((session_id, batch)) = self.load_restore_batch(id)? else {
             return Ok(None);
         };
+        // 1b) 同会话生成互斥(codex 复审 P1-1):原子 try-lock——API 的 is_active
+        // 预检只是快速失败路径,此处才是与「生成注册」真正互斥的判据。
+        let session_lock = self.session_lock(&session_id);
+        let _generation_guard = match session_lock.try_lock() {
+            Ok(g) => g,
+            Err(_) => return Err(RESTORE_BUSY_MESSAGE.to_string()),
+        };
         // 2) 预检整批 + 解析 payload(不通过则零改动零删除)
         let mut steps: Vec<RestoreStep> = Vec::with_capacity(batch.len());
         for item in &batch {
@@ -586,13 +617,20 @@ impl UndoService {
                 ));
             }
         }
-        // 4) 全部成功:按精确 id 列表清理已处理快照(批外新快照不受影响)
+        // 4) 全部成功:按精确 id 列表清理已处理快照(批外新快照不受影响)。
+        //    codex 复审 P2-1:清理放进**单事务**——中途任一 DELETE 失败即整体回滚,
+        //    不出现「删了一半又回 500」的中间态(逆操作幂等,整批可原样重试)。
         {
-            let conn = self.db.write();
+            let mut conn = self.db.write();
+            let tx = conn
+                .transaction()
+                .map_err(|e| format!("开启回退清理事务失败: {e}"))?;
             for step in &steps {
-                conn.execute("DELETE FROM undo_snapshots WHERE id = ?1", params![step.id])
+                tx.execute("DELETE FROM undo_snapshots WHERE id = ?1", params![step.id])
                     .map_err(|e| format!("清理回退快照失败: {e}"))?;
             }
+            tx.commit()
+                .map_err(|e| format!("提交回退清理事务失败: {e}"))?;
         }
         // steps 新→旧,末元素即本次点击的目标快照
         let target_label = steps.last().map(|s| s.label.clone()).unwrap_or_default();
@@ -846,6 +884,36 @@ fn precheck_payload(snapshot_id: &str, payload_raw: &str) -> Result<Value, Strin
                 row.get("id")
                     .and_then(|v| v.as_i64())
                     .ok_or_else(|| format!("快照 {snapshot_id} 气泡记录缺 id"))?;
+                // codex 复审 P1-3:before 结构必须可判定——对象(含字符串 content)
+                // 或 null;类型不明时 apply 侧会按「整行插回/覆盖」处理,静默写坏数据。
+                match row.get("before") {
+                    Some(Value::Null) => {}
+                    Some(Value::Object(o)) => {
+                        if o.get("content").and_then(|v| v.as_str()).is_none() {
+                            return Err(format!(
+                                "快照 {snapshot_id} 气泡 #{} 的 before.content 缺失或非字符串",
+                                row["id"]
+                            ));
+                        }
+                        if o.get("extra").is_some_and(|e| !e.is_object() && !e.is_null()) {
+                            return Err(format!(
+                                "快照 {snapshot_id} 气泡 #{} 的 before.extra 类型非法(应为对象或 null)",
+                                row["id"]
+                            ));
+                        }
+                        if o.get("id").and_then(|v| v.as_i64()).is_none() {
+                            return Err(format!(
+                                "快照 {snapshot_id} 气泡记录 before.id 缺失或非整数"
+                            ));
+                        }
+                    }
+                    _ => {
+                        return Err(format!(
+                            "快照 {snapshot_id} 气泡 #{} 的 before 缺失或类型非法(应为对象或 null)",
+                            row["id"]
+                        ));
+                    }
+                }
             }
         }
         Some("bubble_insert") => {
@@ -884,9 +952,40 @@ fn precheck_file_entry(snapshot_id: &str, entry: &Value) -> Result<(), String> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| format!("快照 {snapshot_id} 缺文件路径"))?;
     safe_rel_path(rel).map_err(|e| format!("快照 {snapshot_id} 文件路径非法({rel}): {e}"))?;
-    if entry.get("truncated").and_then(|v| v.as_bool()) == Some(true) {
+    // codex 复审 P1-3:payload 是持久化数据(可能被截断/手工污染),字段与类型必须
+    // 齐备——apply 侧把「old 非字符串」一律当「逆操作 = 删除」,缺字段会静默删文件。
+    match entry.get("entry_type").and_then(|v| v.as_str()) {
+        Some("file") | Some("dir") => {}
+        _ => {
+            return Err(format!(
+                "快照 {snapshot_id} 的文件项 {rel} 缺合法 entry_type(应为 file/dir)"
+            ));
+        }
+    }
+    match entry.get("old") {
+        Some(Value::String(_)) | Some(Value::Null) => {}
+        _ => {
+            return Err(format!(
+                "快照 {snapshot_id} 的文件项 {rel} 的 old 缺失或类型非法(应为字符串或 null)"
+            ));
+        }
+    }
+    match entry.get("truncated") {
+        Some(Value::Bool(false)) => {}
+        Some(Value::Bool(true)) => {
+            return Err(format!(
+                "快照 {snapshot_id} 的文件 {rel} 原始内容超过 256KB,快照不完整,无法回退"
+            ));
+        }
+        _ => {
+            return Err(format!(
+                "快照 {snapshot_id} 的文件项 {rel} 的 truncated 缺失或类型非法(应为布尔)"
+            ));
+        }
+    }
+    if entry.get("existed").is_some_and(|v| !v.is_boolean()) {
         return Err(format!(
-            "快照 {snapshot_id} 的文件 {rel} 原始内容超过 256KB,快照不完整,无法回退"
+            "快照 {snapshot_id} 的文件项 {rel} 的 existed 类型非法(应为布尔)"
         ));
     }
     Ok(())

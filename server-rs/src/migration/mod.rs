@@ -226,6 +226,16 @@ mod tests {
             )
             .unwrap();
         assert!(call_id.is_none(), "旧行 call_id 应为 NULL(不伪造)");
+        // 排序索引由本 ensure 创建(刻意不在建表批,防旧库引用未补列炸升级——ddl.rs 注释)
+        let has_idx: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index'                  AND name='idx_undo_snapshots_session_seq')",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|v| v == 1)
+            .unwrap_or(false);
+        assert!(has_idx, "ensure 应创建 (session_id, seq) 排序索引");
         // 幂等:重复执行不报错、seq 不被二次改写
         ensure_undo_snapshots_restore_columns(&conn).unwrap();
         let seq_a2: i64 = conn

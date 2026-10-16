@@ -199,6 +199,10 @@ export const useChatStore = defineStore('app.chat', () => {
       if (trace.state === 'error') base.stepText = '执行出错';
       if (trace.state === 'interrupted') base.stepText = '已中断';
       base.toolCalls = trace.tool_calls.map((c) => ({
+        // UI 稳定键(callKey)用落库行 id(codex 复审 P1-2):此前不映射 callId,
+        // 同名历史调用会一起退化到 `name#0` 共享 undoBusy/undoneKeys——点其中一张
+        // 会把另一张也标成「已回退」。行 id 仅作前端键,不冒充线上 call_id。
+        callId: c.id,
         name: c.name,
         input: c.input,
         output: c.output,

@@ -605,6 +605,65 @@ async fn restore_mixed_variables_and_file() {
     assert!(list_undo(app, &sid).await.is_empty(), "已处理快照应清空");
 }
 
+/// ⑤f 预检加严(codex 复审 P1-3):payload 缺必要字段(如文件项的 old)→ 预检拒绝、
+/// 零副作用(文件与快照都不动);直连库制造污染,不依赖真实截断。
+#[tokio::test]
+async fn restore_precheck_rejects_malformed_payload() {
+    let _guard = test_lock().await;
+    let app = test_app();
+    let (cid, sid) = setup(app, "undo 污染", &["write"]).await;
+    let file = char_file(&cid, "undo_mal.md");
+
+    send_tool_chat(
+        app,
+        &sid,
+        &cid,
+        r#"[[tool:write {"target":"file","path":"undo_mal.md","content":"m"}]]"#,
+    )
+    .await;
+    let snaps = list_undo(app, &sid).await;
+    assert_eq!(snaps.len(), 1, "应有 1 条快照: {snaps:?}");
+    let snap_id = snaps[0]["id"].as_str().unwrap().to_string();
+
+    // 直连库把 payload 中文件项的 old 字段删掉(模拟截断/手改污染)
+    {
+        let db = data_dir().join("kedai.db");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let payload: String = conn
+            .query_row(
+                "SELECT payload FROM undo_snapshots WHERE id = ?1",
+                rusqlite::params![snap_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let mut v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        v["entries"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("old");
+        let n = conn
+            .execute(
+                "UPDATE undo_snapshots SET payload = ?1 WHERE id = ?2",
+                rusqlite::params![v.to_string(), snap_id],
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    let (status, res) = restore(app, &snap_id).await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "污染 payload 应被预检拒绝: {res}"
+    );
+    let msg = res["error"].as_str().unwrap_or_default();
+    assert!(msg.contains("预检未通过"), "应说明预检拒绝: {msg}");
+    assert!(msg.contains("old"), "应点名缺失字段: {msg}");
+    // 零副作用:文件原样、快照仍在
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "m");
+    assert_eq!(list_undo(app, &sid).await.len(), 1, "预检拒绝不得删除快照");
+}
+
 /// ⑥ 非写工具(calculator,Safe 无需授权)不产生快照
 #[tokio::test]
 async fn readonly_tool_produces_no_snapshot() {
@@ -655,6 +714,14 @@ async fn snapshot_binds_to_tool_call_event_and_trace() {
         sse.contains(&format!("\"snapshot_id\":\"{snap_id}\"")),
         "ToolResult 事件应携带快照 id {snap_id}: {sse}"
     );
+    // codex 复审 P2-2:SSE 的 call_id 与快照行 call_id 必须同源(mock 的调用 id
+    // 形如 mock-call-k;此处不硬编码序号,只做两侧一致性)
+    let snap_call_id = snaps[0]["call_id"].as_str().unwrap_or_default();
+    assert!(!snap_call_id.is_empty(), "快照行应带 call_id: {snaps:?}");
+    assert!(
+        sse.contains(&format!("\"call_id\":\"{snap_call_id}\"")),
+        "SSE 的 call_id 应与快照行一致({snap_call_id}): {sse}"
+    );
     // 历史重载:tool_calls 落库同一 id
     let (status, trace) = send_json(
         app,
@@ -679,4 +746,45 @@ async fn snapshot_binds_to_tool_call_event_and_trace() {
     // 收尾:回退该次写入,避免污染共享 app 的后续用例状态
     let (status, res) = restore(app, &snap_id).await;
     assert_eq!(status, StatusCode::OK, "回退清理应 200: {res}");
+}
+
+/// ⑦b 回退只清理**同会话**快照:另一会话(同角色,文件区共享)的快照与文件不受影响
+///(codex 复审 P2-2 补:批外快照不受清的实际判据)。
+#[tokio::test]
+async fn restore_scoped_to_session_keeps_other_session_snapshots() {
+    let _guard = test_lock().await;
+    let app = test_app();
+    let (cid, sid1) = setup(app, "undo 跨会话", &["write"]).await;
+    // 第二个会话:会话级授权不跨会话,单独授权
+    let sid2 = create_session(app, &cid).await;
+    authorize(app, &sid2, "write").await;
+    let f2 = char_file(&cid, "undo_cross2.md");
+
+    send_tool_chat(
+        app,
+        &sid1,
+        &cid,
+        r#"[[tool:write {"target":"file","path":"undo_cross1.md","content":"a"}]]"#,
+    )
+    .await;
+    send_tool_chat(
+        app,
+        &sid2,
+        &cid,
+        r#"[[tool:write {"target":"file","path":"undo_cross2.md","content":"b"}]]"#,
+    )
+    .await;
+    let s1 = list_undo(app, &sid1).await;
+    let s2 = list_undo(app, &sid2).await;
+    assert_eq!(s1.len(), 1, "会话 1 应有 1 条快照: {s1:?}");
+    assert_eq!(s2.len(), 1, "会话 2 应有 1 条快照: {s2:?}");
+
+    let (status, res) = restore(app, s1[0]["id"].as_str().unwrap()).await;
+    assert_eq!(status, StatusCode::OK, "restore 应 200: {res}");
+
+    // 另一会话的快照与文件都不受影响
+    let s2_after = list_undo(app, &sid2).await;
+    assert_eq!(s2_after.len(), 1, "另一会话的快照不得被清理: {s2_after:?}");
+    assert_eq!(s2_after[0]["id"], s2[0]["id"]);
+    assert!(f2.exists(), "另一会话写入的文件不得被逆操作波及");
 }

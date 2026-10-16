@@ -130,6 +130,35 @@ describe('AgentPanel「回退到此处」点击链路(批 D-1/D-2)', () => {
     expect(vi.mocked(api.restoreUndoSnapshot)).not.toHaveBeenCalled();
   });
 
+  it('同名历史调用:回退其中一张不影响另一张(codex 复审 P1-2 回归)', async () => {
+    const { wrapper } = mountPanel(() => {
+      const store = useAppStore();
+      store.agent = {
+        ...idleAgent(),
+        toolCalls: [
+          { name: 'write', input: {}, status: 'done', callId: 'row-1', snapshotId: 'snap-1' },
+          { name: 'write', input: {}, status: 'done', callId: 'row-2', snapshotId: 'snap-2' },
+        ],
+      };
+    });
+    vi.mocked(api.listUndoSnapshots).mockResolvedValue([
+      snap('snap-2', '写入文件 b.md'),
+      snap('snap-1', '写入文件 a.md'),
+    ]);
+    vi.mocked(api.restoreUndoSnapshot).mockResolvedValue({ restored: '写入文件 a.md', restored_count: 1 });
+
+    const buttons = wrapper.findAll('button.sv-ml-auto');
+    expect(buttons).toHaveLength(2);
+    // 回退第二张(row-2 绑定 snap-2)——不应把第一张也标记掉
+    await buttons[1].trigger('click');
+    await flushPromises();
+
+    expect(vi.mocked(api.restoreUndoSnapshot)).toHaveBeenCalledWith('snap-2');
+    expect(buttons[1].text()).toBe('已回退');
+    expect(buttons[0].attributes('disabled'), '另一张同名卡仍可点').toBeUndefined();
+    expect(buttons[0].text()).toBe('回退到此处');
+  });
+
   it('生成进行中:按钮禁用(后端同款前置拒绝的界面侧)', async () => {
     const { wrapper } = mountPanel(() => {
       const store = useAppStore();

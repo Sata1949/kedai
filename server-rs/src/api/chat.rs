@@ -301,7 +301,7 @@ pub async fn send(
 
     // 原子占位必须发生在任何消息写入之前;所有前置校验已完成。
     // 守卫随作用域自动清理:早退 / panic / 任务丢弃都必然移除条目(见 PendingRunGuard)。
-    let pending_guard = {
+    let (pending_guard, generation_lock) = {
         let mut pending = state
             .guards
             .pending_runs
@@ -310,13 +310,26 @@ pub async fn send(
         if pending.contains_key(&session_id) || state.engine.is_active(&session_id) {
             return err_status("该会话正在生成中", StatusCode::CONFLICT);
         }
+        // 回退互斥(codex 复审 P1-1):与 UndoService::restore 的 try-lock 成对——
+        // 回退进行中拒绝本次生成;生成的持有期 = 本任务存续(guard 随任务 drop)。
+        let generation_lock = match state
+            .undo
+            .session_lock(&session_id)
+            .try_lock_owned()
+        {
+            Ok(g) => g,
+            Err(_) => return err_status("回退进行中,请稍后再试", StatusCode::CONFLICT),
+        };
         let (cancel, _receiver) = tokio::sync::watch::channel(false);
         pending.insert(session_id.clone(), cancel);
         drop(pending);
-        PendingRunGuard {
-            pending: state.guards.pending_runs.clone(),
-            session_id: session_id.clone(),
-        }
+        (
+            PendingRunGuard {
+                pending: state.guards.pending_runs.clone(),
+                session_id: session_id.clone(),
+            },
+            generation_lock,
+        )
     };
 
     // 消息写入三路分支(互斥):
@@ -429,6 +442,9 @@ pub async fn send(
             // 占位守卫随任务存续:引擎正常结束、panic 或任务被丢弃都会自动清理(RAII),
             // 不再依赖 spawn 收尾语句执行(引擎 panic 时它不会执行)。
             let _pending_guard = pending_guard;
+            // 会话级「生成/恢复」锁持有到任务结束(codex 复审 P1-1):restore 的
+            // try_lock 在生成期间必然失败 → 不会与在途工具写/snapshot commit 交错。
+            let _generation_lock = generation_lock;
             let _ = engine.run(req, tx).await;
         }
         .instrument(run_span),
