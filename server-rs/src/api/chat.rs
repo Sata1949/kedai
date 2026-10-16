@@ -312,11 +312,7 @@ pub async fn send(
         }
         // 回退互斥(codex 复审 P1-1):与 UndoService::restore 的 try-lock 成对——
         // 回退进行中拒绝本次生成;生成的持有期 = 本任务存续(guard 随任务 drop)。
-        let generation_lock = match state
-            .undo
-            .session_lock(&session_id)
-            .try_lock_owned()
-        {
+        let generation_lock = match state.undo.session_lock(&session_id).try_lock_owned() {
             Ok(g) => g,
             Err(_) => return err_status("回退进行中,请稍后再试", StatusCode::CONFLICT),
         };

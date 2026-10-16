@@ -140,10 +140,7 @@ impl UndoService {
     /// 以可见错误结束本次流);restore 侧在阻塞上下文 `try_lock`(生成进行中即
     /// 失败,返回 [`RESTORE_BUSY_MESSAGE`])。双侧都是 try 语义,不排队、不等待。
     pub fn session_lock(&self, session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
-        let mut map = self
-            .session_locks
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut map = self.session_locks.lock().unwrap_or_else(|e| e.into_inner());
         map.entry(session_id.to_string())
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone()
@@ -895,7 +892,9 @@ fn precheck_payload(snapshot_id: &str, payload_raw: &str) -> Result<Value, Strin
                                 row["id"]
                             ));
                         }
-                        if o.get("extra").is_some_and(|e| !e.is_object() && !e.is_null()) {
+                        if o.get("extra")
+                            .is_some_and(|e| !e.is_object() && !e.is_null())
+                        {
                             return Err(format!(
                                 "快照 {snapshot_id} 气泡 #{} 的 before.extra 类型非法(应为对象或 null)",
                                 row["id"]

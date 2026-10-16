@@ -637,10 +637,7 @@ async fn restore_precheck_rejects_malformed_payload() {
             )
             .unwrap();
         let mut v: serde_json::Value = serde_json::from_str(&payload).unwrap();
-        v["entries"][0]
-            .as_object_mut()
-            .unwrap()
-            .remove("old");
+        v["entries"][0].as_object_mut().unwrap().remove("old");
         let n = conn
             .execute(
                 "UPDATE undo_snapshots SET payload = ?1 WHERE id = ?2",
