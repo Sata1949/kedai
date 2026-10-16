@@ -844,6 +844,7 @@ mod tests {
 
     /// **核心安全契约**:破坏性/提权命令在**任何**授权模式下都不被放行
     /// (含 Bypass)——否则放行模式等于「静默执行任意命令」。
+    /// KEDAI-03(审查修复批 C,2026-10-16):Windows 删除族(del/erase/rd)并入本契约。
     #[test]
     fn destructive_and_admin_commands_never_auto_allowed() {
         let m = ToolPermissionManager::in_memory();
@@ -852,6 +853,9 @@ mod tests {
             "sudo reboot",
             "dd if=/dev/zero of=/dev/sda",
             "pm list packages",
+            "del /q disposable.txt",
+            "erase /q disposable.txt",
+            "rd /s /q build",
         ] {
             let a = exec_action(cmd);
             assert!(a.is_exec_op(), "{cmd} 应归类为 Exec");
@@ -925,11 +929,19 @@ mod tests {
         // 提权命令同理
         let a2 = exec_action("sudo rm -rf /");
         assert!(!decide_with(&m, "bash", AuthorizationMode::Bypass, &a2).allowed);
+        // KEDAI-03:Windows 删除族同样不被工具级授权豁免
+        let a3 = exec_action("del /q disposable.txt");
+        assert!(
+            !decide_with(&m, "bash", AuthorizationMode::Bypass, &a3).allowed,
+            "已授权 bash 亦不得静默执行 del;理由:{}",
+            decide_with(&m, "bash", AuthorizationMode::Bypass, &a3).reason
+        );
     }
 
     /// ★ 任务模式白名单(custom_authorized=true,即 ToolGate 名单内工具)不得豁免
     /// 命令级高危硬门:无人值守任务没有 UI 确认通道,rm -rf/sudo 必须直接拒绝;
     /// 普通命令仍经白名单放行(证明硬化断言非恒真)。
+    /// KEDAI-03:Windows 删除族(del/erase)同样走硬门拒绝,不落地为「任务里能静默删文件」。
     #[test]
     fn task_whitelist_does_not_bypass_destructive_command_gate() {
         let m = ToolPermissionManager::in_memory();
@@ -940,7 +952,12 @@ mod tests {
             scope: None,
             budget: None,
         };
-        for cmd in ["rm -rf /important", "sudo reboot"] {
+        for cmd in [
+            "rm -rf /important",
+            "sudo reboot",
+            "del /q disposable.txt",
+            "erase /q disposable.txt",
+        ] {
             let a = exec_action(cmd);
             let d = m.decide_with_policy(
                 "bash",
