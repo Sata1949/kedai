@@ -859,3 +859,60 @@ pub fn ensure_perf_indexes(conn: &Connection) -> Result<(), String> {
         .map_err(|e| format!("创建性能索引失败: {e}"))?;
     Ok(())
 }
+
+/// 幂等 schema 升级(审查修复批 D,2026-10-16):undo_snapshots 补
+/// `seq`/`call_id`/`run_id` 三列 + `(session_id, seq)` 排序索引。
+///
+/// - `seq`:恢复语义「回到所选时点」需要确定顺序——毫秒时间戳同毫秒会并列,
+///   不能用它界定「目标及其后续」。旧行按 `rowid` 回填(= 插入顺序 = 当时的
+///   真实执行顺序,零信息损失);新写入在写锁内 `max+1` 分配。
+/// - `call_id`/`run_id`:产生快照的工具调用身份。**可空不回填**——旧行没有身份,
+///   不伪造一一对应(前端对无身份的工具卡禁用回退按钮并给原因)。
+/// - 列追加在表尾,与新版 CREATE_TABLES 建出的 schema normalize 后一致。
+///   排序索引 **只在本函数创建**(刻意不放进建表批):建表批先于 ensure 执行,对旧库
+///   引用新列的索引会直接失败(「no such column: seq」,2026-10-16 批 D 实测抓出);
+///   放这里则 fresh 与升级两路径同函数同结果(迁移元测试逐表比对索引集合把关)。
+pub fn ensure_undo_snapshots_restore_columns(conn: &Connection) -> Result<(), String> {
+    // 先探表:不存在(极旧快照/手工建库)直接跳过,交建表批负责(与 add_column_if_missing 同口径)
+    let mut existing: Vec<String> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(undo_snapshots)")
+            .map_err(|e| format!("读取 undo_snapshots 列失败: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| format!("遍历 undo_snapshots 列失败: {e}"))?;
+        for name in rows.flatten() {
+            existing.push(name.to_lowercase());
+        }
+    }
+    if existing.is_empty() {
+        return Ok(());
+    }
+    // 已升级过的库不再重复回填(全表扫描只在首次迁移发生)
+    let had_seq = existing.iter().any(|c| c == "seq");
+    add_column_if_missing(conn, "undo_snapshots", "seq", "INTEGER")?;
+    add_column_if_missing(conn, "undo_snapshots", "call_id", "TEXT")?;
+    add_column_if_missing(conn, "undo_snapshots", "run_id", "TEXT")?;
+    if !had_seq {
+        conn.execute(
+            "UPDATE undo_snapshots SET seq = rowid WHERE seq IS NULL",
+            [],
+        )
+        .map_err(|e| format!("回填 undo_snapshots.seq 失败: {e}"))?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_undo_snapshots_session_seq \
+         ON undo_snapshots(session_id, seq)",
+        [],
+    )
+    .map_err(|e| format!("创建 undo_snapshots 排序索引失败: {e}"))?;
+    Ok(())
+}
+
+/// 幂等 schema 升级(审查修复批 D-1,2026-10-16):tool_calls 补 `snapshot_id` 列。
+/// **可空不回填**——旧调用行没有快照身份,不伪造;历史重载的新行按此列精确绑定
+/// 「回退到此处」按钮(批 D-1 起由引擎在工具成功时写入)。
+pub fn ensure_tool_calls_snapshot_id_column(conn: &Connection) -> Result<(), String> {
+    add_column_if_missing(conn, "tool_calls", "snapshot_id", "TEXT")
+}

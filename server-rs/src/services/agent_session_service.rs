@@ -38,6 +38,8 @@ fn row_to_tool_call(row: &rusqlite::Row) -> rusqlite::Result<ToolCallRecord> {
         output: serde_json::from_str(&output).unwrap_or(Value::Null),
         duration_ms: row.get(5)?,
         created_at: row.get(6)?,
+        // 批 D-1:回退快照绑定(旧行/非写工具为 NULL)
+        snapshot_id: row.get(7)?,
     })
 }
 
@@ -129,6 +131,8 @@ impl AgentSessionService {
         .flatten()
     }
 
+    /// 追加一条工具调用记录。`snapshot_id`(批 D-1)为本次执行成功落库的回退快照
+    /// 绑定(非写工具/开关关/落库失败为 None),供历史重载后精确匹配「回退到此处」。
     pub fn add_tool_call(
         &self,
         agent_session_id: &str,
@@ -136,6 +140,7 @@ impl AgentSessionService {
         input: Value,
         output: Value,
         duration_ms: i64,
+        snapshot_id: Option<String>,
     ) -> Result<ToolCallRecord, String> {
         let now = now_iso();
         let id = Uuid::new_v4().to_string();
@@ -143,8 +148,8 @@ impl AgentSessionService {
         let output_str = serde_json::to_string(&output).unwrap_or_else(|_| "{}".into());
         let conn = self.db.write();
         conn.execute(
-            "INSERT INTO tool_calls (id, agent_session_id, name, input, output, duration_ms, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![id, agent_session_id, name, input_str, output_str, duration_ms, now],
+            "INSERT INTO tool_calls (id, agent_session_id, name, input, output, duration_ms, created_at, snapshot_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![id, agent_session_id, name, input_str, output_str, duration_ms, now, snapshot_id],
         )
         .map_err(|e| format!("写入工具调用失败: {e}"))?;
         Ok(ToolCallRecord {
@@ -155,6 +160,7 @@ impl AgentSessionService {
             output,
             duration_ms,
             created_at: now,
+            snapshot_id,
         })
     }
 
@@ -164,7 +170,7 @@ impl AgentSessionService {
             Err(e) => return log_read_pool_failure("工具调用列表", e),
         };
         let mut stmt = match conn
-            .prepare("SELECT id, agent_session_id, name, input, output, duration_ms, created_at FROM tool_calls WHERE agent_session_id = ?1 ORDER BY created_at ASC")
+            .prepare("SELECT id, agent_session_id, name, input, output, duration_ms, created_at, snapshot_id FROM tool_calls WHERE agent_session_id = ?1 ORDER BY created_at ASC")
         {
             Ok(s) => s,
             Err(e) => return log_query_failure("工具调用列表 prepare", e),

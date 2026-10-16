@@ -124,7 +124,7 @@ impl Db {
                 schema::SCHEMA_VERSION
             ));
         }
-        // 升级链事务化(known-limitations L21):建表批 + 14 个 ensure_* 包在同一个
+        // 升级链事务化(known-limitations L21):建表批 + 全部 ensure_* 包在同一个
         // 事务里(另有 2 个重量级回填函数有意留在提交之后,见本函数末尾注释)。
         // SQLite 的 DDL 是事务性的,任一步失败整链回滚,不留「部分升级态」。
         // 回滚必须落在 `?`/早退之前:否则连接停在打开的事务里,后续 Db::write 撞锁。
@@ -207,6 +207,12 @@ impl Db {
                 // 让列表接口零 JSON 解析(列是缓存,空/非法时读取侧回退解析 data_raw)
                 crate::migration::ensure_characters_derived_json_column(&conn)
                     .map_err(|e| format!("升级 characters derived_json 列失败: {e}"))?;
+                // 幂等 schema 升级(审查修复批 D,2026-10-16):回退快照补排序/身份列,
+                // 工具调用表补快照绑定列(旧行 seq 按 rowid 回填,身份列保持 NULL 不伪造)
+                crate::migration::ensure_undo_snapshots_restore_columns(&conn)
+                    .map_err(|e| format!("升级 undo_snapshots 恢复列失败: {e}"))?;
+                crate::migration::ensure_tool_calls_snapshot_id_column(&conn)
+                    .map_err(|e| format!("升级 tool_calls snapshot_id 列失败: {e}"))?;
                 Ok(())
             })();
             let failure: String = match body {

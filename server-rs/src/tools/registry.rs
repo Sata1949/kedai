@@ -32,6 +32,17 @@ pub struct RegisteredTool {
     pub origin: ToolOrigin,
 }
 
+/// 工具执行的完整结果(批 D-1):`output` 为工具业务输出(逐字节原形状,不变);
+/// `snapshot_id` 为本次执行**成功落库的回退快照 id**(仅写工具且快照开关开时 Some)
+/// ——引擎把它并进工具结果事件与 `tool_calls` 绑定列,前端据此精确匹配「回退到此处」,
+/// 不再凭工具名与锚点启发式猜测。
+#[derive(Debug, Clone)]
+pub struct ToolExecOutcome {
+    pub output: String,
+    pub snapshot_id: Option<String>,
+}
+
+/// 工具注册表(与 Node 版 tools/registry.ts 对齐)
 pub struct ToolRegistry {
     tools: Mutex<HashMap<String, RegisteredTool>>,
     permissions: ToolPermissionManager,
@@ -281,7 +292,10 @@ impl ToolRegistry {
                 decision.reason
             ));
         }
-        self.run_tool(tool, args_json, ctx).await
+        // 无调用身份的路径(反射/侦察等):快照不绑定工具调用,行为与旧版一致
+        self.run_tool(tool, args_json, ctx, None)
+            .await
+            .map(|o| o.output)
     }
 
     /// 已裁决执行:跳过权限裁决,直接按给定 decision 语义执行(仍查工具存在性)。
@@ -294,6 +308,23 @@ impl ToolRegistry {
         ctx: ToolContext,
         decision: &PermissionDecision,
     ) -> Result<String, String> {
+        self.execute_with_decision_meta(name, args_json, ctx, decision, None)
+            .await
+            .map(|o| o.output)
+    }
+
+    /// 已裁决执行(携带执行元数据,批 D-1):与 `execute_with_decision` 同一实现体,
+    /// 额外返回本次执行**成功落库的回退快照 id**;`identity` 为调用身份(run_id/call_id,
+    /// 由引擎执行侧提供,随快照落库供前端精确绑定「回退到此处」)。
+    /// 仅引擎主执行路径(executor.rs)需要元数据,其余调用方走上面的薄封装。
+    pub async fn execute_with_decision_meta(
+        &self,
+        name: &str,
+        args_json: &str,
+        ctx: ToolContext,
+        decision: &PermissionDecision,
+        identity: Option<crate::services::undo_service::ToolCallIdentity>,
+    ) -> Result<ToolExecOutcome, String> {
         if !decision.allowed {
             return Err(format!(
                 "工具 \"{name}\" 未执行:{}。下一步:检查步骤白名单配置,或改用白名单内的工具",
@@ -303,7 +334,7 @@ impl ToolRegistry {
         let tool = self
             .get(name)
             .ok_or_else(|| format!("未注册的工具:{name}。请先用 todo 工具查看可用能力,或改用已注册的工具名(区分大小写)"))?;
-        self.run_tool(tool, args_json, ctx).await
+        self.run_tool(tool, args_json, ctx, identity).await
     }
 
     /// 参数解析 + 带超时执行 + 结果截断
@@ -312,7 +343,8 @@ impl ToolRegistry {
         tool: RegisteredTool,
         args_json: &str,
         ctx: ToolContext,
-    ) -> Result<String, String> {
+        identity: Option<crate::services::undo_service::ToolCallIdentity>,
+    ) -> Result<ToolExecOutcome, String> {
         let name = tool.definition.name.clone();
         // 补回 serde 原错(含行列位置):模型给出的坏 JSON 常是截断/多余逗号,
         // 位置信息是判断「预算不足」还是「语法错误」的关键
@@ -324,14 +356,17 @@ impl ToolRegistry {
         // 经 spawn_blocking 挪出 tokio worker(B-1:消除 async 热路径同步 IO);
         // 构建失败/任务取消返回 None——快照 best-effort,绝不挡工具执行。
         // undo_enabled 开关在 UndoService 内读取(全局开关,直接读基础值)。
+        // 批 D-1:调用身份(run_id/call_id)随快照落库,commit 成功后把快照 id
+        // 回传给引擎(工具结果事件与 tool_calls 绑定列共用同一 id)。
         let stager = match self.undo.get() {
             Some(undo) => {
                 let undo = undo.clone();
                 let snap_name = name.clone();
                 let snap_args = args.clone();
                 let snap_ctx = ctx.clone();
+                let snap_identity = identity.clone();
                 tokio::task::spawn_blocking(move || {
-                    undo.snapshot_before(&snap_name, &snap_args, &snap_ctx)
+                    undo.snapshot_before(&snap_name, &snap_args, &snap_ctx, snap_identity.as_ref())
                 })
                 .await
                 .ok()
@@ -360,10 +395,12 @@ impl ToolRegistry {
                 ));
             }
         };
-        // 执行成功:补记执行后信息并落库(须在下方截断之前,截断后输出不再是合法 JSON)
-        if let Some(s) = stager {
-            s.commit(&output);
-        }
+        // 执行成功:补记执行后信息并落库(须在下方截断之前,截断后输出不再是合法 JSON);
+        // 落库成功返回快照 id(批 D-1),失败/无快照为 None
+        let snapshot_id = match stager {
+            Some(s) => s.commit(&output),
+            None => None,
+        };
         // 超长结果截断(保留字节计数元数据,调用方按字符串回填模型/前端)
         if output.len() > MAX_TOOL_OUTPUT_BYTES {
             // **保头 + 保尾**(批次 2 HARNESS3-4):工具结果的结论在尾部(构建日志、错误清单)。
@@ -391,9 +428,15 @@ impl ToolRegistry {
                 tail_kept
             ));
             truncated.push_str(&output[tail_cut..]);
-            return Ok(truncated);
+            return Ok(ToolExecOutcome {
+                output: truncated,
+                snapshot_id,
+            });
         }
-        Ok(output)
+        Ok(ToolExecOutcome {
+            output,
+            snapshot_id,
+        })
     }
 }
 

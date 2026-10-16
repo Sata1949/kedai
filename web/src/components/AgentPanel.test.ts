@@ -35,7 +35,7 @@ beforeEach(() => {
   memStorage.clear();
 });
 
-describe('AgentPanel 回退到此处按钮(批次 6.1b)', () => {
+describe('AgentPanel 回退到此处按钮(批次 6.1b;批 D-1 快照绑定)', () => {
   it('写工具成功调用项渲染按钮;读工具调用项不渲染', async () => {
     const html = await renderPanel((store) => {
       store.currentSessionId = 's1';
@@ -43,7 +43,7 @@ describe('AgentPanel 回退到此处按钮(批次 6.1b)', () => {
       store.agent = {
         ...idleAgent(),
         toolCalls: [
-          { name: 'write', input: { path: 'notes.md' }, status: 'done', callId: 'c1' },
+          { name: 'write', input: { path: 'notes.md' }, status: 'done', callId: 'c1', snapshotId: 'snap-1' },
           { name: 'read', input: { path: 'notes.md' }, status: 'done', callId: 'c2' },
         ],
       };
@@ -52,13 +52,42 @@ describe('AgentPanel 回退到此处按钮(批次 6.1b)', () => {
     expect(html.match(/回退到此处/g), '仅写工具调用项有「回退到此处」').toHaveLength(1);
   });
 
+  it('批 D-1:无绑定快照标识(旧记录)的写工具卡按钮禁用并解释;有绑定则可点', async () => {
+    const htmlBound = await renderPanel((store) => {
+      store.currentSessionId = 's1';
+      store.undoEnabled = true;
+      store.agent = {
+        ...idleAgent(),
+        toolCalls: [{ name: 'write', input: {}, status: 'done', callId: 'c1', snapshotId: 'snap-1' }],
+      };
+    });
+    // 有绑定:按钮存在且不因缺标识禁用(SSR 输出中无 disabled 属性;生成态此时为 false)
+    const boundBtn = htmlBound.match(/<button[^>]*>回退到此处<\/button>/)?.[0] ?? '';
+    expect(boundBtn, '有绑定快照的按钮应渲染').not.toBe('');
+    expect(boundBtn, '有绑定快照的按钮不应禁用').not.toContain('disabled');
+
+    const htmlUnbound = await renderPanel((store) => {
+      store.currentSessionId = 's1';
+      store.undoEnabled = true;
+      store.agent = {
+        ...idleAgent(),
+        toolCalls: [{ name: 'write', input: {}, status: 'done', callId: 'c2' }],
+      };
+    });
+    // 无绑定:按钮存在但禁用,title 给出原因(旧记录/开关未开——不伪造对应)
+    const unboundBtn = htmlUnbound.match(/<button[^>]*>回退到此处<\/button>/)?.[0] ?? '';
+    expect(unboundBtn, '无绑定标识仍渲染按钮(禁用+解释,而非隐藏)').not.toBe('');
+    expect(unboundBtn).toContain('disabled');
+    expect(unboundBtn).toContain('没有绑定回退快照标识');
+  });
+
   it('undo_enabled 关闭或无会话时不渲染按钮', async () => {
     const htmlOff = await renderPanel((store) => {
       store.currentSessionId = 's1';
       store.undoEnabled = false;
       store.agent = {
         ...idleAgent(),
-        toolCalls: [{ name: 'write', input: {}, status: 'done', callId: 'c1' }],
+        toolCalls: [{ name: 'write', input: {}, status: 'done', callId: 'c1', snapshotId: 'snap-1' }],
       };
     });
     expect(htmlOff).not.toContain('回退到此处');
@@ -68,10 +97,25 @@ describe('AgentPanel 回退到此处按钮(批次 6.1b)', () => {
       store.undoEnabled = true;
       store.agent = {
         ...idleAgent(),
-        toolCalls: [{ name: 'write', input: {}, status: 'done', callId: 'c1' }],
+        toolCalls: [{ name: 'write', input: {}, status: 'done', callId: 'c1', snapshotId: 'snap-1' }],
       };
     });
     expect(htmlNoSession).not.toContain('回退到此处');
+  });
+
+  it('批 D-1:生成进行中按钮禁用(title 说明先停止生成)', async () => {
+    const html = await renderPanel((store) => {
+      store.currentSessionId = 's1';
+      store.undoEnabled = true;
+      store.generating = true;
+      store.agent = {
+        ...idleAgent(),
+        toolCalls: [{ name: 'write', input: {}, status: 'done', callId: 'c1', snapshotId: 'snap-1' }],
+      };
+    });
+    const btn = html.match(/<button[^>]*>回退到此处<\/button>/)?.[0] ?? '';
+    expect(btn).toContain('disabled');
+    expect(btn).toContain('生成进行中');
   });
 });
 

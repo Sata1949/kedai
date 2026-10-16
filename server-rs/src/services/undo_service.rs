@@ -41,6 +41,26 @@ pub struct UndoSnapshotInfo {
     pub label: String,
     pub anchor_message_id: Option<i64>,
     pub created_at: String,
+    /// 产生快照的工具调用 call_id(批 D-1,可空:旧行与身份缺失为 NULL)。
+    /// 供前端把快照与工具卡做可匹配核对,不伪造对应关系。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+}
+
+/// 产生快照的工具调用身份(批 D-1):由引擎执行侧(run_id/call_id 的源头)传入,
+/// 随快照落库,供「回退到此处」按调用精确绑定与审计关联。
+#[derive(Debug, Clone)]
+pub struct ToolCallIdentity {
+    pub run_id: String,
+    pub call_id: String,
+}
+
+/// 回退成功回执(批 D-2):目标快照的中文 label + 实际恢复的快照条数
+/// (含目标本身;>1 表示同一批一并撤销了其后的操作)。
+#[derive(Debug, Clone, Serialize)]
+pub struct RestoreReceipt {
+    pub label: String,
+    pub restored_count: usize,
 }
 
 pub struct UndoService {
@@ -52,24 +72,35 @@ pub struct UndoService {
     /// 数据目录(角色文件区 = data_dir/character_files/{character_id},
     /// 与 tools/agent_tools_shared.rs character_file_root 同规则)
     data_dir: PathBuf,
+    /// 恢复期互斥(批 D-2):串行化并发/重复的 restore 请求——两个回退同时应用
+    /// 逆操作会互相踩(各自读到同一批快照,交错写文件/删快照)。粗粒度单锁,
+    /// 回退是低频用户动作,不按会话细分。
+    restore_gate: Mutex<()>,
 }
 
 /// 执行前暂存的快照(未落库);commit/discard 两段式收口
 pub struct SnapshotStager {
     service: Arc<UndoService>,
+    /// 快照 id **前移**到执行前生成(批 D-1):执行成功后以此 id 落库并把同一 id
+    /// 回传给引擎(SSE 工具结果元数据/tool_calls 绑定列),三方(快照/工具卡/绑定)
+    /// 用同一 id,前端不再凭工具名与锚点猜测。
+    id: String,
     session_id: String,
     tool_name: String,
     label: String,
     anchor_message_id: Option<i64>,
+    /// 工具调用身份(批 D-1;无身份的调用路径为 None)
+    call: Option<ToolCallIdentity>,
     payload: Value,
 }
 
 impl SnapshotStager {
     /// 执行成功:补记执行后信息(write 气泡的 message_id、memory_write 的插入 id)
-    /// 并落库。快照落库失败只记日志不上抛——快照是增强能力,不影响主流程。
-    pub fn commit(self, tool_output: &str) {
+    /// 并落库。返回落库成功的快照 id(引擎用于绑定工具调用);落库失败只记日志
+    /// 不上抛——快照是增强能力,不影响主流程。
+    pub fn commit(self, tool_output: &str) -> Option<String> {
         let service = self.service.clone();
-        service.commit_staged(self, tool_output);
+        service.commit_staged(self, tool_output)
     }
 
     /// 执行失败:快照随本次执行一并丢弃(两段式:未执行的写入不需要逆操作)
@@ -90,6 +121,7 @@ impl UndoService {
             memory,
             settings,
             data_dir,
+            restore_gate: Mutex::new(()),
         }
     }
 
@@ -119,11 +151,13 @@ impl UndoService {
 
     /// run_tool 收口调用:写工具且开关开启时取执行前快照;构建失败(参数不合法等,
     /// 工具执行本身也会报错)返回 None——快照 best-effort,绝不挡工具执行。
+    /// `identity`:产生本次调用的 run_id/call_id(批 D-1;无身份路径传 None)。
     pub fn snapshot_before(
         self: &Arc<Self>,
         tool_name: &str,
         args: &Value,
         ctx: &ToolContext,
+        identity: Option<&ToolCallIdentity>,
     ) -> Option<SnapshotStager> {
         if !WRITE_TOOLS.contains(&tool_name) || !self.enabled() {
             return None;
@@ -132,10 +166,12 @@ impl UndoService {
         let anchor_message_id = self.max_message_id(&ctx.session_id);
         Some(SnapshotStager {
             service: self.clone(),
+            id: uuid::Uuid::new_v4().to_string(),
             session_id: ctx.session_id.clone(),
             tool_name: tool_name.to_string(),
             label,
             anchor_message_id,
+            call: identity.cloned(),
             payload,
         })
     }
@@ -349,13 +385,16 @@ impl UndoService {
         Some((json!({ "kind": "files", "entries": entries }), label))
     }
 
-    /// 两段式第二段:补记执行后信息并落库;失败只记日志
-    fn commit_staged(&self, stager: SnapshotStager, tool_output: &str) {
+    /// 两段式第二段:补记执行后信息并以**执行前生成好的 id** 落库;失败只记日志。
+    /// 返回落库成功的快照 id(供引擎绑定工具调用;失败/丢弃为 None)。
+    fn commit_staged(&self, stager: SnapshotStager, tool_output: &str) -> Option<String> {
         let SnapshotStager {
+            id,
             session_id,
             tool_name,
             label,
             anchor_message_id,
+            call,
             mut payload,
             ..
         } = stager;
@@ -370,7 +409,7 @@ impl UndoService {
                         session_id = session_id,
                         "回退快照丢弃:write 气泡输出缺 message_id"
                     );
-                    return;
+                    return None;
                 };
                 payload["message_id"] = json!(mid);
             }
@@ -385,33 +424,58 @@ impl UndoService {
                         session_id = session_id,
                         "回退快照丢弃:memory_write 后未找到新记忆行"
                     );
-                    return;
+                    return None;
                 };
                 payload["inserted_id"] = json!(inserted);
             }
             _ => {}
         }
-        let id = uuid::Uuid::new_v4().to_string();
+        let (call_id, run_id) = match &call {
+            Some(c) => (Some(c.call_id.clone()), Some(c.run_id.clone())),
+            None => (None, None),
+        };
         let payload_str = payload.to_string();
-        let conn = self.db.write();
-        let r = conn.execute(
-            "INSERT INTO undo_snapshots (id, session_id, anchor_message_id, tool_name, label, payload, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                id,
-                session_id,
-                anchor_message_id,
-                tool_name,
-                label,
-                payload_str,
-                now_iso()
-            ],
-        );
-        if let Err(e) = r {
-            tracing::warn!(
-                error = e.to_string(),
-                "回退快照落库失败(不影响工具执行结果)"
-            );
+        // 写锁 + 事务:seq 分配(全局 max+1)与插入原子完成——单写连接串行,无并发面,
+        // 事务补一层「中途失败不留半行」的完整性。
+        let mut conn = self.db.write();
+        let result = (|| -> Result<(), String> {
+            let tx = conn
+                .transaction()
+                .map_err(|e| format!("开启快照写事务失败: {e}"))?;
+            let seq: i64 = tx
+                .query_row(
+                    "SELECT COALESCE(MAX(seq), 0) + 1 FROM undo_snapshots",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|e| format!("分配快照序号失败: {e}"))?;
+            tx.execute(
+                "INSERT INTO undo_snapshots (id, session_id, anchor_message_id, tool_name, label, payload, created_at, seq, call_id, run_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    id,
+                    session_id,
+                    anchor_message_id,
+                    tool_name,
+                    label,
+                    payload_str,
+                    now_iso(),
+                    seq,
+                    call_id,
+                    run_id
+                ],
+            )
+            .map_err(|e| format!("写入回退快照失败: {e}"))?;
+            tx.commit()
+                .map_err(|e| format!("提交快照写事务失败: {e}"))?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => Some(id),
+            Err(e) => {
+                tracing::warn!(error = e, "回退快照落库失败(不影响工具执行结果)");
+                None
+            }
         }
     }
 
@@ -429,15 +493,16 @@ impl UndoService {
         .flatten()
     }
 
-    /// 会话快照列表(新→旧;不含 payload)
+    /// 会话快照列表(新→旧;不含 payload)。排序以 `seq` 为准(批 D-2:
+    /// 毫秒时间戳同毫秒并列,不能再作排序/界定依据;旧行已按 rowid 回填 seq)。
     pub fn list(&self, session_id: &str) -> Vec<UndoSnapshotInfo> {
         let Ok(conn) = self.db.read() else {
             return Vec::new();
         };
         let mut stmt = match conn.prepare(
-            "SELECT id, tool_name, label, anchor_message_id, created_at
+            "SELECT id, tool_name, label, anchor_message_id, created_at, call_id
              FROM undo_snapshots WHERE session_id = ?1
-             ORDER BY created_at DESC, rowid DESC",
+             ORDER BY COALESCE(seq, rowid) DESC",
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -451,6 +516,7 @@ impl UndoService {
                 label: row.get(2)?,
                 anchor_message_id: row.get(3)?,
                 created_at: row.get(4)?,
+                call_id: row.get(5)?,
             })
         });
         match rows {
@@ -459,52 +525,116 @@ impl UndoService {
         }
     }
 
-    /// 回退:按 payload 逆序执行逆操作;成功后删除本快照及同会话更新的所有快照
-    /// (回退到更早状态后,更新的快照语义已失效)。
-    /// 返回 Ok(None) = 快照不存在(404 语义);Err = 执行失败(500 语义),
-    /// 已执行的部分不回滚(逆操作各自独立幂等,调用方按错误提示手动处理)。
-    pub fn restore(&self, id: &str) -> Result<Option<String>, String> {
-        let row = {
-            let conn = self.db.read().map_err(|e| e.to_string())?;
-            conn.query_row(
-                "SELECT session_id, label, payload, created_at FROM undo_snapshots WHERE id = ?1",
-                params![id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                    ))
-                }, // 行不存在 → None
-            )
-            .optional()
-            .map_err(|e| format!("读取回退快照失败: {e}"))?
-        };
-        let Some((session_id, label, payload_str, created_at)) = row else {
+    /// 快照所属会话 id(供 API 层做「生成进行中不可回退」前置判定)。
+    pub fn session_of(&self, id: &str) -> Option<String> {
+        let conn = self.db.read().ok()?;
+        conn.query_row(
+            "SELECT session_id FROM undo_snapshots WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+    }
+
+    /// 回退(批 D-2 语义 = 「回到所选快照**之前**的状态」):
+    /// 取目标及其**同会话后续全部快照**(按 seq 界定的确定顺序),逆序(新→旧)
+    /// 逐条应用逆操作——数据整体回到目标时点,而不是只撤销所选一条却删掉后续恢复依据。
+    ///
+    /// 安全性:
+    /// - 全批**预检**在前:任一条 payload 损坏/路径非法/截断标志即拒绝整批,
+    ///   不修改任何文件、不删除任何快照;
+    /// - 中途失败:保留**全部**快照(逆操作各自幂等,修复原因后原样重试即可,
+    ///   重放已执行过的逆操作是无害的);
+    /// - 全部成功:按**精确 id 列表**清理已处理快照(不再用 `created_at >=` 扫删,
+    ///   同毫秒的其它快照不再被误伤、批外新快照不受影响)。
+    ///
+    /// 返回 Ok(None) = 快照不存在(404 语义);Ok(Some(回执));Err = 失败(500 语义)。
+    pub fn restore(&self, id: &str) -> Result<Option<RestoreReceipt>, String> {
+        // 串行化并发/重复回退:两个请求同时读到同一批快照会交错写文件与删行
+        let _gate = self.restore_gate.lock().unwrap_or_else(|e| e.into_inner());
+        // 1) 目标 + 选批(seq >= 目标;新→旧)
+        let Some((session_id, batch)) = self.load_restore_batch(id)? else {
             return Ok(None);
         };
-        let payload: Value = serde_json::from_str(&payload_str)
-            .map_err(|e| format!("快照数据损坏,无法回退: {e}"))?;
+        // 2) 预检整批 + 解析 payload(不通过则零改动零删除)
+        let mut steps: Vec<RestoreStep> = Vec::with_capacity(batch.len());
+        for item in &batch {
+            let payload = precheck_payload(&item.id, &item.payload_raw)
+                .map_err(|e| format!("预检未通过,未做任何修改:{e}"))?;
+            steps.push(RestoreStep {
+                id: item.id.clone(),
+                label: item.label.clone(),
+                payload,
+            });
+        }
         // character_id 以会话记录为权威(文件区/记忆恢复需要)
         let character_id = self
             .sessions
             .get(&session_id)
             .map(|s| s.character_id)
             .ok_or_else(|| "会话不存在,无法回退".to_string())?;
+        // 3) 逆序应用(新→旧):整批一起回到目标时点
+        let total = steps.len();
+        for (done, step) in steps.iter().enumerate() {
+            if let Err(e) = self.apply_inverse(&session_id, &character_id, &step.payload) {
+                return Err(format!(
+                    "已恢复 {done}/{total} 条更新的快照(逆操作幂等,可修复原因后原样重试);\
+                     处理「{}」时失败:{e}。快照记录已保留",
+                    step.label
+                ));
+            }
+        }
+        // 4) 全部成功:按精确 id 列表清理已处理快照(批外新快照不受影响)
+        {
+            let conn = self.db.write();
+            for step in &steps {
+                conn.execute("DELETE FROM undo_snapshots WHERE id = ?1", params![step.id])
+                    .map_err(|e| format!("清理回退快照失败: {e}"))?;
+            }
+        }
+        // steps 新→旧,末元素即本次点击的目标快照
+        let target_label = steps.last().map(|s| s.label.clone()).unwrap_or_default();
+        Ok(Some(RestoreReceipt {
+            label: target_label,
+            restored_count: total,
+        }))
+    }
 
-        self.apply_inverse(&session_id, &character_id, &payload)
-            .map_err(|e| format!("{e};已完成的部分不会自动回滚,请检查后手动处理"))?;
-
-        // 全部逆操作成功:删除本快照与同会话更新的快照(created_at 毫秒精度,
-        // 同会话同毫秒的其它快照一并清理,视为同时刻之后,可接受)
-        let conn = self.db.write();
-        conn.execute(
-            "DELETE FROM undo_snapshots WHERE session_id = ?1 AND created_at >= ?2",
-            params![session_id, created_at],
-        )
-        .map_err(|e| format!("清理回退快照失败: {e}"))?;
-        Ok(Some(label))
+    /// 读取目标及同会话 `seq >= 目标` 的全部快照(新→旧);
+    /// 目标不存在返回 Ok(None)。payload 保持原文本,由 restore 统一预检/解析。
+    fn load_restore_batch(&self, id: &str) -> Result<Option<(String, Vec<RestoreItem>)>, String> {
+        let conn = self.db.read().map_err(|e| e.to_string())?;
+        let target = conn
+            .query_row(
+                "SELECT session_id, COALESCE(seq, rowid) FROM undo_snapshots WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()
+            .map_err(|e| format!("读取回退快照失败: {e}"))?;
+        let Some((session_id, target_seq)) = target else {
+            return Ok(None);
+        };
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, label, payload FROM undo_snapshots
+                 WHERE session_id = ?1 AND COALESCE(seq, rowid) >= ?2
+                 ORDER BY COALESCE(seq, rowid) DESC",
+            )
+            .map_err(|e| format!("读取回退快照批失败: {e}"))?;
+        let rows = stmt
+            .query_map(params![session_id, target_seq], |row| {
+                Ok(RestoreItem {
+                    id: row.get(0)?,
+                    label: row.get(1)?,
+                    payload_raw: row.get(2)?,
+                })
+            })
+            .map_err(|e| format!("遍历回退快照批失败: {e}"))?;
+        let batch: Vec<RestoreItem> = rows.filter_map(|r| r.ok()).collect();
+        Ok(Some((session_id, batch)))
     }
 
     /// 按 payload kind 分派逆操作;数组类负载一律逆序(后执行的先撤销)
@@ -667,6 +797,99 @@ impl UndoService {
         }
         Ok(())
     }
+}
+
+/// 恢复批中的一条(raw 形态:payload 尚未解析)
+struct RestoreItem {
+    id: String,
+    label: String,
+    payload_raw: String,
+}
+
+/// 恢复批中的一条(已过预检、payload 已解析)
+struct RestoreStep {
+    id: String,
+    label: String,
+    payload: Value,
+}
+
+/// 恢复前预检(批 D-2):逐条校验 payload 完整性与可恢复性,返回解析后的 payload。
+/// 任一条失败 → 调用方拒绝整批(不修改任何文件,也不删除任何快照)。
+/// 覆盖报告 §七 建议 3 的检查面:payload 可解析、kind 合法、文件路径、
+/// 256KB 截断标志、气泡/记忆必要字段、变量树 JSON 基线。
+fn precheck_payload(snapshot_id: &str, payload_raw: &str) -> Result<Value, String> {
+    let payload: Value = serde_json::from_str(payload_raw)
+        .map_err(|e| format!("快照 {snapshot_id} 数据损坏,无法回退: {e}"))?;
+    match payload.get("kind").and_then(|v| v.as_str()) {
+        Some("files") => {
+            let entries = payload
+                .get("entries")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| format!("快照 {snapshot_id} 缺 entries 数组"))?;
+            for entry in entries {
+                precheck_file_entry(snapshot_id, entry)?;
+            }
+        }
+        Some("replace") => {
+            let files = payload
+                .get("files")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| format!("快照 {snapshot_id} 缺 files 数组"))?;
+            for entry in files {
+                precheck_file_entry(snapshot_id, entry)?;
+            }
+            let bubbles = payload
+                .get("bubbles")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| format!("快照 {snapshot_id} 缺 bubbles 数组"))?;
+            for row in bubbles {
+                row.get("id")
+                    .and_then(|v| v.as_i64())
+                    .ok_or_else(|| format!("快照 {snapshot_id} 气泡记录缺 id"))?;
+            }
+        }
+        Some("bubble_insert") => {
+            payload
+                .get("message_id")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| format!("快照 {snapshot_id} 缺气泡 id,无法回退"))?;
+        }
+        Some("vars") => {
+            let before = payload
+                .get("before")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("快照 {snapshot_id} 缺变量树基线"))?;
+            serde_json::from_str::<Value>(before)
+                .map_err(|e| format!("快照 {snapshot_id} 变量树基线损坏: {e}"))?;
+        }
+        Some("memory_insert") => {
+            payload
+                .get("inserted_id")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| format!("快照 {snapshot_id} 缺记忆 id,无法回退"))?;
+        }
+        Some(other) => {
+            return Err(format!("快照 {snapshot_id} 类型未知({other}),无法回退"));
+        }
+        None => return Err(format!("快照 {snapshot_id} 缺类型字段,无法回退")),
+    }
+    Ok(payload)
+}
+
+/// 单个文件快照项的预检:路径必须通过 safe_rel_path(防御 payload 内路径),
+/// 截断标志必须为假(256KB 上限外的内容无法精确恢复)。
+fn precheck_file_entry(snapshot_id: &str, entry: &Value) -> Result<(), String> {
+    let rel = entry
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("快照 {snapshot_id} 缺文件路径"))?;
+    safe_rel_path(rel).map_err(|e| format!("快照 {snapshot_id} 文件路径非法({rel}): {e}"))?;
+    if entry.get("truncated").and_then(|v| v.as_bool()) == Some(true) {
+        return Err(format!(
+            "快照 {snapshot_id} 的文件 {rel} 原始内容超过 256KB,快照不完整,无法回退"
+        ));
+    }
+    Ok(())
 }
 
 /// 中文 label 辅助:按字符数截断(避免超长路径/事实撑爆列表展示)

@@ -24,7 +24,8 @@ pub use ddl::{
     ensure_task_llm_calls_finish_reason_column, ensure_task_messages_table,
     ensure_task_scan_marks_table, ensure_task_subtasks_finished_at_column,
     ensure_tasks_executor_id_column, ensure_tasks_flow_columns, ensure_tasks_task_mode_column,
-    ensure_tasks_workspace_column,
+    ensure_tasks_workspace_column, ensure_tool_calls_snapshot_id_column,
+    ensure_undo_snapshots_restore_columns,
 };
 pub use merge::{merge_data_dirs, MergeReport, TableReport};
 
@@ -159,6 +160,135 @@ mod tests {
             .unwrap()
             .into_iter()
             .filter(|c| c.name == "task_mode")
+            .count();
+        assert_eq!(dup, 1, "重复迁移不应产生重复列");
+        drop(conn);
+    }
+
+    /// 批 D(2026-10-16):undo_snapshots 补 seq/call_id/run_id 列 +
+    /// `(session_id, seq)` 索引;seq 旧行按 rowid 回填(插入顺序 = 当时的执行顺序),
+    /// 身份列保持 NULL(不伪造);幂等可重复执行。
+    #[test]
+    fn ensure_undo_snapshots_restore_columns_adds_backfills_and_is_idempotent() {
+        let dir = temp_dir("undo-restore-columns");
+        let db = dir.join(DATABASE_FILE);
+        let conn = Connection::open(&db).unwrap();
+        // 旧版表结构(批 D 之前):无 seq / call_id / run_id 列
+        conn.execute_batch(
+            "CREATE TABLE undo_snapshots (
+              id                TEXT PRIMARY KEY,
+              session_id        TEXT NOT NULL,
+              anchor_message_id INTEGER,
+              tool_name         TEXT NOT NULL,
+              label             TEXT NOT NULL DEFAULT '',
+              payload           TEXT NOT NULL,
+              created_at        TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO undo_snapshots (id, session_id, tool_name, payload, created_at)
+             VALUES ('a', 's', 'write', '{}', 't1'), ('b', 's', 'write', '{}', 't2')",
+            [],
+        )
+        .unwrap();
+
+        ensure_undo_snapshots_restore_columns(&conn).unwrap();
+        let columns = table_columns(&conn, "main", "undo_snapshots")
+            .unwrap()
+            .into_iter()
+            .map(|c| c.name)
+            .collect::<Vec<_>>();
+        for expected in ["seq", "call_id", "run_id"] {
+            assert!(
+                columns.iter().any(|c| c == expected),
+                "迁移后应包含列 {expected},实际: {columns:?}"
+            );
+        }
+        // seq 回填:按 rowid(插入顺序),a < b
+        let seq_a: i64 = conn
+            .query_row("SELECT seq FROM undo_snapshots WHERE id = 'a'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let seq_b: i64 = conn
+            .query_row("SELECT seq FROM undo_snapshots WHERE id = 'b'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(seq_a < seq_b, "seq 应按插入顺序回填: a={seq_a} b={seq_b}");
+        // 身份列保持 NULL:旧行没有身份,不伪造
+        let call_id: Option<String> = conn
+            .query_row(
+                "SELECT call_id FROM undo_snapshots WHERE id = 'a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(call_id.is_none(), "旧行 call_id 应为 NULL(不伪造)");
+        // 幂等:重复执行不报错、seq 不被二次改写
+        ensure_undo_snapshots_restore_columns(&conn).unwrap();
+        let seq_a2: i64 = conn
+            .query_row("SELECT seq FROM undo_snapshots WHERE id = 'a'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(seq_a, seq_a2, "重复迁移不应改写已有 seq");
+        drop(conn);
+    }
+
+    /// 批 D-1(2026-10-16):tool_calls 补 snapshot_id 列(可空不回填——旧调用行
+    /// 没有快照身份,不伪造);幂等可重复执行。
+    #[test]
+    fn ensure_tool_calls_snapshot_id_column_adds_and_is_idempotent() {
+        let dir = temp_dir("tool-calls-snapshot");
+        let db = dir.join(DATABASE_FILE);
+        let conn = Connection::open(&db).unwrap();
+        // 旧版表结构(批 D-1 之前):无 snapshot_id 列
+        conn.execute_batch(
+            "CREATE TABLE tool_calls (
+              id               TEXT PRIMARY KEY,
+              agent_session_id TEXT NOT NULL,
+              name             TEXT NOT NULL,
+              input            TEXT NOT NULL,
+              output           TEXT NOT NULL,
+              duration_ms      INTEGER NOT NULL,
+              created_at       TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tool_calls (id, agent_session_id, name, input, output, duration_ms, created_at)
+             VALUES ('c1', 'a1', 'write', '{}', '{}', 1, 't')",
+            [],
+        )
+        .unwrap();
+
+        ensure_tool_calls_snapshot_id_column(&conn).unwrap();
+        let columns = table_columns(&conn, "main", "tool_calls")
+            .unwrap()
+            .into_iter()
+            .map(|c| c.name)
+            .collect::<Vec<_>>();
+        assert!(
+            columns.iter().any(|c| c == "snapshot_id"),
+            "迁移后应包含 snapshot_id 列,实际: {columns:?}"
+        );
+        let snap: Option<String> = conn
+            .query_row(
+                "SELECT snapshot_id FROM tool_calls WHERE id = 'c1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(snap.is_none(), "旧行 snapshot_id 应为 NULL(不伪造)");
+
+        // 幂等:重复执行不报错、不产生重复列
+        ensure_tool_calls_snapshot_id_column(&conn).unwrap();
+        let dup = table_columns(&conn, "main", "tool_calls")
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.name == "snapshot_id")
             .count();
         assert_eq!(dup, 1, "重复迁移不应产生重复列");
         drop(conn);

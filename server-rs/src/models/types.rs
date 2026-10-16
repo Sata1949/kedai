@@ -202,6 +202,10 @@ pub struct ToolCallRecord {
     pub output: Value,
     pub duration_ms: i64,
     pub created_at: String,
+    /// 本次调用成功落库的回退快照 id(批 D-1;可空:非写工具/开关关/旧行 → 缺省)。
+    /// 历史重载后前端据此精确绑定「回退到此处」;旧行没有身份,不伪造(按钮禁用)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<String>,
 }
 
 // ---------- Agent 计划 ----------
@@ -782,6 +786,11 @@ pub enum SseEvent {
         /// 工具来源(`builtin`/`plugin`/`mcp`;PLGM 3.3 加性字段)
         #[serde(default, skip_serializing_if = "Option::is_none")]
         origin: Option<String>,
+        /// 本次执行成功落库的回退快照 id(批 D-1 加性字段):写工具且快照开关开时
+        /// 才有值,前端把它存进工具调用卡,「回退到此处」按此精确匹配快照;
+        /// 旧客户端忽略该字段即可,线格式向后兼容。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        snapshot_id: Option<String>,
     },
     /// 酒馆助手变量树同步(每次应用 <UpdateVariable> 补丁后推送最新 stat_data)
     Vars {

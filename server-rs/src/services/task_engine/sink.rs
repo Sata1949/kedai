@@ -144,6 +144,7 @@ mod tests {
             call_id: Some("c1".into()),
             render_kind: None,
             origin: None,
+            snapshot_id: None,
         };
         let detail = map_event(&ev, 0, "主 agent").unwrap();
         assert!(detail.contains("被任务策略拒绝"), "实际:{detail}");
@@ -161,6 +162,7 @@ mod tests {
             call_id: Some("c1".into()),
             render_kind: None,
             origin: None,
+            snapshot_id: None,
         };
         let detail = map_event(&ev, 0, "主 agent").unwrap();
         assert_eq!(detail, "工具 read 已返回结果");

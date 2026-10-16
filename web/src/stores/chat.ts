@@ -204,6 +204,9 @@ export const useChatStore = defineStore('app.chat', () => {
         output: c.output,
         status: 'done' as const,
         origin: c.origin,
+        // 批 D-1:历史重载后仍按快照绑定精确匹配「回退到此处」
+        //(旧记录无该字段 → undefined,按钮禁用并解释,不伪造对应)
+        snapshotId: c.snapshot_id ?? undefined,
       }));
       agent.value = base;
     } catch {

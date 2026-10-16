@@ -71,6 +71,9 @@ export interface AgentTrace {
     created_at: string;
     /** 工具来源(`builtin`/`plugin`/`mcp`;PLGM 3.3 起后端按当前注册表回填,已注销工具缺省) */
     origin?: string;
+    /** 本次调用成功落库的回退快照 id(批 D-1;非写工具/旧记录/开关关缺省)——
+     *  历史重载后「回退到此处」按此精确绑定,不再凭工具名启发式猜测 */
+    snapshot_id?: string | null;
   }>;
 }
 
