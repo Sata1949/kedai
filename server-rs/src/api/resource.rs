@@ -7,6 +7,7 @@
 //     iframe src 直嵌会显示「已阻止此内容」,服务端 fetch 不受此限制)
 //   - 安全:仅 https、SSRF 防护(复用 resolve_public_http_url:拒绝 localhost/私网/
 //     元数据地址)、绑定已解析 IP 防 DNS rebinding、禁用重定向、响应大小上限
+//     (KEDAI-06 起为分块流式限额:读取中累计,超限即中止,见 read_body_bounded)
 use crate::api::{err_with_code, ErrorCode};
 use crate::tools::agent_tools::resolve_public_http_url;
 use axum::extract::Query;
@@ -72,6 +73,41 @@ fn sniff_meta_charset(bytes: &[u8]) -> Option<String> {
         Some(label.to_string())
     }
 }
+/// 有界读取响应体(KEDAI-06):按分块累计**实际接收字节**,超限立即停止读取并丢弃响应;
+/// 超限分块不再复制进缓冲(此前 `.bytes()` 全量缓冲后才比 `MAX_RESOURCE_BYTES`,
+/// 5MB 上限约束不了下载过程的峰值内存)。
+///
+/// - `Content-Length` 已声明超限(> limit):提前拒绝,不启动读取;
+///   缺失/失真/分块传输一律按实际字节计数——声明值不能替代限额。
+/// - 边界:恰好 `limit` 字节通过,`limit + 1` 拒绝(与旧 `> MAX` 判定同口径)。
+/// - 读取错误(连接中断/超时)原样上抛,由调用方按原路径记日志 + 502。
+async fn read_body_bounded(
+    mut resp: reqwest::Response,
+    limit: usize,
+) -> Result<Option<Vec<u8>>, reqwest::Error> {
+    let declared = resp.content_length();
+    if let Some(len) = declared {
+        if len > limit as u64 {
+            return Ok(None);
+        }
+    }
+    // 预分配按声明长度(此刻已保证 ≤ limit);缺失时从 0 起
+    let mut buf: Vec<u8> = Vec::with_capacity(declared.unwrap_or(0).min(limit as u64) as usize);
+    while let Some(chunk) = resp.chunk().await? {
+        let needed = match buf.len().checked_add(chunk.len()) {
+            Some(n) if n <= limit => n,
+            _ => return Ok(None),
+        };
+        if buf.capacity() < needed {
+            // 扩容以上限封顶:几何增长不得越出约定上限
+            let target = needed.saturating_mul(2).min(limit).max(needed);
+            buf.reserve_exact(target - buf.len());
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(Some(buf))
+}
+
 /// GET /api/resource/proxy?url=<https URL>
 /// 成功 `{ ok: true, html, base_url }`;失败 `{ ok: false, error, code }` + 真实状态码
 /// (批次 1 起统一带 code,不再出现「无 code 的裸 error」)。
@@ -150,14 +186,22 @@ pub async fn proxy(Query(q): Query<ProxyQuery>) -> Response {
             StatusCode::BAD_GATEWAY,
         );
     }
-    // content-type 在 bytes() 消费 resp 前取出(charset 解码用)
+    // content-type 在读取消费 resp 前取出(charset 解码用)
     let resp_content_type = resp
         .headers()
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
-    let bytes = match resp.bytes().await {
-        Ok(b) => b,
+    // KEDAI-06:有界读取(分块累计,超限立即中止)——不再全量缓冲后才校验
+    let bytes = match read_body_bounded(resp, MAX_RESOURCE_BYTES).await {
+        Ok(Some(b)) => b,
+        Ok(None) => {
+            return err_with_code(
+                ErrorCode::Upstream,
+                "资源页过大(超过 5MB)",
+                StatusCode::BAD_GATEWAY,
+            );
+        }
         Err(e) => {
             // 泄露封堵:读取中断原文只进日志
             tracing::error!(error = %e, url = raw, "读取资源页失败");
@@ -168,13 +212,6 @@ pub async fn proxy(Query(q): Query<ProxyQuery>) -> Response {
             );
         }
     };
-    if bytes.len() > MAX_RESOURCE_BYTES {
-        return err_with_code(
-            ErrorCode::Upstream,
-            "资源页过大(超过 5MB)",
-            StatusCode::BAD_GATEWAY,
-        );
-    }
     let html = decode_resource_html(&bytes, resp_content_type.as_deref());
     // 作者域名作为 base(srcdoc 内相对 CSS/JS/图片按作者域名解析)
     let base_url = format!(
@@ -231,5 +268,196 @@ mod tests {
             decode_resource_html("中文页面".as_bytes(), None),
             "中文页面"
         );
+    }
+
+    // ---- KEDAI-06 有界读取(评审报告批 E;先红后绿) ----
+    //
+    // 测试经**本机原始 TCP 上游**注入传输层(报告 §八要求:不为测试放开生产 SSRF 校验,
+    // 直接把响应喂给 read_body_bounded),覆盖:低于/恰好/超过上限、缺 Content-Length、
+    // 声明超限预拒、chunked、截断报错、慢响应超时。
+
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// 极简一次性 HTTP 上游:应答给定原始字节;`hold_open` 为真时写完后挂住连接
+    /// (用于断言「超限立即停止」不依赖等 EOF / 等终端块)。
+    async fn spawn_upstream(response: Vec<u8>, hold_open: bool) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            // 读掉请求头即止,不解析
+            let mut seen = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                match sock.read(&mut buf).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => seen.extend_from_slice(&buf[..n]),
+                }
+            }
+            if sock.write_all(&response).await.is_err() {
+                return;
+            }
+            let _ = sock.flush().await;
+            if hold_open {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+        });
+        format!("http://127.0.0.1:{}/", addr.port())
+    }
+
+    fn raw_response(head: &str, body: &[u8]) -> Vec<u8> {
+        let mut out = head.as_bytes().to_vec();
+        out.extend_from_slice(body);
+        out
+    }
+
+    async fn fetch(url: &str) -> reqwest::Response {
+        reqwest::Client::new()
+            .get(url)
+            .send()
+            .await
+            .expect("本地测试上游应可连通")
+    }
+
+    #[tokio::test]
+    async fn bounded_read_ok_below_limit() {
+        let body = vec![b'a'; 1024];
+        let url = spawn_upstream(
+            raw_response(
+                "HTTP/1.1 200 OK\r\nContent-Length: 1024\r\nConnection: close\r\n\r\n",
+                &body,
+            ),
+            false,
+        )
+        .await;
+        let got = read_body_bounded(fetch(&url).await, 4096).await.unwrap();
+        assert_eq!(got.map(|b| b.len()), Some(1024), "低于上限应完整读取");
+    }
+
+    #[tokio::test]
+    async fn bounded_read_accepts_exactly_limit() {
+        let body = vec![b'a'; 4096];
+        let url = spawn_upstream(
+            raw_response(
+                "HTTP/1.1 200 OK\r\nContent-Length: 4096\r\nConnection: close\r\n\r\n",
+                &body,
+            ),
+            false,
+        )
+        .await;
+        let got = read_body_bounded(fetch(&url).await, 4096).await.unwrap();
+        assert_eq!(
+            got.map(|b| b.len()),
+            Some(4096),
+            "恰好等于上限应通过(边界含等号,与旧 `> MAX` 判定同口径)"
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_read_rejects_over_limit_without_content_length() {
+        // 无 Content-Length(close 定界),体为上限+1 且**不关连接**:
+        // 若实现等 EOF 才判定,本测试会超时失败
+        let body = vec![b'a'; 4097];
+        let url = spawn_upstream(
+            raw_response("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n", &body),
+            true,
+        )
+        .await;
+        let got = tokio::time::timeout(
+            Duration::from_secs(5),
+            read_body_bounded(fetch(&url).await, 4096),
+        )
+        .await
+        .expect("超限应立即返回,不应等待连接关闭");
+        assert_eq!(got.unwrap(), None, "无声明长度时仍按实际字节计数拒绝");
+    }
+
+    #[tokio::test]
+    async fn bounded_read_rejects_declared_oversize_early() {
+        // 声明超限:只发响应头,体一个字节都不发且连接挂住——提前拒绝不得启动读取
+        let url = spawn_upstream(
+            raw_response(
+                "HTTP/1.1 200 OK\r\nContent-Length: 9999999\r\nConnection: close\r\n\r\n",
+                b"",
+            ),
+            true,
+        )
+        .await;
+        let got = tokio::time::timeout(
+            Duration::from_secs(5),
+            read_body_bounded(fetch(&url).await, 4096),
+        )
+        .await
+        .expect("声明超限应立即拒绝,不应等待响应体");
+        assert_eq!(got.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn bounded_read_chunked_within_limit_ok() {
+        // Transfer-Encoding: chunked(无 Content-Length),恰好上限 → 通过
+        let mut resp =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_vec();
+        resp.extend_from_slice(b"1000\r\n");
+        resp.extend_from_slice(&[b'a'; 0x1000]);
+        resp.extend_from_slice(b"\r\n0\r\n\r\n");
+        let url = spawn_upstream(resp, false).await;
+        let got = read_body_bounded(fetch(&url).await, 4096).await.unwrap();
+        assert_eq!(got.map(|b| b.len()), Some(4096), "分块传输恰好上限应通过");
+    }
+
+    #[tokio::test]
+    async fn bounded_read_chunked_over_limit_rejected() {
+        // 分块累计超限(4000+97):不写 0 终止块、挂住连接——
+        // 若实现等完整终止才判,本测试会超时
+        let mut resp =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_vec();
+        resp.extend_from_slice(b"fa0\r\n"); // 4000
+        resp.extend_from_slice(&[b'a'; 4000]);
+        resp.extend_from_slice(b"\r\n61\r\n"); // 97
+        resp.extend_from_slice(&[b'a'; 97]);
+        resp.extend_from_slice(b"\r\n");
+        let url = spawn_upstream(resp, true).await;
+        let got = tokio::time::timeout(
+            Duration::from_secs(5),
+            read_body_bounded(fetch(&url).await, 4096),
+        )
+        .await
+        .expect("分块累计超限应立即拒绝");
+        assert_eq!(got.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn bounded_read_surfaces_stream_error_on_truncated_body() {
+        // 声明 100 字节只发 10 字节即断开:错误上抛(调用方走 502 路径),不静默成短读
+        let url = spawn_upstream(
+            raw_response(
+                "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n",
+                &[b'a'; 10],
+            ),
+            false,
+        )
+        .await;
+        let got = read_body_bounded(fetch(&url).await, 4096).await;
+        assert!(got.is_err(), "截断响应必须报错而非静默返回短内容");
+    }
+
+    #[tokio::test]
+    async fn bounded_read_surfaces_timeout_error() {
+        // 慢响应:头发完只滴 8 字节后挂住;客户端总超时 300ms——读取必须以错误收场(超时仍生效)
+        let url = spawn_upstream(
+            raw_response("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n", &[b'a'; 8]),
+            true,
+        )
+        .await;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(300))
+            .build()
+            .unwrap();
+        let resp = client.get(&url).send().await.unwrap();
+        let got = tokio::time::timeout(Duration::from_secs(5), read_body_bounded(resp, 4096))
+            .await
+            .expect("超时应及时生效而不是挂死");
+        assert!(got.is_err(), "慢响应超时应上抛错误");
     }
 }
