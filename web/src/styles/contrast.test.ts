@@ -92,7 +92,8 @@ describe('UIP-10 令牌级小字对比度契约(WCAG AA ≥ 4.5:1)', () => {
     });
   }
 
-  it('旧 ink-faint #6b6b6b 在 surface 上确实不达标(本批加深的动机可复算)', () => {
-    expect(contrast('#6b6b6b', token('--sv-surface'))).toBeLessThan(4.5);
+  it('旧 ink-faint #6b6b6b 在旧 surface #f6e8ed 上确实不达标(本批加深的动机可复算)', () => {
+    // 基准固定为 UIP-10 当时的 surface 值:令牌后来提亮(UIQ),不能拿新底反推旧结论。
+    expect(contrast('#6b6b6b', '#f6e8ed')).toBeLessThan(4.5);
   });
 });

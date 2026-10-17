@@ -364,16 +364,6 @@ watch(
       />
     </Transition>
 
-    <!-- 右侧边缘抽屉标识(两种模式;移动端隐藏,由底部导航「AGENT」替代) -->
-    <button
-      class="sv-agent-toggle"
-      :class="{ active: store.agentPanelOpen }"
-      :title="store.agentPanelOpen ? '收起 Agent 面板' : '展开 Agent 面板'"
-      @click="store.toggleAgentPanel()"
-    >
-      AGENT
-    </button>
-
     <!-- 移动端底部导航(桌面端 CSS 隐藏):角色库 / 模式切换 / Agent / 设置 -->
     <nav class="sv-mobile-nav" aria-label="主导航">
       <button

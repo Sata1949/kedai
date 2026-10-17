@@ -49,15 +49,16 @@ describe('ChatWindow 组件(阶段 A 补测)', () => {
     memStorage.clear();
   });
 
-  it('无消息时渲染空态引导文案', () => {
+  it('无消息时渲染空态引导卡', () => {
     const { wrapper } = mountWindow();
-    expect(wrapper.find('.sv-empty').exists()).toBe(true);
-    expect(wrapper.text()).toContain('选择左侧角色开始对话');
+    expect(wrapper.find('.sv-start').exists()).toBe(true);
+    expect(wrapper.text()).toContain('先选一个角色');
+    expect(wrapper.text()).toContain('导入角色卡');
   });
 
   it('有消息时不再显示空态', async () => {
     const { store, wrapper } = mountWindow();
-    const before = wrapper.find('.sv-empty').exists();
+    const before = wrapper.find('.sv-start').exists();
 
     store.messages = [
       { id: 1, role: 'user', content: '你好', extra: {}, streaming: false },
@@ -66,7 +67,7 @@ describe('ChatWindow 组件(阶段 A 补测)', () => {
 
     // 空态消失(无角色时消息区可能仍受其他条件约束,故断言「与初始不同」而非绝对不存在)
     expect(before).toBe(true);
-    expect(wrapper.text()).not.toContain('选择左侧角色开始对话');
+    expect(wrapper.text()).not.toContain('先选一个角色');
   });
 
   it('渲染输入栏与顶栏(主交互链路常驻)', () => {

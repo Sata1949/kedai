@@ -24,8 +24,17 @@ const store = useAppStore();
 const {
   messages, generating, currentSessionId, currentCharacterId, currentCharacter, currentCharacterName,
   renderHtml, currentScriptHash, currentScriptAuthorized, mvuVariables, initVarEntries, lastError,
-  regexScripts,
+  regexScripts, characters,
 } = storeToRefs(store);
+
+/** 空态快捷角色:最多 3 个,复用列表已有数据,不额外请求 */
+const quickStartCharacters = computed(() => characters.value.slice(0, 3));
+
+/** 角色头像 URL(空态快捷卡用;与聊天头像同一路径规则) */
+function charAvatar(c: { avatar_path?: string | null }): string | null {
+  if (!c.avatar_path) return null;
+  return `/api/avatars/${c.avatar_path.split(/[\\/]/).pop()}`;
+}
 
 /** 错误条「重试」锚点:最后一条**已落库**用户消息(与服务端重发校验口径一致,见 resendMessage) */
 const retryTarget = computed<number | null>(() => {
@@ -169,6 +178,8 @@ onMounted(async () => {
   await frames.hydrate();
   // 渲染面板(TH-render 等价物)同理由 watch 驱动,初始历史补一次
   await hydrateRenderPanels();
+  // 首屏历史可能在 watch 建立前已加载:显式补一次「定位到最后一条」
+  await scrollToBottom();
   // 卡级脚本长驻沙箱首次同步(watch 无 immediate:此时 scrollArea 已挂载,
   // 重进恢复的角色若已授权,swipe 世界书联动等卡级脚本从这里起跑)
   void syncCardScriptSandbox();
@@ -189,6 +200,17 @@ const listEpoch = ref(0);
 /** 编辑中的消息 id(单编辑语义;编辑文本由子组件本地管理,击键不触发列表重渲染) */
 const editingId = ref<number | null>(null);
 
+/** 滚到最后一条:等 DOM/虚拟行高度稳定后再补一帧(首屏/切会话时 watch 可能早于布局)。 */
+async function scrollToBottom(): Promise<void> {
+  await nextTick();
+  const el = scrollArea.value;
+  if (!el) return;
+  el.scrollTop = el.scrollHeight;
+  requestAnimationFrame(() => {
+    if (scrollArea.value) scrollArea.value.scrollTop = scrollArea.value.scrollHeight;
+  });
+}
+
 // 消息变化时自动滚到底部
 // 签名 O(1):仅读「长度 + 最后一条消息 + 生成态 + 编辑态 + 纪元」,
 // 替代原 messages.map(displayText).join('|') 的全量遍历(流式每 token 拼全量字符串)。
@@ -208,10 +230,14 @@ watch(
     ].join('\u0001');
   },
   async () => {
-    await nextTick();
-    if (scrollArea.value) scrollArea.value.scrollTop = scrollArea.value.scrollHeight;
+    await scrollToBottom();
   },
 );
+
+// 切会话:历史尚未到达时先滚一次,消息到达后上面的 watch 再补一次
+watch(currentSessionId, async () => {
+  await scrollToBottom();
+});
 
 // 渲染后副作用(脚本执行 + 资源卡片/渲染面板投递)
 // 签名同样 O(1):最后一条消息渲染文本 + HTML 开关 + 脚本版本(hash/长度/授权)+ 编辑态 + 纪元;
@@ -381,17 +407,43 @@ function bindRowRef(id: number, target: unknown): void {
 
     <!-- 消息画布(渲染面板折叠切换与水合由宿主组件承载) -->
     <RenderPanelHost ref="panelHost">
-      <div v-if="messages.length === 0" class="sv-empty">
-        <div class="sv-empty-geo">
-          <span class="sq black" />
-          <span class="sq pink" />
-          <span class="sq deep" />
-          <i class="diag" />
-        </div>
-        <p>选择左侧角色开始对话,或上传一张角色卡。</p>
-        <p class="hint">
-          输入含算式(如「帮我算 12*34」)时,Agent 会自动调用计算器工具。
+      <div v-if="messages.length === 0" class="sv-start">
+        <div class="sv-start-kicker"><span class="sq" />开始</div>
+        <h2 class="sv-start-title">
+          {{ currentCharacter ? `和 ${currentCharacterName} 开始对话` : '先选一个角色' }}
+        </h2>
+        <p class="sv-start-desc">
+          {{ currentCharacter
+            ? '输入消息开始，或先确认连接与模型。左侧可随时切换角色与模式。'
+            : '从左侧角色列表选择，或点击左下角「导入角色卡」开始。' }}
         </p>
+        <div v-if="quickStartCharacters.length" class="sv-start-chars">
+          <button
+            v-for="c in quickStartCharacters"
+            :key="c.id"
+            type="button"
+            class="sv-start-char"
+            :class="{ active: c.id === currentCharacterId }"
+            @click="store.selectCharacter(c.id)"
+          >
+            <span class="sv-avatar small char">
+              <img v-if="charAvatar(c)" :src="charAvatar(c)!" alt="" />
+              <template v-else>{{ c.chara_name.charAt(0) }}</template>
+            </span>
+            <span class="sv-start-char-name">{{ c.chara_name }}</span>
+            <span class="sv-start-char-desc">{{ c.description || '无提示词' }}</span>
+          </button>
+        </div>
+        <div class="sv-start-actions">
+          <button type="button" class="sv-btn primary sv-btn-sm" @click="store.settingsOpen = true">连接与模型</button>
+          <button
+            type="button"
+            class="sv-btn ghost sv-btn-sm"
+            :disabled="!currentCharacterId"
+            @click="store.newSession()"
+          >新建会话</button>
+        </div>
+        <p class="sv-start-hint">输入含算式（如「帮我算 12*34」）时，Agent 会自动调用计算器工具。</p>
       </div>
 
       <!-- 消息列表(渲染缓存:每条消息独立子组件,流式仅重算当前消息;
@@ -487,4 +539,110 @@ function bindRowRef(id: number, target: unknown): void {
 .sv-chat-error-code { font-size: 11px; opacity: 0.7; }
 .sv-chat-error-hint { font-size: 11px; opacity: 0.85; }
 .sv-chat-error-close { flex: none; }
+
+/* UIQ 复排:空态不再是一张盒中盒卡片,而是画布上的一次构成——
+   顶部 2px 结构线 + 左对齐文本 + 右侧黑方块/红斜线;角色卡 auto-fit,单个也能撑满行。 */
+.sv-start {
+  position: relative;
+  max-width: 760px;
+  margin: clamp(56px, 14vh, 150px) auto 0;
+  padding: 0 0 var(--space-5);
+  border-top: var(--bw) solid var(--sv-ink);
+  background: transparent;
+  box-shadow: none;
+}
+.sv-start::before {
+  content: '';
+  position: absolute;
+  right: 6px;
+  top: 36px;
+  width: 18px;
+  height: 18px;
+  background: var(--sv-ink-supreme);
+}
+.sv-start::after {
+  content: '';
+  position: absolute;
+  right: 34px;
+  top: 60px;
+  width: 76px;
+  height: 5px;
+  background: var(--sv-red);
+  transform: rotate(-38deg);
+  transform-origin: right center;
+}
+.sv-start-kicker {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  font-size: var(--text-2xs);
+  letter-spacing: 0.18em;
+  color: var(--sv-ink-dim);
+  text-transform: uppercase;
+}
+.sv-start-kicker .sq { width: 10px; height: 10px; background: var(--sv-red); display: inline-block; }
+.sv-start-title {
+  max-width: 18ch;
+  margin: var(--space-3) 0 var(--space-2);
+  font-family: var(--font-display);
+  font-size: clamp(24px, 3vw, 30px);
+  line-height: var(--lh-tight);
+  letter-spacing: -0.01em;
+}
+.sv-start-desc { max-width: 54ch; margin: 0; font-size: var(--text-base); line-height: var(--lh-body); color: var(--sv-ink-dim); }
+.sv-start-chars {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
+.sv-start-char {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1-5);
+  min-width: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--sv-line-strong);
+  background: var(--sv-white);
+  text-align: left;
+  cursor: pointer;
+}
+.sv-start-char:hover { border-color: var(--sv-ink); background: var(--sv-white); }
+.sv-start-char.active { border-color: var(--sv-ink); background: var(--sv-pink-light); box-shadow: inset 0 0 0 1px var(--sv-ink); }
+/* 只有一个快捷角色时横排,避免整行只剩左下角一块;移动端仍竖排 */
+.sv-start-char:only-child { flex-direction: row; align-items: center; gap: var(--space-3); }
+.sv-start-char:only-child .sv-start-char-name { flex: none; }
+.sv-start-char:only-child .sv-start-char-desc { flex: 1; }
+.sv-start-char .sv-avatar { width: 28px; height: 28px; }
+.sv-start-char-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-xs);
+  font-weight: 700;
+}
+.sv-start-char-desc {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-2xs);
+  color: var(--sv-ink-faint);
+}
+.sv-start-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-4); }
+.sv-start-hint { margin: var(--space-3) 0 0; padding-top: var(--space-2); border-top: 1px solid var(--sv-line); font-size: var(--text-xs); line-height: var(--lh-body); color: var(--sv-ink-faint); }
+
+@media (max-width: 900px) {
+  .sv-start::before, .sv-start::after { display: none; }
+}
+@media (max-width: 767px) {
+  .sv-start { margin: var(--space-4) var(--space-3) 0; padding: 0 0 var(--space-4); }
+  .sv-start-title { font-size: var(--text-xl); }
+  .sv-start-chars { grid-template-columns: 1fr; }
+  .sv-start-char:only-child { flex-direction: column; align-items: flex-start; gap: var(--space-1-5); }
+  .sv-start-char:only-child .sv-start-char-desc { flex: none; }
+}
 </style>

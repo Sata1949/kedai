@@ -665,17 +665,17 @@
    底部全宽按钮抽类 + Token 统计仪表感
    ============================================================ */
 
-/* 底部三按钮:全宽 flex 居中,图标与文字 gap 对齐 */
+/* 底部按钮:在 .sv-side-foot 的 1+2 网格内 flex 居中(UIQ 样品收一档高度) */
 .sv-side-btn {
   width: 100%;
-  padding: var(--space-3);
-  font-size: 13px;
-  letter-spacing: 0.1em;
-  margin-top: var(--space-2);
+  padding: var(--space-2) var(--space-2-5);
+  font-size: var(--text-xs);
+  letter-spacing: 0.04em;
+  margin-top: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: var(--space-2);
+  gap: var(--space-1-5);
 }
 /* 第一个按钮(综合设置,primary)无上间距,其余按钮 8px 间距 */
 .sv-side-btn:first-child { margin-top: 0; }

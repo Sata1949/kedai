@@ -1167,14 +1167,19 @@ async function removeTask(task: TaskRecord): Promise<void> {
         </template>
 
         <div v-else class="sv-task-empty fill">
-          <div class="sv-empty-geo lg mb14">
-            <span class="sq black" />
-            <span class="sq pink" />
-            <span class="sq deep" />
-          <i class="diag" />
+          <div class="sv-task-start">
+            <div class="sv-task-start-kicker"><span class="sq" />任务工作台</div>
+            <h2 class="sv-task-start-title">把目标交给 Kedai</h2>
+            <p class="sv-task-start-desc">
+              在左侧输入目标，系统会拆解计划、派子智能体执行并汇总结果。
+            </p>
+            <ol class="sv-task-start-steps">
+              <li><b>01</b><span><strong>下达目标</strong><small>写清楚要交付什么</small></span></li>
+              <li><b>02</b><span><strong>拆解与执行</strong><small>选择模式、执行者与工作区</small></span></li>
+              <li><b>03</b><span><strong>汇总与交付</strong><small>查看步骤、结果与文件变更</small></span></li>
+            </ol>
+            <p class="sv-task-start-hint">还没有任务时，先在左侧填写目标并点击「创建并执行」。</p>
           </div>
-          <p class="lead">选择或创建一个任务</p>
-          <p class="sub">在左侧栏输入目标,系统会拆解计划、派子智能体执行并汇总结果</p>
         </div>
       </div>
     </div>
@@ -1323,5 +1328,96 @@ async function removeTask(task: TaskRecord): Promise<void> {
 .flow-node-tag.off {
   border-color: var(--sv-ink-faint);
   color: var(--sv-ink-faint);
+}
+
+/* UIQ 复排:与聊天空态同一构成语法——顶部结构线、左对齐、右侧黑方块/红斜线;
+   三步引导改成一条技术序列,用竖分隔线而非三只盒子。 */
+.sv-task-start {
+  position: relative;
+  width: 100%;
+  max-width: 760px;
+  padding: 0 0 var(--space-5);
+  background: transparent;
+  border-top: var(--bw) solid var(--sv-ink);
+  box-shadow: none;
+  text-align: left;
+}
+.sv-task-start::before {
+  content: '';
+  position: absolute;
+  right: 6px;
+  top: 36px;
+  width: 18px;
+  height: 18px;
+  background: var(--sv-ink-supreme);
+}
+.sv-task-start::after {
+  content: '';
+  position: absolute;
+  right: 34px;
+  top: 60px;
+  width: 76px;
+  height: 5px;
+  background: var(--sv-red);
+  transform: rotate(-38deg);
+  transform-origin: right center;
+}
+.sv-task-start-kicker {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  font-size: var(--text-2xs);
+  letter-spacing: 0.18em;
+  color: var(--sv-ink-dim);
+  text-transform: uppercase;
+}
+.sv-task-start-kicker .sq { width: 10px; height: 10px; background: var(--sv-red); display: inline-block; }
+.sv-task-start-title {
+  max-width: 18ch;
+  margin: var(--space-3) 0 var(--space-2);
+  font-family: var(--font-display);
+  font-size: clamp(24px, 3vw, 30px);
+  line-height: var(--lh-tight);
+  letter-spacing: -0.01em;
+}
+.sv-task-start-desc { max-width: 54ch; margin: 0; font-size: var(--text-base); line-height: var(--lh-body); color: var(--sv-ink-dim); }
+.sv-task-start-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: var(--space-4) 0 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--sv-line-strong);
+  border-bottom: 1px solid var(--sv-line-strong);
+}
+.sv-task-start-steps li {
+  display: flex;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border-right: 1px solid var(--sv-line-strong);
+  background: transparent;
+}
+.sv-task-start-steps li:last-child { border-right: 0; }
+.sv-task-start-steps b {
+  flex: none;
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  line-height: var(--lh-tight);
+  color: var(--sv-red);
+}
+.sv-task-start-steps span { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.sv-task-start-steps strong { font-size: var(--text-xs); }
+.sv-task-start-steps small { font-size: var(--text-2xs); line-height: var(--lh-body); color: var(--sv-ink-faint); }
+.sv-task-start-hint { margin: var(--space-3) 0 0; padding-top: var(--space-2); border-top: 1px solid var(--sv-line); font-size: var(--text-xs); color: var(--sv-ink-faint); }
+
+@media (max-width: 900px) {
+  .sv-task-start::before, .sv-task-start::after { display: none; }
+}
+@media (max-width: 767px) {
+  .sv-task-start { margin: var(--space-3); padding: 0 0 var(--space-4); }
+  .sv-task-start-steps { grid-template-columns: 1fr; }
+  .sv-task-start-steps li { border-right: 0; border-bottom: 1px solid var(--sv-line-strong); }
+  .sv-task-start-steps li:last-child { border-bottom: 0; }
 }
 </style>

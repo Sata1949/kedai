@@ -393,16 +393,13 @@ async function onModelChange(e: Event): Promise<void> {
         <option v-for="m in [...new Set([model, ...models])].filter(Boolean)" :key="m" :value="m">{{ m }}</option>
       </select>
 
-      <!-- 上下文提示 -->
-      <span class="sv-hint sv-tnum sv-ml-auto">CTX {{ store.contextTokens.toLocaleString() }} · {{ agentMode.toUpperCase() }}</span>
-
       <!-- 快速回复按钮(最右,选择文件前):弹出启用列表→点击填入输入框 -->
-      <div class="sv-rel">
-        <button class="sv-btn-attach" title="快速回复:选择常用回复填入输入框(不自动发送)" @click="toggleQuickMenu">
+      <div class="sv-rel sv-ml-auto">
+        <button class="sv-btn-attach" aria-label="快速回复" title="快速回复:选择常用回复填入输入框(不自动发送)" @click="toggleQuickMenu">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
           </svg>
-          快速回复
+          <span class="sv-btn-label">快速回复</span>
         </button>
         <!-- 快速回复下拉(向上弹出) -->
         <div
@@ -427,11 +424,11 @@ async function onModelChange(e: Event): Promise<void> {
       </div>
 
       <!-- 选择文件按钮(最右) -->
-      <button class="sv-btn-attach" title="选择文件发送给模型" @click="fileInput?.click()">
+      <button class="sv-btn-attach" aria-label="选择文件" title="选择文件发送给模型" @click="fileInput?.click()">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
           <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
         </svg>
-        选择文件
+        <span class="sv-btn-label">选择文件</span>
       </button>
       <input
         ref="fileInput"

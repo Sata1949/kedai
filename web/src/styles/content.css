@@ -641,9 +641,9 @@
   color: #fff !important;
 }
 
-/* 主按钮(黑底) */
-.sv-btn.primary,
-.sv-btn.primary:hover {
+/* 主按钮(黑底;UIQ:排除禁用态,否则会压过 panels.css 的 --sv-ink-dim) */
+.sv-btn.primary:not(:disabled),
+.sv-btn.primary:hover:not(:disabled) {
   color: #fff !important;
 }
 

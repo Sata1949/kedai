@@ -399,7 +399,7 @@ async function removeTask(task: TaskRecord): Promise<void> {
 
       <!-- Token 统计区:角色扮演 = 会话累计/全局累计/上下文/缓存命中率;
            任务模式 = 当前任务累计/全部任务累计(无上下文与命中率数据源,两格隐藏) -->
-      <div class="sv-tokens">
+      <div class="sv-tokens" :class="{ two: appMode === 'task' }">
         <template v-if="appMode === 'task'">
           <div class="sv-token-cell">
             <span class="sv-supreme pink" />
