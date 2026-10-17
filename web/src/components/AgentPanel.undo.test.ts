@@ -30,6 +30,7 @@ vi.mock('../api', async (importOriginal) => {
 });
 
 import * as api from '../api';
+import { ApiError } from '../api/client';
 import { useAppStore } from '../store';
 import { idleAgent } from '../sseReducer';
 import AgentPanel from './AgentPanel.vue';
@@ -92,7 +93,7 @@ describe('AgentPanel「回退到此处」点击链路(批 D-1/D-2)', () => {
     expect(wrapper.find('.sv-feedback').text()).toContain('已回退 2 条快照');
   });
 
-  it('绑定的快照已失效(不在列表)→ 不调用恢复 API,标记「已回退」并解释', async () => {
+  it('绑定的快照已失效(不在列表)→ 不调用恢复 API,标记「已失效」并解释', async () => {
     const { wrapper } = mountPanel(() => {
       const store = useAppStore();
       store.agent = {
@@ -107,8 +108,8 @@ describe('AgentPanel「回退到此处」点击链路(批 D-1/D-2)', () => {
 
     expect(vi.mocked(api.restoreUndoSnapshot), '不得回退到其它快照').not.toHaveBeenCalled();
     expect(wrapper.find('.sv-feedback').text()).toContain('已不存在');
-    // 按钮转为「已回退」禁用态
-    expect(undoButton(wrapper).text()).toBe('已回退');
+    // 未执行任何恢复:按钮应转「已失效」而不是「已回退」
+    expect(undoButton(wrapper).text()).toBe('已失效');
     expect(undoButton(wrapper).attributes('disabled')).toBeDefined();
   });
 
@@ -171,5 +172,120 @@ describe('AgentPanel「回退到此处」点击链路(批 D-1/D-2)', () => {
     const btn = undoButton(wrapper);
     expect(btn.attributes('disabled')).toBeDefined();
     expect(btn.attributes('title')).toContain('生成进行中');
+  });
+
+  it('回退失败后也刷新历史(后端可能已应用部分逆操作)', async () => {
+    const { wrapper } = mountPanel(() => {
+      const store = useAppStore();
+      store.agent = {
+        ...idleAgent(),
+        toolCalls: [{ name: 'write', input: {}, status: 'done', callId: 'cA', snapshotId: 'snap-A' }],
+      };
+    });
+    vi.mocked(api.listUndoSnapshots).mockResolvedValue([snap('snap-A', '写入文件 a.md')]);
+    vi.mocked(api.restoreUndoSnapshot).mockRejectedValue(new Error('已恢复 1/2 条更新的快照'));
+
+    await undoButton(wrapper).trigger('click');
+    await flushPromises();
+
+    expect(api.fetchHistory, '失败路径也要对齐后端半恢复状态').toHaveBeenCalledWith('s1');
+    expect(wrapper.find('.sv-feedback').text()).toContain('回退失败');
+  });
+
+  it('切换会话后清空上一会话的回退反馈与完成标记', async () => {
+    const { store, wrapper } = mountPanel(() => {
+      const store = useAppStore();
+      store.agent = {
+        ...idleAgent(),
+        toolCalls: [{ name: 'write', input: {}, status: 'done', callId: 'cA', snapshotId: 'snap-A' }],
+      };
+    });
+    vi.mocked(api.listUndoSnapshots).mockResolvedValue([snap('snap-A', '写入文件 a.md')]);
+    vi.mocked(api.restoreUndoSnapshot).mockResolvedValue({ restored: '写入文件 a.md', restored_count: 1 });
+
+    await undoButton(wrapper).trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.sv-feedback').exists()).toBe(true);
+    expect(undoButton(wrapper).text()).toBe('已回退');
+
+    store.currentSessionId = 's2';
+    await flushPromises();
+
+    expect(wrapper.find('.sv-feedback').exists(), '跨会话不得残留上一会话反馈').toBe(false);
+    expect(undoButton(wrapper).text(), '新会话同卡不得沿用上一会话的已回退态').toBe('回退到此处');
+  });
+
+  it('批量回退后同批所有卡片都标记已回退', async () => {
+    const { wrapper } = mountPanel(() => {
+      const store = useAppStore();
+      store.agent = {
+        ...idleAgent(),
+        toolCalls: [
+          { name: 'write', input: {}, status: 'done', callId: 'cA', snapshotId: 'snap-A' },
+          { name: 'write', input: {}, status: 'done', callId: 'cB', snapshotId: 'snap-B' },
+        ],
+      };
+    });
+    // 列表新→旧:点较早的 snap-A 会连同更新的 snap-B 一起恢复
+    vi.mocked(api.listUndoSnapshots).mockResolvedValue([snap('snap-B', '写入文件 b.md'), snap('snap-A', '写入文件 a.md')]);
+    vi.mocked(api.restoreUndoSnapshot).mockResolvedValue({ restored: '写入文件 a.md', restored_count: 2 });
+
+    const buttons = wrapper.findAll('button.sv-ml-auto');
+    // buttons[0] = snap-A(较早),点击它会连同更新的 snap-B 一起恢复
+    await buttons[0].trigger('click');
+    await flushPromises();
+
+    expect(buttons[0].text()).toBe('已回退');
+    expect(buttons[1].text(), '同批被一并撤销的更新卡也应标记').toBe('已回退');
+  });
+
+  it('一次回退进行中,其它卡片的回退按钮也禁用', async () => {
+    const { wrapper } = mountPanel(() => {
+      const store = useAppStore();
+      store.agent = {
+        ...idleAgent(),
+        toolCalls: [
+          { name: 'write', input: {}, status: 'done', callId: 'cA', snapshotId: 'snap-A' },
+          { name: 'write', input: {}, status: 'done', callId: 'cB', snapshotId: 'snap-B' },
+        ],
+      };
+    });
+    vi.mocked(api.listUndoSnapshots).mockResolvedValue([snap('snap-B', '写入文件 b.md'), snap('snap-A', '写入文件 a.md')]);
+    let resolveRestore!: (v: { restored: string; restored_count: number }) => void;
+    vi.mocked(api.restoreUndoSnapshot).mockImplementation(
+      () => new Promise((resolve) => { resolveRestore = resolve; }),
+    );
+
+    const buttons = wrapper.findAll('button.sv-ml-auto');
+    // 点最新卡 snap-B(只会撤销自身),另一张较早卡应受全局单飞限制
+    await buttons[1].trigger('click');
+    await flushPromises();
+    expect(buttons[0].attributes('disabled'), '回退在飞时其它卡也不得再点').toBeDefined();
+
+    resolveRestore({ restored: '写入文件 b.md', restored_count: 1 });
+    await flushPromises();
+    expect(buttons[0].attributes('disabled'), '结束后应恢复可点').toBeUndefined();
+  });
+
+  it('恢复时快照已被并发回退(404):标记失效,不显示红色失败', async () => {
+    const { wrapper } = mountPanel(() => {
+      const store = useAppStore();
+      store.agent = {
+        ...idleAgent(),
+        toolCalls: [{ name: 'write', input: {}, status: 'done', callId: 'cA', snapshotId: 'snap-A' }],
+      };
+    });
+    vi.mocked(api.listUndoSnapshots).mockResolvedValue([snap('snap-A', '写入文件 a.md')]);
+    vi.mocked(api.restoreUndoSnapshot).mockRejectedValue(
+      new ApiError(404, 'NOT_FOUND', undefined, '快照不存在或已被回退'),
+    );
+
+    await undoButton(wrapper).trigger('click');
+    await flushPromises();
+
+    const feedback = wrapper.find('.sv-feedback');
+    expect(feedback.text()).not.toContain('回退失败');
+    expect(feedback.classes()).not.toContain('err');
+    expect(undoButton(wrapper).text()).toBe('已失效');
   });
 });

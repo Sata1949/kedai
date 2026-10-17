@@ -787,3 +787,52 @@ async fn restore_scoped_to_session_keeps_other_session_snapshots() {
     assert_eq!(s2_after[0]["id"], s2[0]["id"]);
     assert!(f2.exists(), "另一会话写入的文件不得被逆操作波及");
 }
+
+/// memory_write 端到端:工具写入 → 快照落库 → restore 按工具回传的真实 id 删除记忆行。
+#[tokio::test]
+async fn memory_write_restore_removes_inserted_entry() {
+    let _guard = test_lock().await;
+    let app = test_app();
+    let (cid, sid) = setup(app, "undo 记忆", &["memory_write"]).await;
+
+    send_tool_chat(
+        app,
+        &sid,
+        &cid,
+        r#"[[tool:memory_write {"fact":"用户喜欢薄荷茶"}]]"#,
+    )
+    .await;
+
+    let (status, list) = send_json(
+        app,
+        "GET",
+        &format!("/api/memory?character_id={cid}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "记忆列表应 200: {list}");
+    let memories = list["memories"].as_array().unwrap();
+    assert_eq!(memories.len(), 1, "memory_write 应落一条记忆: {list}");
+    assert_eq!(memories[0]["content"], json!("用户喜欢薄荷茶"));
+
+    let snaps = list_undo(app, &sid).await;
+    let snap = snaps
+        .iter()
+        .find(|s| s["tool_name"] == json!("memory_write"))
+        .expect("应产生 memory_write 快照");
+    let (status, res) = restore(app, snap["id"].as_str().unwrap()).await;
+    assert_eq!(status, StatusCode::OK, "记忆回退应成功: {res}");
+
+    let (_, list) = send_json(
+        app,
+        "GET",
+        &format!("/api/memory?character_id={cid}"),
+        json!({}),
+    )
+    .await;
+    assert!(
+        list["memories"].as_array().unwrap().is_empty(),
+        "回退后记忆行应删除: {list}"
+    );
+    assert!(list_undo(app, &sid).await.is_empty(), "成功后快照应清空");
+}

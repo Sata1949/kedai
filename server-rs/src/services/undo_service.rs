@@ -216,9 +216,13 @@ impl UndoService {
             "replace" => self.build_replace(args, ctx),
             "create" => self.build_create(args, ctx),
             "update_variables" => {
-                // 逆操作 = 整树写回(save_assistant_vars);原状态无记录时 before 为空树,
-                // restore 写回空树(会留下一行空 data_raw,语义等价,可接受)
-                let before = self.sessions.load_assistant_vars(&ctx.session_id).to_json();
+                // 逆操作 = 整树写回(save_assistant_vars);原状态无记录时 before 为空树。
+                // 读失败返回 None(不产快照):把读失败退化成空树会让回退把整棵树写空。
+                let before = self
+                    .sessions
+                    .try_load_assistant_vars(&ctx.session_id)
+                    .ok()?
+                    .to_json();
                 Some((
                     json!({ "kind": "vars", "before": before }),
                     "更新变量树".to_string(),
@@ -229,13 +233,12 @@ impl UndoService {
                 if fact.is_empty() {
                     return None; // 工具必然失败,无需快照
                 }
-                // 执行后补记 inserted id:以本角色执行前 max(id) 为界,commit 查其后的新行
-                let max_id_before = self.max_memory_id(&ctx.character_id);
+                // inserted_id 在执行后由工具输出回传(见 commit_staged):
+                // 不再用 max(id) 猜,避免窗口期他人插入或去重分支绑错行。
                 let label = format!("写入记忆:{}", truncate_chars(fact, 20));
                 Some((
                     json!({
                         "kind": "memory_insert",
-                        "max_id_before": max_id_before,
                         "inserted_id": Value::Null,
                     }),
                     label,
@@ -243,18 +246,6 @@ impl UndoService {
             }
             _ => None,
         }
-    }
-
-    fn max_memory_id(&self, character_id: &str) -> i64 {
-        let Ok(conn) = self.db.read() else {
-            return 0;
-        };
-        conn.query_row(
-            "SELECT COALESCE(MAX(id), 0) FROM memory_entries WHERE character_id = ?1",
-            params![character_id],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap_or(0)
     }
 
     /// 文件快照项:old = 执行前内容;不存在为 null(逆操作 = 删除);
@@ -442,15 +433,25 @@ impl UndoService {
                 payload["message_id"] = json!(mid);
             }
             Some("memory_insert") => {
-                let before = payload
-                    .get("max_id_before")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0);
-                let inserted = self.new_memory_id_after(&session_id, before);
-                let Some(inserted) = inserted else {
+                // 只认工具回传的真实行 id。去重命中(created=false)没有新行,不产快照。
+                let out: Value = match serde_json::from_str(tool_output) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(
+                            session_id = session_id,
+                            error = %e,
+                            "回退快照丢弃:memory_write 输出不是合法 JSON"
+                        );
+                        return None;
+                    }
+                };
+                if out.get("created").and_then(|v| v.as_bool()) != Some(true) {
+                    return None;
+                }
+                let Some(inserted) = out.get("id").and_then(|v| v.as_i64()) else {
                     tracing::warn!(
                         session_id = session_id,
-                        "回退快照丢弃:memory_write 后未找到新记忆行"
+                        "回退快照丢弃:memory_write 输出缺记忆 id"
                     );
                     return None;
                 };
@@ -505,20 +506,6 @@ impl UndoService {
                 None
             }
         }
-    }
-
-    /// memory_write 执行后:本角色 max_id_before 之后新插入的第一条记忆
-    fn new_memory_id_after(&self, session_id: &str, before: i64) -> Option<i64> {
-        let character_id = self.sessions.get(session_id).map(|s| s.character_id)?;
-        let conn = self.db.read().ok()?;
-        conn.query_row(
-            "SELECT MIN(id) FROM memory_entries WHERE character_id = ?1 AND id > ?2",
-            params![character_id, before],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()
-        .ok()
-        .flatten()
     }
 
     /// 会话快照列表(新→旧;不含 payload)。排序以 `seq` 为准(批 D-2:
@@ -702,8 +689,11 @@ impl UndoService {
                 let Some(mid) = payload.get("message_id").and_then(|v| v.as_i64()) else {
                     return Err("快照缺少气泡 id,无法回退".into());
                 };
-                // 幂等删除:行可能已被 truncate/手动删除,不存在不视为失败
-                self.sessions.delete_message(session_id, mid);
+                // 幂等删除:Ok(false)= 行本来就不存在(已被 truncate/手动删除);
+                // SQL 失败必须上抛——宽松 delete_message 吞错会让 restore 误报成功。
+                self.sessions
+                    .try_delete_message(session_id, mid)
+                    .map_err(|e| format!("删除气泡 #{mid} 失败: {e}"))?;
                 Ok(())
             }
             Some("replace") => {
@@ -741,8 +731,10 @@ impl UndoService {
                 let Some(mid) = payload.get("inserted_id").and_then(|v| v.as_i64()) else {
                     return Err("快照缺少记忆 id,无法回退".into());
                 };
-                // 幂等删除:行可能已被手动删除
-                self.memory.delete(mid);
+                // 幂等删除:Ok(false)= 行本来就不存在(已被手动删除);SQL 失败必须上抛
+                self.memory
+                    .try_delete(mid)
+                    .map_err(|e| format!("删除记忆 #{mid} 失败: {e}"))?;
                 Ok(())
             }
             _ => Err("未知快照类型,无法回退".into()),
@@ -813,11 +805,17 @@ impl UndoService {
             .unwrap_or_else(|| "{}".to_string());
         if self.sessions.get_message(session_id, id).is_some() {
             let conn = self.db.write();
-            conn.execute(
-                "UPDATE messages SET content = ?1, extra = ?2 WHERE session_id = ?3 AND id = ?4",
-                params![content, extra_str, session_id, id],
-            )
-            .map_err(|e| format!("恢复气泡 #{id} 失败: {e}"))?;
+            let affected = conn
+                .execute(
+                    "UPDATE messages SET content = ?1, extra = ?2 WHERE session_id = ?3 AND id = ?4",
+                    params![content, extra_str, session_id, id],
+                )
+                .map_err(|e| format!("恢复气泡 #{id} 失败: {e}"))?;
+            // 预检查到 UPDATE 之间行被并发删除:不得静默当作成功(快照随后会被清理)。
+            // 返回错误保留快照;重试时会走「行不存在 → 插回」分支。
+            if affected == 0 {
+                return Err(format!("恢复气泡 #{id} 失败:消息行在恢复期间消失,请重试"));
+            }
         } else {
             let role = before
                 .get("role")
@@ -1166,5 +1164,186 @@ mod tests {
                 "{tag}: 预检拒绝不得删除快照"
             );
         }
+    }
+
+    fn memory_ctx(sid: &str) -> ToolContext {
+        ToolContext {
+            session_id: sid.to_string(),
+            character_id: "c1".to_string(),
+            agent_depth: 0,
+            scope: None,
+            budget: None,
+        }
+    }
+
+    /// P1 回归(2026-10-17 复审):记忆快照必须绑定 memory_write 回传的真实行 id。
+    /// 旧实现按「本角色 max(id) 之后的第一行」猜——窗口期另一会话先插入时会绑错行,
+    /// 回退将删除无关记忆。
+    #[test]
+    fn memory_snapshot_binds_tool_output_id_not_guessed_row() {
+        let dir = TempDataDir::new("undo-memory-bind");
+        let (db, svc, sid) = build_service(&dir);
+        let stager = svc
+            .snapshot_before(
+                "memory_write",
+                &json!({ "fact": "目标记忆" }),
+                &memory_ctx(&sid),
+                None,
+            )
+            .expect("应产生 memory_write 快照");
+
+        // 窗口期另一会话先写入(id 更小),旧实现会把它当成自己的插入行。
+        let concurrent = svc
+            .memory
+            .insert("c1", None, "manual", "并发记忆")
+            .expect("并发记忆应写入");
+        let target = svc
+            .memory
+            .insert("c1", Some(&sid), "tool", "目标记忆")
+            .expect("目标记忆应写入");
+        assert!(concurrent.id < target.id, "前提:并发行 id 更小");
+
+        let snap_id = stager
+            .commit(
+                &json!({
+                    "ok": true, "stored": "目标记忆",
+                    "id": target.id, "created": true,
+                })
+                .to_string(),
+            )
+            .expect("快照应落库");
+        let payload: String = db
+            .read()
+            .unwrap()
+            .query_row(
+                "SELECT payload FROM undo_snapshots WHERE id = ?1",
+                params![snap_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let payload: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(
+            payload["inserted_id"],
+            json!(target.id),
+            "必须绑定工具回传的真实 id,不能按 max(id) 猜"
+        );
+    }
+
+    /// P1 回归:去重命中时 memory_write 没有插入新行,不得产快照。
+    #[test]
+    fn memory_snapshot_skips_when_dedup_created_false() {
+        let dir = TempDataDir::new("undo-memory-dedup");
+        let (db, svc, sid) = build_service(&dir);
+        let existing = svc
+            .memory
+            .insert("c1", None, "manual", "重复记忆")
+            .expect("种子记忆应写入");
+        let stager = svc
+            .snapshot_before(
+                "memory_write",
+                &json!({ "fact": "重复记忆" }),
+                &memory_ctx(&sid),
+                None,
+            )
+            .expect("应产生 memory_write 快照");
+        // 窗口期另一条记忆落地;旧实现会把它当成「自己插入的行」。
+        let concurrent = svc
+            .memory
+            .insert("c1", None, "manual", "窗口期并发记忆")
+            .expect("并发记忆应写入");
+        assert!(concurrent.id > existing.id, "前提:并发行 id 更大");
+        // 模拟工具命中去重:没有新行,created=false。
+        let snap_id = stager.commit(
+            &json!({
+                "ok": true, "stored": "重复记忆",
+                "id": existing.id, "created": false,
+            })
+            .to_string(),
+        );
+        assert!(snap_id.is_none(), "去重命中不得产快照");
+        let count: i64 = db
+            .read()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM undo_snapshots WHERE tool_name = 'memory_write'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "去重命中不得留下快照行");
+    }
+
+    /// P2 回归:气泡删除失败必须上抛并保留快照,不得「报成功 + 清恢复依据」。
+    #[test]
+    fn restore_propagates_bubble_delete_error_and_keeps_snapshot() {
+        let dir = TempDataDir::new("undo-bubble-delete-error");
+        let (db, svc, sid) = build_service(&dir);
+        let msg = svc
+            .sessions
+            .add_message(&sid, "assistant", "待删除", json!({}))
+            .expect("消息应写入");
+        {
+            let conn = db.write();
+            conn.execute(
+                "INSERT INTO undo_snapshots (id, session_id, tool_name, label, payload, created_at, seq) VALUES ('snap-bubble-del', ?1, 'write', '写入对话气泡', ?2, ?3, 10)",
+                params![
+                    sid,
+                    json!({ "kind": "bubble_insert", "message_id": msg.id }).to_string(),
+                    now_iso()
+                ],
+            )
+            .unwrap();
+            conn.execute_batch(&format!(
+                "CREATE TRIGGER block_msg_delete BEFORE DELETE ON messages \
+                 WHEN OLD.id = {} BEGIN SELECT RAISE(ABORT, 'blocked'); END;",
+                msg.id
+            ))
+            .unwrap();
+        }
+        let err = svc
+            .restore("snap-bubble-del")
+            .expect_err("删除失败必须上抛");
+        assert!(err.contains("气泡"), "错误应说明气泡删除失败: {err}");
+        assert!(
+            svc.session_of("snap-bubble-del").is_some(),
+            "失败必须保留快照"
+        );
+        assert!(
+            svc.sessions.get_message(&sid, msg.id).is_some(),
+            "消息应仍在"
+        );
+    }
+
+    /// P2 回归:记忆删除失败同样必须上抛并保留快照。
+    #[test]
+    fn restore_propagates_memory_delete_error_and_keeps_snapshot() {
+        let dir = TempDataDir::new("undo-memory-delete-error");
+        let (db, svc, sid) = build_service(&dir);
+        let mem = svc
+            .memory
+            .insert("c1", None, "manual", "待删除记忆")
+            .expect("记忆应写入");
+        {
+            let conn = db.write();
+            conn.execute(
+                "INSERT INTO undo_snapshots (id, session_id, tool_name, label, payload, created_at, seq) VALUES ('snap-mem-del', ?1, 'memory_write', '写入记忆', ?2, ?3, 11)",
+                params![
+                    sid,
+                    json!({ "kind": "memory_insert", "inserted_id": mem.id }).to_string(),
+                    now_iso()
+                ],
+            )
+            .unwrap();
+            conn.execute_batch(&format!(
+                "CREATE TRIGGER block_mem_delete BEFORE DELETE ON memory_entries \
+                 WHEN OLD.id = {} BEGIN SELECT RAISE(ABORT, 'blocked'); END;",
+                mem.id
+            ))
+            .unwrap();
+        }
+        let err = svc.restore("snap-mem-del").expect_err("删除失败必须上抛");
+        assert!(err.contains("记忆"), "错误应说明记忆删除失败: {err}");
+        assert!(svc.session_of("snap-mem-del").is_some(), "失败必须保留快照");
+        assert!(svc.memory.get(mem.id).is_some(), "记忆应仍在");
     }
 }

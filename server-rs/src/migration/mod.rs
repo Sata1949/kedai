@@ -244,6 +244,26 @@ mod tests {
             })
             .unwrap();
         assert_eq!(seq_a, seq_a2, "重复迁移不应改写已有 seq");
+        // 降级写入:旧版 exe 不认识 seq 列,升级后的库被它写入新快照时 seq 为 NULL。
+        // 再次升级必须回填这些行(否则 COALESCE(seq,rowid) 会把两个 id 域混在一起排序)。
+        conn.execute("UPDATE undo_snapshots SET seq = NULL WHERE id = 'a'", [])
+            .unwrap();
+        ensure_undo_snapshots_restore_columns(&conn).unwrap();
+        let seq_null_filled: Option<i64> = conn
+            .query_row("SELECT seq FROM undo_snapshots WHERE id = 'a'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let rowid_a: i64 = conn
+            .query_row("SELECT rowid FROM undo_snapshots WHERE id = 'a'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            seq_null_filled,
+            Some(rowid_a),
+            "降级写入的 NULL seq 必须在下次迁移回填"
+        );
         drop(conn);
     }
 

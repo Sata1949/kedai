@@ -14,6 +14,7 @@ import {
   resumeComputerUse,
   stopComputerUse,
 } from '../api';
+import { ApiError } from '../api/client';
 import type { TaskSubtaskStatus } from '../api';
 import { taskStatusClass, taskStatusLabel } from '../taskStatus';
 import CallTracePanel from './CallTracePanel.vue';
@@ -159,12 +160,18 @@ function callKey(t: { callId?: string; name: string; id?: number }): string {
 // ===== 回退快照(undo,批次 6.1b;批 D-1 起按调用身份精确绑定)=====
 /** 会产生回退快照的写工具(与后端快照生成口径一致) */
 const UNDO_WRITE_TOOLS = new Set(['write', 'replace', 'create', 'update_variables', 'memory_write']);
-/** 回退进行中的工具调用键(防重复点击) */
-const undoBusy = ref<Set<string>>(new Set());
-/** 已回退完成的工具调用键(按钮转「已回退」禁用态) */
-const undoneKeys = ref<Set<string>>(new Set());
+/** 回退进行中(全局单飞:restore 会串行应用整批逆操作,不允许并发点击) */
+const undoBusy = ref(false);
+/** 已成功回退的快照 id(按 snapshotId 键:历史重载后仍与工具卡稳定匹配) */
+const undoneSnapshots = ref<Set<string>>(new Set());
+/** 已失效的快照 id(列表已无 / 恢复时 404)——与「已回退」区分,避免误报成功 */
+const invalidSnapshots = ref<Set<string>>(new Set());
 /** 回退反馈(就近显示在工具调用清单底部,口径同 authMsg) */
 const undoMsg = ref('');
+/** 反馈样式:ok=成功、err=失败、info=快照已失效等中性提示 */
+const undoMsgKind = ref<'ok' | 'err' | 'info'>('ok');
+/** 请求序号:切会话/新请求后旧请求的 finally 不得清掉新请求的 busy */
+let undoSeq = 0;
 
 function isUndoableTool(name: string): boolean {
   return UNDO_WRITE_TOOLS.has(name);
@@ -181,46 +188,90 @@ function undoDisabledReason(t: { snapshotId?: string }): string {
   return '';
 }
 
+function undoButtonDisabled(t: { snapshotId?: string }): boolean {
+  if (generating.value || !t.snapshotId || undoBusy.value) return true;
+  return undoneSnapshots.value.has(t.snapshotId) || invalidSnapshots.value.has(t.snapshotId);
+}
+
+function undoButtonLabel(t: { snapshotId?: string }): string {
+  const id = t.snapshotId ?? '';
+  if (invalidSnapshots.value.has(id)) return '已失效';
+  if (undoneSnapshots.value.has(id)) return '已回退';
+  return '回退到此处';
+}
+
+function undoButtonTitle(t: { snapshotId?: string; name: string }): string {
+  if (!t.snapshotId) return undoDisabledReason(t);
+  if (invalidSnapshots.value.has(t.snapshotId)) {
+    return '该快照已失效(可能已被更早的回退一并处理)';
+  }
+  if (undoneSnapshots.value.has(t.snapshotId)) return '该快照已回退';
+  if (generating.value) return '生成进行中,停止后可回退';
+  if (undoBusy.value) return '另一个回退正在进行,请稍候';
+  return `回退到「${t.name}」本次执行前的状态(连同其后操作一并回到该时点)`;
+}
+
 /**
  * 「回退到此处」:按本次调用绑定的 snapshotId 精确恢复(批 D-1——不再按工具名
  * 与锚点启发式猜测;批 D-2 语义 = 连同其后操作一并回到该次执行前的状态)。
  * 点击时拉列表核对绑定快照仍存在:不存在则标记失效并解释,不回退到其它快照。
  */
-async function undoToHere(t: { callId?: string; snapshotId?: string; name: string; id?: number }): Promise<void> {
+async function undoToHere(t: { snapshotId?: string; name: string }): Promise<void> {
   const sid = currentSessionId.value;
-  if (!sid) return;
+  if (!sid || generating.value) return;
   const snapId = t.snapshotId;
   if (!snapId) {
+    undoMsgKind.value = 'info';
     undoMsg.value = undoDisabledReason(t);
     return;
   }
-  const key = callKey(t);
-  if (undoBusy.value.has(key) || undoneKeys.value.has(key)) return;
-  undoBusy.value = new Set(undoBusy.value).add(key);
+  if (undoBusy.value || undoneSnapshots.value.has(snapId) || invalidSnapshots.value.has(snapId)) {
+    return;
+  }
+  const seq = ++undoSeq;
+  undoBusy.value = true;
   undoMsg.value = '';
   try {
     // 点击时才拉快照列表(不做渲染期预拉/面板级缓存):避免每次渲染打 API,也避免缓存陈旧误导
     const snapshots = await listUndoSnapshots(sid);
-    const target = snapshots.find((s) => s.id === snapId);
-    if (!target) {
+    if (currentSessionId.value !== sid) return;
+    const targetIndex = snapshots.findIndex((s) => s.id === snapId);
+    if (targetIndex < 0) {
       // 快照已被更早的回退一并清理/已失效:禁用该按钮并解释,不选替代目标
-      undoneKeys.value = new Set(undoneKeys.value).add(key);
+      invalidSnapshots.value = new Set(invalidSnapshots.value).add(snapId);
+      undoMsgKind.value = 'info';
       undoMsg.value = '该快照已不存在(可能已被更早的回退一并处理),无法回退';
       return;
     }
+    const target = snapshots[targetIndex];
+    // 列表新→旧:后端 restore 会把目标及其后的快照整批撤销,前端按同一前缀标记
+    const affectedIds = snapshots.slice(0, targetIndex + 1).map((s) => s.id);
     const result = await restoreUndoSnapshot(target.id);
-    // 回退改了落库状态(文件/变量树),刷新历史对齐展示
+    if (currentSessionId.value !== sid) return;
+    // 回退可能已应用部分逆操作(失败时尤其如此):无论成败都刷新历史对齐展示
     await store.loadHistory(sid);
-    undoneKeys.value = new Set(undoneKeys.value).add(key);
+    if (currentSessionId.value !== sid) return;
+    undoneSnapshots.value = new Set([...undoneSnapshots.value, ...affectedIds]);
+    undoMsgKind.value = 'ok';
     undoMsg.value = result.restored_count > 1
       ? `已回退 ${result.restored_count} 条快照(回到「${target.label}」执行前)`
       : `已回退:${target.label}`;
   } catch (err) {
-    undoMsg.value = `回退失败:${(err as Error).message}`;
+    if (currentSessionId.value !== sid) return;
+    // 后端按「已恢复 X/Y」应用了前若干条;失败态也必须拉一次历史，避免界面停在半恢复前
+    await store.loadHistory(sid);
+    if (currentSessionId.value !== sid) return;
+    if (err instanceof ApiError && err.status === 404) {
+      // 并发回退已把该快照清理:这是可解释的失效，不是本次操作失败
+      invalidSnapshots.value = new Set(invalidSnapshots.value).add(snapId);
+      undoMsgKind.value = 'info';
+      undoMsg.value = '该快照已被更早的回退处理,无需重复回退';
+    } else {
+      undoMsgKind.value = 'err';
+      undoMsg.value = `回退失败:${(err as Error).message}`;
+    }
   } finally {
-    const next = new Set(undoBusy.value);
-    next.delete(key);
-    undoBusy.value = next;
+    if (seq === undoSeq) undoBusy.value = false;
   }
 }
 
@@ -346,6 +397,16 @@ onMounted(() => void refreshCuStatus());
 // 面板展开时对齐一次服务端状态(急停也可能由 Agent 的 stop 工具置位)
 watch(showPanel, (open) => {
   if (open) void refreshCuStatus();
+});
+// 切换会话/角色:回退反馈与完成/失效标记只属于原会话,必须清空;
+// 同时作废旧请求的 busy 收尾(undoSeq),避免旧 restore 的 finally 清掉新会话的 busy。
+watch(currentSessionId, () => {
+  undoSeq += 1;
+  undoBusy.value = false;
+  undoneSnapshots.value = new Set();
+  invalidSnapshots.value = new Set();
+  undoMsg.value = '';
+  undoMsgKind.value = 'ok';
 });
 
 </script>
@@ -594,10 +655,10 @@ watch(showPanel, (open) => {
                 v-if="undoEnabled && currentSessionId && isUndoableTool(t.name)"
                 type="button"
                 class="sv-btn ghost sv-btn-sm sv-ml-auto"
-                :disabled="generating || !t.snapshotId || undoBusy.has(callKey(t)) || undoneKeys.has(callKey(t))"
-                :title="!t.snapshotId ? undoDisabledReason(t) : (generating ? '生成进行中,停止后可回退' : `回退到「${t.name}」本次执行前的状态(连同其后操作一并回到该时点)`)"
+                :disabled="undoButtonDisabled(t)"
+                :title="undoButtonTitle(t)"
                 @click="undoToHere(t)"
-              >{{ undoneKeys.has(callKey(t)) ? '已回退' : '回退到此处' }}</button>
+              >{{ undoButtonLabel(t) }}</button>
             </div>
             <div class="sv-tool-io" :class="{ open: isIoOpen(callKey(t) + ':in') }" :ref="(el) => registerIoBox(callKey(t) + ':in', el)">
               <div class="sv-tool-io-bar">
@@ -653,8 +714,8 @@ watch(showPanel, (open) => {
           </div>
         </template>
 
-        <!-- 回退反馈(成功/失败) -->
-        <div v-if="undoMsg" class="sv-feedback sv-mt6" :class="undoMsg.startsWith('回退失败') ? 'err' : 'ok'">{{ undoMsg }}</div>
+        <!-- 回退反馈(成功/失败/快照已失效) -->
+        <div v-if="undoMsg" class="sv-feedback sv-mt6" :class="undoMsgKind" role="status" aria-live="polite">{{ undoMsg }}</div>
 
         <div v-if="!agent.toolCalls.length && !agent.pendingTool" class="sv-empty panel">
           <p class="sv-note-mini">暂无工具调用</p>
