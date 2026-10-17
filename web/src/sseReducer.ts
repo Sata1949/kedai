@@ -28,6 +28,9 @@ export interface AgentActivity {
     renderKind?: string;
     /** 工具来源(`builtin`/`plugin`/`mcp`;PLGM 3.3 起由 SSE 事件携带,缺省不显示徽章) */
     origin?: string;
+    /** 本次执行成功落库的回退快照 id(批 D-1;写工具且快照开关开时由 tool_result 携带)。
+     *  「回退到此处」按此精确匹配;缺省(旧记录/开关关)时按钮禁用并解释。 */
+    snapshotId?: string;
   }>;
   /** 自定义流程(custom 模式)步骤进度;其余模式为 null */
   flowProgress: { index: number; total: number; name: string } | null;
@@ -158,8 +161,10 @@ export function reduceSseEvent(state: SseStateSlice, event: SseEvent): SseStateC
         if ((event.call_id ? t.callId === event.call_id : t.name === event.name)
           && (t.status === 'running' || t.status === 'authorization_required')) {
           t.output = event.output;
-          t.status = event.output && typeof event.output === 'object' && 'error' in event.output ? 'error' : 'done';
+          t.status = t.output && typeof t.output === 'object' && 'error' in t.output ? 'error' : 'done';
           if (event.render_kind !== undefined) t.renderKind = event.render_kind;
+          // 批 D-1:写工具成功落库的回退快照 id,绑定到本工具卡(「回退到此处」据此精确匹配)
+          if (event.snapshot_id) t.snapshotId = event.snapshot_id;
           break;
         }
       }

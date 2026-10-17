@@ -57,7 +57,10 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   input            TEXT NOT NULL,
   output           TEXT NOT NULL,
   duration_ms      INTEGER NOT NULL,
-  created_at       TEXT NOT NULL
+  created_at       TEXT NOT NULL,
+  -- 本次调用成功落库的回退快照 id(批 D-1,可空:非写工具/开关关/旧行 → NULL);
+  -- 供历史重载后「回退到此处」按调用精确绑定快照(不再按工具名+锚点启发式猜测)。
+  snapshot_id      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tool_calls_agent ON tool_calls(agent_session_id);
 CREATE TABLE IF NOT EXISTS world_books (
@@ -419,6 +422,9 @@ CREATE TABLE IF NOT EXISTS backfill_meta (
 -- (文件原内容内嵌,单文件超 256KB 截断并标 truncated=true,restore 拒绝);
 -- anchor_message_id = 快照时该会话 max(messages.id)(无消息为 NULL)。
 -- 不设外键:快照生命周期独立于消息清理(truncate/删除),恢复语义由 undo_service 校验。
+-- 批 D-1/D-2(2026-10-16 审查修复 03~05):seq = 持久排序字段(写锁内 max+1 分配,
+-- 恢复按 seq 逆序界定「目标及其后续」,不再用毫秒时间戳——同毫秒不再误伤);
+-- call_id/run_id = 产生快照的工具调用身份(可空:旧行与身份缺失场景为 NULL,不伪造)。
 CREATE TABLE IF NOT EXISTS undo_snapshots (
   id                TEXT PRIMARY KEY,
   session_id        TEXT NOT NULL,
@@ -426,9 +432,16 @@ CREATE TABLE IF NOT EXISTS undo_snapshots (
   tool_name         TEXT NOT NULL,
   label             TEXT NOT NULL DEFAULT '',
   payload           TEXT NOT NULL,
-  created_at        TEXT NOT NULL
+  created_at        TEXT NOT NULL,
+  seq               INTEGER,
+  call_id           TEXT,
+  run_id            TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_undo_snapshots_session ON undo_snapshots(session_id, created_at);
+-- 注意:`idx_undo_snapshots_session_seq` **不在建表批创建**——旧库的 undo_snapshots 里
+-- 没有 seq 列(建表批的 CREATE INDEX 会在 ensure 补列之前执行,旧库升级直接炸
+-- 「no such column: seq」);该索引由 `ensure_undo_snapshots_restore_columns` 在补列后
+-- 创建(fresh 与升级两路径同函数同结果,2026-10-16 批 D 实测修复 + schema_migration_meta 把关)。
 
 -- 角色卡脚本授权台账(2026-09-14,known-limitations L12 后端授权门)。
 -- 语义:character_id → 该卡**当前被授权执行的脚本内容哈希**。

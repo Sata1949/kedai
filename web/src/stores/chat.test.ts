@@ -329,3 +329,27 @@ describe('SENDFIX-2 停止竞态(停止中过渡态)', () => {
     }
   });
 });
+
+describe('批 D-1 工具调用快照绑定(历史重载映射)', () => {
+  it('restoreAgentTrace 把 tool_calls.snapshot_id 映射为 toolCalls[].snapshotId;旧记录缺省 undefined', async () => {
+    mocked.fetchAgentTrace.mockResolvedValue({
+      state: 'idle',
+      plan: [],
+      step_index: 0,
+      tool_calls: [
+        { id: 't1', name: 'write', input: {}, output: {}, duration_ms: 1, created_at: 'c', snapshot_id: 'snap-1' },
+        { id: 't2', name: 'read', input: {}, output: {}, duration_ms: 1, created_at: 'c' },
+      ],
+    });
+    const store = useChatStore();
+    await store.switchSession('s1');
+    await flush();
+    await flush();
+
+    expect(store.agent.toolCalls[0]).toMatchObject({ name: 'write', snapshotId: 'snap-1' });
+    expect(store.agent.toolCalls[1].snapshotId, '旧记录缺字段时不得伪造绑定').toBeUndefined();
+    // codex 复审 P1-2:UI 键必须用落库行 id——否则同名历史调用会一起退化到 name#0
+    expect(store.agent.toolCalls[0].callId, '行 id 应映射为 UI 稳定键').toBe('t1');
+    expect(store.agent.toolCalls[1].callId).toBe('t2');
+  });
+});

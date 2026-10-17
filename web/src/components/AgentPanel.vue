@@ -14,7 +14,7 @@ import {
   resumeComputerUse,
   stopComputerUse,
 } from '../api';
-import type { TaskSubtaskStatus, UndoSnapshot } from '../api';
+import type { TaskSubtaskStatus } from '../api';
 import { taskStatusClass, taskStatusLabel } from '../taskStatus';
 import CallTracePanel from './CallTracePanel.vue';
 
@@ -156,7 +156,7 @@ function callKey(t: { callId?: string; name: string; id?: number }): string {
   return t.callId ?? `${t.name}#${t.id ?? 0}`;
 }
 
-// ===== 回退快照(undo,批次 6.1b)=====
+// ===== 回退快照(undo,批次 6.1b;批 D-1 起按调用身份精确绑定)=====
 /** 会产生回退快照的写工具(与后端快照生成口径一致) */
 const UNDO_WRITE_TOOLS = new Set(['write', 'replace', 'create', 'update_variables', 'memory_write']);
 /** 回退进行中的工具调用键(防重复点击) */
@@ -171,22 +171,29 @@ function isUndoableTool(name: string): boolean {
 }
 
 /**
- * 快照匹配(近似语义,与后端无一一对应 id,只能启发式):
- * 1) 优先在与本次点击同 tool_name 的快照中选;同名没有则退到全部快照;
- * 2) 列表新→旧,取第一个 anchor_message_id 不大于当前历史最大消息 id 的
- *    (锚点仍落在当前上下文内的最近一条);
- * 3) 无法可靠对应(锚点全缺或全部超出当前上下文)时取最新一条。
+ * 按钮禁用原因(批 D-1):没有绑定快照标识的工具卡不允许回退——
+ * 旧记录(早于本功能)或快照开关当时未开时不伪造对应关系,禁用并解释。
  */
-function pickUndoSnapshot(snapshots: UndoSnapshot[], toolName: string, maxMessageId: number): UndoSnapshot | undefined {
-  const sameTool = snapshots.filter((s) => s.tool_name === toolName);
-  const candidates = sameTool.length > 0 ? sameTool : snapshots;
-  return candidates.find((s) => s.anchor_message_id !== null && s.anchor_message_id <= maxMessageId) ?? candidates[0];
+function undoDisabledReason(t: { snapshotId?: string }): string {
+  if (!t.snapshotId) {
+    return '该工具调用没有绑定回退快照标识(历史记录或快照功能当时未开启),无法精确回退';
+  }
+  return '';
 }
 
-/** 「回退到此处」:选快照 → 恢复 → 刷新聊天历史;按钮转「已回退」禁用态 */
-async function undoToHere(t: { callId?: string; name: string; id?: number }): Promise<void> {
+/**
+ * 「回退到此处」:按本次调用绑定的 snapshotId 精确恢复(批 D-1——不再按工具名
+ * 与锚点启发式猜测;批 D-2 语义 = 连同其后操作一并回到该次执行前的状态)。
+ * 点击时拉列表核对绑定快照仍存在:不存在则标记失效并解释,不回退到其它快照。
+ */
+async function undoToHere(t: { callId?: string; snapshotId?: string; name: string; id?: number }): Promise<void> {
   const sid = currentSessionId.value;
   if (!sid) return;
+  const snapId = t.snapshotId;
+  if (!snapId) {
+    undoMsg.value = undoDisabledReason(t);
+    return;
+  }
   const key = callKey(t);
   if (undoBusy.value.has(key) || undoneKeys.value.has(key)) return;
   undoBusy.value = new Set(undoBusy.value).add(key);
@@ -194,17 +201,20 @@ async function undoToHere(t: { callId?: string; name: string; id?: number }): Pr
   try {
     // 点击时才拉快照列表(不做渲染期预拉/面板级缓存):避免每次渲染打 API,也避免缓存陈旧误导
     const snapshots = await listUndoSnapshots(sid);
-    const maxMessageId = store.messages.reduce((m, msg) => Math.max(m, msg.id), 0);
-    const target = pickUndoSnapshot(snapshots, t.name, maxMessageId);
+    const target = snapshots.find((s) => s.id === snapId);
     if (!target) {
-      undoMsg.value = '当前会话没有可回退的快照';
+      // 快照已被更早的回退一并清理/已失效:禁用该按钮并解释,不选替代目标
+      undoneKeys.value = new Set(undoneKeys.value).add(key);
+      undoMsg.value = '该快照已不存在(可能已被更早的回退一并处理),无法回退';
       return;
     }
-    await restoreUndoSnapshot(target.id);
+    const result = await restoreUndoSnapshot(target.id);
     // 回退改了落库状态(文件/变量树),刷新历史对齐展示
     await store.loadHistory(sid);
     undoneKeys.value = new Set(undoneKeys.value).add(key);
-    undoMsg.value = `已回退:${target.label}`;
+    undoMsg.value = result.restored_count > 1
+      ? `已回退 ${result.restored_count} 条快照(回到「${target.label}」执行前)`
+      : `已回退:${target.label}`;
   } catch (err) {
     undoMsg.value = `回退失败:${(err as Error).message}`;
   } finally {
@@ -584,8 +594,8 @@ watch(showPanel, (open) => {
                 v-if="undoEnabled && currentSessionId && isUndoableTool(t.name)"
                 type="button"
                 class="sv-btn ghost sv-btn-sm sv-ml-auto"
-                :disabled="undoBusy.has(callKey(t)) || undoneKeys.has(callKey(t))"
-                :title="`回退到「${t.name}」本次执行前的状态`"
+                :disabled="generating || !t.snapshotId || undoBusy.has(callKey(t)) || undoneKeys.has(callKey(t))"
+                :title="!t.snapshotId ? undoDisabledReason(t) : (generating ? '生成进行中,停止后可回退' : `回退到「${t.name}」本次执行前的状态(连同其后操作一并回到该时点)`)"
                 @click="undoToHere(t)"
               >{{ undoneKeys.has(callKey(t)) ? '已回退' : '回退到此处' }}</button>
             </div>

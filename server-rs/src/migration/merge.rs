@@ -19,6 +19,7 @@ use super::ddl::{
     ensure_task_llm_calls_finish_reason_column, ensure_task_messages_table,
     ensure_task_scan_marks_table, ensure_task_subtasks_finished_at_column,
     ensure_tasks_executor_id_column, ensure_tasks_flow_columns, ensure_tasks_task_mode_column,
+    ensure_tool_calls_snapshot_id_column, ensure_undo_snapshots_restore_columns,
     CONTRACT_CHANGELOG_DDL, KALEIDO_STATE_DDL, LLM_REQUESTS_DDL, MEMORY_ENTRIES_DDL,
     MEMORY_ENTRIES_FTS_DDL, SCOPE_VARIABLES_DDL, SESSION_COMPACTIONS_DDL, USER_SCRIPTS_DDL,
 };
@@ -240,6 +241,13 @@ fn merge_databases(baseline: &Path, source: &Path) -> Result<MergeReport, String
     // merge_table 按「源表全列」取数,该列缺席会让合并报「基线缺少列」
     ensure_characters_derived_json_column(&conn)
         .map_err(|e| format!("补齐基线库 characters derived_json 列失败: {e}"))?;
+    // 回退快照恢复列 + 工具调用快照绑定列(codex 复审 P1-4):旧库合并时两侧都要
+    // 先补齐,否则 schema_map 比对报「schema 冲突」或产物缺列(启动迁移覆盖不到
+    // merge 直接开 SQLite 的路径);排序索引在第一条 ensure 内一并创建。
+    ensure_undo_snapshots_restore_columns(&conn)
+        .map_err(|e| format!("补齐基线库 undo_snapshots 恢复列失败: {e}"))?;
+    ensure_tool_calls_snapshot_id_column(&conn)
+        .map_err(|e| format!("补齐基线库 tool_calls snapshot_id 列失败: {e}"))?;
     align_schema_version(&conn, "工作库")?;
     // 预补 DDL 完成后把工作库标到当前 schema 版本:合并把两侧结构对齐到当前形态,
     // 版本号必须同步(否则合并产物带着旧版本号,「库比代码新」检测与升级判断失真)。
@@ -305,6 +313,11 @@ fn merge_databases(baseline: &Path, source: &Path) -> Result<MergeReport, String
     // characters derived_json 列(P-11):源快照侧同样补齐(与基线侧成对,漏一侧即报缺少列)
     ensure_characters_derived_json_column(&source_conn)
         .map_err(|e| format!("补齐源快照 characters derived_json 列失败: {e}"))?;
+    // 回退快照恢复列 + 工具调用快照绑定列(codex 复审 P1-4):源快照侧同样补齐(与基线成对)
+    ensure_undo_snapshots_restore_columns(&source_conn)
+        .map_err(|e| format!("补齐源快照 undo_snapshots 恢复列失败: {e}"))?;
+    ensure_tool_calls_snapshot_id_column(&source_conn)
+        .map_err(|e| format!("补齐源快照 tool_calls snapshot_id 列失败: {e}"))?;
     // 源快照同样对齐版本(两侧结构一致才允许合并;版本号也随之一致)
     align_schema_version(&source_conn, "源快照")?;
     drop(source_conn);

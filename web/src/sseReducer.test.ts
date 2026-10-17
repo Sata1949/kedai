@@ -51,6 +51,19 @@ describe('reduceSseEvent', () => {
     expect(current.agent.toolCalls[1].origin).toBeUndefined();
   });
 
+  it('tool_result 透传 snapshot_id 到 toolCalls(批 D-1 快照绑定);旧事件缺省不误设', () => {
+    const current = state();
+    reduceSseEvent(current, { type: 'tool_call', name: 'write', input: {}, call_id: 'c1' });
+    reduceSseEvent(current, {
+      type: 'tool_result', name: 'write', output: { ok: true }, call_id: 'c1', snapshot_id: 'snap-1',
+    });
+    expect(current.agent.toolCalls[0]).toMatchObject({ status: 'done', snapshotId: 'snap-1' });
+    // 第二次调用:旧服务端事件无 snapshot_id → 不写字段(不误设、不复用上一条的 id)
+    reduceSseEvent(current, { type: 'tool_call', name: 'write', input: {}, call_id: 'c2' });
+    reduceSseEvent(current, { type: 'tool_result', name: 'write', output: { ok: true }, call_id: 'c2' });
+    expect(current.agent.toolCalls[1].snapshotId).toBeUndefined();
+  });
+
   it('授权事件按 call_id 标记对应的同名工具，不误改其他调用', () => {
     const current = state();
     reduceSseEvent(current, { type: 'tool_call', name: 'write', input: { path: 'a' }, call_id: 'call-a' });

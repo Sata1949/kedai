@@ -117,6 +117,12 @@ const SCREEN_INPUT_COMMANDS: &[&str] = &[
 const DESTRUCTIVE_COMMANDS: &[&str] = &[
     "rm",
     "rmdir",
+    // Windows 原生删除族(KEDAI-03,2026-10-16 审查修复批 C):del/erase 是 rm 的同义
+    // 内建命令,rd 是 rmdir 的 cmd 别名——此前两条落 Sensitive(白名单/放行档可静默
+    // 执行),rd 完全未收录;与 rm/rmdir 同户收编,统一走「逐条高危确认」硬门。
+    "del",
+    "erase",
+    "rd",
     "shred",
     "truncate",
     "dd",
@@ -179,8 +185,6 @@ const SENSITIVE_COMMANDS: &[&str] = &[
     "copy",
     "xcopy",
     "robocopy",
-    "del",
-    "erase",
     "ren",
     "move",
     "md",
@@ -444,6 +448,35 @@ mod tests {
                 classify_command(c, "sh"),
                 CommandRisk::Destructive,
                 "应为破坏性: {c}"
+            );
+        }
+    }
+
+    /// KEDAI-03(审查修复批 C,2026-10-16):Windows 原生删除命令与 rm/rmdir 同户。
+    /// 修复前 del/erase 落 SENSITIVE_COMMANDS(白名单/放行档可静默执行),rd 完全未收录;
+    /// 升入 Destructive 后统一走「逐条高危确认」硬门。
+    #[test]
+    fn windows_delete_commands_are_destructive() {
+        for c in [
+            // 基础形态
+            "del /q disposable.txt",
+            "erase /q disposable.txt",
+            "rd /s /q build",
+            // 大小写变体(命令名按 basename 归一为小写)
+            "DEL disposable.txt",
+            "Del /Q disposable.txt",
+            "ERASE a.txt",
+            // 绝对路径与扩展名(basename 归一)
+            r"C:\Windows\System32\del.exe a.txt",
+            r"C:\Windows\System32\erase.com a.txt",
+            // 多命令串联:整条取最高危
+            "echo start && del /q x.txt",
+            "dir & erase y.txt",
+        ] {
+            assert_eq!(
+                classify_command(c, "cmd"),
+                CommandRisk::Destructive,
+                "应为破坏性(Windows 删除族): {c}"
             );
         }
     }

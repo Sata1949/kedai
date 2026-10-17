@@ -78,6 +78,8 @@ pub(super) async fn maybe_run_tool(
         json!({ "expression": expression }),
         output.clone(),
         start.elapsed().as_millis() as i64,
+        // 直算路径无回退快照(calculator 非写工具)
+        None,
     );
     send_event(
         SseEvent::ToolResult {
@@ -86,6 +88,7 @@ pub(super) async fn maybe_run_tool(
             call_id: None,
             render_kind: Some("generic".into()),
             origin: tool_origin_str(&engine.tool_registry, "calculator"),
+            snapshot_id: None,
         },
         tx,
         abort,
@@ -1048,6 +1051,7 @@ pub(crate) async fn run_tool_loop(
                     permission,
                     output: Value::Null,
                     duration_ms: 0,
+                    snapshot_id: None,
                 }
             })
             .collect();
@@ -1066,20 +1070,25 @@ pub(crate) async fn run_tool_loop(
         for group in groups {
             if group.len() > 1 || parallel_safe[group[0]] {
                 // 并发组:组内全部为 Safe 工具,并发执行并按原顺序收集
-                let futures: Vec<_> = group
-                    .iter()
-                    .map(|&idx| {
-                        let e = &executed[idx];
-                        let call = &e.call;
-                        let perm = &e.permission;
-                        let ctx = tool_ctx.clone();
-                        async move { execute_call(engine, call, perm, &ctx, tx, abort, flag).await }
-                    })
-                    .collect();
+                let futures: Vec<_> =
+                    group
+                        .iter()
+                        .map(|&idx| {
+                            let e = &executed[idx];
+                            let call = &e.call;
+                            let perm = &e.permission;
+                            let ctx = tool_ctx.clone();
+                            let rid = run_id;
+                            async move {
+                                execute_call(engine, call, perm, &ctx, tx, abort, flag, rid).await
+                            }
+                        })
+                        .collect();
                 let outputs = futures::future::join_all(futures).await;
                 for (&idx, out) in group.iter().zip(outputs) {
                     executed[idx].output = out.0;
                     executed[idx].duration_ms = out.1;
+                    executed[idx].snapshot_id = out.2;
                 }
             } else {
                 // 串行组:单个非 Safe/未注册工具,含授权等待
@@ -1131,6 +1140,8 @@ pub(crate) async fn run_tool_loop(
                     input_val,
                     e.output.clone(),
                     e.duration_ms,
+                    // 批 D-1:快照绑定随工具调用落库,历史重载后「回退到此处」仍可精确匹配
+                    e.snapshot_id.clone(),
                 );
             }
             state_machine.transition_best_effort(AgentState::Executing, session_id);
@@ -1152,6 +1163,8 @@ pub(crate) async fn run_tool_loop(
                     render_kind: crate::tools::registry::render_kind_for(&e.call.name)
                         .map(|s| s.to_string()),
                     origin: tool_origin_str(&engine.tool_registry, &e.call.name),
+                    // 批 D-1:写工具成功落库的回退快照 id(加性字段;None 不序列化)
+                    snapshot_id: e.snapshot_id.clone(),
                 },
                 tx,
                 abort,
@@ -1370,13 +1383,16 @@ pub(crate) async fn run_tool_loop(
     }
 }
 
-/// 单轮中一个待执行/已执行的工具调用(裁决结果 + 执行输出 + 耗时)
+/// 单轮中一个待执行/已执行的工具调用(裁决结果 + 执行输出 + 耗时 + 快照绑定)
 struct ExecutedTool {
     call: ToolCallArgs,
     permission: crate::tools::permissions::PermissionDecision,
     output: Value,
     /// 工具执行耗时(毫秒;未执行时为 0)
     duration_ms: i64,
+    /// 本次执行成功落库的回退快照 id(批 D-1;仅写工具且快照开关开时 Some):
+    /// 随 ToolResult 事件透出、随 tool_calls 落库,供前端精确绑定「回退到此处」
+    snapshot_id: Option<String>,
 }
 
 /// 按模型顺序把工具分成「并行组」:连续 Safe 工具为同一组(组内并发),
@@ -1534,10 +1550,20 @@ async fn execute_serial_tool(
             }
         }
     }
-    let (output, duration_ms) =
-        execute_call(engine, &e.call, &e.permission, tool_ctx, tx, abort, flag).await;
+    let (output, duration_ms, snapshot_id) = execute_call(
+        engine,
+        &e.call,
+        &e.permission,
+        tool_ctx,
+        tx,
+        abort,
+        flag,
+        run_id,
+    )
+    .await;
     e.output = output;
     e.duration_ms = duration_ms;
+    e.snapshot_id = snapshot_id;
     Ok(false)
 }
 
@@ -1605,7 +1631,8 @@ where
 
 /// 执行单个工具调用(已裁决)。未授权不执行:未注册 → 错误 JSON;已注册 → 错误 JSON
 /// (授权事件由收尾阶段按序推送)。执行失败 → 结构化错误 JSON + step 提示,不终止整轮。
-/// 返回 (输出, 耗时毫秒)。
+/// 返回 (输出, 耗时毫秒, 回退快照 id)。`run_id` 用于构造工具调用身份(批 D-1),
+/// 随快照落库并绑定到工具卡(SSE/tool_calls),供「回退到此处」精确匹配。
 #[allow(clippy::too_many_arguments)]
 async fn execute_call(
     engine: &AgentEngine,
@@ -1615,7 +1642,8 @@ async fn execute_call(
     tx: &mpsc::Sender<SseEvent>,
     abort: &watch::Receiver<bool>,
     flag: &AbortFlag,
-) -> (Value, i64) {
+    run_id: &str,
+) -> (Value, i64, Option<String>) {
     if !permission.allowed {
         return (
             if engine.tool_registry.get(&call.name).is_none() {
@@ -1624,22 +1652,28 @@ async fn execute_call(
                 json!({ "error": permission.reason, "code": "tool_authorization_required" })
             },
             0,
+            None,
         );
     }
     let start = std::time::Instant::now();
     // 白名单放行:已裁决执行,避免 execute 二次权限裁决拒绝白名单危险工具
     // (旧实现外层 allowed=true 但 execute 内部再裁决,敏感/危险工具实际仍被拒)
+    let identity = crate::services::undo_service::ToolCallIdentity {
+        run_id: run_id.to_string(),
+        call_id: call.id.clone(),
+    };
     let executed = await_or_cancel(
-        engine.tool_registry.execute_with_decision(
+        engine.tool_registry.execute_with_decision_meta(
             &call.name,
             &call.arguments,
             tool_ctx.clone(),
             permission,
+            Some(identity),
         ),
         abort,
     )
     .await;
-    let out = match executed {
+    let (out, snapshot_id) = match executed {
         // 取消:回填结构化错误(形状与「执行失败」同款,不终止整轮),真正的收场
         // 由调用侧既有的轮末 / 串行路径 abort 检查负责。这里**不**返回 Err,
         // 否则整轮被判失败会把已完成的工作一起丢掉(口径同步骤预算的「带着产出收尾」)。
@@ -1651,9 +1685,13 @@ async fn execute_call(
                     "code": "tool_cancelled"
                 }),
                 start.elapsed().as_millis() as i64,
+                None,
             );
         }
-        Some(Ok(r)) => serde_json::from_str(&r).unwrap_or(Value::String(r)),
+        Some(Ok(o)) => (
+            serde_json::from_str(&o.output).unwrap_or(Value::String(o.output)),
+            o.snapshot_id,
+        ),
         Some(Err(e)) => {
             let _ = send_event(
                 step_evt(
@@ -1667,10 +1705,10 @@ async fn execute_call(
                 flag,
             )
             .await;
-            json!({ "error": e })
+            (json!({ "error": e }), None)
         }
     };
-    (out, start.elapsed().as_millis() as i64)
+    (out, start.elapsed().as_millis() as i64, snapshot_id)
 }
 
 // ===== 非流式静默生成(自 engine/mod.rs 拆分迁入,纯代码移动,逻辑不变)=====
