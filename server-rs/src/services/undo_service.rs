@@ -141,6 +141,12 @@ impl UndoService {
     /// 失败,返回 [`RESTORE_BUSY_MESSAGE`])。双侧都是 try 语义,不排队、不等待。
     pub fn session_lock(&self, session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
         let mut map = self.session_locks.lock().unwrap_or_else(|e| e.into_inner());
+        // 机会性回收(codex 复审二轮 P2):条目只随时间增长——超过阈值时清掉「仅剩
+        // map 自己持有(strong_count==1)」的条目;被生成/恢复持有的锁 strong_count≥2,
+        // 不会被误清。回收不影响功能:同 id 再取即新建。
+        if map.len() > 64 {
+            map.retain(|_, l| Arc::strong_count(l) > 1);
+        }
         map.entry(session_id.to_string())
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone()
@@ -878,38 +884,47 @@ fn precheck_payload(snapshot_id: &str, payload_raw: &str) -> Result<Value, Strin
                 .and_then(|v| v.as_array())
                 .ok_or_else(|| format!("快照 {snapshot_id} 缺 bubbles 数组"))?;
             for row in bubbles {
-                row.get("id")
+                let rid = row
+                    .get("id")
                     .and_then(|v| v.as_i64())
                     .ok_or_else(|| format!("快照 {snapshot_id} 气泡记录缺 id"))?;
-                // codex 复审 P1-3:before 结构必须可判定——对象(含字符串 content)
-                // 或 null;类型不明时 apply 侧会按「整行插回/覆盖」处理,静默写坏数据。
+                // codex 复审 P1-3(二轮加严):before 的读取面与 restore_bubble_row 一一
+                // 对应——缺字段会走「默认值」静默改写(缺 content 写空串、缺 extra 写
+                // {}),before.id 与外层 id 不一致会把内容覆写到别的消息行,都必须拒绝。
                 match row.get("before") {
                     Some(Value::Null) => {}
                     Some(Value::Object(o)) => {
                         if o.get("content").and_then(|v| v.as_str()).is_none() {
                             return Err(format!(
-                                "快照 {snapshot_id} 气泡 #{} 的 before.content 缺失或非字符串",
-                                row["id"]
+                                "快照 {snapshot_id} 气泡 #{rid} 的 before.content 缺失或非字符串"
                             ));
                         }
-                        if o.get("extra")
-                            .is_some_and(|e| !e.is_object() && !e.is_null())
-                        {
+                        if o.get("role").and_then(|v| v.as_str()).is_none() {
                             return Err(format!(
-                                "快照 {snapshot_id} 气泡 #{} 的 before.extra 类型非法(应为对象或 null)",
-                                row["id"]
+                                "快照 {snapshot_id} 气泡 #{rid} 的 before.role 缺失或非字符串"
                             ));
                         }
-                        if o.get("id").and_then(|v| v.as_i64()).is_none() {
+                        if o.get("created_at").and_then(|v| v.as_str()).is_none() {
                             return Err(format!(
-                                "快照 {snapshot_id} 气泡记录 before.id 缺失或非整数"
+                                "快照 {snapshot_id} 气泡 #{rid} 的 before.created_at 缺失或非字符串"
+                            ));
+                        }
+                        // extra 类型不设限(历史导入可能存非对象 JSON,原样回写不失真),
+                        // 但必须**在场**——缺席会被 restore 写成 "{}"。
+                        if o.get("extra").is_none() {
+                            return Err(format!(
+                                "快照 {snapshot_id} 气泡 #{rid} 的 before.extra 缺失"
+                            ));
+                        }
+                        if o.get("id").and_then(|v| v.as_i64()) != Some(rid) {
+                            return Err(format!(
+                                "快照 {snapshot_id} 气泡 #{rid} 的 before.id 与外层 id 不一致"
                             ));
                         }
                     }
                     _ => {
                         return Err(format!(
-                            "快照 {snapshot_id} 气泡 #{} 的 before 缺失或类型非法(应为对象或 null)",
-                            row["id"]
+                            "快照 {snapshot_id} 气泡 #{rid} 的 before 缺失或类型非法(应为对象或 null)"
                         ));
                     }
                 }
@@ -997,4 +1012,137 @@ fn truncate_chars(s: &str, max: usize) -> String {
     }
     let head: String = s.chars().take(max).collect();
     format!("{head}…")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils::test_support::TempDataDir;
+
+    /// 最小装配:临时库 + 角色/会话行 + 一条 vars 快照(不依赖 HTTP 与真实角色文件)
+    fn build_service(dir: &TempDataDir) -> (Arc<Db>, Arc<UndoService>, String) {
+        let db = Arc::new(Db::open(&dir.join("kedai.db"), dir.path()).expect("打开测试库失败"));
+        {
+            let conn = db.write();
+            conn.execute(
+                "INSERT INTO characters(id, name, chara_name, file_path, data_raw, created_at) VALUES ('c1', '测试', '测试', '', '{}', 't')",
+                [],
+            )
+            .expect("插角色行失败");
+        }
+        let sessions = Arc::new(SessionService::new(db.clone()));
+        let sid = sessions
+            .create("c1", Some("锁测试"))
+            .expect("建会话失败")
+            .id;
+        let memory = Arc::new(MemoryService::new(db.clone()));
+        let settings = Arc::new(Mutex::new(RuntimeSettings::from_config(
+            &crate::config::test_config(),
+        )));
+        let svc = Arc::new(UndoService::new(
+            db.clone(),
+            sessions,
+            memory,
+            settings,
+            dir.path().to_path_buf(),
+        ));
+        {
+            let conn = db.write();
+            conn.execute(
+                "INSERT INTO undo_snapshots (id, session_id, tool_name, label, payload, created_at, seq) VALUES ('snap-busy', ?1, 'update_variables', '更新变量树', '{\"kind\":\"vars\",\"before\":\"{}\"}', ?2, 1)",
+                params![sid, now_iso()],
+            )
+            .expect("插快照行失败");
+        }
+        (db, svc, sid)
+    }
+
+    /// codex 复审 P1-1(确定性证据):生成侧持有每会话锁期间,restore 必须拒绝(busy);
+    /// 释放后同一快照可正常恢复——证明「生成↔回退」互斥锁真实生效,而非仅 API 预检形态。
+    #[test]
+    fn restore_rejects_while_session_lock_held() {
+        let dir = TempDataDir::new("undo-session-lock");
+        let (_db, svc, sid) = build_service(&dir);
+        // 模拟生成侧持锁(与 /api/chat/send 的 try_lock_owned 是同一把锁)
+        let lock = svc.session_lock(&sid);
+        let guard = lock.try_lock().expect("空闲锁应可获取");
+        let err = svc.restore("snap-busy").expect_err("持锁期间应拒绝恢复");
+        assert_eq!(err, RESTORE_BUSY_MESSAGE);
+        drop(guard);
+        let receipt = svc
+            .restore("snap-busy")
+            .expect("释放后应可恢复")
+            .expect("快照应存在");
+        assert_eq!(receipt.restored_count, 1);
+    }
+
+    /// codex 复审二轮 P2:锁表机会性回收——空闲条目(仅 map 持有)在超阈值时被清,
+    /// 被持有的锁不受影响;回收后同 id 再取即新建,功能不破坏。
+    #[test]
+    fn session_lock_prunes_idle_entries() {
+        let dir = TempDataDir::new("undo-lock-prune");
+        let (_db, svc, _sid) = build_service(&dir);
+        let idle = svc.session_lock("gc-idle");
+        let idle_weak = Arc::downgrade(&idle);
+        drop(idle); // 只剩 map 持有 → 可回收
+        let held = svc.session_lock("gc-held");
+        let held_guard = held.clone().try_lock_owned().expect("空闲锁应可获取");
+        // 灌到超阈值,再取一把触发回收
+        for i in 0..70 {
+            let _ = svc.session_lock(&format!("gc-fill-{i}"));
+        }
+        let _trigger = svc.session_lock("gc-trigger");
+        assert!(
+            idle_weak.upgrade().is_none(),
+            "空闲条目应被回收(map 不再持有)"
+        );
+        assert!(held.try_lock().is_err(), "被持有的锁不得被误清(仍然锁定中)");
+        drop(held_guard);
+        assert!(held.try_lock().is_ok(), "释放后同 id 锁应可正常使用");
+    }
+
+    /// codex 复审二轮 P1-3 残留:replace.bubbles 的 before 缺字段 / before.id 与
+    /// 外层不一致 必须被预检拒绝(零改动)——apply 侧会拿默认值静默改写消息行。
+    #[test]
+    fn precheck_rejects_tampered_bubble_before() {
+        let dir = TempDataDir::new("undo-bubble-precheck");
+        let (db, svc, sid) = build_service(&dir);
+        let cases: [(&str, Value); 3] = [
+            (
+                "缺 extra",
+                json!({"kind":"replace","files":[],"bubbles":[{"id":10,"before":{"id":10,"role":"assistant","content":"x","created_at":"t"}}]}),
+            ),
+            (
+                "before.id 与外层不一致",
+                json!({"kind":"replace","files":[],"bubbles":[{"id":10,"before":{"id":11,"role":"assistant","content":"x","extra":{},"created_at":"t"}}]}),
+            ),
+            (
+                "缺 role",
+                json!({"kind":"replace","files":[],"bubbles":[{"id":10,"before":{"id":10,"content":"x","extra":{},"created_at":"t"}}]}),
+            ),
+        ];
+        for (i, (tag, payload)) in cases.iter().enumerate() {
+            let snap_id = format!("snap-bad-bubble-{i}");
+            {
+                let conn = db.write();
+                conn.execute(
+                    "INSERT INTO undo_snapshots (id, session_id, tool_name, label, payload, created_at, seq) VALUES (?1, ?2, 'replace', '修改气泡', ?3, ?4, ?5)",
+                    params![snap_id, sid, payload.to_string(), now_iso(), 100 + i as i64],
+                )
+                .expect("插快照行失败");
+            }
+            let err = svc
+                .restore(&snap_id)
+                .expect_err(&format!("{tag} 应被预检拒绝"));
+            assert!(
+                err.contains("预检未通过"),
+                "{tag} 的错误应说明预检拒绝: {err}"
+            );
+            // 零删除:该快照仍在
+            assert!(
+                svc.session_of(&snap_id).is_some(),
+                "{tag}: 预检拒绝不得删除快照"
+            );
+        }
+    }
 }

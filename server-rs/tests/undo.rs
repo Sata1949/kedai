@@ -706,18 +706,20 @@ async fn snapshot_binds_to_tool_call_event_and_trace() {
             .unwrap_or(false),
         "快照列表应带 call_id 身份: {snaps:?}"
     );
-    // SSE 工具结果事件携带同一快照 id(加性字段)
-    assert!(
-        sse.contains(&format!("\"snapshot_id\":\"{snap_id}\"")),
-        "ToolResult 事件应携带快照 id {snap_id}: {sse}"
-    );
-    // codex 复审 P2-2:SSE 的 call_id 与快照行 call_id 必须同源(mock 的调用 id
-    // 形如 mock-call-k;此处不硬编码序号,只做两侧一致性)
+    // codex 复审二轮:改为解析**同一个 tool_result 事件**再做两侧断言——
+    // 分离的 String::contains 无法排除「两个字段落在不同事件」的假绿。
+    let result_ev = sse
+        .split('\n')
+        .filter_map(|line| line.trim().strip_prefix("data: "))
+        .filter_map(|json| serde_json::from_str::<Value>(json).ok())
+        .find(|ev| ev["type"] == json!("tool_result") && ev["snapshot_id"] == json!(snap_id))
+        .expect("应存在携带绑定快照 id 的 tool_result 事件");
     let snap_call_id = snaps[0]["call_id"].as_str().unwrap_or_default();
     assert!(!snap_call_id.is_empty(), "快照行应带 call_id: {snaps:?}");
-    assert!(
-        sse.contains(&format!("\"call_id\":\"{snap_call_id}\"")),
-        "SSE 的 call_id 应与快照行一致({snap_call_id}): {sse}"
+    assert_eq!(
+        result_ev["call_id"],
+        json!(snap_call_id),
+        "同一事件内 snapshot_id 与 call_id 必须同源(与快照行一致)"
     );
     // 历史重载:tool_calls 落库同一 id
     let (status, trace) = send_json(
