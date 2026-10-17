@@ -443,6 +443,22 @@ impl MemoryService {
         kind: &str,
         content: &str,
     ) -> Result<MemoryEntry, String> {
+        self.insert_with_status(character_id, source_session_id, kind, content)
+            .map(|(entry, _)| entry)
+    }
+
+    /// 同 [`Self::insert`],额外返回是否**新建**了行。
+    ///
+    /// `created=false` 表示命中去重、只更新了使用计数——没有新行可供回退删除。
+    /// `memory_write` 把它写进工具输出,回退快照据此决定是否产快照/绑定 inserted_id,
+    /// 不再用 `MAX(id)` 猜「哪一行是刚插入的」(并发窗口或读失败会绑错行)。
+    pub fn insert_with_status(
+        &self,
+        character_id: &str,
+        source_session_id: Option<&str>,
+        kind: &str,
+        content: &str,
+    ) -> Result<(MemoryEntry, bool), String> {
         let content = content.trim();
         if content.is_empty() {
             return Err("记忆内容不能为空".into());
@@ -455,9 +471,10 @@ impl MemoryService {
         }
         if let Some(existing) = self.find_exact(character_id, content) {
             self.touch(&[existing.id])?;
-            return self
+            let entry = self
                 .get(existing.id)
-                .ok_or_else(|| "记忆去重后读取失败".into());
+                .ok_or_else(|| "记忆去重后读取失败".to_string())?;
+            return Ok((entry, false));
         }
         let now = now_iso();
         let id = {
@@ -473,7 +490,10 @@ impl MemoryService {
         };
         // 锁已释放再淘汰(evict 内部会取写锁;std::sync::Mutex 不可重入)
         self.evict_over_capacity(character_id)?;
-        self.get(id).ok_or_else(|| "写入记忆后读取失败".into())
+        let entry = self
+            .get(id)
+            .ok_or_else(|| "写入记忆后读取失败".to_string())?;
+        Ok((entry, true))
     }
 
     /// 精确去重查找:同角色 + content 完全相同(trim 后)的最早一条
@@ -592,10 +612,16 @@ impl MemoryService {
     }
 
     pub fn delete(&self, id: i64) -> bool {
+        self.try_delete(id).unwrap_or(false)
+    }
+
+    /// 严格删除:SQL 失败上抛(`Ok(false)` = 行本来就不存在)。
+    /// 回退等「删除必须被证实」的调用方用它,避免把写库失败当成幂等成功。
+    pub fn try_delete(&self, id: i64) -> Result<bool, String> {
         let conn = self.db.write();
         conn.execute("DELETE FROM memory_entries WHERE id = ?1", params![id])
             .map(|n| n > 0)
-            .unwrap_or(false)
+            .map_err(|e| format!("删除记忆 #{id} 失败: {e}"))
     }
 
     /// 注入后衰减回写:批量 usage_count+1 与 last_usage,不改 content 与 selected,

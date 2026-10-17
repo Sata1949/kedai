@@ -576,6 +576,31 @@ impl SessionService {
         .unwrap_or(false)
     }
 
+    /// 严格删除消息:SQL 失败上抛(`Ok(false)` = 行本来就不存在)。
+    /// 回退逆操作必须用这条路径——宽松版吞错会把「删除失败」当成幂等成功,
+    /// 随后清理快照,用户看到回退成功但消息仍在。
+    pub fn try_delete_message(&self, session_id: &str, id: i64) -> Result<bool, String> {
+        let mut conn = self.db.write();
+        // 作用域变量清理与消息删除同事务:删除失败回滚,不留下「变量没了、消息还在」的半写状态
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("开启消息删除事务失败: {e}"))?;
+        tx.execute(
+            &message_scope_cleanup_sql("session_id = ?1 AND id = ?2"),
+            params![session_id, id],
+        )
+        .map_err(|e| format!("清理消息作用域变量失败: {e}"))?;
+        let n = tx
+            .execute(
+                "DELETE FROM messages WHERE session_id = ?1 AND id = ?2",
+                params![session_id, id],
+            )
+            .map_err(|e| format!("删除消息 #{id} 失败: {e}"))?;
+        tx.commit()
+            .map_err(|e| format!("提交消息删除事务失败: {e}"))?;
+        Ok(n > 0)
+    }
+
     /// 截断:删除该会话中 id 大于 anchor_id 的全部消息(anchor 本身保留)。
     /// 用于「编辑用户消息后重发」:保留被编辑消息、丢弃其后的所有上下文。
     pub fn truncate_messages_after(&self, session_id: &str, anchor_id: i64) -> usize {
@@ -735,20 +760,38 @@ impl SessionService {
         &self,
         session_id: &str,
     ) -> crate::parsing::assistant::AssistantVars {
-        let Ok(conn) = self.db.read() else {
-            return crate::parsing::assistant::AssistantVars::new();
-        };
+        match self.try_load_assistant_vars(session_id) {
+            Ok(vars) => vars,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    session_id,
+                    "读取会话变量树失败,按空树继续"
+                );
+                crate::parsing::assistant::AssistantVars::new()
+            }
+        }
+    }
+
+    /// 严格读取会话变量树:读池/查询失败返回 Err(无记录 = 空树,仍是 Ok)。
+    /// 回退快照的变量树基线必须用它——读失败若退化成空树,回退会把整棵树写空。
+    pub fn try_load_assistant_vars(
+        &self,
+        session_id: &str,
+    ) -> Result<crate::parsing::assistant::AssistantVars, String> {
+        let conn = self.db.read().map_err(|e| format!("读取变量树失败: {e}"))?;
         let raw: Option<String> = conn
             .query_row(
                 "SELECT data_raw FROM session_assistant_vars WHERE session_id = ?1",
                 params![session_id],
                 |row| row.get(0),
             )
-            .ok();
-        match raw {
+            .optional()
+            .map_err(|e| format!("读取变量树失败: {e}"))?;
+        Ok(match raw {
             Some(s) => crate::parsing::assistant::AssistantVars::from_json(&s),
             None => crate::parsing::assistant::AssistantVars::new(),
-        }
+        })
     }
 
     /// 保存会话酒馆助手变量树(整树覆写)。

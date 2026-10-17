@@ -889,18 +889,18 @@ pub fn ensure_undo_snapshots_restore_columns(conn: &Connection) -> Result<(), St
     if existing.is_empty() {
         return Ok(());
     }
-    // 已升级过的库不再重复回填(全表扫描只在首次迁移发生)
-    let had_seq = existing.iter().any(|c| c == "seq");
     add_column_if_missing(conn, "undo_snapshots", "seq", "INTEGER")?;
     add_column_if_missing(conn, "undo_snapshots", "call_id", "TEXT")?;
     add_column_if_missing(conn, "undo_snapshots", "run_id", "TEXT")?;
-    if !had_seq {
-        conn.execute(
-            "UPDATE undo_snapshots SET seq = rowid WHERE seq IS NULL",
-            [],
-        )
-        .map_err(|e| format!("回填 undo_snapshots.seq 失败: {e}"))?;
-    }
+    // 每次升级都回填 NULL seq,而不是只在「首次补列」时做:用户退回旧版 exe
+    // (不认识 seq 列)写入的新行会是 NULL,再升级时 had_seq 已为真——只做一次
+    // 回填会让这些行永久 NULL,`COALESCE(seq,rowid)` 把两个 id 域混在一起排序。
+    // UPDATE 带 `WHERE seq IS NULL`,已回填的行不重写;空表/全非空时是零行更新。
+    conn.execute(
+        "UPDATE undo_snapshots SET seq = rowid WHERE seq IS NULL",
+        [],
+    )
+    .map_err(|e| format!("回填 undo_snapshots.seq 失败: {e}"))?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_undo_snapshots_session_seq \
          ON undo_snapshots(session_id, seq)",

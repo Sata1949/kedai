@@ -75,8 +75,12 @@ pub fn register_memory_tools(
                 if fact.trim().is_empty() {
                     return Err("缺少 fact 参数".into());
                 }
-                let entry =
-                    memory_write.insert(&ctx.character_id, Some(&ctx.session_id), "tool", &fact)?;
+                let (entry, created) = memory_write.insert_with_status(
+                    &ctx.character_id,
+                    Some(&ctx.session_id),
+                    "tool",
+                    &fact,
+                )?;
                 // Phase 3:向量化开启时为工具写入的记忆补向量(失败静默,不阻断工具返回)
                 if let Some(settings) = memory_write.settings_snapshot() {
                     if settings.embedding_enabled {
@@ -99,7 +103,14 @@ pub fn register_memory_tools(
                         }
                     }
                 }
-                Ok(json!({ "ok": true, "stored": fact }).to_string())
+                // id/created 供回退快照精确绑定:去重命中时 created=false(没有新行可回退)。
+                Ok(json!({
+                    "ok": true,
+                    "stored": fact,
+                    "id": entry.id,
+                    "created": created,
+                })
+                .to_string())
             })
         }),
     );
@@ -176,6 +187,17 @@ mod tests {
             .unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["ok"], json!(true));
+        // 回退快照必须绑定真实行 id:工具输出要回传 id 与是否新建(去重命中 created=false)
+        assert!(
+            v["id"].as_i64().is_some(),
+            "memory_write 应回传记忆 id: {v}"
+        );
+        assert_eq!(
+            v["created"],
+            json!(true),
+            "首次写入应标记 created=true: {v}"
+        );
+        let first_id = v["id"].as_i64().unwrap();
         let entries = memory.list("charM");
         assert_eq!(
             entries.len(),
@@ -185,6 +207,26 @@ mod tests {
         assert_eq!(entries[0].kind, "tool");
         assert_eq!(entries[0].content, "用户讨厌香菜");
         assert_eq!(entries[0].source_session_id.as_deref(), Some("sessM"));
+
+        // 同内容再次写入:精确去重命中,不新建行,必须回传同 id + created=false
+        let out_dup = registry
+            .execute_with_decision(
+                "memory_write",
+                r#"{"fact":"用户讨厌香菜"}"#,
+                ctx.clone(),
+                &decision,
+            )
+            .await
+            .unwrap();
+        let v_dup: Value = serde_json::from_str(&out_dup).unwrap();
+        assert_eq!(v_dup["id"].as_i64(), Some(first_id), "去重应回传同一条 id");
+        assert_eq!(
+            v_dup["created"],
+            json!(false),
+            "去重命中应标记 created=false: {v_dup}"
+        );
+        assert_eq!(memory.list("charM").len(), 1, "去重不得新增记忆行");
+
         // 新路径不再写会话消息
         let msgs = sessions.get_messages("sessM");
         assert!(
