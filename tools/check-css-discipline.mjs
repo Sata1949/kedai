@@ -59,15 +59,19 @@ const VERBOSE = process.argv.includes('--verbose');
  * 会话条目行竖排——全部发生在既有 <768px 断点内、无新域。理由:mobile.css 是唯一的移动端适配层
  * (UIP 批起的既定形态),窄屏专用规则无处可去;新增规则仍遵守「不改桌面、不加 !important、
  * 间距走 --space-*」三条既有纪律)。
+ * UIQ-4 变动(2026-10-17):tokens 144→153(新增 --measure-prose/--measure-chat/
+ * --measure-task-result 与焦点环两个令牌,供双主体终稿共用),task 997→1007
+ * (侧栏模式切换 01/02 序号 + 任务历史激活态与搜索框聚焦态)。均为两主体版式服务的
+ * 正常增长,不新增 !important、不引入裸时长;新增规则优先留在 .vue scoped。
  */
 const LINE_BASELINE = {
   'style.css': 49,
-  'styles/tokens.css': 144,
+  'styles/tokens.css': 153,
   'styles/base.css': 122,
-  'styles/shell.css': 832,
+  'styles/shell.css': 827,
   'styles/panels.css': 971,
-  'styles/content.css': 1007,
-  'styles/task.css': 997,
+  'styles/content.css': 997,
+  'styles/task.css': 1007,
   'styles/mobile.css': 464,
 };
 
@@ -77,7 +81,7 @@ const LINE_BASELINE = {
  * + 5 条 prefers-reduced-motion 强制降级(UIP-9 补 delay 归零 +2);新增样式不得引入
  * (用更具体选择器解决)。
  */
-const IMPORTANT_BASELINE = { 'styles/content.css': 12 };
+const IMPORTANT_BASELINE = { 'styles/content.css': 10 };
 /** 组件 scoped(.vue)的 !important 合计基线:当前 0(一旦出现即 FAIL)。 */
 const VUE_IMPORTANT_BASELINE = 0;
 
@@ -89,11 +93,11 @@ const SPACING_BASELINE = {
   'style.css': 0,
   'styles/tokens.css': 0,
   'styles/base.css': 0,
-  'styles/shell.css': 11,
+  'styles/shell.css': 10,
   'styles/panels.css': 7,
   'styles/content.css': 24,
-  'styles/task.css': 15,
-  'styles/mobile.css': 5,
+  'styles/task.css': 14,
+  'styles/mobile.css': 4,
 };
 /** 组件(.vue:scoped 块 + 静态 style 属性)间距裸值合计基线(2026-10-02 收编后实测)。 */
 const VUE_SPACING_BASELINE = 40;

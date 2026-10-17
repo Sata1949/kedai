@@ -375,8 +375,10 @@ watch(
         <span>角色库</span>
       </button>
       <button
-        class="sv-mobile-nav-item"
-        :class="{ active: store.appMode === 'task' }"
+        class="sv-mobile-nav-item sv-mode-nav"
+        :class="{ active: true }"
+        :aria-pressed="true"
+        :title="store.appMode === 'roleplay' ? '当前:角色扮演;点击切到任务' : '当前:任务;点击切到角色扮演'"
         @click="toggleAppMode"
       >
         <svg viewBox="0 0 24 24" aria-hidden="true">

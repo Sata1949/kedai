@@ -5,6 +5,7 @@ import { useAppStore } from '../store';
 import { storeToRefs } from 'pinia';
 import { inTauri, isAndroidTauri } from '../platform';
 import { taskStatusClass as statusClass, taskStatusLabel as statusLabel } from '../taskStatus';
+import { MODE_LABELS } from '../api/labels';
 import { probeWorkspace } from '../api/workspace';
 import { projectHintTitle, projectKindLabel } from '../utils/workspaceProfile';
 import type { WorkspaceProfile } from '../api';
@@ -31,6 +32,16 @@ function pickCharacterFile(): void {
   uploadError.value = '';
   fileInput.value?.click();
 }
+
+/**
+ * 空态「导入角色卡」入口(UIQ-4):ChatWindow 没有文件输入,导入能力只在本组件;
+ * 用一次点击事件复用同一个 file input,不复制导入逻辑,也不新增 store 字段。
+ * 事件由用户点击同步触发,浏览器仍视为用户手势,file picker 可正常打开。
+ */
+function onExternalImportRequest(): void {
+  pickCharacterFile();
+}
+window.addEventListener('kedai:open-character-import', onExternalImportRequest);
 
 function avatarFile(avatarPath: string | null): string {
   if (!avatarPath) return '';
@@ -244,6 +255,15 @@ const wsHintVisible = computed(
   () => store.taskCodingBundleEnabled && !workspacePath.value.trim(),
 );
 
+/** 「执行设置」折叠行摘要:当前模式 + 执行者,让高级项收起时仍可见关键决策。 */
+const taskSettingsSummary = computed(() => {
+  const mode = MODE_LABELS[store.taskRunMode] ?? store.taskRunMode;
+  const executor = executorId.value
+    ? executors.value.find((e) => e.id === executorId.value)?.name ?? '自定义执行者'
+    : '通用执行者';
+  return `${mode} · ${executor}`;
+});
+
 /** 最近工作区(CODE-1;localStorage,去重 + 上限 8 + 最多展示 3 条)。
  *  失效路径不静默删——点了由后端 400 说明原因,与「手填」同一条错误路径。 */
 const WS_RECENT_KEY = 'kedai.taskWorkspace.recent.v1';
@@ -334,7 +354,11 @@ watch(workspacePath, () => {
 });
 
 // 组件卸载时清掉待发定时器(侧栏在模式切换时会重建,不清会留下一个悬空请求)
-onBeforeUnmount(clearWsProbe);
+// 同时摘除跨组件导入事件,避免多个 Sidebar 实例(移动抽屉/桌面)重复响应。
+onBeforeUnmount(() => {
+  clearWsProbe();
+  window.removeEventListener('kedai:open-character-import', onExternalImportRequest);
+});
 
 /** 新建并立即执行 */
 async function createAndRun(): Promise<void> {
@@ -456,14 +480,14 @@ async function removeTask(task: TaskRecord): Promise<void> {
         title="角色扮演模式:与角色进行沉浸式对话与文学创作"
         @click="store.setAppMode('roleplay')"
       >
-        角色扮演
+        <span class="sv-appmode-idx sv-tnum">01</span>角色扮演
       </button>
       <button
         :class="{ active: appMode === 'task' }"
         title="任务模式:下达目标,自动拆解计划并派子智能体执行"
         @click="store.setAppMode('task')"
       >
-        任务
+        <span class="sv-appmode-idx sv-tnum">02</span>任务
       </button>
     </div>
 
@@ -484,9 +508,7 @@ async function removeTask(task: TaskRecord): Promise<void> {
           <div v-if="characters.length === 0" class="sv-empty compact">
             <div class="sv-empty-geo mb10">
               <span class="sq black" />
-              <span class="sq pink" />
-              <span class="sq deep" />
-            <i class="diag" />
+              <i class="diag" />
             </div>
             <p class="sub">暂无角色</p>
             <p class="hint">点击下方「导入角色卡」开始</p>
@@ -521,100 +543,111 @@ async function removeTask(task: TaskRecord): Promise<void> {
              sv-task-scroll(UIP-4):表单+历史合并为单一滚动区,页脚恒固定;
              自定义流程表单超高时不再压住「综合设置」(规则在 styles/task.css)。 -->
         <div v-else key="task" class="sv-task-scroll flex min-h-0 flex-1 flex-col">
-          <!-- 下达目标 -->
+          <!-- 下达目标:首屏主件;执行设置收进 <details>,收起时仍显示当前模式/执行者 -->
           <div class="sv-task-new">
             <div class="sv-task-new-title">下达目标</div>
+            <p class="sv-task-new-lede">写清楚要交付什么；执行设置可稍后改。</p>
             <textarea
               v-model="taskTitle"
-              class="sv-input"
-              rows="3"
+              class="sv-input sv-task-new-input"
+              rows="4"
               placeholder="描述要完成的任务,例如:帮我写一篇 2000 字的科幻短篇并列出大纲…"
               spellcheck="false"
             />
-            <!-- 执行模式(批次 4 六模式;独立子组件,选择持久化在 task store) -->
-            <TaskModeSelect />
-            <!-- 绑定流程(二维批次 5a;仅自定义流程模式可见,空 = 跟随当前流程) -->
-            <TaskFlowSelect />
-            <!-- 逐任务选用连接(B 批 B1;与执行模式无关,故六模式都可见,空 = 跟随设置的默认连接) -->
-            <TaskConnectionSelect />
-            <!-- 执行者(独立执行者库;与角色扮演角色卡解耦,故不列 characters) -->
-            <div class="sv-inp-row">
-              <select v-model="executorId" class="sv-select" title="选择任务执行者">
-                <option value="">执行者:通用执行者</option>
-                <option v-for="e in executors" :key="e.id" :value="e.id">
-                  执行者:{{ e.name }}
-                </option>
-              </select>
-              <button
-                class="sv-btn ghost sv-btn-sm"
-                title="管理执行者(新建/编辑/删除)"
-                @click="store.taskExecutorsOpen = true"
-              >管理</button>
-            </div>
-            <!-- 工作区(CODE-1;可选,空 = 未绑定,任务在草稿目录工作;绑定即冻结) -->
-            <div class="sv-inp-row sv-ws-row">
-              <input
-                v-model="workspacePath"
-                class="sv-input"
-                placeholder="工作区:项目目录绝对路径"
-                title="工作区:项目目录绝对路径(可选);留空 = 未绑定,任务在草稿目录内工作"
-                spellcheck="false"
-                :disabled="creatingTask"
-              />
-              <button
-                v-if="canPickDir"
-                class="sv-btn ghost sv-btn-sm"
-                title="从本机选择项目目录"
-                :disabled="creatingTask"
-                @click="pickWorkspace"
-              >选择…</button>
-              <button
-                v-if="workspacePath"
-                class="sv-btn ghost sv-btn-sm"
-                title="清空工作区(将创建为未绑定任务)"
-                :disabled="creatingTask"
-                @click="workspacePath = ''"
-              >清空</button>
-            </div>
-            <div v-if="recentWorkspacesShown.length > 0 && !workspacePath" class="sv-ws-recent">
-              <span class="sv-note">最近:</span>
-              <button
-                v-for="p in recentWorkspacesShown"
-                :key="p"
-                class="sv-ws-recent-item"
-                :title="p"
-                @click="workspacePath = p"
-              >{{ p }}</button>
-            </div>
-            <!-- 工作区画像(CODE-4):探测到项目类型才渲染;未命中不占位(不把「没有」渲染成噪音) -->
-            <div
-              v-if="wsProfile && wsProfile.detected.length > 0"
-              class="sv-ws-profile"
-            >
-              <span
-                v-for="h in wsProfile.detected"
-                :key="`${h.kind}:${h.marker}`"
-                class="sv-tag sv-tag-muted"
-                :title="projectHintTitle(h.kind, h.marker, h.suggested_command)"
-              >{{ projectKindLabel(h.kind) }} · {{ h.suggested_command }}</span>
-              <span
-                v-if="wsProfile.truncated"
-                class="sv-note"
-                title="子目录过多,仅扫描了前若干个子目录——结果可能不全"
-              >(未扫全)</span>
-            </div>
-            <!-- 探测失败:把后端中文原因原样上屏(与创建时的 400 同一套文案,前端不另造) -->
-            <p v-else-if="wsProbeError" class="sv-note sv-ws-hint">{{ wsProbeError }}</p>
-            <p v-if="wsHintVisible" class="sv-note sv-ws-hint">
-              编码能力包已启用:未绑定工作区的任务将在任务草稿目录内工作。
-            </p>
             <button
-              class="sv-btn primary"
+              class="sv-btn primary sv-task-new-submit"
               :disabled="creatingTask || !taskTitle.trim()"
               @click="createAndRun"
             >
               {{ creatingTask ? '创建中…' : '▶ 创建并执行' }}
             </button>
+
+            <details class="sv-task-advanced">
+              <summary class="sv-task-advanced-summary">
+                <span class="sv-task-advanced-label">执行设置</span>
+                <span class="sv-task-advanced-state">{{ taskSettingsSummary }}</span>
+                <span class="sv-task-advanced-caret" aria-hidden="true">▾</span>
+              </summary>
+              <div class="sv-task-advanced-body">
+                <!-- 执行模式(批次 4 六模式;独立子组件,选择持久化在 task store) -->
+                <TaskModeSelect />
+                <!-- 绑定流程(二维批次 5a;仅自定义流程模式可见,空 = 跟随当前流程) -->
+                <TaskFlowSelect />
+                <!-- 逐任务选用连接(B 批 B1;与执行模式无关,故六模式都可见,空 = 跟随设置的默认连接) -->
+                <TaskConnectionSelect />
+                <!-- 执行者(独立执行者库;与角色扮演角色卡解耦,故不列 characters) -->
+                <div class="sv-inp-row">
+                  <select v-model="executorId" class="sv-select" title="选择任务执行者">
+                    <option value="">执行者:通用执行者</option>
+                    <option v-for="e in executors" :key="e.id" :value="e.id">
+                      执行者:{{ e.name }}
+                    </option>
+                  </select>
+                  <button
+                    class="sv-btn ghost sv-btn-sm"
+                    title="管理执行者(新建/编辑/删除)"
+                    @click="store.taskExecutorsOpen = true"
+                  >管理</button>
+                </div>
+                <!-- 工作区(CODE-1;可选,空 = 未绑定,任务在草稿目录工作;绑定即冻结) -->
+                <div class="sv-inp-row sv-ws-row">
+                  <input
+                    v-model="workspacePath"
+                    class="sv-input"
+                    placeholder="工作区:项目目录绝对路径"
+                    title="工作区:项目目录绝对路径(可选);留空 = 未绑定,任务在草稿目录内工作"
+                    spellcheck="false"
+                    :disabled="creatingTask"
+                  />
+                  <button
+                    v-if="canPickDir"
+                    class="sv-btn ghost sv-btn-sm"
+                    title="从本机选择项目目录"
+                    :disabled="creatingTask"
+                    @click="pickWorkspace"
+                  >选择…</button>
+                  <button
+                    v-if="workspacePath"
+                    class="sv-btn ghost sv-btn-sm"
+                    title="清空工作区(将创建为未绑定任务)"
+                    :disabled="creatingTask"
+                    @click="workspacePath = ''"
+                  >清空</button>
+                </div>
+                <div v-if="recentWorkspacesShown.length > 0 && !workspacePath" class="sv-ws-recent">
+                  <span class="sv-note">最近:</span>
+                  <button
+                    v-for="p in recentWorkspacesShown"
+                    :key="p"
+                    class="sv-ws-recent-item"
+                    :title="p"
+                    @click="workspacePath = p"
+                  >{{ p }}</button>
+                </div>
+                <!-- 工作区画像(CODE-4):探测到项目类型才渲染;未命中不占位(不把「没有」渲染成噪音) -->
+                <div
+                  v-if="wsProfile && wsProfile.detected.length > 0"
+                  class="sv-ws-profile"
+                >
+                  <span
+                    v-for="h in wsProfile.detected"
+                    :key="`${h.kind}:${h.marker}`"
+                    class="sv-tag sv-tag-muted"
+                    :title="projectHintTitle(h.kind, h.marker, h.suggested_command)"
+                  >{{ projectKindLabel(h.kind) }} · {{ h.suggested_command }}</span>
+                  <span
+                    v-if="wsProfile.truncated"
+                    class="sv-note"
+                    title="子目录过多,仅扫描了前若干个子目录——结果可能不全"
+                  >(未扫全)</span>
+                </div>
+                <!-- 探测失败:把后端中文原因原样上屏(与创建时的 400 同一套文案,前端不另造) -->
+                <p v-else-if="wsProbeError" class="sv-note sv-ws-hint">{{ wsProbeError }}</p>
+                <p v-if="wsHintVisible" class="sv-note sv-ws-hint">
+                  编码能力包已启用:未绑定工作区的任务将在任务草稿目录内工作。
+                </p>
+              </div>
+            </details>
           </div>
 
           <!-- 任务历史 -->
@@ -634,12 +667,13 @@ async function removeTask(task: TaskRecord): Promise<void> {
             </button>
             <div v-if="tasks.length === 0" class="sv-empty-geo sm mb10">
               <span class="sq black" />
-              <span class="sq pink" />
-              <span class="sq deep" />
               <span class="diag" />
             </div>
             <p v-if="tasks.length === 0" class="sv-task-list-empty">
               暂无任务,输入目标创建第一个任务
+            </p>
+            <p v-if="tasks.length === 0" class="sv-task-list-empty-hint">
+              01 写目标 · 02 展开执行设置 · 03 创建并执行
             </p>
           </div>
         </div>
@@ -862,5 +896,93 @@ async function removeTask(task: TaskRecord): Promise<void> {
   flex-wrap: wrap;
   gap: var(--space-1-5);
   margin-top: var(--space-1-5);
+}
+
+/* ===== UIQ-4:任务下达区(首屏主件) ===== */
+.sv-task-new { padding: var(--space-4) 0 var(--space-3); }
+.sv-task-new-title {
+  font-size: var(--text-2xs);
+  letter-spacing: 0.16em;
+}
+.sv-task-new-title::before { width: 8px; height: 8px; }
+.sv-task-new-lede {
+  margin: 0 0 var(--space-2-5);
+  font-size: var(--text-xs);
+  line-height: var(--lh-body);
+  color: var(--sv-ink-faint);
+}
+.sv-task-new-input {
+  width: 100%;
+  min-height: 96px;
+  resize: vertical;
+  border: var(--bw) solid var(--sv-ink);
+  background: var(--sv-white);
+  padding: var(--space-3);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  line-height: var(--lh-body);
+  outline: none;
+}
+.sv-task-new-input:focus {
+  border-color: var(--sv-ink);
+  border-top: 3px solid var(--sv-red);
+}
+.sv-task-new-submit {
+  width: 100%;
+  min-height: 44px;
+  margin-top: var(--space-2-5);
+}
+.sv-task-advanced {
+  margin-top: var(--space-3);
+  border-top: 1px solid var(--sv-line);
+}
+.sv-task-advanced-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--control-h-sm);
+  padding: var(--space-2) 0;
+  cursor: pointer;
+  list-style: none;
+  font-size: var(--text-xs);
+  color: var(--sv-ink);
+}
+.sv-task-advanced-summary::-webkit-details-marker { display: none; }
+.sv-task-advanced-label { flex: none; font-weight: 800; letter-spacing: 0.08em; }
+.sv-task-advanced-state {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--sv-ink-faint);
+}
+.sv-task-advanced-caret {
+  flex: none;
+  color: var(--sv-ink-faint);
+  transition: transform var(--dur-fast) var(--ease-standard);
+}
+.sv-task-advanced[open] .sv-task-advanced-caret { transform: rotate(180deg); }
+.sv-task-advanced-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-1) 0 var(--space-2-5);
+}
+.sv-ws-recent-item { font-size: var(--text-xs); }
+.sv-task-list-empty,
+.sv-task-list-empty-hint {
+  text-align: center;
+}
+.sv-task-list-empty-hint {
+  margin: var(--space-1) 0 0;
+  font-size: var(--text-xs);
+  line-height: var(--lh-body);
+  color: var(--sv-ink-faint);
+}
+.sv-task-list .sv-empty-geo.sm {
+  justify-content: center;
+  margin-left: auto;
+  margin-right: auto;
 }
 </style>

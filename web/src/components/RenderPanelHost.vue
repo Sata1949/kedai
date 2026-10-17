@@ -16,6 +16,13 @@ import { buildRenderDocument, RENDER_PANEL_CHANNEL } from '../renderPanel';
 const el = ref<HTMLElement | null>(null);
 
 /**
+ * 透明画布:UIQ-4 环境层需要看到 stage 背后的 WebGL 背景。
+ * 只让出 background-color,保留顶端红黑段带(background-image);
+ * 不传时行为与旧版逐字一致。
+ */
+withDefaults(defineProps<{ transparent?: boolean }>(), { transparent: false });
+
+/**
  * 渲染面板水合:面板占位 HTML 随消息渲染注入(渲染缓存见 ChatMessageItem),
  * 本函数扫描画布内未投递的面板 iframe 并投递面板 HTML(仿 hydrateRemoteResources
  * 的 ready/boot 双向认证 + 超时兜底;面板 HTML 直接内嵌于 data-kd-render-code,
@@ -118,7 +125,19 @@ defineExpose({ el, hydrate });
 
 <template>
   <!-- 消息画布(原 ChatWindow 的 scrollArea 容器;DOM 类名与结构语义不变) -->
-  <div ref="el" class="sv-canvas" @click="onToggle">
+  <div
+    ref="el"
+    class="sv-canvas"
+    :class="{ 'sv-canvas--ambient': transparent }"
+    @click="onToggle"
+  >
     <slot />
   </div>
 </template>
+
+<style scoped>
+/* 环境层可见时只让出底色;顶层段带仍由全局 .sv-canvas 的 background-image 提供。 */
+.sv-canvas--ambient {
+  background-color: transparent;
+}
+</style>

@@ -141,4 +141,13 @@
 
   /* 黑底上的次级文字(2026-10-02 UIP-10):替代「原色 + opacity」写法,保证实色对比度 */
   --sv-on-ink-soft: rgba(255, 255, 255, 0.72);
+
+  /* ===== UIQ-4 终稿:阅读宽度与焦点 ===== */
+  /* 中文正文一行约 42 个汉字;聊天列 820px(含头像/间距),任务成果略宽 */
+  --measure-prose: 42em;
+  --measure-chat: 820px;
+  --measure-task-result: 46em;
+  /* 唯一焦点环:2px 黑 + 2px 偏移;粉/白/黑底上均可见 */
+  --focus-ring: 2px solid var(--sv-ink);
+  --focus-offset: 2px;
 }

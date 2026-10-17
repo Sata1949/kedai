@@ -82,6 +82,9 @@ const PAIRS: Array<[string, string]> = [
   ['--sv-ink', '--sv-green'], // MemoryPanel kind=manual
   ['--sv-pink-dark', '--sv-white'], // MemoryPanel 置顶标记(擦线 4.51,只需不退)
   ['--sv-on-ink-soft', '--sv-ink'], // 黑底次级文字(半透明合成后)
+  ['--sv-ink-dim', '--sv-pink-light'], // UIQ-4:禁用发送键/次要按钮落回浅粉面
+  ['--sv-ink', '--sv-pink-light'], // UIQ-4:角色列表激活行(粉平面 + 墨字)
+  ['--sv-red-deep', '--sv-white'], // UIQ-4:正文链接(海报红的可读变体)
 ];
 
 describe('UIP-10 令牌级小字对比度契约(WCAG AA ≥ 4.5:1)', () => {

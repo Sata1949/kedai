@@ -443,6 +443,50 @@ async function onModelChange(e: Event): Promise<void> {
 </template>
 
 <style scoped>
+/* ===== 输入卡(UIQ-4):白色 composer + 2px 黑框;聚焦时顶线转红 =====
+   输入区整体仍是粉色平面(surface),但真正的输入面是一张白卡;
+   这样文字、光标、发送键都在同一张「纸」上,不再与粉色底混层。 */
+.sv-inputbox {
+  align-items: flex-end;
+  gap: var(--space-3);
+  position: relative;
+}
+.sv-inputbox textarea {
+  border: var(--bw) solid var(--sv-ink);
+  background: var(--sv-white);
+  line-height: var(--lh-ui);
+  padding: var(--space-3-5) var(--space-4);
+  transition: border-color var(--dur-fast) var(--ease-standard),
+    box-shadow var(--dur-fast) var(--ease-standard);
+}
+.sv-inputbox textarea:focus,
+.sv-inputbox textarea:focus-visible {
+  border-color: var(--sv-ink);
+  border-top: 3px solid var(--sv-red);
+  box-shadow: var(--shadow-pink);
+  outline: none;
+}
+.sv-inputbox textarea::placeholder {
+  color: var(--sv-ink-faint);
+}
+/* 发送键:黑方块;hover 抬 2px + 硬影,active 压回纸面 */
+.sv-btn-send {
+  box-shadow: var(--shadow-card);
+  transition: transform var(--dur-fast) var(--ease-standard),
+    box-shadow var(--dur-fast) var(--ease-standard),
+    background var(--dur-fast) var(--ease-standard);
+}
+.sv-btn-send:hover:not(:disabled) {
+  background: var(--sv-ink);
+  border-color: var(--sv-ink);
+  box-shadow: var(--shadow-hover);
+  transform: translate(-2px, -2px);
+}
+.sv-btn-send:active:not(:disabled) {
+  box-shadow: var(--shadow-press);
+  transform: translate(2px, 2px);
+}
+
 /* 模型选择:去原生外观 + 自绘直角黑三角下拉箭头。
    2026-09-27 UIFIX-2:本节 3 条规则原在 styles/task.css(含末尾的 flex/width 工具规则)与
    styles/mobile.css(窄屏限宽),按 MAINTENANCE D-5「改到谁拆谁」随本次修复一并搬进 scoped
@@ -452,7 +496,7 @@ async function onModelChange(e: Event): Promise<void> {
 .sv-model-select {
   -webkit-appearance: none;
   appearance: none;
-  border: var(--bw) solid var(--sv-ink);
+  border: var(--bw-thin) solid var(--sv-ink);
   background: var(--sv-white);
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8'%3E%3Cpolygon points='0,0 8,0 4,8' fill='%23141414'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
@@ -464,7 +508,10 @@ async function onModelChange(e: Event): Promise<void> {
   cursor: pointer;
   flex: none; /* 工具栏内不拉伸 */
   width: auto;
-  min-width: 120px;
+  min-width: 132px;
+}
+.sv-model-select:focus-visible {
+  border-color: var(--sv-red);
 }
 
 /* 窄屏(<768px):工具栏拥挤,模型名限宽 */

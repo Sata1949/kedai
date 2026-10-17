@@ -4,7 +4,7 @@
 // 组件 onMounted 会 installMvuGlobals + 挂 message 监听,故需 jsdom 环境;
 // 脚本沙箱相关模块整体 mock(不启 iframe)。
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { mount } from '@vue/test-utils';
+import { flushPromises, mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
 
 const memStorage = new Map<string, string>();
@@ -54,6 +54,17 @@ describe('ChatWindow 组件(阶段 A 补测)', () => {
     expect(wrapper.find('.sv-start').exists()).toBe(true);
     expect(wrapper.text()).toContain('先选一个角色');
     expect(wrapper.text()).toContain('导入角色卡');
+  });
+
+  it('无消息时切会话不吸底,空态从顶部开始(移动端标题不被滚出视口)', async () => {
+    const { store, wrapper } = mountWindow();
+    const canvas = wrapper.find('.sv-canvas').element as HTMLElement;
+    canvas.scrollTop = 320;
+
+    store.currentSessionId = 'next-empty-session';
+    await flushPromises();
+    expect(canvas.scrollTop).toBe(0);
+    wrapper.unmount();
   });
 
   it('有消息时不再显示空态', async () => {

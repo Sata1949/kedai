@@ -418,12 +418,11 @@ html[data-theme='stained-glass'] .sv-modal-foot {
 }
 
 /* ===== 玫瑰窗:空态右侧的密窗(三层放射扇片 + 白环圆章 + 粗石棂) ===== */
-html[data-theme='stained-glass'] .sv-start::before,
-html[data-theme='stained-glass'] .sv-task-start::before {
+html[data-theme='stained-glass'] .sv-start::before {
   right: 0;
-  top: 8px;
-  width: 150px;
-  height: 150px;
+  top: 230px;
+  width: 140px;
+  height: 140px;
   border: 0;
   border-radius: 50%;
   background-color: transparent;
@@ -436,16 +435,24 @@ html[data-theme='stained-glass'] .sv-task-start::before {
   filter: drop-shadow(0 2px 0 rgba(0, 0, 0, 0.45));
   transform: none;
 }
+/* 任务空态右栏是「执行设置」清单,没有可让给玫瑰窗的空白:主题只保留玻璃场,不叠窗 */
+html[data-theme='stained-glass'] .sv-task-start::before { display: none; }
 html[data-theme='stained-glass'] .sv-start::after,
-html[data-theme='stained-glass'] .sv-task-start::after {
-  right: 0;
-  top: 168px;
-  width: 150px;
-  height: 2px;
-  background: linear-gradient(90deg, transparent, var(--kg-gold) 12%, var(--kg-gold) 88%, transparent);
-  box-shadow: none;
-  transform: none;
-  transform-origin: center;
+html[data-theme='stained-glass'] .sv-task-start::after { display: none; }
+@media (max-width: 1099px) {
+  html[data-theme='stained-glass'] .sv-start::before { display: none; }
+}
+html[data-theme='stained-glass'] .sv-start-title,
+html[data-theme='stained-glass'] .sv-task-start-title { font-weight: 800; }
+html[data-theme='stained-glass'] .sv-start-desc,
+html[data-theme='stained-glass'] .sv-task-start-desc { font-weight: 600; }
+/* 新两栏空态:文字区落在半透明白玻璃芯上,保留窗格但不再让铅条网穿过正文 */
+html[data-theme='stained-glass'] .sv-start-copy,
+html[data-theme='stained-glass'] .sv-start-cast,
+html[data-theme='stained-glass'] .sv-task-start-copy,
+html[data-theme='stained-glass'] .sv-task-start-spec {
+  background: rgba(250, 246, 232, 0.74);
+  box-shadow: 0 0 0 16px rgba(250, 246, 232, 0.74);
 }
 html[data-theme='stained-glass'] .sv-start {
   border-top: 3px solid var(--kg-lead);
@@ -492,6 +499,8 @@ html[data-theme='stained-glass'] .sv-char-item.active {
     3px 3px 0 rgba(0, 0, 0, 0.22),
     inset 0 0 0 1px rgba(230, 192, 114, 0.5);
 }
+html[data-theme='stained-glass'] .sv-char-item.active .sv-char-name { color: var(--sv-white); }
+html[data-theme='stained-glass'] .sv-char-item.active .sv-char-desc { color: rgba(255, 253, 242, 0.76); }
 /* 设置导航选中态:同一扇钴蓝玻璃,右缘红斜线换金 */
 html[data-theme='stained-glass'] .sv-hub-nav-item.active {
   background-color: var(--kg-sapphire);

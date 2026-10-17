@@ -2,6 +2,7 @@
 // 开场选择器模态框(自 ChatWindow 拆出):多开场角色在两种模式下选择开场——
 // mode='new' 新建会话时选择开场;mode='switch' 当前会话内重置开场。
 // 选择动作直落 store,失败 alert 提示;开关状态由父组件持有(v-if 控制挂载)。
+import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 import { storeToRefs } from 'pinia';
 import { useAppStore } from '../store';
 
@@ -13,6 +14,50 @@ const emit = defineEmits<{ (e: 'close'): void }>();
 
 const store = useAppStore();
 const { currentGreetings } = storeToRefs(store);
+
+/** 无障碍:焦点进入对话框、Tab 循环、Esc 关闭、关闭后回到原焦点。 */
+const dialogEl = ref<HTMLElement | null>(null);
+let returnFocus: HTMLElement | null = null;
+
+function focusables(): HTMLElement[] {
+  const root = dialogEl.value;
+  if (!root) return [];
+  return [...root.querySelectorAll<HTMLElement>(
+    'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+  )].filter((el) => el.offsetParent !== null || el === document.activeElement);
+}
+
+function onKeydown(event: KeyboardEvent): void {
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    emit('close');
+    return;
+  }
+  if (event.key !== 'Tab') return;
+  const list = focusables();
+  if (list.length === 0) return;
+  const first = list[0];
+  const last = list[list.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+onMounted(async () => {
+  returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  document.addEventListener('keydown', onKeydown);
+  await nextTick();
+  focusables()[0]?.focus();
+});
+
+onBeforeUnmount(() => {
+  document.removeEventListener('keydown', onKeydown);
+  returnFocus?.focus?.();
+});
 
 /** 选定开场:mode=new → 用该开场新建会话;mode=switch → 当前会话清空并重置为该开场 */
 async function pickGreeting(index: number): Promise<void> {
@@ -31,13 +76,20 @@ async function pickGreeting(index: number): Promise<void> {
 
 <template>
   <div class="sv-modal-mask" @click.self="emit('close')">
-    <div class="sv-modal sm">
+    <div
+      ref="dialogEl"
+      class="sv-modal sm"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="sv-greeting-title"
+      tabindex="-1"
+    >
       <div class="sv-modal-head">
-        <h2 class="flex items-center gap-2">
+        <h2 id="sv-greeting-title" class="flex items-center gap-2">
           <span class="sv-supreme pink-deep" />
           {{ mode === 'new' ? '选择开场 · 新建会话' : '选择开场 · 重置当前会话' }}
         </h2>
-        <button class="sv-btn ghost sv-btn-square" @click="emit('close')">✕</button>
+        <button type="button" class="sv-btn ghost sv-btn-square" aria-label="关闭" @click="emit('close')">✕</button>
       </div>
       <div class="sv-modal-body">
         <p class="sv-note sv-mb12">
@@ -49,6 +101,7 @@ async function pickGreeting(index: number): Promise<void> {
           <button
             v-for="(g, i) in currentGreetings"
             :key="i"
+            type="button"
             class="sv-data-row sv-greet-row"
             @click="pickGreeting(i)"
           >

@@ -190,16 +190,17 @@
     padding: var(--space-2) var(--space-3) var(--space-2) 34px;
     gap: var(--space-2);
   }
-  .sv-topbar-title { font-size: 12px; }
+  /* 窄屏只留单个红方块,避免叠印装饰压住角色名 */
+  .sv-topbar::before { left: 16px; width: 8px; height: 8px; box-shadow: none; }
+  .sv-topbar::after { display: none; }
+  .sv-topbar-title { font-size: var(--text-sm); }
   /* 型号名与「会话」标签在手机上让位给可操作控件 */
   .sv-topbar-sub { display: none; }
   .sv-topbar-right {
     gap: var(--space-2);
-    overflow-x: auto;
-    scrollbar-width: none;
+    overflow: visible;
   }
-  .sv-topbar-right::-webkit-scrollbar { display: none; }
-  .sv-session-select { max-width: 46vw; padding: var(--space-1-5) var(--space-2); }
+  .sv-session-select { max-width: 38vw; padding: var(--space-1-5) var(--space-2); }
   /* Token 统计已由侧栏抽屉承载,顶栏重复项隐藏 */
   .sv-token-inline { display: none; }
 

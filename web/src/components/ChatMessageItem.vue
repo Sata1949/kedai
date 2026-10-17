@@ -51,6 +51,35 @@ const emit = defineEmits<{
 
 const store = useAppStore();
 
+/** 复制回执:每条消息独立;2s 后自动回到「复制」,不改变消息内容。 */
+const copied = ref(false);
+let copiedTimer: ReturnType<typeof setTimeout> | null = null;
+onUnmounted(() => {
+  if (copiedTimer) clearTimeout(copiedTimer);
+});
+
+async function copyMessage(text: string): Promise<void> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const area = document.createElement('textarea');
+      area.value = text;
+      area.style.position = 'fixed';
+      area.style.opacity = '0';
+      document.body.appendChild(area);
+      area.select();
+      document.execCommand('copy');
+      area.remove();
+    }
+    copied.value = true;
+    if (copiedTimer) clearTimeout(copiedTimer);
+    copiedTimer = setTimeout(() => { copied.value = false; }, 2000);
+  } catch {
+    // 剪贴板不可用时不做虚假成功回执;保留原文在消息里,用户可手动选择复制。
+  }
+}
+
 /** 角色卡是否含渲染 HTML 状态栏的脚本(命中 <StatusPlaceHolderImpl/> 占位符) */
 const hasStatusScript = computed(() => hasStatusPlaceholderScript(props.scripts));
 
@@ -395,6 +424,7 @@ defineExpose({ rootEl });
         </div>
       </div>
       <div v-if="!m.streaming" class="sv-msg-actions">
+        <button class="sv-msg-action" @click="copyMessage(displayText(m))">{{ copied ? '已复制' : '复制' }}</button>
         <button class="sv-msg-action" @click="emit('start-edit', m)">编辑</button>
         <button class="sv-msg-action" title="丢弃其后所有消息,以本条内容重新生成" @click="store.resendMessage(m.id)">
           重发
@@ -462,6 +492,7 @@ defineExpose({ rootEl });
               @click="onSwipe(swipePosition(m))"
             >▶</button>
           </template>
+          <button class="sv-msg-action" @click="copyMessage(displayText(m))">{{ copied ? '已复制' : '复制' }}</button>
           <button
             class="sv-msg-action"
             title="保留本条,生成新版本(原内容并入版本列表)"

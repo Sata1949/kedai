@@ -28,14 +28,14 @@ body::after {
   pointer-events: none;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
   background-size: 220px 220px;
-  opacity: 0.05;
+  opacity: 0.035;
   mix-blend-mode: multiply;
 }
 
-/* 滚动条:直角黑条 */
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-thumb { background: var(--sv-ink); }
-::-webkit-scrollbar-thumb:hover { background: var(--sv-ink-soft); }
+/* 滚动条:细墨条(8px 轨道内缩,不抢正文;悬停加深) */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--sv-ink) 30%, transparent); }
+::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--sv-ink) 55%, transparent); }
 ::-webkit-scrollbar-track { background: transparent; }
 
 /* 键盘焦点:2px 印刷黑外描边 + 2px 偏移(构成主义硬边框,非柔和发光)。
