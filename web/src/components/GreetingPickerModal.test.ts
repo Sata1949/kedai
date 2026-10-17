@@ -21,10 +21,15 @@ function mountPicker() {
   const character = useCharacterStore();
   character.characters = [{
     id: 'c1',
+    name: 'test',
     chara_name: '测试角色',
+    description: '',
+    file_path: '',
+    avatar_path: null,
     first_mes: '主开场',
     alternate_greetings: ['备用开场'],
-  }] as never;
+    created_at: '2026-10-17T00:00:00Z',
+  }];
   character.currentCharacterId = 'c1';
   return { character, wrapper: mount(GreetingPickerModal, { props: { mode: 'new' } }) };
 }
