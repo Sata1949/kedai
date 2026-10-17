@@ -36,6 +36,10 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
    * 桌面端恒为 false 且不影响布局——CSS 只在 max-width 断点内响应 .open 类。
    */
   const sidebarOpen = ref(false);
+  /** 由任务空态等入口打开左侧抽屉(唯一状态变更入口;组件不直写 sidebarOpen)。 */
+  function openSidebar(): void {
+    sidebarOpen.value = true;
+  }
   const worldBooksOpen = ref(false);
   const quickRepliesOpen = ref(false);
   const audioOpen = ref(false);
@@ -310,6 +314,7 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
     autoOpenAgentPanel,
     resetAgentPanelAutoSuppress,
     sidebarOpen,
+    openSidebar,
     worldBooksOpen,
     quickRepliesOpen,
     audioOpen,

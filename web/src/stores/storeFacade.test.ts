@@ -68,7 +68,7 @@ const ACTION_KEYS = [
   'removeMessage', 'updateMessage', 'resendMessage', 'regenerateMessage', 'swipeMessage',
   'clearCurrentChat', 'exportCurrentChat',
   'loadWorldBooks', 'uploadWorldBook', 'updateWorldBook', 'deleteWorldBook',
-  'setAppMode', 'loadTasks', 'loadGlobalTaskUsage', 'createTask', 'selectTask', 'loadTaskDetail',
+  'openSidebar', 'setAppMode', 'loadTasks', 'loadGlobalTaskUsage', 'createTask', 'selectTask', 'loadTaskDetail',
   'runTask', 'stopTask', 'deleteTask', 'startTaskPolling', 'stopTaskPolling', 'loadTaskCalls',
   'approveTask',
   'loadQuickReplies', 'loadAudio', 'saveAudioSettings', 'saveAudioPlaylist',

@@ -59,7 +59,7 @@ const taskModeLabel = computed(() => MODE_LABELS[taskMode.value]);
 
 /** 空态主操作:打开抽屉并聚焦左侧「下达目标」输入框(移动端是关键入口)。 */
 function openTaskComposer(): void {
-  store.sidebarOpen = true;
+  store.openSidebar();
   void nextTick(() => {
     const input = document.querySelector<HTMLTextAreaElement>('.sv-task-new textarea');
     input?.focus();

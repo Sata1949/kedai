@@ -138,6 +138,7 @@ export const useAppStore = defineStore('app', () => {
     openSettingsPanel: uiPrefs.openSettingsPanel,
     clearSettingsNav: uiPrefs.clearSettingsNav,
     // Agent 面板开合(自动展开一次 + 用户主动收起后不再打扰)
+    openSidebar: uiPrefs.openSidebar,
     openAgentPanel: uiPrefs.openAgentPanel,
     collapseAgentPanel: uiPrefs.collapseAgentPanel,
     toggleAgentPanel: uiPrefs.toggleAgentPanel,
