@@ -77,6 +77,14 @@ describe('TaskBoard 组件(M5 补测)', () => {
     expect(wrapper.find('.sv-task-head-title').exists()).toBe(false);
   });
 
+  it('空态主按钮打开任务面板(移动端入口)', async () => {
+    const wrapper = mountBoard();
+    const store = useAppStore();
+    await wrapper.find('.sv-task-start-actions .sv-btn.primary').trigger('click');
+    expect(store.sidebarOpen).toBe(true);
+    wrapper.unmount();
+  });
+
   it('有任务时渲染标题、状态标签与执行模式徽标', () => {
     const store = useAppStore();
     store.currentTask = makeTaskDetail({ title: '写一份周报', status: 'done', task_mode: 'solo' });

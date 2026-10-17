@@ -7,23 +7,23 @@
    ============================================================================ */
 :root {
   /* ===== 基底:淡粉画布(肉眼可辨、柔和不刺眼;控件纯白形成层次) ===== */
-  --sv-paper: #fbeef1;          /* 主画布:淡粉 */
-  --sv-surface: #f4dbe2;        /* 表面:侧栏/顶栏/输入区/模态框(比画布深两档,栏位层次分明) */
-  --sv-surface-elevated: #fdf5f7;
+  --sv-paper: #fdfafb;          /* 主画布:近白暖纸(至上主义白色场;粉色只作平面) */
+  --sv-surface: #f8eef2;        /* 表面:侧栏/顶栏/输入区/模态框(比画布深一档) */
+  --sv-surface-elevated: #fffdfd;
   --sv-white: #ffffff;          /* 纯白(控件白底/白字,多处引用须有定义) */
 
   /* ===== 结构:黑色阶段(Black Square) ===== */
-  --sv-ink: #141414;            /* 印刷黑:文本/边框/黑底块(比纯黑柔和一档) */
+  --sv-ink: #17181a;            /* 印刷黑:文本/边框/黑底块(比纯黑柔和一档) */
   --sv-ink-supreme: #000000;    /* 纯黑:仅至上主义方块本体 */
   --sv-ink-soft: #2b2b2b;
   --sv-ink-dim: #5c5c5c;
-  --sv-ink-faint: #616161;      /* 次级文字(2026-10-02 UIP-10 由 #6b6b6b 加深:surface 上 4.08→4.7:1,过 WCAG AA 正文线;paper 上 5.5:1) */
-  --sv-line: #e9d5db;           /* 粉灰线(与淡粉底协调) */
-  --sv-line-strong: #dcc3cb;
+  --sv-ink-faint: #5f6166;      /* 次级文字(UIQ 样品:新 surface 上 5.2:1) */
+  --sv-line: #eadde2;           /* 粉灰线(与淡粉底协调;仅作内部分隔) */
+  --sv-line-strong: #d8c3cb;
 
   /* ===== 色彩阶段:淡粉红主色 ===== */
   --sv-pink: #f7c8d8;
-  --sv-pink-light: #f9e6eb;     /* 淡粉(hover/模态脚/设置导航) */
+  --sv-pink-light: #fdf1f5;     /* 淡粉(hover/模态脚/设置导航) */
   --sv-pink-medium: #f0a8c0;
   --sv-pink-deep: #e06890;
   --sv-pink-dark: #c84878;
@@ -47,7 +47,7 @@
   --sv-orange: #e8842e;         /* 橙:构成主义用色(settings 引用,收编自硬编码) */
 
   /* ===== 语义别名(历史遗留变量,统一指向主 token) ===== */
-  --sv-accent: var(--sv-pink-deep);   /* 强调色(slash 菜单等) */
+  --sv-accent: var(--sv-pink-deep);   /* 强调色(slash 菜单等;填充用途) */
   --sv-bg: var(--sv-paper);           /* 旧暗色主题残留变量的现值 */
   --sv-bg-elev: var(--sv-surface-elevated);
   --sv-border: var(--sv-line-strong);
@@ -60,39 +60,39 @@
   --sv-pink-deep-rgb: 224, 104, 144;
 
   /* ===== 边框宽度梯度(批次 5 海报化:结构边框 2px→3px,顶层浮层 3px→4px) ===== */
-  --bw: 3px;                    /* 标准:按钮/卡片/输入框/面板/结构分隔 */
-  --bw-heavy: 4px;              /* 重型:模态框/右键菜单等顶层浮层 */
-  --bw-thin: 2px;               /* 紧凑:chip/tag/列表行/时间线节点等密集组件(防抖动) */
+  --bw: 2px;                    /* 标准:外框/卡片/主按钮/结构分隔(UIQ 样品 3→2) */
+  --bw-heavy: 3px;              /* 重型:模态框/右键菜单等顶层浮层(4→3) */
+  --bw-thin: 1px;               /* 紧凑:chip/tag/列表行/内部分隔(2→1) */
   --bw-hair: 1px;               /* 发丝:内嵌 pre/code/表格单元 */
   /* 粗网格分隔:面板/区块分隔线(3px 印刷黑;回声段可叠红/蓝,见各组件) */
   --rule-strong: var(--bw) solid var(--sv-ink);
 
   /* ===== 硬阴影(批次 5:偏移加大到 4-6px 级、纯色无模糊、浓度加深) ===== */
-  --shadow-sm: 3px 3px 0 rgba(0, 0, 0, 0.09);
-  --shadow-card: 4px 4px 0 rgba(0, 0, 0, 0.12);
+  --shadow-sm: 3px 3px 0 rgba(0, 0, 0, 0.08);
+  --shadow-card: 3px 3px 0 rgba(0, 0, 0, 0.10);
   --shadow-pink: 4px 4px 0 rgba(var(--sv-pink-deep-rgb), 0.22);  /* 粉强调阴影(任务项 hover 等) */
   --shadow-pink-strong: 4px 4px 0 rgba(var(--sv-pink-deep-rgb), 0.3); /* 粉强调阴影·深档 */
-  --shadow-hover: 6px 6px 0 rgba(0, 0, 0, 0.16);
+  --shadow-hover: 5px 5px 0 rgba(0, 0, 0, 0.14);
   --shadow-raise: 4px 4px 0 rgba(0, 0, 0, 0.16);  /* 按钮/面板 hover 上浮 */
   --shadow-sunk: 4px 4px 0 rgba(0, 0, 0, 0.14);   /* 选中/按下(略沉于 raise) */
   --shadow-card-soft: 5px 5px 0 rgba(0, 0, 0, 0.09); /* 大卡片轻投影(结果卡等) */
-  --shadow-modal: 10px 10px 0 rgba(0, 0, 0, 0.2); /* 模态框 */
+  --shadow-modal: 8px 8px 0 rgba(0, 0, 0, 0.18); /* 模态框 */
   --shadow-ctx: 8px 8px 0 rgba(0, 0, 0, 0.18);    /* 右键菜单 */
   --shadow-hard: 5px 5px 0 var(--sv-ink);  /* 海报级实黑硬投影:仅英雄元素(primary 按钮/成果卡/批准区) */
   --shadow-press: 0 0 0 rgba(0, 0, 0, 0);  /* 按下态:阴影归零(画贴回画布) */
   --font-display: "Archivo Black", "Arial Black", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-body: "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
 
-  /* 字阶:全站只允许这些字号(偶发微调除外) */
-  --text-2xs: 10px;
-  --text-xs: 11px;
-  --text-sm: 12px;
-  --text-base: 13px;
-  --text-md: 14px;
-  --text-lg: 16px;
-  --text-xl: 20px;
-  --text-2xl: 28px;
-
+  /* 字阶:全站只允许这些字号(UIQ 样品:低端抬高,正文 14) */
+  --text-2xs: 11px;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-base: 14px;
+  --text-md: 15px;
+  --text-lg: 18px;
+  --text-xl: 24px;
+  --text-2xl: 30px;
+  --lh-tight: 1.35; --lh-ui: 1.55; --lh-body: 1.65; --lh-prose: 1.75;
   /* 层叠阶梯(z-index 唯一来源;常量命名防裸值漂移) */
   --z-base: 0;
   --z-toggle: 40;      /* 右缘 AGENT 条 / 音频悬浮钮 */
@@ -141,4 +141,13 @@
 
   /* 黑底上的次级文字(2026-10-02 UIP-10):替代「原色 + opacity」写法,保证实色对比度 */
   --sv-on-ink-soft: rgba(255, 255, 255, 0.72);
+
+  /* ===== UIQ-4 终稿:阅读宽度与焦点 ===== */
+  /* 中文正文一行约 42 个汉字;聊天列 820px(含头像/间距),任务成果略宽 */
+  --measure-prose: 42em;
+  --measure-chat: 820px;
+  --measure-task-result: 46em;
+  /* 唯一焦点环:2px 黑 + 2px 偏移;粉/白/黑底上均可见 */
+  --focus-ring: 2px solid var(--sv-ink);
+  --focus-offset: 2px;
 }

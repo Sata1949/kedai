@@ -62,8 +62,8 @@
 .sv-modal-head h2 {
   margin: 0;
   font-family: var(--font-display);
-  font-size: 15px;
-  letter-spacing: 0.1em;
+  font-size: var(--text-lg);
+  letter-spacing: 0.08em;
   color: var(--sv-white);
 }
 /* 模态头色点:统一 18px,替代各模板的内联尺寸 */
@@ -113,17 +113,15 @@
 .sv-modal.pm-edit { width: 760px; }
 /* 宏调试面板(多字段区 + 速查) */
 .sv-modal.macros-modal { width: 1080px; }
-
-/* 设置字段 */
+/* 设置字段(UIQ 样品:1px 分隔,不再盒中盒) */
 .sv-field {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1-5);
-  margin-bottom: var(--space-5);
-  border: var(--bw) solid var(--sv-ink);
-  padding: var(--space-4);
-  background: var(--sv-surface);
+  display: flex; flex-direction: column; gap: var(--space-2);
+  margin-bottom: var(--space-4); border: 0;
+  border-top: 1px solid var(--sv-line);
+  padding: var(--space-4) 0 var(--space-1);
+  background: transparent;
 }
+.sv-field:first-child { border-top: 0; padding-top: 0; }
 /* 设置字段(embedded 模式容器,无边框) */
 .sv-settings-embedded {
   display: flex;
@@ -134,13 +132,13 @@
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 800;
   letter-spacing: 0.06em;
   color: var(--sv-ink);
-  margin-bottom: var(--space-3-5);
-  padding-bottom: var(--space-2-5);
-  border-bottom: var(--bw-thin) solid var(--sv-line);
+  margin-bottom: var(--space-2);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--sv-line);
 }
 .sv-field-label .sv-supreme { width: 10px; height: 10px; }
 /* 次级小标题(区块内,不带上边框线节奏) */
@@ -162,9 +160,9 @@
   flex-shrink: 0;
   min-width: 72px;
   width: auto;
-  font-size: 10px;
-  font-weight: 900;
-  letter-spacing: 0.12em;
+  font-size: var(--text-xs);
+  font-weight: 800;
+  letter-spacing: 0.08em;
   color: var(--sv-ink-faint);
   text-align: left;
   white-space: nowrap;
@@ -185,17 +183,18 @@
   /* 块级父容器下占满整行(textarea 不再塌缩回 cols 默认宽);
      flex 行内被 flex:1 的 basis:0% 覆盖,无副作用 */
   width: 100%;
-  border: var(--bw) solid var(--sv-ink);
+  border: 1px solid var(--sv-line-strong);
   background: var(--sv-white);
   padding: 9px var(--space-3);
-  font-size: 13px;
+  font-size: var(--text-sm);
   font-family: var(--font-body);
   color: var(--sv-ink);
   outline: none;
 }
 .sv-input:focus, .sv-select:focus {
   border-color: var(--sv-pink-deep);
-  box-shadow: var(--shadow-pink-strong);
+  outline: 2px solid var(--sv-pink-deep);
+  outline-offset: 1px;
 }
 /* 输入模态收窄(R-UIP1 落地 / UIP-12,消费 web/src/inputModality.ts 的标记):
    Chromium 对 select 的点选也命中 :focus-visible(纯 CSS 不可分型),故按输入模态收窄——
@@ -204,6 +203,7 @@
 html[data-input-mode='pointer'] .sv-select:focus {
   border-color: var(--sv-ink);
   box-shadow: none;
+  outline: none;
 }
 /* 单行控件显式高度(UIP-10 控件高度档位):与按钮同档 40px、同排天然等高;
    只限 input/select——textarea 与其他元素共用 .sv-input 类,不得套固定高度 */
@@ -255,10 +255,10 @@ input.sv-input,
 .sv-btn-fill { flex: 1; }
 
 .sv-note {
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--sv-ink-faint);
   margin: 0;
-  line-height: 1.5;
+  line-height: var(--lh-body);
 }
 .sv-note code { color: var(--sv-ink-soft); }
 /* F8(2026-09-10):流程步骤「工具」三态误配警示,用暖色区分于普通说明 */

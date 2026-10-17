@@ -61,7 +61,8 @@
     --safe-top: 0px;
     --safe-bottom: 0px;
   }
-
+  /* UIQ 样品:手机保持全宽 */
+  .sv-body { padding: 0; gap: 0; } .sv-main { border: 0; box-shadow: none; }
   /* --- 视口:释放 1100px 硬宽度,顶部让开状态栏,底部为导航栏留位 --- */
   .sv-frame-col {
     min-width: 0;
@@ -82,6 +83,7 @@
     width: min(84vw, 320px);
     transform: translateX(-100%);
     transition: transform var(--dur-normal) var(--ease-standard);
+    border: 0; margin-right: 0;
     padding-top: var(--safe-top);
     /* ANDUI-2:底导航(z 53)恒盖在抽屉之上,底部必须让出导航高,否则页脚最后一项
        (「退出 Kedai」)整枚落在导航之下不可点(实机+411×914 实测:按钮 y853..902
@@ -126,6 +128,7 @@
   }
   .sv-agent-panel.open {
     transform: translateX(0);
+    margin-left: 0;
     box-shadow: -8px 0 0 rgba(0, 0, 0, 0.18);
   }
   /* 右缘竖排 AGENT 条在手机上误触且无意义(底导航已有入口) */
@@ -164,15 +167,15 @@
     border: none;
     background: none;
     color: var(--sv-ink-soft);
-    font-size: 10px;
+    font-size: var(--text-xs);
     font-family: var(--font-display);
-    letter-spacing: 0.06em;
+    letter-spacing: 0.04em;
     cursor: pointer;
     padding: 0;
   }
   .sv-mobile-nav-item svg {
-    width: 21px;
-    height: 21px;
+    width: 22px;
+    height: 22px;
     fill: none;
     stroke: currentColor;
     stroke-width: 1.8;
@@ -187,16 +190,17 @@
     padding: var(--space-2) var(--space-3) var(--space-2) 34px;
     gap: var(--space-2);
   }
-  .sv-topbar-title { font-size: 12px; }
+  /* 窄屏只留单个红方块,避免叠印装饰压住角色名 */
+  .sv-topbar::before { left: 16px; width: 8px; height: 8px; box-shadow: none; }
+  .sv-topbar::after { display: none; }
+  .sv-topbar-title { font-size: var(--text-sm); }
   /* 型号名与「会话」标签在手机上让位给可操作控件 */
   .sv-topbar-sub { display: none; }
   .sv-topbar-right {
     gap: var(--space-2);
-    overflow-x: auto;
-    scrollbar-width: none;
+    overflow: visible;
   }
-  .sv-topbar-right::-webkit-scrollbar { display: none; }
-  .sv-session-select { max-width: 46vw; padding: var(--space-1-5) var(--space-2); }
+  .sv-session-select { max-width: 38vw; padding: var(--space-1-5) var(--space-2); }
   /* Token 统计已由侧栏抽屉承载,顶栏重复项隐藏 */
   .sv-token-inline { display: none; }
 
@@ -210,30 +214,26 @@
   .sv-inputbox { gap: var(--space-2); }
   /* 16px 是 Android/iOS WebView 免「聚焦自动放大」的下限 */
   .sv-inputbox textarea { font-size: 16px; min-height: 44px; padding: var(--space-2-5) var(--space-3); }
-  /* 工具行:桌面为多行换行,手机上改成单行横向滚动。
-     原先 4 组控件折成 3 行占约 200px,挤压消息区;横滑后只占一行。 */
+  /* UIQ 复排:两行网格——第一行模式占满,第二行授权/模型/快捷入口/附件;
+     文字按钮窄屏只留图标,避免 411px 下折成第三行(实测 141px → ~84px)。 */
   .sv-input-toolbar {
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    scrollbar-width: none;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
+    display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto;
+    grid-template-areas: "mode mode mode mode" "auth model quick attach";
+    gap: var(--space-1); padding: var(--space-1) var(--space-3);
   }
-  .sv-input-toolbar::-webkit-scrollbar { display: none; }
-  .sv-input-toolbar > * { flex: 0 0 auto; }
-  /* CTX 提示占宽且非操作项,手机上让位(侧栏抽屉内已有完整 token 统计) */
-  .sv-input-toolbar .sv-hint { display: none; }
-  .sv-mode button { padding: var(--space-1-5) 9px; font-size: 11px; }
-  /* .sv-model-select 的窄屏限宽随该类一起搬进 ChatInput.vue 的 scoped 块(2026-09-27 UIFIX-2) */
-  .sv-btn-attach { padding: var(--space-1-5) var(--space-2-5); font-size: 11.5px; }
+  .sv-mode { grid-area: mode; }
+  .sv-mode button { flex: 1; min-height: 32px; padding: var(--space-1); font-size: var(--text-xs); }
+  .sv-mode-idx, .sv-auth-mode-label, .sv-btn-label, .sv-input-toolbar .sv-hint { display: none; }
+  .sv-auth-mode { grid-area: auth; }
+  .sv-auth-toggle button { min-height: 32px; padding: var(--space-1) var(--space-1-5); }
+  .sv-model-select { grid-area: model; width: 100%; max-width: none; min-width: 0; min-height: 32px; }
+  .sv-rel { grid-area: quick; margin-left: 0; }
+  .sv-input-toolbar > .sv-btn-attach { grid-area: attach; }
+  .sv-input-toolbar .sv-btn-attach { min-width: 32px; min-height: 32px; justify-content: center; padding: var(--space-1); }
   /* 音频入口已移到下方导航栏,隐藏悬浮钮避免压住工具行右端 */
   .sv-audio-toggle { display: none; }
   /* 音频面板改为底部整宽浮层(导航栏之上) */
-  .sv-audio-float {
-    right: 0;
-    left: 0;
-    bottom: calc(var(--mobile-nav-h) + var(--safe-bottom));
-  }
+  .sv-audio-float { right: 0; left: 0; bottom: calc(var(--mobile-nav-h) + var(--safe-bottom)); }
   .sv-audio-panel { width: 100%; max-width: none; }
 
   /* --- 模态弹窗 → 全屏 Sheet --- */

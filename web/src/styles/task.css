@@ -20,8 +20,12 @@
 .sv-appmode button {
   flex: 1;
   min-height: var(--control-h); /* UIP-10 主档高度 */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1-5);
   padding: var(--space-1) var(--space-1);
-  font-size: 12.5px;
+  font-size: var(--text-sm);
   font-weight: 800;
   letter-spacing: 0.08em;
   border: none;
@@ -37,6 +41,13 @@
 .sv-appmode button:not(.active):hover {
   background: var(--sv-pink-light);
 }
+.sv-appmode-idx {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs);
+  letter-spacing: 0.02em;
+  opacity: 0.55;
+}
+.sv-appmode button.active .sv-appmode-idx { opacity: 0.78; }
 
 /* 任务工作台:详情区占满(下达目标与任务历史在左侧 Sidebar 内) */
 .sv-taskboard {
@@ -97,24 +108,23 @@
   align-items: center;
   gap: var(--space-2);
   width: 100%;
-  padding: 9px var(--space-2-5);
+  padding: var(--space-2-5) var(--space-3);
   margin-bottom: var(--space-1);
-  border: var(--bw-thin) solid var(--sv-line-strong);
+  border: var(--bw-thin) solid var(--sv-line);
   background: var(--sv-white);
   color: var(--sv-ink);
   cursor: pointer;
   text-align: left;
   font-size: 12px;
   transition: border-color var(--dur-fast) var(--ease-standard), background var(--dur-fast) var(--ease-standard), box-shadow var(--dur-fast) var(--ease-standard);
-  box-shadow: var(--shadow-card); /* 阴影规则:可点卡片静态挂 card 影 */
 }
 .sv-task-item:hover {
-  border-color: var(--sv-pink-deep);
-  box-shadow: var(--shadow-hover); /* hover 升 hover 影(原粉强调影让位统一规则) */
+  border-color: var(--sv-ink);
+  background: var(--sv-white);
 }
 .sv-task-item.active {
   border-color: var(--sv-ink);
-  box-shadow: var(--shadow-sunk);
+  box-shadow: inset 2px 0 0 var(--sv-ink);
   background: var(--sv-pink-light);
 }
 .sv-task-item-title {
@@ -127,7 +137,7 @@
 }
 .sv-task-item-meta {
   flex-shrink: 0;
-  font-size: 10.5px;
+  font-size: var(--text-xs);
   color: var(--sv-ink-faint);
 }
 .sv-task-item-del {
@@ -202,7 +212,7 @@
   color: var(--sv-ink-soft);
   padding-bottom: var(--space-2);
   margin-bottom: var(--space-2-5);
-  border-bottom: var(--rule-strong); /* 粗网格分隔:3px 印刷黑 */
+  border-bottom: 1px solid var(--sv-line-strong); /* UIQ-4:内部区段发丝线,2px 只留给主框 */
 }
 .sv-task-section-title::before {
   content: '';
@@ -462,7 +472,7 @@
 .sv-tag.partial { color: var(--sv-orange); border-color: var(--sv-orange); }
 .sv-tag.error { color: var(--sv-red-deep); border-color: var(--sv-red); }
 .sv-tag.pending { color: var(--sv-ink-faint); border-color: var(--sv-line-strong); }
-.sv-tag.sm { font-size: 9.5px; padding: 1px var(--space-1-5); }
+.sv-tag.sm { font-size: var(--text-2xs); padding: 1px var(--space-1-5); }
 
 /* ===== 构成主义深化:ChatInput 向上弹层公共类 ===== */
 .sv-popover {
@@ -489,7 +499,7 @@
 /* 模式按钮编号色点 */
 .sv-mode-idx {
   font-family: var(--font-display);
-  font-size: 9px;
+  font-size: var(--text-2xs);
   color: var(--sv-pink-deep);
   margin-right: var(--space-1);
   letter-spacing: 0.05em;
@@ -522,7 +532,7 @@
 /* toggle + 复制按钮行 */
 .sv-tool-io-bar { display: flex; align-items: stretch; }
 .sv-tool-io-toggle {
-  font-size: 10px;
+  font-size: var(--text-2xs);
   color: var(--sv-ink-dim);
   background: var(--sv-pink-light);
   border: none;
@@ -534,7 +544,7 @@
 /* 复制按钮:复制完整 JSON(截断渐隐时不丢数据) */
 .sv-tool-io-copy {
   margin-left: auto;
-  font-size: 10px;
+  font-size: var(--text-2xs);
   font-weight: 700;
   color: var(--sv-ink-dim);
   background: transparent;
@@ -551,7 +561,7 @@
   overflow: auto;
   background: var(--sv-surface);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--text-2xs);
   padding: var(--space-2);
   margin: 0;
 }
@@ -582,7 +592,7 @@
 /* 状态徽章类族:细边框 + 当前颜色描边,替代内联状态小字 */
 .sv-badge {
   display: inline-block;
-  font-size: 10px;
+  font-size: var(--text-2xs);
   font-weight: 700;
   letter-spacing: 0.05em;
   padding: 1px var(--space-1-5);
@@ -625,7 +635,7 @@
   border: 1px solid var(--sv-ink);
   background: var(--sv-white);
   color: var(--sv-ink);
-  font-size: 10px;
+  font-size: var(--text-xs);
   line-height: 1;
   cursor: pointer;
   box-shadow: var(--shadow-sm);
@@ -642,7 +652,7 @@
 .sv-swipe-btn:disabled { opacity: 0.4; cursor: default; }
 .sv-swipe-count {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--text-2xs);
   color: var(--sv-ink-dim);
   padding: 0 var(--space-1);
 }
@@ -665,17 +675,17 @@
    底部全宽按钮抽类 + Token 统计仪表感
    ============================================================ */
 
-/* 底部三按钮:全宽 flex 居中,图标与文字 gap 对齐 */
+/* 底部按钮:在 .sv-side-foot 的 1+2 网格内 flex 居中(UIQ 样品收一档高度) */
 .sv-side-btn {
   width: 100%;
-  padding: var(--space-3);
-  font-size: 13px;
-  letter-spacing: 0.1em;
-  margin-top: var(--space-2);
+  padding: var(--space-2) var(--space-2-5);
+  font-size: var(--text-xs);
+  letter-spacing: 0.04em;
+  margin-top: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: var(--space-2);
+  gap: var(--space-1-5);
 }
 /* 第一个按钮(综合设置,primary)无上间距,其余按钮 8px 间距 */
 .sv-side-btn:first-child { margin-top: 0; }
@@ -744,7 +754,7 @@
    既抢戏又因线定位漂移而显得乱;改为方块的 box-shadow 脉动,定位基准就是方块,
    天生不会漂。复用 AgentPanel 时间线 running 的脉示范式。 */
 @keyframes sv-idx-breath {
-  0%, 100% { box-shadow: 0 0 0 0 var(--sv-yellow); }
+  0%, 100% { box-shadow: 0 0 0 0 var(--sv-red); }
   50% { box-shadow: 0 0 0 5px rgb(0 0 0 / 0); }
 }
 .sv-task-step-idx.active {
@@ -922,7 +932,7 @@
   border: var(--bw-thin) solid var(--sv-line-strong);
   background: var(--sv-surface);
   color: var(--sv-ink-soft);
-  font-size: 11px;
+  font-size: var(--text-xs);
   padding: 2px var(--space-2);
   cursor: pointer;
 }
@@ -956,7 +966,7 @@
   min-width: 160px;
 }
 .sv-fc-tag {
-  font-size: 11px;
+  font-size: var(--text-xs);
   padding: 1px var(--space-1-5);
   border: var(--bw-thin) solid var(--sv-line-strong, #ccc);
   color: var(--sv-ink-soft);
@@ -964,8 +974,8 @@
 .sv-fc-tag.op-create { color: var(--sv-green-deep, #15803d); border-color: currentColor; }
 .sv-fc-tag.op-delete { color: var(--sv-red, #e3342f); border-color: currentColor; }
 .sv-fc-tag.op-rollback { color: var(--sv-amber, #d97706); border-color: currentColor; }
-.sv-fc-src { font-size: 11px; color: var(--sv-ink-soft); }
-.sv-fc-bytes { font-size: 11px; color: var(--sv-ink-soft); }
+.sv-fc-src { font-size: var(--text-xs); color: var(--sv-ink-soft); }
+.sv-fc-bytes { font-size: var(--text-xs); color: var(--sv-ink-soft); }
 /* 整任务操作行(CODE-2):全部回滚 / 导出 patch */
 .sv-fc-actions {
   display: flex;
@@ -973,7 +983,7 @@
   margin: var(--space-2) 0;
 }
 .sv-fc-btn {
-  font-size: 11px;
+  font-size: var(--text-xs);
   padding: 2px var(--space-2);
   border: var(--bw-thin) solid var(--sv-line-strong, #ccc);
   background: var(--sv-surface);
@@ -982,7 +992,7 @@
 }
 .sv-fc-btn:hover:not(:disabled) { border-color: var(--sv-ink); color: var(--sv-ink); }
 .sv-fc-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.sv-fc-unavailable { font-size: 11px; color: var(--sv-ink-soft); margin-top: var(--space-1); }
+.sv-fc-unavailable { font-size: var(--text-xs); color: var(--sv-ink-soft); margin-top: var(--space-1); }
 .sv-fc-diff-wrap { margin-top: var(--space-1-5); }
 .sv-fc-diff {
   max-height: 320px;
@@ -990,7 +1000,7 @@
   background: var(--sv-surface);
   border: var(--bw-thin) solid var(--sv-line, #e5e5e5);
   padding: var(--space-2);
-  font-size: 11px;
+  font-size: var(--text-xs);
   line-height: 1.5;
   white-space: pre;
   margin: var(--space-1) 0 0;

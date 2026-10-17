@@ -3,7 +3,7 @@
 // 下达目标与任务历史已移入左侧 Sidebar(单列布局);任务数据持久化到后端 SQLite。
 // 批次 4 六模式:模式徽标、plan 模式批准区(批准/放弃/修改后批准)、
 // team 模式分工卡与审计结论卡、solo/multi 调用情况面板入口、custom 流程步骤进度。
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useAppStore } from '../store';
 import { storeToRefs } from 'pinia';
 import { renderMarkdown } from '../markdown';
@@ -14,9 +14,11 @@ import { badgeFlowSource, planRowBadges, type NodeBadge } from '../utils/flowNod
 import { projectHintTitle, projectKindLabel } from '../utils/workspaceProfile';
 import { callableFlows } from '../utils/flowCallStats';
 import { flowCandidates, staleMembers, type FlowCandidate } from '../utils/flowCandidates';
-import { APPROVE_EXEC_MODE_LABELS, APPROVE_EXEC_MODE_ORDER, FLOW_MODE_LABELS, MODE_LABELS, messageKindLabel } from '../api/labels';
+import { APPROVE_EXEC_MODE_LABELS, APPROVE_EXEC_MODE_ORDER, FLOW_MODE_LABELS, MODE_LABELS, MODE_ORDER, messageKindLabel } from '../api/labels';
 import type { TaskApproveExecMode, TaskRecord, TaskRunMode, TaskStep } from '../api';
 import FileChangesPanel from './FileChangesPanel.vue';
+/** 环境层懒加载:同 ChatWindow,不进首屏 index chunk。 */
+const AmbientField = defineAsyncComponent(() => import('./AmbientField.vue'));
 
 const store = useAppStore();
 const { currentTask, currentTaskId, model, currentTaskUsage, executorById } = storeToRefs(store);
@@ -38,6 +40,14 @@ const taskTotalTokens = computed(() => {
   return u ? u.prompt_tokens + u.completion_tokens : 0;
 });
 
+/** 计划完成度(仅用于执行中的进度轨;终态不画进度)。 */
+const taskStepProgress = computed(() => {
+  const steps = currentTask.value?.task.plan ?? [];
+  const done = steps.filter((s) => s.status === 'done').length;
+  const total = steps.length;
+  return { done, total, pct: total > 0 ? Math.round((done / total) * 100) : 0 };
+});
+
 // ===== 批次 4:六模式呈现 =====
 
 // 模式中文文案统一取自 api/labels.ts(唯一源;穷尽校验见该文件)。
@@ -46,6 +56,26 @@ const taskTotalTokens = computed(() => {
 /** 当前任务执行模式(旧服务端不带 task_mode 时按 legacy 处理) */
 const taskMode = computed<TaskRunMode>(() => currentTask.value?.task.task_mode ?? 'legacy');
 const taskModeLabel = computed(() => MODE_LABELS[taskMode.value]);
+
+/** 空态主操作:打开抽屉并聚焦左侧「下达目标」输入框(移动端是关键入口)。 */
+function openTaskComposer(): void {
+  store.openSidebar();
+  void nextTick(() => {
+    const input = document.querySelector<HTMLTextAreaElement>('.sv-task-new textarea');
+    input?.focus();
+    input?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  });
+}
+
+/** 空态右侧「执行设置」摘要:模式取当前选择;流程仅在 custom 下有意义。 */
+const emptyModeLabel = computed(() => MODE_LABELS[store.taskRunMode]);
+const emptyFlowLabel = computed(() => {
+  if (store.taskRunMode !== 'custom') return '按模式编排';
+  const id = store.taskFlowId;
+  if (!id) return '跟随当前流程';
+  const flow = agentFlowLibrary.value?.flows.find((f) => f.id === id);
+  return flow?.name?.trim() || id;
+});
 
 /**
  * 计划步骤的 markdown 预渲染(定向响应式,multi/team 卡顿修复):
@@ -677,15 +707,20 @@ async function removeTask(task: TaskRecord): Promise<void> {
       </span>
     </header>
 
-    <!-- 主体:任务详情占满(新建与历史列表在左侧 Sidebar) -->
-    <div class="sv-taskboard">
+    <!-- 主体:任务详情占满(新建与历史列表在左侧 Sidebar);环境层在背后 -->
+    <div class="sv-task-stage">
+      <AmbientField variant="draft" :intensity="currentTask ? 0.14 : 0.8" :paused="taskRunning" />
+      <div class="sv-taskboard">
       <!-- 详情区 -->
       <div class="sv-task-detail">
         <template v-if="currentTask">
           <div class="sv-task-head">
-            <div class="sv-task-head-title">
-              <span class="sv-supreme pink-deep" />
-              {{ currentTask.task.title }}
+            <div class="sv-task-head-copy">
+              <span class="sv-task-head-kicker">任务 / TASK</span>
+              <div class="sv-task-head-title">
+                <span class="sv-supreme pink-deep" />
+                {{ currentTask.task.title }}
+              </div>
             </div>
             <div class="sv-task-head-actions">
               <button
@@ -708,29 +743,36 @@ async function removeTask(task: TaskRecord): Promise<void> {
             </div>
           </div>
 
-          <!-- 状态 + 模式徽标 + 累计 token + 错误 -->
+          <!-- 状态矩阵:状态 / 模式 / 流程 / 累计 token;错误单独成行,不混进矩阵 -->
           <div class="sv-task-status-line">
-            <span class="sv-tag" :class="statusClass(currentTask.task.status)">
-              {{ statusLabel(currentTask.task.status) }}
+            <span class="sv-tag sv-task-status-tag" :class="statusClass(currentTask.task.status)">
+              状态:{{ statusLabel(currentTask.task.status) }}
             </span>
-            <span class="sv-tag sm" title="任务执行模式(批次 4 六模式)">模式:{{ taskModeLabel }}</span>
+            <span class="sv-tag sv-task-status-tag" title="任务执行模式(批次 4 六模式)">模式:{{ taskModeLabel }}</span>
             <!-- 本任务用的流程(二维批次 5a):绑定流程显示其名,未绑定显示「跟随当前流程」。
                  名字取自任务快照(与徽标同一份编排),故跑完任务后再改流程这里也不会变 -->
             <span
               v-if="taskFlowLabel"
-              class="sv-tag sm"
+              class="sv-tag sv-task-status-tag"
               title="本任务绑定/使用的流程(绑定即冻结:创建时的编排;未绑定 = 跟随当前流程)"
             >流程:{{ taskFlowLabel }}</span>
+            <span
+              v-else
+              class="sv-tag sv-task-status-tag"
+              title="非自定义流程任务按执行模式自身的编排运行"
+            >流程:按模式编排</span>
             <!-- 对比模式(二维批次 7b):根流程照常执行,名单内流程额外作为 run_flow 工具
                  释放给宽松节点,由模型自主调用、取回成果。数字按**本轮实际**可调用集显示 -->
             <span
               v-if="taskCompareLabel"
-              class="sv-tag sm"
+              class="sv-tag sv-task-status-tag"
               :title="taskCompareTitle"
             >{{ taskCompareLabel }}</span>
-            <span v-if="taskTotalTokens > 0" class="sv-task-usage">累计 token {{ taskTotalTokens.toLocaleString() }}</span>
-            <span v-if="currentTask.task.error" class="sv-task-error">{{ currentTask.task.error }}</span>
+            <span class="sv-task-usage sv-task-status-tag">
+              累计 token: <b class="sv-tnum">{{ taskTotalTokens.toLocaleString() }}</b>
+            </span>
           </div>
+          <div v-if="currentTask.task.error" class="sv-task-error" role="alert">{{ currentTask.task.error }}</div>
 
           <!-- 工作区(CODE-1):创建期冻结;未绑定不显示该行(不把「没有」渲染成一行噪音) -->
           <div v-if="taskWorkspace" class="sv-task-workspace">
@@ -835,17 +877,33 @@ async function removeTask(task: TaskRecord): Promise<void> {
           <div
             v-if="taskRunning && lastAgentStatus"
             class="sv-task-progress-line"
+            aria-live="polite"
             title="最近一次执行进展(来自后端事件,事件不落库)"
           >
-            <span class="sv-task-progress-dot" />
-            <span class="sv-task-progress-text">{{ lastAgentStatus }}</span>
+            <div class="sv-task-progress-head">
+              <span class="sv-task-progress-dot" />
+              <span class="sv-task-progress-label">执行中</span>
+              <span class="sv-task-progress-count sv-tnum">
+                {{ taskStepProgress.done }}/{{ taskStepProgress.total }}
+              </span>
+            </div>
+            <div
+              class="sv-task-progress-track"
+              role="progressbar"
+              :aria-valuenow="taskStepProgress.done"
+              :aria-valuemin="0"
+              :aria-valuemax="taskStepProgress.total || 0"
+              aria-label="计划步骤完成度"
+            >
+              <span :style="{ width: `${taskStepProgress.pct}%` }" />
+            </div>
+            <p class="sv-task-progress-text">{{ lastAgentStatus }}</p>
           </div>
 
           <!-- plan 模式批准区:计划已生成待批准(批准 / 修改后批准 / 放弃) -->
           <div v-if="taskPlanned" class="sv-task-approve">
             <div class="sv-task-section-title">计划待批准</div>
-            <!-- 批次 R1:planned 态 result = 待批准的计划清单,批准区内渲染供批准前审阅 -->
-            <div v-if="plannedPlanHtml" class="sv-task-result sv-task-planned-plan" v-html="plannedPlanHtml" />
+            <div class="sv-task-approve-head">
             <!-- 执行方式选择(2026-09-17):默认按计划逐步执行;选其它模式则由该模式
                  自行组织执行(team/custom 会用自身规划/流程重写计划步骤显示)。
                  编辑态下同样可见——「修改后批准」也走这个选择。 -->
@@ -883,7 +941,10 @@ async function removeTask(task: TaskRecord): Promise<void> {
                 >放弃</button>
               </div>
             </template>
-            <template v-else>
+            </div>
+            <!-- 批次 R1:planned 态 result = 待批准的计划清单,批准区内渲染供批准前审阅 -->
+            <div v-if="plannedPlanHtml" class="sv-task-result sv-task-planned-plan" v-html="plannedPlanHtml" />
+            <template v-if="planEditing">
               <!-- 计划简易编辑:每步 名称/目标 两个输入框(增删步不做,保持最小) -->
               <div v-for="(s, i) in editedPlan" :key="i" class="sv-task-plan-edit">
                 <span class="sv-task-step-idx">{{ i + 1 }}</span>
@@ -1161,22 +1222,66 @@ async function removeTask(task: TaskRecord): Promise<void> {
             <div v-if="!taskTerminal" class="sv-task-followup-hint">{{ followupDisabledHint }}</div>
           </div>
 
-          <div v-if="currentTask.task.status === 'pending'" class="sv-task-empty sv-mt16">
-            <p class="sub">任务已创建,点击右上「执行」开始</p>
+          <div v-if="currentTask.task.status === 'pending'" class="sv-task-pending">
+            <div>
+              <span class="sv-task-pending-kicker">已创建 · 等待执行</span>
+              <p>任务已创建，点右上「执行」开始；也可以用下面的按钮立即执行。</p>
+            </div>
+            <button type="button" class="sv-btn ghost sv-btn-sm" @click="runCurrent">▶ 立即执行</button>
           </div>
         </template>
 
         <div v-else class="sv-task-empty fill">
-          <div class="sv-empty-geo lg mb14">
-            <span class="sq black" />
-            <span class="sq pink" />
-            <span class="sq deep" />
-          <i class="diag" />
+          <div class="sv-task-start">
+            <div class="sv-task-start-grid">
+              <div class="sv-task-start-copy">
+                <div class="sv-task-start-kicker">
+                  <span class="sq" />任务工作台<span class="sv-task-start-kicker-en">WORKBENCH</span>
+                </div>
+                <h2 class="sv-task-start-title">把目标交给 Kedai</h2>
+                <p class="sv-task-start-desc">
+                  在左侧输入目标，系统会拆解计划、派子智能体执行并汇总结果。
+                </p>
+                <ol class="sv-task-start-steps">
+                  <li><b>01</b><span><strong>下达目标</strong><small>写清楚要交付什么</small></span></li>
+                  <li><b>02</b><span><strong>拆解与执行</strong><small>选择模式、执行者与工作区</small></span></li>
+                  <li><b>03</b><span><strong>汇总与交付</strong><small>查看步骤、结果与文件变更</small></span></li>
+                </ol>
+                <div class="sv-task-start-modes" aria-label="可选执行模式">
+                  <span
+                    v-for="m in MODE_ORDER"
+                    :key="m"
+                    class="sv-task-start-mode"
+                    :class="{ active: store.taskRunMode === m }"
+                  >{{ MODE_LABELS[m] }}</span>
+                </div>
+                <div class="sv-task-start-actions">
+                  <button type="button" class="sv-btn primary sv-btn-sm" @click="openTaskComposer">
+                    打开任务面板
+                  </button>
+                </div>
+              </div>
+
+              <aside class="sv-task-start-spec" aria-labelledby="sv-task-spec-head">
+                <div id="sv-task-spec-head" class="sv-task-start-spec-head">
+                  <span>执行设置</span><span>运行前可改</span>
+                </div>
+                <dl class="sv-task-start-spec-list">
+                  <div><dt>模式</dt><dd>{{ emptyModeLabel }}</dd></div>
+                  <div><dt>流程</dt><dd>{{ emptyFlowLabel }}</dd></div>
+                  <div><dt>执行者</dt><dd>左侧选择 · 通用执行者</dd></div>
+                  <div><dt>工作区</dt><dd>左侧选择 · 可选</dd></div>
+                </dl>
+                <div class="sv-task-start-spec-foot">
+                  <span class="sv-task-start-spec-arrow" aria-hidden="true">←</span>
+                  在左侧「下达目标」写下交付物，点「创建并执行」。
+                </div>
+              </aside>
+            </div>
           </div>
-          <p class="lead">选择或创建一个任务</p>
-          <p class="sub">在左侧栏输入目标,系统会拆解计划、派子智能体执行并汇总结果</p>
         </div>
       </div>
+    </div>
     </div>
   </section>
 </template>
@@ -1323,5 +1428,457 @@ async function removeTask(task: TaskRecord): Promise<void> {
 .flow-node-tag.off {
   border-color: var(--sv-ink-faint);
   color: var(--sv-ink-faint);
+}
+
+/* ===== UIQ-4:任务工作台终稿 =====
+   环境层在 stage 背后;详情区保持透明,标题/状态矩阵用实色纸面保证可读。
+   所有新增规则留在 scoped 块,不增全局 CSS 行数。 */
+.sv-task-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+  background-color: var(--sv-paper);
+  background-image:
+    linear-gradient(to right, color-mix(in srgb, var(--sv-ink) 3%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--sv-ink) 3%, transparent) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+.sv-taskboard { position: relative; z-index: 1; background: transparent; }
+.sv-task-detail { padding-top: var(--space-3); }
+
+/* 标题:sticky,滚动时仍能看到任务身份与主操作 */
+.sv-task-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  align-items: flex-start;
+  margin-bottom: var(--space-2);
+  padding: var(--space-2) 0 var(--space-3);
+  border-bottom: 1px solid var(--sv-line);
+  background: var(--sv-paper);
+}
+.sv-task-head-copy { min-width: 0; }
+.sv-task-head-kicker {
+  display: block;
+  font-size: var(--text-2xs);
+  letter-spacing: 0.18em;
+  color: var(--sv-ink-faint);
+  text-transform: uppercase;
+}
+.sv-task-head-title {
+  align-items: flex-start;
+  margin-top: var(--space-1);
+  font-size: clamp(22px, 2.4vw, 28px);
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+}
+.sv-task-head-title .sv-supreme { flex: none; margin-top: var(--space-1-5); }
+.sv-task-head-actions .sv-btn { min-height: var(--control-h); }
+
+/* 状态矩阵:一格一项,发丝分隔;状态色只改文字/左侧记号,不画彩色盒子 */
+.sv-task-status-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 0;
+  margin-bottom: var(--space-6);
+  border-top: 1px solid var(--sv-line-strong);
+  border-bottom: 1px solid var(--sv-line-strong);
+}
+.sv-task-status-tag {
+  display: flex;
+  align-items: center;
+  min-height: 38px;
+  margin: 0;
+  padding: 0 var(--space-3);
+  border: none;
+  border-right: 1px solid var(--sv-line);
+  background: transparent;
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0;
+}
+.sv-task-status-tag:last-child { border-right: none; }
+.sv-task-status-tag:first-child { box-shadow: inset 3px 0 0 currentColor; }
+.sv-task-usage b { font-weight: 800; color: var(--sv-ink); }
+.sv-task-error { margin: calc(-1 * var(--space-4)) 0 var(--space-5); }
+
+/* 执行中:2px 进度轨 + 当前进展单行 */
+.sv-task-progress-line {
+  display: block;
+  margin: 0 0 var(--space-5);
+  padding: var(--space-3) var(--space-3-5);
+  border: 1px solid var(--sv-line-strong);
+  background: var(--sv-white);
+}
+.sv-task-progress-head { display: flex; align-items: center; gap: var(--space-2); }
+.sv-task-progress-dot { width: 8px; height: 8px; background: var(--sv-red); }
+.sv-task-progress-label { font-size: var(--text-xs); font-weight: 800; letter-spacing: 0.08em; }
+.sv-task-progress-count { margin-left: auto; font-size: var(--text-xs); color: var(--sv-ink-faint); }
+.sv-task-progress-track {
+  height: 2px;
+  margin: var(--space-2-5) 0 var(--space-2);
+  background: var(--sv-line);
+  overflow: hidden;
+}
+.sv-task-progress-track span {
+  display: block;
+  height: 100%;
+  background: var(--sv-red);
+  transition: width var(--dur-slow) var(--ease-out);
+}
+.sv-task-progress-text {
+  margin: 0;
+  font-size: var(--text-xs);
+  line-height: var(--lh-body);
+  color: var(--sv-ink-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 待批准:hero 卡(2px 外框 + 4px 红顶线 + 实黑硬影) */
+.sv-task-approve {
+  padding: var(--space-5);
+  border: var(--bw) solid var(--sv-ink);
+  border-top: 4px solid var(--sv-red);
+  background: var(--sv-white);
+  box-shadow: var(--shadow-hard);
+}
+.sv-task-approve .sv-task-section-title {
+  padding-bottom: 0;
+  margin-bottom: var(--space-3);
+  border-bottom: none;
+  font-size: var(--text-md);
+}
+.sv-task-approve-head {
+  margin-bottom: var(--space-4);
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--sv-line);
+}
+.sv-task-approve-head .sv-task-approve-actions {
+  margin-top: var(--space-3);
+  padding-top: 0;
+  border-top: none;
+}
+.sv-task-approve .sv-task-planned-plan {
+  max-width: none;
+  padding: 0;
+  border: none;
+  box-shadow: none;
+  background: transparent;
+}
+.sv-task-approve .sv-task-result :deep(p) { margin: 0.6em 0; }
+.sv-task-approve-actions {
+  margin-top: var(--space-4);
+  padding-top: var(--space-3-5);
+  border-top: 1px solid var(--sv-line);
+}
+
+/* 步骤时间线:更松的行距、更清楚的数字锚点 */
+.sv-task-step {
+  padding: var(--space-3-5) var(--space-4);
+  margin-bottom: var(--space-2);
+  border: 1px solid var(--sv-line-strong);
+  background: var(--sv-white);
+}
+.sv-task-step-name { font-size: var(--text-base); }
+.sv-task-step-goal { font-size: var(--text-xs); line-height: var(--lh-body); color: var(--sv-ink-dim); }
+.sv-task-step-result { font-size: var(--text-sm); line-height: var(--lh-prose); }
+.sv-task-step-idx { font-size: var(--text-xs); }
+.sv-task-step-idx.active { background: var(--sv-red); color: var(--sv-white); }
+.sv-task-subtask {
+  padding: var(--space-2-5) var(--space-3);
+  border-left: 2px solid var(--sv-line-strong);
+  background: var(--sv-surface-elevated);
+}
+
+/* 成果:白纸 hero + 黑顶线;正文 46em,不被整栏拉宽 */
+.sv-task-result {
+  max-width: var(--measure-task-result);
+  padding: var(--space-5);
+  border: var(--bw) solid var(--sv-ink);
+  border-top: 5px solid var(--sv-ink);
+  font-size: var(--text-base);
+  line-height: var(--lh-prose);
+}
+.sv-task-result :deep(h1),
+.sv-task-result :deep(h2),
+.sv-task-result :deep(h3) {
+  font-family: var(--font-body);
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  line-height: var(--lh-tight);
+}
+.sv-task-result :deep(h1) { margin: 0.2em 0 0.5em; font-size: var(--text-lg); }
+.sv-task-result :deep(h2) { margin: 1.1em 0 0.4em; font-size: var(--text-md); }
+.sv-task-result :deep(h3) { margin: 0.9em 0 0.35em; font-size: var(--text-base); }
+.sv-task-result :deep(p) { margin: 0.7em 0; }
+.sv-task-result :deep(ul),
+.sv-task-result :deep(ol) { margin: 0.6em 0; padding-left: 1.4em; }
+.sv-task-result :deep(ul) { list-style: disc; }
+.sv-task-result :deep(ol) { list-style: decimal; }
+.sv-task-result :deep(li) { margin: 0.28em 0; }
+.sv-task-result :deep(blockquote) {
+  margin: 0.8em 0;
+  padding: 0.35em 0.9em;
+  border-left: 3px solid var(--sv-red);
+  background: var(--sv-paper);
+  color: var(--sv-ink-dim);
+}
+.sv-task-result :deep(table) {
+  width: 100%;
+  margin: 0.8em 0;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+.sv-task-result :deep(th),
+.sv-task-result :deep(td) {
+  padding: var(--space-1-5) var(--space-2-5);
+  border: 1px solid var(--sv-line-strong);
+  text-align: left;
+  vertical-align: top;
+}
+.sv-task-result :deep(th) {
+  background: var(--sv-paper);
+  font-weight: 800;
+}
+.sv-task-result :deep(a) {
+  color: var(--sv-red-deep);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.sv-task-result :deep(code) {
+  padding: 0.1em 0.3em;
+  border: 1px solid var(--sv-line);
+  background: var(--sv-paper);
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+.sv-task-result :deep(pre code) {
+  padding: 0;
+  border: none;
+  background: transparent;
+}
+.sv-task-result :deep(pre) { font-size: var(--text-xs); line-height: 1.7; }
+
+/* pending:不再是一句灰字 */
+.sv-task-pending {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  border: var(--bw) solid var(--sv-ink);
+  border-left: 4px solid var(--sv-red);
+  background: var(--sv-white);
+  box-shadow: var(--shadow-card);
+}
+.sv-task-pending-kicker {
+  font-size: var(--text-2xs);
+  letter-spacing: 0.16em;
+  color: var(--sv-ink-faint);
+  text-transform: uppercase;
+}
+.sv-task-pending p { margin: var(--space-1) 0 0; font-size: var(--text-sm); }
+
+/* ===== 空态:两栏「工作台开场」 ===== */
+.sv-task-empty.fill {
+  height: 100%;
+  align-items: stretch;
+  justify-content: flex-start;
+  padding: 0;
+  text-align: left;
+  color: var(--sv-ink);
+}
+.sv-task-start {
+  position: relative;
+  width: 100%;
+  max-width: 1060px;
+  margin: clamp(var(--space-6), 6vh, calc(var(--space-6) * 3)) auto 0;
+  padding: 0 0 var(--space-5);
+  border-top: var(--bw) solid var(--sv-ink);
+  background: transparent;
+  box-shadow: none;
+  text-align: left;
+}
+.sv-task-start::before {
+  content: '';
+  position: absolute;
+  right: 6px;
+  top: 26px;
+  width: 18px;
+  height: 18px;
+  background: var(--sv-ink-supreme);
+}
+.sv-task-start-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(290px, 0.85fr);
+  gap: clamp(var(--space-8), 5vw, calc(var(--space-8) * 2));
+  align-items: start;
+}
+.sv-task-start-copy { min-width: 0; }
+.sv-task-start-kicker {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  font-size: var(--text-2xs);
+  letter-spacing: 0.18em;
+  color: var(--sv-ink-dim);
+  text-transform: uppercase;
+}
+.sv-task-start-kicker .sq { width: 10px; height: 10px; background: var(--sv-red); display: inline-block; flex: none; }
+.sv-task-start-kicker-en { margin-left: var(--space-1); color: var(--sv-ink-faint); letter-spacing: 0.2em; }
+.sv-task-start-title {
+  max-width: 16ch;
+  margin: var(--space-4) 0 var(--space-3);
+  font-family: var(--font-display);
+  font-size: clamp(28px, 3.4vw, 38px);
+  line-height: 1.12;
+  letter-spacing: -0.01em;
+}
+.sv-task-start-desc {
+  max-width: 52ch;
+  margin: 0;
+  font-size: var(--text-base);
+  line-height: var(--lh-prose);
+  color: var(--sv-ink-dim);
+}
+.sv-task-start-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: var(--space-5) 0 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--sv-line-strong);
+  border-bottom: 1px solid var(--sv-line-strong);
+}
+.sv-task-start-steps li {
+  display: flex;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-3) var(--space-3) 0;
+  border-right: 1px solid var(--sv-line);
+}
+.sv-task-start-steps li:last-child { border-right: 0; }
+.sv-task-start-steps b {
+  flex: none;
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  line-height: var(--lh-tight);
+  color: var(--sv-red);
+}
+.sv-task-start-steps span { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.sv-task-start-steps strong { font-size: var(--text-xs); }
+.sv-task-start-steps small { font-size: var(--text-xs); line-height: var(--lh-body); color: var(--sv-ink-faint); }
+.sv-task-start-modes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1-5);
+  margin-top: var(--space-4);
+}
+.sv-task-start-mode {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--sv-line-strong);
+  font-size: var(--text-2xs);
+  color: var(--sv-ink-dim);
+  letter-spacing: 0.04em;
+}
+.sv-task-start-mode.active {
+  border-color: var(--sv-ink);
+  background: var(--sv-ink);
+  color: var(--sv-white);
+}
+.sv-task-start-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+  padding-top: var(--space-2-5);
+  border-top: 1px solid var(--sv-line);
+}
+
+/* 右栏:执行设置清单(发丝表) */
+.sv-task-start-spec {
+  min-width: 0;
+  border-top: var(--bw) solid var(--sv-ink);
+  padding-top: var(--space-2-5);
+}
+.sv-task-start-spec-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding-bottom: var(--space-2-5);
+  border-bottom: 1px solid var(--sv-line-strong);
+  font-size: var(--text-2xs);
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  color: var(--sv-ink-soft);
+  text-transform: uppercase;
+}
+.sv-task-start-spec-head span:last-child { color: var(--sv-ink-faint); letter-spacing: 0.04em; }
+.sv-task-start-spec-list { margin: 0; }
+.sv-task-start-spec-list > div {
+  display: grid;
+  grid-template-columns: 70px minmax(0, 1fr);
+  gap: var(--space-3);
+  padding: var(--space-2-5) 0;
+  border-bottom: 1px solid var(--sv-line);
+}
+.sv-task-start-spec-list dt {
+  font-size: var(--text-2xs);
+  letter-spacing: 0.08em;
+  color: var(--sv-ink-faint);
+}
+.sv-task-start-spec-list dd {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--sv-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sv-task-start-spec-foot {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  font-size: var(--text-xs);
+  line-height: var(--lh-body);
+  color: var(--sv-ink-dim);
+}
+.sv-task-start-spec-arrow {
+  flex: none;
+  font-family: var(--font-display);
+  font-size: var(--text-base);
+  color: var(--sv-red);
+}
+
+@media (max-width: 1099px) {
+  .sv-task-start-grid { grid-template-columns: minmax(0, 1fr); gap: var(--space-6); }
+  .sv-task-start-spec { max-width: 560px; }
+}
+@media (max-width: 900px) {
+  .sv-task-start::before { display: none; }
+}
+@media (max-width: 767px) {
+  .sv-task-detail { padding: var(--space-3); }
+  .sv-task-head { padding-top: var(--space-1); }
+  .sv-task-status-tag { min-height: 34px; padding: 0 var(--space-2); }
+  .sv-task-start { margin: var(--space-3) 0 0; padding-bottom: var(--space-4); }
+  .sv-task-start-title { font-size: var(--text-xl); }
+  .sv-task-start-steps { grid-template-columns: 1fr; }
+  .sv-task-start-steps li {
+    border-right: 0;
+    border-bottom: 1px solid var(--sv-line);
+    padding: var(--space-2) 0;
+  }
+  .sv-task-start-steps li:last-child { border-bottom: 0; }
+  .sv-task-start-spec-list > div { padding: var(--space-2) 0; }
+  .sv-task-approve { padding: var(--space-4); }
+  .sv-task-pending { flex-direction: column; align-items: flex-start; }
 }
 </style>

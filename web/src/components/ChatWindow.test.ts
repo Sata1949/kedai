@@ -4,7 +4,7 @@
 // 组件 onMounted 会 installMvuGlobals + 挂 message 监听,故需 jsdom 环境;
 // 脚本沙箱相关模块整体 mock(不启 iframe)。
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { mount } from '@vue/test-utils';
+import { flushPromises, mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
 
 const memStorage = new Map<string, string>();
@@ -49,15 +49,27 @@ describe('ChatWindow 组件(阶段 A 补测)', () => {
     memStorage.clear();
   });
 
-  it('无消息时渲染空态引导文案', () => {
+  it('无消息时渲染空态引导卡', () => {
     const { wrapper } = mountWindow();
-    expect(wrapper.find('.sv-empty').exists()).toBe(true);
-    expect(wrapper.text()).toContain('选择左侧角色开始对话');
+    expect(wrapper.find('.sv-start').exists()).toBe(true);
+    expect(wrapper.text()).toContain('先选一个角色');
+    expect(wrapper.text()).toContain('导入角色卡');
+  });
+
+  it('无消息时切会话不吸底,空态从顶部开始(移动端标题不被滚出视口)', async () => {
+    const { store, wrapper } = mountWindow();
+    const canvas = wrapper.find('.sv-canvas').element as HTMLElement;
+    canvas.scrollTop = 320;
+
+    store.currentSessionId = 'next-empty-session';
+    await flushPromises();
+    expect(canvas.scrollTop).toBe(0);
+    wrapper.unmount();
   });
 
   it('有消息时不再显示空态', async () => {
     const { store, wrapper } = mountWindow();
-    const before = wrapper.find('.sv-empty').exists();
+    const before = wrapper.find('.sv-start').exists();
 
     store.messages = [
       { id: 1, role: 'user', content: '你好', extra: {}, streaming: false },
@@ -66,7 +78,7 @@ describe('ChatWindow 组件(阶段 A 补测)', () => {
 
     // 空态消失(无角色时消息区可能仍受其他条件约束,故断言「与初始不同」而非绝对不存在)
     expect(before).toBe(true);
-    expect(wrapper.text()).not.toContain('选择左侧角色开始对话');
+    expect(wrapper.text()).not.toContain('先选一个角色');
   });
 
   it('渲染输入栏与顶栏(主交互链路常驻)', () => {

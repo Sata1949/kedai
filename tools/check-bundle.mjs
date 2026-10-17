@@ -67,6 +67,12 @@ const VERBOSE = process.argv.includes('--verbose');
  *   全局域逐文件行数/!important 只降不升 + 动画/过渡裸时长归零),预算放宽不放松结构约束。
  *   其余 chunk 与首屏/总量预算本批未动(首屏 283,140/288,000 余 4,860,属已知偏紧项,
  *   下次功能增长由当批按同一协议上调)。
+ * index.css 19,700 → 21,910 → 24,939(2026-10-17,UIQ-4 双主体终稿重测):
+ *   角色扮演两栏空态/角色索引/masthead/消息排版,任务台 sticky 标题/状态矩阵/进度轨/
+ *   批准 hero/时间线/两栏空态/侧栏折叠设置等样式(均在 .vue scoped 内,但主 chunk 组件的
+ *   scoped CSS 会被 Vite 抽进 index.css);实测 22,672 gz,超旧预算 762,按协议上调到
+ *   22,672 + 10% ≈ 24,939。环境层已拆为 AmbientField 懒加载 chunk(4.12KB gz),首屏
+ *   合计仍 302,433/317,030,未占首屏预算。
  * 实测值(2026-09-26):首屏 275,060 / 全部资产 477,970 / index 107,834 / flow-vendor 71,603 /
  *   vendor 70,815 / content-rendering 44,786 / vue-vendor 34,069 / index css 17,184。
  *   → 与 2026-09-20 相比,**只有 index 涨了 10,354 gz**(97,480 → 107,834),其余七项持平。
@@ -105,7 +111,7 @@ const CHUNK_BUDGETS_GZ = {
   'vendor.js': 78000,
   'content-rendering.js': 49500,
   'vue-vendor.js': 37500,
-  'index.css': 19700,
+  'index.css': 24939,
 };
 
 /**

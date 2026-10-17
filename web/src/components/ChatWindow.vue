@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 聊天窗口:顶栏(ChatTopbar)+ 消息列表(编辑/删除,画布容器 RenderPanelHost)+ 底部输入区
-import { ref, nextTick, watch, computed, onMounted, onBeforeUnmount } from 'vue';
+import { ref, nextTick, watch, computed, onMounted, onBeforeUnmount, defineAsyncComponent } from 'vue';
 import { storeToRefs } from 'pinia';
 import { useAppStore } from '../store';
 import { renderScopedScripts, hasStatusPlaceholderScript, buildMessageRenderText } from '../render';
@@ -19,13 +19,65 @@ import ChatMessageItem from './ChatMessageItem.vue';
 import ChatTopbar from './ChatTopbar.vue';
 import GreetingPickerModal from './GreetingPickerModal.vue';
 import RenderPanelHost from './RenderPanelHost.vue';
+/** 环境层懒加载:shader/WebGL 生命周期不进首屏 index chunk(预算见 check-bundle)。 */
+const AmbientField = defineAsyncComponent(() => import('./AmbientField.vue'));
 
 const store = useAppStore();
 const {
   messages, generating, currentSessionId, currentCharacterId, currentCharacter, currentCharacterName,
   renderHtml, currentScriptHash, currentScriptAuthorized, mvuVariables, initVarEntries, lastError,
-  regexScripts,
+  regexScripts, characters, sessions, model, connStatus,
 } = storeToRefs(store);
+
+/** 空态快捷角色:最多 3 个,复用列表已有数据,不额外请求 */
+const quickStartCharacters = computed(() => characters.value.slice(0, 3));
+
+/** 会话标题(空态 meta 与有消息时的 masthead 共用) */
+const currentSessionTitle = computed(
+  () => sessions.value.find((s) => s.id === currentSessionId.value)?.title || '当前会话',
+);
+
+/** 连接状态中文(与侧栏同一套语义;空态给用户一个可判断的连接事实) */
+const connectionLabel = computed(() => {
+  switch (connStatus.value) {
+    case 'ok': return '已连接';
+    case 'fail': return '未连接';
+    default: return '检测中';
+  }
+});
+
+/** 无角色时,导入入口在 Sidebar;空态按钮经事件触发同一 file input(不复制导入逻辑) */
+function requestCharacterImport(): void {
+  window.dispatchEvent(new Event('kedai:open-character-import'));
+}
+
+/** 回到底部浮钮:离底超过 400px 才出现,避免在正常阅读时制造噪音。 */
+const showScrollButton = ref(false);
+const SCROLL_BOTTOM_THRESHOLD = 400;
+
+function updateScrollButton(): void {
+  const el = scrollArea.value;
+  if (!el) {
+    showScrollButton.value = false;
+    return;
+  }
+  showScrollButton.value = el.scrollHeight - el.scrollTop - el.clientHeight > SCROLL_BOTTOM_THRESHOLD;
+}
+
+function scrollToLatest(): void {
+  const el = scrollArea.value;
+  if (!el) return;
+  const reduce = typeof window.matchMedia === 'function'
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  el.scrollTo({ top: el.scrollHeight, behavior: reduce ? 'auto' : 'smooth' });
+  showScrollButton.value = false;
+}
+
+/** 角色头像 URL(空态快捷卡用;与聊天头像同一路径规则) */
+function charAvatar(c: { avatar_path?: string | null }): string | null {
+  if (!c.avatar_path) return null;
+  return `/api/avatars/${c.avatar_path.split(/[\\/]/).pop()}`;
+}
 
 /** 错误条「重试」锚点:最后一条**已落库**用户消息(与服务端重发校验口径一致,见 resendMessage) */
 const retryTarget = computed<number | null>(() => {
@@ -47,6 +99,13 @@ const panelHost = ref<InstanceType<typeof RenderPanelHost> | null>(null);
 const scrollArea = computed<HTMLElement | null>(() => panelHost.value?.el ?? null);
 /** 脚本执行器(内部含 [InitVar] 解析缓存;角色切换/条目变化自动失效) */
 const scriptRunner = new ScriptRunner();
+
+/** 滚动容器挂载/换会话后接线「回到底部」判定;监听在卸载时显式摘除。 */
+watch(scrollArea, (el, old) => {
+  old?.removeEventListener('scroll', updateScrollButton);
+  el?.addEventListener('scroll', updateScrollButton, { passive: true });
+  updateScrollButton();
+}, { flush: 'post' });
 
 /** 当前角色正则脚本 + 全局正则库(显示层生效;合并顺序:全局在前、卡级在后,
  *  见 utils/regexMerge.ts。全局库变化会同时改 currentScriptHash 使渲染缓存失效) */
@@ -169,6 +228,8 @@ onMounted(async () => {
   await frames.hydrate();
   // 渲染面板(TH-render 等价物)同理由 watch 驱动,初始历史补一次
   await hydrateRenderPanels();
+  // 首屏历史可能在 watch 建立前已加载:显式补一次「定位到最后一条」
+  await scrollToBottom();
   // 卡级脚本长驻沙箱首次同步(watch 无 immediate:此时 scrollArea 已挂载,
   // 重进恢复的角色若已授权,swipe 世界书联动等卡级脚本从这里起跑)
   void syncCardScriptSandbox();
@@ -176,6 +237,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('message', frames.handleMessage);
+  scrollArea.value?.removeEventListener('scroll', updateScrollButton);
   scriptRunner.cleanup();
   cleanupCardScriptSandbox();
 });
@@ -188,6 +250,24 @@ const listEpoch = ref(0);
 
 /** 编辑中的消息 id(单编辑语义;编辑文本由子组件本地管理,击键不触发列表重渲染) */
 const editingId = ref<number | null>(null);
+
+/** 滚到最后一条:等 DOM/虚拟行高度稳定后再补一帧(首屏/切会话时 watch 可能早于布局)。 */
+async function scrollToBottom(): Promise<void> {
+  await nextTick();
+  const el = scrollArea.value;
+  if (!el) return;
+  // 空态不是消息流:它需要从顶部读起。旧实现无条件吸底,移动端会把标题/引导滚出视口。
+  if (messages.value.length === 0) {
+    el.scrollTop = 0;
+    showScrollButton.value = false;
+    return;
+  }
+  el.scrollTop = el.scrollHeight;
+  showScrollButton.value = false;
+  requestAnimationFrame(() => {
+    if (scrollArea.value) scrollArea.value.scrollTop = scrollArea.value.scrollHeight;
+  });
+}
 
 // 消息变化时自动滚到底部
 // 签名 O(1):仅读「长度 + 最后一条消息 + 生成态 + 编辑态 + 纪元」,
@@ -208,10 +288,14 @@ watch(
     ].join('\u0001');
   },
   async () => {
-    await nextTick();
-    if (scrollArea.value) scrollArea.value.scrollTop = scrollArea.value.scrollHeight;
+    await scrollToBottom();
   },
 );
+
+// 切会话:历史尚未到达时先滚一次,消息到达后上面的 watch 再补一次
+watch(currentSessionId, async () => {
+  await scrollToBottom();
+});
 
 // 渲染后副作用(脚本执行 + 资源卡片/渲染面板投递)
 // 签名同样 O(1):最后一条消息渲染文本 + HTML 开关 + 脚本版本(hash/长度/授权)+ 编辑态 + 纪元;
@@ -379,61 +463,169 @@ function bindRowRef(id: number, target: unknown): void {
     <!-- 顶栏(含渲染引导条):会话/开场/渲染开关/JS 授权/Agent 面板/token 统计 -->
     <ChatTopbar @open-greeting-picker="openGreetingPicker" />
 
-    <!-- 消息画布(渲染面板折叠切换与水合由宿主组件承载) -->
-    <RenderPanelHost ref="panelHost">
-      <div v-if="messages.length === 0" class="sv-empty">
-        <div class="sv-empty-geo">
-          <span class="sq black" />
-          <span class="sq pink" />
-          <span class="sq deep" />
-          <i class="diag" />
-        </div>
-        <p>选择左侧角色开始对话,或上传一张角色卡。</p>
-        <p class="hint">
-          输入含算式(如「帮我算 12*34」)时,Agent 会自动调用计算器工具。
-        </p>
-      </div>
+    <!-- 舞台:环境层在画布背后,消息/空态在实色表面上(z-index 1) -->
+    <div class="sv-stage">
+      <AmbientField :variant="'paper'" :intensity="messages.length ? 0.22 : 0.85" :paused="generating" />
 
-      <!-- 消息列表(渲染缓存:每条消息独立子组件,流式仅重算当前消息;
-           props 未变的子组件在父重渲染时自动跳过;长会话虚拟滚动:缓冲区外渲染等高占位) -->
-      <template v-for="(m, i) in messages" :key="m.id">
-        <div
-          v-if="!vm.isActive(m.id, i)"
-          :style="vm.placeholderStyle(m)"
-          :ref="(el) => bindRowRef(m.id, el)"
-        ></div>
-        <ChatMessageItem
-          v-else
-          :ref="(inst) => bindRowRef(m.id, inst)"
-          :m="m"
-          :editing="editingId === m.id"
-          :avatar-url="avatarUrl"
-          :character-name="currentCharacterName"
-          :render-html="renderHtml"
-          :scripts="currentScripts"
-          :script-hash="currentScriptHash"
-          :depth="messages.length - 1 - i"
-          @start-edit="startEdit"
-          @save-edit="saveEdit"
-          @cancel-edit="editingId = null"
-          @mutated="listEpoch += 1"
-        />
-      </template>
+      <!-- 消息画布(渲染面板折叠切换与水合由宿主组件承载) -->
+      <RenderPanelHost ref="panelHost" transparent>
+        <div v-if="messages.length === 0" class="sv-start">
+          <div class="sv-start-grid">
+            <div class="sv-start-copy">
+              <div class="sv-start-kicker">
+                <span class="sq" />角色扮演<span class="sv-start-kicker-en">ROLEPLAY</span>
+              </div>
+              <h2 class="sv-start-title">
+                {{ currentCharacter ? `和 ${currentCharacterName} 开始对话` : '先选一个角色' }}
+              </h2>
+              <p class="sv-start-desc">
+                {{ currentCharacter
+                  ? '输入消息开始，或先确认连接与模型。左侧可随时切换角色与模式。'
+                  : '从左侧角色列表选择，或点击「导入角色卡」开始。' }}
+              </p>
 
-      <!-- 思考中占位 -->
-      <div v-if="generating" class="sv-msg assistant">
-        <span class="sv-avatar char">
-          <template v-if="avatarUrl"><img :src="avatarUrl" alt="" /></template>
-          <template v-else>{{ currentCharacterName.charAt(0) }}</template>
-        </span>
-        <div>
-          <div class="sv-msg-name">{{ currentCharacterName }}</div>
-          <div class="sv-msg-bubble thinking">
-            <span class="sv-thinking"><i /><i /><i /></span>
+              <dl class="sv-start-meta" aria-label="当前连接与会话">
+                <div class="sv-start-meta-item">
+                  <dt>模型</dt>
+                  <dd>{{ model || '未配置' }}</dd>
+                </div>
+                <div class="sv-start-meta-item">
+                  <dt>连接</dt>
+                  <dd>{{ connectionLabel }}</dd>
+                </div>
+                <div class="sv-start-meta-item">
+                  <dt>会话</dt>
+                  <dd class="sv-tnum">{{ sessions.length }} 个</dd>
+                </div>
+              </dl>
+
+              <div class="sv-start-actions">
+                <button
+                  v-if="!characters.length"
+                  type="button"
+                  class="sv-btn primary sv-btn-sm"
+                  @click="requestCharacterImport"
+                >导入角色卡</button>
+                <button
+                  v-else
+                  type="button"
+                  class="sv-btn primary sv-btn-sm"
+                  @click="store.settingsOpen = true"
+                >连接与模型</button>
+                <button
+                  type="button"
+                  class="sv-btn ghost sv-btn-sm"
+                  :disabled="!currentCharacterId"
+                  @click="store.newSession()"
+                >新建会话</button>
+              </div>
+              <p class="sv-start-hint">输入含算式（如「帮我算 12*34」）时，Agent 会自动调用计算器工具。</p>
+            </div>
+
+            <aside class="sv-start-cast" aria-labelledby="sv-cast-head">
+              <div id="sv-cast-head" class="sv-start-cast-head">
+                <span>角色索引</span>
+                <span class="sv-start-cast-count sv-tnum">
+                  {{ quickStartCharacters.length.toString().padStart(2, '0') }} /
+                  {{ characters.length.toString().padStart(2, '0') }}
+                </span>
+              </div>
+              <ol v-if="quickStartCharacters.length" class="sv-start-chars">
+                <li v-for="(c, i) in quickStartCharacters" :key="c.id">
+                  <button
+                    type="button"
+                    class="sv-start-char"
+                    :class="{ active: c.id === currentCharacterId }"
+                    @click="store.selectCharacter(c.id)"
+                  >
+                    <span class="sv-start-char-idx sv-tnum">{{ (i + 1).toString().padStart(2, '0') }}</span>
+                    <span class="sv-avatar small char">
+                      <img v-if="charAvatar(c)" :src="charAvatar(c)!" alt="" />
+                      <template v-else>{{ c.chara_name.charAt(0) }}</template>
+                    </span>
+                    <span class="sv-start-char-body">
+                      <span class="sv-start-char-name">{{ c.chara_name }}</span>
+                      <span class="sv-start-char-desc">{{ c.description || '无提示词' }}</span>
+                    </span>
+                    <span class="sv-start-char-arrow" aria-hidden="true">→</span>
+                  </button>
+                </li>
+              </ol>
+              <div v-else class="sv-start-cast-empty">
+                <span class="sv-start-cast-mark" aria-hidden="true" />
+                <p>还没有角色卡</p>
+                <p>从左侧「导入角色卡」开始，或点上方按钮选择文件。</p>
+              </div>
+              <p class="sv-start-cast-note">选择角色后，开场白会自动进入对话。</p>
+            </aside>
           </div>
         </div>
-      </div>
-    </RenderPanelHost>
+
+        <!-- 有消息时的对话 masthead:角色 / 模型 / 会话 / 条数 -->
+        <div v-else class="sv-chat-masthead">
+          <div class="sv-chat-masthead-main">
+            <span class="sv-chat-masthead-kicker">角色扮演</span>
+            <h2 class="sv-chat-masthead-title">{{ currentCharacterName }}</h2>
+          </div>
+          <div class="sv-chat-masthead-meta">
+            <span>{{ model || '未配置模型' }}</span>
+            <span>{{ currentSessionTitle }}</span>
+            <span class="sv-tnum">{{ messages.length }} 条消息</span>
+          </div>
+        </div>
+
+        <!-- 消息列表(渲染缓存:每条消息独立子组件,流式仅重算当前消息;
+             props 未变的子组件在父重渲染时自动跳过;长会话虚拟滚动:缓冲区外渲染等高占位) -->
+        <template v-for="(m, i) in messages" :key="m.id">
+          <div
+            v-if="!vm.isActive(m.id, i)"
+            :style="vm.placeholderStyle(m)"
+            :ref="(el) => bindRowRef(m.id, el)"
+          ></div>
+          <ChatMessageItem
+            v-else
+            :ref="(inst) => bindRowRef(m.id, inst)"
+            :m="m"
+            :editing="editingId === m.id"
+            :avatar-url="avatarUrl"
+            :character-name="currentCharacterName"
+            :render-html="renderHtml"
+            :scripts="currentScripts"
+            :script-hash="currentScriptHash"
+            :depth="messages.length - 1 - i"
+            @start-edit="startEdit"
+            @save-edit="saveEdit"
+            @cancel-edit="editingId = null"
+            @mutated="listEpoch += 1"
+          />
+        </template>
+
+        <!-- 思考中占位 -->
+        <div v-if="generating" class="sv-msg assistant">
+          <span class="sv-avatar char">
+            <template v-if="avatarUrl"><img :src="avatarUrl" alt="" /></template>
+            <template v-else>{{ currentCharacterName.charAt(0) }}</template>
+          </span>
+          <div>
+            <div class="sv-msg-name">{{ currentCharacterName }}</div>
+            <div class="sv-msg-bubble thinking">
+              <span class="sv-thinking"><i /><i /><i /></span>
+            </div>
+          </div>
+        </div>
+      </RenderPanelHost>
+
+      <button
+        v-if="showScrollButton && messages.length"
+        type="button"
+        class="sv-scroll-bottom"
+        aria-label="回到最新消息"
+        title="回到最新消息"
+        @click="scrollToLatest"
+      >
+        <span aria-hidden="true">↓</span><span>最新</span>
+      </button>
+    </div>
 
     <!-- 发送/生成失败条(SENDFIX-1):错误必须可见——旧版错误只写进 Agent 面板且随即被
          历史回拉擦除,界面表现为「消息发出后什么都没发生」;此处为对话区内的常驻可见层 -->
@@ -487,4 +679,313 @@ function bindRowRef(id: number, target: unknown): void {
 .sv-chat-error-code { font-size: 11px; opacity: 0.7; }
 .sv-chat-error-hint { font-size: 11px; opacity: 0.85; }
 .sv-chat-error-close { flex: none; }
+
+/* ===== 舞台与环境层 ===== */
+.sv-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+  background-color: var(--sv-paper);
+  background-image:
+    radial-gradient(72% 56% at 80% 10%, color-mix(in srgb, var(--sv-pink) 12%, transparent), transparent 72%),
+    radial-gradient(58% 48% at 14% 92%, color-mix(in srgb, var(--sv-blue) 4%, transparent), transparent 76%);
+}
+.sv-stage :deep(.sv-canvas) {
+  position: relative;
+  z-index: 1;
+}
+
+/* 回到底部:离底 >400px 才出现;不参与阅读路径,只在需要时给一个明确出口 */
+.sv-scroll-bottom {
+  position: absolute;
+  right: clamp(16px, 3vw, 32px);
+  bottom: var(--space-4);
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  min-height: var(--control-h-sm);
+  padding: 0 var(--space-3);
+  border: var(--bw) solid var(--sv-ink);
+  background: var(--sv-white);
+  color: var(--sv-ink);
+  box-shadow: var(--shadow-card);
+  font-size: var(--text-xs);
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+}
+.sv-scroll-bottom:hover {
+  background: var(--sv-pink-light);
+  box-shadow: var(--shadow-hover);
+}
+.sv-scroll-bottom:active {
+  box-shadow: var(--shadow-press);
+  transform: translate(2px, 2px);
+}
+
+/* ===== 空态:两栏「编辑部开场」 =====
+   左栏是介绍与下一步,右栏是角色索引;顶线 2px + 编号 + 箭头,
+   不再堆叠彩块/盒中盒。环境层从背后透出,文字仍在白场实色上。 */
+.sv-start {
+  position: relative;
+  max-width: 1060px;
+  margin: clamp(var(--space-8), 8vh, calc(var(--space-8) * 3)) auto 0;
+  padding: 0 0 var(--space-5);
+  border-top: var(--bw) solid var(--sv-ink);
+  background: transparent;
+  box-shadow: none;
+}
+.sv-start::before {
+  content: '';
+  position: absolute;
+  right: 6px;
+  top: 26px;
+  width: 18px;
+  height: 18px;
+  background: var(--sv-ink-supreme);
+}
+.sv-start-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(300px, 0.9fr);
+  gap: clamp(var(--space-8), 5vw, calc(var(--space-8) * 2));
+  align-items: start;
+}
+.sv-start-copy { min-width: 0; }
+.sv-start-kicker {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  font-size: var(--text-2xs);
+  letter-spacing: 0.18em;
+  color: var(--sv-ink-dim);
+  text-transform: uppercase;
+}
+.sv-start-kicker .sq { width: 10px; height: 10px; background: var(--sv-red); display: inline-block; flex: none; }
+.sv-start-kicker-en { margin-left: var(--space-1); color: var(--sv-ink-faint); letter-spacing: 0.2em; }
+.sv-start-title {
+  max-width: 16ch;
+  margin: var(--space-4) 0 var(--space-3);
+  font-family: var(--font-display);
+  font-size: clamp(28px, 3.4vw, 38px);
+  line-height: 1.12;
+  letter-spacing: -0.01em;
+}
+.sv-start-desc {
+  max-width: 52ch;
+  margin: 0;
+  font-size: var(--text-base);
+  line-height: var(--lh-prose);
+  color: var(--sv-ink-dim);
+}
+.sv-start-meta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: var(--space-5) 0 0;
+  border-top: 1px solid var(--sv-line-strong);
+  border-bottom: 1px solid var(--sv-line-strong);
+}
+.sv-start-meta-item {
+  min-width: 0;
+  padding: var(--space-2-5) var(--space-3) var(--space-2-5) 0;
+  border-right: 1px solid var(--sv-line);
+}
+.sv-start-meta-item:last-child { border-right: none; padding-right: 0; }
+.sv-start-meta dt {
+  font-size: var(--text-2xs);
+  letter-spacing: 0.14em;
+  color: var(--sv-ink-faint);
+  text-transform: uppercase;
+}
+.sv-start-meta dd {
+  margin: var(--space-1) 0 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--sv-ink);
+}
+.sv-start-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-5); }
+.sv-start-hint {
+  max-width: 52ch;
+  margin: var(--space-4) 0 0;
+  padding-top: var(--space-2-5);
+  border-top: 1px solid var(--sv-line);
+  font-size: var(--text-xs);
+  line-height: var(--lh-body);
+  color: var(--sv-ink-faint);
+}
+
+/* 右栏:角色索引(列表行,不是三张盒子卡) */
+.sv-start-cast {
+  min-width: 0;
+  border-top: var(--bw) solid var(--sv-ink);
+  padding-top: var(--space-2-5);
+}
+.sv-start-cast-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding-bottom: var(--space-2-5);
+  border-bottom: 1px solid var(--sv-line-strong);
+  font-size: var(--text-2xs);
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  color: var(--sv-ink-soft);
+  text-transform: uppercase;
+}
+.sv-start-cast-count { color: var(--sv-ink-faint); font-variant-numeric: tabular-nums; }
+.sv-start-chars { list-style: none; margin: 0; padding: 0; }
+.sv-start-chars li { margin: 0; }
+.sv-start-char {
+  display: grid;
+  grid-template-columns: 26px 36px minmax(0, 1fr) 16px;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  min-height: 62px;
+  padding: var(--space-3) 0;
+  border: none;
+  border-bottom: 1px solid var(--sv-line);
+  background: transparent;
+  color: var(--sv-ink);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-standard), box-shadow var(--dur-fast) var(--ease-standard);
+}
+.sv-start-char:hover {
+  background: var(--sv-white);
+  box-shadow: inset 2px 0 0 var(--sv-ink);
+}
+.sv-start-char.active {
+  background: var(--sv-pink-light);
+  box-shadow: inset 2px 0 0 var(--sv-ink);
+}
+.sv-start-char-idx {
+  align-self: start;
+  padding-top: var(--space-1);
+  font-family: var(--font-display);
+  font-size: var(--text-2xs);
+  color: var(--sv-ink-faint);
+}
+.sv-start-char .sv-avatar { width: 36px; height: 36px; }
+.sv-start-char-body { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.sv-start-char-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+  font-weight: 800;
+}
+.sv-start-char-desc {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-xs);
+  color: var(--sv-ink-faint);
+}
+.sv-start-char-arrow {
+  font-size: var(--text-base);
+  color: var(--sv-ink-faint);
+  transition: transform var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
+}
+.sv-start-char:hover .sv-start-char-arrow { transform: translateX(3px); color: var(--sv-ink); }
+.sv-start-cast-empty {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-5) 0;
+  color: var(--sv-ink-faint);
+}
+.sv-start-cast-empty p { margin: 0; font-size: var(--text-sm); }
+.sv-start-cast-empty p:first-of-type { color: var(--sv-ink); font-weight: 700; }
+.sv-start-cast-mark {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  margin-bottom: var(--space-2);
+  background: var(--sv-ink-supreme);
+}
+.sv-start-cast-mark::after {
+  content: '';
+  position: absolute;
+  left: 12px;
+  top: 14px;
+  width: 26px;
+  height: 3px;
+  background: var(--sv-red);
+  transform: rotate(-38deg);
+  transform-origin: left center;
+}
+.sv-start-cast-note {
+  margin: var(--space-3) 0 0;
+  font-size: var(--text-xs);
+  line-height: var(--lh-body);
+  color: var(--sv-ink-faint);
+}
+
+/* 有消息:masthead 给对话一个清晰的章节起点 */
+.sv-chat-masthead {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-4);
+  max-width: var(--measure-chat);
+  margin: 0 auto var(--space-6);
+  padding-bottom: var(--space-3);
+  border-bottom: var(--bw) solid var(--sv-ink);
+}
+.sv-chat-masthead-kicker {
+  font-size: var(--text-2xs);
+  letter-spacing: 0.18em;
+  color: var(--sv-ink-faint);
+  text-transform: uppercase;
+}
+.sv-chat-masthead-title {
+  margin: var(--space-1) 0 0;
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  line-height: var(--lh-tight);
+}
+.sv-chat-masthead-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--sv-ink-faint);
+}
+.sv-chat-masthead-meta span + span {
+  padding-left: var(--space-2);
+  border-left: 1px solid var(--sv-line);
+}
+
+@media (max-width: 1099px) {
+  .sv-start-grid { grid-template-columns: minmax(0, 1fr); gap: var(--space-6); }
+  .sv-start-cast { max-width: 560px; }
+}
+@media (max-width: 900px) {
+  .sv-start::before { display: none; }
+}
+@media (max-width: 767px) {
+  .sv-start { margin: var(--space-4) var(--space-3) 0; padding: 0 0 var(--space-4); }
+  .sv-start-title { font-size: var(--text-xl); }
+  .sv-start { margin-top: var(--space-2); }
+  .sv-start-title { margin: var(--space-2) 0 var(--space-2); }
+  .sv-start-meta { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: var(--space-4); }
+  .sv-start-meta-item { padding: var(--space-1-5) var(--space-2) var(--space-1-5) 0; }
+  .sv-start-meta-item:nth-child(2) { border-right: 1px solid var(--sv-line); padding-right: var(--space-2); }
+  .sv-start-meta-item:nth-child(3) { grid-column: auto; border-top: none; }
+  .sv-start-desc { line-height: var(--lh-body); }
+  .sv-start-hint { margin-top: var(--space-2-5); padding-top: var(--space-1-5); }
+  .sv-start-cast { padding-top: var(--space-1-5); }
+  .sv-chat-masthead { align-items: flex-start; flex-direction: column; gap: var(--space-2); }
+  .sv-chat-masthead-meta { justify-content: flex-start; }
+}
 </style>

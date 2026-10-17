@@ -24,22 +24,30 @@
   display: flex;
   flex: 1;
   min-height: 0;
+  padding: var(--space-3);
 }
 .sv-main {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
+  border: var(--bw) solid var(--sv-ink);
+  box-shadow: var(--shadow-card);
+  background: var(--sv-surface);
+  overflow: hidden;
 }
 
 /* 左栏 */
 .sv-sidebar {
-  width: 260px;
+  width: 296px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
   background: var(--sv-surface);
-  border-right: var(--bw) solid var(--sv-ink);
+  border: var(--bw) solid var(--sv-ink);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+  margin-right: var(--space-3);
   transition: width var(--dur-normal) var(--ease-standard);
 }
 /* 任务模式加宽:给「下达目标」输入区留出更多空间 */
@@ -54,39 +62,14 @@
   display: flex;
   flex-direction: column;
   background: var(--sv-surface);
-  border-left: var(--bw) solid var(--sv-ink);
   overflow: hidden;
   transition: width var(--dur-normal) var(--ease-standard);
 }
 .sv-agent-panel.open {
   width: 340px;
-}
-
-/* 右侧边缘抽屉标识 */
-.sv-agent-toggle {
-  position: fixed;
-  right: 0;
-  top: 50%;
-  transform: translateY(-50%);
-  z-index: var(--z-toggle);
-  writing-mode: vertical-lr;
-  text-orientation: mixed;
-  padding: var(--space-5) var(--space-2);
-  background: var(--sv-ink);
-  color: var(--sv-white);
-  border: none;
-  font-family: var(--font-display);
-  font-size: 11px;
-  letter-spacing: 0.2em;
-  cursor: pointer;
-  transition: background var(--dur-fast) var(--ease-standard), padding-right var(--dur-fast) var(--ease-standard);
-}
-.sv-agent-toggle:hover {
-  background: var(--sv-pink-deep);
-  padding-right: var(--space-3);
-}
-.sv-agent-toggle.active {
-  background: var(--sv-pink-deep);
+  margin-left: var(--space-3);
+  border: var(--bw) solid var(--sv-ink);
+  box-shadow: var(--shadow-card);
 }
 
 /* ===== 顶栏 ===== */
@@ -129,8 +112,8 @@
   pointer-events: none;
 }
 .sv-topbar-right { display: flex; align-items: center; gap: var(--space-3); }
-.sv-topbar-title { font-family: var(--font-display); font-size: 13px; font-weight: 800; letter-spacing: 0.05em; }
-.sv-topbar-sub { font-size: 11px; color: var(--sv-ink-faint); letter-spacing: 0.05em; }
+.sv-topbar-title { font-family: var(--font-display); font-size: var(--text-lg); font-weight: 800; letter-spacing: 0.05em; line-height: var(--lh-tight); }
+.sv-topbar-sub { font-size: var(--text-xs); color: var(--sv-ink-faint); letter-spacing: 0.05em; }
 
 /* Token 统计(顶栏紧凑版;数字用至上蓝——次强调位) */
 .sv-token-inline {
@@ -138,7 +121,7 @@
   align-items: center;
   gap: var(--space-2);
   font-family: var(--font-display);
-  font-size: 11.5px;
+  font-size: var(--text-xs);
   font-variant-numeric: tabular-nums;
   color: var(--sv-blue);
   border: var(--bw) solid var(--sv-ink);
@@ -153,7 +136,7 @@
 
 /* 会话切换器 */
 .sv-session-select {
-  border: var(--bw) solid var(--sv-ink);
+  border: var(--bw-thin) solid var(--sv-ink);
   background: var(--sv-white);
   padding: var(--space-1-5) var(--space-2-5);
   font-size: 12px;
@@ -173,8 +156,9 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: var(--space-8) clamp(24px, 5vw, 64px);
-  background: var(--sv-paper);
+  padding: var(--space-6) clamp(20px, 4vw, 48px);
+  /* 至上主义白色场:聊天画布不铺品牌粉,几何与文字浮在近白纸上 */
+  background: var(--sv-surface-elevated);
   /* 批次 5:画布顶端红黑双色段带(构成主义海报 rule;背景层,固定于面板顶部不随内容滚动,
      让开顶栏回声阴影,不压内容;克制档仅此一条带) */
   background-image: var(--sv-top-stripe);
@@ -222,11 +206,11 @@
 
 /* ===== 气泡 ===== */
 
-.sv-msg { display: flex; margin-bottom: 28px; gap: var(--space-3); animation: sv-list-in var(--dur-normal) var(--ease-out) backwards; }
+.sv-msg { display: flex; max-width: var(--measure-chat); margin: 0 auto var(--space-6); gap: var(--space-3); animation: sv-list-in var(--dur-normal) var(--ease-out) backwards; }
 .sv-msg.user { justify-content: flex-end; }
 
 .sv-msg-bubble {
-  max-width: min(560px, 78%);
+  max-width: min(var(--measure-prose), 78%);
   padding: var(--space-3-5) 18px;
   font-size: 14px;
   line-height: 1.75;
@@ -234,25 +218,28 @@
   word-break: break-word;
   position: relative;
 }
+/* 整条消息只有一个代码块:让代码块自己成为卡片,避免「白框套黑块」的盒中盒 */
+.sv-msg.assistant .sv-msg-bubble:has(> pre:only-child) {
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+.sv-msg-bubble.sv-msg-md > pre:only-child {
+  margin: 0;
+  border: var(--bw) solid var(--sv-ink);
+  border-top: 3px solid var(--sv-pink);
+}
+
 /* 用户消息:黑底白字(纯展示容器,按阴影规则不挂投影——黑块本身即至上主义实体) */
 .sv-msg.user .sv-msg-bubble {
   background: var(--sv-ink);
   color: var(--sv-white);
 }
-.sv-msg.user .sv-msg-bubble::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  right: 0;
-  width: 16px;
-  height: 16px;
-  background: var(--sv-pink);
-}
 /* 角色消息:白底黑字(纯展示容器,按阴影规则不挂投影——3px 粗框 + 粉顶线承担立体感) */
 .sv-msg.assistant .sv-msg-bubble {
-  background: var(--sv-surface);
+  background: var(--sv-white);
   border: var(--bw) solid var(--sv-ink);
-  border-top: 4px solid var(--sv-pink);
+  border-top: 3px solid var(--sv-pink);
 }
 /* 系统消息 */
 .sv-msg.system .sv-msg-bubble {
@@ -266,7 +253,7 @@
 .sv-status-bar {
   display: inline-block;
   margin-top: var(--space-2);
-  max-width: min(560px, 78%);
+  max-width: min(var(--measure-prose), 78%);
   padding: var(--space-1-5) var(--space-3);
   font-size: 12px;
   line-height: 1.5;
@@ -313,7 +300,7 @@
 
 /* 消息角色名 */
 .sv-msg-name {
-  font-size: 10.5px;
+  font-size: var(--text-xs);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--sv-ink-faint);
@@ -386,8 +373,8 @@
 }
 .sv-msg:hover .sv-msg-actions { opacity: 1; }
 .sv-msg-action {
-  font-size: 10px;
-  letter-spacing: 0.08em;
+  font-size: var(--text-xs);
+  letter-spacing: 0.02em;
   color: var(--sv-ink-faint);
   background: none;
   border: none;
@@ -399,8 +386,8 @@
 .sv-msg-action:disabled { color: var(--sv-ink-faint); opacity: 0.4; cursor: default; }
 /* swipe 版本角标(阶段六 6f):n/N 只读指示,与操作按钮同列对齐 */
 .sv-msg-action-label {
-  font-size: 10px;
-  letter-spacing: 0.08em;
+  font-size: var(--text-xs);
+  letter-spacing: 0.02em;
   color: var(--sv-ink-faint);
   padding: 2px 0;
   white-space: nowrap;
@@ -412,13 +399,13 @@
   flex-direction: column;
   gap: var(--space-2);
   width: 100%;
-  max-width: 560px;
+  max-width: var(--measure-prose);
   border: var(--bw) solid var(--sv-ink);
   background: var(--sv-surface);
   padding: var(--space-3);
 }
 .sv-edit-label {
-  font-size: 10px;
+  font-size: var(--text-2xs);
   font-weight: 800;
   letter-spacing: 0.16em;
   text-transform: uppercase;
@@ -444,12 +431,12 @@
 .sv-inputbar {
   border-top: var(--bw) solid var(--sv-ink);
   background: var(--sv-surface);
-  padding: var(--space-4) var(--space-5);
+  padding: var(--space-3) var(--space-4);
 }
 .sv-inputbox { display: flex; gap: var(--space-3); align-items: flex-end; }
 .sv-inputbox textarea {
   flex: 1;
-  min-height: 48px;
+  min-height: 56px;
   max-height: 160px;
   resize: none;
   border: var(--bw) solid var(--sv-ink);
@@ -486,8 +473,10 @@
   border-color: var(--sv-pink-deep);
 }
 .sv-btn-send:disabled {
-  background: var(--sv-line);
-  border-color: var(--sv-line);
+  background: var(--sv-pink-light);
+  border-color: var(--sv-line-strong);
+  color: var(--sv-ink-dim);
+  box-shadow: none;
   cursor: not-allowed;
 }
 
@@ -527,7 +516,7 @@
   color: var(--sv-accent);
 }
 .sv-slash-desc {
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--sv-ink-dim);
   max-width: 100%;
   white-space: nowrap;
@@ -552,8 +541,8 @@
 .sv-input-toolbar {
   display: flex;
   align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-3) var(--space-5);
+  gap: var(--space-2);
+  padding: var(--space-2-5) var(--space-4);
   border-top: 1px solid var(--sv-line);
   background: var(--sv-surface);
   flex-wrap: wrap;
@@ -570,10 +559,10 @@
 }
 .sv-mode button {
   min-height: var(--control-h-sm); /* UIP-10 紧凑档(输入栏开关,不随主档放大) */
-  padding: var(--space-1) var(--space-3-5);
-  font-size: 12px;
+  padding: var(--space-1) var(--space-2-5);
+  font-size: var(--text-xs);
   font-weight: 800;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.04em;
   border: none;
   background: var(--sv-white);
   color: var(--sv-ink);
@@ -591,8 +580,8 @@
 .sv-auth-mode {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
-  font-size: 11.5px;
+  gap: var(--space-1-5);
+  font-size: var(--text-xs);
   color: var(--sv-ink-soft);
 }
 .sv-auth-mode-label { letter-spacing: 0.05em; }
@@ -603,10 +592,10 @@
   box-shadow: var(--shadow-card);
 }
 .sv-auth-toggle button {
-  padding: var(--space-1-5) var(--space-3);
-  font-size: 11px;
+  padding: var(--space-1) var(--space-2);
+  font-size: var(--text-xs);
   font-weight: 800;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.04em;
   border: none;
   background: var(--sv-white);
   color: var(--sv-ink);
@@ -634,7 +623,7 @@
   padding: var(--space-1-5) var(--space-2-5);
   border: var(--bw-thin) solid var(--sv-ink);
   background: var(--sv-white);
-  font-size: 11.5px;
+  font-size: var(--text-xs);
   color: var(--sv-ink);
   max-width: 200px;
 }
@@ -663,13 +652,13 @@
 .sv-btn-attach {
   display: flex;
   align-items: center;
-  gap: var(--space-1-5);
-  min-height: var(--control-h); /* UIP-10 主档高度(与发送键/输入框同排等高) */
-  padding: var(--space-1-5) var(--space-3-5);
+  gap: var(--space-1);
+  min-height: var(--control-h-sm);
+  padding: var(--space-1) var(--space-2-5);
   border: var(--bw) solid var(--sv-ink);
   background: var(--sv-white);
   color: var(--sv-ink);
-  font-size: 12px;
+  font-size: var(--text-xs);
   font-weight: 700;
   cursor: pointer;
   box-shadow: var(--shadow-card);
@@ -678,7 +667,7 @@
   background: var(--sv-pink-light);
   border-color: var(--sv-pink-deep);
 }
-.sv-btn-attach svg { width: 14px; height: 14px; }
+.sv-btn-attach svg { width: 13px; height: 13px; }
 
 /* HTML 渲染开关 */
 .sv-render-toggle-v2 {
@@ -735,39 +724,36 @@
   color: var(--sv-ink);
 }
 
-/* Token 统计(单列:色标 + 数值靠左 + 标签靠右,紧凑横排) */
+/* Token 统计(2×2 技术矩阵:发丝网格,不做盒中盒;每格宽 ≥130px,标签不换行) */
 .sv-tokens {
   display: grid;
-  grid-template-columns: 1fr;
-  gap: var(--space-2);
-  margin-top: var(--space-3-5);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: var(--space-2-5);
+  border-top: 1px solid var(--sv-line-strong);
+  border-left: 1px solid var(--sv-line-strong);
 }
+.sv-tokens.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .sv-token-cell {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: 7px var(--space-2-5);
-  border: var(--bw) solid var(--sv-ink);
-  background: var(--sv-white);
+  position: relative;
+  padding: var(--space-2) var(--space-2-5);
+  border-right: 1px solid var(--sv-line-strong);
+  border-bottom: 1px solid var(--sv-line-strong);
+  background: transparent;
 }
-.sv-token-cell .sv-supreme { flex-shrink: 0; }
-.sv-token-cell > div {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-2);
-}
+.sv-token-cell .sv-supreme { position: absolute; top: var(--space-2); right: var(--space-2); width: 8px; height: 8px; }
+.sv-token-cell > div { min-width: 0; display: block; }
 .sv-token-cell b {
   display: block;
-  font-size: 14px;
+  font-size: var(--text-lg);
   font-family: var(--font-display);
+  line-height: var(--lh-tight);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.sv-token-cell span { font-size: 10px; color: var(--sv-ink-faint); letter-spacing: 0.05em; flex-shrink: 0; }
+.sv-token-cell span { display: block; margin-top: 2px; font-size: var(--text-2xs); color: var(--sv-ink-faint); letter-spacing: 0.03em; white-space: nowrap; }
+/* 奇数项(3 项时)末格跨两列,避免右下留出无边框空槽 */
+.sv-token-cell:last-child:nth-child(odd) { grid-column: 1 / -1; }
 
 /* 搜索 */
 .sv-search {
@@ -804,17 +790,18 @@
   box-shadow: var(--shadow-card); /* 阴影规则:可点列表行 hover 挂 card 影 */
 }
 .sv-char-item.active {
-  background: var(--sv-ink);
+  background: var(--sv-pink-light);
   border-color: var(--sv-ink);
+  box-shadow: inset 2px 0 0 var(--sv-ink);
 }
-.sv-char-item.active .sv-char-name { color: var(--sv-white); }
-.sv-char-item.active .sv-char-desc { color: var(--sv-on-ink-soft); }
+.sv-char-item.active .sv-char-name { color: var(--sv-ink); }
+.sv-char-item.active .sv-char-desc { color: var(--sv-ink-dim); }
 .sv-char-item .sv-avatar.small { width: 32px; height: 32px; font-size: 14px; }
 /* 角色名(UIP-10):补截断——说明行早已省略号,名字行原为「长名整行硬顶」 */
 .sv-char-name { display: block; font-size: 13px; font-weight: 700; color: var(--sv-ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sv-char-desc {
   display: block;
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--sv-ink-faint);
   white-space: nowrap;
   overflow: hidden;
@@ -822,10 +809,18 @@
 }
 
 /* 底部工具条 */
-.sv-side-foot { border-top: var(--bw) solid var(--sv-ink); padding: var(--space-3); }
+.sv-side-foot {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-2);
+  border-top: var(--bw) solid var(--sv-ink);
+  padding: var(--space-3);
+}
+.sv-side-foot .sv-side-btn:first-of-type,
+.sv-side-foot .sv-feedback { grid-column: 1 / -1; }
 
 /* 连接状态灯 */
-.sv-conn { display: flex; align-items: center; gap: var(--space-1-5); font-size: 11px; color: var(--sv-ink-soft); }
+.sv-conn { display: flex; align-items: center; gap: var(--space-1-5); font-size: var(--text-xs); color: var(--sv-ink-soft); }
 .sv-conn .dot { width: 8px; height: 8px; }
 .sv-conn .dot.ok { background: var(--sv-green); }
 .sv-conn .dot.fail { background: var(--sv-red); }
