@@ -83,7 +83,8 @@ pub struct UndoService {
     /// 每会话「生成/恢复」协调锁(codex 复审 P1-1):同会话的生成任务与 restore
     /// 双侧都对本锁 try-lock,原子互斥——单靠 API 的 is_active 预检存在检查与
     /// 注册之间的 TOCTOU 窗口(生成可在两者之间开始)、且 commit_staged 不参与
-    /// 任何协调。锁条目随会话惰性创建(数量与会话同量级,句柄极小,不清理)。
+    /// 任何协调。锁条目随会话惰性创建;条目超阈值时**机会性回收**空闲项
+    /// (见 [`Self::session_lock`],codex 复审二轮 P2),被持有的锁不被回收。
     session_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
@@ -1059,13 +1060,15 @@ mod tests {
 
     /// codex 复审 P1-1(确定性证据):生成侧持有每会话锁期间,restore 必须拒绝(busy);
     /// 释放后同一快照可正常恢复——证明「生成↔回退」互斥锁真实生效,而非仅 API 预检形态。
+    /// 持锁形态与 /api/chat/send 的 `try_lock_owned` 同款(OwnedMutexGuard 自持 Arc)。
     #[test]
     fn restore_rejects_while_session_lock_held() {
         let dir = TempDataDir::new("undo-session-lock");
         let (_db, svc, sid) = build_service(&dir);
-        // 模拟生成侧持锁(与 /api/chat/send 的 try_lock_owned 是同一把锁)
-        let lock = svc.session_lock(&sid);
-        let guard = lock.try_lock().expect("空闲锁应可获取");
+        let guard = svc
+            .session_lock(&sid)
+            .try_lock_owned()
+            .expect("空闲锁应可获取");
         let err = svc.restore("snap-busy").expect_err("持锁期间应拒绝恢复");
         assert_eq!(err, RESTORE_BUSY_MESSAGE);
         drop(guard);
@@ -1076,8 +1079,11 @@ mod tests {
         assert_eq!(receipt.restored_count, 1);
     }
 
-    /// codex 复审二轮 P2:锁表机会性回收——空闲条目(仅 map 持有)在超阈值时被清,
-    /// 被持有的锁不受影响;回收后同 id 再取即新建,功能不破坏。
+    /// codex 复审二轮 P2(三轮判假绿后重写):锁表机会性回收——空闲条目(仅 map 持有)
+    /// 在超阈值时被清,被持有的锁不受影响。判据是**同一性**:回收后经 map 再取必须
+    /// 还是「guard 自持的那一把」(Arc::ptr_eq)——若实现误清条目,再取会新建一把,
+    /// ptr_eq 立即变假(旧版只断言 `held.try_lock()` 仍锁定,外部 Arc 在手时假绿,
+    /// codex 三轮指出)。
     #[test]
     fn session_lock_prunes_idle_entries() {
         let dir = TempDataDir::new("undo-lock-prune");
@@ -1086,7 +1092,11 @@ mod tests {
         let idle_weak = Arc::downgrade(&idle);
         drop(idle); // 只剩 map 持有 → 可回收
         let held = svc.session_lock("gc-held");
+        let held_weak = Arc::downgrade(&held);
+        // OwnedMutexGuard 自持一份 Arc(与 chat/send 的 try_lock_owned 同形态);
+        // 丢掉外部引用后,若 map 误清条目,strong 只剩 guard 那一份。
         let held_guard = held.clone().try_lock_owned().expect("空闲锁应可获取");
+        drop(held);
         // 灌到超阈值,再取一把触发回收
         for i in 0..70 {
             let _ = svc.session_lock(&format!("gc-fill-{i}"));
@@ -1096,9 +1106,21 @@ mod tests {
             idle_weak.upgrade().is_none(),
             "空闲条目应被回收(map 不再持有)"
         );
-        assert!(held.try_lock().is_err(), "被持有的锁不得被误清(仍然锁定中)");
+        let alive = held_weak.upgrade().expect("guard 自持的锁对象应仍在");
+        let again = svc.session_lock("gc-held");
+        assert!(
+            Arc::ptr_eq(&again, &alive),
+            "被持有的锁条目不得被回收:再取必须还是同一把(同一性判据)"
+        );
+        assert!(
+            again.try_lock().is_err(),
+            "同一把锁仍被 guard 持有,不可再取"
+        );
         drop(held_guard);
-        assert!(held.try_lock().is_ok(), "释放后同 id 锁应可正常使用");
+        assert!(
+            svc.session_lock("gc-held").try_lock().is_ok(),
+            "释放后同 id 锁应可正常使用"
+        );
     }
 
     /// codex 复审二轮 P1-3 残留:replace.bubbles 的 before 缺字段 / before.id 与
