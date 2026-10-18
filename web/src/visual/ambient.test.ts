@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   AMBIENT_FRAGMENT_SHADER,
+  AMBIENT_LOW_FRAME_MS,
+  AMBIENT_MAX_PIXELS,
   AMBIENT_VERTEX_SHADER,
   FALLBACK_PALETTE,
   parseCssColor,
@@ -45,6 +47,32 @@ describe('ambient 配置与颜色解析', () => {
     expect(narrow.height).toBe(350);
   });
 
+  it('像素预算:4K 画布不得突破 AMBIENT_MAX_PIXELS', () => {
+    const cfg = resolveAmbientConfig({
+      width: 3840, height: 2160, dpr: 2, reducedMotion: false, webgl: true,
+      visible: true, paused: false, hardwareConcurrency: 8,
+    });
+    expect(cfg.width * cfg.height).toBeLessThanOrEqual(AMBIENT_MAX_PIXELS);
+    expect(cfg.width).toBeLessThan(3840);
+  });
+
+  it('低档:20fps / 0.45 倍 / quality=0', () => {
+    const cfg = resolveAmbientConfig({
+      width: 1000, height: 800, dpr: 1, reducedMotion: false, webgl: true,
+      visible: true, paused: false, hardwareConcurrency: 8, lowTier: true,
+    });
+    expect(cfg.frameMs).toBeCloseTo(AMBIENT_LOW_FRAME_MS);
+    expect(cfg.width).toBe(450);
+    expect(cfg.height).toBe(360);
+    expect(cfg.quality).toBe(0);
+
+    const high = resolveAmbientConfig({
+      width: 1000, height: 800, dpr: 1, reducedMotion: false, webgl: true,
+      visible: true, paused: false, hardwareConcurrency: 8,
+    });
+    expect(high.quality).toBe(1);
+  });
+
   it('减少动态 → 静态首帧;离屏/暂停/低核 → 不跑循环', () => {
     const base = {
       width: 800, height: 600, dpr: 1, webgl: true, visible: true, paused: false, hardwareConcurrency: 8,
@@ -80,7 +108,7 @@ describe('ambient 配置与颜色解析', () => {
 
   it('shader 源包含全部 uniform/变化分支,且不依赖纹理', () => {
     expect(AMBIENT_VERTEX_SHADER).toContain('a_pos');
-    for (const name of ['u_res', 'u_time', 'u_paper', 'u_rose', 'u_blue', 'u_red', 'u_ink', 'u_intensity', 'u_variant']) {
+    for (const name of ['u_res', 'u_time', 'u_paper', 'u_rose', 'u_blue', 'u_red', 'u_ink', 'u_intensity', 'u_variant', 'u_quality']) {
       expect(AMBIENT_FRAGMENT_SHADER).toContain(name);
     }
     expect(AMBIENT_FRAGMENT_SHADER).toContain('u_variant == 0');
