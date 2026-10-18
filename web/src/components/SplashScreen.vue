@@ -2,18 +2,30 @@
 // 启动动画:Logo + 文字逐字淡入
 import { onMounted, ref } from 'vue';
 import { useAppStore } from '../store';
+import { whenThemeReady } from '../theme/registry';
 
 const store = useAppStore();
 const fading = ref(false);
 
 onMounted(() => {
-  // 1.2s 后开始淡出,0.4s 淡出动画,总计 1.6s
-  setTimeout(() => {
+  let fadeStarted = false;
+  const startFade = (): void => {
+    if (fadeStarted) return;
+    fadeStarted = true;
     fading.value = true;
     setTimeout(() => {
       store.splashDone = true;
     }, 400);
-  }, 1200);
+  };
+
+  // 最短 1.2s;同时等主题 CSS 就绪(字体不阻塞)。上限 3s:资源失败/极慢时
+  // 不能让启动动画无限挂着——主题注册表本身已吞掉加载错误。
+  const minDisplay = new Promise<void>((resolve) => setTimeout(resolve, 1200));
+  const themeCss = Promise.race([
+    whenThemeReady().catch(() => undefined),
+    new Promise<void>((resolve) => setTimeout(resolve, 3000)),
+  ]);
+  void Promise.all([minDisplay, themeCss]).then(startFade);
 });
 
 const letters = 'KEDAI'.split('');

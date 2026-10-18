@@ -9,6 +9,7 @@ import {
   applyTheme,
   getActiveThemeId,
   listThemes,
+  preloadTheme,
   subscribeThemes,
   type ThemeSummary,
 } from '../../theme/registry';
@@ -30,6 +31,7 @@ const { scriptAuthorizations } = storeToRefs(store);
 // 外观主题:注册表是纯前端扩展点,不写 settings.json;订阅只在浏览器挂载后建立(SSR 不泄漏监听)。
 const themes = ref<ThemeSummary[]>(listThemes());
 const activeThemeId = ref(getActiveThemeId());
+const switchingTheme = ref<string | null>(null);
 let unsubscribeThemes: (() => void) | undefined;
 onMounted(() => {
   unsubscribeThemes = subscribeThemes((snapshot) => {
@@ -46,8 +48,19 @@ function swatchClass(id: string): string {
   return 'swatch-generic';
 }
 
+/**
+ * 先预载 CSS,再原子切换:避免 apply 先改令牌、CSS 后到造成的「半截主题」,
+ * 也避免首次切到彩窗时把主题 CSS 的解析/重绘压在点击那一帧。
+ */
 async function selectTheme(id: string): Promise<void> {
-  await applyTheme(id);
+  if (switchingTheme.value) return;
+  switchingTheme.value = id;
+  try {
+    await preloadTheme(id);
+    await applyTheme(id);
+  } finally {
+    switchingTheme.value = null;
+  }
 }
 </script>
 
@@ -66,12 +79,14 @@ async function selectTheme(id: string): Promise<void> {
           class="sv-theme-card"
           :class="{ active: theme.id === activeThemeId }"
           :aria-pressed="theme.id === activeThemeId"
+          :aria-busy="switchingTheme === theme.id"
+          :disabled="switchingTheme !== null"
           @click="selectTheme(theme.id)"
         >
           <span class="sv-theme-swatch" :class="swatchClass(theme.id)" aria-hidden="true" />
           <span class="sv-theme-copy">
             <b>
-              {{ theme.name }}<em v-if="theme.builtin">内置</em><em v-if="theme.id === activeThemeId" class="sv-theme-active">使用中</em>
+              {{ theme.name }}<em v-if="theme.builtin">内置</em><em v-if="switchingTheme === theme.id" class="sv-theme-active">切换中…</em><em v-else-if="theme.id === activeThemeId" class="sv-theme-active">使用中</em>
             </b>
             <span>{{ theme.description }}</span>
           </span>

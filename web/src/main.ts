@@ -4,7 +4,8 @@ import { createPinia } from 'pinia';
 import App from './App.vue';
 import { installGlobalErrorHandlers } from './globalErrorHandlers';
 import { installInputModality } from './inputModality';
-import { announceUiReady, initTheme, installThemeApi } from './theme/registry';
+import { announceUiReady, initTheme, installThemeApi, preloadTheme } from './theme/registry';
+import { applyPerfTier, resolvePerfTier } from './visual/perfTier';
 import { useUiPrefsStore } from './stores/uiPrefs';
 // 展示字体(拉丁字标/数字用,本地打包离线可用)
 import '@fontsource/archivo-black';
@@ -18,10 +19,33 @@ app.use(pinia);
 // 尽早安装(首帧即有标记能力),无标记时行为与现状逐字一致。
 installInputModality();
 
+// 性能档位:首帧前写 html[data-perf-tier],主题 CSS 与 WebGL 共用同一判定。
+const perfTier = resolvePerfTier({
+  cores: navigator.hardwareConcurrency,
+  deviceMemory: (navigator as Navigator & { deviceMemory?: number }).deviceMemory,
+  mobile: typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 767px)').matches,
+});
+applyPerfTier(document.documentElement, perfTier);
+
 // 主题插件:对外暴露 window.KedaiUI,并在首帧前同步应用已保存的主题令牌。
 // 主题 CSS/字体 chunk 只在该主题首次激活时按需加载(不膨胀首屏)。
 installThemeApi();
-initTheme();
+void initTheme();
+
+// 高档桌面在空闲时预载彩窗 CSS:首次切主题不再等主题 CSS 下载/解析。
+// 低档设备跳过,避免与启动后的数据加载抢资源。
+if (perfTier === 'high') {
+  const warmGlass = (): void => {
+    void preloadTheme('stained-glass');
+    // 首次切到彩窗时 App 级环境层才挂载;顺手把组件 chunk 也预热掉。
+    void import('./components/AmbientField.vue').catch(() => undefined);
+  };
+  const idle = (window as Window & {
+    requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+  }).requestIdleCallback;
+  if (idle) idle(warmGlass, { timeout: 4000 });
+  else setTimeout(warmGlass, 2000);
+}
 
 // 全局错误兜底(计划批次 5.1):必须在 mount 之前注册,否则首屏渲染期的异常会漏掉。
 // 经 useUiPrefsStore(pinia) 显式取 store——main.ts 里还没有活跃的 pinia 实例上下文,

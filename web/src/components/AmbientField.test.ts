@@ -86,6 +86,20 @@ describe('AmbientField 降级链', () => {
     wrapper.unmount();
   });
 
+  it('WebGL 上下文拒绝软件渲染且不申请 alpha 通道', async () => {
+    mockRect();
+    const getContext = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(fakeGl());
+
+    const wrapper = mount(AmbientField, { props: { variant: 'glass', intensity: 0.6 } });
+    await nextTick();
+
+    expect(getContext).toHaveBeenCalledWith(
+      'webgl',
+      expect.objectContaining({ alpha: false, failIfMajorPerformanceCaveat: true }),
+    );
+    wrapper.unmount();
+  });
+
   it('减少动态效果时只画静态首帧,WebGL 上下文就绪后标记 ready', async () => {
     mockRect();
     vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(fakeGl());

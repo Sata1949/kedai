@@ -151,8 +151,9 @@ describe('主题注册表', () => {
     });
     const seen: string[] = [];
     const off = reg.subscribe((snap) => seen.push(snap.activeId));
-    reg.init();
-    await Promise.resolve();
+    const pending = reg.init();
+    expect(pending).toBeInstanceOf(Promise);
+    await pending;
     expect(reg.getActive()).toBe('theme-b');
     expect(seen).toContain('theme-b');
     off();
@@ -175,6 +176,30 @@ describe('主题注册表', () => {
     expect(load).toHaveBeenCalledTimes(1);
     expect(doc.documentElement.dataset.theme).toBe('lazy');
     warn.mockRestore();
+  });
+
+  it('preload 只加载资源不切主题;apply 复用同一 Promise', async () => {
+    const doc = testDoc();
+    const root = doc.documentElement;
+    const storage = memoryStorage();
+    const load = vi.fn().mockResolvedValue(undefined);
+    const reg = createThemeRegistry({
+      storage,
+      root,
+      document: doc,
+      builtinThemes: [{ id: 'default', name: '默认' }, { id: 'lazy', name: 'Lazy', load }],
+    });
+
+    await expect(reg.preload('lazy')).resolves.toBe(true);
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(reg.getActive()).toBe('default');
+    expect(root.dataset.theme).toBeUndefined();
+    expect(storage.getItem(THEME_STORAGE_KEY)).toBeNull();
+
+    await reg.apply('lazy');
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(reg.getActive()).toBe('lazy');
+    expect(await reg.preload('missing')).toBe(false);
   });
 });
 

@@ -6,7 +6,7 @@
  * 文字始终落在不透明的气泡/卡片/白色场上,因此环境层不会参与文字对比度。
  *
  * 降级链:
- *   1. WebGL 可用 + 未减少动态 → 30fps 低频 shader;
+ *   1. WebGL 可用 + 未减少动态 → 20/30fps 低频 shader(低档 20fps);
  *   2. 减少动态效果 → 只画 t=0 的静态首帧;
  *   3. 无 WebGL / 上下文丢失 / 组件离屏 → CSS 静态渐变兜底(布局不变)。
  */
@@ -54,6 +54,8 @@ let visible = true;
 let pageHidden = false;
 let themeId: string | null = null;
 let currentVariant: AmbientVariant = props.variant;
+let currentQuality: 0 | 1 = 1;
+let resizeTimer: ReturnType<typeof setTimeout> | null = null;
 
 let resizeObserver: ResizeObserver | null = null;
 let intersectionObserver: IntersectionObserver | null = null;
@@ -87,12 +89,15 @@ function setupGl(): boolean {
   if (!canvas) return false;
   try {
     gl = canvas.getContext('webgl', {
-      alpha: true,
+      alpha: false,
       antialias: false,
       depth: false,
       stencil: false,
       powerPreference: 'low-power',
       preserveDrawingBuffer: false,
+      // 环境层是纯装饰:软件渲染(SwiftShader/基本显示适配器)直接不走 WebGL,
+      // 避免全屏 fbm 落到 CPU 上把主线程拖死。
+      failIfMajorPerformanceCaveat: true,
     }) as WebGLRenderingContext | null;
   } catch {
     gl = null;
@@ -146,6 +151,7 @@ function setupGl(): boolean {
     u_ink: gl.getUniformLocation(program, 'u_ink'),
     u_intensity: gl.getUniformLocation(program, 'u_intensity'),
     u_variant: gl.getUniformLocation(program, 'u_variant'),
+    u_quality: gl.getUniformLocation(program, 'u_quality'),
   };
   gl.useProgram(program);
   gl.disable(gl.DEPTH_TEST);
@@ -163,6 +169,7 @@ function applyPalette(): void {
   gl.uniform3fv(uniforms.u_ink, rgbToVec3(palette.ink));
   gl.uniform1f(uniforms.u_intensity, props.intensity);
   gl.uniform1i(uniforms.u_variant, variantIndex(currentVariant));
+  gl.uniform1i(uniforms.u_quality, currentQuality);
 }
 
 function draw(seconds: number): void {
@@ -175,7 +182,29 @@ function draw(seconds: number): void {
   if (!ready.value) ready.value = true;
 }
 
-function resize(): void {
+/**
+ * 面板宽度过渡(侧栏/Agent 面板 150ms)会连续触发 ResizeObserver;每次回调都重分配
+ * WebGL drawing buffer 会造成开合瞬间的抖动。这里把非首次的尺寸变更合并到 120ms 后
+ * 一次应用,过渡期间由 CSS 拉伸旧画布(环境层是低频背景,拉伸不可见)。
+ */
+function resize(immediate = false): void {
+  if (resizeTimer !== null) {
+    if (!immediate) return;
+    clearTimeout(resizeTimer);
+    resizeTimer = null;
+  }
+  const canvas = canvasEl.value;
+  if (immediate || !gl || !canvas || canvas.width === 0 || canvas.height === 0) {
+    applyResize();
+    return;
+  }
+  resizeTimer = setTimeout(() => {
+    resizeTimer = null;
+    applyResize();
+  }, 120);
+}
+
+function applyResize(): void {
   const root = rootEl.value;
   const canvas = canvasEl.value;
   if (!root || !canvas) return;
@@ -189,6 +218,7 @@ function resize(): void {
     visible,
     paused: props.paused || pageHidden,
     hardwareConcurrency: navigator.hardwareConcurrency,
+    lowTier: document.documentElement.dataset.perfTier === 'low',
   });
   staticOnly.value = cfg.staticOnly;
   if (!cfg.enabled) {
@@ -205,6 +235,7 @@ function resize(): void {
     canvas.height = cfg.height;
   }
   currentVariant = variantNow();
+  currentQuality = cfg.quality;
   gl?.useProgram(program);
   applyPalette();
   if (cfg.animate) {
@@ -317,6 +348,10 @@ function observe(): void {
 
 function teardown(): void {
   cancelLoop();
+  if (resizeTimer !== null) {
+    clearTimeout(resizeTimer);
+    resizeTimer = null;
+  }
   resizeObserver?.disconnect();
   intersectionObserver?.disconnect();
   motionQuery?.removeEventListener?.('change', syncAnimation);

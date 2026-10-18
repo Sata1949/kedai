@@ -5,7 +5,7 @@
 //   - 反向注册两个 sink(renderHtml 默认值通知 / task 用的界面偏好能力)。
 // 本 store 不顶层 import 任何其他 store,成为依赖图的汇点。
 import { defineStore } from 'pinia';
-import { ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { LocalRenderHtmlPreferenceStore } from '../renderHtmlPreference';
 import type { SettingsNavRequest, SettingsSectionKey, TutorialPanelKey } from '../onboarding';
 import {
@@ -71,6 +71,35 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
    * 取消则发 kedai://close-cancelled 让壳复位二次关闭兜底标记。
    */
   const exitConfirmOpen = ref(false);
+
+  /**
+   * 全部模态开关的汇总(不含悬浮音频面板——它不覆盖阅读区)。
+   * App 级环境层据此暂停:模态/抽屉打开后背景冻结,避免 30fps 动画画布
+   * 在遮罩下继续逐帧绘制与合成。
+   */
+  const modalFlags = [
+    settingsOpen,
+    promptsOpen,
+    worldBooksOpen,
+    quickRepliesOpen,
+    assetsOpen,
+    importBundleOpen,
+    contractsOpen,
+    scriptsOpen,
+    macrosOpen,
+    eventsOpen,
+    optimizeOpen,
+    memoryOpen,
+    repoIndexOpen,
+    chatRecordsOpen,
+    taskExecutorsOpen,
+    onboardingOpen,
+    exitConfirmOpen,
+  ];
+  const overlayOpen = computed(
+    () => modalFlags.some((flag) => flag.value) || sidebarOpen.value || agentPanelOpen.value,
+  );
+
   /** 启动动画是否完成 */
   const splashDone = ref(false);
   /** 弹窗懒加载失败提示(defineAsyncComponent onError 写入;flag 为重试所需的面板开关键) */
@@ -331,6 +360,7 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
     taskExecutorsOpen,
     onboardingOpen,
     exitConfirmOpen,
+    overlayOpen,
     splashDone,
     modalLoadError,
     dataLoadError,

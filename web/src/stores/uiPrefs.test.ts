@@ -70,4 +70,23 @@ describe('uiPrefs Agent 面板开合语义', () => {
     expect(store.agentPanelOpen).toBe(false);
     expect(store.agentPanelAutoSuppressed).toBe(true);
   });
+
+  it('overlayOpen 汇总模态/抽屉:任一打开即暂停环境层', () => {
+    const store = useUiPrefsStore();
+    expect(store.overlayOpen).toBe(false);
+
+    store.settingsOpen = true;
+    expect(store.overlayOpen).toBe(true);
+    store.settingsOpen = false;
+    expect(store.overlayOpen).toBe(false);
+
+    store.sidebarOpen = true;
+    expect(store.overlayOpen).toBe(true);
+    store.sidebarOpen = false;
+
+    store.openAgentPanel();
+    expect(store.overlayOpen).toBe(true);
+    store.collapseAgentPanel();
+    expect(store.overlayOpen).toBe(false);
+  });
 });

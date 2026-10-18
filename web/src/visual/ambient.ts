@@ -36,10 +36,16 @@ export const FALLBACK_PALETTE: AmbientPalette = {
 
 /** 30fps 上限:环境层是低频氛围,不需要 60fps 的功耗。 */
 export const AMBIENT_FRAME_MS = 1000 / 30;
+/** 低档只保留 20fps:移动端/低核设备优先流畅与功耗。 */
+export const AMBIENT_LOW_FRAME_MS = 1000 / 20;
 export const AMBIENT_MAX_DPR = 1.25;
 /** 低分辨率渲染再交给 CSS 拉伸,避免大画布逐像素开销。 */
 export const AMBIENT_RENDER_SCALE = 0.6;
 export const AMBIENT_MIN_SCALE = 0.5;
+export const AMBIENT_LOW_RENDER_SCALE = 0.45;
+/** 画布绝对像素上限:4K/高 DPR 下由预算反推缩放,避免锐减但拖垮 GPU。 */
+export const AMBIENT_MAX_PIXELS = 1_200_000;
+const AMBIENT_MIN_RENDER_SCALE = 0.1;
 
 const VARIANT_INDEX: Record<AmbientVariant, number> = { paper: 0, draft: 1, glass: 2 };
 
@@ -52,6 +58,8 @@ export interface AmbientConfigInput {
   visible: boolean;
   paused: boolean;
   hardwareConcurrency?: number;
+  /** 低档设备:20fps、0.45 倍、shader 跳过第三次 fbm。 */
+  lowTier?: boolean;
 }
 
 export interface AmbientConfig {
@@ -63,6 +71,8 @@ export interface AmbientConfig {
   height: number;
   frameMs: number;
   dpr: number;
+  /** shader 画质:1=高档(三层 fbm),0=低档(两层 fbm)。 */
+  quality: 0 | 1;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -79,7 +89,14 @@ export function resolveAmbientConfig(input: AmbientConfigInput): AmbientConfig {
   const width = Math.max(0, Math.floor(input.width));
   const height = Math.max(0, Math.floor(input.height));
   const dpr = clamp(Number.isFinite(input.dpr) ? input.dpr : 1, 1, AMBIENT_MAX_DPR);
-  const scale = width > 0 && width < 640 ? AMBIENT_MIN_SCALE : AMBIENT_RENDER_SCALE;
+  const lowTier = input.lowTier === true;
+  const baseScale = lowTier
+    ? AMBIENT_LOW_RENDER_SCALE
+    : (width > 0 && width < 640 ? AMBIENT_MIN_SCALE : AMBIENT_RENDER_SCALE);
+  // 像素预算:按原始 CSS 尺寸 × DPR 反推最大缩放;与基础缩放取小,保证上限不突破。
+  const rawPixels = Math.max(1, width * dpr * height * dpr);
+  const budgetScale = Math.sqrt(AMBIENT_MAX_PIXELS / rawPixels);
+  const scale = Math.max(AMBIENT_MIN_RENDER_SCALE, Math.min(baseScale, budgetScale));
   const cores = input.hardwareConcurrency ?? 8;
   const enabled = input.webgl && width > 0 && height > 0 && cores > 2;
   const staticOnly = input.reducedMotion;
@@ -88,10 +105,11 @@ export function resolveAmbientConfig(input: AmbientConfigInput): AmbientConfig {
     enabled,
     animate,
     staticOnly,
-    width: Math.max(1, Math.round(width * dpr * scale)),
-    height: Math.max(1, Math.round(height * dpr * scale)),
-    frameMs: AMBIENT_FRAME_MS,
+    width: Math.max(1, Math.floor(width * dpr * scale)),
+    height: Math.max(1, Math.floor(height * dpr * scale)),
+    frameMs: lowTier ? AMBIENT_LOW_FRAME_MS : AMBIENT_FRAME_MS,
     dpr,
+    quality: lowTier ? 0 : 1,
   };
 }
 
@@ -190,6 +208,7 @@ uniform vec3 u_red;
 uniform vec3 u_ink;
 uniform float u_intensity;
 uniform int u_variant;
+uniform int u_quality;
 
 float hash(vec2 p) {
   p = fract(p * vec2(123.34, 456.21));
@@ -247,7 +266,9 @@ void main() {
     float n2 = fbm(p * 0.9 + vec2(-t * 0.006, t * 0.009) + 7.0);
     col = mix(col, u_rose, smoothstep(0.38, 0.92, n1) * 0.20 * k);
     col = mix(col, u_blue, smoothstep(0.52, 0.98, n2) * 0.16 * k);
-    col = mix(col, u_ink, smoothstep(0.70, 0.98, fbm(p * 2.1 - t * 0.004)) * 0.05 * k);
+    if (u_quality == 1) {
+      col = mix(col, u_ink, smoothstep(0.70, 0.98, fbm(p * 2.1 - t * 0.004)) * 0.05 * k);
+    }
   }
 
   float grain = hash(gl_FragCoord.xy + fract(t * 0.1) * 131.0) - 0.5;

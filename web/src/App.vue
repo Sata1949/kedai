@@ -3,12 +3,13 @@
 // 弹窗懒加载(前端性能优化):模态弹窗组件统一在 web/src/modals.ts 注册表声明,
 // 首屏 bundle 不再包含其实现,首次打开对应弹窗时才加载 chunk;
 // <Transition name="sv-modal"> 包裹与开合过渡语义不变(由注册表 v-for 派生)。
-import { nextTick, onMounted, onUnmounted, watch } from 'vue';
+import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, watch } from 'vue';
 import { useAppStore } from './store';
 import { lazyModal } from './asyncModal';
 import { MODALS, MODAL_FLAGS } from './modals';
 import { shouldShowOnboarding } from './onboarding';
 import { inTauri } from './platform';
+import { useActiveThemeId } from './composables/useActiveTheme';
 import { useExternalLinks } from './composables/useExternalLinks';
 import { useKeepAlive } from './composables/useKeepAlive';
 import Sidebar from './components/Sidebar.vue';
@@ -20,8 +21,33 @@ import SplashScreen from './components/SplashScreen.vue';
 // 音频播放器:右下角浮层,非首屏(默认收起为开关按钮),一并懒加载。
 // 它是常驻浮层而非模态弹窗,故不进 modals.ts 注册表。
 const AudioPlayer = lazyModal(() => import('./components/AudioPlayer.vue'), '音频播放器', 'audioOpen');
+/** 彩窗主题的整窗环境层:懒加载,默认主题不下载该 chunk。 */
+const AmbientField = defineAsyncComponent(() => import('./components/AmbientField.vue'));
 
 const store = useAppStore();
+const activeThemeId = useActiveThemeId();
+
+/** 任务执行态(planning/running):环境层与任务执行抢帧时暂停。 */
+const taskExecuting = computed(() => {
+  const status = store.currentTask?.task.status;
+  return status === 'planning' || status === 'running';
+});
+/**
+ * 整窗环境层的暂停条件:
+ * - 启动动画期间只画 t=0 静态帧;
+ * - 生成/任务执行期间让出主线程;
+ * - 任一模态/抽屉打开时冻结背景,避免动画画布在遮罩下继续逐帧绘制/合成。
+ */
+const ambientPaused = computed(
+  () => !store.splashDone || store.generating || taskExecuting.value || store.overlayOpen,
+);
+const ambientVariant = computed<'paper' | 'draft'>(() =>
+  store.appMode === 'task' ? 'draft' : 'paper',
+);
+const ambientIntensity = computed(() => {
+  if (store.appMode === 'task') return store.currentTask ? 0.14 : 0.8;
+  return store.messages.length ? 0.22 : 0.85;
+});
 
 /** 壳事件监听的注销句柄(listen 返回的 unlisten;未注册成功时为 null) */
 let unlistenCloseRequested: (() => void) | null = null;
@@ -317,8 +343,22 @@ watch(
   <!-- 启动动画 -->
   <SplashScreen v-if="!store.splashDone" />
 
-  <!-- 主界面(启动动画结束后淡入) -->
-  <div v-else class="sv-frame-col sv-app-enter">
+  <!-- 主界面:启动动画期间也预挂载/预绘制,splash 只负责遮住它;
+       否则 glass 主题的整套重型图层会在揭幕瞬间才首次挂载,形成启动卡顿。
+       inert + aria-hidden 防止键盘/读屏在 splash 期间进入主界面。 -->
+  <div
+    class="sv-frame-col sv-app-enter"
+    :inert="!store.splashDone"
+    :aria-hidden="!store.splashDone"
+  >
+    <!-- 彩窗主题:整窗一层环境层,放在 .sv-body 之下,面板半透明后才能透出动态彩光 -->
+    <div v-if="activeThemeId === 'stained-glass'" class="sv-app-ambient-layer" aria-hidden="true">
+      <AmbientField
+        :variant="ambientVariant"
+        :intensity="ambientIntensity"
+        :paused="ambientPaused"
+      />
+    </div>
     <!-- 全局错误条:数据加载失败(角色/会话/历史)与弹窗懒加载失败,均可重试 -->
     <div v-if="store.dataLoadError" class="sv-global-error" role="alert">
       <span class="sv-global-error-text">{{ store.dataLoadError }}</span>
@@ -437,3 +477,18 @@ watch(
     <AudioPlayer v-else class="sv-audio-float" />
   </div>
 </template>
+
+<style scoped>
+/* 整窗环境层定位:帧容器是定位上下文,内容层抬到环境层之上。
+   放在 App scoped 块里,不增加全局域行数。 */
+.sv-frame-col { position: relative; }
+.sv-body { position: relative; z-index: 1; }
+.sv-app-ambient-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  /* 石壳的拼片仍要从动态玻璃光下透出来;0.5 是观感与可读性的折中 */
+  opacity: 0.5;
+}
+</style>

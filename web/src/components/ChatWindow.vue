@@ -9,6 +9,7 @@ import { ScriptRunner, type SandboxRpcExtensions } from '../scriptRunner';
 import { executeCurrentMessageScripts as scheduleCurrentMessageScripts } from '../chatMessageScriptScheduler';
 import { enabledCardScriptsOf } from '../cardScripts';
 import { cleanupCardScriptSandbox, ensureCardScriptSandbox, makeCardScriptRpcExtensions } from '../cardScriptHost';
+import { useActiveThemeId } from '../composables/useActiveTheme';
 import { useVirtualMessages } from '../composables/useVirtualMessages';
 import { useResourceFrames } from '../composables/useResourceFrames';
 import { scriptBlocksCache, buildScriptBlocksKey } from '../renderCache';
@@ -23,6 +24,7 @@ import RenderPanelHost from './RenderPanelHost.vue';
 const AmbientField = defineAsyncComponent(() => import('./AmbientField.vue'));
 
 const store = useAppStore();
+const activeThemeId = useActiveThemeId();
 const {
   messages, generating, currentSessionId, currentCharacterId, currentCharacter, currentCharacterName,
   renderHtml, currentScriptHash, currentScriptAuthorized, mvuVariables, initVarEntries, lastError,
@@ -463,9 +465,15 @@ function bindRowRef(id: number, target: unknown): void {
     <!-- 顶栏(含渲染引导条):会话/开场/渲染开关/JS 授权/Agent 面板/token 统计 -->
     <ChatTopbar @open-greeting-picker="openGreetingPicker" />
 
-    <!-- 舞台:环境层在画布背后,消息/空态在实色表面上(z-index 1) -->
+    <!-- 舞台:环境层在画布背后,消息/空态在实色表面上(z-index 1)。
+         彩窗主题改用 App 级整窗环境层,这里不再挂第二张 canvas。 -->
     <div class="sv-stage">
-      <AmbientField :variant="'paper'" :intensity="messages.length ? 0.22 : 0.85" :paused="generating" />
+      <AmbientField
+        v-if="activeThemeId !== 'stained-glass'"
+        :variant="'paper'"
+        :intensity="messages.length ? 0.22 : 0.85"
+        :paused="generating || store.overlayOpen"
+      />
 
       <!-- 消息画布(渲染面板折叠切换与水合由宿主组件承载) -->
       <RenderPanelHost ref="panelHost" transparent>

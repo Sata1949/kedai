@@ -76,9 +76,11 @@ export interface ThemeRegistry {
   unregister(id: string): boolean;
   list(): ThemeSummary[];
   getActive(): string;
-  apply(id: string, opts?: { persist?: boolean }): Promise<boolean>;
+  apply(id: string, opts?: { persist?: boolean; suppressTransitions?: boolean }): Promise<boolean>;
+  /** 只加载主题资源,不改变 activeId / data-theme / 持久化(切换前预载用)。 */
+  preload(id: string): Promise<boolean>;
   subscribe(listener: ThemeListener): () => void;
-  init(): void;
+  init(): Promise<void>;
   snapshot(): ThemeSnapshot;
 }
 
@@ -217,10 +219,69 @@ export function createThemeRegistry(options: ThemeRegistryOptions = {}): ThemeRe
     return true;
   }
 
-  async function apply(id: string, opts: { persist?: boolean } = {}): Promise<boolean> {
+  function loadTheme(id: string): Promise<unknown> | undefined {
+    const entry = themes.get(id);
+    if (!entry?.theme.load) return undefined;
+    let pending = loaded.get(id);
+    if (!pending) {
+      try {
+        pending = Promise.resolve(entry.theme.load()).catch((err) => {
+          console.warn('[KedaiUI] 主题资源加载失败:', id, err);
+        });
+      } catch (err) {
+        console.warn('[KedaiUI] 主题资源加载失败:', id, err);
+        pending = Promise.resolve();
+      }
+      loaded.set(id, pending);
+    }
+    return pending;
+  }
+
+  /** 只预载资源;不改 activeId,不写 storage,不写 data-theme。 */
+  async function preload(id: string): Promise<boolean> {
+    const entry = themes.get(id);
+    if (!entry) return false;
+    const pending = loadTheme(id);
+    if (pending) await pending;
+    return true;
+  }
+
+  /**
+   * 主题切换期间临时归零过渡/动画时长:换令牌会让全站颜色/背景同时变化,
+   * 若各自按自己的 transition 播一遍,就是一次「过渡风暴」。两帧后移除。
+   * 用临时 style 而不是全局 CSS:主题切换不是常驻状态,也不增加全局域行数。
+   */
+  function suppressTransitionStorm(): void {
+    if (!doc || !root) return;
+    const style = doc.createElement('style');
+    style.dataset.kedaiThemeSwitching = '1';
+    style.textContent =
+      'html[data-theme-switching] *,html[data-theme-switching] *::before,' +
+      'html[data-theme-switching] *::after{transition-duration:0s;animation-duration:0s;}';
+    doc.head.appendChild(style);
+    root.dataset.themeSwitching = '1';
+    let cleared = false;
+    const clear = (): void => {
+      if (cleared) return;
+      cleared = true;
+      delete root.dataset.themeSwitching;
+      style.remove();
+    };
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => requestAnimationFrame(clear));
+    } else {
+      setTimeout(clear, 32);
+    }
+  }
+
+  async function apply(
+    id: string,
+    opts: { persist?: boolean; suppressTransitions?: boolean } = {},
+  ): Promise<boolean> {
     const entry = themes.get(id);
     if (!entry) return false;
     const theme = entry.theme;
+    if (opts.suppressTransitions !== false) suppressTransitionStorm();
     removeApplied();
     if (root) {
       root.dataset.theme = id;
@@ -246,25 +307,12 @@ export function createThemeRegistry(options: ThemeRegistryOptions = {}): ThemeRe
     }
     notify();
 
-    if (theme.load) {
-      let pending = loaded.get(id);
-      if (!pending) {
-        try {
-          pending = Promise.resolve(theme.load()).catch((err) => {
-            console.warn('[KedaiUI] 主题资源加载失败:', id, err);
-          });
-        } catch (err) {
-          console.warn('[KedaiUI] 主题资源加载失败:', id, err);
-          pending = Promise.resolve();
-        }
-        loaded.set(id, pending);
-      }
-      await pending;
-    }
+    const pending = loadTheme(id);
+    if (pending) await pending;
     return true;
   }
 
-  function init(): void {
+  async function init(): Promise<void> {
     let saved: string | null = null;
     try {
       saved = storage?.getItem(THEME_STORAGE_KEY) ?? null;
@@ -279,7 +327,8 @@ export function createThemeRegistry(options: ThemeRegistryOptions = {}): ThemeRe
         /* 忽略 */
       }
     }
-    void apply(id, { persist: false });
+    // 启动期不要抑制进入动画:主界面是预挂载的,splash 结束后不应再播一次。
+    await apply(id, { persist: false, suppressTransitions: false });
   }
 
   function subscribe(listener: ThemeListener): () => void {
@@ -298,6 +347,7 @@ export function createThemeRegistry(options: ThemeRegistryOptions = {}): ThemeRe
     list: summaries,
     getActive: () => activeId,
     apply,
+    preload,
     subscribe,
     init,
     snapshot,
@@ -310,8 +360,18 @@ export const themeRegistry = createThemeRegistry();
 export const listThemes = (): ThemeSummary[] => themeRegistry.list();
 export const getActiveThemeId = (): string => themeRegistry.getActive();
 export const applyTheme = (id: string): Promise<boolean> => themeRegistry.apply(id);
+export const preloadTheme = (id: string): Promise<boolean> => themeRegistry.preload(id);
 export const subscribeThemes = (listener: ThemeListener): (() => void) => themeRegistry.subscribe(listener);
-export const initTheme = (): void => themeRegistry.init();
+
+/** 启动期主题资源 Promise;SplashScreen 用它避免主题 CSS 晚到造成揭幕后二次重绘。 */
+let themeReady: Promise<void> = Promise.resolve();
+
+export const initTheme = (): Promise<void> => {
+  themeReady = themeRegistry.init();
+  return themeReady;
+};
+
+export const whenThemeReady = (): Promise<void> => themeReady;
 
 /** 暴露给外部前端插件的窄接口:只做主题注册/切换,不提供 DOM 写入口。 */
 export interface KedaiUiApi {
