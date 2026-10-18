@@ -53,10 +53,12 @@ extern "system" {
 
 const MB_OK: u32 = 0x0000;
 const MB_YESNO: u32 = 0x0004;
+const MB_YESNOCANCEL: u32 = 0x0003;
 const MB_ICONERROR: u32 = 0x0010;
 const MB_ICONWARNING: u32 = 0x0030;
 const MB_ICONINFO: u32 = 0x0040;
 const IDYES: i32 = 6;
+const IDNO: i32 = 7;
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -508,14 +510,31 @@ fn latest_mtime(path: &Path, latest: &mut SystemTime) {
 /// 产品源码(web/src、server-rs/src、src-tauri/src、构建脚本与配置)的最新修改时间。
 /// 与 start.ps1 的 Get-LatestSourceTime 扫描表保持一致。
 fn latest_source_mtime(root: &Path) -> SystemTime {
-    let mut latest = UNIX_EPOCH;
-    let paths: [PathBuf; 17] = [
+    let mut latest = latest_web_source_mtime(root);
+    let rust = latest_rust_source_mtime(root);
+    if rust > latest {
+        latest = rust;
+    }
+    latest
+}
+
+/// 仅前端源码:决定 web/dist 的新鲜度。
+fn latest_web_source_mtime(root: &Path) -> SystemTime {
+    let paths = [
         root.join("web/src"),
         root.join("web/public"),
         root.join("web/index.html"),
         root.join("web/vite.config.ts"),
         root.join("web/tsconfig.json"),
         root.join("web/package.json"),
+    ];
+    latest_mtime_of(&paths)
+}
+
+/// 仅后端/壳源码与构建脚本:决定 kedai-server / 便携版 exe 的新鲜度。
+/// 与前端分开比较,避免「改后端导致 web/dist 被误判过期」而触发全量构建。
+fn latest_rust_source_mtime(root: &Path) -> SystemTime {
+    let paths = [
         root.join("server-rs/src"),
         root.join("server-rs/build.rs"),
         root.join("server-rs/Cargo.toml"),
@@ -528,10 +547,49 @@ fn latest_source_mtime(root: &Path) -> SystemTime {
         root.join("tools/build-portable.ps1"),
         root.join("build.ps1"),
     ];
-    for p in &paths {
+    latest_mtime_of(&paths)
+}
+
+fn latest_mtime_of(paths: &[PathBuf]) -> SystemTime {
+    let mut latest = UNIX_EPOCH;
+    for p in paths {
         latest_mtime(p, &mut latest);
     }
     latest
+}
+
+/// 增量构建(debug 后端 + web/dist)是否已经覆盖当前源码。
+/// watch.ps1 / build.ps1 -Dev 只更新这两处,不产出便携版;启动器据此把「源码更新」
+/// 区分为「已有增量产物可看」而不是无脑弹全量重建。
+fn incremental_build_fresh(root: &Path) -> bool {
+    incremental_build_fresh_within(root, Duration::from_secs(120))
+}
+
+/// 带宽容窗口的版本(测试用 0 容忍做精确断言)。
+fn incremental_build_fresh_within(root: &Path, grace: Duration) -> bool {
+    let server_time = [
+        root.join("server-rs/target/debug/kedai-server.exe"),
+        root.join("server-rs/target/release/kedai-server.exe"),
+    ]
+    .iter()
+    .filter_map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
+    .max();
+    let server_fresh = match server_time {
+        Some(t) => latest_rust_source_mtime(root)
+            .duration_since(t)
+            .map(|d| d <= grace)
+            .unwrap_or(true),
+        None => false,
+    };
+    let web_fresh =
+        match std::fs::metadata(root.join("web/dist/index.html")).and_then(|m| m.modified()) {
+            Ok(t) => latest_web_source_mtime(root)
+                .duration_since(t)
+                .map(|d| d <= grace)
+                .unwrap_or(true),
+            Err(_) => false,
+        };
+    server_fresh && web_fresh
 }
 
 /// 便携版产物是否比源码旧(超过 2 分钟宽容窗口,与 start.ps1 一致)。
@@ -582,6 +640,47 @@ fn extract_json_string(json: &str, key: &str) -> Option<String> {
         None
     } else {
         Some(val.to_string())
+    }
+}
+
+/// 启动增量构建的测试版(浏览器)。start.ps1 -NoRebuild 会选中最新 debug/release 产物;
+/// 图形启动器只负责打开新的控制台窗口,生命周期由 start.ps1 自己管理。
+fn launch_incremental_test(root: &Path) -> bool {
+    let script = root.join("start.ps1");
+    if !script.is_file() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                script.to_str().unwrap_or_default(),
+                "-NoRebuild",
+            ])
+            .current_dir(root)
+            .creation_flags(0x0000_0010) // CREATE_NEW_CONSOLE
+            .spawn()
+            .is_ok()
+    }
+    #[cfg(not(windows))]
+    {
+        Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                script.to_str().unwrap_or_default(),
+                "-NoRebuild",
+            ])
+            .current_dir(root)
+            .spawn()
+            .is_ok()
     }
 }
 
@@ -673,21 +772,44 @@ fn main() {
         }
     };
 
-    // 触发重建的两类原因:① 源码比产物新(mtime);② 两版构建指纹不一致(sidecar)。
-    // 保证双击启动器拿到的始终是最新且与测试版同步的版本
+    // 触发重建的三类原因:① 源码比产物新(mtime);② 两版构建指纹不一致(sidecar);
+    // ③ 源码更新已由增量构建(debug + web/dist)覆盖——此时不强迫全量重建,而是让用户
+    // 选择「启动增量测试版 / 重建便携版 / 直接启动当前便携版」。
     // (与 start.ps1 的自动重建语义一致;直接双击 dist 内 exe 无此保障)。
     let drifted = versions_drifted(&root, &desktop);
-    if drifted || artifact_stale(&root, &desktop) {
-        let prompt = if drifted {
-            "检测到测试版与便携版的构建指纹不一致(两版曾分开构建)。\n\n\
-             是否现在自动重建并同步两版?(前端 + Rust 编译,首次或全量需数分钟)\n\n\
-             选「是」开始重建并自动启动新版;选「否」直接启动当前便携版。"
+    let stale = artifact_stale(&root, &desktop);
+    if drifted || stale {
+        let incremental = !drifted && stale && incremental_build_fresh(&root);
+        let rebuild = if incremental {
+            let choice = msgbox(
+                "检测到源码更新已通过本地增量编译(debug 后端 + web/dist 已是最新)。\n\n\
+                 是否直接启动测试版(浏览器)?\n\n\
+                 选「是」:启动增量构建的测试版(数据目录与桌面版一致)\n\
+                 选「否」:重建便携版(前端 + Rust,数分钟)\n\
+                 选「取消」:直接启动当前便携版",
+                "Kedai",
+                MB_YESNOCANCEL | MB_ICONINFO,
+            );
+            if choice == IDYES {
+                if !launch_incremental_test(&root) {
+                    fail("无法启动测试版:请检查项目根 start.ps1 是否存在、是否可执行。");
+                }
+                return;
+            }
+            choice == IDNO
         } else {
-            "检测到源码比当前程序新。\n\n\
-             是否现在自动重建?(前端 + Rust 编译,首次或全量需数分钟)\n\n\
-             选「是」开始重建并自动启动新版;选「否」直接启动当前版本。"
+            let prompt = if drifted {
+                "检测到测试版与便携版的构建指纹不一致(两版曾分开构建)。\n\n\
+                 是否现在自动重建并同步两版?(前端 + Rust 编译,首次或全量需数分钟)\n\n\
+                 选「是」开始重建并自动启动新版;选「否」直接启动当前便携版。"
+            } else {
+                "检测到源码比当前程序新。\n\n\
+                 是否现在自动重建?(前端 + Rust 编译,首次或全量需数分钟)\n\n\
+                 选「是」开始重建并自动启动新版;选「否」直接启动当前版本。"
+            };
+            confirm(prompt)
         };
-        if confirm(prompt) {
+        if rebuild {
             // build.ps1 默认双端同步产出(测试版 + 便携版),重建即对齐指纹
             let script = root.join("build.ps1");
             #[cfg(windows)]
@@ -820,6 +942,50 @@ mod tests {
             extract_json_string(r#"{"dist_hash":123}"#, "dist_hash"),
             None
         );
+    }
+
+    #[test]
+    fn incremental_build_fresh_tracks_debug_and_web_dist() {
+        let root = tmpdir("incremental");
+        std::fs::create_dir_all(root.join("server-rs/src")).unwrap();
+        std::fs::create_dir_all(root.join("web/src")).unwrap();
+        std::fs::create_dir_all(root.join("server-rs/target/debug")).unwrap();
+        std::fs::create_dir_all(root.join("web/dist")).unwrap();
+        std::fs::write(root.join("server-rs/src/lib.rs"), b"fn main() {}").unwrap();
+        std::fs::write(root.join("web/src/App.vue"), b"<template />").unwrap();
+
+        std::thread::sleep(Duration::from_millis(30));
+        std::fs::write(
+            root.join("server-rs/target/debug/kedai-server.exe"),
+            b"debug",
+        )
+        .unwrap();
+        std::fs::write(root.join("web/dist/index.html"), b"<html />").unwrap();
+        assert!(
+            incremental_build_fresh_within(&root, Duration::ZERO),
+            "产物比源码新时增量构建应判定为已覆盖"
+        );
+
+        // 再改源码(超过 0 容忍)→ 增量产物不再是当前源码的编译结果
+        std::thread::sleep(Duration::from_millis(30));
+        std::fs::write(
+            root.join("web/src/App.vue"),
+            b"<template>changed</template>",
+        )
+        .unwrap();
+        assert!(
+            !incremental_build_fresh_within(&root, Duration::ZERO),
+            "web 源码更新后 web/dist 必须重编"
+        );
+
+        // 缺少任一端产物都视为未覆盖
+        std::fs::remove_file(root.join("web/dist/index.html")).unwrap();
+        assert!(!incremental_build_fresh_within(
+            &root,
+            Duration::from_secs(120)
+        ));
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
