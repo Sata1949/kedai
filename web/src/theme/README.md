@@ -9,7 +9,7 @@ Kedai 的前端主题是**声明式**扩展点：主题只能覆盖 CSS 自定�
 | `default` | 纸面 · 至上主义 | 淡粉纸面、黑方块与红斜线；默认主题，无额外 CSS/字体 |
 | `stained-glass` | 教堂拼接玻璃 | 暗石外壳、白玻璃菱格、彩色玻璃拼片与密窗玫瑰；主题 CSS 与字体按需加载 |
 
-切换入口：**综合设置 → 界面与工具 → 界面 → 外观主题**。选择写入 `localStorage["kedai.theme.v1"]`，不写 `settings.json`。启动时 `main.ts` 先同步应用已保存的令牌，再按需加载主题 CSS/字体。
+切换入口：**综合设置 → 界面与工具 → 界面 → 外观主题**。选择写入 `localStorage["kedai.theme.v1"]`，不写 `settings.json`。启动时 `main.ts` 先同步应用已保存的令牌；主题 CSS 由宿主在启动期/空闲期预载，Splash 等待 CSS 就绪（字体后台加载），避免揭幕后再二次重绘。
 
 ### 彩窗主题的视觉依据（2026-10-17 重做）
 
@@ -20,13 +20,15 @@ Kedai 的前端主题是**声明式**扩展点：主题只能覆盖 CSS 自定�
 - **圣礼拜堂**：石构近黑，玻璃自发光；彩色光会溢出到相邻玻璃和石面上。
 - **Laon / 巴黎圣母院玫瑰窗**：不是 12 瓣平涂，而是三层放射扇片 + 一圈圈白环小圆章 + 很粗的石棂；蓝场为主，红金只作圆章。
 
-落成规则：外壳用暗石、彩色光晕与一层拼片；面板是半透明白玻璃（grisaille 细菱格）
-叠在彩色拼片上，两种拼片使用同一套 48×44 菱形与 384×176 平铺尺寸（铅条严格对齐），
-中央白玻璃罩保证文字可读，最外缘露出彩色拼片；顶栏/侧栏顶/模态头/选中态是
-「拼片 + 深蓝纱 + 金色背光」的玻璃横楣；主按钮与授权档是拼片 + 红宝石纱；
-综合设置的左栏与内容区也铺同一扇玻璃，二级选中为钴蓝拼片；
-空态右侧是一扇 150px 密窗玫瑰（三层扇片 + 白环圆章 + 粗石棂）。所有规则限定在
-`html[data-theme='stained-glass']` 下，不使用 `!important`。
+落成规则（2026-10-18 GLASS-1 修订）：外壳用暗石、彩色光晕与一层拼片；面板是**真半透明**
+白玻璃：底色约 `rgba(250,246,232,.58)`，中央 radial scrim 保证正文可读，边缘只剩 `.12`
+让整窗外壳的彩色拼片与动态光透上来。玻璃主题在 App 级挂**唯一一层整窗环境层**，
+`ChatWindow` / `TaskBoard` 不再各挂 stage canvas；大面积面板不做实时 `backdrop-filter`
+（动画背景上的全屏模糊是卡顿源），玻璃感由透出的背景 + 铅条 CSS 网格 + 高光承担。
+顶栏/侧栏顶/模态头是半透明深蓝玻璃横楣；主按钮与授权档保留小面积拼片；综合设置左栏/
+内容区只留 tint，不叠第二层模糊；空态右侧是一扇 150px 密窗玫瑰。低档设备
+（`html[data-perf-tier='low']`）关闭全部实时模糊，环境层降到 20fps/0.45 倍。
+所有规则限定在 `html[data-theme='stained-glass']` 下，不使用 `!important`。
 
 参考照片（Wikimedia Commons，仅作研究，不随仓库分发；本机 15 张在
 `D:\kedai-bench-run\stained-glass-ref\ref-01..15`）：
@@ -50,7 +52,7 @@ interface ThemeDefinition {
   className?: string;         // 单个 class，应用到 <html>
   fonts?: Array<{ family: string; src: string; weight?: string; style?: string; display?: string }>;
   css?: string;               // 请自行以 [data-theme="<id>"] 为前缀
-  load?: () => Promise<unknown>; // 首次激活时调用一次（动态 CSS/字体 chunk）
+  load?: () => Promise<unknown>; // 首次激活或宿主预载时调用一次；应只等 CSS 等关键资源
 }
 
 interface KedaiUiApi {
@@ -91,7 +93,10 @@ window.addEventListener('kedai:ui-ready', () => {
 - 插件主题在启动时必须重新注册；若 `localStorage` 中保存的 id 尚未注册，启动回退 `default`，注册后可再次切换。
 - `css` 由本地插件提供，宿主按可信代码处理；插件必须把选择器限定在 `[data-theme="<id>"]` 下，避免污染其它主题。
 - API 不提供 DOM 写入口，也不执行生命周期回调；需要复杂交互时应在插件自己的脚本里完成，再通过令牌/作用域 CSS 表达。
-- 主题资源只在首次激活时加载一次；切回默认不会卸载已加载的 CSS/字体（它们都带主题作用域）。
+- 主题资源只加载一次；切回默认不会卸载已加载的 CSS/字体（它们都带主题作用域）。
+- 宿主内部提供 `preloadTheme(id)`：只预载资源，不改变 activeId / data-theme / 持久化；内置彩窗在
+  high 档启动空闲时预载 CSS 与环境层 chunk。字体与 CSS 拆开，`font-display: swap` 接管字形回退。
+- `load()` 应只等决定“主题是否完整”的 CSS；字体等非关键资源在后台加载，避免拖住主题切换。
 
 ## 字体与许可
 
