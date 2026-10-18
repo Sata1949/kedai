@@ -31,7 +31,7 @@
   `cfg(windows)` 之外的可移植性回归;`android-smoke` 仅手动(`workflow_dispatch` 选
   `target=android`,默认 `none`)——NDK + `cargo-ndk` 对 `aarch64-linux-android` 交叉编译
   `server-rs` 并自证产物是 `ARM aarch64` + `/system/bin/linker64`,覆盖 Android cfg 路径
-  (JNI / bindgen / 平台执行层)。**它不替代 ③**:③ 仍是唯一权威档(全量 15 段);本档红同样当门禁处理。
+  (JNI / bindgen / 平台执行层)。**它不替代 ③**:③ 仍是唯一权威档(全量档;阶段数与开关语义以 §2 与 `tools/check-all.ps1` 为准);本档红同样当门禁处理。
   分档理由(为何独立文件而非同文件加 job)见 `经验.md` E66。
   **恢复态(2026-10-11 起)**:③④ 两档已 `gh workflow enable` 回 active——2026-09-29 起的停用系
   账号计费阻断,解除经实测(见 `遗留.md` CI-BILL-1 追注)。**main 分支保护同日首次开启**
@@ -146,8 +146,9 @@ kedai/
 │   ├── src/lib.rs              # 数据目录注入(%APPDATA%\com.kedai.app)+ 服务自检/启动
 │   └── tauri.conf.json         # 窗口 1280×800、NSIS 打包、图标
 ├── tools/make-icons.ps1        # 品牌图标生成脚本(圆角 + 透明背景,零依赖)
-├── start.ps1                   # 智能启动:默认测试版(浏览器模式),-Portable 启动便携版;过期/漂移自动双端重建
-├── build.ps1                   # 一键构建(默认双端同步:前端 + Rust release + 便携版;-TestOnly 仅测试版;-Tauri 追加 NSIS)
+├── tools/watch.ps1             # 开发期增量编译:监听前后端源码,保留 target,不跑门禁
+├── start.ps1                   # 智能启动:默认测试版(浏览器模式),-Portable 启动便携版;按 mtime 选最新产物
+├── build.ps1                   # 全量构建(默认双端同步:前端 + Rust release + 便携版;-TestOnly 仅测试版;-Tauri 追加 NSIS)
 ├── Kedai.exe / Kedai.lnk       # 图形启动器(双击正式入口;源码在 launcher/,由 build.ps1 幂等维护)
 ├── logs/                       # 运行日志(自动清理 3 天前;桌面场景在 %APPDATA%\com.kedai.app\logs)
 ├── data/                       # SQLite + 角色卡原图 + avatars(勿删)
@@ -174,14 +175,15 @@ kedai/
 |---|---|---|
 | 一键启动(桌面) | 双击 `Kedai.lnk` 或 `.\start.ps1 -Portable` | lnk 指向项目根 `Kedai.exe` 图形启动器(过期/漂移自动询问重建);`.\start.ps1` 默认启动测试版浏览器模式 |
 | 桌面安装包 | `.\build.ps1 -Tauri` | 双端同步之外追加 NSIS 安装程序(需 `@tauri-apps/cli`);安装后从开始菜单启动 |
-| 一键构建 | `.\build.ps1` | **默认双端同步产出**:前端 web/dist + Rust release(测试版)+ 便携版;`-TestOnly` 仅测试版快速通道 `-Dev` debug 构建 `-NoWeb` 仅 Rust `-Tauri` 追加 NSIS 打包 |
+| 全量构建(升版/交付) | `.\build.ps1` | **版本号更新后、发布/交付前跑这条**:默认双端同步产出前端 web/dist + Rust release(测试版)+ 便携版 + 构建指纹;`-TestOnly` 仅测试版(不刷新便携版)、`-Dev` 只编 debug(保留 target)、`-NoWeb` 仅 Rust、`-Tauri` 追加 NSIS 打包。**日常改代码不要每次全量,用下一行增量** |
 | 兼容别名 | `npm run build:all` / `npm run build:rs` | 均等价 `.\build.ps1`(双端同步);`npm run build:test` 等价 `.\build.ps1 -TestOnly` |
 | 发布归档(7z) | `.\tools\pack-7z.ps1 [-Build]` | 便携版 → `dist\Kedai-<版本>-win64-portable.7z`(命名与归档内结构对齐历史体例;`-Build` 则先跑一次全量双端构建);出包前校验 sidecar 版本与源码一致 + 测试版/便携版 `dist_hash` 一致;7z.exe 按 参数/PATH/注册表/常见目录 探测,缺失时回退系统 bsdtar(`--format=7zip`) |
-| 统一改版本号 | `npm run version:bump -- x.y.z` | **9 个文件一次改全**(2 个 package.json、3 个 Cargo.toml、tauri.conf.json、package-lock.json 全部自身版本、`AboutSection.vue` 的 `FALLBACK_VERSION`、本文档版本行);其中 **8 处声明由 `build.ps1::Assert-VersionConsistency` 校验**(改漏即构建报错);支持 `-DryRun` 预览 |
+| 统一改版本号 | `npm run version:bump -- x.y.z` | **9 个文件一次改全**(2 个 package.json、3 个 Cargo.toml、tauri.conf.json、package-lock.json 全部自身版本、`AboutSection.vue` 的 `FALLBACK_VERSION`、本文档版本行);其中 **8 处声明由 `build.ps1::Assert-VersionConsistency` 校验**(改漏即构建报错);支持 `-DryRun` 预览。**改完版本号后必须接着跑一次完整 `.\build.ps1`**(增量 `watch.ps1` 不刷新 `dist\`、便携版与 sidecar 指纹) |
 | 后端测试 | `cd server-rs && cargo test -j 8` | **1840 个测试(1410 单测 + 430 集成,64 个集成文件)**,**需在 vcvars64 环境**;前端 `npm test -w web` **1628 个(155 文件;静态计数;vitest 运行时为 1671,差值 43 = 循环生成口径差(parser 19 个 fixture、contrast 18 对令牌、主题注册表 15 例,静态各计 1/1/8))**。数字由 `node tools/count-tests.mjs` 自动统计,勿手抄——`npm run count:tests` 查看当前值,`npm run check:tests` 校验文档是否漂移(**2026-09-26 起逐行扫描本节与根 `README.md` 的全部复写处,并校验集成文件数**;其余由代码/脚本派生的计数——表数、`ensure_*` 个数、映射组数、规则字母、ratchet 基线、枚举变体数、门禁阶段数、工具链版本——由 `npm run check:doc-claims` 守护) |
 | 全量检查(本地 CI) | `npm run check` | `tools/check-all.ps1`——**本行是本仓库门禁阶段清单的唯一展开处**,其余文档只写「见本节」。顺序:fmt → clippy → cargo test → **cargo audit(硬门禁,双 Cargo.lock)** → docs: check-docs → docs: check-doc-claims(计数类硬口径;**GATE-1,2026-10-06:与 check-docs 同段,不再受 `-SkipRust`/`-SkipWeb` 影响**) → docs: check-tutorial(新手教程防漂移,**2026-10-10 TUTSYNC OB-12 新增**:步骤 id↔文案、跳转落点与界面名词表、退役名、速览覆盖、步数派生;与文档两段同档,只被 `-AuditOnly` 跳过) → lock-sync(双锁漂移)→ contract → arch(规则集以 `tools/check-arch.mjs` 为准,A–M)→ count: tests → 类型 ratchet → 零测试 ratchet(test-ratchet,**2026-10-06 FE-11 新增**:新增源码文件无测试 import 即 FAIL) → 样式纪律 ratchet(css-discipline,2026-10-02 UIP-8 新增;UIP-10 增第 4 条间距裸值 ratchet)→ eslint → **npm audit(硬门禁)** → vue-tsc(**硬门禁**)→ vitest → vite build → bundle budget(体积预算)→ perf(-Perf 才跑)。**已接入 build.ps1 与 pre-push hook**;云端为 GitHub Actions 两档(权威档 `ci.yml` = 本清单全量,平台档 `ci-linux.yml` = fmt/clippy/cargo test/前端三段 + 手动 Android 交叉编译冒烟;2026-09-26 激活,**2026-09-29~10-11 停用,2026-10-11 恢复**,见 §0 门禁纪律);`-Quick` 跳 vite build 与 bundle budget,**`-Bundle`(2026-10-06 FE-10)即便在 `-Quick` 下也运行这两段——pre-push 用 `-Quick -Bundle`,把体积预算纳入推送前路径;build.ps1 的 `-Quick` 不带它,避免与 `[1/3]` 重复构建**,`-SkipWeb` 跳 web 与契约段(**文档三段不在其中**——GATE-1 后它们与审计段同档,只被 `-AuditOnly` 跳过),`-AuditOnly` 只跑两段 audit(并跳过文档段、全部编译/测试/构建)。 **工具链口径(2026-09-27 起,见 `经验.md` E60/E63)**:真值源是仓库根 **`rust-toolchain.toml`**——仓库内任何 rustup 代理调用(`cargo`/`rustc`/`rustfmt`/`clippy`)都解析到它的 `channel`,换机、换会话、`rustup update stable` 都不再改变口径。CI 各 workflow 里的 `dtolnay/rust-toolchain@<版本>` 是**必须逐处手写同步处**(该 action 明确不支持读 toolchain 文件;2026-09-27 起 `check-doc-claims` 扫 `.github/workflows` 下**每一处**取值与 toml 比对,不再只看第一处),它与本文档工具链行一起被 `npm run check:doc-claims` 逐条钉死——版本漂移**先在门禁转红**,而不是等 CI 炸。升版按 `rust-toolchain.toml` 头注释的五步走(改 channel → 装新工具链 → 同步各 workflow 与本文档 → 本地 `npm run check` 复现并修掉新 lint → 一起提交),别拿 CI 当选 lint 的地方。 |
 `check-arch` 规则自 2026-09-14 起含 C/D/E/G/H/I/J(代际归属与跨代方向以 `tools/arch-layers.json` 为 SSOT),**2026-09-17 起增规则 L**(JNI 按名调用桥类的登记完整性)、**2026-10-05 起增规则 M**(PRODCAP-5:测试专用构造器 `build_test_app` 不得被生产入口引用——集成测试链接非 test 构建的 lib,`#[cfg(test)]` 门控不可行,改由脚本扫 `main.rs`/`bin/*.rs`/`src-tauri/src` 断言零引用);`check-bundle` 自 2026-09-17 起(基线在脚本内,ratchet 只降不升) |
 | 开发模式 | `cd server-rs && cargo run` + `npm run dev -w web` | 后端 3001 / 前端 5173(代理到 3001) |
+| 增量构建(日常开发) | `.\tools\watch.ps1` 或 `npm run watch` | **正常开发内循环用这条**:监听前后端源码,变更后自动增量编译——后端 `cargo build`(debug,保留 target)、前端 `npm run build -w web`;`-Once` 单次、`-RustOnly`/`-WebOnly` 分侧、`-Check` 只检查、`-Release` 增量 release、`-EmbedWeb` 刷新编译期内嵌 dist、`-DryRun` 只打印命令。不跑门禁、不产便携版;升版/交付前仍须完整 `.\build.ps1` |
 | Headless 单次任务(开发/评测) | `cargo build --manifest-path server-rs/Cargo.toml --bin kedai-agent` → `server-rs\target\debug\kedai-agent.exe --prompt-file <题面> --workspace <沙箱目录> --out <结果 JSON>` | HARNESS3-5(2026-10-01):进程内直跑一个 solo 任务,**不起服务、不依赖 web/dist、不装 MCP**;`--workspace` 与界面创建任务**同一把校验**;退出码 0(done)/1(partial/error/ended/timeout)/2(参数或环境错误);命令执行在本进程内存态默认开(**不写用户设置文件**);`--timeout-secs`(缺省 3600,0=不限)超时对任务发 stop 后按 `timeout` 收尾;结果 JSON `{task_id,status,summary,files_changed[],usage}`。它**不进产品面叙事**——开发/评测入口,随 `cargo build` 即得;详细边界见 `功能-变更史.md` 2026-10-01 章 |
 | 前端构建 | `npm run build -w web` | 产出 web/dist(编译进 exe 用) |
 
@@ -231,14 +233,28 @@ git-fetch-with-cli = true
 运行时默认只服务内嵌版本;仅显式设置环境变量 `KEDAI_WEB_DIST` 指向磁盘目录时才用磁盘版覆盖
 (开发调试用,见 `server-rs/src/config.rs`)。
 
-因此**每次改前端后必须重新构建 exe** 才会带上新界面;`server-rs/build.rs` 的
+因此**交付产物 exe 必须重新构建**才会带上新界面;开发期可用 `KEDAI_WEB_DIST=web/dist` 直接读磁盘版
+(或由 `watch.ps1` 持续刷新 `web/dist`),不必每次重编 exe。`server-rs/build.rs` 的
 `rerun-if-changed=../web/dist` 保证 cargo 感知前端变化,构建脚本另有 mtime 兜底检测。
+
+### 增量构建与全量构建(怎么选)
+
+两条链解决两个问题,不要混用:
+
+| 路径 | 脚本 | 何时用 | 行为与产物 |
+|---|---|---|---|
+| 增量构建 | `.\tools\watch.ps1`(或 `npm run watch`) | **日常开发**:改一行就想看结果 | 监听源码变更,后端 `cargo build`(debug)+ 前端 `npm run build -w web`;**保留 `target`**、不跑门禁、不产 release/便携版 |
+| 全量构建 | `.\build.ps1` | **版本号更新后**、发布/交付前、需要双端同步产物时 | 门禁(`check-all -Quick`)→ 前端 → Rust release → 便携版 → 构建指纹 sidecar;默认收尾删除 `target` 释放磁盘 |
+
+- **日常开发不要反复跑 `.\build.ps1`**:它每次都跑门禁并重建双端,收尾还会删 `target`,下一次等于全量重编。改代码的验收用 `watch.ps1` + `start.ps1`(测试版识别最新 debug 产物,并以磁盘 `web/dist` 启动),或直接用 `npm run dev -w web` 做前端热更新。
+- **版本号更新后必须跑一次完整 `.\build.ps1`**:`npm run version:bump -- x.y.z` 只改源码/配置里的 9 个文件,**不会刷新** `dist\`、便携版、根 `Kedai.exe` 与 `<exe>.build.json`;全量构建才会用 `Assert-VersionConsistency` 校验 8 处声明,并产出同指纹的两端产物。
+- 只想验证能否编译:`watch.ps1 -Once`(或 `-Check`);只想出测试版 exe(不刷新便携版):`build.ps1 -TestOnly`,但交付前仍须补一次完整全量构建。
 
 ### 构建流程
 
 ```powershell
-.\build.ps1          # 默认双端同步:前端 + cargo build --release + 便携版
-.\build.ps1 -TestOnly  # 快速迭代:只产出测试版(结尾会警告便携版未同步)
+.\build.ps1            # 全量双端同步:版本号更新后 / 发布 / 交付前
+.\build.ps1 -TestOnly  # 只产出测试版(不刷新便携版;交付前补完整全量)
 ```
 
 > **本机环境提示(2026-08 批次构建时验证)**:裸 shell 里没有 cargo——MSVC toolchain 需先
@@ -248,7 +264,41 @@ git-fetch-with-cli = true
 > 交付前必须跑 `.\build.ps1`(详见 AGENTS.md「构建提醒」)。
 
 产物:`dist\kedai-server.exe`(测试版)+ `dist\Kedai-portable\Kedai.exe`(便携版),各自约 20~30MB。
-双端全量构建约 5~10 分钟(便携版含 Tauri 全量编译);快速迭代用 `-TestOnly` 或 `-Dev`。
+双端全量构建约 5~10 分钟(便携版含 Tauri 全量编译)。**日常内循环用 `.\tools\watch.ps1`**,
+不要用 `-TestOnly` 反复跑全量;`-Dev` 只编 debug 且保留 `target`,适合需要 debug 产物又不想跑发布链时。
+
+### 开发期自动增量编译(tools/watch.ps1)
+
+交付构建(`build.ps1`)会跑完整门禁,并在收尾删除 `target` 释放磁盘,不适合「改一行等半天」的内循环。
+`tools/watch.ps1` 只做增量编译:监听 `server-rs\src` / `web\src` 等源码,变更后分别执行
+`cargo build`(debug)或 `npm run build -w web`——**保留 `target`、不跑门禁、不产出 release/便携版**。
+
+```powershell
+.\tools\watch.ps1            # 监听两端,Ctrl+C 退出(日常开发)
+npm run watch                # 同上(npm 别名)
+.\tools\watch.ps1 -Once      # 只编译一次后退出
+.\tools\watch.ps1 -Check     # 后端只做 cargo check(最快)
+.\tools\watch.ps1 -Release   # 后端用 release profile 增量编译(仍不产 dist/便携版)
+.\tools\watch.ps1 -EmbedWeb  # 前端构建后顺带重编后端(刷新编译期内嵌的 web/dist)
+```
+
+前端改动默认只重建 `web\dist`。若后端以 `KEDAI_WEB_DIST=web\dist` 启动(`start.ps1` 测试版已自动这样做),
+前端刷新无需重编后端;否则(使用内嵌 dist)需要 `-EmbedWeb` 或手动重编。该脚本面向开发,交付/发布前仍须跑
+`.\build.ps1`(门禁 + 双端同步)。
+
+**边界**:`watch.ps1` 只监听 `server-rs\src`、`web\src` / `web\public` 及两端配置文件;`src-tauri\src`、
+`launcher\src` 的改动不会触发它(改这些目录请跑全量 `.\build.ps1`),`server-rs\tests` 的改动也不会触发
+(测试需另行执行)。它只负责编译,不重启正在运行的服务;前端要即时生效仍需 `KEDAI_WEB_DIST` 或 `start.ps1`。
+
+### 版本号更新后的全量构建(固定顺序)
+
+1. `npm run version:bump -- x.y.z`(可先加 `-DryRun` 预览;一次改 9 个文件)
+2. `.\build.ps1`(默认全量双端;开头的 `Assert-VersionConsistency` 校验 8 处声明,随后 `check-all -Quick` 门禁、前端、release、便携版一条链)
+3. 验收:两端 `<exe>.build.json` 的 `version` 均为新号且 `dist_hash` 一致;`/api/health` 与设置中心底部显示新版本与构建时间
+4. 发版需要安装包/归档时再执行 `.\build.ps1 -Tauri` 或 `.\tools\pack-7z.ps1`
+
+> **不要**在升版后用 `watch.ps1` 代替:增量链不刷新 `dist\`、便携版、根 `Kedai.exe` 和指纹 sidecar,
+> 版本号表面改了、交付产物仍是旧版。
 
 ### 两版同步机制(构建指纹)
 
@@ -260,8 +310,9 @@ git-fetch-with-cli = true
 2. **运行时层**:`server-rs/build.rs` 把 `KEDAI_DIST_HASH`/`KEDAI_BUILD_TIME` 编进二进制,
    `GET /api/health` 返回 `{ok, ts, version, build_id, build_time, data_dir, dependencies:{db}}`;设置中心底部常驻显示
    「版本 · 构建时间 · 指纹前 8 位」,两端各开一次对比即可肉眼确认同步。
-3. **启动层**:`start.ps1` 与图形启动器(`Kedai.exe`,源码 `launcher/`)启动前比对两端
-   sidecar 的 `dist_hash`,不一致自动执行 `build.ps1` 双端重建;`Kedai.lnk` 指向图形启动器,
+3. **启动层**:`start.ps1` 的测试版按 mtime 选最新 server 产物(含 `server-rs\target\debug`),统一以磁盘
+   `web/dist` 为准,两端指纹不一致只提示不重建;`-Portable` 分支与图形启动器(`Kedai.exe`,源码 `launcher/`)
+   在便携版过期/指纹漂移时才执行 `build.ps1` 双端重建。`Kedai.lnk` 指向图形启动器,
    双击自带过期/漂移检测(直接双击 dist 里的裸便携版 exe 没有这层保障)。
 
 ### 部署方式
@@ -275,10 +326,10 @@ git-fetch-with-cli = true
 ### 启动器(start.ps1,推荐)
 
 统一 PowerShell 启动脚本(旧 C# `kedai.exe` / `启动Kedai.bat` 已废弃删除):
-- 测试版(默认 `.\start.ps1`):启动 `dist\kedai-server.exe` 并自动打开浏览器;`-NoBrowser` 不开浏览器,`-Build` 强制先执行 `build.ps1`。
+- 测试版(默认 `.\start.ps1`):在 `dist\kedai-server.exe`、`server-rs\target\{release,debug}`、`src-tauri\target\release` 中按 mtime 选最新产物启动,并自动打开浏览器;debug 产物自动以 `KEDAI_WEB_DIST=web/dist` 启动。`-NoBrowser` 不开浏览器,`-Build` 强制先执行全量 `build.ps1`。
 - 正式版(`.\start.ps1 -Portable`):启动 `dist\Kedai-portable\Kedai.exe` 便携版桌面应用(数据存 `%APPDATA%\com.kedai.app`);双击入口是项目根 `Kedai.lnk`(指向 `Kedai.exe` 图形启动器,自带过期/漂移询问重建)。
-- 自动重建:启动前检测产品源码(web/src、server-rs/src、src-tauri/src 等)是否比可执行产物新,过期则自动执行 `build.ps1`(默认双端同步);`-NoRebuild` 跳过。
-- **同步纪律**:测试版与便携版是两条独立编译链的产物,`build.ps1` 默认双端同步产出;只有 `-TestOnly`/`-Dev` 快速通道会只刷新测试版。两端 sidecar 指纹(`<exe>.build.json`)不一致时,启动脚本与图形启动器都会自动触发双端重建,无需人工记忆。
+- 自动重建:启动前**分源**比较——web 源码只比 `web/dist`,Rust/壳源码只比 server 产物;只有对应产物过期才执行 `build.ps1`(默认双端同步),`watch.ps1` / `build.ps1 -Dev` 产出的新鲜增量不会被误判。`-NoRebuild` 跳过。
+- **同步纪律**:测试版与便携版是两条独立编译链的产物,`build.ps1` 默认双端同步产出;`-TestOnly`/`-Dev`/`watch.ps1` 只刷新测试侧。测试版以磁盘 `web/dist` 为准,两端 sidecar 指纹(`<exe>.build.json`)不一致只提示;`-Portable` 分支与图形启动器才会自动触发双端重建。
 - 两版共用端口 3001 与同一数据目录,勿同时运行。
 
 ### 配置(.env,复制自 `.env.example`)
@@ -374,7 +425,7 @@ rusqlite(bundled,零原生依赖),**WAL 模式 + foreign_keys ON**。共 35 张�
 | 改默认系统提示词 | 改 `data/settings.json` 的 `agent_system_prompt`(优先级最高,保存即生效);运行中的服务需重启才读取;代码内置默认在 `server-rs/src/services/settings_service/params.rs`(default_roleplay_agent_prompt,新装/空值回填用);显式清空时另由引擎兜底模板兜底:`server-rs/src/agents/engine/messages/build.rs`(build_llm_messages_with_position),均需重编译 |
 | 演示模式 | CONNECTOR=mock 或清空 API Key,启动即演示 |
 | 端口被占 | `netstat -ano \| findstr ":3001"` → `taskkill /f /pid <pid>`;注意可能残留 Node 旧服务 |
-| 前端改了没生效 | 需重新 `.\build.ps1`(exe 内嵌的是编译期快照;开发期则靠 web/dist 磁盘优先) |
+| 前端改了没生效 | 开发期先确认 `watch.ps1` 在跑、且由 `start.ps1`/`KEDAI_WEB_DIST` 指向磁盘 `web/dist`;交付 exe 需重新 `.\build.ps1`(exe 内嵌的是编译期快照) |
 | 数据迁移/备份 | 停服后复制 `data/` |
 | 磁盘瘦身 | 见下方「空间清理与数据布局」:可安全删除 `server-rs/target`、`node_modules`、`sandbox`、`dist`、`logs` 等可再生目录 |
 | 跑测试 | vcvars64 环境 + `cargo test` |

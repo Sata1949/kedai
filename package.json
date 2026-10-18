@@ -19,6 +19,7 @@
     "version:bump": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/bump-version.ps1",
     "desktop": "dist\\Kedai-portable\\Kedai.exe",
     "start": "powershell -NoProfile -ExecutionPolicy Bypass -File start.ps1",
+    "watch": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/watch.ps1",
     "check": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/check-all.ps1",
     "check:contract": "node tools/check-contract.mjs",
     "check:arch": "node tools/check-arch.mjs",

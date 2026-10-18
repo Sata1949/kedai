@@ -33,7 +33,7 @@
 | 无后缀 | **稳定版** —— 最适合普通用户使用 |
 
 > 例：`0.4.0-alpha` 是测试版；`0.4.0` 是稳定版；`0.4.0-A` 是对 `0.4.0` 的修复版。
-> 版本号由 `tools/bump-version.ps1` 统一维护，全仓库 8 处声明 + 1 处兜底共 9 个文件同批更新。
+> 版本号由 `tools/bump-version.ps1` 统一维护：全仓库 8 处声明（含关于页 `FALLBACK_VERSION` 兜底常量）+ `MAINTENANCE.md` 版本行，共 9 个文件同批更新。**升版后必须跑一次完整 `.\build.ps1`**，否则 `dist\`、便携版与构建指纹仍是旧版本号；日常开发用 `npm run watch` 增量，不要用全量构建当内循环。
 
 ---
 
@@ -129,7 +129,11 @@ cargo build
 #    终端 B(前端):npm run dev -w web          # 监听 http://localhost:5173
 ```
 
-> 开发模式无需先构建前端：Rust 服务默认使用编译期内嵌的 `web/dist`；仅显式设置环境变量 `KEDAI_WEB_DIST` 指向磁盘目录时才用磁盘版覆盖。
+> 上面是「前端 HMR」路径：`npm run dev -w web` 起 Vite(5173)，改界面即时热更新；Rust 服务默认使用编译期内嵌的 `web/dist`，显式设置 `KEDAI_WEB_DIST` 指向磁盘目录时才用磁盘版覆盖。
+>
+> 需要「一条命令持续增量编译前后端」时，另开终端跑 `npm run watch`（或 `.\tools\watch.ps1`）：监听源码，保留 cargo `target`，后端出 debug `kedai-server.exe`、前端出 `web/dist`；随后 `.\start.ps1` 会自动选中最新 debug 产物并以磁盘 `web/dist` 启动。详见 [MAINTENANCE.md](MAINTENANCE.md) §4。
+>
+> **构建路径怎么选**：日常开发用 `npm run watch`（增量）；**版本号更新后、发布/交付前**用 `.\build.ps1`（全量双端同步，含门禁与构建指纹）。`.\build.ps1 -TestOnly` 只用于「只要测试版 exe、暂不刷新便携版」，不是日常内循环。
 
 ### Windows 便携版（正式交付）
 
@@ -156,15 +160,17 @@ cargo build
 ### 浏览器模式（仅开发 / 调试）
 
 ```powershell
-# 快速迭代只构建测试版(不刷新便携版,会提示未同步):
+# 日常开发:持续增量编译,再启动测试版(启动器会选最新 debug 产物)
+npm run watch
+.\start.ps1              # 浏览器开发/调试模式
+.\start.ps1 -NoBrowser   # 不自动开浏览器
+
+# 只想要测试版 exe(不刷新便携版;交付前补完整 .\build.ps1):
 .\build.ps1 -TestOnly
-# 启动服务并自动打开浏览器
-.\start.ps1              # 始终使用浏览器开发/调试模式
-.\start.ps1 -NoBrowser   # 加 -NoBrowser 不自动开浏览器
 ```
 
 > 也可直接双击 `server-rs\target\release\kedai-server.exe` 启动；服务已在运行时再启动会自检并复用，不重复开端口。
-> 测试版与便携版各带构建指纹（`<exe>.build.json` + `/api/health` 的 build_id），设置中心底部可见；两端指纹一致即同步，不一致时启动器会自动双端重建。
+> 测试版与便携版各带构建指纹（`<exe>.build.json` + `/api/health` 的 build_id），设置中心底部可见；两端指纹一致即同步。测试版以磁盘 `web/dist` 为准，指纹不一致只提示；`-Portable` 分支与图形启动器才会自动双端重建。
 
 ### 配置（可选）
 
@@ -208,8 +214,9 @@ kedai/
 ├── launcher/               # 图形启动器源码(双击正式入口,产物为项目根 Kedai.exe)
 ├── Kedai.exe / Kedai.lnk   # 图形启动器与快捷方式(过期/漂移自动询问重建,由 build.ps1 维护)
 ├── dist/Kedai-portable/    # 正式 Windows 便携目录(build.ps1 默认同步产出)
-├── start.ps1               # 启动脚本:默认浏览器测试版,-Portable 启动便携版
-├── build.ps1               # 一键构建:默认双端同步(前端 + Rust release + 便携版)
+├── start.ps1               # 启动脚本:默认浏览器测试版,-Portable 启动便携版;按 mtime 选最新产物
+├── build.ps1               # 全量构建:默认双端同步(前端 + Rust release + 便携版)
+├── tools/watch.ps1         # 增量构建:开发期监听前后端源码,保留 target,不跑门禁
 ├── LICENSE                 # MIT 许可
 └── logs/                   # 运行日志(按天归档,自动清理 3 天前)
 ```
@@ -314,8 +321,8 @@ cargo test --manifest-path server-rs/Cargo.toml -j 8
 npm test -w web
 npm run typecheck -w web
 
-# 仓库根:一键全量检查(15 段:fmt/clippy/cargo test/audit/docs/lock-sync/
-#          contract/arch/count/doc-claims/type-ratchet/eslint/vue-tsc/vitest/bundle)
+# 仓库根:一键全量检查(阶段清单见 MAINTENANCE.md §2;当前 19 个 Invoke-Stage
+#          + 2 个独立审计段)
 npm run check
 ```
 
