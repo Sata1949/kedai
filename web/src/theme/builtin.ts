@@ -61,16 +61,23 @@ const STAINED_GLASS_TOKENS: Record<string, string> = {
     'linear-gradient(90deg, #8e1b33 0 58px, #143a7c 58px 86px, #c99a3b 86px 94px, transparent 94px)',
 };
 
-let stainedGlassAssets: Promise<unknown> | undefined;
+let stainedGlassCss: Promise<unknown> | undefined;
+let stainedGlassFonts: Promise<unknown> | undefined;
 
-/** 首次激活时才加载主题 CSS 与 OFL 字体 chunk;重复激活复用同一 Promise。 */
+/**
+ * 首次激活/预载时加载主题 CSS 与 OFL 字体。
+ * CSS 是切换是否「完整」的判据,字体只影响字形:两者拆开,CSS 就绪即可切主题,
+ * 字体在后台加载并由 font-display: swap 接管,避免字体拖住主题切换。
+ */
 function loadStainedGlass(): Promise<unknown> {
-  stainedGlassAssets ??= Promise.all([
-    import('./stained-glass.css'),
+  stainedGlassCss ??= import('./stained-glass.css');
+  stainedGlassFonts ??= Promise.all([
     import('@fontsource/cinzel/latin-600.css'),
     import('@fontsource/cormorant-garamond/latin-400.css'),
-  ]);
-  return stainedGlassAssets;
+  ]).catch((err) => {
+    console.warn('[KedaiUI] 彩窗主题字体加载失败:', err);
+  });
+  return stainedGlassCss;
 }
 
 export const DEFAULT_THEME: ThemeDefinition = {
