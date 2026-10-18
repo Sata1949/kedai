@@ -9,6 +9,7 @@ import { storeToRefs } from 'pinia';
 import { renderMarkdown } from '../markdown';
 import { splitTaskResult } from '../taskResult';
 import { taskStatusClass as statusClass, taskStatusLabel as statusLabel } from '../taskStatus';
+import { useActiveThemeId } from '../composables/useActiveTheme';
 import { bufferLabel } from '../utils/phaseLabel';
 import { badgeFlowSource, planRowBadges, type NodeBadge } from '../utils/flowNodeBadges';
 import { projectHintTitle, projectKindLabel } from '../utils/workspaceProfile';
@@ -21,6 +22,7 @@ import FileChangesPanel from './FileChangesPanel.vue';
 const AmbientField = defineAsyncComponent(() => import('./AmbientField.vue'));
 
 const store = useAppStore();
+const activeThemeId = useActiveThemeId();
 const { currentTask, currentTaskId, model, currentTaskUsage, executorById } = storeToRefs(store);
 /** 流程库(自定义流程的节点徽标要按 node_id 对回节点;可能未加载 = null) */
 const { agentFlowLibrary } = storeToRefs(store);
@@ -707,9 +709,15 @@ async function removeTask(task: TaskRecord): Promise<void> {
       </span>
     </header>
 
-    <!-- 主体:任务详情占满(新建与历史列表在左侧 Sidebar);环境层在背后 -->
+    <!-- 主体:任务详情占满(新建与历史列表在左侧 Sidebar);环境层在背后。
+         彩窗主题改用 App 级整窗环境层,这里不再挂第二张 canvas。 -->
     <div class="sv-task-stage">
-      <AmbientField variant="draft" :intensity="currentTask ? 0.14 : 0.8" :paused="taskRunning" />
+      <AmbientField
+        v-if="activeThemeId !== 'stained-glass'"
+        variant="draft"
+        :intensity="currentTask ? 0.14 : 0.8"
+        :paused="taskRunning || store.overlayOpen"
+      />
       <div class="sv-taskboard">
       <!-- 详情区 -->
       <div class="sv-task-detail">
