@@ -14,6 +14,7 @@ import { useAppStore } from '../store';
 import { storeToRefs } from 'pinia';
 import * as api from '../api';
 import SkeletonBlock from './SkeletonBlock.vue';
+import { diffEntryIds } from '../utils/worldBookEntryDiff';
 
 const store = useAppStore();
 const {
@@ -36,8 +37,14 @@ const msg = ref('');
 const expandedBook = ref<string | null>(null);
 /** 各世界书条目缓存:bookId -> entries */
 const bookEntries = ref<Record<string, api.WorldBookEntry[]>>({});
+/** 懒加载时的条目 id 基线:保存时算显式 removed/added */
+const bookBaselines = ref<Record<string, Set<number>>>({});
 /** 世界书条目发生过移动的书 id(保存时统一写回) */
 const dirtyBooks = ref<Set<string>>(new Set());
+
+function idSet(entries: api.WorldBookEntry[]): Set<number> {
+  return new Set(entries.map((e) => e.id));
+}
 
 /** 世界书条目角色标签(空 = 自动) */
 const ENTRY_ROLE_LABELS: Record<string, string> = {
@@ -64,6 +71,8 @@ const currentFlow = computed(() => {
 /** 当前角色卡内嵌世界书(character_book)条目 */
 const charEntries = ref<api.WorldBookEntry[]>([]);
 const charEntriesLoaded = ref(false);
+/** 角色卡内嵌条目 id 基线(保存时算显式 removed/added) */
+const charBaseline = ref<Set<number>>(new Set());
 /** 角色卡内嵌条目是否发生过修改(保存时写回) */
 const charEntriesDirty = ref(false);
 /** 角色卡内嵌世界书区块展开开关 */
@@ -87,7 +96,9 @@ async function toggleBook(id: string): Promise<void> {
   expandedBook.value = expandedBook.value === id ? null : id;
   if (expandedBook.value === id && !bookEntries.value[id]) {
     try {
-      bookEntries.value[id] = await api.getWorldBookEntries(id);
+      const entries = await api.getWorldBookEntries(id);
+      bookEntries.value[id] = entries;
+      bookBaselines.value[id] = idSet(entries);
     } catch (e) {
       msg.value = `加载世界书条目失败:${(e as Error).message}`;
     }
@@ -139,6 +150,7 @@ onMounted(async () => {
   if (cid) {
     try {
       charEntries.value = await api.getCharacterWorldEntries(cid);
+      charBaseline.value = idSet(charEntries.value);
     } catch (e) {
       msg.value = `加载角色卡世界书失败:${(e as Error).message}`;
     }
@@ -165,16 +177,33 @@ async function saveAll(): Promise<void> {
       reflect_advice_prompt: reflectAdvicePrompt.value,
       reflect_advice_role: reflectAdviceRole.value,
     });
-    // 位置3/位置1:世界书条目顺序(逐本写回)
+    // 位置3/位置1:世界书条目顺序(逐本写回;removed/added 由基线差集显式给出)
     for (const bookId of dirtyBooks.value) {
       const entries = bookEntries.value[bookId];
-      if (entries) await api.saveWorldBookEntries(bookId, entries);
+      if (!entries) continue;
+      const { removed, added } = diffEntryIds(
+        bookBaselines.value[bookId] ?? [],
+        entries.map((e) => e.id),
+      );
+      const saved = await api.saveWorldBookEntries(bookId, entries, removed, added);
+      bookEntries.value[bookId] = saved;
+      bookBaselines.value[bookId] = idSet(saved);
     }
     dirtyBooks.value.clear();
     // 位置3/位置1:角色卡内嵌世界书(顺序/角色改动写回)
     const cid = store.currentCharacterId;
     if (charEntriesDirty.value && cid) {
-      charEntries.value = await api.saveCharacterWorldEntries(cid, charEntries.value);
+      const { removed, added } = diffEntryIds(
+        charBaseline.value,
+        charEntries.value.map((e) => e.id),
+      );
+      charEntries.value = await api.saveCharacterWorldEntries(
+        cid,
+        charEntries.value,
+        removed,
+        added,
+      );
+      charBaseline.value = idSet(charEntries.value);
       charEntriesDirty.value = false;
     }
     msg.value = '提示词顺序已保存';

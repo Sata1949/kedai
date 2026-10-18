@@ -7,6 +7,7 @@ use crate::parsing::world_book_convert::{convert_world_book, normalize_entry_val
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use uuid::Uuid;
 
@@ -25,6 +26,10 @@ pub struct WorldBookService {
     /// 注意 `save_character_book` 写的是 characters.data_raw,而本函数只读
     /// `world_books` 表,故与它无关,不需要失效。
     entries_cache: Mutex<HashMap<String, Arc<Vec<WorldEntry>>>>,
+    /// 条目缓存代际:每次失效自增(2026-10-15 并发修复批)。
+    /// 填缓存在写锁之外构建,「构建期间发生失效」时若不比对代际就插入,
+    /// 旧快照会留在刚被清空的缓存里直到下一次写——比对后拒绝插入并重试。
+    entries_gen: AtomicU64,
     /// 世界书写入后的附加失效回调(可选;由 app_state 接线为「清空契约缓存」)。
     ///
     /// 为什么挂在这里:契约缓存(ContractRegistry)的来源之一是独立世界书的
@@ -65,6 +70,7 @@ impl WorldBookService {
         WorldBookService {
             db,
             entries_cache: Mutex::new(HashMap::new()),
+            entries_gen: AtomicU64::new(0),
             write_hook: OnceLock::new(),
         }
     }
@@ -79,6 +85,9 @@ impl WorldBookService {
     /// 漏调会让生成读到旧世界书(fail-safe 由本结构体自包含性保证:写路径都在这里)。
     /// 钩子(契约缓存失效)在此统一触发——唯一汇聚点,API/工具/脚本写路径全覆盖。
     fn invalidate_entries_cache(&self) {
+        // 先递增代际再清空(2026-10-15 并发修复批):填缓存侧以「代际是否变」判定可否插入。
+        // 顺序反了会让「构建在写前、插入在失效后」的旧快照漏网——写路径清到的是当时还没插入的空位。
+        self.entries_gen.fetch_add(1, Ordering::SeqCst);
         self.entries_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -177,6 +186,10 @@ impl WorldBookService {
 
     /// 更新 enabled / character_id / name;字段为 None 表示不变。
     /// character_id 语义:Some(Some) 绑定,Some(None) 清除绑定(转全局),None 不变。
+    ///
+    /// 读改写在同一写锁临界区内完成(2026-10-15 并发修复批):原实现先经只读池 get、
+    /// 再取写锁 UPDATE,同一本书的两次并发编辑(如 A 改 enabled、B 改 name)各自基于
+    /// 旧快照整行回写,后者会把前者刚提交的字段打回旧值。
     pub fn update(
         &self,
         id: &str,
@@ -184,29 +197,37 @@ impl WorldBookService {
         character_id: Option<Option<&str>>,
         name: Option<&str>,
     ) -> Option<WorldBookRecord> {
-        let existing = self.get(id)?;
+        let conn = self.db.write();
+        let existing: WorldBookRecord = conn
+            .query_row(&format!("{LIST_SQL} WHERE w.id = ?1"), params![id], |row| {
+                row_to_record(row, true)
+            })
+            .optional()
+            .ok()??;
         let new_enabled = enabled.unwrap_or(existing.enabled);
         let new_cid = character_id
             .map(|c| c.map(|s| s.to_string()))
             .unwrap_or(existing.character_id.clone());
         let new_name = name.unwrap_or(&existing.name).to_string();
-        let character_name = new_cid.as_deref().and_then(|c| self.character_name(c));
-        let source = existing.source.clone();
-        let entry_count = existing.entry_count;
-        let data_raw = existing.data_raw.clone();
-        let created_at = existing.created_at.clone();
-        {
-            let conn = self.db.write();
-            let n = conn
-                .execute(
-                    "UPDATE world_books SET enabled = ?1, character_id = ?2, name = ?3 WHERE id = ?4",
-                    params![new_enabled, new_cid.as_deref(), new_name, id],
-                )
-                .ok()?;
-            if n == 0 {
-                return None;
-            }
+        // 显示名查询走同一写连接,不取只读池:避免「持写锁等读连接」的跨池等待
+        let character_name: Option<String> = new_cid.as_deref().and_then(|c| {
+            conn.query_row(
+                "SELECT chara_name FROM characters WHERE id = ?1",
+                params![c],
+                |row| row.get(0),
+            )
+            .ok()
+        });
+        let n = conn
+            .execute(
+                "UPDATE world_books SET enabled = ?1, character_id = ?2, name = ?3 WHERE id = ?4",
+                params![new_enabled, new_cid.as_deref(), new_name, id],
+            )
+            .ok()?;
+        if n == 0 {
+            return None;
         }
+        drop(conn);
         // 写成功才失效(enabled/绑定变更会影响 collect_entries_for_character 的结果)
         self.invalidate_entries_cache();
         Some(WorldBookRecord {
@@ -215,11 +236,11 @@ impl WorldBookService {
             character_id: new_cid,
             character_name,
             enabled: new_enabled,
-            source,
-            entry_count,
-            data_raw,
+            source: existing.source,
+            entry_count: existing.entry_count,
+            data_raw: existing.data_raw,
             conversion: None,
-            created_at,
+            created_at: existing.created_at,
         })
     }
 
@@ -260,6 +281,10 @@ impl WorldBookService {
     /// 注入条目收集:合并该角色的独立世界书(已过滤 enabled),按条目过滤规则在 engine 侧执行。
     /// 结果按 character_id 缓存(2026-09-14);返回值仍为 owned Vec 以保持既有签名,
     /// 但克隆远比重查库 + 重解析 JSON 便宜(前者是 memcpy,后者是 serde 解析 1MB)。
+    ///
+    /// 填充竞态防线(2026-10-15 并发修复批):未命中到插入之间不持写锁,若期间发生写入,
+    /// 旧快照会被塞进刚被清空的缓存,之后直到下一次写都读到旧世界书。现在以代际计数兜底:
+    /// 构建前后代际不一致就拒绝落缓存,并重试一轮拿新数据。
     pub fn collect_entries_for_character(&self, character_id: &str) -> Vec<WorldEntry> {
         if let Some(hit) = self
             .entries_cache
@@ -270,21 +295,48 @@ impl WorldBookService {
         {
             return hit.as_ref().clone();
         }
+        // 至多两轮:第二轮仅在「首轮构建期间发生过失效」时执行(重试一次)。
+        // 两轮都撞上写入则返回最后构建值但不落缓存——宁可下次重查,绝不缓存可能陈旧的快照。
+        let mut last: Arc<Vec<WorldEntry>> = Arc::new(Vec::new());
+        for _ in 0..2 {
+            let gen_before = self.entries_gen.load(Ordering::SeqCst);
+            let built = Arc::new(self.build_entries(character_id));
+            if self.try_cache_entries(character_id, gen_before, &built) {
+                return built.as_ref().clone();
+            }
+            last = built;
+        }
+        last.as_ref().clone()
+    }
+
+    /// 查库构建条目(不走缓存):collect 的填充路径与竞态交错测试共用
+    fn build_entries(&self, character_id: &str) -> Vec<WorldEntry> {
         let mut out: Vec<WorldEntry> = Vec::new();
         for book in self.enabled_for_character(character_id) {
             if let Some(raw) = &book.data_raw {
                 out.extend(collect_entries(raw));
             }
         }
-        let shared = Arc::new(out);
-        {
-            let mut cache = self.entries_cache.lock().unwrap_or_else(|e| e.into_inner());
-            if cache.len() >= ENTRIES_CACHE_CAP {
-                cache.clear();
-            }
-            cache.insert(character_id.to_string(), shared.clone());
+        out
+    }
+
+    /// 落缓存:仅当传入代际仍是当前代际时插入。`false` = 期间发生过失效,
+    /// 调用方应视本次构建为「可能陈旧」并重试,不得再插入同一份数据。
+    fn try_cache_entries(
+        &self,
+        character_id: &str,
+        gen_before: u64,
+        built: &Arc<Vec<WorldEntry>>,
+    ) -> bool {
+        let mut cache = self.entries_cache.lock().unwrap_or_else(|e| e.into_inner());
+        if self.entries_gen.load(Ordering::SeqCst) != gen_before {
+            return false;
         }
-        shared.as_ref().clone()
+        if cache.len() >= ENTRIES_CACHE_CAP {
+            cache.clear();
+        }
+        cache.insert(character_id.to_string(), built.clone());
+        true
     }
 
     /// 自动分配属性机制自检:验证「角色为 None(自动)→ 常驻注入 system、激发注入 user」
@@ -479,71 +531,182 @@ impl WorldBookService {
     }
 
     /// 新增条目:生成一个新 uid(当前最大 +1),写回 data_raw.entries,返回新条目视图。
+    /// uid 计算与落库在 [`Self::update_raw`] 的写锁事务内完成(2026-10-15 并发修复批)——
+    /// 原实现 get → 算 max → save 三步分离,并发新建会撞 uid 并静默覆盖。
     pub fn add_entry(&self, id: &str) -> Option<WorldBookEntryView> {
-        let rec = self.get(id)?;
-        let mut raw = rec.data_raw?;
-        if raw.get("entries").is_none() {
-            raw.as_object_mut()?
-                .insert("entries".into(), Value::Array(Vec::new()));
-        }
-        let max_uid = collect_entries(&raw)
-            .into_iter()
-            .map(|e| e.id)
-            .max()
-            .unwrap_or(0);
-        let new_id = max_uid + 1;
-        let view = WorldBookEntryView {
-            id: new_id,
-            comment: "新条目".into(),
-            keys: Vec::new(),
-            keys_secondary: Vec::new(),
-            regex: None,
-            use_regex: false,
-            constant: false,
-            enabled: true,
-            content: String::new(),
-            position: 0,
-            depth: 4,
-            // 新条目不预置扫描窗口:None = 未声明,窗口由上面的 depth 兜底(与改前行为一致)
-            scan_depth: None,
-            order: 100,
-            case_sensitive: false,
-            sticky: 0,
-            cooldown: 0,
-            probability: 100,
-            use_probability: false,
-            role: None,
-        };
-        if let Some(entries_value) = raw.get_mut("entries") {
-            let new_value = crate::parsing::world_book::view_to_value(&view);
-            if let Some(map) = entries_value.as_object_mut() {
-                map.insert(new_id.to_string(), new_value);
-            } else if let Some(arr) = entries_value.as_array_mut() {
-                // 数组形态:追加新条目(不能整组替换——那是 PUT 全量回写的语义)
-                arr.push(new_value);
+        let mut view_out: Option<WorldBookEntryView> = None;
+        let done = self.update_raw(id, |raw| {
+            if raw.get("entries").is_none() {
+                raw.as_object_mut()
+                    .ok_or_else(|| "世界书结构异常".to_string())?
+                    .insert("entries".into(), Value::Array(Vec::new()));
             }
+            let max_uid = collect_entries(raw)
+                .into_iter()
+                .map(|e| e.id)
+                .max()
+                .unwrap_or(0);
+            let new_id = max_uid + 1;
+            let view = WorldBookEntryView {
+                id: new_id,
+                comment: "新条目".into(),
+                keys: Vec::new(),
+                keys_secondary: Vec::new(),
+                regex: None,
+                use_regex: false,
+                constant: false,
+                enabled: true,
+                content: String::new(),
+                position: 0,
+                depth: 4,
+                // 新条目不预置扫描窗口:None = 未声明,窗口由上面的 depth 兜底(与改前行为一致)
+                scan_depth: None,
+                order: 100,
+                case_sensitive: false,
+                sticky: 0,
+                cooldown: 0,
+                probability: 100,
+                use_probability: false,
+                role: None,
+            };
+            if let Some(entries_value) = raw.get_mut("entries") {
+                let new_value = crate::parsing::world_book::view_to_value(&view);
+                if let Some(map) = entries_value.as_object_mut() {
+                    map.insert(new_id.to_string(), new_value);
+                } else if let Some(arr) = entries_value.as_array_mut() {
+                    // 数组形态:只追加新条目(PUT 自 WBCONC 提交 2 起也是叠加+显式删除,
+                    // 不再整组替换;POST 的语义仍然只是新增一条)
+                    arr.push(new_value);
+                }
+            }
+            view_out = Some(view);
+            Ok(())
+        });
+        match done {
+            Ok(true) => view_out,
+            _ => None,
         }
-        self.save_data_raw(&rec.id, &raw)?;
-        Some(view)
     }
 
-    /// 回写 data_raw(条目编辑后落库;仅更新 entries 字段,其余原样保留)。
+    /// 回写 data_raw(调用方已持有完整 raw 的底层写;读改写路径请走 [`Self::update_raw`]，
+    /// 它把「读 → 改 → 写」收进同一把写锁)。
     /// 同时按新 raw 重算 `entry_count`(2026-09-13 批次 3 修复:该列此前只在插入时写一次,
     /// 编辑条目不回写 → 列表页条目数一直显示旧值)。
     pub fn save_data_raw(&self, id: &str, raw: &Value) -> Option<()> {
         let data_raw_str = serde_json::to_string(raw).ok()?;
         let entry_count = collect_entries(raw).len() as i64;
         let conn = self.db.write();
-        conn.execute(
-            "UPDATE world_books SET data_raw = ?1, entry_count = ?2 WHERE id = ?3",
-            params![data_raw_str, entry_count, id],
-        )
-        .ok()?;
+        // 影响 0 行 = 目标书已不存在(如并发删除),不得报成功(2026-10-15 并发修复批;
+        // 对照 update() 的 n==0 → None 口径)。SQLite 对同值 UPDATE 仍计 1 行,判定安全。
+        let n = conn
+            .execute(
+                "UPDATE world_books SET data_raw = ?1, entry_count = ?2 WHERE id = ?3",
+                params![data_raw_str, entry_count, id],
+            )
+            .ok()?;
         drop(conn);
+        if n == 0 {
+            return None;
+        }
         // 条目内容变更必须失效:这是 collect_entries_for_character 的直接输入源。
         // add_entry 亦经本方法落库,故在此一处失效即可覆盖两者。
         self.invalidate_entries_cache();
         Some(())
+    }
+
+    /// 独立世界书 data_raw 的读改写**单一入口**(写锁事务):锁内 SELECT → 闭包 → UPDATE +
+    /// 重算 entry_count,全程持唯一写连接。此前各写路径是「get(只读池) → 内存改 →
+    /// save_data_raw」三步分离:两个写者从同一旧快照出发时,后写者整份覆盖先写者(丢更新),
+    /// 并发新建条目还会算出同一 uid 互相覆盖。角色卡内嵌书早已套用同形态的
+    /// `character_data::update_data_raw`,本函数把独立书口径补齐(2026-10-15 并发修复批)。
+    ///
+    /// - `Ok(true)`:  找到世界书并已提交(条目缓存/契约缓存已按写路径口径失效);
+    /// - `Ok(false)`: 世界书不存在(无写入);
+    /// - `Err`:       读取/解析/闭包拒绝/序列化/SQL/提交任一失败——事务回滚,原值不变。
+    fn update_raw<F>(&self, id: &str, mutate: F) -> Result<bool, String>
+    where
+        F: FnOnce(&mut Value) -> Result<(), String>,
+    {
+        self.update_raw_with(id, |value| {
+            mutate(value)?;
+            Ok(())
+        })
+        .map(|out| out.is_some())
+    }
+
+    /// [`Self::update_raw`] 的带返回值版本:闭包可把事务内计算结果(如合并后视图)
+    /// 带出到调用方。值在提交成功后才返回,不存在「未落盘却回显」的窗口。
+    fn update_raw_with<T, F>(&self, id: &str, mutate: F) -> Result<Option<T>, String>
+    where
+        F: FnOnce(&mut Value) -> Result<T, String>,
+    {
+        let mut conn = self.db.write();
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("开启世界书写事务失败: {e}"))?;
+        let raw: Option<Option<String>> = tx
+            .query_row(
+                "SELECT data_raw FROM world_books WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("读取世界书失败: {e}"))?;
+        let Some(raw) = raw else {
+            // 行不存在:事务未写入任何内容,Drop 即回滚
+            return Ok(None);
+        };
+        let raw = raw.ok_or_else(|| "世界书缺少原始数据".to_string())?;
+        let mut value: Value =
+            serde_json::from_str(&raw).map_err(|e| format!("解析世界书失败: {e}"))?;
+        // 闭包拒绝(条目缺失/结构异常等)时事务回滚,不留下半写状态
+        let out = mutate(&mut value)?;
+        let serialized =
+            serde_json::to_string(&value).map_err(|e| format!("序列化世界书失败: {e}"))?;
+        let entry_count = collect_entries(&value).len() as i64;
+        tx.execute(
+            "UPDATE world_books SET data_raw = ?1, entry_count = ?2 WHERE id = ?3",
+            params![serialized, entry_count, id],
+        )
+        .map_err(|e| format!("回写世界书失败: {e}"))?;
+        tx.commit()
+            .map_err(|e| format!("提交世界书事务失败: {e}"))?;
+        drop(conn);
+        // 提交成功才失效;先落写锁再失效(回调只动契约注册表,锁序与 save_data_raw 一致)
+        self.invalidate_entries_cache();
+        Ok(Some(out))
+    }
+
+    /// PUT /entries 的读改写一体化入口(写锁事务,2026-10-15 并发修复批)。
+    /// 保存语义 = **叠加视图 + 显式 removed 删除**:未在视图、也未在 removed 的条目保留
+    /// (窗口期内模型/卡脚本的写入不被旧快照删除);`added` 中的新行在锁内重分配 uid
+    /// (不能靠「uid 已存在」推断——本地新增行与窗口期模型新建可能同号)。
+    /// 返回值 = 提交后重新解析的合并视图(前端用它刷新草稿与基线)。
+    /// `Ok(None)` 世界书不存在;`Err` 结构/IO 失败(调用方映射文案)。
+    pub fn save_entries_merged(
+        &self,
+        id: &str,
+        entries: &[WorldBookEntryView],
+        removed: &[i64],
+        added: &[i64],
+    ) -> Result<Option<Vec<WorldBookEntryView>>, String> {
+        let mut views = entries.to_vec();
+        self.update_raw_with(id, |raw| {
+            if raw.get("entries").is_none() {
+                // 结构兜底与原 API 层实现一致:非对象 raw 静默跳过 merge(保存原样)
+                raw.as_object_mut()
+                    .map(|o| o.insert("entries".into(), Value::Array(Vec::new())));
+            }
+            let Some(entries_value) = raw.get_mut("entries") else {
+                return Ok(Vec::new());
+            };
+            crate::parsing::world_book::assign_added_uids(entries_value, &mut views, added);
+            crate::parsing::world_book::merge_entries_into(entries_value, &views, removed);
+            Ok(collect_entries(entries_value)
+                .iter()
+                .map(crate::parsing::world_book::entry_to_view)
+                .collect())
+        })
     }
 
     /// 当前角色内嵌角色卡(character_book)的条目视图;无内嵌世界书返回 None
@@ -572,15 +735,19 @@ impl WorldBookService {
     }
 
     /// 回写角色卡 data_raw 中的 character_book(合并 entries 后 UPDATE characters)。
-    /// 读改写经 `character_data::update_data_raw` 在**同一写锁事务**内完成:
+    /// 读改写经 `character_data::update_data_raw_with` 在**同一写锁事务**内完成:
     /// 原实现「read 取快照 → 内存改 → write 回写」两步间不持锁,并发编辑同一张卡时
-    /// 后写者会用旧快照覆盖先写者的修改(丢更新)。
+    /// 后写者会用旧快照覆盖先写者的修改(丢更新)。保存语义与独立书一致:
+    /// 叠加 + 显式 removed + added 重分配,返回合并后视图(失败/无内嵌书 → None)。
     pub fn save_character_book(
         &self,
         character_id: &str,
         views: &[WorldBookEntryView],
-    ) -> Option<()> {
-        crate::services::character_data::update_data_raw(&self.db, character_id, |raw| {
+        removed: &[i64],
+        added: &[i64],
+    ) -> Option<Vec<WorldBookEntryView>> {
+        let mut views = views.to_vec();
+        crate::services::character_data::update_data_raw_with(&self.db, character_id, |raw| {
             // 定位 character_book:V2 顶层 / V3 data 子对象
             let cb = if raw.get("character_book").is_some() {
                 raw.get_mut("character_book")
@@ -593,53 +760,31 @@ impl WorldBookService {
                 .as_object_mut()
                 .and_then(|o| o.get_mut("entries"))
                 .ok_or_else(|| "character_book.entries 结构异常".to_string())?;
-            crate::parsing::world_book::merge_entries_into(entries_value, views);
-            Ok(())
+            crate::parsing::world_book::assign_added_uids(entries_value, &mut views, added);
+            crate::parsing::world_book::merge_entries_into(entries_value, &views, removed);
+            Ok(collect_entries(entries_value)
+                .iter()
+                .map(crate::parsing::world_book::entry_to_view)
+                .collect())
         })
-        .ok()?;
-        Some(())
+        .ok()
+        .flatten()
     }
 }
 
 // ==================== 条目级写回(RPFLOW-2 `worldbook_update` 归档步) ====================
 //
-// 为什么不用 PUT /entries 那条全量回写通道:它按「视图整组 merge」落盘
-// (`merge_entries_into`),没进视图的兄弟条目会被整体删除(含归一化不了的条目)。
-// 归档工具只需动**一条**条目,故这里按最小改动面实现:定位一条 → 只改它的 content 键;
-// 其余字段(keys/position/enabled/order/extensions、content 里的 `@@` 装饰器行)与
-// 全部兄弟条目原样保留——即 `merge_entries_into` 承诺的字段叠加语义,但改动面更小。
+// 为什么不用 PUT /entries 那条回写通道:归档工具只需动**一条**条目,故这里按最小
+// 改动面实现:定位一条 → 只改它的 content 键;其余字段(keys/position/enabled/order/
+// extensions、content 里的 `@@` 装饰器行)与全部兄弟条目原样保留。
+// PUT /entries 自 WBCONC 提交 2 起也已是「叠加 + 显式删除」,但本函数仍更小面:
+// 不重写任何未命中条目,也不触发 uid 重分配。
 
 /// 原始条目 uid(兼容 uid / id;直接读 JSON 值,不做条目归一化)
 fn raw_entry_uid(v: &Value) -> Option<i64> {
     v.get("uid")
         .or_else(|| v.get("id"))
         .and_then(|x| x.as_i64())
-}
-
-/// 条目容器内现有最大 uid:**计入未归一化条目**(空条目等),对象形态同时计入数字键。
-/// 只按归一化条目取 max 会让新 uid 与「隐性」条目撞车(对象形态直接覆盖旧条目)。
-fn max_entry_uid(entries_value: &Value) -> Option<i64> {
-    let mut max: Option<i64> = None;
-    let mut bump = |u: Option<i64>| {
-        if let Some(u) = u {
-            max = Some(max.map_or(u, |m| m.max(u)));
-        }
-    };
-    match entries_value {
-        Value::Object(map) => {
-            for (k, v) in map {
-                bump(k.parse::<i64>().ok());
-                bump(raw_entry_uid(v));
-            }
-        }
-        Value::Array(arr) => {
-            for v in arr {
-                bump(raw_entry_uid(v));
-            }
-        }
-        _ => {}
-    }
-    max
 }
 
 /// 按 uid 定位条目容器内的条目(对象/数组两种形态;匹配口径与 `normalize_entry` 一致)
@@ -724,20 +869,37 @@ impl WorldBookService {
     /// 为什么基于原始 content 而不是归一化视图内容:`@@` 装饰器行在归一化时被剥离
     /// (解析层存进 decorators),基于视图追加会把装饰器行静默抹掉,改变条目的条件注入
     /// 与变量写入行为。条目不存在 / 世界书不存在或缺少 data_raw → None(无写入)。
+    /// 读改写经 [`Self::update_raw`] 写锁事务(2026-10-15 并发修复批)。
     pub fn update_entry_content<F>(&self, id: &str, uid: i64, compose: F) -> Option<()>
     where
         F: FnOnce(&str) -> String,
     {
-        let rec = self.get(id)?;
-        let mut raw = rec.data_raw?;
-        let target = find_entry_mut(raw.get_mut("entries")?, uid)?;
-        write_entry_content(target, compose)?;
-        self.save_data_raw(&rec.id, &raw)
+        let done = self.update_raw(id, |raw| {
+            let target = find_entry_mut(
+                raw.get_mut("entries")
+                    .ok_or_else(|| "世界书缺少 entries".to_string())?,
+                uid,
+            )
+            .ok_or_else(|| format!("世界书条目 uid={uid} 不存在"))?;
+            write_entry_content(target, compose).ok_or_else(|| "条目结构异常".to_string())
+        });
+        // Ok(false)=世界书不存在;Err=闭包拒绝或事务失败。调用方(工具层)只看到 None,
+        // 具体原因留 warn 便于排查(与内嵌书版 `update_character_book_entry_content` 同口径)。
+        match done {
+            Ok(true) => Some(()),
+            Ok(false) => None,
+            Err(e) => {
+                tracing::warn!(id, uid, error = %e, "世界书条目更新未生效");
+                None
+            }
+        }
     }
 
     /// 在指定世界书内**追加**一条绿灯(触发)条目,返回新条目 uid。
     /// 新 uid = 现有原始条目最大 uid + 1(空书为 1,同 `add_entry`);
     /// entries 为对象 → 插数字键;为数组 → 追加;缺失 → 建空数组后追加。
+    /// uid 计算与落库在 [`Self::update_raw`] 写锁事务内完成(2026-10-15 并发修复批)——
+    /// 原实现 get → 算 max → save 三步分离,并发新建会撞 uid 并静默覆盖。
     pub fn create_trigger_entry(
         &self,
         id: &str,
@@ -745,25 +907,34 @@ impl WorldBookService {
         keys: &[String],
         content: &str,
     ) -> Option<i64> {
-        let rec = self.get(id)?;
-        let mut raw = rec.data_raw?;
-        if raw.get("entries").is_none() {
-            raw.as_object_mut()?
-                .insert("entries".into(), Value::Array(Vec::new()));
-        }
-        let new_id = max_entry_uid(raw.get("entries")?).map_or(1, |m| m + 1);
-        let value = crate::parsing::world_book::view_to_value(&trigger_entry_view(
-            new_id, comment, keys, content,
-        ));
-        match raw.get_mut("entries")? {
-            Value::Object(map) => {
-                map.insert(new_id.to_string(), value);
+        let mut new_id_out: Option<i64> = None;
+        let done = self.update_raw(id, |raw| {
+            if raw.get("entries").is_none() {
+                raw.as_object_mut()
+                    .ok_or_else(|| "世界书结构异常".to_string())?
+                    .insert("entries".into(), Value::Array(Vec::new()));
             }
-            Value::Array(arr) => arr.push(value),
-            _ => return None,
+            let entries = raw
+                .get_mut("entries")
+                .ok_or_else(|| "世界书结构异常".to_string())?;
+            let new_id = crate::parsing::world_book::max_entry_uid(entries).map_or(1, |m| m + 1);
+            let value = crate::parsing::world_book::view_to_value(&trigger_entry_view(
+                new_id, comment, keys, content,
+            ));
+            match entries {
+                Value::Object(map) => {
+                    map.insert(new_id.to_string(), value);
+                }
+                Value::Array(arr) => arr.push(value),
+                _ => return Err("entries 结构异常".to_string()),
+            }
+            new_id_out = Some(new_id);
+            Ok(())
+        });
+        match done {
+            Ok(true) => new_id_out,
+            _ => None,
         }
-        self.save_data_raw(&rec.id, &raw)?;
-        Some(new_id)
     }
 
     /// 更新角色卡内嵌世界书里一条条目的内容(语义同 [`Self::update_entry_content`]),
@@ -814,7 +985,7 @@ impl WorldBookService {
             crate::services::character_data::update_data_raw(&self.db, character_id, |raw| {
                 let entries = character_book_entries_mut(raw, true)
                     .ok_or_else(|| "角色卡缺少 character_book".to_string())?;
-                let uid = max_entry_uid(entries).map_or(1, |m| m + 1);
+                let uid = crate::parsing::world_book::max_entry_uid(entries).map_or(1, |m| m + 1);
                 let value = crate::parsing::world_book::view_to_value(&trigger_entry_view(
                     uid, comment, keys, content,
                 ));
@@ -1020,9 +1191,98 @@ mod tests {
             )
             .unwrap();
         }
-        svc.save_character_book("c1", &[]).unwrap();
+        svc.save_character_book("c1", &[], &[], &[]).unwrap();
         assert_eq!(hits(), 5, "内嵌卡书写入不属于契约来源,不得触发写钩子");
 
+        drop(svc);
+    }
+
+    /// ③ 失败测试(2026-10-15 并发修复批):并发新建条目不得撞 uid/丢条目。
+    /// 旧实现 get(只读池) → 算 max_uid → save_data_raw(写锁)三步分离,两个写者
+    /// 从同一 max 出发必然算出同一 uid,对象形态 map.insert 直接覆盖(静默丢更新)。
+    #[test]
+    fn concurrent_creates_do_not_collide_or_lose() {
+        let (_dir, svc) = service();
+        let svc = Arc::new(svc);
+        let id = upload_book(&svc, "并发书", "关键词", None);
+        let threads = 8usize;
+        let per = 10usize;
+        std::thread::scope(|s| {
+            for t in 0..threads {
+                let svc = svc.clone();
+                let id = id.clone();
+                s.spawn(move || {
+                    for i in 0..per {
+                        assert!(
+                            svc.create_trigger_entry(&id, &format!("t{t}-{i}"), &["k".into()], "c")
+                                .is_some(),
+                            "create_trigger_entry 不得失败"
+                        );
+                    }
+                });
+            }
+        });
+        let entries = svc.entries(&id).expect("书应存在");
+        // 基数 1(upload_book 的初始条目)+ threads*per,一条都不能少
+        assert_eq!(
+            entries.len(),
+            1 + threads * per,
+            "并发 create 不得丢条目(撞 uid 会静默覆盖)"
+        );
+        let mut uids: Vec<i64> = entries.iter().map(|e| e.id).collect();
+        uids.sort_unstable();
+        uids.dedup();
+        assert_eq!(uids.len(), 1 + threads * per, "uid 必须唯一");
+        drop(svc);
+    }
+
+    /// ⑤ 失败测试(2026-10-15 并发修复批):对不存在的书落盘必须报失败。
+    /// 原实现忽略影响行数:get 与 update 之间书被删除时,0 行 UPDATE 仍返回 Some(())。
+    #[test]
+    fn save_data_raw_missing_book_returns_none() {
+        let (_dir, svc) = service();
+        let raw = json!({ "name": "不存在", "entries": [] });
+        assert!(
+            svc.save_data_raw("不存在的书", &raw).is_none(),
+            "目标书不存在时不得把 0 行更新当成功"
+        );
+        drop(svc);
+    }
+
+    /// ④ 竞态交错测试(2026-10-15 并发修复批):缓存填充与写入交错时,
+    /// 旧快照不得落缓存。手工构造时序——「构建(写前数据) → 写入(代际+1) → 落缓存」:
+    /// 原实现无代际判定会把 1 条旧快照写进刚清空的缓存,此后读到旧世界书。
+    #[test]
+    fn stale_snapshot_is_not_cached_across_write_interleave() {
+        use std::sync::atomic::Ordering;
+        let (_dir, svc) = service();
+        upload_book(&svc, "书一", "关键词一", None);
+
+        // 1) T1 未命中缓存:读代际 + 构建(此刻内容 = 1 本)
+        let gen_before = svc.entries_gen.load(Ordering::SeqCst);
+        let stale = Arc::new(svc.build_entries("c1"));
+        assert_eq!(stale.len(), 1);
+
+        // 2) T2 完成一次写入:代际自增、缓存清空
+        upload_book(&svc, "书二", "关键词二", None);
+
+        // 3) T1 尝试落缓存:代际已变,必须拒绝
+        assert!(
+            !svc.try_cache_entries("c1", gen_before, &stale),
+            "代际变化后不得落缓存"
+        );
+
+        // 4) 后续读取必须是新数据(缓存未被旧快照污染)
+        assert_eq!(
+            svc.collect_entries_for_character("c1").len(),
+            2,
+            "缓存不得残留旧快照"
+        );
+
+        // 正例:代际未变时正常落缓存
+        let gen = svc.entries_gen.load(Ordering::SeqCst);
+        let built = Arc::new(svc.build_entries("c1"));
+        assert!(svc.try_cache_entries("c1", gen, &built), "代际未变应落缓存");
         drop(svc);
     }
 }

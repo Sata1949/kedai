@@ -7,6 +7,7 @@ import { storeToRefs } from 'pinia';
 import { useAppStore } from '../store';
 import * as api from '../api';
 import SkeletonBlock from './SkeletonBlock.vue';
+import { diffEntryIds, isRenderableEntry } from '../utils/worldBookEntryDiff';
 
 const store = useAppStore();
 const { worldBooks, characters, currentCharacter, currentCharacterId } = storeToRefs(store);
@@ -23,6 +24,28 @@ const charEntries = ref<api.WorldBookEntry[]>([]);
 const charEntriesLoaded = ref(false);
 const charSaving = ref(false);
 const charMsg = ref<{ kind: 'ok' | 'err'; text: string } | null>(null);
+/** 打开时的条目 id 基线:保存时用它算显式 removed/added,不能靠「视图内没有」猜删除 */
+const charBaseline = ref<Set<number>>(new Set());
+
+function idSet(entries: api.WorldBookEntry[]): Set<number> {
+  return new Set(entries.map((e) => e.id));
+}
+
+/** 用保存响应刷新草稿,但保留本地尚未填内容的空行(否则保存后空行凭空消失)。
+ *  仍属于基线的空行继续留在基线里,下次保存按叠加处理,避免被当成 added 反复换 uid。 */
+function mergeSavedDraft(
+  draft: api.WorldBookEntry[],
+  saved: api.WorldBookEntry[],
+  baseline: Set<number>,
+): { entries: api.WorldBookEntry[]; baseline: Set<number> } {
+  const savedIds = new Set(saved.map((e) => e.id));
+  const localBlanks = draft.filter((e) => !savedIds.has(e.id) && !isRenderableEntry(e));
+  const nextBaseline = new Set(savedIds);
+  for (const e of localBlanks) {
+    if (baseline.has(e.id)) nextBaseline.add(e.id);
+  }
+  return { entries: [...saved, ...localBlanks], baseline: nextBaseline };
+}
 
 /** 归一注入角色:后端 role=None 序列化时省略(undefined),下拉「自动」选项值是 null,需对齐 */
 function normalizeRoles(entries: api.WorldBookEntry[]): void {
@@ -43,6 +66,7 @@ async function loadCharacterEntries(): Promise<void> {
   try {
     charEntries.value = await api.getCharacterWorldEntries(cid);
     normalizeRoles(charEntries.value);
+    charBaseline.value = idSet(charEntries.value);
   } catch (err) {
     charMsg.value = { kind: 'err', text: `加载角色卡世界书失败:${(err as Error).message}` };
   } finally {
@@ -56,8 +80,18 @@ async function saveCharacterEntries(): Promise<void> {
   charSaving.value = true;
   charMsg.value = null;
   try {
-    charEntries.value = await api.saveCharacterWorldEntries(cid, omitClearedOptional(charEntries.value));
-    normalizeRoles(charEntries.value);
+    const draft = charEntries.value;
+    const { removed, added } = diffEntryIds(charBaseline.value, draft.map((e) => e.id));
+    const saved = await api.saveCharacterWorldEntries(
+      cid,
+      omitClearedOptional(draft),
+      removed,
+      added,
+    );
+    normalizeRoles(saved);
+    const merged = mergeSavedDraft(draft, saved, charBaseline.value);
+    charEntries.value = merged.entries;
+    charBaseline.value = merged.baseline;
     charMsg.value = { kind: 'ok', text: '角色卡世界书已保存(下次发送生效)' };
     setTimeout(() => (charMsg.value = null), 2500);
   } catch (err) {
@@ -72,6 +106,8 @@ async function saveCharacterEntries(): Promise<void> {
 const editingBookId = ref<string | null>(null);
 /** 条目编辑草稿:bookId → entries */
 const entryDrafts = ref<Record<string, api.WorldBookEntry[]>>({});
+/** 打开编辑器时的条目 id 基线:保存时算显式 removed/added */
+const entryBaselines = ref<Record<string, Set<number>>>({});
 const entrySaving = ref<Record<string, boolean>>({});
 const entryMsg = ref<{ kind: 'ok' | 'err'; text: string } | null>(null);
 
@@ -87,8 +123,10 @@ async function openEntries(b: api.WorldBookRecord): Promise<void> {
     const entries = await api.getWorldBookEntries(b.id);
     normalizeRoles(entries);
     entryDrafts.value[b.id] = entries;
+    entryBaselines.value[b.id] = idSet(entries);
     editingBookId.value = b.id;
   } catch (err) {
+    delete entryBaselines.value[b.id];
     listOpError.value = `加载条目失败:${(err as Error).message}`;
   }
 }
@@ -131,9 +169,18 @@ async function saveEntries(b: api.WorldBookRecord): Promise<void> {
   entrySaving.value[id] = true;
   entryMsg.value = null;
   try {
-    const saved = await api.saveWorldBookEntries(id, omitClearedOptional(draft));
+    const baseline = entryBaselines.value[id] ?? new Set<number>();
+    const { removed, added } = diffEntryIds(baseline, draft.map((e) => e.id));
+    const saved = await api.saveWorldBookEntries(
+      id,
+      omitClearedOptional(draft),
+      removed,
+      added,
+    );
     normalizeRoles(saved);
-    entryDrafts.value[id] = saved;
+    const merged = mergeSavedDraft(draft, saved, baseline);
+    entryDrafts.value[id] = merged.entries;
+    entryBaselines.value[id] = merged.baseline;
     entryMsg.value = { kind: 'ok', text: '条目已保存(下次发送生效)' };
     setTimeout(() => (entryMsg.value = null), 2500);
   } catch (err) {
@@ -238,6 +285,7 @@ async function removeBook(b: api.WorldBookRecord): Promise<void> {
     if (editingBookId.value === b.id) {
       editingBookId.value = null;
       delete entryDrafts.value[b.id];
+      delete entryBaselines.value[b.id];
     }
   } catch (err) {
     listOpError.value = `删除失败:${(err as Error).message}`;
@@ -252,10 +300,9 @@ onMounted(() => {
 /** 加载独立世界书列表并捕获失败(避免误显示「暂无独立世界书」) */
 async function loadWorldBooksChecked(): Promise<void> {
   listLoadError.value = '';
-  try {
-    await store.loadWorldBooks();
-  } catch (err) {
-    listLoadError.value = `加载独立世界书失败:${(err as Error).message}`;
+  await store.loadWorldBooks();
+  if (store.worldBooksError) {
+    listLoadError.value = `加载独立世界书失败:${store.worldBooksError}`;
   }
 }
 </script>

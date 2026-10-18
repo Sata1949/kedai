@@ -50,6 +50,7 @@ async function mountModal() {
 describe('WorldBooksModal 组件(M5 补测)', () => {
   beforeEach(() => {
     memStorage.clear();
+    vi.clearAllMocks();
   });
 
   it('挂载后渲染弹窗标题与容器', async () => {
@@ -139,5 +140,138 @@ describe('WorldBooksModal 组件(M5 补测)', () => {
     await btn('保存条目').trigger('click');
     await flushPromises();
     expect(JSON.stringify(vi.mocked(saveWorldBookEntries).mock.calls[1]?.[1])).toContain('"scan_depth":5');
+  });
+
+  it('删除条目:基线差集作为 removed 发送,响应合并视图刷新草稿', async () => {
+    setActivePinia(createPinia());
+    const store = useAppStore();
+    store.loadWorldBooks = vi.fn().mockResolvedValue(undefined);
+    const book: WorldBookRecord = {
+      id: 'wb1', name: '设定集', entry_count: 2, enabled: true,
+      source: 'upload', created_at: '2026-10-11T00:00:00Z',
+    };
+    store.worldBooks = [book];
+    const a: WorldBookEntry = {
+      id: 0, comment: '保留', keys: ['a'], constant: false, enabled: true,
+      content: 'A', position: 0,
+    };
+    const b: WorldBookEntry = {
+      id: 1, comment: '删除', keys: ['b'], constant: false, enabled: true,
+      content: 'B', position: 0,
+    };
+    vi.mocked(getWorldBookEntries).mockResolvedValue([{ ...a }, { ...b }]);
+    // 模拟服务端响应:删除 id=0,并带回窗口期新增的 id=9
+    vi.mocked(saveWorldBookEntries).mockResolvedValueOnce([
+      { ...b },
+      { ...b, id: 9, comment: '窗口期新增', content: '模型写入' },
+    ]);
+    const wrapper = mount(WorldBooksModal);
+    await flushPromises();
+
+    const btn = (txt: string) => {
+      const found = wrapper.findAll('button').find((x) => x.text().trim() === txt);
+      if (!found) throw new Error(`缺「${txt}」按钮`);
+      return found;
+    };
+    await btn('条目').trigger('click');
+    await flushPromises();
+    await wrapper.findAll('button[title="删除条目"]')[0]?.trigger('click');
+    await btn('保存条目').trigger('click');
+    await flushPromises();
+
+    const call = vi.mocked(saveWorldBookEntries).mock.calls[0];
+    expect(call?.[2], '基线有、当前没有的 id 必须进 removed').toEqual([0]);
+    expect(call?.[3], '无本地新增时 added 为空').toEqual([]);
+    const comments = wrapper
+      .findAll('input.sv-wb-comment')
+      .map((x) => (x.element as HTMLInputElement).value);
+    expect(comments).toContain('窗口期新增');
+  });
+
+  it('本地新增行:与基线差集作为 added 发送,响应重分配后的 id 刷新草稿', async () => {
+    setActivePinia(createPinia());
+    const store = useAppStore();
+    store.loadWorldBooks = vi.fn().mockResolvedValue(undefined);
+    store.worldBooks = [{
+      id: 'wb1', name: '设定集', entry_count: 1, enabled: true,
+      source: 'upload', created_at: '2026-10-11T00:00:00Z',
+    }];
+    const base: WorldBookEntry = {
+      id: 0, comment: '已有', keys: ['a'], constant: false, enabled: true,
+      content: 'A', position: 0,
+    };
+    vi.mocked(getWorldBookEntries).mockResolvedValue([{ ...base }]);
+    vi.mocked(saveWorldBookEntries).mockResolvedValueOnce([
+      { ...base },
+      { ...base, id: 2, comment: '本地新增', content: '本地内容' },
+    ]);
+    const wrapper = mount(WorldBooksModal);
+    await flushPromises();
+
+    const btn = (txt: string) => {
+      const found = wrapper.findAll('button').find((x) => x.text().trim() === txt);
+      if (!found) throw new Error(`缺「${txt}」按钮`);
+      return found;
+    };
+    await btn('条目').trigger('click');
+    await flushPromises();
+    await btn('＋ 新增条目').trigger('click');
+    const areas = wrapper.findAll('textarea.sv-wb-entry-content');
+    await areas[areas.length - 1]?.setValue('本地内容');
+    await btn('保存条目').trigger('click');
+    await flushPromises();
+
+    const call = vi.mocked(saveWorldBookEntries).mock.calls[0];
+    expect(call?.[3], '本地新增行 id 必须进 added').toEqual([1]);
+    expect(call?.[2], '没有删除时 removed 为空').toEqual([]);
+    const values = wrapper
+      .findAll('textarea.sv-wb-entry-content')
+      .map((x) => (x.element as HTMLTextAreaElement).value);
+    expect(values).toContain('本地内容');
+  });
+
+  it('加载失败:显示 store 错误态,不误显示「暂无独立世界书」', async () => {
+    setActivePinia(createPinia());
+    const store = useAppStore();
+    store.loadWorldBooks = vi.fn(async () => {
+      store.worldBooksError = '后端不可用';
+    });
+    const wrapper = mount(WorldBooksModal);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain('加载独立世界书失败:后端不可用');
+    expect(wrapper.text()).not.toContain('暂无独立世界书');
+  });
+
+  it('保存后保留本地空白行:服务端过滤空条目不等于草稿行消失', async () => {
+    setActivePinia(createPinia());
+    const store = useAppStore();
+    store.loadWorldBooks = vi.fn().mockResolvedValue(undefined);
+    store.worldBooks = [{
+      id: 'wb1', name: '设定集', entry_count: 1, enabled: true,
+      source: 'upload', created_at: '2026-10-11T00:00:00Z',
+    }];
+    const base: WorldBookEntry = {
+      id: 0, comment: '已有', keys: ['a'], constant: false, enabled: true,
+      content: 'A', position: 0,
+    };
+    vi.mocked(getWorldBookEntries).mockResolvedValue([{ ...base }]);
+    // 服务端按 normalize 口径过滤空白条目,响应只回已有条目
+    vi.mocked(saveWorldBookEntries).mockResolvedValueOnce([{ ...base }]);
+    const wrapper = mount(WorldBooksModal);
+    await flushPromises();
+
+    const btn = (txt: string) => {
+      const found = wrapper.findAll('button').find((x) => x.text().trim() === txt);
+      if (!found) throw new Error(`缺「${txt}」按钮`);
+      return found;
+    };
+    await btn('条目').trigger('click');
+    await flushPromises();
+    await btn('＋ 新增条目').trigger('click');
+    await btn('保存条目').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.findAll('textarea.sv-wb-entry-content').length).toBe(2);
   });
 });

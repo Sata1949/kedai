@@ -126,10 +126,19 @@ pub async fn entries(State(state): State<Arc<AppState>>, Path(id): Path<String>)
     }
 }
 
-/// PUT /api/world-books/{id}/entries — 全量回写条目(内容/关键词/正则/常驻/激发/位置)
+/// PUT /api/world-books/{id}/entries — 叠加回写条目(内容/关键词/正则/常驻/激发/位置)
+///
+/// 语义(WBCONC 提交 2):`entries` 叠加、`removed` 显式删除;未列出且未 removed 的条目
+/// 一律保留(窗口期内模型/卡脚本的写入不被旧快照删除)。`added` 是前端显式标记的新行 id,
+/// 服务端在锁内重分配 uid(本地新增与窗口期模型新建可能撞号,不能靠「uid 是否存在」推断)。
+/// 响应 `entries` 为**合并后的最新视图**,前端用它刷新草稿与基线。
 #[derive(Deserialize)]
 pub struct SaveEntriesBody {
     pub entries: Vec<crate::models::types::WorldBookEntryView>,
+    #[serde(default)]
+    pub removed: Vec<i64>,
+    #[serde(default)]
+    pub added: Vec<i64>,
 }
 
 pub async fn save_entries(
@@ -137,26 +146,28 @@ pub async fn save_entries(
     Path(id): Path<String>,
     Json(body): Json<SaveEntriesBody>,
 ) -> Response {
+    // 预检只为区分 404/422 文案;真正的读改写已下沉到服务层写锁事务
+    // (2026-10-15 并发修复批:原实现「get → merge → save_data_raw」三步分离,
+    // 与工具/脚本的并发写互不感知,后写整份覆盖先写)。
     let rec = match state.world_books.get(&id) {
         Some(r) => r,
         None => return not_found("世界书不存在"),
     };
-    let mut raw = match rec.data_raw {
-        Some(r) => r,
-        None => return validation("世界书缺少原始数据"),
-    };
-    if raw.get("entries").is_none() {
-        raw.as_object_mut()
-            .map(|o| o.insert("entries".into(), serde_json::Value::Array(Vec::new())));
+    if rec.data_raw.is_none() {
+        return validation("世界书缺少原始数据");
     }
-    if let Some(entries) = raw.get_mut("entries") {
-        crate::parsing::world_book::merge_entries_into(entries, &body.entries);
-    }
-    match state.world_books.save_data_raw(&id, &raw) {
-        Some(()) => Json(json!({ "ok": true, "id": id, "entries": body.entries })).into_response(),
+    match state
+        .world_books
+        .save_entries_merged(&id, &body.entries, &body.removed, &body.added)
+    {
+        Ok(Some(entries)) => {
+            Json(json!({ "ok": true, "id": id, "entries": entries })).into_response()
+        }
+        // 预检与提交之间书被并发删除:与预检同文案(极少见的竞态窗口)
+        Ok(None) => not_found("世界书不存在"),
         // "保存失败"是给用户的固定文案(非内部错误原文),故走 err_status 保留原文,
         // 只补 code;若改成 internal() 会把文案降级为通用提示,反而丢信息。
-        None => err_status("保存失败", StatusCode::INTERNAL_SERVER_ERROR),
+        Err(_) => err_status("保存失败", StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
@@ -185,12 +196,15 @@ pub async fn save_character_entries(
     Path(id): Path<String>,
     Json(body): Json<SaveEntriesBody>,
 ) -> Response {
-    match state.world_books.save_character_book(&id, &body.entries) {
-        Some(()) => {
+    match state
+        .world_books
+        .save_character_book(&id, &body.entries, &body.removed, &body.added)
+    {
+        Some(entries) => {
             // 无缓存失效动作:内嵌书每轮现读 characters.data_raw(条目缓存只覆盖独立书),
             // 且契约注册表的条目源只读独立书(collect_entries_for_character)——
             // 内嵌书条目不是 [nlkaleido_contract] 来源,不存在需要失效的缓存。
-            Json(json!({ "ok": true, "character_id": id, "entries": body.entries })).into_response()
+            Json(json!({ "ok": true, "character_id": id, "entries": entries })).into_response()
         }
         None => validation("角色卡无内嵌世界书,或保存失败"),
     }

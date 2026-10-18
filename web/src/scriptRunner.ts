@@ -52,6 +52,9 @@ function deepCopy<T>(v: T): T {
 
 // 执行上下文与沙箱 SandboxExecutionContext 对齐(其子集):characterId/globals 为可选,
 // 真实实现(executeSandboxedCharacterScript)消费二者做角色级全局变量持久化与同步下发。
+// lorebookName 只有卡脚本宿主(cardScriptHost 的 options)会提供;消息级脚本执行链当前
+// 不下发该值,脚本内 lorebook get/set 在消息级恒返回 null/false——链路保留,按实现注释
+// 对齐,不改行为(WBCONC 提交 3 核对)。
 export type CharacterScriptExecutor = (
   code: string,
   context: {

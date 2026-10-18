@@ -40,11 +40,19 @@ export async function getWorldBookEntries(id: string): Promise<WorldBookEntry[]>
   return requireArrayField<WorldBookEntry>(data, 'entries', '世界书条目');
 }
 
-/** 全量回写独立世界书条目(关键词/正则/常驻/激活/位置) */
-export async function saveWorldBookEntries(id: string, entries: WorldBookEntry[]): Promise<WorldBookEntry[]> {
+/** 叠加回写独立世界书条目;removed=显式删除,added=本地新增(服务端重分配 uid) */
+export async function saveWorldBookEntries(
+  id: string,
+  entries: WorldBookEntry[],
+  removed: readonly number[] = [],
+  added: readonly number[] = [],
+): Promise<WorldBookEntry[]> {
+  const body: Record<string, unknown> = { entries };
+  if (removed.length > 0) body.removed = removed;
+  if (added.length > 0) body.added = added;
   const data = await request<unknown>(`/world-books/${id}/entries`, {
     method: 'PUT',
-    body: JSON.stringify({ entries }),
+    body: JSON.stringify(body),
   });
   return requireArrayField<WorldBookEntry>(data, 'entries', '世界书条目');
 }
@@ -61,11 +69,19 @@ export async function getCharacterWorldEntries(characterId: string): Promise<Wor
   return requireArrayField<WorldBookEntry>(data, 'entries', '角色卡世界书条目');
 }
 
-/** 回写角色卡内嵌世界书条目 */
-export async function saveCharacterWorldEntries(characterId: string, entries: WorldBookEntry[]): Promise<WorldBookEntry[]> {
+/** 叠加回写角色卡内嵌世界书条目;removed/added 语义同独立书 */
+export async function saveCharacterWorldEntries(
+  characterId: string,
+  entries: WorldBookEntry[],
+  removed: readonly number[] = [],
+  added: readonly number[] = [],
+): Promise<WorldBookEntry[]> {
+  const body: Record<string, unknown> = { entries };
+  if (removed.length > 0) body.removed = removed;
+  if (added.length > 0) body.added = added;
   const data = await request<unknown>(`/characters/${characterId}/world-entries`, {
     method: 'PUT',
-    body: JSON.stringify({ entries }),
+    body: JSON.stringify(body),
   });
   return requireArrayField<WorldBookEntry>(data, 'entries', '角色卡世界书条目');
 }
