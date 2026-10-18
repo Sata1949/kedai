@@ -4,6 +4,7 @@ import {
   getCharacterWorldEntries,
   getWorldBookEntries,
   listWorldBooks,
+  saveCharacterWorldEntries,
   saveWorldBookEntries,
 } from './worldbooks';
 import { resetApiTokenForTest } from './client';
@@ -48,6 +49,40 @@ describe('api/worldbooks 形状闸门', () => {
   it('saveWorldBookEntries 缺 entries 数组时抛错', async () => {
     mock({ ok: true });
     await expect(saveWorldBookEntries('wb1', [])).rejects.toThrow('世界书条目响应格式异常');
+  });
+
+  it('saveWorldBookEntries 把 removed/added 放进请求体,空集合不出现', async () => {
+    resetApiTokenForTest();
+    const spy = vi.spyOn(globalThis, 'fetch');
+    spy.mockReset();
+    spy.mockResolvedValueOnce(new Response(JSON.stringify({ token: 't' }), { status: 200 }));
+    spy.mockResolvedValueOnce(new Response(JSON.stringify({ entries: [] }), { status: 200 }));
+
+    await saveWorldBookEntries('wb1', [], [2], [3]);
+    expect(JSON.parse(String(spy.mock.calls[1]?.[1]?.body))).toEqual({
+      entries: [],
+      removed: [2],
+      added: [3],
+    });
+
+    spy.mockResolvedValueOnce(new Response(JSON.stringify({ entries: [] }), { status: 200 }));
+    await saveWorldBookEntries('wb1', []);
+    expect(JSON.parse(String(spy.mock.calls[2]?.[1]?.body))).toEqual({ entries: [] });
+  });
+
+  it('saveCharacterWorldEntries 同样携带 removed/added', async () => {
+    resetApiTokenForTest();
+    const spy = vi.spyOn(globalThis, 'fetch');
+    spy.mockReset();
+    spy.mockResolvedValueOnce(new Response(JSON.stringify({ token: 't' }), { status: 200 }));
+    spy.mockResolvedValueOnce(new Response(JSON.stringify({ entries: [] }), { status: 200 }));
+
+    await saveCharacterWorldEntries('c1', [], [1], [4]);
+    expect(JSON.parse(String(spy.mock.calls[1]?.[1]?.body))).toEqual({
+      entries: [],
+      removed: [1],
+      added: [4],
+    });
   });
 
   it('addWorldBookEntry 缺 entry 对象时抛错', async () => {

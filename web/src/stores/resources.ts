@@ -8,6 +8,8 @@ import * as api from '../api';
 export const useResourcesStore = defineStore('app.resources', () => {
   // ===== 状态 =====
   const worldBooks = ref<api.WorldBookRecord[]>([]);
+  /** 独立世界书列表加载错误:面板据此显示错误而非「暂无独立世界书」 */
+  const worldBooksError = ref<string | null>(null);
   const quickReplies = ref<api.QuickReplyRecord[]>([]);
   const audio = ref<api.AudioState | null>(null);
   const skills = ref<api.SkillRecord[]>([]);
@@ -16,7 +18,11 @@ export const useResourcesStore = defineStore('app.resources', () => {
   async function loadWorldBooks(): Promise<void> {
     try {
       worldBooks.value = await api.listWorldBooks();
+      worldBooksError.value = null;
     } catch (e) {
+      // 不 rethrow:PromptManager 的 onMounted 无 try/catch,rethrow 会变成
+      // unhandled rejection;错误通过 store 状态交给面板展示(WorldBooksModal)。
+      worldBooksError.value = (e as Error).message;
       console.error('加载世界书失败', e);
     }
   }
@@ -122,6 +128,7 @@ export const useResourcesStore = defineStore('app.resources', () => {
 
   return {
     worldBooks,
+    worldBooksError,
     quickReplies,
     audio,
     skills,

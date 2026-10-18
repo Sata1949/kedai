@@ -283,7 +283,7 @@ fn save_character_book_writes_fresh_derived_column() {
     let rec = svc.upload(&raw, "collector-col.json").expect("上传应成功");
 
     WorldBookService::new(db.clone())
-        .save_character_book(&rec.id, &[])
+        .save_character_book(&rec.id, &[], &[], &[])
         .expect("保存内嵌世界书应成功");
 
     let col: Value = serde_json::from_str(&derived_of(&db, &rec.id)).expect("列应是合法 JSON");

@@ -25,6 +25,23 @@ pub(crate) fn update_data_raw<F>(db: &Db, character_id: &str, mutate: F) -> Resu
 where
     F: FnOnce(&mut Value) -> Result<(), String>,
 {
+    update_data_raw_with(db, character_id, |value| {
+        mutate(value)?;
+        Ok(())
+    })
+    .map(|out| out.is_some())
+}
+
+/// [`update_data_raw`] 的带返回值版本:闭包可把事务内计算结果(如世界书合并后视图)
+/// 带出到调用方;值只在提交成功后返回。
+pub(crate) fn update_data_raw_with<T, F>(
+    db: &Db,
+    character_id: &str,
+    mutate: F,
+) -> Result<Option<T>, String>
+where
+    F: FnOnce(&mut Value) -> Result<T, String>,
+{
     let mut conn = db.write();
     let tx = conn
         .transaction()
@@ -39,12 +56,12 @@ where
         .map_err(|e| format!("读取角色卡失败: {e}"))?;
     let Some(raw) = raw else {
         // 事务未写入任何内容,Drop 即回滚
-        return Ok(false);
+        return Ok(None);
     };
     let mut value: Value =
         serde_json::from_str(&raw).map_err(|e| format!("解析角色卡失败: {e}"))?;
     // 闭包拒绝(如角色卡结构不符合预期)时事务回滚,不留下半写状态
-    mutate(&mut value)?;
+    let out = mutate(&mut value)?;
     let serialized = serde_json::to_string(&value).map_err(|e| format!("序列化角色卡失败: {e}"))?;
     // 派生列随 data_raw 在同一事务内同步重算(2026-09-17 P-11):本函数是 data_raw 读改写的
     // **单一入口**(世界书编辑、脚本树、契约内嵌、角色字段更新四处都经它),不在此重算会让
@@ -57,5 +74,5 @@ where
     .map_err(|e| format!("回写角色卡失败: {e}"))?;
     tx.commit()
         .map_err(|e| format!("提交角色卡写事务失败: {e}"))?;
-    Ok(true)
+    Ok(Some(out))
 }

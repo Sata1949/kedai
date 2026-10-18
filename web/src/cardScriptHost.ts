@@ -72,9 +72,10 @@ function toHelperEntry(e: WorldBookEntry): Record<string, unknown> {
 }
 
 /**
- * lorebook-set:GET 全量 → 只应用 {uid, enabled} 白名单 → PUT 全量 → 返回更新视图。
- * 并发说明: kedai 世界书写回只有全量 PUT(无单条 PATCH),脚本回写与用户手动编辑
- * 并发时后写覆盖先写——与酒馆全量保存语义一致,此处注释明示风险。
+ * lorebook-set:GET 当前 → 只应用 {uid, enabled} 白名单 → PUT 当前数组 → 返回响应视图。
+ * 并发说明(WBCONC 提交 2 起):PUT 语义是「叠加 + 显式 removed 删除」;本路径不带
+ * removed/added,因此只叠加、不会删除窗口期他人写入的条目。同一 uid 的 enabled 仍是
+ * 后写覆盖(条目级 last-write-wins),与酒馆全量保存的语义边界一致。
  */
 async function applyLorebookSet(
   characterId: string,

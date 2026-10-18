@@ -707,54 +707,131 @@ fn overlay_view(original: Option<&Value>, view_json: Value) -> Value {
     Value::Object(base)
 }
 
-/// 写回条目数组:entries 为对象 map 时按 uid 替换/追加并**删除已移除的条目**,
-/// 数组时整组替换(维持 id 稳定排序)。
+/// 写回条目容器:PUT 的语义是「**叠加视图 + 显式 removed 删除**」。
 ///
-/// 更新是**字段叠加**而非整体替换:视图未承载的原始字段(角色卡 `extensions` 里的
-/// depth/scan_depth/role、作者自定义键等)原样保留。整体替换会静默抹掉 `extensions`,
-/// 让 depth/scan_depth 退回缺省值,世界书触发行为随之改变。
+/// - 不在视图内、也不在 `removed` 里的条目**一律保留**——前端打开编辑器时取的是快照,
+///   保存前窗口期内模型/卡脚本的写入不得被「全量回写」静默删除;
+/// - 只有 `removed` 显式列出的 uid 才删除;
+/// - 视图命中的条目做**字段叠加**(保留 extensions/作者自定义键);
+/// - 未命中的视图条目追加为新条目。
+///
+/// 数组形态与对象形态同口径:此前数组是整组替换,角色卡内嵌书(常为数组)同样会
+/// 在窗口期删除他人写入。
 pub fn merge_entries_into(
     entries_value: &mut Value,
     views: &[crate::models::types::WorldBookEntryView],
+    removed: &[i64],
 ) {
+    let removed: std::collections::HashSet<i64> = removed.iter().copied().collect();
     if let Some(map) = entries_value.as_object_mut() {
-        // 视图中的 uid 集合:仅这些条目保留/更新,其余条目(已在前端删除)一律移除
-        let view_uids: std::collections::HashSet<String> =
-            views.iter().map(|v| v.id.to_string()).collect();
-        let keep: serde_json::Map<String, Value> = map
-            .iter()
-            .filter(|(k, _)| {
-                // 非条目字段(如 name)保留;数字键仅在仍属于视图集合时保留
-                k.parse::<i64>().is_err() || view_uids.contains(k.as_str())
-            })
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        let mut new_map = keep;
+        let mut new_map: serde_json::Map<String, Value> = serde_json::Map::new();
+        // 保留非条目字段与未删除的条目
+        for (k, v) in map.iter() {
+            let key_uid = k.parse::<i64>().ok();
+            let val_uid = value_uid(v);
+            if key_uid.is_some_and(|u| removed.contains(&u))
+                || val_uid.is_some_and(|u| removed.contains(&u))
+            {
+                continue;
+            }
+            new_map.insert(k.clone(), v.clone());
+        }
         for v in views {
-            // 叠加到原始条目对象(命中原始 map 时按 uid,其次按 id 键)
-            let key = v.id.to_string();
-            let original = new_map
-                .get(&key)
-                .cloned()
-                .or_else(|| map.get(&key).cloned());
-            let merged = overlay_view(original.as_ref(), view_to_value(v));
-            new_map.insert(key, merged);
+            // removed 优先于视图:同一 uid 同时出现在两处时按删除处理
+            if removed.contains(&v.id) {
+                continue;
+            }
+            let key = new_map.iter().find_map(|(k, val)| {
+                let key_uid = k.parse::<i64>().ok();
+                (key_uid == Some(v.id) || value_uid(val) == Some(v.id)).then(|| k.clone())
+            });
+            match key {
+                Some(key) => {
+                    let original = new_map.get(&key).cloned();
+                    new_map.insert(key, overlay_view(original.as_ref(), view_to_value(v)));
+                }
+                None => {
+                    new_map.insert(v.id.to_string(), view_to_value(v));
+                }
+            }
         }
         *map = new_map;
+    } else if let Some(arr) = entries_value.as_array_mut() {
+        let mut merged: Vec<Value> = Vec::with_capacity(arr.len().max(views.len()));
+        let mut matched: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        for original in arr.iter() {
+            let uid = value_uid(original);
+            if uid.is_some_and(|u| removed.contains(&u)) {
+                continue;
+            }
+            match uid.and_then(|uid| views.iter().find(|v| v.id == uid)) {
+                Some(view) => {
+                    merged.push(overlay_view(Some(original), view_to_value(view)));
+                    matched.insert(view.id);
+                }
+                None => merged.push(original.clone()),
+            }
+        }
+        for view in views {
+            if removed.contains(&view.id) || matched.contains(&view.id) {
+                continue;
+            }
+            merged.push(overlay_view(None, view_to_value(view)));
+        }
+        *arr = merged;
     } else {
-        // 数组形态:按 uid 在原数组内叠加,保留原条目的未知字段
-        let originals: Vec<Value> = entries_value
-            .as_array()
-            .map(|a| a.to_vec())
-            .unwrap_or_default();
-        let merged: Vec<Value> = views
-            .iter()
-            .map(|v| {
-                let original = originals.iter().find(|o| value_uid(o) == Some(v.id));
-                overlay_view(original, view_to_value(v))
-            })
-            .collect();
-        *entries_value = Value::Array(merged);
+        // 非对象/数组容器(异常形态):退化为仅保存视图,避免把标量写坏
+        *entries_value = Value::Array(views.iter().map(view_to_value).collect());
+    }
+}
+
+/// 条目容器内现有最大 uid:**计入未归一化条目**(空条目等),对象形态同时计入数字键。
+/// 只按归一化条目取 max 会让新 uid 与「隐性」条目撞车(对象形态直接覆盖旧条目)。
+pub fn max_entry_uid(entries_value: &Value) -> Option<i64> {
+    let mut max: Option<i64> = None;
+    let mut bump = |u: Option<i64>| {
+        if let Some(u) = u {
+            max = Some(max.map_or(u, |m| m.max(u)));
+        }
+    };
+    match entries_value {
+        Value::Object(map) => {
+            for (k, v) in map {
+                bump(k.parse::<i64>().ok());
+                bump(value_uid(v));
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr {
+                bump(value_uid(v));
+            }
+        }
+        _ => {}
+    }
+    max
+}
+
+/// 为客户端显式标记的新行分配 uid(**只看 `added` 集合,不靠「uid 是否已存在」推断**)。
+///
+/// 为什么需要显式信号:用户打开编辑器时本地新增行的 id 是草稿 max+1,窗口期内模型
+/// 创建条目也从同一个 max 出发——两者撞号时,若服务端按「uid 已存在 = 更新」处理,
+/// 就会把模型新条目覆盖掉。`added` 由前端用「当前草稿 id − 打开时基线 id」算出,
+/// 服务端对其中每个 id **无条件**重分配(锁内当前 max+1),从根上消除这种误判。
+pub fn assign_added_uids(
+    entries_value: &Value,
+    views: &mut [crate::models::types::WorldBookEntryView],
+    added: &[i64],
+) {
+    if added.is_empty() {
+        return;
+    }
+    let added: std::collections::HashSet<i64> = added.iter().copied().collect();
+    let mut next = max_entry_uid(entries_value).unwrap_or(0);
+    for v in views.iter_mut() {
+        if added.contains(&v.id) {
+            next += 1;
+            v.id = next;
+        }
     }
 }
 
@@ -814,6 +891,35 @@ fn strip_image_ext(name: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// 测试用条目视图:只关心 id/comment/content,其余取缺省值
+    fn test_view(
+        id: i64,
+        comment: &str,
+        content: &str,
+    ) -> crate::models::types::WorldBookEntryView {
+        crate::models::types::WorldBookEntryView {
+            id,
+            comment: comment.into(),
+            keys: vec![comment.into()],
+            keys_secondary: vec![],
+            regex: None,
+            use_regex: false,
+            constant: false,
+            enabled: true,
+            content: content.into(),
+            position: 0,
+            depth: 4,
+            scan_depth: None,
+            order: 100,
+            case_sensitive: false,
+            sticky: 0,
+            cooldown: 0,
+            probability: 100,
+            use_probability: false,
+            role: None,
+        }
+    }
 
     /// 独立世界书 ST 导出格式(对象 entries + originalData)
     #[test]
@@ -1367,7 +1473,7 @@ mod tests {
         let mut stale = declared.clone();
         stale.scan_depth = None;
         let mut entries_value = raw["entries"].clone();
-        merge_entries_into(&mut entries_value, &[stale]);
+        merge_entries_into(&mut entries_value, &[stale], &[]);
         let after = collect_entries(&json!({ "entries": entries_value }));
         assert_eq!(
             after[0].scan_depth,
@@ -1380,68 +1486,87 @@ mod tests {
         assert_eq!(re[0].scan_depth, Some(5));
     }
 
-    /// 回归:对象 map 格式合并后必须删除已移除的条目(前端删除条目后 PUT 保存,
-    /// 原实现只插入/覆盖,删除的条目留在 data_raw 里,下次 GET 复活)
+    /// 显式 removed 才删除:对象 map 形态,未列出条目一律保留
     #[test]
-    fn merge_entries_into_removes_deleted_entries() {
+    fn merge_entries_into_removes_only_explicit_uids() {
         let mut entries_value = json!({
             "name": "小兔子",
             "0": { "uid": 0, "comment": "保留", "keys": ["a"], "content": "A", "constant": false },
             "1": { "uid": 1, "comment": "删除", "keys": ["b"], "content": "B", "constant": false },
             "2": { "uid": 2, "comment": "替换", "keys": ["c"], "content": "旧C", "constant": false }
         });
-        let views = vec![
-            crate::models::types::WorldBookEntryView {
-                id: 0,
-                comment: "保留".into(),
-                keys: vec!["a".into()],
-                keys_secondary: vec![],
-                regex: None,
-                use_regex: false,
-                constant: false,
-                enabled: true,
-                content: "A".into(),
-                position: 0,
-                depth: 4,
-                scan_depth: None,
-                order: 100,
-                case_sensitive: false,
-                sticky: 0,
-                cooldown: 0,
-                probability: 100,
-                use_probability: false,
-                role: None,
-            },
-            crate::models::types::WorldBookEntryView {
-                id: 2,
-                comment: "替换".into(),
-                keys: vec!["c".into()],
-                keys_secondary: vec![],
-                regex: None,
-                use_regex: false,
-                constant: false,
-                enabled: true,
-                content: "新C".into(),
-                position: 0,
-                depth: 4,
-                scan_depth: None,
-                order: 100,
-                case_sensitive: false,
-                sticky: 0,
-                cooldown: 0,
-                probability: 100,
-                use_probability: false,
-                role: None,
-            },
-        ];
-        merge_entries_into(&mut entries_value, &views);
+        let views = vec![test_view(0, "保留", "A"), test_view(2, "替换", "新C")];
+        merge_entries_into(&mut entries_value, &views, &[1]);
         let map = entries_value.as_object().unwrap();
         assert!(map.contains_key("name"), "非条目字段 name 必须保留");
         assert!(map.contains_key("0"), "仍在视图中的条目必须保留");
-        assert!(!map.contains_key("1"), "已移除的条目必须删除");
+        assert!(!map.contains_key("1"), "removed 中的条目必须删除");
         assert!(map.contains_key("2"), "仍在视图中的条目必须保留");
         assert_eq!(map["2"]["content"], json!("新C"), "条目内容必须更新");
         assert_eq!(map.len(), 3, "仅剩 name + 2 条条目");
+    }
+
+    /// 窗口期并发写入:不在视图、也不在 removed 的条目必须保留(核心行为变更)
+    #[test]
+    fn merge_entries_into_keeps_entries_outside_view() {
+        let mut entries_value = json!({
+            "0": { "uid": 0, "comment": "用户打开编辑器时已有", "keys": ["a"], "content": "A" },
+            "1": { "uid": 1, "comment": "窗口期模型写入", "keys": ["b"], "content": "B" },
+            "2": { "uid": 2, "comment": "用户改过", "keys": ["c"], "content": "旧C" }
+        });
+        merge_entries_into(&mut entries_value, &[test_view(2, "用户改过", "新C")], &[]);
+        let map = entries_value.as_object().unwrap();
+        assert!(map.contains_key("0"), "未列出条目必须保留");
+        assert!(map.contains_key("1"), "窗口期新增条目不得被旧快照删除");
+        assert_eq!(map["2"]["content"], json!("新C"));
+        assert_eq!(map.len(), 3);
+    }
+
+    /// 数组形态(角色卡内嵌书常见)同样只删 removed,未列出条目保留且未知字段不丢
+    #[test]
+    fn merge_entries_into_array_keeps_unlisted_entries() {
+        let mut entries_value = json!([
+            { "uid": 0, "comment": "保留", "keys": ["a"], "content": "A", "extensions": { "depth": 3 } },
+            { "uid": 1, "comment": "改", "keys": ["b"], "content": "旧B" },
+            { "uid": 2, "comment": "删", "keys": ["c"], "content": "C" }
+        ]);
+        merge_entries_into(&mut entries_value, &[test_view(1, "改", "新B")], &[2]);
+        let arr = entries_value.as_array().unwrap();
+        assert_eq!(arr.len(), 2, "数组形态只删 removed");
+        let kept = arr.iter().find(|e| e["uid"] == json!(0)).unwrap();
+        assert_eq!(kept["content"], json!("A"), "未列出条目保留");
+        assert_eq!(
+            kept["extensions"]["depth"],
+            json!(3),
+            "视图未承载的 extensions 必须保留"
+        );
+        let edited = arr.iter().find(|e| e["uid"] == json!(1)).unwrap();
+        assert_eq!(edited["content"], json!("新B"));
+        assert!(
+            !arr.iter().any(|e| e["uid"] == json!(2)),
+            "removed 必须删除"
+        );
+    }
+
+    /// added 撞车:本地新增 id 与窗口期模型条目同号时,服务端无条件重分配,两者都存活
+    #[test]
+    fn assign_added_uids_avoids_collision_with_concurrent_entry() {
+        let mut entries_value = json!({
+            "5": { "uid": 5, "comment": "旧条目", "keys": ["a"], "content": "A" },
+            "6": { "uid": 6, "comment": "窗口期模型新建", "keys": ["b"], "content": "B" }
+        });
+        let mut views = vec![test_view(6, "本地新增", "本地内容")];
+        assign_added_uids(&entries_value, &mut views, &[6]);
+        assert_eq!(views[0].id, 7, "撞号的 added 行必须重分配到 max+1");
+        merge_entries_into(&mut entries_value, &views, &[]);
+        let map = entries_value.as_object().unwrap();
+        assert_eq!(
+            map["6"]["content"],
+            json!("B"),
+            "窗口期模型条目不得被本地新增行覆盖"
+        );
+        assert_eq!(map["7"]["content"], json!("本地内容"));
+        assert_eq!(map.len(), 3);
     }
 
     // ============ ST-Prompt-Template 装饰器解析 ============
