@@ -104,7 +104,8 @@ pub struct UpdateSettingsBody {
     /// 任务模式工具白名单(allowlist 策略生效)
     #[serde(default)]
     pub task_tool_allowlist: Option<Vec<String>>,
-    /// AGENT/CUSTOM 模式工具循环轮次上限(1..=200;缺省保持不变)
+    /// 聊天 AGENT 模式工具循环轮次上限(1..=200;缺省保持不变)。
+    /// 任务模式自 2026-10-19 起取消默认轮次限制,不再消费本设置。
     #[serde(default)]
     pub max_tool_rounds: Option<u32>,
     /// 流程动态调用深度上限(A 批 A3;1..=5)

@@ -1,6 +1,6 @@
 // solo 模式:单主 agent 工具自循环——目标直接进 run_tool_loop,工具集按
 // task_tool_policy 编译(默认 deny_dangerous:危险级与元工具除外、bash 例外),
-// 步数上限 max_tool_rounds(docs/功能.md 第一节)。
+// 轮次默认不限(2026-10-19 取消任务模式轮次上限;步骤墙钟/空闲/熔断仍兜底)。
 // 复用聊天引擎 run_tool_loop,不建影子 sessions 行(session_id 用 task: 前缀虚拟 id,
 // llm_requests 落库在引擎侧据此跳过;任务侧追踪走 task_llm_calls,phase=agent)。
 // run_agent_loop 为「单主 agent 工具自循环」共享骨架:solo/multi 执行器与
@@ -137,7 +137,9 @@ pub(crate) async fn run_agent_loop(
         max_tokens: settings.default_max_tokens,
         stop: None,
         tools: policy.defs,
-        max_tool_rounds: Some(settings.max_tool_rounds),
+        // 任务模式取消轮次上限(2026-10-19):0 = 不限;solo/multi/team/plan/followup
+        // 共用本装配点。聊天 AGENT 仍走 settings.max_tool_rounds。
+        max_tool_rounds: Some(0),
         tool_choice: ToolChoice::Auto,
         // 任务级连接(A 批 B1):solo 无节点级连接可配,直接用任务绑定的那条
         // (None = 默认连接,与本批之前一致)

@@ -363,9 +363,9 @@ impl CustomExecutor {
                 .unwrap_or_else(|| step.max_tokens.unwrap_or(settings.default_max_tokens)),
             stop: None,
             tools,
-            // 节点级轮次上限(二维批次 5b):缺省沿用全局;严格档下本参数无意义(不下发工具),
-            // 与「严格档保留工具配置」同一纪律——配置保留、切换档位即生效。
-            max_tool_rounds: Some(step.max_tool_rounds.unwrap_or(settings.max_tool_rounds)),
+            // 任务模式默认不限轮次(0 = 不限);节点作者显式配置的 max_tool_rounds
+            // 仍作为该节点的显式预算保留。严格档下本参数无意义(不下发工具)。
+            max_tool_rounds: Some(step.max_tool_rounds.unwrap_or(0)),
             tool_choice,
             // 连接:节点级(二维批次 5b)优先,缺省回退**任务级**(A 批 B1);
             // 两者皆空 = 默认连接(run_tool_loop 内层经 engine 单点解析)

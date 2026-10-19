@@ -169,8 +169,9 @@ pub struct RuntimeSettings {
     /// 任务模式 allowlist 策略下的工具白名单(task_tool_policy=allowlist 时生效)
     #[serde(default)]
     pub task_tool_allowlist: Vec<String>,
-    /// AGENT/CUSTOM 模式工具循环轮次上限(默认 32;每轮可执行多个工具调用,
-    /// 达到上限后停止调用工具并输出当前结果)
+    /// 聊天 AGENT 模式工具循环轮次上限(默认 32;每轮可执行多个工具调用,
+    /// 达到上限后停止调用工具并输出当前结果)。任务模式已取消默认轮次限制,
+    /// 不再消费本字段(2026-10-19)。
     #[serde(default = "default_max_tool_rounds")]
     pub max_tool_rounds: u32,
     /// 流程**动态调用**的嵌套深度上限(A 批 A3;默认 2,钳 1..=5)。

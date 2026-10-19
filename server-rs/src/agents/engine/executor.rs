@@ -545,8 +545,9 @@ fn is_truncated_tool_call_error(err: &str) -> bool {
     err.contains("arguments 不是合法 JSON")
 }
 
-/// AGENT 模式工具循环:生成 → 有 tool_calls 则逐个执行并回填消息 → 重新生成,
-/// 轮次上限默认 32(params.max_tool_rounds 可调,settings 页配置);无 tool_calls 时返回最终正文。/// 每轮 usage 已累加进 total_usage。
+/// AGENT 模式工具循环:生成 → 有 tool_calls 则逐个执行并回填消息 → 重新生成。
+/// 轮次上限:None = 聊天默认 32;Some(0) = 任务模式不限;Some(n>0) = 显式上限。
+/// 无 tool_calls 时返回最终正文。每轮 usage 已累加进 total_usage。
 /// 截断自愈(问题①):单轮生成被 max_tokens 截断到不可用(空正文 / 半截 tool_call
 /// JSON / 连接器流尾 flush 校验报错)时,本轮 max_tokens 翻倍(上限
 /// TRUNCATION_HEAL_MAX_TOKENS_CAP)原样重发一次,重发仍失败才透出原结果;
@@ -634,6 +635,21 @@ fn budget_stop_content(current: String, last_non_empty: &str) -> String {
     }
 }
 
+/// 工具循环轮次上限解析(2026-10-19 任务模式取消轮次限制):
+/// - `None` → 旧调用方/聊天路径缺省 32(行为不变);
+/// - `Some(0)` → **不限轮次**(任务模式显式哨兵,不再因读文件/探索耗尽轮次);
+/// - `Some(n>0)` → 显式上限(聊天设置、custom 节点级预算)。
+///
+/// 不限轮次不等于无界:步骤墙钟预算、空闲超时、语义/重复熔断、token 预算、
+/// 任务总预算(若开启)与用户取消仍然生效。
+fn resolve_max_rounds(configured: Option<u32>) -> Option<usize> {
+    match configured {
+        Some(0) => None,
+        Some(n) => Some(n.max(1) as usize),
+        None => Some(32),
+    }
+}
+
 /// 跳过状态/工具调用落库;docs/功能.md 第三节);聊天路径恒 Some,行为不变。
 /// pub(crate):任务引擎 solo/custom 模式直调(批次 4.2 起)。
 #[allow(clippy::too_many_arguments)]
@@ -659,8 +675,10 @@ pub(crate) async fn run_tool_loop(
     // 是否透出正文增量(RPFLOW-1):隐藏步骤(草稿/归档)传 false,工具调用照常透出
     emit_tokens: bool,
 ) -> Result<ExecutorResult, EngineError> {
-    // 轮次上限:缺省 32(settings 可调);至少 1 轮,防止配置异常导致死循环
-    let max_rounds = params.max_tool_rounds.unwrap_or(32).max(1) as usize;
+    // 轮次上限:None = 旧调用方/聊天路径默认 32;Some(0) = 显式不限(任务模式哨兵);
+    // Some(n>0) = 显式上限。轮次不再是任务模式的默认终止条件,但仍保留语义/重复熔断
+    // 与步骤墙钟预算等安全阀。
+    let max_rounds = resolve_max_rounds(params.max_tool_rounds);
     let mut round = 0usize;
     // 重复调用熔断(P0-2,2026-09-14):普通 agent 工具循环此前**没有任何重复调用检测**,
     // 唯一终止条件是 max_rounds。实测 plan 模式任务在单步反复调用同一工具(同参数)时,
@@ -963,8 +981,9 @@ pub(crate) async fn run_tool_loop(
         if !result.content.trim().is_empty() {
             last_non_empty_content = result.content.clone();
         }
-        // 本轮是否已达上限:是则执行完本轮工具后停止,不再发起新的模型请求
-        let last_round = round >= max_rounds;
+        // 本轮是否已达上限(Some 才判定;None = 不限轮次):是则执行完本轮工具后停止,
+        // 不再发起新的模型请求
+        let last_round = max_rounds.is_some_and(|limit| round >= limit);
         // ===== 重复调用熔断(P0-2)=====
         // 对本轮每个工具调用做「工具名 + 参数」指纹登记;窗口内同一指纹累计达阈值
         // 即判定模型在原地打转,执行本轮工具后停止,理由显式推给用户(不静默截断)。
@@ -1193,7 +1212,7 @@ pub(crate) async fn run_tool_loop(
             }
         }
         // ===== token 预算闸门(HB-1,2026-09-18):按**成本**而非轮数收口 =====
-        // 轮次上限(max_tool_rounds 默认 32)只管轮数:实测 54 轮各不相同命令的空转仍烧
+        // 轮次上限(显式配置时)只管轮数:实测 54 轮各不相同命令的空转仍烧
         // 137 万 prompt token(遗留 L22)。预算口径 = 本轮 run 内工具循环累计
         // prompt+completion(与 Finish 事件透出的 total_tokens 同口径);0 = 关闭(默认)。
         // 判定点放在**轮末**(本轮工具已执行完,与轮次上限/熔断同构):不发起下一轮
@@ -2244,5 +2263,29 @@ mod watchdog_tests {
         )
         .await;
         assert_eq!(out.unwrap(), 7);
+    }
+}
+
+#[cfg(test)]
+mod round_limit_tests {
+    use super::resolve_max_rounds;
+
+    /// 旧调用方/聊天路径:缺省仍是 32 轮。
+    #[test]
+    fn missing_limit_keeps_default_32() {
+        assert_eq!(resolve_max_rounds(None), Some(32));
+    }
+
+    /// 任务模式哨兵:Some(0) = 不限轮次。
+    #[test]
+    fn zero_means_unlimited() {
+        assert_eq!(resolve_max_rounds(Some(0)), None);
+    }
+
+    /// 显式上限仍照常生效(聊天设置 / custom 节点级预算)。
+    #[test]
+    fn explicit_positive_limit_is_honored() {
+        assert_eq!(resolve_max_rounds(Some(1)), Some(1));
+        assert_eq!(resolve_max_rounds(Some(200)), Some(200));
     }
 }

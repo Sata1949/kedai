@@ -347,8 +347,9 @@ function staleSubFlowOption(): string {
               <option :value="false">禁止</option>
             </select>
           </div>
-          <!-- 节点级工具轮次上限(二维批次 5b):只影响本步的工具自循环;留空 = 沿用全局设置。
-               与工具区同进退(严格档不下发工具 → 本行一并隐藏,配置保留,切回宽松档即生效) -->
+          <!-- 节点级工具轮次上限(二维批次 5b):只影响本步的工具自循环;留空 = 任务模式不限轮次。
+               显式填写的值仍作为该节点作者主动设置的预算;与工具区同进退
+               (严格档不下发工具 → 本行一并隐藏,配置保留,切回宽松档即生效) -->
           <div class="sv-inp-row">
             <label class="sv-inp-tag">工具轮次上限</label>
             <input
@@ -357,8 +358,8 @@ function staleSubFlowOption(): string {
               :min="MAX_TOOL_ROUNDS_MIN"
               :max="MAX_TOOL_ROUNDS_MAX"
               :value="stepToolRoundsText(step)"
-              placeholder="沿用全局"
-              title="工具轮次上限:本步最多让模型调用几轮工具(1-200);留空 = 沿用全局设置"
+              placeholder="不限"
+              title="工具轮次上限:本步最多让模型调用几轮工具(1-200);留空 = 任务模式不限轮次"
               @change="setStepToolRounds(step, ($event.target as HTMLInputElement).value)"
             />
             <span class="sv-note">

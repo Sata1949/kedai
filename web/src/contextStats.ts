@@ -47,9 +47,9 @@ export const RECOMMENDED_SETTINGS: RecommendedSetting[] = [
   },
   {
     key: 'max_tool_rounds',
-    label: '工具循环轮次上限 32',
+    label: '聊天 AGENT 工具轮次上限 32',
     value: 32,
-    desc: 'AGENT/CUSTOM 模式工具循环轮次上限(默认 32,过高可能拖长单轮)',
+    desc: '聊天 AGENT 模式工具循环轮次上限(默认 32);任务模式已取消默认轮次限制',
   },
   {
     key: 'max_context_tokens',

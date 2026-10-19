@@ -442,7 +442,7 @@ export interface RuntimeSettings {
   task_tool_policy: 'all' | 'deny_dangerous' | 'allowlist';
   /** 任务模式工具白名单(task_tool_policy=allowlist 时生效) */
   task_tool_allowlist: string[];
-  /** AGENT/CUSTOM 模式工具循环轮次上限(默认 32) */
+  /** 聊天 AGENT 模式工具循环轮次上限(默认 32);任务模式已取消默认轮次限制 */
   max_tool_rounds: number;
   /** 流程动态调用嵌套深度上限(**任务侧**设置;A 批 A3;默认 2,1..=5):
    *  节点用 `run_flow` 工具逐层调用流程时的深度闸(与静态子图 `sub_flow_id` 的嵌套上限是两回事) */
