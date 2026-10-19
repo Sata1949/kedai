@@ -51,6 +51,15 @@ extern "system" {
     fn MessageBoxW(hwnd: isize, text: *const u16, caption: *const u16, utype: u32) -> i32;
 }
 
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn CreateMutexW(attrs: *mut std::ffi::c_void, initial_owner: i32, name: *const u16) -> isize;
+}
+
+#[cfg(windows)]
+const ERROR_ALREADY_EXISTS: i32 = 183;
+
 const MB_OK: u32 = 0x0000;
 const MB_YESNO: u32 = 0x0004;
 const MB_YESNOCANCEL: u32 = 0x0003;
@@ -79,6 +88,31 @@ fn warn(text: &str) {
 
 fn confirm(text: &str) -> bool {
     msgbox(text, "Kedai", MB_YESNO | MB_ICONINFO) == IDYES
+}
+
+// ---------------------------------------------------------------- 单实例守卫
+
+/// 以命名互斥体判定「是否已有另一个启动器在跑」。
+///
+/// 双击图标时若第一份还没画出窗口,用户常会再点一次;没有守卫就会叠出两份启动检测
+/// 弹窗(2026-10-19 实跑反馈的「双重弹窗」)。互斥体由内核持有,进程退出自动释放,
+/// 无需 CloseHandle。创建失败(极端环境)时返回 true,退化为旧行为而不是拒绝启动。
+#[cfg(windows)]
+fn acquire_named_instance(name: &str) -> bool {
+    let name = wide(name);
+    unsafe {
+        let handle = CreateMutexW(std::ptr::null_mut(), 1, name.as_ptr());
+        handle == 0 || std::io::Error::last_os_error().raw_os_error() != Some(ERROR_ALREADY_EXISTS)
+    }
+}
+
+#[cfg(not(windows))]
+fn acquire_named_instance(_name: &str) -> bool {
+    true
+}
+
+fn acquire_single_instance() -> bool {
+    acquire_named_instance(r"Local\Kedai-Launcher-Singleton")
 }
 
 // ---------------------------------------------------------------- 项目根定位
@@ -643,6 +677,28 @@ fn extract_json_string(json: &str, key: &str) -> Option<String> {
     }
 }
 
+/// 端口被旧 Kedai 实例占用时追加到启动决策弹窗的说明。
+///
+/// 旧实现在构建检测之前单独弹「是否结束旧实例」,紧接着再弹「启动测试版/重建/取消」,
+/// 一次双击看到两个弹窗。现在把接管说明并进同一条决策文案,只问一次。
+fn port_takeover_note(port: u16, port_busy: bool) -> String {
+    if port_busy {
+        format!(
+            "\n\n端口 {port} 上已有旧 Kedai 实例在运行;选择任一启动方式后都会先结束它,\n\
+             再启动当前选择的版本(与正式版自身的接管语义一致)。"
+        )
+    } else {
+        String::new()
+    }
+}
+
+/// 端口被占用时是否仍需单独弹窗征询。
+/// 已经问过构建/启动决策(用户明确选择了要启动哪个版本)就不再二次提问——
+/// 结束旧实例是该选择的既定前提。
+fn needs_port_confirmation(port_busy: bool, decision_shown: bool) -> bool {
+    port_busy && !decision_shown
+}
+
 /// 启动增量构建的测试版(浏览器)。start.ps1 -NoRebuild 会选中最新 debug/release 产物;
 /// 图形启动器只负责打开新的控制台窗口,生命周期由 start.ps1 自己管理。
 fn launch_incremental_test(root: &Path) -> bool {
@@ -687,6 +743,11 @@ fn launch_incremental_test(root: &Path) -> bool {
 // ---------------------------------------------------------------- 启动
 
 fn main() {
+    // 单实例守卫:第二份启动器直接退出,避免双击/连点叠出两个检测弹窗。
+    if !acquire_single_instance() {
+        return;
+    }
+
     let root = match locate_root() {
         Some(r) => r,
         None => fail(
@@ -710,47 +771,6 @@ fn main() {
         Err(_) => fail(&format!("端口配置非法:{port}")),
     };
 
-    // 先看端口,再谈启动:被别的程序占着的话,启动多少次都是白屏
-    match probe_port(addr) {
-        PortState::KedaiRunning => {
-            // 端口上已有 Kedai 服务:绝大多数情况是上次未正常退出的旧实例
-            // (直接跑过 kedai-server.exe、或旧桌面版未回收内嵌后端)。它占着端口,
-            // 新版根本起不来,用户看到的始终是旧界面——误以为「修复没生效」。
-            // 这里提供一键结束旧实例并继续启动(对齐 start.ps1 的交互;不再只报错劝退)。
-            if confirm(&format!(
-                "端口 {port} 上已有 Kedai 服务在运行。\n\n\
-                 这通常是上一次未正常退出的旧实例,它占着端口会让新版本无法启动\n\
-                 (你看到的会一直是旧界面)。\n\n\
-                 是否结束该旧实例,并启动最新版?"
-            )) {
-                terminate_port_owner(port);
-                if !wait_port_free(addr, Duration::from_secs(5)) {
-                    fail(&format!(
-                        "已尝试结束旧实例,但端口 {port} 仍被占用。\n\n\
-                         请在任务管理器中结束 kedai-server.exe / Kedai.exe 后重试,\n\
-                         或把 .env 里的 PORT 改成别的端口(如 3002)。"
-                    ));
-                }
-            } else {
-                fail(&format!(
-                    "已取消启动:端口 {port} 仍被旧 Kedai 实例占用,新版本不会启动。\n\n\
-                     你看到的仍是旧界面。如需使用新版,请先结束旧实例后重新双击本启动器。"
-                ));
-            }
-        }
-        PortState::Occupied => fail(&format!(
-            "端口 {port} 已被其它程序占用,Kedai 无法启动。\n\n\
-             该端口上有程序在响应,但它不是 Kedai 服务。\n\n\
-             解决办法(任选其一):\n\
-             1. 关掉占用该端口的程序;\n\
-             2. 在项目根目录的 .env 中改用别的端口,例如 PORT=3002\n\
-                (没有 .env 就复制 .env.example 为 .env)。\n\n\
-             查占用者:在 PowerShell 执行\n\
-             Get-Process -Id (Get-NetTCPConnection -LocalPort {port}).OwningProcess",
-        )),
-        PortState::Free => {}
-    }
-
     let art = find_artifacts(&root);
 
     let desktop = match art.desktop {
@@ -772,30 +792,48 @@ fn main() {
         }
     };
 
+    // 端口只探测不提问:端口接管与构建决策合并到同一个弹窗,一次启动最多问一次。
+    // 被别的程序占着的话,启动多少次都是白屏,直接报错(单一弹窗)。
+    let port_state = probe_port(addr);
+    if port_state == PortState::Occupied {
+        fail(&format!(
+            "端口 {port} 已被其它程序占用,Kedai 无法启动。\n\n\
+             该端口上有程序在响应,但它不是 Kedai 服务。\n\n\
+             解决办法(任选其一):\n\
+             1. 关掉占用该端口的程序;\n\
+             2. 在项目根目录的 .env 中改用别的端口,例如 PORT=3002\n\
+                (没有 .env 就复制 .env.example 为 .env)。\n\n\
+             查占用者:在 PowerShell 执行\n\
+             Get-Process -Id (Get-NetTCPConnection -LocalPort {port}).OwningProcess",
+        ));
+    }
+    let port_busy = port_state == PortState::KedaiRunning;
+
     // 触发重建的三类原因:① 源码比产物新(mtime);② 两版构建指纹不一致(sidecar);
     // ③ 源码更新已由增量构建(debug + web/dist)覆盖——此时不强迫全量重建,而是让用户
     // 选择「启动增量测试版 / 重建便携版 / 直接启动当前便携版」。
     // (与 start.ps1 的自动重建语义一致;直接双击 dist 内 exe 无此保障)。
     let drifted = versions_drifted(&root, &desktop);
     let stale = artifact_stale(&root, &desktop);
-    if drifted || stale {
+    let mut launch_test = false;
+    let mut decision_shown = false;
+    let rebuild = if drifted || stale {
+        let note = port_takeover_note(port, port_busy);
         let incremental = !drifted && stale && incremental_build_fresh(&root);
-        let rebuild = if incremental {
+        decision_shown = true;
+        if incremental {
             let choice = msgbox(
-                "检测到源码更新已通过本地增量编译(debug 后端 + web/dist 已是最新)。\n\n\
-                 是否直接启动测试版(浏览器)?\n\n\
-                 选「是」:启动增量构建的测试版(数据目录与桌面版一致)\n\
-                 选「否」:重建便携版(前端 + Rust,数分钟)\n\
-                 选「取消」:直接启动当前便携版",
+                &format!(
+                    "检测到源码更新已通过本地增量编译(debug 后端 + web/dist 已是最新)。\n\n\
+                     是否直接启动测试版(浏览器)?\n\n\
+                     选「是」:启动增量构建的测试版(数据目录与桌面版一致)\n\
+                     选「否」:重建便携版(前端 + Rust,数分钟)\n\
+                     选「取消」:直接启动当前便携版{note}"
+                ),
                 "Kedai",
                 MB_YESNOCANCEL | MB_ICONINFO,
             );
-            if choice == IDYES {
-                if !launch_incremental_test(&root) {
-                    fail("无法启动测试版:请检查项目根 start.ps1 是否存在、是否可执行。");
-                }
-                return;
-            }
+            launch_test = choice == IDYES;
             choice == IDNO
         } else {
             let prompt = if drifted {
@@ -807,43 +845,90 @@ fn main() {
                  是否现在自动重建?(前端 + Rust 编译,首次或全量需数分钟)\n\n\
                  选「是」开始重建并自动启动新版;选「否」直接启动当前版本。"
             };
-            confirm(prompt)
-        };
-        if rebuild {
-            // build.ps1 默认双端同步产出(测试版 + 便携版),重建即对齐指纹
-            let script = root.join("build.ps1");
-            #[cfg(windows)]
-            let status = {
-                use std::os::windows::process::CommandExt;
-                // 新控制台窗口呈现构建进度(启动器自身无控制台)
-                Command::new("powershell")
-                    .args([
-                        "-NoProfile",
-                        "-ExecutionPolicy",
-                        "Bypass",
-                        "-File",
-                        script.to_str().unwrap_or_default(),
-                    ])
-                    .current_dir(&root)
-                    .creation_flags(0x0000_0010) // CREATE_NEW_CONSOLE
-                    .status()
-            };
-            #[cfg(not(windows))]
-            let status = Command::new("powershell")
-                .arg(script.to_str().unwrap_or_default())
-                .current_dir(&root)
-                .status();
-            match status {
-                Ok(s) if s.success() => {}
-                Ok(s) => fail(&format!(
-                    "自动重建失败(退出码 {:?}),请在上面的构建窗口中查看错误。\n\
-                     修复后重新双击本启动器,或手动执行 .\\build.ps1。",
-                    s.code()
-                )),
-                Err(e) => fail(&format!("无法启动构建脚本:{e}\n请手动执行 .\\build.ps1。")),
-            }
-            // 重建后产物路径不变(build.ps1 原地更新 dist\Kedai-portable\Kedai.exe)
+            confirm(&format!("{prompt}{note}"))
         }
+    } else {
+        false
+    };
+
+    if rebuild {
+        // build.ps1 默认双端同步产出(测试版 + 便携版),重建即对齐指纹
+        let script = root.join("build.ps1");
+        #[cfg(windows)]
+        let status = {
+            use std::os::windows::process::CommandExt;
+            // 新控制台窗口呈现构建进度(启动器自身无控制台)
+            Command::new("powershell")
+                .args([
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    script.to_str().unwrap_or_default(),
+                ])
+                .current_dir(&root)
+                .creation_flags(0x0000_0010) // CREATE_NEW_CONSOLE
+                .status()
+        };
+        #[cfg(not(windows))]
+        let status = Command::new("powershell")
+            .arg(script.to_str().unwrap_or_default())
+            .current_dir(&root)
+            .status();
+        match status {
+            Ok(s) if s.success() => {}
+            Ok(s) => fail(&format!(
+                "自动重建失败(退出码 {:?}),请在上面的构建窗口中查看错误。\n\
+                 修复后重新双击本启动器,或手动执行 .\\build.ps1。",
+                s.code()
+            )),
+            Err(e) => fail(&format!("无法启动构建脚本:{e}\n请手动执行 .\\build.ps1。")),
+        }
+        // 重建后产物路径不变(build.ps1 原地更新 dist\Kedai-portable\Kedai.exe)
+    }
+
+    // 端口接管放在构建决策之后:决策弹窗已说明「会先结束旧实例」时不再二次提问。
+    // 端口上已有 Kedai 服务:绝大多数情况是上次未正常退出的旧实例(直接跑过
+    // kedai-server.exe、或旧桌面版未回收内嵌后端)。它占着端口,新版根本起不来,
+    // 用户看到的始终是旧界面——误以为「修复没生效」。
+    if needs_port_confirmation(port_busy, decision_shown) {
+        if confirm(&format!(
+            "端口 {port} 上已有 Kedai 服务在运行。\n\n\
+             这通常是上一次未正常退出的旧实例,它占着端口会让新版本无法启动\n\
+             (你看到的会一直是旧界面)。\n\n\
+             是否结束该旧实例,并启动最新版?"
+        )) {
+            terminate_port_owner(port);
+            if !wait_port_free(addr, Duration::from_secs(5)) {
+                fail(&format!(
+                    "已尝试结束旧实例,但端口 {port} 仍被占用。\n\n\
+                     请在任务管理器中结束 kedai-server.exe / Kedai.exe 后重试,\n\
+                     或把 .env 里的 PORT 改成别的端口(如 3002)。"
+                ));
+            }
+        } else {
+            fail(&format!(
+                "已取消启动:端口 {port} 仍被旧 Kedai 实例占用,新版本不会启动。\n\n\
+                 你看到的仍是旧界面。如需使用新版,请先结束旧实例后重新双击本启动器。"
+            ));
+        }
+    } else if port_busy {
+        // 用户已在启动决策里选定版本,结束旧实例是该选择的既定前提。
+        terminate_port_owner(port);
+        if !wait_port_free(addr, Duration::from_secs(5)) {
+            fail(&format!(
+                "已尝试结束旧实例,但端口 {port} 仍被占用。\n\n\
+                 请在任务管理器中结束 kedai-server.exe / Kedai.exe 后重试,\n\
+                 或把 .env 里的 PORT 改成别的端口(如 3002)。"
+            ));
+        }
+    }
+
+    if launch_test {
+        if !launch_incremental_test(&root) {
+            fail("无法启动测试版:请检查项目根 start.ps1 是否存在、是否可执行。");
+        }
+        return;
     }
 
     // 数据迁移必须发生在启动之前:服务一旦起来就会在空目录里建库并写入,
@@ -942,6 +1027,42 @@ mod tests {
             extract_json_string(r#"{"dist_hash":123}"#, "dist_hash"),
             None
         );
+    }
+
+    /// 双击/连点会起两份启动器:第二份必须被互斥体挡掉,否则检测弹窗会叠两份。
+    #[cfg(windows)]
+    #[test]
+    fn single_instance_guard_rejects_second_holder() {
+        let name = format!(r"Local\Kedai-Launcher-Test-{}", std::process::id());
+        assert!(acquire_named_instance(&name), "首份启动器应能取得互斥体");
+        assert!(
+            !acquire_named_instance(&name),
+            "同名互斥体已存在时第二份必须判定为重复实例"
+        );
+    }
+
+    /// 端口被旧实例占用时不再单独弹窗:接管说明并入构建/启动决策弹窗。
+    #[test]
+    fn port_prompt_merges_into_build_decision() {
+        assert!(
+            needs_port_confirmation(true, false),
+            "没有构建决策时仍需单独征询端口接管"
+        );
+        assert!(
+            !needs_port_confirmation(true, true),
+            "已展示启动决策后不得再弹第二个窗口征询端口"
+        );
+        assert!(!needs_port_confirmation(false, false));
+        assert!(!needs_port_confirmation(false, true));
+    }
+
+    /// 接管说明只在端口真有旧实例时出现,且要写明端口号与「先结束」语义。
+    #[test]
+    fn takeover_note_mentions_port_only_when_busy() {
+        assert!(port_takeover_note(3001, false).is_empty());
+        let note = port_takeover_note(3001, true);
+        assert!(note.contains("3001"));
+        assert!(note.contains("先结束"));
     }
 
     #[test]
