@@ -12,6 +12,12 @@ pub mod db;
 /// 分类）与 L2 的 `agents/engine`（消费分类决定 SSE 错误终态）共同引用。
 /// 下沉理由与边界见该模块头注释及 `docs/契约-架构与数据.md` §2.2。
 pub mod llm_error;
+/// 任务工作区文件所有权（TMR-4）：规划器声明 + 运行期首写者认领。
+///
+/// **L1 契约层**：被 `models::types::ExecScope`（同层）、`tools`（写工具拦截）
+/// 与 `services::task_engine::team`（声明构造）共同引用；纯数据结构 + 纯函数，
+/// 不碰文件系统、不依赖上层。
+pub mod ownership;
 /// 工具策略领域词汇（授权档位 / 工具风险 / 命令风险）。
 ///
 /// **L1 契约层**：被 L2 的 `services/`（设置、任务工具策略、审计）与 L3 的 `tools/`

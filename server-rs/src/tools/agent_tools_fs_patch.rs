@@ -683,6 +683,28 @@ fn run_patch(
     })?;
 
     let scope = scope_of(ctx)?;
+    // TMR-4:落盘前统一认领整批目标(Write 的新路径 + Delete/Move 的源路径)。
+    // 任一冲突则整条补丁不应用——与 plan_patch「先整体校验后落盘」同语义;
+    // 部分认领残留是安全的(仍归本 owner,重试可继续)。
+    let mut conflicts: Vec<String> = Vec::new();
+    for action in &actions {
+        let path = match action {
+            PlannedAction::Write { path, .. } | PlannedAction::Delete { path, .. } => path,
+        };
+        if let Err(e) = scope.reserve_write(path) {
+            conflicts.push(e);
+        }
+    }
+    if !conflicts.is_empty() {
+        let mut msg = format!(
+            "补丁未应用(文件所有权冲突,共 {} 处;所有文件保持原样):",
+            conflicts.len()
+        );
+        for (i, p) in conflicts.iter().enumerate() {
+            msg.push_str(&format!("\n{}. {p}", i + 1));
+        }
+        return Err(msg);
+    }
     let total = actions.len();
     for (done, action) in actions.iter().enumerate() {
         let res = match action {
@@ -783,6 +805,7 @@ pub(crate) fn patch_anchor(name: &str, arguments: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::ownership::WriteOwnership;
     use crate::models::types::ExecScope;
     use crate::utils::test_support::TempDataDir;
 
@@ -842,6 +865,16 @@ mod tests {
             }
         }
 
+        fn ctx_with_scope(&self, scope: Arc<ExecScope>) -> ToolContext {
+            ToolContext {
+                session_id: "task:t1".into(),
+                character_id: String::new(),
+                agent_depth: 0,
+                scope: Some(scope),
+                budget: None,
+            }
+        }
+
         fn registry(&self) -> ToolRegistry {
             let reg = ToolRegistry::new();
             super::super::agent_tools_fs::register_fs_tools(&reg, self.deps.clone());
@@ -859,6 +892,27 @@ mod tests {
                 .await
         }
 
+        async fn call_with_scope(
+            &self,
+            name: &str,
+            args: serde_json::Value,
+            scope: Arc<ExecScope>,
+        ) -> Result<String, String> {
+            let decision = crate::tools::permissions::PermissionDecision {
+                allowed: true,
+                risk: crate::tools::permissions::ToolRisk::Dangerous,
+                reason: "测试放行".into(),
+            };
+            self.registry()
+                .execute_with_decision(
+                    name,
+                    &args.to_string(),
+                    self.ctx_with_scope(scope),
+                    &decision,
+                )
+                .await
+        }
+
         fn read(&self, path: &str) -> String {
             std::fs::read_to_string(self.ws.join(path)).unwrap()
         }
@@ -866,6 +920,75 @@ mod tests {
         fn changes(&self) -> Vec<crate::models::types::TaskFileChangeRecord> {
             crate::services::task_change_service::list(&self.deps.db, "t1")
         }
+    }
+
+    /// TMR-4:fs_patch 在落盘前统一认领整批目标;跨主补丁整条拒绝、文件保持原样。
+    #[tokio::test]
+    async fn patch_respects_write_ownership_before_any_write() {
+        let f = fixture("ownership");
+        let ownership = Arc::new(WriteOwnership::new(vec![
+            ("主 Agent-1".to_string(), "parts/a.js".to_string()),
+            ("主 Agent-2".to_string(), "parts/b.js".to_string()),
+        ]));
+        let s1 = f.scope.with_write_ownership(
+            ownership.clone(),
+            "主 Agent-1".into(),
+            vec!["parts/a.js".into()],
+        );
+        let s2 = f.scope.with_write_ownership(
+            ownership.clone(),
+            "主 Agent-2".into(),
+            vec!["parts/b.js".into()],
+        );
+
+        // 主 2 写自己的文件 → 成功
+        f.call_with_scope(
+            "fs_patch",
+            json!({ "patch": "*** Add File: parts/b.js\n+export const b = 1;\n" }),
+            s2.clone(),
+        )
+        .await
+        .unwrap();
+
+        // 主 2 写主 1 声明的文件 → 整条拒绝,文件不落盘
+        let err = f
+            .call_with_scope(
+                "fs_patch",
+                json!({ "patch": "*** Add File: parts/a.js\n+export const a = 1;\n" }),
+                s2.clone(),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("文件所有权冲突"), "{err}");
+        assert!(
+            !f.ws.join("parts/a.js").exists(),
+            "被拒绝的补丁不得创建任何文件"
+        );
+
+        // 未声明文件由主 2 首写认领;主 1 先读后改仍被所有权拒绝
+        f.call_with_scope(
+            "fs_patch",
+            json!({ "patch": "*** Add File: shared.js\n+export const s = 1;\n" }),
+            s2,
+        )
+        .await
+        .unwrap();
+        f.call_with_scope("fs_read", json!({ "path": "shared.js" }), s1.clone())
+            .await
+            .unwrap();
+        let err = f
+            .call_with_scope(
+                "fs_patch",
+                json!({ "patch": "*** Update File: shared.js\n@@\n-export const s = 1;\n+export const s = 2;\n" }),
+                s1,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("文件所有权冲突") && err.contains("主 Agent-2"),
+            "首写者认领后另一主不得改动: {err}"
+        );
+        assert_eq!(f.read("shared.js"), "export const s = 1;\n");
     }
 
     /// 一条补丁同时覆盖 新增 / 修改(多 hunk)/ 删除 / 移动,顺序落盘并全部记账。

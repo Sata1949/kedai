@@ -1311,6 +1311,7 @@ impl CustomExecutor {
                 status: TaskStepStatus::Pending,
                 result: String::new(),
                 node_id: Some(s.id.clone()),
+                files: Vec::new(),
             })
             .collect();
         svc.set_plan(&ctx.task_id, &plan);

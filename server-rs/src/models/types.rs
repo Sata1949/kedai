@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
+use super::ownership::{normalize_workspace_rel, WriteOwnership};
+
 // ---------- 角色 ----------
 #[derive(Debug, Clone, Serialize)]
 pub struct CharacterRecord {
@@ -935,6 +937,13 @@ pub struct ExecScope {
     /// 用 mtime+长度而非内容哈希:单次 stat 即可判定「读后被外部改动」,
     /// 误判面(同长度同 mtime 的内容替换)在实践中不需要花费整文件读取来封堵。
     reads: Mutex<HashMap<PathBuf, (SystemTime, u64)>>,
+    /// 本 scope 的写入者身份(TMR-4;None = 不启用文件所有权)。
+    /// 只有 team 主 agent 的派生 scope 会填;聊天/审计/solo/multi 恒 None。
+    owner: Option<String>,
+    /// 本 owner 在规划器里声明的负责文件(错误文案用;已归一化)。
+    declared_files: Vec<String>,
+    /// 同一次 team 运行内共享的「声明 + 认领」表(TMR-4)。
+    ownership: Option<Arc<WriteOwnership>>,
 }
 
 impl ExecScope {
@@ -943,7 +952,75 @@ impl ExecScope {
             workspace,
             jail,
             reads: Mutex::new(HashMap::new()),
+            owner: None,
+            declared_files: Vec::new(),
+            ownership: None,
         }
+    }
+
+    /// 派生一个「带写入者身份」的 scope(TMR-4)。
+    ///
+    /// 复用 workspace/jail 与同一张 `WriteOwnership`(跨主共享);读记录**独立**
+    /// ——每个主 agent 有自己的先读后写台账,不会因为另一个主读过而允许盲写。
+    pub fn with_write_ownership(
+        &self,
+        ownership: Arc<WriteOwnership>,
+        owner: String,
+        declared_files: Vec<String>,
+    ) -> Arc<Self> {
+        Arc::new(ExecScope {
+            workspace: self.workspace.clone(),
+            jail: self.jail,
+            reads: Mutex::new(HashMap::new()),
+            owner: Some(owner),
+            declared_files,
+            ownership: Some(ownership),
+        })
+    }
+
+    /// 写入前「检查 + 认领」(TMR-4)。未启用所有权时恒 Ok(聊天/单主模式零行为变化)。
+    ///
+    /// 路径必须是 `safe_workspace_path` 解析后的工作区内绝对路径;本方法只把它压成
+    /// 相对键,不重复做越界防护(闸门在 tools 层)。
+    pub fn reserve_write(&self, path: &Path) -> Result<(), String> {
+        let (Some(ownership), Some(owner)) = (&self.ownership, &self.owner) else {
+            return Ok(());
+        };
+        let Some(key) = self.relative_key(path) else {
+            // 解析出来的路径不在工作区内(理论上闸门已拦):不启用所有权判定,
+            // 让原有越界错误路径继续负责报错,避免把安全错误伪装成所有权冲突。
+            return Ok(());
+        };
+        ownership.reserve(owner, &key).map_err(|conflict_owner| {
+            let listed = if self.declared_files.is_empty() {
+                "(规划器未声明你的负责文件)".to_string()
+            } else {
+                let head: Vec<&str> = self
+                    .declared_files
+                    .iter()
+                    .take(10)
+                    .map(|s| s.as_str())
+                    .collect();
+                let more = if self.declared_files.len() > head.len() {
+                    format!(" 等 {} 个", self.declared_files.len())
+                } else {
+                    String::new()
+                };
+                format!("{}{}", head.join("、"), more)
+            };
+            format!(
+                "文件所有权冲突:{key} 属于「{conflict_owner}」;你是「{owner}」。\
+                 你负责的文件:{listed}。请只修改你负责的文件;\
+                 若必须改动其他文件,请在结果正文说明原因,不要直接覆盖。"
+            )
+        })
+    }
+
+    /// 工作区内绝对路径 → 规范化相对键(与声明侧同一函数,单一出处)。
+    fn relative_key(&self, path: &Path) -> Option<String> {
+        let rel = path.strip_prefix(&self.workspace).ok()?;
+        let raw = rel.to_string_lossy().replace('\\', "/");
+        normalize_workspace_rel(&raw)
     }
 
     pub fn workspace(&self) -> &Path {
@@ -1450,6 +1527,16 @@ pub struct TaskStep {
     /// plan/team 的 plan JSON 与存量 custom 任务逐字节不变,旧客户端反序列化也不受影响。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
+    /// 本步骤声明负责的工作区相对文件(TMR-4;team 规划器写入,其余模式为空)。
+    ///
+    /// 用途:运行期按文件级所有权拒绝跨主写(TMR-4),终态按它校验「必需文件是否缺失」
+    /// (TMR-6)。路径已由 team 解析侧用 `models::ownership::normalize_workspace_rel`
+    /// 清洗(相对、无 `..`、无通配符、Windows 小写化)。
+    ///
+    /// 加性字段:空时整键省略,故存量 plan JSON 逐字节不变;前端 `TaskStep.files?`
+    /// 按可选容错。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
 }
 
 fn task_step_default_status() -> TaskStepStatus {
@@ -1464,6 +1551,7 @@ impl Default for TaskStep {
             status: TaskStepStatus::Pending,
             result: String::new(),
             node_id: None,
+            files: Vec::new(),
         }
     }
 }
@@ -1988,6 +2076,7 @@ mod tests {
             status: TaskStepStatus::Pending,
             result: String::new(),
             node_id: None,
+            files: Vec::new(),
         };
         let json = serde_json::to_string(&step).unwrap();
         assert!(!json.contains("node_id"), "None 时不应落键: {json}");
@@ -2006,6 +2095,35 @@ mod tests {
         assert_eq!(custom.node_id.as_deref(), Some("node-a"));
         let back = serde_json::to_string(&custom).unwrap();
         assert!(back.contains(r#""node_id":"node-a""#), "往返: {back}");
+    }
+
+    /// TMR-4:`TaskStep.files` 的加性线格式——空数组整键省略(存量 plan JSON 不变),
+    /// 旧 JSON 无该键按空数组解析,有值时往返不丢。
+    #[test]
+    fn task_step_files_is_additive_and_omitted_when_empty() {
+        let step = TaskStep {
+            name: "写分片".into(),
+            goal: "g".into(),
+            ..TaskStep::default()
+        };
+        let json = serde_json::to_string(&step).unwrap();
+        assert!(!json.contains("files"), "空数组时不应落键: {json}");
+
+        let old: TaskStep =
+            serde_json::from_str(r#"{"name":"旧","goal":"g","status":"done","result":"r"}"#)
+                .unwrap();
+        assert!(old.files.is_empty(), "旧 JSON 应按空数组解析");
+
+        let with_files: TaskStep = serde_json::from_str(
+            r#"{"name":"写分片","goal":"g","files":["parts/a.js","parts/b.js"]}"#,
+        )
+        .unwrap();
+        assert_eq!(with_files.files, vec!["parts/a.js", "parts/b.js"]);
+        let back = serde_json::to_string(&with_files).unwrap();
+        assert!(
+            back.contains(r#""files":["parts/a.js","parts/b.js"]"#),
+            "往返: {back}"
+        );
     }
 
     /// `PlanStep.connection_id` / `max_tool_rounds`(二维批次 5b)的三条线格式护栏:

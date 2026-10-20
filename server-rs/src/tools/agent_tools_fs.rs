@@ -253,6 +253,9 @@ fn run_write(
         .unwrap_or("")
         .to_string();
     let (scope, path) = resolve(deps, ctx, &raw)?;
+    // TMR-4:文件所有权「检查 + 认领」。放在先读后写之前——越权写应直接告诉模型
+    // 「这不是你的文件」,而不是让它先读一遍再被所有权拒绝(白烧一轮上下文)。
+    scope.reserve_write(&path)?;
     // 先读后写:只对「已存在的文件」要求(覆盖别人写过的内容必须基于读过的版本);
     // 目标不存在时是新建,没有可盲写的旧内容——否则本工具将永远无法新建文件。
     if path.exists() {
@@ -326,6 +329,8 @@ fn run_edit(
         return Err("old 不能为空:请给出要被替换的原文(含足够上下文以保证唯一)".into());
     }
     let (scope, path) = resolve(deps, ctx, &raw)?;
+    // TMR-4:与 fs_write 同口径,先过所有权再谈先读后写
+    scope.reserve_write(&path)?;
     // 先读后写(与 fs_write 同口径):这里目标文件必须存在,故无「新建」例外
     scope.check_read_before_write(&path)?;
     let bytes = std::fs::read(&path).map_err(|e| format!("读取失败({raw}):{e}"))?;
@@ -617,6 +622,7 @@ fn format_matches(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::ownership::WriteOwnership;
     use crate::models::types::ExecScope;
     use crate::utils::test_support::TempDataDir;
 
@@ -680,6 +686,17 @@ mod tests {
             }
         }
 
+        /// TMR-4:指定派生 scope 的 ctx(所有权测试用)
+        fn ctx_with_scope(&self, scope: Arc<ExecScope>) -> ToolContext {
+            ToolContext {
+                session_id: "task:t1".into(),
+                character_id: String::new(),
+                agent_depth: 0,
+                scope: Some(scope),
+                budget: None,
+            }
+        }
+
         fn bindless_ctx() -> ToolContext {
             ToolContext {
                 session_id: "s1".into(),
@@ -711,6 +728,22 @@ mod tests {
         async fn call(&self, name: &str, args: serde_json::Value) -> Result<String, String> {
             self.registry()
                 .execute_with_decision(name, &args.to_string(), self.ctx(), &Self::allow())
+                .await
+        }
+
+        async fn call_with_scope(
+            &self,
+            name: &str,
+            args: serde_json::Value,
+            scope: Arc<ExecScope>,
+        ) -> Result<String, String> {
+            self.registry()
+                .execute_with_decision(
+                    name,
+                    &args.to_string(),
+                    self.ctx_with_scope(scope),
+                    &Self::allow(),
+                )
                 .await
         }
 
@@ -751,6 +784,97 @@ mod tests {
                 "{name} 在未绑定时应报未绑定工作区: {err}"
             );
         }
+    }
+
+    /// TMR-4:文件所有权在工具层生效——声明归属优先、未声明首写者认领、
+    /// 同 owner 重复写放行、fs_edit 同样先过所有权再谈先读后写。
+    #[tokio::test]
+    async fn write_ownership_blocks_cross_owner_and_first_writer_claims() {
+        let f = fixture("ownership");
+        let ownership = Arc::new(WriteOwnership::new(vec![
+            ("主 Agent-1".to_string(), "parts/a.js".to_string()),
+            ("主 Agent-2".to_string(), "parts/b.js".to_string()),
+        ]));
+        let s1 = f.scope.with_write_ownership(
+            ownership.clone(),
+            "主 Agent-1".into(),
+            vec!["parts/a.js".into()],
+        );
+        let s2 = f.scope.with_write_ownership(
+            ownership.clone(),
+            "主 Agent-2".into(),
+            vec!["parts/b.js".into()],
+        );
+
+        // 声明归属者可写(新建文件无需先读),重复写也放行
+        f.call_with_scope(
+            WRITE_TOOL,
+            json!({ "path": "parts/a.js", "content": "one\n" }),
+            s1.clone(),
+        )
+        .await
+        .unwrap();
+        f.call_with_scope(
+            WRITE_TOOL,
+            json!({ "path": "parts/a.js", "content": "one again\n" }),
+            s1.clone(),
+        )
+        .await
+        .unwrap();
+
+        // 另一个主写别人声明的文件 → 拒绝且文件保持原样
+        let err = f
+            .call_with_scope(
+                WRITE_TOOL,
+                json!({ "path": "parts/a.js", "content": "two\n" }),
+                s2.clone(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("文件所有权冲突") && err.contains("主 Agent-1"),
+            "越权写应点明归属: {err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(f.ws.join("parts/a.js")).unwrap(),
+            "one again\n",
+            "被拒绝的写入不得落盘"
+        );
+
+        // 未声明文件:先写者认领,后写者被拒
+        f.call_with_scope(
+            WRITE_TOOL,
+            json!({ "path": "shared.txt", "content": "from-2" }),
+            s2.clone(),
+        )
+        .await
+        .unwrap();
+        let err = f
+            .call_with_scope(
+                WRITE_TOOL,
+                json!({ "path": "shared.txt", "content": "from-1" }),
+                s1,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("主 Agent-2"),
+            "首写者认领后,另一主应看到认领者: {err}"
+        );
+
+        // fs_edit:所有权检查先于先读后写(即使没读过也报所有权,而不是误导为「先读」)
+        let err = f
+            .call_with_scope(
+                EDIT_TOOL,
+                json!({ "path": "parts/a.js", "old": "one", "new": "two" }),
+                s2,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("文件所有权冲突"),
+            "fs_edit 也必须受所有权约束: {err}"
+        );
     }
 
     /// fs_read:带行号分页 + 读记录写入(供 fs_write 的先读后写)
