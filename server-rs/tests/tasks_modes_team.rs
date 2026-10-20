@@ -17,6 +17,7 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use kedai_server::build_test_app;
 use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use tower::ServiceExt;
 
@@ -69,6 +70,39 @@ async fn create_task_with_mode(app: &axum::Router, title: &str, mode: &str) -> S
     .await;
     assert_eq!(status, StatusCode::CREATED, "创建任务应返回 201: {json}");
     json["task"]["id"].as_str().unwrap().to_string()
+}
+
+/// 创建指定模式 + 绑定工作区的任务(TMR-2 审计工具需要真实可读文件)
+async fn create_task_with_mode_workspace(
+    app: &axum::Router,
+    title: &str,
+    mode: &str,
+    ws: &Path,
+) -> String {
+    let (status, json) = send_json(
+        app,
+        "POST",
+        "/api/tasks",
+        json!({
+            "title": title,
+            "task_mode": mode,
+            "workspace": ws.to_string_lossy(),
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "创建任务应返回 201: {json}");
+    json["task"]["id"].as_str().unwrap().to_string()
+}
+
+/// 临时工作区(进程 id + 纳秒唯一后缀;用例结束显式清理)
+fn temp_workspace(tag: &str) -> PathBuf {
+    let ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("系统时间应晚于 epoch")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("kedai-tmr-{tag}-{}-{ns}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("创建临时工作区失败");
+    dir
 }
 
 /// custom 模式:预置两步启用流程(起草→润色,均 direct+generates 无工具),
@@ -205,6 +239,85 @@ async fn task_custom_mode_flow_steps_and_disabled_flow() {
         json!({ "id": "builtin-coordination" }),
     )
     .await;
+}
+
+/// TMR-2:team 审计/终审挂只读工作区工具。审计首轮经 `[[tool_if:团队审计员|fs_read …]]`
+/// 真实读取工作区文件,拿到 tool 结果后才产出 JSON;用持久化事件断言审计阶段确实调用了
+/// fs_read,防止「审计没挂到工具、但纯文本 reply_if 仍然通过」的假绿。
+#[tokio::test]
+async fn task_team_audit_uses_readonly_workspace_tools() {
+    let app = test_app();
+    let ws = temp_workspace("team-audit");
+    std::fs::write(ws.join("audit.txt"), "验收证据:6 个 PART 全部存在\n")
+        .expect("写审计样本文件失败");
+
+    // 审计 system 含「团队审计员」→ 只对该角色门控:
+    //   [[tool_if:团队审计员|fs_read ...]] 首轮触发一次真实文件读取;
+    //   拿到 tool 结果后由 [[reply_if:团队审计员|...]] 产出 JSON。
+    // 若审计没有挂到 fs_read(工具面为空),tool_if 会被 tool_offered 过滤掉,
+    // 后续工具调用事件断言即失败——本用例因此能钉住「审计真的看了文件」。
+    let title = concat!(
+        r#"[[reply_if:团队规划器|{"mains":["#,
+        r#"{"name":"核对","goals":[{"name":"产出","goal":"\u005b\u005btool:fs_write {\"path\":\"out.txt\",\"content\":\"audit\"}\u005d\u005d \u005b\u005breply:主产出\u005d\u005d 核对文件"}]}]"#,
+        r#" }]]"#,
+        r#"[[tool_if:团队审计员|fs_read {"path":"audit.txt"}]]"#,
+        r#"[[reply_if:团队审计员|{"通过":true,"打回":[],"结论":"已核对 audit.txt"}]]"#,
+        r#"[[reply_if:任务汇总者|团队最终成果]]"#,
+        " 审计工具目标"
+    );
+    let id = create_task_with_mode_workspace(app, title, "team", &ws).await;
+    let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
+
+    let (st, detail) = wait_terminal(app, &id).await;
+    assert_eq!(st, "done", "team 任务应完成,详情: {detail}");
+    let result = detail["task"]["result"].as_str().unwrap_or("");
+    assert!(
+        result.contains("已核对 audit.txt"),
+        "审计结论应来自拿到文件结果后的 JSON: {result}"
+    );
+
+    // 调用追踪:audit 行存在,且响应摘要就是核对后的结论
+    let (_, calls) = send_json(app, "GET", &format!("/api/tasks/{id}/calls"), json!({})).await;
+    let calls = calls["calls"].as_array().unwrap();
+    let audit = calls
+        .iter()
+        .find(|c| c["phase"] == "audit" && c["status"] == "ok")
+        .unwrap_or_else(|| panic!("应有 phase=audit 的成功调用行: {calls:?}"));
+    assert!(
+        audit["response_summary"]
+            .as_str()
+            .unwrap_or("")
+            .contains("已核对"),
+        "审计响应摘要应含文件核对结论: {audit}"
+    );
+
+    // 关键证据:审计阶段确实发生了 fs_read 工具调用(事件已持久化,可断点补拉)
+    let (status, events) = send_json(
+        app,
+        "GET",
+        &format!("/api/tasks/{id}/events?after=0&limit=500"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "拉取任务事件应 200: {events}");
+    let audit_tool = events["events"]
+        .as_array()
+        .map(|rows| {
+            rows.iter().any(|e| {
+                e["detail"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("审计 agent 调用工具 fs_read")
+            })
+        })
+        .unwrap_or(false);
+    assert!(
+        audit_tool,
+        "审计阶段应透出 fs_read 工具调用事件(证明不是纯文本自述审查): {events}"
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
 }
 
 /// team 模式:自动拓扑(规划器拆 2 主 agent,步骤名带【主Agent-N】前缀)→ 两主并行

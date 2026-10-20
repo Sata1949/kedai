@@ -102,6 +102,11 @@ pub(crate) async fn run_agent_loop(
     let has_image_tools = allowed
         .iter()
         .any(|n| crate::tools::tool_sets::is_image_tool(n));
+    // 写盘优先纪律的条件(TMR-1):本轮实际下发了工作区写工具才追加。用**实际放行名单**
+    // 判定(与下发给模型的 defs 同源),策略收窄到只读时不会出现「教模型写文件但没工具」。
+    let has_write_tools = allowed
+        .iter()
+        .any(|n| crate::tools::tool_sets::is_workspace_write_tool(n));
     // system 提示词组装:统一走 TaskBackend::assemble_executor_system_prompt
     // (单一实现,宿主侧 prompt.rs);拼装顺序与 untrusted 包裹纪律同 legacy,
     // 勿在本文件复制实现(WP7)。
@@ -111,6 +116,7 @@ pub(crate) async fn run_agent_loop(
         call.character_id.as_deref(),
         &call.goal,
         has_tools,
+        has_write_tools,
         has_image_tools,
     );
 
@@ -165,8 +171,13 @@ pub(crate) async fn run_agent_loop(
         agent_depth: 0,
         scope: call.scope.clone(),
         // 任务侧预算载体(PRODCAP-2):子 agent 派发路径(agentgo/subtask)据此
-        // 透传语义熔断三值进子循环;墙钟预算不在其中(父层轮末闸门即上限)
-        budget: Some(ToolBudget { semantic_guard }),
+        // 透传语义熔断三值进子循环;墙钟预算不在其中(父层轮末闸门即上限)。
+        // TMR-5:连续只读检测上限(8 次只读调用)随任务侧装配下发;聊天路径
+        // `budget` 恒 None,行为不变。
+        budget: Some(ToolBudget {
+            semantic_guard,
+            readonly_streak_limit: Some(super::TASK_READONLY_STREAK_LIMIT),
+        }),
     };
     // 事件桥:引擎事件 → 任务事件(agent_status);drain 持续消费到 tx drop。
     // phase/step_index 随桥传入(批次 R4):Token 攒批 delta 携带调用归属,

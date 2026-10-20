@@ -18,7 +18,8 @@ use crate::models::types::{
 };
 use crate::services::prompt_kit::untrusted_boundary;
 use crate::services::task_core::prompt_consts::{
-    SUMMARIZER_PROMPT, TEAM_AUDIT_PROMPT, TEAM_FINAL_AUDIT_PROMPT, TEAM_PLANNER_PROMPT,
+    team_audit_tool_guidance, SUMMARIZER_PROMPT, TEAM_AUDIT_PROMPT, TEAM_FINAL_AUDIT_PROMPT,
+    TEAM_PLANNER_PROMPT,
 };
 use crate::services::task_core::{fallback_terminal, TaskBackend, TaskGenOutput, TaskTerminal};
 use futures::future::BoxFuture;
@@ -684,20 +685,22 @@ impl TeamExecutor {
 
         // ===== c. 审计 agent:一致性/质量/覆盖度审查;缺漏打回指定主补做(最多 1 轮) =====
         let audit_input = build_audit_input(&ctx.goal, &mains, &outputs);
-        let audit_messages = vec![
-            LlmMessage::plain("system", TEAM_AUDIT_PROMPT),
-            LlmMessage::plain("user", &audit_input),
-        ];
-        // 截断自愈:审计是结构化 JSON 输出,推理模型烧光预算会腰斩 JSON(实测)
-        let audit_out = match generate_text_healed(
+        // TMR-2:审计先走「只读工作区工具」通道,让审计员能核对文件真实存在与内容;
+        // 工具不可用/循环失败/空输出时回退既有纯文本审计,保证审计整体不会因新能力失效。
+        let mut audit_system = String::from(TEAM_AUDIT_PROMPT);
+        audit_system.push_str("\n\n");
+        audit_system.push_str(team_audit_tool_guidance(ctx.scope.is_some()));
+        let audit_out = match super::team_audit::generate_with_readonly_tools(
             svc,
-            &ctx.task_id,
+            &self.engine,
+            &ctx,
             "audit",
-            audit_messages,
+            "审计 agent",
+            &audit_system,
+            &audit_input,
+            super::team_audit::AUDIT_MAX_ROUNDS,
             structured_budget(ctx.settings.default_max_tokens),
             TEAM_JSON_TEMPERATURE,
-            ctx.settings.default_top_p,
-            &ctx.cancel,
             &mut total,
         )
         .await
@@ -705,8 +708,37 @@ impl TeamExecutor {
             Ok(o) => o,
             // 取消:保持 Err,由引擎按 ended 收尾(终态兜底从库里的 plan 补写已完成产出)
             Err(e) if *ctx.cancel.borrow() => return Err(e),
-            // 审计调用失败但各主已产出(提交 2 部分成果兜底):不再把成果整体丢掉
-            Err(e) => return Ok((fallback_terminal(&plan, format!("审计调用失败:{e}")), total)),
+            Err(tool_err) => {
+                tracing::warn!(
+                    error = tool_err.as_str(),
+                    "team 审计只读工具通道不可用,回退纯文本审计"
+                );
+                let audit_messages = vec![
+                    LlmMessage::plain("system", &audit_system),
+                    LlmMessage::plain("user", &audit_input),
+                ];
+                // 截断自愈:审计是结构化 JSON 输出,推理模型烧光预算会腰斩 JSON(实测)
+                match generate_text_healed(
+                    svc,
+                    &ctx.task_id,
+                    "audit",
+                    audit_messages,
+                    structured_budget(ctx.settings.default_max_tokens),
+                    TEAM_JSON_TEMPERATURE,
+                    ctx.settings.default_top_p,
+                    &ctx.cancel,
+                    &mut total,
+                )
+                .await
+                {
+                    Ok(o) => o,
+                    Err(e) if *ctx.cancel.borrow() => return Err(e),
+                    // 审计调用失败但各主已产出(提交 2 部分成果兜底):不再把成果整体丢掉
+                    Err(e) => {
+                        return Ok((fallback_terminal(&plan, format!("审计调用失败:{e}")), total))
+                    }
+                }
+            }
         };
         if *ctx.cancel.borrow() {
             return Err("任务已停止".into());
@@ -753,30 +785,61 @@ impl TeamExecutor {
             }
 
             // 终审:基于补做后的最终产出给出结论文本(空输出兜底回退首次审计结论,
-            // 与审计「增强环节异常不沉任务」同口径)
+            // 与审计「增强环节异常不沉任务」同口径)。TMR-2:与首审同款只读工具通道,
+            // 失败回退纯文本。
             let review_input = build_final_review_input(&ctx.goal, &mains, &outputs, &verdict);
-            let review_messages = vec![
-                LlmMessage::plain("system", TEAM_FINAL_AUDIT_PROMPT),
-                LlmMessage::plain("user", &review_input),
-            ];
-            let review_out = match generate_text_healed(
+            let mut review_system = String::from(TEAM_FINAL_AUDIT_PROMPT);
+            review_system.push_str("\n\n");
+            review_system.push_str(team_audit_tool_guidance(ctx.scope.is_some()));
+            let review_out = match super::team_audit::generate_with_readonly_tools(
                 svc,
-                &ctx.task_id,
+                &self.engine,
+                &ctx,
                 "final_audit",
-                review_messages,
+                "终审 agent",
+                &review_system,
+                &review_input,
+                super::team_audit::FINAL_AUDIT_MAX_ROUNDS,
                 structured_budget(ctx.settings.default_max_tokens),
                 TEAM_JSON_TEMPERATURE,
-                ctx.settings.default_top_p,
-                &ctx.cancel,
                 &mut total,
             )
             .await
             {
                 Ok(o) => o,
                 Err(e) if *ctx.cancel.borrow() => return Err(e),
-                // 终审调用失败但补做产出已在手(提交 2 部分成果兜底):不再整体丢成果
-                Err(e) => {
-                    return Ok((fallback_terminal(&plan, format!("终审调用失败:{e}")), total))
+                Err(tool_err) => {
+                    tracing::warn!(
+                        error = tool_err.as_str(),
+                        "team 终审只读工具通道不可用,回退纯文本终审"
+                    );
+                    let review_messages = vec![
+                        LlmMessage::plain("system", &review_system),
+                        LlmMessage::plain("user", &review_input),
+                    ];
+                    match generate_text_healed(
+                        svc,
+                        &ctx.task_id,
+                        "final_audit",
+                        review_messages,
+                        structured_budget(ctx.settings.default_max_tokens),
+                        TEAM_JSON_TEMPERATURE,
+                        ctx.settings.default_top_p,
+                        &ctx.cancel,
+                        &mut total,
+                    )
+                    .await
+                    {
+                        Ok(o) => o,
+                        Err(e) if *ctx.cancel.borrow() => return Err(e),
+                        // 终审调用失败但补做产出已在手(提交 2 部分成果兜底):不再整体丢成果
+                        Err(e) => {
+                            return Ok((
+                                fallback_terminal(&plan, format!("终审调用失败:{e}")),
+                                total,
+                            ))
+                        }
+                    }
                 }
             };
             if *ctx.cancel.borrow() {

@@ -20,6 +20,7 @@
 //   parse.rs     计划 JSON 解析(批次 4.2 自 task_service 上移)
 pub(crate) mod context;
 pub(crate) mod custom;
+pub(crate) mod delivery;
 pub(crate) mod executor;
 pub(crate) mod flow_call;
 pub(crate) mod followup;
@@ -31,10 +32,11 @@ pub(crate) mod retry;
 pub(crate) mod sink;
 pub(crate) mod solo;
 pub(crate) mod team;
+pub(crate) mod team_audit;
 pub(crate) mod tool_policy;
 
 use crate::agents::engine::AgentEngine;
-use crate::models::types::{TaskRecord, TaskRunMode, TaskStep};
+use crate::models::types::{TaskEventKind, TaskRecord, TaskRunMode, TaskStep};
 use crate::services::settings_service::RuntimeSettings;
 use crate::services::task_core::{TaskBackend, TaskTerminal};
 use context::TaskRunContext;
@@ -50,6 +52,15 @@ use std::time::Duration;
 use team::TeamExecutor;
 use tokio::sync::watch;
 use tracing::Instrument;
+
+/// 连续只读工具调用上限(TMR-5,2026-10-19;单一出处)。
+///
+/// 口径 = **工具调用数**而非轮数:真实模型可能在一轮里并发几十个 `fs_read`
+/// (审计实测一次响应 40 个),按轮计数会漏掉最典型的探索空转形态。
+/// 达到 8 次先追加一次「先落盘」提醒并清零;再次达到 8 次则中止本步。
+/// 只对「本轮确有工作区写工具」的任务循环启用(见 `run_tool_loop`),聊天/审计/子 agent
+/// 的只读工具面不会触发。
+pub(crate) const TASK_READONLY_STREAK_LIMIT: usize = 8;
 
 /// 任务侧工具循环的两道限制(提交 3 · D3),单一出处:单步墙钟预算与语义熔断三值。
 ///
@@ -130,7 +141,13 @@ impl TaskEngine {
                 Box::new(CustomExecutor::new(self.svc.clone(), self.engine.clone()))
             }
         };
-        self.spawn_run(task, executor, None, cancel, token);
+        // TMR-3 文件交付门槛:只有「工具自循环 + 预期产出文件」的模式适用。
+        // Legacy 无工具、Plan 本轮只规划、Custom 是用户自定义文本流,均不强制。
+        let enforce_file_delivery = matches!(
+            task.task_mode,
+            TaskRunMode::Solo | TaskRunMode::Multi | TaskRunMode::Team
+        );
+        self.spawn_run(task, executor, None, cancel, token, enforce_file_delivery);
     }
 
     /// followup(终态追加指令)派发入口:goal 由 TaskService 组装为「原目标 +
@@ -150,7 +167,8 @@ impl TaskEngine {
             self.engine.clone(),
             params,
         ));
-        self.spawn_run(task, executor, Some(goal), cancel, token);
+        // 追加指令可以只回答文字(不产出文件),不做文件交付门槛。
+        self.spawn_run(task, executor, Some(goal), cancel, token, false);
     }
 
     /// approve 续跑入口(plan 模式批准后):**只认已批准计划,不按 task_mode 派发**——
@@ -177,6 +195,10 @@ impl TaskEngine {
         token: u64,
     ) {
         use crate::models::types::TaskApproveExecMode as M;
+        // TMR-3:批准后续跑里,只有实际走工具自循环且预期产出文件的执行方式才校验。
+        // 注意不能用 task.task_mode 判断——批准后的任务行仍是 Plan。
+        let enforce_file_delivery =
+            matches!(exec_mode, M::ApprovedPlan | M::Solo | M::Multi | M::Team);
         let executor: Box<dyn ModeExecutor> = match exec_mode {
             M::ApprovedPlan => {
                 if plan.is_empty() {
@@ -195,7 +217,14 @@ impl TaskEngine {
             M::Team => Box::new(TeamExecutor::new(self.svc.clone(), self.engine.clone())),
             M::Custom => Box::new(CustomExecutor::new(self.svc.clone(), self.engine.clone())),
         };
-        self.spawn_run(task, executor, Some(goal), cancel, token);
+        self.spawn_run(
+            task,
+            executor,
+            Some(goal),
+            cancel,
+            token,
+            enforce_file_delivery,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -206,6 +235,7 @@ impl TaskEngine {
         goal: Option<String>,
         cancel: watch::Receiver<bool>,
         token: u64,
+        enforce_file_delivery: bool,
     ) {
         let this = Arc::clone(self);
         let task = task.clone();
@@ -216,7 +246,8 @@ impl TaskEngine {
         let run_span = tracing::info_span!("task_run", taskId = task.id.as_str());
         tokio::spawn(
             async move {
-                this.run_inner(task, executor, goal, cancel, token).await;
+                this.run_inner(task, executor, goal, cancel, token, enforce_file_delivery)
+                    .await;
             }
             .instrument(run_span),
         );
@@ -229,6 +260,7 @@ impl TaskEngine {
         goal: Option<String>,
         cancel: watch::Receiver<bool>,
         token: u64,
+        enforce_file_delivery: bool,
     ) {
         // 工作区作用域(编码通道批次 1;任务模式 D1 起「未绑定」也有作用域):绑定工作区
         // 的任务用它;**未绑定的任务改用任务级 scratch 目录**——否则 bash 的缺省 cwd 会
@@ -263,6 +295,24 @@ impl TaskEngine {
             }
         };
         let settings = self.svc.task_settings();
+        // TMR-3 文件交付门槛:只有「显式绑定工作区」的任务才视为预期有文件产出。
+        // 未绑定任务用 scratch 跑,既可能是文件任务也可能是纯文本任务(研究/问答),
+        // 强制要求文件变更会误伤后者;因此把「绑定工作区」作为用户的显式意图信号。
+        // 策略层面再排除「allowlist 且白名单不含写工具」——那种任务根本没有写能力,
+        // 判它没产物只会制造假 partial。
+        let workspace_bound = task
+            .workspace
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|s| !s.is_empty());
+        let writes_possible = settings.task_tool_policy != "allowlist"
+            || settings
+                .task_tool_allowlist
+                .iter()
+                .any(|n| crate::tools::tool_sets::is_workspace_write_tool(n));
+        let file_delivery_required = enforce_file_delivery && workspace_bound && writes_possible;
+        // 执行前基线:台账是任务终身累计,必须比较「执行后 - 执行前」才是本轮产物。
+        let change_baseline = file_delivery_required.then(|| self.svc.file_change_count(&task.id));
         // 任务级连接(A 批 B1):随上下文下传,供工具循环参数装配回退;
         // 第三级回退 = 任务模式默认连接(TM-SET-1),失效时软回退默认连接
         // (仅任务模式消费;roleplay 引擎不经本上下文)。
@@ -300,6 +350,28 @@ impl TaskEngine {
                     total_tokens = usage.total_tokens,
                     "任务模式执行完成"
                 );
+                // TMR-3:成功终态先过文件交付门槛,再落库——降级必须发生在
+                // `finalize_terminal` 之前,否则用户看到的仍是 done。
+                let terminal = if let Some(baseline) = change_baseline {
+                    let changed = self.svc.file_change_count(&task.id) > baseline;
+                    let (terminal, downgraded) =
+                        delivery::apply_file_delivery_gate(terminal, true, changed);
+                    if downgraded {
+                        self.svc.emit_event(
+                            TaskEventKind::Status,
+                            &task.id,
+                            None,
+                            None,
+                            Some(
+                                "文件产物校验未通过:本次执行未检测到工作区文件变更,任务记为 partial"
+                                    .into(),
+                            ),
+                        );
+                    }
+                    terminal
+                } else {
+                    terminal
+                };
                 self.svc
                     .finalize_terminal(&task.id, token, terminal, *cancel.borrow());
             }

@@ -119,10 +119,13 @@ impl MockConnector {
         // 需要模拟「模型原地打转」的病态场景时用 [[tool_loop_repeat:name|N args]],
         // 它保持参数逐字相同(供重复调用熔断的回归测试);
         // [[tool_loop_text:name|N args]] 同 plain,但每轮附带一句短正文(HB-1 用例)。
+        // [[tool_loop_any:name|N args]] / [[tool_loop_any_text:...]] 是跨提醒轮持久变体
+        // (TMR-5 连续只读提醒会追加 user 消息,普通标记届时按既有语义失效)。
         // 注入的判别字段会被工具忽略(read 等只读已知键),不影响工具行为。
-        if let Some((name, n, args, repeat, text)) =
-            gate_tool(tool_hooks_on, extract_tool_loop_marker(&last_user))
-        {
+        if let Some((name, n, args, repeat, text)) = gate_tool(
+            tool_hooks_on,
+            extract_tool_loop_marker_from_messages(messages, &last_user),
+        ) {
             let executed = messages.iter().filter(|m| m.role == "tool").count();
             if executed < n {
                 let arguments = if repeat {
@@ -889,6 +892,29 @@ fn extract_tool_echo_marker(input: &str) -> Option<(String, String)> {
     Some((name.trim().to_string(), args.trim().to_string()))
 }
 
+/// 解析已定位的 tool_loop 标记(前缀长度/变体位由调用方给出)。
+fn parse_tool_loop_marker(
+    input: &str,
+    start: usize,
+    prefix_len: usize,
+    repeat: bool,
+    text: bool,
+) -> Option<(String, usize, String, bool, bool)> {
+    let rest = &input[start + prefix_len..];
+    let end = rest.find("]]")?;
+    let inner = &rest[..end];
+    let (name, tail) = inner.split_once('|')?;
+    let (n_str, args) = tail.split_once(' ')?;
+    let n: usize = n_str.trim().parse().ok()?;
+    Some((
+        name.trim().to_string(),
+        n,
+        args.trim().to_string(),
+        repeat,
+        text,
+    ))
+}
+
 /// 提取 [[tool_loop:name|N args...]](参数逐轮递变)或
 /// [[tool_loop_repeat:name|N args...]](参数逐字相同,模拟死循环)标记。
 /// 返回 (name, 轮数, arguments_json, repeat)。
@@ -908,19 +934,40 @@ fn extract_tool_loop_marker(input: &str) -> Option<(String, usize, String, bool,
         let p = input.find(MARK)?;
         (p, MARK.len(), false, false)
     };
-    let rest = &input[start + prefix_len..];
-    let end = rest.find("]]")?;
-    let inner = &rest[..end];
-    let (name, tail) = inner.split_once('|')?;
-    let (n_str, args) = tail.split_once(' ')?;
-    let n: usize = n_str.trim().parse().ok()?;
-    Some((
-        name.trim().to_string(),
-        n,
-        args.trim().to_string(),
-        repeat,
-        text,
-    ))
+    parse_tool_loop_marker(input, start, prefix_len, repeat, text)
+}
+
+/// 提取**跨提醒轮持久**的 [[tool_loop_any:...]] / [[tool_loop_any_text:...]] 标记。
+///
+/// TMR-5 的连续只读提醒会在工具轮之间追加一条 user 消息;普通 [[tool_loop:]]
+/// 标记只认末条 user,提醒后即失效(这是 planner 侦察提醒用例的有意语义,不要改)。
+/// 只读守卫用例需要「提醒后继续跑工具循环」,故单独提供 any 变体:标记从全量 user
+/// 消息中查找,且只认 `tool_loop_any` 前缀,不影响普通标记的既有失活行为。
+fn extract_tool_loop_any_marker(input: &str) -> Option<(String, usize, String, bool, bool)> {
+    const MARK_ANY_TEXT: &str = "[[tool_loop_any_text:";
+    const MARK_ANY: &str = "[[tool_loop_any:";
+    if let Some(p) = input.find(MARK_ANY_TEXT) {
+        return parse_tool_loop_marker(input, p, MARK_ANY_TEXT.len(), false, true);
+    }
+    let p = input.find(MARK_ANY)?;
+    parse_tool_loop_marker(input, p, MARK_ANY.len(), false, false)
+}
+
+/// TMR-5:工具循环的驱动标记优先看末条 user;末条 user 已被系统提醒(如连续只读
+/// 「先落盘」提醒)替换时,仅对显式的 `tool_loop_any` 变体回退到全量 user 消息。
+/// 普通 `tool_loop` 保持「末条 user 决定」的既有语义(planner 侦察提醒用例依赖它
+/// 在提醒轮失效)。
+fn extract_tool_loop_marker_from_messages(
+    messages: &[LlmMessage],
+    last_user: &str,
+) -> Option<(String, usize, String, bool, bool)> {
+    extract_tool_loop_marker(last_user).or_else(|| {
+        messages
+            .iter()
+            .rev()
+            .filter(|m| m.role == "user")
+            .find_map(|m| extract_tool_loop_any_marker(&m.content))
+    })
 }
 
 /// 给每轮的工具参数注入判别字段 `"_mock_round": k`,使各轮指纹互不相同

@@ -897,6 +897,12 @@ pub struct ToolDefinition {
 pub struct ToolBudget {
     /// 任务侧收紧后的语义熔断三值(`0` = 该位关闭,原样保持)
     pub semantic_guard: Option<(usize, usize, usize)>,
+    /// 连续只读工具调用上限(TMR-5;`None`/0 = 关闭)。达到上限先提醒一次,
+    /// 再次达到则中止本步——用于治理「读了 32/80 轮、文件一个没写」的探索空转。
+    ///
+    /// 只有任务侧装配填值;聊天路径 `budget` 恒 `None`。子 agent 继承父值,但工具循环
+    /// 只在闸门名单含工作区写工具时启用本检测,子 agent 的只读白名单会自动关闭它。
+    pub readonly_streak_limit: Option<usize>,
 }
 
 #[derive(Debug, Clone)]

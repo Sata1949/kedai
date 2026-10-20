@@ -1029,6 +1029,8 @@ impl TaskService {
             // 填真实值保持「任务侧 ctx 恒带预算」不变量(与 solo/custom 装配同源)。
             budget: Some(ToolBudget {
                 semantic_guard: crate::services::task_engine::task_loop_limits(&settings).1,
+                // 规划侦察轮是只读白名单,不适用连续只读守卫(TMR-5)
+                readonly_streak_limit: None,
             }),
         };
         let mut scout_round = 0usize;
@@ -1211,12 +1213,14 @@ impl TaskService {
         // 外部来源段落逐一 untrusted 包裹,内置指令不包裹(WP7)。
         // 执行者优先:executor_id 命中即独占身份段,character_id 仅为旧任务回退。
         // `has_tools = false`:本原语是 legacy 三段的纯文本步骤生成,恒不下发工具
-        // (tools 传空),故不追加工具纪律段(提交 3 · D3-c);无工具自然也无视觉工具。
+        // (tools 传空),故不追加工具纪律段(提交 3 · D3-c);无工具自然也无写盘优先
+        // 与视觉工具段(TMR-1 / 视觉能力包同口径)。
         let sys = self.assemble_executor_system_prompt(
             &settings,
             task.executor_id.as_deref(),
             task.character_id.as_deref(),
             &task.title,
+            false,
             false,
             false,
         );

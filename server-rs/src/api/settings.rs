@@ -1650,6 +1650,16 @@ pub async fn prompt_preview(
             5,
             task_prompts::EXECUTOR_TOOL_DISCIPLINE,
         );
+        // 写盘优先纪律段(TMR-1):同样是**条件注入**——仅当本轮实际下发工作区写工具
+        // (`fs_write`/`fs_edit`/`fs_patch`)时追加。预览按「工具档」形态展示,与上一条
+        // 同口径(见 docs/契约-协议与配置.md 第五节)。
+        push_preview_layer(
+            &mut layers,
+            "task_executor_write_first_discipline",
+            "system",
+            5,
+            task_prompts::EXECUTOR_WRITE_FIRST_DISCIPLINE,
+        );
         // 视觉验证纪律段(视觉能力包 D4;修复批次扩充到「任一图像工具」):同样是
         // **条件注入**——仅当本轮工具面含图像工具(视觉三件 ∪ screenshot)时追加在
         // 工具纪律之后。预览按「工具档」形态展示(与上一条同口径)。

@@ -342,6 +342,16 @@ impl CustomExecutor {
                 );
             }
         }
+        // 写盘优先纪律(TMR-1):判据以**实际下发名单**为准(不是节点配置)——策略收窄
+        // 或步骤白名单只读时不会出现「教模型写文件但没工具」。与 solo 主循环同源常量。
+        if let Some(s0) = messages.first_mut() {
+            if s0.role == "system" {
+                crate::services::prompt_kit::append_write_first_discipline_if_needed(
+                    &mut s0.content,
+                    &tools,
+                );
+            }
+        }
         // 闸门名单与下发工具一致:名单外立即拒绝(任务模式无 UI 授权上下文)
         let gate_list: Vec<String> = tools.iter().map(|d| d.name.clone()).collect();
         let gate = crate::agents::engine::executor::ToolGate::listed(&gate_list);
@@ -398,9 +408,11 @@ impl CustomExecutor {
             character_id: String::new(), // custom 不吃角色卡
             agent_depth: 0,
             scope: ctx.scope.clone(),
-            // 任务侧预算载体(PRODCAP-2):子 agent 派发路径据此透传语义三值
+            // 任务侧预算载体(PRODCAP-2):子 agent 派发路径据此透传语义三值;
+            // TMR-5:连续只读检测随任务侧装配下发(聊天/审计路径不填)。
             budget: Some(ToolBudget {
                 semantic_guard: limits.1,
+                readonly_streak_limit: Some(super::TASK_READONLY_STREAK_LIMIT),
             }),
         };
         // 事件桥(批次 R4 携 phase/step_index):custom 工具步骤的调用追踪口径为

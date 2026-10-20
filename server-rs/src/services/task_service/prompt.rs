@@ -14,8 +14,8 @@ use super::*;
 // 既有使用者所需的三层固定提示词(executor.rs / api/settings.rs / 本文件),
 // 调用方零改动。team/custom 专属常量由 task_engine 侧直接从 task_core 引用。
 pub(crate) use crate::services::task_core::prompt_consts::{
-    EXECUTOR_PROMPT, EXECUTOR_TOOL_DISCIPLINE, PLANNER_PROMPT, PLANNER_REVISE_GUIDANCE,
-    SUMMARIZER_PROMPT, VISION_VERIFY_DISCIPLINE,
+    EXECUTOR_PROMPT, EXECUTOR_TOOL_DISCIPLINE, EXECUTOR_WRITE_FIRST_DISCIPLINE, PLANNER_PROMPT,
+    PLANNER_REVISE_GUIDANCE, SUMMARIZER_PROMPT, VISION_VERIFY_DISCIPLINE,
 };
 
 impl TaskService {
@@ -77,9 +77,13 @@ impl TaskService {
     /// `user_goal` 供 {{lastUserMessage}} 占位符渲染(步骤生成传任务目标,主 agent 传 goal)。
     /// `has_tools`(提交 3 · D3-c):本轮是否真的下发了工具——true 时在内置执行者指令后
     /// 追加工具使用纪律段(单一出处 `EXECUTOR_TOOL_DISCIPLINE`);legacy(无工具)传 false。
+    /// `has_write_tools`(TMR-1,2026-10-19):本轮实际下发工作区写工具
+    /// (`fs_write`/`fs_edit`/`fs_patch`)时追加写盘优先纪律段(单一出处
+    /// `EXECUTOR_WRITE_FIRST_DISCIPLINE`);只读策略/无工作区的任务不追加。
     /// `has_image_tools`(视觉能力包 D4;修复批次并含截图):本轮工具面是否含任一图像
     /// 工具(视觉三件 ∪ 截图)——true 时再追加视觉验证纪律段(单一出处
     /// `VISION_VERIFY_DISCIPLINE`);无图像工具时该段不出现。
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn assemble_executor_system_prompt(
         &self,
         settings: &RuntimeSettings,
@@ -87,6 +91,7 @@ impl TaskService {
         character_id: Option<&str>,
         user_goal: &str,
         has_tools: bool,
+        has_write_tools: bool,
         has_image_tools: bool,
     ) -> String {
         let executor = self.executor_for(executor_id);
@@ -103,6 +108,14 @@ impl TaskService {
             sys.push_str(&format!(
                 "\n\n{}",
                 crate::services::task_core::prompt_consts::EXECUTOR_TOOL_DISCIPLINE
+            ));
+        }
+        // 写盘优先纪律(TMR-1):仅当本轮实际下发工作区写工具时追加。与工具纪律同族
+        // (条件段、内置块、不进 untrusted);没有写工具的任务不追加,避免误导纯文本/调研任务。
+        if has_write_tools {
+            sys.push_str(&format!(
+                "\n\n{}",
+                crate::services::task_core::prompt_consts::EXECUTOR_WRITE_FIRST_DISCIPLINE
             ));
         }
         // 视觉验证纪律段(D4;修复批次并含截图):仅当工具面含图像工具时追加

@@ -726,6 +726,21 @@ pub(crate) async fn run_tool_loop(
         semantic_max_distinct,
     );
     let mut semantic_break: Option<(String, usize, usize)> = None;
+    // 连续只读检测(TMR-5,2026-10-19):任务侧特有,载体是 ToolBudget(聊天路径 None)。
+    // 只有本轮确实下发工作区写工具时才启用——子 agent 的只读白名单、audit 的只读工具面
+    // 与聊天路径都不会触发「教模型落盘但没给它写工具」的误提醒。按**工具调用数**累计
+    // (单轮并发几十个 fs_read 也算),任一写类/编排类工具出现即清零。
+    let readonly_limit = tool_ctx
+        .budget
+        .and_then(|b| b.readonly_streak_limit)
+        .filter(|n| *n > 0);
+    let readonly_guard_enabled = readonly_limit.is_some()
+        && gate.whitelist.is_some_and(|wl| {
+            wl.iter()
+                .any(|n| crate::tools::tool_sets::is_workspace_write_tool(n))
+        });
+    let mut readonly_streak = 0usize;
+    let mut readonly_nudged = false;
     // 截断自愈留痕(问题①):各轮触发的自愈记录,随最终 ExecutorResult 透出;
     // Err 传播(?)时丢弃——失败路径由调用方落 error 行,截断细节含在错误文案内
     let mut self_heals: Vec<SelfHealRecord> = Vec::new();
@@ -1211,6 +1226,22 @@ pub(crate) async fn run_tool_loop(
                 semantic_break = semantic_guard.record(&e.call.name, fp);
             }
         }
+        // ===== 连续只读检测(TMR-5)=====
+        // 按本轮模型**请求**的工具调用统计(被拒绝的写调用也算「已尝试动手」,
+        // 因此写类出现即清零);中性工具(todo/sleep 等)不增不减。
+        if readonly_guard_enabled {
+            for call in &result.tool_calls {
+                if crate::tools::tool_sets::is_readonly_probe_tool(&call.name) {
+                    readonly_streak += 1;
+                } else if crate::tools::tool_sets::is_write_like_tool(&call.name) {
+                    // 一旦真的动手(或尝试派发新执行面),本次「只读空转段」结束:
+                    // 清空计数并允许下一次空转段重新提醒。否则「提醒 → 写一个文件 →
+                    // 又探索 8 次」会直接熔断,而模型其实已经在交付。
+                    readonly_streak = 0;
+                    readonly_nudged = false;
+                }
+            }
+        }
         // ===== token 预算闸门(HB-1,2026-09-18):按**成本**而非轮数收口 =====
         // 轮次上限(显式配置时)只管轮数:实测 54 轮各不相同命令的空转仍烧
         // 137 万 prompt token(遗留 L22)。预算口径 = 本轮 run 内工具循环累计
@@ -1332,6 +1363,59 @@ pub(crate) async fn run_tool_loop(
                 self_heals: std::mem::take(&mut self_heals),
                 budget_stopped: false,
             });
+        }
+        // 连续只读空转(TMR-5):达到上限先提醒一次,再次达到则中止本步。顺序放在
+        // 轮次/墙钟/Token 预算之后、语义熔断之前——预算是更明确的终止条件;语义熔断
+        // 抓「输出不变」,只读守卫抓「一直读、不落盘」,两者互补。
+        if readonly_guard_enabled && readonly_streak >= readonly_limit.unwrap_or(usize::MAX) {
+            let limit = readonly_limit.unwrap_or(0);
+            readonly_streak = 0;
+            if !readonly_nudged {
+                readonly_nudged = true;
+                llm_messages.push(LlmMessage::plain(
+                    "user",
+                    crate::services::task_core::prompt_consts::READONLY_FIRST_NUDGE,
+                ));
+                send_event(
+                    step_evt(
+                        "只读探索提醒",
+                        Some(format!(
+                            "已连续 {limit} 次只读工具调用没有写出产物:已提醒先落盘;若任务只需调研,请直接给出结论"
+                        )),
+                        None,
+                        None,
+                    ),
+                    tx,
+                    abort,
+                    flag,
+                )
+                .await?;
+            } else {
+                send_event(
+                    step_evt(
+                        "连续只读空转熔断",
+                        Some(format!(
+                            "已连续 {limit} 次只读工具调用没有写出任何产物,且提醒后仍未落盘,已在第 {round} 轮中止;已有正文与用量照常保留"
+                        )),
+                        None,
+                        None,
+                    ),
+                    tx,
+                    abort,
+                    flag,
+                )
+                .await?;
+                return Ok(ExecutorResult {
+                    content: budget_stop_content(result.content, &last_non_empty_content),
+                    usage: TokenUsage::default(),
+                    interrupted: false,
+                    tool_calls: Vec::new(),
+                    reasoning: String::new(),
+                    finish_reason: result.finish_reason,
+                    self_heals: std::mem::take(&mut self_heals),
+                    budget_stopped: false,
+                });
+            }
         }
         // 语义熔断(HB-2):同一工具在窗口内反复调用且输出实质无变化(参数可以每轮都变)。
         // 与「重复调用熔断」互补——后者抓同参数空转,本项抓「参数在变、结果不变」的空转。
