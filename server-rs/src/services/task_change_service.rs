@@ -326,7 +326,7 @@ pub fn deliverable_paths(db: &Arc<Db>, task_id: &str, limit: usize) -> (Vec<Stri
         .unwrap_or(0)
         .max(0);
     let limit = limit.max(1) as i64;
-    let mut paths: Vec<String> = match conn.prepare(
+    let mut paths: Vec<String> = match conn.prepare_cached(
         "SELECT path FROM task_file_changes \
          WHERE task_id = ?1 AND op != 'rollback' \
          GROUP BY path ORDER BY MAX(id) DESC LIMIT ?2",

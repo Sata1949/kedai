@@ -18,6 +18,7 @@ import { flowCandidates, staleMembers, type FlowCandidate } from '../utils/flowC
 import { APPROVE_EXEC_MODE_LABELS, APPROVE_EXEC_MODE_ORDER, FLOW_MODE_LABELS, MODE_LABELS, MODE_ORDER, messageKindLabel } from '../api/labels';
 import type { TaskApproveExecMode, TaskRecord, TaskRunMode, TaskStep } from '../api';
 import FileChangesPanel from './FileChangesPanel.vue';
+import TaskDeliveryPanel from './TaskDeliveryPanel.vue';
 /** 环境层懒加载:同 ChatWindow,不进首屏 index chunk。 */
 const AmbientField = defineAsyncComponent(() => import('./AmbientField.vue'));
 
@@ -1149,6 +1150,16 @@ async function removeTask(task: TaskRecord): Promise<void> {
               {{ resultIncompleteNote }}
             </div>
             <div v-if="summaryOpen" class="sv-task-result" v-html="resultMainHtml" />
+          </div>
+          <!-- 交付校验(TMR-6):必需/已生成/缺失/变更数 + 缺失文件清单。
+               读时合成(后端不落库),未绑定工作区时明说不做校验;四态纪律见
+               TaskDeliveryPanel.vue 头注释。变更明细仍由下方「文件变更」卡承担。 -->
+          <div class="sv-task-section">
+            <div class="sv-task-section-title">交付校验</div>
+            <TaskDeliveryPanel
+              :delivery="currentTask?.delivery ?? null"
+              :workspace-bound="!!currentTask?.task.workspace"
+            />
           </div>
           <!-- 文件变更(批次 4c,PRODCAP-4「交付可审计」):任务结束后「改了什么」的结构化答案。
                数据自取 store(与 CallTracePanel 同款:本组件只负责位置);空清单也**不隐藏卡片**——
