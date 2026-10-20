@@ -140,8 +140,13 @@ impl LoopGuard {
 /// TMR-5(2026-10-19)收窄:原实现把所有连续数字(含 1~2 位)都折叠成 `#`,导致
 /// `NEXT=a02.txt` 与 `a03.txt` 指纹相同——任务侧 4 次链式 `fs_read` 就被误判
 /// 「输出实质无变化」熔断(审计文档已取证)。改为只折叠 ≥3 位数字:时间戳/耗时/计数
-/// 仍是噪声,而文件名/版本号里的短数字可区分。3 位以上标识符(如 `part-001.md`)
-/// 仍会被视为同构,属已知取舍(遗留 TMR-L5)。
+/// 仍是噪声,而文件名/版本号里的短数字可区分。
+///
+/// TMR-L5(2026-10-20):3 位以上数字仍会折叠,`part-001.md` / `part-002.md` 依旧同构。
+/// 本版在数字折叠**之前**先识别「文件名 token」:路径片段末尾是 `.` + 字母开头的
+/// ≥2 位扩展名时,只把 basename 原样保留(目录部分丢弃)。于是分片序号可区分,
+/// 而时间戳/耗时/字节计数仍按噪声折叠;`/tmp/proj-1234/out.txt` 这类只有目录在变的
+/// 输出仍视为同构(只保护 basename,见遗留 TMR-L5 的新边界)。
 fn normalize_tool_output(output: &str) -> String {
     /// 把一段连续数字写入输出:≥3 位折叠为 `#`,1~2 位原样保留。
     fn flush_digits(digits: &mut String, out: &mut String) {
@@ -156,23 +161,86 @@ fn normalize_tool_output(output: &str) -> String {
         digits.clear();
     }
 
+    /// 普通字符:数字进折叠缓冲,空白折叠为单空格,其余原样。
+    fn push_char(ch: char, digits: &mut String, out: &mut String, prev_space: &mut bool) {
+        if ch.is_ascii_digit() {
+            digits.push(ch);
+            return;
+        }
+        flush_digits(digits, out);
+        if ch.is_whitespace() {
+            if !*prev_space {
+                out.push(' ');
+                *prev_space = true;
+            }
+        } else {
+            *prev_space = false;
+            out.push(ch);
+        }
+    }
+
+    /// 路径片段字符集:只收 ASCII,便于按字节切分且不会切断 UTF-8。
+    fn is_path_run_byte(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-' | b'/' | b'\\' | b':')
+    }
+
+    /// 命中文件名时返回 basename(保留在输出里,不参与数字折叠)。
+    ///
+    /// 判定:最后一个 `.` 之后是「字母开头、总长 ≥2、全字母数字」的扩展名,
+    /// 且 `.` 前还有非空文件名。`1.23s` / `12.34` 这类耗时/小数不会被误保护。
+    fn file_basename_token(run: &str) -> Option<&str> {
+        let last_dot = run.rfind('.')?;
+        let ext = &run[last_dot + 1..];
+        if ext.len() < 2 {
+            return None;
+        }
+        let mut ext_chars = ext.chars();
+        if !ext_chars.next()?.is_ascii_alphabetic() {
+            return None;
+        }
+        if !ext.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return None;
+        }
+        let before = &run[..last_dot];
+        if before.is_empty() {
+            return None;
+        }
+        let base_start = before.rfind(['/', '\\']).map(|p| p + 1).unwrap_or(0);
+        let basename = &run[base_start..];
+        // `.md` 这种只有扩展名的片段不算文件名
+        if basename.len() <= ext.len() + 1 {
+            return None;
+        }
+        Some(basename)
+    }
+
+    let bytes = output.as_bytes();
     let mut out = String::with_capacity(output.len().min(4096));
     let mut digits = String::new();
     let mut prev_space = false;
-    for ch in output.chars() {
-        if ch.is_ascii_digit() {
-            digits.push(ch);
-            continue;
-        }
-        flush_digits(&mut digits, &mut out);
-        if ch.is_whitespace() {
-            if !prev_space {
-                out.push(' ');
-                prev_space = true;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if is_path_run_byte(bytes[i]) {
+            let start = i;
+            while i < bytes.len() && is_path_run_byte(bytes[i]) {
+                i += 1;
+            }
+            // 片段是纯 ASCII,按字节切片安全
+            let run = &output[start..i];
+            if let Some(basename) = file_basename_token(run) {
+                flush_digits(&mut digits, &mut out);
+                out.push_str("#f:");
+                out.push_str(basename);
+                prev_space = false;
+            } else {
+                for ch in run.chars() {
+                    push_char(ch, &mut digits, &mut out, &mut prev_space);
+                }
             }
         } else {
-            prev_space = false;
-            out.push(ch);
+            let ch = output[i..].chars().next().expect("字节索引必在字符边界");
+            push_char(ch, &mut digits, &mut out, &mut prev_space);
+            i += ch.len_utf8();
         }
     }
     flush_digits(&mut digits, &mut out);
@@ -505,6 +573,48 @@ drwxr-xr-x 2 user
             output_fingerprint("耗时 980ms"),
             "三位耗时仍属噪声"
         );
+    }
+
+    /// TMR-L5:3 位以上分片序号必须可区分——原实现把 `part-001.md` / `part-002.md`
+    /// 的数字统一折叠,任务侧链式读取 4 个分片即被语义熔断误杀。
+    #[test]
+    fn output_fingerprint_keeps_long_file_sequence_numbers() {
+        assert_ne!(
+            output_fingerprint("part-001.md (共 10 行)\nNEXT=part-002.md"),
+            output_fingerprint("part-002.md (共 10 行)\nNEXT=part-003.md"),
+            "三位分片序号必须可区分"
+        );
+        assert_ne!(
+            output_fingerprint("C:\\ws\\part-001.md"),
+            output_fingerprint("C:\\ws\\part-002.md"),
+            "Windows 路径下的分片序号同样必须可区分"
+        );
+        // 目录噪声仍被抹掉:只保护 basename
+        assert_eq!(
+            output_fingerprint("/tmp/proj-1234/out.txt"),
+            output_fingerprint("/tmp/proj-5678/out.txt"),
+            "只有目录中的数字在变时仍视为同构"
+        );
+        // 已知边界:同 basename 不同目录会同构(遗留 TMR-L5 新边界)
+        assert_eq!(
+            output_fingerprint("src/a/x.js"),
+            output_fingerprint("src/b/x.js"),
+            "basename-only 保护下同文件名不同目录视为同构"
+        );
+    }
+
+    /// TMR-L5:任务侧收紧参数(窗口 8 / 同工具 4 / 去重 2)下,链式读取
+    /// `part-001`…`part-006` 不得被误熔断。
+    #[test]
+    fn semantic_guard_keeps_part_sequence_reads() {
+        let mut g = SemanticGuard::new(8, 4, 2);
+        for i in 1..=6 {
+            let out = format!("part-{i:03}.md (共 10 行)\nNEXT=part-{:03}.md", i + 1);
+            assert!(
+                g.record("fs_read", output_fingerprint(&out)).is_none(),
+                "第 {i} 个分片的读取不得被误熔断"
+            );
+        }
     }
 
     /// 归一化/指纹的稳定性:同内容(含噪声差异)指纹相同,不同内容指纹不同
