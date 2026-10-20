@@ -361,6 +361,68 @@ async fn task_team_plan_carries_files_and_declared_owner_wins() {
         "跨主越权写不得覆盖声明归属者的内容"
     );
 
+    // TMR-6 交付摘要:必需文件齐全、有变更、无缺失
+    let delivery = &detail["delivery"];
+    assert_eq!(
+        delivery["checked"],
+        json!(true),
+        "有声明时 checked=true: {delivery}"
+    );
+    let required = delivery["required"].as_array().expect("required 应为数组");
+    assert_eq!(required.len(), 1, "必需文件应去重: {required:?}");
+    assert_eq!(required[0]["path"], "a.txt");
+    assert_eq!(required[0]["exists"], json!(true));
+    assert_eq!(delivery["missing"], json!([]), "不应有缺失: {delivery}");
+    assert!(
+        delivery["changed"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|p| p == "a.txt")),
+        "变更清单应含 a.txt: {delivery}"
+    );
+    assert!(
+        delivery["changed_count"].as_u64().unwrap_or(0) >= 1,
+        "变更总数应 ≥1: {delivery}"
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// TMR-6:规划器声明了两个必需文件,主 agent 只写了一个 → 终态 partial,
+/// `tasks.error` 点名缺失文件,交付摘要的 missing 与磁盘一致。
+#[tokio::test]
+async fn task_team_missing_required_file_becomes_partial() {
+    let app = test_app();
+    let ws = temp_workspace("team-missing-file");
+
+    let title = concat!(
+        r#"[[reply_if:团队规划器|{"mains":["#,
+        r#"{"name":"甲","goals":[{"name":"写A","goal":"\u005b\u005btool:fs_write {\"path\":\"a.txt\",\"content\":\"only-a\"}\u005d\u005d \u005b\u005breply:主一产出\u005d\u005d","files":["a.txt","b.txt"]}]}"#,
+        r#" ]}]]"#,
+        r#"[[reply_if:团队审计员|{"通过":true,"打回":[],"结论":"通过"}]]"#,
+        r#"[[reply_if:任务汇总者|团队最终成果]]"#,
+        " 必需文件缺失目标"
+    );
+    let id = create_task_with_mode_workspace(app, title, "team", &ws).await;
+    let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
+
+    let (st, detail) = wait_terminal(app, &id).await;
+    assert_eq!(st, "partial", "缺少必需文件必须降 partial: {detail}");
+    let error = detail["task"]["error"].as_str().unwrap_or("");
+    assert!(error.contains("缺少必需文件"), "error 应点名缺失: {error}");
+    assert!(error.contains("b.txt"), "error 应点名 b.txt: {error}");
+
+    let delivery = &detail["delivery"];
+    assert_eq!(delivery["checked"], json!(true));
+    assert_eq!(
+        delivery["missing"],
+        json!(["b.txt"]),
+        "缺失清单: {delivery}"
+    );
+    let required = delivery["required"].as_array().expect("required 应为数组");
+    assert_eq!(required.len(), 2, "两个声明都应下发: {required:?}");
+    assert_eq!(required[1]["exists"], json!(false));
+
     let _ = std::fs::remove_dir_all(&ws);
 }
 

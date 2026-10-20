@@ -350,22 +350,30 @@ impl TaskEngine {
                     total_tokens = usage.total_tokens,
                     "任务模式执行完成"
                 );
-                // TMR-3:成功终态先过文件交付门槛,再落库——降级必须发生在
+                // TMR-3/TMR-6:成功终态先过文件交付门槛,再落库——降级必须发生在
                 // `finalize_terminal` 之前,否则用户看到的仍是 done。
+                // TMR-6 起门槛多两项输入:最终 plan 的必需文件声明(TMR-4 写入)与
+                // 磁盘上实际缺失的路径。plan 必须从库里重读:team 会在运行中重写 plan,
+                // 执行前的 `task.plan` 是空的。
                 let terminal = if let Some(baseline) = change_baseline {
                     let changed = self.svc.file_change_count(&task.id) > baseline;
-                    let (terminal, downgraded) =
-                        delivery::apply_file_delivery_gate(terminal, true, changed);
+                    let final_plan = self.svc.get(&task.id).map(|t| t.plan).unwrap_or_default();
+                    let required = delivery::required_from_plan(&final_plan);
+                    let missing = task
+                        .workspace
+                        .as_deref()
+                        .map(|ws| delivery::missing_files(std::path::Path::new(ws), &required))
+                        .unwrap_or_default();
+                    let (terminal, downgraded) = delivery::apply_file_delivery_gate(
+                        terminal, true, &required, &missing, changed,
+                    );
                     if downgraded {
                         self.svc.emit_event(
                             TaskEventKind::Status,
                             &task.id,
                             None,
                             None,
-                            Some(
-                                "文件产物校验未通过:本次执行未检测到工作区文件变更,任务记为 partial"
-                                    .into(),
-                            ),
+                            Some(delivery::delivery_event_detail(&missing)),
                         );
                     }
                     terminal

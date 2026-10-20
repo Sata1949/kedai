@@ -193,6 +193,7 @@ pub async fn bind(
 
 pub async fn get(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     let svc = state.tasks.clone();
+    let db = state.db.clone();
     match state
         .db_call(move || {
             let found = svc.get_with_subtasks(&id);
@@ -209,22 +210,60 @@ pub async fn get(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> 
                 // 工作区画像(CODE-4,2026-09-30):详情读取时**实时**探测,不落库——
                 // 目录内容会变,落库就与「创建期冻结」的 workspace 语义混淆。
                 // 未绑定工作区 → None(前端不渲染该行,零 IO)。
-                let workspace_profile = task.workspace.as_deref().map(|ws| {
-                    crate::services::workspace_profile::probe(std::path::Path::new(ws))
+                let workspace_profile = task
+                    .workspace
+                    .as_deref()
+                    .map(|ws| crate::services::workspace_profile::probe(std::path::Path::new(ws)));
+                // TMR-6 交付摘要:绑定工作区才下发(未绑定 = 不做文件交付校验)。
+                // 读时合成,不落库;变更路径只取去重清单 + 计数,不把整张台账塞进详情。
+                let delivery = task.workspace.as_deref().map(|ws| {
+                    let (changed, changed_count) =
+                        crate::services::task_change_service::deliverable_paths(
+                            &db,
+                            &task.id,
+                            crate::services::task_engine::delivery::DELIVERY_CHANGED_LIMIT,
+                        );
+                    crate::services::task_engine::delivery::summarize(
+                        &task.plan,
+                        std::path::Path::new(ws),
+                        changed,
+                        changed_count,
+                    )
                 });
-                (task, subtasks, p, c, r, messages, flow_snapshot, workspace_profile)
+                (
+                    task,
+                    subtasks,
+                    p,
+                    c,
+                    r,
+                    messages,
+                    flow_snapshot,
+                    workspace_profile,
+                    delivery,
+                )
             })
         })
         .await
     {
         Err(e) => db_err(&e),
-        Ok(Some((task, subtasks, p, c, r, messages, flow_snapshot, workspace_profile))) => Json(json!({
+        Ok(Some((
+            task,
+            subtasks,
+            p,
+            c,
+            r,
+            messages,
+            flow_snapshot,
+            workspace_profile,
+            delivery,
+        ))) => Json(json!({
             "task": task,
             "subtasks": subtasks,
             "usage_total": { "prompt_tokens": p, "completion_tokens": c, "reasoning_tokens": r },
             "messages": messages,
             "flow_snapshot": flow_snapshot,
             "workspace_profile": workspace_profile,
+            "delivery": delivery,
         }))
         .into_response(),
         Ok(None) => not_found("任务不存在"),

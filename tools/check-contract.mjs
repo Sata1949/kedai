@@ -199,6 +199,29 @@ const MAPPINGS = [
     ts: { file: 'web/src/api/types.ts', name: 'ProjectTypeHint', kind: 'interface' },
   },
   {
+    // TMR-6:任务详情顶层 `delivery` 的具名结构体(TaskDetail 本身不在 MAPPINGS,
+    // 故以摘要结构体为机检锚点;漏字段会让成果卡静默读 undefined)。
+    label: '任务交付摘要',
+    rust: {
+      file: 'server-rs/src/services/task_engine/delivery.rs',
+      name: 'TaskDeliverySummary',
+    },
+    ts: {
+      file: 'web/src/api/types.ts',
+      name: 'TaskDeliverySummary',
+      kind: 'interface',
+    },
+  },
+  {
+    // 摘要的必需文件元素(`required[]`)。
+    label: '任务交付必需文件',
+    rust: {
+      file: 'server-rs/src/services/task_engine/delivery.rs',
+      name: 'TaskDeliveryFile',
+    },
+    ts: { file: 'web/src/api/types.ts', name: 'TaskDeliveryFile', kind: 'interface' },
+  },
+  {
     // SSE 顶层事件判别式联合(Rust `#[serde(tag="type")]` ↔ TS 判别式联合)。
     // 此前**未登记**:新增一个顶层事件要手改 Rust 枚举 + TS 手写 union + 前端两个 switch
     // (sseReducer.ts / stores/task.ts)共 3 处,其中 Rust→TS 这一步完全靠人,漏改不报错。

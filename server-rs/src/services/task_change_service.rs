@@ -300,6 +300,55 @@ pub fn count_deliverable(db: &Arc<Db>, task_id: &str) -> usize {
     }
 }
 
+/// 某任务**去重后**的可交付变更路径 + 总数(TMR-6 交付摘要)。
+///
+/// 口径与 [`count_deliverable`] 一致:`op != 'rollback'`;同一路径多次改动只算一个
+/// 文件。返回 `(最近发生优先的路径, 去重总数)`;路径上限由调用方给(详情接口用
+/// `delivery::DELIVERY_CHANGED_LIMIT`),总数不受截断影响。
+///
+/// 为什么单独写一条分组查询而不是复用 `list`:详情端点在任务运行中会被 SSE 频繁
+/// 触发,`list` 会把每行的哈希/大小等字段全读出来;摘要只要「路径 + 计数」。
+/// 失败方向仍是 warn + 空/0(不 panic,不把无法核实伪装成有产物)。
+pub fn deliverable_paths(db: &Arc<Db>, task_id: &str, limit: usize) -> (Vec<String>, usize) {
+    let conn = match db.read() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(op = "交付路径 read", error = %e, "只读连接获取失败,按空列表");
+            return (Vec::new(), 0);
+        }
+    };
+    let total: i64 = conn
+        .query_row(
+            "SELECT COUNT(DISTINCT path) FROM task_file_changes WHERE task_id = ?1 AND op != 'rollback'",
+            rusqlite::params![task_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0)
+        .max(0);
+    let limit = limit.max(1) as i64;
+    let mut paths: Vec<String> = match conn.prepare(
+        "SELECT path FROM task_file_changes \
+         WHERE task_id = ?1 AND op != 'rollback' \
+         GROUP BY path ORDER BY MAX(id) DESC LIMIT ?2",
+    ) {
+        Ok(mut stmt) => match stmt.query_map(rusqlite::params![task_id, limit], |row| {
+            row.get::<_, String>(0)
+        }) {
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(e) => {
+                tracing::warn!(op = "交付路径 query_map", error = %e, "分组查询失败,按空列表");
+                Vec::new()
+            }
+        },
+        Err(e) => {
+            tracing::warn!(op = "交付路径 prepare", error = %e, "分组查询准备失败,按空列表");
+            Vec::new()
+        }
+    };
+    paths.truncate(limit as usize);
+    (paths, total as usize)
+}
+
 /// 某文件在本任务内的**最新一条**变更(含基线正文),供 diff 与回滚定位。
 struct LatestChange {
     op: String,
