@@ -169,8 +169,9 @@ pub struct RuntimeSettings {
     /// 任务模式 allowlist 策略下的工具白名单(task_tool_policy=allowlist 时生效)
     #[serde(default)]
     pub task_tool_allowlist: Vec<String>,
-    /// AGENT/CUSTOM 模式工具循环轮次上限(默认 32;每轮可执行多个工具调用,
-    /// 达到上限后停止调用工具并输出当前结果)
+    /// 聊天 AGENT 模式工具循环轮次上限(默认 32;每轮可执行多个工具调用,
+    /// 达到上限后停止调用工具并输出当前结果)。任务模式已取消默认轮次限制,
+    /// 不再消费本字段(2026-10-19)。
     #[serde(default = "default_max_tool_rounds")]
     pub max_tool_rounds: u32,
     /// 流程**动态调用**的嵌套深度上限(A 批 A3;默认 2,钳 1..=5)。
@@ -1380,8 +1381,12 @@ mod tests {
         assert!(p.contains("任务执行智能体"), "必须保留任务向身份字样:{p}");
         assert!(!p.contains("{{char}}"), "不得含角色扮演宏:{p}");
         assert!(
-            p.contains("先读后写"),
-            "编码场景纪律(先读后写)必须在模板里:{p}"
+            p.contains("先落盘再补读"),
+            "编码场景纪律(先落盘再补读,TMR-1)必须在模板里:{p}"
+        );
+        assert!(
+            !p.contains("先读后写:动手前先摸清相关文件"),
+            "旧的「先读后写」绝对句不得残留(TMR-1):{p}"
         );
         // CODE-3(2026-09-30):项目约定文件从「泛指」升为「点名」——五家编码 harness 的
         // 主路径都是点名机制(CLAUDE.md / AGENTS.md),只写「既有约定」模型会漏读

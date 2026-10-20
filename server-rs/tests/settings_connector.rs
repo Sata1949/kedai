@@ -270,6 +270,7 @@ async fn prompt_preview_follows_mode() {
         ("task_executor_prompt", "你是任务执行者"),
         ("task_summarizer_prompt", "你是任务汇总者"),
         ("task_executor_tool_discipline", "自测通过即收尾"),
+        ("task_executor_write_first_discipline", "写盘优先"),
     ] {
         let hit = layers.iter().any(|l| {
             l["source"].as_str() == Some(src)

@@ -105,7 +105,7 @@ const isTaskMode = computed(() => store.appMode === 'task');
       </div>
       </template>
       <div class="sv-inp-row">
-        <label class="sv-inp-tag">工具轮次上限</label>
+        <label class="sv-inp-tag">聊天 AGENT 工具轮次上限</label>
         <input
           v-model.number="maxToolRounds"
           type="number"
@@ -113,9 +113,9 @@ const isTaskMode = computed(() => store.appMode === 'task');
           max="200"
           step="1"
           class="sv-input inject-num"
-          title="AGENT/CUSTOM 模式工具循环轮次上限(每轮可执行多个工具调用;默认 32)"
+          title="聊天 AGENT 模式工具循环轮次上限(每轮可执行多个工具调用;默认 32)。任务模式已取消默认轮次限制,本项不再生效"
         />
-        <span class="sv-note">AGENT/CUSTOM 工具循环轮次上限(1-200,默认 32)</span>
+        <span class="sv-note">仅聊天 AGENT 生效(1-200,默认 32);任务模式默认不限轮次</span>
       </div>
       <!-- 流程调用闸与节点默认上下文(A 批 A3/A4):三者都是**任务侧**设置
            (服务端 `apply!(s, is_task, …)` 落在任务覆盖层),角色扮演侧不受影响。

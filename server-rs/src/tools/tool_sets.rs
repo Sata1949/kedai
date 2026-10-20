@@ -119,6 +119,71 @@ pub fn filter_screenshot(defs: Vec<ToolDefinition>, enabled: bool) -> Vec<ToolDe
 /// 「只规划不执行」的零副作用纪律(零副作用靠白名单保证,不靠模型自觉)。
 pub const WORKSPACE_READONLY_TOOLS: &[&str] = &["fs_read", "fs_glob", "fs_grep"];
 
+/// 工作区**写**工具族:`fs_write` / `fs_edit` / `fs_patch`(单一出处)。
+///
+/// 用途:
+/// 1. 任务工具策略默认档的「写工具例外」名单(此前在 `tool_policy.rs` 内逐字比较三次);
+/// 2. 执行者提示词的条件段判据(TMR-1:本轮实际下发写工具时追加「写盘优先纪律」);
+/// 3. 工具循环的连续只读检测(TMR-5):出现任一写工具即清零只读计数。
+///
+/// **不含 `bash`**:bash 可读可写,不能按工具名判定;写文件应优先走 `fs_*`
+/// (提示词纪律),bash 的写入由文件变更台账兜底。
+pub const WORKSPACE_WRITE_TOOLS: &[&str] = &["fs_write", "fs_edit", "fs_patch"];
+
+/// 名称是否属工作区写工具族(精确匹配,前缀同名的其它工具不误伤)。
+pub fn is_workspace_write_tool(name: &str) -> bool {
+    WORKSPACE_WRITE_TOOLS.contains(&name)
+}
+
+/// 只读探测工具(TMR-5):只读取信息、不改变工作区状态。连续多次只读是「探索空转」
+/// 的信号(实测 40 次链式 `fs_read` 仍未落盘);任务侧据此先提醒、再熔断。
+///
+/// 刻意不含 `todo`/`sleep`/`calculator` 等中性工具:它们既不算探索,也不清零计数。
+pub const READONLY_PROBE_TOOLS: &[&str] = &[
+    "fs_read",
+    "fs_glob",
+    "fs_grep",
+    "read",
+    "search",
+    "memory_read",
+    "view_image",
+    "zoom_image",
+    "image_diff",
+];
+
+/// 名称是否属只读探测工具(精确匹配)。
+pub fn is_readonly_probe_tool(name: &str) -> bool {
+    READONLY_PROBE_TOOLS.contains(&name)
+}
+
+/// 写类/编排类工具(TMR-5):出现任一即清零「连续只读」计数。
+///
+/// 口径:会改变工作区、角色文件区或触发新执行面的工具。`bash` 可读可写,按写类处理
+/// (宁可清零,也不把「用 shell 探索」误算成只读空转);`agentgo`/`run_flow` 会发起
+/// 新的执行面,同样清零。
+pub const WRITE_LIKE_TOOLS: &[&str] = &[
+    "fs_write",
+    "fs_edit",
+    "fs_patch",
+    "write",
+    "replace",
+    "create",
+    "bash",
+    "agentgo",
+    "agentend",
+    "submit",
+    "update_variables",
+    "memory_write",
+    "run_flow",
+    "worldbook_update",
+    "apply_patch",
+];
+
+/// 名称是否属写类/编排类工具(精确匹配)。
+pub fn is_write_like_tool(name: &str) -> bool {
+    WRITE_LIKE_TOOLS.contains(&name)
+}
+
 /// 工具 → 「工作状态锚点」所在的参数键名(2026-09-30 批次 3,HARNESS3-3)。
 ///
 /// 用途:工具历史摘要化时**把这个键留在占位里**(消费点 `agents/engine/messages/trim.rs`)。
@@ -279,6 +344,31 @@ mod tests {
             ]
         );
         assert_eq!(WORKSPACE_READONLY_TOOLS, &["fs_read", "fs_glob", "fs_grep"]);
+        assert_eq!(
+            WORKSPACE_WRITE_TOOLS,
+            &["fs_write", "fs_edit", "fs_patch"],
+            "写工具名单是任务策略例外/TMR-1 提示词/TMR-5 清零判据的单一出处"
+        );
+        assert_eq!(
+            READONLY_PROBE_TOOLS,
+            &[
+                "fs_read",
+                "fs_glob",
+                "fs_grep",
+                "read",
+                "search",
+                "memory_read",
+                "view_image",
+                "zoom_image",
+                "image_diff"
+            ]
+        );
+        for n in WORKSPACE_WRITE_TOOLS {
+            assert!(
+                WRITE_LIKE_TOOLS.contains(n),
+                "工作区写工具必须计入写类(只读检测清零):{n}"
+            );
+        }
         assert_eq!(VISION_TOOLS, &["view_image", "zoom_image", "image_diff"]);
         for n in VISION_TOOLS {
             assert!(
@@ -286,6 +376,31 @@ mod tests {
                 "视觉工具必须并入工作区族(聊天路径与无作用域任务一体剔除):{n}"
             );
         }
+    }
+
+    /// TMR-5:只读探测与写类判据必须精确、互斥、不误伤前缀同名工具。
+    #[test]
+    fn readonly_probe_and_write_like_are_exact_and_disjoint() {
+        for n in READONLY_PROBE_TOOLS {
+            assert!(is_readonly_probe_tool(n), "{n}");
+            assert!(
+                !is_write_like_tool(n),
+                "同一工具不得同时属只读探测与写类:{n}"
+            );
+        }
+        for n in WRITE_LIKE_TOOLS {
+            assert!(is_write_like_tool(n), "{n}");
+        }
+        // 中性工具:既不算探索也不清零
+        for n in ["todo", "sleep", "calculator"] {
+            assert!(!is_readonly_probe_tool(n), "{n} 不得计入只读探索");
+            assert!(!is_write_like_tool(n), "{n} 不得清零只读计数");
+        }
+        // 精确匹配:前缀同名不误伤
+        assert!(!is_readonly_probe_tool("fs_read2"));
+        assert!(!is_write_like_tool("fs_write2"));
+        assert!(is_workspace_write_tool("fs_patch"));
+        assert!(!is_workspace_write_tool("bash"));
     }
 
     /// 图像工具判据(条件提示词段用):视觉三件 ∪ 截图;精确名匹配,前缀同名不误伤

@@ -270,6 +270,36 @@ pub fn list(db: &Arc<Db>, task_id: &str) -> Vec<TaskFileChangeRecord> {
     }
 }
 
+/// 某任务累计的**可交付**文件变更行数(TMR-3 文件交付门槛)。
+///
+/// 口径:`op != 'rollback'`——回滚是「撤销交付」,不能把一次只回滚的任务判成有产物。
+/// 计数是**任务终身**的(台账不按 run 分段),调用方在执行前记基线、执行后取差值,
+/// 这样才能区分「本次执行改了文件」与「上次执行留下的历史行」。
+///
+/// 失败方向:查询失败只 warn + 返回 0(与 `list` 同口径,不 panic);调用方据此判
+/// 「没有产物」——宁可多判一次 partial,也不把无法核实的执行伪装成 done。
+pub fn count_deliverable(db: &Arc<Db>, task_id: &str) -> usize {
+    let conn = match db.read() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(op = "文件变更计数 read", error = %e, "只读连接获取失败,计数按 0");
+            return 0;
+        }
+    };
+    let result: rusqlite::Result<i64> = conn.query_row(
+        "SELECT COUNT(*) FROM task_file_changes WHERE task_id = ?1 AND op != 'rollback'",
+        rusqlite::params![task_id],
+        |row| row.get(0),
+    );
+    match result {
+        Ok(n) => n.max(0) as usize,
+        Err(e) => {
+            tracing::warn!(op = "文件变更计数 query", error = %e, "计数查询失败,按 0");
+            0
+        }
+    }
+}
+
 /// 某文件在本任务内的**最新一条**变更(含基线正文),供 diff 与回滚定位。
 struct LatestChange {
     op: String,

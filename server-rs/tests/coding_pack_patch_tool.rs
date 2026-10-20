@@ -65,14 +65,25 @@ async fn fs_patch_is_gated_by_coding_pack_and_runs_when_enabled() {
 
     let create = |title: &'static str, ws: String| json!({ "title": title, "task_mode": "solo", "workspace": ws });
 
-    // ① 关包(缺省):fs_patch 不在工具面 → mock 钩子不命中 → 任务照常 done 但零文件零台账
+    // ① 关包(缺省):fs_patch 不在工具面 → mock 钩子不命中 → 零文件零台账;
+    //    绑定工作区又没有任何产物,TMR-3 起终态应为 partial(而不是 done)。
     let (status, created) = send_json(app, "POST", "/api/tasks", create(title, ws.clone())).await;
     assert_eq!(status, StatusCode::CREATED, "创建任务失败: {created}");
     let id = created["task"]["id"].as_str().unwrap().to_string();
     let (status, r) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "run 应 200: {r}");
-    let (st, _) = wait_terminal(app, &id).await;
-    assert_eq!(st, "done", "关包题面应照常完成(mock 回默认文本)");
+    let (st, detail) = wait_terminal(app, &id).await;
+    assert_eq!(
+        st, "partial",
+        "关包时零文件产物,文件交付门槛应判 partial: {detail}"
+    );
+    assert!(
+        detail["task"]["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("未检测到文件变更"),
+        "partial 原因应说明缺产物: {detail}"
+    );
     assert!(
         !ws_guard.path().join("made.txt").exists(),
         "关包时 fs_patch 不得被执行"

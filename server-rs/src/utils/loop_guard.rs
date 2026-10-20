@@ -134,32 +134,48 @@ impl LoopGuard {
 
 /// 输出归一化:抹掉易变噪声,保留「实质内容」。
 /// 抹掉的对象是那些与语义无关、每次都变的字节:时间戳/耗时/字节计数/PID/带数字的路径
-/// (数字统一折叠为 `#`),同时折叠空白避免缩进差异。
+/// (连续 **3 位及以上**的数字折叠为 `#`),同时折叠空白避免缩进差异。
 /// 刻意保留非数字文本:读不同文件、返回不同条目都会留下可区分的内容。
+///
+/// TMR-5(2026-10-19)收窄:原实现把所有连续数字(含 1~2 位)都折叠成 `#`,导致
+/// `NEXT=a02.txt` 与 `a03.txt` 指纹相同——任务侧 4 次链式 `fs_read` 就被误判
+/// 「输出实质无变化」熔断(审计文档已取证)。改为只折叠 ≥3 位数字:时间戳/耗时/计数
+/// 仍是噪声,而文件名/版本号里的短数字可区分。3 位以上标识符(如 `part-001.md`)
+/// 仍会被视为同构,属已知取舍(遗留 TMR-L5)。
 fn normalize_tool_output(output: &str) -> String {
+    /// 把一段连续数字写入输出:≥3 位折叠为 `#`,1~2 位原样保留。
+    fn flush_digits(digits: &mut String, out: &mut String) {
+        if digits.is_empty() {
+            return;
+        }
+        if digits.len() >= 3 {
+            out.push('#');
+        } else {
+            out.push_str(digits);
+        }
+        digits.clear();
+    }
+
     let mut out = String::with_capacity(output.len().min(4096));
-    let mut prev_digit = false;
+    let mut digits = String::new();
     let mut prev_space = false;
     for ch in output.chars() {
         if ch.is_ascii_digit() {
-            if !prev_digit {
-                out.push('#');
-            }
-            prev_digit = true;
-            prev_space = false;
+            digits.push(ch);
             continue;
         }
-        prev_digit = false;
+        flush_digits(&mut digits, &mut out);
         if ch.is_whitespace() {
             if !prev_space {
                 out.push(' ');
+                prev_space = true;
             }
-            prev_space = true;
         } else {
             prev_space = false;
             out.push(ch);
         }
     }
+    flush_digits(&mut digits, &mut out);
     out
 }
 
@@ -461,6 +477,34 @@ drwxr-xr-x 2 user
             assert!(g.record("bash", 42).is_none(), "关闭态不得熔断");
         }
         assert!(g.is_empty(), "关闭态不登记历史");
+    }
+
+    /// TMR-5:短数字标识符必须可区分——原实现把 1~2 位数字也折叠成 `#`,导致
+    /// `NEXT=a02.txt` / `a03.txt` 被语义熔断误判为同一种输出(任务侧 4 次链式
+    /// `fs_read` 即误杀)。3 位以上仍按噪声折叠,见 `output_fingerprint_is_noise_insensitive`。
+    #[test]
+    fn output_fingerprint_keeps_short_numeric_identifiers() {
+        assert_ne!(
+            output_fingerprint("NEXT=a02.txt"),
+            output_fingerprint("NEXT=a03.txt"),
+            "两位文件名序号必须可区分"
+        );
+        assert_ne!(
+            output_fingerprint("NEXT=a2.txt"),
+            output_fingerprint("NEXT=a3.txt"),
+            "一位文件名序号必须可区分"
+        );
+        assert_ne!(
+            output_fingerprint("v1.2.3"),
+            output_fingerprint("v1.2.4"),
+            "短版本号必须可区分"
+        );
+        // 反向钉住:3 位以上的时间戳/计数仍折叠(该取舍不因本修复丢失)
+        assert_eq!(
+            output_fingerprint("耗时 120ms"),
+            output_fingerprint("耗时 980ms"),
+            "三位耗时仍属噪声"
+        );
     }
 
     /// 归一化/指纹的稳定性:同内容(含噪声差异)指纹相同,不同内容指纹不同

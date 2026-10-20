@@ -71,6 +71,13 @@ pub(crate) trait TaskStore: Send + Sync {
         name: &str,
         instruction: &str,
     ) -> Result<String, String>;
+
+    /// 某任务累计的非回滚文件变更行数(TMR-3 文件交付门槛)。
+    ///
+    /// 语义:任务台账(`task_file_changes`)里 `op != 'rollback'` 的行数;任务终身累计,
+    /// 调用方在执行前后各取一次、比较差值来判定**本次执行**有没有产出文件。
+    /// 查询失败返回 0(失败方向 = 判无产物,宁可 partial 也不伪装 done)。
+    fn file_change_count(&self, task_id: &str) -> usize;
 }
 
 // ==================== 窄接口(2/9):调用追踪与用量留痕 ====================
@@ -137,9 +144,14 @@ pub(crate) trait TaskPromptKit: Send + Sync {
     /// 编译结果算,策略收窄到空集时为 false)。true 时在内置指令后追加
     /// [`crate::services::task_core::prompt_consts::EXECUTOR_TOOL_DISCIPLINE`];
     /// legacy 的步骤没有工具(传 false),不追加——那条纪律讲的是怎么用工具。
+    /// `has_write_tools`(TMR-1,2026-10-19):本轮工具面是否含工作区写工具
+    /// (`fs_write`/`fs_edit`/`fs_patch`)——true 时追加
+    /// [`crate::services::task_core::prompt_consts::EXECUTOR_WRITE_FIRST_DISCIPLINE`],
+    /// 把「产出文件类任务先落盘」的优先级压进 system;只读策略/无工作区不追加。
     /// `has_image_tools`(视觉能力包 D4;修复批次并含截图):本轮工具面是否含任一
     /// 图像工具(`tool_sets::is_image_tool`:视觉三件 ∪ 截图)——true 时再追加
     /// [`crate::services::task_core::prompt_consts::VISION_VERIFY_DISCIPLINE`]。
+    #[allow(clippy::too_many_arguments)]
     fn assemble_executor_system_prompt(
         &self,
         settings: &RuntimeSettings,
@@ -147,6 +159,7 @@ pub(crate) trait TaskPromptKit: Send + Sync {
         character_id: Option<&str>,
         user_goal: &str,
         has_tools: bool,
+        has_write_tools: bool,
         has_image_tools: bool,
     ) -> String;
 

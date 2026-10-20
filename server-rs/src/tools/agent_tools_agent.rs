@@ -322,6 +322,21 @@ async fn run_subtask(
 /// 事件出口:任务模式经任务事件桥(sink)发 agent_status;聊天路径丢弃
 ///(子任务原本不产生用户可见事件;drain 必须持续消费,rx 关闭会让引擎置 abort)。
 #[allow(clippy::too_many_arguments)]
+/// 子 agent 工具循环的轮次上限(TMR-5,2026-10-19):任务路径继承「不限轮次」,
+/// 聊天路径沿用 `settings.max_tool_rounds`。
+///
+/// 判据是父调用是否携带任务侧预算(`ToolContext.budget`):任务侧装配恒填、聊天侧恒
+/// `None`(PRODCAP-2 的既有不变量),不按 `task:` 前缀嗅探。子 agent 的工具白名单
+/// 只有只读/低风险工具,轮次墙取消后仍受父层步骤墙钟与父循环轮末闸门兜底。
+fn resolve_subagent_max_rounds(is_task_path: bool, configured: u32) -> Option<u32> {
+    if is_task_path {
+        Some(0)
+    } else {
+        Some(configured)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_subtask_with_tools(
     deps: &Arc<ToolDeps>,
     engine: &Arc<crate::agents::engine::AgentEngine>,
@@ -354,15 +369,17 @@ async fn run_subtask_with_tools(
     // 子 agent 恒自动放行白名单工具(名单内视为已授权,与改造前一致);
     // 名单外(模型臆造调用)立即拒绝——子 agent 无 UI 授权上下文。
     let gate = crate::agents::engine::executor::ToolGate::listed(&whitelist);
-    // 设置快照:不留锁跨 await
-    let max_rounds = deps.settings_snapshot().max_tool_rounds;
+    // 设置快照:不留锁跨 await。任务路径(父 budget 存在)继承不限轮次;
+    // 聊天路径保持用户配置的硬上限(TMR-5 修正:此前任务子 agent 仍被 32 轮墙限制)。
+    let max_rounds =
+        resolve_subagent_max_rounds(budget.is_some(), deps.settings_snapshot().max_tool_rounds);
     let params = GenerationParams {
         temperature: 0.7,
         top_p: 0.9,
         max_tokens,
         stop: None,
         tools,
-        max_tool_rounds: Some(max_rounds),
+        max_tool_rounds: max_rounds,
         tool_choice: crate::models::types::ToolChoice::Auto,
         connection_id: None,
         parallel_tool_calls: None,
@@ -884,4 +901,19 @@ pub(super) fn register_todo(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
             })
         }),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_subagent_max_rounds;
+
+    /// TMR-5:任务子 agent 继承「不限轮次」(Some(0) 哨兵),聊天子 agent 仍用设置值。
+    /// 两个方向都钉住,防止只改一侧导致聊天侧失去 32 轮兜底。
+    #[test]
+    fn subagent_rounds_follow_task_path() {
+        assert_eq!(resolve_subagent_max_rounds(true, 32), Some(0));
+        assert_eq!(resolve_subagent_max_rounds(true, 5), Some(0));
+        assert_eq!(resolve_subagent_max_rounds(false, 32), Some(32));
+        assert_eq!(resolve_subagent_max_rounds(false, 5), Some(5));
+    }
 }

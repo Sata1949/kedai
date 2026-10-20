@@ -104,7 +104,8 @@ pub struct UpdateSettingsBody {
     /// 任务模式工具白名单(allowlist 策略生效)
     #[serde(default)]
     pub task_tool_allowlist: Option<Vec<String>>,
-    /// AGENT/CUSTOM 模式工具循环轮次上限(1..=200;缺省保持不变)
+    /// 聊天 AGENT 模式工具循环轮次上限(1..=200;缺省保持不变)。
+    /// 任务模式自 2026-10-19 起取消默认轮次限制,不再消费本设置。
     #[serde(default)]
     pub max_tool_rounds: Option<u32>,
     /// 流程动态调用深度上限(A 批 A3;1..=5)
@@ -1648,6 +1649,16 @@ pub async fn prompt_preview(
             "system",
             5,
             task_prompts::EXECUTOR_TOOL_DISCIPLINE,
+        );
+        // 写盘优先纪律段(TMR-1):同样是**条件注入**——仅当本轮实际下发工作区写工具
+        // (`fs_write`/`fs_edit`/`fs_patch`)时追加。预览按「工具档」形态展示,与上一条
+        // 同口径(见 docs/契约-协议与配置.md 第五节)。
+        push_preview_layer(
+            &mut layers,
+            "task_executor_write_first_discipline",
+            "system",
+            5,
+            task_prompts::EXECUTOR_WRITE_FIRST_DISCIPLINE,
         );
         // 视觉验证纪律段(视觉能力包 D4;修复批次扩充到「任一图像工具」):同样是
         // **条件注入**——仅当本轮工具面含图像工具(视觉三件 ∪ screenshot)时追加在

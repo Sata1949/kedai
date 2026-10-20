@@ -87,14 +87,13 @@ pub(crate) fn compile(
         // 默认(含非法值回退):拒绝危险级;bash 与工作区写/改/补丁工具按工具名开例外
         //(见文件头「bash 例外说明」与「工作区写工具例外说明」),危险动作仍由
         // permissions 的命令级硬门/路径闸门拦截,不因本例外放行。
+        // 写工具名单单一出处在 tool_sets::WORKSPACE_WRITE_TOOLS(勿在此逐名比较)。
         _ => {
             let risk = registry.permissions();
             all.into_iter()
                 .filter(|d| {
                     d.name == crate::tools::bash::TOOL_NAME
-                        || d.name == crate::tools::agent_tools_fs::WRITE_TOOL
-                        || d.name == crate::tools::agent_tools_fs::EDIT_TOOL
-                        || d.name == crate::tools::agent_tools_fs::PATCH_TOOL
+                        || tool_sets::is_workspace_write_tool(&d.name)
                         || risk.risk_for(&d.name) != ToolRisk::Dangerous
                 })
                 .collect()

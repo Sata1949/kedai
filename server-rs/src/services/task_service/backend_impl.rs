@@ -62,6 +62,10 @@ impl TaskStore for TaskService {
     ) -> Result<String, String> {
         TaskService::create_subtask(self, task_id, name, instruction)
     }
+
+    fn file_change_count(&self, task_id: &str) -> usize {
+        crate::services::task_change_service::count_deliverable(&self.db, task_id)
+    }
 }
 
 // ==================== TaskTrace:调用追踪与用量留痕 ====================
@@ -128,6 +132,7 @@ impl TaskPromptKit for TaskService {
         character_id: Option<&str>,
         user_goal: &str,
         has_tools: bool,
+        has_write_tools: bool,
         has_image_tools: bool,
     ) -> String {
         TaskService::assemble_executor_system_prompt(
@@ -137,6 +142,7 @@ impl TaskPromptKit for TaskService {
             character_id,
             user_goal,
             has_tools,
+            has_write_tools,
             has_image_tools,
         )
     }

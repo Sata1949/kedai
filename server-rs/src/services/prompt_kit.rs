@@ -265,6 +265,29 @@ pub fn append_vision_discipline_if_needed(
     true
 }
 
+/// 工作区写工具面的「写盘优先纪律」段追加(TMR-1,2026-10-19):本轮工具面含任一
+/// 工作区写工具(`fs_write`/`fs_edit`/`fs_patch`;判据单一出处
+/// `tool_sets::is_workspace_write_tool`)时,把 `EXECUTOR_WRITE_FIRST_DISCIPLINE`
+/// 追加到 system 末尾。返回是否追加。
+///
+/// 消费点:custom 流程工具节点(`task_engine/custom.rs`,按**实际下发工具**判定);
+/// solo 主循环走 `TaskService::assemble_executor_system_prompt` 的同名布尔入参,
+/// 两处文案与判据都不复制。
+pub fn append_write_first_discipline_if_needed(
+    system: &mut String,
+    defs: &[crate::models::types::ToolDefinition],
+) -> bool {
+    if !defs
+        .iter()
+        .any(|d| crate::tools::tool_sets::is_workspace_write_tool(&d.name))
+    {
+        return false;
+    }
+    system.push_str("\n\n");
+    system.push_str(crate::services::task_core::prompt_consts::EXECUTOR_WRITE_FIRST_DISCIPLINE);
+    true
+}
+
 /// 被上下文预算裁掉的上游产出段的正文标记(二维批次 8)。
 /// 段**标签行保留**、正文替换为本标记——让模型知道「这里原本有内容」而不是静默少一段。
 pub const OMITTED_SEGMENT_MARKER: &str = "(因本节点上下文上限省略)";

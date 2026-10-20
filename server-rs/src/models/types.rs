@@ -293,9 +293,10 @@ pub struct PlanStep {
     /// 挂载子流程的节点上本字段被旁路(子图各节点各自解析自己的连接),配置保留。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_id: Option<String>,
-    /// 节点级工具循环轮次上限(二维批次 5b;None = 用全局 `settings.max_tool_rounds`)。
-    /// 范围 1-200,保存期校验(与设置项同口径)。严格档下无意义——配置保留,
-    /// 与「严格档保留工具配置」同一纪律(见 `is_strict`)。
+    /// 节点级工具循环轮次上限(二维批次 5b;2026-10-19 起 None = **不限轮次**,
+    /// 任务模式不再回退全局 `settings.max_tool_rounds`)。显式 Some(1-200) 仍是
+    /// 该节点作者主动设置的预算;严格档下无意义——配置保留,与「严格档保留工具配置」
+    /// 同一纪律(见 `is_strict`)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tool_rounds: Option<u32>,
     /// 节点级上下文上限(二维批次 8;None = **不裁剪**,与批次 8 之前逐字节一致)。
@@ -571,8 +572,10 @@ pub struct GenerationParams {
     pub stop: Option<Vec<String>>,
     /// 工具定义(function calling);空 = 不启用工具
     pub tools: Vec<ToolDefinition>,
-    /// 工具循环轮次上限(None = 用引擎默认 32)。当前轮工具调用照常执行,
-    /// 达到上限后不再发起新的模型请求;避免 AGENT 模式长链路任务被硬编码 8 轮截断。
+    /// 工具循环轮次上限:None = 引擎默认 32(聊天路径);Some(0) = **不限轮次**
+    /// (任务模式哨兵,2026-10-19);Some(n>0) = 显式上限(聊天设置/custom 节点级)。
+    /// 显式上限达到后不再发起新的模型请求;任务模式取消默认轮次上限后,
+    /// 仍由步骤墙钟预算、空闲超时、语义/重复熔断与取消通道兜底。
     pub max_tool_rounds: Option<u32>,
     /// 工具选择策略;默认 Auto(保持原行为)。None/Required/Function 仅 tools 非空时生效。
     pub tool_choice: ToolChoice,
@@ -894,6 +897,12 @@ pub struct ToolDefinition {
 pub struct ToolBudget {
     /// 任务侧收紧后的语义熔断三值(`0` = 该位关闭,原样保持)
     pub semantic_guard: Option<(usize, usize, usize)>,
+    /// 连续只读工具调用上限(TMR-5;`None`/0 = 关闭)。达到上限先提醒一次,
+    /// 再次达到则中止本步——用于治理「读了 32/80 轮、文件一个没写」的探索空转。
+    ///
+    /// 只有任务侧装配填值;聊天路径 `budget` 恒 `None`。子 agent 继承父值,但工具循环
+    /// 只在闸门名单含工作区写工具时启用本检测,子 agent 的只读白名单会自动关闭它。
+    pub readonly_streak_limit: Option<usize>,
 }
 
 #[derive(Debug, Clone)]

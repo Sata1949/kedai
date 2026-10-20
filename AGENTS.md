@@ -24,6 +24,7 @@
 - 数据流:DB 写入成功后 `TaskService` 经 broadcast 通道发射 `SseEvent::Task`,`GET /api/tasks/events` 转发为 SSE;前端 `web/src/stores/task.ts` 事件驱动精确刷新(无轮询;断线指数退避重连 + 5s 兜底轮询)。新增事件 kind 需前后端四处同步(枚举 `TaskEventKind`/发射点/`web/src/api/types.ts` 的 TS union/store 刷新映射;末项由 `stores/task.ts` 的 `never` 穷尽断言兜底)。
 - 提示词共享原语在 `server-rs/src/services/prompt_kit.rs`(世界书过滤/注入合成/占位符渲染/`untrusted_boundary`),引擎与任务双侧调用,勿在任一侧复制实现。
 - 双模式提示词隔离由类型承载(`RoleplayPromptConfig`/`TaskPromptConfig`,settings.json 线格式不变);新增涉及双模式的设置字段时,继承/隔离规则先读 `docs/契约-协议与配置.md`。
+- **轮次与交付(TMR 批,2026-10-19)**:任务主循环轮次默认不限(`Some(0)` 哨兵,`task_engine/solo.rs`);聊天 AGENT 仍用 `settings.max_tool_rounds`(默认 32);agentgo 子 agent 任务路径继承不限、聊天路径用设置值。任务侧另有连续只读守卫(`ToolBudget.readonly_streak_limit=8`,先提醒再熔断)与文件交付门槛(`task_engine/delivery.rs`:绑定工作区+写工具+Solo/Multi/Team,零文件变更则 Done→Partial)。team 审计/终审经 `task_engine/team_audit.rs` 只读工作区工具核对文件,失败回退纯文本。判据与边界见 `docs/计划.md`「TMR-1~TMR-5」与 `docs/遗留.md` §二十九。
 
 ## 验证命令
 

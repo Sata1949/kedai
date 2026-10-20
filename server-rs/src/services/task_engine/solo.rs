@@ -1,6 +1,6 @@
 // solo 模式:单主 agent 工具自循环——目标直接进 run_tool_loop,工具集按
 // task_tool_policy 编译(默认 deny_dangerous:危险级与元工具除外、bash 例外),
-// 步数上限 max_tool_rounds(docs/功能.md 第一节)。
+// 轮次默认不限(2026-10-19 取消任务模式轮次上限;步骤墙钟/空闲/熔断仍兜底)。
 // 复用聊天引擎 run_tool_loop,不建影子 sessions 行(session_id 用 task: 前缀虚拟 id,
 // llm_requests 落库在引擎侧据此跳过;任务侧追踪走 task_llm_calls,phase=agent)。
 // run_agent_loop 为「单主 agent 工具自循环」共享骨架:solo/multi 执行器与
@@ -102,6 +102,11 @@ pub(crate) async fn run_agent_loop(
     let has_image_tools = allowed
         .iter()
         .any(|n| crate::tools::tool_sets::is_image_tool(n));
+    // 写盘优先纪律的条件(TMR-1):本轮实际下发了工作区写工具才追加。用**实际放行名单**
+    // 判定(与下发给模型的 defs 同源),策略收窄到只读时不会出现「教模型写文件但没工具」。
+    let has_write_tools = allowed
+        .iter()
+        .any(|n| crate::tools::tool_sets::is_workspace_write_tool(n));
     // system 提示词组装:统一走 TaskBackend::assemble_executor_system_prompt
     // (单一实现,宿主侧 prompt.rs);拼装顺序与 untrusted 包裹纪律同 legacy,
     // 勿在本文件复制实现(WP7)。
@@ -111,6 +116,7 @@ pub(crate) async fn run_agent_loop(
         call.character_id.as_deref(),
         &call.goal,
         has_tools,
+        has_write_tools,
         has_image_tools,
     );
 
@@ -137,7 +143,9 @@ pub(crate) async fn run_agent_loop(
         max_tokens: settings.default_max_tokens,
         stop: None,
         tools: policy.defs,
-        max_tool_rounds: Some(settings.max_tool_rounds),
+        // 任务模式取消轮次上限(2026-10-19):0 = 不限;solo/multi/team/plan/followup
+        // 共用本装配点。聊天 AGENT 仍走 settings.max_tool_rounds。
+        max_tool_rounds: Some(0),
         tool_choice: ToolChoice::Auto,
         // 任务级连接(A 批 B1):solo 无节点级连接可配,直接用任务绑定的那条
         // (None = 默认连接,与本批之前一致)
@@ -163,8 +171,13 @@ pub(crate) async fn run_agent_loop(
         agent_depth: 0,
         scope: call.scope.clone(),
         // 任务侧预算载体(PRODCAP-2):子 agent 派发路径(agentgo/subtask)据此
-        // 透传语义熔断三值进子循环;墙钟预算不在其中(父层轮末闸门即上限)
-        budget: Some(ToolBudget { semantic_guard }),
+        // 透传语义熔断三值进子循环;墙钟预算不在其中(父层轮末闸门即上限)。
+        // TMR-5:连续只读检测上限(8 次只读调用)随任务侧装配下发;聊天路径
+        // `budget` 恒 None,行为不变。
+        budget: Some(ToolBudget {
+            semantic_guard,
+            readonly_streak_limit: Some(super::TASK_READONLY_STREAK_LIMIT),
+        }),
     };
     // 事件桥:引擎事件 → 任务事件(agent_status);drain 持续消费到 tx drop。
     // phase/step_index 随桥传入(批次 R4):Token 攒批 delta 携带调用归属,
