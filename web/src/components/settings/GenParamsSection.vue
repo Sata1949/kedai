@@ -285,6 +285,11 @@ const isTaskMode = computed(() => store.appMode === 'task');
         />
         <span class="sv-note">任务侧:无活动自动收尾(默认 900;0 = 关;601-86400)</span>
       </div>
+      <div class="sv-inp-row">
+        <span class="sv-note">
+          任务模式不限轮次；实际停止条件 = 模型收尾 / 单步墙钟 / 空闲超时 / 语义或只读熔断 / 手动停止 / 总预算（可选）。
+        </span>
+      </div>
       <!-- 压缩 + 记忆:仅角色扮演(聊天)消费,任务模式隐藏(TM-SET-3) -->
       <template v-if="!isTaskMode">
       <div class="sv-inp-row">

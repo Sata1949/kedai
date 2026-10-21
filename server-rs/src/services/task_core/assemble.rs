@@ -87,6 +87,7 @@ mod tests {
             status,
             result: result.into(),
             node_id: None,
+            files: Vec::new(),
         }
     }
 

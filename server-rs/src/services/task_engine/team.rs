@@ -13,6 +13,7 @@ use super::context::TaskRunContext;
 use super::executor::{usage_as_output, ModeExecutor};
 use super::solo::{run_agent_loop, AgentLoopCall};
 use crate::agents::engine::AgentEngine;
+use crate::models::ownership::{normalize_workspace_rel, WriteOwnership};
 use crate::models::types::{
     LlmMessage, TaskEventKind, TaskStatus, TaskStep, TaskStepStatus, TokenUsage,
 };
@@ -24,6 +25,7 @@ use crate::services::task_core::prompt_consts::{
 use crate::services::task_core::{fallback_terminal, TaskBackend, TaskGenOutput, TaskTerminal};
 use futures::future::BoxFuture;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -53,6 +55,74 @@ const TEAM_RETRY_MAX_TOKENS_CAP: u32 = 131_072;
 /// 即被截断,自愈翻倍到 20000 重发才成功——首发即给足可省掉这一整个 50 秒左右
 /// 的空烧往返。默认 `default_max_tokens=1024` 时更小,结构化 JSON 必然腰斩。
 const TEAM_STRUCTURED_MIN_TOKENS: u32 = 16384;
+
+/// 每个子目标最多声明的负责文件数(TMR-4;规划器输出不可信,防超长/超量)。
+const TEAM_MAX_DECLARED_FILES_PER_GOAL: usize = 32;
+
+/// 清洗规划器给的 `files`:归一化相对路径、去重、限量;非法项静默丢弃。
+///
+/// 非法项不报错的原因:文件声明是**增强约束**,不是拓扑正确性的前提。规划器偶发
+/// 输出通配符/绝对路径时,丢掉该项仍可用「首写者认领」兜底,不该让整个 team 任务
+/// 因一个路径重跑规划。
+fn sanitize_declared_files(raw: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for item in raw {
+        if out.len() >= TEAM_MAX_DECLARED_FILES_PER_GOAL {
+            break;
+        }
+        let Some(key) = normalize_workspace_rel(&item) else {
+            continue;
+        };
+        if !out.contains(&key) {
+            out.push(key);
+        }
+    }
+    out
+}
+
+/// 由规划器拓扑构造本次 team 运行共享的 `WriteOwnership`。
+///
+/// owner 取稳定的 `主 Agent-{n}`(与提示词/错误文案同一口径);同一文件被多个主
+/// 声明时**首声明胜出**并记 warn——规划器提示词已禁止重叠,这里只做防御,
+/// 不因冲突重新规划。
+fn build_write_ownership(mains: &[TeamMain]) -> Arc<WriteOwnership> {
+    let mut declarations: Vec<(String, String)> = Vec::new();
+    let mut owner_of: HashMap<String, String> = HashMap::new();
+    for (i, m) in mains.iter().enumerate() {
+        let owner = format!("主 Agent-{}", i + 1);
+        for goal in &m.goals {
+            for path in &goal.files {
+                if let Some(first) = owner_of.get(path) {
+                    if first != &owner {
+                        tracing::warn!(
+                            path = path.as_str(),
+                            first_owner = first.as_str(),
+                            ignored_owner = owner.as_str(),
+                            "team 规划器把同一文件声明给了多个主 agent,首声明胜出"
+                        );
+                    }
+                    continue;
+                }
+                owner_of.insert(path.clone(), owner.clone());
+                declarations.push((owner.clone(), path.clone()));
+            }
+        }
+    }
+    Arc::new(WriteOwnership::new(declarations))
+}
+
+/// 一个主 agent 的负责文件并集(去重、保持规划器顺序;提示词与 scope 共用)。
+fn declared_files_of(main: &TeamMain) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for goal in &main.goals {
+        for path in &goal.files {
+            if !out.contains(path) {
+                out.push(path.clone());
+            }
+        }
+    }
+    out
+}
 
 /// 一个主 agent 的分工:分工名 + 子目标(1~4 个)
 #[derive(Debug, Clone)]
@@ -96,7 +166,22 @@ struct TeamTopologyRaw {
 struct TeamMainRaw {
     name: String,
     #[serde(default)]
-    goals: Vec<TaskStep>,
+    goals: Vec<TeamGoalRaw>,
+}
+
+/// 规划器的子目标原始形态(TMR-4:多一个可选的 `files`)。
+///
+/// 独立于 `TaskStep` 而不是直接复用:规划器只该输出 name/goal/files,不该把
+/// `status`/`result`/`node_id` 等运行态字段带进来;`files` 用 Option 接纳模型
+/// 常见的 `"files": null`(直接 `Vec` 会在 null 上整条拓扑解析失败)。
+#[derive(Deserialize)]
+struct TeamGoalRaw {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    goal: String,
+    #[serde(default)]
+    files: Option<Vec<String>>,
 }
 
 /// 解析 team 规划输出:剥 markdown 代码块 → 取首个 '{' 到末个 '}' 子串 → serde 解析;
@@ -125,7 +210,19 @@ fn parse_team_topology(text: &str) -> Result<Vec<TeamMain>, String> {
             goals: m
                 .goals
                 .into_iter()
-                .filter(|g| !g.name.trim().is_empty() || !g.goal.trim().is_empty())
+                .filter_map(|g| {
+                    let name = g.name.trim().to_string();
+                    let goal = g.goal.trim().to_string();
+                    if name.is_empty() && goal.is_empty() {
+                        return None;
+                    }
+                    Some(TaskStep {
+                        name,
+                        goal,
+                        files: sanitize_declared_files(g.files.unwrap_or_default()),
+                        ..TaskStep::default()
+                    })
+                })
                 .collect(),
         })
         .filter(|m| !m.goals.is_empty())
@@ -515,12 +612,20 @@ impl TeamExecutor {
         extra_instruction: Option<&str>,
         goal_filter: Option<&[usize]>,
         prior_seed: Vec<(String, String)>,
+        ownership: Arc<WriteOwnership>,
     ) -> (
         usize,
         Vec<(usize, String, Result<(String, TokenUsage), String>)>,
     ) {
         let n = main_index + 1;
         let session_id = format!("task:{}:main:{}", ctx.task_id, n);
+        // TMR-4:该主自己的负责文件(并集)与带 owner 的 scope。声明只用于所有权
+        // 拦截与提示词;同主多个子目标共用一份声明,避免「子目标 A 写不了自己
+        // 在子目标 B 里声明的总装文件」这种主内摩擦。
+        let declared_files = declared_files_of(main);
+        let scope = ctx.scope.as_ref().map(|base| {
+            base.with_write_ownership(ownership, format!("主 Agent-{n}"), declared_files.clone())
+        });
         let mut results = Vec::with_capacity(main.goals.len());
         // 本主已完成子目标的产出:(子目标名, 产出) —— 注入后续子目标,让同一主内各
         // 子目标在彼此成果上衔接,而非各自重造一整份交付物(实跑问题 2 结构性根因)。
@@ -570,6 +675,17 @@ impl TeamExecutor {
                 g.name,
                 g.goal
             );
+            // TMR-4:把「你负责哪些文件」写进目标文本,让模型在动手前就知道边界;
+            // 运行期还有一道硬拦截(fs_* 调用被拒绝并回灌同一份清单)。
+            if !declared_files.is_empty() {
+                goal.push_str(
+                    "\n你负责的文件(工作区相对路径;只能写这些,其他文件由别的主 agent 负责):\n",
+                );
+                for path in &declared_files {
+                    goal.push_str(&format!("- {path}\n"));
+                }
+                goal.push_str("若必须改动未列出的文件,请在结果正文说明原因与建议,不要直接覆盖。\n");
+            }
             // 同主前序产出:仅供衔接与保持一致,明确禁止整篇复述或另造版本
             if !prior.is_empty() {
                 goal.push_str(
@@ -595,8 +711,9 @@ impl TeamExecutor {
                 step_index: Some(step_idxs[k]),
                 label: format!("主 agent {n} 子目标 {}", k + 1),
                 connection_id: ctx.connection_id.clone(),
-                // 工作区作用域(编码通道批次 1):各主 agent 共享同一任务的工作区
-                scope: ctx.scope.clone(),
+                // 工作区作用域(编码通道批次 1):各主共享同一工作区;
+                // TMR-4 起再带本主的写入者身份与负责文件(所有权拦截用)。
+                scope: scope.clone(),
                 // 任务级总预算(PRODCAP-2):各主 agent 的循环同受截止期约束
                 deadline: ctx.deadline,
             };
@@ -623,6 +740,8 @@ impl TeamExecutor {
         // ===== a. 规划器:自动拓扑(reset_task 已置 planning;规划阶段归执行器所有) =====
         svc.set_status(&ctx.task_id, TaskStatus::Planning);
         let (mains, plan_out) = self.plan_team(&ctx).await?;
+        // TMR-4:声明表只构造一次,首轮与补做轮共用(认领记录也随之延续)。
+        let ownership = build_write_ownership(&mains);
         svc.record_usage(&ctx.task_id, "planner", None, &plan_out);
         total.prompt_tokens += plan_out.prompt_tokens;
         total.completion_tokens += plan_out.completion_tokens;
@@ -645,6 +764,7 @@ impl TeamExecutor {
                     status: TaskStepStatus::Pending,
                     result: String::new(),
                     node_id: None,
+                    files: g.files.clone(),
                 });
             }
             step_ranges.push(idxs);
@@ -654,7 +774,15 @@ impl TeamExecutor {
 
         // ===== b. 各主 agent 并行(JoinSet;独立 run_id/虚拟 session,cancel 同源) =====
         let (mut outputs, cancelled) = self
-            .run_mains_parallel(&ctx, &mains, &step_ranges, &mut plan, &mut total, None)
+            .run_mains_parallel(
+                &ctx,
+                &mains,
+                &step_ranges,
+                &mut plan,
+                &mut total,
+                None,
+                &ownership,
+            )
             .await;
         if cancelled {
             return Err("任务已停止".into());
@@ -769,6 +897,7 @@ impl TeamExecutor {
                     &mut plan,
                     &mut total,
                     Some(&verdict.kickbacks),
+                    &ownership,
                 )
                 .await;
             outputs = new_outputs;
@@ -983,6 +1112,7 @@ impl TeamExecutor {
         plan: &mut [TaskStep],
         total: &mut TokenUsage,
         kickbacks: Option<&[Kickback]>,
+        ownership: &Arc<WriteOwnership>,
     ) -> (Vec<Option<String>>, bool) {
         let svc = &self.svc;
         // 确定本轮要跑的主 agent 子集:(主序号, 补做指令, 限定的子目标下标集)。
@@ -1084,6 +1214,7 @@ impl TeamExecutor {
             };
             let main = mains[i].clone();
             let step_idxs = step_ranges[i].clone();
+            let ownership = ownership.clone();
             join.spawn(async move {
                 this.run_main(
                     &ctx2,
@@ -1093,6 +1224,7 @@ impl TeamExecutor {
                     extra.as_deref(),
                     goal_filter.as_deref(),
                     prior_seed,
+                    ownership,
                 )
                 .await
             });
@@ -1371,6 +1503,56 @@ mod tests {
         assert_eq!(mains[1].name, "写作");
     }
 
+    /// TMR-4:files 声明被解析、归一化、去重;null 容错;非法路径/通配符丢弃。
+    #[test]
+    fn parse_team_topology_declares_files() {
+        let text = r#"{"mains":[{"name":"甲","goals":[{"name":"a","goal":"写 a","files":["./parts/a.js","parts/a.js","../escape.js","C:/abs.js","src/*.js","parts/b.js"]},{"name":"b","goal":"无文件","files":null},{"name":"c","goal":"缺省"}]}]}"#;
+        let mains = parse_team_topology(text).unwrap();
+        assert_eq!(
+            mains[0].goals[0].files,
+            vec!["parts/a.js", "parts/b.js"],
+            "files 应归一化、去重、丢弃非法项"
+        );
+        assert!(mains[0].goals[1].files.is_empty(), "null 应按空数组处理");
+        assert!(
+            mains[0].goals[2].files.is_empty(),
+            "缺省 files 应按空数组处理"
+        );
+    }
+
+    /// TMR-4:同一文件被多个主声明时首声明胜出;未声明文件由运行期首写者认领。
+    #[test]
+    fn build_write_ownership_keeps_first_declaration() {
+        let mains = vec![
+            TeamMain {
+                name: "甲".into(),
+                goals: vec![TaskStep {
+                    name: "a".into(),
+                    goal: "x".into(),
+                    files: vec!["shared.js".into()],
+                    ..TaskStep::default()
+                }],
+            },
+            TeamMain {
+                name: "乙".into(),
+                goals: vec![TaskStep {
+                    name: "b".into(),
+                    goal: "y".into(),
+                    files: vec!["shared.js".into(), "parts/b.js".into()],
+                    ..TaskStep::default()
+                }],
+            },
+        ];
+        let ownership = build_write_ownership(&mains);
+        assert_eq!(ownership.declared_owner("shared.js"), Some("主 Agent-1"));
+        assert_eq!(ownership.declared_owner("parts/b.js"), Some("主 Agent-2"));
+        assert_eq!(
+            ownership.reserve("主 Agent-2", "shared.js"),
+            Err("主 Agent-1".to_string()),
+            "重复声明时首声明胜出"
+        );
+    }
+
     /// 剥 markdown 代码块 + 前言后记容忍
     #[test]
     fn parse_team_topology_fenced_and_prose() {
@@ -1612,6 +1794,7 @@ mod tests {
                 status: TaskStepStatus::Done,
                 result: "产出甲一".into(),
                 node_id: None,
+                files: Vec::new(),
             },
             TaskStep {
                 name: "【主Agent-1】子二".into(),
@@ -1619,6 +1802,7 @@ mod tests {
                 status: TaskStepStatus::Error,
                 result: "上游抖动".into(),
                 node_id: None,
+                files: Vec::new(),
             },
             TaskStep {
                 name: "【主Agent-2】子三".into(),
@@ -1626,6 +1810,7 @@ mod tests {
                 status: TaskStepStatus::Error,
                 result: "也失败了".into(),
                 node_id: None,
+                files: Vec::new(),
             },
         ];
         let outputs = rebuild_outputs(&mains, &step_ranges, &plan);
@@ -1654,6 +1839,7 @@ mod tests {
                 status,
                 result: String::new(),
                 node_id: None,
+                files: Vec::new(),
             }
         }
         let mut plan = vec![
@@ -1692,6 +1878,7 @@ mod tests {
             status,
             result: "r".into(),
             node_id: None,
+            files: Vec::new(),
         };
         let plan = vec![
             mk("【主Agent-1】子一", TaskStepStatus::Done),
@@ -1722,6 +1909,7 @@ mod tests {
                 status: TaskStepStatus::Done,
                 result: "甲产出".into(),
                 node_id: None,
+                files: Vec::new(),
             },
             TaskStep {
                 name: "【主Agent-1】子二".into(),
@@ -1729,6 +1917,7 @@ mod tests {
                 status: TaskStepStatus::Done,
                 result: "旧乙产出".into(),
                 node_id: None,
+                files: Vec::new(),
             },
             TaskStep {
                 name: "【主Agent-1】子三".into(),
@@ -1736,6 +1925,7 @@ mod tests {
                 status: TaskStepStatus::Error,
                 result: "失败".into(),
                 node_id: None,
+                files: Vec::new(),
             },
         ];
         let step_ranges = vec![vec![0, 1, 2]];

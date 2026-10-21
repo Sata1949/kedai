@@ -1091,3 +1091,17 @@ async fn executor_tool_discipline_injected_only_for_tool_executors() {
         "legacy 步骤没有工具,不得注入工具纪律段: {step_result}"
     );
 }
+
+/// TMR-6:未绑定工作区的任务不做文件交付校验,详情顶层 `delivery` 为 null
+/// (与 workspace_profile 同款可选语义;旧前端/旧服务端按 optional 容错)。
+#[tokio::test]
+async fn task_detail_delivery_is_null_without_workspace() {
+    let app = test_app();
+    let id = create_task(app, "无工作区交付摘要").await;
+    let (status, json) = send_json(app, "GET", &format!("/api/tasks/{id}"), json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        json["delivery"].is_null(),
+        "未绑定工作区时 delivery 应为 null: {json}"
+    );
+}

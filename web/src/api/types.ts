@@ -1077,6 +1077,13 @@ export interface TaskStep {
    * 「这一行是哪个节点」只能靠它(遗留.md IFW-5)。
    */
   node_id?: string | null;
+  /**
+   * 本步骤声明负责的工作区相对文件（TMR-4；team 规划器写入，其余模式不下发此键）。
+   *
+   * 运行期按它做文件级所有权拦截；TMR-6 的交付摘要「必需文件」也来自这里。
+   * 后端空数组时整键省略，故消费侧按可选容错。
+   */
+  files?: string[];
 }
 
 /** 任务状态:待执行/规划中/执行中/计划待批准(plan 模式)/完成/部分完成(含失败步骤但成果已产出)/出错/已停止 */
@@ -1243,6 +1250,31 @@ export interface WorkspaceProfile {
 }
 
 /** 任务详情(含子任务与该任务 token 累计;批次 R2 起携 messages 用户指令历史) */
+/** 交付摘要里的单个必需文件（TMR-6；路径已归一化为工作区相对路径） */
+export interface TaskDeliveryFile {
+  path: string;
+  /** 规划器里的步骤名（含「【主Agent-N】」前缀） */
+  owner: string;
+  /** 磁盘上当前是否存在（is_file）；工作区不可访问时为 false */
+  exists: boolean;
+}
+
+/**
+ * 任务交付摘要（TMR-6；GET /api/tasks/{id} 顶层 `delivery`）。
+ *
+ * - `checked=false`：本任务未声明必需文件，只按「本次有没有文件变更」弱校验；
+ * - `workspace_available=false`：工作区当前不可访问，`missing` 为空不代表齐全；
+ * - `changed` 只列去重后的前 200 条，总数看 `changed_count`。
+ */
+export interface TaskDeliverySummary {
+  checked: boolean;
+  workspace_available: boolean;
+  required: TaskDeliveryFile[];
+  missing: string[];
+  changed: string[];
+  changed_count: number;
+}
+
 export interface TaskDetail {
   task: TaskRecord;
   subtasks: TaskSubtask[];
@@ -1259,6 +1291,11 @@ export interface TaskDetail {
    * 由后端**实时**探测(不落库),故目录内容变化后刷新即得新结果。
    */
   workspace_profile?: WorkspaceProfile | null;
+  /**
+   * 交付摘要（TMR-6）；未绑定工作区、或旧服务端 → `null`/缺失。
+   * 读时合成，不落库；工作区变化后刷新即反映当前状态。
+   */
+  delivery?: TaskDeliverySummary | null;
 }
 
 /**

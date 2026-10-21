@@ -320,6 +320,112 @@ async fn task_team_audit_uses_readonly_workspace_tools() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
+/// TMR-4:规划器声明的 `files` 必须落进 plan;跨主写同一声明文件时,声明归属者的
+/// 内容胜出(另一主被所有权拦截,不落盘)。用两个主写同一 `a.txt`、内容不同来区分:
+/// 若无所有权,最终内容取决于并行顺序;有所有权则恒为主 Agent-1 的版本。
+#[tokio::test]
+async fn task_team_plan_carries_files_and_declared_owner_wins() {
+    let app = test_app();
+    let ws = temp_workspace("team-files");
+
+    let title = concat!(
+        r#"[[reply_if:团队规划器|{"mains":["#,
+        r#"{"name":"甲","goals":[{"name":"写A","goal":"\u005b\u005btool:fs_write {\"path\":\"a.txt\",\"content\":\"from-main-1\"}\u005d\u005d \u005b\u005breply:主一产出\u005d\u005d","files":["a.txt"]}]},"#,
+        r#"{"name":"乙","goals":[{"name":"写A2","goal":"\u005b\u005btool:fs_write {\"path\":\"a.txt\",\"content\":\"from-main-2\"}\u005d\u005d \u005b\u005breply:主二产出\u005d\u005d","files":[]}]}"#,
+        r#" ]}]]"#,
+        r#"[[reply_if:团队审计员|{"通过":true,"打回":[],"结论":"通过"}]]"#,
+        r#"[[reply_if:任务汇总者|团队最终成果]]"#,
+        " 文件所有权目标"
+    );
+    let id = create_task_with_mode_workspace(app, title, "team", &ws).await;
+    let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
+
+    let (st, detail) = wait_terminal(app, &id).await;
+    assert_eq!(st, "done", "team 任务应完成,详情: {detail}");
+
+    // 声明随 plan 落库并下发(空数组整键省略)
+    let plan = detail["task"]["plan"].as_array().expect("plan 应为数组");
+    assert_eq!(plan.len(), 2, "应有两步: {plan:?}");
+    assert_eq!(plan[0]["files"], json!(["a.txt"]), "声明应随 plan 下发");
+    assert!(
+        plan[1].get("files").is_none() || plan[1]["files"] == json!([]),
+        "空声明应按省略/空数组处理: {:?}",
+        plan[1]
+    );
+
+    // 声明归属者胜出:主 2 的越权写必须被拒,文件内容保持主 1 版本
+    assert_eq!(
+        std::fs::read_to_string(ws.join("a.txt")).expect("a.txt 应存在"),
+        "from-main-1",
+        "跨主越权写不得覆盖声明归属者的内容"
+    );
+
+    // TMR-6 交付摘要:必需文件齐全、有变更、无缺失
+    let delivery = &detail["delivery"];
+    assert_eq!(
+        delivery["checked"],
+        json!(true),
+        "有声明时 checked=true: {delivery}"
+    );
+    let required = delivery["required"].as_array().expect("required 应为数组");
+    assert_eq!(required.len(), 1, "必需文件应去重: {required:?}");
+    assert_eq!(required[0]["path"], "a.txt");
+    assert_eq!(required[0]["exists"], json!(true));
+    assert_eq!(delivery["missing"], json!([]), "不应有缺失: {delivery}");
+    assert!(
+        delivery["changed"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|p| p == "a.txt")),
+        "变更清单应含 a.txt: {delivery}"
+    );
+    assert!(
+        delivery["changed_count"].as_u64().unwrap_or(0) >= 1,
+        "变更总数应 ≥1: {delivery}"
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// TMR-6:规划器声明了两个必需文件,主 agent 只写了一个 → 终态 partial,
+/// `tasks.error` 点名缺失文件,交付摘要的 missing 与磁盘一致。
+#[tokio::test]
+async fn task_team_missing_required_file_becomes_partial() {
+    let app = test_app();
+    let ws = temp_workspace("team-missing-file");
+
+    let title = concat!(
+        r#"[[reply_if:团队规划器|{"mains":["#,
+        r#"{"name":"甲","goals":[{"name":"写A","goal":"\u005b\u005btool:fs_write {\"path\":\"a.txt\",\"content\":\"only-a\"}\u005d\u005d \u005b\u005breply:主一产出\u005d\u005d","files":["a.txt","b.txt"]}]}"#,
+        r#" ]}]]"#,
+        r#"[[reply_if:团队审计员|{"通过":true,"打回":[],"结论":"通过"}]]"#,
+        r#"[[reply_if:任务汇总者|团队最终成果]]"#,
+        " 必需文件缺失目标"
+    );
+    let id = create_task_with_mode_workspace(app, title, "team", &ws).await;
+    let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
+
+    let (st, detail) = wait_terminal(app, &id).await;
+    assert_eq!(st, "partial", "缺少必需文件必须降 partial: {detail}");
+    let error = detail["task"]["error"].as_str().unwrap_or("");
+    assert!(error.contains("缺少必需文件"), "error 应点名缺失: {error}");
+    assert!(error.contains("b.txt"), "error 应点名 b.txt: {error}");
+
+    let delivery = &detail["delivery"];
+    assert_eq!(delivery["checked"], json!(true));
+    assert_eq!(
+        delivery["missing"],
+        json!(["b.txt"]),
+        "缺失清单: {delivery}"
+    );
+    let required = delivery["required"].as_array().expect("required 应为数组");
+    assert_eq!(required.len(), 2, "两个声明都应下发: {required:?}");
+    assert_eq!(required[1]["exists"], json!(false));
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
 /// team 模式:自动拓扑(规划器拆 2 主 agent,步骤名带【主Agent-N】前缀)→ 两主并行
 ///(goal 内嵌 \[ \] 转义的 reply 钩子确定性产出)→ 审计通过 → 升华整合;
 /// result 含「## 审计结论」段(前端拆卡契约);调用追踪覆盖 planner/agent/audit/summary。
