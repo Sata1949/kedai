@@ -680,7 +680,18 @@ impl TaskService {
                     "模型调用超过 {}s 未完成(上游停滞或接口占用),已中止;可重新执行任务",
                     limit.as_secs()
                 );
-                // 超时发生在 connector 读锁获取前后,model 未知,记空串
+                // 超时发生在 connector 读锁获取前后,model 未知,记空串。
+                // TMR3-2:已收到的 Usage 分块仍要入账(此前失败行记 None,消耗不可见)。
+                let out = TaskGenOutput {
+                    text: String::new(),
+                    finish_reason: finish_reason.clone(),
+                    prompt_tokens,
+                    completion_tokens,
+                    reasoning_tokens,
+                    reasoning_chars,
+                    tool_calls: Vec::new(),
+                    dropped_tool_calls,
+                };
                 self.record_llm_call(
                     task_id,
                     phase,
@@ -688,10 +699,11 @@ impl TaskService {
                     "",
                     &messages,
                     &err,
-                    None,
+                    Some(&out),
                     started.elapsed(),
                     "error",
                 );
+                self.record_usage(task_id, phase, step_index, &out);
                 return Err(err);
             }
         };
@@ -699,6 +711,17 @@ impl TaskService {
             // 任务侧的调用追踪/步骤 result 是字符串契约(task_llm_calls 无分类列),
             // 故上游分类在 `call` 内即折算为文案(连接解析失败也走这一条),
             // 分类本身只服务聊天 SSE 的错误终态。
+            // TMR3-2:失败调用已收到的 Usage 分块照常入账(此前记 None)。
+            let out = TaskGenOutput {
+                text: String::new(),
+                finish_reason: finish_reason.clone(),
+                prompt_tokens,
+                completion_tokens,
+                reasoning_tokens,
+                reasoning_chars,
+                tool_calls: Vec::new(),
+                dropped_tool_calls,
+            };
             self.record_llm_call(
                 task_id,
                 phase,
@@ -706,10 +729,11 @@ impl TaskService {
                 &model,
                 &messages,
                 &msg,
-                None,
+                Some(&out),
                 started.elapsed(),
                 "error",
             );
+            self.record_usage(task_id, phase, step_index, &out);
             return Err(msg);
         }
         let out = TaskGenOutput {

@@ -137,6 +137,8 @@ pub(crate) async fn generate_with_readonly_tools(
         .map(|(_, m)| m)
         .unwrap_or_else(|_| engine.model());
     let mut usage = TokenUsage::default();
+    // TMR3-2:截断自愈留痕由调用方持有,失败路径也能补落(不再随 Err 丢弃)
+    let mut self_heals = Vec::new();
     let started = Instant::now();
     let result = run_tool_loop(
         engine,
@@ -150,6 +152,7 @@ pub(crate) async fn generate_with_readonly_tools(
         &ctx.cancel,
         &flag,
         &mut usage,
+        &mut self_heals,
         &run_id,
         ToolGate::listed(&allowed),
         None,
@@ -162,6 +165,15 @@ pub(crate) async fn generate_with_readonly_tools(
 
     match result {
         Ok(res) => {
+            // TMR3-2:截断自愈留痕与 usage 同口径补落(审计成功后仍可回看截断细节)
+            svc.record_self_heals(
+                &ctx.task_id,
+                phase,
+                None,
+                &model,
+                &messages,
+                &super::executor::to_self_heals(&res.self_heals),
+            );
             let text = res.content.trim().to_string();
             let status = if text.is_empty() { "empty" } else { "ok" };
             let mut out = super::executor::usage_as_output(&usage);
@@ -232,19 +244,35 @@ pub(crate) async fn generate_with_readonly_tools(
             Ok(out)
         }
         Err(e) => {
+            // TMR3-2:审计失败循环已消耗的 token 与截断自愈此前完全不入账;
+            // 现在与 solo/multi 同口径:自愈行 + 错误行 + usage 三者求和一致。
+            let msg = e.message().to_string();
+            svc.record_self_heals(
+                &ctx.task_id,
+                phase,
+                None,
+                &model,
+                &messages,
+                &super::executor::to_self_heals(&self_heals),
+            );
+            let out = super::executor::usage_as_output(&usage);
             svc.record_llm_call(
                 &ctx.task_id,
                 phase,
                 None,
                 &model,
                 &messages,
-                "",
-                None,
+                &msg,
+                Some(&out),
                 elapsed,
                 "error",
             );
+            svc.record_usage(&ctx.task_id, phase, None, &out);
+            total.prompt_tokens += out.prompt_tokens;
+            total.completion_tokens += out.completion_tokens;
+            total.total_tokens += out.prompt_tokens + out.completion_tokens;
             let _ = state_machine.transition(AgentState::Error, &session_id);
-            Err(e.message().to_string())
+            Err(msg)
         }
     }
 }

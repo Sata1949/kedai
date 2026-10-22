@@ -212,6 +212,9 @@ pub(crate) async fn run_agent_loop(
         call.step_index,
     );
     let mut total_usage = TokenUsage::default();
+    // TMR3-2:截断自愈留痕由本函数持有,成功/失败都能补落调用行与 usage
+    // (失败路径此前随 Err 丢弃,自愈重发的 token 两头都不记)。
+    let mut self_heals = Vec::new();
     let started = Instant::now();
     // Idle → Executing 为任务/工具路径的合法首迁(无独立规划阶段,见 state_machine.rs);
     // 仍记录非法迁移,避免静默吞掉状态机校验结果。
@@ -230,6 +233,7 @@ pub(crate) async fn run_agent_loop(
         &cancel,
         &flag,
         &mut total_usage,
+        &mut self_heals,
         &run_id,
         gate,
         // 单次调用超时覆盖(A 批 A1):solo 无节点级配置,恒走宿主既有判定
@@ -314,6 +318,7 @@ pub(crate) async fn run_agent_loop(
                 &cancel,
                 &flag,
                 &mut total_usage,
+                &mut self_heals,
                 &run_id,
                 retry_gate,
                 None,
@@ -397,24 +402,34 @@ pub(crate) async fn run_agent_loop(
             if let Err(e) = state_machine.transition(AgentState::Finished, &call.session_id) {
                 tracing::warn!(error = %e, session = %call.session_id, "状态迁移被拒");
             }
-            // PRODCAP-2:本步被墙钟预算收尾且任务级截止期已过 → 收尾的真实约束来源是
-            // 「任务总预算」(引擎事件只报被收窄后的本步数字,不复述总预算)。补一条任务侧
-            // 事件说明成因;单步预算自行到点(截止期未过)不补,保持既有事件形态不变。
+            // PRODCAP-2/TMR3-4:本步被墙钟预算收尾且截止期已过 → 收尾的真实约束来源是
+            // 「任务总预算」或「团队总预算」(引擎事件只报被收窄后的本步数字,不复述总预算)。
+            // 这里用中性「预算截止期」措辞:调用点不知道截止期来自哪一档,团队侧会另行
+            // 补一条「团队总预算用尽」事件说明成因;单步预算自行到点(截止期未过)不补。
             if res.budget_stopped && super::deadline_exhausted(call.deadline) {
                 svc.emit_event(
                     TaskEventKind::Status,
                     &call.task_id,
                     None,
                     None,
-                    Some("任务总预算用尽:工具循环在任务总预算处收尾,已保留本轮产出".into()),
+                    Some("预算截止期用尽:工具循环在预算截止处收尾,已保留本轮产出".into()),
                 );
             }
             Ok((text, total_usage))
         }
-        Ok(_) => {
+        Ok(res) => {
             // 中断(用户 stop):与 legacy 的 connector Err 同款记 error 行。
             // P0-1:行内带「本次增量」usage;usage_total 用整轮累计补记
             // (空正文重试过时,首轮行已单独落库,增量才不会双计)。
+            // TMR3-2:中断前发生的截断自愈同样要落行与 usage。
+            svc.record_self_heals(
+                &call.task_id,
+                call.phase,
+                call.step_index,
+                &model,
+                &messages,
+                &super::executor::to_self_heals(&res.self_heals),
+            );
             let out = usage_as_output(&row_usage);
             svc.record_llm_call(
                 &call.task_id,
@@ -439,6 +454,15 @@ pub(crate) async fn run_agent_loop(
             let msg = e.message().to_string();
             // P0-1:错误循环的已累计 token 必须落账(2026-10-21 实测:234 轮失败循环
             // 被记成 0 token)。行内用增量,usage_total 用整轮累计,保持调用行求和口径。
+            // TMR3-2:失败前发生的截断自愈也要补落(此前随 Err 丢弃)。
+            svc.record_self_heals(
+                &call.task_id,
+                call.phase,
+                call.step_index,
+                &model,
+                &messages,
+                &super::executor::to_self_heals(&self_heals),
+            );
             let out = usage_as_output(&row_usage);
             svc.record_llm_call(
                 &call.task_id,

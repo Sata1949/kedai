@@ -424,6 +424,8 @@ async fn run_subtask_with_tools(
         _ => spawn_discard_sink(),
     };
     let mut total_usage = crate::models::types::TokenUsage::default();
+    // TMR3-2:截断自愈留痕由调用方持有,失败路径也能补落(不再随 Err 丢弃)
+    let mut self_heals = Vec::new();
     let started = std::time::Instant::now();
     let result = run_tool_loop(
         engine,
@@ -437,6 +439,7 @@ async fn run_subtask_with_tools(
         &cancel,
         &flag,
         &mut total_usage,
+        &mut self_heals,
         &run_id,
         gate,
         // 单次调用超时覆盖(A 批 A1):子 agent 无节点级配置,恒走宿主既有判定
@@ -451,36 +454,39 @@ async fn run_subtask_with_tools(
     if let (Some(svc), Some(tid)) = (&svc, &task_ref) {
         let model = engine.model();
         // 截断自愈留痕落库(问题①,与 solo.rs run_agent_loop 同口径):
-        // 被截断的那次调用补落一行 status=error,再落最终行
-        if let Ok(res) = &result {
-            for heal in &res.self_heals {
-                let heal_out = crate::services::task_service::TaskGenOutput {
-                    text: String::new(),
-                    finish_reason: heal.finish_reason.clone(),
-                    prompt_tokens: heal.prompt_tokens,
-                    completion_tokens: heal.completion_tokens,
-                    reasoning_tokens: 0,
-                    reasoning_chars: 0,
-                    tool_calls: Vec::new(),
-                    dropped_tool_calls: 0,
-                };
-                svc.record_llm_call(
-                    tid,
-                    "subagent",
-                    None,
-                    &model,
-                    messages,
-                    &format!(
-                        "(截断自愈){},输出上限翻倍至 {} 重发",
-                        heal.note, heal.retried_max_tokens
-                    ),
-                    Some(&heal_out),
-                    std::time::Duration::ZERO,
-                    "error",
-                );
-                // 补落被截断那次调用的 usage(2026-09-10 实测修复,口径同 solo.rs)
-                svc.record_usage(tid, "subagent", None, &heal_out);
-            }
+        // 被截断的那次调用补落一行 status=error,再落最终行。
+        // TMR3-2:失败路径同样补落(以前只看 Ok 分支,失败循环的自愈 token 直接丢)。
+        let heal_records = match &result {
+            Ok(res) => res.self_heals.as_slice(),
+            Err(_) => self_heals.as_slice(),
+        };
+        for heal in heal_records {
+            let heal_out = crate::services::task_service::TaskGenOutput {
+                text: String::new(),
+                finish_reason: heal.finish_reason.clone(),
+                prompt_tokens: heal.prompt_tokens,
+                completion_tokens: heal.completion_tokens,
+                reasoning_tokens: 0,
+                reasoning_chars: 0,
+                tool_calls: Vec::new(),
+                dropped_tool_calls: 0,
+            };
+            svc.record_llm_call(
+                tid,
+                "subagent",
+                None,
+                &model,
+                messages,
+                &format!(
+                    "(截断自愈){},输出上限翻倍至 {} 重发",
+                    heal.note, heal.retried_max_tokens
+                ),
+                Some(&heal_out),
+                std::time::Duration::ZERO,
+                "error",
+            );
+            // 补落被截断那次调用的 usage(2026-09-10 实测修复,口径同 solo.rs)
+            svc.record_usage(tid, "subagent", None, &heal_out);
         }
         let (response, out, status) = match &result {
             Ok(res) if !res.interrupted => {
@@ -499,9 +505,37 @@ async fn run_subtask_with_tools(
                 };
                 (text, Some(out), status)
             }
-            Ok(_) => ("(已中断)".to_string(), None, "error"),
+            // 中断/失败:错误行也带已累计 token,并同步落 usage_total(TMR3-2:
+            // 子 agent 失败循环此前只落调用行、token 记为 0,消耗完全不可见)。
+            Ok(_) => (
+                "(已中断)".to_string(),
+                Some(crate::services::task_service::TaskGenOutput {
+                    text: String::new(),
+                    finish_reason: None,
+                    prompt_tokens: total_usage.prompt_tokens,
+                    completion_tokens: total_usage.completion_tokens,
+                    reasoning_tokens: 0,
+                    reasoning_chars: 0,
+                    tool_calls: Vec::new(),
+                    dropped_tool_calls: 0,
+                }),
+                "error",
+            ),
             // 子任务追踪是字符串契约,分类在此落回文案
-            Err(e) => (e.message().to_string(), None, "error"),
+            Err(e) => (
+                e.message().to_string(),
+                Some(crate::services::task_service::TaskGenOutput {
+                    text: String::new(),
+                    finish_reason: None,
+                    prompt_tokens: total_usage.prompt_tokens,
+                    completion_tokens: total_usage.completion_tokens,
+                    reasoning_tokens: 0,
+                    reasoning_chars: 0,
+                    tool_calls: Vec::new(),
+                    dropped_tool_calls: 0,
+                }),
+                "error",
+            ),
         };
         svc.record_llm_call(
             tid,
@@ -514,7 +548,7 @@ async fn run_subtask_with_tools(
             started.elapsed(),
             status,
         );
-        // usage 仅成功调用落库(对齐 legacy:失败/中断不记 task_usage 行)
+        // usage 与调用行同口径:成功/失败/中断都落 task_usage(失败也有已累计消耗)
         if let Some(out) = &out {
             svc.record_usage(tid, "subagent", None, out);
         }

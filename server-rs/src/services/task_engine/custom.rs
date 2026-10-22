@@ -427,6 +427,8 @@ impl CustomExecutor {
             Some(step_index),
         );
         let mut total_usage = TokenUsage::default();
+        // TMR3-2:截断自愈留痕由调用方持有,失败/中断也能补落(不再随 Err 丢弃)
+        let mut self_heals = Vec::new();
         let started = Instant::now();
         // 节点级单次调用超时(A 批 A1):None = 宿主既有 300s 看门狗(行为不变),
         // Some = 覆盖该值(工具循环**逐轮**各按它计,与宿主既有粒度一致)。
@@ -445,6 +447,7 @@ impl CustomExecutor {
             &ctx.cancel,
             &flag,
             &mut total_usage,
+            &mut self_heals,
             &run_id,
             gate,
             call_timeout,
@@ -496,7 +499,17 @@ impl CustomExecutor {
                 );
                 Ok((text, total_usage))
             }
-            Ok(_) => {
+            Ok(res) => {
+                // TMR3-2:中断前的截断自愈同样落行与 usage;失败路径不再记 0 token。
+                self.svc.record_self_heals(
+                    &ctx.task_id,
+                    phase,
+                    Some(step_index),
+                    &model,
+                    messages,
+                    &super::executor::to_self_heals(&res.self_heals),
+                );
+                let out = super::executor::usage_as_output(&total_usage);
                 self.svc.record_llm_call(
                     &ctx.task_id,
                     phase,
@@ -504,16 +517,28 @@ impl CustomExecutor {
                     &model,
                     messages,
                     "(已中断)",
-                    None,
+                    Some(&out),
                     elapsed,
                     "error",
                 );
+                self.svc
+                    .record_usage(&ctx.task_id, phase, Some(step_index), &out);
                 Err("任务已停止".into())
             }
             Err(e) => {
                 // 步骤执行器对外契约是字符串错误(步骤 result/追踪列),分类在此落回文案;
                 // 分类只服务聊天路径的 SSE 错误终态。
                 let msg = e.message().to_string();
+                // TMR3-2:失败前发生的截断自愈与已累计 token 都要入账。
+                self.svc.record_self_heals(
+                    &ctx.task_id,
+                    phase,
+                    Some(step_index),
+                    &model,
+                    messages,
+                    &super::executor::to_self_heals(&self_heals),
+                );
+                let out = super::executor::usage_as_output(&total_usage);
                 self.svc.record_llm_call(
                     &ctx.task_id,
                     phase,
@@ -521,10 +546,12 @@ impl CustomExecutor {
                     &model,
                     messages,
                     &msg,
-                    None,
+                    Some(&out),
                     elapsed,
                     "error",
                 );
+                self.svc
+                    .record_usage(&ctx.task_id, phase, Some(step_index), &out);
                 Err(msg)
             }
         }

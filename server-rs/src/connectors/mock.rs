@@ -9,6 +9,8 @@
 // [[tool:]] 在 mock 的「空列表=全放行」语义下无法区分步骤)。
 use crate::models::llm_error::{LlmError, LlmErrorKind};
 use crate::models::types::{GenerationParams, LlmMessage, LlmStreamChunk, ToolCallArgs};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::watch;
 
@@ -78,6 +80,21 @@ impl MockConnector {
             .find(|m| m.role == "user")
             .map(|m| m.content.clone())
             .unwrap_or_default();
+        // 测试钩子:[[fail_times:N 消息@分类]] → 前 N 次请求失败,之后落回其它钩子
+        // (通常 `[[reply:...]]`)。TMR3-1 单次调用重试的端到端用例需要「先失败、
+        // 重试后成功」;`[[fail:]]` 恒失败,构造不出这个形态。
+        // 计数按 marker 全文存进程内 map:测试须使用唯一文案,避免并行用例互相影响。
+        if let Some((key, n, msg)) = extract_fail_times_marker(&last_user) {
+            let mut map = fail_times_remaining()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let left = map.entry(key).or_insert(n);
+            if *left > 0 {
+                *left -= 1;
+                let (msg, kind) = split_fail_kind(&msg);
+                return Err(LlmError::new(kind, msg));
+            }
+        }
         // 测试钩子:[[fail:消息]] → 模拟模型请求失败(顶层错误终态测试用;
         // 上游错误应产生 Error 事件而非「空内容 finish 伪装成功」)
         if let Some(msg) = extract_fail_marker(&last_user) {
@@ -348,6 +365,37 @@ impl MockConnector {
             });
             chunks.push(tool_calls_finish());
             return Ok(chunks);
+        }
+
+        // 测试钩子:[[tool_raw_fail:name {"json"}]] → 首轮与 [[tool_raw:]] 同款截断
+        // (半截 arguments + Finish{length});预算充足的自愈重发轮直接返回上游错误。
+        // TMR3-2 失败循环自愈记账用例专用:构造「自愈发生过、最终仍失败」的形态。
+        if let Some((name, args)) =
+            gate_tool(tool_hooks_on, extract_tool_raw_fail_marker(&last_user))
+        {
+            if params.max_tokens < TOOL_RAW_MIN_BUDGET {
+                let half: String = args.chars().take(args.chars().count() / 2).collect();
+                chunks.push(LlmStreamChunk::ToolCall(ToolCallArgs {
+                    id: "mock-raw-fail-1".into(),
+                    name,
+                    arguments: half,
+                }));
+                chunks.push(LlmStreamChunk::Usage {
+                    prompt_tokens: 11,
+                    completion_tokens: 7,
+                    total_tokens: 18,
+                    prompt_cache_hit_tokens: 0,
+                    prompt_cache_miss_tokens: 0,
+                    reasoning_tokens: 0,
+                });
+                chunks.push(LlmStreamChunk::Finish {
+                    reason: "length".into(),
+                });
+                return Ok(chunks);
+            }
+            return Err(LlmError::upstream(
+                "模拟自愈重发失败(测试钩子 [[tool_raw_fail:]])",
+            ));
         }
 
         // 测试钩子:[[tool_raw:name {"json"}]] → 模拟「max_tokens 把 tool_call 参数
@@ -787,6 +835,17 @@ fn extract_tool_raw_marker(input: &str) -> Option<(String, String)> {
     Some((name.trim().to_string(), args.trim().to_string()))
 }
 
+/// 提取 [[tool_raw_fail:name {"json"}]] 标记(TMR3-2);返回 (name, 完整 args)。
+/// 与 [[tool_raw:]] 同解析,只是重发轮返回 Err 而非完整 ToolCall。
+fn extract_tool_raw_fail_marker(input: &str) -> Option<(String, String)> {
+    let start = input.find("[[tool_raw_fail:")?;
+    let rest = &input[start + "[[tool_raw_fail:".len()..];
+    let end = rest.find("]]")?;
+    let inner = &rest[..end];
+    let (name, args) = inner.split_once(' ')?;
+    Some((name.trim().to_string(), args.trim().to_string()))
+}
+
 /// 提取 [[finish:原因|内容]] 标记(可观测性问题①截断模拟);返回 (reason, 内容)。
 /// 原因取到 '|' 或首个 "]]"(空白/空串视为未命中);内容取到首个 "]]"
 ///(与 [[reply:]] 同截断语义:内容内含 "]]" 须用 \u005d 转义),省略时给固定半截文本。
@@ -1148,6 +1207,33 @@ fn split_fail_kind(msg: &str) -> (String, LlmErrorKind) {
         }
     }
     (msg.to_string(), LlmErrorKind::Upstream)
+}
+
+/// [[fail_times:N 消息@分类]] 的进程内剩余次数(TMR3-1 测试钩子)。
+///
+/// 键用 marker 全文:测试各自写唯一文案即可并行;同一进程内不重置——计数用尽后
+/// 该 marker 永久恢复为成功分支,正好符合「前 N 次失败、之后成功」的用例语义。
+fn fail_times_remaining() -> &'static Mutex<HashMap<String, usize>> {
+    static REMAINING: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+    REMAINING.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 提取 [[fail_times:N 消息@分类]]:返回 (marker 全文, N, 消息)。
+/// 首个空白分隔次数与消息;次数非法/为 0/缺消息时不接管(回落其它钩子)。
+fn extract_fail_times_marker(input: &str) -> Option<(String, usize, String)> {
+    const MARK: &str = "[[fail_times:";
+    let start = input.find(MARK)?;
+    let rest = &input[start + MARK.len()..];
+    let end = rest.find("]]")?;
+    let body = rest[..end].trim().to_string();
+    let split = body.find(char::is_whitespace)?;
+    let (count, msg) = body.split_at(split);
+    let n = count.trim().parse::<usize>().ok()?;
+    let msg = msg.trim().to_string();
+    if n == 0 || msg.is_empty() {
+        return None;
+    }
+    Some((body, n, msg))
 }
 
 impl Default for MockConnector {
