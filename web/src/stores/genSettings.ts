@@ -54,8 +54,8 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
   const loopGuardSemanticMinCalls = ref(12);
   /** 语义熔断输出指纹去重上限(服务端默认 2) */
   const loopGuardSemanticMaxDistinct = ref(2);
-  /** 任务步骤墙钟预算秒数(服务端默认 1200 = 开;0 = 关闭本闸门) */
-  const taskStepBudgetSecs = ref(1200);
+  /** 任务步骤墙钟预算秒数(服务端默认 3600 = 开;0 = 关闭本闸门) */
+  const taskStepBudgetSecs = ref(3600);
   /** 任务级总预算秒数(PRODCAP-2;服务端默认 0 = 关;0 = 关闭,否则 1..=86400) */
   const taskTotalBudgetSecs = ref(0);
   /** 团队任务执行阶段总预算秒数(TMR3-4;服务端默认 1200;0 = 关闭,否则 1..=86400) */
@@ -190,7 +190,7 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
       loopGuardSemanticWindow.value = s.loop_guard_semantic_window ?? 16;
       loopGuardSemanticMinCalls.value = s.loop_guard_semantic_min_calls ?? 12;
       loopGuardSemanticMaxDistinct.value = s.loop_guard_semantic_max_distinct ?? 2;
-      taskStepBudgetSecs.value = s.task_step_budget_secs ?? 1200;
+      taskStepBudgetSecs.value = s.task_step_budget_secs ?? 3600;
       taskTotalBudgetSecs.value = s.task_total_budget_secs ?? 0;
       taskTeamBudgetSecs.value = s.task_team_budget_secs ?? 1200;
       taskIdleTimeoutSecs.value = s.task_idle_timeout_secs ?? 900;
@@ -267,7 +267,7 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     loopGuardSemanticWindow.value = s.loop_guard_semantic_window ?? 16;
     loopGuardSemanticMinCalls.value = s.loop_guard_semantic_min_calls ?? 12;
     loopGuardSemanticMaxDistinct.value = s.loop_guard_semantic_max_distinct ?? 2;
-    taskStepBudgetSecs.value = s.task_step_budget_secs ?? 1200;
+    taskStepBudgetSecs.value = s.task_step_budget_secs ?? 3600;
     taskTotalBudgetSecs.value = s.task_total_budget_secs ?? 0;
     taskTeamBudgetSecs.value = s.task_team_budget_secs ?? 1200;
     taskIdleTimeoutSecs.value = s.task_idle_timeout_secs ?? 900;

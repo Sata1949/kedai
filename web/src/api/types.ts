@@ -467,7 +467,7 @@ export interface RuntimeSettings {
   loop_guard_semantic_min_calls: number;
   /** 语义熔断输出指纹去重上限(默认 2,1..=8) */
   loop_guard_semantic_max_distinct: number;
-  /** 任务步骤墙钟预算秒数(**任务侧**设置;默认 1200 = 开,0 = 关,否则 1..=86400):
+  /** 任务步骤墙钟预算秒数(**任务侧**设置;默认 3600 = 开,0 = 关,否则 1..=86400):
    *  单次工具循环的墙钟上限,到点带着已有产出收尾(步骤照常 done);文档注「建议 ≥300」 */
   task_step_budget_secs: number;
   /** 任务级总预算秒数(**任务侧**设置;默认 0 = 关,否则 1..=86400):
