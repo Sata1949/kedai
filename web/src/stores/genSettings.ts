@@ -58,6 +58,8 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
   const taskStepBudgetSecs = ref(1200);
   /** 任务级总预算秒数(PRODCAP-2;服务端默认 0 = 关;0 = 关闭,否则 1..=86400) */
   const taskTotalBudgetSecs = ref(0);
+  /** 团队任务执行阶段总预算秒数(TMR3-4;服务端默认 1200;0 = 关闭,否则 1..=86400) */
+  const taskTeamBudgetSecs = ref(1200);
   /** 任务空闲超时秒数(服务端默认 900;0 = 关闭看守) */
   const taskIdleTimeoutSecs = ref(900);
   /** 变量两步生成独立模型(空串 = 与正文共用;HB-7) */
@@ -190,6 +192,7 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
       loopGuardSemanticMaxDistinct.value = s.loop_guard_semantic_max_distinct ?? 2;
       taskStepBudgetSecs.value = s.task_step_budget_secs ?? 1200;
       taskTotalBudgetSecs.value = s.task_total_budget_secs ?? 0;
+      taskTeamBudgetSecs.value = s.task_team_budget_secs ?? 1200;
       taskIdleTimeoutSecs.value = s.task_idle_timeout_secs ?? 900;
       mvuModel.value = s.mvu_model ?? '';
       mvuTemperatureInput.value = typeof s.mvu_temperature === 'number' ? String(s.mvu_temperature) : '';
@@ -266,6 +269,7 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     loopGuardSemanticMaxDistinct.value = s.loop_guard_semantic_max_distinct ?? 2;
     taskStepBudgetSecs.value = s.task_step_budget_secs ?? 1200;
     taskTotalBudgetSecs.value = s.task_total_budget_secs ?? 0;
+    taskTeamBudgetSecs.value = s.task_team_budget_secs ?? 1200;
     taskIdleTimeoutSecs.value = s.task_idle_timeout_secs ?? 900;
     mvuModel.value = s.mvu_model ?? '';
     mvuTemperatureInput.value = typeof s.mvu_temperature === 'number' ? String(s.mvu_temperature) : '';
@@ -433,6 +437,7 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     loopGuardSemanticMaxDistinct,
     taskStepBudgetSecs,
     taskTotalBudgetSecs,
+    taskTeamBudgetSecs,
     taskIdleTimeoutSecs,
     mvuModel,
     mvuTemperatureInput,

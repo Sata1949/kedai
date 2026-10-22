@@ -124,11 +124,13 @@ fn declared_files_of(main: &TeamMain) -> Vec<String> {
     out
 }
 
-/// 一个主 agent 的分工:分工名 + 子目标(1~4 个)
+/// 一个主 agent 的分工:分工名 + 子目标(1~4 个)+ 依赖的其他主 agent。
 #[derive(Debug, Clone)]
 struct TeamMain {
     name: String,
     goals: Vec<TaskStep>,
+    /// 依赖的主 agent 下标(0-based;已去自环/越界/重复)。空 = 无依赖,按现状并行。
+    after: Vec<usize>,
 }
 
 /// 审计打回条目:定位粒度到「主 agent 的某个子目标」。
@@ -167,6 +169,10 @@ struct TeamMainRaw {
     name: String,
     #[serde(default)]
     goals: Vec<TeamGoalRaw>,
+    /// 依赖的其他主 agent(TMR3-3;规划器用 1-based 主号,可省略)。
+    /// 只做主级依赖:总装主声明 after=[提供分片的主号],执行器按拓扑分波。
+    #[serde(default)]
+    after: Option<Vec<usize>>,
 }
 
 /// 规划器的子目标原始形态(TMR-4:多一个可选的 `files`)。
@@ -201,41 +207,99 @@ fn parse_team_topology(text: &str) -> Result<Vec<TeamMain>, String> {
     };
     let raw: TeamTopologyRaw =
         serde_json::from_str(candidate).map_err(|e| format!("解析团队拓扑失败: {e}"))?;
-    let mut mains: Vec<TeamMain> = raw
-        .mains
-        .into_iter()
-        .filter(|m| !m.name.trim().is_empty())
-        .map(|m| TeamMain {
-            name: m.name.trim().to_string(),
-            goals: m
-                .goals
-                .into_iter()
-                .filter_map(|g| {
-                    let name = g.name.trim().to_string();
-                    let goal = g.goal.trim().to_string();
-                    if name.is_empty() && goal.is_empty() {
-                        return None;
-                    }
-                    Some(TaskStep {
-                        name,
-                        goal,
-                        files: sanitize_declared_files(g.files.unwrap_or_default()),
-                        ..TaskStep::default()
-                    })
+    // TMR3-3:先保留原始主号,过滤空主后重映射 after。规划器用 1-based 主号,
+    // 空名/空子目标主会让后续下标整体前移;不重映射会把依赖指到错误的主。
+    let mut kept: Vec<(usize, TeamMain, Vec<usize>)> = Vec::new();
+    for (raw_idx, m) in raw.mains.into_iter().enumerate() {
+        let TeamMainRaw { name, goals, after } = m;
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            continue;
+        }
+        let goals: Vec<TaskStep> = goals
+            .into_iter()
+            .filter_map(|g| {
+                let name = g.name.trim().to_string();
+                let goal = g.goal.trim().to_string();
+                if name.is_empty() && goal.is_empty() {
+                    return None;
+                }
+                Some(TaskStep {
+                    name,
+                    goal,
+                    files: sanitize_declared_files(g.files.unwrap_or_default()),
+                    ..TaskStep::default()
                 })
-                .collect(),
-        })
-        .filter(|m| !m.goals.is_empty())
-        .collect();
-    if mains.is_empty() {
+            })
+            .collect();
+        if goals.is_empty() {
+            continue;
+        }
+        kept.push((
+            raw_idx,
+            TeamMain {
+                name,
+                goals,
+                after: Vec::new(),
+            },
+            after.unwrap_or_default(),
+        ));
+    }
+    if kept.is_empty() {
         return Err("解析团队拓扑失败: 规划输出不含任何有效主 agent 分工".into());
+    }
+    let mut remap: HashMap<usize, usize> = HashMap::new();
+    for (new_idx, (raw_idx, _, _)) in kept.iter().enumerate() {
+        remap.insert(*raw_idx, new_idx);
+    }
+    let mut mains: Vec<TeamMain> = Vec::with_capacity(kept.len());
+    for (new_idx, (_, mut main, after_raw)) in kept.into_iter().enumerate() {
+        main.after = after_raw
+            .into_iter()
+            .filter_map(|n| n.checked_sub(1)) // 规划器 1-based → 0-based
+            .filter_map(|raw_ref| remap.get(&raw_ref).copied())
+            .filter(|&dep| dep != new_idx)
+            .collect();
+        main.after.sort_unstable();
+        main.after.dedup();
+        mains.push(main);
     }
     // 超编归并:第 4 位之后的主 agent 子目标并入第 4 位
     if mains.len() > TEAM_MAX_MAINS {
         let tail = mains.split_off(TEAM_MAX_MAINS);
         let merged: usize = tail.iter().map(|m| m.goals.len()).sum();
+        let mut tail_after: Vec<usize> = Vec::new();
         for m in tail {
+            tail_after.extend(m.after);
             mains[TEAM_MAX_MAINS - 1].goals.extend(m.goals);
+        }
+        // 被并入主(原下标 ≥4)在所有 after 引用中统一映射到第 4 主
+        for m in mains.iter_mut() {
+            m.after = m
+                .after
+                .iter()
+                .map(|&d| {
+                    if d >= TEAM_MAX_MAINS {
+                        TEAM_MAX_MAINS - 1
+                    } else {
+                        d
+                    }
+                })
+                .collect();
+        }
+        mains[TEAM_MAX_MAINS - 1]
+            .after
+            .extend(tail_after.into_iter().map(|d| {
+                if d >= TEAM_MAX_MAINS {
+                    TEAM_MAX_MAINS - 1
+                } else {
+                    d
+                }
+            }));
+        for (i, m) in mains.iter_mut().enumerate() {
+            m.after.retain(|&d| d != i);
+            m.after.sort_unstable();
+            m.after.dedup();
         }
         tracing::warn!(
             merged_goals = merged,
@@ -273,10 +337,155 @@ fn parse_team_topology(text: &str) -> Result<Vec<TeamMain>, String> {
             "team 规划子目标全局超编,已按 ≤15 封顶截断"
         );
     }
+    // TMR3-3:规划器漏写 after 时的确定性兜底——若主 B 的子目标文本提到主 A
+    // 声明的文件路径,则 B 依赖 A(总装经常在目标里直接点名 parts/*.js)。
+    infer_dependencies_from_files(&mut mains);
     if mains.len() == 1 {
         tracing::warn!("team 规划仅产出 1 个主 agent,按降级拓扑执行");
     }
     Ok(mains)
+}
+
+/// 主 start 是否(传递地)依赖 target(TMR3-3 环检测;n≤4,DFS 足够)。
+/// 返回 true 表示 `start.after` 链上存在 target。
+fn depends_transitively(mains: &[TeamMain], start: usize, target: usize) -> bool {
+    fn walk(mains: &[TeamMain], cur: usize, target: usize, seen: &mut [bool]) -> bool {
+        if cur == target {
+            return true;
+        }
+        if cur >= mains.len() || seen[cur] {
+            return false;
+        }
+        seen[cur] = true;
+        mains[cur]
+            .after
+            .iter()
+            .any(|&dep| walk(mains, dep, target, seen))
+    }
+    if start >= mains.len() {
+        return false;
+    }
+    let mut seen = vec![false; mains.len()];
+    walk(mains, start, target, &mut seen)
+}
+
+/// 从文件声明推断主级依赖(TMR3-3):主 B 的任一子目标文本提到主 A 声明的文件
+/// 路径时,B 依赖 A。
+///
+/// 为什么需要这层兜底:规划器提示词已经要求总装主用 `after` 声明依赖,但模型
+/// 可能漏写;而「总装目标里点名 parts/a.js」是模型很自然的写法。推断是确定性的,
+/// 成环则跳过该边(不重跑规划),最坏退化为现状并行。
+fn infer_dependencies_from_files(mains: &mut [TeamMain]) {
+    let decls: Vec<Vec<String>> = mains.iter().map(declared_files_of).collect();
+    let texts: Vec<String> = mains
+        .iter()
+        .map(|m| {
+            m.goals
+                .iter()
+                .map(|g| format!("{} {}", g.name, g.goal))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .collect();
+    for i in 0..mains.len() {
+        for (j, decl) in decls.iter().enumerate() {
+            if i == j || mains[i].after.contains(&j) {
+                continue;
+            }
+            let hit = decl.iter().any(|path| {
+                path.len() >= 4
+                    && (path.contains('/') || path.contains('.'))
+                    && texts[i].contains(path.as_str())
+            });
+            // 加边 i→j(i 依赖 j)会成环 = j 已经(传递地)依赖 i
+            if hit && !depends_transitively(mains, j, i) {
+                mains[i].after.push(j);
+                tracing::info!(
+                    main = i + 1,
+                    depends_on = j + 1,
+                    "team 依赖推断:目标文本提到上游主声明的文件"
+                );
+            }
+        }
+    }
+}
+
+/// 按主级依赖把主 agent 分成执行波次(TMR3-3;Kahn 拓扑)。
+///
+/// - 无依赖 = 一波,与 TMR3 之前「全部并行」逐字节等价;
+/// - 有依赖 = 依赖主先进前面的波,后续波等前一波全部结束;
+/// - 检测到环(规划器幻觉/推断兜底仍成环)时记 warn,把剩余主放同一波并行,
+///   保证每个主都会被执行(不因依赖错误整任务失败)。
+fn plan_waves(mains: &[TeamMain]) -> Vec<Vec<usize>> {
+    let n = mains.len();
+    let mut indegree = vec![0usize; n];
+    let mut edges = vec![Vec::<usize>::new(); n];
+    for (i, m) in mains.iter().enumerate() {
+        for &dep in &m.after {
+            if dep < n && dep != i && !edges[dep].contains(&i) {
+                edges[dep].push(i);
+                indegree[i] += 1;
+            }
+        }
+    }
+    let mut waves = Vec::new();
+    let mut done = vec![false; n];
+    let mut remaining = n;
+    while remaining > 0 {
+        let wave: Vec<usize> = (0..n).filter(|&i| !done[i] && indegree[i] == 0).collect();
+        if wave.is_empty() {
+            let rest: Vec<usize> = (0..n).filter(|&i| !done[i]).collect();
+            tracing::warn!(
+                mains = ?rest,
+                "team 主级依赖成环,剩余主 agent 降级为同一波并行"
+            );
+            waves.push(rest);
+            break;
+        }
+        for &i in &wave {
+            done[i] = true;
+            remaining -= 1;
+            for &j in &edges[i] {
+                indegree[j] = indegree[j].saturating_sub(1);
+            }
+        }
+        waves.push(wave);
+    }
+    waves
+}
+
+/// 依赖主已完成子目标的产出摘要(TMR3-3):总装主启动时注入目标文本。
+/// 只取有 `result` 的步骤;步骤名附带声明文件,提示模型该读哪些落盘文件。
+fn upstream_seed_for(
+    mains: &[TeamMain],
+    step_ranges: &[Vec<usize>],
+    plan: &[TaskStep],
+    main_index: usize,
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let Some(main) = mains.get(main_index) else {
+        return out;
+    };
+    for &dep in &main.after {
+        let Some(range) = step_ranges.get(dep) else {
+            continue;
+        };
+        for &si in range {
+            let Some(step) = plan.get(si) else {
+                continue;
+            };
+            if step.result.trim().is_empty() {
+                continue;
+            }
+            let files = if step.files.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", step.files.join(", "))
+            };
+            out.push((format!("{}{}", step.name, files), step.result.clone()));
+        }
+    }
+    out
 }
 
 /// 解析审计输出:{"通过":bool,"打回":[{"main":1-based 序号,"step":主内 1-based 子目标
@@ -612,6 +821,8 @@ impl TeamExecutor {
         extra_instruction: Option<&str>,
         goal_filter: Option<&[usize]>,
         prior_seed: Vec<(String, String)>,
+        upstream_seed: Vec<(String, String)>,
+        deadline_reason: &'static str,
         ownership: Arc<WriteOwnership>,
     ) -> (
         usize,
@@ -658,11 +869,7 @@ impl TeamExecutor {
                     if goal_filter.is_some_and(|only| !only.contains(&k2)) {
                         continue;
                     }
-                    results.push((
-                        step_idxs[k2],
-                        g2.name.clone(),
-                        Err("任务总预算用尽(未执行)".into()),
-                    ));
+                    results.push((step_idxs[k2], g2.name.clone(), Err(deadline_reason.into())));
                 }
                 break;
             }
@@ -692,6 +899,17 @@ impl TeamExecutor {
                     "\n本主此前已完成子目标的产出(仅供衔接与保持一致;不要在本次产出中整篇复述或另起一版):\n",
                 );
                 for (name, text) in &prior {
+                    let brief: String = text.trim().chars().take(1200).collect();
+                    goal.push_str(&format!("- 「{name}」:{brief}\n"));
+                }
+            }
+            // TMR3-3:依赖主已完成——把其产出摘要带给本主,并提示文件已落盘。
+            // 这是「总装主等 parts 主」的可见依据;正文摘要只作衔接,交付以文件为准。
+            if !upstream_seed.is_empty() {
+                goal.push_str(
+                    "\n依赖的上游主 agent 产出(相关文件已落盘;请用 fs_read 核对后再总装/衔接,不要整篇复述):\n",
+                );
+                for (name, text) in upstream_seed.iter().take(8) {
                     let brief: String = text.trim().chars().take(1200).collect();
                     goal.push_str(&format!("- 「{name}」:{brief}\n"));
                 }
@@ -733,7 +951,10 @@ impl TeamExecutor {
         (main_index, results)
     }
 
-    async fn run_inner(&self, ctx: TaskRunContext) -> Result<(TaskTerminal, TokenUsage), String> {
+    async fn run_inner(
+        &self,
+        mut ctx: TaskRunContext,
+    ) -> Result<(TaskTerminal, TokenUsage), String> {
         let svc = &self.svc;
         let mut total = TokenUsage::default();
 
@@ -749,6 +970,17 @@ impl TeamExecutor {
         if *ctx.cancel.borrow() {
             return Err("任务已停止".into());
         }
+
+        // TMR3-4:团队总预算从**规划完成后**起算(规划自身有 3×300s 的重试上限);
+        // 与任务总预算取小,团队预算更早时标记绑定,用于区分收尾文案。
+        let (deadline, team_binding) =
+            super::team_deadline(ctx.deadline, ctx.settings.task_team_budget_secs);
+        ctx.deadline = deadline;
+        let deadline_reason = if team_binding {
+            "团队总预算用尽(未执行)"
+        } else {
+            "任务总预算用尽(未执行)"
+        };
 
         // plan 步骤:「【主Agent-N】子目标名」(前端分工卡分组契约);
         // step_ranges[n] = 主 agent n 在 plan 中的步骤下标区间
@@ -782,6 +1014,7 @@ impl TeamExecutor {
                 &mut total,
                 None,
                 &ownership,
+                deadline_reason,
             )
             .await;
         if cancelled {
@@ -791,17 +1024,19 @@ impl TeamExecutor {
         // 截止期已过则审计/汇总不再发起新调用(总预算的目的就是停止继续开销),
         // 以已完成部分收尾(无产出时 fallback_terminal 自然回落 Failed)。
         if super::deadline_exhausted(ctx.deadline) {
+            let msg = if team_binding {
+                "团队总预算用尽:审计与汇总未执行,以已完成部分收尾"
+            } else {
+                "任务总预算用尽:审计与汇总未执行,以已完成部分收尾"
+            };
             svc.emit_event(
                 TaskEventKind::Status,
                 &ctx.task_id,
                 None,
                 None,
-                Some("任务总预算用尽:审计与汇总未执行,以已完成部分收尾".into()),
+                Some(msg.to_string()),
             );
-            return Ok((
-                fallback_terminal(&plan, "任务总预算用尽,审计与汇总未执行".into()),
-                total,
-            ));
+            return Ok((fallback_terminal(&plan, msg.to_string()), total));
         }
         if outputs.iter().all(|o| o.is_none()) {
             // 全灭时 helper 自然回落 Failed(无 done 步骤可拼),措辞与旧实现一致
@@ -898,11 +1133,28 @@ impl TeamExecutor {
                     &mut total,
                     Some(&verdict.kickbacks),
                     &ownership,
+                    deadline_reason,
                 )
                 .await;
             outputs = new_outputs;
             if cancelled {
                 return Err("任务已停止".into());
+            }
+            // TMR3-4:补做轮可能把团队预算用尽;到点后不再发起终审/汇总。
+            if super::deadline_exhausted(ctx.deadline) {
+                let msg = if team_binding {
+                    "团队总预算用尽:终审与汇总未执行,以已完成部分收尾"
+                } else {
+                    "任务总预算用尽:终审与汇总未执行,以已完成部分收尾"
+                };
+                svc.emit_event(
+                    TaskEventKind::Status,
+                    &ctx.task_id,
+                    None,
+                    None,
+                    Some(msg.to_string()),
+                );
+                return Ok((fallback_terminal(&plan, msg.to_string()), total));
             }
             if outputs.iter().all(|o| o.is_none()) {
                 // 补做后全灭:首轮通过的主产出仍可能已在 plan 里(helper 会捞回来),
@@ -1113,6 +1365,8 @@ impl TeamExecutor {
         total: &mut TokenUsage,
         kickbacks: Option<&[Kickback]>,
         ownership: &Arc<WriteOwnership>,
+        // 波间截止期收尾文案:团队总预算与任务总预算要能区分(TMR3-4)
+        deadline_reason: &'static str,
     ) -> (Vec<Option<String>>, bool) {
         let svc = &self.svc;
         // 确定本轮要跑的主 agent 子集:(主序号, 补做指令, 限定的子目标下标集)。
@@ -1172,103 +1426,183 @@ impl TeamExecutor {
             .iter()
             .map(|(i, _, filter)| before_kickback_prior(step_ranges, plan, *i, filter.as_deref()))
             .collect();
-        // 步骤置 running 并落库(事件随 set_plan 发射):只置本轮真正会跑的步骤——
-        // 子目标粒度补做时被跳过的步骤保持原终态,不得留 running(实跑问题 2)。
-        for (i, _, filter) in &batch {
-            for &si in &step_ranges[*i] {
-                let will_run = match filter {
-                    None => true,
-                    Some(steps) => {
-                        // filter 存的是主内子目标下标;映射回全局步骤下标比对
-                        main_goal_index(step_ranges, *i, si).is_some_and(|k| steps.contains(&k))
-                    }
-                };
-                if will_run {
-                    plan[si].status = TaskStepStatus::Running;
-                }
-            }
+        // TMR3-3:按主级依赖分波。首轮按 `plan_waves`;补做轮依赖已在首轮满足,
+        // 保持单波(与 TMR3 之前一致)。无依赖时 waves = 一波,行为逐字节不变。
+        let waves: Vec<Vec<usize>> = if kickbacks.is_none() {
+            plan_waves(mains)
+                .into_iter()
+                .map(|wave| {
+                    wave.into_iter()
+                        .filter_map(|mi| batch.iter().position(|(i, _, _)| *i == mi))
+                        .collect::<Vec<usize>>()
+                })
+                .filter(|w| !w.is_empty())
+                .collect()
+        } else {
+            vec![(0..batch.len()).collect()]
+        };
+        if waves.len() > 1 {
+            let desc = waves
+                .iter()
+                .enumerate()
+                .map(|(n, w)| {
+                    let names: Vec<String> = w
+                        .iter()
+                        .map(|pos| format!("主Agent-{}", batch[*pos].0 + 1))
+                        .collect();
+                    format!("第{}波:{}", n + 1, names.join(","))
+                })
+                .collect::<Vec<_>>()
+                .join(";");
+            svc.emit_event(
+                TaskEventKind::Status,
+                &ctx.task_id,
+                None,
+                None,
+                Some(format!("团队依赖调度:{desc}")),
+            );
         }
-        svc.set_plan(&ctx.task_id, plan);
-        // 本轮 batch 的主序号留底:JoinError 兜底置 error 时用(spawn 循环会消耗 batch)
-        let batch_idx: Vec<usize> = batch.iter().map(|(i, _, _)| *i).collect();
-
-        let mut join: JoinSet<MainJoinOutput> = JoinSet::new();
-        for ((i, extra, goal_filter), prior_seed) in batch.into_iter().zip(prior_seeds) {
-            let this = Self {
-                svc: self.svc.clone(),
-                engine: self.engine.clone(),
-            };
-            let ctx2 = TaskRunContext {
-                task_id: ctx.task_id.clone(),
-                token: ctx.token,
-                goal: ctx.goal.clone(),
-                settings: ctx.settings.clone(),
-                executor_id: ctx.executor_id.clone(),
-                character_id: ctx.character_id.clone(),
-                cancel: ctx.cancel.clone(),
-                connection_id: ctx.connection_id.clone(),
-                // 工作区作用域(编码通道批次 1):打回补做轮沿用同一工作区
-                scope: ctx.scope.clone(),
-                // 任务级总预算(PRODCAP-2):补做轮沿用同一截止期
-                deadline: ctx.deadline,
-            };
-            let main = mains[i].clone();
-            let step_idxs = step_ranges[i].clone();
-            let ownership = ownership.clone();
-            join.spawn(async move {
-                this.run_main(
-                    &ctx2,
-                    i,
-                    &main,
-                    &step_idxs,
-                    extra.as_deref(),
-                    goal_filter.as_deref(),
-                    prior_seed,
-                    ownership,
-                )
-                .await
-            });
-        }
-
         let mut cancelled = false;
-        while let Some(res) = join.join_next().await {
-            // 主序号不再参与聚合(产出统一从 plan 重建),仅供 JoinError 分支追溯留底
-            let (_i, sub_results) = match res {
-                Ok(v) => v,
-                Err(e) => {
-                    // JoinError(panic 等):按该主失败处理,不中断其余主;JoinError 不携带
-                    // 业务下标,无法反查是哪一主 panic——保守地把本轮 batch 中仍 running 的
-                    // 步骤统一置 error(终态至少 partial,不留永远 running)
-                    tracing::warn!(error = e.to_string(), "team 主 agent 任务异常终止");
-                    fail_batch_running_steps(plan, &batch_idx, step_ranges);
-                    svc.set_plan(&ctx.task_id, plan);
-                    continue;
-                }
-            };
-            // 逐子目标回写各自步骤(未在本轮 results 中的子目标保持原状态/产出)
-            for (si, _goal_name, result) in sub_results {
-                match result {
-                    Ok((text, usage)) => {
-                        total.prompt_tokens += usage.prompt_tokens;
-                        total.completion_tokens += usage.completion_tokens;
-                        total.total_tokens += usage.total_tokens;
-                        // usage 落库(phase=agent,step_index=该子目标的全局步骤下标;
-                        // 子 agent 行在 run_subtask 内落)
-                        svc.record_usage(&ctx.task_id, "agent", Some(si), &usage_as_output(&usage));
-                        plan[si].status = TaskStepStatus::Done;
-                        // 替换式回写:补做产出覆盖旧版本,杜绝新旧并存(实跑问题 2)
-                        plan[si].result = text;
-                    }
-                    Err(e) => {
-                        if *ctx.cancel.borrow() {
-                            cancelled = true;
+        for (wave_no, wave) in waves.iter().enumerate() {
+            // 波间取消/截止期:未启动的条目统一标终态,不留 pending/running
+            if *ctx.cancel.borrow() || super::deadline_exhausted(ctx.deadline) {
+                let reason = if *ctx.cancel.borrow() {
+                    cancelled = true;
+                    "任务已停止"
+                } else {
+                    deadline_reason
+                };
+                for pos in waves[wave_no..].iter().flat_map(|w| w.iter().copied()) {
+                    let (i, _, filter) = &batch[pos];
+                    for &si in &step_ranges[*i] {
+                        let will_run = match filter {
+                            None => true,
+                            Some(steps) => main_goal_index(step_ranges, *i, si)
+                                .is_some_and(|k| steps.contains(&k)),
+                        };
+                        if will_run {
+                            plan[si].status = TaskStepStatus::Error;
+                            plan[si].result = reason.to_string();
                         }
-                        plan[si].status = TaskStepStatus::Error;
-                        plan[si].result = e.clone();
+                    }
+                }
+                svc.set_plan(&ctx.task_id, plan);
+                break;
+            }
+            // 步骤置 running 并落库(事件随 set_plan 发射):只置本波真正会跑的步骤——
+            // 子目标粒度补做时被跳过的步骤保持原终态,不得留 running(实跑问题 2)。
+            for &pos in wave {
+                let (i, _, filter) = &batch[pos];
+                for &si in &step_ranges[*i] {
+                    let will_run = match filter {
+                        None => true,
+                        Some(steps) => {
+                            // filter 存的是主内子目标下标;映射回全局步骤下标比对
+                            main_goal_index(step_ranges, *i, si).is_some_and(|k| steps.contains(&k))
+                        }
+                    };
+                    if will_run {
+                        plan[si].status = TaskStepStatus::Running;
                     }
                 }
             }
             svc.set_plan(&ctx.task_id, plan);
+
+            let mut join: JoinSet<MainJoinOutput> = JoinSet::new();
+            for &pos in wave {
+                let (i, extra, goal_filter) = batch[pos].clone();
+                let prior_seed = prior_seeds[pos].clone();
+                // 依赖主已完成子目标的产出摘要:让总装主在动手前看到上游成果;
+                // 文件本身已落盘,提示模型用 fs_read 核对(不是只凭摘要复述)。
+                let upstream_seed = if kickbacks.is_none() {
+                    upstream_seed_for(mains, step_ranges, plan, i)
+                } else {
+                    Vec::new()
+                };
+                let this = Self {
+                    svc: self.svc.clone(),
+                    engine: self.engine.clone(),
+                };
+                let ctx2 = TaskRunContext {
+                    task_id: ctx.task_id.clone(),
+                    token: ctx.token,
+                    goal: ctx.goal.clone(),
+                    settings: ctx.settings.clone(),
+                    executor_id: ctx.executor_id.clone(),
+                    character_id: ctx.character_id.clone(),
+                    cancel: ctx.cancel.clone(),
+                    connection_id: ctx.connection_id.clone(),
+                    // 工作区作用域(编码通道批次 1):打回补做轮沿用同一工作区
+                    scope: ctx.scope.clone(),
+                    // 任务级总预算(PRODCAP-2):补做轮沿用同一截止期
+                    deadline: ctx.deadline,
+                };
+                let main = mains[i].clone();
+                let step_idxs = step_ranges[i].clone();
+                let ownership = ownership.clone();
+                join.spawn(async move {
+                    this.run_main(
+                        &ctx2,
+                        i,
+                        &main,
+                        &step_idxs,
+                        extra.as_deref(),
+                        goal_filter.as_deref(),
+                        prior_seed,
+                        upstream_seed,
+                        deadline_reason,
+                        ownership,
+                    )
+                    .await
+                });
+            }
+
+            // 本波的主序号留底:JoinError 兜底置 error 时用(spawn 循环已消耗 wave 的引用)
+            let wave_batch_idx: Vec<usize> = wave.iter().map(|pos| batch[*pos].0).collect();
+            while let Some(res) = join.join_next().await {
+                // 主序号不再参与聚合(产出统一从 plan 重建),仅供 JoinError 分支追溯留底
+                let (_i, sub_results) = match res {
+                    Ok(v) => v,
+                    Err(e) => {
+                        // JoinError(panic 等):按该主失败处理,不中断其余主;JoinError 不携带
+                        // 业务下标,无法反查是哪一主 panic——保守地把本波中仍 running 的
+                        // 步骤统一置 error(终态至少 partial,不留永远 running)
+                        tracing::warn!(error = e.to_string(), "team 主 agent 任务异常终止");
+                        fail_batch_running_steps(plan, &wave_batch_idx, step_ranges);
+                        svc.set_plan(&ctx.task_id, plan);
+                        continue;
+                    }
+                };
+                // 逐子目标回写各自步骤(未在本轮 results 中的子目标保持原状态/产出)
+                for (si, _goal_name, result) in sub_results {
+                    match result {
+                        Ok((text, usage)) => {
+                            total.prompt_tokens += usage.prompt_tokens;
+                            total.completion_tokens += usage.completion_tokens;
+                            total.total_tokens += usage.total_tokens;
+                            // usage 落库(phase=agent,step_index=该子目标的全局步骤下标;
+                            // 子 agent 行在 run_subtask 内落)
+                            svc.record_usage(
+                                &ctx.task_id,
+                                "agent",
+                                Some(si),
+                                &usage_as_output(&usage),
+                            );
+                            plan[si].status = TaskStepStatus::Done;
+                            // 替换式回写:补做产出覆盖旧版本,杜绝新旧并存(实跑问题 2)
+                            plan[si].result = text;
+                        }
+                        Err(e) => {
+                            if *ctx.cancel.borrow() {
+                                cancelled = true;
+                            }
+                            plan[si].status = TaskStepStatus::Error;
+                            plan[si].result = e.clone();
+                        }
+                    }
+                }
+                svc.set_plan(&ctx.task_id, plan);
+            }
         }
         // 统一从 plan 重建各主产出(唯一真相源;补做已替换旧版本,未打回主保留原产出)
         (rebuild_outputs(mains, step_ranges, plan), cancelled)
@@ -1520,6 +1854,106 @@ mod tests {
         );
     }
 
+    /// TMR3-3:after 用 1-based 主号;空名主被过滤后仍要重映射到正确的新下标。
+    #[test]
+    fn parse_team_topology_after_is_one_based_and_remapped() {
+        let text = r#"{"mains":[{"name":"","goals":[{"name":"空","goal":"空"}]},{"name":"分片","after":[],"goals":[{"name":"a","goal":"写分片","files":["parts/a.js"]}]},{"name":"总装","after":[2],"goals":[{"name":"b","goal":"把 parts/a.js 引入 index.html","files":["index.html"]}]}]}"#;
+        let mains = parse_team_topology(text).expect("合法拓扑应解析成功");
+        assert_eq!(mains.len(), 2, "空名主应被过滤");
+        assert_eq!(mains[0].name, "分片");
+        assert!(
+            mains[0].after.is_empty(),
+            "无依赖应保持空数组: {:?}",
+            mains[0].after
+        );
+        assert_eq!(
+            mains[1].after,
+            vec![0],
+            "raw 主 2 → 过滤后新下标 0;1-based 解析 + 重映射"
+        );
+    }
+
+    /// TMR3-3:Kahn 分波——依赖主在前,无依赖时单波并行。
+    #[test]
+    fn plan_waves_orders_dependents() {
+        let mut mains = vec![
+            test_main("甲", &[], "", vec![]),
+            test_main("乙", &[], "", vec![0]),
+            test_main("丙", &[], "", vec![1]),
+        ];
+        assert_eq!(plan_waves(&mains), vec![vec![0], vec![1], vec![2]]);
+        for m in mains.iter_mut() {
+            m.after.clear();
+        }
+        assert_eq!(
+            plan_waves(&mains),
+            vec![vec![0, 1, 2]],
+            "无依赖必须保持单波并行(与改动前一致)"
+        );
+    }
+
+    /// TMR3-3:成环时剩余主降级为同一波并行,保证每个主都会被执行。
+    #[test]
+    fn plan_waves_falls_back_to_parallel_on_cycle() {
+        let mains = vec![
+            test_main("甲", &[], "", vec![1]),
+            test_main("乙", &[], "", vec![0]),
+        ];
+        assert_eq!(plan_waves(&mains), vec![vec![0, 1]]);
+    }
+
+    /// TMR3-3:目标文本提到上游声明的文件 → 推断主级依赖;反向提及成环则跳过。
+    #[test]
+    fn infer_dependencies_from_files_adds_edge_and_skips_cycle() {
+        let mut mains = vec![
+            test_main(
+                "总装",
+                &["index.html"],
+                "把 parts/a.js 引入 index.html",
+                vec![],
+            ),
+            test_main("分片", &["parts/a.js"], "写分片", vec![]),
+        ];
+        infer_dependencies_from_files(&mut mains);
+        assert_eq!(
+            mains[0].after,
+            vec![1],
+            "总装文本点名 parts/a.js → 依赖分片主"
+        );
+        assert!(mains[1].after.is_empty());
+
+        // 反向再点名 index.html:会与 0→1 成环,必须跳过而不是制造环
+        let mut cyclic = vec![
+            test_main(
+                "总装",
+                &["index.html"],
+                "把 parts/a.js 引入 index.html",
+                vec![],
+            ),
+            test_main("分片", &["parts/a.js"], "写分片并回填 index.html", vec![]),
+        ];
+        infer_dependencies_from_files(&mut cyclic);
+        assert_eq!(cyclic[0].after, vec![1]);
+        assert!(
+            cyclic[1].after.is_empty(),
+            "成环边必须跳过: {:?}",
+            cyclic[1].after
+        );
+    }
+
+    fn test_main(name: &str, files: &[&str], goal: &str, after: Vec<usize>) -> TeamMain {
+        TeamMain {
+            name: name.into(),
+            goals: vec![TaskStep {
+                name: name.into(),
+                goal: goal.into(),
+                files: files.iter().map(|s| (*s).to_string()).collect(),
+                ..TaskStep::default()
+            }],
+            after,
+        }
+    }
+
     /// TMR-4:同一文件被多个主声明时首声明胜出;未声明文件由运行期首写者认领。
     #[test]
     fn build_write_ownership_keeps_first_declaration() {
@@ -1532,6 +1966,7 @@ mod tests {
                     files: vec!["shared.js".into()],
                     ..TaskStep::default()
                 }],
+                after: Vec::new(),
             },
             TeamMain {
                 name: "乙".into(),
@@ -1541,6 +1976,7 @@ mod tests {
                     files: vec!["shared.js".into(), "parts/b.js".into()],
                     ..TaskStep::default()
                 }],
+                after: Vec::new(),
             },
         ];
         let ownership = build_write_ownership(&mains);
@@ -1780,10 +2216,12 @@ mod tests {
             TeamMain {
                 name: "甲".into(),
                 goals: vec![],
+                after: Vec::new(),
             },
             TeamMain {
                 name: "乙".into(),
                 goals: vec![],
+                after: Vec::new(),
             },
         ];
         let step_ranges = vec![vec![0, 1], vec![2]];

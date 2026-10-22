@@ -49,10 +49,10 @@ use params::{
     default_session_budget_action, default_session_token_budget,
     default_skill_progressive_disclosure, default_subagent_max_concurrency,
     default_subagent_max_depth, default_subagent_result_max_chars, default_task_idle_timeout_secs,
-    default_task_step_budget_secs, default_task_tool_policy, default_task_total_budget_secs,
-    default_tool_authorization_timeout_secs, default_tool_history_budget_tokens,
-    default_tool_history_keep_rounds, default_undo_enabled, default_user_role,
-    default_worldbook_sync_character_enabled,
+    default_task_step_budget_secs, default_task_team_budget_secs, default_task_tool_policy,
+    default_task_total_budget_secs, default_tool_authorization_timeout_secs,
+    default_tool_history_budget_tokens, default_tool_history_keep_rounds, default_undo_enabled,
+    default_user_role, default_worldbook_sync_character_enabled,
 };
 
 #[cfg(test)]
@@ -231,6 +231,14 @@ pub struct RuntimeSettings {
     /// 默认关的判据:单步预算已覆盖主要失控场景,总预算防「每步都不超、整任务失控」。
     #[serde(default = "default_task_total_budget_secs")]
     pub task_total_budget_secs: u32,
+    /// 团队任务执行阶段总预算秒数(TMR3-4;默认 **1200**,0 = 关,否则钳 1..=86400):
+    /// 只被 team 执行器消费,从**规划完成后**起算;到点不再启动新主/子目标,
+    /// 跑步由 `min(步骤预算, 剩余)` 收窄后带产出收尾(不制造失败)。
+    /// 为什么单独一档:`task_step_budget_secs` 在 team 里每个子目标重新起算,
+    /// 4 主 × 4 子目标可跑到小时级;2026-10-21 实测单主 26 分钟后被外部 driver stop。
+    /// 与 `task_total_budget_secs` 取小;后者显式优先(用户设了总预算时以它为准)。
+    #[serde(default = "default_task_team_budget_secs")]
+    pub task_team_budget_secs: u32,
     /// 任务空闲超时秒数(提交 3 · D7;默认 2400,0 = 关,否则钳
     /// `task_idle_floor_secs()`..=86400):运行中任务若连续该时长既无模型调用行、也无事件心跳,
     /// 由看守以 stop 同源路径收尾并标注「空闲超时自动收尾」。

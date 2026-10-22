@@ -48,7 +48,7 @@ use multi::MultiExecutor;
 use plan::{ApprovedPlanExecutor, PlanExecutor};
 use solo::SoloExecutor;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use team::TeamExecutor;
 use tokio::sync::watch;
 use tracing::Instrument;
@@ -108,7 +108,7 @@ pub(crate) fn deadline_exhausted(deadline: Option<std::time::Instant>) -> bool {
 /// 两条预算都不设 = None(行为逐字节不变)。
 pub(crate) fn effective_step_budget(
     base: Option<Duration>,
-    deadline: Option<std::time::Instant>,
+    deadline: Option<Instant>,
 ) -> Option<Duration> {
     match deadline {
         None => base,
@@ -116,6 +116,31 @@ pub(crate) fn effective_step_budget(
             let remaining = d.saturating_duration_since(std::time::Instant::now());
             Some(base.map_or(remaining, |b| b.min(remaining)))
         }
+    }
+}
+
+/// 团队任务执行阶段的截止期(TMR3-4,单一出处):
+/// `min(任务总预算截止期, now + task_team_budget_secs)`。
+///
+/// 返回 `(有效截止期, 是否由团队预算绑定)`:
+///   - `team_budget_secs == 0` → 原样返回 `(task_deadline, false)`,不引入新闸
+///     (0 = 用户显式关闭团队预算);
+///   - 两者都有时取更早的一个;团队预算更早则 `true`,供文案区分
+///     「团队总预算用尽」与「任务总预算用尽」。
+///
+/// 起算点在 **规划完成后**(见 `team::run_inner`):规划自身有 3×300s 的重试上限,
+/// 把规划时间算进执行预算是另一层语义,会让 1200s 的默认值被规划吃掉大半。
+pub(crate) fn team_deadline(
+    task_deadline: Option<Instant>,
+    team_budget_secs: u32,
+) -> (Option<Instant>, bool) {
+    if team_budget_secs == 0 {
+        return (task_deadline, false);
+    }
+    let team = Instant::now() + Duration::from_secs(u64::from(team_budget_secs));
+    match task_deadline {
+        Some(d) if d <= team => (Some(d), false),
+        _ => (Some(team), true),
     }
 }
 
@@ -527,5 +552,28 @@ mod tests {
             deadline_exhausted(Some(std::time::Instant::now() - Duration::from_secs(1))),
             "已过:true"
         );
+    }
+
+    /// TMR3-4:团队预算 0 = 关,不得改变既有任务总预算截止期。
+    #[test]
+    fn team_deadline_zero_keeps_task_deadline() {
+        let task = Some(std::time::Instant::now() + Duration::from_secs(60));
+        assert_eq!(team_deadline(task, 0), (task, false));
+        assert_eq!(team_deadline(None, 0), (None, false));
+    }
+
+    /// TMR3-4:两者都有时取更早;团队预算更早时标记为绑定(文案区分用)。
+    #[test]
+    fn team_deadline_takes_earlier_and_reports_binding() {
+        let far_at = std::time::Instant::now() + Duration::from_secs(600);
+        let far = Some(far_at);
+        let (d, binding) = team_deadline(far, 10);
+        assert!(binding, "团队预算更早应标记绑定");
+        assert!(d.is_some_and(|d| d < far_at));
+
+        let near = Some(std::time::Instant::now() + Duration::from_secs(5));
+        let (d2, binding2) = team_deadline(near, 600);
+        assert!(!binding2, "任务总预算更早时不应标记团队绑定");
+        assert_eq!(d2, near);
     }
 }
