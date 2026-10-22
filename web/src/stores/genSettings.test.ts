@@ -60,8 +60,8 @@ function makeSettings(overrides: Partial<RuntimeSettings> = {}): RuntimeSettings
     loop_guard_semantic_window: 16,
     loop_guard_semantic_min_calls: 12,
     loop_guard_semantic_max_distinct: 2,
-    // 提交 3:任务侧两道闸(步骤墙钟预算默认 1200 = 开;空闲看守默认 900)
-    task_step_budget_secs: 1200,
+    // 提交 3:任务侧两道闸(步骤墙钟预算默认 3600 = 开;空闲看守默认 900)
+    task_step_budget_secs: 3600,
     // PRODCAP-2:任务级总预算(默认 0 = 关)
     task_total_budget_secs: 0,
     // TMR3-4:团队任务执行阶段总预算(默认 1200 = 20 分钟)
@@ -256,9 +256,9 @@ describe('genSettings 任务侧两道闸(提交 3 · D3/D7)', () => {
     setActivePinia(createPinia());
   });
 
-  it('store 默认值与后端缺省一致(步骤预算 1200 / 总预算 0 / 团队预算 1200 / 空闲超时 900)', () => {
+  it('store 默认值与后端缺省一致(步骤预算 3600 / 总预算 0 / 团队预算 1200 / 空闲超时 900)', () => {
     const store = useGenSettingsStore();
-    expect(store.taskStepBudgetSecs).toBe(1200);
+    expect(store.taskStepBudgetSecs).toBe(3600);
     // PRODCAP-2:总预算缺省关(0);「0 是缺省」故缺字段兜底与真实值不可区分,只断言默认
     expect(store.taskTotalBudgetSecs).toBe(0);
     // TMR3-4:团队预算默认 20 分钟(安全阀,不是目标值)
@@ -266,7 +266,7 @@ describe('genSettings 任务侧两道闸(提交 3 · D3/D7)', () => {
     expect(store.taskIdleTimeoutSecs).toBe(900);
   });
 
-  it('loadSettings 回填服务端值;缺字段兜底 1200 / 900', async () => {
+  it('loadSettings 回填服务端值;缺字段兜底 3600 / 900', async () => {
     const store = useGenSettingsStore();
     getSettingsMock.mockReset().mockResolvedValue(
       makeSettings({
@@ -291,7 +291,7 @@ describe('genSettings 任务侧两道闸(提交 3 · D3/D7)', () => {
       ]),
     );
     await store.loadSettings();
-    expect(store.taskStepBudgetSecs).toBe(1200);
+    expect(store.taskStepBudgetSecs).toBe(3600);
     expect(store.taskTeamBudgetSecs).toBe(1200);
     expect(store.taskIdleTimeoutSecs).toBe(900);
   });

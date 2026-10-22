@@ -257,7 +257,7 @@ const isTaskMode = computed(() => store.appMode === 'task');
           class="sv-input inject-num"
           title="任务模式**单步工具循环**的墙钟上限(秒):到点带着已有产出收尾并记完成,不判失败;0 = 关闭本闸门"
         />
-        <span class="sv-note">任务侧:单步工具循环上限(默认 1200;0 = 关;建议 ≥300)</span>
+        <span class="sv-note">任务侧:单步工具循环上限(默认 3600;0 = 关;建议 ≥300)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">任务总预算</label>

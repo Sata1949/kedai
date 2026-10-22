@@ -990,6 +990,14 @@ impl ExecScope {
         &self.declared_files
     }
 
+    /// 是否启用了写入所有权（team 主 agent 的派生 scope）。
+    ///
+    /// bash 用它在**执行前**决定要不要解析命令写目标：聊天/solo/审计路径恒 false，
+    /// 零额外开销；启用时 `reserve_write` 才可能拒绝。
+    pub fn has_write_ownership(&self) -> bool {
+        self.ownership.is_some() && self.owner.is_some()
+    }
+
     /// 写入前「检查 + 认领」(TMR-4)。未启用所有权时恒 Ok(聊天/单主模式零行为变化)。
     ///
     /// 路径必须是 `safe_workspace_path` 解析后的工作区内绝对路径;本方法只把它压成

@@ -711,6 +711,24 @@ fn is_declared_file_write(name: &str, arguments: &str, declared: &[String]) -> b
     })
 }
 
+/// 台账增量里是否出现了「本主声明文件」的改动(TMR3-L6 纯函数)。
+///
+/// 台账路径是执行侧扫出的工作区相对路径,与声明侧同用 `normalize_workspace_rel`
+/// 归一化后再比对;任一非法路径只跳过该行(不让单条脏数据否决整轮进展)。
+fn has_declared_change(declared: &[String], changed_paths: &[String]) -> bool {
+    if declared.is_empty() {
+        return false;
+    }
+    changed_paths.iter().any(|raw| {
+        let Some(key) = crate::models::ownership::normalize_workspace_rel(raw) else {
+            return false;
+        };
+        declared.iter().any(|d| {
+            crate::models::ownership::normalize_workspace_rel(d).as_deref() == Some(key.as_str())
+        })
+    })
+}
+
 /// 跳过状态/工具调用落库;docs/功能.md 第三节);聊天路径恒 Some,行为不变。
 /// pub(crate):任务引擎 solo/custom 模式直调(批次 4.2 起)。
 #[allow(clippy::too_many_arguments)]
@@ -1220,6 +1238,16 @@ pub(crate) async fn run_tool_loop(
                 }
             })
             .collect();
+        // TMR3-L6:本轮执行前的台账基线。bash 的写目标解析只覆盖显式形态,台账是
+        // 「实际改了哪些文件」的权威记录;轮末按行 id 增量补判进展(见下方 round_progress)。
+        // 只在无进展守卫启用时读一次,聊天/solo 路径零额外查询。
+        let ledger_mark: Option<(String, i64)> = if no_progress_enabled {
+            crate::services::task_change_service::task_id_of(&tool_ctx.session_id).and_then(|tid| {
+                crate::services::task_change_service::max_id(&engine.db, &tid).map(|id| (tid, id))
+            })
+        } else {
+            None
+        };
         // 2) 执行:按模型顺序分组调度——连续 Safe 工具组内并发(join_all 保序),
         //    非 Safe/未注册工具单独成组、串行执行(含授权等待),组间串行,
         //    保证授权语义与副作用顺序稳定。
@@ -1288,7 +1316,8 @@ pub(crate) async fn run_tool_loop(
         let mut round_progress = false;
         for e in &executed {
             // P0-2:本轮只要有一次「成功写入本主声明文件」就算有进展,清零连续计数。
-            // 权限拒绝(output=Null)与错误对象不算;临时文件/bash 写入也不算。
+            // 权限拒绝(output=Null)与错误对象不算。这里只看带 `path` 参数的写工具;
+            // bash/fs_patch 等不带单一路径的写形态由下方台账增量补判(TMR3-L6)。
             if no_progress_enabled
                 && is_declared_file_write(&e.call.name, &e.call.arguments, &declared_files)
                 && !e.output.is_null()
@@ -1365,6 +1394,16 @@ pub(crate) async fn run_tool_loop(
             if semantic_break.is_none() {
                 let fp = crate::utils::loop_guard::output_fingerprint(&e.output.to_string());
                 semantic_break = semantic_guard.record(&e.call.name, fp);
+            }
+        }
+        // TMR3-L6:本轮没有可识别的成功写调用时,用台账增量补判——bash 重定向/
+        // tee/cp 等实际落盘的声明文件同样算进展。仅看**本主声明文件**,临时文件
+        // 与越界路径不算;跨主污染由所有权拦截兜底(他人写不了本主声明文件)。
+        if no_progress_enabled && !round_progress {
+            if let Some((task_id, mark)) = ledger_mark.as_ref() {
+                let changed =
+                    crate::services::task_change_service::paths_since(&engine.db, task_id, *mark);
+                round_progress = has_declared_change(&declared_files, &changed);
             }
         }
         // ===== 连续只读检测(TMR-5)=====
@@ -2633,7 +2672,7 @@ mod round_limit_tests {
 
 #[cfg(test)]
 mod no_progress_tests {
-    use super::is_declared_file_write;
+    use super::{has_declared_change, is_declared_file_write};
 
     fn declared() -> Vec<String> {
         vec!["parts/world.js".to_string(), "index.html".to_string()]
@@ -2675,5 +2714,22 @@ mod no_progress_tests {
             r#"{"path":"parts/world.js"}"#,
             &[]
         ));
+    }
+
+    /// TMR3-L6:台账增量(含 bash 写入)命中声明文件同样算进展。
+    #[test]
+    fn ledger_change_hits_declared_file() {
+        let changed = vec!["parts/world.js".to_string(), "_probe.cjs".to_string()];
+        assert!(has_declared_change(&declared(), &changed));
+        // 只改临时文件 / 路径越界 / 空声明:不算进展
+        assert!(!has_declared_change(
+            &declared(),
+            &["_probe.cjs".to_string()]
+        ));
+        assert!(!has_declared_change(
+            &declared(),
+            &["../outside.js".to_string()]
+        ));
+        assert!(!has_declared_change(&[], &changed));
     }
 }
