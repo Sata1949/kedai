@@ -138,15 +138,15 @@ describe('AgentPanel 合并结构(调用情况收编为内部 tab)', () => {
     expect(htmlTrace).toMatch(/role="tab"[^>]*aria-selected="true"[^>]*>\s*调用情况/);
   });
 
-  it('「调用情况」tab 内容(内嵌 CallTracePanel)常驻挂载:任务模式渲染 LLM 调用区', async () => {
+  it('「调用情况」tab 内容(内嵌 CallTracePanel)常驻挂载:任务模式渲染调用记录区', async () => {
     const html = await renderPanel((store) => {
       store.appMode = 'task';
       store.currentTaskId = 't1';
       store.taskCalls = [];
     });
-    // v-show 双 tab 常驻:Agent 状态(任务执行状态)与调用情况(LLM 调用)内容同输出
+    // v-show 双 tab 常驻:Agent 状态(任务执行状态)与调用情况(调用记录)内容同输出
     expect(html).toContain('计划步骤');
-    expect(html).toContain('LLM 调用');
+    expect(html).toContain('调用记录');
   });
 });
 

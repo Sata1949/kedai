@@ -122,4 +122,33 @@ describe('CodingBundleSection(编码能力包区)', () => {
 
     expect(loadSpy).not.toHaveBeenCalled();
   });
+
+  // ===== P2:编码包开启 × 命令执行关闭的联动提示 =====
+
+  it('P2:默认(编码包关 + 命令执行关)不显示联动警示', () => {
+    const { store, wrapper } = mountSection();
+    store.execEnabled = false;
+    expect(wrapper.text()).not.toContain('命令执行总开关关闭');
+  });
+
+  it('P2:编码包开启且命令执行关闭 → 显示联动警示并指向「授权与命令执行」分区', async () => {
+    const { store, wrapper } = mountSection();
+    store.taskCodingBundleEnabled = true;
+    store.execEnabled = false;
+    await wrapper.vm.$nextTick();
+
+    const text = wrapper.text();
+    expect(text).toContain('命令执行总开关关闭');
+    expect(text).toContain('bash');
+    expect(text).toContain('授权与命令执行');
+    expect(text).toContain('启用命令执行');
+  });
+
+  it('P2:编码包开启且命令执行已开启 → 不显示联动警示', async () => {
+    const { store, wrapper } = mountSection();
+    store.taskCodingBundleEnabled = true;
+    store.execEnabled = true;
+    await wrapper.vm.$nextTick();
+    expect(wrapper.text()).not.toContain('命令执行总开关关闭');
+  });
 });
