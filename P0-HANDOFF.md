@@ -99,14 +99,21 @@
 
 ## 五、下一步（P1/P2）与 TMR3 追注（2026-10-22）
 
-> **2026-10-22 状态**：P1 四项已完成（TMR3-1/2/3/4），实现与验证见下方标注；
-> P2 两项（调用面板文案、`exec_enabled` 提示）仍未做，留作后续小批。
+> **2026-10-22 状态**：P1 四项已完成（TMR3-1/2/3/4）；P2 两项（调用记录面板口径、
+> `exec_enabled` 联动提示）已由 TMR3-5/6 收口（代码提交 `4b7e027`），实现与验证见下方标注。
 
 1. **上游流中断重试【已完成 TMR3-1，2026-10-22】**：连接器只在首字节前重试（`connectors/openai_compatible/mod.rs` + `retry.rs`，MAX_ATTEMPTS=3）；SSE 读取阶段 120 秒停滞/body 断开后直接失败，任务层不判断 `LlmError::retryable()`。**实际实现**：在 `run_tool_loop` 内层对**单次调用**重试一次（Timeout/RateLimited/Upstream、500ms 退避、取消即停、仅任务模式），保留消息与工具结果，不重启子目标；重试前透出「上游重试」事件。用例 `tests/task_upstream_retry.rs`。
 2. **team 依赖图/总装顺序【已完成 TMR3-3，2026-10-22】**：当前 `run_mains_parallel` 纯并行，规划器把 `index.html` 和 `parts/*` 分给不同主时，总装主无法等待 parts。**实际实现**：主级 `after`（1-based）+ 文件路径确定性推断 + Kahn 分波；无依赖仍单波并行，成环降级并行；依赖主启动时注入上游产出摘要。用例 `tests/task_team_dependency.rs`。
-3. **调用记录面板文案【未做，P2】**：`web/src/components/CallTracePanel.vue` 把每条 agent 循环汇总行标成「LLM 调用」，错误行显示 0 token（P0-1 已让新任务非零，但历史任务/失败路径仍可能显示 0）。建议改为「工具循环」/「调用汇总」，并显示「未记录」而非 0。
+3. **调用记录面板文案【已完成 TMR3-5，2026-10-22】**：`CallTracePanel.vue` 分区标题由
+   「LLM 调用」改为「调用记录」；`phase=agent/subagent` 的整轮工具循环汇总行加「工具循环」
+   徽标；`status=error` 且 token 合计为 0 时显示「未记录」（历史任务/超时丢弃拿不到用量），
+   非失败行保持数字。`CallTracePanel` + `AgentPanel` 用例 27/27。
 4. **全局预算【已完成 TMR3-4，2026-10-22】**：`task_step_budget_secs` 默认 3600、`task_total_budget_secs` 默认 0；team 每子目标重置。**实际实现**：新增仅 team 消费的 `task_team_budget_secs`（默认 1200s，0 = 关），从规划完成后起算，与任务总预算取小；到点不再启动新主/子目标，主循环后到点则审计/汇总不执行，带产出收尾为 partial/done。用例 `tests/task_team_budget.rs`。
-5. **`exec_enabled` 默认关【未做，P2/运维】**：编码类任务初始化脚本应显式打开，否则前几轮 bash 全被拒（本次实测前 7 分钟）。产品默认值不翻（安全闸门）；实测脚本已在仓外 `D:\kedai-bench-run` 显式写 `exec_enabled:true`。可选后续：编码包开启且命令执行关闭时在设置区加警示。
+5. **`exec_enabled` 默认关【已完成联动提示，TMR3-6，2026-10-22】**：产品默认值**不翻**
+   （安全闸门不破）；`CodingBundleSection.vue` 在「编码包开启且命令执行关闭」时显示
+   `sv-feedback info` 警示，指引到「Agent 与任务 → 授权与命令执行」打开「启用命令执行」。
+   不自动开启。编码类任务初始化脚本仍应显式写 `exec_enabled:true`（本次实测前 7 分钟
+   bash 全被拒即此因）；`CodingBundleSection` 用例 11/11。
 6. **失败循环的 self-heal 用量【已完成 TMR3-2，2026-10-22】**：`run_tool_loop` 的 Err 不带 `self_heals`；失败循环的截断尝试仍可能少记。**实际实现**：`self_heals` 改为调用方传入的 `&mut Vec`（7 个调用点），solo/子 agent/审计的 Err/中断分支补落 `(截断自愈)` 行与 usage；子 agent/审计/`generate_text` 失败也补记。用例 `tests/task_self_heal_usage_on_failure.rs`。
 7. **TMR3 仍未覆盖（登记 `docs/遗留.md` §三十）**：超时那次调用的 usage 不可见（future drop）；重试会重复流式输出首次尝试的部分正文；依赖只到主级、路径推断可能误报；团队预算默认 1200 是行为变更；前后端步骤预算默认值文案仍不一致；`bash` 写入不算进展/不受所有权约束；`JoinError` 路径无 usage。
 
@@ -134,6 +141,16 @@
     `probe-run.log` / `probe-budget.log`。
 - 残余：`docs/遗留.md` §三十 TMR3-L1~L7。
 
+### P2 验证（2026-10-22）
+
+- 前端全量：`npm test -w web` **156 文件 / 1681 用例**（P2 本批 +5）；静态计数 1638；
+  `npm run typecheck -w web`、`npm run build -w web`、`npm run lint -w web`（0 error）EXIT 0。
+- 门禁：`node tools/check-arch.mjs`、`node tools/count-tests.mjs --check`、
+  `node tools/check-docs.mjs`、`node tools/check-doc-claims.mjs` 均 EXIT 0。
+- 真实模型最小连通冒烟（本批不触模型链路，按样式批次豁免档）：
+  `deepseek/deepseek-v4.1-flash` 直连 HTTP 200 / 8.4s，可见回复「连接成功」，
+  usage 37 prompt / 38 completion；证据 `D:\kedai-bench-run\p2-evidence\smoke.log`。
+
 ## 六、文件清单
 
 
@@ -147,12 +164,16 @@
 | `server-rs/src/connectors/mock.rs` | `[[tool_loop_fail:...]]` 测试钩子 |
 | `server-rs/tests/task_usage_on_failure.rs` | P0-1 集成回归 |
 | `server-rs/tests/task_no_progress_guard.rs` | P0-2 集成回归 |
-| `MAINTENANCE.md` | 测试计数更新（1885 / 1445 / 440 / 66） |
+| `web/src/components/CallTracePanel.vue` / `web/src/components/settings/CodingBundleSection.vue` | P2：调用记录口径 / 编码包命令执行联动提示 |
+| `web/src/components/CallTracePanel.test.ts` / `web/src/components/AgentPanel.test.ts` / `web/src/components/settings/CodingBundleSection.test.ts` | P2 前端回归 |
+| `MAINTENANCE.md` | 测试计数更新（1885 / 1445 / 440 / 66；P2 后前端 1638 / 1681） |
 
 ## 七、提交与分支
 
 - 目标分支：`fix/p0-task-usage-no-progress`（从 `main` 新建；不要在 `main` 直接提交，仓保护要求 PR）。
-- 代码提交：`1fd04ab`（P0-1 + P0-2 + 两个集成测试 + MAINTENANCE 计数）。
+- 代码提交：`1fd04ab`（P0-1 + P0-2 + 两个集成测试 + MAINTENANCE 计数）、
+  `4b7e027`（P2 TMR3-5/6 + 前端测试 + MAINTENANCE 计数）、
+  `b07e2d6`（markdown-it / sanitize-html 生产依赖审计补丁）。
 - 实际提交粒度（两个提交，保证每个提交可独立编译/过计数检查）：
   1. `fix(任务模式): P0 失败循环记账 + 声明文件无进展守卫`（代码 + 两个集成测试 + MAINTENANCE 计数）
   2. `docs(台账): P0 修复交接文档`（本文件）
