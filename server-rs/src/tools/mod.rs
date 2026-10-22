@@ -29,6 +29,9 @@ pub mod multistep;
 pub mod permissions;
 pub mod registry;
 pub mod revise;
+// bash 写入目标解析(TMR3-L6):重定向/tee/cp/mv/rm 等静态可识别的写目标,
+// 供 bash 侧的 team 文件所有权预检使用;内联脚本解析不了的部分是已登记边界
+mod shell_write_targets;
 // 截图工具(视觉能力包 D5;Windows 原生 GDI / 非 Windows 明示不支持):
 // 可见性由「视觉与截图」总开关过滤(见 tool_policy::screenshot_gate 与 tool_sets::filter_screenshot)
 pub mod screenshot;

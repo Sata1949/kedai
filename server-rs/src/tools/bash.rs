@@ -211,6 +211,43 @@ async fn run(
         v
     };
 
+    // TMR3-L6:bash 写文件也要过 team 的文件所有权(TMR-4 此前只拦 fs_*)。
+    // 平台层没有文件系统沙箱,只能在命令执行前做**静态**目标解析:重定向/tee/cp/mv/rm
+    // 等显式写形态能识别;内联脚本(node -e/python -c)识别不了,仍是登记边界。
+    // 解析不到或越出工作区的目标不在这里报错——bash 的既定边界是「命令文本里的绝对
+    // 路径不拦」,所有权只判能解析进工作区的路径(与 fs_* 的 reserve_write 同口径)。
+    if let Some(scope) = ctx.scope.as_deref() {
+        if scope.has_write_ownership() {
+            for raw in crate::tools::shell_write_targets::extract_write_targets(&command) {
+                // 相对目标按 shell 的 cwd 解析,但换算成**工作区相对路径**再交给
+                // safe_workspace_path:canonicalize 出来的绝对路径带 `\\?\` 前缀,
+                // 直接传会被它的 UNC 拒绝分支当成网络路径(否则所有权静默失效)。
+                let resolved = if std::path::Path::new(&raw).is_absolute() {
+                    if raw.starts_with(r"\\?\") {
+                        continue;
+                    }
+                    raw
+                } else {
+                    let cwd_path = std::path::Path::new(&cwd);
+                    let Ok(cwd_rel) = cwd_path.strip_prefix(scope.workspace()) else {
+                        // cwd 不在工作区内(聊天/非 jail):所有权不适用
+                        continue;
+                    };
+                    cwd_rel.join(&raw).to_string_lossy().into_owned()
+                };
+                if let Ok(path) = crate::tools::workspace_guard::safe_workspace_path(
+                    scope.workspace(),
+                    &resolved,
+                    Some(data_dir),
+                ) {
+                    if let Err(conflict) = scope.reserve_write(&path) {
+                        return Err(format!("bash 命令被文件所有权拒绝:{conflict}"));
+                    }
+                }
+            }
+        }
+    }
+
     // 批次 4b:前扫描(命令执行前的工作区快照,≤256KB 的文件按预算驻留正文)。
     // 只在「任务 + 绑定了工作区」时扫——聊天路径不记账(与 task_change_service 同口径);
     // 被总开关拒绝的命令在上方已 return,不会被扫到。

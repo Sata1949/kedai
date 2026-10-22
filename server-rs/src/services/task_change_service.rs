@@ -349,6 +349,62 @@ pub fn deliverable_paths(db: &Arc<Db>, task_id: &str, limit: usize) -> (Vec<Stri
     (paths, total as usize)
 }
 
+/// 某任务台账当前的**最大行 id**(无行 = 0;读取失败 = None)。
+///
+/// 调用方在工作段开始前记基线、结束后用 [`paths_since`] 取增量。返回 Option 而不是
+/// 0 兜底:读失败时若按 0 处理,增量会把**历史全部行**算成本轮改动,进展判定会假阳性。
+pub fn max_id(db: &Arc<Db>, task_id: &str) -> Option<i64> {
+    let conn = match db.read() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(op = "台账基线 read", error = %e, "只读连接获取失败,按不可用处理");
+            return None;
+        }
+    };
+    match conn.query_row(
+        "SELECT COALESCE(MAX(id), 0) FROM task_file_changes WHERE task_id = ?1",
+        rusqlite::params![task_id],
+        |row| row.get::<_, i64>(0),
+    ) {
+        Ok(id) => Some(id),
+        Err(e) => {
+            tracing::warn!(op = "台账基线 query", error = %e, "基线查询失败,按不可用处理");
+            None
+        }
+    }
+}
+
+/// `after_id` 之后新增的变更路径(去重、按发生顺序;回滚不算进展)。
+///
+/// 用途是「bash 写声明文件也算进展」(TMR3-L6):bash 的写目标解析只覆盖显式形态,
+/// 台账则是命令**实际**改了哪些文件的权威记录(前扫描 + 后扫描差值),两者互补。
+/// 查询失败只 warn + 空列表——进展守卫宁可少判一次进展,也不能因 DB 抖动误清计数。
+pub fn paths_since(db: &Arc<Db>, task_id: &str, after_id: i64) -> Vec<String> {
+    let conn = match db.read() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(op = "台账增量 read", error = %e, "只读连接获取失败,按空列表");
+            return Vec::new();
+        }
+    };
+    let mut stmt = match conn.prepare(
+        "SELECT DISTINCT path FROM task_file_changes \
+         WHERE task_id = ?1 AND id > ?2 AND op != 'rollback' ORDER BY id ASC",
+    ) {
+        Ok(s) => s,
+        Err(e) => return crate::services::log_query_failure("台账增量 prepare", e),
+    };
+    // 先绑定 query_map 的结果再 match:让 MappedRows 比 `stmt` 先 drop(尾表达式里的
+    // 临时值会活到语句结束,借用检查会报 `stmt` 已释放)。
+    let mapped = stmt.query_map(rusqlite::params![task_id, after_id], |row| {
+        row.get::<_, String>(0)
+    });
+    match mapped {
+        Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+        Err(e) => crate::services::log_query_failure("台账增量 query_map", e),
+    }
+}
+
 /// 某文件在本任务内的**最新一条**变更(含基线正文),供 diff 与回滚定位。
 struct LatestChange {
     op: String,

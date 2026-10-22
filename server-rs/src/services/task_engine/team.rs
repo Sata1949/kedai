@@ -942,6 +942,17 @@ impl TeamExecutor {
                 ctx.cancel.clone(),
             )
             .await;
+            // TMR3-L7:成功子目标的 usage 在**完成即入账**,不等 run_main 返回后由
+            // 并行收集方统一记。这样主 agent 若在后续子目标 panic(JoinError),
+            // 已完成部分的 token 不会随任务一起消失;汇入 `total` 仍由收集方按返回值做。
+            if let Ok((_, usage)) = &result {
+                self.svc.record_usage(
+                    &ctx.task_id,
+                    "agent",
+                    Some(step_idxs[k]),
+                    &usage_as_output(usage),
+                );
+            }
             // 成功产出进 prior 供后续子目标衔接(失败不注入,避免把错误文本当参考)
             if let Ok((text, _)) = &result {
                 prior.push((g.name.clone(), text.clone()));
@@ -1566,7 +1577,10 @@ impl TeamExecutor {
                     Err(e) => {
                         // JoinError(panic 等):按该主失败处理,不中断其余主;JoinError 不携带
                         // 业务下标,无法反查是哪一主 panic——保守地把本波中仍 running 的
-                        // 步骤统一置 error(终态至少 partial,不留永远 running)
+                        // 步骤统一置 error(终态至少 partial,不留永远 running)。
+                        // TMR3-L7:该主**已完成**子目标的 usage 已在 run_main 内完成即入账,
+                        // 不随 panic 丢失;panic 发生在进行中的调用时,那一次的用量仍不可得
+                        // (同 TMR3-L1 的 future drop 边界)。
                         tracing::warn!(error = e.to_string(), "team 主 agent 任务异常终止");
                         fail_batch_running_steps(plan, &wave_batch_idx, step_ranges);
                         svc.set_plan(&ctx.task_id, plan);
@@ -1580,14 +1594,8 @@ impl TeamExecutor {
                             total.prompt_tokens += usage.prompt_tokens;
                             total.completion_tokens += usage.completion_tokens;
                             total.total_tokens += usage.total_tokens;
-                            // usage 落库(phase=agent,step_index=该子目标的全局步骤下标;
-                            // 子 agent 行在 run_subtask 内落)
-                            svc.record_usage(
-                                &ctx.task_id,
-                                "agent",
-                                Some(si),
-                                &usage_as_output(&usage),
-                            );
+                            // usage 行已由 run_main 在子目标完成时落库(TMR3-L7);
+                            // 这里只汇入返回值,不再重复 record_usage(否则会双计)。
                             plan[si].status = TaskStepStatus::Done;
                             // 替换式回写:补做产出覆盖旧版本,杜绝新旧并存(实跑问题 2)
                             plan[si].result = text;
