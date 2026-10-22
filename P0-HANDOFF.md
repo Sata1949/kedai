@@ -97,19 +97,45 @@
 
 - 无（P0 定向/全量/真实模型证据已齐）。P1 见下节。
 
-## 五、下一步（P1/P2，未做）
+## 五、下一步（P1/P2）与 TMR3 追注（2026-10-22）
 
-1. **上游流中断的子目标级重试**：连接器只在首字节前重试（`connectors/openai_compatible/mod.rs` + `retry.rs`，MAX_ATTEMPTS=3）；SSE 读取阶段 120 秒停滞/body 断开后直接失败，任务层不判断 `LlmError::retryable()`。建议对 Timeout/Upstream 做一次带退避的子目标重试。
-2. **team 依赖图/总装顺序**：当前 `run_mains_parallel` 纯并行，规划器把 `index.html` 和 `parts/*` 分给不同主时，总装主无法等待 parts。建议：
-   - 单文件交付时规划器不拆冗余 parts；或
-   - 把总装放到同一主的最后一个子目标（串行）；或
-   - 给 team 增加显式依赖图。
-3. **调用记录面板文案**：`web/src/components/CallTracePanel.vue` 把每条 agent 循环汇总行标成「LLM 调用」，错误行显示 0 token（P0-1 已让新任务非零，但历史任务/失败路径仍可能显示 0）。建议改为「工具循环」/「调用汇总」，并显示「未记录」而非 0。
-4. **全局预算**：`task_step_budget_secs` 默认 3600、`task_total_budget_secs` 默认 0；team 每子目标重置。可考虑 team 默认总预算或每主墙钟上限。
-5. **`exec_enabled` 默认关**：编码类任务初始化脚本应显式打开，否则前几轮 bash 全被拒（本次实测前 7 分钟）。
-6. **失败循环的 self-heal 用量**：`run_tool_loop` 的 Err 不带 `self_heals`；失败循环的截断尝试仍可能少记。可让 EngineError 携带已累计 usage/self_heals，或在 `run_tool_loop` 内直接落账。
+> **2026-10-22 状态**：P1 四项已完成（TMR3-1/2/3/4），实现与验证见下方标注；
+> P2 两项（调用面板文案、`exec_enabled` 提示）仍未做，留作后续小批。
+
+1. **上游流中断重试【已完成 TMR3-1，2026-10-22】**：连接器只在首字节前重试（`connectors/openai_compatible/mod.rs` + `retry.rs`，MAX_ATTEMPTS=3）；SSE 读取阶段 120 秒停滞/body 断开后直接失败，任务层不判断 `LlmError::retryable()`。**实际实现**：在 `run_tool_loop` 内层对**单次调用**重试一次（Timeout/RateLimited/Upstream、500ms 退避、取消即停、仅任务模式），保留消息与工具结果，不重启子目标；重试前透出「上游重试」事件。用例 `tests/task_upstream_retry.rs`。
+2. **team 依赖图/总装顺序【已完成 TMR3-3，2026-10-22】**：当前 `run_mains_parallel` 纯并行，规划器把 `index.html` 和 `parts/*` 分给不同主时，总装主无法等待 parts。**实际实现**：主级 `after`（1-based）+ 文件路径确定性推断 + Kahn 分波；无依赖仍单波并行，成环降级并行；依赖主启动时注入上游产出摘要。用例 `tests/task_team_dependency.rs`。
+3. **调用记录面板文案【未做，P2】**：`web/src/components/CallTracePanel.vue` 把每条 agent 循环汇总行标成「LLM 调用」，错误行显示 0 token（P0-1 已让新任务非零，但历史任务/失败路径仍可能显示 0）。建议改为「工具循环」/「调用汇总」，并显示「未记录」而非 0。
+4. **全局预算【已完成 TMR3-4，2026-10-22】**：`task_step_budget_secs` 默认 3600、`task_total_budget_secs` 默认 0；team 每子目标重置。**实际实现**：新增仅 team 消费的 `task_team_budget_secs`（默认 1200s，0 = 关），从规划完成后起算，与任务总预算取小；到点不再启动新主/子目标，主循环后到点则审计/汇总不执行，带产出收尾为 partial/done。用例 `tests/task_team_budget.rs`。
+5. **`exec_enabled` 默认关【未做，P2/运维】**：编码类任务初始化脚本应显式打开，否则前几轮 bash 全被拒（本次实测前 7 分钟）。产品默认值不翻（安全闸门）；实测脚本已在仓外 `D:\kedai-bench-run` 显式写 `exec_enabled:true`。可选后续：编码包开启且命令执行关闭时在设置区加警示。
+6. **失败循环的 self-heal 用量【已完成 TMR3-2，2026-10-22】**：`run_tool_loop` 的 Err 不带 `self_heals`；失败循环的截断尝试仍可能少记。**实际实现**：`self_heals` 改为调用方传入的 `&mut Vec`（7 个调用点），solo/子 agent/审计的 Err/中断分支补落 `(截断自愈)` 行与 usage；子 agent/审计/`generate_text` 失败也补记。用例 `tests/task_self_heal_usage_on_failure.rs`。
+7. **TMR3 仍未覆盖（登记 `docs/遗留.md` §三十）**：超时那次调用的 usage 不可见（future drop）；重试会重复流式输出首次尝试的部分正文；依赖只到主级、路径推断可能误报；团队预算默认 1200 是行为变更；前后端步骤预算默认值文案仍不一致；`bash` 写入不算进展/不受所有权约束；`JoinError` 路径无 usage。
+
+### TMR3 验证（2026-10-22）
+
+- 定向：`task_upstream_retry` 2/2、`task_self_heal_usage_on_failure` 1/1、
+  `task_team_dependency` 1/1、`task_team_budget` 1/1、`task_usage_on_failure` 1/1、
+  `task_no_progress_guard` 1/1、`task_loop_budget` 6/6、`tasks_modes_team` 13/13、
+  `tasks_modes_plan` 21/21、`tasks_crud` 21/21；`team` 单测 22/22、
+  `transport_retry_tests` 5/5、`team_deadline` 2/2。
+- 后端全量：`cargo test -j 4 --no-fail-fast` **75 目标 1887 passed / 0 failed / 1 ignored，
+  EXIT 0**（静态 1901 = 1456 单测 + 445 集成 / 70 文件）。证据
+  `D:\kedai-bench-run\tmr3-evidence\backend-full.log`。
+- 前端全量：156 文件 / 1676 用例；`npm run typecheck -w web` EXIT 0。
+- **真实模型（2026-10-22，`DATA_DIR=D:/kedai-bench-run/data-tmr3-20261022`、`PORT=3015`、
+  `deepseek/deepseek-v4.1-flash`）**：
+  - 依赖分波 + 总装任务 `cbc48e0d-5951-4508-9a17-d5e809676390`：`done`，156.1s，
+    usage 114,189/6,391；事件「团队依赖调度:第1波:主Agent-1;第2波:主Agent-2」；
+    `delivery.missing=[]`，`index.txt` 242 字节且 A 在前 B 在后（逐字核对）。
+  - 团队预算任务 `4052fcd3-9aa3-4d22-9f19-f03d0c93b720`（预算 5s）：`partial`，18.2s，
+    主 3 标「团队总预算用尽(未执行)」，事件「团队总预算用尽:审计与汇总未执行,以已完成
+    部分收尾」，`delivery.missing=["index.txt"]`。
+  - 上游未失败（`retry_events=0`），TMR3-1 重试路径由 mock 集成用例覆盖。
+  - 证据：`D:\kedai-bench-run\tmr3-evidence\task-probe.json` / `task-budget-probe.json` /
+    `probe-run.log` / `probe-budget.log`。
+- 残余：`docs/遗留.md` §三十 TMR3-L1~L7。
 
 ## 六、文件清单
+
 
 | 文件 | 作用 |
 |---|---|
