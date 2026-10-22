@@ -68,7 +68,7 @@ describe('CallTracePanel(调用追踪内容,面板合并后为 AgentPanel「调�
       store.currentTaskId = 't1';
       store.taskCalls = [];
     });
-    expect(html).toContain('LLM 调用');
+    expect(html).toContain('调用记录');
     expect(html).toContain('暂无调用记录');
   });
 
@@ -81,7 +81,7 @@ describe('CallTracePanel(调用追踪内容,面板合并后为 AgentPanel「调�
         makeCall({ id: 'c2', phase: 'planner', step_index: null, status: 'error', elapsed_ms: 500 }),
       ];
     });
-    expect(html).toContain('LLM 调用');
+    expect(html).toContain('调用记录');
     // 步骤序号契约:后端落库 step_index 为 0 起,面板展示 +1(下标 2 → 步骤 #3)
     expect(html).toContain('步骤 #3');
     expect(html).toContain('规划');
@@ -94,6 +94,39 @@ describe('CallTracePanel(调用追踪内容,面板合并后为 AgentPanel「调�
     expect(html).toContain('错误');
     // 摘要默认收起,不渲染 <pre>
     expect(html).not.toContain('提示词摘要');
+  });
+
+  it('P2:工具循环汇总行(agent/subagent)带「工具循环」徽标,单次调用行不带', async () => {
+    const html = await render((store) => {
+      store.appMode = 'task';
+      store.currentTaskId = 't1';
+      store.taskCalls = [
+        makeCall({ id: 'c1', phase: 'agent', step_index: 0 }),
+        makeCall({ id: 'c2', phase: 'subagent', step_index: null }),
+        makeCall({ id: 'c3', phase: 'step', step_index: 1 }),
+        makeCall({ id: 'c4', phase: 'planner', step_index: null }),
+      ];
+    });
+    // 只有 agent/subagent 两行是整轮工具循环的汇总;step/planner 仍是一次调用
+    expect(html.match(/>工具循环</g)).toHaveLength(2);
+  });
+
+  it('P2:失败且 0 token 显示「未记录」;非零失败与成功零用量照常显示数字', async () => {
+    const html = await render((store) => {
+      store.appMode = 'task';
+      store.currentTaskId = 't1';
+      store.taskCalls = [
+        makeCall({ id: 'c1', status: 'error', prompt_tokens: 0, completion_tokens: 0 }),
+        makeCall({ id: 'c2', status: 'error', prompt_tokens: 4, completion_tokens: 5 }),
+        makeCall({ id: 'c3', status: 'ok', prompt_tokens: 0, completion_tokens: 0 }),
+      ];
+    });
+    // 历史任务/超时丢弃的失败行不把「没拿到用量」伪装成真实 0 消耗
+    expect(html.match(/未记录/g)).toHaveLength(1);
+    expect(html).toContain('该次调用失败且未返回用量');
+    // 非零失败行与成功零用量行保持数字口径
+    expect(html).toContain('9 tokens');
+    expect(html.match(/0 tokens/g)).toHaveLength(1);
   });
 
   it('被调流程小结(二维批次 7b 收口):动态层次数与 token 单列,无动态调用时不显示', async () => {

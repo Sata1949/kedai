@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 调用追踪内容(批次 3 L3;面板合并后作为 AgentPanel「调用情况」tab 的内容组件,两模式共用):
-// 任务模式 = 当前任务 LLM 调用时间线(GET /api/tasks/{id}/calls;
+// 任务模式 = 当前任务调用记录时间线(单次调用 + 工具循环汇总;GET /api/tasks/{id}/calls;
 //   tab 激活时由 SSE llm_call 事件驱动刷新,挂载/切换任务且记录为空时主动拉取一次);
 // 聊天模式 = 复用 chat store 的 AgentActivity(推理链 + 工具调用),纯本地状态,零后端请求。
 // 注意:本组件不再自带抽屉壳/面板头(合并后由 AgentPanel 提供),样式类名保持不变。
@@ -75,6 +75,25 @@ function callTokens(call: TaskLlmCall): number {
   return call.prompt_tokens + call.completion_tokens;
 }
 
+/**
+ * 工具循环汇总行(phase=agent/subagent):一行代表整轮工具循环(多轮 LLM 调用 + 工具),
+ * token/耗时是整轮累计,不是单次调用。其余 phase 一行 = 一次调用。
+ */
+function isLoopSummary(call: TaskLlmCall): boolean {
+  return call.phase === 'agent' || call.phase === 'subagent';
+}
+
+/**
+ * 行内 token 文案:失败且未返回用量时显示「未记录」。
+ * 历史任务(P0-1 之前)的错误行与超时被丢弃的调用都落在这一形态,显示 0 tokens
+ * 会让人误读成真实零消耗;非失败行保持数字(ok 的 0 是上游真实上报)。
+ */
+function callTokensText(call: TaskLlmCall): string {
+  const total = callTokens(call);
+  if (total === 0 && call.status === 'error') return '未记录';
+  return `${total.toLocaleString()} tokens`;
+}
+
 /** 截断标记(后端契约:finish_reason === 'length' = 撞 max_tokens 上限,响应为半截文本;
  *  其余值(stop / '' 未知 / 缺省)不显示徽标) */
 function isTruncated(call: TaskLlmCall): boolean {
@@ -123,10 +142,10 @@ watch(callTraceOpen, (open) => {
 <template>
   <!-- 调用情况 tab 内容(无独立抽屉壳;根元素单节点,供 AgentPanel v-show 控制显隐) -->
   <div class="sv-calltrace-tab">
-    <!-- 任务模式:当前任务 LLM 调用时间线 -->
+    <!-- 任务模式:当前任务调用记录时间线 -->
     <template v-if="appMode === 'task'">
       <div>
-        <div class="sv-agent-section-label">LLM 调用({{ taskCalls.length }})</div>
+        <div class="sv-agent-section-label">调用记录({{ taskCalls.length }})</div>
         <!-- 被调流程单列(二维批次 7b 收口):动态调用层的次数与 token 一眼可见,
              不必再按 phase 前缀手动累加 -->
         <p v-if="dynamicStats.calls > 0" class="sv-note-mini">
@@ -161,6 +180,11 @@ watch(callTraceOpen, (open) => {
             <div class="tool-name">
               {{ phaseLabel(c) }}
               <span
+                v-if="isLoopSummary(c)"
+                class="sv-badge"
+                title="该行是一次工具循环(多轮 LLM 调用 + 工具)的汇总,不是单次调用"
+              >工具循环</span>
+              <span
                 v-if="isTruncated(c)"
                 class="sv-badge trunc"
                 title="响应撞 max_tokens 上限被截断(finish_reason=length),内容为半截文本"
@@ -171,7 +195,12 @@ watch(callTraceOpen, (open) => {
             </div>
             <div class="sv-calltrace-meta">
               <span>{{ c.model }}</span>
-              <span class="sv-tnum">{{ callTokens(c).toLocaleString() }} tokens</span>
+              <span
+                class="sv-tnum"
+                :title="c.status === 'error' && callTokens(c) === 0
+                  ? '该次调用失败且未返回用量(历史任务或超时丢弃),不是真实消耗'
+                  : undefined"
+              >{{ callTokensText(c) }}</span>
               <span class="sv-tnum">{{ elapsedText(c.elapsed_ms) }}</span>
             </div>
             <div class="sv-mt6">

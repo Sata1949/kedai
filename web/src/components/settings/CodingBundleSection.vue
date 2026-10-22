@@ -8,7 +8,7 @@
 // 形态与体例:单开关分区,开关行照 DataManagementSection 的「回退快照(undo)」行
 // (info 标题+说明 / 右侧开关),保存走 store.queueSettingsSave(既有串行保存队列,
 // 与 AndroidExecSection 同一路径),不新造保存通道;失败回滚本地值,避免 UI 与服务端分叉。
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 import { storeToRefs } from 'pinia';
 import { useAppStore } from '../../store';
 
@@ -20,7 +20,15 @@ withDefaults(defineProps<{
 });
 
 const store = useAppStore();
-const { taskCodingBundleEnabled } = storeToRefs(store);
+const { taskCodingBundleEnabled, execEnabled } = storeToRefs(store);
+
+/**
+ * 联动提示:编码包已开但命令执行总开关关闭。
+ * 2026-10-21 实测(我的世界空岛 team 任务)前 7 分钟 bash 全被总开关拒绝——编码任务
+ * 只靠 fs_* 写盘时无法自测,却在跑完才发现。总开关默认关是安全闸门,本提示只提前说明
+ * 后果,不自动开启,也不改后端默认值。
+ */
+const showExecHint = computed(() => taskCodingBundleEnabled.value && !execEnabled.value);
 
 /** 保存反馈(成功/失败,3 秒后自动清除) */
 const msg = ref('');
@@ -77,6 +85,10 @@ async function onToggle(next: boolean): Promise<void> {
           <span class="sv-note">{{ taskCodingBundleEnabled ? '已开启' : '已关闭' }}</span>
         </label>
       </div>
+    </div>
+    <div v-if="showExecHint" class="sv-feedback info" role="status">
+      编码能力包已开启,但<b>命令执行总开关关闭</b>:任务里的 bash 命令会被一律拒绝,编码任务
+      可能空转。请到「Agent 与任务 → 授权与命令执行」打开「启用命令执行」。
     </div>
     <div v-if="msg" class="sv-feedback" :class="msgKind === 'err' ? 'err' : 'ok'">{{ msg }}</div>
     <p class="sv-note">

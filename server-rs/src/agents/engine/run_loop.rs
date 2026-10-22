@@ -638,6 +638,7 @@ impl AgentEngine {
                     abort,
                     flag,
                     rctx.total_usage,
+                    &mut Vec::new(),
                     &run_id.to_string(),
                     gate,
                     // 聊天路径无节点级超时;emit_tokens=false(产物不进气泡)
@@ -796,6 +797,7 @@ impl AgentEngine {
                     abort,
                     flag,
                     rctx.total_usage,
+                    &mut Vec::new(),
                     &run_id.to_string(),
                     gate,
                     // 聊天路径无节点级超时(A 批 A1):恒走宿主既有判定(聊天侧本无总时长上限)
@@ -842,6 +844,7 @@ impl AgentEngine {
                         abort,
                         flag,
                         rctx.total_usage,
+                        &mut Vec::new(),
                         &run_id.to_string(),
                         gate,
                         // 聊天 custom 步骤无节点级超时(A 批 A1:该字段只服务任务侧的

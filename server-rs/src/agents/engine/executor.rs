@@ -181,6 +181,42 @@ fn resolve_call_watchdog(
     call_timeout.or_else(|| call_watchdog_for(session_id))
 }
 
+/// 任务模式单次调用遇到可重试上游失败(超时/限流/流中断)时的最大重试次数(TMR3-1,
+/// 2026-10-22;单一出处)。
+///
+/// 为什么只重试**单次调用**而不是重启整个子目标:2026-10-21 实测主 Agent 2 跑完
+/// 234 轮后上游错误,子目标级重启会丢掉全部工具历史并重跑已完成的副作用;单次
+/// 重试保留 `llm_messages` 与工具结果,只把「这一次没有返回的调用」再做一遍。
+///
+/// 为什么上限是 1:任务模式的 300s 看门狗一次已很贵,重试一次最坏多花 300s;
+/// 团队/单步墙钟预算与取消信号是外层兜底,不能让上游持续停滞把预算吃光。
+const MAX_TRANSPORT_RETRIES: usize = 1;
+
+/// 可重试失败与重试之间的固定退避(TMR3-1):只做一次,无需指数;给上游一个
+/// 恢复窗口,同时不让测试等太久(连接器层重试另有 500ms×2^n 的退避)。
+const TRANSPORT_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// 是否对本次失败发起单次调用重试(TMR3-1 的单一判定出处,纯函数便于单测):
+///   - 只有任务模式启用(`call_watchdog.is_some()`;聊天路径的长回复是正常形态);
+///   - 只重试已分类为可重试的上游失败(`Timeout`/`RateLimited`/`Upstream`);
+///   - 已达到重试上限或用户已取消时不重试。
+///
+/// 内部错误、截断自愈失败、鉴权/参数类错误都不走这里:截断错误有自己的「翻倍预算」
+/// 路径,传输重试只会原样重发同一截断;后两者重试无意义(与 `EngineError::retryable`
+/// 的口径一致)。
+fn should_retry_transport(
+    err: &EngineError,
+    call_watchdog: Option<std::time::Duration>,
+    retries_used: usize,
+    cancelled: bool,
+) -> bool {
+    !is_truncated_tool_call_error(err.message())
+        && err.retryable()
+        && call_watchdog.is_some()
+        && retries_used < MAX_TRANSPORT_RETRIES
+        && !cancelled
+}
+
 /// 流式执行 LLM 生成(与 Node 版 executor.ts executeGeneration 对齐)
 /// pub(crate):任务引擎 custom 模式(批次 4.3b)按步骤直调;聊天路径行为不变。
 #[allow(clippy::too_many_arguments)]
@@ -650,6 +686,31 @@ fn resolve_max_rounds(configured: Option<u32>) -> Option<usize> {
     }
 }
 
+/// 本次工具调用是否是「成功写入本主声明文件」的候选(P0-2 纯函数)。
+///
+/// 只认带 `path` 参数的工作区写工具(`fs_write`/`fs_edit`)+ 路径命中
+/// `scope.declared_files()`。`bash` 刻意不算:它可写可读,且自检循环正是用
+/// `bash` 跑探针;临时文件工具调用也不算——它们不推进交付物。`fs_patch` 的
+/// 补丁目标暂不解析(其参数是补丁文本,不是单一路径),因此不会计为进展。
+/// 结果是否成功由调用方用 `output` 判定(本函数只看调用意图与目标路径)。
+fn is_declared_file_write(name: &str, arguments: &str, declared: &[String]) -> bool {
+    if !crate::tools::tool_sets::is_workspace_write_tool(name) || declared.is_empty() {
+        return false;
+    }
+    let Ok(args) = serde_json::from_str::<Value>(arguments) else {
+        return false;
+    };
+    let Some(raw) = args.get("path").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    let Some(key) = crate::models::ownership::normalize_workspace_rel(raw) else {
+        return false;
+    };
+    declared.iter().any(|d| {
+        crate::models::ownership::normalize_workspace_rel(d).as_deref() == Some(key.as_str())
+    })
+}
+
 /// 跳过状态/工具调用落库;docs/功能.md 第三节);聊天路径恒 Some,行为不变。
 /// pub(crate):任务引擎 solo/custom 模式直调(批次 4.2 起)。
 #[allow(clippy::too_many_arguments)]
@@ -665,6 +726,10 @@ pub(crate) async fn run_tool_loop(
     abort: &watch::Receiver<bool>,
     flag: &AbortFlag,
     total_usage: &mut TokenUsage,
+    // 截断自愈留痕(TMR3-2):由调用方持有 vec,成功/失败都能拿到记录——
+    // 失败路径此前把局部 vec 随 Err 丢弃,自愈重发的 token 既不入调用行也不入 usage。
+    // 聊天调用方可传临时空 vec;任务侧(solo/子 agent)在 Err 分支补落调用行与 usage。
+    self_heals: &mut Vec<SelfHealRecord>,
     run_id: &str,
     // 授权闸门(替代 step_whitelist):见 ToolGate 文档
     gate: ToolGate<'_>,
@@ -741,9 +806,23 @@ pub(crate) async fn run_tool_loop(
         });
     let mut readonly_streak = 0usize;
     let mut readonly_nudged = false;
-    // 截断自愈留痕(问题①):各轮触发的自愈记录,随最终 ExecutorResult 透出;
-    // Err 传播(?)时丢弃——失败路径由调用方落 error 行,截断细节含在错误文案内
-    let mut self_heals: Vec<SelfHealRecord> = Vec::new();
+    // 声明文件无进展守卫(P0-2,2026-10-22):与只读守卫互补。
+    // 只读守卫看「读太多不写」;本守卫看「写了但没写对交付物」——`bash`/临时文件
+    // 会清零只读计数,却可能让交付文件长时间没有推进(实测单主 234 轮自检)。
+    // 只在 scope 带声明文件(team 主 agent)时启用。
+    let no_progress_limit = tool_ctx
+        .budget
+        .and_then(|b| b.no_progress_limit)
+        .filter(|n| *n > 0);
+    let declared_files: Vec<String> = tool_ctx
+        .scope
+        .as_ref()
+        .map(|s| s.declared_files().to_vec())
+        .unwrap_or_default();
+    let no_progress_enabled = no_progress_limit.is_some() && !declared_files.is_empty();
+    let mut no_progress_rounds = 0usize;
+    // 截断自愈留痕(问题①):各轮触发的自愈记录经调用方传入的 vec 透出;
+    // TMR3-2 起 Err 路径不再丢弃——调用方可在失败收尾时补落调用行与 usage。
     loop {
         // ===== 工具历史回灌上限(R3b,2026-09-02 实测修复:每轮全量回灌
         // assistant/tool 交替历史,3 步任务 prompt 3,119→26,679 token 无界膨胀)=====
@@ -805,6 +884,8 @@ pub(crate) async fn run_tool_loop(
         // 那边管无工具纯生成(plan/step/summary),这边管工具循环内的单轮。
         let mut attempt_params = params.clone();
         let mut healed: Option<SelfHealRecord> = None;
+        // TMR3-1:本轮已用掉的上游重试次数(每轮重置;上限见 MAX_TRANSPORT_RETRIES)
+        let mut transport_retries = 0usize;
         let result = loop {
             // 单次调用总时长看门狗(2026-09-18):任务模式下包 300s 上限,超时按超时分类
             // 透出(任务侧照既有错误路径落 error 行并进 error 终态,不留静默挂起);
@@ -843,6 +924,56 @@ pub(crate) async fn run_tool_loop(
             // 已自愈过(重发仍失败):透出原结果,不再重发
             if healed.is_some() {
                 break one;
+            }
+            // TMR3-1:单次调用遇到可重试上游失败(超时/限流/流中断)时原地重试一次。
+            // 只重发**这一次**调用:llm_messages 与已完成的工具结果原样保留,不重启
+            // 子目标、不重跑副作用。超时那次调用已经产生的 usage 拿不到(future 被
+            // drop),仍会少记——这是已知残余,不要在重试路径里伪造 0 之外的值。
+            let transport_failure: Option<String> = match &one {
+                Err(e)
+                    if should_retry_transport(
+                        e,
+                        call_watchdog,
+                        transport_retries,
+                        *abort.borrow(),
+                    ) =>
+                {
+                    Some(e.message().to_string())
+                }
+                _ => None,
+            };
+            if let Some(msg) = transport_failure {
+                transport_retries += 1;
+                tracing::warn!(
+                    session_id = session_id.to_string(),
+                    round = round,
+                    attempt = transport_retries,
+                    max_attempts = MAX_TRANSPORT_RETRIES,
+                    error = msg.as_str(),
+                    "任务模式单次调用失败(可重试),退避后原地重试"
+                );
+                let _ = send_event(
+                    step_evt(
+                        "上游重试",
+                        Some(format!(
+                            "{msg};第 {transport_retries}/{MAX_TRANSPORT_RETRIES} 次重试"
+                        )),
+                        None,
+                        None,
+                    ),
+                    tx,
+                    abort,
+                    flag,
+                )
+                .await;
+                if *abort.borrow() {
+                    break one;
+                }
+                tokio::time::sleep(TRANSPORT_RETRY_BACKOFF).await;
+                if *abort.borrow() {
+                    break one;
+                }
+                continue;
             }
             match one {
                 Ok(res) => {
@@ -971,7 +1102,7 @@ pub(crate) async fn run_tool_loop(
             // 中断分支也会合并 usage)重复计数。与「无工具调用短路」的归零同理由。
             return Ok(ExecutorResult {
                 usage: TokenUsage::default(),
-                self_heals: std::mem::take(&mut self_heals),
+                self_heals: std::mem::take(self_heals),
                 ..result
             });
         }
@@ -984,7 +1115,7 @@ pub(crate) async fn run_tool_loop(
                 reasoning: String::new(),
                 // 末轮(无工具调用)的 finish_reason 透出:任务模式落库截断标记用
                 finish_reason: result.finish_reason,
-                self_heals: std::mem::take(&mut self_heals),
+                self_heals: std::mem::take(self_heals),
                 budget_stopped: false,
             });
         }
@@ -1146,7 +1277,7 @@ pub(crate) async fn run_tool_loop(
                         reasoning: String::new(),
                         // 工具执行期中断:生成未完成,finish_reason 不适用
                         finish_reason: None,
-                        self_heals: std::mem::take(&mut self_heals),
+                        self_heals: std::mem::take(self_heals),
                         budget_stopped: false,
                     });
                 }
@@ -1154,7 +1285,17 @@ pub(crate) async fn run_tool_loop(
         }
         // 3) 收尾(按原调用顺序):状态机/持久化/SSE 推送/模型消息回填。
         //    ToolResult 与 ToolAuthorizationRequired 均在此按序推送,保证前端配对稳定。
+        let mut round_progress = false;
         for e in &executed {
+            // P0-2:本轮只要有一次「成功写入本主声明文件」就算有进展,清零连续计数。
+            // 权限拒绝(output=Null)与错误对象不算;临时文件/bash 写入也不算。
+            if no_progress_enabled
+                && is_declared_file_write(&e.call.name, &e.call.arguments, &declared_files)
+                && !e.output.is_null()
+                && e.output.get("error").is_none()
+            {
+                round_progress = true;
+            }
             state_machine.transition_best_effort(AgentState::ToolCall, session_id);
             // 任务模式 agent_session=None(不建影子会话行):跳过 agent_sessions 落库;
             // 聊天路径恒 Some,落库顺序与原实现逐字节一致。
@@ -1242,6 +1383,13 @@ pub(crate) async fn run_tool_loop(
                 }
             }
         }
+        if no_progress_enabled {
+            if round_progress {
+                no_progress_rounds = 0;
+            } else {
+                no_progress_rounds += 1;
+            }
+        }
         // ===== token 预算闸门(HB-1,2026-09-18):按**成本**而非轮数收口 =====
         // 轮次上限(显式配置时)只管轮数:实测 54 轮各不相同命令的空转仍烧
         // 137 万 prompt token(遗留 L22)。预算口径 = 本轮 run 内工具循环累计
@@ -1296,7 +1444,7 @@ pub(crate) async fn run_tool_loop(
                         tool_calls: Vec::new(),
                         reasoning: String::new(),
                         finish_reason: result.finish_reason,
-                        self_heals: std::mem::take(&mut self_heals),
+                        self_heals: std::mem::take(self_heals),
                         budget_stopped: true,
                     });
                 }
@@ -1332,7 +1480,7 @@ pub(crate) async fn run_tool_loop(
                     tool_calls: Vec::new(),
                     reasoning: String::new(),
                     finish_reason: result.finish_reason,
-                    self_heals: std::mem::take(&mut self_heals),
+                    self_heals: std::mem::take(self_heals),
                     budget_stopped: true,
                 });
             }
@@ -1360,7 +1508,7 @@ pub(crate) async fn run_tool_loop(
                 tool_calls: Vec::new(),
                 reasoning: String::new(),
                 finish_reason: result.finish_reason,
-                self_heals: std::mem::take(&mut self_heals),
+                self_heals: std::mem::take(self_heals),
                 budget_stopped: false,
             });
         }
@@ -1412,10 +1560,47 @@ pub(crate) async fn run_tool_loop(
                     tool_calls: Vec::new(),
                     reasoning: String::new(),
                     finish_reason: result.finish_reason,
-                    self_heals: std::mem::take(&mut self_heals),
+                    self_heals: std::mem::take(self_heals),
                     budget_stopped: false,
                 });
             }
+        }
+        // ===== 声明文件无进展收尾(P0-2,2026-10-22)=====
+        // 与只读熔断同款：本轮工具已执行完，带已有正文收尾（不判失败）。
+        // 触发条件只看「是否成功写入本主声明文件」，因此 `bash` 探针/临时文件
+        // 不会像只读计数那样被清零；这正是 2026-10-21 单主 234 轮自检的止损点。
+        if no_progress_enabled && no_progress_rounds >= no_progress_limit.unwrap_or(usize::MAX) {
+            let limit = no_progress_limit.unwrap_or(0);
+            tracing::warn!(
+                session_id = session_id.to_string(),
+                limit,
+                round = round,
+                "声明文件无进展收尾"
+            );
+            send_event(
+                step_evt(
+                    "无文件进展收尾",
+                    Some(format!(
+                        "已连续 {limit} 轮没有成功写入本主负责的文件:已停止工具循环,本轮产出与用量照常保留"
+                    )),
+                    None,
+                    None,
+                ),
+                tx,
+                abort,
+                flag,
+            )
+            .await?;
+            return Ok(ExecutorResult {
+                content: budget_stop_content(result.content, &last_non_empty_content),
+                usage: TokenUsage::default(),
+                interrupted: false,
+                tool_calls: Vec::new(),
+                reasoning: String::new(),
+                finish_reason: result.finish_reason,
+                self_heals: std::mem::take(self_heals),
+                budget_stopped: false,
+            });
         }
         // 语义熔断(HB-2):同一工具在窗口内反复调用且输出实质无变化(参数可以每轮都变)。
         // 与「重复调用熔断」互补——后者抓同参数空转,本项抓「参数在变、结果不变」的空转。
@@ -1445,7 +1630,7 @@ pub(crate) async fn run_tool_loop(
                 tool_calls: Vec::new(),
                 reasoning: String::new(),
                 finish_reason: result.finish_reason,
-                self_heals: std::mem::take(&mut self_heals),
+                self_heals: std::mem::take(self_heals),
                 budget_stopped: false,
             });
         }
@@ -1479,7 +1664,7 @@ pub(crate) async fn run_tool_loop(
                 tool_calls: Vec::new(),
                 reasoning: String::new(),
                 finish_reason: result.finish_reason,
-                self_heals: std::mem::take(&mut self_heals),
+                self_heals: std::mem::take(self_heals),
                 budget_stopped: false,
             });
         }
@@ -2351,6 +2536,78 @@ mod watchdog_tests {
 }
 
 #[cfg(test)]
+mod transport_retry_tests {
+    use super::{should_retry_transport, EngineError, MAX_TRANSPORT_RETRIES};
+    use crate::models::llm_error::LlmError;
+    use std::time::Duration;
+
+    fn task_watchdog() -> Option<Duration> {
+        Some(Duration::from_secs(300))
+    }
+
+    /// 可重试的三类上游失败 + 任务模式 + 未用尽次数 + 未取消 = 重试。
+    #[test]
+    fn retryable_task_failure_is_retried_once() {
+        for err in [
+            LlmError::timeout("超时"),
+            LlmError::rate_limited("限流"),
+            LlmError::upstream("流中断"),
+        ] {
+            let e = EngineError::Llm(err);
+            assert!(
+                should_retry_transport(&e, task_watchdog(), 0, false),
+                "可重试上游失败应触发重试"
+            );
+            assert!(
+                !should_retry_transport(&e, task_watchdog(), MAX_TRANSPORT_RETRIES, false),
+                "次数用尽后不得再重试"
+            );
+        }
+    }
+
+    /// 聊天路径(watchdog=None)不重试:长回复是正常形态。
+    #[test]
+    fn chat_path_never_retries() {
+        let e = EngineError::Llm(LlmError::timeout("超时"));
+        assert!(!should_retry_transport(&e, None, 0, false));
+    }
+
+    /// 鉴权/参数类与内部错误不重试(与 EngineError::retryable 口径一致)。
+    #[test]
+    fn non_retryable_errors_are_not_retried() {
+        for e in [
+            EngineError::Llm(LlmError::auth_failed("鉴权失败")),
+            EngineError::Llm(LlmError::generation("参数错误")),
+            EngineError::Internal("引擎内部错误".into()),
+            EngineError::Interrupted,
+        ] {
+            assert!(
+                !should_retry_transport(&e, task_watchdog(), 0, false),
+                "不可重试错误不得触发重试: {:?}",
+                e
+            );
+        }
+    }
+
+    /// 已取消时不重试:用户停止优先,不能再用退避把收尾拖住。
+    #[test]
+    fn cancelled_never_retries() {
+        let e = EngineError::Llm(LlmError::timeout("超时"));
+        assert!(!should_retry_transport(&e, task_watchdog(), 0, true));
+    }
+
+    /// 截断工具调用错误不走传输重试:它有自己的「翻倍预算」自愈路径,
+    /// 原样重发同一预算只会再截断一次,白白多花一轮。
+    #[test]
+    fn truncated_tool_call_error_is_not_transport_retried() {
+        let e = EngineError::Llm(LlmError::upstream(
+            r#"工具 "fs_write" 的 arguments 不是合法 JSON"#,
+        ));
+        assert!(!should_retry_transport(&e, task_watchdog(), 0, false));
+    }
+}
+
+#[cfg(test)]
 mod round_limit_tests {
     use super::resolve_max_rounds;
 
@@ -2371,5 +2628,52 @@ mod round_limit_tests {
     fn explicit_positive_limit_is_honored() {
         assert_eq!(resolve_max_rounds(Some(1)), Some(1));
         assert_eq!(resolve_max_rounds(Some(200)), Some(200));
+    }
+}
+
+#[cfg(test)]
+mod no_progress_tests {
+    use super::is_declared_file_write;
+
+    fn declared() -> Vec<String> {
+        vec!["parts/world.js".to_string(), "index.html".to_string()]
+    }
+
+    /// 只有成功意图命中声明路径的写工具才算进展。
+    #[test]
+    fn declared_workspace_write_is_progress() {
+        assert!(is_declared_file_write(
+            "fs_write",
+            r#"{"path":"parts/world.js","content":"x"}"#,
+            &declared()
+        ));
+        assert!(is_declared_file_write(
+            "fs_edit",
+            r#"{"path":"./parts\\world.js","old":"a","new":"b"}"#,
+            &declared()
+        ));
+    }
+
+    /// 临时文件、bash 探针、非法参数、空声明都不算进展(否则自检循环会被清零)。
+    #[test]
+    fn non_deliverable_writes_are_not_progress() {
+        for (name, args) in [
+            ("fs_write", r#"{"path":"_check.js","content":"x"}"#),
+            ("fs_write", r#"{"path":"parts/other.js","content":"x"}"#),
+            ("bash", r#"{"command":"node probe.cjs"}"#),
+            ("fs_write", r#"{"path":"../outside.js"}"#),
+            ("fs_write", r#"{"path":"C:/tmp/a.js"}"#),
+            ("fs_write", r#"not-json"#),
+        ] {
+            assert!(
+                !is_declared_file_write(name, args, &declared()),
+                "{name} {args} 不应算声明文件进展"
+            );
+        }
+        assert!(!is_declared_file_write(
+            "fs_write",
+            r#"{"path":"parts/world.js"}"#,
+            &[]
+        ));
     }
 }

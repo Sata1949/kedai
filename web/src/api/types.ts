@@ -473,6 +473,9 @@ export interface RuntimeSettings {
   /** 任务级总预算秒数(**任务侧**设置;默认 0 = 关,否则 1..=86400):
    *  一次任务执行的墙钟上限——到点后不再启动新步骤/节点/子目标,以已完成部分收尾 */
   task_total_budget_secs: number;
+  /** 团队任务执行阶段总预算秒数(**仅 team**;默认 1200,0 = 关,否则 1..=86400):
+   *  从规划完成后起算;到点不再启动新主/子目标,以已完成部分收尾 */
+  task_team_budget_secs: number;
   /** 任务空闲超时秒数(**任务侧**设置;默认 900,0 = 关,否则 601..=86400):
    *  运行中任务连续该时长无模型调用也无事件 → 看守自动收尾(与 stop 同源),
    *  原因写进 error「空闲超时自动收尾」;下限 = 单命令 300s + 单次调用 300s + 1 */
@@ -654,6 +657,8 @@ export interface RuntimeSettingsPatch {
   task_step_budget_secs?: number;
   /** 任务级总预算秒数(0 = 关;否则 1..=86400) */
   task_total_budget_secs?: number;
+  /** 团队任务执行阶段总预算秒数(0 = 关;否则 1..=86400) */
+  task_team_budget_secs?: number;
   /** 任务空闲超时秒数(0 = 关;否则 601..=86400) */
   task_idle_timeout_secs?: number;
   /** 变量两步生成独立模型(空串 = 清除回到与正文共用) */
