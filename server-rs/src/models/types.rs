@@ -905,6 +905,12 @@ pub struct ToolBudget {
     /// 只有任务侧装配填值;聊天路径 `budget` 恒 `None`。子 agent 继承父值,但工具循环
     /// 只在闸门名单含工作区写工具时启用本检测,子 agent 的只读白名单会自动关闭它。
     pub readonly_streak_limit: Option<usize>,
+    /// 连续「没有写入本主声明文件」的轮数上限(P0-2;`None`/0 = 关闭)。
+    ///
+    /// 与只读守卫互补：`bash`/临时文件写入会清零只读计数，却不一定推进交付物；
+    /// 本守卫只在 scope 带声明文件（team 主 agent）时启用，按「成功写入声明文件的
+    /// 工具调用」重置，连续 N 轮没有这种调用即带产出收尾。
+    pub no_progress_limit: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -976,6 +982,12 @@ impl ExecScope {
             declared_files,
             ownership: Some(ownership),
         })
+    }
+
+    /// 本 scope 声明的负责文件（已归一化；空 = 未启用所有权）。
+    /// 供工具循环的「声明文件无进展」守卫读取，不暴露可变访问。
+    pub fn declared_files(&self) -> &[String] {
+        &self.declared_files
     }
 
     /// 写入前「检查 + 认领」(TMR-4)。未启用所有权时恒 Ok(聊天/单主模式零行为变化)。

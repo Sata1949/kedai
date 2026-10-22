@@ -1031,6 +1031,7 @@ impl TaskService {
                 semantic_guard: crate::services::task_engine::task_loop_limits(&settings).1,
                 // 规划侦察轮是只读白名单,不适用连续只读守卫(TMR-5)
                 readonly_streak_limit: None,
+                no_progress_limit: None,
             }),
         };
         let mut scout_round = 0usize;

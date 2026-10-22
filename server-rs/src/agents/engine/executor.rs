@@ -650,6 +650,31 @@ fn resolve_max_rounds(configured: Option<u32>) -> Option<usize> {
     }
 }
 
+/// 本次工具调用是否是「成功写入本主声明文件」的候选(P0-2 纯函数)。
+///
+/// 只认带 `path` 参数的工作区写工具(`fs_write`/`fs_edit`)+ 路径命中
+/// `scope.declared_files()`。`bash` 刻意不算:它可写可读,且自检循环正是用
+/// `bash` 跑探针;临时文件工具调用也不算——它们不推进交付物。`fs_patch` 的
+/// 补丁目标暂不解析(其参数是补丁文本,不是单一路径),因此不会计为进展。
+/// 结果是否成功由调用方用 `output` 判定(本函数只看调用意图与目标路径)。
+fn is_declared_file_write(name: &str, arguments: &str, declared: &[String]) -> bool {
+    if !crate::tools::tool_sets::is_workspace_write_tool(name) || declared.is_empty() {
+        return false;
+    }
+    let Ok(args) = serde_json::from_str::<Value>(arguments) else {
+        return false;
+    };
+    let Some(raw) = args.get("path").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    let Some(key) = crate::models::ownership::normalize_workspace_rel(raw) else {
+        return false;
+    };
+    declared.iter().any(|d| {
+        crate::models::ownership::normalize_workspace_rel(d).as_deref() == Some(key.as_str())
+    })
+}
+
 /// 跳过状态/工具调用落库;docs/功能.md 第三节);聊天路径恒 Some,行为不变。
 /// pub(crate):任务引擎 solo/custom 模式直调(批次 4.2 起)。
 #[allow(clippy::too_many_arguments)]
@@ -741,6 +766,21 @@ pub(crate) async fn run_tool_loop(
         });
     let mut readonly_streak = 0usize;
     let mut readonly_nudged = false;
+    // 声明文件无进展守卫(P0-2,2026-10-22):与只读守卫互补。
+    // 只读守卫看「读太多不写」;本守卫看「写了但没写对交付物」——`bash`/临时文件
+    // 会清零只读计数,却可能让交付文件长时间没有推进(实测单主 234 轮自检)。
+    // 只在 scope 带声明文件(team 主 agent)时启用。
+    let no_progress_limit = tool_ctx
+        .budget
+        .and_then(|b| b.no_progress_limit)
+        .filter(|n| *n > 0);
+    let declared_files: Vec<String> = tool_ctx
+        .scope
+        .as_ref()
+        .map(|s| s.declared_files().to_vec())
+        .unwrap_or_default();
+    let no_progress_enabled = no_progress_limit.is_some() && !declared_files.is_empty();
+    let mut no_progress_rounds = 0usize;
     // 截断自愈留痕(问题①):各轮触发的自愈记录,随最终 ExecutorResult 透出;
     // Err 传播(?)时丢弃——失败路径由调用方落 error 行,截断细节含在错误文案内
     let mut self_heals: Vec<SelfHealRecord> = Vec::new();
@@ -1154,7 +1194,17 @@ pub(crate) async fn run_tool_loop(
         }
         // 3) 收尾(按原调用顺序):状态机/持久化/SSE 推送/模型消息回填。
         //    ToolResult 与 ToolAuthorizationRequired 均在此按序推送,保证前端配对稳定。
+        let mut round_progress = false;
         for e in &executed {
+            // P0-2:本轮只要有一次「成功写入本主声明文件」就算有进展,清零连续计数。
+            // 权限拒绝(output=Null)与错误对象不算;临时文件/bash 写入也不算。
+            if no_progress_enabled
+                && is_declared_file_write(&e.call.name, &e.call.arguments, &declared_files)
+                && !e.output.is_null()
+                && e.output.get("error").is_none()
+            {
+                round_progress = true;
+            }
             state_machine.transition_best_effort(AgentState::ToolCall, session_id);
             // 任务模式 agent_session=None(不建影子会话行):跳过 agent_sessions 落库;
             // 聊天路径恒 Some,落库顺序与原实现逐字节一致。
@@ -1240,6 +1290,13 @@ pub(crate) async fn run_tool_loop(
                     readonly_streak = 0;
                     readonly_nudged = false;
                 }
+            }
+        }
+        if no_progress_enabled {
+            if round_progress {
+                no_progress_rounds = 0;
+            } else {
+                no_progress_rounds += 1;
             }
         }
         // ===== token 预算闸门(HB-1,2026-09-18):按**成本**而非轮数收口 =====
@@ -1416,6 +1473,43 @@ pub(crate) async fn run_tool_loop(
                     budget_stopped: false,
                 });
             }
+        }
+        // ===== 声明文件无进展收尾(P0-2,2026-10-22)=====
+        // 与只读熔断同款：本轮工具已执行完，带已有正文收尾（不判失败）。
+        // 触发条件只看「是否成功写入本主声明文件」，因此 `bash` 探针/临时文件
+        // 不会像只读计数那样被清零；这正是 2026-10-21 单主 234 轮自检的止损点。
+        if no_progress_enabled && no_progress_rounds >= no_progress_limit.unwrap_or(usize::MAX) {
+            let limit = no_progress_limit.unwrap_or(0);
+            tracing::warn!(
+                session_id = session_id.to_string(),
+                limit,
+                round = round,
+                "声明文件无进展收尾"
+            );
+            send_event(
+                step_evt(
+                    "无文件进展收尾",
+                    Some(format!(
+                        "已连续 {limit} 轮没有成功写入本主负责的文件:已停止工具循环,本轮产出与用量照常保留"
+                    )),
+                    None,
+                    None,
+                ),
+                tx,
+                abort,
+                flag,
+            )
+            .await?;
+            return Ok(ExecutorResult {
+                content: budget_stop_content(result.content, &last_non_empty_content),
+                usage: TokenUsage::default(),
+                interrupted: false,
+                tool_calls: Vec::new(),
+                reasoning: String::new(),
+                finish_reason: result.finish_reason,
+                self_heals: std::mem::take(&mut self_heals),
+                budget_stopped: false,
+            });
         }
         // 语义熔断(HB-2):同一工具在窗口内反复调用且输出实质无变化(参数可以每轮都变)。
         // 与「重复调用熔断」互补——后者抓同参数空转,本项抓「参数在变、结果不变」的空转。
@@ -2371,5 +2465,52 @@ mod round_limit_tests {
     fn explicit_positive_limit_is_honored() {
         assert_eq!(resolve_max_rounds(Some(1)), Some(1));
         assert_eq!(resolve_max_rounds(Some(200)), Some(200));
+    }
+}
+
+#[cfg(test)]
+mod no_progress_tests {
+    use super::is_declared_file_write;
+
+    fn declared() -> Vec<String> {
+        vec!["parts/world.js".to_string(), "index.html".to_string()]
+    }
+
+    /// 只有成功意图命中声明路径的写工具才算进展。
+    #[test]
+    fn declared_workspace_write_is_progress() {
+        assert!(is_declared_file_write(
+            "fs_write",
+            r#"{"path":"parts/world.js","content":"x"}"#,
+            &declared()
+        ));
+        assert!(is_declared_file_write(
+            "fs_edit",
+            r#"{"path":"./parts\\world.js","old":"a","new":"b"}"#,
+            &declared()
+        ));
+    }
+
+    /// 临时文件、bash 探针、非法参数、空声明都不算进展(否则自检循环会被清零)。
+    #[test]
+    fn non_deliverable_writes_are_not_progress() {
+        for (name, args) in [
+            ("fs_write", r#"{"path":"_check.js","content":"x"}"#),
+            ("fs_write", r#"{"path":"parts/other.js","content":"x"}"#),
+            ("bash", r#"{"command":"node probe.cjs"}"#),
+            ("fs_write", r#"{"path":"../outside.js"}"#),
+            ("fs_write", r#"{"path":"C:/tmp/a.js"}"#),
+            ("fs_write", r#"not-json"#),
+        ] {
+            assert!(
+                !is_declared_file_write(name, args, &declared()),
+                "{name} {args} 不应算声明文件进展"
+            );
+        }
+        assert!(!is_declared_file_write(
+            "fs_write",
+            r#"{"path":"parts/world.js"}"#,
+            &[]
+        ));
     }
 }

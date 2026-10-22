@@ -63,6 +63,26 @@ pub(crate) struct AgentLoopCall {
 /// 外部段落逐一 untrusted 包裹)→ run_tool_loop(工具按 task_tool_policy 编译 +
 /// ToolGate 闸门,恒不等待授权:名单外工具立即拒绝)→ 调用追踪统一出口落 task_llm_calls(成功/空/中断/错误均一行)。
 /// 成功返回 (正文, 整轮累计 usage);中断/错误/空内容返回 Err。
+/// P0-1:失败/中止循环的 usage_total 记账。
+///
+/// 成功路径由调用方按返回的 `TokenUsage` 记一次；错误/中断路径没有返回值，
+/// 此前只落 `task_llm_calls` 错误行且 usage 传 `None`，导致失败循环的消耗
+/// 完全不出现在 `usage_total`（2026-10-21 实测：234 轮循环记成 0 token）。
+/// `total_usage` 是整轮累计；空正文重试过时调用行只有增量，本函数补的是整轮，
+/// 与「各行 token 求和 == usage_total」的既有口径一致。
+fn record_failed_loop_usage(
+    svc: &Arc<dyn TaskBackend>,
+    call: &AgentLoopCall,
+    total_usage: &TokenUsage,
+) {
+    svc.record_usage(
+        &call.task_id,
+        call.phase,
+        call.step_index,
+        &usage_as_output(total_usage),
+    );
+}
+
 pub(crate) async fn run_agent_loop(
     svc: Arc<dyn TaskBackend>,
     engine: Arc<AgentEngine>,
@@ -177,6 +197,8 @@ pub(crate) async fn run_agent_loop(
         budget: Some(ToolBudget {
             semantic_guard,
             readonly_streak_limit: Some(super::TASK_READONLY_STREAK_LIMIT),
+            // P0-2:team 的 scope 带声明文件时生效；solo/多主未声明时自动跳过。
+            no_progress_limit: Some(super::TASK_NO_PROGRESS_LIMIT),
         }),
     };
     // 事件桥:引擎事件 → 任务事件(agent_status);drain 持续消费到 tx drop。
@@ -358,6 +380,9 @@ pub(crate) async fn run_agent_loop(
                 // 与其他成因。`out` 的 completion/reasoning token 来自本轮累计(工具循环
                 // 聚合口径不含推理拆分,故那边恒 0,文案会退化为「占比未知」——不报假数)。
                 // TM-EMPTY-1:收尾重试已发起过(若条件满足),仍空才走到这里。
+                // P0-1:失败路径同样落 usage_total。首轮空正文行已单独落库但未记
+                // usage_total,这里用整轮累计一次补记(first + retry),与调用行求和一致。
+                record_failed_loop_usage(&svc, &call, &total_usage);
                 if let Err(e) = state_machine.transition(AgentState::Error, &call.session_id) {
                     tracing::warn!(error = %e, session = %call.session_id, "状态迁移被拒");
                 }
@@ -387,7 +412,10 @@ pub(crate) async fn run_agent_loop(
             Ok((text, total_usage))
         }
         Ok(_) => {
-            // 中断(用户 stop):与 legacy 的 connector Err 同款记 error 行
+            // 中断(用户 stop):与 legacy 的 connector Err 同款记 error 行。
+            // P0-1:行内带「本次增量」usage;usage_total 用整轮累计补记
+            // (空正文重试过时,首轮行已单独落库,增量才不会双计)。
+            let out = usage_as_output(&row_usage);
             svc.record_llm_call(
                 &call.task_id,
                 call.phase,
@@ -395,10 +423,11 @@ pub(crate) async fn run_agent_loop(
                 &model,
                 &messages,
                 "(已中断)",
-                None,
+                Some(&out),
                 elapsed,
                 "error",
             );
+            record_failed_loop_usage(&svc, &call, &total_usage);
             if let Err(e) = state_machine.transition(AgentState::Interrupted, &call.session_id) {
                 tracing::warn!(error = %e, session = %call.session_id, "状态迁移被拒");
             }
@@ -408,6 +437,9 @@ pub(crate) async fn run_agent_loop(
             // 对外契约是字符串错误(任务追踪列/步骤 result),分类在此落回文案;
             // 分类只服务聊天路径的 SSE 错误终态。
             let msg = e.message().to_string();
+            // P0-1:错误循环的已累计 token 必须落账(2026-10-21 实测:234 轮失败循环
+            // 被记成 0 token)。行内用增量,usage_total 用整轮累计,保持调用行求和口径。
+            let out = usage_as_output(&row_usage);
             svc.record_llm_call(
                 &call.task_id,
                 call.phase,
@@ -415,10 +447,11 @@ pub(crate) async fn run_agent_loop(
                 &model,
                 &messages,
                 &msg,
-                None,
+                Some(&out),
                 elapsed,
                 "error",
             );
+            record_failed_loop_usage(&svc, &call, &total_usage);
             if let Err(e) = state_machine.transition(AgentState::Error, &call.session_id) {
                 tracing::warn!(error = %e, session = %call.session_id, "状态迁移被拒");
             }

@@ -413,6 +413,8 @@ impl CustomExecutor {
             budget: Some(ToolBudget {
                 semantic_guard: limits.1,
                 readonly_streak_limit: Some(super::TASK_READONLY_STREAK_LIMIT),
+                // custom 节点没有规划器声明文件，P0-2 守卫不启用。
+                no_progress_limit: None,
             }),
         };
         // 事件桥(批次 R4 携 phase/step_index):custom 工具步骤的调用追踪口径为

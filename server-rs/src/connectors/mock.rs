@@ -122,6 +122,37 @@ impl MockConnector {
         // [[tool_loop_any:name|N args]] / [[tool_loop_any_text:...]] 是跨提醒轮持久变体
         // (TMR-5 连续只读提醒会追加 user 消息,普通标记届时按既有语义失效)。
         // 注入的判别字段会被工具忽略(read 等只读已知键),不影响工具行为。
+        // 测试钩子:[[tool_loop_fail:name|N args]] → 前 N 轮返回 ToolCall,第 N+1 轮
+        // 返回上游错误。用于验证「失败/中止循环的已累计 usage 必须落账」：
+        // mock 的 [[fail:]] 在首轮就失败，构造不出「先跑 N 轮再失败」的形态。
+        if let Some((name, n, args, _, _)) =
+            gate_tool(tool_hooks_on, extract_tool_loop_fail_marker(&last_user))
+        {
+            let executed = messages.iter().filter(|m| m.role == "tool").count();
+            if executed < n {
+                let arguments = vary_tool_args(&args, executed + 1);
+                chunks.push(LlmStreamChunk::ToolCall(ToolCallArgs {
+                    id: format!("mock-fail-call-{}", executed + 1),
+                    name,
+                    arguments,
+                }));
+                chunks.push(LlmStreamChunk::Usage {
+                    prompt_tokens: 5,
+                    completion_tokens: 3,
+                    total_tokens: 8,
+                    prompt_cache_hit_tokens: 0,
+                    prompt_cache_miss_tokens: 0,
+                    reasoning_tokens: 0,
+                });
+                chunks.push(tool_calls_finish());
+                return Ok(chunks);
+            }
+            return Err(LlmError::new(
+                LlmErrorKind::Upstream,
+                format!("模拟工具循环第 {} 轮后上游失败", n),
+            ));
+        }
+
         if let Some((name, n, args, repeat, text)) = gate_tool(
             tool_hooks_on,
             extract_tool_loop_marker_from_messages(messages, &last_user),
@@ -935,6 +966,13 @@ fn extract_tool_loop_marker(input: &str) -> Option<(String, usize, String, bool,
         (p, MARK.len(), false, false)
     };
     parse_tool_loop_marker(input, start, prefix_len, repeat, text)
+}
+
+/// 提取 [[tool_loop_fail:name|N args...]] 标记(前 N 轮正常、随后上游失败)。
+fn extract_tool_loop_fail_marker(input: &str) -> Option<(String, usize, String, bool, bool)> {
+    const MARK: &str = "[[tool_loop_fail:";
+    let p = input.find(MARK)?;
+    parse_tool_loop_marker(input, p, MARK.len(), false, false)
 }
 
 /// 提取**跨提醒轮持久**的 [[tool_loop_any:...]] / [[tool_loop_any_text:...]] 标记。

@@ -124,6 +124,7 @@ pub(crate) async fn generate_with_readonly_tools(
         budget: Some(ToolBudget {
             semantic_guard,
             readonly_streak_limit: None,
+            no_progress_limit: None,
         }),
     };
     let (tx, drain) = sink::spawn(svc.clone(), ctx.task_id.clone(), label, phase, None);
