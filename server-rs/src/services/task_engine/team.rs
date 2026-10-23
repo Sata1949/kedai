@@ -124,12 +124,41 @@ fn declared_files_of(main: &TeamMain) -> Vec<String> {
     out
 }
 
+/// 文本类交付文件里含 `@@` 的行数:未替换模板槽位(如 `/*@@MAIN@@*/`)的直接证据。
+///
+/// SKY-4/SKY-5:空岛实跑的总装停在 7 处 `/*@@...@@*/` 占位符,审计却没有可引用的
+/// 机器事实。这里只做**可见性**——把行数写进清单供审计判断,不在交付门槛里拦截
+/// (模板类交付可能合法保留占位符,误伤面留给审计结合目标判断)。
+/// 仅扫常见文本扩展名且 ≤512KB;读失败/非文本返回 None。
+fn placeholder_line_count(path: &std::path::Path) -> Option<usize> {
+    const MAX_BYTES: u64 = 512 * 1024;
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !matches!(
+        ext.as_str(),
+        "html" | "htm" | "js" | "mjs" | "cjs" | "css" | "json" | "svg" | "md" | "txt" | "xml"
+    ) {
+        return None;
+    }
+    if std::fs::metadata(path).ok()?.len() > MAX_BYTES {
+        return None;
+    }
+    let text = std::fs::read_to_string(path).ok()?;
+    Some(text.lines().filter(|line| line.contains("@@")).count())
+}
+
 /// 审计/终审/汇总输入里的「工作区声明文件实况」(SKY-3,2026-10-23)。
 ///
 /// 为什么需要:空岛 team 实跑中,审计员用 `fs_glob("*.js")` 核对文件,只看到 9 个
 /// 分片便断言「没有 index.html」——而它其实已存在(27,882B 骨架)。文件核对不能
 /// 依赖模型自选通配模式。这里按规划器声明的**全类型**路径逐项 stat,把「存在/缺失 +
 /// 字节数」直接写进输入,审计与汇总都以同一份事实为起点;审计若与清单冲突,以清单为准。
+///
+/// 文本文件另标「含 N 行 @@ 未替换槽位」(SKY-4/SKY-5):占位符是否清零不再靠审计
+/// 自己 grep,引擎先给出可直接引用的计数。
 ///
 /// 工作区不可访问时返回空串(与交付摘要同口径:不制造假缺失)。
 fn workspace_manifest(workspace: &std::path::Path, mains: &[TeamMain]) -> String {
@@ -144,8 +173,15 @@ fn workspace_manifest(workspace: &std::path::Path, mains: &[TeamMain]) -> String
                 continue;
             }
             seen.push(path.clone());
-            let state = match std::fs::metadata(workspace.join(&path)) {
-                Ok(m) if m.is_file() => format!("存在({}B)", m.len()),
+            let abs = workspace.join(&path);
+            let state = match std::fs::metadata(&abs) {
+                Ok(m) if m.is_file() => {
+                    let mut state = format!("存在({}B)", m.len());
+                    if let Some(n) = placeholder_line_count(&abs).filter(|n| *n > 0) {
+                        state.push_str(&format!(",含 {n} 行 @@ 未替换槽位"));
+                    }
+                    state
+                }
                 Ok(_) => "存在但非普通文件".to_string(),
                 Err(_) => "缺失".to_string(),
             };
@@ -2042,7 +2078,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kedai-manifest-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("parts")).expect("建测试目录失败");
-        std::fs::write(dir.join("index.html"), "<html>骨架</html>").expect("写 index.html 失败");
+        std::fs::write(
+            dir.join("index.html"),
+            "<html>\n/*@@MAIN@@*/\n/*@@SKY@@*/\n</html>",
+        )
+        .expect("写 index.html 失败");
         std::fs::write(dir.join("parts/a.js"), "// a").expect("写分片失败");
 
         let mains = vec![TeamMain {
@@ -2064,6 +2104,10 @@ mod tests {
         assert!(
             manifest.contains("`index.html`:存在("),
             "非 .js 的入口文件必须进清单: {manifest}"
+        );
+        assert!(
+            manifest.contains("含 2 行 @@ 未替换槽位"),
+            "未替换的模板槽位必须如实计数(SKY-4/5): {manifest}"
         );
         assert!(
             manifest.contains("`parts/a.js`:存在("),
