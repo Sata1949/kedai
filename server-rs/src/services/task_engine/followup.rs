@@ -84,6 +84,9 @@ impl ModeExecutor for FollowupExecutor {
                 scope: ctx.scope.clone(),
                 // 任务级总预算(PRODCAP-2):续跑同受本轮截止期约束
                 deadline: ctx.deadline,
+                // 终态续跑常见「先通读既有产物再修」,关闭连续只读守卫
+                // (8 次只读即提醒/熔断会误伤总装;见 AgentLoopCall 字段注释)
+                readonly_guard: false,
             };
             let result =
                 run_agent_loop(svc.clone(), self.engine.clone(), call, cancel.clone()).await;

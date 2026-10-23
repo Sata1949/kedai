@@ -1426,8 +1426,14 @@ pub(crate) async fn run_tool_loop(
             // 语义熔断登记(HB-2):输出经归一化(抹时间戳/耗时/计数)后取指纹;
             // 同一工具在窗口内调用 ≥N 次且指纹去重 ≤K 即判定空转。只记录首个命中,
             // 收尾按与「重复调用熔断」同款方式中止(本轮工具已执行完,无悬挂)。
+            // 文件改性工具额外混入参数指纹:成功回执与内容无关,只看输出会把
+            // 「同一文件多段编辑」误判为空转(2026-10-23 空岛 team 实测)。
             if semantic_break.is_none() {
-                let fp = crate::utils::loop_guard::output_fingerprint(&e.output.to_string());
+                let fp = crate::utils::loop_guard::semantic_fingerprint(
+                    &e.call.name,
+                    &e.output.to_string(),
+                    &e.call.arguments,
+                );
                 semantic_break = semantic_guard.record(&e.call.name, fp);
             }
         }

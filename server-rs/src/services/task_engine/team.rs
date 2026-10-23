@@ -171,8 +171,38 @@ struct TeamMainRaw {
     goals: Vec<TeamGoalRaw>,
     /// 依赖的其他主 agent(TMR3-3;规划器用 1-based 主号,可省略)。
     /// 只做主级依赖:总装主声明 after=[提供分片的主号],执行器按拓扑分波。
+    /// 2026-10-23 真实模型实测:规划器会把主 agent **名称**写进 after
+    /// (`["纹理与材质主"]`),整个拓扑解析失败;故用 [`AfterRef`] 宽容两种形态。
     #[serde(default)]
-    after: Option<Vec<usize>>,
+    after: Option<Vec<AfterRef>>,
+}
+
+/// 依赖引用的宽容形态(2026-10-23):提示词要求 1-based 数字序号,真实模型
+/// (deepseek/deepseek-v4.1-flash)仍会写主 agent 名称。名称在解析期按
+/// 「原始 mains 下标」解析,再随空名主过滤做重映射(与数字序号同一条路径)。
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AfterRef {
+    /// 规范形态:1-based 数字序号
+    Index(usize),
+    /// 宽容形态:主 agent 名称;纯数字字符串按序号处理
+    Name(String),
+}
+
+/// 把规划器的 after 原始项解析为 1-based 原始主号;无法解析的名称静默丢弃
+/// (依赖是排序增强,不该让一个写错的名字毁掉整份拓扑)。
+fn resolve_after(raw: Vec<AfterRef>, name_to_raw: &HashMap<String, usize>) -> Vec<usize> {
+    raw.into_iter()
+        .filter_map(|r| match r {
+            AfterRef::Index(n) => Some(n),
+            AfterRef::Name(s) => {
+                let s = s.trim();
+                s.parse::<usize>()
+                    .ok()
+                    .or_else(|| name_to_raw.get(s).map(|i| i + 1))
+            }
+        })
+        .collect()
 }
 
 /// 规划器的子目标原始形态(TMR-4:多一个可选的 `files`)。
@@ -209,6 +239,16 @@ fn parse_team_topology(text: &str) -> Result<Vec<TeamMain>, String> {
         serde_json::from_str(candidate).map_err(|e| format!("解析团队拓扑失败: {e}"))?;
     // TMR3-3:先保留原始主号,过滤空主后重映射 after。规划器用 1-based 主号,
     // 空名/空子目标主会让后续下标整体前移;不重映射会把依赖指到错误的主。
+    // 2026-10-23:after 允许写名称——先建「名称 → 原始下标」索引再消费 mains。
+    let name_to_raw: HashMap<String, usize> = raw
+        .mains
+        .iter()
+        .enumerate()
+        .filter_map(|(i, m)| {
+            let name = m.name.trim();
+            (!name.is_empty()).then(|| (name.to_string(), i))
+        })
+        .collect();
     let mut kept: Vec<(usize, TeamMain, Vec<usize>)> = Vec::new();
     for (raw_idx, m) in raw.mains.into_iter().enumerate() {
         let TeamMainRaw { name, goals, after } = m;
@@ -242,7 +282,7 @@ fn parse_team_topology(text: &str) -> Result<Vec<TeamMain>, String> {
                 goals,
                 after: Vec::new(),
             },
-            after.unwrap_or_default(),
+            resolve_after(after.unwrap_or_default(), &name_to_raw),
         ));
     }
     if kept.is_empty() {
@@ -975,6 +1015,7 @@ impl TeamExecutor {
                 scope: scope.clone(),
                 // 任务级总预算(PRODCAP-2):各主 agent 的循环同受截止期约束
                 deadline: ctx.deadline,
+                readonly_guard: true,
             };
             let result = run_agent_loop(
                 self.svc.clone(),
@@ -1935,6 +1976,17 @@ mod tests {
             vec![0],
             "raw 主 2 → 过滤后新下标 0;1-based 解析 + 重映射"
         );
+    }
+
+    /// 2026-10-23 真实模型实测:after 写成主 agent 名称(或数字字符串)时也要能解析。
+    /// 原始失败形态:deepseek v4.1 flash 输出 `"after":["纹理与材质主"]`,旧解析器
+    /// 只收 usize,整份拓扑报 `invalid type: string, expected usize`。
+    #[test]
+    fn parse_team_topology_after_accepts_main_names() {
+        let text = r#"{"mains":[{"name":"纹理主","goals":[{"name":"a","goal":"写纹理","files":["parts/textures.js"]}]},{"name":"世界主","after":["纹理主"],"goals":[{"name":"b","goal":"写世界","files":["parts/world.js"]}]},{"name":"总装主","after":["纹理主","2"],"goals":[{"name":"c","goal":"总装","files":["index.html"]}]}]}"#;
+        let mains = parse_team_topology(text).expect("名称/数字字符串形态的 after 应解析成功");
+        assert_eq!(mains[1].after, vec![0], "名称应解析为对应主下标");
+        assert_eq!(mains[2].after, vec![0, 1], "名称与数字字符串混用应去重排序");
     }
 
     /// TMR3-3:Kahn 分波——依赖主在前,无依赖时单波并行。
