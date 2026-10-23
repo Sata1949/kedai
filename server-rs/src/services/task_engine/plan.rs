@@ -112,6 +112,7 @@ impl ApprovedPlanExecutor {
                 // 任务级总预算(PRODCAP-2):每步墙钟预算按其取小,到点不再启动新步骤
                 deadline: ctx.deadline,
                 readonly_guard: true,
+                no_progress_guard: true,
             };
             match run_agent_loop(svc.clone(), self.engine.clone(), call, ctx.cancel.clone()).await {
                 Ok((text, usage)) => {

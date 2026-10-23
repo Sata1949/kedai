@@ -62,7 +62,17 @@ pub(crate) struct AgentLoopCall {
     /// 常见形态是「先通读既有产物再修」,一次总装可能合法读取 9+ 个分片;8 次只读
     /// 即提醒、再次达到即熔断会把「还没读完就开始修」误判成探索空转(2026-10-23
     /// 空岛 followup 实测)。语义熔断/步骤预算/轮次上限仍照常生效。
+    ///
+    /// team 的**集成主**(`TeamMain.after` 非空,见 `team.rs::run_main`)同置 false:
+    /// 总装必须先读全部上游分片再写大文件,2026-10-23 复跑中主 Agent-4 的四次循环
+    /// 全部被该守卫截断(SKY-6)。
     pub readonly_guard: bool,
+    /// 是否启用「声明文件无进展」守卫(P0-2,`ToolBudget.no_progress_limit`)。
+    ///
+    /// 默认 true;仅在有声明文件的 scope 上实际生效。team 集成主置 false——
+    /// 读上游分片的 16+ 轮内本就不会写自己的交付文件,该守卫会把合法集成形态
+    /// 当成空转截断(SKY-6;步骤墙钟与团队总预算仍是上限)。
+    pub no_progress_guard: bool,
 }
 
 /// 单主 agent 工具自循环(solo/multi 执行器主体;team 各主 agent 复用):
@@ -200,15 +210,19 @@ pub(crate) async fn run_agent_loop(
         // 任务侧预算载体(PRODCAP-2):子 agent 派发路径(agentgo/subtask)据此
         // 透传语义熔断三值进子循环;墙钟预算不在其中(父层轮末闸门即上限)。
         // TMR-5:连续只读检测上限(8 次只读调用)随任务侧装配下发;聊天路径
-        // `budget` 恒 None,行为不变。followup 经 `readonly_guard=false` 关闭该闸门
-        // (终态续跑常需先通读既有产物,见 AgentLoopCall 字段注释)。
+        // `budget` 恒 None,行为不变。followup 与 team 集成主经
+        // `readonly_guard=false` 关闭该闸门(终态续跑/总装常需先通读既有产物)。
         budget: Some(ToolBudget {
             semantic_guard,
             readonly_streak_limit: call
                 .readonly_guard
                 .then_some(super::TASK_READONLY_STREAK_LIMIT),
             // P0-2:team 的 scope 带声明文件时生效；solo/多主未声明时自动跳过。
-            no_progress_limit: Some(super::TASK_NO_PROGRESS_LIMIT),
+            // SKY-6:team 集成主经 `no_progress_guard=false` 关闭(读上游分片期间
+            // 本就不会写自己的交付文件),步骤墙钟/团队总预算仍是上限。
+            no_progress_limit: call
+                .no_progress_guard
+                .then_some(super::TASK_NO_PROGRESS_LIMIT),
         }),
     };
     // 事件桥:引擎事件 → 任务事件(agent_status);drain 持续消费到 tx drop。
@@ -525,6 +539,7 @@ impl SoloExecutor {
             // 任务级总预算(PRODCAP-2):0 = 关时恒 None,行为逐字节不变
             deadline: ctx.deadline,
             readonly_guard: true,
+            no_progress_guard: true,
         };
         let (text, usage) = run_agent_loop(
             self.svc.clone(),
