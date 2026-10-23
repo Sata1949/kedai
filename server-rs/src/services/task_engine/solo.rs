@@ -56,6 +56,13 @@ pub(crate) struct AgentLoopCall {
     /// 消费点两处:① 本步墙钟预算按 `min(步骤预算, deadline - now)` 取小
     /// (见 `effective_step_budget`);② 多步执行器在启动下一步前判定是否已到点。
     pub deadline: Option<Instant>,
+    /// 是否启用「连续只读」守卫(TMR-5,`ToolBudget.readonly_streak_limit`)。
+    ///
+    /// 默认 true(solo/multi/team/plan 续跑)。followup 置 false:终态追加指令
+    /// 常见形态是「先通读既有产物再修」,一次总装可能合法读取 9+ 个分片;8 次只读
+    /// 即提醒、再次达到即熔断会把「还没读完就开始修」误判成探索空转(2026-10-23
+    /// 空岛 followup 实测)。语义熔断/步骤预算/轮次上限仍照常生效。
+    pub readonly_guard: bool,
 }
 
 /// 单主 agent 工具自循环(solo/multi 执行器主体;team 各主 agent 复用):
@@ -193,10 +200,13 @@ pub(crate) async fn run_agent_loop(
         // 任务侧预算载体(PRODCAP-2):子 agent 派发路径(agentgo/subtask)据此
         // 透传语义熔断三值进子循环;墙钟预算不在其中(父层轮末闸门即上限)。
         // TMR-5:连续只读检测上限(8 次只读调用)随任务侧装配下发;聊天路径
-        // `budget` 恒 None,行为不变。
+        // `budget` 恒 None,行为不变。followup 经 `readonly_guard=false` 关闭该闸门
+        // (终态续跑常需先通读既有产物,见 AgentLoopCall 字段注释)。
         budget: Some(ToolBudget {
             semantic_guard,
-            readonly_streak_limit: Some(super::TASK_READONLY_STREAK_LIMIT),
+            readonly_streak_limit: call
+                .readonly_guard
+                .then_some(super::TASK_READONLY_STREAK_LIMIT),
             // P0-2:team 的 scope 带声明文件时生效；solo/多主未声明时自动跳过。
             no_progress_limit: Some(super::TASK_NO_PROGRESS_LIMIT),
         }),
@@ -514,6 +524,7 @@ impl SoloExecutor {
             scope: ctx.scope.clone(),
             // 任务级总预算(PRODCAP-2):0 = 关时恒 None,行为逐字节不变
             deadline: ctx.deadline,
+            readonly_guard: true,
         };
         let (text, usage) = run_agent_loop(
             self.svc.clone(),

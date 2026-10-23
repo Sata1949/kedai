@@ -265,6 +265,34 @@ pub fn output_fingerprint(output: &str) -> u64 {
     fnv1a_hash(&[&lines.len().to_string(), &head, &uniq_hash.to_string()])
 }
 
+/// 文件改性工具:成功回执文本与「改了什么」无关,同一文件的多段编辑会得到相同
+/// 输出。语义熔断若只看输出,会把正常的多段总装误判为空转——2026-10-23 空岛
+/// team 实测即 4 次 `fs_edit` / 2 种输出被 HB-2 熔断,`index.html` 停在占位符骨架。
+///
+/// `bash` 刻意不在名单内:命令各不相同而输出恒定,正是 HB-2 要抓的病态形态
+/// (见 `semantic_guard_breaks_on_constant_output_with_varying_args`),不能因为
+/// 「参数变了」就放过。
+pub fn is_file_mutation_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "fs_write" | "fs_edit" | "fs_patch" | "apply_patch" | "write" | "replace" | "create"
+    )
+}
+
+/// 供 [`SemanticGuard`] 使用的语义指纹。
+///
+/// 普通工具只看输出;文件改性工具额外混入「工具名 + 参数」,使不同编辑目标/内容
+/// 可区分。完全相同的参数 + 输出仍得到同一指纹,真正的原地重试照样会被熔断。
+pub fn semantic_fingerprint(tool: &str, output: &str, arguments: &str) -> u64 {
+    let out_fp = output_fingerprint(output);
+    if is_file_mutation_tool(tool) {
+        let args_fp = fnv1a_hash(&[tool, arguments]);
+        fnv1a_hash(&[&out_fp.to_string(), &args_fp.to_string()])
+    } else {
+        out_fp
+    }
+}
+
 /// 语义熔断守卫:近 `window` 次调用内,同一工具出现 ≥ `min_calls` 次且其输出指纹
 /// 去重后 ≤ `max_distinct` 个 → 判定空转。
 pub struct SemanticGuard {
@@ -440,6 +468,52 @@ drwxr-xr-x 2 user
             "恰在第 N 次同工具调用触发"
         );
         assert_eq!(distinct, 1, "输出只有一种");
+    }
+
+    /// 2026-10-23 空岛 team 实测回归:同一文件的多段 `fs_edit` 成功回执恒同,
+    /// 但编辑参数各不相同——这属于正常总装,不得被 HB-2 熔断。
+    #[test]
+    fn semantic_fingerprint_keeps_edit_targets_distinct() {
+        let mut g = SemanticGuard::new(8, 4, 2);
+        for i in 0..6 {
+            let args =
+                format!("{{\"path\":\"index.html\",\"old\":\"/*@@slot{i}@@*/\",\"new\":\"body\"}}");
+            let fp = semantic_fingerprint("fs_edit", "已编辑 index.html(1 处替换)", &args);
+            assert!(
+                g.record("fs_edit", fp).is_none(),
+                "不同编辑参数不得熔断(第 {i} 次)"
+            );
+        }
+    }
+
+    /// 同参数 + 同输出的 `fs_edit` 仍是真空转:第 4 次必须熔断。
+    #[test]
+    fn semantic_fingerprint_still_breaks_identical_edits() {
+        let mut g = SemanticGuard::new(8, 4, 2);
+        let args = "{\"path\":\"index.html\",\"old\":\"a\",\"new\":\"b\"}";
+        let fp = semantic_fingerprint("fs_edit", "已编辑 index.html(1 处替换)", args);
+        for i in 0..3 {
+            assert!(g.record("fs_edit", fp).is_none(), "第 {i} 次不应熔断");
+        }
+        assert!(
+            g.record("fs_edit", fp).is_some(),
+            "同参数同输出第 4 次应熔断"
+        );
+    }
+
+    /// `bash` 保持输出侧判定:命令每轮不同但输出恒定,仍须熔断(病态空转的原始形态)。
+    #[test]
+    fn semantic_fingerprint_keeps_bash_output_only() {
+        let mut g = SemanticGuard::new(8, 4, 2);
+        for i in 0..4 {
+            let fp = semantic_fingerprint("bash", "total 0", &format!("cmd-{i}"));
+            let hit = g.record("bash", fp);
+            if i == 3 {
+                assert!(hit.is_some(), "bash 命令不同、输出恒定应熔断");
+            } else {
+                assert!(hit.is_none(), "第 {i} 次不应熔断");
+            }
+        }
     }
 
     /// 正常形态:同一工具读不同文件(输出文本不同)→ 不得误杀。

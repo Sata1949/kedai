@@ -100,6 +100,18 @@ async fn run_task(app: &axum::Router, id: &str) {
     assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
 }
 
+/// 终态追加指令(followup):只接受终态任务,返回 200 后异步续跑。
+async fn followup_task(app: &axum::Router, id: &str, content: &str) {
+    let (status, json) = send_json(
+        app,
+        "POST",
+        &format!("/api/tasks/{id}/followup"),
+        json!({ "content": content, "mode": "append" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "followup 应 200: {json}");
+}
+
 /// 轮询到终态,返回 (状态, 详情)
 async fn wait_terminal(app: &axum::Router, id: &str) -> (String, Value) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
@@ -396,6 +408,157 @@ async fn readonly_streak_nudges_then_breaks() {
     );
 
     // 复位语义熔断(同进程其它用例共享设置)
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({ "loop_guard_semantic_min_calls": 12 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// 2026-10-23 空岛 team 回归:同一文件的多段 `fs_edit` 成功/失败回执可以恒定,
+/// 但参数每轮不同——HB-2 不得把这种正常总装当成空转熔断。
+#[tokio::test]
+async fn semantic_guard_keeps_repeated_edits_with_distinct_args() {
+    let _guard = test_lock().await;
+    let app = test_app();
+
+    // 任务侧会把三值钳到 ≤8/≤4/≤2;显式写成钳制后的值,便于失败时读日志。
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({
+            "loop_guard_semantic_window": 8,
+            "loop_guard_semantic_min_calls": 4,
+            "loop_guard_semantic_max_distinct": 2,
+            "task_step_budget_secs": 3600,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let ws = temp_workspace("edit-args");
+    std::fs::write(ws.join("a.txt"), "hello\n").expect("写测试文件失败");
+
+    let collector = spawn_collector(app);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // 6 轮 fs_edit:mock 每轮注入 _mock_round 使参数不同;文件首轮被改后,
+    // 后续 5 轮都是同一种「找不到旧文本」失败回执——恰是旧实现误杀的形状。
+    let id = create_task_in_workspace(
+        app,
+        r#"[[tool_loop_text:fs_edit|6 {"path":"a.txt","old":"hello","new":"hello2"}]] fs_edit 参数判别用例"#,
+        &ws,
+    )
+    .await;
+    run_task(app, &id).await;
+    let (st, _detail) = wait_terminal(app, &id).await;
+    let events = tokio::time::timeout(Duration::from_secs(10), collector)
+        .await
+        .expect("事件收集应收尾")
+        .expect("收集任务不应 panic");
+
+    assert_ne!(st, "error", "编辑失败也不该让任务崩成 error");
+    let details = status_details(&events, &id);
+    assert!(
+        !details.iter().any(|d| d.contains("重复空转熔断")),
+        "不同编辑参数不得触发 HB-2: {details:?}"
+    );
+    // 用工具结果事件计数兜底:REST 调用行在 mock 工具循环里只落最终一行,
+    // 不能用来判轮数;事件明细每轮一条「工具 fs_edit 已返回结果」。
+    let edit_results = details
+        .iter()
+        .filter(|d| d.contains("工具 fs_edit 已返回结果"))
+        .count();
+    assert!(
+        edit_results >= 6,
+        "应跑满 6 轮编辑(旧实现第 4 轮熔断),实际 fs_edit 结果事件 {edit_results} 条: {details:?}"
+    );
+
+    // 复位
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({
+            "loop_guard_semantic_window": 16,
+            "loop_guard_semantic_min_calls": 12,
+            "loop_guard_semantic_max_distinct": 2,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// 2026-10-23 空岛 followup 回归:终态追加指令常需先通读既有产物再修,连续只读
+/// 守卫在该路径关闭——20 次 fs_read 不得出现「只读探索提醒」或「连续只读空转熔断」。
+#[tokio::test]
+async fn followup_disables_readonly_streak_guard() {
+    let _guard = test_lock().await;
+    let app = test_app();
+
+    // 关语义熔断(本用例只验证只读计数);顺带确保步骤预算不是别的用例留下的短值。
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({
+            "loop_guard_semantic_min_calls": 0,
+            "task_step_budget_secs": 3600,
+            "task_total_budget_secs": 0,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "应可关闭语义熔断");
+
+    let ws = temp_workspace("followup-readonly");
+    std::fs::write(ws.join("a.txt"), "hello\n").expect("写测试文件失败");
+
+    // 首轮普通任务(无工具) → 终态后追加 20 轮只读指令。
+    let id = create_task_in_workspace(app, "followup 只读守卫用例", &ws).await;
+    run_task(app, &id).await;
+    let _ = wait_terminal(app, &id).await;
+
+    let collector = spawn_collector(app);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    followup_task(
+        app,
+        &id,
+        r#"[[tool_loop_any_text:fs_read|20 {"path":"a.txt"}]] 先通读再修:只读续跑用例"#,
+    )
+    .await;
+    let (st, detail) = wait_terminal(app, &id).await;
+    let events = tokio::time::timeout(Duration::from_secs(20), collector)
+        .await
+        .expect("事件收集应收尾")
+        .expect("收集任务不应 panic");
+
+    assert_ne!(st, "error", "followup 不应失败: {detail}");
+    let details = status_details(&events, &id);
+    assert!(
+        !details.iter().any(|d| d.contains("只读探索提醒")),
+        "followup 不应触发只读提醒: {details:?}"
+    );
+    assert!(
+        !details.iter().any(|d| d.contains("连续只读空转熔断")),
+        "followup 不应触发只读熔断: {details:?}"
+    );
+    // 20 轮只读 + 首轮 + 收尾;若旧实现第 16 次熔断,fs_read 结果事件会停在 16 条。
+    let read_results = details
+        .iter()
+        .filter(|d| d.contains("工具 fs_read 已返回结果"))
+        .count();
+    assert!(
+        read_results >= 17,
+        "followup 应跑满 20 轮只读(旧实现第 16 次熔断),实际 fs_read 结果事件 {read_results} 条: {details:?}"
+    );
+
+    // 复位
     let (status, _) = send_json(
         app,
         "PUT",
