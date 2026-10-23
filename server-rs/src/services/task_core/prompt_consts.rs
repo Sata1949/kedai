@@ -76,6 +76,16 @@ pub(crate) fn team_audit_tool_guidance(has_workspace: bool) -> &'static str {
 pub(crate) const TEAM_AUDIT_FINAL_NUDGE: &str =
     "不要再调用任何工具,也不要输出工具调用语法;请基于上面已经拿到的文件读取结果,直接输出要求的 JSON 对象。";
 
+/// team 总装主的**接口接线纪律**(SKY-1,2026-10-23)。
+///
+/// 空岛 team 实跑:上游分片导出 `MCWorldMain.build(world, opts)`,总装主凭猜测调
+/// `build(THREE)`;运行期 `ready=true` 但 `worldReport.meshes=0`。模型给入口写了
+/// 「自适应参数」分支,把签名不匹配掩盖成运行期空场景。本段要求签名以文件为准 +
+/// 写后实际运行自检,用于所有带上游产出的主 agent(总装/衔接形态)。
+///
+/// 条件段:仅在上游产出注入时追加;内置指令不经 untrusted 包裹。
+pub(crate) const TEAM_ASSEMBLY_CONTRACT_NOTE: &str = "【接口接线纪律】上游分片已落盘,上游条目里附有**引擎实测的导出名清单**(可直接核对导入名是否存在);但参数顺序与行为仍**只以工作区文件为准**:接线前必须用 fs_read 逐个确认将被调用的上游文件头注释或导出语句,不得凭规划文本、产出摘要或记忆猜测签名;不得用「自适应参数 / 多形态兼容分支」掩盖不确定——那会把签名不匹配推迟成运行期空场景。接线完成后必须实际运行一次入口自检(如 node --check、执行内联/构建脚本、用浏览器加载并读取运行状态),并在结果正文逐项报告「模块 → 实际调用签名 → 返回值是否非空」;任一模块返回空或未接通就继续修,不得声明完成。";
+
 /// custom 模式反思步骤内置指令:检查上一版产出并输出判定结论(批次 4.3b)。
 /// reflect 步骤按契约不携带用户 system_prompt(validate_flow 强制),统一用本内置指令。
 pub(crate) const CUSTOM_REFLECT_PROMPT: &str = "你是反思审查员。下面是用户目标与上一版产出。检查:目标要求是否全部满足、有无事实/逻辑错误、是否被截断、有无复述指令或元文本。直接输出审查结论:无问题时输出 PASS 并附一句通过理由;有问题时输出 FAIL 并逐条列出需修复的问题。";
@@ -497,6 +507,24 @@ mod tests {
             assert!(
                 TEAM_AUDIT_FINAL_NUDGE.contains(needle),
                 "审计收尾提醒应含「{needle}」: {TEAM_AUDIT_FINAL_NUDGE}"
+            );
+        }
+    }
+
+    /// SKY-1:总装主按上游真实签名接线 + 写后运行自检,不得用自适应参数掩盖不匹配。
+    #[test]
+    fn team_assembly_contract_note_pins_signature_source_and_self_check() {
+        for needle in [
+            "fs_read",
+            "只以工作区文件为准",
+            "不得凭规划文本",
+            "不得用「自适应参数",
+            "入口自检",
+            "返回值是否非空",
+        ] {
+            assert!(
+                TEAM_ASSEMBLY_CONTRACT_NOTE.contains(needle),
+                "总装接线纪律应含「{needle}」: {TEAM_ASSEMBLY_CONTRACT_NOTE}"
             );
         }
     }

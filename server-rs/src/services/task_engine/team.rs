@@ -19,8 +19,8 @@ use crate::models::types::{
 };
 use crate::services::prompt_kit::untrusted_boundary;
 use crate::services::task_core::prompt_consts::{
-    team_audit_tool_guidance, SUMMARIZER_PROMPT, TEAM_AUDIT_PROMPT, TEAM_FINAL_AUDIT_PROMPT,
-    TEAM_PLANNER_PROMPT,
+    team_audit_tool_guidance, SUMMARIZER_PROMPT, TEAM_ASSEMBLY_CONTRACT_NOTE, TEAM_AUDIT_PROMPT,
+    TEAM_FINAL_AUDIT_PROMPT, TEAM_PLANNER_PROMPT,
 };
 use crate::services::task_core::{fallback_terminal, TaskBackend, TaskGenOutput, TaskTerminal};
 use futures::future::BoxFuture;
@@ -122,6 +122,79 @@ fn declared_files_of(main: &TeamMain) -> Vec<String> {
         }
     }
     out
+}
+
+/// 文本类交付文件里含 `@@` 的行数:未替换模板槽位(如 `/*@@MAIN@@*/`)的直接证据。
+///
+/// SKY-4/SKY-5:空岛实跑的总装停在 7 处 `/*@@...@@*/` 占位符,审计却没有可引用的
+/// 机器事实。这里只做**可见性**——把行数写进清单供审计判断,不在交付门槛里拦截
+/// (模板类交付可能合法保留占位符,误伤面留给审计结合目标判断)。
+/// 仅扫常见文本扩展名且 ≤512KB;读失败/非文本返回 None。
+fn placeholder_line_count(path: &std::path::Path) -> Option<usize> {
+    const MAX_BYTES: u64 = 512 * 1024;
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !matches!(
+        ext.as_str(),
+        "html" | "htm" | "js" | "mjs" | "cjs" | "css" | "json" | "svg" | "md" | "txt" | "xml"
+    ) {
+        return None;
+    }
+    if std::fs::metadata(path).ok()?.len() > MAX_BYTES {
+        return None;
+    }
+    let text = std::fs::read_to_string(path).ok()?;
+    Some(text.lines().filter(|line| line.contains("@@")).count())
+}
+
+/// 审计/终审/汇总输入里的「工作区声明文件实况」(SKY-3,2026-10-23)。
+///
+/// 为什么需要:空岛 team 实跑中,审计员用 `fs_glob("*.js")` 核对文件,只看到 9 个
+/// 分片便断言「没有 index.html」——而它其实已存在(27,882B 骨架)。文件核对不能
+/// 依赖模型自选通配模式。这里按规划器声明的**全类型**路径逐项 stat,把「存在/缺失 +
+/// 字节数」直接写进输入,审计与汇总都以同一份事实为起点;审计若与清单冲突,以清单为准。
+///
+/// 文本文件另标「含 N 行 @@ 未替换槽位」(SKY-4/SKY-5):占位符是否清零不再靠审计
+/// 自己 grep,引擎先给出可直接引用的计数。
+///
+/// 工作区不可访问时返回空串(与交付摘要同口径:不制造假缺失)。
+fn workspace_manifest(workspace: &std::path::Path, mains: &[TeamMain]) -> String {
+    if !workspace.is_dir() {
+        return String::new();
+    }
+    let mut seen: Vec<String> = Vec::new();
+    let mut lines: Vec<String> = Vec::new();
+    for (i, main) in mains.iter().enumerate() {
+        for path in declared_files_of(main) {
+            if seen.contains(&path) {
+                continue;
+            }
+            seen.push(path.clone());
+            let abs = workspace.join(&path);
+            let state = match std::fs::metadata(&abs) {
+                Ok(m) if m.is_file() => {
+                    let mut state = format!("存在({}B)", m.len());
+                    if let Some(n) = placeholder_line_count(&abs).filter(|n| *n > 0) {
+                        state.push_str(&format!(",含 {n} 行 @@ 未替换槽位"));
+                    }
+                    state
+                }
+                Ok(_) => "存在但非普通文件".to_string(),
+                Err(_) => "缺失".to_string(),
+            };
+            lines.push(format!("- 主 Agent-{} `{path}`:{state}", i + 1));
+        }
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n工作区声明文件实况(引擎在审计前按 TaskStep.files 全类型枚举;与主 agent 自述冲突时以本清单为准):\n{}\n",
+        lines.join("\n")
+    )
 }
 
 /// 一个主 agent 的分工:分工名 + 子目标(1~4 个)+ 依赖的其他主 agent。
@@ -535,13 +608,103 @@ fn plan_waves(mains: &[TeamMain]) -> Vec<Vec<usize>> {
     waves
 }
 
+/// 从声明文件里提取对外接口名(SKY-1,2026-10-23)。
+///
+/// 支持两种本项目实际出现的形态:
+/// - ES module:`export const/let/var/function/class/async function`、`export {a, b as c}`、
+///   `export default`;
+/// - 经典脚本:`window.X =` / `global.X =`(历史产物 `window.MCWorldMain` 形态)。
+///
+/// 只取**名字**不取签名:签名仍要求总装主 fs_read 确认(参数顺序无法靠正则可靠提取);
+/// 名字清单足以拦住「导入一个根本不存在的导出」这类本次实测到的硬错配。
+/// 读失败/非文本返回空;结果去重排序并截断到 24 个。
+fn extract_exports(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        for prefix in ["window.", "global."] {
+            if let Some(rest) = line.strip_prefix(prefix) {
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+                    .collect();
+                if !name.is_empty() {
+                    out.push(name);
+                }
+                break;
+            }
+        }
+        let Some(rest) = line.strip_prefix("export ") else {
+            continue;
+        };
+        let mut rest = rest.trim_start();
+        if let Some(after) = rest.strip_prefix("default ") {
+            out.push("default".to_string());
+            rest = after.trim_start();
+        }
+        let after_async = rest.strip_prefix("async ").unwrap_or(rest);
+        for kw in ["function ", "const ", "let ", "var ", "class "] {
+            if let Some(after) = after_async.strip_prefix(kw) {
+                let name: String = after
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+                    .collect();
+                if !name.is_empty() {
+                    out.push(name);
+                }
+                break;
+            }
+        }
+        if let Some(after) = rest.strip_prefix('{') {
+            if let Some(end) = after.find('}') {
+                for part in after[..end].split(',') {
+                    let part = part.trim();
+                    if part.is_empty() {
+                        continue;
+                    }
+                    // `a as b` 取右侧对外名;`a` 原样
+                    let name = part.split_whitespace().last().unwrap_or(part);
+                    if !name.is_empty() {
+                        out.push(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out.truncate(24);
+    out
+}
+
+/// 读文件并提取导出名;工作区外/非文本/读失败返回空。
+fn file_exports(path: &std::path::Path) -> Vec<String> {
+    const MAX_BYTES: u64 = 512 * 1024;
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !matches!(ext.as_str(), "js" | "mjs" | "cjs" | "ts" | "tsx" | "jsx") {
+        return Vec::new();
+    }
+    if std::fs::metadata(path).map(|m| m.len()).unwrap_or(u64::MAX) > MAX_BYTES {
+        return Vec::new();
+    }
+    std::fs::read_to_string(path)
+        .map(|text| extract_exports(&text))
+        .unwrap_or_default()
+}
+
 /// 依赖主已完成子目标的产出摘要(TMR3-3):总装主启动时注入目标文本。
-/// 只取有 `result` 的步骤;步骤名附带声明文件,提示模型该读哪些落盘文件。
+/// 只取有 `result` 的步骤;步骤名附带声明文件与**引擎实测的导出名**
+/// (SKY-1,2026-10-23:总装主不必再猜上游模块有哪些导出)。
 fn upstream_seed_for(
     mains: &[TeamMain],
     step_ranges: &[Vec<usize>],
     plan: &[TaskStep],
     main_index: usize,
+    workspace: Option<&std::path::Path>,
 ) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let Some(main) = mains.get(main_index) else {
@@ -558,12 +721,32 @@ fn upstream_seed_for(
             if step.result.trim().is_empty() {
                 continue;
             }
+            let ifaces: Vec<String> = workspace
+                .map(|ws| {
+                    step.files
+                        .iter()
+                        .filter_map(|file| {
+                            let exports = file_exports(&ws.join(file));
+                            (!exports.is_empty())
+                                .then(|| format!("{file} → {}", exports.join(" / ")))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let iface_note = if ifaces.is_empty() {
+                String::new()
+            } else {
+                format!(" [引擎实测导出:{}]", ifaces.join(";"))
+            };
             let files = if step.files.is_empty() {
                 String::new()
             } else {
                 format!(" [{}]", step.files.join(", "))
             };
-            out.push((format!("{}{}", step.name, files), step.result.clone()));
+            out.push((
+                format!("{}{}{}", step.name, files, iface_note),
+                step.result.clone(),
+            ));
         }
     }
     out
@@ -994,6 +1177,10 @@ impl TeamExecutor {
                     let brief: String = text.trim().chars().take(1200).collect();
                     goal.push_str(&format!("- 「{name}」:{brief}\n"));
                 }
+                // SKY-1:总装/衔接形态——签名以文件为准,写后必须实际运行自检
+                goal.push('\n');
+                goal.push_str(TEAM_ASSEMBLY_CONTRACT_NOTE);
+                goal.push('\n');
             }
             if let Some(extra) = extra_instruction {
                 goal.push_str(&format!("\n审计补做指令:\n{extra}\n"));
@@ -1155,7 +1342,14 @@ impl TeamExecutor {
         }
 
         // ===== c. 审计 agent:一致性/质量/覆盖度审查;缺漏打回指定主补做(最多 1 轮) =====
-        let audit_input = build_audit_input(&ctx.goal, &mains, &outputs);
+        // SKY-3:审计前按 TaskStep.files 的**全类型**路径 stat 一次,把文件实况写进输入。
+        // 审计员自选的 fs_glob 模式(如 "*.js")不能作为存在性判据。
+        let manifest = ctx
+            .scope
+            .as_ref()
+            .map(|s| workspace_manifest(s.workspace(), &mains))
+            .unwrap_or_default();
+        let audit_input = build_audit_input(&ctx.goal, &mains, &outputs, &manifest);
         // TMR-2:审计先走「只读工作区工具」通道,让审计员能核对文件真实存在与内容;
         // 工具不可用/循环失败/空输出时回退既有纯文本审计,保证审计整体不会因新能力失效。
         let mut audit_system = String::from(TEAM_AUDIT_PROMPT);
@@ -1275,8 +1469,15 @@ impl TeamExecutor {
 
             // 终审:基于补做后的最终产出给出结论文本(空输出兜底回退首次审计结论,
             // 与审计「增强环节异常不沉任务」同口径)。TMR-2:与首审同款只读工具通道,
-            // 失败回退纯文本。
-            let review_input = build_final_review_input(&ctx.goal, &mains, &outputs, &verdict);
+            // 失败回退纯文本。SKY-3:补做可能改动文件,终审前**重新**枚举工作区实况,
+            // 不复用首审时点的清单。
+            let review_manifest = ctx
+                .scope
+                .as_ref()
+                .map(|s| workspace_manifest(s.workspace(), &mains))
+                .unwrap_or_default();
+            let review_input =
+                build_final_review_input(&ctx.goal, &mains, &outputs, &verdict, &review_manifest);
             let mut review_system = String::from(TEAM_FINAL_AUDIT_PROMPT);
             review_system.push_str("\n\n");
             review_system.push_str(team_audit_tool_guidance(ctx.scope.is_some()));
@@ -1349,8 +1550,19 @@ impl TeamExecutor {
         // ===== d. 升华整合:整合文本 + 审计结论段(前端拆卡契约) =====
         // 汇总输入携带审计结论与已选定版本,并要求「只整合、不另起一版」——旧实现
         // 汇总与审计互不可见,汇总自由再生产一版,导致正文与审计结论不同源
-        //(实跑问题 2)。
-        let summary_input = build_summary_input(&ctx.goal, &mains, &outputs, &final_conclusion);
+        //(实跑问题 2)。SKY-3:汇总同样带**实时**工作区清单,不复述旧文本。
+        let summary_manifest = ctx
+            .scope
+            .as_ref()
+            .map(|s| workspace_manifest(s.workspace(), &mains))
+            .unwrap_or_default();
+        let summary_input = build_summary_input(
+            &ctx.goal,
+            &mains,
+            &outputs,
+            &final_conclusion,
+            &summary_manifest,
+        );
         let mut sum_sys = String::from(SUMMARIZER_PROMPT);
         let world = svc.world_context(ctx.character_id.as_deref());
         if !world.is_empty() {
@@ -1623,7 +1835,13 @@ impl TeamExecutor {
                 // 依赖主已完成子目标的产出摘要:让总装主在动手前看到上游成果;
                 // 文件本身已落盘,提示模型用 fs_read 核对(不是只凭摘要复述)。
                 let upstream_seed = if kickbacks.is_none() {
-                    upstream_seed_for(mains, step_ranges, plan, i)
+                    upstream_seed_for(
+                        mains,
+                        step_ranges,
+                        plan,
+                        i,
+                        ctx.scope.as_ref().map(|s| s.workspace()),
+                    )
                 } else {
                     Vec::new()
                 };
@@ -1859,9 +2077,17 @@ fn error_step_labels(plan: &[TaskStep]) -> Vec<String> {
         .collect()
 }
 
-/// 审计/汇总的输入文本:总体目标 + 各主产出(失败主保留错误文本,供覆盖度判定)
-fn build_audit_input(goal: &str, mains: &[TeamMain], outputs: &[Option<String>]) -> String {
-    let mut user = format!("用户目标:\n{goal}\n\n各主 agent 产出:\n");
+/// 审计/汇总的输入文本:总体目标 + 工作区声明文件实况 + 各主产出
+/// (失败主保留错误文本,供覆盖度判定)。
+fn build_audit_input(
+    goal: &str,
+    mains: &[TeamMain],
+    outputs: &[Option<String>],
+    manifest: &str,
+) -> String {
+    let mut user = format!("用户目标:\n{goal}\n");
+    user.push_str(manifest);
+    user.push_str("\n各主 agent 产出:\n");
     for (i, m) in mains.iter().enumerate() {
         let body = match &outputs[i] {
             Some(text) => text.clone(),
@@ -1885,8 +2111,9 @@ fn build_summary_input(
     mains: &[TeamMain],
     outputs: &[Option<String>],
     audit_conclusion: &str,
+    manifest: &str,
 ) -> String {
-    let mut user = build_audit_input(goal, mains, outputs);
+    let mut user = build_audit_input(goal, mains, outputs, manifest);
     user.push_str("审计结论(必须遵守;若指出某主产出为旧版/有缺漏,以补做后的最终版本为准):\n");
     user.push_str(audit_conclusion);
     user.push_str(
@@ -1904,8 +2131,9 @@ fn build_final_review_input(
     mains: &[TeamMain],
     outputs: &[Option<String>],
     verdict: &AuditVerdict,
+    manifest: &str,
 ) -> String {
-    let mut user = build_audit_input(goal, mains, outputs);
+    let mut user = build_audit_input(goal, mains, outputs, manifest);
     user.push_str("首轮审计结论:\n");
     user.push_str(&verdict.conclusion);
     user.push_str("\n\n首轮打回(均已完成补做,补做产出已替换旧版本):\n");
@@ -1957,6 +2185,145 @@ mod tests {
             mains[0].goals[2].files.is_empty(),
             "缺省 files 应按空数组处理"
         );
+    }
+
+    /// SKY-3:审计输入里的工作区清单必须按 TaskStep.files **全类型**枚举——
+    /// 空岛实跑中审计员只 glob `*.js`,据此断言「没有 index.html」,而文件已存在。
+    #[test]
+    fn workspace_manifest_lists_declared_files_of_all_types() {
+        let dir = std::env::temp_dir().join(format!("kedai-manifest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("parts")).expect("建测试目录失败");
+        std::fs::write(
+            dir.join("index.html"),
+            "<html>\n/*@@MAIN@@*/\n/*@@SKY@@*/\n</html>",
+        )
+        .expect("写 index.html 失败");
+        std::fs::write(dir.join("parts/a.js"), "// a").expect("写分片失败");
+
+        let mains = vec![TeamMain {
+            name: "总装主".into(),
+            goals: vec![TaskStep {
+                name: "总装".into(),
+                goal: "内联分片".into(),
+                files: vec![
+                    "index.html".into(),
+                    "parts/a.js".into(),
+                    "parts/missing.js".into(),
+                ],
+                ..TaskStep::default()
+            }],
+            after: Vec::new(),
+        }];
+        let manifest = workspace_manifest(&dir, &mains);
+
+        assert!(
+            manifest.contains("`index.html`:存在("),
+            "非 .js 的入口文件必须进清单: {manifest}"
+        );
+        assert!(
+            manifest.contains("含 2 行 @@ 未替换槽位"),
+            "未替换的模板槽位必须如实计数(SKY-4/5): {manifest}"
+        );
+        assert!(
+            manifest.contains("`parts/a.js`:存在("),
+            "分片文件应列出字节数: {manifest}"
+        );
+        assert!(
+            manifest.contains("`parts/missing.js`:缺失"),
+            "缺失文件必须如实标注: {manifest}"
+        );
+        // 清单进入审计输入时位于产出正文之前,不能被大段自述淹没
+        let input = build_audit_input("目标", &mains, &[Some("自述".into())], &manifest);
+        let manifest_pos = input.find("工作区声明文件实况").expect("清单应进输入");
+        let outputs_pos = input.find("各主 agent 产出").expect("产出段应存在");
+        assert!(manifest_pos < outputs_pos, "清单应在产出正文之前");
+
+        // 工作区不存在时不制造假缺失
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(workspace_manifest(&dir, &mains).is_empty());
+    }
+
+    /// SKY-1:上游产出的接口清单必须由引擎实测,覆盖 ESM 与经典脚本两种形态。
+    #[test]
+    fn extract_exports_covers_esm_and_classic_forms() {
+        let text = "export const A = 1;\nexport function buildB() {}\nexport async function c() {}\nexport { d, e as f };\nexport default init;\nwindow.MCWorldMain = MCWorldMain;\nglobal.MCTextures = MCTextures;\nconst notExported = 1;";
+        let got = extract_exports(text);
+        for name in [
+            "A",
+            "buildB",
+            "c",
+            "d",
+            "f",
+            "default",
+            "MCWorldMain",
+            "MCTextures",
+        ] {
+            assert!(
+                got.iter().any(|g| g == name),
+                "应提取导出名「{name}」: {got:?}"
+            );
+        }
+        assert!(
+            !got.iter().any(|g| g == "notExported"),
+            "非导出标识符不得进清单: {got:?}"
+        );
+    }
+
+    /// SKY-1:总装主的依赖摘要要附「引擎实测导出」,不能只给步骤名与文件。
+    #[test]
+    fn upstream_seed_carries_measured_exports() {
+        let dir = std::env::temp_dir().join(format!("kedai-seed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("建测试目录失败");
+        std::fs::write(
+            dir.join("src/part-subislands.js"),
+            "export function generateSubIslands() {}\nexport const createSubIslands = 1;",
+        )
+        .expect("写分片失败");
+
+        let mains = vec![
+            TeamMain {
+                name: "分片主".into(),
+                goals: Vec::new(),
+                after: Vec::new(),
+            },
+            TeamMain {
+                name: "总装主".into(),
+                goals: Vec::new(),
+                after: vec![0],
+            },
+        ];
+        let step_ranges = vec![vec![0usize], vec![1usize]];
+        let plan = vec![
+            TaskStep {
+                name: "写副岛".into(),
+                files: vec!["src/part-subislands.js".into()],
+                result: "已写".into(),
+                ..TaskStep::default()
+            },
+            TaskStep {
+                name: "总装".into(),
+                files: vec!["index.html".into()],
+                ..TaskStep::default()
+            },
+        ];
+        let seed = upstream_seed_for(&mains, &step_ranges, &plan, 1, Some(&dir));
+        assert_eq!(seed.len(), 1);
+        let label = &seed[0].0;
+        assert!(
+            label.contains("引擎实测导出") && label.contains("generateSubIslands"),
+            "依赖摘要应附实测导出名: {label}"
+        );
+        assert!(
+            label.contains("createSubIslands"),
+            "同文件多个导出都要列出: {label}"
+        );
+        // 无工作区时不伪造导出清单
+        let bare = upstream_seed_for(&mains, &step_ranges, &plan, 1, None);
+        assert!(!bare[0].0.contains("引擎实测导出"), "{}", bare[0].0);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// TMR3-3:after 用 1-based 主号;空名主被过滤后仍要重映射到正确的新下标。

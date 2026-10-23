@@ -140,11 +140,20 @@ impl TokenService {
     /// 此前只累加 `content`,导致工具循环里「参数很大但正文为空」的 assistant 消息被计成
     /// 近乎零成本 → 预算闸门永远判定「未超预算」→ 工具历史裁剪失效。
     /// 实测后果:plan 模式任务 prompt 无界膨胀至 88 万,单任务累计 150 万 token 不收敛。
+    ///
+    /// **必须计入 `reasoning_content`**(2026-10-23 修复):DeepSeek 系思考模型要求多轮
+    /// 工具调用回传 reasoning_content(`to_openai_messages` 已序列化),它同样真实占用
+    /// prompt;此前漏计 → 保留轮(`tool_history_keep_rounds`)里的长推理对预算不可见,
+    /// 估算可能远低于上游实际 prompt。
+    ///
     /// 口径偏保守(宁可多算):每个 tool_call 额外计 8(token 结构开销 + id 近似)。
     pub fn count_message_tokens(&mut self, messages: &[LlmMessage], model: &str) -> i64 {
         let mut total: i64 = 0;
         for m in messages {
             total += self.count_tokens(&m.content, model) + 4;
+            if let Some(reasoning) = &m.reasoning_content {
+                total += self.count_tokens(reasoning, model);
+            }
             if let Some(calls) = &m.tool_calls {
                 for c in calls {
                     total += self.count_tokens(&c.name, model)
@@ -156,10 +165,13 @@ impl TokenService {
         total + 2
     }
 
-    /// 单条消息成本(与 `count_message_tokens` 同口径,含 tool_calls)。
+    /// 单条消息成本(与 `count_message_tokens` 同口径,含 reasoning_content 与 tool_calls)。
     /// 裁剪逻辑丢弃单条消息时用此方法,避免两处口径分叉导致裁剪量算错。
     pub fn count_single_message_tokens(&mut self, m: &LlmMessage, model: &str) -> i64 {
         let mut total = self.count_tokens(&m.content, model) + 4;
+        if let Some(reasoning) = &m.reasoning_content {
+            total += self.count_tokens(reasoning, model);
+        }
         if let Some(calls) = &m.tool_calls {
             for c in calls {
                 total +=
@@ -238,6 +250,28 @@ mod tests {
         );
         // 单条口径与数组口径一致(同一消息,数组版多 +2 开场)
         let single = svc.count_single_message_tokens(&with_call, model);
+        assert_eq!(with, single + 2, "单条与数组计数口径必须一致");
+    }
+
+    /// 2026-10-23 修复回归:reasoning_content 必须计入。
+    /// DeepSeek 系思考模型要求多轮回传推理内容,连接器会序列化进请求体;
+    /// 漏计会让保留轮里的长推理对预算闸门不可见(空岛 team 实跑复盘)。
+    #[test]
+    fn count_message_tokens_includes_reasoning_content() {
+        let mut svc = TokenService::new();
+        let model = "deepseek/deepseek-v4.1-flash";
+
+        let mut with_reasoning = LlmMessage::plain("assistant", "");
+        with_reasoning.reasoning_content = Some("先核对模块签名再接线。".repeat(500));
+
+        let bare = svc.count_message_tokens(&[LlmMessage::plain("assistant", "")], model);
+        let with = svc.count_message_tokens(&[with_reasoning.clone()], model);
+
+        assert!(
+            with > bare + 500,
+            "reasoning_content 必须显著计入:bare={bare} with={with}"
+        );
+        let single = svc.count_single_message_tokens(&with_reasoning, model);
         assert_eq!(with, single + 2, "单条与数组计数口径必须一致");
     }
 
