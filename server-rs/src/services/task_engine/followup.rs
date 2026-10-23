@@ -87,6 +87,9 @@ impl ModeExecutor for FollowupExecutor {
                 // 终态续跑常见「先通读既有产物再修」,关闭连续只读守卫
                 // (8 次只读即提醒/熔断会误伤总装;见 AgentLoopCall 字段注释)
                 readonly_guard: false,
+                // 无进展守卫按声明文件计数;followup 的 scope 通常没有声明文件,
+                // 保持默认开启(有声明时仍应约束「只说不写」)。
+                no_progress_guard: true,
             };
             let result =
                 run_agent_loop(svc.clone(), self.engine.clone(), call, cancel.clone()).await;

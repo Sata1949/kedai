@@ -1101,6 +1101,10 @@ impl TeamExecutor {
         let scope = ctx.scope.as_ref().map(|base| {
             base.with_write_ownership(ownership, format!("主 Agent-{n}"), declared_files.clone())
         });
+        // SKY-6:有上游依赖的主 = 集成/总装形态。先读完全部分片再写大文件是合法前置,
+        // 不能按「探索空转」截断;只关只读计数与无进展计数,语义熔断/步骤墙钟/
+        // 团队总预算仍是上限(2026-10-23 复跑主 4 四次循环全被守卫截断)。
+        let integration_main = !main.after.is_empty();
         let mut results = Vec::with_capacity(main.goals.len());
         // 本主已完成子目标的产出:(子目标名, 产出) —— 注入后续子目标,让同一主内各
         // 子目标在彼此成果上衔接,而非各自重造一整份交付物(实跑问题 2 结构性根因)。
@@ -1202,7 +1206,10 @@ impl TeamExecutor {
                 scope: scope.clone(),
                 // 任务级总预算(PRODCAP-2):各主 agent 的循环同受截止期约束
                 deadline: ctx.deadline,
-                readonly_guard: true,
+                // SKY-6:集成主(有上游依赖)读全部分片是合法前置,两个计数闸门都关;
+                // 非集成主维持默认,继续保护「只读探索 / 只说不写」。
+                readonly_guard: !integration_main,
+                no_progress_guard: !integration_main,
             };
             let result = run_agent_loop(
                 self.svc.clone(),
