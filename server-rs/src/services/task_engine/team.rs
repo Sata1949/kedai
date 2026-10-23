@@ -375,6 +375,11 @@ fn depends_transitively(mains: &[TeamMain], start: usize, target: usize) -> bool
 /// 为什么需要这层兜底:规划器提示词已经要求总装主用 `after` 声明依赖,但模型
 /// 可能漏写;而「总装目标里点名 parts/a.js」是模型很自然的写法。推断是确定性的,
 /// 成环则跳过该边(不重跑规划),最坏退化为现状并行。
+///
+/// 误报收敛(TMR3-L3):① 主自己声明的文件不算依赖证据(它本就要写/读自己的产物);
+/// ② 「不要覆盖 parts/a.js」这类**否定语境**的提及是约束,不是消费关系,不计边。
+/// 主级粒度保留:同一主内多个子目标仍串行,细粒度 DAG 需拆散 `run_main` 的会话
+/// 连续性/上游产出注入,当前没有需求支撑(见 `docs/遗留.md` §三十 TMR3-L3)。
 fn infer_dependencies_from_files(mains: &mut [TeamMain]) {
     let decls: Vec<Vec<String>> = mains.iter().map(declared_files_of).collect();
     let texts: Vec<String> = mains
@@ -392,22 +397,58 @@ fn infer_dependencies_from_files(mains: &mut [TeamMain]) {
             if i == j || mains[i].after.contains(&j) {
                 continue;
             }
-            let hit = decl.iter().any(|path| {
+            let hit = decl.iter().find(|path| {
                 path.len() >= 4
                     && (path.contains('/') || path.contains('.'))
-                    && texts[i].contains(path.as_str())
+                    && !decls[i].contains(*path)
+                    && mentions_path_unnegated(&texts[i], path.as_str())
             });
             // 加边 i→j(i 依赖 j)会成环 = j 已经(传递地)依赖 i
-            if hit && !depends_transitively(mains, j, i) {
+            if let Some(path) = hit {
+                if depends_transitively(mains, j, i) {
+                    continue;
+                }
                 mains[i].after.push(j);
                 tracing::info!(
                     main = i + 1,
                     depends_on = j + 1,
+                    path = path.as_str(),
                     "team 依赖推断:目标文本提到上游主声明的文件"
                 );
             }
         }
     }
+}
+
+/// 文本里对该路径的提及是否至少有一处**不带否定前缀**(TMR3-L3)。
+///
+/// 规划器的约束句常写成「不要覆盖 parts/a.js」「无需读取 index.html」——这类
+/// 提及与「总装需要 parts/a.js」的消费关系相反,直接按子串判依赖会把并行波次
+/// 无谓地串行化。取提及前 8 个字符做否定词检查(够覆盖常见中文否定句式,又不会
+/// 把上一句的否定词误算到下一句的路径上);同一路径出现多次时,只要有一处非否定
+/// 提及就仍视为依赖证据。
+fn mentions_path_unnegated(text: &str, path: &str) -> bool {
+    const NEGATION_WINDOW_CHARS: usize = 8;
+    const NEGATIONS: &[&str] = &[
+        "不要", "不得", "禁止", "避免", "无需", "不用", "切勿", "勿", "不能", "不应", "别再", "别",
+    ];
+    let mut from = 0usize;
+    while let Some(pos) = text[from..].find(path) {
+        let start = from + pos;
+        // 按字符边界回退 8 个字符;不足 8 个则从头取
+        let prefix_start = text[..start]
+            .char_indices()
+            .rev()
+            .nth(NEGATION_WINDOW_CHARS - 1)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        let prefix = &text[prefix_start..start];
+        if !NEGATIONS.iter().any(|n| prefix.contains(n)) {
+            return true;
+        }
+        from = start + path.len();
+    }
+    false
 }
 
 /// 按主级依赖把主 agent 分成执行波次(TMR3-3;Kahn 拓扑)。
@@ -987,6 +1028,21 @@ impl TeamExecutor {
         let (deadline, team_binding) =
             super::team_deadline(ctx.deadline, ctx.settings.task_team_budget_secs);
         ctx.deadline = deadline;
+        // TMR3-L4:默认 1200s 是**安全阀**而不是目标值,但它是 TMR3 之后的新默认行为
+        // ——团队任务不再无限跑。开工时先透出一条预算事实,让用户在看到「团队总预算
+        // 用尽」之前就知道有这条闸门、以及去哪里调(设置页;0 = 关闭)。
+        if team_binding {
+            svc.emit_event(
+                TaskEventKind::AgentStatus,
+                &ctx.task_id,
+                None,
+                None,
+                Some(format!(
+                    "团队执行预算:{} 秒(规划完成后起算;设置页可调大或设 0 关闭)",
+                    ctx.settings.task_team_budget_secs
+                )),
+            );
+        }
         let deadline_reason = if team_binding {
             "团队总预算用尽(未执行)"
         } else {
@@ -1947,6 +2003,72 @@ mod tests {
             "成环边必须跳过: {:?}",
             cyclic[1].after
         );
+    }
+
+    /// TMR3-L3:否定语境的提及是约束而非依赖证据(「不要覆盖」不得把并行波次串行化)。
+    #[test]
+    fn infer_dependencies_skips_negated_mentions() {
+        let mut mains = vec![
+            test_main(
+                "总装",
+                &["index.html"],
+                "不要覆盖 parts/a.js,只写自己的文件",
+                vec![],
+            ),
+            test_main("分片", &["parts/a.js"], "写分片", vec![]),
+        ];
+        infer_dependencies_from_files(&mut mains);
+        assert!(
+            mains[0].after.is_empty(),
+            "否定语境不应推断依赖: {:?}",
+            mains[0].after
+        );
+
+        // 同一路径另有一处非否定提及:仍应推断依赖(只要有一处是消费语义)
+        let mut mixed = vec![
+            test_main(
+                "总装",
+                &["index.html"],
+                "不要覆盖 parts/a.js;最终把 parts/a.js 引入 index.html",
+                vec![],
+            ),
+            test_main("分片", &["parts/a.js"], "写分片", vec![]),
+        ];
+        infer_dependencies_from_files(&mut mixed);
+        assert_eq!(mixed[0].after, vec![1], "存在非否定提及时仍应加边");
+    }
+
+    /// TMR3-L3:主自己声明的文件不是「依赖上游」的证据(它本来就要读写自己的产物)。
+    #[test]
+    fn infer_dependencies_skips_self_declared_files() {
+        let mut mains = vec![
+            test_main(
+                "总装",
+                &["index.html", "parts/a.js"],
+                "把 parts/a.js 引入 index.html",
+                vec![],
+            ),
+            test_main("分片", &["parts/a.js"], "写分片", vec![]),
+        ];
+        infer_dependencies_from_files(&mut mains);
+        assert!(
+            mains[0].after.is_empty(),
+            "自己声明的文件不应推断为依赖他人: {:?}",
+            mains[0].after
+        );
+
+        // 提到的是别人的另一个文件:仍要加边(守卫只排除「自己声明的那一个」)
+        let mut other = vec![
+            test_main(
+                "总装",
+                &["index.html", "parts/a.js"],
+                "把 parts/b.js 引入 index.html",
+                vec![],
+            ),
+            test_main("分片", &["parts/b.js"], "写分片", vec![]),
+        ];
+        infer_dependencies_from_files(&mut other);
+        assert_eq!(other[0].after, vec![1]);
     }
 
     fn test_main(name: &str, files: &[&str], goal: &str, after: Vec<usize>) -> TeamMain {
