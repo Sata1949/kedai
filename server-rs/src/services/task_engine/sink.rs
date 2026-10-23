@@ -55,6 +55,21 @@ pub(crate) fn spawn(
                             streamed_chars += text.chars().count();
                             batcher.push(&text);
                         }
+                        // 任务模式单次调用重试(TMR3-1):首次尝试已透出的正文增量收不回来,
+                        // 重试会从头再流一遍。先丢弃本批并发 delta_reset,让前端清空该调用
+                        // 归属的缓冲,再播报重试状态(TMR3-L2;聊天侧走自己的 Retry 展示)。
+                        Some(SseEvent::Retry { attempt, max, reason }) => {
+                            batcher.reset();
+                            let detail =
+                                format!("{label} 上游重试:第 {attempt}/{max} 次({reason})");
+                            svc.emit_event(
+                                TaskEventKind::AgentStatus,
+                                &task_id,
+                                None,
+                                None,
+                                Some(detail.chars().take(DETAIL_MAX_CHARS).collect()),
+                            );
+                        }
                         Some(ev) => {
                             // 事件边界先落批:保证 delta 先于后续状态/收尾事件到达前端
                             batcher.flush();

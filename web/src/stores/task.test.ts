@@ -1165,6 +1165,34 @@ describe('delta 流式缓冲(批次 R4 任务模式流式输出)', () => {
     expect(store.liveBuffers.get('step:1')).toBe('乙');
   });
 
+  it('delta_reset 只清对应调用的缓冲,重试轮从空白接续(TMR3-L2)', async () => {
+    const store = useTaskStore();
+    store.appMode = 'task';
+    store.startTaskEvents();
+    await store.selectTask('t1');
+
+    h.emitEvent!({ type: 'task', task_id: 't1', kind: 'delta', phase: 'agent', detail: '首次尝试的一半' });
+    h.emitEvent!({ type: 'task', task_id: 't1', kind: 'delta', phase: 'step', step_index: 0, detail: '另一步' });
+    await flush();
+    expect(store.liveBuffers.size).toBe(2);
+
+    h.emitEvent!({ type: 'task', task_id: 't1', kind: 'delta_reset', phase: 'agent' });
+    await flush();
+    expect(store.liveBuffers.has('agent:'), '被重置的调用缓冲应清空').toBe(false);
+    expect(store.liveBuffers.get('step:0'), '并行调用的缓冲不受影响').toBe('另一步');
+
+    // 重试轮的新增量只保留新正文,不会与首次尝试拼接
+    h.emitEvent!({ type: 'task', task_id: 't1', kind: 'delta', phase: 'agent', detail: '重试后的正文' });
+    await flush();
+    expect(store.liveBuffers.get('agent:')).toBe('重试后的正文');
+
+    // 其他任务 / 缺 phase 的 reset 不得误清当前任务
+    h.emitEvent!({ type: 'task', task_id: 'other', kind: 'delta_reset', phase: 'agent' });
+    h.emitEvent!({ type: 'task', task_id: 't1', kind: 'delta_reset' });
+    await flush();
+    expect(store.liveBuffers.get('agent:')).toBe('重试后的正文');
+  });
+
   it('selectTask 与 deleted 清空流式缓冲', async () => {
     const store = useTaskStore();
     store.appMode = 'task';

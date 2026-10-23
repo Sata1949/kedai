@@ -475,6 +475,7 @@ impl AgentEngine {
                     abort,
                     flag,
                     false,
+                    None,
                 )
                 .await?;
                 // 推理耗尽防护(2026-10-09 真实模型实测):草稿预算被 reasoning 吃光时
@@ -498,6 +499,7 @@ impl AgentEngine {
                             abort,
                             flag,
                             false,
+                            None,
                         )
                         .await?;
                         // 两轮 usage 均计入(与反思链路 generate_collect_healing 同口径)
@@ -817,6 +819,7 @@ impl AgentEngine {
                         abort,
                         flag,
                         true,
+                        None,
                     )
                     .await?
                 } else {
@@ -870,6 +873,7 @@ impl AgentEngine {
                     abort,
                     flag,
                     true,
+                    None,
                 )
                 .await?
             };

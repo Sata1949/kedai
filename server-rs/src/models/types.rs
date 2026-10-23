@@ -676,6 +676,12 @@ pub enum TaskEventKind {
     ApprovalRequired,
     /// 流式正文增量(批次 R4;暂态事件不落库)
     Delta,
+    /// 流式正文缓冲重置(TMR3-L2;暂态事件不落库)。
+    ///
+    /// 任务模式单次调用重试前发射:首次尝试已透出的正文增量无法撤回,重试会从头
+    /// 再流一遍;前端收到本事件即清空同 `phase`/`step_index` 的暂态缓冲,避免把
+    /// 两次尝试的片段拼成重复正文。权威数据仍以 `llm_call` 落库行为准。
+    DeltaReset,
     /// 编排绑定变更(A 批 B3:改绑流程/名单后**重新冻结**快照)。
     ///
     /// 与 `Status` / `Plan` 分开的原因:改绑既不是状态迁移也不是计划更新,它换的是
@@ -706,6 +712,7 @@ impl TaskEventKind {
             Self::AgentStatus => "agent_status",
             Self::ApprovalRequired => "approval_required",
             Self::Delta => "delta",
+            Self::DeltaReset => "delta_reset",
             Self::FlowBound => "flow_bound",
             Self::FileChanged => "file_changed",
         }
@@ -727,6 +734,7 @@ impl TaskEventKind {
             "agent_status" => Self::AgentStatus,
             "approval_required" => Self::ApprovalRequired,
             "delta" => Self::Delta,
+            "delta_reset" => Self::DeltaReset,
             "flow_bound" => Self::FlowBound,
             "file_changed" => Self::FileChanged,
             _ => return None,

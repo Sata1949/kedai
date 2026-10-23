@@ -217,7 +217,8 @@ export const useTaskStore = defineStore('app.task', () => {
    * 值为该调用已攒的正文增量。**delta 事件就地追加进本 Map,绝不走 contentSignature
    * 全量重拉链**(每 token 全量拉取 + stringify 不可行;delta 已由后端攒批节流)。
    * 对齐口径:llm_call 落库事件到达时清对应 key——delta 是暂态展示,权威数据以
-   * task_llm_calls 落库行(loadTaskCalls 全量重拉)为准;切任务/删除任务全清。
+   * task_llm_calls 落库行(loadTaskCalls 全量重拉)为准;delta_reset 事件(重试边界)
+   * 也会清对应 key,防止两次尝试的正文在缓冲区拼接;切任务/删除任务全清。
    * 整表替换(而非原地 set)保持引用语义与既有状态一致,消费方 computed 依赖即刷新。
    */
   const liveBuffers = ref(new Map<string, string>());
@@ -707,6 +708,14 @@ export const useTaskStore = defineStore('app.task', () => {
         // contentSignature 全量重拉链(每 token 全量拉取 + stringify 不可行);
         // 缓冲由 TaskBoard「正在生成」块与 CallTracePanel「进行中」伪行消费
         appendLiveDelta(ev);
+        break;
+      case 'delta_reset':
+        // TMR3-L2:任务模式单次调用重试前,首次尝试已透出的增量无法撤回——后端发
+        // 本事件让前端丢掉该调用归属的暂态缓冲,重试轮从空白接续,避免重复正文。
+        // 权威数据仍以随后 llm_call 落库行为准。
+        if (ev.task_id === currentTaskId.value && ev.phase) {
+          clearLiveDelta(ev.phase, ev.step_index);
+        }
         break;
       case 'approval_required':
         // plan 模式计划已生成待批准:刷新列表(状态徽标)与当前任务详情(批准区)
