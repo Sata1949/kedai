@@ -1434,7 +1434,11 @@ pub(crate) async fn run_tool_loop(
                     &e.output.to_string(),
                     &e.call.arguments,
                 );
-                semantic_break = semantic_guard.record(&e.call.name, fp);
+                // SKY-6 第 4 项:纯读工具按整窗阈值判定——原口径把「少量文件被
+                // 反复读」当成空转(全题复跑 4/8/2),预算烧在探索主上。
+                let readonly_class =
+                    crate::tools::tool_sets::is_workspace_readonly_tool(&e.call.name);
+                semantic_break = semantic_guard.record_classified(&e.call.name, fp, readonly_class);
             }
         }
         // TMR3-L6:本轮没有可识别的成功写调用时,用台账增量补判——bash 重定向/

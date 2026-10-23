@@ -85,6 +85,11 @@ pub(crate) async fn generate_with_readonly_tools(
     }
 
     let (configured_step_budget, semantic_guard) = super::task_loop_limits(&ctx.settings);
+    // SKY-6 第 4 项:审计/终审的工具面只有工作区只读三件,HB-2 与「一轮并发多次读」
+    // 天然冲突——2026-10-23 复跑里终审在 fs_read 上 8 次调用 / 2 种输出即被熔断
+    // (seq 1298),结论靠无工具收尾轮兜底。本路径已有 AUDIT_MAX_ROUNDS /
+    // FINAL_AUDIT_MAX_ROUNDS 与 300s 墙钟兜底,故把语义熔断置**关闭位**。
+    let semantic_guard = audit_semantic_guard(semantic_guard);
     // 审计自带 300s 上限;任务单步预算更小时取更小;总预算截止期再取小。
     let base = configured_step_budget.map_or(AUDIT_TOOL_BUDGET, |b| b.min(AUDIT_TOOL_BUDGET));
     let step_budget = super::effective_step_budget(Some(base), ctx.deadline);
@@ -119,8 +124,9 @@ pub(crate) async fn generate_with_readonly_tools(
         character_id: ctx.character_id.clone().unwrap_or_default(),
         agent_depth: 0,
         scope: Some(scope),
-        // 审计是只读工具面:连续只读守卫必须关闭(否则核对几次文件就会被提醒/熔断);
-        // 语义熔断沿用任务侧收紧值,防审计在同一份输出上空转。
+        // 审计是只读工具面:连续只读与无进展两个计数闸门必须关闭(否则核对几次文件
+        // 就会被提醒/熔断);语义熔断同样关闭——只读面下「重复读」不是空转信号,
+        // 由上面的轮次上限与 300s 墙钟兜底(SKY-6 第 4 项)。
         budget: Some(ToolBudget {
             semantic_guard,
             readonly_streak_limit: None,
@@ -274,5 +280,25 @@ pub(crate) async fn generate_with_readonly_tools(
             let _ = state_machine.transition(AgentState::Error, &session_id);
             Err(msg)
         }
+    }
+}
+
+/// 审计/终审的语义熔断配置(SKY-6 第 4 项):保留窗口/去重上限,把同工具次数下限
+/// 置 0(= 关闭位)。**不能**用 `None`:引擎侧 `GenerationParams.semantic_guard` 的
+/// `None` 语义是「回退到聊天侧扁平设置」,不是关闭(`agents/engine/executor.rs`)。
+fn audit_semantic_guard(guard: Option<(usize, usize, usize)>) -> Option<(usize, usize, usize)> {
+    guard.map(|(window, _min_calls, max_distinct)| (window, 0, max_distinct))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::audit_semantic_guard;
+
+    /// SKY-6 第 4 项:审计/终审必须落到 min_calls=0 的关闭位;`None` 会被引擎
+    /// 回退成聊天侧扁平值(默认 16/12/2),不是关闭。
+    #[test]
+    fn audit_semantic_guard_uses_off_sentinel() {
+        assert_eq!(audit_semantic_guard(Some((8, 4, 2))), Some((8, 0, 2)));
+        assert_eq!(audit_semantic_guard(None), None, "None 无源可关,原样透传");
     }
 }

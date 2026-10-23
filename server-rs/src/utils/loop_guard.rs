@@ -31,8 +31,12 @@ pub const DEFAULT_SEMANTIC_MAX_DISTINCT: usize = 2;
 /// 取值依据:4 次同工具调用即可判别空转;「连续写多个不同文件」不会误伤——
 /// `fs_write` 输出含相对路径(`已写入 {rel}(N 字节)`)、`fs_edit` 含替换处数,
 /// 不同文件的输出指纹互不相同,去重数必然超过 max_distinct。
+///
+/// SKY-6 第 4 项(2026-10-23):本上限只约束**非纯读**工具。纯读工具走
+/// [`SemanticGuard::record_classified`] 的整窗阈值,与 `min_calls` 无关——少量文件
+/// 被反复读是核对/装配的常态,按 4 次判空转会把探索主预算烧光(全题复跑 4/8/2 实测)。
 pub const TASK_MAX_SEMANTIC_WINDOW: usize = 8;
-/// 任务模式同工具调用次数上限(见 [`TASK_MAX_SEMANTIC_WINDOW`])
+/// 任务模式同工具调用次数上限(见 [`TASK_MAX_SEMANTIC_WINDOW`];纯读工具不适用)
 pub const TASK_MAX_SEMANTIC_MIN_CALLS: usize = 4;
 /// 任务模式输出指纹去重上限(见 [`TASK_MAX_SEMANTIC_WINDOW`])
 pub const TASK_MAX_SEMANTIC_MAX_DISTINCT: usize = 2;
@@ -295,6 +299,9 @@ pub fn semantic_fingerprint(tool: &str, output: &str, arguments: &str) -> u64 {
 
 /// 语义熔断守卫:近 `window` 次调用内,同一工具出现 ≥ `min_calls` 次且其输出指纹
 /// 去重后 ≤ `max_distinct` 个 → 判定空转。
+///
+/// 纯读工具(`fs_read/fs_glob/fs_grep`)走 `record_classified(..., true)` 的**整窗**
+/// 阈值,见该方法文档;其余工具维持 `min_calls` 原口径。
 pub struct SemanticGuard {
     window: usize,
     min_calls: usize,
@@ -324,7 +331,26 @@ impl SemanticGuard {
     }
 
     /// 记录一次工具调用与其输出指纹;触发时返回 (工具名, 窗口内该工具次数, 去重指纹数)。
+    ///
+    /// 非纯读类口径(原样):窗口内同工具 ≥ `min_calls` 且输出去重 ≤ `max_distinct`。
     pub fn record(&mut self, tool: &str, output_fp: u64) -> Option<(String, usize, usize)> {
+        self.record_classified(tool, output_fp, false)
+    }
+
+    /// 带工具分类的登记(SKY-6 第 4 项,2026-10-23)。
+    ///
+    /// `readonly_class = true` 表示纯读工具(`fs_read/fs_glob/fs_grep`):这类工具的
+    /// 输出就是文件内容,少量文件被反复读(核对、装配前通读)是任务常态——2026-10-23
+    /// 全题复跑实测「8 次调用中 4 次、去重 2 种输出」被误熔断,把预算烧在探索主上。
+    /// 故纯读类的次数下限抬到**整窗**(`window.max(min_calls)`):必须最近一整窗都是
+    /// 同一纯读工具、且输出去重 ≤ `max_distinct`,才判空转。读/写交替时同工具占不满
+    /// 整窗,天然放行;集成主读 N 个不同分片时输出去重数远超上限,同样不会误伤。
+    pub fn record_classified(
+        &mut self,
+        tool: &str,
+        output_fp: u64,
+        readonly_class: bool,
+    ) -> Option<(String, usize, usize)> {
         if self.min_calls == 0 {
             return None; // 关闭态:不登记也不判定
         }
@@ -332,6 +358,11 @@ impl SemanticGuard {
         while self.history.len() > self.window {
             self.history.pop_front();
         }
+        let min_calls = if readonly_class {
+            self.window.max(self.min_calls)
+        } else {
+            self.min_calls
+        };
         let mut calls = 0usize;
         let mut fps: Vec<u64> = Vec::new();
         for (t, fp) in &self.history {
@@ -340,7 +371,7 @@ impl SemanticGuard {
                 fps.push(*fp);
             }
         }
-        if calls < self.min_calls {
+        if calls < min_calls {
             return None;
         }
         fps.sort_unstable();
@@ -685,10 +716,70 @@ drwxr-xr-x 2 user
         for i in 1..=6 {
             let out = format!("part-{i:03}.md (共 10 行)\nNEXT=part-{:03}.md", i + 1);
             assert!(
-                g.record("fs_read", output_fingerprint(&out)).is_none(),
+                g.record_classified("fs_read", output_fingerprint(&out), true)
+                    .is_none(),
                 "第 {i} 个分片的读取不得被误熔断"
             );
         }
+    }
+
+    // ===== SKY-6 第 4 项:纯读工具的整窗阈值(2026-10-23) =====
+
+    /// 纯读工具必须占满整窗:7 次同输出不熔断,第 8 次才熔断(任务侧窗口 8)。
+    #[test]
+    fn semantic_guard_readonly_class_needs_full_window() {
+        let mut g = SemanticGuard::new(8, 4, 2);
+        for i in 1..8 {
+            assert!(
+                g.record_classified("fs_read", 7, true).is_none(),
+                "第 {i} 次同输出纯读未占满整窗,不得熔断"
+            );
+        }
+        assert_eq!(
+            g.record_classified("fs_read", 7, true),
+            Some(("fs_read".to_string(), 8, 1)),
+            "第 8 次占满整窗且输出去重 ≤2 种必须熔断"
+        );
+    }
+
+    /// 全题复跑的 4/8/2 形态:窗内 4 次 `fs_read`、2 种输出,其余为其它工具。
+    /// 未分档时第 4 次即熔断;整窗阈值下同工具只占 4/8,恒不触发。
+    #[test]
+    fn semantic_guard_readonly_class_ignores_interleaved_reads() {
+        let mut g = SemanticGuard::new(8, 4, 2);
+        for round in 0..4 {
+            assert!(g.record_classified("fs_read", 100, true).is_none());
+            assert!(g.record_classified("bash", 900 + round, false).is_none());
+            assert!(g.record_classified("fs_read", 200, true).is_none());
+            assert!(g.record_classified("bash", 950 + round, false).is_none());
+        }
+    }
+
+    /// 整窗阈值不是「关掉」:整窗 8 次 + 2 种输出仍熔断(去重上限仍是 2)。
+    #[test]
+    fn semantic_guard_readonly_class_breaks_on_full_window_two_outputs() {
+        let mut g = SemanticGuard::new(8, 4, 2);
+        for i in 0..7 {
+            let fp = if i % 2 == 0 { 100 } else { 200 };
+            assert!(g.record_classified("fs_read", fp, true).is_none());
+        }
+        let hit = g
+            .record_classified("fs_read", 100, true)
+            .expect("整窗 8 次、2 种输出仍须熔断");
+        assert_eq!((hit.1, hit.2), (8, 2));
+    }
+
+    /// 非纯读工具维持原口径:同工具 4 次同输出即熔断(bash 抓「输出恒定」的病态)。
+    #[test]
+    fn semantic_guard_default_record_keeps_threshold_for_other_tools() {
+        let mut g = SemanticGuard::new(8, 4, 2);
+        for i in 1..4 {
+            assert!(g.record("bash", 7).is_none(), "第 {i} 次不应熔断");
+        }
+        assert!(
+            g.record("bash", 7).is_some(),
+            "非纯读工具仍按同工具 4 次熔断"
+        );
     }
 
     /// 归一化/指纹的稳定性:同内容(含噪声差异)指纹相同,不同内容指纹不同

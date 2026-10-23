@@ -135,6 +135,15 @@ pub fn is_workspace_write_tool(name: &str) -> bool {
     WORKSPACE_WRITE_TOOLS.contains(&name)
 }
 
+/// 名称是否属工作区只读三件(精确匹配)。
+///
+/// 用途:语义熔断的**纯读整窗阈值**(SKY-6 第 4 项)——`fs_read/fs_glob/fs_grep`
+/// 的输出就是文件内容,少量文件被反复读是核对/装配前的常态,不能按「同工具 4 次」
+/// 判空转。口径与 [`WORKSPACE_READONLY_TOOLS`] 同源,勿另起名单。
+pub fn is_workspace_readonly_tool(name: &str) -> bool {
+    WORKSPACE_READONLY_TOOLS.contains(&name)
+}
+
 /// 只读探测工具(TMR-5):只读取信息、不改变工作区状态。连续多次只读是「探索空转」
 /// 的信号(实测 40 次链式 `fs_read` 仍未落盘);任务侧据此先提醒、再熔断。
 ///
