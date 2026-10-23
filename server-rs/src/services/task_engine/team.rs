@@ -19,8 +19,8 @@ use crate::models::types::{
 };
 use crate::services::prompt_kit::untrusted_boundary;
 use crate::services::task_core::prompt_consts::{
-    team_audit_tool_guidance, SUMMARIZER_PROMPT, TEAM_AUDIT_PROMPT, TEAM_FINAL_AUDIT_PROMPT,
-    TEAM_PLANNER_PROMPT,
+    team_audit_tool_guidance, SUMMARIZER_PROMPT, TEAM_ASSEMBLY_CONTRACT_NOTE, TEAM_AUDIT_PROMPT,
+    TEAM_FINAL_AUDIT_PROMPT, TEAM_PLANNER_PROMPT,
 };
 use crate::services::task_core::{fallback_terminal, TaskBackend, TaskGenOutput, TaskTerminal};
 use futures::future::BoxFuture;
@@ -122,6 +122,43 @@ fn declared_files_of(main: &TeamMain) -> Vec<String> {
         }
     }
     out
+}
+
+/// 审计/终审/汇总输入里的「工作区声明文件实况」(SKY-3,2026-10-23)。
+///
+/// 为什么需要:空岛 team 实跑中,审计员用 `fs_glob("*.js")` 核对文件,只看到 9 个
+/// 分片便断言「没有 index.html」——而它其实已存在(27,882B 骨架)。文件核对不能
+/// 依赖模型自选通配模式。这里按规划器声明的**全类型**路径逐项 stat,把「存在/缺失 +
+/// 字节数」直接写进输入,审计与汇总都以同一份事实为起点;审计若与清单冲突,以清单为准。
+///
+/// 工作区不可访问时返回空串(与交付摘要同口径:不制造假缺失)。
+fn workspace_manifest(workspace: &std::path::Path, mains: &[TeamMain]) -> String {
+    if !workspace.is_dir() {
+        return String::new();
+    }
+    let mut seen: Vec<String> = Vec::new();
+    let mut lines: Vec<String> = Vec::new();
+    for (i, main) in mains.iter().enumerate() {
+        for path in declared_files_of(main) {
+            if seen.contains(&path) {
+                continue;
+            }
+            seen.push(path.clone());
+            let state = match std::fs::metadata(workspace.join(&path)) {
+                Ok(m) if m.is_file() => format!("存在({}B)", m.len()),
+                Ok(_) => "存在但非普通文件".to_string(),
+                Err(_) => "缺失".to_string(),
+            };
+            lines.push(format!("- 主 Agent-{} `{path}`:{state}", i + 1));
+        }
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n工作区声明文件实况(引擎在审计前按 TaskStep.files 全类型枚举;与主 agent 自述冲突时以本清单为准):\n{}\n",
+        lines.join("\n")
+    )
 }
 
 /// 一个主 agent 的分工:分工名 + 子目标(1~4 个)+ 依赖的其他主 agent。
@@ -994,6 +1031,10 @@ impl TeamExecutor {
                     let brief: String = text.trim().chars().take(1200).collect();
                     goal.push_str(&format!("- 「{name}」:{brief}\n"));
                 }
+                // SKY-1:总装/衔接形态——签名以文件为准,写后必须实际运行自检
+                goal.push('\n');
+                goal.push_str(TEAM_ASSEMBLY_CONTRACT_NOTE);
+                goal.push('\n');
             }
             if let Some(extra) = extra_instruction {
                 goal.push_str(&format!("\n审计补做指令:\n{extra}\n"));
@@ -1155,7 +1196,14 @@ impl TeamExecutor {
         }
 
         // ===== c. 审计 agent:一致性/质量/覆盖度审查;缺漏打回指定主补做(最多 1 轮) =====
-        let audit_input = build_audit_input(&ctx.goal, &mains, &outputs);
+        // SKY-3:审计前按 TaskStep.files 的**全类型**路径 stat 一次,把文件实况写进输入。
+        // 审计员自选的 fs_glob 模式(如 "*.js")不能作为存在性判据。
+        let manifest = ctx
+            .scope
+            .as_ref()
+            .map(|s| workspace_manifest(s.workspace(), &mains))
+            .unwrap_or_default();
+        let audit_input = build_audit_input(&ctx.goal, &mains, &outputs, &manifest);
         // TMR-2:审计先走「只读工作区工具」通道,让审计员能核对文件真实存在与内容;
         // 工具不可用/循环失败/空输出时回退既有纯文本审计,保证审计整体不会因新能力失效。
         let mut audit_system = String::from(TEAM_AUDIT_PROMPT);
@@ -1275,8 +1323,15 @@ impl TeamExecutor {
 
             // 终审:基于补做后的最终产出给出结论文本(空输出兜底回退首次审计结论,
             // 与审计「增强环节异常不沉任务」同口径)。TMR-2:与首审同款只读工具通道,
-            // 失败回退纯文本。
-            let review_input = build_final_review_input(&ctx.goal, &mains, &outputs, &verdict);
+            // 失败回退纯文本。SKY-3:补做可能改动文件,终审前**重新**枚举工作区实况,
+            // 不复用首审时点的清单。
+            let review_manifest = ctx
+                .scope
+                .as_ref()
+                .map(|s| workspace_manifest(s.workspace(), &mains))
+                .unwrap_or_default();
+            let review_input =
+                build_final_review_input(&ctx.goal, &mains, &outputs, &verdict, &review_manifest);
             let mut review_system = String::from(TEAM_FINAL_AUDIT_PROMPT);
             review_system.push_str("\n\n");
             review_system.push_str(team_audit_tool_guidance(ctx.scope.is_some()));
@@ -1349,8 +1404,19 @@ impl TeamExecutor {
         // ===== d. 升华整合:整合文本 + 审计结论段(前端拆卡契约) =====
         // 汇总输入携带审计结论与已选定版本,并要求「只整合、不另起一版」——旧实现
         // 汇总与审计互不可见,汇总自由再生产一版,导致正文与审计结论不同源
-        //(实跑问题 2)。
-        let summary_input = build_summary_input(&ctx.goal, &mains, &outputs, &final_conclusion);
+        //(实跑问题 2)。SKY-3:汇总同样带**实时**工作区清单,不复述旧文本。
+        let summary_manifest = ctx
+            .scope
+            .as_ref()
+            .map(|s| workspace_manifest(s.workspace(), &mains))
+            .unwrap_or_default();
+        let summary_input = build_summary_input(
+            &ctx.goal,
+            &mains,
+            &outputs,
+            &final_conclusion,
+            &summary_manifest,
+        );
         let mut sum_sys = String::from(SUMMARIZER_PROMPT);
         let world = svc.world_context(ctx.character_id.as_deref());
         if !world.is_empty() {
@@ -1859,9 +1925,17 @@ fn error_step_labels(plan: &[TaskStep]) -> Vec<String> {
         .collect()
 }
 
-/// 审计/汇总的输入文本:总体目标 + 各主产出(失败主保留错误文本,供覆盖度判定)
-fn build_audit_input(goal: &str, mains: &[TeamMain], outputs: &[Option<String>]) -> String {
-    let mut user = format!("用户目标:\n{goal}\n\n各主 agent 产出:\n");
+/// 审计/汇总的输入文本:总体目标 + 工作区声明文件实况 + 各主产出
+/// (失败主保留错误文本,供覆盖度判定)。
+fn build_audit_input(
+    goal: &str,
+    mains: &[TeamMain],
+    outputs: &[Option<String>],
+    manifest: &str,
+) -> String {
+    let mut user = format!("用户目标:\n{goal}\n");
+    user.push_str(manifest);
+    user.push_str("\n各主 agent 产出:\n");
     for (i, m) in mains.iter().enumerate() {
         let body = match &outputs[i] {
             Some(text) => text.clone(),
@@ -1885,8 +1959,9 @@ fn build_summary_input(
     mains: &[TeamMain],
     outputs: &[Option<String>],
     audit_conclusion: &str,
+    manifest: &str,
 ) -> String {
-    let mut user = build_audit_input(goal, mains, outputs);
+    let mut user = build_audit_input(goal, mains, outputs, manifest);
     user.push_str("审计结论(必须遵守;若指出某主产出为旧版/有缺漏,以补做后的最终版本为准):\n");
     user.push_str(audit_conclusion);
     user.push_str(
@@ -1904,8 +1979,9 @@ fn build_final_review_input(
     mains: &[TeamMain],
     outputs: &[Option<String>],
     verdict: &AuditVerdict,
+    manifest: &str,
 ) -> String {
-    let mut user = build_audit_input(goal, mains, outputs);
+    let mut user = build_audit_input(goal, mains, outputs, manifest);
     user.push_str("首轮审计结论:\n");
     user.push_str(&verdict.conclusion);
     user.push_str("\n\n首轮打回(均已完成补做,补做产出已替换旧版本):\n");
@@ -1957,6 +2033,55 @@ mod tests {
             mains[0].goals[2].files.is_empty(),
             "缺省 files 应按空数组处理"
         );
+    }
+
+    /// SKY-3:审计输入里的工作区清单必须按 TaskStep.files **全类型**枚举——
+    /// 空岛实跑中审计员只 glob `*.js`,据此断言「没有 index.html」,而文件已存在。
+    #[test]
+    fn workspace_manifest_lists_declared_files_of_all_types() {
+        let dir = std::env::temp_dir().join(format!("kedai-manifest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("parts")).expect("建测试目录失败");
+        std::fs::write(dir.join("index.html"), "<html>骨架</html>").expect("写 index.html 失败");
+        std::fs::write(dir.join("parts/a.js"), "// a").expect("写分片失败");
+
+        let mains = vec![TeamMain {
+            name: "总装主".into(),
+            goals: vec![TaskStep {
+                name: "总装".into(),
+                goal: "内联分片".into(),
+                files: vec![
+                    "index.html".into(),
+                    "parts/a.js".into(),
+                    "parts/missing.js".into(),
+                ],
+                ..TaskStep::default()
+            }],
+            after: Vec::new(),
+        }];
+        let manifest = workspace_manifest(&dir, &mains);
+
+        assert!(
+            manifest.contains("`index.html`:存在("),
+            "非 .js 的入口文件必须进清单: {manifest}"
+        );
+        assert!(
+            manifest.contains("`parts/a.js`:存在("),
+            "分片文件应列出字节数: {manifest}"
+        );
+        assert!(
+            manifest.contains("`parts/missing.js`:缺失"),
+            "缺失文件必须如实标注: {manifest}"
+        );
+        // 清单进入审计输入时位于产出正文之前,不能被大段自述淹没
+        let input = build_audit_input("目标", &mains, &[Some("自述".into())], &manifest);
+        let manifest_pos = input.find("工作区声明文件实况").expect("清单应进输入");
+        let outputs_pos = input.find("各主 agent 产出").expect("产出段应存在");
+        assert!(manifest_pos < outputs_pos, "清单应在产出正文之前");
+
+        // 工作区不存在时不制造假缺失
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(workspace_manifest(&dir, &mains).is_empty());
     }
 
     /// TMR3-3:after 用 1-based 主号;空名主被过滤后仍要重映射到正确的新下标。
