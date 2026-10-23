@@ -85,10 +85,11 @@ export interface ChatMessage {
 /** 任务事件分类(WP4 后端推送):创建 / 状态变化 / 计划 / 子任务 / token 累计 / 删除 / LLM 调用落库
  *  批次 4 六模式追加:agent_status(主/子 agent 状态迁移)/ approval_required(plan 模式计划待批准)
  *  批次 R4 流式输出追加:delta(LLM 正文攒批增量,暂态不落库;权威数据以 llm_call 落库行为准)
+ *  TMR3-L2 追加:delta_reset(重试前清空该调用归属的暂态流式缓冲,同样不落库)
  *  PRODCAP-1 追加:file_changed(文件变更台账新增一行,「文件变更」卡片据此实时刷新)
  *  真源为 Rust `models/types.rs` 的 `TaskEventKind`(serde snake_case);改一侧须同步另一侧,
  *  并更新 `tools/check-contract.mjs` 的映射表。 */
-export type TaskEventKind = 'created' | 'status' | 'plan' | 'subtask' | 'usage' | 'deleted' | 'llm_call' | 'agent_status' | 'approval_required' | 'delta' | 'flow_bound' | 'file_changed';
+export type TaskEventKind = 'created' | 'status' | 'plan' | 'subtask' | 'usage' | 'deleted' | 'llm_call' | 'agent_status' | 'approval_required' | 'delta' | 'delta_reset' | 'flow_bound' | 'file_changed';
 
 /**
  * 任务模式(task 工作台)事件(对齐 server-rs SseEvent::Task):
@@ -102,18 +103,19 @@ export type TaskEvent = {
   title?: string;
   /** 任务状态(snake_case,见 TaskStatus) */
   status?: string;
-  /** 简短中文说明(事件监控面板展示用);kind=delta 时为攒批后的正文增量文本 */
+  /** 简短中文说明(事件监控面板展示用);kind=delta 时为攒批后的正文增量文本,
+   *  kind=delta_reset 时不携带(仅表示重置该调用归属的缓冲) */
   detail?: string;
   /** 上游 finish_reason(仅 kind=llm_call 且成功调用携带,可观测性问题①截断标记;
    *  'length' = max_tokens 截断;缺省 = 不适用/未知,旧客户端直接忽略) */
   finish_reason?: string;
-  /** 调用归属阶段(批次 R4;仅 kind=delta/llm_call 携带,与 task_llm_calls.phase 同口径;
+  /** 调用归属阶段(批次 R4;仅 kind=delta/delta_reset/llm_call 携带,与 task_llm_calls.phase 同口径;
    *  流式缓冲 key 前半:`${phase}:${step_index ?? ''}`) */
   phase?: string;
   /** 调用归属步骤下标(0 起;仅步骤类调用携带;流式缓冲 key 后半) */
   step_index?: number;
   /** 任务内单调事件序号(PRODCAP-1;来源 `task_events.seq`)。前端据
-   *  `seq > lastSeq + 1` 判定丢帧并补拉;kind=delta 为暂态事件不落库,**不携带**本字段。
+   *  `seq > lastSeq + 1` 判定丢帧并补拉;kind=delta/delta_reset 为暂态事件不落库,**不携带**本字段。
    *  缺省 = 未知/不适用(旧服务端,直接忽略) */
   seq?: number;
   /** 事件落库时间(ISO-8601,与 `task_events.created_at` 同源;仅落库事件携带) */

@@ -321,8 +321,9 @@ impl TaskService {
     /// 持锁调用点**不要**用本函数(会自死锁),改用 `persist_event` + `broadcast_event`。
     /// 落库失败:`tracing::error!` 留痕、**不广播**(不静默丢事件),调用方语义不变。
     ///
-    /// **两类事件按瞬态广播(不落库,`seq=None`)**:
+    /// **三类事件按瞬态广播(不落库,`seq=None`)**:
     /// - `delta`(流式增量,唯一发射点是 DeltaBatcher::flush);
+    /// - `delta_reset`(TMR3-L2:重试前的流式缓冲重置,同样由 DeltaBatcher 发射);
     /// - `deleted`——任务行删除即**级联清空**该任务的事件史(`ON DELETE CASCADE`),
     ///   先把 `deleted` 落库再删任务等于刚写就被级联删掉;反过来先删任务则外键失败。
     ///   故「删除」本身只能是瞬态通知,前端靠列表刷新兜底(既有行为不变)。
@@ -334,7 +335,10 @@ impl TaskService {
         status: Option<TaskStatus>,
         detail: Option<String>,
     ) {
-        if kind == TaskEventKind::Delta || kind == TaskEventKind::Deleted {
+        if matches!(
+            kind,
+            TaskEventKind::Delta | TaskEventKind::DeltaReset | TaskEventKind::Deleted
+        ) {
             self.broadcast_event(Self::task_event_payload(
                 task_id, kind, title, status, detail, None, None, None, None, None,
             ));
@@ -498,6 +502,34 @@ mod tests {
         assert_eq!(step_index, None, "非步骤类阶段不携带 step_index");
     }
 
+    /// TMR3-L2:重试前 reset 丢弃未发缓冲并发 delta_reset(暂态,带调用归属);
+    /// 后续新尝试的增量不再与首次尝试拼接。
+    #[test]
+    fn delta_batcher_reset_discards_buffer_and_announces() {
+        let (mut b, mut rx) = batcher("agent", None);
+        b.push("首次尝试的部分正文");
+        b.reset();
+        let Ok(SseEvent::Task {
+            kind,
+            detail,
+            phase,
+            seq,
+            at,
+            ..
+        }) = rx.try_recv()
+        else {
+            panic!("reset 应发出 delta_reset");
+        };
+        assert_eq!(kind, Some(TaskEventKind::DeltaReset));
+        assert_eq!(detail, None, "reset 不带正文");
+        assert_eq!(phase.as_deref(), Some("agent"), "必须携带调用归属");
+        assert_eq!(seq, None, "delta_reset 不落库 → 不携带 seq");
+        assert_eq!(at, None, "delta_reset 不落库 → 不携带 at");
+        // 未 flush 的残留被丢弃:再 flush 不应再发出首次尝试的正文
+        b.flush();
+        assert!(rx.try_recv().is_err(), "reset 后缓冲应为空");
+    }
+
     /// `TaskEventKind::as_str()` 与 serde 线格式逐变体一致(PRODCAP-1):
     /// 前者进 `task_events.kind`,后者进 SSE 载荷——漂移会让「补拉的行」与
     /// 「广播的帧」对不上账,故用测试钉死。新增变体须同时补两处(编译器兜住 as_str)。
@@ -514,6 +546,7 @@ mod tests {
             TaskEventKind::AgentStatus,
             TaskEventKind::ApprovalRequired,
             TaskEventKind::Delta,
+            TaskEventKind::DeltaReset,
             TaskEventKind::FlowBound,
             TaskEventKind::FileChanged,
         ];

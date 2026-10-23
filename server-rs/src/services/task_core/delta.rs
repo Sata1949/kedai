@@ -32,9 +32,9 @@ pub(crate) const DELTA_FLUSH_CHARS: usize = 80;
 /// - 引擎事件桥 sink drain 循环(run_tool_loop 的 Token 事件);
 /// - 任务侧 generate_text 旁路(planner/audit/summary 等纯生成步的 chunk)。
 ///
-/// 与截断自愈的交互口径:自愈重发的新一轮 Token 与旧轮同 key(phase:step_index)
-/// 的 delta 接续发出,前端缓冲继续追加;整轮结束后 record_llm_call 落库触发的
-/// llm_call 事件引导前端清缓冲、以落库行对齐权威数据(delta 只是暂态展示)。
+/// 与截断自愈/单次调用重试的交互口径:重发前由调用方显式 `reset()`——首次尝试
+/// 已透出的增量无法撤回,继续追加会把两次尝试的片段拼成重复正文(TMR3-L2);
+/// 整轮结束后 record_llm_call 落库触发的 llm_call 事件仍会清缓冲、以落库行对齐权威数据。
 pub(crate) struct DeltaBatcher {
     tx: tokio::sync::broadcast::Sender<SseEvent>,
     task_id: String,
@@ -111,6 +111,29 @@ impl DeltaBatcher {
             phase: Some(self.phase.clone()),
             step_index: self.step_index,
             // PRODCAP-1:delta 为暂态事件不落库 → 不携带 seq/at(前端不对其做缺口判定)
+            seq: None,
+            at: None,
+        });
+    }
+
+    /// 丢弃本批未发出的增量,并通知前端清空该调用归属的流式缓冲(TMR3-L2)。
+    ///
+    /// 用于「同一轮重新生成」的边界(任务模式单次调用重试):首次尝试已 flush 的
+    /// 增量收不回来,只能让前端整段丢弃;未 flush 的残留也一并丢掉,避免跨越两段
+    /// 尝试拼接。事件同样是暂态(不落库、无 seq)。
+    pub(crate) fn reset(&mut self) {
+        self.buf.clear();
+        self.chars = 0;
+        self.since = None;
+        let _ = self.tx.send(SseEvent::Task {
+            task_id: self.task_id.clone(),
+            kind: Some(TaskEventKind::DeltaReset),
+            title: None,
+            status: None,
+            detail: None,
+            finish_reason: None,
+            phase: Some(self.phase.clone()),
+            step_index: self.step_index,
             seq: None,
             at: None,
         });

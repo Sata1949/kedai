@@ -232,6 +232,11 @@ pub(crate) async fn execute_generation(
     // 是否把正文增量透出为 Token 事件(RPFLOW-1):草稿步/归档步等隐藏步骤传 false,
     // 产物不进消息气泡;工具调用/重试等其余事件照常透出。
     emit_tokens: bool,
+    // 调用外部的 usage 实时累加器(TMR3-L1):每收到一个 Usage 分块就同步写入。
+    // 单次调用被看门狗超时 drop 时,本函数栈上的局部 `usage` 随 future 消失,
+    // 只有外部累加器能保住「超时前已收到的用量」;成功路径由返回值统一入账,
+    // 调用方不得再读它,避免双计。聊天路径恒 None,行为不变。
+    mut live_usage: Option<&mut TokenUsage>,
 ) -> Result<ExecutorResult, EngineError> {
     // LLM 请求快照(第四点·主题 A):开关开启时,把真正下发的完整消息数组落盘,
     // 供回放/调试「模型到底看到了什么」。失败仅告警,不阻塞生成。
@@ -310,7 +315,7 @@ pub(crate) async fn execute_generation(
             }
             chunk = chunk_rx.recv() => match chunk {
                 Some(chunk) => {
-                    if process_chunk(chunk, &mut content, &mut reasoning, &mut tool_calls, &mut usage, &mut finish_reason, &engine.tool_registry, tx, abort, flag, emit_tokens).await? {
+                    if process_chunk(chunk, &mut content, &mut reasoning, &mut tool_calls, &mut usage, live_usage.as_deref_mut(), &mut finish_reason, &engine.tool_registry, tx, abort, flag, emit_tokens).await? {
                         return Ok(ExecutorResult { content, usage, interrupted: true, tool_calls, reasoning, finish_reason, self_heals: Vec::new(), budget_stopped: false });
                     }
                 }
@@ -368,6 +373,17 @@ pub(crate) async fn execute_generation(
     })
 }
 
+/// 把一段用量并入累计(TMR3-L1 的单一累加实现:返回体入账、失败尝试补记、
+/// 外部实时累加器三处共用,避免字段遗漏)。
+fn add_usage(dst: &mut TokenUsage, src: &TokenUsage) {
+    dst.prompt_tokens += src.prompt_tokens;
+    dst.completion_tokens += src.completion_tokens;
+    dst.total_tokens += src.total_tokens;
+    dst.context_tokens += src.context_tokens;
+    dst.prompt_cache_hit_tokens += src.prompt_cache_hit_tokens;
+    dst.prompt_cache_miss_tokens += src.prompt_cache_miss_tokens;
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn process_chunk(
     chunk: LlmStreamChunk,
@@ -375,6 +391,8 @@ async fn process_chunk(
     reasoning: &mut String,
     tool_calls: &mut Vec<ToolCallArgs>,
     usage: &mut TokenUsage,
+    // 外部实时累加器(TMR3-L1):说明见 execute_generation 的同名参数。
+    live_usage: Option<&mut TokenUsage>,
     finish_reason: &mut Option<String>,
     registry: &crate::tools::registry::ToolRegistry,
     tx: &mpsc::Sender<SseEvent>,
@@ -425,11 +443,18 @@ async fn process_chunk(
             prompt_cache_miss_tokens,
             ..
         } => {
-            usage.prompt_tokens += prompt_tokens;
-            usage.completion_tokens += completion_tokens;
-            usage.total_tokens += total_tokens;
-            usage.prompt_cache_hit_tokens += prompt_cache_hit_tokens;
-            usage.prompt_cache_miss_tokens += prompt_cache_miss_tokens;
+            let delta = TokenUsage {
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
+                context_tokens: 0,
+                prompt_cache_hit_tokens,
+                prompt_cache_miss_tokens,
+            };
+            add_usage(usage, &delta);
+            if let Some(live) = live_usage {
+                add_usage(live, &delta);
+            }
         }
         // finish_reason 聚合到结果(可观测性问题①):任务模式据此落 task_llm_calls,
         // 区分「正常收尾(stop)」与「max_tokens 截断(length)」;聊天引擎不据此动作
@@ -909,6 +934,10 @@ pub(crate) async fn run_tool_loop(
             // 透出(任务侧照既有错误路径落 error 行并进 error 终态,不留静默挂起);
             // 聊天路径 call_watchdog=None,行为与裸调完全一致。
             let attempt_started = std::time::Instant::now();
+            // TMR3-L1:本次尝试的实时 usage 累加器。看门狗超时会把 future 直接 drop,
+            // execute_generation 栈上的局部 usage 随之丢失;这里的累加器在 future 外,
+            // 「超时前已收到的分块」能保留下来,Err 分支再并入整轮 total_usage。
+            let mut attempt_usage = TokenUsage::default();
             let one = with_call_watchdog(
                 execute_generation(
                     engine,
@@ -920,6 +949,7 @@ pub(crate) async fn run_tool_loop(
                     abort,
                     flag,
                     emit_tokens,
+                    Some(&mut attempt_usage),
                 ),
                 call_watchdog,
                 || {
@@ -939,14 +969,20 @@ pub(crate) async fn run_tool_loop(
                 },
             )
             .await;
+            // 失败尝试(timed out / 流中断 / 鉴权失败等)没有返回值,usage 只能从这里补:
+            // 成功路径由下方 `result.usage` 统一入账,此处再并会双计。
+            // 仅任务模式落到 total_usage(聊天路径的 total_usage 语义保持逐字节不变)。
+            if one.is_err() && call_watchdog.is_some() {
+                add_usage(&mut *total_usage, &attempt_usage);
+            }
             // 已自愈过(重发仍失败):透出原结果,不再重发
             if healed.is_some() {
                 break one;
             }
             // TMR3-1:单次调用遇到可重试上游失败(超时/限流/流中断)时原地重试一次。
             // 只重发**这一次**调用:llm_messages 与已完成的工具结果原样保留,不重启
-            // 子目标、不重跑副作用。超时那次调用已经产生的 usage 拿不到(future 被
-            // drop),仍会少记——这是已知残余,不要在重试路径里伪造 0 之外的值。
+            // 子目标、不重跑副作用。失败尝试已收到的 usage 由上方 attempt_usage 补记
+            // (TMR3-L1);没有收到的部分上游也未计费到可见分块,无从补。
             let transport_failure: Option<String> = match &one {
                 Err(e)
                     if should_retry_transport(
@@ -971,14 +1007,13 @@ pub(crate) async fn run_tool_loop(
                     "任务模式单次调用失败(可重试),退避后原地重试"
                 );
                 let _ = send_event(
-                    step_evt(
-                        "上游重试",
-                        Some(format!(
-                            "{msg};第 {transport_retries}/{MAX_TRANSPORT_RETRIES} 次重试"
-                        )),
-                        None,
-                        None,
-                    ),
+                    // 用连接器同款 Retry 事件:任务侧事件桥据此清流式缓冲并播报重试状态
+                    // (TMR3-L2);聊天侧已有「正在重试」展示,语义一致。
+                    SseEvent::Retry {
+                        attempt: transport_retries,
+                        max: MAX_TRANSPORT_RETRIES,
+                        reason: msg,
+                    },
                     tx,
                     abort,
                     flag,
@@ -2731,5 +2766,110 @@ mod no_progress_tests {
             &["../outside.js".to_string()]
         ));
         assert!(!has_declared_change(&[], &changed));
+    }
+}
+
+#[cfg(test)]
+mod usage_live_tests {
+    use super::{
+        add_usage, process_chunk, with_call_watchdog, AbortFlag, EngineError, LlmStreamChunk,
+        SseEvent, TokenUsage,
+    };
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+
+    /// TMR3-L1 的机理:外部累加器在 future 之外,看门狗 drop future 后仍保留
+    /// 「超时前已收到的 usage」。若把累加器放回 future 栈上,本用例必红。
+    #[tokio::test]
+    async fn timed_out_future_keeps_external_usage() {
+        let mut live = TokenUsage::default();
+        let out: Result<(), EngineError> = with_call_watchdog(
+            async {
+                live.prompt_tokens = 12;
+                live.completion_tokens = 3;
+                live.total_tokens = 15;
+                std::future::pending::<Result<(), EngineError>>().await
+            },
+            Some(Duration::from_millis(30)),
+            || {
+                EngineError::Llm(crate::models::llm_error::LlmError::timeout(
+                    "模型调用超过 300s 未完成",
+                ))
+            },
+        )
+        .await;
+        assert!(out.is_err(), "超过阈值必须超时");
+        assert_eq!(
+            live.prompt_tokens, 12,
+            "future 被 drop 后,外部累加器必须保留已收用量"
+        );
+        assert_eq!(live.total_tokens, 15);
+    }
+
+    /// Usage 分块同时写入局部结果与外部实时累加器;成功路径由返回值入账,
+    /// 外部累加器只服务失败/超时补偿(此处只锁「都收到了」)。
+    #[tokio::test]
+    async fn usage_chunk_feeds_both_local_and_live_accumulator() {
+        let (tx, _rx) = mpsc::channel::<SseEvent>(4);
+        let (flag, abort) = AbortFlag::new();
+        let registry = crate::tools::registry::ToolRegistry::new();
+        let mut local = TokenUsage::default();
+        let mut live = TokenUsage::default();
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        let mut calls = Vec::new();
+        let mut finish_reason = None;
+        let stopped = process_chunk(
+            LlmStreamChunk::Usage {
+                prompt_tokens: 10,
+                completion_tokens: 4,
+                total_tokens: 14,
+                prompt_cache_hit_tokens: 2,
+                prompt_cache_miss_tokens: 8,
+                reasoning_tokens: 1,
+            },
+            &mut content,
+            &mut reasoning,
+            &mut calls,
+            &mut local,
+            Some(&mut live),
+            &mut finish_reason,
+            &registry,
+            &tx,
+            &abort,
+            &flag,
+            false,
+        )
+        .await
+        .expect("Usage 分块不应失败");
+        assert!(!stopped);
+        for usage in [&local, &live] {
+            assert_eq!(usage.prompt_tokens, 10);
+            assert_eq!(usage.completion_tokens, 4);
+            assert_eq!(usage.total_tokens, 14);
+            assert_eq!(usage.prompt_cache_hit_tokens, 2);
+            assert_eq!(usage.prompt_cache_miss_tokens, 8);
+        }
+    }
+
+    /// 失败尝试补记走同一累加实现,不能漏字段。
+    #[test]
+    fn add_usage_accumulates_every_field() {
+        let mut total = TokenUsage::default();
+        let delta = TokenUsage {
+            prompt_tokens: 1,
+            completion_tokens: 2,
+            total_tokens: 3,
+            context_tokens: 4,
+            prompt_cache_hit_tokens: 5,
+            prompt_cache_miss_tokens: 6,
+        };
+        add_usage(&mut total, &delta);
+        assert_eq!(total.prompt_tokens, 1);
+        assert_eq!(total.completion_tokens, 2);
+        assert_eq!(total.total_tokens, 3);
+        assert_eq!(total.context_tokens, 4);
+        assert_eq!(total.prompt_cache_hit_tokens, 5);
+        assert_eq!(total.prompt_cache_miss_tokens, 6);
     }
 }
