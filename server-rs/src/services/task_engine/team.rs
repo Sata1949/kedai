@@ -608,13 +608,103 @@ fn plan_waves(mains: &[TeamMain]) -> Vec<Vec<usize>> {
     waves
 }
 
+/// 从声明文件里提取对外接口名(SKY-1,2026-10-23)。
+///
+/// 支持两种本项目实际出现的形态:
+/// - ES module:`export const/let/var/function/class/async function`、`export {a, b as c}`、
+///   `export default`;
+/// - 经典脚本:`window.X =` / `global.X =`(历史产物 `window.MCWorldMain` 形态)。
+///
+/// 只取**名字**不取签名:签名仍要求总装主 fs_read 确认(参数顺序无法靠正则可靠提取);
+/// 名字清单足以拦住「导入一个根本不存在的导出」这类本次实测到的硬错配。
+/// 读失败/非文本返回空;结果去重排序并截断到 24 个。
+fn extract_exports(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        for prefix in ["window.", "global."] {
+            if let Some(rest) = line.strip_prefix(prefix) {
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+                    .collect();
+                if !name.is_empty() {
+                    out.push(name);
+                }
+                break;
+            }
+        }
+        let Some(rest) = line.strip_prefix("export ") else {
+            continue;
+        };
+        let mut rest = rest.trim_start();
+        if let Some(after) = rest.strip_prefix("default ") {
+            out.push("default".to_string());
+            rest = after.trim_start();
+        }
+        let after_async = rest.strip_prefix("async ").unwrap_or(rest);
+        for kw in ["function ", "const ", "let ", "var ", "class "] {
+            if let Some(after) = after_async.strip_prefix(kw) {
+                let name: String = after
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+                    .collect();
+                if !name.is_empty() {
+                    out.push(name);
+                }
+                break;
+            }
+        }
+        if let Some(after) = rest.strip_prefix('{') {
+            if let Some(end) = after.find('}') {
+                for part in after[..end].split(',') {
+                    let part = part.trim();
+                    if part.is_empty() {
+                        continue;
+                    }
+                    // `a as b` 取右侧对外名;`a` 原样
+                    let name = part.split_whitespace().last().unwrap_or(part);
+                    if !name.is_empty() {
+                        out.push(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out.truncate(24);
+    out
+}
+
+/// 读文件并提取导出名;工作区外/非文本/读失败返回空。
+fn file_exports(path: &std::path::Path) -> Vec<String> {
+    const MAX_BYTES: u64 = 512 * 1024;
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !matches!(ext.as_str(), "js" | "mjs" | "cjs" | "ts" | "tsx" | "jsx") {
+        return Vec::new();
+    }
+    if std::fs::metadata(path).map(|m| m.len()).unwrap_or(u64::MAX) > MAX_BYTES {
+        return Vec::new();
+    }
+    std::fs::read_to_string(path)
+        .map(|text| extract_exports(&text))
+        .unwrap_or_default()
+}
+
 /// 依赖主已完成子目标的产出摘要(TMR3-3):总装主启动时注入目标文本。
-/// 只取有 `result` 的步骤;步骤名附带声明文件,提示模型该读哪些落盘文件。
+/// 只取有 `result` 的步骤;步骤名附带声明文件与**引擎实测的导出名**
+/// (SKY-1,2026-10-23:总装主不必再猜上游模块有哪些导出)。
 fn upstream_seed_for(
     mains: &[TeamMain],
     step_ranges: &[Vec<usize>],
     plan: &[TaskStep],
     main_index: usize,
+    workspace: Option<&std::path::Path>,
 ) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let Some(main) = mains.get(main_index) else {
@@ -631,12 +721,32 @@ fn upstream_seed_for(
             if step.result.trim().is_empty() {
                 continue;
             }
+            let ifaces: Vec<String> = workspace
+                .map(|ws| {
+                    step.files
+                        .iter()
+                        .filter_map(|file| {
+                            let exports = file_exports(&ws.join(file));
+                            (!exports.is_empty())
+                                .then(|| format!("{file} → {}", exports.join(" / ")))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let iface_note = if ifaces.is_empty() {
+                String::new()
+            } else {
+                format!(" [引擎实测导出:{}]", ifaces.join(";"))
+            };
             let files = if step.files.is_empty() {
                 String::new()
             } else {
                 format!(" [{}]", step.files.join(", "))
             };
-            out.push((format!("{}{}", step.name, files), step.result.clone()));
+            out.push((
+                format!("{}{}{}", step.name, files, iface_note),
+                step.result.clone(),
+            ));
         }
     }
     out
@@ -1725,7 +1835,13 @@ impl TeamExecutor {
                 // 依赖主已完成子目标的产出摘要:让总装主在动手前看到上游成果;
                 // 文件本身已落盘,提示模型用 fs_read 核对(不是只凭摘要复述)。
                 let upstream_seed = if kickbacks.is_none() {
-                    upstream_seed_for(mains, step_ranges, plan, i)
+                    upstream_seed_for(
+                        mains,
+                        step_ranges,
+                        plan,
+                        i,
+                        ctx.scope.as_ref().map(|s| s.workspace()),
+                    )
                 } else {
                     Vec::new()
                 };
@@ -2126,6 +2242,88 @@ mod tests {
         // 工作区不存在时不制造假缺失
         let _ = std::fs::remove_dir_all(&dir);
         assert!(workspace_manifest(&dir, &mains).is_empty());
+    }
+
+    /// SKY-1:上游产出的接口清单必须由引擎实测,覆盖 ESM 与经典脚本两种形态。
+    #[test]
+    fn extract_exports_covers_esm_and_classic_forms() {
+        let text = "export const A = 1;\nexport function buildB() {}\nexport async function c() {}\nexport { d, e as f };\nexport default init;\nwindow.MCWorldMain = MCWorldMain;\nglobal.MCTextures = MCTextures;\nconst notExported = 1;";
+        let got = extract_exports(text);
+        for name in [
+            "A",
+            "buildB",
+            "c",
+            "d",
+            "f",
+            "default",
+            "MCWorldMain",
+            "MCTextures",
+        ] {
+            assert!(
+                got.iter().any(|g| g == name),
+                "应提取导出名「{name}」: {got:?}"
+            );
+        }
+        assert!(
+            !got.iter().any(|g| g == "notExported"),
+            "非导出标识符不得进清单: {got:?}"
+        );
+    }
+
+    /// SKY-1:总装主的依赖摘要要附「引擎实测导出」,不能只给步骤名与文件。
+    #[test]
+    fn upstream_seed_carries_measured_exports() {
+        let dir = std::env::temp_dir().join(format!("kedai-seed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("建测试目录失败");
+        std::fs::write(
+            dir.join("src/part-subislands.js"),
+            "export function generateSubIslands() {}\nexport const createSubIslands = 1;",
+        )
+        .expect("写分片失败");
+
+        let mains = vec![
+            TeamMain {
+                name: "分片主".into(),
+                goals: Vec::new(),
+                after: Vec::new(),
+            },
+            TeamMain {
+                name: "总装主".into(),
+                goals: Vec::new(),
+                after: vec![0],
+            },
+        ];
+        let step_ranges = vec![vec![0usize], vec![1usize]];
+        let plan = vec![
+            TaskStep {
+                name: "写副岛".into(),
+                files: vec!["src/part-subislands.js".into()],
+                result: "已写".into(),
+                ..TaskStep::default()
+            },
+            TaskStep {
+                name: "总装".into(),
+                files: vec!["index.html".into()],
+                ..TaskStep::default()
+            },
+        ];
+        let seed = upstream_seed_for(&mains, &step_ranges, &plan, 1, Some(&dir));
+        assert_eq!(seed.len(), 1);
+        let label = &seed[0].0;
+        assert!(
+            label.contains("引擎实测导出") && label.contains("generateSubIslands"),
+            "依赖摘要应附实测导出名: {label}"
+        );
+        assert!(
+            label.contains("createSubIslands"),
+            "同文件多个导出都要列出: {label}"
+        );
+        // 无工作区时不伪造导出清单
+        let bare = upstream_seed_for(&mains, &step_ranges, &plan, 1, None);
+        assert!(!bare[0].0.contains("引擎实测导出"), "{}", bare[0].0);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// TMR3-3:after 用 1-based 主号;空名主被过滤后仍要重映射到正确的新下标。
