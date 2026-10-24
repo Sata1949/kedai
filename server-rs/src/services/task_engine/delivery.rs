@@ -14,7 +14,7 @@
 // bash 的落盘都算;未记账的写入(MCP/自定义工具)不在保证范围内(遗留 TMR-L2/L3)。
 // 纯函数独立成模块,便于把门槛组合与摘要形状逐条钉住。
 use crate::models::ownership::normalize_workspace_rel;
-use crate::models::types::{TaskStatus, TaskStep};
+use crate::models::types::{TaskStatus, TaskStep, TaskStepStatus};
 use crate::services::task_core::TaskTerminal;
 use serde::Serialize;
 use std::path::Path;
@@ -24,6 +24,9 @@ pub(crate) const FILE_DELIVERY_MISSING_NOTE: &str = "未检测到文件变更:�
 
 /// 必需文件缺失说明的前缀(TMR-6)。
 pub(crate) const FILE_DELIVERY_MISSING_FILES_PREFIX: &str = "缺少必需文件:";
+
+/// 交付内容校验失据的前缀(SKY-6 第 3 项,2026-10-24)。
+pub(crate) const FILE_DELIVERY_CONTENT_PREFIX: &str = "交付内容校验未通过:";
 
 /// 交付摘要里「变更路径」的返回上限;总数仍由 `changed_count` 给出。
 /// 详情端点在运行中会被 SSE 频繁触发,不能把整张台账塞进响应。
@@ -55,6 +58,11 @@ pub struct TaskDeliverySummary {
     pub changed: Vec<String>,
     /// 去重后的变更文件总数(不受 changed 截断影响)
     pub changed_count: usize,
+    /// 声明文件的内容体检不通过项(SKY-6 第 3 项:空文件/仅空白/未替换 `@@` 槽位)。
+    /// 与终态门槛同源,前端「交付校验」卡直接展示。
+    pub content_issues: Vec<String>,
+    /// 被空转守卫截断(步骤 partial)的子目标名(SKY-6 第 2 项)。空 = 无截断。
+    pub truncated: Vec<String>,
 }
 
 /// 从 plan 提取必需文件:(规范化相对路径, 步骤名) 去重,首声明胜出。
@@ -99,6 +107,89 @@ pub(crate) fn missing_files(workspace: &Path, required: &[(String, String)]) -> 
         .collect()
 }
 
+/// 文本类交付文件的扩展名白名单(内容扫描只对文本;空文件判定对所有声明文件生效)。
+const TEXT_EXTENSIONS: &[&str] = &[
+    "html", "htm", "js", "mjs", "cjs", "css", "json", "svg", "md", "txt", "xml",
+];
+
+/// 文本类交付文件里含 `@@` 的行数:未替换模板槽位(如 `/*@@MAIN@@*/`)的直接证据。
+///
+/// SKY-4/SKY-5 先用于审计清单(可见性);SKY-6 第 3 项起交付门槛也消费同一函数
+/// ——「占位符没清零」是半成品的确定性证据。仅扫常见文本扩展名且 ≤512KB;
+/// 读失败/非文本返回 None。
+pub(crate) fn placeholder_line_count(path: &Path) -> Option<usize> {
+    const MAX_BYTES: u64 = 512 * 1024;
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !TEXT_EXTENSIONS.contains(&ext.as_str()) {
+        return None;
+    }
+    if std::fs::metadata(path).ok()?.len() > MAX_BYTES {
+        return None;
+    }
+    let text = std::fs::read_to_string(path).ok()?;
+    Some(text.lines().filter(|line| line.contains("@@")).count())
+}
+
+/// 声明文件的内容体检(SKY-6 第 3 项):空文件 / 仅空白 / 未替换 `@@` 槽位。
+///
+/// 只检查 `TaskStep.files` 声明的交付物(团队规划器声明),不做全工作区扫描——
+/// 未声明文件的任务(研究/问答/模板类)不得因正文或模板里的 `@@` 被误伤
+/// (判据边界见 `docs/计划.md` SKY-6 第 3 项与 `docs/遗留.md` §三十一)。
+///
+/// 工作区不可访问时不产生结论(与缺失判定同口径);不存在的文件交给缺失清单,
+/// 不在本函数重复报错。返回项形如 `index.html:含 3 行 @@ 未替换槽位`。
+pub(crate) fn content_issues(workspace: &Path, required: &[(String, String)]) -> Vec<String> {
+    if !workspace.is_dir() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (path, _) in required {
+        let abs = workspace.join(path);
+        let Ok(meta) = std::fs::metadata(&abs) else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        if meta.len() == 0 {
+            out.push(format!("{path}:文件为空(0B)"));
+            continue;
+        }
+        let Some(lines) = placeholder_line_count(&abs) else {
+            continue;
+        };
+        if lines > 0 {
+            out.push(format!("{path}:含 {lines} 行 @@ 未替换槽位"));
+        } else if std::fs::read_to_string(&abs)
+            .map(|text| text.trim().is_empty())
+            .unwrap_or(false)
+        {
+            out.push(format!("{path}:文件仅含空白"));
+        }
+    }
+    out
+}
+
+/// 从 plan 提取被空转守卫截断(partial)的步骤名(SKY-6 第 2 项)。
+/// 空 = 没有截断步骤。名字沿用 plan 里的「【主Agent-N】…」前缀,前端可直接定位。
+pub(crate) fn truncated_from_plan(plan: &[TaskStep]) -> Vec<String> {
+    plan.iter()
+        .filter(|s| s.status == TaskStepStatus::Partial)
+        .map(|s| {
+            let name = s.name.trim();
+            if name.is_empty() {
+                "未命名步骤".to_string()
+            } else {
+                name.to_string()
+            }
+        })
+        .collect()
+}
+
 /// 读时合成交付摘要(详情接口调用;纯函数,不碰 DB)。
 pub(crate) fn summarize(
     plan: &[TaskStep],
@@ -109,6 +200,8 @@ pub(crate) fn summarize(
     let required = required_from_plan(plan);
     let workspace_available = workspace.is_dir();
     let missing = missing_files(workspace, &required);
+    let content_issues = content_issues(workspace, &required);
+    let truncated = truncated_from_plan(plan);
     let files = required
         .iter()
         .map(|(path, owner)| TaskDeliveryFile {
@@ -124,34 +217,76 @@ pub(crate) fn summarize(
         missing,
         changed,
         changed_count,
+        content_issues,
+        truncated,
+    }
+}
+
+/// 文件交付门槛的输入(单一结构体,避免参数继续膨胀)。
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct DeliveryGateInput<'a> {
+    /// 规划器声明的必需文件(规范化路径 + 步骤名)
+    pub required: &'a [(String, String)],
+    /// 声明了但磁盘上不存在的路径
+    pub missing: &'a [String],
+    /// 声明文件的内容体检不通过项(空文件/仅空白/`@@` 槽位)
+    pub content_issues: &'a [String],
+    /// 被守卫截断(partial)的子目标名
+    pub truncated: &'a [String],
+    /// 本次执行是否产生了非回滚文件变更
+    pub changed: bool,
+}
+
+impl DeliveryGateInput<'_> {
+    /// 文件产物侧是否有未满足项(缺失 / 内容体检 / 零变更)。
+    fn file_unmet(&self) -> bool {
+        (!self.required.is_empty() && !self.missing.is_empty())
+            || !self.content_issues.is_empty()
+            || !self.changed
+    }
+
+    /// 门槛原因的完整清单(缺什么/内容问题/截断),按固定顺序拼接。
+    fn notes(&self) -> Vec<String> {
+        let mut notes: Vec<String> = Vec::new();
+        if !self.missing.is_empty() {
+            notes.push(missing_files_note(self.missing));
+        }
+        if !self.content_issues.is_empty() {
+            notes.push(content_issues_note(self.content_issues));
+        }
+        if !self.changed {
+            notes.push(FILE_DELIVERY_MISSING_NOTE.to_string());
+        }
+        notes
     }
 }
 
 /// 对终态应用文件交付门槛。
 ///
 /// 返回 `(terminal, downgraded)`:
-/// - `downgraded = true` 仅表示「本次把 Done/Partial 改写成带缺失说明的 Partial」,
+/// - `downgraded = true` 仅表示「本次把 Done/Partial 改写成带原因的 Partial」,
 ///   调用方据此补一条任务 Status 事件(可解释性);
 /// - `enabled = false`(未绑定工作区/策略不给写工具/模式不适用)时原样返回;
-/// - `enabled = true` 时:
-///   - 声明了必需文件且任一缺失 → Partial +「缺少必需文件:…」;
-///   - 声明了必需文件且齐全,但本次零变更 → Partial +「未检测到文件变更」;
-///   - 未声明必需文件,但本次零变更 → Partial +「未检测到文件变更」(TMR-3 弱门槛);
-///   - 其余原样(有变更 / 声明齐全且有变更)。
+/// - `enabled = true` 时任一条件未满足即 Partial:
+///   - 声明了必需文件且任一缺失 → 「缺少必需文件:…」;
+///   - 声明文件内容体检不过(空文件/仅空白/未替换 `@@` 槽位)→ 「交付内容校验未通过:…」
+///     (SKY-6 第 3 项,2026-10-24);
+///   - 本次零变更 → 「未检测到文件变更」(TMR-3 弱门槛);
+///   - 存在被守卫截断的 partial 步骤 → 先确保终态不是 Done(SKY-6 第 2 项;
+///     执行器通常已写原因,此处不重复追加)。
 /// - 只有 `TaskTerminal::Complete` 会被改写:Followup(追加指令可以只回答文字)、
 ///   AwaitApproval(尚未执行)、Failed/Noop(本来就不是 Done)一律不碰。
 pub(crate) fn apply_file_delivery_gate(
     terminal: TaskTerminal,
     enabled: bool,
-    required: &[(String, String)],
-    missing: &[String],
-    changed: bool,
+    input: &DeliveryGateInput<'_>,
 ) -> (TaskTerminal, bool) {
     if !enabled {
         return (terminal, false);
     }
-    let unmet = (!required.is_empty() && !missing.is_empty()) || !changed;
-    if !unmet {
+    let file_unmet = input.file_unmet();
+    let truncated = !input.truncated.is_empty();
+    if !file_unmet && !truncated {
         return (terminal, false);
     }
     match terminal {
@@ -161,16 +296,39 @@ pub(crate) fn apply_file_delivery_gate(
             error,
         } => match status {
             TaskStatus::Done | TaskStatus::Partial => {
-                let note = if missing.is_empty() {
-                    FILE_DELIVERY_MISSING_NOTE.to_string()
-                } else {
-                    missing_files_note(missing)
-                };
+                let mut notes = input.notes();
+                // 截断原因:执行器/team 通常已写进 error;不重复追加
+                //(未来某个模式漏写时,门槛仍要留下可解释原因)。
+                if truncated && !error.as_deref().unwrap_or("").contains("守卫截断") {
+                    notes.push(truncated_note(input.truncated));
+                }
+                if notes.is_empty() {
+                    // 原因已齐备(通常是执行器已把「守卫截断」写进 error):
+                    // Done 仍须降 Partial;已是 Partial 则原样返回,不追加空行。
+                    if status == TaskStatus::Done {
+                        return (
+                            TaskTerminal::Complete {
+                                result,
+                                status: TaskStatus::Partial,
+                                error,
+                            },
+                            true,
+                        );
+                    }
+                    return (
+                        TaskTerminal::Complete {
+                            result,
+                            status,
+                            error,
+                        },
+                        false,
+                    );
+                }
                 (
                     TaskTerminal::Complete {
                         result,
                         status: TaskStatus::Partial,
-                        error: Some(merge_note(error.as_deref(), &note)),
+                        error: Some(merge_note(error.as_deref(), &notes.join("\n"))),
                     },
                     true,
                 )
@@ -190,12 +348,46 @@ pub(crate) fn apply_file_delivery_gate(
 }
 
 /// 门槛降级时发给前端的 Status 事件文案(与写进 tasks.error 的说明同源)。
-pub(crate) fn delivery_event_detail(missing: &[String]) -> String {
-    if missing.is_empty() {
-        "文件产物校验未通过:本次执行未检测到工作区文件变更,任务记为 partial".to_string()
-    } else {
-        format!("文件产物校验未通过:{}", missing_files_note(missing))
+pub(crate) fn delivery_event_detail(input: &DeliveryGateInput<'_>) -> String {
+    let mut notes = input.notes();
+    if !input.truncated.is_empty() {
+        notes.push(truncated_note(input.truncated));
     }
+    // 只有截断原因时不冒充「文件产物」问题(截断是执行形态,不是文件校验)。
+    let prefix = if input.missing.is_empty() && input.content_issues.is_empty() && input.changed {
+        "交付校验未通过"
+    } else {
+        "文件产物校验未通过"
+    };
+    format!("{prefix}:{}", notes.join(" "))
+}
+
+/// 内容体检不通过项的中文说明(最多点名 10 项,超出写总数)。
+fn content_issues_note(issues: &[String]) -> String {
+    let head: Vec<&str> = issues.iter().take(10).map(|s| s.as_str()).collect();
+    let more = if issues.len() > head.len() {
+        format!(" 等 {} 项", issues.len())
+    } else {
+        String::new()
+    };
+    format!(
+        "{FILE_DELIVERY_CONTENT_PREFIX}{}{more};请补齐内容后重试。",
+        head.join(";")
+    )
+}
+
+/// 被守卫截断子目标的说明(最多点名 10 个,超出写总数)。
+fn truncated_note(steps: &[String]) -> String {
+    let head: Vec<&str> = steps.iter().take(10).map(|s| s.as_str()).collect();
+    let more = if steps.len() > head.len() {
+        format!(" 等 {} 个", steps.len())
+    } else {
+        String::new()
+    };
+    format!(
+        "以下子目标被守卫截断,成果可能不完整:{}{more};可追加指令继续完成。",
+        head.join("、")
+    )
 }
 
 /// 缺失清单的中文说明(最多点名 10 个,超出写总数)。
@@ -254,11 +446,29 @@ mod tests {
             .collect()
     }
 
+    /// 门槛输入的最小构造:不含内容问题与截断(其余用例按需覆盖字段)。
+    fn gate_input<'a>(
+        required: &'a [(String, String)],
+        missing: &'a [String],
+        changed: bool,
+    ) -> DeliveryGateInput<'a> {
+        DeliveryGateInput {
+            required,
+            missing,
+            content_issues: &[],
+            truncated: &[],
+            changed,
+        }
+    }
+
     /// 门槛关闭(未绑定工作区/策略不给写工具)→ 逐字节原样。
     #[test]
     fn gate_disabled_is_untouched() {
-        let (out, downgraded) =
-            apply_file_delivery_gate(complete(TaskStatus::Done, None), false, &[], &[], false);
+        let (out, downgraded) = apply_file_delivery_gate(
+            complete(TaskStatus::Done, None),
+            false,
+            &gate_input(&[], &[], false),
+        );
         assert!(!downgraded);
         assert_eq!(status_of(&out), TaskStatus::Done);
     }
@@ -266,8 +476,11 @@ mod tests {
     /// TMR-3 弱门槛:未声明必需文件 + 本次零变更 → Partial +「未检测到文件变更」。
     #[test]
     fn weak_gate_without_declarations_downgrades_zero_change() {
-        let (out, downgraded) =
-            apply_file_delivery_gate(complete(TaskStatus::Done, None), true, &[], &[], false);
+        let (out, downgraded) = apply_file_delivery_gate(
+            complete(TaskStatus::Done, None),
+            true,
+            &gate_input(&[], &[], false),
+        );
         assert!(downgraded);
         assert_eq!(status_of(&out), TaskStatus::Partial);
         assert!(error_of(&out).unwrap().contains("未检测到文件变更"));
@@ -277,8 +490,11 @@ mod tests {
     #[test]
     fn declared_files_present_with_change_passes() {
         let req = required(&["index.html", "parts/ui.js"]);
-        let (out, downgraded) =
-            apply_file_delivery_gate(complete(TaskStatus::Done, None), true, &req, &[], true);
+        let (out, downgraded) = apply_file_delivery_gate(
+            complete(TaskStatus::Done, None),
+            true,
+            &gate_input(&req, &[], true),
+        );
         assert!(!downgraded);
         assert_eq!(status_of(&out), TaskStatus::Done);
     }
@@ -287,8 +503,11 @@ mod tests {
     #[test]
     fn declared_files_present_without_change_downgrades() {
         let req = required(&["index.html"]);
-        let (out, downgraded) =
-            apply_file_delivery_gate(complete(TaskStatus::Done, None), true, &req, &[], false);
+        let (out, downgraded) = apply_file_delivery_gate(
+            complete(TaskStatus::Done, None),
+            true,
+            &gate_input(&req, &[], false),
+        );
         assert!(downgraded);
         assert_eq!(status_of(&out), TaskStatus::Partial);
         assert!(error_of(&out).unwrap().contains("未检测到文件变更"));
@@ -299,8 +518,11 @@ mod tests {
     fn missing_required_files_downgrades_even_with_changes() {
         let req = required(&["index.html", "parts/ui.js"]);
         let missing = vec!["parts/ui.js".to_string()];
-        let (out, downgraded) =
-            apply_file_delivery_gate(complete(TaskStatus::Done, None), true, &req, &missing, true);
+        let (out, downgraded) = apply_file_delivery_gate(
+            complete(TaskStatus::Done, None),
+            true,
+            &gate_input(&req, &missing, true),
+        );
         assert!(downgraded);
         assert_eq!(status_of(&out), TaskStatus::Partial);
         let error = error_of(&out).unwrap();
@@ -316,9 +538,7 @@ mod tests {
         let (out, downgraded) = apply_file_delivery_gate(
             complete(TaskStatus::Partial, Some("审计/终审未通过")),
             true,
-            &req,
-            &missing,
-            false,
+            &gate_input(&req, &missing, false),
         );
         assert!(downgraded);
         let error = error_of(&out).unwrap();
@@ -326,34 +546,129 @@ mod tests {
         assert!(error.contains("缺少必需文件"), "{error}");
     }
 
+    /// SKY-6 第 3 项:声明文件有未替换 `@@` 槽位 / 空文件 → 即使文件齐全且有变更
+    /// 也降 Partial,并在 error 里点名具体文件与问题。
+    #[test]
+    fn content_issues_downgrade_even_when_files_present() {
+        let req = required(&["index.html", "parts/main.js"]);
+        let missing: Vec<String> = Vec::new();
+        let issues = vec![
+            "index.html:含 3 行 @@ 未替换槽位".to_string(),
+            "parts/main.js:文件为空(0B)".to_string(),
+        ];
+        let input = DeliveryGateInput {
+            required: &req,
+            missing: &missing,
+            content_issues: &issues,
+            truncated: &[],
+            changed: true,
+        };
+        let (out, downgraded) =
+            apply_file_delivery_gate(complete(TaskStatus::Done, None), true, &input);
+        assert!(downgraded);
+        assert_eq!(status_of(&out), TaskStatus::Partial);
+        let error = error_of(&out).unwrap();
+        assert!(error.contains("交付内容校验未通过"), "{error}");
+        assert!(error.contains("index.html"), "{error}");
+        assert!(error.contains("@@"), "{error}");
+        assert!(error.contains("parts/main.js"), "{error}");
+    }
+
+    /// SKY-6 第 2 项:存在被守卫截断的步骤时,即便文件齐全且有变更也要降 Partial;
+    /// 已有「守卫截断」原因时不重复追加。
+    #[test]
+    fn truncated_steps_force_partial_without_duplicating_reason() {
+        let req = required(&["index.html"]);
+        let truncated = vec!["【主Agent-1】读分片".to_string()];
+        let missing: Vec<String> = Vec::new();
+        let input = DeliveryGateInput {
+            required: &req,
+            missing: &missing,
+            content_issues: &[],
+            truncated: &truncated,
+            changed: true,
+        };
+        // 执行器已写原因:只降状态,不重复追加
+        let (out, downgraded) = apply_file_delivery_gate(
+            complete(
+                TaskStatus::Done,
+                Some("以下子目标被守卫截断,成果可能不完整:主 Agent-1「读分片」"),
+            ),
+            true,
+            &input,
+        );
+        assert!(downgraded);
+        assert_eq!(status_of(&out), TaskStatus::Partial);
+        assert_eq!(
+            error_of(&out).unwrap().matches("守卫截断").count(),
+            1,
+            "已有原因不得重复追加: {}",
+            error_of(&out).unwrap()
+        );
+
+        // 未来模式漏写原因:门槛补一条可解释说明
+        let (out2, downgraded2) =
+            apply_file_delivery_gate(complete(TaskStatus::Done, None), true, &input);
+        assert!(downgraded2);
+        assert_eq!(status_of(&out2), TaskStatus::Partial);
+        assert!(error_of(&out2).unwrap().contains("以下子目标被守卫截断"));
+    }
+
+    /// 门槛输入的两类原因会同时出现:文件缺失 + 内容问题 + 截断,用户能看到全貌。
+    #[test]
+    fn gate_input_notes_combine_all_reasons() {
+        let req = required(&["index.html", "parts/ui.js"]);
+        let missing = vec!["parts/ui.js".to_string()];
+        let issues = vec!["index.html:含 1 行 @@ 未替换槽位".to_string()];
+        let truncated = vec!["【主Agent-2】总装".to_string()];
+        let input = DeliveryGateInput {
+            required: &req,
+            missing: &missing,
+            content_issues: &issues,
+            truncated: &truncated,
+            changed: true,
+        };
+        let (out, downgraded) =
+            apply_file_delivery_gate(complete(TaskStatus::Done, None), true, &input);
+        assert!(downgraded);
+        let error = error_of(&out).unwrap();
+        assert!(error.contains("缺少必需文件"), "{error}");
+        assert!(error.contains("交付内容校验未通过"), "{error}");
+        assert!(error.contains("被守卫截断"), "{error}");
+        let event = delivery_event_detail(&input);
+        assert!(event.contains("文件产物校验未通过"), "{event}");
+        assert!(event.contains("parts/ui.js"), "{event}");
+    }
+
     /// 非 Complete 终态一律不碰:Followup 可以只回答文字,Failed/Noop 本就不是成功。
     #[test]
     fn non_complete_terminals_are_untouched() {
         let req = required(&["index.html"]);
         let missing = vec!["index.html".to_string()];
+        let input = gate_input(&req, &missing, false);
         let followup = TaskTerminal::Followup {
             msg_text: "只回答文字".into(),
             new_result: "结果".into(),
             status: TaskStatus::Done,
         };
-        let (out, downgraded) = apply_file_delivery_gate(followup, true, &req, &missing, false);
+        let (out, downgraded) = apply_file_delivery_gate(followup, true, &input);
         assert!(!downgraded);
         assert!(matches!(out, TaskTerminal::Followup { .. }));
 
         let failed = TaskTerminal::Failed {
             error: Some("连接失败".into()),
         };
-        let (out, downgraded) = apply_file_delivery_gate(failed, true, &req, &missing, false);
+        let (out, downgraded) = apply_file_delivery_gate(failed, true, &input);
         assert!(!downgraded);
         assert!(matches!(out, TaskTerminal::Failed { .. }));
 
         let noop = TaskTerminal::Noop;
-        let (out, downgraded) = apply_file_delivery_gate(noop, true, &req, &missing, false);
+        let (out, downgraded) = apply_file_delivery_gate(noop, true, &input);
         assert!(!downgraded);
         assert!(matches!(out, TaskTerminal::Noop));
     }
 
-    /// 摘要:必需文件存在性、缺失清单、变更数与非法声明跳过。
+    /// 摘要:必需文件存在性、缺失清单、变更数、内容体检与截断清单。
     #[test]
     fn summarize_reports_required_changed_and_missing() {
         let dir = TempDataDir::new("delivery-summary");
@@ -389,6 +704,55 @@ mod tests {
         assert_eq!(summary.missing, vec!["parts/ui.js"]);
         assert_eq!(summary.changed, vec!["index.html"]);
         assert_eq!(summary.changed_count, 2);
+        assert!(
+            summary.content_issues.is_empty(),
+            "缺文件交给 missing,不重复报"
+        );
+        assert!(summary.truncated.is_empty());
+    }
+
+    /// SKY-6 第 3 项:内容体检抓到未替换 `@@` 槽位 / 空文件 / 仅空白;
+    /// 第 2 项:截断清单来自 plan 的 partial 步骤。
+    #[test]
+    fn summarize_reports_content_issues_and_truncated_steps() {
+        let dir = TempDataDir::new("delivery-content");
+        let ws = dir.join("ws");
+        std::fs::create_dir_all(&ws).expect("创建内容体检工作区失败");
+        std::fs::write(
+            ws.join("index.html"),
+            "<html>\n/*@@BODY@@*/\n/*@@UI@@*/\n</html>",
+        )
+        .expect("写占位模板失败");
+        std::fs::write(ws.join("empty.js"), "").expect("写空文件失败");
+        std::fs::write(ws.join("blank.css"), "  \n\t\n").expect("写空白文件失败");
+        std::fs::write(ws.join("ok.js"), "export const ok = 1;\n").expect("写健康文件失败");
+
+        let plan = vec![TaskStep {
+            name: "【主Agent-1】总装".into(),
+            status: TaskStepStatus::Partial,
+            files: vec![
+                "index.html".into(),
+                "empty.js".into(),
+                "blank.css".into(),
+                "ok.js".into(),
+            ],
+            ..TaskStep::default()
+        }];
+        let summary = summarize(&plan, &ws, vec!["index.html".into()], 1);
+        assert_eq!(
+            summary.content_issues,
+            vec![
+                "index.html:含 2 行 @@ 未替换槽位".to_string(),
+                "empty.js:文件为空(0B)".to_string(),
+                "blank.css:文件仅含空白".to_string(),
+            ],
+            "内容体检顺序与声明顺序一致,健康文件不误报"
+        );
+        assert_eq!(
+            summary.truncated,
+            vec!["【主Agent-1】总装".to_string()],
+            "partial 步骤应进截断清单"
+        );
     }
 
     /// 工作区不可访问 → 不制造假缺失(摘要只标记 workspace_available=false)。
@@ -404,6 +768,10 @@ mod tests {
         let summary = summarize(&plan, &ws, Vec::new(), 0);
         assert!(!summary.workspace_available);
         assert!(summary.missing.is_empty(), "不可访问时不得判缺失");
+        assert!(
+            summary.content_issues.is_empty(),
+            "不可访问时不得做内容体检"
+        );
         assert!(!summary.required[0].exists);
     }
 }

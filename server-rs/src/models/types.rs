@@ -1440,6 +1440,9 @@ pub enum TaskStepStatus {
     Pending,
     Running,
     Done,
+    /// 部分完成：工具循环被空转守卫(只读/无进展/语义/重复调用)提前截断。
+    /// 带已有产出收尾,但不得声称完成(SKY-6 第 2 项,2026-10-24)。
+    Partial,
     Error,
 }
 
@@ -1449,6 +1452,7 @@ impl TaskStepStatus {
             Self::Pending => "pending",
             Self::Running => "running",
             Self::Done => "done",
+            Self::Partial => "partial",
             Self::Error => "error",
         }
     }
@@ -1459,6 +1463,7 @@ impl TaskStepStatus {
             "pending" => Self::Pending,
             "running" => Self::Running,
             "done" => Self::Done,
+            "partial" => Self::Partial,
             "error" => Self::Error,
             _ => {
                 tracing::warn!(
@@ -2024,6 +2029,7 @@ mod tests {
             (TaskStepStatus::Pending, "pending"),
             (TaskStepStatus::Running, "running"),
             (TaskStepStatus::Done, "done"),
+            (TaskStepStatus::Partial, "partial"),
             (TaskStepStatus::Error, "error"),
         ];
         for (status, text) in cases {

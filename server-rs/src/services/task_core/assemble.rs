@@ -10,20 +10,22 @@
 // - **纯函数**、不调 LLM、不读库:输入只有 plan(执行器内存态或 tasks.plan 反序列化结果);
 // - **单一出处**:legacy / plan / team / custom 四模式的失败降级、终态兜底(finalize_run)、
 //   重启孤儿兜底(recover_orphan_tasks)全部经这里,禁止各写一份;
-// - **不伪造成果**:没有任何「已完成且有产出」的步骤时返回 None,调用方回落原失败语义
-//   (error/ended + 空 result);不得用空串、占位文本或未完成步骤的内容冒充成果。
+// - **不伪造成果**:没有任何「已完成/partial 且有产出」的步骤时返回 None,调用方回落
+//   原失败语义(error/ended + 空 result);不得用空串、占位文本或未完成步骤的内容冒充成果。
 use crate::models::types::{TaskStatus, TaskStep, TaskStepStatus};
 use crate::services::task_core::TaskTerminal;
 
-/// 用已完成步骤的产出拼装兜底成果;无任何可拼装内容时返回 None。
+/// 用已完成(含被守卫截断但有产出)的步骤拼装兜底成果;无任何可拼装内容时返回 None。
 ///
-/// 形态:每个「已完成且产出非空」的步骤一段 `## 名称` + 正文,段间空行;
-/// 末尾若存在失败步骤,追加一行引用式的未完成清单(让兜底成果自带「不完整」标注)。
+/// 形态:每个「已完成/partial 且产出非空」的步骤一段 `## 名称` + 正文,段间空行;
+/// 末尾若存在失败或被截断的步骤,追加一行引用式的未完成清单(让兜底成果自带「不完整」标注)。
 /// 步骤名折叠换行(原文可能含 `## ` 标题行,不折叠会在段内制造假标题)。
 pub(crate) fn assemble_from_plan(plan: &[TaskStep]) -> Option<String> {
     let mut sections: Vec<String> = Vec::new();
     for (i, s) in plan.iter().enumerate() {
-        if s.status != TaskStepStatus::Done {
+        // partial = 被守卫截断但有产出的步骤(SKY-6 第 2 项):成果不能丢,
+        // 由下方「未完成清单」标注它没跑完。
+        if !matches!(s.status, TaskStepStatus::Done | TaskStepStatus::Partial) {
             continue;
         }
         let text = s.result.trim();
@@ -45,7 +47,7 @@ pub(crate) fn assemble_from_plan(plan: &[TaskStep]) -> Option<String> {
     let mut out = sections.join("\n\n");
     let failed: Vec<String> = plan
         .iter()
-        .filter(|s| s.status == TaskStepStatus::Error)
+        .filter(|s| matches!(s.status, TaskStepStatus::Error | TaskStepStatus::Partial))
         .map(|s| flatten(&s.name))
         .filter(|n| !n.is_empty())
         .collect();
@@ -130,6 +132,23 @@ mod tests {
         assert!(
             out.contains("> 未完成的步骤:失败步"),
             "应有未完成清单: {out}"
+        );
+    }
+
+    /// SKY-6 第 2 项:被守卫截断(partial)但有产出的步骤必须进兜底成果,
+    /// 同时列入未完成清单——不能因为「没跑完」把半成品整个丢掉。
+    #[test]
+    fn assemble_includes_partial_steps_and_marks_them_incomplete() {
+        let plan = vec![
+            step("完成步", TaskStepStatus::Done, "甲产出"),
+            step("截断步", TaskStepStatus::Partial, "乙半成品"),
+        ];
+        let out = assemble_from_plan(&plan).expect("partial 有产出应可拼装");
+        assert!(out.contains("## 截断步"), "{out}");
+        assert!(out.contains("乙半成品"), "{out}");
+        assert!(
+            out.contains("> 未完成的步骤:截断步"),
+            "partial 步骤应在未完成清单里: {out}"
         );
     }
 

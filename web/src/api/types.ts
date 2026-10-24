@@ -1065,11 +1065,12 @@ export interface MacroExpandResult {
 // ===== 任务模式(task 工作台) =====
 
 /**
- * 任务计划步骤状态(与 server-rs task_service 实际写入值对齐):
- * pending=待执行(parse 时 serde 默认值) / running=执行中 / done=完成 / error=失败
- * 写入点:executor.rs 步骤循环(running→done|error)、mod.rs/parse.rs(初始 pending)
+ * 任务计划步骤状态(与 server-rs 实际写入值对齐):
+ * pending=待执行(parse 时 serde 默认值) / running=执行中 / done=完成
+ * / partial=被守卫截断(带产出但没跑完,SKY-6 第 2 项) / error=失败
+ * 写入点:executor.rs 步骤循环(running→done|partial|error)、mod.rs/parse.rs(初始 pending)
  */
-export type TaskStepStatus = 'pending' | 'running' | 'done' | 'error';
+export type TaskStepStatus = 'pending' | 'running' | 'done' | 'partial' | 'error';
 
 /** 任务计划步骤 */
 export interface TaskStep {
@@ -1280,6 +1281,16 @@ export interface TaskDeliverySummary {
   missing: string[];
   changed: string[];
   changed_count: number;
+  /**
+   * 声明文件的内容体检不通过项（SKY-6：空文件 / 仅空白 / 未替换 `@@` 槽位）。
+   * 旧服务端无此字段 → 按「无内容问题」容错。
+   */
+  content_issues?: string[];
+  /**
+   * 被空转守卫截断（步骤 partial）的子目标名（SKY-6）。
+   * 旧服务端无此字段 → 按「无截断」容错。
+   */
+  truncated?: string[];
 }
 
 export interface TaskDetail {

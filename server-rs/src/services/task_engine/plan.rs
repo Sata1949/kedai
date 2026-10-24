@@ -50,6 +50,8 @@ impl ApprovedPlanExecutor {
         let mut plan = self.plan.clone();
         let count = plan.len();
         let mut had_error = false;
+        // SKY-6 第 2 项:被守卫截断的步骤名(带原因),收尾时进 partial 原因。
+        let mut truncated_steps: Vec<String> = Vec::new();
 
         // approve 已置 planning,执行段归执行器所有:推进 running
         svc.set_status(&ctx.task_id, TaskStatus::Running);
@@ -115,13 +117,24 @@ impl ApprovedPlanExecutor {
                 no_progress_guard: true,
             };
             match run_agent_loop(svc.clone(), self.engine.clone(), call, ctx.cancel.clone()).await {
-                Ok((text, usage)) => {
+                Ok(out) => {
+                    let usage = out.usage;
                     total.prompt_tokens += usage.prompt_tokens;
                     total.completion_tokens += usage.completion_tokens;
                     total.total_tokens += usage.total_tokens;
                     svc.record_usage(&ctx.task_id, "agent", Some(i), &usage_as_output(&usage));
-                    plan[i].status = TaskStepStatus::Done;
-                    plan[i].result = text;
+                    // 守卫截断 = 带产出的部分完成,不得记 done(SKY-6 第 2 项)
+                    if let Some(reason) = &out.guard_stopped {
+                        plan[i].status = TaskStepStatus::Partial;
+                        truncated_steps.push(format!(
+                            "第 {} 步「{}」:{reason}",
+                            i + 1,
+                            plan[i].name
+                        ));
+                    } else {
+                        plan[i].status = TaskStepStatus::Done;
+                    }
+                    plan[i].result = out.text;
                 }
                 Err(e) => {
                     plan[i].status = TaskStepStatus::Error;
@@ -163,17 +176,24 @@ impl ApprovedPlanExecutor {
         total.total_tokens += out.prompt_tokens + out.completion_tokens;
         // 结果契约(提交 2 起):result **只放汇总文本**——planned 态写入的计划清单
         // 文本由 TaskTerminal::Complete → complete_mode_run 以此整体覆盖。
-        // 含 error 步骤但成果已产出 → partial(对齐 legacy「有产出则 partial」语义)
-        let status = if had_error {
+        // 含 error 步骤或守卫截断步骤 → partial(对齐 legacy「有产出则 partial」语义;
+        // 截断步骤虽有产出但没跑完,不得声称 done——SKY-6 第 2 项)。
+        let status = if had_error || !truncated_steps.is_empty() {
             TaskStatus::Partial
         } else {
             TaskStatus::Done
         };
+        let error = (!truncated_steps.is_empty()).then(|| {
+            format!(
+                "以下步骤被守卫截断,成果可能不完整:{};可追加指令继续完成",
+                truncated_steps.join(";")
+            )
+        });
         Ok((
             TaskTerminal::Complete {
                 result: out.text.trim().to_string(),
                 status,
-                error: None,
+                error,
             },
             total,
         ))

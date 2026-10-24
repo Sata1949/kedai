@@ -304,7 +304,13 @@ async fn semantic_guard_is_clamped_for_tasks() {
         .expect("事件收集应收尾")
         .expect("收集任务不应 panic");
 
-    assert_eq!(st, "done", "熔断是收尾不是失败: {detail}");
+    // SKY-6 第 2 项:语义熔断也是守卫截断——带产出收尾但不得声称 done。
+    assert_eq!(st, "partial", "熔断是带产出的部分完成,不是 done: {detail}");
+    let error = detail["task"]["error"].as_str().unwrap_or("");
+    assert!(
+        error.contains("守卫截断"),
+        "任务 error 应说明被守卫截断: {error:?}"
+    );
     let details = status_details(&events, &id);
     let calls = details
         .iter()
@@ -387,6 +393,11 @@ async fn readonly_streak_nudges_then_breaks() {
     assert!(
         result.contains("第16轮说明"),
         "应保留熔断那一轮的正文(恰在第 16 次只读后中止): {result:?}"
+    );
+    let error = detail["task"]["error"].as_str().unwrap_or("");
+    assert!(
+        error.contains("守卫截断"),
+        "只读熔断同样应记入截断原因: {error:?}"
     );
 
     let details = status_details(&events, &id);

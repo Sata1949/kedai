@@ -75,6 +75,17 @@ pub(crate) struct AgentLoopCall {
     pub no_progress_guard: bool,
 }
 
+/// 单主 agent 工具自循环的产出。
+pub(crate) struct AgentLoopOutput {
+    /// 最终正文(空正文收尾重试后的版本)
+    pub text: String,
+    /// 整轮累计 usage(调用方按此记一次;首轮空正文行由本函数单独落库)
+    pub usage: TokenUsage,
+    /// 空转守卫截断原因(连续只读/无进展/语义/重复调用);None = 正常收尾。
+    /// 空正文收尾重试不会抹掉首轮的截断事实——重试只是补一段收尾正文,工作仍被截断。
+    pub guard_stopped: Option<String>,
+}
+
 /// 单主 agent 工具自循环(solo/multi 执行器主体;team 各主 agent 复用):
 /// system 组装(内置执行者指令 → 人设 → 世界书 → 提示词注入 → Agent 提示词,
 /// 外部段落逐一 untrusted 包裹)→ run_tool_loop(工具按 task_tool_policy 编译 +
@@ -105,7 +116,7 @@ pub(crate) async fn run_agent_loop(
     engine: Arc<AgentEngine>,
     call: AgentLoopCall,
     cancel: watch::Receiver<bool>,
-) -> Result<(String, TokenUsage), String> {
+) -> Result<AgentLoopOutput, String> {
     let settings = &call.settings;
 
     // 工具按任务策略下发(批次授权改造):默认拒绝危险工具;元工具不入正文列表。
@@ -278,6 +289,9 @@ pub(crate) async fn run_agent_loop(
     // ——usage_total 由调用方按整轮累计一次入账,「各行 token 求和 == usage_total」不变量保持。
     let mut retry_budget_used: Option<u32> = None;
     let mut usage_before_retry = TokenUsage::default();
+    // SKY-6 第 2 项:首轮若被守卫截断,空正文收尾重试也不能抹掉这个事实——
+    // 重试只补收尾正文,被截断的工作仍没做完。
+    let first_guard_stopped = result.as_ref().ok().and_then(|r| r.guard_stopped.clone());
     if let Ok(res) = &result {
         if !res.interrupted && !*cancel.borrow() && res.content.trim().is_empty() {
             svc.record_self_heals(
@@ -439,7 +453,11 @@ pub(crate) async fn run_agent_loop(
                     Some("预算截止期用尽:工具循环在预算截止处收尾,已保留本轮产出".into()),
                 );
             }
-            Ok((text, total_usage))
+            Ok(AgentLoopOutput {
+                text,
+                usage: total_usage,
+                guard_stopped: first_guard_stopped.or(res.guard_stopped),
+            })
         }
         Ok(res) => {
             // 中断(用户 stop):与 legacy 的 connector Err 同款记 error 行。
@@ -541,7 +559,7 @@ impl SoloExecutor {
             readonly_guard: true,
             no_progress_guard: true,
         };
-        let (text, usage) = run_agent_loop(
+        let out = run_agent_loop(
             self.svc.clone(),
             self.engine.clone(),
             call,
@@ -551,15 +569,25 @@ impl SoloExecutor {
         // usage 落库(批次 4.3b 口径补齐:solo 整轮一行,phase=agent;approve 续跑
         // 自 2026-08 起由 ApprovedPlanExecutor 逐步落库,本执行器仅作 plan 为空时的兜底)
         self.svc
-            .record_usage(&ctx.task_id, "agent", None, &usage_as_output(&usage));
-        // 成功终态:result 文本 + done(无覆盖状态/原因)
+            .record_usage(&ctx.task_id, "agent", None, &usage_as_output(&out.usage));
+        // 成功终态:result 文本 + done;守卫截断是「带产出的部分完成」,降 partial
+        // 并写明原因(SKY-6 第 2 项),不得让半成品冒充 done。
+        let (status, error) = match out.guard_stopped {
+            Some(reason) => (
+                TaskStatus::Partial,
+                Some(format!(
+                    "工具循环被守卫截断({reason}),成果可能不完整;可追加指令继续完成"
+                )),
+            ),
+            None => (TaskStatus::Done, None),
+        };
         Ok((
             TaskTerminal::Complete {
-                result: text,
-                status: TaskStatus::Done,
-                error: None,
+                result: out.text,
+                status,
+                error,
             },
-            usage,
+            out.usage,
         ))
     }
 }

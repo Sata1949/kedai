@@ -316,7 +316,7 @@ pub(crate) async fn execute_generation(
             chunk = chunk_rx.recv() => match chunk {
                 Some(chunk) => {
                     if process_chunk(chunk, &mut content, &mut reasoning, &mut tool_calls, &mut usage, live_usage.as_deref_mut(), &mut finish_reason, &engine.tool_registry, tx, abort, flag, emit_tokens).await? {
-                        return Ok(ExecutorResult { content, usage, interrupted: true, tool_calls, reasoning, finish_reason, self_heals: Vec::new(), budget_stopped: false });
+                        return Ok(ExecutorResult { content, usage, interrupted: true, tool_calls, reasoning, finish_reason, self_heals: Vec::new(), budget_stopped: false, guard_stopped: None });
                     }
                 }
                 None => break,
@@ -337,6 +337,7 @@ pub(crate) async fn execute_generation(
                 finish_reason,
                 self_heals: Vec::new(),
                 budget_stopped: false,
+                guard_stopped: None,
             });
         }
         // 连接器失败:分类原样带出(不丢分类信息)
@@ -370,6 +371,7 @@ pub(crate) async fn execute_generation(
         finish_reason,
         self_heals: Vec::new(),
         budget_stopped: false,
+        guard_stopped: None,
     })
 }
 
@@ -504,6 +506,10 @@ pub(crate) struct ExecutorResult {
     /// 消息 extra 里留痕(extra.budget_exceeded),刷新后仍能看出「这轮是被成本/时间
     /// 闸门收掉的」。聊天路径不传 `step_budget`,故聊天侧该位只可能来自 token 预算。
     pub(crate) budget_stopped: bool,
+    /// 因**空转守卫**提前停止工具循环时的原因(连续只读 / 声明文件无进展 / 语义熔断 /
+    /// 重复调用),None = 正常收尾或预算类终止。任务侧据此把步骤降为 partial(SKY-6
+    /// 第 2 项):守卫熔断会 `return Ok(已有正文)`,调用方不能把它当成「做完了」。
+    pub(crate) guard_stopped: Option<String>,
 }
 
 /// 截断自愈记录(问题①):单轮生成被 max_tokens 截断到不可用(空正文/半截
@@ -1170,6 +1176,7 @@ pub(crate) async fn run_tool_loop(
                 finish_reason: result.finish_reason,
                 self_heals: std::mem::take(self_heals),
                 budget_stopped: false,
+                guard_stopped: None,
             });
         }
         round += 1;
@@ -1342,6 +1349,7 @@ pub(crate) async fn run_tool_loop(
                         finish_reason: None,
                         self_heals: std::mem::take(self_heals),
                         budget_stopped: false,
+                        guard_stopped: None,
                     });
                 }
             }
@@ -1530,6 +1538,7 @@ pub(crate) async fn run_tool_loop(
                         finish_reason: result.finish_reason,
                         self_heals: std::mem::take(self_heals),
                         budget_stopped: true,
+                        guard_stopped: None,
                     });
                 }
             }
@@ -1566,6 +1575,7 @@ pub(crate) async fn run_tool_loop(
                     finish_reason: result.finish_reason,
                     self_heals: std::mem::take(self_heals),
                     budget_stopped: true,
+                    guard_stopped: None,
                 });
             }
         }
@@ -1594,6 +1604,7 @@ pub(crate) async fn run_tool_loop(
                 finish_reason: result.finish_reason,
                 self_heals: std::mem::take(self_heals),
                 budget_stopped: false,
+                guard_stopped: None,
             });
         }
         // 连续只读空转(TMR-5):达到上限先提醒一次,再次达到则中止本步。顺序放在
@@ -1646,6 +1657,9 @@ pub(crate) async fn run_tool_loop(
                     finish_reason: result.finish_reason,
                     self_heals: std::mem::take(self_heals),
                     budget_stopped: false,
+                    guard_stopped: Some(format!(
+                        "连续只读空转熔断:连续 {limit} 次只读工具调用没有写出任何产物"
+                    )),
                 });
             }
         }
@@ -1684,6 +1698,9 @@ pub(crate) async fn run_tool_loop(
                 finish_reason: result.finish_reason,
                 self_heals: std::mem::take(self_heals),
                 budget_stopped: false,
+                guard_stopped: Some(format!(
+                    "声明文件无进展收尾:连续 {limit} 轮没有成功写入本主负责的文件"
+                )),
             });
         }
         // 语义熔断(HB-2):同一工具在窗口内反复调用且输出实质无变化(参数可以每轮都变)。
@@ -1716,6 +1733,9 @@ pub(crate) async fn run_tool_loop(
                 finish_reason: result.finish_reason,
                 self_heals: std::mem::take(self_heals),
                 budget_stopped: false,
+                guard_stopped: Some(format!(
+                    "重复空转熔断:工具 \"{tool}\" 在最近 {semantic_window} 次调用中出现 {calls} 次,输出实质无变化"
+                )),
             });
         }
         // 重复调用熔断:本轮工具已执行完(与轮次上限同款收尾),显式告知中止理由。
@@ -1750,6 +1770,9 @@ pub(crate) async fn run_tool_loop(
                 finish_reason: result.finish_reason,
                 self_heals: std::mem::take(self_heals),
                 budget_stopped: false,
+                guard_stopped: Some(format!(
+                    "重复调用熔断:工具 \"{tool}\" 以相同参数出现 {times} 次"
+                )),
             });
         }
     }
@@ -2223,6 +2246,7 @@ mod tests {
             finish_reason: finish.map(|s| s.into()),
             self_heals: Vec::new(),
             budget_stopped: false,
+            guard_stopped: None,
         }
     }
 
