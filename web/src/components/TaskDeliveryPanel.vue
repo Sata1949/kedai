@@ -7,12 +7,17 @@
 //  ③ `checked=false`（规划器未声明必需文件）→ 明说只做「是否产生变更」弱校验；
 //  ④ 工作区不可访问 → 明确警示「缺失判定不可信」，不把空 missing 当齐全。
 // 变更明细仍由 FileChangesPanel 承担，本卡只给摘要，不重复列 diff。
+import { computed } from 'vue';
 import type { TaskDeliverySummary } from '../api';
 
 const props = defineProps<{
   delivery: TaskDeliverySummary | null;
   workspaceBound: boolean;
 }>();
+
+// 旧服务端不下发这两个字段（SKY-6 新增）：按「无问题」容错。
+const contentIssues = computed(() => props.delivery?.content_issues ?? []);
+const truncatedSteps = computed(() => props.delivery?.truncated ?? []);
 </script>
 
 <template>
@@ -33,7 +38,19 @@ const props = defineProps<{
           缺失 {{ props.delivery.missing.length }}
         </span>
         <span class="sv-delivery-chip">变更 {{ props.delivery.changed_count }}</span>
+        <span
+          v-if="truncatedSteps.length"
+          class="sv-delivery-chip bad"
+        >截断 {{ truncatedSteps.length }}</span>
       </div>
+      <div v-if="truncatedSteps.length" class="sv-delivery-warn">
+        被守卫截断的子目标：{{ truncatedSteps.join('、') }}（成果可能不完整，可追加指令继续完成）
+      </div>
+      <div
+        v-for="issue in contentIssues"
+        :key="issue"
+        class="sv-delivery-warn"
+      >交付内容校验：{{ issue }}</div>
       <div v-if="!props.delivery.workspace_available" class="sv-delivery-warn">
         工作区当前不可访问，缺失判定不可信。
       </div>

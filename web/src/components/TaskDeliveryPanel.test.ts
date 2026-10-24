@@ -68,4 +68,28 @@ describe('TaskDeliveryPanel', () => {
     expect(w.text()).toContain('工作区当前不可访问');
     expect(w.text()).toContain('缺失判定不可信');
   });
+
+  it('旧服务端缺 content_issues/truncated：按无问题容错', () => {
+    const w = mountPanel(summary());
+    expect(w.text()).not.toContain('交付内容校验');
+    expect(w.text()).not.toContain('被守卫截断');
+  });
+
+  it('内容体检与守卫截断：逐项展示警示', () => {
+    const w = mountPanel(
+      summary({
+        content_issues: [
+          'index.html:含 2 行 @@ 未替换槽位',
+          'parts/main.js:文件为空(0B)',
+        ],
+        truncated: ['【主Agent-1】总装'],
+      }),
+    );
+    const text = w.text();
+    expect(text).toContain('截断 1');
+    expect(text).toContain('被守卫截断的子目标');
+    expect(text).toContain('【主Agent-1】总装');
+    expect(text).toContain('index.html:含 2 行 @@ 未替换槽位');
+    expect(text).toContain('parts/main.js:文件为空(0B)');
+  });
 });
