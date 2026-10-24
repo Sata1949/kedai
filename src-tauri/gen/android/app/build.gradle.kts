@@ -89,6 +89,17 @@ rust {
     rootDirRel = "../../../"
 }
 
+// Tauri 的 Android 模块固定 jackson-databind 2.15.3(截至 2.12.5 仍未变),
+// 该版本有 15 条安全公告(7 High),2.15 线无修复版本,故收敛到 2.18.11
+// (覆盖全部公告的最高修复位;Jackson 2.x 二进制兼容)。上游升级后应复核删除。
+configurations.all {
+    resolutionStrategy {
+        force("com.fasterxml.jackson.core:jackson-databind:2.18.11")
+        force("com.fasterxml.jackson.core:jackson-core:2.18.11")
+        force("com.fasterxml.jackson.core:jackson-annotations:2.18.11")
+    }
+}
+
 dependencies {
     implementation("androidx.webkit:webkit:1.14.0")
     implementation("androidx.appcompat:appcompat:1.7.1")
