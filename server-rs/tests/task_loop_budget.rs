@@ -683,3 +683,159 @@ async fn workspace_task_with_file_change_stays_done() {
 
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+/// SKY-6 第 4 项:纯读工具(`fs_read/fs_glob/fs_grep`)的 HB-2 采用**整窗阈值**——
+/// 同一纯读工具要占满最近一整窗(任务侧 8 次)且输出去重 ≤2 种才熔断。6 次同文件读
+/// 未占满整窗,不得熔断;旧口径(同工具 4 次)会在第 4 次熔断,即全题复跑的 4/8/2 误伤。
+#[tokio::test]
+async fn repeated_reads_within_window_do_not_trip_semantic_guard() {
+    let _guard = test_lock().await;
+    let app = test_app();
+
+    // 任务侧钳制后的口径:窗口 8 / 同工具 4 / 去重 2;显式设置便于失败时读日志。
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({
+            "loop_guard_semantic_window": 8,
+            "loop_guard_semantic_min_calls": 4,
+            "loop_guard_semantic_max_distinct": 2,
+            "task_step_budget_secs": 3600,
+            "task_total_budget_secs": 0,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let ws = temp_workspace("readonly-hb2-short");
+    std::fs::write(ws.join("a.txt"), "hello\n").expect("写测试文件失败");
+
+    let collector = spawn_collector(app);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // 6 轮 fs_read 同一文件:输出恒同、参数每轮仅在 _mock_round 上变化。
+    // any 变体保证只读提醒轮(本例不会到 8 次)之外的其它追加消息不影响循环。
+    let id = create_task_in_workspace(
+        app,
+        r#"[[tool_loop_any_text:fs_read|6 {"path":"a.txt"}]] 纯读短序列用例"#,
+        &ws,
+    )
+    .await;
+    run_task(app, &id).await;
+    let (st, detail) = wait_terminal(app, &id).await;
+    let events = tokio::time::timeout(Duration::from_secs(10), collector)
+        .await
+        .expect("事件收集应收尾")
+        .expect("收集任务不应 panic");
+
+    assert_ne!(st, "error", "重复读不该把任务打成 error: {detail}");
+    let details = status_details(&events, &id);
+    assert!(
+        !details.iter().any(|d| d.contains("重复空转熔断")),
+        "6 次同文件读未占满整窗,不得触发 HB-2: {details:?}"
+    );
+    // 用「调用工具」事件计数证明循环真的跑了(否则断言无判别力);广播允许丢帧,
+    // 故取 ≥5 而非严格 6——旧口径在第 4 次就断,本断言仍能区分。
+    let reads = details
+        .iter()
+        .filter(|d| d.contains("调用工具 fs_read"))
+        .count();
+    assert!(
+        reads >= 5,
+        "应真实跑满约 6 次 fs_read(旧实现第 4 次熔断),实际 {reads} 条: {details:?}"
+    );
+
+    // 复位
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({
+            "loop_guard_semantic_window": 16,
+            "loop_guard_semantic_min_calls": 12,
+            "loop_guard_semantic_max_distinct": 2,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// SKY-6 第 4 项的反向判据:整窗阈值不是「关掉」——同一纯读工具占满一整窗
+/// (8 次)且输出只有 1 种时仍须熔断,且恰在第 8 次(旧口径第 4 次)。
+#[tokio::test]
+async fn repeated_reads_at_full_window_still_trip_semantic_guard() {
+    let _guard = test_lock().await;
+    let app = test_app();
+
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({
+            "loop_guard_semantic_window": 8,
+            "loop_guard_semantic_min_calls": 4,
+            "loop_guard_semantic_max_distinct": 2,
+            "task_step_budget_secs": 3600,
+            "task_total_budget_secs": 0,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let ws = temp_workspace("readonly-hb2-full");
+    std::fs::write(ws.join("a.txt"), "hello\n").expect("写测试文件失败");
+
+    let collector = spawn_collector(app);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let id = create_task_in_workspace(
+        app,
+        r#"[[tool_loop_any_text:fs_read|12 {"path":"a.txt"}]] 纯读整窗熔断用例"#,
+        &ws,
+    )
+    .await;
+    run_task(app, &id).await;
+    let (st, detail) = wait_terminal(app, &id).await;
+    let events = tokio::time::timeout(Duration::from_secs(10), collector)
+        .await
+        .expect("事件收集应收尾")
+        .expect("收集任务不应 panic");
+
+    assert_ne!(st, "error", "熔断是收尾不是失败: {detail}");
+    let details = status_details(&events, &id);
+    let break_at = details
+        .iter()
+        .position(|d| d.contains("重复空转熔断"))
+        .unwrap_or_else(|| panic!("整窗同输出纯读仍须熔断: {details:?}"));
+    let reads_before = details[..break_at]
+        .iter()
+        .filter(|d| d.contains("调用工具 fs_read"))
+        .count();
+    // 广播允许丢帧:允许少 1 帧;旧口径为 4,区间仍具判别力。
+    assert!(
+        (7..=8).contains(&reads_before),
+        "整窗阈值应在第 8 次才熔断(旧口径为第 4 次),实际 {reads_before} 次: {details:?}"
+    );
+    let break_evt = &details[break_at];
+    assert!(
+        break_evt.contains("出现 8 次"),
+        "熔断事件应说明「最近 8 次中出现 8 次」: {break_evt}"
+    );
+
+    // 复位
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({
+            "loop_guard_semantic_window": 16,
+            "loop_guard_semantic_min_calls": 12,
+            "loop_guard_semantic_max_distinct": 2,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let _ = std::fs::remove_dir_all(&ws);
+}
