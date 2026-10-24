@@ -73,10 +73,12 @@ async fn team_budget_stops_remaining_mains_with_partial_delivery() {
     .await;
     assert_eq!(status, StatusCode::OK, "设置应 200: {json}");
 
-    // 主 1:单轮 sleep 900ms,两轮即越过 1s 团队预算;主 2 依赖主 1。
+    // 主 1:单轮 sleep 1500ms,第一轮即越过 1s 团队预算;主 2 依赖主 1。
+    // SKY-7 起主 1 只拿到池的一半(500ms),但 sleep 在轮末才判预算,
+    // 所以 1500ms 的睡眠同时越过份额与全局截止期——保留本用例「全局用尽」语义。
     let title = concat!(
         r#"[[reply_if:团队规划器|{"mains":["#,
-        r#"{"name":"慢主","after":[],"goals":[{"name":"慢活","goal":"\u005b\u005btool_loop_text:sleep|31 {\"ms\":900}\u005d\u005d 慢活","files":["slow.txt"]}]},"#,
+        r#"{"name":"慢主","after":[],"goals":[{"name":"慢活","goal":"\u005b\u005btool_loop_text:sleep|31 {\"ms\":1500}\u005d\u005d 慢活","files":["slow.txt"]}]},"#,
         r#"{"name":"总装主","after":[1],"goals":[{"name":"总装","goal":"\u005b\u005breply:总装完成\u005d\u005d 总装","files":["index.html"]}]}"#,
         r#" ]}]]"#,
         r#"[[reply_if:团队审计员|{"通过":true,"打回":[],"结论":"预算用例"}]]"#,
