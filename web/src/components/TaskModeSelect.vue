@@ -3,16 +3,24 @@
 // 独立成组件:Sidebar 引用的 /logo.png 静态资源在 SSR 冒烟测试(vitest)下无法解析,
 // 抽出后选择器可单独 SSR 测试;选择持久化在 task store(taskRunMode,localStorage)。
 // 选项文案统一取自 api/labels.ts(唯一源,穷尽校验),避免与 TaskBoard 两处手写漂移。
+import { computed } from 'vue';
 import { storeToRefs } from 'pinia';
 import { useAppStore } from '../store';
+import type { TaskRunMode } from '../api';
 import { MODE_OPTION_LABELS, MODE_ORDER } from '../api/labels';
 
 const store = useAppStore();
 const { taskRunMode } = storeToRefs(store);
+
+/** 本地可写代理:v-model 保留 SSR selected 语义,写入仍走 store action。 */
+const modeModel = computed({
+  get: () => taskRunMode.value,
+  set: (mode: TaskRunMode) => store.setTaskRunMode(mode),
+});
 </script>
 
 <template>
-  <select v-model="taskRunMode" class="sv-select" title="任务执行模式">
+  <select v-model="modeModel" class="sv-select" title="任务执行模式">
     <option v-for="m in MODE_ORDER" :key="m" :value="m">{{ MODE_OPTION_LABELS[m] }}</option>
   </select>
 </template>

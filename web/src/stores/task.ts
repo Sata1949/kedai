@@ -264,6 +264,13 @@ export const useTaskStore = defineStore('app.task', () => {
    */
   const lastAgentStatus = ref<string | null>(null);
 
+  /**
+   * 任务详情加载失败的可见错误(仅 selectTask 切换/恢复路径写入)。
+   * 失败时 UI 会回退到上一个任务;若只 console.error,用户会以为点击没生效。
+   * 错误条由 TaskBoard 渲染,下一次成功选择或手动关闭时清空。
+   */
+  const taskLoadError = ref<string | null>(null);
+
   /** 记录一条 agent 状态(仅当前任务;detail 缺失视为旧服务端事件,忽略) */
   function setAgentStatus(ev: api.TaskEvent): void {
     if (ev.task_id !== currentTaskId.value) return;
@@ -360,6 +367,23 @@ export const useTaskStore = defineStore('app.task', () => {
   }
   watch(taskConnectionId, persistTaskConnectionId);
 
+  // ===== 新建任务参数写入(组件侧只读 + action 写入,避免 v-model 直改 store) =====
+  function setTaskRunMode(mode: api.TaskRunMode): void {
+    taskRunMode.value = mode;
+  }
+  function setTaskFlowId(id: string): void {
+    taskFlowId.value = id;
+  }
+  function setTaskFlowMode(mode: TaskFlowMode): void {
+    taskFlowMode.value = mode;
+  }
+  function setTaskFlowIds(ids: string[]): void {
+    taskFlowIds.value = ids;
+  }
+  function setTaskConnectionId(id: string): void {
+    taskConnectionId.value = id;
+  }
+
   // ===== 加载(in-flight 合并防事件风暴) =====
 
   /**
@@ -435,38 +459,55 @@ export const useTaskStore = defineStore('app.task', () => {
 
   /** 任务详情刷新:按 task_id 的 in-flight 合并——同 id 请求进行中时,事件驱动的
    *  重复刷新只记录一次「待重放」意图,请求结束后补发一次,不叠加并发请求;
-   *  响应与现状签名一致时跳过赋值(数据未变,引用保持,面板零重渲染) */
-  const detailInflight = new Map<string, boolean>();
-  async function loadTaskDetail(id: string): Promise<void> {
-    if (detailInflight.has(id)) {
-      detailInflight.set(id, true);
-      return;
+   *  响应与现状签名一致时跳过赋值(数据未变,引用保持,面板零重渲染)。
+   *  合并调用方**等待同一个 Promise**并拿到真实结果:旧实现立即 return true,
+   *  会让 selectTask 误判成功,在途请求随后失败时不再回退(2026-10-24 C-2-0)。 */
+  const detailInflight = new Map<string, Promise<boolean>>();
+  const detailReloadPending = new Set<string>();
+  /** 每个 id 最近一次详情加载失败的消息(selectTask 回退时取用后删除)。 */
+  const detailErrors = new Map<string, string>();
+  function loadTaskDetail(id: string): Promise<boolean> {
+    const existing = detailInflight.get(id);
+    if (existing) {
+      detailReloadPending.add(id);
+      return existing;
     }
-    detailInflight.set(id, false);
-    try {
-      do {
-        detailInflight.set(id, false);
-        try {
-          const detail = await api.getTask(id);
-          // 迟到守卫:响应到达时已切到别的任务/已清选择则丢弃。此前只比对「已展示详情」
-          // 的 id(currentTask.value?.task.id),旧任务 A 的迟到响应到达时该条件恒真,
-          // 会把 A 强制覆盖到已选中的 B 上。
-          if (currentTaskId.value !== id) return;
-          const sig = contentSignature(detail);
-          // id 检查兜底:切任务后旧签名残留时,即便内容碰巧相同也必须替换(现状是别的任务/null)
-          if (sig !== detailSignature || currentTask.value?.task.id !== id) {
-            detailSignature = sig;
-            currentTask.value = detail;
-            currentTaskUsage.value = detail.usage_total ?? null;
+    let ok = false;
+    const promise = (async () => {
+      try {
+        do {
+          detailReloadPending.delete(id);
+          try {
+            const detail = await api.getTask(id);
+            // 迟到守卫:响应到达时已切到别的任务/已清选择则丢弃。此前只比对「已展示详情」
+            // 的 id(currentTask.value?.task.id),旧任务 A 的迟到响应到达时该条件恒真,
+            // 会把 A 强制覆盖到已选中的 B 上。
+            if (currentTaskId.value !== id) return true;
+            const sig = contentSignature(detail);
+            // id 检查兜底:切任务后旧签名残留时,即便内容碰巧相同也必须替换(现状是别的任务/null)
+            if (sig !== detailSignature || currentTask.value?.task.id !== id) {
+              detailSignature = sig;
+              currentTask.value = detail;
+              currentTaskUsage.value = detail.usage_total ?? null;
+            }
+            ok = true;
+            detailErrors.delete(id);
+          } catch (e) {
+            console.error('加载任务详情失败', e);
+            detailErrors.set(id, e instanceof Error ? e.message : String(e));
+            break;
           }
-        } catch (e) {
-          console.error('加载任务详情失败', e);
-          break;
-        }
-      } while (detailInflight.get(id));
-    } finally {
-      detailInflight.delete(id);
-    }
+        } while (detailReloadPending.delete(id));
+      } finally {
+        detailInflight.delete(id);
+        // 收尾窗口内又收到刷新意图(while 判定之后、finally 之前):补发一次,
+        // 避免事件驱动的最后一次刷新被丢掉。
+        if (detailReloadPending.delete(id)) void loadTaskDetail(id);
+      }
+      return ok;
+    })();
+    detailInflight.set(id, promise);
+    return promise;
   }
 
   /** 调用追踪记录刷新:失败静默(保持旧值),「调用情况」tab 激活时由 llm_call 事件驱动;
@@ -515,9 +556,42 @@ export const useTaskStore = defineStore('app.task', () => {
     changesSignature = contentSignature([]);
   }
 
+  /** 统一的「清空当前任务」出口:删除事件、删除动作、手动清选择三处共用。
+   *  `persist=false` 仅供确实不需要动持久化选择的内部场景;默认三处都清持久化。 */
+  function resetCurrentTaskState(options: { persist?: boolean; clearAgentStatus?: boolean } = {}): void {
+    const { persist = true, clearAgentStatus = true } = options;
+    currentTaskId.value = null;
+    currentTask.value = null;
+    currentTaskUsage.value = null;
+    detailSignature = '';
+    taskCalls.value = [];
+    callsSignature = contentSignature([]);
+    clearTaskChanges();
+    clearAllLiveDeltas();
+    if (clearAgentStatus) lastAgentStatus.value = null;
+    taskLoadError.value = null;
+    if (persist) persistCurrentTaskId(null);
+  }
+
+  /** 关闭任务详情加载错误条(下一次成功选择也会自动清空)。 */
+  function dismissTaskLoadError(): void {
+    taskLoadError.value = null;
+  }
+
   async function selectTask(id: string): Promise<void> {
+    const previousId = currentTaskId.value;
+    const previousTask = currentTask.value;
+    const previousUsage = currentTaskUsage.value;
+    const previousSignature = detailSignature;
+    const previousAgentStatus = lastAgentStatus.value;
+    taskLoadError.value = null;
     currentTaskId.value = id;
     persistCurrentTaskId(id);
+    // 先清详情再加载:加载失败时绝不能把旧任务详情挂在新 id 下(否则批准/删除会发往新 id,
+    // 页面却显示旧任务)。失败分支恢复到切换前的 id/详情。
+    currentTask.value = null;
+    currentTaskUsage.value = null;
+    detailSignature = '';
     // 切换任务时清空旧任务的调用记录(「调用情况」tab 由 watch/事件重新加载)
     // 与流式缓冲(批次 R4:旧任务的 delta 不带入新任务);
     // 同步重置内容签名,防止新任务首屏记录与旧任务签名碰巧相同而被去重跳过
@@ -527,21 +601,33 @@ export const useTaskStore = defineStore('app.task', () => {
     clearAllLiveDeltas();
     // 最近 agent 状态同理:agent_status 不落库,新任务从空开始(等下一个事件)
     lastAgentStatus.value = null;
-    await loadTaskDetail(id);
+    const ok = await loadTaskDetail(id);
+    if (!ok) {
+      const reason = detailErrors.get(id) ?? '未知错误';
+      detailErrors.delete(id);
+      if (currentTaskId.value === id) {
+        taskLoadError.value = `加载任务详情失败:${reason}`;
+        currentTaskId.value = previousId;
+        currentTask.value = previousTask;
+        currentTaskUsage.value = previousUsage;
+        detailSignature = previousSignature;
+        lastAgentStatus.value = previousAgentStatus;
+        persistCurrentTaskId(previousId);
+        // 辅助面板随切换已清空;回到旧任务时补拉,避免用户看到空白调用记录/变更清单。
+        if (previousId) {
+          void loadTaskCalls(previousId);
+          void loadTaskChanges(previousId);
+        }
+        return;
+      }
+    }
     // 打开任务详情即拉一次变更清单(本端点无事件驱动,另一个时机是「任务进终态」)
-    void loadTaskChanges(id);
+    if (ok) void loadTaskChanges(id);
   }
 
   /** 清空当前任务选择(任务被删除/列表已无该 id 时;同步清持久化) */
   function clearSelectedTask(): void {
-    currentTaskId.value = null;
-    currentTask.value = null;
-    currentTaskUsage.value = null;
-    taskCalls.value = [];
-    clearTaskChanges();
-    clearAllLiveDeltas();
-    lastAgentStatus.value = null;
-    persistCurrentTaskId(null);
+    resetCurrentTaskState();
   }
 
   /**
@@ -735,14 +821,8 @@ export const useTaskStore = defineStore('app.task', () => {
         lastSeqByTask.delete(ev.task_id);
         pullAfter.delete(ev.task_id);
         if (currentTaskId.value === ev.task_id) {
-          currentTaskId.value = null;
-          currentTask.value = null;
-          currentTaskUsage.value = null;
-          taskCalls.value = [];
-          callsSignature = contentSignature([]);
-          clearTaskChanges();
-          clearAllLiveDeltas(); // 批次 R4:任务删除,其流式缓冲一并失效
-          lastAgentStatus.value = null;
+          // 删除事件也必须清持久化选择与 lastAgentStatus;此前三处清空各漏一项。
+          resetCurrentTaskState();
         }
         break;
       case 'file_changed':
@@ -968,14 +1048,8 @@ export const useTaskStore = defineStore('app.task', () => {
     tasks.value = tasks.value.filter((t) => t.id !== id);
     listSignature = contentSignature(tasks.value); // 同步签名(同上)
     if (currentTaskId.value === id) {
-      currentTaskId.value = null;
-      currentTask.value = null;
-      currentTaskUsage.value = null;
-      taskCalls.value = [];
-      callsSignature = contentSignature([]);
-      clearTaskChanges();
-      clearAllLiveDeltas(); // 批次 R4:任务删除,其流式缓冲一并失效
-      persistCurrentTaskId(null); // 实跑问题 4:删除当前任务时同步清持久化选择
+      // 删除当前任务:清选择/详情/辅助面板/持久化/lastAgentStatus,统一走单一出口。
+      resetCurrentTaskState();
     }
   }
 
@@ -997,6 +1071,12 @@ export const useTaskStore = defineStore('app.task', () => {
     taskChangesUndected,
     liveBuffers,
     lastAgentStatus,
+    taskLoadError,
+    setTaskRunMode,
+    setTaskFlowId,
+    setTaskFlowMode,
+    setTaskFlowIds,
+    setTaskConnectionId,
     setAppMode,
     setDefaultAppMode,
     loadTasks,
@@ -1006,6 +1086,7 @@ export const useTaskStore = defineStore('app.task', () => {
     createTask,
     selectTask,
     clearSelectedTask,
+    dismissTaskLoadError,
     restoreSelectedTask,
     loadTaskDetail,
     runTask,

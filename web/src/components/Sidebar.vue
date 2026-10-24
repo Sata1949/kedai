@@ -25,6 +25,11 @@ const {
 const fileInput = ref<HTMLInputElement | null>(null);
 const uploadError = ref('');
 
+/** 角色搜索框只读 store + action 写入;纯 UI 过滤草稿,无持久化。 */
+function onSearchInput(ev: Event): void {
+  store.setSearchQuery((ev.target as HTMLInputElement).value);
+}
+
 // 角色卡导入入口(IMPHUB 步骤 C):按钮在下方 sv-side-foot(「综合设置」上侧),
 // 直接触发本组件隐藏 file input;原先「SettingsHub 快速操作 → characterUploadRequested
 // 计数器 → watch」的跨组件通道已删除(入口在侧栏,不需要间接通道)。
@@ -499,10 +504,11 @@ async function removeTask(task: TaskRecord): Promise<void> {
       <Transition name="sv-fade" mode="out-in">
         <div v-if="appMode === 'roleplay'" key="roleplay" class="min-h-0 flex-1 flex flex-col">
           <input
-            v-model="store.searchQuery"
+            :value="store.searchQuery"
             type="text"
             placeholder="搜索角色..."
             class="sv-search"
+            @input="onSearchInput"
           />
 
           <div v-if="characters.length === 0" class="sv-empty compact">

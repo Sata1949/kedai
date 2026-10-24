@@ -18,6 +18,7 @@ import { computed, onMounted, watch } from 'vue';
 import { storeToRefs } from 'pinia';
 import { useAppStore } from '../store';
 import { FLOW_MODE_OPTION_LABELS, FLOW_MODE_ORDER } from '../api/labels';
+import type { TaskFlowMode } from '../api/labels';
 import {
   flowCandidates,
   staleMembers,
@@ -68,8 +69,18 @@ function onToggle(id: string, ev: Event): void {
   const checked = (ev.target as HTMLInputElement).checked;
   const list = taskFlowIds.value.filter((x) => x !== id);
   if (checked) list.push(id);
-  taskFlowIds.value = list;
+  store.setTaskFlowIds(list);
 }
+
+/** 本地可写代理:v-model 保留 SSR selected 语义,写入仍走 store action。 */
+const flowModeModel = computed({
+  get: () => taskFlowMode.value,
+  set: (mode: TaskFlowMode) => store.setTaskFlowMode(mode),
+});
+const flowIdModel = computed({
+  get: () => taskFlowId.value,
+  set: (id: string) => store.setTaskFlowId(id),
+});
 
 /** 名单即时警示(后端为准;这里只把「一定会 400」的两种情形提前说清楚) */
 const listWarning = computed(() => {
@@ -94,7 +105,7 @@ function prefillIfEmpty(): void {
   const ids = flows.value
     .filter((f) => f.enabled && f.id && f.id !== rootId.value)
     .map((f) => f.id as string);
-  if (ids.length) taskFlowIds.value = ids;
+  if (ids.length) store.setTaskFlowIds(ids);
 }
 
 /**
@@ -124,7 +135,7 @@ watch([() => flows.value.length, taskFlowMode], prefillIfEmpty);
 <template>
   <div v-if="visible" class="flow-select-group">
     <select
-      v-model="taskFlowMode"
+      v-model="flowModeModel"
       class="sv-select"
       title="流程模式:强制 = 只跑下面这一份流程;对比 = 根流程照常执行,名单内流程额外作为工具释放给节点,由模型自主调用"
     >
@@ -133,7 +144,7 @@ watch([() => flows.value.length, taskFlowMode], prefillIfEmpty);
       </option>
     </select>
     <select
-      v-model="taskFlowId"
+      v-model="flowIdModel"
       class="sv-select"
       title="绑定要执行的自定义流程;绑定后该任务即冻结在这份编排上(改流程/换当前流程都不影响它)"
     >

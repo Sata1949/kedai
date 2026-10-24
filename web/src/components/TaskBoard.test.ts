@@ -297,6 +297,30 @@ describe('TaskBoard 组件(M5 补测)', () => {
   });
 });
 
+// C-2-0:详情加载失败时 selectTask 会回退到上一个任务;若只 console.error,
+// 用户只看到「点了没反应」。错误条必须可见且可关闭。
+describe('TaskBoard 详情加载失败错误条(C-2-0)', () => {
+  beforeEach(() => {
+    memStorage.clear();
+    setActivePinia(createPinia());
+  });
+
+  it('taskLoadError 渲染为可见错误条,关闭按钮清空', async () => {
+    const store = useAppStore();
+    store.taskLoadError = '加载任务详情失败:网络错误';
+    const wrapper = mount(TaskBoard);
+
+    const bar = wrapper.find('.sv-task-error');
+    expect(bar.exists()).toBe(true);
+    expect(bar.text()).toContain('加载任务详情失败:网络错误');
+
+    await bar.find('button').trigger('click');
+    expect(store.taskLoadError).toBeNull();
+    expect(wrapper.find('.sv-task-error').exists()).toBe(false);
+    wrapper.unmount();
+  });
+});
+
 // 多缓冲的标签中文化(遗留.md IFW-7③):liveBuffers 的 key 是内部键
 // (`${phase}:${step_index ?? ''}`),多缓冲兜底(team 并行 / 静态子图)时曾把它直接插值给
 // 用户看(如 `【subflow.1:0】`)。现在统一走 utils/phaseLabel 的中文标签。
