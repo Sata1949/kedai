@@ -870,6 +870,8 @@ pub(crate) async fn run_tool_loop(
         .unwrap_or_default();
     let no_progress_enabled = no_progress_limit.is_some() && !declared_files.is_empty();
     let mut no_progress_rounds = 0usize;
+    // SKY-7:硬收尾前的中途提醒只发一次;有进展后重置,允许新一轮空转再提醒。
+    let mut no_progress_nudged = false;
     // 截断自愈留痕(问题①):各轮触发的自愈记录经调用方传入的 vec 透出;
     // TMR3-2 起 Err 路径不再丢弃——调用方可在失败收尾时补落调用行与 usage。
     loop {
@@ -1478,8 +1480,38 @@ pub(crate) async fn run_tool_loop(
         if no_progress_enabled {
             if round_progress {
                 no_progress_rounds = 0;
+                // 有进展 = 本轮空转段结束;下一次连续无写可重新获得一次提醒。
+                no_progress_nudged = false;
             } else {
                 no_progress_rounds += 1;
+                // SKY-7:硬收尾(limit 轮)之前先在第 limit/2 轮提醒一次。
+                // 只读守卫会被 bash 等写类工具清零,本提醒只看声明文件是否落盘,
+                // 覆盖「用 shell 探索/自检但不动交付物」的空转形态。
+                let limit = no_progress_limit.unwrap_or(usize::MAX);
+                let nudge_at = (limit / 2).max(1);
+                if !no_progress_nudged && no_progress_rounds >= nudge_at {
+                    no_progress_nudged = true;
+                    llm_messages.push(LlmMessage::plain(
+                        "user",
+                        crate::services::task_core::prompt_consts::NO_PROGRESS_FIRST_NUDGE,
+                    ));
+                    send_event(
+                        step_evt(
+                            "无文件进展提醒",
+                            Some(format!(
+                                "已连续 {} 轮没有成功写入本主负责的文件:已提醒先落盘;再连续 {} 轮仍无写入将收尾",
+                                no_progress_rounds,
+                                limit.saturating_sub(no_progress_rounds)
+                            )),
+                            None,
+                            None,
+                        ),
+                        tx,
+                        abort,
+                        flag,
+                    )
+                    .await?;
+                }
             }
         }
         // ===== token 预算闸门(HB-1,2026-09-18):按**成本**而非轮数收口 =====

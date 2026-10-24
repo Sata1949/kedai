@@ -96,9 +96,11 @@ async fn no_progress_guard_stops_temp_file_loop_at_16_rounds() {
     assert_eq!(status, StatusCode::OK, "关闭语义熔断应 200: {json}");
 
     let ws = temp_workspace("no-progress");
+    // SKY-7:中途提醒是 user 消息;普通 [[tool_loop_text:]] 只认末条 user,
+    // 提醒后会失活。这里用跨提醒轮持久的 any 变体,验证仍跑到第 16 轮硬收尾。
     let title = concat!(
         r#"[[reply_if:团队规划器|{"mains":["#,
-        r#"{"name":"主","goals":[{"name":"写临时文件","goal":"\u005b\u005btool_loop_text:fs_write|30 {\"path\":\"temp.js\",\"content\":\"x\"}\u005d\u005d 只写临时文件","files":["out.txt"]}]}"#,
+        r#"{"name":"主","goals":[{"name":"写临时文件","goal":"\u005b\u005btool_loop_any_text:fs_write|30 {\"path\":\"temp.js\",\"content\":\"x\"}\u005d\u005d 只写临时文件","files":["out.txt"]}]}"#,
         r#" ]}]]"#,
         r#"[[reply_if:团队审计员|{"通过":true,"打回":[],"结论":"通过"}]]"#,
         r#"[[reply_if:任务汇总者|团队最终成果]]"#,
@@ -142,6 +144,14 @@ async fn no_progress_guard_stops_temp_file_loop_at_16_rounds() {
             .contains("无文件进展收尾")
     });
     assert!(stopped, "应透出无文件进展收尾事件: {events}");
+    // SKY-7:硬收尾前必须在第 8 轮透出一次中途提醒(覆盖 bash 探索空转)。
+    let nudged = rows.iter().any(|e| {
+        e["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("无文件进展提醒")
+    });
+    assert!(nudged, "应在第 8 轮透出无文件进展提醒事件: {events}");
     let fs_write_calls = rows
         .iter()
         .filter(|e| {
