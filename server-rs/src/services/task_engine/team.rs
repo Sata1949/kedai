@@ -11,7 +11,7 @@
 // 手动拓扑(用户指定主 agent 数量/人设/分工)预留,待前端入口批次(docs/功能.md)。
 use super::context::TaskRunContext;
 use super::executor::{usage_as_output, ModeExecutor};
-use super::solo::{run_agent_loop, AgentLoopCall};
+use super::solo::{run_agent_loop, AgentLoopCall, AgentLoopOutput};
 use crate::agents::engine::AgentEngine;
 use crate::models::ownership::{normalize_workspace_rel, WriteOwnership};
 use crate::models::types::{
@@ -31,10 +31,7 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 
 /// run_mains_parallel 并行 JoinSet 的单主产出:(主序号, [(子目标序号, 子目标名, 生成结果)])
-type MainJoinOutput = (
-    usize,
-    Vec<(usize, String, Result<(String, TokenUsage), String>)>,
-);
+type MainJoinOutput = (usize, Vec<(usize, String, Result<AgentLoopOutput, String>)>);
 
 /// 主 agent 分工数上限(规划器约定 2~4;超出部分归并进末位主 agent)
 const TEAM_MAX_MAINS: usize = 4;
@@ -124,32 +121,6 @@ fn declared_files_of(main: &TeamMain) -> Vec<String> {
     out
 }
 
-/// 文本类交付文件里含 `@@` 的行数:未替换模板槽位(如 `/*@@MAIN@@*/`)的直接证据。
-///
-/// SKY-4/SKY-5:空岛实跑的总装停在 7 处 `/*@@...@@*/` 占位符,审计却没有可引用的
-/// 机器事实。这里只做**可见性**——把行数写进清单供审计判断,不在交付门槛里拦截
-/// (模板类交付可能合法保留占位符,误伤面留给审计结合目标判断)。
-/// 仅扫常见文本扩展名且 ≤512KB;读失败/非文本返回 None。
-fn placeholder_line_count(path: &std::path::Path) -> Option<usize> {
-    const MAX_BYTES: u64 = 512 * 1024;
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if !matches!(
-        ext.as_str(),
-        "html" | "htm" | "js" | "mjs" | "cjs" | "css" | "json" | "svg" | "md" | "txt" | "xml"
-    ) {
-        return None;
-    }
-    if std::fs::metadata(path).ok()?.len() > MAX_BYTES {
-        return None;
-    }
-    let text = std::fs::read_to_string(path).ok()?;
-    Some(text.lines().filter(|line| line.contains("@@")).count())
-}
-
 /// 审计/终审/汇总输入里的「工作区声明文件实况」(SKY-3,2026-10-23)。
 ///
 /// 为什么需要:空岛 team 实跑中,审计员用 `fs_glob("*.js")` 核对文件,只看到 9 个
@@ -177,7 +148,9 @@ fn workspace_manifest(workspace: &std::path::Path, mains: &[TeamMain]) -> String
             let state = match std::fs::metadata(&abs) {
                 Ok(m) if m.is_file() => {
                     let mut state = format!("存在({}B)", m.len());
-                    if let Some(n) = placeholder_line_count(&abs).filter(|n| *n > 0) {
+                    if let Some(n) =
+                        super::delivery::placeholder_line_count(&abs).filter(|n| *n > 0)
+                    {
                         state.push_str(&format!(",含 {n} 行 @@ 未替换槽位"));
                     }
                     state
@@ -1088,10 +1061,7 @@ impl TeamExecutor {
         upstream_seed: Vec<(String, String)>,
         deadline_reason: &'static str,
         ownership: Arc<WriteOwnership>,
-    ) -> (
-        usize,
-        Vec<(usize, String, Result<(String, TokenUsage), String>)>,
-    ) {
+    ) -> (usize, Vec<(usize, String, Result<AgentLoopOutput, String>)>) {
         let n = main_index + 1;
         let session_id = format!("task:{}:main:{}", ctx.task_id, n);
         // TMR-4:该主自己的负责文件(并集)与带 owner 的 scope。声明只用于所有权
@@ -1221,17 +1191,17 @@ impl TeamExecutor {
             // TMR3-L7:成功子目标的 usage 在**完成即入账**,不等 run_main 返回后由
             // 并行收集方统一记。这样主 agent 若在后续子目标 panic(JoinError),
             // 已完成部分的 token 不会随任务一起消失;汇入 `total` 仍由收集方按返回值做。
-            if let Ok((_, usage)) = &result {
+            if let Ok(out) = &result {
                 self.svc.record_usage(
                     &ctx.task_id,
                     "agent",
                     Some(step_idxs[k]),
-                    &usage_as_output(usage),
+                    &usage_as_output(&out.usage),
                 );
             }
             // 成功产出进 prior 供后续子目标衔接(失败不注入,避免把错误文本当参考)
-            if let Ok((text, _)) = &result {
-                prior.push((g.name.clone(), text.clone()));
+            if let Ok(out) = &result {
+                prior.push((g.name.clone(), out.text.clone()));
             }
             results.push((step_idxs[k], g.name.clone(), result));
         }
@@ -1641,24 +1611,34 @@ impl TeamExecutor {
         // 成功 → 终审通过」仍判 partial 且 error 为空、用户无从解释(实跑问题 2)。
         let failed_steps = error_step_labels(&plan);
         let failed = has_error_steps(&plan);
+        // SKY-6 第 2 项:守卫截断(partial)步骤即使审计通过也不得让任务记 done——
+        // 步骤没跑完就是没跑完。补做成功的步骤已被覆盖回 done,不会拖累终态。
+        let truncated_steps = partial_step_labels(&plan);
         let text = format!(
             "{}\n\n## 审计结论\n{}",
             summary_out.text.trim(),
             final_conclusion
         );
-        // partial 原因:优先说明失败子目标(具体可定位),否则归因于审计/终审未通过;
+        // partial 原因:失败子目标 > 审计/终审未通过;守卫截断原因**独立追加**
+        // (不是二选一——两者可能同时存在,用户需要知道哪些子目标没跑完)。
         // Done 时为 None(complete_mode_run 写空串清掉上一轮残留 error)
-        let error = if failed {
-            Some(format!(
+        let mut reasons: Vec<String> = Vec::new();
+        if failed {
+            reasons.push(format!(
                 "以下子目标执行失败,成果不完整:{}",
                 failed_steps.join("、")
-            ))
+            ));
         } else if !final_pass {
-            Some("审计/终审未通过,未达交付标准(详见「审计结论」)".to_string())
-        } else {
-            None
-        };
-        // 有可解释 error(失败子目标或审计/终审未通过)即 partial,否则 done
+            reasons.push("审计/终审未通过,未达交付标准(详见「审计结论」)".to_string());
+        }
+        if !truncated_steps.is_empty() {
+            reasons.push(format!(
+                "以下子目标被守卫截断,成果可能不完整:{};可追加指令继续完成",
+                truncated_steps.join("、")
+            ));
+        }
+        let error = (!reasons.is_empty()).then(|| reasons.join("\n"));
+        // 有可解释 error(失败子目标 / 审计未通过 / 守卫截断)即 partial,否则 done
         let status = if error.is_some() {
             TaskStatus::Partial
         } else {
@@ -1912,15 +1892,26 @@ impl TeamExecutor {
                 // 逐子目标回写各自步骤(未在本轮 results 中的子目标保持原状态/产出)
                 for (si, _goal_name, result) in sub_results {
                     match result {
-                        Ok((text, usage)) => {
+                        Ok(out) => {
+                            let usage = out.usage;
                             total.prompt_tokens += usage.prompt_tokens;
                             total.completion_tokens += usage.completion_tokens;
                             total.total_tokens += usage.total_tokens;
                             // usage 行已由 run_main 在子目标完成时落库(TMR3-L7);
                             // 这里只汇入返回值,不再重复 record_usage(否则会双计)。
-                            plan[si].status = TaskStepStatus::Done;
-                            // 替换式回写:补做产出覆盖旧版本,杜绝新旧并存(实跑问题 2)
-                            plan[si].result = text;
+                            // SKY-6 第 2 项:守卫截断返回 Ok(带已有正文),但步骤没跑完
+                            // ——记 partial 并把原因写进步骤结果,审计/前端都能看到。
+                            if let Some(reason) = &out.guard_stopped {
+                                plan[si].status = TaskStepStatus::Partial;
+                                plan[si].result = format!(
+                                    "{}\n\n[守卫截断] {reason};该子目标可能未完成。",
+                                    out.text.trim_end()
+                                );
+                            } else {
+                                plan[si].status = TaskStepStatus::Done;
+                                // 替换式回写:补做产出覆盖旧版本,杜绝新旧并存(实跑问题 2)
+                                plan[si].result = out.text;
+                            }
                         }
                         Err(e) => {
                             if *ctx.cancel.borrow() {
@@ -1960,8 +1951,9 @@ fn before_kickback_prior(
     let mut seed = Vec::new();
     for (k, &si) in range.iter().enumerate() {
         let step = &plan[si];
-        // 只种入有产出的终态子目标(失败/未跑的没有可衔接内容)
-        if step.status != TaskStepStatus::Done {
+        // 只种入有产出的终态子目标(失败/未跑的没有可衔接内容);守卫截断的步骤
+        // 也有产出,补做时要让模型看到旧版本内容。
+        if !matches!(step.status, TaskStepStatus::Done | TaskStepStatus::Partial) {
             continue;
         }
         let name = strip_main_prefix(&step.name).to_string();
@@ -1998,7 +1990,9 @@ fn rebuild_outputs(
                 let step = &plan[si];
                 let name = strip_main_prefix(&step.name);
                 match step.status {
-                    TaskStepStatus::Done => {
+                    // 守卫截断的步骤带已有产出(和 done 一样进审计/汇总),截断标记
+                    // 已由执行器写进 result(SKY-6 第 2 项)。
+                    TaskStepStatus::Done | TaskStepStatus::Partial => {
                         any_done = true;
                         sections.push(format!("子目标 {}「{name}」:\n{}", k + 1, step.result));
                     }
@@ -2069,19 +2063,31 @@ fn has_error_steps(plan: &[TaskStep]) -> bool {
 fn error_step_labels(plan: &[TaskStep]) -> Vec<String> {
     plan.iter()
         .filter(|s| s.status == TaskStepStatus::Error)
-        .map(|s| {
-            // plan 步骤名前缀「【主Agent-N】」由执行器构造(前端分工卡分组契约),可靠
-            match s
-                .name
-                .strip_prefix("【主Agent-")
-                .and_then(|r| r.split('】').next())
-                .and_then(|n| n.parse::<usize>().ok())
-            {
-                Some(n) => format!("主 Agent-{n}「{}」", strip_main_prefix(&s.name)),
-                None => strip_main_prefix(&s.name).to_string(),
-            }
-        })
+        .map(step_label)
         .collect()
+}
+
+/// 收集被守卫截断(partial)的子目标名,用于 partial 终态的原因文本。
+/// 空 = 没有步骤被截断。
+fn partial_step_labels(plan: &[TaskStep]) -> Vec<String> {
+    plan.iter()
+        .filter(|s| s.status == TaskStepStatus::Partial)
+        .map(step_label)
+        .collect()
+}
+
+/// 步骤名的用户可见定位(带「主 Agent-N」前缀时拆出来重排)。
+fn step_label(s: &TaskStep) -> String {
+    // plan 步骤名前缀「【主Agent-N】」由执行器构造(前端分工卡分组契约),可靠
+    match s
+        .name
+        .strip_prefix("【主Agent-")
+        .and_then(|r| r.split('】').next())
+        .and_then(|n| n.parse::<usize>().ok())
+    {
+        Some(n) => format!("主 Agent-{n}「{}」", strip_main_prefix(&s.name)),
+        None => strip_main_prefix(&s.name).to_string(),
+    }
 }
 
 /// 审计/汇总的输入文本:总体目标 + 工作区声明文件实况 + 各主产出
@@ -2818,6 +2824,37 @@ mod tests {
         assert!(outputs[1].is_none(), "全败主产出应为 None");
         assert_eq!(strip_main_prefix("【主Agent-3】写作"), "写作");
         assert_eq!(strip_main_prefix("无前缀"), "无前缀");
+    }
+
+    /// SKY-6 第 2 项:守卫截断的 partial 步骤要进各主产出(审计可见),
+    /// 并出现在 partial 终态原因里;但它不是 error,不得拖累「失败步骤」判定。
+    #[test]
+    fn partial_steps_enter_outputs_and_labels() {
+        let mains = vec![TeamMain {
+            name: "甲".into(),
+            goals: vec![],
+            after: Vec::new(),
+        }];
+        let step_ranges = vec![vec![0]];
+        let plan = vec![TaskStep {
+            name: "【主Agent-1】读分片".into(),
+            goal: String::new(),
+            status: TaskStepStatus::Partial,
+            result: "已有正文\n\n[守卫截断] 连续只读空转熔断".into(),
+            node_id: None,
+            files: Vec::new(),
+        }];
+        let outputs = rebuild_outputs(&mains, &step_ranges, &plan);
+        let out = outputs[0]
+            .as_deref()
+            .expect("partial 步骤有产出,不应为 None");
+        assert!(out.contains("[守卫截断]"), "审计输入应看到截断标记: {out}");
+        assert!(!has_error_steps(&plan), "partial 不是 error");
+        assert_eq!(
+            partial_step_labels(&plan),
+            vec!["主 Agent-1「读分片」".to_string()],
+            "原因文本应带主序号与子目标名"
+        );
     }
 
     /// JoinError(panic)兜底:无法从 JoinError 反查是哪一主 panic,保守地把本轮 batch 中

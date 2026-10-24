@@ -95,7 +95,12 @@ impl ModeExecutor for FollowupExecutor {
                 run_agent_loop(svc.clone(), self.engine.clone(), call, cancel.clone()).await;
 
             match result {
-                Ok((text, usage)) => {
+                Ok(out) => {
+                    let super::solo::AgentLoopOutput {
+                        text,
+                        usage,
+                        guard_stopped,
+                    } = out;
                     svc.record_usage(task_id, "agent", None, &usage_as_output(&usage));
                     // 取消优先于写结果:stop 后产出不再落库(与 legacy 同口径)
                     if *cancel.borrow() {
@@ -108,12 +113,19 @@ impl ModeExecutor for FollowupExecutor {
                     } else {
                         brief
                     };
-                    let section = if self.params.mode == TaskFollowupMode::Replace {
+                    let mut section = if self.params.mode == TaskFollowupMode::Replace {
                         // replace:整体替换,段标「修订 N」,旧 result 不再保留
                         format!("**修订 {}:**{brief}\n\n{text}", self.params.followup_no)
                     } else {
                         format!("**追加 {}:**{brief}\n\n{text}", self.params.followup_no)
                     };
+                    // SKY-6 第 2 项:追加指令被守卫截断时,在可见结果里留痕;
+                    // 终态同时降 partial(prev_partial 也保持 partial,既有语义不变)。
+                    if let Some(reason) = &guard_stopped {
+                        section.push_str(&format!(
+                            "\n\n> 本次追加指令被守卫截断({reason}),成果可能不完整。"
+                        ));
+                    }
                     let new_result = if self.params.mode == TaskFollowupMode::Replace {
                         section
                     } else {
@@ -126,7 +138,7 @@ impl ModeExecutor for FollowupExecutor {
                             format!("{prev}\n\n---\n\n{section}")
                         }
                     };
-                    let status = if self.params.prev_partial {
+                    let status = if self.params.prev_partial || guard_stopped.is_some() {
                         TaskStatus::Partial
                     } else {
                         TaskStatus::Done

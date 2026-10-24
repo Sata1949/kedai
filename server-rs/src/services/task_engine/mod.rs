@@ -393,21 +393,32 @@ impl TaskEngine {
                     let changed = self.svc.file_change_count(&task.id) > baseline;
                     let final_plan = self.svc.get(&task.id).map(|t| t.plan).unwrap_or_default();
                     let required = delivery::required_from_plan(&final_plan);
-                    let missing = task
-                        .workspace
-                        .as_deref()
-                        .map(|ws| delivery::missing_files(std::path::Path::new(ws), &required))
+                    let workspace = task.workspace.as_deref().map(std::path::Path::new);
+                    let missing = workspace
+                        .map(|ws| delivery::missing_files(ws, &required))
                         .unwrap_or_default();
-                    let (terminal, downgraded) = delivery::apply_file_delivery_gate(
-                        terminal, true, &required, &missing, changed,
-                    );
+                    // SKY-6 第 3 项:声明交付物的内容体检(空文件/未替换 @@ 槽位);
+                    // 第 2 项:被守卫截断的步骤也要让门槛可见(防御未来模式漏标)。
+                    let content_issues = workspace
+                        .map(|ws| delivery::content_issues(ws, &required))
+                        .unwrap_or_default();
+                    let truncated = delivery::truncated_from_plan(&final_plan);
+                    let gate_input = delivery::DeliveryGateInput {
+                        required: &required,
+                        missing: &missing,
+                        content_issues: &content_issues,
+                        truncated: &truncated,
+                        changed,
+                    };
+                    let (terminal, downgraded) =
+                        delivery::apply_file_delivery_gate(terminal, true, &gate_input);
                     if downgraded {
                         self.svc.emit_event(
                             TaskEventKind::Status,
                             &task.id,
                             None,
                             None,
-                            Some(delivery::delivery_event_detail(&missing)),
+                            Some(delivery::delivery_event_detail(&gate_input)),
                         );
                     }
                     terminal

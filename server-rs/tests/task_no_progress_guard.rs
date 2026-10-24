@@ -115,9 +115,15 @@ async fn no_progress_guard_stops_temp_file_loop_at_16_rounds() {
     );
     let plan = detail["task"]["plan"].as_array().expect("plan 应为数组");
     assert_eq!(plan.len(), 1, "单主单子目标: {detail}");
+    // SKY-6 第 2 项:守卫截断是「没跑完」,步骤不得记 done(修复前恰为 done)。
     assert_eq!(
-        plan[0]["status"], "done",
-        "守卫收尾应保留步骤完成: {detail}"
+        plan[0]["status"], "partial",
+        "守卫截断应把步骤降为 partial: {detail}"
+    );
+    let error = detail["task"]["error"].as_str().unwrap_or("");
+    assert!(
+        error.contains("守卫截断"),
+        "任务 error 应说明被守卫截断: {error:?}"
     );
 
     let (status, events) = send_json(
