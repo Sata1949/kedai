@@ -90,6 +90,8 @@ impl ModeExecutor for FollowupExecutor {
                 // 无进展守卫按声明文件计数;followup 的 scope 通常没有声明文件,
                 // 保持默认开启(有声明时仍应约束「只说不写」)。
                 no_progress_guard: true,
+                // followup 不是 team 集成主:无分片读取软提醒。
+                shard_read_nudge_after: None,
             };
             let result =
                 run_agent_loop(svc.clone(), self.engine.clone(), call, cancel.clone()).await;

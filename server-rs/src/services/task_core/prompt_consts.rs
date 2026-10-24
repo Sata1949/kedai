@@ -95,12 +95,19 @@ pub(crate) const TEAM_ASSEMBLY_CONTRACT_NOTE: &str = "【接口接线纪律】�
 ///
 /// 条件段:仅在目标要求单文件交付、且该主声明了 HTML 入口时追加;内置指令不经
 /// untrusted 包裹。
-pub(crate) const TEAM_SINGLE_FILE_ASSEMBLY_NOTE: &str = "【单文件装配纪律】目标要求唯一单文件交付:最终 HTML 必须自包含——把各分片按声明顺序内联进同一个 `<script type=\"module\">`,不得出现指向工作区文件的 `<script src>`/`<link href>`/`<img src>` 或相对 `import`;只允许 importmap 中的远程 CDN 依赖;不得残留 `@@` 槽位,也不得交付「能打开但入口为空壳」的占位骨架。装配完成后必须实际运行一次自检(node --check 抽取的内联脚本、或浏览器加载并读取运行状态),并在结果正文报告入口字节数、内联分片数与自检结果。引擎会对本地外链、未导出导入与空壳交付做确定性判定,不合格即 partial。";
+pub(crate) const TEAM_SINGLE_FILE_ASSEMBLY_NOTE: &str = "【单文件装配纪律】目标要求唯一单文件交付:最终 HTML 必须自包含——优先调用 `fs_inline_html` 装配(引擎读分片、替换 `@@NAME@@` 槽位、写入口;模板槽位名必须与 parts 键一一对应),不要手写整份 100KB+ 内联脚本;分片也可按声明顺序内联进同一个 `<script type=\"module\">`。不得出现指向工作区文件的 `<script src>`/`<link href>`/`<img src>` 或相对 `import`;只允许 importmap 中的远程 CDN 依赖;不得残留 `@@` 槽位,也不得交付「能打开但入口为空壳」的占位骨架。装配完成后必须实际运行一次自检(node --check 抽取的内联脚本、或浏览器加载并读取运行状态),并在结果正文报告入口字节数、内联分片数与自检结果。引擎会对本地外链、未导出导入与空壳交付做确定性判定,不合格即 partial。";
 
 /// team 规划器的**单文件交付约束**(SKY-4,2026-10-24):条件段,目标要求单文件时
 /// 追加到规划 user 消息。分片只作中间产物,必须有一个子目标负责总装成自包含入口;
-/// 避免规划出多个需要外链本地文件或被多个主并行覆盖的入口。
-pub(crate) const TEAM_SINGLE_FILE_PLANNER_NOTE: &str = "【单文件交付约束】目标要求最终只交付一个自包含 HTML 文件:分片只能作为中间产物,必须有一个子目标负责把全部分片内联进该 HTML;不要把最终入口拆成多个需要外链的本地文件,也不要让多个子目标各自写同一入口。";
+/// 避免规划出多个需要外链本地文件或被多个主并行覆盖的入口。SKY-8 起总装子目标
+/// 必须写明用 `fs_inline_html`(确定性装配,不靠模型手写大段内联)。
+pub(crate) const TEAM_SINGLE_FILE_PLANNER_NOTE: &str = "【单文件交付约束】目标要求最终只交付一个自包含 HTML 文件:分片只能作为中间产物,必须有一个子目标负责用 `fs_inline_html` 把全部分片内联进该 HTML(不要再让模型手写整份内联脚本);不要把最终入口拆成多个需要外链的本地文件,也不要让多个子目标各自写同一入口。";
+
+/// 集成主**分片读取软提醒**(SKY-8,2026-10-24):依赖汇点主豁免了只读/无进展
+/// 两个计数守卫,但 2026-10-24 全题复跑里总装主 201 次 `fs_read`、0 次写入,
+/// 把 1719s 全花在读分片上。累计成功 `fs_read` 达到阈值后注入一次「先写入口骨架」,
+/// 只提醒不熔断(墙钟/团队份额仍是上限)。属动态辅助语:不上设置预览。
+pub(crate) const SHARD_READ_FIRST_NUDGE: &str = "你已多次读取分片,但还没有写出入口。若这是总装/集成子目标,请立即先写出入口 HTML 的最小可运行骨架(优先用 fs_inline_html 把已确认的分片内联进单文件),再继续核对剩余分片;不要把全部分片读完才开始写。";
 
 /// custom 模式反思步骤内置指令:检查上一版产出并输出判定结论(批次 4.3b)。
 /// reflect 步骤按契约不携带用户 system_prompt(validate_flow 强制),统一用本内置指令。
@@ -264,7 +271,7 @@ pub(crate) fn capability_note(
                 .any(|n| n == crate::tools::agent_tools_fs::READ_TOOL);
             let has_shell = allowed.iter().any(|n| n == crate::tools::bash::TOOL_NAME);
             if has_fs {
-                let names = [
+                let mut names = [
                     crate::tools::agent_tools_fs::READ_TOOL,
                     crate::tools::agent_tools_fs::WRITE_TOOL,
                     crate::tools::agent_tools_fs::EDIT_TOOL,
@@ -272,6 +279,13 @@ pub(crate) fn capability_note(
                     crate::tools::agent_tools_fs::GREP_TOOL,
                 ]
                 .join("/");
+                // SKY-8:确定性单文件装配工具存在时让规划器知道可以把它写进总装 goal。
+                if allowed
+                    .iter()
+                    .any(|n| n == crate::tools::agent_tools_fs_inline::INLINE_TOOL)
+                {
+                    names.push_str("/fs_inline_html");
+                }
                 s.push_str(&format!("\n执行者可以读写文件(工具 {names})。"));
                 match workspace {
                     Some(w) => {
@@ -561,6 +575,8 @@ mod tests {
     fn team_single_file_notes_pin_self_contained_delivery() {
         for needle in [
             "自包含",
+            "fs_inline_html",
+            "槽位名必须与 parts 键一一对应",
             "不得出现指向工作区文件的",
             "相对 `import`",
             "不得残留 `@@` 槽位",
@@ -572,10 +588,21 @@ mod tests {
                 "单文件装配纪律应含「{needle}」: {TEAM_SINGLE_FILE_ASSEMBLY_NOTE}"
             );
         }
-        for needle in ["一个自包含", "内联", "不要", "外链"] {
+        for needle in ["一个自包含", "fs_inline_html", "内联", "不要", "外链"] {
             assert!(
                 TEAM_SINGLE_FILE_PLANNER_NOTE.contains(needle),
                 "单文件规划约束应含「{needle}」: {TEAM_SINGLE_FILE_PLANNER_NOTE}"
+            );
+        }
+    }
+
+    /// SKY-8:集成主软提醒必须同时指向「先写入口骨架」与确定性装配工具。
+    #[test]
+    fn shard_read_nudge_pins_skeleton_and_inline_tool() {
+        for needle in ["入口 HTML", "骨架", "fs_inline_html", "不要"] {
+            assert!(
+                SHARD_READ_FIRST_NUDGE.contains(needle),
+                "分片读取提醒应含「{needle}」: {SHARD_READ_FIRST_NUDGE}"
             );
         }
     }

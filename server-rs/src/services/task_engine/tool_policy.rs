@@ -248,6 +248,8 @@ mod tests {
             // 包专属工具(Q6):fs_patch2 是对照项,锁死包闸门与例外一律按精确名匹配
             "fs_patch",
             "fs_patch2",
+            // SKY-8 确定性单文件装配(SKY-8):工作区写族成员,默认档按名例外放行
+            "fs_inline_html",
             // 视觉工具族(D4):view_image2 是「名字含 view_image」的对照项,
             // 锁死视觉闸门按精确名匹配
             "view_image",

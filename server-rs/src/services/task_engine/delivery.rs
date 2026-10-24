@@ -659,7 +659,7 @@ mod tests {
         let (out, downgraded) = apply_file_delivery_gate(
             complete(
                 TaskStatus::Done,
-                Some("以下子目标被守卫截断,成果可能不完整:主 Agent-1「读分片」"),
+                Some("以下子目标未完成(守卫截断或预算收尾),成果可能不完整:主 Agent-1「读分片」"),
             ),
             true,
             &input,
@@ -678,7 +678,7 @@ mod tests {
             apply_file_delivery_gate(complete(TaskStatus::Done, None), true, &input);
         assert!(downgraded2);
         assert_eq!(status_of(&out2), TaskStatus::Partial);
-        assert!(error_of(&out2).unwrap().contains("以下子目标被守卫截断"));
+        assert!(error_of(&out2).unwrap().contains("以下子目标未完成"));
     }
 
     /// 门槛输入的两类原因会同时出现:文件缺失 + 内容问题 + 截断,用户能看到全貌。
@@ -701,7 +701,7 @@ mod tests {
         let error = error_of(&out).unwrap();
         assert!(error.contains("缺少必需文件"), "{error}");
         assert!(error.contains("交付内容校验未通过"), "{error}");
-        assert!(error.contains("被守卫截断"), "{error}");
+        assert!(error.contains("未完成"), "{error}");
         let event = delivery_event_detail(&input);
         assert!(event.contains("文件产物校验未通过"), "{event}");
         assert!(event.contains("parts/ui.js"), "{event}");

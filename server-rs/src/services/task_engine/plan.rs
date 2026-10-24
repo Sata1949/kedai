@@ -115,6 +115,8 @@ impl ApprovedPlanExecutor {
                 deadline: ctx.deadline,
                 readonly_guard: true,
                 no_progress_guard: true,
+                // plan 续跑不是 team 集成主:无分片读取软提醒。
+                shard_read_nudge_after: None,
             };
             match run_agent_loop(svc.clone(), self.engine.clone(), call, ctx.cancel.clone()).await {
                 Ok(out) => {

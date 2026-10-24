@@ -111,10 +111,18 @@ async fn team_budget_share_keeps_later_waves_alive() {
     let plan = detail["task"]["plan"].as_array().expect("plan 应为数组");
     assert_eq!(plan.len(), 4, "两主一子 + 两主各一子: {detail}");
 
-    // 主 1 第一子目标:6s 份额内带产出收尾(done);第二子目标:份额已耗尽。
+    // 主 1 第一子目标:6s 份额内带产出收尾;声明文件 parts/a.js 未落盘,
+    // SKY-8 起按磁盘事实记 partial(修复前按 TMR-3 记 done)。第二子目标:份额已耗尽。
     assert_eq!(
-        plan[0]["status"], "done",
-        "主 1 第一子目标应在份额处带产出收尾: {detail}"
+        plan[0]["status"], "partial",
+        "主 1 第一子目标预算收尾且文件缺失应为 partial: {detail}"
+    );
+    assert!(
+        plan[0]["result"]
+            .as_str()
+            .unwrap_or("")
+            .contains("[预算收尾]"),
+        "预算收尾应在步骤结果留痕: {detail}"
     );
     assert_eq!(
         plan[1]["status"], "error",

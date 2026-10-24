@@ -75,6 +75,9 @@ pub(crate) struct AgentLoopCall {
     /// 当成空转截断(SKY-6;步骤墙钟与团队总预算仍是上限)。非汇点中段主保持 true
     /// (SKY-7;中途第 8 轮会先提醒一次,第 16 轮才收尾)。
     pub no_progress_guard: bool,
+    /// 集成主分片读取软提醒阈值(SKY-8;None = 关闭)。
+    /// 仅 team::run_main 对依赖汇点主填 `Some(TASK_SHARD_READ_NUDGE)`;其余路径 None。
+    pub shard_read_nudge_after: Option<usize>,
 }
 
 /// 单主 agent 工具自循环的产出。
@@ -241,6 +244,8 @@ pub(crate) async fn run_agent_loop(
             no_progress_limit: call
                 .no_progress_guard
                 .then_some(super::TASK_NO_PROGRESS_LIMIT),
+            // SKY-8:集成主读满阈值后提醒先写入口骨架(只提醒,不熔断)。
+            shard_read_nudge_after: call.shard_read_nudge_after,
         }),
     };
     // 事件桥:引擎事件 → 任务事件(agent_status);drain 持续消费到 tx drop。
@@ -574,6 +579,8 @@ impl SoloExecutor {
             deadline: ctx.deadline,
             readonly_guard: true,
             no_progress_guard: true,
+            // solo 不是集成主:无分片读取软提醒。
+            shard_read_nudge_after: None,
         };
         let out = run_agent_loop(
             self.svc.clone(),

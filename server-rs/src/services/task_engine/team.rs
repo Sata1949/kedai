@@ -1296,6 +1296,9 @@ impl TeamExecutor {
                 // 非集成主维持默认,继续保护「只读探索 / 只说不写」。
                 readonly_guard: !integration_main,
                 no_progress_guard: !integration_main,
+                // SKY-8:集成主读满 8 次 fs_read 后提醒一次「先写入口骨架」;
+                // 中段生产者/普通主走既有的只读与无进展守卫,不需要这条软提醒。
+                shard_read_nudge_after: integration_main.then_some(super::TASK_SHARD_READ_NUDGE),
             };
             let result = run_agent_loop(
                 self.svc.clone(),
