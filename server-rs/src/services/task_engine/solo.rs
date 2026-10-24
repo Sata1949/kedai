@@ -63,15 +63,17 @@ pub(crate) struct AgentLoopCall {
     /// 即提醒、再次达到即熔断会把「还没读完就开始修」误判成探索空转(2026-10-23
     /// 空岛 followup 实测)。语义熔断/步骤预算/轮次上限仍照常生效。
     ///
-    /// team 的**集成主**(`TeamMain.after` 非空,见 `team.rs::run_main`)同置 false:
-    /// 总装必须先读全部上游分片再写大文件,2026-10-23 复跑中主 Agent-4 的四次循环
-    /// 全部被该守卫截断(SKY-6)。
+    /// team 的**集成/总装主**(依赖 DAG 汇点,见 `team.rs::is_integration_main`)同置
+    /// false:总装必须先读全部上游分片再写大文件,2026-10-23 复跑中主 Agent-4 的四次
+    /// 循环全部被该守卫截断(SKY-6)。SKY-7 起只豁免汇点——有 `after` 但下游还有主的
+    /// 中段生产者仍受守卫保护(2026-10-24 全题复跑主 2 342 轮零写盘)。
     pub readonly_guard: bool,
     /// 是否启用「声明文件无进展」守卫(P0-2,`ToolBudget.no_progress_limit`)。
     ///
-    /// 默认 true;仅在有声明文件的 scope 上实际生效。team 集成主置 false——
+    /// 默认 true;仅在有声明文件的 scope 上实际生效。team 的依赖汇点主置 false——
     /// 读上游分片的 16+ 轮内本就不会写自己的交付文件,该守卫会把合法集成形态
-    /// 当成空转截断(SKY-6;步骤墙钟与团队总预算仍是上限)。
+    /// 当成空转截断(SKY-6;步骤墙钟与团队总预算仍是上限)。非汇点中段主保持 true
+    /// (SKY-7;中途第 8 轮会先提醒一次,第 16 轮才收尾)。
     pub no_progress_guard: bool,
 }
 
@@ -229,8 +231,9 @@ pub(crate) async fn run_agent_loop(
                 .readonly_guard
                 .then_some(super::TASK_READONLY_STREAK_LIMIT),
             // P0-2:team 的 scope 带声明文件时生效；solo/多主未声明时自动跳过。
-            // SKY-6:team 集成主经 `no_progress_guard=false` 关闭(读上游分片期间
-            // 本就不会写自己的交付文件),步骤墙钟/团队总预算仍是上限。
+            // SKY-6/SKY-7:team 的依赖汇点主经 `no_progress_guard=false` 关闭(读上游
+            // 分片期间本就不会写自己的交付文件);非汇点中段主保持开启,第 8 轮先提醒、
+            // 第 16 轮收尾(步骤墙钟/团队总预算仍是上限)。
             no_progress_limit: call
                 .no_progress_guard
                 .then_some(super::TASK_NO_PROGRESS_LIMIT),

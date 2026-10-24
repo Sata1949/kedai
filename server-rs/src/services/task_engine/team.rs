@@ -29,6 +29,7 @@ use futures::future::BoxFuture;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 
@@ -54,6 +55,11 @@ const TEAM_RETRY_MAX_TOKENS_CAP: u32 = 131_072;
 /// 即被截断,自愈翻倍到 20000 重发才成功——首发即给足可省掉这一整个 50 秒左右
 /// 的空烧往返。默认 `default_max_tokens=1024` 时更小,结构化 JSON 必然腰斩。
 const TEAM_STRUCTURED_MIN_TOKENS: u32 = 16384;
+
+/// 主执行池给审计/终审/汇总预留的秒数下限/上限(SKY-7,见 `post_exec_reserve`)。
+/// 下限 10s 覆盖一次快速审计/汇总往返;上限 180s 防止长任务把 5% 无界放大。
+const TEAM_POST_EXEC_RESERVE_MIN_SECS: u64 = 10;
+const TEAM_POST_EXEC_RESERVE_MAX_SECS: u64 = 180;
 
 /// 每个子目标最多声明的负责文件数(TMR-4;规划器输出不可信,防超长/超量)。
 const TEAM_MAX_DECLARED_FILES_PER_GOAL: usize = 32;
@@ -605,6 +611,79 @@ fn plan_waves(mains: &[TeamMain]) -> Vec<Vec<usize>> {
     waves
 }
 
+/// 团队「集成/总装主」判定(SKY-7,2026-10-24;收窄 SKY-6 的 `after` 非空判据)。
+///
+/// 只有**依赖 DAG 的汇点**才享有两个计数守卫(连续只读 / 声明文件无进展)的豁免:
+/// 有上游依赖,且没有任何其他主依赖它(本主之后没有下游),即它是某条执行链的终点、
+/// 需要先读完全部上游产物再写最终交付物。
+///
+/// 为什么不能只看 `after` 非空:2026-10-24 全题复跑里规划器把三主排成 1→2→3 的串行链,
+/// 主 2 有 `after` 但只是**中段生产者**(下游还有总装主),被误判为集成主后两道守卫
+/// 同时关闭——342 轮零写盘、吃掉 52 分钟,总装主从未得到启动窗口。
+///
+/// 边界:
+/// - 无依赖的并行主 → false(没有上游可读,长读不构成理由);
+/// - 环 → 全部 false(环会被 `plan_waves` 降级为同一波,守卫继续兜底);
+/// - 多个汇点(多个终点交付) → 各自 true(SKY-6 的「两主:分片 + 总装」形态不变)。
+fn is_integration_main(mains: &[TeamMain], index: usize) -> bool {
+    let Some(main) = mains.get(index) else {
+        return false;
+    };
+    if main.after.is_empty() {
+        return false;
+    }
+    !mains
+        .iter()
+        .enumerate()
+        .any(|(j, other)| j != index && other.after.contains(&index))
+}
+
+/// 团队主执行阶段给审计/终审/汇总预留的墙钟(SKY-7,2026-10-24;单一出处)。
+///
+/// 为什么需要:团队总预算由各主共享且此前无预留,2026-10-24 全题复跑里主 2 吃掉
+/// 全部 3600s,审计与汇总直接未执行,任务只能 partial。预留让确定性交付检查与
+/// 质量闸门至少有一次运行窗口。
+///
+/// 口径:剩余 <120s 不预留(秒级集成测试与小预算行为不变);否则取 5%,
+/// 夹在 `TEAM_POST_EXEC_RESERVE_MIN_SECS..=TEAM_POST_EXEC_RESERVE_MAX_SECS`。
+fn post_exec_reserve(remaining: Duration) -> Duration {
+    let secs = remaining.as_secs();
+    if secs < 120 {
+        return Duration::ZERO;
+    }
+    Duration::from_secs((secs / 20).clamp(
+        TEAM_POST_EXEC_RESERVE_MIN_SECS,
+        TEAM_POST_EXEC_RESERVE_MAX_SECS,
+    ))
+}
+
+/// 主执行阶段的预算池截止期 = 全局截止期 - 审计预留;无截止期 = `None`(不引入新闸)。
+fn main_pool_deadline(deadline: Option<Instant>) -> Option<Instant> {
+    let d = deadline?;
+    let remaining = d.saturating_duration_since(Instant::now());
+    let reserve = post_exec_reserve(remaining);
+    Some(d.checked_sub(reserve).unwrap_or(d))
+}
+
+/// 按「本主实际执行步数 / 剩余未执行步数」公平分配预算池(SKY-7;纯函数)。
+///
+/// - `pool_remaining` 或 `units` 为 0 → 0(调用方按即时截止处理,不启动新子目标);
+/// - `remaining_units == 0` → 全部剩余(防御性兜底,正常调用不会命中);
+/// - 池 >0 时至少给 1 秒,但绝不超过池本身(小池按池封顶,避免份额大于总预算)。
+fn fair_share(pool_remaining: Duration, units: usize, remaining_units: usize) -> Duration {
+    if pool_remaining.is_zero() || units == 0 {
+        return Duration::ZERO;
+    }
+    if remaining_units == 0 {
+        return pool_remaining;
+    }
+    let pool_nanos = pool_remaining.as_nanos();
+    let nanos = (pool_nanos * units as u128 / remaining_units as u128)
+        .max(1_000_000_000)
+        .min(pool_nanos);
+    Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
+}
+
 /// 依赖主已完成子目标的产出摘要(TMR3-3):总装主启动时注入目标文本。
 /// 只取有 `result` 的步骤;步骤名附带声明文件与**引擎实测的导出名**
 /// (SKY-1,2026-10-23:总装主不必再猜上游模块有哪些导出)。
@@ -1003,6 +1082,9 @@ impl TeamExecutor {
         prior_seed: Vec<(String, String)>,
         upstream_seed: Vec<(String, String)>,
         deadline_reason: &'static str,
+        // SKY-7:是否豁免两个计数守卫。判定由调用方按「依赖 DAG 汇点」算出
+        // (见 `is_integration_main`);不要在本函数里按 after 非空自行判定。
+        integration_main: bool,
         ownership: Arc<WriteOwnership>,
     ) -> (usize, Vec<(usize, String, Result<AgentLoopOutput, String>)>) {
         let n = main_index + 1;
@@ -1014,10 +1096,10 @@ impl TeamExecutor {
         let scope = ctx.scope.as_ref().map(|base| {
             base.with_write_ownership(ownership, format!("主 Agent-{n}"), declared_files.clone())
         });
-        // SKY-6:有上游依赖的主 = 集成/总装形态。先读完全部分片再写大文件是合法前置,
+        // SKY-6/SKY-7:集成/总装主(依赖汇点)先读完全部分片再写大文件是合法前置,
         // 不能按「探索空转」截断;只关只读计数与无进展计数,语义熔断/步骤墙钟/
-        // 团队总预算仍是上限(2026-10-23 复跑主 4 四次循环全被守卫截断)。
-        let integration_main = !main.after.is_empty();
+        // 团队总预算仍是上限。判定收窄为依赖 DAG 汇点:中段生产者(还有下游主)
+        // 不再豁免(2026-10-24 全题复跑:主 2 有 after 无下游豁免后 342 轮零写盘)。
         let mut results = Vec::with_capacity(main.goals.len());
         // 本主已完成子目标的产出:(子目标名, 产出) —— 注入后续子目标,让同一主内各
         // 子目标在彼此成果上衔接,而非各自重造一整份交付物(实跑问题 2 结构性根因)。
@@ -1184,19 +1266,35 @@ impl TeamExecutor {
         let (deadline, team_binding) =
             super::team_deadline(ctx.deadline, ctx.settings.task_team_budget_secs);
         ctx.deadline = deadline;
+        // SKY-7:主执行池 = 截止期 - 审计/汇总预留。主 agent 只能分到池内份额,
+        // 审计/终审/汇总继续用 ctx.deadline——主执行再也吃不掉质量闸门的最后窗口。
+        let main_pool = main_pool_deadline(deadline);
+        let share_reason = if team_binding {
+            "团队预算份额用尽(未执行)"
+        } else {
+            "任务预算份额用尽(未执行)"
+        };
         // TMR3-L4:默认 1200s 是**安全阀**而不是目标值,但它是 TMR3 之后的新默认行为
         // ——团队任务不再无限跑。开工时先透出一条预算事实,让用户在看到「团队总预算
         // 用尽」之前就知道有这条闸门、以及去哪里调(设置页;0 = 关闭)。
+        // SKY-7:同时说明按主/步分配与审计预留,避免用户误以为每主都能用满总预算。
         if team_binding {
+            let reserve_secs = deadline
+                .map(|d| post_exec_reserve(d.saturating_duration_since(Instant::now())).as_secs())
+                .unwrap_or(0);
+            let mut msg = format!(
+                "团队执行预算:{} 秒(规划完成后起算;设置页可调大或设 0 关闭)",
+                ctx.settings.task_team_budget_secs
+            );
+            if reserve_secs > 0 {
+                msg.push_str(&format!(";按主/步分配,审计/汇总预留 {reserve_secs} 秒"));
+            }
             svc.emit_event(
                 TaskEventKind::AgentStatus,
                 &ctx.task_id,
                 None,
                 None,
-                Some(format!(
-                    "团队执行预算:{} 秒(规划完成后起算;设置页可调大或设 0 关闭)",
-                    ctx.settings.task_team_budget_secs
-                )),
+                Some(msg),
             );
         }
         let deadline_reason = if team_binding {
@@ -1238,6 +1336,9 @@ impl TeamExecutor {
                 None,
                 &ownership,
                 deadline_reason,
+                // SKY-7:首轮用「全局截止期 - 审计预留」作为主执行池
+                main_pool,
+                share_reason,
             )
             .await;
         if cancelled {
@@ -1364,6 +1465,10 @@ impl TeamExecutor {
                     Some(&verdict.kickbacks),
                     &ownership,
                     deadline_reason,
+                    // SKY-7:补做轮不再二次预留(补做优先),但仍在全局截止期内
+                    // 按被打回主的子目标数分配,避免一个补做主吃光终审窗口。
+                    ctx.deadline,
+                    share_reason,
                 )
                 .await;
             outputs = new_outputs;
@@ -1667,6 +1772,12 @@ impl TeamExecutor {
         ownership: &Arc<WriteOwnership>,
         // 波间截止期收尾文案:团队总预算与任务总预算要能区分(TMR3-4)
         deadline_reason: &'static str,
+        // SKY-7:本轮的预算池截止期(初始执行 = 全局截止期 - 审计预留;
+        // 补做轮 = 全局截止期)。None = 无墙钟预算,行为与旧实现一致。
+        share_pool: Option<Instant>,
+        // SKY-7:被份额收窄的主在启动下一子目标前使用的原因文案
+        // (与 `deadline_reason` 区分「团队/任务总预算用尽」与「份额用尽」)。
+        share_reason: &'static str,
     ) -> (Vec<Option<String>>, bool) {
         let svc = &self.svc;
         // 确定本轮要跑的主 agent 子集:(主序号, 补做指令, 限定的子目标下标集)。
@@ -1725,6 +1836,15 @@ impl TeamExecutor {
         let prior_seeds: Vec<Vec<(String, String)>> = batch
             .iter()
             .map(|(i, _, filter)| before_kickback_prior(step_ranges, plan, *i, filter.as_deref()))
+            .collect();
+        // SKY-7:每个主本轮**实际执行**的子目标数 = 预算份额的权重。补做轮只算
+        // 被点名的子目标(被跳过的步骤不参与分配);首轮 = 该主全部子目标。
+        let units_by_pos: Vec<usize> = batch
+            .iter()
+            .map(|(i, _, filter)| match filter {
+                None => mains[*i].goals.len(),
+                Some(steps) => steps.len(),
+            })
             .collect();
         // TMR3-3:按主级依赖分波。首轮按 `plan_waves`;补做轮依赖已在首轮满足,
         // 保持单波(与 TMR3 之前一致)。无依赖时 waves = 一波,行为逐字节不变。
@@ -1808,9 +1928,64 @@ impl TeamExecutor {
             }
             svc.set_plan(&ctx.task_id, plan);
 
+            // SKY-7:按「本波 + 后续未启动波」的实际执行子目标数分配预算池。
+            // 前波提前结束的余额会自然回流后续波(每波从当前剩余重新计算);
+            // 同一波内各主按步数比例分,主 1 再也不能吃掉后续波的全部预算。
+            let remaining_units: usize = waves[wave_no..]
+                .iter()
+                .flat_map(|w| w.iter())
+                .map(|pos| units_by_pos[*pos])
+                .sum();
+            // pos → 本主本轮的截止期;None = 不设额外闸门(仅在无预算池时)。
+            let mut allocations: Vec<Option<Instant>> = vec![None; batch.len()];
+            if let Some(pool) = share_pool {
+                let now = Instant::now();
+                let pool_remaining = pool.saturating_duration_since(now);
+                for &pos in wave {
+                    let share = fair_share(pool_remaining, units_by_pos[pos], remaining_units);
+                    allocations[pos] = Some(pool.min(now.checked_add(share).unwrap_or(pool)));
+                }
+                // 多主同波或仍有后续波时把分配事实透给用户/证据;单主单波不刷屏。
+                let has_future = waves[wave_no + 1..].iter().any(|w| !w.is_empty());
+                if wave.len() > 1 || has_future {
+                    let parts: Vec<String> = wave
+                        .iter()
+                        .map(|pos| {
+                            format!(
+                                "主Agent-{} {} 秒({} 步)",
+                                batch[*pos].0 + 1,
+                                allocations[*pos]
+                                    .map(|d| d.saturating_duration_since(now).as_secs())
+                                    .unwrap_or(0),
+                                units_by_pos[*pos]
+                            )
+                        })
+                        .collect();
+                    svc.emit_event(
+                        TaskEventKind::AgentStatus,
+                        &ctx.task_id,
+                        None,
+                        None,
+                        Some(format!(
+                            "团队预算分配(第{}波):{}(预算池剩余 {} 秒)",
+                            wave_no + 1,
+                            parts.join(";"),
+                            pool_remaining.as_secs()
+                        )),
+                    );
+                }
+            }
+
             let mut join: JoinSet<MainJoinOutput> = JoinSet::new();
             for &pos in wave {
                 let (i, extra, goal_filter) = batch[pos].clone();
+                // SKY-7:本主的有效截止期(份额优先,无池时回退全局截止期);
+                // 份额早于全局时用「份额用尽」文案,否则沿用团队/任务总预算文案。
+                let main_deadline = allocations[pos].or(ctx.deadline);
+                let main_reason = match (main_deadline, ctx.deadline) {
+                    (Some(md), Some(gd)) if md < gd => share_reason,
+                    _ => deadline_reason,
+                };
                 let prior_seed = prior_seeds[pos].clone();
                 // 依赖主已完成子目标的产出摘要:让总装主在动手前看到上游成果;
                 // 文件本身已落盘,提示模型用 fs_read 核对(不是只凭摘要复述)。
@@ -1840,10 +2015,12 @@ impl TeamExecutor {
                     connection_id: ctx.connection_id.clone(),
                     // 工作区作用域(编码通道批次 1):打回补做轮沿用同一工作区
                     scope: ctx.scope.clone(),
-                    // 任务级总预算(PRODCAP-2):补做轮沿用同一截止期
-                    deadline: ctx.deadline,
+                    // SKY-7:本主的份额截止期(无预算池时回退全局截止期)
+                    deadline: main_deadline,
                 };
                 let main = mains[i].clone();
+                // SKY-7:只有依赖 DAG 汇点(总装终点)豁免两个计数守卫
+                let integration_main = is_integration_main(mains, i);
                 let step_idxs = step_ranges[i].clone();
                 let ownership = ownership.clone();
                 join.spawn(async move {
@@ -1856,7 +2033,8 @@ impl TeamExecutor {
                         goal_filter.as_deref(),
                         prior_seed,
                         upstream_seed,
-                        deadline_reason,
+                        main_reason,
+                        integration_main,
                         ownership,
                     )
                     .await
@@ -2175,6 +2353,128 @@ mod tests {
         assert_eq!(mains.len(), 2);
         assert_eq!(mains[0].goals.len(), 2);
         assert_eq!(mains[1].name, "写作");
+    }
+
+    fn team_main_with_after(name: &str, after: Vec<usize>) -> TeamMain {
+        TeamMain {
+            name: name.into(),
+            goals: vec![TaskStep {
+                name: "子".into(),
+                goal: String::new(),
+                status: TaskStepStatus::Pending,
+                result: String::new(),
+                node_id: None,
+                files: Vec::new(),
+            }],
+            after,
+        }
+    }
+
+    /// SKY-7:集成主必须是依赖 DAG 的汇点——链式拓扑只有末端总装主豁免;
+    /// 中段生产者(有 after、但下游还有主)仍走两道计数守卫。
+    #[test]
+    fn integration_main_is_only_dependency_sink() {
+        // 1 → 2 → 3 串行链
+        let chain = vec![
+            team_main_with_after("生产", vec![]),
+            team_main_with_after("中段", vec![0]),
+            team_main_with_after("总装", vec![1]),
+        ];
+        assert!(!is_integration_main(&chain, 0), "无上游依赖:不豁免");
+        assert!(!is_integration_main(&chain, 1), "中段生产者不是汇点:不豁免");
+        assert!(is_integration_main(&chain, 2), "末端总装主是汇点:豁免");
+
+        // 两主:分片 → 总装(汇点)
+        let two = vec![
+            team_main_with_after("分片", vec![]),
+            team_main_with_after("总装", vec![0]),
+        ];
+        assert!(is_integration_main(&two, 1), "两主汇点保持 SKY-6 豁免");
+
+        // 无依赖并行:全部不豁免
+        let parallel = vec![
+            team_main_with_after("甲", vec![]),
+            team_main_with_after("乙", vec![]),
+        ];
+        assert!(!is_integration_main(&parallel, 0));
+        assert!(!is_integration_main(&parallel, 1));
+
+        // 环:每个都有下游,全部不豁免(环由 plan_waves 降级同波)
+        let ring = vec![
+            team_main_with_after("甲", vec![1]),
+            team_main_with_after("乙", vec![0]),
+        ];
+        assert!(!is_integration_main(&ring, 0));
+        assert!(!is_integration_main(&ring, 1));
+
+        // 越界防御
+        assert!(!is_integration_main(&two, 9));
+    }
+
+    /// SKY-7:预算份额按「本主步数 / 剩余未执行步数」比例分;至少 1 秒但不超池。
+    #[test]
+    fn fair_share_is_proportional_and_bounded() {
+        assert_eq!(
+            fair_share(Duration::from_secs(100), 3, 10),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            fair_share(Duration::from_secs(100), 2, 4),
+            Duration::from_secs(50)
+        );
+        assert_eq!(fair_share(Duration::ZERO, 1, 3), Duration::ZERO);
+        assert_eq!(fair_share(Duration::from_secs(100), 0, 3), Duration::ZERO);
+        assert_eq!(
+            fair_share(Duration::from_secs(100), 1, 0),
+            Duration::from_secs(100),
+            "分母为 0 时防御性给满池"
+        );
+        // 小池:至少 1 秒的意图被池本身封顶,不会放大预算
+        assert_eq!(
+            fair_share(Duration::from_millis(200), 1, 10),
+            Duration::from_millis(200)
+        );
+        // 份额不小于 1 秒(中等池的 1/10 小于 1 秒时抬到 1 秒)
+        assert_eq!(
+            fair_share(Duration::from_secs(5), 1, 10),
+            Duration::from_secs(1)
+        );
+    }
+
+    /// SKY-7:审计预留 <120s 不生效;120s 起 5%,夹在 10..=180 秒。
+    #[test]
+    fn post_exec_reserve_scales_and_is_capped() {
+        assert_eq!(post_exec_reserve(Duration::from_secs(1)), Duration::ZERO);
+        assert_eq!(post_exec_reserve(Duration::from_secs(119)), Duration::ZERO);
+        assert_eq!(
+            post_exec_reserve(Duration::from_secs(120)),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            post_exec_reserve(Duration::from_secs(1200)),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            post_exec_reserve(Duration::from_secs(3600)),
+            Duration::from_secs(180)
+        );
+        assert_eq!(
+            post_exec_reserve(Duration::from_secs(86_400)),
+            Duration::from_secs(180)
+        );
+    }
+
+    /// SKY-7:主执行池截止期 = 全局截止期 - 预留;无截止期保持 None。
+    #[test]
+    fn main_pool_deadline_reserves_for_audit() {
+        assert!(main_pool_deadline(None).is_none(), "无预算不得引入新闸");
+        let global = Instant::now() + Duration::from_secs(3600);
+        let pool = main_pool_deadline(Some(global)).expect("应有池");
+        let gap = global.saturating_duration_since(pool).as_secs();
+        assert!(
+            (170..=180).contains(&gap),
+            "3600s 预算应预留约 180s,实际 {gap}s"
+        );
     }
 
     /// TMR-4:files 声明被解析、归一化、去重;null 容错;非法路径/通配符丢弃。
