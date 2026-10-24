@@ -100,6 +100,8 @@ impl ModeExecutor for FollowupExecutor {
                         text,
                         usage,
                         guard_stopped,
+                        // followup 只看守卫截断；预算收尾仍按既有语义收尾（SKY-8）。
+                        budget_stopped: _,
                     } = out;
                     svc.record_usage(task_id, "agent", None, &usage_as_output(&usage));
                     // 取消优先于写结果:stop 后产出不再落库(与 legacy 同口径)

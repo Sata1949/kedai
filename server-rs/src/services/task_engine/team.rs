@@ -28,6 +28,7 @@ use crate::services::task_core::{fallback_terminal, TaskBackend, TaskGenOutput, 
 use futures::future::BoxFuture;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
@@ -636,6 +637,88 @@ fn is_integration_main(mains: &[TeamMain], index: usize) -> bool {
         .iter()
         .enumerate()
         .any(|(j, other)| j != index && other.after.contains(&index))
+}
+
+/// 步骤终态 = 收尾方式 + 本步声明文件的磁盘事实(SKY-8,2026-10-24)。
+///
+/// 规则(与 `docs/契约-协议与配置.md` 的步骤状态语义表同源):
+/// - 正常返回 → `done`;
+/// - **守卫截断**:声明文件全部存在且内容体检通过 → `done`(结果留一条收尾说明);
+///   否则 `partial`;
+/// - **预算收尾**:声明文件有缺失/空/未替换槽位 → `partial`;否则 `done`
+///   (TMR-3 既有语义不变);
+/// - 未声明文件或工作区不可访问:保持旧语义(守卫→partial,预算→done),不制造假判定。
+///
+/// 只查本步 `TaskStep.files` 的存在/空/`@@`,不递归查导入——上游文件可能尚未落盘,
+/// 递归接线留给任务终态的 `delivery.content_issues`。
+fn step_outcome(
+    workspace: Option<&Path>,
+    step: &TaskStep,
+    text: &str,
+    guard_stopped: Option<&str>,
+    budget_stopped: bool,
+) -> (TaskStepStatus, String) {
+    let text = text.trim_end();
+    let unmet = workspace.and_then(|ws| super::delivery::step_files_unmet(ws, &step.files));
+    if let Some(reason) = guard_stopped {
+        match unmet {
+            Some(issues) if !step.files.is_empty() && issues.is_empty() => (
+                TaskStepStatus::Done,
+                step_result_with_note(
+                    text,
+                    &format!(
+                        "[收尾说明] 工具循环被守卫提前截断（{reason}），但本步声明文件已全部落盘且内容体检通过，按完成计。"
+                    ),
+                ),
+            ),
+            Some(issues) => {
+                let detail = if issues.is_empty() {
+                    format!("[守卫截断] {reason}；该子目标可能未完成。")
+                } else {
+                    format!(
+                        "[守卫截断] {reason}；该子目标可能未完成。未满足:{}",
+                        issues.join(";")
+                    )
+                };
+                (
+                    TaskStepStatus::Partial,
+                    step_result_with_note(text, &detail),
+                )
+            }
+            None => (
+                TaskStepStatus::Partial,
+                step_result_with_note(
+                    text,
+                    &format!("[守卫截断] {reason}；该子目标可能未完成。"),
+                ),
+            ),
+        }
+    } else if budget_stopped {
+        match unmet {
+            Some(issues) if !step.files.is_empty() && !issues.is_empty() => (
+                TaskStepStatus::Partial,
+                step_result_with_note(
+                    text,
+                    &format!(
+                        "[预算收尾] 工具循环因预算到点停止；本步声明文件未满足:{}",
+                        issues.join(";")
+                    ),
+                ),
+            ),
+            _ => (TaskStepStatus::Done, text.to_string()),
+        }
+    } else {
+        (TaskStepStatus::Done, text.to_string())
+    }
+}
+
+/// 在步骤正文后追加收尾说明;正文为空时不留下前导空行。
+fn step_result_with_note(text: &str, note: &str) -> String {
+    if text.is_empty() {
+        note.to_string()
+    } else {
+        format!("{text}\n\n{note}")
+    }
 }
 
 /// 团队主执行阶段给审计/终审/汇总预留的墙钟(SKY-7,2026-10-24;单一出处)。
@@ -1709,8 +1792,9 @@ impl TeamExecutor {
         // 成功 → 终审通过」仍判 partial 且 error 为空、用户无从解释(实跑问题 2)。
         let failed_steps = error_step_labels(&plan);
         let failed = has_error_steps(&plan);
-        // SKY-6 第 2 项:守卫截断(partial)步骤即使审计通过也不得让任务记 done——
-        // 步骤没跑完就是没跑完。补做成功的步骤已被覆盖回 done,不会拖累终态。
+        // SKY-6 第 2 项/SKY-8:未完成(partial)步骤即使审计通过也不得让任务记 done
+        // ——步骤没跑完就是没跑完。SKY-8 起 partial 有两个来源:空转守卫截断,以及
+        // 预算收尾时声明文件缺失;补做成功的步骤已被覆盖回 done,不会拖累终态。
         let truncated_steps = partial_step_labels(&plan);
         let text = format!(
             "{}\n\n## 审计结论\n{}",
@@ -1731,12 +1815,12 @@ impl TeamExecutor {
         }
         if !truncated_steps.is_empty() {
             reasons.push(format!(
-                "以下子目标被守卫截断,成果可能不完整:{};可追加指令继续完成",
+                "以下子目标未完成(守卫截断或预算收尾),成果可能不完整:{};可追加指令继续完成",
                 truncated_steps.join("、")
             ));
         }
         let error = (!reasons.is_empty()).then(|| reasons.join("\n"));
-        // 有可解释 error(失败子目标 / 审计未通过 / 守卫截断)即 partial,否则 done
+        // 有可解释 error(失败子目标 / 审计未通过 / 未完成步骤)即 partial,否则 done
         let status = if error.is_some() {
             TaskStatus::Partial
         } else {
@@ -2070,19 +2154,18 @@ impl TeamExecutor {
                             total.total_tokens += usage.total_tokens;
                             // usage 行已由 run_main 在子目标完成时落库(TMR3-L7);
                             // 这里只汇入返回值,不再重复 record_usage(否则会双计)。
-                            // SKY-6 第 2 项:守卫截断返回 Ok(带已有正文),但步骤没跑完
-                            // ——记 partial 并把原因写进步骤结果,审计/前端都能看到。
-                            if let Some(reason) = &out.guard_stopped {
-                                plan[si].status = TaskStepStatus::Partial;
-                                plan[si].result = format!(
-                                    "{}\n\n[守卫截断] {reason};该子目标可能未完成。",
-                                    out.text.trim_end()
-                                );
-                            } else {
-                                plan[si].status = TaskStepStatus::Done;
-                                // 替换式回写:补做产出覆盖旧版本,杜绝新旧并存(实跑问题 2)
-                                plan[si].result = out.text;
-                            }
+                            // SKY-8:终态由「收尾方式 + 本步声明文件磁盘事实」共同决定
+                            // ——守卫截断但文件齐全可记 done,预算收尾但文件缺失必须记
+                            // partial;原因写进步骤结果,审计/前端都能看到。
+                            let (status, result) = step_outcome(
+                                ctx.scope.as_ref().map(|s| s.workspace()),
+                                &plan[si],
+                                &out.text,
+                                out.guard_stopped.as_deref(),
+                                out.budget_stopped,
+                            );
+                            plan[si].status = status;
+                            plan[si].result = result;
                         }
                         Err(e) => {
                             if *ctx.cancel.borrow() {
@@ -2368,6 +2451,91 @@ mod tests {
             }],
             after,
         }
+    }
+
+    fn step_with_files(files: &[&str]) -> TaskStep {
+        TaskStep {
+            name: "子".into(),
+            goal: String::new(),
+            status: TaskStepStatus::Pending,
+            result: String::new(),
+            node_id: None,
+            files: files.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn temp_step_ws(tag: &str) -> std::path::PathBuf {
+        let ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("系统时间应晚于 epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "kedai-step-outcome-{tag}-{}-{ns}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("创建临时工作区失败");
+        dir
+    }
+
+    /// SKY-8:未声明文件时保持旧语义——守卫截断→partial,预算收尾→done。
+    #[test]
+    fn step_outcome_without_declared_files_keeps_old_semantics() {
+        let step = step_with_files(&[]);
+        let (status, text) = step_outcome(None, &step, "正文", Some("连续只读空转熔断"), false);
+        assert_eq!(status, TaskStepStatus::Partial);
+        assert!(text.contains("[守卫截断]"), "{text}");
+        let (status, text) = step_outcome(None, &step, "正文", None, true);
+        assert_eq!(status, TaskStepStatus::Done);
+        assert_eq!(text, "正文");
+    }
+
+    /// SKY-8:守卫截断但声明文件齐全 → done,并留收尾说明。
+    #[test]
+    fn step_outcome_guard_stop_with_complete_file_is_done() {
+        let ws = temp_step_ws("guard-complete");
+        std::fs::write(ws.join("out.txt"), "hello").expect("写文件失败");
+        let step = step_with_files(&["out.txt"]);
+        let (status, text) =
+            step_outcome(Some(&ws), &step, "正文", Some("声明文件无进展收尾"), false);
+        assert_eq!(status, TaskStepStatus::Done);
+        assert!(text.contains("按完成计"), "{text}");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// SKY-8:预算收尾但声明文件缺失 → partial(不得再记 done)。
+    #[test]
+    fn step_outcome_budget_stop_with_missing_file_is_partial() {
+        let ws = temp_step_ws("budget-missing");
+        let step = step_with_files(&["out.txt"]);
+        let (status, text) = step_outcome(Some(&ws), &step, "正文", None, true);
+        assert_eq!(status, TaskStepStatus::Partial);
+        assert!(text.contains("[预算收尾]"), "{text}");
+        assert!(text.contains("out.txt:文件缺失"), "{text}");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// SKY-8:预算收尾但声明文件齐全 → done(旧语义不变)。
+    #[test]
+    fn step_outcome_budget_stop_with_complete_file_is_done() {
+        let ws = temp_step_ws("budget-complete");
+        std::fs::write(ws.join("out.txt"), "hello").expect("写文件失败");
+        let step = step_with_files(&["out.txt"]);
+        let (status, text) = step_outcome(Some(&ws), &step, "正文", None, true);
+        assert_eq!(status, TaskStepStatus::Done);
+        assert_eq!(text, "正文");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// SKY-8:守卫截断 + 声明文件含未替换槽位 → partial 并点名问题。
+    #[test]
+    fn step_outcome_guard_stop_with_placeholder_is_partial() {
+        let ws = temp_step_ws("guard-placeholder");
+        std::fs::write(ws.join("out.txt"), "a\n/*@@MAIN@@*/\n").expect("写文件失败");
+        let step = step_with_files(&["out.txt"]);
+        let (status, text) = step_outcome(Some(&ws), &step, "正文", Some("重复调用熔断"), false);
+        assert_eq!(status, TaskStepStatus::Partial);
+        assert!(text.contains("@@ 未替换槽位"), "{text}");
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     /// SKY-7:集成主必须是依赖 DAG 的汇点——链式拓扑只有末端总装主豁免;

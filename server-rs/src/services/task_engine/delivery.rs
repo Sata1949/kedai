@@ -109,6 +109,55 @@ pub(crate) fn missing_files(workspace: &Path, required: &[(String, String)]) -> 
         .collect()
 }
 
+/// 单步终态的磁盘事实检查(SKY-8,2026-10-24)。
+///
+/// 用途:预算收尾(步骤墙钟/token/团队份额)或空转守卫截断时,步骤终态不能只看
+/// 「循环以什么方式结束」,还要看该步 `TaskStep.files` 是否真的落盘。判定口径:
+/// - `None` = 工作区不可访问,无法判定(调用方保持旧语义,不制造假 partial);
+/// - `Some([])` = 全部声明文件存在且内容体检通过;
+/// - `Some(issues)` = 非法路径 / 文件缺失 / 不是文件 / 0B / 仅空白 / 未替换 `@@`。
+///
+/// **只查本步声明文件,不做递归导入接线检查**:接线检查要等任务终态、上游文件全部
+/// 落盘后才有意义;在步骤收尾时扫描会把「本步先落盘、下游文件后落盘」误判成失败。
+/// 递归接线仍由 [`content_issues`] 在终态门槛统一负责。
+pub(crate) fn step_files_unmet(workspace: &Path, files: &[String]) -> Option<Vec<String>> {
+    if !workspace.is_dir() {
+        return None;
+    }
+    let mut issues: Vec<String> = Vec::new();
+    for raw in files {
+        let Some(path) = normalize_workspace_rel(raw) else {
+            issues.push(format!("{raw}:非法声明路径"));
+            continue;
+        };
+        let abs = workspace.join(&path);
+        let Ok(meta) = std::fs::metadata(&abs) else {
+            issues.push(format!("{path}:文件缺失"));
+            continue;
+        };
+        if !meta.is_file() {
+            issues.push(format!("{path}:不是文件"));
+            continue;
+        }
+        if meta.len() == 0 {
+            issues.push(format!("{path}:文件为空(0B)"));
+            continue;
+        }
+        let Some(lines) = placeholder_line_count(&abs) else {
+            continue;
+        };
+        if lines > 0 {
+            issues.push(format!("{path}:含 {lines} 行 @@ 未替换槽位"));
+        } else if std::fs::read_to_string(&abs)
+            .map(|text| text.trim().is_empty())
+            .unwrap_or(false)
+        {
+            issues.push(format!("{path}:文件仅含空白"));
+        }
+    }
+    Some(issues)
+}
+
 /// 文本类交付文件的扩展名白名单(内容扫描只对文本;空文件判定对所有声明文件生效)。
 const TEXT_EXTENSIONS: &[&str] = &[
     "html", "htm", "js", "mjs", "cjs", "css", "json", "svg", "md", "txt", "xml",
@@ -187,8 +236,9 @@ pub(crate) fn content_issues(
     out
 }
 
-/// 从 plan 提取被空转守卫截断(partial)的步骤名(SKY-6 第 2 项)。
-/// 空 = 没有截断步骤。名字沿用 plan 里的「【主Agent-N】…」前缀,前端可直接定位。
+/// 从 plan 提取未完成(partial)的步骤名。
+/// 空 = 没有未完成步骤。名字沿用 plan 里的「【主Agent-N】…」前缀,前端可直接定位。
+/// SKY-8 起 partial 可能来自空转守卫截断,也可能来自预算收尾且声明文件缺失。
 pub(crate) fn truncated_from_plan(plan: &[TaskStep]) -> Vec<String> {
     plan.iter()
         .filter(|s| s.status == TaskStepStatus::Partial)
@@ -390,7 +440,10 @@ fn content_issues_note(issues: &[String]) -> String {
     )
 }
 
-/// 被守卫截断子目标的说明(最多点名 10 个,超出写总数)。
+/// 未完成子目标的说明(最多点名 10 个,超出写总数)。
+///
+/// SKY-8 起 `Partial` 不再只来自空转守卫:预算收尾且声明文件缺失也会记 partial,
+/// 因此文案用「未完成」而不是「被守卫截断」——字段名 `truncated` 保持不变(线格式兼容)。
 fn truncated_note(steps: &[String]) -> String {
     let head: Vec<&str> = steps.iter().take(10).map(|s| s.as_str()).collect();
     let more = if steps.len() > head.len() {
@@ -399,7 +452,7 @@ fn truncated_note(steps: &[String]) -> String {
         String::new()
     };
     format!(
-        "以下子目标被守卫截断,成果可能不完整:{}{more};可追加指令继续完成。",
+        "以下子目标未完成(守卫截断或预算收尾),成果可能不完整:{}{more};可追加指令继续完成。",
         head.join("、")
     )
 }
@@ -855,5 +908,59 @@ mod tests {
             "普通多文件项目",
         );
         assert!(multi.is_empty(), "非单文件目标不应拦截本地外链: {multi:?}");
+    }
+
+    /// SKY-8:单步磁盘事实检查——缺失/0B/空白/`@@`/非法路径逐项报告;
+    /// 齐全文件为空问题;工作区不可访问返回 None(不制造假 partial)。
+    #[test]
+    fn step_files_unmet_reports_missing_empty_placeholder_and_unavailable_workspace() {
+        let dir = TempDataDir::new("step-files");
+        let ws = dir.join("ws");
+        std::fs::create_dir_all(&ws).expect("创建工作区失败");
+        std::fs::write(ws.join("ok.txt"), "hello").expect("写健康文件失败");
+        std::fs::write(ws.join("empty.txt"), "").expect("写空文件失败");
+        std::fs::write(ws.join("blank.txt"), "  \n\t\n").expect("写空白文件失败");
+        std::fs::write(ws.join("slot.txt"), "a\n/*@@MAIN@@*/\n").expect("写槽位文件失败");
+
+        assert_eq!(
+            step_files_unmet(&ws, &["ok.txt".to_string()]),
+            Some(Vec::new()),
+            "齐全且内容健康的声明文件不应有问题"
+        );
+        let files: Vec<String> = [
+            "ok.txt",
+            "missing.txt",
+            "empty.txt",
+            "blank.txt",
+            "slot.txt",
+            "../escape.txt",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let issues = step_files_unmet(&ws, &files).expect("工作区存在应可判定");
+        for needle in [
+            "missing.txt:文件缺失",
+            "empty.txt:文件为空(0B)",
+            "blank.txt:文件仅含空白",
+            "slot.txt:含 1 行 @@ 未替换槽位",
+            "../escape.txt:非法声明路径",
+        ] {
+            assert!(
+                issues.iter().any(|i| i.contains(needle)),
+                "应报告「{needle}」: {issues:?}"
+            );
+        }
+        assert!(
+            !issues.iter().any(|i| i.contains("ok.txt")),
+            "健康文件不应被误伤: {issues:?}"
+        );
+
+        let unavailable = ws.join("not-a-dir");
+        assert_eq!(
+            step_files_unmet(&unavailable, &files),
+            None,
+            "工作区不可访问时必须返回 None(无法判定),不得制造缺失"
+        );
     }
 }

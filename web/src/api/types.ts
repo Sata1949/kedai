@@ -1287,8 +1287,8 @@ export interface TaskDeliverySummary {
    */
   content_issues?: string[];
   /**
-   * 被空转守卫截断（步骤 partial）的子目标名（SKY-6）。
-   * 旧服务端无此字段 → 按「无截断」容错。
+   * 未完成（步骤 partial）的子目标名（SKY-6；SKY-8 起含预算收尾且声明文件缺失）。
+   * 字段名为线格式兼容保留 `truncated`；旧服务端无此字段 → 按「无未完成步骤」容错。
    */
   truncated?: string[];
 }
