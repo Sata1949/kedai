@@ -34,6 +34,7 @@ pub(crate) mod solo;
 pub(crate) mod team;
 pub(crate) mod team_audit;
 pub(crate) mod tool_policy;
+pub(crate) mod wiring;
 
 use crate::agents::engine::AgentEngine;
 use crate::models::types::{TaskEventKind, TaskRecord, TaskRunMode, TaskStep};
@@ -361,10 +362,13 @@ impl TaskEngine {
             std::time::Instant::now()
                 + Duration::from_secs(u64::from(settings.task_total_budget_secs))
         });
+        // 任务目标就是 title(创建接口没有 goal 字段);这里先留一份供终态交付门槛
+        // 判定「单文件交付」等目标级要求,再把目标移入执行上下文。
+        let goal_text = goal.clone().unwrap_or_else(|| task.title.clone());
         let ctx = TaskRunContext {
             task_id: task.id.clone(),
             token,
-            goal: goal.unwrap_or_else(|| task.title.clone()),
+            goal: goal_text.clone(),
             settings,
             executor_id: task.executor_id.clone(),
             character_id: task.character_id.clone(),
@@ -397,10 +401,11 @@ impl TaskEngine {
                     let missing = workspace
                         .map(|ws| delivery::missing_files(ws, &required))
                         .unwrap_or_default();
-                    // SKY-6 第 3 项:声明交付物的内容体检(空文件/未替换 @@ 槽位);
+                    // SKY-6 第 3 项 / SKY-1 确定性部分:声明交付物的内容体检
+                    // (空文件/未替换 @@ 槽位/接线错误/单文件外链);
                     // 第 2 项:被守卫截断的步骤也要让门槛可见(防御未来模式漏标)。
                     let content_issues = workspace
-                        .map(|ws| delivery::content_issues(ws, &required))
+                        .map(|ws| delivery::content_issues(ws, &required, &goal_text))
                         .unwrap_or_default();
                     let truncated = delivery::truncated_from_plan(&final_plan);
                     let gate_input = delivery::DeliveryGateInput {

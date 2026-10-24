@@ -228,6 +228,7 @@ pub async fn get(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> 
                         std::path::Path::new(ws),
                         changed,
                         changed_count,
+                        &task.title,
                     )
                 });
                 (
