@@ -63,7 +63,7 @@ pub(crate) const TEAM_FINAL_AUDIT_PROMPT: &str = "你是团队终审员。下面
 /// 「没看过文件」的审计结论伪装成已核实。内置指令不经 untrusted 包裹。
 pub(crate) fn team_audit_tool_guidance(has_workspace: bool) -> &'static str {
     if has_workspace {
-        "【文件核对】你可以调用工作区只读工具(fs_glob/fs_read/fs_grep)核对主 agent 声称的产物:先确认入口文件、交付文件是否真实存在,再抽查关键内容(章节/函数/验收输出)是否与目标要求一致;若能读到验收或测试证据文件,以它们为准。不得只依据主 agent 的自述下结论。工具调用轮不算最终输出、不违反「只输出 JSON」契约,核对完再交出结论。"
+        "【文件核对】你可以调用工作区只读工具(fs_glob/fs_read/fs_grep)核对主 agent 声称的产物:先确认入口文件、交付文件是否真实存在,再抽查关键内容(章节/函数/验收输出)是否与目标要求一致;若能读到验收或测试证据文件,以它们为准。不得只依据主 agent 的自述下结论。工具调用轮不算最终输出、不违反「只输出 JSON」契约,核对完再交出结论。引擎还会在输入里附**静态接线检查**(导入名是否真被导出、本地模块/资源是否存在、单文件目标是否仍外链本地文件);它是对文件的确定性判定,与主 agent 自述冲突时以本清单为准。"
     } else {
         "【文件核对】本次任务没有可读的工作区文件,只能基于文本产出审查;结论中必须明确说明「未核对文件」,不得声称已检查文件内容。"
     }
@@ -85,6 +85,22 @@ pub(crate) const TEAM_AUDIT_FINAL_NUDGE: &str =
 ///
 /// 条件段:仅在上游产出注入时追加;内置指令不经 untrusted 包裹。
 pub(crate) const TEAM_ASSEMBLY_CONTRACT_NOTE: &str = "【接口接线纪律】上游分片已落盘,上游条目里附有**引擎实测的导出名清单**(可直接核对导入名是否存在);但参数顺序与行为仍**只以工作区文件为准**:接线前必须用 fs_read 逐个确认将被调用的上游文件头注释或导出语句,不得凭规划文本、产出摘要或记忆猜测签名;不得用「自适应参数 / 多形态兼容分支」掩盖不确定——那会把签名不匹配推迟成运行期空场景。接线完成后必须实际运行一次入口自检(如 node --check、执行内联/构建脚本、用浏览器加载并读取运行状态),并在结果正文逐项报告「模块 → 实际调用签名 → 返回值是否非空」;任一模块返回空或未接通就继续修,不得声明完成。";
+
+/// team 总装主的**单文件装配纪律**(SKY-4/SKY-1,2026-10-24)。
+///
+/// 空岛复跑里 `index.html` 仍是引用 `./src/*.js` 的外链中间稿,而目标明确要求
+/// 「最终只交付一个 HTML 文件」;审计能发现,但补做轮仍只交骨架。本段把「自包含」
+/// 写成可执行边界,并与 `task_engine::wiring` 的确定性检查配套(本地外链、相对导入、
+/// 未导出导入都会进 `delivery.content_issues`,不合格即 partial)。
+///
+/// 条件段:仅在目标要求单文件交付、且该主声明了 HTML 入口时追加;内置指令不经
+/// untrusted 包裹。
+pub(crate) const TEAM_SINGLE_FILE_ASSEMBLY_NOTE: &str = "【单文件装配纪律】目标要求唯一单文件交付:最终 HTML 必须自包含——把各分片按声明顺序内联进同一个 `<script type=\"module\">`,不得出现指向工作区文件的 `<script src>`/`<link href>`/`<img src>` 或相对 `import`;只允许 importmap 中的远程 CDN 依赖;不得残留 `@@` 槽位,也不得交付「能打开但入口为空壳」的占位骨架。装配完成后必须实际运行一次自检(node --check 抽取的内联脚本、或浏览器加载并读取运行状态),并在结果正文报告入口字节数、内联分片数与自检结果。引擎会对本地外链、未导出导入与空壳交付做确定性判定,不合格即 partial。";
+
+/// team 规划器的**单文件交付约束**(SKY-4,2026-10-24):条件段,目标要求单文件时
+/// 追加到规划 user 消息。分片只作中间产物,必须有一个子目标负责总装成自包含入口;
+/// 避免规划出多个需要外链本地文件或被多个主并行覆盖的入口。
+pub(crate) const TEAM_SINGLE_FILE_PLANNER_NOTE: &str = "【单文件交付约束】目标要求最终只交付一个自包含 HTML 文件:分片只能作为中间产物,必须有一个子目标负责把全部分片内联进该 HTML;不要把最终入口拆成多个需要外链的本地文件,也不要让多个子目标各自写同一入口。";
 
 /// custom 模式反思步骤内置指令:检查上一版产出并输出判定结论(批次 4.3b)。
 /// reflect 步骤按契约不携带用户 system_prompt(validate_flow 强制),统一用本内置指令。
@@ -492,6 +508,7 @@ mod tests {
             "fs_glob",
             "fs_grep",
             "不得只依据主 agent 的自述",
+            "静态接线检查",
             "只输出 JSON",
         ] {
             assert!(
@@ -525,6 +542,31 @@ mod tests {
             assert!(
                 TEAM_ASSEMBLY_CONTRACT_NOTE.contains(needle),
                 "总装接线纪律应含「{needle}」: {TEAM_ASSEMBLY_CONTRACT_NOTE}"
+            );
+        }
+    }
+
+    /// SKY-4/SKY-1:单文件目标必须在装配期为「自包含」、规划期为「唯一入口」,
+    /// 且把确定性判定项(本地外链/相对导入/槽位)说清。
+    #[test]
+    fn team_single_file_notes_pin_self_contained_delivery() {
+        for needle in [
+            "自包含",
+            "不得出现指向工作区文件的",
+            "相对 `import`",
+            "不得残留 `@@` 槽位",
+            "空壳",
+            "确定性判定",
+        ] {
+            assert!(
+                TEAM_SINGLE_FILE_ASSEMBLY_NOTE.contains(needle),
+                "单文件装配纪律应含「{needle}」: {TEAM_SINGLE_FILE_ASSEMBLY_NOTE}"
+            );
+        }
+        for needle in ["一个自包含", "内联", "不要", "外链"] {
+            assert!(
+                TEAM_SINGLE_FILE_PLANNER_NOTE.contains(needle),
+                "单文件规划约束应含「{needle}」: {TEAM_SINGLE_FILE_PLANNER_NOTE}"
             );
         }
     }

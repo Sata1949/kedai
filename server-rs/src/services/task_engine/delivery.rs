@@ -16,6 +16,7 @@
 use crate::models::ownership::normalize_workspace_rel;
 use crate::models::types::{TaskStatus, TaskStep, TaskStepStatus};
 use crate::services::task_core::TaskTerminal;
+use crate::services::task_engine::wiring;
 use serde::Serialize;
 use std::path::Path;
 
@@ -58,7 +59,8 @@ pub struct TaskDeliverySummary {
     pub changed: Vec<String>,
     /// 去重后的变更文件总数(不受 changed 截断影响)
     pub changed_count: usize,
-    /// 声明文件的内容体检不通过项(SKY-6 第 3 项:空文件/仅空白/未替换 `@@` 槽位)。
+    /// 声明文件的内容体检不通过项(SKY-6 第 3 项:空文件/仅空白/未替换 `@@` 槽位;
+    /// SKY-1 确定性部分:导入名未导出/本地模块或资源不存在/单文件交付仍外链)。
     /// 与终态门槛同源,前端「交付校验」卡直接展示。
     pub content_issues: Vec<String>,
     /// 被空转守卫截断(步骤 partial)的子目标名(SKY-6 第 2 项)。空 = 无截断。
@@ -134,15 +136,24 @@ pub(crate) fn placeholder_line_count(path: &Path) -> Option<usize> {
     Some(text.lines().filter(|line| line.contains("@@")).count())
 }
 
-/// 声明文件的内容体检(SKY-6 第 3 项):空文件 / 仅空白 / 未替换 `@@` 槽位。
+/// 声明文件的内容体检(SKY-6 第 3 项 + SKY-1 确定性部分):空文件 / 仅空白 /
+/// 未替换 `@@` 槽位 / 静态接线问题(导入名未导出、本地模块或资源不存在、
+/// 单文件交付仍外链本地文件)。
 ///
-/// 只检查 `TaskStep.files` 声明的交付物(团队规划器声明),不做全工作区扫描——
-/// 未声明文件的任务(研究/问答/模板类)不得因正文或模板里的 `@@` 被误伤
-/// (判据边界见 `docs/计划.md` SKY-6 第 3 项与 `docs/遗留.md` §三十一)。
+/// 只检查 `TaskStep.files` 声明的交付物及其相对导入(团队规划器声明),不做全工作区
+/// 扫描——未声明文件的任务(研究/问答/模板类)不得因正文或模板里的 `@@` 被误伤
+/// (判据边界见 `docs/计划.md` SKY-6 与 `docs/遗留.md` §三十一)。
 ///
 /// 工作区不可访问时不产生结论(与缺失判定同口径);不存在的文件交给缺失清单,
 /// 不在本函数重复报错。返回项形如 `index.html:含 3 行 @@ 未替换槽位`。
-pub(crate) fn content_issues(workspace: &Path, required: &[(String, String)]) -> Vec<String> {
+///
+/// `goal` 用于判定「单文件交付」要求(见 `wiring::single_file_requested`);任务目标
+/// 就是 title(创建接口无 goal 字段),详情摘要与终态门槛传同一份文本。
+pub(crate) fn content_issues(
+    workspace: &Path,
+    required: &[(String, String)],
+    goal: &str,
+) -> Vec<String> {
     if !workspace.is_dir() {
         return Vec::new();
     }
@@ -171,6 +182,8 @@ pub(crate) fn content_issues(workspace: &Path, required: &[(String, String)]) ->
             out.push(format!("{path}:文件仅含空白"));
         }
     }
+    let declared: Vec<String> = required.iter().map(|(p, _)| p.clone()).collect();
+    out.extend(wiring::wiring_issues(workspace, &declared, goal));
     out
 }
 
@@ -196,11 +209,12 @@ pub(crate) fn summarize(
     workspace: &Path,
     changed: Vec<String>,
     changed_count: usize,
+    goal: &str,
 ) -> TaskDeliverySummary {
     let required = required_from_plan(plan);
     let workspace_available = workspace.is_dir();
     let missing = missing_files(workspace, &required);
-    let content_issues = content_issues(workspace, &required);
+    let content_issues = content_issues(workspace, &required, goal);
     let truncated = truncated_from_plan(plan);
     let files = required
         .iter()
@@ -688,7 +702,7 @@ mod tests {
                 ..TaskStep::default()
             },
         ];
-        let summary = summarize(&plan, &ws, vec!["index.html".into()], 2);
+        let summary = summarize(&plan, &ws, vec!["index.html".into()], 2, "");
         assert!(summary.checked, "有声明时 checked 应为 true");
         assert!(summary.workspace_available);
         assert_eq!(
@@ -738,7 +752,7 @@ mod tests {
             ],
             ..TaskStep::default()
         }];
-        let summary = summarize(&plan, &ws, vec!["index.html".into()], 1);
+        let summary = summarize(&plan, &ws, vec!["index.html".into()], 1, "");
         assert_eq!(
             summary.content_issues,
             vec![
@@ -765,7 +779,7 @@ mod tests {
             files: vec!["index.html".into()],
             ..TaskStep::default()
         }];
-        let summary = summarize(&plan, &ws, Vec::new(), 0);
+        let summary = summarize(&plan, &ws, Vec::new(), 0, "");
         assert!(!summary.workspace_available);
         assert!(summary.missing.is_empty(), "不可访问时不得判缺失");
         assert!(
@@ -773,5 +787,73 @@ mod tests {
             "不可访问时不得做内容体检"
         );
         assert!(!summary.required[0].exists);
+    }
+
+    /// SKY-1 确定性部分:命名导入未被目标文件导出必须进入内容体检(终态门槛同源)。
+    #[test]
+    fn content_issues_include_static_wiring_mismatch() {
+        let dir = TempDataDir::new("delivery-wiring");
+        let ws = dir.join("ws");
+        std::fs::create_dir_all(ws.join("parts")).expect("创建接线测试工作区失败");
+        std::fs::write(ws.join("parts/a.js"), "export const A = 1;\n").expect("写分片失败");
+        std::fs::write(
+            ws.join("index.html"),
+            "<html><script type=\"module\">import { B } from './parts/a.js';</script></html>",
+        )
+        .expect("写入口失败");
+
+        let issues = content_issues(
+            &ws,
+            &required(&["index.html", "parts/a.js"]),
+            "接线一致性用例",
+        );
+        assert!(
+            issues.iter().any(|i| i.contains("index.html")
+                && i.contains("B")
+                && i.contains("未被目标文件导出")),
+            "应报告未导出的命名导入: {issues:?}"
+        );
+    }
+
+    /// SKY-4:单文件目标仍外链本地分片 → 内容体检失败;健康内联不误伤。
+    #[test]
+    fn content_issues_single_file_policy_flags_local_refs_only_for_single_file_goals() {
+        let dir = TempDataDir::new("delivery-single");
+        let ws = dir.join("ws");
+        std::fs::create_dir_all(&ws).expect("创建单文件测试工作区失败");
+        std::fs::write(ws.join("a.js"), "export const A = 1;\n").expect("写分片失败");
+        std::fs::write(
+            ws.join("external.html"),
+            "<html><script src=\"./a.js\"></script></html>",
+        )
+        .expect("写外链入口失败");
+        std::fs::write(
+            ws.join("inline.html"),
+            "<html><script type=\"module\">const A = 1;</script></html>",
+        )
+        .expect("写内联入口失败");
+
+        let single = content_issues(
+            &ws,
+            &required(&["external.html", "inline.html", "a.js"]),
+            "最终只交付一个 HTML 文件",
+        );
+        assert!(
+            single
+                .iter()
+                .any(|i| i.contains("单文件交付不得引用本地外部资源")),
+            "单文件目标必须拦截本地外链: {single:?}"
+        );
+        assert!(
+            !single.iter().any(|i| i.contains("inline.html")),
+            "健康内联入口不应被误伤: {single:?}"
+        );
+
+        let multi = content_issues(
+            &ws,
+            &required(&["external.html", "inline.html", "a.js"]),
+            "普通多文件项目",
+        );
+        assert!(multi.is_empty(), "非单文件目标不应拦截本地外链: {multi:?}");
     }
 }

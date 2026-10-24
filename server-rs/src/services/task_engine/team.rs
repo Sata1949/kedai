@@ -12,6 +12,7 @@
 use super::context::TaskRunContext;
 use super::executor::{usage_as_output, ModeExecutor};
 use super::solo::{run_agent_loop, AgentLoopCall, AgentLoopOutput};
+use super::wiring::{file_exports, single_file_requested, wiring_issues};
 use crate::agents::engine::AgentEngine;
 use crate::models::ownership::{normalize_workspace_rel, WriteOwnership};
 use crate::models::types::{
@@ -20,7 +21,8 @@ use crate::models::types::{
 use crate::services::prompt_kit::untrusted_boundary;
 use crate::services::task_core::prompt_consts::{
     team_audit_tool_guidance, SUMMARIZER_PROMPT, TEAM_ASSEMBLY_CONTRACT_NOTE, TEAM_AUDIT_PROMPT,
-    TEAM_FINAL_AUDIT_PROMPT, TEAM_PLANNER_PROMPT,
+    TEAM_FINAL_AUDIT_PROMPT, TEAM_PLANNER_PROMPT, TEAM_SINGLE_FILE_ASSEMBLY_NOTE,
+    TEAM_SINGLE_FILE_PLANNER_NOTE,
 };
 use crate::services::task_core::{fallback_terminal, TaskBackend, TaskGenOutput, TaskTerminal};
 use futures::future::BoxFuture;
@@ -121,6 +123,14 @@ fn declared_files_of(main: &TeamMain) -> Vec<String> {
     out
 }
 
+/// 是否声明了 HTML 入口(总装主;单文件装配纪律只对这类主注入)。
+fn declares_html(files: &[String]) -> bool {
+    files.iter().any(|f| {
+        let lower = f.to_ascii_lowercase();
+        lower.ends_with(".html") || lower.ends_with(".htm")
+    })
+}
+
 /// 审计/终审/汇总输入里的「工作区声明文件实况」(SKY-3,2026-10-23)。
 ///
 /// 为什么需要:空岛 team 实跑中,审计员用 `fs_glob("*.js")` 核对文件,只看到 9 个
@@ -131,8 +141,12 @@ fn declared_files_of(main: &TeamMain) -> Vec<String> {
 /// 文本文件另标「含 N 行 @@ 未替换槽位」(SKY-4/SKY-5):占位符是否清零不再靠审计
 /// 自己 grep,引擎先给出可直接引用的计数。
 ///
+/// SKY-1 确定性部分(2026-10-24):同一份清单后附**静态接线检查**——导入名是否真被
+/// 导出、本地模块/资源是否存在、单文件目标是否仍外链本地文件。审计不必靠自由文本
+/// 发现 `buildSubIslands` 与 `generateSubIslands` 这类硬错配。
+///
 /// 工作区不可访问时返回空串(与交付摘要同口径:不制造假缺失)。
-fn workspace_manifest(workspace: &std::path::Path, mains: &[TeamMain]) -> String {
+fn workspace_manifest(workspace: &std::path::Path, mains: &[TeamMain], goal: &str) -> String {
     if !workspace.is_dir() {
         return String::new();
     }
@@ -164,10 +178,20 @@ fn workspace_manifest(workspace: &std::path::Path, mains: &[TeamMain]) -> String
     if lines.is_empty() {
         return String::new();
     }
-    format!(
+    let mut out = format!(
         "\n工作区声明文件实况(引擎在审计前按 TaskStep.files 全类型枚举;与主 agent 自述冲突时以本清单为准):\n{}\n",
         lines.join("\n")
-    )
+    );
+    let wiring = wiring_issues(workspace, &seen, goal);
+    if !wiring.is_empty() {
+        out.push_str(
+            "\n引擎静态接线检查(导入名未导出/本地模块或资源不存在/单文件交付外链;确定性判定,与自述冲突时以本清单为准):\n",
+        );
+        for issue in &wiring {
+            out.push_str(&format!("- {issue}\n"));
+        }
+    }
+    out
 }
 
 /// 一个主 agent 的分工:分工名 + 子目标(1~4 个)+ 依赖的其他主 agent。
@@ -581,94 +605,6 @@ fn plan_waves(mains: &[TeamMain]) -> Vec<Vec<usize>> {
     waves
 }
 
-/// 从声明文件里提取对外接口名(SKY-1,2026-10-23)。
-///
-/// 支持两种本项目实际出现的形态:
-/// - ES module:`export const/let/var/function/class/async function`、`export {a, b as c}`、
-///   `export default`;
-/// - 经典脚本:`window.X =` / `global.X =`(历史产物 `window.MCWorldMain` 形态)。
-///
-/// 只取**名字**不取签名:签名仍要求总装主 fs_read 确认(参数顺序无法靠正则可靠提取);
-/// 名字清单足以拦住「导入一个根本不存在的导出」这类本次实测到的硬错配。
-/// 读失败/非文本返回空;结果去重排序并截断到 24 个。
-fn extract_exports(text: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for raw in text.lines() {
-        let line = raw.trim();
-        for prefix in ["window.", "global."] {
-            if let Some(rest) = line.strip_prefix(prefix) {
-                let name: String = rest
-                    .chars()
-                    .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
-                    .collect();
-                if !name.is_empty() {
-                    out.push(name);
-                }
-                break;
-            }
-        }
-        let Some(rest) = line.strip_prefix("export ") else {
-            continue;
-        };
-        let mut rest = rest.trim_start();
-        if let Some(after) = rest.strip_prefix("default ") {
-            out.push("default".to_string());
-            rest = after.trim_start();
-        }
-        let after_async = rest.strip_prefix("async ").unwrap_or(rest);
-        for kw in ["function ", "const ", "let ", "var ", "class "] {
-            if let Some(after) = after_async.strip_prefix(kw) {
-                let name: String = after
-                    .chars()
-                    .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
-                    .collect();
-                if !name.is_empty() {
-                    out.push(name);
-                }
-                break;
-            }
-        }
-        if let Some(after) = rest.strip_prefix('{') {
-            if let Some(end) = after.find('}') {
-                for part in after[..end].split(',') {
-                    let part = part.trim();
-                    if part.is_empty() {
-                        continue;
-                    }
-                    // `a as b` 取右侧对外名;`a` 原样
-                    let name = part.split_whitespace().last().unwrap_or(part);
-                    if !name.is_empty() {
-                        out.push(name.to_string());
-                    }
-                }
-            }
-        }
-    }
-    out.sort();
-    out.dedup();
-    out.truncate(24);
-    out
-}
-
-/// 读文件并提取导出名;工作区外/非文本/读失败返回空。
-fn file_exports(path: &std::path::Path) -> Vec<String> {
-    const MAX_BYTES: u64 = 512 * 1024;
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if !matches!(ext.as_str(), "js" | "mjs" | "cjs" | "ts" | "tsx" | "jsx") {
-        return Vec::new();
-    }
-    if std::fs::metadata(path).map(|m| m.len()).unwrap_or(u64::MAX) > MAX_BYTES {
-        return Vec::new();
-    }
-    std::fs::read_to_string(path)
-        .map(|text| extract_exports(&text))
-        .unwrap_or_default()
-}
-
 /// 依赖主已完成子目标的产出摘要(TMR3-3):总装主启动时注入目标文本。
 /// 只取有 `result` 的步骤;步骤名附带声明文件与**引擎实测的导出名**
 /// (SKY-1,2026-10-23:总装主不必再猜上游模块有哪些导出)。
@@ -990,9 +926,16 @@ impl TeamExecutor {
         if !world.is_empty() {
             sys.push_str(&format!("\n\n{}", untrusted_boundary("world_book", &world)));
         }
+        // SKY-4:单文件目标在规划期就把约束说清——分片只作中间产物,必须有唯一
+        // 子目标负责自包含总装;否则规划器可能把最终入口拆成多个外链本地文件。
+        let mut user_goal = ctx.goal.clone();
+        if single_file_requested(&ctx.goal) {
+            user_goal.push_str("\n\n");
+            user_goal.push_str(TEAM_SINGLE_FILE_PLANNER_NOTE);
+        }
         let messages = vec![
             LlmMessage::plain("system", &sys),
-            LlmMessage::plain("user", &ctx.goal),
+            LlmMessage::plain("user", &user_goal),
         ];
         let mut max_tokens = TEAM_PLAN_INITIAL_MAX_TOKENS;
         let mut last_err = String::from("规划器未产出有效拓扑");
@@ -1154,6 +1097,14 @@ impl TeamExecutor {
                 // SKY-1:总装/衔接形态——签名以文件为准,写后必须实际运行自检
                 goal.push('\n');
                 goal.push_str(TEAM_ASSEMBLY_CONTRACT_NOTE);
+                goal.push('\n');
+            }
+            // SKY-4/SKY-1 单文件装配纪律:目标要求唯一单文件、且本主声明了 HTML 入口时,
+            // 把「必须自包含、不得外链本地文件、不得残留槽位」写成装配边界;引擎在交付
+            // 门槛对本地外链与未导出导入做确定性判定(见 wiring 模块)。
+            if single_file_requested(&ctx.goal) && declares_html(&declared_files) {
+                goal.push('\n');
+                goal.push_str(TEAM_SINGLE_FILE_ASSEMBLY_NOTE);
                 goal.push('\n');
             }
             if let Some(extra) = extra_instruction {
@@ -1324,7 +1275,7 @@ impl TeamExecutor {
         let manifest = ctx
             .scope
             .as_ref()
-            .map(|s| workspace_manifest(s.workspace(), &mains))
+            .map(|s| workspace_manifest(s.workspace(), &mains, &ctx.goal))
             .unwrap_or_default();
         let audit_input = build_audit_input(&ctx.goal, &mains, &outputs, &manifest);
         // TMR-2:审计先走「只读工作区工具」通道,让审计员能核对文件真实存在与内容;
@@ -1444,83 +1395,125 @@ impl TeamExecutor {
                 ));
             }
 
-            // 终审:基于补做后的最终产出给出结论文本(空输出兜底回退首次审计结论,
-            // 与审计「增强环节异常不沉任务」同口径)。TMR-2:与首审同款只读工具通道,
-            // 失败回退纯文本。SKY-3:补做可能改动文件,终审前**重新**枚举工作区实况,
-            // 不复用首审时点的清单。
-            let review_manifest = ctx
-                .scope
-                .as_ref()
-                .map(|s| workspace_manifest(s.workspace(), &mains))
-                .unwrap_or_default();
-            let review_input =
-                build_final_review_input(&ctx.goal, &mains, &outputs, &verdict, &review_manifest);
-            let mut review_system = String::from(TEAM_FINAL_AUDIT_PROMPT);
-            review_system.push_str("\n\n");
-            review_system.push_str(team_audit_tool_guidance(ctx.scope.is_some()));
-            let review_out = match super::team_audit::generate_with_readonly_tools(
-                svc,
-                &self.engine,
-                &ctx,
-                "final_audit",
-                "终审 agent",
-                &review_system,
-                &review_input,
-                super::team_audit::FINAL_AUDIT_MAX_ROUNDS,
-                structured_budget(ctx.settings.default_max_tokens),
-                TEAM_JSON_TEMPERATURE,
-                &mut total,
-            )
-            .await
-            {
-                Ok(o) => o,
-                Err(e) if *ctx.cancel.borrow() => return Err(e),
-                Err(tool_err) => {
-                    tracing::warn!(
-                        error = tool_err.as_str(),
-                        "team 终审只读工具通道不可用,回退纯文本终审"
-                    );
-                    let review_messages = vec![
-                        LlmMessage::plain("system", &review_system),
-                        LlmMessage::plain("user", &review_input),
-                    ];
-                    match generate_text_healed(
-                        svc,
-                        &ctx.task_id,
-                        "final_audit",
-                        review_messages,
-                        structured_budget(ctx.settings.default_max_tokens),
-                        TEAM_JSON_TEMPERATURE,
-                        ctx.settings.default_top_p,
-                        &ctx.cancel,
-                        &mut total,
-                    )
-                    .await
-                    {
-                        Ok(o) => o,
-                        Err(e) if *ctx.cancel.borrow() => return Err(e),
-                        // 终审调用失败但补做产出已在手(提交 2 部分成果兜底):不再整体丢成果
-                        Err(e) => {
-                            return Ok((
-                                fallback_terminal(&plan, format!("终审调用失败:{e}")),
-                                total,
-                            ))
+            // SKY-5:补做轮末执行器复查(2026-10-24)。补做是否真的修好了,不再等终审:
+            // 先按最终 plan 重算「必需文件缺失 + 内容体检 + 静态接线 + 单文件外链」。
+            // 仍有确定性问题时直接跳过终审——任务终态必然是 partial(交付门槛同源),
+            // 再花一次 16K+ 的结构化调用没有信息增量。无问题时维持既有终审。
+            let recheck_required = super::delivery::required_from_plan(&plan);
+            let recheck_problems: Vec<String> = match ctx.scope.as_ref() {
+                Some(scope) => {
+                    let ws = scope.workspace();
+                    let mut problems: Vec<String> =
+                        super::delivery::missing_files(ws, &recheck_required)
+                            .into_iter()
+                            .map(|path| format!("缺少必需文件:{path}"))
+                            .collect();
+                    problems.extend(super::delivery::content_issues(
+                        ws,
+                        &recheck_required,
+                        &ctx.goal,
+                    ));
+                    problems
+                }
+                None => Vec::new(),
+            };
+            if !recheck_problems.is_empty() {
+                let detail = recheck_problems.join(";");
+                svc.emit_event(
+                    TaskEventKind::Status,
+                    &ctx.task_id,
+                    None,
+                    None,
+                    Some(format!("补做后交付内容复查未通过:{detail}")),
+                );
+                final_pass = false;
+                final_conclusion =
+                    format!("补做后交付内容复查未通过:{detail};已跳过终审,任务以 partial 交付。");
+            }
+            if recheck_problems.is_empty() {
+                // 终审:基于补做后的最终产出给出结论文本(空输出兜底回退首次审计结论,
+                // 与审计「增强环节异常不沉任务」同口径)。TMR-2:与首审同款只读工具通道,
+                // 失败回退纯文本。SKY-3:补做可能改动文件,终审前**重新**枚举工作区实况,
+                // 不复用首审时点的清单。
+                let review_manifest = ctx
+                    .scope
+                    .as_ref()
+                    .map(|s| workspace_manifest(s.workspace(), &mains, &ctx.goal))
+                    .unwrap_or_default();
+                let review_input = build_final_review_input(
+                    &ctx.goal,
+                    &mains,
+                    &outputs,
+                    &verdict,
+                    &review_manifest,
+                );
+                let mut review_system = String::from(TEAM_FINAL_AUDIT_PROMPT);
+                review_system.push_str("\n\n");
+                review_system.push_str(team_audit_tool_guidance(ctx.scope.is_some()));
+                let review_out = match super::team_audit::generate_with_readonly_tools(
+                    svc,
+                    &self.engine,
+                    &ctx,
+                    "final_audit",
+                    "终审 agent",
+                    &review_system,
+                    &review_input,
+                    super::team_audit::FINAL_AUDIT_MAX_ROUNDS,
+                    structured_budget(ctx.settings.default_max_tokens),
+                    TEAM_JSON_TEMPERATURE,
+                    &mut total,
+                )
+                .await
+                {
+                    Ok(o) => o,
+                    Err(e) if *ctx.cancel.borrow() => return Err(e),
+                    Err(tool_err) => {
+                        tracing::warn!(
+                            error = tool_err.as_str(),
+                            "team 终审只读工具通道不可用,回退纯文本终审"
+                        );
+                        let review_messages = vec![
+                            LlmMessage::plain("system", &review_system),
+                            LlmMessage::plain("user", &review_input),
+                        ];
+                        match generate_text_healed(
+                            svc,
+                            &ctx.task_id,
+                            "final_audit",
+                            review_messages,
+                            structured_budget(ctx.settings.default_max_tokens),
+                            TEAM_JSON_TEMPERATURE,
+                            ctx.settings.default_top_p,
+                            &ctx.cancel,
+                            &mut total,
+                        )
+                        .await
+                        {
+                            Ok(o) => o,
+                            Err(e) if *ctx.cancel.borrow() => return Err(e),
+                            // 终审调用失败但补做产出已在手(提交 2 部分成果兜底):不再整体丢成果
+                            Err(e) => {
+                                return Ok((
+                                    fallback_terminal(&plan, format!("终审调用失败:{e}")),
+                                    total,
+                                ))
+                            }
                         }
                     }
+                };
+                if *ctx.cancel.borrow() {
+                    return Err("任务已停止".into());
                 }
-            };
-            if *ctx.cancel.borrow() {
-                return Err("任务已停止".into());
-            }
-            // 终审:基于补做后的最终产出做裁定(结构化 JSON);解析失败/空输出按未通过
-            // 兜底(终审是终态闸门,读不出明确通过就不判 done);结论段空输出时回退首次
-            // 审计结论,避免「## 审计结论」段空白
-            let review_verdict = parse_audit(&review_out.text, mains.len());
-            final_pass = review_verdict.pass;
-            if review_out.text.trim().is_empty() {
-                tracing::warn!("team 终审返回空内容,审计结论段回退为首次审计结论");
-            } else {
-                final_conclusion = review_verdict.conclusion;
+                // 终审:基于补做后的最终产出做裁定(结构化 JSON);解析失败/空输出按未通过
+                // 兜底(终审是终态闸门,读不出明确通过就不判 done);结论段空输出时回退首次
+                // 审计结论,避免「## 审计结论」段空白
+                let review_verdict = parse_audit(&review_out.text, mains.len());
+                final_pass = review_verdict.pass;
+                if review_out.text.trim().is_empty() {
+                    tracing::warn!("team 终审返回空内容,审计结论段回退为首次审计结论");
+                } else {
+                    final_conclusion = review_verdict.conclusion;
+                }
             }
         }
 
@@ -1531,7 +1524,7 @@ impl TeamExecutor {
         let summary_manifest = ctx
             .scope
             .as_ref()
-            .map(|s| workspace_manifest(s.workspace(), &mains))
+            .map(|s| workspace_manifest(s.workspace(), &mains, &ctx.goal))
             .unwrap_or_default();
         let summary_input = build_summary_input(
             &ctx.goal,
@@ -2172,6 +2165,7 @@ impl ModeExecutor for TeamExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::task_engine::wiring::extract_exports;
 
     /// 合法拓扑直接解析;过滤空分工/空子目标
     #[test]
@@ -2228,7 +2222,7 @@ mod tests {
             }],
             after: Vec::new(),
         }];
-        let manifest = workspace_manifest(&dir, &mains);
+        let manifest = workspace_manifest(&dir, &mains, "");
 
         assert!(
             manifest.contains("`index.html`:存在("),
@@ -2254,7 +2248,7 @@ mod tests {
 
         // 工作区不存在时不制造假缺失
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(workspace_manifest(&dir, &mains).is_empty());
+        assert!(workspace_manifest(&dir, &mains, "").is_empty());
     }
 
     /// SKY-1:上游产出的接口清单必须由引擎实测,覆盖 ESM 与经典脚本两种形态。
