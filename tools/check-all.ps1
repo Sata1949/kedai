@@ -252,6 +252,10 @@ if (-not $SkipWeb -and -not $AuditOnly) {
         Invoke-Stage 'deps: check-lock-sync'    { node tools/check-lock-sync.mjs }
         # 契约快照:手写 TS 类型与 Rust 后端字段集合比对(漂移即 FAIL,纯 Node 零依赖)
         Invoke-Stage 'contract: check-contract' { node tools/check-contract.mjs }
+        # 设置字段对拍(C-2B):PUT 请求体 / GET 投影 / 连接元素三组字段集合。
+        # `RuntimeSettingsPatch` 是派生类型,本脚本按同一派生规则重算后与 Rust 对拍;
+        # GET 侧比对 `settings_json()` 的手工投影键(只比结构体会漏掉「加了字段忘投影」)。
+        Invoke-Stage 'contract: check-settings-parity' { node tools/check-settings-parity.mjs }
         # 架构护栏自测:check-arch 的检测逻辑(v-model / 动态 import / arch-allow)
         # 用 fixture 覆盖。门禁脚本自身也要有回归网——2026-10-24 审计实测曾出现
         # 只认 `store.x =` 与静态 from 的假阴性。

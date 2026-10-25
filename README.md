@@ -321,7 +321,7 @@ cargo test --manifest-path server-rs/Cargo.toml -j 8
 npm test -w web
 npm run typecheck -w web
 
-# 仓库根:一键全量检查(阶段清单见 MAINTENANCE.md §2;当前 19 个 Invoke-Stage
+# 仓库根:一键全量检查(阶段清单见 MAINTENANCE.md §2;当前 21 个 Invoke-Stage
 #          + 2 个独立审计段)
 npm run check
 ```

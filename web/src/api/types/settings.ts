@@ -266,128 +266,55 @@ export interface PromptPreview {
   warnings: string[];
 }
 
-export interface RuntimeSettingsPatch {
-  openai_base_url?: string;
+/** GET 响应独有、PUT 不接收的派生字段(密钥掩码/布尔)。
+ *  保持文件内常量(不导出):类型 barrel 的运行期导出必须为空(`index.test.ts` 钉死)。 */
+const SETTINGS_GET_ONLY_FIELDS = [
+  'api_key_masked',
+  'has_api_key',
+  'embedding_api_key_masked',
+  'has_embedding_api_key',
+] as const;
+
+/** PUT 独有、GET 响应不返回的写入字段(明文密钥只在写入侧出现)。 */
+const SETTINGS_PATCH_ONLY_FIELDS = ['openai_api_key', 'embedding_api_key'] as const;
+
+/** GET/PUT 同名但线格式不同的字段:patch 侧需重定义(见下方 Overrides)。 */
+const SETTINGS_PATCH_OVERRIDE_FIELDS = [
+  'connections',
+  'active_connection_id',
+  'mvu_model',
+  'mvu_temperature',
+] as const;
+
+type SettingsGetOnlyField = (typeof SETTINGS_GET_ONLY_FIELDS)[number];
+type SettingsPatchOverrideField = (typeof SETTINGS_PATCH_OVERRIDE_FIELDS)[number];
+
+interface RuntimeSettingsPatchOverrides {
+  /** 明文密钥只在写入侧出现;值留空 = 保持现有密钥不变 */
   openai_api_key?: string;
-  model?: string;
+  /** 明文密钥只在写入侧出现;值留空 = 保持现有密钥不变 */
+  embedding_api_key?: string;
   /** 多套连接(**全量数组语义**:数组里没有的 id 即被删除) */
   connections?: ConnectionProfilePatch[];
   /** 默认连接 id(空串 = 清除,由后端回退到第一个启用连接) */
   active_connection_id?: string;
-  default_temperature?: number;
-  default_top_p?: number;
-  default_max_tokens?: number;
-  max_context_tokens?: number;
-  agent_system_prompt?: string;
-  search_endpoint?: string;
-  mvu_vars_position?: string;
-  reflect_prompt?: string;
-  preset_tail_prompt?: string;
-  preset_tail_role?: string;
-  reflect_advice_prompt?: string;
-  reflect_advice_role?: string;
-  /** @deprecated 用 authorization_mode;true → bypass,false → strict */
-  bypass_mode?: boolean;
-  /** 授权模式三档 */
-  authorization_mode?: AuthorizationMode;
-  /** 「始终需授权」清单 */
-  bypass_blacklist?: string[];
-  /** 授权等待超时(秒;30..=1800) */
-  tool_authorization_timeout_secs?: number;
-  /** 任务模式工具策略 */
-  task_tool_policy?: 'all' | 'deny_dangerous' | 'allowlist';
-  /** 任务模式工具白名单 */
-  task_tool_allowlist?: string[];
-  max_tool_rounds?: number;
-  /** 流程动态调用嵌套深度上限(任务侧;1..=5) */
-  max_flow_call_depth?: number;
-  /** 单任务内流程调用次数上限(任务侧;1..=64) */
-  max_flow_calls_per_task?: number;
-  /** 节点默认上下文上限(任务侧;0 = 不裁剪,否则 256..=1048576) */
-  default_node_max_context?: number;
-  /** 工具历史保留轮数(1..=32) */
-  tool_history_keep_rounds?: number;
-  /** 工具历史 token 预算(0 = 禁用;否则 1024..=1048576) */
-  tool_history_budget_tokens?: number;
-  /** 单次生成 token 预算(0 = 关闭;否则 1024..=1e9) */
-  session_token_budget?: number;
-  /** 预算超限动作(warn/stop) */
-  session_budget_action?: 'warn' | 'stop';
-  /** 语义熔断窗口(4..=64) */
-  loop_guard_semantic_window?: number;
-  /** 语义熔断同工具调用次数下限(0 = 关闭;否则 4..=64) */
-  loop_guard_semantic_min_calls?: number;
-  /** 语义熔断输出指纹去重上限(1..=8) */
-  loop_guard_semantic_max_distinct?: number;
-  /** 任务步骤墙钟预算秒数(0 = 关;否则 1..=86400) */
-  task_step_budget_secs?: number;
-  /** 任务级总预算秒数(0 = 关;否则 1..=86400) */
-  task_total_budget_secs?: number;
-  /** 团队任务执行阶段总预算秒数(0 = 关;否则 1..=86400) */
-  task_team_budget_secs?: number;
-  /** 任务空闲超时秒数(0 = 关;否则 601..=86400) */
-  task_idle_timeout_secs?: number;
   /** 变量两步生成独立模型(空串 = 清除回到与正文共用) */
   mvu_model?: string;
   /** 变量两步生成独立温度(0..=2 设置;负值 = 清除回到内置 0.3) */
   mvu_temperature?: number;
-  render_html?: boolean;
-  compaction_mode?: string;
-  compaction_threshold?: number;
-  compaction_keep_recent?: number;
-  compaction_snip_bytes?: number;
-  llm_request_log?: boolean;
-  memory_distill_enabled?: boolean;
-  memory_inject_limit?: number;
-  /** 记忆槽字符预算(0..=20000;0 = 不限制) */
-  memory_inject_char_budget?: number;
-  /** 每角色记忆容量上限(0..=10000;0 = 不淘汰) */
-  memory_max_entries?: number;
-  /** 剧情推演词条同步·角色档(RPFLOW-2;默认 true = 开启;缺省保持不变) */
-  worldbook_sync_character_enabled?: boolean;
-  /** 剧情推演词条同步·全局档(RPFLOW-2;默认 false = 关闭;缺省保持不变) */
-  worldbook_sync_global_enabled?: boolean;
-  /** 向量化开关 */
-  embedding_enabled?: boolean;
-  /** embedding 服务地址(自动补协议与 /v1) */
-  embedding_base_url?: string;
-  /** embedding API Key(留空 = 保持现有不变更) */
-  embedding_api_key?: string;
-  /** embedding 模型名 */
-  embedding_model?: string;
-  /** 向量维度(0 = 自动探测) */
-  embedding_dim?: number;
-  skill_progressive_disclosure?: boolean;
-  subagent_max_depth?: number;
-  subagent_max_concurrency?: number;
-  subagent_result_max_chars?: number;
-  undo_enabled?: boolean;
-  mcp_enabled?: boolean;
-  mcp_servers?: McpServerConfig[];
-  /** 命令执行总开关(阶段 E;缺省保持不变) */
-  exec_enabled?: boolean;
-  /** Android 允许 ROOT 档(缺省保持不变) */
-  exec_allow_root?: boolean;
-  /** Android 允许 Shizuku 档(缺省保持不变) */
-  exec_allow_shizuku?: boolean;
-  /** Android 允许沙箱档(缺省保持不变) */
-  exec_allow_sandbox?: boolean;
-  /** 「视觉与截图」总开关(缺省保持不变;全局字段) */
-  vision_screenshot_enabled?: boolean;
-  /** 任务模式编码能力包开关(默认 false = 关闭;缺省保持不变) */
-  task_coding_bundle_enabled?: boolean;
-  /** 文学能力包开关(默认 false = 关闭;缺省保持不变)。纯扁平字段:即便请求带 mode=task
-   *  也只写扁平(角色扮演侧无覆盖层) */
-  literary_bundle_enabled?: boolean;
-  /** 任务模式文学能力包开关(默认 false = 关闭;缺省保持不变)。扁平 + task 覆盖层 */
-  task_literary_bundle_enabled?: boolean;
-  /** 文学包文风预设(LIT-6;空串 = 不注入;缺省保持不变;未知取值服务端 400) */
-  literary_style_preset?: string;
-  /** 文学包长程一致性推荐档(LIT-7;空串 = 不改变(有快照则恢复);缺省保持不变) */
-  literary_recommend_preset?: string;
-  /** 任务模式默认连接(TM-SET-1;空串 = 清除,跟随默认连接;非空须为已存在且启用的连接) */
-  task_default_connection_id?: string;
 }
+
+/**
+ * PUT /api/settings 的 patch 类型(C-2B 起派生自 `RuntimeSettings`)。
+ *
+ * 不再手写 75 个可选字段:新增设置只在 `RuntimeSettings` 与后端 `UpdateSettingsBody`
+ * 声明,两侧字段集合由 `tools/check-settings-parity.mjs` 双向对拍。三处固有差异
+ * (GET 独有 / PUT 独有 / 同名不同形)由上方常量显式列出,不靠注释约定。
+ */
+export type RuntimeSettingsPatch = Partial<
+  Omit<RuntimeSettings, SettingsGetOnlyField | SettingsPatchOverrideField>
+> &
+  RuntimeSettingsPatchOverrides;
 
 /** 提示词注入模式:简单模式 / 复杂模式(楼层系统) */
 export type InjectMode = 'simple' | 'complex';

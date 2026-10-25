@@ -170,88 +170,13 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
   // ===== 自定义 Agent 执行流程(custom 模式;全局配置) =====
   const agentFlowLibrary = ref<api.AgentFlowLibrary | null>(null);
 
-  /** 加载运行期设置(API 连接 + 生成参数),仅回填本地默认值;按当前 appMode 读取对应合并值 */
-  async function loadSettings(): Promise<void> {
-    try {
-      const s = await api.getSettings(useTaskStore().appMode);
-      // 数值字段兜底默认值:后端异常响应(缺字段/null)不得污染 store 打崩渲染
-      temperature.value = s.default_temperature ?? 0.8;
-      topP.value = s.default_top_p ?? 0.9;
-      maxTokens.value = s.default_max_tokens ?? 1024;
-      maxContextTokens.value = s.max_context_tokens ?? 65536;
-      maxToolRounds.value = s.max_tool_rounds ?? 32;
-      maxFlowCallDepth.value = s.max_flow_call_depth ?? 2;
-      maxFlowCallsPerTask.value = s.max_flow_calls_per_task ?? 8;
-      defaultNodeMaxContext.value = s.default_node_max_context ?? 0;
-      toolHistoryKeepRounds.value = s.tool_history_keep_rounds ?? 4;
-      toolHistoryBudgetTokens.value = s.tool_history_budget_tokens ?? 16384;
-      sessionTokenBudget.value = s.session_token_budget ?? 0;
-      sessionBudgetAction.value = s.session_budget_action === 'stop' ? 'stop' : 'warn';
-      loopGuardSemanticWindow.value = s.loop_guard_semantic_window ?? 16;
-      loopGuardSemanticMinCalls.value = s.loop_guard_semantic_min_calls ?? 12;
-      loopGuardSemanticMaxDistinct.value = s.loop_guard_semantic_max_distinct ?? 2;
-      taskStepBudgetSecs.value = s.task_step_budget_secs ?? 3600;
-      taskTotalBudgetSecs.value = s.task_total_budget_secs ?? 0;
-      taskTeamBudgetSecs.value = s.task_team_budget_secs ?? 1200;
-      taskIdleTimeoutSecs.value = s.task_idle_timeout_secs ?? 900;
-      mvuModel.value = s.mvu_model ?? '';
-      mvuTemperatureInput.value = typeof s.mvu_temperature === 'number' ? String(s.mvu_temperature) : '';
-      agentSystemPrompt.value = s.agent_system_prompt ?? '';
-      searchEndpoint.value = s.search_endpoint ?? '';
-      mvuVarsPosition.value = (s.mvu_vars_position ?? 'system') as 'system' | 'user_tail';
-      reflectPrompt.value = s.reflect_prompt ?? '';
-      presetTailPrompt.value = s.preset_tail_prompt ?? '';
-      presetTailRole.value = s.preset_tail_role === 'assistant' ? 'assistant' : 'user';
-      reflectAdvicePrompt.value = s.reflect_advice_prompt ?? '';
-      reflectAdviceRole.value = s.reflect_advice_role === 'assistant' ? 'assistant' : 'user';
-      taskCodingBundleEnabled.value = s.task_coding_bundle_enabled ?? false;
-      literaryBundleEnabled.value = s.literary_bundle_enabled ?? false;
-      taskLiteraryBundleEnabled.value = s.task_literary_bundle_enabled ?? false;
-      literaryStylePreset.value = s.literary_style_preset ?? '';
-      literaryRecommendPreset.value = s.literary_recommend_preset ?? '';
-      taskDefaultConnectionId.value = s.task_default_connection_id ?? '';
-      authorizationMode.value = readAuthorizationMode(s);
-      authorizationAlwaysRequired.value = Array.isArray(s.bypass_blacklist) ? s.bypass_blacklist : [];
-      toolAuthorizationTimeoutSecs.value = s.tool_authorization_timeout_secs ?? 300;
-      taskToolPolicy.value = s.task_tool_policy ?? 'deny_dangerous';
-      taskToolAllowlist.value = Array.isArray(s.task_tool_allowlist) ? s.task_tool_allowlist : [];
-      // 全局默认变更经回调桥通知 uiPrefs(其内部写 defaultRenderHtml 并按卡记忆重算生效值)
-      notifyRenderHtmlDefault(s.render_html ?? false);
-      compactionMode.value = (s.compaction_mode as 'off' | 'manual' | 'auto') ?? 'off';
-      compactionThreshold.value = s.compaction_threshold ?? 0.8;
-      compactionKeepRecent.value = s.compaction_keep_recent ?? 4;
-      compactionSnipBytes.value = s.compaction_snip_bytes ?? 8192;
-      memoryDistillEnabled.value = s.memory_distill_enabled ?? false;
-      memoryInjectLimit.value = s.memory_inject_limit ?? 8;
-      memoryInjectCharBudget.value = s.memory_inject_char_budget ?? 2000;
-      memoryMaxEntries.value = s.memory_max_entries ?? 200;
-      // 剧情推演词条同步两档(RPFLOW-2):角色档缺字段兜底 true(与后端默认一致)
-      worldbookSyncCharacterEnabled.value = s.worldbook_sync_character_enabled ?? true;
-      worldbookSyncGlobalEnabled.value = s.worldbook_sync_global_enabled ?? false;
-      skillProgressiveDisclosure.value = s.skill_progressive_disclosure ?? true;
-      subagentMaxDepth.value = s.subagent_max_depth ?? 2;
-      subagentMaxConcurrency.value = s.subagent_max_concurrency ?? 6;
-      subagentResultMaxChars.value = s.subagent_result_max_chars ?? 2000;
-      undoEnabled.value = s.undo_enabled ?? true;
-      mcpEnabled.value = s.mcp_enabled ?? false;
-      mcpServers.value = Array.isArray(s.mcp_servers) ? s.mcp_servers : [];
-      execEnabled.value = s.exec_enabled ?? false;
-      execAllowRoot.value = s.exec_allow_root ?? false;
-      execAllowShizuku.value = s.exec_allow_shizuku ?? false;
-      execAllowSandbox.value = s.exec_allow_sandbox ?? false;
-      visionScreenshotEnabled.value = s.vision_screenshot_enabled ?? false;
-      const modelConn = useModelConnStore();
-      if (!modelConn.model) modelConn.model = s.model;
-    } catch {
-      /* 忽略 */
-    }
-  }
-
-  /** 保存运行期设置(可部分字段;服务端持久化到 data/settings.json);按当前 appMode 写入对应覆盖层 */
-  async function saveSettings(patch: api.RuntimeSettingsPatch): Promise<void> {
-    const res = await api.saveSettings(patch, useTaskStore().appMode);
-    const s = res.settings;
-    // 数值字段兜底默认值(同 loadSettings)
+  /**
+   * 把整份运行期设置回填到 store(load 与 save 响应用同一条路径)。
+   *
+   * 数值/枚举字段统一兜底默认值:后端异常响应(缺字段/null)不得污染 store 打崩渲染。
+   * `model` 不在本函数内:load 只在为空时回填、save 无条件覆盖,两种语义由调用方各自处理。
+   */
+  function applyRuntimeSettings(s: api.RuntimeSettings): void {
     temperature.value = s.default_temperature ?? 0.8;
     topP.value = s.default_top_p ?? 0.9;
     maxTokens.value = s.default_max_tokens ?? 1024;
@@ -272,8 +197,8 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     taskTeamBudgetSecs.value = s.task_team_budget_secs ?? 1200;
     taskIdleTimeoutSecs.value = s.task_idle_timeout_secs ?? 900;
     mvuModel.value = s.mvu_model ?? '';
-    mvuTemperatureInput.value = typeof s.mvu_temperature === 'number' ? String(s.mvu_temperature) : '';
-    useModelConnStore().model = s.model;
+    mvuTemperatureInput.value =
+      typeof s.mvu_temperature === 'number' ? String(s.mvu_temperature) : '';
     agentSystemPrompt.value = s.agent_system_prompt ?? '';
     searchEndpoint.value = s.search_endpoint ?? '';
     mvuVarsPosition.value = (s.mvu_vars_position ?? 'system') as 'system' | 'user_tail';
@@ -289,10 +214,13 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     literaryRecommendPreset.value = s.literary_recommend_preset ?? '';
     taskDefaultConnectionId.value = s.task_default_connection_id ?? '';
     authorizationMode.value = readAuthorizationMode(s);
-    authorizationAlwaysRequired.value = Array.isArray(s.bypass_blacklist) ? s.bypass_blacklist : [];
+    authorizationAlwaysRequired.value = Array.isArray(s.bypass_blacklist)
+      ? s.bypass_blacklist
+      : [];
     toolAuthorizationTimeoutSecs.value = s.tool_authorization_timeout_secs ?? 300;
     taskToolPolicy.value = s.task_tool_policy ?? 'deny_dangerous';
     taskToolAllowlist.value = Array.isArray(s.task_tool_allowlist) ? s.task_tool_allowlist : [];
+    // 全局默认变更经回调桥通知 uiPrefs(其内部写 defaultRenderHtml 并按卡记忆重算生效值)
     notifyRenderHtmlDefault(s.render_html ?? false);
     compactionMode.value = (s.compaction_mode as 'off' | 'manual' | 'auto') ?? 'off';
     compactionThreshold.value = s.compaction_threshold ?? 0.8;
@@ -302,7 +230,7 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     memoryInjectLimit.value = s.memory_inject_limit ?? 8;
     memoryInjectCharBudget.value = s.memory_inject_char_budget ?? 2000;
     memoryMaxEntries.value = s.memory_max_entries ?? 200;
-    // 剧情推演词条同步两档(RPFLOW-2):与 loadSettings 同口径回填
+    // 剧情推演词条同步两档(RPFLOW-2):角色档缺字段兜底 true(与后端默认一致)
     worldbookSyncCharacterEnabled.value = s.worldbook_sync_character_enabled ?? true;
     worldbookSyncGlobalEnabled.value = s.worldbook_sync_global_enabled ?? false;
     skillProgressiveDisclosure.value = s.skill_progressive_disclosure ?? true;
@@ -317,6 +245,26 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     execAllowShizuku.value = s.exec_allow_shizuku ?? false;
     execAllowSandbox.value = s.exec_allow_sandbox ?? false;
     visionScreenshotEnabled.value = s.vision_screenshot_enabled ?? false;
+  }
+
+  /** 加载运行期设置(API 连接 + 生成参数),仅回填本地默认值;按当前 appMode 读取对应合并值 */
+  async function loadSettings(): Promise<void> {
+    try {
+      const s = await api.getSettings(useTaskStore().appMode);
+      applyRuntimeSettings(s);
+      const modelConn = useModelConnStore();
+      if (!modelConn.model) modelConn.model = s.model;
+    } catch {
+      /* 忽略 */
+    }
+  }
+
+  /** 保存运行期设置(可部分字段;服务端持久化到 data/settings.json);按当前 appMode 写入对应覆盖层 */
+  async function saveSettings(patch: api.RuntimeSettingsPatch): Promise<void> {
+    const res = await api.saveSettings(patch, useTaskStore().appMode);
+    const s = res.settings;
+    useModelConnStore().model = s.model;
+    applyRuntimeSettings(s);
   }
 
   // 设置写入统一串行,避免 renderHtml 自动保存与设置面板保存交错回写旧响应。
