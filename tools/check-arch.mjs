@@ -169,6 +169,14 @@ const UI_FLAG_WHITELIST = new Set([
   'globalError',
 ]);
 
+/**
+ * 组件直改 store state 的分类计数基线(2026-10-25 C-2E 实测 113:
+ * UI 白名单 48 + 设置表单文件级 arch-allow-file 65 + 行级 arch-allow 0)。
+ * 只降不升:新增直写请走 store action;确需新增豁免,必须在本批显式下调
+ * 其它处或调整基线并在提交正文说明,禁止无声放宽。
+ */
+const BASELINE_DIRECT_WRITES = 113;
+
 // ---------- 工具 ----------
 
 const isTest = (f) => /\.test\.ts$/.test(f);
@@ -306,9 +314,14 @@ for (const file of collectVue(SRC)) {
     );
   }
 }
+if (writeHits > BASELINE_DIRECT_WRITES) {
+  failures.push(
+    `组件直改 store state 总量新增:${writeHits} 处 > 基线 ${BASELINE_DIRECT_WRITES}(只降不升;新增直写请改走 store action,确需豁免须显式调整基线并在提交正文说明)`,
+  );
+}
 if (VERBOSE) {
   console.log(
-    `  [B] 命中赋值 ${writeHits} 处(UI 白名单 ${whitelisted - fileAllowedHits - lineAllowedHits},arch-allow-file ${fileAllowedHits},arch-allow ${lineAllowedHits},待修 ${writeHits - whitelisted})`,
+    `  [B] 命中赋值 ${writeHits} 处(UI 白名单 ${whitelisted - fileAllowedHits - lineAllowedHits},arch-allow-file ${fileAllowedHits},arch-allow ${lineAllowedHits},待修 ${writeHits - whitelisted};基线 ${BASELINE_DIRECT_WRITES},只降不升)`,
   );
 }
 
@@ -1096,7 +1109,7 @@ if (frontendFailures.length) {
 }
 console.log(`store 循环依赖:${cycles.length} 个(新增 ${newCycles})`);
 console.log(
-  `组件直改 state:${writeHits} 处(UI 白名单 ${whitelisted - fileAllowedHits - lineAllowedHits}，arch-allow ${lineAllowedHits}，arch-allow-file ${fileAllowedHits}，待修 ${writeHits - whitelisted})`,
+  `组件直改 state:${writeHits} 处(UI 白名单 ${whitelisted - fileAllowedHits - lineAllowedHits}，arch-allow ${lineAllowedHits}，arch-allow-file ${fileAllowedHits}，待修 ${writeHits - whitelisted}；基线 ${BASELINE_DIRECT_WRITES}，只降不升)`,
 );
 const wiringNotes = notes.filter((n) => n.kind === 'wiring');
 const debtNotes = notes.filter((n) => n.kind === 'debt');
