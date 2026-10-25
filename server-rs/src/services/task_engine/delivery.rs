@@ -93,6 +93,29 @@ pub(crate) fn required_from_plan(plan: &[TaskStep]) -> Vec<(String, String)> {
     out
 }
 
+/// 从 plan 提取交付必需文件：单文件目标只认**最后一个**声明的 HTML 入口。
+///
+/// SKY-8（2026-10-24）：单文件交付里 `src/shell.html` 之类的模板/分片是**中间产物**，
+/// 不是交付必需项；若把它们一并纳入必需清单，模板里合法的 `@@` 槽位会把整个任务
+/// 误判 partial。非单文件目标仍返回全部声明文件（TMR-6 原口径）。
+pub(crate) fn required_from_plan_for_goal(plan: &[TaskStep], goal: &str) -> Vec<(String, String)> {
+    let all = required_from_plan(plan);
+    if !wiring::single_file_requested(goal) {
+        return all;
+    }
+    let last_html = all
+        .iter()
+        .rfind(|(path, _)| {
+            let lower = path.to_ascii_lowercase();
+            lower.ends_with(".html") || lower.ends_with(".htm")
+        })
+        .cloned();
+    match last_html {
+        Some(item) => vec![item],
+        None => all,
+    }
+}
+
 /// 必需文件中缺失的路径。
 ///
 /// 工作区不可访问时**不产生缺失结论**(返回空):此时无法区分「文件缺失」与
@@ -261,7 +284,7 @@ pub(crate) fn summarize(
     changed_count: usize,
     goal: &str,
 ) -> TaskDeliverySummary {
-    let required = required_from_plan(plan);
+    let required = required_from_plan_for_goal(plan, goal);
     let workspace_available = workspace.is_dir();
     let missing = missing_files(workspace, &required);
     let content_issues = content_issues(workspace, &required, goal);
@@ -962,5 +985,29 @@ mod tests {
             None,
             "工作区不可访问时必须返回 None(无法判定),不得制造缺失"
         );
+    }
+
+    /// SKY-8:单文件目标只把最后一个 HTML 当交付必需项;中间模板/分片不进必需清单。
+    #[test]
+    fn required_from_plan_for_single_file_picks_last_html_entry() {
+        let step = |name: &str, files: &[&str]| TaskStep {
+            name: name.into(),
+            goal: String::new(),
+            status: TaskStepStatus::Pending,
+            result: String::new(),
+            node_id: None,
+            files: files.iter().map(|s| s.to_string()).collect(),
+        };
+        let plan = vec![
+            step("shell", &["src/shell.html"]),
+            step("inline", &["index.html", "parts/a.js"]),
+        ];
+        assert_eq!(required_from_plan(&plan).len(), 3, "全量口径不变");
+        let single =
+            required_from_plan_for_goal(&plan, "最终只交付一个 HTML 文件(自包含 index.html)");
+        assert_eq!(single.len(), 1, "单文件目标只认最终入口: {single:?}");
+        assert_eq!(single[0].0, "index.html");
+        let multi = required_from_plan_for_goal(&plan, "普通多文件项目");
+        assert_eq!(multi.len(), 3, "非单文件目标仍检查全部声明文件");
     }
 }

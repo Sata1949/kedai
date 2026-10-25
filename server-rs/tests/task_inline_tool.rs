@@ -71,7 +71,7 @@ const TITLE: &str = concat!(
     r#"{"name":"写 a","goal":"\u005b\u005btool:fs_write {\"path\":\"parts/a.js\",\"content\":\"window.A=1;\"}\u005d\u005d 写分片 A","files":["parts/a.js"]},"#,
     r#"{"name":"写 b","goal":"\u005b\u005btool:fs_write {\"path\":\"parts/b.js\",\"content\":\"window.B=2;\"}\u005d\u005d 写分片 B","files":["parts/b.js"]}"#,
     r#"]},"#,
-    r#"{"name":"总装主","after":[0],"goals":["#,
+    r#"{"name":"总装主","after":[1],"goals":["#,
     r#"{"name":"总装","goal":"\u005b\u005btool:fs_inline_html {\"path\":\"index.html\",\"sources\":[\"parts/a.js\",\"parts/b.js\"],\"title\":\"装配\"}\u005d\u005d 总装入口","files":["index.html"]}"#,
     r#"]}"#,
     r#"]}]]"#,

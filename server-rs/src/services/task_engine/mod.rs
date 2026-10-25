@@ -403,7 +403,7 @@ impl TaskEngine {
                 let terminal = if let Some(baseline) = change_baseline {
                     let changed = self.svc.file_change_count(&task.id) > baseline;
                     let final_plan = self.svc.get(&task.id).map(|t| t.plan).unwrap_or_default();
-                    let required = delivery::required_from_plan(&final_plan);
+                    let required = delivery::required_from_plan_for_goal(&final_plan, &goal_text);
                     let workspace = task.workspace.as_deref().map(std::path::Path::new);
                     let missing = workspace
                         .map(|ws| delivery::missing_files(ws, &required))

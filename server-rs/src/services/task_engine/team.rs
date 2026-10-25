@@ -648,6 +648,9 @@ fn is_integration_main(mains: &[TeamMain], index: usize) -> bool {
 /// - **预算收尾**:声明文件有缺失/空/未替换槽位 → `partial`;否则 `done`
 ///   (TMR-3 既有语义不变);
 /// - 未声明文件或工作区不可访问:保持旧语义(守卫→partial,预算→done),不制造假判定。
+/// - **单文件目标**:声明了 HTML 但不是最终入口的**中间模板**步骤,以最终入口的
+///   磁盘事实为准——最终入口干净 → done;入口缺失/不干净 → partial。模板里的 `@@`
+///   不再单独把中间步骤判死(模板是中间产物,最终入口才是交付物)。
 ///
 /// 只查本步 `TaskStep.files` 的存在/空/`@@`,不递归查导入——上游文件可能尚未落盘,
 /// 递归接线留给任务终态的 `delivery.content_issues`。
@@ -657,8 +660,38 @@ fn step_outcome(
     text: &str,
     guard_stopped: Option<&str>,
     budget_stopped: bool,
+    final_entry: Option<&str>,
 ) -> (TaskStepStatus, String) {
     let text = text.trim_end();
+    if let Some(final_rel) = final_entry {
+        let step_has_html = step.files.iter().any(|file| {
+            let lower = file.to_ascii_lowercase();
+            lower.ends_with(".html") || lower.ends_with(".htm")
+        });
+        let step_has_final = step
+            .files
+            .iter()
+            .any(|file| normalize_workspace_rel(file).as_deref() == Some(final_rel));
+        if step_has_html && !step_has_final {
+            let final_ok = workspace
+                .and_then(|ws| super::delivery::step_files_unmet(ws, &[final_rel.to_string()]))
+                .map(|issues| issues.is_empty())
+                .unwrap_or(false);
+            let note = if final_ok {
+                "[单文件交付] 中间模板不作为交付必需项；最终入口已就绪，按完成计。"
+            } else {
+                "[单文件交付] 最终入口缺失或内容未通过；该中间步骤仍未完成。"
+            };
+            return (
+                if final_ok {
+                    TaskStepStatus::Done
+                } else {
+                    TaskStepStatus::Partial
+                },
+                step_result_with_note(text, note),
+            );
+        }
+    }
     let unmet = workspace.and_then(|ws| super::delivery::step_files_unmet(ws, &step.files));
     if let Some(reason) = guard_stopped {
         match unmet {
@@ -821,6 +854,103 @@ fn upstream_seed_for(
         }
     }
     out
+}
+
+/// 依赖主声明的上游文件路径（去重、保持 plan 顺序）。供集成主预置骨架使用。
+fn upstream_files_for(
+    mains: &[TeamMain],
+    step_ranges: &[Vec<usize>],
+    plan: &[TaskStep],
+    main_index: usize,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let Some(main) = mains.get(main_index) else {
+        return out;
+    };
+    for &dep in &main.after {
+        let Some(range) = step_ranges.get(dep) else {
+            continue;
+        };
+        for &si in range {
+            let Some(step) = plan.get(si) else {
+                continue;
+            };
+            for file in &step.files {
+                if !out.iter().any(|existing| existing == file) {
+                    out.push(file.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 集成主启动前预置单文件最终入口（SKY-8 全题复跑兜底；见 `assemble_pre_seed`）。
+///
+/// 只在「单文件目标 + 有上游分片 + 本主声明了 HTML 入口」时触发；已有入口不覆盖。
+/// 返回给目标文本的说明（也作为 AgentStatus 事件透出）；预置失败返回 None，模型
+/// 仍可用 `fs_inline_html` 自行装配。
+fn pre_seed_single_file(
+    ctx: &TaskRunContext,
+    scope: Option<&Arc<crate::models::types::ExecScope>>,
+    declared_files: &[String],
+    upstream_files: &[String],
+) -> Option<String> {
+    if !single_file_requested(&ctx.goal) || upstream_files.is_empty() {
+        return None;
+    }
+    // 取**最后一个** HTML：单文件目标里 `src/shell.html` 之类模板可能先声明，
+    // 最终入口按 plan 顺序在后（与 `required_from_plan_for_goal` 同口径）。
+    let html = declared_files
+        .iter()
+        .rfind(|file| {
+            let lower = file.to_ascii_lowercase();
+            lower.ends_with(".html") || lower.ends_with(".htm")
+        })
+        .cloned()?;
+    // 必须用本主**派生后的 scope**（带 owner/声明文件），不能用 ctx 的 base scope：
+    // 否则 reserve_write 会因「声明归属 ≠ 空 owner」拒绝预置（全题复跑前的实测）。
+    let scope = scope?;
+    let workspace = scope.workspace();
+    let out_path = workspace.join(&html);
+    if out_path.is_file() {
+        return Some(format!(
+            "引擎检测到最终入口 {html} 已存在:请先 fs_read 核对,再用 fs_edit 或 fs_inline_html 补全入口调用;不要重写整份内联。"
+        ));
+    }
+    let include_three = ctx.goal.to_ascii_lowercase().contains("three");
+    let (text, count) = crate::tools::agent_tools_fs_inline::assemble_pre_seed(
+        workspace,
+        &html,
+        upstream_files,
+        "Kedai 单文件交付（引擎预置骨架）",
+        include_three,
+    )
+    .ok()?;
+    if let Err(reason) = scope.reserve_write(&out_path) {
+        tracing::warn!(
+            path = html.as_str(),
+            reason = reason.as_str(),
+            "预置骨架被所有权拒绝"
+        );
+        return None;
+    }
+    if let Err(error) = crate::utils::fs_atomic::write_atomic(&out_path, text.as_bytes()) {
+        tracing::warn!(path = html.as_str(), error = %error, "预置骨架写入失败");
+        return None;
+    }
+    if let Ok(stamp) = crate::models::types::ExecScope::stamp_of(&out_path) {
+        scope.note_read(&out_path, stamp);
+    }
+    Some(format!(
+        "引擎已在工作区预置最终入口 {html}({} 字节,内联 {count} 个上游分片{}):请先 fs_read 核对,再用 fs_edit 或 fs_inline_html 补全入口调用;不要重写整份内联。",
+        text.len(),
+        if include_three {
+            ",已带 Three.js CDN"
+        } else {
+            ""
+        }
+    ))
 }
 
 /// 解析审计输出:{"通过":bool,"打回":[{"main":1-based 序号,"step":主内 1-based 子目标
@@ -1164,6 +1294,8 @@ impl TeamExecutor {
         goal_filter: Option<&[usize]>,
         prior_seed: Vec<(String, String)>,
         upstream_seed: Vec<(String, String)>,
+        // SKY-8:依赖主声明的上游文件路径(供集成主启动前预置单文件骨架)。
+        upstream_files: Vec<String>,
         deadline_reason: &'static str,
         // SKY-7:是否豁免两个计数守卫。判定由调用方按「依赖 DAG 汇点」算出
         // (见 `is_integration_main`);不要在本函数里按 after 非空自行判定。
@@ -1190,6 +1322,24 @@ impl TeamExecutor {
         // 调用方经 prior_seed 显式种入该主既有产出,否则补做子目标既看不到同主其他成果,
         // 也看不到自己被替换的旧版本,版本冲突会在打回场景原样复现。
         let mut prior: Vec<(String, String)> = prior_seed;
+        // SKY-8:集成主启动前用上游分片预置最终入口。全题复跑里总装主把 24.5 分钟
+        // 花在读分片/写扫描脚本上，最后只交 `src/shell.html`（12 处 @@），
+        // `index.html` 从未落盘；预置让「入口存在」不再依赖模型的长尾行为。
+        // 已有入口时不覆盖（补做轮保留模型自己的版本），只把「核对/补全」写进目标。
+        let pre_seed_note = if integration_main {
+            pre_seed_single_file(ctx, scope.as_ref(), &declared_files, &upstream_files)
+        } else {
+            None
+        };
+        if let Some(note) = &pre_seed_note {
+            self.svc.emit_event(
+                TaskEventKind::AgentStatus,
+                &ctx.task_id,
+                None,
+                None,
+                Some(note.clone()),
+            );
+        }
         for (k, g) in main.goals.iter().enumerate() {
             // 子目标粒度补做:仅重跑被点名的子目标(其余保留首轮产出);
             // 被跳过的子目标仍要入 results(带既有产出)以便调用方统一回写/重建
@@ -1270,6 +1420,11 @@ impl TeamExecutor {
             if single_file_requested(&ctx.goal) && declares_html(&declared_files) {
                 goal.push('\n');
                 goal.push_str(TEAM_SINGLE_FILE_ASSEMBLY_NOTE);
+                goal.push('\n');
+            }
+            if let Some(note) = &pre_seed_note {
+                goal.push('\n');
+                goal.push_str(note);
                 goal.push('\n');
             }
             if let Some(extra) = extra_instruction {
@@ -1590,7 +1745,7 @@ impl TeamExecutor {
             // 先按最终 plan 重算「必需文件缺失 + 内容体检 + 静态接线 + 单文件外链」。
             // 仍有确定性问题时直接跳过终审——任务终态必然是 partial(交付门槛同源),
             // 再花一次 16K+ 的结构化调用没有信息增量。无问题时维持既有终审。
-            let recheck_required = super::delivery::required_from_plan(&plan);
+            let recheck_required = super::delivery::required_from_plan_for_goal(&plan, &ctx.goal);
             let recheck_problems: Vec<String> = match ctx.scope.as_ref() {
                 Some(scope) => {
                     let ws = scope.workspace();
@@ -1867,6 +2022,20 @@ impl TeamExecutor {
         share_reason: &'static str,
     ) -> (Vec<Option<String>>, bool) {
         let svc = &self.svc;
+        // SKY-8:单文件目标的最终入口(plan 里最后一个 HTML)。中间模板步骤的终态
+        // 以它为准,不因模板里的 `@@` 单独判 partial。
+        let final_entry: Option<String> = if single_file_requested(&ctx.goal) {
+            super::delivery::required_from_plan_for_goal(plan, &ctx.goal)
+                .into_iter()
+                .next()
+                .map(|(path, _)| path)
+                .filter(|path| {
+                    let lower = path.to_ascii_lowercase();
+                    lower.ends_with(".html") || lower.ends_with(".htm")
+                })
+        } else {
+            None
+        };
         // 确定本轮要跑的主 agent 子集:(主序号, 补做指令, 限定的子目标下标集)。
         // 子目标下标先按该主实际子目标数过滤:越界/为空 → 退回整主(审计 step 越界
         // 或该主全部被点名时都不至于漏跑或空跑)。
@@ -2087,6 +2256,9 @@ impl TeamExecutor {
                 } else {
                     Vec::new()
                 };
+                // SKY-8:依赖主声明的上游文件(补做轮沿用首轮已落盘的产物,同样可取;
+                // 这里按 plan 现况重算,不依赖 kickbacks)。
+                let upstream_files = upstream_files_for(mains, step_ranges, plan, i);
                 let this = Self {
                     svc: self.svc.clone(),
                     engine: self.engine.clone(),
@@ -2120,6 +2292,7 @@ impl TeamExecutor {
                         goal_filter.as_deref(),
                         prior_seed,
                         upstream_seed,
+                        upstream_files,
                         main_reason,
                         integration_main,
                         ownership,
@@ -2166,6 +2339,7 @@ impl TeamExecutor {
                                 &out.text,
                                 out.guard_stopped.as_deref(),
                                 out.budget_stopped,
+                                final_entry.as_deref(),
                             );
                             plan[si].status = status;
                             plan[si].result = result;
@@ -2484,10 +2658,11 @@ mod tests {
     #[test]
     fn step_outcome_without_declared_files_keeps_old_semantics() {
         let step = step_with_files(&[]);
-        let (status, text) = step_outcome(None, &step, "正文", Some("连续只读空转熔断"), false);
+        let (status, text) =
+            step_outcome(None, &step, "正文", Some("连续只读空转熔断"), false, None);
         assert_eq!(status, TaskStepStatus::Partial);
         assert!(text.contains("[守卫截断]"), "{text}");
-        let (status, text) = step_outcome(None, &step, "正文", None, true);
+        let (status, text) = step_outcome(None, &step, "正文", None, true, None);
         assert_eq!(status, TaskStepStatus::Done);
         assert_eq!(text, "正文");
     }
@@ -2498,8 +2673,14 @@ mod tests {
         let ws = temp_step_ws("guard-complete");
         std::fs::write(ws.join("out.txt"), "hello").expect("写文件失败");
         let step = step_with_files(&["out.txt"]);
-        let (status, text) =
-            step_outcome(Some(&ws), &step, "正文", Some("声明文件无进展收尾"), false);
+        let (status, text) = step_outcome(
+            Some(&ws),
+            &step,
+            "正文",
+            Some("声明文件无进展收尾"),
+            false,
+            None,
+        );
         assert_eq!(status, TaskStepStatus::Done);
         assert!(text.contains("按完成计"), "{text}");
         let _ = std::fs::remove_dir_all(&ws);
@@ -2510,7 +2691,7 @@ mod tests {
     fn step_outcome_budget_stop_with_missing_file_is_partial() {
         let ws = temp_step_ws("budget-missing");
         let step = step_with_files(&["out.txt"]);
-        let (status, text) = step_outcome(Some(&ws), &step, "正文", None, true);
+        let (status, text) = step_outcome(Some(&ws), &step, "正文", None, true, None);
         assert_eq!(status, TaskStepStatus::Partial);
         assert!(text.contains("[预算收尾]"), "{text}");
         assert!(text.contains("out.txt:文件缺失"), "{text}");
@@ -2523,7 +2704,7 @@ mod tests {
         let ws = temp_step_ws("budget-complete");
         std::fs::write(ws.join("out.txt"), "hello").expect("写文件失败");
         let step = step_with_files(&["out.txt"]);
-        let (status, text) = step_outcome(Some(&ws), &step, "正文", None, true);
+        let (status, text) = step_outcome(Some(&ws), &step, "正文", None, true, None);
         assert_eq!(status, TaskStepStatus::Done);
         assert_eq!(text, "正文");
         let _ = std::fs::remove_dir_all(&ws);
@@ -2535,10 +2716,31 @@ mod tests {
         let ws = temp_step_ws("guard-placeholder");
         std::fs::write(ws.join("out.txt"), "a\n/*@@MAIN@@*/\n").expect("写文件失败");
         let step = step_with_files(&["out.txt"]);
-        let (status, text) = step_outcome(Some(&ws), &step, "正文", Some("重复调用熔断"), false);
+        let (status, text) =
+            step_outcome(Some(&ws), &step, "正文", Some("重复调用熔断"), false, None);
         assert_eq!(status, TaskStepStatus::Partial);
         assert!(text.contains("@@ 未替换槽位"), "{text}");
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// SKY-8:单文件目标的中间模板步骤以最终入口为准——入口干净即 done,
+    /// 模板自身的 `@@`/缺失不再单独判死;入口缺失时仍 partial。
+    #[test]
+    fn step_outcome_intermediate_template_uses_final_entry() {
+        let ws = temp_step_ws("single-entry");
+        std::fs::write(ws.join("index.html"), "<html>ok</html>").expect("写入口失败");
+        let step = step_with_files(&["src/shell.html"]);
+        let (status, text) = step_outcome(Some(&ws), &step, "正文", None, true, Some("index.html"));
+        assert_eq!(status, TaskStepStatus::Done);
+        assert!(text.contains("中间模板"), "{text}");
+
+        let ws2 = temp_step_ws("single-entry-missing");
+        let (status, text) =
+            step_outcome(Some(&ws2), &step, "正文", None, true, Some("index.html"));
+        assert_eq!(status, TaskStepStatus::Partial);
+        assert!(text.contains("最终入口"), "{text}");
+        let _ = std::fs::remove_dir_all(&ws);
+        let _ = std::fs::remove_dir_all(&ws2);
     }
 
     /// SKY-7:集成主必须是依赖 DAG 的汇点——链式拓扑只有末端总装主豁免;

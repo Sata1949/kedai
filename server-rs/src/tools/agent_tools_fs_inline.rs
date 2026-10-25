@@ -235,7 +235,7 @@ fn render_shell(
             sources.len()
         ));
     }
-    let mut blocks: Vec<String> = Vec::with_capacity(sources.len());
+    let mut entries: Vec<(String, String)> = Vec::with_capacity(sources.len());
     for value in sources {
         let raw = value
             .as_str()
@@ -251,19 +251,101 @@ fn render_shell(
                 "分片 {raw} 含行首 import/export(ESM),无模板模式只支持经典脚本;请提供 template 显式控制模块边界"
             ));
         }
-        blocks.push(format!("<script>\n{}\n</script>", content.trim_end()));
+        entries.push((raw.to_string(), content));
     }
+    let html = render_classic_shell(&entries, title, false);
+    Ok((html, format!("{} 个分片按顺序内联", entries.len())))
+}
+
+/// 生成经典脚本单文件外壳（工具 sources 模式与 team 预置骨架共用）。
+///
+/// `sources` 为 (工作区相对路径, 内容)；`.css` 进 `<style>`，其余进 `<script>`。
+/// `include_three` 为 true 时在最前面插入 Three.js UMD CDN（远程资源，单文件规则
+/// 允许 CDN；仅用于 team 预置骨架的 Three.js 任务）。
+pub(crate) fn render_classic_shell(
+    sources: &[(String, String)],
+    title: &str,
+    include_three: bool,
+) -> String {
     let title = if title.trim().is_empty() {
         "Kedai 单文件交付"
     } else {
         title.trim()
     };
-    let html = format!(
+    let mut blocks: Vec<String> = Vec::with_capacity(sources.len() + usize::from(include_three));
+    if include_three {
+        blocks.push(
+            "<script src=\"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js\"></script>"
+                .to_string(),
+        );
+    }
+    for (rel, content) in sources {
+        if rel.to_ascii_lowercase().ends_with(".css") {
+            blocks.push(format!("<style>\n{}\n</style>", content.trim_end()));
+        } else {
+            blocks.push(format!("<script>\n{}\n</script>", content.trim_end()));
+        }
+    }
+    format!(
         "<!doctype html>\n<html lang=\"zh-CN\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n<title>{}</title>\n</head>\n<body>\n{}\n</body>\n</html>\n",
         escape_html(title),
         blocks.join("\n")
-    );
-    Ok((html, format!("{} 个分片按顺序内联", blocks.len())))
+    )
+}
+
+/// team 集成主启动前的确定性预置骨架（SKY-8 全题复跑兜底）。
+///
+/// 为什么需要：全题复跑里总装主把 24.5 分钟花在写扫描脚本/读分片上，最后只交
+/// `src/shell.html`（12 处 `@@`），`index.html` 从未落盘。软提醒无法改变这种
+/// 长尾行为，故由引擎在集成主启动前直接用上游分片生成自包含入口；模型后续
+/// 只需核对/补全，即使不写也有可交付的入口。
+///
+/// 边界：只收 `.js`/`.mjs`/`.css` 的**经典脚本**（行首 `import/export` 跳过），
+/// 非文本/缺失文件跳过；不执行 JS、不判断分片顺序之外的语义。返回
+/// `(HTML 文本, 内联分片数)`；没有可用分片或自包含检查失败返回 Err。
+pub(crate) fn assemble_pre_seed(
+    workspace: &Path,
+    output_rel: &str,
+    upstream_files: &[String],
+    title: &str,
+    include_three: bool,
+) -> Result<(String, usize), String> {
+    let mut sources: Vec<(String, String)> = Vec::new();
+    for raw in upstream_files {
+        let Some(rel) = crate::models::ownership::normalize_workspace_rel(raw) else {
+            continue;
+        };
+        if rel == output_rel {
+            continue;
+        }
+        let lower = rel.to_ascii_lowercase();
+        if !(lower.ends_with(".js") || lower.ends_with(".mjs") || lower.ends_with(".css")) {
+            continue;
+        }
+        let path = workspace.join(&rel);
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(content) = read_text(&path, "预置分片", MAX_SOURCE_BYTES) else {
+            continue;
+        };
+        if (lower.ends_with(".js") || lower.ends_with(".mjs")) && has_top_level_esm(&content) {
+            continue;
+        }
+        if content.trim().is_empty() {
+            continue;
+        }
+        sources.push((rel, content));
+    }
+    if sources.is_empty() {
+        return Err("没有可用于预置骨架的经典脚本/CSS 分片".into());
+    }
+    let html = render_classic_shell(&sources, title, include_three);
+    let issues = wiring::single_file_text_issues(output_rel, &html);
+    if !issues.is_empty() {
+        return Err(format!("预置骨架未通过自包含检查:{}", issues.join(";")));
+    }
+    Ok((html, sources.len()))
 }
 
 /// 提取模板槽位名;未闭合/非法字符直接报错(不在装配阶段猜)。
@@ -586,6 +668,47 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("未绑定工作区"), "{err}");
+        let _ = std::fs::remove_dir_all(f.dir.path());
+    }
+
+    /// SKY-8 预置骨架:经典 JS/CSS 按顺序内联,ESM 分片跳过,Three.js CDN 可选;
+    /// 产物必须通过单文件自包含检查。
+    #[test]
+    fn pre_seed_skips_esm_and_can_include_three_cdn() {
+        let f = fixture("pre-seed");
+        std::fs::write(f.ws.join("parts/c.css"), "body { margin: 0; }").expect("写 CSS 失败");
+        std::fs::write(f.ws.join("parts/esm.js"), "export const X = 1;").expect("写 ESM 失败");
+        let files: Vec<String> = [
+            "parts/a.js",
+            "parts/b.js",
+            "parts/c.css",
+            "parts/esm.js",
+            "src/shell.html",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let (html, count) =
+            assemble_pre_seed(&f.ws, "index.html", &files, "预置骨架", true).expect("预置应成功");
+        assert_eq!(count, 3, "ESM/HTML 分片应跳过:{html}");
+        assert!(html.contains("window.A=1;"), "{html}");
+        assert!(html.contains("window.B=2;"), "{html}");
+        assert!(
+            html.contains("<style>\nbody { margin: 0; }\n</style>"),
+            "{html}"
+        );
+        assert!(
+            !html.contains("export const X"),
+            "ESM 分片不得被经典外壳内联:{html}"
+        );
+        assert!(
+            html.contains("three@0.160.0"),
+            "Three.js 任务应带 CDN:{html}"
+        );
+        assert!(
+            wiring::single_file_text_issues("index.html", &html).is_empty(),
+            "预置骨架应通过自包含检查:{html}"
+        );
         let _ = std::fs::remove_dir_all(f.dir.path());
     }
 }
