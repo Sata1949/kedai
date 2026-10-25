@@ -79,7 +79,7 @@ const LINE_BASELINE = {
 
 /**
  * !important 基线(2026-10-02 UIP-9 实测;去注释后计数;只降不升)。
- * 全局域仅 content.css 有 12 处 = 7 条深底正文色双保险(文件尾「置于文件末尾」段)
+ * 全局域仅 content.css 有 10 处 = 5 条深底正文色双保险(文件尾「置于文件末尾」段)
  * + 5 条 prefers-reduced-motion 强制降级(UIP-9 补 delay 归零 +2);新增样式不得引入
  * (用更具体选择器解决)。
  */

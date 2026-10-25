@@ -2,11 +2,11 @@
 /**
  * check-frontend-lint.mjs — 前端类型逃逸 ratchet 护栏(纯 Node 零依赖)。
  *
- * 为什么不用 ESLint:
- *   仓库既有护栏(check-arch / check-contract)统一为「纯 Node 零依赖」风格;引入
- *   eslint + typescript-eslint 会拉入上百个包并改动 package-lock.json,而 build.ps1
- *   的确定性构建依赖该 lockfile。本脚本用同样的零依赖方式达成「只降不升」的 ratchet,
- *   且天然覆盖 .vue(ESLint 需额外配置 vue-eslint-parser 才能做到)。
+ * 与 ESLint 的分工(2026-10-25 C-2E 校正):
+ *   仓库已安装 ESLint 10(flat config + eslint-plugin-vue),`check-all.ps1` 每轮都跑
+ *   `npm run lint -w web` 管代码质量;本脚本仍保留,专门管「类型逃逸」的只降不升
+ *   ratchet(`as never` / `as unknown as` / 非空断言 / `any`),两者互补而非替代。
+ *   本脚本继续保持纯 Node 零依赖,与 check-arch / check-contract 同一风格。
  *
  * 检查项(均为「类型安全被稀释」的迹象):
  *   - `as never` / `as unknown as` —— 断言逃逸,绕过类型检查
