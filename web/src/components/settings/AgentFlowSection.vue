@@ -16,7 +16,7 @@ import { useFlowConnections } from '../../composables/useFlowConnections';
 import { graphHint, isLinearCompat, subFlowSummary, upstreamSummary } from '../../utils/agentFlowGraph';
 import { connectionSummary } from '../../utils/agentFlowConnections';
 import type { ToolPolicyCtx } from '../../utils/agentFlowTools';
-import { loadFlowCanvas } from '../../utils/flowCanvasChunk';
+import { loadFlowCanvas } from './flowCanvasChunk';
 import AgentFlowStepEditor from './AgentFlowStepEditor.vue';
 import SkeletonBlock from '../SkeletonBlock.vue';
 
@@ -29,7 +29,7 @@ const canvasLoadFailed = ref(false);
 const canvasKey = ref(0);
 
 const AgentFlowCanvas = defineAsyncComponent({
-  // 懒加载入口在 utils/flowCanvasChunk(单独成模块 → 失败路径可测,见该文件注释)
+  // 懒加载入口在同目录 flowCanvasChunk(单独成模块 → 失败路径可测,见该文件注释)
   loader: loadFlowCanvas,
   onError(error, retry, fail, attempts) {
     if (attempts <= 1) {

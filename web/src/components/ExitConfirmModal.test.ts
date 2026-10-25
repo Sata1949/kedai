@@ -31,7 +31,7 @@ import { MODALS, MODAL_FLAGS } from '../modals';
 import ExitConfirmModal from './ExitConfirmModal.vue';
 // 源码级接线契约(?raw 由 vite 提供,仓内既有先例:modals.test.ts)
 import appSource from '../App.vue?raw';
-import sidebarSource from './Sidebar.vue?raw';
+import sidebarFooterSource from './sidebar/SidebarFooter.vue?raw';
 import uiSectionSource from './settings/UiSection.vue?raw';
 
 /** 断言存在并收窄类型:替代非空断言 `!`(类型护栏 ratchet 只降不升,禁用 `x!` 逃逸)。
@@ -192,8 +192,8 @@ describe('退出确认的注册表与壳事件接线(源码级契约)', () => {
 
   it('界面上有可见退出入口(侧栏 + 设置「界面」区),都走确认弹窗而非直接退', () => {
     // 侧栏底部按钮
-    expect(sidebarSource, '侧栏应有退出按钮').toContain('退出 Kedai');
-    expect(sidebarSource, '侧栏退出必须打开确认弹窗').toContain('store.exitConfirmOpen = true');
+    expect(sidebarFooterSource, '侧栏应有退出按钮').toContain('退出 Kedai');
+    expect(sidebarFooterSource, '侧栏退出必须打开确认弹窗').toContain('store.exitConfirmOpen = true');
     // 设置 → 界面区
     expect(uiSectionSource, '设置界面区应有退出按钮').toContain('退出 Kedai');
     expect(uiSectionSource, '设置退出必须打开确认弹窗').toContain('store.exitConfirmOpen = true');

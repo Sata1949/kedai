@@ -5,10 +5,13 @@
 // 而直接 mock 组件模块(`vi.mock('./AgentFlowCanvas.vue', () => { throw … })`)会让 vitest
 // 把工厂抛错记成 run 级 unhandled error —— 整轮测试都会因此失败。
 //
+// 放在 components/settings 而非 utils:它动态 import 同层组件,放 utils 会构成
+// L1(utils)→ L3(components)越代边;放这里两边同属 components,方向合法。
+//
 // 返回类型由 `import()` 推断,不写成 `Promise<Component>`:后者会丢掉画布组件的 props
 // 类型检查(vue-tsc 是硬门禁,不能为了测试放宽类型)。
 
 /** 动态 import 画布视图组件 */
 export function loadFlowCanvas() {
-  return import('../components/settings/AgentFlowCanvas.vue');
+  return import('./AgentFlowCanvas.vue');
 }

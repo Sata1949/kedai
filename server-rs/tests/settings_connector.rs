@@ -89,9 +89,28 @@ async fn mock_auto_switches_to_openai_on_save() {
     assert_eq!(status, StatusCode::OK, "更新设置失败: {r}");
     assert_eq!(r["settings"]["default_top_p"], json!(0.7));
     assert_eq!(r["settings"]["max_context_tokens"], json!(65536));
-    // 非法 top_p 被忽略
-    let (_, r3) = send_json(app, "PUT", "/api/settings", json!({ "default_top_p": 5.0 })).await;
-    assert_eq!(r3["settings"]["default_top_p"], json!(0.7));
+    // 非法值统一 400:此前 default_top_p / default_temperature / 枚举字段是静默忽略,
+    // 前端收到 200 会误以为设置已生效;现与严格字段同口径(整批拒绝、不半提交)。
+    let invalid_cases = [
+        (json!({ "default_top_p": 5.0 }), "default_top_p"),
+        (json!({ "default_temperature": 3.0 }), "default_temperature"),
+        (json!({ "mvu_vars_position": "bogus" }), "mvu_vars_position"),
+        (json!({ "preset_tail_role": "system" }), "preset_tail_role"),
+        (
+            json!({ "reflect_advice_role": "system" }),
+            "reflect_advice_role",
+        ),
+    ];
+    for (body, field) in invalid_cases {
+        let (status, r) = send_json(app, "PUT", "/api/settings", body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{field} 非法值应 400: {r}");
+        assert!(
+            r["error"].as_str().unwrap_or_default().contains(field),
+            "{field} 错误文案应点名字段: {r}"
+        );
+    }
+    let (_, after_invalid_values) = send_json(app, "GET", "/api/settings", json!({})).await;
+    assert_eq!(after_invalid_values["default_top_p"], json!(0.7));
 
     // 任一严格字段非法时整批拒绝,前面的合法字段也不得半提交。
     let (invalid_status, invalid) = send_json(
@@ -108,6 +127,23 @@ async fn mock_auto_switches_to_openai_on_save() {
         .contains("max_tool_rounds"));
     let (_, after_invalid) = send_json(app, "GET", "/api/settings", json!({})).await;
     assert_eq!(after_invalid["default_top_p"], json!(0.7));
+
+    // 本次 5 个字段自身也参与整批原子性:合法 default_top_p 不得随非法枚举半提交
+    // (上面的混合批用的是 max_tool_rounds,不能直接证明这 5 个字段的校验发生在落盘前)。
+    let (invalid_status, invalid) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({ "default_top_p": 0.4, "preset_tail_role": "system" }),
+    )
+    .await;
+    assert_eq!(invalid_status, StatusCode::BAD_REQUEST);
+    assert!(invalid["error"]
+        .as_str()
+        .unwrap()
+        .contains("preset_tail_role"));
+    let (_, after_invalid_enum) = send_json(app, "GET", "/api/settings", json!({})).await;
+    assert_eq!(after_invalid_enum["default_top_p"], json!(0.7));
 
     // 保存 API 地址 + Key + 模型 → 自动切换到 openai-compatible,配置生效
     let (status, r) = send_json(

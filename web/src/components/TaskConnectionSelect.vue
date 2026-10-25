@@ -53,10 +53,16 @@ async function loadAndValidate(): Promise<void> {
   resetNotice.value = '';
   const id = taskConnectionId.value;
   if (id && !conn.options.value.some((o) => o.id === id)) {
-    taskConnectionId.value = '';
+    store.setTaskConnectionId('');
     resetNotice.value = '原选择的连接已不存在，已重置为默认连接。';
   }
 }
+
+/** 本地可写代理:v-model 保留 SSR selected 语义,写入仍走 store action。 */
+const connectionModel = computed({
+  get: () => taskConnectionId.value,
+  set: (id: string) => store.setTaskConnectionId(id),
+});
 
 /**
  * 用户手动改选后撤下重置提示(只在选中了具体连接时撤:
@@ -84,7 +90,7 @@ watch(settingsOpen, (open, prev) => {
   <div>
     <div class="sv-inp-row">
       <select
-        v-model="taskConnectionId"
+        v-model="connectionModel"
         class="sv-select"
         title="本任务所有模型调用走哪一套 API 连接(节点级连接优先);默认 = 跟随「任务模式默认连接」,该连接也未配置时用默认连接。创建任务时后端会校验所选连接存在且已启用"
       >

@@ -252,6 +252,10 @@ if (-not $SkipWeb -and -not $AuditOnly) {
         Invoke-Stage 'deps: check-lock-sync'    { node tools/check-lock-sync.mjs }
         # 契约快照:手写 TS 类型与 Rust 后端字段集合比对(漂移即 FAIL,纯 Node 零依赖)
         Invoke-Stage 'contract: check-contract' { node tools/check-contract.mjs }
+        # 架构护栏自测:check-arch 的检测逻辑(v-model / 动态 import / arch-allow)
+        # 用 fixture 覆盖。门禁脚本自身也要有回归网——2026-10-24 审计实测曾出现
+        # 只认 `store.x =` 与静态 from 的假阴性。
+        Invoke-Stage 'arch: check-arch self-test' { node --test tools/check-arch.test.mjs }
         # 架构护栏:前端 store 循环依赖(A) + 组件直改 state(B) + 后端分层规则 C/D/E/G
         # + EJS 能力面冻结(H) + 代际归属 I + 跨代依赖方向 J(2026-09-14 新增)。
         # 全部规则均为硬门禁:违规即 exit 1;C/D/E 已于 2026-09-13 清零,

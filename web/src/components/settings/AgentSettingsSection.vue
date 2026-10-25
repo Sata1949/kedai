@@ -1,4 +1,5 @@
 <script setup lang="ts">
+// arch-allow-file: 设置表单以 v-model 直写 store 草稿,保存统一走 queueSettingsSave;逐字段 action 只增加转发层。
 // 设置区:Agent 设置(系统提示词/搜索端点/变量注入位置/反思提示词 + 主 Agent 提示词 + 最终提示词预览)。
 // 从 SettingsModal.vue 双模板合并而来:取 embedded 超集版本(standalone 分支缺失
 // 「最终提示词预览」块,属模板漂移,合并后 standalone 一并补上)。

@@ -17,7 +17,7 @@
 #   .\start.ps1 -NoRebuild   # 跳过自动重建,直接用现有产物启动(快速启动)
 #   .\start.ps1 -DryRun      # 只打印检测结果(选中的产物/是否需要构建)后退出
 #
-# 注意:正式版与测试版共用端口 3001 与同一数据目录,请勿同时运行。
+# 注意:正式版与测试版共用端口(PORT 环境变量,默认 3001)与同一数据目录,请勿同时运行。
 
 param(
     [switch]$NoBrowser,
@@ -31,6 +31,36 @@ param(
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $Root "tools\Write-BuildStamp.ps1")
+
+# ===================== 端口解析(与服务端/launcher 同源) =====================
+# 优先级与 launcher/src/main.rs 的 resolve_port 一致:PORT 环境变量 → 根 .env → 3001。
+# **非法值继续回落**(不是「非法即 3001」):launcher 在 PORT 解析失败时会读 .env,
+# 启动脚本若直接回 3001,就会与真正启动的服务端端口分叉。
+# 旧实现 8 处硬编码 3001,用户设 PORT 后健康检查/打开浏览器/旧实例检测全部对着错端口。
+function Resolve-KedaiPort {
+    $candidates = @()
+    if (-not [string]::IsNullOrWhiteSpace($env:PORT)) {
+        $candidates += $env:PORT
+    }
+    $envFile = Join-Path $Root ".env"
+    if (Test-Path $envFile) {
+        foreach ($line in Get-Content $envFile -ErrorAction SilentlyContinue) {
+            if ($line -match '^\s*(?:export\s+)?PORT\s*=\s*(.+?)\s*$') {
+                # 与 launcher::parse_port 同口径:去掉行尾注释与引号
+                $candidates += ($Matches[1] -split '#', 2)[0].Trim().Trim('"').Trim("'")
+                break
+            }
+        }
+    }
+    foreach ($raw in $candidates) {
+        $parsed = 0
+        if ([int]::TryParse($raw, [ref]$parsed) -and $parsed -ge 1 -and $parsed -le 65535) {
+            return $parsed
+        }
+    }
+    return 3001
+}
+$Port = Resolve-KedaiPort
 
 # ===================== 源码过期检测 =====================
 # 分源扫描:web 源码只决定 web/dist 的新鲜度,后端/壳源码只决定 kedai-server / 便携版
@@ -131,7 +161,7 @@ if ($Portable) {
     Write-Host "[启动] $PortableExe" -ForegroundColor Green
     Start-Process -FilePath $PortableExe -WorkingDirectory (Split-Path $PortableExe)
     Write-Host "[OK] 正式版已启动;数据与日志位于 %APPDATA%\com.kedai.app。" -ForegroundColor Green
-    Write-Host "[提示] 正式版与测试版共用端口 3001 与数据目录,运行正式版前请关闭测试版。" -ForegroundColor Yellow
+    Write-Host "[提示] 正式版与测试版共用端口 $Port 与数据目录,运行正式版前请关闭测试版。" -ForegroundColor Yellow
     exit 0
 }
 
@@ -159,7 +189,7 @@ Write-Host "========== Kedai Browser Dev ==========" -ForegroundColor Cyan
 # 健康检查:服务是否已在运行(须在下方构建分支调用前定义)
 function Test-ServerRunning {
     try {
-        $resp = Invoke-WebRequest -Uri "http://127.0.0.1:3001/api/health" -UseBasicParsing -TimeoutSec 2
+        $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/api/health" -UseBasicParsing -TimeoutSec 2
         return $resp.StatusCode -eq 200
     } catch { return $false }
 }
@@ -181,6 +211,7 @@ if (-not $NeedBuild -and -not $NoRebuild) {
     }
 }
 if ($DryRun) {
+    Write-Host "[DryRun] port=$Port"
     Write-Host "[DryRun] server=$ServerExe"
     Write-Host "[DryRun] debug=$IsDebugServer"
     Write-Host "[DryRun] webDist=$WebDist"
@@ -200,13 +231,13 @@ if ($NeedBuild) {
     $IsDebugServer = [bool]($ServerExe -and ($ServerExe -like "*\target\debug\*"))
     # 重建后端口仍被旧实例占用 → 旧服务还在提供旧版本,静默复用会让本次重建白做。
     if (Test-ServerRunning) {
-        Write-Host "[警告] 刚完成重建,但 3001 端口仍被旧服务实例占用——浏览器拿到的仍是旧版本。" -ForegroundColor Yellow
+        Write-Host "[警告] 刚完成重建,但 $Port 端口仍被旧服务实例占用——浏览器拿到的仍是旧版本。" -ForegroundColor Yellow
         $answer = Read-Host "是否结束占用端口的旧 Kedai 进程(kedai-server.exe / Kedai.exe)并继续启动新版?(Y/N)"
         if ($answer -match '^[Yy]') {
             Get-Process -Name 'kedai-server', 'Kedai', 'kedai-portable' -ErrorAction SilentlyContinue | Stop-Process -Force
             Start-Sleep -Milliseconds 800
             if (Test-ServerRunning) {
-                throw "旧进程已结束但 3001 端口仍被占用,请检查是否有其它程序占用该端口"
+                throw "旧进程已结束但 $Port 端口仍被占用,请检查是否有其它程序占用该端口"
             }
             Write-Host "[OK] 旧进程已结束,继续启动新版本" -ForegroundColor Green
         } else {
@@ -243,13 +274,13 @@ if (-not (Test-ServerRunning)) {
         Write-Host "[错误] 服务未能就绪,请查看 logs/ 目录。" -ForegroundColor Red
         exit 1
     }
-    Write-Host "[OK] 服务已就绪 → http://127.0.0.1:3001" -ForegroundColor Green
+    Write-Host "[OK] 服务已就绪 → http://127.0.0.1:$Port" -ForegroundColor Green
 } else {
-    Write-Host "[OK] 服务已在运行 → http://127.0.0.1:3001" -ForegroundColor Green
+    Write-Host "[OK] 服务已在运行 → http://127.0.0.1:$Port" -ForegroundColor Green
 }
 
 if (-not $NoBrowser) {
-    Start-Process "http://127.0.0.1:3001/"
+    Start-Process "http://127.0.0.1:$Port/"
 }
 
 Write-Host "==================================" -ForegroundColor Cyan

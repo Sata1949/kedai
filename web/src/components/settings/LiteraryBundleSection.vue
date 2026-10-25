@@ -1,4 +1,5 @@
 <script setup lang="ts">
+// arch-allow-file: 设置表单以草稿 ref 直写 store(保存失败回滚),保存统一走 queueSettingsSave;逐字段 action 只增加转发层。
 // 设置区:文学能力包(默认关;须用户显式开启)。LIT-1 起为双开关骨架,LIT-6/LIT-7 起
 // 再挂两个选择型控件:
 //   ① 角色扮演侧开关——纯扁平字段(该侧无覆盖层),经任一模式写入都直写扁平;

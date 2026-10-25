@@ -69,18 +69,18 @@ const UI_NOUNS = [
   { term: 'Agent 状态', file: 'components/AgentPanel.vue' },
   { term: '调用情况', file: 'components/AgentPanel.vue' },
   // 侧栏与移动端导航
-  { term: '导入角色卡', file: 'components/Sidebar.vue' },
-  { term: '搜索角色', file: 'components/Sidebar.vue' },
-  { term: '下达目标', file: 'components/Sidebar.vue' },
-  { term: '角色扮演', file: 'components/Sidebar.vue' },
+  { term: '导入角色卡', file: 'components/sidebar/SidebarFooter.vue' },
+  { term: '搜索角色', file: 'components/sidebar/CharacterListPanel.vue' },
+  { term: '下达目标', file: 'components/sidebar/TaskComposer.vue' },
+  { term: '角色扮演', file: 'components/sidebar/SidebarTop.vue' },
   { term: '角色库', file: 'App.vue', re: '>\\s*角色库\\s*<' },
-  // 任务工作台
+  // 任务工作台(C-2A 拆分后:面板在 components/task/,按术语所在面板登记)
   { term: '任务工作台', file: 'components/TaskBoard.vue' },
-  { term: '计划步骤', file: 'components/TaskBoard.vue' },
-  { term: '子任务执行', file: 'components/TaskBoard.vue' },
-  { term: '流程步骤进度', file: 'components/TaskBoard.vue' },
-  { term: '最终计划', file: 'components/TaskBoard.vue' },
-  { term: '对话记录', file: 'components/TaskBoard.vue' },
+  { term: '计划步骤', file: 'components/task/TaskExecutionPanel.vue' },
+  { term: '子任务执行', file: 'components/task/TaskExecutionPanel.vue' },
+  { term: '流程步骤进度', file: 'components/task/TaskExecutionPanel.vue' },
+  { term: '最终计划', file: 'components/task/TaskResultPanel.vue' },
+  { term: '对话记录', file: 'components/task/TaskResultPanel.vue' },
   // 执行模式与授权档位
   { term: '三段式', file: 'api/labels.ts' },
   { term: '单 Agent', file: 'api/labels.ts' },

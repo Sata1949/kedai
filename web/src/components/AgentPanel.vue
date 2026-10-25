@@ -3,7 +3,7 @@
 //   + 「调用情况」tab——原独立 CallTracePanel 面板收编为内部 tab 内容组件,两模式共用)
 // 角色扮演模式 = 聊天 Agent 推理链/工具调用;任务模式 = 当前任务的计划步骤/子任务执行
 // 生成中(或任务执行中)自动展开,用户可手动收起/展开
-import { computed, onMounted, onUpdated, ref, watch, type ComponentPublicInstance } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { useAppStore } from '../store';
 import { storeToRefs } from 'pinia';
 import {
@@ -18,6 +18,7 @@ import { ApiError } from '../api/client';
 import type { TaskSubtaskStatus } from '../api';
 import { taskStatusClass, taskStatusLabel } from '../taskStatus';
 import CallTracePanel from './CallTracePanel.vue';
+import ToolIoPane from './ToolIoPane.vue';
 
 const store = useAppStore();
 const { agent, generating, agentPanelOpen, callTraceOpen, currentSessionId, agentMode, lastUsage, appMode, currentTask, undoEnabled } = storeToRefs(store);
@@ -58,55 +59,11 @@ function isIoOpen(key: string): boolean {
   return openIos.value.has(key);
 }
 
-/** 折叠卡(.sv-tool-io)模板 ref 登记:key → 元素;卸载时(Vue 以 null 回调)移除 */
-const ioBoxEls = new Map<string, HTMLElement>();
-function registerIoBox(key: string, el: Element | ComponentPublicInstance | null): void {
-  if (el instanceof HTMLElement) ioBoxEls.set(key, el);
-  else ioBoxEls.delete(key);
-}
-
-/** 对单张折叠卡求值 has-scroll(内容溢出 → 底部渐隐遮罩);只读本组件登记元素,不再全局选择器 */
-function updateIoScrollShadow(key: string): void {
-  const box = ioBoxEls.get(key);
-  const body = box?.querySelector<HTMLElement>('.sv-tool-io-body');
-  if (box && body) box.classList.toggle('has-scroll', body.scrollHeight > body.clientHeight);
-}
-
-/**
- * 合并到下一帧重估所有展开卡片的 has-scroll:
- * 展开/收起(toggleIo)与卡片内容流式变化(onUpdated)后都需重估;rAF 合帧避免逐次 layout 抖动。
- */
-let ioScrollCheckScheduled = false;
-function scheduleIoScrollRefresh(): void {
-  if (ioScrollCheckScheduled) return;
-  ioScrollCheckScheduled = true;
-  requestAnimationFrame(() => {
-    ioScrollCheckScheduled = false;
-    for (const key of openIos.value) updateIoScrollShadow(key);
-  });
-}
-onUpdated(scheduleIoScrollRefresh);
-
 function toggleIo(key: string): void {
   const next = new Set(openIos.value);
   if (next.has(key)) next.delete(key);
   else next.add(key);
   openIos.value = next;
-  // 展开渲染完成后重估溢出标记(驱动底部渐隐遮罩)
-  scheduleIoScrollRefresh();
-}
-
-/** 折叠卡滚到底时移除渐隐遮罩(提示后面还有内容才显示) */
-function ioScroll(e: Event): void {
-  const el = e.target as HTMLElement;
-  const box = el.closest<HTMLElement>('.sv-tool-io');
-  if (!box) return;
-  box.classList.toggle('has-scroll', el.scrollTop + el.clientHeight < el.scrollHeight - 4);
-}
-
-/** 工具入参/出参序列化(展示与复制共用同一份文本) */
-function ioText(v: unknown): string {
-  return JSON.stringify(v, null, 2);
 }
 
 /**
@@ -605,13 +562,14 @@ watch(currentSessionId, () => {
               <span v-if="t.origin === 'plugin' || t.origin === 'mcp'" class="sv-badge" :title="t.origin === 'mcp' ? '来自 MCP 服务器' : '来自工具插件'">{{ t.origin === 'mcp' ? 'MCP' : '插件' }}</span>
               <span class="sv-badge run sv-ml-auto">执行中</span>
             </div>
-            <div class="sv-tool-io" :class="{ open: isIoOpen(callKey(t) + ':in') }" :ref="(el) => registerIoBox(callKey(t) + ':in', el)">
-              <div class="sv-tool-io-bar">
-                <button type="button" class="sv-tool-io-toggle" @click="toggleIo(callKey(t) + ':in')">入参</button>
-                <button type="button" class="sv-tool-io-copy" @click="copyIo(callKey(t), ioText(t.input))">{{ copiedKey === callKey(t) ? '已复制' : '复制' }}</button>
-              </div>
-              <pre class="sv-tool-io-body" @scroll="ioScroll">{{ ioText(t.input) }}</pre>
-            </div>
+            <ToolIoPane
+              label="入参"
+              :value="t.input"
+              :open="isIoOpen(callKey(t) + ':in')"
+              :copied="copiedKey === callKey(t)"
+              @toggle="toggleIo(callKey(t) + ':in')"
+              @copy="copyIo(callKey(t), $event)"
+            />
           </div>
         </template>
 
@@ -624,13 +582,14 @@ watch(currentSessionId, () => {
               <span v-if="isGranted(t)" class="sv-badge done sv-ml-auto">{{ t.risk }} · 已授权</span>
               <span v-else class="sv-badge pending sv-ml-auto">{{ t.risk }} · 等待授权</span>
             </div>
-            <div class="sv-tool-io" :class="{ open: isIoOpen(callKey(t) + ':in') }" :ref="(el) => registerIoBox(callKey(t) + ':in', el)">
-              <div class="sv-tool-io-bar">
-                <button type="button" class="sv-tool-io-toggle" @click="toggleIo(callKey(t) + ':in')">入参</button>
-                <button type="button" class="sv-tool-io-copy" @click="copyIo(callKey(t), ioText(t.input))">{{ copiedKey === callKey(t) ? '已复制' : '复制' }}</button>
-              </div>
-              <pre class="sv-tool-io-body" @scroll="ioScroll">{{ ioText(t.input) }}</pre>
-            </div>
+            <ToolIoPane
+              label="入参"
+              :value="t.input"
+              :open="isIoOpen(callKey(t) + ':in')"
+              :copied="copiedKey === callKey(t)"
+              @toggle="toggleIo(callKey(t) + ':in')"
+              @copy="copyIo(callKey(t), $event)"
+            />
             <p class="sv-note-mini sv-mt6">{{ t.reason }}</p>
             <div v-if="!isGranted(t)" class="tool-auth-btns">
               <button class="sv-btn primary sv-btn-sm" :disabled="!currentSessionId || authorizing !== null" @click="grant(t.name, t, 'once')">仅允许本次</button>
@@ -660,20 +619,23 @@ watch(currentSessionId, () => {
                 @click="undoToHere(t)"
               >{{ undoButtonLabel(t) }}</button>
             </div>
-            <div class="sv-tool-io" :class="{ open: isIoOpen(callKey(t) + ':in') }" :ref="(el) => registerIoBox(callKey(t) + ':in', el)">
-              <div class="sv-tool-io-bar">
-                <button type="button" class="sv-tool-io-toggle" @click="toggleIo(callKey(t) + ':in')">入参</button>
-                <button type="button" class="sv-tool-io-copy" @click="copyIo(callKey(t), ioText(t.input))">{{ copiedKey === callKey(t) ? '已复制' : '复制' }}</button>
-              </div>
-              <pre class="sv-tool-io-body" @scroll="ioScroll">{{ ioText(t.input) }}</pre>
-            </div>
-            <div v-if="t.output !== undefined" class="sv-tool-io" :class="{ open: isIoOpen(callKey(t) + ':out') }" :ref="(el) => registerIoBox(callKey(t) + ':out', el)">
-              <div class="sv-tool-io-bar">
-                <button type="button" class="sv-tool-io-toggle" @click="toggleIo(callKey(t) + ':out')">出参</button>
-                <button type="button" class="sv-tool-io-copy" @click="copyIo(callKey(t), ioText(t.output))">{{ copiedKey === callKey(t) ? '已复制' : '复制' }}</button>
-              </div>
-              <pre class="sv-tool-io-body" @scroll="ioScroll">{{ ioText(t.output) }}</pre>
-            </div>
+            <ToolIoPane
+              label="入参"
+              :value="t.input"
+              :open="isIoOpen(callKey(t) + ':in')"
+              :copied="copiedKey === callKey(t)"
+              @toggle="toggleIo(callKey(t) + ':in')"
+              @copy="copyIo(callKey(t), $event)"
+            />
+            <ToolIoPane
+              v-if="t.output !== undefined"
+              label="出参"
+              :value="t.output"
+              :open="isIoOpen(callKey(t) + ':out')"
+              :copied="copiedKey === callKey(t)"
+              @toggle="toggleIo(callKey(t) + ':out')"
+              @copy="copyIo(callKey(t), $event)"
+            />
             <!-- 视觉工具图像(视觉能力包 D4):引用式渲染 /api/images,点击新窗口看原图 -->
             <div v-if="toolImages(t.output).length" class="sv-tool-images">
               <a
@@ -697,20 +659,23 @@ watch(currentSessionId, () => {
               {{ t.name }}
               <span v-if="t.origin === 'plugin' || t.origin === 'mcp'" class="sv-badge" :title="t.origin === 'mcp' ? '来自 MCP 服务器' : '来自工具插件'">{{ t.origin === 'mcp' ? 'MCP' : '插件' }}</span>
             </div>
-            <div class="sv-tool-io" :class="{ open: isIoOpen(callKey(t) + ':in') }" :ref="(el) => registerIoBox(callKey(t) + ':in', el)">
-              <div class="sv-tool-io-bar">
-                <button type="button" class="sv-tool-io-toggle" @click="toggleIo(callKey(t) + ':in')">入参</button>
-                <button type="button" class="sv-tool-io-copy" @click="copyIo(callKey(t), ioText(t.input))">{{ copiedKey === callKey(t) ? '已复制' : '复制' }}</button>
-              </div>
-              <pre class="sv-tool-io-body" @scroll="ioScroll">{{ ioText(t.input) }}</pre>
-            </div>
-            <div v-if="t.output !== undefined" class="sv-tool-io" :class="{ open: isIoOpen(callKey(t) + ':out') }" :ref="(el) => registerIoBox(callKey(t) + ':out', el)">
-              <div class="sv-tool-io-bar">
-                <button type="button" class="sv-tool-io-toggle" @click="toggleIo(callKey(t) + ':out')">出参</button>
-                <button type="button" class="sv-tool-io-copy" @click="copyIo(callKey(t), ioText(t.output))">{{ copiedKey === callKey(t) ? '已复制' : '复制' }}</button>
-              </div>
-              <pre class="sv-tool-io-body" @scroll="ioScroll">{{ ioText(t.output) }}</pre>
-            </div>
+            <ToolIoPane
+              label="入参"
+              :value="t.input"
+              :open="isIoOpen(callKey(t) + ':in')"
+              :copied="copiedKey === callKey(t)"
+              @toggle="toggleIo(callKey(t) + ':in')"
+              @copy="copyIo(callKey(t), $event)"
+            />
+            <ToolIoPane
+              v-if="t.output !== undefined"
+              label="出参"
+              :value="t.output"
+              :open="isIoOpen(callKey(t) + ':out')"
+              :copied="copiedKey === callKey(t)"
+              @toggle="toggleIo(callKey(t) + ':out')"
+              @copy="copyIo(callKey(t), $event)"
+            />
           </div>
         </template>
 

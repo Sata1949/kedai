@@ -322,10 +322,16 @@ export const useCharacterStore = defineStore('app.character', () => {
     }
   }
 
+  /** 角色搜索框写入(组件只读 + action 写入;纯 UI 草稿,无持久化)。 */
+  function setSearchQuery(query: string): void {
+    searchQuery.value = query;
+  }
+
   return {
     characters,
     currentCharacterId,
     searchQuery,
+    setSearchQuery,
     currentScriptHash,
     scriptAuthorizations,
     currentCharacter,
