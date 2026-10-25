@@ -1,4 +1,5 @@
 <script setup lang="ts">
+// arch-allow-file: 设置表单以 v-model 直写 store 草稿,保存统一走 queueSettingsSave;逐字段 action 只增加转发层。
 // 设置区:命令执行(阶段 E)。授权面板 + 执行器等级 + 审计日志。
 //
 // 平台可见性:本组件只在 Android Tauri 壳内展示 Android 专属档位(ROOT/Shizuku);

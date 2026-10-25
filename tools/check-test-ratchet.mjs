@@ -75,6 +75,7 @@ const BASELINE = [
   'web/src/components/settings/AuthorizationSection.vue',
   'web/src/components/settings/EmbeddingSection.vue',
   'web/src/components/settings/ExecAuthSection.vue',
+  'web/src/components/settings/flowCanvasChunk.ts',
   'web/src/components/settings/PromptInjectSection.vue',
   'web/src/composables/useEmbeddingSettings.ts',
   'web/src/composables/useExternalLinks.ts',
@@ -87,7 +88,6 @@ const BASELINE = [
   'web/src/sandbox/iframe-lifecycle.ts',
   'web/src/stores/executor.ts',
   'web/src/utils/flowCandidates.ts',
-  'web/src/utils/flowCanvasChunk.ts',
 ];
 
 /** 相对 ROOT 的正斜杠路径(全脚本统一用它做键,避免 Windows 反斜杠差异)。 */
