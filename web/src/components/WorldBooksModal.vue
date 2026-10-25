@@ -7,6 +7,7 @@ import { storeToRefs } from 'pinia';
 import { useAppStore } from '../store';
 import * as api from '../api';
 import SkeletonBlock from './SkeletonBlock.vue';
+import WorldBookEntryEditor from './WorldBookEntryEditor.vue';
 import { diffEntryIds, isRenderableEntry } from '../utils/worldBookEntryDiff';
 
 const store = useAppStore();
@@ -112,6 +113,16 @@ const entrySaving = ref<Record<string, boolean>>({});
 const entryMsg = ref<{ kind: 'ok' | 'err'; text: string } | null>(null);
 
 const editCount = computed(() => (editingBookId.value && entryDrafts.value[editingBookId.value] ? entryDrafts.value[editingBookId.value].length : 0));
+/** 当前编辑的独立世界书(找不到 = null;保存按钮据此禁用,替代非空断言) */
+const editingBook = computed(() => worldBooks.value.find((b) => b.id === editingBookId.value) ?? null);
+/** 当前编辑草稿(非空引用;模板里不再对可能为 null 的 editingBookId 索引) */
+const editingEntries = computed(() =>
+  editingBookId.value ? entryDrafts.value[editingBookId.value] ?? [] : [],
+);
+/** 当前草稿是否保存中(模板不再直接索引可能为 null 的 id) */
+const editingSaving = computed(() =>
+  editingBookId.value ? !!entrySaving.value[editingBookId.value] : false,
+);
 
 async function openEntries(b: api.WorldBookRecord): Promise<void> {
   if (editingBookId.value === b.id) {
@@ -146,6 +157,11 @@ function addCharEntryRow(): void {
 
 function removeEntryRow(draft: api.WorldBookEntry[], i: number): void {
   draft.splice(i, 1);
+}
+
+/** 子组件字段补丁：写回父级草稿对象（两套编辑器共用;不改数组引用,保存逻辑照旧读草稿） */
+function applyEntryPatch(entry: api.WorldBookEntry, key: keyof api.WorldBookEntry, value: unknown): void {
+  Object.assign(entry, { [key]: value });
 }
 
 /** 常驻/触发切换并联动注入位置:常驻 → 位置3(常态),触发 → 位置1(激发),与 6 层规范对齐 */
@@ -188,17 +204,6 @@ async function saveEntries(b: api.WorldBookRecord): Promise<void> {
   } finally {
     delete entrySaving.value[id];
   }
-}
-
-// ===== 通用:关键词输入(逗号分隔) ↔ keys 数组 =====
-function keysToText(keys: string[]): string {
-  return (keys ?? []).join(', ');
-}
-function textToKeys(text: string): string[] {
-  return text
-    .split(/[,，、\n]/)
-    .map((s) => s.trim())
-    .filter(Boolean);
 }
 
 const close = (): void => {
@@ -399,101 +404,19 @@ async function loadWorldBooksChecked(): Promise<void> {
           </div>
           <template v-else>
             <div class="sv-wb-edit">
-              <div v-for="(en, i) in charEntries" :key="`c-${en.id}-${i}`" class="sv-wb-entry">
-                <div class="sv-wb-entry-head">
-                  <input v-model="en.comment" type="text" class="sv-input sv-wb-comment" placeholder="条目名称" spellcheck="false" />
-                  <select v-model.number="en.position" class="sv-wb-select" title="注入位置(酒馆 position):常驻→位置3(并入系统提示词),激发→位置1(追加最新用户消息尾部)">
-                    <option :value="0">0(before_char)</option>
-                    <option :value="1">1(激发/追加用户消息)</option>
-                    <option :value="2">2(normal)</option>
-                    <option :value="3">3(常态/系统提示词)</option>
-                    <option :value="4">4(after_char)</option>
-                  </select>
-                  <select
-                    v-model="en.role"
-                    class="sv-wb-select"
-                    title="注入角色:自动 = 常驻→系统提示词,激发→用户"
-                  >
-                    <option :value="null">自动</option>
-                    <option value="system">系统提示词</option>
-                    <option value="user">用户</option>
-                    <option value="assistant">角色</option>
-                  </select>
-                  <button
-                    class="sv-btn ghost sv-btn-sm"
-                    :class="{ 'sv-btn-on': en.constant }"
-                    title="常驻:始终注入,位置3(并入系统提示词);触发:按关键词/正则命中,位置1(追加最新用户消息尾部)"
-                    @click="toggleConstant(en)"
-                  >
-                    {{ en.constant ? '常驻' : '触发' }}
-                  </button>
-                  <button
-                    class="sv-btn ghost sv-btn-sm"
-                    :class="{ 'sv-btn-on': en.enabled }"
-                    title="激活:该条目参与注入的总开关(停用 = 完全不注入)"
-                    @click="en.enabled = !en.enabled"
-                  >
-                    {{ en.enabled ? '激活' : '停用' }}
-                  </button>
-                  <button
-                    class="sv-btn ghost sv-btn-sm"
-                    :class="{ 'sv-btn-on': en.case_sensitive }"
-                    title="大小写敏感(酒馆 caseSensitive)"
-                    @click="en.case_sensitive = !en.case_sensitive"
-                  >
-                    {{ en.case_sensitive ? 'Aa敏感' : 'Aa不敏' }}
-                  </button>
-                  <button class="sv-btn ghost sv-btn-sm" title="上移(组内排序)" :disabled="i === 0" @click="moveEntryRow(charEntries, i, -1)">↑</button>
-                  <button class="sv-btn ghost sv-btn-sm" title="下移(组内排序)" :disabled="i === charEntries.length - 1" @click="moveEntryRow(charEntries, i, 1)">↓</button>
-                  <button class="sv-btn danger sv-btn-sm" title="删除条目" @click="removeEntryRow(charEntries, i)">✕</button>
-                </div>
-                <div class="sv-wb-entry-fields">
-                  <label class="sv-wb-field-tag">关键词</label>
-                  <input :value="keysToText(en.keys)" type="text" class="sv-input" placeholder="逗号分隔;命中最近对话中的任意词即注入" spellcheck="false" @input="en.keys = textToKeys(($event.target as HTMLInputElement).value)" />
-                </div>
-                <div class="sv-wb-entry-fields">
-                  <label class="sv-wb-field-tag">副关键词</label>
-                  <input :value="keysToText(en.keys_secondary ?? [])" type="text" class="sv-input" placeholder="可选;与主关键词并列,命中其一即注入(酒馆 keysecondary)" spellcheck="false" @input="en.keys_secondary = textToKeys(($event.target as HTMLInputElement).value)" />
-                </div>
-                <div class="sv-wb-entry-fields">
-                  <label class="sv-wb-field-tag">正则</label>
-                  <input v-model="en.regex" type="text" class="sv-input" placeholder="可选;填写并勾选正则后优先于关键词匹配" spellcheck="false" />
-                  <button
-                    class="sv-btn ghost sv-btn-sm"
-                    :class="{ 'sv-btn-on': en.use_regex }"
-                    title="启用正则匹配"
-                    :disabled="!en.regex"
-                    @click="en.use_regex = !en.use_regex"
-                  >
-                    {{ en.use_regex ? '正则开' : '正则关' }}
-                  </button>
-                </div>
-                <div class="sv-wb-entry-fields">
-                  <label class="sv-wb-field-tag">插入深度</label>
-                  <input v-model.number="en.depth" type="number" min="0" class="sv-input sv-wb-num" title="插入深度(酒馆 depth):position=atDepth 时从末尾算注入位置;条目未声明扫描窗口时兼作窗口兜底" placeholder="4" />
-                  <label class="sv-wb-field-tag">扫描窗口</label>
-                  <input v-model.number="en.scan_depth" type="number" min="0" class="sv-input sv-wb-num" title="关键词扫描窗口(酒馆 scanDepth):关键词只扫最近 N 条消息(0 = 全部);留空 = 保持原值不改动" placeholder="未声明" />
-                  <label class="sv-wb-field-tag">注入顺序</label>
-                  <input v-model.number="en.order" type="number" min="0" class="sv-input sv-wb-num" title="同位置内按此值从小到大注入(酒馆 order)" placeholder="100" />
-                  <label class="sv-wb-field-tag">命中概率</label>
-                  <input v-model.number="en.probability" type="number" min="0" max="100" class="sv-input sv-wb-num" title="命中后按此百分比决定是否注入(酒馆 probability)" placeholder="100" />
-                  <button
-                    class="sv-btn ghost sv-btn-sm"
-                    :class="{ 'sv-btn-on': en.use_probability }"
-                    title="启用命中概率(100 = 恒注入)"
-                    @click="en.use_probability = !en.use_probability"
-                  >
-                    {{ en.use_probability ? '概率开' : '概率关' }}
-                  </button>
-                </div>
-                <div class="sv-wb-entry-fields">
-                  <label class="sv-wb-field-tag">粘性</label>
-                  <input v-model.number="en.sticky" type="number" min="0" class="sv-input sv-wb-num" title="酒馆 sticky 字段:命中后接下来 N 条消息持续注入;当前版本尚未参与注入判定(编辑值仅原样保留)" placeholder="0" />
-                  <label class="sv-wb-field-tag">冷却</label>
-                  <input v-model.number="en.cooldown" type="number" min="0" class="sv-input sv-wb-num" title="酒馆 cooldown 字段:命中后 N 条消息内不再触发;当前版本尚未参与注入判定(编辑值仅原样保留)" placeholder="0" />
-                </div>
-                <textarea v-model="en.content" rows="6" class="sv-input sv-wb-entry-content" placeholder="注入内容(留空则该条不注入)" spellcheck="false" />
-              </div>
+              <WorldBookEntryEditor
+                v-for="(en, i) in charEntries"
+                :key="`c-${en.id}-${i}`"
+                :entry="en"
+                :index="i"
+                :total="charEntries.length"
+                keys-placeholder="逗号分隔;命中最近对话中的任意词即注入"
+                regex-placeholder="可选;填写并勾选正则后优先于关键词匹配"
+                @patch="(k, v) => applyEntryPatch(en, k, v)"
+                @toggle-constant="toggleConstant(en)"
+                @move="(d) => moveEntryRow(charEntries, i, d)"
+                @remove="removeEntryRow(charEntries, i)"
+              />
               <div class="sv-wb-edit-foot">
                 <button class="sv-btn ghost sv-btn-sm" @click="addCharEntryRow">＋ 新增条目</button>
                 <button class="sv-btn primary sv-btn-sm" :disabled="charSaving" @click="saveCharacterEntries">
@@ -594,109 +517,27 @@ async function loadWorldBooksChecked(): Promise<void> {
             命中概率:按百分比随机决定是否注入;粘性/冷却:酒馆 sticky/cooldown 字段,当前版本尚未参与注入判定(编辑值仅原样保留)。
           </p>
           <div class="sv-wb-edit">
-            <div v-for="(en, i) in entryDrafts[editingBookId]" :key="`e-${editingBookId}-${en.id}-${i}`" class="sv-wb-entry">
-              <div class="sv-wb-entry-head">
-                <input v-model="en.comment" type="text" class="sv-input sv-wb-comment" placeholder="条目名称" spellcheck="false" />
-                <select v-model.number="en.position" class="sv-wb-select" title="注入位置(酒馆 position):常驻→位置3(并入系统提示词),激发→位置1(追加最新用户消息尾部)">
-                  <option :value="0">0(before_char)</option>
-                  <option :value="1">1(激发/追加用户消息)</option>
-                  <option :value="2">2(normal)</option>
-                  <option :value="3">3(常态/系统提示词)</option>
-                  <option :value="4">4(after_char)</option>
-                </select>
-                <select
-                  v-model="en.role"
-                  class="sv-wb-select"
-                  title="注入角色:自动 = 常驻→系统提示词,激发→用户"
-                >
-                  <option :value="null">自动</option>
-                  <option value="system">系统提示词</option>
-                  <option value="user">用户</option>
-                  <option value="assistant">角色</option>
-                </select>
-                <button
-                  class="sv-btn ghost sv-btn-sm"
-                  :class="{ 'sv-btn-on': en.constant }"
-                  title="常驻:始终注入,位置3(并入系统提示词);触发:按关键词/正则命中,位置1(追加最新用户消息尾部)"
-                  @click="toggleConstant(en)"
-                >
-                  {{ en.constant ? '常驻' : '触发' }}
-                </button>
-                <button
-                  class="sv-btn ghost sv-btn-sm"
-                  :class="{ 'sv-btn-on': en.enabled }"
-                  title="激活:该条目参与注入的总开关(停用 = 完全不注入)"
-                  @click="en.enabled = !en.enabled"
-                >
-                  {{ en.enabled ? '激活' : '停用' }}
-                </button>
-                <button
-                  class="sv-btn ghost sv-btn-sm"
-                  :class="{ 'sv-btn-on': en.case_sensitive }"
-                  title="大小写敏感(酒馆 caseSensitive)"
-                  @click="en.case_sensitive = !en.case_sensitive"
-                >
-                  {{ en.case_sensitive ? 'Aa敏感' : 'Aa不敏' }}
-                </button>
-                <button class="sv-btn ghost sv-btn-sm" title="上移(组内排序)" :disabled="i === 0" @click="moveEntryRow(entryDrafts[editingBookId], i, -1)">↑</button>
-                <button class="sv-btn ghost sv-btn-sm" title="下移(组内排序)" :disabled="i === entryDrafts[editingBookId].length - 1" @click="moveEntryRow(entryDrafts[editingBookId], i, 1)">↓</button>
-                <button class="sv-btn danger sv-btn-sm" title="删除条目" @click="removeEntryRow(entryDrafts[editingBookId], i)">✕</button>
-              </div>
-              <div class="sv-wb-entry-fields">
-                <label class="sv-wb-field-tag">关键词</label>
-                <input :value="keysToText(en.keys)" type="text" class="sv-input" placeholder="逗号分隔;留空且非常驻则需正则命中" spellcheck="false" @input="en.keys = textToKeys(($event.target as HTMLInputElement).value)" />
-              </div>
-              <div class="sv-wb-entry-fields">
-                <label class="sv-wb-field-tag">副关键词</label>
-                <input :value="keysToText(en.keys_secondary ?? [])" type="text" class="sv-input" placeholder="可选;与主关键词并列,命中其一即注入(酒馆 keysecondary)" spellcheck="false" @input="en.keys_secondary = textToKeys(($event.target as HTMLInputElement).value)" />
-              </div>
-              <div class="sv-wb-entry-fields">
-                <label class="sv-wb-field-tag">正则</label>
-                <input v-model="en.regex" type="text" class="sv-input" placeholder="可选;填写并开启后优先于关键词" spellcheck="false" />
-                <button
-                  class="sv-btn ghost sv-btn-sm"
-                  :class="{ 'sv-btn-on': en.use_regex }"
-                  title="启用正则匹配"
-                  :disabled="!en.regex"
-                  @click="en.use_regex = !en.use_regex"
-                >
-                  {{ en.use_regex ? '正则开' : '正则关' }}
-                </button>
-              </div>
-              <div class="sv-wb-entry-fields">
-                <label class="sv-wb-field-tag">插入深度</label>
-                <input v-model.number="en.depth" type="number" min="0" class="sv-input sv-wb-num" title="插入深度(酒馆 depth):position=atDepth 时从末尾算注入位置;条目未声明扫描窗口时兼作窗口兜底" placeholder="4" />
-                <label class="sv-wb-field-tag">扫描窗口</label>
-                <input v-model.number="en.scan_depth" type="number" min="0" class="sv-input sv-wb-num" title="关键词扫描窗口(酒馆 scanDepth):关键词只扫最近 N 条消息(0 = 全部);留空 = 保持原值不改动" placeholder="未声明" />
-                <label class="sv-wb-field-tag">注入顺序</label>
-                <input v-model.number="en.order" type="number" min="0" class="sv-input sv-wb-num" title="同位置内按此值从小到大注入(酒馆 order)" placeholder="100" />
-                <label class="sv-wb-field-tag">命中概率</label>
-                <input v-model.number="en.probability" type="number" min="0" max="100" class="sv-input sv-wb-num" title="命中后按此百分比决定是否注入(酒馆 probability)" placeholder="100" />
-                <button
-                  class="sv-btn ghost sv-btn-sm"
-                  :class="{ 'sv-btn-on': en.use_probability }"
-                  title="启用命中概率(100 = 恒注入)"
-                  @click="en.use_probability = !en.use_probability"
-                >
-                  {{ en.use_probability ? '概率开' : '概率关' }}
-                </button>
-              </div>
-              <div class="sv-wb-entry-fields">
-                <label class="sv-wb-field-tag">粘性</label>
-                <input v-model.number="en.sticky" type="number" min="0" class="sv-input sv-wb-num" title="酒馆 sticky 字段:命中后接下来 N 条消息持续注入;当前版本尚未参与注入判定(编辑值仅原样保留)" placeholder="0" />
-                <label class="sv-wb-field-tag">冷却</label>
-                <input v-model.number="en.cooldown" type="number" min="0" class="sv-input sv-wb-num" title="酒馆 cooldown 字段:命中后 N 条消息内不再触发;当前版本尚未参与注入判定(编辑值仅原样保留)" placeholder="0" />
-              </div>
-              <textarea v-model="en.content" rows="6" class="sv-input sv-wb-entry-content" placeholder="注入内容(留空则该条不注入)" spellcheck="false" />
-            </div>
+              <WorldBookEntryEditor
+                v-for="(en, i) in editingEntries"
+                :key="`e-${editingBookId}-${en.id}-${i}`"
+                :entry="en"
+                :index="i"
+                :total="editingEntries.length"
+                keys-placeholder="逗号分隔;留空且非常驻则需正则命中"
+                regex-placeholder="可选;填写并开启后优先于关键词"
+                @patch="(k, v) => applyEntryPatch(en, k, v)"
+                @toggle-constant="toggleConstant(en)"
+                @move="(d) => moveEntryRow(editingEntries, i, d)"
+                @remove="removeEntryRow(editingEntries, i)"
+              />
             <div class="sv-wb-edit-foot">
               <button class="sv-btn ghost sv-btn-sm" @click="addEntryRow">＋ 新增条目</button>
               <button
                 class="sv-btn primary sv-btn-sm"
-                :disabled="!!entrySaving[editingBookId]"
-                @click="saveEntries(worldBooks.find((b) => b.id === editingBookId)!)"
+                :disabled="editingSaving || !editingBook"
+                @click="editingBook && saveEntries(editingBook)"
               >
-                {{ entrySaving[editingBookId] ? '保存中…' : '保存条目' }}
+                {{ editingSaving ? '保存中…' : '保存条目' }}
               </button>
             </div>
           </div>

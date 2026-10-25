@@ -63,6 +63,8 @@ const VERBOSE = process.argv.includes('--verbose');
  * --measure-task-result 与焦点环两个令牌,供双主体终稿共用),task 997→1007
  * (侧栏模式切换 01/02 序号 + 任务历史激活态与搜索框聚焦态)。均为两主体版式服务的
  * 正常增长,不新增 !important、不引入裸时长;新增规则优先留在 .vue scoped。
+ * C-2A 变动(2026-10-25):task 1007→987——`.sv-task-new` 基础视觉块随 Sidebar 拆分
+ * 移入 components/sidebar/TaskComposer.vue 的 scoped 块(单一 CSS 所有者),全局域净减 20 行。
  */
 const LINE_BASELINE = {
   'style.css': 49,
@@ -71,7 +73,7 @@ const LINE_BASELINE = {
   'styles/shell.css': 827,
   'styles/panels.css': 971,
   'styles/content.css': 997,
-  'styles/task.css': 1007,
+  'styles/task.css': 987,
   'styles/mobile.css': 464,
 };
 

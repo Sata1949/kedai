@@ -25,12 +25,13 @@ vi.mock('../api', async (importOriginal) => {
     listWorldBooks: vi.fn().mockResolvedValue([]),
     getWorldBookEntries: vi.fn().mockResolvedValue([]),
     getCharacterWorldEntries: vi.fn().mockResolvedValue([]),
+    saveCharacterWorldEntries: vi.fn().mockImplementation(async (_id: string, entries: unknown[]) => entries),
     checkWorldBookAutoAssign: vi.fn().mockResolvedValue({ checks: [] }),
     saveWorldBookEntries: vi.fn().mockImplementation(async (_id: string, entries: unknown[]) => entries),
   };
 });
 
-import { getWorldBookEntries, saveWorldBookEntries } from '../api';
+import { getCharacterWorldEntries, getWorldBookEntries, saveCharacterWorldEntries, saveWorldBookEntries } from '../api';
 import type { WorldBookEntry, WorldBookRecord } from '../api';
 import { useAppStore } from '../store';
 import WorldBooksModal from './WorldBooksModal.vue';
@@ -273,5 +274,41 @@ describe('WorldBooksModal 组件(M5 补测)', () => {
     await flushPromises();
 
     expect(wrapper.findAll('textarea.sv-wb-entry-content').length).toBe(2);
+  });
+
+  it('角色卡内嵌世界书:编辑器可用并保存到 saveCharacterWorldEntries(C-2A 拆分前补齐覆盖)', async () => {
+    setActivePinia(createPinia());
+    const store = useAppStore();
+    store.loadWorldBooks = vi.fn().mockResolvedValue(undefined);
+    store.characters = [{
+      id: 'c1', name: 'c1.png', chara_name: '小春', description: '', file_path: 'c1.png',
+      avatar_path: null, created_at: '2026-10-25T00:00:00Z',
+    }];
+    store.currentCharacterId = 'c1';
+    vi.mocked(getCharacterWorldEntries).mockResolvedValue([{
+      id: 1, comment: '天气', keys: ['雨'], constant: false, enabled: true,
+      content: '今天有雨', position: 1,
+    }]);
+    vi.mocked(saveCharacterWorldEntries).mockResolvedValue([{
+      id: 1, comment: '天气现象', keys: ['雨'], constant: false, enabled: true,
+      content: '今天有雨', position: 1,
+    }]);
+    const wrapper = mount(WorldBooksModal);
+    await flushPromises();
+
+    const comment = wrapper.find('input.sv-wb-comment');
+    expect(comment.exists()).toBe(true);
+    await comment.setValue('天气现象');
+    const save = wrapper.findAll('button').find((b) => b.text().includes('保存角色卡世界书'));
+    if (!save) throw new Error('缺「保存角色卡世界书」按钮');
+    await save.trigger('click');
+    await flushPromises();
+
+    expect(saveCharacterWorldEntries).toHaveBeenCalledWith(
+      'c1',
+      expect.arrayContaining([expect.objectContaining({ comment: '天气现象' })]),
+      [],
+      [],
+    );
   });
 });

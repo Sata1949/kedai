@@ -57,28 +57,8 @@
   background: var(--sv-paper);
 }
 
-/* 下达目标 + 任务历史(嵌于 Sidebar 260px 窄栏,水平内边距由外层容器提供) */
-.sv-task-new {
-  padding: var(--space-3) 0;
-  border-bottom: var(--bw) solid var(--sv-ink);
-}
-.sv-task-new-title {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1-5);
-  font-size: 12px;
-  font-weight: 800;
-  letter-spacing: 0.08em;
-  margin-bottom: var(--space-2);
-  color: var(--sv-ink-soft);
-}
-.sv-task-new-title::before {
-  content: '';
-  width: 10px;
-  height: 10px;
-  background: var(--sv-ink-supreme);
-  display: inline-block;
-}
+/* 下达目标区的视觉所有者已随 C-2A 拆到 components/sidebar/TaskComposer.vue
+   （scoped）；本文件只保留 .sv-task-new 后代控件的跨组件布局规则（见文件后段）。 */
 
 .sv-task-list-head {
   padding: var(--space-3) 0 var(--space-1-5);
