@@ -8,7 +8,7 @@
 //   判定所需取消态在返回时快照)。
 // 本执行器**永不返回 Err**(错误按原逻辑自行消化),否则引擎的 Err 分支会二次收尾。
 use super::context::TaskRunContext;
-use super::executor::ModeExecutor;
+use super::executor::{terminal_status, ModeExecutor};
 use crate::models::types::{TaskStatus, TaskStepStatus, TaskSubtaskStatus, TokenUsage};
 use crate::services::task_core::{fallback_terminal, TaskBackend, TaskGenOutput, TaskTerminal};
 use futures::future::BoxFuture;
@@ -147,16 +147,12 @@ impl ModeExecutor for LegacyExecutor {
                     // (is_current_run 守门 + 写 result + 非空落 assistant/result 消息 +
                     // 清理取消条目),与旧 set_result + add_task_message 逐句等价。
                     let has_error = final_plan.iter().any(|s| s.status == TaskStepStatus::Error);
-                    let status = if has_error {
-                        TaskStatus::Partial
-                    } else {
-                        TaskStatus::Done
-                    };
+                    let (status, error) = terminal_status(has_error, None);
                     Ok((
                         TaskTerminal::Complete {
                             result: out.text.trim().to_string(),
                             status,
-                            error: None,
+                            error,
                         },
                         usage,
                     ))

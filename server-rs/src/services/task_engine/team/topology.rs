@@ -13,6 +13,7 @@ use crate::services::task_core::prompt_consts::{
 };
 use crate::services::task_core::TaskGenOutput;
 use crate::services::task_engine::context::TaskRunContext;
+use crate::services::task_engine::retry::retry_parse_loop;
 use crate::services::task_engine::wiring::single_file_requested;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -543,53 +544,35 @@ impl TeamExecutor {
             LlmMessage::plain("system", &sys),
             LlmMessage::plain("user", &user_goal),
         ];
-        let mut max_tokens = TEAM_PLAN_INITIAL_MAX_TOKENS;
-        let mut last_err = String::from("规划器未产出有效拓扑");
-        for attempt in 1..=TEAM_PLAN_MAX_ATTEMPTS {
-            if attempt > 1 {
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                if *ctx.cancel.borrow() {
-                    return Err("任务已停止".into());
+        retry_parse_loop(
+            &ctx.cancel,
+            TEAM_PLAN_INITIAL_MAX_TOKENS,
+            TEAM_PLAN_MAX_ATTEMPTS,
+            TEAM_RETRY_MAX_TOKENS_CAP,
+            "规划器未产出有效拓扑".into(),
+            "team 规划输出解析失败,准备重试",
+            |max_tokens| {
+                let messages = messages.clone();
+                let svc = self.svc.clone();
+                async move {
+                    svc.generate_text(
+                        &ctx.task_id,
+                        "planner",
+                        None,
+                        messages,
+                        Vec::new(),
+                        max_tokens,
+                        TEAM_JSON_TEMPERATURE,
+                        ctx.settings.default_top_p,
+                        None, // team 模式无节点级连接
+                        ctx.cancel.clone(),
+                    )
+                    .await
                 }
-            }
-            let out = self
-                .svc
-                .generate_text(
-                    &ctx.task_id,
-                    "planner",
-                    None,
-                    messages.clone(),
-                    Vec::new(),
-                    max_tokens,
-                    TEAM_JSON_TEMPERATURE,
-                    ctx.settings.default_top_p,
-                    None, // team 模式无节点级连接
-                    ctx.cancel.clone(),
-                )
-                .await?;
-            match parse_team_topology(&out.text) {
-                Ok(mains) => return Ok((mains, out)),
-                Err(e) => last_err = e,
-            }
-            // 失败 attempt 同步入账 usage(口径同 plan_task_retry;2026-09-10 实测修复)
-            self.svc.record_usage(&ctx.task_id, "planner", None, &out);
-            let reason = out.finish_reason.as_deref().unwrap_or("");
-            tracing::warn!(
-                attempt = attempt,
-                finish_reason = reason,
-                error = last_err.clone(),
-                "team 规划输出解析失败,准备重试"
-            );
-            if reason == "length" || out.text.trim().is_empty() {
-                // 与 trunc_heal_budget 同源(批次 4.1 收敛后的补充):翻倍+封顶,达上限保持原值
-                max_tokens =
-                    crate::utils::retry::doubled_heal_budget(max_tokens, TEAM_RETRY_MAX_TOKENS_CAP)
-                        .unwrap_or(max_tokens);
-            }
-        }
-        Err(format!(
-            "{last_err}(已重试 {} 次)",
-            TEAM_PLAN_MAX_ATTEMPTS - 1
-        ))
+            },
+            parse_team_topology,
+            |out| self.svc.record_usage(&ctx.task_id, "planner", None, out),
+        )
+        .await
     }
 }

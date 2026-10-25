@@ -33,7 +33,7 @@ use self::audit::{generate_text_healed, parse_audit};
 use self::budget::{main_pool_deadline, post_exec_reserve, structured_budget};
 use self::topology::build_write_ownership;
 use super::context::TaskRunContext;
-use super::executor::ModeExecutor;
+use super::executor::{terminal_status, ModeExecutor};
 use super::solo::AgentLoopOutput;
 use crate::agents::engine::AgentEngine;
 use crate::models::types::{
@@ -117,6 +117,36 @@ struct AuditVerdict {
 pub(crate) struct TeamExecutor {
     svc: Arc<dyn TaskBackend>,
     engine: Arc<AgentEngine>,
+}
+
+/// 总预算到点时的统一收尾(C-2D):透出原因并以已完成部分 fallback。
+///
+/// `stage` 区分「审计与汇总未执行」/「终审与汇总未执行」——预算的目的就是停止继续
+/// 开销,到点后不再为后段发起新调用;无产出时 `fallback_terminal` 自然回落 Failed。
+fn finish_on_deadline(
+    svc: &Arc<dyn TaskBackend>,
+    ctx: &TaskRunContext,
+    plan: &[TaskStep],
+    total: TokenUsage,
+    team_binding: bool,
+    stage: &str,
+) -> (TaskTerminal, TokenUsage) {
+    let msg = format!(
+        "{}:{stage},以已完成部分收尾",
+        if team_binding {
+            "团队总预算用尽"
+        } else {
+            "任务总预算用尽"
+        }
+    );
+    svc.emit_event(
+        TaskEventKind::Status,
+        &ctx.task_id,
+        None,
+        None,
+        Some(msg.clone()),
+    );
+    (fallback_terminal(plan, msg), total)
 }
 
 impl TeamExecutor {
@@ -231,19 +261,14 @@ impl TeamExecutor {
         // 截止期已过则审计/汇总不再发起新调用(总预算的目的就是停止继续开销),
         // 以已完成部分收尾(无产出时 fallback_terminal 自然回落 Failed)。
         if super::deadline_exhausted(ctx.deadline) {
-            let msg = if team_binding {
-                "团队总预算用尽:审计与汇总未执行,以已完成部分收尾"
-            } else {
-                "任务总预算用尽:审计与汇总未执行,以已完成部分收尾"
-            };
-            svc.emit_event(
-                TaskEventKind::Status,
-                &ctx.task_id,
-                None,
-                None,
-                Some(msg.to_string()),
-            );
-            return Ok((fallback_terminal(&plan, msg.to_string()), total));
+            return Ok(finish_on_deadline(
+                svc,
+                &ctx,
+                &plan,
+                total,
+                team_binding,
+                "审计与汇总未执行",
+            ));
         }
         if outputs.iter().all(|o| o.is_none()) {
             // 全灭时 helper 自然回落 Failed(无 done 步骤可拼),措辞与旧实现一致
@@ -267,55 +292,24 @@ impl TeamExecutor {
         let mut audit_system = String::from(TEAM_AUDIT_PROMPT);
         audit_system.push_str("\n\n");
         audit_system.push_str(team_audit_tool_guidance(ctx.scope.is_some()));
-        let audit_out = match super::team_audit::generate_with_readonly_tools(
-            svc,
-            &self.engine,
-            &ctx,
-            "audit",
-            "审计 agent",
-            &audit_system,
-            &audit_input,
-            super::team_audit::AUDIT_MAX_ROUNDS,
-            structured_budget(ctx.settings.default_max_tokens),
-            TEAM_JSON_TEMPERATURE,
-            &mut total,
-        )
-        .await
+        let audit_out = match self
+            .run_audit_phase(
+                &ctx,
+                "audit",
+                "审计 agent",
+                "审计",
+                &audit_system,
+                &audit_input,
+                super::team_audit::AUDIT_MAX_ROUNDS,
+                &mut total,
+            )
+            .await
         {
             Ok(o) => o,
             // 取消:保持 Err,由引擎按 ended 收尾(终态兜底从库里的 plan 补写已完成产出)
             Err(e) if *ctx.cancel.borrow() => return Err(e),
-            Err(tool_err) => {
-                tracing::warn!(
-                    error = tool_err.as_str(),
-                    "team 审计只读工具通道不可用,回退纯文本审计"
-                );
-                let audit_messages = vec![
-                    LlmMessage::plain("system", &audit_system),
-                    LlmMessage::plain("user", &audit_input),
-                ];
-                // 截断自愈:审计是结构化 JSON 输出,推理模型烧光预算会腰斩 JSON(实测)
-                match generate_text_healed(
-                    svc,
-                    &ctx.task_id,
-                    "audit",
-                    audit_messages,
-                    structured_budget(ctx.settings.default_max_tokens),
-                    TEAM_JSON_TEMPERATURE,
-                    ctx.settings.default_top_p,
-                    &ctx.cancel,
-                    &mut total,
-                )
-                .await
-                {
-                    Ok(o) => o,
-                    Err(e) if *ctx.cancel.borrow() => return Err(e),
-                    // 审计调用失败但各主已产出(提交 2 部分成果兜底):不再把成果整体丢掉
-                    Err(e) => {
-                        return Ok((fallback_terminal(&plan, format!("审计调用失败:{e}")), total))
-                    }
-                }
-            }
+            // 审计调用失败但各主已产出(提交 2 部分成果兜底):不再把成果整体丢掉
+            Err(e) => return Ok((fallback_terminal(&plan, format!("审计调用失败:{e}")), total)),
         };
         if *ctx.cancel.borrow() {
             return Err("任务已停止".into());
@@ -360,19 +354,14 @@ impl TeamExecutor {
             }
             // TMR3-4:补做轮可能把团队预算用尽;到点后不再发起终审/汇总。
             if super::deadline_exhausted(ctx.deadline) {
-                let msg = if team_binding {
-                    "团队总预算用尽:终审与汇总未执行,以已完成部分收尾"
-                } else {
-                    "任务总预算用尽:终审与汇总未执行,以已完成部分收尾"
-                };
-                svc.emit_event(
-                    TaskEventKind::Status,
-                    &ctx.task_id,
-                    None,
-                    None,
-                    Some(msg.to_string()),
-                );
-                return Ok((fallback_terminal(&plan, msg.to_string()), total));
+                return Ok(finish_on_deadline(
+                    svc,
+                    &ctx,
+                    &plan,
+                    total,
+                    team_binding,
+                    "终审与汇总未执行",
+                ));
             }
             if outputs.iter().all(|o| o.is_none()) {
                 // 补做后全灭:首轮通过的主产出仍可能已在 plan 里(helper 会捞回来),
@@ -438,55 +427,24 @@ impl TeamExecutor {
                 let mut review_system = String::from(TEAM_FINAL_AUDIT_PROMPT);
                 review_system.push_str("\n\n");
                 review_system.push_str(team_audit_tool_guidance(ctx.scope.is_some()));
-                let review_out = match super::team_audit::generate_with_readonly_tools(
-                    svc,
-                    &self.engine,
-                    &ctx,
-                    "final_audit",
-                    "终审 agent",
-                    &review_system,
-                    &review_input,
-                    super::team_audit::FINAL_AUDIT_MAX_ROUNDS,
-                    structured_budget(ctx.settings.default_max_tokens),
-                    TEAM_JSON_TEMPERATURE,
-                    &mut total,
-                )
-                .await
+                let review_out = match self
+                    .run_audit_phase(
+                        &ctx,
+                        "final_audit",
+                        "终审 agent",
+                        "终审",
+                        &review_system,
+                        &review_input,
+                        super::team_audit::FINAL_AUDIT_MAX_ROUNDS,
+                        &mut total,
+                    )
+                    .await
                 {
                     Ok(o) => o,
                     Err(e) if *ctx.cancel.borrow() => return Err(e),
-                    Err(tool_err) => {
-                        tracing::warn!(
-                            error = tool_err.as_str(),
-                            "team 终审只读工具通道不可用,回退纯文本终审"
-                        );
-                        let review_messages = vec![
-                            LlmMessage::plain("system", &review_system),
-                            LlmMessage::plain("user", &review_input),
-                        ];
-                        match generate_text_healed(
-                            svc,
-                            &ctx.task_id,
-                            "final_audit",
-                            review_messages,
-                            structured_budget(ctx.settings.default_max_tokens),
-                            TEAM_JSON_TEMPERATURE,
-                            ctx.settings.default_top_p,
-                            &ctx.cancel,
-                            &mut total,
-                        )
-                        .await
-                        {
-                            Ok(o) => o,
-                            Err(e) if *ctx.cancel.borrow() => return Err(e),
-                            // 终审调用失败但补做产出已在手(提交 2 部分成果兜底):不再整体丢成果
-                            Err(e) => {
-                                return Ok((
-                                    fallback_terminal(&plan, format!("终审调用失败:{e}")),
-                                    total,
-                                ))
-                            }
-                        }
+                    // 终审调用失败但补做产出已在手(提交 2 部分成果兜底):不再整体丢成果
+                    Err(e) => {
+                        return Ok((fallback_terminal(&plan, format!("终审调用失败:{e}")), total))
                     }
                 };
                 if *ctx.cancel.borrow() {
@@ -621,11 +579,7 @@ impl TeamExecutor {
         }
         let error = (!reasons.is_empty()).then(|| reasons.join("\n"));
         // 有可解释 error(失败子目标 / 审计未通过 / 未完成步骤)即 partial,否则 done
-        let status = if error.is_some() {
-            TaskStatus::Partial
-        } else {
-            TaskStatus::Done
-        };
+        let (status, error) = terminal_status(error.is_some(), error);
         Ok((
             TaskTerminal::Complete {
                 result: text,

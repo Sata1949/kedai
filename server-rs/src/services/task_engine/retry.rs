@@ -141,6 +141,64 @@ pub(crate) async fn generate_step_retry(
     .await
 }
 
+/// 规划/修订/team 规划共用的「生成 → 解析 → 按 finish_reason 演进预算」重试骨架
+/// (C-2D 去重;三处原本逐行同构)。
+///
+/// 差异只由闭包注入:生成调用(`generate`)、解析函数(`parse`)、失败 attempt 的
+/// usage 入账(`on_failure`,phase 各自不同)与日志文案(`log_message`)。预算演进
+/// 规则与三处原实现一致:length/空输出翻倍并封顶 `max_tokens_cap`,其余同预算重试;
+/// 网络/超时等硬错误不重试直接透传;失败文案带末次错误。
+#[allow(clippy::too_many_arguments)] // 输入为「预算策略 + 三段闭包(生成/解析/入账)」;打包只会把三个调用点换成三次结构体构造
+pub(crate) async fn retry_parse_loop<T, G, Fut, P, R>(
+    cancel: &watch::Receiver<bool>,
+    initial_max_tokens: u32,
+    max_attempts: u32,
+    max_tokens_cap: u32,
+    mut last_err: String,
+    log_message: &str,
+    mut generate: G,
+    parse: P,
+    mut on_failure: R,
+) -> Result<(T, TaskGenOutput), String>
+where
+    G: FnMut(u32) -> Fut,
+    Fut: std::future::Future<Output = Result<TaskGenOutput, String>>,
+    P: Fn(&str) -> Result<T, String>,
+    R: FnMut(&TaskGenOutput),
+{
+    let mut max_tokens = initial_max_tokens;
+    for attempt in 1..=max_attempts {
+        if attempt > 1 {
+            tokio::time::sleep(EMPTY_RETRY_BACKOFF).await;
+            if *cancel.borrow() {
+                return Err("任务已停止".into());
+            }
+        }
+        let out = generate(max_tokens).await?;
+        match parse(&out.text) {
+            Ok(value) => return Ok((value, out)),
+            Err(e) => last_err = e,
+        }
+        // 失败 attempt 仍是一次真实调用(已落 task_llm_calls):同步入账 usage,
+        // 否则重试场景下 usage_total 少于调用明细求和(2026-09-10 实测修复)。
+        on_failure(&out);
+        let reason = out.finish_reason.as_deref().unwrap_or("");
+        tracing::warn!(
+            attempt = attempt,
+            finish_reason = reason,
+            max_tokens = max_tokens,
+            error = last_err.clone(),
+            "{}",
+            log_message
+        );
+        if reason == "length" || out.text.trim().is_empty() {
+            max_tokens = crate::utils::retry::doubled_heal_budget(max_tokens, max_tokens_cap)
+                .unwrap_or(max_tokens);
+        }
+    }
+    Err(format!("{last_err}(已重试 {} 次)", max_attempts - 1))
+}
+
 /// 汇总:与步骤同款的分级重试(空输出按 finish_reason 分别加倍 max_tokens 或调温)。
 /// 规划(带解析与分级重试):parse_plan 内含截断打捞;仍失败时按 finish_reason 分级——
 /// length/空内容 = 预算被推理 token 耗尽,max_tokens 翻倍(上限 RETRY_MAX_TOKENS_CAP);
@@ -158,17 +216,15 @@ pub(crate) async fn plan_task_retry(
     scope: Option<std::sync::Arc<crate::models::types::ExecScope>>,
     capability: crate::services::task_core::prompt_consts::StepCapability,
 ) -> Result<(Vec<TaskStep>, TaskGenOutput), String> {
-    let mut max_tokens = PLAN_INITIAL_MAX_TOKENS;
-    let mut last_err = String::from("规划器未产出有效步骤");
-    for attempt in 1..=PLAN_MAX_ATTEMPTS {
-        if attempt > 1 {
-            tokio::time::sleep(EMPTY_RETRY_BACKOFF).await;
-            if *cancel.borrow() {
-                return Err("任务已停止".into());
-            }
-        }
-        let out = deps
-            .plan_task(
+    retry_parse_loop(
+        cancel,
+        PLAN_INITIAL_MAX_TOKENS,
+        PLAN_MAX_ATTEMPTS,
+        RETRY_MAX_TOKENS_CAP,
+        "规划器未产出有效步骤".into(),
+        "任务模式规划输出解析失败,准备重试",
+        |max_tokens| {
+            deps.plan_task(
                 task_id,
                 title,
                 character_id,
@@ -177,29 +233,15 @@ pub(crate) async fn plan_task_retry(
                 scope.clone(),
                 capability,
             )
-            .await?;
-        match super::parse::parse_plan(&out.text) {
-            Ok(steps) if !steps.is_empty() => return Ok((steps, out)),
-            Ok(_) => last_err = "规划器未产出有效步骤".into(),
-            Err(e) => last_err = e,
-        }
-        // 失败 attempt 仍是一次真实调用(已落 task_llm_calls):同步入账 usage,
-        // 否则重试场景下 usage_total 少于调用明细求和(2026-09-10 实测修复)。
-        deps.record_usage(task_id, "planner", None, &out);
-        let reason = out.finish_reason.as_deref().unwrap_or("");
-        tracing::warn!(
-            attempt = attempt,
-            finish_reason = reason,
-            max_tokens = max_tokens,
-            error = last_err.clone(),
-            "任务模式规划输出解析失败,准备重试"
-        );
-        if reason == "length" || out.text.trim().is_empty() {
-            max_tokens = crate::utils::retry::doubled_heal_budget(max_tokens, RETRY_MAX_TOKENS_CAP)
-                .unwrap_or(max_tokens);
-        }
-    }
-    Err(format!("{last_err}(已重试 {} 次)", PLAN_MAX_ATTEMPTS - 1))
+        },
+        |text| match super::parse::parse_plan(text) {
+            Ok(steps) if !steps.is_empty() => Ok(steps),
+            Ok(_) => Err("规划器未产出有效步骤".into()),
+            Err(e) => Err(e),
+        },
+        |out| deps.record_usage(task_id, "planner", None, out),
+    )
+    .await
 }
 
 /// 规划对话修订(带解析与分级重试):与 plan_task_retry 同款骨架——
@@ -215,17 +257,15 @@ pub(crate) async fn plan_revise_retry(
     scope: Option<std::sync::Arc<crate::models::types::ExecScope>>,
     capability: crate::services::task_core::prompt_consts::StepCapability,
 ) -> Result<(Vec<TaskStep>, TaskGenOutput), String> {
-    let mut max_tokens = PLAN_INITIAL_MAX_TOKENS;
-    let mut last_err = String::from("规划器未产出有效修订计划");
-    for attempt in 1..=PLAN_MAX_ATTEMPTS {
-        if attempt > 1 {
-            tokio::time::sleep(EMPTY_RETRY_BACKOFF).await;
-            if *cancel.borrow() {
-                return Err("任务已停止".into());
-            }
-        }
-        let out = deps
-            .plan_revise(
+    retry_parse_loop(
+        cancel,
+        PLAN_INITIAL_MAX_TOKENS,
+        PLAN_MAX_ATTEMPTS,
+        RETRY_MAX_TOKENS_CAP,
+        "规划器未产出有效修订计划".into(),
+        "规划对话修订输出解析失败,准备重试",
+        |max_tokens| {
+            deps.plan_revise(
                 task,
                 history,
                 feedback,
@@ -234,28 +274,15 @@ pub(crate) async fn plan_revise_retry(
                 scope.clone(),
                 capability,
             )
-            .await?;
-        match super::parse::parse_plan(&out.text) {
-            Ok(steps) if !steps.is_empty() => return Ok((steps, out)),
-            Ok(_) => last_err = "规划器未产出有效修订计划".into(),
-            Err(e) => last_err = e,
-        }
-        // 失败 attempt 同步入账 usage(口径同 plan_task_retry;2026-09-10 实测修复)
-        deps.record_usage(&task.id, "planner", None, &out);
-        let reason = out.finish_reason.as_deref().unwrap_or("");
-        tracing::warn!(
-            attempt = attempt,
-            finish_reason = reason,
-            max_tokens = max_tokens,
-            error = last_err.clone(),
-            "规划对话修订输出解析失败,准备重试"
-        );
-        if reason == "length" || out.text.trim().is_empty() {
-            max_tokens = crate::utils::retry::doubled_heal_budget(max_tokens, RETRY_MAX_TOKENS_CAP)
-                .unwrap_or(max_tokens);
-        }
-    }
-    Err(format!("{last_err}(已重试 {} 次)", PLAN_MAX_ATTEMPTS - 1))
+        },
+        |text| match super::parse::parse_plan(text) {
+            Ok(steps) if !steps.is_empty() => Ok(steps),
+            Ok(_) => Err("规划器未产出有效修订计划".into()),
+            Err(e) => Err(e),
+        },
+        |out| deps.record_usage(&task.id, "planner", None, out),
+    )
+    .await
 }
 
 /// 汇总:与步骤同款的分级重试(空输出按 finish_reason 分别加倍 max_tokens 或调温)。

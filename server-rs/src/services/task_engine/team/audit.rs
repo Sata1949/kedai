@@ -1,9 +1,10 @@
 // team 审计:审计输出解析,以及审计/终审/汇总共用的纯生成出口(截断自愈)。
 // 由原 `team.rs` 整段搬来(C-2D,纯搬运)。
-use super::budget::trunc_heal_budget_reasoning_aware;
-use super::{AuditVerdict, Kickback};
+use super::budget::{structured_budget, trunc_heal_budget_reasoning_aware};
+use super::{AuditVerdict, Kickback, TeamExecutor, TEAM_JSON_TEMPERATURE};
 use crate::models::types::{LlmMessage, TaskEventKind, TokenUsage};
 use crate::services::task_core::{TaskBackend, TaskGenOutput};
+use crate::services::task_engine::context::TaskRunContext;
 use std::sync::Arc;
 use tokio::sync::watch;
 
@@ -174,4 +175,68 @@ pub(super) async fn generate_text_healed(
     total.completion_tokens += out.completion_tokens;
     total.total_tokens += out.prompt_tokens + out.completion_tokens;
     Ok(out)
+}
+
+impl TeamExecutor {
+    /// 审计/终审共用的结构化阶段出口(C-2D 去重):先走只读工作区工具通道,
+    /// 不可用时回退纯文本生成(带截断自愈)。取消保持 Err(由引擎按 ended 收尾);
+    /// 其它失败也返回 Err,由调用方决定 `fallback_terminal` 的文案(审计/终审不同)。
+    ///
+    /// `short` 只用于回退日志的措辞(「审计」/「终审」),`label` 是调用追踪/事件里的
+    /// 「审计 agent」/「终审 agent」。
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn run_audit_phase(
+        &self,
+        ctx: &TaskRunContext,
+        phase: &'static str,
+        label: &str,
+        short: &str,
+        system: &str,
+        input: &str,
+        max_rounds: u32,
+        total: &mut TokenUsage,
+    ) -> Result<TaskGenOutput, String> {
+        match crate::services::task_engine::team_audit::generate_with_readonly_tools(
+            &self.svc,
+            &self.engine,
+            ctx,
+            phase,
+            label,
+            system,
+            input,
+            max_rounds,
+            structured_budget(ctx.settings.default_max_tokens),
+            TEAM_JSON_TEMPERATURE,
+            total,
+        )
+        .await
+        {
+            Ok(o) => Ok(o),
+            // 取消:保持 Err,由引擎按 ended 收尾(终态兜底从库里的 plan 补写已完成产出)
+            Err(e) if *ctx.cancel.borrow() => Err(e),
+            Err(tool_err) => {
+                tracing::warn!(
+                    error = tool_err.as_str(),
+                    "team {short}只读工具通道不可用,回退纯文本{short}"
+                );
+                let messages = vec![
+                    LlmMessage::plain("system", system),
+                    LlmMessage::plain("user", input),
+                ];
+                // 截断自愈:审计/终审是结构化 JSON 输出,推理模型烧光预算会腰斩 JSON(实测)
+                generate_text_healed(
+                    &self.svc,
+                    &ctx.task_id,
+                    phase,
+                    messages,
+                    structured_budget(ctx.settings.default_max_tokens),
+                    TEAM_JSON_TEMPERATURE,
+                    ctx.settings.default_top_p,
+                    &ctx.cancel,
+                    total,
+                )
+                .await
+            }
+        }
+    }
 }

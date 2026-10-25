@@ -12,10 +12,10 @@
 // TaskService::complete_followup_run(守门与取消清理语义与 complete_mode_run 一致)。
 // **永不返回 Err**。
 use super::context::TaskRunContext;
-use super::executor::{usage_as_output, ModeExecutor};
+use super::executor::{terminal_status, usage_as_output, ModeExecutor};
 use super::solo::{run_agent_loop, AgentLoopCall};
 use crate::agents::engine::AgentEngine;
-use crate::models::types::{TaskFollowupMode, TaskStatus, TokenUsage};
+use crate::models::types::{TaskFollowupMode, TokenUsage};
 use crate::services::task_core::{TaskBackend, TaskTerminal};
 use futures::future::BoxFuture;
 use std::sync::Arc;
@@ -142,11 +142,8 @@ impl ModeExecutor for FollowupExecutor {
                             format!("{prev}\n\n---\n\n{section}")
                         }
                     };
-                    let status = if self.params.prev_partial || guard_stopped.is_some() {
-                        TaskStatus::Partial
-                    } else {
-                        TaskStatus::Done
-                    };
+                    let (status, _) =
+                        terminal_status(self.params.prev_partial || guard_stopped.is_some(), None);
                     // 终态值:msg_text 落 kind=followup 消息,new_result 写 result
                     //(引擎 finalize_terminal 转调 complete_followup_run,守门一致)
                     Ok((

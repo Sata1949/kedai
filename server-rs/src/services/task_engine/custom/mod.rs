@@ -40,7 +40,7 @@ mod subflow;
 
 use self::context::select_draft;
 use super::context::TaskRunContext;
-use super::executor::ModeExecutor;
+use super::executor::{terminal_status, ModeExecutor};
 use super::flow_call::{self, FlowCallState};
 use crate::agents::engine::AgentEngine;
 use crate::models::types::{PlanStep, TaskStatus, TaskStep, TaskStepStatus, TokenUsage};
@@ -294,11 +294,7 @@ impl CustomExecutor {
         // 对比模式再加一条:被调流程内有失败/空产出(degraded)同算降级——与本层静态
         // 子图的 degraded 同一口径(那条链的质量已经降级,不该报 done)。
         let degraded = call_state.as_ref().is_some_and(|s| s.degraded());
-        let status = if outcome.any_error || degraded {
-            TaskStatus::Partial
-        } else {
-            TaskStatus::Done
-        };
+        let (status, _) = terminal_status(outcome.any_error || degraded, None);
         Ok((
             TaskTerminal::Complete {
                 result: draft,

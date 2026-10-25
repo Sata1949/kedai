@@ -6,7 +6,7 @@
 // run_agent_loop 为「单主 agent 工具自循环」共享骨架:solo/multi 执行器与
 // team 模式的各主 agent 复用同一实现(批次 4.3b),差异仅在运行身份/追踪字段。
 use super::context::TaskRunContext;
-use super::executor::{usage_as_output, ModeExecutor};
+use super::executor::{terminal_status, usage_as_output, ModeExecutor};
 use super::sink;
 use crate::agents::engine::executor::{run_tool_loop, ToolLoopRequest};
 use crate::agents::engine::{AbortFlag, AgentEngine};
@@ -599,15 +599,10 @@ impl SoloExecutor {
             .record_usage(&ctx.task_id, "agent", None, &usage_as_output(&out.usage));
         // 成功终态:result 文本 + done;守卫截断是「带产出的部分完成」,降 partial
         // 并写明原因(SKY-6 第 2 项),不得让半成品冒充 done。
-        let (status, error) = match out.guard_stopped {
-            Some(reason) => (
-                TaskStatus::Partial,
-                Some(format!(
-                    "工具循环被守卫截断({reason}),成果可能不完整;可追加指令继续完成"
-                )),
-            ),
-            None => (TaskStatus::Done, None),
-        };
+        let error = out.guard_stopped.as_ref().map(|reason| {
+            format!("工具循环被守卫截断({reason}),成果可能不完整;可追加指令继续完成")
+        });
+        let (status, error) = terminal_status(error.is_some(), error);
         Ok((
             TaskTerminal::Complete {
                 result: out.text,
