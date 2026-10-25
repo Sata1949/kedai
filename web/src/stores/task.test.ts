@@ -37,6 +37,8 @@ const h = vi.hoisted(() => ({
   callsFetchCount: 0,
   /** true 时 getTaskCalls 抛错(验证 loadTaskCalls 失败静默) */
   callsFail: false,
+  /** true 时 getTask 抛错(验证 selectTask 失败不留下旧任务详情) */
+  detailFail: false,
   /** getTaskChanges 调用次数(批次 4c:选任务/进终态驱动刷新断言用) */
   changesFetchCount: 0,
   /** true 时 getTaskChanges 抛错(验证失败静默保留旧值) */
@@ -98,6 +100,7 @@ vi.mock('../api', async (importOriginal) => {
     }),
     getTask: vi.fn(async (id: string): Promise<TaskDetail> => {
       h.detailFetchCount += 1;
+      if (h.detailFail) throw new Error('任务详情加载失败');
       // FE-1:命中挂起项时返回未决 Promise(迟到响应时序控制)
       if (h.delay?.fn === 'getTask' && h.delay.key === id) return h.delay.promise as Promise<TaskDetail>;
       return makeDetail(h.backendStatus, id);
@@ -235,15 +238,24 @@ async function flush(): Promise<void> {
 }
 
 /** 手工控制时序的 Promise(FE-1 迟到响应测试用) */
-function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (v: T) => void;
+  reject: (e: unknown) => void;
+} {
   let resolveFn: ((v: T) => void) | null = null;
-  const promise = new Promise<T>((res) => {
+  let rejectFn: ((e: unknown) => void) | null = null;
+  const promise = new Promise<T>((res, rej) => {
     resolveFn = res;
+    rejectFn = rej;
   });
   return {
     promise,
     resolve: (v: T) => {
       if (resolveFn) resolveFn(v);
+    },
+    reject: (e: unknown) => {
+      if (rejectFn) rejectFn(e);
     },
   };
 }
@@ -259,6 +271,7 @@ describe('任务事件 SSE 订阅(WP5)', () => {
     h.usageFetchCount = 0;
     h.callsFetchCount = 0;
     h.callsFail = false;
+    h.detailFail = false;
     h.autoFailSubscribe = false;
     h.backendStatus = 'pending';
     h.emitEvent = null;
@@ -332,6 +345,42 @@ describe('任务事件 SSE 订阅(WP5)', () => {
     await flush();
     expect(store.currentTaskId).toBeNull();
     expect(store.currentTask).toBeNull();
+    expect(memStorage.get('kedai.currentTaskId.v1'), '删除事件必须清持久化选择').toBeUndefined();
+  });
+
+  it('selectTask 详情加载失败时回退到上一个任务,不把旧详情挂到新 id', async () => {
+    const store = useTaskStore();
+    store.appMode = 'task';
+    await store.selectTask('t1');
+    expect(store.currentTask?.task.id).toBe('t1');
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    h.detailFail = true;
+    await store.selectTask('t2');
+    errorSpy.mockRestore();
+
+    expect(store.currentTaskId, '失败应回退 id').toBe('t1');
+    expect(store.currentTask?.task.id, '失败不得显示旧任务详情冒充新任务').toBe('t1');
+    expect(memStorage.get('kedai.currentTaskId.v1'), '持久化选择也应回退').toBe('t1');
+    expect(store.taskLoadError, '失败必须给可见错误').toContain('加载任务详情失败');
+
+    h.detailFail = false;
+    await store.selectTask('t1');
+    expect(store.taskLoadError, '下一次成功选择清空错误').toBeNull();
+  });
+
+  it('deleteTask 清空 lastAgentStatus 与持久化选择', async () => {
+    const store = useTaskStore();
+    store.appMode = 'task';
+    store.startTaskEvents();
+    await store.selectTask('t1');
+    h.emitEvent!({ type: 'task', task_id: 't1', kind: 'agent_status', detail: 't1 在动' });
+    await flush();
+    expect(store.lastAgentStatus).toBe('t1 在动');
+
+    await store.deleteTask('t1');
+    expect(store.lastAgentStatus, '删除当前任务必须清最近状态').toBeNull();
+    expect(memStorage.get('kedai.currentTaskId.v1'), '删除当前任务必须清持久化选择').toBeUndefined();
   });
 
   it('连接持续失败时按指数退避重连(1→2→4s),断开期间 5s 兜底轮询生效', async () => {
@@ -471,6 +520,7 @@ describe('llm_call 事件与调用追踪(批次 3 L3)', () => {
     h.usageFetchCount = 0;
     h.callsFetchCount = 0;
     h.callsFail = false;
+    h.detailFail = false;
     h.autoFailSubscribe = false;
     h.backendStatus = 'pending';
     h.emitEvent = null;
@@ -557,6 +607,7 @@ describe('事件风暴签名去重(multi/team 卡顿修复)', () => {
     h.usageFetchCount = 0;
     h.callsFetchCount = 0;
     h.callsFail = false;
+    h.detailFail = false;
     h.autoFailSubscribe = false;
     h.backendStatus = 'pending';
     h.emitEvent = null;
@@ -639,6 +690,7 @@ describe('批次 4 六模式:taskRunMode / approveTask / 新事件分支', () =>
     h.usageFetchCount = 0;
     h.callsFetchCount = 0;
     h.callsFail = false;
+    h.detailFail = false;
     h.autoFailSubscribe = false;
     h.backendStatus = 'pending';
     h.emitEvent = null;
@@ -994,6 +1046,7 @@ describe('plan 模式生命周期:planned → 批准 → done(签名去重不吞
     h.usageFetchCount = 0;
     h.callsFetchCount = 0;
     h.callsFail = false;
+    h.detailFail = false;
     h.autoFailSubscribe = false;
     h.backendStatus = 'pending';
     h.backendPlan = [];
@@ -1103,6 +1156,7 @@ describe('delta 流式缓冲(批次 R4 任务模式流式输出)', () => {
     h.usageFetchCount = 0;
     h.callsFetchCount = 0;
     h.callsFail = false;
+    h.detailFail = false;
     h.autoFailSubscribe = false;
     h.backendStatus = 'pending';
     h.emitEvent = null;
@@ -1461,6 +1515,7 @@ describe('FE-1 迟到响应守卫(切任务不丢新选择)', () => {
     h.callsFetchCount = 0;
     h.changesFetchCount = 0;
     h.backendStatus = 'pending';
+    h.detailFail = false;
     h.delay = null;
     h.callsFail = false;
     h.changesFail = false;
@@ -1485,6 +1540,27 @@ describe('FE-1 迟到响应守卫(切任务不丢新选择)', () => {
 
     expect(store.currentTaskId).toBe('B');
     expect(store.currentTask?.task.id, '迟到响应不得覆盖当前选择').toBe('B');
+  });
+
+  it('同 id 在途请求失败时 selectTask 也回退(合并不再立即返回 true)', async () => {
+    const late = deferred<TaskDetail>();
+    h.delay = { fn: 'getTask', key: 'B', promise: late.promise };
+    const store = useTaskStore();
+    await store.selectTask('A');
+    expect(store.currentTask?.task.id).toBe('A');
+
+    const pB = store.loadTaskDetail('B'); // B 的请求先上路(持有者不是 selectTask)
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const selectB = store.selectTask('B'); // 命中 in-flight 合并,等待同一个真实结果
+    await Promise.resolve();
+    late.reject(new Error('B 详情失败'));
+    await Promise.all([pB, selectB]);
+    errorSpy.mockRestore();
+
+    expect(store.currentTaskId, '在途失败也必须回退').toBe('A');
+    expect(store.currentTask?.task.id).toBe('A');
+    expect(store.taskLoadError, '回退同时给出可见错误').toContain('加载任务详情失败');
+    expect(memStorage.get('kedai.currentTaskId.v1')).toBe('A');
   });
 
   it('正常路径:单次 selectTask 仍加载详情(守卫不误伤)', async () => {

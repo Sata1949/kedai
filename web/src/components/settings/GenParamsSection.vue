@@ -1,4 +1,5 @@
 <script setup lang="ts">
+// arch-allow-file: 设置表单以 v-model 直写 store 草稿,保存统一走 queueSettingsSave;逐字段 action 只增加转发层。
 // 设置区:生成参数(温度/Top-P/长度/上下文窗口/工具轮次 + 压缩/记忆/子代理参数)。
 // 从 SettingsModal.vue 双模板合并而来:取 standalone 超集版本(embedded 分支缺失
 // 压缩模式/记忆蒸馏/子代理等字段,属模板漂移,合并后两模式一致)。

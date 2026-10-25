@@ -21,7 +21,7 @@
  *      必须全部登记在 `tools/arch-layers.json`(三结合分层的单一事实源)。未登记即 FAIL:
  *      没有代际归属的模块无从按分层纪律评审,是分层叙事的静默失效点。
  *   J. 跨代依赖方向 —— 按 arch-layers.json 的 L1/L2/L3 归属与允许方向校验实测 import 图。
- *      新增越代边 FAIL;存量越代边须在 registeredEdges 中登记(只报债务不阻塞,可还债不可增债)。
+ *      新增越代边 FAIL;存量越代边须在 registeredEdges 中登记(只报 wiring/debt 不阻塞,可还债不可增债)。
  *   K. JSON body 提取器接入 ratchet —— 直接写 `Json(x): Json<T>` 的 handler 数量不得超基线
  *      `BASELINE_RAW_JSON_BODY`(未接入 `JsonBody` 会让畸形 JSON 回 `400 text/plain`,前端解析不出 `code`)。
  *   L. JNI 按名调用桥类的登记完整性 —— 两个入口 `call_string_static`(1 个 String 入参)/
@@ -46,6 +46,14 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  collectFrontendModuleSpecs,
+  directWrites,
+  hasArchAllow,
+  hasFileArchAllow,
+  resolveFrontendSpecifier,
+  storeBindings,
+} from './lib/arch-scan.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SRC = join(ROOT, 'web', 'src');
@@ -64,6 +72,7 @@ const VERBOSE = process.argv.includes('--verbose');
 const KNOWN_CYCLES = [];
 
 const failures = [];
+
 /**
  * 前端「代际归属」类违规(规则 I 的前端分支)独立分桶。
  *
@@ -73,6 +82,10 @@ const failures = [];
  * 现在两个桶在汇总处一并打印后再统一退出,任一桶非空都判 FAIL(不降低门禁强度)。
  */
 const frontendFailures = [];
+/** 已登记依赖 / 已知循环 / 陈旧登记的清单。kind 决定汇总分栏:
+ *  `wiring` = 设计上接受的装配接线,`debt` = 应还的债(含已知循环),
+ *  `stale` = 登记表陈旧项。旧实现统一打「待偿还债务」,把 3 条 wiring
+ *  误报成债(2026-10-24 C-2-0)。 */
 const notes = [];
 
 /**
@@ -230,7 +243,10 @@ let knownCycles = 0;
 for (const ring of cycles) {
   if (sameAsKnown(ring)) {
     knownCycles++;
-    notes.push(`[债务] 已知循环依赖未偿还:${ring.join(' ↔ ')}(修完请从 KNOWN_CYCLES 删除)`);
+    notes.push({
+      kind: 'debt',
+      text: `已知循环依赖未偿还:${ring.join(' ↔ ')}(修完请从 KNOWN_CYCLES 删除)`,
+    });
   } else {
     newCycles++;
     failures.push(`新增 store 循环依赖:${ring.join(' → ')}(顶层 import 成环,须断环)`);
@@ -253,42 +269,31 @@ function collectVue(dir) {
   return out;
 }
 
-/** 找出组件内 store 绑定名:const X = useYStore() / const X = store(门面)。 */
-function storeBindings(src) {
-  const names = new Map();
-  for (const m of src.matchAll(/(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*use[A-Z][\w]*Store\(\)/g)) {
-    names.set(m[1], 'store');
-  }
-  // 门面 store.ts 的 useAppStore() 也匹配上面;补 `= store` 形态(别名导入)
-  for (const m of src.matchAll(/(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*store\b/g)) {
-    names.set(m[1], 'facade');
-  }
-  return names;
-}
-
-/** 找出 `<binding>.<field> = ` 形态的赋值(排除 == / === 与对象字面量键)。 */
-function directWrites(src, bindings) {
-  const hits = [];
-  for (const [bind, kind] of bindings) {
-    const re = new RegExp(`\\b${bind}\\.([A-Za-z_$][\\w$]*)\\s*(?:=[^=]|\\+=|-=|\\*=|\\|=)`, 'g');
-    for (const m of src.matchAll(re)) {
-      hits.push({ field: m[1], kind, index: m.index });
-    }
-  }
-  return hits;
-}
-
 /** 取赋值处的行号(用于报错定位)。 */
 const lineOf = (src, index) => src.slice(0, index).split('\n').length;
 
 let writeHits = 0;
 let whitelisted = 0;
+let fileAllowedHits = 0;
+let lineAllowedHits = 0;
 for (const file of collectVue(SRC)) {
   const src = readFileSync(file, 'utf8');
   const bindings = storeBindings(src);
   if (!bindings.size) continue;
+  const fileAllowed = hasFileArchAllow(src);
   for (const hit of directWrites(src, bindings)) {
     writeHits++;
+    if (fileAllowed || hasArchAllow(src, hit.index)) {
+      whitelisted++;
+      if (fileAllowed) fileAllowedHits++;
+      else lineAllowedHits++;
+      if (VERBOSE) {
+        console.log(
+          `  [B] ${fileAllowed ? 'arch-allow-file' : 'arch-allow'} 命中:${relative(ROOT, file)}:${lineOf(src, hit.index)} → ${hit.syntax}`,
+        );
+      }
+      continue;
+    }
     if (UI_FLAG_WHITELIST.has(hit.field)) {
       whitelisted++;
       if (VERBOSE) {
@@ -297,12 +302,14 @@ for (const file of collectVue(SRC)) {
       continue;
     }
     failures.push(
-      `组件直改 store state:${relative(ROOT, file)}:${lineOf(src, hit.index)} → .${hit.field} = ...(应走 action;若确为无害 UI 开关,加 UI_FLAG_WHITELIST 并写理由)`,
+      `组件直改 store state:${relative(ROOT, file)}:${lineOf(src, hit.index)} → ${hit.syntax}(应走 action;确需直写请在上行写 arch-allow: 理由)`,
     );
   }
 }
 if (VERBOSE) {
-  console.log(`  [B] 命中赋值 ${writeHits} 处(白名单 ${whitelisted},待修 ${writeHits - whitelisted})`);
+  console.log(
+    `  [B] 命中赋值 ${writeHits} 处(UI 白名单 ${whitelisted - fileAllowedHits - lineAllowedHits},arch-allow-file ${fileAllowedHits},arch-allow ${lineAllowedHits},待修 ${writeHits - whitelisted})`,
+  );
 }
 
 // ---------- 汇总 ----------
@@ -922,6 +929,14 @@ const backendWarnings = [];
     // 组合根(`entry` 代际:lib.rs/config.rs/main.rs、App.vue/main.ts)被**允许依赖一切**,
     // 这是分层架构的通用豁免——它的职责就是把各层拼装起来,故不参与方向校验。
     const registeredBackend = new Set((cfg.registeredEdges ?? []).map((e) => `${e.from}->${e.to}`));
+    /** 登记类别:wiring = 装配接线(设计接受),debt = 应还的债。缺省按 debt 处理,
+     *  避免漏写 class 时把债务误报成正常接线。 */
+    const backendEdgeClass = new Map(
+      (cfg.registeredEdges ?? []).map((e) => [
+        `${e.from}->${e.to}`,
+        e.class === 'wiring' ? 'wiring' : 'debt',
+      ]),
+    );
     const backendEdges = new Map();
     for (const f of collect(SERVER, ['.rs'])) {
       const parts = relative(SERVER, f).split(sep);
@@ -951,10 +966,12 @@ const backendWarnings = [];
       backendCrossGen++;
       if (registeredBackend.has(key)) {
         backendRegistered++;
-        notes.push(
-          `[债务] 后端越代依赖 ${e.from}(${ga}) → ${e.to}(${gb}) 例:${e.samples[0]}` +
+        notes.push({
+          kind: backendEdgeClass.get(key) ?? 'debt',
+          text:
+            `后端越代依赖 ${e.from}(${ga}) → ${e.to}(${gb}) 例:${e.samples[0]}` +
             `(已登记于 arch-layers.json;还清后请删除该条目)`,
-        );
+        });
       } else {
         backendFailures.push(
           `[J] 新增越代依赖:${e.from}(${ga}) → ${e.to}(${gb}) 例:${e.samples.join(', ')}` +
@@ -966,9 +983,10 @@ const backendWarnings = [];
     // 登记陈旧检测:已登记但实测不存在的边 → 提示删除,防止登记表变成「历史沉积」而失去意义
     for (const key of registeredBackend) {
       if (!backendEdges.has(key)) {
-        notes.push(
-          `[登记陈旧] arch-layers.json 的 registeredEdges 含 ${key},但实测已无该依赖,请删除该条目`,
-        );
+        notes.push({
+          kind: 'stale',
+          text: `arch-layers.json 的 registeredEdges 含 ${key},但实测已无该依赖,请删除该条目`,
+        });
       }
     }
     if (VERBOSE) {
@@ -987,6 +1005,12 @@ const backendWarnings = [];
     const registeredFrontend = new Set(
       (cfg.frontendRegisteredEdges ?? []).map((e) => `${e.from}->${e.to}`),
     );
+    const frontendEdgeClass = new Map(
+      (cfg.frontendRegisteredEdges ?? []).map((e) => [
+        `${e.from}->${e.to}`,
+        e.class === 'wiring' ? 'wiring' : 'debt',
+      ]),
+    );
     const feEdges = new Map();
     for (const f of collect(SRC, ['.ts', '.vue'])) {
       if (isTest(f)) continue;
@@ -996,29 +1020,23 @@ const backendWarnings = [];
       const from = fromFile ?? parts[0];
       if (feModuleGen(from) === 'entry') continue; // 组合根作为依赖发起方 → 豁免
       const src = readFileSync(f, 'utf8');
-      for (const m of src.matchAll(/from\s+['"]([^'"]+)['"]/g)) {
-        const spec = m[1];
-        let to = null;
-        if (spec.startsWith('@/')) to = spec.slice(2).split('/')[0];
-        else if (spec.startsWith('.')) {
-          const joined = join(dirname(relPath), spec).split(sep).join('/');
-          const seg = joined.split('/')[0];
-          // ./x 在根目录下解析为根文件 x;../x 等上跳路径不视作同层依赖
-          to = seg === '.' || seg === '..' ? null : seg;
-        } else continue;
-        if (to === null || to === from) continue;
+      const recordSpec = (spec) => {
+        const to = resolveFrontendSpecifier(relPath, spec);
+        if (to === null || to === from) return;
         const toName = to.replace(/\.(ts|vue)$/, '');
-        if (!feModuleGen(toName)) continue; // 未登记由规则 I 单独报错
+        if (!feModuleGen(toName)) return; // 未登记由规则 I 单独报错
         // 组合根作为依赖接收方 → 也豁免:前端 entry 是**被广泛引用的公共装配面**
         // (store.ts 门面聚合 7 个 store、modals.ts 是弹窗注册表),组件/composable
         // 经门面访问状态正是该架构的核心模式——若禁止,门面即不可用。这与后端
         // entry 只作发起方的语义不同,是前端层次模型的固有差异。
-        if (feModuleGen(toName) === 'entry') continue;
+        if (feModuleGen(toName) === 'entry') return;
         const key = `${from}->${toName}`;
         if (!feEdges.has(key)) feEdges.set(key, { from, to: toName, samples: [] });
         const rec = feEdges.get(key);
         if (rec.samples.length < 3) rec.samples.push(relPath);
-      }
+      };
+      // 静态 from 与动态 import() 由同一采集器返回,避免再次出现「只认 from」的假阴性。
+      for (const spec of collectFrontendModuleSpecs(src)) recordSpec(spec);
     }
     let feCrossGen = 0;
     for (const [key, e] of feEdges) {
@@ -1027,10 +1045,12 @@ const backendWarnings = [];
       if (ga === gb || isAllowedFeDir(ga, gb)) continue;
       feCrossGen++;
       if (registeredFrontend.has(key)) {
-        notes.push(
-          `[债务] 前端越代依赖 ${e.from}(${ga}) → ${e.to}(${gb}) 例:${e.samples[0]}` +
+        notes.push({
+          kind: frontendEdgeClass.get(key) ?? 'debt',
+          text:
+            `前端越代依赖 ${e.from}(${ga}) → ${e.to}(${gb}) 例:${e.samples[0]}` +
             `(已登记于 arch-layers.json;还清后请删除该条目)`,
-        );
+        });
       } else {
         frontendFailures.push(
           `[J] 前端新增越代依赖:${e.from}(${ga}) → ${e.to}(${gb}) 例:${e.samples.join(', ')}` +
@@ -1040,9 +1060,10 @@ const backendWarnings = [];
     }
     for (const key of registeredFrontend) {
       if (!feEdges.has(key)) {
-        notes.push(
-          `[登记陈旧] arch-layers.json 的 frontendRegisteredEdges 含 ${key},但实测已无该依赖,请删除该条目`,
-        );
+        notes.push({
+          kind: 'stale',
+          text: `arch-layers.json 的 frontendRegisteredEdges 含 ${key},但实测已无该依赖,请删除该条目`,
+        });
       }
     }
     if (VERBOSE) console.log(`  [J] 前端跨代边:${feCrossGen} 条(登记 ${registeredFrontend.size})`);
@@ -1074,10 +1095,29 @@ if (frontendFailures.length) {
   console.log('[ OK ] 前端架构无违规');
 }
 console.log(`store 循环依赖:${cycles.length} 个(新增 ${newCycles})`);
-console.log(`组件直改 state:${writeHits} 处(白名单 ${whitelisted})`);
-if (notes.length) {
-  console.log(`\n待偿还债务 ${notes.length} 条:`);
-  for (const n of notes) console.log(`  - ${n}`);
+console.log(
+  `组件直改 state:${writeHits} 处(UI 白名单 ${whitelisted - fileAllowedHits - lineAllowedHits}，arch-allow ${lineAllowedHits}，arch-allow-file ${fileAllowedHits}，待修 ${writeHits - whitelisted})`,
+);
+const wiringNotes = notes.filter((n) => n.kind === 'wiring');
+const debtNotes = notes.filter((n) => n.kind === 'debt');
+const staleNotes = notes.filter((n) => n.kind === 'stale');
+if (wiringNotes.length || debtNotes.length) {
+  console.log(
+    `\n已登记依赖 ${wiringNotes.length + debtNotes.length} 条` +
+      `(wiring ${wiringNotes.length} / debt ${debtNotes.length}):`,
+  );
+  if (wiringNotes.length) {
+    console.log('  装配接线(wiring,设计上接受):');
+    for (const n of wiringNotes) console.log(`  - [wiring] ${n.text}`);
+  }
+  if (debtNotes.length) {
+    console.log('  待偿还债务(debt,须按 remediation 收口):');
+    for (const n of debtNotes) console.log(`  - [debt] ${n.text}`);
+  }
+}
+if (staleNotes.length) {
+  console.log('  登记陈旧(请删除对应条目):');
+  for (const n of staleNotes) console.log(`  - [stale] ${n.text}`);
 }
 if (failures.length) {
   console.log(`\n[FAIL] ${failures.length} 处架构违规:`);

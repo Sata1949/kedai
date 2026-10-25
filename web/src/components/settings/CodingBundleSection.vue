@@ -1,4 +1,5 @@
 <script setup lang="ts">
+// arch-allow-file: 设置表单以草稿 ref 直写 store(保存失败回滚),保存统一走 queueSettingsSave;逐字段 action 只增加转发层。
 // 设置区:编码能力包(默认关;须用户显式开启)。
 //
 // 语义:开启后,任务模式执行者的**默认**系统提示词改用「编码执行者模板」——强调先读后写、

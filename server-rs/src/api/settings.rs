@@ -700,14 +700,16 @@ pub async fn update_settings(
                 }};
             }
             if let Some(v) = body.default_temperature {
-                if (0.0..=2.0).contains(&v) {
-                    apply!(s, is_task, default_temperature, v);
+                if !(0.0..=2.0).contains(&v) {
+                    return validation("default_temperature 必须在 0.0..=2.0");
                 }
+                apply!(s, is_task, default_temperature, v);
             }
             if let Some(v) = body.default_top_p {
-                if (0.0..=1.0).contains(&v) {
-                    apply!(s, is_task, default_top_p, v);
+                if !(0.0..=1.0).contains(&v) {
+                    return validation("default_top_p 必须在 0.0..=1.0");
                 }
+                apply!(s, is_task, default_top_p, v);
             }
             if let Some(v) = body.default_max_tokens {
                 if v == 0 || v > 131_072 {
@@ -749,9 +751,10 @@ pub async fn update_settings(
             // mvu 变量注入位置:仅接受 system / user_tail
             if let Some(v) = &body.mvu_vars_position {
                 let t = v.trim().to_string();
-                if t == "system" || t == "user_tail" {
-                    apply!(s, is_task, mvu_vars_position, t);
+                if t != "system" && t != "user_tail" {
+                    return validation("mvu_vars_position 仅支持 system / user_tail");
                 }
+                apply!(s, is_task, mvu_vars_position, t);
             }
             // 反思提示词:允许清空(空 = 回退机械规则检查)
             if let Some(v) = &body.reflect_prompt {
@@ -764,9 +767,10 @@ pub async fn update_settings(
             // 预设尾部注入角色:仅接受 user / assistant
             if let Some(v) = &body.preset_tail_role {
                 let t = v.trim().to_string();
-                if t == "user" || t == "assistant" {
-                    apply!(s, is_task, preset_tail_role, t);
+                if t != "user" && t != "assistant" {
+                    return validation("preset_tail_role 仅支持 user / assistant");
                 }
+                apply!(s, is_task, preset_tail_role, t);
             }
             // 反思失败建议提示词:允许清空(空 = 禁用)
             if let Some(v) = &body.reflect_advice_prompt {
@@ -775,9 +779,10 @@ pub async fn update_settings(
             // 反思建议注入角色:仅接受 user / assistant
             if let Some(v) = &body.reflect_advice_role {
                 let t = v.trim().to_string();
-                if t == "user" || t == "assistant" {
-                    apply!(s, is_task, reflect_advice_role, t);
+                if t != "user" && t != "assistant" {
+                    return validation("reflect_advice_role 仅支持 user / assistant");
                 }
+                apply!(s, is_task, reflect_advice_role, t);
             }
             // 授权模式(三档;旧 bypass_mode 仍接受并映射为对应档位)。
             // TM-SET-3:三档/黑名单/等待超时直写扁平(全局字段)——工具授权裁决不经

@@ -722,6 +722,13 @@ async function removeTask(task: TaskRecord): Promise<void> {
       <div class="sv-taskboard">
       <!-- 详情区 -->
       <div class="sv-task-detail">
+        <!-- 详情加载失败:切任务失败会回退到上一个任务,错误条必须可见,
+             否则用户只看到「点了没反应」。放在 currentTask 判空之外,
+             首次选择失败(无旧任务)时也能显示。 -->
+        <div v-if="store.taskLoadError" class="sv-task-error" role="alert">
+          <span>{{ store.taskLoadError }}</span>
+          <button class="sv-btn ghost sv-btn-sm" @click="store.dismissTaskLoadError()">关闭</button>
+        </div>
         <template v-if="currentTask">
           <div class="sv-task-head">
             <div class="sv-task-head-copy">

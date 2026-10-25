@@ -17,8 +17,8 @@ import type { AgentFlowConfig } from '../../api/types';
 
 // 动态 import 必然失败(模拟 chunk 404 / 页面缓存引用旧 hash)。
 // 替换的是**懒加载入口模块**而非组件模块:后者会让 vitest 把工厂抛错记成 run 级
-// unhandled error(见 utils/flowCanvasChunk.ts 的注释)。
-vi.mock('../../utils/flowCanvasChunk', () => ({
+// unhandled error(见 components/settings/flowCanvasChunk.ts 的注释)。
+vi.mock('./flowCanvasChunk', () => ({
   loadFlowCanvas: () => Promise.reject(new Error('模拟画布 chunk 加载失败')),
 }));
 

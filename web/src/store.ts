@@ -47,6 +47,7 @@ export const useAppStore = defineStore('app', () => {
     // 角色
     loadCharacters: character.loadCharacters,
     selectCharacter: character.selectCharacter,
+    setSearchQuery: character.setSearchQuery,
     uploadCharacter: character.uploadCharacter,
     deleteCharacter: character.deleteCharacter,
     authorizeCurrentCharacterScripts: character.authorizeCurrentCharacterScripts,
@@ -104,6 +105,11 @@ export const useAppStore = defineStore('app', () => {
     // 任务模式
     setAppMode: task.setAppMode,
     setDefaultAppMode: task.setDefaultAppMode,
+    setTaskRunMode: task.setTaskRunMode,
+    setTaskFlowId: task.setTaskFlowId,
+    setTaskFlowMode: task.setTaskFlowMode,
+    setTaskFlowIds: task.setTaskFlowIds,
+    setTaskConnectionId: task.setTaskConnectionId,
     loadTasks: task.loadTasks,
     loadGlobalTaskUsage: task.loadGlobalTaskUsage,
     loadTaskCalls: task.loadTaskCalls,
@@ -111,6 +117,7 @@ export const useAppStore = defineStore('app', () => {
     createTask: task.createTask,
     selectTask: task.selectTask,
     clearSelectedTask: task.clearSelectedTask,
+    dismissTaskLoadError: task.dismissTaskLoadError,
     restoreSelectedTask: task.restoreSelectedTask,
     loadTaskDetail: task.loadTaskDetail,
     runTask: task.runTask,
