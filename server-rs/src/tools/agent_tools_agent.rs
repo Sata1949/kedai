@@ -352,7 +352,7 @@ async fn run_subtask_with_tools(
     scope: Option<std::sync::Arc<crate::models::types::ExecScope>>,
     budget: Option<ToolBudget>,
 ) {
-    use crate::agents::engine::executor::run_tool_loop;
+    use crate::agents::engine::executor::{run_tool_loop, ToolLoopRequest};
     use crate::agents::engine::AbortFlag;
     use crate::agents::state_machine::StateMachine;
 
@@ -427,25 +427,25 @@ async fn run_subtask_with_tools(
     // TMR3-2:截断自愈留痕由调用方持有,失败路径也能补落(不再随 Err 丢弃)
     let mut self_heals = Vec::new();
     let started = std::time::Instant::now();
-    let result = run_tool_loop(
+    let result = run_tool_loop(ToolLoopRequest {
         engine,
-        &mut state_machine,
-        None, // 子 agent 不建 agent_sessions 行(聊天/任务路径一致)
-        &sub_session,
-        messages,
-        &params,
-        &tool_ctx,
-        &tx,
-        &cancel,
-        &flag,
-        &mut total_usage,
-        &mut self_heals,
-        &run_id,
+        state_machine: &mut state_machine,
+        agent_session: None, // 子 agent 不建 agent_sessions 行(聊天/任务路径一致)
+        session_id: &sub_session,
+        llm_messages: messages,
+        params: &params,
+        tool_ctx: &tool_ctx,
+        tx: &tx,
+        abort: &cancel,
+        flag: &flag,
+        total_usage: &mut total_usage,
+        self_heals: &mut self_heals,
+        run_id: &run_id,
         gate,
         // 单次调用超时覆盖(A 批 A1):子 agent 无节点级配置,恒走宿主既有判定
-        None,
-        true,
-    )
+        call_timeout: None,
+        emit_tokens: true,
+    })
     .await;
     drop(tx);
     let _ = drain.await;

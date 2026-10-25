@@ -12,6 +12,7 @@
 //   executor.rs / mvu.rs / worldbook.rs / compaction.rs / reflector_integration.rs 见各自文件头
 //                 (generate_text 在 executor 尾;压缩引擎方法在 compaction 尾;
 //                  build_reflect_advice 在 reflector_integration 尾)
+//   tool_loop/     工具循环(C-2C):mod.rs 编排、round.rs 单轮执行、guard.rs 停止判定
 use crate::agents::planner::{
     extract_expression, looks_like_calculation, make_custom_plan, make_plan,
 };
@@ -50,6 +51,8 @@ pub(super) mod messages;
 pub(super) mod mvu;
 pub(super) mod plan;
 pub(super) mod reflector_integration;
+/// C-2C:工具循环编排 / 单轮执行 / 守卫判定(原 `executor.rs::run_tool_loop` 拆出)
+pub(super) mod tool_loop;
 pub(crate) mod worldbook;
 // 按职责拆分的子模块(纯代码移动):主状态机循环 / 角色脚本执行 / 收尾落库
 pub(super) mod run_finish;
@@ -60,7 +63,9 @@ pub(super) mod run_scripts;
 pub(super) mod types;
 pub(super) mod util;
 
-use self::executor::{budget_reached, execute_generation, maybe_run_tool, run_tool_loop};
+use self::executor::{
+    budget_reached, execute_generation, maybe_run_tool, run_tool_loop, ToolLoopRequest,
+};
 use self::messages::{
     draft_heal_budget, inject_reflect_advice, retreat_to_generating_step, step_params_for,
     trim_tool_history, with_step_prompt, CollectedCtx, TOOL_HISTORY_SUMMARY_PREFIX,

@@ -31,7 +31,7 @@ use super::context::TaskRunContext;
 use super::executor::ModeExecutor;
 use super::flow_call::{self, FlowCallState};
 use super::sink;
-use crate::agents::engine::executor::run_tool_loop;
+use crate::agents::engine::executor::{run_tool_loop, ToolLoopRequest};
 use crate::agents::engine::{AbortFlag, AgentEngine};
 use crate::agents::state_machine::StateMachine;
 use crate::models::types::{
@@ -437,24 +437,24 @@ impl CustomExecutor {
         let call_timeout = step
             .call_timeout_secs
             .map(|secs| std::time::Duration::from_secs(secs as u64));
-        let result = run_tool_loop(
-            &self.engine,
-            &mut state_machine,
-            None,
-            &session_id,
-            messages,
-            &params,
-            &tool_ctx,
-            &tx,
-            &ctx.cancel,
-            &flag,
-            &mut total_usage,
-            &mut self_heals,
-            &run_id,
+        let result = run_tool_loop(ToolLoopRequest {
+            engine: &self.engine,
+            state_machine: &mut state_machine,
+            agent_session: None,
+            session_id: &session_id,
+            llm_messages: messages,
+            params: &params,
+            tool_ctx: &tool_ctx,
+            tx: &tx,
+            abort: &ctx.cancel,
+            flag: &flag,
+            total_usage: &mut total_usage,
+            self_heals: &mut self_heals,
+            run_id: &run_id,
             gate,
             call_timeout,
-            true,
-        )
+            emit_tokens: true,
+        })
         .await;
         drop(tx);
         let _ = drain.await;
