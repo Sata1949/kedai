@@ -337,6 +337,16 @@
 
 **验收**：全量 `cargo test --manifest-path server-rs/Cargo.toml -j 8`；守卫决策表单测；任务模式窄探针（solo + team 各一条）真实模型通过；对比拆分前后的事件序列/终态状态，不出现 `guard_stopped` 字符串漂移。
 
+**2026-10-25 执行追注（已完成）**：本批已落地，行为逐字节等价（既有守卫集成用例零修改全绿）。
+
+- 结构：`agents/engine/tool_loop/{mod,guard,round}.rs`。`mod.rs` 只留循环骨架（`run_tool_loop` **251 行**、单结构体入参 `ToolLoopRequest`）；`round.rs` 承载单轮裁决/分组执行/收尾与 `await_or_cancel`；`guard.rs` 承载 7 类停止条件判定与文案。
+- 停止模型：`LoopStopKind{TokenBudget,StepBudget,RoundLimit,Readonly,NoProgress,Semantic,RepeatedCall}` + `LoopStop{kind,message,event_title,event_detail}`；`ExecutorResult.guard_stopped: Option<String>` 改为 `stop: Option<LoopStop>`，新增 `ExecutorResult::stopped(...)` 单点构造（`budget_stopped` 由 kind 派生）与 `guard_stopped()`（仅 4 个空转守卫透出，预算/轮次不降 partial）。
+- 顺序表（`LoopGuardState::evaluate` 单测锁定，与抽取前一致）：token 预算 → 步骤墙钟（仅 `round>0`）→ 轮次上限 → 连续只读（先提醒后熔断）→ 声明文件无进展（`limit/2` 提醒、`limit` 收尾）→ 语义熔断 → 重复调用；同轮多命中时前者胜出，提醒在 stop 之前发出。
+- 抽离：工具历史裁剪 → `trim_round_history`；单轮生成（看门狗/传输重试/截断自愈）→ `generate_round`；两者留在 `executor.rs`（`pub(super)`），循环体不再内联。
+- 测试：新增 `guard.rs` 决策表 9 例（7 类 + 优先级/健康负样例）、`ExecutorResult::stopped` 旗标派生 1 例；`split_parallel_groups` 4 例与取消闸门 4 例随代码移动到 `round.rs`（数量不变）；`api_agent_loop` / `task_loop_budget` / `task_no_progress_guard` / `task_guard_truncation` / `task_team_guard_scope` / `task_team_integration_guards` 共 27 例零修改全绿。
+- 验证：`cargo test --workspace -j 4`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all --check`；后端静态计数 1983（1523 单测 + 460 集成），前端不变；真实模型窄探针证据见本批提交正文与 `D:\kedai-bench-run\c2c-evidence\`。
+- 仍存在：`executor.rs` 仍有 1,811 行（`execute_generation`/截断自愈/非流式生成等），属 C-2D/C-2E 的后续拆分面；本批只收了工具循环。
+
 ### C-2D team/custom 文件拆分与去重（中风险，2~3 天）
 
 **目标**：`team.rs` 从 3,276 行降到 ≤800 行；`custom.rs` 从 1,444 行降到 ≤900 行；行为零变化。
