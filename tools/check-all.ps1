@@ -265,6 +265,9 @@ if (-not $SkipWeb -and -not $AuditOnly) {
         # 全部规则均为硬门禁:违规即 exit 1;C/D/E 已于 2026-09-13 清零,
         # G/H 为 ratchet(只降不升),I/J 以 tools/arch-layers.json 为 SSOT。
         Invoke-Stage 'arch: check-arch'         { node tools/check-arch.mjs }
+        # 超千行文件 ratchet(C-2E,2026-10-25):基线 30 个非测试源文件,只降不升;
+        # 基线外新文件越过 1000 行即 FAIL。先止增,再按 C-2 分批拆(目标 ≤6 未变)。
+        Invoke-Stage 'arch: check-file-size'   { node tools/check-file-size.mjs }
         # 测试数自动统计:与 MAINTENANCE.md 记录比对。
         # 2026-09-14 起为**硬门禁**(此前为警告档):MAINTENANCE.md 是「数字唯一真值源」,
         # 历史教训是同一数字在 5 份文档并存(923/697、975/733、977/745、971/763、1017/768),
