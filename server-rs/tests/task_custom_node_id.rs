@@ -4,37 +4,10 @@
 // 测试文件内的用例共享一个 app 实例(见 task_custom_graph.rs 头部注释记载的既知竞态)。
 // 本用例要求「当前流程」恰是自己保存的那一份(停用步骤的图),与图执行用例并存会互相覆盖,
 // 故按本目录既有体例单开文件 = 单进程 = 单数据目录。
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use http_body_util::BodyExt;
-use kedai_server::build_test_app;
+use axum::http::StatusCode;
 use serde_json::{json, Value};
-use std::sync::OnceLock;
-use tower::ServiceExt;
-
-fn test_app() -> &'static axum::Router {
-    static APP: OnceLock<axum::Router> = OnceLock::new();
-    APP.get_or_init(|| build_test_app().expect("构建测试应用失败"))
-}
-
-async fn send_json(
-    app: &axum::Router,
-    method: &str,
-    path: &str,
-    body: Value,
-) -> (StatusCode, Value) {
-    let req = Request::builder()
-        .method(method)
-        .uri(path)
-        .header("content-type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let status = resp.status();
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    (status, json)
-}
+mod common;
+use common::{send_json, test_app, wait_terminal};
 
 async fn create_task_with_mode(app: &axum::Router, title: &str, mode: &str) -> String {
     let (status, json) = send_json(
@@ -46,19 +19,6 @@ async fn create_task_with_mode(app: &axum::Router, title: &str, mode: &str) -> S
     .await;
     assert_eq!(status, StatusCode::CREATED, "创建任务应返回 201: {json}");
     json["task"]["id"].as_str().unwrap().to_string()
-}
-
-async fn wait_terminal(app: &axum::Router, id: &str) -> (String, Value) {
-    for _ in 0..50 {
-        let (status, json) = send_json(app, "GET", &format!("/api/tasks/{id}"), json!({})).await;
-        assert_eq!(status, StatusCode::OK);
-        let st = json["task"]["status"].as_str().unwrap_or("").to_string();
-        if st == "done" || st == "partial" || st == "error" || st == "ended" {
-            return (st, json);
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    panic!("任务 {id} 未在超时内到达终态");
 }
 
 /// 遗留.md IFW-5:`plan` 行携带 `node_id`(= 流程节点 id),且**停用步骤不入 plan**。

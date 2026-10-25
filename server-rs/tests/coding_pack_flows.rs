@@ -5,44 +5,12 @@
 //
 // **独立测试二进制**:本文件独占一个进程与一套 `%TEMP%\kedai-test-<pid>`(见 tasks_crud.rs
 // 顶部的拆分说明),故不必与 `agent_flows.rs` 抢 `test_lock`,也不可能把「开过包」的状态
-// 漏给别的用例——这正是拆分的用意。辅助函数按「谁用谁带」复制,不建共享层。
+// 漏给别的用例——这正是拆分的用意。辅助函数已收敛到 `tests/common`(2026-10-25 C-2E)。
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use http_body_util::BodyExt;
-use kedai_server::build_test_app;
+use axum::http::StatusCode;
 use serde_json::{json, Value};
-use std::sync::OnceLock;
-use tower::ServiceExt;
-
-fn test_app() -> &'static axum::Router {
-    static APP: OnceLock<axum::Router> = OnceLock::new();
-    static INIT: std::sync::Once = std::sync::Once::new();
-    INIT.call_once(|| {
-        let dir = kedai_server::utils::test_support::TempDataDir::new("test-runtime-prompt-empty");
-        std::env::set_var("KEDAI_RUNTIME_PROMPT_DIR", dir.path());
-    });
-    APP.get_or_init(|| build_test_app().expect("构建测试应用失败"))
-}
-
-async fn send_json(
-    app: &axum::Router,
-    method: &str,
-    path: &str,
-    body: Value,
-) -> (StatusCode, Value) {
-    let req = Request::builder()
-        .method(method)
-        .uri(path)
-        .header("content-type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let status = resp.status();
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    (status, json)
-}
+mod common;
+use common::{send_json, test_app_with_prompt_isolation as test_app};
 
 /// 流程库当前的全部流程 id(按库内顺序)
 async fn flow_ids(app: &axum::Router) -> Vec<String> {

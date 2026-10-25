@@ -10,44 +10,10 @@
 // 独立成文件的原因:本文件**会改进程级设置**(任务侧覆盖层),与其它文件共享进程会让
 // 它们的缺省假设失效——这正是 `settings_connector` 的 TEST-ISO-1 踩过的坑,
 // 故凡改设置的用例一律新开文件(单文件即单进程/单数据目录)。
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use http_body_util::BodyExt;
-use kedai_server::build_test_app;
+use axum::http::StatusCode;
 use serde_json::{json, Value};
-use std::sync::OnceLock;
-use tokio::sync::{Mutex, MutexGuard};
-use tower::ServiceExt;
-
-fn test_app() -> &'static axum::Router {
-    static APP: OnceLock<axum::Router> = OnceLock::new();
-    APP.get_or_init(|| build_test_app().expect("构建测试应用失败"))
-}
-
-/// 串行化全局共享状态(流程库 + 设置 + current_flow_id)的用例
-async fn test_lock() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().await
-}
-
-async fn send_json(
-    app: &axum::Router,
-    method: &str,
-    path: &str,
-    body: Value,
-) -> (StatusCode, Value) {
-    let req = Request::builder()
-        .method(method)
-        .uri(path)
-        .header("content-type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let status = resp.status();
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    (status, json)
-}
+mod common;
+use common::{send_json, test_app, test_lock};
 
 /// 任务侧设置写入(路径带 mode=task,故落在 ModeSettings 覆盖层)
 async fn put_task_settings(app: &axum::Router, patch: Value) -> (StatusCode, Value) {
@@ -92,17 +58,9 @@ async fn run_task(app: &axum::Router, id: &str) {
     assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
 }
 
+/// 任务终态轮询:沿用本文件历史的 120 次 × 100ms 超时,实现见 `common`.
 async fn wait_terminal(app: &axum::Router, id: &str) -> (String, Value) {
-    for _ in 0..120 {
-        let (status, json) = send_json(app, "GET", &format!("/api/tasks/{id}"), json!({})).await;
-        assert_eq!(status, StatusCode::OK);
-        let st = json["task"]["status"].as_str().unwrap_or("").to_string();
-        if matches!(st.as_str(), "done" | "partial" | "error" | "ended") {
-            return (st, json);
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    panic!("任务 {id} 未在超时内到达终态");
+    common::wait_terminal_with_attempts(app, id, 120).await
 }
 
 fn result_of(detail: &Value) -> String {

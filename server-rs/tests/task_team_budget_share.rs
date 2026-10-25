@@ -8,54 +8,14 @@
 //
 // 本用例故意让主 1 超时,验证「前波超时不会饿死后续波」;审计/汇总的预留
 // (<120s 不生效)不在本用例范围,由 `post_exec_reserve` 单测覆盖。
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use http_body_util::BodyExt;
-use kedai_server::build_test_app;
+use axum::http::StatusCode;
 use serde_json::{json, Value};
-use std::sync::OnceLock;
-use std::time::Duration;
-use tower::ServiceExt;
+mod common;
+use common::{send_json, test_app};
 
-fn test_app() -> &'static axum::Router {
-    static APP: OnceLock<axum::Router> = OnceLock::new();
-    APP.get_or_init(|| build_test_app().expect("构建测试应用失败"))
-}
-
-async fn send_json(
-    app: &axum::Router,
-    method: &str,
-    path: &str,
-    body: Value,
-) -> (StatusCode, Value) {
-    let req = Request::builder()
-        .method(method)
-        .uri(path)
-        .header("content-type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let status = resp.status();
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    (status, json)
-}
-
+/// 任务终态轮询:沿用本文件历史的 45s 墙钟 超时,实现见 `common`.
 async fn wait_terminal(app: &axum::Router, id: &str) -> (String, Value) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
-    loop {
-        let (status, json) = send_json(app, "GET", &format!("/api/tasks/{id}"), json!({})).await;
-        assert_eq!(status, StatusCode::OK);
-        let st = json["task"]["status"].as_str().unwrap_or("").to_string();
-        if matches!(st.as_str(), "done" | "partial" | "error" | "ended") {
-            return (st, json);
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "任务未在 45s 内收敛: {json}"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    common::wait_terminal_within_secs(app, id, 45).await
 }
 
 #[tokio::test]

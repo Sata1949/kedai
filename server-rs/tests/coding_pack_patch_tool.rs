@@ -7,52 +7,11 @@
 //
 // 为什么单独一个文件:本用例要翻转编码包开关,而设置与流程库是进程内共享全局
 // (仓库既有裁定:共享全局状态的用例拆文件 + 独立 DATA_DIR,见 coding_pack_flows.rs 头注)。
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use http_body_util::BodyExt;
-use kedai_server::build_test_app;
+use axum::http::StatusCode;
 use kedai_server::utils::test_support::TempDataDir;
-use serde_json::{json, Value};
-use std::sync::OnceLock;
-use tower::ServiceExt;
-
-fn test_app() -> &'static axum::Router {
-    static APP: OnceLock<axum::Router> = OnceLock::new();
-    APP.get_or_init(|| build_test_app().expect("构建测试应用失败"))
-}
-
-async fn send_json(
-    app: &axum::Router,
-    method: &str,
-    path: &str,
-    body: Value,
-) -> (StatusCode, Value) {
-    let req = Request::builder()
-        .method(method)
-        .uri(path)
-        .header("content-type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let status = resp.status();
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    (status, json)
-}
-
-/// 终态轮询(体例照 `coding_pack_flow_runs.rs`)
-async fn wait_terminal(app: &axum::Router, id: &str) -> (String, Value) {
-    for _ in 0..50 {
-        let (status, json) = send_json(app, "GET", &format!("/api/tasks/{id}"), json!({})).await;
-        assert_eq!(status, StatusCode::OK);
-        let st = json["task"]["status"].as_str().unwrap_or("").to_string();
-        if st == "done" || st == "partial" || st == "error" || st == "ended" {
-            return (st, json);
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    panic!("任务 {id} 未在超时内到达终态");
-}
+use serde_json::json;
+mod common;
+use common::{send_json, test_app, wait_terminal};
 
 #[tokio::test]
 async fn fs_patch_is_gated_by_coding_pack_and_runs_when_enabled() {

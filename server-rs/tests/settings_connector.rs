@@ -1,49 +1,12 @@
 // 连接器切换测试(独立进程/独立 app 实例,不影响 api_integration.rs 的共享 mock app):
 // mock 连接器下保存 API 设置(Base URL / Key)→ 自动切换到 openai-compatible,用户配置立即生效。
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use http_body_util::BodyExt;
-use kedai_server::build_test_app;
+use axum::http::StatusCode;
 use kedai_server::services::settings_service::{
     default_literary_reflect_prompt, default_reflect_prompt,
 };
 use serde_json::{json, Value};
-use std::sync::OnceLock;
-use tokio::sync::{Mutex, MutexGuard};
-use tower::ServiceExt;
-
-/// 本文件所有用例共享同一个 app 实例(进程级 settings),且多数用例会 PUT
-/// /api/settings(其中 Base URL/Key 会切换连接器)。此前无串行化,cargo test 默认
-/// 并行下互相踩踏:实测 `mock_auto_switches_to_openai_on_save` 断言的「初始必须是
-/// mock 连接器」会被并发用例保存 base_url 抢先切走而偶发失败(单跑恒过)。
-async fn test_lock() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().await
-}
-
-fn test_app() -> &'static axum::Router {
-    static APP: OnceLock<axum::Router> = OnceLock::new();
-    APP.get_or_init(|| build_test_app().expect("构建测试应用失败"))
-}
-
-async fn send_json(
-    app: &axum::Router,
-    method: &str,
-    path: &str,
-    body: Value,
-) -> (StatusCode, Value) {
-    let req = Request::builder()
-        .method(method)
-        .uri(path)
-        .header("content-type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let status = resp.status();
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    (status, json)
-}
+mod common;
+use common::{send_json, test_app, test_lock};
 
 #[tokio::test]
 async fn mock_auto_switches_to_openai_on_save() {

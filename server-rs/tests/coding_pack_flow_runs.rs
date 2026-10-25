@@ -8,56 +8,10 @@
 // 这是「常量合法」(单元侧 `validate_flow` 断言)之外的**可执行**证据:结构合法但执行不了的
 // 流程(成果节点选错、严格档末步卡住、reflect 步骤判定异常)只有真跑一遍才会暴露。
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use http_body_util::BodyExt;
-use kedai_server::build_test_app;
-use serde_json::{json, Value};
-use std::sync::OnceLock;
-use tower::ServiceExt;
-
-fn test_app() -> &'static axum::Router {
-    static APP: OnceLock<axum::Router> = OnceLock::new();
-    static INIT: std::sync::Once = std::sync::Once::new();
-    INIT.call_once(|| {
-        let dir = kedai_server::utils::test_support::TempDataDir::new("test-runtime-prompt-empty");
-        std::env::set_var("KEDAI_RUNTIME_PROMPT_DIR", dir.path());
-    });
-    APP.get_or_init(|| build_test_app().expect("构建测试应用失败"))
-}
-
-async fn send_json(
-    app: &axum::Router,
-    method: &str,
-    path: &str,
-    body: Value,
-) -> (StatusCode, Value) {
-    let req = Request::builder()
-        .method(method)
-        .uri(path)
-        .header("content-type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let status = resp.status();
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    (status, json)
-}
-
-/// 终态轮询(体例照 `tasks_modes_team.rs`,按「谁用谁带」复制)
-async fn wait_terminal(app: &axum::Router, id: &str) -> (String, Value) {
-    for _ in 0..50 {
-        let (status, json) = send_json(app, "GET", &format!("/api/tasks/{id}"), json!({})).await;
-        assert_eq!(status, StatusCode::OK);
-        let st = json["task"]["status"].as_str().unwrap_or("").to_string();
-        if st == "done" || st == "partial" || st == "error" || st == "ended" {
-            return (st, json);
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    panic!("任务 {id} 未在超时内到达终态");
-}
+use axum::http::StatusCode;
+use serde_json::json;
+mod common;
+use common::{send_json, test_app_with_prompt_isolation as test_app, wait_terminal};
 
 /// 开包 → 绑定 `builtin-code-impl` 建 custom 任务 → 跑到底。
 /// 断言:五步按线性拓扑序执行且全 done、结果取末个生成步骤的产出、
