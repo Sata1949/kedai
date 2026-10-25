@@ -10,7 +10,7 @@
 // 保证新增能力不会让审计整体失效。
 use super::context::TaskRunContext;
 use super::sink;
-use crate::agents::engine::executor::{run_tool_loop, ToolGate};
+use crate::agents::engine::executor::{run_tool_loop, ToolGate, ToolLoopRequest};
 use crate::agents::engine::{AbortFlag, AgentEngine};
 use crate::agents::state_machine::{AgentState, StateMachine};
 use crate::models::types::{
@@ -146,24 +146,24 @@ pub(crate) async fn generate_with_readonly_tools(
     // TMR3-2:截断自愈留痕由调用方持有,失败路径也能补落(不再随 Err 丢弃)
     let mut self_heals = Vec::new();
     let started = Instant::now();
-    let result = run_tool_loop(
+    let result = run_tool_loop(ToolLoopRequest {
         engine,
-        &mut state_machine,
-        None, // 任务模式无 agent_sessions 行
-        &session_id,
-        &mut messages,
-        &params,
-        &tool_ctx,
-        &tx,
-        &ctx.cancel,
-        &flag,
-        &mut usage,
-        &mut self_heals,
-        &run_id,
-        ToolGate::listed(&allowed),
-        None,
-        false, // 审计正文不流式透出(工具调用事件照常)
-    )
+        state_machine: &mut state_machine,
+        agent_session: None, // 任务模式无 agent_sessions 行
+        session_id: &session_id,
+        llm_messages: &mut messages,
+        params: &params,
+        tool_ctx: &tool_ctx,
+        tx: &tx,
+        abort: &ctx.cancel,
+        flag: &flag,
+        total_usage: &mut usage,
+        self_heals: &mut self_heals,
+        run_id: &run_id,
+        gate: ToolGate::listed(&allowed),
+        call_timeout: None,
+        emit_tokens: false, // 审计正文不流式透出(工具调用事件照常)
+    })
     .await;
     drop(tx);
     let _ = drain.await;

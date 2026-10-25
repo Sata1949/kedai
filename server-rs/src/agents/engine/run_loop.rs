@@ -628,25 +628,25 @@ impl AgentEngine {
                     },
                     _ => crate::agents::engine::executor::ToolGate::wait(),
                 };
-                match run_tool_loop(
-                    self,
+                match run_tool_loop(ToolLoopRequest {
+                    engine: self,
                     state_machine,
-                    Some(agent_session),
+                    agent_session: Some(agent_session),
                     session_id,
-                    &mut step_msgs,
-                    &step_params,
+                    llm_messages: &mut step_msgs,
+                    params: &step_params,
                     tool_ctx,
                     tx,
                     abort,
                     flag,
-                    rctx.total_usage,
-                    &mut Vec::new(),
-                    &run_id.to_string(),
+                    total_usage: rctx.total_usage,
+                    self_heals: &mut Vec::new(),
+                    run_id: &run_id.to_string(),
                     gate,
                     // 聊天路径无节点级超时;emit_tokens=false(产物不进气泡)
-                    None,
-                    false,
-                )
+                    call_timeout: None,
+                    emit_tokens: false,
+                })
                 .await
                 {
                     Ok(_res) => {
@@ -786,26 +786,26 @@ impl AgentEngine {
                     },
                     _ => crate::agents::engine::executor::ToolGate::wait(),
                 };
-                run_tool_loop(
-                    self,
+                run_tool_loop(ToolLoopRequest {
+                    engine: self,
                     state_machine,
                     // 聊天路径恒有 agent_sessions 行,包 Some(行为不变;任务模式传 None)
-                    Some(agent_session),
+                    agent_session: Some(agent_session),
                     session_id,
-                    &mut step_msgs,
-                    &effective,
+                    llm_messages: &mut step_msgs,
+                    params: &effective,
                     tool_ctx,
                     tx,
                     abort,
                     flag,
-                    rctx.total_usage,
-                    &mut Vec::new(),
-                    &run_id.to_string(),
+                    total_usage: rctx.total_usage,
+                    self_heals: &mut Vec::new(),
+                    run_id: &run_id.to_string(),
                     gate,
                     // 聊天路径无节点级超时(A 批 A1):恒走宿主既有判定(聊天侧本无总时长上限)
-                    None,
-                    true,
-                )
+                    call_timeout: None,
+                    emit_tokens: true,
+                })
                 .await?
             } else if req.mode == "custom" {
                 let r = if step_params.tools.is_empty() {
@@ -834,27 +834,27 @@ impl AgentEngine {
                         }
                         _ => crate::agents::engine::executor::ToolGate::wait(),
                     };
-                    run_tool_loop(
-                        self,
+                    run_tool_loop(ToolLoopRequest {
+                        engine: self,
                         state_machine,
                         // 聊天路径恒有 agent_sessions 行,包 Some(行为不变;任务模式传 None)
-                        Some(agent_session),
+                        agent_session: Some(agent_session),
                         session_id,
-                        &mut step_msgs,
-                        &step_params,
+                        llm_messages: &mut step_msgs,
+                        params: &step_params,
                         tool_ctx,
                         tx,
                         abort,
                         flag,
-                        rctx.total_usage,
-                        &mut Vec::new(),
-                        &run_id.to_string(),
+                        total_usage: rctx.total_usage,
+                        self_heals: &mut Vec::new(),
+                        run_id: &run_id.to_string(),
                         gate,
                         // 聊天 custom 步骤无节点级超时(A 批 A1:该字段只服务任务侧的
                         // `PlanStep`);恒走宿主既有判定
-                        None,
-                        true,
-                    )
+                        call_timeout: None,
+                        emit_tokens: true,
+                    })
                     .await?
                 };
                 // 步骤提示词展开可能产生新变量:执行后写回持久化(与构建阶段一致)

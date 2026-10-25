@@ -8,7 +8,7 @@
 use super::context::TaskRunContext;
 use super::executor::{usage_as_output, ModeExecutor};
 use super::sink;
-use crate::agents::engine::executor::run_tool_loop;
+use crate::agents::engine::executor::{run_tool_loop, ToolLoopRequest};
 use crate::agents::engine::{AbortFlag, AgentEngine};
 use crate::agents::state_machine::{AgentState, StateMachine};
 use crate::models::types::{
@@ -259,25 +259,25 @@ pub(crate) async fn run_agent_loop(
     if let Err(e) = state_machine.transition(AgentState::Executing, &call.session_id) {
         tracing::warn!(error = %e, session = %call.session_id, "状态迁移被拒");
     }
-    let mut result = run_tool_loop(
-        &engine,
-        &mut state_machine,
-        None, // 任务模式无 agent_sessions 行:跳过状态/工具调用落库
-        &call.session_id,
-        &mut messages,
-        &params,
-        &tool_ctx,
-        &tx,
-        &cancel,
-        &flag,
-        &mut total_usage,
-        &mut self_heals,
-        &run_id,
+    let mut result = run_tool_loop(ToolLoopRequest {
+        engine: &engine,
+        state_machine: &mut state_machine,
+        agent_session: None, // 任务模式无 agent_sessions 行:跳过状态/工具调用落库
+        session_id: &call.session_id,
+        llm_messages: &mut messages,
+        params: &params,
+        tool_ctx: &tool_ctx,
+        tx: &tx,
+        abort: &cancel,
+        flag: &flag,
+        total_usage: &mut total_usage,
+        self_heals: &mut self_heals,
+        run_id: &run_id,
         gate,
         // 单次调用超时覆盖(A 批 A1):solo 无节点级配置,恒走宿主既有判定
-        None,
-        true,
-    )
+        call_timeout: None,
+        emit_tokens: true,
+    })
     .await;
     let model = engine.model();
 
@@ -294,7 +294,10 @@ pub(crate) async fn run_agent_loop(
     let mut usage_before_retry = TokenUsage::default();
     // SKY-6 第 2 项:首轮若被守卫截断,空正文收尾重试也不能抹掉这个事实——
     // 重试只补收尾正文,被截断的工作仍没做完。
-    let first_guard_stopped = result.as_ref().ok().and_then(|r| r.guard_stopped.clone());
+    let first_guard_stopped = result
+        .as_ref()
+        .ok()
+        .and_then(|r| r.guard_stopped().map(str::to_string));
     if let Ok(res) = &result {
         if !res.interrupted && !*cancel.borrow() && res.content.trim().is_empty() {
             svc.record_self_heals(
@@ -347,24 +350,24 @@ pub(crate) async fn run_agent_loop(
             retry_params.temperature = retry_temperature;
             // 不下发任何工具:空名单闸门(fail-closed)——意外工具调用被拒,不放行
             let retry_gate = crate::agents::engine::executor::ToolGate::listed(&[]);
-            result = run_tool_loop(
-                &engine,
-                &mut state_machine,
-                None,
-                &call.session_id,
-                &mut messages,
-                &retry_params,
-                &tool_ctx,
-                &tx,
-                &cancel,
-                &flag,
-                &mut total_usage,
-                &mut self_heals,
-                &run_id,
-                retry_gate,
-                None,
-                true,
-            )
+            result = run_tool_loop(ToolLoopRequest {
+                engine: &engine,
+                state_machine: &mut state_machine,
+                agent_session: None,
+                session_id: &call.session_id,
+                llm_messages: &mut messages,
+                params: &retry_params,
+                tool_ctx: &tool_ctx,
+                tx: &tx,
+                abort: &cancel,
+                flag: &flag,
+                total_usage: &mut total_usage,
+                self_heals: &mut self_heals,
+                run_id: &run_id,
+                gate: retry_gate,
+                call_timeout: None,
+                emit_tokens: true,
+            })
             .await;
         }
     }
@@ -459,7 +462,8 @@ pub(crate) async fn run_agent_loop(
             Ok(AgentLoopOutput {
                 text,
                 usage: total_usage,
-                guard_stopped: first_guard_stopped.or(res.guard_stopped),
+                guard_stopped: first_guard_stopped
+                    .or_else(|| res.guard_stopped().map(str::to_string)),
             })
         }
         Ok(res) => {

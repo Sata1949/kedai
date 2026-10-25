@@ -2,13 +2,21 @@
 use super::*;
 use std::sync::atomic::{AtomicI64, Ordering};
 
+// C-2C:工具循环已拆到 `engine::tool_loop`(编排 / 单轮执行 / 守卫判定)。
+// 此处重新导出保持既有调用路径 `engine::executor::run_tool_loop` 不变。
+use super::tool_loop::LoopStop;
+pub(crate) use super::tool_loop::{run_tool_loop, ToolLoopRequest};
+
 /// 进程级 LLM 请求快照序号(单调递增;第四点·主题 A 的 llm_requests.seq 用,
 /// 跨 run 也单调,比「run 内自增」更强,prune 按 id 删除不受影响)。
 static LLM_REQUEST_SEQ: AtomicI64 = AtomicI64::new(0);
 
 /// 工具来源串(`builtin`/`plugin`/`mcp`;PLGM 3.3 的 SSE 工具事件 origin 字段填充)。
 /// 未注册/未知工具返回 None(字段随 `skip_serializing_if` 省略,旧客户端零变化)。
-fn tool_origin_str(registry: &crate::tools::registry::ToolRegistry, name: &str) -> Option<String> {
+pub(super) fn tool_origin_str(
+    registry: &crate::tools::registry::ToolRegistry,
+    name: &str,
+) -> Option<String> {
     registry.origin_of(name).map(|o| o.as_str().to_string())
 }
 
@@ -174,7 +182,7 @@ fn call_watchdog_for(session_id: &str) -> Option<std::time::Duration> {
 /// 抽成纯函数的原因与 `call_watchdog_for` 相同——生产阈值是 300s(或节点配的 30~3600s),
 /// 不可能在测试里真等,故把「取哪个值」与「等多久」分开锁:单测锁取值,引擎侧只按值包超时。
 /// 覆盖**同时具备收紧与放宽两种用法**(60s 的严节点 / 900s 的慢节点),故不是 `min` 语义。
-fn resolve_call_watchdog(
+pub(super) fn resolve_call_watchdog(
     session_id: &str,
     call_timeout: Option<std::time::Duration>,
 ) -> Option<std::time::Duration> {
@@ -316,7 +324,7 @@ pub(crate) async fn execute_generation(
             chunk = chunk_rx.recv() => match chunk {
                 Some(chunk) => {
                     if process_chunk(chunk, &mut content, &mut reasoning, &mut tool_calls, &mut usage, live_usage.as_deref_mut(), &mut finish_reason, &engine.tool_registry, tx, abort, flag, emit_tokens).await? {
-                        return Ok(ExecutorResult { content, usage, interrupted: true, tool_calls, reasoning, finish_reason, self_heals: Vec::new(), budget_stopped: false, guard_stopped: None });
+                        return Ok(ExecutorResult { content, usage, interrupted: true, tool_calls, reasoning, finish_reason, self_heals: Vec::new(), budget_stopped: false, stop: None });
                     }
                 }
                 None => break,
@@ -337,7 +345,7 @@ pub(crate) async fn execute_generation(
                 finish_reason,
                 self_heals: Vec::new(),
                 budget_stopped: false,
-                guard_stopped: None,
+                stop: None,
             });
         }
         // 连接器失败:分类原样带出(不丢分类信息)
@@ -371,7 +379,7 @@ pub(crate) async fn execute_generation(
         finish_reason,
         self_heals: Vec::new(),
         budget_stopped: false,
-        guard_stopped: None,
+        stop: None,
     })
 }
 
@@ -506,10 +514,44 @@ pub(crate) struct ExecutorResult {
     /// 消息 extra 里留痕(extra.budget_exceeded),刷新后仍能看出「这轮是被成本/时间
     /// 闸门收掉的」。聊天路径不传 `step_budget`,故聊天侧该位只可能来自 token 预算。
     pub(crate) budget_stopped: bool,
-    /// 因**空转守卫**提前停止工具循环时的原因(连续只读 / 声明文件无进展 / 语义熔断 /
-    /// 重复调用),None = 正常收尾或预算类终止。任务侧据此把步骤降为 partial(SKY-6
-    /// 第 2 项):守卫熔断会 `return Ok(已有正文)`,调用方不能把它当成「做完了」。
-    pub(crate) guard_stopped: Option<String>,
+    /// 工具循环的提前停止记录(C-2C):7 类终止条件统一为 `LoopStopKind`。
+    /// None = 正常收尾。预算类/轮次上限属于正常收尾,只有 4 个空转守卫经
+    /// [`Self::guard_stopped`] 透出给任务侧降 partial(SKY-6 第 2 项)。
+    pub(crate) stop: Option<LoopStop>,
+}
+
+impl ExecutorResult {
+    /// 所有「提前停止」出口的唯一构造点(C-2C):保证 kind/message/事件三者同源,
+    /// 并让 `budget_stopped` 由 kind 派生,避免两处各写一份映射。
+    ///
+    /// 停止时本轮工具已全部执行完(轮末闸门),因此 `usage` 归零——整轮用量已由
+    /// 调用方累进 `total_usage`;`tool_calls`/`reasoning` 也已在事件与消息中收尾。
+    pub(crate) fn stopped(
+        content: String,
+        finish_reason: Option<String>,
+        self_heals: Vec<SelfHealRecord>,
+        stop: LoopStop,
+    ) -> Self {
+        Self {
+            content,
+            usage: TokenUsage::default(),
+            interrupted: false,
+            tool_calls: Vec::new(),
+            reasoning: String::new(),
+            finish_reason,
+            self_heals,
+            budget_stopped: stop.kind.is_budget(),
+            stop: Some(stop),
+        }
+    }
+
+    /// 守卫类截断的短原因(任务侧据此把步骤降 partial);预算/轮次上限返回 None。
+    pub(crate) fn guard_stopped(&self) -> Option<&str> {
+        self.stop
+            .as_ref()
+            .filter(|s| s.kind.is_guard())
+            .map(|s| s.message.as_str())
+    }
 }
 
 /// 截断自愈记录(问题①):单轮生成被 max_tokens 截断到不可用(空正文/半截
@@ -660,7 +702,7 @@ impl<'a> ToolGate<'a> {
     /// **空名单不放行任何工具**:名单由「本轮下发的工具集」派生,空集意味着该节点
     /// 一个工具都没下发,此时放行一切与下发意图相反——模型臆造的工具调用会绕过
     /// 策略剔除被执行(fail-open;任务策略 all 时下发集本身非空,不依赖该语义)。
-    fn authorizes(&self, name: &str) -> bool {
+    pub(super) fn authorizes(&self, name: &str) -> bool {
         self.whitelist
             .is_some_and(|wl| wl.iter().any(|n| n == name))
     }
@@ -670,7 +712,7 @@ impl<'a> ToolGate<'a> {
     /// 写文件放行」而放过被任务策略排除的危险工具(模型幻觉调用即越权)。
     /// 聊天路径(no_ui_authorization=false)不硬性排除:名单外工具走授权等待,与改造前一致。
     /// 空名单同样走本判定(拒绝一切)——这正是 2026-09-24 修正的形态。
-    fn excludes(&self, name: &str) -> bool {
+    pub(super) fn excludes(&self, name: &str) -> bool {
         self.no_ui_authorization && self.whitelist.is_some() && !self.authorizes(name)
     }
 }
@@ -686,7 +728,10 @@ pub(super) fn budget_reached(used_tokens: i64, budget: u32) -> bool {
 
 /// 步骤墙钟预算是否已用尽(D3,纯函数便于边界单测):None = 不设预算(聊天路径恒此);
 /// 口径 = 单次 `run_tool_loop` 的墙钟耗时,「达到」即算(与 token 预算/轮次上限同族)。
-fn step_budget_reached(elapsed: std::time::Duration, budget: Option<std::time::Duration>) -> bool {
+pub(super) fn step_budget_reached(
+    elapsed: std::time::Duration,
+    budget: Option<std::time::Duration>,
+) -> bool {
     budget.is_some_and(|b| elapsed >= b)
 }
 
@@ -694,7 +739,7 @@ fn step_budget_reached(elapsed: std::time::Duration, budget: Option<std::time::D
 /// (工具型模型的常见形态)则回退到最近一次非空正文——预算的承诺是「带着已有产出收尾」,
 /// 回一个空串会被上游判成「返回空内容」,与承诺相反。
 /// 两者都空时如实返回空串(不伪造正文,口径同提交 2 的「不伪造成果」)。
-fn budget_stop_content(current: String, last_non_empty: &str) -> String {
+pub(super) fn budget_stop_content(current: String, last_non_empty: &str) -> String {
     if current.trim().is_empty() {
         last_non_empty.to_string()
     } else {
@@ -709,7 +754,7 @@ fn budget_stop_content(current: String, last_non_empty: &str) -> String {
 ///
 /// 不限轮次不等于无界:步骤墙钟预算、空闲超时、语义/重复熔断、token 预算、
 /// 任务总预算(若开启)与用户取消仍然生效。
-fn resolve_max_rounds(configured: Option<u32>) -> Option<usize> {
+pub(super) fn resolve_max_rounds(configured: Option<u32>) -> Option<usize> {
     match configured {
         Some(0) => None,
         Some(n) => Some(n.max(1) as usize),
@@ -724,7 +769,7 @@ fn resolve_max_rounds(configured: Option<u32>) -> Option<usize> {
 /// `bash` 跑探针;临时文件工具调用也不算——它们不推进交付物。`fs_patch` 的
 /// 补丁目标暂不解析(其参数是补丁文本,不是单一路径),因此不会计为进展。
 /// 结果是否成功由调用方用 `output` 判定(本函数只看调用意图与目标路径)。
-fn is_declared_file_write(name: &str, arguments: &str, declared: &[String]) -> bool {
+pub(super) fn is_declared_file_write(name: &str, arguments: &str, declared: &[String]) -> bool {
     if !crate::tools::tool_sets::is_workspace_write_tool(name) || declared.is_empty() {
         return false;
     }
@@ -746,7 +791,7 @@ fn is_declared_file_write(name: &str, arguments: &str, declared: &[String]) -> b
 ///
 /// 台账路径是执行侧扫出的工作区相对路径,与声明侧同用 `normalize_workspace_rel`
 /// 归一化后再比对;任一非法路径只跳过该行(不让单条脏数据否决整轮进展)。
-fn has_declared_change(declared: &[String], changed_paths: &[String]) -> bool {
+pub(super) fn has_declared_change(declared: &[String], changed_paths: &[String]) -> bool {
     if declared.is_empty() {
         return false;
     }
@@ -760,835 +805,261 @@ fn has_declared_change(declared: &[String], changed_paths: &[String]) -> bool {
     })
 }
 
-/// 跳过状态/工具调用落库;docs/功能.md 第三节);聊天路径恒 Some,行为不变。
-/// pub(crate):任务引擎 solo/custom 模式直调(批次 4.2 起)。
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_tool_loop(
+/// 每轮生成前的工具历史回灌裁剪(R3b,2026-09-02 实测修复:每轮全量回灌
+/// assistant/tool 交替历史,3 步任务 prompt 3,119→26,679 token 无界膨胀)。
+///
+/// 最老轮 tool 结果原地摘要化(保留最近 K 轮完整 + token 预算双闸门;配对不破坏、
+/// 幂等)。仅存在工具循环历史时触发;聊天主链路 compaction(compaction.rs)/
+/// protected_tail 注入语义不受影响(不同层)。自循环体抽出的纯搬运(C-2C)。
+pub(super) fn trim_round_history(
     engine: &AgentEngine,
-    state_machine: &mut StateMachine,
-    agent_session: Option<&AgentSessionRecord>,
     session_id: &str,
-    llm_messages: &mut Vec<LlmMessage>,
+    round: usize,
+    llm_messages: &mut [LlmMessage],
+) {
+    if !llm_messages.iter().any(|m| m.role == "tool") {
+        return;
+    }
+    let (keep_rounds, budget_tokens) = {
+        // 设置快照:不留锁跨 await
+        let s = engine.settings_snapshot();
+        (
+            s.tool_history_keep_rounds as usize,
+            s.tool_history_budget_tokens,
+        )
+    };
+    let summarized_count = |msgs: &[LlmMessage]| {
+        msgs.iter()
+            .filter(|m| m.content.starts_with(TOOL_HISTORY_SUMMARY_PREFIX))
+            .count()
+    };
+    let before = summarized_count(llm_messages);
+    let model = engine.model();
+    let outcome = {
+        let mut ts = engine
+            .token_service
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        trim_tool_history(llm_messages, keep_rounds, budget_tokens, &mut ts, &model)
+    };
+    let after = summarized_count(llm_messages);
+    if after > before || outcome.reclaimed_argument_rounds > 0 {
+        tracing::info!(
+            session_id = session_id.to_string(),
+            newly_summarized = after - before,
+            reclaimed_argument_rounds = outcome.reclaimed_argument_rounds,
+            keep_rounds = keep_rounds,
+            budget_tokens = budget_tokens,
+            total_tokens = outcome.total_tokens,
+            "工具循环历史回灌截断(旧轮 tool 结果/参数已摘要化)"
+        );
+    }
+    // 未能收敛必须可诊断,不能静默(2026-09-14):体量超过预算闸门可压缩范围
+    // 时继续跑下去会持续放大 prompt,最终表现为任务长时间不收敛、token 失控。
+    if !outcome.converged {
+        tracing::warn!(
+            session_id = session_id.to_string(),
+            round = round,
+            budget_tokens = budget_tokens,
+            total_tokens = outcome.total_tokens,
+            "工具历史压缩后仍超预算:单轮体量过大,上下文可能持续膨胀"
+        );
+    }
+}
+
+/// 单轮生成:看门狗 + 传输重试 + 截断自愈(C-2C 自循环体抽出,行为逐字节不变)。
+///
+/// 单轮内最多自愈一次:该轮被 max_tokens 截断到不可用时,把本轮 max_tokens 翻倍
+/// (上限 TRUNCATION_HEAL_MAX_TOKENS_CAP)原样重发;重发仍失败(同形态再现)
+/// 才透出原结果走既有错误路径。与 task_service 的空输出分级重试是同问题不同层:
+/// 那边管无工具纯生成(plan/step/summary),这边管工具循环内的单轮。
+///
+/// 失败尝试已收到的 usage 在这里并入 `total_usage`(TMR3-L1:看门狗超时会把
+/// future 直接 drop,栈上局部 usage 随 future 消失);成功路径由调用方按返回值
+/// 统一入账,此处**不**并入,避免双计。截断自愈记录在成功/失败两条路径都写入
+/// `self_heals`(TMR3-2:失败路径不再丢弃)。
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn generate_round(
+    engine: &AgentEngine,
+    session_id: &str,
+    run_id: &str,
+    llm_messages: &[LlmMessage],
     params: &GenerationParams,
-    tool_ctx: &ToolContext,
     tx: &mpsc::Sender<SseEvent>,
     abort: &watch::Receiver<bool>,
     flag: &AbortFlag,
-    total_usage: &mut TokenUsage,
-    // 截断自愈留痕(TMR3-2):由调用方持有 vec,成功/失败都能拿到记录——
-    // 失败路径此前把局部 vec 随 Err 丢弃,自愈重发的 token 既不入调用行也不入 usage。
-    // 聊天调用方可传临时空 vec;任务侧(solo/子 agent)在 Err 分支补落调用行与 usage。
-    self_heals: &mut Vec<SelfHealRecord>,
-    run_id: &str,
-    // 授权闸门(替代 step_whitelist):见 ToolGate 文档
-    gate: ToolGate<'_>,
-    // 单次调用超时覆盖(A 批 A1):None = 用 call_watchdog_for 的既有判定(行为不变);
-    // Some = 该节点每次调用的时间预算(可收紧也可放宽),唯一来源是自定义流程节点的
-    // `call_timeout_secs`。放在末位是为了让既有 5 个调用点只在传值处改动。
-    call_timeout: Option<std::time::Duration>,
-    // 是否透出正文增量(RPFLOW-1):隐藏步骤(草稿/归档)传 false,工具调用照常透出
     emit_tokens: bool,
+    call_watchdog: Option<std::time::Duration>,
+    round: usize,
+    total_usage: &mut TokenUsage,
+    self_heals: &mut Vec<SelfHealRecord>,
 ) -> Result<ExecutorResult, EngineError> {
-    // 轮次上限:None = 旧调用方/聊天路径默认 32;Some(0) = 显式不限(任务模式哨兵);
-    // Some(n>0) = 显式上限。轮次不再是任务模式的默认终止条件,但仍保留语义/重复熔断
-    // 与步骤墙钟预算等安全阀。
-    let max_rounds = resolve_max_rounds(params.max_tool_rounds);
-    let mut round = 0usize;
-    // 重复调用熔断(P0-2,2026-09-14):普通 agent 工具循环此前**没有任何重复调用检测**,
-    // 唯一终止条件是 max_rounds。实测 plan 模式任务在单步反复调用同一工具(同参数)时,
-    // 7 分钟烧 150 万 prompt token 仍未收敛,必须人工 stop。
-    // 契约多步路径已有同类熔断(contracts/multi_step.rs),但只覆盖 PatchOp;
-    // 此处用 utils::loop_guard 的同口径算法补上工具循环的守卫。
-    // 口径 N=8 / K=3:窗口内同一「工具名+参数」指纹出现 ≥3 次即中止该步。
-    let mut loop_guard = crate::utils::loop_guard::LoopGuard::with_defaults();
-    // 单次调用总时长看门狗(2026-09-18):仅任务模式启用(见 call_watchdog_for 文档)。
-    // 聊天路径保持无总时长上限——长回复是正常形态,加限会误伤。
-    // A 批 A1:节点级覆盖优先(自定义流程节点的 `call_timeout_secs`),缺省回落既有判定。
-    let call_watchdog = resolve_call_watchdog(session_id, call_timeout);
-    // token 预算(HB-1):循环前取一次设置快照(与上面工具历史裁剪同款口径,
-    // 不留锁跨 await);0 = 关闭。budget_noticed 保证 warn 档只提示一次。
-    let (token_budget, budget_action, sem_window, sem_min_calls, sem_max_distinct) = {
-        let s = engine.settings_snapshot();
-        (
-            s.session_token_budget,
-            s.session_budget_action,
-            s.loop_guard_semantic_window as usize,
-            s.loop_guard_semantic_min_calls as usize,
-            s.loop_guard_semantic_max_distinct as usize,
-        )
-    };
-    // 语义熔断三值:任务侧由调用方经 `GenerationParams.semantic_guard` 显式传入
-    // **收紧后**的值(只收不放,0 = 关闭位原样保持);None = 聊天路径,用上面的扁平快照
-    // ——不存在按 `task:` 前缀的嗅探,模式由调用方传值表达(见 D3 口径裁定 C2)。
-    let (semantic_window, semantic_min_calls, semantic_max_distinct) = params
-        .semantic_guard
-        .unwrap_or((sem_window, sem_min_calls, sem_max_distinct));
-    // 步骤墙钟预算(D3):None = 不设(聊天路径恒 None,行为逐字节不变);
-    // 任务侧来源是设置项 `task_step_budget_secs`(装配见 task_engine::task_loop_limits)。
-    let step_budget = params.step_budget;
-    // 本步墙钟起点:闸门在**轮末**判定(与 token 预算/轮次上限同构:本轮工具已执行完,
-    // 不发起下一轮模型请求,也不会留下「无 tool_result 的悬挂 tool_call」)。
-    let loop_started = std::time::Instant::now();
-    let mut budget_noticed = false;
-    // 轮级滚动:最近一次非空正文(墙钟预算收尾的回退值,见轮末更新点)
-    let mut last_non_empty_content = String::new();
-    // 语义熔断(HB-2):看「输出的实质变化」而非参数指纹——参数每轮略变即绕开指纹熔断,
-    // 实测 54 轮不同命令烧 137 万 token(遗留 L22)。登记点在工具执行收尾(输出此时可得)。
-    let mut semantic_guard = crate::utils::loop_guard::SemanticGuard::new(
-        semantic_window,
-        semantic_min_calls,
-        semantic_max_distinct,
-    );
-    let mut semantic_break: Option<(String, usize, usize)> = None;
-    // 连续只读检测(TMR-5,2026-10-19):任务侧特有,载体是 ToolBudget(聊天路径 None)。
-    // 只有本轮确实下发工作区写工具时才启用——子 agent 的只读白名单、audit 的只读工具面
-    // 与聊天路径都不会触发「教模型落盘但没给它写工具」的误提醒。按**工具调用数**累计
-    // (单轮并发几十个 fs_read 也算),任一写类/编排类工具出现即清零。
-    let readonly_limit = tool_ctx
-        .budget
-        .and_then(|b| b.readonly_streak_limit)
-        .filter(|n| *n > 0);
-    let readonly_guard_enabled = readonly_limit.is_some()
-        && gate.whitelist.is_some_and(|wl| {
-            wl.iter()
-                .any(|n| crate::tools::tool_sets::is_workspace_write_tool(n))
-        });
-    let mut readonly_streak = 0usize;
-    let mut readonly_nudged = false;
-    // 声明文件无进展守卫(P0-2,2026-10-22):与只读守卫互补。
-    // 只读守卫看「读太多不写」;本守卫看「写了但没写对交付物」——`bash`/临时文件
-    // 会清零只读计数,却可能让交付文件长时间没有推进(实测单主 234 轮自检)。
-    // 只在 scope 带声明文件(team 主 agent)时启用。
-    let no_progress_limit = tool_ctx
-        .budget
-        .and_then(|b| b.no_progress_limit)
-        .filter(|n| *n > 0);
-    let declared_files: Vec<String> = tool_ctx
-        .scope
-        .as_ref()
-        .map(|s| s.declared_files().to_vec())
-        .unwrap_or_default();
-    let no_progress_enabled = no_progress_limit.is_some() && !declared_files.is_empty();
-    let mut no_progress_rounds = 0usize;
-    // SKY-7:硬收尾前的中途提醒只发一次;有进展后重置,允许新一轮空转再提醒。
-    let mut no_progress_nudged = false;
-    // 截断自愈留痕(问题①):各轮触发的自愈记录经调用方传入的 vec 透出;
-    // TMR3-2 起 Err 路径不再丢弃——调用方可在失败收尾时补落调用行与 usage。
-    loop {
-        // ===== 工具历史回灌上限(R3b,2026-09-02 实测修复:每轮全量回灌
-        // assistant/tool 交替历史,3 步任务 prompt 3,119→26,679 token 无界膨胀)=====
-        // 每轮生成前:最老轮 tool 结果原地摘要化(保留最近 K 轮完整 + token 预算
-        // 双闸门;配对不破坏、幂等)。仅存在工具循环历史时触发;聊天主链路
-        // compaction(compaction.rs)/protected_tail 注入语义不受影响(不同层)。
-        if llm_messages.iter().any(|m| m.role == "tool") {
-            let (keep_rounds, budget_tokens) = {
-                // 设置快照:不留锁跨 await
-                let s = engine.settings_snapshot();
-                (
-                    s.tool_history_keep_rounds as usize,
-                    s.tool_history_budget_tokens,
-                )
-            };
-            let summarized_count = |msgs: &[LlmMessage]| {
-                msgs.iter()
-                    .filter(|m| m.content.starts_with(TOOL_HISTORY_SUMMARY_PREFIX))
-                    .count()
-            };
-            let before = summarized_count(llm_messages);
-            let model = engine.model();
-            let outcome = {
-                let mut ts = engine
-                    .token_service
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                trim_tool_history(llm_messages, keep_rounds, budget_tokens, &mut ts, &model)
-            };
-            let after = summarized_count(llm_messages);
-            if after > before || outcome.reclaimed_argument_rounds > 0 {
-                tracing::info!(
-                    session_id = session_id.to_string(),
-                    newly_summarized = after - before,
-                    reclaimed_argument_rounds = outcome.reclaimed_argument_rounds,
-                    keep_rounds = keep_rounds,
-                    budget_tokens = budget_tokens,
-                    total_tokens = outcome.total_tokens,
-                    "工具循环历史回灌截断(旧轮 tool 结果/参数已摘要化)"
-                );
-            }
-            // 未能收敛必须可诊断,不能静默(2026-09-14):体量超过预算闸门可压缩范围
-            // 时继续跑下去会持续放大 prompt,最终表现为任务长时间不收敛、token 失控。
-            if !outcome.converged {
+    let mut attempt_params = params.clone();
+    let mut healed: Option<SelfHealRecord> = None;
+    // TMR3-1:本轮已用掉的上游重试次数(每轮重置;上限见 MAX_TRANSPORT_RETRIES)
+    let mut transport_retries = 0usize;
+    let result = loop {
+        // 单次调用总时长看门狗(2026-09-18):任务模式下包 300s 上限,超时按超时分类
+        // 透出(任务侧照既有错误路径落 error 行并进 error 终态,不留静默挂起);
+        // 聊天路径 call_watchdog=None,行为与裸调完全一致。
+        let attempt_started = std::time::Instant::now();
+        // TMR3-L1:本次尝试的实时 usage 累加器。看门狗超时会把 future 直接 drop,
+        // execute_generation 栈上的局部 usage 随之丢失;这里的累加器在 future 外,
+        // 「超时前已收到的分块」能保留下来,Err 分支再并入整轮 total_usage。
+        let mut attempt_usage = TokenUsage::default();
+        let one = with_call_watchdog(
+            execute_generation(
+                engine,
+                session_id,
+                run_id,
+                llm_messages,
+                &attempt_params,
+                tx,
+                abort,
+                flag,
+                emit_tokens,
+                Some(&mut attempt_usage),
+            ),
+            call_watchdog,
+            || {
+                let limit = call_watchdog.expect("看门狗为 Some 时才会走到超时分支"); // 见 call_watchdog_for
                 tracing::warn!(
                     session_id = session_id.to_string(),
-                    round = round,
-                    budget_tokens = budget_tokens,
-                    total_tokens = outcome.total_tokens,
-                    "工具历史压缩后仍超预算:单轮体量过大,上下文可能持续膨胀"
+                    timeout_s = limit.as_secs(),
+                    elapsed_ms = attempt_started.elapsed().as_millis() as u64,
+                    max_tokens = attempt_params.max_tokens,
+                    "任务模式工具循环单次生成超时(总时长看门狗触发)"
                 );
-            }
+                crate::models::llm_error::LlmError::timeout(format!(
+                    "模型调用超过 {}s 未完成(上游停滞或输出过慢),已中止本轮;可重新执行任务",
+                    limit.as_secs()
+                ))
+                .into()
+            },
+        )
+        .await;
+        // 失败尝试(timed out / 流中断 / 鉴权失败等)没有返回值,usage 只能从这里补:
+        // 成功路径由返回值统一入账,此处再并会双计。
+        // 仅任务模式落到 total_usage(聊天路径的 total_usage 语义保持逐字节不变)。
+        if one.is_err() && call_watchdog.is_some() {
+            add_usage(&mut *total_usage, &attempt_usage);
         }
-        // ===== 截断自愈(问题①,2026-08-31 deepseek 实测:max_tokens 被推理/长参数
-        // 烧光,tool_call 参数 JSON 被切成半截直接判步骤 error)=====
-        // 单轮内最多自愈一次:该轮被 max_tokens 截断到不可用时,把本轮 max_tokens 翻倍
-        // (上限 TRUNCATION_HEAL_MAX_TOKENS_CAP)原样重发;重发仍失败(同形态再现)
-        // 才透出原结果走既有错误路径。与 task_service 的空输出分级重试是同问题不同层:
-        // 那边管无工具纯生成(plan/step/summary),这边管工具循环内的单轮。
-        let mut attempt_params = params.clone();
-        let mut healed: Option<SelfHealRecord> = None;
-        // TMR3-1:本轮已用掉的上游重试次数(每轮重置;上限见 MAX_TRANSPORT_RETRIES)
-        let mut transport_retries = 0usize;
-        let result = loop {
-            // 单次调用总时长看门狗(2026-09-18):任务模式下包 300s 上限,超时按超时分类
-            // 透出(任务侧照既有错误路径落 error 行并进 error 终态,不留静默挂起);
-            // 聊天路径 call_watchdog=None,行为与裸调完全一致。
-            let attempt_started = std::time::Instant::now();
-            // TMR3-L1:本次尝试的实时 usage 累加器。看门狗超时会把 future 直接 drop,
-            // execute_generation 栈上的局部 usage 随之丢失;这里的累加器在 future 外,
-            // 「超时前已收到的分块」能保留下来,Err 分支再并入整轮 total_usage。
-            let mut attempt_usage = TokenUsage::default();
-            let one = with_call_watchdog(
-                execute_generation(
-                    engine,
-                    session_id,
-                    run_id,
-                    llm_messages,
-                    &attempt_params,
-                    tx,
-                    abort,
-                    flag,
-                    emit_tokens,
-                    Some(&mut attempt_usage),
-                ),
-                call_watchdog,
-                || {
-                    let limit = call_watchdog.expect("看门狗为 Some 时才会走到超时分支"); // 见 call_watchdog_for
-                    tracing::warn!(
-                        session_id = session_id.to_string(),
-                        timeout_s = limit.as_secs(),
-                        elapsed_ms = attempt_started.elapsed().as_millis() as u64,
-                        max_tokens = attempt_params.max_tokens,
-                        "任务模式工具循环单次生成超时(总时长看门狗触发)"
-                    );
-                    crate::models::llm_error::LlmError::timeout(format!(
-                        "模型调用超过 {}s 未完成(上游停滞或输出过慢),已中止本轮;可重新执行任务",
-                        limit.as_secs()
-                    ))
-                    .into()
+        // 已自愈过(重发仍失败):透出原结果,不再重发
+        if healed.is_some() {
+            break one;
+        }
+        // TMR3-1:单次调用遇到可重试上游失败(超时/限流/流中断)时原地重试一次。
+        // 只重发**这一次**调用:llm_messages 与已完成的工具结果原样保留,不重启
+        // 子目标、不重跑副作用。失败尝试已收到的 usage 由上方 attempt_usage 补记
+        // (TMR3-L1);没有收到的部分上游也未计费到可见分块,无从补。
+        let transport_failure: Option<String> = match &one {
+            Err(e)
+                if should_retry_transport(e, call_watchdog, transport_retries, *abort.borrow()) =>
+            {
+                Some(e.message().to_string())
+            }
+            _ => None,
+        };
+        if let Some(msg) = transport_failure {
+            transport_retries += 1;
+            tracing::warn!(
+                session_id = session_id.to_string(),
+                round = round,
+                attempt = transport_retries,
+                max_attempts = MAX_TRANSPORT_RETRIES,
+                error = msg.as_str(),
+                "任务模式单次调用失败(可重试),退避后原地重试"
+            );
+            let _ = send_event(
+                // 用连接器同款 Retry 事件:任务侧事件桥据此清流式缓冲并播报重试状态
+                // (TMR3-L2);聊天侧已有「正在重试」展示,语义一致。
+                SseEvent::Retry {
+                    attempt: transport_retries,
+                    max: MAX_TRANSPORT_RETRIES,
+                    reason: msg,
                 },
+                tx,
+                abort,
+                flag,
             )
             .await;
-            // 失败尝试(timed out / 流中断 / 鉴权失败等)没有返回值,usage 只能从这里补:
-            // 成功路径由下方 `result.usage` 统一入账,此处再并会双计。
-            // 仅任务模式落到 total_usage(聊天路径的 total_usage 语义保持逐字节不变)。
-            if one.is_err() && call_watchdog.is_some() {
-                add_usage(&mut *total_usage, &attempt_usage);
-            }
-            // 已自愈过(重发仍失败):透出原结果,不再重发
-            if healed.is_some() {
+            if *abort.borrow() {
                 break one;
             }
-            // TMR3-1:单次调用遇到可重试上游失败(超时/限流/流中断)时原地重试一次。
-            // 只重发**这一次**调用:llm_messages 与已完成的工具结果原样保留,不重启
-            // 子目标、不重跑副作用。失败尝试已收到的 usage 由上方 attempt_usage 补记
-            // (TMR3-L1);没有收到的部分上游也未计费到可见分块,无从补。
-            let transport_failure: Option<String> = match &one {
-                Err(e)
-                    if should_retry_transport(
-                        e,
-                        call_watchdog,
-                        transport_retries,
-                        *abort.borrow(),
-                    ) =>
-                {
-                    Some(e.message().to_string())
+            tokio::time::sleep(TRANSPORT_RETRY_BACKOFF).await;
+            if *abort.borrow() {
+                break one;
+            }
+            continue;
+        }
+        match one {
+            Ok(res) => {
+                let Some(cause) = truncation_heal_cause(&res) else {
+                    break Ok(res);
+                };
+                // 中断轮不自愈(用户停止语义优先;interrupted 时 finish_reason
+                // 也可能残留 length,不得误判)
+                if res.interrupted {
+                    break Ok(res);
                 }
-                _ => None,
-            };
-            if let Some(msg) = transport_failure {
-                transport_retries += 1;
-                tracing::warn!(
+                // 预算提升:推理挤占形态一次给足(见 heal_budget_for),其余走翻倍;
+                // None = 已封顶,重发无意义 → 透出原结果走既有错误路径
+                let Some(next_budget) = heal_budget_for(&res, attempt_params.max_tokens) else {
+                    break Ok(res);
+                };
+                tracing::info!(
                     session_id = session_id.to_string(),
-                    round = round,
-                    attempt = transport_retries,
-                    max_attempts = MAX_TRANSPORT_RETRIES,
-                    error = msg.as_str(),
-                    "任务模式单次调用失败(可重试),退避后原地重试"
+                    cause = cause.clone(),
+                    max_tokens = attempt_params.max_tokens,
+                    retry_max_tokens = next_budget,
+                    "工具循环单轮截断,提高输出上限原样重发(截断自愈)"
                 );
                 let _ = send_event(
-                    // 用连接器同款 Retry 事件:任务侧事件桥据此清流式缓冲并播报重试状态
-                    // (TMR3-L2);聊天侧已有「正在重试」展示,语义一致。
-                    SseEvent::Retry {
-                        attempt: transport_retries,
-                        max: MAX_TRANSPORT_RETRIES,
-                        reason: msg,
-                    },
+                    step_evt(
+                        "截断自愈",
+                        Some(format!(
+                            "{cause},输出上限 {}→{next_budget} 重发",
+                            attempt_params.max_tokens
+                        )),
+                        None,
+                        None,
+                    ),
                     tx,
                     abort,
                     flag,
                 )
                 .await;
-                if *abort.borrow() {
-                    break one;
-                }
-                tokio::time::sleep(TRANSPORT_RETRY_BACKOFF).await;
-                if *abort.borrow() {
-                    break one;
-                }
+                healed = Some(SelfHealRecord {
+                    note: cause,
+                    prompt_tokens: res.usage.prompt_tokens,
+                    completion_tokens: res.usage.completion_tokens,
+                    finish_reason: res.finish_reason.clone(),
+                    retried_max_tokens: next_budget,
+                });
+                attempt_params.max_tokens = next_budget;
                 continue;
             }
-            match one {
-                Ok(res) => {
-                    let Some(cause) = truncation_heal_cause(&res) else {
-                        break Ok(res);
-                    };
-                    // 中断轮不自愈(用户停止语义优先;interrupted 时 finish_reason
-                    // 也可能残留 length,不得误判)
-                    if res.interrupted {
-                        break Ok(res);
-                    }
-                    // 预算提升:推理挤占形态一次给足(见 heal_budget_for),其余走翻倍;
-                    // None = 已封顶,重发无意义 → 透出原结果走既有错误路径
-                    let Some(next_budget) = heal_budget_for(&res, attempt_params.max_tokens) else {
-                        break Ok(res);
-                    };
-                    tracing::info!(
-                        session_id = session_id.to_string(),
-                        cause = cause.clone(),
-                        max_tokens = attempt_params.max_tokens,
-                        retry_max_tokens = next_budget,
-                        "工具循环单轮截断,提高输出上限原样重发(截断自愈)"
-                    );
-                    let _ = send_event(
-                        step_evt(
-                            "截断自愈",
-                            Some(format!(
-                                "{cause},输出上限 {}→{next_budget} 重发",
-                                attempt_params.max_tokens
-                            )),
-                            None,
-                            None,
-                        ),
-                        tx,
-                        abort,
-                        flag,
-                    )
-                    .await;
-                    healed = Some(SelfHealRecord {
-                        note: cause,
-                        prompt_tokens: res.usage.prompt_tokens,
-                        completion_tokens: res.usage.completion_tokens,
-                        finish_reason: res.finish_reason.clone(),
-                        retried_max_tokens: next_budget,
-                    });
-                    attempt_params.max_tokens = next_budget;
-                    continue;
-                }
-                Err(e) => {
-                    if !is_truncated_tool_call_error(e.message()) {
-                        break Err(e);
-                    }
-                    // Err 形态拿不到本轮结果(连接器流尾校验失败),
-                    // 只能沿用「翻倍 + 封顶」;None = 已封顶 → 透出原错误
-                    let Some(next_budget) = doubled_heal_budget(attempt_params.max_tokens) else {
-                        break Err(e);
-                    };
-                    tracing::info!(
-                        session_id = session_id.to_string(),
-                        max_tokens = attempt_params.max_tokens,
-                        retry_max_tokens = next_budget,
-                        "工具调用参数 JSON 截断,提高输出上限原样重发(截断自愈)"
-                    );
-                    let _ = send_event(
-                        step_evt(
-                            "截断自愈",
-                            Some(format!(
-                                "工具参数 JSON 截断,输出上限 {}→{next_budget} 重发",
-                                attempt_params.max_tokens
-                            )),
-                            None,
-                            None,
-                        ),
-                        tx,
-                        abort,
-                        flag,
-                    )
-                    .await;
-                    healed = Some(SelfHealRecord {
-                        note: "工具参数 JSON 截断".into(),
-                        prompt_tokens: 0,
-                        completion_tokens: 0,
-                        finish_reason: None,
-                        retried_max_tokens: next_budget,
-                    });
-                    attempt_params.max_tokens = next_budget;
-                    continue;
-                }
-            }
-        };
-        // Err 传播前包装截断错误文案(问题③):自愈重发仍失败时,错误带「截断」定性,
-        // 任务模式据此把可读的失败原因写进步骤 result(而非连接器原始半截 JSON)
-        let result = match result {
-            Ok(r) => r,
             Err(e) => {
-                if let Some(h) = healed {
-                    self_heals.push(h);
-                    // 包装截断定性文案:分类保持原错误分类(截断不是新的失败类型)
-                    return Err(match e {
-                        EngineError::Llm(e) => {
-                            EngineError::Llm(crate::models::llm_error::LlmError::new(
-                                e.kind(),
-                                format!(
-                                    "工具参数 JSON 截断(已达 token 上限,提高预算重发仍失败): {e}"
-                                ),
-                            ))
-                        }
-                        other => EngineError::Internal(format!(
-                            "工具参数 JSON 截断(已达 token 上限,提高预算重发仍失败): {other}"
-                        )),
-                    });
+                if !is_truncated_tool_call_error(e.message()) {
+                    break Err(e);
                 }
-                return Err(e);
-            }
-        };
-        if let Some(h) = healed {
-            self_heals.push(h);
-        }
-        total_usage.prompt_tokens += result.usage.prompt_tokens;
-        total_usage.completion_tokens += result.usage.completion_tokens;
-        total_usage.total_tokens += result.usage.total_tokens;
-        total_usage.prompt_cache_hit_tokens += result.usage.prompt_cache_hit_tokens;
-        total_usage.prompt_cache_miss_tokens += result.usage.prompt_cache_miss_tokens;
-        if result.interrupted {
-            // 本轮 usage 已累进 total_usage(上方);返回体归零,避免调用方(HB-3 之后
-            // 中断分支也会合并 usage)重复计数。与「无工具调用短路」的归零同理由。
-            return Ok(ExecutorResult {
-                usage: TokenUsage::default(),
-                self_heals: std::mem::take(self_heals),
-                ..result
-            });
-        }
-        if result.tool_calls.is_empty() {
-            return Ok(ExecutorResult {
-                content: result.content,
-                usage: TokenUsage::default(),
-                interrupted: false,
-                tool_calls: Vec::new(),
-                reasoning: String::new(),
-                // 末轮(无工具调用)的 finish_reason 透出:任务模式落库截断标记用
-                finish_reason: result.finish_reason,
-                self_heals: std::mem::take(self_heals),
-                budget_stopped: false,
-                guard_stopped: None,
-            });
-        }
-        round += 1;
-        // 最近一次**非空**正文(轮级滚动):工具型模型常见「只发工具调用、不带正文」的轮,
-        // 而墙钟预算闸门收尾时若恰好停在这样一轮上,返回值就是空串 → 上游按「返回空内容」
-        // 判失败,与「带着已有产出收尾」的承诺相反(2026-09-26 真模型实测:该模型整轮
-        // 工具调用几乎不带可见正文,delta 事件极少)。故预算收尾时回退到这里。
-        if !result.content.trim().is_empty() {
-            last_non_empty_content = result.content.clone();
-        }
-        // 本轮是否已达上限(Some 才判定;None = 不限轮次):是则执行完本轮工具后停止,
-        // 不再发起新的模型请求
-        let last_round = max_rounds.is_some_and(|limit| round >= limit);
-        // ===== 重复调用熔断(P0-2)=====
-        // 对本轮每个工具调用做「工具名 + 参数」指纹登记;窗口内同一指纹累计达阈值
-        // 即判定模型在原地打转,执行本轮工具后停止,理由显式推给用户(不静默截断)。
-        let repeated: Option<(String, usize)> = {
-            let mut hit: Option<(String, usize)> = None;
-            for call in &result.tool_calls {
-                let fp = crate::utils::loop_guard::fnv1a_hash(&[&call.name, &call.arguments]);
-                if loop_guard.record(fp) {
-                    hit = Some((call.name.clone(), loop_guard.count_of(fp)));
-                    break;
-                }
-            }
-            hit
-        };
-        let loop_broken = repeated.is_some();
-        // 回填 OpenAI 标准结构:先追加一条 assistant 消息,携带本轮完整 tool_calls[] 与
-        // reasoning_content,再逐条追加 tool 结果消息。旧实现为每个 call 单独追加一条
-        // assistant(tool_calls=[call]),违反 OpenAI 多工具调用格式,并行工具调用时可能被
-        // 严格后端拒绝(400)或丢失 reasoning_content 对应关系。
-        let reasoning = (!result.reasoning.is_empty()).then_some(result.reasoning.clone());
-        llm_messages.push(LlmMessage {
-            role: "assistant".into(),
-            content: String::new(),
-            reasoning_content: reasoning,
-            tool_calls: Some(result.tool_calls.clone()),
-            tool_call_id: None,
-            images: Vec::new(),
-        });
-        // ===== 本轮工具执行 =====
-        // 1) 裁决(顺序,无副作用):白名单工具自动放行,其余走三档授权模式裁决
-        // (任务模式无 UI 授权上下文时,未放行工具在下方执行阶段直接拒绝,不空等)
-        let mut executed: Vec<ExecutedTool> = result
-            .tool_calls
-            .iter()
-            .map(|call| {
-                let registered = engine.tool_registry.get(&call.name).is_some();
-                let custom_authorized = gate.authorizes(&call.name);
-                let (mode, always_required) = {
-                    // 设置快照:不留锁跨 await
-                    let settings = engine.settings_snapshot();
-                    (
-                        settings.authorization_mode,
-                        settings
-                            .bypass_blacklist
-                            .iter()
-                            .any(|name| name == &call.name),
-                    )
-                };
-                // 操作分类:读/写/删文件与系统路径区域,决定三档矩阵的走向
-                let origin = engine
-                    .tool_registry
-                    .origin_of(&call.name)
-                    .unwrap_or(crate::tools::action_class::ToolOrigin::Builtin);
-                let action =
-                    crate::tools::action_class::classify(&call.name, &call.arguments, origin);
-                let permission = if gate.excludes(&call.name) {
-                    // 任务模式名单是硬边界:名单外工具直接拒绝,不进入三档文件规则
-                    // (否则宽松模式会放过被任务策略排除的写类工具)
-                    crate::tools::permissions::PermissionDecision {
-                        allowed: false,
-                        risk: engine.tool_registry.permissions().risk_for(&call.name),
-                        reason: "该工具不在当前任务策略允许的工具清单内".into(),
-                    }
-                } else {
-                    engine.tool_registry.permissions().decide_with_policy(
-                        &call.name,
-                        tool_ctx,
-                        registered,
-                        custom_authorized,
-                        mode,
-                        &action,
-                        always_required,
-                    )
+                // Err 形态拿不到本轮结果(连接器流尾校验失败),
+                // 只能沿用「翻倍 + 封顶」;None = 已封顶 → 透出原错误
+                let Some(next_budget) = doubled_heal_budget(attempt_params.max_tokens) else {
+                    break Err(e);
                 };
                 tracing::info!(
-                    tool = call.name.clone(),
-                    risk = format!("{:?}", permission.risk).to_lowercase(),
-                    allowed = permission.allowed,
-                    result = permission.reason.clone(),
-                    "tool_permission"
+                    session_id = session_id.to_string(),
+                    max_tokens = attempt_params.max_tokens,
+                    retry_max_tokens = next_budget,
+                    "工具调用参数 JSON 截断,提高输出上限原样重发(截断自愈)"
                 );
-                ExecutedTool {
-                    call: call.clone(),
-                    permission,
-                    output: Value::Null,
-                    duration_ms: 0,
-                    snapshot_id: None,
-                }
-            })
-            .collect();
-        // TMR3-L6:本轮执行前的台账基线。bash 的写目标解析只覆盖显式形态,台账是
-        // 「实际改了哪些文件」的权威记录;轮末按行 id 增量补判进展(见下方 round_progress)。
-        // 只在无进展守卫启用时读一次,聊天/solo 路径零额外查询。
-        let ledger_mark: Option<(String, i64)> = if no_progress_enabled {
-            crate::services::task_change_service::task_id_of(&tool_ctx.session_id).and_then(|tid| {
-                crate::services::task_change_service::max_id(&engine.db, &tid).map(|id| (tid, id))
-            })
-        } else {
-            None
-        };
-        // 2) 执行:按模型顺序分组调度——连续 Safe 工具组内并发(join_all 保序),
-        //    非 Safe/未注册工具单独成组、串行执行(含授权等待),组间串行,
-        //    保证授权语义与副作用顺序稳定。
-        let parallel_safe: Vec<bool> = executed
-            .iter()
-            .map(|e| {
-                engine.tool_registry.get(&e.call.name).is_some()
-                    && engine.tool_registry.permissions().risk_for(&e.call.name)
-                        == crate::tools::permissions::ToolRisk::Safe
-            })
-            .collect();
-        let groups = split_parallel_groups(&parallel_safe);
-        for group in groups {
-            if group.len() > 1 || parallel_safe[group[0]] {
-                // 并发组:组内全部为 Safe 工具,并发执行并按原顺序收集
-                let futures: Vec<_> =
-                    group
-                        .iter()
-                        .map(|&idx| {
-                            let e = &executed[idx];
-                            let call = &e.call;
-                            let perm = &e.permission;
-                            let ctx = tool_ctx.clone();
-                            let rid = run_id;
-                            async move {
-                                execute_call(engine, call, perm, &ctx, tx, abort, flag, rid).await
-                            }
-                        })
-                        .collect();
-                let outputs = futures::future::join_all(futures).await;
-                for (&idx, out) in group.iter().zip(outputs) {
-                    executed[idx].output = out.0;
-                    executed[idx].duration_ms = out.1;
-                    executed[idx].snapshot_id = out.2;
-                }
-            } else {
-                // 串行组:单个非 Safe/未注册工具,含授权等待
-                let interrupted = execute_serial_tool(
-                    engine,
-                    &mut executed[group[0]],
-                    tool_ctx,
-                    tx,
-                    abort,
-                    flag,
-                    run_id,
-                    gate,
-                )
-                .await?;
-                if interrupted {
-                    return Ok(ExecutorResult {
-                        content: String::new(),
-                        usage: TokenUsage::default(),
-                        interrupted: true,
-                        tool_calls: Vec::new(),
-                        reasoning: String::new(),
-                        // 工具执行期中断:生成未完成,finish_reason 不适用
-                        finish_reason: None,
-                        self_heals: std::mem::take(self_heals),
-                        budget_stopped: false,
-                        guard_stopped: None,
-                    });
-                }
-            }
-        }
-        // 3) 收尾(按原调用顺序):状态机/持久化/SSE 推送/模型消息回填。
-        //    ToolResult 与 ToolAuthorizationRequired 均在此按序推送,保证前端配对稳定。
-        let mut round_progress = false;
-        for e in &executed {
-            // P0-2:本轮只要有一次「成功写入本主声明文件」就算有进展,清零连续计数。
-            // 权限拒绝(output=Null)与错误对象不算。这里只看带 `path` 参数的写工具;
-            // bash/fs_patch 等不带单一路径的写形态由下方台账增量补判(TMR3-L6)。
-            if no_progress_enabled
-                && is_declared_file_write(&e.call.name, &e.call.arguments, &declared_files)
-                && !e.output.is_null()
-                && e.output.get("error").is_none()
-            {
-                round_progress = true;
-            }
-            state_machine.transition_best_effort(AgentState::ToolCall, session_id);
-            // 任务模式 agent_session=None(不建影子会话行):跳过 agent_sessions 落库;
-            // 聊天路径恒 Some,落库顺序与原实现逐字节一致。
-            if let Some(agent_session) = agent_session {
-                let _ = engine.agent_sessions.update(
-                    &agent_session.id,
-                    Some("tool_call"),
-                    None,
-                    None,
-                    None,
-                );
-                let input_val: Value = serde_json::from_str(&e.call.arguments)
-                    .unwrap_or_else(|_| Value::String(e.call.arguments.clone()));
-                let _ = engine.agent_sessions.add_tool_call(
-                    &agent_session.id,
-                    &e.call.name,
-                    input_val,
-                    e.output.clone(),
-                    e.duration_ms,
-                    // 批 D-1:快照绑定随工具调用落库,历史重载后「回退到此处」仍可精确匹配
-                    e.snapshot_id.clone(),
-                );
-            }
-            state_machine.transition_best_effort(AgentState::Executing, session_id);
-            if let Some(agent_session) = agent_session {
-                let _ = engine.agent_sessions.update(
-                    &agent_session.id,
-                    Some("executing"),
-                    None,
-                    None,
-                    None,
-                );
-            }
-            // 授权已在执行前等待;此处统一发送最终结果,允许与拒绝都按 call_id 收束状态。
-            send_event(
-                SseEvent::ToolResult {
-                    name: e.call.name.clone(),
-                    output: e.output.clone(),
-                    call_id: Some(e.call.id.clone()),
-                    render_kind: crate::tools::registry::render_kind_for(&e.call.name)
-                        .map(|s| s.to_string()),
-                    origin: tool_origin_str(&engine.tool_registry, &e.call.name),
-                    // 批 D-1:写工具成功落库的回退快照 id(加性字段;None 不序列化)
-                    snapshot_id: e.snapshot_id.clone(),
-                },
-                tx,
-                abort,
-                flag,
-            )
-            .await?;
-            // tool 结果消息:与循环前的 assistant(tool_calls) 成对,供下一轮生成参考。
-            // 工具图像通道(视觉能力包 D4):约定式返回 `{text, images:[引用]}` 时,
-            // 把引用解析成 data URL 挂到 tool 消息上(内容取 text 字段);其它返回形状
-            // 原样透传(既有工具零改动)。SSE 的 ToolResult 沿用原值,前端按 images 渲染缩略图。
-            let (tool_content, tool_images) = engine.images.parse_tool_output(&e.output);
-            llm_messages.push(LlmMessage {
-                role: "tool".into(),
-                content: tool_content,
-                reasoning_content: None,
-                tool_calls: None,
-                tool_call_id: Some(e.call.id.clone()),
-                images: tool_images,
-            });
-            // 语义熔断登记(HB-2):输出经归一化(抹时间戳/耗时/计数)后取指纹;
-            // 同一工具在窗口内调用 ≥N 次且指纹去重 ≤K 即判定空转。只记录首个命中,
-            // 收尾按与「重复调用熔断」同款方式中止(本轮工具已执行完,无悬挂)。
-            // 文件改性工具额外混入参数指纹:成功回执与内容无关,只看输出会把
-            // 「同一文件多段编辑」误判为空转(2026-10-23 空岛 team 实测)。
-            if semantic_break.is_none() {
-                let fp = crate::utils::loop_guard::semantic_fingerprint(
-                    &e.call.name,
-                    &e.output.to_string(),
-                    &e.call.arguments,
-                );
-                // SKY-6 第 4 项:纯读工具按整窗阈值判定——原口径把「少量文件被
-                // 反复读」当成空转(全题复跑 4/8/2),预算烧在探索主上。
-                let readonly_class =
-                    crate::tools::tool_sets::is_workspace_readonly_tool(&e.call.name);
-                semantic_break = semantic_guard.record_classified(&e.call.name, fp, readonly_class);
-            }
-        }
-        // TMR3-L6:本轮没有可识别的成功写调用时,用台账增量补判——bash 重定向/
-        // tee/cp 等实际落盘的声明文件同样算进展。仅看**本主声明文件**,临时文件
-        // 与越界路径不算;跨主污染由所有权拦截兜底(他人写不了本主声明文件)。
-        if no_progress_enabled && !round_progress {
-            if let Some((task_id, mark)) = ledger_mark.as_ref() {
-                let changed =
-                    crate::services::task_change_service::paths_since(&engine.db, task_id, *mark);
-                round_progress = has_declared_change(&declared_files, &changed);
-            }
-        }
-        // ===== 连续只读检测(TMR-5)=====
-        // 按本轮模型**请求**的工具调用统计(被拒绝的写调用也算「已尝试动手」,
-        // 因此写类出现即清零);中性工具(todo/sleep 等)不增不减。
-        if readonly_guard_enabled {
-            for call in &result.tool_calls {
-                if crate::tools::tool_sets::is_readonly_probe_tool(&call.name) {
-                    readonly_streak += 1;
-                } else if crate::tools::tool_sets::is_write_like_tool(&call.name) {
-                    // 一旦真的动手(或尝试派发新执行面),本次「只读空转段」结束:
-                    // 清空计数并允许下一次空转段重新提醒。否则「提醒 → 写一个文件 →
-                    // 又探索 8 次」会直接熔断,而模型其实已经在交付。
-                    readonly_streak = 0;
-                    readonly_nudged = false;
-                }
-            }
-        }
-        if no_progress_enabled {
-            if round_progress {
-                no_progress_rounds = 0;
-                // 有进展 = 本轮空转段结束;下一次连续无写可重新获得一次提醒。
-                no_progress_nudged = false;
-            } else {
-                no_progress_rounds += 1;
-                // SKY-7:硬收尾(limit 轮)之前先在第 limit/2 轮提醒一次。
-                // 只读守卫会被 bash 等写类工具清零,本提醒只看声明文件是否落盘,
-                // 覆盖「用 shell 探索/自检但不动交付物」的空转形态。
-                let limit = no_progress_limit.unwrap_or(usize::MAX);
-                let nudge_at = (limit / 2).max(1);
-                if !no_progress_nudged && no_progress_rounds >= nudge_at {
-                    no_progress_nudged = true;
-                    llm_messages.push(LlmMessage::plain(
-                        "user",
-                        crate::services::task_core::prompt_consts::NO_PROGRESS_FIRST_NUDGE,
-                    ));
-                    send_event(
-                        step_evt(
-                            "无文件进展提醒",
-                            Some(format!(
-                                "已连续 {} 轮没有成功写入本主负责的文件:已提醒先落盘;再连续 {} 轮仍无写入将收尾",
-                                no_progress_rounds,
-                                limit.saturating_sub(no_progress_rounds)
-                            )),
-                            None,
-                            None,
-                        ),
-                        tx,
-                        abort,
-                        flag,
-                    )
-                    .await?;
-                }
-            }
-        }
-        // ===== token 预算闸门(HB-1,2026-09-18):按**成本**而非轮数收口 =====
-        // 轮次上限(显式配置时)只管轮数:实测 54 轮各不相同命令的空转仍烧
-        // 137 万 prompt token(遗留 L22)。预算口径 = 本轮 run 内工具循环累计
-        // prompt+completion(与 Finish 事件透出的 total_tokens 同口径);0 = 关闭(默认)。
-        // 判定点放在**轮末**(本轮工具已执行完,与轮次上限/熔断同构):不发起下一轮
-        // 模型请求,也不会留下「无 tool_result 的悬挂 tool_call」。warn 档只提示一次
-        // 后继续;stop 档跳出循环并保留已有产出。
-        if token_budget > 0 {
-            let used_tokens = total_usage.prompt_tokens + total_usage.completion_tokens;
-            if budget_reached(used_tokens, token_budget) {
-                let stop = budget_action == "stop";
-                if !budget_noticed {
-                    budget_noticed = true;
-                    tracing::info!(
-                        session_id = session_id.to_string(),
-                        used_tokens,
-                        budget = token_budget,
-                        rounds = round + 1,
-                        action = budget_action.as_str(),
-                        "单次生成 token 预算超限"
-                    );
-                    send_event(
-                        step_evt(
-                            if stop {
-                                "Token 预算超限,停止工具循环"
-                            } else {
-                                "Token 预算超限"
-                            },
-                            Some(format!(
-                                "已用 {used_tokens} token / 预算 {token_budget}(第 {} 轮):{}",
-                                round + 1,
-                                if stop {
-                                    "已停止工具循环,本轮产出与用量照常保留"
-                                } else {
-                                    "仅提示(warn 档),循环继续"
-                                }
-                            )),
-                            None,
-                            None,
-                        ),
-                        tx,
-                        abort,
-                        flag,
-                    )
-                    .await?;
-                }
-                if stop {
-                    return Ok(ExecutorResult {
-                        content: result.content,
-                        usage: TokenUsage::default(),
-                        interrupted: false,
-                        tool_calls: Vec::new(),
-                        reasoning: String::new(),
-                        finish_reason: result.finish_reason,
-                        self_heals: std::mem::take(self_heals),
-                        budget_stopped: true,
-                        guard_stopped: None,
-                    });
-                }
-            }
-        }
-        // 步骤墙钟预算(D3,2026-09-26 实测):时间/成本闸门优先于轮数闸门——
-        // 任务模式每个 agent 循环各自重置轮次上限,实测单步 10 条命令反复自检(重跑测试/
-        // pwd/ls/git status)、单轮往返 1.5~3 分钟,15 分钟不收敛。到点**带着已有产出收尾**:
-        // 返回 Ok 让步骤照常记 done(不制造失败——失败会把已完成的工作一起丢掉)。
-        if round > 0 {
-            let elapsed = loop_started.elapsed();
-            if step_budget_reached(elapsed, step_budget) {
-                let budget_secs = step_budget.map(|b| b.as_secs()).unwrap_or(0);
-                send_event(
+                let _ = send_event(
                     step_evt(
-                        "步骤墙钟预算用尽",
+                        "截断自愈",
                         Some(format!(
-                            "已用 {}s / 预算 {budget_secs}s(第 {round} 轮):已停止工具循环,本轮产出与用量照常保留",
-                            elapsed.as_secs()
+                            "工具参数 JSON 截断,输出上限 {}→{next_budget} 重发",
+                            attempt_params.max_tokens
                         )),
                         None,
                         None,
@@ -1597,545 +1068,47 @@ pub(crate) async fn run_tool_loop(
                     abort,
                     flag,
                 )
-                .await?;
-                return Ok(ExecutorResult {
-                    content: budget_stop_content(result.content, &last_non_empty_content),
-                    usage: TokenUsage::default(),
-                    interrupted: false,
-                    tool_calls: Vec::new(),
-                    reasoning: String::new(),
-                    finish_reason: result.finish_reason,
-                    self_heals: std::mem::take(self_heals),
-                    budget_stopped: true,
-                    guard_stopped: None,
+                .await;
+                healed = Some(SelfHealRecord {
+                    note: "工具参数 JSON 截断".into(),
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    finish_reason: None,
+                    retried_max_tokens: next_budget,
                 });
+                attempt_params.max_tokens = next_budget;
+                continue;
             }
         }
-        // 已达轮次上限:本轮工具已全部执行(含终态推送),停止发起新的模型请求并输出当前结果
-        if last_round {
-            send_event(
-                step_evt(
-                    "达到工具调用轮次上限",
-                    Some(format!(
-                        "已执行 {round} 轮工具调用,停止继续调用工具,输出当前结果"
-                    )),
-                    None,
-                    None,
-                ),
-                tx,
-                abort,
-                flag,
-            )
-            .await?;
-            return Ok(ExecutorResult {
-                content: result.content,
-                usage: TokenUsage::default(),
-                interrupted: false,
-                tool_calls: Vec::new(),
-                reasoning: String::new(),
-                finish_reason: result.finish_reason,
-                self_heals: std::mem::take(self_heals),
-                budget_stopped: false,
-                guard_stopped: None,
-            });
+    };
+    // Err 传播前包装截断错误文案(问题③):自愈重发仍失败时,错误带「截断」定性,
+    // 任务模式据此把可读的失败原因写进步骤 result(而非连接器原始半截 JSON)。
+    match result {
+        Ok(r) => {
+            if let Some(h) = healed {
+                self_heals.push(h);
+            }
+            Ok(r)
         }
-        // 连续只读空转(TMR-5):达到上限先提醒一次,再次达到则中止本步。顺序放在
-        // 轮次/墙钟/Token 预算之后、语义熔断之前——预算是更明确的终止条件;语义熔断
-        // 抓「输出不变」,只读守卫抓「一直读、不落盘」,两者互补。
-        if readonly_guard_enabled && readonly_streak >= readonly_limit.unwrap_or(usize::MAX) {
-            let limit = readonly_limit.unwrap_or(0);
-            readonly_streak = 0;
-            if !readonly_nudged {
-                readonly_nudged = true;
-                llm_messages.push(LlmMessage::plain(
-                    "user",
-                    crate::services::task_core::prompt_consts::READONLY_FIRST_NUDGE,
-                ));
-                send_event(
-                    step_evt(
-                        "只读探索提醒",
-                        Some(format!(
-                            "已连续 {limit} 次只读工具调用没有写出产物:已提醒先落盘;若任务只需调研,请直接给出结论"
-                        )),
-                        None,
-                        None,
-                    ),
-                    tx,
-                    abort,
-                    flag,
-                )
-                .await?;
-            } else {
-                send_event(
-                    step_evt(
-                        "连续只读空转熔断",
-                        Some(format!(
-                            "已连续 {limit} 次只读工具调用没有写出任何产物,且提醒后仍未落盘,已在第 {round} 轮中止;已有正文与用量照常保留"
-                        )),
-                        None,
-                        None,
-                    ),
-                    tx,
-                    abort,
-                    flag,
-                )
-                .await?;
-                return Ok(ExecutorResult {
-                    content: budget_stop_content(result.content, &last_non_empty_content),
-                    usage: TokenUsage::default(),
-                    interrupted: false,
-                    tool_calls: Vec::new(),
-                    reasoning: String::new(),
-                    finish_reason: result.finish_reason,
-                    self_heals: std::mem::take(self_heals),
-                    budget_stopped: false,
-                    guard_stopped: Some(format!(
-                        "连续只读空转熔断:连续 {limit} 次只读工具调用没有写出任何产物"
+        Err(e) => {
+            if let Some(h) = healed {
+                self_heals.push(h);
+                // 包装截断定性文案:分类保持原错误分类(截断不是新的失败类型)
+                return Err(match e {
+                    EngineError::Llm(e) => {
+                        EngineError::Llm(crate::models::llm_error::LlmError::new(
+                            e.kind(),
+                            format!("工具参数 JSON 截断(已达 token 上限,提高预算重发仍失败): {e}"),
+                        ))
+                    }
+                    other => EngineError::Internal(format!(
+                        "工具参数 JSON 截断(已达 token 上限,提高预算重发仍失败): {other}"
                     )),
                 });
             }
-        }
-        // ===== 声明文件无进展收尾(P0-2,2026-10-22)=====
-        // 与只读熔断同款：本轮工具已执行完，带已有正文收尾（不判失败）。
-        // 触发条件只看「是否成功写入本主声明文件」，因此 `bash` 探针/临时文件
-        // 不会像只读计数那样被清零；这正是 2026-10-21 单主 234 轮自检的止损点。
-        if no_progress_enabled && no_progress_rounds >= no_progress_limit.unwrap_or(usize::MAX) {
-            let limit = no_progress_limit.unwrap_or(0);
-            tracing::warn!(
-                session_id = session_id.to_string(),
-                limit,
-                round = round,
-                "声明文件无进展收尾"
-            );
-            send_event(
-                step_evt(
-                    "无文件进展收尾",
-                    Some(format!(
-                        "已连续 {limit} 轮没有成功写入本主负责的文件:已停止工具循环,本轮产出与用量照常保留"
-                    )),
-                    None,
-                    None,
-                ),
-                tx,
-                abort,
-                flag,
-            )
-            .await?;
-            return Ok(ExecutorResult {
-                content: budget_stop_content(result.content, &last_non_empty_content),
-                usage: TokenUsage::default(),
-                interrupted: false,
-                tool_calls: Vec::new(),
-                reasoning: String::new(),
-                finish_reason: result.finish_reason,
-                self_heals: std::mem::take(self_heals),
-                budget_stopped: false,
-                guard_stopped: Some(format!(
-                    "声明文件无进展收尾:连续 {limit} 轮没有成功写入本主负责的文件"
-                )),
-            });
-        }
-        // 语义熔断(HB-2):同一工具在窗口内反复调用且输出实质无变化(参数可以每轮都变)。
-        // 与「重复调用熔断」互补——后者抓同参数空转,本项抓「参数在变、结果不变」的空转。
-        // 同样置于 last_round 之后:轮次上限是更明确的终止条件。
-        if let Some((tool, calls, distinct)) = semantic_break.take() {
-            let detail = format!(
-                "检测到重复空转:工具 \"{tool}\" 在最近 {semantic_window} 次调用中出现 {calls} 次,输出实质无变化(去重后 {distinct} 种),已在第 {round} 轮中止。请调整策略后重试。"
-            );
-            tracing::warn!(
-                session_id = session_id.to_string(),
-                tool = tool.as_str(),
-                calls,
-                distinct,
-                "工具循环重复空转熔断(HB-2)"
-            );
-            send_event(
-                step_evt("重复空转熔断", Some(detail), None, None),
-                tx,
-                abort,
-                flag,
-            )
-            .await?;
-            return Ok(ExecutorResult {
-                content: result.content,
-                usage: TokenUsage::default(),
-                interrupted: false,
-                tool_calls: Vec::new(),
-                reasoning: String::new(),
-                finish_reason: result.finish_reason,
-                self_heals: std::mem::take(self_heals),
-                budget_stopped: false,
-                guard_stopped: Some(format!(
-                    "重复空转熔断:工具 \"{tool}\" 在最近 {semantic_window} 次调用中出现 {calls} 次,输出实质无变化"
-                )),
-            });
-        }
-        // 重复调用熔断:本轮工具已执行完(与轮次上限同款收尾),显式告知中止理由。
-        // 置于 last_round 之后:轮次上限是更明确的终止条件,优先按其文案收尾。
-        if loop_broken {
-            let (tool, times) = repeated.expect("loop_broken 蕴含 repeated 为 Some");
-            let detail = format!(
-                "检测到重复调用:工具 \"{tool}\" 以相同参数在最近 {} 轮内出现 {times} 次,已在第 {round} 轮中止以避免空转。请调整策略后重试。",
-                crate::utils::loop_guard::DEFAULT_WINDOW
-            );
-            tracing::warn!(
-                session_id = session_id.to_string(),
-                tool = tool.as_str(),
-                repeat_count = times,
-                round = round,
-                "工具循环重复调用熔断"
-            );
-            send_event(
-                step_evt("重复调用熔断", Some(detail), None, None),
-                tx,
-                abort,
-                flag,
-            )
-            .await?;
-            return Ok(ExecutorResult {
-                // 尽量保留已产出的正文(可能为思考内容),不丢模型已有成果
-                content: result.content,
-                usage: TokenUsage::default(),
-                interrupted: false,
-                tool_calls: Vec::new(),
-                reasoning: String::new(),
-                finish_reason: result.finish_reason,
-                self_heals: std::mem::take(self_heals),
-                budget_stopped: false,
-                guard_stopped: Some(format!(
-                    "重复调用熔断:工具 \"{tool}\" 以相同参数出现 {times} 次"
-                )),
-            });
+            Err(e)
         }
     }
-}
-
-/// 单轮中一个待执行/已执行的工具调用(裁决结果 + 执行输出 + 耗时 + 快照绑定)
-struct ExecutedTool {
-    call: ToolCallArgs,
-    permission: crate::tools::permissions::PermissionDecision,
-    output: Value,
-    /// 工具执行耗时(毫秒;未执行时为 0)
-    duration_ms: i64,
-    /// 本次执行成功落库的回退快照 id(批 D-1;仅写工具且快照开关开时 Some):
-    /// 随 ToolResult 事件透出、随 tool_calls 落库,供前端精确绑定「回退到此处」
-    snapshot_id: Option<String>,
-}
-
-/// 按模型顺序把工具分成「并行组」:连续 Safe 工具为同一组(组内并发),
-/// 非 Safe/未注册工具各自成组(串行屏障)。返回每组在 executed 里的下标集合。
-fn split_parallel_groups(parallel_safe: &[bool]) -> Vec<Vec<usize>> {
-    let mut groups: Vec<Vec<usize>> = Vec::new();
-    for (idx, &safe) in parallel_safe.iter().enumerate() {
-        if safe {
-            // Safe 且上一组也是 Safe 组 → 并入,否则新开一组
-            if let Some(last) = groups.last_mut() {
-                if parallel_safe[last[0]] {
-                    last.push(idx);
-                    continue;
-                }
-            }
-            groups.push(vec![idx]);
-        } else {
-            // 非 Safe → 单独成组(屏障)
-            groups.push(vec![idx]);
-        }
-    }
-    groups
-}
-
-/// 串行执行单个工具调用(含未授权时的等待授权)。返回是否被中止。
-/// 与并发组不同,非 Safe/未注册工具必须走此路径,保证授权语义与副作用顺序稳定。
-/// `gate.no_ui_authorization = true`(任务模式)时,未放行工具直接拒绝并回灌错误,
-/// 不进入 300 秒授权等待——任务模式没有 UI 授权上下文,等待必然超时。
-#[allow(clippy::too_many_arguments)]
-async fn execute_serial_tool(
-    engine: &AgentEngine,
-    e: &mut ExecutedTool,
-    tool_ctx: &ToolContext,
-    tx: &mpsc::Sender<SseEvent>,
-    abort: &watch::Receiver<bool>,
-    flag: &AbortFlag,
-    run_id: &str,
-    gate: ToolGate<'_>,
-) -> Result<bool, String> {
-    if *abort.borrow() {
-        return Ok(true);
-    }
-    if !e.permission.allowed && engine.tool_registry.get(&e.call.name).is_some() {
-        // 任务模式(无 UI 授权上下文):立即拒绝,不空等
-        if gate.no_ui_authorization {
-            e.output = json!({
-                "error": e.permission.reason,
-                "code": "tool_policy_denied"
-            });
-            return Ok(false);
-        }
-        let receiver = engine.tool_registry.permissions().begin_wait(
-            run_id,
-            &e.call.id,
-            &tool_ctx.session_id,
-            &e.call.name,
-        );
-        send_event(
-            SseEvent::ToolAuthorizationRequired {
-                name: e.call.name.clone(),
-                risk: e.permission.risk,
-                reason: e.permission.reason.clone(),
-                run_id: run_id.to_string(),
-                call_id: e.call.id.clone(),
-                origin: tool_origin_str(&engine.tool_registry, &e.call.name),
-            },
-            tx,
-            abort,
-            flag,
-        )
-        .await?;
-        let mut abort_wait = abort.clone();
-        let timeout_secs = {
-            let s = engine.settings_snapshot();
-            s.tool_authorization_timeout_secs as u64
-        };
-        let resolved = tokio::select! {
-            decision = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), receiver) => {
-                match decision {
-                    Ok(Ok(value)) => Ok(value),
-                    Ok(Err(_)) => Err(("authorization_disconnected", "授权通道已断开")),
-                    Err(_) => Err(("authorization_timeout", "等待授权超时")),
-                }
-            }
-            changed = abort_wait.changed() => {
-                let _ = changed;
-                Err(("authorization_disconnected", "生成连接已断开"))
-            }
-        };
-        engine
-            .tool_registry
-            .permissions()
-            .cancel_wait(run_id, &e.call.id);
-        match resolved {
-            Ok(crate::tools::permissions::PendingAuthorizationDecision::AllowOnce) => {
-                e.permission = crate::tools::permissions::PermissionDecision::allowed(
-                    e.permission.risk,
-                    "用户允许本次调用".into(),
-                );
-            }
-            Ok(crate::tools::permissions::PendingAuthorizationDecision::AllowSession) => {
-                // 授权落盘失败(如匿名会话/磁盘异常)不应中断整轮生成:降级为「仅本次允许」
-                // 并留痕,否则用户看到的是生成失败而非授权失败。
-                match engine.tool_registry.permissions().authorize(
-                    &e.call.name,
-                    "session",
-                    &tool_ctx.session_id,
-                ) {
-                    Ok(()) => {
-                        e.permission = crate::tools::permissions::PermissionDecision::allowed(
-                            e.permission.risk,
-                            "用户授权当前会话".into(),
-                        );
-                    }
-                    Err(err) => {
-                        tracing::warn!(tool = e.call.name, error = %err, "会话授权落盘失败,降级为仅本次允许");
-                        e.permission = crate::tools::permissions::PermissionDecision::allowed(
-                            e.permission.risk,
-                            format!("用户允许本次调用(会话授权未保存:{err})"),
-                        );
-                    }
-                }
-            }
-            Ok(crate::tools::permissions::PendingAuthorizationDecision::AllowRole) => {
-                match engine.tool_registry.permissions().authorize(
-                    &e.call.name,
-                    "role",
-                    &tool_ctx.character_id,
-                ) {
-                    Ok(()) => {
-                        e.permission = crate::tools::permissions::PermissionDecision::allowed(
-                            e.permission.risk,
-                            "用户授权当前角色".into(),
-                        );
-                    }
-                    Err(err) => {
-                        tracing::warn!(tool = e.call.name, error = %err, "角色授权落盘失败,降级为仅本次允许");
-                        e.permission = crate::tools::permissions::PermissionDecision::allowed(
-                            e.permission.risk,
-                            format!("用户允许本次调用(角色授权未保存:{err})"),
-                        );
-                    }
-                }
-            }
-            Ok(crate::tools::permissions::PendingAuthorizationDecision::Deny) => {
-                e.output =
-                    json!({ "error": "用户拒绝工具调用", "code": "tool_authorization_denied" });
-                emit_authorization_outcome(tx, abort, flag, &e.call.name, "已拒绝").await;
-                return Ok(false);
-            }
-            Err((code, message)) => {
-                e.output = json!({ "error": message, "code": code });
-                emit_authorization_outcome(tx, abort, flag, &e.call.name, message).await;
-                return Ok(false);
-            }
-        }
-    }
-    let (output, duration_ms, snapshot_id) = execute_call(
-        engine,
-        &e.call,
-        &e.permission,
-        tool_ctx,
-        tx,
-        abort,
-        flag,
-        run_id,
-    )
-    .await;
-    e.output = output;
-    e.duration_ms = duration_ms;
-    e.snapshot_id = snapshot_id;
-    Ok(false)
-}
-
-/// 授权终态事件(拒绝/超时/断开):原实现只回灌 error JSON,前端工具卡片显示为
-/// 普通失败,用户无法区分「授权被拒」与「工具报错」。发一条 step 事件补足可见性。
-async fn emit_authorization_outcome(
-    tx: &mpsc::Sender<SseEvent>,
-    abort: &watch::Receiver<bool>,
-    flag: &AbortFlag,
-    tool: &str,
-    outcome: &str,
-) {
-    let _ = send_event(
-        step_evt(
-            &format!("工具 {tool} 未执行"),
-            Some(format!("授权结果:{outcome}")),
-            None,
-            None,
-        ),
-        tx,
-        abort,
-        flag,
-    )
-    .await;
-}
-
-/// 工具执行的取消闸门(HARNESS3-1):工具 future 与 abort 信号竞争,先到的胜出。
-///
-/// 为什么在**调用侧**竞争,而不是给 `ToolRegistry::execute*` 加取消形参:
-/// 执行器类型 `ToolExecutor` 是 L1 公共契约(`models::types::ToolExecutor`,
-/// `tools/registry.rs:17-21` 的下沉说明写明「`plugins/` 与 `mcp/` 都要构造它」),
-/// 加形参等于动 L1 类型 + 全部内置工具闭包 + 两个 L3 构造点,与本批「取消只在工具循环生效」
-/// 的需求不成比例。
-///
-/// `None` = 已取消。竞争赢时工具 future 被 drop:对 `bash` 而言这意味着 exec 层的
-/// future 被丢弃,进程由 `kill_on_drop` 与 Job Object 句柄关闭收掉
-/// (见 `services/exec/desktop.rs`)。
-///
-/// 循环而非单次 `select!` 的原因:`changed()` 返回 `Err` 只表示**发送端已全部 drop**
-/// (引擎 run 收尾),那不是取消信号——若把它当取消,正常完成的工具会被误判成
-/// 「已取消」;若不管它,`changed()` 会立刻重复就绪导致忙循环。故 `Err` 分支改为
-/// 等 future 自己跑完,`Ok` 分支回到循环顶重读当前值。
-async fn await_or_cancel<F>(fut: F, abort: &watch::Receiver<bool>) -> Option<F::Output>
-where
-    F: std::future::Future,
-{
-    tokio::pin!(fut);
-    let mut wait = abort.clone();
-    loop {
-        // borrow() 不标记 seen:标记会让克隆出的接收端再也等不到「变化」,
-        // 于是「起跑前已取消」反而要等工具自然结束(正是本条要修的行为)。
-        if *wait.borrow() {
-            return None;
-        }
-        tokio::select! {
-            biased;
-            value = &mut fut => return Some(value),
-            changed = wait.changed() => match changed {
-                Ok(()) => continue,
-                Err(_) => return Some((&mut fut).await),
-            }
-        }
-    }
-}
-
-/// 执行单个工具调用(已裁决)。未授权不执行:未注册 → 错误 JSON;已注册 → 错误 JSON
-/// (授权事件由收尾阶段按序推送)。执行失败 → 结构化错误 JSON + step 提示,不终止整轮。
-/// 返回 (输出, 耗时毫秒, 回退快照 id)。`run_id` 用于构造工具调用身份(批 D-1),
-/// 随快照落库并绑定到工具卡(SSE/tool_calls),供「回退到此处」精确匹配。
-#[allow(clippy::too_many_arguments)]
-async fn execute_call(
-    engine: &AgentEngine,
-    call: &ToolCallArgs,
-    permission: &crate::tools::permissions::PermissionDecision,
-    tool_ctx: &ToolContext,
-    tx: &mpsc::Sender<SseEvent>,
-    abort: &watch::Receiver<bool>,
-    flag: &AbortFlag,
-    run_id: &str,
-) -> (Value, i64, Option<String>) {
-    if !permission.allowed {
-        return (
-            if engine.tool_registry.get(&call.name).is_none() {
-                json!({ "error": format!("工具未注册:{}", call.name), "code": "tool_not_registered" })
-            } else {
-                json!({ "error": permission.reason, "code": "tool_authorization_required" })
-            },
-            0,
-            None,
-        );
-    }
-    let start = std::time::Instant::now();
-    // 白名单放行:已裁决执行,避免 execute 二次权限裁决拒绝白名单危险工具
-    // (旧实现外层 allowed=true 但 execute 内部再裁决,敏感/危险工具实际仍被拒)
-    let identity = crate::services::undo_service::ToolCallIdentity {
-        run_id: run_id.to_string(),
-        call_id: call.id.clone(),
-    };
-    let executed = await_or_cancel(
-        engine.tool_registry.execute_with_decision_meta(
-            &call.name,
-            &call.arguments,
-            tool_ctx.clone(),
-            permission,
-            Some(identity),
-        ),
-        abort,
-    )
-    .await;
-    let (out, snapshot_id) = match executed {
-        // 取消:回填结构化错误(形状与「执行失败」同款,不终止整轮),真正的收场
-        // 由调用侧既有的轮末 / 串行路径 abort 检查负责。这里**不**返回 Err,
-        // 否则整轮被判失败会把已完成的工作一起丢掉(口径同步骤预算的「带着产出收尾」)。
-        None => {
-            tracing::info!(tool = call.name.as_str(), "工具执行中被取消,提前结束等待");
-            return (
-                json!({
-                    "error": "已取消:工具在执行中被中止(用户停止)",
-                    "code": "tool_cancelled"
-                }),
-                start.elapsed().as_millis() as i64,
-                None,
-            );
-        }
-        Some(Ok(o)) => (
-            serde_json::from_str(&o.output).unwrap_or(Value::String(o.output)),
-            o.snapshot_id,
-        ),
-        Some(Err(e)) => {
-            let _ = send_event(
-                step_evt(
-                    &format!("工具 {} 调用失败", call.name),
-                    Some(e.clone()),
-                    None,
-                    None,
-                ),
-                tx,
-                abort,
-                flag,
-            )
-            .await;
-            (json!({ "error": e }), None)
-        }
-    };
-    (out, start.elapsed().as_millis() as i64, snapshot_id)
 }
 
 // ===== 非流式静默生成(自 engine/mod.rs 拆分迁入,纯代码移动,逻辑不变)=====
@@ -2228,31 +1201,40 @@ mod tests {
         assert!(!gate.authorizes("write"));
     }
 
+    /// C-2C:所有停止出口共用的 `ExecutorResult::stopped` 必须由 kind 派生
+    /// `budget_stopped`,且只有 4 个空转守卫经 `guard_stopped()` 透出
+    /// (预算/轮次上限不得被任务侧误降 partial)。
     #[test]
-    fn split_parallel_groups_groups_safe_runs() {
-        // [safe, safe, danger, safe] → [[0,1],[2],[3]]
-        let flags = vec![true, true, false, true];
-        assert_eq!(
-            split_parallel_groups(&flags),
-            vec![vec![0, 1], vec![2], vec![3]]
-        );
-    }
+    fn stopped_result_derives_flags_from_kind() {
+        use super::super::tool_loop::LoopStopKind;
 
-    #[test]
-    fn split_parallel_groups_all_safe_single_group() {
-        let flags = vec![true, true, true];
-        assert_eq!(split_parallel_groups(&flags), vec![vec![0, 1, 2]]);
-    }
-
-    #[test]
-    fn split_parallel_groups_no_safe_each_solo() {
-        let flags = vec![false, false];
-        assert_eq!(split_parallel_groups(&flags), vec![vec![0], vec![1]]);
-    }
-
-    #[test]
-    fn split_parallel_groups_empty() {
-        assert!(split_parallel_groups(&[]).is_empty());
+        let cases = [
+            (LoopStopKind::TokenBudget, true, false),
+            (LoopStopKind::StepBudget, true, false),
+            (LoopStopKind::RoundLimit, false, false),
+            (LoopStopKind::Readonly, false, true),
+            (LoopStopKind::NoProgress, false, true),
+            (LoopStopKind::Semantic, false, true),
+            (LoopStopKind::RepeatedCall, false, true),
+        ];
+        for (kind, budget_stopped, guard_stopped) in cases {
+            let result = ExecutorResult::stopped(
+                "已有正文".into(),
+                Some("stop".into()),
+                Vec::new(),
+                LoopStop {
+                    kind,
+                    message: format!("{kind:?} 原因"),
+                    event_title: "事件",
+                    event_detail: String::new(),
+                },
+            );
+            assert_eq!(result.budget_stopped, budget_stopped, "{kind:?}");
+            assert_eq!(result.guard_stopped().is_some(), guard_stopped, "{kind:?}");
+            assert_eq!(result.usage.total_tokens, 0, "停止处 usage 归零防双计");
+            assert!(result.tool_calls.is_empty(), "停止处不再遗留待执行调用");
+            assert_eq!(result.content, "已有正文", "停止处必须保留已有产出");
+        }
     }
 
     // ===== 截断自愈(问题①)判定纯函数 =====
@@ -2278,7 +1260,7 @@ mod tests {
             finish_reason: finish.map(|s| s.into()),
             self_heals: Vec::new(),
             budget_stopped: false,
-            guard_stopped: None,
+            stop: None,
         }
     }
 
@@ -2470,80 +1452,6 @@ mod tests {
             budget_stop_content(String::new(), ""),
             "",
             "两者皆空如实返回空:不伪造正文"
-        );
-    }
-}
-
-#[cfg(test)]
-mod cancel_tests {
-    use super::await_or_cancel;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
-    use tokio::sync::watch;
-
-    /// **正常路径必须仍然放行**(与下面两条同权重):取消守卫一旦误判,表现不是报错
-    /// 而是「工具永远返回已取消」——比现状(取消打断不了工具)更糟,所以必须单独钉。
-    #[tokio::test]
-    async fn not_cancelled_returns_tool_output() {
-        let (_tx, rx) = watch::channel(false);
-        let got = await_or_cancel(async { "工具输出" }, &rx).await;
-        assert_eq!(got, Some("工具输出"), "未取消时必须原样带回工具输出");
-    }
-
-    /// 本批的正面断言:工具执行途中取消 → **立即**返回,不等工具自身时长。
-    /// 修复前该用例要等满 5s(工具自身 sleep)才返回,故时间余量给到 1s 足以判别。
-    #[tokio::test]
-    async fn cancel_during_tool_execution_returns_immediately() {
-        let (tx, rx) = watch::channel(false);
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(30)).await;
-            let _ = tx.send(true);
-        });
-        let start = Instant::now();
-        let got = await_or_cancel(tokio::time::sleep(Duration::from_secs(5)), &rx).await;
-        let elapsed = start.elapsed();
-        assert!(got.is_none(), "取消途中应返回 None(实际: {got:?})");
-        assert!(
-            elapsed < Duration::from_secs(1),
-            "取消应在毫秒级生效,实际等了一轮工具时长: {elapsed:?}"
-        );
-    }
-
-    /// 起跑前已置位:直接判取消,且**不轮询**工具 future(否则副作用已经发生才说「取消了」)。
-    #[tokio::test]
-    async fn already_aborted_before_start_skips_tool() {
-        let (tx, rx) = watch::channel(true);
-        let polled = Arc::new(AtomicBool::new(false));
-        let flag = polled.clone();
-        let got = await_or_cancel(
-            async move {
-                flag.store(true, Ordering::SeqCst);
-                1u8
-            },
-            &rx,
-        )
-        .await;
-        assert_eq!(got, None);
-        assert!(
-            !polled.load(Ordering::SeqCst),
-            "已取消时不该把工具放下去跑(否则取消只是事后通知)"
-        );
-        drop(tx);
-    }
-
-    /// `changed()` 返回 Err 只代表**发送端已全部 drop**(run 收尾的正常路径),那不是取消
-    /// 信号——必须等工具跑完并带回结果。此用例同时兜住「Err 分支被误写成 continue 造成忙循环」。
-    #[tokio::test]
-    async fn dropped_sender_is_not_treated_as_cancel() {
-        let (tx, rx) = watch::channel(false);
-        drop(tx);
-        let start = Instant::now();
-        let got = await_or_cancel(tokio::time::sleep(Duration::from_millis(40)), &rx).await;
-        assert!(got.is_some(), "发送端断开不等于取消,应等工具完成");
-        assert!(
-            start.elapsed() >= Duration::from_millis(30),
-            "应真的等完工具,而不是立刻返回"
         );
     }
 }
