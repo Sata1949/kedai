@@ -120,7 +120,7 @@ if (UPDATE) {
   for (const rel of Object.keys(next).sort()) ordered[rel] = next[rel];
   fs.writeFileSync(
     BASELINE_PATH,
-    `${JSON.stringify({ ...baseline, updated: '2026-10-25', files: ordered }, null, 2)}\n`
+    `${JSON.stringify({ ...baseline, updated: new Date().toISOString().slice(0, 10), files: ordered }, null, 2)}\n`
   );
   console.log(`基线已更新:${Object.keys(ordered).length} 个文件`);
   for (const c of changed) console.log(`  - ${c}`);
