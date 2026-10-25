@@ -53,7 +53,20 @@ describe('UIP 批次源码级布局契约', () => {
   });
 
   it('UIP-5:进度行不再引用不存在的变量与蓝色回退', () => {
-    const taskBoardSource = readText('TaskBoard.vue');
+    // C-2A 拆分后任务台由 components/task/ 多个面板承载,断言改为扫描整组源码,
+    // 防止规则只守住已被搬空的壳文件。
+    const taskBoardSource = [
+      'TaskBoard.vue',
+      'task/TaskStatusPanel.vue',
+      'task/TaskFlowBindPanel.vue',
+      'task/TaskApprovalPanel.vue',
+      'task/TaskExecutionPanel.vue',
+      'task/TaskResultPanel.vue',
+      'task/TaskBoardEmpty.vue',
+      'task/MarkdownBlock.vue',
+    ]
+      .map(readText)
+      .join('\n');
     expect(taskBoardSource).not.toContain('--sv-text-dim');
     expect(taskBoardSource).not.toContain('4ea1ff');
   });
