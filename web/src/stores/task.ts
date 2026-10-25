@@ -483,12 +483,25 @@ export const useTaskStore = defineStore('app.task', () => {
             // 的 id(currentTask.value?.task.id),旧任务 A 的迟到响应到达时该条件恒真,
             // 会把 A 强制覆盖到已选中的 B 上。
             if (currentTaskId.value !== id) return true;
-            const sig = contentSignature(detail);
+            // 用量单独记账：usage 事件高频且只改 token 累计，若计入详情签名会让每个 usage
+            // 事件都替换 currentTask，打穿全部依赖它的 markdown 预渲染缓存（C-2A）。
+            // 详情其余内容不变时保持引用；用量值有变化才更新 currentTaskUsage。
+            const usage = detail.usage_total ?? null;
+            const sig = contentSignature({ ...detail, usage_total: undefined });
             // id 检查兜底:切任务后旧签名残留时,即便内容碰巧相同也必须替换(现状是别的任务/null)
             if (sig !== detailSignature || currentTask.value?.task.id !== id) {
               detailSignature = sig;
               currentTask.value = detail;
-              currentTaskUsage.value = detail.usage_total ?? null;
+            }
+            const prevUsage = currentTaskUsage.value;
+            if (
+              !prevUsage ||
+              !usage ||
+              prevUsage.prompt_tokens !== usage.prompt_tokens ||
+              prevUsage.completion_tokens !== usage.completion_tokens ||
+              prevUsage.reasoning_tokens !== usage.reasoning_tokens
+            ) {
+              currentTaskUsage.value = usage;
             }
             ok = true;
             detailErrors.delete(id);

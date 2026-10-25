@@ -10,8 +10,8 @@ import skeletonBlockSource from '../components/SkeletonBlock.vue?raw';
 import splashScreenSource from '../components/SplashScreen.vue?raw';
 import chatRecordsSource from '../components/ChatRecords.vue?raw';
 import chatWindowSource from '../components/ChatWindow.vue?raw';
-import sidebarSource from '../components/Sidebar.vue?raw';
-import taskBoardSource from '../components/TaskBoard.vue?raw';
+import taskHistorySource from '../components/sidebar/TaskHistoryList.vue?raw';
+import taskExecutionSource from '../components/task/TaskExecutionPanel.vue?raw';
 import appSource from '../App.vue?raw';
 
 /** 读取相对本测试文件的源码文本(readFileSync 直接接受 file: URL)。 */
@@ -64,10 +64,10 @@ describe('UIP-9 动效词汇源码契约', () => {
   });
 
   it('UIP-9b:状态点挂闪点类与 :key(状态变更时节点重建重播)', () => {
-    expect(sidebarSource).toContain('sv-dot-flash');
-    expect(sidebarSource).toContain(':key="t.status"');
-    expect(taskBoardSource).toContain('sv-dot-flash');
-    expect(taskBoardSource).toContain(':key="st.status"');
+    expect(taskHistorySource).toContain('sv-dot-flash');
+    expect(taskHistorySource).toContain(':key="t.status"');
+    expect(taskExecutionSource).toContain('sv-dot-flash');
+    expect(taskExecutionSource).toContain(':key="st.status"');
   });
 
   it('UIP-9c:--transition-* 兼容别名已删除且全仓无引用,--ease-in-out 已建', () => {

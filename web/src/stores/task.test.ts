@@ -77,6 +77,8 @@ const h = vi.hoisted(() => ({
   pullTruncated: false,
   /** PRODCAP-1:true 时补拉抛错(验证失败不重试、只留告警) */
   pullFail: false,
+  /** C-2A:详情 usage_total 的可变值(验证用量单独更新不打穿详情引用) */
+  backendUsage: { prompt_tokens: 0, completion_tokens: 0, reasoning_tokens: 0 } as TaskUsageTotal,
   /** FE-1:迟到响应时序控制——命中 (fn,key) 时该 api 返回给定挂起 Promise(旧响应迟到场景) */
   delay: null as PendingApiResponse | null,
 }));
@@ -192,7 +194,7 @@ function makeDetail(status: TaskStatus, id = 't1'): TaskDetail {
   return {
     task: { ...makeTask(status), id },
     subtasks: [],
-    usage_total: { prompt_tokens: 0, completion_tokens: 0, reasoning_tokens: 0 },
+    usage_total: { ...h.backendUsage },
   };
 }
 
@@ -649,6 +651,22 @@ describe('事件风暴签名去重(multi/team 卡顿修复)', () => {
     await flush();
     expect(store.currentTask, '数据变化必须替换引用').not.toBe(refBefore);
     expect(store.currentTask?.task.status).toBe('running');
+  });
+
+  it('仅用量变化时不替换 currentTask,但 currentTaskUsage 更新(C-2A:markdown 缓存不打穿)', async () => {
+    const store = useTaskStore();
+    store.appMode = 'task';
+    store.startTaskEvents();
+    await store.selectTask('t1');
+    const refBefore = store.currentTask;
+    expect(store.currentTaskUsage?.prompt_tokens).toBe(0);
+
+    h.backendUsage = { prompt_tokens: 120, completion_tokens: 30, reasoning_tokens: 5 };
+    h.emitEvent!({ type: 'task', task_id: 't1', kind: 'usage' });
+    await flush();
+
+    expect(store.currentTask, 'usage 不属于详情内容签名,引用必须保持').toBe(refBefore);
+    expect(store.currentTaskUsage).toEqual(h.backendUsage);
   });
 
   it('任务列表内容未变时,status/plan 事件保持 tasks 引用', async () => {
