@@ -313,6 +313,16 @@
 
 **验收**：现有 `settings_connector`/`api_integration` 全绿；新增字段清单测试；`check-contract`/`check-doc-claims`；真实模型最小连通（`generate-raw` 200）确认设置仍能下发。
 
+**2026-10-25 执行追注（已完成）**：本批已落地，未开始 C-2C/C-2D/C-2E。
+
+- 后端：`api/settings.rs`（1934 行）拆为 `api/settings/{mod,projection,probes,prompt,patch/*}`；`update_settings` **149 行**（目标 ≤200）；75 字段按七域拆分，每域一个 `apply` 返回 `PatchError{field,message}`；`apply_mode!` 提到 `patch/mod.rs` 模块级。
+- 非法值策略：在 C-2-0 的 5 个字段之外，`compaction_mode` / `compaction_keep_recent` / `compaction_snip_bytes` / `memory_inject_limit` / `memory_inject_char_budget` / `memory_max_entries` 六处「静默忽略 200」改为 400。域顺序为连接→生成→Agent→工具→记忆→任务→能力包（bundles 最后，保证文学推荐档写压缩三项与默认词重物化最后执行）。
+- 门禁：新增 `tools/check-settings-parity.mjs`（PUT 75 / GET 77 / 连接 14；GET 侧直接解析 `settings_json()` 投影键，覆盖「结构体加字段但投影忘加」），接入 `check-all.ps1`（阶段 20→21）；`check-contract` 的 `PromptPreviewResponse` 路径改指 `api/settings/prompt.rs`。
+- 前端：`RuntimeSettingsPatch` 由 `Partial<Omit<RuntimeSettings,…>> & Overrides` 派生（GET-only / PUT-only / 同名重定义三组常量显式列出）；`genSettings` 的 load/save 回填合并为 `applyRuntimeSettings`。
+- 测试：新增 6 个后端单测（生效 / 非法 / 缺省三态 + 连接清空名单 + 任务默认连接）；`settings_connector` 的 5 字段表驱动扩到 11 个并补新字段的整批原子性；`api_memory_diagnostics` 的越界忽略断言改为 400。
+- 验证：后端静态 1973（1513 单测 + 460 集成）、前端静态 1686 / 运行时 1729；`check-settings-parity` 三组 OK；真实模型最小连通证据见 `D:\kedai-bench-run\c2b-evidence\`。
+- 仍存在：`check-settings-parity` 只比字段名与可选性，不校验类型/取值域；`RuntimeSettingsPatch` 的派生规则靠三个常量维系，新增差异类别时需同步脚本；`settings_service/mod.rs`（2126 行）自身未拆。
+
 ### C-2C 工具循环守卫管线（高风险，3~5 天，下一次任务模式改动前必做）
 
 **目标**：`run_tool_loop` 从 1,046 行降到 ≤300 行；守卫决策与副作用分离；行为逐字节等价。
