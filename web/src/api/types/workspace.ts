@@ -61,4 +61,9 @@ export interface TaskDeliverySummary {
    * 字段名为线格式兼容保留 `truncated`；旧服务端无此字段 → 按「无未完成步骤」容错。
    */
   truncated?: string[];
+  /**
+   * 根目录未声明的临时/草稿文件（SKY-1 交付卫生，2026-10-25）。
+   * 只作提示，不影响任务终态；旧服务端无此字段 → 按「无卫生提示」容错。
+   */
+  hygiene_issues?: string[];
 }
