@@ -65,6 +65,9 @@ pub struct TaskDeliverySummary {
     pub content_issues: Vec<String>,
     /// 被空转守卫截断(步骤 partial)的子目标名(SKY-6 第 2 项)。空 = 无截断。
     pub truncated: Vec<String>,
+    /// 工作区根目录里未声明的临时/草稿文件(SKY-1 交付卫生,2026-10-25)。
+    /// 只做提示,不降终态——避免把合法的下划线文件误伤;审计清单会看到同一份列表。
+    pub hygiene_issues: Vec<String>,
 }
 
 /// 从 plan 提取必需文件:(规范化相对路径, 步骤名) 去重,首声明胜出。
@@ -208,6 +211,97 @@ pub(crate) fn placeholder_line_count(path: &Path) -> Option<usize> {
     Some(text.lines().filter(|line| line.contains("@@")).count())
 }
 
+/// 根目录未声明的临时/草稿文件(SKY-1 交付卫生,2026-10-25)。
+///
+/// 空岛复跑的工作区根目录留下 `_verify_*.js` / `_dump.js` / `_ui.txt` 等 9 个
+/// 临时脚本,审计视为交付缺陷但交付门槛看不见。这里只做**提示**:命中 `_` 前缀或
+/// `.orig/.bak/.tmp/.log/.rej` 后缀、且未被 `TaskStep.files` 声明的根目录文件;
+/// 不下沉终态(合法交付物可能恰好以下划线开头,误判代价高于收益)。
+pub(crate) fn hygiene_issues(workspace: &Path, required: &[(String, String)]) -> Vec<String> {
+    if !workspace.is_dir() {
+        return Vec::new();
+    }
+    let declared: std::collections::HashSet<&str> =
+        required.iter().map(|(path, _)| path.as_str()).collect();
+    let Ok(entries) = std::fs::read_dir(workspace) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if declared.contains(name) || !looks_like_scratch(name) {
+            continue;
+        }
+        match entry.metadata() {
+            Ok(meta) if meta.is_file() => {
+                out.push(format!("{name}:未声明的临时/草稿文件(交付前应清理)"));
+            }
+            _ => {}
+        }
+    }
+    out.sort();
+    out.truncate(10);
+    out
+}
+
+fn looks_like_scratch(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    name.starts_with('_')
+        || [".orig", ".bak", ".tmp", ".log", ".rej"]
+            .iter()
+            .any(|suffix| lower.ends_with(suffix))
+}
+
+/// 选择单文件交付的**最终入口**(SKY-1 运行期闸门,2026-10-25)。
+///
+/// 优先用规划器声明的 HTML(team 规划链路);solo/未声明文件的任务没有 `files`,
+/// 回退到工作区根目录:`index.html`/`index.htm` 优先,否则取**最大的根级 HTML**
+/// (单文件交付的最终入口通常内联了全部分片,体积最大)。只看根目录,避免把
+/// `src/shell.html` 这类中间模板当成最终交付。
+pub(crate) fn pick_single_file_entry(
+    workspace: &Path,
+    required: &[(String, String)],
+) -> Option<String> {
+    if let Some((path, _)) = required.iter().rev().find(|(path, _)| is_html_name(path)) {
+        return Some(path.clone());
+    }
+    if !workspace.is_dir() {
+        return None;
+    }
+    for name in ["index.html", "index.htm"] {
+        if workspace.join(name).is_file() {
+            return Some(name.to_string());
+        }
+    }
+    let mut best: Option<(u64, String)> = None;
+    let entries = std::fs::read_dir(workspace).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !is_html_name(name) {
+            continue;
+        }
+        let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        if best.as_ref().is_none_or(|(best_len, _)| len > *best_len) {
+            best = Some((len, name.to_string()));
+        }
+    }
+    best.map(|(_, name)| name)
+}
+
+fn is_html_name(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with(".html") || lower.ends_with(".htm")
+}
+
 /// 声明文件的内容体检(SKY-6 第 3 项 + SKY-1 确定性部分):空文件 / 仅空白 /
 /// 未替换 `@@` 槽位 / 静态接线问题(导入名未导出、本地模块或资源不存在、
 /// 单文件交付仍外链本地文件)。
@@ -254,7 +348,15 @@ pub(crate) fn content_issues(
             out.push(format!("{path}:文件仅含空白"));
         }
     }
-    let declared: Vec<String> = required.iter().map(|(p, _)| p.clone()).collect();
+    // 单文件目标但规划器没声明文件(solo/未规划):回退到根目录入口,让静态接线
+    // 与终态门槛对「最终交付物」仍然有效。
+    let declared: Vec<String> = if required.is_empty() && wiring::single_file_requested(goal) {
+        pick_single_file_entry(workspace, required)
+            .into_iter()
+            .collect()
+    } else {
+        required.iter().map(|(p, _)| p.clone()).collect()
+    };
     out.extend(wiring::wiring_issues(workspace, &declared, goal));
     out
 }
@@ -289,6 +391,7 @@ pub(crate) fn summarize(
     let missing = missing_files(workspace, &required);
     let content_issues = content_issues(workspace, &required, goal);
     let truncated = truncated_from_plan(plan);
+    let hygiene_issues = hygiene_issues(workspace, &required);
     let files = required
         .iter()
         .map(|(path, owner)| TaskDeliveryFile {
@@ -306,6 +409,7 @@ pub(crate) fn summarize(
         changed_count,
         content_issues,
         truncated,
+        hygiene_issues,
     }
 }
 
@@ -1009,5 +1113,92 @@ mod tests {
         assert_eq!(single[0].0, "index.html");
         let multi = required_from_plan_for_goal(&plan, "普通多文件项目");
         assert_eq!(multi.len(), 3, "非单文件目标仍检查全部声明文件");
+    }
+
+    /// SKY-1 交付卫生:根目录未声明的 `_*`/临时后缀文件进提示清单;
+    /// 已声明文件、子目录与正常产物不误伤。
+    #[test]
+    fn hygiene_lists_scratch_files_and_skips_declared() {
+        let dir = TempDataDir::new("delivery-hygiene");
+        let ws = dir.join("ws");
+        std::fs::create_dir_all(ws.join("parts")).expect("创建工作区失败");
+        std::fs::write(ws.join("index.html"), "<html>ok</html>").expect("写入口失败");
+        std::fs::write(ws.join("_check.js"), "console.log(1)").expect("写临时脚本失败");
+        std::fs::write(ws.join("_declared.js"), "window.A=1;").expect("写声明文件失败");
+        std::fs::write(ws.join("notes.orig"), "old").expect("写备份文件失败");
+        std::fs::write(ws.join("readme.md"), "说明").expect("写正常文件失败");
+
+        let required = required(&["index.html", "_declared.js"]);
+        let issues = hygiene_issues(&ws, &required);
+        assert!(
+            issues.iter().any(|i| i.contains("_check.js")),
+            "临时脚本应被提示: {issues:?}"
+        );
+        assert!(
+            issues.iter().any(|i| i.contains("notes.orig")),
+            "备份后缀应被提示: {issues:?}"
+        );
+        assert!(
+            !issues.iter().any(|i| i.contains("_declared.js")),
+            "已声明文件不得误伤: {issues:?}"
+        );
+        assert!(
+            !issues
+                .iter()
+                .any(|i| i.contains("readme.md") || i.contains("index.html")),
+            "正常产物不得误伤: {issues:?}"
+        );
+        assert!(
+            !issues.iter().any(|i| i.contains("parts")),
+            "子目录不得误伤: {issues:?}"
+        );
+
+        let summary = summarize(
+            &[TaskStep {
+                name: "写入口".into(),
+                files: vec!["index.html".into(), "_declared.js".into()],
+                ..TaskStep::default()
+            }],
+            &ws,
+            vec!["index.html".into()],
+            1,
+            "",
+        );
+        assert_eq!(summary.hygiene_issues, issues, "交付摘要与直接调用同源");
+    }
+
+    /// SKY-1 运行期闸门的入口选择:声明入口优先;solo 未声明时回退根目录,
+    /// `index.html` 优先,其次最大的根级 HTML;子目录模板不参与。
+    #[test]
+    fn pick_single_file_entry_prefers_declared_then_index_then_largest() {
+        let dir = TempDataDir::new("delivery-entry");
+        let ws = dir.join("ws");
+        std::fs::create_dir_all(ws.join("src")).expect("创建工作区失败");
+        std::fs::write(ws.join("index.html"), "<html>small</html>").expect("写入口失败");
+        std::fs::write(ws.join("other.html"), "<html>medium-body-medium</html>")
+            .expect("写次入口失败");
+        std::fs::write(
+            ws.join("src/shell.html"),
+            format!("<html>{}</html>", "x".repeat(256)),
+        )
+        .expect("写模板失败");
+
+        assert_eq!(
+            pick_single_file_entry(&ws, &required(&["src/shell.html"])),
+            Some("src/shell.html".to_string()),
+            "规划器声明的入口优先"
+        );
+        assert_eq!(
+            pick_single_file_entry(&ws, &[]),
+            Some("index.html".to_string()),
+            "未声明时 index.html 优先"
+        );
+
+        std::fs::remove_file(ws.join("index.html")).expect("删除入口失败");
+        assert_eq!(
+            pick_single_file_entry(&ws, &[]),
+            Some("other.html".to_string()),
+            "无 index 时取最大的根级 HTML,不得选中子目录模板"
+        );
     }
 }
