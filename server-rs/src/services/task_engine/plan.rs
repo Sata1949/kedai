@@ -14,7 +14,7 @@
 // - 续跑汇总失败:能拼出已完成步骤的产出即 partial + 拼装成果(不再整体丢成果,
 //   见 task_core::assemble)。
 use super::context::TaskRunContext;
-use super::executor::{usage_as_output, ModeExecutor};
+use super::executor::{terminal_status, usage_as_output, ModeExecutor};
 use super::solo::{run_agent_loop, AgentLoopCall};
 use crate::agents::engine::AgentEngine;
 use crate::models::types::{TaskEventKind, TaskStatus, TaskStep, TaskStepStatus, TokenUsage};
@@ -180,17 +180,13 @@ impl ApprovedPlanExecutor {
         // 文本由 TaskTerminal::Complete → complete_mode_run 以此整体覆盖。
         // 含 error 步骤或守卫截断步骤 → partial(对齐 legacy「有产出则 partial」语义;
         // 截断步骤虽有产出但没跑完,不得声称 done——SKY-6 第 2 项)。
-        let status = if had_error || !truncated_steps.is_empty() {
-            TaskStatus::Partial
-        } else {
-            TaskStatus::Done
-        };
         let error = (!truncated_steps.is_empty()).then(|| {
             format!(
                 "以下步骤被守卫截断,成果可能不完整:{};可追加指令继续完成",
                 truncated_steps.join(";")
             )
         });
+        let (status, error) = terminal_status(had_error || error.is_some(), error);
         Ok((
             TaskTerminal::Complete {
                 result: out.text.trim().to_string(),

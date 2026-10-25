@@ -4,7 +4,7 @@
 // 落库由 TaskService::finalize_terminal 统一消费(批次 B 依赖倒置,规则 C 断环)。
 use super::context::TaskRunContext;
 use crate::agents::engine::executor::SelfHealRecord;
-use crate::models::types::TokenUsage;
+use crate::models::types::{TaskStatus, TokenUsage};
 use crate::services::task_core::{TaskGenOutput, TaskTerminal, TruncationHeal};
 use futures::future::BoxFuture;
 
@@ -48,6 +48,21 @@ pub(crate) fn usage_as_output(usage: &TokenUsage) -> TaskGenOutput {
     }
 }
 
+/// 六模式共用的终态拼装(C-2D):有可解释原因即 partial,否则 done。
+///
+/// `Done` 恒不带 error——「done 却挂着原因」会让前端/追加指令看到自相矛盾的终态
+/// (历史上有模式在成功路径漏清 error)。各模式只提供自己的原因文本,控制流不动。
+pub(crate) fn terminal_status(
+    partial: bool,
+    error: Option<String>,
+) -> (TaskStatus, Option<String>) {
+    if partial {
+        (TaskStatus::Partial, error)
+    } else {
+        (TaskStatus::Done, None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,5 +103,29 @@ mod tests {
     #[test]
     fn to_self_heals_empty_is_empty() {
         assert!(to_self_heals(&[]).is_empty());
+    }
+
+    /// C-2D:partial 保留调用方给的原因(失败步骤/守卫截断/审计未通过)。
+    #[test]
+    fn terminal_status_partial_keeps_reason() {
+        let (status, error) = terminal_status(true, Some("审计未通过".into()));
+        assert_eq!(status, TaskStatus::Partial);
+        assert_eq!(error.as_deref(), Some("审计未通过"));
+    }
+
+    /// C-2D:partial 也允许没有可解释原因(legacy/custom 的既有语义,不制造文案)。
+    #[test]
+    fn terminal_status_partial_without_reason() {
+        let (status, error) = terminal_status(true, None);
+        assert_eq!(status, TaskStatus::Partial);
+        assert_eq!(error, None);
+    }
+
+    /// C-2D:done 恒清空原因——成功终态不得挂着 error。
+    #[test]
+    fn terminal_status_done_clears_reason() {
+        let (status, error) = terminal_status(false, Some("不该出现".into()));
+        assert_eq!(status, TaskStatus::Done);
+        assert_eq!(error, None);
     }
 }

@@ -360,6 +360,14 @@
 
 **验收**：`cargo test` 全绿且测试数不变；team/plan/custom 集成测试；真实模型窄探针；SKY-6/SKY-7 的守卫语义不变。
 
+**2026-10-25 执行追注（已完成）**：本批分两笔提交落地（纯搬运 → 去重），未开始 C-2E。
+
+- 目录化：`team.rs`（3,649 行）→ `team/{mod,topology,budget,parallel,audit,assemble,tests}.rs`，mod.rs **632 行**；`custom.rs`（1,446 行）→ `custom/{mod,context,step,graph,subflow}.rs`，mod.rs **316 行**；生产文件均 <1,000 行（最大 `team/parallel.rs` 981）。`TeamMain`/`Kickback`/`AuditVerdict` 与 `NodeOutcome`/`NodeInput`/`GraphCtx`/`GraphOutcome` 作为跨子模块共享词汇留在各自 `mod.rs`；39 个 team 单测搬到 `team/tests.rs`，`#![cfg(test)]` 保规则 E 生产区切分。
+- 去重：首审/终审共用 `TeamExecutor::run_audit_phase`（只读工具通道 → 纯文本回退，取消/失败语义保持）；两处预算到点收尾收敛为 `finish_on_deadline`；`retry.rs` 新增 `retry_parse_loop`，统一 `plan_task_retry`/`plan_revise_retry`/team 规划三处骨架（唯一差异是 team 日志多一个 `max_tokens` 字段）；`task_engine::executor::terminal_status(partial, error)` 替换 legacy/plan/solo/team/custom/followup 六处终态拼装，`Done` 恒清空原因。
+- 验证：合并 `origin/main`（PR #44 / SKY-9）后，后端静态 **2040**（1573 单测 + 467 集成，本批新增 3 例 `terminal_status`）；前端 1687 静态 / 1730 运行时；`cargo test --workspace -j 4`、`clippy --all-targets -D warnings`、`cargo fmt --check` 全绿；custom/team 18 个集成测试文件 69 例零修改全绿；函数条目数 team 88/88、custom 20/20，`allow(too_many_arguments)` 3/3、3/3 不变。
+- 真实模型窄探针（隔离实例 `DATA_DIR=D:/kedai-bench-run/data-c2d`、`PORT=3018`，启动日志/health 均核对该目录）：`PUT /api/settings` 200、`generate-raw` 200（`text=连通正常`）、`task-probe solo` 8.7s `done`、`team` 22.0s `done`（planner → 主 agent → audit → summary 四段）、`custom` 3 步全 `done`；证据 `D:\kedai-bench-run\c2d-evidence\`。
+- 仍存在：`executor.rs`（1,852 行）与 `settings_service` 未拆；C-2E（卫生/ratchet）未启动。
+
 ### C-2E 卫生、测试夹具与 ratchet（低风险，可并行）
 
 1. 删除 `SKY7-EXEC-PLAN.md`；`更新稿-0.3.0B之后.md` 比对后并入/归档；`P0-HANDOFF.md` 迁移开放项与引用后删除；给 `check-docs` 加仓库根 md allowlist。
