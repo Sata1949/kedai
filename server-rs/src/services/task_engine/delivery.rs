@@ -93,6 +93,29 @@ pub(crate) fn required_from_plan(plan: &[TaskStep]) -> Vec<(String, String)> {
     out
 }
 
+/// 从 plan 提取交付必需文件：单文件目标只认**最后一个**声明的 HTML 入口。
+///
+/// SKY-8（2026-10-24）：单文件交付里 `src/shell.html` 之类的模板/分片是**中间产物**，
+/// 不是交付必需项；若把它们一并纳入必需清单，模板里合法的 `@@` 槽位会把整个任务
+/// 误判 partial。非单文件目标仍返回全部声明文件（TMR-6 原口径）。
+pub(crate) fn required_from_plan_for_goal(plan: &[TaskStep], goal: &str) -> Vec<(String, String)> {
+    let all = required_from_plan(plan);
+    if !wiring::single_file_requested(goal) {
+        return all;
+    }
+    let last_html = all
+        .iter()
+        .rfind(|(path, _)| {
+            let lower = path.to_ascii_lowercase();
+            lower.ends_with(".html") || lower.ends_with(".htm")
+        })
+        .cloned();
+    match last_html {
+        Some(item) => vec![item],
+        None => all,
+    }
+}
+
 /// 必需文件中缺失的路径。
 ///
 /// 工作区不可访问时**不产生缺失结论**(返回空):此时无法区分「文件缺失」与
@@ -107,6 +130,55 @@ pub(crate) fn missing_files(workspace: &Path, required: &[(String, String)]) -> 
         .filter(|(path, _)| !workspace.join(path).is_file())
         .map(|(path, _)| path.clone())
         .collect()
+}
+
+/// 单步终态的磁盘事实检查(SKY-8,2026-10-24)。
+///
+/// 用途:预算收尾(步骤墙钟/token/团队份额)或空转守卫截断时,步骤终态不能只看
+/// 「循环以什么方式结束」,还要看该步 `TaskStep.files` 是否真的落盘。判定口径:
+/// - `None` = 工作区不可访问,无法判定(调用方保持旧语义,不制造假 partial);
+/// - `Some([])` = 全部声明文件存在且内容体检通过;
+/// - `Some(issues)` = 非法路径 / 文件缺失 / 不是文件 / 0B / 仅空白 / 未替换 `@@`。
+///
+/// **只查本步声明文件,不做递归导入接线检查**:接线检查要等任务终态、上游文件全部
+/// 落盘后才有意义;在步骤收尾时扫描会把「本步先落盘、下游文件后落盘」误判成失败。
+/// 递归接线仍由 [`content_issues`] 在终态门槛统一负责。
+pub(crate) fn step_files_unmet(workspace: &Path, files: &[String]) -> Option<Vec<String>> {
+    if !workspace.is_dir() {
+        return None;
+    }
+    let mut issues: Vec<String> = Vec::new();
+    for raw in files {
+        let Some(path) = normalize_workspace_rel(raw) else {
+            issues.push(format!("{raw}:非法声明路径"));
+            continue;
+        };
+        let abs = workspace.join(&path);
+        let Ok(meta) = std::fs::metadata(&abs) else {
+            issues.push(format!("{path}:文件缺失"));
+            continue;
+        };
+        if !meta.is_file() {
+            issues.push(format!("{path}:不是文件"));
+            continue;
+        }
+        if meta.len() == 0 {
+            issues.push(format!("{path}:文件为空(0B)"));
+            continue;
+        }
+        let Some(lines) = placeholder_line_count(&abs) else {
+            continue;
+        };
+        if lines > 0 {
+            issues.push(format!("{path}:含 {lines} 行 @@ 未替换槽位"));
+        } else if std::fs::read_to_string(&abs)
+            .map(|text| text.trim().is_empty())
+            .unwrap_or(false)
+        {
+            issues.push(format!("{path}:文件仅含空白"));
+        }
+    }
+    Some(issues)
 }
 
 /// 文本类交付文件的扩展名白名单(内容扫描只对文本;空文件判定对所有声明文件生效)。
@@ -187,8 +259,9 @@ pub(crate) fn content_issues(
     out
 }
 
-/// 从 plan 提取被空转守卫截断(partial)的步骤名(SKY-6 第 2 项)。
-/// 空 = 没有截断步骤。名字沿用 plan 里的「【主Agent-N】…」前缀,前端可直接定位。
+/// 从 plan 提取未完成(partial)的步骤名。
+/// 空 = 没有未完成步骤。名字沿用 plan 里的「【主Agent-N】…」前缀,前端可直接定位。
+/// SKY-8 起 partial 可能来自空转守卫截断,也可能来自预算收尾且声明文件缺失。
 pub(crate) fn truncated_from_plan(plan: &[TaskStep]) -> Vec<String> {
     plan.iter()
         .filter(|s| s.status == TaskStepStatus::Partial)
@@ -211,7 +284,7 @@ pub(crate) fn summarize(
     changed_count: usize,
     goal: &str,
 ) -> TaskDeliverySummary {
-    let required = required_from_plan(plan);
+    let required = required_from_plan_for_goal(plan, goal);
     let workspace_available = workspace.is_dir();
     let missing = missing_files(workspace, &required);
     let content_issues = content_issues(workspace, &required, goal);
@@ -390,7 +463,10 @@ fn content_issues_note(issues: &[String]) -> String {
     )
 }
 
-/// 被守卫截断子目标的说明(最多点名 10 个,超出写总数)。
+/// 未完成子目标的说明(最多点名 10 个,超出写总数)。
+///
+/// SKY-8 起 `Partial` 不再只来自空转守卫:预算收尾且声明文件缺失也会记 partial,
+/// 因此文案用「未完成」而不是「被守卫截断」——字段名 `truncated` 保持不变(线格式兼容)。
 fn truncated_note(steps: &[String]) -> String {
     let head: Vec<&str> = steps.iter().take(10).map(|s| s.as_str()).collect();
     let more = if steps.len() > head.len() {
@@ -399,7 +475,7 @@ fn truncated_note(steps: &[String]) -> String {
         String::new()
     };
     format!(
-        "以下子目标被守卫截断,成果可能不完整:{}{more};可追加指令继续完成。",
+        "以下子目标未完成(守卫截断或预算收尾),成果可能不完整:{}{more};可追加指令继续完成。",
         head.join("、")
     )
 }
@@ -606,7 +682,7 @@ mod tests {
         let (out, downgraded) = apply_file_delivery_gate(
             complete(
                 TaskStatus::Done,
-                Some("以下子目标被守卫截断,成果可能不完整:主 Agent-1「读分片」"),
+                Some("以下子目标未完成(守卫截断或预算收尾),成果可能不完整:主 Agent-1「读分片」"),
             ),
             true,
             &input,
@@ -625,7 +701,7 @@ mod tests {
             apply_file_delivery_gate(complete(TaskStatus::Done, None), true, &input);
         assert!(downgraded2);
         assert_eq!(status_of(&out2), TaskStatus::Partial);
-        assert!(error_of(&out2).unwrap().contains("以下子目标被守卫截断"));
+        assert!(error_of(&out2).unwrap().contains("以下子目标未完成"));
     }
 
     /// 门槛输入的两类原因会同时出现:文件缺失 + 内容问题 + 截断,用户能看到全貌。
@@ -648,7 +724,7 @@ mod tests {
         let error = error_of(&out).unwrap();
         assert!(error.contains("缺少必需文件"), "{error}");
         assert!(error.contains("交付内容校验未通过"), "{error}");
-        assert!(error.contains("被守卫截断"), "{error}");
+        assert!(error.contains("未完成"), "{error}");
         let event = delivery_event_detail(&input);
         assert!(event.contains("文件产物校验未通过"), "{event}");
         assert!(event.contains("parts/ui.js"), "{event}");
@@ -855,5 +931,83 @@ mod tests {
             "普通多文件项目",
         );
         assert!(multi.is_empty(), "非单文件目标不应拦截本地外链: {multi:?}");
+    }
+
+    /// SKY-8:单步磁盘事实检查——缺失/0B/空白/`@@`/非法路径逐项报告;
+    /// 齐全文件为空问题;工作区不可访问返回 None(不制造假 partial)。
+    #[test]
+    fn step_files_unmet_reports_missing_empty_placeholder_and_unavailable_workspace() {
+        let dir = TempDataDir::new("step-files");
+        let ws = dir.join("ws");
+        std::fs::create_dir_all(&ws).expect("创建工作区失败");
+        std::fs::write(ws.join("ok.txt"), "hello").expect("写健康文件失败");
+        std::fs::write(ws.join("empty.txt"), "").expect("写空文件失败");
+        std::fs::write(ws.join("blank.txt"), "  \n\t\n").expect("写空白文件失败");
+        std::fs::write(ws.join("slot.txt"), "a\n/*@@MAIN@@*/\n").expect("写槽位文件失败");
+
+        assert_eq!(
+            step_files_unmet(&ws, &["ok.txt".to_string()]),
+            Some(Vec::new()),
+            "齐全且内容健康的声明文件不应有问题"
+        );
+        let files: Vec<String> = [
+            "ok.txt",
+            "missing.txt",
+            "empty.txt",
+            "blank.txt",
+            "slot.txt",
+            "../escape.txt",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let issues = step_files_unmet(&ws, &files).expect("工作区存在应可判定");
+        for needle in [
+            "missing.txt:文件缺失",
+            "empty.txt:文件为空(0B)",
+            "blank.txt:文件仅含空白",
+            "slot.txt:含 1 行 @@ 未替换槽位",
+            "../escape.txt:非法声明路径",
+        ] {
+            assert!(
+                issues.iter().any(|i| i.contains(needle)),
+                "应报告「{needle}」: {issues:?}"
+            );
+        }
+        assert!(
+            !issues.iter().any(|i| i.contains("ok.txt")),
+            "健康文件不应被误伤: {issues:?}"
+        );
+
+        let unavailable = ws.join("not-a-dir");
+        assert_eq!(
+            step_files_unmet(&unavailable, &files),
+            None,
+            "工作区不可访问时必须返回 None(无法判定),不得制造缺失"
+        );
+    }
+
+    /// SKY-8:单文件目标只把最后一个 HTML 当交付必需项;中间模板/分片不进必需清单。
+    #[test]
+    fn required_from_plan_for_single_file_picks_last_html_entry() {
+        let step = |name: &str, files: &[&str]| TaskStep {
+            name: name.into(),
+            goal: String::new(),
+            status: TaskStepStatus::Pending,
+            result: String::new(),
+            node_id: None,
+            files: files.iter().map(|s| s.to_string()).collect(),
+        };
+        let plan = vec![
+            step("shell", &["src/shell.html"]),
+            step("inline", &["index.html", "parts/a.js"]),
+        ];
+        assert_eq!(required_from_plan(&plan).len(), 3, "全量口径不变");
+        let single =
+            required_from_plan_for_goal(&plan, "最终只交付一个 HTML 文件(自包含 index.html)");
+        assert_eq!(single.len(), 1, "单文件目标只认最终入口: {single:?}");
+        assert_eq!(single[0].0, "index.html");
+        let multi = required_from_plan_for_goal(&plan, "普通多文件项目");
+        assert_eq!(multi.len(), 3, "非单文件目标仍检查全部声明文件");
     }
 }

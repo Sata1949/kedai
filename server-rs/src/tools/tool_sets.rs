@@ -74,6 +74,9 @@ pub const WORKSPACE_TOOLS: &[&str] = &[
     // Q6(2026-10-01)第六员:结构化补丁;另受任务工具策略的**编码包闸门**约束
     // (关包时不下发,见 task_engine/tool_policy.rs::coding_pack_gate)
     "fs_patch",
+    // SKY-8(2026-10-24)确定性单文件装配:读分片 → 替换 @@NAME@@ → 写入口;
+    // 与 fs_patch 同属工作区写族,受同一套工作区闸门与写工具例外约束。
+    "fs_inline_html",
     // 视觉三件(2026-10-02):view_image / zoom_image / image_diff
     "view_image",
     "zoom_image",
@@ -128,7 +131,7 @@ pub const WORKSPACE_READONLY_TOOLS: &[&str] = &["fs_read", "fs_glob", "fs_grep"]
 ///
 /// **不含 `bash`**:bash 可读可写,不能按工具名判定;写文件应优先走 `fs_*`
 /// (提示词纪律),bash 的写入由文件变更台账兜底。
-pub const WORKSPACE_WRITE_TOOLS: &[&str] = &["fs_write", "fs_edit", "fs_patch"];
+pub const WORKSPACE_WRITE_TOOLS: &[&str] = &["fs_write", "fs_edit", "fs_patch", "fs_inline_html"];
 
 /// 名称是否属工作区写工具族(精确匹配,前缀同名的其它工具不误伤)。
 pub fn is_workspace_write_tool(name: &str) -> bool {
@@ -174,6 +177,7 @@ pub const WRITE_LIKE_TOOLS: &[&str] = &[
     "fs_write",
     "fs_edit",
     "fs_patch",
+    "fs_inline_html",
     "write",
     "replace",
     "create",
@@ -214,7 +218,7 @@ pub fn is_write_like_tool(name: &str) -> bool {
 /// 拿它判「写类」会静默恒假。
 pub fn state_anchor_arg(name: &str) -> Option<&'static str> {
     match name {
-        "fs_write" | "fs_edit" | "write" | "replace" | "create" => Some("path"),
+        "fs_write" | "fs_edit" | "fs_inline_html" | "write" | "replace" | "create" => Some("path"),
         "bash" => Some("command"),
         _ => None,
     }
@@ -347,6 +351,7 @@ mod tests {
                 "fs_glob",
                 "fs_grep",
                 "fs_patch",
+                "fs_inline_html",
                 "view_image",
                 "zoom_image",
                 "image_diff"
@@ -355,7 +360,7 @@ mod tests {
         assert_eq!(WORKSPACE_READONLY_TOOLS, &["fs_read", "fs_glob", "fs_grep"]);
         assert_eq!(
             WORKSPACE_WRITE_TOOLS,
-            &["fs_write", "fs_edit", "fs_patch"],
+            &["fs_write", "fs_edit", "fs_patch", "fs_inline_html"],
             "写工具名单是任务策略例外/TMR-1 提示词/TMR-5 清零判据的单一出处"
         );
         assert_eq!(
@@ -385,6 +390,24 @@ mod tests {
                 "视觉工具必须并入工作区族(聊天路径与无作用域任务一体剔除):{n}"
             );
         }
+    }
+
+    /// SKY-8:新工具的注册常量必须与工作区族/写族名单同源(改名时锁死)。
+    #[test]
+    fn inline_tool_matches_registration_constant() {
+        let name = crate::tools::agent_tools_fs_inline::INLINE_TOOL;
+        assert!(
+            WORKSPACE_TOOLS.contains(&name),
+            "装配工具应在工作区族:{name}"
+        );
+        assert!(
+            WORKSPACE_WRITE_TOOLS.contains(&name),
+            "装配工具会写入口,应在写族:{name}"
+        );
+        assert!(
+            WRITE_LIKE_TOOLS.contains(&name),
+            "装配工具应清零连续只读计数:{name}"
+        );
     }
 
     /// TMR-5:只读探测与写类判据必须精确、互斥、不误伤前缀同名工具。

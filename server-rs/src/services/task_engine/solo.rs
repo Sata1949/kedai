@@ -75,6 +75,9 @@ pub(crate) struct AgentLoopCall {
     /// 当成空转截断(SKY-6;步骤墙钟与团队总预算仍是上限)。非汇点中段主保持 true
     /// (SKY-7;中途第 8 轮会先提醒一次,第 16 轮才收尾)。
     pub no_progress_guard: bool,
+    /// 集成主分片读取软提醒阈值(SKY-8;None = 关闭)。
+    /// 仅 team::run_main 对依赖汇点主填 `Some(TASK_SHARD_READ_NUDGE)`;其余路径 None。
+    pub shard_read_nudge_after: Option<usize>,
 }
 
 /// 单主 agent 工具自循环的产出。
@@ -86,6 +89,10 @@ pub(crate) struct AgentLoopOutput {
     /// 空转守卫截断原因(连续只读/无进展/语义/重复调用);None = 正常收尾。
     /// 空正文收尾重试不会抹掉首轮的截断事实——重试只是补一段收尾正文,工作仍被截断。
     pub guard_stopped: Option<String>,
+    /// 预算类收尾(步骤墙钟/token 预算/团队份额)发生时为 true(SKY-8,2026-10-24)。
+    /// 与 `guard_stopped` 分开承载:预算收尾的步骤终态要看声明文件的磁盘事实——
+    /// 文件已齐可记 done,文件缺失必须记 partial;空正文重试同样不得抹掉首轮事实。
+    pub budget_stopped: bool,
 }
 
 /// 单主 agent 工具自循环(solo/multi 执行器主体;team 各主 agent 复用):
@@ -237,6 +244,8 @@ pub(crate) async fn run_agent_loop(
             no_progress_limit: call
                 .no_progress_guard
                 .then_some(super::TASK_NO_PROGRESS_LIMIT),
+            // SKY-8:集成主读满阈值后提醒先写入口骨架(只提醒,不熔断)。
+            shard_read_nudge_after: call.shard_read_nudge_after,
         }),
     };
     // 事件桥:引擎事件 → 任务事件(agent_status);drain 持续消费到 tx drop。
@@ -298,6 +307,14 @@ pub(crate) async fn run_agent_loop(
         .as_ref()
         .ok()
         .and_then(|r| r.guard_stopped().map(str::to_string));
+    // SKY-8:预算收尾同理。首轮因步骤墙钟/token 预算/团队份额到点收尾、随后空正文
+    // 重试成功时,`res.budget_stopped` 会是重试轮的值(false);必须保留首轮事实,
+    // 否则「预算收尾 + 声明文件缺失」会被误判成 done。
+    let first_budget_stopped = result
+        .as_ref()
+        .ok()
+        .map(|r| r.budget_stopped)
+        .unwrap_or(false);
     if let Ok(res) = &result {
         if !res.interrupted && !*cancel.borrow() && res.content.trim().is_empty() {
             svc.record_self_heals(
@@ -464,6 +481,7 @@ pub(crate) async fn run_agent_loop(
                 usage: total_usage,
                 guard_stopped: first_guard_stopped
                     .or_else(|| res.guard_stopped().map(str::to_string)),
+                budget_stopped: first_budget_stopped || res.budget_stopped,
             })
         }
         Ok(res) => {
@@ -565,6 +583,8 @@ impl SoloExecutor {
             deadline: ctx.deadline,
             readonly_guard: true,
             no_progress_guard: true,
+            // solo 不是集成主:无分片读取软提醒。
+            shard_read_nudge_after: None,
         };
         let out = run_agent_loop(
             self.svc.clone(),

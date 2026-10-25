@@ -513,7 +513,9 @@ fn default_risk(tool: &str) -> ToolRisk {
         // 工作区内,而不是「工具不危险」。fs_patch 还多一道编码包闸门:关包时在策略层
         // **早于例外**被整族剔除(例外只在开包时生效)。
         "fs_read" | "fs_glob" | "fs_grep" => ToolRisk::Safe,
-        "fs_write" | "fs_edit" | "fs_patch" => ToolRisk::Dangerous,
+        // SKY-8:确定性单文件装配会写工作区入口,与 fs_write 同级归危险级;
+        // 任务默认策略按工具名例外放行(见 task_engine/tool_policy.rs)。
+        "fs_write" | "fs_edit" | "fs_patch" | "fs_inline_html" => ToolRisk::Dangerous,
         // 视觉工具族(2026-10-02 视觉能力包 D4):只读工作区图像、图像输出重定向到
         // DATA_DIR/images,不改工作区、不执行命令 → 安全级(与 fs_read 同档)。
         // 必须显式登记:未登记会落下面的通配兜底被误判 Dangerous,任务默认策略

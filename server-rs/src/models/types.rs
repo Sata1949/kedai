@@ -919,6 +919,12 @@ pub struct ToolBudget {
     /// 本守卫只在 scope 带声明文件（team 主 agent）时启用，按「成功写入声明文件的
     /// 工具调用」重置，连续 N 轮没有这种调用即带产出收尾。
     pub no_progress_limit: Option<usize>,
+    /// 集成主分片读取软提醒阈值(SKY-8;`None`/0 = 关闭)。
+    ///
+    /// 累计**成功** `fs_read` 次数达到该值后注入一次「先写入口骨架」提醒并透出
+    /// 「分片读取提醒」事件。只提醒不熔断：依赖汇点主的只读/无进展守卫本就关闭，
+    /// 步骤墙钟与团队份额仍是上限。仅 team::run_main 对集成主填值。
+    pub shard_read_nudge_after: Option<usize>,
 }
 
 #[derive(Debug, Clone)]

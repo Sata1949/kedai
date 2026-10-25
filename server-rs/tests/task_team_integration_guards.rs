@@ -142,6 +142,16 @@ async fn team_integration_main_skips_readonly_and_no_progress_guards() {
             "集成主不得触发「{forbidden}」: {joined}"
         );
     }
+    // SKY-8:集成主读满 8 次 fs_read 后注入一次「先写入口骨架」软提醒;
+    // 只提醒不熔断,后续读轮仍然继续(下方 read_results 断言 ≥20)。
+    let nudge_count = details
+        .iter()
+        .filter(|d| d.contains("分片读取提醒"))
+        .count();
+    assert_eq!(
+        nudge_count, 1,
+        "集成主第 8 次成功 fs_read 后应恰好提醒一次: {joined}"
+    );
     let read_results = details
         .iter()
         .filter(|d| d.contains("工具 fs_read 已返回结果"))

@@ -1056,6 +1056,7 @@ impl TaskService {
                 // 规划侦察轮是只读白名单,不适用连续只读守卫(TMR-5)
                 readonly_streak_limit: None,
                 no_progress_limit: None,
+                shard_read_nudge_after: None,
             }),
         };
         let mut scout_round = 0usize;

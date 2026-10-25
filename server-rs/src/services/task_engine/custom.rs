@@ -415,6 +415,8 @@ impl CustomExecutor {
                 readonly_streak_limit: Some(super::TASK_READONLY_STREAK_LIMIT),
                 // custom 节点没有规划器声明文件，P0-2 守卫不启用。
                 no_progress_limit: None,
+                // custom 节点不是 team 集成主：无分片读取软提醒。
+                shard_read_nudge_after: None,
             }),
         };
         // 事件桥(批次 R4 携 phase/step_index):custom 工具步骤的调用追踪口径为

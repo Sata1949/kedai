@@ -41,10 +41,10 @@ const truncatedSteps = computed(() => props.delivery?.truncated ?? []);
         <span
           v-if="truncatedSteps.length"
           class="sv-delivery-chip bad"
-        >截断 {{ truncatedSteps.length }}</span>
+        >未完成 {{ truncatedSteps.length }}</span>
       </div>
       <div v-if="truncatedSteps.length" class="sv-delivery-warn">
-        被守卫截断的子目标：{{ truncatedSteps.join('、') }}（成果可能不完整，可追加指令继续完成）
+        未完成的子目标：{{ truncatedSteps.join('、') }}（成果可能不完整，可追加指令继续完成）
       </div>
       <div
         v-for="issue in contentIssues"

@@ -61,6 +61,8 @@ struct LoopLimits {
     declared_files: Vec<String>,
     /// 声明文件无进展守卫是否启用(有预算阈值且有声明文件)。
     no_progress_enabled: bool,
+    /// SKY-8:集成主分片读取软提醒阈值(None = 关闭,只提醒不熔断)。
+    shard_nudge_after: Option<usize>,
     guards: GuardState,
     semantic_guard: SemanticGuard,
 }
@@ -117,11 +119,19 @@ fn resolve_loop_limits(
         .and_then(|b| b.no_progress_limit)
         .filter(|n| *n > 0)
         .filter(|_| !declared_files.is_empty());
+    // SKY-8:集成主分片读取软提醒——依赖汇点主关闭了只读/无进展两道计数守卫,
+    // 但全题复跑里总装主 201 次读/0 次写;累计成功 fs_read 达阈值后注入一次
+    // 「先写入口骨架」,只提醒不熔断(墙钟/团队份额仍是上限)。
+    let shard_nudge_after = tool_ctx
+        .budget
+        .and_then(|b| b.shard_read_nudge_after)
+        .filter(|n| *n > 0);
 
     LoopLimits {
         call_watchdog,
         declared_files,
         no_progress_enabled: no_progress_limit.is_some(),
+        shard_nudge_after,
         guards: GuardState::new(GuardConfig {
             max_rounds,
             token_budget,
@@ -168,10 +178,14 @@ pub(crate) async fn run_tool_loop(req: ToolLoopRequest<'_>) -> Result<ExecutorRe
         call_watchdog,
         declared_files,
         no_progress_enabled,
+        shard_nudge_after,
         mut guards,
         mut semantic_guard,
     } = resolve_loop_limits(engine, session_id, params, tool_ctx, gate, call_timeout);
     let mut round = 0usize;
+    // SKY-8:分片读取软提醒计数器(只提醒,不参与停止判定)。
+    let mut shard_reads = 0usize;
+    let mut shard_nudged = false;
     // 重复调用熔断(P0-2):窗口内同一「工具名+参数」指纹 ≥3 次即中止。
     let mut loop_guard = LoopGuard::with_defaults();
     let loop_started = std::time::Instant::now();
@@ -301,8 +315,16 @@ pub(crate) async fn run_tool_loop(req: ToolLoopRequest<'_>) -> Result<ExecutorRe
 
         // ===== 在成果里判定「是否写入了声明文件」(P0-2 / TMR3-L6)=====
         let mut round_progress = false;
-        if no_progress_enabled {
-            for e in &outcome.outputs {
+        for e in &outcome.outputs {
+            // SKY-8:累计**成功**的 fs_read(输出是字符串;错误对象不计),
+            // 供集成主「读满阈值 → 先写入口骨架」软提醒使用。
+            if shard_nudge_after.is_some()
+                && e.call.name == crate::tools::agent_tools_fs::READ_TOOL
+                && e.output.as_str().is_some()
+            {
+                shard_reads += 1;
+            }
+            if no_progress_enabled {
                 // 权限拒绝(output=Null)与错误对象不算;只认带 `path` 参数的写工具。
                 if is_declared_file_write(&e.call.name, &e.call.arguments, &declared_files)
                     && !e.output.is_null()
@@ -311,15 +333,14 @@ pub(crate) async fn run_tool_loop(req: ToolLoopRequest<'_>) -> Result<ExecutorRe
                     round_progress = true;
                 }
             }
+        }
+        if no_progress_enabled && !round_progress {
             // 没有可识别的成功写调用时,用台账增量补判——bash 重定向/tee/cp 等
             // 实际落盘的声明文件同样算进展;临时文件与越界路径不算。
-            if !round_progress {
-                if let Some((task_id, mark)) = ledger_mark.as_ref() {
-                    let changed = crate::services::task_change_service::paths_since(
-                        &engine.db, task_id, *mark,
-                    );
-                    round_progress = has_declared_change(&declared_files, &changed);
-                }
+            if let Some((task_id, mark)) = ledger_mark.as_ref() {
+                let changed =
+                    crate::services::task_change_service::paths_since(&engine.db, task_id, *mark);
+                round_progress = has_declared_change(&declared_files, &changed);
             }
         }
 
@@ -395,6 +416,31 @@ pub(crate) async fn run_tool_loop(req: ToolLoopRequest<'_>) -> Result<ExecutorRe
                 std::mem::take(self_heals),
                 stop,
             ));
+        }
+        // SKY-8:集成主读满阈值后提醒一次「先写入口骨架」。放在所有终止闸门之后:
+        // 本轮若已被预算/守卫收尾,提醒没有意义;未收尾则注入给下一轮模型请求。
+        if let Some(after) = shard_nudge_after {
+            if !shard_nudged && shard_reads >= after {
+                shard_nudged = true;
+                llm_messages.push(LlmMessage::plain(
+                    "user",
+                    crate::services::task_core::prompt_consts::SHARD_READ_FIRST_NUDGE,
+                ));
+                send_event(
+                    step_evt(
+                        "分片读取提醒",
+                        Some(format!(
+                            "已累计 {shard_reads} 次 fs_read:建议先用 fs_inline_html 写出入口骨架,再继续核对剩余分片"
+                        )),
+                        None,
+                        None,
+                    ),
+                    tx,
+                    abort,
+                    flag,
+                )
+                .await?;
+            }
         }
     }
 }

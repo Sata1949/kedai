@@ -104,9 +104,18 @@ async fn team_budget_stops_remaining_mains_with_partial_delivery() {
     );
     let plan = detail["task"]["plan"].as_array().expect("plan 应为数组");
     assert_eq!(plan.len(), 2, "两主各一个子目标: {detail}");
+    // SKY-8:慢主预算收尾时声明文件 slow.txt 未落盘 → 按磁盘事实记 partial
+    // (修复前按 TMR-3 记 done);本用例仍验证「主 2 在截止期后不启动」。
     assert_eq!(
-        plan[0]["status"], "done",
-        "主 1 应在预算处带产出收尾: {detail}"
+        plan[0]["status"], "partial",
+        "主 1 预算收尾且文件缺失应为 partial: {detail}"
+    );
+    assert!(
+        plan[0]["result"]
+            .as_str()
+            .unwrap_or("")
+            .contains("[预算收尾]"),
+        "预算收尾应在步骤结果留痕: {detail}"
     );
     assert_eq!(
         plan[1]["status"], "error",

@@ -131,6 +131,8 @@ pub(crate) async fn generate_with_readonly_tools(
             semantic_guard,
             readonly_streak_limit: None,
             no_progress_limit: None,
+            // 审计/终审不是集成主：无分片读取软提醒。
+            shard_read_nudge_after: None,
         }),
     };
     let (tx, drain) = sink::spawn(svc.clone(), ctx.task_id.clone(), label, phase, None);

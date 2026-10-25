@@ -183,6 +183,37 @@ pub(crate) fn wiring_issues(workspace: &Path, declared: &[String], goal: &str) -
     issues
 }
 
+/// 对**尚未落盘**的单文件 HTML 文本做自包含检查(SKY-8,2026-10-24)。
+///
+/// 与 [`wiring_issues`] 的单文件分支同口径:HTML 不得引用工作区本地资源
+/// (`script[src]`/`link[href]`/`img[src]`/`source[src]`),内联 module 不得相对
+/// `import` 本地模块;CDN / `data:` / `blob:` / `#` 放行。`fs_inline_html` 在写入口
+/// 之前调用本函数——校验失败不落盘,避免把非自包含半成品交给交付门槛。
+///
+/// 只做文本判定,不解析完整 HTML/JS 语法;返回项形如
+/// `index.html:单文件交付不得引用本地外部资源 ./parts/a.js`。
+pub(crate) fn single_file_text_issues(rel: &str, html: &str) -> Vec<String> {
+    let cleaned = strip_html_comments(html);
+    let mut issues: Vec<String> = Vec::new();
+    for block in html_inline_modules(&cleaned) {
+        for import in parse_imports(&block) {
+            if is_relative_spec(&import.specifier) {
+                issues.push(format!(
+                    "{rel}:单文件交付不得在脚本内导入本地模块 {}",
+                    import.specifier
+                ));
+            }
+        }
+    }
+    for reference in html_local_refs(&cleaned) {
+        issues.push(format!("{rel}:单文件交付不得引用本地外部资源 {reference}"));
+    }
+    issues.sort();
+    issues.dedup();
+    issues.truncate(MAX_ISSUES);
+    issues
+}
+
 fn check_js(
     workspace: &Path,
     rel: &str,
@@ -1187,5 +1218,38 @@ mod tests {
             "识别不了的导出形态应跳过名字比对: {issues:?}"
         );
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// SKY-8:落盘前的单文件文本检查——本地外链/相对 import 拦截,CDN/data 放行。
+    #[test]
+    fn single_file_text_issues_rejects_local_refs_and_relative_imports() {
+        let clean = "<html><script>window.A=1;</script><script src=\"https://cdn.example/x.js\"></script></html>";
+        assert!(single_file_text_issues("index.html", clean).is_empty());
+
+        let local_ref = "<html><script src=\"./parts/a.js\"></script></html>";
+        let issues = single_file_text_issues("index.html", local_ref);
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.contains("单文件交付不得引用本地外部资源")),
+            "{issues:?}"
+        );
+
+        let relative_import =
+            "<html><script type=\"module\">import { A } from './a.js';</script></html>";
+        let issues = single_file_text_issues("index.html", relative_import);
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.contains("单文件交付不得在脚本内导入本地模块")),
+            "{issues:?}"
+        );
+
+        let commented =
+            "<html><!-- <script src=\"./a.js\"></script> --><script>window.A=1;</script></html>";
+        assert!(
+            single_file_text_issues("index.html", commented).is_empty(),
+            "HTML 注释里的外链不得误伤"
+        );
     }
 }
