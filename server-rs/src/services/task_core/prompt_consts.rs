@@ -95,13 +95,13 @@ pub(crate) const TEAM_ASSEMBLY_CONTRACT_NOTE: &str = "【接口接线纪律】�
 ///
 /// 条件段:仅在目标要求单文件交付、且该主声明了 HTML 入口时追加;内置指令不经
 /// untrusted 包裹。
-pub(crate) const TEAM_SINGLE_FILE_ASSEMBLY_NOTE: &str = "【单文件装配纪律】目标要求唯一单文件交付:最终 HTML 必须自包含——优先调用 `fs_inline_html` 装配(引擎读分片、替换 `@@NAME@@` 槽位、写入口;模板槽位名必须与 parts 键一一对应),不要手写整份 100KB+ 内联脚本;分片也可按声明顺序内联进同一个 `<script type=\"module\">`。不得出现指向工作区文件的 `<script src>`/`<link href>`/`<img src>` 或相对 `import`;只允许 importmap 中的远程 CDN 依赖;不得残留 `@@` 槽位,也不得交付「能打开但入口为空壳」的占位骨架。装配完成后必须实际运行一次自检(node --check 抽取的内联脚本、或浏览器加载并读取运行状态),并在结果正文报告入口字节数、内联分片数与自检结果。引擎会对本地外链、未导出导入与空壳交付做确定性判定,不合格即 partial。";
+pub(crate) const TEAM_SINGLE_FILE_ASSEMBLY_NOTE: &str = "【单文件装配纪律】目标要求唯一单文件交付:最终 HTML 必须自包含——分片**必须写成经典脚本**(赋值到 `window.*`,不使用 `import`/`export`),以便 `fs_inline_html` 的 sources 模式按序直接内联;如确需 ESM,总装主必须提供 importmap/模板控制模块边界,并确保最终文件没有相对 `import`。优先调用 `fs_inline_html` 装配(引擎读分片、替换 `@@NAME@@` 槽位、写入口;模板槽位名必须与 parts 键一一对应),不要手写整份 100KB+ 内联脚本。不得出现指向工作区文件的 `<script src>`/`<link href>`/`<img src>` 或相对 `import`;只允许 importmap 中的远程 CDN 依赖;不得残留 `@@` 槽位,也不得交付「能打开但入口为空壳」的占位骨架。装配完成后必须实际运行一次自检(node --check 抽取的内联脚本、或浏览器加载并读取运行状态),并在结果正文报告入口字节数、内联分片数与自检结果。引擎会对本地外链、未导出导入与空壳交付做确定性判定,不合格即 partial。";
 
 /// team 规划器的**单文件交付约束**(SKY-4,2026-10-24):条件段,目标要求单文件时
 /// 追加到规划 user 消息。分片只作中间产物,必须有一个子目标负责总装成自包含入口;
 /// 避免规划出多个需要外链本地文件或被多个主并行覆盖的入口。SKY-8 起总装子目标
 /// 必须写明用 `fs_inline_html`(确定性装配,不靠模型手写大段内联)。
-pub(crate) const TEAM_SINGLE_FILE_PLANNER_NOTE: &str = "【单文件交付约束】目标要求最终只交付一个自包含 HTML 文件:分片只能作为中间产物,必须有一个子目标负责用 `fs_inline_html` 把全部分片内联进该 HTML(不要再让模型手写整份内联脚本);不要把最终入口拆成多个需要外链的本地文件,也不要让多个子目标各自写同一入口。";
+pub(crate) const TEAM_SINGLE_FILE_PLANNER_NOTE: &str = "【单文件交付约束】目标要求最终只交付一个自包含 HTML 文件:分片只能作为中间产物,**分片必须规划成经典脚本(window.* 全局,不得使用 import/export)**,必须有一个子目标负责用 `fs_inline_html` 把全部分片内联进该 HTML(不要再让模型手写整份内联脚本);若确需 ESM 分片,规划中必须同时包含 importmap/模板子目标控制模块边界;不要把最终入口拆成多个需要外链的本地文件,也不要让多个子目标各自写同一入口。";
 
 /// 集成主**分片读取软提醒**(SKY-8,2026-10-24):依赖汇点主豁免了只读/无进展
 /// 两个计数守卫,但 2026-10-24 全题复跑里总装主 201 次 `fs_read`、0 次写入,
@@ -575,6 +575,8 @@ mod tests {
     fn team_single_file_notes_pin_self_contained_delivery() {
         for needle in [
             "自包含",
+            "经典脚本",
+            "window.*",
             "fs_inline_html",
             "槽位名必须与 parts 键一一对应",
             "不得出现指向工作区文件的",
@@ -588,7 +590,14 @@ mod tests {
                 "单文件装配纪律应含「{needle}」: {TEAM_SINGLE_FILE_ASSEMBLY_NOTE}"
             );
         }
-        for needle in ["一个自包含", "fs_inline_html", "内联", "不要", "外链"] {
+        for needle in [
+            "一个自包含",
+            "经典脚本",
+            "fs_inline_html",
+            "内联",
+            "不要",
+            "外链",
+        ] {
             assert!(
                 TEAM_SINGLE_FILE_PLANNER_NOTE.contains(needle),
                 "单文件规划约束应含「{needle}」: {TEAM_SINGLE_FILE_PLANNER_NOTE}"
