@@ -90,6 +90,8 @@ impl ModeExecutor for FollowupExecutor {
                 // 无进展守卫按声明文件计数;followup 的 scope 通常没有声明文件,
                 // 保持默认开启(有声明时仍应约束「只说不写」)。
                 no_progress_guard: true,
+                // followup 不是 team 集成主:无分片读取软提醒。
+                shard_read_nudge_after: None,
             };
             let result =
                 run_agent_loop(svc.clone(), self.engine.clone(), call, cancel.clone()).await;
@@ -100,6 +102,8 @@ impl ModeExecutor for FollowupExecutor {
                         text,
                         usage,
                         guard_stopped,
+                        // followup 只看守卫截断；预算收尾仍按既有语义收尾（SKY-8）。
+                        budget_stopped: _,
                     } = out;
                     svc.record_usage(task_id, "agent", None, &usage_as_output(&usage));
                     // 取消优先于写结果:stop 后产出不再落库(与 legacy 同口径)

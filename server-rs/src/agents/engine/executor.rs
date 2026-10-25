@@ -872,6 +872,15 @@ pub(crate) async fn run_tool_loop(
     let mut no_progress_rounds = 0usize;
     // SKY-7:硬收尾前的中途提醒只发一次;有进展后重置,允许新一轮空转再提醒。
     let mut no_progress_nudged = false;
+    // SKY-8:集成主分片读取软提醒——依赖汇点主关闭了上面两道计数守卫,
+    // 但全题复跑里总装主 201 次读/0 次写;累计成功 fs_read 达到阈值后注入一次
+    // 「先写入口骨架」,只提醒不熔断(墙钟/团队份额仍是上限)。
+    let shard_nudge_after = tool_ctx
+        .budget
+        .and_then(|b| b.shard_read_nudge_after)
+        .filter(|n| *n > 0);
+    let mut shard_reads = 0usize;
+    let mut shard_nudged = false;
     // 截断自愈留痕(问题①):各轮触发的自愈记录经调用方传入的 vec 透出;
     // TMR3-2 起 Err 路径不再丢弃——调用方可在失败收尾时补落调用行与 usage。
     loop {
@@ -1360,6 +1369,14 @@ pub(crate) async fn run_tool_loop(
         //    ToolResult 与 ToolAuthorizationRequired 均在此按序推送,保证前端配对稳定。
         let mut round_progress = false;
         for e in &executed {
+            // SKY-8:累计**成功**的 fs_read(输出是字符串;错误对象不计),
+            // 供集成主「读满阈值 → 先写入口骨架」软提醒使用。
+            if shard_nudge_after.is_some()
+                && e.call.name == crate::tools::agent_tools_fs::READ_TOOL
+                && e.output.as_str().is_some()
+            {
+                shard_reads += 1;
+            }
             // P0-2:本轮只要有一次「成功写入本主声明文件」就算有进展,清零连续计数。
             // 权限拒绝(output=Null)与错误对象不算。这里只看带 `path` 参数的写工具;
             // bash/fs_patch 等不带单一路径的写形态由下方台账增量补判(TMR3-L6)。
@@ -1806,6 +1823,31 @@ pub(crate) async fn run_tool_loop(
                     "重复调用熔断:工具 \"{tool}\" 以相同参数出现 {times} 次"
                 )),
             });
+        }
+        // SKY-8:集成主读满阈值后提醒一次「先写入口骨架」。放在所有终止闸门之后:
+        // 本轮若已被预算/守卫收尾,提醒没有意义;未收尾则注入给下一轮模型请求。
+        if let Some(after) = shard_nudge_after {
+            if !shard_nudged && shard_reads >= after {
+                shard_nudged = true;
+                llm_messages.push(LlmMessage::plain(
+                    "user",
+                    crate::services::task_core::prompt_consts::SHARD_READ_FIRST_NUDGE,
+                ));
+                send_event(
+                    step_evt(
+                        "分片读取提醒",
+                        Some(format!(
+                            "已累计 {shard_reads} 次 fs_read:建议先用 fs_inline_html 写出入口骨架,再继续核对剩余分片"
+                        )),
+                        None,
+                        None,
+                    ),
+                    tx,
+                    abort,
+                    flag,
+                )
+                .await?;
+            }
         }
     }
 }

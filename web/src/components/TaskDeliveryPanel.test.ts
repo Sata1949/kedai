@@ -72,10 +72,10 @@ describe('TaskDeliveryPanel', () => {
   it('旧服务端缺 content_issues/truncated：按无问题容错', () => {
     const w = mountPanel(summary());
     expect(w.text()).not.toContain('交付内容校验');
-    expect(w.text()).not.toContain('被守卫截断');
+    expect(w.text()).not.toContain('未完成的子目标');
   });
 
-  it('内容体检与守卫截断：逐项展示警示', () => {
+  it('内容体检与未完成步骤：逐项展示警示', () => {
     const w = mountPanel(
       summary({
         content_issues: [
@@ -86,8 +86,8 @@ describe('TaskDeliveryPanel', () => {
       }),
     );
     const text = w.text();
-    expect(text).toContain('截断 1');
-    expect(text).toContain('被守卫截断的子目标');
+    expect(text).toContain('未完成 1');
+    expect(text).toContain('未完成的子目标');
     expect(text).toContain('【主Agent-1】总装');
     expect(text).toContain('index.html:含 2 行 @@ 未替换槽位');
     expect(text).toContain('parts/main.js:文件为空(0B)');

@@ -95,6 +95,9 @@ pub fn register_fs_tools(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
     register_edit_tool(registry, deps.clone());
     register_glob_tool(registry, deps.clone());
     register_grep_tool(registry, deps.clone());
+    // SKY-8:确定性单文件装配(读分片 → 替换槽位 → 写入口);与 fs_patch 同族,
+    // 可见性由工作区闸门与任务策略的写工具例外共同决定。
+    super::agent_tools_fs_inline::register_inline_tool(registry, deps.clone());
     // 第六员(Q6):结构化补丁;可见性在策略层另受包开关闸门(仅编码能力包开启时下发)
     super::agent_tools_fs_patch::register_patch_tool(registry, deps);
 }
@@ -108,7 +111,7 @@ pub(super) fn scope_of(ctx: &ToolContext) -> Result<Arc<ExecScope>, String> {
 }
 
 /// 解析工作区内的路径(闸门入口 + 作用域取值合一,五个工具共用)
-fn resolve(
+pub(super) fn resolve(
     deps: &ToolDeps,
     ctx: &ToolContext,
     raw: &str,
