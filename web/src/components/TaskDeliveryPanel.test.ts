@@ -92,4 +92,16 @@ describe('TaskDeliveryPanel', () => {
     expect(text).toContain('index.html:含 2 行 @@ 未替换槽位');
     expect(text).toContain('parts/main.js:文件为空(0B)');
   });
+
+  it('交付卫生提示：只展示提示，不冒充内容校验失败', () => {
+    const w = mountPanel(
+      summary({
+        hygiene_issues: ['_check.js:未声明的临时/草稿文件(交付前应清理)'],
+      }),
+    );
+    const text = w.text();
+    expect(text).toContain('交付卫生');
+    expect(text).toContain('_check.js');
+    expect(text).not.toContain('交付内容校验');
+  });
 });

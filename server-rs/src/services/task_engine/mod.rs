@@ -29,6 +29,7 @@ pub(crate) mod multi;
 pub(crate) mod parse;
 pub(crate) mod plan;
 pub(crate) mod retry;
+pub(crate) mod runtime_check;
 pub(crate) mod sink;
 pub(crate) mod solo;
 pub(crate) mod team;
@@ -37,7 +38,7 @@ pub(crate) mod tool_policy;
 pub(crate) mod wiring;
 
 use crate::agents::engine::AgentEngine;
-use crate::models::types::{TaskEventKind, TaskRecord, TaskRunMode, TaskStep};
+use crate::models::types::{TaskEventKind, TaskRecord, TaskRunMode, TaskStatus, TaskStep};
 use crate::services::settings_service::RuntimeSettings;
 use crate::services::task_core::{TaskBackend, TaskTerminal};
 use context::TaskRunContext;
@@ -411,9 +412,69 @@ impl TaskEngine {
                     // SKY-6 第 3 项 / SKY-1 确定性部分:声明交付物的内容体检
                     // (空文件/未替换 @@ 槽位/接线错误/单文件外链);
                     // 第 2 项:被守卫截断的步骤也要让门槛可见(防御未来模式漏标)。
-                    let content_issues = workspace
+                    let mut content_issues = workspace
                         .map(|ws| delivery::content_issues(ws, &required, &goal_text))
                         .unwrap_or_default();
+                    // SKY-1 运行期闸门(SKY-9,2026-10-25):单文件交付在终态前用无头
+                    // 浏览器加载最终入口,读应用自报的 ready/场景/地图状态。只对有
+                    // 浏览器的机器生效;无浏览器时降级为「未判定」提示,不误判失败。
+                    // 失败/结束类终态不跑:门槛本来就不会改写它们,白起一次浏览器。
+                    let successful_terminal = matches!(
+                        &terminal,
+                        TaskTerminal::Complete { status, .. }
+                            if matches!(status, TaskStatus::Done | TaskStatus::Partial)
+                    );
+                    if let (Some(ws), true, true) = (
+                        workspace,
+                        wiring::single_file_requested(&goal_text),
+                        successful_terminal,
+                    ) {
+                        let entry = delivery::pick_single_file_entry(ws, &required);
+                        if let Some(entry) = entry.filter(|p| ws.join(p).is_file()) {
+                            let outcome = runtime_check::probe(ws, &entry, &goal_text).await;
+                            if !outcome.issues.is_empty() {
+                                content_issues.extend(
+                                    outcome
+                                        .issues
+                                        .iter()
+                                        .map(|issue| format!("{entry}:{issue}")),
+                                );
+                            }
+                            if !outcome.notes.is_empty() {
+                                self.svc.emit_event(
+                                    TaskEventKind::Status,
+                                    &task.id,
+                                    None,
+                                    None,
+                                    Some(outcome.notes.join(";")),
+                                );
+                            }
+                        }
+                    }
+                    // SKY-1 交付卫生:根目录未声明的临时脚本只作提示,不降终态。
+                    let hygiene = workspace
+                        .map(|ws| delivery::hygiene_issues(ws, &required))
+                        .unwrap_or_default();
+                    if !hygiene.is_empty() {
+                        let head: Vec<&str> = hygiene.iter().take(5).map(String::as_str).collect();
+                        let more = hygiene.len().saturating_sub(head.len());
+                        self.svc.emit_event(
+                            TaskEventKind::Status,
+                            &task.id,
+                            None,
+                            None,
+                            Some(format!(
+                                "交付卫生提示:根目录有 {} 个未声明的临时/草稿文件({}){};建议清理后再交付。",
+                                hygiene.len(),
+                                head.join("、"),
+                                if more > 0 {
+                                    format!(" 等 {more} 个")
+                                } else {
+                                    String::new()
+                                }
+                            )),
+                        );
+                    }
                     let truncated = delivery::truncated_from_plan(&final_plan);
                     let gate_input = delivery::DeliveryGateInput {
                         required: &required,

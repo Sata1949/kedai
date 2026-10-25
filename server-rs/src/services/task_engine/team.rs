@@ -198,6 +198,19 @@ fn workspace_manifest(workspace: &std::path::Path, mains: &[TeamMain], goal: &st
             out.push_str(&format!("- {issue}\n"));
         }
     }
+    // SKY-1 交付卫生:根目录未声明的临时脚本/草稿(如 `_verify_*.js`)会让交付目录
+    // 混入非交付物。只作提示,不降终态;审计与汇总都看到同一份清单。
+    let declared_pairs: Vec<(String, String)> = seen
+        .iter()
+        .map(|path| (path.clone(), String::new()))
+        .collect();
+    let hygiene = super::delivery::hygiene_issues(workspace, &declared_pairs);
+    if !hygiene.is_empty() {
+        out.push_str("\n引擎交付卫生检查(根目录未声明的临时/草稿文件;只作提示,不据此判失败):\n");
+        for issue in &hygiene {
+            out.push_str(&format!("- {issue}\n"));
+        }
+    }
     out
 }
 
@@ -1746,7 +1759,7 @@ impl TeamExecutor {
             // 仍有确定性问题时直接跳过终审——任务终态必然是 partial(交付门槛同源),
             // 再花一次 16K+ 的结构化调用没有信息增量。无问题时维持既有终审。
             let recheck_required = super::delivery::required_from_plan_for_goal(&plan, &ctx.goal);
-            let recheck_problems: Vec<String> = match ctx.scope.as_ref() {
+            let mut recheck_problems: Vec<String> = match ctx.scope.as_ref() {
                 Some(scope) => {
                     let ws = scope.workspace();
                     let mut problems: Vec<String> =
@@ -1763,6 +1776,37 @@ impl TeamExecutor {
                 }
                 None => Vec::new(),
             };
+            // SKY-1 运行期闸门(SKY-9):补做后仍打不开的入口不必再付一次终审。
+            // 与终态门槛同源(同一 `runtime_check::probe`),测试构建与无浏览器机器自动跳过。
+            if super::wiring::single_file_requested(&ctx.goal) {
+                let workspace = ctx
+                    .scope
+                    .as_ref()
+                    .map(|scope| scope.workspace().to_path_buf());
+                if let Some(ws) = workspace {
+                    let entry = super::delivery::pick_single_file_entry(&ws, &recheck_required);
+                    if let Some(entry) = entry.filter(|p| ws.join(p).is_file()) {
+                        let outcome = super::runtime_check::probe(&ws, &entry, &ctx.goal).await;
+                        if !outcome.issues.is_empty() {
+                            recheck_problems.extend(
+                                outcome
+                                    .issues
+                                    .iter()
+                                    .map(|issue| format!("{entry}:{issue}")),
+                            );
+                        }
+                        if !outcome.notes.is_empty() {
+                            svc.emit_event(
+                                TaskEventKind::Status,
+                                &ctx.task_id,
+                                None,
+                                None,
+                                Some(outcome.notes.join(";")),
+                            );
+                        }
+                    }
+                }
+            }
             if !recheck_problems.is_empty() {
                 let detail = recheck_problems.join(";");
                 svc.emit_event(
