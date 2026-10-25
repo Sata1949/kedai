@@ -525,7 +525,7 @@ async fn memory_search_and_prune_endpoints() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
-/// 记忆设置白名单透出:GET 默认 关闭/上限 8;PUT 可写,越界(>50)忽略、0 合法
+/// 记忆设置白名单透出:GET 默认 关闭/上限 8;PUT 可写,越界(>50)400、0 合法
 #[tokio::test]
 async fn memory_settings_exposed_and_clamped() {
     let app = test_app();
@@ -543,34 +543,42 @@ async fn memory_settings_exposed_and_clamped() {
     );
     assert_eq!(s["memory_max_entries"], json!(200), "容量默认 200: {s}");
 
-    // 越界值忽略(保持默认);0 合法(关闭注入/不限制/不淘汰)
-    let (status, _) = send_json(
+    // 越界值 400(C-2B 收口:此前静默忽略仍返回 200);0 合法(关闭注入/不限制/不淘汰)
+    let (status, r) = send_json(
         app,
         "PUT",
         "/api/settings",
         json!({ "memory_inject_limit": 999 }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::BAD_REQUEST, "越界值应 400: {r}");
+    assert!(r["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("memory_inject_limit"));
     let (_, s) = send_json(app, "GET", "/api/settings", json!({})).await;
-    assert_eq!(s["memory_inject_limit"], json!(8), "越界值应被忽略");
+    assert_eq!(s["memory_inject_limit"], json!(8), "越界值不得落库");
 
-    // 新增两字段:越界忽略、合法值生效
-    let (status, _) = send_json(
+    // 新增两字段:越界 400、合法值生效
+    let (status, r) = send_json(
         app,
         "PUT",
         "/api/settings",
         json!({ "memory_inject_char_budget": 999_999, "memory_max_entries": 999_999 }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::BAD_REQUEST, "越界值应 400: {r}");
+    assert!(r["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("memory_inject_char_budget"));
     let (_, s) = send_json(app, "GET", "/api/settings", json!({})).await;
     assert_eq!(
         s["memory_inject_char_budget"],
         json!(2000),
-        "越界预算应忽略"
+        "越界预算不得落库"
     );
-    assert_eq!(s["memory_max_entries"], json!(200), "越界容量应忽略");
+    assert_eq!(s["memory_max_entries"], json!(200), "越界容量不得落库");
     let (status, _) = send_json(
         app,
         "PUT",

@@ -256,7 +256,7 @@ const MAPPINGS = [
     // 提示词预览响应(WB-E 批 2,遗留 L31 登记):新增 `warnings` 数组,前后端字段集合
     // 首次机检(响应此前由 json! 手工拼,现改结构体承载,见 PromptPreviewResponse 注释)。
     label: '提示词预览响应',
-    rust: { file: 'server-rs/src/api/settings.rs', name: 'PromptPreviewResponse' },
+    rust: { file: 'server-rs/src/api/settings/prompt.rs', name: 'PromptPreviewResponse' },
     ts: { file: 'web/src/api/types/settings.ts', name: 'PromptPreview', kind: 'interface' },
   },
 ];

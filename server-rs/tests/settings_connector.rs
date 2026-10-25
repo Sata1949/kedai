@@ -100,6 +100,25 @@ async fn mock_auto_switches_to_openai_on_save() {
             json!({ "reflect_advice_role": "system" }),
             "reflect_advice_role",
         ),
+        // C-2B 收口:此前「静默忽略仍返回 200」的 6 个字段,现与其它严格字段同口径
+        (json!({ "compaction_mode": "always" }), "compaction_mode"),
+        (
+            json!({ "compaction_keep_recent": 1 }),
+            "compaction_keep_recent",
+        ),
+        (
+            json!({ "compaction_snip_bytes": 1_048_577 }),
+            "compaction_snip_bytes",
+        ),
+        (json!({ "memory_inject_limit": 51 }), "memory_inject_limit"),
+        (
+            json!({ "memory_inject_char_budget": 20_001 }),
+            "memory_inject_char_budget",
+        ),
+        (
+            json!({ "memory_max_entries": 10_001 }),
+            "memory_max_entries",
+        ),
     ];
     for (body, field) in invalid_cases {
         let (status, r) = send_json(app, "PUT", "/api/settings", body).await;
@@ -144,6 +163,22 @@ async fn mock_auto_switches_to_openai_on_save() {
         .contains("preset_tail_role"));
     let (_, after_invalid_enum) = send_json(app, "GET", "/api/settings", json!({})).await;
     assert_eq!(after_invalid_enum["default_top_p"], json!(0.7));
+
+    // C-2B 收口的字段同样发生在落盘前:合法 default_top_p 不得随越界记忆上限半提交
+    let (invalid_status, invalid) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({ "default_top_p": 0.4, "memory_inject_limit": 51 }),
+    )
+    .await;
+    assert_eq!(invalid_status, StatusCode::BAD_REQUEST);
+    assert!(invalid["error"]
+        .as_str()
+        .unwrap()
+        .contains("memory_inject_limit"));
+    let (_, after_invalid_memory) = send_json(app, "GET", "/api/settings", json!({})).await;
+    assert_eq!(after_invalid_memory["default_top_p"], json!(0.7));
 
     // 保存 API 地址 + Key + 模型 → 自动切换到 openai-compatible,配置生效
     let (status, r) = send_json(
