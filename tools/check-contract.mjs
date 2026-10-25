@@ -2,7 +2,7 @@
 /**
  * Kedai 前后端契约快照校验(Node 零依赖)。
  *
- * 背景:前端 `web/src/api/types.ts` / `web/src/api/memory.ts` 的类型是手写的,
+ * 背景:前端 `web/src/api/types/`(各域文件,types.ts 为 barrel)/ `web/src/api/memory.ts` 的类型是手写的,
  * 与 Rust 后端契约逐字对齐靠人。历史漂移样例:`DistillResult.skipped` 后端已下发、
  * 前端漏字段,消费方读到 undefined。本脚本把「已知高变更面」的字段集合做差集比对,
  * 漂移即非零退出,纳入 `tools/check-all.ps1` 门禁。
@@ -46,27 +46,27 @@ const MAPPINGS = [
   {
     label: '任务记录',
     rust: { file: 'server-rs/src/models/types.rs', name: 'TaskRecord' },
-    ts: { file: 'web/src/api/types.ts', name: 'TaskRecord', kind: 'interface' },
+    ts: { file: 'web/src/api/types/task.ts', name: 'TaskRecord', kind: 'interface' },
   },
   {
     label: '任务步骤',
     rust: { file: 'server-rs/src/models/types.rs', name: 'TaskStep' },
-    ts: { file: 'web/src/api/types.ts', name: 'TaskStep', kind: 'interface' },
+    ts: { file: 'web/src/api/types/task.ts', name: 'TaskStep', kind: 'interface' },
   },
   {
     label: '任务子任务',
     rust: { file: 'server-rs/src/models/types.rs', name: 'TaskSubtaskRecord' },
-    ts: { file: 'web/src/api/types.ts', name: 'TaskSubtask', kind: 'interface' },
+    ts: { file: 'web/src/api/types/task.ts', name: 'TaskSubtask', kind: 'interface' },
   },
   {
     label: '任务 LLM 调用记录',
     rust: { file: 'server-rs/src/models/types.rs', name: 'TaskLlmCallRecord' },
-    ts: { file: 'web/src/api/types.ts', name: 'TaskLlmCall', kind: 'interface' },
+    ts: { file: 'web/src/api/types/task.ts', name: 'TaskLlmCall', kind: 'interface' },
   },
   {
     label: '任务文件变更行',
     rust: { file: 'server-rs/src/models/types.rs', name: 'TaskFileChangeRecord' },
-    ts: { file: 'web/src/api/types.ts', name: 'TaskFileChange', kind: 'interface' },
+    ts: { file: 'web/src/api/types/task.ts', name: 'TaskFileChange', kind: 'interface' },
   },
   {
     label: '命令执行审计行',
@@ -76,7 +76,7 @@ const MAPPINGS = [
   {
     label: '任务事件分类枚举',
     rust: { file: 'server-rs/src/models/types.rs', name: 'TaskEventKind' },
-    ts: { file: 'web/src/api/types.ts', name: 'TaskEventKind', kind: 'union' },
+    ts: { file: 'web/src/api/types/task.ts', name: 'TaskEventKind', kind: 'union' },
   },
   {
     // FE-9(2026-10-06):`SseEvent::Task` 的**载荷字段**此前无守卫——映射表里只有
@@ -85,19 +85,19 @@ const MAPPINGS = [
     // 用枚举结构体变体形态登记:字段集合与可选性逐条比对。
     label: '任务事件载荷',
     rust: { file: 'server-rs/src/models/types.rs', name: 'SseEvent', variant: 'Task' },
-    ts: { file: 'web/src/api/types.ts', name: 'TaskEvent', kind: 'type-literal' },
+    ts: { file: 'web/src/api/types/task.ts', name: 'TaskEvent', kind: 'type-literal' },
     // 线格式判别式:serde 由 `#[serde(tag = "type")]` 注入,TS 侧手写 `type: 'task'`
     tsIgnore: ['type'],
   },
   {
     label: '任务执行模式枚举',
     rust: { file: 'server-rs/src/models/types.rs', name: 'TaskRunMode' },
-    ts: { file: 'web/src/api/types.ts', name: 'TaskRunMode', kind: 'union' },
+    ts: { file: 'web/src/api/types/task.ts', name: 'TaskRunMode', kind: 'union' },
   },
   {
     label: '任务状态枚举',
     rust: { file: 'server-rs/src/models/types.rs', name: 'TaskStatus' },
-    ts: { file: 'web/src/api/types.ts', name: 'TaskStatus', kind: 'union' },
+    ts: { file: 'web/src/api/types/task.ts', name: 'TaskStatus', kind: 'union' },
   },
   {
     // 此前标在 `契约.md` 的「机检状态总表」里为**缺口**(有 serde 快照、无跨端集合比对):
@@ -105,13 +105,13 @@ const MAPPINGS = [
     // 界面会把合法状态显示成未知。
     label: '任务步骤状态枚举',
     rust: { file: 'server-rs/src/models/types.rs', name: 'TaskStepStatus' },
-    ts: { file: 'web/src/api/types.ts', name: 'TaskStepStatus', kind: 'union' },
+    ts: { file: 'web/src/api/types/task.ts', name: 'TaskStepStatus', kind: 'union' },
   },
   {
     // 同上(缺口的另一半):子任务状态比步骤多一个 ended。
     label: '任务子任务状态枚举',
     rust: { file: 'server-rs/src/models/types.rs', name: 'TaskSubtaskStatus' },
-    ts: { file: 'web/src/api/types.ts', name: 'TaskSubtaskStatus', kind: 'union' },
+    ts: { file: 'web/src/api/types/task.ts', name: 'TaskSubtaskStatus', kind: 'union' },
   },
   {
     // 自定义流程的节点契约(遗留.md IFW-7②):此前「后端加字段、前端漏加」只能靠人
@@ -119,7 +119,7 @@ const MAPPINGS = [
     // 聊天 agent_mode=custom 吃同一份,漏一个字段会静默丢掉该节点的配置。
     label: '流程节点',
     rust: { file: 'server-rs/src/models/types.rs', name: 'PlanStep' },
-    ts: { file: 'web/src/api/types.ts', name: 'AgentFlowStep', kind: 'interface' },
+    ts: { file: 'web/src/api/types/agentFlow.ts', name: 'AgentFlowStep', kind: 'interface' },
   },
   {
     label: '流程配置',
@@ -127,7 +127,7 @@ const MAPPINGS = [
       file: 'server-rs/src/services/agent_flow_service/mod.rs',
       name: 'AgentFlowConfig',
     },
-    ts: { file: 'web/src/api/types.ts', name: 'AgentFlowConfig', kind: 'interface' },
+    ts: { file: 'web/src/api/types/agentFlow.ts', name: 'AgentFlowConfig', kind: 'interface' },
   },
   {
     label: '流程库',
@@ -135,7 +135,7 @@ const MAPPINGS = [
       file: 'server-rs/src/services/agent_flow_service/mod.rs',
       name: 'AgentFlowLibrary',
     },
-    ts: { file: 'web/src/api/types.ts', name: 'AgentFlowLibrary', kind: 'interface' },
+    ts: { file: 'web/src/api/types/agentFlow.ts', name: 'AgentFlowLibrary', kind: 'interface' },
   },
   {
     // 流程搬运(二维批次 7a):导入报告回给前端做用户提示——漏一个字段会让
@@ -145,7 +145,7 @@ const MAPPINGS = [
       file: 'server-rs/src/services/agent_flow_service/mod.rs',
       name: 'FlowImportReport',
     },
-    ts: { file: 'web/src/api/types.ts', name: 'FlowImportReport', kind: 'interface' },
+    ts: { file: 'web/src/api/types/agentFlow.ts', name: 'FlowImportReport', kind: 'interface' },
   },
   {
     // 同上:报告条目(`renamed[]` 的元素)。
@@ -154,7 +154,7 @@ const MAPPINGS = [
       file: 'server-rs/src/services/agent_flow_service/mod.rs',
       name: 'FlowIdRemap',
     },
-    ts: { file: 'web/src/api/types.ts', name: 'FlowIdRemap', kind: 'interface' },
+    ts: { file: 'web/src/api/types/agentFlow.ts', name: 'FlowIdRemap', kind: 'interface' },
   },
   {
     // 流程搬运包(二维批次 7a):导出/导入**文件的线格式**,会被用户带到别的机器上——
@@ -164,7 +164,7 @@ const MAPPINGS = [
       file: 'server-rs/src/services/agent_flow_service/mod.rs',
       name: 'FlowBundle',
     },
-    ts: { file: 'web/src/api/types.ts', name: 'AgentFlowBundle', kind: 'interface' },
+    ts: { file: 'web/src/api/types/agentFlow.ts', name: 'AgentFlowBundle', kind: 'interface' },
   },
   {
     // 任务用的流程快照(二维批次 5a):入口流程 + 可达子流程闭包。它同时是
@@ -175,7 +175,7 @@ const MAPPINGS = [
       file: 'server-rs/src/services/agent_flow_service/mod.rs',
       name: 'FlowSnapshot',
     },
-    ts: { file: 'web/src/api/types.ts', name: 'TaskFlowSnapshot', kind: 'interface' },
+    ts: { file: 'web/src/api/types/task.ts', name: 'TaskFlowSnapshot', kind: 'interface' },
   },
   {
     // 工作区画像(CODE-4):任务详情顶层 `workspace_profile` 与独立探测端点
@@ -187,7 +187,7 @@ const MAPPINGS = [
       file: 'server-rs/src/services/workspace_profile.rs',
       name: 'WorkspaceProfile',
     },
-    ts: { file: 'web/src/api/types.ts', name: 'WorkspaceProfile', kind: 'interface' },
+    ts: { file: 'web/src/api/types/workspace.ts', name: 'WorkspaceProfile', kind: 'interface' },
   },
   {
     // 同上:画像的命中条目(`detected[]` 的元素)。
@@ -196,7 +196,7 @@ const MAPPINGS = [
       file: 'server-rs/src/services/workspace_profile.rs',
       name: 'ProjectTypeHint',
     },
-    ts: { file: 'web/src/api/types.ts', name: 'ProjectTypeHint', kind: 'interface' },
+    ts: { file: 'web/src/api/types/workspace.ts', name: 'ProjectTypeHint', kind: 'interface' },
   },
   {
     // TMR-6:任务详情顶层 `delivery` 的具名结构体(TaskDetail 本身不在 MAPPINGS,
@@ -207,7 +207,7 @@ const MAPPINGS = [
       name: 'TaskDeliverySummary',
     },
     ts: {
-      file: 'web/src/api/types.ts',
+      file: 'web/src/api/types/workspace.ts',
       name: 'TaskDeliverySummary',
       kind: 'interface',
     },
@@ -219,7 +219,7 @@ const MAPPINGS = [
       file: 'server-rs/src/services/task_engine/delivery.rs',
       name: 'TaskDeliveryFile',
     },
-    ts: { file: 'web/src/api/types.ts', name: 'TaskDeliveryFile', kind: 'interface' },
+    ts: { file: 'web/src/api/types/workspace.ts', name: 'TaskDeliveryFile', kind: 'interface' },
   },
   {
     // SSE 顶层事件判别式联合(Rust `#[serde(tag="type")]` ↔ TS 判别式联合)。
@@ -229,7 +229,7 @@ const MAPPINGS = [
     // 类型检查阶段拦住(两处配合才闭环)。
     label: 'SSE 顶层事件枚举',
     rust: { file: 'server-rs/src/models/types.rs', name: 'SseEvent' },
-    ts: { file: 'web/src/api/types.ts', name: 'SseEvent', kind: 'tagged-union' },
+    ts: { file: 'web/src/api/types/chat.ts', name: 'SseEvent', kind: 'tagged-union' },
   },
   {
     // 多套连接(二维批次 4):落盘结构体 ↔ GET /api/settings 的 connections 元素。
@@ -240,7 +240,7 @@ const MAPPINGS = [
       file: 'server-rs/src/services/settings_service/connection.rs',
       name: 'ConnectionProfile',
     },
-    ts: { file: 'web/src/api/types.ts', name: 'ConnectionProfile', kind: 'interface' },
+    ts: { file: 'web/src/api/types/settings.ts', name: 'ConnectionProfile', kind: 'interface' },
     rustIgnore: ['api_key'],
     tsIgnore: ['api_key_masked', 'has_api_key'],
   },
@@ -250,14 +250,14 @@ const MAPPINGS = [
     // `entry_to_view` 的内联重复实现,两侧线格式更容易各走各路)。
     label: '世界书条目编辑视图',
     rust: { file: 'server-rs/src/models/types.rs', name: 'WorldBookEntryView' },
-    ts: { file: 'web/src/api/types.ts', name: 'WorldBookEntry', kind: 'interface' },
+    ts: { file: 'web/src/api/types/worldbook.ts', name: 'WorldBookEntry', kind: 'interface' },
   },
   {
     // 提示词预览响应(WB-E 批 2,遗留 L31 登记):新增 `warnings` 数组,前后端字段集合
     // 首次机检(响应此前由 json! 手工拼,现改结构体承载,见 PromptPreviewResponse 注释)。
     label: '提示词预览响应',
     rust: { file: 'server-rs/src/api/settings.rs', name: 'PromptPreviewResponse' },
-    ts: { file: 'web/src/api/types.ts', name: 'PromptPreview', kind: 'interface' },
+    ts: { file: 'web/src/api/types/settings.ts', name: 'PromptPreview', kind: 'interface' },
   },
 ];
 
@@ -474,23 +474,63 @@ function tsTypeBlock(src, name) {
 /**
  * 提取 TS 判别式联合的变体集合(`type: '<字面量>'`)。
  *
- * 联合里可能引用同文件的类型别名(如 `SseEvent` 的 `| TaskEvent`),故对被引用的
- * 别名递归展开——否则会误报「TS 缺少取值 task」。
- * 递归带 visited 集合防自引用死循环。
+ * 联合里可能引用类型别名(如 `SseEvent` 的 `| TaskEvent`),故对被引用的别名递归展开——
+ * 否则会误报「TS 缺少取值 task」。域拆分后别名可能位于另一个文件,因此沿
+ * `import type { X } from './other'` 跨文件解析;递归带 visited 集合防自引用死循环。
  */
-function tsTaggedUnionVariants(src, name, seen = new Set()) {
+function tsTaggedUnionVariants(src, name, seen = new Set(), file = null) {
   if (seen.has(name)) return new Set();
   seen.add(name);
-  const body = tsTypeBlock(src, name);
+  let body = tsTypeBlock(src, name);
+  let srcFile = file;
+  if (body === null && file) {
+    for (const m of src.matchAll(/import\s+type\s*\{([^}]*)\}\s*from\s*'([^']+)'/g)) {
+      const names = m[1].split(',').map((s) => s.trim().replace(/\s+as\s+.*$/, ''));
+      if (!names.includes(name)) continue;
+      const target = resolveTsImport(file, m[2]);
+      if (!target) continue;
+      const nextSrc = readTs(target);
+      const nextBody = tsTypeBlock(nextSrc, name);
+      if (nextBody !== null) {
+        body = nextBody;
+        src = nextSrc;
+        srcFile = target;
+        break;
+      }
+    }
+  }
   if (body === null) return null;
   const out = new Set();
   for (const m of body.matchAll(/\btype\s*:\s*'([^']+)'/g)) out.add(m[1]);
   // 联合成员里引用的类型别名(位于行首或 `|` 之后,且不是内联对象/字面量)
   for (const m of body.matchAll(/(?:^|\|)\s*([A-Z][A-Za-z0-9_]*)\s*(?=\||;|$)/gm)) {
-    const sub = tsTaggedUnionVariants(src, m[1], seen);
+    const sub = tsTaggedUnionVariants(src, m[1], seen, srcFile);
     if (sub) for (const v of sub) out.add(v);
   }
   return out;
+}
+
+/** TS 源码缓存(跨文件解析判别式联合时复用;键为仓库相对路径)。 */
+const tsSourceCache = new Map();
+function readTs(rel) {
+  const key = rel.replace(/\\/g, '/');
+  if (!tsSourceCache.has(key)) tsSourceCache.set(key, read(key));
+  return tsSourceCache.get(key);
+}
+
+/** 解析相对 import 到仓库内 TS 文件(无扩展名时补 .ts / index.ts);失败返回 null。 */
+function resolveTsImport(fromFile, spec) {
+  if (!spec.startsWith('.')) return null;
+  const base = join(dirname(fromFile), spec).replace(/\\/g, '/');
+  for (const candidate of [base, `${base}.ts`, join(base, 'index.ts').replace(/\\/g, '/')]) {
+    try {
+      readTs(candidate);
+      return candidate;
+    } catch {
+      // 尝试下一个候选
+    }
+  }
+  return null;
 }
 
 const failures = [];
@@ -511,7 +551,7 @@ for (const map of MAPPINGS) {
 
   if (map.ts.kind === 'tagged-union') {
     const want = rustVariants(rustSrc, map.rust.name);
-    const got = tsTaggedUnionVariants(tsSrc, map.ts.name);
+    const got = tsTaggedUnionVariants(tsSrc, map.ts.name, new Set(), map.ts.file);
     if (!want || !got) {
       fail(`${map.label}: ${!want ? `Rust 未找到枚举 ${map.rust.name}` : ''}${!got ? ` TS 未找到判别式联合 ${map.ts.name}` : ''}`);
       continue;
