@@ -377,7 +377,7 @@ impl TeamExecutor {
             // 仍有确定性问题时直接跳过终审——任务终态必然是 partial(交付门槛同源),
             // 再花一次 16K+ 的结构化调用没有信息增量。无问题时维持既有终审。
             let recheck_required = super::delivery::required_from_plan_for_goal(&plan, &ctx.goal);
-            let recheck_problems: Vec<String> = match ctx.scope.as_ref() {
+            let mut recheck_problems: Vec<String> = match ctx.scope.as_ref() {
                 Some(scope) => {
                     let ws = scope.workspace();
                     let mut problems: Vec<String> =
@@ -394,6 +394,37 @@ impl TeamExecutor {
                 }
                 None => Vec::new(),
             };
+            // SKY-1 运行期闸门(SKY-9):补做后仍打不开的入口不必再付一次终审。
+            // 与终态门槛同源(同一 `runtime_check::probe`),测试构建与无浏览器机器自动跳过。
+            if super::wiring::single_file_requested(&ctx.goal) {
+                let workspace = ctx
+                    .scope
+                    .as_ref()
+                    .map(|scope| scope.workspace().to_path_buf());
+                if let Some(ws) = workspace {
+                    let entry = super::delivery::pick_single_file_entry(&ws, &recheck_required);
+                    if let Some(entry) = entry.filter(|p| ws.join(p).is_file()) {
+                        let outcome = super::runtime_check::probe(&ws, &entry, &ctx.goal).await;
+                        if !outcome.issues.is_empty() {
+                            recheck_problems.extend(
+                                outcome
+                                    .issues
+                                    .iter()
+                                    .map(|issue| format!("{entry}:{issue}")),
+                            );
+                        }
+                        if !outcome.notes.is_empty() {
+                            svc.emit_event(
+                                TaskEventKind::Status,
+                                &ctx.task_id,
+                                None,
+                                None,
+                                Some(outcome.notes.join(";")),
+                            );
+                        }
+                    }
+                }
+            }
             if !recheck_problems.is_empty() {
                 let detail = recheck_problems.join(";");
                 svc.emit_event(

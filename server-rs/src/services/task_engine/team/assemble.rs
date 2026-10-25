@@ -3,6 +3,7 @@
 use super::topology::declared_files_of;
 use super::{AuditVerdict, TeamMain};
 use crate::models::types::{TaskStep, TaskStepStatus};
+use crate::services::task_engine::delivery::hygiene_issues;
 use crate::services::task_engine::wiring::wiring_issues;
 
 /// 审计/终审/汇总输入里的「工作区声明文件实况」(SKY-3,2026-10-23)。
@@ -67,6 +68,19 @@ pub(super) fn workspace_manifest(
             "\n引擎静态接线检查(导入名未导出/本地模块或资源不存在/单文件交付外链;确定性判定,与自述冲突时以本清单为准):\n",
         );
         for issue in &wiring {
+            out.push_str(&format!("- {issue}\n"));
+        }
+    }
+    // SKY-1 交付卫生:根目录未声明的临时脚本/草稿(如 `_verify_*.js`)会让交付目录
+    // 混入非交付物。只作提示,不降终态;审计与汇总都看到同一份清单。
+    let declared_pairs: Vec<(String, String)> = seen
+        .iter()
+        .map(|path| (path.clone(), String::new()))
+        .collect();
+    let hygiene = hygiene_issues(workspace, &declared_pairs);
+    if !hygiene.is_empty() {
+        out.push_str("\n引擎交付卫生检查(根目录未声明的临时/草稿文件;只作提示,不据此判失败):\n");
+        for issue in &hygiene {
             out.push_str(&format!("- {issue}\n"));
         }
     }

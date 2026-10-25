@@ -143,6 +143,10 @@ pub(crate) fn wiring_issues(workspace: &Path, declared: &[String], goal: &str) -
     let mut issues: Vec<String> = Vec::new();
     let mut scanned: HashSet<PathBuf> = HashSet::new();
     let mut queue: Vec<(String, PathBuf)> = Vec::new();
+    // 全局命名检查要跨文件比对「生产者/消费者」,先攒文本再统一判定。
+    // 上限 8MB:异常工作区不能把收尾内存打满(声明文件本身已限 512KB/个)。
+    let mut texts: Vec<(String, String)> = Vec::new();
+    let mut text_bytes = 0usize;
     for raw in declared {
         let Some(rel) = normalize_workspace_rel(raw) else {
             continue;
@@ -163,6 +167,10 @@ pub(crate) fn wiring_issues(workspace: &Path, declared: &[String], goal: &str) -
         let Some(text) = read_text(&abs) else {
             continue;
         };
+        if text_bytes < 8 * 1024 * 1024 {
+            text_bytes += text.len();
+            texts.push((rel.clone(), text.clone()));
+        }
         if is_html_path(&abs) {
             check_html(
                 workspace,
@@ -177,10 +185,324 @@ pub(crate) fn wiring_issues(workspace: &Path, declared: &[String], goal: &str) -
             check_js(workspace, &rel, &abs, &text, &mut issues, &mut queue);
         }
     }
+    issues.extend(global_wiring_issues(&texts));
     issues.sort();
     issues.dedup();
     issues.truncate(MAX_ISSUES);
     issues
+}
+
+/// 已知的 CDN/运行时全局:经典脚本模式下由外部 `<script src>` 提供,不在工作区声明,
+/// 不能因为「没导出」就判失败。
+const AMBIENT_GLOBALS: &[&str] = &[
+    "THREE",
+    "React",
+    "ReactDOM",
+    "Vue",
+    "gsap",
+    "TWEEN",
+    "Matter",
+    "p5",
+    "d3",
+    "Chart",
+    "ace",
+    "CodeMirror",
+    "monaco",
+    "anime",
+    "lottie",
+    "Howl",
+    "Tone",
+    "CANNON",
+    "AMMO",
+    "GUI",
+    "dat",
+    "Stats",
+    "OrbitControls",
+    "MapControls",
+    "PointerLockControls",
+    "TransformControls",
+    "GLTFLoader",
+    "FBXLoader",
+    "OBJLoader",
+    "MTLLoader",
+    "RGBELoader",
+    "DRACOLoader",
+    "EffectComposer",
+    "RenderPass",
+    "ShaderPass",
+    "UnrealBloomPass",
+    "Sky",
+    "Water",
+];
+
+/// 浏览器内置的 `window.*` 属性(读取它们不是应用全局)。
+const BUILTIN_WINDOW_PROPS: &[&str] = &[
+    "location",
+    "navigator",
+    "document",
+    "console",
+    "history",
+    "screen",
+    "performance",
+    "crypto",
+    "localStorage",
+    "sessionStorage",
+    "innerWidth",
+    "innerHeight",
+    "outerWidth",
+    "outerHeight",
+    "devicePixelRatio",
+    "requestAnimationFrame",
+    "cancelAnimationFrame",
+    "setTimeout",
+    "clearTimeout",
+    "setInterval",
+    "clearInterval",
+    "addEventListener",
+    "removeEventListener",
+    "dispatchEvent",
+    "matchMedia",
+    "getComputedStyle",
+    "alert",
+    "confirm",
+    "prompt",
+    "open",
+    "close",
+    "focus",
+    "blur",
+    "scrollTo",
+    "scrollBy",
+    "fetch",
+    "atob",
+    "btoa",
+    "URL",
+    "Blob",
+    "File",
+    "FileReader",
+    "Image",
+    "Audio",
+    "FormData",
+    "XMLHttpRequest",
+    "WebSocket",
+    "Worker",
+    "CustomEvent",
+    "Event",
+    "HTMLElement",
+    "Element",
+    "Node",
+    "Promise",
+    "Math",
+    "JSON",
+    "Date",
+    "Object",
+    "Array",
+    "String",
+    "Number",
+    "Boolean",
+    "RegExp",
+    "Error",
+    "Map",
+    "Set",
+    "WeakMap",
+    "WeakSet",
+    "Symbol",
+    "Intl",
+    "BigInt",
+    "Reflect",
+    "Proxy",
+    "Uint8Array",
+    "Float32Array",
+    "ArrayBuffer",
+    "DataView",
+    "TextEncoder",
+    "TextDecoder",
+    "WebGLRenderingContext",
+    "WebGL2RenderingContext",
+    "ImageData",
+    "Path2D",
+    "OffscreenCanvas",
+];
+
+struct GlobalPatterns {
+    producer: regex::Regex,
+    producer_bracket: regex::Regex,
+    require: regex::Regex,
+    read: regex::Regex,
+}
+
+/// 惰性编译一次;编译失败(不应发生)返回 None,让调用方跳过而不 panic。
+fn global_patterns() -> Option<&'static GlobalPatterns> {
+    use std::sync::OnceLock;
+    static RE: OnceLock<Option<GlobalPatterns>> = OnceLock::new();
+    RE.get_or_init(|| {
+        Some(GlobalPatterns {
+            producer: regex::Regex::new(
+                r"(?:window|global|globalThis)\s*\.\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*=(=)?",
+            )
+            .ok()?,
+            producer_bracket: regex::Regex::new(
+                r#"(?:window|global|globalThis)\s*\[\s*["']([A-Za-z_$][A-Za-z0-9_$]*)["']\s*\]\s*=(=)?"#,
+            )
+            .ok()?,
+            require: regex::Regex::new(
+                r#"requireGlobal\s*\(\s*["']([A-Za-z_$][A-Za-z0-9_$]*)["']\s*\)"#,
+            )
+            .ok()?,
+            read: regex::Regex::new(
+                r"(?:window|global|globalThis)\s*\.\s*([A-Za-z_$][A-Za-z0-9_$]*)",
+            )
+            .ok()?,
+        })
+    })
+    .as_ref()
+}
+
+/// 全局命名接线检查(SKY-1,2026-10-25)。
+///
+/// 空岛复跑暴露的形态:入口 `requireGlobal('BlockEngine')`,而上游只导出
+/// `window.MC_BLOCK_ENGINE`;这类错配能静态判定,不该等审计自由文本或运行期空场景。
+///
+/// 判定只认高信号形态,避免把 CDN/内置全局误判:
+/// - `requireGlobal('X')` 是模型自己写的查找助手,返回 null 即启动失败——X 未导出就报;
+/// - `window.X` 读取在 X 未导出、但与某个已导出名字**规范化后相近**时报警(命名不一致);
+/// - 注释里的示例、`window.THREE` 等外部全局、浏览器内置属性不算。
+///
+/// 返回项带文件相对路径,进 `delivery.content_issues` 后由终态门槛降 partial。
+pub(crate) fn global_wiring_issues(texts: &[(String, String)]) -> Vec<String> {
+    let Some(pat) = global_patterns() else {
+        return Vec::new();
+    };
+    let mut produced: HashSet<String> = HashSet::new();
+    let mut cleaned: Vec<(&str, String)> = Vec::new();
+    for (rel, text) in texts {
+        let lower = rel.to_ascii_lowercase();
+        if lower.ends_with(".html") || lower.ends_with(".htm") {
+            let html = strip_html_comments(text);
+            for body in html_inline_scripts(&html) {
+                cleaned.push((rel.as_str(), strip_js_comments(&body)));
+            }
+        } else if is_js_rel(rel) {
+            cleaned.push((rel.as_str(), strip_js_comments(text)));
+        }
+    }
+    for (_, text) in &cleaned {
+        for caps in pat.producer.captures_iter(text) {
+            if caps.get(2).is_some() {
+                continue; // `==` 比较,不是赋值
+            }
+            produced.insert(caps[1].to_string());
+        }
+        for caps in pat.producer_bracket.captures_iter(text) {
+            if caps.get(2).is_some() {
+                continue;
+            }
+            produced.insert(caps[1].to_string());
+        }
+    }
+    let ambient =
+        |name: &str| AMBIENT_GLOBALS.contains(&name) || BUILTIN_WINDOW_PROPS.contains(&name);
+    let mut issues: Vec<String> = Vec::new();
+    for (rel, text) in &cleaned {
+        for caps in pat.require.captures_iter(text) {
+            let name = &caps[1];
+            if produced.contains(name) || ambient(name) {
+                continue;
+            }
+            if let Some(near) = produced
+                .iter()
+                .filter(|p| fuzzy_global_match(name, p))
+                .min_by_key(|p| p.len())
+            {
+                issues.push(format!(
+                    "{rel}:requireGlobal('{name}') 找不到全局对象;工作区导出的相近名称是 {near}(全局命名不一致)"
+                ));
+            } else {
+                issues.push(format!(
+                    "{rel}:requireGlobal('{name}') 找不到全局对象(工作区未导出该全局)"
+                ));
+            }
+        }
+        for caps in pat.read.captures_iter(text) {
+            let whole = caps.get(0).map(|m| m.end()).unwrap_or(text.len());
+            let after = text[whole..].trim_start();
+            if after.starts_with('=') {
+                continue; // 赋值/比较,不是读取
+            }
+            let name = &caps[1];
+            if produced.contains(name) || ambient(name) {
+                continue;
+            }
+            if let Some(near) = produced
+                .iter()
+                .filter(|p| fuzzy_global_match(name, p))
+                .min_by_key(|p| p.len())
+            {
+                issues.push(format!(
+                    "{rel}:读取 window.{name},但工作区只导出了 {near}(全局命名不一致)"
+                ));
+            }
+        }
+    }
+    issues.sort();
+    issues.dedup();
+    issues.truncate(MAX_ISSUES);
+    issues
+}
+
+fn is_js_rel(rel: &str) -> bool {
+    let lower = rel.to_ascii_lowercase();
+    JS_EXTENSIONS
+        .iter()
+        .any(|ext| lower.ends_with(&format!(".{ext}")))
+}
+
+/// 规范化全局名:只保留 ASCII 字母数字并小写;导出名允许去掉 `MC` 前缀。
+/// 包含匹配只在两侧都不短于 6 个字符时启用,避免 `UI`/`GameUI` 这类噪声;
+/// 去前缀后的**完全相等**不受长度限制(`MC_APP` 与 `App` 是典型的命名不一致)。
+fn fuzzy_global_match(consumer: &str, produced: &str) -> bool {
+    let c: String = consumer
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect();
+    let p: String = produced
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect();
+    if c == p {
+        return true;
+    }
+    if let Some(stripped) = p.strip_prefix("mc") {
+        if stripped == c {
+            return true;
+        }
+    }
+    c.len() >= 6 && p.len() >= 6 && (p.contains(&c) || c.contains(&p))
+}
+
+/// 提取 HTML 里所有**内联** `<script>` 正文(带 `src` 的外链脚本不算)。
+fn html_inline_scripts(text: &str) -> Vec<String> {
+    let lower = text.to_ascii_lowercase();
+    let mut out = Vec::new();
+    let mut pos = 0;
+    while let Some(rel) = lower[pos..].find("<script") {
+        let open = pos + rel;
+        let Some(tag_end_rel) = lower[open..].find('>') else {
+            break;
+        };
+        let tag_end = open + tag_end_rel;
+        let attrs = &lower[open..tag_end];
+        let Some(close) = find_case_insensitive(&lower, tag_end + 1, "</script>") else {
+            break;
+        };
+        let has_src = attr_value(attrs, "src").is_some();
+        if !has_src {
+            out.push(text[tag_end + 1..close].to_string());
+        }
+        pos = close + "</script>".len();
+    }
+    out
 }
 
 /// 对**尚未落盘**的单文件 HTML 文本做自包含检查(SKY-8,2026-10-24)。
@@ -208,6 +530,7 @@ pub(crate) fn single_file_text_issues(rel: &str, html: &str) -> Vec<String> {
     for reference in html_local_refs(&cleaned) {
         issues.push(format!("{rel}:单文件交付不得引用本地外部资源 {reference}"));
     }
+    issues.extend(global_wiring_issues(&[(rel.to_string(), html.to_string())]));
     issues.sort();
     issues.dedup();
     issues.truncate(MAX_ISSUES);
@@ -1250,6 +1573,136 @@ mod tests {
         assert!(
             single_file_text_issues("index.html", commented).is_empty(),
             "HTML 注释里的外链不得误伤"
+        );
+    }
+
+    fn texts(items: &[(&str, &str)]) -> Vec<(String, String)> {
+        items
+            .iter()
+            .map(|(rel, text)| (rel.to_string(), text.to_string()))
+            .collect()
+    }
+
+    /// SKY-1:入口 `requireGlobal('BlockEngine')` vs 上游只导出 `MC_BLOCK_ENGINE`
+    /// ——静态判定必须点名两侧名字(不靠审计自由文本)。
+    #[test]
+    fn global_wiring_flags_renamed_global_lookup() {
+        let issues = global_wiring_issues(&texts(&[
+            (
+                "parts/main.js",
+                "var BlockEngine = requireGlobal('BlockEngine');",
+            ),
+            (
+                "parts/block-engine.js",
+                "global.MC_BLOCK_ENGINE = API;\nglobal.MC = global.MC || {};",
+            ),
+        ]));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.contains("requireGlobal('BlockEngine')")
+                    && i.contains("MC_BLOCK_ENGINE")
+                    && i.contains("命名不一致")),
+            "{issues:?}"
+        );
+    }
+
+    /// 生产者/消费者同名(即使分处两文件)不得误报。
+    #[test]
+    fn global_wiring_accepts_matching_global() {
+        let issues = global_wiring_issues(&texts(&[
+            (
+                "index.html",
+                "<script>window.BlockEngine = Engine;</script>",
+            ),
+            (
+                "parts/main.js",
+                "var e = requireGlobal('BlockEngine'); e.addBlock();",
+            ),
+        ]));
+        assert!(issues.is_empty(), "{issues:?}");
+    }
+
+    /// 完全没导出 → 报「工作区未导出该全局」(与命名不一致区分)。
+    #[test]
+    fn global_wiring_flags_missing_global() {
+        let issues = global_wiring_issues(&texts(&[(
+            "parts/main.js",
+            "var m = requireGlobal('MissingThing');",
+        )]));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.contains("MissingThing") && i.contains("未导出该全局")),
+            "{issues:?}"
+        );
+    }
+
+    /// CDN 全局(THREE)与浏览器内置属性不算工作区导出缺失。
+    #[test]
+    fn global_wiring_ignores_ambient_and_builtin_globals() {
+        let issues = global_wiring_issues(&texts(&[(
+            "parts/main.js",
+            "var t = requireGlobal('THREE');\nwindow.innerWidth; window.location.href; window.THREE;",
+        )]));
+        assert!(issues.is_empty(), "{issues:?}");
+    }
+
+    /// 注释里的示例与 `==` 比较不得被当成生产者/消费者。
+    #[test]
+    fn global_wiring_ignores_comments_and_comparisons() {
+        let issues = global_wiring_issues(&texts(&[(
+            "parts/main.js",
+            "// window.Ghost = 1;\nif (window.Ghost == null) { requireGlobal('Ghost'); }",
+        )]));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.contains("Ghost") && i.contains("未导出该全局")),
+            "比较不是赋值,仍应报未导出: {issues:?}"
+        );
+        assert!(
+            !issues.iter().any(|i| i.contains("注释")),
+            "不得出现注释噪声: {issues:?}"
+        );
+    }
+
+    /// `window.X` 读取与已导出名字相近但仍不同 → 报命名不一致。
+    #[test]
+    fn global_wiring_flags_read_name_mismatch() {
+        let issues = global_wiring_issues(&texts(&[
+            ("parts/main.js", "var e = window.BlockEngine;"),
+            ("parts/engine.js", "global.MC_BLOCK_ENGINE = API;"),
+        ]));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.contains("读取 window.BlockEngine") && i.contains("MC_BLOCK_ENGINE")),
+            "{issues:?}"
+        );
+    }
+
+    /// HTML 正文里的撇号不能破坏脚本扫描;内联脚本里的全局仍然参与判定。
+    #[test]
+    fn global_wiring_scans_inline_scripts_of_html() {
+        let issues = global_wiring_issues(&texts(&[(
+            "index.html",
+            "<html><body><p>don't panic</p><script>var a = requireGlobal('Absent');</script></body></html>",
+        )]));
+        assert!(issues.iter().any(|i| i.contains("Absent")), "{issues:?}");
+    }
+
+    /// 落盘前的单文件检查也消费全局命名规则(模型手写内联时提前反馈)。
+    #[test]
+    fn single_file_text_issues_include_global_naming() {
+        let html =
+            "<html><script>global.MC_APP = {};\nvar a = requireGlobal('App');</script></html>";
+        let issues = single_file_text_issues("index.html", html);
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.contains("requireGlobal('App')") && i.contains("MC_APP")),
+            "{issues:?}"
         );
     }
 }

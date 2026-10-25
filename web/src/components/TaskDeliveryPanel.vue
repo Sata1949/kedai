@@ -18,6 +18,8 @@ const props = defineProps<{
 // 旧服务端不下发这两个字段（SKY-6 新增）：按「无问题」容错。
 const contentIssues = computed(() => props.delivery?.content_issues ?? []);
 const truncatedSteps = computed(() => props.delivery?.truncated ?? []);
+// SKY-1 交付卫生（2026-10-25）：根目录临时/草稿文件只作提示，不影响终态。
+const hygieneIssues = computed(() => props.delivery?.hygiene_issues ?? []);
 </script>
 
 <template>
@@ -51,6 +53,11 @@ const truncatedSteps = computed(() => props.delivery?.truncated ?? []);
         :key="issue"
         class="sv-delivery-warn"
       >交付内容校验：{{ issue }}</div>
+      <div
+        v-for="issue in hygieneIssues"
+        :key="issue"
+        class="sv-delivery-hint"
+      >交付卫生：{{ issue }}</div>
       <div v-if="!props.delivery.workspace_available" class="sv-delivery-warn">
         工作区当前不可访问，缺失判定不可信。
       </div>

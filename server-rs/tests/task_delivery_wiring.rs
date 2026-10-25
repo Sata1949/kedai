@@ -324,3 +324,104 @@ async fn redo_recheck_skips_final_audit_and_returns_partial() {
 
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+/// ⑤ 全局命名接线不一致（SKY-1，2026-10-25）：入口 `requireGlobal('BlockEngine')`，
+/// 内联脚本只导出 `MC_BLOCK_ENGINE` → 静态闸门判 partial，并同时点名两侧名字。
+#[tokio::test]
+async fn global_name_mismatch_downgrades_to_partial() {
+    let app = test_app();
+    let ws = temp_workspace("global-name-mismatch");
+    let html = "<html><script>global.MC_BLOCK_ENGINE = {};\nvar engine = requireGlobal('BlockEngine');</script></html>";
+    let title = team_title(
+        &[(
+            "写入口",
+            &["index.html"],
+            write_goal("index.html", html, "写入口"),
+        )],
+        pass_audit(),
+        " 单文件交付(命名一致性用例)",
+    );
+    let id = run_task(app, &title, &ws).await;
+    let (st, detail) = wait_terminal(app, &id).await;
+
+    assert_eq!(st, "partial", "全局命名不一致不得判 done: {detail}");
+    let error = detail["task"]["error"].as_str().unwrap_or("");
+    assert!(
+        error.contains("全局命名不一致")
+            && error.contains("BlockEngine")
+            && error.contains("MC_BLOCK_ENGINE"),
+        "error 应同时点名消费者与生产者: {error:?}"
+    );
+    let issues = detail["delivery"]["content_issues"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        issues.iter().any(|v| {
+            let s = v.as_str().unwrap_or("");
+            s.contains("index.html") && s.contains("requireGlobal('BlockEngine')")
+        }),
+        "交付摘要应下发全局命名问题: {detail}"
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// ⑥ 交付卫生（SKY-1，2026-10-25）：根目录预置未声明的 `_check.js` 只进提示，
+/// 不把健康交付降成 partial；摘要与事件都要能看到。
+#[tokio::test]
+async fn scratch_files_are_reported_without_downgrading() {
+    let app = test_app();
+    let ws = temp_workspace("hygiene-note");
+    std::fs::write(ws.join("_check.js"), "console.log('scratch');\n").expect("写临时脚本失败");
+    let title = team_title(
+        &[(
+            "写入口",
+            &["index.html"],
+            write_goal(
+                "index.html",
+                "<html><script>window.App={ready:true};</script></html>",
+                "写入口",
+            ),
+        )],
+        pass_audit(),
+        " 单文件交付(交付卫生用例)",
+    );
+    let id = run_task(app, &title, &ws).await;
+    let (st, detail) = wait_terminal(app, &id).await;
+
+    assert_eq!(st, "done", "临时脚本只作提示,不得降终态: {detail}");
+    let hygiene = detail["delivery"]["hygiene_issues"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        hygiene
+            .iter()
+            .any(|v| v.as_str().unwrap_or("").contains("_check.js")),
+        "交付摘要应下发卫生提示: {detail}"
+    );
+
+    let (status, events) = send_json(
+        app,
+        "GET",
+        &format!("/api/tasks/{id}/events?after=0&limit=2000"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let joined = events["events"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|e| e["detail"].as_str().unwrap_or("").to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        joined.contains("交付卫生提示"),
+        "应透出卫生提示事件: {joined}"
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+}

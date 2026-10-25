@@ -95,7 +95,7 @@ pub(crate) const TEAM_ASSEMBLY_CONTRACT_NOTE: &str = "【接口接线纪律】�
 ///
 /// 条件段:仅在目标要求单文件交付、且该主声明了 HTML 入口时追加;内置指令不经
 /// untrusted 包裹。
-pub(crate) const TEAM_SINGLE_FILE_ASSEMBLY_NOTE: &str = "【单文件装配纪律】目标要求唯一单文件交付:最终 HTML 必须自包含——分片**必须写成经典脚本**(赋值到 `window.*`,不使用 `import`/`export`),以便 `fs_inline_html` 的 sources 模式按序直接内联;如确需 ESM,总装主必须提供 importmap/模板控制模块边界,并确保最终文件没有相对 `import`。优先调用 `fs_inline_html` 装配(引擎读分片、替换 `@@NAME@@` 槽位、写入口;模板槽位名必须与 parts 键一一对应),不要手写整份 100KB+ 内联脚本。不得出现指向工作区文件的 `<script src>`/`<link href>`/`<img src>` 或相对 `import`;只允许 importmap 中的远程 CDN 依赖;不得残留 `@@` 槽位,也不得交付「能打开但入口为空壳」的占位骨架。装配完成后必须实际运行一次自检(node --check 抽取的内联脚本、或浏览器加载并读取运行状态),并在结果正文报告入口字节数、内联分片数与自检结果。引擎会对本地外链、未导出导入与空壳交付做确定性判定,不合格即 partial。";
+pub(crate) const TEAM_SINGLE_FILE_ASSEMBLY_NOTE: &str = "【单文件装配纪律】目标要求唯一单文件交付:最终 HTML 必须自包含——分片**必须写成经典脚本**(赋值到 `window.*`,不使用 `import`/`export`),以便 `fs_inline_html` 的 sources 模式按序直接内联;如确需 ESM,总装主必须提供 importmap/模板控制模块边界,并确保最终文件没有相对 `import`。优先调用 `fs_inline_html` 装配(引擎读分片、替换 `@@NAME@@` 槽位、写入口;模板槽位名必须与 parts 键一一对应),不要手写整份 100KB+ 内联脚本。不得出现指向工作区文件的 `<script src>`/`<link href>`/`<img src>` 或相对 `import`;只允许 importmap 中的远程 CDN 依赖;不得残留 `@@` 槽位,也不得交付「能打开但入口为空壳」的占位骨架。装配完成后必须实际运行一次自检(node --check 抽取的内联脚本、或浏览器加载并读取运行状态),并在结果正文报告入口字节数、内联分片数与自检结果。引擎会对本地外链、未导出导入与空壳交付做确定性判定,不合格即 partial。**【就绪状态与交付卫生】**入口若需异步初始化,必须暴露机器可读的就绪状态:`window.<App>.ready=true` 与 `window.<App>.getState()`(返回 `sceneChildren`/`mapSize` 等计数);初始化失败时 ready 必须保持 false,不得用 try/catch 吞掉异常后仍置 true。引擎会用无头浏览器加载最终入口核对 ready、scene.children、map.size、renderer 与未捕获错误,任一不合格即 partial——不要只在正文里声称「已验证」。交付前清理根目录临时脚本/草稿(如 `_verify_*.js`、`_dump.js`、`_ui.txt`),只保留最终入口与必要产物。";
 
 /// team 规划器的**单文件交付约束**(SKY-4,2026-10-24):条件段,目标要求单文件时
 /// 追加到规划 user 消息。分片只作中间产物,必须有一个子目标负责总装成自包含入口;
@@ -584,6 +584,11 @@ mod tests {
             "不得残留 `@@` 槽位",
             "空壳",
             "确定性判定",
+            // SKY-9(2026-10-25):运行期闸门依赖入口自报就绪状态,交付目录要干净。
+            "就绪状态",
+            "getState()",
+            "无头浏览器",
+            "临时脚本",
         ] {
             assert!(
                 TEAM_SINGLE_FILE_ASSEMBLY_NOTE.contains(needle),
