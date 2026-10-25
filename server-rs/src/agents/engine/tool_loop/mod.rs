@@ -324,7 +324,7 @@ pub(crate) async fn run_tool_loop(req: ToolLoopRequest<'_>) -> Result<ExecutorRe
         }
 
         // ===== 无进展守卫的中途提醒(先提醒,后硬收尾)=====
-        if let Some(notice) = guards.observe_round_progress(round_progress, round) {
+        if let Some(notice) = guards.observe_round_progress(round_progress) {
             emit_notice(notice, llm_messages, tx, abort, flag).await?;
         }
         // ===== 连续只读计数(TMR-5):按本轮模型请求的工具调用统计 =====
@@ -348,18 +348,26 @@ pub(crate) async fn run_tool_loop(req: ToolLoopRequest<'_>) -> Result<ExecutorRe
         }
 
         // ===== 轮末判定(7 类停止条件;顺序见 guard.rs)=====
-        let evaluation = guards.evaluate(
+        // 两阶段:token 预算的提醒事件先发出,步骤墙钟再采样 elapsed——
+        // 与抽取前「先 await token warn,再取墙钟」的时点一致。
+        let mut evaluation = guards.evaluate_token(
             session_id,
-            RoundFacts {
-                round,
-                elapsed: loop_started.elapsed(),
-                used_tokens: total_usage.prompt_tokens + total_usage.completion_tokens,
-                semantic_break: semantic_break.take(),
-                repeated,
-            },
+            total_usage.prompt_tokens + total_usage.completion_tokens,
+            round,
         );
-        for notice in evaluation.notices {
-            emit_notice(notice, llm_messages, tx, abort, flag).await?;
+        emit_notices(&mut evaluation.notices, llm_messages, tx, abort, flag).await?;
+        if evaluation.stop.is_none() {
+            evaluation = guards.evaluate_rest(
+                session_id,
+                RoundFacts {
+                    round,
+                    elapsed: loop_started.elapsed(),
+                    used_tokens: total_usage.prompt_tokens + total_usage.completion_tokens,
+                    semantic_break: semantic_break.take(),
+                    repeated,
+                },
+            );
+            emit_notices(&mut evaluation.notices, llm_messages, tx, abort, flag).await?;
         }
         if let Some(stop) = evaluation.stop {
             let (title, detail) = stop.event();
@@ -405,5 +413,19 @@ async fn emit_notice(
     }
     let (title, detail) = notice.event();
     send_event(step_evt(title, Some(detail), None, None), tx, abort, flag).await?;
+    Ok(())
+}
+
+/// 按顺序发出阶段内的全部提醒(两阶段判定共用;drain 避免调用方再管所有权)。
+async fn emit_notices(
+    notices: &mut Vec<GuardNotice>,
+    llm_messages: &mut Vec<LlmMessage>,
+    tx: &tokio::sync::mpsc::Sender<SseEvent>,
+    abort: &tokio::sync::watch::Receiver<bool>,
+    flag: &AbortFlag,
+) -> Result<(), EngineError> {
+    for notice in notices.drain(..) {
+        emit_notice(notice, llm_messages, tx, abort, flag).await?;
+    }
     Ok(())
 }

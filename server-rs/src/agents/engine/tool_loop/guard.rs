@@ -104,7 +104,9 @@ pub(super) struct RoundFacts {
     pub(super) round: usize,
     /// 工具循环已耗时。
     pub(super) elapsed: Duration,
-    /// 本 run 累计 prompt + completion。
+    /// 本 run 累计 prompt + completion。生产路径由 evaluate_token 单独接收;
+    /// 本字段只服务决策表单测入口(避免把「取用量」和「判其余闸门」耦合回一次调用)。
+    #[allow(dead_code)]
     pub(super) used_tokens: i64,
     /// 语义熔断命中:(工具名, 窗口内次数, 输出去重数)。
     pub(super) semantic_break: Option<(String, usize, usize)>,
@@ -209,11 +211,7 @@ impl GuardState {
     /// 登记本轮是否有「成功写入声明文件」的进展,并产出中途提醒(先提醒后硬收尾)。
     ///
     /// 提醒点 = `limit / 2`(至少 1):SKY-7 的「硬收尾之前先给一次机会」。
-    pub(super) fn observe_round_progress(
-        &mut self,
-        round_progress: bool,
-        _round: usize,
-    ) -> Option<GuardNotice> {
+    pub(super) fn observe_round_progress(&mut self, round_progress: bool) -> Option<GuardNotice> {
         let limit = self.config.no_progress_limit?;
         if round_progress {
             self.no_progress_rounds = 0;
@@ -232,24 +230,28 @@ impl GuardState {
         None
     }
 
-    /// 轮末判定。顺序与抽出前逐字一致:预算/轮次优先,守卫按只读 → 无进展 →
-    /// 语义 → 重复调用。
+    /// 第一阶段:token 预算(HB-1)。
     ///
-    /// `session_id` 只用于诊断日志(保持抽取前的日志字段与文案),不参与判定。
-    pub(super) fn evaluate(&mut self, session_id: &str, facts: RoundFacts) -> GuardEvaluation {
+    /// 与其余闸门分开是为了**保持抽取前的采样时点**:旧实现先发出 token warn 事件
+    /// (`await`),再到步骤墙钟处取 `elapsed`;若合并成一次判定,一次慢 send 会让墙钟
+    /// 少算这段耗时,预算边界上可能多跑一轮。循环体先发本阶段提醒,再调 `evaluate_rest`。
+    ///
+    /// `session_id` 只用于诊断日志(保持抽取前的字段与文案),不参与判定。
+    pub(super) fn evaluate_token(
+        &mut self,
+        session_id: &str,
+        used_tokens: i64,
+        round: usize,
+    ) -> GuardEvaluation {
         let mut notices = Vec::new();
-
-        // 1) token 预算(HB-1):按成本而非轮数收口。
-        if self.config.token_budget > 0
-            && budget_reached(facts.used_tokens, self.config.token_budget)
-        {
+        if self.config.token_budget > 0 && budget_reached(used_tokens, self.config.token_budget) {
             if !self.budget_noticed {
                 self.budget_noticed = true;
                 tracing::info!(
                     session_id = session_id.to_string(),
-                    used_tokens = facts.used_tokens,
+                    used_tokens,
                     budget = self.config.token_budget,
-                    rounds = facts.round + 1,
+                    rounds = round + 1,
                     action = if self.config.stop_on_budget {
                         "stop"
                     } else {
@@ -259,16 +261,15 @@ impl GuardState {
                 );
                 if !self.config.stop_on_budget {
                     notices.push(GuardNotice::TokenBudgetWarn {
-                        used_tokens: facts.used_tokens,
+                        used_tokens,
                         budget: self.config.token_budget,
-                        round: facts.round + 1,
+                        round: round + 1,
                     });
                 }
             }
             if self.config.stop_on_budget {
-                let used_tokens = facts.used_tokens;
                 let budget = self.config.token_budget;
-                let display_round = facts.round + 1;
+                let display_round = round + 1;
                 return GuardEvaluation {
                     notices,
                     stop: Some(LoopStop {
@@ -284,6 +285,17 @@ impl GuardState {
                 };
             }
         }
+        GuardEvaluation {
+            notices,
+            stop: None,
+        }
+    }
+
+    /// 第二阶段:步骤墙钟 → 轮次上限 → 连续只读 → 声明文件无进展 → 语义 → 重复调用。
+    ///
+    /// 顺序与抽出前逐字一致;`session_id` 只用于诊断日志,不参与判定。
+    pub(super) fn evaluate_rest(&mut self, session_id: &str, facts: RoundFacts) -> GuardEvaluation {
+        let mut notices = Vec::new();
 
         // 2) 步骤墙钟预算(D3):时间闸门优先于轮数闸门。
         if facts.round > 0 && step_budget_reached(facts.elapsed, self.config.step_budget) {
@@ -433,6 +445,21 @@ impl GuardState {
             notices,
             stop: None,
         }
+    }
+
+    /// 决策表单测的便捷入口:先 token 再其余(不模拟提醒事件的发送耗时)。
+    #[cfg(test)]
+    fn evaluate(&mut self, session_id: &str, facts: RoundFacts) -> GuardEvaluation {
+        let used_tokens = facts.used_tokens;
+        let round = facts.round;
+        let mut first = self.evaluate_token(session_id, used_tokens, round);
+        if first.stop.is_some() {
+            return first;
+        }
+        let mut rest = self.evaluate_rest(session_id, facts);
+        first.notices.append(&mut rest.notices);
+        first.stop = rest.stop;
+        first
     }
 }
 
@@ -594,9 +621,9 @@ mod tests {
             no_progress_limit: Some(4),
             ..base_config()
         });
-        assert!(state.observe_round_progress(false, 1).is_none());
+        assert!(state.observe_round_progress(false).is_none());
         let nudge = state
-            .observe_round_progress(false, 2)
+            .observe_round_progress(false)
             .expect("第 2 轮(limit/2)应提醒");
         assert!(matches!(
             &nudge,
@@ -607,12 +634,12 @@ mod tests {
         ));
         let (_, detail) = nudge.event();
         assert!(detail.contains("再连续 2 轮"), "{detail}");
-        assert!(state.observe_round_progress(false, 3).is_none());
+        assert!(state.observe_round_progress(false).is_none());
         assert!(
             state.evaluate("s", facts(3)).stop.is_none(),
             "第 3 轮不得收尾"
         );
-        assert!(state.observe_round_progress(false, 4).is_none());
+        assert!(state.observe_round_progress(false).is_none());
         let out = state.evaluate("s", facts(4));
         let stop = out.stop.expect("第 4 轮必须收尾");
         assert_eq!(stop.kind, LoopStopKind::NoProgress);
@@ -623,12 +650,12 @@ mod tests {
             no_progress_limit: Some(4),
             ..base_config()
         });
-        reset.observe_round_progress(false, 1);
-        reset.observe_round_progress(false, 2); // 提醒
-        reset.observe_round_progress(true, 3); // 有进展
-        assert!(reset.observe_round_progress(false, 4).is_none());
+        reset.observe_round_progress(false);
+        reset.observe_round_progress(false); // 提醒
+        reset.observe_round_progress(true); // 有进展
+        assert!(reset.observe_round_progress(false).is_none());
         let nudge_again = reset
-            .observe_round_progress(false, 5)
+            .observe_round_progress(false)
             .expect("重置后第 2 轮应重新提醒");
         assert!(matches!(nudge_again, GuardNotice::NoProgressNudge { .. }));
     }
@@ -691,9 +718,32 @@ mod tests {
             ..base_config()
         });
         state.observe_tool_calls(&[call("fs_write")]);
-        assert!(state.observe_round_progress(true, 1).is_none());
+        assert!(state.observe_round_progress(true).is_none());
         let out = state.evaluate("s", facts_at(1, 200, Duration::from_secs(2)));
         assert!(out.notices.is_empty());
         assert!(out.stop.is_none());
+    }
+
+    /// 同一轮既有提醒又有 stop 时,提醒必须随判定结果一起返回(循环体先发提醒再发
+    /// stop;这是 `mod.rs` 事件顺序的可回归证据,与抽取前一致)。
+    #[test]
+    fn notices_are_kept_when_same_round_also_stops() {
+        let mut state = GuardState::new(GuardConfig {
+            readonly_limit: Some(2),
+            ..base_config()
+        });
+        state.observe_tool_calls(&[call("fs_read"), call("fs_read")]);
+        let mut round = facts(3);
+        round.semantic_break = Some(("bash".into(), 8, 1));
+        let out = state.evaluate("s", round);
+        assert_eq!(out.notices.len(), 1, "只读提醒必须先于 stop 保留");
+        assert!(matches!(
+            &out.notices[0],
+            GuardNotice::ReadonlyNudge { limit: 2 }
+        ));
+        assert_eq!(
+            out.stop.expect("语义熔断应胜出").kind,
+            LoopStopKind::Semantic
+        );
     }
 }

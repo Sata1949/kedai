@@ -517,6 +517,9 @@ pub(crate) struct ExecutorResult {
     /// 工具循环的提前停止记录(C-2C):7 类终止条件统一为 `LoopStopKind`。
     /// None = 正常收尾。预算类/轮次上限属于正常收尾,只有 4 个空转守卫经
     /// [`Self::guard_stopped`] 透出给任务侧降 partial(SKY-6 第 2 项)。
+    ///
+    /// **不要用 `stop.is_some()` 判定「守卫截断」**:预算/轮次上限同样会写入本字段,
+    /// 任务侧降 partial 必须走 [`Self::guard_stopped`](它按 kind 过滤)。
     pub(crate) stop: Option<LoopStop>,
 }
 
