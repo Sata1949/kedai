@@ -3,8 +3,8 @@
 > 本目录分两类:**六类活文档**(契约/功能/计划/展望/经验/遗留,改代码时需同步)与
 > **归档**(已整合的历史文档,仅供溯源,不再更新)。
 >
-> **物理约定:`docs/` 根下只允许六类活文档 + 本索引 + `fixtures/` + `archive/` + `plans/`。**
-> 该约定由 `tools/check-docs.mjs` 强制(规则 D2),新增文档若不属于六类,须先在本文登记其分类。
+> **物理约定:`docs/` 根下只允许六类活文档 + 本索引 + `fixtures/` + `archive/` + `plans/`;仓库根 `*.md` 只允许 `README.md` / `AGENTS.md` / `MAINTENANCE.md`。**
+> 该约定由 `tools/check-docs.mjs` 强制(规则 D2 / D7),新增文档若不属于六类,须先在本文登记其分类。
 >
 > **2026-09-16 整合说明**:本目录与仓库根原有 **68 份**过程文档(含根目录 `API.md`),其中 **50 份**
 > 内容按六类**移植**到下列九份文档中、原文件移入 `archive/2026-09-16-consolidation/`
@@ -127,6 +127,8 @@
 | [archive/kedai-agent-coordination.md](archive/kedai-agent-coordination.md) | 多 agent 协作约定 |
 | [archive/context-optimization-brief.md](archive/context-optimization-brief.md) | 上下文优化简报(其中「1 秒轮询/不走 SSE」已被任务事件 SSE 取代) |
 | [archive/contract-drift-2026-09-09.md](archive/contract-drift-2026-09-09.md) | 前后端契约漂移登记(#1-#12 全数修复,漂移检查已由 `tools/check-contract.mjs` 自动执行) |
+| [archive/P0-HANDOFF-2026-10-22.md](archive/P0-HANDOFF-2026-10-22.md) | P0 任务编排修复交接(0.3.0-B 后 P0/P1/P2 实测与收口记录;2026-10-25 由仓库根归档) |
+| [archive/更新说明-0.3.0B之后-2026-10-11.md](archive/更新说明-0.3.0B之后-2026-10-11.md) | 0.3.0-B→0.4.2 面向用户的更新说明稿(12 条大更新与撤回记录已并入 `功能-变更史.md`;2026-10-25 由仓库根归档) |
 
 ## 常见任务路由(我要做 X,该读哪份)
 

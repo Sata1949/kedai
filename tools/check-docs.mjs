@@ -13,11 +13,12 @@
  *
  * 规则:
  *   D1 六类活文档均存在
- *   D2 docs/ 根下只允许白名单(六类活文档 + README.md + fixtures/ + archive/)
+ *   D2 docs/ 根下只允许白名单(六类活文档 + README.md + fixtures/ + archive/ + plans/)
  *   D3 docs/README.md 的六类表格与实际文件**双向一致**(列了必须存在;存在必须列了)
  *   D4 活文档内的相对 markdown 链接目标必须存在(锚点尽量校验)
  *   D5 归档映射表覆盖归档目录下全部文件
  *   D6 (WARN) 计划/遗留条目应带 ID(P- / L / T / D / 批次 / 项)
+ *   D7 仓库根只允许 README.md / AGENTS.md / MAINTENANCE.md 三份约定文档
  *
  * 失败只影响本脚本自身结论;check-all.ps1 侧用统一 Invoke-Stage 聚合,
  * **不要**另建失败桶(见 MAINTENANCE.md §0「修复纪律」:曾因前端分支写进后端失败桶
@@ -48,6 +49,9 @@ const CLASSIFIED = [
 // docs/ 根下允许出现的条目(D2 白名单)
 const ROOT_ALLOW = new Set([...CLASSIFIED, 'docs/README.md']);
 const ROOT_ALLOW_DIRS = new Set(['docs/fixtures', 'docs/archive', 'docs/plans']);
+
+// 仓库根允许出现的 md(D7 白名单;其余过程稿一律进 docs/plans/ 或 docs/archive/)
+const REPO_ROOT_MD_ALLOW = new Set(['README.md', 'AGENTS.md', 'MAINTENANCE.md']);
 
 const ARCHIVE_DIR = 'docs/archive/2026-09-16-consolidation';
 
@@ -89,6 +93,26 @@ if (!fs.existsSync(DOCS)) {
     );
   } else {
     ok('D2', 'docs/ 根下无未登记条目');
+  }
+}
+
+// ---------- D7 仓库根只允许三份约定 md ----------
+// 背景(2026-10-25 C-2E):根目录曾长期滞留 P0-HANDOFF / 更新说明稿等过程稿。
+// docs/README.md 自述「仓库根只留 README/AGENTS/MAINTENANCE」,但 D2 只守 docs/ 根;
+// 本规则把该叙述变成硬门禁:过程稿应进 docs/plans/(调研/报告)或 docs/archive/(历史)。
+{
+  const strayRootMd = fs
+    .readdirSync(ROOT, { withFileTypes: true })
+    .filter((e) => e.isFile() && e.name.endsWith('.md') && !REPO_ROOT_MD_ALLOW.has(e.name))
+    .map((e) => e.name);
+  if (strayRootMd.length) {
+    fail(
+      'D7',
+      `仓库根出现未约定的 md(过程稿请移入 docs/plans/ 或 docs/archive/):\n` +
+        strayRootMd.map((s) => `       - ${s}`).join('\n')
+    );
+  } else {
+    ok('D7', '仓库根只有 README.md / AGENTS.md / MAINTENANCE.md');
   }
 }
 
