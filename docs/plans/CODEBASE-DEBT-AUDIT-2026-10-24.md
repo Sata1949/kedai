@@ -242,15 +242,16 @@
 ### 5.3 仓库卫生
 
 - **根目录三份非约定文档**：未跟踪的 `SKY7-EXEC-PLAN.md`（144 行，抬头明确写「收口时删除」）与 `更新稿-0.3.0B之后.md`（43 行），以及已跟踪的 `P0-HANDOFF.md`。`docs/README.md` 自述「根目录只留 README/AGENTS/MAINTENANCE」，但门禁只守 `docs/` 根，不守仓库根。
+- **2026-10-25 C-2E 已处置**：两份过程稿已归档（`docs/archive/P0-HANDOFF-2026-10-22.md`、`docs/archive/更新说明-0.3.0B之后-2026-10-11.md`），活文档引用改指归档；`check-docs` 新增 D7 守住仓库根。
 - **处置**：`SKY7-EXEC-PLAN.md` 内容已落入 `docs/计划.md:4900`、`docs/遗留.md:2766`、`docs/经验.md:2712` 等，可直接删；`更新稿-0.3.0B之后.md` 是面向用户的发布说明稿，12 条大更新与撤回记录已在 `功能-变更史`，不建议新建第七类活文档，应作为 GitHub Release 正文或并入 `功能-变更史` 短索引；`P0-HANDOFF.md` 仍被 4 份活文档引用，先把开放项并入计划/遗留、更新引用，再删除，不要盲删。
-- **5 条架构债**：3 条后端 wiring（`api→mcp`、`api→plugins`、`scripts→slash`）是组合根/兼容桥，登记为可接受；2 条前端真实回边中，`composables/useMemoryPanel → components/memoryPanel` 有明确低风险修法（纯函数下沉到 `composables/` 或 `utils/`），`stores/chat → characterScriptSandbox` 需要事件总线，单独评估。
-- **组件直改 state 113 处（C-2-0 后分类计数）** 是显式接纳，不是零债务；建议加 ratchet（只降不升），不要一次性清零。
+- **5 条架构债**：3 条后端 wiring（`api→mcp`、`api→plugins`、`scripts→slash`）是组合根/兼容桥，登记为可接受；2 条前端真实回边中，`composables/useMemoryPanel → components/memoryPanel` **已由 2026-10-25 C-2E 偿还**（纯函数移入 `utils/`，登记删除）；`stores/chat → characterScriptSandbox` 需要事件总线，单独评估（登记保留）。
+- **组件直改 state 113 处（C-2-0 后分类计数）** 是显式接纳，不是零债务；**2026-10-25 C-2E 已加 ratchet（`BASELINE_DIRECT_WRITES=113`，只降不升）**，不要一次性清零。
 - **文档台账不是屎山**：81 文件 / 48,973 行是六类体系的刻意设计，`check-docs`/`check-doc-claims` 全绿；问题是根目录草稿、少量现行态漂移与关键常量多源，不是「文档太多」。
 
 ### 5.4 CI / 门禁注释漂移
 
 - `.github/workflows/ci-linux.yml:7` 写「全量 15 段门禁」，实际 `check-all.ps1` 已有 19 个 `Invoke-Stage` 调用。
-- `ci-linux.yml:50-51` 写 `minSdk 24`，实际 `src-tauri/gen/android/app/build.gradle.kts:36` 是 30。
+- `ci-linux.yml:50-51` 写 `minSdk 24`，实际 `src-tauri/gen/android/app/build.gradle.kts:36` 是 30。**2026-10-25 C-2E 已修为 30。**
 - `ci-linux.yml:21` 引用已删除的 `docs/plans/QUALITY-FIX-PLAN.md`。
 - `tools/check-css-discipline.mjs:80-84` 注释称 `content.css` 有 12 处 `!important`，基线/实测是 10 处。
 - `tools/check-frontend-lint.mjs:5-8` 头部仍写「为什么不用 ESLint」，但仓库已装 ESLint 10，`check-all.ps1:281` 每轮都跑 `npm run lint -w web`；理由已过期，两个门禁可并存。
@@ -379,6 +380,41 @@
 7. 更新 `docs/计划.md` C-2 的计数与状态（本报告不改台账；执行前由维护者拍板）。
 
 **验收**：`check-arch`/`check-docs`/`check-doc-claims`/`count-tests --check` 全绿；ratchet 人为加一个超限文件必须转红；根目录只剩 `README.md`/`AGENTS.md`/`MAINTENANCE.md`；测试夹具 grep 只剩 1 处定义（或明确保留的少量变体）。
+
+**2026-10-25 执行追注（已完成）**：本批已落地，C-2 六批（C-2-0 + C-2A~E）全部完成。
+
+- 卫生：`P0-HANDOFF.md` → `docs/archive/P0-HANDOFF-2026-10-22.md`；未跟踪的
+  `更新稿-0.3.0B之后.md` → `docs/archive/更新说明-0.3.0B之后-2026-10-11.md`；
+  4 处活文档引用改指归档。`check-docs` 新增 D7：仓库根 `*.md` 只允许
+  README/AGENTS/MAINTENANCE。
+- 文件大小 ratchet：`tools/check-file-size.mjs` + `tools/file-size-baseline.json`，
+  基线 30 个超千行非测试源文件（排除 tests/common、tests.rs、*_tests.rs、tests_*.rs、
+  *.test.ts、*.spec.ts、*.d.ts）；基线内只降不升，基线外新超阈值即 FAIL；
+  接入 `check-all`（阶段 21→22）。
+- 测试夹具：`server-rs/tests/common/mod.rs` 提供 `test_app`/`send_json`/`test_lock`/
+  `wait_terminal` 及显式变体；75 个测试文件删除本地定义约 2,600 行，24 个任务用例
+  保留一行超时包装、2 个特殊变体原样保留；`count-tests` 排除 `tests/common/`，
+  集成文件数仍 80。每个测试文件仍编译为独立二进制，进程级 app 与串行锁语义不变。
+- 架构债：`memoryPanel` 纯函数移入 `utils/`，`composables→components` 回边消除；
+  `arch-layers.json` 删登记，已登记依赖 5→4（wiring 3 / debt 1）。`stores/chat →
+  characterScriptSandbox` 需事件总线，按审计口径单独立项，未动。
+- 直写 ratchet：`check-arch` 增 `BASELINE_DIRECT_WRITES=113`，总量超出即 FAIL；
+  113 处分类计数不变。
+- 漂移：`ci-linux.yml` 删「15 段」硬编码与 `QUALITY-FIX-PLAN` 死引用、
+  `CARGO_NDK_PLATFORM` 24→30；`check-css-discipline` 12→10；
+  `check-frontend-lint` 头部改为与 ESLint 的分工。
+- 台账：`docs/计划.md` C-2 状态改「部分完成」并登记 C-2 残余；本追注；
+  `docs/契约-架构与数据.md` 已登记依赖/直写计数同步；`MAINTENANCE.md` 门禁清单补
+  file-size 与直写 ratchet；`docs/经验.md` E134 记录批量删除的区间重叠坑。
+- 验证：后端静态 2040（1573 单测 + 467 集成 / 80 文件）不变；`cargo check --tests`
+  0 warning、`clippy --all-targets -D warnings`、`fmt --check` 全绿；定向集成 7 文件
+  53 例全绿；前端 1687 静态 / 1730 运行时；`check-docs`（D7）/`check-arch`/
+  `check-file-size`/`check-doc-claims`/`check-test-ratchet`/`check-css-discipline`/
+  `check-frontend-lint` 全绿；file-size 与直写两个 ratchet 均做人为反证并转红。
+- 仍存在：`executor.rs`（1,852 行）与 `settings_service/mod.rs`（2,126 行）未拆；
+  `stores/chat → characterScriptSandbox` debt；`check-settings-parity` 只比字段名/
+  可选性；`TaskDetail`/`TaskUsageTotal` + `ts-rs` 未做——均登记在 `docs/计划.md`
+  的「C-2 残余」。
 
 ### 排序理由
 
