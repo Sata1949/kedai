@@ -258,14 +258,29 @@ pub(super) fn pre_seed_single_file(
         ));
     }
     let include_three = ctx.goal.to_ascii_lowercase().contains("three");
-    let (text, count) = crate::tools::agent_tools_fs_inline::assemble_pre_seed(
+    let outcome = crate::tools::agent_tools_fs_inline::assemble_pre_seed(
         workspace,
         &html,
         upstream_files,
         "Kedai 单文件交付（引擎预置骨架）",
         include_three,
-    )
-    .ok()?;
+    );
+    // 跳过的 ESM 分片必须点名:全题复跑里预置静默跳过 ESM,模型既没有入口也不知道
+    // 为什么没有,只能重新规划或空转。这里把「引擎不打包 ESM」变成可执行指令。
+    let skipped = if outcome.skipped_esm.is_empty() {
+        String::new()
+    } else {
+        format!(
+            ";跳过 ESM 分片(引擎不打包 ESM):{}。请改写为经典脚本(window.*)后重新装配,或改用只引用远程 URL 的模板",
+            outcome.skipped_esm.join("、")
+        )
+    };
+    let Some(text) = outcome.html else {
+        return Some(format!(
+            "引擎未能预置最终入口 {html}:{}{skipped}。请把上游分片改写为经典脚本后调用 fs_inline_html,或提供只引用远程 URL 的模板。",
+            outcome.reason.unwrap_or_default()
+        ));
+    };
     if let Err(reason) = scope.reserve_write(&out_path) {
         tracing::warn!(
             path = html.as_str(),
@@ -282,8 +297,9 @@ pub(super) fn pre_seed_single_file(
         scope.note_read(&out_path, stamp);
     }
     Some(format!(
-        "引擎已在工作区预置最终入口 {html}({} 字节,内联 {count} 个上游分片{}):请先 fs_read 核对,再用 fs_edit 或 fs_inline_html 补全入口调用;不要重写整份内联。",
+        "引擎已在工作区预置最终入口 {html}({} 字节,内联 {} 个上游分片{}{skipped}):请先 fs_read 核对,再用 fs_edit 或 fs_inline_html 补全入口调用;不要重写整份内联。",
         text.len(),
+        outcome.inlined,
         if include_three {
             ",已带 Three.js CDN"
         } else {
