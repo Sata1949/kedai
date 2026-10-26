@@ -168,6 +168,10 @@ impl Db {
                 //(可空无 DEFAULT,零回填——NULL = 未绑定工作区)
                 crate::migration::ensure_tasks_workspace_column(&conn)
                     .map_err(|e| format!("升级 tasks workspace 列失败: {e}"))?;
+                // 幂等 schema 升级(SKY-9-L1):旧库 tasks 补 runtime_issues 列
+                //(NOT NULL DEFAULT '[]',旧行零回填)
+                crate::migration::ensure_tasks_runtime_issues_column(&conn)
+                    .map_err(|e| format!("升级 tasks runtime_issues 列失败: {e}"))?;
                 // 幂等 schema 升级(可观测性问题①):旧库 task_llm_calls 补 finish_reason 列
                 crate::migration::ensure_task_llm_calls_finish_reason_column(&conn)
                     .map_err(|e| format!("升级 task_llm_calls finish_reason 列失败: {e}"))?;

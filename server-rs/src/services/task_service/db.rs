@@ -208,7 +208,8 @@ impl TaskService {
             self.exec_with_event(
                 &conn,
                 Some(id),
-                "UPDATE tasks SET status = 'planning', plan = '[]', result = '', error = '', updated_at = ?1 WHERE id = ?2",
+                "UPDATE tasks SET status = 'planning', plan = '[]', result = '', error = '', \
+                 runtime_issues = '[]', updated_at = ?1 WHERE id = ?2",
                 params![now_iso(), id],
                 TaskEventKind::Status,
                 None,

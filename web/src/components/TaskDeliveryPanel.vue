@@ -20,6 +20,8 @@ const contentIssues = computed(() => props.delivery?.content_issues ?? []);
 const truncatedSteps = computed(() => props.delivery?.truncated ?? []);
 // SKY-1 交付卫生（2026-10-25）：根目录临时/草稿文件只作提示，不影响终态。
 const hygieneIssues = computed(() => props.delivery?.hygiene_issues ?? []);
+// SKY-9-L1（2026-10-25）：运行期自检问题由后端持久化后下发，与错误条同源。
+const runtimeIssues = computed(() => props.delivery?.runtime_issues ?? []);
 </script>
 
 <template>
@@ -53,6 +55,11 @@ const hygieneIssues = computed(() => props.delivery?.hygiene_issues ?? []);
         :key="issue"
         class="sv-delivery-warn"
       >交付内容校验：{{ issue }}</div>
+      <div
+        v-for="issue in runtimeIssues"
+        :key="`runtime-${issue}`"
+        class="sv-delivery-warn"
+      >运行期自检：{{ issue }}</div>
       <div
         v-for="issue in hygieneIssues"
         :key="issue"

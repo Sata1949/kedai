@@ -93,6 +93,20 @@ describe('TaskDeliveryPanel', () => {
     expect(text).toContain('parts/main.js:文件为空(0B)');
   });
 
+  it('运行期自检问题：独立展示，旧服务端缺字段时静默', () => {
+    const w = mountPanel(
+      summary({
+        runtime_issues: ['index.html:页面没有 canvas 画布(3D/可视化交付未渲染)'],
+      }),
+    );
+    const text = w.text();
+    expect(text).toContain('运行期自检');
+    expect(text).toContain('页面没有 canvas 画布');
+    expect(text).not.toContain('交付内容校验');
+
+    expect(mountPanel(summary()).text()).not.toContain('运行期自检');
+  });
+
   it('交付卫生提示：只展示提示，不冒充内容校验失败', () => {
     const w = mountPanel(
       summary({

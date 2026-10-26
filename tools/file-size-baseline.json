@@ -7,11 +7,11 @@
     "server-rs/src/agents/engine/messages/trim.rs": 1111,
     "server-rs/src/agents/engine/run_loop.rs": 1022,
     "server-rs/src/api/chat.rs": 1138,
-    "server-rs/src/api/tasks.rs": 1152,
+    "server-rs/src/api/tasks.rs": 1157,
     "server-rs/src/connectors/mock.rs": 1243,
     "server-rs/src/connectors/openai_compatible/mod.rs": 1191,
     "server-rs/src/mcp/mod.rs": 1113,
-    "server-rs/src/migration/mod.rs": 1131,
+    "server-rs/src/migration/mod.rs": 1152,
     "server-rs/src/models/types.rs": 2333,
     "server-rs/src/parsing/assistant/ejs/exec.rs": 1313,
     "server-rs/src/parsing/world_book.rs": 1728,
@@ -19,11 +19,11 @@
     "server-rs/src/services/session_service.rs": 1134,
     "server-rs/src/services/settings_service/mod.rs": 2126,
     "server-rs/src/services/settings_service/params.rs": 1235,
-    "server-rs/src/services/task_engine/delivery.rs": 1204,
+    "server-rs/src/services/task_engine/delivery.rs": 1213,
     "server-rs/src/services/task_engine/runtime_check.rs": 1051,
     "server-rs/src/services/task_engine/wiring.rs": 1708,
-    "server-rs/src/services/task_service/db.rs": 1267,
-    "server-rs/src/services/task_service/executor.rs": 1427,
+    "server-rs/src/services/task_service/db.rs": 1268,
+    "server-rs/src/services/task_service/executor.rs": 1434,
     "server-rs/src/services/undo_service.rs": 1349,
     "server-rs/src/services/world_book_service.rs": 1288,
     "server-rs/src/tools/agent_tools.rs": 1347,
@@ -34,5 +34,5 @@
     "server-rs/src/tools/screenshot.rs": 1153,
     "web/src/stores/task.ts": 1117
   },
-  "updated": "2026-10-25"
+  "updated": "2026-10-26"
 }
