@@ -1,6 +1,6 @@
 # C-2 残余处理交接文档（2026-10-26）
 
-> 状态：**待处理**（C-2E 已收口；本文件只做交接，不改代码）
+> 状态：**已完成（2026-10-26，C-2F-1~5 全部合并）**（执行结果见 §九）
 > 基线：`main` = `6ddd2cb`（PR #47 后，本文件编写时；C-2 六批 C-2-0 + C-2A~E 全部完成）
 > 依据：[`CODEBASE-DEBT-AUDIT-2026-10-24.md`](CODEBASE-DEBT-AUDIT-2026-10-24.md) §四/§七/§九、[`C2-0-HANDOFF-2026-10-24.md`](C2-0-HANDOFF-2026-10-24.md)、`docs/计划.md` 的「C-2 残余」
 > 范围：**五项已登记残余** + 超千行基线文件的处置边界；不是重开 C-2，也不是把 30 个文件全部拆完
@@ -364,6 +364,24 @@ git diff -- tools/file-size-baseline.json   # 只允许向下；新增 >1000 文
 - [ ] PR CI `check` / `check-ubuntu` 双绿后合并；临时分支已删
 
 ---
+
+---
+
+## 九、执行结果（2026-10-26）
+
+五项全部落地，按交接顺序合并（每项一个 PR，纯搬运与行为改动分开提交）：
+
+| 批次 | 内容 | 结果 |
+|---|---|---|
+| C-2F-1 | `settings_service/mod.rs` 测试搬出 | 2,126→400 行；`tests.rs` 1,723 行；基线 30→29 |
+| C-2F-2 | `executor.rs` 测试搬出 + 生产分区 | `mod.rs` 167 / `generation.rs` 701 / `transport.rs` 107 / `heal.rs` 85 / `guard.rs` 153；基线 29→28；测试 38 例零修改；真实模型 solo done 6.9s / team done 63.8s |
+| C-2F-3 | 沙箱广播下沉 L1 | 新增 `utils/sandboxProtocol.ts` / `utils/sandboxBroadcast.ts`；已登记依赖 4→3（wiring 3 / debt 0）；前端测试 1697 静态 / 1740 运行时 |
+| C-2F-4 | 任务详情响应结构体 | `TaskDetailResponse` / `TaskUsageTotal`；`check-contract` 29→31；后端 2060（1588+472/81） |
+| C-2F-5 | settings parity 类型/取值域 | 三组类型类别 + 40 个受限字段取值域；三项人为反证均转红 |
+
+收口核对：`node tools/check-file-size.mjs` = 28 个（只降不升）；`node tools/check-arch.mjs` = 已登记依赖 3 条（wiring 3 / debt 0）；`node tools/count-tests.mjs --check` 与 `node tools/check-doc-claims.mjs` 一致；全量 `npm run check` 由 PR CI 双档复核。
+
+证据：R-2 真实模型探针在 `D:\kedai-bench-run\c2f2-evidence\`（`realmodel-smoke.log`、`probe-solo.json`、`probe-team.json`、`server-stdout.log`）；其余批次的门禁输出见各 PR 描述。
 
 ## 八、参考
 
