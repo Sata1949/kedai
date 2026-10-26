@@ -18,6 +18,9 @@ use serde_json::json;
 use std::convert::Infallible;
 use std::sync::Arc;
 
+mod detail;
+use detail::{TaskDetailResponse, TaskUsageTotalResponse};
+
 #[derive(Deserialize)]
 pub struct CreateTaskBody {
     pub title: String,
@@ -262,15 +265,15 @@ pub async fn get(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> 
             flow_snapshot,
             workspace_profile,
             delivery,
-        ))) => Json(json!({
-            "task": task,
-            "subtasks": subtasks,
-            "usage_total": { "prompt_tokens": p, "completion_tokens": c, "reasoning_tokens": r },
-            "messages": messages,
-            "flow_snapshot": flow_snapshot,
-            "workspace_profile": workspace_profile,
-            "delivery": delivery,
-        }))
+        ))) => Json(TaskDetailResponse::new(
+            task,
+            subtasks,
+            (p, c, r),
+            messages,
+            flow_snapshot,
+            workspace_profile,
+            delivery,
+        ))
         .into_response(),
         Ok(None) => not_found("任务不存在"),
     }
@@ -820,10 +823,7 @@ pub async fn usage_total(State(state): State<Arc<AppState>>) -> Response {
     let svc = state.tasks.clone();
     match state.db_call(move || svc.all_usage_total()).await {
         Err(e) => db_err(&e),
-        Ok((p, c, r)) => Json(json!({
-            "usage_total": { "prompt_tokens": p, "completion_tokens": c, "reasoning_tokens": r },
-        }))
-        .into_response(),
+        Ok((p, c, r)) => Json(TaskUsageTotalResponse::from_counts(p, c, r)).into_response(),
     }
 }
 
