@@ -17,7 +17,6 @@
     "server-rs/src/parsing/world_book.rs": 1728,
     "server-rs/src/plugins/mod.rs": 1426,
     "server-rs/src/services/session_service.rs": 1134,
-    "server-rs/src/services/settings_service/mod.rs": 2126,
     "server-rs/src/services/settings_service/params.rs": 1235,
     "server-rs/src/services/task_engine/delivery.rs": 1213,
     "server-rs/src/services/task_engine/runtime_check.rs": 1051,
