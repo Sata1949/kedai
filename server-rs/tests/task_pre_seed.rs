@@ -173,3 +173,105 @@ async fn engine_pre_seeds_final_entry_when_assembly_main_only_reads() {
     )
     .await;
 }
+
+/// SKY-10:上游全是 ESM 时引擎不生成入口,但必须点名分片并解释「引擎不打包 ESM」,
+/// 不能像修复前那样静默跳过(模型既没有入口也不知道原因)。
+#[tokio::test]
+async fn engine_pre_seed_names_esm_shards_instead_of_silently_skipping() {
+    let _guard = lock().lock().await;
+    let app = test_app();
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({
+            "loop_guard_semantic_min_calls": 0,
+            "task_step_budget_secs": 3600,
+            "task_team_budget_secs": 3600,
+            "task_total_budget_secs": 0,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "设置应可写入");
+
+    let ws = temp_workspace("esm-only");
+    let title = concat!(
+        r#"[[reply_if:团队规划器|{"mains":["#,
+        r#"{"name":"分片主","after":[],"goals":["#,
+        r#"{"name":"写 a","goal":"\u005b\u005btool:fs_write {\"path\":\"parts/a.js\",\"content\":\"export const A=1;\"}\u005d\u005d 写分片 A","files":["parts/a.js"]},"#,
+        r#"{"name":"写 b","goal":"\u005b\u005btool:fs_write {\"path\":\"parts/b.js\",\"content\":\"export function b(){return 2;}\"}\u005d\u005d 写分片 B","files":["parts/b.js"]}"#,
+        r#"]},"#,
+        r#"{"name":"总装主","after":[1],"goals":["#,
+        r#"{"name":"入口","goal":"\u005b\u005breply:入口完成\u005d\u005d 写入口","files":["index.html"]}"#,
+        r#"]}"#,
+        r#"]}]]"#,
+        r#"[[reply_if:团队审计员|{"通过":true,"打回":[],"结论":"通过"}]]"#,
+        r#"[[reply_if:任务汇总者|团队最终成果]]"#,
+        " 单文件 ESM 预置用例"
+    );
+    let (status, json) = send_json(
+        app,
+        "POST",
+        "/api/tasks",
+        json!({
+            "title": title,
+            "task_mode": "team",
+            "workspace": ws.to_string_lossy(),
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "创建任务应 201: {json}");
+    let id = json["task"]["id"].as_str().unwrap().to_string();
+    let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
+
+    let (st, detail) = wait_terminal(app, &id).await;
+    assert_eq!(st, "partial", "全 ESM 上游不得伪造入口: {detail}");
+    assert!(
+        !ws.join("index.html").exists(),
+        "引擎不得为全 ESM 分片生成入口"
+    );
+    let error = detail["task"]["error"].as_str().unwrap_or("");
+    assert!(
+        error.contains("缺少必需文件"),
+        "终态应点名缺失的最终入口: {error:?}"
+    );
+
+    let (status, events) = send_json(
+        app,
+        "GET",
+        &format!("/api/tasks/{id}/events?after=0&limit=2000"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let joined = events["events"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|e| e["detail"].as_str().unwrap_or("").to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        joined.contains("引擎未能预置最终入口"),
+        "应透出预置失败原因: {joined}"
+    );
+    assert!(
+        joined.contains("parts/a.js") && joined.contains("parts/b.js"),
+        "应逐一点名 ESM 分片: {joined}"
+    );
+    assert!(
+        joined.contains("引擎不打包 ESM"),
+        "应说明 ESM 边界: {joined}"
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+    let _ = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({ "loop_guard_semantic_min_calls": 12 }),
+    )
+    .await;
+}

@@ -18,9 +18,11 @@
 //   followup.rs  终态追加指令执行器:自原 followup 后台执行主体机械搬迁
 //   retry.rs     空输出/规划分级重试算法(批次 4.2 自 task_service 上移)
 //   parse.rs     计划 JSON 解析(批次 4.2 自 task_service 上移)
+//   esm_boundary.rs 单文件交付的 ESM/模块边界判定(SKY-10)
 pub(crate) mod context;
 pub(crate) mod custom;
 pub(crate) mod delivery;
+pub(crate) mod esm_boundary;
 pub(crate) mod executor;
 pub(crate) mod flow_call;
 pub(crate) mod followup;

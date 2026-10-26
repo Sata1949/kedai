@@ -389,3 +389,108 @@ async fn scratch_files_are_reported_without_downgrading() {
 
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+/// ⑦ SKY-10：importmap 把裸说明符映射到工作区本地文件 → 单文件不得建本地模块图。
+#[tokio::test]
+async fn single_file_local_importmap_downgrades_to_partial() {
+    let app = test_app();
+    let ws = temp_workspace("local-importmap");
+    std::fs::create_dir_all(ws.join("parts")).expect("建 parts 失败");
+    std::fs::write(ws.join("parts/a.js"), "export const A = 1;\n").expect("写分片失败");
+    let title = team_title(
+        &[(
+            "写入口",
+            &["index.html"],
+            write_goal(
+                "index.html",
+                r#"<html><script type="importmap">{"imports":{"a":"./parts/a.js"}}</script><script type="module">import { A } from "a"; console.log(A);</script></html>"#,
+                "写入口",
+            ),
+        )],
+        pass_audit(),
+        " 单文件交付(本地 importmap 用例)",
+    );
+    let id = run_task(app, &title, &ws).await;
+    let (st, detail) = wait_terminal(app, &id).await;
+
+    assert_eq!(st, "partial", "本地 importmap 不得判 done: {detail}");
+    let error = detail["task"]["error"].as_str().unwrap_or("");
+    assert!(
+        error.contains("importmap") && error.contains("./parts/a.js"),
+        "error 应点名本地映射: {error:?}"
+    );
+    let issues = detail["delivery"]["content_issues"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        issues
+            .iter()
+            .any(|v| v.as_str().unwrap_or("").contains("importmap")),
+        "交付摘要应下发 importmap 问题: {detail}"
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// ⑧ SKY-10：裸说明符没有 importmap 映射 → 单文件里浏览器无法解析,终态 partial。
+#[tokio::test]
+async fn single_file_unmapped_bare_import_downgrades_to_partial() {
+    let app = test_app();
+    let ws = temp_workspace("bare-import");
+    let title = team_title(
+        &[(
+            "写入口",
+            &["index.html"],
+            write_goal(
+                "index.html",
+                r#"<html><script type="module">import * as THREE from "three"; console.log(THREE);</script></html>"#,
+                "写入口",
+            ),
+        )],
+        pass_audit(),
+        " 单文件交付(裸说明符用例)",
+    );
+    let id = run_task(app, &title, &ws).await;
+    let (st, detail) = wait_terminal(app, &id).await;
+
+    assert_eq!(st, "partial", "未映射裸说明符不得判 done: {detail}");
+    let error = detail["task"]["error"].as_str().unwrap_or("");
+    assert!(
+        error.contains("裸模块说明符") && error.contains("three"),
+        "error 应点名未映射说明符: {error:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// ⑨ SKY-10：经典 `<script>` 里写 `export` → 浏览器整块语法错误,终态 partial。
+#[tokio::test]
+async fn single_file_classic_script_export_downgrades_to_partial() {
+    let app = test_app();
+    let ws = temp_workspace("classic-export");
+    let title = team_title(
+        &[(
+            "写入口",
+            &["index.html"],
+            write_goal(
+                "index.html",
+                "<html><script>export const A = 1;</script></html>",
+                "写入口",
+            ),
+        )],
+        pass_audit(),
+        " 单文件交付(经典脚本 export 用例)",
+    );
+    let id = run_task(app, &title, &ws).await;
+    let (st, detail) = wait_terminal(app, &id).await;
+
+    assert_eq!(st, "partial", "经典脚本 export 不得判 done: {detail}");
+    let error = detail["task"]["error"].as_str().unwrap_or("");
+    assert!(
+        error.contains("经典脚本") && error.contains("import/export"),
+        "error 应点名经典脚本里的 ESM: {error:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
