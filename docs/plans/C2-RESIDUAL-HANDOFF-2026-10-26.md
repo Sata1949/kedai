@@ -1,7 +1,7 @@
 # C-2 残余处理交接文档（2026-10-26）
 
 > 状态：**待处理**（C-2E 已收口；本文件只做交接，不改代码）
-> 基线：`main` = `cdb578c`（PR #46 合并；C-2 六批 C-2-0 + C-2A~E 全部完成）
+> 基线：`main` = `6ddd2cb`（PR #47 后，本文件编写时；C-2 六批 C-2-0 + C-2A~E 全部完成）
 > 依据：[`CODEBASE-DEBT-AUDIT-2026-10-24.md`](CODEBASE-DEBT-AUDIT-2026-10-24.md) §四/§七/§九、[`C2-0-HANDOFF-2026-10-24.md`](C2-0-HANDOFF-2026-10-24.md)、`docs/计划.md` 的「C-2 残余」
 > 范围：**五项已登记残余** + 超千行基线文件的处置边界；不是重开 C-2，也不是把 30 个文件全部拆完
 
@@ -15,8 +15,8 @@
 | 文件大小基线 | `tools/file-size-baseline.json`（只降不升） | 同上 |
 | 组件直改 store state | **113 处**（UI 48 + 表单级 65 + 行级 0） | `node tools/check-arch.mjs` |
 | 已登记越代依赖 | **4 条**（wiring 3 / debt 1） | 同上；debt 仅 `stores/chat → characterScriptSandbox` |
-| 后端测试 | **2040 静态**（1573 单测 + 467 集成 / 80 文件） | `node tools/count-tests.mjs` |
-| 前端测试 | **1687 静态 / 1730 运行时 / 163 文件** | `npm test -w web` + `count-tests` |
+| 后端测试 | **2044 静态**（1576 单测 + 468 集成 / 81 文件） | `node tools/count-tests.mjs` |
+| 前端测试 | **1688 静态 / 1731 运行时 / 163 文件** | `npm test -w web` + `count-tests` |
 | 门禁阶段 | **22 个 `Invoke-Stage`** + 2 审计段 | `tools/check-all.ps1` |
 | 架构回边 | `composables→components` 已还；只剩 `stores/chat→characterScriptSandbox` | `tools/arch-layers.json` |
 
@@ -27,7 +27,7 @@ node tools/check-arch.mjs
 node tools/count-tests.mjs
 ```
 
-行号均为 `cdb578c` 快照；**动手前先复核**（C-2E 后的行号很容易再漂）。
+行号均为 `6ddd2cb` 快照；**动手前先复核**（C-2E 后的行号很容易再漂）。
 
 ---
 
@@ -35,7 +35,7 @@ node tools/count-tests.mjs
 
 ### R-1 `settings_service/mod.rs` 测试搬出（最高性价比，先做）
 
-**现状证据**（`cdb578c`）：
+**现状证据**（`6ddd2cb`）：
 
 - `server-rs/src/services/settings_service/mod.rs` 共 **2,126 行**；
 - **生产代码只到第 402 行**（`RuntimeSettings` 结构体/`AppMode`/辅助函数）；
@@ -59,7 +59,7 @@ node tools/count-tests.mjs
 **验收**：
 
 - `wc -l`：`mod.rs` ~402，`tests.rs` ~1,720；
-- 静态测试数不变 2040（`count-tests --check`）；
+- 静态测试数不变（当前 2044；`count-tests --check`）；
 - `check-arch` 无规则 E 误报（`#[cfg(test)]` 在列首）；
 - `check-file-size` 基线减少 1 项，无新增 >1000 文件；
 - `cargo test --workspace -j 4` 全绿。
@@ -74,7 +74,7 @@ node tools/count-tests.mjs
 
 ### R-2 `agents/engine/executor.rs` 测试搬出 + 生产分区
 
-**现状证据**（`cdb578c`）：
+**现状证据**（`6ddd2cb`）：
 
 - 共 **1,852 行**；**生产代码到第 1,166 行**，第 1,167 行起 `#[cfg(test)] mod tests`（约 **685 行**，测试密集）。
 - 生产区自然边界（行号为快照）：
@@ -338,7 +338,7 @@ git diff -- tools/file-size-baseline.json   # 只允许向下；新增 >1000 文
 
 1. **`tests.rs` 必须 `#![cfg(test)]` 在列首**：`check-arch` 的 `productionLineCount` 靠它切生产区；否则规则 E（services 生产代码禁 `.expect`）会把测试断言全判红。参照 `team/tests.rs`、`agent_flow_service/tests.rs`。
 2. **子模块路径**：`super::` 在 `tests.rs` 里指向父模块；跨目录搬函数时改成 `crate::…`，方法跨模块用 `pub(super)`/`pub(crate)`。C-2D 踩过。
-3. **`count-tests` 口径**：`tests/common/` 已排除；`src/**/tests.rs` 里的 `#[test]` 仍计入静态数。搬测试**不应**改变 2040。
+3. **`count-tests` 口径**：`tests/common/` 已排除；`src/**/tests.rs` 里的 `#[test]` 仍计入静态数。搬测试**不应**改变 2044。
 4. **`check-file-size --update` 只许下调**：直接改 JSON 绕过 `--update` 等于手动放宽 ratchet；提交正文必须说明每一次基线变化。
 5. **`arch-allow-file` 只认文件头 20 行**；`arch-allow` 认当前/上一行；新增直写优先走 action，别加豁免。直写总量基线 113，超出即 FAIL。
 6. **`check-settings-parity` 解析假设**：Rust 结构体字段 4 空格、TS 接口 2 空格、`RuntimeSettingsPatch` 的三组差异常量（GET-only / PUT-only / Overrides）必须同步；加类型解析后先跑 mutation 反证。
