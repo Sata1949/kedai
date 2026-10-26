@@ -60,13 +60,13 @@ function makeSettings(overrides: Partial<RuntimeSettings> = {}): RuntimeSettings
     loop_guard_semantic_window: 16,
     loop_guard_semantic_min_calls: 12,
     loop_guard_semantic_max_distinct: 2,
-    // 提交 3:任务侧两道闸(步骤墙钟预算默认 3600 = 开;空闲看守默认 900)
+    // 提交 3:任务侧两道闸(步骤墙钟预算默认 3600 = 开;空闲看守默认 2400)
     task_step_budget_secs: 3600,
     // PRODCAP-2:任务级总预算(默认 0 = 关)
     task_total_budget_secs: 0,
-    // TMR3-4:团队任务执行阶段总预算(默认 1200 = 20 分钟)
+    // TMR3-4:团队任务执行阶段总预算(默认 1200 = 20 分钟,可调上限)
     task_team_budget_secs: 1200,
-    task_idle_timeout_secs: 900,
+    task_idle_timeout_secs: 2400,
     // HB-7:变量两步生成的独立模型/温度(默认未配置)
     mvu_model: null,
     mvu_temperature: null,
@@ -256,31 +256,33 @@ describe('genSettings 任务侧两道闸(提交 3 · D3/D7)', () => {
     setActivePinia(createPinia());
   });
 
-  it('store 默认值与后端缺省一致(步骤预算 3600 / 总预算 0 / 团队预算 1200 / 空闲超时 900)', () => {
+  it('store 默认值与后端缺省一致(步骤预算 3600 / 总预算 0 / 团队预算 1200 / 空闲超时 2400)', () => {
     const store = useGenSettingsStore();
     expect(store.taskStepBudgetSecs).toBe(3600);
     // PRODCAP-2:总预算缺省关(0);「0 是缺省」故缺字段兜底与真实值不可区分,只断言默认
     expect(store.taskTotalBudgetSecs).toBe(0);
-    // TMR3-4:团队预算默认 20 分钟(安全阀,不是目标值)
+    // TMR3-4:团队预算默认 20 分钟(安全阀,不是目标值;2026-10-26 起为可调上限)
     expect(store.taskTeamBudgetSecs).toBe(1200);
-    expect(store.taskIdleTimeoutSecs).toBe(900);
+    // D7:空闲看守后端默认 2400(下限 2101);前端兜底必须与之一致,
+    // 否则设置尚未加载时的保存会提交 900 并被后端 400。
+    expect(store.taskIdleTimeoutSecs).toBe(2400);
   });
 
-  it('loadSettings 回填服务端值;缺字段兜底 3600 / 900', async () => {
+  it('loadSettings 回填服务端值;缺字段兜底 3600 / 1200 / 2400', async () => {
     const store = useGenSettingsStore();
     getSettingsMock.mockReset().mockResolvedValue(
       makeSettings({
         task_step_budget_secs: 300,
         task_total_budget_secs: 600,
         task_team_budget_secs: 900,
-        task_idle_timeout_secs: 601,
+        task_idle_timeout_secs: 2101,
       }),
     );
     await store.loadSettings();
     expect(store.taskStepBudgetSecs).toBe(300);
     expect(store.taskTotalBudgetSecs).toBe(600);
     expect(store.taskTeamBudgetSecs).toBe(900);
-    expect(store.taskIdleTimeoutSecs).toBe(601);
+    expect(store.taskIdleTimeoutSecs).toBe(2101);
 
     // 旧服务端缺字段:回退默认(而非 0——0 是「关」,不能把缺字段当用户关掉了闸门)
     getSettingsMock.mockReset().mockResolvedValue(
@@ -293,7 +295,25 @@ describe('genSettings 任务侧两道闸(提交 3 · D3/D7)', () => {
     await store.loadSettings();
     expect(store.taskStepBudgetSecs).toBe(3600);
     expect(store.taskTeamBudgetSecs).toBe(1200);
-    expect(store.taskIdleTimeoutSecs).toBe(900);
+    expect(store.taskIdleTimeoutSecs).toBe(2400);
+  });
+
+  it('团队预算按 600-1200 归一:>1200 = 不限,低于下限抬到 600', async () => {
+    const store = useGenSettingsStore();
+    for (const [raw, expected] of [
+      [0, 0],
+      [300, 600],
+      [600, 600],
+      [1200, 1200],
+      [1201, 0],
+      [3600, 0],
+    ] as const) {
+      getSettingsMock.mockReset().mockResolvedValue(
+        makeSettings({ task_team_budget_secs: raw }),
+      );
+      await store.loadSettings();
+      expect(store.taskTeamBudgetSecs, `服务端返回 ${raw}`).toBe(expected);
+    }
   });
 
   it('saveSettings 响应回填两个字段(与 loadSettings 同口径)', async () => {

@@ -6,7 +6,7 @@ use crate::models::tool_policy::AuthorizationMode;
 use serde::{Deserialize, Serialize};
 
 use super::connection::DEFAULT_SEARCH_ENDPOINT;
-use super::{AppMode, RuntimeSettings};
+use super::{AppMode, RuntimeSettings, TASK_TEAM_BUDGET_MAX_SECS};
 
 /// 角色扮演 Agent 系统提示词(类型级模式隔离,WP7 抗多模式提示词混淆):
 /// RuntimeSettings 扁平字段的权威类型。serde transparent = 序列化为裸字符串,
@@ -242,16 +242,16 @@ pub(super) fn default_task_total_budget_secs() -> u32 {
     0
 }
 
-/// 默认团队任务总预算(TMR3-4,2026-10-22):**1200 秒(20 分钟)**,0 = 关。
+/// 默认团队任务总预算(TMR3-4,2026-10-22;2026-10-26 起限定 600..=1200):**1200 秒(20 分钟)**,`0` = 不限(关闭团队闸门)。
 ///
 /// 为什么 team 需要独立的一档:单步预算在 team 里是**每个子目标**重新起算
 /// (`run_agent_loop` 每次新 `loop_started`),4 主 × 4 子目标最坏可跑到小时级;
 /// 2026-10-21 实测单主跑到 26 分钟、外部 driver 30 分钟主动 stop,终态 `ended`。
 /// 全局 `task_total_budget_secs` 默认 0(不改变 solo/plan/custom 体感),故给 team
 /// 单独一档默认值;它取「执行阶段」起算,不含规划(规划有 3×300s 自己的上限)。
-/// 用户可在设置页调大或设 0 关闭;这是安全阀,不是目标值。
+/// 默认取可调上限:900s 实测会把总装截图截成 `partial`(SKY-10);要更久显式切「不限」。这是安全阀,不是目标值。
 pub(super) fn default_task_team_budget_secs() -> u32 {
-    1200
+    TASK_TEAM_BUDGET_MAX_SECS
 }
 
 /// 默认任务空闲超时(提交 3 · D7):2400 秒无任何活动即由看守收尾。

@@ -313,7 +313,8 @@ const VALUE_RULES = {
   subagent_result_max_chars: { kind: 'range', min: 500, max: 8000 },
   task_default_connection_id: { kind: 'free' },
   task_step_budget_secs: { kind: 'range', min: 1, max: 86400, allowZero: true },
-  task_team_budget_secs: { kind: 'range', min: 1, max: 86400, allowZero: true },
+  // 2026-10-26 团队预算口径:600..=1200,超过 1200 归一为 0(不限)。
+  task_team_budget_secs: { kind: 'range', min: 600, max: 1200, allowZero: true },
   task_tool_policy: { kind: 'enum', values: ['all', 'deny_dangerous', 'allowlist'] },
   task_total_budget_secs: { kind: 'range', min: 1, max: 86400, allowZero: true },
   tool_authorization_timeout_secs: { kind: 'range', min: 30, max: 1800 },

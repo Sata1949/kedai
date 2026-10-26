@@ -1721,3 +1721,21 @@ fn task_gate_defaults_cover_one_full_command_plus_a_call() {
         "bash 的注册表超时须留出收尾余量: {registry_allows}"
     );
 }
+
+/// 团队预算默认值必须落在设置页可调区间内(2026-10-26):默认取可调上限 1200 ——
+/// 900s 实测会把总装截图阶段截成 `partial`(SKY-10),默认应为「不误伤」的最宽有限档;
+/// 需要更久的用户显式切「不限」(0)。低于下限或高于上限都会让首装值被 load 归一改写。
+#[test]
+fn team_budget_default_is_the_widest_finite_option() {
+    let default = default_task_team_budget_secs();
+    assert!(
+        (TASK_TEAM_BUDGET_MIN_SECS..=TASK_TEAM_BUDGET_MAX_SECS).contains(&default),
+        "团队预算默认 {default}s 不在可调区间 {}..={}s",
+        TASK_TEAM_BUDGET_MIN_SECS,
+        TASK_TEAM_BUDGET_MAX_SECS
+    );
+    assert_eq!(
+        default, TASK_TEAM_BUDGET_MAX_SECS,
+        "默认值应取可调上限;更久由用户显式切「不限」"
+    );
+}

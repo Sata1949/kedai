@@ -90,6 +90,8 @@ export const useAppStore = defineStore('app', () => {
     saveSettings: genSettings.saveSettings,
     queueSettingsSave: genSettings.queueSettingsSave,
     setAuthorizationMode: genSettings.setAuthorizationMode,
+    normalizeTaskTeamBudget: genSettings.normalizeTaskTeamBudget,
+    setTaskTeamBudgetUnlimited: genSettings.setTaskTeamBudgetUnlimited,
     requestShizukuPermission: genSettings.requestShizukuPermission,
     loadPromptInject: genSettings.loadPromptInject,
     savePromptInjectConfig: genSettings.savePromptInjectConfig,

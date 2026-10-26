@@ -31,8 +31,9 @@
  *      2026-09-17 实测:ShellExecutorBridge 漏登记 + detectTier 等四个无参方法被按
  *      带参调用,两缺陷叠加致 Android 命令执行永久不可用(后者被前者掩盖,修前者才暴露)。
  *      相关文件均 `cfg(target_os = "android")`,Rust 单测在 Windows 上不编译,故只能本脚本守。
- *   M. 测试专用构造器不得被生产入口引用(PRODCAP-5,2026-10-05 起)——`build_test_app()`
- *      无 `cfg(test)` 门控(集成测试链接非 test 构建的 lib,加了会断 56 个文件),故由本
+ *   M. 测试专用构造器不得被生产入口引用(PRODCAP-5,2026-10-05 起;2026-10-26 覆盖
+ *      `build_test_app_configured`)——`build_test_app()` 无 `cfg(test)` 门控(集成测试
+ *      链接非 test 构建的 lib,加了会断 56 个文件),故由本
  *      脚本扫 `main.rs` / `bin/*.rs` / `src-tauri/src` 断言零引用;历史教训:它曾被误读为
  *      生产启动路径(见 `计划.md` PRODCAP-5 论据更正),机器断言消除该误读面。
  *
@@ -809,17 +810,17 @@ const backendWarnings = [];
   let hits = 0;
   for (const f of targets) {
     const src = readFileSync(f, 'utf8');
-    if (/\bbuild_test_app\b/.test(src)) {
+    if (/\bbuild_test_app(_configured)?\b/.test(src)) {
       hits += 1;
       backendFailures.push(
-        `[M] 生产入口引用测试构造器 build_test_app:${relative(ROOT, f)}——` +
+        `[M] 生产入口引用测试构造器 build_test_app*:${relative(ROOT, f)}——` +
           `该函数仅供 tests/ 集成测试建 app(mock 连接器 + 临时数据目录);` +
           `生产启动必须走 AppState::new/AppConfig::from_env`,
       );
     }
   }
   if (VERBOSE) {
-    console.log(`  [M] 生产入口扫描 ${targets.length} 个文件,build_test_app 引用 ${hits} 处`);
+    console.log(`  [M] 生产入口扫描 ${targets.length} 个文件,build_test_app* 引用 ${hits} 处`);
   }
 }
 

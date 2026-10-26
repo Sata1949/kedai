@@ -131,6 +131,11 @@ fn invalid_values_are_rejected_with_field_name() {
             json!({ "task_idle_timeout_secs": 1 }),
             "task_idle_timeout_secs",
         ),
+        // 团队预算设置页下限 600s(2026-10-26);低于下限的有限值一律 400
+        (
+            json!({ "task_team_budget_secs": 599 }),
+            "task_team_budget_secs",
+        ),
     ];
 
     for (patch, field) in cases {
@@ -141,6 +146,30 @@ fn invalid_values_are_rejected_with_field_name() {
             "用户文案应包含字段名:{field} -> {}",
             err.message
         );
+    }
+}
+
+/// 团队总预算(2026-10-26):设置页口径 `600..=1200`,超过 1200 归一为 `0`(不限)。
+/// 「想设更久」的产品语义就是「别限时」,因此 >1200 不报错而是落到不限。
+#[test]
+fn team_budget_above_max_means_unlimited() {
+    for (input, expected) in [
+        (0_u32, 0_u32),
+        (600, 600),
+        (900, 900),
+        (1200, 1200),
+        (1201, 0),
+        (86_400, 0),
+    ] {
+        let mut s = settings();
+        s.task_team_budget_secs = 1200;
+        apply(
+            &mut s,
+            &body(json!({ "task_team_budget_secs": input })),
+            AppMode::Roleplay,
+        )
+        .expect("0 / 600..=1200 / >1200 都应通过归一");
+        assert_eq!(s.task_team_budget_secs, expected, "输入 {input}");
     }
 }
 

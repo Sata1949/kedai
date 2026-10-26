@@ -9,6 +9,10 @@ import { computed } from 'vue';
 import { useAppStore } from '../../store';
 import { storeToRefs } from 'pinia';
 import { useGenerationParams } from '../../composables/useDataManager';
+import {
+  TASK_TEAM_BUDGET_MAX_SECS,
+  TASK_TEAM_BUDGET_MIN_SECS,
+} from '../../stores/genSettings';
 
 withDefaults(defineProps<{
   /** 是否显示(embedded 模式按 activeSection 切换;standalone 恒 true) */
@@ -39,6 +43,24 @@ const {
 
 /** 任务模式缺省块(TM-SET-1)仅任务模式显示;角色扮演侧缺省不同(0.8 / 0.9 / 扁平输出上限) */
 const isTaskMode = computed(() => store.appMode === 'task');
+
+/** 团队总预算「不限」态:0 与 >1200 都是服务端的不限语义(>1200 会在写入时归一为 0) */
+const teamBudgetUnlimited = computed(
+  () => taskTeamBudgetSecs.value === 0 || taskTeamBudgetSecs.value > TASK_TEAM_BUDGET_MAX_SECS,
+);
+
+/** 输入框只在明确的「不限」(0)时禁用;>1200 仍在编辑中,需保留输入以便 change 归一 */
+const teamBudgetInputDisabled = computed(() => taskTeamBudgetSecs.value === 0);
+
+/** 失焦/变更时归一(写入逻辑在 store action 内,组件只转发事件) */
+function onTeamBudgetChange(): void {
+  store.normalizeTaskTeamBudget();
+}
+
+/** 勾选「不限」= 0;取消勾选回到可调上限(默认值),而不是回退到某个隐藏的旧值 */
+function onTeamBudgetUnlimitedChange(event: Event): void {
+  store.setTaskTeamBudgetUnlimited((event.target as HTMLInputElement).checked);
+}
 </script>
 
 <template>
@@ -278,13 +300,27 @@ const isTaskMode = computed(() => store.appMode === 'task');
         <input
           v-model.number="taskTeamBudgetSecs"
           type="number"
-          min="0"
-          max="86400"
-          step="1"
+          :min="TASK_TEAM_BUDGET_MIN_SECS"
+          :max="TASK_TEAM_BUDGET_MAX_SECS"
+          step="60"
           class="sv-input inject-num"
-          title="团队模式:规划完成后的执行阶段总墙钟上限(秒);到点不再启动新主 agent/子目标,以已完成部分收尾;0 = 关闭本闸门(默认 1200)"
+          :disabled="teamBudgetInputDisabled"
+          title="团队模式:规划完成后的执行阶段总墙钟上限(秒);可调 600-1200,超过 1200 = 不限(不设团队闸门);从规划完成后起算"
+          @change="onTeamBudgetChange"
         />
-        <span class="sv-note">团队侧:执行阶段上限(默认 1200;0 = 关;从规划完成后起算)</span>
+        <label
+          style="display: flex; gap: var(--space-1-5); align-items: center; cursor: pointer"
+          title="不限团队执行阶段时长(等价于输入 0 或任意 >1200 的值)"
+        >
+          <input
+            type="checkbox"
+            :checked="teamBudgetUnlimited"
+            style="flex-shrink: 0"
+            @change="onTeamBudgetUnlimitedChange"
+          />
+          <span class="sv-note">不限</span>
+        </label>
+        <span class="sv-note">团队侧:执行阶段上限(600-1200 秒;超过 1200 或勾选「不限」= 不设限;默认 1200)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">任务空闲超时</label>
@@ -297,7 +333,7 @@ const isTaskMode = computed(() => store.appMode === 'task');
           class="sv-input inject-num"
           title="任务模式:运行中的任务连续该秒数既无模型调用也无事件时,由看守自动收尾(与手动停止同源,原因写入任务错误栏);0 = 关闭看守"
         />
-        <span class="sv-note">任务侧:无活动自动收尾(默认 900;0 = 关;601-86400)</span>
+        <span class="sv-note">任务侧:无活动自动收尾(默认 2400;0 = 关;下限 2101 = 命令上限 + 调用上限 + 1)</span>
       </div>
       <div class="sv-inp-row">
         <span class="sv-note">

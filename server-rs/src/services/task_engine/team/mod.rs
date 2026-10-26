@@ -196,7 +196,7 @@ impl TeamExecutor {
                 .map(|d| post_exec_reserve(d.saturating_duration_since(Instant::now())).as_secs())
                 .unwrap_or(0);
             let mut msg = format!(
-                "团队执行预算:{} 秒(规划完成后起算;设置页可调大或设 0 关闭)",
+                "团队执行预算:{} 秒(规划完成后起算;设置页可调 600-1200,超过 1200 视为不限)",
                 ctx.settings.task_team_budget_secs
             );
             if reserve_secs > 0 {

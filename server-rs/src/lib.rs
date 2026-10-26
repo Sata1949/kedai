@@ -32,6 +32,19 @@ use std::sync::Once;
 /// 见 `docs/计划.md` PRODCAP-5 论据更正)。
 #[doc(hidden)]
 pub fn build_test_app() -> Result<axum::Router, String> {
+    build_test_app_configured(|_| {})
+}
+
+/// 同 [`build_test_app`],另在路由装配前允许改写内存设置(**仅供 tests/ 集成测试**)。
+///
+/// 存在理由:少量回归用例需要**低于设置页下限**的预算(如团队预算 1s)来触发预算
+/// 收尾路径,而 `PUT /api/settings` 按产品规则会拒绝这些值。设置只在构建期经本钩子
+/// 注入,HTTP 端点的校验面不受影响;生产入口对 `build_test_app*` 的零引用仍由
+/// `tools/check-arch.mjs` 规则 M 断言。
+#[doc(hidden)]
+pub fn build_test_app_configured(
+    configure: impl FnOnce(&api::app_state::AppState),
+) -> Result<axum::Router, String> {
     static INIT: Once = Once::new();
     let mut data_dir = std::env::temp_dir();
     data_dir.push(format!("kedai-test-{}", std::process::id()));
@@ -56,6 +69,9 @@ pub fn build_test_app() -> Result<axum::Router, String> {
     // 既有集成测试聚焦业务接缝;安全中间件另用显式配置测试。
     config.auth_required = false;
     let state = api::app_state::AppState::new(config)?;
+    // 启动设置已加载、服务已装配;此处的内存改写对运行期读设置的路径立即生效
+    // (任务引擎在每次 run 起点取 `settings_snapshot`)。
+    configure(&state);
     Ok(api::build_router(state))
 }
 

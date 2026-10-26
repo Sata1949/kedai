@@ -37,6 +37,15 @@ pub use params::{
     TASK_DEFAULT_TEMPERATURE, TASK_DEFAULT_TOP_P,
 };
 
+/// 团队总预算的可调下限(秒,设置页口径,2026-10-26):低于 10 分钟连一个子目标的
+/// 「读→改→自测」闭环都跑不完,截断只会制造半成品,故不允许更小的有限值。
+pub const TASK_TEAM_BUDGET_MIN_SECS: u32 = 600;
+
+/// 团队总预算的可调上限(秒,设置页口径,2026-10-26):超过该值不再接受为有限预算,
+/// 一律归一为 `0`(不限)——「想设得更久」在产品语义里就是「别限时」;
+/// 默认值也取此上限:900s 实测会把总装截图阶段截成 `partial`(SKY-10,2026-10-25)。
+pub const TASK_TEAM_BUDGET_MAX_SECS: u32 = 1200;
+
 // RuntimeSettings 字段的 serde(default = "...") 按名字在本模块作用域解析;
 // 默认值函数集中在 params.rs,在此引入保持属性文本不变。
 use params::{
@@ -228,7 +237,8 @@ pub struct RuntimeSettings {
     /// 默认关的判据:单步预算已覆盖主要失控场景,总预算防「每步都不超、整任务失控」。
     #[serde(default = "default_task_total_budget_secs")]
     pub task_total_budget_secs: u32,
-    /// 团队任务执行阶段总预算秒数(TMR3-4;默认 **1200**,0 = 关,否则钳 1..=86400):
+    /// 团队任务执行阶段总预算秒数(TMR3-4;2026-10-26 起 `0` = 不限,否则
+    /// `600..=1200`,超过 1200 在写入时归一为 `0`):
     /// 只被 team 执行器消费,从**规划完成后**起算;到点不再启动新主/子目标,
     /// 跑步由 `min(步骤预算, 剩余)` 收窄后带产出收尾(不制造失败)。
     /// 为什么单独一档:`task_step_budget_secs` 在 team 里每个子目标重新起算,
