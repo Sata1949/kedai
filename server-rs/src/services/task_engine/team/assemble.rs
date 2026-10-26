@@ -4,7 +4,7 @@ use super::topology::declared_files_of;
 use super::{AuditVerdict, TeamMain};
 use crate::models::types::{TaskStep, TaskStepStatus};
 use crate::services::task_engine::delivery::hygiene_issues;
-use crate::services::task_engine::wiring::wiring_issues;
+use crate::services::task_engine::esm_boundary::delivery_issues;
 
 /// 审计/终审/汇总输入里的「工作区声明文件实况」(SKY-3,2026-10-23)。
 ///
@@ -62,10 +62,10 @@ pub(super) fn workspace_manifest(
         "\n工作区声明文件实况(引擎在审计前按 TaskStep.files 全类型枚举;与主 agent 自述冲突时以本清单为准):\n{}\n",
         lines.join("\n")
     );
-    let wiring = wiring_issues(workspace, &seen, goal);
+    let wiring = delivery_issues(workspace, &seen, goal);
     if !wiring.is_empty() {
         out.push_str(
-            "\n引擎静态接线检查(导入名未导出/本地模块或资源不存在/单文件交付外链;确定性判定,与自述冲突时以本清单为准):\n",
+            "\n引擎静态接线检查(导入名未导出/本地模块或资源不存在/单文件交付外链/ESM 模块边界;确定性判定,与自述冲突时以本清单为准):\n",
         );
         for issue in &wiring {
             out.push_str(&format!("- {issue}\n"));

@@ -8,14 +8,14 @@
 // 边界(与 `docs/遗留.md` §三十一 SKY-8 同源):
 // - 模板模式:`@@NAME@@` 槽位必须与 `parts` 键一一对应;缺槽/多槽直接报错;
 // - 无模板模式:只支持经典脚本(行首 `import`/`export` 拒绝,要求改用模板);
-// - 落盘前用 `wiring::single_file_text_issues` 做自包含校验,失败不写文件;
+// - 落盘前用 `esm_boundary::single_file_text_issues` 做自包含校验,失败不写文件;
 // - 只做文本装配,不执行 JS、不解析完整语法(运行期自检仍是模型/审计职责)。
 use super::agent_tools::ToolDeps;
 use super::agent_tools_fs::{note_change, resolve};
 use super::workspace_scan::display_rel;
 use crate::models::types::{ExecScope, ToolContext, ToolDefinition};
 use crate::services::task_change_service;
-use crate::services::task_engine::wiring;
+use crate::services::task_engine::esm_boundary;
 use crate::tools::registry::ToolRegistry;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -40,22 +40,23 @@ pub fn register_inline_tool(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
         ToolDefinition {
             name: INLINE_TOOL.into(),
             description: "把工作区里的多个分片内联成一个自包含 HTML(引擎读分片、替换 @@NAME@@ 槽位并写入口);\
-                          不要在正文手写大段内联脚本。输出不得引用本地文件或相对 import。"
+                          不要在正文手写大段内联脚本。输出不得引用本地文件或相对 import。\
+                          引擎不打包 ESM:含 import/export 的分片请先改写为经典脚本(window.*),或改用 template 把模块代码放入 <script type=\"module\">(import 只能指向远程 URL/远程 importmap)。"
                 .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "输出的 HTML 工作区相对路径(如 index.html;需 .html/.htm)" },
-                    "template": { "type": "string", "description": "可选模板路径;模板中以 @@NAME@@ 标记槽位(如 @@TEXTURES@@)" },
+                    "template": { "type": "string", "description": "可选模板路径;模板中以 @@NAME@@ 标记槽位(如 @@TEXTURES@@);模板自身可写 <script type=\"module\">,其 import 只能指向远程 URL/远程 importmap" },
                     "parts": {
                         "type": "object",
-                        "description": "模板模式必填:槽位名 → 分片路径。键必须与模板槽位一一对应",
+                        "description": "模板模式必填:槽位名 → 分片路径。键必须与模板槽位一一对应;分片含 import/export 时会被放进模板的槽位(须位于 module 脚本内且 import 指向远程)",
                         "additionalProperties": { "type": "string" }
                     },
                     "sources": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "无模板模式:按顺序内联的经典脚本分片(不得含行首 import/export)"
+                        "description": "无模板模式:按顺序内联的经典脚本/CSS 分片(不得含行首 import/export;引擎不打包 ESM,ESM 分片请先改写或改用 template)"
                     },
                     "title": { "type": "string", "description": "无模板模式生成的 HTML 标题" }
                 },
@@ -111,7 +112,7 @@ fn run_inline(deps: &ToolDeps, ctx: &ToolContext, args: &Value) -> Result<String
             rendered.len()
         ));
     }
-    let issues = wiring::single_file_text_issues(&out_rel, &rendered);
+    let issues = esm_boundary::single_file_text_issues(&out_rel, &rendered);
     if !issues.is_empty() {
         return Err(format!(
             "装配结果不是自包含单文件,未落盘:{}",
@@ -246,9 +247,9 @@ fn render_shell(
         }
         let content =
             read_text(&path, "分片", MAX_SOURCE_BYTES).map_err(|e| format!("{raw}:{e}"))?;
-        if has_top_level_esm(&content) {
+        if esm_boundary::has_top_level_esm(&content) {
             return Err(format!(
-                "分片 {raw} 含行首 import/export(ESM),无模板模式只支持经典脚本;请提供 template 显式控制模块边界"
+                "分片 {raw} 含行首 import/export(ESM);引擎不打包 ESM,sources 模式只生成经典脚本外壳。请把分片改写为经典脚本(window.*),或改用 template 把该分片放入 <script type=\"module\">(import 只能指向远程 URL/远程 importmap)"
             ));
         }
         entries.push((raw.to_string(), content));
@@ -293,6 +294,15 @@ pub(crate) fn render_classic_shell(
     )
 }
 
+/// 预置骨架的判定结果(SKY-10):成功给 HTML;失败也给原因与 ESM 清单,
+/// 让调用方能把「为什么没有入口」变成可执行的改写指令。
+pub(crate) struct PreSeedOutcome {
+    pub html: Option<String>,
+    pub inlined: usize,
+    pub skipped_esm: Vec<String>,
+    pub reason: Option<String>,
+}
+
 /// team 集成主启动前的确定性预置骨架（SKY-8 全题复跑兜底）。
 ///
 /// 为什么需要：全题复跑里总装主把 24.5 分钟花在写扫描脚本/读分片上，最后只交
@@ -302,15 +312,17 @@ pub(crate) fn render_classic_shell(
 ///
 /// 边界：只收 `.js`/`.mjs`/`.css` 的**经典脚本**（行首 `import/export` 跳过），
 /// 非文本/缺失文件跳过；不执行 JS、不判断分片顺序之外的语义。返回
-/// `(HTML 文本, 内联分片数)`；没有可用分片或自包含检查失败返回 Err。
+/// [`PreSeedOutcome`]：成功带 HTML 与内联数；没有可用分片或自包含检查失败时
+/// 原因与跳过的 ESM 分片清单仍在结果里（由调用方点名，不再静默失败）。
 pub(crate) fn assemble_pre_seed(
     workspace: &Path,
     output_rel: &str,
     upstream_files: &[String],
     title: &str,
     include_three: bool,
-) -> Result<(String, usize), String> {
+) -> PreSeedOutcome {
     let mut sources: Vec<(String, String)> = Vec::new();
+    let mut skipped_esm: Vec<String> = Vec::new();
     for raw in upstream_files {
         let Some(rel) = crate::models::ownership::normalize_workspace_rel(raw) else {
             continue;
@@ -329,7 +341,10 @@ pub(crate) fn assemble_pre_seed(
         let Ok(content) = read_text(&path, "预置分片", MAX_SOURCE_BYTES) else {
             continue;
         };
-        if (lower.ends_with(".js") || lower.ends_with(".mjs")) && has_top_level_esm(&content) {
+        if (lower.ends_with(".js") || lower.ends_with(".mjs"))
+            && esm_boundary::has_top_level_esm(&content)
+        {
+            skipped_esm.push(rel);
             continue;
         }
         if content.trim().is_empty() {
@@ -338,14 +353,29 @@ pub(crate) fn assemble_pre_seed(
         sources.push((rel, content));
     }
     if sources.is_empty() {
-        return Err("没有可用于预置骨架的经典脚本/CSS 分片".into());
+        return PreSeedOutcome {
+            html: None,
+            inlined: 0,
+            skipped_esm,
+            reason: Some("没有可用于预置骨架的经典脚本/CSS 分片".into()),
+        };
     }
     let html = render_classic_shell(&sources, title, include_three);
-    let issues = wiring::single_file_text_issues(output_rel, &html);
+    let issues = esm_boundary::single_file_text_issues(output_rel, &html);
     if !issues.is_empty() {
-        return Err(format!("预置骨架未通过自包含检查:{}", issues.join(";")));
+        return PreSeedOutcome {
+            html: None,
+            inlined: sources.len(),
+            skipped_esm,
+            reason: Some(format!("预置骨架未通过自包含检查:{}", issues.join(";"))),
+        };
     }
-    Ok((html, sources.len()))
+    PreSeedOutcome {
+        html: Some(html),
+        inlined: sources.len(),
+        skipped_esm,
+        reason: None,
+    }
 }
 
 /// 提取模板槽位名;未闭合/非法字符直接报错(不在装配阶段猜)。
@@ -420,18 +450,6 @@ fn read_text(path: &Path, kind: &str, max_bytes: u64) -> Result<String, String> 
         ));
     }
     String::from_utf8(bytes).map_err(|_| format!("{kind} {} 不是 UTF-8 文本", path.display()))
-}
-
-fn has_top_level_esm(text: &str) -> bool {
-    text.lines().any(|line| {
-        let line = line.trim_start();
-        line.starts_with("import ")
-            || line.starts_with("import{")
-            || line.starts_with("import.")
-            || line.starts_with("export ")
-            || line.starts_with("export{")
-            || line.starts_with("export*")
-    })
 }
 
 fn is_html_path(path: &Path) -> bool {
@@ -688,9 +706,16 @@ mod tests {
         .iter()
         .map(|s| s.to_string())
         .collect();
-        let (html, count) =
-            assemble_pre_seed(&f.ws, "index.html", &files, "预置骨架", true).expect("预置应成功");
-        assert_eq!(count, 3, "ESM/HTML 分片应跳过:{html}");
+        let PreSeedOutcome {
+            html,
+            inlined,
+            skipped_esm,
+            reason,
+        } = assemble_pre_seed(&f.ws, "index.html", &files, "预置骨架", true);
+        let html = html.expect("预置应成功");
+        assert_eq!(inlined, 3, "ESM/HTML 分片应跳过:{html}");
+        assert_eq!(skipped_esm, vec!["parts/esm.js".to_string()], "{html}");
+        assert!(reason.is_none(), "成功不应带失败原因:{html}");
         assert!(html.contains("window.A=1;"), "{html}");
         assert!(html.contains("window.B=2;"), "{html}");
         assert!(
@@ -706,9 +731,36 @@ mod tests {
             "Three.js 任务应带 CDN:{html}"
         );
         assert!(
-            wiring::single_file_text_issues("index.html", &html).is_empty(),
+            esm_boundary::single_file_text_issues("index.html", &html).is_empty(),
             "预置骨架应通过自包含检查:{html}"
         );
+        let _ = std::fs::remove_dir_all(f.dir.path());
+    }
+
+    /// SKY-10:全 ESM 上游不生成入口,但结果里必须带原因与逐一点名的分片清单,
+    /// 让调用方能把「没有入口」变成可执行的改写指令(不再静默失败)。
+    #[test]
+    fn pre_seed_reports_all_esm_without_writing() {
+        let f = fixture("pre-seed-esm-only");
+        std::fs::write(f.ws.join("parts/a.js"), "export const A = 1;").expect("写 ESM 失败");
+        std::fs::write(f.ws.join("parts/b.js"), "export function b() {}").expect("写 ESM 失败");
+        let files: Vec<String> = ["parts/a.js", "parts/b.js"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let outcome = assemble_pre_seed(&f.ws, "index.html", &files, "预置骨架", false);
+        assert!(outcome.html.is_none(), "全 ESM 不应生成入口");
+        assert_eq!(outcome.inlined, 0);
+        assert_eq!(
+            outcome.skipped_esm,
+            vec!["parts/a.js".to_string(), "parts/b.js".to_string()],
+            "ESM 分片应逐一点名"
+        );
+        assert!(
+            outcome.reason.unwrap_or_default().contains("经典脚本"),
+            "失败原因应指向经典脚本要求"
+        );
+        assert!(!f.ws.join("index.html").exists(), "失败不应落盘");
         let _ = std::fs::remove_dir_all(f.dir.path());
     }
 }
