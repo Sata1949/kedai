@@ -18,10 +18,11 @@ use super::ddl::{
     ensure_skills_progressive_columns, ensure_task_events_table, ensure_task_file_changes_table,
     ensure_task_llm_calls_finish_reason_column, ensure_task_messages_table,
     ensure_task_scan_marks_table, ensure_task_subtasks_finished_at_column,
-    ensure_tasks_executor_id_column, ensure_tasks_flow_columns, ensure_tasks_task_mode_column,
-    ensure_tool_calls_snapshot_id_column, ensure_undo_snapshots_restore_columns,
-    CONTRACT_CHANGELOG_DDL, KALEIDO_STATE_DDL, LLM_REQUESTS_DDL, MEMORY_ENTRIES_DDL,
-    MEMORY_ENTRIES_FTS_DDL, SCOPE_VARIABLES_DDL, SESSION_COMPACTIONS_DDL, USER_SCRIPTS_DDL,
+    ensure_tasks_executor_id_column, ensure_tasks_flow_columns, ensure_tasks_runtime_issues_column,
+    ensure_tasks_task_mode_column, ensure_tool_calls_snapshot_id_column,
+    ensure_undo_snapshots_restore_columns, CONTRACT_CHANGELOG_DDL, KALEIDO_STATE_DDL,
+    LLM_REQUESTS_DDL, MEMORY_ENTRIES_DDL, MEMORY_ENTRIES_FTS_DDL, SCOPE_VARIABLES_DDL,
+    SESSION_COMPACTIONS_DDL, USER_SCRIPTS_DDL,
 };
 use super::{DATABASE_FILE, SKIPPED_SIDECARS};
 use crate::models::db::SCHEMA_VERSION;
@@ -204,6 +205,9 @@ fn merge_databases(baseline: &Path, source: &Path) -> Result<MergeReport, String
         .map_err(|e| format!("补齐基线库 tasks executor_id 列失败: {e}"))?;
     // tasks flow_id/flow_snapshot 列(二维批次 5a 任务绑定流程):旧库 ALTER 补齐
     ensure_tasks_flow_columns(&conn).map_err(|e| format!("补齐基线库 tasks flow 列失败: {e}"))?;
+    // tasks runtime_issues 列(SKY-9-L1):旧库 ALTER 补齐,保证两侧 schema 一致
+    ensure_tasks_runtime_issues_column(&conn)
+        .map_err(|e| format!("补齐基线库 tasks runtime_issues 列失败: {e}"))?;
     // task_llm_calls finish_reason 列(可观测性问题①):旧库 ALTER 补齐
     ensure_task_llm_calls_finish_reason_column(&conn)
         .map_err(|e| format!("补齐基线库 task_llm_calls finish_reason 列失败: {e}"))?;
@@ -277,6 +281,9 @@ fn merge_databases(baseline: &Path, source: &Path) -> Result<MergeReport, String
     // tasks flow_id/flow_snapshot 列(二维批次 5a):源快照侧同样补齐(与基线侧成对)
     ensure_tasks_flow_columns(&source_conn)
         .map_err(|e| format!("补齐源快照 tasks flow 列失败: {e}"))?;
+    // tasks runtime_issues 列(SKY-9-L1):源快照侧同样补齐(与基线侧成对)
+    ensure_tasks_runtime_issues_column(&source_conn)
+        .map_err(|e| format!("补齐源快照 tasks runtime_issues 列失败: {e}"))?;
     ensure_task_llm_calls_finish_reason_column(&source_conn)
         .map_err(|e| format!("补齐源快照 task_llm_calls finish_reason 列失败: {e}"))?;
     ensure_agent_subtasks_finished_at_column(&source_conn)

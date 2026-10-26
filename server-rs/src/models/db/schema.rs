@@ -144,7 +144,12 @@ CREATE TABLE IF NOT EXISTS tasks (
   -- canonicalize 后冻结,绑定后任务获得工作区文件工具族(fs_*)且 bash 缺省 cwd 落在
   -- 其内。旧库经 migration::ensure_tasks_workspace_column 幂等补列;列追加在表尾以对齐
   -- ALTER ADD COLUMN 的追加顺序(schema 指纹比对依赖)。
-  workspace    TEXT
+  workspace    TEXT,
+  -- 最近一次终态运行期自检的问题(JSON 字符串数组;SKY-9-L1,2026-10-25)。
+  -- 空数组 = 未执行自检或自检通过;重跑/批准/追加指令起跑时清空,避免陈旧问题残留。
+  -- 详情 `delivery.runtime_issues` 读这一列(读时不再重跑浏览器)。
+  -- 旧库经 migration::ensure_tasks_runtime_issues_column 幂等补列,列在表尾。
+  runtime_issues TEXT NOT NULL DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
 -- 任务列表按角色 / 状态过滤(2026-09-13 批次 3 补;旧库经 ensure_perf_indexes 补建)

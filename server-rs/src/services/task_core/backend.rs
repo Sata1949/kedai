@@ -49,6 +49,10 @@ pub(crate) trait TaskStore: Send + Sync {
     /// (绑定优先 → 冻结快照;否则当时的当前流程),那由 `TaskFlowAccess` 单一提供。
     fn set_flow_snapshot(&self, id: &str, snapshot: &FlowSnapshot) -> bool;
 
+    /// 覆写本轮运行期自检问题(SKY-9-L1;空切片 = 清空);返回是否命中并更新。
+    /// 详情侧读同一列由宿主 `TaskService::runtime_issues` 提供,引擎只需写。
+    fn set_runtime_issues(&self, id: &str, issues: &[String]) -> bool;
+
     /// 设置任务状态;返回是否命中并更新。
     fn set_status(&self, id: &str, status: TaskStatus) -> bool;
 

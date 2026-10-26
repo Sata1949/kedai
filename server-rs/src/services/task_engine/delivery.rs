@@ -63,6 +63,12 @@ pub struct TaskDeliverySummary {
     /// SKY-1 确定性部分:导入名未导出/本地模块或资源不存在/单文件交付仍外链)。
     /// 与终态门槛同源,前端「交付校验」卡直接展示。
     pub content_issues: Vec<String>,
+    /// 最近一次终态运行期自检的问题(SKY-9-L1,2026-10-25)。
+    ///
+    /// 由任务终态门槛写入 `tasks.runtime_issues`,详情接口读列填充;`summarize` 本身
+    /// 是纯函数,不重跑浏览器(每次 SSE 刷新都起一次无头浏览器不可接受)。空 = 未执行
+    /// 自检或自检通过;重跑/批准/追加指令起跑时清空。
+    pub runtime_issues: Vec<String>,
     /// 被空转守卫截断(步骤 partial)的子目标名(SKY-6 第 2 项)。空 = 无截断。
     pub truncated: Vec<String>,
     /// 工作区根目录里未声明的临时/草稿文件(SKY-1 交付卫生,2026-10-25)。
@@ -408,6 +414,9 @@ pub(crate) fn summarize(
         changed,
         changed_count,
         content_issues,
+        // 运行期问题来自 tasks.runtime_issues,由详情接口在 summarize 之后填充
+        // (本函数不碰 DB,也不重跑浏览器)。
+        runtime_issues: Vec::new(),
         truncated,
         hygiene_issues,
     }

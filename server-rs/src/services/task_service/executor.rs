@@ -66,6 +66,9 @@ impl TaskService {
             self.resolve_task_flow(Some(&task))
                 .map_err(|e| format!("选择自定义流程执行前需先确认可用流程:{e}"))?;
         }
+        // SKY-9-L1:批准续跑是新的一轮交付,上一轮运行期自检结论已过期。
+        // 在 set_plan / set_status 发事件之前清空,避免前端收到事件后短暂读到旧结论。
+        let _ = self.clear_runtime_issues(id);
         let steps = match plan {
             Some(p) => {
                 if p.is_empty() {
@@ -276,6 +279,10 @@ impl TaskService {
         // 的收尾(finalize_run/complete_mode_run)可能晚到——若先写 running 后登记,
         // 旧收尾凭旧 token 仍是 current 会把 ended 盖回 running;先登记则旧收尾
         // is_current_run 让位不写,新执行的 running 不被覆盖。
+        // SKY-9-L1:追加指令是新的一轮交付,上一轮运行期自检结论已过期。
+        // 在写 status 事件之前清空,避免前端收到事件后短暂读到旧结论;
+        // followup 不做文件交付门槛(可只回答文字),故本轮也不会重跑运行期自检。
+        let _ = self.clear_runtime_issues(id);
         let (cancel, token) = self.register_cancel(id);
         let _ = self.set_status(id, TaskStatus::Running);
         // 经任务引擎派发 followup 执行器(统一派发点;收尾由执行器返回

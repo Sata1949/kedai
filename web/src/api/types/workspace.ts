@@ -57,6 +57,12 @@ export interface TaskDeliverySummary {
    */
   content_issues?: string[];
   /**
+   * 最近一次终态运行期自检的问题（SKY-9-L1，2026-10-25）。
+   * 空 = 未执行自检或自检通过；重跑/批准/追加指令起跑时由后端清空。
+   * 旧服务端无此字段 → 按「无运行期问题」容错。
+   */
+  runtime_issues?: string[];
+  /**
    * 未完成（步骤 partial）的子目标名（SKY-6；SKY-8 起含预算收尾且声明文件缺失）。
    * 字段名为线格式兼容保留 `truncated`；旧服务端无此字段 → 按「无未完成步骤」容错。
    */
