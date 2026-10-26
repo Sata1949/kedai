@@ -1,14 +1,9 @@
 // protocol.ts — 沙箱通信协议:频道名/消息字节上限/消息类型定义与宿主-沙箱公共契约类型
 import type { MvuVariables } from '../mvu/variables';
+// 纯常量/序列化原语已下沉 L1（C-2F-3），此处再导出保持既有导入面不变。
+import { CHANNEL, MAX_MESSAGE_BYTES, cloneData, utf8Bytes } from '../utils/sandboxProtocol';
 
-const CHANNEL = 'kedai-character-script-v1';
-
-/**
- * 沙箱 boot 消息上限。角色卡开场/状态栏脚本动辄几十 KB(如 WuWa 状态栏 107KB,
- * 开场 40KB),64KB 会把它们整段拒掉 → 协议弹窗/悬浮球/状态栏永不显示。
- * postMessage 跨窗口传输无浏览器级硬上限(与内存一致),这里放宽到 1MB 防内存压力。
- */
-const MAX_MESSAGE_BYTES = 1024 * 1024;
+export { CHANNEL, MAX_MESSAGE_BYTES, cloneData, utf8Bytes } from '../utils/sandboxProtocol';
 
 interface JqOperation {
   ref:
@@ -129,20 +124,8 @@ export type SandboxCleanup = () => void;
 
 export const MAX_BOOT_MESSAGE_BYTES = MAX_MESSAGE_BYTES;
 
-function cloneData<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
-}
-
-function utf8Bytes(value: unknown): number {
-  return new TextEncoder().encode(JSON.stringify(value)).byteLength;
-}
-
 export {
-  CHANNEL,
-  MAX_MESSAGE_BYTES,
   INLINE_EVENT_NAMES,
-  cloneData,
-  utf8Bytes,
   type JqOperation,
   type CreatedElementSpec,
   type DraggableWire,

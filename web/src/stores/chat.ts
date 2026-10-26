@@ -8,7 +8,7 @@ import { ref, watch } from 'vue';
 import * as api from '../api';
 import { emitMvuEvent } from '../mvu/host';
 import { parseUpdateVariable } from '../mvu/parser';
-import { broadcastCardEvent, broadcastMvuUpdate } from '../characterScriptSandbox';
+import { broadcastCardEvent, broadcastMvuUpdate } from '../utils/sandboxBroadcast';
 // SSE 事件纯函数化 + mvu 状态纯函数(经 '../api' 类型依赖)
 import { idleAgent, reduceSseEvent } from '../sseReducer';
 import { applyMvuCommands, replayMvuVariables } from '../mvu/mvuStore';

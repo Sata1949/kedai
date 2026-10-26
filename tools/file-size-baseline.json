@@ -3,7 +3,6 @@
   "threshold": 1000,
   "note": "C-2E 基线:超千行非测试源文件只降不升。拆分后跑 --update;确需增长用 --update --force 并在提交正文说明。",
   "files": {
-    "server-rs/src/agents/engine/executor.rs": 1852,
     "server-rs/src/agents/engine/messages/trim.rs": 1111,
     "server-rs/src/agents/engine/run_loop.rs": 1022,
     "server-rs/src/api/chat.rs": 1138,
@@ -17,7 +16,6 @@
     "server-rs/src/parsing/world_book.rs": 1728,
     "server-rs/src/plugins/mod.rs": 1426,
     "server-rs/src/services/session_service.rs": 1134,
-    "server-rs/src/services/settings_service/mod.rs": 2126,
     "server-rs/src/services/settings_service/params.rs": 1235,
     "server-rs/src/services/task_engine/delivery.rs": 1213,
     "server-rs/src/services/task_engine/runtime_check.rs": 1051,
