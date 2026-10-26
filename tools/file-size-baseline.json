@@ -3,7 +3,6 @@
   "threshold": 1000,
   "note": "C-2E 基线:超千行非测试源文件只降不升。拆分后跑 --update;确需增长用 --update --force 并在提交正文说明。",
   "files": {
-    "server-rs/src/agents/engine/executor.rs": 1167,
     "server-rs/src/agents/engine/messages/trim.rs": 1111,
     "server-rs/src/agents/engine/run_loop.rs": 1022,
     "server-rs/src/api/chat.rs": 1138,
