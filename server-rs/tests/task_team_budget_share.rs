@@ -8,10 +8,13 @@
 //
 // 本用例故意让主 1 超时,验证「前波超时不会饿死后续波」;审计/汇总的预留
 // (<120s 不生效)不在本用例范围,由 `post_exec_reserve` 单测覆盖。
+//
+// 12s 团队预算低于设置页下限(600s),经 `test_app_with_settings` 在进程内注入;
+// PUT 只保留设置页允许的字段。
 use axum::http::StatusCode;
 use serde_json::{json, Value};
 mod common;
-use common::{send_json, test_app};
+use common::send_json;
 
 /// 任务终态轮询:沿用本文件历史的 45s 墙钟 超时,实现见 `common`.
 async fn wait_terminal(app: &axum::Router, id: &str) -> (String, Value) {
@@ -20,7 +23,7 @@ async fn wait_terminal(app: &axum::Router, id: &str) -> (String, Value) {
 
 #[tokio::test]
 async fn team_budget_share_keeps_later_waves_alive() {
-    let app = test_app();
+    let app = common::test_app_with_settings(|s| s.task_team_budget_secs = 12);
     let (status, json) = send_json(
         app,
         "PUT",
@@ -28,7 +31,6 @@ async fn team_budget_share_keeps_later_waves_alive() {
         json!({
             "loop_guard_semantic_min_calls": 0,
             "task_step_budget_secs": 3600,
-            "task_team_budget_secs": 12,
             "task_total_budget_secs": 0,
         }),
     )

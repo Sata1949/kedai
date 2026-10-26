@@ -13,14 +13,13 @@ use super::params::{
     default_memory_inject_char_budget, default_memory_inject_limit, default_memory_max_entries,
     default_session_budget_action, default_session_token_budget, default_subagent_max_concurrency,
     default_subagent_max_depth, default_subagent_result_max_chars, default_task_idle_timeout_secs,
-    default_task_step_budget_secs, default_task_team_budget_secs, default_task_tool_policy,
-    default_task_total_budget_secs, default_tool_authorization_timeout_secs,
-    default_tool_history_budget_tokens, default_tool_history_keep_rounds,
-    migrate_authorization_mode, task_idle_floor_secs,
+    default_task_step_budget_secs, default_task_tool_policy, default_task_total_budget_secs,
+    default_tool_authorization_timeout_secs, default_tool_history_budget_tokens,
+    default_tool_history_keep_rounds, migrate_authorization_mode, task_idle_floor_secs,
 };
 use super::{
     is_valid_literary_recommend_preset, is_valid_literary_style_preset, RoleplayPromptConfig,
-    RuntimeSettings,
+    RuntimeSettings, TASK_TEAM_BUDGET_MAX_SECS, TASK_TEAM_BUDGET_MIN_SECS,
 };
 
 impl RuntimeSettings {
@@ -210,10 +209,16 @@ impl RuntimeSettings {
                 {
                     s.task_total_budget_secs = default_task_total_budget_secs();
                 }
-                // 团队任务总预算(TMR3-4):同款区间(0 = 关,否则 1..=86400)
-                if s.task_team_budget_secs != 0 && !(1..=86_400).contains(&s.task_team_budget_secs)
+                // 团队任务总预算(TMR3-4;2026-10-26 起 600..=1200,>1200 = 不限):
+                // 旧配置里的 1..599 是旧规则下的合法短预算,钳到新下限而不是回默认
+                // ——用户想要的仍是「短」,给最短合法值最接近原意;>1200 按新语义
+                // 归一为 0(不限),避免设置页显示一个已不存在的「有限大值」。
+                if s.task_team_budget_secs > TASK_TEAM_BUDGET_MAX_SECS {
+                    s.task_team_budget_secs = 0;
+                } else if s.task_team_budget_secs != 0
+                    && s.task_team_budget_secs < TASK_TEAM_BUDGET_MIN_SECS
                 {
-                    s.task_team_budget_secs = default_task_team_budget_secs();
+                    s.task_team_budget_secs = TASK_TEAM_BUDGET_MIN_SECS;
                 }
                 if s.task_idle_timeout_secs != 0
                     && !(task_idle_floor_secs()..=86_400).contains(&s.task_idle_timeout_secs)
@@ -852,6 +857,39 @@ mod tests {
             serde_json::to_string(&task.connections).unwrap(),
             serde_json::to_string(&roleplay.connections).unwrap(),
             "连接信息始终共享,不得按模式隔离"
+        );
+    }
+
+    /// 团队预算旧值迁移(2026-10-26):旧规则允许 1..=86400,新规则 600..=1200
+    /// 且 >1200 = 不限。加载旧配置时:低于下限钳到 600(保留「想要短」的意图),
+    /// 超过上限归一为 0(不限),合法值原样保留。
+    #[test]
+    fn team_budget_old_values_migrate_to_floor_or_unlimited() {
+        let dir = temp_dir("team-budget");
+        let write_with = |secs: u32| {
+            let mut base = RuntimeSettings::from_config(&test_config());
+            base.task_team_budget_secs = secs;
+            write_settings(&dir, &serde_json::to_string_pretty(&base).unwrap());
+        };
+
+        write_with(300);
+        assert_eq!(
+            RuntimeSettings::load(&dir, &test_config()).task_team_budget_secs,
+            TASK_TEAM_BUDGET_MIN_SECS
+        );
+
+        write_with(3600);
+        assert_eq!(
+            RuntimeSettings::load(&dir, &test_config()).task_team_budget_secs,
+            0,
+            ">1200 按无限处理"
+        );
+
+        write_with(900);
+        assert_eq!(
+            RuntimeSettings::load(&dir, &test_config()).task_team_budget_secs,
+            900,
+            "区间内旧值原样保留"
         );
     }
 }

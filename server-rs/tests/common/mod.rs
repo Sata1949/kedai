@@ -15,6 +15,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
+use kedai_server::services::settings_service::RuntimeSettings;
 use serde_json::{json, Value};
 use std::sync::OnceLock;
 use tokio::sync::{Mutex, MutexGuard};
@@ -53,6 +54,21 @@ pub fn test_app_with_prompt_isolation() -> &'static Router {
     static APP: OnceLock<Router> = OnceLock::new();
     runtime_prompt_isolation();
     APP.get_or_init(|| kedai_server::build_test_app().expect("构建测试应用失败"))
+}
+
+/// 需要**低于设置页下限**的预算来触发收尾路径时使用:构建独立 app,并在路由装配前
+/// 直接改写内存设置(绕过 `PUT /api/settings` 的产品校验)。
+///
+/// 与 `test_app()` 的进程级单例不同,本函数每次调用新建 app 并清空临时数据目录
+/// (同一测试二进制内只应有它一个 app);泄漏 Router 仅为让调用点保持 `&'static Router`
+/// 与既有夹具同形,泄漏量是每进程一个。
+pub fn test_app_with_settings(configure: impl FnOnce(&mut RuntimeSettings)) -> &'static Router {
+    let app = kedai_server::build_test_app_configured(|state| {
+        let mut settings = state.settings.lock().unwrap_or_else(|e| e.into_inner());
+        configure(&mut settings);
+    })
+    .expect("构建测试应用失败");
+    Box::leak(Box::new(app))
 }
 
 /// JSON 请求 + JSON 响应(响应非法 JSON 时按 `Value::Null` 处理,沿用原夹具语义)。

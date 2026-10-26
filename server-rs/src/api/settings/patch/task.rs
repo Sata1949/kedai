@@ -1,5 +1,8 @@
 //! 任务侧默认连接与墙钟/空闲预算(预算为扁平字段,仅任务侧消费)。
-use crate::services::settings_service::{connection_label, task_idle_floor_secs, RuntimeSettings};
+use crate::services::settings_service::{
+    connection_label, task_idle_floor_secs, RuntimeSettings, TASK_TEAM_BUDGET_MAX_SECS,
+    TASK_TEAM_BUDGET_MIN_SECS,
+};
 
 use super::super::UpdateSettingsBody;
 use super::apply_mode;
@@ -64,15 +67,25 @@ pub(super) fn apply(
         }
         s.task_total_budget_secs = v;
     }
-    // 团队任务总预算(TMR3-4):同款区间(0 = 关,否则 1..=86400)
+    // 团队任务总预算(TMR3-4;2026-10-26 起设置页口径 600..=1200,>1200 = 不限):
+    // 超过上限直接归一为 0 而不是报错——用户的意图是「放久一点/别限时」,不是故意
+    // 填非法值;0 与既有「关闭闸门」同义(团队执行阶段不设墙钟)。
+    // 低于 600 的有限值仍拒绝:900s 实测已会把总装截图阶段截成 partial(SKY-10),
+    // 更短只会稳定制造半成品。回归用例需要秒级预算触发收尾路径,经
+    // `build_test_app_configured` 在进程内注入,不走本端点。
     if let Some(v) = body.task_team_budget_secs {
-        if v != 0 && !(1..=86_400).contains(&v) {
+        if v > TASK_TEAM_BUDGET_MAX_SECS {
+            s.task_team_budget_secs = 0;
+        } else if v != 0 && v < TASK_TEAM_BUDGET_MIN_SECS {
+            // 文案必须是字面量:check-settings-parity 从 `PatchError::new` 的字符串
+            // 字面量派生取值域,`format!` 会让该字段被判定为「登记失效」。
             return Err(PatchError::new(
                 "task_team_budget_secs",
-                "task_team_budget_secs 须为 0(关闭)或 1..=86400",
+                "task_team_budget_secs 须为 0(不限)或 600..=1200(超过 1200 视为不限)",
             ));
+        } else {
+            s.task_team_budget_secs = v;
         }
-        s.task_team_budget_secs = v;
     }
     if let Some(v) = body.task_idle_timeout_secs {
         // 下限走 `task_idle_floor_secs()` 单一出处(= 单条命令上限 + 单次模型调用上限 + 1);

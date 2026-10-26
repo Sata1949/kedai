@@ -25,6 +25,25 @@ function readAuthorizationMode(s: api.RuntimeSettings): api.AuthorizationMode {
   return s.bypass_mode ? 'bypass' : 'strict';
 }
 
+/** 团队总预算可调下限(秒;与服务端 `TASK_TEAM_BUDGET_MIN_SECS` 同源) */
+export const TASK_TEAM_BUDGET_MIN_SECS = 600;
+/** 团队总预算可调上限(秒;超过即「不限」,与服务端 `TASK_TEAM_BUDGET_MAX_SECS` 同源) */
+export const TASK_TEAM_BUDGET_MAX_SECS = 1200;
+/** 团队总预算默认值(秒;服务端默认同值 = 可调上限,最宽的有限档) */
+export const TASK_TEAM_BUDGET_DEFAULT_SECS = 1200;
+
+/**
+ * 归一团队总预算:`0` = 不限;`600..=1200` = 有限值;`>1200` 归为 `0`(不限);
+ * `1..599` 抬到下限 `600`。输入框失焦、保存前与 loadSettings 共用同一判据,
+ * 保证界面显示值与服务端实际值一致(服务端对 >1200 也做同样的归一)。
+ */
+export function normalizeTaskTeamBudgetSecs(value: number): number {
+  if (!Number.isFinite(value)) return TASK_TEAM_BUDGET_DEFAULT_SECS;
+  if (value === 0) return 0;
+  if (value > TASK_TEAM_BUDGET_MAX_SECS) return 0;
+  return Math.max(TASK_TEAM_BUDGET_MIN_SECS, Math.round(value));
+}
+
 export const useGenSettingsStore = defineStore('app.genSettings', () => {
   // ===== 生成参数 =====
   const temperature = ref(0.8);
@@ -58,10 +77,10 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
   const taskStepBudgetSecs = ref(3600);
   /** 任务级总预算秒数(PRODCAP-2;服务端默认 0 = 关;0 = 关闭,否则 1..=86400) */
   const taskTotalBudgetSecs = ref(0);
-  /** 团队任务执行阶段总预算秒数(TMR3-4;服务端默认 1200;0 = 关闭,否则 1..=86400) */
-  const taskTeamBudgetSecs = ref(1200);
-  /** 任务空闲超时秒数(服务端默认 900;0 = 关闭看守) */
-  const taskIdleTimeoutSecs = ref(900);
+  /** 团队任务执行阶段总预算秒数(TMR3-4;服务端默认 1200;0 = 不限,否则 600..=1200) */
+  const taskTeamBudgetSecs = ref(TASK_TEAM_BUDGET_DEFAULT_SECS);
+  /** 任务空闲超时秒数(服务端默认 2400;0 = 关闭看守) */
+  const taskIdleTimeoutSecs = ref(2400);
   /** 变量两步生成独立模型(空串 = 与正文共用;HB-7) */
   const mvuModel = ref('');
   /** 变量两步生成独立温度输入(空串 = 跟随内置 0.3;保存时映射为清除哨兵) */
@@ -194,8 +213,10 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     loopGuardSemanticMaxDistinct.value = s.loop_guard_semantic_max_distinct ?? 2;
     taskStepBudgetSecs.value = s.task_step_budget_secs ?? 3600;
     taskTotalBudgetSecs.value = s.task_total_budget_secs ?? 0;
-    taskTeamBudgetSecs.value = s.task_team_budget_secs ?? 1200;
-    taskIdleTimeoutSecs.value = s.task_idle_timeout_secs ?? 900;
+    taskTeamBudgetSecs.value = normalizeTaskTeamBudgetSecs(
+      s.task_team_budget_secs ?? TASK_TEAM_BUDGET_DEFAULT_SECS,
+    );
+    taskIdleTimeoutSecs.value = s.task_idle_timeout_secs ?? 2400;
     mvuModel.value = s.mvu_model ?? '';
     mvuTemperatureInput.value =
       typeof s.mvu_temperature === 'number' ? String(s.mvu_temperature) : '';
@@ -308,6 +329,16 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     }
   }
 
+  /** 团队预算输入失焦/变更时归一(组件直接写 store 会被架构门禁计数,故收为 action) */
+  function normalizeTaskTeamBudget(): void {
+    taskTeamBudgetSecs.value = normalizeTaskTeamBudgetSecs(taskTeamBudgetSecs.value);
+  }
+
+  /** 「不限」开关:勾选 → 0;取消 → 回到可调上限(默认值) */
+  function setTaskTeamBudgetUnlimited(unlimited: boolean): void {
+    taskTeamBudgetSecs.value = unlimited ? 0 : TASK_TEAM_BUDGET_MAX_SECS;
+  }
+
   // ===== 提示词注入 =====
 
   /** 加载注入配置(简单模式 + 楼层);失败保持 null,区块显示加载失败 */
@@ -418,6 +449,8 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     taskToolAllowlist,
     requestShizukuPermission,
     setAuthorizationMode,
+    normalizeTaskTeamBudget,
+    setTaskTeamBudgetUnlimited,
     agentSystemPrompt,
     searchEndpoint,
     mvuVarsPosition,

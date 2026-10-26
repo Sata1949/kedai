@@ -92,8 +92,21 @@ describe('批量保存按模式过滤(TM-SET-3)', () => {
     expect(patch.task_step_budget_secs).toBeDefined();
     // 任务级总预算(PRODCAP-2):装配漏一处即类型/UI 断裂,在此钉住
     expect(patch.task_total_budget_secs).toBeDefined();
-    // 团队任务总预算(TMR3-4):同款装配钉住
-    expect(patch.task_team_budget_secs).toBeDefined();
+    // 团队任务总预算(TMR3-4):同款装配钉住;默认 = 可调上限 1200
+    expect(patch.task_team_budget_secs).toBe(1200);
+  });
+
+  it('团队预算保存前归一:>1200 写 0(不限),1..599 写 600', async () => {
+    const store = useAppStore();
+    const { saveParamsNow } = useGenerationParams();
+
+    store.taskTeamBudgetSecs = 1300;
+    await saveParamsNow();
+    expect(lastSavedPatch().task_team_budget_secs, '超过 1200 = 不限').toBe(0);
+
+    store.taskTeamBudgetSecs = 300;
+    await saveParamsNow();
+    expect(lastSavedPatch().task_team_budget_secs, '低于 600 抬到下限').toBe(600);
   });
 });
 

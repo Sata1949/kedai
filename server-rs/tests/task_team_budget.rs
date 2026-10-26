@@ -4,13 +4,14 @@
 // 可跑到小时级),全局 `task_total_budget_secs` 默认 0;2026-10-21 实测单主跑到
 // 26 分钟、外部 driver 30 分钟主动 stop。
 //
-// 本用例把 `task_team_budget_secs` 设为 1 秒,主 1 用 sleep 工具拖过截止期,
+// 本用例把 `task_team_budget_secs` 设为 1 秒(低于设置页下限 600,经
+// `test_app_with_settings` 在进程内注入),主 1 用 sleep 工具拖过截止期,
 // 主 2 声明 after:[1] —— 应看到:主 1 带产出收尾、主 2 标「团队总预算用尽(未执行)」、
 // 任务以 partial 收尾而不是 error。
 use axum::http::StatusCode;
 use serde_json::{json, Value};
 mod common;
-use common::{send_json, test_app};
+use common::send_json;
 
 /// 任务终态轮询:沿用本文件历史的 60s 墙钟 超时,实现见 `common`.
 async fn wait_terminal(app: &axum::Router, id: &str) -> (String, Value) {
@@ -19,15 +20,15 @@ async fn wait_terminal(app: &axum::Router, id: &str) -> (String, Value) {
 
 #[tokio::test]
 async fn team_budget_stops_remaining_mains_with_partial_delivery() {
-    let app = test_app();
-    // 关闭语义熔断(本用例要拖过 1s 截止期,不能被同工具输出守卫先收掉)
+    let app = common::test_app_with_settings(|s| s.task_team_budget_secs = 1);
+    // 关闭语义熔断(本用例要拖过 1s 截止期,不能被同工具输出守卫先收掉);
+    // 团队预算已在上面的构建期注入,PUT 不再带该字段(端点会拒绝 <600 的有限值)。
     let (status, json) = send_json(
         app,
         "PUT",
         "/api/settings",
         json!({
             "loop_guard_semantic_min_calls": 0,
-            "task_team_budget_secs": 1,
         }),
     )
     .await;

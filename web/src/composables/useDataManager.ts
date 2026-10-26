@@ -3,6 +3,7 @@ import { computed, ref } from 'vue';
 import { useAppStore } from '../store';
 import { storeToRefs } from 'pinia';
 import * as api from '../api';
+import { normalizeTaskTeamBudgetSecs } from '../stores/genSettings';
 
 export function useDataManager() {
   const store = useAppStore();
@@ -150,7 +151,7 @@ export function useGenerationParams() {
         loop_guard_semantic_max_distinct: loopGuardSemanticMaxDistinct.value,
         task_step_budget_secs: taskStepBudgetSecs.value,
         task_total_budget_secs: taskTotalBudgetSecs.value,
-        task_team_budget_secs: taskTeamBudgetSecs.value,
+        task_team_budget_secs: normalizeTaskTeamBudgetSecs(taskTeamBudgetSecs.value),
         task_idle_timeout_secs: taskIdleTimeoutSecs.value,
         subagent_max_depth: subagentMaxDepth.value,
         subagent_max_concurrency: subagentMaxConcurrency.value,
