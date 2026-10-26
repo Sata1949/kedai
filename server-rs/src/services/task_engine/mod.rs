@@ -432,14 +432,17 @@ impl TaskEngine {
                         let entry = delivery::pick_single_file_entry(ws, &required);
                         if let Some(entry) = entry.filter(|p| ws.join(p).is_file()) {
                             let outcome = runtime_check::probe(ws, &entry, &goal_text).await;
-                            if !outcome.issues.is_empty() {
-                                content_issues.extend(
-                                    outcome
-                                        .issues
-                                        .iter()
-                                        .map(|issue| format!("{entry}:{issue}")),
-                                );
+                            // SKY-9-L1:运行期问题随终态一起持久化,详情接口读列下发;
+                            // 自检通过时也写空数组,保证本轮结论覆盖起跑时的清空值。
+                            let runtime_issues: Vec<String> = outcome
+                                .issues
+                                .iter()
+                                .map(|issue| format!("{entry}:{issue}"))
+                                .collect();
+                            if !runtime_issues.is_empty() {
+                                content_issues.extend(runtime_issues.iter().cloned());
                             }
+                            self.svc.set_runtime_issues(&task.id, &runtime_issues);
                             if !outcome.notes.is_empty() {
                                 self.svc.emit_event(
                                     TaskEventKind::Status,

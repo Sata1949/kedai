@@ -36,6 +36,10 @@ impl TaskStore for TaskService {
         TaskService::set_flow_snapshot(self, id, snapshot)
     }
 
+    fn set_runtime_issues(&self, id: &str, issues: &[String]) -> bool {
+        TaskService::set_runtime_issues(self, id, issues)
+    }
+
     fn set_status(&self, id: &str, status: TaskStatus) -> bool {
         TaskService::set_status(self, id, status)
     }

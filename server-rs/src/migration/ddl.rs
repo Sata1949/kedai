@@ -270,6 +270,41 @@ pub fn ensure_tasks_workspace_column(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// 幂等 schema 升级(SKY-9-L1,2026-10-25):为 tasks 补 runtime_issues 列。
+///
+/// 语义:最近一次终态运行期自检的问题清单(JSON 字符串数组)。用 NOT NULL DEFAULT '[]'
+/// 而不是可空——「没有运行期问题」与「未执行自检」在展示上同为空数组,旧行零回填
+/// 也天然满足读取侧的 `Vec<String>` 解析。列追加在表尾,与新版 CREATE_TABLES 的
+/// 建表顺序一致(schema 归一化比对依赖)。
+pub fn ensure_tasks_runtime_issues_column(conn: &Connection) -> Result<(), String> {
+    let mut existing: Vec<String> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(tasks)")
+            .map_err(|e| format!("读取 tasks 列失败: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| format!("遍历 tasks 列失败: {e}"))?;
+        for name in rows.flatten() {
+            existing.push(name.to_lowercase());
+        }
+    }
+    // tasks 表不存在(极旧快照/手工建库)时零列返回,直接跳过——
+    // 建表由 CREATE_TABLES 或合并期 schema 比对负责,此处不能 ALTER 报错
+    if existing.is_empty() {
+        return Ok(());
+    }
+    if existing.iter().any(|c| c == "runtime_issues") {
+        return Ok(());
+    }
+    conn.execute(
+        "ALTER TABLE tasks ADD COLUMN runtime_issues TEXT NOT NULL DEFAULT '[]'",
+        [],
+    )
+    .map_err(|e| format!("为 tasks 补 runtime_issues 列失败: {e}"))?;
+    Ok(())
+}
+
 /// 幂等 schema 升级(可观测性问题①):为 task_llm_calls 补 finish_reason 列
 ///(缺失才 ALTER,已存在跳过)。启动时(Db::open)与跨库合并前(merge_databases
 /// 两侧)各执行一次;旧行经 DEFAULT '' 零迁移成本('' = 未知/未下发,

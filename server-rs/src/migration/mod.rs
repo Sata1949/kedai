@@ -23,9 +23,9 @@ pub use ddl::{
     ensure_skills_progressive_columns, ensure_task_events_table, ensure_task_file_changes_table,
     ensure_task_llm_calls_finish_reason_column, ensure_task_messages_table,
     ensure_task_scan_marks_table, ensure_task_subtasks_finished_at_column,
-    ensure_tasks_executor_id_column, ensure_tasks_flow_columns, ensure_tasks_task_mode_column,
-    ensure_tasks_workspace_column, ensure_tool_calls_snapshot_id_column,
-    ensure_undo_snapshots_restore_columns,
+    ensure_tasks_executor_id_column, ensure_tasks_flow_columns, ensure_tasks_runtime_issues_column,
+    ensure_tasks_task_mode_column, ensure_tasks_workspace_column,
+    ensure_tool_calls_snapshot_id_column, ensure_undo_snapshots_restore_columns,
 };
 pub use merge::{merge_data_dirs, MergeReport, TableReport};
 
@@ -359,16 +359,19 @@ mod tests {
         // 编码通道批次:workspace 列同属表尾追加,Db::open 里紧随 flow 列执行,
         // 本用例按同一顺序补齐,才能与新建库的列定义逐字一致
         ensure_tasks_workspace_column(&conn).unwrap();
+        // SKY-9-L1:runtime_issues 同属表尾追加,Db::open 里紧随 workspace 列执行
+        ensure_tasks_runtime_issues_column(&conn).unwrap();
         let columns: Vec<String> = table_columns(&conn, "main", "tasks")
             .unwrap()
             .into_iter()
             .map(|c| c.name)
             .collect();
         // 列序固定为 flow_id → flow_snapshot → flow_ids → connection_id → workspace
-        // (与新建库建表顺序一致,schema 比对依赖);后两列分别于 A 批 B1 与编码通道批次
-        // 追加在最后,正是为了不打乱上面三列的既有相对顺序。
+        // → runtime_issues(与新建库建表顺序一致,schema 比对依赖);后三列分别于
+        // A 批 B1、编码通道批次与 SKY-9-L1 追加在最后,正是为了不打乱上面三列的既有
+        // 相对顺序。
         let tail = columns
-            .get(columns.len().saturating_sub(5)..)
+            .get(columns.len().saturating_sub(6)..)
             .unwrap_or(&[]);
         assert_eq!(
             tail,
@@ -377,9 +380,10 @@ mod tests {
                 "flow_snapshot",
                 "flow_ids",
                 "connection_id",
-                "workspace"
+                "workspace",
+                "runtime_issues"
             ],
-            "五列应追加在表尾且顺序固定,实际: {columns:?}"
+            "六列应追加在表尾且顺序固定,实际: {columns:?}"
         );
 
         // 旧行零迁移成本:三列均为 NULL(未绑定 / 尚无快照 / 强制模式)
@@ -409,14 +413,31 @@ mod tests {
             .unwrap();
         assert_eq!(ws, None, "旧行未绑定工作区");
 
+        // SKY-9-L1:runtime_issues 零回填为 '[]'（展示层与「未执行自检」同形）
+        let runtime: String = conn
+            .query_row(
+                "SELECT runtime_issues FROM tasks WHERE id = 't1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(runtime, "[]", "旧行默认无运行期问题");
+
         // 幂等:重复执行不报错、不产生重复列
         ensure_tasks_flow_columns(&conn).unwrap();
+        ensure_tasks_runtime_issues_column(&conn).unwrap();
         let dup = table_columns(&conn, "main", "tasks")
             .unwrap()
             .into_iter()
             .filter(|c| c.name == "flow_id" || c.name == "flow_snapshot" || c.name == "flow_ids")
             .count();
         assert_eq!(dup, 3, "重复迁移不应产生重复列");
+        let dup_runtime = table_columns(&conn, "main", "tasks")
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.name == "runtime_issues")
+            .count();
+        assert_eq!(dup_runtime, 1, "runtime_issues 重复迁移不应产生重复列");
 
         // 迁移后 schema 与新版 CREATE_TABLES 建出的表**列定义**一致(跨库合并比对依赖)。
         // 比对前剥掉 `--` 行注释:tasks 建表语句里带注释(注释是 sqlite_schema.sql 的

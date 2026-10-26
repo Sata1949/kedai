@@ -216,7 +216,7 @@ pub async fn get(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> 
                     .map(|ws| crate::services::workspace_profile::probe(std::path::Path::new(ws)));
                 // TMR-6 交付摘要:绑定工作区才下发(未绑定 = 不做文件交付校验)。
                 // 读时合成,不落库;变更路径只取去重清单 + 计数,不把整张台账塞进详情。
-                let delivery = task.workspace.as_deref().map(|ws| {
+                let mut delivery = task.workspace.as_deref().map(|ws| {
                     let (changed, changed_count) =
                         crate::services::task_change_service::deliverable_paths(
                             &db,
@@ -231,6 +231,11 @@ pub async fn get(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> 
                         &task.title,
                     )
                 });
+                // SKY-9-L1:运行期自检问题读持久化列,补齐 summarize 的静态重算缺口。
+                // 这里只读单列,不重跑浏览器(详情请求会被 SSE 高频触发)。
+                if let Some(summary) = delivery.as_mut() {
+                    summary.runtime_issues = svc.runtime_issues(&task.id);
+                }
                 (
                     task,
                     subtasks,
