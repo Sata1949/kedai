@@ -969,7 +969,7 @@ fn is_ident_char(c: char) -> bool {
 }
 
 /// 去掉 JS 注释,保留换行(避免把注释里的示例 import 误判为真实引用)。
-fn strip_js_comments(text: &str) -> String {
+pub(crate) fn strip_js_comments(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     let mut quote: Option<char> = None;
@@ -1020,7 +1020,7 @@ fn strip_js_comments(text: &str) -> String {
 }
 
 /// 去掉 HTML 注释(避免注释里的 `<script src>` 被当成真实引用)。
-fn strip_html_comments(text: &str) -> String {
+pub(crate) fn strip_html_comments(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find("<!--") {
@@ -1098,7 +1098,7 @@ pub(crate) fn html_local_refs(text: &str) -> Vec<String> {
     out
 }
 
-fn attr_value(tag: &str, attr: &str) -> Option<String> {
+pub(crate) fn attr_value(tag: &str, attr: &str) -> Option<String> {
     let lower = tag.to_ascii_lowercase();
     let mut search = 0;
     while let Some(pos) = lower[search..].find(attr) {
@@ -1132,7 +1132,7 @@ fn find_case_insensitive(haystack: &str, from: usize, needle: &str) -> Option<us
     haystack[from..].find(needle).map(|p| from + p)
 }
 
-fn is_local_ref(value: &str) -> bool {
+pub(crate) fn is_local_ref(value: &str) -> bool {
     let v = value.trim();
     if v.is_empty()
         || v.starts_with("http://")
@@ -1148,7 +1148,7 @@ fn is_local_ref(value: &str) -> bool {
     true
 }
 
-fn is_relative_spec(spec: &str) -> bool {
+pub(crate) fn is_relative_spec(spec: &str) -> bool {
     spec.starts_with("./") || spec.starts_with("../")
 }
 
@@ -1174,7 +1174,7 @@ fn is_html_path(path: &Path) -> bool {
     )
 }
 
-fn read_text(path: &Path) -> Option<String> {
+pub(crate) fn read_text(path: &Path) -> Option<String> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())

@@ -16,7 +16,7 @@
 use crate::models::ownership::normalize_workspace_rel;
 use crate::models::types::{TaskStatus, TaskStep, TaskStepStatus};
 use crate::services::task_core::TaskTerminal;
-use crate::services::task_engine::wiring;
+use crate::services::task_engine::{esm_boundary, wiring};
 use serde::Serialize;
 use std::path::Path;
 
@@ -363,7 +363,7 @@ pub(crate) fn content_issues(
     } else {
         required.iter().map(|(p, _)| p.clone()).collect()
     };
-    out.extend(wiring::wiring_issues(workspace, &declared, goal));
+    out.extend(esm_boundary::delivery_issues(workspace, &declared, goal));
     out
 }
 
