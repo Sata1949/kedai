@@ -1,46 +1,13 @@
 // MCP 管理面端点集成测试(PLGM 3.1):状态列表形状 / 未知服务器 404 / 无服务器空态 /
 // 手动 start 不受 enabled 阻断且失败如实落状态。
 //
-// 测试辅助函数按「谁用谁带」复制(仓库既有体例:40 个测试文件里 36 个各自持有 `test_app`),
-// 刻意不建 `tests/common` 共享层。`test_lock()` 是**本二进制内**的串行锁。
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use http_body_util::BodyExt;
-use kedai_server::build_test_app;
-use serde_json::{json, Value};
-use std::sync::OnceLock;
-use tokio::sync::{Mutex, MutexGuard};
-use tower::ServiceExt;
-
-fn test_app() -> &'static axum::Router {
-    static APP: OnceLock<axum::Router> = OnceLock::new();
-    APP.get_or_init(|| build_test_app().expect("构建测试应用失败"))
-}
-
-/// 本二进制内的串行锁(settings 是共享单例,写设置与读状态必须串行)
-async fn test_lock() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().await
-}
-
-async fn send_json(
-    app: &axum::Router,
-    method: &str,
-    path: &str,
-    body: Value,
-) -> (StatusCode, Value) {
-    let req = Request::builder()
-        .method(method)
-        .uri(path)
-        .header("content-type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let status = resp.status();
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    (status, json)
-}
+// 测试辅助函数已收敛到 `tests/common`(2026-10-25 C-2E):`test_app` / `send_json` /
+// `test_lock` / `wait_terminal` 只保留一份实现;每个测试文件 `mod common;` 仍编译为
+// 独立测试二进制,进程级 app 与串行锁语义不变。`test_lock()` 仍只在本二进制内串行。
+use axum::http::StatusCode;
+use serde_json::json;
+mod common;
+use common::{send_json, test_app, test_lock};
 
 /// 管理面顺序用例(单条,自洽不依赖执行顺序;共享 DATA_DIR/运行时台账):
 /// ① 空态重置 → servers 空 + mcp_enabled=false;② 配置一台(禁用、命令不存在)→ 形状与派生;

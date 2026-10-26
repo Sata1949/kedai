@@ -9,45 +9,11 @@
 // mock 钩子 [[reply_if:needle|内容]]:needle 命中任一 **system** 消息(钩子语法自身的
 // 出现不算命中)时返回指定内容;故把钩子写进任务目标(它同时进 user 与 system 的
 // 「任务目标」段),再让各步骤的 system 提示词含各自 needle,即可为每个节点指定确定性产出。
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use http_body_util::BodyExt;
-use kedai_server::build_test_app;
+use axum::http::StatusCode;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
-use std::sync::OnceLock;
-use tokio::sync::{Mutex, MutexGuard};
-use tower::ServiceExt;
-
-fn test_app() -> &'static axum::Router {
-    static APP: OnceLock<axum::Router> = OnceLock::new();
-    APP.get_or_init(|| build_test_app().expect("构建测试应用失败"))
-}
-
-/// 串行化全局共享状态(流程库)的测试
-async fn test_lock() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().await
-}
-
-async fn send_json(
-    app: &axum::Router,
-    method: &str,
-    path: &str,
-    body: Value,
-) -> (StatusCode, Value) {
-    let req = Request::builder()
-        .method(method)
-        .uri(path)
-        .header("content-type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let status = resp.status();
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    (status, json)
-}
+mod common;
+use common::{send_json, test_app, test_lock, wait_terminal};
 
 /// 保存流程并返回分配到的 id(按名字在库里回查;PUT 响应即携带 library)
 async fn save_flow(app: &axum::Router, name: &str, steps: Value) -> String {
@@ -85,19 +51,6 @@ async fn create_task(app: &axum::Router, title: &str) -> String {
 async fn run_task(app: &axum::Router, id: &str) {
     let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
-}
-
-async fn wait_terminal(app: &axum::Router, id: &str) -> (String, Value) {
-    for _ in 0..50 {
-        let (status, json) = send_json(app, "GET", &format!("/api/tasks/{id}"), json!({})).await;
-        assert_eq!(status, StatusCode::OK);
-        let st = json["task"]["status"].as_str().unwrap_or("").to_string();
-        if matches!(st.as_str(), "done" | "partial" | "error" | "ended") {
-            return (st, json);
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    panic!("任务 {id} 未在超时内到达终态");
 }
 
 /// 取某条调用行(phase + step_index)的 prompt_summary

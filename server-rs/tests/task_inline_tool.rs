@@ -2,40 +2,13 @@
 //
 // 两主链:分片主写两个经典脚本,总装主用一次工具调用完成「读分片 + 内联 + 写入口」。
 // 判别力:修复前工具未注册,`[[tool:fs_inline_html]]` 被任务策略拒绝,index.html 缺失。
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use http_body_util::BodyExt;
-use kedai_server::build_test_app;
+use axum::http::StatusCode;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::OnceLock;
-use std::time::Duration;
 use tokio::sync::Mutex;
-use tower::ServiceExt;
-
-fn test_app() -> &'static axum::Router {
-    static APP: OnceLock<axum::Router> = OnceLock::new();
-    APP.get_or_init(|| build_test_app().expect("构建测试应用失败"))
-}
-
-async fn send_json(
-    app: &axum::Router,
-    method: &str,
-    path: &str,
-    body: Value,
-) -> (StatusCode, Value) {
-    let req = Request::builder()
-        .method(method)
-        .uri(path)
-        .header("content-type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let status = resp.status();
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    (status, json)
-}
+mod common;
+use common::{send_json, test_app};
 
 fn temp_workspace(tag: &str) -> PathBuf {
     let ns = std::time::SystemTime::now()
@@ -50,17 +23,9 @@ fn temp_workspace(tag: &str) -> PathBuf {
     dir
 }
 
+/// 任务终态轮询:沿用本文件历史的 400 次 × 100ms 超时,实现见 `common`.
 async fn wait_terminal(app: &axum::Router, id: &str) -> (String, Value) {
-    for _ in 0..400 {
-        let (status, json) = send_json(app, "GET", &format!("/api/tasks/{id}"), json!({})).await;
-        assert_eq!(status, StatusCode::OK);
-        let st = json["task"]["status"].as_str().unwrap_or("").to_string();
-        if matches!(st.as_str(), "done" | "partial" | "error" | "ended") {
-            return (st, json);
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    panic!("任务 {id} 未在超时内到达终态");
+    common::wait_terminal_with_attempts(app, id, 400).await
 }
 
 /// 两主链标题。goal 内的 `[[...]]` 写成 `\u005b...\u005d`,避免被外层 reply_if 截断;

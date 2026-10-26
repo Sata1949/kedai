@@ -14,46 +14,10 @@
 // 区分不开。故用 **openai-compatible + 本机不可达端口** 造第二条连接——连接器构造不联网,
 // 调用必然失败(连接拒绝,两次退避重试约 1.5-2s),但失败行**照样落 model 列**,
 // 「哪个节点走哪条连接」因此完全可断言,且不依赖任何外部网络。
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use http_body_util::BodyExt;
-use kedai_server::build_test_app;
+use axum::http::StatusCode;
 use serde_json::{json, Value};
-use std::sync::OnceLock;
-use tokio::sync::{Mutex, MutexGuard};
-use tower::ServiceExt;
-
-/// 串行化:设置(data/settings.json)与流程库(data/agent_flows.json)都是**进程级共享**的,
-/// 同文件内的用例并发做「读-改-写」式的 PUT 会互相覆盖(基线连接的 id 会在两次 PUT 之间
-/// 被别的用例换掉)。故本文件的用例一律先取这把锁 —— 与 `settings_connections.rs` 同款纪律。
-async fn test_lock() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().await
-}
-
-fn test_app() -> &'static axum::Router {
-    static APP: OnceLock<axum::Router> = OnceLock::new();
-    APP.get_or_init(|| build_test_app().expect("构建测试应用失败"))
-}
-
-async fn send_json(
-    app: &axum::Router,
-    method: &str,
-    path: &str,
-    body: Value,
-) -> (StatusCode, Value) {
-    let req = Request::builder()
-        .method(method)
-        .uri(path)
-        .header("content-type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let status = resp.status();
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    (status, json)
-}
+mod common;
+use common::{send_json, test_app, test_lock};
 
 /// PUT 设置的响应是 `{ok, settings}`,GET 直接返回设置体
 fn settings_body(body: &Value) -> &Value {
@@ -149,18 +113,9 @@ async fn create_custom_task(app: &axum::Router, goal: &str) -> String {
     json["task"]["id"].as_str().unwrap().to_string()
 }
 
-/// 轮询到终态(含失败节点的用例要等两次退避重试,故上限放到 20s;既有用例的 5s 不够宽)
+/// 任务终态轮询:沿用本文件历史的 200 次 × 100ms 超时,实现见 `common`.
 async fn wait_terminal(app: &axum::Router, id: &str) -> (String, Value) {
-    for _ in 0..200 {
-        let (status, json) = send_json(app, "GET", &format!("/api/tasks/{id}"), json!({})).await;
-        assert_eq!(status, StatusCode::OK);
-        let st = json["task"]["status"].as_str().unwrap_or("").to_string();
-        if st == "done" || st == "partial" || st == "error" || st == "ended" {
-            return (st, json);
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    panic!("任务 {id} 未在超时内到达终态");
+    common::wait_terminal_with_attempts(app, id, 200).await
 }
 
 /// 取某步骤(step_index)的调用追踪行

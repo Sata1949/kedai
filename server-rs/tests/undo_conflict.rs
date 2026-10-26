@@ -24,8 +24,9 @@ use kedai_server::api::app_state::AppState;
 use serde_json::{json, Value};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
-use tokio::sync::{Mutex, MutexGuard};
 use tower::ServiceExt;
+mod common;
+use common::{send_json, test_lock};
 
 fn test_state() -> (&'static Arc<AppState>, &'static axum::Router) {
     static STATE: OnceLock<Arc<AppState>> = OnceLock::new();
@@ -43,31 +44,6 @@ fn test_state() -> (&'static Arc<AppState>, &'static axum::Router) {
     });
     let router = ROUTER.get_or_init(|| kedai_server::api::build_router(state.clone()));
     (state, router)
-}
-
-/// 文件内串行:两个用例共享同一 app/库,且反向用例会短暂持有 db 写锁。
-async fn test_lock() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().await
-}
-
-async fn send_json(
-    app: &axum::Router,
-    method: &str,
-    path: &str,
-    body: Value,
-) -> (StatusCode, Value) {
-    let req = Request::builder()
-        .method(method)
-        .uri(path)
-        .header("content-type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let status = resp.status();
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    (status, json)
 }
 
 /// 上传空角色卡(mock 连接器不依赖角色内容;name 仅作标识)

@@ -5,9 +5,9 @@
 // `build_test_app()` 的 `DATA_DIR`（`%TEMP%\kedai-test-<pid>`）与 `OnceLock` 单例 app 随
 // 文件独立，原先「同一进程内共享 settings.json / 流程库」的顺序耦合由此消失。**别再把它们合回一个文件。**
 //
-// 测试辅助函数按「谁用谁带」复制（仓库既有体例：40 个测试文件里 36 个各自持有 `test_app`），
-// 刻意不建 `tests/common` 共享层：那会让 count-tests 的集成文件数口径虚高，也会给多会话并行
-// 改测试制造新的争用点，与本次拆分的用意相悖。
+// 测试辅助函数已收敛到 `tests/common`(2026-10-25 C-2E):`test_app` / `send_json` /
+// `test_lock` / `wait_terminal` 只保留一份实现;每个测试文件 `mod common;` 仍编译为
+// 独立测试二进制,进程级 app 与串行锁语义不变。`test_lock()` 仍只在本二进制内串行。
 //
 // 共用前提：`build_test_app()`（mock 连接器 + 临时数据目录 + 免鉴权）；mock 钩子 `[[reply:内容]]`
 // 让规划器返回 JSON 计划、子智能体返回指定结果，实现确定性端到端。
@@ -15,54 +15,16 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use kedai_server::build_test_app;
 use serde_json::{json, Value};
-use std::sync::OnceLock;
 use tower::ServiceExt;
-
-fn test_app() -> &'static axum::Router {
-    static APP: OnceLock<axum::Router> = OnceLock::new();
-    APP.get_or_init(|| build_test_app().expect("构建测试应用失败"))
-}
-
-async fn send_json(
-    app: &axum::Router,
-    method: &str,
-    path: &str,
-    body: Value,
-) -> (StatusCode, Value) {
-    let req = Request::builder()
-        .method(method)
-        .uri(path)
-        .header("content-type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let status = resp.status();
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    (status, json)
-}
+mod common;
+use common::{send_json, test_app, wait_terminal};
 
 /// 创建任务并返回 id
 async fn create_task(app: &axum::Router, title: &str) -> String {
     let (status, json) = send_json(app, "POST", "/api/tasks", json!({ "title": title })).await;
     assert_eq!(status, StatusCode::CREATED, "创建任务应返回 201: {json}");
     json["task"]["id"].as_str().unwrap().to_string()
-}
-
-/// 轮询任务详情直到终态(done/partial/error/ended)或超时;返回最终 status 与详情
-async fn wait_terminal(app: &axum::Router, id: &str) -> (String, Value) {
-    for _ in 0..50 {
-        let (status, json) = send_json(app, "GET", &format!("/api/tasks/{id}"), json!({})).await;
-        assert_eq!(status, StatusCode::OK);
-        let st = json["task"]["status"].as_str().unwrap_or("").to_string();
-        if st == "done" || st == "partial" || st == "error" || st == "ended" {
-            return (st, json);
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    panic!("任务 {id} 未在超时内到达终态");
 }
 
 /// 创建 solo 任务(兼容字段 character_id 绑定旧角色卡)并跑到终态,返回任务详情。

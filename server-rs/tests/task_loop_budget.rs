@@ -15,43 +15,12 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use kedai_server::build_test_app;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::time::Duration;
-use tokio::sync::{Mutex, MutexGuard};
 use tower::ServiceExt;
-
-fn test_app() -> &'static axum::Router {
-    static APP: OnceLock<axum::Router> = OnceLock::new();
-    APP.get_or_init(|| build_test_app().expect("构建测试应用失败"))
-}
-
-/// 串行化:本文件的用例都会写全局设置(进程级共享),必须互相排队
-async fn test_lock() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().await
-}
-
-async fn send_json(
-    app: &axum::Router,
-    method: &str,
-    path: &str,
-    body: Value,
-) -> (StatusCode, Value) {
-    let req = Request::builder()
-        .method(method)
-        .uri(path)
-        .header("content-type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let status = resp.status();
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    (status, json)
-}
+mod common;
+use common::{send_json, test_app, test_lock};
 
 /// 创建任务(题面就是 title:任务目标口径,见 tools/bench/task-probe.mjs 文件头)
 async fn create_task(app: &axum::Router, title: &str) -> String {

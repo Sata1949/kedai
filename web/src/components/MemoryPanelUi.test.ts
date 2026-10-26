@@ -11,7 +11,7 @@ import { resetApiTokenForTest } from '../api/client';
 // 交互链路(蒸馏 / 添加 / 编辑 / 注入开关 / 删除两段式确认)在
 // composables/useMemoryPanel.test.ts 直测 composable;
 // 文件名带 Ui 后缀:Windows 文件系统大小写不敏感,MemoryPanel.test.ts 会与
-// 纯函数测试 memoryPanel.test.ts 视为同一文件互相覆盖,故不可用。
+// 纯函数测试 utils/memoryPanel.test.ts 视为同一文件互相覆盖,故不可用。
 
 /** 样例条目(与 api/memory.test.ts 同源字段) */
 function memEntry(overrides: Partial<api.MemoryEntry> = {}): api.MemoryEntry {

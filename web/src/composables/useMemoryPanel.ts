@@ -16,7 +16,7 @@ import {
   pruneSuccessText,
   type KindFilter,
   type MemoryRow,
-} from '../components/memoryPanel';
+} from '../utils/memoryPanel';
 
 /** 面板反馈条(ok / err 两色,sv-feedback 现成样式) */
 export interface PanelMessage {

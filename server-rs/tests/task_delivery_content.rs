@@ -7,51 +7,15 @@
 // 反向用例:健康文件不得被内容体检误伤(done + content_issues 为空)。
 //
 // 独立成文件的原因同其它 task_*.rs:设置/数据目录按进程隔离,便于将来扩展。
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use http_body_util::BodyExt;
-use kedai_server::build_test_app;
+use axum::http::StatusCode;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
-use std::time::Duration;
-use tower::ServiceExt;
+mod common;
+use common::{send_json, test_app};
 
-fn test_app() -> &'static axum::Router {
-    static APP: OnceLock<axum::Router> = OnceLock::new();
-    APP.get_or_init(|| build_test_app().expect("构建测试应用失败"))
-}
-
-async fn send_json(
-    app: &axum::Router,
-    method: &str,
-    path: &str,
-    body: Value,
-) -> (StatusCode, Value) {
-    let req = Request::builder()
-        .method(method)
-        .uri(path)
-        .header("content-type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let status = resp.status();
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    (status, json)
-}
-
+/// 任务终态轮询:沿用本文件历史的 300 次 × 100ms 超时,实现见 `common`.
 async fn wait_terminal(app: &axum::Router, id: &str) -> (String, Value) {
-    for _ in 0..300 {
-        let (status, json) = send_json(app, "GET", &format!("/api/tasks/{id}"), json!({})).await;
-        assert_eq!(status, StatusCode::OK);
-        let st = json["task"]["status"].as_str().unwrap_or("").to_string();
-        if matches!(st.as_str(), "done" | "partial" | "error" | "ended") {
-            return (st, json);
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    panic!("任务 {id} 未在超时内到达终态");
+    common::wait_terminal_with_attempts(app, id, 300).await
 }
 
 fn temp_workspace(tag: &str) -> PathBuf {
