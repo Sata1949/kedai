@@ -8,44 +8,10 @@
 // needle 命中任一 **system** 消息时返回指定内容。把钩子写进任务目标、让各流程节点的
 // system 提示词含各自 needle,就能为「每个流程/每个节点」指定确定性产出——
 // 本批正是靠它区分「到底跑了哪一份编排」。
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use http_body_util::BodyExt;
-use kedai_server::build_test_app;
+use axum::http::StatusCode;
 use serde_json::{json, Value};
-use std::sync::OnceLock;
-use tokio::sync::{Mutex, MutexGuard};
-use tower::ServiceExt;
-
-fn test_app() -> &'static axum::Router {
-    static APP: OnceLock<axum::Router> = OnceLock::new();
-    APP.get_or_init(|| build_test_app().expect("构建测试应用失败"))
-}
-
-/// 串行化全局共享状态(流程库 + current_flow_id)的用例
-async fn test_lock() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().await
-}
-
-async fn send_json(
-    app: &axum::Router,
-    method: &str,
-    path: &str,
-    body: Value,
-) -> (StatusCode, Value) {
-    let req = Request::builder()
-        .method(method)
-        .uri(path)
-        .header("content-type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let status = resp.status();
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    (status, json)
-}
+mod common;
+use common::{send_json, test_app, test_lock};
 
 /// 保存流程(PUT 同时把它设为当前选中),返回其 id。
 /// 传入 `"id": ""` 为新建;传既有 id 为**覆盖更新**(本批用它验证「改了流程不影响已绑定任务」)。

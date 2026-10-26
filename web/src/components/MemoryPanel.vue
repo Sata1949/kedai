@@ -14,7 +14,7 @@ import {
   KIND_FILTERS,
   type KindFilter,
   type MemoryRow,
-} from './memoryPanel';
+} from '../utils/memoryPanel';
 
 const props = defineProps<{ characterId?: string | null; sessionId?: string | null }>();
 

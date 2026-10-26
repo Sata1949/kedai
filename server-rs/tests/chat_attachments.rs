@@ -10,22 +10,10 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use base64::Engine as _;
 use http_body_util::BodyExt;
-use kedai_server::build_test_app;
 use serde_json::{json, Value};
-use std::sync::OnceLock;
-use tokio::sync::{Mutex, MutexGuard};
 use tower::ServiceExt;
-
-fn test_app() -> &'static axum::Router {
-    static APP: OnceLock<axum::Router> = OnceLock::new();
-    APP.get_or_init(|| build_test_app().expect("构建测试应用失败"))
-}
-
-/// 串行化:同一 app 的 settings 是进程级共享的,并行 PUT 会互相覆盖
-async fn test_lock() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().await
-}
+mod common;
+use common::{send_json_with_text as send_json, test_app, test_lock};
 
 /// 1x1 PNG(真实魔数;与 services/image_service 单测同一份字节)
 const PNG_1PX: &[u8] = &[
@@ -41,27 +29,6 @@ fn png_data_url() -> String {
         "data:image/png;base64,{}",
         base64::engine::general_purpose::STANDARD.encode(PNG_1PX)
     )
-}
-
-/// 返回 (状态码, JSON, 原始响应文本):文本用于断言错误文案与「不含 base64」类判别
-async fn send_json(
-    app: &axum::Router,
-    method: &str,
-    path: &str,
-    body: Value,
-) -> (StatusCode, Value, String) {
-    let req = Request::builder()
-        .method(method)
-        .uri(path)
-        .header("content-type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let status = resp.status();
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let text = String::from_utf8_lossy(&bytes).to_string();
-    let json: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-    (status, json, text)
 }
 
 /// 上传最小角色卡,返回 character_id

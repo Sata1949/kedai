@@ -4,22 +4,21 @@
 # `docs/遗留.md` CI-BILL-1 的 2026-10-11 追注)。2026-09-29~10-11 曾因计费阻断服务端停用
 # (状态 `disabled_manually`),文件全程保留、触发面未改。
 #
-# 定位:ci.yml 仍是**唯一权威档**(windows-latest + 全量 15 段门禁);本档不替代它,
+# 定位:ci.yml 仍是**唯一权威档**(windows-latest + 全量门禁,阶段数以
+# `tools/check-all.ps1` 为准);本档不替代它,
 # 只补两件 Windows 档**结构上测不到**的事:
 #   ① check-ubuntu:`cfg(windows)` 之外的可移植性回归只有换平台才暴露 ——
 #      把同一套门禁里与平台无关的几段(fmt / clippy / cargo test / 前端三段)在
-#      Linux 上跑一遍。刻意**不重复**跑纯 Node 的文档与架构门禁(check-docs /
-#      check-arch / check-contract / check-lock-sync / count-tests /
-#      check-doc-claims / type-ratchet / eslint):它们与平台无关,Windows 档已覆盖,
+#      Linux 上跑一遍。刻意**不重复**跑纯 Node 的文档/架构/契约/计数/ratchet
+#      门禁(清单见 `tools/check-all.ps1`):它们与平台无关,Windows 档已覆盖,
 #      重复只加成本、不给新信号。
 #   ② android-smoke(仅手动):对 aarch64-linux-android 交叉编译 server-rs,覆盖
 #      `cfg(target_os = "android")` 的 exec/android.rs、keystore_android.rs、
 #      native_bridge_android.rs 与 jni / rquickjs+bindgen 路径。**只编译不跑测试**
 #      ——Android 产物无法在 runner 上执行,本档验的是「还编得过」,不是「跑得对」。
 #
-# 为何独立成文件、而不是往 ci.yml 里加 job(Q4 执行时的口径偏离,理由见
-# docs/plans/QUALITY-FIX-PLAN.md 的「执行口径裁定」):本档在迭代期会被反复触发,
-# 而 ci.yml 的 Windows 档单次 30~50 分钟且按 2 倍计费;独立文件可单独
+# 为何独立成文件、而不是往 ci.yml 里加 job(Q4 执行时的口径偏离):本档在迭代期
+# 会被反复触发,而 ci.yml 的 Windows 档单次 30~50 分钟且按 2 倍计费;独立文件可单独
 # workflow_dispatch,迭代代价从「两档都跑」降到「只跑本档」。
 #
 # 工具链版本:与 ci.yml 一样必须**手写**(该 action 不读 toml,见经验 E63)。
@@ -47,8 +46,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # 与 kedai-Android 的 minSdk 24 对齐(见该分支上的发布检查清单)。
-  CARGO_NDK_PLATFORM: '24'
+  # 与 `src-tauri/gen/android/app/build.gradle.kts` 的 minSdk 30 对齐
+  # (2026-10-02 视觉能力包 A1 从 24 提到 30;见 `docs/遗留.md` VISION-L14)。
+  CARGO_NDK_PLATFORM: '30'
 
 jobs:
   check-ubuntu:

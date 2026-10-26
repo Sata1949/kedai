@@ -15,14 +15,8 @@ use serde_json::{json, Value};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::broadcast::error::TryRecvError;
 use tokio::sync::broadcast::Receiver;
-use tokio::sync::{Mutex, MutexGuard};
-
-/// 串行化:看守扫的是**全库** running/planning 任务,用例各自插入的行会互相进入
-/// 对方的候选集(并行下「只收尾我这一行」的断言必然打架),故全文件排队。
-async fn test_lock() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().await
-}
+mod common;
+use common::test_lock;
 
 /// 本进程隔离数据目录 + 应用状态(env 只在首次构造前设一次)
 fn test_state() -> (&'static Arc<AppState>, &'static axum::Router) {

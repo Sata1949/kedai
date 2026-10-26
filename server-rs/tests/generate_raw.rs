@@ -8,15 +8,10 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use kedai_server::build_test_app;
 use serde_json::{json, Value};
-use std::sync::OnceLock;
 use tower::ServiceExt;
-
-fn test_app() -> &'static axum::Router {
-    static APP: OnceLock<axum::Router> = OnceLock::new();
-    APP.get_or_init(|| build_test_app().expect("构建测试应用失败"))
-}
+mod common;
+use common::test_app;
 
 async fn post_json(app: &axum::Router, path: &str, body: Value) -> (StatusCode, Value) {
     let req = Request::builder()

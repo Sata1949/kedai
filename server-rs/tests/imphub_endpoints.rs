@@ -5,52 +5,21 @@
 //   综合导出 GET /api/export/bundle?mode=(bundle v1 信封与模式取段)
 //
 // 与既有集成测试同款:mock 连接器 + 进程级临时数据目录 + 免鉴权;
-// 辅助函数按「谁用谁带」复制(仓库体例,刻意不建 tests/common 共享层)。
+// 测试辅助函数已收敛到 `tests/common`(2026-10-25 C-2E);每个测试文件仍是独立测试二进制。
 // 本文件内的用例共享同一个 app 与数据目录,故**改目录/改库的用例必须 `test_lock()` 串行**
 // (与 api_misc_assets.rs 同款文件内串行锁)。
 
 use axum::body::Body;
-use axum::http::{header, Request, StatusCode};
+use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use kedai_server::build_test_app;
 use serde_json::{json, Value};
-use std::sync::OnceLock;
-use tokio::sync::{Mutex, MutexGuard};
+use tokio::sync::MutexGuard;
 use tower::ServiceExt;
-
-fn test_app() -> &'static axum::Router {
-    static APP: OnceLock<axum::Router> = OnceLock::new();
-    APP.get_or_init(|| build_test_app().expect("构建测试应用失败"))
-}
-
-/// 本测试二进制内的串行锁:数据目录与插件目录是进程级共享资源,
-/// 会改它们的用例必须持锁(否则同名文件/正则库互相踩)
-fn test_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
+mod common;
+use common::{send_json, test_app, test_lock_ref as test_lock};
 
 async fn lock() -> MutexGuard<'static, ()> {
     test_lock().lock().await
-}
-
-async fn send_json(
-    app: &axum::Router,
-    method: &str,
-    path: &str,
-    body: Value,
-) -> (StatusCode, Value) {
-    let req = Request::builder()
-        .method(method)
-        .uri(path)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let status = resp.status();
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    (status, json)
 }
 
 /// 原始 body 文本(综合导出要断言**键序**,解析成 Value 会丢序:serde_json 的 Map 是 BTreeMap)

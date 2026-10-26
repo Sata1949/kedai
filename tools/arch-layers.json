@@ -239,13 +239,6 @@
 
   "frontendRegisteredEdges": [
     {
-      "from": "composables",
-      "to": "components",
-      "class": "debt",
-      "reason": "唯一回边:composables/useMemoryPanel.ts 从 components/memoryPanel 导入 pruneSuccessText/nextPendingPrune(值导入,非纯类型)。components/ 是 L3 展示层,不应向 L2 提供业务函数。",
-      "remediation": "把 memoryPanel 的纯逻辑函数从 components/ 移入 composables/ 或 utils/,组件只保留渲染"
-    },
-    {
       "from": "stores",
       "to": "characterScriptSandbox",
       "class": "debt",

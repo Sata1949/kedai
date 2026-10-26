@@ -38,7 +38,12 @@ function countMatches(file, re) {
 // ===== 后端 =====
 const rsFilter = (p) => p.endsWith('.rs');
 const srcFiles = walk(path.join(ROOT, 'server-rs', 'src'), rsFilter);
-const testFiles = walk(path.join(ROOT, 'server-rs', 'tests'), rsFilter);
+const TESTS_ROOT = path.join(ROOT, 'server-rs', 'tests');
+// 共享夹具目录不是测试文件(2026-10-25 C-2E):`tests/common/mod.rs` 只放
+// test_app/send_json/test_lock/wait_terminal,不含 #[test];若计入文件数,
+// 集成测试文件会凭空 +1,台账口径失真。
+const COMMON_FIXTURE_PREFIX = path.join(TESTS_ROOT, 'common') + path.sep;
+const testFiles = walk(TESTS_ROOT, rsFilter).filter((p) => !p.startsWith(COMMON_FIXTURE_PREFIX));
 const RUST_TEST_RE = /#\[(?:tokio::)?test(?:\]|\()/g;
 
 const backendUnit = srcFiles.reduce((n, f) => n + countMatches(f, RUST_TEST_RE), 0);
