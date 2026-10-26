@@ -237,13 +237,5 @@
     }
   ],
 
-  "frontendRegisteredEdges": [
-    {
-      "from": "stores",
-      "to": "characterScriptSandbox",
-      "class": "debt",
-      "reason": "stores/chat.ts:11 从 characterScriptSandbox(L3 沙箱)导入 broadcastCardEvent/broadcastMvuUpdate——L2 状态编排反向依赖 L3 沙箱宿主。2026-09-14 修好门禁分桶与根文件代际后首次暴露(此前因 characterScriptSandbox.ts 未登记代际而被静默跳过)。语义上是「状态变更后通知沙箱」,属事件通知而非能力调用。",
-      "remediation": "反转依赖:把事件广播改为 store 侧 emit 到一个 L2/L1 事件总线,由沙箱宿主(cardScriptHost/scriptRunner)订阅,store 不再 import 沙箱;或把两个纯广播函数下沉到 L1(它们只是事件发射,无沙箱实现依赖)"
-    }
-  ]
+  "frontendRegisteredEdges": []
 }

@@ -26,13 +26,13 @@ vi.mock('../api', () => ({
   stopChat: vi.fn(),
 }));
 
-vi.mock('../characterScriptSandbox', () => ({
+vi.mock('../utils/sandboxBroadcast', () => ({
   broadcastMvuUpdate: vi.fn(),
   broadcastCardEvent: vi.fn(),
 }));
 
 import * as api from '../api';
-import { broadcastCardEvent } from '../characterScriptSandbox';
+import { broadcastCardEvent } from '../utils/sandboxBroadcast';
 import { registerCharacterIdProvider } from './storeBridge';
 import { useChatStore } from './chat';
 

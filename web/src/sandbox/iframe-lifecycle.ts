@@ -1,7 +1,6 @@
-// iframe-lifecycle.ts — 沙箱 iframe 生命周期:创建/boot 注入/消息分发/几何镜像推送/销毁清理,以及存活沙箱注册表广播与音频 RPC 桥
+// iframe-lifecycle.ts — 沙箱 iframe 生命周期:创建/boot 注入/消息分发/几何镜像推送/销毁清理,以及音频 RPC 桥
 import { getAudioController } from '../audioController';
 import type { AudioChannelSettings, AudioChannelType } from '../api/types';
-import type { MvuVariables } from '../mvu/variables';
 import {
   CHANNEL,
   INLINE_EVENT_NAMES,
@@ -15,6 +14,10 @@ import {
   type SandboxRequest,
   type ScriptSegment,
 } from './protocol';
+// 存活沙箱广播已下沉 L1（C-2F-3）：stores 不再反向依赖本 L3 门面。
+// 此处保留再导出，既有 `characterScriptSandbox` 导入面不变。
+import { registerSandboxSink, unregisterSandboxSink } from '../utils/sandboxBroadcast';
+export { broadcastCardEvent, broadcastMvuUpdate } from '../utils/sandboxBroadcast';
 import { sandboxScript } from './boot-script';
 import {
   getCardSharedGlobals,
@@ -68,60 +71,6 @@ function readContainerGeo(container: HTMLElement): ContainerGeo {
     hostH,
     hostW,
   };
-}
-
-/** 存活沙箱注册表(nonce → contentWindow):MVU 变量更新时向全部在跑的状态栏脚本广播 */
-const liveSandboxes = new Map<string, Window>();
-
-/**
- * 向全部存活沙箱广播最新变量树(消息落库应用 UpdateVariable 后由 chat store 调用)。
- * 沙箱内合并变量并触发 eventOn 订阅(Mvu.events.VARIABLE_UPDATE_ENDED),状态栏随之重渲染。
- */
-export function broadcastMvuUpdate(variables: MvuVariables): void {
-  if (liveSandboxes.size === 0) return;
-  let payload: { stat_data: Record<string, unknown>; display_data: Record<string, unknown> };
-  try {
-    payload = {
-      stat_data: cloneData((variables.stat_data ?? {}) as Record<string, unknown>),
-      display_data: cloneData((variables.display_data ?? {}) as Record<string, unknown>),
-    };
-    if (utf8Bytes(payload) > MAX_MESSAGE_BYTES) return; // 变量树超大时跳过广播,重渲染自取新快照
-  } catch {
-    return;
-  }
-  for (const [nonce, win] of liveSandboxes) {
-    try {
-      win.postMessage(
-        { channel: CHANNEL, nonce, type: 'mvu-event', event: 'mag_variable_updated', payload, variables: payload },
-        '*',
-      );
-    } catch {
-      /* 沙箱已销毁:忽略 */
-    }
-  }
-}
-
-/**
- * 向全部存活沙箱广播卡级事件(swipe 切换等;对齐酒馆助手事件流)。
- * 沙箱内经事件总线 __kdFireEvent 派发给 eventOn 订阅者(如舰娘卡
- * 「随着开场白切换自动开启关闭世界书」脚本监听 tavern_events.MESSAGE_SWIPED)。
- */
-export function broadcastCardEvent(name: string, payload?: unknown): void {
-  if (liveSandboxes.size === 0 || !name) return;
-  let cloned: unknown = payload;
-  try {
-    cloned = cloneData(payload ?? null);
-    if (utf8Bytes(cloned) > MAX_MESSAGE_BYTES) return;
-  } catch {
-    return;
-  }
-  for (const [nonce, win] of liveSandboxes) {
-    try {
-      win.postMessage({ channel: CHANNEL, nonce, type: 'card-event', name, payload: cloned }, '*');
-    } catch {
-      /* 沙箱已销毁:忽略 */
-    }
-  }
 }
 
 /** 沙箱启动时经 rpc 拉取的音频全量快照(AudioPlayer 未挂载时回退默认) */
@@ -231,7 +180,7 @@ export async function executeSandboxedCharacterScript(
     const cleanup = (): void => {
       if (disposed) return;
       disposed = true;
-      liveSandboxes.delete(nonce);
+      unregisterSandboxSink(nonce);
       unsubscribeShared?.();
       unsubscribeShared = undefined;
       environment.window.removeEventListener('message', onMessage as EventListener);
@@ -393,7 +342,7 @@ export async function executeSandboxedCharacterScript(
             ),
           };
           if (utf8Bytes(boot) > MAX_MESSAGE_BYTES) throw new Error('角色卡脚本启动消息过大');
-          if (iframe.contentWindow) liveSandboxes.set(nonce, iframe.contentWindow);
+          if (iframe.contentWindow) registerSandboxSink(nonce, iframe.contentWindow);
           // 静态 HTML 的降级 inline 事件(data-kd-on*)在脚本运行前先绑好,
           // 作者脚本 boot 期间的同步点击也能正确路由
           bindInlineHandlers();

@@ -259,6 +259,20 @@ const MAPPINGS = [
     rust: { file: 'server-rs/src/api/settings/prompt.rs', name: 'PromptPreviewResponse' },
     ts: { file: 'web/src/api/types/settings.ts', name: 'PromptPreview', kind: 'interface' },
   },
+  {
+    // C-2F-4:任务详情响应此前由 api/tasks.rs 的 json! 手工拼(TaskDetail 本身不在
+    // MAPPINGS);收进结构体后顶层字段名/可选性与前端 TaskDetail 首次机检。
+    label: '任务详情响应',
+    rust: { file: 'server-rs/src/api/tasks/detail.rs', name: 'TaskDetailResponse' },
+    ts: { file: 'web/src/api/types/task.ts', name: 'TaskDetail', kind: 'interface' },
+  },
+  {
+    // C-2F-4:任务 / 全局 token 累计。GET /api/tasks/usage/total 的外层信封
+    // (TaskUsageTotalResponse)只是包一层同名键,内层三字段由本条目守护。
+    label: '任务 token 累计',
+    rust: { file: 'server-rs/src/api/tasks/detail.rs', name: 'TaskUsageTotal' },
+    ts: { file: 'web/src/api/types/task.ts', name: 'TaskUsageTotal', kind: 'interface' },
+  },
 ];
 
 const read = (rel) => readFileSync(join(ROOT, rel), 'utf8');
