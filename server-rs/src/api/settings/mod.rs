@@ -259,7 +259,7 @@ pub struct UpdateSettingsBody {
     /// 任务级总预算秒数(PRODCAP-2;0 = 关,否则 1..=86400;缺省保持不变)
     #[serde(default)]
     pub task_total_budget_secs: Option<u32>,
-    /// 团队任务执行阶段总预算秒数(TMR3-4;0 = 不限,否则 600..=1200;
+    /// 团队任务执行阶段总预算秒数(TMR3-4;0 = 不限(默认),否则 600..=1200;
     /// 超过 1200 归一为 0;缺省保持不变)
     #[serde(default)]
     pub task_team_budget_secs: Option<u32>,

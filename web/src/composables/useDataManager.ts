@@ -3,7 +3,14 @@ import { computed, ref } from 'vue';
 import { useAppStore } from '../store';
 import { storeToRefs } from 'pinia';
 import * as api from '../api';
-import { normalizeTaskTeamBudgetSecs } from '../stores/genSettings';
+import {
+  buildTaskParamTierPatch,
+  identifyTaskParamTier,
+  normalizeTaskTeamBudgetSecs,
+  TASK_PARAM_TIER_LABELS,
+  type TaskParamTier,
+  type TaskParamTierValues,
+} from '../stores/genSettings';
 
 export function useDataManager() {
   const store = useAppStore();
@@ -183,25 +190,45 @@ export function useGenerationParams() {
     }
   }
 
-  /** 写入任务推荐值(TM-SET-1):把 0.3 / 1.0 / 8192 显式写为**任务覆盖层**值。
-   *  与后端 `TASK_DEFAULT_TEMPERATURE` / `TASK_DEFAULT_TOP_P` / `TASK_DEFAULT_OUTPUT_TOKENS`
-   *  逐值对应(前端本就有默认值镜像先例,genSettings 的 `?? 0.8` 一族同款);
-   *  仅任务模式调用(按钮仅在任务模式渲染)。用途:历史批量保存冻结过旧值的用户一键采用新缺省。 */
+  /** 当前任务参数(字段与档位定义一一对应;团队预算先按服务端语义归一) */
+  const taskTierValues = computed<TaskParamTierValues>(() => ({
+    temperature: temperature.value,
+    topP: topP.value,
+    maxTokens: maxTokens.value,
+    maxFlowCallDepth: maxFlowCallDepth.value,
+    maxFlowCallsPerTask: maxFlowCallsPerTask.value,
+    defaultNodeMaxContext: defaultNodeMaxContext.value,
+    toolHistoryKeepRounds: toolHistoryKeepRounds.value,
+    toolHistoryBudgetTokens: toolHistoryBudgetTokens.value,
+    subagentMaxDepth: subagentMaxDepth.value,
+    subagentMaxConcurrency: subagentMaxConcurrency.value,
+    subagentResultMaxChars: subagentResultMaxChars.value,
+    taskStepBudgetSecs: taskStepBudgetSecs.value,
+    taskTotalBudgetSecs: taskTotalBudgetSecs.value,
+    taskTeamBudgetSecs: normalizeTaskTeamBudgetSecs(taskTeamBudgetSecs.value),
+    taskIdleTimeoutSecs: taskIdleTimeoutSecs.value,
+  }));
+
+  /** 当前识别到的档位;手动改过任一项即 custom(不猜、不自动写回) */
+  const currentTaskTier = computed(() => identifyTaskParamTier(taskTierValues.value));
+
+  /** 应用任务参数档位(TPROF-1):一次整批写 task 覆盖层 + 全局扁平字段。
+   *  走 `queueSettingsSave` 与自动保存串行,避免响应交错回填旧值。 */
   const taskRecSaving = ref(false);
   const taskRecMsg = ref('');
-  async function applyTaskRecommended(): Promise<void> {
+  async function applyTaskTier(tier: TaskParamTier): Promise<void> {
+    if (store.appMode !== 'task') {
+      taskRecMsg.value = '仅任务模式可应用任务参数档位';
+      return;
+    }
     taskRecSaving.value = true;
     taskRecMsg.value = '';
     try {
-      await store.saveSettings({
-        default_temperature: 0.3,
-        default_top_p: 1.0,
-        default_max_tokens: 8192,
-      });
-      taskRecMsg.value = '已写入任务模式显式值:温度 0.3 / Top-P 1.0 / 输出上限 8192';
+      await store.queueSettingsSave(buildTaskParamTierPatch(tier));
+      taskRecMsg.value = `已应用${TASK_PARAM_TIER_LABELS[tier]}`;
       setTimeout(() => (taskRecMsg.value = ''), 3000);
     } catch (e) {
-      taskRecMsg.value = `写入失败:${(e as Error).message}`;
+      taskRecMsg.value = `应用失败:${(e as Error).message}`;
     } finally {
       taskRecSaving.value = false;
     }
@@ -209,6 +236,6 @@ export function useGenerationParams() {
 
   return {
     tempLabel, topPLabel, ctxLabel, saveParams, paramsMsg, saveParamsNow,
-    taskRecSaving, taskRecMsg, applyTaskRecommended,
+    taskRecSaving, taskRecMsg, currentTaskTier, applyTaskTier,
   };
 }

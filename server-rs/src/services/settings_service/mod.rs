@@ -42,8 +42,9 @@ pub use params::{
 pub const TASK_TEAM_BUDGET_MIN_SECS: u32 = 600;
 
 /// 团队总预算的可调上限(秒,设置页口径,2026-10-26):超过该值不再接受为有限预算,
-/// 一律归一为 `0`(不限)——「想设得更久」在产品语义里就是「别限时」;
-/// 默认值也取此上限:900s 实测会把总装截图阶段截成 `partial`(SKY-10,2026-10-25)。
+/// 一律归一为 `0`(不限)——「想设得更久」在产品语义里就是「别限时」。
+/// **默认值自 TPROF-1(2026-10-27)起改为 `0`(不限)**;1200 仍是有限档的最大值,
+/// 需要硬性控成本的用户可显式选 600-1200。
 pub const TASK_TEAM_BUDGET_MAX_SECS: u32 = 1200;
 
 // RuntimeSettings 字段的 serde(default = "...") 按名字在本模块作用域解析;
@@ -180,13 +181,13 @@ pub struct RuntimeSettings {
     /// 不再消费本字段(2026-10-19)。
     #[serde(default = "default_max_tool_rounds")]
     pub max_tool_rounds: u32,
-    /// 流程**动态调用**的嵌套深度上限(A 批 A3;默认 2,钳 1..=5)。
+    /// 流程**动态调用**的嵌套深度上限(A 批 A3;TPROF-1 起默认 3,钳 1..=5)。
     ///
     /// 口径同 7b:只对「宽松档节点调 `run_flow`」生效;静态子图(`sub_flow_id`)与注册期
     /// 的嵌套校验仍按 `MAX_SUB_FLOW_DEPTH = 3`(那是**结构**上限,不是运行期成本闸)。
     #[serde(default = "default_max_flow_call_depth")]
     pub max_flow_call_depth: u32,
-    /// 单个任务内的流程调用**次数**上限(A 批 A3;默认 8,钳 1..=64)。
+    /// 单个任务内的流程调用**次数**上限(A 批 A3;TPROF-1 起默认 24,钳 1..=64)。
     #[serde(default = "default_max_flow_calls_per_task")]
     pub max_flow_calls_per_task: u32,
     /// 节点默认上下文上限(A 批 A4;默认 **0 = 不裁剪**,否则钳 256..=1048576)。
@@ -196,11 +197,11 @@ pub struct RuntimeSettings {
     /// 长输入,属可观测的行为变化(见 `计划.md` 裁定 26 口径 2)。
     #[serde(default = "default_node_max_context")]
     pub default_node_max_context: u32,
-    /// 工具循环历史保留的最近完整轮数(R3b;默认 4,钳 1..=32):
+    /// 工具循环历史保留的最近完整轮数(R3b;TPROF-1 起默认 12,钳 1..=32):
     /// 超出后最老轮的 tool 结果原地替换为短摘要(配对不破坏),防止全量回灌无界膨胀
     #[serde(default = "default_tool_history_keep_rounds")]
     pub tool_history_keep_rounds: u32,
-    /// 工具循环历史 token 预算(R3b;默认 16384,钳 1024..=1M;0 = 禁用预算闸门,
+    /// 工具循环历史 token 预算(R3b;TPROF-1 起默认 65536,钳 1024..=1M;0 = 禁用预算闸门,
     /// 仅 keep_rounds 生效):估算超预算时从最老完整轮起继续摘要,保底最近 1 轮完整
     #[serde(default = "default_tool_history_budget_tokens")]
     pub tool_history_budget_tokens: u32,
@@ -222,7 +223,7 @@ pub struct RuntimeSettings {
     /// 语义熔断输出指纹去重上限(HB-2;默认 2,钳 1..=8):去重后不超过该值即判空转
     #[serde(default = "default_loop_guard_semantic_max_distinct")]
     pub loop_guard_semantic_max_distinct: u32,
-    /// 任务步骤墙钟预算秒数(提交 3 · D3;默认 1200 = 开,0 = 关,否则钳 1..=86400):
+    /// 任务步骤墙钟预算秒数(提交 3 · D3;默认 3600 = 开,0 = 关,否则钳 1..=86400):
     /// 单次工具循环的墙钟上限,到点带着已有产出收尾(步骤记 done,不制造失败)。
     /// **扁平字段、只被任务侧消费**(`task_engine::task_loop_limits` 装配给
     /// `GenerationParams.step_budget`);聊天路径不读、不传。
@@ -237,13 +238,13 @@ pub struct RuntimeSettings {
     /// 默认关的判据:单步预算已覆盖主要失控场景,总预算防「每步都不超、整任务失控」。
     #[serde(default = "default_task_total_budget_secs")]
     pub task_total_budget_secs: u32,
-    /// 团队任务执行阶段总预算秒数(TMR3-4;2026-10-26 起 `0` = 不限,否则
+    /// 团队任务执行阶段总预算秒数(TMR3-4;TPROF-1 起默认 **0 = 不限**,否则
     /// `600..=1200`,超过 1200 在写入时归一为 `0`):
     /// 只被 team 执行器消费,从**规划完成后**起算;到点不再启动新主/子目标,
     /// 跑步由 `min(步骤预算, 剩余)` 收窄后带产出收尾(不制造失败)。
     /// 为什么单独一档:`task_step_budget_secs` 在 team 里每个子目标重新起算,
     /// 4 主 × 4 子目标可跑到小时级;2026-10-21 实测单主 26 分钟后被外部 driver stop。
-    /// 与 `task_total_budget_secs` 取小;后者显式优先(用户设了总预算时以它为准)。
+    /// 与 `task_total_budget_secs` **取更早者**;后者不再「显式优先」。
     #[serde(default = "default_task_team_budget_secs")]
     pub task_team_budget_secs: u32,
     /// 任务空闲超时秒数(提交 3 · D7;默认 2400,0 = 关,否则钳
@@ -321,13 +322,14 @@ pub struct RuntimeSettings {
     /// Agent 面板「回退到此处」按快照逆序恢复;关闭后不再产生新快照(存量快照仍可恢复)
     #[serde(default = "default_undo_enabled")]
     pub undo_enabled: bool,
-    /// 子智能体最大嵌套深度(落地项 3;默认 2,钳 1..=4;主 Agent 为第 0 层)
+    /// 子智能体最大嵌套深度(落地项 3;TPROF-1 起默认 3,钳 1..=4;主 Agent 为第 0 层)
     #[serde(default = "default_subagent_max_depth")]
     pub subagent_max_depth: u32,
-    /// 子智能体并发上限(落地项 3;默认 6,钳 1..=16;当前顺序派发,作为在飞计数守卫)
+    /// 子智能体并发上限(落地项 3;TPROF-1 起默认 8,钳 1..=16;当前顺序派发,作为在飞计数守卫)
     #[serde(default = "default_subagent_max_concurrency")]
     pub subagent_max_concurrency: u32,
-    /// 子智能体结果最大字符数(落地项 3;默认 2000,钳 500..=8000;超出截断并附尾注)
+    /// 子智能体结果最大字符数(落地项 3;TPROF-1 起默认 8000 = 上限,钳 500..=8000;
+    /// 超出截断并附尾注)
     #[serde(default = "default_subagent_result_max_chars")]
     pub subagent_result_max_chars: u32,
     /// MCP stdio 客户端总开关(批次 6.2,L3 隔离;默认关闭):

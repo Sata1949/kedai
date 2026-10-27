@@ -106,7 +106,7 @@ async fn team_budget_stops_remaining_mains_with_partial_delivery() {
             .contains("团队总预算用尽")),
         "应透出团队总预算用尽事件: {events}"
     );
-    // TMR3-L4:预算事实必须在开工时可见(默认 1200s 是 TMR3 新增行为,不能等用尽才告知)
+    // TMR3-L4:预算事实必须在开工时可见(本用例显式注入 1s 有限预算,不能等用尽才告知)
     assert!(
         rows.iter()
             .any(|e| e["detail"].as_str().unwrap_or("").contains("团队执行预算")),

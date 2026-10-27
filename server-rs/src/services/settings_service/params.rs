@@ -6,7 +6,7 @@ use crate::models::tool_policy::AuthorizationMode;
 use serde::{Deserialize, Serialize};
 
 use super::connection::DEFAULT_SEARCH_ENDPOINT;
-use super::{AppMode, RuntimeSettings, TASK_TEAM_BUDGET_MAX_SECS};
+use super::{AppMode, RuntimeSettings};
 
 /// 角色扮演 Agent 系统提示词(类型级模式隔离,WP7 抗多模式提示词混淆):
 /// RuntimeSettings 扁平字段的权威类型。serde transparent = 序列化为裸字符串,
@@ -154,11 +154,14 @@ pub(super) fn default_max_tool_rounds() -> u32 {
 ///
 /// 默认值直接取 `agent_flow_service` 的常量而非写字面量:那两个常量从此退居
 /// **缺省值与测试基准**,真源是本设置项,两边抄成两个数字必然漂移。
+/// 默认 3 层(TPROF-1,2026-10-27):任务里常见的「入口→子流程→再一层」编排不再被
+/// 2 层缺省截断;上限仍是 5 层,成本闸由每任务调用次数与流程预算共同约束。
 pub(super) fn default_max_flow_call_depth() -> u32 {
     crate::services::agent_flow_service::MAX_FLOW_CALL_DEPTH as u32
 }
 
 /// 默认每任务流程调用次数上限(A 批 A3 = 二维批次 7b 的 `MAX_FLOW_CALLS_PER_TASK`)。
+/// 默认 24 次(TPROF-1):一次任务里逐项处理十来个条目时,8 次会在收尾前耗尽。
 pub(super) fn default_max_flow_calls_per_task() -> u32 {
     crate::services::agent_flow_service::MAX_FLOW_CALLS_PER_TASK as u32
 }
@@ -171,15 +174,18 @@ pub(super) fn default_node_max_context() -> u32 {
     0
 }
 
-/// 默认工具循环历史保留轮数(R3b):最近 4 轮完整,更早轮摘要化
+/// 默认工具循环历史保留轮数(R3b;TPROF-1 起 12 轮):最近 12 轮完整,更早轮摘要化。
+///
+/// 任务模式的实测形态是「读文件→改→自测」多轮往返,4 轮会在改到后半段时把前面的
+/// 关键工具结果摘要掉;12 轮配合 64K token 预算,既保住工作记忆又仍有上界。
 pub(super) fn default_tool_history_keep_rounds() -> u32 {
-    4
+    12
 }
 
-/// 默认工具循环历史 token 预算(R3b):16K 估算 token,覆盖主流模型单轮工具结果规模;
-/// 实测膨胀形态(3 步 26K+)在此预算内被收敛到最近几轮
+/// 默认工具循环历史 token 预算(R3b;TPROF-1 起 64K):覆盖任务侧多轮大文件读取;
+/// 超出后从最老完整轮起继续摘要,保底最近 1 轮完整。
 pub(super) fn default_tool_history_budget_tokens() -> u32 {
-    16_384
+    65_536
 }
 
 /// 默认单次生成 token 预算(HB-1 成本护栏):0 = 关闭(默认)。
@@ -242,16 +248,16 @@ pub(super) fn default_task_total_budget_secs() -> u32 {
     0
 }
 
-/// 默认团队任务总预算(TMR3-4,2026-10-22;2026-10-26 起限定 600..=1200):**1200 秒(20 分钟)**,`0` = 不限(关闭团队闸门)。
+/// 默认团队任务总预算(TMR3-4,2026-10-22;TPROF-1,2026-10-27 起默认**不限**):
+/// `0` = 不限(关闭团队闸门),是新的默认值;有限档仍可显式设 `600..=1200` 秒。
 ///
-/// 为什么 team 需要独立的一档:单步预算在 team 里是**每个子目标**重新起算
-/// (`run_agent_loop` 每次新 `loop_started`),4 主 × 4 子目标最坏可跑到小时级;
-/// 2026-10-21 实测单主跑到 26 分钟、外部 driver 30 分钟主动 stop,终态 `ended`。
-/// 全局 `task_total_budget_secs` 默认 0(不改变 solo/plan/custom 体感),故给 team
-/// 单独一档默认值;它取「执行阶段」起算,不含规划(规划有 3×300s 自己的上限)。
-/// 默认取可调上限:900s 实测会把总装截图截成 `partial`(SKY-10);要更久显式切「不限」。这是安全阀,不是目标值。
+/// 为什么默认改为不限:团队模式的实际任务是「规划→多主并行→审计→总装」,1200 秒
+/// (20 分钟)在 4 主 × 4 子目标的形态下会在总装前耗尽,终态只能 `partial`;
+/// 2026-10-21 实测单主跑到 26 分钟、全题 3666 秒仍 partial。单步 3600 秒、空闲 2400 秒、
+/// 只读/无进展/语义守卫仍在,团队总预算是「额外的安全阀」而不是默认目标。
+/// 需要硬性控成本的用户仍可在设置页选 600-1200 的有限档;`>1200` 仍归一为 0(不限)。
 pub(super) fn default_task_team_budget_secs() -> u32 {
-    TASK_TEAM_BUDGET_MAX_SECS
+    0
 }
 
 /// 默认任务空闲超时(提交 3 · D7):2400 秒无任何活动即由看守收尾。
@@ -358,19 +364,22 @@ pub(super) fn default_undo_enabled() -> bool {
     true
 }
 
-/// 默认子智能体最大嵌套深度(落地项 3)
+/// 默认子智能体最大嵌套深度(落地项 3;TPROF-1 起 3 层,上限 4)。
 pub(super) fn default_subagent_max_depth() -> u32 {
-    2
+    3
 }
 
-/// 默认子智能体并发上限(落地项 3)
+/// 默认子智能体并发上限(落地项 3;TPROF-1 起 8,上限 16)。
 pub(super) fn default_subagent_max_concurrency() -> u32 {
-    6
+    8
 }
 
-/// 默认子智能体结果最大字符数(落地项 3)
+/// 默认子智能体结果最大字符数(落地项 3;TPROF-1 起 8000 = 上限)。
+///
+/// 任务侧子代理常回传代码/文件摘要,2000 字符会在父代理拼装前就截断关键内容;
+/// 8000 是设置项允许的最大值,仍保留「截断并附原长尾注」的兜底行为。
 pub(super) fn default_subagent_result_max_chars() -> u32 {
-    2000
+    8000
 }
 
 // MCP 服务器条目默认启用的辅助函数已随 `McpServerConfig` 下沉到 L1
@@ -861,17 +870,21 @@ pub fn default_literary_reflect_prompt() -> String {
     )
 }
 
-/// 任务向缺省生成参数(TM-SET-1,2026-10-01):任务覆盖层未显式配置时,任务模式的有效
-/// 温度 / Top-P / 单次输出上限取本组值。任务执行以工具循环与多步执行为主,低温 + 不截断
-/// 采样 + 足够产出预算是更稳的档位;角色扮演侧的扁平缺省(0.8 / 0.9 / 1024)不受影响。
+/// 任务向缺省生成参数(TM-SET-1,2026-10-01;TPROF-1,2026-10-27 抬档):任务覆盖层未显式
+/// 配置时,任务模式的有效温度 / Top-P / 单次输出上限取本组值。任务执行以工具循环与多步
+/// 执行为主,低温 + 不截断采样 + 足够产出预算是更稳的档位;角色扮演侧的扁平缺省
+/// (0.8 / 0.9 / 1024)不受影响。
 ///
 /// `TASK_DEFAULT_OUTPUT_TOKENS` 沿用 TM-GEN-1 的「只抬不压」语义:None 时任务有效值取
 /// `max(扁平值, 本值)` 而非直接替换——扁平值更大时保持更大,不被本值压低(理由:带工具/
 /// 推理的 agent 轮会被推理 token 吃光,TM-D6 实测 1024 曾被 reasoning 整体烧尽导致正文零输出)。
 /// 任务覆盖层的显式值(`Some`)一律逐字优先。
+///
+/// 2026-10-27 TPROF-1 起缺省输出上限抬到 32768:代码类单文件产出(HTML/TS)常超过 8K,
+/// 推理模型的 reasoning 也计入该预算;32768 让首轮尽量不截断,截断自愈仍保留。
 pub const TASK_DEFAULT_TEMPERATURE: f64 = 0.3;
 pub const TASK_DEFAULT_TOP_P: f64 = 1.0;
-pub const TASK_DEFAULT_OUTPUT_TOKENS: u32 = 8192;
+pub const TASK_DEFAULT_OUTPUT_TOKENS: u32 = 32768;
 
 impl RuntimeSettings {
     /// 角色扮演**缺省词**的唯一判据入口(LIT-2):开关开 → 文学增强版,否则现行版。

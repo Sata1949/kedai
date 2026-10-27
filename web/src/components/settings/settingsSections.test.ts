@@ -276,7 +276,7 @@ describe('任务模式隐藏清单(TM-SET-3)', () => {
     return stripComments(await render(comp, props, pinia));
   }
 
-  it('生成参数:任务模式隐藏最大上下文窗口/压缩/记忆;保留子代理与任务缺省块', async () => {
+  it('生成参数:任务模式隐藏最大上下文窗口/压缩/记忆;保留子代理与任务参数档位块', async () => {
     const taskHtml = await renderTask(GenParamsSection);
     expect(taskHtml).not.toContain('最大上下文窗口(Token)');
     expect(taskHtml).not.toContain('压缩模式');
@@ -286,7 +286,7 @@ describe('任务模式隐藏清单(TM-SET-3)', () => {
     expect(taskHtml).not.toContain('剧情推演同步角色词条');
     expect(taskHtml).not.toContain('剧情推演同步全局词条');
     expect(taskHtml).toContain('子代理深度');
-    expect(taskHtml).toContain('任务模式缺省');
+    expect(taskHtml).toContain('任务参数档位');
     expect(taskHtml).toContain('已在任务模式下隐藏');
 
     // 角色扮演视图照常
@@ -371,18 +371,20 @@ describe('GenParamsSection(生成参数区:记忆槽预算/容量上限)', () =>
     expect(html).toMatch(/display:\s*none/);
   });
 
-  it('任务模式渲染「任务缺省」块与「写入任务推荐值」;角色扮演模式不渲染(TM-SET-1)', async () => {
+  it('任务模式渲染「任务参数档位」下拉与应用按钮;角色扮演模式不渲染(TPROF-1)', async () => {
     const rpHtml = stripComments(await render(GenParamsSection));
-    expect(rpHtml).not.toContain('任务模式缺省');
+    expect(rpHtml).not.toContain('任务参数档位');
 
     // 组件内部读 store.appMode:pinia 必须与设定状态的实例同一个
     const pinia = createPinia();
     setActivePinia(pinia);
     useTaskStore().appMode = 'task';
     const html = stripComments(await render(GenParamsSection, {}, pinia));
-    expect(html).toContain('任务模式缺省');
-    expect(html).toContain('写入任务推荐值');
+    expect(html).toContain('任务参数档位');
+    expect(html).toContain('任务优先档（默认）');
+    expect(html).toContain('应用档位');
     expect(html).toContain('温度 0.3');
+    expect(html).not.toContain('写入任务推荐值');
   });
 });
 

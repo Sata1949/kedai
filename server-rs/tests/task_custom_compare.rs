@@ -303,53 +303,55 @@ async fn compare_blocks_cycle_across_dynamic_layers() {
     assert_usage_invariant(&detail, &calls);
 }
 
-/// 动态嵌套深度:甲→乙→丙→丁 四层,第三层动态调用被 `MAX_FLOW_CALL_DEPTH` 拦下
-/// (每层都会把 token 消耗成倍放大)。路径命名同时被锁定:`call.d1` / `call.d1.d2`。
+/// 动态嵌套深度:甲→乙→丙→丁→戊 五层,第四层动态调用被 `MAX_FLOW_CALL_DEPTH = 3` 拦下
+/// (每层都会把 token 消耗成倍放大)。路径命名同时被锁定:`call.d1` / `call.d1.d2` / `call.d1.d2.d3`。
 #[tokio::test]
-async fn compare_depth_guard_blocks_third_level() {
+async fn compare_depth_guard_blocks_fourth_level() {
     let _guard = test_lock().await;
     let app = test_app();
 
-    let d = save_flow(app, "丁流程", plain_node_flow("丁本步")).await;
+    let e = save_flow(app, "戊流程", plain_node_flow("戊本步")).await;
+    let d = save_flow(app, "丁流程", loose_node_flow("丁本步")).await;
     let c = save_flow(app, "丙流程", loose_node_flow("丙本步")).await;
     let b = save_flow(app, "乙流程", loose_node_flow("乙本步")).await;
     let a = save_flow(app, "甲流程", loose_node_flow("甲本步")).await;
 
-    // 逐层拼装:丙的节点调丁;乙的节点调丙(把它作为 input 传给丙);甲的节点调乙
-    let call_d = echo_marker(&run_flow_args(&d, None));
+    // 逐层拼装:每一层把下一层的调用串作为 input 传下去(loose 节点回显 input 触发 run_flow)
+    let call_e = echo_marker(&run_flow_args(&e, None));
+    let call_d = echo_marker(&run_flow_args(&d, Some(&call_e)));
     let call_c = echo_marker(&run_flow_args(&c, Some(&call_d)));
     let call_b = echo_marker(&run_flow_args(&b, Some(&call_c)));
     let title = format!("{call_b} 深度守卫用例");
-    let id = create_ok(app, &title, Some(&a), Some(&[b, c, d])).await;
+    let id = create_ok(app, &title, Some(&a), Some(&[b, c, d, e])).await;
     run_task(app, &id).await;
     let (st, detail) = wait_terminal(app, &id).await;
     assert_eq!(st, "done", "深度被拦后任务仍应完成: {detail}");
 
     let calls = calls_of(app, &id).await;
     let rows = dynamic_rows(&calls);
-    assert!(!rows.is_empty(), "前两层应正常执行: {calls}");
+    assert!(!rows.is_empty(), "前三层应正常执行: {calls}");
     assert!(
-        rows.iter().all(|p| dynamic_depth(p) <= 2),
-        "最深只到两层动态路径(call.d1 / call.d1.d2),不得出现第三层: {rows:?}"
+        rows.iter().all(|p| dynamic_depth(p) <= 3),
+        "最深只到三层动态路径(call.d1 / call.d1.d2 / call.d1.d2.d3),不得出现第四层: {rows:?}"
     );
     assert!(
-        rows.iter().any(|p| p == "call.d1.d2"),
-        "第二层路径应为 call.d1.d2(嵌套命名口径): {rows:?}"
+        rows.iter().any(|p| p == "call.d1.d2.d3"),
+        "第三层路径应为 call.d1.d2.d3(嵌套命名口径): {rows:?}"
     );
     let res = result_of(&detail);
     assert!(
-        res.contains("嵌套超过 2 层"),
+        res.contains("嵌套超过 3 层"),
         "回灌文本应说明深度被拦: {res}"
     );
     assert_usage_invariant(&detail, &calls);
 }
 
-/// 每任务调用预算:模型串行地反复调用同一套流程时,第 9 次起拒绝(深度与环都拦不住
-/// 这种形态)。断言动态调用行恰好 8 条。
+/// 每任务调用预算:模型串行地反复调用同一套流程时,第 25 次起拒绝(深度与环都拦不住
+/// 这种形态)。断言动态调用行恰好 24 条。
 ///
 /// **本用例显式关闭语义熔断**(`loop_guard_semantic_min_calls: 0`):它要造的是
-/// 「同一套调用重复 10 轮」的形态,而提交 3 起任务侧的语义熔断被钳到
-/// 「>4 次同工具 + 输出实质无变化即熔断」——同一流程同一输入 10 次,工具结果当然逐字相同,
+/// 「同一套调用重复 26 轮」的形态,而提交 3 起任务侧的语义熔断被钳到
+/// 「>4 次同工具 + 输出实质无变化即熔断」——同一流程同一输入 26 次,工具结果当然逐字相同,
 /// 会在第 4 轮就先把循环收掉,测不到预算闸。两者是**不同维度**的守卫(次数预算 vs 输出空转),
 /// 故此处的正确做法是关掉无关的那一个(与 api_integration 的 token 预算用例同款),
 /// 而不是放宽钳制。语义熔断自身的任务侧行为由 `tests/task_loop_budget.rs` 覆盖。
@@ -373,7 +375,7 @@ async fn compare_call_budget_halts_further_calls() {
     // 参数里的 input 用 reply_if 钩子(被调流程节点因此产出确定内容),
     // 且每轮 `_mock_round` 注入使指纹互不相同 → 走的是预算闸而不是重复调用熔断
     let args = run_flow_args(&b, Some(&reply_if("乙本步", "乙成果")));
-    let title = format!("{} 预算用例", loop_marker(10, &args));
+    let title = format!("{} 预算用例", loop_marker(26, &args));
     let id = create_ok(app, &title, Some(&a), Some(&[b])).await;
     run_task(app, &id).await;
     let (st, detail) = wait_terminal(app, &id).await;
@@ -386,8 +388,8 @@ async fn compare_call_budget_halts_further_calls() {
     let rows = dynamic_rows(&calls);
     assert_eq!(
         rows.len(),
-        8,
-        "每任务预算 8 次:第 9、10 次调用应在任何模型调用之前被拒: {rows:?}"
+        24,
+        "每任务预算 24 次:第 25、26 次调用应在任何模型调用之前被拒: {rows:?}"
     );
     assert_usage_invariant(&detail, &calls);
 
