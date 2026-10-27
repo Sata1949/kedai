@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
 import { useAppStore } from '../store';
+import { TASK_PARAM_TIERS } from '../stores/genSettings';
 import { useDataManager, useGenerationParams } from './useDataManager';
 
 // useDataManager / useGenerationParams 装配测试(批次 6.1b undo_enabled):
@@ -92,8 +93,8 @@ describe('批量保存按模式过滤(TM-SET-3)', () => {
     expect(patch.task_step_budget_secs).toBeDefined();
     // 任务级总预算(PRODCAP-2):装配漏一处即类型/UI 断裂,在此钉住
     expect(patch.task_total_budget_secs).toBeDefined();
-    // 团队任务总预算(TMR3-4):同款装配钉住;默认 = 可调上限 1200
-    expect(patch.task_team_budget_secs).toBe(1200);
+    // 团队任务总预算(TMR3-4 / TPROF-1):同款装配钉住;默认 = 0(不限)
+    expect(patch.task_team_budget_secs).toBe(0);
   });
 
   it('团队预算保存前归一:>1200 写 0(不限),1..599 写 600', async () => {
@@ -107,6 +108,52 @@ describe('批量保存按模式过滤(TM-SET-3)', () => {
     store.taskTeamBudgetSecs = 300;
     await saveParamsNow();
     expect(lastSavedPatch().task_team_budget_secs, '低于 600 抬到下限').toBe(600);
+  });
+});
+
+describe('任务参数档位应用(TPROF-1)', () => {
+  it('任务模式:一次 patch 写入完整档位,响应回填后识别为极限档', async () => {
+    const store = useAppStore();
+    store.appMode = 'task';
+    const extreme = TASK_PARAM_TIERS.extreme;
+    h.settingsBody = {
+      default_temperature: extreme.temperature,
+      default_top_p: extreme.topP,
+      default_max_tokens: extreme.maxTokens,
+      max_flow_call_depth: extreme.maxFlowCallDepth,
+      max_flow_calls_per_task: extreme.maxFlowCallsPerTask,
+      default_node_max_context: extreme.defaultNodeMaxContext,
+      tool_history_keep_rounds: extreme.toolHistoryKeepRounds,
+      tool_history_budget_tokens: extreme.toolHistoryBudgetTokens,
+      subagent_max_depth: extreme.subagentMaxDepth,
+      subagent_max_concurrency: extreme.subagentMaxConcurrency,
+      subagent_result_max_chars: extreme.subagentResultMaxChars,
+      task_step_budget_secs: extreme.taskStepBudgetSecs,
+      task_total_budget_secs: extreme.taskTotalBudgetSecs,
+      task_team_budget_secs: extreme.taskTeamBudgetSecs,
+      task_idle_timeout_secs: extreme.taskIdleTimeoutSecs,
+    };
+    const { applyTaskTier, currentTaskTier } = useGenerationParams();
+    await applyTaskTier('extreme');
+    const patch = lastSavedPatch();
+    expect(patch.default_max_tokens).toBe(65536);
+    expect(patch.max_flow_call_depth).toBe(5);
+    expect(patch.max_flow_calls_per_task).toBe(64);
+    expect(patch.tool_history_keep_rounds).toBe(16);
+    expect(patch.tool_history_budget_tokens).toBe(131072);
+    expect(patch.subagent_max_depth).toBe(4);
+    expect(patch.subagent_max_concurrency).toBe(16);
+    expect(patch.task_team_budget_secs).toBe(0);
+    expect(currentTaskTier.value).toBe('extreme');
+  });
+
+  it('角色扮演模式拒绝应用档位且不发保存请求', async () => {
+    const store = useAppStore();
+    store.appMode = 'roleplay';
+    const { applyTaskTier, taskRecMsg } = useGenerationParams();
+    await applyTaskTier('task');
+    expect(h.savedPatches).toHaveLength(0);
+    expect(taskRecMsg.value).toContain('仅任务模式');
   });
 });
 

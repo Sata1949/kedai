@@ -110,17 +110,17 @@ export interface RuntimeSettings {
   task_tool_allowlist: string[];
   /** 聊天 AGENT 模式工具循环轮次上限(默认 32);任务模式已取消默认轮次限制 */
   max_tool_rounds: number;
-  /** 流程动态调用嵌套深度上限(**任务侧**设置;A 批 A3;默认 2,1..=5):
+  /** 流程动态调用嵌套深度上限(**任务侧**设置;A 批 A3;TPROF-1 起默认 3,1..=5):
    *  节点用 `run_flow` 工具逐层调用流程时的深度闸(与静态子图 `sub_flow_id` 的嵌套上限是两回事) */
   max_flow_call_depth: number;
-  /** 单任务内流程调用次数上限(**任务侧**设置;A 批 A3;默认 8,1..=64) */
+  /** 单任务内流程调用次数上限(**任务侧**设置;A 批 A3;TPROF-1 起默认 24,1..=64) */
   max_flow_calls_per_task: number;
   /** 节点默认上下文上限(**任务侧**设置;A 批 A4;默认 0 = **不裁剪**,否则 256..=1048576):
    *  节点自己写了 `max_context` 即按节点的,只有未写时才用本项 */
   default_node_max_context: number;
-  /** 工具历史保留的最近完整轮数(1..=32;默认 4;超出后最老轮摘要化) */
+  /** 工具历史保留的最近完整轮数(1..=32;TPROF-1 起默认 12;超出后最老轮摘要化) */
   tool_history_keep_rounds: number;
-  /** 工具历史 token 预算(0 = 禁用预算闸门;否则 1024..=1M,默认 16384) */
+  /** 工具历史 token 预算(0 = 禁用预算闸门;否则 1024..=1M,TPROF-1 起默认 65536) */
   tool_history_budget_tokens: number;
   /** 单次生成的 token 预算(0 = 关闭,默认 0;否则 1024..=1e9):
    *  工具循环累计 prompt+completion 达到该值即按 session_budget_action 处置 */
@@ -139,7 +139,7 @@ export interface RuntimeSettings {
   /** 任务级总预算秒数(**任务侧**设置;默认 0 = 关,否则 1..=86400):
    *  一次任务执行的墙钟上限——到点后不再启动新步骤/节点/子目标,以已完成部分收尾 */
   task_total_budget_secs: number;
-  /** 团队任务执行阶段总预算秒数(**仅 team**;默认 1200,0 = 不限,否则 600..=1200):
+  /** 团队任务执行阶段总预算秒数(**仅 team**;TPROF-1 起默认 0 = 不限,否则 600..=1200):
    *  从规划完成后起算;到点不再启动新主/子目标,以已完成部分收尾。
    *  超过 1200 由后端归一为 0(不限)——「想设更久」即「别限时」 */
   task_team_budget_secs: number;
@@ -192,11 +192,11 @@ export interface RuntimeSettings {
   embedding_dim: number;
   /** 技能渐进披露开关(true = system 只注入「名称:用途」清单,正文按需 read;默认 true) */
   skill_progressive_disclosure: boolean;
-  /** 子智能体最大嵌套深度(1..=4;默认 2) */
+  /** 子智能体最大嵌套深度(1..=4;TPROF-1 起默认 3) */
   subagent_max_depth: number;
-  /** 子智能体最大并发数(1..=16;默认 6) */
+  /** 子智能体最大并发数(1..=16;TPROF-1 起默认 8) */
   subagent_max_concurrency: number;
-  /** 子智能体结果最大字符数(500..=8000;默认 2000,超出截断带尾注) */
+  /** 子智能体结果最大字符数(500..=8000;TPROF-1 起默认 8000,超出截断带尾注) */
   subagent_result_max_chars: number;
   /** 回退快照(undo)开关(批次 6.1b;默认 true):开时写工具执行前自动存档,可回退 */
   undo_enabled: boolean;

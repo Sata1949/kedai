@@ -29,8 +29,164 @@ function readAuthorizationMode(s: api.RuntimeSettings): api.AuthorizationMode {
 export const TASK_TEAM_BUDGET_MIN_SECS = 600;
 /** 团队总预算可调上限(秒;超过即「不限」,与服务端 `TASK_TEAM_BUDGET_MAX_SECS` 同源) */
 export const TASK_TEAM_BUDGET_MAX_SECS = 1200;
-/** 团队总预算默认值(秒;服务端默认同值 = 可调上限,最宽的有限档) */
-export const TASK_TEAM_BUDGET_DEFAULT_SECS = 1200;
+/** 团队总预算默认值(秒;TPROF-1 起 0 = 不限,服务端默认同值) */
+export const TASK_TEAM_BUDGET_DEFAULT_SECS = 0;
+
+/** 任务向缺省生成参数(与后端 `TASK_DEFAULT_TEMPERATURE/TOP_P/OUTPUT_TOKENS` 逐值对应) */
+export const TASK_DEFAULT_TEMPERATURE = 0.3;
+export const TASK_DEFAULT_TOP_P = 1.0;
+export const TASK_DEFAULT_OUTPUT_TOKENS = 32768;
+
+/** 任务参数档位(TPROF-1):默认任务优先,用户可切稳健/极限;手动改过任一项即「自定义」 */
+export type TaskParamTier = 'steady' | 'task' | 'extreme';
+export type TaskParamTierOrCustom = TaskParamTier | 'custom';
+
+/** 档位覆盖的任务参数集合(与设置页批量保存的字段一一对应) */
+export interface TaskParamTierValues {
+  temperature: number;
+  topP: number;
+  maxTokens: number;
+  maxFlowCallDepth: number;
+  maxFlowCallsPerTask: number;
+  defaultNodeMaxContext: number;
+  toolHistoryKeepRounds: number;
+  toolHistoryBudgetTokens: number;
+  subagentMaxDepth: number;
+  subagentMaxConcurrency: number;
+  subagentResultMaxChars: number;
+  taskStepBudgetSecs: number;
+  taskTotalBudgetSecs: number;
+  taskTeamBudgetSecs: number;
+  taskIdleTimeoutSecs: number;
+}
+
+/**
+ * 三档任务参数(TPROF-1,2026-10-27)。
+ *
+ * - 稳健档:只比旧默认松一档,适合成本敏感/小模型;
+ * - 任务优先档(默认):任务模式的推荐档,后端默认值逐值等于本档;
+ * - 极限档:尽量放开输出、流程、历史与子代理,适合本机、成本不敏感的长任务。
+ * 空转熔断/单次 token 预算不进入档位:它们是成本安全阀,由用户单独控制。
+ */
+export const TASK_PARAM_TIERS: Record<TaskParamTier, TaskParamTierValues> = {
+  steady: {
+    temperature: TASK_DEFAULT_TEMPERATURE,
+    topP: TASK_DEFAULT_TOP_P,
+    maxTokens: 16384,
+    maxFlowCallDepth: 2,
+    maxFlowCallsPerTask: 8,
+    defaultNodeMaxContext: 0,
+    toolHistoryKeepRounds: 8,
+    toolHistoryBudgetTokens: 32768,
+    subagentMaxDepth: 2,
+    subagentMaxConcurrency: 6,
+    subagentResultMaxChars: 8000,
+    taskStepBudgetSecs: 3600,
+    taskTotalBudgetSecs: 0,
+    taskTeamBudgetSecs: 1200,
+    taskIdleTimeoutSecs: 2400,
+  },
+  task: {
+    temperature: TASK_DEFAULT_TEMPERATURE,
+    topP: TASK_DEFAULT_TOP_P,
+    maxTokens: TASK_DEFAULT_OUTPUT_TOKENS,
+    maxFlowCallDepth: 3,
+    maxFlowCallsPerTask: 24,
+    defaultNodeMaxContext: 0,
+    toolHistoryKeepRounds: 12,
+    toolHistoryBudgetTokens: 65536,
+    subagentMaxDepth: 3,
+    subagentMaxConcurrency: 8,
+    subagentResultMaxChars: 8000,
+    taskStepBudgetSecs: 3600,
+    taskTotalBudgetSecs: 0,
+    taskTeamBudgetSecs: 0,
+    taskIdleTimeoutSecs: 2400,
+  },
+  extreme: {
+    temperature: TASK_DEFAULT_TEMPERATURE,
+    topP: TASK_DEFAULT_TOP_P,
+    maxTokens: 65536,
+    maxFlowCallDepth: 5,
+    maxFlowCallsPerTask: 64,
+    defaultNodeMaxContext: 0,
+    toolHistoryKeepRounds: 16,
+    toolHistoryBudgetTokens: 131072,
+    subagentMaxDepth: 4,
+    subagentMaxConcurrency: 16,
+    subagentResultMaxChars: 8000,
+    taskStepBudgetSecs: 3600,
+    taskTotalBudgetSecs: 0,
+    taskTeamBudgetSecs: 0,
+    taskIdleTimeoutSecs: 2400,
+  },
+};
+
+/** 任务优先档即后端缺省口径 */
+export const TASK_PARAM_DEFAULTS: TaskParamTierValues = TASK_PARAM_TIERS.task;
+
+export const TASK_PARAM_TIER_LABELS: Record<TaskParamTier, string> = {
+  steady: '稳健档',
+  task: '任务优先档（默认）',
+  extreme: '极限档',
+};
+
+/** 浮点比较容差:温度/Top-P 由后端 JSON 回传,避免 0.3 与 0.30000000000000004 误判 */
+const TIER_EPSILON = 1e-9;
+
+/**
+ * 识别当前值属于哪一档;任一项不匹配即 `custom`(不猜、不四舍五入)。
+ * 团队预算先走 `normalizeTaskTeamBudgetSecs`:>1200 的服务端语义是「不限」(0),
+ * 不归一的话保存后的 0 会被误识别成自定义。
+ */
+export function identifyTaskParamTier(values: TaskParamTierValues): TaskParamTierOrCustom {
+  const teamBudget = normalizeTaskTeamBudgetSecs(values.taskTeamBudgetSecs);
+  for (const tier of ['steady', 'task', 'extreme'] as const) {
+    const t = TASK_PARAM_TIERS[tier];
+    if (
+      Math.abs(values.temperature - t.temperature) < TIER_EPSILON &&
+      Math.abs(values.topP - t.topP) < TIER_EPSILON &&
+      values.maxTokens === t.maxTokens &&
+      values.maxFlowCallDepth === t.maxFlowCallDepth &&
+      values.maxFlowCallsPerTask === t.maxFlowCallsPerTask &&
+      values.defaultNodeMaxContext === t.defaultNodeMaxContext &&
+      values.toolHistoryKeepRounds === t.toolHistoryKeepRounds &&
+      values.toolHistoryBudgetTokens === t.toolHistoryBudgetTokens &&
+      values.subagentMaxDepth === t.subagentMaxDepth &&
+      values.subagentMaxConcurrency === t.subagentMaxConcurrency &&
+      values.subagentResultMaxChars === t.subagentResultMaxChars &&
+      values.taskStepBudgetSecs === t.taskStepBudgetSecs &&
+      values.taskTotalBudgetSecs === t.taskTotalBudgetSecs &&
+      teamBudget === normalizeTaskTeamBudgetSecs(t.taskTeamBudgetSecs) &&
+      values.taskIdleTimeoutSecs === t.taskIdleTimeoutSecs
+    ) {
+      return tier;
+    }
+  }
+  return 'custom';
+}
+
+/** 档位 → PUT /api/settings 的 patch(一次整批提交,后端原子应用) */
+export function buildTaskParamTierPatch(tier: TaskParamTier): api.RuntimeSettingsPatch {
+  const v = TASK_PARAM_TIERS[tier];
+  return {
+    default_temperature: v.temperature,
+    default_top_p: v.topP,
+    default_max_tokens: v.maxTokens,
+    max_flow_call_depth: v.maxFlowCallDepth,
+    max_flow_calls_per_task: v.maxFlowCallsPerTask,
+    default_node_max_context: v.defaultNodeMaxContext,
+    tool_history_keep_rounds: v.toolHistoryKeepRounds,
+    tool_history_budget_tokens: v.toolHistoryBudgetTokens,
+    subagent_max_depth: v.subagentMaxDepth,
+    subagent_max_concurrency: v.subagentMaxConcurrency,
+    subagent_result_max_chars: v.subagentResultMaxChars,
+    task_step_budget_secs: v.taskStepBudgetSecs,
+    task_total_budget_secs: v.taskTotalBudgetSecs,
+    task_team_budget_secs: v.taskTeamBudgetSecs,
+    task_idle_timeout_secs: v.taskIdleTimeoutSecs,
+  };
+}
 
 /**
  * 归一团队总预算:`0` = 不限;`600..=1200` = 有限值;`>1200` 归为 `0`(不限);
@@ -53,16 +209,16 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
   const maxContextTokens = ref(65536);
   /** AGENT/CUSTOM 模式工具循环轮次上限(服务端默认 32,1..=200) */
   const maxToolRounds = ref(32);
-  /** 流程动态调用嵌套深度上限(**任务侧**,A 批 A3;服务端默认 2,1..=5) */
-  const maxFlowCallDepth = ref(2);
-  /** 单任务内流程调用次数上限(**任务侧**,A 批 A3;服务端默认 8,1..=64) */
-  const maxFlowCallsPerTask = ref(8);
+  /** 流程动态调用嵌套深度上限(**任务侧**,A 批 A3;TPROF-1 起服务端默认 3,1..=5) */
+  const maxFlowCallDepth = ref(3);
+  /** 单任务内流程调用次数上限(**任务侧**,A 批 A3;TPROF-1 起服务端默认 24,1..=64) */
+  const maxFlowCallsPerTask = ref(24);
   /** 节点默认上下文上限(**任务侧**,A 批 A4;服务端默认 0 = 不裁剪,否则 256..=1048576) */
   const defaultNodeMaxContext = ref(0);
-  /** 工具循环历史保留的最近完整轮数(服务端默认 4,1..=32) */
-  const toolHistoryKeepRounds = ref(4);
-  /** 工具循环历史 token 预算(服务端默认 16384;0 = 禁用预算闸门) */
-  const toolHistoryBudgetTokens = ref(16384);
+  /** 工具循环历史保留的最近完整轮数(TPROF-1 起服务端默认 12,1..=32) */
+  const toolHistoryKeepRounds = ref(12);
+  /** 工具循环历史 token 预算(TPROF-1 起服务端默认 65536;0 = 禁用预算闸门) */
+  const toolHistoryBudgetTokens = ref(65536);
   /** 单次生成的 token 预算(服务端默认 0 = 关闭;HB-1 成本护栏) */
   const sessionTokenBudget = ref(0);
   /** 预算超限动作:warn(只提示一次,默认)/ stop(停止本轮工具循环) */
@@ -77,7 +233,7 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
   const taskStepBudgetSecs = ref(3600);
   /** 任务级总预算秒数(PRODCAP-2;服务端默认 0 = 关;0 = 关闭,否则 1..=86400) */
   const taskTotalBudgetSecs = ref(0);
-  /** 团队任务执行阶段总预算秒数(TMR3-4;服务端默认 1200;0 = 不限,否则 600..=1200) */
+  /** 团队任务执行阶段总预算秒数(TMR3-4;TPROF-1 起服务端默认 0 = 不限,否则 600..=1200) */
   const taskTeamBudgetSecs = ref(TASK_TEAM_BUDGET_DEFAULT_SECS);
   /** 任务空闲超时秒数(服务端默认 2400;0 = 关闭看守) */
   const taskIdleTimeoutSecs = ref(2400);
@@ -110,12 +266,12 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
   const worldbookSyncGlobalEnabled = ref(false);
   /** 技能渐进披露开关(服务端默认 true):system 只注入「名称:用途」清单,正文按需 read */
   const skillProgressiveDisclosure = ref(true);
-  /** 子智能体最大嵌套深度(1..=4;服务端默认 2) */
-  const subagentMaxDepth = ref(2);
-  /** 子智能体最大并发数(1..=16;服务端默认 6) */
-  const subagentMaxConcurrency = ref(6);
-  /** 子智能体结果最大字符数(500..=8000;服务端默认 2000,超出截断带尾注) */
-  const subagentResultMaxChars = ref(2000);
+  /** 子智能体最大嵌套深度(1..=4;TPROF-1 起服务端默认 3) */
+  const subagentMaxDepth = ref(3);
+  /** 子智能体最大并发数(1..=16;TPROF-1 起服务端默认 8) */
+  const subagentMaxConcurrency = ref(8);
+  /** 子智能体结果最大字符数(500..=8000;TPROF-1 起服务端默认 8000,超出截断带尾注) */
+  const subagentResultMaxChars = ref(8000);
   /** 回退快照(undo)开关(批次 6.1b;服务端默认 true):开时写工具执行前自动存档 */
   const undoEnabled = ref(true);
   /** MCP stdio 客户端总开关(批次 6.2;服务端默认 false;仅启动时装配,改后重启生效) */
@@ -201,11 +357,11 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     maxTokens.value = s.default_max_tokens ?? 1024;
     maxContextTokens.value = s.max_context_tokens ?? 65536;
     maxToolRounds.value = s.max_tool_rounds ?? 32;
-    maxFlowCallDepth.value = s.max_flow_call_depth ?? 2;
-    maxFlowCallsPerTask.value = s.max_flow_calls_per_task ?? 8;
+    maxFlowCallDepth.value = s.max_flow_call_depth ?? 3;
+    maxFlowCallsPerTask.value = s.max_flow_calls_per_task ?? 24;
     defaultNodeMaxContext.value = s.default_node_max_context ?? 0;
-    toolHistoryKeepRounds.value = s.tool_history_keep_rounds ?? 4;
-    toolHistoryBudgetTokens.value = s.tool_history_budget_tokens ?? 16384;
+    toolHistoryKeepRounds.value = s.tool_history_keep_rounds ?? 12;
+    toolHistoryBudgetTokens.value = s.tool_history_budget_tokens ?? 65536;
     sessionTokenBudget.value = s.session_token_budget ?? 0;
     sessionBudgetAction.value = s.session_budget_action === 'stop' ? 'stop' : 'warn';
     loopGuardSemanticWindow.value = s.loop_guard_semantic_window ?? 16;
@@ -255,9 +411,9 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     worldbookSyncCharacterEnabled.value = s.worldbook_sync_character_enabled ?? true;
     worldbookSyncGlobalEnabled.value = s.worldbook_sync_global_enabled ?? false;
     skillProgressiveDisclosure.value = s.skill_progressive_disclosure ?? true;
-    subagentMaxDepth.value = s.subagent_max_depth ?? 2;
-    subagentMaxConcurrency.value = s.subagent_max_concurrency ?? 6;
-    subagentResultMaxChars.value = s.subagent_result_max_chars ?? 2000;
+    subagentMaxDepth.value = s.subagent_max_depth ?? 3;
+    subagentMaxConcurrency.value = s.subagent_max_concurrency ?? 8;
+    subagentResultMaxChars.value = s.subagent_result_max_chars ?? 8000;
     undoEnabled.value = s.undo_enabled ?? true;
     mcpEnabled.value = s.mcp_enabled ?? false;
     mcpServers.value = Array.isArray(s.mcp_servers) ? s.mcp_servers : [];

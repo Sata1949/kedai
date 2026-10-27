@@ -5,13 +5,15 @@
 // 压缩模式/记忆蒸馏/子代理等字段,属模板漂移,合并后两模式一致)。
 // 数值字段的默认值由 stores/genSettings.ts 的 loadSettings 集中 `?? 默认` 兜底,
 // 本组件不再逐个兜(onMounted 里曾只兜 3 个字段,既冗余又误导)。
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import { useAppStore } from '../../store';
 import { storeToRefs } from 'pinia';
 import { useGenerationParams } from '../../composables/useDataManager';
 import {
+  TASK_PARAM_TIER_LABELS,
   TASK_TEAM_BUDGET_MAX_SECS,
   TASK_TEAM_BUDGET_MIN_SECS,
+  type TaskParamTier,
 } from '../../stores/genSettings';
 
 withDefaults(defineProps<{
@@ -38,8 +40,19 @@ const {
 
 const {
   tempLabel, topPLabel, ctxLabel, saveParams, paramsMsg, saveParamsNow,
-  taskRecSaving, taskRecMsg, applyTaskRecommended,
+  taskRecSaving, taskRecMsg, currentTaskTier, applyTaskTier,
 } = useGenerationParams();
+
+/** 任务参数档位下拉的本地待应用值(不写 store:避免直写基线增长) */
+const pendingTier = ref<TaskParamTier>('task');
+
+/** 当前识别结果的中文标签;custom 明确说明原因 */
+const currentTierLabel = computed(() => {
+  const tier = currentTaskTier.value;
+  return tier === 'custom'
+    ? '自定义（手动改过任一项）'
+    : TASK_PARAM_TIER_LABELS[tier];
+});
 
 /** 任务模式缺省块(TM-SET-1)仅任务模式显示;角色扮演侧缺省不同(0.8 / 0.9 / 扁平输出上限) */
 const isTaskMode = computed(() => store.appMode === 'task');
@@ -142,7 +155,7 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
       </div>
       <!-- 流程调用闸与节点默认上下文(A 批 A3/A4):三者都是**任务侧**设置
            (服务端 `apply!(s, is_task, …)` 落在任务覆盖层),角色扮演侧不受影响。
-           缺省值全部等于 A 批之前的行为:深度 2 / 每任务 8 / 不裁剪(0)。 -->
+           TPROF-1 起缺省:深度 3 / 每任务 24 / 不裁剪(0)。 -->
       <div class="sv-inp-row">
         <label class="sv-inp-tag">流程调用深度</label>
         <input
@@ -152,9 +165,9 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           max="5"
           step="1"
           class="sv-input inject-num"
-          title="任务里节点用 run_flow 工具逐层调用流程的嵌套深度上限(1-5,默认 2);静态子流程(sub_flow_id)的嵌套上限另有 3 层的结构限制"
+          title="任务里节点用 run_flow 工具逐层调用流程的嵌套深度上限(1-5,默认 3);静态子流程(sub_flow_id)的嵌套上限另有 3 层的结构限制"
         />
-        <span class="sv-note">任务侧:流程动态调用嵌套深度(1-5,默认 2)</span>
+        <span class="sv-note">任务侧:流程动态调用嵌套深度(1-5,默认 3)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">每任务调用上限</label>
@@ -165,9 +178,9 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           max="64"
           step="1"
           class="sv-input inject-num"
-          title="单个任务内流程调用(run_flow)的次数上限(1-64,默认 8);达到后该任务不再允许新的流程调用"
+          title="单个任务内流程调用(run_flow)的次数上限(1-64,默认 24);达到后该任务不再允许新的流程调用"
         />
-        <span class="sv-note">任务侧:单个任务的流程调用次数上限(1-64,默认 8)</span>
+        <span class="sv-note">任务侧:单个任务的流程调用次数上限(1-64,默认 24)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">节点默认上下文</label>
@@ -194,7 +207,7 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           class="sv-input inject-num"
           title="工具循环历史保留的最近完整轮数;超出后最老轮的 tool 结果原地替换为摘要,防止上下文无界膨胀"
         />
-        <span class="sv-note">最近完整保留轮数(1-32,默认 4;超出部分摘要化)</span>
+        <span class="sv-note">最近完整保留轮数(1-32,默认 12;超出部分摘要化)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">工具历史 token 预算</label>
@@ -207,7 +220,7 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           class="sv-input inject-num"
           title="工具循环历史 token 预算;估算超预算时从最老完整轮起继续摘要,保底最近 1 轮完整。0 = 禁用预算闸门"
         />
-        <span class="sv-note">0 = 禁用;否则 1024-1048576(默认 16384)</span>
+        <span class="sv-note">0 = 禁用;否则 1024-1048576(默认 65536)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">单次生成 token 预算</label>
@@ -320,7 +333,7 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           />
           <span class="sv-note">不限</span>
         </label>
-        <span class="sv-note">团队侧:执行阶段上限(600-1200 秒;超过 1200 或勾选「不限」= 不设限;默认 1200)</span>
+        <span class="sv-note">团队侧:执行阶段上限(600-1200 秒;超过 1200 或勾选「不限」= 不设限;默认 0 = 不限)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">任务空闲超时</label>
@@ -468,9 +481,9 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           max="4"
           step="1"
           class="sv-input inject-num"
-          title="子智能体最大嵌套深度(1-4;默认 2,超限时提示主智能体直接处理)"
+          title="子智能体最大嵌套深度(1-4;默认 3,超限时提示主智能体直接处理)"
         />
-        <span class="sv-note">子智能体嵌套深度上限(1-4,默认 2)</span>
+        <span class="sv-note">子智能体嵌套深度上限(1-4,默认 3)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">子代理并发</label>
@@ -481,9 +494,9 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           max="16"
           step="1"
           class="sv-input inject-num"
-          title="子智能体最大并发数(1-16;默认 6,占满时新派发被拒并提示稍后重试)"
+          title="子智能体最大并发数(1-16;默认 8,占满时新派发被拒并提示稍后重试)"
         />
-        <span class="sv-note">子智能体并发上限(1-16,默认 6)</span>
+        <span class="sv-note">子智能体并发上限(1-16,默认 8)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">子代理结果上限</label>
@@ -494,34 +507,49 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           max="8000"
           step="100"
           class="sv-input inject-num"
-          title="子智能体结果最大字符数(500-8000;默认 2000,超出截断并附原长尾注)"
+          title="子智能体结果最大字符数(500-8000;默认 8000,超出截断并附原长尾注)"
         />
-        <span class="sv-note">子智能体结果字符上限(500-8000,默认 2000)</span>
+        <span class="sv-note">子智能体结果字符上限(500-8000,默认 8000)</span>
       </div>
       <!-- 子代理三参数与回退快照为**全局字段**(TM-SET-3 直写扁平):两模式共用一份,
            任务模式下编辑立即生效(此前经覆盖层是静默死写)。 -->
       <p v-if="isTaskMode" class="sv-note">
         子代理参数为全局设置(角色扮演与任务共用一份),修改立即对两者生效。
       </p>
-      <!-- 任务模式缺省生成配置(TM-SET-1):仅任务模式显示。任务覆盖层未显式配置时,
-           任务运行取任务缺省(0.3 / 1.0 / 8192,不沿用角色扮演风味值);
-           本页「保存为默认参数」会把滑块当前值写成**任务显式值**并冻结,故给一键写推荐值。 -->
+      <!-- 任务参数档位(TPROF-1):仅任务模式显示。档位是一次性批量写入的快捷方式,
+           不是新的持久化字段;当前值匹配哪一档由 currentTaskTier 派生。 -->
       <div v-if="isTaskMode" class="sv-separator">
-        <div class="sv-field-label sub">任务模式缺省</div>
+        <div class="sv-field-label sub">任务参数档位</div>
         <p class="sv-note">
-          任务未单独设置时使用:温度 0.3 · Top-P 1.0 · 输出上限 8192(输出上限只抬不压:
-          更大时保持更大)。显式保存过的值优先于缺省。
+          任务未单独设置时使用:温度 0.3 · Top-P 1.0 · 输出上限 32768(输出上限只抬不压:
+          更大时保持更大)。显式保存过的值优先于缺省;应用档位会覆盖当前任务参数(含降低)。
         </p>
+        <div class="sv-inp-row">
+          <label class="sv-inp-tag">参数档位</label>
+          <select
+            v-model="pendingTier"
+            class="sv-select"
+            title="稳健档=成本敏感;任务优先档=默认推荐;极限档=尽量放开输出/流程/历史/子代理"
+          >
+            <option value="steady">稳健档</option>
+            <option value="task">任务优先档（默认）</option>
+            <option value="extreme">极限档</option>
+          </select>
+          <span class="sv-note">当前识别:{{ currentTierLabel }}</span>
+        </div>
         <div class="sv-btn-row">
           <button
             class="sv-btn ghost sv-btn-fill"
             :disabled="taskRecSaving"
-            title="把温度 0.3 / Top-P 1.0 / 输出上限 8192 显式写入任务模式设置(此前批量保存冻结过旧值的用户可用它一键采用新缺省)"
-            @click="applyTaskRecommended"
+            title="把所选档位一次写入任务参数(含任务覆盖层与全局字段);可在应用后继续手动微调"
+            @click="applyTaskTier(pendingTier)"
           >
-            {{ taskRecSaving ? '写入中...' : '写入任务推荐值(0.3 / 1.0 / 8192)' }}
+            {{ taskRecSaving ? '应用中...' : '应用档位' }}
           </button>
         </div>
+        <p class="sv-note">
+          工具历史与子代理为全局参数(角色扮演与任务共用);空转熔断任务侧仍按 8/4/2 收紧。
+        </p>
         <div v-if="taskRecMsg" class="sv-feedback ok sv-feedback-flex">{{ taskRecMsg }}</div>
       </div>
       <div class="sv-btn-row">

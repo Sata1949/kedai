@@ -4,7 +4,13 @@
 // getSettings/saveSettings(保留其余导出),断言调用入参。
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
-import { useGenSettingsStore } from './genSettings';
+import {
+  buildTaskParamTierPatch,
+  identifyTaskParamTier,
+  TASK_PARAM_DEFAULTS,
+  TASK_PARAM_TIERS,
+  useGenSettingsStore,
+} from './genSettings';
 import { useTaskStore } from './task';
 import * as api from '../api';
 import type { RuntimeSettings } from '../api';
@@ -64,8 +70,8 @@ function makeSettings(overrides: Partial<RuntimeSettings> = {}): RuntimeSettings
     task_step_budget_secs: 3600,
     // PRODCAP-2:任务级总预算(默认 0 = 关)
     task_total_budget_secs: 0,
-    // TMR3-4:团队任务执行阶段总预算(默认 1200 = 20 分钟,可调上限)
-    task_team_budget_secs: 1200,
+    // TMR3-4 / TPROF-1:团队任务执行阶段总预算(默认 0 = 不限;有限档 600-1200)
+    task_team_budget_secs: 0,
     task_idle_timeout_secs: 2400,
     // HB-7:变量两步生成的独立模型/温度(默认未配置)
     mvu_model: null,
@@ -75,12 +81,12 @@ function makeSettings(overrides: Partial<RuntimeSettings> = {}): RuntimeSettings
     task_tool_policy: 'deny_dangerous',
     task_tool_allowlist: [],
     max_tool_rounds: 32,
-    // 流程调用闸与节点默认上下文(A 批 A3/A4;三者都是任务侧设置)
-    max_flow_call_depth: 2,
-    max_flow_calls_per_task: 8,
+    // 流程调用闸与节点默认上下文(A 批 A3/A4;TPROF-1 起任务侧默认 3/24)
+    max_flow_call_depth: 3,
+    max_flow_calls_per_task: 24,
     default_node_max_context: 0,
-    tool_history_keep_rounds: 4,
-    tool_history_budget_tokens: 16384,
+    tool_history_keep_rounds: 12,
+    tool_history_budget_tokens: 65536,
     render_html: false,
     compaction_mode: 'off',
     compaction_threshold: 0.8,
@@ -101,9 +107,9 @@ function makeSettings(overrides: Partial<RuntimeSettings> = {}): RuntimeSettings
     embedding_model: '',
     embedding_dim: 0,
     skill_progressive_disclosure: true,
-    subagent_max_depth: 2,
-    subagent_max_concurrency: 6,
-    subagent_result_max_chars: 2000,
+    subagent_max_depth: 3,
+    subagent_max_concurrency: 8,
+    subagent_result_max_chars: 8000,
     undo_enabled: true,
     mcp_enabled: false,
     mcp_servers: [],
@@ -194,10 +200,10 @@ describe('genSettings 流程调用闸与节点默认上下文(A 批 A3/A4)', () 
     setActivePinia(createPinia());
   });
 
-  it('store 默认值与后端缺省一致(深度 2 / 每任务 8 / 不裁剪 0)', () => {
+  it('store 默认值与后端缺省一致(深度 3 / 每任务 24 / 不裁剪 0)', () => {
     const store = useGenSettingsStore();
-    expect(store.maxFlowCallDepth).toBe(2);
-    expect(store.maxFlowCallsPerTask).toBe(8);
+    expect(store.maxFlowCallDepth).toBe(3);
+    expect(store.maxFlowCallsPerTask).toBe(24);
     expect(store.defaultNodeMaxContext).toBe(0);
   });
 
@@ -224,8 +230,8 @@ describe('genSettings 流程调用闸与节点默认上下文(A 批 A3/A4)', () 
       ]),
     );
     await store.loadSettings();
-    expect(store.maxFlowCallDepth).toBe(2);
-    expect(store.maxFlowCallsPerTask).toBe(8);
+    expect(store.maxFlowCallDepth).toBe(3);
+    expect(store.maxFlowCallsPerTask).toBe(24);
     expect(store.defaultNodeMaxContext).toBe(0);
   });
 
@@ -256,19 +262,19 @@ describe('genSettings 任务侧两道闸(提交 3 · D3/D7)', () => {
     setActivePinia(createPinia());
   });
 
-  it('store 默认值与后端缺省一致(步骤预算 3600 / 总预算 0 / 团队预算 1200 / 空闲超时 2400)', () => {
+  it('store 默认值与后端缺省一致(步骤预算 3600 / 总预算 0 / 团队预算 0 / 空闲超时 2400)', () => {
     const store = useGenSettingsStore();
     expect(store.taskStepBudgetSecs).toBe(3600);
     // PRODCAP-2:总预算缺省关(0);「0 是缺省」故缺字段兜底与真实值不可区分,只断言默认
     expect(store.taskTotalBudgetSecs).toBe(0);
-    // TMR3-4:团队预算默认 20 分钟(安全阀,不是目标值;2026-10-26 起为可调上限)
-    expect(store.taskTeamBudgetSecs).toBe(1200);
+    // TPROF-1:团队预算默认 0 = 不限(复杂团队任务不再被 20 分钟截断)
+    expect(store.taskTeamBudgetSecs).toBe(0);
     // D7:空闲看守后端默认 2400(下限 2101);前端兜底必须与之一致,
     // 否则设置尚未加载时的保存会提交 900 并被后端 400。
     expect(store.taskIdleTimeoutSecs).toBe(2400);
   });
 
-  it('loadSettings 回填服务端值;缺字段兜底 3600 / 1200 / 2400', async () => {
+  it('loadSettings 回填服务端值;缺字段兜底 3600 / 0 / 2400', async () => {
     const store = useGenSettingsStore();
     getSettingsMock.mockReset().mockResolvedValue(
       makeSettings({
@@ -294,7 +300,7 @@ describe('genSettings 任务侧两道闸(提交 3 · D3/D7)', () => {
     );
     await store.loadSettings();
     expect(store.taskStepBudgetSecs).toBe(3600);
-    expect(store.taskTeamBudgetSecs).toBe(1200);
+    expect(store.taskTeamBudgetSecs).toBe(0);
     expect(store.taskIdleTimeoutSecs).toBe(2400);
   });
 
@@ -332,8 +338,7 @@ describe('genSettings 任务侧两道闸(提交 3 · D3/D7)', () => {
   });
 });
 
-describe('genSettings 记忆槽预算与容量上限(B2/B3)', () => {
-  beforeEach(() => {
+describe('genSettings 记忆槽预算与容量上限(B2/B3)', () => {  beforeEach(() => {
     memStorage.clear();
     setActivePinia(createPinia());
   });
@@ -368,6 +373,52 @@ describe('genSettings 记忆槽预算与容量上限(B2/B3)', () => {
     await store.saveSettings({ memory_inject_char_budget: 0, memory_max_entries: 0 });
     expect(store.memoryInjectCharBudget).toBe(0);
     expect(store.memoryMaxEntries).toBe(0);
+  });
+});
+
+describe('genSettings 任务参数档位(TPROF-1)', () => {
+  it('任务优先档即后端任务缺省(0.3 / 1.0 / 32768,流程 3/24,历史 12/64K,子代理 3/8/8000)', () => {
+    expect(TASK_PARAM_DEFAULTS.temperature).toBe(0.3);
+    expect(TASK_PARAM_DEFAULTS.topP).toBe(1.0);
+    expect(TASK_PARAM_DEFAULTS.maxTokens).toBe(32768);
+    expect(TASK_PARAM_DEFAULTS.maxFlowCallDepth).toBe(3);
+    expect(TASK_PARAM_DEFAULTS.maxFlowCallsPerTask).toBe(24);
+    expect(TASK_PARAM_DEFAULTS.toolHistoryKeepRounds).toBe(12);
+    expect(TASK_PARAM_DEFAULTS.toolHistoryBudgetTokens).toBe(65536);
+    expect(TASK_PARAM_DEFAULTS.subagentMaxDepth).toBe(3);
+    expect(TASK_PARAM_DEFAULTS.subagentMaxConcurrency).toBe(8);
+    expect(TASK_PARAM_DEFAULTS.subagentResultMaxChars).toBe(8000);
+    expect(TASK_PARAM_DEFAULTS.taskTeamBudgetSecs).toBe(0);
+  });
+
+  it('识别三档与自定义;团队预算 >1200 归一为 0 后仍识别为任务优先档', () => {
+    expect(identifyTaskParamTier(TASK_PARAM_TIERS.steady)).toBe('steady');
+    expect(identifyTaskParamTier(TASK_PARAM_TIERS.task)).toBe('task');
+    expect(identifyTaskParamTier(TASK_PARAM_TIERS.extreme)).toBe('extreme');
+    expect(
+      identifyTaskParamTier({ ...TASK_PARAM_TIERS.task, maxTokens: 1234 }),
+    ).toBe('custom');
+    expect(
+      identifyTaskParamTier({ ...TASK_PARAM_TIERS.task, taskTeamBudgetSecs: 3600 }),
+    ).toBe('task');
+  });
+
+  it('buildTaskParamTierPatch 输出完整档位字段(极限档取上限)', () => {
+    const patch = buildTaskParamTierPatch('extreme');
+    expect(patch.default_temperature).toBe(0.3);
+    expect(patch.default_top_p).toBe(1.0);
+    expect(patch.default_max_tokens).toBe(65536);
+    expect(patch.max_flow_call_depth).toBe(5);
+    expect(patch.max_flow_calls_per_task).toBe(64);
+    expect(patch.tool_history_keep_rounds).toBe(16);
+    expect(patch.tool_history_budget_tokens).toBe(131072);
+    expect(patch.subagent_max_depth).toBe(4);
+    expect(patch.subagent_max_concurrency).toBe(16);
+    expect(patch.subagent_result_max_chars).toBe(8000);
+    expect(patch.task_team_budget_secs).toBe(0);
+    expect(patch.task_step_budget_secs).toBe(3600);
+    expect(patch.task_total_budget_secs).toBe(0);
+    expect(patch.task_idle_timeout_secs).toBe(2400);
   });
 });
 
