@@ -86,7 +86,7 @@ pub(super) fn settings_json(s: &RuntimeSettings) -> Value {
         "task_step_budget_secs": s.task_step_budget_secs,
         // 任务级总预算(PRODCAP-2):扁平字段,任务侧消费(0 = 关)
         "task_total_budget_secs": s.task_total_budget_secs,
-        // 团队任务总预算(TMR3-4):扁平字段,仅 team 执行器消费(默认 1200,0 = 关)
+        // 团队任务总预算(TMR3-4;TPROF-1 起默认 0 = 不限),仅 team 执行器消费
         "task_team_budget_secs": s.task_team_budget_secs,
         "task_idle_timeout_secs": s.task_idle_timeout_secs,
         // HB-7 接线:变量两步生成的独立模型/温度档(此前可落盘但无 API 通路)

@@ -281,12 +281,12 @@ async fn task_solo_tool_history_trimmed_in_prompt_summary() {
         "最近轮(第 6 轮)工具结果应完整保留且仅此一份(最老轮原文已移除): {prompt}"
     );
 
-    // 还原现场(共享 app;默认 4 / 语义熔断下限 12)
+    // 还原现场(共享 app;TPROF-1 默认 12 / 语义熔断下限 12)
     let (status, json) = send_json(
         app,
         "PUT",
         "/api/settings",
-        json!({ "tool_history_keep_rounds": 4, "loop_guard_semantic_min_calls": 12 }),
+        json!({ "tool_history_keep_rounds": 12, "loop_guard_semantic_min_calls": 12 }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "还原 keep_rounds 应 200: {json}");

@@ -19,8 +19,10 @@ use tokio::sync::watch;
 /// 取值须落在任务侧首轮输出预算与自愈翻倍值之间,使首轮截断、重发充足
 /// ——与 `TRUNC_TEXT_MIN_BUDGET` 同款「夹在首轮与翻倍值之间」口径。
 /// 首轮预算随任务缺省演进:TM-GEN-1 前 1024(门限 2048)→ TM-GEN-1 起 4096(门限 8192)
-/// → TM-SET-1 起 8192(门限本值 16384,翻倍后 16384 充足)。
-const TOOL_RAW_MIN_BUDGET: u32 = 16_384;
+/// → TM-SET-1 起 8192(门限 16384)→ TPROF-1 起 32768(门限本值 49152,翻倍后 65536 充足)。
+/// **改任务缺省输出上限时必须同批改本值**:否则首轮直接达到门限,四个截断自愈用例会
+/// 静默失去「首轮截断」形态(见文件末的常量关系单测)。
+const TOOL_RAW_MIN_BUDGET: u32 = 49_152;
 
 /// [[trunc_text:]]/[[trunc_fail:]] 钩子的截断预算门限:max_tokens 低于该值视为
 /// 「输出预算不足」返回半截文本 + Finish{length};达到即视为「自愈翻倍后的重发」。
@@ -1239,5 +1241,30 @@ fn extract_fail_times_marker(input: &str) -> Option<(String, usize, String)> {
 impl Default for MockConnector {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::settings_service::TASK_DEFAULT_OUTPUT_TOKENS;
+
+    /// 截断自愈钩子的预算门限必须严格落在「任务首轮输出预算」与「翻倍值」之间:
+    /// 首轮 < 门限(截断),翻倍值 ≥ 门限(成功)。改任务缺省输出上限时若忘了同步本值,
+    /// 四个 `[[tool_raw:]]`/`[[tool_raw_fail:]]` 用例会静默退化,故用本单测钉死关系。
+    /// 断言两侧都是编译期常量,clippy 的 `assertions_on_constants` 在此是误报:
+    /// 这正是要守护的常量不变量。
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn tool_raw_budget_threshold_sits_between_task_first_round_and_double() {
+        assert!(
+            TASK_DEFAULT_OUTPUT_TOKENS < TOOL_RAW_MIN_BUDGET,
+            "首轮 {TASK_DEFAULT_OUTPUT_TOKENS} 必须低于门限 {TOOL_RAW_MIN_BUDGET}"
+        );
+        assert!(
+            TOOL_RAW_MIN_BUDGET <= TASK_DEFAULT_OUTPUT_TOKENS.saturating_mul(2),
+            "门限 {TOOL_RAW_MIN_BUDGET} 不得超过首轮翻倍值 {}",
+            TASK_DEFAULT_OUTPUT_TOKENS.saturating_mul(2)
+        );
     }
 }

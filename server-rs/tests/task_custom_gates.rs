@@ -1,7 +1,8 @@
 // 调用闸与默认节点上下文的**可配置性**回归(A 批 A3/A4)。
 //
 // 口径(见 `交接稿-自定义流程AB批.md` R4/R5):
-//   - A3:`max_flow_call_depth`(默认 2,1..=5)与 `max_flow_calls_per_task`(默认 8,1..=64)
+//   - A3:`max_flow_call_depth`(TPROF-1 起默认 3,1..=5)与
+//     `max_flow_calls_per_task`(TPROF-1 起默认 24,1..=64)
 //     是**任务侧**设置项,`agent_flow_service` 的两个常量退居缺省值与测试基准;
 //     消费点在 `task_engine/flow_call.rs`(取执行开始时的设置快照,执行期改设置不影响本轮);
 //   - A4:`default_node_max_context`(默认 **0 = 不裁剪**,否则 256..=1048576)只在该节点
@@ -181,8 +182,8 @@ async fn flow_call_budget_setting_drives_the_gate() {
         "上限设为 1 时只应有 1 次动态调用落地: {calls}"
     );
 
-    // 缺省设置(8)下同一份钩子应真的跑出 3 次
-    let (status, _) = put_task_settings(app, json!({ "max_flow_calls_per_task": 8 })).await;
+    // 缺省设置(24)下同一份钩子应真的跑出 3 次
+    let (status, _) = put_task_settings(app, json!({ "max_flow_calls_per_task": 24 })).await;
     assert_eq!(status, StatusCode::OK);
     let (status, json) = send_json(
         app,
@@ -223,16 +224,16 @@ async fn gate_settings_roundtrip_and_stay_task_scoped() {
     assert_eq!(task_view["max_flow_call_depth"], 4, "{task_view}");
     assert_eq!(task_view["max_flow_calls_per_task"], 20, "{task_view}");
 
-    // 角色扮演侧(扁平值)不受影响:那里仍是缺省 2 / 8
+    // 角色扮演侧(扁平值)不受影响:那里仍是缺省 3 / 24
     let (status, roleplay_view) =
         send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        roleplay_view["max_flow_call_depth"], 2,
+        roleplay_view["max_flow_call_depth"], 3,
         "任务侧改设置不得污染角色扮演侧: {roleplay_view}"
     );
     assert_eq!(
-        roleplay_view["max_flow_calls_per_task"], 8,
+        roleplay_view["max_flow_calls_per_task"], 24,
         "{roleplay_view}"
     );
 
@@ -245,7 +246,7 @@ async fn gate_settings_roundtrip_and_stay_task_scoped() {
     // 复位
     let (status, _) = put_task_settings(
         app,
-        json!({ "max_flow_call_depth": 2, "max_flow_calls_per_task": 8 }),
+        json!({ "max_flow_call_depth": 3, "max_flow_calls_per_task": 24 }),
     )
     .await;
     assert_eq!(status, StatusCode::OK);

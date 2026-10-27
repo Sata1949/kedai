@@ -452,9 +452,9 @@ fn harness_settings_defaults_clamp_roundtrip_and_mode_override() {
     let cfg = test_cfg();
     let s = RuntimeSettings::from_config(&cfg);
     assert!(s.skill_progressive_disclosure, "渐进披露默认开启");
-    assert_eq!(s.subagent_max_depth, 2);
-    assert_eq!(s.subagent_max_concurrency, 6);
-    assert_eq!(s.subagent_result_max_chars, 2000);
+    assert_eq!(s.subagent_max_depth, 3);
+    assert_eq!(s.subagent_max_concurrency, 8);
+    assert_eq!(s.subagent_result_max_chars, 8000);
 
     // 旧版配置缺字段:serde default 补齐,行为与默认一致
     let dir = tmp_dir("harness-legacy");
@@ -474,11 +474,11 @@ fn harness_settings_defaults_clamp_roundtrip_and_mode_override() {
     .unwrap();
     let loaded = RuntimeSettings::load(&dir, &cfg);
     assert!(loaded.skill_progressive_disclosure);
-    assert_eq!(loaded.subagent_max_depth, 2);
-    assert_eq!(loaded.subagent_max_concurrency, 6);
-    assert_eq!(loaded.subagent_result_max_chars, 2000);
+    assert_eq!(loaded.subagent_max_depth, 3);
+    assert_eq!(loaded.subagent_max_concurrency, 8);
+    assert_eq!(loaded.subagent_result_max_chars, 8000);
 
-    // 越界钳回默认:深度 0/5 → 2;并发 0/17 → 6;结果 499/8001 → 2000
+    // 越界钳回默认:深度 0/5 → 3;并发 0/17 → 8;结果 499/8001 → 8000
     let dir2 = tmp_dir("harness-clamp");
     let mut s2 = RuntimeSettings::from_config(&cfg);
     s2.subagent_max_depth = 0;
@@ -486,11 +486,11 @@ fn harness_settings_defaults_clamp_roundtrip_and_mode_override() {
     s2.subagent_result_max_chars = 499;
     s2.save(&dir2).unwrap();
     let clamped = RuntimeSettings::load(&dir2, &cfg);
-    assert_eq!(clamped.subagent_max_depth, 2, "深度越界应钳回 2");
-    assert_eq!(clamped.subagent_max_concurrency, 6, "并发越界应钳回 6");
+    assert_eq!(clamped.subagent_max_depth, 3, "深度越界应钳回 3");
+    assert_eq!(clamped.subagent_max_concurrency, 8, "并发越界应钳回 8");
     assert_eq!(
-        clamped.subagent_result_max_chars, 2000,
-        "结果上限越界应钳回 2000"
+        clamped.subagent_result_max_chars, 8000,
+        "结果上限越界应钳回 8000"
     );
 
     // 合法边界值通过;保存往返还原
@@ -569,7 +569,7 @@ fn task_generation_defaults_apply_and_some_wins() {
     assert_eq!(
         s.for_mode(AppMode::Task).default_max_tokens,
         TASK_DEFAULT_OUTPUT_TOKENS,
-        "None + 扁平 1024 → 抬到任务缺省 8192"
+        "None + 扁平 1024 → 抬到任务缺省 32768"
     );
     assert_eq!(
         s.for_mode(AppMode::Task).default_temperature,
@@ -581,10 +581,10 @@ fn task_generation_defaults_apply_and_some_wins() {
         TASK_DEFAULT_TOP_P,
         "None → 任务缺省 Top-P 1.0(不沿用扁平 0.9)"
     );
-    s.default_max_tokens = 16384;
+    s.default_max_tokens = 65_536;
     assert_eq!(
         s.for_mode(AppMode::Task).default_max_tokens,
-        16384,
+        65_536,
         "扁平值更大时保持更大(只抬不压)"
     );
     s.task.default_max_tokens = Some(2048);
@@ -607,7 +607,7 @@ fn task_generation_defaults_apply_and_some_wins() {
     assert_eq!(s.for_mode(AppMode::Task).default_top_p, 0.95);
     assert_eq!(
         s.for_mode(AppMode::Roleplay).default_max_tokens,
-        16384,
+        65_536,
         "roleplay 读扁平权威值,不受任务缺省影响"
     );
     assert_eq!(
@@ -1722,20 +1722,23 @@ fn task_gate_defaults_cover_one_full_command_plus_a_call() {
     );
 }
 
-/// 团队预算默认值必须落在设置页可调区间内(2026-10-26):默认取可调上限 1200 ——
-/// 900s 实测会把总装截图阶段截成 `partial`(SKY-10),默认应为「不误伤」的最宽有限档;
-/// 需要更久的用户显式切「不限」(0)。低于下限或高于上限都会让首装值被 load 归一改写。
+/// 团队预算默认值(TPROF-1,2026-10-27):默认 `0` = 不限——复杂团队任务不再被 20 分钟
+/// 截断(全题实测 3666s 仍 partial);需要硬性控成本的用户可显式选 `600..=1200` 有限档。
+/// 有限档区间仍由常量锁定,避免默认值改动顺手把可调范围改坏。
 #[test]
-fn team_budget_default_is_the_widest_finite_option() {
-    let default = default_task_team_budget_secs();
-    assert!(
-        (TASK_TEAM_BUDGET_MIN_SECS..=TASK_TEAM_BUDGET_MAX_SECS).contains(&default),
-        "团队预算默认 {default}s 不在可调区间 {}..={}s",
-        TASK_TEAM_BUDGET_MIN_SECS,
-        TASK_TEAM_BUDGET_MAX_SECS
-    );
+fn team_budget_default_is_unlimited_and_finite_range_stays_available() {
     assert_eq!(
-        default, TASK_TEAM_BUDGET_MAX_SECS,
-        "默认值应取可调上限;更久由用户显式切「不限」"
+        default_task_team_budget_secs(),
+        0,
+        "团队预算默认应为 0(不限)"
+    );
+    assert!(
+        (TASK_TEAM_BUDGET_MIN_SECS..=TASK_TEAM_BUDGET_MAX_SECS).contains(&600),
+        "有限档下限须仍可用"
+    );
+    assert!(
+        (TASK_TEAM_BUDGET_MIN_SECS..=TASK_TEAM_BUDGET_MAX_SECS)
+            .contains(&TASK_TEAM_BUDGET_MAX_SECS),
+        "有限档上限须仍可用"
     );
 }

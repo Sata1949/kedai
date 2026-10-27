@@ -547,8 +547,8 @@ async fn task_generation_defaults_visible_in_task_view() {
     );
     assert_eq!(
         t["default_max_tokens"].as_u64(),
-        Some(flat_max.max(8192)),
-        "任务输出上限 = max(扁平值, 8192)(只抬不压)"
+        Some(flat_max.max(32768)),
+        "任务输出上限 = max(扁平值, 32768)(只抬不压)"
     );
 
     // 显式写任务覆盖值 → task 视图切换、扁平(roleplay 视图)不变

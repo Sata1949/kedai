@@ -526,15 +526,20 @@ mod tests {
         RuntimeSettings::from_config(&crate::config::test_config())
     }
 
-    /// 预算映射:默认 1200 秒 = 开;0 = 关(None);到秒的换算不丢精度。
+    /// 预算映射:显式 1200 秒 = 开;0 = 关(None);到秒的换算不丢精度。
     #[test]
     fn task_loop_limits_maps_step_budget() {
         let mut s = default_settings();
+        assert_eq!(
+            task_loop_limits(&s).0,
+            Some(Duration::from_secs(3600)),
+            "缺省口径 = 3600 秒(TPROF-1)"
+        );
         s.task_step_budget_secs = 1200;
         assert_eq!(
             task_loop_limits(&s).0,
             Some(Duration::from_secs(1200)),
-            "默认口径 = 1200 秒(§10 C4 的用户裁定)"
+            "显式 1200 秒按用户值"
         );
         s.task_step_budget_secs = 1;
         assert_eq!(
