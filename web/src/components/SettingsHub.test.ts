@@ -117,6 +117,8 @@ describe('SettingsHub 组件(阶段 A 补测)', () => {
     // action 项尾部带「→」箭头(提示点开是独立面板),故用包含判定
     expect(labels.some((l) => l.includes('综合导入 / 导出'))).toBe(true);
     expect(labels).not.toContain('提示词注入');
+    // USERPERSONA-1:用户设定同为角色扮演专属(任务模式不消费该配置)
+    expect(labels).not.toContain('用户设定');
   });
 
   it('「授权与命令执行」是独立二级项且两种模式下都可见(2026-09-17:授权入口曾被埋在 Agent 设置内)', async () => {

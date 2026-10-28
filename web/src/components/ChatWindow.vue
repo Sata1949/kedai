@@ -3,7 +3,7 @@
 import { ref, nextTick, watch, computed, onMounted, onBeforeUnmount, defineAsyncComponent } from 'vue';
 import { storeToRefs } from 'pinia';
 import { useAppStore } from '../store';
-import { renderScopedScripts, hasStatusPlaceholderScript, buildMessageRenderText } from '../render';
+import { hasStatusPlaceholderScript, buildMessageRenderText } from '../render';
 import { installMvuGlobals } from '../mvu/host';
 import { ScriptRunner, type SandboxRpcExtensions } from '../scriptRunner';
 import { executeCurrentMessageScripts as scheduleCurrentMessageScripts } from '../chatMessageScriptScheduler';
@@ -12,7 +12,8 @@ import { cleanupCardScriptSandbox, ensureCardScriptSandbox, makeCardScriptRpcExt
 import { useActiveThemeId } from '../composables/useActiveTheme';
 import { useVirtualMessages } from '../composables/useVirtualMessages';
 import { useResourceFrames } from '../composables/useResourceFrames';
-import { scriptBlocksCache, buildScriptBlocksKey } from '../renderCache';
+import { useUserPersona } from '../composables/useUserPersona';
+import { createScriptBlocksRender } from '../scriptBlocksRender';
 import { mergedRegexScripts } from '../utils/regexMerge';
 import type { UiMessage } from '../sseReducer';
 import ChatInput from './ChatInput.vue';
@@ -25,6 +26,7 @@ const AmbientField = defineAsyncComponent(() => import('./AmbientField.vue'));
 
 const store = useAppStore();
 const activeThemeId = useActiveThemeId();
+const { userName } = useUserPersona();
 const {
   messages, generating, currentSessionId, currentCharacterId, currentCharacter, currentCharacterName,
   renderHtml, currentScriptHash, currentScriptAuthorized, mvuVariables, initVarEntries, lastError,
@@ -140,34 +142,12 @@ function renderTextFor(m: { id: number; content: string; content_display?: strin
   return buildMessageRenderText(displayText(m), statusBar(m), hasStatusScript.value);
 }
 
-/**
- * 脚本块解析缓存(流式性能优化):调度器触发时会为每条历史 assistant 消息执行
- * renderScopedScripts(全量正则 + sanitize,重活),流式期间每个 token 触发一次,
- * 历史消息解析结果却不变。按 (scopeId + scriptHash + depth + 渲染文本) 记忆结果,
- * 历史消息零重算。
- *
- * 2026-09-17 P-9:缓存由「组件作用域 + 无上限」改为**模块级有界**(容量 500,FIFO 淘汰,
- * 见 renderCache.ts)。理由:原实现只在 messages/scripts 引用变化时整体重建,长会话下
- * 条目无界增长;且组件卸载(如切走再切回聊天页)会丢失全部缓存。
- * role 判定:renderScopedScripts 返回 null 表示「未命中任何脚本」,这是**有效结果**
- * (缓存它可省掉每次重跑全量正则去确认无命中),故用 get 的返回值区分而非真假值。
- */
-function renderScriptsCached(
-  text: string,
-  scripts: Parameters<typeof renderScopedScripts>[1],
-  scopeId: string,
-  depth: number,
-): ReturnType<typeof renderScopedScripts> {
-  // depth 参与缓存键:同一条消息在不同楼层深度下脚本适用性不同(实跑问题 7 R2)
-  const key = buildScriptBlocksKey(scopeId, currentScriptHash.value, depth, text);
-  const hit = scriptBlocksCache.get(key);
-  if (hit !== undefined) return hit;
-  const scoped = renderScopedScripts(text, scripts, scopeId, depth, {
-    charName: currentCharacter.value?.chara_name ?? currentCharacter.value?.name ?? '',
-  });
-  scriptBlocksCache.set(key, scoped ?? null);
-  return scoped;
-}
+// 脚本块解析缓存(流式性能优化;实现与键纪律见 scriptBlocksRender.ts,USERPERSONA-1 起下沉)
+const renderScriptsCached = createScriptBlocksRender({
+  scriptHash: () => currentScriptHash.value,
+  charName: () => currentCharacter.value?.chara_name ?? currentCharacter.value?.name ?? '',
+  userName: () => userName.value,
+});
 
 // 消息级沙箱只读 RPC 扩展(世界书读取 / 聊天消息读取),供首楼脚本获取聊天上下文。
 // 实跑问题 7 主因:此前不注入,数据 RPC 落到 DOM 白名单分发抛错 → 沙箱 cleanup
@@ -199,6 +179,7 @@ async function executeCurrentMessageScripts(): Promise<void> {
     initVarEntries: initVarEntries.value,
     mvuVariables: mvuVariables.value,
     charName: currentCharacter.value?.chara_name ?? currentCharacter.value?.name ?? '',
+    userName: userName.value,
     rpcExtensions: messageRpcExtensions(),
     isAuthorized: store.isCharacterScriptAuthorized,
     getScrollArea: () => scrollArea.value,

@@ -21,6 +21,9 @@ import {
 import { renderMarkdown, renderMarkdownWithHtml, stripHtmlComments } from '../markdown';
 import { isRenderCodeBlock } from '../renderPanel';
 import { messageHtmlCache, buildMessageRenderKey } from '../renderCache';
+import { useUserPersona } from '../composables/useUserPersona';
+
+const { userName } = useUserPersona();
 
 const props = defineProps<{
   /** 消息对象(store 响应式;流式期间 content 被就地追加) */
@@ -284,6 +287,7 @@ const html = computed<string>(() => {
     depth,
     scopeId,
     charName: store.currentCharacterName,
+    userName: userName.value,
   });
   const cached = messageHtmlCache.get(key);
   if (cached !== undefined) return cached;
@@ -316,6 +320,7 @@ function renderMessageHtml(text: string, scopeId: string, depth: number): string
       // userName 缺省「用户」,与后端 content_display 展开一致)
       const scoped = renderScopedScripts(text, props.scripts, `msg-${props.m.id}`, depth, {
         charName: store.currentCharacterName,
+        userName: userName.value,
       });
       if (scoped) return scoped.html;
     }

@@ -86,6 +86,8 @@ const domains: Domain[] = [
       // 附件管理(IMPHUB 步骤 D):技能 / 流程 / 插件 / 预设正则 的统一组织面
       { type: 'action', key: 'assets', label: '附件管理', run: openPanel('assetsOpen') },
       { type: 'section', key: 'prompt', label: '提示词注入' },
+      // 用户设定(USERPERSONA-1):角色扮演专属的全局用户角色配置
+      { type: 'section', key: 'userPersona', label: '用户设定' },
     ],
   },
   {
@@ -143,7 +145,7 @@ const domains: Domain[] = [
  *  (IFW-3 入口错位修复,见 docs/遗留.md §九 已封堵项索引)。
  *  'preset'(预设导入)随 IMPHUB 步骤 C 删除:能力并入「综合导入」①;「对话与提示词」
  *  域的 action(综合导入/导出)两模式可见,故任务模式下本域不再整域隐藏。 */
-const ROLEPLAY_ONLY: ReadonlySet<SectionKey> = new Set<SectionKey>(['prompt']);
+const ROLEPLAY_ONLY: ReadonlySet<SectionKey> = new Set<SectionKey>(['prompt', 'userPersona']);
 
 /** 按顶层模式过滤二级 section 项;过滤后为空的功能域整域隐藏 */
 const visibleDomains = computed<Domain[]>(() =>

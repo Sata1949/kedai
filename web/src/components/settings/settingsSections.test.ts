@@ -15,6 +15,7 @@ import VisionScreenshotSection from './VisionScreenshotSection.vue';
 import DataManagementSection from './DataManagementSection.vue';
 import AgentSettingsSection from './AgentSettingsSection.vue';
 import GenParamsSection from './GenParamsSection.vue';
+import UserPersonaSection from './UserPersonaSection.vue';
 import SettingsModal from '../SettingsModal.vue';
 
 // 设置区组件冒烟测试:项目无 jsdom / @vue/test-utils,沿用 CacheHealthPanel.test.ts 的
@@ -213,6 +214,31 @@ describe('SettingsModal(壳 · 单模式)', () => {
     expect(html).toContain('提示词注入');
     expect(html).not.toContain('对话开头');
     expect(html).not.toContain('深度 N');
+  });
+
+  it('装配:用户设定分区挂进壳(USERPERSONA-1,角色扮演专属)', async () => {
+    const html = await render(SettingsModal, { activeSection: 'userPersona' });
+    expect(html).toContain('用户设定');
+    expect(html).toContain('保存用户设定');
+  });
+});
+
+describe('UserPersonaSection(用户设定区,角色扮演专属;USERPERSONA-1)', () => {
+  it('渲染启用开关 / 称呼 / 角色设定与三处口径说明(默认未启用)', async () => {
+    const html = await render(UserPersonaSection);
+    expect(html).toContain('用户设定');
+    expect(html).toContain('已关闭'); // 默认 enabled=false
+    expect(html).toContain('称呼');
+    expect(html).toContain('角色设定');
+    // 三处口径必须在界面上说清:仅角色扮演生效、宏替换、system 追加
+    expect(html).toContain('仅角色扮演模式生效');
+    expect(html).toContain('任务模式不注入、不替换称呼');
+    expect(html).toContain('系统提示词追加【用户角色】段');
+  });
+
+  it('show=false 时根节点 display:none(embedded 模式按 activeSection 切换)', async () => {
+    const html = await render(UserPersonaSection, { show: false });
+    expect(html).toMatch(/display:\s*none/);
   });
 });
 

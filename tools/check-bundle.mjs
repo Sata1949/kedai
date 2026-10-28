@@ -89,6 +89,14 @@ const VERBOSE = process.argv.includes('--verbose');
  *   同批记录:首屏实测 290,508 / 预算 317,030(余 26,522)、全部资产实测 516,895 / 预算
  *   557,300(余 40,405),两项本批未动。
  *
+ * index 131,300 → 144,616(2026-10-28,USERPERSONA-1 后重测):该批在入口链新增
+ *   `useUserPersona`(App / ChatWindow / ChatMessageItem 三处静态引用,称呼要参与
+ *   `{{user}}` 的宏展开与两个渲染缓存键)与从 ChatWindow 下沉的 `scriptBlocksRender`;
+ *   index 实测 131,469 gz,越过 131,300(超 169)。属功能正常增长——聊天页一进来就要
+ *   按称呼渲染历史消息,拆懒加载会先渲染成「用户」再闪一次,故按协议上调到
+ *   131,469 + 10% ≈ 144,616。同批记录:首屏实测 301,052 / 预算 317,030(余 15,978)、
+ *   全部资产实测 548,969 / 预算 557,300(余 8,331),两项本批未动。
+ *
  * flow-vendor 必须单列一条(不能走默认上限):二维批次 3 引入的流程画布库
  *   (`@vue-flow/*` + 传递依赖 d3-* / @vueuse/core / vue-demi)整体 71,594 gz。
  *   它由 `web/vite.config.ts` 的 manualChunks 单列成块,只被执行流程编辑区里的画布
@@ -106,7 +114,7 @@ const ALL_ASSETS_BUDGET_GZ = 557300;
  * 哈希会随内容变化,故**必须按去哈希名索引**,不能写死文件名。
  */
 const CHUNK_BUDGETS_GZ = {
-  'index.js': 131300,
+  'index.js': 144616,
   'flow-vendor.js': 79000,
   'vendor.js': 78000,
   'content-rendering.js': 49500,

@@ -12,6 +12,7 @@ import { inTauri } from './platform';
 import { useActiveThemeId } from './composables/useActiveTheme';
 import { useExternalLinks } from './composables/useExternalLinks';
 import { useKeepAlive } from './composables/useKeepAlive';
+import { useUserPersona } from './composables/useUserPersona';
 import Sidebar from './components/Sidebar.vue';
 import ChatWindow from './components/ChatWindow.vue';
 import TaskBoard from './components/TaskBoard.vue';
@@ -267,6 +268,8 @@ onMounted(() => {
   // 其余 4 个 load 保持并行;聚合错误提示:任一失败在 console 汇总(连接失败同时由
   // testConnection 落入 connStatus,UI 已有展示机制,不新增 UI),不阻塞其余加载。
   const parallelLoads = [store.loadCharacters(), store.testConnection(), store.loadModel(), store.loadModels()];
+  // 用户设定(USERPERSONA-1):启动懒加载,供显示层 {{user}} 展开;失败静默回退「用户」。
+  void useUserPersona().ensureLoaded();
   void Promise.allSettled(parallelLoads).then((results) => {
     const failed = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
     if (failed.length > 0) {

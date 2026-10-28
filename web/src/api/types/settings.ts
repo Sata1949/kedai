@@ -375,6 +375,15 @@ export interface PromptPresetImportResult {
   config: PromptInjectConfig;
 }
 
+/** 用户设定(USERPERSONA-1;角色扮演专属,全局一份) */
+export interface UserPersonaConfig {
+  enabled: boolean;
+  /** 称呼/名字(空 = 宏回退「用户」;注入段称呼用「你」) */
+  name: string;
+  /** 用户角色设定(经 untrusted 包裹注入) */
+  description: string;
+}
+
 /** 技能记录(提示词技能) */
 export interface SkillRecord {
   id: string;
