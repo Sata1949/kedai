@@ -356,13 +356,17 @@ async fn prompt_preview_warns_when_template_lacks_world_info() {
         "缺 {{{{world_info}}}} 的自定义模板必须告警"
     );
 
-    // 2) 写了占位符 → 无告警(空数组仍在)
+    // 2) 写了占位符 → 无 world_info 告警(步骤指令运行时追加告警可能存在,与本用例无关)
     let (status, r) = put_prompt("你是{{char}}:\n{{world_info}}\n按设定回答。").await;
     assert_eq!(status, StatusCode::OK, "写模板失败:{r}");
-    assert_eq!(
-        preview_warnings("/api/settings/prompt-preview").await,
-        json!([]),
-        "写了 {{{{world_info}}}} 不应告警"
+    let warnings = preview_warnings("/api/settings/prompt-preview").await;
+    assert!(
+        !warnings
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| *w == json!("template_missing_world_info")),
+        "写了 {{{{world_info}}}} 不应告警:{warnings}"
     );
 
     // 3) task 模式不适用:同样的缺占位符模板,任务侧世界书走引擎拼装
@@ -1028,6 +1032,49 @@ async fn prompt_preview_shows_pov_anchor_and_unknown_warning() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+}
+
+/// CARD-1:角色卡层必须是 metadata(不再冒充 system 层);步骤指令不再作为主层展示。
+#[tokio::test]
+async fn prompt_preview_card_layer_is_metadata_and_step_instruction_hidden() {
+    let _guard = test_lock().await;
+    let app = test_app();
+    let (_, chars) = send_json(app, "GET", "/api/characters", json!({})).await;
+    let list = chars
+        .as_array()
+        .cloned()
+        .or_else(|| chars["characters"].as_array().cloned())
+        .unwrap_or_default();
+    let cid = list
+        .first()
+        .and_then(|c| c["id"].as_str())
+        .expect("测试 app 应播种默认角色")
+        .to_string();
+    let (status, preview) = send_json(
+        app,
+        "GET",
+        &format!("/api/settings/prompt-preview?character_id={cid}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "预览失败:{preview}");
+    let layers = preview["layers"].as_array().cloned().unwrap_or_default();
+    let card = layers
+        .iter()
+        .find(|l| l["source"] == json!("character_card_metadata"))
+        .unwrap_or_else(|| panic!("缺角色卡 metadata 层:{preview}"));
+    assert_eq!(card["role"], "metadata", "角色卡层不得再冒充 system:{card}");
+    assert!(
+        card["content"].as_str().unwrap_or("").contains("角色名"),
+        "metadata 应展示角色名/描述:{card}"
+    );
+    assert!(
+        !layers.iter().any(|l| l["source"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("step_instruction")),
+        "步骤指令不得作为主层展示:{preview}"
+    );
 }
 
 /// 文学包选择型字段(LIT-6/LIT-7):未知取值 400(不静默回退、不落库);合法值往返;

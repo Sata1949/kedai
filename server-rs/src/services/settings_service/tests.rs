@@ -6,7 +6,8 @@ use super::params::{
     default_literary_reflect_prompt, default_literary_roleplay_agent_prompt,
     default_reflect_prompt, LEGACY_LITERARY_REFLECT_ENHANCEMENT_V1,
     LEGACY_LITERARY_RP_ENHANCEMENT_V1, LEGACY_REFLECT_PROMPT_V1, LEGACY_REFLECT_PROMPT_V2,
-    LEGACY_ROLEPLAY_AGENT_PROMPT_V1, LITERARY_NOTE, LITERARY_REFLECT_ENHANCEMENT, LITERARY_TAIL,
+    LEGACY_ROLEPLAY_AGENT_PROMPT_V1, LEGACY_ROLEPLAY_AGENT_PROMPT_V2, LITERARY_NOTE,
+    LITERARY_REFLECT_ENHANCEMENT, LITERARY_RP_ENHANCEMENT, LITERARY_TAIL,
 };
 use super::prompts_literary::{
     LITERARY_STYLE_CLASSICAL, LITERARY_STYLE_HARDBOILED, LITERARY_STYLE_LIGHTNOVEL,
@@ -1104,9 +1105,11 @@ fn literary_default_prompts_text_constraints_and_priority() {
     let rp_lit = default_literary_roleplay_agent_prompt();
     for ph in [
         "{{char}}",
+        "{{character_description}}",
         "{{personality}}",
         "{{scenario}}",
         "{{world_info}}",
+        "{{mes_example_block}}",
     ] {
         assert!(rp_lit.contains(ph), "文学增强版必须保留占位符 {ph}");
     }
@@ -1204,6 +1207,34 @@ fn roleplay_default_prompt_does_not_write_world_header_line() {
     );
 }
 
+/// CARD-1:默认词必须真正携带角色卡 `description` 与 `mes_example`,不能只在兜底模板里有。
+/// 这两个字段是导入卡最常放主设定的位置;缺失时模型几乎看不到人设/口吻示例。
+#[test]
+fn roleplay_default_prompt_includes_card_fields() {
+    let prompt = default_roleplay_agent_prompt();
+    for ph in [
+        "{{character_description}}",
+        "{{personality}}",
+        "{{scenario}}",
+        "{{world_info}}",
+        "{{mes_example_block}}",
+    ] {
+        assert!(prompt.contains(ph), "默认词缺占位符 {ph}: {prompt}");
+    }
+    assert!(
+        prompt.contains("有对话示例时,口吻与句式贴近示例"),
+        "规则 7 应改为「有示例时贴近、不得复述」: {prompt}"
+    );
+    assert!(
+        prompt.contains("不替用户角色写内心") || prompt.contains("不得代写或替其做决定"),
+        "默认词应补代答禁令: {prompt}"
+    );
+    assert!(
+        default_literary_roleplay_agent_prompt().starts_with(&prompt),
+        "文学版必须以现行默认词为逐字节前缀"
+    );
+}
+
 /// 存量迁移(遗留 L32 配套):load 期逐字等于**旧**内置默认(或其文学版)者视为未自定义,
 /// 重物化为现行默认——否则旧串里那句字面头会与引擎新头同屏成双头,而这批用户从未自定义过文本。
 /// 追加过内容的自定义文本必须逐字保留(不得被迁移覆盖);空串走既有回填分支,本迁移不动。
@@ -1263,6 +1294,65 @@ fn legacy_roleplay_default_prompt_rehydrates_on_load() {
     assert_eq!(
         loaded.agent_system_prompt.0, custom,
         "自定义文本(哪怕以旧默认为前缀)不得被迁移覆盖"
+    );
+
+    // 分支四:POV-1 之前的 v2 默认词(开关关)→ CARD-1 现行默认
+    let dir_v2 = tmp_dir("rp-prompt-legacy-v2");
+    let mut j = serde_json::to_value(RuntimeSettings::from_config(&cfg)).unwrap();
+    j["agent_system_prompt"] = serde_json::Value::from(LEGACY_ROLEPLAY_AGENT_PROMPT_V2);
+    j["literary_bundle_enabled"] = serde_json::Value::from(false);
+    std::fs::write(
+        dir_v2.join("settings.json"),
+        serde_json::to_string_pretty(&j).unwrap(),
+    )
+    .unwrap();
+    let loaded = RuntimeSettings::load(&dir_v2, &cfg);
+    assert_eq!(
+        loaded.agent_system_prompt.0,
+        default_roleplay_agent_prompt(),
+        "v2 默认词应迁移为 CARD-1 新默认"
+    );
+
+    // 分支五:v2 + 现行文学增强段(开关开)→ CARD-1 文学默认
+    let dir_v2_lit = tmp_dir("rp-prompt-legacy-v2-lit");
+    let v2_lit = format!(
+        "{}\n\n{}",
+        LEGACY_ROLEPLAY_AGENT_PROMPT_V2, LITERARY_RP_ENHANCEMENT
+    );
+    let mut j = serde_json::to_value(RuntimeSettings::from_config(&cfg)).unwrap();
+    j["agent_system_prompt"] = serde_json::Value::from(v2_lit);
+    j["literary_bundle_enabled"] = serde_json::Value::from(true);
+    std::fs::write(
+        dir_v2_lit.join("settings.json"),
+        serde_json::to_string_pretty(&j).unwrap(),
+    )
+    .unwrap();
+    let loaded = RuntimeSettings::load(&dir_v2_lit, &cfg);
+    assert_eq!(
+        loaded.agent_system_prompt.0,
+        default_literary_roleplay_agent_prompt(),
+        "v2 文学默认应迁移为 CARD-1 文学默认"
+    );
+
+    // 分支六:v2 + 旧文学增强段(更早的文学包出厂文本)→ 同样迁移
+    let dir_v2_old_lit = tmp_dir("rp-prompt-legacy-v2-old-lit");
+    let v2_old_lit = format!(
+        "{}\n\n{}",
+        LEGACY_ROLEPLAY_AGENT_PROMPT_V2, LEGACY_LITERARY_RP_ENHANCEMENT_V1
+    );
+    let mut j = serde_json::to_value(RuntimeSettings::from_config(&cfg)).unwrap();
+    j["agent_system_prompt"] = serde_json::Value::from(v2_old_lit);
+    j["literary_bundle_enabled"] = serde_json::Value::from(true);
+    std::fs::write(
+        dir_v2_old_lit.join("settings.json"),
+        serde_json::to_string_pretty(&j).unwrap(),
+    )
+    .unwrap();
+    let loaded = RuntimeSettings::load(&dir_v2_old_lit, &cfg);
+    assert_eq!(
+        loaded.agent_system_prompt.0,
+        default_literary_roleplay_agent_prompt(),
+        "v2 + 旧文学增强段应迁移为 CARD-1 文学默认"
     );
 }
 

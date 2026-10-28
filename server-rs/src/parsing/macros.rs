@@ -16,6 +16,9 @@ pub struct MacroCtx<'a> {
     pub user_name: &'a str,
     pub personality: &'a str,
     pub scenario: &'a str,
+    /// 角色卡对话示例(CARD-1):`{{mes_example}}` 原样;`{{mes_example_block}}` 带标题。
+    /// 引擎侧传值已经过 `untrusted_boundary("character_card.mes_example")` 包裹。
+    pub mes_example: &'a str,
     /// 当前用户输入({{input}} 宏;显示层/无输入场景为空串)
     pub user_input: &'a str,
     /// 历史消息 [(role, content)](角色名消息 = assistant,用户消息 = user)
@@ -106,6 +109,14 @@ fn expand_one(inner: &str, ctx: &mut MacroCtx<'_>) -> String {
         "personality" => ctx.personality.to_string(),
         "scenario" => ctx.scenario.to_string(),
         "character_description" => ctx.character_description.to_string(),
+        "mes_example" => ctx.mes_example.to_string(),
+        "mes_example_block" => {
+            if ctx.mes_example.trim().is_empty() {
+                String::new()
+            } else {
+                format!("【对话示例】\n{}", ctx.mes_example)
+            }
+        }
         "lastmessage" | "mes" => last_by_role(ctx.history, None),
         "lastusermessage" => last_by_role(ctx.history, Some("user")),
         "lastcharmessage" => last_by_role(ctx.history, Some("assistant")),
@@ -355,6 +366,7 @@ mod tests {
             user_input: "",
             personality: "冷静沉着",
             scenario: "雪山相遇",
+            mes_example: "「你来了。」她握紧剑柄。",
             history,
             vars,
             assistant_vars: None,
@@ -378,6 +390,23 @@ mod tests {
         assert!(out.contains('\n'));
         assert!(out.contains("性格冷静沉着"));
         assert!(out.contains("场景雪山相遇"));
+    }
+
+    #[test]
+    fn expands_mes_example_macros() {
+        let history = Vec::new();
+        let mut vars = HashMap::new();
+        let mut c = ctx(&history, &mut vars);
+        let out = expand_macros("raw={{mes_example}};block={{mes_example_block}}", &mut c);
+        assert!(out.contains("raw=「你来了。」她握紧剑柄。"), "{out}");
+        assert!(
+            out.contains("block=【对话示例】\n「你来了。」她握紧剑柄。"),
+            "{out}"
+        );
+
+        // 空示例:block 不得留下空标题(否则默认词里会出现悬空「【对话示例】」)
+        c.mes_example = "";
+        assert_eq!(expand_macros("x{{mes_example_block}}y", &mut c), "xy");
     }
 
     #[test]

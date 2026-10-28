@@ -6,6 +6,9 @@ use crate::models::tool_policy::AuthorizationMode;
 use serde::{Deserialize, Serialize};
 
 use super::connection::DEFAULT_SEARCH_ENDPOINT;
+use super::task_defaults::{
+    TASK_DEFAULT_OUTPUT_TOKENS, TASK_DEFAULT_TEMPERATURE, TASK_DEFAULT_TOP_P,
+};
 use super::{AppMode, RuntimeSettings};
 
 /// 角色扮演 Agent 系统提示词(类型级模式隔离,WP7 抗多模式提示词混淆):
@@ -467,19 +470,9 @@ pub use super::prompts_literary::{
     default_literary_roleplay_agent_prompt, default_literary_task_agent_prompt,
     default_roleplay_agent_prompt, is_valid_literary_recommend_preset,
     is_valid_literary_style_preset, literary_recommend_values, literary_style_text,
-    LEGACY_LITERARY_RP_ENHANCEMENT_V1, LEGACY_ROLEPLAY_AGENT_PROMPT_V1, LITERARY_NOTE,
-    LITERARY_RP_ENHANCEMENT, LITERARY_TAIL,
+    LEGACY_LITERARY_RP_ENHANCEMENT_V1, LEGACY_ROLEPLAY_AGENT_PROMPT_V1,
+    LEGACY_ROLEPLAY_AGENT_PROMPT_V2, LITERARY_NOTE, LITERARY_RP_ENHANCEMENT, LITERARY_TAIL,
 };
-
-/// 采纳推荐档**之前**的压缩三项快照(LIT-7):只在用户显式选档时拍摄一次,选回「不改变」时
-/// 按它恢复到**写入前原值**——与「恢复默认值」是两回事(有测试锁,两者必须区分)。
-/// 档间切换**不重拍**:快照始终是「采纳前」的状态。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LiteraryRecommendSnapshot {
-    pub compaction_mode: String,
-    pub compaction_threshold: f32,
-    pub compaction_keep_recent: u32,
-}
 
 /// 角色扮演模式缺省反思提示词(deep / agent 模式的反思步骤用;空 = 走机械规则)。
 ///
@@ -611,22 +604,6 @@ pub fn default_literary_reflect_prompt() -> String {
     )
 }
 
-/// 任务向缺省生成参数(TM-SET-1,2026-10-01;TPROF-1,2026-10-27 抬档):任务覆盖层未显式
-/// 配置时,任务模式的有效温度 / Top-P / 单次输出上限取本组值。任务执行以工具循环与多步
-/// 执行为主,低温 + 不截断采样 + 足够产出预算是更稳的档位;角色扮演侧的扁平缺省
-/// (0.8 / 0.9 / 1024)不受影响。
-///
-/// `TASK_DEFAULT_OUTPUT_TOKENS` 沿用 TM-GEN-1 的「只抬不压」语义:None 时任务有效值取
-/// `max(扁平值, 本值)` 而非直接替换——扁平值更大时保持更大,不被本值压低(理由:带工具/
-/// 推理的 agent 轮会被推理 token 吃光,TM-D6 实测 1024 曾被 reasoning 整体烧尽导致正文零输出)。
-/// 任务覆盖层的显式值(`Some`)一律逐字优先。
-///
-/// 2026-10-27 TPROF-1 起缺省输出上限抬到 32768:代码类单文件产出(HTML/TS)常超过 8K,
-/// 推理模型的 reasoning 也计入该预算;32768 让首轮尽量不截断,截断自愈仍保留。
-pub const TASK_DEFAULT_TEMPERATURE: f64 = 0.3;
-pub const TASK_DEFAULT_TOP_P: f64 = 1.0;
-pub const TASK_DEFAULT_OUTPUT_TOKENS: u32 = 32768;
-
 impl RuntimeSettings {
     /// 角色扮演**缺省词**的唯一判据入口(LIT-2):开关开 → 文学增强版,否则现行版。
     /// 消费者两处——① `from_config`(新装物化默认值);② load 空值回填(`secret.rs`)。
@@ -712,10 +689,23 @@ impl RuntimeSettings {
             "{}\n\n{}",
             LEGACY_ROLEPLAY_AGENT_PROMPT_V1, LEGACY_LITERARY_RP_ENHANCEMENT_V1
         );
+        // POV-1/CARD-1 之前的 v2 默认词及其两种文学版:
+        //   v2 单独 / v2 + v1 文学增强段 / v2 + 现行文学增强段
+        let legacy_v2_literary_old = format!(
+            "{}\n\n{}",
+            LEGACY_ROLEPLAY_AGENT_PROMPT_V2, LEGACY_LITERARY_RP_ENHANCEMENT_V1
+        );
+        let legacy_v2_literary_current = format!(
+            "{}\n\n{}",
+            LEGACY_ROLEPLAY_AGENT_PROMPT_V2, LITERARY_RP_ENHANCEMENT
+        );
         if self.agent_system_prompt.0 == default_roleplay_agent_prompt()
             || self.agent_system_prompt.0 == default_literary_roleplay_agent_prompt()
             || self.agent_system_prompt.0 == LEGACY_ROLEPLAY_AGENT_PROMPT_V1
             || self.agent_system_prompt.0 == legacy_literary_v1
+            || self.agent_system_prompt.0 == LEGACY_ROLEPLAY_AGENT_PROMPT_V2
+            || self.agent_system_prompt.0 == legacy_v2_literary_old
+            || self.agent_system_prompt.0 == legacy_v2_literary_current
         {
             self.agent_system_prompt = RoleplayPromptConfig(self.roleplay_default_prompt());
         }

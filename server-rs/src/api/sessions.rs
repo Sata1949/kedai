@@ -303,7 +303,7 @@ pub async fn history(
     // 返回 content_display(展开后文本,渲染用)+ 保持 content 原文(编辑消息用,不污染存储)
     let mut values = Vec::with_capacity(messages.len());
     if !messages.is_empty() {
-        let (name, description, personality, scenario) = match &character {
+        let (name, description, personality, scenario, mes_example) = match &character {
             Some(c) => (
                 c.chara_name.clone(),
                 c.description.clone(),
@@ -319,9 +319,16 @@ pub async fn history(
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string(),
+                c.data_raw
+                    .as_ref()
+                    .and_then(|raw| raw.get("mes_example"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
             ),
             None => (
                 "角色".to_string(),
+                String::new(),
                 String::new(),
                 String::new(),
                 String::new(),
@@ -346,6 +353,7 @@ pub async fn history(
                 user_input: "",
                 personality: &personality,
                 scenario: &scenario,
+                mes_example: &mes_example,
                 history: &before,
                 vars: &mut vars,
                 assistant_vars: Some(&mut assistant_vars),

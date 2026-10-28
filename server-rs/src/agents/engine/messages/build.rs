@@ -44,7 +44,7 @@ const CONSTANT_WORLD_HEADER: &str = "世界书(当前已命中的设定,必须�
 /// 字符数(无注入为 0),供 trim_to_context 截断时优先保留(注入不能先于角色设定被切掉)。
 #[allow(clippy::too_many_arguments)]
 #[cfg(test)]
-fn build_llm_messages(
+pub(in crate::agents::engine) fn build_llm_messages(
     character_name: &str,
     character_description: &str,
     personality: &str,
@@ -108,6 +108,17 @@ pub(in crate::agents::engine) struct LiteraryTexts<'a> {
     pub(in crate::agents::engine) style: Option<&'a str>,
 }
 
+/// 角色卡文本(CARD-1):description / personality / scenario / mes_example 同源同判据,
+/// 用结构体收口,避免每加一个卡字段就改全部调用点。各字段在 build 层分别经
+/// `untrusted_boundary("character_card.*")` 包裹。
+#[derive(Default, Clone, Copy)]
+pub(in crate::agents::engine) struct CardTexts<'a> {
+    pub(in crate::agents::engine) description: &'a str,
+    pub(in crate::agents::engine) personality: &'a str,
+    pub(in crate::agents::engine) scenario: &'a str,
+    pub(in crate::agents::engine) mes_example: &'a str,
+}
+
 /// build_llm_messages 的 6 层位置版本(位置定义见 build_llm_messages 文档)。
 /// 世界书常驻(role=system)并入 system;激发与预设尾部追加到最新用户消息尾部
 /// (system + 早期历史前缀保持稳定 → 前缀缓存命中率显著提升,缓存友好)。
@@ -115,11 +126,9 @@ pub(in crate::agents::engine) struct LiteraryTexts<'a> {
 /// reflect_advice = 反思失败建议(位置0,自动生成的改进建议;注入到位置1 激发之后、
 /// 预设尾部之前,不再作为最末尾内容);reflect_advice_role = user / assistant(system 钳制为 user)。
 #[allow(clippy::too_many_arguments)]
-pub(in crate::agents::engine) fn build_llm_messages_with_position(
+pub(in crate::agents::engine) fn build_llm_messages_with_card(
     character_name: &str,
-    character_description: &str,
-    personality: &str,
-    scenario: &str,
+    card: CardTexts<'_>,
     world_constant: &[WorldInjection],
     world_triggered: &[WorldInjection],
     history: &[(String, String)],
@@ -141,10 +150,11 @@ pub(in crate::agents::engine) fn build_llm_messages_with_position(
 ) -> (Vec<LlmMessage>, usize) {
     let mut messages = Vec::new();
     // 角色卡字段属于不可信素材。只包裹宏展开后的替换值，不改写原始角色扮演文本。
-    let bounded_description =
-        untrusted_boundary("character_card.description", character_description);
-    let bounded_personality = untrusted_boundary("character_card.personality", personality);
-    let bounded_scenario = untrusted_boundary("character_card.scenario", scenario);
+    let bounded_description = untrusted_boundary("character_card.description", card.description);
+    let bounded_personality = untrusted_boundary("character_card.personality", card.personality);
+    let bounded_scenario = untrusted_boundary("character_card.scenario", card.scenario);
+    // CARD-1:对话示例同属角色卡不可信素材;与 description/personality/scenario 同一边界规则
+    let bounded_mes_example = untrusted_boundary("character_card.mes_example", card.mes_example);
     // 宏上下文:自定义系统提示词 / 简单合成 / 楼层 / 世界书共享同一 vars,按序展开,
     // 保证 {{setvar}} 在前面的文本写入、{{getvar}} 在后面的文本能读到(时序与 ST prompt_order 一致)。
     let mut mctx = MacroCtx {
@@ -154,6 +164,7 @@ pub(in crate::agents::engine) fn build_llm_messages_with_position(
         user_input: "",
         personality: &bounded_personality,
         scenario: &bounded_scenario,
+        mes_example: &bounded_mes_example,
         history,
         vars,
         assistant_vars: Some(assistant_vars),
@@ -255,14 +266,23 @@ pub(in crate::agents::engine) fn build_llm_messages_with_position(
             let mut s = format!(
                 "你是角色「{character_name}」的扮演者与文学创作者,与用户进行沉浸式角色扮演 / 文学创作。"
             );
-            if !character_description.is_empty() {
+            if !card.description.is_empty() {
                 s.push_str(&format!(
                     "\n\n{}",
                     untrusted_boundary(
                         "character_card",
-                        &format!("背景设定:\n{character_description}")
+                        &format!("背景设定:\n{}", card.description)
                     )
                 ));
+            }
+            if !bounded_personality.is_empty() {
+                s.push_str(&format!("\n\n性格:\n{bounded_personality}"));
+            }
+            if !bounded_scenario.is_empty() {
+                s.push_str(&format!("\n\n场景:\n{bounded_scenario}"));
+            }
+            if !bounded_mes_example.is_empty() {
+                s.push_str(&format!("\n\n【对话示例】\n{bounded_mes_example}"));
             }
             if !world_block.is_empty() {
                 s.push_str(&format!("\n\n{world_block}"));
@@ -271,22 +291,22 @@ pub(in crate::agents::engine) fn build_llm_messages_with_position(
                 "\n\n【创作总纲】\n\
                  本会话定位为文学创作系统:你的正文是小说文本而非聊天记录,以\"能否被称为一段好小说\"为最低验收标准。描写应当可朗读、可回味、经得起推敲。\n\n\
                  【角色扮演规则】\n\
-                 1. 视角与口吻:视角遵循系统提示词与用户要求(用户未指定时,默认以角色的视角与口吻叙述);不要出现旁白标题、「以上是回复」「作为AI」等元文本;角色设定与世界观保持一致。\n\
+                 1. 视角与口吻:按系统提示词中的人称锚定输出;未给出锚定时,以第三人称限知、镜头贴住角色叙述,角色台词保持角色第一人称口吻;不要出现旁白标题、「以上是回复」「作为AI」等元文本;角色设定与世界观保持一致。\n\
                  2. 用户指令优先:用户提出的字数、风格、视角、情节走向要求必须服从;用户提问必须在本轮正面回答,不允许回避。\n\
                  3. 不转述:用户输入的动作与对话视为已经发生,不得复述或引用,直接从其后无缝衔接继续创作新的剧情。\n\
-                 4. 主角与独立角色:用户所操控角色是剧情主角,但所有角色都是独立的人,有自己的价值观、思考方式与喜好,不会无条件依附用户,好感度不会因小事凭空上涨或下降。\n\
+                 4. 主角与独立角色:用户所操控角色是剧情主角,但其台词、内心与决定由用户掌握;你不得代写或替其做决定,只写其他角色与环境对它的反应。所有角色都是独立的人,有自己的价值观、思考方式与喜好,不会无条件依附用户,好感度不会因小事凭空上涨或下降。\n\
                  5. 推进节奏:一次输出不得把当前事件直接推进至末尾,应当适当拆分事件、合理安排节奏,在正文末尾为用户留下可互动的窗口。\n\n\
                  【写作要求】\n\
                  1. 句式:长短句合理搭配;段落之间空一行;适当插入短段,不得连续堆叠对话;各段长度合理交错。\n\
-                 2. 描写:区分周围描写(环境)与聚焦描写(重点物),合理穿插;相同环境描写不得重复提及;拒绝\"自然式\"滥用与过度精确化的机械描写;比喻须贴切,不把物比作与其无关的事物。\n\
+                 2. 描写:区分周围描写(环境)与聚焦描写(重点物),合理穿插;相同环境描写不得重复提及;拒绝堆砌\"自然\"\"仿佛\"\"似乎\"等空泛修饰与过度精确化的机械描写;比喻须贴切,不把物比作与其无关的事物。\n\
                  3. 对话:口语化,话题连贯不重复;所有说出口的对话必须用中文双引号\"...\"包裹。\n\
                  4. 规避:禁止先否后肯句式(不是……而是……)、动物比喻、元评论(用括号解释正文)、夸张化描写;非必要不描写回忆,尤其不得复述与上文类似的回忆。\n\
                  5. 开头结尾:每次输出的开头与结尾都应当新颖,不得与上一次输出类似或重复,不得强行升华。\n\
                  6. 不得以任何方式描述任何角色的具体年龄。\n\
-                 7. 角色对话必须符合其性格与对话示例,禁止刻板印象化、指导式、刻薄式、油腻式语言;该爆发时爆发,该平静时平静。\n\
+                 7. 角色对话必须符合其性格与设定;有对话示例时,口吻与句式贴近示例,但不得复述示例。\n\
                  8. 逻辑一致:严格遵守时间/对话/行为/变量/剧情的逻辑;角色不得知晓不该知道的设定信息,不得出现\"根据XX的设定\"这类作者视角发言。\n\n\
                  【剧情结构(模块化)】\n\
-                 每次输出将剧情分为三个剧情模块和一个结尾模块,模块之间以过渡段承转;模块类型在【环境/推进/插入】中选择,同类型不得连续出现三次;模块与结尾的格式、内容不得与上一次输出相似或雷同;禁止在正文中对模块或过渡部分做任何标注。\n\n\
+                 每次输出将剧情分为三个剧情模块和一个结尾模块,模块之间以过渡段承转;模块类型在【环境/推进/插入】中选择,同类型不得连续出现三次;模块与结尾的格式、内容不得与上一次输出相似或雷同;禁止在正文中对模块或过渡部分做任何标注。用户明确要求不分模块、或本轮为对话/极短篇幅时,本条不适用。\n\n\
                  【输出纪律】\n\
                  一次只输出角色回应本身;若需要分段,使用空行,不使用 Markdown 标题。",
             );
@@ -537,406 +557,51 @@ pub(in crate::agents::engine) fn build_llm_messages_with_position(
     (messages, protected_tail)
 }
 
+/// 测试兼容入口:旧签名(无 mes_example)。生产走 `build_llm_messages_with_card`;
+/// 保留本函数供既有 build 测试的 23 处调用,避免为「空示例」机械改全部调用点。
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::services::prompt_inject_service::{FloorPosition, PromptFloor};
-
-    /// build_llm_messages:world_text 注入到 system 内
-    #[test]
-    fn build_messages_injects_world_text() {
-        let mut vars = HashMap::new();
-        let (msgs, _) = build_llm_messages(
-            "芽衣",
-            "兔族少女。",
-            "",
-            "",
-            Some("世界书设定:\n[地点]\n图书馆。"),
-            &[],
-            None,
-            None,
-            &mut vars,
-            &mut AssistantVars::new(),
-        );
-        assert_eq!(msgs.len(), 1);
-        assert!(msgs[0].role == "system");
-        assert!(msgs[0].content.contains("世界书设定:"));
-        assert!(msgs[0].content.contains("图书馆。"));
-        assert!(msgs[0].content.contains("兔族少女。"));
-    }
-    /// build_llm_messages:自定义提示词模板替换占位符,世界书经 {{world_info}} 注入
-    #[test]
-    fn custom_prompt_placeholders_replaced() {
-        let tpl = "你是{{character_name}},{{character_description}},以下是世界书:\n{{world_info}}\n自定义要求。";
-        let mut vars = HashMap::new();
-        let (msgs, _) = build_llm_messages(
-            "芽衣",
-            "兔族少女。",
-            "",
-            "",
-            Some("世界书设定:\n[地点]\n图书馆。"),
-            &[],
-            Some(tpl),
-            None,
-            &mut vars,
-            &mut AssistantVars::new(),
-        );
-        assert_eq!(msgs.len(), 1);
-        assert!(msgs[0].content.contains("你是芽衣"));
-        assert!(msgs[0].content.contains("兔族少女。"));
-        assert!(msgs[0].content.contains("图书馆。"));
-        assert!(msgs[0].content.contains("自定义要求。"));
-        // 自定义提示词不再拼接内置默认要求
-        assert!(!msgs[0].content.contains("始终以角色身份回复"));
-    }
-    /// build_llm_messages:自定义系统提示词同样走宏系统(宏在提示词中持续工作)
-    #[test]
-    fn custom_prompt_expands_macros() {
-        // {{char}}/{{random}}/{{setvar}}/{{getvar}} 应全部展开;时序:setvar 在 getvar 前生效
-        let tpl =
-            "你是{{char}},随机值{{random:5,5}},{{setvar::地点::酒馆}}当前地点={{getvar::地点}}";
-        let mut vars = HashMap::new();
-        let (msgs, _) = build_llm_messages(
-            "芽衣",
-            "兔族少女。",
-            "",
-            "",
-            None,
-            &[],
-            Some(tpl),
-            None,
-            &mut vars,
-            &mut AssistantVars::new(),
-        );
-        let sys = &msgs[0].content;
-        assert!(sys.contains("你是芽衣"), "{{char}} 应展开:{sys}");
-        assert!(sys.contains("随机值5"), "{{random:5,5}} 应展开为 5:{sys}");
-        assert!(
-            sys.contains("当前地点=酒馆"),
-            "setvar/getvar 时序错误:{sys}"
-        );
-        // 与楼层共享 vars:setvar 副作用写入 vars,供持久化
-        assert_eq!(vars.get("地点").map(|s| s.as_str()), Some("酒馆"));
-        // {{world_info}} 依旧由调用方替换后进入
-        let tpl2 = "世界书:\n{{world_info}}";
-        let (msgs2, _) = build_llm_messages(
-            "芽衣",
-            "",
-            "",
-            "",
-            Some("世界书设定:图书馆。"),
-            &[],
-            Some(tpl2),
-            None,
-            &mut vars,
-            &mut AssistantVars::new(),
-        );
-        assert!(msgs2[0].content.contains("图书馆。"));
-    }
-    /// build_llm_messages:空自定义提示词回退内置默认
-    #[test]
-    fn empty_custom_prompt_falls_back() {
-        let mut vars = HashMap::new();
-        let (msgs, _) = build_llm_messages(
-            "芽衣",
-            "兔族少女。",
-            "",
-            "",
-            None,
-            &[],
-            Some("  "),
-            None,
-            &mut vars,
-            &mut AssistantVars::new(),
-        );
-        assert!(
-            msgs[0].content.contains("文学创作系统"),
-            "内置默认应含创作总纲: {}",
-            msgs[0].content
-        );
-    }
-    /// 文学能力包(LIT-2):引擎兜底模板(用户清空提示词框路径)在装配层传入增强段时
-    /// 追加该段;不传(None)时与加参数前逐字节一致;自定义提示词路径不受本参数影响
-    /// (那是 LIT-3 两段注入的职责)。
-    #[test]
-    fn fallback_template_appends_literary_enhancement() {
-        let mut vars = HashMap::new();
-        let (msgs, _) = build_llm_messages_with_position(
-            "芽衣",
-            "兔族少女。",
-            "",
-            "",
-            &[],
-            &[],
-            &[],
-            &[],
-            None,
-            None,
-            None,
-            "user",
-            None,
-            "user",
-            &mut vars,
-            &mut AssistantVars::new(),
-            None,
-            LiteraryTexts::default(),
-        );
-        assert!(msgs[0].content.contains("文学创作系统"), "兜底模板应生效");
-        assert!(
-            !msgs[0].content.contains("【文学增强纪律】"),
-            "未传增强段时不得出现本段(开关关逐字等同)"
-        );
-
-        let mut vars2 = HashMap::new();
-        let (msgs2, _) = build_llm_messages_with_position(
-            "芽衣",
-            "兔族少女。",
-            "",
-            "",
-            &[],
-            &[],
-            &[],
-            &[],
-            None,
-            None,
-            None,
-            "user",
-            None,
-            "user",
-            &mut vars2,
-            &mut AssistantVars::new(),
-            None,
-            LiteraryTexts {
-                default_suffix: Some("【文学增强纪律】\n测试增强段"),
-                ..Default::default()
-            },
-        );
-        let sys = &msgs2[0].content;
-        assert!(sys.contains("【文学增强纪律】"), "增强段应追加进 system");
-        assert!(
-            sys.find("文学创作系统").unwrap() < sys.find("【文学增强纪律】").unwrap(),
-            "增强段应在兜底模板之后"
-        );
-
-        let mut vars3 = HashMap::new();
-        let (msgs3, _) = build_llm_messages_with_position(
-            "芽衣",
-            "兔族少女。",
-            "",
-            "",
-            &[],
-            &[],
-            &[],
-            &[],
-            Some("CUSTOM"),
-            None,
-            None,
-            "user",
-            None,
-            "user",
-            &mut vars3,
-            &mut AssistantVars::new(),
-            None,
-            LiteraryTexts {
-                default_suffix: Some("【文学增强纪律】\n测试增强段"),
-                ..Default::default()
-            },
-        );
-        assert!(
-            !msgs3[0].content.contains("【文学增强纪律】"),
-            "自定义提示词路径不由本参数追加(归 LIT-3)"
-        );
-    }
-
-    /// build_llm_messages:简单模式合成文本拼入 system;楼层按位置插入历史
-    #[test]
-    fn build_messages_injects_simple_and_floors() {
-        let mut vars = HashMap::new();
-        let mut cfg = PromptInjectConfig {
-            mode: InjectMode::Simple,
-            ..PromptInjectConfig::default()
-        };
-        cfg.simple.word_count_enabled = true;
-        cfg.simple.word_count = 99;
-        let history = vec![("user".to_string(), "你好".to_string())];
-        let (msgs, _) = build_llm_messages(
-            "芽衣",
-            "兔族少女。",
-            "",
-            "",
-            None,
-            &history,
-            None,
-            Some(&cfg),
-            &mut vars,
-            &mut AssistantVars::new(),
-        );
-        assert_eq!(msgs.len(), 2);
-        assert!(
-            msgs[0].content.contains("99 字"),
-            "msgs[0]: {}",
-            msgs[0].content
-        );
-        assert!(
-            msgs[0].content.contains("文学创作系统"),
-            "内置默认应含创作总纲: {}",
-            msgs[0].content
-        );
-
-        // 复杂模式:楼层统一归位位置4 —— system 角色进 system 尾部,user/assistant 紧随 system 按 order 排
-        // (旧 before/after/depth 历史内散插已废弃;position 字段仅兼容解析,不再参与注入)
-        cfg.mode = InjectMode::Complex;
-        cfg.simple.word_count_enabled = false;
-        cfg.floors = vec![
-            PromptFloor {
-                id: "f1".into(),
-                name: "开".into(),
-                content: "{{char}}的开场".into(),
-                role: FloorRole::User,
-                position: FloorPosition::Before,
-                depth: 0,
-                enabled: true,
-                order: 0,
-            },
-            PromptFloor {
-                id: "f2".into(),
-                name: "变".into(),
-                content: "{{setvar::地点::酒馆}}地点={{getvar::地点}}".into(),
-                role: FloorRole::System,
-                position: FloorPosition::System,
-                depth: 0,
-                enabled: true,
-                order: 1,
-            },
-            PromptFloor {
-                id: "f3".into(),
-                name: "尾".into(),
-                content: "尾{{getvar::地点}}".into(),
-                role: FloorRole::Assistant,
-                position: FloorPosition::After,
-                depth: 0,
-                enabled: true,
-                order: 2,
-            },
-        ];
-        let (msgs, _) = build_llm_messages(
-            "芽衣",
-            "兔族少女。",
-            "",
-            "",
-            None,
-            &history,
-            None,
-            Some(&cfg),
-            &mut vars,
-            &mut AssistantVars::new(),
-        );
-        // system(含 f2 宏)+ f1(user 楼层)+ f3(assistant 楼层)+ 历史用户消息
-        assert_eq!(msgs.len(), 4, "消息序列: {msgs:?}");
-        assert!(
-            msgs[0].content.contains("地点=酒馆"),
-            "system 宏: {}",
-            msgs[0].content
-        );
-        assert_eq!(msgs[1].role, "user");
-        assert_eq!(msgs[1].content, "芽衣的开场");
-        assert_eq!(msgs[2].role, "assistant");
-        assert_eq!(msgs[2].content, "尾酒馆");
-        assert_eq!(msgs[3].role, "user");
-        assert_eq!(msgs[3].content, "你好");
-        // setvar 写入了 vars,可被持久化
-        assert_eq!(vars.get("地点").map(|s| s.as_str()), Some("酒馆"));
-    }
-
-    /// 空 system 楼层不得向系统提示词注入空白(回归:此前 system 分支无空检查,
-    /// 导入 ST 预设的锚点/组头空块会以 "\n\n" 形式拼进系统提示词尾部;
-    /// 非 system 空楼层已有跳过,见上方 order 分支)。
-    #[test]
-    fn build_messages_skips_empty_system_floor() {
-        let mut vars = HashMap::new();
-        let mut with_empty = PromptInjectConfig {
-            mode: InjectMode::Complex,
-            ..PromptInjectConfig::default()
-        };
-        with_empty.floors = vec![
-            PromptFloor {
-                id: "empty".into(),
-                name: "空锚点".into(),
-                content: "".into(),
-                role: FloorRole::System,
-                position: FloorPosition::System,
-                depth: 0,
-                enabled: true,
-                order: 0,
-            },
-            PromptFloor {
-                id: "comment".into(),
-                name: "仅注释".into(),
-                content: "{{// 仅注释,展开后为空 }}".into(),
-                role: FloorRole::System,
-                position: FloorPosition::System,
-                depth: 0,
-                enabled: true,
-                order: 1,
-            },
-            PromptFloor {
-                id: "real".into(),
-                name: "有内容".into(),
-                content: "有效指令".into(),
-                role: FloorRole::System,
-                position: FloorPosition::System,
-                depth: 0,
-                enabled: true,
-                order: 2,
-            },
-        ];
-        let mut reference = PromptInjectConfig {
-            mode: InjectMode::Complex,
-            ..PromptInjectConfig::default()
-        };
-        reference.floors = vec![PromptFloor {
-            id: "real".into(),
-            name: "有内容".into(),
-            content: "有效指令".into(),
-            role: FloorRole::System,
-            position: FloorPosition::System,
-            depth: 0,
-            enabled: true,
-            order: 0,
-        }];
-        let mut vars_ref = HashMap::new();
-        let (msgs, _) = build_llm_messages(
-            "芽衣",
-            "兔族少女。",
-            "",
-            "",
-            None,
-            &[],
-            None,
-            Some(&with_empty),
-            &mut vars,
-            &mut AssistantVars::new(),
-        );
-        let (base, _) = build_llm_messages(
-            "芽衣",
-            "兔族少女。",
-            "",
-            "",
-            None,
-            &[],
-            None,
-            Some(&reference),
-            &mut vars_ref,
-            &mut AssistantVars::new(),
-        );
-        assert!(
-            msgs[0].content.contains("有效指令"),
-            "有内容的 system 楼层仍须注入: {}",
-            msgs[0].content
-        );
-        assert_eq!(
-            msgs[0].content, base[0].content,
-            "空 system 楼层不得改变系统提示词(预期与无空楼层一致)"
-        );
-    }
+#[allow(clippy::too_many_arguments)]
+pub(in crate::agents::engine) fn build_llm_messages_with_position(
+    character_name: &str,
+    character_description: &str,
+    personality: &str,
+    scenario: &str,
+    world_constant: &[WorldInjection],
+    world_triggered: &[WorldInjection],
+    history: &[(String, String)],
+    history_images: &[Vec<ImageRef>],
+    custom_prompt: Option<&str>,
+    inject: Option<&PromptInjectConfig>,
+    preset_tail: Option<&str>,
+    preset_tail_role: &str,
+    reflect_advice: Option<&str>,
+    reflect_advice_role: &str,
+    vars: &mut HashMap<String, String>,
+    assistant_vars: &mut AssistantVars,
+    scopes: Option<&mut crate::parsing::scopes::ScopeVars>,
+    literary: LiteraryTexts<'_>,
+) -> (Vec<LlmMessage>, usize) {
+    build_llm_messages_with_card(
+        character_name,
+        CardTexts {
+            description: character_description,
+            personality,
+            scenario,
+            mes_example: "",
+        },
+        world_constant,
+        world_triggered,
+        history,
+        history_images,
+        custom_prompt,
+        inject,
+        preset_tail,
+        preset_tail_role,
+        reflect_advice,
+        reflect_advice_role,
+        vars,
+        assistant_vars,
+        scopes,
+        literary,
+    )
 }
