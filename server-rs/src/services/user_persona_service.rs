@@ -332,7 +332,11 @@ mod tests {
         };
         let err = service.set(bad).unwrap_err();
         assert!(err.contains("name"), "错误文案应点名字段: {err}");
-        assert_eq!(service.get(), &UserPersonaConfig::default(), "拒绝时不得改内存");
+        assert_eq!(
+            service.get(),
+            &UserPersonaConfig::default(),
+            "拒绝时不得改内存"
+        );
         assert_eq!(
             UserPersonaConfig::load(dir.path()),
             UserPersonaConfig::default(),
