@@ -301,7 +301,12 @@ pub(in crate::agents::engine) fn insert_summary_slot(
     if summary.is_empty() {
         return false;
     }
-    let slot = LlmMessage::plain("system", &format!("{SUMMARY_SLOT_MARKER}\n{summary}"));
+    let slot = LlmMessage::plain(
+        "system",
+        &format!(
+            "{SUMMARY_SLOT_MARKER}\n（仅作事实参考，不决定本轮正文的人称与叙述方式）\n{summary}"
+        ),
+    );
     // 插入点:首条非 system 消息之前(即紧跟 system 头;正常布局为 1);
     // 无 system 头(异常布局)时置顶,保持「摘要位于数组前部」的分层
     let at = messages

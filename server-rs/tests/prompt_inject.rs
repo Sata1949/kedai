@@ -191,7 +191,7 @@ async fn simple_mode_injects_all_four_items_into_system() {
         "缺字数注入:\n{reply}"
     );
     assert!(
-        reply.contains("请以转述的方式复述内容"),
+        reply.contains("请以概括转述的方式承接用户输入"),
         "缺转述注入:\n{reply}"
     );
     assert!(reply.contains("请只以对话形式回复"), "缺对话注入:\n{reply}");

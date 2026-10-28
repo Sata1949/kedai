@@ -19,6 +19,7 @@ use crate::models::tool_policy::AuthorizationMode;
 mod connection;
 mod connector_pool;
 mod params;
+mod prompts_literary;
 mod secret;
 
 pub use connection::{
@@ -27,6 +28,7 @@ pub use connection::{
     CONNECTOR_TYPE_OPENAI, DEFAULT_SEARCH_ENDPOINT, MAX_CONNECTIONS,
 };
 pub use connector_pool::{connection_label, ConnectorPool};
+// 推荐档数值类型(定义随提示词常量迁入 prompts_literary;在父模块再导出保证公开可达)
 pub use params::{
     default_coding_task_agent_prompt, default_literary_reflect_prompt,
     default_literary_roleplay_agent_prompt, default_literary_task_agent_prompt,
@@ -36,6 +38,7 @@ pub use params::{
     ModeSettings, RoleplayPromptConfig, TaskPromptConfig, TASK_DEFAULT_OUTPUT_TOKENS,
     TASK_DEFAULT_TEMPERATURE, TASK_DEFAULT_TOP_P,
 };
+pub use prompts_literary::LiteraryRecommendValues;
 
 /// 团队总预算的可调下限(秒,设置页口径,2026-10-26):低于 10 分钟连一个子目标的
 /// 「读→改→自测」闭环都跑不完,截断只会制造半成品,故不允许更小的有限值。

@@ -11,6 +11,8 @@ use crate::parsing::macros::{expand_macros, MacroCtx};
 use crate::services::prompt_inject_service::{FloorRole, InjectMode, PromptInjectConfig};
 // 防注入包裹原语已下沉 services::prompt_kit(WP7),与任务模式共用同一实现
 use crate::services::prompt_kit::untrusted_boundary;
+// 人称锚定(POV-1):与预览/步骤/反思共用同一文案出处
+use crate::services::pov::{parse_pov_mode, pov_anchor};
 use std::collections::HashMap;
 
 /// 位置1 激发条目的统一说明头(WB-C,2026-10-11):与常驻侧 [`CONSTANT_WORLD_HEADER`] 同口径,
@@ -354,6 +356,21 @@ pub(in crate::agents::engine) fn build_llm_messages_with_position(
             protected_tail += t.chars().count();
             sys.push_str(&format!("\n\n{t}"));
         }
+    }
+
+    // 人称锚定(POV-1):位置 4 最后一条静态指令。简单/复杂模式均发——配置了可识别视角
+    // 发显式版(强制覆盖提示词/预设/上文),未配置或未知值发兜底版(让位给会话提示词/
+    // 预设/用户本轮输入)。计入 protected_tail:极端裁剪下不得先于注入层被切掉。
+    // 注意:锚定必须排在文学尾段之后——它是本轮最后一条静态人称指令,recency 最强。
+    if let Some(cfg) = inject {
+        let mode = if cfg.simple.perspective_enabled {
+            parse_pov_mode(&cfg.simple.perspective)
+        } else {
+            None
+        };
+        let anchor = pov_anchor(mode, character_name, None);
+        protected_tail += anchor.chars().count();
+        sys.push_str(&format!("\n\n{anchor}"));
     }
 
     messages.push(LlmMessage::plain("system", &sys));

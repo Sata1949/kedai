@@ -1,6 +1,7 @@
 // 主状态机循环:step_loop(规划步骤的 direct/tool/reflect 执行、反思回退重生成、
 // custom 模式即时补丁应用)。自 engine/mod.rs 拆分迁入,纯代码移动,逻辑不变。
 // 依赖经 `use super::*` 取自 engine/mod.rs(与 executor/mvu 等子模块同一约定)。
+use super::run_loop_steps::{current_inject_requirements, current_pov_anchor, step_messages};
 use super::*;
 
 impl AgentEngine {
@@ -123,6 +124,10 @@ impl AgentEngine {
                 // 模型,由它在上下文中用 revise_passage/censor_text 做同义改写;引擎不再做
                 // 任何机械空替换删除(旧实现即实测投诉的「暴力去除」)。
                 let banned_hint = ctx.inject_snapshot.simple.banned_words_hint();
+                // POV-1:反思判定基准——简单模式四项(宏展开;不含禁词)+ 本轮人称锚定。
+                // 复杂模式楼层要求由用户自负(登记 POV-L6),只给锚定。
+                let inject_requirements = current_inject_requirements(rctx, ctx);
+                let pov_anchor_text = current_pov_anchor(ctx);
                 // 达修改上限后采纳(不再整篇重生成)的标记与已用修改轮数
                 let mut accept_capped = false;
                 let mut revisions_used = 0usize;
@@ -135,6 +140,8 @@ impl AgentEngine {
                             self,
                             &ctx.reflect_prompt,
                             &banned_hint,
+                            &inject_requirements,
+                            &pov_anchor_text,
                             user_input,
                             &reflect_text,
                             &reflect_tool_ctx,
@@ -215,6 +222,8 @@ impl AgentEngine {
                         self,
                         &ctx.reflect_prompt,
                         &banned_hint,
+                        &inject_requirements,
+                        &pov_anchor_text,
                         user_input,
                         &reflect_text,
                         &reflect_tool_ctx,
@@ -979,44 +988,4 @@ impl AgentEngine {
             custom_contract_pending,
         ))
     }
-}
-
-/// 构造步骤级消息视图(RPFLOW-1:草稿步与既有生成步共用同一装配语义):
-/// 先把 scopes 镜像同步到当前变量树(步骤提示词的 getvar 类宏能读到本步骤之前的
-/// setvar 副作用),再把步骤 system_prompt 宏展开后以「[本步指令]」追加到 system 末尾。
-/// 返回独立视图,不污染共享 llm_messages(反思回退后按步骤重建、无中间消息残留)。
-fn step_messages(
-    rctx: &mut RunContext<'_>,
-    ctx: &CollectedCtx,
-    user_input: &str,
-    step: &crate::models::types::PlanStep,
-) -> Vec<LlmMessage> {
-    {
-        let mut s = rctx.scopes.lock().unwrap_or_else(|e| e.into_inner());
-        s.sync_chat_tree(rctx.assistant_vars);
-        s.sync_chat_flat(rctx.session_vars);
-    }
-    let mut step_msgs = rctx.llm_messages.clone();
-    if step
-        .system_prompt
-        .as_deref()
-        .map(|s| !s.trim().is_empty())
-        .unwrap_or(false)
-    {
-        let mut scopes_guard = rctx.scopes.lock().unwrap_or_else(|e| e.into_inner());
-        let mut mctx = MacroCtx {
-            character_name: &ctx.chara_name,
-            character_description: &ctx.chara_desc,
-            user_name: "用户",
-            user_input,
-            personality: &ctx.personality,
-            scenario: &ctx.scenario,
-            history: &ctx.history_tuples,
-            vars: &mut *rctx.session_vars,
-            assistant_vars: Some(&mut *rctx.assistant_vars),
-            scopes: Some(&mut *scopes_guard),
-        };
-        step_msgs = with_step_prompt(rctx.llm_messages, step, &mut mctx);
-    }
-    step_msgs
 }

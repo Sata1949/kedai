@@ -44,10 +44,16 @@ pub(in crate::agents::engine) fn draft_heal_budget(
 
 /// 自定义流程步骤消息视图:步骤级系统提示词(宏展开)追加到 system 末尾;
 /// 无提示词时返回共享消息的克隆(不修改原数组,保证反思回退后视图可重建)。
+///
+/// POV-1:生成型 direct 步在 `[本步指令]` 之后再追加一次本轮人称锚定——存量
+/// `data/agent_flows.json` 里的旧步骤文本不会自动更新,这一步保证「最后一条指令」
+/// 始终是锚定,而不是旧文案里的「以角色自身视角」。草稿/反思/归档步不追加
+/// (内部步骤,不面向用户)。
 pub(in crate::agents::engine) fn with_step_prompt(
     base: &[LlmMessage],
     step: &PlanStep,
     mctx: &mut MacroCtx,
+    pov_anchor: Option<&str>,
 ) -> Vec<LlmMessage> {
     let Some(tpl) = step.system_prompt.as_deref() else {
         return base.to_vec();
@@ -59,6 +65,11 @@ pub(in crate::agents::engine) fn with_step_prompt(
     let expanded = expand_macros(tpl, mctx);
     if let Some(s) = msgs.first_mut() {
         s.content.push_str(&format!("\n\n[本步指令]\n{expanded}"));
+        if step.action == "direct" && step.generates != Some(false) {
+            if let Some(anchor) = pov_anchor.filter(|a| !a.trim().is_empty()) {
+                s.content.push_str(&format!("\n\n{anchor}"));
+            }
+        }
     }
     msgs
 }
@@ -329,5 +340,76 @@ mod tests {
             reflect_retries, max_attempts,
             "应恰好重试 {max_attempts} 次后放弃"
         );
+    }
+
+    /// POV-1:步骤指令之后追加的人称锚定只对「生成型 direct 步」生效。
+    /// 存量 agent_flows.json 的旧步骤文本不会被自动更新,这一层是运行期兜底;
+    /// 草稿/反思/归档是内部步骤,追加锚定会污染它们。
+    #[test]
+    fn step_prompt_appends_pov_anchor_only_for_generating_direct_steps() {
+        use crate::parsing::assistant::AssistantVars;
+        use std::collections::HashMap;
+
+        let base = vec![LlmMessage::plain("system", "BASE")];
+        let mut vars = HashMap::new();
+        let mut assistant = AssistantVars::new();
+        let mut mctx = MacroCtx {
+            character_name: "芽衣",
+            character_description: "",
+            user_name: "用户",
+            personality: "",
+            scenario: "",
+            user_input: "",
+            history: &[],
+            vars: &mut vars,
+            assistant_vars: Some(&mut assistant),
+            scopes: None,
+        };
+        let mut run = |action: &str, generates: Option<bool>| {
+            let step = PlanStep {
+                action: action.into(),
+                generates,
+                system_prompt: Some("正文指令".into()),
+                ..Default::default()
+            };
+            with_step_prompt(&base, &step, &mut mctx, Some("【本轮人称锚定】ANCHOR"))
+        };
+
+        for (action, generates) in [("direct", Some(true)), ("direct", None)] {
+            let msgs = run(action, generates);
+            assert!(
+                msgs[0].content.contains("[本步指令]\n正文指令"),
+                "步骤指令应在锚定之前: {}",
+                msgs[0].content
+            );
+            assert!(
+                msgs[0].content.ends_with("ANCHOR"),
+                "生成型 direct 步应以锚定收尾: {}",
+                msgs[0].content
+            );
+        }
+        for (action, generates) in [
+            ("direct", Some(false)),
+            ("reflect", None),
+            ("draft", None),
+            ("archive", None),
+        ] {
+            let msgs = run(action, generates);
+            assert!(
+                !msgs[0].content.contains("ANCHOR"),
+                "action={action}, generates={generates:?} 不得追加锚定: {}",
+                msgs[0].content
+            );
+        }
+
+        // 空锚定(未启用/取值为空)不产生空段
+        let step = PlanStep {
+            action: "direct".into(),
+            generates: Some(true),
+            system_prompt: Some("正文指令".into()),
+            ..Default::default()
+        };
+        let msgs = with_step_prompt(&base, &step, &mut mctx, Some("   "));
+        assert_eq!(msgs[0].content, "BASE\n\n[本步指令]\n正文指令");
     }
 }

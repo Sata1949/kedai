@@ -8,9 +8,11 @@ use crate::agents::engine::messages::inject::{
     SUMMARY_SLOT_MARKER,
 };
 use crate::agents::engine::worldbook::WorldInjection;
-use crate::models::types::LlmMessage;
+use crate::models::types::{LlmMessage, PromptFloor};
 use crate::parsing::assistant::AssistantVars;
-use crate::services::prompt_inject_service::PromptInjectConfig;
+use crate::services::prompt_inject_service::{
+    FloorRole, InjectMode, PromptInjectConfig, SimplePromptConfig,
+};
 use std::collections::HashMap;
 
 use super::build::{build_llm_messages_with_position, LiteraryTexts};
@@ -1090,6 +1092,11 @@ fn summary_lives_in_dedicated_system_slot() {
         "摘要槽应以标记开头: {}",
         msgs[1].content
     );
+    assert!(
+        msgs[1].content.contains("仅作事实参考"),
+        "摘要槽必须声明不决定本轮人称(POV-1): {}",
+        msgs[1].content
+    );
     // 首个 system 不再内嵌摘要
     assert!(
         !msgs[0].content.contains("早期剧情的摘要文本"),
@@ -1706,5 +1713,199 @@ fn constant_world_header_is_uniform_across_template_paths() {
     assert!(
         fallback_state_only.contains("[当前状态]"),
         "状态块仍照常进 system: {fallback_state_only}"
+    );
+}
+
+/// POV-1:锚定是 system 最后一条静态指令,且排在文学尾段之后(recency 最强位)。
+#[test]
+fn pov_anchor_is_last_static_instruction_after_literary_tail() {
+    const TAIL: &str = "【文学增强段】测试用位置4段";
+    let mut vars = HashMap::new();
+    let mut inject = PromptInjectConfig::default();
+    inject.simple.perspective_enabled = true;
+    inject.simple.perspective = "第三人称".to_string();
+    let (messages, protected_tail) = build_llm_messages_with_position(
+        "芽衣",
+        "兔族少女。",
+        "",
+        "",
+        &[],
+        &[],
+        &[("user".to_string(), "你好".to_string())],
+        &[],
+        Some("CUSTOM 模板"),
+        Some(&inject),
+        None,
+        "user",
+        None,
+        "user",
+        &mut vars,
+        &mut AssistantVars::new(),
+        None,
+        LiteraryTexts {
+            tail: Some(TAIL),
+            ..Default::default()
+        },
+    );
+    let system = &messages[0].content;
+    let tail_pos = system.find(TAIL).expect("文学尾段应在 system 中");
+    let anchor_pos = system
+        .find("【本轮人称锚定：第三人称】")
+        .expect("锚定应在 system 中");
+    assert!(tail_pos < anchor_pos, "锚定应在文学尾段之后: {system}");
+    assert!(
+        system.ends_with("不写成通篇旁白或章节。"),
+        "锚定应是 system 最后一段: {system}"
+    );
+    assert!(
+        protected_tail >= TAIL.chars().count() + "【本轮人称锚定：第三人称】".chars().count(),
+        "锚定应计入 protected_tail: {protected_tail}"
+    );
+}
+
+/// POV-1:显式第一人称覆盖模板;未启用或未知值走兜底版(让位给会话提示词/预设)。
+#[test]
+fn pov_anchor_explicit_mode_and_fallback() {
+    let mut vars = HashMap::new();
+    let mut inject = PromptInjectConfig::default();
+    inject.simple.perspective_enabled = true;
+    inject.simple.perspective = "第一人称".to_string();
+    let (messages, _) = build_llm_messages_with_position(
+        "芽衣",
+        "兔族少女。",
+        "",
+        "",
+        &[],
+        &[],
+        &[("user".to_string(), "你好".to_string())],
+        &[],
+        Some("CUSTOM 模板"),
+        Some(&inject),
+        None,
+        "user",
+        None,
+        "user",
+        &mut vars,
+        &mut AssistantVars::new(),
+        None,
+        LiteraryTexts::default(),
+    );
+    let system = &messages[0].content;
+    assert!(system.contains("【本轮人称锚定：第一人称】"), "{system}");
+    assert!(!system.contains("【本轮人称锚定（默认）】"), "{system}");
+    assert!(system.contains("台词仍用「我」说话"), "{system}");
+    assert!(!system.contains("第三人称限知"), "{system}");
+
+    for (enabled, perspective) in [(false, "第三人称"), (true, "旁白")] {
+        let mut vars = HashMap::new();
+        let mut inject = PromptInjectConfig::default();
+        inject.simple.perspective_enabled = enabled;
+        inject.simple.perspective = perspective.to_string();
+        let (messages, _) = build_llm_messages_with_position(
+            "芽衣",
+            "兔族少女。",
+            "",
+            "",
+            &[],
+            &[],
+            &[("user".to_string(), "你好".to_string())],
+            &[],
+            None,
+            Some(&inject),
+            None,
+            "user",
+            None,
+            "user",
+            &mut vars,
+            &mut AssistantVars::new(),
+            None,
+            LiteraryTexts::default(),
+        );
+        let system = &messages[0].content;
+        assert!(
+            system.contains("【本轮人称锚定（默认）】"),
+            "perspective_enabled={enabled}, perspective={perspective}: {system}"
+        );
+    }
+}
+
+/// POV-1:复杂模式 system 楼层在前、锚定在后(锚定是本轮最后一条静态指令)。
+#[test]
+fn pov_anchor_stays_after_complex_system_floor() {
+    let mut vars = HashMap::new();
+    let inject = PromptInjectConfig {
+        mode: InjectMode::Complex,
+        simple: SimplePromptConfig {
+            perspective_enabled: true,
+            perspective: "第一人称".to_string(),
+            ..Default::default()
+        },
+        floors: vec![PromptFloor {
+            id: "f1".to_string(),
+            name: "人设楼层".to_string(),
+            content: "【楼层】人设段".to_string(),
+            role: FloorRole::System,
+            position: Default::default(),
+            depth: 0,
+            enabled: true,
+            order: 0,
+        }],
+    };
+    let (messages, _) = build_llm_messages_with_position(
+        "芽衣",
+        "兔族少女。",
+        "",
+        "",
+        &[],
+        &[],
+        &[("user".to_string(), "你好".to_string())],
+        &[],
+        Some("CUSTOM 模板"),
+        Some(&inject),
+        None,
+        "user",
+        None,
+        "user",
+        &mut vars,
+        &mut AssistantVars::new(),
+        None,
+        LiteraryTexts::default(),
+    );
+    let system = &messages[0].content;
+    let floor_pos = system.find("【楼层】人设段").expect("楼层应在 system 中");
+    let anchor_pos = system
+        .find("【本轮人称锚定：第一人称】")
+        .expect("锚定应在 system 中");
+    assert!(floor_pos < anchor_pos, "楼层在前、锚定在后: {system}");
+}
+
+/// 测试兼容入口(inject=None)不追加锚定:既有金样/单测的逐字节基线不被本层扰动。
+#[test]
+fn pov_anchor_absent_without_inject_config() {
+    let mut vars = HashMap::new();
+    let (messages, _) = build_llm_messages_with_position(
+        "芽衣",
+        "兔族少女。",
+        "",
+        "",
+        &[],
+        &[],
+        &[("user".to_string(), "你好".to_string())],
+        &[],
+        Some("CUSTOM 模板"),
+        None,
+        None,
+        "user",
+        None,
+        "user",
+        &mut vars,
+        &mut AssistantVars::new(),
+        None,
+        LiteraryTexts::default(),
+    );
+    assert!(
+        !messages[0].content.contains("【本轮人称锚定"),
+        "无注入配置时不得追加锚定: {}",
+        messages[0].content
     );
 }

@@ -285,9 +285,11 @@ impl PromptInjectConfig {
             .map_err(|e| e.to_string())
     }
 
-    /// 简单模式:合成注入提示词文本(按 order 顺序拼接启用项;空 = 无注入)
-    /// 与楼层系统互斥(由 mode 决定),文本在此层只负责组装,宏展开在引擎层做。
-    pub fn simple_inject_text(&self) -> String {
+    /// 简单模式四项的合成文本(按 order 顺序拼接启用项;空 = 无启用项)。
+    /// 不含禁词提示——禁词提示由 [`Self::simple_inject_text`] 与复杂模式共用
+    /// [`Self::banned_words_hint`] 单独追加;反思链路只取四项作为「本轮写作要求」
+    /// 判定基准(POV-1),不把禁词当成写作要求重复注入。
+    pub fn simple_items_text(&self) -> String {
         let s = &self.simple;
         // 启用项内容表(键 = order 中的标识)
         let mut items: Vec<(&str, String)> = Vec::new();
@@ -295,7 +297,9 @@ impl PromptInjectConfig {
             items.push((
                 "word_count",
                 format!(
-                    "请输出篇幅约为 {} 字的正文(明显少于该字数视为不达标,不得大幅缩水)。",
+                    "请输出篇幅约为 {} 字的正文(明显少于该字数视为不达标,不得大幅缩水);\
+                     不得为凑字数复述上文、堆砌环境描写或重复对话;\
+                     篇幅不足以展开三个剧情模块时,以完整推进一个事件为准,不强行凑模块。",
                     s.word_count
                 ),
             ));
@@ -303,13 +307,19 @@ impl PromptInjectConfig {
         if s.paraphrase_enabled {
             items.push((
                 "paraphrase",
-                "请以转述的方式复述内容,用自己的话表达,不要直接照抄原文。".to_string(),
+                "请以概括转述的方式承接用户输入(只转述用户输入部分,不照抄原文);\
+                 转述后按本轮人称锚定续写新剧情;不得把整段回复写成通篇摘要或概述。\
+                 此项覆盖系统提示词(含运行时主提示词)中「不转述」规则的「用户输入承接」部分。"
+                    .to_string(),
             ));
         }
         if s.dialogue_enabled {
             items.push((
                 "dialogue",
-                "请只以对话形式回复,输出角色台词与必要动作描写,不输出旁白叙述段落。".to_string(),
+                "请只以对话形式回复,输出角色台词与必要动作描写,不输出旁白叙述段落;\
+                 本轮不适用【剧情结构(模块化)】的三段剧情模块与过渡段要求;\
+                 动作描写仍遵守本轮人称锚定。"
+                    .to_string(),
             ));
         }
         if s.perspective_enabled {
@@ -334,13 +344,21 @@ impl PromptInjectConfig {
         for (_, text) in items {
             sorted.push(text);
         }
-        // 禁词库自省提示(不进 order 系统,固定追加末尾):所有模式生效——
-        // deep/agent/custom 模式另由引擎收尾工具替换兜底。
-        let hint = s.banned_words_hint();
-        if !hint.is_empty() {
-            sorted.push(hint);
-        }
         sorted.join("\n")
+    }
+
+    /// 简单模式:四项合成 + 禁词库自省提示(固定追加末尾,不进 order 系统)。
+    /// 复杂模式的禁词提示由引擎 build 层单独追加;两模式文案同源。
+    pub fn simple_inject_text(&self) -> String {
+        let mut text = self.simple_items_text();
+        let hint = self.simple.banned_words_hint();
+        if !hint.is_empty() {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(&hint);
+        }
+        text
     }
 
     /// 启用且按 order 排序的楼层(简单模式返回空)
@@ -390,6 +408,35 @@ mod tests {
         cfg.simple.perspective = "第一人称".to_string();
         let text = cfg.simple_inject_text();
         assert!(text.contains("第一人称视角"), "text: {text}");
+    }
+
+    #[test]
+    fn simple_items_text_excludes_banned_words_hint() {
+        // 四项合成与禁词提示分离:反思链路只取四项作为判定基准,禁词走独立参数。
+        let mut cfg = PromptInjectConfig::default();
+        cfg.simple.word_count_enabled = true;
+        cfg.simple.banned_words_enabled = true;
+        cfg.simple.banned_prompt = "禁止出现下列词".to_string();
+        let items = cfg.simple_items_text();
+        assert!(items.contains("请输出篇幅约为"), "text: {items}");
+        assert!(!items.contains("禁止出现下列词"), "text: {items}");
+        let full = cfg.simple_inject_text();
+        assert!(full.contains("禁止出现下列词"), "text: {full}");
+    }
+
+    #[test]
+    fn conflicting_item_texts_explain_precedence() {
+        // POV-1:三项与默认词/运行时主提示词的冲突必须由注入项自己解除,不能靠模型猜。
+        let mut cfg = PromptInjectConfig::default();
+        cfg.simple.word_count_enabled = true;
+        cfg.simple.word_count = 150;
+        cfg.simple.paraphrase_enabled = true;
+        cfg.simple.dialogue_enabled = true;
+        let text = cfg.simple_inject_text();
+        assert!(text.contains("不强行凑模块"), "text: {text}");
+        assert!(text.contains("覆盖系统提示词"), "text: {text}");
+        assert!(text.contains("「不转述」规则"), "text: {text}");
+        assert!(text.contains("不适用【剧情结构(模块化)】"), "text: {text}");
     }
 
     #[test]

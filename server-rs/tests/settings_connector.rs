@@ -890,6 +890,146 @@ async fn prompt_preview_shows_literary_layers_when_enabled() {
     assert_eq!(status, StatusCode::OK);
 }
 
+/// POV-1:预览必须展示人称锚定层,且顺序在文学尾段之后(与真实 build 同序);
+/// 未知视角值给结构化告警 `perspective_unknown`,前端据此提示三档取值。
+#[tokio::test]
+async fn prompt_preview_shows_pov_anchor_and_unknown_warning() {
+    let _guard = test_lock().await;
+    let app = test_app();
+
+    // 现场值(共享 app;净零复位目标)
+    let (_, before_settings) =
+        send_json(app, "GET", "/api/settings?mode=roleplay", json!({})).await;
+    let literary_before = before_settings["literary_bundle_enabled"].clone();
+    let (_, before_inject) = send_json(app, "GET", "/api/prompt-inject", json!({})).await;
+    let inject_before = before_inject["config"].clone();
+
+    // 开文学包,确保「锚定在文学尾段之后」可判别
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=roleplay",
+        json!({ "literary_bundle_enabled": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // ① 第一人称:层存在、role/layer 正确、与 build 同源
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/prompt-inject",
+        json!({
+            "config": {
+                "mode": "simple",
+                "simple": { "perspective_enabled": true, "perspective": "第一人称" },
+                "floors": []
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, preview) = send_json(app, "GET", "/api/settings/prompt-preview", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let layers = preview["layers"].as_array().cloned().unwrap_or_default();
+    let idx = |src: &str| {
+        layers
+            .iter()
+            .position(|l| l["source"] == json!(src))
+            .unwrap_or_else(|| panic!("缺 {src} 层:{preview}"))
+    };
+    let pov_idx = idx("pov_anchor");
+    let pov = &layers[pov_idx];
+    assert_eq!(pov["role"], "system");
+    assert_eq!(pov["layer"], 4);
+    assert!(
+        pov["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains("【本轮人称锚定：第一人称】"),
+        "锚定层内容应来自同源 helper:{pov}"
+    );
+    assert!(
+        idx("simple_inject") < pov_idx,
+        "锚定应在注入层之后:{preview}"
+    );
+    assert!(
+        idx("literary_enhancement") < pov_idx,
+        "锚定应在文学尾段之后:{preview}"
+    );
+
+    // ② 未知视角:兜底锚定 + 结构化告警
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/prompt-inject",
+        json!({
+            "config": {
+                "mode": "simple",
+                "simple": { "perspective_enabled": true, "perspective": "旁白" },
+                "floors": []
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, preview) = send_json(app, "GET", "/api/settings/prompt-preview", json!({})).await;
+    let layers = preview["layers"].as_array().cloned().unwrap_or_default();
+    assert!(
+        layers
+            .iter()
+            .find(|l| l["source"] == json!("pov_anchor"))
+            .and_then(|l| l["content"].as_str())
+            .unwrap_or("")
+            .contains("【本轮人称锚定（默认）】"),
+        "未知视角应回退兜底锚定:{preview}"
+    );
+    assert!(
+        preview["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| *w == json!("perspective_unknown")),
+        "未知视角必须给结构化告警:{preview}"
+    );
+
+    // task 模式不得含锚定层(角色扮演侧专属)
+    let (_, task_preview) = send_json(
+        app,
+        "GET",
+        "/api/settings/prompt-preview?mode=task",
+        json!({}),
+    )
+    .await;
+    assert!(
+        !task_preview["layers"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .any(|l| l["source"] == json!("pov_anchor")),
+        "task 预览不得含人称锚定:{task_preview}"
+    );
+
+    // 卫生复位
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=roleplay",
+        json!({ "literary_bundle_enabled": literary_before }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        "/api/prompt-inject",
+        json!({ "config": inject_before }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
 /// 文学包选择型字段(LIT-6/LIT-7):未知取值 400(不静默回退、不落库);合法值往返;
 /// 推荐档**显式选档才写入**既有三项数值、档间切换不重拍快照、选回空串**恢复写入前原值**
 /// ——这一条与「恢复默认值」是两回事,故本用例特意把原值置成非默认值来判别。
