@@ -604,7 +604,6 @@ pub fn default_literary_reflect_prompt() -> String {
     )
 }
 
-
 impl RuntimeSettings {
     /// 角色扮演**缺省词**的唯一判据入口(LIT-2):开关开 → 文学增强版,否则现行版。
     /// 消费者两处——① `from_config`(新装物化默认值);② load 空值回填(`secret.rs`)。
