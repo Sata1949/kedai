@@ -1,7 +1,8 @@
 // 世界书 / 契约 / 契约历史 / 变量引擎 / 提示词注入 / 全局正则 / 快速回复路由(自 api/mod.rs build_router 迁入)
 use crate::api::app_state::AppState;
 use crate::api::{
-    contract_history, contracts, kaleido, prompt_inject, quick_replies, regex_scripts, world_books,
+    contract_history, contracts, kaleido, prompt_inject, quick_replies, regex_scripts,
+    user_persona, world_books,
 };
 use axum::routing::{get, post, put};
 use axum::Router;
@@ -58,6 +59,11 @@ pub(crate) fn content_routes() -> Router<Arc<AppState>> {
             get(prompt_inject::get_prompt_inject).put(prompt_inject::update_prompt_inject),
         )
         .route("/api/prompt-inject/import", post(prompt_inject::import))
+        // 用户设定(USERPERSONA-1):角色扮演专属的全局用户角色配置
+        .route(
+            "/api/user-persona",
+            get(user_persona::get).put(user_persona::update),
+        )
         // 全局正则库(IMPHUB ⑥):跨角色的显示层正则,整体读写(导入/启停/删除都走 PUT)
         .route(
             "/api/regex-scripts",
