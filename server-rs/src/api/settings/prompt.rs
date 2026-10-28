@@ -2,6 +2,7 @@
 use crate::api::app_state::AppState;
 use crate::api::json_body::JsonBody;
 use crate::api::{internal, not_found, validation};
+use crate::services::pov::{parse_pov_mode, pov_anchor};
 use crate::services::settings_service::AppMode;
 use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Response};
@@ -247,73 +248,110 @@ pub async fn prompt_preview(
         }
     }
 
-    if let Some(character_id) = query.character_id.as_deref() {
-        // 角色卡 + 世界书条目读取(同步 SQLite)合并进同一阻塞任务(DB 并发改造)
-        let cid = character_id.to_string();
-        let characters = state.characters.clone();
-        let world_books = state.world_books.clone();
-        let character = state
-            .db_call(move || {
-                let character = characters.get(&cid);
-                let entries = character
-                    .as_ref()
-                    .map(|_| world_books.collect_entries_for_character(&cid))
-                    .unwrap_or_default();
-                (character, entries)
-            })
-            .await
-            .unwrap_or((None, Vec::new()));
-        if let (Some(character), wb_entries) = character {
-            let entries = {
-                let mut v = character
-                    .data_raw
-                    .as_ref()
-                    .map(crate::parsing::world_book::character_book_entries)
-                    .unwrap_or_default();
-                v.extend(wb_entries);
-                v
-            };
-            // 常驻条目中真正会被 {{world_info}} 带走的子集(role 缺省即 system,与引擎 sys_world 同判据)
-            constant_system_entry = Some(entries.iter().any(|entry| {
-                entry.enabled
-                    && entry.constant
-                    && entry.role.as_deref().unwrap_or("system") == "system"
-            }));
-            push_preview_layer(
-                &mut layers,
-                "character_card",
-                "system",
-                3,
-                format!(
-                    "角色名：{}\n角色描述：{}",
-                    character.chara_name, character.description
-                ),
-            );
-            let summary = entries
-                .iter()
-                .filter(|entry| entry.enabled)
-                .map(|entry| {
-                    format!(
-                        "[{}] kind={} role={} length={} hash={}",
-                        entry.comment,
-                        if entry.constant {
-                            "constant"
-                        } else {
-                            "triggered"
-                        },
-                        entry.role.as_deref().unwrap_or(if entry.constant {
-                            "system"
-                        } else {
-                            "user"
-                        }),
-                        entry.content.chars().count(),
-                        stable_history_hash(&entry.content),
-                    )
+    // POV-1:角色卡上下文提前读取——锚定文案需要角色名,而锚定层必须排在角色卡层之前;
+    // 推送顺序保持 runtime → 模板 → 注入 → 文学 → 锚定 → 角色卡 → 世界书。
+    let (preview_character, preview_entries) = match query.character_id.as_deref() {
+        Some(character_id) => {
+            // 角色卡 + 世界书条目读取(同步 SQLite)合并进同一阻塞任务(DB 并发改造)
+            let cid = character_id.to_string();
+            let characters = state.characters.clone();
+            let world_books = state.world_books.clone();
+            let (character, wb_entries) = state
+                .db_call(move || {
+                    let character = characters.get(&cid);
+                    let entries = character
+                        .as_ref()
+                        .map(|_| world_books.collect_entries_for_character(&cid))
+                        .unwrap_or_default();
+                    (character, entries)
                 })
-                .collect::<Vec<_>>()
-                .join("\n");
-            push_preview_layer(&mut layers, "world_book", "metadata", 3, summary);
+                .await
+                .unwrap_or((None, Vec::new()));
+            match character {
+                Some(character) => {
+                    let mut entries = character
+                        .data_raw
+                        .as_ref()
+                        .map(crate::parsing::world_book::character_book_entries)
+                        .unwrap_or_default();
+                    entries.extend(wb_entries);
+                    (Some(character), entries)
+                }
+                None => (None, Vec::new()),
+            }
         }
+        None => (None, Vec::new()),
+    };
+
+    // 人称锚定(POV-1):与引擎 build 层同判据、同 helper;简单/复杂模式都展示。
+    // 未知视角值同时给结构化告警码(前端文案映射在 utils/promptWarnings.ts)。
+    if matches!(mode, AppMode::Roleplay) {
+        let pov_inject = state
+            .prompt_inject
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get()
+            .clone();
+        let pov_mode = if pov_inject.simple.perspective_enabled {
+            parse_pov_mode(&pov_inject.simple.perspective)
+        } else {
+            None
+        };
+        if pov_inject.simple.perspective_enabled && pov_mode.is_none() {
+            warnings.push("perspective_unknown");
+        }
+        let char_name = preview_character
+            .as_ref()
+            .map(|c| c.chara_name.as_str())
+            .unwrap_or("角色");
+        push_preview_layer(
+            &mut layers,
+            "pov_anchor",
+            "system",
+            4,
+            pov_anchor(pov_mode, char_name, None),
+        );
+    }
+
+    // 角色卡层(位置 3):仅在带角色卡上下文时展示。
+    if let Some(character) = &preview_character {
+        // 常驻条目中真正会被 {{world_info}} 带走的子集(role 缺省即 system,与引擎 sys_world 同判据)
+        constant_system_entry = Some(preview_entries.iter().any(|entry| {
+            entry.enabled && entry.constant && entry.role.as_deref().unwrap_or("system") == "system"
+        }));
+        push_preview_layer(
+            &mut layers,
+            "character_card",
+            "system",
+            3,
+            format!(
+                "角色名：{}\n角色描述：{}",
+                character.chara_name, character.description
+            ),
+        );
+        let summary = preview_entries
+            .iter()
+            .filter(|entry| entry.enabled)
+            .map(|entry| {
+                format!(
+                    "[{}] kind={} role={} length={} hash={}",
+                    entry.comment,
+                    if entry.constant {
+                        "constant"
+                    } else {
+                        "triggered"
+                    },
+                    entry
+                        .role
+                        .as_deref()
+                        .unwrap_or(if entry.constant { "system" } else { "user" }),
+                    entry.content.chars().count(),
+                    stable_history_hash(&entry.content),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        push_preview_layer(&mut layers, "world_book", "metadata", 3, summary);
     }
 
     // 带角色卡上下文时以「确有常驻条目会被静默丢弃」为准,避免在全激发卡上报无信号的警;

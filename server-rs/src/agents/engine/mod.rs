@@ -59,6 +59,8 @@ pub(super) mod run_finish;
 #[cfg(test)]
 mod run_generation_tests;
 pub(super) mod run_loop;
+/// 步骤级消息视图与 POV 判定基准(POV-1 文件大小治理,自 run_loop 迁入)
+mod run_loop_steps;
 pub(super) mod run_scripts;
 pub(super) mod types;
 pub(super) mod util;

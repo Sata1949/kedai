@@ -18,6 +18,28 @@ const REFLECT_HEAL_MAX_TOKENS: u32 = REFLECT_MAX_TOKENS * 4;
 /// 批判与修改的总轮数余量:首轮批判 + 每轮修改 + 最终判定轮
 const CRITIQUE_EXTRA_ROUNDS: usize = 2;
 
+/// POV-1:把「本轮写作要求」与「人称锚定」追加到反思 system,作为判定基准。
+/// 反思模型此前只看得到「用户输入 + 草稿 + 反思提示词」,既判不了第三人称漂移,
+/// 还可能按「未指定时默认角色视角」把正文改回第一人称。两段都为空时保持逐字节不变
+/// (复杂模式只给锚定;自定义反思提示词场景仍受锚定约束)。
+fn append_judgement_basis(system: &mut String, inject_requirements: &str, pov_anchor: &str) {
+    let requirements = inject_requirements.trim();
+    if !requirements.is_empty() {
+        system.push_str("\n\n【本轮写作要求（判定基准）】\n");
+        system.push_str(requirements);
+    }
+    let anchor = pov_anchor.trim();
+    if !anchor.is_empty() {
+        system.push_str("\n\n【人称锚定（本轮，判定基准）】\n");
+        system.push_str(anchor);
+        system.push_str(
+            "\n检查正文是否遵守：叙述层与台词的人称是否被混用；是否替用户角色代言；\
+             是否延续了上文的漂移。\n发现不符必须用 revise_passage 定点修正，\
+             不得按「未指定时默认角色视角」自行设定。",
+        );
+    }
+}
+
 /// LLM 反思:按配置的反思提示词调用模型检查草稿质量。
 /// 消息 = system(反思提示词)+ user(用户输入 + 剥离变量块后的草稿);
 /// 低温度 0.3、输出上限 512,判定 token 计入本轮 total_usage。
@@ -26,6 +48,8 @@ const CRITIQUE_EXTRA_ROUNDS: usize = 2;
 pub(super) async fn reflect_with_llm(
     engine: &AgentEngine,
     prompt: &str,
+    inject_requirements: &str,
+    pov_anchor: &str,
     user_input: &str,
     draft: &str,
     abort: &watch::Receiver<bool>,
@@ -33,8 +57,10 @@ pub(super) async fn reflect_with_llm(
     if *abort.borrow() {
         return None;
     }
+    let mut system = String::from(prompt);
+    append_judgement_basis(&mut system, inject_requirements, pov_anchor);
     let messages = vec![
-        LlmMessage::plain("system", prompt),
+        LlmMessage::plain("system", &system),
         LlmMessage::plain(
             "user",
             &format!("[用户输入]\n{user_input}\n\n[模型草稿]\n{draft}"),
@@ -63,10 +89,13 @@ pub(super) async fn reflect_with_llm(
 /// 最多 3 轮工具循环;无工具调用即解析最终判定;工具修正后的正文经返回值回传。
 /// 返回 (判定, 修正后的正文 Option, usage);任何异常/中断返回 None(调用方回退机械规则,
 /// 保证反思路径永远可判定、有界)。
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn reflect_with_tools(
     engine: &AgentEngine,
     prompt: &str,
     banned_hint: &str,
+    inject_requirements: &str,
+    pov_anchor: &str,
     user_input: &str,
     draft: &str,
     tool_ctx: &crate::models::types::ToolContext,
@@ -85,9 +114,17 @@ pub(super) async fn reflect_with_tools(
         .filter_map(|name| engine.tool_registry.get(name).map(|t| t.definition))
         .collect();
     if tools.is_empty() {
-        return reflect_with_llm(engine, prompt, user_input, draft, abort)
-            .await
-            .map(|(v, u)| (v, None, u));
+        return reflect_with_llm(
+            engine,
+            prompt,
+            inject_requirements,
+            pov_anchor,
+            user_input,
+            draft,
+            abort,
+        )
+        .await
+        .map(|(v, u)| (v, None, u));
     }
     let mut system_text = format!(
         "{prompt}\n\n若发现正文存在禁词、逻辑矛盾、表述不当或需要改写的段落,请先调用 \
@@ -102,6 +139,7 @@ pub(super) async fn reflect_with_tools(
             banned_hint.trim()
         ));
     }
+    append_judgement_basis(&mut system_text, inject_requirements, pov_anchor);
     let mut messages = vec![
         LlmMessage::plain("system", &system_text),
         LlmMessage::plain(
@@ -302,6 +340,8 @@ pub(super) async fn critique_and_revise(
     engine: &AgentEngine,
     prompt: &str,
     banned_hint: &str,
+    inject_requirements: &str,
+    pov_anchor: &str,
     user_input: &str,
     draft: &str,
     tool_ctx: &crate::models::types::ToolContext,
@@ -340,6 +380,7 @@ pub(super) async fn critique_and_revise(
             banned_hint.trim()
         ));
     }
+    append_judgement_basis(&mut system, inject_requirements, pov_anchor);
 
     let mut messages = vec![
         LlmMessage::plain("system", &system),
@@ -670,5 +711,47 @@ mod tests {
         assert_eq!(override_text_arg("not-json", "NEW"), "not-json");
         // 含 text 的数组/非对象形态原样返回
         assert_eq!(override_text_arg("[1,2]", "NEW"), "[1,2]");
+    }
+
+    /// POV-1:反思判定基准必须同时含本轮写作要求与人称锚定,并明确要求定点修正。
+    #[test]
+    fn judgement_basis_adds_requirements_and_anchor() {
+        let mut system = String::from("REFLECT PROMPT");
+        append_judgement_basis(
+            &mut system,
+            "请输出篇幅约为 1200 字的正文",
+            "【本轮人称锚定：第三人称】\n- 台词仍用第一人称「我」。",
+        );
+        assert!(
+            system.contains("【本轮写作要求（判定基准）】"),
+            "system: {system}"
+        );
+        assert!(system.contains("1200 字"), "system: {system}");
+        assert!(
+            system.contains("【人称锚定（本轮，判定基准）】"),
+            "system: {system}"
+        );
+        assert!(
+            system.contains("【本轮人称锚定：第三人称】"),
+            "system: {system}"
+        );
+        assert!(system.contains("revise_passage"), "system: {system}");
+        assert!(
+            system.contains("不得按「未指定时默认角色视角」"),
+            "system: {system}"
+        );
+    }
+
+    /// 复杂模式只给锚定;两者都空时 system 逐字节不变(旧行为回归钉子)。
+    #[test]
+    fn judgement_basis_omits_empty_sections() {
+        let mut only_anchor = String::from("P");
+        append_judgement_basis(&mut only_anchor, "  ", "【本轮人称锚定（默认）】");
+        assert!(!only_anchor.contains("【本轮写作要求"), "{only_anchor}");
+        assert!(only_anchor.contains("【人称锚定"), "{only_anchor}");
+
+        let mut unchanged = String::from("P");
+        append_judgement_basis(&mut unchanged, "", "");
+        assert_eq!(unchanged, "P");
     }
 }

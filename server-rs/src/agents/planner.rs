@@ -1,4 +1,17 @@
-// 规划器(与 Node 版 planner.ts 对齐)
+/// 正文步提示词(deep/agent 共用)。**人称不再由步骤指令自行设定**——步骤提示词追加在
+/// system 末尾,recency 会盖过简单注入/预设;统一改成「沿用系统提示词已确定的人称锚定」。
+pub const DIRECT_STEP_PROMPT: &str = "【本步指令·正文】严格依据上方「内部草稿」扩写为完整正文:\
+     可自由充实细节与对话,但不得复述草稿本身,不得出现「草稿」「计划」等字样。\
+     沿用系统提示词已确定的人称锚定与角色口吻;角色台词保持第一人称口吻;\
+     不得改用其他人称;用户在本轮明确要求改用人称时,以用户要求为准。\
+     服从用户字数与风格要求,用户提问必须正面回答。";
+
+/// agent 正文步在通用正文指令之后追加的工具说明(deep 主生成无工具,不追加)。
+pub const DIRECT_STEP_TOOL_SUFFIX: &str = "你可以通过 function calling 自主调用下方列出的工具:\
+     需要随机数用 role、联网查最新信息用 search、读世界书/角色资料用 read、写对话气泡或文件用 write、\
+     需要后台并行处理子任务用 agentgo;需要时再调用,不必每轮都调。";
+
+/// 规划器(与 Node 版 planner.ts 对齐)
 use crate::models::types::{Plan, PlanStep};
 use crate::services::agent_flow_service::resolve_graph;
 use crate::tools::tool_sets::ARCHIVE_TOOLS;
@@ -25,16 +38,9 @@ pub fn make_plan(user_input: &str, mode: &str) -> Plan {
                     goal: "生成正文回复".into(),
                     action: "direct".into(),
                     generates: Some(true),
-                    system_prompt: Some(
-                        "【本步指令·正文】严格依据上方「内部草稿」扩写为完整正文:\
-                         可自由充实细节与对话,但不得复述草稿本身,不得出现「草稿」「计划」等字样。\
-                         以 {{char}} 的视角与口吻输出:视角遵循系统提示词与用户要求\
-                         (用户未指定时以角色自身视角叙述);服从用户字数与风格要求,用户提问必须正面回答。\
-                         你可以通过 function calling 自主调用下方列出的工具:\
-                         需要随机数用 role、联网查最新信息用 search、读世界书/角色资料用 read、写对话气泡或文件用 write、\
-                         需要后台并行处理子任务用 agentgo;需要时再调用,不必每轮都调。"
-                            .into(),
-                    ),
+                    system_prompt: Some(format!(
+                        "{DIRECT_STEP_PROMPT}{DIRECT_STEP_TOOL_SUFFIX}"
+                    )),
                     ..Default::default()
                 },
                 PlanStep {
@@ -64,13 +70,7 @@ pub fn make_plan(user_input: &str, mode: &str) -> Plan {
                     goal: "生成正文回复".into(),
                     action: "direct".into(),
                     generates: Some(true),
-                    system_prompt: Some(
-                        "【本步指令·正文】严格依据上方「内部草稿」扩写为完整正文:\
-                         可自由充实细节与对话,但不得复述草稿本身,不得出现「草稿」「计划」等字样。\
-                         以 {{char}} 的视角与口吻输出:视角遵循系统提示词与用户要求\
-                         (用户未指定时以角色自身视角叙述);服从用户字数与风格要求,用户提问必须正面回答。"
-                            .into(),
-                    ),
+                    system_prompt: Some(DIRECT_STEP_PROMPT.into()),
                     ..Default::default()
                 },
                 PlanStep {
@@ -81,7 +81,8 @@ pub fn make_plan(user_input: &str, mode: &str) -> Plan {
                 },
                 archive_step(),
             ],
-            summary: "深度模式:草稿(隐藏) → 正文 → 强制批判与修改(最多 2 次) → 归档与词条同步。".into(),
+            summary: "深度模式:草稿(隐藏) → 正文 → 强制批判与修改(最多 2 次) → 归档与词条同步。"
+                .into(),
         }
     } else {
         let _ = user_input;
@@ -357,6 +358,10 @@ mod tests {
             sp.contains("role") && sp.contains("search"),
             "正文步应含工具名: {sp}"
         );
+        assert!(
+            sp.contains("人称锚定") && !sp.contains("用户未指定时以角色自身视角叙述"),
+            "正文步不得自行设定人称(POV-1): {sp}"
+        );
         // 反思步:reflect 不带 system_prompt
         assert_eq!(p.steps[2].action, "reflect");
         assert!(p.steps[2].system_prompt.is_none());
@@ -396,6 +401,10 @@ mod tests {
         assert!(
             !sp.contains("function calling"),
             "deep 正文步不带工具说明(主生成无工具属既有裁剪): {sp}"
+        );
+        assert!(
+            sp.contains("人称锚定") && !sp.contains("用户未指定时以角色自身视角叙述"),
+            "deep 正文步不得自行设定人称(POV-1): {sp}"
         );
         assert_eq!(p.steps[1].generates, Some(true));
         assert_eq!(p.steps[2].action, "reflect");

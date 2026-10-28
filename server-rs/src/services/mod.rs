@@ -42,6 +42,7 @@ pub mod memory_service;
 // Android 原生能力桥接(外链/分享/前台服务保活),仅 android 目标编译
 #[cfg(target_os = "android")]
 pub mod native_bridge_android;
+pub mod pov;
 pub mod prompt_inject_service;
 pub mod prompt_kit;
 pub mod quick_reply_service;

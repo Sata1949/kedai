@@ -250,8 +250,8 @@ async fn auto_compaction_keeps_prefix_and_freezes_prior_summary() {
     let slot3 = last_summary_slot(&sid).expect("压缩后的请求应含摘要槽");
     assert_eq!(
         slot3,
-        format!("【早期对话摘要】\n{summary1}"),
-        "摘要槽内容应等于落库摘要(模型看到的与库里的一致)"
+        format!("【早期对话摘要】\n（仅作事实参考，不决定本轮正文的人称与叙述方式）\n{summary1}"),
+        "摘要槽内容应等于落库摘要(模型看到的与库里的一致;POV-1 起带人称让位说明)"
     );
 
     // 轮 4:历史 7 条 → 增量压缩(段 = 长消息 + 首轮回复)
@@ -295,7 +295,7 @@ async fn auto_compaction_keeps_prefix_and_freezes_prior_summary() {
     let slot4 = last_summary_slot(&sid).expect("第二轮请求仍应含摘要槽");
     assert_eq!(
         slot4,
-        format!("【早期对话摘要】\n{summary2}"),
+        format!("【早期对话摘要】\n（仅作事实参考，不决定本轮正文的人称与叙述方式）\n{summary2}"),
         "摘要槽应等于新的落库摘要"
     );
     assert!(

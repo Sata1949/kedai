@@ -5,7 +5,12 @@
 use super::params::{
     default_literary_reflect_prompt, default_literary_roleplay_agent_prompt,
     default_reflect_prompt, LEGACY_LITERARY_REFLECT_ENHANCEMENT_V1,
-    LEGACY_LITERARY_RP_ENHANCEMENT_V1, LEGACY_REFLECT_PROMPT_V1, LEGACY_ROLEPLAY_AGENT_PROMPT_V1,
+    LEGACY_LITERARY_RP_ENHANCEMENT_V1, LEGACY_REFLECT_PROMPT_V1, LEGACY_REFLECT_PROMPT_V2,
+    LEGACY_ROLEPLAY_AGENT_PROMPT_V1, LITERARY_NOTE, LITERARY_REFLECT_ENHANCEMENT, LITERARY_TAIL,
+};
+use super::prompts_literary::{
+    LITERARY_STYLE_CLASSICAL, LITERARY_STYLE_HARDBOILED, LITERARY_STYLE_LIGHTNOVEL,
+    LITERARY_STYLE_PLAIN,
 };
 use super::*;
 use crate::config::AppConfig;
@@ -1467,12 +1472,11 @@ fn load_migrates_legacy_reflect_prompt() {
         default_literary_reflect_prompt(),
         "旧版文学默认应迁移为新版文学默认"
     );
-    // ③ RPFLOW-1 窗口的文学版(现行默认词 + v1 文学增强段)+ 开关开 → 同样重物化
+    // ③ RPFLOW-1 窗口的文学版(v2 默认词 + v1 文学增强段)+ 开关开 → 同样重物化
     // (2026-10-09 修复批次:该组合的末尾是旧句「只判定不重写」,不迁移就永久自相矛盾)
     let rpflow1_lit = format!(
         "{}\n\n{}",
-        default_reflect_prompt(),
-        LEGACY_LITERARY_REFLECT_ENHANCEMENT_V1
+        LEGACY_REFLECT_PROMPT_V2, LEGACY_LITERARY_REFLECT_ENHANCEMENT_V1
     );
     let got = write(&dir, &rpflow1_lit, true);
     assert_eq!(
@@ -1480,12 +1484,69 @@ fn load_migrates_legacy_reflect_prompt() {
         default_literary_reflect_prompt(),
         "RPFLOW-1 窗口的文学默认应迁移为修复后的文学默认"
     );
-    // ④ 自定义文本 → 逐字优先,不迁移
+    // ④ POV-1 之前的 v2 默认词(开关关) → 迁移到新默认
+    let got = write(&dir, LEGACY_REFLECT_PROMPT_V2, false);
+    assert_eq!(
+        got.reflect_prompt,
+        default_reflect_prompt(),
+        "v2 默认词应迁移为 POV-1 新默认"
+    );
+    // ⑤ POV-1 之前的文学版(v2 默认词 + 现行文学增强段)+ 开关开 → 迁移
+    let v2_lit = format!(
+        "{}\n\n{}",
+        LEGACY_REFLECT_PROMPT_V2, LITERARY_REFLECT_ENHANCEMENT
+    );
+    let got = write(&dir, &v2_lit, true);
+    assert_eq!(
+        got.reflect_prompt,
+        default_literary_reflect_prompt(),
+        "v2 文学默认应迁移为 POV-1 新文学默认"
+    );
+    // ⑥ 自定义文本 → 逐字优先,不迁移
     let got = write(&dir, "CUSTOM-LEGACY-CHECK", true);
     assert_eq!(
         got.reflect_prompt, "CUSTOM-LEGACY-CHECK",
         "自定义文本不得被迁移覆盖"
     );
+}
+
+/// POV-1:默认反思词不得再要求「未指定时默认角色视角」——反思模型必须服从本轮锚定。
+#[test]
+fn default_reflect_prompt_uses_pov_anchor_as_judgement_basis() {
+    let prompt = default_reflect_prompt();
+    assert!(
+        prompt.contains("遵守本轮【人称锚定】与本轮写作要求"),
+        "默认反思词应把锚定作为判定基准: {prompt}"
+    );
+    assert!(
+        !prompt.contains("未指定时默认角色视角"),
+        "旧口径会让反思把正文改回第一人称: {prompt}"
+    );
+}
+
+/// POV-1:文学常量不得再把「与上文一致」写成无条件的粘性锚点——
+/// 上文人称一旦漂移,后续每轮都会「与上文一致」;三处视角句必须让位给系统锚定。
+#[test]
+fn literary_constants_defer_to_pov_anchor() {
+    assert!(
+        LITERARY_TAIL.contains("以本轮系统提示词的人称锚定为起点"),
+        "LITERARY_TAIL: {LITERARY_TAIL}"
+    );
+    assert!(
+        LITERARY_NOTE.contains("若与本轮系统提示词的人称锚定冲突,以锚定为准"),
+        "LITERARY_NOTE: {LITERARY_NOTE}"
+    );
+    for (name, style) in [
+        ("plain", LITERARY_STYLE_PLAIN),
+        ("classical", LITERARY_STYLE_CLASSICAL),
+        ("lightnovel", LITERARY_STYLE_LIGHTNOVEL),
+        ("hardboiled", LITERARY_STYLE_HARDBOILED),
+    ] {
+        assert!(
+            style.contains("以系统锚定为准"),
+            "文风预设 {name} 应让位给系统锚定: {style}"
+        );
+    }
 }
 
 /// RPFLOW-2:剧情推演词条同步两档开关——默认值(角色档 true / 全局档 false)与落盘往返。

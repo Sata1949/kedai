@@ -15,6 +15,14 @@ describe('promptWarningText(预览告警文案单一出处)', () => {
     expect(promptWarningText('some_future_code')).toBe('some_future_code');
   });
 
+  it('未知视角码给出三档提示与回退说明', () => {
+    const text = promptWarningText('perspective_unknown');
+    expect(text).toContain('第一人称');
+    expect(text).toContain('第二人称');
+    expect(text).toContain('第三人称');
+    expect(text).toContain('默认');
+  });
+
   it('原型链键名不得被当成已登记码', () => {
     expect(promptWarningText('constructor')).toBe('constructor');
     expect(promptWarningText('toString')).toBe('toString');
