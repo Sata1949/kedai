@@ -23,7 +23,7 @@ use serde_json::Value;
 use super::{
     append_memory_notice, apply_inject_insertions, build_llm_messages_with_card,
     insert_memory_slot, insert_recall_slot, insert_summary_slot, parse_inject_insertion,
-    trim_to_context, CardTexts, InjectAt, InjectInsertion, LiteraryTexts,
+    trim_to_context, CardTexts, InjectAt, InjectInsertion, LiteraryTexts, PersonaTexts,
 };
 
 /// 阶段 2「上下文收集」的只读产物:字符卡/历史/世界书/设置快照等,
@@ -35,6 +35,13 @@ pub(in crate::agents::engine) struct CollectedCtx {
     pub(in crate::agents::engine) scenario: String,
     /// 角色卡对话示例(CARD-1):`{{mes_example}}` / `{{mes_example_block}}` 的数据源。
     pub(in crate::agents::engine) mes_example: String,
+    /// 用户称呼(USERPERSONA-1):启用且有称呼 → 该称呼;否则「用户」。
+    pub(in crate::agents::engine) user_name: String,
+    /// 用户角色设定原文(未包裹;供 `{{user_description}}`,build 层负责包裹)。
+    pub(in crate::agents::engine) user_description: String,
+    /// 已包裹的【用户角色】段(单一出处 `UserPersonaService::block()`);
+    /// 未启用/空配置 → None。
+    pub(in crate::agents::engine) user_persona_block: Option<String>,
     pub(in crate::agents::engine) history: Vec<MessageRecord>,
     pub(in crate::agents::engine) history_tuples: Vec<(String, String)>,
     /// 与 history_tuples 逐条对齐的图像引用(视觉能力包 D2;已解析为 data URL,
@@ -200,6 +207,21 @@ impl AgentEngine {
             .unwrap_or_else(|e| e.into_inner())
             .get()
             .clone();
+        // 用户设定快照(USERPERSONA-1):角色扮演专属;任务模式不经本函数。
+        // user_name 回退「用户」;description 仅在启用时提供给 {{user_description}}。
+        let user_persona = self
+            .user_persona
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get()
+            .clone();
+        let user_name = user_persona.user_name().unwrap_or("用户").to_string();
+        let user_description = if user_persona.enabled {
+            user_persona.description.clone()
+        } else {
+            String::new()
+        };
+        let user_persona_block = user_persona.block();
         // getpreset/getPresetPrompt 的预设楼层数据(启用的楼层,按配置顺序)
         let preset_prompts: Vec<PresetPromptCtx> = inject_snapshot
             .floors
@@ -450,6 +472,9 @@ impl AgentEngine {
             personality,
             scenario,
             mes_example,
+            user_name,
+            user_description,
+            user_persona_block,
             history,
             history_tuples,
             history_images,
@@ -496,6 +521,11 @@ impl AgentEngine {
                 personality: &ctx.personality,
                 scenario: &ctx.scenario,
                 mes_example: &ctx.mes_example,
+            },
+            PersonaTexts {
+                user_name: &ctx.user_name,
+                user_description: &ctx.user_description,
+                block: ctx.user_persona_block.as_deref(),
             },
             &ctx.world_constant,
             &ctx.world_triggered,
@@ -554,7 +584,8 @@ impl AgentEngine {
                 let rt = rt
                     .replace("{{char}}", &ctx.chara_name)
                     .replace("{{character_name}}", &ctx.chara_name)
-                    .replace("{{user}}", "用户");
+                    .replace("{{user}}", &ctx.user_name)
+                    .replace("{{user_name}}", &ctx.user_name);
                 if let Some(s0) = llm_messages.first_mut() {
                     if s0.role == "system" {
                         s0.content = format!("{}\n\n{}", rt.trim(), s0.content);

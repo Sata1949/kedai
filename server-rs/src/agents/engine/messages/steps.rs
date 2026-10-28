@@ -357,6 +357,7 @@ mod tests {
             character_name: "芽衣",
             character_description: "",
             user_name: "用户",
+            user_description: "",
             personality: "",
             scenario: "",
             mes_example: "",

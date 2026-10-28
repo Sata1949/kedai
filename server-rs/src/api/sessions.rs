@@ -335,6 +335,19 @@ pub async fn history(
             ),
         };
         let mut vars = session_vars;
+        // 用户设定(USERPERSONA-1):显示层 {{user}} / {{user_name}} / {{user_description}}
+        let user_persona = state
+            .user_persona
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get()
+            .clone();
+        let user_name = user_persona.user_name().unwrap_or("用户").to_string();
+        let user_description = if user_persona.enabled {
+            user_persona.description.clone()
+        } else {
+            String::new()
+        };
         // 酒馆助手变量树副本:{{format_message_variable}}/{{getvar::stat_data.…}} 显示用
         let mut assistant_vars = assistant_vars;
         // 7 作用域变量(计划二):chat 树/扁平层镜像同步,作用域宏族显示用
@@ -349,7 +362,8 @@ pub async fn history(
             let mut mctx = MacroCtx {
                 character_name: &name,
                 character_description: &description,
-                user_name: "用户",
+                user_name: &user_name,
+                user_description: &user_description,
                 user_input: "",
                 personality: &personality,
                 scenario: &scenario,

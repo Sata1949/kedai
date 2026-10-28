@@ -17,6 +17,7 @@ use std::collections::HashMap;
 
 use super::build::{
     build_llm_messages_with_card, build_llm_messages_with_position, CardTexts, LiteraryTexts,
+    PersonaTexts,
 };
 use super::trim_to_context;
 
@@ -1925,6 +1926,11 @@ fn card_fields_reach_system_and_mes_example_is_bounded() {
             scenario: "雨夜的旧书店。",
             mes_example: "「来了。」他把门推开,侧身让出半边。",
         },
+        PersonaTexts {
+            user_name: "用户",
+            user_description: "",
+            block: None,
+        },
         &[],
         &[],
         &[("user".to_string(), "你好".to_string())],
@@ -1967,6 +1973,11 @@ fn fallback_template_contains_card_fields_and_skips_empty_example() {
             scenario: "雨夜。",
             mes_example: "「来了。」",
         },
+        PersonaTexts {
+            user_name: "用户",
+            user_description: "",
+            block: None,
+        },
         &[],
         &[],
         &[("user".to_string(), "你好".to_string())],
@@ -2004,6 +2015,11 @@ fn fallback_template_contains_card_fields_and_skips_empty_example() {
             scenario: "",
             mes_example: "",
         },
+        PersonaTexts {
+            user_name: "用户",
+            user_description: "",
+            block: None,
+        },
         &[],
         &[],
         &[("user".to_string(), "你好".to_string())],
@@ -2024,4 +2040,98 @@ fn fallback_template_contains_card_fields_and_skips_empty_example() {
         "空示例不得产生悬空标题: {}",
         messages[0].content
     );
+}
+
+/// USERPERSONA-1:【用户角色】段在模板之后、simple 注入之前;`{{user}}` /
+/// `{{user_name}}` / `{{user_description}}` 同步替换,description 经 untrusted 包裹。
+#[test]
+fn persona_block_and_macros_are_injected_between_template_and_inject() {
+    let mut vars = HashMap::new();
+    let inject = PromptInjectConfig {
+        simple: SimplePromptConfig {
+            word_count_enabled: true,
+            word_count: 88,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let block = "【用户角色】\n称呼: 林\n设定:\n<UNTRUSTED_PROMPT_SOURCE source=\"user_persona\">\n退役侦探\n</UNTRUSTED_PROMPT_SOURCE>";
+    let (messages, _) = build_llm_messages_with_card(
+        "芽衣",
+        CardTexts {
+            description: "兔族少女。",
+            ..Default::default()
+        },
+        PersonaTexts {
+            user_name: "林",
+            user_description: "退役侦探",
+            block: Some(block),
+        },
+        &[],
+        &[],
+        &[("user".to_string(), "你好".to_string())],
+        &[],
+        Some("CUSTOM 模板 {{user}}/{{user_name}}/{{user_description}}"),
+        Some(&inject),
+        None,
+        "user",
+        None,
+        "user",
+        &mut vars,
+        &mut AssistantVars::new(),
+        None,
+        LiteraryTexts::default(),
+    );
+    let system = &messages[0].content;
+    let template_pos = system.find("CUSTOM 模板").expect("模板应在 system");
+    let persona_pos = system.find("【用户角色】").expect("用户角色段应在 system");
+    let inject_pos = system.find("88 字").expect("简单注入应在 system");
+    assert!(
+        template_pos < persona_pos,
+        "用户角色段应在模板之后: {system}"
+    );
+    assert!(
+        persona_pos < inject_pos,
+        "用户角色段应在注入层之前: {system}"
+    );
+    assert!(
+        system.contains("CUSTOM 模板 林/林/<UNTRUSTED_PROMPT_SOURCE source=\"user_persona\">"),
+        "三个用户宏都应替换({{user_description}} 取包裹后的值): {system}"
+    );
+    assert!(
+        system.contains(r#"<UNTRUSTED_PROMPT_SOURCE source="user_persona">"#),
+        "user_description 应经 untrusted 包裹: {system}"
+    );
+}
+
+/// 未启用用户设定时:不注入段、关键宏回退「用户」,行为与加本层前一致。
+#[test]
+fn persona_absent_keeps_user_macro_fallback() {
+    let mut vars = HashMap::new();
+    let (messages, _) = build_llm_messages_with_card(
+        "芽衣",
+        CardTexts::default(),
+        PersonaTexts {
+            user_name: "用户",
+            user_description: "",
+            block: None,
+        },
+        &[],
+        &[],
+        &[("user".to_string(), "你好".to_string())],
+        &[],
+        Some("CUSTOM {{user}}/{{user_name}}/{{user_description}}"),
+        None,
+        None,
+        "user",
+        None,
+        "user",
+        &mut vars,
+        &mut AssistantVars::new(),
+        None,
+        LiteraryTexts::default(),
+    );
+    let system = &messages[0].content;
+    assert!(!system.contains("【用户角色】"), "{system}");
+    assert!(system.contains("CUSTOM 用户/用户/"), "{system}");
 }

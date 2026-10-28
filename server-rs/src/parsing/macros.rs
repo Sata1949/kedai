@@ -14,6 +14,8 @@ pub struct MacroCtx<'a> {
     pub character_name: &'a str,
     pub character_description: &'a str,
     pub user_name: &'a str,
+    /// 用户角色设定原文(USERPERSONA-1;已由装配层经 untrusted 包裹)
+    pub user_description: &'a str,
     pub personality: &'a str,
     pub scenario: &'a str,
     /// 角色卡对话示例(CARD-1):`{{mes_example}}` 原样;`{{mes_example_block}}` 带标题。
@@ -103,6 +105,7 @@ fn expand_one(inner: &str, ctx: &mut MacroCtx<'_>) -> String {
     match lower.as_str() {
         "char" | "character_name" => ctx.character_name.to_string(),
         "user" | "user_name" => ctx.user_name.to_string(),
+        "user_description" => ctx.user_description.to_string(),
         "newline" | "lf" => "\n".to_string(),
         "time" => now_str("%H:%M:%S"),
         "datetime" | "date" => now_str("%Y-%m-%d %H:%M:%S"),
@@ -363,6 +366,7 @@ mod tests {
             character_name: "林晚",
             character_description: "温柔的女剑客",
             user_name: "旅人",
+            user_description: "来自北方的旅人",
             user_input: "",
             personality: "冷静沉着",
             scenario: "雪山相遇",
@@ -383,13 +387,14 @@ mod tests {
         let mut vars = HashMap::new();
         let mut c = ctx(&history, &mut vars);
         let out = expand_macros(
-            "{{char}}对{{user}}说:{{newline}}性格{{personality}},场景{{scenario}}",
+            "{{char}}对{{user}}说:{{newline}}性格{{personality}},场景{{scenario}},用户{{user_description}}",
             &mut c,
         );
         assert!(out.contains("林晚对旅人说"));
         assert!(out.contains('\n'));
         assert!(out.contains("性格冷静沉着"));
         assert!(out.contains("场景雪山相遇"));
+        assert!(out.contains("用户来自北方的旅人"));
     }
 
     #[test]

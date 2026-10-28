@@ -115,6 +115,14 @@ pub async fn prompt_preview(
         Some("task") => AppMode::Task,
         _ => AppMode::Roleplay,
     };
+    // 用户设定快照(USERPERSONA-1):角色扮演专属;task 预览不 push。
+    let user_persona = state
+        .user_persona
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get()
+        .clone();
+    let user_persona_block = user_persona.block();
     // 设置快照:不留锁跨 await(for_mode 为纯计算,锁在 snapshot 内即释放)
     let settings = state.settings_snapshot().for_mode(mode);
     // 文学能力包(LIT-3):两段值取自设置层方法(开关判定 + 文本单一出处)。此处先取好——
@@ -147,6 +155,14 @@ pub async fn prompt_preview(
             5,
             settings.agent_system_prompt.0.clone(),
         );
+    }
+
+    // USERPERSONA-1:【用户角色】段在模板之后、simple/complex 注入之前;
+    // 与真实 build 的拼装位置一致(block() 单一出处)。
+    if matches!(mode, AppMode::Roleplay) {
+        if let Some(block) = user_persona_block.as_deref() {
+            push_preview_layer(&mut layers, "user_persona", "system", 3, block);
+        }
     }
 
     // task 模式追加规划器/执行者/汇总者三层固定提示词(单一来源 task_service/prompt.rs)
@@ -309,7 +325,7 @@ pub async fn prompt_preview(
             "pov_anchor",
             "system",
             4,
-            pov_anchor(pov_mode, char_name, None),
+            pov_anchor(pov_mode, char_name, user_persona.user_name()),
         );
     }
 

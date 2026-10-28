@@ -28,6 +28,9 @@ pub struct MacroExpandCtx {
     pub mes_example: Option<String>,
     #[serde(default)]
     pub user_name: Option<String>,
+    /// 用户角色设定原文(USERPERSONA-1;调试端点用,缺省空)
+    #[serde(default)]
+    pub user_description: Option<String>,
     #[serde(default)]
     pub user_input: Option<String>,
     #[serde(default)]
@@ -75,6 +78,7 @@ pub async fn expand(
             character_name: ctx.character_name.as_deref().unwrap_or(""),
             character_description: ctx.character_description.as_deref().unwrap_or(""),
             user_name: ctx.user_name.as_deref().unwrap_or("用户"),
+            user_description: ctx.user_description.as_deref().unwrap_or(""),
             personality: ctx.personality.as_deref().unwrap_or(""),
             scenario: ctx.scenario.as_deref().unwrap_or(""),
             mes_example: ctx.mes_example.as_deref().unwrap_or(""),

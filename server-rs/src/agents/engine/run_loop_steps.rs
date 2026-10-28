@@ -28,7 +28,8 @@ pub(super) fn step_messages(
         let mut mctx = MacroCtx {
             character_name: &ctx.chara_name,
             character_description: &ctx.chara_desc,
-            user_name: "用户",
+            user_name: &ctx.user_name,
+            user_description: &ctx.user_description,
             user_input,
             personality: &ctx.personality,
             scenario: &ctx.scenario,
@@ -53,7 +54,12 @@ pub(super) fn current_pov_anchor(ctx: &CollectedCtx) -> String {
     } else {
         None
     };
-    crate::services::pov::pov_anchor(mode, &ctx.chara_name, None)
+    let user_name = if ctx.user_name.trim().is_empty() || ctx.user_name == "用户" {
+        None
+    } else {
+        Some(ctx.user_name.as_str())
+    };
+    crate::services::pov::pov_anchor(mode, &ctx.chara_name, user_name)
 }
 
 /// 反思判定基准:简单模式四项(宏展开,不含禁词);复杂模式返回空串
@@ -70,7 +76,8 @@ pub(super) fn current_inject_requirements(rctx: &mut RunContext<'_>, ctx: &Colle
     let mut mctx = MacroCtx {
         character_name: &ctx.chara_name,
         character_description: &ctx.chara_desc,
-        user_name: "用户",
+        user_name: &ctx.user_name,
+        user_description: &ctx.user_description,
         user_input: "",
         personality: &ctx.personality,
         scenario: &ctx.scenario,
