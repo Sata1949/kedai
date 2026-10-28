@@ -319,15 +319,36 @@ pub async fn prompt_preview(
         constant_system_entry = Some(preview_entries.iter().any(|entry| {
             entry.enabled && entry.constant && entry.role.as_deref().unwrap_or("system") == "system"
         }));
+        // CARD-1:角色卡层改为 metadata——不再冒充 system 层。模板是否真把
+        // description/personality/scenario/mes_example 送进 system,取决于模板占位符;
+        // 内容原样展示供用户对照,不在这里二次拼装成一条假 system。
+        let mut card_text = format!(
+            "角色名：{}\n角色描述：{}",
+            character.chara_name, character.description
+        );
+        let raw = character.data_raw.as_ref();
+        for (label, key) in [
+            ("性格", "personality"),
+            ("场景", "scenario"),
+            ("对话示例", "mes_example"),
+        ] {
+            if let Some(value) = raw
+                .and_then(|r| r.get(key))
+                .and_then(|v| v.as_str())
+                .filter(|v| !v.trim().is_empty())
+            {
+                card_text.push_str(&format!("\n{label}：{value}"));
+            }
+        }
+        card_text.push_str(
+            "\n（供 {{character_description}} / {{personality}} / {{scenario}} / {{mes_example_block}} 宏展开；是否进入 system 取决于模板）",
+        );
         push_preview_layer(
             &mut layers,
-            "character_card",
-            "system",
+            "character_card_metadata",
+            "metadata",
             3,
-            format!(
-                "角色名：{}\n角色描述：{}",
-                character.chara_name, character.description
-            ),
+            card_text,
         );
         let summary = preview_entries
             .iter()
@@ -383,28 +404,26 @@ pub async fn prompt_preview(
         push_preview_layer(&mut layers, "history_summary", "metadata", 2, summary);
     }
 
-    if let Some(flow) = state
+    // CARD-1:步骤指令不再以 layer 0 的假层展示——真实下发是运行时追加到 system 末尾,
+    // 且 deep/agent 用 planner 步骤(完全不来自当前 flow)。这里只给结构化告警,
+    // 避免用户把预览里的顺序当成真实顺序。
+    let has_runtime_step_prompt = state
         .flow
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get()
         .filter(|flow| flow.enabled)
-    {
-        for (index, step) in flow.steps.iter().filter(|step| step.enabled).enumerate() {
-            if let Some(prompt) = step
-                .system_prompt
-                .as_deref()
-                .filter(|text| !text.trim().is_empty())
-            {
-                push_preview_layer(
-                    &mut layers,
-                    format!("step_instruction:{}", index + 1),
-                    "system",
-                    0,
-                    prompt,
-                );
-            }
-        }
+        .is_some_and(|flow| {
+            flow.steps.iter().any(|step| {
+                step.enabled
+                    && step
+                        .system_prompt
+                        .as_deref()
+                        .is_some_and(|p| !p.trim().is_empty())
+            })
+        });
+    if matches!(mode, AppMode::Roleplay) && has_runtime_step_prompt {
+        warnings.push("step_instruction_runtime_only");
     }
 
     if !settings.reflect_prompt.trim().is_empty() {
@@ -461,7 +480,7 @@ pub async fn prompt_preview(
 
     Json(PromptPreviewResponse {
         ok: true,
-        note: "历史仅显示角色、长度与哈希；预览不包含聊天正文或 API Key。步骤指令与工具指南在具体运行步骤确定后追加。",
+        note: "历史仅显示角色、长度与哈希；预览不包含聊天正文或 API Key。模板与注入层按原文展示，宏在发送时展开；步骤指令与工具指南在运行时追加，不在预览层中展示。",
         layers,
         warnings,
     })

@@ -21,9 +21,9 @@ use crate::services::prompt_inject_service::PromptInjectConfig;
 use serde_json::Value;
 
 use super::{
-    append_memory_notice, apply_inject_insertions, build_llm_messages_with_position,
+    append_memory_notice, apply_inject_insertions, build_llm_messages_with_card,
     insert_memory_slot, insert_recall_slot, insert_summary_slot, parse_inject_insertion,
-    trim_to_context, InjectAt, InjectInsertion, LiteraryTexts,
+    trim_to_context, CardTexts, InjectAt, InjectInsertion, LiteraryTexts,
 };
 
 /// 阶段 2「上下文收集」的只读产物:字符卡/历史/世界书/设置快照等,
@@ -33,6 +33,8 @@ pub(in crate::agents::engine) struct CollectedCtx {
     pub(in crate::agents::engine) chara_desc: String,
     pub(in crate::agents::engine) personality: String,
     pub(in crate::agents::engine) scenario: String,
+    /// 角色卡对话示例(CARD-1):`{{mes_example}}` / `{{mes_example_block}}` 的数据源。
+    pub(in crate::agents::engine) mes_example: String,
     pub(in crate::agents::engine) history: Vec<MessageRecord>,
     pub(in crate::agents::engine) history_tuples: Vec<(String, String)>,
     /// 与 history_tuples 逐条对齐的图像引用(视觉能力包 D2;已解析为 data URL,
@@ -415,20 +417,25 @@ impl AgentEngine {
         // 反思未通过放弃重试时,附在自动建议之后;注入角色(user/assistant;system 钳制为 user)
         let reflect_advice_supplement = settings_snap.reflect_advice_prompt.clone();
         let reflect_advice_role = settings_snap.reflect_advice_role.clone();
-        // 提示词注入:配置快照已提前获取(inject_snapshot);角色卡个性/情景(供宏)
-        let (personality, scenario) = match character.as_ref().and_then(|c| c.data_raw.as_ref()) {
-            Some(raw) => (
-                raw.get("personality")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                raw.get("scenario")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-            ),
-            None => (String::new(), String::new()),
-        };
+        // 提示词注入:配置快照已提前获取(inject_snapshot);角色卡个性/情景/对话示例(供宏)
+        let (personality, scenario, mes_example) =
+            match character.as_ref().and_then(|c| c.data_raw.as_ref()) {
+                Some(raw) => (
+                    raw.get("personality")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    raw.get("scenario")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    raw.get("mes_example")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                ),
+                None => (String::new(), String::new(), String::new()),
+            };
         // 位置0 预设尾部提示词与注入角色(空 = 禁用;system 在尾部钳制为 user)
         let preset_tail_snapshot = settings_snap.preset_tail_prompt.clone();
         let preset_tail = if preset_tail_snapshot.trim().is_empty() {
@@ -442,6 +449,7 @@ impl AgentEngine {
             chara_desc,
             personality,
             scenario,
+            mes_example,
             history,
             history_tuples,
             history_images,
@@ -481,11 +489,14 @@ impl AgentEngine {
     ) -> Vec<i64> {
         // 反思失败建议(位置0):本轮初始构建时恒为空(未失败/未生成),后续失败才注入
         let mut scopes_guard = rctx.scopes.lock().unwrap_or_else(|e| e.into_inner());
-        let (messages, mut protected_tail) = build_llm_messages_with_position(
+        let (messages, mut protected_tail) = build_llm_messages_with_card(
             &ctx.chara_name,
-            &ctx.chara_desc,
-            &ctx.personality,
-            &ctx.scenario,
+            CardTexts {
+                description: &ctx.chara_desc,
+                personality: &ctx.personality,
+                scenario: &ctx.scenario,
+                mes_example: &ctx.mes_example,
+            },
             &ctx.world_constant,
             &ctx.world_triggered,
             &ctx.history_tuples,

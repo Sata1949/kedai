@@ -359,6 +359,7 @@ mod tests {
             user_name: "用户",
             personality: "",
             scenario: "",
+            mes_example: "",
             user_input: "",
             history: &[],
             vars: &mut vars,

@@ -21,6 +21,7 @@ mod connector_pool;
 mod params;
 mod prompts_literary;
 mod secret;
+mod task_defaults;
 
 pub use connection::{
     mask_key, normalize_base_url, resolve_connector_target, strip_endpoint_suffix,
@@ -34,11 +35,14 @@ pub use params::{
     default_literary_roleplay_agent_prompt, default_literary_task_agent_prompt,
     default_reflect_prompt, default_roleplay_agent_prompt, default_task_agent_prompt,
     is_valid_literary_recommend_preset, is_valid_literary_style_preset, literary_recommend_values,
-    literary_style_text, task_idle_floor_secs, LiteraryRecommendSnapshot, McpServerConfig,
-    ModeSettings, RoleplayPromptConfig, TaskPromptConfig, TASK_DEFAULT_OUTPUT_TOKENS,
-    TASK_DEFAULT_TEMPERATURE, TASK_DEFAULT_TOP_P,
+    literary_style_text, task_idle_floor_secs, McpServerConfig, ModeSettings,
+    RoleplayPromptConfig, TaskPromptConfig,
 };
 pub use prompts_literary::LiteraryRecommendValues;
+pub use task_defaults::{
+    LiteraryRecommendSnapshot, TASK_DEFAULT_OUTPUT_TOKENS, TASK_DEFAULT_TEMPERATURE,
+    TASK_DEFAULT_TOP_P,
+};
 
 /// 团队总预算的可调下限(秒,设置页口径,2026-10-26):低于 10 分钟连一个子目标的
 /// 「读→改→自测」闭环都跑不完,截断只会制造半成品,故不允许更小的有限值。

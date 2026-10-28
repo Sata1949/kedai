@@ -23,6 +23,9 @@ pub struct MacroExpandCtx {
     pub personality: Option<String>,
     #[serde(default)]
     pub scenario: Option<String>,
+    /// 角色卡对话示例(CARD-1;调试端点用,缺省空)
+    #[serde(default)]
+    pub mes_example: Option<String>,
     #[serde(default)]
     pub user_name: Option<String>,
     #[serde(default)]
@@ -74,6 +77,7 @@ pub async fn expand(
             user_name: ctx.user_name.as_deref().unwrap_or("用户"),
             personality: ctx.personality.as_deref().unwrap_or(""),
             scenario: ctx.scenario.as_deref().unwrap_or(""),
+            mes_example: ctx.mes_example.as_deref().unwrap_or(""),
             user_input: ctx.user_input.as_deref().unwrap_or(""),
             history: &history,
             vars: &mut vars,

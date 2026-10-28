@@ -12,13 +12,15 @@
 // pub(in crate::agents::engine),可见范围与拆分前完全一致,未放宽。
 mod build;
 #[cfg(test)]
+mod build_inline_tests;
+#[cfg(test)]
 mod build_tests;
 mod context;
 mod inject;
 mod steps;
 mod trim;
 
-pub(super) use build::{build_llm_messages_with_position, LiteraryTexts};
+pub(super) use build::{build_llm_messages_with_card, CardTexts, LiteraryTexts};
 pub(super) use context::CollectedCtx;
 pub(super) use inject::{
     append_memory_notice, apply_inject_insertions, inject_reflect_advice, insert_memory_slot,

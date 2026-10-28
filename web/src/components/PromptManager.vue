@@ -61,6 +61,13 @@ function truncate(text: string, n: number): string {
   return t.length > n ? `${t.slice(0, n)}…` : t;
 }
 
+/** 角色卡 data_raw 中的文本字段(CARD-1:位置3 概览展示性格/场景/对话示例) */
+function rawCardField(key: string): string {
+  const raw = store.currentCharacter?.data_raw as Record<string, unknown> | undefined;
+  const value = raw?.[key];
+  return typeof value === 'string' ? value : '';
+}
+
 /** 位置4 agent 执行流程摘要(只读,编辑在设置面板) */
 const currentFlow = computed(() => {
   const lib = store.agentFlowLibrary;
@@ -271,6 +278,15 @@ async function saveAll(): Promise<void> {
           <div class="sv-stack">
             <div class="pm-summary">
               当前角色:{{ store.currentCharacterName }} — {{ truncate(store.currentCharacter?.description ?? '无角色描述', 100) }}
+            </div>
+            <div v-if="rawCardField('personality')" class="pm-summary">
+              性格:{{ truncate(rawCardField('personality'), 80) }}
+            </div>
+            <div v-if="rawCardField('scenario')" class="pm-summary">
+              场景:{{ truncate(rawCardField('scenario'), 80) }}
+            </div>
+            <div v-if="rawCardField('mes_example')" class="pm-summary">
+              对话示例:{{ truncate(rawCardField('mes_example'), 80) }}
             </div>
             <!-- 角色卡内嵌世界书(character_book)常驻条目 -->
             <div class="pm-book">

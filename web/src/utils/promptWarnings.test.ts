@@ -23,6 +23,13 @@ describe('promptWarningText(预览告警文案单一出处)', () => {
     expect(text).toContain('默认');
   });
 
+  it('步骤指令运行时追加码说明预览不展示', () => {
+    const text = promptWarningText('step_instruction_runtime_only');
+    expect(text).toContain('运行时');
+    expect(text).toContain('system');
+    expect(text).toContain('预览');
+  });
+
   it('原型链键名不得被当成已登记码', () => {
     expect(promptWarningText('constructor')).toBe('constructor');
     expect(promptWarningText('toString')).toBe('toString');

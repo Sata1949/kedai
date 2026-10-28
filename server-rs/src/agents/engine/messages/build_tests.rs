@@ -15,7 +15,9 @@ use crate::services::prompt_inject_service::{
 };
 use std::collections::HashMap;
 
-use super::build::{build_llm_messages_with_position, LiteraryTexts};
+use super::build::{
+    build_llm_messages_with_card, build_llm_messages_with_position, CardTexts, LiteraryTexts,
+};
 use super::trim_to_context;
 
 /// 构造带角色的世界书注入(6 层规范测试用)
@@ -1906,6 +1908,120 @@ fn pov_anchor_absent_without_inject_config() {
     assert!(
         !messages[0].content.contains("【本轮人称锚定"),
         "无注入配置时不得追加锚定: {}",
+        messages[0].content
+    );
+}
+
+/// CARD-1:角色卡四字段都能到达 system;mes_example 必须经独立 untrusted source 包裹,
+/// `{{mes_example_block}}` 非空时带标题。
+#[test]
+fn card_fields_reach_system_and_mes_example_is_bounded() {
+    let mut vars = HashMap::new();
+    let (messages, _) = build_llm_messages_with_card(
+        "芽衣",
+        CardTexts {
+            description: "旧书店的店主,右手有旧伤。",
+            personality: "寡言,观察力强。",
+            scenario: "雨夜的旧书店。",
+            mes_example: "「来了。」他把门推开,侧身让出半边。",
+        },
+        &[],
+        &[],
+        &[("user".to_string(), "你好".to_string())],
+        &[],
+        Some(
+            "CUSTOM {{character_description}} / {{personality}} / {{scenario}} / {{mes_example_block}}",
+        ),
+        None,
+        None,
+        "user",
+        None,
+        "user",
+        &mut vars,
+        &mut AssistantVars::new(),
+        None,
+        LiteraryTexts::default(),
+    );
+    let system = &messages[0].content;
+    for needle in [
+        "旧书店的店主",
+        "寡言",
+        "雨夜的旧书店",
+        "【对话示例】",
+        "「来了。」他把门推开",
+        r#"<UNTRUSTED_PROMPT_SOURCE source="character_card.mes_example">"#,
+    ] {
+        assert!(system.contains(needle), "缺 {needle}: {system}");
+    }
+}
+
+/// CARD-1:兜底模板与默认词字段对齐;空 mes_example 不得留下悬空标题。
+#[test]
+fn fallback_template_contains_card_fields_and_skips_empty_example() {
+    let mut vars = HashMap::new();
+    let (messages, _) = build_llm_messages_with_card(
+        "芽衣",
+        CardTexts {
+            description: "旧书店的店主。",
+            personality: "寡言。",
+            scenario: "雨夜。",
+            mes_example: "「来了。」",
+        },
+        &[],
+        &[],
+        &[("user".to_string(), "你好".to_string())],
+        &[],
+        None,
+        None,
+        None,
+        "user",
+        None,
+        "user",
+        &mut vars,
+        &mut AssistantVars::new(),
+        None,
+        LiteraryTexts::default(),
+    );
+    let system = &messages[0].content;
+    for needle in [
+        "旧书店的店主",
+        "性格:",
+        "场景:",
+        "【对话示例】",
+        r#"<UNTRUSTED_PROMPT_SOURCE source="character_card.personality">"#,
+        r#"<UNTRUSTED_PROMPT_SOURCE source="character_card.scenario">"#,
+        r#"<UNTRUSTED_PROMPT_SOURCE source="character_card.mes_example">"#,
+    ] {
+        assert!(system.contains(needle), "兜底模板缺 {needle}: {system}");
+    }
+
+    let mut vars = HashMap::new();
+    let (messages, _) = build_llm_messages_with_card(
+        "芽衣",
+        CardTexts {
+            description: "旧书店的店主。",
+            personality: "",
+            scenario: "",
+            mes_example: "",
+        },
+        &[],
+        &[],
+        &[("user".to_string(), "你好".to_string())],
+        &[],
+        None,
+        None,
+        None,
+        "user",
+        None,
+        "user",
+        &mut vars,
+        &mut AssistantVars::new(),
+        None,
+        LiteraryTexts::default(),
+    );
+    assert!(
+        !messages[0].content.contains("【对话示例】"),
+        "空示例不得产生悬空标题: {}",
         messages[0].content
     );
 }
