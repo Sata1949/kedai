@@ -559,7 +559,10 @@ export function parseImportBundle(
           key: 'prompts',
           label: SECTION_LABELS.prompts,
           count: 1,
-          summary: '一段文本,作为运行时主提示词导入(预览内可切换为系统提示词)',
+          // IMPHUB-L3:此处曾写「(预览内可切换为系统提示词)」,但本段 option 恒为 null、
+          // 预览把 summary 当纯文本渲染、执行侧只走 runtime —— 承诺了不存在的能力。
+          // 按计划 IMPHUB-F1 的收窄一侧(②)删去该句,零行为变化。
+          summary: '一段文本,作为运行时主提示词导入',
           option: null,
           payload: { system: { roleplay: '', task: '' }, runtime: text },
         },

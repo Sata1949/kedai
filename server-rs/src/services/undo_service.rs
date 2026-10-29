@@ -250,6 +250,10 @@ impl UndoService {
 
     /// 文件快照项:old = 执行前内容;不存在为 null(逆操作 = 删除);
     /// 内容超限或不可读(非 UTF-8)标 truncated=true(逆操作拒绝)
+    ///
+    /// UNDOFIX2-L3:上限判定必须在**读入正文之前**——先 `metadata().len()` 判大小,
+    /// 超限直接标 truncated 不读正文。`replace` 一次恢复 N 个文件,旧实现(先
+    /// `read_to_string` 再比长度)的峰值内存是 N 倍文件大小。
     fn file_entry(&self, character_id: &str, rel: &str, entry_type: &str) -> Value {
         let full = self.file_root(character_id).join(rel);
         if !full.exists() {
@@ -265,16 +269,27 @@ impl UndoService {
                 "existed": true, "truncated": false, "old": Value::Null,
             });
         }
+        let truncated = || {
+            json!({
+                "path": rel, "entry_type": entry_type,
+                "existed": true, "truncated": true, "old": Value::Null,
+            })
+        };
+        // 先按文件长度判上限(≤ 语义:恰好等于上限仍可快照)
+        match std::fs::metadata(&full) {
+            Ok(meta) if meta.len() as usize <= MAX_SNAPSHOT_FILE_BYTES => {}
+            // 超限:不读正文直接标截断(避免把超大文件读进内存)
+            Ok(_) => return truncated(),
+            // 取不到元数据(权限/竞态删除):与读取失败同语义
+            Err(_) => return truncated(),
+        }
         match std::fs::read_to_string(&full) {
             Ok(content) if content.len() <= MAX_SNAPSHOT_FILE_BYTES => json!({
                 "path": rel, "entry_type": entry_type,
                 "existed": true, "truncated": false, "old": content,
             }),
-            // 超限或读取失败:都无法精确恢复,统一按截断拒绝语义处理
-            _ => json!({
-                "path": rel, "entry_type": entry_type,
-                "existed": true, "truncated": true, "old": Value::Null,
-            }),
+            // 非 UTF-8 或读取中途变化:都无法精确恢复,统一按截断拒绝语义处理
+            _ => truncated(),
         }
     }
 
@@ -903,6 +918,19 @@ fn precheck_payload(snapshot_id: &str, payload_raw: &str) -> Result<Value, Strin
                                 "快照 {snapshot_id} 气泡 #{rid} 的 before.role 缺失或非字符串"
                             ));
                         }
+                        // UNDOFIX2-L4:role 必须在 messages.role 的 CHECK 白名单内。
+                        // 旧实现只校验「是字符串」,`role:"tool"` 能过预检,却在 INSERT 时
+                        // 违反 CHECK → 恢复中途失败且重试仍失败。
+                        match o.get("role").and_then(|v| v.as_str()) {
+                            Some("user") | Some("assistant") | Some("system") => {}
+                            Some(other) => {
+                                return Err(format!(
+                                    "快照 {snapshot_id} 气泡 #{rid} 的 before.role 非法({other}),\
+                                     只允许 user/assistant/system"
+                                ));
+                            }
+                            None => unreachable!("上一段已确认 role 为字符串"),
+                        }
                         if o.get("created_at").and_then(|v| v.as_str()).is_none() {
                             return Err(format!(
                                 "快照 {snapshot_id} 气泡 #{rid} 的 before.created_at 缺失或非字符串"
@@ -976,7 +1004,17 @@ fn precheck_file_entry(snapshot_id: &str, entry: &Value) -> Result<(), String> {
         }
     }
     match entry.get("old") {
-        Some(Value::String(_)) | Some(Value::Null) => {}
+        Some(Value::String(s)) => {
+            // UNDOFIX2-L4:文件正文也必须有上限。快照写入侧本就 ≤256KB,
+            // 超出者只可能来自持久化数据被污染/手工拼接;预检放行等于让它进 restore。
+            if s.len() > MAX_SNAPSHOT_FILE_BYTES {
+                return Err(format!(
+                    "快照 {snapshot_id} 的文件项 {rel} 的 old 超过 {}KB 上限",
+                    MAX_SNAPSHOT_FILE_BYTES / 1024
+                ));
+            }
+        }
+        Some(Value::Null) => {}
         _ => {
             return Err(format!(
                 "快照 {snapshot_id} 的文件项 {rel} 的 old 缺失或类型非法(应为字符串或 null)"
@@ -996,9 +1034,35 @@ fn precheck_file_entry(snapshot_id: &str, entry: &Value) -> Result<(), String> {
             ));
         }
     }
-    if entry.get("existed").is_some_and(|v| !v.is_boolean()) {
+    // UNDOFIX2-L4:existed 必须**在场**且形态与 old 自洽。旧实现只校验「若在则必须是
+    // 布尔」——缺 existed 时 `{entry_type:"file", old:null}` 会被 apply 侧当「逆操作 =
+    // 删除」而静默删掉文件。写入侧(见 file_entry)恒显式给 existed,故不做兼容放宽。
+    let existed = match entry.get("existed") {
+        Some(Value::Bool(b)) => *b,
+        Some(_) => {
+            return Err(format!(
+                "快照 {snapshot_id} 的文件项 {rel} 的 existed 类型非法(应为布尔)"
+            ));
+        }
+        None => {
+            return Err(format!(
+                "快照 {snapshot_id} 的文件项 {rel} 缺 existed,无法判断逆操作是回写还是删除"
+            ));
+        }
+    };
+    // 形态自洽:existed=true 的文件项必须带 old 字符串(否则被当删除);existed=false
+    // 必须 old=null(否则回写会凭空造出文件)。
+    let has_old = entry.get("old").is_some_and(|v| v.is_string());
+    if existed && !has_old {
         return Err(format!(
-            "快照 {snapshot_id} 的文件项 {rel} 的 existed 类型非法(应为布尔)"
+            "快照 {snapshot_id} 的文件项 {rel} 标 existed=true 却无 old 内容,\
+             回退会被误当成删除"
+        ));
+    }
+    if !existed && has_old {
+        return Err(format!(
+            "快照 {snapshot_id} 的文件项 {rel} 标 existed=false 却带 old 内容,\
+             回退会凭空写出文件"
         ));
     }
     Ok(())
@@ -1013,337 +1077,8 @@ fn truncate_chars(s: &str, max: usize) -> String {
     format!("{head}…")
 }
 
+/// 单元测试迁至独立文件(UNDOFIX2 批收口):`undo_service_tests.rs` 不计
+/// check-file-size 的 ratchet,生产文件回落基线以内。
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::utils::test_support::TempDataDir;
-
-    /// 最小装配:临时库 + 角色/会话行 + 一条 vars 快照(不依赖 HTTP 与真实角色文件)
-    fn build_service(dir: &TempDataDir) -> (Arc<Db>, Arc<UndoService>, String) {
-        let db = Arc::new(Db::open(&dir.join("kedai.db"), dir.path()).expect("打开测试库失败"));
-        {
-            let conn = db.write();
-            conn.execute(
-                "INSERT INTO characters(id, name, chara_name, file_path, data_raw, created_at) VALUES ('c1', '测试', '测试', '', '{}', 't')",
-                [],
-            )
-            .expect("插角色行失败");
-        }
-        let sessions = Arc::new(SessionService::new(db.clone()));
-        let sid = sessions
-            .create("c1", Some("锁测试"))
-            .expect("建会话失败")
-            .id;
-        let memory = Arc::new(MemoryService::new(db.clone()));
-        let settings = Arc::new(Mutex::new(RuntimeSettings::from_config(
-            &crate::config::test_config(),
-        )));
-        let svc = Arc::new(UndoService::new(
-            db.clone(),
-            sessions,
-            memory,
-            settings,
-            dir.path().to_path_buf(),
-        ));
-        {
-            let conn = db.write();
-            conn.execute(
-                "INSERT INTO undo_snapshots (id, session_id, tool_name, label, payload, created_at, seq) VALUES ('snap-busy', ?1, 'update_variables', '更新变量树', '{\"kind\":\"vars\",\"before\":\"{}\"}', ?2, 1)",
-                params![sid, now_iso()],
-            )
-            .expect("插快照行失败");
-        }
-        (db, svc, sid)
-    }
-
-    /// codex 复审 P1-1(确定性证据):生成侧持有每会话锁期间,restore 必须拒绝(busy);
-    /// 释放后同一快照可正常恢复——证明「生成↔回退」互斥锁真实生效,而非仅 API 预检形态。
-    /// 持锁形态与 /api/chat/send 的 `try_lock_owned` 同款(OwnedMutexGuard 自持 Arc)。
-    #[test]
-    fn restore_rejects_while_session_lock_held() {
-        let dir = TempDataDir::new("undo-session-lock");
-        let (_db, svc, sid) = build_service(&dir);
-        let guard = svc
-            .session_lock(&sid)
-            .try_lock_owned()
-            .expect("空闲锁应可获取");
-        let err = svc.restore("snap-busy").expect_err("持锁期间应拒绝恢复");
-        assert_eq!(err, RESTORE_BUSY_MESSAGE);
-        drop(guard);
-        let receipt = svc
-            .restore("snap-busy")
-            .expect("释放后应可恢复")
-            .expect("快照应存在");
-        assert_eq!(receipt.restored_count, 1);
-    }
-
-    /// codex 复审二轮 P2(三轮判假绿后重写):锁表机会性回收——空闲条目(仅 map 持有)
-    /// 在超阈值时被清,被持有的锁不受影响。判据是**同一性**:回收后经 map 再取必须
-    /// 还是「guard 自持的那一把」(Arc::ptr_eq)——若实现误清条目,再取会新建一把,
-    /// ptr_eq 立即变假(旧版只断言 `held.try_lock()` 仍锁定,外部 Arc 在手时假绿,
-    /// codex 三轮指出)。
-    #[test]
-    fn session_lock_prunes_idle_entries() {
-        let dir = TempDataDir::new("undo-lock-prune");
-        let (_db, svc, _sid) = build_service(&dir);
-        let idle = svc.session_lock("gc-idle");
-        let idle_weak = Arc::downgrade(&idle);
-        drop(idle); // 只剩 map 持有 → 可回收
-        let held = svc.session_lock("gc-held");
-        let held_weak = Arc::downgrade(&held);
-        // OwnedMutexGuard 自持一份 Arc(与 chat/send 的 try_lock_owned 同形态);
-        // 丢掉外部引用后,若 map 误清条目,strong 只剩 guard 那一份。
-        let held_guard = held.clone().try_lock_owned().expect("空闲锁应可获取");
-        drop(held);
-        // 灌到超阈值,再取一把触发回收
-        for i in 0..70 {
-            let _ = svc.session_lock(&format!("gc-fill-{i}"));
-        }
-        let _trigger = svc.session_lock("gc-trigger");
-        assert!(
-            idle_weak.upgrade().is_none(),
-            "空闲条目应被回收(map 不再持有)"
-        );
-        let alive = held_weak.upgrade().expect("guard 自持的锁对象应仍在");
-        let again = svc.session_lock("gc-held");
-        assert!(
-            Arc::ptr_eq(&again, &alive),
-            "被持有的锁条目不得被回收:再取必须还是同一把(同一性判据)"
-        );
-        assert!(
-            again.try_lock().is_err(),
-            "同一把锁仍被 guard 持有,不可再取"
-        );
-        drop(held_guard);
-        assert!(
-            svc.session_lock("gc-held").try_lock().is_ok(),
-            "释放后同 id 锁应可正常使用"
-        );
-    }
-
-    /// codex 复审二轮 P1-3 残留:replace.bubbles 的 before 缺字段 / before.id 与
-    /// 外层不一致 必须被预检拒绝(零改动)——apply 侧会拿默认值静默改写消息行。
-    #[test]
-    fn precheck_rejects_tampered_bubble_before() {
-        let dir = TempDataDir::new("undo-bubble-precheck");
-        let (db, svc, sid) = build_service(&dir);
-        let cases: [(&str, Value); 3] = [
-            (
-                "缺 extra",
-                json!({"kind":"replace","files":[],"bubbles":[{"id":10,"before":{"id":10,"role":"assistant","content":"x","created_at":"t"}}]}),
-            ),
-            (
-                "before.id 与外层不一致",
-                json!({"kind":"replace","files":[],"bubbles":[{"id":10,"before":{"id":11,"role":"assistant","content":"x","extra":{},"created_at":"t"}}]}),
-            ),
-            (
-                "缺 role",
-                json!({"kind":"replace","files":[],"bubbles":[{"id":10,"before":{"id":10,"content":"x","extra":{},"created_at":"t"}}]}),
-            ),
-        ];
-        for (i, (tag, payload)) in cases.iter().enumerate() {
-            let snap_id = format!("snap-bad-bubble-{i}");
-            {
-                let conn = db.write();
-                conn.execute(
-                    "INSERT INTO undo_snapshots (id, session_id, tool_name, label, payload, created_at, seq) VALUES (?1, ?2, 'replace', '修改气泡', ?3, ?4, ?5)",
-                    params![snap_id, sid, payload.to_string(), now_iso(), 100 + i as i64],
-                )
-                .expect("插快照行失败");
-            }
-            let err = svc
-                .restore(&snap_id)
-                .expect_err(&format!("{tag} 应被预检拒绝"));
-            assert!(
-                err.contains("预检未通过"),
-                "{tag} 的错误应说明预检拒绝: {err}"
-            );
-            // 零删除:该快照仍在
-            assert!(
-                svc.session_of(&snap_id).is_some(),
-                "{tag}: 预检拒绝不得删除快照"
-            );
-        }
-    }
-
-    fn memory_ctx(sid: &str) -> ToolContext {
-        ToolContext {
-            session_id: sid.to_string(),
-            character_id: "c1".to_string(),
-            agent_depth: 0,
-            scope: None,
-            budget: None,
-        }
-    }
-
-    /// P1 回归(2026-10-17 复审):记忆快照必须绑定 memory_write 回传的真实行 id。
-    /// 旧实现按「本角色 max(id) 之后的第一行」猜——窗口期另一会话先插入时会绑错行,
-    /// 回退将删除无关记忆。
-    #[test]
-    fn memory_snapshot_binds_tool_output_id_not_guessed_row() {
-        let dir = TempDataDir::new("undo-memory-bind");
-        let (db, svc, sid) = build_service(&dir);
-        let stager = svc
-            .snapshot_before(
-                "memory_write",
-                &json!({ "fact": "目标记忆" }),
-                &memory_ctx(&sid),
-                None,
-            )
-            .expect("应产生 memory_write 快照");
-
-        // 窗口期另一会话先写入(id 更小),旧实现会把它当成自己的插入行。
-        let concurrent = svc
-            .memory
-            .insert("c1", None, "manual", "并发记忆")
-            .expect("并发记忆应写入");
-        let target = svc
-            .memory
-            .insert("c1", Some(&sid), "tool", "目标记忆")
-            .expect("目标记忆应写入");
-        assert!(concurrent.id < target.id, "前提:并发行 id 更小");
-
-        let snap_id = stager
-            .commit(
-                &json!({
-                    "ok": true, "stored": "目标记忆",
-                    "id": target.id, "created": true,
-                })
-                .to_string(),
-            )
-            .expect("快照应落库");
-        let payload: String = db
-            .read()
-            .unwrap()
-            .query_row(
-                "SELECT payload FROM undo_snapshots WHERE id = ?1",
-                params![snap_id],
-                |r| r.get(0),
-            )
-            .unwrap();
-        let payload: Value = serde_json::from_str(&payload).unwrap();
-        assert_eq!(
-            payload["inserted_id"],
-            json!(target.id),
-            "必须绑定工具回传的真实 id,不能按 max(id) 猜"
-        );
-    }
-
-    /// P1 回归:去重命中时 memory_write 没有插入新行,不得产快照。
-    #[test]
-    fn memory_snapshot_skips_when_dedup_created_false() {
-        let dir = TempDataDir::new("undo-memory-dedup");
-        let (db, svc, sid) = build_service(&dir);
-        let existing = svc
-            .memory
-            .insert("c1", None, "manual", "重复记忆")
-            .expect("种子记忆应写入");
-        let stager = svc
-            .snapshot_before(
-                "memory_write",
-                &json!({ "fact": "重复记忆" }),
-                &memory_ctx(&sid),
-                None,
-            )
-            .expect("应产生 memory_write 快照");
-        // 窗口期另一条记忆落地;旧实现会把它当成「自己插入的行」。
-        let concurrent = svc
-            .memory
-            .insert("c1", None, "manual", "窗口期并发记忆")
-            .expect("并发记忆应写入");
-        assert!(concurrent.id > existing.id, "前提:并发行 id 更大");
-        // 模拟工具命中去重:没有新行,created=false。
-        let snap_id = stager.commit(
-            &json!({
-                "ok": true, "stored": "重复记忆",
-                "id": existing.id, "created": false,
-            })
-            .to_string(),
-        );
-        assert!(snap_id.is_none(), "去重命中不得产快照");
-        let count: i64 = db
-            .read()
-            .unwrap()
-            .query_row(
-                "SELECT COUNT(*) FROM undo_snapshots WHERE tool_name = 'memory_write'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(count, 0, "去重命中不得留下快照行");
-    }
-
-    /// P2 回归:气泡删除失败必须上抛并保留快照,不得「报成功 + 清恢复依据」。
-    #[test]
-    fn restore_propagates_bubble_delete_error_and_keeps_snapshot() {
-        let dir = TempDataDir::new("undo-bubble-delete-error");
-        let (db, svc, sid) = build_service(&dir);
-        let msg = svc
-            .sessions
-            .add_message(&sid, "assistant", "待删除", json!({}))
-            .expect("消息应写入");
-        {
-            let conn = db.write();
-            conn.execute(
-                "INSERT INTO undo_snapshots (id, session_id, tool_name, label, payload, created_at, seq) VALUES ('snap-bubble-del', ?1, 'write', '写入对话气泡', ?2, ?3, 10)",
-                params![
-                    sid,
-                    json!({ "kind": "bubble_insert", "message_id": msg.id }).to_string(),
-                    now_iso()
-                ],
-            )
-            .unwrap();
-            conn.execute_batch(&format!(
-                "CREATE TRIGGER block_msg_delete BEFORE DELETE ON messages \
-                 WHEN OLD.id = {} BEGIN SELECT RAISE(ABORT, 'blocked'); END;",
-                msg.id
-            ))
-            .unwrap();
-        }
-        let err = svc
-            .restore("snap-bubble-del")
-            .expect_err("删除失败必须上抛");
-        assert!(err.contains("气泡"), "错误应说明气泡删除失败: {err}");
-        assert!(
-            svc.session_of("snap-bubble-del").is_some(),
-            "失败必须保留快照"
-        );
-        assert!(
-            svc.sessions.get_message(&sid, msg.id).is_some(),
-            "消息应仍在"
-        );
-    }
-
-    /// P2 回归:记忆删除失败同样必须上抛并保留快照。
-    #[test]
-    fn restore_propagates_memory_delete_error_and_keeps_snapshot() {
-        let dir = TempDataDir::new("undo-memory-delete-error");
-        let (db, svc, sid) = build_service(&dir);
-        let mem = svc
-            .memory
-            .insert("c1", None, "manual", "待删除记忆")
-            .expect("记忆应写入");
-        {
-            let conn = db.write();
-            conn.execute(
-                "INSERT INTO undo_snapshots (id, session_id, tool_name, label, payload, created_at, seq) VALUES ('snap-mem-del', ?1, 'memory_write', '写入记忆', ?2, ?3, 11)",
-                params![
-                    sid,
-                    json!({ "kind": "memory_insert", "inserted_id": mem.id }).to_string(),
-                    now_iso()
-                ],
-            )
-            .unwrap();
-            conn.execute_batch(&format!(
-                "CREATE TRIGGER block_mem_delete BEFORE DELETE ON memory_entries \
-                 WHEN OLD.id = {} BEGIN SELECT RAISE(ABORT, 'blocked'); END;",
-                mem.id
-            ))
-            .unwrap();
-        }
-        let err = svc.restore("snap-mem-del").expect_err("删除失败必须上抛");
-        assert!(err.contains("记忆"), "错误应说明记忆删除失败: {err}");
-        assert!(svc.session_of("snap-mem-del").is_some(), "失败必须保留快照");
-        assert!(svc.memory.get(mem.id).is_some(), "记忆应仍在");
-    }
-}
+#[path = "undo_service_tests.rs"]
+mod tests;
