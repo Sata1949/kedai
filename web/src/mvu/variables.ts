@@ -157,8 +157,7 @@ export function collectFromInitVarContent(content: string): Record<string, unkno
   const out: Record<string, unknown> = {};
   const setRe = /[_.]\s*set\s*\(/g;
   const bodies: string[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = setRe.exec(content)) !== null) {
+  while (setRe.exec(content) !== null) {
     // 注意:lastIndex 在正则对象上,不在 exec 返回的数组上
     const openIdx = setRe.lastIndex - 1;
     const depth = scanParen(content, openIdx);

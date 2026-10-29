@@ -6,7 +6,7 @@ import { useAppStore } from '../../store';
 
 const store = useAppStore();
 const {
-  connStatus, contextTokens, lastUsage, sessionTotalTokens, globalTotalTokens, cacheZeroStreak,
+  contextTokens, lastUsage, sessionTotalTokens, globalTotalTokens, cacheZeroStreak,
   appMode, currentTaskUsage, globalTaskUsage,
 } = storeToRefs(store);
 

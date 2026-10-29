@@ -4,7 +4,6 @@
 import type { MvuVariables } from './variables';
 import { collectFromInitVarContent, emptyVariables, deepMerge, statPair } from './variables';
 import type { JsonValue } from './parser';
-import { parseSetStatement } from './parser';
 import { displayChange, isStatLeafArray, unwrapStatLeaf } from './unwrap';
 import { pathGet, pathSet } from './variables';
 

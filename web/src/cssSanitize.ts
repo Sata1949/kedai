@@ -285,7 +285,7 @@ function splitCssBlocks(css: string): Array<{ head: string; inner: string; isAt:
       continue;
     }
     // 收集 head(直到 '{' 或 ';',跳过引号内的分号)
-    let headStart = i;
+    const headStart = i;
     let j = i;
     let headQuote: string | null = null;
     while (j < n) {

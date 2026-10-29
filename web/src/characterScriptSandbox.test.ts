@@ -198,7 +198,7 @@ describe('sandboxScript(wuwa 状态栏兼容面)', () => {
     expect(() => new vm.Script(out)).not.toThrow();
   });
 
-  it('$("<div>") 创建判定正则的反斜杠必须保留(模板字面量会消化 \s)', () => {
+  it('$("<div>") 创建判定正则的反斜杠必须保留(模板字面量会消化反斜杠)', () => {
     // 退化为 /^s</ 会把以 s 开头的选择器误判为创建语法
     expect(out).toContain(String.raw`/^\s*</`);
   });

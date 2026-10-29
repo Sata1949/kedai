@@ -63,7 +63,7 @@ export function broadcastMvuUpdate(variables: MvuVariables): void {
  */
 export function broadcastCardEvent(name: string, payload?: unknown): void {
   if (liveSandboxes.size === 0 || !name) return;
-  let cloned: unknown = payload;
+  let cloned: unknown;
   try {
     cloned = cloneData(payload ?? null);
     if (utf8Bytes(cloned) > MAX_MESSAGE_BYTES) return;

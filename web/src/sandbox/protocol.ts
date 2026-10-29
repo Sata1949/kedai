@@ -1,7 +1,7 @@
 // protocol.ts — 沙箱通信协议:频道名/消息字节上限/消息类型定义与宿主-沙箱公共契约类型
 import type { MvuVariables } from '../mvu/variables';
 // 纯常量/序列化原语已下沉 L1（C-2F-3），此处再导出保持既有导入面不变。
-import { CHANNEL, MAX_MESSAGE_BYTES, cloneData, utf8Bytes } from '../utils/sandboxProtocol';
+import { CHANNEL, MAX_MESSAGE_BYTES } from '../utils/sandboxProtocol';
 
 export { CHANNEL, MAX_MESSAGE_BYTES, cloneData, utf8Bytes } from '../utils/sandboxProtocol';
 

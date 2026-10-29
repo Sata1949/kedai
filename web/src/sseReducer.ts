@@ -138,7 +138,7 @@ export function reduceSseEvent(state: SseStateSlice, event: SseEvent): SseStateC
       a.phase = 'tool_call';
       a.chain.push({ at: Date.now(), text: `调用工具 ${event.name}`, detail: JSON.stringify(event.input) });
       break;
-    case 'tool_authorization_required':
+    case 'tool_authorization_required': {
       for (let i = a.toolCalls.length - 1; i >= 0; i--) {
         const t = a.toolCalls[i];
         if ((event.call_id ? t.callId === event.call_id : t.name === event.name) && t.status === 'running') {
@@ -153,6 +153,7 @@ export function reduceSseEvent(state: SseStateSlice, event: SseEvent): SseStateC
       a.pendingTool = pending ? { name: pending.name, input: pending.input } : null;
       a.chain.push({ at: Date.now(), text: `工具 ${event.name} 等待授权`, detail: event.reason });
       break;
+    }
     case 'tool_result':
       a.pendingTool = null;
       // call_id 优先保证并行/同名工具结果稳定配对；旧服务端事件仍回退到同名逆序匹配。

@@ -431,13 +431,13 @@ watch(currentSessionId, () => {
             <span class="label">模式</span>
             <span class="value">TASK</span>
           </div>
-          <div class="sv-agent-summary-row" v-if="currentTask && currentTask.task.plan.length">
+          <div v-if="currentTask && currentTask.task.plan.length" class="sv-agent-summary-row">
             <span class="label">流程进度</span>
             <span class="value sv-tnum">
               完成 {{ planDoneCount }}/{{ currentTask.task.plan.length }}<template v-if="planErrorCount > 0"> · {{ planErrorCount }} 步出错</template>
             </span>
           </div>
-          <div class="sv-agent-summary-row" v-if="currentTask?.task.error">
+          <div v-if="currentTask?.task.error" class="sv-agent-summary-row">
             <span class="label">详情</span>
             <span class="value detail">{{ currentTask.task.error }}</span>
           </div>
@@ -495,22 +495,22 @@ watch(currentSessionId, () => {
           <span class="label">模式</span>
           <span class="value">{{ agentMode.toUpperCase() }}</span>
         </div>
-        <div class="sv-agent-summary-row" v-if="agent.flowProgress">
+        <div v-if="agent.flowProgress" class="sv-agent-summary-row">
           <span class="label">流程进度</span>
             <span class="value sv-tnum">{{ agent.flowProgress.index }}/{{ agent.flowProgress.total }}</span>
         </div>
-        <div class="sv-agent-summary-row" v-if="lastUsage">
+        <div v-if="lastUsage" class="sv-agent-summary-row">
           <span class="label">本次消耗</span>
             <span class="value sv-tnum">{{ lastUsage.total_tokens }} tokens</span>
         </div>
-        <div class="sv-agent-summary-row" v-if="agent.detail">
+        <div v-if="agent.detail" class="sv-agent-summary-row">
           <span class="label">详情</span>
           <span class="value detail">{{ agent.detail }}</span>
         </div>
         <!-- 错误终态的操作位(HB-4):可重试错误给「重试」入口,不可重试只提示。
              锚点是最后一条已落库用户消息——错误终态下临时草稿已被清掉,没有
              assistant 锚点,故复用「重发」而非「生成新版本」。 -->
-        <div class="sv-agent-summary-row" v-if="agent.phase === 'error' && retryTarget !== null">
+        <div v-if="agent.phase === 'error' && retryTarget !== null" class="sv-agent-summary-row">
           <span class="label">操作</span>
           <span class="value">
             <button

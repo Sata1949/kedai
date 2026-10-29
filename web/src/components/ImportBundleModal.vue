@@ -26,7 +26,7 @@ import {
 } from '../utils/importBundle';
 
 const store = useAppStore();
-const { importBundleOpen, appMode } = storeToRefs(store);
+const { appMode } = storeToRefs(store);
 
 const close = (): void => {
   store.importBundleOpen = false;
@@ -317,7 +317,7 @@ async function runExport(): Promise<void> {
             </div>
 
             <!-- 段预览:勾选 + 摘要 + 段级策略 -->
-            <div class="impb-section" v-for="s in parsed.sections" :key="s.key">
+            <div v-for="s in parsed.sections" :key="s.key" class="impb-section">
               <label class="impb-head" :for="`impb-sel-${s.key}`">
                 <input :id="`impb-sel-${s.key}`" v-model="selected[s.key]" type="checkbox" />
                 <b>{{ s.label }}</b>

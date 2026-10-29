@@ -84,7 +84,7 @@ describe('useFlowConnections', () => {
   it('show 由不可见变可见 → 重拉一次(连完连接再切回流程能吃上新列表)', async () => {
     getSettingsMock.mockResolvedValue(makeSettings([connection()]));
     const show = ref(false);
-    const conn = useFlowConnections(show);
+    useFlowConnections(show);
     expect(getSettingsMock).not.toHaveBeenCalled();
 
     show.value = true;

@@ -234,13 +234,11 @@ export function bindGlobalEvents(
     const listener = (event: Event): void => {
       // 委托写法 $(document).on('click', '.btn', fn):以 closest 命中的目标回发,
       // 未被委托选择器命中则忽略(实跑问题 7 R3)
-      let hitId = 0;
       if (selector) {
         const raw = event.target as Element | null;
         const found = raw && typeof raw.closest === 'function' ? raw.closest(selector) : null;
         if (!found || !(found instanceof HTMLElement)) return;
-        hitId = bindDelegateTarget(found);
-        postEvent(ctx, jqId, eventName, undefined, hitId);
+        postEvent(ctx, jqId, eventName, undefined, bindDelegateTarget(found));
         return;
       }
       postEvent(ctx, jqId, eventName);

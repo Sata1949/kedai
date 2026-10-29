@@ -22,7 +22,7 @@ const { removeTask } = useTaskActions();
       :class="{ active: t.id === currentTaskId }"
       @click="store.selectTask(t.id)"
     >
-      <span class="sv-supreme xs sv-dot-flash" :class="statusClass(t.status)" :key="t.status" />
+      <span :key="t.status" class="sv-supreme xs sv-dot-flash" :class="statusClass(t.status)" />
       <span class="sv-task-item-title">{{ t.title }}</span>
       <span class="sv-task-item-meta">{{ statusLabel(t.status) }}</span>
       <span class="sv-task-item-del" title="删除任务" @click.stop="removeTask(t)">✕</span>

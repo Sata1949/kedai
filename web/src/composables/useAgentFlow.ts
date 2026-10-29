@@ -298,7 +298,8 @@ export function useAgentFlow() {
     dragStepId.value = id;
     if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
   }
-  function onStepDragOver(e: DragEvent, id: string): void {
+  // `_id` 只为模板调用签名对齐(`v-on:drop` 侧仍在用),函数体不需要
+  function onStepDragOver(e: DragEvent, _id: string): void {
     e.preventDefault();
     if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
   }

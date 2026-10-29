@@ -154,7 +154,8 @@ function mockApi(routes: Array<{ url: string; body: unknown }>): {
 }
 
 /** 构造一次「选择文件」事件(只需 files[0].text() 与 value) */
-function filePickEvent(payload: unknown): Event {
+// 供后续用例复用的夹具,当前用例改走其它路径,暂留
+export function filePickEvent(payload: unknown): Event {
   const file = { text: async () => JSON.stringify(payload) };
   return { target: { files: [file], value: '' } } as unknown as Event;
 }
