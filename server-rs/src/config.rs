@@ -112,6 +112,69 @@ fn dir_has_user_data(dir: &Path) -> bool {
         || has("SELECT EXISTS(SELECT 1 FROM sessions)")
 }
 
+/// DB-7:检测「另一套数据目录」是否也存在且有用户数据(双库分叉的可见性缺口)。
+///
+/// 背景:数据目录解析已在 2026-09 统一(`DATA_DIR` > `%APPDATA%` 有数据 > 项目根 `data/`),
+/// 但**选中的那套之外**如果还有另一套带用户数据的库,当前实现完全静默——用户只会看到
+/// 「聊天记录没了」,日志里也没有任何线索。本函数只做检测与回报,不改选择结果。
+///
+/// 返回 `(路径, 判据说明)` 列表:只包含「存在且确有用户数据」且**不等于**所选目录的候选。
+/// 纯函数(不做 IO 之外的副作用,不打印),便于单测直接给路径。
+pub fn detect_split_data_dirs(
+    selected: &Path,
+    candidates: &[PathBuf],
+) -> Vec<(PathBuf, &'static str)> {
+    let mut out = Vec::new();
+    for dir in candidates {
+        // 与所选目录是同一个物理位置 → 不是分叉(比较前统一成分量化的规范形态)
+        if same_dir(selected, dir) {
+            continue;
+        }
+        if !dir.is_dir() {
+            continue;
+        }
+        let has_settings = dir.join("settings.json").is_file();
+        let has_db = dir.join("kedai.db").is_file();
+        if !has_settings && !has_db {
+            continue;
+        }
+        // 有库无数据(空壳)不算分叉——与 dir_has_user_data 同判据,避免首启空壳误报
+        if !dir_has_user_data(dir) {
+            continue;
+        }
+        out.push((
+            dir.clone(),
+            if has_settings {
+                "settings.json + 数据库"
+            } else {
+                "数据库（含角色或会话）"
+            },
+        ));
+    }
+    out
+}
+
+/// DB-7:按当前环境给出「另一套可能的数据目录」候选(供启动期双库检测使用)。
+///
+/// 顺序与解析顺序一致:`%APPDATA%\com.kedai.app\data`、项目根 `data/`。
+/// **不含** `DATA_DIR` 表达的那个(调用方按 selected 自行排除)。
+pub fn split_dir_candidates() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(appdata) = env::var_os("APPDATA").filter(|v| !v.is_empty()) {
+        out.push(PathBuf::from(appdata).join("com.kedai.app").join("data"));
+    }
+    out.push(project_root().join("data"));
+    out
+}
+
+/// 两个路径是否指向同一位置(存在时用 `fs::canonicalize` 规范化;失败则按字面比较)。
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
+}
+
 /// 最小 AppConfig(仅供测试:不读环境变量,避免受本机 .env 与用户数据目录影响)。
 /// 设置加载/保存类测试共用同一份字面量,避免多处复制漂移。
 #[cfg(test)]
@@ -262,3 +325,8 @@ fn absolutize(p: &Path, root: &Path) -> PathBuf {
         root.join(p)
     }
 }
+
+/// 单元测试迁/放在独立文件:`config_tests.rs` 不计 check-file-size 的 ratchet。
+#[cfg(test)]
+#[path = "config_tests.rs"]
+mod tests;

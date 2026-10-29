@@ -348,8 +348,19 @@ pub async fn import_tools(
         return validation("导入内容为空");
     }
     // 阶段 1:逐项校验 + 生成落盘正文(不写任何文件)
+    //
+    // IMPHUB-L4:重名判定必须**在这里**做完,不能留到阶段 3。原因是阶段 2 已经写盘,
+    // 而 `sync_plugins` 阶段 3 才拒重名——旧顺序会让「校验通过但注册失败」(典型 =
+    // 与内置工具重名)的路径先落盘再回 400,目录里留下无人注册的文件,重启/重载后
+    // 仍会被加载并再次拒绝。故本阶段同时检查:
+    //   ① 与内置工具重名(插件不得劫持内置,L19);
+    //   ② 批内跨文件重名(同名后者先退出,与 sync_plugins 的「先到者生效」同口径);
+    //   ③ 与目录里**已存在**的同名文件不算错(覆盖即热更新,与 upload 语义一致)。
     let prepared = (|| -> Result<Vec<(String, Vec<u8>)>, String> {
         let mut writes: Vec<(String, Vec<u8>)> = Vec::with_capacity(body.plugins.len());
+        // 本批已占用的工具名 → 文件名(批内重名检测;HashMap 的键序不影响判定)
+        let mut claimed: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         for (idx, item) in body.plugins.iter().enumerate() {
             let n = idx + 1;
             let Some(obj) = item.as_object() else {
@@ -378,9 +389,24 @@ pub async fn import_tools(
             }
             let text = serde_json::to_string_pretty(&serde_json::Value::Object(config))
                 .map_err(|e| format!("第 {n} 个插件序列化失败: {e}"))?;
-            if let Err(e) = crate::plugins::parse_plugin_json(&text) {
-                return Err(format!("第 {n} 个插件({safe})无效:{e}"));
+            let parsed = match crate::plugins::parse_plugin_json(&text) {
+                Ok(p) => p,
+                Err(e) => return Err(format!("第 {n} 个插件({safe})无效:{e}")),
+            };
+            // ① 与内置工具重名(与 sync_plugins 同一判据与文案口径)
+            let tool_name = parsed.name.clone();
+            if state.tool_registry.is_builtin(&tool_name) {
+                return Err(format!(
+                    "{safe}: 工具名 {tool_name} 与内置工具重名，已拒绝注册（插件不得劫持内置工具）"
+                ));
             }
+            // ② 批内跨文件重名:先到者生效,后者整批拒绝(不写任何文件)
+            if let Some(other) = claimed.get(&tool_name) {
+                return Err(format!(
+                    "{safe}: 工具名 {tool_name} 与 {other} 重复，已拒绝（同一批次先到者生效）"
+                ));
+            }
+            claimed.insert(tool_name, safe.clone());
             writes.push((safe, text.into_bytes()));
         }
         Ok(writes)
