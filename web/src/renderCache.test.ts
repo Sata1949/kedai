@@ -6,7 +6,12 @@
 // 本文件只测缓存容器语义(容量/FIFO/统计);「卸载重挂零重算」的端到端语义
 // 由 ChatMessageItem.renderCache.test.ts 断言。
 import { describe, expect, it } from 'vitest';
-import { createBoundedCache, DEFAULT_RENDER_CACHE_LIMIT } from './renderCache';
+import {
+  buildMessageRenderKey,
+  buildScriptBlocksKey,
+  createBoundedCache,
+  DEFAULT_RENDER_CACHE_LIMIT,
+} from './renderCache';
 
 describe('createBoundedCache', () => {
   it('命中与未命中分别计数,未命中返回 undefined', () => {
@@ -82,5 +87,30 @@ describe('createBoundedCache', () => {
     // 最早的 50 条被淘汰,最新的仍在
     expect(c.get('k0')).toBeUndefined();
     expect(c.get(`k${DEFAULT_RENDER_CACHE_LIMIT + 49}`)).toBe(DEFAULT_RENDER_CACHE_LIMIT + 49);
+  });
+});
+
+// USERPERSONA-1:称呼是渲染实际读取的输入(脚本替换串里的 {{user}}),必须进键——
+// 否则改名后仍旧命中旧条目,界面继续显示旧称呼。
+describe('缓存键包含用户称呼(USERPERSONA-1)', () => {
+  const base = {
+    text: '正文',
+    renderHtml: false,
+    scriptHash: 'h',
+    depth: 0,
+    scopeId: 's',
+    charName: '芽衣',
+  };
+
+  it('buildMessageRenderKey:称呼参与键,缺省按「用户」', () => {
+    const noName = buildMessageRenderKey(base);
+    expect(buildMessageRenderKey({ ...base, userName: '用户' })).toBe(noName);
+    expect(buildMessageRenderKey({ ...base, userName: '林' })).not.toBe(noName);
+  });
+
+  it('buildScriptBlocksKey:称呼参与键,缺省按「用户」', () => {
+    const noName = buildScriptBlocksKey('s', 'h', 0, '正文');
+    expect(buildScriptBlocksKey('s', 'h', 0, '正文', '用户')).toBe(noName);
+    expect(buildScriptBlocksKey('s', 'h', 0, '正文', '林')).not.toBe(noName);
   });
 });

@@ -105,6 +105,8 @@ export interface MessageRenderKeyInput {
   scopeId: string;
   /** 宏展开用角色名(脚本替换串中的 {{char}}) */
   charName: string;
+  /** 宏展开用用户称呼({{user}}/{{user_name}};USERPERSONA-1) */
+  userName?: string;
 }
 
 /**
@@ -113,7 +115,7 @@ export interface MessageRenderKeyInput {
  * 故不存在「不同输入拼出同一键」的歧义。
  */
 export function buildMessageRenderKey(i: MessageRenderKeyInput): string {
-  return `${i.scopeId}\n${i.scriptHash}\n${i.depth}\n${i.renderHtml ? 1 : 0}\n${i.charName}\n${i.text}`;
+  return `${i.scopeId}\n${i.scriptHash}\n${i.depth}\n${i.renderHtml ? 1 : 0}\n${i.charName}\n${i.userName ?? '用户'}\n${i.text}`;
 }
 
 /**
@@ -125,6 +127,7 @@ export function buildScriptBlocksKey(
   scriptHash: string,
   depth: number,
   text: string,
+  userName = '用户',
 ): string {
-  return `${scopeId}\n${scriptHash}\n${depth}\n${text}`;
+  return `${scopeId}\n${scriptHash}\n${depth}\n${userName}\n${text}`;
 }

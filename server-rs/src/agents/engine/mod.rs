@@ -34,6 +34,7 @@ use crate::services::runtime_prompt_service::RuntimePromptService;
 use crate::services::session_service::SessionService;
 use crate::services::settings_service::RuntimeSettings;
 use crate::services::token_service::TokenService;
+use crate::services::user_persona_service::UserPersonaService;
 use crate::services::user_script_service::UserScriptService;
 use crate::services::world_book_service::WorldBookService;
 use crate::tools::registry::ToolRegistry;
@@ -116,6 +117,8 @@ pub struct EngineStorage {
 pub struct EnginePrompt {
     /// 提示词注入配置(简单模式 + 楼层系统)
     pub prompt_inject: Arc<Mutex<PromptInjectService>>,
+    /// 用户设定(角色扮演专属;USERPERSONA-1)
+    pub user_persona: Arc<Mutex<UserPersonaService>>,
     /// 快速回复(Quick Replies):getqr 的渲染数据源
     pub quick_replies: Arc<QuickReplyService>,
     /// 与 settings API 共用的 DATA_DIR 运行时提示词文件服务
@@ -156,6 +159,8 @@ pub struct AgentEngine {
     settings: Arc<Mutex<RuntimeSettings>>,
     /// 提示词注入配置(简单模式 + 楼层系统)
     prompt_inject: Arc<Mutex<PromptInjectService>>,
+    /// 用户设定(角色扮演专属;USERPERSONA-1)
+    user_persona: Arc<Mutex<UserPersonaService>>,
     /// 快速回复(Quick Replies):getqr 的渲染数据源
     quick_replies: Arc<QuickReplyService>,
     /// 与 settings API 共用的 DATA_DIR 运行时提示词文件服务
@@ -208,6 +213,7 @@ impl AgentEngine {
             token_service: Arc::new(Mutex::new(TokenService::new())),
             settings: core.settings,
             prompt_inject: prompt.prompt_inject,
+            user_persona: prompt.user_persona,
             quick_replies: prompt.quick_replies,
             runtime_prompt: prompt.runtime_prompt,
             db: core.db,

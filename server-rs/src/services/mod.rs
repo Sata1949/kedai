@@ -68,6 +68,7 @@ pub mod screen_capture_android;
 pub mod task_change_service;
 // 回退快照(批次 6.1「undo」):写工具执行前逆操作负载落 undo_snapshots 表
 pub mod undo_service;
+pub mod user_persona_service;
 pub mod user_script_service;
 pub mod variable_apply;
 // 工作区画像(2026-09-30 编码能力包 CODE-4):项目类型探测,只读展示

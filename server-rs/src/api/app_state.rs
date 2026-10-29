@@ -23,6 +23,7 @@ use crate::services::skill_service::SkillService;
 use crate::services::task_service::TaskService;
 use crate::services::token_service::TokenService;
 use crate::services::undo_service::UndoService;
+use crate::services::user_persona_service::UserPersonaService;
 use crate::services::user_script_service::UserScriptService;
 use crate::services::world_book_service::WorldBookService;
 use crate::tools::agent_tools::ToolDeps;
@@ -63,6 +64,8 @@ pub struct CoreServices {
     pub settings: Arc<Mutex<RuntimeSettings>>,
     /// 提示词注入配置(简单模式 + 楼层系统),持久化到 data/prompt_floors.json
     pub prompt_inject: Arc<Mutex<PromptInjectService>>,
+    /// 用户设定(角色扮演专属):DATA_DIR/user_persona.json;任务模式不消费
+    pub user_persona: Arc<Mutex<UserPersonaService>>,
     /// 全局正则库(IMPHUB ⑥,2026-10-09):跨角色的**显示层**正则,
     /// 持久化到 data/regex_scripts.json;前端与卡级正则合并后应用(全局在前、卡级在后)
     pub regex: Arc<Mutex<RegexScriptService>>,
@@ -321,6 +324,9 @@ impl AppState {
             config.data_dir.clone(),
         )));
 
+        // 用户设定(角色扮演专属;任务模式不消费);同样先于 engine 创建
+        let user_persona = Arc::new(Mutex::new(UserPersonaService::new(config.data_dir.clone())));
+
         // 全局正则库(IMPHUB ⑥):跨角色的显示层正则;渲染侧消费点在前端
         // (与卡级脚本合并后应用),后端只负责整体读写与落盘
         let regex = Arc::new(Mutex::new(RegexScriptService::new(config.data_dir.clone())));
@@ -398,6 +404,7 @@ impl AppState {
             },
             EnginePrompt {
                 prompt_inject: prompt_inject.clone(),
+                user_persona: user_persona.clone(),
                 quick_replies: quick_replies.clone(),
                 runtime_prompt: runtime_prompt.clone(),
                 memory: memory.clone(),
@@ -452,6 +459,7 @@ impl AppState {
                 model: Arc::new(Mutex::new(engine_model)),
                 settings,
                 prompt_inject,
+                user_persona,
                 regex,
                 audio,
                 quick_replies,

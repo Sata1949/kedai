@@ -35,6 +35,8 @@ export interface ScriptRunContext {
   mvuVariables: MvuVariables;
   /** 角色名(initvar 内容 {{char}} 宏展开用;缺省不展开 char) */
   charName?: string;
+  /** 用户称呼(initvar 内容 {{user}}/{{user_name}} 展开用;缺省「用户」) */
+  userName?: string;
   /**
    * 消息级沙箱的 RPC 扩展点(世界书读取 / 聊天消息读取,只读)。
    * 实跑问题 7 主因:此前消息级沙箱不注入扩展点,TavernHelper.getChatMessages /
@@ -86,11 +88,11 @@ export class ScriptRunner {
 
   /** [InitVar] 解析结果缓存:key = 角色 id + 条目内容指纹;角色切换/条目变化时自动失效 */
   private cachedInitVars(ctx: ScriptRunContext): MvuVariables {
-    const key = `${ctx.characterId}:${JSON.stringify(ctx.initVarEntries)}:${ctx.charName ?? ''}`;
+    const key = `${ctx.characterId}:${JSON.stringify(ctx.initVarEntries)}:${ctx.charName ?? ''}:${ctx.userName ?? ''}`;
     if (this.initVarCacheKey === key && this.initVarCache) return this.initVarCache;
     // 宏展开:initvar 值里的 {{user}}/{{char}}(如碧蓝卡 `name: "{{user}}"`)
     // 在解析前展开,否则变量树里存字面量、状态栏直接显示 {{user}}
-    const macroCtx = { charName: ctx.charName ?? '' };
+    const macroCtx = { charName: ctx.charName ?? '', userName: ctx.userName ?? '用户' };
     const vars = collectInitVars(
       Object.entries(ctx.initVarEntries).map(([comment, content]) => ({
         comment,

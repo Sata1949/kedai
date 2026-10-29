@@ -20,7 +20,7 @@ mod inject;
 mod steps;
 mod trim;
 
-pub(super) use build::{build_llm_messages_with_card, CardTexts, LiteraryTexts};
+pub(super) use build::{build_llm_messages_with_card, CardTexts, LiteraryTexts, PersonaTexts};
 pub(super) use context::CollectedCtx;
 pub(super) use inject::{
     append_memory_notice, apply_inject_insertions, inject_reflect_advice, insert_memory_slot,

@@ -18,6 +18,8 @@ export interface MessageScriptSchedulerOptions<TMessage extends SchedulableMessa
   mvuVariables: MvuVariables;
   /** 角色名(initvar 内容 {{char}} 宏展开用,透传 ScriptRunContext) */
   charName?: string;
+  /** 用户称呼(initvar / 消息宏 {{user}} 展开用;USERPERSONA-1) */
+  userName?: string;
   /** 消息级沙箱只读 RPC 扩展点(世界书/聊天消息读取;实跑问题 7) */
   rpcExtensions?: ScriptRunContext['rpcExtensions'];
   isAuthorized: ScriptRunContext['isAuthorized'];
@@ -72,6 +74,7 @@ export async function executeCurrentMessageScripts<TMessage extends SchedulableM
         initVarEntries: options.initVarEntries,
         mvuVariables: { ...options.mvuVariables },
         charName: options.charName,
+        userName: options.userName,
         rpcExtensions: options.rpcExtensions,
       });
     } catch (err) {

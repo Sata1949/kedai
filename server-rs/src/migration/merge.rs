@@ -690,6 +690,7 @@ fn merge_json_configs(
         "agent_flows.json",
         "task_executors.json",
         "tool_permissions.json",
+        "user_persona.json",
     ] {
         let baseline_file = baseline.join(name);
         let source_file = source.join(name);
@@ -812,5 +813,6 @@ fn is_structured_config(name: &str) -> bool {
             | "agent_flows.json"
             | "task_executors.json"
             | "tool_permissions.json"
+            | "user_persona.json"
     )
 }

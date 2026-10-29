@@ -17,6 +17,7 @@ import type {
   RegexScript,
   RuntimeSettings,
   RuntimeSettingsPatch,
+  UserPersonaConfig,
 } from './types';
 
 /** 逐连接探测参数(2026-10-03 API 设置补全):显式 `connection` 草稿字段级覆盖 >
@@ -131,6 +132,23 @@ export async function savePromptInject(config: PromptInjectConfig): Promise<Prom
     body: JSON.stringify({ config }),
   });
   return requireObjectField<PromptInjectConfig>(data, 'config', '提示词注入配置');
+}
+
+// ===== 用户设定(USERPERSONA-1;角色扮演专属) =====
+
+/** GET /api/user-persona:读取用户设定(enabled=false 也返回已存文本) */
+export async function getUserPersona(): Promise<UserPersonaConfig> {
+  const data = await request<unknown>('/user-persona');
+  return requireObjectField<UserPersonaConfig>(data, 'config', '用户设定');
+}
+
+/** PUT /api/user-persona:保存用户设定(超长由后端 400,文案含字段名) */
+export async function saveUserPersona(config: UserPersonaConfig): Promise<UserPersonaConfig> {
+  const data = await request<unknown>('/user-persona', {
+    method: 'PUT',
+    body: JSON.stringify({ config }),
+  });
+  return requireObjectField<UserPersonaConfig>(data, 'config', '用户设定');
 }
 
 /** POST /api/prompt-inject/import:导入酒馆(SillyTavern)预设 JSON。

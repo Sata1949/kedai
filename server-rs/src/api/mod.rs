@@ -42,6 +42,7 @@ pub mod tasks;
 pub mod tokens;
 pub mod tool_permissions;
 pub mod undo;
+pub mod user_persona;
 pub mod user_scripts;
 pub mod variables;
 pub mod workspace;

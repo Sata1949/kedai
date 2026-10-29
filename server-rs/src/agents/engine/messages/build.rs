@@ -119,6 +119,16 @@ pub(in crate::agents::engine) struct CardTexts<'a> {
     pub(in crate::agents::engine) mes_example: &'a str,
 }
 
+/// 用户设定文本(USERPERSONA-1):称呼、用户角色原文与已包裹的【用户角色】段。
+/// `block` 由装配层用 `user_persona_service::block()` 生成(单一出处),build 层只负责
+/// 在模板之后、注入层之前拼入 system。
+#[derive(Default, Clone, Copy)]
+pub(in crate::agents::engine) struct PersonaTexts<'a> {
+    pub(in crate::agents::engine) user_name: &'a str,
+    pub(in crate::agents::engine) user_description: &'a str,
+    pub(in crate::agents::engine) block: Option<&'a str>,
+}
+
 /// build_llm_messages 的 6 层位置版本(位置定义见 build_llm_messages 文档)。
 /// 世界书常驻(role=system)并入 system;激发与预设尾部追加到最新用户消息尾部
 /// (system + 早期历史前缀保持稳定 → 前缀缓存命中率显著提升,缓存友好)。
@@ -129,6 +139,7 @@ pub(in crate::agents::engine) struct CardTexts<'a> {
 pub(in crate::agents::engine) fn build_llm_messages_with_card(
     character_name: &str,
     card: CardTexts<'_>,
+    persona: PersonaTexts<'_>,
     world_constant: &[WorldInjection],
     world_triggered: &[WorldInjection],
     history: &[(String, String)],
@@ -155,12 +166,15 @@ pub(in crate::agents::engine) fn build_llm_messages_with_card(
     let bounded_scenario = untrusted_boundary("character_card.scenario", card.scenario);
     // CARD-1:对话示例同属角色卡不可信素材;与 description/personality/scenario 同一边界规则
     let bounded_mes_example = untrusted_boundary("character_card.mes_example", card.mes_example);
+    // USERPERSONA-1:用户角色设定属不可信素材,只包裹替换值,不改写原始文本。
+    let bounded_user_description = untrusted_boundary("user_persona", persona.user_description);
     // 宏上下文:自定义系统提示词 / 简单合成 / 楼层 / 世界书共享同一 vars,按序展开,
     // 保证 {{setvar}} 在前面的文本写入、{{getvar}} 在后面的文本能读到(时序与 ST prompt_order 一致)。
     let mut mctx = MacroCtx {
         character_name,
         character_description: &bounded_description,
-        user_name: "用户",
+        user_name: persona.user_name,
+        user_description: &bounded_user_description,
         user_input: "",
         personality: &bounded_personality,
         scenario: &bounded_scenario,
@@ -320,6 +334,13 @@ pub(in crate::agents::engine) fn build_llm_messages_with_card(
             s
         }
     };
+    // USERPERSONA-1:用户显式启用的全局层——与「Custom Prompt 完整替换」并列,
+    // 模板之后、simple/complex 注入之前。任务模式不经本函数,天然隔离。
+    if let Some(block) = persona.block {
+        if !block.trim().is_empty() {
+            sys.push_str(&format!("\n\n{block}"));
+        }
+    }
     // 拼入 system 尾部的注入文本总长度(截断保护用)
     let mut protected_tail: usize = 0;
 
@@ -388,7 +409,12 @@ pub(in crate::agents::engine) fn build_llm_messages_with_card(
         } else {
             None
         };
-        let anchor = pov_anchor(mode, character_name, None);
+        let user_name = if persona.user_name.trim().is_empty() || persona.user_name == "用户" {
+            None
+        } else {
+            Some(persona.user_name)
+        };
+        let anchor = pov_anchor(mode, character_name, user_name);
         protected_tail += anchor.chars().count();
         sys.push_str(&format!("\n\n{anchor}"));
     }
@@ -588,6 +614,11 @@ pub(in crate::agents::engine) fn build_llm_messages_with_position(
             personality,
             scenario,
             mes_example: "",
+        },
+        PersonaTexts {
+            user_name: "用户",
+            user_description: "",
+            block: None,
         },
         world_constant,
         world_triggered,
