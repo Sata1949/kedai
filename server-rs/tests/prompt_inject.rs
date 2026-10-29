@@ -348,6 +348,11 @@ async fn session_vars_persist_across_rounds() {
 
 // ===== 酒馆预设导入 =====
 
+/// 夹具说明(STIMP-L1):`a1` 在 `prompts[]` 与 `prompt_order[]` 两处都写 `enabled=false`。
+/// 早先夹具是「prompts=false / order=true」的矛盾形态,而 ST 的真实语义是**以
+/// `prompt_order[].enabled` 为准**(SillyTavern `PromptManager.getPromptCollection` 只读
+/// order 项的 `enabled`,`prompts[].enabled` 不参与激活判定)。解析器改为 order 优先后,
+/// 矛盾的夹具会让本用例的「禁用条目保留 enabled=false」断言失真,故把两处对齐。
 const ST_PRESET: &str = r#"{
     "name": "测试预设",
     "prompts": [
@@ -359,7 +364,7 @@ const ST_PRESET: &str = r#"{
         { "character_id": 100001, "order": [
             { "enabled": true, "identifier": "b1" },
             { "enabled": true, "identifier": "sys" },
-            { "enabled": true, "identifier": "a1" }
+            { "enabled": false, "identifier": "a1" }
         ] }
     ]
 }"#;
@@ -445,6 +450,43 @@ async fn import_preset_replaces_floors() {
     let got_floors = got["config"]["floors"].as_array().unwrap();
     assert_eq!(got_floors.len(), 3);
     assert_eq!(got_floors[0]["id"], "b1");
+}
+
+/// STIMP-L1:两处 `enabled` 冲突时以 `prompt_order[]` 为准(ST 的真实语义,
+/// 见 `PromptManager.getPromptCollection`)。这条锁的是「导入后的开关状态与用户在 ST
+/// 里看到的一致」——只读 `prompts[]` 会把这里两个方向都读反。
+#[tokio::test]
+async fn import_preset_prefers_prompt_order_enabled() {
+    let _guard = test_lock().await;
+    let app = test_app();
+
+    let preset = r#"{
+        "name": "冲突启用位",
+        "prompts": [
+            { "identifier": "off_to_on", "name": "关→开", "content": "x", "role": "user", "enabled": false },
+            { "identifier": "on_to_off", "name": "开→关", "content": "y", "role": "user", "enabled": true }
+        ],
+        "prompt_order": [
+            { "character_id": 1, "order": [
+                { "enabled": true, "identifier": "off_to_on" },
+                { "enabled": false, "identifier": "on_to_off" }
+            ] }
+        ]
+    }"#;
+    let (status, resp) = import_preset(app, preset).await;
+    assert_eq!(status, StatusCode::OK, "resp: {resp}");
+    let floors = resp["config"]["floors"].as_array().unwrap();
+    let by_id = |id: &str| floors.iter().find(|f| f["id"] == id).unwrap();
+    assert_eq!(
+        by_id("off_to_on")["enabled"],
+        true,
+        "prompt_order 说开即为开(即使 prompts[] 写的是 false)"
+    );
+    assert_eq!(
+        by_id("on_to_off")["enabled"],
+        false,
+        "prompt_order 说关即为关(即使 prompts[] 写的是 true)"
+    );
 }
 
 #[tokio::test]

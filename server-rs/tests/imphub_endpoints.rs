@@ -273,6 +273,18 @@ async fn plugin_import_rejects_batch_atomically() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(body["error"].as_str().unwrap().contains("内置"), "{body}");
+    // IMPHUB-L4:失败路径**不得留下未注册的落盘文件**。旧实现阶段 1 只校验 JSON 形状,
+    // 重名判定在阶段 3(sync_plugins)才做,文件已先落盘 —— 目录里留下无人注册的
+    // imphub_read.json,重启/重载后仍会被加载并再次拒绝。
+    let (_, body) = send_json(app, "GET", "/api/plugins/tools/export", json!({})).await;
+    assert!(
+        !body["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["file"] == "imphub_read.json"),
+        "重名被拒后不得留下落盘文件: {body}"
+    );
 }
 
 // ==================== 流程 move ====================

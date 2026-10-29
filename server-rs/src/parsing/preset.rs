@@ -88,16 +88,20 @@ pub fn parse_st_preset(json_text: &str) -> Result<Vec<PromptFloor>, String> {
     }
 
     // prompt_order:提取首个组的顺序 identifier 列表(兼容数组与对象两种形态)
-    let mut ordered_ids: Vec<String> = Vec::new();
+    // 同时收集 `prompt_order[].enabled`——ST 以它为准(STIMP-L1):条目在 `prompts` 里
+    // 写着 enabled=true、在 `prompt_order` 组里被关掉是常见形态,只看 `prompts` 会让导入
+    // 后的启用状态与用户在 ST 里看到的相反,且没有任何提示。
+    // 用 Vec 而非 HashMap:order 依赖出现顺序,散列表会打乱它。
+    let mut ordered: Vec<(String, Option<bool>)> = Vec::new();
     match root.get("prompt_order") {
         Some(Value::Array(arr)) => {
             if let Some(first) = arr.first() {
-                collect_order(first, &mut ordered_ids);
+                collect_order(first, &mut ordered);
             }
         }
         Some(Value::Object(map)) => {
             if let Some(first) = map.values().next() {
-                collect_order(first, &mut ordered_ids);
+                collect_order(first, &mut ordered);
             }
         }
         _ => {}
@@ -105,11 +109,16 @@ pub fn parse_st_preset(json_text: &str) -> Result<Vec<PromptFloor>, String> {
 
     // 按 order 列表编号(只数本预设中真实存在的条目);未命中的条目按数组序排最后
     let mut order = 0usize;
-    for oid in &ordered_ids {
+    for (oid, enabled) in &ordered {
         for (_, f) in by_id.iter_mut() {
             if &f.id == oid && f.order == usize::MAX {
                 f.order = order;
                 order += 1;
+                // 覆盖启用位:prompt_order 里显式给出的值优先于 prompts[] 的同名字段;
+                // 该组未写 enabled 则保留 prompts[] 的取值。
+                if let Some(v) = enabled {
+                    f.enabled = *v;
+                }
             }
         }
     }
@@ -125,14 +134,17 @@ pub fn parse_st_preset(json_text: &str) -> Result<Vec<PromptFloor>, String> {
     Ok(floors)
 }
 
-/// 收集 prompt_order 组的 order 数组中的 identifier(跳过非条目锚点由调用方自然忽略——锚点不在 by_id 中)
-fn collect_order(group: &Value, out: &mut Vec<String>) {
+/// 收集 prompt_order 组的 order 数组:identifier + 该组的 enabled(STIMP-L1)。
+/// identifier 顺序即注入顺序;`enabled` 缺失时为 None(调用方保留 `prompts[]` 的取值)。
+/// 非条目锚点(worldInfoBefore / chatHistory 等)照旧收进来,由调用方按 by_id 自然忽略。
+fn collect_order(group: &Value, out: &mut Vec<(String, Option<bool>)>) {
     let Some(arr) = group.get("order").and_then(|v| v.as_array()) else {
         return;
     };
     for item in arr {
         if let Some(id) = item.get("identifier").and_then(|v| v.as_str()) {
-            out.push(id.to_string());
+            let enabled = item.get("enabled").and_then(|v| v.as_bool());
+            out.push((id.to_string(), enabled));
         }
     }
 }
@@ -261,6 +273,53 @@ mod tests {
         assert!(order_of("p1") < order_of("p2"));
         assert!(order_of("p2") < order_of("p4"));
         assert!(order_of("p4") < order_of("p6"));
+    }
+
+    /// STIMP-L1：ST 以 `prompt_order[].enabled` 为准，而本仓原先只读 `prompts[].enabled`。
+    /// 两处不一致时（ST 里很常见：条目在 `prompts` 里写着 true，但 `prompt_order` 组里被
+    /// 关掉），导入后的启用状态与用户在 ST 里看到的相反，且没有任何提示。
+    /// SAMPLE 里 `p5` 正是这个形态：`prompts[].enabled=true`，`prompt_order` 里 `enabled=false`。
+    #[test]
+    fn prompt_order_enabled_overrides_prompts_enabled() {
+        let floors = parse_st_preset(SAMPLE).unwrap();
+        let by_id = |id: &str| floors.iter().find(|f| f.id == id).unwrap();
+
+        // p5：prompt_order 说关 → 必须为关（旧实现按 prompts 的 true 导入，断言会红）
+        assert!(
+            !by_id("p5").enabled,
+            "prompt_order[].enabled=false 必须覆盖 prompts[].enabled=true"
+        );
+        // p3 / p0 / p7：prompt_order 说开，prompts 也是开 → 保持开
+        assert!(by_id("p3").enabled);
+        assert!(by_id("p0").enabled);
+        assert!(by_id("p7").enabled);
+        // p4 未出现在 prompt_order 中 → 仍按 prompts 的 false（不回退成 true）
+        assert!(!by_id("p4").enabled);
+        // p1 / p2 / p6 未出现在 prompt_order 中 → 按 prompts 的 true
+        assert!(by_id("p1").enabled);
+        assert!(by_id("p2").enabled);
+        assert!(by_id("p6").enabled);
+    }
+
+    /// 与上条配套：`prompt_order` 把条目设为开、而 `prompts` 里是关时，也要以 order 为准。
+    #[test]
+    fn prompt_order_enabled_can_turn_floor_on() {
+        let json = r#"{
+            "prompts": [
+                { "identifier": "a", "name": "A", "content": "ca", "role": "user", "enabled": false },
+                { "identifier": "b", "name": "B", "content": "cb", "role": "user", "enabled": false }
+            ],
+            "prompt_order": [
+                { "character_id": 1, "order": [
+                    { "enabled": true, "identifier": "a" },
+                    { "enabled": false, "identifier": "b" }
+                ] }
+            ]
+        }"#;
+        let floors = parse_st_preset(json).unwrap();
+        let by_id = |id: &str| floors.iter().find(|f| f.id == id).unwrap();
+        assert!(by_id("a").enabled, "prompt_order 说开即为开");
+        assert!(!by_id("b").enabled, "prompt_order 说关即为关");
     }
 
     #[test]

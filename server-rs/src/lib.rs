@@ -130,6 +130,20 @@ pub async fn run_server(config: config::AppConfig) -> Result<(), String> {
         "Kedai server starting"
     );
 
+    // DB-7:双库分叉可见性。数据目录解析已统一(DATA_DIR > %APPDATA% 有数据 > 项目根
+    // data/),但**选中的那套之外**若还有另一套带用户数据的库,此前完全静默——用户只会
+    // 看到「聊天记录没了」,日志里也没有线索。这里只做检测与告警,**不改选择结果**。
+    for (dir, why) in
+        config::detect_split_data_dirs(&config.data_dir, &config::split_dir_candidates())
+    {
+        tracing::warn!(
+            selected = config.data_dir.to_string_lossy().as_ref(),
+            other = dir.to_string_lossy().as_ref(),
+            evidence = why,
+            "检测到另一套数据目录也有用户数据:两套库互不可见,请确认要用哪一套(设置 DATA_DIR,或清理其一)"
+        );
+    }
+
     let state = api::app_state::AppState::new(config).map_err(|e| {
         tracing::error!(error = e.as_str(), "初始化失败");
         format!("初始化失败: {e}")

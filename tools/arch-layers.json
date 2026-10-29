@@ -121,7 +121,8 @@
   "entryFiles": {
     "config.rs": { "generation": "entry", "responsibility": "环境与 DATA_DIR 解析、AppConfig 组装" },
     "lib.rs": { "generation": "entry", "responsibility": "库入口、模块声明、测试应用装配、run_server" },
-    "main.rs": { "generation": "entry", "responsibility": "bin 入口" }
+    "main.rs": { "generation": "entry", "responsibility": "bin 入口" },
+    "config_tests.rs": { "generation": "entry", "responsibility": "config.rs 的单元测试（DB-7 双库检测）；*_tests.rs 不计 check-file-size" }
   },
 
   "frontend": {
