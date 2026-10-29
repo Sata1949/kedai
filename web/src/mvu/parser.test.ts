@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
   parseUpdateVariable,
-  parseSetStatement,
   parseJsValue,
   hasUpdateVariable,
 } from './parser';

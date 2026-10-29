@@ -263,9 +263,9 @@ export async function executeSandboxedCharacterScript(
     const bindInlineHandlers = (): void => {
       const targetWindow = iframe.contentWindow;
       if (!targetWindow || !context.container) return;
-      let selectorParts: string[] = [];
+      const selectorParts: string[] = [];
       for (const name of INLINE_EVENT_NAMES) selectorParts.push(`[data-kd-on${name}]`);
-      let elements: HTMLElement[] = [];
+      let elements: HTMLElement[];
       try {
         elements = Array.from(context.container.querySelectorAll<HTMLElement>(selectorParts.join(',')));
       } catch {

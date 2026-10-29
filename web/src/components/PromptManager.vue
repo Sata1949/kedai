@@ -24,7 +24,6 @@ const {
   presetTailRole,
   reflectAdvicePrompt,
   reflectAdviceRole,
-  promptInject,
   worldBooks,
 } = storeToRefs(store);
 

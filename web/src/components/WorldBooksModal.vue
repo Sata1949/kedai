@@ -178,7 +178,8 @@ function moveEntryRow(draft: api.WorldBookEntry[], i: number, dir: -1 | 1): void
   draft.forEach((e, idx) => (e.order = idx));
 }
 
-async function saveEntries(b: api.WorldBookRecord): Promise<void> {
+// `_b` 为调用点签名保留(整本记录当前不需要),故以 _ 前缀表达有意未用
+async function saveEntries(_b: api.WorldBookRecord): Promise<void> {
   const id = editingBookId.value;
   const draft = id && entryDrafts.value[id];
   if (!id || !draft || entrySaving.value[id]) return;

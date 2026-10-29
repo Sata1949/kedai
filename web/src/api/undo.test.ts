@@ -76,7 +76,7 @@ describe('api/undo REST 封装', () => {
   });
 
   it('restoreUndoSnapshot:旧服务端缺回执字段时回退为缺省值(restored 空串 / count 1)', async () => {
-    vi.mocked(globalThis.fetch).mockImplementation(async (input, init) => {
+    vi.mocked(globalThis.fetch).mockImplementation(async (input) => {
       const url = String(input);
       if (url.endsWith('/api/bootstrap')) return json({ token: 't' });
       if (url.endsWith('/api/undo/u2/restore')) return json({ ok: true });

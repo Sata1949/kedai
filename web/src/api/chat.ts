@@ -2,7 +2,7 @@
 import { BASE, apiErrorMessage, authorizedFetch, request } from './client';
 import { createSseFrameParser } from './sseParser';
 import { pumpSseFrames, readErrorParts } from './stream';
-import type { AgentMode, SseEvent, TokenUsage } from './types';
+import type { AgentMode, SseEvent } from './types';
 
 export type SseHandler = (event: SseEvent) => void;
 
@@ -54,11 +54,6 @@ export function clearCompactChat(sessionId: string): Promise<{ ok: boolean; clea
     method: 'POST',
     body: JSON.stringify({ session_id: sessionId }),
   });
-}
-
-/** 空 usage(错误分支兜底:保证 finish 事件结构完整,store 能安全复位) */
-function emptyUsage(): TokenUsage {
-  return { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, context_tokens: 0, prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: 0 };
 }
 
 /** 发送受理结果(SENDFIX):`accepted=false` = 本轮消息未被服务端受理(HTTP 非 2xx / 网络错误),

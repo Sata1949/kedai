@@ -234,6 +234,18 @@ describe('流程四形态 / skills 三形态 / 插件 / 文本', () => {
     expect(() => parseImportBundle('   ', 'roleplay')).toThrow(/为空/);
   });
 
+  // IMPHUB-L3:摘要曾写「(预览内可切换为系统提示词)」,但该段 option 恒为 null、
+  // 预览把 summary 当纯文本渲染、执行侧只走 runtime——界面承诺了不存在的能力。
+  // 收窄取「删文案」一侧(零行为风险),用例锁死「不得再出现切换承诺」。
+  it('文本段摘要不得承诺不存在的注入位置切换(IMPHUB-L3)', () => {
+    const out = parseImportBundle('# 提示词\n内容', 'roleplay', { fileName: 'p.md' });
+    const s = out.sections[0];
+    if (s.key !== 'prompts') throw new Error('应为 prompts 段');
+    expect(s.summary).not.toContain('可切换');
+    expect(s.summary).toContain('运行时主提示词');
+    expect(s.option).toBeNull();
+  });
+
   it('全部不命中 → 抛出,文案列出支持范围', () => {
     expect(() => parseImportBundle({ foo: 1 }, 'roleplay')).toThrow(/无法识别/);
     expect(() => parseImportBundle(null, 'roleplay')).toThrow(/无法识别/);

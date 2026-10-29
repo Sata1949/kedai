@@ -241,7 +241,7 @@ onUnmounted(() => {
       :key="st.id"
       class="sv-task-subtask"
     >
-      <span class="sv-supreme xs sv-dot-flash" :class="statusClass(st.status)" :key="st.status" />
+      <span :key="st.status" class="sv-supreme xs sv-dot-flash" :class="statusClass(st.status)" />
       <div class="sv-task-subtask-body">
         <div class="sv-task-subtask-name">
           {{ st.name }}

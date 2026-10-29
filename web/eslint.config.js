@@ -60,28 +60,62 @@ export default tseslint.config(
       ],
       // 单字组件名在本项目是既有约定(App.vue / Sidebar.vue),不与多词命名规范冲突。
       'vue/multi-word-component-names': 'off',
-      // v-html 在本项目用于渲染已消毒的 Markdown/富文本(见 sanitize-html 管线),
-      // 属既定实现;保留为 warn 提示风险,不阻断。
-      'vue/no-v-html': 'warn',
 
-      // ---- 以下为「存量问题」降级为 warn(2026-09-13 首次接入 ESLint)----
-      // 本任务约定不改业务代码,首轮先让 `eslint .` 零 error;这些规则仍有价值,
-      // 故只降为 warn 保持可见(而非 off / disable 注释),留待后续批次清偿:
-      //   no-control-regex ×3                     src/render.ts(消毒时的 NUL 字符正则,属有意)
-      //   no-useless-assignment ×3                src/sandbox/draggable.ts、iframe-lifecycle.ts(死存储)
-      //   prefer-const ×2                         src/cssSanitize.ts、src/sandbox/iframe-lifecycle.ts
-      //   no-useless-escape ×1                    src/characterScriptSandbox.test.ts
-      //   no-case-declarations ×1                 src/sseReducer.ts(case 块内 const)
-      //   no-fallthrough ×1                       src/taskStatus.ts('pending' 有意贯穿到 'planned')
-      //   vue/no-side-effects-in-computed-properties ×1  src/components/DevToolsModal.vue
-      'no-control-regex': 'warn',
-      'no-useless-assignment': 'warn',
-      'no-useless-escape': 'warn',
-      'no-case-declarations': 'warn',
-      'no-fallthrough': 'warn',
-      'prefer-const': 'warn',
-      'vue/no-side-effects-in-computed-properties': 'warn',
+      // ---- 以下为「有意的实现方式」,按**文件范围**关闭并写明理由 ----
+      // 声明式:不用行内 disable 注释,理由集中在此处,后续新增文件不会被静默放行。
+
+      // no-useless-assignment / prefer-const / no-useless-escape / no-case-declarations
+      // 的存量已于 2026-10-29 FT-2 批全部清偿(见变更史同章),故此处不再降级,
+      // 保持 ESLint 默认(推荐规则集里的 error),由 lint 作为零告警门禁的一部分。
     },
+  },
+
+  // 5a) v-html:全仓 v-html 的分支值都经统一消毒管线(sanitize-html,见 render.ts
+  //     的 sanitizeMessageHtml / cleanScriptHtml),属既定实现而非疏漏。按文件收窄到
+  //     「确实渲染已消毒 HTML」的组件,不全局关闭——新组件若直接绑未消毒内容仍会报。
+  {
+    files: [
+      'src/components/ChatMessageItem.vue',
+      'src/components/task/MarkdownBlock.vue',
+      'src/components/task/TaskApprovalPanel.vue',
+      'src/components/task/TaskExecutionPanel.vue',
+      'src/components/task/TaskResultPanel.vue',
+    ],
+    rules: { 'vue/no-v-html': 'off' },
+  },
+
+  // 5b) no-control-regex:render.ts 用 \u0000 作**脚本块的占位符定界符**
+  //     (renderBlocks 把脚本替换成 \0KDAI_BLOCK_n\0,再按该正则拆段并剥离残留)。
+  //     NUL 不会出现在正常正文里,故选它作定界符;这三个正则属有意实现。
+  {
+    files: ['src/render.ts'],
+    rules: { 'no-control-regex': 'off' },
+  },
+
+  // 5c) no-fallthrough:两处 case 贯穿都是**刻意的合并分支**——
+  //     taskStatus.ts 的 'pending' 贯穿到 'planned'(同走 pending 灰);
+  //     stores/task.ts 的 status/plan/subtask/flow_bound 共用同一刷新路径。
+  //     两处均已用注释说明,故按文件关闭。
+  {
+    files: ['src/taskStatus.ts', 'src/stores/task.ts'],
+    rules: { 'no-fallthrough': 'off' },
+  },
+
+  // 5d) vue/no-side-effects-in-computed-properties:DevToolsModal 的 `shown` 计算属性
+  //     在返回前把 expandedTs 复位为 null(「新增事件默认折叠」)。这是开发者工具面板的
+  //     展示态重置,不参与响应式依赖,且该面板不承载业务状态;按文件关闭。
+  {
+    files: ['src/components/DevToolsModal.vue'],
+    rules: { 'vue/no-side-effects-in-computed-properties': 'off' },
+  },
+
+  // 5e) @typescript-eslint/no-unused-vars:api/types/settings.ts 的三个 `SETTINGS_*_FIELDS`
+  //     是**类型推导用的常量**(紧邻的 `type X = (typeof SETTINGS_..._FIELDS)[number]` 消费它们),
+  //     而 ESLint 的非 type-aware 规则看不到类型位置的使用。按文件关闭该规则,不写
+  //     行内 disable(计划 FT-2 明令「不得在源文件加 eslint-disable」)。
+  {
+    files: ['src/api/types/settings.ts'],
+    rules: { '@typescript-eslint/no-unused-vars': 'off' },
   },
 
   // 6) 关闭与 Prettier 冲突的格式规则(必须放在最后)

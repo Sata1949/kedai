@@ -284,9 +284,13 @@ if (-not $SkipWeb -and -not $AuditOnly) {
         # 全局域(style.css + styles/*.css)逐文件行数与 !important 只降不升 + 组件 scoped
         # !important 合计 + animation/transition 裸时长归零(动效令牌 --dur-*/--stagger-step)。
         Invoke-Stage 'web: css-discipline'      { node tools/check-css-discipline.mjs }
-        # 前端代码质量(ESLint flat config + eslint-plugin-vue):0 error 硬门禁。
+        # 前端代码质量(ESLint flat config + eslint-plugin-vue):**0 error + 0 warning** 硬门禁。
         # 与上面 type-ratchet 目的不同(ratchet 管类型逃逸、此管代码质量),两者并存。
-        # 规则集首轮克制:存量问题降级为 warn(见 web/eslint.config.js),故 0 error 可过;
+        # 2026-10-29 FT-2 批已把 2026-09-13 接入时的 50 条存量 warning 全部清偿:
+        # 真问题直接修(no-useless-assignment/prefer-const/no-case-declarations 等),
+        # 有意实现按**文件范围**在 web/eslint.config.js 里关闭并写明理由(v-html 走消毒管线、
+        # render.ts 的 NUL 占位符正则、两处刻意 case 贯穿、DevToolsModal 的展示态重置)。
+        # 故 --max-warnings=0:新增任何 warning 即红,不再有「先降级再清偿」的缓冲带。
         # prettier --check 未接入——现有代码为手写紧凑风格,全量格式化差异面 ~80%,
         # 待独立「全量格式化」专项落地后再接(见 docs/功能-变更史.md)。
         Invoke-Stage 'web: eslint'              { npm run lint -w web }

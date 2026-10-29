@@ -568,8 +568,8 @@ function bindRowRef(id: number, target: unknown): void {
         <template v-for="(m, i) in messages" :key="m.id">
           <div
             v-if="!vm.isActive(m.id, i)"
-            :style="vm.placeholderStyle(m)"
             :ref="(el) => bindRowRef(m.id, el)"
+            :style="vm.placeholderStyle(m)"
           ></div>
           <ChatMessageItem
             v-else

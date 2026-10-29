@@ -160,24 +160,6 @@ function makeHarness(nonce: string): Harness {
   );
   new vm.Script(script).runInContext(sandboxGlobal);
 
-  const ack = (): void => {
-    for (const m of messages.filter((x) => x.type === 'batch')) {
-      for (const fn of listeners) {
-        fn({
-          data: {
-            channel: 'kedai-character-script-v1',
-            nonce,
-            type: 'rpc-result',
-            id: m.id,
-            ok: true,
-            value: true,
-          },
-        });
-      }
-    }
-    for (const m of messages.filter((x) => x.type === 'warn')) warnings.push(String(m.message));
-    for (const m of messages.filter((x) => x.type === 'error')) errors.push(String(m.message));
-  };
   // 待 ack 的 batch 应只 ack 一次:按 id 去重,避免重复解析同一批 rpc 造成计数噪声
   const acked = new Set<number>();
   const ackOnce = (): void => {

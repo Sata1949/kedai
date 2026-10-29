@@ -313,7 +313,7 @@ export function createThemeRegistry(options: ThemeRegistryOptions = {}): ThemeRe
   }
 
   async function init(): Promise<void> {
-    let saved: string | null = null;
+    let saved: string | null;
     try {
       saved = storage?.getItem(THEME_STORAGE_KEY) ?? null;
     } catch {
