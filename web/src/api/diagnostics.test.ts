@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { getCacheDiagnostics } from './diagnostics';
+import { getCacheDiagnostics, getDataDirs } from './diagnostics';
 import { resetApiTokenForTest } from './client';
 
 // 样例数据与后端 server-rs/src/services/cache_diagnostics.rs 测试同源:
@@ -86,5 +86,57 @@ describe('getCacheDiagnostics', () => {
   it('200 但缺少 totals/entries/watermark 时抛格式异常', async () => {
     mockFetchSequence({ body: { window: 20, session_id: null } });
     await expect(getCacheDiagnostics()).rejects.toThrow('缓存统计响应格式异常');
+  });
+});
+
+describe('getDataDirs(DB-7 双库分叉)', () => {
+  beforeEach(() => {
+    resetApiTokenForTest();
+    vi.restoreAllMocks();
+  });
+
+  it('请求 /api/diagnostics/data-dirs 并解析 data_dir / others', async () => {
+    const spy = mockFetchSequence({
+      body: {
+        data_dir: 'C:\\Users\\u\\AppData\\Roaming\\com.kedai.app\\data',
+        others: [{ path: 'D:\\kedai\\data', evidence: 'settings.json + 数据库' }],
+      },
+    });
+    const report = await getDataDirs();
+    expect(String(spy.mock.calls[1][0])).toBe('/api/diagnostics/data-dirs');
+    expect(report.data_dir).toContain('com.kedai.app');
+    expect(report.others).toHaveLength(1);
+    expect(report.others[0].path).toBe('D:\\kedai\\data');
+    expect(report.others[0].evidence).toBe('settings.json + 数据库');
+  });
+
+  it('无分叉时 others 为空数组(调用方据此判定不提示)', async () => {
+    mockFetchSequence({ body: { data_dir: 'C:\\only', others: [] } });
+    const report = await getDataDirs();
+    expect(report.others).toEqual([]);
+  });
+
+  it('others 缺字段时抛格式异常,而不是静默当成「没分叉」', async () => {
+    // 关键回归:若这里返回 { others: undefined },调用方的 `others.length > 0`
+    // 会变成 false —— 恰好把 DB-7 要堵的静默重建一遍。
+    mockFetchSequence({ body: { data_dir: 'C:\\only' } });
+    await expect(getDataDirs()).rejects.toThrow('数据目录检测响应格式异常');
+  });
+
+  it('data_dir 缺失时同样抛格式异常', async () => {
+    mockFetchSequence({ body: { others: [] } });
+    await expect(getDataDirs()).rejects.toThrow('数据目录检测响应格式异常');
+  });
+
+  it('丢弃没有 path 的脏条目(渲染层按下标取 path,脏条目会渲染出 undefined)', async () => {
+    mockFetchSequence({
+      body: {
+        data_dir: 'C:\\only',
+        others: [{ path: 'D:\\a', evidence: 'e1' }, { evidence: '缺 path' }, null],
+      },
+    });
+    const report = await getDataDirs();
+    expect(report.others).toHaveLength(1);
+    expect(report.others[0].path).toBe('D:\\a');
   });
 });

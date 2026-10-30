@@ -781,3 +781,33 @@ async fn embedding_test_reports_code_without_http_error() {
     );
     assert_no_internal_leak(&body);
 }
+
+// ==================== 双库分叉检测端点(DB-7 UI 侧出口,2026-10-30) ====================
+
+/// 端点必须回 `data_dir` + `others` 两键;`others` 恒为数组(前端按 length 判据)。
+///
+/// 测试环境的 DATA_DIR 是 `%TEMP%\kedai-test-<pid>`,与 `%APPDATA%` / 项目 `data/`
+/// 都可能**恰好**存在另一套有用户数据的库(取决于跑测试的机器),故本用例只断言形状
+/// 与「不含当前目录本身」这条不变式,不断言 others 为空——那会让用例随机器状态飘。
+#[tokio::test]
+async fn diagnostics_data_dirs_reports_shape_and_excludes_self() {
+    let app = test_app();
+    let (status, body) = send_json(app, "GET", "/api/diagnostics/data-dirs", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "双库检测应恒 200: {body}");
+    let selected = body["data_dir"]
+        .as_str()
+        .expect("必须回 data_dir(前端要据此显示当前库位置)");
+    assert!(!selected.is_empty(), "data_dir 不得为空串");
+    let others = body["others"]
+        .as_array()
+        .expect("others 必须是数组(缺字段会让前端判据落 undefined)");
+    // 自身不得出现在分叉列表里(否则每次启动都误报)
+    for item in others {
+        let path = item["path"].as_str().expect("每项必须带 path");
+        assert_ne!(path, selected, "自身目录不得报为分叉");
+        assert!(
+            item["evidence"].as_str().is_some_and(|s| !s.is_empty()),
+            "每项必须带判据说明: {item}"
+        );
+    }
+}

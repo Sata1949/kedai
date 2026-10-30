@@ -1,7 +1,8 @@
-// 诊断路由(缓存感知管线):GET /api/diagnostics/cache
-// 返回近 N 条请求的缓存命中率(加权 token 口径)、逐条明细、按可配置单价估算的
+// 诊断路由:GET /api/diagnostics/cache(缓存感知管线)+ GET /api/diagnostics/data-dirs(双库分叉,DB-7)
+// cache 返回近 N 条请求的缓存命中率(加权 token 口径)、逐条明细、按可配置单价估算的
 // 费用与节省,以及输入 tokens 对照 max_context_tokens 的四级水位报告。
 use crate::api::app_state::AppState;
+use crate::config;
 use crate::services::cache_diagnostics::{summarize, watermark, CachePricing, CacheUsageRow};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -9,6 +10,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::{err_with_code, ErrorCode};
@@ -134,3 +136,89 @@ pub async fn cache(State(state): State<Arc<AppState>>, Query(q): Query<CacheQuer
     }))
     .into_response()
 }
+
+/// GET /api/diagnostics/data-dirs:当前生效数据目录 + 检测到的「另一套有用户数据的库」。
+///
+/// 存在的理由(DB-7 的 UI 侧缺口):`detect_split_data_dirs` 自 2026-10-29 起只在启动期
+/// 打 `warn`——用户界面完全看不到,只能自己发现「聊天记录没了」。本端点把同一份检测
+/// 结果搬上 HTTP,供前端横幅提示。**纯只读**:不改目录选择、不写文件、不动任何状态。
+///
+/// 每次请求都重新探测而不缓存:候选目录的内容可能在进程存活期间变化(用户手动拷库、
+/// 删掉另一套库),缓存会让提示停留在过期事实上。代价是几次 `metadata` + 只读 SQLite
+/// 打开,只在页面启动时调一次,可接受。
+pub async fn data_dirs(State(state): State<Arc<AppState>>) -> Response {
+    let selected = state.config.data_dir.clone();
+    let candidates = config::split_dir_candidates();
+    // 目录探测含文件系统与 SQLite 打开(阻塞调用),放 spawn_blocking 避免占 tokio worker
+    let scan_target = selected.clone();
+    let detected = tokio::task::spawn_blocking(move || {
+        config::detect_split_data_dirs(&scan_target, &candidates)
+    })
+    .await;
+    let others = match detected {
+        Ok(v) => v,
+        Err(e) => {
+            // 任务被取消/panic:不假装「没有分叉」——那会把检测失败伪装成正常态
+            tracing::error!(error = %e, "双库检测任务失败");
+            return err_with_code(
+                ErrorCode::Internal,
+                "双库检测失败",
+                StatusCode::INTERNAL_SERVER_ERROR,
+            );
+        }
+    };
+    Json(split_dirs_payload(&selected, &others)).into_response()
+}
+
+// ===== 纯函数(端点与单测共用;`*_tests` 侧不重复实现判据) =====
+
+/// 把检测结果摊平成线格式条目(见 [`data_dirs`])。
+///
+/// 抽成纯函数以便单测断言「路径与判据都如实透出、顺序保持候选顺序」,
+/// 而不必拉起整个 AppState。
+pub(crate) fn split_dirs_payload(selected: &Path, found: &[(PathBuf, &'static str)]) -> serde_json::Value {
+    json!({
+        "data_dir": selected.to_string_lossy(),
+        "others": found
+            .iter()
+            .map(|(dir, why)| json!({
+                "path": dir.to_string_lossy(),
+                "evidence": why,
+            }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+#[cfg(test)]
+mod data_dirs_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+
+    /// 检测结果按候选顺序原样透出:路径与判据都必须出现在线格式里,
+    /// 否则前端只能显示「有另一套库」却给不出位置。
+    #[test]
+    fn payload_keeps_path_and_evidence() {
+        let selected = PathBuf::from(r"C:\data-a");
+        let found = vec![
+            (PathBuf::from(r"C:\data-b"), "settings.json + 数据库"),
+            (PathBuf::from(r"D:\data-c"), "数据库（含角色或会话）"),
+        ];
+        let v = split_dirs_payload(&selected, &found);
+        assert_eq!(v["data_dir"], json!(r"C:\data-a"));
+        let others = v["others"].as_array().unwrap();
+        assert_eq!(others.len(), 2, "两套都要报: {v}");
+        assert_eq!(others[0]["path"], json!(r"C:\data-b"));
+        assert_eq!(others[0]["evidence"], json!("settings.json + 数据库"));
+        assert_eq!(others[1]["path"], json!(r"D:\data-c"));
+    }
+
+    /// 无分叉时 `others` 必须是空数组(不是 null、不是缺字段):
+    /// 前端按 `others.length > 0` 决定是否提示,缺字段会让判据变成 undefined。
+    #[test]
+    fn empty_result_is_empty_array() {
+        let v = split_dirs_payload(Path::new(r"C:\only"), &[]);
+        assert_eq!(v["others"], json!([]));
+        assert_eq!(v["data_dir"], json!(r"C:\only"));
+    }
+}
+

@@ -90,3 +90,30 @@ describe('uiPrefs Agent 面板开合语义', () => {
     expect(store.overlayOpen).toBe(false);
   });
 });
+
+describe('uiPrefs 双库分叉提示(DB-7)', () => {
+  it('检测到另一套库时置位,并保留当前目录与另一套路径', () => {
+    const store = useUiPrefsStore();
+    expect(store.splitDataDirs).toBeNull();
+    store.setSplitDataDirs({
+      data_dir: 'C:\\a',
+      others: [{ path: 'D:\\b', evidence: 'settings.json + 数据库' }],
+    });
+    expect(store.splitDataDirs).not.toBeNull();
+    expect(store.splitDataDirs?.dataDir).toBe('C:\\a');
+    expect(store.splitDataDirs?.others[0].path).toBe('D:\\b');
+  });
+
+  it('others 为空时保持 null(无分叉不弹提示)', () => {
+    const store = useUiPrefsStore();
+    store.setSplitDataDirs({ data_dir: 'C:\\a', others: [] });
+    expect(store.splitDataDirs).toBeNull();
+  });
+
+  it('关闭后置 null(本会话不再显示)', () => {
+    const store = useUiPrefsStore();
+    store.setSplitDataDirs({ data_dir: 'C:\\a', others: [{ path: 'D:\\b', evidence: 'e' }] });
+    store.dismissSplitDataDirs();
+    expect(store.splitDataDirs).toBeNull();
+  });
+});
