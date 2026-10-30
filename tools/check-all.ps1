@@ -95,34 +95,110 @@ function Invoke-Stage([string]$Name, [scriptblock]$Body) {
     $script:results += [pscustomobject]@{ Stage = $Name; Result = 'OK'; Seconds = [math]::Round($sw.Elapsed.TotalSeconds,1) }
 }
 
+# ===== 第 1 段:秒级结构/口径检查(纯 Node 零依赖,合计 < 3s)=====
+# 2026-10-30 提效批(阶段顺序):此前顺序是「后端编译测试 → 审计 → 文档 → 前端」,
+# 最长的一步(全量 cargo test,约 21 分钟)排在 0.1s 的文档检查**之前**。实测出现过
+# 跑满 1288s 后,被 0.3s 的 `docs: check-docs` 判死、整轮作废的浪费(见
+# db7ui-evidence/check-full.log)。现改为按「越便宜越先跑」排序:所有秒级检查前置,
+# 失败在 3 秒内暴露;cargo test 排到倒数第二(仅早于前端构建)。
+# 语义不变:文档两段仍只由 -AuditOnly 跳过,不受 -SkipWeb/-SkipRust 影响(GATE-1)。
+if (-not $AuditOnly) {
+    Push-Location $root
+    try {
+        Invoke-Stage 'docs: check-docs' { node tools/check-docs.mjs }
+        # 文档口径检查(2026-09-26 起,硬门禁):把「由代码/脚本派生」的计数(表数、ensure_* 个数、
+        # check-contract 映射组数与镜像表行数、check-arch 规则字母与两个 ratchet 基线、
+        # SseEvent/TaskEventKind 变体数、check-all 阶段数)与文档字面逐条比对——这批事实
+        # 原先散在多份文档各写一个数、且不在任何门禁内(count-tests 只管测试数字)。
+        # 历史层(「原文 + 变更标注」体例)保留旧值不判失配。
+        Invoke-Stage 'docs: check-doc-claims' { node tools/check-doc-claims.mjs }
+        # 新手教程防漂移机检(2026-10-10 TUTSYNC OB-12,硬门禁):教程步骤表的跳转落点、
+        # 引用的界面真实名、退役入口叫法、关于页速览覆盖与步数派生,逐条与真实界面对比。
+        # 放在文档口径段而不是 web 段:它校验的是「内容与界面一致性」这类口径事实,
+        # 与 GATE-1 的教训同理——不该被 -SkipWeb 跳过(纯后端批次同样可能改改名/删入口而忘改教程)。
+        Invoke-Stage 'docs: check-tutorial' { node tools/check-tutorial.mjs }
+    } finally { Pop-Location }
+}
+
+# 静态结构检查(纯 Node,零依赖,均 < 1s):锁漂移 / 契约 / 设置对拍 / 分层 / 体积
+# ratchet / 类型逃逸 ratchet / 零测试 ratchet / 样式纪律。全部与编译产物无关。
+if (-not $SkipWeb -and -not $AuditOnly) {
+    Push-Location $root
+    try {
+        # 双 Cargo.lock 漂移:src-tauri 以 path 内嵌 server-rs,构建便携版时 cargo 忽略
+        # server-rs/Cargo.lock 并重新解析依赖树 —— 同一后端源码在两版产物中可能编译出
+        # 不同版本依赖(静默,跨 lock 不报 links 冲突)。2026-09-13 批次 1 起 0 漂移为基线,
+        # 新增漂移即 FAIL;不可避免的历史例外登记在 tools/lock-sync-baseline.json。
+        Invoke-Stage 'deps: check-lock-sync'    { node tools/check-lock-sync.mjs }
+        # 契约快照:手写 TS 类型与 Rust 后端字段集合比对(漂移即 FAIL,纯 Node 零依赖)
+        Invoke-Stage 'contract: check-contract' { node tools/check-contract.mjs }
+        # 设置字段对拍(C-2B):PUT 请求体 / GET 投影 / 连接元素三组字段集合。
+        # `RuntimeSettingsPatch` 是派生类型,本脚本按同一派生规则重算后与 Rust 对拍;
+        # GET 侧比对 `settings_json()` 的手工投影键(只比结构体会漏掉「加了字段忘投影」)。
+        Invoke-Stage 'contract: check-settings-parity' { node tools/check-settings-parity.mjs }
+        # 架构护栏自测:check-arch 的检测逻辑(v-model / 动态 import / arch-allow)
+        # 用 fixture 覆盖。门禁脚本自身也要有回归网——2026-10-24 审计实测曾出现
+        # 只认 `store.x =` 与静态 from 的假阴性。
+        Invoke-Stage 'arch: check-arch self-test' { node --test tools/check-arch.test.mjs }
+        # 架构护栏:前端 store 循环依赖(A) + 组件直改 state(B) + 后端分层规则 C/D/E/G
+        # + EJS 能力面冻结(H) + 代际归属 I + 跨代依赖方向 J(2026-09-14 新增)。
+        # 全部规则均为硬门禁:违规即 exit 1;C/D/E 已于 2026-09-13 清零,
+        # G/H 为 ratchet(只降不升),I/J 以 tools/arch-layers.json 为 SSOT。
+        Invoke-Stage 'arch: check-arch'         { node tools/check-arch.mjs }
+        # 超千行文件 ratchet(C-2E,2026-10-25):基线 30 个非测试源文件,只降不升;
+        # 基线外新文件越过 1000 行即 FAIL。先止增,再按 C-2 分批拆(目标 ≤6 未变)。
+        Invoke-Stage 'arch: check-file-size'   { node tools/check-file-size.mjs }
+        # 测试数自动统计:与 MAINTENANCE.md 记录比对。
+        # 2026-09-14 起为**硬门禁**(此前为警告档):MAINTENANCE.md 是「数字唯一真值源」,
+        # 历史教训是同一数字在 5 份文档并存(923/697、975/733、977/745、971/763、1017/768),
+        # 根因就是多处手抄且无人守护。新增测试后请跑 `npm run count:tests` 并同步该文档。
+        Invoke-Stage 'count: tests' { node tools/count-tests.mjs --check }
+        # 前端类型逃逸 ratchet:as never / as unknown as / 非空断言 / any 只降不升
+        # (纯 Node 零依赖,与 check-arch/check-contract 同风格;基线见脚本内 BASELINE)
+        Invoke-Stage 'web: type-ratchet'        { node tools/check-frontend-lint.mjs }
+        # 零测试文件 ratchet(2026-10-06 FE-11 新增,FRONTEND-REPORT §七第 9 条的零依赖
+        # 替代方案——覆盖率工具链因本机网络拉不到新依赖而不可用):新增源码文件若没有任何
+        # 测试 import 引用即 FAIL;基线为显式清单(只减不增),见脚本头注释与 BASELINE。
+        Invoke-Stage 'web: test-ratchet'        { node tools/check-test-ratchet.mjs }
+        # 样式纪律 ratchet(2026-10-02 UIP-8 新增;FRONTEND-REPORT §七第 10 条 / FE-12 落点):
+        # 全局域(style.css + styles/*.css)逐文件行数与 !important 只降不升 + 组件 scoped
+        # !important 合计 + animation/transition 裸时长归零(动效令牌 --dur-*/--stagger-step)。
+        Invoke-Stage 'web: css-discipline'      { node tools/check-css-discipline.mjs }
+    } finally { Pop-Location }
+}
+
+# ===== 第 2 段:后端环境就绪(一次导入,供下方 fmt/clippy/test 共用)=====
+# 原实现把 Import-VcVars 放在单一后端块内;阶段拆成两处后必须提前到此处,
+# 否则第二个块拿不到 MSVC 环境(clippy 会误用 Git 的 link.exe)。
+$rustReady = $false
+$cargoTargetArgs = @()
 if (-not $SkipRust -and -not $AuditOnly) {
     if (-not $hasCargo) { Write-Host '未找到 cargo(也不在 ~\.cargo\bin),跳过后端;请先安装 Rust 工具链' -ForegroundColor Yellow }
     elseif (-not (Test-Path $vcvars)) { Write-Host "未找到 vcvars64.bat,跳过后端;请安装 VS BuildTools(MSVC)" -ForegroundColor Yellow }
     else {
         Import-VcVars $vcvars
         if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { $env:PATH = "$cargoBin;$env:PATH" }
-        Push-Location "$root\server-rs"
-        try {
-            # 后端产物目录:默认 server-rs\target;若外部已设 CARGO_TARGET_DIR 则用其值
-            # (某些机器上安全软件会拦截 server-rs\target 下**新建 exe** 的执行,报
-            #  os error 5,需把产物外置。详见 MAINTENANCE.md §10 条目 22)。
-            # 这里显式把变量导出给本轮 cargo 调用,并让 grep/路径类检查一致。
-            $cargoTargetArgs = if ($env:CARGO_TARGET_DIR) { @('--target-dir', $env:CARGO_TARGET_DIR) } else { @() }
-            if ($env:CARGO_TARGET_DIR) { Write-Host "[信息] 后端产物目录外置: $env:CARGO_TARGET_DIR" -ForegroundColor DarkGray }
-            # 编译前让位:运行中的 kedai-server 会锁住产物,导致 cargo 链接失败(os error 5)
-            $serverTargetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $root "server-rs\target" }
-            Clear-KedaiLockedServerArtifacts -TargetDir $serverTargetDir
-            Invoke-Stage 'cargo fmt --check'        { cargo fmt --check }
-            Invoke-Stage 'cargo clippy'             { cargo clippy --all-targets @cargoTargetArgs -- -D warnings }
-            # -j 8:2026-09-17 P-13 实测后由 -j 2 放宽。历史故障(全并行链接撞 os error 1455
-            # 页面文件不足 / rustc 自身 STATUS_STACK_BUFFER_OVERRUN)本次**未能复现**:
-            # 冷 target 全并行(16 jobs)与 -j 4/6/8 五轮均 1157 passed / 0 failed。
-            # 取 8 而非不限制,是为与 build.ps1 等重活并发时留内存余量(详见 docs/经验.md 条目 29)。
-            Invoke-Stage 'cargo test --workspace'   { cargo test --workspace -j 8 @cargoTargetArgs }
-            # cargo audit 已迁出本块,升级为下方独立「审计段」:不再受 -SkipRust 影响,
-            # 并覆盖 server-rs + src-tauri 两把锁。
-        } finally { Pop-Location }
+        # 后端产物目录:默认 server-rs\target;若外部已设 CARGO_TARGET_DIR 则用其值
+        # (某些机器上安全软件会拦截 server-rs\target 下**新建 exe** 的执行,报
+        #  os error 5,需把产物外置。详见 MAINTENANCE.md §10 条目 22)。
+        # 这里显式把变量导出给本轮 cargo 调用,并让 grep/路径类检查一致。
+        $cargoTargetArgs = if ($env:CARGO_TARGET_DIR) { @('--target-dir', $env:CARGO_TARGET_DIR) } else { @() }
+        if ($env:CARGO_TARGET_DIR) { Write-Host "[信息] 后端产物目录外置: $env:CARGO_TARGET_DIR" -ForegroundColor DarkGray }
+        # 编译前让位:运行中的 kedai-server 会锁住产物,导致 cargo 链接失败(os error 5)
+        $serverTargetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $root "server-rs\target" }
+        Clear-KedaiLockedServerArtifacts -TargetDir $serverTargetDir
+        $rustReady = $true
     }
+}
+
+# ===== 第 3 段:后端静态编译检查(fmt + clippy;缓存命中时合计约 4s)=====
+# 编译错误应在测试之前暴露:clippy 冷启动可能要 60s+,仍远低于全量测试的分钟级。
+if ($rustReady) {
+    Push-Location "$root\server-rs"
+    try {
+        Invoke-Stage 'cargo fmt --check'        { cargo fmt --check }
+        Invoke-Stage 'cargo clippy'             { cargo clippy --all-targets @cargoTargetArgs -- -D warnings }
+    } finally { Pop-Location }
 }
 
 # ---- 审计段(独立安全门禁,与 -SkipRust/-SkipWeb 解耦)----
@@ -213,86 +289,34 @@ if ($LASTEXITCODE -eq 0) {
     exit 1
 }
 
-# ===== 文档一致性门禁(纯 Node 零依赖,与 -SkipRust/-SkipWeb 解耦)=====
-# 2026-09-16 文档整合:68 份散落 md → 六类体系(契约/功能/计划/展望/经验/遗留),
-# 原文档归档到 docs/archive/2026-09-16-consolidation/。此前 docs/ 没有任何机器校验,
-# 本阶段把「根下只放六类活文档 + 索引双向一致 + 链接不失效 + 归档映射覆盖」变成硬门禁。
-# 规则清单见 tools/check-docs.mjs 头部注释(D1~D6)。
-#
-# GATE-1(2026-10-06 修复):`docs: check-doc-claims` 此前被包在 `-SkipWeb` 守卫内,
-# 而段注释却声称「与 -SkipWeb 解耦」——带 `-SkipWeb` 跑时文档口径(含路由总表穷尽性
-# 与十余项由代码派生的计数)不校验且无任何提示,「口径全绿」成为假信号。现与
-# `docs: check-docs` 并列在本段内:只有 `-AuditOnly` 能跳过它们。本段与后端编译、
-# 前端测试/构建都无依赖,可独立运行。
-if (-not $AuditOnly) {
-    Push-Location $root
+# ===== 第 4 段:后端全量测试(全门禁最慢一步,放在所有秒级检查之后)=====
+# 2026-10-30 提效批:本段此前排在最前(紧跟 clippy),导致任何便宜检查失败都要先
+# 白跑一遍 21 分钟的测试。现移到审计之后、前端构建之前;前面的 fmt/clippy 已保证
+# 「能编译」,本段只负责「行为对」。
+if ($rustReady) {
+    Push-Location "$root\server-rs"
     try {
-        Invoke-Stage 'docs: check-docs' { node tools/check-docs.mjs }
-        # 文档口径检查(2026-09-26 起,硬门禁):把「由代码/脚本派生」的计数(表数、ensure_* 个数、
-        # check-contract 映射组数与镜像表行数、check-arch 规则字母与两个 ratchet 基线、
-        # SseEvent/TaskEventKind 变体数、check-all 阶段数)与文档字面逐条比对——这批事实
-        # 原先散在多份文档各写一个数、且不在任何门禁内(count-tests 只管测试数字)。
-        # 历史层(「原文 + 变更标注」体例)保留旧值不判失配。
-        Invoke-Stage 'docs: check-doc-claims' { node tools/check-doc-claims.mjs }
-        # 新手教程防漂移机检(2026-10-10 TUTSYNC OB-12,硬门禁):教程步骤表的跳转落点、
-        # 引用的界面真实名、退役入口叫法、关于页速览覆盖与步数派生,逐条与真实界面对比。
-        # 放在文档口径段而不是 web 段:它校验的是「内容与界面一致性」这类口径事实,
-        # 与 GATE-1 的教训同理——不该被 -SkipWeb 跳过(纯后端批次同样可能改改名/删入口而忘改教程)。
-        Invoke-Stage 'docs: check-tutorial' { node tools/check-tutorial.mjs }
+        # -j 8:2026-09-17 P-13 实测后由 -j 2 放宽。历史故障(全并行链接撞 os error 1455
+        # 页面文件不足 / rustc 自身 STATUS_STACK_BUFFER_OVERRUN)本次**未能复现**:
+        # 冷 target 全并行(16 jobs)与 -j 4/6/8 五轮均 1157 passed / 0 failed。
+        # 取 8 而非不限制,是为与 build.ps1 等重活并发时留内存余量(详见 docs/经验.md 条目 29)。
+        Invoke-Stage 'cargo test --workspace'   { cargo test --workspace -j 8 @cargoTargetArgs }
     } finally { Pop-Location }
 }
 
+# ===== 第 5 段:前端测试与构建 =====
+# 前端代码质量(ESLint flat config + eslint-plugin-vue):**0 error + 0 warning** 硬门禁。
+# 与 type-ratchet(第 1 段)目的不同:ratchet 管类型逃逸、此管代码质量,两者并存。
+# 2026-10-29 FT-2 批已把 2026-09-13 接入时的 50 条存量 warning 全部清偿:
+# 真问题直接修(no-useless-assignment/prefer-const/no-case-declarations 等),
+# 有意实现按**文件范围**在 web/eslint.config.js 里关闭并写明理由(v-html 走消毒管线、
+# render.ts 的 NUL 占位符正则、两处刻意 case 贯穿、DevToolsModal 的展示态重置)。
+# 故 --max-warnings=0:新增任何 warning 即红,不再有「先降级再清偿」的缓冲带。
+# prettier --check 未接入——现有代码为手写紧凑风格,全量格式化差异面 ~80%,
+# 待独立「全量格式化」专项落地后再接(见 docs/功能-变更史.md)。
 if (-not $SkipWeb -and -not $AuditOnly) {
     Push-Location $root
     try {
-        # 双 Cargo.lock 漂移:src-tauri 以 path 内嵌 server-rs,构建便携版时 cargo 忽略
-        # server-rs/Cargo.lock 并重新解析依赖树 —— 同一后端源码在两版产物中可能编译出
-        # 不同版本依赖(静默,跨 lock 不报 links 冲突)。2026-09-13 批次 1 起 0 漂移为基线,
-        # 新增漂移即 FAIL;不可避免的历史例外登记在 tools/lock-sync-baseline.json。
-        Invoke-Stage 'deps: check-lock-sync'    { node tools/check-lock-sync.mjs }
-        # 契约快照:手写 TS 类型与 Rust 后端字段集合比对(漂移即 FAIL,纯 Node 零依赖)
-        Invoke-Stage 'contract: check-contract' { node tools/check-contract.mjs }
-        # 设置字段对拍(C-2B):PUT 请求体 / GET 投影 / 连接元素三组字段集合。
-        # `RuntimeSettingsPatch` 是派生类型,本脚本按同一派生规则重算后与 Rust 对拍;
-        # GET 侧比对 `settings_json()` 的手工投影键(只比结构体会漏掉「加了字段忘投影」)。
-        Invoke-Stage 'contract: check-settings-parity' { node tools/check-settings-parity.mjs }
-        # 架构护栏自测:check-arch 的检测逻辑(v-model / 动态 import / arch-allow)
-        # 用 fixture 覆盖。门禁脚本自身也要有回归网——2026-10-24 审计实测曾出现
-        # 只认 `store.x =` 与静态 from 的假阴性。
-        Invoke-Stage 'arch: check-arch self-test' { node --test tools/check-arch.test.mjs }
-        # 架构护栏:前端 store 循环依赖(A) + 组件直改 state(B) + 后端分层规则 C/D/E/G
-        # + EJS 能力面冻结(H) + 代际归属 I + 跨代依赖方向 J(2026-09-14 新增)。
-        # 全部规则均为硬门禁:违规即 exit 1;C/D/E 已于 2026-09-13 清零,
-        # G/H 为 ratchet(只降不升),I/J 以 tools/arch-layers.json 为 SSOT。
-        Invoke-Stage 'arch: check-arch'         { node tools/check-arch.mjs }
-        # 超千行文件 ratchet(C-2E,2026-10-25):基线 30 个非测试源文件,只降不升;
-        # 基线外新文件越过 1000 行即 FAIL。先止增,再按 C-2 分批拆(目标 ≤6 未变)。
-        Invoke-Stage 'arch: check-file-size'   { node tools/check-file-size.mjs }
-        # 测试数自动统计:与 MAINTENANCE.md 记录比对。
-        # 2026-09-14 起为**硬门禁**(此前为警告档):MAINTENANCE.md 是「数字唯一真值源」,
-        # 历史教训是同一数字在 5 份文档并存(923/697、975/733、977/745、971/763、1017/768),
-        # 根因就是多处手抄且无人守护。新增测试后请跑 `npm run count:tests` 并同步该文档。
-        Invoke-Stage 'count: tests' { node tools/count-tests.mjs --check }
-        # 前端类型逃逸 ratchet:as never / as unknown as / 非空断言 / any 只降不升
-        # (纯 Node 零依赖,与 check-arch/check-contract 同风格;基线见脚本内 BASELINE)
-        Invoke-Stage 'web: type-ratchet'        { node tools/check-frontend-lint.mjs }
-        # 零测试文件 ratchet(2026-10-06 FE-11 新增,FRONTEND-REPORT §七第 9 条的零依赖
-        # 替代方案——覆盖率工具链因本机网络拉不到新依赖而不可用):新增源码文件若没有任何
-        # 测试 import 引用即 FAIL;基线为显式清单(只减不增),见脚本头注释与 BASELINE。
-        Invoke-Stage 'web: test-ratchet'        { node tools/check-test-ratchet.mjs }
-        # 样式纪律 ratchet(2026-10-02 UIP-8 新增;FRONTEND-REPORT §七第 10 条 / FE-12 落点):
-        # 全局域(style.css + styles/*.css)逐文件行数与 !important 只降不升 + 组件 scoped
-        # !important 合计 + animation/transition 裸时长归零(动效令牌 --dur-*/--stagger-step)。
-        Invoke-Stage 'web: css-discipline'      { node tools/check-css-discipline.mjs }
-        # 前端代码质量(ESLint flat config + eslint-plugin-vue):**0 error + 0 warning** 硬门禁。
-        # 与上面 type-ratchet 目的不同(ratchet 管类型逃逸、此管代码质量),两者并存。
-        # 2026-10-29 FT-2 批已把 2026-09-13 接入时的 50 条存量 warning 全部清偿:
-        # 真问题直接修(no-useless-assignment/prefer-const/no-case-declarations 等),
-        # 有意实现按**文件范围**在 web/eslint.config.js 里关闭并写明理由(v-html 走消毒管线、
-        # render.ts 的 NUL 占位符正则、两处刻意 case 贯穿、DevToolsModal 的展示态重置)。
-        # 故 --max-warnings=0:新增任何 warning 即红,不再有「先降级再清偿」的缓冲带。
-        # prettier --check 未接入——现有代码为手写紧凑风格,全量格式化差异面 ~80%,
-        # 待独立「全量格式化」专项落地后再接(见 docs/功能-变更史.md)。
         Invoke-Stage 'web: eslint'              { npm run lint -w web }
         # 2026-09-08 附录 D 168 个存量错误已清偿归零,typecheck 恢复硬门禁;
         # -StrictTypecheck 参数保留兼容(已无分支差异)
