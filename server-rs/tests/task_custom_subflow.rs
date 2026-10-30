@@ -729,8 +729,10 @@ async fn custom_sub_flow_stop_aborts_running_sub_graph() {
     let _guard = test_lock().await;
     let app = test_app();
 
-    // 慢子流程:单节点、**不带回复钩子** → 走 mock 默认逐字分支(每字符 sleep 8ms,
-    // 约 130 字符 ≈ 1s),足以让 stop 落在子图运行中
+    // 慢子流程:单节点、**不带回复钩子** → 走 mock 默认分支;停止窗口由任务目标里的
+    // 慢流哨兵申请(custom 流程把它渲染进每个节点的 system,见 task_engine/custom/
+    // step.rs 的 build_step_system)——该轮强制 8ms/字符(约 130 字符 ≈ 1s),
+    // 足以让 stop 落在子图运行中。测试构建默认零延时,不申请就观测不到 running 态。
     let sub_id = save_flow(
         app,
         "慢子流程",
@@ -751,7 +753,7 @@ async fn custom_sub_flow_stop_aborts_running_sub_graph() {
     )
     .await;
 
-    let id = create_task(app, "慢子图任务目标").await;
+    let id = create_task(app, "慢子图任务目标__KEDAI_SLOW_STREAM__").await;
     run_task(app, &id).await;
 
     // 等挂载节点进入 running(子图这时才开始跑)再停止

@@ -12,7 +12,7 @@ use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 mod common;
-use common::{send_json, test_app_with_prompt_isolation as test_app, test_lock};
+use common::{send_json, test_app_with_prompt_isolation as test_app, test_lock_read};
 
 /// 上传角色卡:酒馆助手插件变量树 + 可选契约(extensions.nlkaleido)。
 /// 契约 updateRules 只声明「心之所向.好感度」,「世界.年分」未声明(供门控拒绝断言)。
@@ -243,7 +243,7 @@ async fn kaleido_state_row(app: &axum::Router, sid: &str) -> Option<Value> {
 /// 契约卡 + mvu_tool 驱动:门控只放行声明字段;kaleido_changelog 逐 op 落账;kaleido_state 有行
 #[tokio::test]
 async fn contract_gates_mvu_tool_and_commits_kaleido_state() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
 
     let (status, char) = upload_character_with_contract(app).await;
@@ -345,7 +345,7 @@ async fn contract_gates_mvu_tool_and_commits_kaleido_state() {
 /// 契约卡 + 正文 <UpdateVariable> 文本协议:同样产生 changelog 记录(正文路径接线)
 #[tokio::test]
 async fn contract_changelog_for_update_variable_text_protocol() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
 
     let (status, char) = upload_character_with_contract(app).await;
@@ -402,7 +402,7 @@ async fn contract_changelog_for_update_variable_text_protocol() {
 /// 无契约角色(存量卡):kaleido_state 无行(回归,零行为变化)
 #[tokio::test]
 async fn no_contract_character_has_no_kaleido_state() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
 
     let (status, char) = upload_character_without_contract(app).await;
@@ -454,7 +454,7 @@ async fn no_contract_character_has_no_kaleido_state() {
 /// InitVar 已写的值不被覆盖。
 #[tokio::test]
 async fn contract_defaults_fill_missing_initvar_fields() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
 
     // 契约声明三个字段:心之所向.好感度(InitVar 已写)、心之所向.信任度

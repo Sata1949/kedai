@@ -47,7 +47,7 @@ use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 mod common;
-use common::{send_json, test_app_mock as test_app, test_lock};
+use common::{send_json, test_app_mock as test_app, test_lock_read};
 
 async fn upload_character(app: &axum::Router, name: &str) -> String {
     let body = format!(
@@ -147,7 +147,7 @@ async fn sse_events(
 ///  单测覆盖表清理逻辑;此处不臆造断言。)
 #[tokio::test]
 async fn concurrent_second_send_is_rejected_while_first_in_flight() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
     let cid = upload_character(app, "抢占特征化.json").await;
     let sid = new_session(app, &cid).await;
@@ -206,7 +206,7 @@ async fn concurrent_second_send_is_rejected_while_first_in_flight() {
 /// 故本测试不传任何内容钩子。
 #[tokio::test]
 async fn stop_keeps_partial_output_with_interrupted_mark() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
     let cid = upload_character(app, "中断特征化.json").await;
     let sid = new_session(app, &cid).await;
@@ -343,7 +343,7 @@ async fn assistant_count(app: &axum::Router, sid: &str) -> usize {
 /// 该形状必须逐字保持(前端 `api/types.ts` 按此解析)。
 #[tokio::test]
 async fn single_tool_call_backfills_ok_true_with_result() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
     let cid = upload_character(app, "工具回填特征化.json").await;
     let sid = new_session(app, &cid).await;
@@ -405,7 +405,7 @@ async fn single_tool_call_backfills_ok_true_with_result() {
 /// 拆分时若误把失败当致命错误上抛,本测试会失败。
 #[tokio::test]
 async fn failed_tool_call_backfills_error_and_loop_continues() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
     let cid = upload_character(app, "工具失败特征化.json").await;
     let sid = new_session(app, &cid).await;
@@ -459,7 +459,7 @@ async fn failed_tool_call_backfills_error_and_loop_continues() {
 /// 新增的阶段破坏(例如误发空的 tool_result)。锁定它可防止「为拆而拆」引入噪声事件。
 #[tokio::test]
 async fn plain_text_path_emits_no_tool_events() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
     let cid = upload_character(app, "纯文本特征化.json").await;
     let sid = new_session(app, &cid).await;
@@ -502,7 +502,7 @@ async fn plain_text_path_emits_no_tool_events() {
 ///   - 反思调用 system 含「反思纪律」(引擎追加的纪律段)→ 回「PASS」(无工具调用 → 达标)。
 #[tokio::test]
 async fn deep_mode_draft_is_hidden_and_reflect_accepts() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
     let cid = upload_character(app, "流程特征化-草稿.json").await;
     let sid = new_session(app, &cid).await;
@@ -568,7 +568,7 @@ async fn deep_mode_draft_is_hidden_and_reflect_accepts() {
 /// 只由反思步发出;后续轮无判定输出 → 有界结束,机械闸通过后采纳修订文本。
 #[tokio::test]
 async fn deep_mode_reflect_applies_targeted_revision() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
     let cid = upload_character(app, "流程特征化-修改.json").await;
     let sid = new_session(app, &cid).await;
@@ -615,7 +615,7 @@ async fn deep_mode_reflect_applies_targeted_revision() {
 /// 被丢则落到 mock 默认回复(不含门控短语),足以区分两种实现。
 #[tokio::test]
 async fn deep_retreat_regeneration_keeps_draft_note() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
     let cid = upload_character(app, "流程特征化-回退注记.json").await;
     let sid = new_session(app, &cid).await;
@@ -657,7 +657,7 @@ async fn deep_retreat_regeneration_keeps_draft_note() {
 /// 提额判定本身由 `draft_heal_budget` 单测覆盖),正文步由 `[[reply_if_any:]]` 门控。
 #[tokio::test]
 async fn deep_empty_draft_is_visible_and_main_step_continues() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
     let cid = upload_character(app, "流程特征化-空草稿.json").await;
     let sid = new_session(app, &cid).await;
@@ -704,7 +704,7 @@ async fn deep_empty_draft_is_visible_and_main_step_continues() {
 /// 「本轮最终正文」注记,末条提取的钩子会丢标记——与 TM-EMPTY-1 提醒轮同型)。
 #[tokio::test]
 async fn deep_mode_archive_step_runs_without_leaking_into_bubble() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
     let cid = upload_character(app, "流程特征化-归档.json").await;
     let sid = new_session(app, &cid).await;
@@ -757,7 +757,7 @@ async fn deep_mode_archive_step_runs_without_leaking_into_bubble() {
 /// 工具结果回填后一轮走固定完成回复,归档循环收敛。
 #[tokio::test]
 async fn deep_mode_archive_syncs_worldbook_entry() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
     // 角色卡带内嵌世界书:一条蓝灯(常驻)条目
     let card = json!({

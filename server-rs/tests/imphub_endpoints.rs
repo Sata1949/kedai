@@ -13,13 +13,13 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
-use tokio::sync::MutexGuard;
+use tokio::sync::RwLockWriteGuard;
 use tower::ServiceExt;
 mod common;
 use common::{send_json, test_app, test_lock_ref as test_lock};
 
-async fn lock() -> MutexGuard<'static, ()> {
-    test_lock().lock().await
+async fn lock() -> RwLockWriteGuard<'static, ()> {
+    test_lock().write().await
 }
 
 /// 原始 body 文本(综合导出要断言**键序**,解析成 Value 会丢序:serde_json 的 Map 是 BTreeMap)

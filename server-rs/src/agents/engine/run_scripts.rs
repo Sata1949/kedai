@@ -389,14 +389,19 @@ mod tests {
 
         // 场景二:请求在途时调度任务被 abort(引擎抢占/运行时退出)→ 回执
         // sender 随请求 drop → handler 的 recv 返回 RecvError → 明确错误。
-        // mock 默认分支逐字 8ms sleep(回复百余字,耗时约秒级),留出 abort 窗口。
+        // 消息带慢流哨兵显式申请 8ms/字符:测试构建默认零延时(见
+        // connectors/mock.rs 的 mock_char_delay),不申请就没有 abort 窗口。
+        let slow_msg = format!(
+            "普通输入{}",
+            crate::connectors::mock_timing::SLOW_STREAM_SENTINEL
+        );
         let (tx, rx) = mpsc::channel(4);
         let task = tokio::spawn(generate_dispatch_loop(mock_connector(), rx));
         let handler = generate_handler_from_tx(tx);
         let call = tokio::task::spawn_blocking(move || {
             let (_abort_tx, abort_rx) = watch::channel(false);
             handler(
-                vec![LlmMessage::plain("user", "普通输入")],
+                vec![LlmMessage::plain("user", &slow_msg)],
                 test_params(),
                 abort_rx,
             )

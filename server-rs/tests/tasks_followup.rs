@@ -210,7 +210,9 @@ async fn task_followup_state_gate() {
     assert_eq!(json["code"], "NOT_FOUND");
 
     // 400:空指令(校验先于状态门禁)
-    let id = create_task_with_mode(app, "门禁测试目标", "solo").await;
+    // 目标带慢流哨兵:下面要观测 running 态(测试构建的 mock 默认零延时,
+    // 不申请就可能在首次轮询前跑完)。
+    let id = create_task_with_mode(app, "门禁测试目标__KEDAI_SLOW_STREAM__", "solo").await;
     let (status, json) = send_json(
         app,
         "POST",

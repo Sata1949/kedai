@@ -16,7 +16,7 @@ use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 mod common;
-use common::{send_json, test_app_with_prompt_isolation as test_app, test_lock};
+use common::{send_json, test_app_with_prompt_isolation as test_app, test_lock_read};
 
 /// 上传带酒馆助手插件的角色卡(JSON,V2 格式),first_mes 可自定义
 async fn upload_assistant_character_with(
@@ -178,7 +178,7 @@ async fn session_id_for(app: &axum::Router, cid: &str) -> String {
 
 #[tokio::test]
 async fn assistant_card_injects_rendered_stage_and_state() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
 
     let (status, char) = upload_assistant_character(app).await;
@@ -208,7 +208,7 @@ async fn assistant_card_injects_rendered_stage_and_state() {
 
 #[tokio::test]
 async fn update_variable_protocol_applied_stripped_and_switches_stage() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
 
     let (status, char) = upload_assistant_character(app).await;
@@ -307,7 +307,7 @@ async fn update_variable_protocol_applied_stripped_and_switches_stage() {
 
 #[tokio::test]
 async fn card_plugins_detected_in_character_detail() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
 
     // 助手卡:详情应返回 card_plugins(酒馆助手,5 项特性全命中)
@@ -373,7 +373,7 @@ async fn card_plugins_detected_in_character_detail() {
 
 #[tokio::test]
 async fn non_assistant_card_unaffected() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
 
     // 普通卡(无 [InitVar]/EJS):注入行为不变
@@ -420,7 +420,7 @@ async fn non_assistant_card_unaffected() {
 
 #[tokio::test]
 async fn assistant_vars_endpoint_overwrites_session_tree() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
 
     let (status, char) = upload_assistant_character(app).await;
@@ -471,7 +471,7 @@ async fn assistant_vars_endpoint_overwrites_session_tree() {
 
 #[tokio::test]
 async fn truncate_rolls_back_variable_tree_to_anchor_snapshot() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
 
     let (status, char) = upload_assistant_character(app).await;
@@ -561,7 +561,7 @@ async fn truncate_rolls_back_variable_tree_to_anchor_snapshot() {
 /// 仅作为本轮气泡 extra.status_bar 显示,不写入首楼。
 #[tokio::test]
 async fn status_slot_tool_preserves_placeholder_and_bubble() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
 
     let (status, char) =
@@ -681,7 +681,7 @@ async fn status_slot_tool_preserves_placeholder_and_bubble() {
 /// 第二步经 [[mvu_tool:update_variables]] 更新变量树:vars 事件 + extra.mvu 快照 + diff 兜底状态栏
 #[tokio::test]
 async fn mvu_variables_tool_updates_tree_and_snapshot() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
 
     let (status, char) = upload_assistant_character(app).await;
@@ -743,7 +743,7 @@ async fn mvu_variables_tool_updates_tree_and_snapshot() {
 /// 回退:第二步不调用工具时,旧文本协议(<StatusBar>)仍生效,正文剥离协议标签
 #[tokio::test]
 async fn status_bar_text_protocol_fallback() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
 
     let (status, char) =
@@ -810,7 +810,7 @@ async fn status_bar_text_protocol_fallback() {
 /// 发送 [[floors]] 回显完整消息,断言注入含渲染结果且 EJS 源码不漏。
 #[tokio::test]
 async fn ejs_context_reads_world_quickreply_history_and_injects() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
 
     // 1) 创建快速回复(getqr 数据源)
@@ -948,7 +948,7 @@ async fn ejs_context_reads_world_quickreply_history_and_injects() {
 /// 故并入生成注入(system 首/尾),差异见 plan6-ecosystem-devtools.md 6a 实施记录。
 #[tokio::test]
 async fn render_tag_injects_into_system_edges() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
 
     let card = json!({
@@ -1033,7 +1033,7 @@ async fn render_tag_injects_into_system_edges() {
 /// @@var 在渲染前写入变量树(条目内容可读取该变量)。
 #[tokio::test]
 async fn worldbook_decorators_gate_injection_and_write_vars() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
 
     let card = json!({
