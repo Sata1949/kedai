@@ -11,7 +11,6 @@ use crate::models::llm_error::{LlmError, LlmErrorKind};
 use crate::models::types::{GenerationParams, LlmMessage, LlmStreamChunk, ToolCallArgs};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
 use tokio::sync::watch;
 
 /// [[tool_raw:]] 钩子的截断预算门限:max_tokens 低于该值视为「输出预算不足」,
@@ -46,7 +45,7 @@ impl MockConnector {
         (true, "Mock 连接器就绪(演示模式)".to_string())
     }
 
-    /// 逐字流式输出固定回复;每字符 sleep 8ms;abort 时返回带分类的错误(取消由调用方按 abort 标志判定)
+    /// 逐字流式输出固定回复;每字符 sleep 一个定时器周期(默认 8ms);abort 时返回带分类的错误(取消由调用方按 abort 标志判定)
     pub async fn generate(
         &self,
         messages: &[LlmMessage],
@@ -723,12 +722,15 @@ impl MockConnector {
         let prompt_tokens = (prompt_chars as f64 / 4.0).ceil() as i64;
         let completion_tokens = (reply.chars().count() as f64 / 4.0).ceil() as i64;
 
+        let char_delay = char_delay_for(messages);
         for ch in reply.chars() {
             if *abort.borrow() {
                 return Err(LlmError::generation("生成已中断"));
             }
             chunks.push(LlmStreamChunk::Token(ch.to_string()));
-            tokio::time::sleep(Duration::from_millis(8)).await;
+            if !char_delay.is_zero() {
+                tokio::time::sleep(char_delay).await;
+            }
         }
         chunks.push(LlmStreamChunk::Usage {
             prompt_tokens,
@@ -775,6 +777,9 @@ fn text_reply_chunks(reply: String, messages: &[LlmMessage]) -> Vec<LlmStreamChu
         },
     ]
 }
+
+/// 慢流哨兵与逐字延时判据见 `mock_timing`(独立模块,理由见其文件头)。
+pub(crate) use super::mock_timing::char_delay_for;
 
 /// 提取 [[reply:内容...]] 标记;内容取到首个 "]]"(无 "]]" 则取到行尾)。
 fn extract_reply_marker(input: &str) -> Option<String> {

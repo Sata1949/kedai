@@ -4,6 +4,7 @@
 // 判据: 把各提供商的线格式翻译成本项目内部类型;只依赖 L1(models)。
 // 纪律: 新增提供商在此适配,不得把提供商特有字段泄漏到上层。
 pub mod mock;
+pub(crate) mod mock_timing;
 pub mod openai_compatible;
 
 use crate::models::llm_error::LlmError;
