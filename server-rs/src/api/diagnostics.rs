@@ -176,7 +176,10 @@ pub async fn data_dirs(State(state): State<Arc<AppState>>) -> Response {
 ///
 /// 抽成纯函数以便单测断言「路径与判据都如实透出、顺序保持候选顺序」,
 /// 而不必拉起整个 AppState。
-pub(crate) fn split_dirs_payload(selected: &Path, found: &[(PathBuf, &'static str)]) -> serde_json::Value {
+pub(crate) fn split_dirs_payload(
+    selected: &Path,
+    found: &[(PathBuf, &'static str)],
+) -> serde_json::Value {
     json!({
         "data_dir": selected.to_string_lossy(),
         "others": found
@@ -221,4 +224,3 @@ mod data_dirs_tests {
         assert_eq!(v["data_dir"], json!(r"C:\only"));
     }
 }
-
