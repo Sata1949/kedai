@@ -147,11 +147,17 @@ async fn task_multi_mode_subagent_runs_to_done() {
     );
 }
 
-/// multi 取消:运行中 stop → ended(主循环走 mock 默认逐字流式回复,约 1s 窗口)。
+/// multi 取消:运行中 stop → ended(goal 带慢流哨兵,显式申请约 1s 窗口;
+/// 测试构建的 mock 默认零延时,不申请就观测不到 running 态)。
 #[tokio::test]
 async fn task_multi_mode_stop_running() {
     let app = test_app();
-    let id = create_task_with_mode(app, "慢慢写一篇长文,不要任何钩子", "multi").await;
+    let id = create_task_with_mode(
+        app,
+        "慢慢写一篇长文,不要任何钩子__KEDAI_SLOW_STREAM__",
+        "multi",
+    )
+    .await;
 
     let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "run 应 200: {json}");

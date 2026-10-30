@@ -490,9 +490,10 @@ async fn task_plan_approve_resume_stop_marks_remaining_steps_error() {
     let app = test_app();
 
     // 规划钩子用 reply_if(仅匹配规划器 system 提示词「任务规划器」):步骤执行的
-    // system 提示词不含该子串,故步骤调用落空到默认慢速流式回复,留出 stop 窗口
+    // system 提示词不含该子串,故步骤调用落空到默认回复。stop 窗口由 goal 里的
+    // 慢流哨兵显式申请(测试构建默认零延时;哨兵无括号,不会截断 reply_if 的 `]]`)。
     let title = concat!(
-        r#"[[reply_if:任务规划器|[{"name":"步骤一","goal":"慢慢写第一段"},{"name":"步骤二","goal":"慢慢写第二段"}] ]]"#,
+        r#"[[reply_if:任务规划器|[{"name":"步骤一","goal":"慢慢写第一段__KEDAI_SLOW_STREAM__"},{"name":"步骤二","goal":"慢慢写第二段__KEDAI_SLOW_STREAM__"}] ]]"#,
         " 计划取消目标"
     );
     let id = create_task_with_mode(app, title, "plan").await;
@@ -549,10 +550,11 @@ async fn task_plan_resume_stop_keeps_done_step_output() {
 
     // 规划器用 [[reply_if:任务规划器|…]] (只命中规划器 system):步骤的 user 消息里
     // 携带整份已批准计划(含各步 goal),任何 user 侧无条件钩子都会毒化全部步骤——
-    // 步骤统一落回 mock 默认逐字流式回复(约 8ms/字符 ≈ 1s/步),留出 stop 窗口。
+    // 步骤统一落回 mock 默认回复。stop 窗口由 goal 里的慢流哨兵显式申请
+    // (测试构建默认零延时;哨兵无括号,不会截断 reply_if 的 `]]`)。
     let title = concat!(
-        r#"[[reply_if:任务规划器|[{"name":"甲步","goal":"写第一段"},"#,
-        r#"{"name":"乙步","goal":"写第二段"},{"name":"丙步","goal":"写第三段"}] ]]"#,
+        r#"[[reply_if:任务规划器|[{"name":"甲步","goal":"写第一段__KEDAI_SLOW_STREAM__"},"#,
+        r#"{"name":"乙步","goal":"写第二段__KEDAI_SLOW_STREAM__"},{"name":"丙步","goal":"写第三段__KEDAI_SLOW_STREAM__"}] ]]"#,
         " 计划取消目标"
     );
     let id = create_task_with_mode(app, title, "plan").await;

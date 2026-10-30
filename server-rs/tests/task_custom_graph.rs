@@ -113,8 +113,11 @@ async fn custom_graph_merges_multi_parent_inputs_in_index_order() {
 }
 
 /// 并行流程:两个源节点 + 一个合并节点(与上面同构,供批次 2 的两条用例复用)。
-/// 只给合并节点配回复钩子:两个源节点不命中 → 走 mock 默认逐字回复(每字 8ms,
-/// 约 0.8s),制造足够宽的并发观测窗口。
+/// 只给合并节点配回复钩子:两个源节点不命中 → 走 mock 默认回复。
+/// 并发观测窗口由任务目标里的慢流哨兵申请:哨兵写进 **任务 goal**(custom 流程
+/// 把它渲染进每个节点的 system,见 step.rs 的 build_step_system),命中默认分支的
+/// 两个源节点因此各跑 8ms/字符(约 0.8s);合并节点走 reply_if 钩子、不经过逐字循环。
+/// 测试构建默认零延时,不申请就观测不到「两分支同跑」。
 async fn preset_parallel_flow(app: &axum::Router, max_parallel: u32) -> String {
     let flow = json!({
         "config": {
@@ -135,8 +138,12 @@ async fn preset_parallel_flow(app: &axum::Router, max_parallel: u32) -> String {
     });
     let (status, json) = send_json(app, "PUT", "/api/agent-flows", flow).await;
     assert_eq!(status, StatusCode::OK, "保存并行流程应 200: {json}");
-    let id =
-        create_task_with_mode(app, "[[reply_if:合并本步|合并成果]] 并行任务目标", "custom").await;
+    let id = create_task_with_mode(
+        app,
+        "[[reply_if:合并本步|合并成果]] 并行任务目标__KEDAI_SLOW_STREAM__",
+        "custom",
+    )
+    .await;
     let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
     id

@@ -5,7 +5,7 @@ use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 mod common;
-use common::{send_json, test_app, test_lock};
+use common::{send_json, test_app, test_lock_read};
 
 async fn send_empty(app: &axum::Router, method: &str, path: &str) -> StatusCode {
     let req = Request::builder()
@@ -60,7 +60,7 @@ fn sample_book() -> Value {
 
 #[tokio::test]
 async fn world_book_crud() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
 
     // 上传(全局,未绑定角色)
@@ -164,7 +164,7 @@ async fn world_book_crud() {
 
 #[tokio::test]
 async fn world_book_invalid_upload_rejected() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
     // 非 JSON
     let body = "--BOUND\r\nContent-Disposition: form-data; name=\"file\"; filename=\"bad.json\"\r\n\r\nnot json\r\n--BOUND--\r\n";
@@ -184,7 +184,7 @@ async fn world_book_invalid_upload_rejected() {
 
 #[tokio::test]
 async fn world_book_bind_to_character() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
     // 上传角色
     let body = format!(
@@ -227,7 +227,7 @@ async fn world_book_bind_to_character() {
 /// (清空会把窗口打回条目 depth 兜底,静默改变世界书触发行为)。
 #[tokio::test]
 async fn world_book_scan_depth_roundtrip() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
     let (status, book) = upload_world_book(app, &sample_book(), None).await;
     assert_eq!(status, StatusCode::CREATED);
@@ -298,7 +298,7 @@ async fn world_book_scan_depth_roundtrip() {
 /// 独立世界书条目编辑:PUT 叠加回写(关键词/常驻/激发/位置)+ 显式 removed 删除 → GET 验证
 #[tokio::test]
 async fn world_book_entries_editable() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
     let (status, book) = upload_world_book(app, &sample_book(), None).await;
     assert_eq!(status, StatusCode::CREATED);
@@ -410,7 +410,7 @@ async fn world_book_entries_editable() {
 /// WBCONC 核心回归:用户打开编辑器后,窗口期模型/卡脚本写入的条目不得被旧快照 PUT 删除
 #[tokio::test]
 async fn world_book_put_preserves_window_writes() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
     let (status, book) = upload_world_book(app, &sample_book(), None).await;
     assert_eq!(status, StatusCode::CREATED);
@@ -469,7 +469,7 @@ async fn world_book_put_preserves_window_writes() {
 /// removed + added 撞号:本地新增行与窗口期模型新建同号时,服务端重分配且两者都存活
 #[tokio::test]
 async fn world_book_put_removed_and_added_collision() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
     let (status, book) = upload_world_book(app, &sample_book(), None).await;
     assert_eq!(status, StatusCode::CREATED);
@@ -525,7 +525,7 @@ async fn world_book_put_removed_and_added_collision() {
 /// 角色卡内嵌数组形态:未列出条目保留、removed 删除、added 撞号重分配
 #[tokio::test]
 async fn character_book_put_preserves_unlisted_and_reassigns_added() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
     let body = format!(
         "--BOUND\r\nContent-Disposition: form-data; name=\"file\"; filename=\"数组书.json\"\r\nContent-Type: application/json\r\n\r\n{}\r\n--BOUND--\r\n",
@@ -602,7 +602,7 @@ async fn character_book_put_preserves_unlisted_and_reassigns_added() {
 /// 角色卡内嵌世界书:GET/PUT /api/characters/{id}/world-entries
 #[tokio::test]
 async fn character_card_world_entries_editable() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
     let body = format!(
         "--BOUND\r\nContent-Disposition: form-data; name=\"file\"; filename=\"带世界书.json\"\r\nContent-Type: application/json\r\n\r\n{}\r\n--BOUND--\r\n",
@@ -684,7 +684,7 @@ async fn character_card_world_entries_editable() {
 /// 上传时被规范化,响应携带 conversion 统计,条目接口返回规范字段。
 #[tokio::test]
 async fn upload_converts_variant_entries() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
     let book = json!({
         "name": "变体书",
@@ -740,7 +740,7 @@ async fn upload_converts_variant_entries() {
 /// 且含 parse / auto_role / convert / ui_auto 全部检查项。
 #[tokio::test]
 async fn auto_assign_check_reports_ok() {
-    let _guard = test_lock().await;
+    let _guard = test_lock_read().await;
     let app = test_app();
     let (status, result) =
         send_json(app, "GET", "/api/world-books/auto-assign-check", json!({})).await;

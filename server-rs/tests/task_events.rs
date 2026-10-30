@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 use tower::ServiceExt;
 mod common;
-use common::{send_json, test_app};
+use common::{send_json, test_app, test_lock, test_lock_read};
 
 async fn send_empty(app: &axum::Router, method: &str, path: &str) -> StatusCode {
     let req = Request::builder()
@@ -116,6 +116,7 @@ fn assert_subsequence(seq: &[(String, Option<String>)], expected: &[&str]) {
 /// 且全部事件 task_id 一致(中间多出 usage/subtask 等其他 kind 不算失败)。
 #[tokio::test]
 async fn task_events_emitted_on_run() {
+    let _guard = test_lock_read().await;
     let app = test_app();
     let (status, content_type, mut body) = open_event_stream(app).await;
     assert_eq!(status, StatusCode::OK, "事件流应 200");
@@ -148,6 +149,7 @@ async fn task_events_emitted_on_run() {
 /// 删除任务后应收到 kind=deleted 且 task_id 一致。
 #[tokio::test]
 async fn task_events_include_usage_and_deleted() {
+    let _guard = test_lock_read().await;
     let app = test_app();
     let (status, _, mut body) = open_event_stream(app).await;
     assert_eq!(status, StatusCode::OK);
@@ -195,6 +197,7 @@ async fn task_events_include_usage_and_deleted() {
 /// 同时验证该静态路由未被 /api/tasks/{id} 通配吃掉(否则将走详情逻辑返回 404 JSON)。
 #[tokio::test]
 async fn task_events_sse_endpoint_smoke() {
+    let _guard = test_lock_read().await;
     let app = test_app();
     let (status, content_type, _body) = open_event_stream(app).await;
     assert_eq!(
@@ -296,16 +299,26 @@ fn frame_pairs(frames: &[Value]) -> Vec<(String, Option<String>)> {
 /// 步骤逐字流式输出约百字(每字一个 token),delta 条数远小于字符数;
 /// ③ 权威对齐——各阶段 delta 拼接 == task_llm_calls 对应行 response_summary
 /// (delta 暂态不落库,落库行为权威数据)。
+///
+/// 取**写锁**(独占)而非读锁:本用例断言的是瞬时 delta 帧的**完整到达**,
+/// 而同文件其余用例并发跑时会往同一个 broadcast 通道(容量 64)灌事件,
+/// 读端一旦 Lagged 就永久丢帧——delta 不落库,补拉也救不回来。实测 2026-10-30:
+/// 并行下 5 次红 1~2 次,串行 6/6 绿。改用写锁后独占事件通道,判据强度不变。
 #[tokio::test]
 async fn task_events_delta_streaming_on_run() {
+    let _guard = test_lock().await;
     let app = test_app();
     let (status, _, mut body) = open_event_stream(app).await;
     assert_eq!(status, StatusCode::OK);
 
     // 规划器走 [[reply_stream:]] 逐字流式钩子(批次 R4 新增,无 sleep);
     // 计划 JSON 不含连续 "]]",钩子取到行尾(与既有 [[reply:]] 测试同形态);
-    // goal 写长使计划 JSON 超过 80 字攒批字符阈值;步骤/汇总走 mock 默认分支逐字流式
-    let goal = "写一段关于秋天的长句,写落叶写黄昏写风声,反复铺陈细节直到足够长,再写远山与归鸟";
+    // goal 写长使计划 JSON 超过 80 字攒批字符阈值;步骤/汇总走 mock 默认分支逐字流式。
+    // goal 带慢流哨兵:步骤/汇总强制 8ms/字符,**给 SSE 读端留出消费 planner delta 的
+    // 时间**——测试构建默认零延时,整个任务在 1ms 内跑完,broadcast 通道会因读端跟不上
+    // 而丢帧(实测 5 次里 2 次观测不到 phase=planner 的 delta)。哨兵无括号,不影响
+    // reply_stream 的截断语义。
+    let goal = "写一段关于秋天的长句,写落叶写黄昏写风声,反复铺陈细节直到足够长,再写远山与归鸟__KEDAI_SLOW_STREAM__";
     let title = format!(r#"[[reply_stream:[{{"name":"步骤一","goal":"{goal}"}}] ]]"#);
     let id = create_task(app, &title).await;
     let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
@@ -407,6 +420,7 @@ async fn task_events_delta_streaming_on_run() {
 /// [[reply_stream:]] 逐字流式,断言攒批生效(事件数远小于字符数)且拼接完整。
 #[tokio::test]
 async fn task_events_delta_from_agent_sink() {
+    let _guard = test_lock_read().await;
     let app = test_app();
     let (status, _, mut body) = open_event_stream(app).await;
     assert_eq!(status, StatusCode::OK);
@@ -459,6 +473,7 @@ async fn task_events_delta_from_agent_sink() {
 /// 下发 ≠ 放行,受总开关与命令级硬门双重约束。
 #[tokio::test]
 async fn task_solo_offers_bash_tool() {
+    let _guard = test_lock_read().await;
     let app = test_app();
     let (status, _, mut body) = open_event_stream(app).await;
     assert_eq!(status, StatusCode::OK);
@@ -532,6 +547,7 @@ async fn wait_task_terminal(app: &axum::Router, task_id: &str) -> Value {
 /// `after` 超过最新 seq 返回空数组(**不是 404**);不存在的任务 404。
 #[tokio::test]
 async fn task_events_pull_returns_tail_and_empty_after_max() {
+    let _guard = test_lock_read().await;
     let app = test_app();
     // mock 规划器 1 步(与既有用例同款 reply 钩子)
     let title = r#"[[reply:[{"name":"步骤一","goal":"写第一段"}] ]]"#;
@@ -621,6 +637,7 @@ async fn task_events_pull_returns_tail_and_empty_after_max() {
 /// 模拟一次窗口清理——比驱动 2000+ 次真实事件快,得到的状态与真实运行完全同形。
 #[tokio::test]
 async fn task_events_pull_reports_truncated_window() {
+    let _guard = test_lock_read().await;
     let app = test_app();
     let id = create_task(app, "窗口截断用例").await;
 
@@ -711,6 +728,7 @@ async fn task_events_pull_reports_truncated_window() {
 /// 且首帧即任务首事件;删除后的 `deleted` 帧经实时流到达(证明回放→实时已交接)。
 #[tokio::test]
 async fn task_events_sse_replays_history_before_live() {
+    let _guard = test_lock_read().await;
     let app = test_app();
     let title = r#"[[reply:[{"name":"步骤一","goal":"写第一段"}] ]]"#;
     let id = create_task(app, title).await;
@@ -797,6 +815,7 @@ async fn task_events_sse_replays_history_before_live() {
 ///      `KEDAI_TASK_SCRATCH_DIR` 同源)——这是「模型不再把数据目录当草稿纸」的前提。
 #[tokio::test]
 async fn workspace_less_task_binds_scratch_and_offers_fs_tools() {
+    let _guard = test_lock_read().await;
     let app = test_app();
     let (status, _, mut body) = open_event_stream(app).await;
     assert_eq!(status, StatusCode::OK);
@@ -859,6 +878,7 @@ async fn workspace_less_task_binds_scratch_and_offers_fs_tools() {
 /// 前端 TaskLlmCall 契约逐一对应。
 #[tokio::test]
 async fn task_llm_calls_tracked_on_run() {
+    let _guard = test_lock_read().await;
     let app = test_app();
     let (status, _, mut body) = open_event_stream(app).await;
     assert_eq!(status, StatusCode::OK);
@@ -907,6 +927,7 @@ async fn task_llm_calls_tracked_on_run() {
 ///(不引入新事件类型),消息落库不产生独立事件(详情经 status 事件驱动重拉)。
 #[tokio::test]
 async fn task_followup_emits_status_events() {
+    let _guard = test_lock_read().await;
     let app = test_app();
     let (status, _, mut body) = open_event_stream(app).await;
     assert_eq!(status, StatusCode::OK);
@@ -981,6 +1002,7 @@ async fn task_followup_emits_status_events() {
 /// 驱动前端刷新批准区计划与对话记录;任务保持 planned(无终态事件)。
 #[tokio::test]
 async fn task_plan_chat_reemits_plan_and_approval_events() {
+    let _guard = test_lock_read().await;
     let app = test_app();
     let (status, _, mut body) = open_event_stream(app).await;
     assert_eq!(status, StatusCode::OK);
@@ -1087,6 +1109,7 @@ async fn task_plan_chat_reemits_plan_and_approval_events() {
 /// 若出现 2 条即证明链路上有重复发射(需修);出现 1 条即证明链路干净。
 #[tokio::test]
 async fn task_tool_events_are_not_duplicated() {
+    let _guard = test_lock_read().await;
     let app = test_app();
     let (status, _, mut body) = open_event_stream(app).await;
     assert_eq!(status, StatusCode::OK);

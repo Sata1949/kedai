@@ -18,7 +18,7 @@ use http_body_util::BodyExt;
 use kedai_server::services::settings_service::RuntimeSettings;
 use serde_json::{json, Value};
 use std::sync::OnceLock;
-use tokio::sync::{Mutex, MutexGuard};
+use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tower::ServiceExt;
 
 /// 测试进程级:把运行时主提示词目录指向空目录,避免真实项目根 `AGENTS_RUNTIME.md`
@@ -35,6 +35,10 @@ fn runtime_prompt_isolation() {
 }
 
 /// 默认测试 app(mock 连接器 + 进程级临时数据目录 + 免鉴权,由 `build_test_app` 装配)。
+///
+/// mock 逐字延时在测试构建下默认归零(判据在 `connectors/mock_timing.rs` 的
+/// `mock_char_delay`:cfg(test) 与 test-support feature 双覆盖),无需在此设环境变量。
+/// 需要「生成仍在进行中」窗口的用例,在 goal / 消息里带 `__KEDAI_SLOW_STREAM__` 显式申请慢流。
 pub fn test_app() -> &'static Router {
     static APP: OnceLock<Router> = OnceLock::new();
     APP.get_or_init(|| kedai_server::build_test_app().expect("构建测试应用失败"))
@@ -108,23 +112,40 @@ pub async fn send_json_with_text(
 }
 
 /// 本测试二进制内的串行锁(改全局设置 / 流程库 / 插件目录的用例必须持锁)。
-fn lock_cell() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+///
+/// 2026-10-30 提效批:由 `Mutex` 改为 `RwLock`。语义不变——`test_lock()` 仍取
+/// **写**guard(独占),294 个既有调用点一行未改;新增 `test_lock_read()` 给那些
+/// 「只操作自己建的会话/任务、完全不碰全局设置与流程库」的用例取**读**guard,
+/// 让它们彼此并发。原先所有用例挤同一把互斥锁,单文件 12 个用例串行跑完才轮到
+/// 下一个,白白浪费 tokio 的并发能力。
+///
+/// 迁移纪律:**只有确认不写全局态的用例才能换读锁**。判定方式是 grep 该文件是否
+/// 出现 `/api/settings`、`/api/agent-flows`、`/api/plugins` 的写请求;任何一个命中
+/// 就必须继续用 `test_lock()`。写锁与读锁互斥,所以混用不会让写者与读者撞车。
+fn lock_cell() -> &'static RwLock<()> {
+    static LOCK: OnceLock<RwLock<()>> = OnceLock::new();
+    LOCK.get_or_init(|| RwLock::new(()))
 }
 
-pub async fn test_lock() -> MutexGuard<'static, ()> {
-    lock_cell().lock().await
+/// 独占锁:改全局设置 / 流程库 / 插件目录的用例必须用它(默认选择)。
+pub async fn test_lock() -> RwLockWriteGuard<'static, ()> {
+    lock_cell().write().await
+}
+
+/// 并发读锁:**只**给不碰全局态的用例(见 `lock_cell` 的迁移纪律)。
+/// 与 `test_lock()` 互斥,因此不会观察到「别的用例正在改设置」的中间态。
+pub async fn test_lock_read() -> RwLockReadGuard<'static, ()> {
+    lock_cell().read().await
 }
 
 /// 持锁前顺带做运行时提示词隔离(少数 API 测试的历史语义)。
-pub async fn test_lock_with_prompt_isolation() -> MutexGuard<'static, ()> {
+pub async fn test_lock_with_prompt_isolation() -> RwLockWriteGuard<'static, ()> {
     runtime_prompt_isolation();
-    lock_cell().lock().await
+    lock_cell().write().await
 }
 
 /// 需要把锁作为引用交给他处 `lock()` 包装的用例。
-pub fn test_lock_ref() -> &'static Mutex<()> {
+pub fn test_lock_ref() -> &'static RwLock<()> {
     lock_cell()
 }
 

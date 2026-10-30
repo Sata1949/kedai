@@ -770,11 +770,12 @@ async fn task_team_mode_same_main_goals_run_independently() {
 async fn task_team_mode_stop_running() {
     let app = test_app();
 
-    // 主 agent 子目标不带 reply 钩子 → 主循环走默认慢速流式回复,留出 stop 窗口
+    // 主 agent 子目标不带 reply 钩子 → 主循环走默认回复;stop 窗口由 goal 里的慢流
+    // 哨兵显式申请(测试构建默认零延时;哨兵无括号,不会截断 reply_if 的 `]]`)。
     let title = concat!(
         r#"[[reply_if:团队规划器|{"mains":["#,
-        r#"{"name":"甲","goals":[{"name":"子一","goal":"慢慢写第一段"}]},"#,
-        r#"{"name":"乙","goals":[{"name":"子二","goal":"慢慢写第二段"}]}]"#,
+        r#"{"name":"甲","goals":[{"name":"子一","goal":"慢慢写第一段__KEDAI_SLOW_STREAM__"}]},"#,
+        r#"{"name":"乙","goals":[{"name":"子二","goal":"慢慢写第二段__KEDAI_SLOW_STREAM__"}]}]"#,
         r#" }]]"#,
         " 团队取消目标"
     );

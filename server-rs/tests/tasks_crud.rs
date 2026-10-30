@@ -437,14 +437,14 @@ async fn task_summary_failure_without_step_outputs_stays_error() {
 /// 停止运行中任务(WP6):任务进入 running 且首个子任务执行中时 stop →
 /// 任务终态 ended;执行中子任务一并 ended,不得残留 running/pending。
 /// (task_stop_pending 仅覆盖 pending 态,本测试覆盖 running 态。)
-/// 时序依据:步骤 goal 无钩子,mock 走逐字流式默认回复(约 8ms/字符,单步 1s+),
-/// 为「轮询观测 running 子任务 → stop」留出充足时间窗。
+/// 时序依据:步骤 goal 带慢流哨兵 `__KEDAI_SLOW_STREAM__`,mock 对该轮强制
+/// 8ms/字符(单步 1s+),为「轮询观测 running 子任务 → stop」留出窗口。
+/// 测试构建默认零延时,不显式申请就观测不到 running 态。
 #[tokio::test]
 async fn task_stop_running() {
     let app = test_app();
 
-    let title =
-        r#"[[reply:[{"name":"步骤一","goal":"写第一段"},{"name":"步骤二","goal":"写第二段"}] ]]"#;
+    let title = r#"[[reply:[{"name":"步骤一","goal":"写第一段__KEDAI_SLOW_STREAM__"},{"name":"步骤二","goal":"写第二段__KEDAI_SLOW_STREAM__"}] ]]"#;
     let id = create_task(app, title).await;
     let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
@@ -496,13 +496,14 @@ async fn task_stop_running() {
 async fn task_stop_running_keeps_done_step_output() {
     let app = test_app();
 
-    let title = r#"[[reply:[{"name":"步骤一","goal":"写第一段"},{"name":"步骤二","goal":"写第二段"},{"name":"步骤三","goal":"写第三段"}] ]]"#;
+    let title = r#"[[reply:[{"name":"步骤一","goal":"写第一段"},{"name":"步骤二","goal":"写第二段__KEDAI_SLOW_STREAM__"},{"name":"步骤三","goal":"写第三段__KEDAI_SLOW_STREAM__"}] ]]"#;
     let id = create_task(app, title).await;
     let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
 
-    // 轮询直到首步 done(legacy 每步完成即回写 plan);步骤 goal 无钩子,mock 走逐字
-    // 流式默认回复(约 8ms/字符 ≈ 1s/步),后续两步各留一个窗口,足够在第二步执行中 stop。
+    // 轮询直到首步 done(legacy 每步完成即回写 plan);首步不带哨兵 → 零延时立刻完成,
+    // 后续两步带哨兵走 8ms/字符(≈1s/步),各自留出窗口,足够在第二步执行中 stop。
+    // 只给后两步带哨兵是刻意的:首步必须**做完**,本用例断言的正是「已完成步骤的产出不丢」。
     let mut first_done = false;
     for _ in 0..200 {
         let (status, json) = send_json(app, "GET", &format!("/api/tasks/{id}"), json!({})).await;
