@@ -141,7 +141,7 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
       </div>
       </template>
       <div class="sv-inp-row">
-        <label class="sv-inp-tag">聊天 AGENT 工具轮次上限</label>
+        <label class="sv-inp-tag" title="聊天 AGENT 工具轮次上限">聊天 AGENT 工具轮次上限</label>
         <input
           v-model.number="maxToolRounds"
           type="number"
@@ -170,7 +170,7 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
         <span class="sv-note">任务侧:流程动态调用嵌套深度(1-5,默认 3)</span>
       </div>
       <div class="sv-inp-row">
-        <label class="sv-inp-tag">每任务调用上限</label>
+        <label class="sv-inp-tag" title="每任务调用上限">每任务调用上限</label>
         <input
           v-model.number="maxFlowCallsPerTask"
           type="number"
@@ -183,7 +183,7 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
         <span class="sv-note">任务侧:单个任务的流程调用次数上限(1-64,默认 24)</span>
       </div>
       <div class="sv-inp-row">
-        <label class="sv-inp-tag">节点默认上下文</label>
+        <label class="sv-inp-tag" title="节点默认上下文">节点默认上下文</label>
         <input
           v-model.number="defaultNodeMaxContext"
           type="number"
@@ -197,7 +197,7 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
         <span class="sv-note">任务侧:节点未单独设置时的输入 token 上限(0 = 不裁剪,否则 256-1048576)</span>
       </div>
       <div class="sv-inp-row">
-        <label class="sv-inp-tag">工具历史保留轮数</label>
+        <label class="sv-inp-tag" title="工具历史保留轮数">工具历史保留轮数</label>
         <input
           v-model.number="toolHistoryKeepRounds"
           type="number"
@@ -210,7 +210,7 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
         <span class="sv-note">最近完整保留轮数(1-32,默认 12;超出部分摘要化)</span>
       </div>
       <div class="sv-inp-row">
-        <label class="sv-inp-tag">工具历史 token 预算</label>
+        <label class="sv-inp-tag" title="工具历史 token 预算">工具历史 token 预算</label>
         <input
           v-model.number="toolHistoryBudgetTokens"
           type="number"
@@ -223,7 +223,7 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
         <span class="sv-note">0 = 禁用;否则 1024-1048576(默认 65536)</span>
       </div>
       <div class="sv-inp-row">
-        <label class="sv-inp-tag">单次生成 token 预算</label>
+        <label class="sv-inp-tag" title="单次生成 token 预算">单次生成 token 预算</label>
         <input
           v-model.number="sessionTokenBudget"
           type="number"
@@ -248,7 +248,7 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
         <span class="sv-note">默认 warn;stop 用于硬性控成本(长工具循环提前收尾)</span>
       </div>
       <div class="sv-inp-row">
-        <label class="sv-inp-tag">空转熔断次数下限</label>
+        <label class="sv-inp-tag" title="空转熔断次数下限">空转熔断次数下限</label>
         <input
           v-model.number="loopGuardSemanticMinCalls"
           type="number"
@@ -261,7 +261,7 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
         <span class="sv-note">0 = 关闭;否则 4-64(默认 12)</span>
       </div>
       <div class="sv-inp-row">
-        <label class="sv-inp-tag">空转熔断窗口 / 输出去重上限</label>
+        <label class="sv-inp-tag" title="空转熔断窗口 / 输出去重上限">空转熔断窗口 / 输出去重上限</label>
         <input
           v-model.number="loopGuardSemanticWindow"
           type="number"
@@ -455,14 +455,14 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
       <!-- 剧情推演词条同步两档(RPFLOW-2):deep/agent 流程「归档步」改写世界书词条的放行开关。
            拆两档是因为全局书常服务多个角色(默认关,影响面更大);仅聊天侧消费,随记忆组隐藏。 -->
       <div class="sv-inp-row">
-        <label class="sv-inp-tag">剧情推演同步角色词条</label>
+        <label class="sv-inp-tag" title="剧情推演同步角色词条">剧情推演同步角色词条</label>
         <label style="display: flex; gap: var(--space-1-5); align-items: center; cursor: pointer" title="deep/agent 归档时把剧情变化写入角色绑定/卡内嵌世界书的绿灯(触发)词条;蓝灯(常驻)条目不改写、只新建绿灯条目。默认开启。">
           <input v-model="worldbookSyncCharacterEnabled" type="checkbox" style="flex-shrink: 0" />
           <span class="sv-note">归档步同步角色绑定与卡内嵌世界书(默认开)</span>
         </label>
       </div>
       <div class="sv-inp-row">
-        <label class="sv-inp-tag">剧情推演同步全局词条</label>
+        <label class="sv-inp-tag" title="剧情推演同步全局词条">剧情推演同步全局词条</label>
         <label style="display: flex; gap: var(--space-1-5); align-items: center; cursor: pointer" title="deep/agent 归档时把剧情变化写入全局世界书(未绑定角色)的绿灯(触发)词条;蓝灯(常驻)条目不改写、只新建绿灯条目。可能影响多个角色,默认关闭。">
           <input v-model="worldbookSyncGlobalEnabled" type="checkbox" style="flex-shrink: 0" />
           <span class="sv-note">同上,作用范围为全局世界书(默认关)</span>
@@ -499,7 +499,7 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
         <span class="sv-note">子智能体并发上限(1-16,默认 8)</span>
       </div>
       <div class="sv-inp-row">
-        <label class="sv-inp-tag">子代理结果上限</label>
+        <label class="sv-inp-tag" title="子代理结果上限">子代理结果上限</label>
         <input
           v-model.number="subagentResultMaxChars"
           type="number"

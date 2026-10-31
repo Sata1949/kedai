@@ -82,11 +82,16 @@ function openTaskComposer(): void {
 </template>
 
 <style scoped>
-/* ===== 空态:两栏「工作台开场」 ===== */
+/* ===== 空态:两栏「工作台开场」 =====
+   UIPOL-2/A3:内容在可用高度内垂直居中。原为 justify-content:flex-start,实测 1440×900
+   下容器高 790、内容高 383,上方留 54px 而下方空出 353px(1 : 6.5),重心严重偏上。
+   两个必改点(实测):①改全局 task.css 的 .sv-task-empty 无效——本块 scoped 规则的
+   specificity 更高,必须在这里改;②只加居中不够,.sv-task-start 自带的
+   margin-top clamp(24px,6vh,72px) 会把居中后的内容继续下推 24~72px,必须同时去掉。 */
 .sv-task-empty.fill {
   height: 100%;
   align-items: stretch;
-  justify-content: flex-start;
+  justify-content: center;
   padding: 0;
   text-align: left;
   color: var(--sv-ink);
@@ -95,7 +100,7 @@ function openTaskComposer(): void {
   position: relative;
   width: 100%;
   max-width: 1060px;
-  margin: clamp(var(--space-6), 6vh, calc(var(--space-6) * 3)) auto 0;
+  margin: 0 auto;
   padding: 0 0 var(--space-5);
   border-top: var(--bw) solid var(--sv-ink);
   background: transparent;
@@ -263,6 +268,8 @@ function openTaskComposer(): void {
   .sv-task-start::before { display: none; }
 }
 @media (max-width: 767px) {
+  /* 窄屏内容本身已接近满高,居中会顶掉首屏的可读起点;保持贴顶并收紧外边距 */
+  .sv-task-empty.fill { justify-content: flex-start; }
   .sv-task-start { margin: var(--space-3) 0 0; padding-bottom: var(--space-4); }
   .sv-task-start-title { font-size: var(--text-xl); }
   .sv-task-start-steps { grid-template-columns: 1fr; }

@@ -217,11 +217,12 @@ onBeforeUnmount(() => {
       -->
       <button
         type="button"
-        class="sv-btn ghost sv-btn-sm"
+        class="sv-btn ghost sv-btn-sm sv-topbar-js"
         :aria-pressed="currentScriptAuthorized"
         :title="currentScriptAuthorized ? '撤销当前角色脚本授权' : '查看风险并授权当前角色脚本'"
         @click="confirmScriptAuthorization"
       >
+        <span class="sv-topbar-js-dot" :class="{ on: currentScriptAuthorized }" />
         JS {{ currentScriptAuthorized ? '已授权' : '禁用' }}
       </button>
       </div>
@@ -320,6 +321,45 @@ onBeforeUnmount(() => {
 }
 .sv-topbar-title { max-width: 320px; }
 .sv-topbar-sub { max-width: 160px; }
+
+/* UIPOL-1/A1:顶栏三个渲染开关统一为「裸开关」规格。
+   JS 授权原本是带 2px 黑框白底的 .sv-btn(高 34px),与左右两个 22px 的 HTML/AGENT
+   开关排在同一行时顶边高 6px、底边低 6px,在一条水平线上形成视觉鼓包(实测 22/34/22)。
+   它和 HTML、AGENT 同属渲染管线开关、语义同级,强调应由状态本身承担,不该改变控件形态;
+   故拉平到 22px 无边框无底色,状态用前缀方块表达(关闭 = 粉灰、已授权 = 粉深)。
+   方块取 10px(.sv-supreme.sm 同档),与顶栏身份区的标识方块同一尺度,不抢 HTML/AGENT 的
+   40×22 轨道——那两枚是「开/关」拨杆,这枚是「已授权/未授权」状态灯,视觉上刻意区分。 */
+.sv-topbar-render .sv-topbar-js {
+  height: 22px;
+  min-height: 22px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--sv-ink-soft);
+  white-space: nowrap;
+}
+.sv-topbar-render .sv-topbar-js:hover:not(:disabled),
+.sv-topbar-render .sv-topbar-js:active:not(:disabled) {
+  background: transparent;
+  border-color: transparent;
+  color: var(--sv-ink);
+  box-shadow: none;
+  transform: none;
+}
+.sv-topbar-render .sv-topbar-js-dot {
+  width: 10px;
+  height: 10px;
+  flex: none;
+  background: var(--sv-line-strong);
+}
+.sv-topbar-render .sv-topbar-js-dot.on { background: var(--sv-pink-deep); }
 
 /* 技术矩阵:1×4 发丝格(标签 11 / 值 12,等宽数字);只跨一格边框,不盒中盒 */
 .sv-topbar-stats {

@@ -309,8 +309,10 @@ onMounted(() => {
   height: 13px;
   margin: 0;
 }
-/* 「启用」不是字段标签而是开关说明,卡头里不再占标签列宽(默认格仍保持 72px 以维持列对齐) */
+/* 「启用」不是字段标签而是开关说明,卡头里不再占标签列宽(默认格仍走 .sv-inp-tag 的
+   96px 定宽以维持列对齐;本行的启用格回到内容宽,否则卡头会白多出 56px) */
 .sv-conn-head .sv-inp-tag:not(.sv-conn-def) {
+  flex-basis: auto;
   min-width: 0;
 }
 

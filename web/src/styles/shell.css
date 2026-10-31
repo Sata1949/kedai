@@ -211,7 +211,7 @@
 
 .sv-msg-bubble {
   max-width: min(var(--measure-prose), 78%);
-  padding: var(--space-3-5) 18px;
+  padding: var(--space-3-5) var(--space-5); /* UIPOL-1/C2:右内边距原为裸值 18px(非 --space-* 档),收到 20px */
   font-size: 14px;
   line-height: 1.75;
   white-space: pre-wrap;
@@ -431,7 +431,7 @@
 .sv-inputbar {
   border-top: var(--bw) solid var(--sv-ink);
   background: var(--sv-surface);
-  padding: var(--space-3) var(--space-4);
+  padding: var(--space-3) calc(var(--space-4) + 48px) var(--space-3) var(--space-4); /* UIPOL-1/B3:右侧 16→64px,给 .sv-audio-toggle 浮钮让位 */
 }
 .sv-inputbox { display: flex; gap: var(--space-3); align-items: flex-end; }
 .sv-inputbox textarea {

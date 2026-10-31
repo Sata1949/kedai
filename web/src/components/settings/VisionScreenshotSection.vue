@@ -230,7 +230,7 @@ onMounted(() => {
         <b>只记范围、尺寸与图像哈希,不保存屏幕画面</b>。
       </p>
       <div class="sv-inp-row">
-        <label class="sv-inp-tag">最近记录({{ cuEntries.length }})</label>
+        <label class="sv-inp-tag" title="最近记录">最近记录({{ cuEntries.length }})</label>
         <button
           class="sv-btn ghost sv-btn-sm"
           :disabled="cuBusy || !cuEntries.length"
