@@ -965,26 +965,22 @@ mod tests {
             .collect();
         assert_eq!(left, vec![fresh], "陈旧的轮转产物应随日志一并清理");
     }
-    /// 6.2:非法级别一律拒绝,且不改变当前值。
+    /// 6.2:运行时调级的级别校验与归一。
+    ///
+    /// **单例合并**:`CURRENT_LEVEL` 是进程级状态,两个测试并行跑会互相踩
+    /// (CI 实测:一例把级别改成 debug,另一例「拒绝时不得改写」的断言随即失败)。
+    /// 故把「非法拒绝」与「合法归一」放进同一个用例顺序执行。
     #[test]
-    fn set_level_rejects_unknown_and_keeps_current() {
+    fn set_level_validates_and_normalizes() {
+        // 先落到确定值,避免受同进程其它测试影响
+        assert!(set_level("error").is_ok());
         let before = current_level();
-        for bad in ["", "verbose", "INFO ", "warning", "5"] {
-            // "info " 会被 trim 后接受,单独在下一例覆盖;这里只断言真正非法的
-            if bad.trim().eq_ignore_ascii_case("info") {
-                continue;
-            }
+        // 非法级别:一律拒绝,且不改写当前值("info " 会被 trim 后接受,不在非法集合内)
+        for bad in ["", "verbose", "warning", "5", "Information"] {
             assert!(set_level(bad).is_err(), "非法级别 {bad:?} 应被拒绝");
         }
         assert_eq!(current_level(), before, "拒绝时不得改写当前级别");
-    }
-
-    /// 6.2:合法级别(大小写与空白不敏感)被接受并回显为新值。
-    ///
-    /// 本仓测试进程可能已有全局 subscriber(`init` 的 `try_init` 失败),此时
-    /// `set_level` 走「只记录当前级别」分支——端点可观测契约与之一致。
-    #[test]
-    fn set_level_accepts_valid_and_normalizes_case() {
+        // 合法级别:大小写与空白归一后接受
         assert!(set_level("DEBUG").is_ok(), "大小写应归一后接受");
         assert_eq!(current_level(), "debug");
         assert!(set_level(" warn ").is_ok(), "空白应被 trim");
