@@ -138,12 +138,7 @@ impl TaskService {
                     &format!("任务已结束({}),该子任务未完成", status.as_str()),
                 );
             } else {
-                tracing::error!(
-                    task_id = task_id,
-                    token = token,
-                    status = status.as_str(),
-                    "任务终态落库失败(完成路径):任务可能停留在 Running,已跳过成果消息与子任务收编"
-                );
+                tracing::error!(task_id, token, "任务终态落库失败(完成路径)");
             }
         }
         self.remove_cancel_if(task_id, token);
@@ -172,12 +167,7 @@ impl TaskService {
                     &format!("任务已结束({}),该子任务未完成", status.as_str()),
                 );
             } else {
-                tracing::error!(
-                    task_id = task_id,
-                    token = token,
-                    status = status.as_str(),
-                    "任务终态落库失败(followup 路径):任务可能停留在 Running,已跳过子任务收编"
-                );
+                tracing::error!(task_id, token, "任务终态落库失败(followup 路径)");
             }
         }
         self.remove_cancel_if(task_id, token);
@@ -201,11 +191,7 @@ impl TaskService {
     /// register_cancel 开启新执行。
     pub(crate) fn planned_mode_run(&self, task_id: &str, token: u64, result: &str) {
         if self.is_current_run(task_id, token) && !self.set_planned_result(task_id, result) {
-            tracing::error!(
-                task_id = task_id,
-                token = token,
-                "计划清单落库失败(planned 路径):任务可能停留在 planning"
-            );
+            tracing::error!(task_id, token, "计划清单落库失败(planned 路径)");
         }
         self.remove_cancel_if(task_id, token);
     }
