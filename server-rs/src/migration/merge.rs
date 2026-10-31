@@ -909,3 +909,9 @@ fn is_structured_config(name: &str) -> bool {
             | "user_persona.json"
     )
 }
+
+/// SDC 批(2026-10-31):合并逻辑引用重映射与 seq 重排的回归网。
+/// 声明在 merge 模块下(而非 mod.rs)是为了让 mod.rs 保持在体积基线以内。
+#[cfg(test)]
+#[path = "sdc_tests.rs"]
+mod sdc_tests;
