@@ -125,16 +125,26 @@ impl TaskService {
         error: Option<&str>,
     ) {
         if self.is_current_run(task_id, token) {
-            let _ = self.set_result_with_error(task_id, result, status, error);
-            let text = result.trim();
-            if !text.is_empty() {
-                let _ = self.add_task_message(task_id, "assistant", "result", text);
+            // 终态落库是完成路径的唯一事实落点:失败时任务会停在 Running(前端永远转圈),
+            // 不能再继续写成果消息/收编子任务掩盖这个事实(2026-10-25 审计 P0)。
+            if self.set_result_with_error(task_id, result, status, error) {
+                let text = result.trim();
+                if !text.is_empty() {
+                    let _ = self.add_task_message(task_id, "assistant", "result", text);
+                }
+                // PRODCAP-3:终态收编未完成子任务(绝不置 done、result 原样;幂等)
+                self.end_unfinished_subtasks(
+                    task_id,
+                    &format!("任务已结束({}),该子任务未完成", status.as_str()),
+                );
+            } else {
+                tracing::error!(
+                    task_id = task_id,
+                    token = token,
+                    status = status.as_str(),
+                    "任务终态落库失败(完成路径):任务可能停留在 Running,已跳过成果消息与子任务收编"
+                );
             }
-            // PRODCAP-3:终态收编未完成子任务(绝不置 done、result 原样;幂等)
-            self.end_unfinished_subtasks(
-                task_id,
-                &format!("任务已结束({}),该子任务未完成", status.as_str()),
-            );
         }
         self.remove_cancel_if(task_id, token);
     }
@@ -155,12 +165,20 @@ impl TaskService {
             // assistant 产出落库(WP4 纪律:消息不发射独立事件,详情经
             // set_result 的 status 事件驱动前端重拉)
             let _ = self.add_task_message(task_id, "assistant", "followup", msg_text);
-            let _ = self.set_result(task_id, new_result, status);
-            // PRODCAP-3:终态收编未完成子任务(与 complete_mode_run 同口径)
-            self.end_unfinished_subtasks(
-                task_id,
-                &format!("任务已结束({}),该子任务未完成", status.as_str()),
-            );
+            if self.set_result(task_id, new_result, status) {
+                // PRODCAP-3:终态收编未完成子任务(与 complete_mode_run 同口径)
+                self.end_unfinished_subtasks(
+                    task_id,
+                    &format!("任务已结束({}),该子任务未完成", status.as_str()),
+                );
+            } else {
+                tracing::error!(
+                    task_id = task_id,
+                    token = token,
+                    status = status.as_str(),
+                    "任务终态落库失败(followup 路径):任务可能停留在 Running,已跳过子任务收编"
+                );
+            }
         }
         self.remove_cancel_if(task_id, token);
     }
@@ -182,8 +200,12 @@ impl TaskService {
     /// 「旧执行让位」语义),随后按 token 清理取消条目;后续 approve 会经
     /// register_cancel 开启新执行。
     pub(crate) fn planned_mode_run(&self, task_id: &str, token: u64, result: &str) {
-        if self.is_current_run(task_id, token) {
-            let _ = self.set_planned_result(task_id, result);
+        if self.is_current_run(task_id, token) && !self.set_planned_result(task_id, result) {
+            tracing::error!(
+                task_id = task_id,
+                token = token,
+                "计划清单落库失败(planned 路径):任务可能停留在 planning"
+            );
         }
         self.remove_cancel_if(task_id, token);
     }

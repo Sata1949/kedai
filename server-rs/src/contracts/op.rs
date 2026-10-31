@@ -207,7 +207,9 @@ fn merge_numeric(path: &str, ops: &[PatchOp], rule: &MergeRule) -> PatchOp {
 /// 跨字段不变量检查(§7-Invariant):返回违反信息列表(空 = 满足)。
 ///
 /// P1 落地 mutex(互斥)类型;range/require_if 依赖白名单谓词引擎(§17.8 CES),
-/// 后续里程碑实现,当前恒判定为满足。
+/// **尚未实现**。未实现的类型不再静默判过——返回一条明确的「本项未参与判定」记录,
+/// 调用方/测试可据此看见不支持面(当前无生产调用点;保存/导入路径在 `parse_contract`
+/// 记 warn,见 `contracts::mod`)。
 pub fn check_invariants(contract: &super::Contract, stat_data: &Value) -> Vec<String> {
     let mut violations = Vec::new();
     for inv in &contract.invariants {
@@ -222,8 +224,17 @@ pub fn check_invariants(contract: &super::Contract, stat_data: &Value) -> Vec<St
                     violations.push(format!("{}: {}", inv.id, inv.message));
                 }
             }
-            // range/require_if 留待谓词引擎(§17.8),P1 不判定
+            // range/require_if 留待谓词引擎(§17.8):显式报告不支持,不静默判过
             super::invariant::InvariantKind::Range | super::invariant::InvariantKind::RequireIf => {
+                let kind = match inv.kind {
+                    super::invariant::InvariantKind::Range => "range",
+                    super::invariant::InvariantKind::RequireIf => "require_if",
+                    super::invariant::InvariantKind::Mutex => "mutex",
+                };
+                violations.push(format!(
+                    "{}: 不变量类型 {} 尚未实现(白名单谓词引擎未落地),本项未参与判定",
+                    inv.id, kind
+                ));
             }
         }
     }
@@ -553,6 +564,32 @@ mod tests {
         // 只有一个非空 → 不违反
         let ok = check_invariants(&c, &json!({ "a": 1 }));
         assert!(ok.is_empty());
+    }
+
+    /// range/require_if 未实现时必须显式报告「本项未参与判定」,
+    /// 不能静默返回空(与 mutex 的「满足」无法区分,见审计 P2/L2)。
+    #[test]
+    fn check_invariants_reports_unimplemented_kinds() {
+        let mut c = contract_with(vec![num_field("a"), num_field("b")]);
+        c.invariants.push(crate::contracts::invariant::Invariant {
+            id: "a_range".into(),
+            kind: crate::contracts::invariant::InvariantKind::Range,
+            paths: vec!["a".into()],
+            condition: None,
+            message: "a 超范围".into(),
+        });
+        c.invariants.push(crate::contracts::invariant::Invariant {
+            id: "b_require".into(),
+            kind: crate::contracts::invariant::InvariantKind::RequireIf,
+            paths: vec!["b".into()],
+            condition: Some("a > 0".into()),
+            message: "a > 0 时 b 必填".into(),
+        });
+        let v = check_invariants(&c, &json!({ "a": 1, "b": 2 }));
+        assert_eq!(v.len(), 2, "两种未实现类型都应各报一条: {v:?}");
+        assert!(v[0].contains("a_range") && v[0].contains("range"));
+        assert!(v[1].contains("b_require") && v[1].contains("require_if"));
+        assert!(v.iter().all(|s| s.contains("尚未实现")));
     }
 
     /// apply_ops:契约层 op 应用到树(replace/delta/remove/move/add 全覆盖)。

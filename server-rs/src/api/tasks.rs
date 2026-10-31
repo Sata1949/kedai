@@ -318,7 +318,7 @@ pub async fn events(
             .db_call(move || svc.list_events_replay(&query_id, after))
             .await
         {
-            Ok((h, truncated)) => {
+            Ok(Ok((h, truncated))) => {
                 if truncated {
                     tracing::warn!(
                         task_id = tid.as_str(),
@@ -328,13 +328,10 @@ pub async fn events(
                 }
                 history = h;
             }
-            Err(e) => {
-                tracing::warn!(
-                    task_id = tid.as_str(),
-                    error = e,
-                    "任务事件回放读取失败,仅续实时流"
-                )
-            }
+            // 回放读失败不能伪装成「无历史」只续实时流:客户端会把缺失当权威
+            // (2026-10-25 审计 P1)。在流开始前返回 500,让前端走重连/兜底轮询。
+            Ok(Err(e)) => return db_err(&e),
+            Err(e) => return db_err(&e),
         }
     }
     let stream = async_stream::stream! {
@@ -419,7 +416,10 @@ pub async fn list_events(
         .await
     {
         Err(e) => db_err(&e),
-        Ok((events, truncated)) => Json(json!({
+        // 读取/坏行失败返回 500,不得回 200 空数组让客户端把缺失当权威
+        // (2026-10-25 审计 P1)。
+        Ok(Err(e)) => db_err(&e),
+        Ok(Ok((events, truncated))) => Json(json!({
             "events": events,
             "truncated": truncated,
         }))

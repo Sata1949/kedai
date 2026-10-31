@@ -216,12 +216,32 @@ pub struct Contract {
 ///
 /// 反序列化失败抛错;成功后再做结构校验(validate_contract),失败返回错误列表。
 /// 返回的契约即为运行时唯一事实源。
+///
+/// **未实现的不变量类型**(range/require_if)不拒绝整张契约(存量卡仍可用),
+/// 但逐条记 warn——不能让作者以为声明后就会被校验(2026-10-25 审计 P2/L2)。
 pub fn parse_contract(raw: &Value) -> Result<Contract, String> {
     let contract: Contract =
         serde_json::from_value(raw.clone()).map_err(|e| format!("契约解析失败: {e}"))?;
     let errors = validation::validate_contract(&contract);
     if !errors.is_empty() {
         return Err(format!("契约校验失败: {}", errors.join("; ")));
+    }
+    let unsupported: Vec<&str> = contract
+        .invariants
+        .iter()
+        .filter(|inv| {
+            matches!(
+                inv.kind,
+                invariant::InvariantKind::Range | invariant::InvariantKind::RequireIf
+            )
+        })
+        .map(|inv| inv.id.as_str())
+        .collect();
+    if !unsupported.is_empty() {
+        tracing::warn!(
+            invariants = ?unsupported,
+            "契约含尚未实现的不变量类型(range/require_if),这些条目不会参与判定"
+        );
     }
     Ok(contract)
 }
@@ -279,5 +299,21 @@ mod tests {
         });
         let err = parse_contract(&raw).unwrap_err();
         assert!(err.contains("dependencies cycle"), "应报依赖环: {err}");
+    }
+
+    /// range/require_if 尚未实现,但存量卡不能因此整张失效:
+    /// `parse_contract` 只记 warn,契约照常返回(判定面由 check_invariants 显式报告)。
+    #[test]
+    fn parse_contract_keeps_unimplemented_invariants() {
+        let mut raw = minimal_contract();
+        raw["invariants"] = json!([{
+            "id": "hp_range",
+            "kind": "range",
+            "paths": ["角色.好感度"],
+            "message": "好感度超范围"
+        }]);
+        let c = parse_contract(&raw).expect("含未实现不变量的存量卡仍应可解析");
+        assert_eq!(c.invariants.len(), 1);
+        assert_eq!(c.invariants[0].kind, InvariantKind::Range);
     }
 }
