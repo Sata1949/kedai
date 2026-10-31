@@ -29,7 +29,7 @@ const emit = defineEmits<{
       <template v-for="(other, i) in notice.others" :key="other.path">
         <span v-if="i > 0">;</span>{{ other.path }}<template v-if="other.evidence">({{ other.evidence }})</template>
       </template>
-      。两套库互不可见,请确认要使用哪一套(设置 DATA_DIR,或清理其一)。
+      。两套库互不可见，请确认要使用哪一套（设置 DATA_DIR，或清理其一）。
     </span>
     <button
       type="button"
