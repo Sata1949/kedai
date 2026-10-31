@@ -98,6 +98,10 @@
 | [plans/CODEBASE-DEBT-AUDIT-2026-10-24.md](plans/CODEBASE-DEBT-AUDIT-2026-10-24.md) | 代码结构债审计(churn×size / 函数规模 / 重复块 / 门禁假阴性;C-2 重启与先修项依据) |
 | [plans/C2-0-HANDOFF-2026-10-24.md](plans/C2-0-HANDOFF-2026-10-24.md) | C-2-0 先修批交接报告(改动清单 / 验证证据 / 兼容性变化 / 下一步;已收口并提交,补齐项见 §七) |
 | [plans/C2-RESIDUAL-HANDOFF-2026-10-26.md](plans/C2-RESIDUAL-HANDOFF-2026-10-26.md) | C-2 五项残余处理交接(settings_service/executor 测试搬出与拆分、sandbox 广播下沉、TaskDetail 结构体、settings parity 类型/取值域;含验收、坑与不动边界) |
+| [plans/TASK-MODE-ROUNDS-AUDIT.md](plans/TASK-MODE-ROUNDS-AUDIT.md) | 任务模式轮次与产物实测分析(空岛单文件真实模型实测;TMR 系列修复依据,条目 TMR-1~TMR-7 见 `计划.md`) |
+| [plans/LITERARY-REPORT.md](plans/LITERARY-REPORT.md) | 文学能力包方案调研(外部 harness 经验 / 仓库现状对照 / 官方能力包形态与出包清单;条目 LIT-1~LIT-8 见 `计划.md`) |
+| [plans/UI-AUDIT-2026-10-30.md](plans/UI-AUDIT-2026-10-30.md) | 前端观感审计(真实启动 + 逐屏观察确认 13 项缺陷;UIVIS-1~3 的依据,覆盖说明见 `计划.md` UIVIS 章) |
+| [plans/UI-AESTHETICS-2026-10-31.md](plans/UI-AESTHETICS-2026-10-31.md) | 前端美感审计(三类不均匀 + 逐条浏览器内试改;UIPOL-1~3 的依据,C4 维持「需确认」) |
 
 > **同名撞车提醒**:[archive/TASK-MODE-FIX-PLAN.md](archive/TASK-MODE-FIX-PLAN.md) 是更早的
 > 「Kimi 续做」交接稿(归档,只读);其同名的工作区执行稿已于 2026-09-27 并入 `计划.md` 并删除。
