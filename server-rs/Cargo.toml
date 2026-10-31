@@ -118,6 +118,37 @@ tokio = { version = "1", features = ["test-util"] }
 # 集成测试需要 utils::test_support::TempDataDir,而 cfg(test) 不作用于独立 crate 的 tests/**。
 kedai-server = { path = ".", features = ["test-support"] }
 
+# 开发档调试信息降到 line-tables-only(2026-10-31 编译效率批,实测矩阵见
+# D:\kedai-bench-run\compeff-evidence\01-profile-matrix.md)。
+#
+# 改前用默认 debug=2(完整 DWARF):单文件增量 15.6s、libkedai_server rlib 912MB、
+# 272 个测试二进制的 PDB 合计 53GB(target 曾胀到 82GB,D 盘只剩 13GB)。
+# 改后实测:单文件增量 13.3s、rlib 294MB、PDB 505MB。
+#
+# 选 1 而非 0:0 会连 panic 行号一起丢掉(`panicked at src/...:123` 退化成函数名),
+# 而本仓排障高度依赖行号(见 docs/经验.md 多条「先看行号再定位」的处置模板);
+# 1 保留行号表、去掉局部变量/类型信息,日常排障够用,体积仍降七成。
+#
+# 注意 profile.dev **不**作用于 `cargo test`——它走 profile.test。测试二进制的
+# PDB 因此不受上面这一行影响:门禁跑完一轮后实测 89 个测试 PDB 合计 11GB
+# (单个约 131MB),是清理后 target 回升到 37GB 的唯一原因。故下方单独设 test 档。
+[profile.dev]
+debug = 1
+
+# 测试档取 0 而不是 1 —— 这条是实测反直觉的一点,别按「dev 用 1 那 test 也用 1」类推:
+#
+#   test 档        PDB 总量    测试二进制编译
+#   debug = 1      11 GB       91 s
+#   debug = 0      3.2 GB      66 s
+#
+# line-tables-only 对本仓的测试二进制几乎没有瘦身效果(单个 PDB 131MB vs 完整档的
+# 127MB,行号表本身就占绝大部分),而 0 档同时省 7.8GB 且**编译快 28%**。
+# 测试档丢掉的「行号」在本仓也不是刚需:失败断言由 libtest 直接打印
+# `tests/xxx.rs:123` 与断言消息,不依赖 PDB 栈符号化;真需要行号时单跑
+# `cargo test` 加 `RUSTFLAGS=-Cdebuginfo=1` 临时覆盖即可,不必让每次门禁都背这个体积。
+[profile.test]
+debug = 0
+
 [profile.release]
 lto = true
 strip = true

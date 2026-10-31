@@ -21,6 +21,7 @@
 #   .\tools\watch.ps1 -WebOnly         # 只监听前端
 #   .\tools\watch.ps1 -Check           # 后端改用 cargo check(更快,不产出 exe)
 #   .\tools\watch.ps1 -Release         # 后端用 release profile(不删 target)
+#   .\tools\watch.ps1 -MainBinOnly     # 后端只编 kedai-server,不链 kedai-agent / kedai-data-merge
 #   .\tools\watch.ps1 -EmbedWeb        # 前端构建成功后顺带重编后端,刷新内嵌 dist
 #   .\tools\watch.ps1 -DryRun          # 只打印将要执行的命令(验证监听用)
 #
@@ -31,6 +32,7 @@ param(
     [switch]$WebOnly,
     [switch]$Check,
     [switch]$Release,
+    [switch]$MainBinOnly,
     [switch]$EmbedWeb,
     [switch]$Once,
     [switch]$NoInitial,
@@ -102,15 +104,21 @@ function Invoke-NativeCommand {
 
 function Invoke-RustBuild {
     $profile = if ($Release) { "release" } else { "debug" }
+    # -MainBinOnly:只编主 bin。三个 bin 共享同一个 lib,但各自独立链接
+    # (2026-10-31 实测:单文件增量 15.6s,其中约 6s 是三条链接);日常改后端只有
+    # kedai-server 会被起起来验证,kedai-agent(文档化的 headless 评测入口)与
+    # kedai-data-merge(迁移工具)极少改动,故提供快通道。默认不启用——
+    # 用 headless 评测时不加此开关,否则 kedai-agent.exe 会落后于源码。
+    $binArg = if ($MainBinOnly) { " --bin kedai-server" } else { "" }
     if ($Check) {
         $cargoArgs = "cargo check"
         $display = "cargo check(增量检查,不产出 exe)"
     } elseif ($Release) {
-        $cargoArgs = "cargo build --release"
+        $cargoArgs = "cargo build --release$binArg"
         $display = "cargo build --release(增量)"
     } else {
-        $cargoArgs = "cargo build"
-        $display = "cargo build(debug 增量)"
+        $cargoArgs = "cargo build$binArg"
+        $display = if ($MainBinOnly) { "cargo build(debug 增量,仅 kedai-server)" } else { "cargo build(debug 增量)" }
     }
 
     # 运行中的 kedai-server.exe 会锁住链接产物;与 build.ps1 同一套改名让位逻辑。

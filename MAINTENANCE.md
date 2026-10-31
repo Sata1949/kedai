@@ -184,7 +184,7 @@ kedai/
 `check-arch` 规则自 2026-09-14 起含 C/D/E/G/H/I/J(代际归属与跨代方向以 `tools/arch-layers.json` 为 SSOT),**2026-09-17 起增规则 L**(JNI 按名调用桥类的登记完整性)、**2026-10-05 起增规则 M**(PRODCAP-5:测试专用构造器 `build_test_app` 不得被生产入口引用——集成测试链接非 test 构建的 lib,`#[cfg(test)]` 门控不可行,改由脚本扫 `main.rs`/`bin/*.rs`/`src-tauri/src` 断言零引用);`check-bundle` 自 2026-09-17 起(基线在脚本内,ratchet 只降不升) |
 - **文件大小与直写 ratchet（2026-10-25 C-2E 起）**：`tools/check-file-size.mjs` 对 26 个超千行非测试源文件做只降不升（基线 `tools/file-size-baseline.json`）；`check-arch` 的组件直改 state 总量基线 113。两者都在 `check-all` 内，新增超限即 FAIL。
 | 开发模式 | `cd server-rs && cargo run` + `npm run dev -w web` | 后端 3001 / 前端 5173(代理到 3001) |
-| 增量构建(日常开发) | `.\tools\watch.ps1` 或 `npm run watch` | **正常开发内循环用这条**:监听前后端源码,变更后自动增量编译——后端 `cargo build`(debug,保留 target)、前端 `npm run build -w web`;`-Once` 单次、`-RustOnly`/`-WebOnly` 分侧、`-Check` 只检查、`-Release` 增量 release、`-EmbedWeb` 刷新编译期内嵌 dist、`-DryRun` 只打印命令。不跑门禁、不产便携版;升版/交付前仍须完整 `.\build.ps1` |
+| 增量构建(日常开发) | `.\tools\watch.ps1` 或 `npm run watch` | **正常开发内循环用这条**:监听前后端源码,变更后自动增量编译——后端 `cargo build`(debug,保留 target)、前端 `npm run build -w web`;`-Once` 单次、`-RustOnly`/`-WebOnly` 分侧、`-Check` 只检查、`-Release` 增量 release、`-MainBinOnly` 只编 `kedai-server`(省两条无关 bin 的链接)、`-EmbedWeb` 刷新编译期内嵌 dist、`-DryRun` 只打印命令。不跑门禁、不产便携版;升版/交付前仍须完整 `.\build.ps1`。**调试信息按档分设:`profile.dev` 为 `debug = 1`(line-tables-only,保留 panic 行号)、`profile.test` 为 `debug = 0`(测试 PDB 11GB→3.2GB 且编译快 28%)**,两档结论相反的理由见 §10 条目 34 |
 | Headless 单次任务(开发/评测) | `cargo build --manifest-path server-rs/Cargo.toml --bin kedai-agent` → `server-rs\target\debug\kedai-agent.exe --prompt-file <题面> --workspace <沙箱目录> --out <结果 JSON>` | HARNESS3-5(2026-10-01):进程内直跑一个 solo 任务,**不起服务、不依赖 web/dist、不装 MCP**;`--workspace` 与界面创建任务**同一把校验**;退出码 0(done)/1(partial/error/ended/timeout)/2(参数或环境错误);命令执行在本进程内存态默认开(**不写用户设置文件**);`--timeout-secs`(缺省 3600,0=不限)超时对任务发 stop 后按 `timeout` 收尾;结果 JSON `{task_id,status,summary,files_changed[],usage}`。它**不进产品面叙事**——开发/评测入口,随 `cargo build` 即得;详细边界见 `功能-变更史.md` 2026-10-01 章 |
 | 前端构建 | `npm run build -w web` | 产出 web/dist(编译进 exe 用) |
 
@@ -280,8 +280,14 @@ npm run watch                # 同上(npm 别名)
 .\tools\watch.ps1 -Once      # 只编译一次后退出
 .\tools\watch.ps1 -Check     # 后端只做 cargo check(最快)
 .\tools\watch.ps1 -Release   # 后端用 release profile 增量编译(仍不产 dist/便携版)
+.\tools\watch.ps1 -MainBinOnly  # 只编 kedai-server(不链 kedai-agent / kedai-data-merge)
 .\tools\watch.ps1 -EmbedWeb  # 前端构建后顺带重编后端(刷新编译期内嵌的 web/dist)
 ```
+
+`-MainBinOnly` 的适用面:三个 bin 共享同一个库,但**各自独立链接**(2026-10-31 实测单文件
+增量 15.6s,其中约 6s 是三条链接)。日常改后端只会起 `kedai-server` 验证,故可省下两条。
+**用 headless 评测(`kedai-agent`)前不要加**,否则 `kedai-agent.exe` 会落后于源码;
+不加该开关时的行为与改前完全一致。
 
 前端改动默认只重建 `web\dist`。若后端以 `KEDAI_WEB_DIST=web\dist` 启动(`start.ps1` 测试版已自动这样做),
 前端刷新无需重编后端;否则(使用内嵌 dist)需要 `-EmbedWeb` 或手动重编。该脚本面向开发,交付/发布前仍须跑
@@ -510,6 +516,7 @@ rusqlite(bundled,零原生依赖),**WAL 模式 + foreign_keys ON**。共 35 张�
 | 31 | 360 安全卫士拦截 cargo 新生成的 build script 可执行文件 | `docs/经验.md` |
 | 32 | 测试临时数据目录从不清理,会把 %TEMP% 撑爆 | `docs/经验.md` |
 | 33 | MSVC 本地化 linker 进度消息被 `linker_messages` 报为告警(含 cdylib 的 crate) | `docs/经验.md` |
+| 34 | 编译效率瓶颈是调试信息体积与单 crate 无边界,不是链接器或 build.rs(dev=`debug 1`/test=`debug 0`,两档结论相反) | `docs/经验.md` |
 
 条目 32 末尾的「本批次后的实测残留」(约 30 个测试临时目录残留、`kedai-tool-test-*` 3 个为
 已知有界残留)属**遗留登记**,见 `docs/遗留.md`。
