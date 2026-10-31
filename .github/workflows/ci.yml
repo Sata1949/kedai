@@ -63,6 +63,10 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # 缓存键含 Cargo.toml:改 profile(debug 级别、opt-level、lto 等)不会改动 Cargo.lock,
+      # 若键里只有锁文件,这类改动会命中上一档的旧产物——cargo 的 fingerprint 虽能识别参数
+      # 变化并正确重编(不会用错产物),但缓存因此整份作废却仍被下载解包,白白吃一次
+      # 上传/下载与解压的开销。2026-10-31 编译效率批(dev/test 分档)即踩此点。
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -71,7 +75,7 @@ jobs:
             ~/.cargo/git
             server-rs/target
             src-tauri/target
-          key: cargo-${{ hashFiles('server-rs/Cargo.lock', 'src-tauri/Cargo.lock') }}
+          key: cargo-${{ hashFiles('server-rs/Cargo.lock', 'src-tauri/Cargo.lock', 'server-rs/Cargo.toml', 'src-tauri/Cargo.toml') }}
 
       - name: Install cargo-audit
         shell: pwsh
