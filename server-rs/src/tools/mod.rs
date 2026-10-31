@@ -204,9 +204,14 @@ mod registry_meta_tests {
         );
     }
 
-    /// 名单成员必须真实注册(反向检查:白名单里写了不存在的工具名)
+    /// 名单成员必须真实注册(反向检查:白名单/策略名单里写了不存在的工具名)
+    ///
+    /// 2026-10-31 SUBFIX:此前只覆盖 7 个场景名单,漏了 4 个策略名单
+    /// (`WORKSPACE_READONLY_TOOLS` / `WORKSPACE_WRITE_TOOLS` / `READONLY_PROBE_TOOLS` /
+    /// `WRITE_LIKE_TOOLS`)——这些名单一旦写错,策略层会静默少放行/少清零,同样属于
+    /// 4.7 要拦的静默降级。
     #[test]
-    fn every_scene_whitelist_member_is_registered() {
+    fn every_tool_set_member_is_registered() {
         let names = registered_names();
         let mut whitelists: Vec<(&str, &[&str])> = vec![
             ("SUBAGENT", tool_sets::SUBAGENT),
@@ -215,6 +220,13 @@ mod registry_meta_tests {
             ("ARCHIVE_TOOLS", tool_sets::ARCHIVE_TOOLS),
             ("WORKSPACE_TOOLS", tool_sets::WORKSPACE_TOOLS),
             ("META_TOOLS", tool_sets::META_TOOLS),
+            (
+                "WORKSPACE_READONLY_TOOLS",
+                tool_sets::WORKSPACE_READONLY_TOOLS,
+            ),
+            ("WORKSPACE_WRITE_TOOLS", tool_sets::WORKSPACE_WRITE_TOOLS),
+            ("READONLY_PROBE_TOOLS", tool_sets::READONLY_PROBE_TOOLS),
+            ("WRITE_LIKE_TOOLS", tool_sets::WRITE_LIKE_TOOLS),
         ];
         whitelists.push(("VISION_TOOLS", tool_sets::VISION_TOOLS));
         let mut missing = Vec::new();

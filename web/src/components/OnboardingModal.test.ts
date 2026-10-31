@@ -97,7 +97,7 @@ describe('首启教程 · 步骤推进', () => {
     await answerQuestions(wrapper, '1. 角色扮演', '2. 我只需要看我喜欢的');
     expect(wrapper.text()).toContain(`第 1 / ${RP_PLAN.length} 步`);
     expect(wrapper.text()).toContain(titleAt(RP_PLAN, 1));
-    expect(titleAt(RP_PLAN, 1)).toBe('第一步:导入角色卡');
+    expect(titleAt(RP_PLAN, 1)).toBe('第一步：导入角色卡');
     // 首步没有设置跳转按钮
     expect(wrapper.findAll('button').some((b) => b.text().includes('带我去设置'))).toBe(false);
   });

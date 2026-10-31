@@ -56,6 +56,17 @@ fn settings_json_alone_counts_as_user_data() {
     std::fs::write(other.join("settings.json"), "{}").expect("写 settings.json 失败");
     let found = detect_split_data_dirs(selected.path(), &[other.path().to_path_buf()]);
     assert_eq!(found.len(), 1, "有 settings.json 应算用户数据: {found:?}");
+    assert_eq!(found[0].1, "settings.json");
+}
+
+/// 两件都在时判据文案才写「settings.json + 数据库」。
+#[test]
+fn settings_and_db_reports_both() {
+    let selected = TempDataDir::new("cfg-sel5");
+    let other = make_data_dir("cfg-settings-db");
+    std::fs::write(other.join("settings.json"), "{}").expect("写 settings.json 失败");
+    let found = detect_split_data_dirs(selected.path(), &[other.path().to_path_buf()]);
+    assert_eq!(found.len(), 1, "应检测到分叉库: {found:?}");
     assert_eq!(found[0].1, "settings.json + 数据库");
 }
 

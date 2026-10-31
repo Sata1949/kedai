@@ -142,14 +142,15 @@ pub fn detect_split_data_dirs(
         if !dir_has_user_data(dir) {
             continue;
         }
-        out.push((
-            dir.clone(),
-            if has_settings {
-                "settings.json + 数据库"
-            } else {
-                "数据库（含角色或会话）"
-            },
-        ));
+        // 判据文案按**实际存在的文件**拼:只有 settings.json 时不能谎称还有数据库。
+        let evidence = if has_settings && has_db {
+            "settings.json + 数据库"
+        } else if has_settings {
+            "settings.json"
+        } else {
+            "数据库（含角色或会话）"
+        };
+        out.push((dir.clone(), evidence));
     }
     out
 }
