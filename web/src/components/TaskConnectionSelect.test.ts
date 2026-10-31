@@ -81,7 +81,7 @@ describe('TaskConnectionSelect:任务级连接选择器(B 批 B1)', () => {
     const store = useTaskStore();
     const wrapper = await mountSelect();
     const options = wrapper.findAll('option').map((o) => o.text());
-    expect(options[0]).toBe('连接:默认（跟随任务模式默认连接）');
+    expect(options[0]).toBe('连接：默认（跟随任务模式默认连接）');
     expect((wrapper.find('select').element as HTMLSelectElement).value).toBe('');
     // 缺省 = 跟随设置的默认连接:store 里必须是空串,createTask 才不会下发该键
     expect(store.taskConnectionId).toBe('');
@@ -94,10 +94,10 @@ describe('TaskConnectionSelect:任务级连接选择器(B 批 B1)', () => {
     );
     const wrapper = await mountSelect();
     const texts = wrapper.findAll('option').map((o) => o.text());
-    expect(texts).toContain('连接:主连接｜gpt-x');
-    expect(texts).toContain('连接:备用｜gpt-x(已停用)');
+    expect(texts).toContain('连接：主连接｜gpt-x');
+    expect(texts).toContain('连接：备用｜gpt-x（已停用）');
     const disabled = wrapper.findAll('option').filter((o) => o.attributes('disabled') !== undefined);
-    expect(disabled.map((o) => o.text())).toEqual(['连接:备用｜gpt-x(已停用)']);
+    expect(disabled.map((o) => o.text())).toEqual(['连接：备用｜gpt-x（已停用）']);
     wrapper.unmount();
   });
 

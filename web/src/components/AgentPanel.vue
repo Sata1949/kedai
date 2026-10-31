@@ -453,7 +453,7 @@ watch(currentSessionId, () => {
             </li>
           </ol>
           <div v-else class="sv-empty panel">
-            <p class="sv-note-mini">创建并执行任务后,计划步骤将在此展示</p>
+            <p class="sv-note-mini">创建并执行任务后，计划步骤将在此展示</p>
           </div>
         </div>
 
@@ -546,7 +546,7 @@ watch(currentSessionId, () => {
           </li>
         </ol>
         <div v-else class="sv-empty panel">
-          <p class="sv-note-mini">发送消息后,Agent 推理步骤将在此展示</p>
+          <p class="sv-note-mini">发送消息后，Agent 推理步骤将在此展示</p>
         </div>
       </div>
 

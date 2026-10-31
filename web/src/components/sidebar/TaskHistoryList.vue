@@ -32,7 +32,7 @@ const { removeTask } = useTaskActions();
       <span class="diag" />
     </div>
     <p v-if="tasks.length === 0" class="sv-task-list-empty">
-      暂无任务,输入目标创建第一个任务
+      暂无任务，输入目标创建第一个任务
     </p>
     <p v-if="tasks.length === 0" class="sv-task-list-empty-hint">
       01 写目标 · 02 展开执行设置 · 03 创建并执行

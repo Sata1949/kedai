@@ -138,8 +138,8 @@ onMounted(async () => {
            导入的冲突处理(新增副本 / 覆盖同 id)迁到综合导入的段级选项;
            本区保留的「导出流程」= 单流程 + 子流程闭包(分享场景)。 -->
       <div class="sv-note">
-        导出会带上该流程挂载的子流程(缺了它们,导入方必然报「引用的子流程不存在」);
-        导出文件不含 API 连接与密钥,节点上的连接引用跨机后需重选。
+        导出会带上该流程挂载的子流程(缺了它们，导入方必然报「引用的子流程不存在」);
+        导出文件不含 API 连接与密钥，节点上的连接引用跨机后需重选。
         多流程整库搬运用「综合设置 → 对话与提示词 → 综合导入 / 导出」。
       </div>
       <div class="sv-inp-row">
@@ -166,12 +166,12 @@ onMounted(async () => {
           title="同一层最多同时执行的步骤数(1 = 完全串行);并行会成倍消耗 token"
           @change="setFlowParallel(($event.target as HTMLInputElement).value)"
         />
-        <span class="sv-note">同一层的步骤最多同时跑这么多个;并行会成倍消耗 token。</span>
+        <span class="sv-note">同一层的步骤最多同时跑这么多个；并行会成倍消耗 token。</span>
       </div>
       <p v-if="graphHintText" class="sv-note">{{ graphHintText }}</p>
       <p class="sv-note">
-        自定义流程:输入栏切换到 <b>CUSTOM</b> 模式后,按下方步骤从上到下依次执行
-        (设了上游则按依赖顺序执行);每步可独立设置系统提示词(支持酒馆宏,以
+        自定义流程：输入栏切换到 <b>CUSTOM</b> 模式后，按下方步骤从上到下依次执行
+        (设了上游则按依赖顺序执行);每步可独立设置系统提示词(支持酒馆宏，以
         <code v-pre>[本步指令]</code> 追加到系统提示词末尾)、生成参数与工具范围。
         至少需要一步「生成正文」的 direct 步骤。
       </p>
@@ -194,10 +194,10 @@ onMounted(async () => {
         >
           画布
         </button>
-        <span class="sv-note">画布是高级模式;列表视图同样能编辑二维依赖。</span>
+        <span class="sv-note">画布是高级模式；列表视图同样能编辑二维依赖。</span>
       </div>
       <div v-if="flowDraft && !flowDraft.steps.length" class="sv-note inject-empty">
-        尚未添加步骤,点击下方「+ 新增步骤」。
+        尚未添加步骤，点击下方「+ 新增步骤」。
       </div>
       <template v-if="flowView === 'list'">
         <div
@@ -300,7 +300,7 @@ onMounted(async () => {
       />
       <p v-if="flowView === 'canvas' && canvasLoadFailed" class="sv-note flow-tool-warn">
         画布组件加载失败(多为前端已更新、页面缓存的旧 chunk 失效)。
-        可点右侧「重试」;若仍失败,请刷新页面,或先用列表视图编辑(功能一致)。
+        可点右侧「重试」;若仍失败，请刷新页面，或先用列表视图编辑(功能一致)。
         <button class="sv-btn ghost" @click="retryCanvasLoad">重试</button>
       </p>
       <div class="sv-btn-row">

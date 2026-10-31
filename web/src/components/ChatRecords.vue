@@ -170,7 +170,7 @@ onMounted(() => {
       <div class="sv-modal-body">
         <div v-if="feedback" class="sv-feedback" :class="feedback.kind" style="margin-bottom: var(--space-2-5)">{{ feedback.text }}</div>
         <p class="sv-note" style="margin-top: 0">
-          全部会话列表(按最近活动排序)。选择切换会话、新建当前角色会话、删除会话,或对单个会话导出 / 导入 JSON(导入将替换该会话全部内容)。
+          全部会话列表(按最近活动排序)。选择切换会话、新建当前角色会话、删除会话，或对单个会话导出 / 导入 JSON(导入将替换该会话全部内容)。
         </p>
 
         <!-- UIP-15:骨架只在无内容时占位;有列表时刷新保持可见(删除后由 sv-list 播放退场/重排) -->
@@ -178,7 +178,7 @@ onMounted(() => {
           <SkeletonBlock :lines="5" />
         </div>
         <div v-else-if="sessions.length === 0" class="sv-empty" style="padding: 30px var(--space-3)">
-          <p style="font-size: 12px">暂无会话记录。选择角色后发送第一条消息,或点击「新建」。</p>
+          <p style="font-size: 12px">暂无会话记录。选择角色后发送第一条消息，或点击「新建」。</p>
         </div>
         <!-- UIP-15:会话删除/新建走 sv-list 过渡(删除入口见行内「删除」) -->
         <TransitionGroup v-else name="sv-list" tag="div" class="sv-datalist" @before-leave="pinLeavingRow">

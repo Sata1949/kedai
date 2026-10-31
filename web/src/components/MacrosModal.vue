@@ -63,11 +63,11 @@ async function expandNow(): Promise<void> {
         <div class="sv-field">
           <div class="sv-field-label"><span class="sv-supreme blue" /> 说明</div>
           <p class="sv-note" style="margin: 0; line-height: 1.8">
-            宏调试面板:粘贴含 <code v-pre>{{...}}</code> 的模板,点「展开」查看服务端实际展开结果
+            宏调试面板：粘贴含 <code v-pre>{{...}}</code> 的模板，点「展开」查看服务端实际展开结果
             (与提示词注入/世界书/快速回复共用的同一宏引擎)。<br />
             <b>未知宏保留原样</b>(不报错);<b>变量</b> 区供
             <code v-pre>{{getvar::键}}</code> / <code v-pre>{{var::键}}</code> 调试(每行
-            <code>键::值</code>,支持 true/false 与整数)。
+            <code>键：:值</code>,支持 true/false 与整数)。
           </p>
         </div>
 
@@ -108,7 +108,7 @@ async function expandNow(): Promise<void> {
         <div class="sv-field">
           <div class="sv-field-label"><span class="sv-supreme green" /> 展开结果</div>
           <div v-if="!expanded && !msg" class="sv-empty" style="padding: var(--space-4) var(--space-3)">
-            <p style="font-size: 12px">点击「展开」查看结果;未知宏会原样保留在输出中。</p>
+            <p style="font-size: 12px">点击「展开」查看结果；未知宏会原样保留在输出中。</p>
           </div>
           <pre v-else class="sv-input" style="white-space: pre-wrap; line-height: 1.7; margin: 0; min-height: 60px">{{ expanded }}</pre>
           <div v-if="msg" class="sv-feedback" :class="msg.kind" style="margin-top: var(--space-1-5)">{{ msg.text }}</div>

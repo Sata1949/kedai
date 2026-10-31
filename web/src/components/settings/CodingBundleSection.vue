@@ -88,13 +88,13 @@ async function onToggle(next: boolean): Promise<void> {
       </div>
     </div>
     <div v-if="showExecHint" class="sv-feedback info" role="status">
-      编码能力包已开启,但<b>命令执行总开关关闭</b>:任务里的 bash 命令会被一律拒绝,编码任务
+      编码能力包已开启，但<b>命令执行总开关关闭</b>:任务里的 bash 命令会被一律拒绝，编码任务
       可能空转。请到「Agent 与任务 → 授权与命令执行」打开「启用命令执行」。
     </div>
     <div v-if="msg" class="sv-feedback" :class="msgKind === 'err' ? 'err' : 'ok'">{{ msg }}</div>
     <p class="sv-note">
-      仅任务模式生效:开启后,任务模式执行者<b>未自定义</b>系统提示词时,默认值改用「编码执行者模板」,
-      强调<b>先读后写</b>、遵循既有风格、改完跑验证、最小改动;你在提示词框里填过自定义内容时,
+      仅任务模式生效：开启后，任务模式执行者<b>未自定义</b>系统提示词时，默认值改用「编码执行者模板」,
+      强调<b>先读后写</b>、遵循既有风格、改完跑验证、最小改动；你在提示词框里填过自定义内容时，
       <b>以自定义值为准</b>,本开关只影响默认值。<b>不影响角色扮演模式</b>。默认关闭。
     </p>
   </div>

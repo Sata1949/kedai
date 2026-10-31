@@ -252,6 +252,12 @@ input.sv-input,
 }
 
 .sv-btn-row { display: flex; gap: var(--space-2-5); }
+/* UIPOL-3/C3:主次权重差。改前「保存」「从 API 加载模型列表」两个按钮靠 .sv-btn-fill
+   各占一半(实测同为 357px),一个纯黑一个白底,视觉上是 50:50 的兄弟关系——
+   但语义上前者是主操作、后者是辅助。主按钮固定拿 2 份、其余让位,实测权重比 ≥ 1.8。
+   只在有 primary 的行生效(无主按钮的按钮行仍等分,如确认/取消)。 */
+.sv-btn-row:has(> .sv-btn.primary) > .sv-btn.primary { flex: 2 1 0; }
+.sv-btn-row:has(> .sv-btn.primary) > .sv-btn:not(.primary) { flex: 1 1 0; }
 .sv-btn-fill { flex: 1; }
 
 .sv-note {
@@ -288,15 +294,31 @@ input.sv-input,
 }
 .sv-feedback-flex { flex: 1; margin: 0; }
 
-.sv-range-row { display: flex; align-items: center; gap: var(--space-3); }
+/* UIVIS-2/B3:轨道自适应 + 数值框定宽 88px。
+   原为 flex,数值框 min-width:34px 但内容自适应——「0.30 / 1.00 / 32768」三种内容撑出三种宽度,
+   数值框左缘与右缘在三条滑块行里各不相同;32768 那条还把 input 拉成近整行(实测 x 差 7px+、
+   轨道中线与框中线不齐)。改 grid 后三行数值框 x 与宽完全相同,纵向成一条竖线。 */
+.sv-range-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 88px;
+  align-items: center;
+  gap: var(--space-3);
+}
 .sv-range-row output {
   font-family: var(--font-display);
   font-size: 15px;
-  min-width: 34px;
   text-align: center;
   border: var(--bw-thin) solid var(--sv-ink);
   padding: 3px var(--space-2);
   background: var(--sv-white);
+  /* 等宽数字:0.30 / 1.00 / 32768 的小数点与位数纵向对齐 */
+  font-variant-numeric: tabular-nums;
+}
+/* 滑块行内的数字输入:右对齐 + 等宽数字,读法与 output 同源 */
+.sv-range-row .sv-input.inject-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  min-width: 0;
 }
 input[type="range"].sv-range {
   flex: 1;
@@ -462,16 +484,21 @@ input[type="range"].sv-range::-moz-range-thumb {
 
 /* 数据管理行 */
 .sv-datalist { display: flex; flex-direction: column; gap: var(--space-2-5); position: relative; }
+/* UIVIS-3/UI-B5:改 grid 1fr auto 而不是 flex space-between。原 flex 下 .info 是唯一
+   可压缩项,但按钮本身没有下限——「清理任务草稿」那条说明文字很长时,「立即清理」被挤到
+   约 60px,中文被折成「立即清 / 理」两行。grid 的 auto 轨道按内容撑开,按钮拿足固有宽。 */
 .sv-data-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
   gap: var(--space-3);
   padding: var(--space-3) var(--space-3-5);
   border: var(--bw) solid var(--sv-ink);
   background: var(--sv-white);
 }
-.sv-data-row .info { font-size: 12.5px; }
+.sv-data-row > .sv-btn,
+.sv-data-row > .sv-tag { white-space: nowrap; }
+.sv-data-row .info { font-size: 12.5px; min-width: 0; }
 .sv-data-row .info b { display: block; font-size: 13px; }
 .sv-data-row .info span { color: var(--sv-ink-faint); font-size: 11px; }
 /* 开场选择器行:整行按钮化 + 预览文本限高滚动(收编模板内联) */
@@ -562,12 +589,14 @@ input[type="range"].sv-range::-moz-range-thumb {
   border-color: var(--sv-ink);
 }
 /* 导航序号:构成主义数字(display 字体,同 .sv-mode-idx 节奏);
-   批次 5 第二轮:编号 pink-deep → 海报红,与色点构成红黑海报对 */
+   批次 5 第二轮:编号 pink-deep → 海报红,与色点构成红黑海报对;
+   UIPOL-3/C1:9px 不在字阶令牌内(合法档 11/12/13/14/15/18/24/30),中文环境下接近不可读,
+   与 12px 标签的比例只有 0.75(实测宽 15px);收到 --text-2xs(11px)后比例 0.92,序号终于「站住」。 */
 .sv-hub-nav-idx {
   font-family: var(--font-display);
-  font-size: 9px;
+  font-size: var(--text-2xs);
   color: var(--sv-red);
-  letter-spacing: 0.05em;
+  letter-spacing: 0.08em;
   flex-shrink: 0;
 }
 .sv-hub-nav-item.active .sv-hub-nav-idx { color: var(--sv-pink); }

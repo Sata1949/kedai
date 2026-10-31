@@ -94,8 +94,8 @@ async function pickGreeting(index: number): Promise<void> {
       <div class="sv-modal-body">
         <p class="sv-note sv-mb12">
           {{ mode === 'new'
-            ? '选择一个开场,以其作为新会话的第一条消息。'
-            : '切换开场将清空当前会话全部消息,并以所选开场重新开始。' }}
+            ? '选择一个开场，以其作为新会话的第一条消息。'
+            : '切换开场将清空当前会话全部消息，并以所选开场重新开始。' }}
         </p>
         <div class="sv-datalist">
           <button

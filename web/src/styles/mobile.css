@@ -43,6 +43,11 @@
   .sv-canvas { padding: var(--space-6) clamp(16px, 3vw, 36px); }
   .sv-topbar { padding-left: 38px; }
   .sv-session-select { max-width: 200px; }
+  /* UIVIS-3/UI-A5:本档最窄处(768)侧栏只有 220px。底部按钮虽已在 task.css 里 nowrap,
+     但两列网格每格只剩约 92px,「导入角色卡」这类五字按钮即使不折行也会溢出。
+     改单列后整行可用(页脚高一点,窄屏可接受);桌面档不受影响。 */
+  .sv-side-foot { grid-template-columns: 1fr; }
+  .sv-side-foot .sv-side-btn { min-width: 0; }
 }
 
 /* ---------- 手机(<768px):抽屉 + 底部导航 ---------- */

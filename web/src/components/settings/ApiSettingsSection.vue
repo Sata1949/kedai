@@ -73,6 +73,9 @@ onMounted(() => {
         </select>
       </div>
 
+      <!-- UIVIS-2/UI-A4:原为 `.sv-note` 普通 <p>,里面写死 `**默认连接**` 星号,
+           而 .sv-note 不渲染 Markdown → 源码级星号直接露在界面上。改为 <strong>
+           (本组件已有该写法先例);同段两处半角标点一并改为全角。 -->
       <div class="sv-btn-row">
         <button class="sv-btn primary sv-btn-fill" :disabled="savingApi" @click="saveApi">
           {{ savingApi ? '保存中...' : '保存 API 设置' }}
@@ -82,8 +85,8 @@ onMounted(() => {
         </button>
       </div>
       <p class="sv-note">
-        本区编辑的是**默认连接**;要多存几套请在「连接配置」里管理,聊天与任务都使用默认连接。
-        保存后立即生效并写入 data/settings.json;Key 仅存本地服务端,不回显明文。地址会自动补全
+        本区编辑的是<strong>默认连接</strong>；要多存几套请在「连接配置」里管理，聊天与任务都使用默认连接。
+        保存后立即生效并写入 data/settings.json；Key 仅存本地服务端，不回显明文。地址会自动补全
         协议与 /v1。
       </p>
     </div>

@@ -506,9 +506,12 @@ async function onModelChange(e: Event): Promise<void> {
   font-size: 12px;
   color: var(--sv-ink);
   cursor: pointer;
-  flex: none; /* 工具栏内不拉伸 */
+  /* UIVIS-2/UI-B1:工具栏里唯一可让位的控件——吃掉剩余宽,最小 180px。
+     改前 `flex: none` 使它在窄主区下也被钉在原宽,只能整块掉行,把工具栏拆成三行。
+     180px 是模型名的可读下限(少于它就只能看到几个字符,等于没有选择器)。 */
+  flex: 1 1 180px;
+  min-width: 0;
   width: auto;
-  min-width: 132px;
 }
 .sv-model-select:focus-visible {
   border-color: var(--sv-red);

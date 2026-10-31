@@ -393,6 +393,27 @@
   background: var(--sv-paper);
   color: var(--sv-ink-dim);
 }
+/* UIVIS-2/UI-A3:用户气泡是黑底(.sv-msg.user .sv-msg-bubble),上面这套浅底配色直接套上去
+   会出现「浅粉引用块 + 深灰字」「浅粉行内代码块」这类对比塌陷。此处把用户气泡内的
+   引用/行内代码翻成深底可读形态:半透明白底 + 白字,边框走半透明白线。
+   代码块(pre)本来就有自己的一套配色,且已由上面「深底双保险」段把 pre 内部文字统一为白,
+   故不在此重复覆盖。 */
+.sv-msg.user .sv-msg-bubble.sv-msg-md blockquote {
+  background: rgba(255, 255, 255, 0.12);
+  border-left-color: var(--sv-white);
+  color: rgba(255, 255, 255, 0.86);
+}
+.sv-msg.user .sv-msg-bubble.sv-msg-md code {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.32);
+  color: inherit;
+}
+.sv-msg.user .sv-msg-bubble.sv-msg-md a {
+  color: var(--sv-white);
+}
+.sv-msg.user .sv-msg-bubble.sv-msg-md hr {
+  border-color: rgba(255, 255, 255, 0.34);
+}
 .sv-msg-bubble.sv-msg-md code {
   font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
   font-size: 0.92em;

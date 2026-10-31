@@ -263,15 +263,15 @@ onMounted(() => {
         <div class="sv-field">
           <div class="sv-field-label"><span class="sv-supreme blue" /> 说明</div>
           <p class="sv-note" style="margin: 0; line-height: 1.8">
-            用户脚本(ScriptTree,对齐酒馆助手格式)在<code>消息生成完成后</code>由后端执行,
+            用户脚本(ScriptTree,对齐酒馆助手格式)在<code>消息生成完成后</code>由后端执行，
             可读写<code>global / character / chat / script</code>等作用域变量并调用
             <code>TavernHelper</code> 兼容 API(如
             <code>setVariables</code>/<code>triggerSlash</code>)。<br />
-            <b>全局脚本</b>存于本机数据库;<b>角色脚本</b>存于角色卡
-            <code>extensions.tavern_helper</code>,随角色卡导出。脚本仅做变量/数据处理,
+            <b>全局脚本</b>存于本机数据库；<b>角色脚本</b>存于角色卡
+            <code>extensions.tavern_helper</code>,随角色卡导出。脚本仅做变量/数据处理，
             运行于隔离沙箱(1 秒超时 + 内存上限),不接触 DOM 与网络。<br />
             <b>导出/导入(阶段六 6e)</b>:导出 = 读取当前作用域脚本树下载 JSON(勾选
-            「仅 data/button」时按 export_with 剥离正文,仅保留结构);导入 = 解析本地
+            「仅 data/button」时按 export_with 剥离正文，仅保留结构);导入 = 解析本地
             JSON 并<b>自动重分配 id</b>,点「保存脚本」后全量写入。
           </p>
         </div>
@@ -314,7 +314,7 @@ onMounted(() => {
             <p style="font-size: 12px">请选择角色以查看/编辑其角色卡脚本。</p>
           </div>
           <div v-else-if="trees.length === 0" class="sv-empty" style="padding: var(--space-4) var(--space-3)">
-            <p style="font-size: 12px">暂无脚本,点击「新增脚本」创建。</p>
+            <p style="font-size: 12px">暂无脚本，点击「新增脚本」创建。</p>
           </div>
           <div v-else class="sv-scripts-layout">
             <!-- 树形列表 -->

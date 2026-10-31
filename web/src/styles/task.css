@@ -666,6 +666,12 @@
   align-items: center;
   justify-content: center;
   gap: var(--space-1-5);
+  /* UIVIS-3/UI-A5:窄档(768)侧栏收到 220px 时,「退出 Kedai」「综合设置」的可用宽
+     不够容纳固有文本,中文被逐字折断(实测「已连接」竖排三行、「退出 Kedai」两行)。
+     按钮文字一律不折行;空间不够时让 grid 轨道按内容撑开或整体省略号,不要断字。 */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 /* 第一个按钮(综合设置,primary)无上间距,其余按钮 8px 间距 */
 .sv-side-btn:first-child { margin-top: 0; }

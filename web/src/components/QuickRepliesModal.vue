@@ -115,11 +115,11 @@ async function load(): Promise<void> {
         <div class="sv-field">
           <div class="sv-field-label"><span class="sv-supreme blue" /> 说明</div>
           <p class="sv-note" style="margin: 0; line-height: 1.8">
-            快速回复(Quick Replies)是预置的常用消息片段:在输入框上方点「快速回复」选择后
-            <b>填入输入框</b>(不自动发送,按 Enter 确认)。<br />
+            快速回复(Quick Replies)是预置的常用消息片段：在输入框上方点「快速回复」选择后
+            <b>填入输入框</b>(不自动发送，按 Enter 确认)。<br />
             也可被世界书 EJS 模板经 <code>getqr/getQuickReply(name[, label])</code> 读取并嵌套渲染
-            (酒馆助手生态兼容,渲染数据源已接入引擎)。<br />
-            <b>启用</b> = 参与输入框快捷列表与 getqr 渲染;<b>内容为空</b> 的条目不出现在快捷列表。
+            (酒馆助手生态兼容，渲染数据源已接入引擎)。<br />
+            <b>启用</b> = 参与输入框快捷列表与 getqr 渲染；<b>内容为空</b> 的条目不出现在快捷列表。
           </p>
         </div>
 

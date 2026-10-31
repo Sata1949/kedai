@@ -155,10 +155,10 @@ onMounted(() => {
         <div class="sv-field">
           <div class="sv-field-label"><span class="sv-supreme blue" /> 说明</div>
           <p class="sv-note" style="margin: 0; line-height: 1.8">
-            执行者是<b>任务模式的独立角色</b>,与角色扮演的角色卡互不影响。任务创建时选择一个执行者,
+            执行者是<b>任务模式的独立角色</b>,与角色扮演的角色卡互不影响。任务创建时选择一个执行者，
             其<b>执行者指令</b>会作为「执行者职责」注入任务执行的系统提示词。<br />
-            不选执行者(或用「通用执行者」)= 不注入任何身份描述,为默认行为。<br />
-            删除执行者不会影响已引用它的任务:执行时查不到即回退通用执行者。
+            不选执行者(或用「通用执行者」)= 不注入任何身份描述，为默认行为。<br />
+            删除执行者不会影响已引用它的任务：执行时查不到即回退通用执行者。
           </p>
         </div>
 
@@ -189,7 +189,7 @@ onMounted(() => {
                 <span class="exec-item-desc">{{ e.instruction }}</span>
               </button>
               <p v-if="executors.length === 0" class="sv-note" style="padding: var(--space-2) var(--space-1)">
-                还没有执行者,点上方「＋ 新建执行者」创建第一个。
+                还没有执行者，点上方「＋ 新建执行者」创建第一个。
               </p>
             </div>
 
@@ -210,7 +210,7 @@ onMounted(() => {
                 />
               </div>
               <p class="sv-note">
-                该文本整段注入任务执行提示词,会被标记为外部来源(untrusted)——
+                该文本整段注入任务执行提示词，会被标记为外部来源(untrusted)——
                 <b>不要在此填写安全策略或试图改变工具授权规则</b>,那些由应用层控制。
               </p>
               <div class="sv-inp-row">

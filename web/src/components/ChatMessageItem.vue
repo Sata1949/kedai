@@ -18,7 +18,7 @@ import {
   buildRemoteResourceHtml,
   stableFrameNonce,
 } from '../render';
-import { renderMarkdown, renderMarkdownWithHtml, stripHtmlComments } from '../markdown';
+import { renderMarkdown, renderMarkdownWithHtml, renderUserMarkdown, stripHtmlComments } from '../markdown';
 import { isRenderCodeBlock } from '../renderPanel';
 import { messageHtmlCache, buildMessageRenderKey } from '../renderCache';
 import { useUserPersona } from '../composables/useUserPersona';
@@ -341,10 +341,43 @@ const statusBarVisible = computed<boolean>(() => {
   return true;
 });
 
-/** 纯文本展示(用户消息 / system) */
+/** 纯文本展示(system 消息) */
 function messagePlain(content: string): string {
   return content || ' ';
 }
+
+/**
+ * 用户消息的 markdown HTML(UIVIS-2/UI-A3)。
+ *
+ * 改前:用户气泡用 `{{ }}` 插值,同一会话里「用户写 `- 第一条` 是字面文本、助手写同样的
+ * 是 `<ul><li>`」——两种排版并存,读起来像回复坏了。现改与助手同走 markdown,
+ * 但按用户输入的语义差异收窄两处(见 `renderUserMarkdown` 注释):关 linkify、不剥协议块。
+ *
+ * 安全基线不变:html:false 使原始标签一律转义,故**不需要**再过 sanitizeHtml 白名单
+ * (免掉一次 sanitiser 成本,也不会误伤用户粘贴的代码片段)。
+ *
+ * 缓存复用 `messageHtmlCache`:键里 renderHtml 位在本路径恒为 false、scriptHash 位传固定
+ * 标记 `user-md`,因此用户条目不会被助手条目命中(两条路径的渲染器不同,键必须可分)。
+ */
+const userHtml = computed<string>(() => {
+  void props.scriptHash; // 脚本版本变化时同样强制重算(正则脚本也作用于用户消息)
+  const text = paintText.value;
+  const scopeId = `m${props.m.id}`;
+  const key = buildMessageRenderKey({
+    text,
+    renderHtml: false,
+    scriptHash: 'user-md',
+    depth: 0,
+    scopeId,
+    charName: store.currentCharacterName,
+    userName: userName.value,
+  });
+  const cached = messageHtmlCache.get(key);
+  if (cached !== undefined) return cached;
+  const result = renderUserMarkdown(text);
+  if (!props.m.streaming) messageHtmlCache.set(key, result);
+  return result;
+});
 
 // ===== 编辑态(文本本地管理,击键不触发父组件重渲染;保存时经事件上抛) =====
 const editText = ref('');
@@ -411,8 +444,11 @@ defineExpose({ rootEl });
     </div>
     <!-- 展示态 -->
     <template v-else>
-      <div class="sv-msg-bubble" :class="{ 'sv-stream-cursor': m.streaming }">
-        {{ messagePlain(displayText(m)) }}
+      <!-- UIVIS-2/UI-A3:用户正文改走 markdown(与助手同一排版语言)。
+           html:false 保证原始标签转义,故可直接 v-html,不经 sanitizeHtml 白名单。
+           图像附件仍留在气泡内、文本之后(不能与 v-html 同元素,故文本单独一层)。 -->
+      <div class="sv-msg-bubble sv-msg-md" :class="{ 'sv-stream-cursor': m.streaming }">
+        <div v-html="userHtml" />
         <!-- 图像附件(视觉能力包 D2):extra.image_refs 只存引用,渲染走 /api/images(免 Bearer)。
              放在气泡内、文本之后;模板层渲染,不进 v-html 渲染缓存(缓存键不含 extra)。 -->
         <div v-if="userImages.length" class="sv-msg-images">
@@ -471,13 +507,13 @@ defineExpose({ rootEl });
              (finish 事件即时写入 + 后端落库,刷新后仍在)。 -->
         <div v-if="truncated(m)" class="sv-trunc-note">
           <span class="sv-badge trunc">截断</span>
-          <span class="sv-trunc-text">回复达到输出上限被截断,内容可能不完整;可增大「最大生成长度」后重发。</span>
+          <span class="sv-trunc-text">回复达到输出上限被截断，内容可能不完整；可增大「最大生成长度」后重发。</span>
         </div>
         <!-- 中断提示(HB-3,2026-09-18):停止生成时保留已生成的部分正文并标记,
              与「截断」同款呈现;重新生成入口复用既有「生成新版本」按钮 -->
         <div v-if="interrupted(m)" class="sv-trunc-note">
           <span class="sv-badge trunc">已中断</span>
-          <span class="sv-trunc-text">本次生成被手动停止,以上为已生成的部分内容;可用「生成新版本」重试。</span>
+          <span class="sv-trunc-text">本次生成被手动停止，以上为已生成的部分内容；可用「生成新版本」重试。</span>
         </div>
         <div v-if="statusBarVisible" class="sv-status-bar">{{ statusBar(m) }}</div>
         <div v-if="!m.streaming" class="sv-msg-actions">
@@ -512,7 +548,7 @@ defineExpose({ rootEl });
 
   <!-- system 消息 -->
   <div v-else ref="rootEl" class="sv-msg system" :data-kd-vm-id="m.id">
-    <div class="sv-msg-bubble">{{ displayText(m) }}</div>
+    <div class="sv-msg-bubble">{{ messagePlain(displayText(m)) }}</div>
   </div>
 </template>
 

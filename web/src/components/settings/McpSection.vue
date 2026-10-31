@@ -134,7 +134,7 @@ onMounted(() => void loadStatus());
       <div class="sv-data-row">
         <div class="info">
           <b>启用 MCP 服务</b>
-          <span>连接本机 MCP stdio 服务器,其工具以 mcp_ 前缀注入 Agent(未知工具默认按危险级需授权)。改配置后点该行「重连」即生效</span>
+          <span>连接本机 MCP stdio 服务器，其工具以 mcp_ 前缀注入 Agent(未知工具默认按危险级需授权)。改配置后点该行「重连」即生效</span>
         </div>
         <button type="button" class="sv-btn ghost" :aria-pressed="mcpEnabled" @click="mcpEnabled = !mcpEnabled">
           {{ mcpEnabled ? '已开启' : '已关闭' }}
@@ -220,8 +220,8 @@ onMounted(() => void loadStatus());
         <div v-if="saveMsg" class="sv-feedback ok sv-feedback-flex">{{ saveMsg }}</div>
       </div>
       <p class="sv-note">
-        改开关/服务器列表后点「保存 MCP 设置」,再点该行「重连」即生效(无需重启应用);「停止/启动」为显式动作,
-        不受该行「启用/停用」影响。服务器启动失败只影响该台,失败原因显示在该行下方。
+        改开关/服务器列表后点「保存 MCP 设置」,再点该行「重连」即生效(无需重启应用);「停止/启动」为显式动作，
+        不受该行「启用/停用」影响。服务器启动失败只影响该台，失败原因显示在该行下方。
       </p>
     </div>
   </div>

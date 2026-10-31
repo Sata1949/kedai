@@ -236,8 +236,8 @@ async function saveAll(): Promise<void> {
 
       <div class="sv-modal-body">
         <p class="sv-note">
-          提示词按 6 大层注入,自上而下 位置5 → 位置0。各层内可自由调整顺序与消息角色;
-          位置2 为历史上下文固定块,不可调整。保存后对所有会话生效。
+          提示词按 6 大层注入，自上而下 位置5 → 位置0。各层内可自由调整顺序与消息角色；
+          位置2 为历史上下文固定块，不可调整。保存后对所有会话生效。
         </p>
 
         <!-- 位置5 头部 -->
@@ -246,9 +246,9 @@ async function saveAll(): Promise<void> {
           <div class="sv-stack">
             <div class="sv-inp-row">
               <label class="sv-inp-tag" title="主 Agent 提示词">主 Agent 提示词</label>
-              <span class="sv-note">角色:系统提示词(固定)</span>
+              <span class="sv-note">角色：系统提示词(固定)</span>
             </div>
-            <div class="pm-summary">{{ agentSystemPrompt ? truncate(agentSystemPrompt, 140) : '未自定义,使用内置默认模板(角色名 + 角色设定 + 世界书 + 回复要求)' }}</div>
+            <div class="pm-summary">{{ agentSystemPrompt ? truncate(agentSystemPrompt, 140) : '未自定义，使用内置默认模板(角色名 + 角色设定 + 世界书 + 回复要求)' }}</div>
             <div class="sv-btn-row">
               <button class="sv-btn ghost" @click="openSettings">去设置中编辑</button>
             </div>
@@ -261,11 +261,11 @@ async function saveAll(): Promise<void> {
           <div class="sv-field-label"><span class="sv-supreme orange" /> 位置4 · 模式注入与预设</div>
           <div class="sv-stack">
             <div class="pm-summary">
-              简单模式四项、禁词库、复杂模式楼层与 agent 执行流程的编辑,在「综合设置 → 对话与提示词 → 提示词注入」与「执行流程」区完成。
+              简单模式四项、禁词库、复杂模式楼层与 agent 执行流程的编辑，在「综合设置 → 对话与提示词 → 提示词注入」与「执行流程」区完成。
             </div>
             <div class="sv-inp-row">
               <label class="sv-inp-tag">执行流程</label>
-              <span v-if="currentFlow" class="sv-note">{{ currentFlow.name }}({{ currentFlow.steps.length }} 步)按步骤注入,编辑在设置面板</span>
+              <span v-if="currentFlow" class="sv-note">{{ currentFlow.name }}({{ currentFlow.steps.length }} 步)按步骤注入，编辑在设置面板</span>
               <span v-else class="sv-note">未配置执行流程</span>
             </div>
           </div>
@@ -276,16 +276,16 @@ async function saveAll(): Promise<void> {
           <div class="sv-field-label"><span class="sv-supreme yellow" /> 位置3 · 角色卡与世界书常态</div>
           <div class="sv-stack">
             <div class="pm-summary">
-              当前角色:{{ store.currentCharacterName }} — {{ truncate(store.currentCharacter?.description ?? '无角色描述', 100) }}
+              当前角色：{{ store.currentCharacterName }} — {{ truncate(store.currentCharacter?.description ?? '无角色描述', 100) }}
             </div>
             <div v-if="rawCardField('personality')" class="pm-summary">
-              性格:{{ truncate(rawCardField('personality'), 80) }}
+              性格：{{ truncate(rawCardField('personality'), 80) }}
             </div>
             <div v-if="rawCardField('scenario')" class="pm-summary">
-              场景:{{ truncate(rawCardField('scenario'), 80) }}
+              场景：{{ truncate(rawCardField('scenario'), 80) }}
             </div>
             <div v-if="rawCardField('mes_example')" class="pm-summary">
-              对话示例:{{ truncate(rawCardField('mes_example'), 80) }}
+              对话示例：{{ truncate(rawCardField('mes_example'), 80) }}
             </div>
             <!-- 角色卡内嵌世界书(character_book)常驻条目 -->
             <div class="pm-book">
@@ -316,13 +316,13 @@ async function saveAll(): Promise<void> {
               </div>
             </div>
             <div v-if="!worldBooks.length" class="sv-note inject-empty">
-              暂无世界书,常驻条目为空 —
+              暂无世界书，常驻条目为空 —
               <button class="sv-btn ghost" @click="store.worldBooksOpen = true; close()">去创建世界书</button>
             </div>
             <div v-for="book in worldBooks" :key="`c-${book.id}`" class="pm-book">
               <div class="pm-book-head" @click="toggleBook(book.id)">
                 <span class="pm-book-name">{{ book.name }}</span>
-                <span class="sv-note">{{ book.character_name ? `绑定:${book.character_name}` : '全局' }} · 常态 {{ constantEntries(book.id).length }}</span>
+                <span class="sv-note">{{ book.character_name ? `绑定：${book.character_name}` : '全局' }} · 常态 {{ constantEntries(book.id).length }}</span>
                 <span class="pm-book-caret">{{ expandedBook === book.id ? '▾' : '▸' }}</span>
               </div>
               <div v-if="expandedBook === book.id" class="pm-book-body">
@@ -352,14 +352,14 @@ async function saveAll(): Promise<void> {
         <!-- 位置2 历史上下文 -->
         <div class="sv-field">
           <div class="sv-field-label"><span class="sv-supreme blue" /> 位置2 · 历史上下文</div>
-          <div class="pm-summary pm-fixed">对话历史原样保留,不可调整;超长时由服务端按上下文窗口从最旧消息起裁剪。</div>
+          <div class="pm-summary pm-fixed">对话历史原样保留，不可调整；超长时由服务端按上下文窗口从最旧消息起裁剪。</div>
         </div>
 
         <!-- 位置1 世界书激发 -->
         <div class="sv-field">
           <div class="sv-field-label"><span class="sv-supreme purple" /> 位置1 · 世界书激发</div>
           <div class="sv-stack">
-            <p class="sv-note">关键词/正则命中后,条目内容追加到最新用户消息尾部(位置3 常态之后、位置0 之前)。</p>
+            <p class="sv-note">关键词/正则命中后，条目内容追加到最新用户消息尾部(位置3 常态之后、位置0 之前)。</p>
             <!-- 角色卡内嵌世界书(character_book)激发条目 -->
             <div class="pm-book">
               <div class="pm-book-head" @click="charBookExpanded = !charBookExpanded">
@@ -392,13 +392,13 @@ async function saveAll(): Promise<void> {
               </div>
             </div>
             <div v-if="!worldBooks.length" class="sv-note inject-empty">
-              暂无世界书,激发条目为空 —
+              暂无世界书，激发条目为空 —
               <button class="sv-btn ghost" @click="store.worldBooksOpen = true; close()">去创建世界书</button>
             </div>
             <div v-for="book in worldBooks" :key="`t-${book.id}`" class="pm-book">
               <div class="pm-book-head" @click="toggleBook(book.id)">
                 <span class="pm-book-name">{{ book.name }}</span>
-                <span class="sv-note">{{ book.character_name ? `绑定:${book.character_name}` : '全局' }} · 激发 {{ triggeredEntries(book.id).length }}</span>
+                <span class="sv-note">{{ book.character_name ? `绑定：${book.character_name}` : '全局' }} · 激发 {{ triggeredEntries(book.id).length }}</span>
                 <span class="pm-book-caret">{{ expandedBook === book.id ? '▾' : '▸' }}</span>
               </div>
               <div v-if="expandedBook === book.id" class="pm-book-body">
@@ -433,7 +433,7 @@ async function saveAll(): Promise<void> {
           <div class="sv-field-label"><span class="sv-supreme green" /> 位置0 · 尾部</div>
           <div class="sv-stack">
             <div class="pm-summary pm-disabled">
-              Dvar 变量提示词 — 即将上线(本次仅留位;届时变量状态将以尾部块注入)
+              Dvar 变量提示词 — 即将上线(本次仅留位；届时变量状态将以尾部块注入)
             </div>
             <div class="sv-inp-row">
               <label class="sv-inp-tag">预设尾部</label>
@@ -471,8 +471,8 @@ async function saveAll(): Promise<void> {
               </select>
             </div>
             <div class="pm-summary pm-disabled">
-              反思未通过且放弃重试时,引擎自动生成本次改进建议(≤200 token,内容随失败原因变化),
-              注入在位置1 激发之后、预设尾部之前 —— 不再位于最末尾,主体建议无需手填。
+              反思未通过且放弃重试时，引擎自动生成本次改进建议(≤200 token,内容随失败原因变化),
+              注入在位置1 激发之后、预设尾部之前 —— 不再位于最末尾，主体建议无需手填。
             </div>
             <textarea
               v-model="reflectAdvicePrompt"
@@ -481,7 +481,7 @@ async function saveAll(): Promise<void> {
               placeholder="可选补充说明:附加在自动生成的改进建议之后(留空 = 仅自动建议)。"
               spellcheck="false"
             />
-            <p class="sv-note">自上而下依次注入:位置1 激发 → 反思反馈(仅反思失败时自动注入)→ 预设尾部。</p>
+            <p class="sv-note">自上而下依次注入：位置1 激发 → 反思反馈(仅反思失败时自动注入)→ 预设尾部。</p>
           </div>
         </div>
       </div>

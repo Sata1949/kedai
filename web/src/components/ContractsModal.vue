@@ -296,8 +296,8 @@ async function onRollback(entry: ContractChangeEntry): Promise<void> {
             </div>
 
             <p class="sv-note" style="flex: none; margin: 0; font-size: 11px">
-              契约保存在角色卡 extensions.nlkaleido,随卡导出;保存后服务端契约缓存立即失效,下一轮生成即用新契约。
-              结构说明:version/id/schema/updateRules(字段定义)/displayRules/guardrails/invariants。
+              契约保存在角色卡 extensions.nlkaleido,随卡导出；保存后服务端契约缓存立即失效，下一轮生成即用新契约。
+              结构说明：version/id/schema/updateRules(字段定义)/displayRules/guardrails/invariants。
             </p>
           </template>
 
@@ -318,7 +318,7 @@ async function onRollback(entry: ContractChangeEntry): Promise<void> {
                   <span class="sv-history-source">{{ SOURCE_LABELS[entry.source] }}</span>
                 </div>
                 <div class="sv-history-summary" :class="{ removed: !entry.after }">{{ historySummary(entry) }}</div>
-                <div v-if="entry.rationale" class="sv-history-rationale">说明:{{ entry.rationale }}</div>
+                <div v-if="entry.rationale" class="sv-history-rationale">说明：{{ entry.rationale }}</div>
                 <div v-if="entry.after" style="display: flex; justify-content: flex-end">
                   <button class="sv-btn ghost sv-btn-sm" :disabled="historyLoading" @click="onRollback(entry)">
                     恢复此版本
@@ -328,7 +328,7 @@ async function onRollback(entry: ContractChangeEntry): Promise<void> {
             </div>
 
             <p class="sv-note" style="flex: none; margin: 0; font-size: 11px">
-              此处显示该角色契约的每次变更记录(最新在前);「恢复此版本」会以该快照覆盖当前契约,
+              此处显示该角色契约的每次变更记录(最新在前);「恢复此版本」会以该快照覆盖当前契约，
               并生成一条新的「回滚」记录。移除类记录(after 为空)不可恢复。
             </p>
           </div>

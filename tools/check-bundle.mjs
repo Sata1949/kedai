@@ -120,6 +120,15 @@ const CHUNK_BUDGETS_GZ = {
   'content-rendering.js': 49500,
   'vue-vendor.js': 37500,
   'index.css': 24939,
+  // UIVIS-3/UI-C2(2026-10-31):主区两模式由 App.vue 静态 import 改为 lazyMain 懒加载,
+  // 于是从 index 里析出成两个独立 chunk。这**不是**「重依赖落进小 chunk」那种失控,
+  // 而是把原本就在首屏包里的内容按模式切开——首屏合计因此由 ~242KB 降到 185,094
+  // (预算 317,030,余量反增 ~57KB)。金额按「实测 + 10%」取:
+  //   ChatWindow 实测 57,304 → 63,000;TaskBoard 实测 14,415 → 16,000。
+  // 下次再动这两块先跑本脚本;若 TaskBoard 涨到 16,000 以上,优先查是否有新的
+  // 静态 import 把设置区/画布类重依赖吸进来。
+  'ChatWindow.js': 63000,
+  'TaskBoard.js': 16000,
 };
 
 /**

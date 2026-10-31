@@ -123,7 +123,7 @@ const grantedCount = computed(() => grants.value.session.length + grants.value.r
   <div v-show="show" class="sv-stack">
     <div class="sv-field-label sub">授权模式</div>
     <p class="sv-note">
-      按「操作类型 × 路径区域」判定:文件操作分读/写/删,系统路径(盘符/UNC/绝对路径)写删在三档下都需授权。
+      按「操作类型 × 路径区域」判定：文件操作分读/写/删，系统路径(盘符/UNC/绝对路径)写删在三档下都需授权。
       写对话正文(气泡)不受文件规则限制。
     </p>
     <div class="sv-auth-modes">
@@ -144,7 +144,7 @@ const grantedCount = computed(() => grants.value.session.length + grants.value.r
 
     <div class="sv-field-label sub">始终需授权</div>
     <p class="sv-note">
-      勾选后,这些工具在三档模式下都需手动授权(不受模式自动放行影响)。默认空。
+      勾选后，这些工具在三档模式下都需手动授权(不受模式自动放行影响)。默认空。
     </p>
     <div v-if="loading" class="sv-note">加载工具清单…</div>
     <div v-else-if="loadErr" class="sv-feedback err">{{ loadErr }}</div>
@@ -173,7 +173,7 @@ const grantedCount = computed(() => grants.value.session.length + grants.value.r
       授权一经授予会持续生效(角色授权对该角色所有会话生效),此处可查看并撤销。
       <template v-if="grantedCount > 0">当前共 {{ grantedCount }} 条。</template>
     </p>
-    <div v-if="!currentSessionId" class="sv-note">未选择会话:选择会话后可查看与撤销授权。</div>
+    <div v-if="!currentSessionId" class="sv-note">未选择会话：选择会话后可查看与撤销授权。</div>
     <template v-else>
       <div v-if="grants.session.length" class="sv-stack">
         <b class="sv-note">当前会话授权</b>
@@ -195,7 +195,7 @@ const grantedCount = computed(() => grants.value.session.length + grants.value.r
     <div v-if="msg" class="sv-feedback" :class="msg.startsWith('保存失败') || msg.startsWith('撤销失败') ? 'err' : 'ok'">{{ msg }}</div>
 
     <div v-if="dangerousTools.length" class="sv-note">
-      危险级工具:{{ dangerousTools.map((t) => t.name).join('、') }}
+      危险级工具：{{ dangerousTools.map((t) => t.name).join('、') }}
     </div>
   </div>
 </template>

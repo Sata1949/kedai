@@ -150,7 +150,7 @@ const close = (): void => {
         <div class="sv-field">
           <div class="sv-field-label"><span class="sv-supreme blue" /> 提示词检查</div>
           <p class="sv-note" style="margin: 0 0 var(--space-2); line-height: 1.8">
-            按 source / role / layer / order 展示最终提示词(历史已脱敏,不返回聊天正文或
+            按 source / role / layer / order 展示最终提示词(历史已脱敏，不返回聊天正文或
             API Key);每层附 token 估算。
           </p>
           <button class="sv-btn ghost sv-btn-sm" :disabled="previewLoading || tokenCounting" @click="refreshPreview">
@@ -244,7 +244,7 @@ const close = (): void => {
         <div class="sv-field">
           <div class="sv-field-label"><span class="sv-supreme purple" /> 上下文压缩</div>
           <p class="sv-note" style="margin: 0 0 var(--space-2); line-height: 1.8">
-            把较早对话压成一条摘要注入给模型,原文不删除、可随时恢复。当前占比
+            把较早对话压成一条摘要注入给模型，原文不删除、可随时恢复。当前占比
             <b v-if="compactionNeed.ratio !== null" class="sv-tag">{{ Math.round(compactionNeed.ratio * 100) }}%</b>
             <span v-else>暂无数据</span>
             (模式 {{ store.compactionMode }},阈值 {{ Math.round(store.compactionThreshold * 100) }}%)。

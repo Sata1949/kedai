@@ -73,7 +73,7 @@ const changelog: string[] = [
              平台后缀同理不写死:模板里硬写 "Android" 会让 Windows 端也显示成 Android
              (2026-10-07 0.4.1 批次移除该字样),本行只显示版本号。 -->
         <b>kedai {{ version }}</b>
-        <span>作者:十七凌云(Sata1949)</span>
+        <span>作者：十七凌云(Sata1949)</span>
         <span>遵循 MIT 协议</span>
         <span>感谢您在百忙之中支持此软件。</span>
       </div>

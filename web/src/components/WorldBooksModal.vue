@@ -332,15 +332,15 @@ async function loadWorldBooksChecked(): Promise<void> {
             世界书(World Info)在对话时按关键词命中注入设定。<br />
             <b>内嵌世界书</b>:角色卡内
             <code>character_book</code>
-            条目随角色卡自动生效(常驻条目始终注入,其余按关键词匹配),可在此直接编辑。<br />
-            <b>独立世界书</b>:上传 SillyTavern 世界书 JSON 后,默认全局启用,也可绑定到指定角色;<br />
-            条目编辑完整支持酒馆惯例:<code>位置</code>/<code>注入顺序</code>(排序)、
+            条目随角色卡自动生效(常驻条目始终注入，其余按关键词匹配),可在此直接编辑。<br />
+            <b>独立世界书</b>:上传 SillyTavern 世界书 JSON 后，默认全局启用，也可绑定到指定角色；<br />
+            条目编辑完整支持酒馆惯例：<code>位置</code>/<code>注入顺序</code>(排序)、
             <code>关键词</code>/<code>副关键词</code>(子串匹配)、<code>正则</code>、
             <code>插入深度</code>/<code>扫描窗口</code>(酒馆 depth 与 scanDepth,语义分离)、<code>常驻</code>(始终注入)、
             <code>命中概率</code>、<code>大小写敏感</code>与<code>激活状态</code>(总开关)。<br />
             <b>状态定义</b>:<code>激活</code> = 该条目参与注入的总开关(停用 = 完全不注入);
-            <code>触发</code> = 激活且非常驻的条目,按关键词/正则命中最近对话才注入;
-            <code>常驻</code> = 始终注入,无需关键词命中。
+            <code>触发</code> = 激活且非常驻的条目，按关键词/正则命中最近对话才注入；
+            <code>常驻</code> = 始终注入，无需关键词命中。
           </p>
         </div>
 
@@ -348,7 +348,7 @@ async function loadWorldBooksChecked(): Promise<void> {
         <div class="sv-field">
           <div class="sv-field-label"><span class="sv-supreme green" /> 自动分配机制</div>
           <p class="sv-note" style="margin: 0 0 var(--space-2); line-height: 1.8">
-            条目「注入角色」选<code>自动</code>时按 常驻→系统提示词、激发→用户 自动分配;
+            条目「注入角色」选<code>自动</code>时按 常驻→系统提示词、激发→用户 自动分配；
             上传时自动转换关键词拆分、常态/激发判定与属性默认自动。可一键自检链路是否可用。
           </p>
           <div class="sv-stack">
@@ -476,7 +476,7 @@ async function loadWorldBooksChecked(): Promise<void> {
                   <span v-if="b.enabled" class="sv-tag sv-tag-on">启用</span>
                 </div>
                 <div class="sv-wb-sub">
-                  <span v-if="b.character_id" class="sv-wb-sub-item">绑定:{{ b.character_name ?? '角色' }}</span>
+                  <span v-if="b.character_id" class="sv-wb-sub-item">绑定：{{ b.character_name ?? '角色' }}</span>
                   <span v-else class="sv-wb-sub-item">全局</span>
                   <span class="sv-wb-sub-item">{{ new Date(b.created_at).toLocaleString('zh-CN', { hour12: false }) }}</span>
                 </div>
@@ -512,10 +512,10 @@ async function loadWorldBooksChecked(): Promise<void> {
           </div>
           <p class="sv-note" style="margin-top: 0">
             <b>状态定义</b>:<code>激活</code> = 条目参与注入的总开关(停用则不注入);
-            <code>常驻</code> = 始终注入,归位「位置3(常态)」并入系统提示词;<code>触发</code> = 激活且非常驻时按关键词/正则命中,归位「位置1(激发)」追加到最新用户消息尾部。<br />
-            注入顺序:同位置内按列表顺序注入(可 ↑↓ 排序);关键词/副关键词:逗号分隔,命中最近对话即注入;
-            插入深度:酒馆 <code>depth</code>,仅作注入位置(atDepth)与窗口兜底;扫描窗口:酒馆 <code>scanDepth</code>,关键词只扫最近 N 条消息(0 = 全部,留空 = 保持原值);
-            命中概率:按百分比随机决定是否注入;粘性/冷却:酒馆 sticky/cooldown 字段,当前版本尚未参与注入判定(编辑值仅原样保留)。
+            <code>常驻</code> = 始终注入，归位「位置3(常态)」并入系统提示词；<code>触发</code> = 激活且非常驻时按关键词/正则命中，归位「位置1(激发)」追加到最新用户消息尾部。<br />
+            注入顺序：同位置内按列表顺序注入(可 ↑↓ 排序);关键词/副关键词：逗号分隔，命中最近对话即注入；
+            插入深度：酒馆 <code>depth</code>,仅作注入位置(atDepth)与窗口兜底；扫描窗口：酒馆 <code>scanDepth</code>,关键词只扫最近 N 条消息(0 = 全部，留空 = 保持原值);
+            命中概率：按百分比随机决定是否注入；粘性/冷却：酒馆 sticky/cooldown 字段，当前版本尚未参与注入判定(编辑值仅原样保留)。
           </p>
           <div class="sv-wb-edit">
               <WorldBookEntryEditor

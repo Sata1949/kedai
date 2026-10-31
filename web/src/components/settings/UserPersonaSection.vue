@@ -22,8 +22,8 @@ onMounted(() => {
     <div class="sv-field-label"><span class="sv-supreme blue" /> 用户设定</div>
     <div class="sv-stack">
       <p class="sv-note">
-        仅角色扮演模式生效;任务模式不注入、不替换称呼。启用后:
-        <code v-pre>{{user}}</code> / <code v-pre>{{user_name}}</code> 替换为称呼,
+        仅角色扮演模式生效；任务模式不注入、不替换称呼。启用后：
+        <code v-pre>{{user}}</code> / <code v-pre>{{user_name}}</code> 替换为称呼，
         系统提示词追加【用户角色】段。
       </p>
 
@@ -66,8 +66,8 @@ onMounted(() => {
       </div>
 
       <p class="sv-note">
-        设定会经不可信素材边界包裹后注入;请不要在其中写系统指令或工具调用要求。
-        任务模式保持「用户」,切换模式不会删除本配置,只是不生效。
+        设定会经不可信素材边界包裹后注入；请不要在其中写系统指令或工具调用要求。
+        任务模式保持「用户」,切换模式不会删除本配置，只是不生效。
       </p>
 
       <div class="sv-btn-row">

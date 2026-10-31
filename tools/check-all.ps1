@@ -164,6 +164,10 @@ if (-not $SkipWeb -and -not $AuditOnly) {
         # 全局域(style.css + styles/*.css)逐文件行数与 !important 只降不升 + 组件 scoped
         # !important 合计 + animation/transition 裸时长归零(动效令牌 --dur-*/--stagger-step)。
         Invoke-Stage 'web: css-discipline'      { node tools/check-css-discipline.mjs }
+        # 模板文案标点纪律(2026-10-31 UIVIS-3/UI-B4 新增):`.vue` 的 <template> 内、
+        # 标签外、{{ }} 之外的文本节点里,汉字后不得跟半角 , ; : ? !(基线 = 0)。
+        # 与 css-discipline 同族:都是「一次清零 + 防回流」的排版纪律,秒级、零依赖。
+        Invoke-Stage 'web: text-punct'          { node tools/check-text-punct.mjs }
     } finally { Pop-Location }
 }
 

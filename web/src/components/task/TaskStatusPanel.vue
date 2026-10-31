@@ -140,21 +140,21 @@ async function copyWorkspacePath(): Promise<void> {
   <!-- 状态矩阵:状态 / 模式 / 流程 / 累计 token;错误单独成行,不混进矩阵 -->
   <div class="sv-task-status-line">
     <span class="sv-tag sv-task-status-tag" :class="statusClass(task.status)">
-      状态:{{ statusLabel(task.status) }}
+      状态：{{ statusLabel(task.status) }}
     </span>
-    <span class="sv-tag sv-task-status-tag" title="任务执行模式(批次 4 六模式)">模式:{{ taskModeLabel }}</span>
+    <span class="sv-tag sv-task-status-tag" title="任务执行模式(批次 4 六模式)">模式：{{ taskModeLabel }}</span>
     <!-- 本任务用的流程(二维批次 5a):绑定流程显示其名,未绑定显示「跟随当前流程」。
          名字取自任务快照(与徽标同一份编排),故跑完任务后再改流程这里也不会变 -->
     <span
       v-if="taskFlowLabel"
       class="sv-tag sv-task-status-tag"
       title="本任务绑定/使用的流程(绑定即冻结:创建时的编排;未绑定 = 跟随当前流程)"
-    >流程:{{ taskFlowLabel }}</span>
+    >流程：{{ taskFlowLabel }}</span>
     <span
       v-else
       class="sv-tag sv-task-status-tag"
       title="非自定义流程任务按执行模式自身的编排运行"
-    >流程:按模式编排</span>
+    >流程：按模式编排</span>
     <!-- 对比模式(二维批次 7b):根流程照常执行,名单内流程额外作为 run_flow 工具
          释放给宽松节点,由模型自主调用、取回成果。数字按**本轮实际**可调用集显示 -->
     <span
@@ -170,7 +170,7 @@ async function copyWorkspacePath(): Promise<void> {
 
   <!-- 工作区(CODE-1):创建期冻结;未绑定不显示该行(不把「没有」渲染成一行噪音) -->
   <div v-if="taskWorkspace" class="sv-task-workspace">
-    <span class="sv-note">工作区:</span>
+    <span class="sv-note">工作区：</span>
     <span class="sv-task-workspace-path" :title="taskWorkspace">{{ taskWorkspace }}</span>
     <button
       class="sv-btn ghost sv-btn-sm"

@@ -71,16 +71,29 @@ const VERBOSE = process.argv.includes('--verbose');
  *   shell 保持 827(气泡内边距 18px→--space-5 行数不变,其间距裸值 10→9 已同步下调)。
  *   两批均不新增 !important、不引入裸时长;新增的 calc(--space-4 + 48px) 属浮钮让位常量,
  *   走令牌表达式而非裸值。
+ * UIVIS/UIPOL-3 变动(2026-10-31,一致性 + 排版治理九项;全部为**既有元素的对齐与状态收口**):
+ *   content 1001→1022(用户气泡深底 markdown 配色 21 行:UI-A3 让用户消息也走 markdown 后,
+ *     引用块/行内代码/链接/horizontal rule 原先是浅底配色,套在黑底气泡上对比塌陷。
+ *     消息正文经 v-html 注入,scoped 不生效,只能落全局域——与上一条 justify 同源);
+ *   mobile 464→469(平板档侧栏页脚改单列 5 行:UI-A5,220px 侧栏下两列网格每格约 92px,
+ *     「导入角色卡」即使 nowrap 也溢出。规则只在 768–1099px 断点内);
+ *   panels 971→1000(UI-B3 滑块行 flex→grid + 定宽数值框 20 行;UI-B5 数据行 flex→grid 9 行);
+ *   shell 827→862(UI-B1 工具栏换行优先级 12 行;UI-B2 折叠态子元素定宽 8 行;
+ *     UI-A5 连接状态灯 nowrap 8 行;UIPOL-3/B2 发送键禁用态 8 行——四处都是改既有规则,
+ *     行数增长来自注释与新增声明,未新增选择器族);
+ *   task 987→993(UI-A5 侧栏底部按钮 nowrap + 省略号 6 行)。
+ *   九项均不新增 !important、不引入裸时长;新增间距值全部走 --space-* 或既有 88px/340px
+ *   这类「控件规格常量」(与 UIPOL 的 calc(--space-4 + 48px) 同一判断口径)。
  */
 const LINE_BASELINE = {
   'style.css': 49,
   'styles/tokens.css': 153,
   'styles/base.css': 122,
-  'styles/shell.css': 827,
-  'styles/panels.css': 971,
-  'styles/content.css': 1001,
-  'styles/task.css': 987,
-  'styles/mobile.css': 464,
+  'styles/shell.css': 862,
+  'styles/panels.css': 1000,
+  'styles/content.css': 1022,
+  'styles/task.css': 993,
+  'styles/mobile.css': 469,
 };
 
 /**

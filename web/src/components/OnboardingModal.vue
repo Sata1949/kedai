@@ -323,8 +323,13 @@ function finish(): void {
   color: var(--sv-pink-dark);
   font-weight: 700;
 }
+/* UIVIS-3/UI-C3:标签与正文之间给一个显式呼吸。改前 .ob-lead 是 margin:0,标签到正文的
+   间距完全由父容器 .ob-body 的 gap(10px)决定,与同列 .ob-title/.ob-line 之间的间距相同
+   ——「步骤标签 + 正文」读起来像被压紧的一整块,首启第一印象偏散。加到 8px 后层级读起来
+   是「标签 / 正文」两段。注:实测间距来自父 gap,故这里加的是**额外** 8px(合计约 18px),
+   不再动 .ob-body 的 gap(那会同时拉开标题与正文行之间)。 */
 .ob-lead {
-  margin: 0;
+  margin: var(--space-2) 0 0;
   font-size: var(--text-md);
   line-height: 1.6;
 }

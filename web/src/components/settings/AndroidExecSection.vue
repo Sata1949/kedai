@@ -174,15 +174,15 @@ onMounted(() => {
     <div class="sv-field-label sub">命令执行</div>
     <p class="sv-note">
       允许 Agent 通过 <code>bash</code> 工具执行 shell 命令。默认关闭。
-      <b>破坏性与提权命令(删除/格式化/su/sudo/包管理等)不受授权模式豁免,一律逐条确认</b>;
-      任务模式下此类高危命令不可用(无确认通道,直接拒绝),普通命令可用。
+      <b>破坏性与提权命令(删除/格式化/su/sudo/包管理等)不受授权模式豁免，一律逐条确认</b>;
+      任务模式下此类高危命令不可用(无确认通道，直接拒绝),普通命令可用。
       每次尝试(含被拒绝的)都会留下审计记录。
     </p>
 
     <label class="sv-auth-tool-row">
       <input v-model="execEnabled" type="checkbox" />
       <b>启用命令执行</b>
-      <span class="sv-note">总开关;关闭时 bash 工具一律拒绝并在审计中留痕</span>
+      <span class="sv-note">总开关；关闭时 bash 工具一律拒绝并在审计中留痕</span>
     </label>
 
     <template v-if="showAndroidTiers">
@@ -204,27 +204,27 @@ onMounted(() => {
         >请求 Shizuku 授权</button>
       </div>
       <p class="sv-note">
-        ROOT 需设备已 root(su 可用);Shizuku 需先安装 Shizuku 应用并经 ADB 启动其服务;
-        沙箱档为应用自身权限,能力等同本应用。「刷新」会重新探测(新装/新授权后必须刷新才能看到变化)。
+        ROOT 需设备已 root(su 可用);Shizuku 需先安装 Shizuku 应用并经 ADB 启动其服务；
+        沙箱档为应用自身权限，能力等同本应用。「刷新」会重新探测(新装/新授权后必须刷新才能看到变化)。
       </p>
       <p v-if="shizukuInstalled || shizukuGranted" class="sv-note">
-        Shizuku 环境:应用<b>{{ shizukuInstalled ? '已安装' : '未安装' }}</b> ·
+        Shizuku 环境：应用<b>{{ shizukuInstalled ? '已安装' : '未安装' }}</b> ·
         授权<b>{{ shizukuGranted ? '已获得' : '未获得' }}</b>
       </p>
       <p class="sv-note">
-        逐档放行后才会以该档执行:
+        逐档放行后才会以该档执行：
       </p>
       <label class="sv-auth-tool-row">
         <input v-model="execAllowRoot" type="checkbox" />
         <b>ROOT 提权</b>
         <span class="sv-badge dangerous">最高风险</span>
-        <span class="sv-note">以 root 执行任意命令;不适合上架 Google Play,建议侧载</span>
+        <span class="sv-note">以 root 执行任意命令；不适合上架 Google Play,建议侧载</span>
       </label>
       <label class="sv-auth-tool-row">
         <input v-model="execAllowShizuku" type="checkbox" />
         <b>Shizuku(ADB 权限)</b>
         <span class="sv-badge sensitive">需 ADB 激活</span>
-        <span class="sv-note">以 shell(UID 2000)权限执行,无需 root</span>
+        <span class="sv-note">以 shell(UID 2000)权限执行，无需 root</span>
       </label>
       <label class="sv-auth-tool-row">
         <input v-model="execAllowSandbox" type="checkbox" />

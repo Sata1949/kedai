@@ -127,7 +127,7 @@ async function sendPlanChat(): Promise<void> {
         </select>
       </div>
       <p v-if="approveExecMode !== 'approved_plan'" class="sv-note approve-exec-hint">
-        非默认方式将以该模式自行组织执行:已批准计划作为目标上下文下发;
+        非默认方式将以该模式自行组织执行：已批准计划作为目标上下文下发；
         团队协作与自定义流程会用自己的规划/流程重写计划步骤显示。
       </p>
       <template v-if="!planEditing">

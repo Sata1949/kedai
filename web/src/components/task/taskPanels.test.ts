@@ -91,7 +91,7 @@ describe('C-2A 任务面板拆分', () => {
     store.runTask = vi.fn().mockResolvedValue(undefined);
     const wrapper = mount(TaskStatusPanel, { props: { detail, running: true } });
     expect(wrapper.find('.sv-task-head-title').text()).toContain('拆分后的任务');
-    expect(wrapper.text()).toContain('模式:');
+    expect(wrapper.text()).toContain('模式：');
     expect(wrapper.find('.sv-task-workspace-path').text()).toBe('D:/work');
     expect(wrapper.text()).toContain('cargo test');
     await wrapper.find('button[title="停止执行"]').trigger('click');
