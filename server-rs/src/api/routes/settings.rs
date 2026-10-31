@@ -61,6 +61,11 @@ pub(crate) fn settings_routes() -> Router<Arc<AppState>> {
         .route("/api/diagnostics/cache", get(diagnostics::cache))
         // 双库分叉检测(DB-7 的 UI 侧出口):当前数据目录 + 另一套有用户数据的库
         .route("/api/diagnostics/data-dirs", get(diagnostics::data_dirs))
+        // 运行时日志级别(6.2):读当前值 / 热切换,无需重启;与其他 /api/* 同样要求 token
+        .route(
+            "/api/diagnostics/log-level",
+            get(diagnostics::get_log_level).put(diagnostics::put_log_level),
+        )
         // 仓库索引(开发期工具):读取 .kedai-index/index.json 供前端面板浏览
         .route("/api/repo-index", get(repo_index::get_repo_index))
 }

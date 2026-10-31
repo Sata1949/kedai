@@ -1,4 +1,5 @@
 // 诊断路由:GET /api/diagnostics/cache(缓存感知管线)+ GET /api/diagnostics/data-dirs(双库分叉,DB-7)
+// + GET/PUT /api/diagnostics/log-level(6.2 运行时调级,无需重启)
 // cache 返回近 N 条请求的缓存命中率(加权 token 口径)、逐条明细、按可配置单价估算的
 // 费用与节省,以及输入 tokens 对照 max_context_tokens 的四级水位报告。
 use crate::api::app_state::AppState;
@@ -14,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::{err_with_code, ErrorCode};
+use crate::utils::logging::{current_level, set_level, LOG_LEVELS};
 
 /// 全会话统计:窗口参数是 `?1`。
 const SQL_ALL_SESSIONS: &str = "SELECT session_id, created_at, prompt_tokens, completion_tokens,
@@ -222,5 +224,41 @@ mod data_dirs_tests {
         let v = split_dirs_payload(Path::new(r"C:\only"), &[]);
         assert_eq!(v["others"], json!([]));
         assert_eq!(v["data_dir"], json!(r"C:\only"));
+    }
+}
+
+// ===== 运行时日志级别(6.2) =====
+
+/// `PUT /api/diagnostics/log-level` 请求体。
+#[derive(Deserialize)]
+pub struct LogLevelBody {
+    pub level: String,
+}
+
+/// GET /api/diagnostics/log-level:回显当前生效级别。
+///
+/// `custom` 表示启动时由 `RUST_LOG` 接管(其指令集不是五档之一,不做猜测);
+/// 运行时调级会把它切回五档之一。
+pub async fn get_log_level() -> Response {
+    Json(json!({ "level": current_level(), "allowed": LOG_LEVELS })).into_response()
+}
+
+/// PUT /api/diagnostics/log-level:运行时切换日志级别(无需重启)。
+///
+/// 鉴权:本路由挂在全站 `security::guard` 之下,与其余 `/api/*` 一样要求 token
+/// (6.2 条目建议「需要 token」,此处即按该口径)。级别非法回 400(带 `code`),
+/// 热替换失败回 500——不装作成功。
+pub async fn put_log_level(Json(body): Json<LogLevelBody>) -> Response {
+    match set_level(&body.level) {
+        Ok(()) => Json(json!({
+            "ok": true,
+            "level": current_level(),
+            "note": "已生效(控制台与文件两层同时切换),无需重启"
+        }))
+        .into_response(),
+        Err(e) if e.contains("非法日志级别") => {
+            err_with_code(ErrorCode::Validation, e, StatusCode::BAD_REQUEST)
+        }
+        Err(e) => err_with_code(ErrorCode::Internal, e, StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
