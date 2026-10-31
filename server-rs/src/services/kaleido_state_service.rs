@@ -18,6 +18,11 @@ pub struct KaleidoStateService {
     db: Arc<Db>,
 }
 
+/// 每个会话保留的变更记录条数上限(3.8:kaleido_changelog 原本只增不减)。
+/// 取 2000 与 `exec_audit` / `cu_audit` 同口径:变更记录是审计与重放素材,
+/// 不是回退深度的决定因素(契约重放只关心最近 revision)。
+const KALEIDO_CHANGELOG_KEEP_PER_SESSION: i64 = 2000;
+
 /// kaleido_state 行(P7 HTTP 出口只读投影);stat_data/meta_json 保持原始
 /// JSON 文本,由 handler 侧解析与序列化(服务层不假设消费方形态)。
 pub struct KaleidoStateRow {
@@ -197,6 +202,18 @@ impl KaleidoStateService {
             ],
         )
         .map_err(|e| format!("写入契约运行态失败: {e}"))?;
+        // 保留策略(3.8:kaleido_changelog 原本只增不减,仅会话删除时清空)。
+        // 放在 upsert **之后**:上面的 revision_seq 依赖 `MAX(seq)`,裁剪只删旧行,
+        // 不影响该值。失败只告警——多留旧行不会破坏语义。
+        if let Err(e) = tx.execute(
+            "DELETE FROM kaleido_changelog WHERE session_id = ?1 AND seq NOT IN (
+               SELECT seq FROM kaleido_changelog WHERE session_id = ?1
+               ORDER BY seq DESC LIMIT ?2
+             )",
+            rusqlite::params![session_id, KALEIDO_CHANGELOG_KEEP_PER_SESSION],
+        ) {
+            tracing::warn!(op = "kaleido_changelog prune", error = %e, "契约变更记录保留策略清理失败");
+        }
         tx.commit()
             .map_err(|e| format!("提交契约运行态事务失败: {e}"))?;
         Ok(())
@@ -252,5 +269,79 @@ impl KaleidoStateService {
             );
         }
         Ok(entries)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contracts::changelog::{ChangelogEntry, ChangelogSource};
+    use crate::contracts::op::PatchOp;
+    use crate::contracts::Confidence;
+    use crate::utils::test_support::TempDataDir;
+
+    fn entry(turn: u64) -> ChangelogEntry {
+        ChangelogEntry {
+            seq: 0, // commit_turn 会回填权威 seq
+            turn_id: turn,
+            op: PatchOp::replace("hp", serde_json::json!(turn)),
+            path: "hp".to_string(),
+            old: serde_json::json!(turn - 1),
+            new: serde_json::json!(turn),
+            rationale: None,
+            confidence: Confidence::High,
+            source: ChangelogSource::Agent,
+        }
+    }
+
+    /// 3.8:kaleido_changelog 原本只增不减(仅会话删除时清空),长会话会无限累积。
+    /// 保留策略按会话裁剪最旧的变更记录,且不影响 revision_seq 的语义。
+    #[test]
+    fn commit_turn_prunes_changelog_beyond_retention() {
+        let dir = TempDataDir::new("kaleido-retention");
+        let db = Arc::new(Db::open(&dir.join("kedai.db"), dir.path()).expect("打开测试库失败"));
+        let svc = KaleidoStateService::new(db.clone());
+        let sid = "sess-retention";
+        let total = (KALEIDO_CHANGELOG_KEEP_PER_SESSION + 5) as u64;
+        for turn in 1..=total {
+            let mut entries = vec![entry(turn)];
+            svc.commit_turn(
+                sid,
+                1,
+                &serde_json::json!({ "hp": turn }),
+                &KaleidoMeta::default(),
+                &mut entries,
+            )
+            .expect("提交运行态失败");
+        }
+        let conn = db.read().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM kaleido_changelog WHERE session_id = ?1",
+                rusqlite::params![sid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, KALEIDO_CHANGELOG_KEEP_PER_SESSION,
+            "变更记录数应恰为保留上限,实际 {count}"
+        );
+        // 裁剪的是最旧的:最新一条必须还在,最早一条必须被清
+        let has_newest: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM kaleido_changelog WHERE session_id = ?1 AND turn_id = ?2",
+                rusqlite::params![sid, total as i64],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_newest, 1, "最新一轮的变更不得被裁剪");
+        let has_oldest: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM kaleido_changelog WHERE session_id = ?1 AND turn_id = 1",
+                rusqlite::params![sid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_oldest, 0, "最旧的变更应被裁剪");
     }
 }

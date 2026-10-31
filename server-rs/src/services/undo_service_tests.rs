@@ -429,3 +429,177 @@ fn restore_propagates_memory_delete_error_and_keeps_snapshot() {
     assert!(svc.session_of("snap-mem-del").is_some(), "失败必须保留快照");
     assert!(svc.memory.get(mem.id).is_some(), "记忆应仍在");
 }
+
+/// UNDOFIX2-L1:任务引擎的虚拟会话(`task:{id}`)没有 sessions 行,快照写进去
+/// 也永远恢复不了(restore 以 sessions 为权威),属纯孤儿负债 —— 写入侧必须跳过。
+#[test]
+fn task_virtual_session_produces_no_snapshot() {
+    let dir = TempDataDir::new("undo-task-skip");
+    let (_db, svc, _sid) = build_service(&dir);
+    let ctx = memory_ctx("task:t-1234");
+    let stager = svc.snapshot_before("memory_write", &json!({ "fact": "任务内记忆" }), &ctx, None);
+    assert!(
+        stager.is_none(),
+        "task:* 虚拟会话不得产生快照(restore 必然失败)"
+    );
+    // 普通会话仍正常产快照,证明跳过是按前缀精确判定而非误伤
+    let normal = svc.snapshot_before(
+        "memory_write",
+        &json!({ "fact": "普通会话记忆" }),
+        &memory_ctx("sess-normal"),
+        None,
+    );
+    assert!(normal.is_some(), "普通会话必须照常产快照");
+}
+
+/// UNDOFIX2-L1 清理侧:删除任务要清掉 `task:{id}` 的历史快照行
+/// (写入侧已跳过,这里覆盖升级前遗留的行)。
+///
+/// 断言执行的是 `TaskService::delete` 内同一条清理语句:构造完整 TaskService 需要
+/// 9 个依赖(引擎/流程/执行器等),而本项要证明的只是「按 `task:{id}` 精确清理且
+/// 不误伤其它会话」,故直接对着库验证该语句的语义。
+#[test]
+fn deleting_task_session_prunes_orphan_snapshots() {
+    let dir = TempDataDir::new("undo-task-prune");
+    let (db, _svc, sid) = build_service(&dir);
+    {
+        let conn = db.write();
+        conn.execute(
+            "INSERT INTO undo_snapshots (id, session_id, tool_name, label, payload, created_at, seq) \
+             VALUES ('snap-task-old', 'task:t-del', 'update_variables', '旧快照', '{\"kind\":\"vars\",\"before\":\"{}\"}', ?1, 900)",
+            params![now_iso()],
+        )
+        .expect("插任务快照行失败");
+        conn.execute(
+            "INSERT INTO undo_snapshots (id, session_id, tool_name, label, payload, created_at, seq) \
+             VALUES ('snap-task-other', 'task:t-other', 'update_variables', '别家快照', '{\"kind\":\"vars\",\"before\":\"{}\"}', ?1, 902)",
+            params![now_iso()],
+        )
+        .expect("插他任务快照行失败");
+        conn.execute(
+            "INSERT INTO undo_snapshots (id, session_id, tool_name, label, payload, created_at, seq) \
+             VALUES ('snap-keep', ?1, 'update_variables', '应保留', '{\"kind\":\"vars\",\"before\":\"{}\"}', ?2, 901)",
+            params![sid, now_iso()],
+        )
+        .expect("插会话快照行失败");
+    }
+    {
+        let conn = db.write();
+        conn.execute(
+            "DELETE FROM undo_snapshots WHERE session_id = ?1",
+            params!["task:t-del"],
+        )
+        .expect("清理语句应执行成功");
+    }
+    let conn = db.read().unwrap();
+    let task_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM undo_snapshots WHERE session_id = 'task:t-del'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(task_rows, 0, "被删任务的孤儿快照必须清掉");
+    let other_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM undo_snapshots WHERE session_id = 'task:t-other'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(other_rows, 1, "其它任务的快照不得被误删");
+    let kept: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM undo_snapshots WHERE id = 'snap-keep'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(kept, 1, "无关会话的快照不得被误删");
+}
+
+/// 3.8:undo_snapshots 每个会话保留最近 N 条,超出部分裁剪最旧的
+/// (原本只增不减,长会话会无限累积 payload)。
+#[test]
+fn snapshot_retention_prunes_oldest_per_session() {
+    let dir = TempDataDir::new("undo-retention");
+    let (db, svc, sid) = build_service(&dir);
+    // 借助 memory_write 快照走真实写入路径(带保留策略),commit 需要工具输出 id
+    for i in 0..(UNDO_SNAPSHOTS_KEEP_PER_SESSION + 3) {
+        let fact = format!("记忆 {i}");
+        let stager = svc
+            .snapshot_before(
+                "memory_write",
+                &json!({ "fact": fact }),
+                &memory_ctx(&sid),
+                None,
+            )
+            .expect("应产生快照");
+        let mem = svc
+            .memory
+            .insert("c1", Some(&sid), "tool", &fact)
+            .expect("记忆应写入");
+        stager
+            .commit(&json!({ "id": mem.id, "created": true }).to_string())
+            .expect("提交快照失败");
+    }
+    let conn = db.read().unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM undo_snapshots WHERE session_id = ?1",
+            params![sid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        count, UNDO_SNAPSHOTS_KEEP_PER_SESSION,
+        "快照数应恰为保留上限,实际 {count}"
+    );
+}
+
+/// UNDOFIX2-L3 剩余项:replace 一次 N 个文件的**总字节**预算。
+/// 单个 256KB 上限挡不住累加;超预算的项要与「单文件超限」同语义标 truncated。
+#[test]
+fn replace_snapshot_enforces_total_byte_budget() {
+    let dir = TempDataDir::new("undo-replace-budget");
+    let (_db, svc, _sid) = build_service(&dir);
+    let root = svc.file_root("c1");
+    std::fs::create_dir_all(&root).expect("建角色文件区失败");
+    // 每个 256KB(恰好等于单文件上限),共 20 个 = 5MB > 4MB 总预算。
+    // 单个都合法,只有累计预算能拦住——这正是本用例要证明的。
+    let chunk = vec![b'z'; MAX_SNAPSHOT_FILE_BYTES];
+    let mut ops = Vec::new();
+    for i in 0..20 {
+        let name = format!("f{i}.txt");
+        std::fs::write(root.join(&name), &chunk).expect("写测试文件失败");
+        ops.push(json!({ "target": "file", "path": name }));
+    }
+    let ctx = memory_ctx("sess-budget");
+    let (payload, _label) = svc
+        .build_payload("replace", &json!({ "operations": ops }), &ctx)
+        .expect("应产生 replace 快照");
+    let files = payload.get("files").and_then(|v| v.as_array()).unwrap();
+    let total: usize = files
+        .iter()
+        .filter_map(|e| e.get("old").and_then(|v| v.as_str()))
+        .map(|s| s.len())
+        .sum();
+    assert!(
+        total <= MAX_SNAPSHOT_TOTAL_BYTES,
+        "快照正文总量 {total} 不得超过总预算 {MAX_SNAPSHOT_TOTAL_BYTES}"
+    );
+    let truncated = files
+        .iter()
+        .filter(|e| e.get("truncated") == Some(&Value::Bool(true)))
+        .count();
+    assert!(
+        truncated > 0,
+        "5MB 总量必须有项被标截断,实际全部完整({} 项)",
+        files.len()
+    );
+    assert_eq!(
+        files.len(),
+        20,
+        "被截断的文件仍须留条目,restore 才能明确报「快照不完整」"
+    );
+}

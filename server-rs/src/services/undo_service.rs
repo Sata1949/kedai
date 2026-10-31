@@ -34,6 +34,28 @@ const WRITE_TOOLS: [&str; 5] = [
 /// 单文件快照内容上限(256KB):超出记 truncated=true,restore 拒绝并中文提示
 const MAX_SNAPSHOT_FILE_BYTES: usize = 256 * 1024;
 
+/// 单次快照可容纳的文件条目上限(replace 一次操作 N 个文件的峰值保护)。
+/// 超出后剩余文件项记 truncated=true —— restore 侧已对 truncated 项拒绝,
+/// 语义与「单个文件超 256KB」一致,不会产生「看起来能回退实际不能」的假象。
+const MAX_SNAPSHOT_FILE_ENTRIES: usize = 64;
+
+/// 单次快照全部文件内容的字节总预算(4MB = 16 个满额 256KB 文件)。
+/// 单独的文件上限挡不住「N 个小文件累加」,这里按累计量兜底。
+const MAX_SNAPSHOT_TOTAL_BYTES: usize = 4 * 1024 * 1024;
+
+/// 每个会话保留的快照条数上限(3.8:undo_snapshots 原本只增不减)。
+/// 取 200 而非 2000:回退是交互操作,超过 200 步的撤销深度实际不可用,
+/// 而单条 payload 上限 256KB,200 条 ≈ 50MB 属可接受的单会话占用。
+const UNDO_SNAPSHOTS_KEEP_PER_SESSION: i64 = 200;
+
+/// 任务引擎的虚拟会话 id 前缀(`task:{id}`,见 `task_engine/solo.rs`)。
+const TASK_SESSION_PREFIX: &str = "task:";
+
+/// 该会话 id 是否为任务引擎的虚拟会话(没有 `sessions` 行,快照无法恢复)。
+pub(crate) fn is_task_virtual_session(session_id: &str) -> bool {
+    session_id.starts_with(TASK_SESSION_PREFIX)
+}
+
 /// 恢复被同会话生成占位拒绝时的固定文案(API 层据此映射 409;codex 复审 P1-1)。
 pub const RESTORE_BUSY_MESSAGE: &str = "该会话正在生成中,请先停止生成再回退";
 
@@ -190,6 +212,12 @@ impl UndoService {
         if !WRITE_TOOLS.contains(&tool_name) || !self.enabled() {
             return None;
         }
+        // UNDOFIX2-L1:任务引擎用 `task:{id}` 作为虚拟会话 id,没有 sessions 行。
+        // 这类快照即使写入也永远恢复不了(restore 以 sessions 为权威),只会在
+        // 库里留下删不掉的孤儿行,故整类跳过。
+        if is_task_virtual_session(&ctx.session_id) {
+            return None;
+        }
         let (payload, label) = self.build_payload(tool_name, args, ctx)?;
         let anchor_message_id = self.max_message_id(&ctx.session_id);
         Some(SnapshotStager {
@@ -255,6 +283,21 @@ impl UndoService {
     /// 超限直接标 truncated 不读正文。`replace` 一次恢复 N 个文件,旧实现(先
     /// `read_to_string` 再比长度)的峰值内存是 N 倍文件大小。
     fn file_entry(&self, character_id: &str, rel: &str, entry_type: &str) -> Value {
+        self.file_entry_within(character_id, rel, entry_type, MAX_SNAPSHOT_TOTAL_BYTES)
+    }
+
+    /// `file_entry` 的本体,`budget` 为该文件可占用的剩余字节额度。
+    ///
+    /// UNDOFIX2-L3 剩余项:`replace` 一次 N 个文件时,单一文件上限(256KB)挡不住
+    /// 累加量,由调用方按 [`MAX_SNAPSHOT_TOTAL_BYTES`] 递减传入剩余额度;超出额度的
+    /// 文件与「单文件超限」同语义标 truncated(restore 侧已有拒绝逻辑)。
+    fn file_entry_within(
+        &self,
+        character_id: &str,
+        rel: &str,
+        entry_type: &str,
+        budget: usize,
+    ) -> Value {
         let full = self.file_root(character_id).join(rel);
         if !full.exists() {
             return json!({
@@ -275,16 +318,18 @@ impl UndoService {
                 "existed": true, "truncated": true, "old": Value::Null,
             })
         };
+        // 单文件上限与本次剩余额度取小;额度已耗尽时不必再读
+        let limit = MAX_SNAPSHOT_FILE_BYTES.min(budget);
         // 先按文件长度判上限(≤ 语义:恰好等于上限仍可快照)
         match std::fs::metadata(&full) {
-            Ok(meta) if meta.len() as usize <= MAX_SNAPSHOT_FILE_BYTES => {}
+            Ok(meta) if meta.len() as usize <= limit => {}
             // 超限:不读正文直接标截断(避免把超大文件读进内存)
             Ok(_) => return truncated(),
             // 取不到元数据(权限/竞态删除):与读取失败同语义
             Err(_) => return truncated(),
         }
         match std::fs::read_to_string(&full) {
-            Ok(content) if content.len() <= MAX_SNAPSHOT_FILE_BYTES => json!({
+            Ok(content) if content.len() <= limit => json!({
                 "path": rel, "entry_type": entry_type,
                 "existed": true, "truncated": false, "old": content,
             }),
@@ -320,6 +365,9 @@ impl UndoService {
         let mut bubbles: Vec<Value> = Vec::new();
         let mut seen_files: Vec<String> = Vec::new();
         let mut seen_bubbles: Vec<i64> = Vec::new();
+        // UNDOFIX2-L3 剩余项:一次 replace 的累计预算(条目数 + 字节总量)。
+        // 超出的项按「truncated」记录——不静默丢弃,restore 侧会明确报「快照不完整」。
+        let mut remaining_bytes = MAX_SNAPSHOT_TOTAL_BYTES;
         for op in ops {
             match op.get("target").and_then(|v| v.as_str()) {
                 Some("file") => {
@@ -334,7 +382,24 @@ impl UndoService {
                         continue;
                     }
                     seen_files.push(rel.clone());
-                    files.push(self.file_entry(&ctx.character_id, &rel, "file"));
+                    if files.len() >= MAX_SNAPSHOT_FILE_ENTRIES || remaining_bytes == 0 {
+                        // 条目超限:仍记录该路径(否则 restore 不知道有文件被改),
+                        // 但正文不存、标 truncated 让 restore 明确拒绝
+                        files.push(json!({
+                            "path": rel, "entry_type": "file",
+                            "existed": true, "truncated": true, "old": Value::Null,
+                        }));
+                        continue;
+                    }
+                    let entry =
+                        self.file_entry_within(&ctx.character_id, &rel, "file", remaining_bytes);
+                    // 完整快照才扣减预算;truncated 项本就没读正文
+                    if entry.get("truncated") == Some(&Value::Bool(false)) {
+                        if let Some(len) = entry.get("old").and_then(|v| v.as_str()) {
+                            remaining_bytes = remaining_bytes.saturating_sub(len.len());
+                        }
+                    }
+                    files.push(entry);
                 }
                 Some("bubble") => {
                     let Some(id) = op.get("id").and_then(|v| v.as_i64()) else {
@@ -510,6 +575,17 @@ impl UndoService {
                 ],
             )
             .map_err(|e| format!("写入回退快照失败: {e}"))?;
+            // 保留策略(3.8:undo_snapshots 原本只增不减):按会话保留最近 N 条。
+            // 失败只告警不阻断——快照已写入,裁剪失败只意味着多留旧行。
+            if let Err(e) = tx.execute(
+                "DELETE FROM undo_snapshots WHERE session_id = ?1 AND id NOT IN (
+                   SELECT id FROM undo_snapshots WHERE session_id = ?1
+                   ORDER BY COALESCE(seq, rowid) DESC LIMIT ?2
+                 )",
+                params![session_id, UNDO_SNAPSHOTS_KEEP_PER_SESSION],
+            ) {
+                tracing::warn!(op = "undo_snapshots prune", error = %e, "回退快照保留策略清理失败");
+            }
             tx.commit()
                 .map_err(|e| format!("提交快照写事务失败: {e}"))?;
             Ok(())
