@@ -119,18 +119,23 @@ for (const file of collectVue(SRC)) {
 }
 
 /**
- * 补充面:`api/labels.ts` 这类**纯展示文案常量表**。
+ * 补充面:`api/labels.ts`、`utils/tutorialCopy.ts` 这类**纯展示文案常量表**。
  *
  * 它们不出现在 `<template>` 里，但会经 `{{ TABLE[x] }}` 原样渲染成下拉选项文本
  * (UIVIS-3/UI-B4 实施期实测:模板清零后「模式：三段式（默认）」在 labels.ts 里仍是半角,
- * 界面上的下拉照样是半角——只扫模板会漏)。这里只登记**确认为界面文案**的表,
- * 不扫全部 .ts:错误消息、日志、注释里出现半角标点不是排版问题。
+ * 界面上的下拉照样是半角——只扫模板会漏)。`tutorialCopy.ts` 同属这一类:教程弹窗与
+ * 关于页速览共用同一份文案,2026-10-31 SUBFIX 实测仍有 66 处半角。这里只登记
+ * **确认为界面文案**的表,不扫全部 .ts:错误消息、日志、注释里出现半角标点不是排版问题。
  */
 const LABEL_TABLES = [
   {
     file: 'web/src/api/labels.ts',
     /** 表名(仅用于提示);实际按「字符串字面量 + 前字符为汉字」扫描整个文件 */
     name: 'api/labels.ts 展示标签',
+  },
+  {
+    file: 'web/src/utils/tutorialCopy.ts',
+    name: 'utils/tutorialCopy.ts 教程文案',
   },
 ];
 
