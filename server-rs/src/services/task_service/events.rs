@@ -98,88 +98,101 @@ impl TaskService {
     /// (`after + 1 < 现存最小 seq`)——那意味着「窗口外的更早事件确实存在过但已被清理」,
     /// 与「本来就没有事件」必须区分,故显式标记而不是假装空。`after` 已达/超过最新 seq
     /// 则返回空列表 + `truncated=false`(调用方据此回空数组,**不是 404**)。
+    ///
+    /// **失败返回 `Err`**:连接/查询/坏行错误一律向上传播——读失败或跳过坏行后
+    /// 返回「空/不完整」会让客户端把缺失当权威(2026-10-25 审计 P1)。
     pub(crate) fn scan_events(
         conn: &Connection,
         task_id: &str,
         after: u64,
         limit: usize,
-    ) -> (Vec<SseEvent>, bool) {
-        // 窗口边界先读:同时决定 truncated 与「无新行」短路
-        let bounds: Option<(i64, i64)> = conn
+    ) -> Result<(Vec<SseEvent>, bool), String> {
+        // 窗口边界先读:同时决定 truncated 与「无新行」短路。
+        // 聚合查询恒返回一行(NULL 表示无事件),真正的 SQL 错误必须向上抛。
+        let (min_seq, max_seq): (Option<i64>, Option<i64>) = conn
             .query_row(
                 "SELECT MIN(seq), MAX(seq) FROM task_events WHERE task_id = ?1",
                 params![task_id],
                 |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?)),
             )
-            .ok()
-            .and_then(|(min, max)| min.zip(max));
-        let Some((min_seq, max_seq)) = bounds else {
-            return (Vec::new(), false);
+            .map_err(|e| format!("读取任务事件窗口失败: {e}"))?;
+        let Some((min_seq, max_seq)) = min_seq.zip(max_seq) else {
+            return Ok((Vec::new(), false));
         };
         // u64 → i64 用饱和转换:`after > i64::MAX` 的入参(如 u64::MAX)直接回绕成负数会把
         // 「超过最新 seq」误判成「窗口前起点」——饱和到 i64::MAX 后按超界处理(回空 + 不标截断)
         let after = i64::try_from(after).unwrap_or(i64::MAX);
         if after >= max_seq {
-            return (Vec::new(), false);
+            return Ok((Vec::new(), false));
         }
         let truncated = after + 1 < min_seq;
-        let mut stmt = match conn.prepare_cached(
-            "SELECT seq, kind, title, status, detail, finish_reason, phase, step_index, created_at \
-             FROM task_events WHERE task_id = ?1 AND seq > ?2 ORDER BY seq ASC LIMIT ?3",
-        ) {
-            Ok(s) => s,
-            Err(e) => return (log_query_failure("任务事件补拉 prepare", e), truncated),
-        };
-        let query = stmt.query_map(params![task_id, after, limit as i64], |row| {
-            let kind_wire: String = row.get(1)?;
-            let kind = TaskEventKind::from_wire(&kind_wire);
-            if kind.is_none() {
-                // 只有本进程写入过的 kind 才会进表;读不出枚举 = 数据被外部改动或版本回退,
-                // 属真实异常而非噪声(照仓内「绝不静默放过」纪律留痕),该帧仍原样下发。
-                tracing::warn!(
-                    task_id = task_id,
-                    kind = kind_wire,
-                    "任务事件分类无法识别,按未知分类下发"
-                );
-            }
-            let status_wire: Option<String> = row.get(3)?;
-            Ok(SseEvent::Task {
-                task_id: task_id.to_string(),
-                kind,
-                title: row.get(2)?,
-                status: status_wire.as_deref().map(TaskStatus::from_str_lossy),
-                detail: row.get(4)?,
-                finish_reason: row.get(5)?,
-                phase: row.get(6)?,
-                step_index: row.get::<_, Option<i64>>(7)?.map(|i| i as usize),
-                seq: Some(row.get::<_, i64>(0)? as u64),
-                at: Some(row.get(8)?),
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT seq, kind, title, status, detail, finish_reason, phase, step_index, created_at \
+                 FROM task_events WHERE task_id = ?1 AND seq > ?2 ORDER BY seq ASC LIMIT ?3",
+            )
+            .map_err(|e| format!("准备任务事件补拉查询失败: {e}"))?;
+        let rows = stmt
+            .query_map(params![task_id, after, limit as i64], |row| {
+                let kind_wire: String = row.get(1)?;
+                let kind = TaskEventKind::from_wire(&kind_wire);
+                if kind.is_none() {
+                    // 只有本进程写入过的 kind 才会进表;读不出枚举 = 数据被外部改动或版本回退,
+                    // 属真实异常而非噪声(照仓内「绝不静默放过」纪律留痕),该帧仍原样下发。
+                    tracing::warn!(
+                        task_id = task_id,
+                        kind = kind_wire,
+                        "任务事件分类无法识别,按未知分类下发"
+                    );
+                }
+                let status_wire: Option<String> = row.get(3)?;
+                Ok(SseEvent::Task {
+                    task_id: task_id.to_string(),
+                    kind,
+                    title: row.get(2)?,
+                    status: status_wire.as_deref().map(TaskStatus::from_str_lossy),
+                    detail: row.get(4)?,
+                    finish_reason: row.get(5)?,
+                    phase: row.get(6)?,
+                    step_index: row.get::<_, Option<i64>>(7)?.map(|i| i as usize),
+                    seq: Some(row.get::<_, i64>(0)? as u64),
+                    at: Some(row.get(8)?),
+                })
             })
-        });
-        // query_map 结果先绑定局部变量再 match(与 list_llm_calls 同口径,防 E0597)
-        match query {
-            Ok(rows) => (rows.filter_map(|r| r.ok()).collect(), truncated),
-            Err(e) => (log_query_failure("任务事件补拉 query_map", e), truncated),
+            .map_err(|e| format!("执行任务事件补拉查询失败: {e}"))?;
+        let mut events = Vec::new();
+        for row in rows {
+            match row {
+                Ok(event) => events.push(event),
+                // 坏行不得静默跳过:跳过会让客户端拿到「看似完整」的尾部而漏帧。
+                Err(e) => return Err(format!("读取任务事件行失败: {e}")),
+            }
         }
+        Ok((events, truncated))
     }
 
     /// 任务事件补拉(端点用;只读池):`GET /api/tasks/{id}/events` 的数据源,
-    /// 语义见 `scan_events`。
+    /// 语义见 `scan_events`。连接获取失败也返回 `Err`(不再回退空列表)。
     pub(crate) fn list_events(
         &self,
         task_id: &str,
         after: u64,
         limit: usize,
-    ) -> (Vec<SseEvent>, bool) {
-        let Some(conn) = read_or_log(&self.db, "任务事件 read") else {
-            return (Vec::new(), false);
-        };
+    ) -> Result<(Vec<SseEvent>, bool), String> {
+        let conn = self
+            .db
+            .read()
+            .map_err(|e| format!("任务事件读取连接获取失败: {e}"))?;
         Self::scan_events(&conn, task_id, after, limit)
     }
 
     /// SSE 回放用的一次性历史读取:窗口内历史**全部**补发(`limit` = 保留上限),
     /// 与补拉端点的分页语义分开——回放要的是「一条流从断点接上」,不是翻页。
-    pub(crate) fn list_events_replay(&self, task_id: &str, after: u64) -> (Vec<SseEvent>, bool) {
+    pub(crate) fn list_events_replay(
+        &self,
+        task_id: &str,
+        after: u64,
+    ) -> Result<(Vec<SseEvent>, bool), String> {
         self.list_events(task_id, after, EVENTS_KEEP_PER_TASK as usize)
     }
 
@@ -202,6 +215,18 @@ impl TaskService {
             self.touch_activity(task_id);
         }
         let _ = self.events.send(event);
+    }
+
+    /// 执行事实写并区分「0 行变更」与「SQL 失败」:失败返回带上下文的 `Err`,
+    /// 由调用方回滚事务并留痕——**不得折叠成 false 后提交空事务**(2026-10-25 审计 P0)。
+    fn execute_fact(
+        tx: &rusqlite::Transaction<'_>,
+        sql: &str,
+        sql_params: &[&dyn rusqlite::ToSql],
+    ) -> Result<bool, String> {
+        tx.execute(sql, sql_params)
+            .map(|n| n > 0)
+            .map_err(|e| format!("任务事实写失败: {e}"))
     }
 
     /// 「事实写 + 事件落库**同事务** + 提交后广播」的统一出口(PRODCAP-1)。
@@ -232,7 +257,13 @@ impl TaskService {
                 return false;
             }
         };
-        let changed = tx.execute(sql, sql_params).map(|n| n > 0).unwrap_or(false);
+        let changed = match Self::execute_fact(&tx, sql, sql_params) {
+            Ok(changed) => changed,
+            Err(e) => {
+                tracing::error!(error = %e, "任务事实写失败,事实与事件一并回滚");
+                return false;
+            }
+        };
         let tid = match task_id.filter(|_| changed) {
             Some(tid) => tid,
             None => {
@@ -723,7 +754,8 @@ mod tests {
         };
 
         // ① after=1 → 只要 2/3,升序,且帧与广播同形(含 seq/at 与逐字字段)
-        let (events, truncated) = TaskService::scan_events(&conn, "t1", 1, 100);
+        let (events, truncated) =
+            TaskService::scan_events(&conn, "t1", 1, 100).expect("扫描应成功");
         assert!(!truncated, "起点在窗口内不应标截断");
         assert_eq!(
             seqs_of(&events),
@@ -746,17 +778,20 @@ mod tests {
         assert!(at.as_deref().is_some_and(|s| !s.is_empty()), "at 应非空");
 
         // ② limit 生效(夹取在端点层,扫描层按调用方给定值截断)
-        let (events, _) = TaskService::scan_events(&conn, "t1", 0, 1);
+        let (events, _) = TaskService::scan_events(&conn, "t1", 0, 1).expect("扫描应成功");
         assert_eq!(events.len(), 1);
 
         // ③ after 已达/超过最新 seq → 空 + 不标截断(端点据此回空数组,不是 404)
-        let (events, truncated) = TaskService::scan_events(&conn, "t1", 3, 100);
+        let (events, truncated) =
+            TaskService::scan_events(&conn, "t1", 3, 100).expect("扫描应成功");
         assert!(events.is_empty() && !truncated);
-        let (events, truncated) = TaskService::scan_events(&conn, "t1", 99, 100);
+        let (events, truncated) =
+            TaskService::scan_events(&conn, "t1", 99, 100).expect("扫描应成功");
         assert!(events.is_empty() && !truncated);
         // u64 超界(如 ?after=18446744073709551615)按「超过最新 seq」处理:
         // 回绕成负数会把「超界」误判成「窗口前起点」(返回全量 + 误标 truncated),故饱和转换
-        let (events, truncated) = TaskService::scan_events(&conn, "t1", u64::MAX, 100);
+        let (events, truncated) =
+            TaskService::scan_events(&conn, "t1", u64::MAX, 100).expect("扫描应成功");
         assert!(
             events.is_empty() && !truncated,
             "u64 超界入参应回空且不标截断(不得回绕为负数)"
@@ -778,7 +813,8 @@ mod tests {
             .expect("落库");
         }
         let (events, truncated) =
-            TaskService::scan_events(&conn, "t1", 0, EVENTS_KEEP_PER_TASK as usize);
+            TaskService::scan_events(&conn, "t1", 0, EVENTS_KEEP_PER_TASK as usize)
+                .expect("扫描应成功");
         assert!(
             truncated,
             "起点早于保留窗口应显式标记(不得假装「没有更多」)"
@@ -791,8 +827,59 @@ mod tests {
         );
 
         // ⑤ 恰在窗口边缘(after+1 == 最小 seq)= 无缺口,不标截断
-        let (events, truncated) = TaskService::scan_events(&conn, "t1", 1, 10);
+        let (events, truncated) = TaskService::scan_events(&conn, "t1", 1, 10).expect("扫描应成功");
         assert!(!truncated, "after+1 == 最小 seq 时没有丢行");
         assert_eq!(seqs_of(&events).first(), Some(&2));
+    }
+
+    /// P0(2026-10-25 审计):事实写的 SQL 错误必须返回 `Err`,不得折叠成 false
+    /// 后继续提交空事务。用非法 SQL 做故障注入,断言错误上下文带「任务事实写失败」。
+    #[test]
+    fn execute_fact_surfaces_sql_errors() {
+        let conn = rusqlite::Connection::open_in_memory().expect("内存库");
+        let tx = conn.unchecked_transaction().expect("开启事务");
+        let no_params: &[&dyn rusqlite::ToSql] = &[];
+        let err = TaskService::execute_fact(&tx, "UPDATE no_such_table SET x = 1", no_params)
+            .expect_err("SQL 错误不得折叠成 false");
+        assert!(err.contains("任务事实写失败"), "错误应带上下文: {err}");
+    }
+
+    /// P1(2026-10-25 审计):读取失败必须返回 `Err`,不得伪装成「本来就没有事件」。
+    /// 未建表的内存库会让窗口边界查询直接失败。
+    #[test]
+    fn scan_events_surfaces_query_failure() {
+        let conn = rusqlite::Connection::open_in_memory().expect("内存库");
+        let err =
+            TaskService::scan_events(&conn, "t1", 0, 100).expect_err("缺表应返回 Err,而不是空列表");
+        assert!(
+            err.contains("读取任务事件窗口失败"),
+            "错误应指明读取阶段: {err}"
+        );
+    }
+
+    /// P1(2026-10-25 审计):坏行不得被 `filter_map` 静默跳过——跳过会让客户端
+    /// 拿到「看似完整」的尾部而漏帧。这里把 status 写成 BLOB 制造类型错误。
+    #[test]
+    fn scan_events_rejects_malformed_rows() {
+        let conn = rusqlite::Connection::open_in_memory().expect("内存库");
+        conn.execute_batch(crate::models::db::create_tables_sql())
+            .expect("建表");
+        conn.execute(
+            "INSERT INTO tasks (id, title, created_at, updated_at) VALUES ('t1', 't', '2026-10-05T00:00:00Z', '2026-10-05T00:00:00Z')",
+            [],
+        )
+        .expect("建任务行");
+        conn.execute(
+            "INSERT INTO task_events (task_id, seq, kind, status, detail, created_at) \
+             VALUES ('t1', 1, 'status', x'00', '坏行', '2026-10-05T00:00:00Z')",
+            [],
+        )
+        .expect("插入坏行");
+        let err =
+            TaskService::scan_events(&conn, "t1", 0, 100).expect_err("坏行应返回 Err,不得静默跳过");
+        assert!(
+            err.contains("读取任务事件行失败"),
+            "错误应指明坏行阶段: {err}"
+        );
     }
 }

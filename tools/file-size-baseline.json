@@ -19,7 +19,7 @@
     "server-rs/src/services/task_engine/runtime_check.rs": 1051,
     "server-rs/src/services/task_engine/wiring.rs": 1708,
     "server-rs/src/services/task_service/db.rs": 1268,
-    "server-rs/src/services/task_service/executor.rs": 1434,
+    "server-rs/src/services/task_service/executor.rs": 1442,
     "server-rs/src/services/undo_service.rs": 1082,
     "server-rs/src/services/world_book_service.rs": 1288,
     "server-rs/src/tools/agent_tools.rs": 1347,
