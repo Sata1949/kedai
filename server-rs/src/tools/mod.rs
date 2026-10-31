@@ -45,6 +45,8 @@ pub mod submit;
 // 动态调用名单内流程(二维批次 7b):工具**定义**在此,「谁可被调用」由 custom 执行器
 // 逐节点下发描述表达;名单/预算/环与深度守卫在 task_engine/flow_call.rs
 pub mod run_flow;
+pub mod tool_meta;
+pub mod tool_risk;
 pub mod tool_sets;
 pub mod variables;
 // 视觉工具三件(视觉能力包 D4):工具**定义**在此,可见性 = 工作区族闸门 ∩ 视觉闸门
@@ -123,4 +125,106 @@ pub fn register_builtin_tools(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
     // 归档名单(ARCHIVE_TOOLS)决定——默认不下发,只由归档步显式下发
     worldbook::register_worldbook_tool(registry, deps.clone());
     agent_tools::register_agent_tools(registry, deps);
+}
+
+/// 新增内置工具的登记完整性元测试(计划 4.7)。
+///
+/// 背景:新增一个内置工具要同时落到「注册 / 风险级 / 工具指南 / 渲染意图 / 场景白名单」
+/// 多处,漏改不会报错而是**静默降级**——历史两次实例:fs_* 族漏登记风险级会被
+/// `deny_dangerous` 整族剔除;视觉族漏登记会让只读工具被当危险级。
+///
+/// 判据(遍历真实注册表,不维护第二份工具名清单):
+/// 1. 每个注册的内置工具在 `tool_risk::explicit_risk` 里有显式登记;
+/// 2. 每个都有 `tool_when` 指南(非空);
+/// 3. 每个都有 `render_kind_for`(前端据此分派渲染,缺失会退化成 JSON 直出);
+/// 4. `tool_sets` 里的每个名单成员都必须真实注册(防名单写了不存在的工具)。
+#[cfg(test)]
+mod registry_meta_tests {
+    use super::*;
+    use crate::tools::tool_meta::render_kind_for;
+
+    /// 取真实注册表的工具名(与启动路径同一注册函数)。
+    ///
+    /// 除 `register_builtin_tools` 外还要补注册 multistep 的 `get_state` / `apply_patch`
+    /// ——它们由 `app_state` 单独注册(需要契约注册表),但同属内置工具,
+    /// 也出现在 `META_TOOLS` 名单里,漏掉会让反向检查误报。
+    fn registered_names() -> Vec<String> {
+        let (_guard, deps) = agent_tools::ToolDeps::dummy_for_test();
+        let registry = ToolRegistry::new();
+        register_builtin_tools(&registry, Arc::new(deps));
+        let (_guard2, deps2) = agent_tools::ToolDeps::dummy_for_test();
+        let contracts = Arc::new(crate::contracts::ContractRegistry::new(
+            {
+                let characters = deps2.characters.clone();
+                move |id: &str| characters.get(id).and_then(|c| c.data_raw)
+            },
+            {
+                let world_books = deps2.world_books.clone();
+                move |id: &str| world_books.collect_entries_for_character(id)
+            },
+        ));
+        crate::tools::multistep::register_multistep_tools(
+            &registry,
+            deps2.sessions.clone(),
+            contracts,
+            Arc::new(
+                crate::services::kaleido_state_service::KaleidoStateService::new(deps2.db.clone()),
+            ),
+        );
+        registry
+            .list_definitions()
+            .iter()
+            .map(|d| d.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn every_registered_tool_has_explicit_risk_guide_and_render_kind() {
+        let names = registered_names();
+        assert!(!names.is_empty(), "注册表为空,元测试失去意义");
+        let mut missing = Vec::new();
+        for name in &names {
+            if tool_risk::explicit_risk(name).is_none() {
+                missing.push(format!("{name}: 风险级未显式登记"));
+            }
+            if !tool_meta::tool_when_for_test(name).is_empty() {
+                // 有指南,通过
+            } else {
+                missing.push(format!("{name}: 缺少工具指南(tool_when)"));
+            }
+            if render_kind_for(name).is_none() {
+                missing.push(format!("{name}: 缺少渲染意图(render_kind_for)"));
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "新增内置工具漏登记 {} 处:\n{}",
+            missing.len(),
+            missing.join("\n")
+        );
+    }
+
+    /// 名单成员必须真实注册(反向检查:白名单里写了不存在的工具名)
+    #[test]
+    fn every_scene_whitelist_member_is_registered() {
+        let names = registered_names();
+        let mut whitelists: Vec<(&str, &[&str])> = vec![
+            ("SUBAGENT", tool_sets::SUBAGENT),
+            ("READONLY_SCOUT", tool_sets::READONLY_SCOUT),
+            ("REFLECT", tool_sets::REFLECT),
+            ("ARCHIVE_TOOLS", tool_sets::ARCHIVE_TOOLS),
+            ("WORKSPACE_TOOLS", tool_sets::WORKSPACE_TOOLS),
+            ("META_TOOLS", tool_sets::META_TOOLS),
+        ];
+        whitelists.push(("VISION_TOOLS", tool_sets::VISION_TOOLS));
+        let mut missing = Vec::new();
+        for (label, list) in whitelists {
+            for name in list {
+                if !names.iter().any(|n| n == name) {
+                    missing.push(format!("{label} 含未注册工具 {name}"));
+                }
+            }
+        }
+        assert!(missing.is_empty(), "名单漂移:\n{}", missing.join("\n"));
+    }
 }
