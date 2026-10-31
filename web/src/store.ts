@@ -153,6 +153,9 @@ export const useAppStore = defineStore('app', () => {
     toggleAgentPanel: uiPrefs.toggleAgentPanel,
     autoOpenAgentPanel: uiPrefs.autoOpenAgentPanel,
     resetAgentPanelAutoSuppress: uiPrefs.resetAgentPanelAutoSuppress,
+    // 双库分叉提示(DB-7:启动期检测到「另一套库也有用户数据」时置位/关闭)
+    setSplitDataDirs: uiPrefs.setSplitDataDirs,
+    dismissSplitDataDirs: uiPrefs.dismissSplitDataDirs,
     // 世界书
     loadWorldBooks: resources.loadWorldBooks,
     uploadWorldBook: resources.uploadWorldBook,

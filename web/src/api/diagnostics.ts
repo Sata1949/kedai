@@ -94,3 +94,52 @@ export async function getCacheDiagnostics(
   const raw = await request<unknown>(`/diagnostics/cache${query.size ? `?${query}` : ''}`);
   return assertDiagnostics(raw);
 }
+
+/**
+ * 一套「选中的库之外、也有用户数据」的数据目录(DB-7)。
+ *
+ * 后端判据与启动期告警同源(`config::detect_split_data_dirs`):有 settings.json,
+ * 或库里已有非内置角色/任何会话;空壳目录不报。
+ */
+export interface SplitDataDir {
+  /** 另一套库的绝对路径(给用户定位用) */
+  path: string;
+  /** 判定依据的中文说明,如「settings.json + 数据库」 */
+  evidence: string;
+}
+
+/** 数据目录分叉报告:当前生效目录 + 检测到的其它库 */
+export interface DataDirsReport {
+  /** 当前进程实际使用的数据目录 */
+  data_dir: string;
+  /** 另一套有用户数据的库(空数组 = 无分叉);顺序与后端候选顺序一致 */
+  others: SplitDataDir[];
+}
+
+/**
+ * 形状闸门:后端正常时必带 `data_dir` 与 `others` 数组。
+ *
+ * 与 `assertDiagnostics` 同一理由——`request()` 只按 HTTP 状态判成败,
+ * 载荷形状不对时应在**这里**抛可捕获的 Error,而不是让调用方在
+ * `report.others.length` 上抛 TypeError。`others` 缺失尤其危险:它会让
+ * 「有无分叉」的判据落到 undefined,静默变成「没分叉」——恰好是 DB-7 要堵的静默。
+ */
+function assertDataDirs(value: unknown): DataDirsReport {
+  const v = value as Partial<DataDirsReport> | null | undefined;
+  if (!v || typeof v !== 'object' || typeof v.data_dir !== 'string' || !Array.isArray(v.others)) {
+    throw new Error('数据目录检测响应格式异常');
+  }
+  const others = v.others
+    .filter((item): item is SplitDataDir =>
+      !!item && typeof item === 'object' && typeof item.path === 'string',
+    )
+    .map((item) => ({ path: item.path, evidence: typeof item.evidence === 'string' ? item.evidence : '' }));
+  return { data_dir: v.data_dir, others };
+}
+
+/** GET /api/diagnostics/data-dirs:读取当前数据目录与「另一套有用户数据的库」(DB-7) */
+export async function getDataDirs(): Promise<DataDirsReport> {
+  const raw = await request<unknown>('/diagnostics/data-dirs');
+  return assertDataDirs(raw);
+}
+

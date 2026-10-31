@@ -15,8 +15,27 @@ import {
   registerUiPrefsSink,
 } from './storeBridge';
 
-export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
-  // ===== 弹窗/面板开关 =====
+/**
+ * 双库分叉提示里的单条「另一套库」(DB-7)。
+ *
+ * 结构上与 `api/diagnostics.ts` 的 `SplitDataDir` 同形,但**刻意各自声明**:
+ * 展示层(components, L3)只依赖 store(L2)手里的视图模型,不反向依赖 api 层的
+ * 线格式类型;将来端点形状演进时,适配只发生在 `setSplitDataDirs` 这一处。
+ */
+export interface SplitDataDirItem {
+  /** 另一套库的绝对路径(给用户定位用) */
+  path: string;
+  /** 判定依据的中文说明,如「settings.json + 数据库」 */
+  evidence: string;
+}
+
+/** store 内的分叉提示载荷:当前目录 + 其它库(字段名用 camelCase 与前端惯例一致) */
+export interface SplitDataDirsNotice {
+  dataDir: string;
+  others: SplitDataDirItem[];
+}
+
+export const useUiPrefsStore = defineStore('app.uiPrefs', () => {  // ===== 弹窗/面板开关 =====
   // 弹窗开关(settingsOpen…chatRecordsOpen)与 web/src/modals.ts 的 MODALS 注册表一一对应:
   // 逐个声明的目的是保住 store.xxxOpen 的布尔类型与模板绑定;一致性由
   // web/src/modals.test.ts 元测试锁定(解析契约:弹窗开关均为 ref(false) 的具名声明)。
@@ -113,6 +132,28 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
    * 仅内存态:下次异常覆盖、用户关闭即清除,不持久化。
    */
   const globalError = ref<string | null>(null);
+  /**
+   * 双库分叉提示(DB-7):启动期检测到「另一套数据目录也有用户数据」时的横幅内容
+   * (`null` = 无提示)。
+   *
+   * 与上面两个错误条分开的理由是**语义不同**:dataLoadError/globalError 是故障,
+   * 分叉不是——当前这套库是好的,只是另外还有一套也在被用,用户可能在那边写过东西。
+   * 故它可关闭且不重试(没有「重试」可言,只能由用户决定用哪一套),关掉即置 null。
+   * 仅内存态:下次启动重新检测,不持久化(持久化会让用户永远看不到第二次提示,
+   * 而分叉状态可能变化)。
+   */
+  const splitDataDirs = ref<SplitDataDirsNotice | null>(null);
+  /** 记录双库分叉检测结果(接收方 App.vue 启动时写入;`others` 为空时不设置) */
+  function setSplitDataDirs(report: { data_dir: string; others: SplitDataDirItem[] } | null): void {
+    splitDataDirs.value =
+      report && report.others.length > 0
+        ? { dataDir: report.data_dir, others: report.others }
+        : null;
+  }
+  /** 关闭双库分叉提示(用户已确认;本会话不再显示,下次启动重新检测) */
+  function dismissSplitDataDirs(): void {
+    splitDataDirs.value = null;
+  }
 
   // ===== 设置分区定位请求(新手教程「带我去设置」) =====
   /**
@@ -365,6 +406,9 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {
     modalLoadError,
     dataLoadError,
     globalError,
+    splitDataDirs,
+    setSplitDataDirs,
+    dismissSplitDataDirs,
     settingsNav,
     openSettingsAt,
     openSettingsPanel,

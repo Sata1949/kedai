@@ -5,6 +5,7 @@
 // <Transition name="sv-modal"> 包裹与开合过渡语义不变(由注册表 v-for 派生)。
 import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, watch } from 'vue';
 import { useAppStore } from './store';
+import { getDataDirs } from './api/diagnostics';
 import { lazyModal } from './asyncModal';
 import { lazyMain } from './asyncMain';
 import { MODALS, MODAL_FLAGS } from './modals';
@@ -17,6 +18,7 @@ import { useUserPersona } from './composables/useUserPersona';
 import Sidebar from './components/Sidebar.vue';
 import AgentPanel from './components/AgentPanel.vue';
 import SplashScreen from './components/SplashScreen.vue';
+import SplitDataDirsHint from './components/SplitDataDirsHint.vue';
 
 // 主区两模式(UIVIS-3/UI-C2):此前是静态 import,首屏 bundle 里含着任务台的整块实现;
 // 改为按模式懒加载 + 统一的加载骨架,chunk 未到位时主区不再是纯空白。
@@ -290,6 +292,15 @@ onMounted(() => {
       store.startTaskEvents();
     }
   });
+  // DB-7 双库分叉提示:后端仅在启动日志里 warn,用户界面此前完全没有线索——
+  // 「聊天记录没了」只能靠用户自己猜。这里独立拉一次探测(不并入上面的并行组:
+  // 它失败**不该**计入启动失败数,分叉检测挂掉不影响正常使用)。
+  void getDataDirs()
+    .then((report) => store.setSplitDataDirs(report))
+    .catch((e: unknown) => {
+      // 静默降级但留痕:旧版后端没有该端点(404),不该在控制台制造噪声级错误
+      console.warn('[kedai] 数据目录分叉检测不可用', e);
+    });
   if (shouldOpenSettings()) store.settingsOpen = true;
   window.addEventListener('hashchange', onHashChange);
   void registerBackButton();
@@ -385,6 +396,14 @@ watch(
       <button class="sv-btn ghost sv-btn-sm" @click="retryModalLoad">重试</button>
       <button class="sv-btn ghost sv-btn-sm" @click="store.modalLoadError = null">关闭</button>
     </div>
+    <!-- 双库分叉提示(DB-7):另一套数据目录也有用户数据。
+         用 info 条而非错误条——当前这套库本身是好的,只是同一台机器上还有另一套
+         在写,用户在那边写的聊天在本实例里**看不到**。展示细节见组件内注释。 -->
+    <SplitDataDirsHint
+      v-if="store.splitDataDirs"
+      :notice="store.splitDataDirs"
+      @dismiss="store.dismissSplitDataDirs()"
+    />
     <div class="sv-body">
       <!-- 左侧功能区(桌面常驻;移动端为覆盖式抽屉,由底部导航「角色」开合) -->
       <Sidebar />
