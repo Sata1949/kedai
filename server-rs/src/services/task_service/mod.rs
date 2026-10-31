@@ -557,13 +557,22 @@ impl TaskService {
     pub fn delete(&self, id: &str) -> bool {
         self.signal_cancel(id);
         self.remove_cancel_entry(id);
-        let deleted = self
-            .db
-            .write()
+        let conn = self.db.write();
+        let deleted = conn
             .execute("DELETE FROM tasks WHERE id = ?1", params![id])
             .map(|n| n > 0)
             .unwrap_or(false);
         if deleted {
+            // UNDOFIX2-L1:任务会话是虚拟 id(`task:{id}`),undo_snapshots 无外键,
+            // 不随 tasks 级联删除。写入侧已对这类会话跳过产快照(见 undo_service),
+            // 这里再清一次,覆盖升级前遗留的历史行。
+            if let Err(e) = conn.execute(
+                "DELETE FROM undo_snapshots WHERE session_id = ?1",
+                params![format!("task:{id}")],
+            ) {
+                tracing::warn!(op = "undo_snapshots task prune", error = %e, "删除任务时清理回退快照失败");
+            }
+            drop(conn);
             self.emit_event(
                 TaskEventKind::Deleted,
                 id,

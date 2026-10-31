@@ -34,11 +34,11 @@ const SKIPPED_SIDECARS: [&str; 2] = ["kedai.db-wal", "kedai.db-shm"];
 
 // 供测试经 `use super::*` 取名的内部符号与原文件顶层 import,集中在此保持测试零改动。
 #[cfg(test)]
-use merge::{normalize_sql, table_columns};
-#[cfg(test)]
-use rusqlite::Connection;
-#[cfg(test)]
-use std::path::Path;
+use {
+    merge::{normalize_sql, table_columns},
+    rusqlite::Connection,
+    std::path::Path,
+};
 
 #[cfg(test)]
 mod tests {

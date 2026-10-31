@@ -60,6 +60,43 @@ pub(super) struct ForeignKey {
     pub(super) to: String,
 }
 
+/// 非外键的**逻辑引用**(UNDOFIX2-L2):列值指向另一表主键,但 schema 刻意不声明
+/// `REFERENCES`(undo_snapshots 要能容纳没有 sessions 行的 `task:*` 虚拟会话,
+/// 故不能加外键)。合并时它们与真实外键一样必须重映射,否则分叉副本的旧 id 会挂到
+/// 基线同名行上,或快照主键被换掉后 `tool_calls.snapshot_id` 指向不存在的快照。
+///
+/// 元组语义:`(子表, 子表列, 父表, 父表主键列)`。父表必须先于子表合并
+/// (见 [`dependency_order`]),否则 `id_maps` 里还没有父表的重映射结果。
+pub(super) const LOGICAL_REFERENCES: &[(&str, &str, &str, &str)] = &[
+    ("undo_snapshots", "session_id", "sessions", "id"),
+    ("tool_calls", "snapshot_id", "undo_snapshots", "id"),
+];
+
+/// 该表的逻辑父表(合并顺序约束用)。
+fn logical_parents(table: &str) -> Vec<&'static str> {
+    LOGICAL_REFERENCES
+        .iter()
+        .filter(|(child, ..)| *child == table)
+        .map(|(_, _, parent, _)| *parent)
+        .collect()
+}
+
+/// 该表的真实外键 + 逻辑引用(一并交给 `remap_foreign_keys` 重映射)。
+fn references_for(table: &str, foreign_keys: &[ForeignKey]) -> Vec<ForeignKey> {
+    let mut refs = foreign_keys.to_vec();
+    for (child, column, parent_table, parent_column) in LOGICAL_REFERENCES {
+        if *child != table {
+            continue;
+        }
+        refs.push(ForeignKey {
+            from: column.to_string(),
+            parent_table: parent_table.to_string(),
+            to: parent_column.to_string(),
+        });
+    }
+    refs
+}
+
 pub fn merge_data_dirs(
     baseline_dir: &Path,
     source_dir: &Path,
@@ -359,14 +396,61 @@ fn merge_databases(baseline: &Path, source: &Path) -> Result<MergeReport, String
     for table in order {
         merge_table(&tx, &table, &mut id_maps, &mut report)?;
     }
+    // UNDOFIX2-L2:两侧 `seq` 各自从 1 开始,原样搬入会让同会话出现并列值,
+    // 令「回退到此处」按 `seq >= target` 界定范围时行为不确定。合并事务内按
+    // (会话, created_at, 原 seq, id) 重排为全局唯一递增序列——保留相对顺序,
+    // 同时保持「seq 是全局单调序号」这一写入侧不变式。
+    renumber_undo_snapshot_seq(&tx)?;
     tx.commit().map_err(|e| format!("提交合并事务失败: {e}"))?;
     conn.execute_batch("DETACH DATABASE src; PRAGMA foreign_keys=ON;")
         .map_err(|e| format!("结束数据库合并失败: {e}"))?;
     Ok(report)
 }
 
-/// 把库的 `PRAGMA user_version` 对齐到 `SCHEMA_VERSION`。
-/// 合并前两侧都会补跑预补 DDL(schema 对齐到当前形态),版本号必须同步;否则合并
+/// 合并后按会话重排 `undo_snapshots.seq`(UNDOFIX2-L2)。
+///
+/// 两侧各自从 1 开始分配 seq,合并后同一会话会出现两个 seq=1、两个 seq=2……
+/// `load_restore_batch` 用 `COALESCE(seq, rowid) >= target_seq` 界定「目标及其后续」,
+/// 并列值会让回退范围多撤或少撤。这里在合并事务内一次性重排:
+/// - 排序键 `(session_id, created_at, 原 seq, id)`:同会话内保持原有相对顺序,
+///   跨会话按会话聚合(seq 的语义是全局单调,不必与会话交错);
+/// - 重排后仍全局唯一递增,写入侧 `MAX(seq)+1` 的分配逻辑不受影响。
+///
+/// 表或 `seq` 列不存在(极旧库/该批之前的快照)时直接跳过。
+fn renumber_undo_snapshot_seq(tx: &Transaction<'_>) -> Result<(), String> {
+    let columns = table_columns(tx, "main", "undo_snapshots")?;
+    if columns.is_empty() || !columns.iter().any(|column| column.name == "seq") {
+        return Ok(());
+    }
+    let rows: Vec<(String, String)> = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT id, session_id FROM main.undo_snapshots \
+                 ORDER BY session_id, created_at, COALESCE(seq, rowid), id",
+            )
+            .map_err(|e| format!("准备快照重排查询失败: {e}"))?;
+        let mapped = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| format!("查询快照重排顺序失败: {e}"))?;
+        let mut out = Vec::new();
+        for row in mapped {
+            out.push(row.map_err(|e| format!("读取快照重排行失败: {e}"))?);
+        }
+        out
+    };
+    for (index, (id, _session_id)) in rows.iter().enumerate() {
+        tx.execute(
+            "UPDATE main.undo_snapshots SET seq = ?1 WHERE id = ?2",
+            rusqlite::params![(index + 1) as i64, id],
+        )
+        .map_err(|e| format!("重排快照序号失败: {e}"))?;
+    }
+    Ok(())
+}
+
+/// 把库的 `PRAGMA user_version` 对齐到 `SCHEMA_VERSION`。/// 合并前两侧都会补跑预补 DDL(schema 对齐到当前形态),版本号必须同步;否则合并
 /// 产物带着旧版本号,「库比代码新」检测与后续升级判断都会失真(L18 补齐路径)。
 /// 合并期只做对齐,不做降级拒绝——拒绝启动是 `Db::open` 启动路径的职责。
 fn align_schema_version(conn: &Connection, side: &str) -> Result<(), String> {
@@ -384,7 +468,8 @@ fn merge_table(
     if columns.is_empty() {
         return Ok(());
     }
-    let foreign_keys = foreign_keys(tx, "main", table)?;
+    // 真实外键 + 非外键逻辑引用一并重映射(UNDOFIX2-L2)
+    let references = references_for(table, &foreign_keys(tx, "main", table)?);
     let pk_indices: Vec<usize> = columns
         .iter()
         .enumerate()
@@ -415,7 +500,7 @@ fn merge_table(
     for source_row in source_rows {
         let original = source_row.map_err(|e| format!("读取源表 {table} 行失败: {e}"))?;
         let mut row = original.clone();
-        remap_foreign_keys(&mut row, &columns, &foreign_keys, id_maps);
+        remap_foreign_keys(&mut row, &columns, &references, id_maps);
 
         let existing = if pk_indices.is_empty() {
             None
@@ -555,7 +640,7 @@ fn dependency_order(conn: &Connection, tables: Vec<String>) -> Result<Vec<String
         let mut ready = remaining
             .iter()
             .filter(|table| {
-                foreign_keys(conn, "main", table)
+                let fk_ready = foreign_keys(conn, "main", table)
                     .map(|keys| {
                         keys.iter().all(|key| {
                             !table_set.contains(&key.parent_table)
@@ -563,7 +648,15 @@ fn dependency_order(conn: &Connection, tables: Vec<String>) -> Result<Vec<String
                                 || result.contains(&key.parent_table)
                         })
                     })
-                    .unwrap_or(false)
+                    .unwrap_or(false);
+                // 逻辑引用同样构成顺序约束(UNDOFIX2-L2):父表必须先合并,否则
+                // `id_maps` 里还没有它的重映射结果,子表引用会漏改。
+                let logical_ready = logical_parents(table).iter().all(|parent| {
+                    !table_set.contains(*parent)
+                        || *parent == table.as_str()
+                        || result.contains(&parent.to_string())
+                });
+                fk_ready && logical_ready
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -816,3 +909,9 @@ fn is_structured_config(name: &str) -> bool {
             | "user_persona.json"
     )
 }
+
+/// SDC 批(2026-10-31):合并逻辑引用重映射与 seq 重排的回归网。
+/// 声明在 merge 模块下(而非 mod.rs)是为了让 mod.rs 保持在体积基线以内。
+#[cfg(test)]
+#[path = "sdc_tests.rs"]
+mod sdc_tests;

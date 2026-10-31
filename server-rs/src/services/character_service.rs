@@ -518,11 +518,23 @@ impl CharacterService {
             return false;
         };
         let conn = self.db.write();
+        // UNDOFIX2-L1:undo_snapshots 刻意不带外键(恢复要按 payload 判语义),sessions 被
+        // `characters ON DELETE CASCADE` 删掉后快照会成为孤儿行。必须在删角色**之前**
+        // 按该角色全部会话 id 清一次——删完就查不到 session_id 了。
+        if let Err(e) = conn.execute(
+            "DELETE FROM undo_snapshots WHERE session_id IN (
+               SELECT id FROM sessions WHERE character_id = ?1
+             )",
+            params![id],
+        ) {
+            tracing::warn!(op = "undo_snapshots character prune", error = %e, "删除角色时清理回退快照失败");
+        }
         if conn
             .execute("DELETE FROM characters WHERE id = ?1", params![id])
             .map(|n| n > 0)
             .unwrap_or(false)
         {
+            drop(conn);
             let _ = std::fs::remove_file(Path::new(&rec.file_path));
             if let Some(av) = &rec.avatar_path {
                 let _ = std::fs::remove_file(Path::new(av));
