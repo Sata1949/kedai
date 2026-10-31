@@ -58,7 +58,9 @@ encoding_rs = "0.8"
 # D-4:日志迁移到 tracing 生态——热路径不再持全局锁,文件/stdout 双写走 non-blocking channel;
 # json 特性保留(结构化输出能力),实际行格式由自定义 PinoFormat 保证与旧 logger 逐字段一致
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+# registry: 6.2 运行时调级(无需重启)——双写两层的 EnvFilter 经 reload::Layer 热替换;
+# reload 模块由 registry 特性开启(0.3 无独立的 reload feature),不新增外部 crate
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter", "registry"] }
 tracing-appender = "0.2"
 # sha2:角色卡脚本授权台账的内容哈希(known-limitations L12 后端授权门)。
 # 已在依赖树中(经 rustls/native-tls 的 ring 生态传入),此处直接声明为显式依赖,

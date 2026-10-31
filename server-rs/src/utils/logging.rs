@@ -29,8 +29,72 @@ use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
 use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::reload;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
+
+/// 运行时调级句柄(6.2):两层(控制台/文件)各自的 `EnvFilter` 可热替换。
+/// 存成闭包而不是具体 `Handle<L, S>` 类型——两层所在 subscriber 栈类型不同,
+/// 具体类型无处安放;闭包同时抹掉了这个差异。
+type ReloadFn = Box<dyn Fn(EnvFilter) -> Result<(), String> + Send + Sync>;
+
+static RELOADERS: std::sync::OnceLock<Vec<ReloadFn>> = std::sync::OnceLock::new();
+/// 当前生效级别(仅本进程内记录,供 `GET /api/diagnostics/log-level` 回显)。
+static CURRENT_LEVEL: std::sync::OnceLock<std::sync::Mutex<String>> = std::sync::OnceLock::new();
+
+/// 合法级别白名单(与 `filter_directives` 的 base 分支同源)。
+pub const LOG_LEVELS: [&str; 5] = ["trace", "debug", "info", "warn", "error"];
+
+fn current_level_cell() -> &'static std::sync::Mutex<String> {
+    CURRENT_LEVEL.get_or_init(|| std::sync::Mutex::new("info".to_string()))
+}
+
+/// 当前生效的日志级别(运行时调级后即为新值)。
+pub fn current_level() -> String {
+    current_level_cell()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// 运行时把日志级别切到 `level`,无需重启。
+///
+/// - 级别不在 [`LOG_LEVELS`] 内 → `Err`(调用方据此回 400);
+/// - 日志尚未初始化(无 reload 句柄,如单元测试直接调用 handler)→ 记录当前级别
+///   并返回 `Ok`:端点语义是「已接受」;后续首次 `init` 会按**启动配置**回填,
+///   本函数不保证该值跨初始化生效。
+/// - 已初始化 → 逐层 `reload`,任一层失败即整体报错(不装作成功)。
+pub fn set_level(level: &str) -> Result<(), String> {
+    let level = level.trim().to_ascii_lowercase();
+    if !LOG_LEVELS.contains(&level.as_str()) {
+        return Err(format!(
+            "非法日志级别({level}),允许值:{}",
+            LOG_LEVELS.join("/")
+        ));
+    }
+    let filter = EnvFilter::new(directives_for(&level));
+    if let Some(reloaders) = RELOADERS.get() {
+        for reload in reloaders {
+            reload(filter.clone())?;
+        }
+    }
+    *current_level_cell()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = level;
+    Ok(())
+}
+
+/// 按级别组装 EnvFilter 指令(不读 RUST_LOG;运行时调级是显式覆盖)。
+fn directives_for(level: &str) -> String {
+    let base = if LOG_LEVELS.contains(&level) {
+        level
+    } else {
+        "info"
+    };
+    format!(
+        "{base},tower_http=info,hyper=info,h2=info,rustls=info,reqwest=info,tokio=info,mio=info,rquickjs=info"
+    )
+}
 
 /// 日志文件前缀:文件名 kedai-YYYY-MM-DD.log(与旧 logger 一致,3 天清理逻辑无需变更)
 const FILE_PREFIX: &str = "kedai-";
@@ -407,13 +471,7 @@ fn filter_directives(level: &str) -> String {
             return v;
         }
     }
-    let base = match level {
-        "trace" | "debug" | "info" | "warn" | "error" => level,
-        _ => "info",
-    };
-    format!(
-        "{base},tower_http=info,hyper=info,h2=info,rustls=info,reqwest=info,tokio=info,mio=info,rquickjs=info"
-    )
+    directives_for(level)
 }
 
 /// 初始化日志(进程启动时调用一次;重复调用仅首次生效)。
@@ -428,23 +486,62 @@ pub fn init(level: &str, log_dir: &Path) -> Vec<WorkerGuard> {
     // 文件非阻塞写(按天滚动,kedai-YYYY-MM-DD.log)
     let (file_nb, file_guard) = tracing_appender::non_blocking(DailyFileWriter::new(log_dir));
 
+    // 6.2:两层各自包一层 reload,句柄登记到 RELOADERS,供运行时调级热替换
+    let (stdout_filter, stdout_handle) = reload::Layer::new(EnvFilter::new(directives.clone()));
+    let (file_filter, file_handle) = reload::Layer::new(EnvFilter::new(directives));
     let stdout_layer = tracing_subscriber::fmt::layer()
         .event_format(PinoFormat)
         .with_writer(stdout_nb)
-        .with_filter(EnvFilter::new(directives.clone()));
+        .with_filter(stdout_filter);
     let file_layer = tracing_subscriber::fmt::layer()
         .event_format(PinoFormat)
         .with_writer(file_nb)
-        .with_filter(EnvFilter::new(directives));
+        .with_filter(file_filter);
 
     // try_init:Tauri 壳与命令行入口重复初始化时忽略第二次,不 panic
     // RequestIdLayer 必须注册在这里:span 的 requestId extension 由它写入,
     // 两个 PinoFormat 层才能在事件行里合并出 requestId。
-    let _ = tracing_subscriber::registry()
+    let init_result = tracing_subscriber::registry()
         .with(RequestIdLayer)
         .with(stdout_layer)
         .with(file_layer)
         .try_init();
+    // try_init 失败 = 本进程已有全局 subscriber(测试/壳内重复初始化),此时句柄
+    // 无法生效,不登记——`set_level` 会退化为「只记录当前级别」。
+    let reloaders: Vec<ReloadFn> = if init_result.is_ok() {
+        vec![
+            Box::new(move |f| {
+                stdout_handle
+                    .reload(f)
+                    .map_err(|e| format!("控制台日志层调级失败:{e}"))
+            }),
+            Box::new(move |f| {
+                file_handle
+                    .reload(f)
+                    .map_err(|e| format!("文件日志层调级失败:{e}"))
+            }),
+        ]
+    } else {
+        Vec::new()
+    };
+    let _ = RELOADERS.set(reloaders);
+    // 启动级别回填:只有真正装上 subscriber 的首次 init 才回填。重复 init 的
+    // try_init 会失败,此时生效的仍是首次的订阅者与级别——不能用第二次的参数覆盖,
+    // 否则 GET /api/diagnostics/log-level 会回显一个并未生效的值。
+    // RUST_LOG 覆盖时回显 "custom"(它的指令集不是五档之一,不做无意义的猜测)。
+    if init_result.is_ok() {
+        let startup_level = if std::env::var("RUST_LOG")
+            .ok()
+            .is_some_and(|v| !v.trim().is_empty())
+        {
+            "custom".to_string()
+        } else {
+            level.trim().to_ascii_lowercase()
+        };
+        *current_level_cell()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = startup_level;
+    }
 
     cleanup_old_logs(log_dir);
     vec![stdout_guard, file_guard]
@@ -872,5 +969,29 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().to_string())
             .collect();
         assert_eq!(left, vec![fresh], "陈旧的轮转产物应随日志一并清理");
+    }
+    /// 6.2:运行时调级的级别校验与归一。
+    ///
+    /// **单例合并**:`CURRENT_LEVEL` 是进程级状态,两个测试并行跑会互相踩
+    /// (CI 实测:一例把级别改成 debug,另一例「拒绝时不得改写」的断言随即失败)。
+    /// 故把「非法拒绝」与「合法归一」放进同一个用例顺序执行。
+    #[test]
+    fn set_level_validates_and_normalizes() {
+        // 先落到确定值,避免受同进程其它测试影响
+        assert!(set_level("error").is_ok());
+        let before = current_level();
+        // 非法级别:一律拒绝,且不改写当前值("info " 会被 trim 后接受,不在非法集合内)
+        for bad in ["", "verbose", "warning", "5", "Information"] {
+            assert!(set_level(bad).is_err(), "非法级别 {bad:?} 应被拒绝");
+        }
+        assert_eq!(current_level(), before, "拒绝时不得改写当前级别");
+        // 合法级别:大小写与空白归一后接受
+        assert!(set_level("DEBUG").is_ok(), "大小写应归一后接受");
+        assert_eq!(current_level(), "debug");
+        assert!(set_level(" warn ").is_ok(), "空白应被 trim");
+        assert_eq!(current_level(), "warn");
+        // 复位,避免影响同进程其它测试的日志噪声
+        assert!(set_level("error").is_ok());
+        assert_eq!(current_level(), "error");
     }
 }
