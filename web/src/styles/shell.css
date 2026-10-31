@@ -64,7 +64,13 @@
   background: var(--sv-surface);
   overflow: hidden;
   transition: width var(--dur-normal) var(--ease-standard);
+  contain: layout; /* 折叠态的排布不外溢影响 .sv-body 的横向尺寸计算 */
 }
+/* UIVIS-2/B2:折叠态(width:0)的裁剪窗口不该反过来压缩内部排布。改前子元素按 0 宽容器
+   重新折行:页签被挤到 34px、「调用情况」竖折 4 行(实测 w=34.3 h=86.4),展开动画途中
+   还会二次回流。折叠时让子元素仍按展开宽(340px)排布,面板只负责裁剪;
+   展开态 width 恢复 auto,与改前逐像素一致(336px = 340 − 2×2px 边框)。 */
+.sv-agent-panel:not(.open) > * { width: 340px; }
 .sv-agent-panel.open {
   width: 340px;
   margin-left: var(--space-3);
@@ -472,11 +478,18 @@
   background: var(--sv-pink-deep);
   border-color: var(--sv-pink-deep);
 }
+/* UIPOL-3/B2:禁用态形体不能消失。改前底色 --sv-pink-light 与容纳它的输入框
+   (--sv-paper/#fdfafb)亮度几乎相同,对比度实测 1.03:1——WCAG 对非文本 UI 组件要求 3:1,
+   按钮读起来就是「不存在」,用户会以为功能坏了。现改为:去掉浅粉填充,形体交给
+   2px 实线 --sv-ink-faint + 55% 不透明(实测边框对比 5.46:1),仍是明确的「不可用」观感。
+   不用虚线:本案实测虚线只有 1.61:1,且硬边体系里虚线是「占位框」语义(尚未确定的区域),
+   用在按钮上会读成「这里将来会有东西」。 */
 .sv-btn-send:disabled {
-  background: var(--sv-pink-light);
-  border-color: var(--sv-line-strong);
-  color: var(--sv-ink-dim);
+  background: transparent;
+  border: var(--bw) solid var(--sv-ink-faint);
+  color: var(--sv-ink-faint);
   box-shadow: none;
+  opacity: 0.55;
   cursor: not-allowed;
 }
 
@@ -537,7 +550,13 @@
   white-space: nowrap;
 }
 
-/* ===== 最底部工具栏 ===== */
+/* ===== 最底部工具栏 =====
+   UIVIS-2/UI-B1:换行必须有明确优先级。改前 `flex-wrap: wrap` 让每个控件各自决定何时
+   掉行——Agent 面板展开(主区窄 340px)后实测「模式档位 + 授权」留在第一行、模型选择器
+   独占第二行、两个附件按钮掉到第三行,三个控件组被拆散,看起来像布局失控。
+   现:各控件组 `flex-shrink: 0`(组内不压缩、不拆散),模型选择器作为唯一可让位的项
+   (`flex: 1 1 180px`)吃掉剩余宽;剩余宽不足 180px 时整体换行,换行后仍是
+   「模式 / 授权 / 模型」在前、「附件」在右的固定顺序。 */
 .sv-input-toolbar {
   display: flex;
   align-items: center;
@@ -546,8 +565,13 @@
   border-top: 1px solid var(--sv-line);
   background: var(--sv-surface);
   flex-wrap: wrap;
+  row-gap: var(--space-1-5);
 }
 .sv-input-toolbar .sv-mode { flex-shrink: 0; }
+/* 授权档与附件按钮:整组不压缩(压缩会把中文压成竖排) */
+.sv-input-toolbar .sv-auth-mode,
+.sv-input-toolbar .sv-btn-attach { flex-shrink: 0; }
+.sv-input-toolbar .sv-rel { flex-shrink: 0; }
 
 /* 模式切换 */
 .sv-mode {
@@ -819,8 +843,19 @@
 .sv-side-foot .sv-side-btn:first-of-type,
 .sv-side-foot .sv-feedback { grid-column: 1 / -1; }
 
-/* 连接状态灯 */
-.sv-conn { display: flex; align-items: center; gap: var(--space-1-5); font-size: var(--text-xs); color: var(--sv-ink-soft); }
+/* 连接状态灯
+   UIVIS-3/UI-A5:「已连接」在 768 档(侧栏 220px、与品牌+S 标同排)会被逐字折断成竖排
+   三行——中文在窄容器里没有单词边界,浏览器会逐字断。nowrap + 不参与压缩即可;
+   空间真不够时品牌名先省略,而不是把状态灯拆成竖排。 */
+.sv-conn {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  font-size: var(--text-xs);
+  color: var(--sv-ink-soft);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
 .sv-conn .dot { width: 8px; height: 8px; }
 .sv-conn .dot.ok { background: var(--sv-green); }
 .sv-conn .dot.fail { background: var(--sv-red); }

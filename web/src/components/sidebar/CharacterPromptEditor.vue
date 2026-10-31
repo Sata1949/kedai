@@ -108,7 +108,7 @@ onBeforeUnmount(() => {
               spellcheck="false"
             ></textarea>
             <p class="sv-note sv-mt6">
-              主开场之外可添加备用开场,新建会话时可在多个开场之间选择。
+              主开场之外可添加备用开场，新建会话时可在多个开场之间选择。
             </p>
 
             <!-- 备用开场列表 -->
@@ -131,7 +131,7 @@ onBeforeUnmount(() => {
               ＋ 添加备用开场
             </button>
             <p class="sv-note sv-mt8">
-              提示词作为角色的系统设定注入每次对话;开场白在新建会话时作为角色的第一句话(自动识别角色卡内嵌开场白)。
+              提示词作为角色的系统设定注入每次对话；开场白在新建会话时作为角色的第一句话(自动识别角色卡内嵌开场白)。
             </p>
           </div>
           <div v-if="promptMsg" class="sv-feedback" :class="promptMsg.includes('失败') ? 'err' : 'ok'">

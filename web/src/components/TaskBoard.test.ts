@@ -93,7 +93,7 @@ describe('TaskBoard 组件(M5 补测)', () => {
     expect(wrapper.find('.sv-task-head-title').text()).toContain('写一份周报');
     // 状态经 taskStatusLabel 中文化(M0 的 TaskStatus 枚举消费点)
     const statusLine = wrapper.find('.sv-task-status-line').text();
-    expect(statusLine).toContain('模式:');
+    expect(statusLine).toContain('模式：');
     expect(statusLine.length).toBeGreaterThan(0);
   });
 
@@ -111,7 +111,7 @@ describe('TaskBoard 组件(M5 补测)', () => {
       store.currentTask = makeTaskDetail({ task_mode: mode });
       const wrapper = mount(TaskBoard);
       const line = wrapper.find('.sv-task-status-line').text();
-      expect(line).toContain(`模式:${label}`);
+      expect(line).toContain(`模式：${label}`);
       wrapper.unmount();
     }
   });

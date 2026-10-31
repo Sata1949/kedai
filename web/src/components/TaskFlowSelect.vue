@@ -137,7 +137,7 @@ watch([() => flows.value.length, taskFlowMode], prefillIfEmpty);
     <select
       v-model="flowModeModel"
       class="sv-select"
-      title="流程模式:强制 = 只跑下面这一份流程;对比 = 根流程照常执行,名单内流程额外作为工具释放给节点,由模型自主调用"
+      title="流程模式：强制 = 只跑下面这一份流程；对比 = 根流程照常执行，名单内流程额外作为工具释放给节点，由模型自主调用"
     >
       <option v-for="m in FLOW_MODE_ORDER" :key="m" :value="m">
         {{ FLOW_MODE_OPTION_LABELS[m] }}
@@ -148,15 +148,15 @@ watch([() => flows.value.length, taskFlowMode], prefillIfEmpty);
       class="sv-select"
       title="绑定要执行的自定义流程;绑定后该任务即冻结在这份编排上(改流程/换当前流程都不影响它)"
     >
-      <option value="">流程:跟随当前流程</option>
-      <option v-if="staleId" :value="staleId">流程:(已失效) {{ staleId }}</option>
+      <option value="">流程：跟随当前流程</option>
+      <option v-if="staleId" :value="staleId">流程：（已失效） {{ staleId }}</option>
       <option v-for="f in flows" :key="f.id" :value="f.id" :disabled="!f.enabled">
-        流程:{{ f.name || f.id }}{{ f.enabled ? '' : '(已停用)' }}
+        流程：{{ f.name || f.id }}{{ f.enabled ? '' : '（已停用）' }}
       </option>
     </select>
     <!-- 对比模式名单(二维批次 7b):勾选即「模型可调用」 -->
     <div v-if="taskFlowMode === 'compare'" class="flow-ids">
-      <p class="sv-note">可调用流程(模型在工具循环里自主调用,成果回灌给根流程):</p>
+      <p class="sv-note">可调用流程(模型在工具循环里自主调用，成果回灌给根流程):</p>
       <label
         v-for="c in candidates"
         :key="c.id"

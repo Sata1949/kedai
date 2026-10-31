@@ -74,12 +74,12 @@ watch(appMode, () => void loadPromptPreview());
         :placeholder="promptPlaceholder"
         spellcheck="false"
       />
-      <p class="sv-note">该提示词按模式独立存储,互不影响。</p>
+      <p class="sv-note">该提示词按模式独立存储，互不影响。</p>
       <p class="sv-note">
         <b>Custom Prompt 会完整替换内置模板，不是追加。</b>占位符替换为当前角色与已命中的世界书内容。不写
         <code v-pre>{{world_info}}</code> 时世界书不会自动注入（<b>变量状态块除外</b>：它是变量更新的唯一
         载体，漏写占位符时由引擎兜底注入到系统提示词末尾，避免变量更新静默停摆）。可用工具清单与「何时调用」由引擎在
-        Agent 模式下动态注入到系统提示词末尾,无需在此手写工具说明。
+        Agent 模式下动态注入到系统提示词末尾，无需在此手写工具说明。
       </p>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">搜索端点</label>
@@ -91,21 +91,21 @@ watch(appMode, () => void loadPromptPreview());
           spellcheck="false"
         />
       </div>
-      <p class="sv-note">search 工具联网搜索使用的端点;自定义服务需返回相似 HTML 结构。</p>
+      <p class="sv-note">search 工具联网搜索使用的端点；自定义服务需返回相似 HTML 结构。</p>
       <!-- 变量组与反思提示词:仅角色扮演(聊天)消费,任务模式隐藏(TM-SET-3);
            批量保存路径同步按模式过滤(useAgentSettings)。 -->
       <template v-if="!isTaskMode">
       <div class="sv-inp-row">
         <label class="sv-inp-tag" title="变量状态注入位置">变量状态注入位置</label>
         <select v-model="mvuVarsPosition" class="sv-input">
-          <option value="system">system 提示词(默认,兼容)</option>
+          <option value="system">system 提示词(默认，兼容)</option>
           <option value="user_tail">最新用户消息尾部(缓存友好)</option>
         </select>
       </div>
       <p class="sv-note">
         世界书/变量状态(<code v-pre>{{format_message_variable}}</code>)的注入位置。「最新用户消息尾部」模式把
-        变量块移出 system 提示词,变量更新不再使 system + 早期历史的前缀缓存整体失效,可显著提升
-        DeepSeek / Anthropic / OpenAI 等提供商的 prompt caching 命中率;需角色卡把
+        变量块移出 system 提示词，变量更新不再使 system + 早期历史的前缀缓存整体失效，可显著提升
+        DeepSeek / Anthropic / OpenAI 等提供商的 prompt caching 命中率；需角色卡把
         <code v-pre>{{format_message_variable}}</code> 写在常驻世界书条目中才生效。
       </p>
 
@@ -131,7 +131,7 @@ watch(appMode, () => void loadPromptPreview());
           title="变量两步生成的温度档;留空 = 用内置 0.3(与正文温度解耦,降低温度可提高结构化遵循度)"
         />
       </div>
-      <p class="sv-note">变量更新/状态栏调用独立于正文:模型留空即共用,温度留空用内置 0.3(0-2,越小越稳)。</p>
+      <p class="sv-note">变量更新/状态栏调用独立于正文：模型留空即共用，温度留空用内置 0.3(0-2,越小越稳)。</p>
       <div class="sv-inp-row" style="align-items: flex-start">
         <label class="sv-inp-tag" style="padding-top: var(--space-2)">反思提示词</label>
         <textarea
@@ -143,13 +143,13 @@ watch(appMode, () => void loadPromptPreview());
         />
       </div>
       <p class="sv-note">
-        深度 / Agent 模式的反思步骤:留空时用内置规则(空输出、截断、未答疑问)检查;填写后改为调用模型,按本提示词检查
-        草稿是否满足人设、字数、格式等要求,判定输出须以 <code>PASS</code> 或 <code>FAIL</code> 开头,失败自动重新生成
-        (最多 3 次)。模型输出无法解析时自动回退内置规则,不影响流程。
+        深度 / Agent 模式的反思步骤：留空时用内置规则(空输出、截断、未答疑问)检查；填写后改为调用模型，按本提示词检查
+        草稿是否满足人设、字数、格式等要求，判定输出须以 <code>PASS</code> 或 <code>FAIL</code> 开头，失败自动重新生成
+        (最多 3 次)。模型输出无法解析时自动回退内置规则，不影响流程。
       </p>
       </template>
       <p v-if="isTaskMode" class="sv-note">
-        变量与状态栏、反思提示词仅角色扮演(聊天)使用,已在任务模式下隐藏;如需调整请切到角色扮演模式。
+        变量与状态栏、反思提示词仅角色扮演(聊天)使用，已在任务模式下隐藏；如需调整请切到角色扮演模式。
       </p>
       <div class="sv-btn-row">
         <button class="sv-btn primary sv-btn-fill" :disabled="agentSaving" @click="saveAgentNow">
@@ -171,7 +171,7 @@ watch(appMode, () => void loadPromptPreview());
       </div>
 
       <div class="sv-separator">
-        <div class="sv-field-label sub">主 Agent 提示词(运行时,注入模型)</div>
+        <div class="sv-field-label sub">主 Agent 提示词(运行时，注入模型)</div>
         <textarea
           v-model="agentPromptMd"
           rows="14"

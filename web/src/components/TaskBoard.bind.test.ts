@@ -193,7 +193,7 @@ describe('TaskBoard 改绑流程入选区(B 批 B3)', () => {
     // 根流程下拉:含「跟随当前流程」,当前绑定原样读回
     const select = panel.find('select.sv-task-flow-bind-select');
     expect((select.element as HTMLSelectElement).value).toBe('f1');
-    expect(select.text()).toContain('流程:跟随当前流程');
+    expect(select.text()).toContain('流程：跟随当前流程');
     // 名单勾选:根流程禁用、停用禁用、当前勾选的 f2 在场
     expect(panel.text()).toContain('主流程(根流程,不可调用)');
     expect(panel.text()).toContain('停用流程(已停用)');

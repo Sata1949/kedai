@@ -122,6 +122,48 @@ export function stripMvuBlocks(text: string): string {
   return stripProtocolBlocks(text);
 }
 
+/**
+ * 用户消息 markdown 实例(2026-10-31 UIVIS-2/UI-A3)。
+ *
+ * 与助手路径的差异只有两条:**关闭 linkify**(用户粘贴的 URL 不该被自动改写成可点链接——
+ * 用户输入是「我打的字」,自动加链接会改掉原文语义)、**不剥协议块**(mvu 变量块是助手输出
+ * 的约定,用户正文里出现同名字样应当原样显示)。html 仍是 false(与助手同一安全基线),
+ * 原始标签一律转义。
+ */
+let mdUser: MarkdownItInstance | null = null;
+
+function buildMdUser(): MarkdownItInstance {
+  const instance = new MarkdownIt({
+    html: false,
+    linkify: false,
+    breaks: true,
+    typographer: false,
+  });
+  const defaultLink = instance.renderer.rules.link_open ?? ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
+  instance.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+    tokens[idx].attrSet('target', '_blank');
+    tokens[idx].attrSet('rel', 'noopener noreferrer');
+    return defaultLink(tokens, idx, options, env, self);
+  };
+  for (const ext of mdExtensions) ext(instance);
+  return instance;
+}
+
+/**
+ * 渲染用户消息 markdown(UI-A3)。
+ *
+ * 背景:用户气泡此前走纯文本插值,同一会话里用户写 `- 第一条` 是字面文本、助手写同样的
+ * 是 `<ul><li>`——两种排版并存会被读成「回复坏了」。改为与助手同走 markdown,但按
+ * 用户输入的语义差异关掉自动链接(见上)。md 语法之外的内容(lone 空行、缩进代码块)
+ * 由 markdown-it 的 breaks/缩进规则处理,与助手侧观感一致。
+ */
+export function renderUserMarkdown(text: string): string {
+  if (!text) return '';
+  if (!text.trim()) return '';
+  if (!mdUser) mdUser = buildMdUser();
+  return mdUser.render(text);
+}
+
 /** 导出 md 实例(供测试/高级插件) */
 export function getMarkdownIt(): MarkdownItInstance {
   return ensureMd();

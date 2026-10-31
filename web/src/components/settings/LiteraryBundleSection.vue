@@ -142,7 +142,7 @@ async function onRecommendChange(next: string): Promise<void> {
       <div class="sv-data-row">
         <div class="info">
           <b>启用文学能力包(角色扮演)</b>
-          <span>角色扮演模式:提示词框留空时默认值取「文学增强版」,并在 system 尾与最新用户消息尾追加两段创作纪律(反 AI 腔 / 视角锚定 / 防复读代答 / 篇幅纪律)</span>
+          <span>角色扮演模式：提示词框留空时默认值取「文学增强版」,并在 system 尾与最新用户消息尾追加两段创作纪律(反 AI 腔 / 视角锚定 / 防复读代答 / 篇幅纪律)</span>
         </div>
         <label
           style="display: flex; gap: var(--space-1-5); align-items: center; cursor: pointer"
@@ -178,7 +178,7 @@ async function onRecommendChange(next: string): Promise<void> {
       <div class="sv-data-row">
         <div class="info">
           <b>文风预设(角色扮演)</b>
-          <span>在最新用户消息尾部追加一段文风素材(人称 / 句式 / 正例锚定);需开启上方「文学能力包」开关才会注入,默认不注入</span>
+          <span>在最新用户消息尾部追加一段文风素材(人称 / 句式 / 正例锚定);需开启上方「文学能力包」开关才会注入，默认不注入</span>
         </div>
         <select
           class="sv-select"
@@ -192,7 +192,7 @@ async function onRecommendChange(next: string): Promise<void> {
       <div class="sv-data-row">
         <div class="info">
           <b>长程一致性推荐档</b>
-          <span>把「压缩模式 / 压缩阈值 / 压缩保留条数」三项改为该档推荐值(只改这三项);选回「不改变」按<b>写入前原值</b>恢复,不是恢复默认值</span>
+          <span>把「压缩模式 / 压缩阈值 / 压缩保留条数」三项改为该档推荐值(只改这三项);选回「不改变」按<b>写入前原值</b>恢复，不是恢复默认值</span>
         </div>
         <select
           class="sv-select"
@@ -206,9 +206,9 @@ async function onRecommendChange(next: string): Promise<void> {
     </div>
     <div v-if="msg" class="sv-feedback" :class="msgKind === 'err' ? 'err' : 'ok'">{{ msg }}</div>
     <p class="sv-note">
-      两个开关各自按模式生效:角色扮演侧开关<b>只影响角色扮演模式</b>,任务侧开关<b>只影响任务模式</b>
-      (与「编码能力包」同开时,任务侧以编码模板优先)。两者都<b>只影响默认值</b>——
-      你在提示词框里填过自定义内容时,<b>以自定义值为准</b>;角色扮演侧的创作纪律段对自定义提示词同样生效。
+      两个开关各自按模式生效：角色扮演侧开关<b>只影响角色扮演模式</b>,任务侧开关<b>只影响任务模式</b>
+      (与「编码能力包」同开时，任务侧以编码模板优先)。两者都<b>只影响默认值</b>——
+      你在提示词框里填过自定义内容时，<b>以自定义值为准</b>;角色扮演侧的创作纪律段对自定义提示词同样生效。
       开启后还会并入四条文学流程预设(章节续写 / 润色去 AI 腔 / 一致性校对 / 人物声音校准)。
       默认关闭。
     </p>

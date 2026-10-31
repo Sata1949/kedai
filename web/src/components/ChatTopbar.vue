@@ -296,7 +296,7 @@ onBeforeUnmount(() => {
 
   <!-- 渲染引导条:角色卡含界面脚本但当前纯文本显示时,给一键开启入口(bug 4 可发现性修复) -->
   <div v-if="renderHintVisible" class="sv-render-hint" role="status">
-    <span class="sv-render-hint-text">此角色卡带有界面脚本,当前以纯文本显示,可能看不到状态栏/开场界面。</span>
+    <span class="sv-render-hint-text">此角色卡带有界面脚本，当前以纯文本显示，可能看不到状态栏/开场界面。</span>
     <button type="button" class="sv-btn ghost sv-btn-sm" @click="enableRenderFromHint">开启 HTML 渲染</button>
     <button type="button" class="sv-btn ghost sv-btn-sm" title="查看风险后为当前角色卡启用 JavaScript" @click="confirmScriptAuthorization">授权 JS</button>
     <button type="button" class="sv-icon-btn" title="不再提示(仅此角色)" @click="dismissRenderHint">✕</button>

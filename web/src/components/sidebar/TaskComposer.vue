@@ -198,9 +198,9 @@ watch(
         <!-- 执行者(独立执行者库;与角色扮演角色卡解耦,故不列 characters) -->
         <div class="sv-inp-row">
           <select v-model="executorId" class="sv-select" title="选择任务执行者">
-            <option value="">执行者:通用执行者</option>
+            <option value="">执行者：通用执行者</option>
             <option v-for="e in executors" :key="e.id" :value="e.id">
-              执行者:{{ e.name }}
+              执行者：{{ e.name }}
             </option>
           </select>
           <button
@@ -235,7 +235,7 @@ watch(
           >清空</button>
         </div>
         <div v-if="recentWorkspacesShown.length > 0 && !workspacePath" class="sv-ws-recent">
-          <span class="sv-note">最近:</span>
+          <span class="sv-note">最近：</span>
           <button
             v-for="p in recentWorkspacesShown"
             :key="p"
@@ -264,7 +264,7 @@ watch(
         <!-- 探测失败:把后端中文原因原样上屏(与创建时的 400 同一套文案,前端不另造) -->
         <p v-else-if="wsProbeError" class="sv-note sv-ws-hint">{{ wsProbeError }}</p>
         <p v-if="wsHintVisible" class="sv-note sv-ws-hint">
-          编码能力包已启用:未绑定工作区的任务将在任务草稿目录内工作。
+          编码能力包已启用：未绑定工作区的任务将在任务草稿目录内工作。
         </p>
       </div>
     </details>

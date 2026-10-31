@@ -6,6 +6,7 @@
 import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, watch } from 'vue';
 import { useAppStore } from './store';
 import { lazyModal } from './asyncModal';
+import { lazyMain } from './asyncMain';
 import { MODALS, MODAL_FLAGS } from './modals';
 import { shouldShowOnboarding } from './onboarding';
 import { inTauri } from './platform';
@@ -14,10 +15,14 @@ import { useExternalLinks } from './composables/useExternalLinks';
 import { useKeepAlive } from './composables/useKeepAlive';
 import { useUserPersona } from './composables/useUserPersona';
 import Sidebar from './components/Sidebar.vue';
-import ChatWindow from './components/ChatWindow.vue';
-import TaskBoard from './components/TaskBoard.vue';
 import AgentPanel from './components/AgentPanel.vue';
 import SplashScreen from './components/SplashScreen.vue';
+
+// 主区两模式(UIVIS-3/UI-C2):此前是静态 import,首屏 bundle 里含着任务台的整块实现;
+// 改为按模式懒加载 + 统一的加载骨架,chunk 未到位时主区不再是纯空白。
+// 注意:两者仍由 <Transition mode="out-in"> 切换,key 保持不变(切换语义不变)。
+const ChatWindow = lazyMain(() => import('./components/ChatWindow.vue'));
+const TaskBoard = lazyMain(() => import('./components/TaskBoard.vue'));
 
 // 音频播放器:右下角浮层,非首屏(默认收起为开关按钮),一并懒加载。
 // 它是常驻浮层而非模态弹窗,故不进 modals.ts 注册表。
@@ -371,11 +376,11 @@ watch(
     <!-- 未捕获异常兜底(计划批次 5.1):只给「关闭」——异常没有对应的重试动作,
          给重试按钮会让用户以为点一下能修复,而实际只有刷新页面可能有用 -->
     <div v-if="store.globalError" class="sv-global-error" role="alert">
-      <span class="sv-global-error-text">界面出现未捕获异常:{{ store.globalError }}</span>
+      <span class="sv-global-error-text">界面出现未捕获异常：{{ store.globalError }}</span>
       <button class="sv-btn ghost sv-btn-sm" @click="store.globalError = null">关闭</button>
     </div>
     <div v-if="store.modalLoadError" class="sv-global-error" role="alert">
-      <span class="sv-global-error-text">「{{ store.modalLoadError.name }}」面板加载失败(前端已更新,需刷新页面)</span>
+      <span class="sv-global-error-text">「{{ store.modalLoadError.name }}」面板加载失败(前端已更新，需刷新页面)</span>
       <button class="sv-btn ghost sv-btn-sm" @click="reloadPage">刷新页面</button>
       <button class="sv-btn ghost sv-btn-sm" @click="retryModalLoad">重试</button>
       <button class="sv-btn ghost sv-btn-sm" @click="store.modalLoadError = null">关闭</button>

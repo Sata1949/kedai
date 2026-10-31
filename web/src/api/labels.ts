@@ -43,28 +43,28 @@ export const CONNECTION_CAPABILITIES: ConnectionCapabilityMeta[] = [
   {
     key: 'supports_vision',
     label: '视觉输入',
-    tip: '该连接对应模型可接收图像:聊天贴图、截图与视觉工具的图像会随请求发送。纯文本模型(不支持视觉)请勿勾选——未勾选时贴图不会随请求发送,避免无效报错。',
+    tip: '该连接对应模型可接收图像：聊天贴图、截图与视觉工具的图像会随请求发送。纯文本模型（不支持视觉）请勿勾选——未勾选时贴图不会随请求发送，避免无效报错。',
   },
   {
     key: 'image_auto_split',
     label: '大图自动拆分',
-    tip: '对图像尺寸限制较严的端点(如 DeepSeek):长边超过 1300px 的大图会在发送前自动等比切块,提升识别成功率。可直接接收大图的模型(如 Kimi / GPT-4o 等)无需勾选。',
+    tip: '对图像尺寸限制较严的端点（如 DeepSeek）：长边超过 1300px 的大图会在发送前自动等比切块，提升识别成功率。可直接接收大图的模型（如 Kimi / GPT-4o 等）无需勾选。',
   },
   {
     key: 'supports_structured_output',
     label: '结构化输出',
-    tip: '勾选后,引擎的结构化产物调用(如变量状态更新)会随请求要求 JSON 模式(Chat Completions: response_format;Responses: text.format)。Anthropic 方言无等价参数,自动走提示词约定。',
+    tip: '勾选后，引擎的结构化产物调用（如变量状态更新）会随请求要求 JSON 模式（Chat Completions: response_format;Responses: text.format）。Anthropic 方言无等价参数，自动走提示词约定。',
   },
   {
     key: 'supports_prefix_completion',
     label: '前缀续写',
-    tip: '预留能力位:已接入连接构建与指纹,引擎当前没有前缀续写生成路径,勾选暂不改变行为。',
+    tip: '预留能力位：已接入连接构建与指纹，引擎当前没有前缀续写生成路径，勾选暂不改变行为。',
     reserved: true,
   },
   {
     key: 'supports_mid_conversation_system',
     label: '中途系统插入',
-    tip: '勾选后,对话中途插入的系统级内容(世界书 @INJECT、生成前激发条目)在 Anthropic / Responses 方言下就地以 user 消息承载(保留位置);不勾选时这类内容上提合并到顶部系统提示。Chat Completions 方言本就原样透传。',
+    tip: '勾选后，对话中途插入的系统级内容（世界书 @INJECT、生成前激发条目）在 Anthropic / Responses 方言下就地以 user 消息承载（保留位置）；不勾选时这类内容上提合并到顶部系统提示。Chat Completions 方言本就原样透传。',
   },
 ];
 
@@ -88,14 +88,16 @@ export const MODE_LABELS = {
   custom: '自定义流程',
 } satisfies Record<TaskRunMode, string>;
 
-/** 模式 → 下拉选项文案(选择器)。在短标签基础上标注默认项。 */
+/** 模式 → 下拉选项文案(选择器)。在短标签基础上标注默认项。
+ *  UIVIS-3/UI-B4:本表直接渲染成 <option> 文本,是界面文案而非线格式字段——中文后的
+ *  冒号与括号按全角写(同批把模板文本节点统一成同一套标点)。 */
 export const MODE_OPTION_LABELS = {
-  legacy: '模式:三段式(默认)',
-  solo: '模式:单 Agent',
-  multi: '模式:多 Agent',
-  plan: '模式:先规划后批准',
-  team: '模式:团队协作',
-  custom: '模式:自定义流程',
+  legacy: '模式：三段式（默认）',
+  solo: '模式：单 Agent',
+  multi: '模式：多 Agent',
+  plan: '模式：先规划后批准',
+  team: '模式：团队协作',
+  custom: '模式：自定义流程',
 } satisfies Record<TaskRunMode, string>;
 
 /** 下拉展示顺序(与后端 TaskRunMode 定义顺序一致,便于对照) */
@@ -112,10 +114,10 @@ export const MODE_ORDER: TaskRunMode[] = ['legacy', 'solo', 'multi', 'plan', 'te
  */
 export type TaskFlowMode = 'force' | 'compare';
 
-/** 流程用法 → 下拉文案(穷尽校验同 MODE_LABELS) */
+/** 流程用法 → 下拉文案(穷尽校验同 MODE_LABELS;UIVIS-3/UI-B4:同样按界面文案用全角) */
 export const FLOW_MODE_OPTION_LABELS = {
-  force: '流程模式:强制',
-  compare: '流程模式:对比(模型可调用名单内流程)',
+  force: '流程模式：强制',
+  compare: '流程模式：对比（模型可调用名单内流程）',
 } satisfies Record<TaskFlowMode, string>;
 
 /** 流程用法 → 徽标短标签(任务详情/看台展示用;对比模式的可调用数另拼) */

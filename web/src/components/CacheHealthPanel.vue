@@ -67,7 +67,7 @@ const entryRows = computed(() =>
     <div class="sv-field-label"><span class="sv-supreme orange" /> 缓存健康</div>
     <p class="sv-note" style="margin: 0 0 var(--space-2); line-height: 1.8">
       近 N 轮请求的 token 加权缓存命中率、费用估算与上下文水位(DeepSeek 等提供商的
-      prompt_cache 字段口径;命中率按 token 加权,非按请求条数)。
+      prompt_cache 字段口径；命中率按 token 加权，非按请求条数)。
     </p>
 
     <!-- 窗口切换 + 刷新 -->
@@ -145,7 +145,7 @@ const entryRows = computed(() =>
       <!-- 明细表(默认折叠) -->
       <details v-if="entryRows.length" class="cache-entries">
         <summary class="sv-script-meta" style="font-size: 11px; cursor: pointer">
-          明细(最近 {{ entryRows.length }} 条,左旧右新)
+          明细(最近 {{ entryRows.length }} 条，左旧右新)
         </summary>
         <div class="cache-entry-table">
           <div class="cache-entry-head">

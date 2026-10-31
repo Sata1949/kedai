@@ -24,8 +24,8 @@ onMounted(() => {
   <div v-show="props.show" class="sv-field">
     <div class="sv-field-label"><span class="sv-supreme blue" /> 向量化模型</div>
     <p class="sv-note" style="margin: 0 0 var(--space-2-5); line-height: 1.8">
-      记忆库的<strong>语义召回</strong>需要 embedding 服务:开启后,记忆写入时生成向量,
-      召回时按「向量相似度 70% + 关键词 30%」混合排序。未配置时自动降级为纯关键词召回,
+      记忆库的<strong>语义召回</strong>需要 embedding 服务：开启后，记忆写入时生成向量，
+      召回时按「向量相似度 70% + 关键词 30%」混合排序。未配置时自动降级为纯关键词召回，
       不影响记忆功能本身。需 OpenAI 兼容的 <code>/embeddings</code> 接口。
     </p>
 
@@ -35,7 +35,7 @@ onMounted(() => {
         <label class="sv-inp-tag">启用向量化</label>
         <label style="display: flex; gap: var(--space-1-5); align-items: center; cursor: pointer">
           <input v-model="enabled" type="checkbox" style="flex-shrink: 0" />
-          <span class="sv-note">开启后新记忆自动生成向量;存量记忆需点下方「重建向量索引」</span>
+          <span class="sv-note">开启后新记忆自动生成向量；存量记忆需点下方「重建向量索引」</span>
         </label>
       </div>
 
@@ -119,8 +119,8 @@ onMounted(() => {
         </span>
       </div>
       <p class="sv-note">
-        Key 仅存本地服务端,落盘加密、不回显明文;地址会自动补全协议与 /v1。
-        向量化失败不影响记忆写入,可在本页随时手动重建。
+        Key 仅存本地服务端，落盘加密、不回显明文；地址会自动补全协议与 /v1。
+        向量化失败不影响记忆写入，可在本页随时手动重建。
       </p>
     </div>
 

@@ -147,19 +147,19 @@ async function saveBind(): Promise<void> {
           class="sv-select sv-task-flow-bind-select"
           title="绑定要执行的流程;绑定后该任务即冻结在这份编排上(改流程/换当前流程都不影响它)。「跟随当前流程」= 执行时按当时的当前流程跑"
         >
-          <option value="">流程:跟随当前流程</option>
-          <option v-if="bindStaleRoot" :value="bindStaleRoot">流程:(已失效) {{ bindStaleRoot }}</option>
+          <option value="">流程：跟随当前流程</option>
+          <option v-if="bindStaleRoot" :value="bindStaleRoot">流程：(已失效) {{ bindStaleRoot }}</option>
           <option v-for="f in bindFlows" :key="f.id" :value="f.id" :disabled="!f.enabled">
-            流程:{{ f.name || f.id }}{{ f.enabled ? '' : '(已停用)' }}
+            流程：{{ f.name || f.id }}{{ f.enabled ? '' : '(已停用)' }}
           </option>
         </select>
       </div>
       <!-- 可调用名单(与创建选择器同款文案与判定):空名单 = 强制模式,是合法选择 -->
       <p v-if="!bindFlows.length" class="sv-note flow-tool-warn">
-        流程库为空(或尚未加载):请先在设置里添加并启用流程,再来改绑。
+        流程库为空(或尚未加载):请先在设置里添加并启用流程，再来改绑。
       </p>
       <p class="sv-note">
-        可调用流程(模型在工具循环里自主调用,成果回灌给根流程;一个都不勾 = 强制模式,只跑根流程):
+        可调用流程(模型在工具循环里自主调用，成果回灌给根流程；一个都不勾 = 强制模式，只跑根流程):
       </p>
       <label
         v-for="c in bindCandidates"
@@ -177,9 +177,9 @@ async function saveBind(): Promise<void> {
         <span>{{ c.label }}</span>
       </label>
       <p v-if="bindStaleSelected.length" class="sv-note flow-tool-warn">
-        名单里有已失效的流程,请取消勾选后再保存(否则后端会拒绝并保持原绑定)。
+        名单里有已失效的流程，请取消勾选后再保存(否则后端会拒绝并保持原绑定)。
       </p>
-      <p v-if="bindError" class="sv-note sv-task-flow-bind-err">改绑失败:{{ bindError }}</p>
+      <p v-if="bindError" class="sv-note sv-task-flow-bind-err">改绑失败：{{ bindError }}</p>
       <div class="sv-task-flow-bind-actions">
         <button
           class="sv-btn primary sv-btn-sm"

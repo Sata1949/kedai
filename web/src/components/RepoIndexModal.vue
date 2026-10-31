@@ -81,7 +81,7 @@ onServerPrefetch(load);
           <div class="sv-field-label"><span class="sv-supreme blue" /> 说明</div>
           <p class="sv-note" style="margin: 0; line-height: 1.8">
             由 <code>.kedai-index/build.mjs</code> 生成的代码索引(只读):
-            展示每个文件的模块 / 摘要 / 重要性 / 符号清单,供快速定位实现。
+            展示每个文件的模块 / 摘要 / 重要性 / 符号清单，供快速定位实现。
             <template v-if="result?.available">
               当前索引
               <b>{{ result.fileCount ?? items.length }}</b> 个文件
@@ -176,7 +176,7 @@ onServerPrefetch(load);
                       模块 {{ it.module }} · 类别 {{ it.category || '—' }} · 引用 {{ it.usageCount }} 次
                     </p>
                     <p v-if="it.deepSummary" class="repo-index-deep">{{ it.deepSummary }}</p>
-                    <p v-if="it.note" class="sv-script-meta" style="font-size: 11px">备注:{{ it.note }}</p>
+                    <p v-if="it.note" class="sv-script-meta" style="font-size: 11px">备注：{{ it.note }}</p>
                     <div v-if="it.symbols.length" class="repo-index-symbols">
                       <span class="sv-script-meta" style="font-size: 11px">符号({{ it.symbols.length }}):</span>
                       <span v-for="s in it.symbols" :key="`${s.name}:${s.line}`" class="repo-index-symbol">

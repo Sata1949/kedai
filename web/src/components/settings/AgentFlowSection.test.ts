@@ -196,7 +196,7 @@ describe('AgentFlowSection 列表编辑未因抽取共用组件而回归', () =>
     await flushPromises();
     expect((kindSelect.element as HTMLSelectElement).value).toBe('strict');
     expect(editor().text()).not.toContain('工具策略');
-    expect(editor().text()).toContain('严格档:一次模型调用即完成');
+    expect(editor().text()).toContain('严格档：一次模型调用即完成');
 
     // 切回宽松:工具区恢复(说明草稿里的工具配置没有被清掉)
     await kindSelect.setValue('loose');

@@ -73,7 +73,7 @@ async function onCleanupScratch(): Promise<void> {
       <div class="sv-data-row">
         <div class="info">
           <b>清空当前会话</b>
-          <span>删除本会话全部消息,保留角色定义</span>
+          <span>删除本会话全部消息，保留角色定义</span>
         </div>
         <button class="sv-btn danger" :disabled="!currentSessionId" @click="clearAllData">清空</button>
       </div>
@@ -81,7 +81,7 @@ async function onCleanupScratch(): Promise<void> {
       <div class="sv-data-row">
         <div class="info">
           <b>回退快照(undo)</b>
-          <span>写工具(写文件/改变量等)执行前自动存档,可在 Agent 面板回退到该次修改前(全局设置,两模式共用)</span>
+          <span>写工具(写文件/改变量等)执行前自动存档，可在 Agent 面板回退到该次修改前(全局设置，两模式共用)</span>
         </div>
         <label style="display: flex; gap: var(--space-1-5); align-items: center; cursor: pointer" title="开启后写工具执行前自动保存快照,Agent 面板工具调用项出现「回退到此处」入口">
           <input v-model="undoEnabled" type="checkbox" style="flex-shrink: 0" @change="saveUndoEnabled" />
@@ -91,7 +91,7 @@ async function onCleanupScratch(): Promise<void> {
       <div class="sv-data-row">
         <div class="info">
           <b>清理任务草稿</b>
-          <span>删除任务产物目录中超过保留期(默认 30 天,见 KEDAI_TASK_SCRATCH_KEEP_DAYS)且不在运行/待批准任务的内容;自动清理由空闲看守顺带执行</span>
+          <span>删除任务产物目录中超过保留期(默认 30 天，见 KEDAI_TASK_SCRATCH_KEEP_DAYS)且不在运行/待批准任务的内容；自动清理由空闲看守顺带执行</span>
         </div>
         <button class="sv-btn ghost" :disabled="scratchBusy" @click="onCleanupScratch">立即清理</button>
       </div>
@@ -103,10 +103,10 @@ async function onCleanupScratch(): Promise<void> {
     <div v-if="scratchMsg" class="sv-feedback" :class="scratchMsg.startsWith('清理失败') ? 'err' : 'ok'">{{ scratchMsg }}</div>
     <input ref="importInput" type="file" accept=".json,application/json" class="hidden" @change="onImportFile" />
     <p v-if="!isTaskMode" class="sv-note">
-      导入格式与 SillyTavern 兼容:<code>[{"role":"user","content":"..."}]</code>
+      导入格式与 SillyTavern 兼容：<code>[{"role":"user","content":"..."}]</code>
     </p>
     <p v-else class="sv-note">
-      任务模式没有会话概念,聊天导出 / 导入 / 清空已隐藏;回退快照为全局开关,两模式共用。
+      任务模式没有会话概念，聊天导出 / 导入 / 清空已隐藏；回退快照为全局开关，两模式共用。
     </p>
   </div>
 </template>

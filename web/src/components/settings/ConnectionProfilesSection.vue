@@ -99,7 +99,7 @@ onMounted(() => {
     <div class="sv-field-label"><span class="sv-supreme red" /> 连接配置</div>
     <div class="sv-stack">
       <SkeletonBlock v-if="loading" :lines="2" />
-      <div v-else-if="!drafts.length" class="sv-count">暂无连接,点「新增连接」添加一条。</div>
+      <div v-else-if="!drafts.length" class="sv-count">暂无连接，点「新增连接」添加一条。</div>
 
       <div v-for="(d, i) in drafts" :key="d.id || 'new-' + i" class="sv-conn-card">
         <!-- 卡头:默认单选并进标签格(若单选自成 flex 项,会把名称输入右推 23px、与下方字段列错位) -->
@@ -266,16 +266,16 @@ onMounted(() => {
           任务模式未单独指定连接时使用(聊天的角色扮演不受影响)。新增的连接先「保存连接配置」后才能被选为任务默认。
         </p>
         <p v-if="taskDefaultDangling" class="sv-note flow-tool-warn">
-          当前任务默认连接已不存在或已停用,运行任务时将回退默认连接;请改选或清除。
+          当前任务默认连接已不存在或已停用，运行任务时将回退默认连接；请改选或清除。
         </p>
       </div>
 
       <p class="sv-note">
-        连接信息全局共享:角色扮演使用「默认」那套连接。
+        连接信息全局共享：角色扮演使用「默认」那套连接。
         <template v-if="isTaskMode">
-          任务模式未单独选择时也走它,可用上方「任务模式默认连接」改指其它连接(逐任务 / 流程节点的显式选择仍优先)。
+          任务模式未单独选择时也走它，可用上方「任务模式默认连接」改指其它连接(逐任务 / 流程节点的显式选择仍优先)。
         </template>
-        密钥只写不回显,留空表示不修改已有密钥;要清除已保存的密钥,用「清除」按钮并保存。
+        密钥只写不回显，留空表示不修改已有密钥；要清除已保存的密钥，用「清除」按钮并保存。
       </p>
     </div>
     <div v-if="feedback" class="sv-feedback" :class="feedback.kind">{{ feedback.text }}</div>

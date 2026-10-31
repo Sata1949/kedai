@@ -71,8 +71,8 @@ describe('TaskFlowSelect:对比模式(二维批次 7b)', () => {
   it('强制模式不渲染名单区;切到对比后出现(流程用法始终在 custom 下可选)', async () => {
     const { wrapper, store } = mountSelect(() => {});
     expect(wrapper.find('select').exists()).toBe(true);
-    expect(wrapper.text()).toContain('流程模式:强制');
-    expect(wrapper.text()).toContain('流程模式:对比(模型可调用名单内流程)');
+    expect(wrapper.text()).toContain('流程模式：强制');
+    expect(wrapper.text()).toContain('流程模式：对比（模型可调用名单内流程）');
     expect(wrapper.find('.flow-ids').exists(), '强制模式不渲染勾选区').toBe(false);
 
     store.taskFlowMode = 'compare';

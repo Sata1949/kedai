@@ -66,15 +66,15 @@ async function confirm(): Promise<void> {
 
       <div class="sv-modal-body">
         <!-- 提问做主标题:比普通说明文字更重,用户一眼看到要决定什么 -->
-        <p class="exit-question">确定要退出 Kedai 吗?</p>
-        <p class="exit-sub">退出会结束整个应用进程,以下内容会受影响:</p>
+        <p class="exit-question">确定要退出 Kedai 吗？</p>
+        <p class="exit-sub">退出会结束整个应用进程，以下内容会受影响：</p>
 
         <ul class="exit-warn">
           <li>
             <span class="exit-warn-mark" aria-hidden="true" />
             <span class="exit-warn-text">
               <b>正在生成或执行中的任务会被中断</b>
-              <em>已产出的内容保留在任务记录里,可稍后继续追加指令</em>
+              <em>已产出的内容保留在任务记录里，可稍后继续追加指令</em>
             </span>
           </li>
           <li>
@@ -88,7 +88,7 @@ async function confirm(): Promise<void> {
 
         <!-- Android 的二次返回键快捷退出(与桌面二次关闭同语义) -->
         <p v-if="showBackHint" class="exit-tip">
-          提示:按返回键打开本确认后,<b>再按一次返回键即直接退出</b>。
+          提示：按返回键打开本确认后，<b>再按一次返回键即直接退出</b>。
         </p>
 
         <!-- 构成主义签名:红斜线 + 黑方块,与全站装饰语言一致(纯装饰,不参与交互) -->

@@ -218,7 +218,7 @@ async function exportPatch(): Promise<void> {
   <div class="sv-task-file-changes">
     <!-- 扫描缺项横幅:文案用后端给的原因原文(前端不许用固定文案冒充) -->
     <div v-if="taskChangesUndected" class="sv-fc-undected">
-      本轮命令产生的改动未能完整检出:{{ taskChangesUndected }}
+      本轮命令产生的改动未能完整检出：{{ taskChangesUndected }}
     </div>
 
     <!-- 整任务操作(CODE-2):仅清单非空时出现;「全部回滚」= 逐项报告,「导出 patch」= 文本通道 -->
@@ -239,7 +239,7 @@ async function exportPatch(): Promise<void> {
 
     <!-- 空清单:缺项时不许宣称「没有改动」(那正是本卡片要区分掉的歧义) -->
     <p v-if="!taskFileChanges.length" class="sv-note-mini">
-      <template v-if="taskChangesUndected">清单为空不代表没有改动——本轮扫描不完整,请以上方说明为准。</template>
+      <template v-if="taskChangesUndected">清单为空不代表没有改动——本轮扫描不完整，请以上方说明为准。</template>
       <template v-else>本轮未改动文件</template>
     </p>
 

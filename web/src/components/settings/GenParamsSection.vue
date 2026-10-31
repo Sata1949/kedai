@@ -167,7 +167,7 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           class="sv-input inject-num"
           title="任务里节点用 run_flow 工具逐层调用流程的嵌套深度上限(1-5,默认 3);静态子流程(sub_flow_id)的嵌套上限另有 3 层的结构限制"
         />
-        <span class="sv-note">任务侧:流程动态调用嵌套深度(1-5,默认 3)</span>
+        <span class="sv-note">任务侧：流程动态调用嵌套深度(1-5,默认 3)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag" title="每任务调用上限">每任务调用上限</label>
@@ -180,7 +180,7 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           class="sv-input inject-num"
           title="单个任务内流程调用(run_flow)的次数上限(1-64,默认 24);达到后该任务不再允许新的流程调用"
         />
-        <span class="sv-note">任务侧:单个任务的流程调用次数上限(1-64,默认 24)</span>
+        <span class="sv-note">任务侧：单个任务的流程调用次数上限(1-64,默认 24)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag" title="节点默认上下文">节点默认上下文</label>
@@ -194,7 +194,7 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           placeholder="0 = 不裁剪"
           title="节点自己没写「上下文上限」时用的默认 token 上限(0 = 不裁剪,默认;否则 256-1048576);节点级配置优先"
         />
-        <span class="sv-note">任务侧:节点未单独设置时的输入 token 上限(0 = 不裁剪,否则 256-1048576)</span>
+        <span class="sv-note">任务侧：节点未单独设置时的输入 token 上限(0 = 不裁剪，否则 256-1048576)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag" title="工具历史保留轮数">工具历史保留轮数</label>
@@ -220,7 +220,7 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           class="sv-input inject-num"
           title="工具循环历史 token 预算;估算超预算时从最老完整轮起继续摘要,保底最近 1 轮完整。0 = 禁用预算闸门"
         />
-        <span class="sv-note">0 = 禁用;否则 1024-1048576(默认 65536)</span>
+        <span class="sv-note">0 = 禁用；否则 1024-1048576(默认 65536)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag" title="单次生成 token 预算">单次生成 token 预算</label>
@@ -233,7 +233,7 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           class="sv-input inject-num"
           title="单次生成内工具循环累计 token(prompt+completion)上限;0 = 关闭(默认)。达到上限按下一项的动作处置"
         />
-        <span class="sv-note">0 = 关闭;否则 1024-1000000000(默认 0)</span>
+        <span class="sv-note">0 = 关闭；否则 1024-1000000000(默认 0)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">预算超限动作</label>
@@ -258,7 +258,7 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           class="sv-input inject-num"
           title="同一工具在窗口内被调用达到该次数、且输出实质无变化时熔断空转;0 = 关闭本闸门"
         />
-        <span class="sv-note">0 = 关闭;否则 4-64(默认 12)</span>
+        <span class="sv-note">0 = 关闭；否则 4-64(默认 12)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag" title="空转熔断窗口 / 输出去重上限">空转熔断窗口 / 输出去重上限</label>
@@ -293,7 +293,7 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           class="sv-input inject-num"
           title="任务模式**单步工具循环**的墙钟上限(秒):到点带着已有产出收尾并记完成,不判失败;0 = 关闭本闸门"
         />
-        <span class="sv-note">任务侧:单步工具循环上限(默认 3600;0 = 关;建议 ≥300)</span>
+        <span class="sv-note">任务侧：单步工具循环上限(默认 3600;0 = 关；建议 ≥300)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">任务总预算</label>
@@ -306,7 +306,7 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           class="sv-input inject-num"
           title="任务模式:一次任务执行(含多步/多节点/多子目标)的总墙钟上限(秒):到点后不再启动新步骤,以已完成部分收尾并说明原因;0 = 关闭本闸门(默认关)"
         />
-        <span class="sv-note">任务侧:整任务上限(默认 0 = 关;0 或 1-86400)</span>
+        <span class="sv-note">任务侧：整任务上限(默认 0 = 关；0 或 1-86400)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">团队总预算</label>
@@ -333,7 +333,7 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           />
           <span class="sv-note">不限</span>
         </label>
-        <span class="sv-note">团队侧:执行阶段上限(600-1200 秒;超过 1200 或勾选「不限」= 不设限;默认 0 = 不限)</span>
+        <span class="sv-note">团队侧：执行阶段上限(600-1200 秒；超过 1200 或勾选「不限」= 不设限；默认 0 = 不限)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">任务空闲超时</label>
@@ -346,7 +346,7 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           class="sv-input inject-num"
           title="任务模式:运行中的任务连续该秒数既无模型调用也无事件时,由看守自动收尾(与手动停止同源,原因写入任务错误栏);0 = 关闭看守"
         />
-        <span class="sv-note">任务侧:无活动自动收尾(默认 2400;0 = 关;下限 2101 = 命令上限 + 调用上限 + 1)</span>
+        <span class="sv-note">任务侧：无活动自动收尾(默认 2400;0 = 关；下限 2101 = 命令上限 + 调用上限 + 1)</span>
       </div>
       <div class="sv-inp-row">
         <span class="sv-note">
@@ -378,7 +378,7 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           <output>{{ Math.round(compactionThreshold * 100) }}%</output>
         </div>
         <div class="sv-range-hints"><span>50% · 更早压缩</span><span>95% · 更晚压缩</span></div>
-        <p class="sv-note">仅 auto 模式生效:历史 token 达到该占比时自动压缩。</p>
+        <p class="sv-note">仅 auto 模式生效：历史 token 达到该占比时自动压缩。</p>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">压缩保留条数</label>
@@ -404,7 +404,7 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           class="sv-input inject-num"
           title="snip 零成本裁剪的超长消息长度阈值(字节;0 = 禁用,上限 1MB;默认 8192)"
         />
-        <span class="sv-note">超长消息裁剪阈值(字节;0 = 禁用,默认 8192)</span>
+        <span class="sv-note">超长消息裁剪阈值(字节；0 = 禁用，默认 8192)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">记忆蒸馏</label>
@@ -437,7 +437,7 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           class="sv-input inject-num"
           title="每次注入的记忆内容总字符预算(0-20000;0 = 不限制,默认 2000):按精选排序累积到预算即停"
         />
-        <span class="sv-note">注入记忆的字符预算(0-20000,0 = 不限制,默认 2000)</span>
+        <span class="sv-note">注入记忆的字符预算(0-20000,0 = 不限制，默认 2000)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">记忆容量上限</label>
@@ -450,7 +450,7 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           class="sv-input inject-num"
           title="每角色记忆容量上限(0-10000;0 = 不淘汰,默认 200):超出后最低分条目置为已归档(不删除)"
         />
-        <span class="sv-note">每角色记忆条数上限(0-10000,0 = 不限制,默认 200)</span>
+        <span class="sv-note">每角色记忆条数上限(0-10000,0 = 不限制，默认 200)</span>
       </div>
       <!-- 剧情推演词条同步两档(RPFLOW-2):deep/agent 流程「归档步」改写世界书词条的放行开关。
            拆两档是因为全局书常服务多个角色(默认关,影响面更大);仅聊天侧消费,随记忆组隐藏。 -->
@@ -465,12 +465,12 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
         <label class="sv-inp-tag" title="剧情推演同步全局词条">剧情推演同步全局词条</label>
         <label style="display: flex; gap: var(--space-1-5); align-items: center; cursor: pointer" title="deep/agent 归档时把剧情变化写入全局世界书(未绑定角色)的绿灯(触发)词条;蓝灯(常驻)条目不改写、只新建绿灯条目。可能影响多个角色,默认关闭。">
           <input v-model="worldbookSyncGlobalEnabled" type="checkbox" style="flex-shrink: 0" />
-          <span class="sv-note">同上,作用范围为全局世界书(默认关)</span>
+          <span class="sv-note">同上，作用范围为全局世界书(默认关)</span>
         </label>
       </div>
       </template>
       <p v-if="isTaskMode" class="sv-note">
-        最大上下文窗口、压缩与记忆参数仅角色扮演(聊天)使用,已在任务模式下隐藏;如需调整请切到角色扮演模式。
+        最大上下文窗口、压缩与记忆参数仅角色扮演(聊天)使用，已在任务模式下隐藏；如需调整请切到角色扮演模式。
       </p>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">子代理深度</label>
@@ -521,8 +521,8 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
       <div v-if="isTaskMode" class="sv-separator">
         <div class="sv-field-label sub">任务参数档位</div>
         <p class="sv-note">
-          任务未单独设置时使用:温度 0.3 · Top-P 1.0 · 输出上限 32768(输出上限只抬不压:
-          更大时保持更大)。显式保存过的值优先于缺省;应用档位会覆盖当前任务参数(含降低)。
+          任务未单独设置时使用：温度 0.3 · Top-P 1.0 · 输出上限 32768(输出上限只抬不压：
+          更大时保持更大)。显式保存过的值优先于缺省；应用档位会覆盖当前任务参数(含降低)。
         </p>
         <div class="sv-inp-row">
           <label class="sv-inp-tag">参数档位</label>
@@ -535,7 +535,7 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
             <option value="task">任务优先档（默认）</option>
             <option value="extreme">极限档</option>
           </select>
-          <span class="sv-note">当前识别:{{ currentTierLabel }}</span>
+          <span class="sv-note">当前识别：{{ currentTierLabel }}</span>
         </div>
         <div class="sv-btn-row">
           <button

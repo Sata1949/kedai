@@ -229,8 +229,8 @@ watch(
       >{{ followupSending ? '发送中…' : '发送' }}</button>
     </div>
     <div class="sv-task-followup-hint">
-      <template v-if="followupMode === 'replace'">重写模式:本轮产出将<b>整体替换</b>现有成果,旧内容不再保留</template>
-      <template v-else>追加模式:新产出附加在成果末尾,<b>不会修改</b>原有内容;若要压缩或改写全文请切换到「重写」</template>
+      <template v-if="followupMode === 'replace'">重写模式：本轮产出将<b>整体替换</b>现有成果，旧内容不再保留</template>
+      <template v-else>追加模式：新产出附加在成果末尾，<b>不会修改</b>原有内容；若要压缩或改写全文请切换到「重写」</template>
     </div>
     <div v-if="!taskTerminal" class="sv-task-followup-hint">{{ followupDisabledHint }}</div>
   </div>

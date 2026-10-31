@@ -154,8 +154,8 @@ function staleSubFlowOption(): string {
     </div>
     <p class="sv-note">
       {{ isLinearCompat(steps)
-        ? '当前流程为一维线性:所有步骤都不设上游,按列表顺序逐步串联(与旧版行为一致)。'
-        : '当前流程为二维:不勾选上游 = 源节点(只给任务目标);勾选多个 = 多路产出按列表顺序拼接为本步输入。' }}
+        ? '当前流程为一维线性：所有步骤都不设上游，按列表顺序逐步串联(与旧版行为一致)。'
+        : '当前流程为二维：不勾选上游 = 源节点(只给任务目标);勾选多个 = 多路产出按列表顺序拼接为本步输入。' }}
     </p>
     <div class="sv-inp-row">
       <label class="sv-inp-tag">最终成果</label>
@@ -168,7 +168,7 @@ function staleSubFlowOption(): string {
         {{ step.is_output === true ? '本步产出即成果' : '未标注' }}
       </button>
       <span class="sv-note">
-        未标注时按「无后继汇点」自动判定;当前成果节点:{{ outputStepName(steps) ?? '无' }}
+        未标注时按「无后继汇点」自动判定；当前成果节点：{{ outputStepName(steps) ?? '无' }}
       </span>
     </div>
     <p
@@ -202,11 +202,11 @@ function staleSubFlowOption(): string {
     <template v-if="subFlowId(step)">
       <p class="sv-note">{{ subFlowMountNote(flowLib(), subFlowId(step)) }}</p>
       <p class="sv-note">
-        子流程按它自己的并行上限执行(嵌套时并发会按层数相乘,token 消耗随之增加);
+        子流程按它自己的并行上限执行(嵌套时并发会按层数相乘，token 消耗随之增加);
         最多嵌套 {{ MAX_SUB_FLOW_DEPTH }} 层。
       </p>
       <p v-if="!step.enabled" class="sv-note">
-        本步骤已停用,引用暂不参与校验;启用后会被保存期校验。
+        本步骤已停用，引用暂不参与校验；启用后会被保存期校验。
       </p>
     </template>
     <p
@@ -241,8 +241,8 @@ function staleSubFlowOption(): string {
         <span class="sv-note">
           {{
             stepConnectionId(step)
-              ? '本步走所选连接(模型随连接);引用失效时该步会明确报错,不会回退默认连接。'
-              : '本步走默认连接;改这里可为单步指定别的 provider 或模型。'
+              ? '本步走所选连接(模型随连接);引用失效时该步会明确报错，不会回退默认连接。'
+              : '本步走默认连接；改这里可为单步指定别的 provider 或模型。'
           }}
         </span>
       </div>
@@ -267,8 +267,8 @@ function staleSubFlowOption(): string {
         </select>
         <span class="sv-note">
           {{ stepKind(step) === 'strict'
-            ? '严格档:一次模型调用即完成;已配置的工具不会下发(配置保留,切回宽松档即生效)。'
-            : '宽松档:模型可反复调用工具,直到给出正文。' }}
+            ? '严格档：一次模型调用即完成；已配置的工具不会下发(配置保留，切回宽松档即生效)。'
+            : '宽松档：模型可反复调用工具，直到给出正文。' }}
         </span>
       </div>
       <p
@@ -323,7 +323,7 @@ function staleSubFlowOption(): string {
             {{ warn }}
           </p>
           <p v-if="stepToolMode(step) === 'none'" class="sv-note">
-            「不使用工具」= 本步骤纯生成,不下发任何工具。
+            「不使用工具」= 本步骤纯生成，不下发任何工具。
           </p>
           <div class="sv-inp-row">
             <label class="sv-inp-tag">工具策略</label>
@@ -402,8 +402,8 @@ function staleSubFlowOption(): string {
             :title="`本步输入(系统提示 + 任务目标 + 上游产出)的 token 上限(${STEP_MAX_CONTEXT_MIN}~${STEP_MAX_CONTEXT_MAX});留空 = 不限制`"
           />
           <span class="sv-note">
-            本步输入的 token 上限:超出时从「最旧的上游产出」起省略(正文换成
-            「(因本节点上下文上限省略)」标记,标签行保留);任务目标恒保留(不会被省略)。
+            本步输入的 token 上限：超出时从「最旧的上游产出」起省略(正文换成
+            「(因本节点上下文上限省略)」标记，标签行保留);任务目标恒保留(不会被省略)。
           </span>
         </div>
       </template>
@@ -425,8 +425,8 @@ function staleSubFlowOption(): string {
         />
         <span class="sv-note">
           本步「每次」模型调用的时间预算({{ STEP_CALL_TIMEOUT_MIN }}-{{ STEP_CALL_TIMEOUT_MAX }} 秒):
-          留空沿用缺省 300 秒;可收紧(如 60)也可放宽(如 900),宽松档工具循环逐轮各按它计;
-          超时即本步失败,不自动重试。挂载子流程的节点上本项不生效(配置保留)。
+          留空沿用缺省 300 秒；可收紧(如 60)也可放宽(如 900),宽松档工具循环逐轮各按它计；
+          超时即本步失败，不自动重试。挂载子流程的节点上本项不生效(配置保留)。
         </span>
       </div>
       <p
@@ -449,8 +449,8 @@ function staleSubFlowOption(): string {
           @change="setStepMaxRetries(step, ($event.target as HTMLInputElement).value)"
         />
         <span class="sv-note">
-          只在模型产出为空时重试({{ STEP_MAX_RETRIES_MIN }}-{{ STEP_MAX_RETRIES_MAX }} 次 = 额外尝试上限,
-          总尝试 1 + n);连接失败、超时、解析错误等一律不重试;每次重试会翻倍输出预算(封顶 131072)。
+          只在模型产出为空时重试({{ STEP_MAX_RETRIES_MIN }}-{{ STEP_MAX_RETRIES_MAX }} 次 = 额外尝试上限，
+          总尝试 1 + n);连接失败、超时、解析错误等一律不重试；每次重试会翻倍输出预算(封顶 131072)。
         </span>
       </div>
       <p

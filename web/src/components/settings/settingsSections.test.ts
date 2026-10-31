@@ -150,7 +150,7 @@ describe('ConnectionProfilesSection(连接配置区)', () => {
     expect(html).toContain('大图自动拆分');
     // VISION-L6 收口(2026-10-03):三项预留位接入引擎,唯一仍预留的是前缀续写;
     // tooltip 如实标注「已接入连接构建与指纹,无生成路径」
-    expect(html).toContain('预留能力位:已接入连接构建与指纹');
+    expect(html).toContain('预留能力位：已接入连接构建与指纹');
     expect(html).not.toContain('当前版本仅记录');
     // 逐连接三件套(2026-10-03 API 设置补全)进入模板
     expect(html).toContain('测试连接');

@@ -309,11 +309,11 @@ async function runExport(): Promise<void> {
             @change="onFilePicked"
           />
           <p class="sv-note">{{ IMPORT_FILE_HINT }}</p>
-          <div v-if="parseError" class="sv-feedback err">解析失败:{{ parseError }}</div>
+          <div v-if="parseError" class="sv-feedback err">解析失败：{{ parseError }}</div>
 
           <template v-if="parsed">
             <div class="sv-note">
-              来源:{{ parsed.source }}{{ pickedName ? `(文件 ${pickedName})` : '' }}
+              来源：{{ parsed.source }}{{ pickedName ? `(文件 ${pickedName})` : '' }}
             </div>
 
             <!-- 段预览:勾选 + 摘要 + 段级策略 -->
@@ -354,7 +354,7 @@ async function runExport(): Promise<void> {
                 :key="`${s.key}-${i}`"
                 class="sv-note"
               >
-                「{{ s.label }}」不导入:{{ s.reason }}
+                「{{ s.label }}」不导入：{{ s.reason }}
               </p>
             </div>
 
@@ -385,7 +385,7 @@ async function runExport(): Promise<void> {
         <!-- ===== 导出页签 ===== -->
         <div v-show="tab === 'export'" class="sv-stack">
           <p class="sv-note">
-            导出为综合导出件(bundle v1):勾选要包含的段。当前模式:{{ appMode === 'task' ? '任务(①预设条目 / ⑥预设正则 不适用)' : '角色扮演' }}。
+            导出为综合导出件(bundle v1):勾选要包含的段。当前模式：{{ appMode === 'task' ? '任务(①预设条目 / ⑥预设正则 不适用)' : '角色扮演' }}。
           </p>
           <label
             v-for="k in exportableSections"
@@ -402,7 +402,7 @@ async function runExport(): Promise<void> {
             </button>
           </div>
           <p class="sv-note">
-            导出件含 ②执行流程 / ⑤技能 / ⑦插件 / ③④提示词等段;不含 API 连接与密钥,节点上的连接引用跨机后需重选。
+            导出件含 ②执行流程 / ⑤技能 / ⑦插件 / ③④提示词等段；不含 API 连接与密钥，节点上的连接引用跨机后需重选。
           </p>
           <div v-if="msg" class="sv-feedback" :class="msg.kind === 'err' ? 'err' : 'ok'">{{ msg.text }}</div>
         </div>

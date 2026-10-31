@@ -215,7 +215,7 @@ watch(callTraceOpen, (open) => {
                 响应摘要
                 <span v-if="isTruncated(c)" class="sv-badge trunc">截断</span>
               </div>
-              <p v-if="isTruncated(c)" class="sv-note-mini sv-mt6">该次调用撞 max_tokens 上限(finish_reason=length),响应仅含前半部分;如需完整结果请调大 max_tokens 后重试。</p>
+              <p v-if="isTruncated(c)" class="sv-note-mini sv-mt6">该次调用撞 max_tokens 上限(finish_reason=length),响应仅含前半部分；如需完整结果请调大 max_tokens 后重试。</p>
               <pre class="sv-calltrace-pre">{{ c.response_summary || '(空)' }}</pre>
             </template>
           </div>

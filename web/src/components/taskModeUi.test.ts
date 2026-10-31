@@ -82,7 +82,7 @@ describe('TaskBoard 批次 4:plan 模式批准区', () => {
     expect(html).toContain('修改后批准');
     expect(html).toContain('放弃');
     expect(html).toContain('待批准');
-    expect(html).toContain('模式:先规划后批准');
+    expect(html).toContain('模式：先规划后批准');
     // 计划步骤仍展示(供批准前审阅)
     expect(html).toContain('搜集资料');
   });
@@ -108,7 +108,7 @@ describe('TaskBoard 批次 4:plan 模式批准区', () => {
   });
 });
 
-describe('TaskBoard plan 模式:批准后/完成后计划清单持续可见(实测回归)', () => {
+describe('TaskBoard plan 模式：批准后/完成后计划清单持续可见(实测回归)', () => {
   const planBase: TaskStep[] = [
     { name: '搜集资料', goal: '收集季度数据', status: 'pending', result: '' },
     { name: '撰写正文', goal: '输出报告初稿', status: 'pending', result: '' },
@@ -190,7 +190,7 @@ describe('TaskBoard 批次 4:team 模式分工卡与审计结论', () => {
     expect(html).toContain('未分工');
     expect(html).toContain('汇总成果');
     expect(html).toContain('审计结论');
-    expect(html).toContain('模式:团队协作');
+    expect(html).toContain('模式：团队协作');
   });
 });
 
@@ -201,7 +201,7 @@ describe('TaskBoard 批次 4:solo/multi 调用情况入口与 custom 步骤进�
     );
     expect(html).toContain('查看调用情况');
     expect(html).toContain('Agent 面板「调用情况」');
-    expect(html).toContain('模式:单 Agent');
+    expect(html).toContain('模式：单 Agent');
   });
 
   it('custom 模式计划区标题为「流程步骤进度」且带步骤状态徽标', async () => {
@@ -290,7 +290,7 @@ describe('TaskBoard 批次 4:solo/multi 调用情况入口与 custom 步骤进�
       seedCurrentTask(p, makeDetail(makeTask('running', 'legacy', plan))),
     );
     expect(html).toContain('计划步骤');
-    expect(html).toContain('模式:三段式');
+    expect(html).toContain('模式：三段式');
     expect(html).not.toContain('计划待批准');
     expect(html).not.toContain('主 Agent 分工');
     expect(html).not.toContain('查看调用情况面板');
@@ -404,12 +404,12 @@ describe('TaskModeSelect 批次 4:六档模式选择器(Sidebar「下达目标�
       void p;
       useTaskStore().taskRunMode = 'team';
     });
-    expect(html).toContain('模式:三段式(默认)');
-    expect(html).toContain('模式:单 Agent');
-    expect(html).toContain('模式:多 Agent');
-    expect(html).toContain('模式:先规划后批准');
-    expect(html).toContain('模式:团队协作');
-    expect(html).toContain('模式:自定义流程');
+    expect(html).toContain('模式：三段式（默认）');
+    expect(html).toContain('模式：单 Agent');
+    expect(html).toContain('模式：多 Agent');
+    expect(html).toContain('模式：先规划后批准');
+    expect(html).toContain('模式：团队协作');
+    expect(html).toContain('模式：自定义流程');
     // 绑定生效:当前选中值落在 team 选项上
     expect(html).toMatch(/value="team"[^>]*selected|selected[^>]*value="team"/);
   });
@@ -636,7 +636,7 @@ describe('TaskBoard 流程步骤的节点徽标(IFW-5)', () => {
     expect(nodeBadgeKinds(html)).toEqual(['level', 'level', 'strict', 'out']);
     expect(html).toContain('第 2 层');
     // 流程名同样取自快照(读当前库会显示「另一份流程」)
-    expect(html).toContain('流程:主流程');
+    expect(html).toContain('流程：主流程');
   });
 
   it('快照在手时不需要流程库(库未加载照常出徽标与流程名)', async () => {
@@ -645,7 +645,7 @@ describe('TaskBoard 流程步骤的节点徽标(IFW-5)', () => {
       seedFlowLib(null);
     });
     expect(nodeBadgeKinds(html)).toEqual(['level', 'level', 'strict', 'out']);
-    expect(html).toContain('流程:主流程');
+    expect(html).toContain('流程：主流程');
   });
 
   it('无快照的旧任务回退当前流程库(本批之前的降级路径保留)', async () => {
@@ -655,6 +655,6 @@ describe('TaskBoard 流程步骤的节点徽标(IFW-5)', () => {
     });
     expect(nodeBadgeKinds(html)).toEqual(['level', 'level', 'strict', 'out']);
     // 未绑定 → 如实显示「跟随当前流程」
-    expect(html).toContain('流程:跟随当前流程');
+    expect(html).toContain('流程：跟随当前流程');
   });
 });

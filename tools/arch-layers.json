@@ -168,6 +168,7 @@
     "test-node-shim.d.ts": { "generation": "L1", "responsibility": "测试专用最小类型声明(node:fs 的 readFileSync;零运行时代码,使样式契约测试免写显式压错注释)" },
 
     "asyncModal.ts": { "generation": "L2", "responsibility": "弹窗懒加载包装(失败重试 + uiPrefs.modalLoadError 上报)" },
+    "asyncMain.ts": { "generation": "entry", "responsibility": "主区懒加载装配(loadingComponent = MainLoadingSkeleton;UIVIS-3/UI-C2 消除首屏切模式的空白窗)。归 entry 与 modals.ts 同理:它只被 App.vue 消费、只做装配(把 L3 组件挂到主区接缝),不承载业务语义;若按 L2 登记则会产生 L2→L3 的越代边" },
     "globalErrorHandlers.ts": { "generation": "L2", "responsibility": "全局错误兜底接线(Vue errorHandler / unhandledrejection / window error;上报走注入回调,不直连 store)" },
     "audioController.ts": { "generation": "L2", "responsibility": "音频控制器注册表(宿主能力桥;被 sandbox 音频 RPC 调用)" },
     "chatStreamService.ts": { "generation": "L2", "responsibility": "聊天流服务编排(依赖注入 streamChat/stopChat,可测编排层)" },

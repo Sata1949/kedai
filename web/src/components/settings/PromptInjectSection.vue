@@ -68,7 +68,7 @@ onMounted(async () => {
           spellcheck="false"
         />
       </div>
-      <p v-if="injectDraft" class="sv-note">输出含禁用词时注入此提示词,对所有模式生效;deep/agent/custom 模式另由引擎收尾做同义替换。</p>
+      <p v-if="injectDraft" class="sv-note">输出含禁用词时注入此提示词，对所有模式生效；deep/agent/custom 模式另由引擎收尾做同义替换。</p>
 
       <!-- 简单模式:字数/转述/对话/视角 -->
       <template v-if="injectDraft?.mode === 'simple'">
@@ -99,7 +99,7 @@ onMounted(async () => {
           >
             {{ injectDraft.simple.paraphrase_enabled ? '已启用' : '已关闭' }}
           </button>
-          <span class="sv-note">用自己的话复述内容,不直接照抄原文</span>
+          <span class="sv-note">用自己的话复述内容，不直接照抄原文</span>
         </div>
         <div class="sv-inp-row">
           <label class="sv-inp-tag">对话</label>
@@ -110,7 +110,7 @@ onMounted(async () => {
           >
             {{ injectDraft.simple.dialogue_enabled ? '已启用' : '已关闭' }}
           </button>
-          <span class="sv-note">只输出台词与必要动作描写,不输出旁白段落</span>
+          <span class="sv-note">只输出台词与必要动作描写，不输出旁白段落</span>
         </div>
         <div class="sv-inp-row">
           <label class="sv-inp-tag">视角</label>
@@ -132,11 +132,11 @@ onMounted(async () => {
           </select>
         </div>
         <p class="sv-note">
-          第一人称=以角色「我」叙述;第二人称=以用户角色「你」为叙述对象;第三人称=叙述层用「他/她」、镜头贴角色。
+          第一人称=以角色「我」叙述；第二人称=以用户角色「你」为叙述对象；第三人称=叙述层用「他/她」、镜头贴角色。
           角色台词始终用第一人称。未启用时按默认第三人称限知锚定。
         </p>
         <p class="sv-note">
-          启用的项目会合成一条注入提示词拼入系统提示词末尾,人称锚定随后作为最后一条静态指令;对所有会话生效;支持宏(如
+          启用的项目会合成一条注入提示词拼入系统提示词末尾，人称锚定随后作为最后一条静态指令；对所有会话生效；支持宏(如
           <code v-pre>{{time}}</code>、<code v-pre>{{random:1,100}}</code>)。
         </p>
       </template>
@@ -144,11 +144,11 @@ onMounted(async () => {
       <!-- 复杂模式:楼层系统(仿 SillyTavern Prompt Manager) -->
       <template v-else-if="injectDraft">
         <p class="sv-note">
-          楼层按从上到下的顺序注入:可拖拽排序,自由选择消息角色,内容支持完整酒馆宏。
-          <code v-pre>{{setvar::键::值}}</code> 会持久化到会话变量,后续楼层可
+          楼层按从上到下的顺序注入：可拖拽排序，自由选择消息角色，内容支持完整酒馆宏。
+          <code v-pre>{{setvar::键：:值}}</code> 会持久化到会话变量，后续楼层可
           <code v-pre>{{getvar::键}}</code> 读取。
         </p>
-        <div v-if="!injectDraft.floors.length" class="sv-note inject-empty">尚未添加楼层,点击下方「新增楼层」。</div>
+        <div v-if="!injectDraft.floors.length" class="sv-note inject-empty">尚未添加楼层，点击下方「新增楼层」。</div>
         <div
           v-for="floor in injectDraft.floors"
           :key="floor.id"

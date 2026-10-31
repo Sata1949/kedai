@@ -442,7 +442,7 @@ onMounted(() => {
         <!-- ===== 预设正则(扁平列表,无文件夹)===== -->
         <div v-else class="asset-list">
           <p class="sv-note" style="margin-top: 0">
-            全局正则:跨角色生效的显示层正则(全局先、卡级后)。发送层清洗不在此范围。
+            全局正则：跨角色生效的显示层正则(全局先、卡级后)。发送层清洗不在此范围。
           </p>
           <div v-for="r in regexScripts" :key="r.id" class="asset-item">
             <div class="asset-item-main">

@@ -57,7 +57,7 @@ describe('TaskFlowSelect:任务绑定流程选择器(二维批次 5a)', () => {
   });
 
   it('仅自定义流程模式出现;其余模式整块不渲染(后端也会拒绝非 custom 的 flow_id)', async () => {
-    expect(await render(TaskFlowSelect, seed('custom'))).toContain('流程:跟随当前流程');
+    expect(await render(TaskFlowSelect, seed('custom'))).toContain('流程：跟随当前流程');
     for (const mode of ['legacy', 'solo', 'multi', 'plan', 'team'] as TaskRunMode[]) {
       const html = await render(TaskFlowSelect, seed(mode));
       expect(html, `${mode} 模式不应出现绑定选择器`).not.toContain('流程:');
@@ -66,9 +66,9 @@ describe('TaskFlowSelect:任务绑定流程选择器(二维批次 5a)', () => {
 
   it('列出「跟随当前流程」+ 库内流程;已停用流程 disabled 并标注', async () => {
     const html = await render(TaskFlowSelect, seed('custom'));
-    expect(html).toContain('流程:跟随当前流程');
-    expect(html).toContain('流程:主流程');
-    expect(html).toContain('流程:备用流程(已停用)');
+    expect(html).toContain('流程：跟随当前流程');
+    expect(html).toContain('流程：主流程');
+    expect(html).toContain('流程：备用流程（已停用）');
     // 停用项不可选(选中它会被后端 400;不给用户这条路)
     expect(html).toMatch(/<option[^>]*value="f2"[^>]*disabled|disabled[^>]*value="f2"/);
     // 启用项不带 disabled
@@ -83,12 +83,12 @@ describe('TaskFlowSelect:任务绑定流程选择器(二维批次 5a)', () => {
   it('库未加载 / 绑定已失效都如实保留:不静默改绑到别的流程', async () => {
     // 库未加载:只剩「跟随当前流程」+ 失效占位(值仍是用户原来选的 id)
     const noLib = await render(TaskFlowSelect, seed('custom', 'f-deleted', null));
-    expect(noLib).toContain('流程:(已失效) f-deleted');
-    expect(noLib).not.toContain('流程:主流程');
+    expect(noLib).toContain('流程：（已失效） f-deleted');
+    expect(noLib).not.toContain('流程：主流程');
 
     // 库已加载但流程被删:同样是失效占位,而不是回落到第一个流程
     const staleHtml = await render(TaskFlowSelect, seed('custom', 'f-deleted', library));
-    expect(staleHtml).toContain('流程:(已失效) f-deleted');
+    expect(staleHtml).toContain('流程：（已失效） f-deleted');
     expect(staleHtml).toMatch(/value="f-deleted"[^>]*selected|selected[^>]*value="f-deleted"/);
 
     // 正常绑定(库内命中)时不出现失效项

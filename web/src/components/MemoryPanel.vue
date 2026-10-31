@@ -78,7 +78,7 @@ onServerPrefetch(load);
   <div class="sv-field">
     <div class="sv-field-label"><span class="sv-supreme pink-deep" /> 记忆库</div>
     <p class="sv-note" style="margin: 0 0 var(--space-2); line-height: 1.8">
-      当前角色的跨会话记忆:由会话蒸馏、工具写入或手动补录;勾选「注入」的条目按
+      当前角色的跨会话记忆：由会话蒸馏、工具写入或手动补录；勾选「注入」的条目按
       使用热度注入提示词(条数上限见 设置 → 生成参数)。置顶条目优先注入。
     </p>
 
@@ -120,7 +120,7 @@ onServerPrefetch(load);
           <option v-for="k in KIND_FILTERS" :key="k.value" :value="k.value">{{ k.label }}</option>
         </select>
         <template v-if="pendingPrune">
-          <span class="sv-script-meta" style="font-size: 11px">硬删除全部已归档记忆?</span>
+          <span class="sv-script-meta" style="font-size: 11px">硬删除全部已归档记忆？</span>
           <button class="sv-btn ghost sv-btn-sm memory-danger" :disabled="pruning" @click="pruneNow">
             {{ pruning ? '清理中…' : '确认清理' }}
           </button>
@@ -189,7 +189,7 @@ onServerPrefetch(load);
 
           <div class="memory-ops">
             <template v-if="pendingDelete === row.id">
-              <span class="sv-script-meta" style="font-size: 11px">确认删除该记忆?</span>
+              <span class="sv-script-meta" style="font-size: 11px">确认删除该记忆？</span>
               <button class="sv-btn ghost sv-btn-sm memory-danger" :disabled="deleting" @click="confirmDelete">
                 {{ deleting ? '删除中…' : '确认删除' }}
               </button>
@@ -210,7 +210,7 @@ onServerPrefetch(load);
         </div>
       </TransitionGroup>
       <p v-else-if="!error && !loading && !searching" class="sv-script-meta" style="font-size: 11px">
-        {{ query.trim() || kindFilter !== 'all' ? '没有匹配的记忆:可调整搜索词或筛选条件。' : '暂无记忆:可蒸馏当前会话或上方手动补录。' }}
+        {{ query.trim() || kindFilter !== 'all' ? '没有匹配的记忆：可调整搜索词或筛选条件。' : '暂无记忆：可蒸馏当前会话或上方手动补录。' }}
       </p>
     </template>
     <p v-else class="sv-script-meta" style="font-size: 11px">
