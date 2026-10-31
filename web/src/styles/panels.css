@@ -154,18 +154,18 @@
 
 .sv-stack { display: flex; flex-direction: column; gap: var(--space-3); }
 
-/* 输入行 */
+/* 输入行(UIPOL-1/A2:标签列定宽 96px —— 原 72px 自适应致控件左缘出现 {542,535} 两种取值且 BASE URL 折行;96 而非 88 是因为存在十余字标签。超长标签走省略号 + 模板 title) */
 .sv-inp-row { display: flex; align-items: center; gap: var(--space-2-5); }
 .sv-inp-tag {
-  flex-shrink: 0;
-  min-width: 72px;
-  width: auto;
+  flex: 0 0 96px;
+  min-width: 0; /* flex 项 min-width:auto = min-content,nowrap 长标签会顶破定宽 */
   font-size: var(--text-xs);
   font-weight: 800;
   letter-spacing: 0.08em;
   color: var(--sv-ink-faint);
   text-align: left;
   white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
 }
 .sv-inp-tag::before {
   content: "";

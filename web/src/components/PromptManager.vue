@@ -245,7 +245,7 @@ async function saveAll(): Promise<void> {
           <div class="sv-field-label"><span class="sv-supreme red" /> 位置5 · 头部</div>
           <div class="sv-stack">
             <div class="sv-inp-row">
-              <label class="sv-inp-tag">主 Agent 提示词</label>
+              <label class="sv-inp-tag" title="主 Agent 提示词">主 Agent 提示词</label>
               <span class="sv-note">角色:系统提示词(固定)</span>
             </div>
             <div class="pm-summary">{{ agentSystemPrompt ? truncate(agentSystemPrompt, 140) : '未自定义,使用内置默认模板(角色名 + 角色设定 + 世界书 + 回复要求)' }}</div>

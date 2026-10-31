@@ -161,6 +161,15 @@ function deleteChar(c: CharacterRecord): void {
           <span class="sv-char-desc">{{ c.description || '无提示词' }}</span>
         </span>
       </button>
+
+      <!-- 列表下方引导(UIPOL-2/A4):角色只有一两张时,角色区剩下 400 余 px 没有任何内容的
+           粉色空地,一张卡孤零零贴在顶部,观感像「没排完」。这里补一条低调的引导语,
+           与任务历史空态的 01/02/03 三步引导同一套语气(次级灰 + 12px,不用装饰色块),
+           内容归零时不重复——上面的「暂无角色」空态已经讲清楚了。 -->
+      <p v-if="characters.length > 0 && !store.searchQuery.trim()" class="sv-char-empty">
+        更多角色可从下方「导入角色卡」继续添加 · 右键或长按可编辑提示词
+      </p>
+      <p v-else-if="characters.length > 0" class="sv-char-empty">没有匹配的角色</p>
     </div>
 
     <!-- 角色操作菜单(编辑提示词 / 删除)。
@@ -200,3 +209,16 @@ function deleteChar(c: CharacterRecord): void {
     />
   </div>
 </template>
+
+<style scoped>
+/* 角色区引导(UIPOL-2/A4):只在列表有内容时出现,补住「角色区下半截一片空地」的失重感。
+   语气与任务历史空态一致——次级灰 + 12px,不做卡片、不加边框,避免与真实条目抢注意力。 */
+.sv-char-empty {
+  margin: var(--space-3) 0 var(--space-2);
+  padding-top: var(--space-3);
+  border-top: 1px dashed var(--sv-line-strong);
+  font-size: var(--text-xs);
+  line-height: var(--lh-body);
+  color: var(--sv-ink-faint);
+}
+</style>

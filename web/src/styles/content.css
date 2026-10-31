@@ -433,7 +433,10 @@
   text-decoration: underline;
   text-underline-offset: 3px;
 }
+/* UIPOL-2/B1:表格吃满气泡宽、列宽均分,表头与数据行分底色(原 auto 布局下 588px 气泡里表仅 228px、列宽 112/57/58) */
 .sv-msg-bubble.sv-msg-md table {
+  width: 100%;
+  table-layout: fixed;
   border-collapse: collapse;
   margin: 0.65em 0;
   font-size: 0.95em;
@@ -443,9 +446,10 @@
   border: var(--bw-thin) solid var(--sv-line);
   padding: 0.35em 0.7em;
   text-align: left;
+  overflow-wrap: anywhere;
 }
 .sv-msg-bubble.sv-msg-md th {
-  background: var(--sv-paper);
+  background: var(--sv-pink-light);
   font-weight: 700;
 }
 .sv-msg-bubble.sv-msg-md hr {

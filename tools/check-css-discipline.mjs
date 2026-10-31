@@ -65,6 +65,12 @@ const VERBOSE = process.argv.includes('--verbose');
  * 正常增长,不新增 !important、不引入裸时长;新增规则优先留在 .vue scoped。
  * C-2A 变动(2026-10-25):task 1007→987——`.sv-task-new` 基础视觉块随 Sidebar 拆分
  * 移入 components/sidebar/TaskComposer.vue 的 scoped 块(单一 CSS 所有者),全局域净减 20 行。
+ * UIPOL 变动(2026-10-31,两批):
+ *   content 997→1001(消息表格整宽:width/table-layout/overflow-wrap 三条声明 + 一行注释。
+ *     `.sv-msg-bubble.sv-msg-md table` 只能落全局域——消息正文经 v-html 注入,scoped 不生效);
+ *   shell 保持 827(气泡内边距 18px→--space-5 行数不变,其间距裸值 10→9 已同步下调)。
+ *   两批均不新增 !important、不引入裸时长;新增的 calc(--space-4 + 48px) 属浮钮让位常量,
+ *   走令牌表达式而非裸值。
  */
 const LINE_BASELINE = {
   'style.css': 49,
@@ -72,7 +78,7 @@ const LINE_BASELINE = {
   'styles/base.css': 122,
   'styles/shell.css': 827,
   'styles/panels.css': 971,
-  'styles/content.css': 997,
+  'styles/content.css': 1001,
   'styles/task.css': 987,
   'styles/mobile.css': 464,
 };
@@ -95,7 +101,7 @@ const SPACING_BASELINE = {
   'style.css': 0,
   'styles/tokens.css': 0,
   'styles/base.css': 0,
-  'styles/shell.css': 10,
+  'styles/shell.css': 9, /* UIPOL-1/C2:气泡右内边距 18px → --space-5(20px),裸值 −1 */
   'styles/panels.css': 7,
   'styles/content.css': 24,
   'styles/task.css': 14,

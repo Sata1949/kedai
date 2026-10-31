@@ -343,7 +343,7 @@
      改为:标签与控件同一行(控件吃满剩余宽),说明文字独占下一行。
      min-width:60px 是关键——它让「流程名称+说明」这类同行双控件自动折成两行,无需改模板。 */
   .sv-inp-row { flex-wrap: wrap; row-gap: var(--space-1-5); align-items: center; }
-  .sv-inp-row > .sv-inp-tag { flex: 0 0 auto; }
+  /* 标签列宽由全局 .sv-inp-tag 的 96px 定宽承担(UIPOL-1/A2),不再在此写 flex:0 0 auto */
   .sv-inp-row > .sv-input,
   .sv-inp-row > .sv-select {
     flex: 1 1 0;
@@ -373,7 +373,7 @@
     align-items: center;
     row-gap: var(--space-1-5);
   }
-  .flow-meta-pair > .sv-inp-tag { flex: 0 0 auto; padding-top: 0; }
+  .flow-meta-pair > .sv-inp-tag { flex: 0 0 96px; padding-top: 0; }
   .flow-meta-pair > .sv-input {
     flex: 1 1 0;
     width: auto;

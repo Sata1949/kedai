@@ -96,7 +96,7 @@ watch(appMode, () => void loadPromptPreview());
            批量保存路径同步按模式过滤(useAgentSettings)。 -->
       <template v-if="!isTaskMode">
       <div class="sv-inp-row">
-        <label class="sv-inp-tag">变量状态注入位置</label>
+        <label class="sv-inp-tag" title="变量状态注入位置">变量状态注入位置</label>
         <select v-model="mvuVarsPosition" class="sv-input">
           <option value="system">system 提示词(默认,兼容)</option>
           <option value="user_tail">最新用户消息尾部(缓存友好)</option>
