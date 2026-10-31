@@ -60,8 +60,9 @@ pub fn current_level() -> String {
 /// 运行时把日志级别切到 `level`,无需重启。
 ///
 /// - 级别不在 [`LOG_LEVELS`] 内 → `Err`(调用方据此回 400);
-/// - 日志尚未初始化(如单元测试直接调用 handler)→ 记录待生效级别并返回 `Ok`:
-///   端点语义是「已接受」,初始化时会以该值为准。
+/// - 日志尚未初始化(无 reload 句柄,如单元测试直接调用 handler)→ 记录当前级别
+///   并返回 `Ok`:端点语义是「已接受」;后续首次 `init` 会按**启动配置**回填,
+///   本函数不保证该值跨初始化生效。
 /// - 已初始化 → 逐层 `reload`,任一层失败即整体报错(不装作成功)。
 pub fn set_level(level: &str) -> Result<(), String> {
     let level = level.trim().to_ascii_lowercase();
@@ -524,19 +525,23 @@ pub fn init(level: &str, log_dir: &Path) -> Vec<WorkerGuard> {
         Vec::new()
     };
     let _ = RELOADERS.set(reloaders);
-    // 启动级别回填:运行时调级端点据此回显真实值。RUST_LOG 覆盖时回显 "custom"
-    // (它的指令集不是五档之一,不做无意义的猜测)。
-    let startup_level = if std::env::var("RUST_LOG")
-        .ok()
-        .is_some_and(|v| !v.trim().is_empty())
-    {
-        "custom".to_string()
-    } else {
-        level.trim().to_ascii_lowercase()
-    };
-    *current_level_cell()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) = startup_level;
+    // 启动级别回填:只有真正装上 subscriber 的首次 init 才回填。重复 init 的
+    // try_init 会失败,此时生效的仍是首次的订阅者与级别——不能用第二次的参数覆盖,
+    // 否则 GET /api/diagnostics/log-level 会回显一个并未生效的值。
+    // RUST_LOG 覆盖时回显 "custom"(它的指令集不是五档之一,不做无意义的猜测)。
+    if init_result.is_ok() {
+        let startup_level = if std::env::var("RUST_LOG")
+            .ok()
+            .is_some_and(|v| !v.trim().is_empty())
+        {
+            "custom".to_string()
+        } else {
+            level.trim().to_ascii_lowercase()
+        };
+        *current_level_cell()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = startup_level;
+    }
 
     cleanup_old_logs(log_dir);
     vec![stdout_guard, file_guard]
