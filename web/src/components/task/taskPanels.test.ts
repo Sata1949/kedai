@@ -8,8 +8,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { flushPromises, mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
-import type { TaskDetail, TaskRecord, TaskStep } from '../../api';
+import type { TaskDetail, TaskRecord, TaskStep, TaskTrace } from '../../api';
 import { useAppStore } from '../../store';
+import { resetTaskTraceForTest } from '../../composables/useTaskTrace';
 import MarkdownBlock from './MarkdownBlock.vue';
 import TaskStatusPanel from './TaskStatusPanel.vue';
 import TaskFlowBindPanel from './TaskFlowBindPanel.vue';
@@ -62,6 +63,22 @@ function seed(detail: TaskDetail): ReturnType<typeof useAppStore> {
   // FileChangesPanel 挂载会拉变更；这里统一挡掉真实请求
   store.loadTaskChanges = vi.fn().mockResolvedValue(undefined);
   return store;
+}
+
+/** 一条最小轨迹行(只为让「有轨迹」成立,内容不参与断言) */
+function traceRow(seq: number): TaskTrace {
+  return {
+    id: seq,
+    task_id: 't1',
+    seq,
+    phase: 'agent',
+    step_index: null,
+    kind: 'reasoning',
+    name: null,
+    content: `第 ${seq} 条`,
+    truncated: false,
+    created_at: '2026-11-01T00:00:00.000Z',
+  };
 }
 
 describe('C-2A 任务面板拆分', () => {
@@ -204,6 +221,40 @@ describe('C-2A 任务面板拆分', () => {
     const wrapper = mount(TaskExecutionPanel, { props: { detail } });
     expect(wrapper.text()).toContain('查看调用情况');
     expect(wrapper.text()).toContain('计划步骤');
+  });
+
+  it('TaskExecutionPanel:档位覆盖与默认档都参与步骤视图判定(与 TaskTranscript 同一函数)', () => {
+    const plan: TaskStep[] = [
+      { name: '【主Agent-1】调研', goal: '调研', status: 'done', result: '成果' },
+    ];
+    const detail = makeDetail({}, { task_mode: 'team', status: 'running', plan });
+    // 三个场景共用同一测试函数:轨迹与档位是**模块级**状态(跨 pinia 实例),
+    // 每个场景都必须显式复位,否则上一个场景写的覆盖键会让下一个场景走错分支。
+    const reset = () => {
+      memStorage.clear();
+      resetTaskTraceForTest();
+    };
+
+    // ① 有轨迹 + 任务覆盖为档 1 → 步骤视图(分工卡出)
+    reset();
+    let store = seed(detail);
+    store.taskTrace = [traceRow(1)];
+    store.setTaskTranscriptMode('legacy');
+    let wrapper = mount(TaskExecutionPanel, { props: { detail } });
+    expect(wrapper.text()).toContain('主 Agent 分工');
+
+    // ② 有轨迹 + 未覆盖 + 默认档为档 2 → 时间线视图(分工卡不出)
+    reset();
+    store = seed(detail);
+    store.taskTrace = [traceRow(1)];
+    wrapper = mount(TaskExecutionPanel, { props: { detail } });
+    expect(wrapper.text()).not.toContain('主 Agent 分工');
+
+    // ③ 未覆盖 + 默认档为档 2 + 轨迹为空 → 降级,分工卡回来
+    reset();
+    seed(detail);
+    wrapper = mount(TaskExecutionPanel, { props: { detail } });
+    expect(wrapper.text()).toContain('主 Agent 分工');
   });
 
   it('TaskResultPanel:成果汇总/交付校验/文件变更/对话记录/追加指令全集', () => {

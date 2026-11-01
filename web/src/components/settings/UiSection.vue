@@ -13,6 +13,7 @@ import {
   subscribeThemes,
   type ThemeSummary,
 } from '../../theme/registry';
+import { TRANSCRIPT_MODE_LABELS, TRANSCRIPT_MODES, TRANSCRIPT_MODE_TITLES } from '../../utils/taskTranscript';
 
 const props = withDefaults(defineProps<{
   /** useDataManager 的返回对象(壳共享实例,本区仅用 characterLabel / 撤销授权) */
@@ -138,6 +139,30 @@ async function selectTheme(id: string): Promise<void> {
         <button class="sv-btn ghost" @click="store.toggleAgentPanel()">
           {{ store.agentPanelOpen ? '展开中' : '已折叠' }}
         </button>
+      </div>
+      <!-- 任务执行过程显示:默认档(TMSHOW-3)。任务详情顶栏的分段控件写的是**该任务**
+           自己的覆盖,这里改的是「没单独设过的任务」的默认值——两者互不覆盖。
+           三档文案直接取 TRANSCRIPT_MODE_LABELS/TITLES,不在模板里手写第二份:
+           同一个档位名在控件与文案里不一致是这类分段控件最常见的漂移。 -->
+      <div class="sv-data-row">
+        <div class="info">
+          <b>任务执行过程显示</b>
+          <span>没单独设过档位的任务按这里的默认值显示。三个档位都偏好看当前任务自己的，任务详情顶栏可单独设置。</span>
+        </div>
+        <div class="flex items-center gap-2 shrink-0 whitespace-nowrap">
+          <button
+            v-for="m in TRANSCRIPT_MODES"
+            :key="m"
+            type="button"
+            class="sv-btn ghost"
+            :class="{ 'sv-btn-on': store.taskTranscriptMode === m }"
+            :aria-pressed="store.taskTranscriptMode === m"
+            :title="TRANSCRIPT_MODE_TITLES[m]"
+            @click="store.setDefaultTaskTranscriptMode(m)"
+          >
+            {{ TRANSCRIPT_MODE_LABELS[m] }}
+          </button>
+        </div>
       </div>
       <div class="sv-data-row">
         <div class="info">

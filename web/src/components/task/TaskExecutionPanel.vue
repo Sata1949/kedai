@@ -7,6 +7,7 @@ import { useAppStore } from '../../store';
 import { renderMarkdownCached } from '../../utils/markdownCache';
 import { taskStatusClass as statusClass, taskStatusLabel as statusLabel } from '../../taskStatus';
 import { MODE_LABELS } from '../../api/labels';
+import { resolveTranscriptMode } from '../../utils/taskTranscript';
 import TaskTranscript from './TaskTranscript.vue';
 import type { TaskDetail, TaskRunMode, TaskStep } from '../../api';
 
@@ -15,7 +16,7 @@ const props = defineProps<{
 }>();
 
 const store = useAppStore();
-const { taskTranscriptMode, taskTrace } = storeToRefs(store);
+const { taskTranscriptOverride, taskTranscriptMode, taskTrace } = storeToRefs(store);
 
 const taskMode = computed<TaskRunMode>(() => props.detail.task.task_mode ?? 'legacy');
 const taskModeLabel = computed(() => MODE_LABELS[taskMode.value]);
@@ -26,13 +27,19 @@ const taskModeLabel = computed(() => MODE_LABELS[taskMode.value]);
  * **必须同时看轨迹是否为空**:默认档是 `full`,但旧任务(或本次运行没有工具循环)
  * 的轨迹是空的——那时 `TaskTranscript` 会降级成档 1 布局,分工卡也必须跟着回来,
  * 否则 team 旧任务会既没有时间线也没有分工卡,只剩一片「没有可展示的执行轨迹」。
- * 判定与 `TaskTranscript` 内的 `degraded` 同式(两处必须一致)。
+ *
+ * 判定**直接复用** `resolveTranscriptMode`(与 `TaskTranscript` 的 `mode` 同一个函数,
+ * 不是同一条公式):两处手写同式实现必然漂开——TMSHOW-2 已经为此留过「两处必须一致」
+ * 的注释,那只是纪律;TMSHOW-3 改为代码层面的唯一来源。
  */
-const stepViewActive = computed(() => {
-  const requested = taskTranscriptMode.value ?? 'full';
-  if (requested === 'legacy') return true;
-  return taskTrace.value.length === 0;
-});
+const stepViewActive = computed<boolean>(
+  () =>
+    resolveTranscriptMode(
+      taskTranscriptOverride.value,
+      taskTranscriptMode.value,
+      taskTrace.value.length > 0,
+    ) === 'legacy',
+);
 
 // ----- team 模式:分工卡(按步骤名「【主Agent-N】」前缀分组;契约见批次 4) -----
 /** 分工前缀捕获:【主Agent-N】子目标名 */
