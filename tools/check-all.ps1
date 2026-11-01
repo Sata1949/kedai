@@ -313,9 +313,12 @@ if ($rustReady) {
     # Tauri 依赖树(冷态数分钟),与本段「秒级护栏」的定位不符;其 lib 单测目前
     # **只能手动跑**(`cargo test --manifest-path src-tauri/Cargo.toml --lib`)。
     # 该缺口登记在 `docs/遗留.md` §三 TESTCOV-1,勿当成已覆盖。
+    # **不要再用 `2>&1 | Out-Null` 吞输出**(2026-11-01 起)。此前吞掉后,CI 上
+    # 该段判红只留下一行 `throw 'launcher 单测失败'`,完全看不出是哪条用例、什么
+    # 断言——run 41309317403 排查时只能靠本地按 4 线程复跑才能定位。launcher 是零
+    # 依赖 crate,正常输出至多几十行,留着成本可忽略,排障价值远大于噪声。
     Invoke-Stage 'cargo test (launcher)' {
-        cargo test --manifest-path "$root\launcher\Cargo.toml" -j 8 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw 'launcher 单测失败' }
+        cargo test --manifest-path "$root\launcher\Cargo.toml" -j 8
     }
 }
 
