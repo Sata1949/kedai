@@ -5,13 +5,15 @@ import {
   formatTraceContent,
   formatTraceCounts,
   groupTrace,
+  requestedTranscriptMode,
+  resolveTranscriptMode,
   TRANSCRIPT_MODE_LABELS,
   TRANSCRIPT_MODES,
   TRACE_KIND_LABELS,
 } from './taskTranscript';
 import type { TaskTrace } from '../api/types';
 
-// 三档显示的纯函数单测(TMSHOW-2):排序去重、分类计数、按归属分组。
+// 三档显示的纯函数单测(TMSHOW-2 排序去重/分类计数/分组 + TMSHOW-3 档位合成与降级)。
 // 三档的 DOM 结构由 components/task/taskTranscript.test.ts 覆盖;本文件只管逻辑。
 
 /** 构造一条轨迹(默认值覆盖大部分字段,单测只关心被断言的那几项) */
@@ -231,5 +233,53 @@ describe('常量表的穷尽性', () => {
     expect(Object.keys(TRACE_KIND_LABELS).sort()).toEqual(
       ['reasoning', 'step_result', 'tool_call', 'tool_result'].sort(),
     );
+  });
+});
+
+describe('requestedTranscriptMode 用户选择', () => {
+  it('未覆盖时跟随默认档', () => {
+    expect(requestedTranscriptMode(null, 'condensed')).toBe('condensed');
+    expect(requestedTranscriptMode(undefined, 'legacy')).toBe('legacy');
+  });
+
+  it('有覆盖时覆盖优先于默认档', () => {
+    expect(requestedTranscriptMode('legacy', 'full')).toBe('legacy');
+    expect(requestedTranscriptMode('condensed', 'legacy')).toBe('condensed');
+  });
+
+  it('覆盖成与默认档相同的值也是一次覆盖(未来改默认时不跟随)', () => {
+    expect(requestedTranscriptMode('full', 'full')).toBe('full');
+  });
+});
+
+describe('resolveTranscriptMode 生效档位与降级', () => {
+  it('有轨迹时各档位原样生效', () => {
+    for (const mode of TRANSCRIPT_MODES) {
+      expect(resolveTranscriptMode(mode, 'full', true)).toBe(mode);
+    }
+  });
+
+  it('无轨迹时档 2 / 档 3 降级到档 1(不出现空时间线)', () => {
+    expect(resolveTranscriptMode('full', 'full', false)).toBe('legacy');
+    expect(resolveTranscriptMode('condensed', 'full', false)).toBe('legacy');
+  });
+
+  it('无轨迹时用户本来就选档 1,不重复降级(结果相同但路径不同)', () => {
+    expect(resolveTranscriptMode('legacy', 'full', false)).toBe('legacy');
+  });
+
+  it('未覆盖 + 无轨迹 → 降到档 1(默认 full 也要降)', () => {
+    expect(resolveTranscriptMode(null, 'full', false)).toBe('legacy');
+  });
+
+  it('未覆盖 + 有轨迹 → 用默认档', () => {
+    expect(resolveTranscriptMode(null, 'condensed', true)).toBe('condensed');
+    expect(resolveTranscriptMode(undefined, 'legacy', true)).toBe('legacy');
+  });
+
+  it('降级不改用户选择:同一份入参下 requested 与 resolved 可不同', () => {
+    // 这条是组件层的口径钉子:分段控件高亮用 requested,渲染分支用 resolved。
+    expect(requestedTranscriptMode('condensed', 'full')).toBe('condensed');
+    expect(resolveTranscriptMode('condensed', 'full', false)).toBe('legacy');
   });
 });

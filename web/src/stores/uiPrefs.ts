@@ -9,6 +9,11 @@ import { computed, ref, watch } from 'vue';
 import { LocalRenderHtmlPreferenceStore } from '../renderHtmlPreference';
 import type { SettingsNavRequest, SettingsSectionKey, TutorialPanelKey } from '../onboarding';
 import {
+  readDefaultTaskTranscriptMode,
+  writeDefaultTaskTranscriptMode,
+} from '../utils/taskTranscriptPreference';
+import type { TranscriptMode } from '../utils/taskTranscript';
+import {
   currentCharacterIdValue,
   queueSettingsSave,
   registerRenderHtmlDefaultSink,
@@ -242,6 +247,28 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {  // ===== 弹�
     }
   });
 
+  // ===== 任务执行过程显示的默认档位(TMSHOW-3) =====
+  // 这是**默认档**;任务详情顶栏写的是单任务覆盖(键 kedai.task-transcript-mode.v1.<taskId>,
+  // 见 utils/taskTranscriptPreference.ts),未覆盖的任务跟随这里。
+  // 刻意不入 settings.json:纯 UI 偏好,进设置链要改后端五处 + 取值域登记 + 双模式继承规则。
+  const taskTranscriptMode = ref<TranscriptMode>(readStoredTaskTranscriptMode());
+  function readStoredTaskTranscriptMode(): TranscriptMode {
+    return readDefaultTaskTranscriptMode(localStorage);
+  }
+  watch(taskTranscriptMode, (v) => {
+    writeDefaultTaskTranscriptMode(localStorage, v);
+  });
+  /**
+   * 设置默认档位(设置页入口)。
+   *
+   * 白名单校验放在存储层(`readDefault...`/`isTranscriptMode`)而不是这里:
+   * 非法值只可能来自外部写入的脏 localStorage,而这条链上唯一的写入方是本函数,
+   * 参数类型已经是 `TranscriptMode`——重复校验只会让两处白名单慢慢漂开。
+   */
+  function setDefaultTaskTranscriptMode(next: TranscriptMode): void {
+    taskTranscriptMode.value = next;
+  }
+
   // ===== 安全 HTML 渲染开关 =====
   /**
    * 消息 HTML 渲染开关(只控制安全 HTML,与 JavaScript 授权独立)。
@@ -415,6 +442,8 @@ export const useUiPrefsStore = defineStore('app.uiPrefs', () => {  // ===== 弹�
     clearSettingsNav,
     callTraceOpen,
     taskResultSummaryOpen,
+    taskTranscriptMode,
+    setDefaultTaskTranscriptMode,
     renderHtml,
     defaultRenderHtml,
     renderHtmlOverrides,
