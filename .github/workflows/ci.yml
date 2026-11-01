@@ -102,10 +102,15 @@ jobs:
       #
       # ---- 2026-11-01 提效批:三条改动,只为「稳定命中」,不改任何门禁语义 ----
       #
-      # ① **排除 debug/incremental**:该目录是 Cargo 的增量编译中间产物,本机实测
-      #    23 GB(整个 target 41 GB 的 56%)。CI 每个 job 都是「恢复缓存 → 一次性编译」,
-      #    增量中间态跨 run 复用的收益接近零(能在 CI 复用的只有 rlib/rmeta 与依赖产物),
-      #    却是缓存体积与解压耗时的大头。排除后单条目从约 2.1 GB 降到 1.0~1.3 GB。
+      # ① **排除 debug/incremental**(注:实测在 CI 上是空操作,见下「实测修正」)。
+      #    本机该目录 23 GB(整个 target 41 GB 的 56%)。CI 每个 job 都是「恢复缓存 →
+      #    一次性编译」,增量中间态跨 run 复用的收益接近零。
+      #    **实测修正(2026-11-01 PR #82 后)**:`dtolnay/rust-toolchain` 这个 action
+      #    会**自动设置 `CARGO_INCREMENTAL=0`**(其日志里明写 "Disable incremental
+      #    compilation"),所以 CI 里根本不生成 `incremental` 目录——本行是防御性写法,
+      #    不产生实际收益。缓存条目实测仍是 ~2201 MB,与改前 2.14 GB 基本一致;
+      #    那部分体积是 `target/debug/deps` 的 rlib/rmeta,是**真实可复用**的产物,
+      #    不该再减。保留本行的理由:若日后换掉该 action 或手动开增量,这里能兜住。
       #
       # ② **key 里摘掉 src-tauri 的两份清单**。此前改一次 Tauri 依赖就让 server-rs 的
       #    整份缓存作废。而 `src-tauri/target` 在 CI 里**根本不存在**——check-all.ps1
@@ -124,7 +129,11 @@ jobs:
       #
       # **配额提醒**:GitHub 单仓缓存上限 10 GB,超限按最后访问时间 LRU 淘汰。本次
       # 改动前实测该仓库已用 11.59 GB(cargo 条目 5 条 × 约 2.1 GB,同名 key 因
-      # 不同 scope 各存一份)。改完后单条目显著变小,且 restore-keys 让重复条目变少。
+      # 不同 scope 各存一份)。**实测(本批 PR #82 后)10.84 GB,仍略超上限**——
+      # 但结构已改善:新 key 只按 server-rs 清单失效,且带 restore-keys,旧的三条
+      # 同名 Tauri-scope 条目会随 LRU 自然淘汰。若后续仍频繁 miss,下一步可考虑
+      # 用 `actions/cache/restore` + `save` 分离、或只缓存 `~/.cargo/registry` +
+      # 依赖层(不缓存 crate 自身产物),但那需要单独实测,不在本批。
       - name: Cache cargo
         uses: actions/cache@v4
         with:
