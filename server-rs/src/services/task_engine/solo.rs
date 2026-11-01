@@ -286,6 +286,8 @@ pub(crate) async fn run_agent_loop(
         // 单次调用超时覆盖(A 批 A1):solo 无节点级配置,恒走宿主既有判定
         call_timeout: None,
         emit_tokens: true,
+        // 任务侧透出思考正文(TMSHOW-1):经事件桥落 task_trace,供三档显示
+        emit_reasoning: true,
     })
     .await;
     let model = engine.model();
@@ -384,6 +386,8 @@ pub(crate) async fn run_agent_loop(
                 gate: retry_gate,
                 call_timeout: None,
                 emit_tokens: true,
+                // 任务侧透出思考正文(TMSHOW-1):收尾重试同样落轨迹
+                emit_reasoning: true,
             })
             .await;
         }

@@ -603,6 +603,10 @@ impl TaskService {
             let (mut prompt_tokens, mut completion_tokens, mut reasoning_tokens) =
                 (0i64, 0i64, 0i64);
             let mut reasoning_chars = 0usize;
+            // 思考正文(TMSHOW-1):此前只数字符数、文本直接丢弃;轨迹落库需要正文。
+            // 本旁路无 SSE 事件通道,故在此就地累积,收尾时整轮写一条 task_trace
+            // (与事件桥「一轮一条」同粒度同口径)。
+            let mut reasoning_text = String::new();
             let mut tool_calls: Vec<ToolCallArgs> = Vec::new();
             // 未下发工具却到达的 ToolCall 块计数(TM-EMPTY-1):按既有纪律丢弃不入
             // `tool_calls`,但计数透给调用方——规划器侦察终轮据此识别「空文本 + tool_call」
@@ -614,7 +618,10 @@ impl TaskService {
                         batcher.push(&t);
                         content.push_str(&t);
                     }
-                    LlmStreamChunk::Reasoning(r) => reasoning_chars += r.chars().count(),
+                    LlmStreamChunk::Reasoning(r) => {
+                        reasoning_chars += r.chars().count();
+                        reasoning_text.push_str(&r);
+                    }
                     LlmStreamChunk::Usage {
                         prompt_tokens: p,
                         completion_tokens: ct,
@@ -661,6 +668,7 @@ impl TaskService {
                 completion_tokens,
                 reasoning_tokens,
                 reasoning_chars,
+                reasoning_text,
                 tool_calls,
                 dropped_tool_calls,
             )
@@ -674,6 +682,7 @@ impl TaskService {
                 completion_tokens,
                 reasoning_tokens,
                 reasoning_chars,
+                reasoning_text,
                 tool_calls,
                 dropped_tool_calls,
             ),
@@ -764,6 +773,19 @@ impl TaskService {
         // 调用追踪落库先于日志字段构建:log_fields 会 move model,此处只借用。
         // 空内容判定须排除「带 tool_calls 的轮次」(问题②规划器侦察轮:模型请求
         // 工具时正文为空是正常形态,属有效产出;标 empty 会误导调用情况面板)
+        // TMSHOW-1:思考正文落轨迹(整轮一条)。放在 record_llm_call 之前:
+        // 轨迹 seq 与调用行 created_at 同序,前端按 seq 排出的时间线
+        // 与「调用情况」面板的行序一致,不会出现两条信息源互相矛盾。
+        if !reasoning_text.trim().is_empty() {
+            self.emit_trace(
+                task_id,
+                phase,
+                step_index,
+                crate::models::types::TaskTraceKind::Reasoning,
+                None,
+                &reasoning_text,
+            );
+        }
         let status = if out.text.trim().is_empty() && out.tool_calls.is_empty() {
             "empty"
         } else {

@@ -273,6 +273,14 @@ const MAPPINGS = [
     rust: { file: 'server-rs/src/api/tasks/detail.rs', name: 'TaskUsageTotal' },
     ts: { file: 'web/src/api/types/task.ts', name: 'TaskUsageTotal', kind: 'interface' },
   },
+  {
+    // TMSHOW-1(2026-11-01):任务执行轨迹(`task_trace` 表)。与「任务 LLM 调用记录」是
+    // **两个视角**:调用记录是每次调用的记账(token/耗时/摘要),轨迹是执行内容的正文
+    // (思考 / 工具入出参 / 节点产出)。前端三档显示的档 2 与档 3 都直接消费本组字段。
+    label: '任务执行轨迹条目',
+    rust: { file: 'server-rs/src/models/types.rs', name: 'TaskTraceRecord' },
+    ts: { file: 'web/src/api/types/task.ts', name: 'TaskTrace', kind: 'interface' },
+  },
 ];
 
 const read = (rel) => readFileSync(join(ROOT, rel), 'utf8');

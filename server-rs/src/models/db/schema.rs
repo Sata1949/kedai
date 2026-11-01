@@ -517,6 +517,31 @@ CREATE TABLE IF NOT EXISTS task_events (
 );
 CREATE INDEX IF NOT EXISTS idx_task_events_task_seq ON task_events(task_id, seq);
 
+-- 任务执行轨迹(TMSHOW-1,2026-11-01):任务模式**中间过程**的结构化落库。
+-- 此前的可见性只有三类残缺形态:思考正文被直接丢弃(只数字符数)、工具调用与结果被压成
+-- 一行 200 字中文状态(无入参无出参)、bash 输出只回灌模型不入库。前端「全消息显示」
+-- 与「压缩 + 计数」两档因此无数据可渲染,本表是这两档的唯一数据源。
+-- 语义:一行 = 一条执行轨迹条目;`phase` + `step_index` 与 `task_llm_calls` **同口径**,
+-- 前端据已有 utils/phaseLabel 归组,不另立归属体系。
+-- kind 四值:reasoning=一轮思考正文(整轮一条,不逐块) / tool_call=工具入参 /
+--   tool_result=工具出参 / step_result=流程节点正文产出。
+-- 截断:正文在**写入侧**硬截断(见 task_service::trace::TRACE_CONTENT_MAX_CHARS),
+--   超限置 truncated=1 —— 不设闸门时单任务可膨胀到几十 MB(fs_read 可返回整文件)。
+-- 保留窗口:每任务 TRACE_KEEP_PER_TASK 条,写事务末尾按 seq 删最旧(同 task_events 口径)。
+CREATE TABLE IF NOT EXISTS task_trace (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id    TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  seq        INTEGER NOT NULL,
+  phase      TEXT NOT NULL,
+  step_index INTEGER,
+  kind       TEXT NOT NULL,
+  name       TEXT,
+  content    TEXT NOT NULL,
+  truncated  INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_trace_task_seq ON task_trace(task_id, seq);
+
 -- 电脑操作审计(CU-1,2026-10-06「安全前提」批):每次 cu 类工具调用尝试落一行
 -- (成功/被拒都落),回答「模型看了几次屏幕、什么时候被急停/未启用拦下」。
 -- 与 exec_audit 分表而非合并:那份是**命令执行**审计(含命令原文与输出摘要),

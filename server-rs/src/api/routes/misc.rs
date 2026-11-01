@@ -93,6 +93,9 @@ pub(crate) fn misc_routes() -> Router<Arc<AppState>> {
         // 任务事件补拉(PRODCAP-1):`after`/`limit` + `truncated` 标记,与 SSE 帧同形;
         // SSE 端点的 `?task_id=&after=` 回放见 tasks::events
         .route("/api/tasks/{id}/events", get(tasks::list_events))
+        // 任务执行轨迹(TMSHOW-1):思考 / 工具入出参 / 节点产出的结构化读取
+        // (`after`/`limit` + `truncated`,与事件补拉同形)
+        .route("/api/tasks/{id}/trace", get(tasks::list_trace))
         // 任务文件变更台账(2026-09-30 批次 4,PRODCAP-4「交付可审计」):
         // 清单 / 单文件 diff / 单文件回滚。回滚是 POST(有副作用),diff 与清单只读。
         .route("/api/tasks/{id}/changes", get(tasks::file_changes))

@@ -484,6 +484,7 @@ impl AgentEngine {
                     abort,
                     flag,
                     false,
+                    false, // 思考亦不透出(TMSHOW-1,聊天路径)
                     None,
                 )
                 .await?;
@@ -508,6 +509,7 @@ impl AgentEngine {
                             abort,
                             flag,
                             false,
+                            false, // 草稿提额重试同样不透出思考(TMSHOW-1)
                             None,
                         )
                         .await?;
@@ -655,6 +657,7 @@ impl AgentEngine {
                     // 聊天路径无节点级超时;emit_tokens=false(产物不进气泡)
                     call_timeout: None,
                     emit_tokens: false,
+                    emit_reasoning: false, // 聊天侧不透出思考正文(TMSHOW-1)
                 })
                 .await
                 {
@@ -814,6 +817,7 @@ impl AgentEngine {
                     // 聊天路径无节点级超时(A 批 A1):恒走宿主既有判定(聊天侧本无总时长上限)
                     call_timeout: None,
                     emit_tokens: true,
+                    emit_reasoning: false, // 聊天侧不透出思考正文(TMSHOW-1)
                 })
                 .await?
             } else if req.mode == "custom" {
@@ -828,6 +832,7 @@ impl AgentEngine {
                         abort,
                         flag,
                         true,
+                        false, // 聊天 custom 步骤单次生成不透出思考(TMSHOW-1)
                         None,
                     )
                     .await?
@@ -863,6 +868,7 @@ impl AgentEngine {
                         // `PlanStep`);恒走宿主既有判定
                         call_timeout: None,
                         emit_tokens: true,
+                        emit_reasoning: false, // 聊天侧不透出思考正文(TMSHOW-1)
                     })
                     .await?
                 };
@@ -882,6 +888,7 @@ impl AgentEngine {
                     abort,
                     flag,
                     true,
+                    false, // deep/fast 步骤单次生成不透出思考(TMSHOW-1)
                     None,
                 )
                 .await?

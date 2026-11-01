@@ -141,6 +141,9 @@ pub(crate) async fn execute_generation(
     // 是否把正文增量透出为 Token 事件(RPFLOW-1):草稿步/归档步等隐藏步骤传 false,
     // 产物不进消息气泡;工具调用/重试等其余事件照常透出。
     emit_tokens: bool,
+    // 是否把思考正文增量透出为 Reasoning 事件(TMSHOW-1):仅任务侧 true。
+    // 聊天侧恒 false —— 推理链的渲染契约由 Step 事件承担,本批不动角色扮演观感。
+    emit_reasoning: bool,
     // 调用外部的 usage 实时累加器(TMR3-L1):每收到一个 Usage 分块就同步写入。
     // 单次调用被看门狗超时 drop 时,本函数栈上的局部 `usage` 随 future 消失,
     // 只有外部累加器能保住「超时前已收到的用量」;成功路径由返回值统一入账,
@@ -224,7 +227,7 @@ pub(crate) async fn execute_generation(
             }
             chunk = chunk_rx.recv() => match chunk {
                 Some(chunk) => {
-                    if process_chunk(chunk, &mut content, &mut reasoning, &mut tool_calls, &mut usage, live_usage.as_deref_mut(), &mut finish_reason, &engine.tool_registry, tx, abort, flag, emit_tokens).await? {
+                    if process_chunk(chunk, &mut content, &mut reasoning, &mut tool_calls, &mut usage, live_usage.as_deref_mut(), &mut finish_reason, &engine.tool_registry, tx, abort, flag, emit_tokens, emit_reasoning).await? {
                         return Ok(ExecutorResult { content, usage, interrupted: true, tool_calls, reasoning, finish_reason, self_heals: Vec::new(), budget_stopped: false, stop: None });
                     }
                 }
@@ -311,6 +314,8 @@ pub(crate) async fn process_chunk(
     flag: &AbortFlag,
     // 是否透出 Token 事件(RPFLOW-1;草稿/归档等隐藏步骤传 false)
     emit_tokens: bool,
+    // 是否透出思考正文增量(TMSHOW-1;仅任务侧传 true)
+    emit_reasoning: bool,
 ) -> Result<bool, String> {
     if *abort.borrow() {
         return Ok(true);
@@ -322,7 +327,14 @@ pub(crate) async fn process_chunk(
                 send_event(SseEvent::Token { text }, tx, abort, flag).await?;
             }
         }
-        LlmStreamChunk::Reasoning(rc) => reasoning.push_str(&rc),
+        LlmStreamChunk::Reasoning(rc) => {
+            reasoning.push_str(&rc);
+            // TMSHOW-1:思考正文此前在此丢弃(只留局部变量供回灌与截断自愈判断)。
+            // 任务侧需要它落轨迹表供前端渲染;聊天侧透传关闭,推理链渲染契约不变。
+            if emit_reasoning {
+                send_event(SseEvent::Reasoning { text: rc }, tx, abort, flag).await?;
+            }
+        }
         LlmStreamChunk::ToolCall(call) => {
             if !call.id.is_empty() && !call.name.is_empty() {
                 tool_calls.push(call.clone());
@@ -478,6 +490,8 @@ pub(crate) async fn generate_round(
     abort: &watch::Receiver<bool>,
     flag: &AbortFlag,
     emit_tokens: bool,
+    // 是否透出思考正文(TMSHOW-1;仅任务侧 true)——与 execute_generation 同名参数同义
+    emit_reasoning: bool,
     call_watchdog: Option<std::time::Duration>,
     round: usize,
     total_usage: &mut TokenUsage,
@@ -507,6 +521,7 @@ pub(crate) async fn generate_round(
                 abort,
                 flag,
                 emit_tokens,
+                emit_reasoning,
                 Some(&mut attempt_usage),
             ),
             call_watchdog,

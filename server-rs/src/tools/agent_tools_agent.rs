@@ -445,6 +445,8 @@ async fn run_subtask_with_tools(
         // 单次调用超时覆盖(A 批 A1):子 agent 无节点级配置,恒走宿主既有判定
         call_timeout: None,
         emit_tokens: true,
+        // 子 agent 也是任务侧链路(TMSHOW-1):思考正文落轨迹,前端按 phase 归组
+        emit_reasoning: true,
     })
     .await;
     drop(tx);

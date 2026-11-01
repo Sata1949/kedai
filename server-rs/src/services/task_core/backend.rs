@@ -385,6 +385,33 @@ pub(crate) trait TaskScratch: Send + Sync {
     fn scratch_dir_for(&self, task_id: &str) -> Result<std::path::PathBuf, String>;
 }
 
+// ==================== 窄接口(10/10):任务执行轨迹(TMSHOW-1) ====================
+
+/// 任务执行轨迹落库(`task_trace`):思考正文 / 工具入出参 / 节点产出。
+///
+/// **与 [`TaskTrace`] 的区别(名字相近,职责不同)**:
+/// - `TaskTrace`(窄接口 2)是**调用记账**——`task_llm_calls` 每次调用一行、token/耗时/摘要,
+///   回答「这次调用花了多少、看到了什么」;
+/// - 本接口是**执行内容**——`task_trace` 一条轨迹一行完整正文,回答「这一轮想了什么、
+///   调了哪个工具、bash 回了什么」。前者是成本与诊断视角,后者是渲染视角。
+///
+/// 只有真的多了一种**要渲染的内容**才走本接口;只是想多记一个统计量,应加在 `TaskTrace`。
+pub(crate) trait TaskTimeline: Send + Sync {
+    /// 落一条轨迹并广播 `kind=trace` 事件。
+    ///
+    /// 空正文由实现侧早退(不落库不广播);正文超上限在实现侧截断并置标记。
+    /// 返回值 = 轨迹序号(未落库时为 None),供调用方观测/测试断言。
+    fn record_trace(
+        &self,
+        task_id: &str,
+        phase: &str,
+        step_index: Option<usize>,
+        kind: crate::models::types::TaskTraceKind,
+        name: Option<&str>,
+        content: &str,
+    ) -> Option<i64>;
+}
+
 // ==================== 聚合别名(兼容既有构造点) ====================
 
 /// 宿主能力全集(聚合别名,非上帝接口):同时满足全部窄接口即自动实现。
@@ -399,6 +426,7 @@ pub(crate) trait TaskBackend:
     + TaskTerminalSink
     + TaskGenerator
     + TaskScratch
+    + TaskTimeline
 {
 }
 
@@ -412,5 +440,6 @@ impl<T> TaskBackend for T where
         + TaskTerminalSink
         + TaskGenerator
         + TaskScratch
+        + TaskTimeline
 {
 }

@@ -8,9 +8,10 @@ import type { TaskDeliverySummary, WorkspaceProfile } from './workspace';
  *  批次 R4 流式输出追加:delta(LLM 正文攒批增量,暂态不落库;权威数据以 llm_call 落库行为准)
  *  TMR3-L2 追加:delta_reset(重试前清空该调用归属的暂态流式缓冲,同样不落库)
  *  PRODCAP-1 追加:file_changed(文件变更台账新增一行,「文件变更」卡片据此实时刷新)
+ *  TMSHOW-1 追加:trace(执行轨迹新增一条,载荷见 `TaskEvent.trace`)
  *  真源为 Rust `models/types.rs` 的 `TaskEventKind`(serde snake_case);改一侧须同步另一侧,
  *  并更新 `tools/check-contract.mjs` 的映射表。 */
-export type TaskEventKind = 'created' | 'status' | 'plan' | 'subtask' | 'usage' | 'deleted' | 'llm_call' | 'agent_status' | 'approval_required' | 'delta' | 'delta_reset' | 'flow_bound' | 'file_changed';
+export type TaskEventKind = 'created' | 'status' | 'plan' | 'subtask' | 'usage' | 'deleted' | 'llm_call' | 'agent_status' | 'approval_required' | 'delta' | 'delta_reset' | 'flow_bound' | 'file_changed' | 'trace';
 
 /**
  * 任务模式(task 工作台)事件(对齐 server-rs SseEvent::Task):
@@ -41,6 +42,51 @@ export type TaskEvent = {
   seq?: number;
   /** 事件落库时间(ISO-8601,与 `task_events.created_at` 同源;仅落库事件携带) */
   at?: string;
+  /** 执行轨迹条目(TMSHOW-1;仅 kind=trace 携带)。
+   *  收到即并入本地轨迹缓存,免去为每条轨迹重拉 `/trace` 端点。
+   *  `trace.seq` 是轨迹自己的排序键(**与事件 seq 不同源**)。 */
+  trace?: TaskTrace;
+};
+
+/**
+ * 任务轨迹条目分类(TMSHOW-1;对齐 server-rs `TaskTraceKind`,serde snake_case)。
+ * 真源为 Rust `models/types.rs::TaskTraceKind`;改一侧须同步另一侧与契约映射表。
+ */
+export type TaskTraceKind = 'reasoning' | 'tool_call' | 'tool_result' | 'step_result';
+
+/**
+ * 任务执行轨迹条目(TMSHOW-1;对齐 server-rs `TaskTraceRecord`)。
+ * 任务模式**中间过程**的结构化记录:思考正文 / 工具入参 / 工具出参 / 节点产出。
+ *
+ * 与 `TaskLlmCall` 的区别:`TaskLlmCall` 是**调用记账**(每次调用一行、token/耗时/摘要),
+ * 本类型是**执行内容**(一条轨迹一行完整正文)。前端三档显示的数据源:
+ * 档 2 按 `seq` 排成扁平时间线,档 3 按 `phase + step_index` 分组后折叠计数。
+ */
+export interface TaskTrace {
+  id: number;
+  task_id: string;
+  /** 任务内单调序号(渲染顺序的唯一依据) */
+  seq: number;
+  /** 调用归属阶段(与 `TaskLlmCall.phase` 同口径,可直接喂 `utils/phaseLabel`) */
+  phase: string;
+  /** 步骤下标(仅步骤类调用携带;非步骤阶段为 null) */
+  step_index: number | null;
+  kind: TaskTraceKind;
+  /** 工具名(仅 tool_call/tool_result 携带) */
+  name: string | null;
+  /** 正文:思考文本 / 工具入参 JSON / 工具出参 JSON / 节点正文产出 */
+  content: string;
+  /** 正文超出写入侧上限被截断 */
+  truncated: boolean;
+  created_at: string;
+}
+
+/** 任务轨迹读取响应(TMSHOW-1;`GET /api/tasks/{id}/trace?after=&limit=`)。
+ *  `truncated=true` 表示请求起点早于保留窗口,更早条目已被清理;
+ *  `after` 超过最新 seq 返回空数组,**不是 404**。 */
+export type TaskTracePage = {
+  trace: TaskTrace[];
+  truncated: boolean;
 };
 
 /**

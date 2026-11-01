@@ -6,7 +6,7 @@
 // 批次 R4:Token 不再只计字数丢弃,改经 DeltaBatcher 攒批(200ms/80 字先到先发)
 // 转发为 kind=delta 暂态事件,前端任务工作台据此实时显示「正在生成」;
 // 攒批器携带 phase/step_index 调用上下文(与 task_llm_calls 落库行同口径)。
-use crate::models::types::{SseEvent, TaskEventKind};
+use crate::models::types::{SseEvent, TaskEventKind, TaskTraceKind};
 use crate::services::task_core::{TaskBackend, DELTA_FLUSH_WINDOW};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -47,6 +47,10 @@ pub(crate) fn spawn(
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // 流式正文字符聚合计数:Finish 收尾事件汇总携带(「流式输出 N 字」)
         let mut streamed_chars = 0usize;
+        // 思考正文累积(TMSHOW-1):Reasoning 分块按**整轮一条**落轨迹,不逐块落库。
+        // 为什么整轮一条:逐块会让一次思考变成几十行记录,前端无法成「一条思考消息」,
+        // 也会把 64 容量的任务事件通道灌满——落库粒度必须等于展示粒度。
+        let mut reasoning_buf = String::new();
         loop {
             tokio::select! {
                 ev = rx.recv() => {
@@ -55,11 +59,18 @@ pub(crate) fn spawn(
                             streamed_chars += text.chars().count();
                             batcher.push(&text);
                         }
+                        // 思考正文分块(TMSHOW-1):只累积,落库时机见 ToolCall 分支与 drain 收尾
+                        Some(SseEvent::Reasoning { text }) => {
+                            reasoning_buf.push_str(&text);
+                        }
                         // 任务模式单次调用重试(TMR3-1):首次尝试已透出的正文增量收不回来,
                         // 重试会从头再流一遍。先丢弃本批并发 delta_reset,让前端清空该调用
                         // 归属的缓冲,再播报重试状态(TMR3-L2;聊天侧走自己的 Retry 展示)。
                         Some(SseEvent::Retry { attempt, max, reason }) => {
                             batcher.reset();
+                            // 重试会从头再思考一遍:首次尝试的思考已无展示价值(正文同理被
+                            // reset 丢弃),丢弃而不是拼接,避免同一段思考在时间线上出现两次。
+                            reasoning_buf.clear();
                             let detail =
                                 format!("{label} 上游重试:第 {attempt}/{max} 次({reason})");
                             svc.emit_event(
@@ -73,8 +84,32 @@ pub(crate) fn spawn(
                         Some(ev) => {
                             // 事件边界先落批:保证 delta 先于后续状态/收尾事件到达前端
                             batcher.flush();
+                            // 工具调用前先落思考:时间线顺序 == 真实推理顺序
+                            if matches!(ev, SseEvent::ToolCall { .. }) && !reasoning_buf.trim().is_empty() {
+                                svc.record_trace(
+                                    &task_id,
+                                    &phase,
+                                    step_index,
+                                    TaskTraceKind::Reasoning,
+                                    None,
+                                    &reasoning_buf,
+                                );
+                                reasoning_buf.clear();
+                            }
                             if let Some(detail) = map_event(&ev, streamed_chars, &label) {
                                 svc.emit_event(TaskEventKind::AgentStatus, &task_id, None, None, Some(detail));
+                            }
+                            // 工具轨迹(TMSHOW-1):入参与出参各落一行,前端按 seq 排序后
+                            // 与思考条目并列显示;正文为空时 record_trace 内部早退。
+                            if let Some((kind, name, content)) = trace_of(&ev) {
+                                svc.record_trace(
+                                    &task_id,
+                                    &phase,
+                                    step_index,
+                                    kind,
+                                    name.as_deref(),
+                                    &content,
+                                );
                             }
                         }
                         None => break,
@@ -83,10 +118,46 @@ pub(crate) fn spawn(
                 _ = tick.tick() => batcher.flush_if_due(),
             }
         }
-        // drain 收尾:不足一批的尾段也要发出(delta 暂态可丢,但不主动丢)
+        // drain 收尾:末轮思考(其后再无工具调用)与不足一批的尾段都要发出
+        if !reasoning_buf.trim().is_empty() {
+            svc.record_trace(
+                &task_id,
+                &phase,
+                step_index,
+                TaskTraceKind::Reasoning,
+                None,
+                &reasoning_buf,
+            );
+        }
         batcher.flush();
     });
     (tx, drain)
+}
+
+/// 引擎事件 → 轨迹条目(TMSHOW-1);返回 None 表示本事件不产生轨迹。
+///
+/// 与 `map_event` 的分工是**内容 vs 通知**:`map_event` 产出「一行人类可读进展」
+/// (200 字上限,只够说"还在动"),本函数产出**可渲染的完整正文**。同一条工具调用
+/// 会走两者:一个进 agent_status 做活动指示,一个进 task_trace 做时间线。
+///
+/// 入参/出参统一序列化为 JSON 文本落 `content`,前端原样展示、不解析结构——
+/// 轨迹表不为不同工具留结构化列是刻意的:工具形状由插件/MCP 决定,列会一直漂。
+fn trace_of(ev: &SseEvent) -> Option<(TaskTraceKind, Option<String>, String)> {
+    match ev {
+        SseEvent::ToolCall { name, input, .. } => Some((
+            TaskTraceKind::ToolCall,
+            Some(name.clone()),
+            serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string()),
+        )),
+        SseEvent::ToolResult { name, output, .. } => Some((
+            TaskTraceKind::ToolResult,
+            Some(name.clone()),
+            serde_json::to_string_pretty(output).unwrap_or_else(|_| output.to_string()),
+        )),
+        // 其余事件不产生轨迹:Token 是正文(已有 delta 通道与步骤产出)、
+        // Step 是进度标题(agent_status 已承载)、Finish/Error/Interrupted 是终态通知。
+        _ => None,
+    }
 }
 
 /// 引擎事件 → 任务事件 detail 文本映射;返回 None 表示不转发。

@@ -113,6 +113,8 @@ impl DeltaBatcher {
             // PRODCAP-1:delta 为暂态事件不落库 → 不携带 seq/at(前端不对其做缺口判定)
             seq: None,
             at: None,
+            // 轨迹载荷仅 kind=trace 携带(TMSHOW-1);流式增量与轨迹无关
+            trace: None,
         });
     }
 
@@ -136,6 +138,8 @@ impl DeltaBatcher {
             step_index: self.step_index,
             seq: None,
             at: None,
+            // 重置事件不携带轨迹载荷(同上)
+            trace: None,
         });
     }
 }

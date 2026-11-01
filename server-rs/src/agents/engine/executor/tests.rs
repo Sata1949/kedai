@@ -614,6 +614,8 @@ async fn usage_chunk_feeds_both_local_and_live_accumulator() {
         &abort,
         &flag,
         false,
+        // 本用例只验证 usage 聚合,不验证思考透出(TMSHOW-1):保持 false(聊天路径口径)
+        false,
     )
     .await
     .expect("Usage 分块不应失败");
