@@ -7,7 +7,7 @@
     "server-rs/src/api/chat.rs": 1138,
     "server-rs/src/api/tasks.rs": 1157,
     "server-rs/src/connectors/mock.rs": 1275,
-    "server-rs/src/connectors/openai_compatible/mod.rs": 1191,
+    "server-rs/src/connectors/openai_compatible/mod.rs": 1222,
     "server-rs/src/mcp/mod.rs": 1113,
     "server-rs/src/migration/mod.rs": 1152,
     "server-rs/src/models/types.rs": 2333,
