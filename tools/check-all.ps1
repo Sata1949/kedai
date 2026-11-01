@@ -12,6 +12,13 @@
 #       -StrictAudit 历史保留参数(2026-09-13 起 cargo audit 已是硬门禁,此开关无差异)
 #       -LooseAudit 把 cargo audit 降回警告档(仅在 advisory DB 不可用等特殊场景临时使用)
 #       -Perf 追加性能门禁(需 Kedai 服务已在运行;见文件末尾「性能门禁」段)
+#       **-StaticOnly(2026-11-01 CI 提效批)**:只跑「与编译产物无关」的全部检查——
+#       文档三段 + 11 段纯 Node 静态检查(契约/架构/计数/两个 ratchet/css/标点)+
+#       审计两段;跳过 fmt/clippy/cargo test 与前端 eslint/typecheck/vitest/vite build。
+#       给 CI 的 main 轻量档用(.github/workflows/ci.yml 的 check-main)。
+#       **与 -SkipWeb 的区别**:-SkipWeb 会连带跳过那 11 段静态检查(它们历史上与前端
+#       归在同一块),对「PR 已验过编译、main 只想复核静态口径」的场景来说太弱。
+#       -StaticOnly 不改变 -SkipWeb/-SkipRust 的任何既有语义,只在它们之上多一个挡位。
 #
 # 审计段(独立安全门禁,与 -SkipRust/-SkipWeb 解耦;批次 6.1 升级):
 #   - cargo audit 覆盖**两把锁**:server-rs/Cargo.lock + src-tauri/Cargo.lock(此前只扫前者)。
@@ -26,6 +33,9 @@ param(
     # 体积段 fail-closed 且消费 web/dist,故必须与 vite build 成对运行(先构建后判定)。
     [switch]$Bundle,
     [switch]$AuditOnly,
+    # CI 的 main 轻量档(2026-11-01 CI 提效批):只跑与编译产物无关的静态检查 + 审计。
+    # 与 -SkipWeb 的差别见文件头参数说明。
+    [switch]$StaticOnly,
     [switch]$StrictTypecheck,
     [switch]$StrictAudit,
     [switch]$LooseAudit,
@@ -122,7 +132,13 @@ if (-not $AuditOnly) {
 
 # 静态结构检查(纯 Node,零依赖,均 < 1s):锁漂移 / 契约 / 设置对拍 / 分层 / 体积
 # ratchet / 类型逃逸 ratchet / 零测试 ratchet / 样式纪律。全部与编译产物无关。
-if (-not $SkipWeb -and -not $AuditOnly) {
+#
+# 跳过条件 = 「-SkipWeb 或 -AuditOnly」且「不是 -StaticOnly」(2026-11-01 CI 提效批)。
+# 历史语义(-SkipWeb 连带跳过本段,见 MAINTENANCE.md 的开关说明)保持不动——改它
+# 会动到 pre-push / build.ps1 / 文档既有口径,与本批「只加速 CI」的目标不符。
+# -StaticOnly 是**显式要求跑静态段**的挡位:它优先于 -SkipWeb,供 CI 的 main 轻量档
+# 使用(那一档要跳过编译、但必须保留全部静态口径)。
+if ($StaticOnly -or (-not $SkipWeb -and -not $AuditOnly)) {
     Push-Location $root
     try {
         # 双 Cargo.lock 漂移:src-tauri 以 path 内嵌 server-rs,构建便携版时 cargo 忽略
@@ -176,7 +192,7 @@ if (-not $SkipWeb -and -not $AuditOnly) {
 # 否则第二个块拿不到 MSVC 环境(clippy 会误用 Git 的 link.exe)。
 $rustReady = $false
 $cargoTargetArgs = @()
-if (-not $SkipRust -and -not $AuditOnly) {
+if (-not $SkipRust -and -not $AuditOnly -and -not $StaticOnly) {
     if (-not $hasCargo) { Write-Host '未找到 cargo(也不在 ~\.cargo\bin),跳过后端;请先安装 Rust 工具链' -ForegroundColor Yellow }
     elseif (-not (Test-Path $vcvars)) { Write-Host "未找到 vcvars64.bat,跳过后端;请安装 VS BuildTools(MSVC)" -ForegroundColor Yellow }
     else {
@@ -332,7 +348,7 @@ if ($rustReady) {
 # 故 --max-warnings=0:新增任何 warning 即红,不再有「先降级再清偿」的缓冲带。
 # prettier --check 未接入——现有代码为手写紧凑风格,全量格式化差异面 ~80%,
 # 待独立「全量格式化」专项落地后再接(见 docs/功能-变更史.md)。
-if (-not $SkipWeb -and -not $AuditOnly) {
+if (-not $SkipWeb -and -not $AuditOnly -and -not $StaticOnly) {
     Push-Location $root
     try {
         Invoke-Stage 'web: eslint'              { npm run lint -w web }
