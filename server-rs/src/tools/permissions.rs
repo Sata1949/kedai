@@ -38,8 +38,16 @@ impl PermissionDecision {
     }
 }
 
+/// 授权配置的磁盘形态(`<data_dir>/permissions.json`)。
+///
+/// **`classifications` 是保留字段,当前没有任何写入入口**(无 API、无 UI):`risk_for` 会读它,
+/// 但全仓没有代码往里写,生产中等价于恒空——插件 / MCP 工具的最终风险级恒由 `default_risk`
+/// 的未知分支给出(Dangerous)。手改本文件里的 `classifications` **确实生效**(`risk_for` 照读),
+/// 只是界面没有入口;补入口会放开「把危险工具降级即自动执行」,需独立安全设计(见 `遗留.md`
+/// L8 / `计划.md` DC-3,这是既定口径而非漏做)。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct PermissionConfig {
+    /// **保留字段**:只被 `risk_for` 读取,无写入通路(见上)。手工编辑文件可用。
     #[serde(default)]
     classifications: BTreeMap<String, ToolRisk>,
     #[serde(default)]
@@ -706,6 +714,31 @@ mod tests {
         let d = decide_with(&m, "read", AuthorizationMode::Strict, &a);
         assert!(d.allowed);
         assert!(d.reason.contains("显式授权"));
+    }
+
+    /// DC-3 / L8:`classifications` 是保留字段——无 API/UI 写入入口,但手改磁盘仍生效。
+    /// 双向钉死:① 别以为它死了而删字段(手改配置的用户会静默变回 Dangerous);
+    /// ② 别以为它已可配而按它写 UI(生产永远拿不到值)。
+    #[test]
+    fn classifications_is_read_from_disk_but_has_no_write_entry() {
+        let root = TempDataDir::new("permission-classifications");
+        let path = root.join("permissions.json");
+        std::fs::write(
+            &path,
+            r#"{"classifications":{"my_custom_tool":"safe"},"session_grants":{},"role_grants":{}}"#,
+        )
+        .unwrap();
+        let m = ToolPermissionManager::load(path);
+        assert_eq!(
+            m.risk_for("my_custom_tool"),
+            ToolRisk::Safe,
+            "手改 classifications 应被 risk_for 读到(保留字段仍然生效)"
+        );
+        assert_eq!(
+            m.risk_for("some_unlisted_plugin_tool"),
+            ToolRisk::Dangerous,
+            "未登记工具恒为危险级——插件/MCP 工具在生产中即走这一支"
+        );
     }
 
     /// 匿名会话(character_id 为空)不命中角色授权,防止串权。
