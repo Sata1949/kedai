@@ -338,6 +338,35 @@ impl OpenAiCompatibleConnector {
         &self,
         messages: &[LlmMessage],
         params: GenerationParams,
+        abort: watch::Receiver<bool>,
+        tx: mpsc::UnboundedSender<LlmStreamChunk>,
+    ) -> Result<(), LlmError> {
+        // 6.3:外层只做计时与配对日志,主体原样搬进 `generate_stream_inner`——
+        // 主体有 5 处提前 return,逐出口手写日志必然会漏掉将来新增的分支。
+        // outcome 取 `LlmErrorKind::code`,与前端 SSE `Error.code` 同一词汇,免二次翻译。
+        let round_started = std::time::Instant::now();
+        let outcome = self
+            .generate_stream_inner(messages, params, abort, tx)
+            .await;
+        tracing::info!(
+            style = self.style.as_str(),
+            provider_host = provider_host(&self.base_url),
+            elapsed_ms = round_started.elapsed().as_millis() as u64,
+            outcome = outcome
+                .as_ref()
+                .err()
+                .map(|e| e.kind().code())
+                .unwrap_or("ok"),
+            "provider_round_end"
+        );
+        outcome
+    }
+
+    /// [`Self::generate_stream`] 的主体:原有逻辑逐行不变(含各提前 return)。
+    async fn generate_stream_inner(
+        &self,
+        messages: &[LlmMessage],
+        params: GenerationParams,
         mut abort: watch::Receiver<bool>,
         tx: mpsc::UnboundedSender<LlmStreamChunk>,
     ) -> Result<(), LlmError> {
@@ -426,6 +455,8 @@ impl OpenAiCompatibleConnector {
             ApiStyle::Responses => StreamParser::Responses(ResponsesParser::default()),
             ApiStyle::Anthropic => StreamParser::Anthropic(AnthropicParser::default()),
         };
+        // 结束日志由外层 `generate_stream` 统一发(那里覆盖全部出口,含本函数
+        // 之前几处提前 return);这里只把结果原样交回,不重复打 provider_round_end。
         read_sse_stream(resp.bytes_stream(), abort, tx, STREAM_IDLE_TIMEOUT, parser).await
     }
 
