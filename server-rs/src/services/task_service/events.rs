@@ -438,7 +438,8 @@ impl TaskService {
             step_index,
             seq: None,
             at: Some(record.created_at.clone()),
-            trace: Some(record),
+            // Box 化的理由见 `SseEvent::Task.trace` 的字段注释(clippy::large_enum_variant)
+            trace: Some(Box::new(record)),
         });
         Some(seq)
     }

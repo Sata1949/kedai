@@ -910,8 +910,13 @@ pub enum SseEvent {
         /// 加性字段:旧客户端读不到即忽略,不影响既有事件分发;新客户端据此把内容
         /// 并入本地轨迹缓存,免去收到一条轨迹就重拉一次 `/trace` 端点。
         /// `trace.seq` 是轨迹自己的排序键(**与事件 seq 不同源**)。
+        ///
+        /// **Box 是必需的而不是口味**:`TaskTraceRecord` 含多个 String 级字段,
+        /// 内联进本变体后会把 `SseEvent::Task` 撑到 ~362 字节(第二大变体仅 152),
+        /// 触发 `clippy::large_enum_variant`(CI 以 `-D warnings` 判红)。
+        /// Box 不改变线格式——serde 对 `Box<T>` 是透明代理,序列化结果与内联时逐字节相同。
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        trace: Option<TaskTraceRecord>,
+        trace: Option<Box<TaskTraceRecord>>,
     },
 }
 
@@ -1935,6 +1940,66 @@ mod tests {
                 "task_id": "t1",
                 "kind": "llm_call",
                 "detail": "step #1 · mock · 5 tokens"
+            })
+        );
+    }
+
+    /// serde 快照:trace 事件携带轨迹载荷(TMSHOW-1)。
+    ///
+    /// 本测试守两件事,都为**加性兼容**服务:
+    /// 1. `kind=trace` 时 `trace` 键确实出现,且字段名/形状与 `TaskTraceRecord` 一致
+    ///    (前端 `TaskTrace` 与之逐字段对拍,见 `tools/check-contract.mjs` 第 32 组);
+    /// 2. 载荷的 `Box` 包装对线格式**完全透明**——序列化结果与内联时逐字节相同。
+    ///    这条必须钉住:Box 只是为了压枚举体积(clippy::large_enum_variant),
+    ///    若哪天有人因为「反正是 Box」就去改载荷结构,这里会先红。
+    #[test]
+    fn sse_task_trace_event_wire_format() {
+        let ev = SseEvent::Task {
+            task_id: "t1".into(),
+            kind: Some(TaskEventKind::Trace),
+            title: None,
+            status: None,
+            detail: Some("轨迹 · tool_call".into()),
+            finish_reason: None,
+            phase: Some("agent".into()),
+            step_index: None,
+            seq: None,
+            at: Some("2026-11-01T00:00:00.000Z".into()),
+            trace: Some(Box::new(TaskTraceRecord {
+                id: 7,
+                task_id: "t1".into(),
+                seq: 3,
+                phase: "agent".into(),
+                step_index: None,
+                kind: "tool_call".into(),
+                name: Some("bash".into()),
+                content: "{\"cmd\":\"ls\"}".into(),
+                truncated: false,
+                created_at: "2026-11-01T00:00:00.000Z".into(),
+            })),
+        };
+        let v = serde_json::to_value(&ev).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "type": "task",
+                "task_id": "t1",
+                "kind": "trace",
+                "detail": "轨迹 · tool_call",
+                "phase": "agent",
+                "at": "2026-11-01T00:00:00.000Z",
+                "trace": {
+                    "id": 7,
+                    "task_id": "t1",
+                    "seq": 3,
+                    "phase": "agent",
+                    "step_index": null,
+                    "kind": "tool_call",
+                    "name": "bash",
+                    "content": "{\"cmd\":\"ls\"}",
+                    "truncated": false,
+                    "created_at": "2026-11-01T00:00:00.000Z"
+                }
             })
         );
     }
