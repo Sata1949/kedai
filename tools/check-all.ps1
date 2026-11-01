@@ -306,6 +306,17 @@ if ($rustReady) {
         # 取 8 而非不限制,是为与 build.ps1 等重活并发时留内存余量(详见 docs/经验.md 条目 29)。
         Invoke-Stage 'cargo test --workspace'   { cargo test --workspace -j 8 @cargoTargetArgs }
     } finally { Pop-Location }
+    # launcher 是**独立 crate**(刻意零依赖,不在 server-rs workspace 内),此前其单测
+    # 从不在门禁里跑——2026-10-31 PC-4 批给端口接管解析补了 5 例才发现这个缺口。
+    # 实测热态 1.1s(零依赖,只编自身),成本可忽略,故接入。
+    # src-tauri **仍未接**:它以 path 内嵌 server-rs,`cargo test` 会连带重编整棵
+    # Tauri 依赖树(冷态数分钟),与本段「秒级护栏」的定位不符;其 lib 单测目前
+    # **只能手动跑**(`cargo test --manifest-path src-tauri/Cargo.toml --lib`)。
+    # 该缺口登记在 `docs/遗留.md` §三 TESTCOV-1,勿当成已覆盖。
+    Invoke-Stage 'cargo test (launcher)' {
+        cargo test --manifest-path "$root\launcher\Cargo.toml" -j 8 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'launcher 单测失败' }
+    }
 }
 
 # ===== 第 5 段:前端测试与构建 =====
