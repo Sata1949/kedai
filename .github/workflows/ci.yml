@@ -217,7 +217,11 @@ jobs:
   # 本档不参与保护(它只在 main 上跑,而保护作用于 PR)。
   check-main:
     runs-on: windows-latest
-    timeout-minutes: 10
+    # 20 分钟:稳态约 93s,但两处会让它变长——① cargo-audit 缓存 miss 时要从源码
+    # 安装(实测 376s);② npm ci 在网络抖动时可达 2~3 分钟。10 分钟余量偏紧,
+    # 一次超时就会把「轻量档」判红,比它要避免的问题更糟。20 分钟既远小于全量档的
+    # 45 分钟(仍然实现「main 便宜」的目标),又给最坏情况留了 2 倍余量。
+    timeout-minutes: 20
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
