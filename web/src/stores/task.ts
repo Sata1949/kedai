@@ -21,6 +21,14 @@ import {
   reportChatEvent,
   uiPrefsBridge,
 } from './storeBridge';
+import {
+  appendTrace as appendTaskTrace,
+  clearTaskTrace,
+  loadTaskTrace,
+  resumeTaskTrace,
+  setTranscriptMode as setTaskTranscriptMode,
+  useTaskTrace as taskTraceState,
+} from '../composables/useTaskTrace';
 
 /** 顶层模式持久化键:刷新后停留在上次模式 */
 const APP_MODE_KEY = 'kedai.appMode';
@@ -160,6 +168,12 @@ function readStoredTaskConnectionId(): string {
 
 export const useTaskStore = defineStore('app.task', () => {
   // ===== 状态 =====
+  /**
+   * 执行轨迹状态(TMSHOW-2):模块级共享状态,本 store 只转发。
+   * 逻辑主体(function 主体在 `composables/useTaskTrace`)不放在这里,
+   * 因为本文件已在对 file-size ratchet 的基线内(只降不升)。
+   */
+  const traceState = taskTraceState();
   /** 顶层模式:roleplay = 角色扮演,task = 任务工作台;持久化到 localStorage */
   const appMode = ref<'roleplay' | 'task'>(readStoredAppMode());
   /**
@@ -581,6 +595,9 @@ export const useTaskStore = defineStore('app.task', () => {
     callsSignature = contentSignature([]);
     clearTaskChanges();
     clearAllLiveDeltas();
+    // 执行轨迹同理:轨迹是**当前任务**的展示数据,切任务/删除后必须清空——
+    // 留着旧任务的轨迹会让新任务的时间线显示别人的思考。
+    clearTaskTrace();
     if (clearAgentStatus) lastAgentStatus.value = null;
     taskLoadError.value = null;
     if (persist) persistCurrentTaskId(null);
@@ -612,6 +629,7 @@ export const useTaskStore = defineStore('app.task', () => {
     callsSignature = contentSignature([]);
     clearTaskChanges();
     clearAllLiveDeltas();
+    clearTaskTrace();
     // 最近 agent 状态同理:agent_status 不落库,新任务从空开始(等下一个事件)
     lastAgentStatus.value = null;
     const ok = await loadTaskDetail(id);
@@ -630,12 +648,16 @@ export const useTaskStore = defineStore('app.task', () => {
         if (previousId) {
           void loadTaskCalls(previousId);
           void loadTaskChanges(previousId);
+          void loadTaskTrace(previousId);
         }
         return;
       }
     }
     // 打开任务详情即拉一次变更清单(本端点无事件驱动,另一个时机是「任务进终态」)
     if (ok) void loadTaskChanges(id);
+    // 执行轨迹同理:它是独立端点(轨迹可达数 MB,刻意不并入任务详情),
+    // 打开任务时拉一次;之后由 kind=trace 事件增量并入,不重复拉。
+    if (ok) void loadTaskTrace(id);
   }
 
   /** 清空当前任务选择(任务被删除/列表已无该 id 时;同步清持久化) */
@@ -846,9 +868,11 @@ export const useTaskStore = defineStore('app.task', () => {
         if (ev.task_id === currentTaskId.value) void loadTaskChanges(ev.task_id);
         break;
       case 'trace':
-        // 执行轨迹新增一条(TMSHOW-1):载荷直接并入本地轨迹缓存,**不重拉**端点
-        // (一条轨迹一次请求会让长任务打爆后端)。轨迹是纯展示数据,不驱动详情刷新。
-        // 本批(提交 1)只有后端通道;缓存在提交 2 随三档渲染落地。
+        // 执行轨迹新增一条(TMSHOW-1 数据面 / TMSHOW-2 消费):载荷直接并入轨迹缓存,
+        // **不重拉**端点(一条轨迹一次请求会让长任务打爆后端)。轨迹是纯展示数据,
+        // 不驱动详情刷新。并入逻辑(seq 去重与缺口补拉)在 composables/useTaskTrace,
+        // 这里只做转调——本文件已在对 file-size ratchet 的基线内,不再加主体逻辑。
+        appendTaskTrace(ev.task_id, ev.trace);
         break;
       case undefined:
         // kind 缺失(旧服务端/未知分类):仅透传事件面板,不触发刷新。
@@ -887,6 +911,9 @@ export const useTaskStore = defineStore('app.task', () => {
       const resumeTask = currentTaskId.value;
       const resumeAfter = resumeTask ? lastSeqByTask.get(resumeTask) : undefined;
       if (resumeTask && resumeAfter !== undefined) void pullTaskEvents(resumeTask, resumeAfter);
+      // 轨迹是**另一条通道**(事件 seq 与轨迹 seq 不同源,且 kind=trace 帧不带事件 seq),
+      // 断线期间丢的轨迹帧由它自己按轨迹 seq 补齐;从未加载成功过时退回全量拉取。
+      if (resumeTask) resumeTaskTrace(resumeTask);
     }, CONNECT_SETTLE_MS);
   }
 
@@ -1090,6 +1117,14 @@ export const useTaskStore = defineStore('app.task', () => {
     liveBuffers,
     lastAgentStatus,
     taskLoadError,
+    // 执行轨迹(TMSHOW-2):独立模块的响应式状态,此处直通暴露给组件
+    taskTrace: traceState.rows,
+    taskTraceTruncated: traceState.truncated,
+    taskTraceLoading: traceState.loading,
+    taskTraceError: traceState.error,
+    taskTranscriptMode: traceState.mode,
+    loadTaskTrace,
+    setTaskTranscriptMode,
     setTaskRunMode,
     setTaskFlowId,
     setTaskFlowMode,

@@ -163,3 +163,47 @@ describe('createVirtualListState 条数窗口(rowWindow)', () => {
     expect(s.isActive(1, 0, 200)).toBe(false);
   });
 });
+
+// 行 id 泛化到 `string | number`(TMSHOW-2):任务执行轨迹的行键可能带前缀
+// (如 `trace:12`),与聊天消息的数字 id 共用同一套虚拟滚动状态。
+describe('createVirtualListState 字符串行 id', () => {
+  it('字符串 id 的可见/隐藏与高度缓存按 string 键存取', () => {
+    const s = createVirtualListState({ threshold: 10, tailKeep: 5 });
+    const count = 100;
+    // 下标 41 处,默认不挂载(尾部窗口之外)
+    expect(s.isActive('trace:42', 41, count)).toBe(false);
+    s.markVisible('trace:42');
+    expect(s.isActive('trace:42', 41, count)).toBe(true);
+    // 离开缓冲区:实测高度按 string 键回取(键类型走样会退化成角色估算)
+    s.markHidden('trace:42', 240);
+    expect(s.isActive('trace:42', 41, count)).toBe(false);
+    expect(s.placeholderHeight('trace:42', 'assistant')).toBe(240);
+  });
+
+  it('数字 id 与字符串 id 不会互相串键(1 与 "1" 是两行)', () => {
+    const s = createVirtualListState({ threshold: 10, tailKeep: 5 });
+    s.markVisible(1);
+    expect(s.isActive(1, 90, 200)).toBe(true);
+    // 字符串 '1' 未上报过可见 → 不因数字 1 的登记而挂载
+    expect(s.isActive('1', 0, 200)).toBe(false);
+  });
+
+  it('字符串 id 参与条数窗口判定(顺序映射按原值建)', () => {
+    const ids = ['a', 'b', 'c', 'd', 'e'];
+    const count = 100;
+    const s = createVirtualListState({ threshold: 1, tailKeep: 1, rowWindow: 1 });
+    s.syncOrder(ids);
+    s.markVisible('c'); // 下标 2
+    // 距 1 条 → 窗口内(b, d)
+    expect(s.isActive('b', 1, count)).toBe(true);
+    expect(s.isActive('d', 3, count)).toBe(true);
+    // 距 2 条 → 窗口外(a);e 是尾条但 count 给 100 → 不搭尾部便车
+    expect(s.isActive('a', 0, count)).toBe(false);
+  });
+
+  it('pinnedId 支持字符串(轨迹行也可能被钉住)', () => {
+    const s = createVirtualListState({ threshold: 10, tailKeep: 5 });
+    expect(s.isActive('trace:9', 8, 100, 'trace:9')).toBe(true);
+    expect(s.isActive('trace:8', 7, 100, 'trace:9')).toBe(false);
+  });
+});

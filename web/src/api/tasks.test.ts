@@ -12,6 +12,7 @@ import {
   getTaskChanges,
   getTaskChangesPatch,
   getTaskEvents,
+  getTaskTrace,
   getTaskUsageTotal,
   rollbackAllTaskChanges,
   rollbackTaskChange,
@@ -165,6 +166,49 @@ describe('api/tasks REST 封装', () => {
       }
       if (url.includes('/api/tasks/a%2Fb/events?') && method === 'GET') {
         return json({ events: [], truncated: false });
+      }
+      // TMSHOW-1 执行轨迹(`trace` 数组与 truncated 都在顶层)
+      if (url.includes('/api/tasks/t1/trace?') && method === 'GET') {
+        return json({
+          trace: [
+            {
+              id: 1,
+              task_id: 't1',
+              seq: 1,
+              phase: 'agent',
+              step_index: null,
+              kind: 'reasoning',
+              name: null,
+              content: '先想一下',
+              truncated: false,
+              created_at: '2026-11-01T00:00:00.000Z',
+            },
+            {
+              id: 2,
+              task_id: 't1',
+              seq: 2,
+              phase: 'agent',
+              step_index: null,
+              kind: 'tool_call',
+              name: 'bash',
+              content: '{"cmd":"ls"}',
+              truncated: true,
+              created_at: '2026-11-01T00:00:01.000Z',
+            },
+          ],
+          truncated: false,
+        });
+      }
+      if (url.includes('/api/tasks/t3/trace?') && method === 'GET') {
+        return json({ trace: [], truncated: true });
+      }
+      // 形状闸门用例:缺 truncated(TMSHOW-1 端点明确「不回 200 空数组」,
+      // 少了这个布尔就没法区分「窗口截断」与「本来就没有」)
+      if (url.includes('/api/tasks/shape/trace?') && method === 'GET') {
+        return json({ trace: [] });
+      }
+      if (url.includes('/api/tasks/a%2Fb/trace?') && method === 'GET') {
+        return json({ trace: [], truncated: false });
       }
       return json({ error: `未 mock 的请求: ${method} ${url}` }, 404);
     });
@@ -616,6 +660,37 @@ describe('api/tasks REST 封装', () => {
     await getTaskEvents('a/b', 0);
     const urls = vi.mocked(fetch).mock.calls.map(([input]) => String(input));
     expect(urls).toContain('/api/tasks/a%2Fb/events?after=0');
+  });
+
+  // ==================== 任务执行轨迹端点(TMSHOW-1)====================
+
+  it('getTaskTrace:after 必带、limit 可选;trace 与 truncated 原样带出', async () => {
+    const page = await getTaskTrace('t1', 0);
+    expect(page.truncated).toBe(false);
+    expect(page.trace).toHaveLength(2);
+    expect(page.trace[0]).toMatchObject({ seq: 1, kind: 'reasoning', truncated: false });
+    // truncated 是**逐条**的字段(单条正文超 8000 字被截断),与顶层窗口截断是两回事
+    expect(page.trace[1]).toMatchObject({ kind: 'tool_call', name: 'bash', truncated: true });
+
+    const window = await getTaskTrace('t3', 0, 500);
+    expect(window.truncated).toBe(true);
+    expect(window.trace).toHaveLength(0);
+
+    const urls = vi.mocked(fetch).mock.calls.map(([input]) => String(input));
+    expect(urls, `after 必带、limit 仅在给出时拼接:${urls.join(' , ')}`).toContain(
+      '/api/tasks/t1/trace?after=0',
+    );
+    expect(urls).toContain('/api/tasks/t3/trace?after=0&limit=500');
+  });
+
+  it('getTaskTrace:id 整体编码(与其余任务端点同款)', async () => {
+    await getTaskTrace('a/b', 0);
+    const urls = vi.mocked(fetch).mock.calls.map(([input]) => String(input));
+    expect(urls).toContain('/api/tasks/a%2Fb/trace?after=0');
+  });
+
+  it('getTaskTrace:缺 truncated 即抛错(形状闸门,不把 undefined 当"未截断")', async () => {
+    await expect(getTaskTrace('shape', 0)).rejects.toThrow();
   });
 
 });
