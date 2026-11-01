@@ -4,7 +4,7 @@
 // `projection.rs` 承载 GET/PUT 的响应投影,`probes.rs` / `prompt.rs` 承载连接探测与
 // 提示词预览端点。本文件只保留请求体、`get_settings` 与 `update_settings` 的事务骨架。
 use crate::api::app_state::AppState;
-use crate::api::json_body::JsonBody;
+use crate::api::json_body::JsonBodyRejectingEnvelope;
 use crate::api::{err_with_code, validation, ErrorCode};
 use crate::connectors::openai_compatible::API_STYLE_CHAT;
 use crate::services::settings_service::{
@@ -42,6 +42,18 @@ impl ModeQuery {
 }
 
 #[derive(Deserialize, Default)]
+// **不加 `deny_unknown_fields`**:这里有一个必须保留的向后兼容语义。
+//
+// TM-SET-2 明确要求「退役字段被静默忽略」——旧客户端 PUT 带 `task_persona_full` 等
+// 已下线键时必须回 200 而不是 400,否则老版本前端升级服务端后直接不可用
+// (用例见 `tests/settings_connector.rs::retired_task_switches_ignored_by_settings_api`)。
+// 全局拒绝未知键会把这个兼容面一起打掉。
+//
+// 但「全部字段都是 Option + serde(default)」带来的真缺陷是:**多包一层信封**
+// `{"settings": {...}}` 时 serde 把 `settings` 当未知键丢掉、回 200 却一个字段都没改
+// (2026-11-01 CB 反代配置时实测踩到,仓外旧脚本 `set-conn.mjs` 正是该形态)。
+// 修法不是拒绝所有未知键,而是**只认那一种形状**:独占的 `settings` 信封键由
+// `handler` 入口显式检测并 400(见 `reject_settings_envelope`),其余未知键照旧忽略。
 pub struct UpdateSettingsBody {
     #[serde(default)]
     pub openai_base_url: Option<String>,
@@ -364,7 +376,12 @@ pub async fn get_settings(
 pub async fn update_settings(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ModeQuery>,
-    JsonBody(body): JsonBody<UpdateSettingsBody>,
+    // 用带信封拒绝的提取器:`{"settings": {...}}` 这种多包一层的误用必须在**进入事务之前**
+    // 就被 400 拦掉。若放它过去,serde 会把 `settings` 当未知键丢弃,handler 照常 200 并落盘
+    // 「什么都没改」——那是最难自查的一类失败(2026-11-01 实测踩到)。
+    // 之所以不在结构体上加 `deny_unknown_fields`:那会打掉 TM-SET-2 要求的
+    // 「退役字段静默忽略」兼容面(旧客户端带已下线键必须回 200)。
+    JsonBodyRejectingEnvelope(body): JsonBodyRejectingEnvelope<UpdateSettingsBody>,
 ) -> Response {
     let mode = query.app_mode();
     // 事务锁覆盖“读取当前值 → 应用 patch → 原子落盘 → 替换内存”，防止并发部分更新丢字段。
