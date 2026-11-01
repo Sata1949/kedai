@@ -73,6 +73,9 @@ export default tseslint.config(
   // 5a) v-html:全仓 v-html 的分支值都经统一消毒管线(sanitize-html,见 render.ts
   //     的 sanitizeMessageHtml / cleanScriptHtml),属既定实现而非疏漏。按文件收窄到
   //     「确实渲染已消毒 HTML」的组件,不全局关闭——新组件若直接绑未消毒内容仍会报。
+  //     TMSHOW-2:计划步骤结果区从 TaskExecutionPanel 迁入 TaskTranscript(渲染的仍是
+  //     `renderMarkdownCached` 的产物,与 MarkdownBlock 同一管线),故一并登记——
+  //     内容搬走白名单没跟,等于让这条豁免名存实亡。
   {
     files: [
       'src/components/ChatMessageItem.vue',
@@ -80,6 +83,7 @@ export default tseslint.config(
       'src/components/task/TaskApprovalPanel.vue',
       'src/components/task/TaskExecutionPanel.vue',
       'src/components/task/TaskResultPanel.vue',
+      'src/components/task/TaskTranscript.vue',
     ],
     rules: { 'vue/no-v-html': 'off' },
   },
