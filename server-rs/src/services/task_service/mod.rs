@@ -45,6 +45,7 @@ pub(crate) mod idle;
 pub(crate) mod prompt;
 pub(crate) mod runtime_issues;
 pub(crate) mod scratch;
+pub(crate) mod trace;
 
 use self::db::{row_to_task, TASK_COLS};
 

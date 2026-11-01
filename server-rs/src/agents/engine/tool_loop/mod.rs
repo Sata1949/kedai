@@ -53,6 +53,10 @@ pub(crate) struct ToolLoopRequest<'a> {
     pub(crate) call_timeout: Option<std::time::Duration>,
     /// 是否透出正文增量(RPFLOW-1):隐藏步骤传 false,工具事件照常透出。
     pub(crate) emit_tokens: bool,
+    /// 是否透出思考正文增量(TMSHOW-1):仅任务侧传 true。
+    /// 与 `emit_tokens` 是**两个独立开关**:隐藏草稿步可以既不要正文也不要思考;
+    /// 而任务审计步需要的正是「不要正文但要思考」这一组合。
+    pub(crate) emit_reasoning: bool,
 }
 
 /// 循环开始前解析一次的限制与守卫快照(循环内不再读设置锁,不留锁跨 await)。
@@ -172,6 +176,7 @@ pub(crate) async fn run_tool_loop(req: ToolLoopRequest<'_>) -> Result<ExecutorRe
         gate,
         call_timeout,
         emit_tokens,
+        emit_reasoning,
     } = req;
 
     let LoopLimits {
@@ -207,6 +212,7 @@ pub(crate) async fn run_tool_loop(req: ToolLoopRequest<'_>) -> Result<ExecutorRe
             abort,
             flag,
             emit_tokens,
+            emit_reasoning,
             call_watchdog,
             round,
             total_usage,

@@ -201,6 +201,12 @@ export function reduceSseEvent(state: SseStateSlice, event: SseEvent): SseStateC
       a.draft = event.text;
       break;
     }
+    case 'reasoning': {
+      // 思考正文增量(TMSHOW-1):该事件**只在任务侧发出**(后端 emit_reasoning 开关),
+      // 聊天侧不会收到。这里显式空操作而不是落到 default——穷尽性断言要求每个变体
+      // 都有分支,且「收到了也不该改聊天状态」这个意图必须写出来,不能靠兜底静默。
+      break;
+    }
     case 'interrupted': {
       a.phase = 'interrupted';
       a.stepText = '已中断';

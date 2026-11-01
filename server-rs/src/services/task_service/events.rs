@@ -157,6 +157,9 @@ impl TaskService {
                     step_index: row.get::<_, Option<i64>>(7)?.map(|i| i as usize),
                     seq: Some(row.get::<_, i64>(0)? as u64),
                     at: Some(row.get(8)?),
+                    // 补拉帧不带轨迹载荷:轨迹有独立端点(`/trace`),事件表不存正文。
+                    // 前端补拉事件只为对齐刷新,内容一律取自各自端点。
+                    trace: None,
                 })
             })
             .map_err(|e| format!("执行任务事件补拉查询失败: {e}"))?;
@@ -197,7 +200,8 @@ impl TaskService {
     }
 
     /// 任务行是否已不存在(persist 失败后判「瞬态广播」用;只读一次主键查询)。
-    fn task_row_missing(conn: &Connection, task_id: &str) -> bool {
+    /// `pub(super)`:轨迹落库(trace.rs)复用同一判定,两处口径必须一致。
+    pub(super) fn task_row_missing(conn: &Connection, task_id: &str) -> bool {
         conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?1)",
             params![task_id],
@@ -398,7 +402,46 @@ impl TaskService {
             step_index,
             seq,
             at,
+            trace: None,
         }
+    }
+
+    /// 落一条执行轨迹并广播 kind=trace 事件(TMSHOW-1)。
+    ///
+    /// **单一出口**:执行侧(引擎事件桥、纯生成旁路)只调本函数,不直接碰
+    /// `record_trace` + `broadcast_event` —— 两者分离过就会有人只写库不广播(前端要等
+    /// 下一次全量刷新)或只广播不写库(补拉对不上账)。
+    ///
+    /// 落库失败或空正文:静默返回 `None`(轨迹是**增量可见性**而非正确性依赖,
+    /// 失败不该打断正在跑的任务;`record_trace` 内部已 error 留痕)。
+    pub(crate) fn emit_trace(
+        &self,
+        task_id: &str,
+        phase: &str,
+        step_index: Option<usize>,
+        kind: crate::models::types::TaskTraceKind,
+        name: Option<&str>,
+        content: &str,
+    ) -> Option<i64> {
+        let seq = self.record_trace(task_id, phase, step_index, kind, name, content)?;
+        // 广播载荷取库里的**权威形态**(截断后的正文 + truncated 标记):若在此用入参
+        // 构造,同一条轨迹在「实时」与「刷新后补拉」会显示成两种长度。
+        let record = self.trace_by_seq(task_id, seq)?;
+        self.broadcast_event(SseEvent::Task {
+            task_id: task_id.to_string(),
+            kind: Some(TaskEventKind::Trace),
+            title: None,
+            status: None,
+            detail: Some(format!("轨迹 · {}", kind.as_str())),
+            finish_reason: None,
+            phase: Some(phase.to_string()),
+            step_index,
+            seq: None,
+            at: Some(record.created_at.clone()),
+            // Box 化的理由见 `SseEvent::Task.trace` 的字段注释(clippy::large_enum_variant)
+            trace: Some(Box::new(record)),
+        });
+        Some(seq)
     }
 
     /// 发射任务事件(不持有写连接的调用点用:引擎桥 / 执行器 / 计划批准等)。

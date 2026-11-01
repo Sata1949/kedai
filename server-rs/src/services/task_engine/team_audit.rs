@@ -165,6 +165,8 @@ pub(crate) async fn generate_with_readonly_tools(
         gate: ToolGate::listed(&allowed),
         call_timeout: None,
         emit_tokens: false, // 审计正文不流式透出(工具调用事件照常)
+        // 但思考与工具轨迹要留(TMSHOW-1):这正是「不要正文、要思考」的组合场景
+        emit_reasoning: true,
     })
     .await;
     drop(tx);

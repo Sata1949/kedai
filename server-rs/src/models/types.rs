@@ -695,6 +695,16 @@ pub enum TaskEventKind {
     /// `detail` 为人类可读摘要(如「3 个文件变更(2 改 / 1 增)」),权威数据仍以
     /// `GET /api/tasks/{id}/changes` 为准。
     FileChanged,
+    /// 任务执行轨迹新增一条(TMSHOW-1,2026-11-01)。
+    ///
+    /// 与 `AgentStatus` 的分工:`agent_status` 是「一行人类可读进展」(200 字上限,
+    /// 只够显示"还在动"),本 kind 携带**可渲染的正文**(思考 / 工具入出参 / 节点产出),
+    /// 载荷见 `SseEvent::Task.trace`。
+    ///
+    /// **落库与广播口径**:轨迹行先写 `task_trace`(含 seq),提交后再广播本事件,
+    /// 与其它落库型事件一致;前端收到即把载荷并入本地轨迹缓存(不重拉端点),
+    /// 断线后仍可经 `GET /api/tasks/{id}/trace` 补齐。
+    Trace,
 }
 
 impl TaskEventKind {
@@ -715,6 +725,7 @@ impl TaskEventKind {
             Self::DeltaReset => "delta_reset",
             Self::FlowBound => "flow_bound",
             Self::FileChanged => "file_changed",
+            Self::Trace => "trace",
         }
     }
 
@@ -737,6 +748,7 @@ impl TaskEventKind {
             "delta_reset" => Self::DeltaReset,
             "flow_bound" => Self::FlowBound,
             "file_changed" => Self::FileChanged,
+            "trace" => Self::Trace,
             _ => return None,
         })
     }
@@ -752,6 +764,17 @@ pub enum SseEvent {
     /// 隐藏草稿(deep/agent 流程第 1 步产物,RPFLOW-1):**不进消息气泡**,
     /// 仅推给前端在 Agent 面板折叠展示(默认隐藏);正文由后续步骤另行生成。
     Draft {
+        text: String,
+    },
+    /// 思考正文增量(TMSHOW-1,2026-11-01):推理模型的 `reasoning_content` 分块。
+    ///
+    /// 此前该分块在 `process_chunk` 里只累进局部变量后丢弃——聊天侧靠 `Step` 事件展示
+    /// 推理链(那是**步骤标题**不是正文),任务侧连字符数都只进日志,于是「全消息显示」
+    /// 无数据可渲染。本事件是该内容第一次上线。
+    ///
+    /// **只在任务侧透出**(`emit_reasoning` 开关,对齐既有 `emit_tokens` 双开关范式):
+    /// 聊天侧保持关闭,推理链渲染契约不变,避免本批顺带改动角色扮演观感。
+    Reasoning {
         text: String,
     },
     Step {
@@ -882,6 +905,18 @@ pub enum SseEvent {
         /// 同样仅落库事件携带;delta 省略。旧客户端忽略本字段(加性,线格式兼容)。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         at: Option<String>,
+        /// 执行轨迹条目(TMSHOW-1;仅 kind=trace 携带)。
+        ///
+        /// 加性字段:旧客户端读不到即忽略,不影响既有事件分发;新客户端据此把内容
+        /// 并入本地轨迹缓存,免去收到一条轨迹就重拉一次 `/trace` 端点。
+        /// `trace.seq` 是轨迹自己的排序键(**与事件 seq 不同源**)。
+        ///
+        /// **Box 是必需的而不是口味**:`TaskTraceRecord` 含多个 String 级字段,
+        /// 内联进本变体后会把 `SseEvent::Task` 撑到 ~362 字节(第二大变体仅 152),
+        /// 触发 `clippy::large_enum_variant`(CI 以 `-D warnings` 判红)。
+        /// Box 不改变线格式——serde 对 `Box<T>` 是透明代理,序列化结果与内联时逐字节相同。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trace: Option<Box<TaskTraceRecord>>,
     },
 }
 
@@ -1726,6 +1761,77 @@ pub struct TaskMessageRecord {
     pub created_at: String,
 }
 
+/// 任务执行轨迹(task_trace 表;TMSHOW-1,2026-11-01):任务模式**中间过程**的结构化记录。
+///
+/// 为什么单独建表而非塞进 `task_llm_calls`/`task_events`:
+/// - `task_llm_calls` 是**每次调用一行**的记账口径(工具循环整轮一行,OBS-1 知情接受),
+///   其 `prompt_summary` 双截断(每消息 800 / 整体 4000),恢复不出「哪一轮思考了什么」;
+/// - `task_events` 的 `agent_status` 只放 200 字人类可读进展,**不承载正文**;
+/// - 本表按「一条轨迹一行」记录,顺序由任务内单调 `seq` 决定,前端据此渲染
+///   全消息时间线(档 2)或压缩计数(档 3)。
+///
+/// `phase` + `step_index` 与 `task_llm_calls` **同口径**(前端 `utils/phaseLabel` 直接复用),
+/// 不另立归属体系。`kind` 取值见 [`TaskTraceKind`]。
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskTraceRecord {
+    pub id: i64,
+    pub task_id: String,
+    /// 任务内单调序号(渲染顺序的唯一依据)
+    pub seq: i64,
+    /// 调用归属阶段(与 `task_llm_calls.phase` 同口径)
+    pub phase: String,
+    /// 步骤下标(仅步骤类调用携带;非步骤阶段为 None → 序列化为 null)
+    pub step_index: Option<i64>,
+    /// reasoning | tool_call | tool_result | step_result
+    pub kind: String,
+    /// 工具名(仅 tool_call/tool_result 携带)
+    pub name: Option<String>,
+    /// 正文:思考文本 / 工具入参 JSON / 工具出参 JSON / 节点正文产出
+    pub content: String,
+    /// 正文超出写入侧上限被截断
+    pub truncated: bool,
+    pub created_at: String,
+}
+
+/// 任务轨迹条目分类(`task_trace.kind` 的取值来源;线格式 snake_case)。
+///
+/// 与 `TaskEventKind` 分开:轨迹是**内容**(要渲染成消息),事件是**通知**(要不要刷新);
+/// 混用会让「新增一种可展示内容」逼着前端把事件分发也改一遍。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskTraceKind {
+    /// 一轮思考正文(整轮一条,不逐块落库——逐块会让一次思考变成几十行,无法成「一条消息」)
+    Reasoning,
+    /// 工具调用入参
+    ToolCall,
+    /// 工具调用出参
+    ToolResult,
+    /// 流程节点正文产出(custom 模式节点 / 步骤最终产出)
+    StepResult,
+}
+
+impl TaskTraceKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Reasoning => "reasoning",
+            Self::ToolCall => "tool_call",
+            Self::ToolResult => "tool_result",
+            Self::StepResult => "step_result",
+        }
+    }
+
+    /// `as_str` 的逆(读库回填用);未知值返回 None,由调用方降级跳过。
+    pub fn from_wire(s: &str) -> Option<Self> {
+        Some(match s {
+            "reasoning" => Self::Reasoning,
+            "tool_call" => Self::ToolCall,
+            "tool_result" => Self::ToolResult,
+            "step_result" => Self::StepResult,
+            _ => return None,
+        })
+    }
+}
+
 /// 任务文件变更(task_file_changes 表;2026-09-30 批次 4,PRODCAP-4「交付可审计」):
 /// 任务执行期间工作区文件每次被改动记一行。
 /// GET /api/tasks/{id}/changes 的数组元素;**不含基线正文**(那份在库里,只由 diff /
@@ -1823,6 +1929,8 @@ mod tests {
             // PRODCAP-1:未持久化的事件构造 seq/at 省略(序列化断言据此保持原样)
             seq: None,
             at: None,
+            // 轨迹载荷仅 kind=trace 携带(TMSHOW-1):本帧序列化时应省略该键
+            trace: None,
         };
         let v = serde_json::to_value(&ev).unwrap();
         assert_eq!(
@@ -1832,6 +1940,66 @@ mod tests {
                 "task_id": "t1",
                 "kind": "llm_call",
                 "detail": "step #1 · mock · 5 tokens"
+            })
+        );
+    }
+
+    /// serde 快照:trace 事件携带轨迹载荷(TMSHOW-1)。
+    ///
+    /// 本测试守两件事,都为**加性兼容**服务:
+    /// 1. `kind=trace` 时 `trace` 键确实出现,且字段名/形状与 `TaskTraceRecord` 一致
+    ///    (前端 `TaskTrace` 与之逐字段对拍,见 `tools/check-contract.mjs` 第 32 组);
+    /// 2. 载荷的 `Box` 包装对线格式**完全透明**——序列化结果与内联时逐字节相同。
+    ///    这条必须钉住:Box 只是为了压枚举体积(clippy::large_enum_variant),
+    ///    若哪天有人因为「反正是 Box」就去改载荷结构,这里会先红。
+    #[test]
+    fn sse_task_trace_event_wire_format() {
+        let ev = SseEvent::Task {
+            task_id: "t1".into(),
+            kind: Some(TaskEventKind::Trace),
+            title: None,
+            status: None,
+            detail: Some("轨迹 · tool_call".into()),
+            finish_reason: None,
+            phase: Some("agent".into()),
+            step_index: None,
+            seq: None,
+            at: Some("2026-11-01T00:00:00.000Z".into()),
+            trace: Some(Box::new(TaskTraceRecord {
+                id: 7,
+                task_id: "t1".into(),
+                seq: 3,
+                phase: "agent".into(),
+                step_index: None,
+                kind: "tool_call".into(),
+                name: Some("bash".into()),
+                content: "{\"cmd\":\"ls\"}".into(),
+                truncated: false,
+                created_at: "2026-11-01T00:00:00.000Z".into(),
+            })),
+        };
+        let v = serde_json::to_value(&ev).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "type": "task",
+                "task_id": "t1",
+                "kind": "trace",
+                "detail": "轨迹 · tool_call",
+                "phase": "agent",
+                "at": "2026-11-01T00:00:00.000Z",
+                "trace": {
+                    "id": 7,
+                    "task_id": "t1",
+                    "seq": 3,
+                    "phase": "agent",
+                    "step_index": null,
+                    "kind": "tool_call",
+                    "name": "bash",
+                    "content": "{\"cmd\":\"ls\"}",
+                    "truncated": false,
+                    "created_at": "2026-11-01T00:00:00.000Z"
+                }
             })
         );
     }
@@ -1852,6 +2020,8 @@ mod tests {
             step_index: None,
             seq: None,
             at: None,
+            // 轨迹载荷仅 kind=trace 携带(TMSHOW-1)
+            trace: None,
         };
         let v = serde_json::to_value(&ev).unwrap();
         assert_eq!(v["finish_reason"], serde_json::json!("length"));
@@ -1928,6 +2098,8 @@ mod tests {
             step_index: Some(0),
             seq: None,
             at: None,
+            // delta 是暂态流式增量,与轨迹无关(TMSHOW-1)
+            trace: None,
         };
         let v = serde_json::to_value(&ev).unwrap();
         assert_eq!(
@@ -1959,6 +2131,8 @@ mod tests {
             step_index: Some(0),
             seq: None,
             at: None,
+            // 轨迹载荷仅 kind=trace 携带(TMSHOW-1)
+            trace: None,
         };
         let v = serde_json::to_value(&ev).unwrap();
         assert_eq!(v["phase"], serde_json::json!("step"));
@@ -1975,6 +2149,8 @@ mod tests {
             step_index: None,
             seq: None,
             at: None,
+            // 轨迹载荷仅 kind=trace 携带(TMSHOW-1)
+            trace: None,
         };
         let v = serde_json::to_value(&ev).unwrap();
         assert_eq!(v["phase"], serde_json::json!("planner"));

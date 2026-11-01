@@ -18,6 +18,8 @@ export type SseEvent =
   | { type: 'token'; text: string }
   /** 隐藏草稿(deep/agent 流程第 1 步产物,RPFLOW):不进消息气泡,仅 Agent 面板折叠展示 */
   | { type: 'draft'; text: string }
+  /** 思考正文增量(TMSHOW-1):仅任务侧透出(后端 emit_reasoning 开关),聊天侧恒不发送 */
+  | { type: 'reasoning'; text: string }
   | { type: 'step'; step: string; detail?: string; index?: number; total?: number }
   | { type: 'tool_call'; name: string; input: unknown; call_id?: string; render_kind?: string; origin?: string }
   | { type: 'tool_authorization_required'; name: string; risk: ToolRisk; reason: string; run_id: string; call_id: string; origin?: string }

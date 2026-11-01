@@ -19,7 +19,8 @@ use crate::services::agent_flow_service::FlowSnapshot;
 use crate::services::settings_service::RuntimeSettings;
 use crate::services::task_core::{
     DeltaBatcher, TaskEvents, TaskFlowAccess, TaskGenerator, TaskPromptKit, TaskScratch,
-    TaskSettings, TaskStore, TaskTerminal, TaskTerminalSink, TaskTrace, TruncationHeal,
+    TaskSettings, TaskStore, TaskTerminal, TaskTerminalSink, TaskTimeline, TaskTrace,
+    TruncationHeal,
 };
 use futures::future::BoxFuture;
 use std::time::Duration;
@@ -115,6 +116,22 @@ impl TaskTrace for TaskService {
         TaskService::record_self_heals(
             self, task_id, phase, step_index, model, messages, self_heals,
         )
+    }
+}
+
+// ==================== TaskTimeline:任务执行轨迹(TMSHOW-1) ====================
+
+impl TaskTimeline for TaskService {
+    fn record_trace(
+        &self,
+        task_id: &str,
+        phase: &str,
+        step_index: Option<usize>,
+        kind: crate::models::types::TaskTraceKind,
+        name: Option<&str>,
+        content: &str,
+    ) -> Option<i64> {
+        TaskService::emit_trace(self, task_id, phase, step_index, kind, name, content)
     }
 }
 

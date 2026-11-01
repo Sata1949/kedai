@@ -397,6 +397,8 @@ impl CustomExecutor {
             gate,
             call_timeout,
             emit_tokens: true,
+            // 任务侧透出思考正文(TMSHOW-1):经事件桥落 task_trace
+            emit_reasoning: true,
         })
         .await;
         drop(tx);

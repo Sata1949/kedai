@@ -19,7 +19,9 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 mod detail;
+mod trace;
 use detail::{TaskDetailResponse, TaskUsageTotalResponse};
+pub use trace::list_trace;
 
 #[derive(Deserialize)]
 pub struct CreateTaskBody {

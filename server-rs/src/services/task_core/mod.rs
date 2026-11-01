@@ -15,7 +15,7 @@ pub(crate) mod types;
 pub(crate) use assemble::{assemble_from_plan, fallback_terminal};
 pub(crate) use backend::{
     TaskBackend, TaskEvents, TaskFlowAccess, TaskGenerator, TaskPromptKit, TaskScratch,
-    TaskSettings, TaskStore, TaskTerminalSink, TaskTrace,
+    TaskSettings, TaskStore, TaskTerminalSink, TaskTimeline, TaskTrace,
 };
 pub(crate) use delta::{DeltaBatcher, DELTA_FLUSH_WINDOW};
 pub(crate) use terminal::TaskTerminal;

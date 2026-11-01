@@ -799,6 +799,48 @@ pub fn ensure_task_events_table(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// 任务执行轨迹表(TMSHOW-1,2026-11-01):任务模式中间过程的结构化落库。
+/// 文本与 models/db/schema.rs CREATE_TABLES 内的建表语句保持一致(normalize 比对依赖)。
+const TASK_TRACE_DDL: &str = r#"
+CREATE TABLE IF NOT EXISTS task_trace (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id    TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  seq        INTEGER NOT NULL,
+  phase      TEXT NOT NULL,
+  step_index INTEGER,
+  kind       TEXT NOT NULL,
+  name       TEXT,
+  content    TEXT NOT NULL,
+  truncated  INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_trace_task_seq ON task_trace(task_id, seq);
+"#;
+
+/// 幂等 schema 升级:旧库补建 task_trace 表(PRAGMA 探测,已存在跳过)。
+/// 调用点与 `ensure_task_events_table` 同(启动 + 跨库合并两侧)——漏补的一侧会被
+/// schema 比对判为「基线缺少源表」并中止合并。
+pub fn ensure_task_trace_table(conn: &Connection) -> Result<(), String> {
+    let mut existing: Vec<String> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(task_trace)")
+            .map_err(|e| format!("读取 task_trace 列失败: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| format!("遍历 task_trace 列失败: {e}"))?;
+        for name in rows.flatten() {
+            existing.push(name);
+        }
+    }
+    if !existing.is_empty() {
+        return Ok(());
+    }
+    conn.execute_batch(TASK_TRACE_DDL)
+        .map_err(|e| format!("创建 task_trace 表失败: {e}"))?;
+    Ok(())
+}
+
 /// 命令执行审计表(bash 工具与 Android 执行层):每次尝试执行(含被拒绝的)
 /// 落一行,供设置面板审计查看与事后追溯。
 /// 为什么必须落库:root/ADB 级命令不可逆,「谁在何时以什么等级跑了什么」

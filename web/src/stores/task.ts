@@ -845,6 +845,11 @@ export const useTaskStore = defineStore('app.task', () => {
         // 大批量改动(如一次补丁几十个文件)不会叠加并发请求。
         if (ev.task_id === currentTaskId.value) void loadTaskChanges(ev.task_id);
         break;
+      case 'trace':
+        // 执行轨迹新增一条(TMSHOW-1):载荷直接并入本地轨迹缓存,**不重拉**端点
+        // (一条轨迹一次请求会让长任务打爆后端)。轨迹是纯展示数据,不驱动详情刷新。
+        // 本批(提交 1)只有后端通道;缓存在提交 2 随三档渲染落地。
+        break;
       case undefined:
         // kind 缺失(旧服务端/未知分类):仅透传事件面板,不触发刷新。
         // 这是**契约允许**的向后兼容分支(后端 kind 为 Option + skip_serializing_if),
