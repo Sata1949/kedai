@@ -1325,14 +1325,29 @@ mod tests {
         std::fs::remove_dir_all(&dst).ok();
     }
 
-    /// 端口空闲时不得误报为被占用(否则启动器会拒绝启动)
+    /// 端口空闲时不得误报为被占用(否则启动器会拒绝启动)。
+    ///
+    /// **不能写成「bind(:0) 拿到端口 → drop → 断言 Free」**:drop 之后端口立即回到
+    /// 系统临时端口池,本文件另两个 probe 用例并发的 `bind(:0)` 可能马上拿回同一个
+    /// 端口,probe 便连上那个监听者判成 Occupied。实测(本机 4 个测试线程,对齐 CI
+    /// 4 vCPU runner):200 轮红 2 次,失败点恒为本用例;32 线程下 20 轮红 1 次。
+    /// CI run 41309317403 的 launcher 段(2.6s 内判红)即此,不是产品缺陷。
+    ///
+    /// 改为**换端口重试**:每次取一个新的临时端口,只有连续多次采样都被占用才判失败
+    /// ——真回归(probe 的 Free 分支失效)会全红,不会因重试而蒙混过关。
     #[test]
     fn probe_reports_free_for_closed_port() {
-        // 绑定后立即释放,得到一个大概率空闲的端口
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        drop(listener);
-        assert!(matches!(probe_port(addr), PortState::Free));
+        let mut occupied = Vec::new();
+        for _ in 0..8 {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            drop(listener);
+            if matches!(probe_port(addr), PortState::Free) {
+                return;
+            }
+            occupied.push(addr);
+        }
+        panic!("连续 8 个已释放的临时端口都被判为被占用,probe_port 的 Free 分支可能已失效:{occupied:?}");
     }
 
     /// 端口上是非 Kedai 程序时必须判为 Occupied,而不是 Free

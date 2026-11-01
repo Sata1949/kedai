@@ -9,7 +9,13 @@
 # `git push --no-verify` / `build.ps1 -SkipChecks` 绕过,且换机后 hook 需重装
 # (tools/install-hooks.ps1)。本工作流把同一套门禁搬到服务端强制执行。
 #
-# 触发:push 到 main + PR + 手动 workflow_dispatch。**平台分支(kedai-Win /
+# 触发:**PR / 手动 / 每周定时 → 全量档 `check`**;**push 到 main → 轻量档 `check-main`**。
+# 2026-11-01 CI 提效批的结构性改动(逐 step 实测与三条可复用结论见 `docs/经验.md` E144):
+#   · 实测耗时 12.9~19.2 分钟(此前文档记的「30~50 分钟」是 2026-09-27 的旧值,已过期)
+#   · main 只跑静态档:PR 的检查跑在 `refs/pull/N/merge` 上,那棵树就是合并结果,
+#     全量在 PR 阶段已经验过;main 再跑一遍全量,新增信息接近零、却要多付一整轮。
+#     定时全量**不可省**——它给默认分支保鲜 cargo 缓存,PR 档才能真正命中。
+# **平台分支(kedai-Win /
 # kedai-Android)刻意不单独触发**——它们与 main 逐字节同源(见
 # docs/契约-协议与配置.md「平台分支契约」),为每个分支各跑一遍只是重复烧额度
 # (私有仓时代免费 2000 分钟/月、Windows runner 按 2 倍计费;2026-09-29 转公开后
@@ -19,13 +25,21 @@
 #
 # 远端:2026-09-26 起 origin 指向 GitHub 仓(2026-09-29 由私有转公开);本地等价命令:
 # `powershell -NoProfile -ExecutionPolicy Bypass -File tools/check-all.ps1`
-# (只跑快速档加 `-Quick`;跳过后端加 `-SkipRust`)。
+# (只跑快速档加 `-Quick`;跳过后端加 `-SkipRust`;main 轻量档同款用 `-StaticOnly`)。
 name: ci
 
 on:
   push:
     branches: [main]
   pull_request:
+  # 每周一次的全量档(2026-11-01 提效批)。**不是可选项**:
+  # main 的 push 已改为只跑轻量档(check-main),若不保留一个会真编译 Rust 的
+  # 默认分支触发源,PR 那档的 cargo target 缓存会彻底断供——GitHub 的缓存作用域
+  # 规定 PR run 只能还原「当前分支」或「默认分支」的缓存,兄弟 PR 之间互相看不见。
+  # 后果就是每个新 PR 都冷编、Local gates 稳定付 620~700s。
+  # 本档同时给 main 留下周期性的完整记录(轻量档不含编译与测试)。
+  schedule:
+    - cron: '0 18 * * 0'
   workflow_dispatch:
 
 # 同 ref 的过期 run 直接取消:本仓库存在**多会话并行推送**的场景,没有这一条会出现
@@ -35,9 +49,27 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # cargo-audit 版本**必须钉死**(2026-11-01 提效批):缓存 key 用它,缓存命中时
+  # 安装步骤被跳过——若这里改了版本而 key 跟着变,自然重装;但若只改这里却不改
+  # 缓存 key,新旧版本会混用,审计结论无法归因。两处永远同步改。
+  # 升级方式:改这里 + 下方 Cache cargo-audit 的 key 是自动跟随的(同一变量),
+  # 本地 `cargo install cargo-audit --locked --version X` 复核后一并提交。
+  CARGO_AUDIT_VERSION: '0.22.2'
+
 jobs:
+  # ===== 全量档:PR / 手动 / 每周定时 =====
+  #
+  # **job 名必须继续叫 `check`**:仓库的分支保护把 `check` 与 `check-ubuntu` 列为
+  # required status checks。改名会让 PR 永远等不到这个检查、无法合并。
+  # 轻量档因此用新名字 `check-main`,刻意不叫 check(它也进不了保护名单)。
   check:
     runs-on: windows-latest
+    # 45 分钟:当前实测 13~19 分钟,留 2.4 倍余量。此前完全没有 timeout-minutes,
+    # runner 挂死时要吃满 GitHub 默认的 6 小时(2026-11-01 提效批补上)。
+    timeout-minutes: 45
+    # push 到 main 走下方轻量档;PR、手动、定时都跑全量。
+    if: github.event_name != 'push'
     steps:
       - uses: actions/checkout@v4
 
@@ -67,6 +99,41 @@ jobs:
       # 若键里只有锁文件,这类改动会命中上一档的旧产物——cargo 的 fingerprint 虽能识别参数
       # 变化并正确重编(不会用错产物),但缓存因此整份作废却仍被下载解包,白白吃一次
       # 上传/下载与解压的开销。2026-10-31 编译效率批(dev/test 分档)即踩此点。
+      #
+      # ---- 2026-11-01 提效批:三条改动,只为「稳定命中」,不改任何门禁语义 ----
+      #
+      # ① **排除 debug/incremental**(注:实测在 CI 上是空操作,见下「实测修正」)。
+      #    本机该目录 23 GB(整个 target 41 GB 的 56%)。CI 每个 job 都是「恢复缓存 →
+      #    一次性编译」,增量中间态跨 run 复用的收益接近零。
+      #    **实测修正(2026-11-01 PR #82 后)**:`dtolnay/rust-toolchain` 这个 action
+      #    会**自动设置 `CARGO_INCREMENTAL=0`**(其日志里明写 "Disable incremental
+      #    compilation"),所以 CI 里根本不生成 `incremental` 目录——本行是防御性写法,
+      #    不产生实际收益。缓存条目实测仍是 ~2201 MB,与改前 2.14 GB 基本一致;
+      #    那部分体积是 `target/debug/deps` 的 rlib/rmeta,是**真实可复用**的产物,
+      #    不该再减。保留本行的理由:若日后换掉该 action 或手动开增量,这里能兜住。
+      #
+      # ② **key 里摘掉 src-tauri 的两份清单**。此前改一次 Tauri 依赖就让 server-rs 的
+      #    整份缓存作废。而 `src-tauri/target` 在 CI 里**根本不存在**——check-all.ps1
+      #    只对 server-rs 与 launcher 跑 cargo(见 tools/check-all.ps1 的 stage 列表),
+      #    从不碰 src-tauri。路径保留无害(缺失目录会被忽略),但 key 必须只反映
+      #    真正会被编译的东西。
+      #
+      # ③ **加 restore-keys 前缀回退**。这是最关键的一条:此前是精确 key,改一次
+      #    Cargo.toml 就零复用、整轮冷编。有了前缀回退,cargo 会拿到上一版的 target,
+      #    按自身 fingerprint 只重编变化的部分。命中率从「全有全无」变成「总有部分」。
+      #    实测同一份代码 PR 与 main 两轮 Local gates 差 6 分钟(431s vs 620s),
+      #    主要就是这个「命中/不命中」的二值性造成的。
+      #
+      # launcher/target 刻意**不缓存**:零依赖 crate,冷编 2s、热编 0.02s,为它付
+      # 上传下载代价不划算。
+      #
+      # **配额提醒**:GitHub 单仓缓存上限 10 GB,超限按最后访问时间 LRU 淘汰。本次
+      # 改动前实测该仓库已用 11.59 GB(cargo 条目 5 条 × 约 2.1 GB,同名 key 因
+      # 不同 scope 各存一份)。**实测(本批 PR #82 后)10.84 GB,仍略超上限**——
+      # 但结构已改善:新 key 只按 server-rs 清单失效,且带 restore-keys,旧的三条
+      # 同名 Tauri-scope 条目会随 LRU 自然淘汰。若后续仍频繁 miss,下一步可考虑
+      # 用 `actions/cache/restore` + `save` 分离、或只缓存 `~/.cargo/registry` +
+      # 依赖层(不缓存 crate 自身产物),但那需要单独实测,不在本批。
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -74,14 +141,36 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             server-rs/target
-            src-tauri/target
-          key: cargo-${{ hashFiles('server-rs/Cargo.lock', 'src-tauri/Cargo.lock', 'server-rs/Cargo.toml', 'src-tauri/Cargo.toml') }}
+            !server-rs/target/debug/incremental
+          key: cargo-${{ runner.os }}-${{ hashFiles('server-rs/Cargo.lock', 'server-rs/Cargo.toml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
 
-      - name: Install cargo-audit
+      # cargo-audit 的预编译二进制单独一条缓存(2026-11-01 提效批)。
+      #
+      # 此前它每轮都从源码现编:`~/.cargo/bin` 不在下方 target 缓存路径内,所以
+      # `Get-Command cargo-audit` 在全新 runner 上恒为假。实测三轮 run 该步耗时
+      # 196s / 342s / 364s,占整轮 25%~37%,是当时最大的单点浪费。
+      #
+      # key 用**固定字面量 + 版本号**(不做 hashFiles):cargo-audit 与仓库依赖树无关,
+      # 版本不变就该一直命中。版本号与下方 CARGO_AUDIT_VERSION 必须一致,否则缓存里
+      # 是旧二进制、安装步骤又不执行,审计口径会静默漂移。key 里带 runner.os 是因为
+      # 这是 Windows 专属工作流,留作日后复用到别的平台时不串味的余地。
+      - name: Cache cargo-audit
+        id: cargo-audit-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-audit.exe
+          key: cargo-audit-${{ env.CARGO_AUDIT_VERSION }}-${{ runner.os }}
+
+      - name: Install cargo-audit (缓存二进制,版本钉死)
         shell: pwsh
         run: |
           if (-not (Get-Command cargo-audit -ErrorAction SilentlyContinue)) {
-            cargo install cargo-audit --locked
+            Write-Host "缓存未命中,从源码安装 cargo-audit $env:CARGO_AUDIT_VERSION ..."
+            cargo install cargo-audit --locked --version $env:CARGO_AUDIT_VERSION
+          } else {
+            Write-Host "cargo-audit 命中缓存:$(& cargo-audit --version)"
           }
 
       - name: Install npm deps (lockfile 严格一致)
@@ -102,6 +191,79 @@ jobs:
       # server-rs/Cargo.lock 与 src-tauri/Cargo.lock 两把锁(cargo audit 硬门禁),
       # 并执行 npm audit --omit=dev 生产依赖硬门禁。无法本地修复的 unmaintained 告警
       # 由仓库根 .cargo/audit.toml 逐条 ignore(随 checkout 带入,无需额外步骤)。
-      - name: Local gates (fmt / clippy / test / audit[两锁+npm] / contract / arch / lock-sync / typecheck / vitest / build)
+      # step 名按 check-all.ps1 的**现行**阶段顺序重写(2026-10-30 提效批把便宜检查
+      # 前移:文档 → 静态段 → fmt/clippy → 审计 → cargo test → 前端)。旧名写的
+      # 「fmt / clippy / test / audit…」是重排前的顺序,与实际执行不符。
+      - name: Local gates 全量档 (docs / contract / arch / count / ratchet / fmt / clippy / audit[两锁+npm] / test / eslint / typecheck / vitest / build / bundle)
         shell: pwsh
         run: ./tools/check-all.ps1
+
+  # ===== 轻量档:push 到 main =====
+  #
+  # 为什么可以轻:GitHub 的 PR 检查跑在 `refs/pull/N/merge` 上,**那棵树就是合并后
+  # 的结果**。同一份代码在 PR 阶段已经过全量门禁(编译 + 全部测试 + 前端三段),
+  # merge 后在 main 上再跑一遍全量,新增信息接近零,而实测每轮 12.9~19.2 分钟。
+  #
+  # 保留什么:check-all.ps1 加 `-SkipRust -SkipWeb`。这个组合**不是「跳过一切」**——
+  # 按脚本的 GATE-1 约定(见 tools/check-all.ps1 头注释):
+  #   · 文档三段(check-docs / check-doc-claims / check-tutorial)**不受这两个开关影响**
+  #   · 11 段纯 Node 静态检查(契约/架构/计数/两个 ratchet/css/标点)全跑
+  #   · 审计两段(cargo audit 双锁 + npm 生产依赖)全跑,仍为硬门禁
+  # 丢掉的只有「已经由 PR 证明过」的编译、单元/集成测试与前端构建。
+  #
+  # 实测这 11 段纯 Node 检查合计 < 3s,加上 npm audit 的联网时间,整档 60~90s。
+  #
+  # 刻意**不叫 check**:分支保护的 required status checks 是 `check` / `check-ubuntu`,
+  # 本档不参与保护(它只在 main 上跑,而保护作用于 PR)。
+  check-main:
+    runs-on: windows-latest
+    # 20 分钟:稳态约 93s,但两处会让它变长——① cargo-audit 缓存 miss 时要从源码
+    # 安装(实测 376s);② npm ci 在网络抖动时可达 2~3 分钟。10 分钟余量偏紧,
+    # 一次超时就会把「轻量档」判红,比它要避免的问题更糟。20 分钟既远小于全量档的
+    # 45 分钟(仍然实现「main 便宜」的目标),又给最坏情况留了 2 倍余量。
+    timeout-minutes: 20
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # 轻量档不编译 Rust,但审计段要跑 cargo audit 双锁,故工具链仍需就位;
+      # 同时装了 rustfmt/clippy 保持与全量档同一套组件(避免「轻量档跑的是另一套
+      # 工具链」这类难以察觉的口径分叉)。
+      - name: Setup Rust (锁 1.97.1,真值源 rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo-audit
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-audit.exe
+          key: cargo-audit-${{ env.CARGO_AUDIT_VERSION }}-${{ runner.os }}
+
+      - name: Install cargo-audit (缓存二进制,版本钉死)
+        shell: pwsh
+        run: |
+          if (-not (Get-Command cargo-audit -ErrorAction SilentlyContinue)) {
+            Write-Host "缓存未命中,从源码安装 cargo-audit $env:CARGO_AUDIT_VERSION ..."
+            cargo install cargo-audit --locked --version $env:CARGO_AUDIT_VERSION
+          } else {
+            Write-Host "cargo-audit 命中缓存:$(& cargo-audit --version)"
+          }
+
+      - name: Install npm deps (lockfile 严格一致)
+        run: npm ci
+
+      # -StaticOnly:文档三段 + 11 段纯 Node 静态检查(契约/架构/计数/两个 ratchet/
+      # css/标点)+ 审计两段;跳过 fmt/clippy/cargo test 与前端 eslint/typecheck/
+      # vitest/build。语义见 tools/check-all.ps1 头注释。
+      # (初版写的是 -SkipRust -SkipWeb,但 -SkipWeb 会**连带跳过那 11 段静态检查**
+      #  ——它们历史上与前端归在同一块,于是轻量档只剩文档三段与审计,弱于本意。)
+      - name: Local gates 轻量档 (docs / contract / arch / count / ratchet / audit[两锁+npm])
+        shell: pwsh
+        run: ./tools/check-all.ps1 -StaticOnly
