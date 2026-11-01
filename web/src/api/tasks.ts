@@ -5,7 +5,7 @@
 import { BASE, authorizedFetch, request, requestText } from './client';
 import { requireArrayField, requireBoolField, requireObject, requireObjectField, requireStringField } from './shape';
 import { pumpSseFrames, toApiError } from './stream';
-import type { TaskApproveExecMode, TaskChangeDiff, TaskChangeRollback, TaskChangeRollbackAll, TaskChangeRollbackItem, TaskChangesPayload, TaskDetail, TaskEvent, TaskEventsPull, TaskFileChange, TaskLlmCall, TaskRecord, TaskRunMode, TaskScratchCleanup, TaskStep, TaskUsageTotal } from './types';
+import type { TaskApproveExecMode, TaskChangeDiff, TaskChangeRollback, TaskChangeRollbackAll, TaskChangeRollbackItem, TaskChangesPayload, TaskDetail, TaskEvent, TaskEventsPull, TaskFileChange, TaskLlmCall, TaskRecord, TaskRunMode, TaskScratchCleanup, TaskStep, TaskTrace, TaskTracePage, TaskUsageTotal } from './types';
 
 /** 读取任务列表(最新在前) */
 export async function listTasks(): Promise<TaskRecord[]> {
@@ -198,6 +198,34 @@ export async function getTaskEvents(
   const payload = requireObject<TaskEventsPull>(data, '任务事件补拉');
   requireArrayField<TaskEvent>(data, 'events', '任务事件补拉');
   requireBoolField(data, 'truncated', '任务事件补拉');
+  return payload;
+}
+
+/**
+ * 任务执行轨迹读取(TMSHOW-1;`GET /api/tasks/{id}/trace?after=&limit=`)。
+ *
+ * 轨迹与事件流是**两条独立通道**:本端点是补拉/重载通道(刷新后重建时间线),
+ * SSE 的 `kind=trace` 帧是增量通道。`trace.seq` 是轨迹自己的排序键,与事件 `seq` 不同源。
+ *
+ * `truncated=true` 表示请求起点早于保留窗口(每任务 2000 条),更早条目已被清理;
+ * `after` 超过最新 `seq` 返回空数组,**不是 404**。
+ *
+ * 读失败必须抛出:后端刻意「读失败回 500 而不回空数组」,前端同理不得把失败
+ * 降级成「这个任务没有轨迹」——那会把一次故障显示成一份残缺的"完整过程"。
+ */
+export async function getTaskTrace(
+  taskId: string,
+  after = 0,
+  limit?: number,
+): Promise<TaskTracePage> {
+  const qs = new URLSearchParams({ after: String(after) });
+  if (limit !== undefined) qs.set('limit', String(limit));
+  const data = await request<unknown>(
+    `/tasks/${encodeURIComponent(taskId)}/trace?${qs.toString()}`,
+  );
+  const payload = requireObject<TaskTracePage>(data, '任务执行轨迹');
+  requireArrayField<TaskTrace>(data, 'trace', '任务执行轨迹');
+  requireBoolField(data, 'truncated', '任务执行轨迹');
   return payload;
 }
 

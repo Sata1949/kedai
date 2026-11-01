@@ -106,7 +106,7 @@ const VERBOSE = process.argv.includes('--verbose');
  *   全部资产预算同步上调:画布库计入总量是事实,不能用「反正不首屏加载」绕过总量兜底。
  */
 const FIRST_PAINT_BUDGET_GZ = 317030;
-const ALL_ASSETS_BUDGET_GZ = 557300;
+const ALL_ASSETS_BUDGET_GZ = 617100;
 
 /**
  * 单 chunk 预算:键为「去哈希后的文件名」(`index.js` / `index.css` / `vendor.js` …)。
@@ -128,7 +128,10 @@ const CHUNK_BUDGETS_GZ = {
   // 下次再动这两块先跑本脚本;若 TaskBoard 涨到 16,000 以上,优先查是否有新的
   // 静态 import 把设置区/画布类重依赖吸进来。
   'ChatWindow.js': 63000,
-  'TaskBoard.js': 16000,
+  //   TMSHOW-2(2026-11-01)再调:实测 16,805 → 18,500。增长来自任务执行三档
+  //   显示(TaskTranscript + TaskTraceItem 两个组件 + utils/taskTranscript 纯函数);
+  //   TaskBoard 是任务台的懒加载 chunk,不进首屏(首屏合计 187,320 / 317,030 余 129,710)。
+  'TaskBoard.js': 18500,
 };
 
 /**

@@ -26,6 +26,16 @@ export interface VirtualListOptions {
   rowWindow?: number;
 }
 
+/**
+ * 行的唯一标识。
+ *
+ * 泛化到 `string | number` 是因为两个消费方的 id 类型不同:聊天消息用数据库自增
+ * `number` id,任务执行轨迹用 `seq`(number 也可以)但预留字符串键的空间——
+ * 一旦某批引入带前缀的合成行 id(如 `trace:12`),改这里比改消费方便宜。
+ * 泛型化是**加性**改动:既有 number 调用点零修改。
+ */
+export type RowId = string | number;
+
 /** 未渲染消息的占位高度估算(按角色;assistant 通常含 markdown 卡片,偏高) */
 export const ESTIMATED_HEIGHTS: Record<string, number> = {
   user: 72,
@@ -46,22 +56,22 @@ export function createVirtualListState(options: VirtualListOptions = {}) {
   const rowWindow = Math.max(0, options.rowWindow ?? 8);
 
   /** 当前处于「真实挂载」集合内的消息 id(IO 上报进入缓冲区的非尾部消息) */
-  const visible = reactive(new Set<number>());
+  const visible = reactive(new Set<RowId>());
   /** 已渲染消息的实测高度缓存(离开缓冲区时记录,占位等高) */
-  const heights = reactive(new Map<number, number>());
+  const heights = reactive(new Map<RowId, number>());
 
   /**
    * 当前列表的 id → 下标映射(条数窗口判定用)。
    * 由宿主每次渲染前经 `syncOrder` 同步;未同步时条数窗口退化为不生效(安全降级)。
    */
-  let order = new Map<number, number>();
+  let order = new Map<RowId, number>();
 
   /**
    * 同步当前列表顺序。宿主在每次取列表快照时调用(按数组引用记忆化,避免逐行重建)。
    * 下标会随消息增删而变,故必须与列表同源更新,不能只在挂载时算一次。
    */
-  function syncOrder(ids: readonly number[]): void {
-    const next = new Map<number, number>();
+  function syncOrder(ids: readonly RowId[]): void {
+    const next = new Map<RowId, number>();
     for (let i = 0; i < ids.length; i++) next.set(ids[i], i);
     order = next;
   }
@@ -75,7 +85,7 @@ export function createVirtualListState(options: VirtualListOptions = {}) {
    * 该行是否真实挂载。
    * @param id 消息 id;@param index 在列表中的下标;@param count 列表总长;@param pinnedId 强制挂载 id(编辑中)
    */
-  function isActive(id: number, index: number, count: number, pinnedId: number | null = null): boolean {
+  function isActive(id: RowId, index: number, count: number, pinnedId: RowId | null = null): boolean {
     if (!isEnabled(count)) return true;
     if (id === pinnedId) return true;
     if (index >= count - tailKeep) return true;
@@ -94,18 +104,18 @@ export function createVirtualListState(options: VirtualListOptions = {}) {
   }
 
   /** IO 上报:进入视口缓冲区 → 真实挂载 */
-  function markVisible(id: number): void {
+  function markVisible(id: RowId): void {
     visible.add(id);
   }
 
   /** IO 上报:离开视口缓冲区 → 记录实测高度并降级为占位 */
-  function markHidden(id: number, measuredHeight: number): void {
+  function markHidden(id: RowId, measuredHeight: number): void {
     if (measuredHeight > 0) heights.set(id, measuredHeight);
     visible.delete(id);
   }
 
   /** 占位高度:优先实测缓存,否则按角色估算 */
-  function placeholderHeight(id: number, role: string): number {
+  function placeholderHeight(id: RowId, role: string): number {
     return heights.get(id) ?? ESTIMATED_HEIGHTS[role] ?? ESTIMATED_HEIGHT_FALLBACK;
   }
 
@@ -132,11 +142,11 @@ function resolveRowEl(target: RowRefTarget): HTMLElement | null {
 
 export interface UseVirtualMessagesOptions extends VirtualListOptions {
   /** 消息列表(store 响应式引用) */
-  messages: Ref<Array<{ id: number; role: string }>>;
+  messages: Ref<Array<{ id: RowId; role: string }>>;
   /** 滚动容器元素 ref */
   scrollArea: Ref<HTMLElement | null>;
   /** 强制真实挂载的消息 id(编辑中的消息;无则传 Ref<null>) */
-  pinnedId: Ref<number | null>;
+  pinnedId: Ref<RowId | null>;
   /** 行挂载状态变化(占位↔真实)后的回调:父组件用于补跑资源水合/脚本执行 */
   onRowsChanged?: () => void;
   /** 会话标识:变化时重置高度缓存与可见集 */
@@ -163,27 +173,41 @@ export function useVirtualMessages(opts: UseVirtualMessagesOptions) {
   }
 
   /** 该行是否真实挂载(模板每行调用;依赖 reactive visible 集合,精准重渲染) */
-  function isActive(id: number, index: number): boolean {
+  function isActive(id: RowId, index: number): boolean {
     syncOrderIfNeeded();
     return state.isActive(id, index, opts.messages.value.length, opts.pinnedId.value);
   }
 
   /** 占位 div 内联样式:等高 + 与 .sv-msg 相同的下间距(28px),不新增全局样式 */
-  function placeholderStyle(m: { id: number; role: string }): { height: string; marginBottom: string } {
+  function placeholderStyle(m: { id: RowId; role: string }): { height: string; marginBottom: string } {
     return { height: `${state.placeholderHeight(m.id, m.role)}px`, marginBottom: '28px' };
   }
 
   // ===== IntersectionObserver 接线(DOM 侧薄胶水,核心逻辑在 createVirtualListState) =====
   let observer: IntersectionObserver | null = null;
   /** 已观察的行元素(按消息 id) */
-  const observed = new Map<number, HTMLElement>();
+  const observed = new Map<RowId, HTMLElement>();
+  /**
+   * DOM 上的字符串键 → 原始 RowId 反查表。
+   *
+   * `dataset` 只能存字符串,而 id 可能是 `number`(聊天消息)也可能是 `string`(轨迹的
+   * 合成键)。**不能**直接 `Number(dataset.kdVmId)` —— 字符串 id 会被解成 `NaN` 而被
+   * 静默跳过,虚拟化于是「看起来在跑但一行都不挂载」。故 bindRow 时登记本表,
+   * IO 回调只经它反查。
+   */
+  const idByToken = new Map<string, RowId>();
+
+  /** RowId → dataset 字符串键(纯数字与字符串都稳定;加前缀避免 `1` 与 `'1'` 撞键) */
+  function tokenOf(id: RowId): string {
+    return typeof id === 'number' ? `n:${id}` : `s:${id}`;
+  }
 
   function handleEntries(entries: IntersectionObserverEntry[]): void {
     let changed = false;
     for (const entry of entries) {
       const el = entry.target as HTMLElement;
-      const id = Number(el.dataset.kdVmId);
-      if (!Number.isFinite(id)) continue;
+      const id = idByToken.get(el.dataset.kdVmId ?? '');
+      if (id === undefined) continue;
       if (entry.isIntersecting) {
         if (!state.visible.has(id)) {
           state.markVisible(id);
@@ -200,7 +224,7 @@ export function useVirtualMessages(opts: UseVirtualMessagesOptions) {
   }
 
   /** 模板行 ref 回调:登记/注销行元素并纳入观察(占位与真实行共用) */
-  function bindRow(id: number, target: RowRefTarget): void {
+  function bindRow(id: RowId, target: RowRefTarget): void {
     const prev = observed.get(id);
     if (prev) {
       observer?.unobserve(prev);
@@ -208,7 +232,9 @@ export function useVirtualMessages(opts: UseVirtualMessagesOptions) {
     }
     const el = resolveRowEl(target);
     if (!el) return;
-    el.dataset.kdVmId = String(id);
+    const token = tokenOf(id);
+    el.dataset.kdVmId = token;
+    idByToken.set(token, id);
     observed.set(id, el);
     observer?.observe(el);
   }
@@ -227,6 +253,7 @@ export function useVirtualMessages(opts: UseVirtualMessagesOptions) {
     observer?.disconnect();
     observer = null;
     observed.clear();
+    idByToken.clear();
   });
 
   // 会话切换:重置可见集与高度缓存(旧 id 的实测高度对新会话无意义)

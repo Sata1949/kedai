@@ -154,7 +154,7 @@ describe('C-2A 任务面板拆分', () => {
     expect(wrapper.find('.sv-task-approve').exists()).toBe(false);
   });
 
-  it('TaskExecutionPanel:team 分工卡 + 计划步骤 + 流式文本', async () => {
+  it('TaskExecutionPanel:team 空轨迹降级档 1 → 分工卡 + 计划步骤 + 流式文本都可见', async () => {
     const plan: TaskStep[] = [
       { name: '【主Agent-1】调研', goal: '调研', status: 'done', result: '**调研完成**' },
       { name: '【主Agent-2】撰写', goal: '撰写', status: 'running', result: '' },
@@ -162,19 +162,23 @@ describe('C-2A 任务面板拆分', () => {
     const detail = makeDetail({}, { task_mode: 'team', status: 'running', plan });
     const store = seed(detail);
     store.liveBuffers = new Map([['step:1', '正在写出第一段']]);
+    // 默认档是 full,但该任务没有轨迹(旧任务 / 无工具循环)→ 降级到档 1 布局
     const wrapper = mount(TaskExecutionPanel, { props: { detail } });
     expect(wrapper.text()).toContain('主 Agent 分工');
     expect(wrapper.text()).toContain('【主Agent-1】');
     expect(wrapper.find('.sv-task-step-result').html()).toContain('<strong>');
-    expect(wrapper.find('.sv-task-live-text').text()).toContain('正在写出第一段');
-    // team 模式不渲染「计划步骤」区（与分工卡互斥）
+    expect(wrapper.text()).toContain('本任务没有可展示的执行轨迹');
+    // team 模式档 1 不渲染「计划步骤」区（与分工卡互斥）
     expect(wrapper.text()).not.toContain('计划步骤');
+    // 流式块在 TaskTranscript 内,三档都保留(它是活动指示)
+    expect(wrapper.find('.sv-task-live-text').text()).toContain('正在写出第一段');
   });
 
   it('TaskExecutionPanel:solo 模式渲染调用情况入口与计划步骤', () => {
     const plan: TaskStep[] = [{ name: '第一步', goal: '做调研', status: 'done', result: '已完成' }];
     const detail = makeDetail({}, { task_mode: 'solo', status: 'done', plan });
     seed(detail);
+    // 空轨迹 → 降级档 1,计划步骤区可见
     const wrapper = mount(TaskExecutionPanel, { props: { detail } });
     expect(wrapper.text()).toContain('查看调用情况');
     expect(wrapper.text()).toContain('计划步骤');

@@ -4,6 +4,7 @@ import { renderToString } from 'vue/server-renderer';
 import { createPinia, setActivePinia, type Pinia } from 'pinia';
 import { useTaskStore } from '../stores/task';
 import { useGenSettingsStore } from '../stores/genSettings';
+import { useUiPrefsStore } from '../stores/uiPrefs';
 import TaskBoard from './TaskBoard.vue';
 import TaskModeSelect from './TaskModeSelect.vue';
 import type { AgentFlowConfig, AgentFlowLibrary, TaskDetail, TaskRecord, TaskRunMode, TaskStep, TaskStatus } from '../api';
@@ -323,9 +324,16 @@ describe('TaskBoard 批次 R1:plan 模式最终计划输出', () => {
     ];
     const result =
       '最终成果:完整季度报告\n\n## 最终计划\n1. 搜集资料(done):资料摘要\n2. 撰写正文(done):初稿内容';
-    const html = await render(TaskBoard, (p) =>
-      seedCurrentTask(p, makeDetail(makeTask('done', 'plan', plan, result))),
-    );
+    const html = await render(TaskBoard, (p) => {
+      seedCurrentTask(p, makeDetail(makeTask('done', 'plan', plan, result)));
+      // 「成果汇总」卡默认收起(实跑问题 1:与逐轮对话重复),本用例要断言卡内内容。
+      // 必须写 store 而不是 localStorage:uiPrefs 的 ref 只在 store **首次创建**时读一次
+      // localStorage,之后再改无效——此前本用例是靠「同文件更早的用例已建过 store 且当时
+      // memStorage 被设过」偶然通过的。TMSHOW-2 调整组件树后初始化顺序变化,这个顺序依赖
+      // 就暴露成一条红。显式写 store 消除依赖。
+      useUiPrefsStore(p).taskResultSummaryOpen = true;
+    });
+    expect(html).toContain('成果汇总');
     expect(html).toContain('最终成果');
     // 独立卡标题(section-title div),非 markdown 正文里的 h2
     expect(html).toContain('最终计划</div>');

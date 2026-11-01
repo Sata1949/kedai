@@ -116,6 +116,9 @@ export const useAppStore = defineStore('app', () => {
     loadGlobalTaskUsage: task.loadGlobalTaskUsage,
     loadTaskCalls: task.loadTaskCalls,
     loadTaskChanges: task.loadTaskChanges,
+    // 执行轨迹(TMSHOW-2):独立端点的拉取与三档切换(临时,不持久化)
+    loadTaskTrace: task.loadTaskTrace,
+    setTaskTranscriptMode: task.setTaskTranscriptMode,
     createTask: task.createTask,
     selectTask: task.selectTask,
     clearSelectedTask: task.clearSelectedTask,

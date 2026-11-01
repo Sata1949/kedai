@@ -28,7 +28,7 @@
     "server-rs/src/tools/permissions.rs": 1069,
     "server-rs/src/tools/registry.rs": 1019,
     "server-rs/src/tools/screenshot.rs": 1153,
-    "web/src/stores/task.ts": 1122
+    "web/src/stores/task.ts": 1157
   },
   "updated": "2026-11-01"
 }
