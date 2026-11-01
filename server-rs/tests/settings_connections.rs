@@ -681,3 +681,52 @@ async fn clear_api_key_via_connections_patch() {
     assert_eq!(conns.len(), 3, "新行应正常创建");
     assert_eq!(conns[2]["has_api_key"], false, "新行本就无密钥");
 }
+
+/// 未知字段必须显式 400,不得静默忽略(2026-11-01 实测缺陷)。
+///
+/// 起因:本文件的 `UpdateSettingsBody` 所有字段都是 `Option<T>` + `#[serde(default)]`,
+/// 于是 `{"settings": {"exec_enabled": true}}`(多包一层信封)解析成**全 None**——
+/// serde 把 `settings` 当未知键丢弃,handler 照常 200 并落盘「什么都没改」。
+/// 用户侧表现是「PUT 返回 200 但值没变」,排查成本极高(2026-11-01 CB 反代配置时实测踩到,
+/// 仓外旧脚本 `set-conn.mjs` 正是这个形态)。
+///
+/// 修法:`deny_unknown_fields` 让未知键**显式报错**,把静默失效变成可见失败。
+/// 注意错误文案不能只说「unknown field」——要点名收到了什么,以及顶层就是扁平结构。
+#[tokio::test]
+async fn put_settings_rejects_envelope_shape() {
+    let _guard = test_lock().await;
+    let app = test_app();
+    reset_to_baseline(app).await;
+
+    // 先读出当前值,稍后断言它没被改
+    let (_, before, _) = send_json(app, "GET", "/api/settings", json!({})).await;
+    let exec_before = before["exec_enabled"].clone();
+
+    let (status, body, text) = send_json(
+        app,
+        "PUT",
+        "/api/settings",
+        json!({"settings": {"exec_enabled": !exec_before.as_bool().unwrap_or(false)}}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "多包一层 settings 信封必须 400(否则静默改不动):{text}"
+    );
+    assert_eq!(body["code"], "VALIDATION", "错误码应为 VALIDATION:{body}");
+    // 文案必须点名「顶层就是字段本身」:只说"格式不对"会把用户引向检查字段拼写
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(msg.contains("顶层"), "错误文案应说明顶层结构:{msg}");
+    assert!(
+        !msg.contains("不是合法 JSON"),
+        "这是形状误用,不该说成 JSON 语法问题:{msg}"
+    );
+
+    // 值必须原样不动(整批原子:非法请求不落库)
+    let (_, after, _) = send_json(app, "GET", "/api/settings", json!({})).await;
+    assert_eq!(
+        after["exec_enabled"], exec_before,
+        "非法请求不得改动任何字段"
+    );
+}
