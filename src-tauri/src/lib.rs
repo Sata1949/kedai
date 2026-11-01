@@ -86,20 +86,7 @@ fn terminate_other_port_owners(port: u16) {
         Err(_) => return,
     };
     let text = String::from_utf8_lossy(&out.stdout);
-    let needle = format!(":{port}");
-    for line in text.lines() {
-        // TCP    127.0.0.1:3001    0.0.0.0:0    LISTENING    8748
-        if !line.contains("LISTENING") {
-            continue;
-        }
-        let cols: Vec<&str> = line.split_whitespace().collect();
-        if cols.len() < 4 || !cols[1].ends_with(&needle) {
-            continue;
-        }
-        let pid = match cols[cols.len() - 1].parse::<u32>() {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
+    for pid in parse_netstat_listeners(&text, port) {
         if pid == self_pid {
             continue;
         }
@@ -107,6 +94,101 @@ fn terminate_other_port_owners(port: u16) {
             .args(["/F", "/PID", &pid.to_string()])
             .output();
     }
+}
+
+/// 从 `netstat -ano` 输出里挑出监听指定端口的 PID(纯函数,可单测)。
+///
+/// **不依赖状态列的英文文案**(2026-10-31 PC-4):旧实现用 `line.contains("LISTENING")`
+/// 过滤——非英文 Windows 的 netstat 会把状态列本地化(如「侦听」),这条路径下
+/// 退出时的端口清理**静默失效**,用户看到「点了退出后端还在跑」。
+///
+/// 判据改成列结构:
+/// - 协议列 `TCP`/`TCPv6`/`UDP`/`UDPv6` 不随语言变化,用它剔掉表头;
+/// - 本地地址列以 `:PORT` 结尾(避免 `:13001` 之类误命中);
+/// - **TCP 行排除已知连接态**(`ESTABLISHED` 等),否则会把占着该端口的客户端
+///   短连接一起杀掉;UDP 行没有状态列,末列即 PID。
+///
+/// 与 `launcher/src/main.rs::parse_netstat_listeners` 同一套判据(两个 crate 无法
+/// 共享代码:launcher 刻意零依赖),改动须同步。
+#[cfg(desktop)]
+fn parse_netstat_listeners(text: &str, port: u16) -> Vec<u32> {
+    let needle = format!(":{port}");
+    let mut pids: Vec<u32> = Vec::new();
+    for line in text.lines() {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() < 3 {
+            continue;
+        }
+        let proto = cols[0];
+        let is_tcp = matches!(proto, "TCP" | "TCPv6");
+        let is_udp = matches!(proto, "UDP" | "UDPv6");
+        if !is_tcp && !is_udp {
+            continue;
+        }
+        if !cols[1].ends_with(&needle) {
+            continue;
+        }
+        let pid_col = if is_tcp {
+            if cols.len() < 5 {
+                continue;
+            }
+            let state = cols[cols.len() - 2];
+            // 状态列恒为非数字;数字说明缺状态列,跳过以免把 PID 当状态
+            if state.parse::<u32>().is_ok() {
+                continue;
+            }
+            if is_non_listening_state(state) {
+                continue;
+            }
+            cols.len() - 1
+        } else {
+            cols.len() - 1
+        };
+        if let Ok(pid) = cols[pid_col].parse::<u32>() {
+            if !pids.contains(&pid) {
+                pids.push(pid);
+            }
+        }
+    }
+    pids
+}
+
+/// 已知的「非监听」TCP 状态(英文原文 + 简体中文 Windows 的本地化形态)。
+///
+/// 反过来列排除集而不是匹配 `LISTENING`:解析不出的状态(未知语言)按监听处理,
+/// 与旧行为对齐;明确处于连接态的行一律跳过。
+#[cfg(desktop)]
+fn is_non_listening_state(state: &str) -> bool {
+    const NON_LISTENING: &[&str] = &[
+        "ESTABLISHED",
+        "TIME_WAIT",
+        "CLOSE_WAIT",
+        "SYN_SENT",
+        "SYN_RECEIVED",
+        "FIN_WAIT_1",
+        "FIN_WAIT_2",
+        "LAST_ACK",
+        "CLOSING",
+        "CLOSED",
+        "DELETE_TCB",
+        "已建立",
+        "已建立连接",
+        "时间等待",
+        "关闭等待",
+        "同步已发送",
+        "同步已接收",
+        "最后确认",
+        "正在关闭",
+        "已关闭",
+    ];
+    let upper = state.to_ascii_uppercase();
+    NON_LISTENING.iter().any(|s| {
+        if s.is_ascii() {
+            upper == *s
+        } else {
+            state == *s
+        }
+    })
 }
 
 /// app_data_dir() 失败时的回退目录。
@@ -796,5 +878,81 @@ mod tests {
             "取消退出后应回到确认流程,而不是下一次点击就退出"
         );
         assert!(flag.load(Ordering::SeqCst), "复位后应被本次请求重新置位");
+    }
+
+    /// PC-4:旧实现按 `line.contains("LISTENING")` 过滤,非英文 Windows 的 netstat
+    /// 会本地化状态列(如「侦听」),退出时的端口清理**静默失效**。
+    /// 与 `launcher/src/main.rs` 的同名用例保持同一套输入,两侧判据须一致。
+    #[cfg(desktop)]
+    #[test]
+    fn netstat_parse_works_with_localized_state_column() {
+        let text = [
+            "活动连接",
+            "",
+            "  协议  本地地址          外部地址        状态           PID",
+            "  TCP    0.0.0.0:135            0.0.0.0:0              侦听        1756",
+            "  TCP    127.0.0.1:3001         0.0.0.0:0              侦听        8748",
+            "  TCP    127.0.0.1:13001        0.0.0.0:0              侦听        9999",
+        ]
+        .join("\r\n");
+        assert_eq!(
+            parse_netstat_listeners(&text, 3001),
+            vec![8748],
+            "本地化状态列下仍须解出端口 3001 的 PID,且不得误命中 13001"
+        );
+    }
+
+    /// 英文系统(既有形态)不得回归。
+    #[cfg(desktop)]
+    #[test]
+    fn netstat_parse_works_with_english_state_column() {
+        let text = [
+            "Active Connections",
+            "",
+            "  Proto  Local Address          Foreign Address        State           PID",
+            "  TCP    0.0.0.0:135            0.0.0.0:0              LISTENING       1756",
+            "  TCP    127.0.0.1:3001         0.0.0.0:0              LISTENING       8748",
+        ]
+        .join("\r\n");
+        assert_eq!(parse_netstat_listeners(&text, 3001), vec![8748]);
+    }
+
+    /// 连接态(ESTABLISHED 等)不是占用者:旧实现靠 LISTENING 字面量天然排除,
+    /// 改列结构后必须显式排除,否则会杀掉占着该端口的客户端短连接。
+    #[cfg(desktop)]
+    #[test]
+    fn netstat_parse_skips_established_connections() {
+        let text = [
+            "  TCP    127.0.0.1:3001         0.0.0.0:0              LISTENING       8748",
+            "  TCP    127.0.0.1:3001         127.0.0.1:52000        ESTABLISHED     12345",
+            "  TCP    127.0.0.1:3001         127.0.0.1:52001        已建立          22222",
+        ]
+        .join("\r\n");
+        assert_eq!(
+            parse_netstat_listeners(&text, 3001),
+            vec![8748],
+            "只有监听进程该被杀,连接态(英文与本地化两种写法)都跳过"
+        );
+    }
+
+    /// UDP 行没有状态列,末列仍是 PID;IPv6 行同样命中。
+    #[cfg(desktop)]
+    #[test]
+    fn netstat_parse_handles_udp_and_ipv6_rows() {
+        let text = [
+            "  UDP    127.0.0.1:3001         *:*                                    31572",
+            "  TCPv6  [::1]:3001             [::]:0                 LISTENING       41000",
+        ]
+        .join("\r\n");
+        assert_eq!(parse_netstat_listeners(&text, 3001), vec![31572, 41000]);
+    }
+
+    /// 空输出 / 未知语言的不完整行不得 panic,也不得造出 PID。
+    #[cfg(desktop)]
+    #[test]
+    fn netstat_parse_tolerates_empty_and_malformed_input() {
+        assert!(parse_netstat_listeners("", 3001).is_empty());
+        assert!(parse_netstat_listeners("活动连接\r\n\r\n", 3001).is_empty());
+        assert!(parse_netstat_listeners("  TCP    127.0.0.1:3001", 3001).is_empty());
     }
 }
