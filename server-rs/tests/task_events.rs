@@ -67,32 +67,13 @@ async fn read_event(body: &mut Body) -> Option<Value> {
     }
 }
 
-/// 收集指定任务的事件,直到出现终态 status(done/partial/error/ended)或超时。
-/// 返回按到达顺序排列的 (kind, status) 序列。
-async fn collect_until_terminal(body: &mut Body, task_id: &str) -> Vec<(String, Option<String>)> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    let mut seq: Vec<(String, Option<String>)> = Vec::new();
-    loop {
-        let got = tokio::time::timeout_at(deadline, read_event(body)).await;
-        match got {
-            Ok(Some(ev)) => {
-                if ev["type"].as_str() == Some("task") && ev["task_id"].as_str() == Some(task_id) {
-                    let kind = ev["kind"].as_str().unwrap_or("").to_string();
-                    let status = ev["status"].as_str().map(|s| s.to_string());
-                    let terminal = kind == "status"
-                        && matches!(
-                            status.as_deref(),
-                            Some("done") | Some("partial") | Some("error") | Some("ended")
-                        );
-                    seq.push((kind, status));
-                    if terminal {
-                        return seq;
-                    }
-                }
-            }
-            _ => panic!("等待任务 {task_id} 事件超时或流中断,已收: {seq:?}"),
-        }
-    }
+/// 收集指定任务的事件到终态(`collect_full_until_terminal` 的语义化别名)。
+///
+/// 两者是同一个实现,分开命名只是为了在调用点表达意图:需要 `detail`/`phase`
+/// 等完整字段的流式断言用它原名;需要「按 seq 与补拉合并」的丢帧容忍断言用本名。
+/// **不要各写一份实现**——两份采集器迟早会在超时预算或终态判据上漂移。
+async fn collect_frames_until_terminal(body: &mut Body, task_id: &str) -> Vec<Value> {
+    collect_full_until_terminal(body, task_id).await
 }
 
 /// 断言 expected 是 seq 的子序列(保序,中间允许多出其他事件)。
@@ -132,9 +113,14 @@ async fn task_events_emitted_on_run() {
     let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
 
-    let seq = collect_until_terminal(&mut body, &id).await;
+    let live = collect_frames_until_terminal(&mut body, &id).await;
+    // 判据 = 实时窗口 ∪ 补拉(按 seq 合并,实时帧优先)。5 个期望帧全部是**落库**
+    // 事件,补拉可靠补齐——只看实时窗口时其中任一帧被 Lagged 丢掉即概率性误红
+    // (7.3 同族;2026-10-31 实测过「回放首帧不是 created」的同型失败)。
+    // **不去重**:重复发射会在并集里多出一条,正是本用例要抓的缺陷。
+    let merged = frame_pairs(&merge_by_seq(&live, &pull_events_after(app, &id, 0).await));
     assert_subsequence(
-        &seq,
+        &merged,
         &[
             "created",
             "status:planning",
@@ -159,14 +145,17 @@ async fn task_events_include_usage_and_deleted() {
     let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
 
-    let seq = collect_until_terminal(&mut body, &id).await;
+    let live = collect_frames_until_terminal(&mut body, &id).await;
+    // 判据 = 实时 ∪ 补拉:usage/subtask 都是落库事件,补拉能补齐被 Lagged 丢掉的那些
+    // (7.3 同族;只看实时窗口时「至少出现一次」类断言同样会概率性误红)。
+    let merged = merge_by_seq(&live, &pull_events_after(app, &id, 0).await);
     assert!(
-        seq.iter().any(|(kind, _)| kind == "usage"),
-        "执行过程应发射 kind=usage 事件,实际序列: {seq:?}"
+        merged.iter().any(|e| e["kind"].as_str() == Some("usage")),
+        "执行过程应发射 kind=usage 事件,实际序列: {merged:?}"
     );
     assert!(
-        seq.iter().any(|(kind, _)| kind == "subtask"),
-        "执行过程应发射 kind=subtask 事件,实际序列: {seq:?}"
+        merged.iter().any(|e| e["kind"].as_str() == Some("subtask")),
+        "执行过程应发射 kind=subtask 事件,实际序列: {merged:?}"
     );
 
     // 删除 → kind=deleted
@@ -543,6 +532,45 @@ async fn wait_task_terminal(app: &axum::Router, task_id: &str) -> Value {
     }
 }
 
+/// 验收⓪(7.3 根因回归防线):**`created` 必须真的落库且 seq=1**。
+///
+/// 2026-10-31 CI(linux 档)实测过一次失败:`task_events_sse_replays_history_before_live`
+/// 的回放首帧成了 `status:planning` 且 **seq=1** —— 丢的不是帧而是**库里那一行**
+/// (实时窗口丢帧会留下 seq 空洞,这里 seq 从 1 连续开始)。说明 `create()` 的
+/// `emit_event(Created)` 曾整条落库失败,而当时的 `emit_event` 直接 return(不重试也不广播)。
+///
+/// 本用例把「任务一创建就必须能补拉到 created(seq=1)」钉死:不依赖实时流、不依赖时序,
+/// 只要落库丢行就红。
+#[tokio::test]
+async fn task_created_event_is_persisted_with_seq_one() {
+    let _guard = test_lock_read().await;
+    let app = test_app();
+    let id = create_task(app, "落库自检").await;
+
+    let (status, json) = send_json(
+        app,
+        "GET",
+        &format!("/api/tasks/{id}/events?after=0"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "补拉应 200: {json}");
+    let events = json["events"].as_array().expect("events 应为数组");
+    let first = events
+        .first()
+        .unwrap_or_else(|| panic!("刚建的任务应有事件: {json}"));
+    assert_eq!(
+        first["kind"].as_str(),
+        Some("created"),
+        "首条事件必须是 created(seq=1)——丢了说明落库被吞: {json}"
+    );
+    assert_eq!(
+        first["seq"].as_u64(),
+        Some(1),
+        "created 必须占 seq=1: {json}"
+    );
+}
+
 /// 验收②:补拉端点 —— `after` 之后按 seq 升序、帧与 SSE 同形(含 seq/at);
 /// `after` 超过最新 seq 返回空数组(**不是 404**);不存在的任务 404。
 #[tokio::test]
@@ -888,10 +916,14 @@ async fn task_llm_calls_tracked_on_run() {
     let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
 
-    let seq = collect_until_terminal(&mut body, &id).await;
+    let live = collect_frames_until_terminal(&mut body, &id).await;
+    // 判据 = 实时 ∪ 补拉(llm_call 落库,可补拉;同 7.3 同族口径)
+    let merged = merge_by_seq(&live, &pull_events_after(app, &id, 0).await);
     assert!(
-        seq.iter().any(|(kind, _)| kind == "llm_call"),
-        "执行过程应发射 kind=llm_call 事件,实际序列: {seq:?}"
+        merged
+            .iter()
+            .any(|e| e["kind"].as_str() == Some("llm_call")),
+        "执行过程应发射 kind=llm_call 事件,实际序列: {merged:?}"
     );
 
     let (status, calls) = send_json(app, "GET", &format!("/api/tasks/{id}/calls"), json!({})).await;
@@ -1030,9 +1062,13 @@ async fn task_plan_chat_reemits_plan_and_approval_events() {
     let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
 
-    // 等首轮 approval_required(planned 待批准;plan 模式无终态 status,手动收集)
+    // 等首轮 approval_required(planned 待批准;plan 模式无终态 status,手动收集)。
+    // **判据 = 实时窗口 ∪ 补拉**(见 merge_by_seq 注释):并行负载下 broadcast 允许
+    // Lagged 丢帧,只看实时窗口会让「等某帧出现」类断言概率性误红(7.3 同族)。
+    // approval_required 是**落库**事件,补拉可靠补齐;实时窗口超时后用它兜住。
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     let mut seq: Vec<(String, Option<String>)> = Vec::new();
+    let mut live_frames: Vec<Value> = Vec::new();
     loop {
         let got = tokio::time::timeout_at(deadline, read_event(&mut body)).await;
         match got {
@@ -1043,13 +1079,21 @@ async fn task_plan_chat_reemits_plan_and_approval_events() {
                     let kind = ev["kind"].as_str().unwrap_or("").to_string();
                     let status = ev["status"].as_str().map(|s| s.to_string());
                     let hit = kind == "approval_required";
+                    live_frames.push(ev);
                     seq.push((kind, status));
                     if hit {
                         break;
                     }
                 }
             }
-            _ => panic!("等待首轮 approval_required 超时,已收: {seq:?}"),
+            // 实时窗口没等到 → 走补拉(权威来源),不直接判失败
+            _ => {
+                seq = frame_pairs(&merge_by_seq(
+                    &live_frames,
+                    &pull_events_after(app, &id, 0).await,
+                ));
+                break;
+            }
         }
     }
     assert_subsequence(&seq, &["plan", "approval_required"]);
@@ -1064,9 +1108,11 @@ async fn task_plan_chat_reemits_plan_and_approval_events() {
     .await;
     assert_eq!(status, StatusCode::OK, "plan-chat 应 200: {json}");
 
-    // 修订后应重发 plan → approval_required 保序子序列(中间可夹 status/usage/llm_call)
+    // 修订后应重发 plan → approval_required 保序子序列(中间可夹 status/usage/llm_call)。
+    // 同首轮:实时窗口等不到就走补拉并集,不因 Lagged 丢帧误红。
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let mut seq2: Vec<(String, Option<String>)> = Vec::new();
+    let mut live2: Vec<Value> = Vec::new();
     loop {
         let got = tokio::time::timeout_at(deadline, read_event(&mut body)).await;
         match got {
@@ -1077,13 +1123,17 @@ async fn task_plan_chat_reemits_plan_and_approval_events() {
                     let kind = ev["kind"].as_str().unwrap_or("").to_string();
                     let status = ev["status"].as_str().map(|s| s.to_string());
                     let hit = kind == "approval_required";
+                    live2.push(ev);
                     seq2.push((kind, status));
                     if hit {
                         break;
                     }
                 }
             }
-            _ => panic!("等待修订后 approval_required 超时,已收: {seq2:?}"),
+            _ => {
+                seq2 = frame_pairs(&merge_by_seq(&live2, &pull_events_after(app, &id, 0).await));
+                break;
+            }
         }
     }
     assert_subsequence(&seq2, &["plan", "approval_required"]);

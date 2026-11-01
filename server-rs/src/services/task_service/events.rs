@@ -318,6 +318,61 @@ impl TaskService {
         true
     }
 
+    /// 落库型事件的实际写入(含**一次**重试)。
+    ///
+    /// 返回值:`Ok(Some((seq, at)))` = 已落库;`Ok(None)` = 任务行已不存在(按瞬态广播
+    /// 处理,不是故障);`Err(())` = 两次都失败(调用方记 error 且不广播)。
+    ///
+    /// **为什么重试一次**:分布式 CI(Linux/Win 双档)上实测过「`created` 没进
+    /// `task_events`,导致回放首帧成了 `planning seq=1`」——丢的不是帧而是**库里那一行**
+    /// (帧丢了会留 seq 空洞,这里 seq 连续从 1 开始)。单写连接下 `MAX(seq)+1` 与 INSERT
+    /// 同锁,故失败只可能来自瞬时写错误(锁/IO/事务),这类错误重试一次通常即成功。
+    /// 只重试一次:持续失败说明是真故障,继续重试只会拖慢任务且掩盖问题。
+    fn persist_event_with_retry(
+        &self,
+        kind: TaskEventKind,
+        task_id: &str,
+        title: Option<&str>,
+        status: Option<TaskStatus>,
+        detail: Option<&str>,
+    ) -> Result<Option<(u64, String)>, ()> {
+        let mut last_err = String::new();
+        for _attempt in 1..=2 {
+            let mut conn = self.db.write();
+            let tx = match conn.transaction() {
+                Ok(tx) => tx,
+                Err(e) => {
+                    last_err = format!("开启事务失败: {e}");
+                    continue;
+                }
+            };
+            match Self::persist_event(&tx, task_id, kind, title, status, detail, None, None, None) {
+                Ok(v) => {
+                    if let Err(e) = tx.commit() {
+                        last_err = format!("提交失败: {e}");
+                        continue;
+                    }
+                    return Ok(Some(v));
+                }
+                Err(e) => {
+                    // 任务行不存在不是故障:外键写不进去属预期
+                    if Self::task_row_missing(&tx, task_id) {
+                        tracing::warn!(task_id = task_id, "任务行已删除,事件按瞬态广播(不落库)");
+                        return Ok(None);
+                    }
+                    last_err = e;
+                }
+            }
+        }
+        tracing::error!(
+            task_id = task_id,
+            kind = kind.as_str(),
+            error = last_err,
+            "任务事件落库失败(已重试一次),放弃本帧且不广播"
+        );
+        Err(())
+    }
+
     /// 构造一条落库型任务事件的广播载荷(seq/at 来自 `persist_event` 的返回值)。
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn task_event_payload(
@@ -375,56 +430,24 @@ impl TaskService {
             ));
             return;
         }
-        let (seq, at) = {
-            let mut conn = self.db.write();
-            let tx = match conn.transaction() {
-                Ok(tx) => tx,
-                Err(e) => {
-                    tracing::error!(
-                        task_id = task_id,
-                        error = e.to_string(),
-                        "任务事件事务开启失败,事件未落库"
-                    );
-                    return;
-                }
-            };
-            let persisted = Self::persist_event(
-                &tx,
-                task_id,
-                kind,
-                title.as_deref(),
-                status,
-                detail.as_deref(),
-                None,
-                None,
-                None,
-            );
-            let seq_at = match persisted {
-                Ok(v) => v,
-                Err(e) => {
-                    if Self::task_row_missing(&tx, task_id) {
-                        // 任务行已不存在(用户删除运行中任务后引擎补发的少量事件):
-                        // 事件行有 tasks(id) 外键,写不进去;按瞬态广播,不当故障。
-                        tracing::warn!(task_id = task_id, "任务行已删除,事件按瞬态广播(不落库)");
-                        drop(tx);
-                        self.broadcast_event(Self::task_event_payload(
-                            task_id, kind, title, status, detail, None, None, None, None, None,
-                        ));
-                        return;
-                    }
-                    tracing::error!(task_id = task_id, error = e, "任务事件落库失败,已放弃广播");
-                    return;
-                }
-            };
-            if let Err(e) = tx.commit() {
-                tracing::error!(
-                    task_id = task_id,
-                    error = e.to_string(),
-                    "任务事件事务提交失败,事件未落库"
-                );
+        let (seq, at) = match self.persist_event_with_retry(
+            kind,
+            task_id,
+            title.as_deref(),
+            status,
+            detail.as_deref(),
+        ) {
+            Ok(Some(v)) => v,
+            // 任务行已删除:按瞬态广播(不落库),不是故障
+            Ok(None) => {
+                self.broadcast_event(Self::task_event_payload(
+                    task_id, kind, title, status, detail, None, None, None, None, None,
+                ));
                 return;
             }
-            seq_at
+            // 落库最终失败:记 error 且**不广播**(宁可无广播,也不要「有广播无落库」
+            // 让前端补拉对不上账——撤回一条已显示的进展比从未显示更糟)。
+            Err(()) => return,
         };
         self.broadcast_event(Self::task_event_payload(
             task_id,
