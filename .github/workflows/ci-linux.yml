@@ -18,8 +18,10 @@
 #      ——Android 产物无法在 runner 上执行,本档验的是「还编得过」,不是「跑得对」。
 #
 # 为何独立成文件、而不是往 ci.yml 里加 job(Q4 执行时的口径偏离):本档在迭代期
-# 会被反复触发,而 ci.yml 的 Windows 档单次 30~50 分钟且按 2 倍计费;独立文件可单独
-# workflow_dispatch,迭代代价从「两档都跑」降到「只跑本档」。
+# 会被反复触发,而 ci.yml 的 Windows 档单次耗时长(写此文件时记作 30~50 分钟;
+# **2026-11-01 实测 12.9~19.2 分钟**,结构与逐 step 优化见 `docs/经验.md` E144)、
+# 且私有仓 Free 档按 2 倍计费;独立文件可单独 workflow_dispatch,
+# 迭代代价从「两档都跑」降到「只跑本档」。
 #
 # 工具链版本:与 ci.yml 一样必须**手写**(该 action 不读 toml,见经验 E63)。
 # 全仓 `.github/workflows` 下所有 `dtolnay/rust-toolchain` 版本字面量由
