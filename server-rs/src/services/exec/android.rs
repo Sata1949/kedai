@@ -5,17 +5,15 @@
 // 但普通应用 UID 受 SELinux 约束,拿不到 root/ADB 权限。故 Rust 只做字符串进出
 // (与 native_bridge_android.rs 同一模式),执行逻辑在 Kotlin `ShellExecutorBridge`。
 //
-// 入参编码约定(沿用 `\u{1f}` 单元分隔符,避免额外 JNI 签名):
-//   exec:       command ␟ cwd ␟ timeoutMs        →  exitCode ␟ stdout ␟ stderr
-//   detectTier: ""                               →  root|shizuku|sandbox|disabled
-//   requestShizukuPermission: ""                 →  ""(成功)或错误消息
+// 入参编码约定(T3 起为 v2 长度无关格式,详见 `exec::wire` 模块头):
+//   exec:       v2 ␟ b64(command) ␟ b64(cwd) ␟ timeoutMs  →  v2 ␟ exitCode ␟ b64(stdout) ␟ b64(stderr)
+//   detectTier: ""                                         →  root|shizuku|sandbox|disabled
+//   requestShizukuPermission: ""                           →  ""(成功)或错误消息
 #![cfg(target_os = "android")]
 
+use super::wire::{decode_exec_result, encode_exec_request};
 use super::{truncate_output, ExecRequest, ExecResult, ShellTier};
 use crate::services::jni_bridge::{call_string_static, call_string_static_no_arg, EXEC_CLASS};
-
-/// 单元分隔符(US):与 Kotlin 侧 SEP 一致
-const SEP: char = '\u{1f}';
 
 /// 探测当前可用执行器等级(Kotlin 侧按 ROOT → Shizuku → Sandbox 顺序探测)。
 /// 探测失败一律回退 Disabled:宁可不可用,不给「看似可用实则失败」的假象。
@@ -53,12 +51,7 @@ pub async fn execute(req: ExecRequest) -> Result<ExecResult, String> {
     }
 
     let timeout_ms = super::clamp_timeout(req.timeout_ms);
-    let payload = format!(
-        "{}{SEP}{}{SEP}{}",
-        req.command,
-        req.cwd.unwrap_or_default(),
-        timeout_ms
-    );
+    let payload = encode_exec_request(&req.command, req.cwd.as_deref(), timeout_ms);
 
     // JNI 调用是同步阻塞的,放到阻塞线程池避免占用 async 运行时
     let raw = tokio::task::spawn_blocking(move || call_string_static(EXEC_CLASS, "exec", &payload))
@@ -68,24 +61,14 @@ pub async fn execute(req: ExecRequest) -> Result<ExecResult, String> {
     parse_result(&raw, tier)
 }
 
-/// 解析 Kotlin 回传的 `exitCode␟stdout␟stderr`。
-/// 三字段缺失时给出可诊断的错误(而非静默当空输出)。
+/// 解析 Kotlin 回传的 `v2 ␟ exitCode ␟ b64(stdout) ␟ b64(stderr)`。
+/// 三字段缺失或版本不匹配时给出可诊断的错误(而非静默当空输出)。
 fn parse_result(raw: &str, tier: ShellTier) -> Result<ExecResult, String> {
-    let mut parts = raw.splitn(3, SEP);
-    let code = parts
-        .next()
-        .ok_or_else(|| format!("执行器返回格式异常(缺 exitCode): {raw}"))?;
-    // 有意丢弃 ParseIntError:唯一信息是「不是整数」,原始 code 已在消息中
-    let exit_code: i32 = code
-        .trim()
-        .parse()
-        .map_err(|_| format!("执行器返回的 exitCode 非法: {code}"))?;
-    let stdout = parts.next().unwrap_or("");
-    let stderr = parts.next().unwrap_or("");
+    let (exit_code, stdout, stderr) = decode_exec_result(raw)?;
     Ok(ExecResult {
         exit_code,
-        stdout: truncate_output(stdout),
-        stderr: truncate_output(stderr),
+        stdout: truncate_output(&stdout),
+        stderr: truncate_output(&stderr),
         tier,
         timed_out: false,
     })
@@ -109,11 +92,18 @@ pub fn shizuku_granted() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::wire::SEP;
     use super::*;
+
+    /// v2 线格式:回执按 `v2 ␟ exitCode ␟ b64(stdout) ␟ b64(stderr)` 解析。
+    /// 编码侧用 `wire::encode_exec_result`(与 Kotlin 同一算法),两侧对拍由此可用。
+    fn make_result(exit_code: i32, stdout: &str, stderr: &str) -> String {
+        super::super::wire::encode_exec_result(exit_code, stdout, stderr)
+    }
 
     #[test]
     fn parses_well_formed_result() {
-        let raw = format!("0{SEP}hello{SEP}");
+        let raw = make_result(0, "hello", "");
         let r = parse_result(&raw, ShellTier::Shizuku).expect("应解析成功");
         assert_eq!(r.exit_code, 0);
         assert_eq!(r.stdout, "hello");
@@ -123,16 +113,36 @@ mod tests {
 
     #[test]
     fn parses_result_with_stderr() {
-        let raw = format!("1{SEP}out{SEP}err message");
+        let raw = make_result(1, "out", "err message");
         let r = parse_result(&raw, ShellTier::Root).expect("应解析成功");
         assert_eq!(r.exit_code, 1);
         assert_eq!(r.stdout, "out");
         assert_eq!(r.stderr, "err message");
     }
 
+    /// T3 判别性用例:输出含旧分隔符 US 时不得错位(修复前 splitn(3, US) 会切坏)。
+    #[test]
+    fn parses_output_containing_separator() {
+        let raw = make_result(0, "a\u{1f}b", "c\u{1f}d");
+        let r = parse_result(&raw, ShellTier::Sandbox).expect("应解析成功");
+        assert_eq!(r.stdout, "a\u{1f}b");
+        assert_eq!(r.stderr, "c\u{1f}d");
+    }
+
+    #[test]
+    fn rejects_legacy_wire_format() {
+        // 旧格式(v1,US 分隔)必须显式报错,不静默按新格式解读
+        let raw = format!("0{SEP}out{SEP}err");
+        let err = parse_result(&raw, ShellTier::Root).unwrap_err();
+        assert!(err.contains("协议版本不匹配"), "{err}");
+    }
+
     #[test]
     fn rejects_malformed_exit_code() {
-        let raw = format!("notanumber{SEP}x{SEP}y");
+        let raw = format!(
+            "{}{SEP}notanumber{SEP}{SEP}",
+            super::super::wire::WIRE_VERSION
+        );
         let err = parse_result(&raw, ShellTier::Root).unwrap_err();
         assert!(err.contains("非法"), "{err}");
     }
@@ -140,7 +150,7 @@ mod tests {
     #[test]
     fn truncates_long_output() {
         let long = "x".repeat(super::super::MAX_OUTPUT_CHARS + 50);
-        let raw = format!("0{SEP}{long}{SEP}");
+        let raw = make_result(0, &long, "");
         let r = parse_result(&raw, ShellTier::Sandbox).expect("应解析成功");
         assert!(r.stdout.contains("已截断"));
     }

@@ -1,6 +1,7 @@
 package com.kedai.app
 
 import android.content.pm.PackageManager
+import android.util.Base64
 import androidx.annotation.Keep
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -14,10 +15,15 @@ import java.util.concurrent.TimeUnit
  *   - Shizuku:以 ADB shell(UID 2000)权限执行,无需 root;
  *   - Sandbox:应用自身 UID 的 `sh -c`,能力等于本进程。
  *
- * 入参/出参编码(与 server-rs/src/services/exec/android.rs 严格对齐,US 分隔符):
- *   exec:                command ␟ cwd ␟ timeoutMs   →  exitCode ␟ stdout ␟ stderr
+ * 入参/出参编码(与 server-rs/src/services/exec/wire.rs 严格对齐,**v2 线格式**):
+ *   exec:                v2 ␟ b64(command) ␟ b64(cwd) ␟ timeoutMs
+ *                        →  v2 ␟ exitCode ␟ b64(stdout) ␟ b64(stderr)
  *   detectTier:          ""                          →  root|shizuku|sandbox|disabled
  *   requestShizukuPermission: ""                     →  ""(成功)或抛异常
+ *
+ * v2 换了什么(计划 3.4 / 遗留 T3):旧格式直接用 US(`\u001f`)分隔字段,命令原文或输出
+ * 含该字符就会字段错位。现在内容一律 base64(字母表不含 US),分隔符永不与内容冲突;
+ * 首字段是版本号,**两侧版本不一致时明确抛错**而不是静默错位解析。
  *
  * ⚠️ 混淆约束:本类被 native 按名调用(FindClass / CallStaticMethod)。release 的 R8
  * 若重命名会导致运行时失败(KeystoreBridge 已有实测踩坑)。双保险:`@Keep` 注解 +
@@ -29,6 +35,18 @@ import java.util.concurrent.TimeUnit
 @Keep
 object ShellExecutorBridge {
     private const val SEP = '\u001f'
+
+    /** 线格式版本前缀(与 Rust `wire::WIRE_VERSION` 必须一致) */
+    private const val WIRE_VERSION = "v2"
+
+    private fun b64Encode(s: String): String =
+        Base64.encodeToString(s.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+
+    private fun b64Decode(s: String, field: String): String = try {
+        String(Base64.decode(s, Base64.NO_WRAP), Charsets.UTF_8)
+    } catch (e: IllegalArgumentException) {
+        throw IllegalArgumentException("执行器入参 $field 不是合法 base64")
+    }
 
     /** 执行器等级常量(与 Rust 侧 ShellTier 对齐) */
     private const val TIER_ROOT = "root"
@@ -200,11 +218,20 @@ object ShellExecutorBridge {
     @JvmStatic
     @Keep
     fun exec(payload: String): String {
+        // v2 线格式:v2 ␟ b64(command) ␟ b64(cwd) ␟ timeoutMs
         val parts = payload.split(SEP)
-        val command = parts.getOrNull(0) ?: ""
+        val version = parts.getOrNull(0) ?: ""
+        if (version != WIRE_VERSION) {
+            throw IllegalArgumentException(
+                "执行器入参协议版本不匹配(期望 $WIRE_VERSION,收到 \"$version\");请确认 APK 与后端同版本"
+            )
+        }
+        val command = b64Decode(parts.getOrNull(1) ?: throw IllegalArgumentException("执行器入参缺 command 字段"), "command")
         if (command.isBlank()) throw IllegalArgumentException("命令为空")
-        val cwd = parts.getOrNull(1)?.takeIf { it.isNotBlank() }
-        val timeoutMs = parts.getOrNull(2)?.toLongOrNull() ?: 60_000L
+        val cwd = b64Decode(parts.getOrNull(2) ?: throw IllegalArgumentException("执行器入参缺 cwd 字段"), "cwd")
+            .takeIf { it.isNotBlank() }
+        val timeoutMs = (parts.getOrNull(3) ?: throw IllegalArgumentException("执行器入参缺 timeoutMs 字段"))
+            .trim().toLongOrNull() ?: 60_000L
 
         val tier = detectTier()
         if (tier == TIER_DISABLED) {
@@ -242,8 +269,8 @@ object ShellExecutorBridge {
 
         val stdout = proc.inputStream.bufferedReader().use { it.readText() }
         val stderr = proc.errorStream.bufferedReader().use { it.readText() }
-        // 格式:exitCode␟stdout␟stderr(US 分隔)
-        return "${proc.exitValue()}$SEP$stdout$SEP$stderr"
+        // v2 回执:v2 ␟ exitCode ␟ b64(stdout) ␟ b64(stderr)
+        return "$WIRE_VERSION$SEP${proc.exitValue()}$SEP${b64Encode(stdout)}$SEP${b64Encode(stderr)}"
     }
 
     /** 用 ProcessBuilder 启动并返回已开始的 Process(stdout/stderr 分管道)。 */

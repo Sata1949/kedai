@@ -217,6 +217,10 @@ pub fn shizuku_granted() -> bool {
 
 pub mod audit;
 
+/// 跨端线格式(编码/解码纯函数,桌面与 Android 共用;T3 收口)。
+/// 单独成模块的理由见文件头:让桌面 `cargo test` 能覆盖 Android 桥的编解码。
+pub mod wire;
+
 #[cfg(not(target_os = "android"))]
 pub mod desktop;
 
