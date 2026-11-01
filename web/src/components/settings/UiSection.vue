@@ -147,7 +147,7 @@ async function selectTheme(id: string): Promise<void> {
       <div class="sv-data-row">
         <div class="info">
           <b>任务执行过程显示</b>
-          <span>没单独设过档位的任务按这里的默认值显示。三个档位都偏好看当前任务自己的，任务详情顶栏可单独设置。</span>
+          <span>没单独设过档位的任务按这里的默认值显示；任务详情顶栏可以只改当前任务，互不影响。</span>
         </div>
         <div class="flex items-center gap-2 shrink-0 whitespace-nowrap">
           <button
