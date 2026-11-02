@@ -7,7 +7,7 @@ use super::{
 };
 use crate::models::ownership::{normalize_workspace_rel, WriteOwnership};
 use crate::models::types::{LlmMessage, TaskStep};
-use crate::services::prompt_kit::untrusted_boundary;
+use crate::services::prompt_kit::untrusted_boundary_task;
 use crate::services::task_core::prompt_consts::{
     TEAM_PLANNER_PROMPT, TEAM_SINGLE_FILE_PLANNER_NOTE,
 };
@@ -531,7 +531,10 @@ impl TeamExecutor {
         ));
         let world = self.svc.world_context(ctx.character_id.as_deref());
         if !world.is_empty() {
-            sys.push_str(&format!("\n\n{}", untrusted_boundary("world_book", &world)));
+            sys.push_str(&format!(
+                "\n\n{}",
+                untrusted_boundary_task("world_book", &world)
+            ));
         }
         // SKY-4:单文件目标在规划期就把约束说清——分片只作中间产物,必须有唯一
         // 子目标负责自包含总装;否则规划器可能把最终入口拆成多个外链本地文件。

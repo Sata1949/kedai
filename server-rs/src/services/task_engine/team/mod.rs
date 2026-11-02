@@ -39,7 +39,7 @@ use crate::agents::engine::AgentEngine;
 use crate::models::types::{
     LlmMessage, TaskEventKind, TaskStatus, TaskStep, TaskStepStatus, TokenUsage,
 };
-use crate::services::prompt_kit::untrusted_boundary;
+use crate::services::prompt_kit::untrusted_boundary_task;
 use crate::services::task_core::prompt_consts::{
     team_audit_tool_guidance, SUMMARIZER_PROMPT, TEAM_AUDIT_PROMPT, TEAM_FINAL_AUDIT_PROMPT,
 };
@@ -513,7 +513,10 @@ impl TeamExecutor {
         let mut sum_sys = String::from(SUMMARIZER_PROMPT);
         let world = svc.world_context(ctx.character_id.as_deref());
         if !world.is_empty() {
-            sum_sys.push_str(&format!("\n\n{}", untrusted_boundary("world_book", &world)));
+            sum_sys.push_str(&format!(
+                "\n\n{}",
+                untrusted_boundary_task("world_book", &world)
+            ));
         }
         let summary_messages = vec![
             LlmMessage::plain("system", &sum_sys),

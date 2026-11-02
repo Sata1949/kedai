@@ -413,6 +413,24 @@ describe('AgentSettingsSection(Agent 设置区)', () => {
     const html = stripComments(await render(AgentSettingsSection, {}, pinia));
     expect(html).toContain('设置加载失败:网络断开');
   });
+
+  // RTSPLIT-4:说明文案必须按模式分叉——任务侧是**追加**,不是替换
+  it('系统提示词说明按模式分叉:角色扮演说「替换」,任务说「追加」(RTSPLIT-4)', async () => {
+    const rpHtml = stripComments(await render(AgentSettingsSection));
+    expect(rpHtml).toContain('会完整替换内置模板，不是追加');
+    expect(rpHtml).not.toContain('任务模式是追加，不是替换');
+
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    useTaskStore().appMode = 'task';
+    const taskHtml = stripComments(await render(AgentSettingsSection, {}, pinia));
+    expect(taskHtml).toContain('任务模式是追加，不是替换');
+    // 角色扮演那句绝不得出现在任务模式(它把语义说反了)
+    expect(taskHtml).not.toContain('会完整替换内置模板，不是追加');
+    // 任务侧应点名内置指令保留 + 支持的占位符
+    expect(taskHtml).toContain('内置指令始终保留');
+    expect(taskHtml).toContain('{{lastUserMessage}}');
+  });
 });
 
 describe('GenParamsSection(生成参数区:记忆槽预算/容量上限)', () => {
