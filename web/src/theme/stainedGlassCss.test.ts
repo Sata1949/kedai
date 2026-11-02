@@ -136,8 +136,9 @@ describe('GLASS-PANE-1 拼接玻璃契约', () => {
     const stats = allBlocks.find(
       (b) => b.selector.includes('.sv-topbar .sv-topbar-stats') && !b.selector.includes('menu'),
     );
-    expect(stats, '缺少顶栏统计格的暗底规则').toBeTruthy();
-    expect(stats!.body).toMatch(/background-color:\s*rgba\(9,\s*14,\s*32,/);
+    // 不用非空断言：找不到时给出可读的失败原因，而不是让断言炸在 undefined 上。
+    if (!stats) throw new Error('缺少顶栏统计格的暗底规则');
+    expect(stats.body).toMatch(/background-color:\s*rgba\(9,\s*14,\s*32,/);
   });
 
   it('8. 零引用的 --kg-* 令牌已清除（令牌表不留死条目）', () => {
