@@ -8,25 +8,30 @@
    彩色玻璃是稀缺资源：只出现在窗楣窄带、选中态、主按钮三处。
    玻璃的贵气来自「材质的物理感」而非花纹：厚度、内缘聚光、边缘渗光。
 
+   拼接玻璃（2026-11-02 GLASS-PANE-1）：
+     真实彩窗由铅条把玻璃切成大小悬殊、不规则、永不重复的拼片。这条观感
+     不能靠「往面板上铺拼片」实现——只要拼片是背景，文字就必然跨越铅条，
+     可读性直接崩（七轮原型里第 3、4 轮就是这么失败的）。
+     因此拼片只允许用在**装饰层**（顶栏窗楣、空态装饰带）与
+     **强调层**（角色卡选中态、主按钮，需先压柔光垫）；**内容层**
+     （主面板/侧栏/消息气泡/输入框/模态）必须保持素玻璃。
+     这条边界由 stainedGlassCss.test.ts 机检，别绕过它。
+
    长时间阅读的三个约束（本版的设计前提）：
      1. 玻璃不用纯白，用暖象牙（#ece5d6 一族）——屏幕白是眩光的来源
      2. 正文用宋体族 + 1.92 行高，中文长读的舒适区
      3. 对比度全部 ≥3:1（实测 0 项不达标），降亮但不降可读性
 
-   本文件带根属性选择器，不触碰默认主题；不使用 !important 以外的侵入手段。
+   本文件带根属性选择器，不触碰默认主题，也不用 !important 这类侵入手段。
    ============================================================================ */
 
 html[data-theme='stained-glass'] {
   --kg-lead: #05040a;
-  --kg-lead-soft: #1a1520;
   --kg-gold: #b08a34;
   --kg-gold-lit: #e3bd77;
   --kg-ruby: #7a1a30;
   --kg-ruby-lit: #a82642;
   --kg-sapphire: #14305f;
-  --kg-sapphire-lit: #2a5cab;
-  --kg-emerald: #12503a;
-  --kg-amethyst: #4c2a6e;
   --kg-stone: #0b0910;
   /* 玻璃表面：暖象牙（比纯白低 8% 亮度，长时间不刺眼） */
   --kg-glass: #ece5d6;
@@ -38,6 +43,9 @@ html[data-theme='stained-glass'] {
   --kg-ink-faint: #6f6159;
   /* 玫瑰窗的整张密窗 SVG（空态视觉焦点；资源本身沿用 2026-10-17 版） */
   --kg-rose: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220' viewBox='0 0 220 220'%3E%3Cdefs%3E%3CradialGradient id='bg' cx='.45' cy='.38' r='.72'%3E%3Cstop offset='0' stop-color='%232f65b4'/%3E%3Cstop offset='.55' stop-color='%23153c7e'/%3E%3Cstop offset='1' stop-color='%230a1f4d'/%3E%3C/radialGradient%3E%3C/defs%3E%3Ccircle cx='110' cy='110' r='104' fill='url(%23bg)' stroke='%2307050a' stroke-width='5'/%3E%3Cg stroke='%2307050a' stroke-width='2' stroke-linejoin='round' fill-opacity='0.94'%3E%3Cpath d='M212 110 A102 102 0 0 1 209 136 L185 130 A78 78 0 0 0 188 110 Z' fill='%236d1429'/%3E%3Cpath d='M209 136 A102 102 0 0 1 198 161 L178 149 A78 78 0 0 0 185 130 Z' fill='%23143a7c'/%3E%3Cpath d='M198 161 A102 102 0 0 1 182 182 L165 165 A78 78 0 0 0 178 149 Z' fill='%231c4a9c'/%3E%3Cpath d='M182 182 A102 102 0 0 1 161 198 L149 178 A78 78 0 0 0 165 165 Z' fill='%23173a6b'/%3E%3Cpath d='M161 198 A102 102 0 0 1 136 209 L130 185 A78 78 0 0 0 149 178 Z' fill='%231f4f66'/%3E%3Cpath d='M136 209 A102 102 0 0 1 110 212 L110 188 A78 78 0 0 0 130 185 Z' fill='%23123a7c'/%3E%3Cpath d='M110 212 A102 102 0 0 1 84 209 L90 185 A78 78 0 0 0 110 188 Z' fill='%236d1429'/%3E%3Cpath d='M84 209 A102 102 0 0 1 59 198 L71 178 A78 78 0 0 0 90 185 Z' fill='%231b4a8a'/%3E%3Cpath d='M59 198 A102 102 0 0 1 38 182 L55 165 A78 78 0 0 0 71 178 Z' fill='%230d2a63'/%3E%3Cpath d='M38 182 A102 102 0 0 1 22 161 L42 149 A78 78 0 0 0 55 165 Z' fill='%23143a7c'/%3E%3Cpath d='M22 161 A102 102 0 0 1 11 136 L35 130 A78 78 0 0 0 42 149 Z' fill='%231c4a9c'/%3E%3Cpath d='M11 136 A102 102 0 0 1 8 110 L32 110 A78 78 0 0 0 35 130 Z' fill='%23173a6b'/%3E%3Cpath d='M8 110 A102 102 0 0 1 11 84 L35 90 A78 78 0 0 0 32 110 Z' fill='%236d1429'/%3E%3Cpath d='M11 84 A102 102 0 0 1 22 59 L42 71 A78 78 0 0 0 35 90 Z' fill='%23123a7c'/%3E%3Cpath d='M22 59 A102 102 0 0 1 38 38 L55 55 A78 78 0 0 0 42 71 Z' fill='%23153c7e'/%3E%3Cpath d='M38 38 A102 102 0 0 1 59 22 L71 42 A78 78 0 0 0 55 55 Z' fill='%231b4a8a'/%3E%3Cpath d='M59 22 A102 102 0 0 1 84 11 L90 35 A78 78 0 0 0 71 42 Z' fill='%230d2a63'/%3E%3Cpath d='M84 11 A102 102 0 0 1 110 8 L110 32 A78 78 0 0 0 90 35 Z' fill='%23143a7c'/%3E%3Cpath d='M110 8 A102 102 0 0 1 136 11 L130 35 A78 78 0 0 0 110 32 Z' fill='%236d1429'/%3E%3Cpath d='M136 11 A102 102 0 0 1 161 22 L149 42 A78 78 0 0 0 130 35 Z' fill='%23173a6b'/%3E%3Cpath d='M161 22 A102 102 0 0 1 182 38 L165 55 A78 78 0 0 0 149 42 Z' fill='%231f4f66'/%3E%3Cpath d='M182 38 A102 102 0 0 1 198 59 L178 71 A78 78 0 0 0 165 55 Z' fill='%23123a7c'/%3E%3Cpath d='M198 59 A102 102 0 0 1 209 84 L185 90 A78 78 0 0 0 178 71 Z' fill='%23153c7e'/%3E%3Cpath d='M209 84 A102 102 0 0 1 212 110 L188 110 A78 78 0 0 0 185 90 Z' fill='%231b4a8a'/%3E%3Cpath d='M188 110 A78 78 0 0 1 182 140 L158 130 A52 52 0 0 0 162 110 Z' fill='%236d1429'/%3E%3Cpath d='M182 140 A78 78 0 0 1 165 165 L147 147 A52 52 0 0 0 158 130 Z' fill='%231f4f66'/%3E%3Cpath d='M165 165 A78 78 0 0 1 140 182 L130 158 A52 52 0 0 0 147 147 Z' fill='%23123a7c'/%3E%3Cpath d='M140 182 A78 78 0 0 1 110 188 L110 162 A52 52 0 0 0 130 158 Z' fill='%23153c7e'/%3E%3Cpath d='M110 188 A78 78 0 0 1 80 182 L90 158 A52 52 0 0 0 110 162 Z' fill='%236d1429'/%3E%3Cpath d='M80 182 A78 78 0 0 1 55 165 L73 147 A52 52 0 0 0 90 158 Z' fill='%230d2a63'/%3E%3Cpath d='M55 165 A78 78 0 0 1 38 140 L62 130 A52 52 0 0 0 73 147 Z' fill='%23143a7c'/%3E%3Cpath d='M38 140 A78 78 0 0 1 32 110 L58 110 A52 52 0 0 0 62 130 Z' fill='%231c4a9c'/%3E%3Cpath d='M32 110 A78 78 0 0 1 38 80 L62 90 A52 52 0 0 0 58 110 Z' fill='%236d1429'/%3E%3Cpath d='M38 80 A78 78 0 0 1 55 55 L73 73 A52 52 0 0 0 62 90 Z' fill='%231f4f66'/%3E%3Cpath d='M55 55 A78 78 0 0 1 80 38 L90 62 A52 52 0 0 0 73 73 Z' fill='%23123a7c'/%3E%3Cpath d='M80 38 A78 78 0 0 1 110 32 L110 58 A52 52 0 0 0 90 62 Z' fill='%23153c7e'/%3E%3Cpath d='M110 32 A78 78 0 0 1 140 38 L130 62 A52 52 0 0 0 110 58 Z' fill='%236d1429'/%3E%3Cpath d='M140 38 A78 78 0 0 1 165 55 L147 73 A52 52 0 0 0 130 62 Z' fill='%230d2a63'/%3E%3Cpath d='M165 55 A78 78 0 0 1 182 80 L158 90 A52 52 0 0 0 147 73 Z' fill='%23143a7c'/%3E%3Cpath d='M182 80 A78 78 0 0 1 188 110 L162 110 A52 52 0 0 0 158 90 Z' fill='%231c4a9c'/%3E%3Cpath d='M162 110 A52 52 0 0 1 155 136 L134 124 A28 28 0 0 0 138 110 Z' fill='%238a6420'/%3E%3Cpath d='M155 136 A52 52 0 0 1 136 155 L124 134 A28 28 0 0 0 134 124 Z' fill='%23153c7e'/%3E%3Cpath d='M136 155 A52 52 0 0 1 110 162 L110 138 A28 28 0 0 0 124 134 Z' fill='%231b4a8a'/%3E%3Cpath d='M110 162 A52 52 0 0 1 84 155 L96 134 A28 28 0 0 0 110 138 Z' fill='%230d2a63'/%3E%3Cpath d='M84 155 A52 52 0 0 1 65 136 L86 124 A28 28 0 0 0 96 134 Z' fill='%238a6420'/%3E%3Cpath d='M65 136 A52 52 0 0 1 58 110 L82 110 A28 28 0 0 0 86 124 Z' fill='%231c4a9c'/%3E%3Cpath d='M58 110 A52 52 0 0 1 65 84 L86 96 A28 28 0 0 0 82 110 Z' fill='%23173a6b'/%3E%3Cpath d='M65 84 A52 52 0 0 1 84 65 L96 86 A28 28 0 0 0 86 96 Z' fill='%231f4f66'/%3E%3Cpath d='M84 65 A52 52 0 0 1 110 58 L110 82 A28 28 0 0 0 96 86 Z' fill='%238a6420'/%3E%3Cpath d='M110 58 A52 52 0 0 1 136 65 L124 86 A28 28 0 0 0 110 82 Z' fill='%23153c7e'/%3E%3Cpath d='M136 65 A52 52 0 0 1 155 84 L134 96 A28 28 0 0 0 124 86 Z' fill='%231b4a8a'/%3E%3Cpath d='M155 84 A52 52 0 0 1 162 110 L138 110 A28 28 0 0 0 134 96 Z' fill='%230d2a63'/%3E%3C/g%3E%3Cg fill='none' stroke='%2307050a' stroke-width='5'%3E%3Ccircle cx='110' cy='110' r='102'/%3E%3Ccircle cx='110' cy='110' r='78'/%3E%3Ccircle cx='110' cy='110' r='52'/%3E%3Ccircle cx='110' cy='110' r='28'/%3E%3C/g%3E%3Ccircle cx='110' cy='110' r='99' fill='none' stroke='%23c99a3b' stroke-width='1.4'/%3E%3Cg stroke='%2307050a' stroke-width='3.4'%3E%3Cline x1='188' y1='110' x2='212' y2='110'/%3E%3Cline x1='185' y1='130' x2='209' y2='136'/%3E%3Cline x1='178' y1='149' x2='198' y2='161'/%3E%3Cline x1='165' y1='165' x2='182' y2='182'/%3E%3Cline x1='149' y1='178' x2='161' y2='198'/%3E%3Cline x1='130' y1='185' x2='136' y2='209'/%3E%3Cline x1='110' y1='188' x2='110' y2='212'/%3E%3Cline x1='90' y1='185' x2='84' y2='209'/%3E%3Cline x1='71' y1='178' x2='59' y2='198'/%3E%3Cline x1='55' y1='165' x2='38' y2='182'/%3E%3Cline x1='42' y1='149' x2='22' y2='161'/%3E%3Cline x1='35' y1='130' x2='11' y2='136'/%3E%3Cline x1='32' y1='110' x2='8' y2='110'/%3E%3Cline x1='35' y1='90' x2='11' y2='84'/%3E%3Cline x1='42' y1='71' x2='22' y2='59'/%3E%3Cline x1='55' y1='55' x2='38' y2='38'/%3E%3Cline x1='71' y1='42' x2='59' y2='22'/%3E%3Cline x1='90' y1='35' x2='84' y2='11'/%3E%3Cline x1='110' y1='32' x2='110' y2='8'/%3E%3Cline x1='130' y1='35' x2='136' y2='11'/%3E%3Cline x1='149' y1='42' x2='161' y2='22'/%3E%3Cline x1='165' y1='55' x2='182' y2='38'/%3E%3Cline x1='178' y1='71' x2='198' y2='59'/%3E%3Cline x1='185' y1='90' x2='209' y2='84'/%3E%3Cline x1='161' y1='120' x2='187' y2='125'/%3E%3Cline x1='153' y1='139' x2='175' y2='153'/%3E%3Cline x1='139' y1='153' x2='153' y2='175'/%3E%3Cline x1='120' y1='161' x2='125' y2='187'/%3E%3Cline x1='100' y1='161' x2='95' y2='187'/%3E%3Cline x1='81' y1='153' x2='67' y2='175'/%3E%3Cline x1='67' y1='139' x2='45' y2='153'/%3E%3Cline x1='59' y1='120' x2='33' y2='125'/%3E%3Cline x1='59' y1='100' x2='33' y2='95'/%3E%3Cline x1='67' y1='81' x2='45' y2='67'/%3E%3Cline x1='81' y1='67' x2='67' y2='45'/%3E%3Cline x1='100' y1='59' x2='95' y2='33'/%3E%3Cline x1='120' y1='59' x2='125' y2='33'/%3E%3Cline x1='139' y1='67' x2='153' y2='45'/%3E%3Cline x1='153' y1='81' x2='175' y2='67'/%3E%3Cline x1='161' y1='100' x2='187' y2='95'/%3E%3Cline x1='137' y1='117' x2='160' y2='123'/%3E%3Cline x1='130' y1='130' x2='147' y2='147'/%3E%3Cline x1='117' y1='137' x2='123' y2='160'/%3E%3Cline x1='103' y1='137' x2='97' y2='160'/%3E%3Cline x1='90' y1='130' x2='73' y2='147'/%3E%3Cline x1='83' y1='117' x2='60' y2='123'/%3E%3Cline x1='83' y1='103' x2='60' y2='97'/%3E%3Cline x1='90' y1='90' x2='73' y2='73'/%3E%3Cline x1='103' y1='83' x2='97' y2='60'/%3E%3Cline x1='117' y1='83' x2='123' y2='60'/%3E%3Cline x1='130' y1='90' x2='147' y2='73'/%3E%3Cline x1='137' y1='103' x2='160' y2='97'/%3E%3C/g%3E%3Cg stroke='%2307050a' stroke-width='2'%3E%3Ccircle cx='200' cy='110' r='11.5' fill='%23efe3c4'/%3E%3Ccircle cx='200' cy='110' r='9' fill='%23c99a3b'/%3E%3Ccircle cx='200' cy='110' r='4' fill='%23143a7c'/%3E%3Ccircle cx='188' cy='155' r='11.5' fill='%23efe3c4'/%3E%3Ccircle cx='188' cy='155' r='9' fill='%23a51f39'/%3E%3Ccircle cx='188' cy='155' r='4' fill='%236d1429'/%3E%3Ccircle cx='155' cy='188' r='11.5' fill='%23efe3c4'/%3E%3Ccircle cx='155' cy='188' r='9' fill='%23efe3c4'/%3E%3Ccircle cx='155' cy='188' r='4' fill='%231f6b4a'/%3E%3Ccircle cx='110' cy='200' r='11.5' fill='%23efe3c4'/%3E%3Ccircle cx='110' cy='200' r='9' fill='%232a5cab'/%3E%3Ccircle cx='110' cy='200' r='4' fill='%23c99a3b'/%3E%3Ccircle cx='65' cy='188' r='11.5' fill='%23efe3c4'/%3E%3Ccircle cx='65' cy='188' r='9' fill='%23c99a3b'/%3E%3Ccircle cx='65' cy='188' r='4' fill='%23143a7c'/%3E%3Ccircle cx='32' cy='155' r='11.5' fill='%23efe3c4'/%3E%3Ccircle cx='32' cy='155' r='9' fill='%23a51f39'/%3E%3Ccircle cx='32' cy='155' r='4' fill='%236d1429'/%3E%3Ccircle cx='20' cy='110' r='11.5' fill='%23efe3c4'/%3E%3Ccircle cx='20' cy='110' r='9' fill='%23efe3c4'/%3E%3Ccircle cx='20' cy='110' r='4' fill='%231f6b4a'/%3E%3Ccircle cx='32' cy='65' r='11.5' fill='%23efe3c4'/%3E%3Ccircle cx='32' cy='65' r='9' fill='%232a5cab'/%3E%3Ccircle cx='32' cy='65' r='4' fill='%23c99a3b'/%3E%3Ccircle cx='65' cy='32' r='11.5' fill='%23efe3c4'/%3E%3Ccircle cx='65' cy='32' r='9' fill='%23c99a3b'/%3E%3Ccircle cx='65' cy='32' r='4' fill='%23143a7c'/%3E%3Ccircle cx='110' cy='20' r='11.5' fill='%23efe3c4'/%3E%3Ccircle cx='110' cy='20' r='9' fill='%23a51f39'/%3E%3Ccircle cx='110' cy='20' r='4' fill='%236d1429'/%3E%3Ccircle cx='155' cy='32' r='11.5' fill='%23efe3c4'/%3E%3Ccircle cx='155' cy='32' r='9' fill='%23efe3c4'/%3E%3Ccircle cx='155' cy='32' r='4' fill='%231f6b4a'/%3E%3Ccircle cx='188' cy='65' r='11.5' fill='%23efe3c4'/%3E%3Ccircle cx='188' cy='65' r='9' fill='%232a5cab'/%3E%3Ccircle cx='188' cy='65' r='4' fill='%23c99a3b'/%3E%3Ccircle cx='170' cy='135' r='11.5' fill='%23efe3c4'/%3E%3Ccircle cx='170' cy='135' r='9' fill='%23a51f39'/%3E%3Ccircle cx='170' cy='135' r='4' fill='%23c99a3b'/%3E%3Ccircle cx='135' cy='170' r='11.5' fill='%23efe3c4'/%3E%3Ccircle cx='135' cy='170' r='9' fill='%231c4a9c'/%3E%3Ccircle cx='135' cy='170' r='4' fill='%23c99a3b'/%3E%3Ccircle cx='85' cy='170' r='11.5' fill='%23efe3c4'/%3E%3Ccircle cx='85' cy='170' r='9' fill='%23a51f39'/%3E%3Ccircle cx='85' cy='170' r='4' fill='%23c99a3b'/%3E%3Ccircle cx='50' cy='135' r='11.5' fill='%23efe3c4'/%3E%3Ccircle cx='50' cy='135' r='9' fill='%231c4a9c'/%3E%3Ccircle cx='50' cy='135' r='4' fill='%23c99a3b'/%3E%3Ccircle cx='50' cy='85' r='11.5' fill='%23efe3c4'/%3E%3Ccircle cx='50' cy='85' r='9' fill='%23a51f39'/%3E%3Ccircle cx='50' cy='85' r='4' fill='%23c99a3b'/%3E%3Ccircle cx='85' cy='50' r='11.5' fill='%23efe3c4'/%3E%3Ccircle cx='85' cy='50' r='9' fill='%231c4a9c'/%3E%3Ccircle cx='85' cy='50' r='4' fill='%23c99a3b'/%3E%3Ccircle cx='135' cy='50' r='11.5' fill='%23efe3c4'/%3E%3Ccircle cx='135' cy='50' r='9' fill='%23a51f39'/%3E%3Ccircle cx='135' cy='50' r='4' fill='%23c99a3b'/%3E%3Ccircle cx='170' cy='85' r='11.5' fill='%23efe3c4'/%3E%3Ccircle cx='170' cy='85' r='9' fill='%231c4a9c'/%3E%3Ccircle cx='170' cy='85' r='4' fill='%23c99a3b'/%3E%3Ccircle cx='145' cy='130' r='9.5' fill='%23efe3c4'/%3E%3Ccircle cx='145' cy='130' r='7' fill='%23145037'/%3E%3Ccircle cx='145' cy='130' r='3' fill='%23a51f39'/%3E%3Ccircle cx='110' cy='150' r='9.5' fill='%23efe3c4'/%3E%3Ccircle cx='110' cy='150' r='7' fill='%23c99a3b'/%3E%3Ccircle cx='110' cy='150' r='3' fill='%23a51f39'/%3E%3Ccircle cx='75' cy='130' r='9.5' fill='%23efe3c4'/%3E%3Ccircle cx='75' cy='130' r='7' fill='%23145037'/%3E%3Ccircle cx='75' cy='130' r='3' fill='%23a51f39'/%3E%3Ccircle cx='75' cy='90' r='9.5' fill='%23efe3c4'/%3E%3Ccircle cx='75' cy='90' r='7' fill='%23c99a3b'/%3E%3Ccircle cx='75' cy='90' r='3' fill='%23a51f39'/%3E%3Ccircle cx='110' cy='70' r='9.5' fill='%23efe3c4'/%3E%3Ccircle cx='110' cy='70' r='7' fill='%23145037'/%3E%3Ccircle cx='110' cy='70' r='3' fill='%23a51f39'/%3E%3Ccircle cx='145' cy='90' r='9.5' fill='%23efe3c4'/%3E%3Ccircle cx='145' cy='90' r='7' fill='%23c99a3b'/%3E%3Ccircle cx='145' cy='90' r='3' fill='%23a51f39'/%3E%3C/g%3E%3Ccircle cx='110' cy='110' r='20' fill='%23efe3c4' stroke='%2307050a' stroke-width='3'/%3E%3Ccircle cx='110' cy='110' r='16' fill='%23a51f39' stroke='%2307050a' stroke-width='2.4'/%3E%3Ccircle cx='110' cy='110' r='12' fill='none' stroke='%23c99a3b' stroke-width='1.6'/%3E%3Ccircle cx='117' cy='110' r='2.8' fill='%23f7f2e4' stroke='%2307050a' stroke-width='1'/%3E%3Ccircle cx='115' cy='115' r='2.8' fill='%23e6c072' stroke='%2307050a' stroke-width='1'/%3E%3Ccircle cx='110' cy='117' r='2.8' fill='%23f7f2e4' stroke='%2307050a' stroke-width='1'/%3E%3Ccircle cx='105' cy='115' r='2.8' fill='%23e6c072' stroke='%2307050a' stroke-width='1'/%3E%3Ccircle cx='103' cy='110' r='2.8' fill='%23f7f2e4' stroke='%2307050a' stroke-width='1'/%3E%3Ccircle cx='105' cy='105' r='2.8' fill='%23e6c072' stroke='%2307050a' stroke-width='1'/%3E%3Ccircle cx='110' cy='103' r='2.8' fill='%23f7f2e4' stroke='%2307050a' stroke-width='1'/%3E%3Ccircle cx='115' cy='105' r='2.8' fill='%23e6c072' stroke='%2307050a' stroke-width='1'/%3E%3Ccircle cx='110' cy='110' r='4' fill='%23e6c072' stroke='%2307050a' stroke-width='1.2'/%3E%3C/svg%3E");
+  /* 顶栏专用横向窗楣条带（560×80，按「一档高 + 两个光窗宽」为周期）。
+     见 .sv-topbar 的说明：竖窗图不能拿来铺横带。 */
+  --kg-panes-band: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='560' height='80' viewBox='0 0 560 80'%3E%3Crect width='560' height='80' fill='%230d1526'/%3E%3Cpolygon points='-17,-34 0,-17 -17,0 -34,-17' fill='%23e9e3d5' fill-opacity='0.66' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='-34,-17 -17,-34 0,-17' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='0,-17 -17,0 -34,-17' fill='%23000000' fill-opacity='0.12'/%3E%3Cpolygon points='17,-34 34,-17 17,0 0,-17' fill='%23cddaea' fill-opacity='0.65' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='0,-17 17,-34 34,-17' fill='%23ffffff' fill-opacity='0.12'/%3E%3Cpolygon points='34,-17 17,0 0,-17' fill='%23000000' fill-opacity='0.12'/%3E%3Cpolygon points='51,-34 68,-17 51,0 34,-17' fill='%23143a7c' fill-opacity='0.42' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='34,-17 51,-34 68,-17' fill='%23ffffff' fill-opacity='0.13'/%3E%3Cpolygon points='68,-17 51,0 34,-17' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='85,-34 102,-17 85,0 68,-17' fill='%23ded7c8' fill-opacity='0.62' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='68,-17 85,-34 102,-17' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='102,-17 85,0 68,-17' fill='%23000000' fill-opacity='0.12'/%3E%3Cpolygon points='119,-34 136,-17 119,0 102,-17' fill='%23c2d2e7' fill-opacity='0.65' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='102,-17 119,-34 136,-17' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='136,-17 119,0 102,-17' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='153,-34 170,-17 153,0 136,-17' fill='%23ded7c8' fill-opacity='0.61' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='136,-17 153,-34 170,-17' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='170,-17 153,0 136,-17' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='187,-34 204,-17 187,0 170,-17' fill='%23e3eaf4' fill-opacity='0.66' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='170,-17 187,-34 204,-17' fill='%23ffffff' fill-opacity='0.12'/%3E%3Cpolygon points='204,-17 187,0 170,-17' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='221,-34 238,-17 221,0 204,-17' fill='%23e3eaf4' fill-opacity='0.59' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='204,-17 221,-34 238,-17' fill='%23ffffff' fill-opacity='0.13'/%3E%3Cpolygon points='238,-17 221,0 204,-17' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='255,-34 272,-17 255,0 238,-17' fill='%23eef2f8' fill-opacity='0.61' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='238,-17 255,-34 272,-17' fill='%23ffffff' fill-opacity='0.16'/%3E%3Cpolygon points='272,-17 255,0 238,-17' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='289,-34 306,-17 289,0 272,-17' fill='%23ded7c8' fill-opacity='0.66' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='272,-17 289,-34 306,-17' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='306,-17 289,0 272,-17' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='323,-34 340,-17 323,0 306,-17' fill='%231f6b4a' fill-opacity='0.40' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='306,-17 323,-34 340,-17' fill='%23ffffff' fill-opacity='0.10'/%3E%3Cpolygon points='340,-17 323,0 306,-17' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='357,-34 374,-17 357,0 340,-17' fill='%23d8e2ef' fill-opacity='0.60' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='340,-17 357,-34 374,-17' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='374,-17 357,0 340,-17' fill='%23000000' fill-opacity='0.10'/%3E%3Cpolygon points='391,-34 408,-17 391,0 374,-17' fill='%23b7c9e3' fill-opacity='0.66' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='374,-17 391,-34 408,-17' fill='%23ffffff' fill-opacity='0.13'/%3E%3Cpolygon points='408,-17 391,0 374,-17' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='425,-34 442,-17 425,0 408,-17' fill='%23e3eaf4' fill-opacity='0.58' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='408,-17 425,-34 442,-17' fill='%23ffffff' fill-opacity='0.13'/%3E%3Cpolygon points='442,-17 425,0 408,-17' fill='%23000000' fill-opacity='0.12'/%3E%3Cpolygon points='459,-34 476,-17 459,0 442,-17' fill='%23e9e3d5' fill-opacity='0.63' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='442,-17 459,-34 476,-17' fill='%23ffffff' fill-opacity='0.12'/%3E%3Cpolygon points='476,-17 459,0 442,-17' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='493,-34 510,-17 493,0 476,-17' fill='%23e3eaf4' fill-opacity='0.61' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='476,-17 493,-34 510,-17' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='510,-17 493,0 476,-17' fill='%23000000' fill-opacity='0.10'/%3E%3Cpolygon points='527,-34 544,-17 527,0 510,-17' fill='%23c2d2e7' fill-opacity='0.61' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='510,-17 527,-34 544,-17' fill='%23ffffff' fill-opacity='0.16'/%3E%3Cpolygon points='544,-17 527,0 510,-17' fill='%23000000' fill-opacity='0.11'/%3E%3Cpolygon points='561,-34 578,-17 561,0 544,-17' fill='%23cddaea' fill-opacity='0.61' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='544,-17 561,-34 578,-17' fill='%23ffffff' fill-opacity='0.12'/%3E%3Cpolygon points='578,-17 561,0 544,-17' fill='%23000000' fill-opacity='0.11'/%3E%3Cpolygon points='595,-34 612,-17 595,0 578,-17' fill='%23c2d2e7' fill-opacity='0.70' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='578,-17 595,-34 612,-17' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='612,-17 595,0 578,-17' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='629,-34 646,-17 629,0 612,-17' fill='%23b7c9e3' fill-opacity='0.72' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='612,-17 629,-34 646,-17' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='646,-17 629,0 612,-17' fill='%23000000' fill-opacity='0.12'/%3E%3Cpolygon points='0,-17 17,0 0,17 -17,0' fill='%23e3eaf4' fill-opacity='0.67' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='-17,0 0,-17 17,0' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='17,0 0,17 -17,0' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='34,-17 51,0 34,17 17,0' fill='%23eef2f8' fill-opacity='0.64' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='17,0 34,-17 51,0' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='51,0 34,17 17,0' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='68,-17 85,0 68,17 51,0' fill='%23cddaea' fill-opacity='0.68' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='51,0 68,-17 85,0' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='85,0 68,17 51,0' fill='%23000000' fill-opacity='0.12'/%3E%3Cpolygon points='102,-17 119,0 102,17 85,0' fill='%23d8e2ef' fill-opacity='0.65' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='85,0 102,-17 119,0' fill='%23ffffff' fill-opacity='0.10'/%3E%3Cpolygon points='119,0 102,17 85,0' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='136,-17 153,0 136,17 119,0' fill='%23b7c9e3' fill-opacity='0.73' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='119,0 136,-17 153,0' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='153,0 136,17 119,0' fill='%23000000' fill-opacity='0.15'/%3E%3Cpolygon points='170,-17 187,0 170,17 153,0' fill='%23e3eaf4' fill-opacity='0.65' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='153,0 170,-17 187,0' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='187,0 170,17 153,0' fill='%23000000' fill-opacity='0.11'/%3E%3Cpolygon points='204,-17 221,0 204,17 187,0' fill='%23143a7c' fill-opacity='0.42' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='187,0 204,-17 221,0' fill='%23ffffff' fill-opacity='0.13'/%3E%3Cpolygon points='221,0 204,17 187,0' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='238,-17 255,0 238,17 221,0' fill='%23c2d2e7' fill-opacity='0.64' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='221,0 238,-17 255,0' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='255,0 238,17 221,0' fill='%23000000' fill-opacity='0.11'/%3E%3Cpolygon points='272,-17 289,0 272,17 255,0' fill='%23b7c9e3' fill-opacity='0.71' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='255,0 272,-17 289,0' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='289,0 272,17 255,0' fill='%23000000' fill-opacity='0.10'/%3E%3Cpolygon points='306,-17 323,0 306,17 289,0' fill='%23eef2f8' fill-opacity='0.61' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='289,0 306,-17 323,0' fill='%23ffffff' fill-opacity='0.14'/%3E%3Cpolygon points='323,0 306,17 289,0' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='340,-17 357,0 340,17 323,0' fill='%23c2d2e7' fill-opacity='0.65' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='323,0 340,-17 357,0' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='357,0 340,17 323,0' fill='%23000000' fill-opacity='0.12'/%3E%3Cpolygon points='374,-17 391,0 374,17 357,0' fill='%23ded7c8' fill-opacity='0.59' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='357,0 374,-17 391,0' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='391,0 374,17 357,0' fill='%23000000' fill-opacity='0.12'/%3E%3Cpolygon points='408,-17 425,0 408,17 391,0' fill='%23c2d2e7' fill-opacity='0.71' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='391,0 408,-17 425,0' fill='%23ffffff' fill-opacity='0.12'/%3E%3Cpolygon points='425,0 408,17 391,0' fill='%23000000' fill-opacity='0.12'/%3E%3Cpolygon points='442,-17 459,0 442,17 425,0' fill='%23d8e2ef' fill-opacity='0.61' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='425,0 442,-17 459,0' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='459,0 442,17 425,0' fill='%23000000' fill-opacity='0.15'/%3E%3Cpolygon points='476,-17 493,0 476,17 459,0' fill='%23c2d2e7' fill-opacity='0.69' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='459,0 476,-17 493,0' fill='%23ffffff' fill-opacity='0.16'/%3E%3Cpolygon points='493,0 476,17 459,0' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='510,-17 527,0 510,17 493,0' fill='%23cddaea' fill-opacity='0.65' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='493,0 510,-17 527,0' fill='%23ffffff' fill-opacity='0.12'/%3E%3Cpolygon points='527,0 510,17 493,0' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='544,-17 561,0 544,17 527,0' fill='%23b7c9e3' fill-opacity='0.69' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='527,0 544,-17 561,0' fill='%23ffffff' fill-opacity='0.13'/%3E%3Cpolygon points='561,0 544,17 527,0' fill='%23000000' fill-opacity='0.15'/%3E%3Cpolygon points='578,-17 595,0 578,17 561,0' fill='%23e3eaf4' fill-opacity='0.57' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='561,0 578,-17 595,0' fill='%23ffffff' fill-opacity='0.13'/%3E%3Cpolygon points='595,0 578,17 561,0' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='612,-17 629,0 612,17 595,0' fill='%23e9e3d5' fill-opacity='0.61' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='595,0 612,-17 629,0' fill='%23ffffff' fill-opacity='0.16'/%3E%3Cpolygon points='629,0 612,17 595,0' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='646,-17 663,0 646,17 629,0' fill='%23b7c9e3' fill-opacity='0.67' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='629,0 646,-17 663,0' fill='%23ffffff' fill-opacity='0.12'/%3E%3Cpolygon points='663,0 646,17 629,0' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='-17,0 0,17 -17,34 -34,17' fill='%23e9e3d5' fill-opacity='0.64' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='-34,17 -17,0 0,17' fill='%23ffffff' fill-opacity='0.12'/%3E%3Cpolygon points='0,17 -17,34 -34,17' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='17,0 34,17 17,34 0,17' fill='%23b7c9e3' fill-opacity='0.63' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='0,17 17,0 34,17' fill='%23ffffff' fill-opacity='0.12'/%3E%3Cpolygon points='34,17 17,34 0,17' fill='%23000000' fill-opacity='0.11'/%3E%3Cpolygon points='51,0 68,17 51,34 34,17' fill='%23b7c9e3' fill-opacity='0.66' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='34,17 51,0 68,17' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='68,17 51,34 34,17' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='85,0 102,17 85,34 68,17' fill='%23e3eaf4' fill-opacity='0.59' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='68,17 85,0 102,17' fill='%23ffffff' fill-opacity='0.13'/%3E%3Cpolygon points='102,17 85,34 68,17' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='119,0 136,17 119,34 102,17' fill='%23eef2f8' fill-opacity='0.59' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='102,17 119,0 136,17' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='136,17 119,34 102,17' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='153,0 170,17 153,34 136,17' fill='%23c2d2e7' fill-opacity='0.64' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='136,17 153,0 170,17' fill='%23ffffff' fill-opacity='0.13'/%3E%3Cpolygon points='170,17 153,34 136,17' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='187,0 204,17 187,34 170,17' fill='%23ded7c8' fill-opacity='0.67' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='170,17 187,0 204,17' fill='%23ffffff' fill-opacity='0.17'/%3E%3Cpolygon points='204,17 187,34 170,17' fill='%23000000' fill-opacity='0.15'/%3E%3Cpolygon points='221,0 238,17 221,34 204,17' fill='%23d8e2ef' fill-opacity='0.60' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='204,17 221,0 238,17' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='238,17 221,34 204,17' fill='%23000000' fill-opacity='0.12'/%3E%3Cpolygon points='255,0 272,17 255,34 238,17' fill='%23eef2f8' fill-opacity='0.58' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='238,17 255,0 272,17' fill='%23ffffff' fill-opacity='0.17'/%3E%3Cpolygon points='272,17 255,34 238,17' fill='%23000000' fill-opacity='0.12'/%3E%3Cpolygon points='289,0 306,17 289,34 272,17' fill='%23e9e3d5' fill-opacity='0.64' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='272,17 289,0 306,17' fill='%23ffffff' fill-opacity='0.16'/%3E%3Cpolygon points='306,17 289,34 272,17' fill='%23000000' fill-opacity='0.11'/%3E%3Cpolygon points='323,0 340,17 323,34 306,17' fill='%23cddaea' fill-opacity='0.68' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='306,17 323,0 340,17' fill='%23ffffff' fill-opacity='0.16'/%3E%3Cpolygon points='340,17 323,34 306,17' fill='%23000000' fill-opacity='0.12'/%3E%3Cpolygon points='357,0 374,17 357,34 340,17' fill='%23d8e2ef' fill-opacity='0.66' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='340,17 357,0 374,17' fill='%23ffffff' fill-opacity='0.10'/%3E%3Cpolygon points='374,17 357,34 340,17' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='391,0 408,17 391,34 374,17' fill='%23eef2f8' fill-opacity='0.60' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='374,17 391,0 408,17' fill='%23ffffff' fill-opacity='0.17'/%3E%3Cpolygon points='408,17 391,34 374,17' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='425,0 442,17 425,34 408,17' fill='%23eef2f8' fill-opacity='0.64' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='408,17 425,0 442,17' fill='%23ffffff' fill-opacity='0.16'/%3E%3Cpolygon points='442,17 425,34 408,17' fill='%23000000' fill-opacity='0.15'/%3E%3Cpolygon points='459,0 476,17 459,34 442,17' fill='%23ded7c8' fill-opacity='0.61' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='442,17 459,0 476,17' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='476,17 459,34 442,17' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='493,0 510,17 493,34 476,17' fill='%23d8e2ef' fill-opacity='0.67' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='476,17 493,0 510,17' fill='%23ffffff' fill-opacity='0.12'/%3E%3Cpolygon points='510,17 493,34 476,17' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='527,0 544,17 527,34 510,17' fill='%23ded7c8' fill-opacity='0.61' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='510,17 527,0 544,17' fill='%23ffffff' fill-opacity='0.17'/%3E%3Cpolygon points='544,17 527,34 510,17' fill='%23000000' fill-opacity='0.11'/%3E%3Cpolygon points='561,0 578,17 561,34 544,17' fill='%23b7c9e3' fill-opacity='0.65' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='544,17 561,0 578,17' fill='%23ffffff' fill-opacity='0.16'/%3E%3Cpolygon points='578,17 561,34 544,17' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='595,0 612,17 595,34 578,17' fill='%23eef2f8' fill-opacity='0.61' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='578,17 595,0 612,17' fill='%23ffffff' fill-opacity='0.16'/%3E%3Cpolygon points='612,17 595,34 578,17' fill='%23000000' fill-opacity='0.12'/%3E%3Cpolygon points='629,0 646,17 629,34 612,17' fill='%23ded7c8' fill-opacity='0.68' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='612,17 629,0 646,17' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='646,17 629,34 612,17' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='0,17 17,34 0,51 -17,34' fill='%23b7c9e3' fill-opacity='0.71' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='-17,34 0,17 17,34' fill='%23ffffff' fill-opacity='0.14'/%3E%3Cpolygon points='17,34 0,51 -17,34' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='34,17 51,34 34,51 17,34' fill='%238e1b33' fill-opacity='0.36' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='17,34 34,17 51,34' fill='%23ffffff' fill-opacity='0.16'/%3E%3Cpolygon points='51,34 34,51 17,34' fill='%23000000' fill-opacity='0.11'/%3E%3Cpolygon points='68,17 85,34 68,51 51,34' fill='%23e3eaf4' fill-opacity='0.61' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='51,34 68,17 85,34' fill='%23ffffff' fill-opacity='0.17'/%3E%3Cpolygon points='85,34 68,51 51,34' fill='%23000000' fill-opacity='0.11'/%3E%3Cpolygon points='102,17 119,34 102,51 85,34' fill='%23eef2f8' fill-opacity='0.61' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='85,34 102,17 119,34' fill='%23ffffff' fill-opacity='0.10'/%3E%3Cpolygon points='119,34 102,51 85,34' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='136,17 153,34 136,51 119,34' fill='%23e3eaf4' fill-opacity='0.64' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='119,34 136,17 153,34' fill='%23ffffff' fill-opacity='0.16'/%3E%3Cpolygon points='153,34 136,51 119,34' fill='%23000000' fill-opacity='0.11'/%3E%3Cpolygon points='170,17 187,34 170,51 153,34' fill='%23e3eaf4' fill-opacity='0.64' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='153,34 170,17 187,34' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='187,34 170,51 153,34' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='204,17 221,34 204,51 187,34' fill='%23cddaea' fill-opacity='0.67' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='187,34 204,17 221,34' fill='%23ffffff' fill-opacity='0.14'/%3E%3Cpolygon points='221,34 204,51 187,34' fill='%23000000' fill-opacity='0.11'/%3E%3Cpolygon points='238,17 255,34 238,51 221,34' fill='%23143a7c' fill-opacity='0.42' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='221,34 238,17 255,34' fill='%23ffffff' fill-opacity='0.17'/%3E%3Cpolygon points='255,34 238,51 221,34' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='272,17 289,34 272,51 255,34' fill='%23cddaea' fill-opacity='0.71' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='255,34 272,17 289,34' fill='%23ffffff' fill-opacity='0.10'/%3E%3Cpolygon points='289,34 272,51 255,34' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='306,17 323,34 306,51 289,34' fill='%23ded7c8' fill-opacity='0.66' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='289,34 306,17 323,34' fill='%23ffffff' fill-opacity='0.12'/%3E%3Cpolygon points='323,34 306,51 289,34' fill='%23000000' fill-opacity='0.15'/%3E%3Cpolygon points='340,17 357,34 340,51 323,34' fill='%23e3eaf4' fill-opacity='0.62' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='323,34 340,17 357,34' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='357,34 340,51 323,34' fill='%23000000' fill-opacity='0.12'/%3E%3Cpolygon points='374,17 391,34 374,51 357,34' fill='%23e9e3d5' fill-opacity='0.64' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='357,34 374,17 391,34' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='391,34 374,51 357,34' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='408,17 425,34 408,51 391,34' fill='%23c2d2e7' fill-opacity='0.66' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='391,34 408,17 425,34' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='425,34 408,51 391,34' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='442,17 459,34 442,51 425,34' fill='%23ded7c8' fill-opacity='0.59' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='425,34 442,17 459,34' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='459,34 442,51 425,34' fill='%23000000' fill-opacity='0.10'/%3E%3Cpolygon points='476,17 493,34 476,51 459,34' fill='%23e3eaf4' fill-opacity='0.65' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='459,34 476,17 493,34' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='493,34 476,51 459,34' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='510,17 527,34 510,51 493,34' fill='%23e9e3d5' fill-opacity='0.63' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='493,34 510,17 527,34' fill='%23ffffff' fill-opacity='0.14'/%3E%3Cpolygon points='527,34 510,51 493,34' fill='%23000000' fill-opacity='0.10'/%3E%3Cpolygon points='544,17 561,34 544,51 527,34' fill='%23b08a34' fill-opacity='0.46' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='527,34 544,17 561,34' fill='%23ffffff' fill-opacity='0.14'/%3E%3Cpolygon points='561,34 544,51 527,34' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='578,17 595,34 578,51 561,34' fill='%23b7c9e3' fill-opacity='0.66' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='561,34 578,17 595,34' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='595,34 578,51 561,34' fill='%23000000' fill-opacity='0.11'/%3E%3Cpolygon points='612,17 629,34 612,51 595,34' fill='%23c2d2e7' fill-opacity='0.67' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='595,34 612,17 629,34' fill='%23ffffff' fill-opacity='0.14'/%3E%3Cpolygon points='629,34 612,51 595,34' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='646,17 663,34 646,51 629,34' fill='%23cddaea' fill-opacity='0.68' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='629,34 646,17 663,34' fill='%23ffffff' fill-opacity='0.17'/%3E%3Cpolygon points='663,34 646,51 629,34' fill='%23000000' fill-opacity='0.12'/%3E%3Cpolygon points='-17,34 0,51 -17,68 -34,51' fill='%23cddaea' fill-opacity='0.70' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='-34,51 -17,34 0,51' fill='%23ffffff' fill-opacity='0.13'/%3E%3Cpolygon points='0,51 -17,68 -34,51' fill='%23000000' fill-opacity='0.11'/%3E%3Cpolygon points='17,34 34,51 17,68 0,51' fill='%23ded7c8' fill-opacity='0.63' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='0,51 17,34 34,51' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='34,51 17,68 0,51' fill='%23000000' fill-opacity='0.12'/%3E%3Cpolygon points='51,34 68,51 51,68 34,51' fill='%23ded7c8' fill-opacity='0.68' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='34,51 51,34 68,51' fill='%23ffffff' fill-opacity='0.12'/%3E%3Cpolygon points='68,51 51,68 34,51' fill='%23000000' fill-opacity='0.11'/%3E%3Cpolygon points='85,34 102,51 85,68 68,51' fill='%23c2d2e7' fill-opacity='0.63' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='68,51 85,34 102,51' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='102,51 85,68 68,51' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='119,34 136,51 119,68 102,51' fill='%23b7c9e3' fill-opacity='0.72' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='102,51 119,34 136,51' fill='%23ffffff' fill-opacity='0.13'/%3E%3Cpolygon points='136,51 119,68 102,51' fill='%23000000' fill-opacity='0.10'/%3E%3Cpolygon points='153,34 170,51 153,68 136,51' fill='%23cddaea' fill-opacity='0.70' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='136,51 153,34 170,51' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='170,51 153,68 136,51' fill='%23000000' fill-opacity='0.11'/%3E%3Cpolygon points='187,34 204,51 187,68 170,51' fill='%23eef2f8' fill-opacity='0.56' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='170,51 187,34 204,51' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='204,51 187,68 170,51' fill='%23000000' fill-opacity='0.12'/%3E%3Cpolygon points='221,34 238,51 221,68 204,51' fill='%23cddaea' fill-opacity='0.65' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='204,51 221,34 238,51' fill='%23ffffff' fill-opacity='0.16'/%3E%3Cpolygon points='238,51 221,68 204,51' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='255,34 272,51 255,68 238,51' fill='%23cddaea' fill-opacity='0.68' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='238,51 255,34 272,51' fill='%23ffffff' fill-opacity='0.16'/%3E%3Cpolygon points='272,51 255,68 238,51' fill='%23000000' fill-opacity='0.15'/%3E%3Cpolygon points='289,34 306,51 289,68 272,51' fill='%23cddaea' fill-opacity='0.70' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='272,51 289,34 306,51' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='306,51 289,68 272,51' fill='%23000000' fill-opacity='0.15'/%3E%3Cpolygon points='323,34 340,51 323,68 306,51' fill='%23d8e2ef' fill-opacity='0.64' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='306,51 323,34 340,51' fill='%23ffffff' fill-opacity='0.12'/%3E%3Cpolygon points='340,51 323,68 306,51' fill='%23000000' fill-opacity='0.11'/%3E%3Cpolygon points='357,34 374,51 357,68 340,51' fill='%23eef2f8' fill-opacity='0.59' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='340,51 357,34 374,51' fill='%23ffffff' fill-opacity='0.17'/%3E%3Cpolygon points='374,51 357,68 340,51' fill='%23000000' fill-opacity='0.11'/%3E%3Cpolygon points='391,34 408,51 391,68 374,51' fill='%23c2d2e7' fill-opacity='0.69' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='374,51 391,34 408,51' fill='%23ffffff' fill-opacity='0.14'/%3E%3Cpolygon points='408,51 391,68 374,51' fill='%23000000' fill-opacity='0.12'/%3E%3Cpolygon points='425,34 442,51 425,68 408,51' fill='%234c2a6e' fill-opacity='0.41' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='408,51 425,34 442,51' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='442,51 425,68 408,51' fill='%23000000' fill-opacity='0.11'/%3E%3Cpolygon points='459,34 476,51 459,68 442,51' fill='%23cddaea' fill-opacity='0.69' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='442,51 459,34 476,51' fill='%23ffffff' fill-opacity='0.12'/%3E%3Cpolygon points='476,51 459,68 442,51' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='493,34 510,51 493,68 476,51' fill='%23eef2f8' fill-opacity='0.65' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='476,51 493,34 510,51' fill='%23ffffff' fill-opacity='0.16'/%3E%3Cpolygon points='510,51 493,68 476,51' fill='%23000000' fill-opacity='0.12'/%3E%3Cpolygon points='527,34 544,51 527,68 510,51' fill='%23cddaea' fill-opacity='0.65' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='510,51 527,34 544,51' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='544,51 527,68 510,51' fill='%23000000' fill-opacity='0.10'/%3E%3Cpolygon points='561,34 578,51 561,68 544,51' fill='%23b08a34' fill-opacity='0.42' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='544,51 561,34 578,51' fill='%23ffffff' fill-opacity='0.14'/%3E%3Cpolygon points='578,51 561,68 544,51' fill='%23000000' fill-opacity='0.12'/%3E%3Cpolygon points='595,34 612,51 595,68 578,51' fill='%23b7c9e3' fill-opacity='0.66' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='578,51 595,34 612,51' fill='%23ffffff' fill-opacity='0.14'/%3E%3Cpolygon points='612,51 595,68 578,51' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='629,34 646,51 629,68 612,51' fill='%23cddaea' fill-opacity='0.63' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='612,51 629,34 646,51' fill='%23ffffff' fill-opacity='0.12'/%3E%3Cpolygon points='646,51 629,68 612,51' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='0,51 17,68 0,85 -17,68' fill='%23b7c9e3' fill-opacity='0.72' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='-17,68 0,51 17,68' fill='%23ffffff' fill-opacity='0.17'/%3E%3Cpolygon points='17,68 0,85 -17,68' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='34,51 51,68 34,85 17,68' fill='%23b7c9e3' fill-opacity='0.71' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='17,68 34,51 51,68' fill='%23ffffff' fill-opacity='0.16'/%3E%3Cpolygon points='51,68 34,85 17,68' fill='%23000000' fill-opacity='0.10'/%3E%3Cpolygon points='68,51 85,68 68,85 51,68' fill='%23d8e2ef' fill-opacity='0.68' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='51,68 68,51 85,68' fill='%23ffffff' fill-opacity='0.12'/%3E%3Cpolygon points='85,68 68,85 51,68' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='102,51 119,68 102,85 85,68' fill='%23cddaea' fill-opacity='0.69' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='85,68 102,51 119,68' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='119,68 102,85 85,68' fill='%23000000' fill-opacity='0.12'/%3E%3Cpolygon points='136,51 153,68 136,85 119,68' fill='%23cddaea' fill-opacity='0.63' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='119,68 136,51 153,68' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='153,68 136,85 119,68' fill='%23000000' fill-opacity='0.15'/%3E%3Cpolygon points='170,51 187,68 170,85 153,68' fill='%23e3eaf4' fill-opacity='0.61' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='153,68 170,51 187,68' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='187,68 170,85 153,68' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='204,51 221,68 204,85 187,68' fill='%23ded7c8' fill-opacity='0.69' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='187,68 204,51 221,68' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='221,68 204,85 187,68' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='238,51 255,68 238,85 221,68' fill='%23c2d2e7' fill-opacity='0.62' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='221,68 238,51 255,68' fill='%23ffffff' fill-opacity='0.10'/%3E%3Cpolygon points='255,68 238,85 221,68' fill='%23000000' fill-opacity='0.15'/%3E%3Cpolygon points='272,51 289,68 272,85 255,68' fill='%23b7c9e3' fill-opacity='0.68' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='255,68 272,51 289,68' fill='%23ffffff' fill-opacity='0.10'/%3E%3Cpolygon points='289,68 272,85 255,68' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='306,51 323,68 306,85 289,68' fill='%23c2d2e7' fill-opacity='0.64' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='289,68 306,51 323,68' fill='%23ffffff' fill-opacity='0.14'/%3E%3Cpolygon points='323,68 306,85 289,68' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='340,51 357,68 340,85 323,68' fill='%23e3eaf4' fill-opacity='0.58' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='323,68 340,51 357,68' fill='%23ffffff' fill-opacity='0.16'/%3E%3Cpolygon points='357,68 340,85 323,68' fill='%23000000' fill-opacity='0.15'/%3E%3Cpolygon points='374,51 391,68 374,85 357,68' fill='%23ded7c8' fill-opacity='0.60' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='357,68 374,51 391,68' fill='%23ffffff' fill-opacity='0.10'/%3E%3Cpolygon points='391,68 374,85 357,68' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='408,51 425,68 408,85 391,68' fill='%23cddaea' fill-opacity='0.61' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='391,68 408,51 425,68' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='425,68 408,85 391,68' fill='%23000000' fill-opacity='0.10'/%3E%3Cpolygon points='442,51 459,68 442,85 425,68' fill='%23e9e3d5' fill-opacity='0.60' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='425,68 442,51 459,68' fill='%23ffffff' fill-opacity='0.16'/%3E%3Cpolygon points='459,68 442,85 425,68' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='476,51 493,68 476,85 459,68' fill='%23e3eaf4' fill-opacity='0.59' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='459,68 476,51 493,68' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='493,68 476,85 459,68' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='510,51 527,68 510,85 493,68' fill='%23b7c9e3' fill-opacity='0.63' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='493,68 510,51 527,68' fill='%23ffffff' fill-opacity='0.16'/%3E%3Cpolygon points='527,68 510,85 493,68' fill='%23000000' fill-opacity='0.11'/%3E%3Cpolygon points='544,51 561,68 544,85 527,68' fill='%23b7c9e3' fill-opacity='0.73' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='527,68 544,51 561,68' fill='%23ffffff' fill-opacity='0.14'/%3E%3Cpolygon points='561,68 544,85 527,68' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='578,51 595,68 578,85 561,68' fill='%23e3eaf4' fill-opacity='0.58' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='561,68 578,51 595,68' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='595,68 578,85 561,68' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='612,51 629,68 612,85 595,68' fill='%23b7c9e3' fill-opacity='0.64' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='595,68 612,51 629,68' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='629,68 612,85 595,68' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='646,51 663,68 646,85 629,68' fill='%23cddaea' fill-opacity='0.65' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='629,68 646,51 663,68' fill='%23ffffff' fill-opacity='0.16'/%3E%3Cpolygon points='663,68 646,85 629,68' fill='%23000000' fill-opacity='0.11'/%3E%3Cpolygon points='-17,68 0,85 -17,102 -34,85' fill='%23e9e3d5' fill-opacity='0.61' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='-34,85 -17,68 0,85' fill='%23ffffff' fill-opacity='0.16'/%3E%3Cpolygon points='0,85 -17,102 -34,85' fill='%23000000' fill-opacity='0.12'/%3E%3Cpolygon points='17,68 34,85 17,102 0,85' fill='%23cddaea' fill-opacity='0.62' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='0,85 17,68 34,85' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='34,85 17,102 0,85' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='51,68 68,85 51,102 34,85' fill='%23b7c9e3' fill-opacity='0.64' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='34,85 51,68 68,85' fill='%23ffffff' fill-opacity='0.16'/%3E%3Cpolygon points='68,85 51,102 34,85' fill='%23000000' fill-opacity='0.12'/%3E%3Cpolygon points='85,68 102,85 85,102 68,85' fill='%23d8e2ef' fill-opacity='0.61' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='68,85 85,68 102,85' fill='%23ffffff' fill-opacity='0.16'/%3E%3Cpolygon points='102,85 85,102 68,85' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='119,68 136,85 119,102 102,85' fill='%23e3eaf4' fill-opacity='0.61' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='102,85 119,68 136,85' fill='%23ffffff' fill-opacity='0.14'/%3E%3Cpolygon points='136,85 119,102 102,85' fill='%23000000' fill-opacity='0.11'/%3E%3Cpolygon points='153,68 170,85 153,102 136,85' fill='%23ded7c8' fill-opacity='0.68' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='136,85 153,68 170,85' fill='%23ffffff' fill-opacity='0.14'/%3E%3Cpolygon points='170,85 153,102 136,85' fill='%23000000' fill-opacity='0.12'/%3E%3Cpolygon points='187,68 204,85 187,102 170,85' fill='%23d8e2ef' fill-opacity='0.68' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='170,85 187,68 204,85' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='204,85 187,102 170,85' fill='%23000000' fill-opacity='0.12'/%3E%3Cpolygon points='221,68 238,85 221,102 204,85' fill='%23eef2f8' fill-opacity='0.63' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='204,85 221,68 238,85' fill='%23ffffff' fill-opacity='0.16'/%3E%3Cpolygon points='238,85 221,102 204,85' fill='%23000000' fill-opacity='0.12'/%3E%3Cpolygon points='255,68 272,85 255,102 238,85' fill='%23c2d2e7' fill-opacity='0.64' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='238,85 255,68 272,85' fill='%23ffffff' fill-opacity='0.14'/%3E%3Cpolygon points='272,85 255,102 238,85' fill='%23000000' fill-opacity='0.11'/%3E%3Cpolygon points='289,68 306,85 289,102 272,85' fill='%23e3eaf4' fill-opacity='0.62' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='272,85 289,68 306,85' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='306,85 289,102 272,85' fill='%23000000' fill-opacity='0.15'/%3E%3Cpolygon points='323,68 340,85 323,102 306,85' fill='%23b7c9e3' fill-opacity='0.65' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='306,85 323,68 340,85' fill='%23ffffff' fill-opacity='0.16'/%3E%3Cpolygon points='340,85 323,102 306,85' fill='%23000000' fill-opacity='0.15'/%3E%3Cpolygon points='357,68 374,85 357,102 340,85' fill='%23cddaea' fill-opacity='0.66' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='340,85 357,68 374,85' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='374,85 357,102 340,85' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='391,68 408,85 391,102 374,85' fill='%23ded7c8' fill-opacity='0.65' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='374,85 391,68 408,85' fill='%23ffffff' fill-opacity='0.16'/%3E%3Cpolygon points='408,85 391,102 374,85' fill='%23000000' fill-opacity='0.12'/%3E%3Cpolygon points='425,68 442,85 425,102 408,85' fill='%23ded7c8' fill-opacity='0.63' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='408,85 425,68 442,85' fill='%23ffffff' fill-opacity='0.12'/%3E%3Cpolygon points='442,85 425,102 408,85' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='459,68 476,85 459,102 442,85' fill='%23b7c9e3' fill-opacity='0.65' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='442,85 459,68 476,85' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='476,85 459,102 442,85' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='493,68 510,85 493,102 476,85' fill='%23c2d2e7' fill-opacity='0.69' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='476,85 493,68 510,85' fill='%23ffffff' fill-opacity='0.17'/%3E%3Cpolygon points='510,85 493,102 476,85' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='527,68 544,85 527,102 510,85' fill='%23e9e3d5' fill-opacity='0.62' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='510,85 527,68 544,85' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='544,85 527,102 510,85' fill='%23000000' fill-opacity='0.10'/%3E%3Cpolygon points='561,68 578,85 561,102 544,85' fill='%23ded7c8' fill-opacity='0.64' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='544,85 561,68 578,85' fill='%23ffffff' fill-opacity='0.14'/%3E%3Cpolygon points='578,85 561,102 544,85' fill='%23000000' fill-opacity='0.11'/%3E%3Cpolygon points='595,68 612,85 595,102 578,85' fill='%23c2d2e7' fill-opacity='0.71' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='578,85 595,68 612,85' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='612,85 595,102 578,85' fill='%23000000' fill-opacity='0.15'/%3E%3Cpolygon points='629,68 646,85 629,102 612,85' fill='%23b08a34' fill-opacity='0.38' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='612,85 629,68 646,85' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='646,85 629,102 612,85' fill='%23000000' fill-opacity='0.11'/%3E%3Cpolygon points='0,85 17,102 0,119 -17,102' fill='%23d8e2ef' fill-opacity='0.62' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='-17,102 0,85 17,102' fill='%23ffffff' fill-opacity='0.12'/%3E%3Cpolygon points='17,102 0,119 -17,102' fill='%23000000' fill-opacity='0.11'/%3E%3Cpolygon points='34,85 51,102 34,119 17,102' fill='%23e9e3d5' fill-opacity='0.58' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='17,102 34,85 51,102' fill='%23ffffff' fill-opacity='0.14'/%3E%3Cpolygon points='51,102 34,119 17,102' fill='%23000000' fill-opacity='0.15'/%3E%3Cpolygon points='68,85 85,102 68,119 51,102' fill='%23cddaea' fill-opacity='0.62' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='51,102 68,85 85,102' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='85,102 68,119 51,102' fill='%23000000' fill-opacity='0.12'/%3E%3Cpolygon points='102,85 119,102 102,119 85,102' fill='%231f6b4a' fill-opacity='0.40' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='85,102 102,85 119,102' fill='%23ffffff' fill-opacity='0.13'/%3E%3Cpolygon points='119,102 102,119 85,102' fill='%23000000' fill-opacity='0.15'/%3E%3Cpolygon points='136,85 153,102 136,119 119,102' fill='%23b7c9e3' fill-opacity='0.70' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='119,102 136,85 153,102' fill='%23ffffff' fill-opacity='0.14'/%3E%3Cpolygon points='153,102 136,119 119,102' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='170,85 187,102 170,119 153,102' fill='%23cddaea' fill-opacity='0.65' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='153,102 170,85 187,102' fill='%23ffffff' fill-opacity='0.12'/%3E%3Cpolygon points='187,102 170,119 153,102' fill='%23000000' fill-opacity='0.10'/%3E%3Cpolygon points='204,85 221,102 204,119 187,102' fill='%23cddaea' fill-opacity='0.62' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='187,102 204,85 221,102' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='221,102 204,119 187,102' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='238,85 255,102 238,119 221,102' fill='%23c2d2e7' fill-opacity='0.65' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='221,102 238,85 255,102' fill='%23ffffff' fill-opacity='0.17'/%3E%3Cpolygon points='255,102 238,119 221,102' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='272,85 289,102 272,119 255,102' fill='%23e9e3d5' fill-opacity='0.64' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='255,102 272,85 289,102' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='289,102 272,119 255,102' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='306,85 323,102 306,119 289,102' fill='%23ded7c8' fill-opacity='0.65' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='289,102 306,85 323,102' fill='%23ffffff' fill-opacity='0.13'/%3E%3Cpolygon points='323,102 306,119 289,102' fill='%23000000' fill-opacity='0.12'/%3E%3Cpolygon points='340,85 357,102 340,119 323,102' fill='%23b7c9e3' fill-opacity='0.63' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='323,102 340,85 357,102' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='357,102 340,119 323,102' fill='%23000000' fill-opacity='0.12'/%3E%3Cpolygon points='374,85 391,102 374,119 357,102' fill='%23eef2f8' fill-opacity='0.57' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='357,102 374,85 391,102' fill='%23ffffff' fill-opacity='0.12'/%3E%3Cpolygon points='391,102 374,119 357,102' fill='%23000000' fill-opacity='0.11'/%3E%3Cpolygon points='408,85 425,102 408,119 391,102' fill='%23c2d2e7' fill-opacity='0.67' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='391,102 408,85 425,102' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='425,102 408,119 391,102' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='442,85 459,102 442,119 425,102' fill='%23eef2f8' fill-opacity='0.61' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='425,102 442,85 459,102' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='459,102 442,119 425,102' fill='%23000000' fill-opacity='0.12'/%3E%3Cpolygon points='476,85 493,102 476,119 459,102' fill='%23eef2f8' fill-opacity='0.64' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='459,102 476,85 493,102' fill='%23ffffff' fill-opacity='0.12'/%3E%3Cpolygon points='493,102 476,119 459,102' fill='%23000000' fill-opacity='0.11'/%3E%3Cpolygon points='510,85 527,102 510,119 493,102' fill='%23cddaea' fill-opacity='0.63' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='493,102 510,85 527,102' fill='%23ffffff' fill-opacity='0.16'/%3E%3Cpolygon points='527,102 510,119 493,102' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='544,85 561,102 544,119 527,102' fill='%23d8e2ef' fill-opacity='0.62' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='527,102 544,85 561,102' fill='%23ffffff' fill-opacity='0.13'/%3E%3Cpolygon points='561,102 544,119 527,102' fill='%23000000' fill-opacity='0.15'/%3E%3Cpolygon points='578,85 595,102 578,119 561,102' fill='%238e1b33' fill-opacity='0.37' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='561,102 578,85 595,102' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='595,102 578,119 561,102' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='612,85 629,102 612,119 595,102' fill='%23c2d2e7' fill-opacity='0.63' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='595,102 612,85 629,102' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='629,102 612,119 595,102' fill='%23000000' fill-opacity='0.12'/%3E%3Cpolygon points='646,85 663,102 646,119 629,102' fill='%23c2d2e7' fill-opacity='0.70' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='629,102 646,85 663,102' fill='%23ffffff' fill-opacity='0.12'/%3E%3Cpolygon points='663,102 646,119 629,102' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='-17,102 0,119 -17,136 -34,119' fill='%23e9e3d5' fill-opacity='0.63' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='-34,119 -17,102 0,119' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='0,119 -17,136 -34,119' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='17,102 34,119 17,136 0,119' fill='%23d8e2ef' fill-opacity='0.62' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='0,119 17,102 34,119' fill='%23ffffff' fill-opacity='0.13'/%3E%3Cpolygon points='34,119 17,136 0,119' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='51,102 68,119 51,136 34,119' fill='%23e3eaf4' fill-opacity='0.65' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='34,119 51,102 68,119' fill='%23ffffff' fill-opacity='0.17'/%3E%3Cpolygon points='68,119 51,136 34,119' fill='%23000000' fill-opacity='0.11'/%3E%3Cpolygon points='85,102 102,119 85,136 68,119' fill='%23d8e2ef' fill-opacity='0.62' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='68,119 85,102 102,119' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='102,119 85,136 68,119' fill='%23000000' fill-opacity='0.15'/%3E%3Cpolygon points='119,102 136,119 119,136 102,119' fill='%23e3eaf4' fill-opacity='0.60' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='102,119 119,102 136,119' fill='%23ffffff' fill-opacity='0.12'/%3E%3Cpolygon points='136,119 119,136 102,119' fill='%23000000' fill-opacity='0.11'/%3E%3Cpolygon points='153,102 170,119 153,136 136,119' fill='%23ded7c8' fill-opacity='0.61' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='136,119 153,102 170,119' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='170,119 153,136 136,119' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='187,102 204,119 187,136 170,119' fill='%23d8e2ef' fill-opacity='0.62' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='170,119 187,102 204,119' fill='%23ffffff' fill-opacity='0.14'/%3E%3Cpolygon points='204,119 187,136 170,119' fill='%23000000' fill-opacity='0.11'/%3E%3Cpolygon points='221,102 238,119 221,136 204,119' fill='%23ded7c8' fill-opacity='0.67' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='204,119 221,102 238,119' fill='%23ffffff' fill-opacity='0.16'/%3E%3Cpolygon points='238,119 221,136 204,119' fill='%23000000' fill-opacity='0.15'/%3E%3Cpolygon points='255,102 272,119 255,136 238,119' fill='%23c2d2e7' fill-opacity='0.65' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='238,119 255,102 272,119' fill='%23ffffff' fill-opacity='0.14'/%3E%3Cpolygon points='272,119 255,136 238,119' fill='%23000000' fill-opacity='0.13'/%3E%3Cpolygon points='289,102 306,119 289,136 272,119' fill='%23ded7c8' fill-opacity='0.69' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='272,119 289,102 306,119' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='306,119 289,136 272,119' fill='%23000000' fill-opacity='0.12'/%3E%3Cpolygon points='323,102 340,119 323,136 306,119' fill='%23c2d2e7' fill-opacity='0.68' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='306,119 323,102 340,119' fill='%23ffffff' fill-opacity='0.14'/%3E%3Cpolygon points='340,119 323,136 306,119' fill='%23000000' fill-opacity='0.11'/%3E%3Cpolygon points='357,102 374,119 357,136 340,119' fill='%23eef2f8' fill-opacity='0.59' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='340,119 357,102 374,119' fill='%23ffffff' fill-opacity='0.17'/%3E%3Cpolygon points='374,119 357,136 340,119' fill='%23000000' fill-opacity='0.10'/%3E%3Cpolygon points='391,102 408,119 391,136 374,119' fill='%23d8e2ef' fill-opacity='0.61' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='374,119 391,102 408,119' fill='%23ffffff' fill-opacity='0.14'/%3E%3Cpolygon points='408,119 391,136 374,119' fill='%23000000' fill-opacity='0.15'/%3E%3Cpolygon points='425,102 442,119 425,136 408,119' fill='%234c2a6e' fill-opacity='0.37' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='408,119 425,102 442,119' fill='%23ffffff' fill-opacity='0.16'/%3E%3Cpolygon points='442,119 425,136 408,119' fill='%23000000' fill-opacity='0.11'/%3E%3Cpolygon points='459,102 476,119 459,136 442,119' fill='%23e3eaf4' fill-opacity='0.64' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='442,119 459,102 476,119' fill='%23ffffff' fill-opacity='0.11'/%3E%3Cpolygon points='476,119 459,136 442,119' fill='%23000000' fill-opacity='0.11'/%3E%3Cpolygon points='493,102 510,119 493,136 476,119' fill='%23e9e3d5' fill-opacity='0.63' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='476,119 493,102 510,119' fill='%23ffffff' fill-opacity='0.12'/%3E%3Cpolygon points='510,119 493,136 476,119' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='527,102 544,119 527,136 510,119' fill='%238e1b33' fill-opacity='0.43' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='510,119 527,102 544,119' fill='%23ffffff' fill-opacity='0.14'/%3E%3Cpolygon points='544,119 527,136 510,119' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='561,102 578,119 561,136 544,119' fill='%23e3eaf4' fill-opacity='0.65' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='544,119 561,102 578,119' fill='%23ffffff' fill-opacity='0.12'/%3E%3Cpolygon points='578,119 561,136 544,119' fill='%23000000' fill-opacity='0.14'/%3E%3Cpolygon points='595,102 612,119 595,136 578,119' fill='%23cddaea' fill-opacity='0.63' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='578,119 595,102 612,119' fill='%23ffffff' fill-opacity='0.15'/%3E%3Cpolygon points='612,119 595,136 578,119' fill='%23000000' fill-opacity='0.15'/%3E%3Cpolygon points='629,102 646,119 629,136 612,119' fill='%23cddaea' fill-opacity='0.63' stroke='%230a0812' stroke-width='1.4'/%3E%3Cpolygon points='612,119 629,102 646,119' fill='%23ffffff' fill-opacity='0.16'/%3E%3Cpolygon points='646,119 629,136 612,119' fill='%23000000' fill-opacity='0.12'/%3E%3Crect x='-4.5' y='-4' width='9' height='88' fill='%230a0812'/%3E%3Crect x='-3.2' y='-4' width='2' height='88' fill='%239fb0d0' fill-opacity='0.34'/%3E%3Crect x='2.5' y='-4' width='1.2' height='88' fill='%23ffffff' fill-opacity='0.12'/%3E%3Crect x='275.5' y='-4' width='9' height='88' fill='%230a0812'/%3E%3Crect x='276.8' y='-4' width='2' height='88' fill='%239fb0d0' fill-opacity='0.34'/%3E%3Crect x='282.5' y='-4' width='1.2' height='88' fill='%23ffffff' fill-opacity='0.12'/%3E%3Crect x='555.5' y='-4' width='9' height='88' fill='%230a0812'/%3E%3Crect x='556.8' y='-4' width='2' height='88' fill='%239fb0d0' fill-opacity='0.34'/%3E%3Crect x='562.5' y='-4' width='1.2' height='88' fill='%23ffffff' fill-opacity='0.12'/%3E%3Crect x='-4' y='0' width='568' height='3' fill='%230a0812'/%3E%3Crect x='-4' y='77' width='568' height='3' fill='%230a0812'/%3E%3Crect x='-4' y='3' width='568' height='1.2' fill='%23b9c8e2' fill-opacity='0.30'/%3E%3Crect x='-4' y='75.8' width='568' height='1.2' fill='%23b9c8e2' fill-opacity='0.18'/%3E%3Cpolygon points='-40,80 140,-4 250,-4 70,80' fill='%23ffffff' fill-opacity='0.055'/%3E%3Cpolygon points='300,80 470,-4 508,-4 338,80' fill='%23ffffff' fill-opacity='0.035'/%3E%3C/svg%3E");
 }
 
 /* ============ 层 0：石室 ============ */
@@ -69,7 +77,8 @@ html[data-theme='stained-glass'] .sv-body {
    position 只在桌面态声明：移动端 .sv-sidebar 是 position:fixed 的覆盖式抽屉
    （mobile.css:81），而本文件带 html[data-theme] 前缀特异性更高，若无条件写
    position:relative 会把抽屉拽回文档流、占掉 320px，主区被挤到 55px 宽并竖向断字
-   （2026-11-02 实测 390×844：main.width=55）。见文件末的移动端复位块。 */
+   （2026-11-02 实测 390×844：main.width=55）。因为只写在媒体查询里，
+   移动端自然不继承，无需额外的复位块。 */
 @media (min-width: 768px) {
   html[data-theme='stained-glass'] .sv-sidebar { position: relative; }
 }
@@ -163,7 +172,6 @@ html[data-theme='stained-glass'] .sv-main::after {
 }
 
 /* ============ 层 2：石梁与窗台 ============ */
-html[data-theme='stained-glass'] .sv-topbar,
 html[data-theme='stained-glass'] .sv-side-head {
   background-color: #08060f;
   background-image: linear-gradient(180deg, rgba(255, 240, 214, 0.075) 0%, transparent 42%);
@@ -172,10 +180,91 @@ html[data-theme='stained-glass'] .sv-side-head {
   border-bottom: 1px solid rgba(150, 120, 72, 0.38);
   box-shadow: inset 0 -1px 0 rgba(150, 120, 72, 0.16), 0 1px 0 rgba(0, 0, 0, 0.6);
 }
+
+/* 顶栏 = 横向拼片窗楣：整条石梁上嵌一排彩窗，是界面里「多块玻璃拼接」的主识别点。
+   ---------------------------------------------------------------------------
+   这里四条都是实测调出来的，改之前先读：
+
+   1) 用 **multiply 染色**，不是「盖半透明暗罩」。
+      拼片本身是「浅象牙底 + 近黑铅条」，直接铺在近黑石梁上会读作灰白纸片；
+      盖暗罩只能把它压成一片均匀的灰。与深钴蓝相乘后，浅底变成「透光的暗蓝玻璃」，
+      铅条仍是黑 —— 这才是暗室里看彩窗的样子。
+      实测三档：纯 0.50 暗罩 = 灰白纸片；multiply + #1d3a70 = 玻璃发乌；
+      multiply + #4a68a8 = ✓ 暗蓝透光、铅条清晰。
+
+   2) 必须有**石棂网格**，否则读作迷彩/碎玻璃。
+      第一版用的是几十个完全随机的多边形，观感是「碎玻璃拼贴」。真实彩窗的
+      规整感来自刚性石棂：等距竖棂(lancet) + 横档(saddle bar) 把窗切成规则的
+      格子，格内才是小片玻璃。所以 --kg-panes-band 自己画了竖棂与上下窗框，
+      不靠 CSS 叠网格（叠网格会与菱形斜线打架）。
+
+   3) 横向条带要**单独设计**，不能拿竖窗图去铺。
+      顶栏只有 68px 高，拿 820×560 的竖窗图做极端缩放取样，采到的永远是某一块
+      局部，比例和亮度都不对。--kg-panes-band 是按「一档高 + 两个光窗宽」的
+      周期单独生成的，用 repeat-x 平铺，尺寸 auto 100% 自适应。
+
+   4) 透明感与光泽靠**分层叠加**，不靠加白：
+      - 玻璃片本身 fill-opacity 0.6~0.7，底下的石室色能透上来（这是"透"的来源）
+      - 每片内部有沿斜边的高光 + 右下暗部（厚度反光）
+      - 条带里嵌了两条贯穿的斜向反光（窗面整体镜面反射）
+      - CSS 再补三层：顶部天光、底部内阴影、顶/底 1px 亮边 */
+html[data-theme='stained-glass'] .sv-topbar {
+  background-color: #08060f;
+  background-image:
+    /* 顶部天光：窗楣上缘被石梁反下来的光 */
+    linear-gradient(180deg, rgba(255, 248, 232, 0.10) 0%, rgba(255, 248, 232, 0.02) 38%, transparent 60%),
+    /* 染色层 */
+    linear-gradient(#4a68a8, #4a68a8),
+    /* 拼接玻璃本体 */
+    var(--kg-panes-band);
+  background-size: 100% 100%, 100% 100%, auto 100%;
+  background-position: center, center, center;
+  background-repeat: no-repeat, no-repeat, repeat-x;
+  background-blend-mode: normal, multiply, normal;
+  border-bottom: 2px solid #07060c;
+  box-shadow:
+    /* 玻璃上缘的一道镜面亮边 + 下缘被窗台压住的暗边 */
+    inset 0 1px 0 rgba(255, 252, 242, 0.42),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.55),
+    inset 0 -8px 14px rgba(0, 0, 0, 0.34),
+    0 1px 0 rgba(0, 0, 0, 0.6);
+}
+
+/* 窗楣上的控件必须从拼片上「浮起来」。
+   第 ⑦ 轮原型实测：拼片满铺后 AGENT / CTX / 本轮 落在高亮块上，控件边缘与背景
+   分不清。做法是给每个控件垫一层近黑玻璃（0.72）——比提高整条覆盖层浓度更好，
+   因为后者会把彩色感一起抹掉。 */
+html[data-theme='stained-glass'] .sv-topbar .sv-topbar-group,
+html[data-theme='stained-glass'] .sv-topbar .sv-topbar-stats,
+html[data-theme='stained-glass'] .sv-topbar .sv-icon-btn.sv-topbar-more-btn {
+  background-color: rgba(9, 14, 32, 0.72);
+  border: 1px solid rgba(200, 168, 106, 0.28);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 246, 226, 0.12),
+    0 1px 3px rgba(0, 0, 0, 0.45);
+}
+html[data-theme='stained-glass'] .sv-topbar .sv-topbar-group {
+  padding: 3px 8px;
+}
+/* 统计格原本是 1×4 发丝格，垫底后要维持格线可见 */
+html[data-theme='stained-glass'] .sv-topbar .sv-topbar-stat {
+  border-right-color: rgba(200, 168, 106, 0.24);
+}
+html[data-theme='stained-glass'] .sv-topbar .sv-topbar-stat dt {
+  color: rgba(240, 232, 214, 0.62);
+}
+html[data-theme='stained-glass'] .sv-topbar .sv-topbar-stat dd {
+  color: #fbf4e2;
+}
+
 html[data-theme='stained-glass'] .sv-topbar-title,
 html[data-theme='stained-glass'] .sv-brand h1 {
   color: #f2e9d4;
   letter-spacing: 0.10em;
+}
+/* 顶栏标题直接压在拼片上，加一层暗光晕保证可读；身份区不加底板，免得抢窗楣 */
+html[data-theme='stained-glass'] .sv-topbar .sv-topbar-identity {
+  text-shadow: 0 1px 3px rgba(4, 6, 14, 0.95), 0 0 10px rgba(4, 6, 14, 0.75);
 }
 html[data-theme='stained-glass'] .sv-topbar-sub,
 html[data-theme='stained-glass'] .sv-conn { color: rgba(226, 214, 190, 0.50); }
@@ -216,15 +305,14 @@ html[data-theme='stained-glass'] .sv-side-head * {
 }
 html[data-theme='stained-glass'] .sv-topbar .sv-topbar-sub,
 html[data-theme='stained-glass'] .sv-side-head .sv-conn { color: rgba(240, 232, 214, 0.62); }
-/* token 卡片：改成「暗玻璃内嵌格」，数字用暖白、标签用半透明暖白 */
-html[data-theme='stained-glass'] .sv-topbar .sv-token-cell,
+/* token 卡片：改成「暗玻璃内嵌格」，数字用暖白、标签用半透明暖白。
+   只在侧栏头出现——顶栏用的是 .sv-topbar-stat，历史那条 .sv-topbar .sv-token-cell
+   是死选择器（该类只在 SidebarTop 里），已于 GLASS-PANE-1 删除。 */
 html[data-theme='stained-glass'] .sv-side-head .sv-token-cell {
   background-color: rgba(255, 248, 232, 0.06);
   border-color: rgba(200, 168, 106, 0.30);
 }
-html[data-theme='stained-glass'] .sv-topbar .sv-token-cell b,
 html[data-theme='stained-glass'] .sv-side-head .sv-token-cell b { color: #fbf4e2; }
-html[data-theme='stained-glass'] .sv-topbar .sv-token-cell span,
 html[data-theme='stained-glass'] .sv-side-head .sv-token-cell span { color: rgba(240, 232, 214, 0.66); }
 /* 顶栏开关标签与 toggle 轨道 */
 html[data-theme='stained-glass'] .sv-topbar .toggle-label { color: rgba(240, 232, 214, 0.82); }
@@ -250,6 +338,65 @@ html[data-theme='stained-glass'] .sv-topbar option {
   background-color: #f8f2e2;
   color: var(--kg-ink);
 }
+/* 窄屏溢出菜单：基础样式给的是白底(--sv-white #fdf8ec)，而上面那条 `.sv-topbar *`
+   已经把文字刷成暖白 #f0e8d6 —— 落在一起只有 1.15:1。这是 GLASS-PANE-1 修掉的
+   真实缺陷（<1280px 时统计与渲染开关全收进这个常驻入口，风险面不小）。
+   改成浮起的暗玻璃卡片，与石梁同族。 */
+html[data-theme='stained-glass'] .sv-topbar .sv-topbar-more-menu {
+  background-color: rgba(14, 11, 20, 0.98);
+  border: 1px solid rgba(150, 120, 72, 0.42);
+  box-shadow:
+    0 10px 30px rgba(0, 0, 0, 0.62),
+    inset 0 1px 0 rgba(255, 246, 226, 0.10);
+}
+html[data-theme='stained-glass'] .sv-topbar .sv-topbar-more-title {
+  color: rgba(240, 232, 214, 0.58);
+  border-bottom-color: rgba(200, 168, 106, 0.24);
+}
+html[data-theme='stained-glass'] .sv-topbar .sv-topbar-more-item {
+  color: #f0e8d6;
+}
+html[data-theme='stained-glass'] .sv-topbar .sv-topbar-more-item b {
+  color: var(--kg-gold-lit);
+}
+html[data-theme='stained-glass'] .sv-topbar .sv-topbar-more-item:hover {
+  background: rgba(240, 232, 214, 0.10);
+}
+/* 菜单里的统计格是 2 列网格，垫底会变成「盒中盒」，这里回退成裸格 */
+html[data-theme='stained-glass'] .sv-topbar .sv-topbar-stats-menu {
+  background-color: transparent;
+  border: 0;
+  box-shadow: none;
+}
+html[data-theme='stained-glass'] .sv-topbar .sv-topbar-stats-menu .sv-topbar-stat {
+  border-color: rgba(200, 168, 106, 0.20);
+}
+/* 提示条（渲染引导 / 数据目录分叉）：基础样式是「浅蓝底 + 深蓝字」，
+   在默认纸面主题下成立；但彩窗主题的层 0 是近黑石室，而提示条底色只有
+   0.06 的蓝，合成后仍是近黑 —— 深蓝字压上去只有 1.87:1（GLASS-PANE-1 实测）。
+   改成「暗玻璃底 + 暖白金线」，与石梁同族。 */
+html[data-theme='stained-glass'] .sv-render-hint {
+  color: #f0e8d6;
+  background-color: rgba(9, 14, 32, 0.72);
+  border-bottom-color: var(--kg-gold);
+}
+html[data-theme='stained-glass'] .sv-render-hint .sv-render-hint-text { color: #f0e8d6; }
+html[data-theme='stained-glass'] .sv-render-hint .sv-btn.ghost {
+  color: #efe7d5;
+  border-color: rgba(240, 232, 214, 0.36);
+}
+html[data-theme='stained-glass'] .sv-render-hint .sv-icon-btn {
+  /* 基础样式给的是白底(--sv-white)，配上面翻成的暖白字只有 1.16:1。
+     提示条现在是暗玻璃，关闭键也必须是透明的暗底。 */
+  color: #f0e8d6;
+  background: transparent;
+  border-color: rgba(240, 232, 214, 0.36);
+}
+html[data-theme='stained-glass'] .sv-render-hint .sv-icon-btn:hover {
+  background: rgba(240, 232, 214, 0.14);
+  border-color: var(--kg-gold);
+}
+
 /* 移动端抽屉的关闭键也在侧栏头里（暗底），必须同色系；
    旧版有这条、重写时漏掉，2026-11-02 移动端实测 1.15:1。 */
 html[data-theme='stained-glass'] .sv-side-head .sv-sidebar-close,
@@ -366,23 +513,85 @@ html[data-theme='stained-glass'] .sv-task-start-kicker .sq {
   transform: rotate(45deg);
   margin-right: 10px;
 }
-/* 两栏构图：拉宽以消除右侧空洞，右栏加竖向石棂 */
+/* 两栏构图：拉宽以消除右侧空洞。
+   ⚠ 列定义必须写在 .sv-start-grid / .sv-task-start-grid 上——.sv-start 本身不是
+   grid 容器，2026-11-02 的写法把 grid-template-columns 与 gap 打在 .sv-start 上，
+   4 处声明全部空转（GLASS-PANE-1 修）。
+   间距与左右边距都放大一档：内容贴着画布中缝时，两侧的留白就读作「挤在一起」；
+   拉开之后，留白是内容周围的呼吸区，不是边角废料。 */
 html[data-theme='stained-glass'] .sv-start,
 html[data-theme='stained-glass'] .sv-task-start {
   max-width: none;
-  grid-template-columns: minmax(0, 1.45fr) minmax(240px, 1fr);
-  gap: 72px;
-  align-items: start;
   margin-top: clamp(16px, 3.2vh, 40px);
   border-top-color: rgba(40, 32, 26, 0.20);
   box-shadow: none;
 }
+html[data-theme='stained-glass'] .sv-start-grid,
+html[data-theme='stained-glass'] .sv-task-start-grid {
+  grid-template-columns: minmax(0, 1.38fr) minmax(250px, 1fr);
+  gap: 108px;
+  align-items: start;
+}
 html[data-theme='stained-glass'] .sv-start-copy { padding-top: 8px; min-width: 0; }
+
+/* 留白治理：内容只占画布上半部、下方空一大片，是「没做完」的观感。
+   解法不是塞装饰条，而是让版式**纵向撑满、把内容按阅读节奏分散**：
+   说明区保持紧凑（标题→描述→步骤是一组），只在「步骤」与「模式/按钮」
+   之间、以及右栏「清单」与「页脚提示」之间拉开距离。
+   注意不能整块用 space-between——那会把标题和描述之间也撑出上百像素的缝，
+   读起来像两段无关的内容（第一版实测就是这样）。 */
+html[data-theme='stained-glass'] .sv-task-start,
+html[data-theme='stained-glass'] .sv-task-start-grid {
+  height: 100%;
+}
+html[data-theme='stained-glass'] .sv-task-start-grid { align-items: stretch; }
+html[data-theme='stained-glass'] .sv-task-start-copy {
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 8px;
+}
+/* 说明簇（kicker/title/desc）作为一组固定在顶部；步骤表之后留白再展开 */
+html[data-theme='stained-glass'] .sv-task-start-copy > .sv-task-start-steps {
+  margin-top: clamp(24px, 4.5vh, 56px);
+}
+html[data-theme='stained-glass'] .sv-task-start-copy > .sv-task-start-modes {
+  margin-top: auto;
+}
+html[data-theme='stained-glass'] .sv-task-start-copy > .sv-task-start-actions {
+  margin-top: clamp(16px, 2.4vh, 28px);
+}
+/* 右栏：清单与页脚提示分到两端 */
+html[data-theme='stained-glass'] .sv-task-start-spec {
+  display: flex;
+  flex-direction: column;
+}
+html[data-theme='stained-glass'] .sv-task-start-spec-foot {
+  margin-top: auto;
+  padding-bottom: 8px;
+}
+/* 聊天空态：字段表与按钮之间留白，标题簇保持紧凑 */
+html[data-theme='stained-glass'] .sv-start-copy {
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 8px;
+}
+html[data-theme='stained-glass'] .sv-start-copy > .sv-start-meta {
+  margin-top: auto;
+}
+html[data-theme='stained-glass'] .sv-start-copy > .sv-start-actions {
+  margin-top: clamp(16px, 2.4vh, 28px);
+}
+html[data-theme='stained-glass'] .sv-start {
+  min-height: min(100%, 640px);
+}
 html[data-theme='stained-glass'] .sv-start-cast {
   border-left: 1px solid rgba(120, 100, 72, 0.22);
   padding-left: 40px;
   margin-top: -4px;
 }
+/* 空态右栏不再顶一条拼片装饰带：用户裁定「装饰条太丑」。
+   拼片只保留在确实承担结构语义的地方（顶栏窗楣、选中态、主按钮）。
+   右栏回到纯排版，靠玫瑰窗承担焦点。 */
 /* 空态不再有玻璃芯 */
 html[data-theme='stained-glass'] .sv-start-copy,
 html[data-theme='stained-glass'] .sv-start-cast,
@@ -466,36 +675,68 @@ html[data-theme='stained-glass'] .sv-char-item:not(.active) {
 html[data-theme='stained-glass'] .sv-char-item:not(.active):hover {
   background-color: rgba(255, 252, 244, 0.55);
 }
+/* 选中态 = 嵌着拼片的宝石玻璃。
+   同样用 multiply 把「浅底 + 黑铅条」的拼片染成深蓝玻璃，再叠柔光垫与光泽：
+   - 顶部天光：模拟光从窗顶斜射进来
+   - 底部内阴影：玻璃下缘被石框压暗，制造厚度
+   - inset 亮边：玻璃边缘的一圈镜面反光
+   拼片 SVG 自带不透明底，若不先染色就用，深底会被翻成浅底、白字掉到 1.x:1。 */
 html[data-theme='stained-glass'] .sv-char-item.active {
   background-color: var(--kg-sapphire);
   background-image:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.13), transparent 44%),
-    radial-gradient(120% 160% at 50% -40%, rgba(150, 190, 255, 0.26), transparent 60%);
-  background-size: 100% 100%, 100% 100%;
+    /* 顶部天光（窗顶斜射） */
+    linear-gradient(180deg, rgba(255, 250, 236, 0.18) 0%, transparent 46%),
+    /* 左下柔光垫：保证兜底可读性 */
+    radial-gradient(ellipse 90% 120% at 40% 50%, rgba(10, 22, 50, 0.42), rgba(10, 22, 50, 0.20) 70%),
+    /* 染色层 */
+    linear-gradient(#4a68a8, #4a68a8),
+    /* 宝石内部的拼片 */
+    var(--kg-panes-band);
+  background-size: 100% 100%, 100% 100%, 100% 100%, auto 150%;
+  background-position: center, center, center, 78% 50%;
+  background-repeat: no-repeat, no-repeat, no-repeat, repeat-x;
+  background-blend-mode: normal, normal, multiply, normal;
   border-color: var(--kg-lead);
   box-shadow:
     0 2px 10px rgba(0, 0, 0, 0.28),
-    inset 0 0 0 1px rgba(200, 162, 100, 0.32),
-    inset 0 1px 0 rgba(255, 255, 255, 0.16);
+    /* 上缘镜面亮边 + 下缘压暗，玻璃厚度 */
+    inset 0 1px 0 rgba(255, 252, 242, 0.40),
+    inset 0 -10px 16px rgba(0, 0, 0, 0.34),
+    inset 0 0 0 1px rgba(200, 162, 100, 0.32);
 }
-html[data-theme='stained-glass'] .sv-char-item.active .sv-char-name { color: #f8f3e5; }
-html[data-theme='stained-glass'] .sv-char-item.active .sv-char-desc { color: rgba(248, 243, 229, 0.66); }
+/* 拼片上还要再加一层字晕：原型 5 实测 .sv-char-name 被拼片高亮块压过 */
+html[data-theme='stained-glass'] .sv-char-item.active .sv-char-name {
+  color: #f8f3e5;
+  text-shadow: 0 1px 3px rgba(4, 8, 20, 0.85);
+}
+html[data-theme='stained-glass'] .sv-char-item.active .sv-char-desc {
+  color: rgba(248, 243, 229, 0.72);
+  text-shadow: 0 1px 2px rgba(4, 8, 20, 0.78);
+}
 
-/* ③ 主按钮 */
+/* ③ 主按钮 = 酒红宝石玻璃（同一套四层结构，染色层改用亮酒红以保住底色） */
 html[data-theme='stained-glass'] .sv-btn.primary:not(:disabled),
 html[data-theme='stained-glass'] .sv-btn-send:not(:disabled) {
-  background-color: #741a2c;
+  background-color: var(--kg-ruby);
   background-image:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.17), transparent 46%),
-    radial-gradient(120% 140% at 50% -30%, rgba(255, 185, 165, 0.22), transparent 62%);
-  background-size: 100% 100%, 100% 100%;
+    linear-gradient(180deg, rgba(255, 250, 236, 0.20) 0%, transparent 48%),
+    radial-gradient(ellipse 90% 130% at 42% 46%, rgba(40, 6, 14, 0.40), rgba(40, 6, 14, 0.18) 72%),
+    linear-gradient(#a8394f, #a8394f),
+    var(--kg-panes-band);
+  background-size: 100% 100%, 100% 100%, 100% 100%, auto 170%;
+  background-position: center, center, center, 72% 50%;
+  background-repeat: no-repeat, no-repeat, no-repeat, repeat-x;
+  background-blend-mode: normal, normal, multiply, normal;
   border-color: var(--kg-lead);
   color: #fdf7e8;
   font-family: "Noto Serif SC", serif;
   font-weight: 600;
   letter-spacing: 0.06em;
+  text-shadow: 0 1px 3px rgba(20, 3, 8, 0.75);
   box-shadow:
     0 2px 10px rgba(0, 0, 0, 0.32),
+    inset 0 1px 0 rgba(255, 252, 242, 0.38),
+    inset 0 -8px 12px rgba(0, 0, 0, 0.30),
     inset 0 0 0 1px rgba(206, 166, 100, 0.40);
 }
 
@@ -535,8 +776,9 @@ html[data-theme='stained-glass'] .sv-start::before {
   transform: none;
 }
 html[data-theme='stained-glass'] .sv-task-start::before { display: none; }
-html[data-theme='stained-glass'] .sv-start::after,
-html[data-theme='stained-glass'] .sv-task-start::after { display: none; }
+html[data-theme='stained-glass'] .sv-start::after { display: none; }
+
+
 @media (max-width: 1099px) {
   html[data-theme='stained-glass'] .sv-start::before { display: none; }
 }
@@ -652,9 +894,9 @@ html[data-theme='stained-glass'] body::after { display: none; }
   /* 令牌是行内样式（--bw:3px），媒体查询改不动，这里直接约束边框宽度 */
   html[data-theme='stained-glass'] .sv-mode,
   html[data-theme='stained-glass'] .sv-auth-toggle { border-width: 2px; }
-  /* 窄屏收窄两栏 → 单栏，避免标题挤压 */
-  html[data-theme='stained-glass'] .sv-start,
-  html[data-theme='stained-glass'] .sv-task-start {
+  /* 窄屏收窄两栏 → 单栏，避免标题挤压（同样必须打在真正的 grid 容器上） */
+  html[data-theme='stained-glass'] .sv-start-grid,
+  html[data-theme='stained-glass'] .sv-task-start-grid {
     grid-template-columns: minmax(0, 1fr);
     gap: 36px;
   }
@@ -664,6 +906,11 @@ html[data-theme='stained-glass'] body::after { display: none; }
     padding-left: 0;
     padding-top: 22px;
     margin-top: 0;
+  }
+  /* 单栏时装饰带变成列表上方的整宽横带，高度收一档免得把内容推太低 */
+  html[data-theme='stained-glass'] .sv-start-cast::before {
+    height: 44px;
+    margin-bottom: 14px;
   }
 }
 
