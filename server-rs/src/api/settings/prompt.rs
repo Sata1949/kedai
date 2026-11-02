@@ -11,14 +11,52 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 
-/// GET /api/settings/agent-prompt:读取 DATA_DIR 中的运行时主 Agent 提示词。
-/// 新文件缺失时由共享文件服务兼容读取/迁移旧 AGENTS_RUNTIME.md。
-pub async fn get_agent_prompt(State(state): State<Arc<AppState>>) -> Response {
-    let path = state.runtime_prompt.path().display().to_string();
-    match state.runtime_prompt.read() {
-        Ok(content) => {
-            Json(json!({ "ok": true, "path": path, "content": content })).into_response()
-        }
+use super::ModeQuery;
+
+/// 按模式取运行时主提示词文件服务(RTSPLIT-1)。
+///
+/// 两模式各一份文件:`AGENTS_RUNTIME.md`(角色扮演,创作向) /
+/// `AGENTS_RUNTIME.task.md`(任务,缺省为空 = 不注入)。取错文件就等于把创作指令
+/// 塞进任务执行,故读写与预览三处统一走本函数,不在调用点各写一次 match。
+fn runtime_prompt_for(
+    state: &AppState,
+    mode: AppMode,
+) -> &std::sync::Arc<crate::services::runtime_prompt_service::RuntimePromptService> {
+    match mode {
+        AppMode::Task => &state.runtime_prompt_task,
+        AppMode::Roleplay => &state.runtime_prompt,
+    }
+}
+
+fn mode_wire(mode: AppMode) -> &'static str {
+    match mode {
+        AppMode::Task => "task",
+        AppMode::Roleplay => "roleplay",
+    }
+}
+
+/// GET /api/settings/agent-prompt?mode=roleplay|task:读取对应模式的运行时主 Agent 提示词。
+/// 新文件缺失时由共享文件服务兼容读取/迁移旧 AGENTS_RUNTIME.md(仅角色扮演侧)。
+///
+/// 用 `read_optional` 而非 `read`:**文件不存在不是错误**。任务侧刻意没有内置默认
+/// (`new_task` 的 `builtin_default = false`),首次打开设置页时该文件必然还不存在——
+/// 若走 `read` 就会回 404,前端把它显示成「读取失败」,而这其实是「还没配置」。
+/// 角色扮演侧行为不变:文件缺失会先回退旧文件迁移、再回退内置默认,故一般不会走到 None。
+pub async fn get_agent_prompt(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ModeQuery>,
+) -> Response {
+    let mode = query.app_mode();
+    let service = runtime_prompt_for(&state, mode);
+    let path = service.path().display().to_string();
+    match service.read_optional() {
+        Ok(content) => Json(json!({
+            "ok": true,
+            "path": path,
+            "mode": mode_wire(mode),
+            "content": content.unwrap_or_default(),
+        }))
+        .into_response(),
         Err(e) => not_found(e),
     }
 }
@@ -53,6 +91,10 @@ struct PromptPreviewLayer {
 #[derive(Serialize)]
 pub struct PromptPreviewResponse {
     ok: bool,
+    /// 本份预览属于哪个模式(RTSPLIT-2):前端在异步响应回来时据此判断
+    /// 「这份结果是不是我已经切走的那个模式的」,不匹配就丢弃并重拉。
+    /// 缺这个字段时前端无从自证,切模式瞬间的旧响应会静默覆盖新模式的预览。
+    mode: &'static str,
     note: &'static str,
     layers: Vec<PromptPreviewLayer>,
     warnings: Vec<&'static str>,
@@ -100,7 +142,13 @@ pub async fn prompt_preview(
     let mut warnings: Vec<&'static str> = Vec::new();
     // 角色卡里是否有「会进 system 的常驻条目」:None = 本次预览没带角色卡上下文(无从判定)。
     let mut constant_system_entry: Option<bool> = None;
-    match state.runtime_prompt.read_optional() {
+    // 模式解析提前到取运行时提示词之前(RTSPLIT-1):两份文件,取错就等于把创作指令
+    // 塞进任务执行。缺省/未知值按 roleplay(旧客户端零变化)。
+    let mode = match query.mode.as_deref() {
+        Some("task") => AppMode::Task,
+        _ => AppMode::Roleplay,
+    };
+    match runtime_prompt_for(&state, mode).read_optional() {
         Ok(Some(runtime)) => {
             push_preview_layer(&mut layers, "runtime_prompt", "system", 5, runtime)
         }
@@ -109,12 +157,9 @@ pub async fn prompt_preview(
     }
 
     // 预览按模式走 for_mode 合并值(docs/契约-协议与配置.md 第五节):
-    // 缺省/未知值按 roleplay(旧客户端零变化);task 为覆盖层合并后的有效设置,
-    // agent_system_prompt 经类型级隔离转换(None 已注入内置任务默认词)。
-    let mode = match query.mode.as_deref() {
-        Some("task") => AppMode::Task,
-        _ => AppMode::Roleplay,
-    };
+    // task 为覆盖层合并后的有效设置,agent_system_prompt 经类型级隔离转换
+    // (None 已注入内置任务默认词)。
+    let settings = state.settings_snapshot().for_mode(mode);
     // 用户设定快照(USERPERSONA-1):角色扮演专属;task 预览不 push。
     let user_persona = state
         .user_persona
@@ -123,8 +168,6 @@ pub async fn prompt_preview(
         .get()
         .clone();
     let user_persona_block = user_persona.block();
-    // 设置快照:不留锁跨 await(for_mode 为纯计算,锁在 snapshot 内即释放)
-    let settings = state.settings_snapshot().for_mode(mode);
     // 文学能力包(LIT-3):两段值取自设置层方法(开关判定 + 文本单一出处)。此处先取好——
     // 下方若干 push 会按值移动 settings 的字段(如 reflect_advice_prompt),之后再借用会编译错。
     let literary_tail = settings.literary_system_tail();
@@ -496,6 +539,7 @@ pub async fn prompt_preview(
 
     Json(PromptPreviewResponse {
         ok: true,
+        mode: mode_wire(mode),
         note: "历史仅显示角色、长度与哈希；预览不包含聊天正文或 API Key。模板与注入层按原文展示，宏在发送时展开；步骤指令与工具指南在运行时追加，不在预览层中展示。",
         layers,
         warnings,
@@ -503,14 +547,17 @@ pub async fn prompt_preview(
     .into_response()
 }
 
-/// PUT /api/settings/agent-prompt:原子保存主 Agent 提示词到 DATA_DIR。
+/// PUT /api/settings/agent-prompt?mode=roleplay|task:原子保存对应模式的运行时主 Agent 提示词。
 pub async fn save_agent_prompt(
     State(state): State<Arc<AppState>>,
+    Query(query): Query<ModeQuery>,
     JsonBody(body): JsonBody<SaveAgentPromptBody>,
 ) -> Response {
-    let path = state.runtime_prompt.path().display().to_string();
-    match state.runtime_prompt.write(&body.content) {
-        Ok(_) => Json(json!({ "ok": true, "path": path })).into_response(),
+    let mode = query.app_mode();
+    let service = runtime_prompt_for(&state, mode);
+    let path = service.path().display().to_string();
+    match service.write(&body.content) {
+        Ok(_) => Json(json!({ "ok": true, "path": path, "mode": mode_wire(mode) })).into_response(),
         Err(e) => validation(e),
     }
 }

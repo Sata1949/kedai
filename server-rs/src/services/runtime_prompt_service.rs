@@ -5,6 +5,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 pub const RUNTIME_PROMPT_FILE: &str = "AGENTS_RUNTIME.md";
+/// 任务模式的运行时主提示词文件(RTSPLIT-1,2026-11-02)。
+///
+/// **为何要拆两份**:角色扮演那份开篇即「以角色『{{char}}』的扮演者与文学创作者身份」,
+/// 任务模式注入它会直接污染任务执行;而两模式共用一个文本框又让「切模式提示词不变」成为
+/// 结构性事实(设置页里它与按模式独立存储的「系统提示词」紧邻,用户无从分辨)。
+pub const RUNTIME_PROMPT_TASK_FILE: &str = "AGENTS_RUNTIME.task.md";
 pub const MAX_RUNTIME_PROMPT_BYTES: u64 = 512 * 1024;
 
 /// 主 Agent 运行时提示词的内置默认(新装/首次运行、数据目录尚无该文件时兜底)。
@@ -157,11 +163,38 @@ impl RuntimePromptService {
         }
     }
 
+    /// 任务模式专用服务(RTSPLIT-1):`DATA_DIR/AGENTS_RUNTIME.task.md`。
+    ///
+    /// 两处刻意的差异(都不是疏忽):
+    /// - **不给 `legacy_path`**:旧文件 `AGENTS_RUNTIME.md` 是角色扮演的创作向文本,
+    ///   迁到任务侧等于把「以角色扮演者身份创作小说」塞进任务执行 system。
+    /// - **`builtin_default = false`**:任务侧缺省**零注入**。`EXECUTOR_PROMPT` 与任务缺省
+    ///   `agent_system_prompt` 已经承担主提示词职责,再叠一份内置默认就是第三份重复指令
+    ///   (仓内有过提示词冲突审计的历史)。用户填了才生效,且存量任务的实际 system 逐字节不变。
+    pub fn new_task(data_dir: PathBuf) -> Self {
+        Self {
+            path: data_dir.join(RUNTIME_PROMPT_TASK_FILE),
+            legacy_path: None,
+            builtin_default: false,
+            cache: Mutex::new(None),
+        }
+    }
+
     /// 显式指定提示词目录(关闭内置默认回退)。来源:`KEDAI_RUNTIME_PROMPT_DIR`。
     pub fn with_dir(dir: PathBuf, legacy_path: Option<PathBuf>) -> Self {
         Self {
             path: dir.join(RUNTIME_PROMPT_FILE),
             legacy_path,
+            builtin_default: false,
+            cache: Mutex::new(None),
+        }
+    }
+
+    /// 任务模式版 `with_dir`(测试隔离用;同样关闭内置默认——任务侧本就无默认)。
+    pub fn with_dir_task(dir: PathBuf) -> Self {
+        Self {
+            path: dir.join(RUNTIME_PROMPT_TASK_FILE),
+            legacy_path: None,
             builtin_default: false,
             cache: Mutex::new(None),
         }
@@ -749,5 +782,87 @@ mod tests {
             "重复读不应改变缓存戳"
         );
         assert!(first.is_some(), "读过后应已填充缓存");
+    }
+
+    // ===== 任务模式独立文件(RTSPLIT-1,2026-11-02)=====
+
+    /// 任务服务读的是自己的文件,且**没有内置默认**——缺文件即「不注入」。
+    /// 这条是「任务侧零行为变化」的地基:存量数据目录没有该文件,装配结果必须逐字节不变。
+    #[test]
+    fn task_service_uses_separate_file_and_defaults_to_empty() {
+        let root = dir("task-separate");
+        let data = root.path().to_path_buf();
+        let roleplay = RuntimePromptService::new(data.clone(), None);
+        let task = RuntimePromptService::new_task(data.clone());
+
+        assert_ne!(roleplay.path(), task.path(), "两份文件路径必须不同");
+        assert!(
+            task.path().ends_with(RUNTIME_PROMPT_TASK_FILE),
+            "任务服务应指向 {RUNTIME_PROMPT_TASK_FILE}:{}",
+            task.path().display()
+        );
+        assert_eq!(
+            task.read_optional().unwrap(),
+            None,
+            "任务侧缺省必须零注入(不得退回角色扮演内置默认)"
+        );
+        assert!(
+            roleplay.read_optional().unwrap().is_some(),
+            "角色扮演侧仍应有内置默认"
+        );
+    }
+
+    /// 任务侧绝不迁移角色扮演的旧文件:旧 `AGENTS_RUNTIME.md` 是创作向文本,
+    /// 复制过去等于把「以角色扮演者身份创作小说」塞进任务执行 system。
+    #[test]
+    fn task_service_never_migrates_roleplay_legacy_file() {
+        let root = dir("task-no-migrate");
+        let data = root.join("data");
+        fs::create_dir_all(&data).unwrap();
+        let legacy = root.join(RUNTIME_PROMPT_FILE);
+        fs::write(&legacy, "角色扮演的主提示词").unwrap();
+
+        // 即便把角色扮演那份旧文件显式放在磁盘上,任务侧也不得读到它
+        let task = RuntimePromptService::new_task(data.clone());
+        assert_eq!(
+            task.read_optional().unwrap(),
+            None,
+            "任务侧不得继承创作向文本"
+        );
+        assert!(
+            !data.join(RUNTIME_PROMPT_TASK_FILE).exists(),
+            "任务侧读操作不应在数据目录落下任何文件"
+        );
+    }
+
+    /// 两份文件互不影响:各写各的、各读各的
+    #[test]
+    fn task_and_roleplay_files_are_independent() {
+        let root = dir("task-independent");
+        let data = root.path().to_path_buf();
+        let roleplay = RuntimePromptService::new(data.clone(), None);
+        let task = RuntimePromptService::new_task(data.clone());
+
+        roleplay.write("角色扮演文本").unwrap();
+        task.write("任务文本").unwrap();
+
+        assert_eq!(roleplay.read().unwrap(), "角色扮演文本");
+        assert_eq!(task.read().unwrap(), "任务文本");
+
+        // 反向覆盖也不串
+        task.write("任务文本第二版").unwrap();
+        assert_eq!(roleplay.read().unwrap(), "角色扮演文本");
+        assert_eq!(task.read().unwrap(), "任务文本第二版");
+    }
+
+    /// 任务侧写入同样走主动失效(不能依赖 mtime:Windows 时间戳约 15.6ms 粒度)
+    #[test]
+    fn task_service_write_roundtrip_and_cache_invalidation() {
+        let root = dir("task-cache");
+        let task = RuntimePromptService::new_task(root.path().to_path_buf());
+        task.write("aaaa").unwrap();
+        assert_eq!(task.read().unwrap(), "aaaa");
+        task.write("bbbb").unwrap();
+        assert_eq!(task.read().unwrap(), "bbbb", "任务侧写入后必须立即读到新值");
     }
 }

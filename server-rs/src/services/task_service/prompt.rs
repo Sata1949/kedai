@@ -101,8 +101,38 @@ impl TaskService {
         } else {
             self.character_for(character_id)
         };
+        // 世界书过滤口径与身份来源一致:执行者库路径只取全局(传 None,
+        // 执行者与角色卡无关联关系),角色卡路径按该角色过滤(旧语义:原样传 character_id,
+        // 即使该角色已被删除也与改造前一致);无身份时也是全局。
+        // 提前到此是因为运行时主提示词与 Agent 提示词的占位符渲染都要用同一份文本。
+        let world_char_id = if executor.is_some() {
+            None
+        } else {
+            character_id
+        };
+        let world = self.world_context(world_char_id);
 
-        let mut sys = String::from(EXECUTOR_PROMPT);
+        let mut sys = String::new();
+        // 运行时主提示词(RTSPLIT-1):任务模式独占 `DATA_DIR/AGENTS_RUNTIME.task.md`。
+        // 放在最前(与角色扮演链「前缀拼到 system 开头」同位),因为它是最高层的模式级约定;
+        // 缺省为空 → 存量任务实际 system 逐字节不变。占位符与 Agent 提示词同款渲染
+        // ({{char}}/{{user}}/{{lastUserMessage}}),外部来源一律 untrusted 包裹。
+        let runtime_prompt = self
+            .runtime_prompt
+            .read_optional()
+            .ok()
+            .flatten()
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty());
+        if let Some(text) = runtime_prompt {
+            let rendered = self.render_agent_prompt(&text, character.as_ref(), &world, user_goal);
+            sys.push_str(&crate::services::prompt_kit::untrusted_boundary(
+                "runtime_prompt",
+                &rendered,
+            ));
+            sys.push_str("\n\n");
+        }
+        sys.push_str(EXECUTOR_PROMPT);
         // 工具纪律段紧随内置指令(属内置块,不经 untrusted 包裹);仅在真有工具时追加
         if has_tools {
             sys.push_str(&format!(
@@ -138,16 +168,7 @@ impl TaskService {
         }
         // 角色卡人设段已随「执行者人设档位」一并退役(TM-SET-2):执行者身份段只认执行者
         // 指令;旧任务(仅读侧可达,含 character_id)不再注入「写作风格参考」。character
-        // 仍参与下方世界书过滤口径与占位符渲染({{char}} 等),那两项维持现状。
-        // 世界书过滤口径与身份来源一致:执行者库路径只取全局(传 None,
-        // 执行者与角色卡无关联关系),角色卡路径按该角色过滤(旧语义:原样传 character_id,
-        // 即使该角色已被删除也与改造前一致);无身份时也是全局
-        let world_char_id = if executor.is_some() {
-            None
-        } else {
-            character_id
-        };
-        let world = self.world_context(world_char_id);
+        // 仍参与世界书过滤口径与占位符渲染({{char}} 等),那两项维持现状。
         if !world.is_empty() {
             sys.push_str(&format!(
                 "\n\n{}",

@@ -87,8 +87,10 @@ pub struct CoreServices {
     pub tasks: Arc<TaskService>,
     /// slash 命令注册表(阶段四 4a)
     pub slash: Arc<crate::slash::SlashRegistry>,
-    /// 运行时主 Agent 提示词文件服务
+    /// 运行时主 Agent 提示词文件服务(角色扮演:`AGENTS_RUNTIME.md`)
     pub runtime_prompt: Arc<RuntimePromptService>,
+    /// 任务模式运行时主提示词文件服务(`AGENTS_RUNTIME.task.md`,RTSPLIT-1)
+    pub runtime_prompt_task: Arc<RuntimePromptService>,
     /// 自定义 Agent 执行流程(custom 模式),持久化到 data/agent_flows.json
     pub flow: Arc<Mutex<AgentFlowService>>,
     /// 任务执行者库(任务模式的执行者,与角色扮演角色卡解耦),
@@ -351,6 +353,13 @@ impl AppState {
             // 默认:DATA_DIR;文件与旧文件都缺失时回退内置默认提示词
             None => RuntimePromptService::new(config.data_dir.clone(), legacy_runtime_prompt),
         });
+        // 任务模式运行时主提示词(RTSPLIT-1):独立文件(AGENTS_RUNTIME.task.md)+ **无**内置默认
+        // + 不迁移角色扮演的旧文件(那份是创作向文本,迁过去会污染任务执行)。
+        // 与上面那份同受 KEDAI_RUNTIME_PROMPT_DIR 约束,测试隔离语义对两者一致。
+        let runtime_prompt_task = Arc::new(match std::env::var_os("KEDAI_RUNTIME_PROMPT_DIR") {
+            Some(dir) => RuntimePromptService::with_dir_task(std::path::PathBuf::from(dir)),
+            None => RuntimePromptService::new_task(config.data_dir.clone()),
+        });
 
         // 自定义 Agent 执行流程(custom 模式);保存时按当前已注册工具校验白名单
         let registered_tools = tool_registry
@@ -432,6 +441,7 @@ impl AppState {
             flow.clone(),
             agent_subtasks.clone(),
             executors.clone(),
+            runtime_prompt_task.clone(),
             // 未绑定工作区的任务在此根下按任务 id 建 scratch(任务模式 D1)
             config.task_scratch_dir.clone(),
         ));
@@ -472,6 +482,7 @@ impl AppState {
                 mcp: Arc::new(McpManager::empty()),
                 slash,
                 runtime_prompt,
+                runtime_prompt_task,
                 flow,
                 executors,
                 images,

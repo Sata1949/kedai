@@ -36,7 +36,7 @@ pub struct ModeQuery {
 }
 
 impl ModeQuery {
-    fn app_mode(&self) -> AppMode {
+    pub(crate) fn app_mode(&self) -> AppMode {
         AppMode::parse(self.mode.as_deref().unwrap_or("roleplay"))
     }
 }

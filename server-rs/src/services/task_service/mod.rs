@@ -25,6 +25,7 @@ use crate::models::types::{
 use crate::services::agent_flow_service::{AgentFlowService, FlowSnapshot};
 use crate::services::agent_subtask_service::AgentSubtaskService;
 use crate::services::character_service::CharacterService;
+use crate::services::runtime_prompt_service::RuntimePromptService;
 use crate::services::settings_service::{connection_label, AppMode, RuntimeSettings};
 use crate::services::world_book_service::WorldBookService;
 use rusqlite::{params, OptionalExtension};
@@ -100,6 +101,10 @@ pub struct TaskService {
     settings: Arc<Mutex<RuntimeSettings>>,
     /// 世界书(注入执行者人设的世界观设定)
     world_books: Arc<WorldBookService>,
+    /// 任务模式运行时主提示词(`DATA_DIR/AGENTS_RUNTIME.task.md`,RTSPLIT-1)。
+    /// 与角色扮演那份(`AGENTS_RUNTIME.md`)是两个文件:前者是创作向文本,注入任务
+    /// 执行会污染任务语义。此处缺省为空(无内置默认),故存量任务行为逐字节不变。
+    runtime_prompt: Arc<RuntimePromptService>,
     /// 执行者库(任务创建时校验 executor_id 是否存在;执行期按 id 取执行者指令
     /// 注入 system 提示词;与 AppState 共享同一实例)
     executors: Arc<Mutex<crate::services::executor_service::ExecutorService>>,
@@ -131,6 +136,7 @@ impl TaskService {
         flow: Arc<Mutex<AgentFlowService>>,
         agent_subtasks: Arc<AgentSubtaskService>,
         executors: Arc<Mutex<crate::services::executor_service::ExecutorService>>,
+        runtime_prompt: Arc<RuntimePromptService>,
         scratch_root: std::path::PathBuf,
     ) -> Self {
         let svc = TaskService {
@@ -142,6 +148,7 @@ impl TaskService {
             agent_subtasks,
             settings,
             world_books,
+            runtime_prompt,
             executors,
             cancels: Mutex::new(HashMap::new()),
             activity: Mutex::new(HashMap::new()),

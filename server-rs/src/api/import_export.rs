@@ -115,12 +115,18 @@ pub struct PresetEntriesSection {
     pub config: PromptInjectConfig,
 }
 
-/// ③④ 提示词段:系统 agent 提示词(双模式变体)+ 运行时主 Agent 提示词。
+/// ③④ 提示词段:系统 agent 提示词(双模式变体)+ 运行时主 Agent 提示词(双文件)。
 /// 空串语义 = 「未自定义」(导入侧不写该变体、不覆盖本机)——契约文档同一口径。
+///
+/// `runtime_task`(RTSPLIT-1,2026-11-02)是任务模式那份 `AGENTS_RUNTIME.task.md`。
+/// `#[serde(default)]` + 省略空值保证 bundle v1 向后兼容:旧导出件没有该键(读入即空串,
+/// 导入侧按「未自定义」处理);新导出件在任务侧未自定义时也不写该键(旧导入端忽略未知键)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptsSection {
     pub system: SystemPrompts,
     pub runtime: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub runtime_task: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -293,10 +299,17 @@ pub async fn export_bundle(
         Err(e) => return internal(e),
     };
 
-    // ③④ 提示词:设置(不留锁跨 await,取快照)+ 运行时提示词文件
+    // ③④ 提示词:设置(不留锁跨 await,取快照)+ 运行时主提示词文件(RTSPLIT-1 起两份)
     let settings = state.settings_snapshot();
+    // 角色扮演那份:文件缺失时回退内置默认(与运行时注入同源),故用 read()
     let runtime = match state.runtime_prompt.read() {
         Ok(text) => text,
+        Err(e) => return internal(e),
+    };
+    // 任务那份:缺省为空(无内置默认)。读到错误不当作「未自定义」——那会把
+    // 「文件坏了」伪装成「没配置」,导出件静默少一段。
+    let runtime_task = match state.runtime_prompt_task.read_optional() {
+        Ok(text) => text.unwrap_or_default(),
         Err(e) => return internal(e),
     };
     let prompts = Some(PromptsSection {
@@ -312,6 +325,7 @@ pub async fn export_bundle(
                 .unwrap_or_default(),
         },
         runtime,
+        runtime_task,
     });
 
     // ⑤ 技能:库全量(含停用)
@@ -417,6 +431,7 @@ mod tests {
                     task: "t".to_string(),
                 },
                 runtime: "x".to_string(),
+                runtime_task: String::new(),
             }),
             skills: Some(Vec::new()),
             regex_scripts: Some(Vec::new()),
