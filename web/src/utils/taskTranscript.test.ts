@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   countTrace,
   flattenTrace,
+  formatTraceContent,
   formatTraceCounts,
   groupTrace,
   TRANSCRIPT_MODE_LABELS,
@@ -176,6 +177,45 @@ describe('formatTraceCounts 角标文案', () => {
 
   it('三项全零返回空串(调用方据此不渲染角标)', () => {
     expect(formatTraceCounts({ reasoning: 0, tool: 0, bash: 0 })).toBe('');
+  });
+});
+
+describe('formatTraceContent 历史坏数据修复(UIFIX-8)', () => {
+  it('被双重转义的工具参数还原成多行结构化 JSON', () => {
+    // 提交 1 之前落库的真实形状:整个参数被序列化成 JSON 字符串字面量
+    const literal = JSON.stringify('{"command":"ls -la","cwd":"."}');
+    const out = formatTraceContent('tool_call', literal);
+    expect(out).toContain('\n');
+    expect(out).toContain('"command": "ls -la"');
+    expect(out).not.toContain('\\"');
+  });
+
+  it('纯文本工具结果(bash stdout)原样返回,自己的换行不动', () => {
+    const stdout = 'total 8\ndrwxr-xr-x parts\n-rw-r--r-- pelican.svg';
+    const literal = JSON.stringify(stdout);
+    expect(formatTraceContent('tool_result', literal)).toBe(stdout);
+  });
+
+  it('已是多行结构化 JSON 的内容不重复处理(幂等)', () => {
+    const pretty = '{\n  "a": 1,\n  "b": [\n    2\n  ]\n}';
+    expect(formatTraceContent('tool_result', pretty)).toBe(pretty);
+    // 再跑一次仍不变
+    expect(formatTraceContent('tool_result', formatTraceContent('tool_result', pretty))).toBe(pretty);
+  });
+
+  it('思考类正文原样透传(碰巧是合法 JSON 的思考也不许重排)', () => {
+    const thought = '{"looks": "like json", "but": "is prose"}';
+    expect(formatTraceContent('reasoning', thought)).toBe(thought);
+  });
+
+  it('裸标量与非法 JSON 原样返回(不把 "123"/"true" 当结构化数据重排)', () => {
+    expect(formatTraceContent('tool_result', '123')).toBe('123');
+    expect(formatTraceContent('tool_result', 'true')).toBe('true');
+    expect(formatTraceContent('tool_result', '{not json')).toBe('{not json');
+  });
+
+  it('空串原样返回(修复绝不能把可读内容变成空)', () => {
+    expect(formatTraceContent('tool_call', '')).toBe('');
   });
 });
 

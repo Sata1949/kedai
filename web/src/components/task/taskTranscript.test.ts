@@ -355,6 +355,21 @@ describe('TaskTraceItem 单条卡', () => {
     expect(wrapper.html()).not.toContain('<strong>');
   });
 
+  it('历史坏数据的工具参数在卡内被还原成多行(UIFIX-8 前端兜底)', () => {
+    // 旧轨迹:整段参数被序列化成 JSON 字符串字面量,`\n` 是字面两字符
+    const literal = JSON.stringify('{"command":"ls -la && ls parts","cwd":"."}');
+    const wrapper = mount(TaskTraceItem, {
+      props: { trace: traceRow(1, { kind: 'tool_call', name: 'bash', content: literal, truncated: false }) },
+      // 强制展开,否则内容被折叠开关挡住、断言看不到正文
+    });
+    // 默认收起(>120 字才折叠;这条很短,直接可见)
+    const body = wrapper.find('.sv-trace-body');
+    expect(body.exists()).toBe(true);
+    expect(body.text()).toContain('\n');
+    expect(body.text()).toContain('"command": "ls -la && ls parts"');
+    expect(body.text()).not.toContain('\\"');
+  });
+
   it('truncated 显示「已截断」标记', () => {
     const wrapper = mount(TaskTraceItem, {
       props: { trace: traceRow(1, { content: 'x', truncated: true }) },
