@@ -114,11 +114,18 @@ watch(appMode, async () => {
         spellcheck="false"
       />
       <p class="sv-note">该提示词按模式独立存储，互不影响。</p>
-      <p class="sv-note">
+      <!-- 说明按模式分叉:任务侧是**追加**在内置执行者指令之后,不是替换;
+           沿用角色扮演那句「完整替换内置模板」会让用户以为写了就覆盖一切(RTSPLIT-4)。 -->
+      <p v-if="!isTaskMode" class="sv-note">
         <b>Custom Prompt 会完整替换内置模板，不是追加。</b>占位符替换为当前角色与已命中的世界书内容。不写
         <code v-pre>{{world_info}}</code> 时世界书不会自动注入（<b>变量状态块除外</b>：它是变量更新的唯一
         载体，漏写占位符时由引擎兜底注入到系统提示词末尾，避免变量更新静默停摆）。可用工具清单与「何时调用」由引擎在
         Agent 模式下动态注入到系统提示词末尾，无需在此手写工具说明。
+      </p>
+      <p v-else class="sv-note">
+        <b>任务模式是追加，不是替换：</b>本段注入在内置执行者指令、执行者职责、世界书之后，内置指令始终保留。
+        支持占位符 <code v-pre>{{char}}</code> / <code v-pre>{{user}}</code> / <code v-pre>{{lastUserMessage}}</code>
+        （任务目标），其余占位符原样保留。工具由请求参数下发，引擎不在任务侧注入文字版工具指南。
       </p>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">搜索端点</label>

@@ -485,29 +485,34 @@ pub async fn prompt_preview(
         warnings.push("step_instruction_runtime_only");
     }
 
-    if !settings.reflect_prompt.trim().is_empty() {
-        push_preview_layer(
-            &mut layers,
-            "reflection",
-            "system",
-            0,
-            settings.reflect_prompt,
-        );
-    }
-    if !settings.reflect_advice_prompt.trim().is_empty() {
-        push_preview_layer(
-            &mut layers,
-            "reflection_advice",
-            settings.reflect_advice_role,
-            0,
-            settings.reflect_advice_prompt,
-        );
-    }
-    // 文学能力包(LIT-3/LIT-6):位置 0 文风段与 Author's Note 段——都在反思建议之后、
-    // 预设尾部之前,且**文风段在 AN 段之前**(与真实拼装同序);随尾部角色
-    // (preset_tail_role,与真实下发同判据);按 untrusted_boundary 包裹展示
-    // (「预览即真实下发」:真实拼装侧即按此包裹)。
+    // 反思提示词 / 反思建议 / 预设尾部:三层都是**角色扮演专属**消费点。
+    // 此前没有 mode 门控,而 `for_mode(Task)` 的 reflect_prompt 会从扁平值继承
+    // (from_config 默认非空),于是任务预览恒多出一条执行期根本不下发的层——直接
+    // 违反本端点自述的「预览即真实下发」。同函数里 literary_* 与 user_persona 早已
+    // 有 mode 门控,这三处是漏网(RTSPLIT-4,2026-11-02)。
     if matches!(mode, AppMode::Roleplay) {
+        if !settings.reflect_prompt.trim().is_empty() {
+            push_preview_layer(
+                &mut layers,
+                "reflection",
+                "system",
+                0,
+                settings.reflect_prompt,
+            );
+        }
+        if !settings.reflect_advice_prompt.trim().is_empty() {
+            push_preview_layer(
+                &mut layers,
+                "reflection_advice",
+                settings.reflect_advice_role.clone(),
+                0,
+                settings.reflect_advice_prompt,
+            );
+        }
+        // 文学能力包(LIT-3/LIT-6):位置 0 文风段与 Author's Note 段——都在反思建议之后、
+        // 预设尾部之前,且**文风段在 AN 段之前**(与真实拼装同序);随尾部角色
+        // (preset_tail_role,与真实下发同判据);按 untrusted_boundary 包裹展示
+        // (「预览即真实下发」:真实拼装侧即按此包裹)。
         if let Some(style) = literary_style {
             push_preview_layer(
                 &mut layers,
@@ -526,21 +531,33 @@ pub async fn prompt_preview(
                 crate::services::prompt_kit::untrusted_boundary("literary_note", note),
             );
         }
+        // 预设尾部提示词(位置 0):同为角色扮演专属
+        if !settings.preset_tail_prompt.trim().is_empty() {
+            push_preview_layer(
+                &mut layers,
+                "preset_tail",
+                settings.preset_tail_role.clone(),
+                0,
+                settings.preset_tail_prompt.clone(),
+            );
+        }
     }
-    if !settings.preset_tail_prompt.trim().is_empty() {
-        push_preview_layer(
-            &mut layers,
-            "preset_tail",
-            settings.preset_tail_role,
-            0,
-            settings.preset_tail_prompt,
-        );
-    }
+
+    // 说明文案按模式分叉:任务侧**没有**全量宏系统,只做占位符替换
+    // ({{char}}/{{user}}/{{lastUserMessage}} 等),说成「宏在发送时展开」是过度承诺。
+    let note = match mode {
+        AppMode::Roleplay => {
+            "历史仅显示角色、长度与哈希；预览不包含聊天正文或 API Key。模板与注入层按原文展示，宏在发送时展开；步骤指令与工具指南在运行时追加，不在预览层中展示。"
+        }
+        AppMode::Task => {
+            "预览不包含聊天正文或 API Key。任务模式仅展开声明过的占位符({{char}} / {{user}} / {{lastUserMessage}} 等)，其余原样保留；执行者身份、世界书与运行时主提示词按实际下发顺序展示；工具指南与收尾提醒在运行时追加，不在预览层中展示。"
+        }
+    };
 
     Json(PromptPreviewResponse {
         ok: true,
         mode: mode_wire(mode),
-        note: "历史仅显示角色、长度与哈希；预览不包含聊天正文或 API Key。模板与注入层按原文展示，宏在发送时展开；步骤指令与工具指南在运行时追加，不在预览层中展示。",
+        note,
         layers,
         warnings,
     })
