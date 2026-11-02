@@ -9,7 +9,7 @@ use crate::models::types::{
     GenerationParams, LlmMessage, PlanStep, TokenUsage, ToolBudget, ToolChoice, ToolContext,
 };
 use crate::services::prompt_kit::{
-    select_segments_within_budget, untrusted_boundary, SegmentCost, OMITTED_SEGMENT_MARKER,
+    select_segments_within_budget, untrusted_boundary_task, SegmentCost, OMITTED_SEGMENT_MARKER,
 };
 use crate::services::task_core::prompt_consts::{
     CUSTOM_REFLECT_PROMPT, EXECUTOR_PROMPT, TASK_INTERNAL_PLAN_PROMPT,
@@ -41,14 +41,14 @@ impl CustomExecutor {
                 if !rendered.trim().is_empty() {
                     sys.push_str(&format!(
                         "\n\n{}",
-                        untrusted_boundary("flow_step", &rendered)
+                        untrusted_boundary_task("flow_step", &rendered)
                     ));
                 }
             }
         }
         sys.push_str(&format!(
             "\n\n任务目标:\n{}",
-            untrusted_boundary("task_goal", goal)
+            untrusted_boundary_task("task_goal", goal)
         ));
         sys
     }

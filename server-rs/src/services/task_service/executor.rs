@@ -913,7 +913,7 @@ impl TaskService {
         if !world.is_empty() {
             sys.push_str(&format!(
                 "\n\n{}",
-                crate::services::prompt_kit::untrusted_boundary("world_book", &world)
+                crate::services::prompt_kit::untrusted_boundary_task("world_book", &world)
             ));
         }
         sys
@@ -930,7 +930,7 @@ impl TaskService {
         }
         format!(
             "【工作区侦察快照】以下为系统在工作区实时采集的真实信息(机器扫描,非模型推断)。\n{}",
-            crate::services::prompt_kit::untrusted_boundary("workspace_snapshot", &body)
+            crate::services::prompt_kit::untrusted_boundary_task("workspace_snapshot", &body)
         )
     }
 
@@ -1346,7 +1346,7 @@ impl TaskService {
         if !world.is_empty() {
             sys.push_str(&format!(
                 "\n\n{}",
-                crate::services::prompt_kit::untrusted_boundary("world_book", &world)
+                crate::services::prompt_kit::untrusted_boundary_task("world_book", &world)
             ));
         }
         // 提示词注入**恒隔离**(TM-SET-2):原 task_prompt_inject_enabled 开关退役后,
@@ -1361,7 +1361,7 @@ impl TaskService {
             );
             sys.push_str(&format!(
                 "\n\n{}",
-                crate::services::prompt_kit::untrusted_boundary("agent_prompt", &rendered)
+                crate::services::prompt_kit::untrusted_boundary_task("agent_prompt", &rendered)
             ));
         }
         let mut user = format!("用户目标:\n{}\n\n各步骤结果:\n", task.title);

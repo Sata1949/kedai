@@ -126,7 +126,7 @@ impl TaskService {
             .filter(|text| !text.is_empty());
         if let Some(text) = runtime_prompt {
             let rendered = self.render_agent_prompt(&text, character.as_ref(), &world, user_goal);
-            sys.push_str(&crate::services::prompt_kit::untrusted_boundary(
+            sys.push_str(&crate::services::prompt_kit::untrusted_boundary_task(
                 "runtime_prompt",
                 &rendered,
             ));
@@ -162,7 +162,10 @@ impl TaskService {
                 sys.push_str(&format!(
                     "\n\n执行者职责(执行者「{}」):\n{}",
                     e.name,
-                    crate::services::prompt_kit::untrusted_boundary("task_executor", instruction)
+                    crate::services::prompt_kit::untrusted_boundary_task(
+                        "task_executor",
+                        instruction
+                    )
                 ));
             }
         }
@@ -172,7 +175,7 @@ impl TaskService {
         if !world.is_empty() {
             sys.push_str(&format!(
                 "\n\n{}",
-                crate::services::prompt_kit::untrusted_boundary("world_book", &world)
+                crate::services::prompt_kit::untrusted_boundary_task("world_book", &world)
             ));
         }
         // 提示词注入**恒隔离**(TM-SET-2):原 task_prompt_inject_enabled 开关退役后固定为
@@ -189,7 +192,7 @@ impl TaskService {
             );
             sys.push_str(&format!(
                 "\n\n{}",
-                crate::services::prompt_kit::untrusted_boundary("agent_prompt", &rendered)
+                crate::services::prompt_kit::untrusted_boundary_task("agent_prompt", &rendered)
             ));
         }
         sys
