@@ -102,6 +102,27 @@ describe('bundle v1:段序 / 模式过滤 / 版本', () => {
     expect(empty.sections).toEqual([]);
     expect(empty.skipped.some((s) => s.key === 'prompts')).toBe(true);
   });
+
+  // RTSPLIT-1:运行时主提示词自本批起是**两份文件**(角色扮演 / 任务),摘要与载荷都要分开
+  it('④ prompts 段:两份运行时主提示词分别识别并各自进载荷', () => {
+    const section = parseImportBundle(
+      bundleOf({ prompts: { runtime: '创作向', runtime_task: '任务向' } }),
+      'task',
+    ).sections[0];
+    if (section.key !== 'prompts') throw new Error('段形状错误');
+    expect(section.summary).toContain('运行时主提示词(角色扮演)');
+    expect(section.summary).toContain('运行时主提示词(任务)');
+    expect(section.payload.runtime).toBe('创作向');
+    expect(section.payload.runtimeTask).toBe('任务向');
+  });
+
+  it('④ prompts 段:旧导出件没有 runtime_task 键时按未自定义处理(不误判为空段)', () => {
+    const section = parseImportBundle(bundleOf({ prompts: { runtime: '仅角色扮演' } }), 'roleplay').sections[0];
+    if (section.key !== 'prompts') throw new Error('段形状错误');
+    expect(section.payload.runtimeTask).toBe('');
+    expect(section.payload.runtime).toBe('仅角色扮演');
+    expect(section.summary).not.toContain('(任务)');
+  });
 });
 
 describe('酒馆预设(顶层 prompts)', () => {

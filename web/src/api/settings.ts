@@ -96,14 +96,26 @@ export async function saveSettings(patch: RuntimeSettingsPatch, mode?: 'roleplay
   return request(`/settings${q}`, { method: 'PUT', body: JSON.stringify(patch) });
 }
 
-/** GET /api/settings/agent-prompt:读取运行时主 Agent 提示词(DATA_DIR/AGENTS_RUNTIME.md,注入模型) */
-export async function getAgentPromptMd(): Promise<{ path: string; content: string }> {
-  return request('/settings/agent-prompt');
+/** GET /api/settings/agent-prompt:读取运行时主 Agent 提示词。
+ *  mode 决定读哪份文件(RTSPLIT-1):roleplay → `AGENTS_RUNTIME.md`(缺省),
+ *  task → `AGENTS_RUNTIME.task.md`(缺省为空 = 任务侧不额外注入)。 */
+export async function getAgentPromptMd(
+  mode?: 'roleplay' | 'task',
+): Promise<{ path: string; content: string; mode?: 'roleplay' | 'task' }> {
+  const q = mode ? `?mode=${mode}` : '';
+  return request(`/settings/agent-prompt${q}`);
 }
 
-/** PUT /api/settings/agent-prompt:保存运行时主 Agent 提示词(写回 DATA_DIR/AGENTS_RUNTIME.md) */
-export async function saveAgentPromptMd(content: string): Promise<{ ok: boolean; path: string }> {
-  return request('/settings/agent-prompt', { method: 'PUT', body: JSON.stringify({ content }) });
+/** PUT /api/settings/agent-prompt:保存运行时主 Agent 提示词(写回对应模式的文件) */
+export async function saveAgentPromptMd(
+  content: string,
+  mode?: 'roleplay' | 'task',
+): Promise<{ ok: boolean; path: string; mode?: 'roleplay' | 'task' }> {
+  const q = mode ? `?mode=${mode}` : '';
+  return request(`/settings/agent-prompt${q}`, {
+    method: 'PUT',
+    body: JSON.stringify({ content }),
+  });
 }
 
 /** GET /api/settings/prompt-preview：按来源、角色、层级与顺序查看最终提示词；历史正文已脱敏。

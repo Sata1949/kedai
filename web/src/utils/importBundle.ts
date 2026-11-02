@@ -162,10 +162,15 @@ export interface FlowsPayload {
   rootId?: string;
 }
 
-/** ③④ 提示词段载荷(双变体 + 运行时;**空串 = 未自定义,导入侧不写**) */
+/** ③④ 提示词段载荷(双变体 + 运行时两份;**空串 = 未自定义,导入侧不写**)
+ *
+ *  `runtime` / `runtimeTask` 对应 RTSPLIT-1 的两份文件:角色扮演 `AGENTS_RUNTIME.md`
+ *  与任务模式 `AGENTS_RUNTIME.task.md`。旧导出件无 `runtimeTask` 键 → 空串 → 按
+ *  「未自定义」处理(不覆盖本机任务侧文本)。 */
 export interface PromptsPayload {
   system: { roleplay: string; task: string };
   runtime: string;
+  runtimeTask?: string;
 }
 
 /** ⑦ 插件段条目(与后端 import/export 端点同形) */
@@ -422,11 +427,14 @@ function parseBundleSection(key: ImportSectionKey, raw: unknown): SectionParseRe
       const str = (v: unknown): string => (typeof v === 'string' ? v : '');
       const system = { roleplay: str(systemRaw.roleplay), task: str(systemRaw.task) };
       const runtime = str(raw.runtime);
-      if (!system.roleplay && !system.task && !runtime) return null;
+      // 任务模式那份(RTSPLIT-1);旧导出件没有该键 → 空串 = 未自定义
+      const runtimeTask = str(raw.runtime_task);
+      if (!system.roleplay && !system.task && !runtime && !runtimeTask) return null;
       const parts: string[] = [];
       if (system.roleplay) parts.push('系统提示词(角色扮演)');
       if (system.task) parts.push('系统提示词(任务)');
-      if (runtime) parts.push('运行时主提示词');
+      if (runtime) parts.push('运行时主提示词(角色扮演)');
+      if (runtimeTask) parts.push('运行时主提示词(任务)');
       return {
         entry: {
           key,
@@ -434,7 +442,7 @@ function parseBundleSection(key: ImportSectionKey, raw: unknown): SectionParseRe
           count: parts.length,
           summary: `${parts.join(' + ')};只写当前模式变体,空值不覆盖`,
           option: null,
-          payload: { system, runtime },
+          payload: { system, runtime, runtimeTask },
         },
         skipped,
       };

@@ -1,4 +1,7 @@
 // Agent 设置:系统提示词 / 搜索端点 / 变量状态注入位置 / 反思提示词的编辑与保存。
+// 注:本组合式不持有预览状态——`useAgentPromptEditor()` 每次调用返回独立 ref,
+// 在这里调它的 loadPromptPreview 只会更新一份没人渲染的副本。保存后是否刷新预览
+// 由调用方(设置区组件)用本函数的返回值决定。
 import { ref } from 'vue';
 import { useAppStore } from '../store';
 import { storeToRefs } from 'pinia';
@@ -12,13 +15,14 @@ export function useAgentSettings() {
   const agentMsg = ref('');
 
   /** 恢复内置默认提示词(清空 = 服务端用内置默认)并保存 */
-  async function resetAgentPrompt(): Promise<void> {
+  async function resetAgentPrompt(): Promise<boolean> {
     agentSystemPrompt.value = '';
-    await saveAgentNow();
+    return saveAgentNow();
   }
 
-  async function saveAgentNow(): Promise<void> {
-    if (agentSaving.value) return;
+  /** 保存 Agent 设置;返回是否成功(调用方据此决定要不要刷新提示词预览) */
+  async function saveAgentNow(): Promise<boolean> {
+    if (agentSaving.value) return false;
     agentSaving.value = true;
     agentMsg.value = '';
     try {
@@ -42,8 +46,10 @@ export function useAgentSettings() {
       });
       agentMsg.value = 'Agent 设置已保存';
       setTimeout(() => (agentMsg.value = ''), 2500);
+      return true;
     } catch (e) {
       agentMsg.value = `保存失败:${(e as Error).message}`;
+      return false;
     } finally {
       agentSaving.value = false;
     }

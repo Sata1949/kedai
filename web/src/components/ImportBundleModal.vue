@@ -143,17 +143,24 @@ async function runSection(section: ImportSection): Promise<ImportSectionResult> 
       }
       case 'prompts': {
         const p = section.payload;
-        const mode = appMode.value === 'task' ? '任务' : '角色扮演';
-        const variant = appMode.value === 'task' ? p.system.task : p.system.roleplay;
+        const isTask = appMode.value === 'task';
+        const mode = isTask ? '任务' : '角色扮演';
+        const variant = isTask ? p.system.task : p.system.roleplay;
         const wrote: string[] = [];
         // 空串语义 = 未自定义(不覆盖本机;契约与后端导出件注释同源)
         if (variant) {
           await store.saveSettings({ agent_system_prompt: variant });
           wrote.push(`系统提示词(${mode})`);
         }
+        // 运行时主提示词自 RTSPLIT-1 起**按模式两份文件**:各写各的,互不覆盖。
+        // 此前恒写角色扮演那份,任务侧的内容永远进不了任务 system。
         if (p.runtime) {
-          await api.saveAgentPromptMd(p.runtime);
-          wrote.push('运行时主提示词');
+          await api.saveAgentPromptMd(p.runtime, 'roleplay');
+          wrote.push('运行时主提示词(角色扮演)');
+        }
+        if (p.runtimeTask) {
+          await api.saveAgentPromptMd(p.runtimeTask, 'task');
+          wrote.push('运行时主提示词(任务)');
         }
         if (wrote.length === 0) {
           return { ...base, status: 'skipped', summary: '段内为空(空串 = 未自定义),未覆盖本机' };
