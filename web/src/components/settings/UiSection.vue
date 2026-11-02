@@ -210,14 +210,17 @@ async function selectTheme(id: string): Promise<void> {
 .swatch-default {
   background: linear-gradient(135deg, #fdfafb 0 52%, #d62b25 52% 64%, #17181a 64%);
 }
+/* 彩窗主题缩略图：与「石室与光」同一视觉语言——
+   暗石室底 + 一块发光的暖象牙玻璃 + 顶部窄彩带（原实现引用的 --kg-mosaic
+   已在主题重做中删除，此处一并换成新材质，避免缩略图与主题不符）。 */
 .swatch-glass {
-  background-color: #141016;
+  background-color: #0b0910;
   background-image:
-    radial-gradient(circle 24px at 82% 50%, #e6c072 0 3px, #9c2540 3px 10px, #143a7c 10px 22px, transparent 22px),
-    var(--kg-mosaic, none),
-    linear-gradient(90deg, #141016 0 18%, #1c4a9c 18% 48%, #9c2540 48% 72%, #c99a3b 72% 100%);
-  background-size: auto, 160px 73px, 100% 100%;
-  background-repeat: no-repeat, repeat, no-repeat;
+    linear-gradient(180deg, #fdf8ec 0%, #f2ecdd 46%, #ddd5c2 100%),
+    repeating-linear-gradient(90deg, #7a1a30 0 6px, #0f2f63 6px 12px, #b08a34 12px 14px, #12503a 14px 20px);
+  background-size: 46% 60%, 100% 2px;
+  background-position: center, 0 0;
+  background-repeat: no-repeat, no-repeat;
 }
 .swatch-generic {
   background: linear-gradient(135deg, var(--sv-pink-light), var(--sv-pink-deep), var(--sv-ink));
