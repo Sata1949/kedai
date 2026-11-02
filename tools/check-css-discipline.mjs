@@ -88,7 +88,7 @@ const VERBOSE = process.argv.includes('--verbose');
 const LINE_BASELINE = {
   'style.css': 49,
   'styles/tokens.css': 153,
-  'styles/base.css': 122,
+  'styles/base.css': 121,
   'styles/shell.css': 862,
   'styles/panels.css': 1000,
   'styles/content.css': 1022,

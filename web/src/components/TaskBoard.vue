@@ -14,6 +14,7 @@ import { useActiveThemeId } from '../composables/useActiveTheme';
 import { useTaskActions } from '../composables/useTaskActions';
 import type { TaskRunMode } from '../api';
 import TaskStatusPanel from './task/TaskStatusPanel.vue';
+import TaskTranscriptModes from './task/TaskTranscriptModes.vue';
 import TaskFlowBindPanel from './task/TaskFlowBindPanel.vue';
 import TaskApprovalPanel from './task/TaskApprovalPanel.vue';
 import TaskExecutionPanel from './task/TaskExecutionPanel.vue';
@@ -115,7 +116,12 @@ watch([taskMode, currentTaskId], ensureFlowLib);
           <button class="sv-btn ghost sv-btn-sm" @click="store.dismissTaskLoadError()">关闭</button>
         </div>
         <template v-if="currentTask">
-          <TaskStatusPanel :detail="currentTask" :running="taskRunning" />
+          <!-- 表头插槽(UIFIX-8):档位切换条与任务身份同块常驻,不再随轨迹内容滚走 -->
+          <TaskStatusPanel :detail="currentTask" :running="taskRunning">
+            <template #modes>
+              <TaskTranscriptModes />
+            </template>
+          </TaskStatusPanel>
           <TaskFlowBindPanel :detail="currentTask" />
 
           <!-- 执行中进度行(2026-09-18):后端 agent_status 事件本就携带每轮进展简述,
@@ -185,7 +191,9 @@ watch([taskMode, currentTaskId], ensureFlowLib);
   background-size: 24px 24px;
 }
 .sv-taskboard { position: relative; z-index: 1; background: transparent; }
-.sv-task-detail { padding-top: var(--space-3); }
+/* 详情区顶部不再留内边距(UIFIX-8):sticky 表头贴顶常驻,留白会让滚动内容从缝里
+   透出来(表头背景只在自身盒内)。首行留白已由表头自身的 padding-top 承担。 */
+.sv-task-detail { padding-top: 0; }
 .sv-task-error { margin: calc(-1 * var(--space-4)) 0 var(--space-5); }
 
 /* 执行中:2px 进度轨 + 当前进展单行 */

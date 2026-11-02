@@ -108,64 +108,77 @@ async function copyWorkspacePath(): Promise<void> {
 </script>
 
 <template>
-  <div class="sv-task-head">
-    <div class="sv-task-head-copy">
-      <span class="sv-task-head-kicker">任务 / TASK</span>
-      <div class="sv-task-head-title">
-        <span class="sv-supreme pink-deep" />
-        {{ task.title }}
+  <!-- 常驻表头(UIFIX-8):任务身份 + 状态矩阵 + 档位切换同块 sticky。
+       之前只有标题区 sticky,档位条埋在 TaskTranscript 内部随内容滚走——用户看不到
+       自己正在看哪一档,想切档还得先滚回去。合块后三者同屏常驻。 -->
+  <div class="sv-task-sticky">
+    <div class="sv-task-head">
+      <div class="sv-task-head-copy">
+        <span class="sv-task-head-kicker">任务 / TASK</span>
+        <div class="sv-task-head-title">
+          <span class="sv-supreme pink-deep" />
+          {{ task.title }}
+        </div>
+      </div>
+      <div class="sv-task-head-actions">
+        <button
+          v-if="!running"
+          class="sv-btn primary sv-btn-sm"
+          title="执行(重新)此任务"
+          @click="runCurrent"
+        >▶ 执行</button>
+        <button
+          v-else
+          class="sv-btn sv-btn-sm stop"
+          title="停止执行"
+          @click="stopCurrent"
+        >■ 停止</button>
+        <button
+          class="sv-btn ghost sv-btn-sm"
+          title="删除任务"
+          @click="removeTask(task)"
+        >删除</button>
       </div>
     </div>
-    <div class="sv-task-head-actions">
-      <button
-        v-if="!running"
-        class="sv-btn primary sv-btn-sm"
-        title="执行(重新)此任务"
-        @click="runCurrent"
-      >▶ 执行</button>
-      <button
+
+    <!-- 状态矩阵:状态 / 模式 / 流程 / 累计 token;错误单独成行,不混进矩阵 -->
+    <div class="sv-task-status-line">
+      <span class="sv-tag sv-task-status-tag" :class="statusClass(task.status)">
+        状态：{{ statusLabel(task.status) }}
+      </span>
+      <span class="sv-tag sv-task-status-tag" title="任务执行模式(批次 4 六模式)">模式：{{ taskModeLabel }}</span>
+      <!-- 本任务用的流程(二维批次 5a):绑定流程显示其名,未绑定显示「跟随当前流程」。
+           名字取自任务快照(与徽标同一份编排),故跑完任务后再改流程这里也不会变 -->
+      <span
+        v-if="taskFlowLabel"
+        class="sv-tag sv-task-status-tag"
+        title="本任务绑定/使用的流程(绑定即冻结:创建时的编排;未绑定 = 跟随当前流程)"
+      >流程：{{ taskFlowLabel }}</span>
+      <span
         v-else
-        class="sv-btn sv-btn-sm stop"
-        title="停止执行"
-        @click="stopCurrent"
-      >■ 停止</button>
-      <button
-        class="sv-btn ghost sv-btn-sm"
-        title="删除任务"
-        @click="removeTask(task)"
-      >删除</button>
+        class="sv-tag sv-task-status-tag"
+        title="非自定义流程任务按执行模式自身的编排运行"
+      >流程：按模式编排</span>
+      <!-- 对比模式(二维批次 7b):根流程照常执行,名单内流程额外作为 run_flow 工具
+           释放给宽松节点,由模型自主调用、取回成果。数字按**本轮实际**可调用集显示 -->
+      <span
+        v-if="taskCompareLabel"
+        class="sv-tag sv-task-status-tag"
+        :title="taskCompareTitle"
+      >{{ taskCompareLabel }}</span>
+      <span class="sv-task-usage sv-task-status-tag">
+        累计 token: <b class="sv-tnum">{{ taskTotalTokens.toLocaleString() }}</b>
+      </span>
+    </div>
+
+    <!-- 执行过程档位(步骤 / 全消息 / 压缩):由父级注入 TaskTranscriptModes。
+         用插槽而不是直接 import,是为了让本面板保持「只展示任务状态」的职责边界——
+         档位偏好属于执行过程的渲染配置,不是任务状态的一部分。 -->
+    <div v-if="$slots.modes" class="sv-task-sticky-modes">
+      <slot name="modes" />
     </div>
   </div>
 
-  <!-- 状态矩阵:状态 / 模式 / 流程 / 累计 token;错误单独成行,不混进矩阵 -->
-  <div class="sv-task-status-line">
-    <span class="sv-tag sv-task-status-tag" :class="statusClass(task.status)">
-      状态：{{ statusLabel(task.status) }}
-    </span>
-    <span class="sv-tag sv-task-status-tag" title="任务执行模式(批次 4 六模式)">模式：{{ taskModeLabel }}</span>
-    <!-- 本任务用的流程(二维批次 5a):绑定流程显示其名,未绑定显示「跟随当前流程」。
-         名字取自任务快照(与徽标同一份编排),故跑完任务后再改流程这里也不会变 -->
-    <span
-      v-if="taskFlowLabel"
-      class="sv-tag sv-task-status-tag"
-      title="本任务绑定/使用的流程(绑定即冻结:创建时的编排;未绑定 = 跟随当前流程)"
-    >流程：{{ taskFlowLabel }}</span>
-    <span
-      v-else
-      class="sv-tag sv-task-status-tag"
-      title="非自定义流程任务按执行模式自身的编排运行"
-    >流程：按模式编排</span>
-    <!-- 对比模式(二维批次 7b):根流程照常执行,名单内流程额外作为 run_flow 工具
-         释放给宽松节点,由模型自主调用、取回成果。数字按**本轮实际**可调用集显示 -->
-    <span
-      v-if="taskCompareLabel"
-      class="sv-tag sv-task-status-tag"
-      :title="taskCompareTitle"
-    >{{ taskCompareLabel }}</span>
-    <span class="sv-task-usage sv-task-status-tag">
-      累计 token: <b class="sv-tnum">{{ taskTotalTokens.toLocaleString() }}</b>
-    </span>
-  </div>
   <div v-if="task.error" class="sv-task-error" role="alert">{{ task.error }}</div>
 
   <!-- 工作区(CODE-1):创建期冻结;未绑定不显示该行(不把「没有」渲染成一行噪音) -->
@@ -228,21 +241,36 @@ async function copyWorkspacePath(): Promise<void> {
   margin: calc(-1 * var(--space-3-5)) 0 var(--space-5);
 }
 
-/* 标题:sticky,滚动时仍能看到任务身份与主操作 */
-.sv-task-head {
+/* ===== 常驻表头(UIFIX-8) =====
+   任务身份 + 状态矩阵 + 档位切换三者同块 sticky,滚动时始终可见。
+
+   **必须有实色背景**:sticky 元素若透明,下面滚过的内容会从它背后透出。这里是整块
+   （含状态矩阵与档位条）铺 --sv-paper,而不是只垫在标题上的矩形——三者同块才有意义。
+
+   **顶部发丝线**:任务详情区顶端原本只有左边一条 96px 宽的红黑段带(--sv-top-stripe),
+   标题与上方内容之间没有任何横向分隔(截图点名)。这里补一条整宽 1px 线,
+   让「段带 → 空隙 → 发丝线 → 任务 / TASK」形成明确的章节起点。
+
+   **高度纪律**:常驻表头是吃掉视口高度的固定成本(实测首版 166px / 720px 视口 = 23%),
+   故内边距、行高与矩阵高度都按紧凑值给;标题字号仍保持海报级,它是这一块的主角。 */
+.sv-task-sticky {
   position: sticky;
   top: 0;
   z-index: 2;
-  align-items: flex-start;
-  margin-bottom: var(--space-2);
-  padding: var(--space-2) 0 var(--space-3);
+  padding: var(--space-1-5) 0 var(--space-2);
+  border-top: var(--bw-thin) solid var(--sv-line-strong);
   border-bottom: 1px solid var(--sv-line);
   background: var(--sv-paper);
+}
+.sv-task-head {
+  align-items: flex-start;
+  margin-bottom: var(--space-1-5);
 }
 .sv-task-head-copy { min-width: 0; }
 .sv-task-head-kicker {
   display: block;
   font-size: var(--text-2xs);
+  line-height: var(--lh-tight);
   letter-spacing: 0.18em;
   color: var(--sv-ink-faint);
   text-transform: uppercase;
@@ -250,27 +278,28 @@ async function copyWorkspacePath(): Promise<void> {
 .sv-task-head-title {
   align-items: flex-start;
   margin-top: var(--space-1);
-  font-size: clamp(22px, 2.4vw, 28px);
-  line-height: 1.2;
+  font-size: clamp(20px, 2.2vw, 26px);
+  line-height: 1.15;
   letter-spacing: -0.01em;
 }
 .sv-task-head-title .sv-supreme { flex: none; margin-top: var(--space-1-5); }
-.sv-task-head-actions .sv-btn { min-height: var(--control-h); }
+.sv-task-head-actions .sv-btn { min-height: var(--control-h-sm); }
 
-/* 状态矩阵:一格一项,发丝分隔;状态色只改文字/左侧记号,不画彩色盒子 */
+/* 状态矩阵:一格一项,发丝分隔;状态色只改文字/左侧记号,不画彩色盒子。
+   上下边线用 --sv-line:它现在紧贴表头底部的同色线,用强线会叠成一条粗黑边。 */
 .sv-task-status-line {
   display: flex;
   flex-wrap: wrap;
   align-items: stretch;
   gap: 0;
-  margin-bottom: var(--space-6);
-  border-top: 1px solid var(--sv-line-strong);
-  border-bottom: 1px solid var(--sv-line-strong);
+  margin-bottom: 0;
+  border-top: 1px solid var(--sv-line);
+  border-bottom: 1px solid var(--sv-line);
 }
 .sv-task-status-tag {
   display: flex;
   align-items: center;
-  min-height: 38px;
+  min-height: 32px;
   margin: 0;
   padding: 0 var(--space-3);
   border: none;
@@ -283,10 +312,18 @@ async function copyWorkspacePath(): Promise<void> {
 .sv-task-status-tag:last-child { border-right: none; }
 .sv-task-status-tag:first-child { box-shadow: inset 3px 0 0 currentColor; }
 .sv-task-usage b { font-weight: 800; color: var(--sv-ink); }
-.sv-task-error { margin: calc(-1 * var(--space-4)) 0 var(--space-5); }
+.sv-task-error { margin: 0 0 var(--space-5); }
+
+/* 档位条嵌在表头底缘:上边距把它与状态矩阵分开,底边不再另画线(表头自带) */
+.sv-task-sticky-modes { margin-top: var(--space-2); }
 
 @media (max-width: 767px) {
-  .sv-task-head { padding-top: var(--space-1); }
-  .sv-task-status-tag { min-height: 34px; padding: 0 var(--space-2); }
+  .sv-task-sticky { padding-top: var(--space-1); }
+  /* 窄屏压缩纵向占用:kicker 是装饰性英文标记,此时删掉不影响识别 */
+  .sv-task-head-kicker { display: none; }
+  .sv-task-head-title { margin-top: 0; }
+  .sv-task-status-tag { min-height: 30px; padding: 0 var(--space-2); }
+  .sv-task-sticky-modes { margin-top: var(--space-1-5); }
 }
+
 </style>

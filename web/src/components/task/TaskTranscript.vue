@@ -16,13 +16,9 @@ import { renderMarkdownCached } from '../../utils/markdownCache';
 import { badgeFlowSource, planRowBadges, type NodeBadge } from '../../utils/flowNodeBadges';
 import { taskStatusClass as statusClass, taskStatusLabel as statusLabel } from '../../taskStatus';
 import {
-  countTrace,
   flattenTrace,
   formatTraceCounts,
   groupTrace,
-  TRANSCRIPT_MODE_LABELS,
-  TRANSCRIPT_MODES,
-  TRANSCRIPT_MODE_TITLES,
   type TranscriptMode,
 } from '../../utils/taskTranscript';
 import { bufferLabel } from '../../utils/phaseLabel';
@@ -42,15 +38,12 @@ const taskMode = computed<TaskRunMode>(() => props.detail.task.task_mode ?? 'leg
 const taskId = computed(() => props.detail.task.id);
 
 // ===== 档位 =====
-/** 当前档位:轨迹为空时档 2/3 自动回退档 1(降级),但**用户选择本身不改** */
+/** 当前档位:轨迹为空时档 2/3 自动回退档 1(降级),但**用户选择本身不改**。
+ *  选择控件已迁到表头(TaskTranscriptModes),这里只读不写。 */
 const requestedMode = computed<TranscriptMode>(() => taskTranscriptMode.value ?? 'full');
 const hasTrace = computed(() => taskTrace.value.length > 0);
 const degraded = computed(() => !hasTrace.value && requestedMode.value !== 'legacy');
 const mode = computed<TranscriptMode>(() => (degraded.value ? 'legacy' : requestedMode.value));
-
-function pickMode(next: TranscriptMode): void {
-  store.setTaskTranscriptMode(next);
-}
 
 // ===== 拉取 =====
 /**
@@ -185,8 +178,34 @@ function rowActive(seq: number, index: number): boolean {
   return vmState.isActive(seq, index, vmRows.value.length, null);
 }
 
+/**
+ * 行间距(px),必须与 `TaskTraceItem.vue` 的 `.sv-trace-item { margin-bottom }` 同值。
+ *
+ * **为什么占位高度要含它**:占位 div 是真实行的兄弟节点,真实行的高度里有 8px 下间距,
+ * 占位却没有。每换一行就丢 8px,几百行的滚动位置会累积漂移——表现就是「滚到中段时
+ * 列表突然跳一下」(UIFIX-8 实测)。这是等高占位的必要条件,不是保险。
+ */
+const ROW_GAP_PX = 8;
+
+/** 占位高度:实测缓存(未渲染过则按角色估算)+ 行间距 */
 function placeholderStyle(seq: number): { height: string } {
-  return { height: `${vmState.placeholderHeight(seq, 'assistant')}px` };
+  return { height: `${vmState.placeholderHeight(seq, 'assistant') + ROW_GAP_PX}px` };
+}
+
+/**
+ * 实测一行的高度(含行间距)。
+ *
+ * `offsetHeight` 只算元素自身盒高,不含子元素的 margin——真实行外层是个裸 div,
+ * 里面的 `.sv-trace-item` 带 8px 下间距,直接取 `offsetHeight` 会系统性偏小。
+ * 故量到子元素的实际外边距并补回;取不到就退回纯 offsetHeight(不虚构数值)。
+ */
+function measureRow(el: HTMLElement): number {
+  const own = el.offsetHeight;
+  if (own <= 0) return 0;
+  const child = el.firstElementChild;
+  if (!child) return own + ROW_GAP_PX;
+  const mb = parseFloat(getComputedStyle(child).marginBottom);
+  return own + (Number.isFinite(mb) ? mb : ROW_GAP_PX);
 }
 
 /** 行元素登记(占位与真实行都登记;IO 据此上报进出缓冲区) */
@@ -233,7 +252,8 @@ function setupObserver(): void {
         if (entry.isIntersecting) {
           vmState.markVisible(seq);
         } else if (vmState.visible.has(seq)) {
-          vmState.markHidden(seq, el.offsetHeight || Math.round(entry.boundingClientRect.height));
+          // 用 measured 而非 offsetHeight:后者不含行间距,占位会比真实行矮(见 measureRow)
+          vmState.markHidden(seq, measureRow(el) || Math.round(entry.boundingClientRect.height));
         }
       }
     },
@@ -280,9 +300,7 @@ function toggleGroup(key: string): void {
   expandedGroups.value = next;
 }
 
-/** 全量角标(档 3 顶部一行总览) */
-const totalCounts = computed(() => countTrace(taskTrace.value));
-const totalBadge = computed(() => formatTraceCounts(totalCounts.value));
+/** 全量角标已随档位条迁到 TaskTranscriptModes(UIFIX-8);本组件不再需要计数 */
 
 // ===== 「正在生成」活动指示(沿用 store 的流式缓冲)=====
 const liveRaw = computed(() => {
@@ -312,24 +330,8 @@ onUnmounted(() => {
 </script>
 <template>
   <div class="sv-transcript" :data-mode="mode">
-    <!-- 档位切换(临时;持久化与设置页入口属 TMSHOW-3) + 轨迹总览 -->
-    <div class="sv-transcript-bar">
-      <div class="sv-transcript-modes" role="group" aria-label="执行过程显示档位">
-        <button
-          v-for="m in TRANSCRIPT_MODES"
-          :key="m"
-          type="button"
-          class="sv-transcript-mode"
-          :class="{ active: requestedMode === m }"
-          :aria-pressed="requestedMode === m"
-          :title="TRANSCRIPT_MODE_TITLES[m]"
-          @click="pickMode(m)"
-        >
-          {{ TRANSCRIPT_MODE_LABELS[m] }}
-        </button>
-      </div>
-      <span v-if="totalBadge" class="sv-transcript-badge sv-tnum">{{ totalBadge }}</span>
-    </div>
+    <!-- 档位切换条已迁出(UIFIX-8):住在 TaskStatusPanel 的 sticky 表头里
+         (TaskTranscriptModes.vue),滚到任何位置都能看到当前档并直接切换。 -->
 
     <!-- 降级说明:轨迹为空时档 2/3 回退档 1,不让用户看到一片空白时间线 -->
     <div v-if="degraded" class="sv-transcript-note" role="status">
@@ -451,36 +453,7 @@ onUnmounted(() => {
 <style scoped>
 .sv-transcript { display: block; }
 
-/* 档位条:与任务台既有控件同高(VIS 纪律:移动端 44px 触达,桌面 32px) */
-.sv-transcript-bar {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  margin-bottom: var(--space-3);
-}
-.sv-transcript-modes {
-  display: inline-flex;
-  border: var(--bw-thin) solid var(--sv-line-strong);
-  background: var(--sv-white);
-}
-.sv-transcript-mode {
-  padding: var(--space-1-5) var(--space-3);
-  border: 0;
-  background: none;
-  color: var(--sv-ink-dim);
-  font-size: var(--text-xs);
-  font-weight: 700;
-  cursor: pointer;
-  transition: background var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
-}
-.sv-transcript-mode + .sv-transcript-mode { border-left: var(--bw-thin) solid var(--sv-line); }
-.sv-transcript-mode:hover { background: var(--sv-pink-light); }
-.sv-transcript-mode.active { background: var(--sv-ink); color: var(--sv-white); }
-.sv-transcript-badge {
-  margin-left: auto;
-  font-size: var(--text-xs);
-  color: var(--sv-ink-faint);
-}
+/* 档位条的样式随组件迁到 TaskTranscriptModes.vue(UIFIX-8),此处不再保留。 */
 
 .sv-transcript-note {
   margin-bottom: var(--space-3);

@@ -11,6 +11,7 @@ import { useAppStore } from '../../store';
 import { resetTaskTraceForTest } from '../../composables/useTaskTrace';
 import TaskTraceItem from './TaskTraceItem.vue';
 import TaskTranscript from './TaskTranscript.vue';
+import TaskTranscriptModes from './TaskTranscriptModes.vue';
 
 const memStorage = new Map<string, string>();
 vi.stubGlobal('localStorage', {
@@ -85,11 +86,11 @@ beforeEach(() => {
   memStorage.clear();
 });
 
-describe('TaskTranscript 档位切换', () => {
+describe('档位切换条(UIFIX-8 起独立挂载于常驻表头)', () => {
   it('渲染三个档位按钮,当前档带 active 标记', () => {
     const detail = makeDetail();
     seed(detail, [traceRow(1)], 'full');
-    const wrapper = mount(TaskTranscript, { props: { detail } });
+    const wrapper = mount(TaskTranscriptModes);
     const buttons = wrapper.findAll('.sv-transcript-mode');
     expect(buttons).toHaveLength(3);
     expect(buttons.map((b) => b.text())).toEqual(['步骤', '全消息', '压缩']);
@@ -99,11 +100,33 @@ describe('TaskTranscript 档位切换', () => {
   it('点击档位按钮写入 store(临时,不持久化)', async () => {
     const detail = makeDetail();
     const store = seed(detail, [traceRow(1)], 'full');
-    const wrapper = mount(TaskTranscript, { props: { detail } });
+    const wrapper = mount(TaskTranscriptModes);
     await wrapper.findAll('.sv-transcript-mode')[2].trigger('click');
     expect(store.taskTranscriptMode).toBe('condensed');
     // 不写 localStorage(TMSHOW-3 才做持久化)
     expect([...memStorage.keys()]).toHaveLength(0);
+  });
+
+  it('档位条不再渲染在 TaskTranscript 内部(否则会随轨迹滚走)', () => {
+    const detail = makeDetail();
+    seed(detail, [traceRow(1)], 'full');
+    const wrapper = mount(TaskTranscript, { props: { detail } });
+    expect(wrapper.find('.sv-transcript-mode').exists()).toBe(false);
+  });
+
+  it('角标按全量轨迹计数(与档位条同处,不随档 3 分组变化)', () => {
+    const detail = makeDetail();
+    seed(
+      detail,
+      [
+        traceRow(1, { kind: 'reasoning' }),
+        traceRow(2, { kind: 'tool_call', name: 'bash' }),
+        traceRow(3, { kind: 'tool_call', name: 'fs_read' }),
+      ],
+      'condensed',
+    );
+    const wrapper = mount(TaskTranscriptModes);
+    expect(wrapper.find('.sv-transcript-badge').text()).toBe('思考 1 · 工具 2 · bash 1');
   });
 });
 
@@ -204,7 +227,7 @@ describe('档 3 condensed:分组折叠 + 分类计数', () => {
     expect(wrapper.findAll('.sv-trace-item')).toHaveLength(2);
   });
 
-  it('顶部总览角标与全部轨迹的分类计数相符', () => {
+  it('顶部总览角标已随档位条迁出(档 3 内部不再有第二份计数)', () => {
     const detail = makeDetail();
     seed(
       detail,
@@ -217,9 +240,10 @@ describe('档 3 condensed:分组折叠 + 分类计数', () => {
       'condensed',
     );
     const wrapper = mount(TaskTranscript, { props: { detail } });
-    const badge = wrapper.find('.sv-transcript-badge').text();
-    // 思考 1 · 工具 2 · bash 1(tool_result 不计入)
-    expect(badge).toBe('思考 1 · 工具 2 · bash 1');
+    // 全量角标住在 TaskTranscriptModes(见本文件「档位切换条」组),
+    // 这里只钉住「档 3 卡内不重复渲染一份」;各分组的角标仍在,计数口径不变。
+    expect(wrapper.find('.sv-transcript-badge').exists()).toBe(false);
+    expect(wrapper.find('.sv-transcript-group-count').text()).toBe('思考 1 · 工具 2 · bash 1');
   });
 });
 
