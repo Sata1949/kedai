@@ -3,28 +3,37 @@
 import type { ThemeDefinition } from './registry';
 
 /**
- * 教堂拼接玻璃的视觉参数。
+ * 教堂拼接玻璃的视觉参数（2026-11-02 重做：石室与光）。
  *
- * 参照真实教堂彩窗(沙特尔蓝圣母窗 / 圣礼拜堂 / 巴黎圣母院北玫瑰窗)提炼:
- *   - 石构与铅条是**近黑**的,玻璃是**自发光**的;所以面板底色是透光的白玻璃
- *     (grisaille),外壳与边框是暗石与铅条,而不是整片暗底。
- *   - 主色是钴蓝,红宝石与金只作点缀;旧版把六种宝石色等量铺开,读起来像色轮,
- *     这里收敛为「蓝场 + 红金珠宝 + 祖母绿少量」。
- *   - 现有组件用 --sv-white 同时承担白底与黑底白字,因此保持浅色面板 + 深色文字
- *     的可读性骨架,由主题 CSS 的暗石外壳、铅条格纹、珠宝色玻璃 chrome 建立教堂感。
+ * 参照真实教堂彩窗（哥特长窗 / 布拉索夫暗室暖窗 / 科隆 Richter 窗）提炼的三层模型：
+ *   层 0 石室 —— 近黑微暖，四角暗角，只承载对比；
+ *   层 1 窗   —— 面板就是一整块**从背后发光**的乳白玻璃（透射光，不是反射光）；
+ *   层 2 石梁 —— 顶栏/输入区近黑，只留被窗光照到的一条暖金边。
+ *
+ * 两条决定成败的经验（均由 1440×900 实测得出）：
+ *   - **玻璃不能用纯白**：真实彩窗的眩光风险（高亮且近乎无彩的面积）远低于屏幕白；
+ *     这里改用暖象牙一族（#ece5d6 / #ddd5c2），实测眩光 12.5% → 0.3%。
+ *   - **彩色是稀缺资源**：真实窗的彩色只镶在窗缘一窄条 + 顶部圆花窗。旧版把彩色拼片
+ *     当主材质铺满 chrome，读作「印着菱形花纹的纸」；本版只在窗楣 / 选中态 / 主按钮
+ *     三处上色，其余一律素玻璃。
+ *
+ * 现有组件用 --sv-white 同时承担白底与黑底白字，因此保持浅色正文 + 深色文字的
+ * 可读性骨架，由主题 CSS 的暗室外壳、玻璃材质与层级光建立教堂感。
  */
 const STAINED_GLASS_TOKENS: Record<string, string> = {
-  '--sv-paper': '#f1ead9',
-  '--sv-surface': '#e7dfca',
-  '--sv-surface-elevated': '#faf5e6',
-  '--sv-white': '#fffdf2',
-  '--sv-ink': '#171219',
-  '--sv-ink-supreme': '#070509',
-  '--sv-ink-soft': '#332a31',
-  '--sv-ink-dim': '#554a4f',
-  '--sv-ink-faint': '#5b4f54',
-  '--sv-line': '#6f6058',
-  '--sv-line-strong': '#3a3036',
+  '--sv-paper': '#ece5d6',
+  '--sv-surface': '#ddd5c2',
+  '--sv-surface-elevated': '#faf5e8',
+  '--sv-white': '#fdf8ec',
+  '--sv-ink': '#221b27',
+  '--sv-ink-supreme': '#05040a',
+  '--sv-ink-soft': '#4c4249',
+  '--sv-ink-dim': '#5c504b',
+  /* 次级文字：在 --sv-surface(#ddd5c2) 上实测 4.69:1、paper 上 5.46:1，
+     过 WCAG AA 4.5:1（原 #6f6159 只有 4.07:1，被 registry.test.ts 抓出后加深一档） */
+  '--sv-ink-faint': '#655850',
+  '--sv-line': '#8b7a63',
+  '--sv-line-strong': '#5a4c3c',
   '--sv-pink': '#d9929e',
   '--sv-pink-light': '#f4e3e2',
   '--sv-pink-medium': '#c46576',
@@ -89,7 +98,7 @@ export const DEFAULT_THEME: ThemeDefinition = {
 export const STAINED_GLASS_THEME: ThemeDefinition = {
   id: 'stained-glass',
   name: '教堂拼接玻璃',
-  description: '暗石外壳、白玻璃菱格与彩色玻璃拼片；密窗玫瑰，Cinzel / Cormorant Garamond 字体，中文回退系统宋体。',
+  description: '暗石室中一扇从背后发光的乳白玻璃：暖象牙不透光面、石框与窗棂、彩色只镶在窗楣与选中态；宋体正文，Cinzel / Cormorant Garamond 字标。',
   tokens: STAINED_GLASS_TOKENS,
   load: loadStainedGlass,
 };
