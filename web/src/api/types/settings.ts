@@ -261,6 +261,9 @@ export interface PromptPreviewLayer {
 
 export interface PromptPreview {
   ok: boolean;
+  /** 本份预览属于哪个模式(RTSPLIT-2):异步响应回来时据此判断是否已被切走。
+   *  旧服务端不带该字段,前端按「无法自证」处理(只靠本地模式比对)。 */
+  mode?: 'roleplay' | 'task';
   note: string;
   layers: PromptPreviewLayer[];
   /** 结构化告警码(WB-E;文案映射见 utils/promptWarnings.ts)。后端恒返回数组,空集表示无告警。 */

@@ -299,6 +299,15 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
 
   // ===== Agent 设置(编辑区草稿,保存时随 patch 提交) =====
   const agentSystemPrompt = ref('');
+  /**
+   * 当前已回填到 store 的设置属于哪个模式(RTSPLIT-2)。
+   *
+   * 与 `appMode` 不一致 = 正在切换中(请求在飞或刚失败)。设置页据此提示「正在切换为 X 模式」,
+   * 避免用户把切换窗口里的旧文本当成「提示词不随模式切换」。
+   */
+  const settingsMode = ref<'roleplay' | 'task' | null>(null);
+  /** 设置加载失败信息(空 = 无错误)。此前 catch 全静默,失败与「切模式没生效」在界面上无法区分。 */
+  const settingsError = ref('');
   const searchEndpoint = ref('');
   /** mvu 变量状态注入位置(system / user_tail) */
   const mvuVarsPosition = ref<'system' | 'user_tail'>('system');
@@ -424,24 +433,42 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     visionScreenshotEnabled.value = s.vision_screenshot_enabled ?? false;
   }
 
-  /** 加载运行期设置(API 连接 + 生成参数),仅回填本地默认值;按当前 appMode 读取对应合并值 */
+  /**
+   * 加载运行期设置(API 连接 + 生成参数),仅回填本地默认值;按当前 appMode 读取对应合并值。
+   *
+   * 模式时效(RTSPLIT-2,2026-11-02):请求发出前快照 appMode,响应回来若模式已变则**丢弃**。
+   * 此前直接 `applyRuntimeSettings(s)` 且 catch 全静默——快速切模式时后到的旧模式响应会覆盖
+   * 新模式的值(提示词框停在上一模式文本),请求失败时更是毫无痕迹。两种都要可见。
+   */
   async function loadSettings(): Promise<void> {
+    const requestedMode = useTaskStore().appMode;
+    settingsError.value = '';
     try {
-      const s = await api.getSettings(useTaskStore().appMode);
+      const s = await api.getSettings(requestedMode);
+      // 期间切了模式:这份结果属于旧模式,丢弃(切模式那次会自己再拉)
+      if (useTaskStore().appMode !== requestedMode) return;
       applyRuntimeSettings(s);
+      settingsMode.value = requestedMode;
       const modelConn = useModelConnStore();
       if (!modelConn.model) modelConn.model = s.model;
-    } catch {
-      /* 忽略 */
+    } catch (e) {
+      if (useTaskStore().appMode !== requestedMode) return;
+      // 不再静默:调用方(设置页)据此显示错误条,用户不会把「没加载出来」当成「模式没切」
+      settingsError.value = `设置加载失败:${(e as Error).message}`;
     }
   }
 
   /** 保存运行期设置(可部分字段;服务端持久化到 data/settings.json);按当前 appMode 写入对应覆盖层 */
   async function saveSettings(patch: api.RuntimeSettingsPatch): Promise<void> {
-    const res = await api.saveSettings(patch, useTaskStore().appMode);
+    const requestedMode = useTaskStore().appMode;
+    const res = await api.saveSettings(patch, requestedMode);
     const s = res.settings;
     useModelConnStore().model = s.model;
+    // 模式时效:写入本身落在发起时的覆盖层(正确);但界面回填只在该模式仍是当前模式时做。
+    // 否则会把旧模式的值写进已切到新模式的界面——与 loadSettings 同一类覆盖。
+    if (useTaskStore().appMode !== requestedMode) return;
     applyRuntimeSettings(s);
+    settingsMode.value = requestedMode;
   }
 
   // 设置写入统一串行,避免 renderHtml 自动保存与设置面板保存交错回写旧响应。
@@ -608,6 +635,8 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     normalizeTaskTeamBudget,
     setTaskTeamBudgetUnlimited,
     agentSystemPrompt,
+    settingsMode,
+    settingsError,
     searchEndpoint,
     mvuVarsPosition,
     reflectPrompt,

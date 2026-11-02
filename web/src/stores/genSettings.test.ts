@@ -194,6 +194,96 @@ describe('genSettings 模式分流:loadSettings/saveSettings 按 appMode 传 mod
   });
 });
 
+// ===== RTSPLIT-2:切模式瞬间的响应时效 =====
+//
+// 共同背景:请求发出时按当时 appMode 取 mode,响应回来时模式可能已经变了。
+// 此前无条件 applyRuntimeSettings(s) —— 旧模式的响应会把新模式的值覆盖掉,
+// 用户看到的就是「切了模式但提示词没变」。
+describe('genSettings 设置回填的模式时效(RTSPLIT-2)', () => {
+  beforeEach(() => {
+    memStorage.clear();
+    setActivePinia(createPinia());
+    getSettingsMock.mockReset().mockResolvedValue(makeSettings());
+    saveSettingsMock.mockReset().mockResolvedValue({ ok: true, settings: makeSettings() });
+  });
+
+  it('loadSettings 响应回来时模式已变:丢弃,不回填', async () => {
+    const task = useTaskStore();
+    task.appMode = 'roleplay';
+    const store = useGenSettingsStore();
+    store.agentSystemPrompt = '当前值';
+
+    let release: (v: RuntimeSettings) => void = () => {};
+    getSettingsMock.mockImplementationOnce(
+      () => new Promise((r) => { release = r as (v: RuntimeSettings) => void; }),
+    );
+
+    const pending = store.loadSettings();
+    // 请求在飞期间切到任务模式
+    task.appMode = 'task';
+    release(makeSettings({ agent_system_prompt: '角色扮演人设词' }));
+    await pending;
+
+    expect(store.agentSystemPrompt).toBe('当前值');
+    expect(store.settingsMode).toBeNull();
+  });
+
+  it('loadSettings 成功时记录这份设置属于哪个模式', async () => {
+    const task = useTaskStore();
+    task.appMode = 'task';
+    const store = useGenSettingsStore();
+    getSettingsMock.mockResolvedValueOnce(makeSettings({ agent_system_prompt: '任务词' }));
+
+    await store.loadSettings();
+
+    expect(store.agentSystemPrompt).toBe('任务词');
+    expect(store.settingsMode).toBe('task');
+  });
+
+  it('loadSettings 失败不再静默:置 settingsError,且不清空已有值', async () => {
+    const task = useTaskStore();
+    task.appMode = 'roleplay';
+    const store = useGenSettingsStore();
+    store.agentSystemPrompt = '保留值';
+    getSettingsMock.mockRejectedValueOnce(new Error('网络断开'));
+
+    await store.loadSettings();
+
+    expect(store.settingsError).toContain('网络断开');
+    expect(store.agentSystemPrompt).toBe('保留值');
+  });
+
+  it('loadSettings 成功会清掉上一次的错误', async () => {
+    const task = useTaskStore();
+    task.appMode = 'roleplay';
+    const store = useGenSettingsStore();
+    store.settingsError = '上一条错误';
+
+    await store.loadSettings();
+
+    expect(store.settingsError).toBe('');
+  });
+
+  it('saveSettings 响应回来时模式已变:只同步模型,不回填整份设置', async () => {
+    const task = useTaskStore();
+    task.appMode = 'roleplay';
+    const store = useGenSettingsStore();
+    store.agentSystemPrompt = '新模式的值';
+
+    let release: (v: { ok: boolean; settings: RuntimeSettings }) => void = () => {};
+    saveSettingsMock.mockImplementationOnce(
+      () => new Promise((r) => { release = r as (v: { ok: boolean; settings: RuntimeSettings }) => void; }),
+    );
+
+    const pending = store.saveSettings({ agent_system_prompt: '角色扮演人设词' });
+    task.appMode = 'task';
+    release({ ok: true, settings: makeSettings({ agent_system_prompt: '角色扮演人设词', model: '新模型' }) });
+    await pending;
+
+    expect(store.agentSystemPrompt).toBe('新模式的值');
+  });
+});
+
 describe('genSettings 流程调用闸与节点默认上下文(A 批 A3/A4)', () => {
   beforeEach(() => {
     memStorage.clear();

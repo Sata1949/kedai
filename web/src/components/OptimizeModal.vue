@@ -5,7 +5,7 @@
 //    (懒加载:预览加载后逐层计数;失败静默不阻塞展示)。
 //  - 一键推荐设置:静态常量 RECOMMENDED_SETTINGS,仅勾选项经 store.queueSettingsSave 串行套用。
 //  - 上下文健康度:缓存命中率(computeHitRate 与顶栏共用)+ 最近一次请求 token 用量。
-import { ref, computed } from 'vue';
+import { ref, computed, watch } from 'vue';
 import { storeToRefs } from 'pinia';
 import { useAppStore } from '../store';
 import * as api from '../api';
@@ -18,7 +18,7 @@ import MemoryPanel from './MemoryPanel.vue';
 const store = useAppStore();
 const { lastUsage } = storeToRefs(store);
 // 记忆库按当前角色/会话拉取(store 字段:currentCharacterId / currentSessionId)
-const { currentCharacterId, currentSessionId } = storeToRefs(store);
+const { currentCharacterId, currentSessionId, appMode } = storeToRefs(store);
 const { promptPreview, previewLoading, previewError, loadPromptPreview } = useAgentPromptEditor();
 
 /** 每层 token 估算(懒加载:预览就绪后逐层计数;失败保持 undefined 静默) */
@@ -44,6 +44,12 @@ async function refreshPreview(): Promise<void> {
     tokenCounting.value = false;
   }
 }
+
+// 切模式后已加载过的预览必须重拉(RTSPLIT-2):本面板没有挂载时自动加载,
+// 不重拉就会一直显示上一个模式的层与告警,而徽标早已换成新模式。
+watch(appMode, () => {
+  if (promptPreview.value) void refreshPreview();
+});
 
 // ===== 一键推荐设置 =====
 const checked = ref<Record<string, boolean>>({});

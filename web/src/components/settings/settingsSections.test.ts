@@ -6,6 +6,7 @@ import { useApiSettings } from '../../composables/useApiSettings';
 import { useConnectionProfiles } from '../../composables/useConnectionProfiles';
 import { useDataManager } from '../../composables/useDataManager';
 import { useTaskStore } from '../../stores/task';
+import { useGenSettingsStore } from '../../stores/genSettings';
 import ConnectionProfilesSection from './ConnectionProfilesSection.vue';
 import ConnectionSection from './ConnectionSection.vue';
 import McpSection from './McpSection.vue';
@@ -369,6 +370,48 @@ describe('AgentSettingsSection(Agent 设置区)', () => {
     expect(html).toContain('搜索端点');
     expect(html).toContain('反思提示词');
     expect(html).toContain('保存 Agent 设置');
+  });
+
+  // ===== RTSPLIT-1/2:运行时主提示词按模式分两份 + 切换可见性 =====
+
+  it('运行时主提示词区随模式标注归属,并说明两份文件(RTSPLIT-1)', async () => {
+    const rpHtml = stripComments(await render(AgentSettingsSection));
+    expect(rpHtml).toContain('主 Agent 提示词(运行时，注入模型)');
+    expect(rpHtml).toContain('AGENTS_RUNTIME.md');
+    // 徽标跟着模式走(两个模式各一处:系统提示词 + 运行时主提示词)
+    expect(rpHtml.match(/角色扮演专属/g)?.length).toBe(2);
+
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    useTaskStore().appMode = 'task';
+    const taskHtml = stripComments(await render(AgentSettingsSection, {}, pinia));
+    expect(taskHtml).toContain('AGENTS_RUNTIME.task.md');
+    expect(taskHtml.match(/任务模式专属/g)?.length).toBe(2);
+    // 任务侧必须点明「缺省为空 = 不额外注入」,否则用户会以为留空等于坏了;
+    // 且 textarea 的占位符要按模式换成任务语义(SSR 下 placeholder 进属性)
+    expect(taskHtml).toContain('任务模式不额外注入');
+    expect(taskHtml).toContain('留空 = 任务模式不额外注入运行时主提示词');
+  });
+
+  it('设置仍属于上一模式时渲染切换中提示(RTSPLIT-2)', async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const store = useTaskStore();
+    store.appMode = 'task';
+    useGenSettingsStore().settingsMode = 'roleplay';
+
+    const html = stripComments(await render(AgentSettingsSection, {}, pinia));
+    expect(html).toContain('正在切换为任务模式');
+  });
+
+  it('设置加载失败时渲染错误条,而非静默(RTSPLIT-2)', async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    useGenSettingsStore().settingsError = '设置加载失败:网络断开';
+    useGenSettingsStore().settingsMode = 'roleplay';
+
+    const html = stripComments(await render(AgentSettingsSection, {}, pinia));
+    expect(html).toContain('设置加载失败:网络断开');
   });
 });
 

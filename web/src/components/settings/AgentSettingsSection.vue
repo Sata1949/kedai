@@ -20,7 +20,7 @@ withDefaults(defineProps<{
 const store = useAppStore();
 // Agent 设置直接绑定 store(storeToRefs),与 useAgentSettings 保存逻辑读写同一 store;
 // appMode 用于「系统提示词按模式独立存储」的 UI 标注(徽标/说明/按钮文案随模式即时切换)
-const { agentSystemPrompt, searchEndpoint, mvuVarsPosition, reflectPrompt, appMode, mvuModel, mvuTemperatureInput, model, models } = storeToRefs(store);
+const { agentSystemPrompt, searchEndpoint, mvuVarsPosition, reflectPrompt, appMode, mvuModel, mvuTemperatureInput, model, models, settingsMode, settingsError } = storeToRefs(store);
 
 /** 变量生成模型下拉的候选:当前正文模型 + 已拉取到的可用模型列表(HB-7) */
 const modelOptions = computed(() => {
@@ -40,6 +40,22 @@ const promptPlaceholder = computed(() =>
 const resetPromptLabel = computed(() => (appMode.value === 'task' ? '恢复任务模式默认提示词' : '恢复默认提示词'));
 /** 任务模式:变量组与反思提示词(聊天专属消费)隐藏(TM-SET-3) */
 const isTaskMode = computed(() => appMode.value === 'task');
+/**
+ * 正在切换模式:store 里已回填的设置仍属于上一个模式(RTSPLIT-2)。
+ * 请求在飞或刚失败时置位,这期间文本框里是旧模式的词——不提示的话,用户看到的
+ * 正是「切了模式但提示词没变」。
+ */
+const switchingMode = computed(() => settingsMode.value !== null && settingsMode.value !== appMode.value);
+/** 目标模式名(切换提示条文案用) */
+const targetModeLabel = computed(() => (appMode.value === 'task' ? '任务模式' : '角色扮演模式'));
+
+/** 运行时主提示词的占位与说明按模式区分(RTSPLIT-1:两份文件,任务侧缺省为空) */
+const runtimePromptPlaceholder = computed(() =>
+  appMode.value === 'task'
+    ? '留空 = 任务模式不额外注入运行时主提示词。'
+    : '加载中...',
+);
+const runtimePromptBadge = computed(() => (appMode.value === 'task' ? '任务模式专属' : '角色扮演专属'));
 
 const { agentSaving, agentMsg, resetAgentPrompt, saveAgentNow } = useAgentSettings();
 
@@ -48,20 +64,43 @@ const {
   loadPromptPreview, loadAgentPromptMd, saveAgentPromptMd,
 } = useAgentPromptEditor();
 
+/** 保存 Agent 设置成功后重拉预览(系统提示词是预览的一层,不重拉会停在旧文本) */
+async function onSaveAgent(): Promise<void> {
+  if (await saveAgentNow()) await loadPromptPreview();
+}
+
+/** 恢复默认同理:清空提示词会直接改变预览里的模板层 */
+async function onResetAgent(): Promise<void> {
+  if (await resetAgentPrompt()) await loadPromptPreview();
+}
+
 onMounted(async () => {
-  // 加载 DATA_DIR 主 Agent 提示词与脱敏后的最终分层预览
+  // 加载当前模式对应的运行时主 Agent 提示词与脱敏后的最终分层预览
   await loadAgentPromptMd();
   await loadPromptPreview();
 });
 
-// 预览按模式取 for_mode 合并值(task 追加三层固定提示词):切模式即重拉,与徽标/占位符同步
-watch(appMode, () => void loadPromptPreview());
+// 切模式要同时换两样东西(RTSPLIT-1/2):
+//   ① 系统提示词框由 genSettings.reloadSettings 回填(见 setAppMode);
+//   ② 运行时主提示词是**两份文件**,必须显式重载——此前只重拉预览,正文停在旧模式那份,
+//      这就是「切模式后运行提示词一字不变」的直接原因之一。
+watch(appMode, async () => {
+  await loadAgentPromptMd();
+  await loadPromptPreview();
+});
 </script>
 
 <template>
   <div v-show="show" class="sv-field">
     <div class="sv-field-label"><span class="sv-supreme blue" /> Agent</div>
     <div class="sv-stack">
+      <!-- 切换中提示(RTSPLIT-2):回填的设置仍属于上一个模式时明确告知,
+           否则文本框里的旧模式文本会被读成「提示词不随模式切换」 -->
+      <div v-if="switchingMode" class="sv-feedback info">
+        正在切换为{{ targetModeLabel }}…当前显示的可能仍是上一模式的提示词。
+      </div>
+      <!-- 设置加载失败(RTSPLIT-2):此前静默吞掉,失败与「切模式没生效」无法区分 -->
+      <div v-if="settingsError" class="sv-feedback err">{{ settingsError }}</div>
       <!-- 模式徽标:标注当前编辑的是哪个模式的提示词(两模式独立存储),随 appMode 即时切换 -->
       <div class="sv-field-label sub">
         系统提示词(Agent 模式)
@@ -152,10 +191,10 @@ watch(appMode, () => void loadPromptPreview());
         变量与状态栏、反思提示词仅角色扮演(聊天)使用，已在任务模式下隐藏；如需调整请切到角色扮演模式。
       </p>
       <div class="sv-btn-row">
-        <button class="sv-btn primary sv-btn-fill" :disabled="agentSaving" @click="saveAgentNow">
+        <button class="sv-btn primary sv-btn-fill" :disabled="agentSaving" @click="onSaveAgent">
           {{ agentSaving ? '保存中...' : '保存 Agent 设置' }}
         </button>
-        <button class="sv-btn ghost sv-btn-fill" :disabled="agentSaving" @click="resetAgentPrompt">
+        <button class="sv-btn ghost sv-btn-fill" :disabled="agentSaving" @click="onResetAgent">
           {{ resetPromptLabel }}
         </button>
         <div v-if="agentMsg" class="sv-feedback ok sv-feedback-flex">{{ agentMsg }}</div>
@@ -171,19 +210,31 @@ watch(appMode, () => void loadPromptPreview());
       </div>
 
       <div class="sv-separator">
-        <div class="sv-field-label sub">主 Agent 提示词(运行时，注入模型)</div>
+        <div class="sv-field-label sub">
+          主 Agent 提示词(运行时，注入模型)
+          <span class="sv-tag">{{ runtimePromptBadge }}</span>
+        </div>
         <textarea
           v-model="agentPromptMd"
           rows="14"
           class="sv-input sv-md-area"
-          placeholder="加载中..."
+          :placeholder="runtimePromptPlaceholder"
           spellcheck="false"
         />
         <p class="sv-note">
-          运行时主提示词保存在 DATA_DIR/AGENTS_RUNTIME.md，保存后下次会话生效；
-          内容会注入到模型 system 消息开头(角色定位 / 创作原则 / 工具使用原则 / 输出纪律)。
-          其中「工具使用原则」段只在<b>带工具的模式</b>(Agent / 自定义流程)下发——快速 / 深度模式
-          没有工具调用能力，该段由引擎整段省略，无需为此改文本。
+          该文件按模式独立存储，切换模式会切换到对应文件：角色扮演用
+          <code>DATA_DIR/AGENTS_RUNTIME.md</code>（缺省为内置创作向文本），任务模式用
+          <code>DATA_DIR/AGENTS_RUNTIME.task.md</code>（<b>缺省为空 = 任务模式不额外注入</b>）。
+          保存后下一轮生成即生效。
+        </p>
+        <p class="sv-note">
+          内容会注入到对应模式 system 消息开头。角色扮演侧内含「角色定位 / 创作原则 / 工具使用原则 / 输出纪律」，
+          其中「工具使用原则」段只在<b>带工具的模式</b>(Agent / 自定义流程)下发——快速 / 深度模式没有工具调用能力，
+          该段由引擎整段省略，无需为此改文本。任务模式注入时会按任务目标展开
+          <code v-pre>{{char}}</code> / <code v-pre>{{user}}</code> / <code v-pre>{{lastUserMessage}}</code> 占位符，
+          并以不可信来源边界包裹；任务的执行者指令、世界书与「系统提示词」仍照常注入，不会因留空而丢失。
+        </p>
+        <p class="sv-note">
           项目根 AGENTS.md 仅供开发 agent 使用，不在此编辑，也绝不会注入运行时模型。
         </p>
         <div class="sv-btn-row">
