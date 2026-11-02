@@ -262,7 +262,8 @@ impl TaskService {
         // 用户指令先落库(第 N 次追加的 N 含本条:落库后计数即本轮序号)
         self.add_task_message(id, "user", "followup", content)?;
         let followup_no = self.followup_count(id);
-        // 续跑上下文:原目标 + 上轮结果 + 追加指令(沿用原人设/世界书,与 solo 同口径)。
+        // 续跑上下文:原目标 + 上轮结果 + 追加指令(沿用原执行者身份与世界书,与 solo 同口径;
+        // 人设档位已随 TM-SET-2 退役)。
         // replace 模式明确告知以本轮产出作为整体新版结果(旧结果仅作改写素材)。
         let mut goal = format!("用户目标:\n{}\n", task.title);
         if !task.result.trim().is_empty() {
@@ -865,14 +866,19 @@ impl TaskService {
 
     /// 侦察轮的工具定义(白名单 ∩ 已注册;未注册的环境静默缺席,如裁剪版工具集)。
     /// `plan_scout_loop` 的装配与「侦察指引」的 defs 非空判据**共用同一来源**
-    /// (TM-SCOUT-1),防「指引说了有工具、循环却没下发」的漂移。
+    /// (TM-SCOUT-1),防「指引说了有工具、循环却没下发」的漂移。描述按模式分叉
+    /// (RTSPLIT-R3):侦察是纯任务侧路径,与 `tool_policy::compile` 同口径换任务向文案。
     fn scout_defs(&self, has_scope: bool) -> Vec<ToolDefinition> {
         let whitelist = crate::tools::tool_sets::scout_tools(has_scope);
-        self.engine
+        let defs = self
+            .engine
             .tool_definitions()
             .into_iter()
-            .filter(|d| whitelist.contains(&d.name.as_str()))
-            .collect()
+            .filter(|d| whitelist.contains(&d.name.as_str()));
+        crate::tools::tool_description::with_mode(
+            crate::services::settings_service::AppMode::Task,
+            defs.collect(),
+        )
     }
 
     /// 规划调用 system 组装(plan_task / plan_revise 共用同一构建,防两处文案漂移;
@@ -1236,7 +1242,8 @@ impl TaskService {
         }
     }
 
-    /// 执行单个步骤:注入执行者人设 + 世界书 + 提示词注入 + Agent 系统提示词。
+    /// 执行单个步骤:注入执行者指令 + 世界书 + 用户可编辑 Agent 提示词(提示词注入按
+    /// TM-SET-2 恒隔离——任务 system 不继承 `prompt_floors.json`)。
     /// 生成参数读任务模式设置;温度走执行者建议温度解析(TM-GEN-1,与
     /// `solo::run_agent_loop` 同一口径)。
     pub(crate) async fn generate_step(
@@ -1306,7 +1313,8 @@ impl TaskService {
         .await
     }
 
-    /// 汇总:综合各步骤结果产出最终成果。注入世界书 + 提示词注入 + Agent 系统提示词。
+    /// 汇总:综合各步骤结果产出最终成果。注入内置汇总指令 + 世界书 + Agent 提示词;
+    /// 提示词注入与步骤生成同口径恒隔离,不继承 `prompt_floors.json`。
     /// 生成参数读任务模式设置。
     pub(crate) async fn summarize_task(
         &self,

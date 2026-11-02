@@ -99,6 +99,14 @@ pub(crate) fn compile(
                 .collect()
         }
     };
+    // 描述按模式分叉(RTSPLIT-R3,2026-11-02):注册原文是给聊天链写的(「本角色」
+    // 「正文」「角色设定」)。本函数是任务侧工具面的主出口(solo/multi/team 主 agent
+    // 与 custom 步骤都经它取 defs),在此统一换成任务向文案——放在出口而不是注册点,
+    // 是为了让聊天链的描述逐字节不变(`tool_description` 的回归锁盯着这一点)。
+    let selected = crate::tools::tool_description::with_mode(
+        crate::services::settings_service::AppMode::Task,
+        selected,
+    );
     let allowed = selected.iter().map(|d| d.name.clone()).collect();
     TaskToolPolicy {
         defs: selected,
@@ -525,8 +533,7 @@ mod tests {
         }
     }
 
-    /// 截图闸门(2026-10-02,D5):「视觉与截图」开关关(默认)时截图工具整族剔除
-    /// (defs/allowed 同源);开位下发;对照项 screenshot2 不受影响(精确名匹配);
+    /// 截图闸门(2026-10-02,D5):「视觉与截图」开关关(默认)时截图工具整族剔除    /// (defs/allowed 同源);开位下发;对照项 screenshot2 不受影响(精确名匹配);
     /// 与视觉能力位/工作区闸门正交(截图不属工作区族)。
     #[test]
     fn screenshot_gate_hides_tool_until_switch_on() {
@@ -547,5 +554,65 @@ mod tests {
         let p = compile("deny_dangerous", &[], &reg, false, false, false, true);
         let got: Vec<&str> = p.defs.iter().map(|d| d.name.as_str()).collect();
         assert!(got.contains(&"screenshot"), "开位后应下发:{got:?}");
+    }
+
+    /// 工具描述按模式分叉(RTSPLIT-R3,2026-11-02):`compile` 是任务侧工具面的主出口,
+    /// 它返回的定义必须已经是任务向文案——否则模型在任务里仍会读到「本角色 / 正文 /
+    /// 角色设定」这些在该模式下不存在的概念。
+    ///
+    /// 本用例在真实注册路径上验证(而非只在 `tool_description` 单测里),锁的是
+    /// 「出口有没有接上」这件容易漏的事。
+    #[test]
+    fn compile_returns_task_oriented_descriptions() {
+        use crate::tools::agent_tools::ToolDeps;
+        let (_guard, deps) = ToolDeps::dummy_for_test();
+        let reg = ToolRegistry::new();
+        crate::tools::register_builtin_tools(&reg, std::sync::Arc::new(deps));
+
+        // 绑定工作区 + 包开 + 视觉位开,让 read / memory_* / censor / revise / role
+        // 这一族尽量都在场;策略用 all 档避免风险级把 memory_write 剔掉。
+        let p = compile("all", &[], &reg, true, true, true, false);
+        let desc = |name: &str| {
+            p.defs
+                .iter()
+                .find(|d| d.name == name)
+                .map(|d| d.description.clone())
+                .unwrap_or_else(|| panic!("{name} 应在本工具面内"))
+        };
+
+        // read:任务侧读工作区文件,不是角色文件区
+        let read = desc("read");
+        assert!(
+            !read.contains("角色提示词") && !read.contains("角色文件区"),
+            "任务侧 read 描述不得再指向角色文件区: {read}"
+        );
+        assert!(
+            read.contains("工作区"),
+            "任务侧 read 应说明读工作区文件: {read}"
+        );
+
+        // memory_* / revise / role:不得含角色扮演专属词汇
+        for (name, banned) in [
+            ("memory_read", "本角色"),
+            ("memory_write", "本角色"),
+            ("revise_passage", "正文"),
+            ("role", "掷骰子"),
+        ] {
+            let text = desc(name);
+            assert!(
+                !text.contains(banned),
+                "任务侧 {name} 描述不得含「{banned}」: {text}"
+            );
+        }
+        // agentgo:模板保留,创作措辞去掉
+        let agentgo = desc("agentgo");
+        assert!(
+            agentgo.contains("判据:"),
+            "agentgo 契约模板必须保留: {agentgo}"
+        );
+        assert!(
+            !agentgo.contains("角色设定"),
+            "任务侧 agentgo 不得再说「角色设定」: {agentgo}"
+        );
     }
 }

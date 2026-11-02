@@ -99,7 +99,7 @@ pub struct TaskService {
     agent_subtasks: Arc<AgentSubtaskService>,
     /// 运行期设置(读任务模式的生成参数);与 AppState 共享同一实例
     settings: Arc<Mutex<RuntimeSettings>>,
-    /// 世界书(注入执行者人设的世界观设定)
+    /// 世界书(任务侧按**资料依据**注入,段落前缀为「世界书资料」;RTSPLIT-R4)
     world_books: Arc<WorldBookService>,
     /// 任务模式运行时主提示词(`DATA_DIR/AGENTS_RUNTIME.task.md`,RTSPLIT-1)。
     /// 与角色扮演那份(`AGENTS_RUNTIME.md`)是两个文件:前者是创作向文本,注入任务

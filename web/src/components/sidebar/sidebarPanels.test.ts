@@ -150,6 +150,12 @@ describe('C-2A 侧栏面板拆分', () => {
     store.loadExecutors = vi.fn().mockResolvedValue(undefined);
     const wrapper = mount(TaskComposer);
     expect(wrapper.find('textarea').attributes('placeholder')).toContain('描述要完成的任务');
+    // RTSPLIT-R4(2026-11-02):示例必须是任务向的。任务台是通用 harness 的工作模式,
+    // 用「科幻短篇 + 大纲」这类创作示例会把角色扮演语义泄漏回任务入口。
+    const placeholder = wrapper.find('textarea').attributes('placeholder') ?? '';
+    for (const creative of ['科幻', '短篇', '小说', '大纲']) {
+      expect(placeholder).not.toContain(creative);
+    }
     await wrapper.find('textarea').setValue('写一份周报');
     const submit = wrapper.findAll('button').find((b) => b.text().includes('创建并执行'));
     if (!submit) throw new Error('创建按钮应存在');
