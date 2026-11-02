@@ -406,5 +406,27 @@ watch(
   gap: var(--space-2);
   padding: var(--space-1) 0 var(--space-2-5);
 }
+/* ===== UIFIX-8:四行控件等高 =====
+   改前四行白框高矮不齐,四个成因各自独立:
+   ① 模式下拉是 column flex 的**直接子项**,继承了 panels.css 的 `flex: 1`
+      (即 basis 0%),而 flex-basis 在纵轴上压过 `height: var(--control-h)`,
+      高度只剩内容最小高,比其余三项矮一截;
+   ② 连接下拉多包了一层匿名 div(结构与其它的 .sv-inp-row 不一致);
+   ③ 执行者行的「管理」按钮是 sv-btn-sm(34px),与同排 40px 的 select 不等高;
+   ④ 工作区行用 `flex: 1 1 170px`(basis 170px),与其余 `flex: 1`(basis 0)不同源。
+
+   修法逐条对应:下面第一条钉死「本区的直接子项一律不参与拉伸」,② 在
+   TaskConnectionSelect 里拆掉匿名 div,③ 由本节末尾把行内小按钮抬到控件档,
+   ④ **保留不动**——那两条 170px 是 UIP-2 的回归网(sidebarTaskLayout.test.ts 用
+   正则钉住),窄栏折行不裁字优先于四行绝对一致。 */
+.sv-task-advanced-body > * { flex: none; }
+/* 行内小按钮与同排下拉同档高度(34px → 40px)。不改 padding:sv-btn-sm 的紧凑
+   左右内边距是有意的,只把高度补齐;居中交给 inline-flex 而不是靠行高。 */
+.sv-task-advanced-body .sv-inp-row .sv-btn-sm {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--control-h);
+}
 .sv-ws-recent-item { font-size: var(--text-xs); }
 </style>

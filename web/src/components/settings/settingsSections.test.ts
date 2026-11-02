@@ -473,6 +473,25 @@ describe('GenParamsSection(生成参数区:记忆槽预算/容量上限)', () =>
     expect(html).toContain('温度 0.3');
     expect(html).not.toContain('写入任务推荐值');
   });
+
+  it('档位区是同排布局:下拉与应用按钮同属一行,不再是全宽按钮独占一段(UIFIX-8)', async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    useTaskStore().appMode = 'task';
+    const html = stripComments(await render(GenParamsSection, {}, pinia));
+    // 下拉与按钮在同一容器内(按内容而非整段 HTML 结构断言,避免被 SSR 空白干扰)
+    expect(html).toContain('sv-tier-row');
+    const rowStart = html.indexOf('sv-tier-row');
+    const buttonAt = html.indexOf('应用档位');
+    expect(buttonAt).toBeGreaterThan(rowStart);
+    // 档位区的按钮不再用 sv-btn-fill 撑成整行(页面下方「保存为默认参数」仍可用它,
+    // 故只断言档位区那一段)
+    const tierBlock = html.slice(rowStart, html.indexOf('sv-feedback', rowStart) + 200);
+    expect(tierBlock).not.toContain('sv-btn-fill');
+    // 说明合并为一段,「当前识别」作为该段的结论而不是行尾第三列
+    expect(html).toContain('sv-tier-current');
+    expect(html).toContain('当前识别');
+  });
 });
 
 describe('VisionScreenshotSection(视觉与截图区,默认关)', () => {

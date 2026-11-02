@@ -54,6 +54,24 @@ describe('UIP 批次源码级布局契约', () => {
     expect(mobileCss).toContain('.sv-task-scroll { overflow-y: visible; }');
   });
 
+  it('UIFIX-8:执行设置四行控件等高(模式下拉不被纵轴 flex 压扁)', () => {
+    // 根因是 .sv-task-advanced-body 是 column flex,而模式下拉作为**直接子项**
+    // 继承了 panels.css 的 flex:1(basis 0%),纵轴上 basis 压过 height:40px。
+    // 这条规则把本区直接子项钉成不参与拉伸。
+    expect(taskComposerSource).toContain('.sv-task-advanced-body > * { flex: none; }');
+    // 行内小按钮抬到控件档(34px → 40px),与同排 select 等高且文字居中
+    expect(taskComposerSource).toMatch(
+      /\.sv-task-advanced-body \.sv-inp-row \.sv-btn-sm \{[\s\S]*?min-height: var\(--control-h\);/,
+    );
+    // 连接下拉不得再包一层匿名 div(那会让它成为嵌套后代而不是直接子项)。
+    // 源码是 CRLF,故用 [\s\S] 而非 \s*\n 来跨行匹配。
+    const connectionSource = readText('TaskConnectionSelect.vue');
+    expect(connectionSource).toMatch(/<template>[\s\S]*?<div class="sv-inp-row">/);
+    expect(connectionSource).not.toMatch(/<template>\s*<div>\s*<div class="sv-inp-row">/);
+    // UIP-2 的 170px 下限必须原样保留(窄栏折行不裁字优先于四行绝对一致)
+    expect(taskComposerSource).toContain('flex: 1 1 170px');
+  });
+
   it('UIP-5:进度行不再引用不存在的变量与蓝色回退', () => {
     // C-2A 拆分后任务台由 components/task/ 多个面板承载,断言改为扫描整组源码,
     // 防止规则只守住已被搬空的壳文件。

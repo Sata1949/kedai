@@ -87,22 +87,23 @@ watch(settingsOpen, (open, prev) => {
 </script>
 
 <template>
-  <div>
-    <div class="sv-inp-row">
-      <select
-        v-model="connectionModel"
-        class="sv-select"
-        title="本任务所有模型调用走哪一套 API 连接(节点级连接优先);默认 = 跟随「任务模式默认连接」,该连接也未配置时用默认连接。创建任务时后端会校验所选连接存在且已启用"
-      >
-        <option value="">连接：默认（跟随任务模式默认连接）</option>
-        <option v-for="c in conn.options.value" :key="c.id" :value="c.id" :disabled="!c.enabled">
-          连接：{{ c.name }}{{ c.model ? `｜${c.model}` : '' }}{{ c.enabled ? '' : '（已停用）' }}
-        </option>
-      </select>
-    </div>
+  <!-- 根即 .sv-inp-row(UIFIX-8):原先外面多包一层匿名 div,使本行的控件成为
+       嵌套块的后代而非 .sv-task-advanced-body 的直接子项——四行等高规则在纵轴上
+       靠「直接子项」判定,多这一层就让连接行与其余三行不同源。提示文案仍留在行外。 -->
+  <div class="sv-inp-row">
+    <select
+      v-model="connectionModel"
+      class="sv-select"
+      title="本任务所有模型调用走哪一套 API 连接(节点级连接优先);默认 = 跟随「任务模式默认连接」,该连接也未配置时用默认连接。创建任务时后端会校验所选连接存在且已启用"
+    >
+      <option value="">连接：默认（跟随任务模式默认连接）</option>
+      <option v-for="c in conn.options.value" :key="c.id" :value="c.id" :disabled="!c.enabled">
+        连接：{{ c.name }}{{ c.model ? `｜${c.model}` : '' }}{{ c.enabled ? '' : '（已停用）' }}
+      </option>
+    </select>
     <!-- 失效重置与停用两条提示互斥:重置已把引用清空,停用提示此时不再成立 -->
-    <p v-if="resetNotice" class="sv-note flow-tool-warn">{{ resetNotice }}</p>
-    <p v-else-if="disabledNotice" class="sv-note flow-tool-warn">{{ disabledNotice }}</p>
-    <p v-if="conn.error.value" class="sv-note flow-tool-warn">{{ conn.error.value }}</p>
+    <span v-if="resetNotice" class="sv-note flow-tool-warn">{{ resetNotice }}</span>
+    <span v-else-if="disabledNotice" class="sv-note flow-tool-warn">{{ disabledNotice }}</span>
+    <span v-if="conn.error.value" class="sv-note flow-tool-warn">{{ conn.error.value }}</span>
   </div>
 </template>

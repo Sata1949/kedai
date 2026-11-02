@@ -517,15 +517,13 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
         子代理参数为全局设置(角色扮演与任务共用一份),修改立即对两者生效。
       </p>
       <!-- 任务参数档位(TPROF-1):仅任务模式显示。档位是一次性批量写入的快捷方式,
-           不是新的持久化字段;当前值匹配哪一档由 currentTaskTier 派生。 -->
+           不是新的持久化字段;当前值匹配哪一档由 currentTaskTier 派生。
+           UIFIX-8 重排:改前是「小标题 → 两行说明 → 三列挤一行的下拉 → 单独占一行的
+           全宽 ghost 按钮 → 又一段说明」,视觉重心落在一个纯辅助的全宽按钮上。
+           现在下拉与其唯一的动作同行,说明合并为一段,「当前识别」退为行尾次级徽标。 -->
       <div v-if="isTaskMode" class="sv-separator">
-        <div class="sv-field-label sub">任务参数档位</div>
-        <p class="sv-note">
-          任务未单独设置时使用：温度 0.3 · Top-P 1.0 · 输出上限 32768(输出上限只抬不压：
-          更大时保持更大)。显式保存过的值优先于缺省；应用档位会覆盖当前任务参数(含降低)。
-        </p>
-        <div class="sv-inp-row">
-          <label class="sv-inp-tag">参数档位</label>
+        <div class="sv-field-label sub sv-tier-title">任务参数档位</div>
+        <div class="sv-tier-row">
           <select
             v-model="pendingTier"
             class="sv-select"
@@ -535,11 +533,8 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
             <option value="task">任务优先档（默认）</option>
             <option value="extreme">极限档</option>
           </select>
-          <span class="sv-note">当前识别：{{ currentTierLabel }}</span>
-        </div>
-        <div class="sv-btn-row">
           <button
-            class="sv-btn ghost sv-btn-fill"
+            class="sv-btn primary sv-tier-apply"
             :disabled="taskRecSaving"
             title="把所选档位一次写入任务参数(含任务覆盖层与全局字段);可在应用后继续手动微调"
             @click="applyTaskTier(pendingTier)"
@@ -547,8 +542,11 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
             {{ taskRecSaving ? '应用中...' : '应用档位' }}
           </button>
         </div>
-        <p class="sv-note">
-          工具历史与子代理为全局参数(角色扮演与任务共用);空转熔断任务侧仍按 8/4/2 收紧。
+        <p class="sv-tier-note">
+          <span class="sv-tier-current">当前识别：<b>{{ currentTierLabel }}</b></span>
+          任务未单独设置时使用：温度 0.3 · Top-P 1.0 · 输出上限 32768（只抬不压，更大时保持）；
+          显式保存的值优先于缺省，应用档位会覆盖当前任务参数（含降低）。
+          工具历史与子代理为全局参数（两模式共用），空转熔断任务侧仍按 8/4/2 收紧。
         </p>
         <div v-if="taskRecMsg" class="sv-feedback ok sv-feedback-flex">{{ taskRecMsg }}</div>
       </div>
@@ -561,3 +559,59 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
     </div>
   </div>
 </template>
+
+<style scoped>
+/* 任务参数档位区(UIFIX-8)。
+   本组件此前没有 style 块、全部样式来自全局 panels.css;新增规则一律写在这里,
+   不进全局域(全局域行数有只降不升的 ratchet)。 */
+
+/* 小标题沿用 .sv-field-label.sub 的字级,补一枚粉色记号与 .sv-inp-tag 的记号语言对齐 */
+.sv-tier-title::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: var(--space-1-5);
+  background: var(--sv-pink);
+  vertical-align: 1px;
+}
+
+/* 下拉 + 应用按钮同行:按钮是这一区唯一的动作,就该贴着它的输入同排。
+   下拉弹性占满、按钮取自然宽(不再用 .sv-btn-fill 撑成整行——那会让纯辅助动作
+   看起来像页面的主操作)。 */
+.sv-tier-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2-5);
+  margin-top: var(--space-2);
+}
+.sv-tier-row .sv-select {
+  flex: 1 1 180px;
+  min-width: 180px;
+}
+.sv-tier-apply {
+  flex: none;
+}
+
+/* 说明与「当前识别」合并为一段:识别结果是这一段的**结论**,用加粗把它从说明里拎出来,
+   而不是另起一列挤在行尾(窄栏下那一列最先被压没)。 */
+.sv-tier-note {
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-xs);
+  line-height: var(--lh-body);
+  color: var(--sv-ink-faint);
+}
+.sv-tier-current {
+  display: inline-block;
+  margin-right: var(--space-2);
+  padding: 0 var(--space-1-5);
+  border: var(--bw-thin) solid var(--sv-line-strong);
+  background: var(--sv-white);
+  color: var(--sv-ink-dim);
+}
+.sv-tier-current b {
+  color: var(--sv-ink);
+  font-weight: 800;
+}
+</style>
