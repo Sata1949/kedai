@@ -171,7 +171,7 @@ watch(
       v-model="taskTitle"
       class="sv-input sv-task-new-input"
       rows="4"
-      placeholder="描述要完成的任务,例如:帮我写一篇 2000 字的科幻短篇并列出大纲…"
+      placeholder="描述要完成的任务,例如:把这份接口文档整理成对照表,并核对字段命名…"
       spellcheck="false"
     />
     <button

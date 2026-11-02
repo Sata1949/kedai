@@ -21,7 +21,8 @@ use crate::services::settings_service::AppMode;
 
 /// 世界书常驻条目正文(过滤 enabled && constant 且内容非空,按 position→order→id 排序,
 /// 拼成 `[comment]\ncontent` 段落,无「世界书设定:」前缀)。供需要自定义前缀的调用方复用
-/// (如子智能体上下文的「常驻世界书设定:」)。
+/// (如子智能体上下文的「常驻世界书设定:」、任务链的「世界书资料:」,后者见
+/// [`constant_world_text_with_prefix`] 与 RTSPLIT-R4)。
 pub fn constant_world_body(entries: &[WorldEntry]) -> String {
     let mut constants: Vec<&WorldEntry> = entries
         .iter()
@@ -38,11 +39,24 @@ pub fn constant_world_body(entries: &[WorldEntry]) -> String {
 /// 世界书常驻条目文本:过滤 enabled && constant 且内容非空,按 position→order→id 排序,
 /// 拼成「世界书设定」段落。任务模式 world_context 与引擎侧世界书拼装共用同一过滤/格式化口径。
 pub fn constant_world_text(entries: &[WorldEntry]) -> String {
+    constant_world_text_with_prefix(entries, "世界书设定")
+}
+
+/// 同 [`constant_world_text`],但由调用方给定段落前缀(RTSPLIT-R4,2026-11-02)。
+///
+/// 为什么需要:`constant_world_text` 的前缀「世界书设定」是**角色扮演侧**的既有口径
+/// (「设定」暗示创作背景)。任务链拿同一份条目当**资料依据**输入,沿用「设定」会让
+/// 模型把可核对的资料读成创作背景;任务侧改用中性前缀「世界书资料」。
+///
+/// 标签结构与拼接规则两侧完全一致,只有前缀一词不同——同 RTSPLIT-3 的
+/// `untrusted_boundary_for` 口径:按模式分叉优先于统一中性化,避免削弱角色扮演侧
+/// 既有的语义强调。
+pub fn constant_world_text_with_prefix(entries: &[WorldEntry], prefix: &str) -> String {
     let body = constant_world_body(entries);
     if body.is_empty() {
         String::new()
     } else {
-        format!("世界书设定:\n{body}")
+        format!("{prefix}:\n{body}")
     }
 }
 
@@ -501,6 +515,56 @@ mod tests {
         }
     }
 
+    // ===== 世界书段落前缀按模式分叉(RTSPLIT-R4,2026-11-02)=====
+
+    /// 兼容口径:`constant_world_text` 必须与「角色扮演前缀」逐字节相同。
+    /// 这条锁住引擎侧既有调用点零改动——若有人把旧函数改成中性前缀,这里红。
+    #[test]
+    fn constant_world_text_is_verbatim_roleplay_prefix() {
+        let entries = vec![constant_entry("地点", "图书馆")];
+        assert_eq!(
+            constant_world_text(&entries),
+            constant_world_text_with_prefix(&entries, "世界书设定"),
+            "旧函数必须逐字节等于角色扮演前缀变体"
+        );
+        assert!(constant_world_text(&entries).starts_with("世界书设定:\n"));
+    }
+
+    /// 任务侧口径:同一批条目换成中性前缀「世界书资料」——条目正文与拼接规则完全一致,
+    /// 只有前缀一词不同(与 untrusted 规则句同族的「按模式分叉优先于中性化」口径)。
+    #[test]
+    fn task_world_prefix_is_neutral_but_body_identical() {
+        let entries = vec![
+            constant_entry("地点", "图书馆"),
+            constant_entry("人物", "阿岚"),
+        ];
+        let rp = constant_world_text(&entries);
+        let task = constant_world_text_with_prefix(&entries, "世界书资料");
+
+        assert!(
+            task.starts_with("世界书资料:\n"),
+            "任务侧应使用中性前缀: {task}"
+        );
+        assert!(
+            !task.contains("设定"),
+            "任务侧前缀不得含「设定」(那是角色扮演侧口径): {task}"
+        );
+        // 去掉首行前缀后,两侧正文必须逐字节相同——分叉只在前缀
+        let rp_body = rp.split_once('\n').map(|(_, b)| b).unwrap_or("");
+        let task_body = task.split_once('\n').map(|(_, b)| b).unwrap_or("");
+        assert_eq!(rp_body, task_body, "分叉只该在前缀,条目正文必须一致");
+        assert!(task.contains("[地点]\n图书馆"), "{task}");
+    }
+
+    /// 空前缀/空条目都不产生残壳:没有常驻条目时,任何前缀都返回空串
+    /// (否则任务侧每段无世界书的提示词都会多出一个空段落)。
+    #[test]
+    fn world_prefix_skips_empty_entries() {
+        for prefix in ["世界书设定", "世界书资料", ""] {
+            assert_eq!(constant_world_text_with_prefix(&[], prefix), "");
+        }
+    }
+
     /// 构造测试用激发条目（`WorldEntry` 无 `Default`，显式列出字段以免将来加字段时静默漏配）。
     fn triggered_entry(keys: &[&str], probability: i64) -> WorldEntry {
         WorldEntry {
@@ -522,6 +586,34 @@ mod tests {
             cooldown: 0,
             probability,
             use_probability: true,
+            role: None,
+            decorators: Vec::new(),
+        }
+    }
+
+    /// 构造测试用**常驻**条目（`constant: true` 且内容非空，才会进 `constant_world_body`）。
+    /// 与 `triggered_entry` 分开写：两者只差 constant/probability 字段，混用会让
+    /// 「为什么这条没进结果」变成隐性假设。
+    fn constant_entry(comment: &str, content: &str) -> WorldEntry {
+        WorldEntry {
+            id: 1,
+            comment: comment.to_string(),
+            keys: Vec::new(),
+            keys_secondary: Vec::new(),
+            regex: None,
+            use_regex: false,
+            content: content.to_string(),
+            constant: true,
+            enabled: true,
+            position: 0,
+            depth: 4,
+            scan_depth: None,
+            order: 100,
+            case_sensitive: false,
+            sticky: 0,
+            cooldown: 0,
+            probability: 100,
+            use_probability: false,
             role: None,
             decorators: Vec::new(),
         }

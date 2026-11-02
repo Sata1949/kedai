@@ -302,7 +302,8 @@ pub(crate) trait TaskGenerator: Send + Sync {
         )
     }
 
-    /// 执行单个步骤的单次生成(注入执行者人设/世界书/注入/Agent 提示词)。
+    /// 执行单个步骤的单次生成(注入执行者指令/世界书/Agent 提示词;
+    /// 提示词注入按 TM-SET-2 恒隔离,任务侧不继承 `prompt_floors.json`)。
     fn generate_step<'a>(
         &'a self,
         task: &'a TaskRecord,

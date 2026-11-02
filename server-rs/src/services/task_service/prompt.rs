@@ -199,13 +199,17 @@ impl TaskService {
     }
 
     /// 世界书常驻条目文本:过滤 enabled && constant 且内容非空,按 position→order→id 排序,
-    /// 拼成「世界书设定」段落。无执行者时传空 id 仅取全局世界书。
-    /// 过滤/排序/格式化逻辑下沉 prompt_kit::constant_world_text(WP7),与引擎侧共用口径。
-    /// pub(crate):任务引擎 solo 提示词组装复用(勿复制实现)。
+    /// 拼成「世界书资料」段落。无执行者时传空 id 仅取全局世界书。
+    /// 过滤/排序/格式化逻辑下沉 prompt_kit::constant_world_text_with_prefix(WP7 + RTSPLIT-R4),
+    /// 与引擎侧共用同一实现。
+    /// pub(crate):任务引擎 solo/team 提示词组装复用(勿复制实现)。
+    ///
+    /// 前缀按模式分叉(RTSPLIT-R4,2026-11-02):任务链把世界书条目当**资料依据**输入,
+    /// 沿用角色扮演侧的「世界书设定」会让模型读成创作背景。仅前缀一词不同,拼接规则一致。
     pub(crate) fn world_context(&self, character_id: Option<&str>) -> String {
         let cid = character_id.unwrap_or("");
         let entries = self.world_books.collect_entries_for_character(cid);
-        crate::services::prompt_kit::constant_world_text(&entries)
+        crate::services::prompt_kit::constant_world_text_with_prefix(&entries, "世界书资料")
     }
 
     /// 渲染任务模式 Agent 系统提示词占位符(与角色扮演同款占位符语义):

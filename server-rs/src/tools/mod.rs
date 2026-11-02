@@ -45,6 +45,9 @@ pub mod submit;
 // 动态调用名单内流程(二维批次 7b):工具**定义**在此,「谁可被调用」由 custom 执行器
 // 逐节点下发描述表达;名单/预算/环与深度守卫在 task_engine/flow_call.rs
 pub mod run_flow;
+// 内置工具描述的按模式分叉(RTSPLIT-R3,2026-11-02):注册点写给聊天链的原文逐字节
+// 不变,任务侧在工具面出口经 `with_mode` 换成任务向文案(见模块头注释)
+pub mod tool_description;
 pub mod tool_meta;
 pub mod tool_risk;
 pub mod tool_sets;
