@@ -95,4 +95,26 @@ describe('UIPOL-2 布局均衡', () => {
     // 表头底色从 --sv-paper(与 body 同色)改为 --sv-pink-light
     expect(contentCss).toMatch(/\.sv-msg-bubble\.sv-msg-md th \{[^}]*background: var\(--sv-pink-light\);/);
   });
+
+  it('A5:任务台空态纵向节奏下沉到组件(默认主题不再只有固定间距)', () => {
+    // 修前(2026-11-03 实测 1440×900):默认主题内容高 361 / 容器 730,所有间距都是
+    // 16/16/20px 固定档,整块读作一条密实的窄带——纵向分散只写在 stained-glass.css,
+    // 默认主题完全没有。
+    // 分散必须有上限:第一版用 margin-top:auto 把模式清单推到容器底部,实测出现
+    // 440px 空缝,比原问题更糟,故默认主题改用 clamp 封顶(彩窗版心是满幅、可用高度
+    // 多一倍,auto 在那里才是对的——差异按主题高度决定,不是漏改)。
+    expect(taskEmptySource).toMatch(/\.sv-task-start-modes \{[\s\S]*?margin-top: clamp\(/);
+    expect(taskEmptySource).toMatch(/\.sv-task-start-spec-foot \{[\s\S]*?margin-top: clamp\(/);
+    // 四行行距 20px → 24px
+    expect(taskEmptySource).toMatch(/\.sv-task-start-spec-list > div \{[^}]*padding: var\(--space-3\) 0;/);
+    // 窄屏必须还原紧凑节奏(clamp 的下限在手机上仍会撑出空缝)
+    const narrow = taskEmptySource.slice(taskEmptySource.indexOf('@media (max-width: 767px)'));
+    expect(narrow).toMatch(/\.sv-task-start-modes \{ margin-top: var\(--space-4\); \}/);
+    expect(narrow).toMatch(/\.sv-task-start-spec-foot \{ margin-top: var\(--space-3\); padding-top: 0; border-top: 0; \}/);
+    // 彩窗主题不得再重复「步骤表→模式清单」的 clamp(那是共用层的事);
+    // 但它的 auto 版心分散必须保留。
+    const glassCss = readText('../theme/stained-glass.css');
+    expect(glassCss).not.toMatch(/\.sv-task-start-modes \{\s*margin-top: clamp\(/);
+    expect(glassCss).toMatch(/\.sv-task-start-copy > \.sv-task-start-modes \{\s*margin-top: auto;/);
+  });
 });
