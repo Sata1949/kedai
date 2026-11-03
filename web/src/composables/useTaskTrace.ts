@@ -16,6 +16,10 @@
 import { ref } from 'vue';
 import * as api from '../api';
 import { flattenTrace, type TranscriptMode } from '../utils/taskTranscript';
+import {
+  readTaskTranscriptOverride,
+  writeTaskTranscriptOverride,
+} from '../utils/taskTranscriptPreference';
 
 /** 单次补拉请求的条数(与后端 `limit` 缺省 500 / 夹取 1..=1000 同口径) */
 const TRACE_PAGE_LIMIT = 500;
@@ -39,8 +43,18 @@ const truncated = ref(false);
 const loading = ref(false);
 /** 最近一次加载失败的原因(null = 无错);与「没有轨迹」是**两件不同的事** */
 const error = ref<string | null>(null);
-/** 档位(临时;TMSHOW-3 接 uiPrefs 持久化与单任务覆盖) */
-const mode = ref<TranscriptMode>('full');
+/**
+ * 当前任务的档位**覆盖**(`null` = 未覆盖,跟随设置页默认档)。
+ *
+ * 为什么存 `null` 而不是直接存一个 `TranscriptMode`:两者语义不同——
+ * 未覆盖会随设置页改默认而变,覆盖成与默认相同的值则不会。用默认值兜底会让
+ * 「跟随默认」这条语义永久失效。
+ *
+ * 为什么持久化点在这里而不是 stores/task.ts:`stores/task.ts` 卡在文件大小基线
+ * (1157 行只降不升),切任务读取覆盖与写入覆盖的动作全部下沉到本模块,
+ * store 侧只做一行转发。
+ */
+const modeOverride = ref<TranscriptMode | null>(null);
 
 /** 当前已载入的最大轨迹 seq(缺口判定与增量补拉的起点) */
 const lastSeqByTask = new Map<string, number>();
@@ -49,12 +63,39 @@ const pullRunning = new Set<string>();
 
 /** 轨迹状态与模式入口(组件消费) */
 export function useTaskTrace() {
-  return { rows, ownerTaskId, truncated, loading, error, mode };
+  return { rows, ownerTaskId, truncated, loading, error, modeOverride };
 }
 
-/** 设置档位(临时切换;不持久化——TMSHOW-3 才接 localStorage 与设置页) */
-export function setTranscriptMode(next: TranscriptMode): void {
-  mode.value = next;
+/**
+ * 设置某个任务的档位覆盖并立即落盘(TMSHOW-3)。
+ *
+ * 写的是**单任务键** `kedai.task-transcript-mode.v1.<taskId>`,不改设置页的默认档:
+ * 「这个任务用压缩看」与「我以后都默认压缩」是两件事,混写成一条会让用户在别的
+ * 任务上莫名其妙被改了默认。
+ *
+ * `taskId` 由调用方显式传入而**不是**取 `ownerTaskId`:后者只在轨迹开始加载时才就位,
+ * 而档位控件在轨迹为空的任务上同样可点(那时用户改的偏好更要能记住)。
+ * 空 id 只改内存态不落盘——顶栏控件只在任务详情里出现,这个分支只是防误触。
+ */
+export function setTranscriptMode(taskId: string | null | undefined, next: TranscriptMode): void {
+  modeOverride.value = next;
+  if (taskId) writeTaskTranscriptOverride(localStorage, taskId, next);
+}
+
+/** 档位设置的入参类型(store 侧包装动作复用,免去再 import 一次 TranscriptMode) */
+export type TranscriptModeArg = Parameters<typeof setTranscriptMode>[1];
+
+/**
+ * 确保当前任务的覆盖已从 localStorage 读入(TMSHOW-3)。
+ *
+ * 为什么要这个入口而不是只在 `loadTaskTrace` 里读:`TaskTranscript` 在轨迹**已存在**
+ * 时不会重新拉取(重复拉全量在长任务上是几 MB 的浪费),但组件可能刚被重新挂载
+ * (从档 1 切回档 2、或切走再切回同一任务)。此时 `loadTaskTrace` 不跑,覆盖就没人读——
+ * 用户的记忆会表现为「刷新后回到默认档」。组件挂载与本任务首次加载两处都调它。
+ */
+export function ensureTranscriptMode(taskId: string): void {
+  if (ownerTaskId.value !== taskId) return;
+  modeOverride.value = readTaskTranscriptOverride(localStorage, taskId);
 }
 
 /**
@@ -62,6 +103,10 @@ export function setTranscriptMode(next: TranscriptMode): void {
  *
  * `ownerTaskId` 一并清空:迟到响应靠它比对丢弃,若留着旧 id,切到新任务后
  * 旧请求的响应会被误认为「还是我的」而写进新任务的视图。
+ *
+ * 档位覆盖同步复位为 `null`(跟随默认):覆盖是**每个任务各一份**的,留着上一个任务的
+ * 覆盖会让新任务凭空继承别人的选择。真实的覆盖值由下一次 `loadTaskTrace` /
+ * `ensureTranscriptMode` 按新任务 id 从 localStorage 读回。
  */
 export function clearTaskTrace(): void {
   rows.value = [];
@@ -69,6 +114,7 @@ export function clearTaskTrace(): void {
   truncated.value = false;
   loading.value = false;
   error.value = null;
+  modeOverride.value = null;
 }
 
 /**
@@ -84,6 +130,8 @@ export function clearTaskTrace(): void {
 export async function loadTaskTrace(taskId: string): Promise<void> {
   if (ownerTaskId.value === taskId && loading.value) return; // 同任务已在飞:不叠加并发
   ownerTaskId.value = taskId;
+  // 档位覆盖随任务就位读回(打开发起拉取之前先读,避免时间线先按默认档渲染一帧)
+  modeOverride.value = readTaskTranscriptOverride(localStorage, taskId);
   loading.value = true;
   error.value = null;
   const collected: api.TaskTrace[] = [];
@@ -196,5 +244,5 @@ export function resetTaskTraceForTest(): void {
   clearTaskTrace();
   lastSeqByTask.clear();
   pullRunning.clear();
-  mode.value = 'full';
+  modeOverride.value = null;
 }

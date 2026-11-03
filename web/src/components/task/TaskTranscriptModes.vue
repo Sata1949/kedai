@@ -8,12 +8,16 @@
 // **职责边界**：这里只管「用户选了哪一档」与计数角标。降级判定（轨迹为空回退档 1）
 // 仍留在 TaskTranscript 的 `mode`——那个才是「实际渲染哪一档」，两者刻意不同源：
 // 回退若写回选择，持久化的档位会在空轨迹任务上被洗掉。
+//
+// **档位来源**（TMSHOW-3）：本任务覆盖优先，未覆盖跟随设置页默认档。写入只改本任务的
+// 覆盖键，不改设置页的默认——「这个任务用压缩看」与「我以后都默认压缩」是两件事。
 import { computed } from 'vue';
 import { storeToRefs } from 'pinia';
 import { useAppStore } from '../../store';
 import {
   countTrace,
   formatTraceCounts,
+  requestedTranscriptMode,
   TRANSCRIPT_MODE_LABELS,
   TRANSCRIPT_MODES,
   TRANSCRIPT_MODE_TITLES,
@@ -21,13 +25,20 @@ import {
 } from '../../utils/taskTranscript';
 
 const store = useAppStore();
-const { taskTrace, taskTranscriptMode } = storeToRefs(store);
+const { taskTrace, taskTranscriptOverride, taskTranscriptMode } = storeToRefs(store);
 
 /** 用户选择的档位（分段控件高亮用；不跟着降级走） */
-const requestedMode = computed<TranscriptMode>(() => taskTranscriptMode.value ?? 'full');
+const requestedMode = computed<TranscriptMode>(() =>
+  requestedTranscriptMode(taskTranscriptOverride.value, taskTranscriptMode.value),
+);
 
 /** 全量角标（一行总览：思考 N · 工具 N · bash N） */
 const totalBadge = computed(() => formatTraceCounts(countTrace(taskTrace.value)));
+
+/** 写本任务覆盖（设置页的默认档不在这里改） */
+function pickMode(next: TranscriptMode): void {
+  store.setTaskTranscriptMode(next);
+}
 </script>
 
 <template>
@@ -41,7 +52,7 @@ const totalBadge = computed(() => formatTraceCounts(countTrace(taskTrace.value))
         :class="{ active: requestedMode === m }"
         :aria-pressed="requestedMode === m"
         :title="TRANSCRIPT_MODE_TITLES[m]"
-        @click="store.setTaskTranscriptMode(m)"
+        @click="pickMode(m)"
       >
         {{ TRANSCRIPT_MODE_LABELS[m] }}
       </button>

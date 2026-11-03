@@ -1117,14 +1117,14 @@ export const useTaskStore = defineStore('app.task', () => {
     liveBuffers,
     lastAgentStatus,
     taskLoadError,
-    // 执行轨迹(TMSHOW-2):独立模块的响应式状态,此处直通暴露给组件
+    // 执行轨迹(TMSHOW-2/3):override = 本任务档位覆盖(null 跟随设置页默认档)
     taskTrace: traceState.rows,
     taskTraceTruncated: traceState.truncated,
     taskTraceLoading: traceState.loading,
     taskTraceError: traceState.error,
-    taskTranscriptMode: traceState.mode,
+    taskTranscriptOverride: traceState.modeOverride,
     loadTaskTrace,
-    setTaskTranscriptMode,
+    setTaskTranscriptMode: (next: Parameters<typeof setTaskTranscriptMode>[1]) => setTaskTranscriptMode(currentTaskId.value, next),
     setTaskRunMode,
     setTaskFlowId,
     setTaskFlowMode,

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 任务执行过程三档显示(TMSHOW-2)。
+// 任务执行过程三档显示(TMSHOW-2 渲染 / TMSHOW-3 档位偏好)。
 //
 // 三档:
 //   档 1 `legacy`    —— 计划步骤时间线精修(状态色带 + 长结果折叠),不显示中间过程;
@@ -9,6 +9,7 @@
 // 数据来自 TMSHOW-1 的 `task_trace`(经 composables/useTaskTrace 加载,SSE 增量并入)。
 // **降级路径**:轨迹为空(旧任务 / 无工具循环的模式)时档 2 / 档 3 自动回退档 1 布局
 // 并显示一行说明——绝不出现一片空白的时间线(那会被误读成「加载失败」)。
+// **档位来源**见下方「档位」小节:本任务覆盖优先,未覆盖跟随设置页默认。
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { storeToRefs } from 'pinia';
 import { useAppStore } from '../../store';
@@ -19,10 +20,13 @@ import {
   flattenTrace,
   formatTraceCounts,
   groupTrace,
+  requestedTranscriptMode,
+  resolveTranscriptMode,
   type TranscriptMode,
 } from '../../utils/taskTranscript';
 import { bufferLabel } from '../../utils/phaseLabel';
 import { createVirtualListState } from '../../composables/useVirtualMessages';
+import { ensureTranscriptMode } from '../../composables/useTaskTrace';
 import TaskTraceItem from './TaskTraceItem.vue';
 import type { TaskDetail, TaskRunMode, TaskStep } from '../../api';
 
@@ -31,30 +35,54 @@ const props = defineProps<{
 }>();
 
 const store = useAppStore();
-const { agentFlowLibrary, taskTrace, taskTraceTruncated, taskTraceLoading, taskTraceError, taskTranscriptMode } =
-  storeToRefs(store);
+const {
+  agentFlowLibrary,
+  taskTrace,
+  taskTraceTruncated,
+  taskTraceLoading,
+  taskTraceError,
+  taskTranscriptOverride,
+  taskTranscriptMode,
+} = storeToRefs(store);
 
 const taskMode = computed<TaskRunMode>(() => props.detail.task.task_mode ?? 'legacy');
 const taskId = computed(() => props.detail.task.id);
 
-// ===== 档位 =====
-/** 当前档位:轨迹为空时档 2/3 自动回退档 1(降级),但**用户选择本身不改**。
- *  选择控件已迁到表头(TaskTranscriptModes),这里只读不写。 */
-const requestedMode = computed<TranscriptMode>(() => taskTranscriptMode.value ?? 'full');
+// ===== 档位(TMSHOW-3:单任务覆盖优先,未覆盖跟随设置页默认) =====
+/**
+ * 用户**选择的**档位(分段控件高亮用)。
+ *
+ * 与下面的 `mode` 分开是必须的:降级只改「实际渲染哪一档」,不能回写用户选择——
+ * 否则持久化的 full 在空轨迹任务上会被洗成 legacy,换个任务回来就丢了。
+ */
+const requestedMode = computed<TranscriptMode>(() =>
+  requestedTranscriptMode(taskTranscriptOverride.value, taskTranscriptMode.value),
+);
 const hasTrace = computed(() => taskTrace.value.length > 0);
 const degraded = computed(() => !hasTrace.value && requestedMode.value !== 'legacy');
-const mode = computed<TranscriptMode>(() => (degraded.value ? 'legacy' : requestedMode.value));
+/** 实际渲染的档位(降级判定与 `TaskExecutionPanel.stepViewActive` 共用同一个纯函数) */
+const mode = computed<TranscriptMode>(() =>
+  resolveTranscriptMode(taskTranscriptOverride.value, taskTranscriptMode.value, hasTrace.value),
+);
 
 // ===== 拉取 =====
 /**
  * 首次挂载时若 store 里还没有本任务的轨迹,拉一次。
  * selectTask 也会拉(那才是主要入口);这里兜底「组件晚挂载 / 状态被清过」的情形。
  * 已有轨迹时不重拉——重复拉全量在长任务上是几 MB 的浪费。
+ *
+ * **档位覆盖无论如何都要读一次**:轨迹已在时不会走 `loadTaskTrace`,而组件可能刚被
+ * 重新挂载(档 1 ↔ 档 2 切换、切走再切回同一任务)。少了这一句,用户的档位记忆会表现为
+ * 「刷新后回到默认档」。
  */
 function ensureTrace(): void {
   const id = taskId.value;
   if (!id) return;
-  if (taskTrace.value.length > 0) return;
+  const hasRows = taskTrace.value.length > 0;
+  if (hasRows) {
+    ensureTranscriptMode(id);
+    return;
+  }
   void store.loadTaskTrace(id);
 }
 onMounted(ensureTrace);
@@ -178,34 +206,8 @@ function rowActive(seq: number, index: number): boolean {
   return vmState.isActive(seq, index, vmRows.value.length, null);
 }
 
-/**
- * 行间距(px),必须与 `TaskTraceItem.vue` 的 `.sv-trace-item { margin-bottom }` 同值。
- *
- * **为什么占位高度要含它**:占位 div 是真实行的兄弟节点,真实行的高度里有 8px 下间距,
- * 占位却没有。每换一行就丢 8px,几百行的滚动位置会累积漂移——表现就是「滚到中段时
- * 列表突然跳一下」(UIFIX-8 实测)。这是等高占位的必要条件,不是保险。
- */
-const ROW_GAP_PX = 8;
-
-/** 占位高度:实测缓存(未渲染过则按角色估算)+ 行间距 */
 function placeholderStyle(seq: number): { height: string } {
-  return { height: `${vmState.placeholderHeight(seq, 'assistant') + ROW_GAP_PX}px` };
-}
-
-/**
- * 实测一行的高度(含行间距)。
- *
- * `offsetHeight` 只算元素自身盒高,不含子元素的 margin——真实行外层是个裸 div,
- * 里面的 `.sv-trace-item` 带 8px 下间距,直接取 `offsetHeight` 会系统性偏小。
- * 故量到子元素的实际外边距并补回;取不到就退回纯 offsetHeight(不虚构数值)。
- */
-function measureRow(el: HTMLElement): number {
-  const own = el.offsetHeight;
-  if (own <= 0) return 0;
-  const child = el.firstElementChild;
-  if (!child) return own + ROW_GAP_PX;
-  const mb = parseFloat(getComputedStyle(child).marginBottom);
-  return own + (Number.isFinite(mb) ? mb : ROW_GAP_PX);
+  return { height: `${vmState.placeholderHeight(seq, 'assistant')}px` };
 }
 
 /** 行元素登记(占位与真实行都登记;IO 据此上报进出缓冲区) */
@@ -252,8 +254,7 @@ function setupObserver(): void {
         if (entry.isIntersecting) {
           vmState.markVisible(seq);
         } else if (vmState.visible.has(seq)) {
-          // 用 measured 而非 offsetHeight:后者不含行间距,占位会比真实行矮(见 measureRow)
-          vmState.markHidden(seq, measureRow(el) || Math.round(entry.boundingClientRect.height));
+          vmState.markHidden(seq, el.offsetHeight || Math.round(entry.boundingClientRect.height));
         }
       }
     },
@@ -300,8 +301,6 @@ function toggleGroup(key: string): void {
   expandedGroups.value = next;
 }
 
-/** 全量角标已随档位条迁到 TaskTranscriptModes(UIFIX-8);本组件不再需要计数 */
-
 // ===== 「正在生成」活动指示(沿用 store 的流式缓冲)=====
 const liveRaw = computed(() => {
   const entries = [...store.liveBuffers.entries()];
@@ -330,8 +329,9 @@ onUnmounted(() => {
 </script>
 <template>
   <div class="sv-transcript" :data-mode="mode">
-    <!-- 档位切换条已迁出(UIFIX-8):住在 TaskStatusPanel 的 sticky 表头里
-         (TaskTranscriptModes.vue),滚到任何位置都能看到当前档并直接切换。 -->
+    <!-- 档位切换与轨迹总览已迁到常驻表头（UIFIX-8 的 TaskTranscriptModes）：它住在
+         TaskStatusPanel 的 sticky 区，一滚不消失。本组件只回答「实际渲染哪一档」，
+         用户选择（TMSHOW-3 的单任务覆盖）在那边写，这边只读。 -->
 
     <!-- 降级说明:轨迹为空时档 2/3 回退档 1,不让用户看到一片空白时间线 -->
     <div v-if="degraded" class="sv-transcript-note" role="status">
@@ -452,8 +452,6 @@ onUnmounted(() => {
 
 <style scoped>
 .sv-transcript { display: block; }
-
-/* 档位条的样式随组件迁到 TaskTranscriptModes.vue(UIFIX-8),此处不再保留。 */
 
 .sv-transcript-note {
   margin-bottom: var(--space-3);

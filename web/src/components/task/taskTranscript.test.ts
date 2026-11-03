@@ -6,6 +6,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
+import { nextTick } from 'vue';
 import type { TaskDetail, TaskRecord, TaskStep, TaskTrace } from '../../api';
 import { useAppStore } from '../../store';
 import { resetTaskTraceForTest } from '../../composables/useTaskTrace';
@@ -71,13 +72,13 @@ function traceRow(seq: number, over: Partial<TaskTrace> = {}): TaskTrace {
 }
 
 /** 播种 store(含轨迹行与档位),返回 store 便于后续断言 */
-function seed(detail: TaskDetail, rows: TaskTrace[] = [], mode: 'legacy' | 'full' | 'condensed' = 'full') {
+function seed(detail: TaskDetail, rows: TaskTrace[] = [], override: 'legacy' | 'full' | 'condensed' | null = null) {
   setActivePinia(createPinia());
   const store = useAppStore();
   store.currentTaskId = detail.task.id;
   store.currentTask = detail;
   store.taskTrace = rows;
-  store.setTaskTranscriptMode(mode);
+  if (override) store.setTaskTranscriptMode(override);
   return store;
 }
 
@@ -97,14 +98,49 @@ describe('档位切换条(UIFIX-8 起独立挂载于常驻表头)', () => {
     expect(wrapper.find('.sv-transcript-mode.active').text()).toBe('全消息');
   });
 
-  it('点击档位按钮写入 store(临时,不持久化)', async () => {
+  it('未设过覆盖时跟随设置页的默认档', () => {
+    const detail = makeDetail();
+    const store = seed(detail, [traceRow(1)], null);
+    store.setDefaultTaskTranscriptMode('condensed');
+    // 高亮在表头控件里(UIFIX-8 迁走后 TaskTranscript 不再渲染档位条),
+    // 渲染档位仍看本组件的 data-mode——两处同源但不同组件,故分别挂载。
+    const modes = mount(TaskTranscriptModes);
+    expect(modes.find('.sv-transcript-mode.active').text()).toBe('压缩');
+    const wrapper = mount(TaskTranscript, { props: { detail } });
+    expect(wrapper.attributes('data-mode')).toBe('condensed');
+  });
+
+  it('点档位按钮写本任务的覆盖键(不动全局默认档)', async () => {
     const detail = makeDetail();
     const store = seed(detail, [traceRow(1)], 'full');
+    // 先把默认档设成压缩并落盘(watch 只在值变化时写,故这里用与初值不同的档)
+    store.setDefaultTaskTranscriptMode('condensed');
+    await nextTick();
+    expect(memStorage.get('kedai.task-transcript-mode.v1')).toBe('condensed');
+
     const wrapper = mount(TaskTranscriptModes);
-    await wrapper.findAll('.sv-transcript-mode')[2].trigger('click');
+    await wrapper.findAll('.sv-transcript-mode')[0].trigger('click');
+    expect(store.taskTranscriptOverride).toBe('legacy');
+    // 覆盖写任务级键
+    expect(memStorage.get('kedai.task-transcript-mode.v1.t1')).toBe('legacy');
+    // 设置页的默认档不被顶栏控件改动
     expect(store.taskTranscriptMode).toBe('condensed');
-    // 不写 localStorage(TMSHOW-3 才做持久化)
-    expect([...memStorage.keys()]).toHaveLength(0);
+    await nextTick();
+    expect(memStorage.get('kedai.task-transcript-mode.v1')).toBe('condensed');
+  });
+
+  it('降级不改用户选择:空轨迹下高亮仍是用户选的档,但渲染落在档 1', () => {
+    const detail = makeDetail({}, {
+      plan: [{ name: '第一步', goal: '目标', status: 'done', result: '成果' }],
+    });
+    seed(detail, [], 'condensed');
+    // 高亮:用户选的是压缩(在表头控件里读,与渲染组件分离)
+    const modes = mount(TaskTranscriptModes);
+    expect(modes.find('.sv-transcript-mode.active').text()).toBe('压缩');
+    // 渲染:降到档 1
+    const wrapper = mount(TaskTranscript, { props: { detail } });
+    expect(wrapper.attributes('data-mode')).toBe('legacy');
+    expect(wrapper.text()).toContain('本任务没有可展示的执行轨迹');
   });
 
   it('档位条不再渲染在 TaskTranscript 内部(否则会随轨迹滚走)', () => {

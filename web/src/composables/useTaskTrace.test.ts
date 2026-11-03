@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   appendTrace,
   clearTaskTrace,
+  ensureTranscriptMode,
   loadTaskTrace,
   resetTaskTraceForTest,
   resumeTaskTrace,
@@ -11,8 +12,19 @@ import {
 } from './useTaskTrace';
 import type { TaskTrace, TaskTracePage } from '../api/types';
 
-// 轨迹状态模块单测(TMSHOW-2):分页拼接、seq 去重、缺口补拉、迟到守卫、清空。
+// 轨迹状态模块单测(TMSHOW-2 拼接去重 / TMSHOW-3 档位覆盖)。
 // api 层整体打桩——本文件只验证状态机的拼接与去重口径,不验证 HTTP。
+
+// node 环境无 localStorage(档位覆盖要读写它),补内存桩
+const memStorage = new Map<string, string>();
+vi.stubGlobal('localStorage', {
+  getItem: (k: string) => memStorage.get(k) ?? null,
+  setItem: (k: string, v: string) => void memStorage.set(k, String(v)),
+  removeItem: (k: string) => void memStorage.delete(k),
+  clear: () => memStorage.clear(),
+  key: (i: number) => [...memStorage.keys()][i] ?? null,
+  get length() { return memStorage.size; },
+});
 
 vi.mock('../api', () => ({
   getTaskTrace: vi.fn(),
@@ -45,6 +57,7 @@ function page(rows: TaskTrace[], truncated = false): TaskTracePage {
 
 beforeEach(() => {
   resetTaskTraceForTest();
+  memStorage.clear();
   getTaskTrace.mockReset();
 });
 
@@ -207,13 +220,67 @@ describe('clearTaskTrace 与档位', () => {
     expect(s.loading.value).toBe(false);
   });
 
-  it('档位默认 full,可切换到三档任一(TMSHOW-2 只做临时切换)', () => {
-    expect(useTaskTrace().mode.value).toBe('full');
-    setTranscriptMode('legacy');
-    expect(useTaskTrace().mode.value).toBe('legacy');
-    setTranscriptMode('condensed');
-    expect(useTaskTrace().mode.value).toBe('condensed');
-    setTranscriptMode('full');
-    expect(useTaskTrace().mode.value).toBe('full');
+  it('档位未覆盖时是 null(跟随设置页默认,不是「恰好等于 full」)', () => {
+    expect(useTaskTrace().modeOverride.value).toBeNull();
+  });
+
+  it('设置档位后写入本任务的覆盖键,并成为内存态', () => {
+    setTranscriptMode('t1', 'condensed');
+    expect(useTaskTrace().modeOverride.value).toBe('condensed');
+    expect(memStorage.get('kedai.task-transcript-mode.v1.t1')).toBe('condensed');
+  });
+
+  it('切任务清空覆盖(不留上一个任务的选择给新任务)', async () => {
+    setTranscriptMode('t1', 'condensed');
+    clearTaskTrace();
+    expect(useTaskTrace().modeOverride.value).toBeNull();
+  });
+
+  it('加载任务时按该任务的键读回覆盖', async () => {
+    memStorage.set('kedai.task-transcript-mode.v1.t1', 'legacy');
+    getTaskTrace.mockResolvedValueOnce(page([trace(1)]));
+    await loadTaskTrace('t1');
+    expect(useTaskTrace().modeOverride.value).toBe('legacy');
+  });
+
+  it('切任务各自记忆:A 的覆盖不会被 B 继承,B 无覆盖时为 null', async () => {
+    memStorage.set('kedai.task-transcript-mode.v1.t1', 'condensed');
+    memStorage.set('kedai.task-transcript-mode.v1.t2', 'legacy');
+    getTaskTrace.mockResolvedValueOnce(page([trace(1)]));
+    await loadTaskTrace('t1');
+    expect(useTaskTrace().modeOverride.value).toBe('condensed');
+    clearTaskTrace();
+    getTaskTrace.mockResolvedValueOnce(page([trace(1)]));
+    await loadTaskTrace('t2');
+    expect(useTaskTrace().modeOverride.value).toBe('legacy');
+    // t3 从没设过
+    clearTaskTrace();
+    getTaskTrace.mockResolvedValueOnce(page([trace(1)]));
+    await loadTaskTrace('t3');
+    expect(useTaskTrace().modeOverride.value).toBeNull();
+  });
+
+  it('ensureTranscriptMode:轨迹已在时重挂载也能读回覆盖', async () => {
+    memStorage.set('kedai.task-transcript-mode.v1.t1', 'condensed');
+    getTaskTrace.mockResolvedValueOnce(page([trace(1)]));
+    await loadTaskTrace('t1');
+    // 模拟组件重挂载:内存态被别的路径清掉,但 rows 还在
+    useTaskTrace().modeOverride.value = null;
+    ensureTranscriptMode('t1');
+    expect(useTaskTrace().modeOverride.value).toBe('condensed');
+  });
+
+  it('ensureTranscriptMode:不是当前任务时不动(迟到响应不得改写新任务的档位)', async () => {
+    getTaskTrace.mockResolvedValueOnce(page([trace(1)]));
+    await loadTaskTrace('t1');
+    memStorage.set('kedai.task-transcript-mode.v1.t2', 'legacy');
+    ensureTranscriptMode('t2');
+    expect(useTaskTrace().modeOverride.value).toBeNull();
+  });
+
+  it('空任务 id 只改内存态、不落盘(不凭空造无主键)', () => {
+    setTranscriptMode(null, 'legacy');
+    expect(useTaskTrace().modeOverride.value).toBe('legacy');
+    expect(memStorage.size).toBe(0);
   });
 });

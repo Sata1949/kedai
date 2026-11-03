@@ -16,7 +16,9 @@ import type { TaskTrace } from '../api/types';
  * - `full`:扁平全消息时间线——每条思考 / 工具调用 / 工具结果 / 步骤产出独立成条,按 `seq` 排序;
  * - `condensed`:按 `phase + step_index` 分组,每组一张卡,中间过程折叠其内,右下角显示分类计数。
  *
- * TMSHOW-2 只做渲染与临时切换(不持久化);默认档位与单任务覆盖记忆属 TMSHOW-3。
+ * 档位的**持久化**分两级(TMSHOW-3):设置页写默认档(`uiPrefs.taskTranscriptMode`,
+ * localStorage 全局键),任务详情顶栏写单任务覆盖(每任务一个键),未覆盖的任务跟随默认。
+ * 两级合成与降级判定的唯一入口是 `resolveTranscriptMode`——两个消费组件必须同式。
  */
 export type TranscriptMode = 'legacy' | 'full' | 'condensed';
 
@@ -49,6 +51,47 @@ export const TRACE_KIND_LABELS = {
   tool_result: '工具结果',
   step_result: '步骤产出',
 } satisfies Record<TaskTrace['kind'], string>;
+
+/**
+ * 用户**选择的**档位(单任务覆盖优先,未覆盖跟随默认)。
+ *
+ * 与 `resolveTranscriptMode` 的分工:本函数只回答「用户要哪一档」,不含降级。
+ * 分段控件的高亮、设置页的回显都用它;实际渲染哪一档用 `resolveTranscriptMode`。
+ * 两者分开正是为了守住「降级不改用户选择」这条不变量。
+ */
+export function requestedTranscriptMode(
+  override: TranscriptMode | null | undefined,
+  fallback: TranscriptMode,
+): TranscriptMode {
+  return override ?? fallback;
+}
+
+/**
+ * 合成生效档位与降级判定(TMSHOW-3;`TaskTranscript` 与 `TaskExecutionPanel` 共用)。
+ *
+ * 输入三项:
+ * - `override`:该任务的单任务覆盖(`null` = 未覆盖,跟随默认);
+ * - `fallback`:设置页的默认档;
+ * - `hasTrace`:当前任务是否有可展示的轨迹。
+ *
+ * 两条规则,顺序不可换:
+ * 1. **未覆盖跟随默认**:`override` 为 null 时用 `fallback` 补位。
+ * 2. **降级**:选了档 2/档 3 但轨迹为空(旧任务,或本次运行没有工具循环)时返回 `legacy`。
+ *    不降级会让用户看到一片空白时间线,那会被读成「加载失败」。
+ *
+ * **降级不改用户选择**:本函数只算「实际渲染哪一档」,用户选的档位仍由调用方经
+ * `requestedTranscriptMode` 原样显示(否则持久化的 full 在空轨迹任务上会被洗成 legacy,
+ * 换个任务回来就丢了)。
+ */
+export function resolveTranscriptMode(
+  override: TranscriptMode | null | undefined,
+  fallback: TranscriptMode,
+  hasTrace: boolean,
+): TranscriptMode {
+  const requested = requestedTranscriptMode(override, fallback);
+  if (requested === 'legacy') return 'legacy';
+  return hasTrace ? requested : 'legacy';
+}
 
 /** 分类计数(档 3 角标「思考 N · 工具 N · bash N」的数据源) */
 export interface TraceCounts {

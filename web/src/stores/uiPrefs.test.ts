@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
+import { nextTick } from 'vue';
 import { useUiPrefsStore } from './uiPrefs';
 
 // uiPrefs:Agent 面板「自动展开一次,收起后不再弹」语义。
@@ -91,8 +92,39 @@ describe('uiPrefs Agent 面板开合语义', () => {
   });
 });
 
-describe('uiPrefs 双库分叉提示(DB-7)', () => {
-  it('检测到另一套库时置位,并保留当前目录与另一套路径', () => {
+describe('uiPrefs 任务执行过程默认档(TMSHOW-3)', () => {
+  it('默认 full(不是 legacy;legacy 只是空轨迹时的降级落点)', () => {
+    const store = useUiPrefsStore();
+    expect(store.taskTranscriptMode).toBe('full');
+  });
+
+  it('设置默认档后写入 localStorage 全局键(不是任务级键)', async () => {
+    const store = useUiPrefsStore();
+    store.setDefaultTaskTranscriptMode('condensed');
+    expect(store.taskTranscriptMode).toBe('condensed');
+    // 持久化走 watch(pre-flush),落盘发生在下一轮微任务
+    await nextTick();
+    expect(memStorage.get('kedai.task-transcript-mode.v1')).toBe('condensed');
+    // 不能顺手写出一堆任务级键:任务级是顶栏写覆盖的地方
+    expect([...memStorage.keys()].filter((k) => k.endsWith('.t1'))).toHaveLength(0);
+  });
+
+  it('store 首次创建时从 localStorage 读回默认档(刷新保持)', () => {
+    memStorage.set('kedai.task-transcript-mode.v1', 'legacy');
+    setActivePinia(createPinia());
+    const store = useUiPrefsStore();
+    expect(store.taskTranscriptMode).toBe('legacy');
+  });
+
+  it('localStorage 里的非法值回退 full(不把脏值当成用户偏好)', () => {
+    memStorage.set('kedai.task-transcript-mode.v1', 'verbose');
+    setActivePinia(createPinia());
+    const store = useUiPrefsStore();
+    expect(store.taskTranscriptMode).toBe('full');
+  });
+});
+
+describe('uiPrefs 双库分叉提示(DB-7)', () => {  it('检测到另一套库时置位,并保留当前目录与另一套路径', () => {
     const store = useUiPrefsStore();
     expect(store.splitDataDirs).toBeNull();
     store.setSplitDataDirs({
