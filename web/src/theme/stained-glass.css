@@ -535,11 +535,13 @@ html[data-theme='stained-glass'] .sv-task-start-grid {
 html[data-theme='stained-glass'] .sv-start-copy { padding-top: 8px; min-width: 0; }
 
 /* 留白治理：内容只占画布上半部、下方空一大片，是「没做完」的观感。
-   解法不是塞装饰条，而是让版式**纵向撑满、把内容按阅读节奏分散**：
-   说明区保持紧凑（标题→描述→步骤是一组），只在「步骤」与「模式/按钮」
-   之间、以及右栏「清单」与「页脚提示」之间拉开距离。
-   注意不能整块用 space-between——那会把标题和描述之间也撑出上百像素的缝，
-   读起来像两段无关的内容（第一版实测就是这样）。 */
+   解法不是塞装饰条，而是让版式**纵向撑满、按阅读节奏分散**。
+
+   **2026-11-03（UIPOL-3）**：基础节奏（步骤表→模式清单、清单→页脚的间隔）已下沉到
+   组件 scoped，两个主题共用。彩窗**额外**保留两条：本主题的版心是满幅画布、
+   可用高度比默认主题多约一倍，故两栏在容器内撑满并把模式清单/页脚压到两端
+   （`margin-top: auto`）。默认主题不能用 auto——内容只占容器一半，
+   推到两端会出现 440px 空缝（实测，见 TaskBoardEmpty.vue 注释）。 */
 html[data-theme='stained-glass'] .sv-task-start,
 html[data-theme='stained-glass'] .sv-task-start-grid {
   height: 100%;
@@ -560,7 +562,6 @@ html[data-theme='stained-glass'] .sv-task-start-copy > .sv-task-start-modes {
 html[data-theme='stained-glass'] .sv-task-start-copy > .sv-task-start-actions {
   margin-top: clamp(16px, 2.4vh, 28px);
 }
-/* 右栏：清单与页脚提示分到两端 */
 html[data-theme='stained-glass'] .sv-task-start-spec {
   display: flex;
   flex-direction: column;

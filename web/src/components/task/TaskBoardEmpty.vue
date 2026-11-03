@@ -122,6 +122,11 @@ function openTaskComposer(): void {
   gap: clamp(var(--space-8), 5vw, calc(var(--space-8) * 2));
   align-items: start;
 }
+/* 纵向节奏（UIPOL-3）：改前内容高 361 而容器 730（1440×900 实测），所有间距都是
+   16/16/20px 的固定档，整块读作一条密实的窄带。
+   分散**必须有上限**：第一版用 `margin-top: auto` 把模式清单推到容器底部，
+   实测出现 440px 的空缝，比原问题更糟。故左栏用 clamp 封顶，只让右栏的
+   页脚提示贴底（页脚贴底是版式惯例，且右栏内容本身更短）。 */
 .sv-task-start-copy { min-width: 0; }
 .sv-task-start-kicker {
   display: flex;
@@ -179,8 +184,10 @@ function openTaskComposer(): void {
 .sv-task-start-modes {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-1-5);
-  margin-top: var(--space-4);
+  gap: var(--space-2);
+  /* 分散断点①：步骤表与模式清单之间从固定 16px 拉开到 24~56px（随视口高度）。
+     clamp 上限是关键——无上限的 auto 会拉出数百像素的空白。 */
+  margin-top: clamp(var(--space-6), 4vh, calc(var(--space-8) + var(--space-6)));
 }
 .sv-task-start-mode {
   padding: var(--space-1) var(--space-2);
@@ -228,7 +235,8 @@ function openTaskComposer(): void {
   display: grid;
   grid-template-columns: 70px minmax(0, 1fr);
   gap: var(--space-3);
-  padding: var(--space-2-5) 0;
+  /* 行距 20px → 24px:四行挤成一张密集表格读不出层次(UIPOL-3 实测)。 */
+  padding: var(--space-3) 0;
   border-bottom: 1px solid var(--sv-line);
 }
 .sv-task-start-spec-list dt {
@@ -248,7 +256,10 @@ function openTaskComposer(): void {
   display: flex;
   align-items: flex-start;
   gap: var(--space-2);
-  margin-top: var(--space-3);
+  /* 分散断点②：页脚提示与上方清单之间同样用带上限的间隔。 */
+  margin-top: clamp(var(--space-5), 3.5vh, calc(var(--space-8) + var(--space-4)));
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--sv-line);
   font-size: var(--text-xs);
   line-height: var(--lh-body);
   color: var(--sv-ink-dim);
@@ -280,5 +291,8 @@ function openTaskComposer(): void {
   }
   .sv-task-start-steps li:last-child { border-bottom: 0; }
   .sv-task-start-spec-list > div { padding: var(--space-2) 0; }
+  /* 窄屏内容已接近满高：还原紧凑节奏，否则 clamp 的下限也会在手机上撑出空缝。 */
+  .sv-task-start-modes { margin-top: var(--space-4); }
+  .sv-task-start-spec-foot { margin-top: var(--space-3); padding-top: 0; border-top: 0; }
 }
 </style>
