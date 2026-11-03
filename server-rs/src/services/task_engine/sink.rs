@@ -296,8 +296,14 @@ mod tests {
             "应还原成结构化字段,实际:{content}"
         );
         // 不再有「外层包一层引号 + 内层引号被判转义」的双重转义
-        assert!(!content.contains(r#"\""#), "不应残留转义引号,实际:{content}");
-        assert!(!content.starts_with('"'), "不应整体被包成字符串,实际:{content}");
+        assert!(
+            !content.contains(r#"\""#),
+            "不应残留转义引号,实际:{content}"
+        );
+        assert!(
+            !content.starts_with('"'),
+            "不应整体被包成字符串,实际:{content}"
+        );
     }
 
     /// bash stdout 是**真正的文本**,不是被搬运的结构化参数——不能二次解析,
