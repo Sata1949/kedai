@@ -1294,9 +1294,10 @@ impl TaskService {
             false,
             false,
         );
+        let user = self.legacy_step_user_message(task, &step.goal);
         let messages = vec![
             LlmMessage::plain("system", &sys),
-            LlmMessage::plain("user", &step.goal),
+            LlmMessage::plain("user", &user),
         ];
         self.generate_text(
             &task.id,
@@ -1372,16 +1373,7 @@ impl TaskService {
                 crate::services::prompt_kit::untrusted_boundary_task("agent_prompt", &rendered)
             ));
         }
-        let mut user = format!("用户目标:\n{}\n\n各步骤结果:\n", task.title);
-        for (i, s) in plan.iter().enumerate() {
-            user.push_str(&format!(
-                "{}. {}({}):\n{}\n",
-                i + 1,
-                s.name,
-                s.status.as_str(),
-                s.result
-            ));
-        }
+        let user = self.legacy_summary_user_message(task, plan);
         let messages = vec![
             LlmMessage::plain("system", &sys),
             LlmMessage::plain("user", &user),

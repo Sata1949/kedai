@@ -384,6 +384,10 @@ impl TaskEngine {
                 &goal_text,
                 &list,
                 crate::services::settings_service::vision_enabled(&settings),
+                // legacy 是「三段纯文本生成」(StepCapability::NoTools),拿不到任何工具
+                // ——注入文案必须如实说「读不了」,否则模型会照做之后回报
+                // 「读取工具返回空白」(2026-11-03 真实模型实测抓到)。
+                !matches!(task.task_mode, TaskRunMode::Legacy),
             ),
             Ok(_) => goal_text,
             Err(e) => {

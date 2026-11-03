@@ -200,3 +200,54 @@ async fn image_attachment_hint_reflects_vision_flag() {
         "视觉关闭时不得预告 view_image 可用: {prompt}"
     );
 }
+
+/// **legacy 的步骤执行与汇总也必须看到附件段**（ATTACH-1-L1，2026-11-03 真实模型实测抓到）。
+///
+/// 此前只修了规划器（它拿 `ctx.goal`），但 legacy 的 `generate_step` 读的是
+/// **规划器写的 `step.goal`**、`summarize_task` 读的是 `task.title`——两者都不含
+/// 附件清单。真实模型的表现是：规划器看得到附件，执行阶段却回答「我没有收到任何附件」。
+#[tokio::test]
+async fn legacy_step_and_summarize_see_attachment_section() {
+    let _g = test_lock().await;
+    let app = test_app();
+    // 规划器返回一个普通步骤；步骤回显用 [[floors]] 让执行器回显实际收到的消息
+    let title = echo_title("读附件");
+    let id = create_task(app, &title, json!({ "task_mode": "legacy" })).await;
+    upload_attachment(app, &id, "legacy说明.txt", "LEGACY-BODY-MARK".as_bytes()).await;
+
+    let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
+    let (st, detail) = wait_terminal(app, &id).await;
+    assert_eq!(st, "done", "任务应完成: {detail}");
+
+    // 逐 phase 检查：step 与 summarize 都必须带附件段
+    let (status, calls) = send_json(app, "GET", &format!("/api/tasks/{id}/calls"), json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = calls["calls"].as_array().expect("calls 应为数组");
+    let by_phase = |phase: &str| -> String {
+        rows.iter()
+            .filter(|r| r["phase"] == phase)
+            .filter_map(|r| r["prompt_summary"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let step_prompt = by_phase("step");
+    assert!(
+        step_prompt.contains("## 附件"),
+        "**步骤执行**必须看到附件段(否则模型会说「没收到附件」): {step_prompt}"
+    );
+    assert!(
+        step_prompt.contains("legacy说明.txt"),
+        "步骤提示应带附件展示名: {step_prompt}"
+    );
+    let summary_prompt = by_phase("summarize");
+    assert!(
+        summary_prompt.contains("## 附件"),
+        "**汇总**也要看到附件段: {summary_prompt}"
+    );
+    // 正文不内联（只给清单）
+    assert!(
+        !step_prompt.contains("LEGACY-BODY-MARK"),
+        "附件正文不得内联进步骤提示: {step_prompt}"
+    );
+}
