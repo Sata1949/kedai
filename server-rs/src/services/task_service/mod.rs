@@ -47,6 +47,8 @@ pub(crate) mod prompt;
 pub(crate) mod runtime_issues;
 pub(crate) mod scratch;
 pub(crate) mod trace;
+// legacy 三段纯文本生成的附件注入(ATTACH-1-L1:executor.rs 有只降不升基线)
+pub(crate) mod legacy_attachments;
 // 任务附件(ATTACH-1):用户随任务提供的任意文件的落盘与元数据
 pub(crate) mod attachments;
 
