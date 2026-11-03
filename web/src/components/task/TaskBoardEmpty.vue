@@ -122,7 +122,7 @@ function openTaskComposer(): void {
   gap: clamp(var(--space-8), 5vw, calc(var(--space-8) * 2));
   align-items: start;
 }
-/* 纵向节奏（UIPOL-3）：改前内容高 361 而容器 730（1440×900 实测），所有间距都是
+/* 纵向节奏（UIPOL-4）：改前内容高 361 而容器 730（1440×900 实测），所有间距都是
    16/16/20px 的固定档，整块读作一条密实的窄带。
    分散**必须有上限**：第一版用 `margin-top: auto` 把模式清单推到容器底部，
    实测出现 440px 的空缝，比原问题更糟。故左栏用 clamp 封顶，只让右栏的
@@ -235,7 +235,7 @@ function openTaskComposer(): void {
   display: grid;
   grid-template-columns: 70px minmax(0, 1fr);
   gap: var(--space-3);
-  /* 行距 20px → 24px:四行挤成一张密集表格读不出层次(UIPOL-3 实测)。 */
+  /* 行距 20px → 24px:四行挤成一张密集表格读不出层次(UIPOL-4 实测)。 */
   padding: var(--space-3) 0;
   border-bottom: 1px solid var(--sv-line);
 }
