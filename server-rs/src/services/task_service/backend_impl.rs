@@ -17,6 +17,7 @@ use crate::models::types::{
 };
 use crate::services::agent_flow_service::FlowSnapshot;
 use crate::services::settings_service::RuntimeSettings;
+use crate::services::task_core::backend::TaskAttachmentBrief;
 use crate::services::task_core::{
     DeltaBatcher, TaskEvents, TaskFlowAccess, TaskGenerator, TaskPromptKit, TaskScratch,
     TaskSettings, TaskStore, TaskTerminal, TaskTerminalSink, TaskTimeline, TaskTrace,
@@ -235,6 +236,18 @@ impl TaskTerminalSink for TaskService {
 impl TaskScratch for TaskService {
     fn scratch_dir_for(&self, task_id: &str) -> Result<std::path::PathBuf, String> {
         TaskService::scratch_dir_for(self, task_id)
+    }
+
+    fn list_task_attachments(&self, task_id: &str) -> Result<Vec<TaskAttachmentBrief>, String> {
+        Ok(TaskService::list_attachments(self, task_id)?
+            .into_iter()
+            .map(|a| TaskAttachmentBrief {
+                name: a.name,
+                rel_path: a.rel_path,
+                size: a.size,
+                mime: a.mime,
+            })
+            .collect())
     }
 }
 

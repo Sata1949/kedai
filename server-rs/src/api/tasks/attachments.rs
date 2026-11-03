@@ -169,18 +169,6 @@ fn sniff_mime(name: &str) -> Option<String> {
     Some(mime.to_string())
 }
 
-/// 目标注入用:附件是不是「能被视觉工具查看的图像」。
-///
-/// 与 `sniff_mime` 同源判定，但单独导出给 `task_engine::attachments` 用——
-/// 注入段不该反向依赖 HTTP 层。注意 SVG 也算图像(MIME 是 image/*)，但
-/// `view_image` 解码 SVG 的能力取决于上游，故注入文案对 SVG 另作说明。
-// 提交 1 只落地数据层，消费点在提交 2 的目标注入段；此处先允许未使用，
-// 免得 `cargo clippy -D warnings` 在中间提交上转红（提交 2 会删掉这行）。
-#[allow(dead_code)]
-pub(crate) fn is_image_mime(mime: Option<&str>) -> bool {
-    mime.is_some_and(|m| m.starts_with("image/"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,13 +181,5 @@ mod tests {
         assert_eq!(sniff_mime("x.json").as_deref(), Some("application/json"));
         assert_eq!(sniff_mime("noext"), None);
         assert_eq!(sniff_mime("a.unknownext"), None);
-    }
-
-    /// 图像判定只认 image/* 前缀。
-    #[test]
-    fn image_mime_detection() {
-        assert!(is_image_mime(Some("image/png")));
-        assert!(!is_image_mime(Some("text/plain")));
-        assert!(!is_image_mime(None));
     }
 }

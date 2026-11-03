@@ -49,6 +49,13 @@ impl ModeExecutor for LegacyExecutor {
                 return Ok((TaskTerminal::Noop, usage));
             };
 
+            // 规划用的目标文本:**用 `ctx.goal` 而不是 `task.title`**。
+            // `task.title` 是用户原始输入;`ctx.goal` 还含任务附件的清单段(ATTACH-1)
+            // 与批准/追加轮次拼进目标的上下文。此前这里读 title,导致附件段对 legacy
+            // 模式完全无效——其它五模式都消费 `ctx.goal`,只有 legacy 是例外,
+            // 而这个例外没有任何理由(legacy 的规划器同样需要知道有这个文件)。
+            let goal_text = ctx.goal.clone();
+
             // 1) 规划(带解析与分级重试:截断/空输出翻倍 max_tokens,最多 PLAN_MAX_ATTEMPTS 次)
             // 能力事实 = NoTools:本模式的步骤走 generate_step_retry(纯文本生成),
             // **没有任何工具**——规划器必须知道这点,否则会把交付物规划成文件(D1 实测)。
@@ -56,7 +63,7 @@ impl ModeExecutor for LegacyExecutor {
             let (plan, plan_out) = match super::retry::plan_task_retry(
                 svc.as_ref(),
                 task_id,
-                &task.title,
+                &goal_text,
                 task.character_id.as_deref(),
                 &cancel,
                 ctx.scope.clone(),

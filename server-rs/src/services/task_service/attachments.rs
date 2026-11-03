@@ -244,26 +244,6 @@ impl TaskService {
         Ok(true)
     }
 
-    /// 附件在**相对路径**下的存在性(供目标注入如实说明「文件还在不在」)。
-    ///
-    /// 只做 stat，不读正文——注入段不该因为附件很大而变慢。
-    // 提交 1 只落地数据层，消费点在提交 2 的目标注入段；此处先允许未使用。
-    #[allow(dead_code)]
-    pub(crate) fn attachment_exists(&self, task: &TaskRecord, rel_path: &str) -> bool {
-        match task
-            .workspace
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            Some(ws) => Path::new(ws).join(rel_path).is_file(),
-            None => self
-                .existing_scratch_dir(&task.id)
-                .map(|d| d.join(rel_path).is_file())
-                .unwrap_or(false),
-        }
-    }
-
     /// 单条附件是否存在(按 id;详情/删除路径的辅助)。
     #[allow(dead_code)]
     pub(crate) fn find_attachment(
@@ -431,7 +411,10 @@ mod tests {
         assert_eq!(sanitize_file_name("接口 说明.txt"), "接口_说明.txt");
         // 真实链路是「先 sanitize_display_name 去路径段,再 sanitize_file_name」;
         // 单独喂一个带分隔符的串时,分隔符会被替换而不是制造目录层级——两者都不能穿越。
-        assert_eq!(sanitize_file_name(&sanitize_display_name("../../etc/passwd")), "passwd");
+        assert_eq!(
+            sanitize_file_name(&sanitize_display_name("../../etc/passwd")),
+            "passwd"
+        );
         let direct = sanitize_file_name("../../etc/passwd");
         // 落盘名只保留字母数字与 -/_，其余（含路径分隔符）全部替换。
         assert!(
