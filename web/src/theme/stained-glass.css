@@ -294,6 +294,46 @@ html[data-theme='stained-glass'] .sv-taskboard,
 html[data-theme='stained-glass'] .sv-stage,
 html[data-theme='stained-glass'] .sv-task-stage { background: transparent; }
 
+/* ============ 任务台（ATTACH-1 观感批，2026-11-03） ============
+   此前任务台在彩窗主题里几乎没有主题化：详情区的顶段带仍是**默认主题的红黑条**
+   （--sv-top-stripe 在彩窗令牌里沿用了默认值），sticky 表头与侧栏底部三按钮也全部
+   沿用默认令牌。这三处与周围「石室与光」不同源，是实测能一眼看出的不一致。
+
+   段带为什么不能用拼片：.sv-task-detail 属**内容层**，拼片铺上去文字必跨铅条
+   （stainedGlassCss.test.ts 第 3 条机检）。这里只用纯色 + 渐变。 */
+html[data-theme='stained-glass'] .sv-task-detail {
+  /* 红宝石 → 金 → 蓝宝石：与侧栏窗楣同一套三色，长度按内容层的克制尺度缩短 */
+  background-image: linear-gradient(90deg,
+    var(--kg-ruby) 0 44px,
+    var(--kg-gold) 44px 58px,
+    var(--kg-sapphire) 58px 76px,
+    transparent 76px);
+}
+
+/* 常驻表头：实色玻璃 + 底部金线（与侧栏「窗台」同族）。
+   背景必须是实色——sticky 元素透出下面是内容层的可读性问题，不是审美问题。 */
+html[data-theme='stained-glass'] .sv-task-sticky {
+  background-color: var(--kg-glass);
+  border-bottom-color: rgba(150, 120, 72, 0.42);
+}
+
+/* 侧栏底部三按钮：与「窗台」同族。
+   注意「综合设置」是 .sv-btn.primary——它的底色来自 panels.css 的**简写**
+   `background: var(--sv-ink)`，主题这里若只写 background-color 会被简写覆盖
+   （实测仍是纯黑 rgb(34,27,39)）。故用 background-color + background-image: none
+   把简写的两层分别钉住，而不是靠提特异性。 */
+html[data-theme='stained-glass'] .sv-side-foot {
+  border-top-color: rgba(150, 120, 72, 0.42);
+}
+html[data-theme='stained-glass'] .sv-side-foot .sv-btn:not(.primary) {
+  border-color: rgba(120, 100, 72, 0.42);
+  color: var(--kg-ink-soft);
+}
+html[data-theme='stained-glass'] .sv-side-foot .sv-btn:not(.primary):hover {
+  border-color: var(--kg-gold);
+  color: var(--kg-ink);
+}
+
 /* ============ 石梁上的文字：顶栏/侧栏头是近黑，里面的深色文字必须翻成暖白 ============
    这条不能省：顶栏从「半透明深蓝」改为「近黑石梁」后，token 卡片、开关标签等
    原本落在浅底上的深色文字会直接压成 1.2~2.9:1（2026-11-02 实测抓到 6 处）。 */
@@ -403,6 +443,10 @@ html[data-theme='stained-glass'] .sv-side-head .sv-sidebar-close,
 html[data-theme='stained-glass'] .sv-sidebar-close {
   color: #f0e8d6;
   border-color: rgba(240, 232, 214, 0.36);
+  /* 背景必须一起改：mobile.css 给的是 `background: var(--sv-white)`，在彩窗令牌下是
+     近白 #fdf8ec。只翻 color 会让暖白字压在近白底上——2026-11-03 窄视口实测 1.15:1。
+     用简写 `background` 与基础样式同构（长写会留下 background-image 未清）。 */
+  background: transparent;
 }
 html[data-theme='stained-glass'] .sv-sidebar-close:hover { background: rgba(240, 232, 214, 0.12); }
 html[data-theme='stained-glass'] .sv-topbar :focus-visible,
@@ -740,6 +784,24 @@ html[data-theme='stained-glass'] .sv-btn-send:not(:disabled) {
     inset 0 -8px 12px rgba(0, 0, 0, 0.30),
     inset 0 0 0 1px rgba(206, 166, 100, 0.40);
 }
+/* 侧栏底部的主按钮（「综合设置」）。
+   为什么单独一条、且必须放在上面这条**之后**：
+   - 上面那条带 `:not(:disabled)`，特异性 (0,4,0)，与
+     `html[data-theme] .sv-side-foot .sv-btn.primary` 同档；同档时**源序后者胜**，
+     所以本规则必须写在它后面（写在前面时实测计算值仍是纯黑 rgb(34,27,39)）。
+   - 主题给它的是「窗台按钮」的小尺寸材质，不需要整块拼片（拼片只许顶栏/选中态/
+     主行动按钮三处，见 stainedGlassCss.test.ts 第 2 条），故显式抹掉拼片与多层渐变。 */
+html[data-theme='stained-glass'] .sv-side-foot .sv-btn.primary {
+  /* **只写长写、绝不与简写混用**：同一条规则里既写 `background: var(--kg-ruby)`
+     又写 `background-image: none` 时，浏览器无法在解析期求值 var()，会把简写降级成
+     一串空子属性（实测 CSSOM：background-color 为空、background-image: none），
+     结果整条规则等于没设底色。长写不涉及子属性展开，var() 在计算期照常求值。 */
+  background-color: var(--kg-ruby);
+  background-image: none;
+  border-color: var(--kg-lead);
+  color: #fdf7e8;
+  box-shadow: inset 0 1px 0 rgba(255, 252, 242, 0.28);
+}
 
 /* 禁用态主按钮：仍要是「一块玻璃」，但明确不可按。
    注意不能用「背景与文字同色」的意外结果——任务模式「创建并执行」
@@ -826,15 +888,25 @@ html[data-theme='stained-glass'] .hub-sub-item.active {
   background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.12), transparent 44%);
   background-size: 100% 100%;
 }
-/* 表单控件：玻璃内凹 */
+/* 表单控件：玻璃内凹。
+   2026-11-03 起**合并了侧栏**：此前只覆盖 .sv-modal，侧栏的模式下拉 / 连接下拉 /
+   工作区输入框在彩窗主题下仍是近白底 rgb(253,248,236)，与周围素玻璃不同源。
+   合并成一份声明而不是复制一份——同样的材质写两遍是 gzip 余量（版权 533）里的白付。 */
 html[data-theme='stained-glass'] .sv-modal input[type='text'],
 html[data-theme='stained-glass'] .sv-modal input[type='password'],
 html[data-theme='stained-glass'] .sv-modal input[type='number'],
 html[data-theme='stained-glass'] .sv-modal select,
-html[data-theme='stained-glass'] .sv-modal textarea {
-  background: #faf5e8;
+html[data-theme='stained-glass'] .sv-modal textarea,
+html[data-theme='stained-glass'] .sv-sidebar select.sv-select,
+html[data-theme='stained-glass'] .sv-sidebar input.sv-input,
+html[data-theme='stained-glass'] .sv-sidebar textarea.sv-input {
+  background-color: #faf5e8;
   border-color: rgba(120, 100, 72, 0.34);
   box-shadow: inset 0 1px 2px rgba(100, 80, 52, 0.06);
+  /* 显式给定深墨：侧栏头那条 `.sv-side-head * { color: #f0e8d6 }` 会把头内控件
+     文字刷成暖白，压在浅玻璃上只有约 1.2:1。侧栏正文区虽不在 side-head 内，
+     但把 color 写死可以让这条规则在两种挂载位置都安全。 */
+  color: var(--kg-ink);
 }
 /* 分离面（Agent 抽屉） */
 html[data-theme='stained-glass'] .sv-agent-panel.open {
