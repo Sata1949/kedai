@@ -384,6 +384,26 @@ pub(crate) trait TaskGenerator: Send + Sync {
 pub(crate) trait TaskScratch: Send + Sync {
     /// 任务 scratch 目录:`<scratch_root>/<task_id>`,不存在则创建。
     fn scratch_dir_for(&self, task_id: &str) -> Result<std::path::PathBuf, String>;
+
+    /// 任务附件清单(ATTACH-1)。
+    ///
+    /// 挂在窄接口 9 而不是新开一条:附件与 scratch 同属「任务的文件作用域」,
+    /// 消费方也只有同一处(`task_engine::run_inner` 拼目标文本)。
+    /// 返回类型用**无结构的 `(name, rel_path, size, mime)` 四元组**,不把
+    /// `TaskAttachmentRecord`(宿主侧的类型)泄进 task_core:`task_core` 是窄接口层,
+    /// 不认识 DB 行;真需要整行时再另立接口(与 `TaskTrace` / `TaskTimeline` 的
+    /// 「名字相近、职责不同」同一处置)。
+    fn list_task_attachments(&self, task_id: &str) -> Result<Vec<TaskAttachmentBrief>, String>;
+}
+
+/// 目标注入只需要这四个字段:名字(给人看)、相对路径(给 `fs_read` 用)、
+/// 大小(给模型判断要不要读)与 MIME(决定 fs_read 还是 view_image)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TaskAttachmentBrief {
+    pub name: String,
+    pub rel_path: String,
+    pub size: i64,
+    pub mime: Option<String>,
 }
 
 // ==================== 窄接口(10/10):任务执行轨迹(TMSHOW-1) ====================

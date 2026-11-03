@@ -87,3 +87,29 @@ export async function uploadForm<T>(
   if (!res.ok) throw await toApiError(res);
   return (await res.json()) as T;
 }
+
+/**
+ * multipart **多文件**上传(任务附件专用;ATTACH-1)。
+ *
+ * 与 `uploadForm` 的区别只有两处:
+ * - 每个文件都作为独立的 `file` part 追加(后端按 part 逐个入库),而不是只传第一个;
+ * - 不设 `accept`/大小校验——那是调用方与后端的职责(后端限制单任务 10 个 / 单文件 25MB)。
+ *
+ * 其余语义与 `uploadForm` 完全一致(不设 Content-Type、401 重引导重试一次)。
+ * 保留 `uploadForm` 不动:四个既有上传端点的行为不该因为新需求而变。
+ */
+export async function uploadFormMultiple<T>(
+  path: string,
+  files: File[],
+  extra: Record<string, string> = {},
+): Promise<T> {
+  const form = new FormData();
+  for (const f of files) form.append('file', f);
+  for (const [k, v] of Object.entries(extra)) form.append(k, v);
+
+  const res = await retryOnUnauthorized(() =>
+    authorizedFetch(`${BASE}${path}`, { method: 'POST', body: form }, false),
+  );
+  if (!res.ok) throw await toApiError(res);
+  return (await res.json()) as T;
+}

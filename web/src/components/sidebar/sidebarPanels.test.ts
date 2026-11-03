@@ -165,6 +165,36 @@ describe('C-2A 侧栏面板拆分', () => {
     expect(store.runTask).toHaveBeenCalledWith('t1');
   });
 
+  it('TaskComposer:待上传附件在起跑前刷到新任务(ATTACH-1 时序)', async () => {
+    const store = freshStore();
+    store.appMode = 'task';
+    store.createTask = vi.fn().mockResolvedValue(makeTask());
+    store.runTask = vi.fn().mockResolvedValue(undefined);
+    store.loadExecutors = vi.fn().mockResolvedValue(undefined);
+    const { resetTaskAttachmentsForTest, useTaskAttachments } = await import('../../composables/useTaskAttachments');
+    const api = await import('../../api/tasks');
+    resetTaskAttachmentsForTest();
+    const attachments = useTaskAttachments();
+    // 队列里先放一个附件(模拟「没选中任务时先导入」);上传本身打桩,本用例只测时序
+    attachments.enqueue([new File(['x'], 'spec.txt', { type: 'text/plain' })]);
+    const uploadSpy = vi.spyOn(api, 'uploadTaskAttachments').mockResolvedValue([]);
+    const order: string[] = [];
+    uploadSpy.mockImplementation(async () => { order.push('upload'); return []; });
+    (store.runTask as ReturnType<typeof vi.fn>).mockImplementation(async () => { order.push('run'); });
+    const wrapper = mount(TaskComposer);
+    await wrapper.find('textarea').setValue('整理附件');
+    const submit = wrapper.findAll('button').find((b) => b.text().includes('创建并执行'));
+    if (!submit) throw new Error('创建按钮应存在');
+    await submit.trigger('click');
+    await flushPromises();
+    // **关键时序**:附件必须在 run 之前上传——目标文本在 run 起点组装,
+    // 晚一步传的附件这一轮就进不了注入段。
+    expect(uploadSpy).toHaveBeenCalledWith('t1', [expect.any(File)]);
+    expect(order).toEqual(['upload', 'run']);
+    expect(attachments.pendingFiles.value).toHaveLength(0);
+    uploadSpy.mockRestore();
+  });
+
   it('TaskComposer:工作区 placeholder 与清空入口保留(源契约的 DOM 侧)', async () => {
     const store = freshStore();
     store.appMode = 'task';
@@ -198,10 +228,12 @@ describe('C-2A 侧栏面板拆分', () => {
     expect(store.selectTask).toHaveBeenCalledWith('t1');
   });
 
-  it('SidebarFooter:导入/设置/退出入口与 state 开关', async () => {
+  it('SidebarFooter:角色扮演模式仍是「导入角色卡」(ATTACH-1 未改动该路径)', async () => {
     const store = freshStore();
+    store.appMode = 'roleplay';
     const wrapper = mount(SidebarFooter);
     expect(wrapper.text()).toContain('导入角色卡');
+    expect(wrapper.text()).not.toContain('导入附件');
     expect(wrapper.text()).toContain('综合设置');
     expect(wrapper.text()).toContain('退出 Kedai');
     const settings = wrapper.findAll('button').find((b) => b.text().includes('综合设置'));
@@ -213,5 +245,36 @@ describe('C-2A 侧栏面板拆分', () => {
     expect(store.exitConfirmOpen).toBe(true);
     // 隐藏 file input 用于导入(事件通道由 ChatWindow 空态复用)
     expect(wrapper.find('input[type="file"]').exists()).toBe(true);
+  });
+
+  // ==================== ATTACH-1(2026-11-03)任务附件入口 ====================
+
+  it('SidebarFooter:任务模式改「导入附件」,input 无 accept 且支持多选', async () => {
+    const store = freshStore();
+    store.appMode = 'task';
+    const wrapper = mount(SidebarFooter);
+    expect(wrapper.text()).toContain('导入附件');
+    expect(wrapper.text()).not.toContain('导入角色卡');
+    // 两个 file input 同时存在(角色卡那份保留,切回角色扮演即用)
+    const inputs = wrapper.findAll('input[type="file"]');
+    expect(inputs).toHaveLength(2);
+    const taskInput = inputs[1];
+    expect(taskInput.attributes('accept')).toBeUndefined();
+    expect(taskInput.attributes('multiple')).toBeDefined();
+  });
+
+  it('SidebarFooter:任务模式无选中任务时附件进待上传队列', async () => {
+    const store = freshStore();
+    store.appMode = 'task';
+    store.currentTaskId = null;
+    const { resetTaskAttachmentsForTest, useTaskAttachments } = await import('../../composables/useTaskAttachments');
+    resetTaskAttachmentsForTest();
+    const wrapper = mount(SidebarFooter);
+    const input = wrapper.findAll('input[type="file"]')[1];
+    const file = new File(['abc'], 'spec.txt', { type: 'text/plain' });
+    Object.defineProperty(input.element, 'files', { value: [file], configurable: true });
+    await input.trigger('change');
+    await flushPromises();
+    expect(useTaskAttachments().pendingFiles.value.map((p) => p.file.name)).toEqual(['spec.txt']);
   });
 });

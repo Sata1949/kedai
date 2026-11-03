@@ -19,6 +19,7 @@
 //   retry.rs     空输出/规划分级重试算法(批次 4.2 自 task_service 上移)
 //   parse.rs     计划 JSON 解析(批次 4.2 自 task_service 上移)
 //   esm_boundary.rs 单文件交付的 ESM/模块边界判定(SKY-10)
+pub(crate) mod attachments;
 pub(crate) mod context;
 pub(crate) mod custom;
 pub(crate) mod delivery;
@@ -375,6 +376,24 @@ impl TaskEngine {
         // 任务目标就是 title(创建接口没有 goal 字段);这里先留一份供终态交付门槛
         // 判定「单文件交付」等目标级要求,再把目标移入执行上下文。
         let goal_text = goal.clone().unwrap_or_else(|| task.title.clone());
+        // 任务附件(ATTACH-1):把附件清单拼进目标,六模式共用这一个入口——
+        // 否则模型只知道有任务、不知道作用域里还躺着用户给的文件。
+        // 无附件时逐字节不变(见 `attachments::with_attachments` 的短路)。
+        let goal_text = match self.svc.list_task_attachments(&task.id) {
+            Ok(list) if !list.is_empty() => attachments::with_attachments(
+                &goal_text,
+                &list,
+                crate::services::settings_service::vision_enabled(&settings),
+            ),
+            Ok(_) => goal_text,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = task.id.as_str(),
+                    "读取附件清单失败,目标不含附件段: {e}"
+                );
+                goal_text
+            }
+        };
         let ctx = TaskRunContext {
             task_id: task.id.clone(),
             token,

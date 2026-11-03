@@ -287,7 +287,31 @@ export interface TaskDetail {
    * 读时合成，不落库；工作区变化后刷新即反映当前状态。
    */
   delivery?: TaskDeliverySummary | null;
+  /**
+   * 任务附件（ATTACH-1，2026-11-03）；旧服务端缺少该字段 → 按空数组容错。
+   * 后端恒为数组（无附件为 `[]`，不是 null）。
+   */
+  attachments?: TaskAttachment[];
 }
+
+/**
+ * 任务附件（ATTACH-1）。落盘在任务的 fs 作用域内，故 `relPath` 是**相对作用域根**的
+ * 路径（绑定工作区 → `.kedai/attachments/…`；未绑定 → `attachments/…`），
+ * 模型侧直接用同一个相对路径 fs_read / view_image。
+ */
+export interface TaskAttachment {
+  id: string;
+  task_id: string;
+  /** 用户原始文件名（展示用；不是磁盘名） */
+  name: string;
+  /** 相对任务作用域根的落盘路径（统一 `/` 分隔） */
+  rel_path: string;
+  size: number;
+  /** 按扩展名保守推断；未知为 null（后端不猜） */
+  mime: string | null;
+  created_at: string;
+}
+
 
 /**
  * 任务单次 LLM 调用记录(批次 3 L3 调用追踪;GET /api/tasks/{id}/calls,按 created_at,id 升序)。

@@ -5,7 +5,7 @@ use crate::api::{
     audio, characters, computer_use, exec, import_export, macros, mcp, plugins, resource, screen,
     skills, slash_commands, tasks, user_scripts, workspace,
 };
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 use std::sync::Arc;
 
@@ -120,6 +120,18 @@ pub(crate) fn misc_routes() -> Router<Arc<AppState>> {
         .route(
             "/api/tasks/{id}/artifacts/download",
             get(tasks::task_artifact_download),
+        )
+        // 任务附件(ATTACH-1,2026-11-03):用户随任务提供的任意文件。
+        // 上传走 multipart(复用 characters 的解析器,支持多文件);清单只读;删除幂等。
+        // 落点在任务 fs 作用域内(`<workspace>/.kedai/attachments/` 或 scratch 子目录),
+        // 故模型可直接用 fs_read / view_image 按 rel_path 读取。
+        .route(
+            "/api/tasks/{id}/attachments",
+            get(tasks::attachment_list).post(tasks::attachment_upload),
+        )
+        .route(
+            "/api/tasks/{id}/attachments/{att_id}",
+            delete(tasks::attachment_delete),
         )
         // 工作区画像(CODE-4,2026-09-30):创建表单在任务存在之前就要显示「这是什么项目」,
         // 故探测必须有独立只读端点(与任务详情顶层的 workspace_profile 同一把尺)

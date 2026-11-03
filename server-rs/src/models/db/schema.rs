@@ -565,6 +565,23 @@ CREATE TABLE IF NOT EXISTS cu_audit (
   sha256     TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_cu_audit_ts ON cu_audit(ts DESC);
+
+-- 任务附件(ATTACH-1,2026-11-03):用户随任务提供的任意文件(不再限于角色卡)。
+-- 语义:一行 = 一个已落盘的附件;`rel_path` 是**相对任务 fs 作用域根**的路径
+-- (绑定工作区 = `<workspace>/.kedai/attachments/{seq}-{safe}`,未绑定 = scratch 子目录),
+-- 模型侧经 `fs_read` / `view_image` 按同一相对路径读取。
+-- `name` 保留用户原始文件名(展示用),落盘名另做 sanitize 防覆盖/防穿越。
+-- 不参与交付门槛与写所有权:它是**输入**,不是产物(见 delivery.rs / ownership.rs 的边界注释)。
+CREATE TABLE IF NOT EXISTS task_attachments (
+  id         TEXT PRIMARY KEY,
+  task_id    TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  name       TEXT NOT NULL,
+  rel_path   TEXT NOT NULL,
+  size       INTEGER NOT NULL,
+  mime       TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_attachments_task ON task_attachments(task_id, created_at);
 "#;
 
 /// 暴露建表 SQL 供迁移一致性测试比对(旧库 ALTER 补列后应与新建表 schema normalize 一致)

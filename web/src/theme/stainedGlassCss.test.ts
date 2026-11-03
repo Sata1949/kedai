@@ -152,4 +152,63 @@ describe('GLASS-PANE-1 拼接玻璃契约', () => {
       expect(code.includes(`var(${name})`), `${name} 已声明但从未被引用`).toBe(true);
     }
   });
+
+// ATTACH-1 观感批(2026-11-03):任务台与侧栏在彩窗主题下的四处补齐。
+// 这几条都是「实测能一眼看出不同源」的缺陷,用源码契约守住,防止下次重写主题时又漏掉。
+describe('ATTACH-1 彩窗主题补齐契约(2026-11-03)', () => {
+  it('侧栏表单元控件与模态共用同一份「玻璃内凹」声明(不复制材质)', () => {
+    // 此前只覆盖 .sv-modal,侧栏的模式/连接/工作区控件在彩窗下仍是近白底
+    // rgb(253,248,236),与周围素玻璃不同源。合并成一份而不是复制一份——
+    // 同样的材质写两遍是 gzip 余量里的白付。
+    const formBlocks = allBlocks.filter((b) => b.body.includes('background-color: #faf5e8'));
+    expect(formBlocks.length, '玻璃内凹应只有一份声明').toBe(1);
+    const sel = formBlocks[0].selector;
+    expect(sel).toContain('.sv-modal select');
+    expect(sel, '侧栏下拉也必须覆盖').toContain('.sv-sidebar select.sv-select');
+    expect(sel, '侧栏输入框也必须覆盖').toContain('.sv-sidebar input.sv-input');
+    expect(formBlocks[0].body, '深墨字必须显式给定(侧栏头那条暖白规则会污染)')
+      .toContain('color: var(--kg-ink)');
+  });
+
+  it('任务详情段带用主题三色,且不得用拼片(内容层禁拼片)', () => {
+    const detail = allBlocks.filter(
+      (b) => b.selector.includes('.sv-task-detail') && b.body.includes('background-image'),
+    );
+    expect(detail.length, '应有 .sv-task-detail 的段带规则').toBeGreaterThan(0);
+    const body = detail.map((b) => b.body).join('\n');
+    expect(body, '段带应改用主题三色').toContain('var(--kg-ruby)');
+    expect(body).toContain('var(--kg-gold)');
+    expect(body).toContain('var(--kg-sapphire)');
+    for (const b of detail) {
+      expect(b.body, '内容层禁止拼片:文字会跨铅条').not.toContain('--kg-panes-band');
+    }
+  });
+
+  it('常驻表头在彩窗下是实色玻璃(透明会让下方内容透出)', () => {
+    const sticky = allBlocks.find((b) => b.selector.includes('.sv-task-sticky'));
+    if (!sticky) throw new Error('缺少 .sv-task-sticky 的主题规则');
+    expect(sticky.body).toMatch(/background-color:\s*var\(--kg-glass\)/);
+  });
+
+  it('侧栏底部主按钮不与简写 background 混用(会解析成空子属性)', () => {
+    // 同一条规则里既写 `background: var(...)` 又写 `background-image: none` 时,
+    // 浏览器无法在解析期求值 var(),会把简写降级成一串空子属性——
+    // 实测 CSSOM:background-color 为空、整条规则等于没设底色。故只许长写。
+    const btn = allBlocks.find((b) => b.selector.includes('.sv-side-foot .sv-btn.primary'));
+    if (!btn) throw new Error('缺少侧栏主按钮的主题规则');
+    expect(btn.body, '必须用 background-color 长写').toMatch(/background-color:\s*var\(--kg-ruby\)/);
+    expect(btn.body, '不得出现 background 简写').not.toMatch(/(^|[\s;{])background\s*:/);
+  });
+
+  it('移动端侧栏关闭键必须同时改背景(否则暖白字压近白底 = 1.15:1)', () => {
+    // mobile.css 给的是 `background: var(--sv-white)`(彩窗令牌下是近白 #fdf8ec),
+    // 而主题把 color 翻成暖白 #f0e8d6——2026-11-03 窄视口实测 1.15:1。
+    const close = allBlocks.filter(
+      (b) => b.selector.includes('.sv-sidebar-close') && !b.selector.includes(':hover'),
+    );
+    expect(close.length, '应有侧栏关闭键的主题规则').toBeGreaterThan(0);
+    const hasBg = close.some((b) => /background(-color)?:\s*transparent/.test(b.body));
+    expect(hasBg, '关闭键必须显式把背景改透明/暗底').toBe(true);
+  });
+});
 });

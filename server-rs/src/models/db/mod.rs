@@ -205,6 +205,9 @@ impl Db {
                 // (任务模式中间过程:思考正文 / 工具入出参 / 节点产出)
                 crate::migration::ensure_task_trace_table(&conn)
                     .map_err(|e| format!("升级 task_trace 表失败: {e}"))?;
+                // 幂等 schema 升级(ATTACH-1):旧库补建 task_attachments 附件元数据表
+                crate::migration::ensure_task_attachments_table(&conn)
+                    .map_err(|e| format!("升级 task_attachments 表失败: {e}"))?;
                 // 幂等 schema 升级(CU-1):旧库补建 cu_audit 电脑操作审计表
                 crate::migration::ensure_cu_audit_table(&conn)
                     .map_err(|e| format!("升级 cu_audit 表失败: {e}"))?;
