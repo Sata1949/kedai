@@ -19,17 +19,16 @@ body {
 }
 
 /* 纸张噪点:全屏固定噪点层,模拟印刷纸面质感(纯装饰,pointer-events 穿透)。
-   SVG feTurbulence 生成去色噪点,multiply 混合压进纸色;静态无动画,不受 reduced-motion 影响。 */
+   UIFIX-8:原用 mix-blend-mode: multiply 把整页拉进同一混合组,窗口化列表每换一行都要重混合全屏、滚动时 2px 装饰色条抖动。改为纯黑 + 亮度取反作 alpha(g→1−g 等价 base×g):观感等价且不再全屏混合;矩阵末行 -1 0 0 0 1 即 alpha=1−亮度。 */
 body::after {
   content: '';
   position: fixed;
   inset: 0;
   z-index: calc(var(--z-splash) + 1);
   pointer-events: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -1 0 0 0 1'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
   background-size: 220px 220px;
   opacity: 0.035;
-  mix-blend-mode: multiply;
 }
 
 /* 滚动条:细墨条(8px 轨道内缩,不抢正文;悬停加深) */

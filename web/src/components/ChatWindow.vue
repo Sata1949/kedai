@@ -831,14 +831,17 @@ function bindRowRef(id: number, target: unknown): void {
 .sv-start-cast-count { color: var(--sv-ink-faint); font-variant-numeric: tabular-nums; }
 .sv-start-chars { list-style: none; margin: 0; padding: 0; }
 .sv-start-chars li { margin: 0; }
+/* UIFIX-8 角色索引:序号提到海报级、头像 40px、箭头仅 hover/选中显示(原序号只有
+   11px,所谓「大号数字」名不副实);选中态由整行淡粉改为白底 + 左黑线,淡粉铺满会
+   像一块色块压过名字本身。 */
 .sv-start-char {
   display: grid;
-  grid-template-columns: 26px 36px minmax(0, 1fr) 16px;
+  grid-template-columns: 30px 40px minmax(0, 1fr) 16px;
   align-items: center;
   gap: var(--space-3);
   width: 100%;
-  min-height: 62px;
-  padding: var(--space-3) 0;
+  min-height: 68px;
+  padding: var(--space-2-5) 0;
   border: none;
   border-bottom: 1px solid var(--sv-line);
   background: transparent;
@@ -847,29 +850,40 @@ function bindRowRef(id: number, target: unknown): void {
   cursor: pointer;
   transition: background var(--dur-fast) var(--ease-standard), box-shadow var(--dur-fast) var(--ease-standard);
 }
-.sv-start-char:hover {
-  background: var(--sv-white);
-  box-shadow: inset 2px 0 0 var(--sv-ink);
-}
+/* 悬停与选中同一套「被点名」的表达:白底 + 左侧 2px 黑线(取代整行淡粉色块) */
+.sv-start-char:hover,
 .sv-start-char.active {
-  background: var(--sv-pink-light);
+  background: var(--sv-white);
   box-shadow: inset 2px 0 0 var(--sv-ink);
 }
 .sv-start-char-idx {
   align-self: start;
   padding-top: var(--space-1);
   font-family: var(--font-display);
-  font-size: var(--text-2xs);
+  font-size: var(--text-md);
+  line-height: 1;
   color: var(--sv-ink-faint);
+  transition: color var(--dur-fast) var(--ease-standard);
 }
-.sv-start-char .sv-avatar { width: 36px; height: 36px; }
+.sv-start-char:hover .sv-start-char-idx,
+.sv-start-char.active .sv-start-char-idx { color: var(--sv-ink); }
+.sv-start-char .sv-avatar { width: 40px; height: 40px; font-size: var(--text-md); }
+/* 选中时的头像标识:外扩 2px 黑框 + 粉色外圈光晕,头像本体维持黑底白字。
+   **刻意不复用「反色」**:content.css 对 `.sv-avatar.char` 有 `color: #fff !important`
+   (黑底白字的双保险,5 处之一),而组件 scoped 禁 `!important`(门禁基线 0)——
+   任何改 color 的尝试都不可能生效,首版实测就变成了白底白字的空方框。 */
+.sv-start-char.active .sv-avatar.char {
+  outline: var(--bw) solid var(--sv-ink);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 var(--space-1) var(--sv-pink);
+}
 .sv-start-char-body { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
 .sv-start-char-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: var(--text-sm);
-  font-weight: 800;
+  font-size: var(--text-md);
+  font-weight: 900;
 }
 .sv-start-char-desc {
   overflow: hidden;
@@ -878,12 +892,15 @@ function bindRowRef(id: number, target: unknown): void {
   font-size: var(--text-xs);
   color: var(--sv-ink-faint);
 }
+/* 箭头只暗示可点、不是信息:常态隐去,悬停/选中才出现 */
 .sv-start-char-arrow {
   font-size: var(--text-base);
   color: var(--sv-ink-faint);
-  transition: transform var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-standard), transform var(--dur-fast) var(--ease-standard);
 }
-.sv-start-char:hover .sv-start-char-arrow { transform: translateX(3px); color: var(--sv-ink); }
+.sv-start-char:hover .sv-start-char-arrow { opacity: 1; color: var(--sv-ink); transform: translateX(3px); }
+.sv-start-char.active .sv-start-char-arrow { opacity: 1; color: var(--sv-ink); }
 .sv-start-cast-empty {
   display: flex;
   flex-direction: column;

@@ -101,6 +101,28 @@ describe('C-2A 任务面板拆分', () => {
     expect(store.runTask).toHaveBeenCalledWith('t1');
   });
 
+  it('TaskStatusPanel:表头 / 状态矩阵 / 档位插槽同块 sticky(UIFIX-8 常驻表头)', () => {
+    const detail = makeDetail();
+    seed(detail);
+    const wrapper = mount(TaskStatusPanel, {
+      props: { detail, running: false },
+      slots: { modes: '<div class="stub-modes">档位</div>' },
+    });
+    // 三者必须在同一个 sticky 容器内:分开 sticky 只能钉住最上面一块,插槽会随内容滚走
+    const sticky = wrapper.find('.sv-task-sticky');
+    expect(sticky.exists()).toBe(true);
+    expect(sticky.find('.sv-task-head').exists()).toBe(true);
+    expect(sticky.find('.sv-task-status-line').exists()).toBe(true);
+    expect(wrapper.find('.sv-task-sticky-modes .stub-modes').exists()).toBe(true);
+  });
+
+  it('TaskStatusPanel:未传 modes 插槽时不渲染空的档位行(空占位会白吃一段高度)', () => {
+    const detail = makeDetail();
+    seed(detail);
+    const wrapper = mount(TaskStatusPanel, { props: { detail, running: false } });
+    expect(wrapper.find('.sv-task-sticky-modes').exists()).toBe(false);
+  });
+
   it('TaskStatusPanel:删除走 useTaskActions 的确认与 store.deleteTask', async () => {
     const detail = makeDetail();
     const store = seed(detail);

@@ -2,7 +2,7 @@
 // 单条执行轨迹折叠卡(TMSHOW-2):思考 / 工具调用 / 工具结果 / 步骤产出。
 // 由 TaskTranscript 的档 2(扁平)与档 3(分组内)共用同一张卡。
 import { computed, ref } from 'vue';
-import { TRACE_KIND_LABELS } from '../../utils/taskTranscript';
+import { TRACE_KIND_LABELS, formatTraceContent } from '../../utils/taskTranscript';
 import { phaseText } from '../../utils/phaseLabel';
 import type { TaskTrace } from '../../api';
 
@@ -50,6 +50,9 @@ const subtitle = computed(() => {
 
 /** 正文是否值得显示折叠开关(极短文本没有折叠的意义) */
 const collapsible = computed(() => props.trace.content.length > 120);
+
+/** 展示正文:工具类走 UIFIX-8 的历史坏数据修复,思考类原样透传 */
+const bodyText = computed(() => formatTraceContent(props.trace.kind, props.trace.content));
 </script>
 
 <template>
@@ -72,8 +75,10 @@ const collapsible = computed(() => props.trace.content.length > 120);
       <span v-if="trace.truncated" class="sv-trace-cut" title="正文超过写入侧上限，已截断">已截断</span>
     </div>
     <!-- 正文一律纯文本插值:工具入参/出参是 JSON 文本,思考是原始文本。
-         刻意不走 v-html(即便走 markdown 也不该——轨迹里混着未转义的模型输出) -->
-    <pre v-if="!collapsible || open" class="sv-trace-body">{{ trace.content }}</pre>
+         刻意不走 v-html(即便走 markdown 也不该——轨迹里混着未转义的模型输出)。
+         formatTraceContent 只救「历史坏数据」(被双重转义的 JSON 字符串),
+         思考类原样透传;修不动的文本一律原样返回,不会把可读内容变空。 -->
+    <pre v-if="!collapsible || open" class="sv-trace-body">{{ bodyText }}</pre>
   </div>
 </template>
 

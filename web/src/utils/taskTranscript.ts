@@ -180,3 +180,47 @@ export function formatTraceCounts(counts: TraceCounts): string {
   if (counts.bash > 0) parts.push(`bash ${counts.bash}`);
   return parts.join(' · ');
 }
+
+/**
+ * 轨迹正文的展示文本（UIFIX-8）。
+ *
+ * **问题面**：提交 1 之前落库的工具轨迹把「模型原始参数字符串」当成了字符串值再
+ * pretty 序列化，于是存成 `"{\"command\": \"ls -la\"}"` —— 换行变成字面 `\n` 两字符、
+ * 内层引号被判转义，前端 `<pre>` 里整段挤成一行。
+ *
+ * **为什么前端还要兜一层**：后端修的是**新写入**的行（`sink.rs::render_payload`），
+ * 历史轨迹已经是坏数据，不会因为改代码而自愈。旧任务回看时间线时仍应可读。
+ *
+ * **只对工具类生效**：`reasoning` 是模型原样输出的纯文本，里面可能正常出现花括号；
+ * 对它做 `JSON.parse` 会把「碰巧是合法 JSON 的思考」错误地重排，那是篡改内容而非修复。
+ *
+ * **两段式解析**：坏数据是「JSON 字符串字面量里装着 JSON 文本」，需要解析两次才能拿到
+ * 结构化参数；第一次拿到的若是对象/数组则直接美化，若是字符串则再试一次。
+ * 任何一步失败都原样返回——repair 绝不能把可读内容变成空或报错。
+ */
+export function formatTraceContent(kind: TaskTrace['kind'], content: string): string {
+  if (kind !== 'tool_call' && kind !== 'tool_result') return content;
+  const once = tryParse(content);
+  if (once === undefined) return content;
+  if (typeof once === 'string') {
+    const twice = tryParse(once);
+    // 二次解析不出结构化数据 = 它本来就是纯文本（bash stdout），保留原文（含其换行）
+    return twice === undefined ? once : JSON.stringify(twice, null, 2);
+  }
+  return JSON.stringify(once, null, 2);
+}
+
+/** 解析失败与「解析出 undefined」不可混同：用哨兵区分「没有值」与「不是 JSON」 */
+function tryParse(text: string): unknown {
+  const trimmed = text.trim();
+  // 只对像 JSON 的文本尝试解析：纯文本（bash 输出、中文结果）连试都不必试，
+  // 也避免把 "123"、'true' 这类裸标量当成结构化数据重排
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[') && !trimmed.startsWith('"')) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    return undefined;
+  }
+}

@@ -140,23 +140,44 @@ pub(crate) fn spawn(
 /// (200 字上限,只够说"还在动"),本函数产出**可渲染的完整正文**。同一条工具调用
 /// 会走两者:一个进 agent_status 做活动指示,一个进 task_trace 做时间线。
 ///
-/// 入参/出参统一序列化为 JSON 文本落 `content`,前端原样展示、不解析结构——
+/// 入参/出参统一渲染成 JSON 文本落 `content`,前端原样展示、不解析结构——
 /// 轨迹表不为不同工具留结构化列是刻意的:工具形状由插件/MCP 决定,列会一直漂。
 fn trace_of(ev: &SseEvent) -> Option<(TaskTraceKind, Option<String>, String)> {
     match ev {
         SseEvent::ToolCall { name, input, .. } => Some((
             TaskTraceKind::ToolCall,
             Some(name.clone()),
-            serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string()),
+            render_payload(input),
         )),
         SseEvent::ToolResult { name, output, .. } => Some((
             TaskTraceKind::ToolResult,
             Some(name.clone()),
-            serde_json::to_string_pretty(output).unwrap_or_else(|_| output.to_string()),
+            render_payload(output),
         )),
         // 其余事件不产生轨迹:Token 是正文(已有 delta 通道与步骤产出)、
         // Step 是进度标题(agent_status 已承载)、Finish/Error/Interrupted 是终态通知。
         _ => None,
+    }
+}
+
+/// 工具入参/出参 → 落库正文(UIFIX-8)。
+///
+/// **为什么不能直接 `to_string_pretty`**:流式路径把模型吐出的**原始参数字符串**当
+/// `Value::String` 塞进 `SseEvent::ToolCall`(见 `executor/generation.rs` 的
+/// `input: Value::String(call.arguments)`)。对字符串值做 pretty 只会输出「带引号的
+/// 一行」:换行被转义成字面 `\n`、内层引号被转义成 `\"`,前端拿到就是整段挤在
+/// 一行里的双重转义 JSON(实跑截图点名)。
+///
+/// 判别口径:字符串值**能二次解析成 JSON** 就说明它是「被当成字符串搬运的结构化
+/// 参数」,解析后按结构美化;解析不了的才是真正的文本(bash 的 stdout、纯文字结果),
+/// 原样保留——那类正文里的换行本来就该原样呈现。
+fn render_payload(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => serde_json::from_str::<serde_json::Value>(s)
+            .ok()
+            .and_then(|parsed| serde_json::to_string_pretty(&parsed).ok())
+            .unwrap_or_else(|| s.clone()),
+        other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
     }
 }
 
@@ -252,5 +273,76 @@ mod tests {
         };
         let detail = map_event(&ev, 0, "主 agent").unwrap();
         assert_eq!(detail, "工具 read 已返回结果");
+    }
+
+    /// UIFIX-8 的主症状:流式路径把模型原始参数字符串当 `Value::String` 塞进事件,
+    /// 直接 pretty 序列化只会输出「带引号的单行 + 双重转义」,前端看到 `\n` 字面两字符。
+    /// 修法判据:字符串值能二次解析成 JSON 就按结构美化。
+    #[test]
+    fn stringified_tool_arguments_are_reparsed_and_pretty_printed() {
+        let raw = r#"{"command":"ls -la && ls -la parts 2>nul","cwd":"."}"#;
+        let ev = SseEvent::ToolCall {
+            name: "bash".into(),
+            input: json!(raw),
+            call_id: Some("c1".into()),
+            render_kind: None,
+            origin: None,
+        };
+        let (_, _, content) = trace_of(&ev).expect("工具调用应产生轨迹");
+        // 多行:pretty 打出缩进与换行
+        assert!(content.contains('\n'), "应为多行 JSON,实际:{content}");
+        assert!(
+            content.contains("\"command\": \"ls -la && ls -la parts 2>nul\""),
+            "应还原成结构化字段,实际:{content}"
+        );
+        // 不再有「外层包一层引号 + 内层引号被判转义」的双重转义
+        assert!(
+            !content.contains(r#"\""#),
+            "不应残留转义引号,实际:{content}"
+        );
+        assert!(
+            !content.starts_with('"'),
+            "不应整体被包成字符串,实际:{content}"
+        );
+    }
+
+    /// bash stdout 是**真正的文本**,不是被搬运的结构化参数——不能二次解析,
+    /// 原样保留(它自己的换行必须原样留着,前端 pre-wrap 才能正确分行)。
+    #[test]
+    fn plain_text_result_keeps_its_own_newlines() {
+        let stdout = "total 8\ndrwxr-xr-x parts\n-rw-r--r-- pelican.svg";
+        let ev = SseEvent::ToolResult {
+            name: "bash".into(),
+            output: json!(stdout),
+            call_id: Some("c1".into()),
+            render_kind: None,
+            origin: None,
+            snapshot_id: None,
+        };
+        let (_, _, content) = trace_of(&ev).expect("工具结果应产生轨迹");
+        assert_eq!(content, stdout, "纯文本应原样保留");
+        assert!(!content.contains(r#"\n"#), "换行不应被转义成字面 \\n");
+    }
+
+    /// 结构化 Value 的路径不受改动影响:仍是 pretty 多行。
+    #[test]
+    fn structured_value_still_prints_pretty() {
+        let ev = SseEvent::ToolResult {
+            name: "fs_glob".into(),
+            output: json!({ "files": ["a.txt", "b.txt"], "total": 2 }),
+            call_id: None,
+            render_kind: None,
+            origin: None,
+            snapshot_id: None,
+        };
+        let (_, _, content) = trace_of(&ev).expect("工具结果应产生轨迹");
+        assert!(content.contains('\n'));
+        assert!(content.contains("\"total\": 2"));
+    }
+
+    /// 空字符串既不解析也不该报错,原样返回空(写入侧随后按空正文早退)。
+    #[test]
+    fn empty_string_payload_yields_empty_content() {
+        assert_eq!(render_payload(&json!("")), "");
     }
 }
