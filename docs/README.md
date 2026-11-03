@@ -103,7 +103,6 @@
 | [plans/UI-AUDIT-2026-10-30.md](plans/UI-AUDIT-2026-10-30.md) | 前端观感审计(真实启动 + 逐屏观察确认 13 项缺陷;UIVIS-1~3 的依据,覆盖说明见 `计划.md` UIVIS 章) |
 | [plans/UI-AESTHETICS-2026-10-31.md](plans/UI-AESTHETICS-2026-10-31.md) | 前端美感审计(三类不均匀 + 逐条浏览器内试改;UIPOL-1~3 的依据,C4 维持「需确认」) |
 | [plans/PROMPT-BOUNDARY-HANDOFF-2026-11-02.md](plans/PROMPT-BOUNDARY-HANDOFF-2026-11-02.md) | 提示词双模式边界清理交接(RTSPLIT 前两批已合并;四项未开工遗留 R-1~R-4、三项误报判定、验收清单与探针坑) |
-| [plans/DOC-SPLIT-PLAN.md](plans/DOC-SPLIT-PLAN.md) | 文档拆分计划(超 3000 行文档按「门面 + 子目录」拆分;含切分点实测、门禁 D2/D3/D4/D8 改造与 18 条锚点引用风险;**计划,未开工**) |
 | [plans/TASK-BOARD-HANDOFF-2026-11-03.md](plans/TASK-BOARD-HANDOFF-2026-11-03.md) | 任务台观感与附件导入交接(阶段 0/1/2 已合并 PR #92/#93/#94;阶段 3 任务附件与阶段 4 双主题观感未开工,含落点、门禁红点与 10 条坑) |
 
 > **同名撞车提醒**:[archive/TASK-MODE-FIX-PLAN.md](archive/TASK-MODE-FIX-PLAN.md) 是更早的
