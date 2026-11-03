@@ -6,6 +6,7 @@
 use crate::models::types::{TaskMessageRecord, TaskRecord, TaskSubtaskRecord};
 use crate::services::agent_flow_service::FlowSnapshot;
 use crate::services::task_engine::delivery::TaskDeliverySummary;
+use crate::services::task_service::TaskAttachmentRecord;
 use crate::services::workspace_profile::WorkspaceProfile;
 use serde::Serialize;
 
@@ -27,8 +28,8 @@ impl TaskUsageTotal {
     }
 }
 
-/// `GET /api/tasks/{id}` 的响应体：任务、子任务、指令历史、流程快照、工作区画像、交付摘要。
-/// 后四项为 `None` 时如实序列化为 `null`（前端按 optional/null 容错，语义不变）。
+/// `GET /api/tasks/{id}` 的响应体：任务、子任务、指令历史、流程快照、工作区画像、交付摘要、附件清单。
+/// 可选字段为 `None` 时如实序列化为 `null`（前端按 optional/null 容错，语义不变）。
 #[derive(Serialize)]
 pub struct TaskDetailResponse {
     pub task: TaskRecord,
@@ -38,6 +39,9 @@ pub struct TaskDetailResponse {
     pub flow_snapshot: Option<FlowSnapshot>,
     pub workspace_profile: Option<WorkspaceProfile>,
     pub delivery: Option<TaskDeliverySummary>,
+    /// 任务附件（ATTACH-1）：恒为数组（无附件为 `[]`，不是 `null`）——
+    /// 「没有附件」与「旧服务端不下发该字段」对前端是两件事，前者要渲染空态。
+    pub attachments: Vec<TaskAttachmentRecord>,
 }
 
 impl TaskDetailResponse {
@@ -51,6 +55,7 @@ impl TaskDetailResponse {
         flow_snapshot: Option<FlowSnapshot>,
         workspace_profile: Option<WorkspaceProfile>,
         delivery: Option<TaskDeliverySummary>,
+        attachments: Vec<TaskAttachmentRecord>,
     ) -> Self {
         let (prompt_tokens, completion_tokens, reasoning_tokens) = usage;
         Self {
@@ -65,6 +70,7 @@ impl TaskDetailResponse {
             flow_snapshot,
             workspace_profile,
             delivery,
+            attachments,
         }
     }
 }

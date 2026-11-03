@@ -47,6 +47,10 @@ pub(crate) mod prompt;
 pub(crate) mod runtime_issues;
 pub(crate) mod scratch;
 pub(crate) mod trace;
+// 任务附件(ATTACH-1):用户随任务提供的任意文件的落盘与元数据
+pub(crate) mod attachments;
+
+pub use self::attachments::TaskAttachmentRecord;
 
 use self::db::{row_to_task, TASK_COLS};
 

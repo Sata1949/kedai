@@ -15,9 +15,10 @@ use super::conflict::{
 use super::ddl::{
     ensure_agent_subtasks_finished_at_column, ensure_characters_derived_json_column,
     ensure_cu_audit_table, ensure_llm_requests_usage_columns, ensure_memory_entries_pinned_column,
-    ensure_skills_progressive_columns, ensure_task_events_table, ensure_task_file_changes_table,
-    ensure_task_llm_calls_finish_reason_column, ensure_task_messages_table,
-    ensure_task_scan_marks_table, ensure_task_subtasks_finished_at_column, ensure_task_trace_table,
+    ensure_skills_progressive_columns, ensure_task_attachments_table, ensure_task_events_table,
+    ensure_task_file_changes_table, ensure_task_llm_calls_finish_reason_column,
+    ensure_task_messages_table, ensure_task_scan_marks_table,
+    ensure_task_subtasks_finished_at_column, ensure_task_trace_table,
     ensure_tasks_executor_id_column, ensure_tasks_flow_columns, ensure_tasks_runtime_issues_column,
     ensure_tasks_task_mode_column, ensure_tool_calls_snapshot_id_column,
     ensure_undo_snapshots_restore_columns, CONTRACT_CHANGELOG_DDL, KALEIDO_STATE_DDL,
@@ -291,6 +292,9 @@ fn merge_databases(baseline: &Path, source: &Path) -> Result<MergeReport, String
         .map_err(|e| format!("补齐基线库 undo_snapshots 恢复列失败: {e}"))?;
     ensure_tool_calls_snapshot_id_column(&conn)
         .map_err(|e| format!("补齐基线库 tool_calls snapshot_id 列失败: {e}"))?;
+    // 任务附件表(ATTACH-1):与 task_trace 同款,两侧各建一次(漏一侧即报缺少表)
+    ensure_task_attachments_table(&conn)
+        .map_err(|e| format!("补齐基线库 task_attachments 表失败: {e}"))?;
     align_schema_version(&conn, "工作库")?;
     // 预补 DDL 完成后把工作库标到当前 schema 版本:合并把两侧结构对齐到当前形态,
     // 版本号必须同步(否则合并产物带着旧版本号,「库比代码新」检测与升级判断失真)。
@@ -367,6 +371,9 @@ fn merge_databases(baseline: &Path, source: &Path) -> Result<MergeReport, String
         .map_err(|e| format!("补齐源快照 undo_snapshots 恢复列失败: {e}"))?;
     ensure_tool_calls_snapshot_id_column(&source_conn)
         .map_err(|e| format!("补齐源快照 tool_calls snapshot_id 列失败: {e}"))?;
+    // 任务附件表(ATTACH-1):源快照侧同样补齐(与基线侧成对,漏一侧即报缺少表)
+    ensure_task_attachments_table(&source_conn)
+        .map_err(|e| format!("补齐源快照 task_attachments 表失败: {e}"))?;
     // 源快照同样对齐版本(两侧结构一致才允许合并;版本号也随之一致)
     align_schema_version(&source_conn, "源快照")?;
     drop(source_conn);

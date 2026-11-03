@@ -5,7 +5,6 @@
 //       零 `crate::` 出边,是纯基石模块。
 // 纪律: 所有升级必须**幂等**(探测后补列/补表),失败返回 Err 不 panic。
 // 详见 docs/契约-架构与数据.md §2.2。
-//
 //   backup.rs   数据库快照备份(SQLite Online Backup API,含未 checkpoint 的 WAL)
 //   merge.rs    双库合并:schema 一致性比对、按外键依赖序逐表合并、文件树/JSON 配置合并、合并后校验
 //   ddl.rs      幂等 DDL 升级:新增表 DDL 常量与 ensure_* 补列/补表函数
@@ -20,9 +19,10 @@ pub use ddl::{
     ensure_characters_derived_json_column, ensure_cu_audit_table,
     ensure_exec_audit_risk_flag_column, ensure_exec_audit_table, ensure_llm_requests_usage_columns,
     ensure_memory_entries_fts_backfill, ensure_memory_entries_pinned_column, ensure_perf_indexes,
-    ensure_skills_progressive_columns, ensure_task_events_table, ensure_task_file_changes_table,
-    ensure_task_llm_calls_finish_reason_column, ensure_task_messages_table,
-    ensure_task_scan_marks_table, ensure_task_subtasks_finished_at_column, ensure_task_trace_table,
+    ensure_skills_progressive_columns, ensure_task_attachments_table, ensure_task_events_table,
+    ensure_task_file_changes_table, ensure_task_llm_calls_finish_reason_column,
+    ensure_task_messages_table, ensure_task_scan_marks_table,
+    ensure_task_subtasks_finished_at_column, ensure_task_trace_table,
     ensure_tasks_executor_id_column, ensure_tasks_flow_columns, ensure_tasks_runtime_issues_column,
     ensure_tasks_task_mode_column, ensure_tasks_workspace_column,
     ensure_tool_calls_snapshot_id_column, ensure_undo_snapshots_restore_columns,

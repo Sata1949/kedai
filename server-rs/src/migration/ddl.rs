@@ -1,5 +1,9 @@
 // 幂等 DDL 升级:新增表 DDL 常量与 ensure_* 补列/补表函数(缺失才执行,已存在跳过)。
 use rusqlite::Connection;
+// ATTACH-1:任务附件建表单独成文件(本文件逼近千行闸门),对外符号不变。
+#[path = "attachments_ddl.rs"]
+mod attachments_ddl;
+pub use attachments_ddl::ensure_task_attachments_table;
 
 /// 计划二新增的 7 作用域变量表。合并前对两侧各补一次 DDL,避免旧版本数据库
 /// (无此表)与新版本数据库合并时因「基线缺少源表」停止(§4.3)。
