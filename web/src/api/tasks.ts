@@ -4,8 +4,8 @@
 // DELETE /api/tasks/{id} → 204;GET /api/tasks/events → SSE(KeepAlive 30s)。
 import { BASE, authorizedFetch, request, requestText } from './client';
 import { requireArrayField, requireBoolField, requireObject, requireObjectField, requireStringField } from './shape';
-import { pumpSseFrames, toApiError } from './stream';
-import type { TaskApproveExecMode, TaskChangeDiff, TaskChangeRollback, TaskChangeRollbackAll, TaskChangeRollbackItem, TaskChangesPayload, TaskDetail, TaskEvent, TaskEventsPull, TaskFileChange, TaskLlmCall, TaskRecord, TaskRunMode, TaskScratchCleanup, TaskStep, TaskTrace, TaskTracePage, TaskUsageTotal } from './types';
+import { pumpSseFrames, toApiError, uploadFormMultiple } from './stream';
+import type { TaskApproveExecMode, TaskChangeDiff, TaskChangeRollback, TaskChangeRollbackAll, TaskChangeRollbackItem, TaskChangesPayload, TaskDetail, TaskEvent, TaskEventsPull, TaskFileChange, TaskLlmCall, TaskAttachment, TaskRecord, TaskRunMode, TaskScratchCleanup, TaskStep, TaskTrace, TaskTracePage, TaskUsageTotal } from './types';
 
 /** 读取任务列表(最新在前) */
 export async function listTasks(): Promise<TaskRecord[]> {
@@ -366,4 +366,45 @@ export function streamTaskEvents(
   })();
 
   return close;
+}
+
+// ==================== 任务附件(ATTACH-1,2026-11-03) ====================
+
+/**
+ * 上传一个或多个附件到指定任务(POST /api/tasks/{id}/attachments)。
+ *
+ * 一次请求带多文件:后端按 part 逐个入库,整批要么全成功、要么 400 点名原因
+ * (部分成功会让「我传了 3 个怎么只有 2 个」变成静默数据丢失,故按批返回)。
+ * 响应只含**本次**新入库的条目——调用方把它并入本地清单,不必重拉详情。
+ */
+export async function uploadTaskAttachments(
+  taskId: string,
+  files: File[],
+): Promise<TaskAttachment[]> {
+  if (files.length === 0) return [];
+  const data = await uploadFormMultiple<unknown>(
+    `/tasks/${encodeURIComponent(taskId)}/attachments`,
+    files,
+  );
+  // 形状闸门:清单直接进渲染,缺字段不该静默变成 undefined 行
+  return requireArrayField<TaskAttachment>(data, 'attachments', '任务附件');
+}
+
+/** 任务附件清单(GET /api/tasks/{id}/attachments;按上传顺序)。 */
+export async function listTaskAttachments(taskId: string): Promise<TaskAttachment[]> {
+  const data = await request<unknown>(`/tasks/${encodeURIComponent(taskId)}/attachments`);
+  return requireArrayField<TaskAttachment>(data, 'attachments', '任务附件');
+}
+
+/**
+ * 删除单个附件(DELETE /api/tasks/{id}/attachments/{aid})。
+ *
+ * 后端对该任务下不存在的附件回 404(不伪装成功——静默 204 会让前端清单过期
+ * 却以为删掉了别的东西)。调用方据此刷新清单,而不是本地直接 splice。
+ */
+export async function deleteTaskAttachment(taskId: string, attachmentId: string): Promise<void> {
+  await request<void>(
+    `/tasks/${encodeURIComponent(taskId)}/attachments/${encodeURIComponent(attachmentId)}`,
+    { method: 'DELETE' },
+  );
 }

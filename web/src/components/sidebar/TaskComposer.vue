@@ -13,9 +13,12 @@ import type { WorkspaceProfile } from '../../api';
 import TaskModeSelect from '../TaskModeSelect.vue';
 import TaskFlowSelect from '../TaskFlowSelect.vue';
 import TaskConnectionSelect from '../TaskConnectionSelect.vue';
+import { useTaskAttachments } from '../../composables/useTaskAttachments';
 
 const store = useAppStore();
 const { appMode, executors } = storeToRefs(store);
+/** 待上传附件队列(ATTACH-1):用户没选中任务时先在这里攒着 */
+const taskAttachments = useTaskAttachments();
 
 const taskTitle = ref('');
 /** 所选执行者库 id(空 = 通用执行者)。执行者与角色扮演角色卡解耦,不再列 characters。 */
@@ -144,6 +147,10 @@ async function createAndRun(): Promise<void> {
     const task = await store.createTask(t, executorId.value || undefined, ws || undefined);
     if (ws) rememberWorkspace(ws);
     taskTitle.value = '';
+    // 待上传附件必须在**起跑之前**刷上去(ATTACH-1):目标文本在 run 起点组装,
+    // 晚一步传的附件这一轮就进不了注入段,模型看不到。失败不阻断执行——附件没上去
+    // 不该让任务跑不起来,但错误留在 composable 的 lastError 里由侧栏显示。
+    await taskAttachments.flushPending(task.id);
     await store.runTask(task.id);
   } catch (err) {
     alert(`创建任务失败:${(err as Error).message}`);

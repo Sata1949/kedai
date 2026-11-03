@@ -9,6 +9,7 @@ import { renderMarkdownCached } from '../../utils/markdownCache';
 import MarkdownBlock from './MarkdownBlock.vue';
 import FileChangesPanel from '../FileChangesPanel.vue';
 import TaskDeliveryPanel from '../TaskDeliveryPanel.vue';
+import TaskAttachmentList from './TaskAttachmentList.vue';
 import { messageKindLabel } from '../../api/labels';
 import type { TaskDetail, TaskRunMode } from '../../api';
 
@@ -154,6 +155,8 @@ watch(
     </div>
     <MarkdownBlock v-if="summaryOpen" :html="resultMainHtml" />
   </div>
+  <!-- 任务附件(ATTACH-1):用户交给任务的文件。数据自取,无附件时整块不渲染。 -->
+  <TaskAttachmentList />
   <!-- 交付校验(TMR-6):必需/已生成/缺失/变更数 + 缺失文件清单。 -->
   <div class="sv-task-section">
     <div class="sv-task-section-title">交付校验</div>

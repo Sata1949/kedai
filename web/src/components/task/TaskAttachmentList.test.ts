@@ -1,0 +1,151 @@
+// @vitest-environment jsdom
+// 任务附件清单面板(ATTACH-1)。jsdom 环境(要 DOM 与 confirm)。
+//
+// 关注三件事:清单从哪来(缓存 vs 详情顶层回落)、无附件时不渲染整块、
+// 删除走「确认 → 服务端 → 重拉」而不是本地 splice。
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { flushPromises, mount } from '@vue/test-utils';
+import { createPinia, setActivePinia } from 'pinia';
+import type { TaskAttachment, TaskDetail } from '../../api';
+
+vi.mock('../../api/tasks', () => ({
+  uploadTaskAttachments: vi.fn(),
+  listTaskAttachments: vi.fn(),
+  deleteTaskAttachment: vi.fn(),
+}));
+
+import { deleteTaskAttachment, listTaskAttachments } from '../../api/tasks';
+import { useAppStore } from '../../store';
+import { resetTaskAttachmentsForTest, useTaskAttachments } from '../../composables/useTaskAttachments';
+import TaskAttachmentList from './TaskAttachmentList.vue';
+
+// store 在 setup 里读 localStorage;jsdom 未提供(与其它面板测试同款桩)。
+const memStorage = new Map<string, string>();
+vi.stubGlobal('localStorage', {
+  getItem: (k: string) => memStorage.get(k) ?? null,
+  setItem: (k: string, v: string) => void memStorage.set(k, String(v)),
+  removeItem: (k: string) => void memStorage.delete(k),
+  clear: () => memStorage.clear(),
+  key: (i: number) => [...memStorage.keys()][i] ?? null,
+  get length() { return memStorage.size; },
+});
+
+const listMock = vi.mocked(listTaskAttachments);
+const deleteMock = vi.mocked(deleteTaskAttachment);
+
+function att(overrides: Partial<TaskAttachment> = {}): TaskAttachment {
+  return {
+    id: 'a1',
+    task_id: 't1',
+    name: '规格说明.txt',
+    rel_path: '.kedai/attachments/1-spec.txt',
+    size: 2048,
+    mime: 'text/plain',
+    created_at: '2026-11-03T00:00:00Z',
+    ...overrides,
+  };
+}
+
+function makeDetail(attachments: TaskAttachment[]): TaskDetail {
+  return {
+    task: {
+      id: 't1',
+      title: '写周报',
+      status: 'done',
+      plan: [],
+      result: '',
+      error: '',
+      created_at: '2026-11-03T00:00:00Z',
+      updated_at: '2026-11-03T00:00:00Z',
+    },
+    subtasks: [],
+    usage_total: { prompt_tokens: 0, completion_tokens: 0, reasoning_tokens: 0 },
+    attachments,
+  };
+}
+
+function seed(detail: TaskDetail | null): ReturnType<typeof useAppStore> {
+  setActivePinia(createPinia());
+  const store = useAppStore();
+  store.currentTaskId = 't1';
+  store.currentTask = detail;
+  return store;
+}
+
+beforeEach(() => {
+  resetTaskAttachmentsForTest();
+  vi.clearAllMocks();
+  listMock.mockResolvedValue([]);
+});
+
+describe('任务附件清单面板', () => {
+  it('无附件时不渲染整块(附件是可选输入,不占版面)', async () => {
+    seed(makeDetail([]));
+    const wrapper = mount(TaskAttachmentList);
+    await flushPromises();
+    expect(wrapper.text()).not.toContain('任务附件');
+    expect(wrapper.findAll('li')).toHaveLength(0);
+  });
+
+  it('回落详情顶层的 attachments(首屏/换设备靠它)', async () => {
+    seed(makeDetail([att()]));
+    const wrapper = mount(TaskAttachmentList);
+    await flushPromises();
+    expect(wrapper.text()).toContain('任务附件');
+    expect(wrapper.text()).toContain('规格说明.txt');
+    expect(wrapper.text()).toContain('.kedai/attachments/1-spec.txt');
+    expect(wrapper.text()).toContain('2.0 KB');
+  });
+
+  it('图像附件标「图」,文本标「文」', async () => {
+    seed(
+      makeDetail([
+        att({ id: 'a1', name: 'shot.png', mime: 'image/png' }),
+        att({ id: 'a2', name: 'n.txt', mime: 'text/plain' }),
+      ]),
+    );
+    const wrapper = mount(TaskAttachmentList);
+    await flushPromises();
+    const kinds = wrapper.findAll('.sv-attachment-kind').map((n) => n.text());
+    expect(kinds).toEqual(['图', '文']);
+  });
+
+  it('缓存优先于详情顶层(刚上传完即时可见)', async () => {
+    const store = seed(makeDetail([att({ id: 'old', name: '旧文件.txt' })]));
+    void store;
+    // 先塞缓存
+    const a = useTaskAttachments();
+    listMock.mockResolvedValueOnce([att({ id: 'new', name: '新文件.txt' })]);
+    await a.refresh('t1');
+    const wrapper = mount(TaskAttachmentList);
+    await flushPromises();
+    expect(wrapper.text()).toContain('新文件.txt');
+    expect(wrapper.text()).not.toContain('旧文件.txt');
+  });
+
+  it('删除要确认;确认后调服务端并重拉清单', async () => {
+    seed(makeDetail([att()]));
+    const wrapper = mount(TaskAttachmentList);
+    await flushPromises();
+    const confirmSpy = vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    deleteMock.mockResolvedValueOnce(undefined);
+    listMock.mockResolvedValueOnce([]);
+    await wrapper.find('button').trigger('click');
+    await flushPromises();
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(deleteMock).toHaveBeenCalledWith('t1', 'a1');
+    expect(listMock).toHaveBeenCalledTimes(2);
+    confirmSpy.mockRestore();
+  });
+
+  it('取消确认时不发请求', async () => {
+    seed(makeDetail([att()]));
+    const wrapper = mount(TaskAttachmentList);
+    await flushPromises();
+    const confirmSpy = vi.spyOn(globalThis, 'confirm').mockReturnValue(false);
+    await wrapper.find('button').trigger('click');
+    await flushPromises();
+    expect(deleteMock).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+});
