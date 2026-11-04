@@ -281,6 +281,16 @@ const MAPPINGS = [
     rust: { file: 'server-rs/src/models/types.rs', name: 'TaskTraceRecord' },
     ts: { file: 'web/src/api/types/task.ts', name: 'TaskTrace', kind: 'interface' },
   },
+  {
+    // TMSHOW-4(2026-11-04):轨迹条目的**分类取值**。上一组只守护字段名,挡不住
+    // `reasoning` 被改成 `thinking` 这类取值漂移——而前端 `TRACE_KIND_LABELS` 是按
+    // kind 查表的中文字典,查不到即渲染 undefined(整类条目的标签静默消失)。
+    // 后端还有 `as_str` / `from_wire` 两处手写映射进 `task_trace.kind` 列,漂移会
+    // 让「落库的分类」与「前端认识的分类」对不上账。
+    label: '任务轨迹分类枚举',
+    rust: { file: 'server-rs/src/models/types.rs', name: 'TaskTraceKind' },
+    ts: { file: 'web/src/api/types/task.ts', name: 'TaskTraceKind', kind: 'union' },
+  },
 ];
 
 const read = (rel) => readFileSync(join(ROOT, rel), 'utf8');

@@ -410,4 +410,59 @@ mod tests {
             "截断后长度应等于上限"
         );
     }
+
+    /// 保留窗口按 seq 删最旧,且 `truncated` 如实标记「起点早于窗口下界」。
+    ///
+    /// TMSHOW-4(2026-11-04)补:此前 `truncated` 的**置真**分支没有任何机检——
+    /// 三条既有测试只覆盖了「窗口内不截断」与「正文超限截断」,而「请求起点落在
+    /// 保留窗口之前」这一条读端语义(前端据此提示「更早过程已清理」)无人守住。
+    /// 这里直接写窗口边界两侧的行,避免真造 2001 条:
+    /// 写入 `seq = TRACE_KEEP_PER_TASK + 1`,触发 `DELETE ... seq <= 1`,于是
+    /// 窗口下界变成 2。
+    #[test]
+    fn scan_trace_marks_truncated_before_retention_window() {
+        use crate::utils::test_support::TempDataDir;
+        let dir = TempDataDir::new("task-trace-window");
+        let db_path = dir.join("kedai.db");
+        let db = crate::models::db::Db::open(&db_path, &dir).expect("开库失败");
+        let conn = db.write();
+        conn.execute(
+            "INSERT INTO tasks (id, title, status, created_at, updated_at) \
+             VALUES ('t1', '目标', 'running', 'c', 'u')",
+            [],
+        )
+        .expect("建任务行");
+
+        // 写满窗口 + 1 行:最后一行写入时会把 seq=1 清理掉。
+        let total = TRACE_KEEP_PER_TASK + 1;
+        for i in 1..=total {
+            TaskService::insert_trace(
+                &conn,
+                "t1",
+                "agent",
+                None,
+                TaskTraceKind::Reasoning,
+                None,
+                &format!("第 {i} 条"),
+                false,
+            )
+            .expect("写轨迹");
+        }
+
+        // 起点在窗口之前(after=0 要求 seq>0,而窗口下界已是 2)→ 必须标 truncated
+        let before = TaskService::scan_trace(&conn, "t1", 0, 10).expect("窗口前读取");
+        assert!(
+            before.truncated,
+            "请求起点早于保留窗口时必须标 truncated(after=0,窗口下界=2)"
+        );
+        assert_eq!(before.rows[0].seq, 2, "最旧一条已被窗口清掉");
+
+        // 起点落在窗口内(after=1 → 要求 seq>1,正是窗口下界)→ 不算截断
+        let inside = TaskService::scan_trace(&conn, "t1", 1, 10).expect("窗口内读取");
+        assert!(
+            !inside.truncated,
+            "起点正好等于窗口下界时不应标 truncated:更早的条目确实不存在了,不是缺失"
+        );
+        assert_eq!(inside.rows[0].seq, 2);
+    }
 }

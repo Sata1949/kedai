@@ -630,6 +630,10 @@ mod tests {
     /// `TaskEventKind::as_str()` 与 serde 线格式逐变体一致(PRODCAP-1):
     /// 前者进 `task_events.kind`,后者进 SSE 载荷——漂移会让「补拉的行」与
     /// 「广播的帧」对不上账,故用测试钉死。新增变体须同时补两处(编译器兜住 as_str)。
+    ///
+    /// TMSHOW-4(2026-11-04)补:`Trace` 变体在 TMSHOW-1 引入时漏加进 `all`,
+    /// 于是本测试虽名为「逐变体」,对第 14 个取值实际是失效的。仅补一行不够——
+    /// 下次还会漏,故末尾加「`all` 长度必须等于枚举变体数」的自检。
     #[test]
     fn task_event_kind_as_str_matches_serde_wire() {
         let all = [
@@ -646,7 +650,31 @@ mod tests {
             TaskEventKind::DeltaReset,
             TaskEventKind::FlowBound,
             TaskEventKind::FileChanged,
+            TaskEventKind::Trace,
         ];
+        // 变体数真值取自「逐个 from_wire 回读」之外的独立口径:枚举全部取值的线格式清单。
+        // 新增变体却忘了加进 `all` 时,这里立刻红,而不是静默漏检。
+        const ALL_WIRE_VALUES: [&str; 14] = [
+            "created",
+            "status",
+            "plan",
+            "subtask",
+            "usage",
+            "deleted",
+            "llm_call",
+            "agent_status",
+            "approval_required",
+            "delta",
+            "delta_reset",
+            "flow_bound",
+            "file_changed",
+            "trace",
+        ];
+        assert_eq!(
+            all.len(),
+            ALL_WIRE_VALUES.len(),
+            "`all` 少列了变体:新增 TaskEventKind 取值时必须同步本数组与 ALL_WIRE_VALUES"
+        );
         for kind in all {
             let wire = serde_json::to_value(kind).expect("TaskEventKind 应可序列化");
             assert_eq!(
