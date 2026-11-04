@@ -12,13 +12,14 @@
  *   node tools/check-docs.mjs --json     # 机器可读输出
  *
  * 规则:
- *   D1 六类活文档均存在
- *   D2 docs/ 根下只允许白名单(六类活文档 + README.md + fixtures/ + archive/ + plans/)
- *   D3 docs/README.md 的六类表格与实际文件**双向一致**(列了必须存在;存在必须列了)
- *   D4 活文档内的相对 markdown 链接目标必须存在(锚点尽量校验)
+ *   D1 活文档均存在（六类 + 裁定分册）
+ *   D2 docs/ 根下只允许白名单(活文档 + README.md + fixtures/ + archive/ + plans/ + 已登记子目录)
+ *   D3 docs/README.md 的活文档表格与实际文件**双向一致**(列了必须存在;存在必须列了)
+ *   D4 活文档与子目录正文分卷内的相对 markdown 链接目标必须存在(锚点尽量校验)
  *   D5 归档映射表覆盖归档目录下全部文件
  *   D6 (WARN) 计划/遗留条目应带 ID(P- / L / T / D / 批次 / 项)
  *   D7 仓库根只允许 README.md / AGENTS.md / MAINTENANCE.md 三份约定文档
+ *   D8 门面索引完整性(子目录存在时:门面必须链接全部子文件,且不得链接不存在者)
  *
  * 失败只影响本脚本自身结论;check-all.ps1 侧用统一 Invoke-Stage 聚合,
  * **不要**另建失败桶(见 MAINTENANCE.md §0「修复纪律」:曾因前端分支写进后端失败桶
@@ -33,7 +34,7 @@ const DOCS = path.join(ROOT, 'docs');
 const VERBOSE = process.argv.includes('--verbose');
 const JSON_OUT = process.argv.includes('--json');
 
-// 六类活文档(2026-09-16 体系)
+// 活文档(2026-09-16 六类体系 + 2026-11-04 裁定分册)
 const CLASSIFIED = [
   'docs/契约.md',
   'docs/契约-协议与配置.md',
@@ -41,14 +42,18 @@ const CLASSIFIED = [
   'docs/功能.md',
   'docs/功能-变更史.md',
   'docs/计划.md',
+  'docs/裁定.md',
   'docs/展望.md',
   'docs/经验.md',
   'docs/遗留.md',
 ];
 
+// 拆分后的正文子卷目录(门面 + 子目录方案;X-2 起允许存在)
+const DOC_SUBDIRS = ['docs/功能-变更史', 'docs/计划', 'docs/经验', 'docs/功能'];
+
 // docs/ 根下允许出现的条目(D2 白名单)
 const ROOT_ALLOW = new Set([...CLASSIFIED, 'docs/README.md']);
-const ROOT_ALLOW_DIRS = new Set(['docs/fixtures', 'docs/archive', 'docs/plans']);
+const ROOT_ALLOW_DIRS = new Set(['docs/fixtures', 'docs/archive', 'docs/plans', ...DOC_SUBDIRS]);
 
 // 仓库根允许出现的 md(D7 白名单;其余过程稿一律进 docs/plans/ 或 docs/archive/)
 const REPO_ROOT_MD_ALLOW = new Set(['README.md', 'AGENTS.md', 'MAINTENANCE.md']);
@@ -66,11 +71,11 @@ const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
 const exists = (p) => fs.existsSync(path.join(ROOT, p));
 const rel = (abs) => path.relative(ROOT, abs).split(path.sep).join('/');
 
-// ---------- D1 六类活文档存在 ----------
+// ---------- D1 活文档存在(六类 + 裁定分册) ----------
 for (const f of CLASSIFIED) {
-  if (!exists(f)) fail('D1', `六类活文档缺失:${f}`);
+  if (!exists(f)) fail('D1', `活文档缺失:${f}`);
 }
-if (CLASSIFIED.every(exists)) ok('D1', `六类活文档齐备(${CLASSIFIED.length} 份)`);
+if (CLASSIFIED.every(exists)) ok('D1', `活文档齐备(${CLASSIFIED.length} 份：六类 + 裁定分册)`);
 
 // ---------- D2 docs/ 根下只允许白名单 ----------
 if (!fs.existsSync(DOCS)) {
@@ -132,7 +137,7 @@ if (!exists(README)) {
     // 根文档(AGENTS/README/MAINTENANCE)用 ../ 形式指向仓库根,不算 docs 体系
     if (!src.slice(Math.max(0, m.index - 60), m.index).includes('../')) {
       // docs 相对解析(而非 basename):照 basename 会把 `plans/X.md` 塌缩成 `docs/X.md`
-      // 并误判为 citingGhost。对全部单段目标(六类文档都在 docs/ 根下)等价。
+      // 并误判为 citingGhost。对全部单段目标(活文档都在 `docs/` 根下)等价。
       linked.add('docs/' + path.posix.normalize(t));
     }
   }
@@ -149,9 +154,18 @@ if (!exists(README)) {
   }
 }
 
-// ---------- D4 活文档相对链接目标存在 ----------
+// ---------- D4 活文档与子目录正文分卷的相对链接目标存在 ----------
 {
-  const files = [...CLASSIFIED, README].filter(exists);
+  // 子卷不登记 CLASSIFIED(它们不是新的一类活文档),但仍须受链接校验保护。
+  const subFiles = [];
+  for (const d of DOC_SUBDIRS) {
+    const abs = path.join(ROOT, d);
+    if (!fs.existsSync(abs)) continue;
+    for (const e of fs.readdirSync(abs, { withFileTypes: true })) {
+      if (e.isFile() && e.name.endsWith('.md')) subFiles.push(`${d}/${e.name}`);
+    }
+  }
+  const files = [...CLASSIFIED, README, ...subFiles].filter(exists);
   let checked = 0;
   const broken = [];
   for (const f of files) {
@@ -214,6 +228,54 @@ if (!exists(ARCHIVE_DIR)) {
   }
 }
 
+// ---------- D8 门面索引完整性（门面 ↔ 子目录双向） ----------
+{
+  let dirCount = 0;
+  let fileCount = 0;
+  const problems = [];
+  for (const dir of DOC_SUBDIRS) {
+    const absDir = path.join(ROOT, dir);
+    if (!fs.existsSync(absDir)) continue;
+    dirCount += 1;
+    const facade = `${dir}.md`;
+    if (!exists(facade)) {
+      problems.push(`子目录 ${dir}/ 存在但门面 ${facade} 不存在`);
+      continue;
+    }
+    const files = fs
+      .readdirSync(absDir, { withFileTypes: true })
+      .filter((e) => e.isFile() && e.name.endsWith('.md'))
+      .map((e) => e.name)
+      .sort();
+    fileCount += files.length;
+    const src = read(facade);
+    const linked = new Set();
+    const ghosts = new Set();
+    const re = /\]\((?!https?:|mailto:)([^)#]+?)(?:#[^)]*)?\)/g;
+    let m;
+    while ((m = re.exec(src))) {
+      const target = m[1].trim();
+      if (!target) continue;
+      const abs = path.resolve(path.dirname(path.join(ROOT, facade)), target);
+      const relToDir = path.relative(absDir, abs);
+      if (!relToDir || relToDir.startsWith('..') || path.isAbsolute(relToDir)) continue;
+      if (!relToDir.endsWith('.md') || relToDir.includes(path.sep)) continue;
+      linked.add(relToDir);
+      if (!files.includes(relToDir)) ghosts.add(relToDir);
+    }
+    const missing = files.filter((n) => !linked.has(n));
+    if (missing.length) problems.push(`${facade} 未链接子文件:${missing.join(', ')}`);
+    if (ghosts.size) problems.push(`${facade} 链接了不存在的子文件:${[...ghosts].join(', ')}`);
+  }
+  if (problems.length) {
+    fail('D8', `门面索引不完整:\n` + problems.map((p) => `       - ${p}`).join('\n'));
+  } else if (dirCount === 0) {
+    ok('D8', '尚无子目录（拆分未开始）');
+  } else {
+    ok('D8', `门面索引覆盖全部 ${fileCount} 个子文件（${dirCount} 个目录）`);
+  }
+}
+
 // ---------- D6 (WARN) 条目 ID 存在性 ----------
 {
   const idRules = [
@@ -248,10 +310,10 @@ if (JSON_OUT) {
   if (fails.length) {
     console.log('\n[FAIL] 文档一致性检查未通过:');
     fails.forEach((f) => console.log(`  - [${f.rule}] ${f.msg}`));
-    console.log('\n六类体系约定见 docs/README.md。');
+    console.log('\n活文档体系约定见 docs/README.md。');
     process.exit(1);
   }
-  console.log('\n[ OK ] 文档六类体系一致(docs/ 结构 / 索引 / 链接 / 归档映射)');
+  console.log('\n[ OK ] 文档体系一致(六类 + 裁定分册;docs/ 结构 / 索引 / 链接 / 归档映射 / 门面索引)');
 }
 
 process.exit(fails.length ? 1 : 0);
