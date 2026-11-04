@@ -137,6 +137,15 @@ watch(workspacePath, () => {
 // 组件卸载时清掉待发定时器(侧栏在模式切换时会重建,不清会留下一个悬空请求)
 onBeforeUnmount(clearWsProbe);
 
+/** 待上传附件的展示大小(与任务详情附件清单同口径) */
+function pendingSize(bytes: number): string {
+  const kb = 1024;
+  if (bytes < kb) return `${bytes} B`;
+  if (bytes < kb * kb) return `${(bytes / kb).toFixed(1)} KB`;
+  if (bytes < kb * kb * kb) return `${(bytes / (kb * kb)).toFixed(1)} MB`;
+  return `${(bytes / (kb * kb * kb)).toFixed(1)} GB`;
+}
+
 /** 新建并立即执行 */
 async function createAndRun(): Promise<void> {
   const t = taskTitle.value.trim();
@@ -188,6 +197,37 @@ watch(
     >
       {{ creatingTask ? '创建中…' : '▶ 创建并执行' }}
     </button>
+
+    <!-- 待上传附件(ATTFIX-6):未选中任务时导入的文件此前完全不可见、不可移除。
+         这里是它们唯一的可见面;创建任务时由 createAndRun 一并刷上去。 -->
+    <div v-if="taskAttachments.pendingFiles.value.length > 0" class="sv-pending-list">
+      <div class="sv-pending-head">
+        <span class="sv-pending-title">将随任务提交的附件</span>
+        <button
+          class="sv-btn ghost sv-btn-sm"
+          :title="'清空待上传的 ' + taskAttachments.pendingFiles.value.length + ' 个附件'"
+          :disabled="creatingTask"
+          @click="taskAttachments.clearPending()"
+        >清空附件</button>
+      </div>
+      <ul class="sv-pending-items">
+        <li
+          v-for="p in taskAttachments.pendingFiles.value"
+          :key="p.localId"
+          class="sv-pending-attachment"
+        >
+          <span class="sv-pending-name" :title="p.file.name">{{ p.file.name }}</span>
+          <span class="sv-pending-size sv-tnum">{{ pendingSize(p.file.size) }}</span>
+          <button
+            type="button"
+            class="sv-btn ghost sv-btn-sm sv-pending-remove"
+            :title="`移除「${p.file.name}」`"
+            :disabled="creatingTask"
+            @click="taskAttachments.removePending(p.localId)"
+          >移除</button>
+        </li>
+      </ul>
+    </div>
 
     <details class="sv-task-advanced">
       <summary class="sv-task-advanced-summary">
@@ -376,8 +416,7 @@ watch(
   min-height: 44px;
   margin-top: var(--space-2-5);
 }
-.sv-task-advanced {
-  margin-top: var(--space-3);
+.sv-task-advanced {  margin-top: var(--space-3);
   border-top: 1px solid var(--sv-line);
 }
 .sv-task-advanced-summary {
@@ -436,4 +475,53 @@ watch(
   min-height: var(--control-h);
 }
 .sv-ws-recent-item { font-size: var(--text-xs); }
+
+/* ===== 待上传附件(ATTFIX-6) =====
+   块本身是「提交前确认」的可见面,故贴着「创建并执行」放;队列为空时整块不渲染。 */
+.sv-pending-list {
+  margin-top: var(--space-2);
+  padding: var(--space-2);
+  border: var(--bw-thin) dashed var(--sv-line-strong);
+}
+.sv-pending-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-1-5);
+}
+.sv-pending-title {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-2xs);
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: var(--sv-ink-soft);
+}
+.sv-pending-items {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.sv-pending-attachment {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+}
+.sv-pending-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sv-pending-size {
+  flex: none;
+  color: var(--sv-ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+.sv-pending-attachment .sv-btn { flex: none; }
 </style>

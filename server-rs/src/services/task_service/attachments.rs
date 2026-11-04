@@ -44,7 +44,12 @@ pub struct TaskAttachmentRecord {
     /// **相对任务作用域根**的落盘路径(统一 `/` 分隔;模型 `fs_read` 直接用这个)
     pub rel_path: String,
     pub size: i64,
-    /// 客户端上报的 MIME;缺失为 `null`(不猜——按扩展名伪造会让「图像/文本」判定说谎)
+    /// **按扩展名推断**的 MIME 提示;推断不出为 `null`(ATTFIX-13)。
+    ///
+    /// 不是客户端上报值:multipart 的 part 级 `Content-Type` 当前不被解析器读取
+    /// (它只解析 `Content-Disposition` 的 name/filename)。见 `api/tasks/attachments.rs`
+    /// 的 `sniff_mime`:只覆盖「文本 vs 图像」这一条判定真正需要的类别。
+    /// 用它做安全判定是不对的(扩展名不可信),但这里只用于给模型一个读法建议。
     pub mime: Option<String>,
     pub created_at: String,
 }

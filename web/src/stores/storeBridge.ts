@@ -75,6 +75,22 @@ export type UiPrefsSink = {
 };
 
 /**
+ * 任务附件侧的缓存失效口(ATTFIX-12,2026-11-04)。
+ *
+ * 为什么需要:`useTaskAttachments` 的清单缓存在模块级单例里,任务被删除后不会自动
+ * 离开。留着的后果是孤儿数据长期驻留(每个任务一份清单,进程生命周期内不复用 id 时
+ * 永不命中但也永不释放)。`forgetTask` 一直存在却**零调用**,本批把它接上。
+ *
+ * 为什么走桥而不是直接在 store 里 import composable:`stores/task.ts` 已经在文件
+ * 大小基线里只降不升,且 store 依赖 composable 会破坏既有单向分层(composable 是
+ * 消费 store 的那一侧)。桥的形态与 `uiPrefs` 同款:composable 注册,store 调用。
+ */
+export type TaskAttachmentSink = {
+  /** 丢弃某任务的附件清单缓存 */
+  forgetTask: (taskId: string) => void;
+};
+
+/**
  * 六条桥(owner 与降级行为集中登记;业务调用点走下方具名包装,owner 已固定)。
  *
  * 降级语义一览(未注册时 get() 的行为):
@@ -84,7 +100,8 @@ export type UiPrefsSink = {
  *   - settingsLoader → no-op;
  *   - renderHtmlDefault → no-op(仅影响该展示值);
  *   - chatEvent → no-op;
- *   - uiPrefs → 安全空实现(不崩、不误展开面板,isCallTraceOpen 恒 false)。
+ *   - uiPrefs → 安全空实现(不崩、不误展开面板,isCallTraceOpen 恒 false);
+ *   - taskAttachment → no-op(只是少释放几份内存,不影响任何可见行为)。
  */
 export const storeBridges = {
   /** 读当前角色 id(owner:character store;读取方:chat / uiPrefs) */
@@ -104,6 +121,10 @@ export const storeBridges = {
     collapseAgentPanel: () => {},
     autoOpenAgentPanel: () => {},
     isCallTraceOpen: () => false,
+  }),
+  /** 任务附件缓存失效(owner:useTaskAttachments;调用方:task 删除任务时) */
+  taskAttachment: createBridge<TaskAttachmentSink>('taskAttachment', {
+    forgetTask: () => {},
   }),
 } as const;
 
@@ -171,4 +192,14 @@ export function registerUiPrefsSink(fn: UiPrefsSink): void {
 /** 取 uiPrefs 能力;未注册时返回安全的空实现(不崩、不误展开面板)。 */
 export function uiPrefsBridge(): UiPrefsSink {
   return storeBridges.uiPrefs.get();
+}
+
+/** 由 `useTaskAttachments` 在模块加载期注册(见该文件末尾)。 */
+export function registerTaskAttachmentSink(fn: TaskAttachmentSink): void {
+  storeBridges.taskAttachment.register('useTaskAttachments', fn);
+}
+
+/** 通知某任务的附件缓存失效。未注册时静默跳过(只是少释放一点内存)。 */
+export function forgetTaskAttachments(taskId: string): void {
+  storeBridges.taskAttachment.get().forgetTask(taskId);
 }

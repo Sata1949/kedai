@@ -162,3 +162,110 @@ describe('任务附件:上传与清单', () => {
     expect(b.pendingFiles.value).toHaveLength(1);
   });
 });
+
+// ATTFIX-11(2026-11-04):`uploadTo` 此前把待上传队列也算进「当前任务」的配额。
+// 待上传队列属于**还没创建的任务**,与任何已有任务无关;把它算进来会让用户
+// 「先给 A 任务传 10 个,再去选文件准备建新任务」时被误拒。
+describe('任务附件:配额归属(ATTFIX-11)', () => {
+  it('待上传队列不占用当前任务的配额', async () => {
+    const a = useTaskAttachments();
+    // 队列里已攒了 MAX-1 个(将来要交给一个新任务)
+    a.enqueue(
+      Array.from({ length: MAX_ATTACHMENTS_PER_TASK - 1 }, (_, i) => file(`q${i}.txt`)),
+    );
+    // 当前任务 t1 只有 1 个附件
+    listMock.mockResolvedValueOnce([att('1')]);
+    await a.refresh('t1');
+    // 再给 t1 传 9 个:总数为 10,正好到上限 → 必须全部接受
+    uploadMock.mockResolvedValueOnce(
+      Array.from({ length: 9 }, (_, i) => att(`n${i}`, `n${i}.txt`)),
+    );
+    await a.uploadTo('t1', Array.from({ length: 9 }, (_, i) => file(`n${i}.txt`)));
+    expect(a.lastError.value).toBe('');
+    expect(uploadMock).toHaveBeenCalledTimes(1);
+    // 队列原封不动(它属于别的任务)
+    expect(a.pendingFiles.value).toHaveLength(MAX_ATTACHMENTS_PER_TASK - 1);
+  });
+
+  it('当前任务自身超限时仍然拒绝', async () => {
+    const a = useTaskAttachments();
+    listMock.mockResolvedValueOnce(
+      Array.from({ length: MAX_ATTACHMENTS_PER_TASK }, (_, i) => att(`${i}`)),
+    );
+    await a.refresh('t1');
+    await a.uploadTo('t1', [file('extra.txt')]);
+    expect(uploadMock).not.toHaveBeenCalled();
+    expect(a.lastError.value).toContain('extra.txt');
+  });
+});
+
+// ATTFIX-4(2026-11-04):`length > 0` 无法区分「已加载且为空」与「从未加载」。
+// 删除最后一个附件后缓存变成空数组,`length > 0` 判为「没加载过」→ 回落详情顶层,
+// 而详情顶层是**删之前**的快照,于是已删的附件又显示出来。
+describe('任务附件:缓存加载态(ATTFIX-4)', () => {
+  it('hasLoaded 区分「已加载且为空」与「从未加载」', () => {
+    const a = useTaskAttachments();
+    expect(a.hasLoaded('t1')).toBe(false);
+  });
+
+  it('refresh 回来后 hasLoaded 为真(哪怕清单是空的)', async () => {
+    const a = useTaskAttachments();
+    listMock.mockResolvedValueOnce([]);
+    await a.refresh('t1');
+    expect(a.hasLoaded('t1')).toBe(true);
+    expect(a.attachmentsOf('t1')).toEqual([]);
+  });
+
+  it('上传成功也算已加载', async () => {
+    const a = useTaskAttachments();
+    uploadMock.mockResolvedValueOnce([att('1')]);
+    await a.uploadTo('t1', [file('a.txt')]);
+    expect(a.hasLoaded('t1')).toBe(true);
+  });
+
+  it('forgetTask 之后回到未加载态', async () => {
+    const a = useTaskAttachments();
+    listMock.mockResolvedValueOnce([]);
+    await a.refresh('t1');
+    a.forgetTask('t1');
+    expect(a.hasLoaded('t1')).toBe(false);
+  });
+});
+
+// ATTFIX-12(2026-11-04):`forgetTask` 此前**零调用**,清单缓存随进程一直驻留。
+// 现在 `stores/task.ts` 在删除任务(以及收到 deleted 事件)时经 storeBridge 通知。
+describe('任务附件:删除任务清缓存(ATTFIX-12)', () => {
+  it('经桥回调通知后缓存被清空', async () => {
+    const a = useTaskAttachments();
+    listMock.mockResolvedValueOnce([att('1')]);
+    await a.refresh('t1');
+    expect(a.attachmentsOf('t1')).toHaveLength(1);
+
+    // store 侧调的就是这个入口(经 storeBridge 转到这里)
+    const { forgetTaskAttachments } = await import('../stores/storeBridge');
+    forgetTaskAttachments('t1');
+
+    expect(a.attachmentsOf('t1')).toHaveLength(0);
+    expect(a.hasLoaded('t1')).toBe(false);
+  });
+
+  it('清掉一个任务的缓存不影响别的任务', async () => {
+    const a = useTaskAttachments();
+    listMock.mockResolvedValueOnce([att('1')]);
+    await a.refresh('t1');
+    listMock.mockResolvedValueOnce([att('2')]);
+    await a.refresh('t2');
+
+    const { forgetTaskAttachments } = await import('../stores/storeBridge');
+    forgetTaskAttachments('t1');
+
+    expect(a.attachmentsOf('t1')).toHaveLength(0);
+    expect(a.attachmentsOf('t2')).toHaveLength(1);
+  });
+
+  it('未注册方的降级实现不抛错(forgetTaskAttachments 恒可调)', async () => {
+    const { forgetTaskAttachments } = await import('../stores/storeBridge');
+    expect(() => forgetTaskAttachments('never-existed')).not.toThrow();
+  });
+});
+

@@ -14,6 +14,7 @@
 //      而不是组件级;但**页面刷新后自然消失**,这是可接受的(用户还没提交任何东西)。
 import { computed, ref } from 'vue';
 import { deleteTaskAttachment, listTaskAttachments, uploadTaskAttachments } from '../api/tasks';
+import { registerTaskAttachmentSink } from '../stores/storeBridge';
 import type { TaskAttachment } from '../api';
 
 /** 待上传的附件(未选中任务时选择)。带上本地 id 供 UI 去重与移除。 */
@@ -37,6 +38,15 @@ let localSeq = 0;
 
 /** 任务 id → 已上传附件清单 */
 const listsByTask = ref(new Map<string, TaskAttachment[]>());
+/**
+ * 哪些任务的清单**已经有过一次权威来源**(服务端重拉或上传回执)。
+ *
+ * 为什么不能用 `attachmentsOf(id).length > 0` 代替(ATTFIX-4):空数组既可能是
+ * 「读过了,确实一个都没有」,也可能是「还没读过」。两者混淆的直接后果是
+ * **删掉最后一个附件后它又冒出来**——缓存变成空数组被判为「没缓存」,于是回落到
+ * `currentTask.attachments`(详情快照,还是删之前的样子)。
+ */
+const loadedTasks = ref(new Set<string>());
 /** 当前待上传队列(尚未绑定到任何任务) */
 const pending = ref<PendingAttachment[]>([]);
 /** 最近一次操作的错误文案(供 UI 显示;空串 = 无错误) */
@@ -77,14 +87,50 @@ export function validateFiles(
 }
 
 /**
+ * 丢弃某任务的清单缓存与加载态(模块级,`useTaskAttachments().forgetTask` 与
+ * `stores/task.ts` 经桥回调两条路径共用同一实现)。
+ */
+function forgetTaskImpl(taskId: string): void {
+  if (listsByTask.value.has(taskId)) {
+    const next = new Map(listsByTask.value);
+    next.delete(taskId);
+    listsByTask.value = next;
+  }
+  // 加载态一并清掉:留着会让新任务(极端情况 id 复用)既不回落详情也不重拉
+  if (loadedTasks.value.has(taskId)) {
+    const nextLoaded = new Set(loadedTasks.value);
+    nextLoaded.delete(taskId);
+    loadedTasks.value = nextLoaded;
+  }
+}
+
+/**
  * 任务附件的状态与动作。**每次调用返回同一份单例状态**(模块级 ref),
  * 因此侧栏与详情面板看到的是同一份清单。
- */
-export function useTaskAttachments() {
+ */export function useTaskAttachments() {
   /** 某任务的附件清单(响应式读) */
   function attachmentsOf(taskId: string | null): TaskAttachment[] {
     if (!taskId) return [];
     return listsByTask.value.get(taskId) ?? [];
+  }
+
+  /**
+   * 某任务的清单是否**已有权威来源**(ATTFIX-4)。
+   *
+   * 「已加载且为空」与「从未加载」是两件事:判断该不该回落详情快照必须看这个，
+   * 而不是看 `attachmentsOf(id).length > 0`。
+   */
+  function hasLoaded(taskId: string | null): boolean {
+    if (!taskId) return false;
+    return loadedTasks.value.has(taskId);
+  }
+
+  /** 把某任务的清单标记为已加载(内部用) */
+  function markLoaded(taskId: string): void {
+    if (loadedTasks.value.has(taskId)) return;
+    const next = new Set(loadedTasks.value);
+    next.add(taskId);
+    loadedTasks.value = next;
   }
 
   /** 待上传队列的只读视图 */
@@ -131,6 +177,7 @@ export function useTaskAttachments() {
         ...(listsByTask.value.get(taskId) ?? []),
         ...uploaded,
       ]);
+      markLoaded(taskId);
     } catch (err) {
       // 后端按批返回失败原因(整批要么全成要么 400),故队列整体保留
       lastError.value = (err as Error).message;
@@ -146,7 +193,10 @@ export function useTaskAttachments() {
    * 成功的即时并入清单。
    */
   async function uploadTo(taskId: string, files: File[]): Promise<void> {
-    const existing = attachmentsOf(taskId).length + pending.value.length;
+    // 配额只算**本任务已有**的附件(ATTFIX-11):`pending` 属于还没创建的任务,
+    // 与任何已存在任务的配额无关。把它算进来会让「先给新任务攒了 9 个,再给已有
+    // 任务传 2 个」被误拒。
+    const existing = attachmentsOf(taskId).length;
     const { accepted, errors } = validateFiles(files, existing);
     if (errors.length > 0) lastError.value = errors.join(';');
     else lastError.value = '';
@@ -158,6 +208,7 @@ export function useTaskAttachments() {
         ...(listsByTask.value.get(taskId) ?? []),
         ...uploaded,
       ]);
+      markLoaded(taskId);
     } catch (err) {
       lastError.value = (err as Error).message;
     } finally {
@@ -175,6 +226,7 @@ export function useTaskAttachments() {
     try {
       const list = await listTaskAttachments(taskId);
       listsByTask.value = new Map(listsByTask.value).set(taskId, list);
+      markLoaded(taskId);
     } catch (err) {
       lastError.value = (err as Error).message;
     }
@@ -202,10 +254,7 @@ export function useTaskAttachments() {
 
   /** 丢弃某任务的缓存(任务被删除时调用,避免 id 复用读到旧清单) */
   function forgetTask(taskId: string): void {
-    if (!listsByTask.value.has(taskId)) return;
-    const next = new Map(listsByTask.value);
-    next.delete(taskId);
-    listsByTask.value = next;
+    forgetTaskImpl(taskId);
   }
 
   return {
@@ -215,6 +264,7 @@ export function useTaskAttachments() {
     uploading,
     lastError,
     attachmentsOf,
+    hasLoaded,
     enqueue,
     removePending,
     clearPending,
@@ -230,8 +280,16 @@ export function useTaskAttachments() {
 /** 仅供测试:把模块级单例复位(避免用例间互相污染)。 */
 export function resetTaskAttachmentsForTest(): void {
   listsByTask.value = new Map();
+  loadedTasks.value = new Set();
   pending.value = [];
   lastError.value = '';
   uploading.value = false;
   localSeq = 0;
 }
+
+// 任务被删除时清掉它的清单缓存(ATTFIX-12)。
+// 走桥而不是让 `stores/task.ts` import 本模块:store 卡在文件大小基线里只降不升,
+// 且反向依赖会让分层倒挂(composable 才是消费 store 的那一侧)。
+// 注册放在模块顶层(而非 useTaskAttachments 内):store 可能在任何人调
+// useTaskAttachments 之前就删掉一个任务——那时也应该已经能拿到这个回调。
+registerTaskAttachmentSink({ forgetTask: (taskId: string) => forgetTaskImpl(taskId) });
