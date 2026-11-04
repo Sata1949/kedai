@@ -258,7 +258,10 @@ pub(in crate::agents::engine) fn apply_inject_insertions(
                 placements.push((full, role, content, "target"));
             }
             InjectInsertion::Regex { pattern, at, role } => {
-                let Ok(re) = regex::Regex::new(&format!("(?i){pattern}")) else {
+                // 复用 parsing 层的进程级正则缓存:同一条目的 pattern 每轮都会再匹配,
+                // 现场 `Regex::new` 是纯重复编译;`false` = 大小写不敏感(等价原 `(?i)`)。
+                let Some(re) = crate::parsing::world_book::compile_regex_cached(pattern, false)
+                else {
                     continue;
                 };
                 let Some(found) = non_system_idx

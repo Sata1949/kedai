@@ -82,13 +82,14 @@ pub struct TaskDeliverySummary {
 /// 把越界路径交给文件系统。
 pub(crate) fn required_from_plan(plan: &[TaskStep]) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for step in plan {
         for raw in &step.files {
             let Some(path) = normalize_workspace_rel(raw) else {
                 tracing::warn!(path = raw.as_str(), "交付摘要:非法声明路径已跳过");
                 continue;
             };
-            if out.iter().any(|(p, _)| p == &path) {
+            if !seen.insert(path.clone()) {
                 continue;
             }
             let owner = if step.name.trim().is_empty() {
@@ -175,15 +176,13 @@ pub(crate) fn step_files_unmet(workspace: &Path, files: &[String]) -> Option<Vec
             issues.push(format!("{path}:文件为空(0B)"));
             continue;
         }
-        let Some(lines) = placeholder_line_count(&abs) else {
+        let Some(text) = read_inspectable_text(&abs) else {
             continue;
         };
+        let lines = text.lines().filter(|line| line.contains("@@")).count();
         if lines > 0 {
             issues.push(format!("{path}:含 {lines} 行 @@ 未替换槽位"));
-        } else if std::fs::read_to_string(&abs)
-            .map(|text| text.trim().is_empty())
-            .unwrap_or(false)
-        {
+        } else if text.trim().is_empty() {
             issues.push(format!("{path}:文件仅含空白"));
         }
     }
@@ -201,6 +200,18 @@ const TEXT_EXTENSIONS: &[&str] = &[
 /// ——「占位符没清零」是半成品的确定性证据。仅扫常见文本扩展名且 ≤512KB;
 /// 读失败/非文本返回 None。
 pub(crate) fn placeholder_line_count(path: &Path) -> Option<usize> {
+    Some(
+        read_inspectable_text(path)?
+            .lines()
+            .filter(|line| line.contains("@@"))
+            .count(),
+    )
+}
+
+/// 读取可做内容体检的文本文件:只认常见文本扩展名且 ≤512KB。
+/// 读失败/非文本/超限返回 None(与 `placeholder_line_count` 的跳过语义一致)。
+/// 单步检查用它一次读入,避免「先数 `@@` 再判空白」读两遍。
+fn read_inspectable_text(path: &Path) -> Option<String> {
     const MAX_BYTES: u64 = 512 * 1024;
     let ext = path
         .extension()
@@ -213,8 +224,7 @@ pub(crate) fn placeholder_line_count(path: &Path) -> Option<usize> {
     if std::fs::metadata(path).ok()?.len() > MAX_BYTES {
         return None;
     }
-    let text = std::fs::read_to_string(path).ok()?;
-    Some(text.lines().filter(|line| line.contains("@@")).count())
+    std::fs::read_to_string(path).ok()
 }
 
 /// 根目录未声明的临时/草稿文件(SKY-1 交付卫生,2026-10-25)。
@@ -1122,6 +1132,32 @@ mod tests {
         assert_eq!(single[0].0, "index.html");
         let multi = required_from_plan_for_goal(&plan, "普通多文件项目");
         assert_eq!(multi.len(), 3, "非单文件目标仍检查全部声明文件");
+    }
+
+    /// ALGO-2:重复声明按「首次出现胜出」去重,返回顺序保持首次出现顺序。
+    #[test]
+    fn required_from_plan_dedupes_and_keeps_first_owner() {
+        let step = |name: &str, files: &[&str]| TaskStep {
+            name: name.into(),
+            goal: String::new(),
+            status: TaskStepStatus::Pending,
+            result: String::new(),
+            node_id: None,
+            files: files.iter().map(|s| s.to_string()).collect(),
+        };
+        let plan = vec![
+            step("A", &["a.js", "b.js", "a.js"]),
+            step("B", &["a.js", "c.js", "b.js"]),
+        ];
+        assert_eq!(
+            required_from_plan(&plan),
+            vec![
+                ("a.js".to_string(), "A".to_string()),
+                ("b.js".to_string(), "A".to_string()),
+                ("c.js".to_string(), "B".to_string()),
+            ],
+            "去重必须保留首次声明与其 owner,且顺序不变"
+        );
     }
 
     /// SKY-1 交付卫生:根目录未声明的 `_*`/临时后缀文件进提示清单;
