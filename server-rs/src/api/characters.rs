@@ -50,7 +50,13 @@ pub async fn upload(
     let Some(boundary) = parse_boundary(content_type) else {
         return err_status("缺少文件字段(file)", StatusCode::BAD_REQUEST);
     };
-    let Some((file_name, file_bytes)) = parse_multipart_file(&body, &boundary) else {
+    let file = match parse_multipart_file(&body, &boundary) {
+        Ok(v) => v,
+        // 解析器报的只有「分隔符冲突」:内容里出现了与 boundary 相同的字节序列,
+        // 边界不可判别。这是用户可以重试/换文件解决的问题,故 400 而不是 500。
+        Err(e) => return err_status(e, StatusCode::BAD_REQUEST),
+    };
+    let Some((file_name, file_bytes)) = file else {
         return err_status("缺少文件字段(file)", StatusCode::BAD_REQUEST);
     };
     if file_bytes.len() > MAX_UPLOAD {
@@ -83,10 +89,13 @@ pub(crate) fn parse_boundary(content_type: &str) -> Option<String> {
 }
 
 /// 在完整 multipart 字节中查找 file 字段,返回 (filename, content)
-fn parse_multipart_file(body: &[u8], boundary: &str) -> Option<(String, Vec<u8>)> {
-    parse_multipart(body, boundary)
+fn parse_multipart_file(
+    body: &[u8],
+    boundary: &str,
+) -> Result<Option<(String, Vec<u8>)>, MultipartError> {
+    Ok(parse_multipart(body, boundary)?
         .into_iter()
-        .find_map(|p| p.filename.map(|f| (f, p.content)))
+        .find_map(|p| p.filename.map(|f| (f, p.content))))
 }
 
 /// 通用 multipart 解析:返回全部 part(字段名 / 可选文件名 / 内容),供 world_books 复用
@@ -96,10 +105,28 @@ pub(crate) struct MultipartPart {
     pub content: Vec<u8>,
 }
 
-pub(crate) fn parse_multipart(body: &[u8], boundary: &str) -> Vec<MultipartPart> {
+/// multipart 解析失败原因(中文,直接上屏)。
+pub(crate) type MultipartError = String;
+
+/// 解析 multipart 请求体。
+///
+/// **内容边界必须带 boundary**(ATTFIX-1,2026-11-04):此前只匹配 `\r\n--`,内容自身
+/// 出现该字节序列就被静默截断——CRLF 换行的 Markdown 首行 `---` 之后即中招(实测
+/// 28 字节被截成 13)。写入的 `size` 也是截断后的值,三层自洽、无人报错,用户只看到
+/// 「附件内容对不上」。
+///
+/// 解析器是 2026 年早期为角色卡上传而写的,当时内容只可能是 UTF-8 JSON(几乎不含
+/// `\r\n--`);ATTACH-1 首次把它用于**任意文件**,旧假设才暴露。详见 `docs/经验.md` E149。
+pub(crate) fn parse_multipart(
+    body: &[u8],
+    boundary: &str,
+) -> Result<Vec<MultipartPart>, MultipartError> {
     let mut parts = Vec::new();
     let delim = format!("--{boundary}");
     let delim_bytes = delim.as_bytes();
+    // 内容终止符带 boundary:只认「本请求的分隔符」,不认任何 `\r\n--`
+    let terminator = format!("\r\n--{boundary}");
+    let terminator_bytes = terminator.as_bytes();
     let mut search_from = 0usize;
     while let Some(rel) = find_subsequence(&body[search_from..], delim_bytes) {
         // 跳过 boundary + 后续 CRLF
@@ -110,10 +137,17 @@ pub(crate) fn parse_multipart(body: &[u8], boundary: &str) -> Vec<MultipartPart>
         let headers_block = &body[part_start..part_start + hdr_end_rel];
         let content_start = part_start + hdr_end_rel + 4;
         let rest = &body[content_start..];
-        // 内容到下一个 "\r\n--boundary" 为止
-        let Some(next_rel) = find_subsequence(rest, b"\r\n--") else {
+        // 内容到下一个 "\r\n--{boundary}" 为止
+        let Some(next_rel) = find_subsequence(rest, terminator_bytes) else {
             break;
         };
+        // 协议上分隔符之后只能跟 CRLF(还有下一个 part)或 `--`(整体结束)。两者都不是,
+        // 说明内容里出现了与 boundary 相同的字节序列,边界不可判别——报错而不是静默
+        // 截断:截断产出的是一份「尺寸自洽、内容残缺」的附件,用户无从察觉。
+        let after = &rest[next_rel + terminator_bytes.len()..];
+        if !after.starts_with(b"\r\n") && !after.starts_with(b"--") {
+            return Err("请求内容与 multipart 分隔符冲突,上传已中止".to_string());
+        }
         let content = &rest[..next_rel];
         let headers_text = String::from_utf8_lossy(headers_block);
         let mut field = String::new();
@@ -146,7 +180,7 @@ pub(crate) fn parse_multipart(body: &[u8], boundary: &str) -> Vec<MultipartPart>
         // 下一个 boundary 起点:指向 "\r\n--" 处(不 +4,让 find_subsequence 重新定位 "--BOUND")
         search_from = content_start + next_rel;
     }
-    parts
+    Ok(parts)
 }
 
 fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {

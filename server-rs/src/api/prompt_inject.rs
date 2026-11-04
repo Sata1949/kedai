@@ -74,7 +74,10 @@ pub async fn import(
     let Some(boundary) = parse_boundary(content_type) else {
         return validation("缺少文件字段(file)");
     };
-    let parts = parse_multipart(&body, &boundary);
+    let parts = match parse_multipart(&body, &boundary) {
+        Ok(p) => p,
+        Err(e) => return validation(e),
+    };
     let Some(file_part) = parts.iter().find(|p| p.field == "file") else {
         return validation("缺少文件字段(file)");
     };

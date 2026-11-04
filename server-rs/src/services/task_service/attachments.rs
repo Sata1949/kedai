@@ -22,6 +22,7 @@ use crate::models::db::now_iso;
 use crate::models::types::TaskRecord;
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -101,6 +102,43 @@ impl TaskService {
         }
     }
 
+    /// 一批附件**先整体校验、后逐条写入**(ATTFIX-2)。
+    ///
+    /// 此前端点侧循环内 `?` 提前返回,已写入的行与文件不回滚——函数文档声称
+    /// 「整批失败」,实现却造出了它要避免的「部分成功」:用户看到 400,库里却已经
+    /// 多了前 N 个附件。校验放在写入之前,失败时磁盘与库都未动。
+    ///
+    /// 个数上限按**整批**算:此前每个 `store_attachment` 各自查一次库,批内不累加,
+    /// 一次传 12 个能全进(单任务上限 10)。
+    pub(crate) fn store_attachments(
+        &self,
+        task: &TaskRecord,
+        items: Vec<(String, Option<String>, Vec<u8>)>,
+    ) -> Result<Vec<TaskAttachmentRecord>, String> {
+        for (name, _, bytes) in &items {
+            if bytes.is_empty() {
+                return Err(format!("附件「{name}」内容为空"));
+            }
+            if bytes.len() > MAX_ATTACHMENT_BYTES {
+                return Err(format!(
+                    "附件「{name}」超过 {}MB 上限",
+                    MAX_ATTACHMENT_BYTES / (1024 * 1024)
+                ));
+            }
+        }
+        let existing = self.list_attachments(&task.id)?;
+        if existing.len() + items.len() > MAX_ATTACHMENTS_PER_TASK {
+            return Err(format!(
+                "单个任务最多 {MAX_ATTACHMENTS_PER_TASK} 个附件,请先删除不用的"
+            ));
+        }
+        let mut out = Vec::with_capacity(items.len());
+        for (name, mime, bytes) in items {
+            out.push(self.store_attachment(task, &name, mime.as_deref(), &bytes)?);
+        }
+        Ok(out)
+    }
+
     /// 写入一个附件:落盘 + 落库,返回记录。
     ///
     /// 顺序是**先落盘后落库**:库写失败时留一个孤儿文件(下次同名序号会被跳过,
@@ -133,12 +171,17 @@ impl TaskService {
         let dir = self.attachment_dir(task)?;
         // 序号取「已有文件里最大的数字前缀 + 1」而不是已有记录数:删过附件后记录数
         // 会小于磁盘上的最大序号,直接用记录数会撞名覆盖。
-        let seq = next_seq(&dir.abs);
+        //
+        // **占位而非先算后写**(ATTFIX-9):`next_seq` 只是读目录,两个并发上传会算出
+        // 同一个 seq,后一次 `fs::write` 直接覆盖前一次,库里两行指向同一物理文件。
+        // 改成 `create_new` 占位:拿到独占句柄才算认领成功,撞名就 seq+1 重试。
         let safe = sanitize_file_name(&display);
+        let (seq, mut file) = reserve_seq(&dir.abs, &safe)?;
+        file.write_all(bytes)
+            .map_err(|e| format!("附件写入失败({}):{e}", dir.abs.display()))?;
+        // 句柄随作用域结束关闭:Windows 上不关闭会让随后的删除/覆盖失败
+        drop(file);
         let disk_name = format!("{seq}-{safe}");
-        let target = dir.abs.join(&disk_name);
-        std::fs::write(&target, bytes)
-            .map_err(|e| format!("附件写入失败({}):{e}", target.display()))?;
         if let Some(gitignore) = dir.gitignore_at.as_deref() {
             ensure_gitignore(gitignore);
         }
@@ -171,11 +214,23 @@ impl TaskService {
     }
 
     /// 列出某任务的附件(按创建时间升序 = 上传顺序)。
+    ///
+    /// 坏行**不静默跳过**(ATTFIX-10):`task_attachments` 是详情与目标注入的权威清单,
+    /// 悄悄丢一行会让「上传成功但列表里没有」变成无法诊断的现象。与同模块
+    /// `scan_events` / `scan_trace` 的严格口径对齐——读到坏行就明确报错。
     pub(crate) fn list_attachments(
         &self,
         task_id: &str,
     ) -> Result<Vec<TaskAttachmentRecord>, String> {
         let conn = self.db.read()?;
+        Self::select_attachments(&conn, task_id)
+    }
+
+    /// 清单查询的静态实现(显式传连接,可内存库单测;同 `select_trace_by_seq` 形态)。
+    fn select_attachments(
+        conn: &rusqlite::Connection,
+        task_id: &str,
+    ) -> Result<Vec<TaskAttachmentRecord>, String> {
         let mut stmt = conn
             .prepare(
                 "SELECT id, task_id, name, rel_path, size, mime, created_at
@@ -196,7 +251,11 @@ impl TaskService {
                 })
             })
             .map_err(|e| format!("遍历附件清单失败: {e}"))?;
-        Ok(rows.flatten().collect())
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| format!("读取附件行失败: {e}"))?);
+        }
+        Ok(out)
     }
 
     /// 删除某附件:先删库行再删磁盘文件。
@@ -337,6 +396,9 @@ fn sanitize_file_name(display: &str) -> String {
 /// 目录里已有的最大 `{seq}-` 前缀 + 1(从 1 起)。
 ///
 /// 读目录而不是数库行:删过附件后两者会分叉,按库行数取名会**覆盖**磁盘上残留的文件。
+///
+/// 只用于给 `reserve_seq` 一个起算点。**不能**单独拿它的返回值直接写文件:
+/// 两个并发上传会算出同一个 seq(ATTFIX-9)。
 fn next_seq(dir: &Path) -> u64 {
     let max = std::fs::read_dir(dir)
         .map(|entries| {
@@ -352,6 +414,31 @@ fn next_seq(dir: &Path) -> u64 {
         })
         .unwrap_or(0);
     max + 1
+}
+
+/// 独占分配一个 `{seq}-{safe}` 落盘名,返回 (seq, 已创建的句柄)。
+///
+/// `create_new` 是原子占位:两个并发请求同时算到 seq=3 时只有一个能建成功,另一个
+/// 拿到 `AlreadyExists` 后顺延到 4。**这是 ATTFIX-9 的修复本体**——用 `fs::write`
+/// 先前算好的路径会让两次上传落到同一文件,库里两行指向同一物理文件。
+///
+/// 重试上限 64:目录里理论上不会有连续 64 个名字被占住;真有那么多同名文件时
+/// 明确报错比无限循环好。
+fn reserve_seq(dir: &Path, safe: &str) -> Result<(u64, std::fs::File), String> {
+    let mut seq = next_seq(dir);
+    for _ in 0..64 {
+        let path = dir.join(format!("{seq}-{safe}"));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(f) => return Ok((seq, f)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => seq += 1,
+            Err(e) => return Err(format!("附件写入失败({}):{e}", path.display())),
+        }
+    }
+    Err("附件序号分配失败(目录内同名文件过多)".to_string())
 }
 
 /// 保证 `<workspace>/.kedai/.gitignore` 存在且忽略 `attachments/`。
@@ -447,6 +534,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// **占位是原子的**:同名连续占位会各自递增,不会拿到同一个文件名(ATTFIX-9)。
+    ///
+    /// 缺陷形态:`next_seq` 的结果直接 `fs::write`,两次调用算出同一 seq,后写覆盖前写。
+    #[test]
+    fn reserve_seq_never_hands_out_the_same_name_twice() {
+        let dir = std::env::temp_dir().join(format!("kedai-attach-rsv-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        let mut seqs = Vec::new();
+        let mut names = Vec::new();
+        // 连续占位 5 次,句柄全部持有到结束(模拟并发时都还没关闭)
+        let mut held = Vec::new();
+        for _ in 0..5 {
+            let (seq, f) = reserve_seq(&dir, "same.txt").expect("占位应成功");
+            seqs.push(seq);
+            names.push(format!("{seq}-same.txt"));
+            held.push(f);
+        }
+        drop(held);
+        seqs.sort_unstable();
+        seqs.dedup();
+        assert_eq!(seqs.len(), 5, "5 次占位必须拿到 5 个不同序号: {seqs:?}");
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), 5, "落盘名不得重复: {names:?}");
+        // 占位已创建空文件,随后的 next_seq 应看在眼里继续往后走
+        assert_eq!(next_seq(&dir), 6);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// `.gitignore` 只补不改:已存在时内容保持原样(用户可能自己维护规则)。
     #[test]
     fn gitignore_is_created_once_and_never_overwritten() {
@@ -478,5 +594,57 @@ mod tests {
             format!("{}/{}", "attachments", "1-a.txt"),
             "attachments/1-a.txt"
         );
+    }
+
+    /// **坏行必须报错,不得静默跳过**(ATTFIX-10)。
+    ///
+    /// 缺陷形态:`rows.flatten().collect()` 把读不出的行当成不存在——附件清单
+    /// 是详情与目标注入的权威来源,少一行用户只会看到「上传成功但列表里没有」,
+    /// 无从诊断。这里用类型不匹配的行(size 存成文本)构造「读不出」。
+    #[test]
+    fn list_attachments_rejects_bad_rows_instead_of_skipping() {
+        let conn = rusqlite::Connection::open_in_memory().expect("内存库");
+        conn.execute_batch(
+            "CREATE TABLE task_attachments (
+               id TEXT PRIMARY KEY, task_id TEXT NOT NULL, name TEXT NOT NULL,
+               rel_path TEXT NOT NULL, size INTEGER NOT NULL, mime TEXT, created_at TEXT NOT NULL
+             );",
+        )
+        .expect("建表");
+        // 一条好行 + 一条坏行(size 位置存了非数字文本)
+        conn.execute(
+            "INSERT INTO task_attachments VALUES ('a1','t1','好.txt','attachments/1-a.txt',3,NULL,'c1')",
+            [],
+        )
+        .expect("插好行");
+        conn.execute(
+            "INSERT INTO task_attachments VALUES ('a2','t1','坏.txt','attachments/2-b.txt','not-a-number',NULL,'c2')",
+            [],
+        )
+        .expect("插坏行");
+        let err = TaskService::select_attachments(&conn, "t1").expect_err("坏行必须报错");
+        assert!(err.contains("读取附件行失败"), "错误文本应指明坏行: {err}");
+    }
+
+    /// 全部为好行时正常返回(确认上面的严格化没有把正常路径改坏)。
+    #[test]
+    fn list_attachments_returns_good_rows() {
+        let conn = rusqlite::Connection::open_in_memory().expect("内存库");
+        conn.execute_batch(
+            "CREATE TABLE task_attachments (
+               id TEXT PRIMARY KEY, task_id TEXT NOT NULL, name TEXT NOT NULL,
+               rel_path TEXT NOT NULL, size INTEGER NOT NULL, mime TEXT, created_at TEXT NOT NULL
+             );",
+        )
+        .expect("建表");
+        conn.execute(
+            "INSERT INTO task_attachments VALUES ('a1','t1','好.txt','attachments/1-a.txt',3,'text/plain','c1')",
+            [],
+        )
+        .expect("插行");
+        let rows = TaskService::select_attachments(&conn, "t1").expect("应成功");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "好.txt");
+        assert_eq!(rows[0].size, 3);
     }
 }

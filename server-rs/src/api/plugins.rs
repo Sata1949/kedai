@@ -185,7 +185,10 @@ pub async fn upload_tool(
     let Some(boundary) = crate::api::characters::parse_boundary(content_type) else {
         return err_status("缺少文件字段(file)", StatusCode::BAD_REQUEST);
     };
-    let parts = crate::api::characters::parse_multipart(&body, &boundary);
+    let parts = match crate::api::characters::parse_multipart(&body, &boundary) {
+        Ok(p) => p,
+        Err(e) => return err_status(e, StatusCode::BAD_REQUEST),
+    };
     let Some(file) = parts.into_iter().find(|p| p.filename.is_some()) else {
         return err_status("缺少文件字段(file)", StatusCode::BAD_REQUEST);
     };
