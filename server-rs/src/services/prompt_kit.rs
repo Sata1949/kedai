@@ -153,6 +153,57 @@ pub fn triggered_entry_hits_scoped(
     entry_matches_texts(e, &texts[start..]) && entry_probability_pass(e, roll)
 }
 
+/// 世界书扫描池(ALGO-5,2026-11-04):每轮构建一次,供全部条目复用。
+///
+/// 旧实现每条目都做两件 O(历史) 的事:① `is_user` 全扫数 user 总数并反向找窗口起点;
+/// ② 大小写不敏感条目各自把整段历史 `to_lowercase()`。池化后两项都只做一次,
+/// 条目侧只剩匹配本身。窗口/概率语义与 [`triggered_entry_hits_scoped`] 逐字节一致
+/// (等价性由单测逐例对照)。
+pub struct WorldScanPool<'a> {
+    texts: &'a [String],
+    /// 与 `texts` 逐条对齐的小写池(仅在条目需要大小写不敏感匹配时被消费)
+    lowered: Vec<String>,
+    /// user 消息在池中的下标(升序);`user_total = user_indices.len()`
+    user_indices: Vec<usize>,
+}
+
+impl<'a> WorldScanPool<'a> {
+    pub fn new(texts: &'a [String], is_user: &[bool]) -> Self {
+        debug_assert_eq!(texts.len(), is_user.len(), "扫描文本与角色标记必须逐条对齐");
+        let user_indices = is_user
+            .iter()
+            .enumerate()
+            .filter_map(|(i, is_user)| (*is_user).then_some(i))
+            .collect();
+        let lowered = texts.iter().map(|m| m.to_lowercase()).collect();
+        Self {
+            texts,
+            lowered,
+            user_indices,
+        }
+    }
+
+    /// 与 [`triggered_entry_hits_scoped`] 同语义的单条目判定。
+    pub fn triggered_hits(&self, e: &WorldEntry, window_fallback: i64, roll: i64) -> bool {
+        use crate::parsing::world_book::{
+            entry_matches_texts_prepared, entry_probability_pass, scan_window_len,
+        };
+        let user_total = self.user_indices.len();
+        if user_total == 0 {
+            return false;
+        }
+        let window_users = scan_window_len(e, user_total, window_fallback);
+        // 窗口撑满全部 user 消息 → 自会话起点计;否则 O(1) 取倒数第 window_users 条 user 下标。
+        let start = if window_users >= user_total {
+            0
+        } else {
+            self.user_indices[user_total - window_users]
+        };
+        entry_matches_texts_prepared(e, &self.texts[start..], Some(&self.lowered[start..]))
+            && entry_probability_pass(e, roll)
+    }
+}
+
 /// 激发条目的概率 roll(单点):返回 `0..100` 的整数。
 ///
 /// 收敛前 ② 用引擎的 `simple_roll()`、③ 用 `SystemTime::subsec_nanos() % 100`——
@@ -732,6 +783,61 @@ mod tests {
             4,
             0
         ));
+    }
+
+    /// ALGO-5:池化实现与旧 scoped 原语逐例等价(大小写不敏感 / 大小写敏感 / 正则 /
+    /// 窗口未撑满 / assistant 侧命中 / 空池 / 概率闸)。
+    #[test]
+    fn world_scan_pool_matches_scoped_reference() {
+        let mut case_sensitive = triggered_entry(&["trigger"], 100);
+        case_sensitive.case_sensitive = true;
+        let mut regex_entry = triggered_entry(&[], 100);
+        regex_entry.use_regex = true;
+        regex_entry.regex = Some("触发词".to_string());
+        let entries = vec![
+            triggered_entry(&["trigger"], 100),
+            case_sensitive,
+            regex_entry,
+            triggered_entry(&["触发词"], 0), // 概率闸:probability=0 恒不过
+        ];
+        let cases: Vec<Vec<(&str, &str)>> = vec![
+            vec![("user", "TRIGGER")],
+            vec![("user", "u1"), ("assistant", "甲触发词"), ("user", "u2")],
+            vec![("assistant", "开场白含触发词"), ("user", "u1")],
+            vec![("assistant", "开场白含触发词")],
+            vec![
+                ("user", "U1"),
+                ("assistant", "乙触发词"),
+                ("user", "u2"),
+                ("assistant", "丙触发词"),
+            ],
+            vec![("user", "无关"), ("assistant", "无关")],
+        ];
+        for &window in &[0i64, 1, 2, 4] {
+            for messages in &cases {
+                let (texts, is_user) = scan_pool(messages);
+                let pool = WorldScanPool::new(&texts, &is_user);
+                for e in &entries {
+                    assert_eq!(
+                        pool.triggered_hits(e, window, 0),
+                        triggered_entry_hits_scoped(e, &texts, &is_user, window, 0),
+                        "window={window} keys={:?} texts={texts:?}",
+                        e.keys
+                    );
+                }
+            }
+        }
+        // 概率闸:roll 边界仍与旧实现一致
+        let (texts, is_user) = scan_pool(&[("user", "u1"), ("assistant", "触发词")]);
+        let pool = WorldScanPool::new(&texts, &is_user);
+        let e = triggered_entry(&["触发词"], 30);
+        for roll in [0, 29, 30, 99] {
+            assert_eq!(
+                pool.triggered_hits(&e, 2, roll),
+                triggered_entry_hits_scoped(&e, &texts, &is_user, 2, roll),
+                "roll={roll}"
+            );
+        }
     }
 
     /// 格式化单点:两种既有约定经 `keep_empty_bracket` 显式区分。
