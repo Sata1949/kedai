@@ -109,6 +109,8 @@
 | [plans/PROMPT-BOUNDARY-HANDOFF-2026-11-02.md](plans/PROMPT-BOUNDARY-HANDOFF-2026-11-02.md) | 提示词双模式边界清理交接(RTSPLIT 前两批已合并;四项未开工遗留 R-1~R-4、三项误报判定、验收清单与探针坑) |
 | [plans/TASK-BOARD-HANDOFF-2026-11-03.md](plans/TASK-BOARD-HANDOFF-2026-11-03.md) | 任务台观感与附件导入交接(阶段 0/1/2 已合并 PR #92/#93/#94;阶段 3 任务附件与阶段 4 双主题观感未开工,含落点、门禁红点与 10 条坑) |
 | [plans/TASK-ATTACH-THEME-PLAN-2026-11-03.md](plans/TASK-ATTACH-THEME-PLAN-2026-11-03.md) | 任务附件与双主题观感执行稿(承接上一条的阶段 3/4;四提交切分、附件落点与 `.gitignore` 决策、彩窗四项改点与八契约对照、门禁红点表) |
+| [plans/DOC-SPLIT-PLAN.md](plans/DOC-SPLIT-PLAN.md) | 大文档拆分计划(X-0~X-3 已落地;X-4 计划.md 3 卷、X-5~X-7 待做;含门禁 D8、锚点风险与逐卷实测边界) |
+| [plans/DOC-SPLIT-HANDOFF-2026-11-04.md](plans/DOC-SPLIT-HANDOFF-2026-11-04.md) | 文档拆分交接(X-0~X-3 已合并 PR #99/#100;X-4 边界、30 条计划锚点、ALGO 合流回放与 8 条坑) |
 
 > **同名撞车提醒**:[archive/TASK-MODE-FIX-PLAN.md](archive/TASK-MODE-FIX-PLAN.md) 是更早的
 > 「Kimi 续做」交接稿(归档,只读);其同名的工作区执行稿已于 2026-09-27 并入 `计划.md` 并删除。
