@@ -120,6 +120,22 @@ describe('createVirtualListState 条数窗口(rowWindow)', () => {
     expect(s.isActive(60, 59, 200)).toBe(false); // 距 50 有 9
   });
 
+  it('稀疏可见集不跨空档误挂载(多段回退逐项判定)', () => {
+    const ids = Array.from({ length: 100 }, (_, i) => i);
+    const s = createVirtualListState({ threshold: 0, tailKeep: 0, rowWindow: 1 });
+    s.syncOrder(ids);
+    s.markVisible(10);
+    s.markVisible(50);
+    // 跨度 40 > 2*rowWindow + visible.size → 回退逐项,不把两簇之间整段挂载
+    expect(s.isActive(30, 30, 100)).toBe(false);
+    expect(s.isActive(11, 11, 100)).toBe(true);
+    expect(s.isActive(49, 49, 100)).toBe(true);
+    // 边界行隐藏后按剩余可见集重算
+    s.markHidden(10, 0);
+    expect(s.isActive(49, 49, 100)).toBe(true);
+    expect(s.isActive(11, 11, 100)).toBe(false);
+  });
+
   it('rowWindow=0 时关闭条数窗口,退化为纯像素窗口行为', () => {
     const ids = Array.from({ length: 200 }, (_, i) => i + 1);
     const s = createVirtualListState({ threshold: 80, tailKeep: 30, rowWindow: 0 });

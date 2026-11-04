@@ -59,6 +59,9 @@ export function createVirtualListState(options: VirtualListOptions = {}) {
   const visible = reactive(new Set<RowId>());
   /** 已渲染消息的实测高度缓存(离开缓冲区时记录,占位等高) */
   const heights = reactive(new Map<RowId, number>());
+  /** 可见集下标的 min/max(条数窗口的 O(1) 快路径;边界移除时重算) */
+  let visibleMin = Number.POSITIVE_INFINITY;
+  let visibleMax = Number.NEGATIVE_INFINITY;
 
   /**
    * 当前列表的 id → 下标映射(条数窗口判定用)。
@@ -74,6 +77,20 @@ export function createVirtualListState(options: VirtualListOptions = {}) {
     const next = new Map<RowId, number>();
     for (let i = 0; i < ids.length; i++) next.set(ids[i], i);
     order = next;
+    // 下标整体位移后,可见集的 min/max 也必须按新顺序重算(一次 O(visible))。
+    recomputeVisibleBounds();
+  }
+
+  /** 按当前 order 重算可见集下标边界;无可用下标时保持空边界。 */
+  function recomputeVisibleBounds(): void {
+    visibleMin = Number.POSITIVE_INFINITY;
+    visibleMax = Number.NEGATIVE_INFINITY;
+    for (const vid of visible) {
+      const vi = order.get(vid);
+      if (vi === undefined) continue;
+      if (vi < visibleMin) visibleMin = vi;
+      if (vi > visibleMax) visibleMax = vi;
+    }
   }
 
   /** 是否启用虚拟化(未超阈值全部真实挂载) */
@@ -93,9 +110,17 @@ export function createVirtualListState(options: VirtualListOptions = {}) {
     return isWithinRowWindow(index);
   }
 
-  /** 条数窗口:任一已在缓冲区内的行与本行相距不超过 rowWindow 时,本行也挂载 */
+  /**
+   * 条数窗口:任一已在缓冲区内的行与本行相距不超过 rowWindow 时,本行也挂载。
+   *
+   * 快路径用可见集的 [min, max] 区间一次判定;视口滚动产生的可见集通常连续,
+   * 此时区间判定与逐项判定等价。只有稀疏多段(如跳转后残留两簇)才回退逐项,
+   * 避免把两簇之间的空档误挂载。旧实现每次都对整个可见集逐项遍历。
+   */
   function isWithinRowWindow(index: number): boolean {
-    if (rowWindow <= 0 || visible.size === 0) return false;
+    if (rowWindow <= 0 || visible.size === 0 || !Number.isFinite(visibleMin)) return false;
+    if (index < visibleMin - rowWindow || index > visibleMax + rowWindow) return false;
+    if (visibleMax - visibleMin <= rowWindow * 2 + visible.size) return true;
     for (const vid of visible) {
       const vi = order.get(vid);
       if (vi !== undefined && Math.abs(vi - index) <= rowWindow) return true;
@@ -106,12 +131,21 @@ export function createVirtualListState(options: VirtualListOptions = {}) {
   /** IO 上报:进入视口缓冲区 → 真实挂载 */
   function markVisible(id: RowId): void {
     visible.add(id);
+    const vi = order.get(id);
+    if (vi !== undefined) {
+      if (vi < visibleMin) visibleMin = vi;
+      if (vi > visibleMax) visibleMax = vi;
+    }
   }
 
   /** IO 上报:离开视口缓冲区 → 记录实测高度并降级为占位 */
   function markHidden(id: RowId, measuredHeight: number): void {
     if (measuredHeight > 0) heights.set(id, measuredHeight);
+    const vi = order.get(id);
     visible.delete(id);
+    if (vi !== undefined && (vi === visibleMin || vi === visibleMax)) {
+      recomputeVisibleBounds();
+    }
   }
 
   /** 占位高度:优先实测缓存,否则按角色估算 */
@@ -124,6 +158,7 @@ export function createVirtualListState(options: VirtualListOptions = {}) {
     visible.clear();
     heights.clear();
     order = new Map();
+    recomputeVisibleBounds();
   }
 
   return { threshold, tailKeep, rowWindow, visible, heights, isEnabled, isActive, markVisible, markHidden, placeholderHeight, reset, syncOrder };

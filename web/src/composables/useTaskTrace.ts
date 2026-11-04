@@ -58,6 +58,8 @@ const modeOverride = ref<TranscriptMode | null>(null);
 
 /** 当前已载入的最大轨迹 seq(缺口判定与增量补拉的起点) */
 const lastSeqByTask = new Map<string, number>();
+/** 当前列表已含的 seq 集合(逐帧并入去重;O(1) 查重代替逐条 some) */
+let seenSeqs = new Set<number>();
 /** 有补拉在飞的 task_id 集合(缺口密集时不叠加并发请求) */
 const pullRunning = new Set<string>();
 
@@ -110,6 +112,7 @@ export function ensureTranscriptMode(taskId: string): void {
  */
 export function clearTaskTrace(): void {
   rows.value = [];
+  seenSeqs = new Set<number>();
   ownerTaskId.value = null;
   truncated.value = false;
   loading.value = false;
@@ -155,6 +158,7 @@ export async function loadTaskTrace(taskId: string): Promise<void> {
     }
     const merged = flattenTrace(collected);
     rows.value = merged;
+    seenSeqs = new Set(merged.map((r) => r.seq));
     truncated.value = sawTruncated;
     const last = merged.length ? merged[merged.length - 1].seq : 0;
     lastSeqByTask.set(taskId, last);
@@ -187,6 +191,7 @@ async function pullTraceGap(taskId: string, after: number): Promise<void> {
     if (page.trace.length === 0) return;
     const merged = flattenTrace([...rows.value, ...page.trace]);
     rows.value = merged;
+    seenSeqs = new Set(merged.map((r) => r.seq));
     const last = merged[merged.length - 1].seq;
     lastSeqByTask.set(taskId, last);
   } catch (e) {
@@ -218,8 +223,27 @@ export function appendTrace(taskId: string, trace: api.TaskTrace | undefined): v
   }
   if (last === undefined || trace.seq > last) lastSeqByTask.set(taskId, trace.seq);
   // 逐条并入也要去重:补拉与实时帧重叠时同一条会到两次
-  if (rows.value.some((r) => r.seq === trace.seq)) return;
-  rows.value = flattenTrace([...rows.value, trace]);
+  if (seenSeqs.has(trace.seq)) return;
+  const tail = rows.value.length
+    ? rows.value[rows.value.length - 1].seq
+    : Number.NEGATIVE_INFINITY;
+  if (trace.seq > tail) {
+    // 常见路径(SSE 按 seq 单调到达):尾插 O(1),不重建整表。
+    rows.value.push(trace);
+  } else {
+    // 迟到/乱序帧:二分插入保持 seq 升序;仍不回退到全表排序。
+    const arr = rows.value;
+    let lo = 0;
+    let hi = arr.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (arr[mid].seq < trace.seq) lo = mid + 1;
+      else hi = mid;
+    }
+    if (arr[lo]?.seq === trace.seq) return;
+    arr.splice(lo, 0, trace);
+  }
+  seenSeqs.add(trace.seq);
 }
 
 /**
