@@ -724,7 +724,8 @@ impl AgentEngine {
         // system 超限时优先保留尾部注入块 protected_tail)
         {
             let mut ts = self.token_service.lock().unwrap_or_else(|e| e.into_inner());
-            trim_to_context(
+            // 裁剪内部已算过最终 total,直接复用,避免裁完再全量重扫一遍。
+            rctx.total_usage.context_tokens = trim_to_context(
                 &mut llm_messages,
                 req.max_context_tokens,
                 &mut ts,
@@ -732,10 +733,6 @@ impl AgentEngine {
                 protected_tail,
             );
         }
-        rctx.total_usage.context_tokens = {
-            let mut ts = self.token_service.lock().unwrap_or_else(|e| e.into_inner());
-            ts.count_message_tokens(&llm_messages, &self.model())
-        };
         // 发送统计(ST-Prompt-Template 兼容):LAST_SEND_TOKENS / LAST_SEND_CHARS 记入
         // 会话宏变量,供模板 `{{getvar::LAST_SEND_TOKENS}}` 读取。写入宏表而非变量树,
         // 避免污染 {{format_message_variable}} 的状态输出(原版即「不参与树渲染的特殊变量」)。
