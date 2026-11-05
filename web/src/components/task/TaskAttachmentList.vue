@@ -21,21 +21,24 @@ const attachments = useTaskAttachments();
 
 /**
  * 清单来源:优先用 composable 的缓存(刚上传完就即时可见),
- * 缓存为空时回落到详情顶层下发的 `attachments`(首屏/换设备都靠它)。
+ * **缓存从未加载过**时才回落到详情顶层下发的 `attachments`(首屏/换设备靠它)。
+ *
+ * 判据必须是 `hasLoaded` 而不是「缓存非空」(ATTFIX-4):删掉最后一个附件后缓存
+ * 变成空数组,`length > 0` 会把它当成「没缓存」→ 回落详情快照(删除之前的样子)
+ * → 用户看到已删的附件又冒出来。
  */
 const list = computed<TaskAttachment[]>(() => {
   const id = currentTaskId.value;
   if (!id) return [];
-  const cached = attachments.attachmentsOf(id);
-  if (cached.length > 0) return cached;
+  if (attachments.hasLoaded(id)) return attachments.attachmentsOf(id);
   return currentTask.value?.attachments ?? [];
 });
 
-/** 切换任务时拉一次(缓存已有则不重复请求;失败只记错误、保留旧值) */
+/** 切换任务时拉一次(已加载过则不重复请求;失败只记错误、保留旧值) */
 watch(
   currentTaskId,
   (id) => {
-    if (id && attachments.attachmentsOf(id).length === 0) void attachments.refresh(id);
+    if (id && !attachments.hasLoaded(id)) void attachments.refresh(id);
   },
   { immediate: true },
 );

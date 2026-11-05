@@ -48,7 +48,11 @@ pub async fn attachment_upload(
     let Some(boundary) = parse_boundary(content_type) else {
         return err_status("缺少文件字段(file)", StatusCode::BAD_REQUEST);
     };
-    let parts: Vec<(String, Option<String>, Vec<u8>)> = parse_multipart(&body, &boundary)
+    let parsed = match parse_multipart(&body, &boundary) {
+        Ok(p) => p,
+        Err(e) => return err_status(e, StatusCode::BAD_REQUEST),
+    };
+    let parts: Vec<(String, Option<String>, Vec<u8>)> = parsed
         .into_iter()
         .filter(|p| p.field == FILE_FIELD || p.filename.is_some())
         .map(|p| (p.field, p.filename, p.content))
@@ -60,21 +64,23 @@ pub async fn attachment_upload(
     let tasks = state.tasks.clone();
     let uploaded = state
         .db_call(move || {
-            let mut out = Vec::new();
-            for (field, filename, content) in parts {
-                // 无名 part(纯文本字段)不是文件,跳过而不是报错:multipart 里常
-                // 附带 `task_id` 之类元数据字段,为此整批失败太脆。
-                let Some(name) = filename else {
+            // 无名 part(纯文本字段)不是文件,跳过而不是报错:multipart 里常
+            // 附带 `task_id` 之类元数据字段,为此整批失败太脆。
+            let files: Vec<(String, Option<String>, Vec<u8>)> = parts
+                .into_iter()
+                .filter_map(|(field, filename, content)| {
                     let _ = field;
-                    continue;
-                };
-                let mime = sniff_mime(&name);
-                out.push(tasks.store_attachment(&task, &name, mime.as_deref(), &content)?);
-            }
-            if out.is_empty() {
+                    filename.map(|name| {
+                        let mime = sniff_mime(&name);
+                        (name, mime, content)
+                    })
+                })
+                .collect();
+            if files.is_empty() {
                 return Err("缺少文件字段(file)".to_string());
             }
-            Ok(out)
+            // 整批校验 + 写入在服务层一次完成(ATTFIX-2):任一条不合法则一条都不落库
+            tasks.store_attachments(&task, files)
         })
         .await;
     match uploaded {

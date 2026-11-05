@@ -56,10 +56,39 @@ const error = ref<string | null>(null);
  */
 const modeOverride = ref<TranscriptMode | null>(null);
 
-/** 当前已载入的最大轨迹 seq(缺口判定与增量补拉的起点) */
-const lastSeqByTask = new Map<string, number>();
+/**
+ * **已连续覆盖**的最大轨迹 seq(缺口判定与增量补拉的唯一起点)。
+ *
+ * 语义收紧是本条缺陷(ATTFIX-3,2026-11-04)的修法核心:这里记的是
+ * 「1..N 中间没有空洞的最大 N」,**不是**「见过的最大的 seq」。缺口补拉必须从
+ * 前者起算——拿「见过的最大」当起点会把缺口中的一整段永久跳过:
+ *
+ * ```text
+ * 已连续覆盖 seq=11 → 断线 → 收到 seq=700
+ *   旧实现:补拉从 11 起只拉一页(12..511),游标随即被推到 700
+ *           → 512..699 再也拉不回来(后续帧相对 700 连续,缺口检测永不触发)
+ *   现在:  补拉从 11 起翻页拉到不足一页为止,游标按补拉覆盖到的位置推进
+ * ```
+ */
+const coveredSeqByTask = new Map<string, number>();
 /** 有补拉在飞的 task_id 集合(缺口密集时不叠加并发请求) */
 const pullRunning = new Set<string>();
+
+/**
+ * 从当前覆盖点向前推进,吞掉 `rows` 里已经能接上的连续区间。
+ *
+ * 为什么不能只看「补拉拉到哪」:缺口期间到达的大 seq 帧(如 700)已经在 `rows` 里,
+ * 补拉补完 12..699 之后,覆盖点应当直接跳到 700,而不是停在 699 再多触发一次补拉。
+ * 反过来,中间仍缺 512..699 时,推进到 511 就会停 —— 这正是本条要的语义。
+ */
+function advanceCoveredSeq(taskId: string): void {
+  const base = coveredSeqByTask.get(taskId);
+  if (base === undefined) return;
+  const seen = new Set(rows.value.map((r) => r.seq));
+  let next = base + 1;
+  while (seen.has(next)) next += 1;
+  coveredSeqByTask.set(taskId, next - 1);
+}
 
 /** 轨迹状态与模式入口(组件消费) */
 export function useTaskTrace() {
@@ -157,7 +186,9 @@ export async function loadTaskTrace(taskId: string): Promise<void> {
     rows.value = merged;
     truncated.value = sawTruncated;
     const last = merged.length ? merged[merged.length - 1].seq : 0;
-    lastSeqByTask.set(taskId, last);
+    // 全量加载是连续翻页(从 0 起到不足一页),故末条即「已连续覆盖」的边界。
+    // 窗口被裁过时下界不是 1,但那是已被清理的历史,不构成待补缺口。
+    coveredSeqByTask.set(taskId, last);
   } catch (e) {
     // 迟到守卫同样适用于失败分支:切走后不要在新任务上写错误
     if (ownerTaskId.value !== taskId) return;
@@ -172,26 +203,55 @@ export async function loadTaskTrace(taskId: string): Promise<void> {
  * 缺口补拉:从 `after` 起把缺失区间拉回来并并入当前列表。
  *
  * 与 `loadTaskTrace` 的差别:**只拉增量、不清已载入内容**。缺口出现在
- * `trace.seq > last + 1` 时(SSE 丢帧 / 事件通道 Lagged)。
+ * `trace.seq > covered + 1` 时(SSE 丢帧 / 事件通道 Lagged)。
+ *
+ * **必须分页**(ATTFIX-3,2026-11-04):此前只拉一页(500 条)。断线较久时缺口可以
+ * 远超一页——实测复现「已见 11 → 收到 700 → 只补回 12..511 → 512..699 永久丢失」,
+ * 因为游标随即被推到 700,后续帧相对 700 连续,缺口检测再也不会触发。
+ * 现在与 `loadTaskTrace` 同构:翻到不足一页为止。
  *
  * `pullRunning` 防抖:密集缺口时合并成一次在飞请求(与 `stores/task.ts` 的
- * `pullTaskEvents` 同款策略)。失败静默——下一次缺口或重连补偿会再触发。
+ * `pullTaskEvents` 同款策略)。失败静默——下一次缺口或重连补偿会再触发;
+ * **失败时不动游标**,否则缺口会被自己「抹平」成永久丢失。
  */
 async function pullTraceGap(taskId: string, after: number): Promise<void> {
   if (pullRunning.has(taskId)) return;
   pullRunning.add(taskId);
+  let cursor = after;
+  const collected: api.TaskTrace[] = [];
   try {
-    const page = await api.getTaskTrace(taskId, after, TRACE_PAGE_LIMIT);
-    if (ownerTaskId.value !== taskId) return;
-    if (page.truncated) truncated.value = true;
-    if (page.trace.length === 0) return;
-    const merged = flattenTrace([...rows.value, ...page.trace]);
-    rows.value = merged;
-    const last = merged[merged.length - 1].seq;
-    lastSeqByTask.set(taskId, last);
+    let sawTruncated = false;
+    for (;;) {
+      const page = await api.getTaskTrace(taskId, cursor, TRACE_PAGE_LIMIT);
+      // 迟到守卫:响应到达时已切到别的任务(或已清选择)则整轮丢弃
+      if (ownerTaskId.value !== taskId) return;
+      if (page.truncated) sawTruncated = true;
+      if (page.trace.length === 0) break;
+      collected.push(...page.trace);
+      const nextAfter = page.trace[page.trace.length - 1].seq;
+      // 游标原地打转(脏数据)则终止,防死循环
+      if (nextAfter <= cursor) break;
+      cursor = nextAfter;
+      if (collected.length >= TRACE_MAX_ROWS) break;
+      // 不足一页 = 已到底,不再多打一次空请求
+      if (page.trace.length < TRACE_PAGE_LIMIT) break;
+    }
+    if (sawTruncated) truncated.value = true;
   } catch (e) {
-    console.warn('[kedai] 任务轨迹缺口补拉失败(等待下一次缺口或重连补偿)', e);
+    // 翻页中途失败:**已拉回的那几页照常并入**,游标停在最后一页末尾。
+    // 整批丢弃会让一次失败把已有进度也清掉,而剩余的缺口依然存在——用户会看到
+    // 一个比失败前更长的空洞。
+    console.warn('[kedai] 任务轨迹缺口补拉中断(已拉回的部分保留,余下等下次)', e);
   } finally {
+    if (collected.length > 0) {
+      rows.value = flattenTrace([...rows.value, ...collected]);
+      // 游标只按**补拉覆盖到的**位置推进,绝不跨过尚未拉回的区间。
+      // 用 `cursor` 而不是「合并后末条的 seq」:后者包含那帧大 seq(如 700),
+      // 会把缺口区间当成已覆盖,正是本条缺陷的第二半。
+      coveredSeqByTask.set(taskId, cursor);
+      // 追平后 `rows` 里可能已有接续的大 seq 帧,顺手吞进来,免得下一帧再补一次
+      advanceCoveredSeq(taskId);
+    }
     pullRunning.delete(taskId);
   }
 }
@@ -202,24 +262,31 @@ async function pullTraceGap(taskId: string, after: number): Promise<void> {
  * 只接受**当前任务**的轨迹;非当前任务直接丢弃(与 `lastAgentStatus` 同口径——
  * 事件不落前端缓存,切任务后从端点重建)。
  *
- * 缺口检测:`trace.seq > last + 1` 时先不并这条(交给补拉按序补齐),
- * 但仍会把它放进列表——否则用户会看到一条永久的空洞。补拉返回后 `flattenTrace`
+ * 缺口检测按 **`coveredSeqByTask`(已连续覆盖)** 而不是「见过的最大的 seq」
+ * (ATTFIX-3):缺口期间到达的大 seq 帧不能把游标推过缺口,否则中段永久丢失。
+ * 缺口帧仍会放进列表——否则用户会看到一条永久的空洞;补拉返回后 `flattenTrace`
  * 按 seq 排序去重,顺序自愈。
  */
 export function appendTrace(taskId: string, trace: api.TaskTrace | undefined): void {
   if (!trace) return; // 旧服务端 / 非 trace 事件:无载荷
   if (ownerTaskId.value !== taskId) return; // 非当前任务
-  const last = lastSeqByTask.get(taskId);
-  if (last !== undefined && trace.seq > last + 1) {
+  const covered = coveredSeqByTask.get(taskId);
+  if (covered !== undefined && trace.seq > covered + 1) {
     console.warn(
-      `[kedai] 任务轨迹缺口(任务 ${taskId}:已见 seq=${last},收到 seq=${trace.seq}),开始补拉`,
+      `[kedai] 任务轨迹缺口(任务 ${taskId}:已连续覆盖 seq=${covered},收到 seq=${trace.seq}),开始补拉`,
     );
-    void pullTraceGap(taskId, last);
+    void pullTraceGap(taskId, covered);
   }
-  if (last === undefined || trace.seq > last) lastSeqByTask.set(taskId, trace.seq);
   // 逐条并入也要去重:补拉与实时帧重叠时同一条会到两次
   if (rows.value.some((r) => r.seq === trace.seq)) return;
   rows.value = flattenTrace([...rows.value, trace]);
+  // covered 只在「恰好接续」时前进;跳号帧交给补拉补齐,补齐后由 pullTraceGap 推进
+  if (covered === undefined) {
+    // 从未建立覆盖基线:以本条为起点(首屏由 loadTaskTrace 建立,这里是兜底)
+    coveredSeqByTask.set(taskId, trace.seq);
+  } else if (trace.seq === covered + 1) {
+    coveredSeqByTask.set(taskId, trace.seq);
+  }
 }
 
 /**
@@ -230,19 +297,19 @@ export function appendTrace(taskId: string, trace: api.TaskTrace | undefined): v
  */
 export function resumeTaskTrace(taskId: string): void {
   if (ownerTaskId.value !== taskId) return;
-  const last = lastSeqByTask.get(taskId);
-  if (last === undefined) {
+  const covered = coveredSeqByTask.get(taskId);
+  if (covered === undefined) {
     // 从未加载成功过(首屏就断线):退回全量加载
     void loadTaskTrace(taskId);
     return;
   }
-  void pullTraceGap(taskId, last);
+  void pullTraceGap(taskId, covered);
 }
 
 /** 测试用:把内部记账清干净(避免用例间互相污染) */
 export function resetTaskTraceForTest(): void {
   clearTaskTrace();
-  lastSeqByTask.clear();
+  coveredSeqByTask.clear();
   pullRunning.clear();
   modeOverride.value = null;
 }

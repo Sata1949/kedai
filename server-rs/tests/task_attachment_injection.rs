@@ -202,7 +202,6 @@ async fn image_attachment_hint_reflects_vision_flag() {
 }
 
 /// **legacy 的步骤执行与汇总也必须看到附件段**（ATTACH-1-L1，2026-11-03 真实模型实测抓到）。
-///
 /// 此前只修了规划器（它拿 `ctx.goal`），但 legacy 的 `generate_step` 读的是
 /// **规划器写的 `step.goal`**、`summarize_task` 读的是 `task.title`——两者都不含
 /// 附件清单。真实模型的表现是：规划器看得到附件，执行阶段却回答「我没有收到任何附件」。
@@ -249,5 +248,73 @@ async fn legacy_step_and_summarize_see_attachment_section() {
     assert!(
         !step_prompt.contains("LEGACY-BODY-MARK"),
         "附件正文不得内联进步骤提示: {step_prompt}"
+    );
+}
+
+/// **legacy 任务 followup 时不得说「本模式没有文件读取工具」**（ATTFIX-5，2026-11-04）。
+///
+/// 能力位此前从 `task.task_mode` 推断：`!matches!(task_mode, Legacy)`。但 followup
+/// 由 `FollowupExecutor` 执行、走 `run_agent_loop`，**有完整工具集**。于是 legacy 任务
+/// 续跑时模型会被告知「本模式没有文件读取工具」，而它其实能读——提示词在说谎，
+/// 正是 ATTACH-1-L2 修掉的同一个问题的另一个入口。
+///
+/// 为什么用 `[[floors]]` 而不是查 `prompt_summary`：后者按「每条消息 800 字 / 整体
+/// 4000 字」截断，而附件段在 goal 末尾，必然被切掉——用它会得到「没有附件段」的假象
+/// （本用例第一版就踩了）。`[[floors]]` 让 mock 把**实际收到的完整消息**回显进产出。
+///
+/// 断言只取**本轮** user 消息：followup 的 goal 会拼上「已产出的结果」，而首轮 legacy
+/// 结果里本来就带着它自己的附件段（那段写「无读取工具」是对的）。全串匹配会把上轮的
+/// 正确文案误判成本轮的错误。
+#[tokio::test]
+async fn legacy_followup_is_told_it_has_read_tools() {
+    let _g = test_lock().await;
+    let app = test_app();
+    // legacy 任务先跑完一轮（规划器回声 + 单步）
+    let title = echo_title("先跑一轮");
+    let id = create_task(app, &title, json!({ "task_mode": "legacy" })).await;
+    upload_attachment(app, &id, "续跑说明.txt", b"FOLLOWUP-BODY").await;
+
+    let (status, json) = send_json(app, "POST", &format!("/api/tasks/{id}/run"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "run 应 200: {json}");
+    let (st, detail) = wait_terminal(app, &id).await;
+    assert_eq!(st, "done", "首轮应完成: {detail}");
+
+    // followup 的 content 自带 [[floors]]：mock 把本轮实际收到的消息原样回显进产出
+    let (status, json) = send_json(
+        app,
+        "POST",
+        &format!("/api/tasks/{id}/followup"),
+        json!({ "content": "[[floors]] 再看看附件" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "followup 应 200: {json}");
+    let (st, detail) = wait_terminal(app, &id).await;
+    assert_eq!(st, "done", "续跑后应回 done: {detail}");
+
+    let result = detail["task"]["result"].as_str().unwrap_or("");
+    // 回显里的消息按 ---FLOOR-SEP--- 分隔；本轮 user 消息是最后一段。
+    //
+    // 注意这一段里会出现**两个**附件段：前半来自 followup goal 拼进去的「已产出的
+    // 结果」（那是首轮 legacy 的结果，写「无读取工具」是对的），后半才是**本轮**
+    // `run_inner` 注入的那份。故只对最后一份（即最后一个 `## 附件` 起的片段）断言。
+    let this_turn_user = result
+        .rsplit("---FLOOR-SEP---")
+        .find(|seg| seg.contains("[user]"))
+        .unwrap_or_else(|| panic!("回显里应能找到本轮 user 消息: {result}"));
+    let injected = this_turn_user
+        .rfind("## 附件")
+        .map(|i| &this_turn_user[i..])
+        .unwrap_or_else(|| panic!("本轮 user 消息里应有附件段: {this_turn_user}"));
+    assert!(
+        injected.contains("fs_read"),
+        "followup 有完整工具集，应提示用 fs_read 读取（ATTFIX-5）: {injected}"
+    );
+    assert!(
+        !injected.contains("本模式没有文件读取工具"),
+        "followup 有完整工具集，不得说读不了（ATTFIX-5）: {injected}"
+    );
+    assert!(
+        !injected.contains("本模式无读取工具"),
+        "followup 有完整工具集，不得说读不了（ATTFIX-5）: {injected}"
     );
 }

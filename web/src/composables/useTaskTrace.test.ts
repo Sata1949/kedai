@@ -175,6 +175,101 @@ describe('appendTrace 实时并入', () => {
     appendTrace('t1', trace(2));
     expect(getTaskTrace).toHaveBeenCalledTimes(1);
   });
+
+  // ATTFIX-3(2026-11-04):缺口补拉此前只拉**一页**,且 `appendTrace` 在触发补拉之后
+  // 同步把游标推到缺口之后那一帧的 seq。两者叠加使得缺口的中段永久丢失:
+  // 已见 seq=11 → 收到 seq=700 → 只补 12..511 → 游标落 700 → 512..699 再也拉不回来
+  // (后续帧相对 700 连续,缺口检测永不触发)。
+  it('缺口跨多页时全部拉回(只拉一页会漏掉中段)', async () => {
+    getTaskTrace.mockResolvedValueOnce(page(Array.from({ length: 11 }, (_, i) => trace(i + 1))));
+    await loadTaskTrace('t1');
+    getTaskTrace.mockClear();
+
+    // 缺口 12..699 跨两页:第一页满 500(12..511),第二页 188(512..699)
+    getTaskTrace
+      .mockResolvedValueOnce(page(Array.from({ length: 500 }, (_, i) => trace(12 + i))))
+      .mockResolvedValueOnce(page(Array.from({ length: 188 }, (_, i) => trace(512 + i))));
+    appendTrace('t1', trace(700));
+
+    await vi.waitFor(() => {
+      expect(useTaskTrace().rows.value).toHaveLength(700);
+    });
+    // 逐条无空洞:1..700
+    expect(useTaskTrace().rows.value.map((r) => r.seq)).toEqual(
+      Array.from({ length: 700 }, (_, i) => i + 1),
+    );
+    // 第二页的起点必须是第一页末条 seq
+    expect(getTaskTrace.mock.calls[1][1]).toBe(511);
+  });
+
+  it('补拉失败时游标不前移:后续帧相对「已连续覆盖」仍是缺口,必须能再次触发', async () => {
+    getTaskTrace.mockResolvedValueOnce(page([trace(1)]));
+    await loadTaskTrace('t1');
+
+    getTaskTrace.mockRejectedValueOnce(new Error('网络断'));
+    appendTrace('t1', trace(50));
+    await vi.waitFor(() => {
+      expect(getTaskTrace).toHaveBeenCalledTimes(2);
+    });
+    // 等补拉彻底结束(pullRunning 释放)
+    await new Promise((r) => setTimeout(r, 0));
+
+    // 再来一帧 seq=51:相对「已见」的 50 是连续的,但相对「已连续覆盖」的 1 仍是缺口
+    getTaskTrace.mockResolvedValueOnce(
+      page(Array.from({ length: 49 }, (_, i) => trace(i + 2))),
+    );
+    appendTrace('t1', trace(51));
+    await vi.waitFor(() => {
+      expect(getTaskTrace.mock.calls.length).toBeGreaterThanOrEqual(3);
+    });
+    // 起点必须仍是 1(不是 50):中段 2..49 一次都没拉回来过
+    expect(getTaskTrace.mock.calls[2][1]).toBe(1);
+    await vi.waitFor(() => {
+      expect(useTaskTrace().rows.value.map((r) => r.seq)).toEqual(
+        Array.from({ length: 51 }, (_, i) => i + 1),
+      );
+    });
+  });
+
+  it('补拉翻到第二页时失败 → 游标停在第一页末尾,不跨过未拉回区间', async () => {
+    getTaskTrace.mockResolvedValueOnce(page([trace(1)]));
+    await loadTaskTrace('t1');
+    getTaskTrace.mockClear();
+
+    // 第一页满 500(2..501),第二页炸掉
+    getTaskTrace
+      .mockResolvedValueOnce(page(Array.from({ length: 500 }, (_, i) => trace(2 + i))))
+      .mockRejectedValueOnce(new Error('第二页失败'));
+    appendTrace('t1', trace(700));
+    await vi.waitFor(() => {
+      expect(getTaskTrace).toHaveBeenCalledTimes(2);
+    });
+    await new Promise((r) => setTimeout(r, 0));
+
+    // 再收到 seq=701:相对 700 连续,但相对「已连续覆盖」(501)仍是缺口 → 必须再补
+    getTaskTrace.mockClear();
+    getTaskTrace.mockResolvedValueOnce(page([]));
+    appendTrace('t1', trace(701));
+    await vi.waitFor(() => {
+      expect(getTaskTrace).toHaveBeenCalled();
+    });
+    // 起点必须是 501(第一页末条),绝不是 700(那会把 502..699 永久跳过)
+    expect(getTaskTrace.mock.calls[0][1]).toBe(501);
+  });
+
+  it('补拉追平后游标推进到连续覆盖末端,后续连续帧不再补拉', async () => {
+    getTaskTrace.mockResolvedValueOnce(page([trace(1)]));
+    await loadTaskTrace('t1');
+    getTaskTrace
+      .mockResolvedValueOnce(page([trace(2), trace(3), trace(4)]));
+    appendTrace('t1', trace(5));
+    await vi.waitFor(() => {
+      expect(useTaskTrace().rows.value).toHaveLength(5);
+    });
+    getTaskTrace.mockClear();
+    appendTrace('t1', trace(6));
+    expect(getTaskTrace).not.toHaveBeenCalled();
+  });
 });
 
 describe('resumeTaskTrace 重连补偿', () => {

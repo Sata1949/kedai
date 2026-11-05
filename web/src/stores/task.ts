@@ -17,6 +17,7 @@ import {
   type AppMode,
 } from '../onboarding';
 import {
+  forgetTaskCaches,
   reloadSettings,
   reportChatEvent,
   uiPrefsBridge,
@@ -852,9 +853,7 @@ export const useTaskStore = defineStore('app.task', () => {
         break;
       case 'deleted':
         void loadTasks();
-        // PRODCAP-1:任务已删,其 seq 断点记账一并失效(级联删除了事件行,再补拉只会空转)
-        lastSeqByTask.delete(ev.task_id);
-        pullAfter.delete(ev.task_id);
+        forgetTaskCaches(ev.task_id, { last: lastSeqByTask, pullAfter });
         if (currentTaskId.value === ev.task_id) {
           // 删除事件也必须清持久化选择与 lastAgentStatus;此前三处清空各漏一项。
           resetCurrentTaskState();
@@ -1092,6 +1091,7 @@ export const useTaskStore = defineStore('app.task', () => {
     await api.deleteTask(id);
     tasks.value = tasks.value.filter((t) => t.id !== id);
     listSignature = contentSignature(tasks.value); // 同步签名(同上)
+    forgetTaskCaches(id, { last: lastSeqByTask, pullAfter });
     if (currentTaskId.value === id) {
       // 删除当前任务:清选择/详情/辅助面板/持久化/lastAgentStatus,统一走单一出口。
       resetCurrentTaskState();

@@ -75,6 +75,9 @@ function seed(detail: TaskDetail | null): ReturnType<typeof useAppStore> {
 beforeEach(() => {
   resetTaskAttachmentsForTest();
   vi.clearAllMocks();
+  // 默认「清单端点返回空」：对应真实链路里详情也没有附件的任务。
+  // 详情带附件的用例必须显式让清单端点返回同样的内容——清单端点是权威来源
+  // （与详情读同一张表），两者不一致时以清单为准（ATTFIX-4）。
   listMock.mockResolvedValue([]);
 });
 
@@ -89,6 +92,8 @@ describe('任务附件清单面板', () => {
 
   it('回落详情顶层的 attachments(首屏/换设备靠它)', async () => {
     seed(makeDetail([att()]));
+    // 清单端点与详情读同一张表，故返回同一份清单
+    listMock.mockResolvedValue([att()]);
     const wrapper = mount(TaskAttachmentList);
     await flushPromises();
     expect(wrapper.text()).toContain('任务附件');
@@ -98,12 +103,12 @@ describe('任务附件清单面板', () => {
   });
 
   it('图像附件标「图」,文本标「文」', async () => {
-    seed(
-      makeDetail([
-        att({ id: 'a1', name: 'shot.png', mime: 'image/png' }),
-        att({ id: 'a2', name: 'n.txt', mime: 'text/plain' }),
-      ]),
-    );
+    const list = [
+      att({ id: 'a1', name: 'shot.png', mime: 'image/png' }),
+      att({ id: 'a2', name: 'n.txt', mime: 'text/plain' }),
+    ];
+    seed(makeDetail(list));
+    listMock.mockResolvedValue(list);
     const wrapper = mount(TaskAttachmentList);
     await flushPromises();
     const kinds = wrapper.findAll('.sv-attachment-kind').map((n) => n.text());
@@ -125,11 +130,12 @@ describe('任务附件清单面板', () => {
 
   it('删除要确认;确认后调服务端并重拉清单', async () => {
     seed(makeDetail([att()]));
+    listMock.mockResolvedValue([att()]);
     const wrapper = mount(TaskAttachmentList);
     await flushPromises();
     const confirmSpy = vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
     deleteMock.mockResolvedValueOnce(undefined);
-    listMock.mockResolvedValueOnce([]);
+    listMock.mockResolvedValueOnce([att()]);
     await wrapper.find('button').trigger('click');
     await flushPromises();
     expect(confirmSpy).toHaveBeenCalled();
@@ -140,6 +146,7 @@ describe('任务附件清单面板', () => {
 
   it('取消确认时不发请求', async () => {
     seed(makeDetail([att()]));
+    listMock.mockResolvedValue([att()]);
     const wrapper = mount(TaskAttachmentList);
     await flushPromises();
     const confirmSpy = vi.spyOn(globalThis, 'confirm').mockReturnValue(false);
@@ -147,5 +154,39 @@ describe('任务附件清单面板', () => {
     await flushPromises();
     expect(deleteMock).not.toHaveBeenCalled();
     confirmSpy.mockRestore();
+  });
+
+  // ATTFIX-4(2026-11-04):`cached.length > 0` 判「有没有缓存」无法区分
+  // 「已加载且为空」与「从未加载」。删掉最后一个附件后缓存是空数组 → 判为没加载过
+  // → 回落 `currentTask.attachments`(删之前的快照)→ 已删的附件又冒出来。
+  it('删除唯一附件后不再显示(缓存已加载且为空,不得回落详情快照)', async () => {
+    const store = seed(makeDetail([att()]));
+    listMock.mockResolvedValueOnce([att()]);
+    const wrapper = mount(TaskAttachmentList);
+    await flushPromises();
+    expect(wrapper.findAll('li')).toHaveLength(1);
+
+    const confirmSpy = vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    deleteMock.mockResolvedValueOnce(undefined);
+    // 服务端删除后清单归零
+    listMock.mockResolvedValue([]);
+    await wrapper.find('button').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.findAll('li')).toHaveLength(0);
+    expect(wrapper.text()).not.toContain('任务附件');
+    // 详情快照故意保持旧值:真实链路里 store 不会因为删附件就重拉详情
+    expect(store.currentTask?.attachments).toHaveLength(1);
+    confirmSpy.mockRestore();
+  });
+
+  // 反面对照:从未加载过时仍应回落详情顶层(首屏靠它)
+  it('从未加载过缓存时仍回落详情顶层', async () => {
+    seed(makeDetail([att()]));
+    // listMock 保持挂起不返回 → 缓存始终未建立
+    listMock.mockReturnValueOnce(new Promise(() => {}));
+    const wrapper = mount(TaskAttachmentList);
+    await flushPromises();
+    expect(wrapper.findAll('li')).toHaveLength(1);
   });
 });

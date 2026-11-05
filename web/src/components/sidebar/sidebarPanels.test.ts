@@ -195,8 +195,75 @@ describe('C-2A 侧栏面板拆分', () => {
     uploadSpy.mockRestore();
   });
 
-  it('TaskComposer:工作区 placeholder 与清空入口保留(源契约的 DOM 侧)', async () => {
+  // ATTFIX-6(2026-11-04):`pendingFiles` / `removePending` / `clearPending` 三个 API
+  // 此前**零 UI 消费**——用户未选中任务时选的附件完全不可见、不可移除。看得到才谈得上
+  // 「提交前确认一下自己要带上什么」。
+  it('TaskComposer:待上传附件可见且可逐个移除(ATTFIX-6)', async () => {
     const store = freshStore();
+    store.appMode = 'task';
+    store.loadExecutors = vi.fn().mockResolvedValue(undefined);
+    const { resetTaskAttachmentsForTest, useTaskAttachments } = await import('../../composables/useTaskAttachments');
+    resetTaskAttachmentsForTest();
+    const attachments = useTaskAttachments();
+    attachments.enqueue([
+      new File(['x'], '规格说明.txt', { type: 'text/plain' }),
+      new File(['y'], 'shot.png', { type: 'image/png' }),
+    ]);
+
+    const wrapper = mount(TaskComposer);
+    await flushPromises();
+
+    // 清单可见:两个文件名都上屏
+    expect(wrapper.text()).toContain('规格说明.txt');
+    expect(wrapper.text()).toContain('shot.png');
+    expect(wrapper.findAll('.sv-pending-attachment')).toHaveLength(2);
+
+    // 逐个移除:点第一个的移除按钮,只剩第二个
+    const removeBtns = wrapper.findAll('.sv-pending-remove');
+    expect(removeBtns).toHaveLength(2);
+    await removeBtns[0].trigger('click');
+    await flushPromises();
+    expect(attachments.pendingFiles.value.map((p) => p.file.name)).toEqual(['shot.png']);
+    expect(wrapper.text()).not.toContain('规格说明.txt');
+    expect(wrapper.findAll('.sv-pending-attachment')).toHaveLength(1);
+  });
+
+  it('TaskComposer:待上传队列为空时不渲染该区块(不占版面)', async () => {
+    const store = freshStore();
+    store.appMode = 'task';
+    store.loadExecutors = vi.fn().mockResolvedValue(undefined);
+    const { resetTaskAttachmentsForTest } = await import('../../composables/useTaskAttachments');
+    resetTaskAttachmentsForTest();
+
+    const wrapper = mount(TaskComposer);
+    await flushPromises();
+    expect(wrapper.findAll('.sv-pending-attachment')).toHaveLength(0);
+    expect(wrapper.find('.sv-pending-list').exists()).toBe(false);
+  });
+
+  it('TaskComposer:清空按钮清掉整个待上传队列(ATTFIX-6)', async () => {
+    const store = freshStore();
+    store.appMode = 'task';
+    store.loadExecutors = vi.fn().mockResolvedValue(undefined);
+    const { resetTaskAttachmentsForTest, useTaskAttachments } = await import('../../composables/useTaskAttachments');
+    resetTaskAttachmentsForTest();
+    const attachments = useTaskAttachments();
+    attachments.enqueue([
+      new File(['x'], 'a.txt', { type: 'text/plain' }),
+      new File(['y'], 'b.txt', { type: 'text/plain' }),
+    ]);
+
+    const wrapper = mount(TaskComposer);
+    await flushPromises();
+    const clear = wrapper.findAll('button').find((b) => b.text() === '清空附件');
+    if (!clear) throw new Error('清空附件按钮应存在');
+    await clear.trigger('click');
+    await flushPromises();
+    expect(attachments.pendingFiles.value).toHaveLength(0);
+    expect(wrapper.findAll('.sv-pending-attachment')).toHaveLength(0);
+  });
+
+  it('TaskComposer:工作区 placeholder 与清空入口保留(源契约的 DOM 侧)', async () => {    const store = freshStore();
     store.appMode = 'task';
     store.loadExecutors = vi.fn().mockResolvedValue(undefined);
     const wrapper = mount(TaskComposer);
