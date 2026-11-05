@@ -193,7 +193,19 @@ impl TaskEngine {
             task.task_mode,
             TaskRunMode::Solo | TaskRunMode::Multi | TaskRunMode::Team
         );
-        self.spawn_run(task, executor, None, cancel, token, enforce_file_delivery);
+        // 能力位显式传入(ATTFIX-5):Legacy 是三步纯文本生成,其余五个模式都走
+        // 工具自循环。**不能从 task_mode 反推**——followup / approve 续跑会用别的
+        // 执行器,那时 task_mode 记录的仍是任务当初怎么跑的(见 run_followup）。
+        let executor_has_tools = !matches!(task.task_mode, TaskRunMode::Legacy);
+        self.spawn_run(
+            task,
+            executor,
+            None,
+            cancel,
+            token,
+            enforce_file_delivery,
+            executor_has_tools,
+        );
     }
 
     /// followup(终态追加指令)派发入口:goal 由 TaskService 组装为「原目标 +
@@ -214,7 +226,10 @@ impl TaskEngine {
             params,
         ));
         // 追加指令可以只回答文字(不产出文件),不做文件交付门槛。
-        self.spawn_run(task, executor, Some(goal), cancel, token, false);
+        // 但 **FollowupExecutor 走 run_agent_loop,工具齐全**(ATTFIX-5):能力位必须是
+        // true。legacy 任务续跑时若按 task_mode 推断会得到 false,模型便被告知
+        // 「本模式没有文件读取工具」,而它其实能读——提示词在说谎。
+        self.spawn_run(task, executor, Some(goal), cancel, token, false, true);
     }
 
     /// approve 续跑入口(plan 模式批准后):**只认已批准计划,不按 task_mode 派发**——
@@ -270,6 +285,9 @@ impl TaskEngine {
             cancel,
             token,
             enforce_file_delivery,
+            // 批准续跑的四个分支全部走 run_agent_loop(ApprovedPlan 逐步 + Solo/Multi/
+            // Team/Custom 整体),工具齐全(ATTFIX-5)。
+            true,
         );
     }
 
@@ -282,6 +300,7 @@ impl TaskEngine {
         cancel: watch::Receiver<bool>,
         token: u64,
         enforce_file_delivery: bool,
+        executor_has_tools: bool,
     ) {
         let this = Arc::clone(self);
         let task = task.clone();
@@ -292,13 +311,24 @@ impl TaskEngine {
         let run_span = tracing::info_span!("task_run", taskId = task.id.as_str());
         tokio::spawn(
             async move {
-                this.run_inner(task, executor, goal, cancel, token, enforce_file_delivery)
-                    .await;
+                this.run_inner(
+                    task,
+                    executor,
+                    goal,
+                    cancel,
+                    token,
+                    enforce_file_delivery,
+                    executor_has_tools,
+                )
+                .await;
             }
             .instrument(run_span),
         );
     }
 
+    // 参数偏多的原因与 spawn_run 相同:全是「本次派发的事实」(执行器、目标、取消、
+    // token、两个策略位),没有可归并的同类项;拆结构体只会把调用点摊得更散。
+    #[allow(clippy::too_many_arguments)]
     async fn run_inner(
         self: Arc<Self>,
         task: TaskRecord,
@@ -307,6 +337,7 @@ impl TaskEngine {
         cancel: watch::Receiver<bool>,
         token: u64,
         enforce_file_delivery: bool,
+        executor_has_tools: bool,
     ) {
         // 工作区作用域(编码通道批次 1;任务模式 D1 起「未绑定」也有作用域):绑定工作区
         // 的任务用它;**未绑定的任务改用任务级 scratch 目录**——否则 bash 的缺省 cwd 会
@@ -384,10 +415,10 @@ impl TaskEngine {
                 &goal_text,
                 &list,
                 crate::services::settings_service::vision_enabled(&settings),
-                // legacy 是「三段纯文本生成」(StepCapability::NoTools),拿不到任何工具
-                // ——注入文案必须如实说「读不了」,否则模型会照做之后回报
-                // 「读取工具返回空白」(2026-11-03 真实模型实测抓到)。
-                !matches!(task.task_mode, TaskRunMode::Legacy),
+                // 由派发点按**实际执行器**传入(ATTFIX-5),不按 task_mode 反推:
+                // legacy 任务续跑走的是 FollowupExecutor(工具齐全),按 task_mode
+                // 推断会告诉模型「本模式没有文件读取工具」——提示词在说谎。
+                executor_has_tools,
             ),
             Ok(_) => goal_text,
             Err(e) => {
