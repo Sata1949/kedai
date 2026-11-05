@@ -236,6 +236,10 @@ pub unsafe extern "C" fn JNI_OnLoad(
 /// 语义与桌面版一致:后端与壳同进程,退出即整体结束,无残留服务。
 const EXIT_APP_EVENT: &str = "kedai://exit-app";
 
+/// 前端→壳:数据位置切换后重启应用。数据根在服务启动期绑定,运行期无法热切换;
+/// 重启让新的 `KEDAI_DATA_ROOT` 生效(浏览器/独立 server 无壳,前端提示手动重启)。
+const RESTART_APP_EVENT: &str = "kedai://restart-app";
+
 /// 壳→前端下发「用户点了窗口关闭,请弹退出确认」(仅桌面)。
 ///
 /// 为什么走事件而不是原生对话框:关闭确认要出前端至上主义样式,而 Tauri 的
@@ -291,6 +295,15 @@ pub fn run() {
                     // 只有原生对话框回调清理,留下「点退出后 kedai-server 还在跑」的缺口)
                     exit_now(&handle);
                 });
+
+                // 数据位置切换后重启:让新的 KEDAI_DATA_ROOT/DATA_DIR 在启动期生效。
+                {
+                    let handle = app.handle().clone();
+                    app.listen(RESTART_APP_EVENT, move |_| {
+                        tracing::info!("收到重启请求,应用即将重启以切换数据位置");
+                        handle.restart();
+                    });
+                }
 
                 // 前端取消退出:复位二次关闭兜底标记,让下一次关闭仍走确认框。
                 #[cfg(desktop)]
@@ -362,17 +375,27 @@ pub fn run() {
             let log_dir = app_data.join("logs");
 
             std::fs::create_dir_all(&log_dir)?;
-            // 便携版数据迁移仅桌面存在:靠 exe 同级向上找 data/,APK 内无此目录布局
-            #[cfg(desktop)]
-            if let Some(project_data) = find_project_data_dir() {
-                if let Err(error) = migrate_data_if_needed(&project_data, &data_dir) {
-                    write_start_error(&log_dir, &format!("旧数据迁移失败: {error}"));
+            // 数据位置(2026-11 盘符选择):指针存在且 `<root>/data` 可用时以用户选择的根为准;
+            // 缺失/不可用则沿用旧逻辑(`%APPDATA%/data`),由前端教程第二步/强制弹窗接管。
+            // 旧版「项目 data → APPDATA」迁移只在未选择根时执行:选择根后数据已由服务端迁移。
+            let chosen_root = kedai_server::data_location::read_pointer()
+                .filter(|pointer| kedai_server::data_location::pointer_usable(&pointer.root))
+                .map(|pointer| pointer.root);
+            if let Some(root) = chosen_root {
+                std::env::set_var("KEDAI_DATA_ROOT", &root);
+                eprintln!("[信息] KEDAI_DATA_ROOT={}", root.display());
+            } else {
+                // 便携版数据迁移仅桌面存在:靠 exe 同级向上找 data/,APK 内无此目录布局
+                #[cfg(desktop)]
+                if let Some(project_data) = find_project_data_dir() {
+                    if let Err(error) = migrate_data_if_needed(&project_data, &data_dir) {
+                        write_start_error(&log_dir, &format!("旧数据迁移失败: {error}"));
+                    }
                 }
+                std::env::set_var("DATA_DIR", &data_dir);
+                eprintln!("[信息] DATA_DIR={}", data_dir.display());
             }
-
-            std::env::set_var("DATA_DIR", &data_dir);
             std::env::set_var("LOG_DIR", &log_dir);
-            eprintln!("[信息] DATA_DIR={}", data_dir.display());
 
             // Android UI 迭代加速(仅 debug 构建):前端 dist 默认编译期内嵌进二进制
             // (server-rs/api/static_files.rs 的 include_dir),每次改样式都要重编 Rust。

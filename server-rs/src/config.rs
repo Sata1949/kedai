@@ -1,4 +1,5 @@
 // 配置加载:环境变量 + .env,与 Node 版语义一致
+use crate::data_location::{self, DataLocationPointer};
 use rusqlite::{Connection, OpenFlags};
 use std::env;
 use std::path::{Path, PathBuf};
@@ -9,6 +10,21 @@ pub struct AppConfig {
     pub port: u16,
     /// 数据目录(绝对路径):SQLite + characters + avatars
     pub data_dir: PathBuf,
+    /// 用户数据根(盘符选择结果,例 `D:\Kedai-Data`);未选择/显式 `DATA_DIR` 时为 None。
+    /// 派生关系见 `data_location::derived_paths`:data / outputs / task-records / imports。
+    pub data_root: Option<PathBuf>,
+    /// 图像产物目录:根模式 = `<root>/outputs/images`;旧模式 = `<data_dir>/images`。
+    pub images_dir: PathBuf,
+    /// 综合导入原始文件归档目录:根模式 = `<root>/imports`;旧模式 = `<data_dir>/imports`。
+    pub imports_dir: PathBuf,
+    /// 数据位置指针文件路径(`%APPDATA%\com.kedai.app\data-location.json`),供 API 展示。
+    pub data_location_pointer: Option<PathBuf>,
+    /// 是否需要前端强制选择数据位置(无指针,或指针指向的根已不可用)。
+    pub data_location_pending: bool,
+    /// 是否由数据位置引导管理(显式 `KEDAI_DATA_ROOT` / `DATA_DIR` 时为 false,不弹窗)。
+    pub data_location_managed: bool,
+    /// 指针存在但根不可用时的原因;非空时前端必须提示重新选择。
+    pub data_location_error: Option<String>,
     /// 任务 scratch 根(绝对路径):未绑定工作区的任务按任务 id 在其下建子目录,
     /// 作为执行侧的路径闸门根与 bash 缺省 cwd(任务模式 D1 修复,见
     /// `tools/workspace_guard.rs` 与 `services/task_engine/mod.rs`)。
@@ -92,7 +108,7 @@ fn canonical_user_data_dir() -> Option<PathBuf> {
 
 /// 「已有用户数据」判据:settings.json 存在(存过设置即生成),或 kedai.db 里有
 /// 非内置角色 / 任何会话(排除桌面版首启自动建库留下的空壳)。
-fn dir_has_user_data(dir: &Path) -> bool {
+pub(crate) fn dir_has_user_data(dir: &Path) -> bool {
     if dir.join("settings.json").is_file() {
         return true;
     }
@@ -131,6 +147,11 @@ pub fn detect_split_data_dirs(
             continue;
         }
         if !dir.is_dir() {
+            continue;
+        }
+        // 已迁移走的旧目录不再算分叉:选择数据位置后旧数据仍在(复制语义),
+        // 但用户已明确切走,再提示「两套库」会变成噪音。
+        if data_location::has_migrated_marker(dir) {
             continue;
         }
         let has_settings = dir.join("settings.json").is_file();
@@ -176,6 +197,103 @@ fn same_dir(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// 数据目录解析结果(纯计算,不做 IO):供 `from_env` 与单测共用。
+struct DataLayout {
+    data_root: Option<PathBuf>,
+    data_dir: PathBuf,
+    images_dir: PathBuf,
+    imports_dir: PathBuf,
+    task_scratch_dir: PathBuf,
+    pending: bool,
+    managed: bool,
+    error: Option<String>,
+}
+
+/// 按优先级解析:
+/// 1. `KEDAI_DATA_ROOT`(显式根,测试/运维)→ 根模式,不弹窗;
+/// 2. `DATA_DIR`(显式数据目录,既有测试/bench/真实模型隔离实例)→ 旧布局,不弹窗;
+/// 3. 指针文件且 `<root>/data` 可用 → 根模式;
+/// 4. 指针存在但根不可用 → 回退旧默认(保证服务能启动),标记 pending + error;
+/// 5. 无指针 → 旧默认,标记 pending(引导选择)。
+fn resolve_data_layout(
+    env_root: Option<PathBuf>,
+    env_data_dir: Option<PathBuf>,
+    pointer: Option<DataLocationPointer>,
+    project_root: &Path,
+    canonical: Option<PathBuf>,
+) -> DataLayout {
+    let legacy_dir = || {
+        canonical
+            .clone()
+            .unwrap_or_else(|| project_root.join("data"))
+    };
+    // 旧布局:task_scratch 与 data 同级是既有不变量(fs_* 不得落数据目录内)
+    let legacy = |data_dir: PathBuf| {
+        let scratch = data_dir
+            .parent()
+            .unwrap_or(project_root)
+            .join("task_scratch");
+        DataLayout {
+            data_root: None,
+            images_dir: data_dir.join("images"),
+            imports_dir: data_dir.join("imports"),
+            task_scratch_dir: scratch,
+            data_dir,
+            pending: false,
+            managed: false,
+            error: None,
+        }
+    };
+    if let Some(root) = env_root {
+        let p = data_location::derived_paths(&root);
+        return DataLayout {
+            data_root: Some(root),
+            data_dir: p.data_dir,
+            images_dir: p.images_dir,
+            imports_dir: p.imports_dir,
+            task_scratch_dir: p.task_records_dir,
+            pending: false,
+            managed: false,
+            error: None,
+        };
+    }
+    if let Some(dir) = env_data_dir {
+        return legacy(dir);
+    }
+    match pointer {
+        Some(p) if data_location::pointer_usable(&p.root) => {
+            let d = data_location::derived_paths(&p.root);
+            DataLayout {
+                data_root: Some(p.root),
+                data_dir: d.data_dir,
+                images_dir: d.images_dir,
+                imports_dir: d.imports_dir,
+                task_scratch_dir: d.task_records_dir,
+                pending: false,
+                managed: true,
+                error: None,
+            }
+        }
+        Some(p) => {
+            let error = format!(
+                "数据位置不可用:{} 不存在或缺少 data 子目录,请重新选择数据盘符",
+                p.root.display()
+            );
+            DataLayout {
+                pending: true,
+                managed: true,
+                error: Some(error),
+                ..legacy(legacy_dir())
+            }
+        }
+        None => DataLayout {
+            pending: true,
+            managed: true,
+            ..legacy(legacy_dir())
+        },
+    }
+}
+
 /// 最小 AppConfig(仅供测试:不读环境变量,避免受本机 .env 与用户数据目录影响)。
 /// 设置加载/保存类测试共用同一份字面量,避免多处复制漂移。
 #[cfg(test)]
@@ -184,6 +302,13 @@ pub(crate) fn test_config() -> AppConfig {
         host: "127.0.0.1".into(),
         port: 0,
         data_dir: std::env::temp_dir(),
+        data_root: None,
+        images_dir: std::env::temp_dir().join("kedai-test-images"),
+        imports_dir: std::env::temp_dir().join("kedai-test-imports"),
+        data_location_pointer: None,
+        data_location_pending: false,
+        data_location_managed: false,
+        data_location_error: None,
         task_scratch_dir: std::env::temp_dir().join("kedai-test-scratch"),
         task_scratch_keep_days: 30,
         log_dir: std::env::temp_dir(),
@@ -211,24 +336,35 @@ impl AppConfig {
         let _ = dotenvy::dotenv(); // 向上搜索 .env(默认从 cwd 开始)
 
         let root = project_root();
-        // 数据目录解析顺序(2026-09 统一):DATA_DIR 环境变量 > 用户级统一目录
-        // (%APPDATA%\com.kedai.app\data,已有用户数据时) > 项目根 data/。
-        // 背景:桌面版(Tauri)强制 %APPDATA%,而直接跑 kedai-server.exe / start.ps1 曾用
-        // 项目目录,两套库并行分叉——一边写的聊天记录另一边不可见(「重进后记录丢失」主因)。
-        let data_dir = match env_str("DATA_DIR") {
-            Some(d) => absolutize(Path::new(&d), &root),
-            None => canonical_user_data_dir().unwrap_or_else(|| root.join("data")),
-        };
-        // 任务 scratch 根(D1):KEDAI_TASK_SCRATCH_DIR 显式覆盖 > 数据目录的**兄弟**目录。
-        // 与数据目录平级是刻意的:放进数据目录内会让「fs_* 不得落在 DATA_DIR」的二次防线
-        // (data_dir_conflict)把整个 scratch 判为冲突,等于给不变量开例外;放同级则既能让
-        // 用户按任务 id 找回/清理产物,又不动用户数据的边界。纯路径计算,不做 IO。
+        // 数据目录解析顺序(2026-11 盘符选择批次):
+        //   KEDAI_DATA_ROOT > DATA_DIR > 指针文件 > 旧默认(APPDATA 有数据 > 项目根 data)。
+        // 前两者是显式覆盖(测试/bench/真实模型隔离实例),不弹引导;指针是用户在
+        // 首启教程/强制弹窗里的选择;无指针时服务仍要能启动,故沿用旧默认并标记 pending。
+        let env_root = env_str("KEDAI_DATA_ROOT").map(|d| absolutize(Path::new(&d), &root));
+        let env_data_dir = env_str("DATA_DIR").map(|d| absolutize(Path::new(&d), &root));
+        let layout = resolve_data_layout(
+            env_root,
+            env_data_dir,
+            data_location::read_pointer(),
+            &root,
+            canonical_user_data_dir(),
+        );
+        let DataLayout {
+            data_root,
+            data_dir,
+            images_dir,
+            imports_dir,
+            task_scratch_dir: layout_scratch,
+            pending: data_location_pending,
+            managed: data_location_managed,
+            error: data_location_error,
+        } = layout;
+        // 任务 scratch 根(D1):KEDAI_TASK_SCRATCH_DIR 显式覆盖 > 布局派生。
+        // 根模式下派生到 `<root>/task-records`;旧模式下仍是 data 的兄弟目录
+        // (`task_scratch`)——目录名一直如此,不随根模式改名以免破坏既有任务目录。
         let task_scratch_dir = match env_str("KEDAI_TASK_SCRATCH_DIR") {
             Some(d) => absolutize(Path::new(&d), &root),
-            None => data_dir
-                .parent()
-                .unwrap_or(root.as_path())
-                .join("task_scratch"),
+            None => layout_scratch,
         };
         // 任务 scratch 自动保留天数(PRODCAP-5):默认 30 天;0 = 关闭自动清理。
         // 上限 3650(10 年)防手滑写成天文数;非法值回默认,不阻断启动。
@@ -296,6 +432,13 @@ impl AppConfig {
             host,
             port,
             data_dir,
+            data_root,
+            images_dir,
+            imports_dir,
+            data_location_pointer: data_location::pointer_path(),
+            data_location_pending,
+            data_location_managed,
+            data_location_error,
             task_scratch_dir,
             task_scratch_keep_days,
             log_dir,

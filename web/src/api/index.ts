@@ -30,3 +30,4 @@ export * from './repoIndex';
 export * from './undo';
 export * from './exec';
 export * from './computerUse';
+export * from './dataLocation';

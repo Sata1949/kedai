@@ -20,6 +20,8 @@ pub mod cache_diagnostics;
 pub(crate) mod character_data;
 pub mod character_service;
 pub mod contract_changelog_service;
+// 数据位置(盘符选择,2026-11):状态汇总/目录创建/旧数据迁移/指针写入
+pub mod data_location_service;
 // 电脑操作(computer use)运行期治理(CU-1,2026-10-06):急停开关 + 操作审计(cu_audit)。
 // 当前消费点:既有 screenshot 工具(读屏通道);GUI 工具族随 CU 提交 3/4 引入。
 pub mod computer_use;

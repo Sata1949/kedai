@@ -7,6 +7,7 @@ pub mod api;
 pub mod config;
 pub mod connectors;
 pub mod contracts;
+pub mod data_location;
 pub mod mcp;
 pub mod migration;
 pub mod models;

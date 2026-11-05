@@ -31,6 +31,8 @@ const TaskBoard = lazyMain(() => import('./components/TaskBoard.vue'));
 const AudioPlayer = lazyModal(() => import('./components/AudioPlayer.vue'), '音频播放器', 'audioOpen');
 /** 彩窗主题的整窗环境层:懒加载,默认主题不下载该 chunk。 */
 const AmbientField = defineAsyncComponent(() => import('./components/AmbientField.vue'));
+/** 老用户升级后的数据位置强制弹窗(新用户由教程第二步选择;教程打开时本组件让位)。 */
+const DataLocationGate = defineAsyncComponent(() => import('./components/DataLocationGate.vue'));
 
 const store = useAppStore();
 const activeThemeId = useActiveThemeId();
@@ -502,6 +504,10 @@ watch(
       </button>
     </template>
     <AudioPlayer v-else class="sv-audio-float" />
+
+    <!-- 数据位置强制弹窗:老用户升级后/教程跳过时接管;新用户由教程第二步负责。
+         放在所有模态之后,保证遮罩在最上层(不可关闭,必须选择)。 -->
+    <DataLocationGate />
   </div>
 </template>
 

@@ -20,3 +20,14 @@ export const isAndroid: boolean =
 
 /** 是否 Android Tauri 壳(需要走原生桥的场景) */
 export const isAndroidTauri: boolean = inTauri && isAndroid;
+
+/**
+ * 请求壳重启应用(数据位置切换后必须重启:数据根在服务启动期绑定)。
+ * 浏览器/独立 server 没有壳可重启,返回 false,由调用方提示用户手动重启。
+ */
+export async function restartApp(): Promise<boolean> {
+  if (!inTauri) return false;
+  const { emit } = await import('@tauri-apps/api/event');
+  await emit('kedai://restart-app');
+  return true;
+}

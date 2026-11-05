@@ -34,6 +34,8 @@ const PromptInjectSection = lazyModal(() => import('./settings/PromptInjectSecti
 // 用户设定(USERPERSONA-1):角色扮演专属的全局用户角色配置
 const UserPersonaSection = lazyModal(() => import('./settings/UserPersonaSection.vue'), '设置区:用户设定', 'settingsOpen');
 const DataManagementSection = lazyModal(() => import('./settings/DataManagementSection.vue'), '设置区:数据管理', 'settingsOpen');
+// 数据位置(2026-11 盘符选择):当前根/四目录展示 + 更改(迁移后需重启)
+const DataLocationSection = lazyModal(() => import('./settings/DataLocationSection.vue'), '设置区:数据位置', 'settingsOpen');
 const McpSection = lazyModal(() => import('./settings/McpSection.vue'), '设置区:MCP 服务', 'settingsOpen');
 const UiSection = lazyModal(() => import('./settings/UiSection.vue'), '设置区:界面', 'settingsOpen');
 const EmbeddingSection = lazyModal(() => import('./settings/EmbeddingSection.vue'), '设置区:向量化模型', 'settingsOpen');
@@ -91,6 +93,7 @@ watch(
     <VisionScreenshotSection v-if="visitedSections.has('vision')" :show="props.activeSection === 'vision'" />
     <PromptInjectSection v-if="visitedSections.has('prompt')" :state="promptInject" :show="props.activeSection === 'prompt'" />
     <UserPersonaSection v-if="visitedSections.has('userPersona')" :show="props.activeSection === 'userPersona'" />
+    <DataLocationSection v-if="visitedSections.has('data')" :show="props.activeSection === 'data'" />
     <DataManagementSection v-if="visitedSections.has('data')" :state="dataManager" :show="props.activeSection === 'data'" />
     <McpSection v-if="visitedSections.has('mcp')" :show="props.activeSection === 'mcp'" />
     <EmbeddingSection v-if="visitedSections.has('embedding')" :show="props.activeSection === 'embedding'" />
