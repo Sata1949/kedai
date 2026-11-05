@@ -38,10 +38,14 @@ pub struct ImageService {
 }
 
 impl ImageService {
+    /// 旧布局:`<data_dir>/images`(测试与旧配置的兼容入口)。
     pub fn new(data_dir: PathBuf) -> Self {
-        Self {
-            dir: data_dir.join("images"),
-        }
+        Self::new_in(data_dir.join("images"))
+    }
+
+    /// 直接指定图像目录(根模式下为 `<root>/outputs/images`)。
+    pub fn new_in(dir: PathBuf) -> Self {
+        Self { dir }
     }
 
     /// 图像目录(诊断用)

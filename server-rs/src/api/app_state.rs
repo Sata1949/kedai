@@ -99,6 +99,8 @@ pub struct CoreServices {
     /// 图像通道(DATA_DIR/images;视觉能力包 D2):聊天附件落盘、
     /// /api/images 路由与引擎历史图像解析共用同一实例
     pub images: Arc<crate::services::image_service::ImageService>,
+    /// 数据位置(盘符选择):状态查询、旧数据迁移与指针写入(2026-11 批次)
+    pub data_location: Arc<crate::services::data_location_service::DataLocationService>,
 }
 
 /// 并发与限流脚手架(M4.3 归组):只服务于「串行化 / 取消 / 防滥用」,
@@ -143,10 +145,16 @@ impl AppState {
         let kaleido_state = Arc::new(KaleidoStateService::new(db.clone()));
         let sessions = Arc::new(SessionService::new(db.clone()));
         let agent_sessions = Arc::new(AgentSessionService::new(db.clone()));
-        // 图像通道(DATA_DIR/images;视觉能力包 D2):附件落盘 / 历史解析 / 图像路由
-        let images = Arc::new(crate::services::image_service::ImageService::new(
-            config.data_dir.clone(),
+        // 图像通道(根模式为 <root>/outputs/images;旧模式为 DATA_DIR/images):附件落盘 /
+        // 历史解析 / 图像路由共用同一实例。目录由配置派生,服务本身仍按文件名白名单读。
+        let images = Arc::new(crate::services::image_service::ImageService::new_in(
+            config.images_dir.clone(),
         ));
+        // 数据位置服务:持有配置快照(数据目录/图像/任务草稿的当前来源),迁移在
+        // spawn_blocking 里跑(见 api/data_location.rs);此处只需装配。
+        let data_location = Arc::new(
+            crate::services::data_location_service::DataLocationService::new(config.clone()),
+        );
         let world_books = Arc::new(WorldBookService::new(db.clone()));
         let skills = Arc::new(SkillService::new(db.clone()));
         // Skill 库加载情况(供启动器/控制台确认;与下方工具插件日志保持一致)
@@ -486,6 +494,7 @@ impl AppState {
                 flow,
                 executors,
                 images,
+                data_location,
                 tasks,
             },
             guards: ConcurrencyGuards {

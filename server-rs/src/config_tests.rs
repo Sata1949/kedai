@@ -78,3 +78,100 @@ fn ignores_missing_dir() {
     let found = detect_split_data_dirs(selected.path(), &[missing]);
     assert!(found.is_empty(), "不存在的目录不得报: {found:?}");
 }
+
+fn pointer_for(root: &Path) -> DataLocationPointer {
+    DataLocationPointer {
+        version: 1,
+        root: root.to_path_buf(),
+        chosen_at: String::new(),
+        migrated_from: Vec::new(),
+    }
+}
+
+/// KEDAI_DATA_ROOT 优先,派生四目录,不弹窗。
+#[test]
+fn layout_explicit_root_derives_dirs() {
+    let project = TempDataDir::new("cfg-layout-root");
+    let root = project.join("Kedai-Data");
+    let layout = resolve_data_layout(Some(root.clone()), None, None, project.path(), None);
+    assert_eq!(layout.data_dir, root.join("data"));
+    assert_eq!(layout.images_dir, root.join("outputs").join("images"));
+    assert_eq!(layout.task_scratch_dir, root.join("task-records"));
+    assert_eq!(layout.imports_dir, root.join("imports"));
+    assert!(!layout.pending && !layout.managed);
+}
+
+/// 显式 DATA_DIR 保持旧布局,且不被指针改写。
+#[test]
+fn layout_explicit_data_dir_wins_over_pointer() {
+    let project = TempDataDir::new("cfg-layout-data");
+    let explicit = project.join("data-explicit");
+    let pointed = project.join("pointed-root");
+    std::fs::create_dir_all(pointed.join("data")).unwrap();
+    let layout = resolve_data_layout(
+        None,
+        Some(explicit.clone()),
+        Some(pointer_for(&pointed)),
+        project.path(),
+        None,
+    );
+    assert_eq!(layout.data_dir, explicit);
+    assert_eq!(layout.images_dir, explicit.join("images"));
+    assert_eq!(
+        layout.task_scratch_dir,
+        explicit.parent().unwrap().join("task_scratch")
+    );
+    assert!(!layout.pending && !layout.managed);
+}
+
+/// 指针可用 → 根模式(images/task-records/imports 均按契约派生)。
+#[test]
+fn layout_usable_pointer_uses_root() {
+    let project = TempDataDir::new("cfg-layout-ptr");
+    let root = project.join("Kedai-Data");
+    std::fs::create_dir_all(root.join("data")).unwrap();
+    let layout = resolve_data_layout(None, None, Some(pointer_for(&root)), project.path(), None);
+    assert_eq!(layout.data_root.as_deref(), Some(root.as_path()));
+    assert_eq!(layout.data_dir, root.join("data"));
+    assert!(layout.managed && !layout.pending);
+    assert!(layout.error.is_none());
+}
+
+/// 指针存在但根不可用:回退旧默认并强制重选(不能静默建空库)。
+#[test]
+fn layout_unusable_pointer_falls_back_and_flags_error() {
+    let project = TempDataDir::new("cfg-layout-badptr");
+    let missing_root = project.join("gone");
+    let layout = resolve_data_layout(
+        None,
+        None,
+        Some(pointer_for(&missing_root)),
+        project.path(),
+        None,
+    );
+    assert_eq!(layout.data_dir, project.join("data"), "回退旧默认");
+    assert!(layout.pending && layout.managed);
+    assert!(layout.error.is_some(), "必须带出不可用原因");
+}
+
+/// 无指针:旧默认 + pending(由教程/Gate 接管)。
+#[test]
+fn layout_without_pointer_is_pending() {
+    let project = TempDataDir::new("cfg-layout-none");
+    let canonical = project.join("appdata-data");
+    let layout = resolve_data_layout(None, None, None, project.path(), Some(canonical.clone()));
+    assert_eq!(layout.data_dir, canonical);
+    assert!(layout.pending && layout.managed);
+    assert!(layout.error.is_none());
+}
+
+/// 已迁移走的旧目录带 marker:DB-7 不再把它报成分叉。
+#[test]
+fn migrated_source_is_not_reported_as_split() {
+    let selected = TempDataDir::new("cfg-migrated-sel");
+    let old = make_data_dir("cfg-migrated-old");
+    data_location::write_migrated_marker(old.path(), Path::new("D:\\Kedai-Data"))
+        .expect("写迁移标记失败");
+    let found = detect_split_data_dirs(selected.path(), &[old.path().to_path_buf()]);
+    assert!(found.is_empty(), "已迁移源不得报分叉: {found:?}");
+}

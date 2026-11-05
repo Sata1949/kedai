@@ -2,8 +2,8 @@
 // (自 api/mod.rs build_router 迁入)
 use crate::api::app_state::AppState;
 use crate::api::{
-    audio, characters, computer_use, exec, import_export, macros, mcp, plugins, resource, screen,
-    skills, slash_commands, tasks, user_scripts, workspace,
+    audio, characters, computer_use, data_location, exec, import_export, imports, macros, mcp,
+    plugins, resource, screen, skills, slash_commands, tasks, user_scripts, workspace,
 };
 use axum::routing::{delete, get, post, put};
 use axum::Router;
@@ -11,6 +11,11 @@ use std::sync::Arc;
 
 pub(crate) fn misc_routes() -> Router<Arc<AppState>> {
     Router::new()
+        // 数据位置(盘符选择):状态查询 + 选择/迁移(2026-11)
+        .route(
+            "/api/data-location",
+            get(data_location::get).put(data_location::put),
+        )
         // 命令执行审计与执行器状态(阶段 B/E)
         .route("/api/exec/tier", get(exec::tier))
         .route(
@@ -42,6 +47,8 @@ pub(crate) fn misc_routes() -> Router<Arc<AppState>> {
         .route("/api/import/chat", post(import_export::import_chat))
         // 综合导出(IMPHUB bundle v1):一次取回当前模式可用的全部段(下载件 = 综合导入的输入)
         .route("/api/export/bundle", get(import_export::export_bundle))
+        // 综合导入原始文件归档(<root>/imports/;前端解析成功后回调,留档不参与解析)
+        .route("/api/imports/archive", post(imports::archive))
         // 插件(自定义工具)
         .route("/api/plugins/tools", get(plugins::list_tools))
         .route("/api/plugins/tools/reload", post(plugins::reload_tools))
