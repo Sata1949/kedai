@@ -113,14 +113,17 @@ export function createVirtualListState(options: VirtualListOptions = {}) {
   /**
    * 条数窗口:任一已在缓冲区内的行与本行相距不超过 rowWindow 时,本行也挂载。
    *
-   * 快路径用可见集的 [min, max] 区间一次判定;视口滚动产生的可见集通常连续,
-   * 此时区间判定与逐项判定等价。只有稀疏多段(如跳转后残留两簇)才回退逐项,
-   * 避免把两簇之间的空档误挂载。旧实现每次都对整个可见集逐项遍历。
+   * 快路径用可见集的 [min, max] 区间做**充分条件**判定:可见集足够稠密时,
+   * 区间内任一下标必与某个可见行相距不超过 rowWindow,直接返回 true。
+   * `span <= rowWindow + visible.size` 是充分条件(不必要):它保证相邻可见行的
+   * 最大间隔不超过 `rowWindow + 2`,对 `rowWindow >= 1` 必有半距 <= rowWindow。
+   * 区间过宽(稀疏多段,如跳转后残留两簇)才回退逐项,避免跨空档误挂载。
+   * 旧实现每次都对整个可见集逐项遍历。
    */
   function isWithinRowWindow(index: number): boolean {
     if (rowWindow <= 0 || visible.size === 0 || !Number.isFinite(visibleMin)) return false;
     if (index < visibleMin - rowWindow || index > visibleMax + rowWindow) return false;
-    if (visibleMax - visibleMin <= rowWindow * 2 + visible.size) return true;
+    if (visibleMax - visibleMin <= rowWindow + visible.size) return true;
     for (const vid of visible) {
       const vi = order.get(vid);
       if (vi !== undefined && Math.abs(vi - index) <= rowWindow) return true;

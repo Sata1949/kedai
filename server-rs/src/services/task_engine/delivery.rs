@@ -352,15 +352,15 @@ pub(crate) fn content_issues(
             out.push(format!("{path}:文件为空(0B)"));
             continue;
         }
-        let Some(lines) = placeholder_line_count(&abs) else {
+        // ALGO-6:与 `step_files_unmet` 同款单次读盘——`@@` 计数与空白判定
+        // 共用一次读取,避免旧实现「先数一遍再读一遍」。
+        let Some(text) = read_inspectable_text(&abs) else {
             continue;
         };
+        let lines = text.lines().filter(|line| line.contains("@@")).count();
         if lines > 0 {
             out.push(format!("{path}:含 {lines} 行 @@ 未替换槽位"));
-        } else if std::fs::read_to_string(&abs)
-            .map(|text| text.trim().is_empty())
-            .unwrap_or(false)
-        {
+        } else if text.trim().is_empty() {
             out.push(format!("{path}:文件仅含空白"));
         }
     }
@@ -1011,6 +1011,39 @@ mod tests {
                 && i.contains("B")
                 && i.contains("未被目标文件导出")),
             "应报告未导出的命名导入: {issues:?}"
+        );
+    }
+
+    /// ALGO-6:内容体检对文本只读一次,`@@` 计数与空白判定必须与旧双读口径一致。
+    #[test]
+    fn content_issues_single_read_matches_placeholder_and_blank_checks() {
+        let dir = TempDataDir::new("delivery-single-read");
+        let ws = dir.join("ws");
+        std::fs::create_dir_all(&ws).expect("创建内容体检工作区失败");
+        std::fs::write(
+            ws.join("slots.html"),
+            "<div>@@name@@</div>\n<section>@@age@@</section>\n",
+        )
+        .expect("写槽位文件失败");
+        std::fs::write(ws.join("blank.txt"), " \n\t\n").expect("写空白文件失败");
+        std::fs::write(ws.join("ok.txt"), "ready\n").expect("写正常文件失败");
+
+        let issues = content_issues(&ws, &required(&["slots.html", "blank.txt", "ok.txt"]), "");
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.contains("slots.html") && i.contains("2 行 @@")),
+            "应报告 2 行未替换槽位: {issues:?}"
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.contains("blank.txt") && i.contains("仅含空白")),
+            "应报告仅含空白: {issues:?}"
+        );
+        assert!(
+            !issues.iter().any(|i| i.contains("ok.txt")),
+            "正常文本不得误报: {issues:?}"
         );
     }
 

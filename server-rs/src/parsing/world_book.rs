@@ -584,6 +584,21 @@ pub(crate) fn entry_matches_texts_prepared(
     }
 }
 
+/// 该条目在子串分支是否可能消费小写池(ALGO-6,2026-11-05)。
+///
+/// 仅作 `WorldScanPool` 的构建提示,不参与正确性判定:正则需要原文本、大小写敏感
+/// 走原文本、无有效关键词直接不命中,都不需要小写池。调用方保守预判(条目可能被
+/// 装饰器跳过)只会多构建,不会影响命中结果;漏判时池实现会本地现算。
+pub(crate) fn entry_needs_lowered(e: &WorldEntry) -> bool {
+    if e.use_regex || e.case_sensitive {
+        return false;
+    }
+    e.keys
+        .iter()
+        .chain(e.keys_secondary.iter())
+        .any(|k| !k.trim().is_empty())
+}
+
 /// 正则分支:独立 regex 字段优先;否则按 ST 语义把 keys/keys_secondary 当正则。
 fn regex_matches(e: &WorldEntry, texts: &[String]) -> bool {
     let mut patterns: Vec<&str> = Vec::new();

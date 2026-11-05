@@ -159,10 +159,15 @@ pub fn triggered_entry_hits_scoped(
 /// ② 大小写不敏感条目各自把整段历史 `to_lowercase()`。池化后两项都只做一次,
 /// 条目侧只剩匹配本身。窗口/概率语义与 [`triggered_entry_hits_scoped`] 逐字节一致
 /// (等价性由单测逐例对照)。
+///
+/// ALGO-6(2026-11-05):小写池改为**按需**构建。整本书全是常驻/大小写敏感/正则条目时,
+/// 旧实现仍会白扫一遍历史;现在由调用方经 [`Self::with_lowered`] 显式开启。
+/// 未开启时 `triggered_hits` 对确实需要小写的条目**本地现算**(见
+/// `entry_matches_texts_prepared` 的 `None` 分支),因此预判失误只影响性能、不影响正确性。
 pub struct WorldScanPool<'a> {
     texts: &'a [String],
-    /// 与 `texts` 逐条对齐的小写池(仅在条目需要大小写不敏感匹配时被消费)
-    lowered: Vec<String>,
+    /// 与 `texts` 逐条对齐的小写池;`None` = 本轮没有条目需要(或调用方未预判到)
+    lowered: Option<Vec<String>>,
     /// user 消息在池中的下标(升序);`user_total = user_indices.len()`
     user_indices: Vec<usize>,
 }
@@ -175,12 +180,18 @@ impl<'a> WorldScanPool<'a> {
             .enumerate()
             .filter_map(|(i, is_user)| (*is_user).then_some(i))
             .collect();
-        let lowered = texts.iter().map(|m| m.to_lowercase()).collect();
         Self {
             texts,
-            lowered,
+            lowered: None,
             user_indices,
         }
+    }
+
+    /// 构建与 `texts` 逐条对齐的小写池(本轮至少一条激活条目需要大小写不敏感匹配时调用)。
+    #[must_use]
+    pub fn with_lowered(mut self) -> Self {
+        self.lowered = Some(self.texts.iter().map(|m| m.to_lowercase()).collect());
+        self
     }
 
     /// 与 [`triggered_entry_hits_scoped`] 同语义的单条目判定。
@@ -199,7 +210,8 @@ impl<'a> WorldScanPool<'a> {
         } else {
             self.user_indices[user_total - window_users]
         };
-        entry_matches_texts_prepared(e, &self.texts[start..], Some(&self.lowered[start..]))
+        let lowered = self.lowered.as_deref().map(|pool| &pool[start..]);
+        entry_matches_texts_prepared(e, &self.texts[start..], lowered)
             && entry_probability_pass(e, roll)
     }
 }
@@ -816,7 +828,7 @@ mod tests {
         for &window in &[0i64, 1, 2, 4] {
             for messages in &cases {
                 let (texts, is_user) = scan_pool(messages);
-                let pool = WorldScanPool::new(&texts, &is_user);
+                let pool = WorldScanPool::new(&texts, &is_user).with_lowered();
                 for e in &entries {
                     assert_eq!(
                         pool.triggered_hits(e, window, 0),
@@ -829,7 +841,7 @@ mod tests {
         }
         // 概率闸:roll 边界仍与旧实现一致
         let (texts, is_user) = scan_pool(&[("user", "u1"), ("assistant", "触发词")]);
-        let pool = WorldScanPool::new(&texts, &is_user);
+        let pool = WorldScanPool::new(&texts, &is_user).with_lowered();
         let e = triggered_entry(&["触发词"], 30);
         for roll in [0, 29, 30, 99] {
             assert_eq!(
@@ -838,6 +850,51 @@ mod tests {
                 "roll={roll}"
             );
         }
+    }
+
+    /// ALGO-6:未预构建小写池时也必须与旧实现等价(池实现内部现算兜底)。
+    /// 这样调用方的预判只影响性能,不影响命中结果。
+    #[test]
+    fn world_scan_pool_without_lowered_falls_back_to_local_lowering() {
+        let mut entry = triggered_entry(&["TRIGGER"], 100);
+        entry.case_sensitive = false;
+        let (texts, is_user) = scan_pool(&[("user", "trigger"), ("assistant", "其他")]);
+        let pool = WorldScanPool::new(&texts, &is_user);
+        assert!(pool.lowered.is_none(), "默认构造不应预构建小写池(ALGO-6)");
+        for window in [0i64, 1, 2] {
+            assert_eq!(
+                pool.triggered_hits(&entry, window, 0),
+                triggered_entry_hits_scoped(&entry, &texts, &is_user, window, 0),
+                "window={window}"
+            );
+        }
+    }
+
+    /// ALGO-6:小写池只在确实有大小写不敏感的子串条目时构建。
+    #[test]
+    fn world_scan_pool_builds_lowered_only_when_needed() {
+        let (texts, is_user) = scan_pool(&[("user", "u1")]);
+        let insensitive = triggered_entry(&["trigger"], 100);
+        assert!(crate::parsing::world_book::entry_needs_lowered(
+            &insensitive
+        ));
+
+        let mut sensitive = triggered_entry(&["trigger"], 100);
+        sensitive.case_sensitive = true;
+        assert!(!crate::parsing::world_book::entry_needs_lowered(&sensitive));
+
+        let mut regex = triggered_entry(&[], 100);
+        regex.use_regex = true;
+        regex.regex = Some("trigger".into());
+        assert!(!crate::parsing::world_book::entry_needs_lowered(&regex));
+
+        let empty_keys = triggered_entry(&[], 100);
+        assert!(!crate::parsing::world_book::entry_needs_lowered(
+            &empty_keys
+        ));
+
+        let pool = WorldScanPool::new(&texts, &is_user).with_lowered();
+        assert!(pool.lowered.is_some());
     }
 
     /// 格式化单点:两种既有约定经 `keep_empty_bracket` 显式区分。

@@ -136,6 +136,42 @@ describe('createVirtualListState 条数窗口(rowWindow)', () => {
     expect(s.isActive(11, 11, 100)).toBe(false);
   });
 
+  it('快路径是充分条件:近邻空档不得被区间判定误吞(ALGO-6 回归)', () => {
+    const ids = Array.from({ length: 20 }, (_, i) => i);
+    const s = createVirtualListState({ threshold: 0, tailKeep: 0, rowWindow: 1 });
+    s.syncOrder(ids);
+    s.markVisible(0);
+    s.markVisible(4);
+    // span=4 > rowWindow + size = 3 → 回退逐项;下标 2 距两端均为 2,不挂载。
+    // 旧判据 `span <= 2*rowWindow + visible.size` 会把它误判为区间全覆盖。
+    expect(s.isActive(2, 2, 20)).toBe(false);
+    expect(s.isActive(1, 1, 20)).toBe(true);
+    expect(s.isActive(3, 3, 20)).toBe(true);
+  });
+
+  it('条数窗口快路径与逐项判定在小规模可见集上完全一致', () => {
+    const n = 8;
+    const ids = Array.from({ length: n }, (_, i) => i);
+    for (const rowWindow of [1, 2, 3]) {
+      for (let mask = 1; mask < 1 << n; mask++) {
+        const visible: number[] = [];
+        for (let i = 0; i < n; i++) if (mask & (1 << i)) visible.push(i);
+        const s = createVirtualListState({ threshold: 0, tailKeep: 0, rowWindow });
+        s.syncOrder(ids);
+        for (const v of visible) s.markVisible(v);
+        for (let idx = 0; idx < n; idx++) {
+          // 可见行由 `visible.has` 直接挂载,不属于条数窗口快路径的判定面。
+          if (visible.includes(idx)) continue;
+          const expected = visible.some((v) => Math.abs(v - idx) <= rowWindow);
+          expect(
+            s.isActive(idx, idx, n),
+            `rowWindow=${rowWindow} visible=${visible.join(',')} idx=${idx}`,
+          ).toBe(expected);
+        }
+      }
+    }
+  });
+
   it('rowWindow=0 时关闭条数窗口,退化为纯像素窗口行为', () => {
     const ids = Array.from({ length: 200 }, (_, i) => i + 1);
     const s = createVirtualListState({ threshold: 80, tailKeep: 30, rowWindow: 0 });

@@ -106,7 +106,17 @@ pub(crate) fn collect_world_text_grouped_with(
 
     // ALGO-5:整轮只建一次扫描池(小写化 + user 下标),所有条目复用;
     // 旧实现每条目都重扫 is_user 并各自小写化整段历史(O(条目数 × 历史))。
+    // ALGO-6:小写池只在本轮确实有大小写不敏感的激发条目时构建。预判是保守的
+    // (含可能被装饰器跳过的条目,只多构建);漏判由池实现本地现算兜底。
+    let needs_lowered = entries
+        .iter()
+        .any(|e| e.enabled && !e.constant && crate::parsing::world_book::entry_needs_lowered(e));
     let scan_pool = crate::services::prompt_kit::WorldScanPool::new(&scan_texts, &scan_is_user);
+    let scan_pool = if needs_lowered {
+        scan_pool.with_lowered()
+    } else {
+        scan_pool
+    };
     let mut constant_parts: Vec<WorldInjection> = Vec::new();
     let mut triggered_parts: Vec<WorldInjection> = Vec::new();
     for e in entries {

@@ -40,28 +40,32 @@ pub(in crate::agents::engine) struct ToolHistoryTrimOutcome {
 /// 缓存感知管线·改造 A),从最旧的 user/assistant 起丢弃,直到总 token 不超过预算;
 /// 极端情况下(仅剩 system 仍超)截断 system 内容,并优先保留尾部注入文本
 /// (protected_tail 字符),避免注入先于角色设定被切掉。
+/// 返回 `(最终 token 总数, content 字符总数)`:两者在同一遍里算出,
+/// 供 `LAST_SEND_TOKENS` / `LAST_SEND_CHARS` 直接消费(ALGO-6,2026-11-05)。
 pub(in crate::agents::engine) fn trim_to_context(
     messages: &mut Vec<LlmMessage>,
     max_context: Option<u32>,
     token_service: &mut crate::services::token_service::TokenService,
     model: &str,
     protected_tail: usize,
-) -> i64 {
+) -> (i64, usize) {
     let Some(budget) = max_context else {
-        return token_service.count_message_tokens(messages, model);
+        return token_service.count_message_tokens_and_chars(messages, model);
     };
     if budget == 0 || messages.len() <= 1 {
-        return token_service.count_message_tokens(messages, model);
+        return token_service.count_message_tokens_and_chars(messages, model);
     }
     // 受保护头部:首条 system + 摘要槽(存在时)——裁剪从其后开始
     let head = protected_head_len(messages);
-    let mut total: i64 = token_service.count_message_tokens(messages, model);
+    let (mut total, mut chars): (i64, usize) =
+        token_service.count_message_tokens_and_chars(messages, model);
     // 从最旧消息(head 起)丢弃,直到不超预算或仅剩受保护头部。
     // 先算出待删区间再一次 drain:旧实现逐条 remove,每删一条都要前移 O(n)。
     let mut end = head;
     while total > budget as i64 && end < messages.len() {
         // 与 count_message_tokens 同口径(含 tool_calls 的参数成本,2026-09-14 修复)
         total -= token_service.count_single_message_tokens(&messages[end], model);
+        chars -= messages[end].content.chars().count();
         end += 1;
     }
     if end > head {
@@ -105,10 +109,12 @@ pub(in crate::agents::engine) fn trim_to_context(
             sys.content = text.chars().take(n).collect();
             tracing::warn!(budget = budget, "上下文超限:系统提示词被截断");
         }
-        // 截断后内容变了,返回的 total 必须按新内容重算(仅极端分支付这一次)。
-        total = token_service.count_message_tokens(messages, model);
+        // 截断后内容变了,返回的 total/chars 必须按新内容重算(仅极端分支付这一次)。
+        let (new_total, new_chars) = token_service.count_message_tokens_and_chars(messages, model);
+        total = new_total;
+        chars = new_chars;
     }
-    total
+    (total, chars)
 }
 
 /// 消息数组中受裁剪保护的头部条数:首条 system(恒保护)+ 开头连续的
@@ -450,19 +456,27 @@ mod tests {
         );
     }
 
-    /// ALGO-3:裁剪返回的 total 与全量计数一致(含头部丢弃与 system 截断两条路径)。
+    /// ALGO-3/ALGO-6:裁剪返回的 (tokens, chars) 与全量口径一致
+    /// (含头部丢弃与 system 截断两条路径)。
     #[test]
-    fn trim_to_context_returns_final_token_total() {
+    fn trim_to_context_returns_final_token_total_and_chars() {
         let model = "deepseek-v4-flash";
         let mut ts = crate::services::token_service::TokenService::new();
         let mut messages = loop_messages(4, 10);
         let want = ts.count_message_tokens(&messages, model);
-        let got = trim_to_context(&mut messages, Some(10_000), &mut ts, model, 0);
+        let want_chars: usize = messages.iter().map(|m| m.content.chars().count()).sum();
+        let (got, got_chars) = trim_to_context(&mut messages, Some(10_000), &mut ts, model, 0);
         assert_eq!(got, want, "未裁剪时返回值应等于全量计数");
+        assert_eq!(got_chars, want_chars, "未裁剪时字符数应等于全量口径");
 
-        let got = trim_to_context(&mut messages, Some(5), &mut ts, model, 0);
+        let (got, got_chars) = trim_to_context(&mut messages, Some(5), &mut ts, model, 0);
         let want = ts.count_message_tokens(&messages, model);
+        let want_chars: usize = messages.iter().map(|m| m.content.chars().count()).sum();
         assert_eq!(got, want, "裁剪(含 system 截断)后返回值应等于全量计数");
+        assert_eq!(
+            got_chars, want_chars,
+            "裁剪(含 system 截断)后字符数应等于全量口径"
+        );
     }
 
     /// 裁剪黄金测试：同时保留系统契约头、步骤/工具指南尾，丢弃中间非核心内容。
