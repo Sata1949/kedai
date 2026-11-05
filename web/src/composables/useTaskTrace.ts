@@ -218,7 +218,7 @@ async function pullTraceGap(taskId: string, after: number): Promise<void> {
   if (pullRunning.has(taskId)) return;
   pullRunning.add(taskId);
   let cursor = after;
-  let collected: api.TaskTrace[] = [];
+  const collected: api.TaskTrace[] = [];
   try {
     let sawTruncated = false;
     for (;;) {

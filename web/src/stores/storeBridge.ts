@@ -203,3 +203,22 @@ export function registerTaskAttachmentSink(fn: TaskAttachmentSink): void {
 export function forgetTaskAttachments(taskId: string): void {
   storeBridges.taskAttachment.get().forgetTask(taskId);
 }
+
+/**
+ * 任务已不存在时清掉它的全部任务级缓存(ATTFIX-12,2026-11-04)。
+ *
+ * 收在这里而不是 `stores/task.ts` 里:那个文件卡在「超千行只降不升」的 ratchet 上,
+ * 而这段逻辑只是三行 `delete` 的组合、没有任何 store 内部耦合——除了两个 Map,
+ * 由调用方传进来。`deleted`(SSE)与 `deleteTask`(本地动作)两处共用同一份。
+ *
+ * 三处各有理由:事件 seq 断点在行已级联删除后再补拉只会空转(PRODCAP-1);
+ * 附件清单缓存在模块级单例里、任务没了就再也不会被读到。
+ */
+export function forgetTaskCaches(
+  taskId: string,
+  seqCaches: { last: Map<string, number>; pullAfter: Map<string, number> },
+): void {
+  seqCaches.last.delete(taskId);
+  seqCaches.pullAfter.delete(taskId);
+  forgetTaskAttachments(taskId);
+}

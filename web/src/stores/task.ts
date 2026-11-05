@@ -17,7 +17,7 @@ import {
   type AppMode,
 } from '../onboarding';
 import {
-  forgetTaskAttachments,
+  forgetTaskCaches,
   reloadSettings,
   reportChatEvent,
   uiPrefsBridge,
@@ -853,11 +853,7 @@ export const useTaskStore = defineStore('app.task', () => {
         break;
       case 'deleted':
         void loadTasks();
-        // PRODCAP-1:任务已删,其 seq 断点记账一并失效(级联删除了事件行,再补拉只会空转)
-        lastSeqByTask.delete(ev.task_id);
-        pullAfter.delete(ev.task_id);
-        // ATTFIX-12:附件清单缓存同理失效(别的端/别的会话删掉的任务走这条)
-        forgetTaskAttachments(ev.task_id);
+        forgetTaskCaches(ev.task_id, { last: lastSeqByTask, pullAfter });
         if (currentTaskId.value === ev.task_id) {
           // 删除事件也必须清持久化选择与 lastAgentStatus;此前三处清空各漏一项。
           resetCurrentTaskState();
@@ -1095,9 +1091,7 @@ export const useTaskStore = defineStore('app.task', () => {
     await api.deleteTask(id);
     tasks.value = tasks.value.filter((t) => t.id !== id);
     listSignature = contentSignature(tasks.value); // 同步签名(同上)
-    // 附件清单缓存一并失效(ATTFIX-12):`forgetTask` 此前零调用,孤儿清单会随
-    // 进程一直驻留;删除后立刻清掉,不依赖 SSE 的 deleted 事件(它可能丢帧)。
-    forgetTaskAttachments(id);
+    forgetTaskCaches(id, { last: lastSeqByTask, pullAfter });
     if (currentTaskId.value === id) {
       // 删除当前任务:清选择/详情/辅助面板/持久化/lastAgentStatus,统一走单一出口。
       resetCurrentTaskState();
