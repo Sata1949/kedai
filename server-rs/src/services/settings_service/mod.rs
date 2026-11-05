@@ -201,7 +201,7 @@ pub struct RuntimeSettings {
     ///
     /// 与节点级 `PlanStep.max_context` 的关系:节点值优先,缺省才用本设置;两者皆空
     /// 即与批次 8 之前逐字节一致。缺省关闭是刻意的——默认套预算会截断当前正常工作的
-    /// 长输入,属可观测的行为变化(见 `计划.md` 裁定 26 口径 2)。
+    /// 长输入,属可观测的行为变化(见 `裁定.md` 裁定 26 口径 2)。
     #[serde(default = "default_node_max_context")]
     pub default_node_max_context: u32,
     /// 工具循环历史保留的最近完整轮数(R3b;TPROF-1 起默认 12,钳 1..=32):
