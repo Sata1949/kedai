@@ -147,6 +147,15 @@ export const STEP_COPY: Record<TutorialStepId, StepCopy> = {
     nav: { kind: 'section', section: 'prompt' },
     navLabel: '对话与提示词 · 提示词注入',
   },
+  'r-userpersona': {
+    title: '对话与提示词 · 用户设定',
+    lines: [
+      '设置 ›「对话与提示词」›「用户设定」可配置你的称呼与用户角色描述，仅角色扮演模式生效；任务模式仍称「用户」。',
+      '启用后提示词里的 {{user}} / {{user_name}} 会替换为称呼，新增的 {{user_description}} 读取用户角色描述；称呼留空时按「用户 / 你」处理。',
+    ],
+    nav: { kind: 'section', section: 'userPersona' },
+    navLabel: '对话与提示词 · 用户设定',
+  },
   'r-memory': {
     title: '世界书与记忆',
     lines: [
@@ -163,11 +172,20 @@ export const STEP_COPY: Record<TutorialStepId, StepCopy> = {
       '目标会成为任务标题，模型据此拆解计划并执行。',
     ],
   },
+  't-attach': {
+    title: '把文件交给任务',
+    lines: [
+      '任务模式左下角是「导入附件」：任意文件可多选，单任务最多 10 个、单文件 25MB。',
+      '已选中任务时直接上传到当前任务；还没建任务时，文件先进入「将随任务提交的附件」清单，可逐个移除或清空，创建任务时一起上传。',
+      '附件会落在任务的工作目录内，并在目标里列出相对路径；任务详情「任务附件」区可逐个删除。',
+    ],
+  },
   't-mode': {
     title: '执行模式六选一',
     lines: [
       '「模式」下拉六选一：模式：三段式（默认）/ 模式：单 Agent / 模式：多 Agent / 模式：先规划后批准 / 模式：团队协作 / 模式：自定义流程。',
       '复杂目标建议「先规划后批准」（先出计划、您批准后执行）或「团队协作」（分派子目标并做审计）。',
+      '任务参数另有「稳健 / 任务优先 / 极限」三档，默认任务优先；在设置 ›「模型与生成」›「任务参数档位」里切换，点「应用档位」批量写入。',
     ],
   },
   't-custom-flow': {
@@ -181,6 +199,14 @@ export const STEP_COPY: Record<TutorialStepId, StepCopy> = {
     title: '任务工作台',
     lines: [
       '「计划步骤」「子任务执行」「流程步骤进度」「最终计划」与「对话记录」都在任务工作台里；被取消或超时的任务也会保留已完成的部分成果。',
+      '成果卡的「交付校验」列出必需 / 已生成 / 缺失文件与变更数；被守卫截断或内容像占位的步骤会标为「部分完成」，不冒充成功。',
+    ],
+  },
+  't-transcript': {
+    title: '任务执行过程三档显示',
+    lines: [
+      '任务详情顶栏可在「步骤 / 全消息 / 压缩」三档之间切换：步骤只看计划时间线，全消息逐条列出思考、工具调用与结果，压缩按阶段分组折叠并显示分类计数。',
+      '设置 ›「界面」›「任务执行过程显示」可设默认档；任务详情顶栏改的是当前任务自己的档位，两者互不影响。',
     ],
   },
   't-agent': {
@@ -219,7 +245,7 @@ export const ABOUT_SECTIONS: AboutSectionCopy[] = [
   },
   {
     heading: '任务模式',
-    steps: ['t-switch', 't-mode', 't-board', 't-agent'],
+    steps: ['t-switch', 't-attach', 't-mode', 't-board', 't-transcript', 't-agent'],
   },
   {
     heading: '导入与附件',
@@ -244,7 +270,7 @@ export const ABOUT_SECTIONS: AboutSectionCopy[] = [
   },
   {
     heading: '提示词与授权',
-    steps: ['r-prompt', 's-exec'],
+    steps: ['r-prompt', 'r-userpersona', 's-exec'],
   },
   {
     heading: '快捷键与输入',
