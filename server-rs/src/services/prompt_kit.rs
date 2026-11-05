@@ -373,11 +373,13 @@ pub fn select_segments_within_budget(
              请调大该步的「上下文上限」或留空(留空 = 不裁剪)"
         ));
     }
+    // 预算判定只需维护「尚未省略段的 kept 合计」与「已省略段的 omitted 合计」:
+    // 每推进一段就转移一次成本。旧实现每轮对两段各自全量求和,推进 n 次即 O(n²)。
+    let mut kept_total: i64 = segments.iter().map(|s| s.kept).sum();
+    let mut omitted_total: i64 = 0;
     let mut keep_from = 0usize;
     loop {
-        let total = head_tokens
-            + segments[keep_from..].iter().map(|s| s.kept).sum::<i64>()
-            + segments[..keep_from].iter().map(|s| s.omitted).sum::<i64>();
+        let total = head_tokens + kept_total + omitted_total;
         if total <= budget {
             return Ok(keep_from);
         }
@@ -387,6 +389,8 @@ pub fn select_segments_within_budget(
                 keep_from
             ));
         }
+        kept_total -= segments[keep_from].kept;
+        omitted_total += segments[keep_from].omitted;
         keep_from += 1;
     }
 }
@@ -819,6 +823,98 @@ mod tests {
     #[test]
     fn budget_with_no_segments_keeps_head() {
         assert_eq!(select_segments_within_budget(80, &[], 100).unwrap(), 0);
+    }
+
+    /// ALGO-1: 预算选择必须与优化前的全量求和实现逐字节等价。
+    ///
+    /// 参考实现照抄优化前的 O(n²) 形态;本用例是**纯等价护栏**(不是性能断言),
+    /// 覆盖 n=0/1/2/10/64/256 与多种头部/预算组合。变异验证:把递推符号或 `<=`
+    /// 改坏,本用例必须变红。
+    #[test]
+    fn budget_selection_matches_reference_implementation() {
+        fn reference(
+            head_tokens: i64,
+            segments: &[SegmentCost],
+            budget: u32,
+        ) -> Result<usize, String> {
+            let budget = budget as i64;
+            if head_tokens > budget {
+                return Err(format!(
+                    "任务目标约 {head_tokens} token,已超出本节点上下文上限 {budget} token;\
+                     请调大该步的「上下文上限」或留空(留空 = 不裁剪)"
+                ));
+            }
+            let mut keep_from = 0usize;
+            loop {
+                let total = head_tokens
+                    + segments[keep_from..].iter().map(|s| s.kept).sum::<i64>()
+                    + segments[..keep_from].iter().map(|s| s.omitted).sum::<i64>();
+                if total <= budget {
+                    return Ok(keep_from);
+                }
+                if keep_from == segments.len() {
+                    return Err(format!(
+                        "本节点上下文上限 {budget} token 过小:任务目标与 {} 个省略标记合计约 {total} token",
+                        keep_from
+                    ));
+                }
+                keep_from += 1;
+            }
+        }
+
+        // 确定性伪随机(LCG):避免为测试引入依赖。
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            *seed
+        }
+
+        let heads = [0i64, 1, 50, 500];
+        let budgets = [0u32, 1, 49, 50, 100, 250, 350, 1_000, 10_000];
+        for &n in &[0usize, 1, 2, 10, 64, 256] {
+            for &head in &heads {
+                for &budget in &budgets {
+                    for case in 0..4u64 {
+                        let mut seed = 0x5eed_0000
+                            ^ ((n as u64) << 32)
+                            ^ ((head as u64) << 12)
+                            ^ (budget as u64)
+                            ^ case;
+                        let segments: Vec<SegmentCost> = (0..n)
+                            .map(|_| SegmentCost {
+                                kept: (next(&mut seed) % 500) as i64,
+                                omitted: (next(&mut seed) % 80) as i64,
+                            })
+                            .collect();
+                        let expected = reference(head, &segments, budget);
+                        let actual = select_segments_within_budget(head, &segments, budget);
+                        assert_eq!(
+                            actual,
+                            expected,
+                            "n={n} head={head} budget={budget} case={case} segments={:?}",
+                            segments
+                                .iter()
+                                .map(|s| (s.kept, s.omitted))
+                                .collect::<Vec<_>>()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// ALGO-1 边界:合计恰好等于预算时保留当前 keep_from(`<=` 而非 `<`)。
+    #[test]
+    fn budget_selection_keeps_when_exactly_at_budget() {
+        let mk = |kept: i64, omitted: i64| SegmentCost { kept, omitted };
+        let segs = [mk(100, 10), mk(200, 20)];
+        // keep_from=0: 50+300=350
+        assert_eq!(select_segments_within_budget(50, &segs, 350).unwrap(), 0);
+        // keep_from=1: 50+200+10=260
+        assert_eq!(select_segments_within_budget(50, &segs, 260).unwrap(), 1);
+        // keep_from=2: 50+0+30=80
+        assert_eq!(select_segments_within_budget(50, &segs, 80).unwrap(), 2);
     }
 
     /// 视觉验证纪律条件追加(修复批次):判据 = 图像工具(视觉三件 ∪ 截图),
