@@ -10,9 +10,11 @@
 // 文案表在 `utils/tutorialCopy.ts`(与关于页速览**同一份**):原先文案内联在本文件、
 // 靠注释与 AboutSection 约定同源,结果两处各自腐烂(2026-10-10 盘点实测 12 条硬错而 54 例测试全绿)。
 // 本组件仍是懒加载,文案不膨胀首屏 index chunk(共享模块被 Vite hoist 成异步共享 chunk)。
-import { computed, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import { useAppStore } from '../store';
-import { isAndroidTauri } from '../platform';
+import { isAndroidTauri, restartApp } from '../platform';
+import * as api from '../api';
+import DataLocationChooser from './DataLocationChooser.vue';
 import { STEP_COPY, type StepCopy } from '../utils/tutorialCopy';
 import {
   PANEL_STORE_FLAG,
@@ -33,6 +35,7 @@ const store = useAppStore();
 /** 一屏 */
 type Screen =
   | { kind: 'pref' }
+  | { kind: 'storage' }
   | { kind: 'scope' }
   | { kind: 'step'; id: TutorialStepId }
   | { kind: 'done' };
@@ -41,6 +44,46 @@ const screenIndex = ref(0);
 /** 偏好:进组件时预选已设过的偏好(关于页重开场景),未设置过则为 null */
 const preference = ref<AppMode | null>(readDefaultAppMode(localStorage));
 const scope = ref<TutorialScope | null>(null);
+/** 第二步:数据位置。默认 true(已选择/未加载时不闪该屏),后端 pending 时再置 false。 */
+const storageStatus = ref<api.DataLocationStatus | null>(null);
+const storageChosen = ref(true);
+const storageBusy = ref(false);
+const storageError = ref('');
+const restarting = ref(false);
+
+onMounted(async () => {
+  try {
+    const status = await api.getDataLocation();
+    storageStatus.value = status;
+    // 未选择过(或指针根不可用)才插这一步;显式 DATA_DIR/已选择保持跳过
+    if (status.pending) storageChosen.value = false;
+  } catch (e) {
+    storageError.value = `读取数据位置失败:${(e as Error).message}`;
+  }
+});
+
+/** 第二步确认:写指针 + 迁移,然后重启;浏览器端没有壳可重启,停留并提示。 */
+async function confirmStorage(letter: string): Promise<void> {
+  if (storageBusy.value) return;
+  storageBusy.value = true;
+  storageError.value = '';
+  try {
+    await api.selectDataLocation(letter);
+    storageChosen.value = true;
+    restarting.value = true;
+    const restarted = await restartApp();
+    if (!restarted) {
+      // 独立 server/浏览器:不能继续(数据根尚未切换,继续写会留在旧目录)
+      storageChosen.value = false;
+      restarting.value = false;
+      storageError.value = '数据位置已保存。请关闭并重新启动 Kedai,重启后教程会跳过此步';
+    }
+  } catch (e) {
+    storageError.value = (e as Error).message;
+  } finally {
+    storageBusy.value = false;
+  }
+}
 /** 浮条形态(点「带我去设置」后置位;**不渲染遮罩**) */
 const minimized = ref(false);
 /** 设置弹窗是否由本教程打开(完成/跳过时只关自己开过的那个) */
@@ -70,7 +113,9 @@ const plan = computed<TutorialStepId[]>(() =>
 const screens = computed<Screen[]>(() => {
   const head: Screen[] = [{ kind: 'pref' }];
   if (!preference.value) return head;
-  const withScope: Screen[] = [...head, { kind: 'scope' }];
+  // 第二步 = 数据位置(未选择时);已选择后该屏从序列中移除,老用户/重启后不再打扰
+  const withStorage: Screen[] = storageChosen.value ? head : [...head, { kind: 'storage' }];
+  const withScope: Screen[] = [...withStorage, { kind: 'scope' }];
   if (!scope.value) return withScope;
   return [
     ...withScope,
@@ -120,7 +165,7 @@ function pickScope(next: TutorialScope): void {
   scope.value = next;
   writeOnboarding(localStorage, { preferredMode: pref, tutorials: planBranches(next, pref) });
   // 第二问之后要么是第一步骤屏,要么(不需要时)直接落在结束屏
-  screenIndex.value = 2;
+  screenIndex.value += 1;
 }
 
 /** 返回第一问改偏好:范围选择的后果(分支数量)随之作废,重答一次 */
@@ -221,7 +266,27 @@ function finish(): void {
           </p>
         </template>
 
-        <!-- S2 是否开始教学流程 -->
+        <!-- S2 数据保存位置(第二步;已选择过则不进序列) -->
+        <template v-else-if="current.kind === 'storage'">
+          <div class="ob-step-label">数据保存位置</div>
+          <p class="ob-lead">
+            请选择 Kedai 数据所在的盘符。选择后会在该盘创建 <code>Kedai-Data</code> 文件夹，
+            内含系统数据、产物、任务记录与综合导入文件四个子目录。
+          </p>
+          <DataLocationChooser
+            :status="storageStatus"
+            :busy="storageBusy"
+            :disabled="restarting"
+            @choose="confirmStorage"
+          />
+          <p v-if="storageError" class="sv-feedback err">{{ storageError }}</p>
+          <p v-if="restarting" class="sv-feedback ok">正在重启 Kedai 以应用数据位置…</p>
+          <p class="ob-note">
+            默认优先 D 盘，没有 D 盘时回退 C 盘；已有数据会复制到新位置（原目录保留）。
+          </p>
+        </template>
+
+        <!-- S3 是否开始教学流程 -->
         <template v-else-if="current.kind === 'scope'">
           <div class="ob-step-label">是否开始教学流程</div>
           <p class="ob-lead">
@@ -279,7 +344,7 @@ function finish(): void {
 
       <div class="sv-modal-foot ob-foot">
         <button
-          v-if="current.kind === 'scope'"
+          v-if="current.kind === 'scope' || current.kind === 'storage'"
           class="sv-btn ghost"
           @click="backToPreference"
         >

@@ -38,6 +38,8 @@ const tab = ref<'import' | 'export'>('import');
 // ===== 导入页签状态 =====
 const fileInput = ref<HTMLInputElement | null>(null);
 const pickedName = ref('');
+/** 原始文件:导入成功后归档到 <root>/imports/(用户可见的「综合导入文件」目录) */
+const pickedFile = ref<File | null>(null);
 const parsed = ref<ParsedBundle | null>(null);
 const parseError = ref('');
 /** 每段勾选(缺省全选;键为段键) */
@@ -60,6 +62,7 @@ async function onFilePicked(e: Event): Promise<void> {
   const file = input.files?.[0];
   input.value = '';
   if (!file) return;
+  pickedFile.value = file;
   parsed.value = null;
   parseError.value = '';
   results.value = [];
@@ -232,9 +235,18 @@ async function runImport(): Promise<void> {
   results.value = [...skipped, ...executed];
   const failed = executed.filter((r) => r.status === 'failed').length;
   const okCount = executed.filter((r) => r.status === 'ok').length;
+  // 原始文件留档:只在至少一段导入成功时写,失败不影响导入结果,但要在回执里可见
+  let archiveNote = '';
+  if (okCount > 0 && pickedFile.value) {
+    try {
+      await api.archiveImportFile(pickedFile.value);
+    } catch {
+      archiveNote = '(原始文件归档失败)';
+    }
+  }
   msg.value = failed > 0
-    ? { kind: 'err', text: `导入完成:${okCount} 段成功,${failed} 段失败(见下方回执)` }
-    : { kind: 'ok', text: `导入完成:${okCount} 段成功` };
+    ? { kind: 'err', text: `导入完成:${okCount} 段成功,${failed} 段失败(见下方回执)${archiveNote}` }
+    : { kind: 'ok', text: `导入完成:${okCount} 段成功${archiveNote}` };
   running.value = false;
 }
 

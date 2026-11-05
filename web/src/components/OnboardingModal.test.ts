@@ -5,10 +5,13 @@
 // 覆盖的是**状态机**而不是静态文案:三问作答 → 步骤推进 → 「带我去设置」最小化为浮条
 // (且浮条形态不渲染遮罩,综合设置仍可操作)→ 浮条返回 → 完成/跳过写标记。
 // 步骤表与文案的纯逻辑在 onboarding.test.ts;本文件只管「点下去会怎样」。
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
 import OnboardingModal from './OnboardingModal.vue';
+import * as api from '../api';
+import { restartApp } from '../platform';
+import type { DataLocationStatus } from '../api';
 import {
   DEFAULT_APP_MODE_KEY,
   ONBOARDING_KEY,
@@ -18,6 +21,36 @@ import {
 } from '../onboarding';
 import { STEP_COPY } from '../utils/tutorialCopy';
 import { useAppStore } from '../store';
+
+// 数据位置第二步依赖后端状态与壳重启:测试里固定为「已选择」(旧用例语义不变),
+// 新用户用例单独覆写为 pending=true。
+vi.mock('../api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../api')>();
+  return {
+    ...actual,
+    getDataLocation: vi.fn(),
+    selectDataLocation: vi.fn(),
+  };
+});
+vi.mock('../platform', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../platform')>();
+  return { ...actual, restartApp: vi.fn(async () => true) };
+});
+
+const dataStatus: DataLocationStatus = {
+  managed: true,
+  pending: false,
+  root: 'D:\\Kedai-Data',
+  data_dir: 'D:\\Kedai-Data\\data',
+  images_dir: 'D:\\Kedai-Data\\outputs\\images',
+  task_records_dir: 'D:\\Kedai-Data\\task-records',
+  imports_dir: 'D:\\Kedai-Data\\imports',
+  default_drive: 'D',
+  drives: [{ letter: 'C' }, { letter: 'D' }],
+  legacy_data: false,
+  pointer: 'C:\\Users\\u\\AppData\\Roaming\\com.kedai.app\\data-location.json',
+  error: null,
+};
 
 /** 挂载教程组件(组件从 uiPrefs 取动作,需要活动 pinia) */
 function mountTour(): { wrapper: VueWrapper; store: ReturnType<typeof useAppStore> } {
@@ -46,6 +79,10 @@ async function answerQuestions(
 beforeEach(() => {
   localStorage.clear();
   setActivePinia(createPinia());
+  vi.mocked(api.getDataLocation).mockReset();
+  vi.mocked(api.selectDataLocation).mockReset();
+  vi.mocked(restartApp).mockClear();
+  vi.mocked(api.getDataLocation).mockResolvedValue(dataStatus);
 });
 
 describe('首启教程 · 三问', () => {
@@ -63,6 +100,27 @@ describe('首启教程 · 三问', () => {
     expect(localStorage.getItem(DEFAULT_APP_MODE_KEY)).toBe('roleplay');
     expect(wrapper.text()).toContain('是否开始教学流程');
     expect(wrapper.text()).toContain('3. 不需要，谢谢');
+  });
+
+  it('未选择数据位置:第二步选择盘符 → 写指针并请求重启', async () => {
+    vi.mocked(api.getDataLocation).mockResolvedValue({
+      ...dataStatus,
+      pending: true,
+      root: null,
+    });
+    vi.mocked(api.selectDataLocation).mockResolvedValue({
+      root: 'D:\\Kedai-Data',
+      migrated: false,
+      restart_required: true,
+    });
+    const { wrapper } = mountTour();
+    await flushPromises();
+    await clickText(wrapper, '2. 任务');
+    expect(wrapper.text()).toContain('数据保存位置');
+    expect(wrapper.text()).toContain('D:\\Kedai-Data');
+    await clickText(wrapper, '使用该位置');
+    expect(api.selectDataLocation).toHaveBeenCalledWith('D');
+    expect(restartApp).toHaveBeenCalledTimes(1);
   });
 
   it('第二问可选「返回上一步」回到偏好选择', async () => {
