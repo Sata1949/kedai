@@ -258,17 +258,14 @@ mod tests {
 
     #[test]
     fn derived_paths_follow_contract() {
-        let p = derived_paths(Path::new("D:\\Kedai-Data"));
-        assert_eq!(p.data_dir, PathBuf::from("D:\\Kedai-Data\\data"));
-        assert_eq!(
-            p.images_dir,
-            PathBuf::from("D:\\Kedai-Data\\outputs\\images")
-        );
-        assert_eq!(
-            p.task_records_dir,
-            PathBuf::from("D:\\Kedai-Data\\task-records")
-        );
-        assert_eq!(p.imports_dir, PathBuf::from("D:\\Kedai-Data\\imports"));
+        // 期望值用 join 拼:断言只锁目录名契约,不把平台分隔符写死进期望路径
+        // (Linux 上 `to_string_lossy` 是 `/`,与 Windows 反斜杠不同)。
+        let root = Path::new("D:\\Kedai-Data");
+        let p = derived_paths(root);
+        assert_eq!(p.data_dir, root.join(DATA_DIR_NAME));
+        assert_eq!(p.images_dir, root.join(OUTPUTS_DIR_NAME).join("images"));
+        assert_eq!(p.task_records_dir, root.join(TASK_RECORDS_DIR_NAME));
+        assert_eq!(p.imports_dir, root.join(IMPORTS_DIR_NAME));
     }
 
     #[test]

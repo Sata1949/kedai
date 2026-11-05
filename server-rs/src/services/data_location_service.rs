@@ -317,7 +317,11 @@ mod tests {
         let status = svc.status();
         assert!(status.pending, "测试配置默认 pending");
         assert!(!status.legacy_data);
+        // 盘符枚举只在 Windows 有意义(`drive_exists` 探 `X:\`);Linux 档明确返回 None。
+        #[cfg(windows)]
         assert!(status.default_drive.is_some(), "至少应给出默认盘");
+        #[cfg(not(windows))]
+        assert!(status.default_drive.is_none());
     }
 
     #[test]
