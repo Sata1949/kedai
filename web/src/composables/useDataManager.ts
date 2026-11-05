@@ -212,7 +212,7 @@ export function useGenerationParams() {
   /** 当前识别到的档位;手动改过任一项即 custom(不猜、不自动写回) */
   const currentTaskTier = computed(() => identifyTaskParamTier(taskTierValues.value));
 
-  /** 应用任务参数档位(TPROF-1):一次整批写 task 覆盖层 + 全局扁平字段。
+  /** 应用任务参数档位(TPROF-2):一次整批写 task 覆盖层 + 全局扁平字段。
    *  走 `queueSettingsSave` 与自动保存串行,避免响应交错回填旧值。 */
   const taskRecSaving = ref(false);
   const taskRecMsg = ref('');
