@@ -541,8 +541,8 @@ async fn task_generation_defaults_visible_in_task_view() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         t["default_temperature"],
-        json!(0.3),
-        "任务缺省温度 0.3(不沿用扁平值): {t}"
+        json!(1.0),
+        "任务缺省温度 1.0(不沿用扁平值): {t}"
     );
     assert_eq!(
         t["default_top_p"],
@@ -551,8 +551,8 @@ async fn task_generation_defaults_visible_in_task_view() {
     );
     assert_eq!(
         t["default_max_tokens"].as_u64(),
-        Some(flat_max.max(32768)),
-        "任务输出上限 = max(扁平值, 32768)(只抬不压)"
+        Some(flat_max.max(65536)),
+        "任务输出上限 = max(扁平值, 65536)(只抬不压)"
     );
 
     // 显式写任务覆盖值 → task 视图切换、扁平(roleplay 视图)不变
@@ -578,7 +578,7 @@ async fn task_generation_defaults_visible_in_task_view() {
         app,
         "PUT",
         "/api/settings?mode=task",
-        json!({ "default_temperature": 0.3 }),
+        json!({ "default_temperature": 1.0 }),
     )
     .await;
     assert_eq!(status, StatusCode::OK);

@@ -458,8 +458,8 @@ fn harness_settings_defaults_clamp_roundtrip_and_mode_override() {
     let cfg = test_cfg();
     let s = RuntimeSettings::from_config(&cfg);
     assert!(s.skill_progressive_disclosure, "渐进披露默认开启");
-    assert_eq!(s.subagent_max_depth, 3);
-    assert_eq!(s.subagent_max_concurrency, 8);
+    assert_eq!(s.subagent_max_depth, 4);
+    assert_eq!(s.subagent_max_concurrency, 16);
     assert_eq!(s.subagent_result_max_chars, 8000);
 
     // 旧版配置缺字段:serde default 补齐,行为与默认一致
@@ -480,11 +480,11 @@ fn harness_settings_defaults_clamp_roundtrip_and_mode_override() {
     .unwrap();
     let loaded = RuntimeSettings::load(&dir, &cfg);
     assert!(loaded.skill_progressive_disclosure);
-    assert_eq!(loaded.subagent_max_depth, 3);
-    assert_eq!(loaded.subagent_max_concurrency, 8);
+    assert_eq!(loaded.subagent_max_depth, 4);
+    assert_eq!(loaded.subagent_max_concurrency, 16);
     assert_eq!(loaded.subagent_result_max_chars, 8000);
 
-    // 越界钳回默认:深度 0/5 → 3;并发 0/17 → 8;结果 499/8001 → 8000
+    // 越界钳回默认:深度 0/5 → 4;并发 0/17 → 16;结果 499/8001 → 8000
     let dir2 = tmp_dir("harness-clamp");
     let mut s2 = RuntimeSettings::from_config(&cfg);
     s2.subagent_max_depth = 0;
@@ -492,8 +492,8 @@ fn harness_settings_defaults_clamp_roundtrip_and_mode_override() {
     s2.subagent_result_max_chars = 499;
     s2.save(&dir2).unwrap();
     let clamped = RuntimeSettings::load(&dir2, &cfg);
-    assert_eq!(clamped.subagent_max_depth, 3, "深度越界应钳回 3");
-    assert_eq!(clamped.subagent_max_concurrency, 8, "并发越界应钳回 8");
+    assert_eq!(clamped.subagent_max_depth, 4, "深度越界应钳回 4");
+    assert_eq!(clamped.subagent_max_concurrency, 16, "并发越界应钳回 16");
     assert_eq!(
         clamped.subagent_result_max_chars, 8000,
         "结果上限越界应钳回 8000"
@@ -575,12 +575,12 @@ fn task_generation_defaults_apply_and_some_wins() {
     assert_eq!(
         s.for_mode(AppMode::Task).default_max_tokens,
         TASK_DEFAULT_OUTPUT_TOKENS,
-        "None + 扁平 1024 → 抬到任务缺省 32768"
+        "None + 扁平 1024 → 抬到任务缺省 65536"
     );
     assert_eq!(
         s.for_mode(AppMode::Task).default_temperature,
         TASK_DEFAULT_TEMPERATURE,
-        "None → 任务缺省温度 0.3(不沿用扁平 0.8)"
+        "None → 任务缺省温度 1.0(不沿用扁平 0.8)"
     );
     assert_eq!(
         s.for_mode(AppMode::Task).default_top_p,

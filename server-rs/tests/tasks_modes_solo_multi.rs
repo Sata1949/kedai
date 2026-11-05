@@ -266,15 +266,15 @@ async fn task_legacy_subtasks_still_from_db() {
 /// 问题①截断自愈:solo 任务经 mock [[tool_raw:]] 钩子模拟「max_tokens 把 tool_call
 /// 参数 JSON 切成半截 + finish=length」(2026-08-31 deepseek 实测形态:calculator/
 /// agentgo 参数截断直接判步骤 error)——run_tool_loop 单轮自愈:max_tokens 翻倍
-/// (32768→65536,任务侧首轮预算 = TPROF-1 起的任务缺省 32768)原样重发,第二轮预算充足
+/// (65536→131072,任务侧首轮预算 = TPROF-2 起的任务缺省 65536)原样重发,第二轮预算充足
 /// 返回完整 tool_call,工具正常执行,任务 done;
 /// 调用追踪产生两次记录(被截断的 error 标注行 + 最终成功行)。
 #[tokio::test]
 async fn task_solo_truncated_tool_call_self_heals() {
     let app = test_app();
 
-    // [[tool_raw:]] 钩子:max_tokens < 49152 返回左半 arguments(非法 JSON)+ finish=length;
-    // ≥49152(自愈翻倍后 65536)返回完整 tool_call。内容不得含 "]]"(首个 "]]" 截断语义)。
+    // [[tool_raw:]] 钩子:max_tokens < 98304 返回左半 arguments(非法 JSON)+ finish=length;
+    // ≥98304(自愈翻倍后 131072)返回完整 tool_call。内容不得含 "]]"(首个 "]]" 截断语义)。
     let title = r#"[[tool_raw:calculator {"expression":"12*34"}]] 截断自愈目标"#;
     let id = create_task_with_mode(app, title, "solo").await;
 

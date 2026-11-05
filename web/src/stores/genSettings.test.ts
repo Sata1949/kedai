@@ -81,12 +81,12 @@ function makeSettings(overrides: Partial<RuntimeSettings> = {}): RuntimeSettings
     task_tool_policy: 'deny_dangerous',
     task_tool_allowlist: [],
     max_tool_rounds: 32,
-    // 流程调用闸与节点默认上下文(A 批 A3/A4;TPROF-1 起任务侧默认 3/24)
-    max_flow_call_depth: 3,
-    max_flow_calls_per_task: 24,
+    // 流程调用闸与节点默认上下文(A 批 A3/A4;TPROF-2 起任务侧默认 5/64)
+    max_flow_call_depth: 5,
+    max_flow_calls_per_task: 64,
     default_node_max_context: 0,
-    tool_history_keep_rounds: 12,
-    tool_history_budget_tokens: 65536,
+    tool_history_keep_rounds: 16,
+    tool_history_budget_tokens: 131072,
     render_html: false,
     compaction_mode: 'off',
     compaction_threshold: 0.8,
@@ -290,14 +290,14 @@ describe('genSettings 流程调用闸与节点默认上下文(A 批 A3/A4)', () 
     setActivePinia(createPinia());
   });
 
-  it('store 默认值与后端缺省一致(深度 3 / 每任务 24 / 不裁剪 0)', () => {
+  it('store 默认值与后端缺省一致(深度 5 / 每任务 64 / 不裁剪 0)', () => {
     const store = useGenSettingsStore();
-    expect(store.maxFlowCallDepth).toBe(3);
-    expect(store.maxFlowCallsPerTask).toBe(24);
+    expect(store.maxFlowCallDepth).toBe(5);
+    expect(store.maxFlowCallsPerTask).toBe(64);
     expect(store.defaultNodeMaxContext).toBe(0);
   });
 
-  it('loadSettings 回填服务端值;缺字段兜底 2 / 8 / 0', async () => {
+  it('loadSettings 回填服务端值;缺字段兜底 5 / 64 / 0', async () => {
     const store = useGenSettingsStore();
     getSettingsMock.mockReset().mockResolvedValue(
       makeSettings({
@@ -320,8 +320,8 @@ describe('genSettings 流程调用闸与节点默认上下文(A 批 A3/A4)', () 
       ]),
     );
     await store.loadSettings();
-    expect(store.maxFlowCallDepth).toBe(3);
-    expect(store.maxFlowCallsPerTask).toBe(24);
+    expect(store.maxFlowCallDepth).toBe(5);
+    expect(store.maxFlowCallsPerTask).toBe(64);
     expect(store.defaultNodeMaxContext).toBe(0);
   });
 
@@ -466,19 +466,54 @@ describe('genSettings 记忆槽预算与容量上限(B2/B3)', () => {  beforeEac
   });
 });
 
-describe('genSettings 任务参数档位(TPROF-1)', () => {
-  it('任务优先档即后端任务缺省(0.3 / 1.0 / 32768,流程 3/24,历史 12/64K,子代理 3/8/8000)', () => {
-    expect(TASK_PARAM_DEFAULTS.temperature).toBe(0.3);
+describe('genSettings 任务参数档位(TPROF-2)', () => {
+  it('保守档 = 旧任务优先参数(1.0 / 32768,流程 3/24,历史 12/64K,子代理 3/8/8000)', () => {
+    const tier = TASK_PARAM_TIERS.steady;
+    expect(tier.temperature).toBe(1.0);
+    expect(tier.topP).toBe(1.0);
+    expect(tier.maxTokens).toBe(32768);
+    expect(tier.maxFlowCallDepth).toBe(3);
+    expect(tier.maxFlowCallsPerTask).toBe(24);
+    expect(tier.defaultNodeMaxContext).toBe(0);
+    expect(tier.toolHistoryKeepRounds).toBe(12);
+    expect(tier.toolHistoryBudgetTokens).toBe(65536);
+    expect(tier.subagentMaxDepth).toBe(3);
+    expect(tier.subagentMaxConcurrency).toBe(8);
+    expect(tier.subagentResultMaxChars).toBe(8000);
+    expect(tier.taskStepBudgetSecs).toBe(3600);
+    expect(tier.taskTotalBudgetSecs).toBe(0);
+    expect(tier.taskTeamBudgetSecs).toBe(0);
+    expect(tier.taskIdleTimeoutSecs).toBe(2400);
+  });
+
+  it('任务优先档即后端任务缺省(1.0 / 65536,流程 5/64,历史 16/128K,子代理 4/16/8000)', () => {
+    expect(TASK_PARAM_DEFAULTS.temperature).toBe(1.0);
     expect(TASK_PARAM_DEFAULTS.topP).toBe(1.0);
-    expect(TASK_PARAM_DEFAULTS.maxTokens).toBe(32768);
-    expect(TASK_PARAM_DEFAULTS.maxFlowCallDepth).toBe(3);
-    expect(TASK_PARAM_DEFAULTS.maxFlowCallsPerTask).toBe(24);
-    expect(TASK_PARAM_DEFAULTS.toolHistoryKeepRounds).toBe(12);
-    expect(TASK_PARAM_DEFAULTS.toolHistoryBudgetTokens).toBe(65536);
-    expect(TASK_PARAM_DEFAULTS.subagentMaxDepth).toBe(3);
-    expect(TASK_PARAM_DEFAULTS.subagentMaxConcurrency).toBe(8);
+    expect(TASK_PARAM_DEFAULTS.maxTokens).toBe(65536);
+    expect(TASK_PARAM_DEFAULTS.maxFlowCallDepth).toBe(5);
+    expect(TASK_PARAM_DEFAULTS.maxFlowCallsPerTask).toBe(64);
+    expect(TASK_PARAM_DEFAULTS.toolHistoryKeepRounds).toBe(16);
+    expect(TASK_PARAM_DEFAULTS.toolHistoryBudgetTokens).toBe(131072);
+    expect(TASK_PARAM_DEFAULTS.subagentMaxDepth).toBe(4);
+    expect(TASK_PARAM_DEFAULTS.subagentMaxConcurrency).toBe(16);
     expect(TASK_PARAM_DEFAULTS.subagentResultMaxChars).toBe(8000);
     expect(TASK_PARAM_DEFAULTS.taskTeamBudgetSecs).toBe(0);
+  });
+
+  it('极限档把输出/流程/历史/子代理拉到上限,保留步骤与空闲安全闸', () => {
+    const tier = TASK_PARAM_TIERS.extreme;
+    expect(tier.maxTokens).toBe(131072);
+    expect(tier.maxFlowCallDepth).toBe(5);
+    expect(tier.maxFlowCallsPerTask).toBe(64);
+    expect(tier.toolHistoryKeepRounds).toBe(32);
+    expect(tier.toolHistoryBudgetTokens).toBe(1048576);
+    expect(tier.subagentMaxDepth).toBe(4);
+    expect(tier.subagentMaxConcurrency).toBe(16);
+    expect(tier.subagentResultMaxChars).toBe(8000);
+    expect(tier.taskStepBudgetSecs).toBe(3600);
+    expect(tier.taskTotalBudgetSecs).toBe(0);
+    expect(tier.taskTeamBudgetSecs).toBe(0);
+    expect(tier.taskIdleTimeoutSecs).toBe(2400);
   });
 
   it('识别三档与自定义;团队预算 >1200 归一为 0 后仍识别为任务优先档', () => {
@@ -495,13 +530,14 @@ describe('genSettings 任务参数档位(TPROF-1)', () => {
 
   it('buildTaskParamTierPatch 输出完整档位字段(极限档取上限)', () => {
     const patch = buildTaskParamTierPatch('extreme');
-    expect(patch.default_temperature).toBe(0.3);
+    expect(patch.default_temperature).toBe(1.0);
     expect(patch.default_top_p).toBe(1.0);
-    expect(patch.default_max_tokens).toBe(65536);
+    expect(patch.default_max_tokens).toBe(131072);
     expect(patch.max_flow_call_depth).toBe(5);
     expect(patch.max_flow_calls_per_task).toBe(64);
-    expect(patch.tool_history_keep_rounds).toBe(16);
-    expect(patch.tool_history_budget_tokens).toBe(131072);
+    expect(patch.default_node_max_context).toBe(0);
+    expect(patch.tool_history_keep_rounds).toBe(32);
+    expect(patch.tool_history_budget_tokens).toBe(1048576);
     expect(patch.subagent_max_depth).toBe(4);
     expect(patch.subagent_max_concurrency).toBe(16);
     expect(patch.subagent_result_max_chars).toBe(8000);

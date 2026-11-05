@@ -188,13 +188,13 @@ pub struct RuntimeSettings {
     /// 不再消费本字段(2026-10-19)。
     #[serde(default = "default_max_tool_rounds")]
     pub max_tool_rounds: u32,
-    /// 流程**动态调用**的嵌套深度上限(A 批 A3;TPROF-1 起默认 3,钳 1..=5)。
+    /// 流程**动态调用**的嵌套深度上限(A 批 A3;TPROF-2 起默认 5,钳 1..=5)。
     ///
     /// 口径同 7b:只对「宽松档节点调 `run_flow`」生效;静态子图(`sub_flow_id`)与注册期
     /// 的嵌套校验仍按 `MAX_SUB_FLOW_DEPTH = 3`(那是**结构**上限,不是运行期成本闸)。
     #[serde(default = "default_max_flow_call_depth")]
     pub max_flow_call_depth: u32,
-    /// 单个任务内的流程调用**次数**上限(A 批 A3;TPROF-1 起默认 24,钳 1..=64)。
+    /// 单个任务内的流程调用**次数**上限(A 批 A3;TPROF-2 起默认 64,钳 1..=64)。
     #[serde(default = "default_max_flow_calls_per_task")]
     pub max_flow_calls_per_task: u32,
     /// 节点默认上下文上限(A 批 A4;默认 **0 = 不裁剪**,否则钳 256..=1048576)。
@@ -204,11 +204,11 @@ pub struct RuntimeSettings {
     /// 长输入,属可观测的行为变化(见 `裁定.md` 裁定 26 口径 2)。
     #[serde(default = "default_node_max_context")]
     pub default_node_max_context: u32,
-    /// 工具循环历史保留的最近完整轮数(R3b;TPROF-1 起默认 12,钳 1..=32):
+    /// 工具循环历史保留的最近完整轮数(R3b;TPROF-2 起默认 16,钳 1..=32):
     /// 超出后最老轮的 tool 结果原地替换为短摘要(配对不破坏),防止全量回灌无界膨胀
     #[serde(default = "default_tool_history_keep_rounds")]
     pub tool_history_keep_rounds: u32,
-    /// 工具循环历史 token 预算(R3b;TPROF-1 起默认 65536,钳 1024..=1M;0 = 禁用预算闸门,
+    /// 工具循环历史 token 预算(R3b;TPROF-2 起默认 131072,钳 1024..=1M;0 = 禁用预算闸门,
     /// 仅 keep_rounds 生效):估算超预算时从最老完整轮起继续摘要,保底最近 1 轮完整
     #[serde(default = "default_tool_history_budget_tokens")]
     pub tool_history_budget_tokens: u32,
@@ -329,10 +329,10 @@ pub struct RuntimeSettings {
     /// Agent 面板「回退到此处」按快照逆序恢复;关闭后不再产生新快照(存量快照仍可恢复)
     #[serde(default = "default_undo_enabled")]
     pub undo_enabled: bool,
-    /// 子智能体最大嵌套深度(落地项 3;TPROF-1 起默认 3,钳 1..=4;主 Agent 为第 0 层)
+    /// 子智能体最大嵌套深度(落地项 3;TPROF-2 起默认 4 = 上限,钳 1..=4;主 Agent 为第 0 层)
     #[serde(default = "default_subagent_max_depth")]
     pub subagent_max_depth: u32,
-    /// 子智能体并发上限(落地项 3;TPROF-1 起默认 8,钳 1..=16;当前顺序派发,作为在飞计数守卫)
+    /// 子智能体并发上限(落地项 3;TPROF-2 起默认 16 = 上限,钳 1..=16;当前顺序派发,作为在飞计数守卫)
     #[serde(default = "default_subagent_max_concurrency")]
     pub subagent_max_concurrency: u32,
     /// 子智能体结果最大字符数(落地项 3;TPROF-1 起默认 8000 = 上限,钳 500..=8000;

@@ -458,7 +458,7 @@ describe('GenParamsSection(生成参数区:记忆槽预算/容量上限)', () =>
     expect(html).toMatch(/display:\s*none/);
   });
 
-  it('任务模式渲染「任务参数档位」下拉与应用按钮;角色扮演模式不渲染(TPROF-1)', async () => {
+  it('任务模式渲染「任务参数档位」下拉与应用按钮;角色扮演模式不渲染(TPROF-2)', async () => {
     const rpHtml = stripComments(await render(GenParamsSection));
     expect(rpHtml).not.toContain('任务参数档位');
 
@@ -468,9 +468,11 @@ describe('GenParamsSection(生成参数区:记忆槽预算/容量上限)', () =>
     useTaskStore().appMode = 'task';
     const html = stripComments(await render(GenParamsSection, {}, pinia));
     expect(html).toContain('任务参数档位');
+    expect(html).toContain('保守档');
     expect(html).toContain('任务优先档（默认）');
     expect(html).toContain('应用档位');
-    expect(html).toContain('温度 0.3');
+    expect(html).toContain('温度 1.0');
+    expect(html).toContain('输出上限 65536');
     expect(html).not.toContain('写入任务推荐值');
   });
 

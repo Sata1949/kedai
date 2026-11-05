@@ -33,11 +33,11 @@ export const TASK_TEAM_BUDGET_MAX_SECS = 1200;
 export const TASK_TEAM_BUDGET_DEFAULT_SECS = 0;
 
 /** 任务向缺省生成参数(与后端 `TASK_DEFAULT_TEMPERATURE/TOP_P/OUTPUT_TOKENS` 逐值对应) */
-export const TASK_DEFAULT_TEMPERATURE = 0.3;
+export const TASK_DEFAULT_TEMPERATURE = 1.0;
 export const TASK_DEFAULT_TOP_P = 1.0;
-export const TASK_DEFAULT_OUTPUT_TOKENS = 32768;
+export const TASK_DEFAULT_OUTPUT_TOKENS = 65536;
 
-/** 任务参数档位(TPROF-1):默认任务优先,用户可切稳健/极限;手动改过任一项即「自定义」 */
+/** 任务参数档位(TPROF-2):默认任务优先,用户可切保守/极限;手动改过任一项即「自定义」 */
 export type TaskParamTier = 'steady' | 'task' | 'extreme';
 export type TaskParamTierOrCustom = TaskParamTier | 'custom';
 
@@ -61,35 +61,19 @@ export interface TaskParamTierValues {
 }
 
 /**
- * 三档任务参数(TPROF-1,2026-10-27)。
+ * 三档任务参数(TPROF-2,2026-11-05)。
  *
- * - 稳健档:只比旧默认松一档,适合成本敏感/小模型;
- * - 任务优先档(默认):任务模式的推荐档,后端默认值逐值等于本档;
- * - 极限档:尽量放开输出、流程、历史与子代理,适合本机、成本不敏感的长任务。
+ * - 保守档:旧任务优先档的取值,成本敏感/小模型可用;
+ * - 任务优先档(默认):旧极限档的取值,后端默认值逐值等于本档;
+ * - 极限档:输出、流程、历史与子代理拉到设置允许的上限,但**保留**步骤墙钟 3600 秒
+ *   与空闲 2400 秒两个安全闸(防单步跑飞与僵尸任务);任务总预算/团队预算仍不限。
  * 空转熔断/单次 token 预算不进入档位:它们是成本安全阀,由用户单独控制。
  */
 export const TASK_PARAM_TIERS: Record<TaskParamTier, TaskParamTierValues> = {
   steady: {
     temperature: TASK_DEFAULT_TEMPERATURE,
     topP: TASK_DEFAULT_TOP_P,
-    maxTokens: 16384,
-    maxFlowCallDepth: 2,
-    maxFlowCallsPerTask: 8,
-    defaultNodeMaxContext: 0,
-    toolHistoryKeepRounds: 8,
-    toolHistoryBudgetTokens: 32768,
-    subagentMaxDepth: 2,
-    subagentMaxConcurrency: 6,
-    subagentResultMaxChars: 8000,
-    taskStepBudgetSecs: 3600,
-    taskTotalBudgetSecs: 0,
-    taskTeamBudgetSecs: 1200,
-    taskIdleTimeoutSecs: 2400,
-  },
-  task: {
-    temperature: TASK_DEFAULT_TEMPERATURE,
-    topP: TASK_DEFAULT_TOP_P,
-    maxTokens: TASK_DEFAULT_OUTPUT_TOKENS,
+    maxTokens: 32768,
     maxFlowCallDepth: 3,
     maxFlowCallsPerTask: 24,
     defaultNodeMaxContext: 0,
@@ -103,15 +87,32 @@ export const TASK_PARAM_TIERS: Record<TaskParamTier, TaskParamTierValues> = {
     taskTeamBudgetSecs: 0,
     taskIdleTimeoutSecs: 2400,
   },
-  extreme: {
+  task: {
     temperature: TASK_DEFAULT_TEMPERATURE,
     topP: TASK_DEFAULT_TOP_P,
-    maxTokens: 65536,
+    maxTokens: TASK_DEFAULT_OUTPUT_TOKENS,
     maxFlowCallDepth: 5,
     maxFlowCallsPerTask: 64,
     defaultNodeMaxContext: 0,
     toolHistoryKeepRounds: 16,
     toolHistoryBudgetTokens: 131072,
+    subagentMaxDepth: 4,
+    subagentMaxConcurrency: 16,
+    subagentResultMaxChars: 8000,
+    taskStepBudgetSecs: 3600,
+    taskTotalBudgetSecs: 0,
+    taskTeamBudgetSecs: 0,
+    taskIdleTimeoutSecs: 2400,
+  },
+  extreme: {
+    temperature: TASK_DEFAULT_TEMPERATURE,
+    topP: TASK_DEFAULT_TOP_P,
+    maxTokens: 131072,
+    maxFlowCallDepth: 5,
+    maxFlowCallsPerTask: 64,
+    defaultNodeMaxContext: 0,
+    toolHistoryKeepRounds: 32,
+    toolHistoryBudgetTokens: 1048576,
     subagentMaxDepth: 4,
     subagentMaxConcurrency: 16,
     subagentResultMaxChars: 8000,
@@ -126,7 +127,7 @@ export const TASK_PARAM_TIERS: Record<TaskParamTier, TaskParamTierValues> = {
 export const TASK_PARAM_DEFAULTS: TaskParamTierValues = TASK_PARAM_TIERS.task;
 
 export const TASK_PARAM_TIER_LABELS: Record<TaskParamTier, string> = {
-  steady: '稳健档',
+  steady: '保守档',
   task: '任务优先档（默认）',
   extreme: '极限档',
 };
@@ -209,16 +210,16 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
   const maxContextTokens = ref(65536);
   /** AGENT/CUSTOM 模式工具循环轮次上限(服务端默认 32,1..=200) */
   const maxToolRounds = ref(32);
-  /** 流程动态调用嵌套深度上限(**任务侧**,A 批 A3;TPROF-1 起服务端默认 3,1..=5) */
-  const maxFlowCallDepth = ref(3);
-  /** 单任务内流程调用次数上限(**任务侧**,A 批 A3;TPROF-1 起服务端默认 24,1..=64) */
-  const maxFlowCallsPerTask = ref(24);
+  /** 流程动态调用嵌套深度上限(**任务侧**,A 批 A3;TPROF-2 起服务端默认 5,1..=5) */
+  const maxFlowCallDepth = ref(5);
+  /** 单任务内流程调用次数上限(**任务侧**,A 批 A3;TPROF-2 起服务端默认 64,1..=64) */
+  const maxFlowCallsPerTask = ref(64);
   /** 节点默认上下文上限(**任务侧**,A 批 A4;服务端默认 0 = 不裁剪,否则 256..=1048576) */
   const defaultNodeMaxContext = ref(0);
-  /** 工具循环历史保留的最近完整轮数(TPROF-1 起服务端默认 12,1..=32) */
-  const toolHistoryKeepRounds = ref(12);
-  /** 工具循环历史 token 预算(TPROF-1 起服务端默认 65536;0 = 禁用预算闸门) */
-  const toolHistoryBudgetTokens = ref(65536);
+  /** 工具循环历史保留的最近完整轮数(TPROF-2 起服务端默认 16,1..=32) */
+  const toolHistoryKeepRounds = ref(16);
+  /** 工具循环历史 token 预算(TPROF-2 起服务端默认 131072;0 = 禁用预算闸门) */
+  const toolHistoryBudgetTokens = ref(131072);
   /** 单次生成的 token 预算(服务端默认 0 = 关闭;HB-1 成本护栏) */
   const sessionTokenBudget = ref(0);
   /** 预算超限动作:warn(只提示一次,默认)/ stop(停止本轮工具循环) */
@@ -266,10 +267,10 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
   const worldbookSyncGlobalEnabled = ref(false);
   /** 技能渐进披露开关(服务端默认 true):system 只注入「名称:用途」清单,正文按需 read */
   const skillProgressiveDisclosure = ref(true);
-  /** 子智能体最大嵌套深度(1..=4;TPROF-1 起服务端默认 3) */
-  const subagentMaxDepth = ref(3);
-  /** 子智能体最大并发数(1..=16;TPROF-1 起服务端默认 8) */
-  const subagentMaxConcurrency = ref(8);
+  /** 子智能体最大嵌套深度(1..=4;TPROF-2 起服务端默认 4) */
+  const subagentMaxDepth = ref(4);
+  /** 子智能体最大并发数(1..=16;TPROF-2 起服务端默认 16) */
+  const subagentMaxConcurrency = ref(16);
   /** 子智能体结果最大字符数(500..=8000;TPROF-1 起服务端默认 8000,超出截断带尾注) */
   const subagentResultMaxChars = ref(8000);
   /** 回退快照(undo)开关(批次 6.1b;服务端默认 true):开时写工具执行前自动存档 */
@@ -366,11 +367,11 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     maxTokens.value = s.default_max_tokens ?? 1024;
     maxContextTokens.value = s.max_context_tokens ?? 65536;
     maxToolRounds.value = s.max_tool_rounds ?? 32;
-    maxFlowCallDepth.value = s.max_flow_call_depth ?? 3;
-    maxFlowCallsPerTask.value = s.max_flow_calls_per_task ?? 24;
+    maxFlowCallDepth.value = s.max_flow_call_depth ?? 5;
+    maxFlowCallsPerTask.value = s.max_flow_calls_per_task ?? 64;
     defaultNodeMaxContext.value = s.default_node_max_context ?? 0;
-    toolHistoryKeepRounds.value = s.tool_history_keep_rounds ?? 12;
-    toolHistoryBudgetTokens.value = s.tool_history_budget_tokens ?? 65536;
+    toolHistoryKeepRounds.value = s.tool_history_keep_rounds ?? 16;
+    toolHistoryBudgetTokens.value = s.tool_history_budget_tokens ?? 131072;
     sessionTokenBudget.value = s.session_token_budget ?? 0;
     sessionBudgetAction.value = s.session_budget_action === 'stop' ? 'stop' : 'warn';
     loopGuardSemanticWindow.value = s.loop_guard_semantic_window ?? 16;
@@ -420,8 +421,8 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     worldbookSyncCharacterEnabled.value = s.worldbook_sync_character_enabled ?? true;
     worldbookSyncGlobalEnabled.value = s.worldbook_sync_global_enabled ?? false;
     skillProgressiveDisclosure.value = s.skill_progressive_disclosure ?? true;
-    subagentMaxDepth.value = s.subagent_max_depth ?? 3;
-    subagentMaxConcurrency.value = s.subagent_max_concurrency ?? 8;
+    subagentMaxDepth.value = s.subagent_max_depth ?? 4;
+    subagentMaxConcurrency.value = s.subagent_max_concurrency ?? 16;
     subagentResultMaxChars.value = s.subagent_result_max_chars ?? 8000;
     undoEnabled.value = s.undo_enabled ?? true;
     mcpEnabled.value = s.mcp_enabled ?? false;

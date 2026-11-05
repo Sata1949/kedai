@@ -155,7 +155,7 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
       </div>
       <!-- 流程调用闸与节点默认上下文(A 批 A3/A4):三者都是**任务侧**设置
            (服务端 `apply!(s, is_task, …)` 落在任务覆盖层),角色扮演侧不受影响。
-           TPROF-1 起缺省:深度 3 / 每任务 24 / 不裁剪(0)。 -->
+           TPROF-2 起缺省:深度 5 / 每任务 64 / 不裁剪(0)。 -->
       <div class="sv-inp-row">
         <label class="sv-inp-tag">流程调用深度</label>
         <input
@@ -165,9 +165,9 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           max="5"
           step="1"
           class="sv-input inject-num"
-          title="任务里节点用 run_flow 工具逐层调用流程的嵌套深度上限(1-5,默认 3);静态子流程(sub_flow_id)的嵌套上限另有 3 层的结构限制"
+          title="任务里节点用 run_flow 工具逐层调用流程的嵌套深度上限(1-5,默认 5);静态子流程(sub_flow_id)的嵌套上限另有 3 层的结构限制"
         />
-        <span class="sv-note">任务侧：流程动态调用嵌套深度(1-5,默认 3)</span>
+        <span class="sv-note">任务侧：流程动态调用嵌套深度(1-5,默认 5)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag" title="每任务调用上限">每任务调用上限</label>
@@ -178,9 +178,9 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           max="64"
           step="1"
           class="sv-input inject-num"
-          title="单个任务内流程调用(run_flow)的次数上限(1-64,默认 24);达到后该任务不再允许新的流程调用"
+          title="单个任务内流程调用(run_flow)的次数上限(1-64,默认 64);达到后该任务不再允许新的流程调用"
         />
-        <span class="sv-note">任务侧：单个任务的流程调用次数上限(1-64,默认 24)</span>
+        <span class="sv-note">任务侧：单个任务的流程调用次数上限(1-64,默认 64)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag" title="节点默认上下文">节点默认上下文</label>
@@ -207,7 +207,7 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           class="sv-input inject-num"
           title="工具循环历史保留的最近完整轮数;超出后最老轮的 tool 结果原地替换为摘要,防止上下文无界膨胀"
         />
-        <span class="sv-note">最近完整保留轮数(1-32,默认 12;超出部分摘要化)</span>
+        <span class="sv-note">最近完整保留轮数(1-32,默认 16;超出部分摘要化)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag" title="工具历史 token 预算">工具历史 token 预算</label>
@@ -220,7 +220,7 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           class="sv-input inject-num"
           title="工具循环历史 token 预算;估算超预算时从最老完整轮起继续摘要,保底最近 1 轮完整。0 = 禁用预算闸门"
         />
-        <span class="sv-note">0 = 禁用；否则 1024-1048576(默认 65536)</span>
+        <span class="sv-note">0 = 禁用；否则 1024-1048576(默认 131072)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag" title="单次生成 token 预算">单次生成 token 预算</label>
@@ -481,9 +481,9 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           max="4"
           step="1"
           class="sv-input inject-num"
-          title="子智能体最大嵌套深度(1-4;默认 3,超限时提示主智能体直接处理)"
+          title="子智能体最大嵌套深度(1-4;默认 4,超限时提示主智能体直接处理)"
         />
-        <span class="sv-note">子智能体嵌套深度上限(1-4,默认 3)</span>
+        <span class="sv-note">子智能体嵌套深度上限(1-4,默认 4)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">子代理并发</label>
@@ -494,9 +494,9 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           max="16"
           step="1"
           class="sv-input inject-num"
-          title="子智能体最大并发数(1-16;默认 8,占满时新派发被拒并提示稍后重试)"
+          title="子智能体最大并发数(1-16;默认 16,占满时新派发被拒并提示稍后重试)"
         />
-        <span class="sv-note">子智能体并发上限(1-16,默认 8)</span>
+        <span class="sv-note">子智能体并发上限(1-16,默认 16)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag" title="子代理结果上限">子代理结果上限</label>
@@ -516,7 +516,7 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
       <p v-if="isTaskMode" class="sv-note">
         子代理参数为全局设置(角色扮演与任务共用一份),修改立即对两者生效。
       </p>
-      <!-- 任务参数档位(TPROF-1):仅任务模式显示。档位是一次性批量写入的快捷方式,
+      <!-- 任务参数档位(TPROF-2):仅任务模式显示。档位是一次性批量写入的快捷方式,
            不是新的持久化字段;当前值匹配哪一档由 currentTaskTier 派生。
            UIFIX-8 重排:改前是「小标题 → 两行说明 → 三列挤一行的下拉 → 单独占一行的
            全宽 ghost 按钮 → 又一段说明」,视觉重心落在一个纯辅助的全宽按钮上。
@@ -527,9 +527,9 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           <select
             v-model="pendingTier"
             class="sv-select"
-            title="稳健档=成本敏感;任务优先档=默认推荐;极限档=尽量放开输出/流程/历史/子代理"
+            title="保守档=旧任务优先参数;任务优先档=默认推荐;极限档=输出/流程/历史/子代理拉满,保留步骤墙钟与空闲安全闸"
           >
-            <option value="steady">稳健档</option>
+            <option value="steady">保守档</option>
             <option value="task">任务优先档（默认）</option>
             <option value="extreme">极限档</option>
           </select>
@@ -544,8 +544,9 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
         </div>
         <p class="sv-tier-note">
           <span class="sv-tier-current">当前识别：<b>{{ currentTierLabel }}</b></span>
-          任务未单独设置时使用：温度 0.3 · Top-P 1.0 · 输出上限 32768（只抬不压，更大时保持）；
-          显式保存的值优先于缺省，应用档位会覆盖当前任务参数（含降低）。
+          任务未单独设置时使用：温度 1.0 · Top-P 1.0 · 输出上限 65536（只抬不压，更大时保持）；
+          显式保存的值优先于缺省，应用档位会覆盖当前任务参数（含降低）。极限档把输出/流程/历史/子代理
+          拉到设置上限，但仍保留步骤墙钟 3600 秒与空闲 2400 秒两个安全闸。
           工具历史与子代理为全局参数（两模式共用），空转熔断任务侧仍按 8/4/2 收紧。
         </p>
         <div v-if="taskRecMsg" class="sv-feedback ok sv-feedback-flex">{{ taskRecMsg }}</div>
