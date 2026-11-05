@@ -274,7 +274,8 @@ describe('SettingsHub · action 型落点与教程落点穷尽校验', () => {
       (id) => STEP_COPY[id].nav,
     );
     // 断言「有落点的步骤」数量本身也是信号:落点集合变动时这里会提醒复核教程
-    expect(navSteps.length).toBe(10);
+    // 2026-11-05 0.4.5:新增「用户设定」步骤(11 = 原 10 + r-userpersona)
+    expect(navSteps.length).toBe(11);
 
     for (const id of navSteps) {
       setActivePinia(createPinia());

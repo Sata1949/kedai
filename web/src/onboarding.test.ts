@@ -193,13 +193,13 @@ describe('教程步骤表完整性(TUTSYNC 不变量)', () => {
     return out;
   };
 
-  it('步数:角色扮演 13 / 任务 13 / 都需要 19(桌面),Android 各 +1', () => {
-    expect(buildTutorialPlan({ preference: 'roleplay', scope: 'preferred', isAndroid: false })).toHaveLength(13);
-    expect(buildTutorialPlan({ preference: 'task', scope: 'preferred', isAndroid: false })).toHaveLength(13);
-    expect(buildTutorialPlan({ preference: 'roleplay', scope: 'both', isAndroid: false })).toHaveLength(19);
-    expect(buildTutorialPlan({ preference: 'task', scope: 'both', isAndroid: false })).toHaveLength(19);
-    expect(buildTutorialPlan({ preference: 'roleplay', scope: 'preferred', isAndroid: true })).toHaveLength(14);
-    expect(buildTutorialPlan({ preference: 'task', scope: 'both', isAndroid: true })).toHaveLength(20);
+  it('步数:角色扮演 14 / 任务 15 / 都需要 22(桌面),Android 各 +1', () => {
+    expect(buildTutorialPlan({ preference: 'roleplay', scope: 'preferred', isAndroid: false })).toHaveLength(14);
+    expect(buildTutorialPlan({ preference: 'task', scope: 'preferred', isAndroid: false })).toHaveLength(15);
+    expect(buildTutorialPlan({ preference: 'roleplay', scope: 'both', isAndroid: false })).toHaveLength(22);
+    expect(buildTutorialPlan({ preference: 'task', scope: 'both', isAndroid: false })).toHaveLength(22);
+    expect(buildTutorialPlan({ preference: 'roleplay', scope: 'preferred', isAndroid: true })).toHaveLength(15);
+    expect(buildTutorialPlan({ preference: 'task', scope: 'both', isAndroid: true })).toHaveLength(23);
   });
 
   it('每条文案都有对应步骤、每个步骤都有文案(无孤儿、无漏写)', () => {

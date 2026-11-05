@@ -82,8 +82,9 @@ export const PANEL_STORE_FLAG: Record<TutorialPanelKey, 'importBundleOpen' | 'as
  * 文案在 `utils/tutorialCopy.ts`(L1 纯数据,与关于页共用同一份)。
  */
 export type TutorialStepId =
-  | 'r-import' | 'r-intro' | 'r-display' | 'r-sendfail' | 'r-prompt' | 'r-memory'
-  | 't-switch' | 't-mode' | 't-custom-flow' | 't-board' | 't-agent' | 't-workspace'
+  | 'r-import' | 'r-intro' | 'r-display' | 'r-sendfail' | 'r-prompt' | 'r-userpersona' | 'r-memory'
+  | 't-switch' | 't-attach' | 't-mode' | 't-custom-flow' | 't-board' | 't-transcript' | 't-agent'
+  | 't-workspace'
   | 's-enter' | 's-api' | 's-import' | 's-assets' | 's-ext' | 's-flow' | 's-exec' | 's-android-exec';
 
 /** 存储接口(注入式;浏览器传 localStorage,单测传内存实现) */
@@ -220,13 +221,15 @@ function settingsSteps(isAndroid: boolean): TutorialStepId[] {
 function roleplaySteps(includeSettings: boolean, isAndroid: boolean): TutorialStepId[] {
   const steps: TutorialStepId[] = ['r-import', 'r-intro', 'r-display'];
   if (includeSettings) steps.push(...settingsSteps(isAndroid));
-  steps.push('r-sendfail', 'r-prompt', 'r-memory');
+  steps.push('r-sendfail', 'r-prompt', 'r-userpersona', 'r-memory');
   return steps;
 }
 
 /** 任务分支步骤(includeSettings = 是否带设置共同段) */
 function taskSteps(includeSettings: boolean, isAndroid: boolean): TutorialStepId[] {
-  const steps: TutorialStepId[] = ['t-switch', 't-mode', 't-custom-flow', 't-board', 't-agent'];
+  const steps: TutorialStepId[] = [
+    't-switch', 't-attach', 't-mode', 't-custom-flow', 't-board', 't-transcript', 't-agent',
+  ];
   if (includeSettings) steps.push(...settingsSteps(isAndroid));
   steps.push('t-workspace');
   return steps;

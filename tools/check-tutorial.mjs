@@ -42,6 +42,7 @@ const UI_NOUNS = [
   { term: '综合导入 / 导出', file: 'components/SettingsHub.vue' },
   { term: '附件管理', file: 'components/SettingsHub.vue' },
   { term: '提示词注入', file: 'components/SettingsHub.vue' },
+  { term: '用户设定', file: 'components/SettingsHub.vue' },
   { term: 'Agent 设置', file: 'components/SettingsHub.vue' },
   { term: '连接配置', file: 'components/SettingsHub.vue' },
   { term: '执行流程', file: 'components/SettingsHub.vue' },
@@ -70,6 +71,8 @@ const UI_NOUNS = [
   { term: '调用情况', file: 'components/AgentPanel.vue' },
   // 侧栏与移动端导航
   { term: '导入角色卡', file: 'components/sidebar/SidebarFooter.vue' },
+  { term: '导入附件', file: 'components/sidebar/SidebarFooter.vue' },
+  { term: '将随任务提交的附件', file: 'components/sidebar/TaskComposer.vue' },
   { term: '搜索角色', file: 'components/sidebar/CharacterListPanel.vue' },
   { term: '下达目标', file: 'components/sidebar/TaskComposer.vue' },
   { term: '角色扮演', file: 'components/sidebar/SidebarTop.vue' },
@@ -81,6 +84,13 @@ const UI_NOUNS = [
   { term: '流程步骤进度', file: 'components/task/TaskExecutionPanel.vue' },
   { term: '最终计划', file: 'components/task/TaskResultPanel.vue' },
   { term: '对话记录', file: 'components/task/TaskResultPanel.vue' },
+  // 任务附件与执行过程(TMSHOW-4 / ATTACH-1 起教程讲到的界面)
+  { term: '任务附件', file: 'components/task/TaskAttachmentList.vue' },
+  { term: '交付校验', file: 'components/task/TaskResultPanel.vue' },
+  { term: '任务执行过程显示', file: 'components/settings/UiSection.vue' },
+  { term: '任务参数档位', file: 'components/settings/GenParamsSection.vue' },
+  { term: '全消息', file: 'utils/taskTranscript.ts' },
+  { term: '部分完成', file: 'taskStatus.ts' },
   // 执行模式与授权档位
   { term: '三段式', file: 'api/labels.ts' },
   { term: '单 Agent', file: 'api/labels.ts' },

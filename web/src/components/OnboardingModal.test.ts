@@ -92,7 +92,7 @@ const BOTH_TASK_PLAN = buildTutorialPlan({ preference: 'task', scope: 'both', is
 const titleAt = (plan: TutorialStepId[], n: number): string => STEP_COPY[plan[n - 1]].title;
 
 describe('首启教程 · 步骤推进', () => {
-  it('只看喜欢的(角色扮演)= 13 步,首步是「导入角色卡」且没有跳转按钮', async () => {
+  it('只看喜欢的(角色扮演)= 14 步,首步是「导入角色卡」且没有跳转按钮', async () => {
     const { wrapper } = mountTour();
     await answerQuestions(wrapper, '1. 角色扮演', '2. 我只需要看我喜欢的');
     expect(wrapper.text()).toContain(`第 1 / ${RP_PLAN.length} 步`);
