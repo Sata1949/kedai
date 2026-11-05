@@ -324,39 +324,23 @@ mod tests {
         assert!(err.contains("「a」 → 「b」"), "应打印调用链: {err}");
     }
 
-    /// 深度:第 1、2、3 层放行,第 4 层拒绝(MAX_FLOW_CALL_DEPTH = 3)
+    /// 深度:第 1~5 层放行,第 6 层拒绝(MAX_FLOW_CALL_DEPTH = 5)
     #[test]
-    fn depth_guard_allows_three_levels_only() {
+    fn depth_guard_allows_five_levels_only() {
         let cfg = flow("c", "丙");
-        assert!(
-            check_call_guards(&["a".into()], 0, &cfg, MAX_FLOW_CALL_DEPTH).is_ok(),
-            "第 1 层"
-        );
-        assert!(
-            check_call_guards(&["a".into(), "b".into()], 1, &cfg, MAX_FLOW_CALL_DEPTH).is_ok(),
-            "第 2 层"
-        );
-        assert!(
-            check_call_guards(
-                &["a".into(), "b".into(), "c2".into()],
-                2,
-                &cfg,
-                MAX_FLOW_CALL_DEPTH
-            )
-            .is_ok(),
-            "第 3 层"
-        );
-        let err = check_call_guards(
-            &["a".into(), "b".into(), "c2".into()],
-            3,
-            &cfg,
-            MAX_FLOW_CALL_DEPTH,
-        )
-        .unwrap_err();
-        assert!(err.contains("超过 3 层"), "{err}");
+        let chain = ["a".to_string(), "b".to_string(), "c2".to_string()];
+        for depth in 0..=4 {
+            assert!(
+                check_call_guards(&chain, depth, &cfg, MAX_FLOW_CALL_DEPTH).is_ok(),
+                "第 {} 层应放行",
+                depth + 1
+            );
+        }
+        let err = check_call_guards(&chain, 5, &cfg, MAX_FLOW_CALL_DEPTH).unwrap_err();
+        assert!(err.contains("超过 5 层"), "{err}");
     }
 
-    /// 预算:第 24 次照常放行,第 25 次起拒绝且**不消耗**已通过者的序号
+    /// 预算:第 64 次照常放行,第 65 次起拒绝且**不消耗**已通过者的序号
     #[test]
     fn budget_rejects_after_limit() {
         let st = FlowCallState::new(vec!["b".into()], MAX_FLOW_CALLS_PER_TASK);

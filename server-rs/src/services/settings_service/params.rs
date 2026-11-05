@@ -157,14 +157,15 @@ pub(super) fn default_max_tool_rounds() -> u32 {
 ///
 /// 默认值直接取 `agent_flow_service` 的常量而非写字面量:那两个常量从此退居
 /// **缺省值与测试基准**,真源是本设置项,两边抄成两个数字必然漂移。
-/// 默认 3 层(TPROF-1,2026-10-27):任务里常见的「入口→子流程→再一层」编排不再被
-/// 2 层缺省截断;上限仍是 5 层,成本闸由每任务调用次数与流程预算共同约束。
+/// 默认 5 层(TPROF-2,2026-11-05):任务优先档直接取设置允许的上限,深链编排不再被
+/// 缺省截断;成本闸由每任务调用次数与流程预算共同约束。
 pub(super) fn default_max_flow_call_depth() -> u32 {
     crate::services::agent_flow_service::MAX_FLOW_CALL_DEPTH as u32
 }
 
 /// 默认每任务流程调用次数上限(A 批 A3 = 二维批次 7b 的 `MAX_FLOW_CALLS_PER_TASK`)。
-/// 默认 24 次(TPROF-1):一次任务里逐项处理十来个条目时,8 次会在收尾前耗尽。
+/// 默认 64 次(TPROF-2,2026-11-05 起取设置允许的上限):一次任务里逐项处理几十个条目
+/// 时,24 次会在收尾前耗尽。
 pub(super) fn default_max_flow_calls_per_task() -> u32 {
     crate::services::agent_flow_service::MAX_FLOW_CALLS_PER_TASK as u32
 }
@@ -177,18 +178,18 @@ pub(super) fn default_node_max_context() -> u32 {
     0
 }
 
-/// 默认工具循环历史保留轮数(R3b;TPROF-1 起 12 轮):最近 12 轮完整,更早轮摘要化。
+/// 默认工具循环历史保留轮数(R3b;TPROF-2 起 16 轮):最近 16 轮完整,更早轮摘要化。
 ///
 /// 任务模式的实测形态是「读文件→改→自测」多轮往返,4 轮会在改到后半段时把前面的
-/// 关键工具结果摘要掉;12 轮配合 64K token 预算,既保住工作记忆又仍有上界。
+/// 关键工具结果摘要掉;16 轮配合 128K token 预算,既保住工作记忆又仍有上界。
 pub(super) fn default_tool_history_keep_rounds() -> u32 {
-    12
+    16
 }
 
-/// 默认工具循环历史 token 预算(R3b;TPROF-1 起 64K):覆盖任务侧多轮大文件读取;
+/// 默认工具循环历史 token 预算(R3b;TPROF-2 起 128K):覆盖任务侧多轮大文件读取;
 /// 超出后从最老完整轮起继续摘要,保底最近 1 轮完整。
 pub(super) fn default_tool_history_budget_tokens() -> u32 {
-    65_536
+    131_072
 }
 
 /// 默认单次生成 token 预算(HB-1 成本护栏):0 = 关闭(默认)。
@@ -367,14 +368,14 @@ pub(super) fn default_undo_enabled() -> bool {
     true
 }
 
-/// 默认子智能体最大嵌套深度(落地项 3;TPROF-1 起 3 层,上限 4)。
+/// 默认子智能体最大嵌套深度(落地项 3;TPROF-2 起 4 层 = 上限)。
 pub(super) fn default_subagent_max_depth() -> u32 {
-    3
+    4
 }
 
-/// 默认子智能体并发上限(落地项 3;TPROF-1 起 8,上限 16)。
+/// 默认子智能体并发上限(落地项 3;TPROF-2 起 16 = 上限)。
 pub(super) fn default_subagent_max_concurrency() -> u32 {
-    8
+    16
 }
 
 /// 默认子智能体结果最大字符数(落地项 3;TPROF-1 起 8000 = 上限)。

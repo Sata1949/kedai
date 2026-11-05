@@ -917,7 +917,7 @@ async fn executor_temperature_reaches_agent_and_step_generation() {
         "solo 主 agent 应使用执行者建议温度(且无 f32 拓宽噪声): {detail}"
     );
 
-    // ② 无执行者:solo 沿用任务缺省温度(TM-SET-1 起为 0.3)
+    // ② 无执行者:solo 沿用任务缺省温度(TPROF-2 起为 1.0)
     let id2 = create_task_with_mode(app, "[[echo_temp]] 无执行者温度目标", "solo").await;
     let (status, _) = send_json(app, "POST", &format!("/api/tasks/{id2}/run"), json!({})).await;
     assert_eq!(status, StatusCode::OK);
@@ -927,8 +927,8 @@ async fn executor_temperature_reaches_agent_and_step_generation() {
         detail["task"]["result"]
             .as_str()
             .unwrap_or("")
-            .contains("温度=0.3"),
-        "无执行者应沿用任务缺省温度 0.3(TM-SET-1): {detail}"
+            .contains("温度=1"),
+        "无执行者应沿用任务缺省温度 1.0(TPROF-2): {detail}"
     );
 
     // ③ legacy 步骤生成(经 generate_step):同解析式命中执行者温度
