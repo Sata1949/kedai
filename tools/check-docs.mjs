@@ -277,17 +277,26 @@ if (!exists(ARCHIVE_DIR)) {
 }
 
 // ---------- D6 (WARN) 条目 ID 存在性 ----------
+// 拆分后条目正文移入 docs/<门面>/ 子卷:D6 必须跟着扫描子卷,否则门面只剩索引,
+// 「编号是全仓引用锚点」这条检查会在拆分后静默失效(与 D4/D8 扩范围的同一理由)。
 {
   const idRules = [
     { file: 'docs/遗留.md', re: /^#{2,3}\s+.*\b(L\d{1,2}|T\d|D\d)\b/m, hint: 'L*/T*/D*' },
-    { file: 'docs/计划.md', re: /^#{2,3}\s+.*(P-\d+|批次\s*\d|[A-Z]\.\d)/m, hint: 'P-*/批次 N/X.N' },
+    { file: 'docs/计划.md', dir: 'docs/计划', re: /^#{2,3}\s+.*(P-\d+|批次\s*\d|[A-Z]\.\d)/m, hint: 'P-*/批次 N/X.N' },
   ];
-  for (const { file, re, hint } of idRules) {
+  for (const { file, dir, re, hint } of idRules) {
     if (!exists(file)) continue;
-    const src = read(file);
-    const h2 = (src.match(/^##\s+/gm) || []).length;
+    const body = [read(file)];
+    if (dir && exists(dir)) {
+      for (const e of fs.readdirSync(path.join(ROOT, dir), { withFileTypes: true })) {
+        if (e.isFile() && e.name.endsWith('.md')) body.push(read(`${dir}/${e.name}`));
+      }
+    }
+    const h2 = (body[0].match(/^##\s+/gm) || []).length;
     if (h2 === 0) warn('D6', `${file} 无二级章节,疑似结构被破坏`);
-    if (!re.test(src)) warn('D6', `${file} 未见条目 ID 形态(${hint}),编号是全仓引用锚点,请勿改成无语义标题`);
+    if (!body.some((src) => re.test(src))) {
+      warn('D6', `${file} 未见条目 ID 形态(${hint}),编号是全仓引用锚点,请勿改成无语义标题`);
+    }
   }
   ok('D6', '条目 ID 形态检查完成(仅 WARN 级)');
 }
