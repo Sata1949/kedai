@@ -75,17 +75,17 @@ L3      scripts/ 或 web/src/sandbox/ ───┘  实现 ExecutorPort，只经
 
 ### 3.2 模块表
 
-| 名称 | 代码名 | 代际 | 真实落点 | 对外接口 | 明确不做 |
+| 模块名 | 代码名 | 代际 | 真实落点 | 对外接口 | 明确不做 |
 |---|---|---|---|---|---|
-| 极·契 | `roleplay_contract` | L1 | `server-rs/src/models/roleplay_contract.rs`（或 `models/roleplay/`，`models/mod.rs` 注册） | `PromptSpec` / `PromptPlan` / `ContextFragment` / `ProviderResult` / `FailurePolicy` / `ConfigRevision` / `ExecutorPort` | 不访问 DB/文件；不执行模板/正则；不装配服务；不改表/线格式 |
-| 极·汇 | `roleplay_config` | L2 | `server-rs/src/services/roleplay/config/` | 只读 `RoleplayProfileView` + 唯一写 `RoleplayConfigCommit` + bundle 六段适配 | 不搬数据；不缓存 Profile；不让 UI 直写；不改旧字段语义 |
-| 极·材 | `roleplay_context` | L2 | `server-rs/src/services/roleplay/context/` | `ContextProvider` 注册表 + `assemble` + source/priority/budget/failure trace | 不落库；不改既有 service 内部；不拥有向量算法；不执行 regex |
-| 极·叙 | `roleplay_prompt` | L2 | `server-rs/src/services/roleplay/prompt/` | `build_prompt(PromptSpec) -> PromptPlan { messages, prefix_hash, trace }`；send/preview 共用 | 不定义存储；不执行脚本/EJS；不替代 `engine.run` 事务收尾 |
-| 极·隔 | `script_sandbox` | L3 | 预留：`scripts/`（后端）与 `web/src/sandbox/`（前端）；**本批不建目录** | 实现 L1 `ExecutorPort`，只收 L1 命令、返回 L1 结果 | 不被 L2 import；不新建插件机制；不搬前端执行点 |
-| 极·面 | `roleplay_commands` | 前端 L2 | `web/src/composables/roleplay/` | commands / selectors / view-model；只经 store action 或 API DTO | 不替代 `stores/store.ts` / `modals.ts`；不合并三 store；不执行不可信脚本 |
-| 极·根 | `compose_roleplay` | entry | `server-rs/src/bin/` 薄函数 + `api/app_state.rs` 注册点 | `compose_roleplay(flags)` 装配 ports/providers/开关 | 不写业务逻辑；不解析 ST；不访问 DB 本体；不新增顶层桶 |
+| 角色模式契约 | `roleplay_contract` | L1 | `server-rs/src/models/roleplay_contract.rs`（或 `models/roleplay/`，`models/mod.rs` 注册） | `PromptSpec` / `PromptPlan` / `ContextFragment` / `ProviderResult` / `FailurePolicy` / `ConfigRevision` / `ExecutorPort` | 不访问 DB/文件；不执行模板/正则；不装配服务；不改表/线格式 |
+| 角色模式配置 | `roleplay_config` | L2 | `server-rs/src/services/roleplay/config/` | 只读 `RoleplayProfileView` + 唯一写 `RoleplayConfigCommit` + bundle 六段适配 | 不搬数据；不缓存 Profile；不让 UI 直写；不改旧字段语义 |
+| 上下文素材 | `roleplay_context` | L2 | `server-rs/src/services/roleplay/context/` | `ContextProvider` 注册表 + `assemble` + source/priority/budget/failure trace | 不落库；不改既有 service 内部；不拥有向量算法；不执行 regex |
+| 提示词构建 | `roleplay_prompt` | L2 | `server-rs/src/services/roleplay/prompt/` | `build_prompt(PromptSpec) -> PromptPlan { messages, prefix_hash, trace }`；send/preview 共用 | 不定义存储；不执行脚本/EJS；不替代 `engine.run` 事务收尾 |
+| 脚本沙箱 | `script_sandbox` | L3 | 预留：`scripts/`（后端）与 `web/src/sandbox/`（前端）；**本批不建目录** | 实现 L1 `ExecutorPort`，只收 L1 命令、返回 L1 结果 | 不被 L2 import；不新建插件机制；不搬前端执行点 |
+| 前端命令层 | `roleplay_commands` | 前端 L2 | `web/src/composables/roleplay/` | commands / selectors / view-model；只经 store action 或 API DTO | 不替代 `stores/store.ts` / `modals.ts`；不合并三 store；不执行不可信脚本 |
+| 装配点 | `compose_roleplay` | entry | `server-rs/src/bin/` 薄函数 + `api/app_state.rs` 注册点 | `compose_roleplay(flags)` 装配 ports/providers/开关 | 不写业务逻辑；不解析 ST；不访问 DB 本体；不新增顶层桶 |
 
-> 「极·根」不设独立模块目录：SSOT 的 entry 只有 `bin/`，业务装配实际在 `api/app_state.rs`（L2，已登记 wiring）。把它写成新 entry 模块会制造「双装配」假象。
+> 装配点不设独立模块目录：SSOT 的 entry 只有 `bin/`，业务装配实际在 `api/app_state.rs`（L2，已登记 wiring）。把它写成新 entry 模块会制造「双装配」假象。
 
 ### 3.3 关键边界决策
 
@@ -198,21 +198,25 @@ L3      scripts/ 或 web/src/sandbox/ ───┘  实现 ExecutorPort，只经
 
 ---
 
-## 七、命名建议
+## 七、命名
 
-**「极」作为项目代号保留在文档与路线图；代码里一律用可搜索的机械名。**
+**「极」只是模块系名，子模块一律用常规工程名，不再派生子代号。**
 
-| 文档名 | 代码名 |
-|---|---|
-| 极·契 | `roleplay_contract` |
-| 极·汇 | `roleplay_config` |
-| 极·材 | `roleplay_context` |
-| 极·叙 | `roleplay_prompt` |
-| 极·隔 | `script_sandbox` |
-| 极·面 | `roleplay_commands` |
-| 极·根 | `compose_roleplay` |
+| 模块名 | 代码名 | 职责一句话 |
+|---|---|---|
+| 角色模式契约 | `roleplay_contract` | L1 类型、常量与 port |
+| 角色模式配置 | `roleplay_config` | 配置只读投影与唯一写入口 |
+| 上下文素材 | `roleplay_context` | ContextProvider 注册与装配 |
+| 提示词构建 | `roleplay_prompt` | send/preview 共用的构建器 |
+| 脚本沙箱 | `script_sandbox` | L3 执行隔离（预留） |
+| 前端命令层 | `roleplay_commands` | UI 与 store 之间的命令与选择器 |
+| 装配点 | `compose_roleplay` | entry 薄装配函数 |
 
-理由：单人维护、公开仓库、AI agent 可读的代码库需要「路径即语义」；`极·X` 不可搜索、含 Unicode 中点，容易让「几个类型 + 影子测试」被误读成实体模块。开关、日志、metric、API 字段、测试名一律英文 snake_case；调试面板只显示 revision、spec hash、policy key。
+命名纪律：
+
+- 「极」只出现在模块系层级：文档标题、路线图、批次代号（`JI-*`）、PR 标签；
+- 子模块名不带「极」字，也不使用单字代号；中文名用完整词组，英文名用可搜索的 snake_case；
+- 「极」不进代码标识符、开关、日志/metric、API 字段、测试名；调试面板只显示 revision、spec hash、policy key。
 
 ---
 
