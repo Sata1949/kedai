@@ -46,7 +46,7 @@ pub async fn put(
         (Some(root), _) => Target::Root(root),
         (None, Some(drive)) => Target::Drive(drive),
         (None, None) => {
-            return validation("缺少 drive 或 root:请提供盘符或数据根路径".to_string());
+            return validation("缺少 drive 或 root:请提供盘符或数据根路径");
         }
     };
     let joined = tokio::task::spawn_blocking(move || match target {
