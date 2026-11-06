@@ -188,6 +188,13 @@ describe('buildScopedScriptHtml', () => {
     expect(r.scripts).toEqual(['steal()']);
   });
 
+  it('插图修复:角色卡 scoped HTML 中的 http 图床图片保留(2026-11-06)', () => {
+    const s = '<img src="http://img.example/a.png" alt="图">';
+    const r = buildScopedScriptHtml(s, 'm-http-img');
+    expect(r.html).toContain('src="http://img.example/a.png"');
+    expect(r.html).toContain('alt="图"');
+  });
+
   it('危险样式能力被清理:https url 与 position 放行,@import 仍剥除', () => {
     const s = '<style>@import url(https://evil.test/a.css); .a{background:url(https://evil.test/x);position:fixed}</style><div class="a">正文</div>';
     const r = buildScopedScriptHtml(s, 'm3');
@@ -753,7 +760,7 @@ describe('sanitizeMessageHtml(酒馆式消息白名单,RPFLOW 提交 3)', () => 
     expect(html).not.toContain('other');
   });
 
-  it('a:仅 https 保留 + 新窗口属性;img:仅 data:/https:', () => {
+  it('a:仅 https 保留 + 新窗口属性;img:data:/https:/http(2026-11-06 插图修复)', () => {
     const a = sanitizeMessageHtml('<a href="https://example.com/x" title="t">链接</a>');
     expect(a).toContain('href="https://example.com/x"');
     expect(a).toContain('target="_blank"');
@@ -762,7 +769,10 @@ describe('sanitizeMessageHtml(酒馆式消息白名单,RPFLOW 提交 3)', () => 
     expect(sanitizeMessageHtml('<a href="http://example.com">x</a>')).not.toContain('href=');
     expect(sanitizeMessageHtml('<img src="data:image/png;base64,AAA" alt="a">')).toContain('data:image/png');
     expect(sanitizeMessageHtml('<img src="https://example.com/a.png" width="120">')).toContain('width="120"');
-    expect(sanitizeMessageHtml('<img src="http://example.com/a.png">')).not.toContain('src=');
+    // http 图床插图保留(2026-11-06 实机取证:此前被白名单丢弃,表现为「插图消失」)
+    expect(sanitizeMessageHtml('<img src="http://example.com/a.png">')).toContain('src="http://example.com/a.png"');
+    // 其他危险协议仍拒
+    expect(sanitizeMessageHtml('<img src="javascript:alert(1)">')).not.toContain('src=');
   });
 
   it('注释剥除;s 标签放行(删除线卡片常用)', () => {

@@ -18,6 +18,13 @@ use std::path::{Path, PathBuf};
 
 /// 用户可见的根目录名(位于所选盘符根下)。
 pub const ROOT_DIR_NAME: &str = "Kedai-Data";
+/// Android 默认数据根:公共「下载」目录下的 `Kedai-Data`(2026-11-06 实机反馈)。
+///
+/// Android 没有盘符概念,`available_drives()` 恒为空,盘符选择器在手机上不可用;
+/// 产品裁定(0.4.5 修复)把默认位置定在用户可见的 Download 目录,既符合「数据在
+/// 根目录可管理」的诉求,也避免数据锁在应用私有目录里随卸载一起丢失。
+/// 写入公共目录需要「所有文件访问」权限(Android 11+),前端设置页提供授权入口。
+pub const ANDROID_DEFAULT_ROOT: &str = "/storage/emulated/0/Download/Kedai-Data";
 /// 系统数据目录名(与既有 `DATA_DIR` 布局一致)。
 pub const DATA_DIR_NAME: &str = "data";
 /// 应用产物目录名(当前承接 `images/`)。
@@ -192,6 +199,73 @@ pub fn default_root() -> Option<PathBuf> {
     default_drive().and_then(root_for_drive)
 }
 
+/// 运行平台标识(供数据位置状态接口区分盘符选择器与 Android 路径模式)。
+pub fn platform() -> &'static str {
+    if cfg!(target_os = "android") {
+        "android"
+    } else {
+        "desktop"
+    }
+}
+
+/// 平台建议的数据根:Android = `/storage/emulated/0/Download/Kedai-Data`;
+/// 桌面 = None(仍走盘符选择)。
+pub fn suggested_root() -> Option<PathBuf> {
+    if cfg!(target_os = "android") {
+        Some(PathBuf::from(ANDROID_DEFAULT_ROOT))
+    } else {
+        None
+    }
+}
+
+/// 目录是否真的可写:建目录 + 写入并删除探针文件。
+///
+/// 不能只看 `create_dir_all`:目录已存在时它对无权限路径也返回 Ok(Android scoped
+/// storage 下尤其常见),必须实际写一次才能区分「有目录」与「能写入」。
+pub fn probe_writable(root: &Path) -> bool {
+    if std::fs::create_dir_all(root).is_err() {
+        return false;
+    }
+    let probe = root.join(".kedai-write-probe");
+    match std::fs::write(&probe, b"1") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// 把用户输入的自定义根归一为绝对路径(Android 路径模式)。
+///
+/// 约束:必须绝对、最后一段必须是 `Kedai-Data`、父目录已存在、路径中无 `..`。
+/// 父目录存在是刻意的——Android 只应写入已存在的公共目录(Download),不应让
+/// 一个手滑路径在多级不存在的位置上创建数据根。
+pub fn normalize_custom_root(input: &str) -> Result<PathBuf, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("数据根路径为空".into());
+    }
+    let path = PathBuf::from(trimmed);
+    if !path.is_absolute() {
+        return Err(format!("数据根必须是绝对路径:{trimmed}"));
+    }
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err("数据根路径不允许包含 ..".into());
+    }
+    if path.file_name().and_then(|n| n.to_str()) != Some(ROOT_DIR_NAME) {
+        return Err(format!("数据根目录名必须是 {ROOT_DIR_NAME}:{trimmed}"));
+    }
+    match path.parent() {
+        Some(parent) if parent.is_dir() => Ok(path),
+        Some(parent) => Err(format!("上级目录不存在:{}", parent.display())),
+        None => Err(format!("数据根没有上级目录:{trimmed}")),
+    }
+}
+
 /// 建根与四个子目录(幂等)。`data` 也在这里建,后续 `Db::open` 只负责其中的库文件。
 pub fn ensure_root_layout(root: &Path) -> Result<(), String> {
     if root.as_os_str().is_empty() {
@@ -308,6 +382,56 @@ mod tests {
         assert!(!pointer_usable(&root), "缺 data 子目录不得视为可用");
         std::fs::create_dir_all(root.join("data")).unwrap();
         assert!(pointer_usable(&root));
+    }
+
+    #[test]
+    fn normalize_custom_root_accepts_only_named_absolute_dir_with_existing_parent() {
+        let dir = TempDataDir::new("dl-custom-root");
+        let root = dir.path().join("Kedai-Data");
+        assert_eq!(
+            normalize_custom_root(&root.to_string_lossy()).unwrap(),
+            root
+        );
+        // 相对路径 / 末段不是 Kedai-Data / 父目录不存在 → 全部拒绝
+        assert!(normalize_custom_root("Kedai-Data").is_err());
+        assert!(normalize_custom_root(&dir.path().join("Other").to_string_lossy()).is_err());
+        assert!(
+            normalize_custom_root(&dir.path().join("missing/Kedai-Data").to_string_lossy())
+                .is_err()
+        );
+        // `..` 不允许
+        assert!(normalize_custom_root(&format!("{}/../Kedai-Data", dir.path().display())).is_err());
+    }
+
+    #[test]
+    fn probe_writable_detects_real_write_access() {
+        let dir = TempDataDir::new("dl-probe");
+        let root = dir.path().join("Kedai-Data");
+        assert!(probe_writable(&root), "临时目录应可写");
+        assert!(root.is_dir(), "探针会顺带建目录");
+        assert!(
+            !root.join(".kedai-write-probe").exists(),
+            "探针文件必须删除"
+        );
+    }
+
+    #[test]
+    fn android_platform_helpers_are_desktop_safe() {
+        // 本测试在桌面跑:平台判定与建议根必须与 Android 分支互斥,
+        // 保证盘符模式不会被路径模式污染。
+        assert_eq!(
+            platform(),
+            if cfg!(target_os = "android") {
+                "android"
+            } else {
+                "desktop"
+            }
+        );
+        if cfg!(target_os = "android") {
+            assert_eq!(suggested_root(), Some(PathBuf::from(ANDROID_DEFAULT_ROOT)));
+        } else {
+            assert_eq!(suggested_root(), None);
+        }
     }
 
     #[test]

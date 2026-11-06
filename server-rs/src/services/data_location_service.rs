@@ -37,6 +37,13 @@ pub struct DataLocationStatus {
     pub legacy_data: bool,
     pub pointer: Option<String>,
     pub error: Option<String>,
+    /// 运行平台:`android` 走路径模式(无盘符),`desktop` 走盘符模式。
+    pub platform: String,
+    /// 平台建议的数据根:Android = `/storage/emulated/0/Download/Kedai-Data`;桌面为 null。
+    pub suggested_root: Option<String>,
+    /// Android 专用:建议根当前不可写(通常缺少「所有文件访问」权限)。
+    /// 桌面恒为 false。前端据此展示授权入口,而不是只给一个报错的按钮。
+    pub needs_permission: bool,
 }
 
 /// `POST /api/data-location` 的结果。
@@ -95,6 +102,12 @@ impl DataLocationService {
                 letter: letter.to_string(),
             })
             .collect();
+        let suggested_root = data_location::suggested_root();
+        // 可写探测只在 Android 且尚未选定根时做:已选定且可用的根不需要权限提示,
+        // 而每次打开设置都建目录/写探针也没有必要。
+        let needs_permission = suggested_root.as_ref().is_some_and(|root| {
+            self.config.data_root.is_none() && !data_location::probe_writable(root)
+        });
         DataLocationStatus {
             managed: self.config.data_location_managed,
             pending: self.config.data_location_pending,
@@ -115,6 +128,9 @@ impl DataLocationService {
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned()),
             error: self.config.data_location_error.clone(),
+            platform: data_location::platform().to_string(),
+            suggested_root: suggested_root.map(|p| p.to_string_lossy().into_owned()),
+            needs_permission,
         }
     }
 
@@ -126,6 +142,16 @@ impl DataLocationService {
         let root = data_location::root_for_drive(letter).ok_or_else(|| {
             DataLocationError::BadRequest(format!("{letter} 盘不存在或不可访问,请选择其它盘"))
         })?;
+        self.apply_to_root(&root)
+    }
+
+    /// Android 路径模式:直接选择绝对路径根(默认 `/storage/emulated/0/Download/Kedai-Data`)。
+    ///
+    /// 与 `apply(盘符)` 共用同一套目录创建/迁移/冲突判定;额外只做路径形态校验
+    /// (绝对、末段 `Kedai-Data`、父目录存在),避免手滑路径在磁盘深处建出数据根。
+    pub fn apply_root_path(&self, input: &str) -> Result<ApplyOutcome, DataLocationError> {
+        let root =
+            data_location::normalize_custom_root(input).map_err(DataLocationError::BadRequest)?;
         self.apply_to_root(&root)
     }
 
@@ -422,6 +448,41 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
             .unwrap();
         assert_eq!(n, 1, "快照必须包含源库数据");
+    }
+
+    /// Android 路径模式:apply_root_path 与盘符模式共用迁移逻辑,只多一层路径校验。
+    #[test]
+    fn apply_root_path_migrates_and_writes_pointer() {
+        let source = TempDataDir::new("dl-root-src");
+        let pointer_dir = TempDataDir::new("dl-root-ptr");
+        let root_parent = TempDataDir::new("dl-root-parent");
+        let root = root_parent.join("Kedai-Data");
+        std::fs::write(source.join("settings.json"), "{}").unwrap();
+        std::fs::create_dir_all(source.join("images")).unwrap();
+        std::fs::write(source.join("images").join("a.png"), b"png").unwrap();
+
+        let mut cfg = crate::config::test_config();
+        cfg.data_dir = source.path().to_path_buf();
+        cfg.images_dir = source.join("images");
+        cfg.imports_dir = source.join("imports");
+        cfg.task_scratch_dir = source.path().parent().unwrap().join("scratch-root-test");
+        let pointer_path = pointer_dir.join("data-location.json");
+        let svc = DataLocationService::with_pointer_path(cfg, pointer_path.clone());
+
+        let out = svc
+            .apply_root_path(&root.to_string_lossy())
+            .expect("路径模式迁移失败");
+        assert!(out.migrated && out.restart_required);
+        assert!(root.join("data").join("settings.json").is_file());
+        assert!(root.join("outputs").join("images").join("a.png").is_file());
+        let pointer = data_location::read_pointer_from(&pointer_path).expect("指针未写");
+        assert_eq!(pointer.root, root);
+
+        // 非法路径走 BadRequest,不落盘
+        assert!(matches!(
+            svc.apply_root_path("relative/Kedai-Data"),
+            Err(DataLocationError::BadRequest(_))
+        ));
     }
 
     #[test]

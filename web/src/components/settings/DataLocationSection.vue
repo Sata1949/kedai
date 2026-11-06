@@ -23,7 +23,7 @@ async function load(): Promise<void> {
 
 onMounted(load);
 
-async function choose(letter: string): Promise<void> {
+async function choose(target: string): Promise<void> {
   if (busy.value) return;
   const hasData = !!status.value?.legacy_data || !!status.value?.root;
   if (hasData && !window.confirm('将把现有数据复制到新位置(原目录保留),之后需要重启 Kedai。继续?')) {
@@ -32,7 +32,10 @@ async function choose(letter: string): Promise<void> {
   busy.value = true;
   msg.value = null;
   try {
-    const result = await api.selectDataLocation(letter);
+    // Android 传绝对路径根,桌面传盘符:以是否以 / 开头区分(桌面盘符恒为单字母)
+    const result = await api.selectDataLocation(
+      target.startsWith('/') ? { root: target } : target,
+    );
     msg.value = {
       kind: 'ok',
       text: result.migrated
@@ -83,11 +86,12 @@ async function choose(letter: string): Promise<void> {
       :status="status"
       :busy="busy"
       @choose="choose"
+      @refresh="load"
     />
     <p v-if="msg" class="sv-feedback" :class="msg.kind === 'err' ? 'err' : 'ok'">{{ msg.text }}</p>
     <p class="sv-note">
       更改后旧数据会复制到新位置（原目录保留），并需要重启 Kedai；
-      若所选盘已有 Kedai 用户数据，会被拒绝以免覆盖。
+      若所选位置已有 Kedai 用户数据，会被拒绝以免覆盖。
     </p>
   </div>
 </template>

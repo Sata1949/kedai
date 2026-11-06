@@ -45,6 +45,19 @@ describe('dataLocation API', () => {
     expect((req[1] as RequestInit).body).toBe(JSON.stringify({ drive: 'D' }));
   });
 
+  it('PUT /data-location 支持 Android 绝对路径根(root 字段)', async () => {
+    mockBootstrapThen({
+      root: '/storage/emulated/0/Download/Kedai-Data',
+      migrated: true,
+      restart_required: true,
+    });
+    await selectDataLocation({ root: '/storage/emulated/0/Download/Kedai-Data' });
+    const req = vi.mocked(fetch).mock.calls[1];
+    expect((req[1] as RequestInit).body).toBe(
+      JSON.stringify({ root: '/storage/emulated/0/Download/Kedai-Data' }),
+    );
+  });
+
   it('POST /imports/archive 用 FormData 上传原始文件', async () => {
     mockBootstrapThen({ ok: true, name: '20260101-x.json' });
     const file = new File(['{}'], 'x.json', { type: 'application/json' });

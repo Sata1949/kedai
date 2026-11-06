@@ -190,7 +190,11 @@ watch([taskMode, currentTaskId], ensureFlowLib);
     linear-gradient(to bottom, color-mix(in srgb, var(--sv-ink) 3%, transparent) 1px, transparent 1px);
   background-size: 24px 24px;
 }
-.sv-taskboard { position: relative; z-index: 1; background: transparent; }
+/* 2026-11-06 修复任务详情被挤宽:作为 .sv-task-stage 的 flex 项,默认 min-width:auto
+   会取内容的 min-content;计划步骤里出现超长不可断 token(长 URL/路径/base64)时,
+   整个详情区被撑到内容宽,再被 .sv-task-stage 的 overflow:hidden 裁掉右侧——
+   实机表现是「任务模式内容显示不全」。显式 0 让详情区始终不超过视口宽。 */
+.sv-taskboard { position: relative; z-index: 1; background: transparent; min-width: 0; }
 /* 详情区顶部不再留内边距(UIFIX-8):sticky 表头贴顶常驻,留白会让滚动内容从缝里
    透出来(表头背景只在自身盒内)。首行留白已由表头自身的 padding-top 承担。 */
 .sv-task-detail { padding-top: 0; }

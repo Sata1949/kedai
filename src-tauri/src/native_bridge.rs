@@ -19,6 +19,8 @@ pub const KEEPALIVE_START_EVENT: &str = "kedai://keepalive-start";
 pub const KEEPALIVE_STOP_EVENT: &str = "kedai://keepalive-stop";
 /// 请求 Shizuku 权限(阶段 E;仅 Android 有效)。首次触发系统授权弹窗。
 pub const SHIZUKU_REQUEST_EVENT: &str = "kedai://shizuku-request";
+/// 请求「所有文件访问」权限(仅 Android 有效):默认数据根在公共 Download 目录。
+pub const ALL_FILES_ACCESS_EVENT: &str = "kedai://all-files-access";
 
 #[derive(Debug, Deserialize)]
 pub struct OpenExternalPayload {
@@ -120,4 +122,15 @@ pub fn request_shizuku_permission() -> Result<(), String> {
 #[cfg(target_os = "android")]
 pub fn request_shizuku_permission() -> Result<(), String> {
     kedai_server::services::exec::android::request_shizuku_permission()
+}
+
+/// 请求「所有文件访问」权限(仅 Android 有意义;桌面端明确报错,便于前端提示)。
+#[cfg(not(target_os = "android"))]
+pub fn request_all_files_access() -> Result<(), String> {
+    Err("「所有文件访问」授权仅在 Android 上可用".into())
+}
+
+#[cfg(target_os = "android")]
+pub fn request_all_files_access() -> Result<(), String> {
+    kedai_server::services::native_bridge_android::request_all_files_access()
 }

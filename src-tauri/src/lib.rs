@@ -363,6 +363,12 @@ pub fn run() {
                         tracing::warn!(error = e, "请求 Shizuku 授权失败");
                     }
                 });
+                // 数据位置(Android):默认根在公共 Download 目录,需要「所有文件访问」权限。
+                app.listen(native_bridge::ALL_FILES_ACCESS_EVENT, |_| {
+                    if let Err(e) = native_bridge::request_all_files_access() {
+                        tracing::warn!(error = e, "请求所有文件访问权限失败");
+                    }
+                });
             }
 
             // 数据目录:Android 上 app_data_dir() 映射到应用私有目录(/data/data/<pkg>/files),
@@ -375,13 +381,41 @@ pub fn run() {
             let log_dir = app_data.join("logs");
 
             std::fs::create_dir_all(&log_dir)?;
+            // Android 没有 %APPDATA%:指针路径默认解析为 None,选择结果无法持久化。
+            // 壳把指针放到应用私有目录(服务端 `data_location::pointer_path` 优先读该环境变量)。
+            #[cfg(target_os = "android")]
+            std::env::set_var(
+                "KEDAI_DATA_LOCATION_POINTER",
+                app_data.join("data-location.json"),
+            );
+
             // 数据位置(2026-11 盘符选择):指针存在且 `<root>/data` 可用时以用户选择的根为准;
             // 缺失/不可用则沿用旧逻辑(`%APPDATA%/data`),由前端教程第二步/强制弹窗接管。
             // 旧版「项目 data → APPDATA」迁移只在未选择根时执行:选择根后数据已由服务端迁移。
             let chosen_root = kedai_server::data_location::read_pointer()
                 .filter(|pointer| kedai_server::data_location::pointer_usable(&pointer.root))
                 .map(|pointer| pointer.root);
-            if let Some(root) = chosen_root {
+            let mut selected_root = chosen_root;
+            // Android 默认数据根(2026-11-06):无指针时应落到公共 Download/Kedai-Data。
+            // 应用私有目录为空(全新安装/清过数据)且默认根可写 → 直接采用,不弹引导;
+            // 已有私有数据 → 交给前端强制弹窗确认迁移(不会静默丢弃旧目录)。
+            #[cfg(target_os = "android")]
+            if selected_root.is_none() {
+                if let Some(default_root) = kedai_server::data_location::suggested_root() {
+                    let writable = kedai_server::data_location::probe_writable(&default_root);
+                    let private_has_data = kedai_server::config::dir_has_user_data(&data_dir);
+                    if writable && !private_has_data {
+                        if let Err(error) =
+                            kedai_server::data_location::ensure_root_layout(&default_root)
+                        {
+                            eprintln!("[警告] 创建 Android 默认数据根失败: {error}");
+                        } else {
+                            selected_root = Some(default_root);
+                        }
+                    }
+                }
+            }
+            if let Some(root) = selected_root {
                 std::env::set_var("KEDAI_DATA_ROOT", &root);
                 eprintln!("[信息] KEDAI_DATA_ROOT={}", root.display());
             } else {
@@ -393,6 +427,10 @@ pub fn run() {
                     }
                 }
                 std::env::set_var("DATA_DIR", &data_dir);
+                // Android:私有目录只是回退,数据位置仍待用户确认(默认 Download/Kedai-Data)。
+                // 显式 DATA_DIR 在桌面/bench 表示「不要弹引导」,故用独立标记表达这一差异。
+                #[cfg(target_os = "android")]
+                std::env::set_var("KEDAI_DATA_LOCATION_PENDING", "1");
                 eprintln!("[信息] DATA_DIR={}", data_dir.display());
             }
             std::env::set_var("LOG_DIR", &log_dir);

@@ -112,6 +112,7 @@
 | [plans/ATTFIX-BUGFIX-PLAN-2026-11-04.md](plans/ATTFIX-BUGFIX-PLAN-2026-11-04.md) | 附件链缺陷修复执行稿(两轮独立排查合并出的 13 条真缺陷 + 1 条口径冲突;四提交切分,**已全部落地**;含逐条落点、判据、修法与验证方式,以及「本次改动复用了哪些旧原语」的排查反思) |
 | [plans/DOC-SPLIT-PLAN.md](plans/DOC-SPLIT-PLAN.md) | 大文档拆分计划(X-0~X-6 已落地;X-7 台账收口待做;含门禁 D8、锚点风险与逐卷实测边界) |
 | [plans/DOC-SPLIT-HANDOFF-2026-11-04.md](plans/DOC-SPLIT-HANDOFF-2026-11-04.md) | 文档拆分交接(X-0~X-6 已合并;§九 为 X-4~X-6 追注与 X-7 入口,含 30 条计划锚点、ALGO 合流回放与 8 条坑) |
+| [plans/ANDROID-RP-UI-AUDIT-2026-11-06.md](plans/ANDROID-RP-UI-AUDIT-2026-11-06.md) | 安卓角色扮演移动端观感审计(0.4.5 实机 + 411×914 DOM 实测;触屏操作行挤压/页头与输入区密度/空态三栏表格;含重排数值、改动落点与开放项) |
 
 > **同名撞车提醒**:[archive/TASK-MODE-FIX-PLAN.md](archive/TASK-MODE-FIX-PLAN.md) 是更早的
 > 「Kimi 续做」交接稿(归档,只读);其同名的工作区执行稿已于 2026-09-27 并入 `计划.md` 并删除。

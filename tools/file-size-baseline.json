@@ -5,7 +5,7 @@
   "files": {
     "server-rs/src/agents/engine/messages/trim.rs": 1111,
     "server-rs/src/api/chat.rs": 1138,
-    "server-rs/src/api/tasks.rs": 1159,
+    "server-rs/src/api/tasks.rs": 1023,
     "server-rs/src/connectors/mock.rs": 1275,
     "server-rs/src/connectors/openai_compatible/mod.rs": 1222,
     "server-rs/src/mcp/mod.rs": 1113,
@@ -19,7 +19,7 @@
     "server-rs/src/services/task_engine/runtime_check.rs": 1051,
     "server-rs/src/services/task_engine/wiring.rs": 1708,
     "server-rs/src/services/task_service/db.rs": 1268,
-    "server-rs/src/services/task_service/executor.rs": 1472,
+    "server-rs/src/services/task_service/executor.rs": 1464,
     "server-rs/src/services/undo_service.rs": 1082,
     "server-rs/src/services/world_book_service.rs": 1288,
     "server-rs/src/tools/agent_tools.rs": 1347,
@@ -28,7 +28,8 @@
     "server-rs/src/tools/permissions.rs": 1069,
     "server-rs/src/tools/registry.rs": 1019,
     "server-rs/src/tools/screenshot.rs": 1153,
+    "web/src/components/ChatWindow.vue": 1060,
     "web/src/stores/task.ts": 1157
   },
-  "updated": "2026-11-02"
+  "updated": "2026-11-06"
 }

@@ -453,6 +453,12 @@ onUnmounted(() => {
 <style scoped>
 .sv-transcript { display: block; }
 
+/* 2026-11-06 长 token 折行:计划步骤的 name/goal/result 常含长 URL、Windows 路径或
+   base64 片段;窄屏不折行会把整张步骤卡撑宽,右侧内容被 .sv-task-stage 裁掉。 */
+.sv-transcript .sv-task-step-name,
+.sv-transcript .sv-task-step-goal,
+.sv-transcript .sv-task-step-result { overflow-wrap: anywhere; }
+
 .sv-transcript-note {
   margin-bottom: var(--space-3);
   padding: var(--space-2) var(--space-3);

@@ -1,5 +1,6 @@
 package com.kedai.app
 
+import android.content.ActivityNotFoundException
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
@@ -7,6 +8,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import android.provider.Settings
 import androidx.annotation.Keep
 import androidx.core.content.FileProvider
 import java.io.File
@@ -15,7 +17,7 @@ import java.io.File
  * Kedai 原生能力桥接(供 Rust 侧经 JNI 调用)。
  *
  * 与 [KeystoreBridge] 同一模式:Rust 只做字符串进出,Kotlin 侧封装 Android API。
- * 四项能力:
+ * 能力:
  *   - openExternal(url):用系统浏览器打开外链。WebView 里 `target=_blank` 在
  *     Android 上没有新窗口处理,会被当作当前页导航,把 SPA 界面顶掉且返回键无处可退;
  *     改为交给系统浏览器,行为与桌面一致。
@@ -24,6 +26,8 @@ import java.io.File
  *     「写缓存 + 分享」是移动端导出 JSON 的标准做法。
  *   - startKeepAlive() / stopKeepAlive():启停前台服务,避免长任务在切后台/锁屏后
  *     被系统冻结或回收。
+ *   - requestAllFilesAccess():打开「所有文件访问」授权页(默认数据根在公共
+ *     Download/Kedai-Data;Android 11+ 按路径读写公共目录需要该特殊权限)。
  *
  * 入参约定(与 server-rs/src/services/native_bridge_android.rs 对齐):
  *   - openExternal:入参即 URL;
@@ -104,6 +108,33 @@ object KedaiNative {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         context.startActivity(chooser)
+        return ""
+    }
+
+    /**
+     * 打开系统的「所有文件访问」授权页(Android 11+ 公共目录读写)。
+     *
+     * 数据根默认在 `/storage/emulated/0/Download/Kedai-Data`;Android 11 起按路径
+     * 直接访问公共目录必须持有 MANAGE_EXTERNAL_STORAGE。未授权时设置页/首次引导
+     * 展示授权入口,授权后返回应用重新检测(本方法只负责拉起系统页面,不做结果判定)。
+     */
+    @JvmStatic
+    @Keep
+    fun requestAllFilesAccess(): String {
+        val context = requireContext()
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return ""
+        val appIntent = Intent(
+            Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+            Uri.parse("package:" + context.packageName),
+        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        try {
+            context.startActivity(appIntent)
+        } catch (_: ActivityNotFoundException) {
+            // 部分厂商 ROM 没有应用级页面,回退到全局「所有文件访问」列表
+            val globalIntent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(globalIntent)
+        }
         return ""
     }
 
