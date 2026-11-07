@@ -13,10 +13,10 @@
 #       -LooseAudit 把 cargo audit 降回警告档(仅在 advisory DB 不可用等特殊场景临时使用)
 #       -Perf 追加性能门禁(需 Kedai 服务已在运行;见文件末尾「性能门禁」段)
 #       **-StaticOnly(2026-11-01 CI 提效批)**:只跑「与编译产物无关」的全部检查——
-#       文档三段 + 11 段纯 Node 静态检查(契约/架构/计数/两个 ratchet/css/标点)+
+#       文档三段 + 12 段纯 Node 静态检查(契约/架构/计数/两个 ratchet/css/标点/日志摘要)+
 #       审计两段;跳过 fmt/clippy/cargo test 与前端 eslint/typecheck/vitest/vite build。
 #       给 CI 的 main 轻量档用(.github/workflows/ci.yml 的 check-main)。
-#       **与 -SkipWeb 的区别**:-SkipWeb 会连带跳过那 11 段静态检查(它们历史上与前端
+#       **与 -SkipWeb 的区别**:-SkipWeb 会连带跳过那 12 段静态检查(它们历史上与前端
 #       归在同一块),对「PR 已验过编译、main 只想复核静态口径」的场景来说太弱。
 #       -StaticOnly 不改变 -SkipWeb/-SkipRust 的任何既有语义,只在它们之上多一个挡位。
 #
@@ -156,6 +156,9 @@ if ($StaticOnly -or (-not $SkipWeb -and -not $AuditOnly)) {
         # 用 fixture 覆盖。门禁脚本自身也要有回归网——2026-10-24 审计实测曾出现
         # 只认 `store.x =` 与静态 from 的假阴性。
         Invoke-Stage 'arch: check-arch self-test' { node --test tools/check-arch.test.mjs }
+        # 日志摘要自测(2026-11-07):保护失败识别、重叠窗口合并、退出码和 BOM 解码。
+        # 文本/JSON/头尾回退统一限字节，预算截断必须保留数量与回读位置。
+        Invoke-Stage 'tools: logdigest self-test' { node --test tools/logdigest.test.mjs }
         # 架构护栏:前端 store 循环依赖(A) + 组件直改 state(B) + 后端分层规则 C/D/E/G
         # + EJS 能力面冻结(H) + 代际归属 I + 跨代依赖方向 J(2026-09-14 新增)。
         # 全部规则均为硬门禁:违规即 exit 1;C/D/E 已于 2026-09-13 清零,
