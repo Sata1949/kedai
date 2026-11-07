@@ -8,9 +8,12 @@ import { storeToRefs } from 'pinia';
 import * as api from '../api';
 import type { AgentMode } from '../api';
 import { filterCommands, wordBeforeCursor } from './slashSuggest';
+import { useComposerDraftsStore } from '../stores/composerDrafts';
 
 const store = useAppStore();
-const { generating, stopping, currentCharacterId, agentMode, authorizationMode, model, models } = storeToRefs(store);
+const { generating, stopping, currentCharacterId, currentSessionId, agentMode, authorizationMode, model, models } = storeToRefs(store);
+const drafts = useComposerDraftsStore();
+const draft = computed(() => drafts.chatDraft(currentCharacterId.value, currentSessionId.value));
 
 /** 授权三档:严格(读/写/删都需授权)/ 宽松(读/写放行,删需授权)/ 放行(仅系统路径写删需授权) */
 const AUTH_MODES = [
@@ -18,7 +21,8 @@ const AUTH_MODES = [
   { key: 'loose' as const, label: '宽松', title: '宽松:读/写文件自动放行,删文件需授权' },
   { key: 'bypass' as const, label: '放行', title: '放行:仅写/删系统路径(如 C 盘)需授权,其余自动放行' },
 ];
-const text = ref('');
+const text = computed({ get: () => draft.value.text, set: (value: string) => drafts.setChatText(draft.value, value) });
+const sending = computed(() => draft.value.sending);
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
 
 /** 窄屏占位语(移动端观感复排 2026-11-06):桌面那句含 Enter/Shift+Enter 键盘语义,
@@ -61,25 +65,26 @@ const MODES: Array<{ key: AgentMode; label: string; title: string }> = [
 ];
 
 /** 附件 */
-const attachments = ref<File[]>([]);
+const attachments = computed(() => draft.value.attachments);
 const fileInput = ref<HTMLInputElement | null>(null);
 
 function onFilePicked(e: Event): void {
   const input = e.target as HTMLInputElement;
-  const files = input.files;
+  const files = Array.from(input.files ?? []);
   input.value = '';
-  if (!files?.length) return;
+  if (!files.length) return;
   for (const f of files) {
     if (f.size > 10 * 1024 * 1024) {
       alert(`文件「${f.name}」超过 10MB 限制`);
       continue;
     }
-    attachments.value.push(f);
+    drafts.setChatAttachments(draft.value, [...attachments.value, f]);
   }
 }
 
 function removeAttachment(index: number): void {
-  const [removed] = attachments.value.splice(index, 1);
+  const removed = attachments.value[index];
+  drafts.setChatAttachments(draft.value, attachments.value.filter((_, i) => i !== index));
   if (removed) releasePreviews([removed]);
 }
 
@@ -111,6 +116,9 @@ function releasePreviews(files: readonly File[]): void {
   }
 }
 
+// 迟到回执可能由已卸载的输入组件处理；当前组件也回收被移除附件的本地预览。
+watch(attachments, (files, previous) => releasePreviews(previous.filter((file) => !files.includes(file))));
+
 /** 读取非图片文件为文本(既有「[文件: 名称]+正文」内联形态不变) */
 function readFileText(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -132,48 +140,43 @@ function readImageDataUrl(file: File): Promise<string> {
 }
 
 async function send(): Promise<void> {
-  const value = text.value.trim();
-  if ((!value && attachments.value.length === 0) || generating.value) return;
-
-  // 视觉能力包 D2:图片正文只保留 `[图片: 名称]` 标记(可读性 + 旧渲染降级),
-  // 像素经 attachments(data URL)单独提交;非图片文件维持既有内联形态。
-  const images = attachments.value.filter(isImage);
-  const others = attachments.value.filter((f) => !isImage(f));
-  const parts: string[] = [];
-  for (const f of images) {
-    parts.push(`[图片: ${f.name}]`);
-  }
-  for (const f of others) {
-    const data = await readFileText(f);
-    parts.push(`[文件: ${f.name}]\n${data}`);
-  }
-  let content = value;
-  if (parts.length) {
-    content = content ? `${content}\n\n${parts.join('\n\n')}` : parts.join('\n\n');
-  }
-
-  const payload: api.ChatAttachment[] = [];
-  for (const f of images) {
-    try {
-      payload.push({
-        name: f.name,
-        mime: f.type || 'application/octet-stream',
-        data_url: await readImageDataUrl(f),
-      });
-    } catch {
-      alert(`读取图片「${f.name}」失败,已跳过该附件`);
+  const source = draft.value;
+  const originalText = source.text;
+  const value = originalText.trim();
+  const files = [...source.attachments];
+  const characterId = currentCharacterId.value;
+  const sessionId = currentSessionId.value;
+  if ((!value && !files.length) || generating.value || source.sending || !characterId) return;
+  drafts.setSending(source, true);
+  try {
+    const parts: string[] = [];
+    const payload: api.ChatAttachment[] = [];
+    const sentFiles: File[] = [];
+    for (const f of files.filter(isImage)) {
+      try {
+        payload.push({ name: f.name, mime: f.type || 'application/octet-stream', data_url: await readImageDataUrl(f) });
+        parts.push(`[图片: ${f.name}]`);
+        sentFiles.push(f);
+      } catch {
+        alert(`读取图片「${f.name}」失败，附件已保留，可重试`);
+      }
     }
+    for (const f of files.filter((file) => !isImage(file))) {
+      parts.push(`[文件: ${f.name}]\n${await readFileText(f)}`);
+      sentFiles.push(f);
+    }
+    const content = [value, ...parts].filter(Boolean).join('\n\n');
+    // 文件读取期间切换会话时不向新会话误发；原会话草稿仍保留。
+    if (!content || characterId !== currentCharacterId.value || sessionId !== currentSessionId.value) return;
+    const outcome = await store.sendMessage(content, payload);
+    if (!outcome.accepted) return;
+    drafts.acceptChatSend(source, originalText, sentFiles);
+    releasePreviews(sentFiles);
+  } catch (err) {
+    alert(`发送失败，草稿已保留：${err instanceof Error ? err.message : '读取附件或提交消息失败'}`);
+  } finally {
+    drafts.setSending(source, false);
   }
-
-  const released = [...attachments.value];
-  // SENDFIX-2:先不清空——等 HTTP 层受理结果;未受理(400/409/网络不可达)时原文与附件
-  // 留在输入框、由对话区错误条说明原因,避免「消息与输入文本一起消失」。
-  const outcome = await store.sendMessage(content, payload);
-  if (!outcome.accepted) return;
-  // 受理成功才清空;若等待期间用户已输入新内容则不动(极短窗口,防御性判定)
-  if (text.value === value) text.value = '';
-  attachments.value = [];
-  releasePreviews(released);
 }
 
 function onKeydown(e: KeyboardEvent): void {
@@ -271,6 +274,7 @@ function applySlash(name: string): void {
 }
 
 onMounted(() => {
+  void nextTick(autoGrow);
   // 联想数据与快速回复列表:加载失败静默(输入功能不受影响)
   void api.listSlashCommands().then((cmds) => (slashCommands.value = cmds)).catch(() => {});
   void api.listQuickReplies().then((rs) => (quickReplies.value = rs)).catch(() => {});
@@ -284,7 +288,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   // 卸载时回收未发送附件的预览 URL(视觉能力包 D2 的 blob 泄漏收口)
-  releasePreviews([...attachments.value]);
+  releasePreviews([...previewUrls.keys()]);
   narrowMq?.removeEventListener('change', syncNarrow);
   narrowMq = null;
 });
@@ -365,8 +369,9 @@ async function onModelChange(e: Event): Promise<void> {
       <button
         v-else
         class="sv-btn-send"
-        :disabled="(!text.trim() && !attachments.length) || !currentCharacterId"
-        title="发送"
+        :disabled="sending || (!text.trim() && !attachments.length) || !currentCharacterId"
+        :title="sending ? '正在发送…' : '发送'"
+        :aria-label="sending ? '正在发送' : '发送'"
         @click="send()"
       >
         <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">

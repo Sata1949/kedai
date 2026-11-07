@@ -110,8 +110,9 @@ describe('UIVIS-3 排版治理', () => {
     expect(src).not.toContain("?? '...'");
     // 有值时仍渲染真值,而不是两处同时出现
     expect(src).toMatch(/<code v-if="connInfo" class="sv-code">/);
-    expect(src).toMatch(/<SkeletonBlock v-else :lines="1" width="140px" \/>/);
-    expect(src).toMatch(/<SkeletonBlock v-else-if="connInfo" :lines="1" width="96px" \/>/);
+    // 空值不是加载态：失败/空列表必须结束占位，骨架只跟随显式加载标志。
+    expect(src).toMatch(/<SkeletonBlock v-else-if="loadingConnection" :lines="1" width="140px" \/>/);
+    expect(src).toMatch(/<SkeletonBlock v-if="modelsLoading && connInfo" :lines="1" width="96px" \/>/);
   });
 
   it('UI-C2:主区懒加载挂 loadingComponent,不再有空白窗', () => {

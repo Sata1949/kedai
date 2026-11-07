@@ -445,7 +445,8 @@ watch(
         @click="toggleDrawer('sidebar')"
       >
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
-        <span>角色库</span>
+        <span v-if="store.appMode === 'roleplay'">角色库</span>
+        <span v-else>任务</span>
       </button>
       <button
         class="sv-mobile-nav-item sv-mode-nav"
