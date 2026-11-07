@@ -70,18 +70,19 @@ export const STEP_COPY: Record<TutorialStepId, StepCopy> = {
     nav: { kind: 'section', section: 'api' },
     // navLabel 一律写**落点自己的真实标题**(不是步骤主题):浮条与步骤条显示它,
     // 机检拿它比对 SettingsHub 的实际标题。这一步讲的是「综合设置」这个总入口,
-    // 而落点是Hub 的默认分区「连接与模型 · API 连接」,所以这里写后者。
-    navLabel: '连接与模型 · API 连接',
+    // 而落点是 Hub 的默认分区「连接与模型 · API 与模型」,所以这里写后者。
+    navLabel: '连接与模型 · API 与模型',
     tourNote: '请现在点开它 —— 下面几步带您走一遍最常打交道的几项，可随时点「继续教程」回到这里。',
   },
   's-api': {
-    title: '连接与模型 · API 连接',
+    title: '连接与模型 · API 与模型',
     lines: [
       'BASE URL / API KEY / MODEL 三项在这里填；相关内容获取请前往各大模型厂商的云文档与 API／套餐界面。',
+      '同一个分区往下就是生成参数：温度 / Top-P / 输出上限，以及任务模式的任务参数档位——「用哪个模型」和「怎么生成」在同一页，不用来回切换。',
       '默认连接就在本区编辑；需要多套连接(不同厂商、不同密钥)可在「连接配置」里保存并切换。',
     ],
     nav: { kind: 'section', section: 'api' },
-    navLabel: '连接与模型 · API 连接',
+    navLabel: '连接与模型 · API 与模型',
   },
   's-import': {
     title: '对话与提示词 · 综合导入 / 导出',

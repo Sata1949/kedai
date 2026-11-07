@@ -136,6 +136,21 @@ export const TASK_PARAM_TIER_LABELS: Record<TaskParamTier, string> = {
 const TIER_EPSILON = 1e-9;
 
 /**
+ * 档位下拉的**默认待应用值**(2026-11-07 修复「档位看似锁死在任务优先档」)。
+ *
+ * 修前组件把 `pendingTier` 硬编码为 `'task'` 且从不与当前识别结果同步:用户的当前
+ * 参数是保守档或极限档时,下拉仍显示「任务优先档（默认）」;更糟的是此时点「应用档位」
+ * 会把他现有的档位悄悄改回任务优先档——用户视角就是「档位被锁死了」。
+ *
+ * `custom` 不属于任何一档,而下拉必须落在某个具体档上(否则 select 无选中项),
+ * 故回落到默认档;「当前识别」徽标仍如实显示「自定义（手动改过任一项）」,
+ * 不替用户猜他想要哪一档。
+ */
+export function initialPendingTier(current: TaskParamTierOrCustom): TaskParamTier {
+  return current === 'custom' ? 'task' : current;
+}
+
+/**
  * 识别当前值属于哪一档;任一项不匹配即 `custom`(不猜、不四舍五入)。
  * 团队预算先走 `normalizeTaskTeamBudgetSecs`:>1200 的服务端语义是「不限」(0),
  * 不归一的话保存后的 0 会被误识别成自定义。

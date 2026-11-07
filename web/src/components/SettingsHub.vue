@@ -72,9 +72,13 @@ const domains: Domain[] = [
   {
     key: 'conn', label: '连接与模型', dot: 'red',
     items: [
-      { type: 'section', key: 'api', label: 'API 连接' },
+      // 「模型与生成」并入本区(2026-11-07 设置分区合并):BASE URL / KEY / MODEL 与
+      // 温度 / 输出上限 / 任务参数档位讲的是同一件事——「用哪个模型、怎么生成」。
+      // 分成两个二级项时用户要在两处来回跳:改完模型再去找生成参数,而生成参数页
+      // 顶部又只有生成参数没有模型。合并后旧分区键 `model` 仍被接受(路由到 `api`),
+      // 教程历史落点与深链接不失效。
+      { type: 'section', key: 'api', label: 'API 与模型' },
       { type: 'section', key: 'connections', label: '连接配置' },
-      { type: 'section', key: 'model', label: '模型与生成' },
       { type: 'section', key: 'mcp', label: 'MCP 服务' },
     ],
   },
@@ -162,6 +166,21 @@ const visibleDomains = computed<Domain[]>(() =>
 const activeDomain = ref<string>('conn');
 const activeSection = ref<SectionKey>('api');
 
+/**
+ * 已并入其他分区的**旧分区键** → 现分区键(2026-11-07 设置分区合并)。
+ *
+ * `model`(模型与生成)并入 `api`(现名「API 与模型」):生成参数与模型选择是同一件事,
+ * 分成两个二级项只是让用户在两处来回跳。迁移只做**入口重定向**,不删数据、不动设置字段:
+ * 教程历史落点、`uiPrefs.settingsNav` 里残留的目标、以及任何按旧键写死的深链接,
+ * 都必须仍能落到内容上,而不是「设置打开了但空白」。
+ */
+const RETIRED_SECTION_ALIAS: Partial<Record<string, SectionKey>> = { model: 'api' };
+
+/** 把(可能已退役的)分区键解析成现分区键;未知键原样返回,交由可达性判定处理 */
+function resolveSectionKey(key: string): string {
+  return RETIRED_SECTION_ALIAS[key] ?? key;
+}
+
 /** 当前功能域的二级项(左栏下半部分渲染) */
 const currentItems = computed<HubItem[]>(
   () => visibleDomains.value.find((d) => d.key === activeDomain.value)?.items ?? [],
@@ -234,11 +253,11 @@ watch(
       return;
     }
     const domain = visibleDomains.value.find((d) =>
-      d.items.some((it) => it.type === 'section' && it.key === request.section),
+      d.items.some((it) => it.type === 'section' && it.key === resolveSectionKey(request.section)),
     );
     if (!domain) return;
     activeDomain.value = domain.key;
-    activeSection.value = request.section;
+    activeSection.value = resolveSectionKey(request.section) as SectionKey;
   },
   { immediate: true },
 );

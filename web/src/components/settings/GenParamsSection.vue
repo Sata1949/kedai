@@ -5,15 +5,17 @@
 // 压缩模式/记忆蒸馏/子代理等字段,属模板漂移,合并后两模式一致)。
 // 数值字段的默认值由 stores/genSettings.ts 的 loadSettings 集中 `?? 默认` 兜底,
 // 本组件不再逐个兜(onMounted 里曾只兜 3 个字段,既冗余又误导)。
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { useAppStore } from '../../store';
 import { storeToRefs } from 'pinia';
 import { useGenerationParams } from '../../composables/useDataManager';
 import {
+  initialPendingTier,
   TASK_PARAM_TIER_LABELS,
   TASK_TEAM_BUDGET_MAX_SECS,
   TASK_TEAM_BUDGET_MIN_SECS,
   type TaskParamTier,
+  type TaskParamTierOrCustom,
 } from '../../stores/genSettings';
 
 withDefaults(defineProps<{
@@ -43,8 +45,30 @@ const {
   taskRecSaving, taskRecMsg, currentTaskTier, applyTaskTier,
 } = useGenerationParams();
 
-/** 任务参数档位下拉的本地待应用值(不写 store:避免直写基线增长) */
-const pendingTier = ref<TaskParamTier>('task');
+/**
+ * 任务参数档位下拉的**待应用值**(不写 store:避免直写基线增长)。
+ *
+ * 初值必须跟随当前识别结果,不能恒为 `'task'`——否则当前是保守/极限档时下拉仍显示
+ * 「任务优先档（默认）」,点「应用档位」还会把用户的档位悄悄改回任务优先档
+ * (2026-11-07 修复「档位看似锁死在任务优先档」)。
+ */
+const pendingTier = ref<TaskParamTier>(initialPendingTier(currentTaskTier.value));
+
+/**
+ * 用户在**别处**改了参数(手动微调、「保存为默认参数」、切模式重载)后,让下拉重新
+ * 对齐识别结果——但**不覆盖用户刚在下拉里做出的、尚未点击应用的临时选择**。
+ *
+ * 判据:`pendingTier` 仍等于「上次同步时的识别档」才认为用户没动过下拉,此时可以跟随;
+ * 一旦用户主动选了别的档(`dirty`),就保留他的选择直到应用或重新对齐。
+ */
+let lastSyncedTier: TaskParamTierOrCustom = currentTaskTier.value;
+watch(currentTaskTier, (next) => {
+  if (next === 'custom') return; // 自定义档不往三档之一硬塞(见 initialPendingTier)
+  if (pendingTier.value === initialPendingTier(lastSyncedTier)) {
+    pendingTier.value = next;
+  }
+  lastSyncedTier = next;
+});
 
 /** 当前识别结果的中文标签;custom 明确说明原因 */
 const currentTierLabel = computed(() => {

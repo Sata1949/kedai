@@ -7,6 +7,7 @@ import { createPinia, setActivePinia } from 'pinia';
 import {
   buildTaskParamTierPatch,
   identifyTaskParamTier,
+  initialPendingTier,
   TASK_PARAM_DEFAULTS,
   TASK_PARAM_TIERS,
   useGenSettingsStore,
@@ -545,6 +546,23 @@ describe('genSettings 任务参数档位(TPROF-2)', () => {
     expect(patch.task_step_budget_secs).toBe(3600);
     expect(patch.task_total_budget_secs).toBe(0);
     expect(patch.task_idle_timeout_secs).toBe(2400);
+  });
+
+  /**
+   * 下拉的**待应用值**必须跟随当前识别结果,而不是恒为任务优先档。
+   *
+   * 缺陷形态(2026-11-07 修前):`pendingTier` 硬编码 `'task'` 且没有任何同步,
+   * 用户即使当前是保守/极限档,下拉也停在「任务优先档（默认）」——看起来像「档位被
+   * 锁死在任务优先档」,点「应用档位」还会把它悄悄降/升回任务优先档。
+   * 自定义档不能硬塞进三档之一(那等于替用户猜),此时回落到默认档但保留提示。
+   */
+  it('待应用档位默认跟随当前识别档,不再恒为任务优先档', () => {
+    expect(initialPendingTier('extreme')).toBe('extreme');
+    expect(initialPendingTier('steady')).toBe('steady');
+    expect(initialPendingTier('task')).toBe('task');
+    // 自定义值不属于任何一档:下拉只能落在某个档上(否则 select 无选中项),
+    // 此时回落到默认档,但「当前识别」文案会如实显示「自定义」。
+    expect(initialPendingTier('custom')).toBe('task');
   });
 });
 
