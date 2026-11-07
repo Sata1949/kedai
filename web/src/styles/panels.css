@@ -389,8 +389,8 @@ input[type="range"].sv-range::-moz-range-thumb {
   box-shadow: var(--shadow-hard);
 }
 .sv-btn.primary:hover:not(:disabled) {
-  background: var(--sv-pink-deep);
-  border-color: var(--sv-pink-deep);
+  background: var(--sv-pink-dark);
+  border-color: var(--sv-pink-dark);
   box-shadow: 6px 6px 0 var(--sv-ink);
 }
 .sv-btn.ghost {

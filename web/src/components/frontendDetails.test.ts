@@ -202,6 +202,6 @@ describe('前端细节：综合设置键盘操作', () => {
 
   it('移动端侧栏入口文案随顶层模式切换', () => {
     expect(appSource).toContain('<span v-if="store.appMode === \'roleplay\'">角色库</span>');
-    expect(appSource).toContain('<span v-else>任务</span>');
+    expect(appSource).toContain('<span v-else>任务面板</span>');
   });
 });

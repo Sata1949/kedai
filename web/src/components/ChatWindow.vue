@@ -549,15 +549,13 @@ function bindRowRef(id: number, target: unknown): void {
           </div>
         </div>
 
-        <!-- 有消息时的对话 masthead:角色 / 模型 / 会话 / 条数 -->
+        <!-- 有消息时只展示会话与条数；角色留在顶栏，模型留在输入区。 -->
         <div v-else class="sv-chat-masthead">
           <div class="sv-chat-masthead-main">
-            <span class="sv-chat-masthead-kicker">角色扮演</span>
-            <h2 class="sv-chat-masthead-title">{{ currentCharacterName }}</h2>
+            <span class="sv-chat-masthead-kicker">当前会话</span>
+            <h2 class="sv-chat-masthead-title truncate" :title="currentSessionTitle">{{ currentSessionTitle }}</h2>
           </div>
           <div class="sv-chat-masthead-meta">
-            <span>{{ model || '未配置模型' }}</span>
-            <span>{{ currentSessionTitle }}</span>
             <span class="sv-tnum">{{ messages.length }} 条消息</span>
           </div>
         </div>
@@ -945,6 +943,7 @@ function bindRowRef(id: number, target: unknown): void {
   padding-bottom: var(--space-3);
   border-bottom: var(--bw) solid var(--sv-ink);
 }
+.sv-chat-masthead-main { min-width: 0; flex: 1; }
 .sv-chat-masthead-kicker {
   font-size: var(--text-2xs);
   letter-spacing: 0.18em;

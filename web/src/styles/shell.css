@@ -626,7 +626,7 @@
   cursor: pointer;
 }
 .sv-auth-toggle button.active {
-  background: var(--sv-pink-deep);
+  background: var(--sv-pink-dark);
   color: var(--sv-white);
 }
 .sv-auth-toggle button:not(.active):hover {

@@ -446,20 +446,18 @@ watch(
       >
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
         <span v-if="store.appMode === 'roleplay'">角色库</span>
-        <span v-else>任务</span>
+        <span v-else>任务面板</span>
       </button>
       <button
         class="sv-mobile-nav-item sv-mode-nav"
-        :class="{ active: true }"
-        :aria-pressed="true"
+        :aria-label="store.appMode === 'roleplay' ? '当前角色扮演，切换到任务模式' : '当前任务模式，切换到角色扮演'"
         :title="store.appMode === 'roleplay' ? '当前:角色扮演;点击切到任务' : '当前:任务;点击切到角色扮演'"
         @click="toggleAppMode"
       >
         <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path v-if="store.appMode === 'roleplay'" d="M4 5h16v11H8l-4 4z" />
-          <path v-else d="M4 6h16M4 12h10M4 18h13" />
+          <path d="M4 7h16l-4-4M20 17H4l4 4" />
         </svg>
-        <span>{{ store.appMode === 'roleplay' ? '角色扮演' : '任务' }}</span>
+        <span>切换模式</span>
       </button>
       <button
         class="sv-mobile-nav-item"
