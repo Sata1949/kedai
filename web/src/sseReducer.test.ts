@@ -89,6 +89,58 @@ describe('reduceSseEvent', () => {
     expect(current.agent.pendingTool).toEqual({ name: 'write', input: { path: 'b' } });
   });
 
+  /**
+   * 三档授权（2026-11-06）新增 `tool_authorization_resolved` 事件：允许/拒绝/超时/取消
+   * 四条收束路径各发一条。reducer 必须接这个变体——否则 `default` 子句的穷尽性断言
+   * （`const exhaustive: never = event`）会让 vue-tsc 直接编译失败（2026-11-07 CI
+   * `check-ubuntu` 实测 TS2322）。这里同时锁住状态迁移，避免只把类型补上却不改行为。
+   */
+  it('tool_authorization_resolved 按 call_id 收束工具状态并清掉待授权提示', () => {
+    const current = state();
+    reduceSseEvent(current, { type: 'tool_call', name: 'write', input: { path: 'a' }, call_id: 'call-a' });
+    reduceSseEvent(current, {
+      type: 'tool_authorization_required',
+      name: 'write', call_id: 'call-a', run_id: 'run-a',
+      risk: 'dangerous', reason: '需要写入文件',
+    });
+    expect(current.agent.toolCalls[0].status).toBe('authorization_required');
+
+    reduceSseEvent(current, {
+      type: 'tool_authorization_resolved',
+      name: 'write', call_id: 'call-a', run_id: 'run-a', decision: 'allow',
+    });
+
+    // 放行后回到 running:真正的终态(结果/错误/超时文案)由随后的 tool_result 写入,
+    // 这里不能直接判 done——工具还没真正执行。
+    expect(current.agent.toolCalls[0].status).toBe('running');
+    // 待授权提示必须清掉,否则输入区会一直显示「等待授权」
+    expect(current.agent.pendingTool).toBeNull();
+    // 收束事件进推理链,便于事后核对管理员的每一次点头
+    expect(current.agent.chain.some((c) => c.text.includes('授权') && c.text.includes('放行'))).toBe(true);
+  });
+
+  it('tool_authorization_resolved 的拒绝/超时/取消把工具标成 error 并带上原因', () => {
+    for (const [decision, needle] of [
+      ['deny', '拒绝'],
+      ['timeout', '超时'],
+      ['cancelled', '取消'],
+    ] as const) {
+      const current = state();
+      reduceSseEvent(current, { type: 'tool_call', name: 'write', input: {}, call_id: 'c1' });
+      reduceSseEvent(current, {
+        type: 'tool_authorization_required',
+        name: 'write', call_id: 'c1', run_id: 'r1', risk: 'dangerous', reason: '需要写入文件',
+      });
+      reduceSseEvent(current, {
+        type: 'tool_authorization_resolved',
+        name: 'write', call_id: 'c1', run_id: 'r1', decision, detail: '用户没空',
+      });
+      expect(current.agent.toolCalls[0].status, decision).toBe('error');
+      expect(current.agent.toolCalls[0].output, decision).toMatchObject({ error: expect.stringContaining(needle) });
+      expect(current.agent.pendingTool, decision).toBeNull();
+    }
+  });
+
   it('interrupted 结束生成并削除未落库的临时草稿气泡', () => {
     const current = state();
     current.messages.push({ id: -1, role: 'assistant', content: '部分内容', extra: {}, streaming: true });
