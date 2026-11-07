@@ -12,11 +12,10 @@ impl AgentEngine {
     pub(super) fn record_send_stats(
         &self,
         session_vars: &mut HashMap<String, String>,
-        llm_messages: &[LlmMessage],
         context_tokens: i64,
+        send_chars: usize,
         session_id: &str,
     ) {
-        let send_chars: usize = llm_messages.iter().map(|m| m.content.chars().count()).sum();
         session_vars.insert("LAST_SEND_TOKENS".to_string(), context_tokens.to_string());
         session_vars.insert("LAST_SEND_CHARS".to_string(), send_chars.to_string());
         self.sessions.save_session_vars(session_id, session_vars);

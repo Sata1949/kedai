@@ -153,6 +153,69 @@ pub fn triggered_entry_hits_scoped(
     entry_matches_texts(e, &texts[start..]) && entry_probability_pass(e, roll)
 }
 
+/// 世界书扫描池(ALGO-5,2026-11-04):每轮构建一次,供全部条目复用。
+///
+/// 旧实现每条目都做两件 O(历史) 的事:① `is_user` 全扫数 user 总数并反向找窗口起点;
+/// ② 大小写不敏感条目各自把整段历史 `to_lowercase()`。池化后两项都只做一次,
+/// 条目侧只剩匹配本身。窗口/概率语义与 [`triggered_entry_hits_scoped`] 逐字节一致
+/// (等价性由单测逐例对照)。
+///
+/// ALGO-6(2026-11-05):小写池改为**按需**构建。整本书全是常驻/大小写敏感/正则条目时,
+/// 旧实现仍会白扫一遍历史;现在由调用方经 [`Self::with_lowered`] 显式开启。
+/// 未开启时 `triggered_hits` 对确实需要小写的条目**本地现算**(见
+/// `entry_matches_texts_prepared` 的 `None` 分支),因此预判失误只影响性能、不影响正确性。
+pub struct WorldScanPool<'a> {
+    texts: &'a [String],
+    /// 与 `texts` 逐条对齐的小写池;`None` = 本轮没有条目需要(或调用方未预判到)
+    lowered: Option<Vec<String>>,
+    /// user 消息在池中的下标(升序);`user_total = user_indices.len()`
+    user_indices: Vec<usize>,
+}
+
+impl<'a> WorldScanPool<'a> {
+    pub fn new(texts: &'a [String], is_user: &[bool]) -> Self {
+        debug_assert_eq!(texts.len(), is_user.len(), "扫描文本与角色标记必须逐条对齐");
+        let user_indices = is_user
+            .iter()
+            .enumerate()
+            .filter_map(|(i, is_user)| (*is_user).then_some(i))
+            .collect();
+        Self {
+            texts,
+            lowered: None,
+            user_indices,
+        }
+    }
+
+    /// 构建与 `texts` 逐条对齐的小写池(本轮至少一条激活条目需要大小写不敏感匹配时调用)。
+    #[must_use]
+    pub fn with_lowered(mut self) -> Self {
+        self.lowered = Some(self.texts.iter().map(|m| m.to_lowercase()).collect());
+        self
+    }
+
+    /// 与 [`triggered_entry_hits_scoped`] 同语义的单条目判定。
+    pub fn triggered_hits(&self, e: &WorldEntry, window_fallback: i64, roll: i64) -> bool {
+        use crate::parsing::world_book::{
+            entry_matches_texts_prepared, entry_probability_pass, scan_window_len,
+        };
+        let user_total = self.user_indices.len();
+        if user_total == 0 {
+            return false;
+        }
+        let window_users = scan_window_len(e, user_total, window_fallback);
+        // 窗口撑满全部 user 消息 → 自会话起点计;否则 O(1) 取倒数第 window_users 条 user 下标。
+        let start = if window_users >= user_total {
+            0
+        } else {
+            self.user_indices[user_total - window_users]
+        };
+        let lowered = self.lowered.as_deref().map(|pool| &pool[start..]);
+        entry_matches_texts_prepared(e, &self.texts[start..], lowered)
+            && entry_probability_pass(e, roll)
+    }
+}
+
 /// 激发条目的概率 roll(单点):返回 `0..100` 的整数。
 ///
 /// 收敛前 ② 用引擎的 `simple_roll()`、③ 用 `SystemTime::subsec_nanos() % 100`——
@@ -373,11 +436,13 @@ pub fn select_segments_within_budget(
              请调大该步的「上下文上限」或留空(留空 = 不裁剪)"
         ));
     }
+    // 预算判定只需维护「尚未省略段的 kept 合计」与「已省略段的 omitted 合计」:
+    // 每推进一段就转移一次成本。旧实现每轮对两段各自全量求和,推进 n 次即 O(n²)。
+    let mut kept_total: i64 = segments.iter().map(|s| s.kept).sum();
+    let mut omitted_total: i64 = 0;
     let mut keep_from = 0usize;
     loop {
-        let total = head_tokens
-            + segments[keep_from..].iter().map(|s| s.kept).sum::<i64>()
-            + segments[..keep_from].iter().map(|s| s.omitted).sum::<i64>();
+        let total = head_tokens + kept_total + omitted_total;
         if total <= budget {
             return Ok(keep_from);
         }
@@ -387,6 +452,8 @@ pub fn select_segments_within_budget(
                 keep_from
             ));
         }
+        kept_total -= segments[keep_from].kept;
+        omitted_total += segments[keep_from].omitted;
         keep_from += 1;
     }
 }
@@ -730,6 +797,106 @@ mod tests {
         ));
     }
 
+    /// ALGO-5:池化实现与旧 scoped 原语逐例等价(大小写不敏感 / 大小写敏感 / 正则 /
+    /// 窗口未撑满 / assistant 侧命中 / 空池 / 概率闸)。
+    #[test]
+    fn world_scan_pool_matches_scoped_reference() {
+        let mut case_sensitive = triggered_entry(&["trigger"], 100);
+        case_sensitive.case_sensitive = true;
+        let mut regex_entry = triggered_entry(&[], 100);
+        regex_entry.use_regex = true;
+        regex_entry.regex = Some("触发词".to_string());
+        let entries = vec![
+            triggered_entry(&["trigger"], 100),
+            case_sensitive,
+            regex_entry,
+            triggered_entry(&["触发词"], 0), // 概率闸:probability=0 恒不过
+        ];
+        let cases: Vec<Vec<(&str, &str)>> = vec![
+            vec![("user", "TRIGGER")],
+            vec![("user", "u1"), ("assistant", "甲触发词"), ("user", "u2")],
+            vec![("assistant", "开场白含触发词"), ("user", "u1")],
+            vec![("assistant", "开场白含触发词")],
+            vec![
+                ("user", "U1"),
+                ("assistant", "乙触发词"),
+                ("user", "u2"),
+                ("assistant", "丙触发词"),
+            ],
+            vec![("user", "无关"), ("assistant", "无关")],
+        ];
+        for &window in &[0i64, 1, 2, 4] {
+            for messages in &cases {
+                let (texts, is_user) = scan_pool(messages);
+                let pool = WorldScanPool::new(&texts, &is_user).with_lowered();
+                for e in &entries {
+                    assert_eq!(
+                        pool.triggered_hits(e, window, 0),
+                        triggered_entry_hits_scoped(e, &texts, &is_user, window, 0),
+                        "window={window} keys={:?} texts={texts:?}",
+                        e.keys
+                    );
+                }
+            }
+        }
+        // 概率闸:roll 边界仍与旧实现一致
+        let (texts, is_user) = scan_pool(&[("user", "u1"), ("assistant", "触发词")]);
+        let pool = WorldScanPool::new(&texts, &is_user).with_lowered();
+        let e = triggered_entry(&["触发词"], 30);
+        for roll in [0, 29, 30, 99] {
+            assert_eq!(
+                pool.triggered_hits(&e, 2, roll),
+                triggered_entry_hits_scoped(&e, &texts, &is_user, 2, roll),
+                "roll={roll}"
+            );
+        }
+    }
+
+    /// ALGO-6:未预构建小写池时也必须与旧实现等价(池实现内部现算兜底)。
+    /// 这样调用方的预判只影响性能,不影响命中结果。
+    #[test]
+    fn world_scan_pool_without_lowered_falls_back_to_local_lowering() {
+        let mut entry = triggered_entry(&["TRIGGER"], 100);
+        entry.case_sensitive = false;
+        let (texts, is_user) = scan_pool(&[("user", "trigger"), ("assistant", "其他")]);
+        let pool = WorldScanPool::new(&texts, &is_user);
+        assert!(pool.lowered.is_none(), "默认构造不应预构建小写池(ALGO-6)");
+        for window in [0i64, 1, 2] {
+            assert_eq!(
+                pool.triggered_hits(&entry, window, 0),
+                triggered_entry_hits_scoped(&entry, &texts, &is_user, window, 0),
+                "window={window}"
+            );
+        }
+    }
+
+    /// ALGO-6:小写池只在确实有大小写不敏感的子串条目时构建。
+    #[test]
+    fn world_scan_pool_builds_lowered_only_when_needed() {
+        let (texts, is_user) = scan_pool(&[("user", "u1")]);
+        let insensitive = triggered_entry(&["trigger"], 100);
+        assert!(crate::parsing::world_book::entry_needs_lowered(
+            &insensitive
+        ));
+
+        let mut sensitive = triggered_entry(&["trigger"], 100);
+        sensitive.case_sensitive = true;
+        assert!(!crate::parsing::world_book::entry_needs_lowered(&sensitive));
+
+        let mut regex = triggered_entry(&[], 100);
+        regex.use_regex = true;
+        regex.regex = Some("trigger".into());
+        assert!(!crate::parsing::world_book::entry_needs_lowered(&regex));
+
+        let empty_keys = triggered_entry(&[], 100);
+        assert!(!crate::parsing::world_book::entry_needs_lowered(
+            &empty_keys
+        ));
+
+        let pool = WorldScanPool::new(&texts, &is_user).with_lowered();
+        assert!(pool.lowered.is_some());
+    }
+
     /// 格式化单点:两种既有约定经 `keep_empty_bracket` 显式区分。
     #[test]
     fn world_entry_text_covers_both_bracket_conventions() {
@@ -819,6 +986,98 @@ mod tests {
     #[test]
     fn budget_with_no_segments_keeps_head() {
         assert_eq!(select_segments_within_budget(80, &[], 100).unwrap(), 0);
+    }
+
+    /// ALGO-1: 预算选择必须与优化前的全量求和实现逐字节等价。
+    ///
+    /// 参考实现照抄优化前的 O(n²) 形态;本用例是**纯等价护栏**(不是性能断言),
+    /// 覆盖 n=0/1/2/10/64/256 与多种头部/预算组合。变异验证:把递推符号或 `<=`
+    /// 改坏,本用例必须变红。
+    #[test]
+    fn budget_selection_matches_reference_implementation() {
+        fn reference(
+            head_tokens: i64,
+            segments: &[SegmentCost],
+            budget: u32,
+        ) -> Result<usize, String> {
+            let budget = budget as i64;
+            if head_tokens > budget {
+                return Err(format!(
+                    "任务目标约 {head_tokens} token,已超出本节点上下文上限 {budget} token;\
+                     请调大该步的「上下文上限」或留空(留空 = 不裁剪)"
+                ));
+            }
+            let mut keep_from = 0usize;
+            loop {
+                let total = head_tokens
+                    + segments[keep_from..].iter().map(|s| s.kept).sum::<i64>()
+                    + segments[..keep_from].iter().map(|s| s.omitted).sum::<i64>();
+                if total <= budget {
+                    return Ok(keep_from);
+                }
+                if keep_from == segments.len() {
+                    return Err(format!(
+                        "本节点上下文上限 {budget} token 过小:任务目标与 {} 个省略标记合计约 {total} token",
+                        keep_from
+                    ));
+                }
+                keep_from += 1;
+            }
+        }
+
+        // 确定性伪随机(LCG):避免为测试引入依赖。
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            *seed
+        }
+
+        let heads = [0i64, 1, 50, 500];
+        let budgets = [0u32, 1, 49, 50, 100, 250, 350, 1_000, 10_000];
+        for &n in &[0usize, 1, 2, 10, 64, 256] {
+            for &head in &heads {
+                for &budget in &budgets {
+                    for case in 0..4u64 {
+                        let mut seed = 0x5eed_0000
+                            ^ ((n as u64) << 32)
+                            ^ ((head as u64) << 12)
+                            ^ (budget as u64)
+                            ^ case;
+                        let segments: Vec<SegmentCost> = (0..n)
+                            .map(|_| SegmentCost {
+                                kept: (next(&mut seed) % 500) as i64,
+                                omitted: (next(&mut seed) % 80) as i64,
+                            })
+                            .collect();
+                        let expected = reference(head, &segments, budget);
+                        let actual = select_segments_within_budget(head, &segments, budget);
+                        assert_eq!(
+                            actual,
+                            expected,
+                            "n={n} head={head} budget={budget} case={case} segments={:?}",
+                            segments
+                                .iter()
+                                .map(|s| (s.kept, s.omitted))
+                                .collect::<Vec<_>>()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// ALGO-1 边界:合计恰好等于预算时保留当前 keep_from(`<=` 而非 `<`)。
+    #[test]
+    fn budget_selection_keeps_when_exactly_at_budget() {
+        let mk = |kept: i64, omitted: i64| SegmentCost { kept, omitted };
+        let segs = [mk(100, 10), mk(200, 20)];
+        // keep_from=0: 50+300=350
+        assert_eq!(select_segments_within_budget(50, &segs, 350).unwrap(), 0);
+        // keep_from=1: 50+200+10=260
+        assert_eq!(select_segments_within_budget(50, &segs, 260).unwrap(), 1);
+        // keep_from=2: 50+0+30=80
+        assert_eq!(select_segments_within_budget(50, &segs, 80).unwrap(), 2);
     }
 
     /// 视觉验证纪律条件追加(修复批次):判据 = 图像工具(视觉三件 ∪ 截图),

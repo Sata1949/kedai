@@ -278,6 +278,11 @@ const html = computed<string>(() => {
   // 而两者对脚本 min_depth/max_depth 的过滤语义不同(undefined=不过滤),
   // 键与渲染输入不等价(同一键可能命中不同渲染结果)
   const depth = props.depth ?? 0;
+  // 流式中的每一帧都是「前缀」:逐帧入缓存会以每帧一条的速度把 500 容量全换成
+  // 该消息的历史前缀(流式期间每帧一个新的键),稳定历史条目被挤光、P-9 缓存
+  // 在生成时段完全失效;终态帧(m.streaming=false)才入缓存。
+  // 流式帧本就不查表,提前返回可免去每帧构造超长键与 Map 查找。
+  if (props.m.streaming) return renderMessageHtml(text, scopeId, depth);
   // 模块级缓存(2026-09-17 P-9):虚拟滚动卸载重挂时组件内 computed 缓存随之销毁,
   // 同一条消息来回滚动会反复重付 markdown / scoped 脚本 / sanitize 成本,故提到模块级。
   const key = buildMessageRenderKey({
@@ -292,10 +297,7 @@ const html = computed<string>(() => {
   const cached = messageHtmlCache.get(key);
   if (cached !== undefined) return cached;
   const result = renderMessageHtml(text, scopeId, depth);
-  // 流式中的每一帧都是「前缀」:逐帧入缓存会以每帧一条的速度把 500 容量全换成
-  // 该消息的历史前缀(流式期间每帧一个新的键),稳定历史条目被挤光、P-9 缓存
-  // 在生成时段完全失效;终态帧(m.streaming=false)才入缓存。
-  if (!props.m.streaming) messageHtmlCache.set(key, result);
+  messageHtmlCache.set(key, result);
   return result;
 });
 

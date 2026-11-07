@@ -61,6 +61,14 @@ struct FirstMessageStatusSlot {
     last: Option<String>,
 }
 
+fn status_placeholder_re() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r"(?i)<\s*StatusPlaceHolderImpl\s*\/?\s*>")
+            .expect("StatusPlaceHolderImpl 占位符正则为常量,编译必然成功")
+    })
+}
+
 /// 自动识别并查找首楼里的状态栏:优先带 first_mes 标记的 assistant 消息,否则取第一条
 /// assistant 消息。占位符匹配大小写不敏感、容忍空白与自闭合变体(<StatusPlaceHolderImpl/> 等)。
 fn find_first_message_status_slot(history: &[MessageRecord]) -> Option<FirstMessageStatusSlot> {
@@ -71,10 +79,8 @@ fn find_first_message_status_slot(history: &[MessageRecord]) -> Option<FirstMess
                 && m.extra.get("first_mes").and_then(|v| v.as_bool()) == Some(true)
         })
         .or_else(|| history.iter().find(|m| m.role == "assistant"))?;
-    // 正则为写死字面量,编译必然成功
-    let has_placeholder = regex::Regex::new(r"(?i)<\s*StatusPlaceHolderImpl\s*\/?\s*>")
-        .expect("StatusPlaceHolderImpl 占位符正则为常量,编译必然成功")
-        .is_match(&first.content);
+    // 正则为写死字面量,编译必然成功;进程级缓存避免每轮收尾重复编译。
+    let has_placeholder = status_placeholder_re().is_match(&first.content);
     let last = first
         .extra
         .get("status_slot")
@@ -464,13 +470,18 @@ pub(super) async fn generate_mvu_status(
     Ok((vars_snapshot, status_bar, changelog_entries, pending_ops))
 }
 
+fn status_bar_tag_re() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r"(?is)<StatusBar\b[^>]*>[\s\S]*?</StatusBar\s*>")
+            .expect("StatusBar 剥离正则为常量,编译必然成功")
+    })
+}
+
 /// 提取 <StatusBar>...</StatusBar> 中的状态栏文本(容错:无匹配返回 None)
 /// 剥离正文中的 <StatusBar>…</StatusBar> 协议标签(状态栏文本由两步生成单独落库)。
 pub(super) fn strip_status_bar_tag(text: &str) -> String {
-    // 正则为写死字面量,编译必然成功
-    let re = regex::Regex::new(r"(?is)<StatusBar\b[^>]*>[\s\S]*?</StatusBar\s*>")
-        .expect("StatusBar 剥离正则为常量,编译必然成功");
-    re.replace_all(text, "").to_string()
+    status_bar_tag_re().replace_all(text, "").to_string()
 }
 
 fn extract_status_bar(text: &str) -> Option<String> {

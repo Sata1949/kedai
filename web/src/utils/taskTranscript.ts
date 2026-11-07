@@ -126,12 +126,17 @@ const BASH_TOOL_NAME = 'bash';
 export function flattenTrace(rows: readonly TaskTrace[]): TaskTrace[] {
   const seen = new Set<number>();
   const out: TaskTrace[] = [];
+  let ordered = true;
+  let prev = Number.NEGATIVE_INFINITY;
   for (const row of rows) {
     if (seen.has(row.seq)) continue;
     seen.add(row.seq);
+    // 写入侧与实时并入都按 seq 递增;输入已有序时跳过 O(n log n) 排序。
+    if (row.seq < prev) ordered = false;
+    prev = row.seq;
     out.push(row);
   }
-  out.sort((a, b) => a.seq - b.seq);
+  if (!ordered) out.sort((a, b) => a.seq - b.seq);
   return out;
 }
 

@@ -104,6 +104,19 @@ pub(crate) fn collect_world_text_grouped_with(
         }
     }
 
+    // ALGO-5:整轮只建一次扫描池(小写化 + user 下标),所有条目复用;
+    // 旧实现每条目都重扫 is_user 并各自小写化整段历史(O(条目数 × 历史))。
+    // ALGO-6:小写池只在本轮确实有大小写不敏感的激发条目时构建。预判是保守的
+    // (含可能被装饰器跳过的条目,只多构建);漏判由池实现本地现算兜底。
+    let needs_lowered = entries
+        .iter()
+        .any(|e| e.enabled && !e.constant && crate::parsing::world_book::entry_needs_lowered(e));
+    let scan_pool = crate::services::prompt_kit::WorldScanPool::new(&scan_texts, &scan_is_user);
+    let scan_pool = if needs_lowered {
+        scan_pool.with_lowered()
+    } else {
+        scan_pool
+    };
     let mut constant_parts: Vec<WorldInjection> = Vec::new();
     let mut triggered_parts: Vec<WorldInjection> = Vec::new();
     for e in entries {
@@ -127,18 +140,12 @@ pub(crate) fn collect_world_text_grouped_with(
             }
             continue;
         }
-        // 激发判定(「窗口→匹配→概率」三步已收敛到 prompt_kit::triggered_entry_hits_scoped):
+        // 激发判定(「窗口→匹配→概率」三步已收敛到 prompt_kit::WorldScanPool):
         // 引擎口径 = 窗口按「最近 N 条 user 消息」计、匹配池取该跨度内的**全部消息**(WB-A,
         // 2026-10-11 决策 D1=B2);未声明 scan_depth 时窗口长度兜底用条目 depth(存量卡行为)。
         // 概率 roll 统一走 prompt_kit::world_entry_roll(收敛前用本模块的 simple_roll,
         // 与 generate-raw 侧的 subsec_nanos 不同源,现已统一)。
-        if !crate::services::prompt_kit::triggered_entry_hits_scoped(
-            e,
-            &scan_texts,
-            &scan_is_user,
-            e.depth,
-            crate::services::prompt_kit::world_entry_roll(),
-        ) {
+        if !scan_pool.triggered_hits(e, e.depth, crate::services::prompt_kit::world_entry_roll()) {
             continue;
         }
         if !e.content.trim().is_empty() {

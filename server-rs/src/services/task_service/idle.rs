@@ -87,8 +87,13 @@ impl TaskService {
         // 心跳快照(Instant → 静默秒数):顺带把已不在候选集里的条目裁掉,
         // 表不随任务总数无限增长(任务结束时最后一轮会把它清出去)。
         let heartbeat_ages: HashMap<String, i64> = {
+            // ALGO-6:候选集下标化后再裁剪,旧实现 `candidates.iter().any` 是 O(C²)。
+            // `get` 保留在下面的逐任务循环里——它承担「最新状态权威」语义,不能为了
+            // 去掉 N+1 改用候选集里的旧行。
+            let candidate_ids: std::collections::HashSet<&str> =
+                candidates.iter().map(|(id, _)| id.as_str()).collect();
             let mut act = self.activity.lock().unwrap_or_else(|e| e.into_inner());
-            act.retain(|id, _| candidates.iter().any(|(c, _)| c == id));
+            act.retain(|id, _| candidate_ids.contains(id.as_str()));
             act.iter()
                 .map(|(id, t)| (id.clone(), t.elapsed().as_secs() as i64))
                 .collect()

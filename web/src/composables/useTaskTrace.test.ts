@@ -141,6 +141,13 @@ describe('appendTrace 实时并入', () => {
     expect(useTaskTrace().rows.value.map((r) => r.seq)).toEqual([1, 2, 3]);
   });
 
+  it('乱序帧二分插入,保持 seq 升序且不整体重建', async () => {
+    getTaskTrace.mockResolvedValueOnce(page([trace(1), trace(3)]));
+    await loadTaskTrace('t1');
+    appendTrace('t1', trace(2)); // 迟到帧
+    expect(useTaskTrace().rows.value.map((r) => r.seq)).toEqual([1, 2, 3]);
+  });
+
   it('非当前任务的轨迹直接丢弃', async () => {
     getTaskTrace.mockResolvedValueOnce(page([trace(1)]));
     await loadTaskTrace('t1');

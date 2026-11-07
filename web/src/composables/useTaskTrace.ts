@@ -71,8 +71,22 @@ const modeOverride = ref<TranscriptMode | null>(null);
  * ```
  */
 const coveredSeqByTask = new Map<string, number>();
+/**
+ * 当前列表已含的 seq 集合(逐帧并入去重)。
+ *
+ * ALGO-4 起查重从「逐条 `some`」的 O(n) 改为 O(1),`advanceCoveredSeq` 也复用它,
+ * 不再每次从 `rows` 重建一份。**必须与 `rows` 同源**:凡是整表替换的地方都走
+ * `setRows`,它是唯一的同步点,两处分别记账必然分叉。
+ */
+let seenSeqs = new Set<number>();
 /** 有补拉在飞的 task_id 集合(缺口密集时不叠加并发请求) */
 const pullRunning = new Set<string>();
+
+/** 整表替换 `rows` 并同步查重集合(唯一同步点) */
+function setRows(next: api.TaskTrace[]): void {
+  rows.value = next;
+  seenSeqs = new Set(next.map((r) => r.seq));
+}
 
 /**
  * 从当前覆盖点向前推进,吞掉 `rows` 里已经能接上的连续区间。
@@ -84,9 +98,8 @@ const pullRunning = new Set<string>();
 function advanceCoveredSeq(taskId: string): void {
   const base = coveredSeqByTask.get(taskId);
   if (base === undefined) return;
-  const seen = new Set(rows.value.map((r) => r.seq));
   let next = base + 1;
-  while (seen.has(next)) next += 1;
+  while (seenSeqs.has(next)) next += 1;
   coveredSeqByTask.set(taskId, next - 1);
 }
 
@@ -138,7 +151,7 @@ export function ensureTranscriptMode(taskId: string): void {
  * `ensureTranscriptMode` 按新任务 id 从 localStorage 读回。
  */
 export function clearTaskTrace(): void {
-  rows.value = [];
+  setRows([]);
   ownerTaskId.value = null;
   truncated.value = false;
   loading.value = false;
@@ -183,7 +196,7 @@ export async function loadTaskTrace(taskId: string): Promise<void> {
       if (page.trace.length < TRACE_PAGE_LIMIT) break;
     }
     const merged = flattenTrace(collected);
-    rows.value = merged;
+    setRows(merged);
     truncated.value = sawTruncated;
     const last = merged.length ? merged[merged.length - 1].seq : 0;
     // 全量加载是连续翻页(从 0 起到不足一页),故末条即「已连续覆盖」的边界。
@@ -244,7 +257,7 @@ async function pullTraceGap(taskId: string, after: number): Promise<void> {
     console.warn('[kedai] 任务轨迹缺口补拉中断(已拉回的部分保留,余下等下次)', e);
   } finally {
     if (collected.length > 0) {
-      rows.value = flattenTrace([...rows.value, ...collected]);
+      setRows(flattenTrace([...rows.value, ...collected]));
       // 游标只按**补拉覆盖到的**位置推进,绝不跨过尚未拉回的区间。
       // 用 `cursor` 而不是「合并后末条的 seq」:后者包含那帧大 seq(如 700),
       // 会把缺口区间当成已覆盖,正是本条缺陷的第二半。
@@ -278,8 +291,27 @@ export function appendTrace(taskId: string, trace: api.TaskTrace | undefined): v
     void pullTraceGap(taskId, covered);
   }
   // 逐条并入也要去重:补拉与实时帧重叠时同一条会到两次
-  if (rows.value.some((r) => r.seq === trace.seq)) return;
-  rows.value = flattenTrace([...rows.value, trace]);
+  if (seenSeqs.has(trace.seq)) return;
+  const tail = rows.value.length
+    ? rows.value[rows.value.length - 1].seq
+    : Number.NEGATIVE_INFINITY;
+  if (trace.seq > tail) {
+    // 常见路径(SSE 按 seq 单调到达):尾插 O(1),不重建整表。
+    rows.value.push(trace);
+  } else {
+    // 迟到/乱序帧:二分插入保持 seq 升序;仍不回退到全表排序。
+    const arr = rows.value;
+    let lo = 0;
+    let hi = arr.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (arr[mid].seq < trace.seq) lo = mid + 1;
+      else hi = mid;
+    }
+    if (arr[lo]?.seq === trace.seq) return;
+    arr.splice(lo, 0, trace);
+  }
+  seenSeqs.add(trace.seq);
   // covered 只在「恰好接续」时前进;跳号帧交给补拉补齐,补齐后由 pullTraceGap 推进
   if (covered === undefined) {
     // 从未建立覆盖基线:以本条为起点(首屏由 loadTaskTrace 建立,这里是兜底)
