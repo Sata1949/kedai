@@ -45,6 +45,12 @@ pub(crate) struct TaskRunContext {
     /// `bash` 以它为 cwd 缺省与 jail 边界。`Arc` 共享让同一任务的所有工具调用
     /// 共用一份「本 run 读过哪些文件」的记录(fs_write/fs_edit 的先读后写校验依赖它)。
     pub scope: Option<std::sync::Arc<crate::models::types::ExecScope>>,
+    /// **任务模式工具授权档位**(2026-11-06 三档授权;None = 旧任务)。
+    ///
+    /// 与 `scope.task_authorization()` 同源：scope 由 `scope_for_task_with_authorization`
+    /// 用本字段构造，权限裁决读 scope 即可。单独留一份是为了**未绑定工作区**的任务
+    /// 也能拿到档位（此时 scope=None，但 Step/Auto 仍要生效）。
+    pub tool_authorization: Option<crate::models::tool_policy::TaskAuthorizationMode>,
     /// **任务级总预算截止期**(PRODCAP-2;`None` = 总预算关,行为逐字节不变)。
     ///
     /// 由 `spawn_run` 从设置 `task_total_budget_secs` 起算一次,随上下文下传到各

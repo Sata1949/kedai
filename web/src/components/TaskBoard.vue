@@ -17,6 +17,7 @@ import TaskStatusPanel from './task/TaskStatusPanel.vue';
 import TaskTranscriptModes from './task/TaskTranscriptModes.vue';
 import TaskFlowBindPanel from './task/TaskFlowBindPanel.vue';
 import TaskApprovalPanel from './task/TaskApprovalPanel.vue';
+import TaskAuthorizationPanel from './task/TaskAuthorizationPanel.vue';
 import TaskExecutionPanel from './task/TaskExecutionPanel.vue';
 import TaskResultPanel from './task/TaskResultPanel.vue';
 import TaskBoardEmpty from './task/TaskBoardEmpty.vue';
@@ -153,6 +154,10 @@ watch([taskMode, currentTaskId], ensureFlowLib);
             </div>
             <p class="sv-task-progress-text">{{ lastAgentStatus }}</p>
           </div>
+
+          <!-- 工具调用待确认(2026-11-06 三档授权):「逐步」/「越界转确认」时模型在这里
+               停下等用户点头;放在进度行之后、批准区之前,不属于 sticky 表头。 -->
+          <TaskAuthorizationPanel :task-id="currentTask.task.id" />
 
           <TaskApprovalPanel :detail="currentTask" />
           <TaskExecutionPanel :detail="currentTask" />

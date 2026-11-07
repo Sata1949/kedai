@@ -51,6 +51,20 @@ pub(super) struct ExecutedTool {
     snapshot_id: Option<String>,
 }
 
+/// 确认卡/待授权快照用的入参预览(截断到 2000 字符)。
+///
+/// 为什么不给全量:确认卡只需要「改哪个文件/跑什么命令」的判断依据,而工具参数可能是
+/// 整份文件内容(fs_write)。截断放这里而不是各消费点,保证事件与 pending 快照一致。
+fn preview_input(arguments: &str) -> String {
+    const MAX_PREVIEW_CHARS: usize = 2000;
+    let count = arguments.chars().count();
+    if count <= MAX_PREVIEW_CHARS {
+        return arguments.to_string();
+    }
+    let head: String = arguments.chars().take(MAX_PREVIEW_CHARS).collect();
+    format!("{head}…(入参过长,已截断显示前 {MAX_PREVIEW_CHARS} 字符)")
+}
+
 /// 执行本轮全部工具调用,并完成状态/session/SSE/消息回灌的收尾。
 ///
 /// 中断语义:串行组执行中检测到取消时立即返回 `interrupted=true`,**不再**收尾
@@ -91,6 +105,7 @@ pub(super) async fn execute_round(
                     allowed: false,
                     risk: ctx.engine.tool_registry.permissions().risk_for(&call.name),
                     reason: "该工具不在当前任务策略允许的工具清单内".into(),
+                    code: Some("tool_policy_denied".into()),
                 }
             } else {
                 ctx.engine.tool_registry.permissions().decide_with_policy(
@@ -123,10 +138,14 @@ pub(super) async fn execute_round(
     // 2) 执行:按模型顺序分组调度——连续 Safe 工具组内并发(join_all 保序),
     //    非 Safe/未注册工具单独成组、串行执行(含授权等待),组间串行,
     //    保证授权语义与副作用顺序稳定。
+    //    2026-11-06:未放行的调用必须走串行路径,否则并发分支会直接回
+    //    `tool_authorization_required` 错误而不进入等待/确认(逐步档的写类工具
+    //    即使风险级是 Safe 也不能被并发旁路)。
     let parallel_safe: Vec<bool> = executed
         .iter()
         .map(|e| {
-            ctx.engine.tool_registry.get(&e.call.name).is_some()
+            e.permission.allowed
+                && ctx.engine.tool_registry.get(&e.call.name).is_some()
                 && ctx
                     .engine
                     .tool_registry
@@ -309,11 +328,17 @@ async fn execute_serial_tool(
             });
             return Ok(false);
         }
+        // 入参预览只截断一次,事件与 pending 快照共用同一份,避免两处口径漂移
+        let input_preview = preview_input(&e.call.arguments);
         let receiver = engine.tool_registry.permissions().begin_wait(
             run_id,
             &e.call.id,
             &tool_ctx.session_id,
             &e.call.name,
+            e.permission.risk,
+            &e.permission.reason,
+            e.permission.code.as_deref(),
+            Some(&input_preview),
         );
         send_event(
             SseEvent::ToolAuthorizationRequired {
@@ -323,6 +348,10 @@ async fn execute_serial_tool(
                 run_id: run_id.to_string(),
                 call_id: e.call.id.clone(),
                 origin: tool_origin_str(&engine.tool_registry, &e.call.name),
+                // 任务模式必须靠它回填 resolve(任务虚拟会话不是 sessions 表行)
+                session_id: Some(tool_ctx.session_id.clone()),
+                code: e.permission.code.clone(),
+                input_preview: Some(input_preview),
             },
             tx,
             abort,
@@ -351,6 +380,59 @@ async fn execute_serial_tool(
             .tool_registry
             .permissions()
             .cancel_wait(run_id, &e.call.id);
+        // 收束通知(2026-11-06 三档授权):无论允许/拒绝/超时都要发一条,前端据此把
+        // 确认卡移出队列。允许分支走下面三个 Allow* 的公共尾部,拒绝/超时在各自分支前发。
+        match &resolved {
+            Ok(crate::tools::permissions::PendingAuthorizationDecision::AllowOnce)
+            | Ok(crate::tools::permissions::PendingAuthorizationDecision::AllowSession)
+            | Ok(crate::tools::permissions::PendingAuthorizationDecision::AllowRole) => {
+                emit_authorization_resolved(
+                    tx,
+                    abort,
+                    flag,
+                    &e.call.name,
+                    run_id,
+                    &e.call.id,
+                    &tool_ctx.session_id,
+                    "allow",
+                    None,
+                )
+                .await;
+            }
+            Ok(crate::tools::permissions::PendingAuthorizationDecision::Deny) => {
+                emit_authorization_resolved(
+                    tx,
+                    abort,
+                    flag,
+                    &e.call.name,
+                    run_id,
+                    &e.call.id,
+                    &tool_ctx.session_id,
+                    "deny",
+                    Some("用户拒绝工具调用".into()),
+                )
+                .await;
+            }
+            Err((code, message)) => {
+                let decision = if *code == "authorization_timeout" {
+                    "timeout"
+                } else {
+                    "cancelled"
+                };
+                emit_authorization_resolved(
+                    tx,
+                    abort,
+                    flag,
+                    &e.call.name,
+                    run_id,
+                    &e.call.id,
+                    &tool_ctx.session_id,
+                    decision,
+                    Some((*message).to_string()),
+                )
+                .await;
+            }
+        }
         match resolved {
             Ok(crate::tools::permissions::PendingAuthorizationDecision::AllowOnce) => {
                 e.permission = crate::tools::permissions::PermissionDecision::allowed(
@@ -430,6 +512,39 @@ async fn execute_serial_tool(
     e.duration_ms = duration_ms;
     e.snapshot_id = snapshot_id;
     Ok(false)
+}
+
+/// 授权收束事件(2026-11-06 三档授权):让前端立即把确认卡移出队列。
+///
+/// 与 [`emit_authorization_outcome`] 的分工:后者是「一行人类可读进展」,本函数是
+/// **结构化载荷**(run_id/call_id/session_id/decision),任务事件桥据此翻译成
+/// `tool_authorization_resolved`。
+#[allow(clippy::too_many_arguments)]
+async fn emit_authorization_resolved(
+    tx: &mpsc::Sender<SseEvent>,
+    abort: &watch::Receiver<bool>,
+    flag: &AbortFlag,
+    tool: &str,
+    run_id: &str,
+    call_id: &str,
+    session_id: &str,
+    decision: &str,
+    detail: Option<String>,
+) {
+    let _ = send_event(
+        SseEvent::ToolAuthorizationResolved {
+            name: tool.to_string(),
+            run_id: run_id.to_string(),
+            call_id: call_id.to_string(),
+            session_id: Some(session_id.to_string()),
+            decision: decision.to_string(),
+            detail,
+        },
+        tx,
+        abort,
+        flag,
+    )
+    .await;
 }
 
 /// 授权终态事件(拒绝/超时/断开):原实现只回灌 error JSON,前端工具卡片显示为

@@ -225,7 +225,7 @@ impl CustomExecutor {
         let limits = crate::services::task_engine::task_loop_limits(settings);
         // 任务模式工具策略:先按策略编译候选集(默认拒绝危险工具、剔除元工具),
         // 再与步骤白名单取交——步骤白名单只能收窄,不能突破任务策略放行危险工具。
-        let policy = crate::services::task_engine::tool_policy::compile(
+        let policy = crate::services::task_engine::tool_policy::compile_with_authorization(
             &settings.task_tool_policy,
             &settings.task_tool_allowlist,
             &self.engine.tool_registry(),
@@ -239,6 +239,8 @@ impl CustomExecutor {
             crate::services::settings_service::vision_enabled(settings),
             // 截图工具随「视觉与截图」总开关(默认关)
             settings.vision_screenshot_enabled,
+            // 三档授权(2026-11-06):自动档提升为全量工具面
+            ctx.tool_authorization,
         );
         // Some([]) = 策略全量集;Some(list) = 策略集 ∩ 步骤白名单
         let mut tools: Vec<_> = if whitelist.is_empty() {
@@ -290,9 +292,15 @@ impl CustomExecutor {
                 );
             }
         }
-        // 闸门名单与下发工具一致:名单外立即拒绝(任务模式无 UI 授权上下文)
+        // 闸门名单与下发工具一致:名单外立即拒绝(名单是硬边界)。
+        // 三档授权(2026-11-06):逐步/工作区内档允许等待用户确认名单内需要确认的调用。
         let gate_list: Vec<String> = tools.iter().map(|d| d.name.clone()).collect();
-        let gate = crate::agents::engine::executor::ToolGate::listed(&gate_list);
+        let gate = match ctx.tool_authorization {
+            Some(mode) if mode.can_wait_for_user() => {
+                crate::agents::engine::executor::ToolGate::listed_waiting(&gate_list)
+            }
+            _ => crate::agents::engine::executor::ToolGate::listed(&gate_list),
+        };
         let tool_choice = match step.tool_choice.as_deref() {
             Some("none") => ToolChoice::None,
             Some("required") => ToolChoice::Required,
@@ -360,6 +368,8 @@ impl CustomExecutor {
                 no_progress_limit: None,
                 // custom 节点不是 team 集成主：无分片读取软提醒。
                 shard_read_nudge_after: None,
+                // 三档授权(2026-11-06):custom 工具节点沿用同一任务档位
+                task_authorization: ctx.tool_authorization,
             }),
         };
         // 事件桥(批次 R4 携 phase/step_index):custom 工具步骤的调用追踪口径为

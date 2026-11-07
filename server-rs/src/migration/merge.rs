@@ -25,6 +25,7 @@ use super::ddl::{
     LLM_REQUESTS_DDL, MEMORY_ENTRIES_DDL, MEMORY_ENTRIES_FTS_DDL, SCOPE_VARIABLES_DDL,
     SESSION_COMPACTIONS_DDL, USER_SCRIPTS_DDL,
 };
+use super::ddl_task_authorization::ensure_tasks_tool_authorization_column;
 use super::{DATABASE_FILE, SKIPPED_SIDECARS};
 use crate::models::db::SCHEMA_VERSION;
 
@@ -246,6 +247,9 @@ fn merge_databases(baseline: &Path, source: &Path) -> Result<MergeReport, String
     // tasks runtime_issues 列(SKY-9-L1):旧库 ALTER 补齐,保证两侧 schema 一致
     ensure_tasks_runtime_issues_column(&conn)
         .map_err(|e| format!("补齐基线库 tasks runtime_issues 列失败: {e}"))?;
+    // tasks tool_authorization 列(2026-11-06 三档授权):旧库 ALTER 补齐
+    ensure_tasks_tool_authorization_column(&conn)
+        .map_err(|e| format!("补齐基线库 tasks tool_authorization 列失败: {e}"))?;
     // task_llm_calls finish_reason 列(可观测性问题①):旧库 ALTER 补齐
     ensure_task_llm_calls_finish_reason_column(&conn)
         .map_err(|e| format!("补齐基线库 task_llm_calls finish_reason 列失败: {e}"))?;
@@ -327,6 +331,9 @@ fn merge_databases(baseline: &Path, source: &Path) -> Result<MergeReport, String
     // tasks runtime_issues 列(SKY-9-L1):源快照侧同样补齐(与基线侧成对)
     ensure_tasks_runtime_issues_column(&source_conn)
         .map_err(|e| format!("补齐源快照 tasks runtime_issues 列失败: {e}"))?;
+    // tasks tool_authorization 列(2026-11-06 三档授权):源快照侧同样补齐
+    ensure_tasks_tool_authorization_column(&source_conn)
+        .map_err(|e| format!("补齐源快照 tasks tool_authorization 列失败: {e}"))?;
     ensure_task_llm_calls_finish_reason_column(&source_conn)
         .map_err(|e| format!("补齐源快照 task_llm_calls finish_reason 列失败: {e}"))?;
     ensure_agent_subtasks_finished_at_column(&source_conn)

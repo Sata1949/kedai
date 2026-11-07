@@ -21,10 +21,15 @@ use serde_json::Value;
 ///   2026-09-24 修正)。
 /// - `no_ui_authorization`:true = 未放行工具立即拒绝并回灌错误,不进入授权等待。
 ///   任务模式没有 UI 授权上下文,若走等待会空等 300 秒超时,故必须置 true。
+/// - `hard_exclude_outside`:true = 名单外工具**直接拒绝**,与是否等待授权无关。
+///   任务侧名单是能力硬边界(2026-11-06 三档授权后与 `no_ui_authorization` 解耦:
+///   「逐步」档既要等用户确认名单内的写类调用,又不能因此放名单外工具进入等待)。
+///   聊天 custom 步骤的名单不是硬边界(名单外回到授权等待),故它恒 false。
 #[derive(Clone, Copy)]
 pub(crate) struct ToolGate<'a> {
     pub whitelist: Option<&'a [String]>,
     pub no_ui_authorization: bool,
+    pub hard_exclude_outside: bool,
 }
 
 impl<'a> ToolGate<'a> {
@@ -33,6 +38,7 @@ impl<'a> ToolGate<'a> {
         Self {
             whitelist: None,
             no_ui_authorization: false,
+            hard_exclude_outside: false,
         }
     }
 
@@ -41,6 +47,20 @@ impl<'a> ToolGate<'a> {
         Self {
             whitelist: Some(whitelist),
             no_ui_authorization: true,
+            hard_exclude_outside: true,
+        }
+    }
+
+    /// 显式白名单 + 允许等待用户确认（任务「逐步」「工作区内」档，2026-11-06）。
+    ///
+    /// 与 [`Self::listed`] 的差异只有等待能力：名单仍是硬边界（名单外由
+    /// [`Self::excludes`] 直接拒绝），但名单**内**需要确认的调用（逐步档的写类工具、
+    /// 工作区内档的越界命令）会进入 `begin_wait` 等用户决定。
+    pub(crate) fn listed_waiting(whitelist: &'a [String]) -> Self {
+        Self {
+            whitelist: Some(whitelist),
+            no_ui_authorization: false,
+            hard_exclude_outside: true,
         }
     }
 
@@ -54,13 +74,13 @@ impl<'a> ToolGate<'a> {
             .is_some_and(|wl| wl.iter().any(|n| n == name))
     }
 
-    /// 该工具是否被闸门硬性排除。仅对「有名单 + 不等待授权」的路径成立(任务模式):
+    /// 该工具是否被闸门硬性排除。仅对「有名单 + 硬边界」的路径成立(任务模式):
     /// 名单是能力的硬边界,不在名单内的工具必须拒绝——否则文件规则可能因「宽松模式
     /// 写文件放行」而放过被任务策略排除的危险工具(模型幻觉调用即越权)。
-    /// 聊天路径(no_ui_authorization=false)不硬性排除:名单外工具走授权等待,与改造前一致。
+    /// 聊天路径(hard_exclude_outside=false)不硬性排除:名单外工具走授权等待,与改造前一致。
     /// 空名单同样走本判定(拒绝一切)——这正是 2026-09-24 修正的形态。
     pub(crate) fn excludes(&self, name: &str) -> bool {
-        self.no_ui_authorization && self.whitelist.is_some() && !self.authorizes(name)
+        self.hard_exclude_outside && self.whitelist.is_some() && !self.authorizes(name)
     }
 }
 

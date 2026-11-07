@@ -133,6 +133,9 @@ pub(crate) async fn generate_with_readonly_tools(
             no_progress_limit: None,
             // 审计/终审不是集成主：无分片读取软提醒。
             shard_read_nudge_after: None,
+            // 审计/终审只跑只读工具（Step 不会拦只读，Workspace 不涉及命令执行）；
+            // 仍原样带着档位，避免未来审计工具面扩张时漏判。
+            task_authorization: ctx.tool_authorization,
         }),
     };
     let (tx, drain) = sink::spawn(svc.clone(), ctx.task_id.clone(), label, phase, None);

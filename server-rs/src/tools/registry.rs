@@ -759,6 +759,7 @@ mod tests {
             allowed: true,
             risk: crate::tools::permissions::ToolRisk::Dangerous,
             reason: "步骤白名单工具,自动放行".into(),
+            code: None,
         };
         let out = reg
             .execute_with_decision("write", "{}", ctx(), &decision)
@@ -782,6 +783,7 @@ mod tests {
             allowed: false,
             risk: crate::tools::permissions::ToolRisk::Safe,
             reason: "测试拒绝".into(),
+            code: None,
         };
         let error = reg
             .execute_with_decision("calculator", "{}", ctx(), &denied)

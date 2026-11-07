@@ -24,3 +24,6 @@ pub mod ownership;
 /// 共同引用。下沉理由与边界见本文件头部注释及 `docs/契约-架构与数据.md` §2.2。
 pub mod tool_policy;
 pub mod types;
+// 核心类型的 serde 快照用例(自 types.rs 整体搬出,2026-11-06;守住 file-size ratchet)
+#[cfg(test)]
+mod types_tests;

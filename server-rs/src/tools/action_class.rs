@@ -54,6 +54,11 @@ pub struct ToolAction {
     /// 放在这里而非在上游单独判一次,是为了让权限裁决能直接据其决定
     /// 「是否需要逐条确认」,避免分级口径在两处漂移。
     pub exec_risk: Option<CommandRisk>,
+    /// 命令原文(仅 op=Exec 时有值;任务「工作区内」档的越界判定要用它)。
+    /// 与 `target` 的展示摘要分开:判定需要原文,展示只需要截断预览。
+    pub exec_command: Option<String>,
+    /// 命令的显式 cwd(仅 op=Exec 时可能有值;None = 任务工作区缺省)。
+    pub exec_cwd: Option<String>,
 }
 
 impl ToolAction {
@@ -64,6 +69,8 @@ impl ToolAction {
             target: None,
             reason: String::new(),
             exec_risk: None,
+            exec_command: None,
+            exec_cwd: None,
         }
     }
 
@@ -156,6 +163,8 @@ fn classify_bash(args: &Value) -> ToolAction {
             reason: "命令为空".into(),
             // 空命令按最高危处理:宁可多确认,不给「空命令绕过」留缝
             exec_risk: Some(CommandRisk::Admin),
+            exec_command: Some(String::new()),
+            exec_cwd: args.get("cwd").and_then(|v| v.as_str()).map(str::to_string),
         };
     }
     let risk = super::command_risk::classify_command(cmd, "");
@@ -172,6 +181,8 @@ fn classify_bash(args: &Value) -> ToolAction {
         target: Some(brief.clone()),
         reason: format!("执行命令({}):{brief}", risk.label()),
         exec_risk: Some(risk),
+        exec_command: Some(cmd.to_string()),
+        exec_cwd: args.get("cwd").and_then(|v| v.as_str()).map(str::to_string),
     }
 }
 
@@ -201,6 +212,8 @@ fn classify_read(args: &Value) -> ToolAction {
         target: Some(targets.join(", ")),
         reason: String::new(),
         exec_risk: None,
+        exec_command: None,
+        exec_cwd: None,
     }
 }
 
@@ -221,6 +234,8 @@ fn classify_write(args: &Value) -> ToolAction {
         target,
         reason: String::new(),
         exec_risk: None,
+        exec_command: None,
+        exec_cwd: None,
     }
 }
 
@@ -245,6 +260,8 @@ fn classify_create(args: &Value) -> ToolAction {
         target: Some(paths.join(", ")),
         reason: String::new(),
         exec_risk: None,
+        exec_command: None,
+        exec_cwd: None,
     }
 }
 
@@ -286,6 +303,8 @@ fn classify_replace(args: &Value) -> ToolAction {
         target: (!targets.is_empty()).then(|| targets.join(", ")),
         reason: String::new(),
         exec_risk: None,
+        exec_command: None,
+        exec_cwd: None,
     }
 }
 

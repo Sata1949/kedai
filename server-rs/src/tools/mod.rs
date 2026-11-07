@@ -29,6 +29,9 @@ pub mod command_risk;
 pub mod memory;
 pub mod multistep;
 pub mod permissions;
+// 待授权调用登记(2026-11-06 三档授权;从 permissions.rs 拆出):pending 表 + oneshot
+// + 断线快照,守住 file-size ratchet
+mod permissions_pending;
 pub mod registry;
 pub mod revise;
 // bash 写入目标解析(TMR3-L6):重定向/tee/cp/mv/rm 等静态可识别的写目标,
@@ -61,6 +64,12 @@ pub mod worldbook;
 // 工作区路径闸门(编码通道批次,本批安全核心):fs_* 工具与 bash 的 cwd 校验共用;
 // 创建期的工作区校验也复用其判据(见 agent_tools_fs.rs / bash.rs / api/tasks.rs)
 pub mod workspace_guard;
+// 任务「工作区内」档的 bash 命令边界检查(2026-11-06 三档授权):只做静态判定,
+// 越界/无法证明时由权限层转逐步确认,不是 OS 级沙箱(边界见模块头注释)
+pub mod workspace_check;
+// 任务三档授权裁决(2026-11-06):从 permissions.rs 拆出的 Step/Workspace/Auto 语义,
+// 与聊天侧文件三档矩阵正交;拆出同时守住 file-size ratchet
+pub mod task_authorization;
 // 工作区树扫描(批次 4b):bash 侧命令前后各扫一次,供文件变更台账做启发式检出;
 // 遍历实现同时被 agent_tools_fs::walk_files(fs_glob/fs_grep)复用
 mod workspace_scan;

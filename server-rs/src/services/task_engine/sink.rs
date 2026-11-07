@@ -99,6 +99,65 @@ pub(crate) fn spawn(
                             if let Some(detail) = map_event(&ev, streamed_chars, &label) {
                                 svc.emit_event(TaskEventKind::AgentStatus, &task_id, None, None, Some(detail));
                             }
+                            // 工具待确认(2026-11-06 三档授权):任务模式没有聊天 SSE,
+                            // 不在这里翻译成任务事件,前端就只见一行 agent_status 文案、
+                            // 无从点确认。翻译后仍保留上面的进展行(时间线连续性)。
+                            if let SseEvent::ToolAuthorizationRequired {
+                                name,
+                                risk,
+                                reason,
+                                run_id,
+                                call_id,
+                                session_id,
+                                code,
+                                input_preview,
+                                ..
+                            } = &ev
+                            {
+                                svc.emit_tool_authorization_required(
+                                    &task_id,
+                                    crate::models::types::TaskToolAuthorization {
+                                        name: name.clone(),
+                                        risk: *risk,
+                                        reason: reason.clone(),
+                                        run_id: run_id.clone(),
+                                        call_id: call_id.clone(),
+                                        // 引擎事件已带精确 session_id;缺省回退到
+                                        // task:{id}(旧引擎不该走到这里,但宁可给出可
+                                        // resolve 的 id 也不要产生一条无法回填的卡片)
+                                        session_id: session_id
+                                            .clone()
+                                            .unwrap_or_else(|| format!("task:{task_id}")),
+                                        code: code.clone(),
+                                        input_preview: input_preview.clone(),
+                                    },
+                                );
+                            }
+                            // 待授权已收束(2026-11-06):前端据此把确认卡出队,
+                            // 不必等下一次全量刷新。
+                            if let SseEvent::ToolAuthorizationResolved {
+                                name,
+                                run_id,
+                                call_id,
+                                session_id,
+                                decision,
+                                detail,
+                            } = &ev
+                            {
+                                svc.emit_tool_authorization_resolved(
+                                    &task_id,
+                                    crate::models::types::TaskToolAuthorizationDecision {
+                                        run_id: run_id.clone(),
+                                        call_id: call_id.clone(),
+                                        name: name.clone(),
+                                        session_id: session_id
+                                            .clone()
+                                            .unwrap_or_else(|| format!("task:{task_id}")),
+                                        decision: decision.clone(),
+                                        detail: detail.clone(),
+                                    },
+                                );
+                            }
                             // 工具轨迹(TMSHOW-1):入参与出参各落一行,前端按 seq 排序后
                             // 与思考条目并列显示;正文为空时 record_trace 内部早退。
                             if let Some((kind, name, content)) = trace_of(&ev) {

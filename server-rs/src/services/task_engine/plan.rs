@@ -117,6 +117,8 @@ impl ApprovedPlanExecutor {
                 no_progress_guard: true,
                 // plan 续跑不是 team 集成主:无分片读取软提醒。
                 shard_read_nudge_after: None,
+                // 三档授权(2026-11-06):批准后续跑沿用任务创建期的档位
+                task_authorization: ctx.tool_authorization,
             };
             match run_agent_loop(svc.clone(), self.engine.clone(), call, ctx.cancel.clone()).await {
                 Ok(out) => {

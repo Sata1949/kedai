@@ -24,6 +24,7 @@ fn chat_gate_does_not_hard_exclude() {
     let chat = ToolGate {
         whitelist: Some(&allowed),
         no_ui_authorization: false,
+        hard_exclude_outside: false,
     };
     assert!(!chat.excludes("write"), "聊天路径名单外工具应走授权等待");
 }
