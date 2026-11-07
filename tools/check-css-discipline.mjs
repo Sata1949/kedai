@@ -93,7 +93,7 @@ const LINE_BASELINE = {
   'styles/panels.css': 1000,
   'styles/content.css': 1022,
   'styles/task.css': 993,
-  'styles/mobile.css': 469,
+  'styles/mobile.css': 468, // UIREFINE：快捷入口合组，移动端网格定位净减一行
 };
 
 /**

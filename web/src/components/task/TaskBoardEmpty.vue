@@ -46,12 +46,12 @@ function openTaskComposer(): void {
             <li><b>02</b><span><strong>拆解与执行</strong><small>选择模式、执行者与工作区</small></span></li>
             <li><b>03</b><span><strong>汇总与交付</strong><small>查看步骤、结果与文件变更</small></span></li>
           </ol>
-          <div class="sv-task-start-modes" aria-label="可选执行模式">
+          <div class="sv-task-start-modes" aria-label="执行模式一览">
+            <span class="sv-task-start-modes-label">支持的执行模式</span>
             <span
               v-for="m in MODE_ORDER"
               :key="m"
               class="sv-task-start-mode"
-              :class="{ active: store.taskRunMode === m }"
             >{{ MODE_LABELS[m] }}</span>
           </div>
           <div class="sv-task-start-actions">
@@ -190,17 +190,12 @@ function openTaskComposer(): void {
   margin-top: clamp(var(--space-6), 4vh, calc(var(--space-8) + var(--space-6)));
 }
 .sv-task-start-mode {
-  padding: var(--space-1) var(--space-2);
-  border: 1px solid var(--sv-line-strong);
-  font-size: var(--text-2xs);
+  font-size: var(--text-xs);
   color: var(--sv-ink-dim);
   letter-spacing: 0.04em;
 }
-.sv-task-start-mode.active {
-  border-color: var(--sv-ink);
-  background: var(--sv-ink);
-  color: var(--sv-white);
-}
+.sv-task-start-modes-label { flex-basis: 100%; font-size: var(--text-xs); color: var(--sv-ink-faint); }
+.sv-task-start-mode + .sv-task-start-mode::before { content: '·'; margin-right: var(--space-2); color: var(--sv-ink-faint); }
 .sv-task-start-actions {
   display: flex;
   flex-wrap: wrap;

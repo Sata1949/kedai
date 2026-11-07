@@ -417,56 +417,67 @@ async function onModelChange(e: Event): Promise<void> {
         <option v-for="m in [...new Set([model, ...models])].filter(Boolean)" :key="m" :value="m">{{ m }}</option>
       </select>
 
-      <!-- 快速回复按钮(最右,选择文件前):弹出启用列表→点击填入输入框 -->
-      <div class="sv-rel sv-ml-auto">
-        <button class="sv-btn-attach" aria-label="快速回复" title="快速回复:选择常用回复填入输入框(不自动发送)" @click="toggleQuickMenu">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-          </svg>
-          <span class="sv-btn-label">快速回复</span>
-        </button>
-        <!-- 快速回复下拉(向上弹出) -->
-        <div
-          v-if="quickMenuOpen"
-          class="sv-slash-menu sv-popover sv-popover-right"
-          @mousedown.stop.prevent
-        >
-          <button
-            v-for="r in enabledQuickReplies"
-            :key="r.id"
-            class="sv-slash-item"
-            title="点击填入输入框"
-            @mousedown.prevent="fillQuickReply(r)"
-          >
-            <b>{{ r.label || r.name }}</b>
-            <span class="sv-slash-desc">{{ r.content }}</span>
+      <!-- 两个快捷入口整体换行，避免附件单独掉到下一行。 -->
+      <div class="sv-composer-actions">
+        <div class="sv-rel">
+          <button class="sv-btn-attach" aria-label="快速回复" title="快速回复:选择常用回复填入输入框(不自动发送)" @click="toggleQuickMenu">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+            </svg>
+            <span class="sv-btn-label">回复</span>
           </button>
-          <div v-if="enabledQuickReplies.length === 0" class="sv-slash-empty">
-            <span>暂无启用的快速回复(可在「快速回复」管理中创建)</span>
+          <!-- 快速回复下拉(向上弹出) -->
+          <div
+            v-if="quickMenuOpen"
+            class="sv-slash-menu sv-popover sv-popover-right"
+            @mousedown.stop.prevent
+          >
+            <button
+              v-for="r in enabledQuickReplies"
+              :key="r.id"
+              class="sv-slash-item"
+              title="点击填入输入框"
+              @mousedown.prevent="fillQuickReply(r)"
+            >
+              <b>{{ r.label || r.name }}</b>
+              <span class="sv-slash-desc">{{ r.content }}</span>
+            </button>
+            <div v-if="enabledQuickReplies.length === 0" class="sv-slash-empty">
+              <span>暂无启用的快速回复(可在「快速回复」管理中创建)</span>
+            </div>
           </div>
         </div>
-      </div>
 
-      <!-- 选择文件按钮(最右) -->
-      <button class="sv-btn-attach" aria-label="选择文件" title="选择文件发送给模型" @click="fileInput?.click()">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-        </svg>
-        <span class="sv-btn-label">选择文件</span>
-      </button>
-      <input
-        ref="fileInput"
-        type="file"
-        multiple
-        accept="image/*,.txt,.md,.json,.js,.ts,.py,.html,.css,.pdf,.doc,.docx"
-        class="hidden"
-        @change="onFilePicked"
-      />
+        <!-- 选择文件按钮(最右) -->
+        <button class="sv-btn-attach" aria-label="选择文件" title="选择文件发送给模型" @click="fileInput?.click()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+          </svg>
+          <span class="sv-btn-label">附件</span>
+        </button>
+        <input
+          ref="fileInput"
+          type="file"
+          multiple
+          accept="image/*,.txt,.md,.json,.js,.ts,.py,.html,.css,.pdf,.doc,.docx"
+          class="hidden"
+          @change="onFilePicked"
+        />
+      </div>
     </div>
   </footer>
 </template>
 
 <style scoped>
+.sv-composer-actions { display: flex; align-items: center; gap: var(--space-1-5); flex: none; margin-left: auto; }
+/* 桌面工具栏：统一控件高度，框线退后，只有选中态承担强调。 */
+@media (min-width: 768px) {
+  .sv-mode, .sv-auth-toggle { border-width: var(--bw-thin); box-shadow: none; }
+  .sv-mode button, .sv-auth-toggle button { min-height: var(--control-h-sm); }
+  .sv-mode button:not(.active), .sv-auth-toggle button:not(.active) { background: transparent; }
+  .sv-mode-idx { display: none; }
+  .sv-composer-actions .sv-btn-attach { border-color: var(--sv-line-strong); box-shadow: none; }
+}
 /* ===== 输入卡(UIQ-4):白色 composer + 2px 黑框;聚焦时顶线转红 =====
    输入区整体仍是粉色平面(surface),但真正的输入面是一张白卡;
    这样文字、光标、发送键都在同一张「纸」上,不再与粉色底混层。 */
@@ -518,6 +529,7 @@ async function onModelChange(e: Event): Promise<void> {
    background-size 必须显式给像素对:三角是只有 viewBox、没有 width/height 的 SVG,
    `auto` 会按定位区高度渲染(实测 35×35px,而右侧只预留 22px → 三角压住模型名)。 */
 .sv-model-select {
+  height: calc(var(--control-h-sm) + 2px);
   -webkit-appearance: none;
   appearance: none;
   border: var(--bw-thin) solid var(--sv-ink);
@@ -606,11 +618,11 @@ async function onModelChange(e: Event): Promise<void> {
   }
   /* 选中态保留墨块/粉块(content.css 用 !important 固定白字),其余段落下沉为文本 */
   .sv-mode { border: 0; box-shadow: none; }
-  .sv-mode button { min-height: 30px; padding: 0 var(--space-2); border: 0; background: transparent; color: var(--sv-ink-faint); font-size: 11px; letter-spacing: 0.04em; }
+  .sv-mode button { min-height: 30px; padding: 0 var(--space-2); border: 0; background: transparent; color: var(--sv-ink-faint); font-size: var(--text-xs); letter-spacing: 0.04em; }
   .sv-mode button.active { background: var(--sv-ink); color: var(--sv-white); }
   .sv-auth-toggle { border: 0; box-shadow: none; }
   .sv-auth-toggle button { min-height: 30px; padding: 0 var(--space-2); background: transparent; color: var(--sv-ink-faint); }
-  .sv-auth-toggle button.active { background: var(--sv-pink-deep); color: var(--sv-white); }
+  .sv-auth-toggle button.active { background: var(--sv-pink-dark); color: var(--sv-white); }
   /* 全局 .sv-select 固定 height:40px,只写 min-height 压不住(实测第二行比第一行高 9px) */
   .sv-model-select {
     height: 30px;
@@ -618,7 +630,7 @@ async function onModelChange(e: Event): Promise<void> {
     padding: 0 var(--space-5) 0 var(--space-1);
     border: 0;
     background-color: transparent;
-    font-size: 11px;
+    font-size: var(--text-xs);
     color: var(--sv-ink-soft);
   }
   .sv-input-toolbar .sv-btn-attach {

@@ -15,7 +15,7 @@ const emit = defineEmits<{
 
 const store = useAppStore();
 const {
-  model, currentSessionId, currentCharacterId, sessions, currentCharacter, currentCharacterName,
+  currentSessionId, currentCharacterId, sessions, currentCharacter, currentCharacterName,
   currentGreetings, renderHtml, currentScriptAuthorized,
 } = storeToRefs(store);
 
@@ -158,7 +158,6 @@ onBeforeUnmount(() => {
     <span class="sv-topbar-identity">
       <span class="sv-supreme blue sm" />
       <span class="sv-topbar-title truncate min-w-0" :title="currentCharacterName">{{ currentCharacterName }}</span>
-      <span v-if="model" class="sv-topbar-sub truncate" :title="model">{{ model }}</span>
     </span>
 
     <span class="sv-topbar-right">

@@ -165,6 +165,7 @@ const visibleDomains = computed<Domain[]>(() =>
 
 const activeDomain = ref<string>('conn');
 const activeSection = ref<SectionKey>('api');
+const activeDomainLabel = computed(() => visibleDomains.value.find((d) => d.key === activeDomain.value)?.label ?? '设置分区');
 
 /**
  * 已并入其他分区的**旧分区键** → 现分区键(2026-11-07 设置分区合并)。
@@ -300,6 +301,7 @@ const activeLabel = computed(() => {
 
           <!-- 二级:当前功能域下的分区与工具(缩进区分层级) -->
           <div class="hub-sub">
+            <div class="hub-sub-label">{{ activeDomainLabel }}</div>
             <button
               v-for="it in currentItems"
               :key="`${it.type}-${it.key}`"
@@ -339,6 +341,8 @@ const activeLabel = computed(() => {
 </template>
 
 <style scoped>
+.hub-sub-label { padding: var(--space-2) var(--space-2-5) var(--space-1); color: var(--sv-ink-faint); font-size: var(--text-xs); }
+@media (max-width: 767px) { .hub-sub-label { display: none; } }
 /* 二级导航(2026-09 两级结构):缩进 + 左侧细线区分层级。
    样式写在 scoped 内(MAINTENANCE D-5:新增组件样式禁止进 style.css)。 */
 .hub-sub {
@@ -380,11 +384,13 @@ const activeLabel = computed(() => {
   border-color: var(--sv-pink);
   color: var(--sv-ink);
 }
-/* 当前分区:黑底白字,与一级 active 视觉语言一致但更轻(不做全黑,避免抢一级层级) */
+/* 当前分区用浅底与左侧标线，区别于一级功能域的整块深底。 */
 .hub-sub-item.active {
-  background: var(--sv-ink);
-  color: var(--sv-white);
-  border-color: var(--sv-ink);
+  background: var(--sv-pink-light);
+  color: var(--sv-ink);
+  border-color: var(--sv-line-strong);
+  box-shadow: inset 3px 0 0 var(--sv-pink-dark);
+  font-weight: 700;
 }
 /* 工具项:虚线段标记 + 尾部箭头,提示「点开是独立面板」而非切换内容区 */
 .hub-sub-mark {
