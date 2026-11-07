@@ -10,6 +10,7 @@ import { health, type HealthInfo } from '../api/health';
 import type { ModalFlag } from '../modals';
 import type { SettingsSectionKey } from '../onboarding';
 import SettingsModal from './SettingsModal.vue';
+import { useDialogFocus } from '../composables/useDialogFocus';
 
 const store = useAppStore();
 
@@ -35,6 +36,8 @@ const buildInfoText = computed(() => {
 const close = (): void => {
   store.settingsOpen = false;
 };
+const dialogEl = ref<HTMLElement | null>(null);
+useDialogFocus(dialogEl, close);
 
 /** 设置分区键(与 SettingsModal 的 activeSection 一一对应)。
  *  字面量联合的单一来源在 `web/src/onboarding.ts`(L1):该键同时被 stores(L2) 的
@@ -276,12 +279,12 @@ const activeLabel = computed(() => {
 
 <template>
   <div class="sv-modal-mask" @click.self="close">
-    <div class="sv-modal sv-hub-modal">
+    <div ref="dialogEl" class="sv-modal sv-hub-modal" role="dialog" aria-modal="true" aria-labelledby="sv-settings-title" tabindex="-1">
       <div class="sv-modal-head">
-        <h2 class="flex items-center gap-2">
+        <h2 id="sv-settings-title" class="flex items-center gap-2">
           <span class="sv-supreme pink" /> 综合设置
         </h2>
-        <button class="sv-btn ghost sv-btn-square" @click="close">✕</button>
+        <button class="sv-btn ghost sv-btn-square" aria-label="关闭综合设置" @click="close">✕</button>
       </div>
 
       <div class="sv-hub-body">

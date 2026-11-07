@@ -1,6 +1,6 @@
 // API 连接设置:Base URL / Key / 模型 的编辑、保存与连接测试。
 // 从 SettingsModal.vue 拆分:逻辑集中于 composable,组件模板零改动(同名 ref 解构可用)。
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 import { useAppStore } from '../store';
 import { storeToRefs } from 'pinia';
 import * as api from '../api';
@@ -76,16 +76,22 @@ export function useApiSettings() {
   const switchingModel = ref(false);
   const modelFeedback = ref('');
   const refreshing = ref(false);
+  const loadingConnection = ref(false);
+  const connectionLoadError = ref('');
+  const modelsLoading = computed(() => loadingConnection.value || refreshing.value || connecting.value || savingApi.value);
 
   /** 回填服务端运行期设置(API 连接 + Key 脱敏);组件挂载时调用 */
   async function loadApiSettings(): Promise<void> {
+    if (loadingConnection.value) return;
+    loadingConnection.value = true;
+    connectionLoadError.value = '';
     try {
       const data = await api.settingsInfo();
       connInfo.value = { connector: data.connector, model: data.model };
-      if (data.models?.length) models.value = data.models;
+      models.value = data.models ?? [];
       if (!model.value) model.value = data.model;
-    } catch {
-      /* 忽略 */
+    } catch (err) {
+      connectionLoadError.value = `加载连接信息失败：${err instanceof Error ? err.message : '请重试'}`;
     }
     try {
       // 按当前顶层模式回填:任务模式读 task 覆盖层,否则读 roleplay(扁平字段)。
@@ -95,8 +101,10 @@ export function useApiSettings() {
       hasApiKey.value = s.has_api_key;
       apiKey.value = '';
       if (!model.value) model.value = s.model;
-    } catch {
-      /* 忽略 */
+    } catch (err) {
+      connectionLoadError.value = `加载 API 设置失败：${err instanceof Error ? err.message : '请重试'}`;
+    } finally {
+      loadingConnection.value = false;
     }
   }
 
@@ -199,6 +207,7 @@ export function useApiSettings() {
   return {
     apiBaseUrl, apiKey, apiKeyMasked, hasApiKey, savingApi, apiFeedback,
     connInfo, models, connecting, connFeedback, switchingModel, modelFeedback, refreshing,
+    loadingConnection, connectionLoadError, modelsLoading,
     loadApiSettings, onBaseUrlBlur, doConnect, saveApi, refreshModelList, onModelChange,
   };
 }
