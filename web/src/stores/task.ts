@@ -9,6 +9,7 @@
 import { defineStore } from 'pinia';
 import { ref, watch } from 'vue';
 import * as api from '../api';
+import { persistTaskAuthorizationTier as persistTier, taskAuthorizationTierState } from '../composables/useTaskAuthorizationTier';
 import type { TaskFlowMode } from '../api/labels';
 import {
   readDefaultAppMode,
@@ -30,6 +31,7 @@ import {
   setTranscriptMode as setTaskTranscriptMode,
   useTaskTrace as taskTraceState,
 } from '../composables/useTaskTrace';
+import { applyTaskToolAuthRequired, applyTaskToolAuthResolved, clearPendingTaskToolAuth, clearTaskToolAuth, loadTaskToolAuthSnapshot } from '../composables/useTaskToolAuth';
 
 /** 顶层模式持久化键:刷新后停留在上次模式 */
 const APP_MODE_KEY = 'kedai.appMode';
@@ -208,6 +210,7 @@ export const useTaskStore = defineStore('app.task', () => {
    * 在拉取到连接列表后**显式重置**失效引用并给一行提示(不静默;见 TaskConnectionSelect)。
    */
   const taskConnectionId = ref<string>(readStoredTaskConnectionId());
+  const taskAuthorizationTier = taskAuthorizationTierState(); // 三档授权(2026-11-06)
   const tasks = ref<api.TaskRecord[]>([]);
   const currentTaskId = ref<string | null>(null);
   /** 当前任务详情(含子任务) */
@@ -381,6 +384,7 @@ export const useTaskStore = defineStore('app.task', () => {
     }
   }
   watch(taskConnectionId, persistTaskConnectionId);
+  watch(taskAuthorizationTier, persistTier);
 
   // ===== 新建任务参数写入(组件侧只读 + action 写入,避免 v-model 直改 store) =====
   function setTaskRunMode(mode: api.TaskRunMode): void {
@@ -397,6 +401,9 @@ export const useTaskStore = defineStore('app.task', () => {
   }
   function setTaskConnectionId(id: string): void {
     taskConnectionId.value = id;
+  }
+  function setTaskAuthorizationTier(tier: api.TaskAuthorizationTier): void {
+    taskAuthorizationTier.value = tier; // 三档授权(2026-11-06)
   }
 
   // ===== 加载(in-flight 合并防事件风暴) =====
@@ -599,6 +606,7 @@ export const useTaskStore = defineStore('app.task', () => {
     // 执行轨迹同理:轨迹是**当前任务**的展示数据,切任务/删除后必须清空——
     // 留着旧任务的轨迹会让新任务的时间线显示别人的思考。
     clearTaskTrace();
+    clearTaskToolAuth(); // 瞬态队列属于当前任务,切走/删除后不得残留
     if (clearAgentStatus) lastAgentStatus.value = null;
     taskLoadError.value = null;
     if (persist) persistCurrentTaskId(null);
@@ -631,6 +639,7 @@ export const useTaskStore = defineStore('app.task', () => {
     clearTaskChanges();
     clearAllLiveDeltas();
     clearTaskTrace();
+    clearTaskToolAuth(); // 待确认队列随切换清空;成功后从快照端点重建
     // 最近 agent 状态同理:agent_status 不落库,新任务从空开始(等下一个事件)
     lastAgentStatus.value = null;
     const ok = await loadTaskDetail(id);
@@ -650,6 +659,7 @@ export const useTaskStore = defineStore('app.task', () => {
           void loadTaskCalls(previousId);
           void loadTaskChanges(previousId);
           void loadTaskTrace(previousId);
+          void loadTaskToolAuthSnapshot(previousId);
         }
         return;
       }
@@ -659,6 +669,7 @@ export const useTaskStore = defineStore('app.task', () => {
     // 执行轨迹同理:它是独立端点(轨迹可达数 MB,刻意不并入任务详情),
     // 打开任务时拉一次;之后由 kind=trace 事件增量并入,不重复拉。
     if (ok) void loadTaskTrace(id);
+    if (ok) void loadTaskToolAuthSnapshot(id); // 瞬态事件不落库:切任务/刷新后靠快照恢复队列
   }
 
   /** 清空当前任务选择(任务被删除/列表已无该 id 时;同步清持久化) */
@@ -802,6 +813,7 @@ export const useTaskStore = defineStore('app.task', () => {
           // 「无事件」路径上终态补拉仍是唯一保证,故保留)
           if (ev.task_id === currentTaskId.value) {
             void loadTaskChanges(ev.task_id);
+            clearPendingTaskToolAuth(); // 终态:后端已取消全部等待;回执保留(它是结论)
           }
         }
         break;
@@ -873,6 +885,12 @@ export const useTaskStore = defineStore('app.task', () => {
         // 这里只做转调——本文件已在对 file-size ratchet 的基线内,不再加主体逻辑。
         appendTaskTrace(ev.task_id, ev.trace);
         break;
+      case 'tool_authorization_required':
+        applyTaskToolAuthRequired(ev); // 三档授权(2026-11-06):瞬态事件,载荷直接入队
+        break;
+      case 'tool_authorization_resolved':
+        applyTaskToolAuthResolved(ev); // 收束事件:出队 + 一行结果
+        break;
       case undefined:
         // kind 缺失(旧服务端/未知分类):仅透传事件面板,不触发刷新。
         // 这是**契约允许**的向后兼容分支(后端 kind 为 Option + skip_serializing_if),
@@ -913,6 +931,7 @@ export const useTaskStore = defineStore('app.task', () => {
       // 轨迹是**另一条通道**(事件 seq 与轨迹 seq 不同源,且 kind=trace 帧不带事件 seq),
       // 断线期间丢的轨迹帧由它自己按轨迹 seq 补齐;从未加载成功过时退回全量拉取。
       if (resumeTask) resumeTaskTrace(resumeTask);
+      if (resumeTask) void loadTaskToolAuthSnapshot(resumeTask); // 瞬态事件不补拉:重连后靠快照对齐
     }, CONNECT_SETTLE_MS);
   }
 
@@ -1014,6 +1033,7 @@ export const useTaskStore = defineStore('app.task', () => {
       // 连接不做模式门控:六模式都会用到 provider,空串 = 跟随默认连接(不下发该键)
       taskConnectionId.value || undefined,
       workspace,
+      taskAuthorizationTier.value,
     );
     tasks.value = [task, ...tasks.value];
     listSignature = contentSignature(tasks.value); // 本地乐观改写后同步签名(下次事件刷新同内容时不再替换)
@@ -1106,6 +1126,7 @@ export const useTaskStore = defineStore('app.task', () => {
     taskFlowMode,
     taskFlowIds,
     taskConnectionId,
+    taskAuthorizationTier,
     tasks,
     currentTaskId,
     currentTask,
@@ -1130,6 +1151,7 @@ export const useTaskStore = defineStore('app.task', () => {
     setTaskFlowMode,
     setTaskFlowIds,
     setTaskConnectionId,
+    setTaskAuthorizationTier,
     setAppMode,
     setDefaultAppMode,
     loadTasks,

@@ -47,6 +47,9 @@ reqwest = { version = "0.12", default-features = false, features = ["native-tls"
 
 [target.'cfg(target_os = "android")'.dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# Android 退出必须走 `_exit`:Tauri/tao 的 std::process::exit 会执行 C++ 静态析构,
+# 在 WebView 仍存活时触发 hwui 的 destroyed mutex(FORTIFY abort),详见 src/lib.rs 的 hard_exit。
+libc = "0.2"
 
 [profile.release]
 lto = true

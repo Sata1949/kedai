@@ -1989,6 +1989,7 @@ name = "kedai-desktop"
 version = "0.4.5"
 dependencies = [
  "kedai-server",
+ "libc",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",

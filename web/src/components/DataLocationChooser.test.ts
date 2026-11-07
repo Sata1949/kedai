@@ -49,4 +49,45 @@ describe('DataLocationChooser(盘符选择器)', () => {
     const apply = wrapper.findAll('button').find((b) => b.text().includes('使用该位置'));
     expect(apply?.attributes('disabled')).toBeDefined();
   });
+
+  it('Android:默认路径模式,缺权限时显示授权入口,确认 emit 绝对路径', async () => {
+    const wrapper = mount(DataLocationChooser, {
+      props: {
+        status: {
+          ...status,
+          platform: 'android',
+          suggested_root: '/storage/emulated/0/Download/Kedai-Data',
+          needs_permission: true,
+          drives: [],
+          default_drive: null,
+        },
+      },
+    });
+    // 不再展示盘符错误,而是默认路径 + 权限说明
+    expect(wrapper.text()).not.toContain('未检测到可用盘符');
+    expect(wrapper.text()).toContain('去授权所有文件访问');
+    const input = wrapper.find('input.sv-input');
+    expect((input.element as HTMLInputElement).value).toBe('/storage/emulated/0/Download/Kedai-Data');
+    const apply = wrapper.findAll('button').find((b) => b.text().includes('使用该位置'));
+    await apply?.trigger('click');
+    expect(wrapper.emitted('choose')).toEqual([['/storage/emulated/0/Download/Kedai-Data']]);
+  });
+
+  it('Android:授权后可点「重新检测」请求父级刷新', async () => {
+    const wrapper = mount(DataLocationChooser, {
+      props: {
+        status: {
+          ...status,
+          platform: 'android',
+          suggested_root: '/storage/emulated/0/Download/Kedai-Data',
+          needs_permission: false,
+          drives: [],
+          default_drive: null,
+        },
+      },
+    });
+    const refresh = wrapper.findAll('button').find((b) => b.text().includes('重新检测'));
+    await refresh?.trigger('click');
+    expect(wrapper.emitted('refresh')).toHaveLength(1);
+  });
 });

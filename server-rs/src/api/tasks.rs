@@ -22,11 +22,14 @@ mod artifacts;
 mod attachments;
 mod detail;
 mod trace;
+// 任务待确认工具调用快照(2026-11-06 三档授权;拆出以守住本文件 file-size 基线)
+mod tool_authorizations;
 use detail::{TaskDetailResponse, TaskUsageTotalResponse};
 // 草稿产物与回收端点已搬进 `artifacts.rs`(ATTACH-1,纯代码移动):路由层仍按
 // `tasks::task_artifacts` 等旧名字引用,签名与线格式不变。
 pub use artifacts::{scratch_cleanup, task_artifact_download, task_artifacts};
 pub use attachments::{attachment_delete, attachment_list, attachment_upload};
+pub use tool_authorizations::list_tool_authorizations;
 pub use trace::list_trace;
 
 #[derive(Deserialize)]
@@ -77,6 +80,10 @@ pub struct CreateTaskBody {
     /// (不许把工作区指进数据目录,也不许让数据目录落在工作区内)。
     #[serde(default)]
     pub workspace: Option<String>,
+    /// 任务模式工具授权档位(2026-11-06):`step`/`workspace`/`auto`;
+    /// 缺省 = None(旧行为 deny_dangerous),未知值 400。
+    #[serde(default)]
+    pub tool_authorization: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -147,6 +154,15 @@ pub async fn create(
         Ok(w) => w,
         Err(e) => return validation(e),
     };
+    // 三档授权(2026-11-06):严格解析;缺省 None = 旧行为,未知值 400。
+    let tool_authorization = match body.tool_authorization.as_deref().map(str::trim) {
+        None => None,
+        Some("") => None,
+        Some(s) => match crate::models::tool_policy::TaskAuthorizationMode::parse(s) {
+            Some(m) => Some(m),
+            None => return validation(format!("未知任务授权档位:{s}(可选:step/workspace/auto)")),
+        },
+    };
     match state
         .db_call(move || {
             svc.create(
@@ -158,6 +174,7 @@ pub async fn create(
                 flow_ids.as_deref(),
                 connection_id.as_deref(),
                 workspace.as_deref(),
+                tool_authorization,
             )
         })
         .await

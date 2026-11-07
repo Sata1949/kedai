@@ -215,6 +215,22 @@ impl TaskEvents for TaskService {
     fn delta_batcher(&self, task_id: &str, phase: &str, step_index: Option<usize>) -> DeltaBatcher {
         TaskService::delta_batcher(self, task_id, phase, step_index)
     }
+
+    fn emit_tool_authorization_required(
+        &self,
+        task_id: &str,
+        auth: crate::models::types::TaskToolAuthorization,
+    ) {
+        TaskService::emit_tool_authorization_required(self, task_id, auth)
+    }
+
+    fn emit_tool_authorization_resolved(
+        &self,
+        task_id: &str,
+        decision: crate::models::types::TaskToolAuthorizationDecision,
+    ) {
+        TaskService::emit_tool_authorization_resolved(self, task_id, decision)
+    }
 }
 
 // ==================== TaskTerminalSink:执行终态落库 ====================

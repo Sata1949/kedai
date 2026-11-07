@@ -725,6 +725,7 @@ mod tests {
                 allowed: true,
                 risk: crate::tools::permissions::ToolRisk::Dangerous,
                 reason: "测试放行".into(),
+                code: None,
             }
         }
 

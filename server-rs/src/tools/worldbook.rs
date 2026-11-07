@@ -508,6 +508,7 @@ mod tests {
             allowed: true,
             risk: ToolRisk::Dangerous,
             reason: "测试放行".into(),
+            code: None,
         };
         let out = registry
             .execute_with_decision(TOOL_NAME, &args.to_string(), ctx(), &decision)

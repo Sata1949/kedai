@@ -214,7 +214,11 @@ fn secure_headers(mut response: Response<Body>) -> Response<Body> {
         "permissions-policy",
         HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
     );
-    headers.insert("content-security-policy", HeaderValue::from_static("default-src 'self'; base-uri 'none'; object-src 'none'; frame-src 'self'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data: blob: https:; media-src 'self' https: http:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' http://127.0.0.1:* http://localhost:*"));
+    // img-src 放行 http(2026-11-06 实机取证):角色卡插图常见 http 图床,
+    // 旧策略只剩 https 时整张图被 CSP 拦掉(消息里表现为破图图标 + alt,视觉上就是
+    // 「插图消失」)。图片不是可执行内容:script-src 仍仅 'self',http 图无法读取
+    // 宿主 DOM / cookie;Android 侧另需 network_security_config 同步放行明文。
+    headers.insert("content-security-policy", HeaderValue::from_static("default-src 'self'; base-uri 'none'; object-src 'none'; frame-src 'self'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data: blob: https: http:; media-src 'self' https: http:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' http://127.0.0.1:* http://localhost:*"));
     response
 }
 

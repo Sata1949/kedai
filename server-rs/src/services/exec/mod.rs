@@ -78,6 +78,12 @@ pub struct ExecResult {
     pub tier: ShellTier,
     /// 是否因超时被强杀
     pub timed_out: bool,
+    /// stdout 或 stderr 是否被 exec 层的 32K 字符窗口截断(2026-11-06)。
+    ///
+    /// 只表示**本层**截断;`tools/registry` 另有 64KB 字节截断,两层各自如实报告。
+    /// 为什么要暴露:模型看到「输出超 N 字符已截断」才知道该缩小范围重跑,
+    /// 否则会把半截日志当完整结论。
+    pub truncated: bool,
 }
 
 /// 输出保留上限(字符):超出部分截断并附省略说明。
@@ -131,6 +137,103 @@ pub fn truncate_output(s: &str) -> String {
     let tail: String = s.chars().skip(count - TAIL_KEEP_CHARS).collect();
     let omitted = count - HEAD_KEEP_CHARS - TAIL_KEEP_CHARS;
     format!("{head}\n{}\n{tail}", truncation_marker(omitted))
+}
+
+/// ANSI 转义序列过滤器(流式状态机,2026-11-06)。
+///
+/// **为什么需要它**:`cargo test` / `npm test` 的输出带 ANSI 色彩与光标控制
+/// (`\x1b[32m✓\x1b[0m`),原样回灌模型与前端会污染可读性,也白占 32K 字符预算。
+///
+/// **为什么放在读取侧而不是拼接侧**:截断是「保头 + 保尾」的字符窗口,序列若恰好被
+/// 窗口切开,事后按整串清洗会把后半截的可见文本一起吃掉。在 `PipeCapture` 之前过滤,
+/// 转义序列根本不进预算,也不存在切半问题。
+///
+/// 覆盖范围:CSI(`ESC [` … 0x40–0x7E)、OSC(`ESC ]` … BEL 或 `ESC \`)、单字符 ESC
+/// 序列。**不**处理 `\r` 与退格——那是光标语义,不属于转义序列。
+#[derive(Debug, Default)]
+pub struct AnsiFilter {
+    state: AnsiState,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum AnsiState {
+    /// 正常文本
+    #[default]
+    Ground,
+    /// 已读到 ESC
+    Esc,
+    /// 已读到 ESC [
+    Csi,
+    /// 已读到 ESC ](OSC)
+    Osc,
+    /// OSC 内读到 ESC(可能是 `ESC \` 终止符)
+    OscEsc,
+}
+
+impl AnsiFilter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 喂入一段原始字节,把可见文本追加到 `out`。
+    ///
+    /// 按 `u8` 处理:UTF-8 多字节序列的每个字节都 ≥ 0x80,与任何状态机的 ASCII
+    /// 边界字符不冲突,故这里可以逐字节扫描而不破坏中文。
+    pub fn feed(&mut self, input: &[u8], out: &mut Vec<u8>) {
+        for &b in input {
+            match self.state {
+                AnsiState::Ground => {
+                    if b == 0x1b {
+                        self.state = AnsiState::Esc;
+                    } else {
+                        out.push(b);
+                    }
+                }
+                AnsiState::Esc => match b {
+                    b'[' => self.state = AnsiState::Csi,
+                    b']' => self.state = AnsiState::Osc,
+                    // 单字符 ESC 序列(如 ESC c):吃掉该字符即回到正常
+                    _ => self.state = AnsiState::Ground,
+                },
+                AnsiState::Csi => {
+                    // 0x40..=0x7E 是 CSI 的终止字节
+                    if (0x40..=0x7e).contains(&b) {
+                        self.state = AnsiState::Ground;
+                    }
+                }
+                AnsiState::Osc => match b {
+                    0x07 => self.state = AnsiState::Ground,
+                    0x1b => self.state = AnsiState::OscEsc,
+                    _ => {}
+                },
+                AnsiState::OscEsc => match b {
+                    b'\\' => self.state = AnsiState::Ground,
+                    0x1b => {} // 连续 ESC 仍等终止符
+                    _ => self.state = AnsiState::Osc,
+                },
+            }
+        }
+    }
+
+    /// 收尾:丢弃未终止的序列(它们没有可见文本),状态复位。
+    pub fn finish(&mut self) {
+        self.state = AnsiState::Ground;
+    }
+
+    /// 当前是否停在正常文本态(测试用)。
+    #[cfg(test)]
+    pub fn is_ground(&self) -> bool {
+        self.state == AnsiState::Ground
+    }
+}
+
+/// 整串便捷入口(Android 桥等「一次拿到全部输出」的路径用)。
+pub fn strip_ansi(s: &str) -> String {
+    let mut filter = AnsiFilter::new();
+    let mut out = Vec::with_capacity(s.len());
+    filter.feed(s.as_bytes(), &mut out);
+    filter.finish();
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// 命令执行的单一入口:按当前可用等级执行。
@@ -318,5 +421,44 @@ mod tests {
                 assert_eq!(t.as_str(), s, "往返 {s}");
             }
         }
+    }
+    // ==================== ANSI 过滤(2026-11-06) ====================
+
+    #[test]
+    fn strip_ansi_removes_sgr_and_cursor_sequences() {
+        assert_eq!(strip_ansi("\x1b[31mred\x1b[0m"), "red");
+        assert_eq!(strip_ansi("\x1b[2K\x1b[1Gok"), "ok");
+        // OSC(终端标题)以 BEL 终止
+        assert_eq!(strip_ansi("\x1b]0;title\x07text"), "text");
+    }
+
+    #[test]
+    fn ansi_filter_handles_sequence_split_across_chunks() {
+        let mut f = AnsiFilter::new();
+        let mut out = Vec::new();
+        f.feed(b"a\x1b[3", &mut out);
+        f.feed(b"1mred", &mut out);
+        f.finish();
+        assert_eq!(String::from_utf8_lossy(&out), "ared");
+    }
+
+    #[test]
+    fn ansi_filter_preserves_utf8_and_newlines() {
+        let mut f = AnsiFilter::new();
+        let mut out = Vec::new();
+        f.feed("中文\n\x1b[32m绿\x1b[0m".as_bytes(), &mut out);
+        f.finish();
+        assert_eq!(String::from_utf8_lossy(&out), "中文\n绿");
+    }
+
+    #[test]
+    fn ansi_filter_drops_unterminated_tail() {
+        let mut f = AnsiFilter::new();
+        let mut out = Vec::new();
+        f.feed(b"ok\x1b[", &mut out);
+        assert!(!f.is_ground(), "未终止的 CSI 应停在序列态");
+        f.finish();
+        assert!(f.is_ground(), "finish 必须复位");
+        assert_eq!(String::from_utf8_lossy(&out), "ok");
     }
 }

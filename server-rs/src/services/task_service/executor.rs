@@ -1100,6 +1100,9 @@ impl TaskService {
                 readonly_streak_limit: None,
                 no_progress_limit: None,
                 shard_read_nudge_after: None,
+                // 规划侦察只跑只读白名单；档位从 scope 透传，未绑定工作区时 None
+                // （侦察没有写类/命令执行，Step/Auto 的分支都不会命中）。
+                task_authorization: scope.as_ref().and_then(|s| s.task_authorization()),
             }),
         };
         let mut scout_round = 0usize;

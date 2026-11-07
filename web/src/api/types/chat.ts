@@ -22,7 +22,28 @@ export type SseEvent =
   | { type: 'reasoning'; text: string }
   | { type: 'step'; step: string; detail?: string; index?: number; total?: number }
   | { type: 'tool_call'; name: string; input: unknown; call_id?: string; render_kind?: string; origin?: string }
-  | { type: 'tool_authorization_required'; name: string; risk: ToolRisk; reason: string; run_id: string; call_id: string; origin?: string }
+  | {
+      type: 'tool_authorization_required';
+      name: string;
+      risk: ToolRisk;
+      reason: string;
+      run_id: string;
+      call_id: string;
+      origin?: string;
+      /** 2026-11-06 三档授权加性字段;旧服务端不下发,前端按可选处理 */
+      session_id?: string;
+      code?: string;
+      input_preview?: string;
+    }
+  | {
+      type: 'tool_authorization_resolved';
+      name: string;
+      run_id: string;
+      call_id: string;
+      session_id?: string;
+      decision: 'allow' | 'deny' | 'timeout' | 'cancelled';
+      detail?: string;
+    }
   | { type: 'tool_result'; name: string; output: unknown; call_id?: string; render_kind?: string; origin?: string; snapshot_id?: string }
   | { type: 'vars'; stat_data: Record<string, unknown> }
   | { type: 'interrupted' }

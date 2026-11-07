@@ -51,7 +51,7 @@ const storageBusy = ref(false);
 const storageError = ref('');
 const restarting = ref(false);
 
-onMounted(async () => {
+async function loadStorageStatus(): Promise<void> {
   try {
     const status = await api.getDataLocation();
     storageStatus.value = status;
@@ -60,15 +60,18 @@ onMounted(async () => {
   } catch (e) {
     storageError.value = `读取数据位置失败:${(e as Error).message}`;
   }
-});
+}
+
+onMounted(loadStorageStatus);
 
 /** 第二步确认:写指针 + 迁移,然后重启;浏览器端没有壳可重启,停留并提示。 */
-async function confirmStorage(letter: string): Promise<void> {
+async function confirmStorage(target: string): Promise<void> {
   if (storageBusy.value) return;
   storageBusy.value = true;
   storageError.value = '';
   try {
-    await api.selectDataLocation(letter);
+    // Android 传绝对路径根,桌面传盘符:以是否以 / 开头区分(桌面盘符恒为单字母)
+    await api.selectDataLocation(target.startsWith('/') ? { root: target } : target);
     storageChosen.value = true;
     restarting.value = true;
     const restarted = await restartApp();
@@ -270,19 +273,31 @@ function finish(): void {
         <template v-else-if="current.kind === 'storage'">
           <div class="ob-step-label">数据保存位置</div>
           <p class="ob-lead">
-            请选择 Kedai 数据所在的盘符。选择后会在该盘创建 <code>Kedai-Data</code> 文件夹，
-            内含系统数据、产物、任务记录与综合导入文件四个子目录。
+            <template v-if="storageStatus?.platform === 'android'">
+              Android 默认把数据放在公共「下载」目录下的 <code>Kedai-Data</code> 文件夹，
+              卸载应用后数据仍保留；内含系统数据、产物、任务记录与综合导入文件四个子目录。
+            </template>
+            <template v-else>
+              请选择 Kedai 数据所在的盘符。选择后会在该盘创建 <code>Kedai-Data</code> 文件夹，
+              内含系统数据、产物、任务记录与综合导入文件四个子目录。
+            </template>
           </p>
           <DataLocationChooser
             :status="storageStatus"
             :busy="storageBusy"
             :disabled="restarting"
             @choose="confirmStorage"
+            @refresh="loadStorageStatus"
           />
           <p v-if="storageError" class="sv-feedback err">{{ storageError }}</p>
           <p v-if="restarting" class="sv-feedback ok">正在重启 Kedai 以应用数据位置…</p>
           <p class="ob-note">
-            默认优先 D 盘，没有 D 盘时回退 C 盘；已有数据会复制到新位置（原目录保留）。
+            <template v-if="storageStatus?.platform === 'android'">
+              公共目录需要「所有文件访问」权限；已有数据会复制到新位置（原目录保留）。
+            </template>
+            <template v-else>
+              默认优先 D 盘，没有 D 盘时回退 C 盘；已有数据会复制到新位置（原目录保留）。
+            </template>
           </p>
         </template>
 

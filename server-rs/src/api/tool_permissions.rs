@@ -101,15 +101,36 @@ pub async fn resolve(
     let Some(call_id) = body.call_id.as_deref() else {
         return validation("缺少 call_id");
     };
-    {
-        let svc = state.sessions.clone();
-        let sid = body.session_id.clone();
-        match state.db_call(move || svc.get(&sid)).await {
-            Err(e) => return db_err(&e),
-            Ok(None) => return not_found("会话不存在"),
-            Ok(Some(_)) => {}
+    // 会话归属校验(2026-11-06 三档授权):任务模式用的是**虚拟**会话 id
+    // (`task:{id}` / `task:{id}:main:{n}` / `task:{id}:{phase}:{step}`),它们不在
+    // `sessions` 表里。此前一律查 sessions 表,任务侧的确认卡永远 404。
+    // 判据:带 `task:` 前缀且首个冒号段是存在的任务 id → 合法;否则回落原会话校验。
+    let task_sid: Option<String> = body
+        .session_id
+        .strip_prefix("task:")
+        .and_then(|rest| rest.split(':').next())
+        .filter(|id| !id.is_empty())
+        .map(str::to_string);
+    let is_task_session = match &task_sid {
+        Some(task_id) => {
+            let svc = state.tasks.clone();
+            let tid = task_id.clone();
+            match state.db_call(move || svc.get(&tid)).await {
+                Err(e) => return db_err(&e),
+                Ok(None) => return not_found("任务不存在"),
+                Ok(Some(_)) => true,
+            }
         }
-    }
+        None => {
+            let svc = state.sessions.clone();
+            let sid = body.session_id.clone();
+            match state.db_call(move || svc.get(&sid)).await {
+                Err(e) => return db_err(&e),
+                Ok(None) => return not_found("会话不存在"),
+                Ok(Some(_)) => false,
+            }
+        }
+    };
     if state.tool_registry.get(&body.tool).is_none() {
         return validation("工具未注册");
     }
@@ -120,6 +141,17 @@ pub async fn resolve(
         "deny" => PendingAuthorizationDecision::Deny,
         _ => return validation("decision 仅支持 once/session/role/deny"),
     };
+    // 任务会话没有角色维度(`character_id` 是任务执行者,不是角色授权对象),
+    // 「当前会话」授权也只对一个虚拟子会话生效(team 各主各一份),两者都会让用户
+    // 误解授权范围。任务侧只接受 once/deny,其余明确 400 而不是静默降级。
+    if is_task_session
+        && !matches!(
+            decision,
+            PendingAuthorizationDecision::AllowOnce | PendingAuthorizationDecision::Deny
+        )
+    {
+        return validation("任务模式仅支持 once(仅本次)/ deny(拒绝)两种决议");
+    }
     match state.tool_registry.permissions().resolve_wait(
         run_id,
         call_id,

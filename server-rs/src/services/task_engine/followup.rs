@@ -92,6 +92,8 @@ impl ModeExecutor for FollowupExecutor {
                 no_progress_guard: true,
                 // followup 不是 team 集成主:无分片读取软提醒。
                 shard_read_nudge_after: None,
+                // 三档授权(2026-11-06):终态追加指令沿用任务创建期的档位
+                task_authorization: ctx.tool_authorization,
             };
             let result =
                 run_agent_loop(svc.clone(), self.engine.clone(), call, cancel.clone()).await;

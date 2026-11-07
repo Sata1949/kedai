@@ -103,6 +103,13 @@ pub(crate) fn misc_routes() -> Router<Arc<AppState>> {
         // 任务执行轨迹(TMSHOW-1):思考 / 工具入出参 / 节点产出的结构化读取
         // (`after`/`limit` + `truncated`,与事件补拉同形)
         .route("/api/tasks/{id}/trace", get(tasks::list_trace))
+        // 任务待确认工具调用快照(2026-11-06 三档授权):断线/刷新后的权威恢复源。
+        // 待授权事件是瞬态的(不落库),重放旧请求会让用户对已超时的调用点头,
+        // 故补拉走这个内存快照端点。决议仍走 /api/agent/tool-permissions/resolve。
+        .route(
+            "/api/tasks/{id}/tool-authorizations",
+            get(tasks::list_tool_authorizations),
+        )
         // 任务文件变更台账(2026-09-30 批次 4,PRODCAP-4「交付可审计」):
         // 清单 / 单文件 diff / 单文件回滚。回滚是 POST(有副作用),diff 与清单只读。
         .route("/api/tasks/{id}/changes", get(tasks::file_changes))

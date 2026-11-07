@@ -175,6 +175,7 @@ mod tests {
             allowed: true,
             risk: crate::tools::permissions::ToolRisk::Dangerous,
             reason: "测试放行".into(),
+            code: None,
         };
         let out = registry
             .execute_with_decision(

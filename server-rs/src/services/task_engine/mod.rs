@@ -357,9 +357,12 @@ impl TaskEngine {
                 .scratch_dir_for(&task.id)
                 .map(|d| Some(d.to_string_lossy().into_owned())),
         };
-        let scope = match workspace
-            .and_then(|ws| crate::tools::workspace_guard::scope_for_task(ws.as_deref()))
-        {
+        let scope = match workspace.and_then(|ws| {
+            crate::tools::workspace_guard::scope_for_task_with_authorization(
+                ws.as_deref(),
+                task.tool_authorization,
+            )
+        }) {
             Ok(scope) => scope,
             Err(e) => {
                 self.svc.finalize_terminal(
@@ -440,6 +443,8 @@ impl TaskEngine {
             connection_id,
             scope,
             deadline,
+            // 三档授权(2026-11-06):未绑定工作区的任务没有 scope,档位仍要下传
+            tool_authorization: task.tool_authorization,
         };
         // 单一收尾出口(批次 B 依赖倒置):执行器返回终态值,引擎按值分派落库;
         // Err 分支兜底为 Failed(ended_by_cancel 以取消通道求值)。收尾判定所需的

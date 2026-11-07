@@ -12,7 +12,7 @@
 #![cfg(target_os = "android")]
 
 use super::wire::{decode_exec_result, encode_exec_request};
-use super::{truncate_output, ExecRequest, ExecResult, ShellTier};
+use super::{strip_ansi, truncate_output, ExecRequest, ExecResult, ShellTier};
 use crate::services::jni_bridge::{call_string_static, call_string_static_no_arg, EXEC_CLASS};
 
 /// 探测当前可用执行器等级(Kotlin 侧按 ROOT → Shizuku → Sandbox 顺序探测)。
@@ -67,10 +67,15 @@ fn parse_result(raw: &str, tier: ShellTier) -> Result<ExecResult, String> {
     let (exit_code, stdout, stderr) = decode_exec_result(raw)?;
     Ok(ExecResult {
         exit_code,
-        stdout: truncate_output(&stdout),
-        stderr: truncate_output(&stderr),
+        // ANSI 在截断之前剥掉(2026-11-06):序列不占 32K 字符预算,也不会被
+        // 「保头保尾」窗口切成两半。口径与桌面侧 `drain_pipe` 同源。
+        stdout: truncate_output(&strip_ansi(&stdout)),
+        stderr: truncate_output(&strip_ansi(&stderr)),
         tier,
         timed_out: false,
+        // 截断判定在整串截断之后:数一下剥完 ANSI 的字符数是否超预算
+        truncated: stdout.chars().count() > super::MAX_OUTPUT_CHARS
+            || stderr.chars().count() > super::MAX_OUTPUT_CHARS,
     })
 }
 

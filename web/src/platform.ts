@@ -31,3 +31,14 @@ export async function restartApp(): Promise<boolean> {
   await emit('kedai://restart-app');
   return true;
 }
+
+/**
+ * 请求 Android「所有文件访问」特殊权限页面(默认数据根在公共 Download 目录)。
+ * 仅 Android 壳有效;桌面/浏览器返回 false,由调用方决定是否显示提示。
+ */
+export async function requestAllFilesAccess(): Promise<boolean> {
+  if (!isAndroidTauri) return false;
+  const { emit } = await import('@tauri-apps/api/event');
+  await emit('kedai://all-files-access');
+  return true;
+}

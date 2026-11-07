@@ -79,6 +79,22 @@ const MAPPINGS = [
     ts: { file: 'web/src/api/types/task.ts', name: 'TaskEventKind', kind: 'union' },
   },
   {
+    // 2026-11-06 三档授权:确认卡与快照端点共用的载荷。此前未登记,字段改名
+    // (如 session_id)会让前端决议请求带着 undefined 发出,只在运行期 400。
+    label: '任务待确认工具调用',
+    rust: { file: 'server-rs/src/models/types.rs', name: 'TaskToolAuthorization' },
+    ts: { file: 'web/src/api/types/task.ts', name: 'TaskToolAuthorization', kind: 'type-literal' },
+  },
+  {
+    label: '任务待确认收束结果',
+    rust: { file: 'server-rs/src/models/types.rs', name: 'TaskToolAuthorizationDecision' },
+    ts: {
+      file: 'web/src/api/types/task.ts',
+      name: 'TaskToolAuthorizationDecision',
+      kind: 'type-literal',
+    },
+  },
+  {
     // FE-9(2026-10-06):`SseEvent::Task` 的**载荷字段**此前无守卫——映射表里只有
     // TaskEventKind 的变体名比对,`phase` / `step_index` 改名时检查仍全绿、TS 也全绿,
     // 前端静默读到 undefined(而这两个字段正是流式缓冲 liveBuffers 的 key)。

@@ -6,9 +6,17 @@
   前端并为 REST/SSE 提供同源接口。Android 9(API 28)起默认禁止明文 HTTP
   (release 构建的 usesCleartextTraffic=false),若不放行 loopback,正式包会白屏。
 
-  策略:只对 loopback 放行明文,其余所有域名仍强制 HTTPS —— 不用
-  android:usesCleartextTraffic="true" 全局开门,避免把用户到 LLM 供应商的流量
-  也置于明文风险中。
+  策略(2026-11-06 修订):WebView 内全部域名放行明文,loopback 仍显式声明。
+  修订理由与旧口径的差异必须写清:
+  - 旧口径「全局开门会把用户到 LLM 供应商的流量置于明文风险」不成立:LLM/API 请求由
+    Rust reqwest 发起,走原生 socket,不经过 Android Network Security Config。
+    本配置实际约束的是 WebView 子资源(角色卡插图、资源页 iframe)——这些内容
+    用户主动要求渲染,http 图床在角色卡生态里大量存在,拦掉会表现为「插图消失」
+    (2026-11-06 实机取证:https 图正常、http 图只剩破图图标)。
+  - 脚本仍受 CSP script-src 'self' 约束;http 图片不能执行代码,也无法读取宿主
+    DOM / localStorage。传输机密性由用户选择的图源决定,应用不再代其强制升级。
+  - loopback 三条显式声明保留:release 构建的 usesCleartextTraffic=false 下,
+    内嵌后端页面必须能明文加载,否则白屏。
 -->
 <network-security-config>
     <domain-config cleartextTrafficPermitted="true">
@@ -16,5 +24,5 @@
         <domain includeSubdomains="false">localhost</domain>
         <domain includeSubdomains="false">::1</domain>
     </domain-config>
-    <base-config cleartextTrafficPermitted="false" />
+    <base-config cleartextTrafficPermitted="true" />
 </network-security-config>

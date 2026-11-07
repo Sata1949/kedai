@@ -21,21 +21,25 @@ const saved = ref(false);
 const visible = computed(
   () => !!status.value?.pending && !store.onboardingOpen,
 );
+const isAndroid = computed(() => status.value?.platform === 'android');
 
-onMounted(async () => {
+async function load(): Promise<void> {
   try {
     status.value = await api.getDataLocation();
   } catch (e) {
     error.value = `读取数据位置失败:${(e as Error).message}`;
   }
-});
+}
 
-async function choose(letter: string): Promise<void> {
+onMounted(load);
+
+async function choose(target: string): Promise<void> {
   if (busy.value || saved.value) return;
   busy.value = true;
   error.value = '';
   try {
-    await api.selectDataLocation(letter);
+    // Android 传绝对路径根,桌面传盘符:以是否以 / 开头区分(桌面盘符恒为单字母)
+    await api.selectDataLocation(target.startsWith('/') ? { root: target } : target);
     saved.value = true;
     const restarted = await restartApp();
     if (!restarted) {
@@ -63,8 +67,15 @@ async function choose(letter: string): Promise<void> {
       </div>
       <div class="sv-modal-body">
         <p class="sv-note">
-          Kedai 需要先确定数据保存的盘符才能继续使用。选择后会在该盘创建
-          <code>Kedai-Data</code>,内含系统数据、产物、任务记录、综合导入文件四个子目录。
+          <template v-if="isAndroid">
+            Kedai 需要先确定数据保存位置才能继续使用。Android 默认使用公共「下载」目录下的
+            <code>Kedai-Data</code>（卸载应用后数据仍保留），内含系统数据、产物、任务记录、
+            综合导入文件四个子目录。
+          </template>
+          <template v-else>
+            Kedai 需要先确定数据保存的盘符才能继续使用。选择后会在该盘创建
+            <code>Kedai-Data</code>,内含系统数据、产物、任务记录、综合导入文件四个子目录。
+          </template>
         </p>
         <p v-if="status?.error" class="sv-feedback err">{{ status.error }}</p>
         <p v-if="status?.legacy_data" class="sv-note">
@@ -75,6 +86,7 @@ async function choose(letter: string): Promise<void> {
           :busy="busy"
           :disabled="saved"
           @choose="choose"
+          @refresh="load"
         />
         <p v-if="error" class="sv-feedback err">{{ error }}</p>
         <p v-if="saved && !error" class="sv-feedback ok">数据位置已保存，正在重启…</p>

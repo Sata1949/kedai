@@ -420,18 +420,22 @@ watch(
       <!-- 右侧 Agent 区(抽屉,默认收起;两种模式共用,内容按模式映射:角色扮演 = 推理链/工具,任务 = 计划/子任务;
            面板合并:原独立「调用情况」面板收编为其内部 tab,由 AgentPanel 内嵌 CallTracePanel 承载) -->
       <AgentPanel />
-    </div>
 
-    <!-- 移动端抽屉遮罩:点击空白处收起当前抽屉(桌面端由 CSS 隐藏)。
-         2026-10-02 UIP-9:遮罩随抽屉一起淡入淡出(原为瞬时出现) -->
-    <Transition name="sv-fade">
-      <div
-        v-if="store.sidebarOpen || store.agentPanelOpen"
-        class="sv-drawer-backdrop"
-        aria-hidden="true"
-        @click="closeDrawers"
-      />
-    </Transition>
+      <!-- 移动端抽屉遮罩:点击空白处收起当前抽屉(桌面端由 CSS 隐藏)。
+           2026-10-02 UIP-9:遮罩随抽屉一起淡入淡出(原为瞬时出现)。
+           **必须放在 .sv-body 内**(2026-11-06 修复):.sv-body 带 z-index:1 形成层叠上下文,
+           抽屉(z=52)被困在其中;遮罩若留在 .sv-body 外,其 z=51 会压在整个 .sv-body 之上,
+           表现为抽屉虽然可见却完全无法点击(点哪儿都命中遮罩并立即收起)。
+           同层后 z 序恢复为「主内容 < 遮罩(51) < 抽屉(52)」。 -->
+      <Transition name="sv-fade">
+        <div
+          v-if="store.sidebarOpen || store.agentPanelOpen"
+          class="sv-drawer-backdrop"
+          aria-hidden="true"
+          @click="closeDrawers"
+        />
+      </Transition>
+    </div>
 
     <!-- 移动端底部导航(桌面端 CSS 隐藏):角色库 / 模式切换 / Agent / 设置 -->
     <nav class="sv-mobile-nav" aria-label="主导航">

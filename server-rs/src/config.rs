@@ -108,7 +108,7 @@ fn canonical_user_data_dir() -> Option<PathBuf> {
 
 /// 「已有用户数据」判据:settings.json 存在(存过设置即生成),或 kedai.db 里有
 /// 非内置角色 / 任何会话(排除桌面版首启自动建库留下的空壳)。
-pub(crate) fn dir_has_user_data(dir: &Path) -> bool {
+pub fn dir_has_user_data(dir: &Path) -> bool {
     if dir.join("settings.json").is_file() {
         return true;
     }
@@ -342,13 +342,23 @@ impl AppConfig {
         // 首启教程/强制弹窗里的选择;无指针时服务仍要能启动,故沿用旧默认并标记 pending。
         let env_root = env_str("KEDAI_DATA_ROOT").map(|d| absolutize(Path::new(&d), &root));
         let env_data_dir = env_str("DATA_DIR").map(|d| absolutize(Path::new(&d), &root));
-        let layout = resolve_data_layout(
+        let has_env_data_dir = env_data_dir.is_some();
+        let mut layout = resolve_data_layout(
             env_root,
             env_data_dir,
             data_location::read_pointer(),
             &root,
             canonical_user_data_dir(),
         );
+        // Android 升级/首启的「待选择」标记:壳在无指针时会把旧私有目录当 DATA_DIR 传进来,
+        // 但数据位置仍应由前端引导接管(默认 /Download/Kedai-Data)。显式 DATA_DIR
+        // 默认表示「测试/运维隔离实例,不要弹窗」,故由壳单独用本环境变量声明待选择,
+        // 避免改变桌面/bench 的既定语义。
+        if has_env_data_dir && env_str("KEDAI_DATA_LOCATION_PENDING").as_deref() == Some("1") {
+            layout.pending = true;
+            layout.managed = true;
+            layout.error = env_str("KEDAI_DATA_LOCATION_ERROR");
+        }
         let DataLayout {
             data_root,
             data_dir,

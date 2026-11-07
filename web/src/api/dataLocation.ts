@@ -24,6 +24,12 @@ export interface DataLocationStatus {
   legacy_data: boolean;
   pointer: string | null;
   error: string | null;
+  /** 运行平台(0.4.5 Android 修复新增;旧服务端缺省按 desktop 处理) */
+  platform?: 'android' | 'desktop';
+  /** Android 建议根:`/storage/emulated/0/Download/Kedai-Data`;桌面为 null */
+  suggested_root?: string | null;
+  /** Android 建议根当前不可写(缺「所有文件访问」权限) */
+  needs_permission?: boolean;
 }
 
 export interface DataLocationApply {
@@ -38,12 +44,21 @@ export async function getDataLocation(): Promise<DataLocationStatus> {
   return request<DataLocationStatus>('/data-location');
 }
 
-/** PUT /api/data-location:选择盘符并迁移(失败时后端返回 400/409 的可读原因) */
-export async function selectDataLocation(drive: string): Promise<DataLocationApply> {
+/** 数据位置目标:桌面传盘符,Android 传绝对路径根(向后兼容旧的单字符串调用) */
+export interface DataLocationTarget {
+  drive?: string;
+  root?: string;
+}
+
+/** PUT /api/data-location:选择盘符/数据根并迁移(失败时后端返回 400/409 的可读原因) */
+export async function selectDataLocation(
+  target: string | DataLocationTarget,
+): Promise<DataLocationApply> {
+  const body = typeof target === 'string' ? { drive: target } : target;
   return request<DataLocationApply>('/data-location', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ drive }),
+    body: JSON.stringify(body),
   });
 }
 

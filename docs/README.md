@@ -56,7 +56,7 @@
 | **代际归属权威** | 模块属 L1/L2/L3/entry、允许的跨代方向、已登记的越代债务 | `tools/arch-layers.json` | `tools/check-arch.mjs` 规则 I/J(**未登记即 FAIL**) |
 | **数字权威** | 测试数量、构建步骤、命令、门禁清单等一切可计数事实 | `../MAINTENANCE.md` | `tools/count-tests.mjs --check`（测试数）+ `tools/check-doc-claims.mjs`（其余由代码/脚本派生的计数） |
 | **叙述权威** | 为什么这样分层、判据、纪律与晋升规则 | [契约-架构与数据.md](契约-架构与数据.md) §三结合分层架构(原 `docs/ARCHITECTURE-3H.md`,已归档) | 须向 `arch-layers.json` 对账 |
-| **字面契约权威** | HTTP 端点字段、SSE 负载、线格式冻结值 | [契约.md](契约.md) / [契约-协议与配置.md](契约-协议与配置.md) | `tools/check-contract.mjs`(33 组 MAPPINGS,未登记不校验) |
+| **字面契约权威** | HTTP 端点字段、SSE 负载、线格式冻结值 | [契约.md](契约.md) / [契约-协议与配置.md](契约-协议与配置.md) | `tools/check-contract.mjs`(35 组 MAPPINGS,未登记不校验) |
 | **条目编号权威** | 遗留 L/T/D 编号、计划批次号、经验条目 1~33（含重复的 11）与 E1 起、裁定 1~29 | [遗留.md](遗留.md) / [计划.md](计划.md) / [经验.md](经验.md) / [裁定.md](裁定.md) | **编号不得重编** —— 源码注释按编号引用 |
 
 **CI 现状(2026-10-11)**:两个 workflow 文件在位(`ci.yml` 权威档 / `ci-linux.yml` 平台可移植性档;
@@ -112,6 +112,7 @@
 | [plans/ATTFIX-BUGFIX-PLAN-2026-11-04.md](plans/ATTFIX-BUGFIX-PLAN-2026-11-04.md) | 附件链缺陷修复执行稿(两轮独立排查合并出的 13 条真缺陷 + 1 条口径冲突;四提交切分,**已全部落地**;含逐条落点、判据、修法与验证方式,以及「本次改动复用了哪些旧原语」的排查反思) |
 | [plans/DOC-SPLIT-PLAN.md](plans/DOC-SPLIT-PLAN.md) | 大文档拆分计划(X-0~X-6 已落地;X-7 台账收口待做;含门禁 D8、锚点风险与逐卷实测边界) |
 | [plans/DOC-SPLIT-HANDOFF-2026-11-04.md](plans/DOC-SPLIT-HANDOFF-2026-11-04.md) | 文档拆分交接(X-0~X-6 已合并;§九 为 X-4~X-6 追注与 X-7 入口,含 30 条计划锚点、ALGO 合流回放与 8 条坑) |
+| [plans/ANDROID-RP-UI-AUDIT-2026-11-06.md](plans/ANDROID-RP-UI-AUDIT-2026-11-06.md) | 安卓角色扮演移动端观感审计(0.4.5 实机 + 411×914 DOM 实测;触屏操作行挤压/页头与输入区密度/空态三栏表格;含重排数值、改动落点与开放项) |
 
 > **同名撞车提醒**:[archive/TASK-MODE-FIX-PLAN.md](archive/TASK-MODE-FIX-PLAN.md) 是更早的
 > 「Kimi 续做」交接稿(归档,只读);其同名的工作区执行稿已于 2026-09-27 并入 `计划.md` 并删除。

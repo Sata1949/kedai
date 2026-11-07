@@ -115,6 +115,8 @@ impl DeltaBatcher {
             at: None,
             // 轨迹载荷仅 kind=trace 携带(TMSHOW-1);流式增量与轨迹无关
             trace: None,
+            tool_authorization: None,
+            tool_authorization_decision: None,
         });
     }
 
@@ -140,6 +142,8 @@ impl DeltaBatcher {
             at: None,
             // 重置事件不携带轨迹载荷(同上)
             trace: None,
+            tool_authorization: None,
+            tool_authorization_decision: None,
         });
     }
 }

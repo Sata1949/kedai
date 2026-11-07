@@ -114,6 +114,15 @@ fn canonical_or_self(path: &Path) -> PathBuf {
 /// 明确错误终止,**绝不静默降级为 None**——降级会让 bash 的 cwd 回落到 DATA_DIR 并去改
 /// 用户真实数据,正是本批要消除的默认行为。
 pub fn scope_for_task(workspace: Option<&str>) -> Result<Option<Arc<ExecScope>>, String> {
+    scope_for_task_with_authorization(workspace, None)
+}
+
+/// 同 [`scope_for_task`]，并写入任务三档授权档位（2026-11-06）。
+/// 旧调用方（测试/兼容路径）继续用无档位版本，行为逐字节不变。
+pub fn scope_for_task_with_authorization(
+    workspace: Option<&str>,
+    task_authorization: Option<crate::models::tool_policy::TaskAuthorizationMode>,
+) -> Result<Option<Arc<ExecScope>>, String> {
     let Some(raw) = workspace.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(None);
     };
@@ -126,7 +135,9 @@ pub fn scope_for_task(workspace: Option<&str>) -> Result<Option<Arc<ExecScope>>,
     }
     let canonical = std::fs::canonicalize(path)
         .map_err(|e| format!("任务绑定的工作区无法解析({raw}):{e};沙箱可能已被删除"))?;
-    Ok(Some(Arc::new(ExecScope::new(canonical, true))))
+    Ok(Some(Arc::new(
+        ExecScope::new(canonical, true).with_task_authorization(task_authorization),
+    )))
 }
 
 /// 逐段解析:先词法归一,再从盘根起逐段 stat 拒链接。

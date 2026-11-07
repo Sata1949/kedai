@@ -483,6 +483,7 @@ mod tests {
             flow_ids: None,
             connection_id: None,
             workspace: workspace.map(str::to_string),
+            tool_authorization: None,
         }
     }
 

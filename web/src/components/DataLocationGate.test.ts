@@ -77,6 +77,31 @@ describe('DataLocationGate(老用户强制弹窗)', () => {
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false);
   });
 
+  it('Android:默认路径 → 调 API 时发送 root(不是盘符)', async () => {
+    vi.mocked(api.getDataLocation).mockResolvedValue({
+      ...status,
+      platform: 'android',
+      suggested_root: '/storage/emulated/0/Download/Kedai-Data',
+      needs_permission: false,
+      drives: [],
+      default_drive: null,
+    });
+    vi.mocked(api.selectDataLocation).mockResolvedValue({
+      root: '/storage/emulated/0/Download/Kedai-Data',
+      migrated: true,
+      restart_required: true,
+    });
+    const wrapper = mount(DataLocationGate);
+    await flushPromises();
+    const apply = wrapper.findAll('button').find((b) => b.text().includes('使用该位置'));
+    await apply?.trigger('click');
+    await flushPromises();
+    expect(api.selectDataLocation).toHaveBeenCalledWith({
+      root: '/storage/emulated/0/Download/Kedai-Data',
+    });
+    expect(restartApp).toHaveBeenCalledTimes(1);
+  });
+
   it('选择盘符 → 调 API → 请求重启', async () => {
     vi.mocked(api.getDataLocation).mockResolvedValue(status);
     vi.mocked(api.selectDataLocation).mockResolvedValue({

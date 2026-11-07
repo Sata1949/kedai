@@ -160,6 +160,10 @@ impl TaskService {
                     // 补拉帧不带轨迹载荷:轨迹有独立端点(`/trace`),事件表不存正文。
                     // 前端补拉事件只为对齐刷新,内容一律取自各自端点。
                     trace: None,
+                    // 待确认事件是瞬态广播,永不落库;补拉帧恒不带载荷
+                    // (断线恢复走 `/tool-authorizations` 的 pending 快照)。
+                    tool_authorization: None,
+                    tool_authorization_decision: None,
                 })
             })
             .map_err(|e| format!("执行任务事件补拉查询失败: {e}"))?;
@@ -403,6 +407,8 @@ impl TaskService {
             seq,
             at,
             trace: None,
+            tool_authorization: None,
+            tool_authorization_decision: None,
         }
     }
 
@@ -440,6 +446,9 @@ impl TaskService {
             at: Some(record.created_at.clone()),
             // Box 化的理由见 `SseEvent::Task.trace` 的字段注释(clippy::large_enum_variant)
             trace: Some(Box::new(record)),
+            // 待确认事件是独立的两条 kind(瞬态,不落库),轨迹帧恒不带载荷。
+            tool_authorization: None,
+            tool_authorization_decision: None,
         });
         Some(seq)
     }
@@ -651,10 +660,12 @@ mod tests {
             TaskEventKind::FlowBound,
             TaskEventKind::FileChanged,
             TaskEventKind::Trace,
+            TaskEventKind::ToolAuthorizationRequired,
+            TaskEventKind::ToolAuthorizationResolved,
         ];
         // 变体数真值取自「逐个 from_wire 回读」之外的独立口径:枚举全部取值的线格式清单。
         // 新增变体却忘了加进 `all` 时,这里立刻红,而不是静默漏检。
-        const ALL_WIRE_VALUES: [&str; 14] = [
+        const ALL_WIRE_VALUES: [&str; 16] = [
             "created",
             "status",
             "plan",
@@ -669,6 +680,8 @@ mod tests {
             "flow_bound",
             "file_changed",
             "trace",
+            "tool_authorization_required",
+            "tool_authorization_resolved",
         ];
         assert_eq!(
             all.len(),

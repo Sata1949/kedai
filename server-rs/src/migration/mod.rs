@@ -11,6 +11,8 @@
 mod backup;
 mod conflict;
 mod ddl;
+// 任务三档授权的补列(2026-11-06;ddl.rs 已到千行阈值)
+mod ddl_task_authorization;
 mod merge;
 
 pub use backup::{snapshot_before_upgrade, snapshot_database};
@@ -27,6 +29,7 @@ pub use ddl::{
     ensure_tasks_task_mode_column, ensure_tasks_workspace_column,
     ensure_tool_calls_snapshot_id_column, ensure_undo_snapshots_restore_columns,
 };
+pub use ddl_task_authorization::ensure_tasks_tool_authorization_column;
 pub use merge::{merge_data_dirs, MergeReport, TableReport};
 
 const DATABASE_FILE: &str = "kedai.db";
@@ -426,6 +429,7 @@ mod tests {
         // 幂等:重复执行不报错、不产生重复列
         ensure_tasks_flow_columns(&conn).unwrap();
         ensure_tasks_runtime_issues_column(&conn).unwrap();
+        ensure_tasks_tool_authorization_column(&conn).unwrap(); // 幂等复跑
         let dup = table_columns(&conn, "main", "tasks")
             .unwrap()
             .into_iter()

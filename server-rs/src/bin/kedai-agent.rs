@@ -223,6 +223,8 @@ async fn run() -> i32 {
                 None,
                 None,
                 Some(&ws_for_create),
+                // headless 单次任务保持改动前的授权行为；三档授权只走交互式任务创建。
+                None,
             )
         })
         .await;

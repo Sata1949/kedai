@@ -5,7 +5,7 @@
 import { BASE, authorizedFetch, request, requestText } from './client';
 import { requireArrayField, requireBoolField, requireObject, requireObjectField, requireStringField } from './shape';
 import { pumpSseFrames, toApiError, uploadFormMultiple } from './stream';
-import type { TaskApproveExecMode, TaskChangeDiff, TaskChangeRollback, TaskChangeRollbackAll, TaskChangeRollbackItem, TaskChangesPayload, TaskDetail, TaskEvent, TaskEventsPull, TaskFileChange, TaskLlmCall, TaskAttachment, TaskRecord, TaskRunMode, TaskScratchCleanup, TaskStep, TaskTrace, TaskTracePage, TaskUsageTotal } from './types';
+import type { TaskApproveExecMode, TaskAuthorizationTier, TaskChangeDiff, TaskChangeRollback, TaskChangeRollbackAll, TaskChangeRollbackItem, TaskChangesPayload, TaskDetail, TaskEvent, TaskEventsPull, TaskFileChange, TaskLlmCall, TaskAttachment, TaskRecord, TaskRunMode, TaskScratchCleanup, TaskStep, TaskToolAuthorization, TaskTrace, TaskTracePage, TaskUsageTotal } from './types';
 
 /** 读取任务列表(最新在前) */
 export async function listTasks(): Promise<TaskRecord[]> {
@@ -32,6 +32,8 @@ export async function listTasks(): Promise<TaskRecord[]> {
  * - `workspace`:CODE-1 的**任务工作区**(可选;项目目录的绝对路径)。非空时随请求下发,
  *   后端创建期 canonical 化并冻结(**不存在 / 指向数据目录 → 400 点名原因**);空/缺省
  *   = 未绑定(任务在草稿目录工作)。仅在显式给出时下发,旧调用方请求体逐字节不变。
+ * - `toolAuthorization`:2026-11-06 三档授权(step/workspace/auto)。缺省不下发
+ *   (= 后端旧行为 deny_dangerous);给出即随请求下发 `tool_authorization`。
  */
 export async function createTask(
   title: string,
@@ -42,6 +44,7 @@ export async function createTask(
   flowIds?: string[],
   connectionId?: string,
   workspace?: string,
+  toolAuthorization?: TaskAuthorizationTier,
 ): Promise<TaskRecord> {
   const data = await request<unknown>('/tasks', {
     method: 'POST',
@@ -59,6 +62,8 @@ export async function createTask(
       ...(connectionId ? { connection_id: connectionId } : {}),
       // 工作区(CODE-1):仅非空下发(空/纯空白 = 未绑定,不下发该键);值去两端空白
       ...(workspace && workspace.trim() ? { workspace: workspace.trim() } : {}),
+      // 三档授权(2026-11-06):仅显式给出时下发(缺省 = 后端旧行为 deny_dangerous)
+      ...(toolAuthorization ? { tool_authorization: toolAuthorization } : {}),
     }),
   });
   return requireObjectField<TaskRecord>(data, 'task', '任务');
@@ -227,6 +232,25 @@ export async function getTaskTrace(
   requireArrayField<TaskTrace>(data, 'trace', '任务执行轨迹');
   requireBoolField(data, 'truncated', '任务执行轨迹');
   return payload;
+}
+
+/**
+ * 任务当前待确认的工具调用(2026-11-06 三档授权;`GET /api/tasks/{id}/tool-authorizations`)。
+ *
+ * 为什么需要它:待授权事件是**瞬态广播**(不落 `task_events`)——重放旧的待授权会让
+ * 用户对早已超时的调用点头。刷新 / 断线重连 / 切换任务后,前端靠本端点恢复队列;
+ * 决议仍走 `POST /api/agent/tool-permissions/resolve`。
+ *
+ * 任务不存在时后端回 404(不是空数组):调用方必须把「任务没了」与「没有待确认」
+ * 区分开,故这里让错误照常抛出。
+ */
+export async function getTaskToolAuthorizations(
+  taskId: string,
+): Promise<TaskToolAuthorization[]> {
+  const data = await request<unknown>(
+    `/tasks/${encodeURIComponent(taskId)}/tool-authorizations`,
+  );
+  return requireArrayField<TaskToolAuthorization>(data, 'pending', '任务待确认调用');
 }
 
 /**
