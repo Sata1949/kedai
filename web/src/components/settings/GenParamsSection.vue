@@ -58,8 +58,10 @@ const pendingTier = ref<TaskParamTier>(initialPendingTier(currentTaskTier.value)
  * 用户在**别处**改了参数(手动微调、「保存为默认参数」、切模式重载)后,让下拉重新
  * 对齐识别结果——但**不覆盖用户刚在下拉里做出的、尚未点击应用的临时选择**。
  *
- * 判据:`pendingTier` 仍等于「上次同步时的识别档」才认为用户没动过下拉,此时可以跟随;
- * 一旦用户主动选了别的档(`dirty`),就保留他的选择直到应用或重新对齐。
+ * 判据:`pendingTier` 仍等于「上次同步时的识别档」即认为用户没动过下拉,可以跟随;
+ * 一旦用户主动选了别的档,两者不相等,就保留他的选择直到应用或下次对齐。
+ * `custom` 期间不推进 `lastSyncedTier`(基准仍是上一个具体档),这样从 custom 回到
+ * 某个具体档时,「用户有没有动过下拉」的判断仍以他最后一次看到的档位为准。
  */
 let lastSyncedTier: TaskParamTierOrCustom = currentTaskTier.value;
 watch(currentTaskTier, (next) => {
