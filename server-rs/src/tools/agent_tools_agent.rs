@@ -882,9 +882,15 @@ pub(super) fn register_todo(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
                 }
             }),
         },
-        Arc::new(move |_args: Value, ctx: ToolContext| {
+        Arc::new(move |args: Value, ctx: ToolContext| {
             let deps = deps.clone();
             Box::pin(async move {
+                // 参数此前声明了却从未读取(`_args`),导致传 false 也会返回子任务清单
+                // (2026-11-06 修正):调用方按需关闭,可省掉一段可能很长的清单。
+                let include_subtasks = args
+                    .get("include_subtasks")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
                 let mut out = json!({ "ok": true });
                 if let Some(agent_session) = deps.agent_sessions.find_by_session(&ctx.session_id) {
                     out["plan"] = json!(agent_session.plan);
@@ -916,7 +922,8 @@ pub(super) fn register_todo(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
                 // 使同任务的 :main:/:sub: 派生 session 也能看到全部兄弟子任务(跨 agent
                 // 证据可见,构成「交接登记表」);聊天路径退回精确 session。复用既有内存
                 // 覆盖层(list_by_session_prefix),不新增存储。
-                let tasks: Vec<Value> = subtask_candidates(&deps, &ctx.session_id)
+                let tasks: Vec<Value> = if include_subtasks {
+                    subtask_candidates(&deps, &ctx.session_id)
                     .iter()
                     .map(|t| {
                         json!({
@@ -931,7 +938,12 @@ pub(super) fn register_todo(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
                             "finished_at": t.finished_at,
                         })
                     })
-                    .collect();
+                    .collect()
+                } else {
+                    // 显式关闭时给空数组而不是省略键:形状稳定,消费方不必区分
+                    // 「键缺失」与「没有子任务」两种空。
+                    Vec::new()
+                };
                 out["subtasks"] = json!(tasks);
                 Ok(out.to_string())
             })

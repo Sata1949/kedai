@@ -46,6 +46,7 @@ impl TaskToolPolicy {
         crate::agents::engine::executor::ToolGate {
             whitelist: Some(&self.allowed),
             no_ui_authorization: true,
+            hard_exclude_outside: true,
         }
     }
 }
@@ -70,6 +71,39 @@ pub(crate) fn compile(
     vision_enabled: bool,
     screenshot_enabled: bool,
 ) -> TaskToolPolicy {
+    compile_with_authorization(
+        policy,
+        allowlist,
+        registry,
+        has_workspace,
+        coding_pack_enabled,
+        vision_enabled,
+        screenshot_enabled,
+        None,
+    )
+}
+
+/// 带任务授权档位的编译入口（2026-11-06 三档授权）。
+///
+/// `Auto` 档把缺省策略提升为 `all`（任务策略内全部工具放行）；`allowlist` **不被提升**——
+/// 它是管理员显式钉死的白名单，自动档也不该绕过。`Step`/`Workspace`/`None` 保持原策略。
+#[allow(clippy::too_many_arguments)] // 与 compile 同参面,只多一个档位
+pub(crate) fn compile_with_authorization(
+    policy: &str,
+    allowlist: &[String],
+    registry: &ToolRegistry,
+    has_workspace: bool,
+    coding_pack_enabled: bool,
+    vision_enabled: bool,
+    screenshot_enabled: bool,
+    task_authorization: Option<crate::models::tool_policy::TaskAuthorizationMode>,
+) -> TaskToolPolicy {
+    let policy = match task_authorization {
+        Some(crate::models::tool_policy::TaskAuthorizationMode::Auto) if policy != "allowlist" => {
+            "all"
+        }
+        _ => policy,
+    };
     let all = coding_pack_gate(
         vision_gate(
             workspace_gate(

@@ -26,6 +26,8 @@ defineProps<{
   border-top: 5px solid var(--sv-ink);
   font-size: var(--text-base);
   line-height: var(--lh-prose);
+  /* 2026-11-06:成果正文里的长 URL / 路径 / base64 就地折行,不撑破任务详情 */
+  overflow-wrap: anywhere;
 }
 .sv-task-result :deep(h1),
 .sv-task-result :deep(h2),

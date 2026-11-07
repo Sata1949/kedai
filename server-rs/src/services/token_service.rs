@@ -148,21 +148,30 @@ impl TokenService {
     ///
     /// 口径偏保守(宁可多算):每个 tool_call 额外计 8(token 结构开销 + id 近似)。
     pub fn count_message_tokens(&mut self, messages: &[LlmMessage], model: &str) -> i64 {
-        let mut total: i64 = 0;
+        messages
+            .iter()
+            .map(|m| self.count_single_message_tokens(m, model))
+            .sum::<i64>()
+            + 2
+    }
+
+    /// 一次遍历同时返回 `(token 总数, content 字符总数)`(ALGO-6,2026-11-05)。
+    ///
+    /// token 口径与 [`Self::count_message_tokens`] 完全一致;chars 口径 =
+    /// `Σ m.content.chars().count()`,即发送统计 `LAST_SEND_CHARS` 的定义。
+    /// 两者合流后,调用方不需要在裁剪后再全量扫一遍字符。
+    pub fn count_message_tokens_and_chars(
+        &mut self,
+        messages: &[LlmMessage],
+        model: &str,
+    ) -> (i64, usize) {
+        let mut tokens: i64 = 0;
+        let mut chars: usize = 0;
         for m in messages {
-            total += self.count_tokens(&m.content, model) + 4;
-            if let Some(reasoning) = &m.reasoning_content {
-                total += self.count_tokens(reasoning, model);
-            }
-            if let Some(calls) = &m.tool_calls {
-                for c in calls {
-                    total += self.count_tokens(&c.name, model)
-                        + self.count_tokens(&c.arguments, model)
-                        + 8;
-                }
-            }
+            tokens += self.count_single_message_tokens(m, model);
+            chars += m.content.chars().count();
         }
-        total + 2
+        (tokens + 2, chars)
     }
 
     /// 单条消息成本(与 `count_message_tokens` 同口径,含 reasoning_content 与 tool_calls)。
@@ -283,6 +292,34 @@ mod tests {
         assert_eq!(
             svc.count_message_tokens(std::slice::from_ref(&m), "gpt-4o-mini"),
             svc.count_single_message_tokens(&m, "gpt-4o-mini") + 2
+        );
+    }
+
+    /// ALGO-6:合流计数必须与「数组 token 口径 + 手算字符数」完全一致。
+    /// chars 只数 `content`(与 LAST_SEND_CHARS 定义一致),不含 reasoning/工具参数。
+    #[test]
+    fn count_message_tokens_and_chars_matches_separate_judgements() {
+        let mut svc = TokenService::new();
+        let model = "gpt-4o-mini";
+        let mut with_call = LlmMessage::plain("assistant", "");
+        with_call.tool_calls = Some(vec![crate::models::types::ToolCallArgs {
+            id: "call_1".into(),
+            name: "write".into(),
+            arguments: "{\"content\":\"参数\"}".into(),
+        }]);
+        let mut with_reasoning = LlmMessage::plain("assistant", "正文🙂");
+        with_reasoning.reasoning_content = Some("推理内容".into());
+        let messages = vec![
+            LlmMessage::plain("user", "你好 world"),
+            with_call,
+            with_reasoning,
+        ];
+        let expected_tokens = svc.count_message_tokens(&messages, model);
+        let expected_chars: usize = messages.iter().map(|m| m.content.chars().count()).sum();
+        assert_eq!(
+            svc.count_message_tokens_and_chars(&messages, model),
+            (expected_tokens, expected_chars),
+            "合流计数必须与分开计算逐值一致"
         );
     }
 

@@ -508,7 +508,7 @@ impl TeamExecutor {
         // 执行阶段能力段(D1):各主 agent 走 run_agent_loop(有工具),工具面与
         // solo/multi 同源编译(单一出处 task_engine::tool_policy::compile)——
         // 让分工拓扑不再规划出执行者做不到的子目标(如没有工具却要求产出文件)。
-        let allowed = crate::services::task_engine::tool_policy::compile(
+        let allowed = crate::services::task_engine::tool_policy::compile_with_authorization(
             &ctx.settings.task_tool_policy,
             &ctx.settings.task_tool_allowlist,
             &self.engine.tool_registry(),
@@ -519,6 +519,8 @@ impl TeamExecutor {
             crate::services::settings_service::vision_enabled(&ctx.settings),
             // 截图工具随「视觉与截图」总开关(默认关)
             ctx.settings.vision_screenshot_enabled,
+            // 三档授权(2026-11-06):自动档提升为全量工具面
+            ctx.tool_authorization,
         )
         .allowed;
         sys.push_str(&format!(

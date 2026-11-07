@@ -469,7 +469,7 @@ function bindRowRef(id: number, target: unknown): void {
               </h2>
               <p class="sv-start-desc">
                 {{ currentCharacter
-                  ? '输入消息开始，或先确认连接与模型。左侧可随时切换角色与模式。'
+                  ? '输入消息开始，或先确认连接与模型。角色与模式可随时切换。'
                   : '从左侧角色列表选择，或点击「导入角色卡」开始。' }}
               </p>
 
@@ -515,8 +515,7 @@ function bindRowRef(id: number, target: unknown): void {
               <div id="sv-cast-head" class="sv-start-cast-head">
                 <span>角色索引</span>
                 <span class="sv-start-cast-count sv-tnum">
-                  {{ quickStartCharacters.length.toString().padStart(2, '0') }} /
-                  {{ characters.length.toString().padStart(2, '0') }}
+                  {{ quickStartCharacters.length }} / {{ characters.length }}
                 </span>
               </div>
               <ol v-if="quickStartCharacters.length" class="sv-start-chars">
@@ -527,7 +526,7 @@ function bindRowRef(id: number, target: unknown): void {
                     :class="{ active: c.id === currentCharacterId }"
                     @click="store.selectCharacter(c.id)"
                   >
-                    <span class="sv-start-char-idx sv-tnum">{{ (i + 1).toString().padStart(2, '0') }}</span>
+                    <span class="sv-start-char-idx sv-tnum">{{ i + 1 }}</span>
                     <span class="sv-avatar small char">
                       <img v-if="charAvatar(c)" :src="charAvatar(c)!" alt="" />
                       <template v-else>{{ c.chara_name.charAt(0) }}</template>
@@ -980,18 +979,82 @@ function bindRowRef(id: number, target: unknown): void {
   .sv-start::before { display: none; }
 }
 @media (max-width: 767px) {
-  .sv-start { margin: var(--space-4) var(--space-3) 0; padding: 0 0 var(--space-4); }
-  .sv-start-title { font-size: var(--text-xl); }
-  .sv-start { margin-top: var(--space-2); }
-  .sv-start-title { margin: var(--space-2) 0 var(--space-2); }
-  .sv-start-meta { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: var(--space-4); }
-  .sv-start-meta-item { padding: var(--space-1-5) var(--space-2) var(--space-1-5) 0; }
-  .sv-start-meta-item:nth-child(2) { border-right: 1px solid var(--sv-line); padding-right: var(--space-2); }
-  .sv-start-meta-item:nth-child(3) { grid-column: auto; border-top: none; }
-  .sv-start-desc { line-height: var(--lh-body); }
-  .sv-start-hint { margin-top: var(--space-2-5); padding-top: var(--space-1-5); }
-  .sv-start-cast { padding-top: var(--space-1-5); }
-  .sv-chat-masthead { align-items: flex-start; flex-direction: column; gap: var(--space-2); }
-  .sv-chat-masthead-meta { justify-content: flex-start; }
+  /* 手机版观感(2026-11-06 第二遍):把桌面「编辑部」的粗横线/三栏表格收成一条
+     安静的元信息,并用 16px 页边距与 20–32px 的段落节奏换呼吸感。目标不是把
+     桌面版缩小,而是让手机首屏只留「角色名 → 一句说明 → 一个主动作 → 角色索引」。 */
+  .sv-canvas { padding: var(--space-4) var(--space-4) var(--space-6); }
+  .sv-start { margin: 0; padding: 0 0 var(--space-6); border-top: 0; }
+  .sv-start-grid { gap: var(--space-8); }
+  .sv-start-kicker { margin-top: var(--space-1); }
+  .sv-start-title {
+    max-width: none;
+    margin: var(--space-3) 0 var(--space-2);
+    font-size: 28px;
+    line-height: 1.2;
+  }
+  .sv-start-desc { max-width: 34ch; font-size: var(--text-sm); line-height: 1.8; }
+  /* 三栏表格改为一行元信息:不再给「模型/连接/会话」各画一格 */
+  .sv-start-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2) var(--space-4);
+    margin-top: var(--space-5);
+    border: 0;
+  }
+  .sv-start-meta-item {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-1-5);
+    min-width: 0;
+    padding: 0;
+    border: 0;
+  }
+  .sv-start-meta-item:nth-child(2),
+  .sv-start-meta-item:nth-child(3) { grid-column: auto; border-top: none; padding-right: 0; }
+  .sv-start-meta dt { font-size: var(--text-2xs); letter-spacing: 0.08em; }
+  .sv-start-meta dd { margin: 0; font-size: var(--text-xs); font-weight: 700; }
+  /* 两个动作并排、各占一半:主次由黑白面区分,不再靠边框大小 */
+  .sv-start-actions { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2-5); margin-top: var(--space-6); }
+  .sv-start-actions .sv-btn { width: 100%; min-height: 46px; }
+  /* 计算器提示是低频信息,手机首屏不承担;桌面保留 */
+  .sv-start-hint { display: none; }
+  .sv-start-cast {
+    margin-top: var(--space-8);
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--sv-line-strong);
+  }
+  .sv-start-cast-head { padding-bottom: var(--space-2); }
+  .sv-start-char { min-height: 64px; padding: var(--space-3) 0; }
+  /* 序号回到「列表编号」:手机不再用海报级 display 数字,改 12px 正文数字,
+     在 30px 列内右对齐、与头像中线对齐;模板也已去掉 01 前缀。 */
+  .sv-start-char-idx {
+    align-self: center;
+    justify-self: end;
+    width: 20px;
+    padding-top: 0;
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    line-height: 1;
+    letter-spacing: 0;
+  }
+  .sv-start-cast-note { display: none; }
+  /* 有消息时的页头:两行 + 一条发丝线,不再用 2px 黑杠 */
+  .sv-chat-masthead {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: var(--space-1);
+    margin-bottom: var(--space-4);
+    padding-bottom: var(--space-2);
+    border-bottom: 1px solid var(--sv-line-strong);
+  }
+  .sv-chat-masthead-kicker { display: none; }
+  .sv-chat-masthead-title { margin: 0; font-size: var(--text-md); }
+  .sv-chat-masthead-meta {
+    justify-content: flex-start;
+    gap: var(--space-1-5);
+    font-size: var(--text-2xs);
+  }
+  .sv-chat-masthead-meta span + span { padding-left: var(--space-1-5); }
 }
 </style>

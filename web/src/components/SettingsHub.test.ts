@@ -184,7 +184,7 @@ describe('SettingsHub 分区定位(新手教程「带我去设置」)', () => {
     await nextTick();
     const second = mount(SettingsHub);
     await nextTick();
-    expect(second.find('.sv-hub-content-title').text()).toBe('连接与模型 · API 连接');
+    expect(second.find('.sv-hub-content-title').text()).toBe('连接与模型 · API 与模型');
   });
 
   it('连续两次请求同一分区都生效(nonce 递增,不因值相同被跳过)', async () => {
@@ -304,5 +304,24 @@ describe('SettingsHub · action 型落点与教程落点穷尽校验', () => {
       }
       wrapper.unmount();
     }
+  });
+
+  /**
+   * 设置分区合并(2026-11-07):`model`(模型与生成)并入 `api`(现名「API 与模型」)。
+   *
+   * 两条都要锁:(a) 新标签存在且旧标签消失;(b) 按**旧键**定位仍能落到内容上——
+   * 教程历史落点、`uiPrefs.settingsNav` 残留目标、按旧键写死的深链接都属于后者。
+   * 缺 (b) 会让用户「设置打开了但停在默认分区」,比不合并更难自查。
+   */
+  it('分区合并:API 与模型取代模型与生成,旧 model 键重定向到新分区', async () => {
+    const { store, wrapper } = mountHub();
+    const labels = wrapper.findAll('.hub-sub-item').map((it) => it.text());
+    expect(labels.some((l) => l.includes('API 与模型'))).toBe(true);
+    expect(labels.some((l) => l.includes('模型与生成'))).toBe(false);
+
+    // 旧键定位:必须落到「连接与模型 · API 与模型」
+    store.openSettingsAt('model');
+    await nextTick();
+    expect(wrapper.find('.sv-hub-content-title').text()).toBe('连接与模型 · API 与模型');
   });
 });

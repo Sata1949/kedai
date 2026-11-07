@@ -82,6 +82,55 @@ impl AuthorizationMode {
     }
 }
 
+/// 任务模式工具授权档位（三档；2026-11-06）。
+///
+/// 与 [`AuthorizationMode`] 的分工：后者是聊天侧「文件三档」的全局设置
+/// （`settings.authorization_mode`），本枚举是**任务创建期**选择的逐任务授权档位，
+/// 落 `tasks.tool_authorization`，不写 settings.json，也不影响聊天。
+///
+/// - `Step`：写/执行类工具（`tool_sets::WRITE_LIKE_TOOLS`）逐条等待用户确认；
+///   只读工具照常自动放行。用于「我要盯着它改」的场景。
+/// - `Workspace`：工作区内工具与命令自动放行；bash 越界或无法静态证明在工作区内时
+///   **转逐步确认**（复用同一等待通道）。fs_* 的路径闸门不变。
+/// - `Auto`：任务策略内的工具与命令全部自动执行；破坏性/提权命令写审计后放行。
+///   **屏幕/输入类（`CommandRisk::ScreenInput`）任何档位都不自动放行**（CU-1）。
+///
+/// `NULL`（旧任务/旧客户端）不映射到本枚举，保持改动前的 `deny_dangerous` 行为。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskAuthorizationMode {
+    Step,
+    Workspace,
+    Auto,
+}
+
+impl TaskAuthorizationMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Step => "step",
+            Self::Workspace => "workspace",
+            Self::Auto => "auto",
+        }
+    }
+
+    /// 解析任务授权档位；非法值返回 None（API 层决定 400）。
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "step" => Some(Self::Step),
+            "workspace" => Some(Self::Workspace),
+            "auto" => Some(Self::Auto),
+            _ => None,
+        }
+    }
+
+    /// 是否允许进入「等待用户确认」通道（Step/Workspace）。
+    ///
+    /// Workspace 也需要等待通道：bash 越界时转逐步确认。
+    pub fn can_wait_for_user(&self) -> bool {
+        matches!(self, Self::Step | Self::Workspace)
+    }
+}
+
 /// 命令风险级别（执行类工具的判定依据）。
 ///
 /// 五级，取最高危聚合序：`Safe < Sensitive < Destructive < Admin < ScreenInput`。
@@ -259,5 +308,26 @@ mod tests {
         assert!(CommandRisk::Sensitive < CommandRisk::Destructive);
         assert!(CommandRisk::Destructive < CommandRisk::Admin);
         assert!(CommandRisk::Admin < CommandRisk::ScreenInput);
+    }
+
+    /// 任务三档：线格式、解析互逆、等待通道归属。
+    #[test]
+    fn task_authorization_mode_roundtrip_and_wait_semantics() {
+        for mode in [
+            TaskAuthorizationMode::Step,
+            TaskAuthorizationMode::Workspace,
+            TaskAuthorizationMode::Auto,
+        ] {
+            assert_eq!(TaskAuthorizationMode::parse(mode.as_str()), Some(mode));
+        }
+        assert_eq!(
+            serde_json::to_string(&TaskAuthorizationMode::Workspace).unwrap(),
+            "\"workspace\""
+        );
+        assert_eq!(TaskAuthorizationMode::parse("bogus"), None);
+        // Step/Workspace 走等待确认通道；Auto 不等待。
+        assert!(TaskAuthorizationMode::Step.can_wait_for_user());
+        assert!(TaskAuthorizationMode::Workspace.can_wait_for_user());
+        assert!(!TaskAuthorizationMode::Auto.can_wait_for_user());
     }
 }

@@ -1,6 +1,7 @@
 // 任务模式域类型(与后端 models/types.rs、task_core 线格式一一对应)。
 
 import type { AgentFlowConfig } from './agentFlow';
+import type { ToolRisk } from './tools';
 import type { TaskDeliverySummary, WorkspaceProfile } from './workspace';
 
 /** 任务事件分类(WP4 后端推送):创建 / 状态变化 / 计划 / 子任务 / token 累计 / 删除 / LLM 调用落库
@@ -11,7 +12,38 @@ import type { TaskDeliverySummary, WorkspaceProfile } from './workspace';
  *  TMSHOW-1 追加:trace(执行轨迹新增一条,载荷见 `TaskEvent.trace`)
  *  真源为 Rust `models/types.rs` 的 `TaskEventKind`(serde snake_case);改一侧须同步另一侧,
  *  并更新 `tools/check-contract.mjs` 的映射表。 */
-export type TaskEventKind = 'created' | 'status' | 'plan' | 'subtask' | 'usage' | 'deleted' | 'llm_call' | 'agent_status' | 'approval_required' | 'delta' | 'delta_reset' | 'flow_bound' | 'file_changed' | 'trace';
+export type TaskEventKind = 'created' | 'status' | 'plan' | 'subtask' | 'usage' | 'deleted' | 'llm_call' | 'agent_status' | 'approval_required' | 'delta' | 'delta_reset' | 'flow_bound' | 'file_changed' | 'trace' | 'tool_authorization_required' | 'tool_authorization_resolved';
+
+/** 任务模式工具授权档位(2026-11-06;与后端 TaskAuthorizationMode 线格式对齐)。
+ *  step = 写/执行类工具逐条确认;workspace = 工作区内自动放行、越界转确认;
+ *  auto = 任务策略内全部自动执行(屏幕/输入类仍拒)。 */
+export type TaskAuthorizationTier = 'step' | 'workspace' | 'auto';
+
+/** 一条等待用户确认的任务工具调用(后端 TaskToolAuthorization)。 */
+export type TaskToolAuthorization = {
+  name: string;
+  risk: ToolRisk;
+  reason: string;
+  run_id: string;
+  call_id: string;
+  /** 任务虚拟会话 id(`task:{id}` / `task:{id}:main:{n}` / `task:{id}:{phase}:{step}`)。
+   *  决议时必须原样回传——不能用 currentTaskId 拼。 */
+  session_id: string;
+  /** 机器可读原因码:`step_confirm`(逐步档)/ `workspace_escape`(越界转确认)/ 其它裁决码 */
+  code?: string;
+  /** 工具入参预览(截断后的 JSON 文本;不保证完整) */
+  input_preview?: string;
+};
+
+/** 待授权调用的收束结果(后端 TaskToolAuthorizationDecision)。 */
+export type TaskToolAuthorizationDecision = {
+  run_id: string;
+  call_id: string;
+  name: string;
+  session_id: string;
+  decision: 'allow' | 'deny' | 'timeout' | 'cancelled';
+  detail?: string;
+};
 
 /**
  * 任务模式(task 工作台)事件(对齐 server-rs SseEvent::Task):
@@ -46,6 +78,10 @@ export type TaskEvent = {
    *  收到即并入本地轨迹缓存,免去为每条轨迹重拉 `/trace` 端点。
    *  `trace.seq` 是轨迹自己的排序键(**与事件 seq 不同源**)。 */
   trace?: TaskTrace;
+  /** 待确认的工具调用(2026-11-06 三档授权;仅 kind=tool_authorization_required 携带)。 */
+  tool_authorization?: TaskToolAuthorization;
+  /** 待授权调用的收束结果(仅 kind=tool_authorization_resolved 携带)。 */
+  tool_authorization_decision?: TaskToolAuthorizationDecision;
 };
 
 /**
@@ -197,6 +233,8 @@ export interface TaskRecord {
    * 路径闸门根,`bash` 以它为 cwd 缺省与 jail 边界。未绑定的任务不下发该工具族。
    */
   workspace?: string | null;
+  /** 任务模式工具授权档位(2026-11-06;缺省 = 旧任务,保持改动前行为)。 */
+  tool_authorization?: TaskAuthorizationTier | null;
 }
 
 /**

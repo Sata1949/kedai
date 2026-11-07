@@ -112,6 +112,8 @@ export const useAppStore = defineStore('app', () => {
     setTaskFlowMode: task.setTaskFlowMode,
     setTaskFlowIds: task.setTaskFlowIds,
     setTaskConnectionId: task.setTaskConnectionId,
+    // 三档授权(2026-11-06;逐任务参数,缺省 workspace = 旧行为)
+    setTaskAuthorizationTier: task.setTaskAuthorizationTier,
     loadTasks: task.loadTasks,
     loadGlobalTaskUsage: task.loadGlobalTaskUsage,
     loadTaskCalls: task.loadTaskCalls,

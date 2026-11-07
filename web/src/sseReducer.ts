@@ -154,6 +154,43 @@ export function reduceSseEvent(state: SseStateSlice, event: SseEvent): SseStateC
       a.chain.push({ at: Date.now(), text: `工具 ${event.name} 等待授权`, detail: event.reason });
       break;
     }
+    /**
+     * 三档授权的收束事件(2026-11-06):允许 / 拒绝 / 超时 / 取消四条路径各发一条。
+     *
+     * 必须在这里接住——`default` 子句的穷尽性断言(`const exhaustive: never = event`)
+     * 会让漏接的新变体直接编译失败(2026-11-07 CI `check-ubuntu` 实测 TS2322)。
+     *
+     * 状态迁移的取舍:
+     * - `allow` → 回到 `running`。工具**还没真正执行**,终态由随后的 `tool_result`
+     *   写入;此处若直接判 `done`,会让界面在执行前就显示「已完成」。
+     * - 其余三档 → `error`,并把原因写进 `output.error`(与 `tool_result` 的错误形态
+     *   一致,工具卡与结果渲染都按同一判据取红色)。
+     * 无论哪档都要清 `pendingTool`:留着会让输入区一直显示「等待授权」。
+     */
+    case 'tool_authorization_resolved': {
+      const target = [...a.toolCalls]
+        .reverse()
+        .find((t) => (event.call_id ? t.callId === event.call_id : t.name === event.name)
+          && t.status === 'authorization_required');
+      if (target) {
+        if (event.decision === 'allow') {
+          target.status = 'running';
+        } else {
+          const label = event.decision === 'deny' ? '拒绝'
+            : event.decision === 'timeout' ? '超时'
+              : '取消';
+          target.status = 'error';
+          target.output = { error: `工具授权${label}${event.detail ? `:${event.detail}` : ''}` };
+        }
+      }
+      a.pendingTool = null;
+      a.chain.push({
+        at: Date.now(),
+        text: `工具 ${event.name} 授权${event.decision === 'allow' ? '放行' : '未通过'}`,
+        detail: event.detail ?? event.decision,
+      });
+      break;
+    }
     case 'tool_result':
       a.pendingTool = null;
       // call_id 优先保证并行/同名工具结果稳定配对；旧服务端事件仍回退到同名逆序匹配。

@@ -599,6 +599,7 @@ impl TeamExecutor {
                 // 中段生产者/普通主走既有的只读与无进展守卫,不需要这条软提醒。
                 shard_read_nudge_after: integration_main
                     .then_some(crate::services::task_engine::TASK_SHARD_READ_NUDGE),
+                task_authorization: ctx.tool_authorization,
             };
             let result = run_agent_loop(
                 self.svc.clone(),
@@ -911,6 +912,8 @@ impl TeamExecutor {
                     scope: ctx.scope.clone(),
                     // SKY-7:本主的份额截止期(无预算池时回退全局截止期)
                     deadline: main_deadline,
+                    // 三档授权(2026-11-06):各主沿用同一任务档位
+                    tool_authorization: ctx.tool_authorization,
                 };
                 let main = mains[i].clone();
                 // SKY-7:只有依赖 DAG 汇点(总装终点)豁免两个计数守卫

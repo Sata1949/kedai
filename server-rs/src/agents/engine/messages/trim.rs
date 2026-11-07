@@ -40,27 +40,36 @@ pub(in crate::agents::engine) struct ToolHistoryTrimOutcome {
 /// 缓存感知管线·改造 A),从最旧的 user/assistant 起丢弃,直到总 token 不超过预算;
 /// 极端情况下(仅剩 system 仍超)截断 system 内容,并优先保留尾部注入文本
 /// (protected_tail 字符),避免注入先于角色设定被切掉。
+/// 返回 `(最终 token 总数, content 字符总数)`:两者在同一遍里算出,
+/// 供 `LAST_SEND_TOKENS` / `LAST_SEND_CHARS` 直接消费(ALGO-6,2026-11-05)。
 pub(in crate::agents::engine) fn trim_to_context(
     messages: &mut Vec<LlmMessage>,
     max_context: Option<u32>,
     token_service: &mut crate::services::token_service::TokenService,
     model: &str,
     protected_tail: usize,
-) {
-    let Some(budget) = max_context else { return };
+) -> (i64, usize) {
+    let Some(budget) = max_context else {
+        return token_service.count_message_tokens_and_chars(messages, model);
+    };
     if budget == 0 || messages.len() <= 1 {
-        return;
+        return token_service.count_message_tokens_and_chars(messages, model);
     }
     // 受保护头部:首条 system + 摘要槽(存在时)——裁剪从其后开始
     let head = protected_head_len(messages);
-    let mut total: i64 = token_service.count_message_tokens(messages, model);
-    // 从最旧消息(head 起)丢弃,直到不超预算或仅剩受保护头部;idx 保持不变(remove 后自动前移)
-    let idx = head;
-    while total > budget as i64 && idx < messages.len() {
+    let (mut total, mut chars): (i64, usize) =
+        token_service.count_message_tokens_and_chars(messages, model);
+    // 从最旧消息(head 起)丢弃,直到不超预算或仅剩受保护头部。
+    // 先算出待删区间再一次 drain:旧实现逐条 remove,每删一条都要前移 O(n)。
+    let mut end = head;
+    while total > budget as i64 && end < messages.len() {
         // 与 count_message_tokens 同口径(含 tool_calls 的参数成本,2026-09-14 修复)
-        let cost = token_service.count_single_message_tokens(&messages[idx], model);
-        messages.remove(idx);
-        total -= cost;
+        total -= token_service.count_single_message_tokens(&messages[end], model);
+        chars -= messages[end].content.chars().count();
+        end += 1;
+    }
+    if end > head {
+        messages.drain(head..end);
     }
     // 仍超预算(极长角色设定):按预算截断 system,保留尾部注入块
     if total > budget as i64 && messages.len() == head && head > 0 {
@@ -100,7 +109,12 @@ pub(in crate::agents::engine) fn trim_to_context(
             sys.content = text.chars().take(n).collect();
             tracing::warn!(budget = budget, "上下文超限:系统提示词被截断");
         }
+        // 截断后内容变了,返回的 total/chars 必须按新内容重算(仅极端分支付这一次)。
+        let (new_total, new_chars) = token_service.count_message_tokens_and_chars(messages, model);
+        total = new_total;
+        chars = new_chars;
     }
+    (total, chars)
 }
 
 /// 消息数组中受裁剪保护的头部条数:首条 system(恒保护)+ 开头连续的
@@ -199,9 +213,18 @@ pub(in crate::agents::engine) fn trim_tool_history(
     if budget_tokens > 0 {
         let mut total = token_service.count_message_tokens(messages, model);
         while total > budget_tokens as i64 && cursor + 1 < full.len() {
-            summarize_round(messages, &rounds[full[cursor]]);
+            // 只重算被摘要的那一轮:旧实现每轮全量重扫全部历史(长工具循环 O(M·N))。
+            let round = &rounds[full[cursor]];
+            let before = round_cost(messages, round, token_service, model);
+            summarize_round(messages, round);
+            let after = round_cost(messages, round, token_service, model);
+            total += after - before;
+            debug_assert_eq!(
+                total,
+                token_service.count_message_tokens(messages, model),
+                "增量计数与全量口径分叉(摘要轮)"
+            );
             cursor += 1;
-            total = token_service.count_message_tokens(messages, model);
             outcome.summarized_rounds += 1;
         }
         // 5) 参数回收兜底(2026-09-14):仍超预算说明体量集中在「保底轮」本身
@@ -211,9 +234,17 @@ pub(in crate::agents::engine) fn trim_tool_history(
         //    这一步是防「单轮参数即超预算导致闸门永不达标」的关键兜底。
         if total > budget_tokens as i64 {
             for &ri in full.iter().skip(cursor) {
-                if reclaim_round_arguments(messages, rounds[ri].0) {
+                let a_idx = rounds[ri].0;
+                let before = token_service.count_single_message_tokens(&messages[a_idx], model);
+                if reclaim_round_arguments(messages, a_idx) {
                     outcome.reclaimed_argument_rounds += 1;
-                    total = token_service.count_message_tokens(messages, model);
+                    let after = token_service.count_single_message_tokens(&messages[a_idx], model);
+                    total += after - before;
+                    debug_assert_eq!(
+                        total,
+                        token_service.count_message_tokens(messages, model),
+                        "增量计数与全量口径分叉(参数回收)"
+                    );
                     if total <= budget_tokens as i64 {
                         break;
                     }
@@ -226,6 +257,23 @@ pub(in crate::agents::engine) fn trim_tool_history(
         outcome.total_tokens = token_service.count_message_tokens(messages, model);
     }
     outcome
+}
+
+/// 一轮消息的 token 成本(assistant 起头 + 该轮全部 tool 消息),与
+/// `count_message_tokens` 同口径(含 reasoning_content 与 tool_calls 参数)。
+/// 预算闸门用它只重算被改动的一轮,避免每摘要一轮就全量重扫历史。
+fn round_cost(
+    messages: &[LlmMessage],
+    round: &(usize, Vec<usize>),
+    token_service: &mut crate::services::token_service::TokenService,
+    model: &str,
+) -> i64 {
+    let (a_idx, tool_idxs) = round;
+    let mut total = token_service.count_single_message_tokens(&messages[*a_idx], model);
+    for &ti in tool_idxs {
+        total += token_service.count_single_message_tokens(&messages[ti], model);
+    }
+    total
 }
 
 /// 从工具参数 JSON 里取「工作状态锚点」摘要(批次 3)。
@@ -405,6 +453,29 @@ mod tests {
             messages[0].content.starts_with("你是角色「测试」"),
             "无保护尾部时应从头部截断,保留开头,实际: {}",
             &messages[0].content[..20.min(messages[0].content.len())]
+        );
+    }
+
+    /// ALGO-3/ALGO-6:裁剪返回的 (tokens, chars) 与全量口径一致
+    /// (含头部丢弃与 system 截断两条路径)。
+    #[test]
+    fn trim_to_context_returns_final_token_total_and_chars() {
+        let model = "deepseek-v4-flash";
+        let mut ts = crate::services::token_service::TokenService::new();
+        let mut messages = loop_messages(4, 10);
+        let want = ts.count_message_tokens(&messages, model);
+        let want_chars: usize = messages.iter().map(|m| m.content.chars().count()).sum();
+        let (got, got_chars) = trim_to_context(&mut messages, Some(10_000), &mut ts, model, 0);
+        assert_eq!(got, want, "未裁剪时返回值应等于全量计数");
+        assert_eq!(got_chars, want_chars, "未裁剪时字符数应等于全量口径");
+
+        let (got, got_chars) = trim_to_context(&mut messages, Some(5), &mut ts, model, 0);
+        let want = ts.count_message_tokens(&messages, model);
+        let want_chars: usize = messages.iter().map(|m| m.content.chars().count()).sum();
+        assert_eq!(got, want, "裁剪(含 system 截断)后返回值应等于全量计数");
+        assert_eq!(
+            got_chars, want_chars,
+            "裁剪(含 system 截断)后字符数应等于全量口径"
         );
     }
 
@@ -628,6 +699,22 @@ mod tests {
             "预算超限时 keep 之内的轮也应被摘要"
         );
         assert!(round_intact(&messages, 3), "保底:最近一轮始终完整");
+    }
+
+    /// ALGO-3:预算闸门的增量 total 必须与全量口径一致(含摘要轮与参数回收)。
+    #[test]
+    fn tool_history_incremental_total_matches_full_count() {
+        let model = "deepseek-v4-flash";
+        for &(rounds, keep, budget) in &[(4usize, 3usize, 60u32), (6, 2, 200), (8, 1, 40)] {
+            let mut ts = crate::services::token_service::TokenService::new();
+            let mut messages = loop_messages(rounds, 2000);
+            let out = trim_tool_history(&mut messages, keep, budget, &mut ts, model);
+            let full = ts.count_message_tokens(&messages, model);
+            assert_eq!(
+                out.total_tokens, full,
+                "rounds={rounds} keep={keep} budget={budget} 增量计数应与全量一致"
+            );
+        }
     }
 
     /// 幂等 + 配对完整:二次调用结果不变;tool_call_id/tool_calls 配对不破坏;

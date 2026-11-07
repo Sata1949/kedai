@@ -886,6 +886,7 @@ mod tests {
                 allowed: true,
                 risk: crate::tools::permissions::ToolRisk::Dangerous,
                 reason: "测试放行".into(),
+                code: None,
             };
             self.registry()
                 .execute_with_decision(name, &args.to_string(), self.ctx(), &decision)
@@ -902,6 +903,7 @@ mod tests {
                 allowed: true,
                 risk: crate::tools::permissions::ToolRisk::Dangerous,
                 reason: "测试放行".into(),
+                code: None,
             };
             self.registry()
                 .execute_with_decision(

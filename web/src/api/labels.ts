@@ -10,7 +10,7 @@
 //     `vue-tsc` 直接报错(把「漏改」从运行期静默变成编译期失败)。
 //   - MESSAGE_KIND_LABELS 的键来自后端 task_messages.kind,非联合类型,故用
 //     `Record<string, string>` 并保留「未登记返回空」的既有语义。
-import type { ApiStyle, ConnectorType, TaskApproveExecMode, TaskRunMode } from './types';
+import type { ApiStyle, ConnectorType, TaskApproveExecMode, TaskAuthorizationTier, TaskRunMode, ToolRisk } from './types';
 
 /** 连接器类型 → 展示文案(多套连接批次)。
  *  键来自后端 `connectors::available_connector_types()`(非联合类型可穷尽),
@@ -102,6 +102,21 @@ export const MODE_OPTION_LABELS = {
 
 /** 下拉展示顺序(与后端 TaskRunMode 定义顺序一致,便于对照) */
 export const MODE_ORDER: TaskRunMode[] = ['legacy', 'solo', 'multi', 'plan', 'team', 'custom'];
+
+/** 工具风险等级 → 展示文案(2026-11-06 三档授权;确认卡与授权区共用)。
+ *  穷尽校验同上:后端 `ToolRisk` 新增取值而此处漏配,`vue-tsc` 直接报错。 */
+export const TOOL_RISK_LABELS = {
+  safe: '安全',
+  sensitive: '敏感',
+  dangerous: '危险',
+} satisfies Record<ToolRisk, string>;
+
+/** 任务工具授权档位 → 短标签(任务详情状态矩阵回显;不写「完全」这类超出能力的承诺)。 */
+export const TASK_AUTHORIZATION_TIER_LABELS = {
+  step: '逐步',
+  workspace: '工作区内',
+  auto: '自动',
+} satisfies Record<TaskAuthorizationTier, string>;
 
 /**
  * **流程用法**(二维批次 7b;前端概念,**不是线格式字段**)。

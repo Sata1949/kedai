@@ -15,10 +15,20 @@ import { readFileSync } from 'node:fs';
 const chatWindow = readFileSync(new URL('./ChatWindow.vue', import.meta.url), 'utf8');
 
 describe('UIFIX-8 角色索引卡片契约', () => {
-  it('序号提到海报级字号（不再是 11px 的「假大号数字」）', () => {
+  it('桌面序号维持海报级字号（不再是 11px 的「假大号数字」）', () => {
     // 用 [^}]* 限定在规则块内,避免跨到文件后段其它 font-size
     expect(chatWindow).toMatch(/\.sv-start-char-idx \{[^}]*font-size: var\(--text-md\);/);
     expect(chatWindow).not.toMatch(/\.sv-start-char-idx \{[^}]*font-size: var\(--text-2xs\);/);
+  });
+
+  it('手机序号回到普通列表编号(2026-11-06):12px 正文数字 + 去 01 前缀', () => {
+    // 实机反馈海报级「01」在手机角色行里像一枚不属于列表的装饰数字;
+    // 窄屏改正文数字并右对齐头像中线,模板也去掉 padStart(2,'0')。
+    expect(chatWindow).toMatch(
+      /@media \(max-width: 767px\) \{[\s\S]*?\.sv-start-char-idx \{[^}]*?font-family: var\(--font-body\);[^}]*?font-size: var\(--text-xs\);/,
+    );
+    expect(chatWindow).toContain('{{ i + 1 }}');
+    expect(chatWindow).toContain('{{ quickStartCharacters.length }} / {{ characters.length }}');
   });
 
   it('头像 40px,选中时用外扩黑框 + 粉晕标识(不动 color)', () => {

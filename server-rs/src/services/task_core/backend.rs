@@ -220,6 +220,23 @@ pub(crate) trait TaskEvents: Send + Sync {
         detail: Option<String>,
     );
 
+    /// 广播「工具待确认」任务事件(2026-11-06 三档授权;瞬态,不落库)。
+    ///
+    /// 引擎桥把 `SseEvent::ToolAuthorizationRequired` 翻译成本事件——任务模式没有聊天
+    /// SSE 客户端,不翻译的话前端只能看到一行 `agent_status` 文案,无从点确认。
+    fn emit_tool_authorization_required(
+        &self,
+        task_id: &str,
+        auth: crate::models::types::TaskToolAuthorization,
+    );
+
+    /// 广播「待确认已收束」任务事件(2026-11-06;瞬态,不落库)。
+    fn emit_tool_authorization_resolved(
+        &self,
+        task_id: &str,
+        decision: crate::models::types::TaskToolAuthorizationDecision,
+    );
+
     /// 构造挂在任务事件广播通道上的 delta 攒批器。
     fn delta_batcher(&self, task_id: &str, phase: &str, step_index: Option<usize>) -> DeltaBatcher;
 }

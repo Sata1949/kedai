@@ -21,6 +21,19 @@ const AUTH_MODES = [
 const text = ref('');
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
 
+/** 窄屏占位语(移动端观感复排 2026-11-06):桌面那句含 Enter/Shift+Enter 键盘语义,
+ *  在手机上会折成两行长提示并占掉输入卡首屏高度;窄屏只保留发现性最强的 `/` 命令提示。 */
+const narrowViewport = ref(false);
+const composerPlaceholder = computed(() =>
+  narrowViewport.value
+    ? '输入消息…（/ 触发命令联想）'
+    : '输入消息...(Enter 发送,Shift+Enter 换行;/ 触发命令联想)',
+);
+let narrowMq: MediaQueryList | null = null;
+function syncNarrow(): void {
+  narrowViewport.value = narrowMq?.matches ?? false;
+}
+
 /** 输入框自动增高:随内容撑开,上限 160px,超出后内部滚动;清空后回落 rows=2 初始高 */
 function autoGrow(): void {
   const el = textareaRef.value;
@@ -30,6 +43,9 @@ function autoGrow(): void {
 }
 // watch 覆盖全部 text 变更入口(手动输入、发送清空、快速回复填入、slash 补全)
 watch(text, () => void nextTick(autoGrow));
+// 窄屏初始 rows 由 2 收到 1(桌面键盘语义在手机上只是两行空高);断点切换后
+// 重新量一次高度,避免横竖屏切换留下上一次的内联 height。
+watch(narrowViewport, () => void nextTick(autoGrow));
 
 /** 四档模式按钮(自定义模式需先在设置中启用执行流程) */
 const MODES: Array<{ key: AgentMode; label: string; title: string }> = [
@@ -258,11 +274,19 @@ onMounted(() => {
   // 联想数据与快速回复列表:加载失败静默(输入功能不受影响)
   void api.listSlashCommands().then((cmds) => (slashCommands.value = cmds)).catch(() => {});
   void api.listQuickReplies().then((rs) => (quickReplies.value = rs)).catch(() => {});
+  // 窄屏占位语:监听断点变化(桌面缩窗/手机横竖屏切换都可跟随)
+  if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+    narrowMq = window.matchMedia('(max-width: 767px)');
+    syncNarrow();
+    narrowMq.addEventListener('change', syncNarrow);
+  }
 });
 
 onUnmounted(() => {
   // 卸载时回收未发送附件的预览 URL(视觉能力包 D2 的 blob 泄漏收口)
   releasePreviews([...attachments.value]);
+  narrowMq?.removeEventListener('change', syncNarrow);
+  narrowMq = null;
 });
 
 /** 模型切换 */
@@ -297,8 +321,8 @@ async function onModelChange(e: Event): Promise<void> {
       <textarea
         ref="textareaRef"
         v-model="text"
-        rows="2"
-        placeholder="输入消息...(Enter 发送,Shift+Enter 换行;/ 触发命令联想)"
+        :rows="narrowViewport ? 1 : 2"
+        :placeholder="composerPlaceholder"
         @input="updateSlashMenu"
         @blur="closeSlashMenu"
         @keydown="onKeydown"
@@ -521,6 +545,89 @@ async function onModelChange(e: Event): Promise<void> {
 @media (max-width: 767px) {
   .sv-model-select {
     max-width: 132px;
+  }
+}
+
+/* 移动端输入区观感复排(2026-11-06):实机反馈「输入框与发送键各占一块硬框、
+   工具条三层黑边叠在一起」。只改窄屏:
+   ① 输入卡是唯一的主表面(1px 墨线);发送键压在卡内右下,不再单独长一个框;
+      窄屏初始只留一行高度,输入后再由 autoGrow 撑开;
+   ② 工具条只留一条发丝顶线:模式/授权/模型/附件都去边框,选中态才落墨块/粉块;
+      这样第二行不再是「仪表盘」,而是一条安静的设置行;
+   ③ 模型下拉的 40px 来自全局 .sv-select 的 height,必须显式覆盖。
+   放在组件 scoped 块:输入区 DOM 全部由本组件渲染,不占全局域行数。 */
+@media (max-width: 767px) {
+  .sv-inputbar {
+    padding: var(--space-2-5) var(--space-4) var(--space-3);
+    border: 0;
+    border-top: 1px solid var(--sv-line-strong);
+    background: var(--sv-paper);
+  }
+  .sv-inputbox { display: block; position: relative; }
+  .sv-inputbox textarea {
+    /* inline-block 会在基线下方留 4~6px 缝隙,绝对定位的发送键按更高的 inputbox
+       算 bottom,实测中心比输入框低 5.73px;改块级后两者同高同心。 */
+    display: block;
+    width: 100%;
+    min-height: 52px;
+    padding: var(--space-3) calc(var(--space-6) * 2) var(--space-3) var(--space-3-5);
+    border: 1px solid var(--sv-ink);
+    font-size: 16px;
+    line-height: 1.5;
+  }
+  .sv-inputbox textarea:focus,
+  .sv-inputbox textarea:focus-visible {
+    border: 1px solid var(--sv-ink);
+    box-shadow: 0 0 0 2px var(--sv-pink-light);
+  }
+  .sv-btn-send {
+    position: absolute;
+    right: 4px;
+    bottom: 4px;
+    width: 44px;
+    height: 44px;
+    min-height: 44px; /* 触摸目标下限(原 36px 只有视觉尺寸达标) */
+    padding: 0;
+    border: 1px solid var(--sv-ink);
+    background: var(--sv-ink);
+    color: var(--sv-white);
+    box-shadow: none;
+  }
+  .sv-btn-send:disabled {
+    background: transparent;
+    border-color: var(--sv-line-strong);
+    color: var(--sv-ink-faint);
+  }
+  .sv-input-toolbar {
+    padding: var(--space-2-5) 0 0;
+    gap: var(--space-1-5);
+    border-top: 1px solid var(--sv-line);
+    background: transparent;
+  }
+  /* 选中态保留墨块/粉块(content.css 用 !important 固定白字),其余段落下沉为文本 */
+  .sv-mode { border: 0; box-shadow: none; }
+  .sv-mode button { min-height: 30px; padding: 0 var(--space-2); border: 0; background: transparent; color: var(--sv-ink-faint); font-size: 11px; letter-spacing: 0.04em; }
+  .sv-mode button.active { background: var(--sv-ink); color: var(--sv-white); }
+  .sv-auth-toggle { border: 0; box-shadow: none; }
+  .sv-auth-toggle button { min-height: 30px; padding: 0 var(--space-2); background: transparent; color: var(--sv-ink-faint); }
+  .sv-auth-toggle button.active { background: var(--sv-pink-deep); color: var(--sv-white); }
+  /* 全局 .sv-select 固定 height:40px,只写 min-height 压不住(实测第二行比第一行高 9px) */
+  .sv-model-select {
+    height: 30px;
+    min-height: 30px;
+    padding: 0 var(--space-5) 0 var(--space-1);
+    border: 0;
+    background-color: transparent;
+    font-size: 11px;
+    color: var(--sv-ink-soft);
+  }
+  .sv-input-toolbar .sv-btn-attach {
+    min-width: 32px;
+    min-height: 32px;
+    height: 32px;
+    border: 0;
+    background: transparent;
+    color: var(--sv-ink-soft);
   }
 }
 </style>

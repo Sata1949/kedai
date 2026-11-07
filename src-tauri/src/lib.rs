@@ -265,9 +265,34 @@ fn exit_now(app: &tauri::AppHandle) {
     app.exit(0);
 }
 
+/// Android 进程退出必须绕过 `std::process::exit`。
+///
+/// Tauri/tao 在事件循环结束时调用 `std::process::exit`,该调用会执行 C++ 静态析构;
+/// 退出时 hwui 的 `WebViewFunctorManager`(真机 Trichrome WebView)或 EGL display
+/// (模拟器)析构会去锁一个已经被 WebView 销毁的互斥量,Android 14/15 的 FORTIFY
+/// 直接 SIGABRT(`pthread_mutex_lock called on a destroyed mutex`)。
+///
+/// `_exit` 是内核级立即退出:不跑 atexit、不跑静态析构,也就不存在「WebView 已销毁
+/// 但静态析构还没走完」的窗口。代价是不做 Rust/日志缓冲的收尾,因此调用前必须把
+/// 需要留痕的错误同步写入文件(见 `write_start_error`)。
+#[cfg(target_os = "android")]
+fn hard_exit(code: i32) -> ! {
+    // SAFETY:`_exit` 只接受退出码,不访问 Rust 内存;调用即终止本进程。
+    unsafe { libc::_exit(code) }
+}
+
 /// Android:无端口残留清理流程(无 netstat/taskkill,且系统 launcher 保证单实例),
 /// 后端与壳同进程,退出即整体结束。
-#[cfg(mobile)]
+///
+/// 不能走 `AppHandle::exit`:它会触发 tao 的 `std::process::exit`,退出时静态析构
+/// 撞上仍存活的 WebView(FORTIFY abort)。`hard_exit` 直接调用内核 `_exit`。
+#[cfg(target_os = "android")]
+fn exit_now(_app: &tauri::AppHandle) {
+    hard_exit(0);
+}
+
+/// 其它移动端(iOS):保持 Tauri 原生退出语义。
+#[cfg(all(mobile, not(target_os = "android")))]
 fn exit_now(app: &tauri::AppHandle) {
     app.exit(0);
 }
@@ -301,6 +326,21 @@ pub fn run() {
                     let handle = app.handle().clone();
                     app.listen(RESTART_APP_EVENT, move |_| {
                         tracing::info!("收到重启请求,应用即将重启以切换数据位置");
+                        #[cfg(target_os = "android")]
+                        {
+                            let _ = &handle;
+                            // 原生 PendingIntent 重启:先安排 launcher Intent,再立即结束进程。
+                            // 不能走 AppHandle::restart/Tauri process::restart —— 后者最终
+                            // std::process::exit,在 WebView 存活时触发同一 FORTIFY abort。
+                            match native_bridge::restart_app() {
+                                Ok(()) => hard_exit(0),
+                                Err(e) => {
+                                    tracing::error!(error = e, "原生重启失败,改为直接退出");
+                                    hard_exit(0);
+                                }
+                            }
+                        }
+                        #[cfg(not(target_os = "android"))]
                         handle.restart();
                     });
                 }
@@ -363,6 +403,12 @@ pub fn run() {
                         tracing::warn!(error = e, "请求 Shizuku 授权失败");
                     }
                 });
+                // 数据位置(Android):默认根在公共 Download 目录,需要「所有文件访问」权限。
+                app.listen(native_bridge::ALL_FILES_ACCESS_EVENT, |_| {
+                    if let Err(e) = native_bridge::request_all_files_access() {
+                        tracing::warn!(error = e, "请求所有文件访问权限失败");
+                    }
+                });
             }
 
             // 数据目录:Android 上 app_data_dir() 映射到应用私有目录(/data/data/<pkg>/files),
@@ -375,13 +421,65 @@ pub fn run() {
             let log_dir = app_data.join("logs");
 
             std::fs::create_dir_all(&log_dir)?;
+            // Android 没有 %APPDATA%:指针路径默认解析为 None,选择结果无法持久化。
+            // 壳把指针放到应用私有目录(服务端 `data_location::pointer_path` 优先读该环境变量)。
+            #[cfg(target_os = "android")]
+            std::env::set_var(
+                "KEDAI_DATA_LOCATION_POINTER",
+                app_data.join("data-location.json"),
+            );
+
             // 数据位置(2026-11 盘符选择):指针存在且 `<root>/data` 可用时以用户选择的根为准;
             // 缺失/不可用则沿用旧逻辑(`%APPDATA%/data`),由前端教程第二步/强制弹窗接管。
             // 旧版「项目 data → APPDATA」迁移只在未选择根时执行:选择根后数据已由服务端迁移。
             let chosen_root = kedai_server::data_location::read_pointer()
                 .filter(|pointer| kedai_server::data_location::pointer_usable(&pointer.root))
                 .map(|pointer| pointer.root);
-            if let Some(root) = chosen_root {
+            // Android 分支会写入 selected_root(默认公共根);桌面只读。
+            #[cfg(target_os = "android")]
+            let mut selected_root = chosen_root;
+            #[cfg(not(target_os = "android"))]
+            let selected_root = chosen_root;
+            // Android 默认数据根(2026-11-06):无指针时应落到公共 Download/Kedai-Data。
+            // 应用私有目录为空(全新安装/清过数据)且默认根可写 → 直接采用,不弹引导;
+            // 已有私有数据 → 交给前端强制弹窗确认迁移(不会静默丢弃旧目录)。
+            #[cfg(target_os = "android")]
+            if selected_root.is_none() {
+                if let Some(default_root) = kedai_server::data_location::suggested_root() {
+                    let writable = kedai_server::data_location::probe_writable(&default_root);
+                    let private_has_data = kedai_server::config::dir_has_user_data(&data_dir);
+                    if writable && !private_has_data {
+                        match kedai_server::data_location::ensure_root_layout(&default_root) {
+                            Err(error) => {
+                                eprintln!("[警告] 创建 Android 默认数据根失败: {error}");
+                                std::env::set_var(
+                                    "KEDAI_DATA_LOCATION_ERROR",
+                                    format!("Android 默认数据根不可用: {error}"),
+                                );
+                            }
+                            Ok(()) => {
+                                // 公共目录「能写文件」不等于 SQLite 能用:scoped storage 下
+                                // 隐藏探针可能成功、真实 kedai.db 却建不出来。用真实库路径
+                                // 探针验证,失败则回退私有目录并按 pending 引导用户。
+                                if let Err(error) = kedai_server::services::data_location_service::probe_sqlite_support(
+                                    &default_root.join(kedai_server::data_location::DATA_DIR_NAME),
+                                ) {
+                                    eprintln!(
+                                        "[警告] Android 默认数据根不能承载 SQLite: {error};回退应用私有目录"
+                                    );
+                                    std::env::set_var(
+                                        "KEDAI_DATA_LOCATION_ERROR",
+                                        format!("Android 默认数据根不可用于 SQLite: {error}"),
+                                    );
+                                } else {
+                                    selected_root = Some(default_root);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(root) = selected_root {
                 std::env::set_var("KEDAI_DATA_ROOT", &root);
                 eprintln!("[信息] KEDAI_DATA_ROOT={}", root.display());
             } else {
@@ -393,6 +491,10 @@ pub fn run() {
                     }
                 }
                 std::env::set_var("DATA_DIR", &data_dir);
+                // Android:私有目录只是回退,数据位置仍待用户确认(默认 Download/Kedai-Data)。
+                // 显式 DATA_DIR 在桌面/bench 表示「不要弹引导」,故用独立标记表达这一差异。
+                #[cfg(target_os = "android")]
+                std::env::set_var("KEDAI_DATA_LOCATION_PENDING", "1");
                 eprintln!("[信息] DATA_DIR={}", data_dir.display());
             }
             std::env::set_var("LOG_DIR", &log_dir);
@@ -433,6 +535,19 @@ pub fn run() {
                 {
                     write_start_error(&log_dir, &error);
                     eprintln!("[错误] {error}");
+                    // Android 绝不能走 AppHandle::exit:它最终调用 std::process::exit,
+                    // 在 WebView 仍存活时触发 hwui 的 destroyed mutex(FORTIFY abort)。
+                    // 改为原生对话框展示失败原因;用户点「退出」时由 Kotlin 直接
+                    // Process.killProcess(同样不跑静态析构)。
+                    #[cfg(target_os = "android")]
+                    {
+                        let _ = &app_handle;
+                        if let Err(e) = native_bridge::show_startup_error(&error) {
+                            tracing::error!(error = e, "显示启动失败对话框失败,直接退出");
+                            hard_exit(1);
+                        }
+                    }
+                    #[cfg(not(target_os = "android"))]
                     app_handle.exit(1);
                 }
             });
@@ -469,28 +584,40 @@ pub fn run() {
                     .unwrap_or(false);
                 if force {
                     tracing::warn!("前端未响应关闭确认,第二次关闭直接退出");
-                    exit_now(&app_handle);
+                    exit_now(app_handle);
                 } else if let Err(e) = app_handle.emit(CLOSE_REQUESTED_EVENT, ()) {
                     // 事件下发失败(无 webview 等)意味着确认框不可能出现:
                     // 用户点了关闭就必须关得掉,直接退出比挂住强。
                     tracing::warn!(error = e.to_string(), "关闭确认事件下发失败,直接退出");
-                    exit_now(&app_handle);
+                    exit_now(app_handle);
                 }
             }
 
-            // Android:进程级退出前的收尾(返回键退出/系统回收)——
-            // 后端与壳同进程,无需单独 kill;此处仅留观测点便于真机排查。
-            #[cfg(mobile)]
+            // Android:任何 Tauri 退出请求都在这里收口,直接走 `_exit`,不给
+            // `std::process::exit` 执行 WebView/EGL 静态析构的机会。
+            // 这是最后一道安全网:即使某个第三方插件调用 AppHandle::exit,也不会崩。
+            #[cfg(target_os = "android")]
+            if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
+                tracing::info!(code = ?code, "Kedai Android 进程退出请求");
+                api.prevent_exit();
+                if code == Some(tauri::RESTART_EXIT_CODE) {
+                    if let Err(e) = native_bridge::restart_app() {
+                        tracing::error!(error = e, "原生重启失败,改为直接退出");
+                    }
+                }
+                hard_exit(code.unwrap_or(0));
+            }
+
+            // 其它移动端(iOS):保留观测点。
+            #[cfg(all(mobile, not(target_os = "android")))]
             if let tauri::RunEvent::ExitRequested { .. } = event {
-                tracing::info!("Kedai Android 进程退出请求");
+                tracing::info!("Kedai 进程退出请求");
             }
         });
 }
 
-/// 端口当前是否可绑定(用于确认旧实例已真正释放端口)。
+/// 端口当前是否可绑定(用于确认旧实例已真正释放端口/端口是否被占用)。
 /// 直接试绑一次:成功即空闲;失败说明仍被占用。
-/// 仅桌面使用(Android 无「接管旧实例」流程)。
-#[cfg(desktop)]
 async fn port_bindable(config: &kedai_server::config::AppConfig) -> bool {
     let addr = format!("{}:{}", config.host, config.port);
     match tokio::net::TcpListener::bind(&addr).await {
@@ -507,6 +634,27 @@ async fn start_and_wait_ready(
     app: tauri::AppHandle,
     log_dir: PathBuf,
 ) -> Result<(), String> {
+    // Android:端口被非 Kedai 进程占用时改用系统分配的空闲端口。
+    // 不能让「端口冲突」变成启动失败 → 退出:Android 上退出会触发 WebView 析构
+    // (FORTIFY abort)。桌面端的接管逻辑在下方单独处理。
+    #[cfg(target_os = "android")]
+    let config = {
+        let mut config = config;
+        if !port_bindable(&config).await && !health_ok(&config).await {
+            let listener = tokio::net::TcpListener::bind((config.host.as_str(), 0))
+                .await
+                .map_err(|e| format!("无法分配空闲端口: {e}"))?;
+            let port = listener
+                .local_addr()
+                .map_err(|e| format!("读取空闲端口失败: {e}"))?
+                .port();
+            drop(listener);
+            tracing::warn!(from = config.port, to = port, "端口被占用,改用空闲端口");
+            eprintln!("[警告] 端口 {} 被占用,改用 {}", config.port, port);
+            config.port = port;
+        }
+        config
+    };
     let service_url = service_url(&config);
 
     // 桌面版必须使用本进程内、指向统一 AppData 的后端。端口若已被另一个 Kedai 实例

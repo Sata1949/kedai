@@ -200,8 +200,11 @@ export function sanitizeVisibleHtml(html: string): string {
       textarea: ['name', 'rows', 'cols', 'placeholder', 'disabled', 'maxlength', 'class', 'id', 'style'],
       fieldset: ['disabled', 'class', 'id', 'style'],
     },
+    // img 额外放行 http(2026-11-06 实机取证):角色卡插图大量使用 http 图床,
+    // 旧白名单只剩 data/https 时整张图被 sanitizer 丢弃,表现为「插图消失」。
+    // 脚本/链接仍只放行 https,http 图片无法执行脚本。
     allowedSchemes: ['data', 'https'],
-    allowedSchemesByTag: { img: ['data', 'https'] },
+    allowedSchemesByTag: { img: ['data', 'https', 'http'] },
     allowProtocolRelative: false,
     transformTags: {
       // style 属性声明级清洗(与 <style> 规则体同一管线:剥 expression/javascript:/
@@ -259,8 +262,9 @@ export function sanitizeMessageHtml(html: string): string {
       div: ['class'],
     },
     allowedClasses: { div: ['sv-status-block'] },
+    // img 额外放行 http:同 sanitizeVisibleHtml,http 图床的角色卡插图不能整张消失
     allowedSchemes: ['https'],
-    allowedSchemesByTag: { a: ['https'], img: ['data', 'https'] },
+    allowedSchemesByTag: { a: ['https'], img: ['data', 'https', 'http'] },
     allowProtocolRelative: false,
     transformTags: {
       // 卡片约定标签 <StatusBlock> → Kedai 状态面板(原属性全丢,只留注入类名)

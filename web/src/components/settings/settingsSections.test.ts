@@ -203,6 +203,18 @@ describe('SettingsModal(壳 · 单模式)', () => {
     expect(html).toContain('「重连」即生效');
   });
 
+  it('API 分区含生成参数(2026-11-07 分区合并):连接三段与生成参数同屏', async () => {
+    const html = stripComments(await render(SettingsModal, { activeSection: 'api' }));
+    // 连接侧(API 设置 / 后端连接 / 生成参数)三块都在同一分区里
+    expect(html).toContain('API 设置');
+    expect(html).toContain('BASE URL');
+    expect(html).toContain('生成参数');
+    expect(html).toContain('随机性(Temperature)');
+    // 合并后旧的 `model` 分区键不再单独挂载生成参数——它已被重定向到 api
+    const viaRetiredKey = stripComments(await render(SettingsModal, { activeSection: 'model' }));
+    expect(viaRetiredKey).not.toContain('随机性(Temperature)');
+  });
+
   it('装配:能力包分区按 activeSection 挂载(编码 / 文学;LIT-1)', async () => {
     const coding = await render(SettingsModal, { activeSection: 'coding' });
     expect(coding).toContain('编码能力包');

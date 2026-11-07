@@ -278,6 +278,11 @@ const html = computed<string>(() => {
   // 而两者对脚本 min_depth/max_depth 的过滤语义不同(undefined=不过滤),
   // 键与渲染输入不等价(同一键可能命中不同渲染结果)
   const depth = props.depth ?? 0;
+  // 流式中的每一帧都是「前缀」:逐帧入缓存会以每帧一条的速度把 500 容量全换成
+  // 该消息的历史前缀(流式期间每帧一个新的键),稳定历史条目被挤光、P-9 缓存
+  // 在生成时段完全失效;终态帧(m.streaming=false)才入缓存。
+  // 流式帧本就不查表,提前返回可免去每帧构造超长键与 Map 查找。
+  if (props.m.streaming) return renderMessageHtml(text, scopeId, depth);
   // 模块级缓存(2026-09-17 P-9):虚拟滚动卸载重挂时组件内 computed 缓存随之销毁,
   // 同一条消息来回滚动会反复重付 markdown / scoped 脚本 / sanitize 成本,故提到模块级。
   const key = buildMessageRenderKey({
@@ -292,10 +297,7 @@ const html = computed<string>(() => {
   const cached = messageHtmlCache.get(key);
   if (cached !== undefined) return cached;
   const result = renderMessageHtml(text, scopeId, depth);
-  // 流式中的每一帧都是「前缀」:逐帧入缓存会以每帧一条的速度把 500 容量全换成
-  // 该消息的历史前缀(流式期间每帧一个新的键),稳定历史条目被挤光、P-9 缓存
-  // 在生成时段完全失效;终态帧(m.streaming=false)才入缓存。
-  if (!props.m.streaming) messageHtmlCache.set(key, result);
+  messageHtmlCache.set(key, result);
   return result;
 });
 
@@ -591,5 +593,46 @@ defineExpose({ rootEl });
   max-height: 220px;
   border: var(--bw-thin) solid var(--sv-line-strong);
   background: var(--sv-white);
+}
+
+/* 角色扮演移动端观感复排(2026-11-06):实机反馈「移动模式 UI 太丑」的落点——
+   每屏都压着 2px 黑框消息盒、头像与内边距吃掉正文宽度。这里只改窄屏:
+   ① 消息盒收成 1px 发丝线 + 2px 粉顶线;助手气泡吃满可用宽,用户气泡限 88%;
+   ② 头像缩到 28px,消息间距从 24px 收到 16px;
+   ③ 操作行字号降到 11px(触摸高度仍由 mobile.css 的 44px 规则兜底),
+      并让用户消息的操作行换到气泡下一行——不能与气泡并列,否则触屏常显时
+      四个按钮会把气泡挤到 275px 并竖排(见下方结构注释)。
+   放在组件 scoped 块:消息 DOM 全部由本组件渲染,不占全局域行数。 */
+@media (max-width: 767px) {
+  /* 20px 段距、12/14 内边距:消息之间留出呼吸,正文不至于贴住发丝线 */
+  .sv-msg { gap: var(--space-2-5); margin-bottom: var(--space-5); }
+  .sv-msg .sv-avatar.char { width: 28px; height: 28px; font-size: 12px; }
+  .sv-msg-bubble {
+    max-width: none;
+    padding: var(--space-3) var(--space-3-5);
+    font-size: 15px;
+    line-height: 1.75;
+  }
+  .sv-msg.user .sv-msg-bubble { max-width: 86%; }
+  .sv-msg.assistant .sv-msg-bubble {
+    border-width: var(--bw-thin);
+    border-top-width: 2px;
+  }
+  .sv-msg-name { margin-bottom: calc(var(--space-1) / 2); }
+  /* 触屏端操作行常显(mobile.css 的 hover:none 规则)暴露的结构缺陷:用户消息的
+     气泡与操作行是 .sv-msg 的并列 flex 子项,操作行一旦常显就与气泡抢同一行宽
+     ——实测 411px 下气泡被压到 275px 且左移,四个 2 字按钮各占 17.6×94px 竖排。
+     窄屏改为允许换行:气泡独占第一行并右对齐,操作行整行落到下一行右对齐;
+     按钮给 44px 最小宽(原只有 min-height,横向命中区仅 17px)。 */
+  .sv-msg.user { flex-wrap: wrap; }
+  .sv-msg-actions { align-items: center; flex-wrap: wrap; gap: var(--space-2-5); margin-top: var(--space-1); }
+  .sv-msg.user .sv-msg-actions { flex: 1 1 100%; justify-content: flex-end; }
+  .sv-msg .sv-msg-action {
+    min-width: 44px;
+    padding: 0 var(--space-1);
+    white-space: nowrap;
+    font-size: 11px;
+  }
+  .sv-msg-images img { max-width: 100%; max-height: 260px; }
 }
 </style>

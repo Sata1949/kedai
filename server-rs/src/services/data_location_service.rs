@@ -37,6 +37,13 @@ pub struct DataLocationStatus {
     pub legacy_data: bool,
     pub pointer: Option<String>,
     pub error: Option<String>,
+    /// 运行平台:`android` 走路径模式(无盘符),`desktop` 走盘符模式。
+    pub platform: String,
+    /// 平台建议的数据根:Android = `/storage/emulated/0/Download/Kedai-Data`;桌面为 null。
+    pub suggested_root: Option<String>,
+    /// Android 专用:建议根当前不可写(通常缺少「所有文件访问」权限)。
+    /// 桌面恒为 false。前端据此展示授权入口,而不是只给一个报错的按钮。
+    pub needs_permission: bool,
 }
 
 /// `POST /api/data-location` 的结果。
@@ -95,6 +102,16 @@ impl DataLocationService {
                 letter: letter.to_string(),
             })
             .collect();
+        let suggested_root = data_location::suggested_root();
+        // 可写/可读探测只在 Android 且尚未选定根时做:已选定且可用的根不需要权限提示,
+        // 而每次打开设置都建目录/写探针也没有必要。
+        // 除可写外还要验已有 kedai.db 能否打开:旧 UID/其它安装留下的公共库在未授权
+        // 「所有文件访问」时不可读,只测「能新建文件」会给出假的 needs_permission=false。
+        let needs_permission = suggested_root.as_ref().is_some_and(|root| {
+            self.config.data_root.is_none()
+                && (!data_location::probe_writable(root)
+                    || probe_sqlite_support(&root.join(DATA_DIR_NAME)).is_err())
+        });
         DataLocationStatus {
             managed: self.config.data_location_managed,
             pending: self.config.data_location_pending,
@@ -115,6 +132,9 @@ impl DataLocationService {
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned()),
             error: self.config.data_location_error.clone(),
+            platform: data_location::platform().to_string(),
+            suggested_root: suggested_root.map(|p| p.to_string_lossy().into_owned()),
+            needs_permission,
         }
     }
 
@@ -126,6 +146,16 @@ impl DataLocationService {
         let root = data_location::root_for_drive(letter).ok_or_else(|| {
             DataLocationError::BadRequest(format!("{letter} 盘不存在或不可访问,请选择其它盘"))
         })?;
+        self.apply_to_root(&root)
+    }
+
+    /// Android 路径模式:直接选择绝对路径根(默认 `/storage/emulated/0/Download/Kedai-Data`)。
+    ///
+    /// 与 `apply(盘符)` 共用同一套目录创建/迁移/冲突判定;额外只做路径形态校验
+    /// (绝对、末段 `Kedai-Data`、父目录存在),避免手滑路径在磁盘深处建出数据根。
+    pub fn apply_root_path(&self, input: &str) -> Result<ApplyOutcome, DataLocationError> {
+        let root =
+            data_location::normalize_custom_root(input).map_err(DataLocationError::BadRequest)?;
         self.apply_to_root(&root)
     }
 
@@ -270,6 +300,44 @@ fn copy_tree(source: &Path, target: &Path, skip_images: bool) -> Result<u64, Str
         }
     }
     Ok(copied)
+}
+
+/// 验证目录能承载 SQLite(建库 + WAL + 读写)。
+///
+/// Android 公共目录(默认 `/storage/emulated/0/Download/Kedai-Data/data`)位于 FUSE,
+/// scoped storage 下隐藏探针可能成功、真实的 `kedai.db` 却建不出来(2026-11-06 实测:
+/// 未授予「所有文件访问」时 `.kedai-sqlite-probe.db` 可写,`kedai.db` 返回
+/// `unable to open database file`,随后启动失败)。因此这里直接使用服务端将要打开的
+/// **真实库路径**:
+/// - 不存在:建一个空库并执行 WAL/CREATE/DROP,然后删除(不污染真实数据);
+/// - 已存在:只读打开并验证可读,不删除、不迁移;打不开/损坏则报错。
+pub fn probe_sqlite_support(data_dir: &Path) -> Result<(), String> {
+    fs::create_dir_all(data_dir).map_err(|e| format!("创建数据目录失败: {e}"))?;
+    let db = data_dir.join("kedai.db");
+    if db.exists() {
+        let conn =
+            rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|e| format!("已有数据库无法打开: {e}"))?;
+        conn.query_row("SELECT COUNT(*) FROM sqlite_master", [], |_| Ok(()))
+            .map_err(|e| format!("已有数据库无法读取: {e}"))?;
+        return Ok(());
+    }
+    let result = (|| -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db)
+            .map_err(|e| format!("SQLite 无法在目标目录建库: {e}"))?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             CREATE TABLE probe (id INTEGER PRIMARY KEY, value TEXT);
+             INSERT INTO probe(value) VALUES ('ok');
+             DROP TABLE probe;",
+        )
+        .map_err(|e| format!("SQLite 探针执行失败: {e}"))?;
+        Ok(())
+    })();
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = fs::remove_file(format!("{}{}", db.display(), suffix));
+    }
+    result
 }
 
 /// 是否有非终态任务(pending/planning/running/planned)。
@@ -424,6 +492,41 @@ mod tests {
         assert_eq!(n, 1, "快照必须包含源库数据");
     }
 
+    /// Android 路径模式:apply_root_path 与盘符模式共用迁移逻辑,只多一层路径校验。
+    #[test]
+    fn apply_root_path_migrates_and_writes_pointer() {
+        let source = TempDataDir::new("dl-root-src");
+        let pointer_dir = TempDataDir::new("dl-root-ptr");
+        let root_parent = TempDataDir::new("dl-root-parent");
+        let root = root_parent.join("Kedai-Data");
+        std::fs::write(source.join("settings.json"), "{}").unwrap();
+        std::fs::create_dir_all(source.join("images")).unwrap();
+        std::fs::write(source.join("images").join("a.png"), b"png").unwrap();
+
+        let mut cfg = crate::config::test_config();
+        cfg.data_dir = source.path().to_path_buf();
+        cfg.images_dir = source.join("images");
+        cfg.imports_dir = source.join("imports");
+        cfg.task_scratch_dir = source.path().parent().unwrap().join("scratch-root-test");
+        let pointer_path = pointer_dir.join("data-location.json");
+        let svc = DataLocationService::with_pointer_path(cfg, pointer_path.clone());
+
+        let out = svc
+            .apply_root_path(&root.to_string_lossy())
+            .expect("路径模式迁移失败");
+        assert!(out.migrated && out.restart_required);
+        assert!(root.join("data").join("settings.json").is_file());
+        assert!(root.join("outputs").join("images").join("a.png").is_file());
+        let pointer = data_location::read_pointer_from(&pointer_path).expect("指针未写");
+        assert_eq!(pointer.root, root);
+
+        // 非法路径走 BadRequest,不落盘
+        assert!(matches!(
+            svc.apply_root_path("relative/Kedai-Data"),
+            Err(DataLocationError::BadRequest(_))
+        ));
+    }
+
     #[test]
     fn active_tasks_are_detected_from_db() {
         let source = TempDataDir::new("dl-active");
@@ -437,5 +540,39 @@ mod tests {
         conn.execute("UPDATE tasks SET status='done' WHERE id='t1'", [])
             .unwrap();
         assert!(!has_active_tasks(source.path()).unwrap());
+    }
+
+    #[test]
+    fn sqlite_probe_detects_usable_directory_and_rejects_blocked_path() {
+        let dir = TempDataDir::new("dl-sqlite-probe");
+        let data = dir.path().join("data");
+        probe_sqlite_support(&data).expect("临时目录应可承载 SQLite");
+        assert!(!data.join("kedai.db").exists(), "探针文件必须清理");
+
+        // 真实库路径被一个目录占住 → SQLite 无法建库
+        let blocked = dir.path().join("blocked");
+        std::fs::create_dir_all(blocked.join("kedai.db")).unwrap();
+        assert!(
+            probe_sqlite_support(&blocked).is_err(),
+            "不可建库的目录必须报错"
+        );
+    }
+
+    #[test]
+    fn sqlite_probe_keeps_existing_database_untouched() {
+        let dir = TempDataDir::new("dl-sqlite-existing");
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        Connection::open(data.join("kedai.db"))
+            .unwrap()
+            .execute_batch("CREATE TABLE keep(id INTEGER); INSERT INTO keep VALUES (7);")
+            .unwrap();
+
+        probe_sqlite_support(&data).expect("已有库应可读");
+        let n: i64 = Connection::open(data.join("kedai.db"))
+            .unwrap()
+            .query_row("SELECT id FROM keep", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(n, 7, "探针不得改动已有库");
     }
 }

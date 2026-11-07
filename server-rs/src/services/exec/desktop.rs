@@ -217,16 +217,17 @@ pub async fn execute(req: ExecRequest) -> Result<ExecResult, String> {
             }
             // 读任务收尾**有界**(宽限 + 放弃 + 取已捕获部分):子孙持写端时 EOF 可能
             // 永不到来,不能让它挂住返回值(见 PIPE_DRAIN_GRACE)。
-            let stdout = match out_task {
+            let (stdout, out_truncated) = match out_task {
                 Some(handle) => finish_reader(handle, &out_cap).await,
-                None => String::new(),
+                None => (String::new(), false),
             };
-            let stderr = match err_task {
+            let (stderr, err_truncated) = match err_task {
                 Some(handle) => finish_reader(handle, &err_cap).await,
-                None => String::new(),
+                None => (String::new(), false),
             };
             Ok(ExecResult {
                 exit_code: status.code().unwrap_or(-1),
+                truncated: out_truncated || err_truncated,
                 stdout,
                 stderr,
                 tier: ShellTier::Sandbox,
@@ -250,9 +251,14 @@ pub async fn execute(req: ExecRequest) -> Result<ExecResult, String> {
             // 读任务直接放弃:等写端关闭可能永远不返回,收尾必须有界
             abort_reader(out_task.as_ref());
             abort_reader(err_task.as_ref());
+            let meta = serde_json::json!({
+                "exit_code": serde_json::Value::Null,
+                "timed_out": true,
+                "truncated": false,
+            });
             Err(format!(
-                "命令超时({timeout} ms)已终止。建议:拆小步骤、或调高 timeout_ms(上限 {} ms)。",
-                super::MAX_TIMEOUT_MS
+                "命令超时({timeout} ms)已终止。建议:拆小步骤、或调高 timeout_ms(上限 {} ms)。\n\n[exec-meta] {meta}",
+                super::MAX_TIMEOUT_MS,
             ))
         }
     }
@@ -265,7 +271,14 @@ pub async fn execute(req: ExecRequest) -> Result<ExecResult, String> {
 const PIPE_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_millis(1_000);
 
 /// 有界地收掉一个读任务并取回捕获结果。
-async fn finish_reader(mut handle: JoinHandle<()>, shared: &Arc<Mutex<PipeCapture>>) -> String {
+/// 收尾一个读任务,返回(渲染后的文本, 是否发生过截断)。
+///
+/// `truncated` 取自 `PipeCapture` 丢弃计数:它只说明**本层 32K 字符窗口**是否截断,
+/// 与 `tools/registry` 的 64KB 字节截断互不代偿(两层各自如实报告)。
+async fn finish_reader(
+    mut handle: JoinHandle<()>,
+    shared: &Arc<Mutex<PipeCapture>>,
+) -> (String, bool) {
     if tokio::time::timeout(PIPE_DRAIN_GRACE, &mut handle)
         .await
         .is_err()
@@ -274,7 +287,8 @@ async fn finish_reader(mut handle: JoinHandle<()>, shared: &Arc<Mutex<PipeCaptur
         handle.abort();
         let _ = handle.await;
     }
-    shared.lock().unwrap_or_else(|e| e.into_inner()).render()
+    let cap = shared.lock().unwrap_or_else(|e| e.into_inner());
+    (cap.render(), cap.truncated())
 }
 
 /// 放弃一个读任务(超时/失败路径):不等写端关闭,abort 即释放管道句柄。
@@ -291,14 +305,23 @@ fn abort_reader(handle: Option<&JoinHandle<()>>) {
 async fn drain_pipe(mut pipe: impl tokio::io::AsyncRead + Unpin, shared: Arc<Mutex<PipeCapture>>) {
     use tokio::io::AsyncReadExt;
     let mut buf = [0u8; 8192];
+    // ANSI 转义在这里就剥掉(2026-11-06):见 `AnsiFilter` 的模块级理由——放在截断之前,
+    // 序列既不占 32K 字符预算,也不会被「保头保尾」窗口切成两半。
+    let mut ansi = crate::services::exec::AnsiFilter::new();
+    let mut cleaned: Vec<u8> = Vec::with_capacity(8192);
     loop {
         match pipe.read(&mut buf).await {
             Ok(0) => break,
             Ok(n) => {
+                cleaned.clear();
+                ansi.feed(&buf[..n], &mut cleaned);
+                if cleaned.is_empty() {
+                    continue;
+                }
                 shared
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .feed(&buf[..n]);
+                    .feed(&cleaned);
             }
             Err(_) => break,
         }
@@ -405,6 +428,11 @@ impl PipeCapture {
                 tail
             )
         }
+    }
+
+    /// 本管道是否发生过截断(供 `ExecResult.truncated` 汇总)。
+    fn truncated(&self) -> bool {
+        self.dropped > 0
     }
 }
 

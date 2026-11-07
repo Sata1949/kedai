@@ -56,6 +56,9 @@ pub(crate) struct AgentLoopCall {
     /// 消费点两处:① 本步墙钟预算按 `min(步骤预算, deadline - now)` 取小
     /// (见 `effective_step_budget`);② 多步执行器在启动下一步前判定是否已到点。
     pub deadline: Option<Instant>,
+    /// **任务三档授权档位**(2026-11-06;None = 旧任务)。
+    /// 未绑定工作区的任务没有 `ExecScope`，权限层仍需要它，故随 `ToolBudget` 下传。
+    pub task_authorization: Option<crate::models::tool_policy::TaskAuthorizationMode>,
     /// 是否启用「连续只读」守卫(TMR-5,`ToolBudget.readonly_streak_limit`)。
     ///
     /// 默认 true(solo/multi/team/plan 续跑)。followup 置 false:终态追加指令
@@ -131,7 +134,7 @@ pub(crate) async fn run_agent_loop(
     // 工具按任务策略下发(批次授权改造):默认拒绝危险工具;元工具不入正文列表。
     // 任务模式无 UI 授权上下文,闸门恒 no_ui_authorization = true:
     // 名单外工具立即拒绝并回灌错误,不会空等 300 秒授权超时。
-    let policy = super::tool_policy::compile(
+    let policy = super::tool_policy::compile_with_authorization(
         &settings.task_tool_policy,
         &settings.task_tool_allowlist,
         &engine.tool_registry(),
@@ -147,6 +150,8 @@ pub(crate) async fn run_agent_loop(
         crate::services::settings_service::vision_enabled(settings),
         // 截图工具随「视觉与截图」总开关(默认关;见 tool_policy::screenshot_gate)
         settings.vision_screenshot_enabled,
+        // 三档授权(2026-11-06):自动档提升为全量工具面
+        call.task_authorization,
     );
     // 闸门名单先取出(allowed 借用生命周期需覆盖整个工具循环),再取走 defs
     let allowed = policy.allowed;
@@ -212,7 +217,16 @@ pub(crate) async fn run_agent_loop(
         semantic_guard,
         response_format: None,
     };
-    let gate = crate::agents::engine::executor::ToolGate::listed(&allowed);
+    // 三档授权(2026-11-06):「逐步」「工作区内」档要能等用户确认，故用可等待闸门；
+    // 「自动」档与旧任务维持直接拒绝名单外工具（不空等 300 秒）。
+    // 名单本身仍是硬边界（`ToolGate::excludes` 只看 hard_exclude_outside），
+    // 因此模型臆造名单外工具时两档都直接拒绝。
+    let gate = match call.task_authorization {
+        Some(mode) if mode.can_wait_for_user() => {
+            crate::agents::engine::executor::ToolGate::listed_waiting(&allowed)
+        }
+        _ => crate::agents::engine::executor::ToolGate::listed(&allowed),
+    };
 
     // 运行身份:虚拟 session_id(task: 前缀,不建 sessions/agent_sessions 影子行);
     // 状态迁移校验:非法迁移记 warn 日志(StateMachine 会返回 Err,不得静默丢弃);
@@ -246,6 +260,8 @@ pub(crate) async fn run_agent_loop(
                 .then_some(super::TASK_NO_PROGRESS_LIMIT),
             // SKY-8:集成主读满阈值后提醒先写入口骨架(只提醒,不熔断)。
             shard_read_nudge_after: call.shard_read_nudge_after,
+            // 三档授权(2026-11-06):随预算载体下传,未绑定工作区也能生效。
+            task_authorization: call.task_authorization,
         }),
     };
     // 事件桥:引擎事件 → 任务事件(agent_status);drain 持续消费到 tx drop。
@@ -589,6 +605,8 @@ impl SoloExecutor {
             no_progress_guard: true,
             // solo 不是集成主:无分片读取软提醒。
             shard_read_nudge_after: None,
+            // 三档授权(2026-11-06):任务创建期选择的档位
+            task_authorization: ctx.tool_authorization,
         };
         let out = run_agent_loop(
             self.svc.clone(),

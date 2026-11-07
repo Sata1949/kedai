@@ -458,6 +458,46 @@ onBeforeUnmount(() => {
   .sv-session-select { max-width: 38vw; }
 }
 @media (max-width: 767px) {
-  .sv-topbar-title { max-width: 42vw; }
+  /* 手机顶栏:只保留「品牌方块 + 角色名 + 会话 + 一个 ⋯」。
+     会话下拉、新建、开场全部去框,变成一条安静的文字行;2px 黑杠+4px 粉影
+     收到 1px/2px,让顶栏从「四个盒子」变成一条标题栏。 */
+  .sv-topbar {
+    padding: var(--space-2-5) var(--space-4) var(--space-2-5) var(--space-8);
+    gap: var(--space-2);
+    border-bottom-width: 1px;
+    box-shadow: 0 2px 0 0 var(--sv-pink);
+  }
+  .sv-topbar-title { max-width: 42vw; font-size: var(--text-md); font-weight: 800; letter-spacing: 0; }
+  /* 蓝方块与左侧红方块叠在一起像两个坏掉的徽标;手机只留红方块作品牌记号 */
+  .sv-topbar-identity .sv-supreme.blue { display: none; }
+  .sv-topbar-right { gap: var(--space-1); }
+  .sv-topbar-group { gap: var(--space-1); }
+  .sv-session-select {
+    max-width: 36vw;
+    padding: 0 var(--space-4) 0 0;
+    border: 0;
+    background-color: transparent;
+    font-size: var(--text-xs);
+    color: var(--sv-ink-faint);
+  }
+  .sv-session-select:focus { border-color: transparent; }
+  .sv-topbar-group .sv-icon-btn,
+  .sv-topbar-group > .sv-btn {
+    min-width: 34px;
+    min-height: 34px;
+    padding: 0 var(--space-1);
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+    font-size: var(--text-sm);
+  }
+  .sv-topbar-more-btn {
+    min-width: 36px;
+    min-height: 36px;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+    font-size: 18px;
+  }
 }
 </style>

@@ -31,7 +31,10 @@ fn regex_cache() -> &'static RegexCache {
 /// 按 (pattern, 大小写敏感) 取编译后的正则;编译失败返回 None 并缓存该结果
 /// (与既有「编译失败跳过该 pattern、不拖垮整条目」容错语义一致;失败也缓存,
 /// 避免每轮对同一坏模式重复尝试编译)。
-fn compile_regex_cached(pattern: &str, case_sensitive: bool) -> Option<Arc<regex::Regex>> {
+pub(crate) fn compile_regex_cached(
+    pattern: &str,
+    case_sensitive: bool,
+) -> Option<Arc<regex::Regex>> {
     let key = (pattern.to_string(), case_sensitive);
     let cache = regex_cache();
     if let Ok(guard) = cache.lock() {
@@ -539,33 +542,90 @@ pub fn scan_window_len(e: &WorldEntry, texts_len: usize, fallback: i64) -> usize
 ///   编译失败的模式跳过(不拖垮整条目);case_sensitive=false 时大小写不敏感
 /// - use_regex=false:keys + 副关键词子串命中,大小写敏感按条目设置
 pub fn entry_matches_texts(e: &WorldEntry, texts: &[String]) -> bool {
+    entry_matches_texts_prepared(e, texts, None)
+}
+
+/// 与 [`entry_matches_texts`] 同语义,但允许调用方复用**已小写化**的文本池。
+///
+/// `lowered` 为 `None` 时按需现算(既有调用方);`Some` 时必须与 `texts` 等长且逐条
+/// 对应——由 [`WorldScanPool`](crate::services::prompt_kit::WorldScanPool) 每轮构建一次,
+/// 避免「每个大小写不敏感条目都把整段历史重新小写化」的 O(条目数×历史) 开销。
+pub(crate) fn entry_matches_texts_prepared(
+    e: &WorldEntry,
+    texts: &[String],
+    lowered: Option<&[String]>,
+) -> bool {
     if texts.is_empty() {
         return false;
     }
     if e.use_regex {
-        let mut patterns: Vec<&str> = Vec::new();
-        if let Some(r) = e.regex.as_deref() {
-            if !r.is_empty() {
-                patterns.push(r);
-            }
-        }
-        // ST 语义:无独立 regex 字段时 keys 即正则模式(吸血鬼卡 system log 条目等)
-        if patterns.is_empty() {
-            for k in e.keys.iter().chain(e.keys_secondary.iter()) {
-                let t = k.trim();
-                if !t.is_empty() {
-                    patterns.push(t);
-                }
-            }
-        }
-        // 编译结果走进程级缓存(2026-09-14):此前每轮每 pattern 现场编译,
-        // 实测 9.293 ms/轮 → 缓存后 0.026 ms/轮(99.7% 的时间是重复编译)
-        return patterns.iter().any(|pat| {
-            compile_regex_cached(pat, e.case_sensitive)
-                .is_some_and(|re| texts.iter().any(|m| re.is_match(m)))
-        });
+        return regex_matches(e, texts);
     }
-    // (needle, 是否大小写敏感);keys + 副关键词并列命中,大小写敏感按条目设置
+    let needles = needles_of(e);
+    if needles.is_empty() {
+        return false;
+    }
+    let needs_lowered = needles.iter().any(|(_, sensitive)| !*sensitive);
+    if !needs_lowered {
+        return matches_needles(&needles, texts, &[]);
+    }
+    match lowered {
+        Some(lowered) => {
+            debug_assert_eq!(lowered.len(), texts.len(), "小写池必须与文本池逐条对齐");
+            matches_needles(&needles, texts, lowered)
+        }
+        None => {
+            // 大小写不敏感的消息侧只小写化**一次**(2026-09-14 修复):
+            // 此前在 needle 内层循环里对每条消息反复 to_lowercase(),
+            // 同一消息被小写化「needle 数」遍。实测 0.406 ms → 0.051 ms。
+            let lowered: Vec<String> = texts.iter().map(|m| m.to_lowercase()).collect();
+            matches_needles(&needles, texts, &lowered)
+        }
+    }
+}
+
+/// 该条目在子串分支是否可能消费小写池(ALGO-6,2026-11-05)。
+///
+/// 仅作 `WorldScanPool` 的构建提示,不参与正确性判定:正则需要原文本、大小写敏感
+/// 走原文本、无有效关键词直接不命中,都不需要小写池。调用方保守预判(条目可能被
+/// 装饰器跳过)只会多构建,不会影响命中结果;漏判时池实现会本地现算。
+pub(crate) fn entry_needs_lowered(e: &WorldEntry) -> bool {
+    if e.use_regex || e.case_sensitive {
+        return false;
+    }
+    e.keys
+        .iter()
+        .chain(e.keys_secondary.iter())
+        .any(|k| !k.trim().is_empty())
+}
+
+/// 正则分支:独立 regex 字段优先;否则按 ST 语义把 keys/keys_secondary 当正则。
+fn regex_matches(e: &WorldEntry, texts: &[String]) -> bool {
+    let mut patterns: Vec<&str> = Vec::new();
+    if let Some(r) = e.regex.as_deref() {
+        if !r.is_empty() {
+            patterns.push(r);
+        }
+    }
+    // ST 语义:无独立 regex 字段时 keys 即正则模式(吸血鬼卡 system log 条目等)
+    if patterns.is_empty() {
+        for k in e.keys.iter().chain(e.keys_secondary.iter()) {
+            let t = k.trim();
+            if !t.is_empty() {
+                patterns.push(t);
+            }
+        }
+    }
+    // 编译结果走进程级缓存(2026-09-14):此前每轮每 pattern 现场编译,
+    // 实测 9.293 ms/轮 → 缓存后 0.026 ms/轮(99.7% 的时间是重复编译)
+    patterns.iter().any(|pat| {
+        compile_regex_cached(pat, e.case_sensitive)
+            .is_some_and(|re| texts.iter().any(|m| re.is_match(m)))
+    })
+}
+
+/// 子串分支的待匹配词表:(needle, 是否大小写敏感);keys + 副关键词并列命中。
+fn needles_of(e: &WorldEntry) -> Vec<(String, bool)> {
     let mut needles: Vec<(String, bool)> = Vec::new();
     for k in e.keys.iter().chain(e.keys_secondary.iter()) {
         let t = k.trim();
@@ -578,18 +638,10 @@ pub fn entry_matches_texts(e: &WorldEntry, texts: &[String]) -> bool {
             needles.push((t.to_lowercase(), false));
         }
     }
-    if needles.is_empty() {
-        return false;
-    }
-    let needs_lowered = needles.iter().any(|(_, sensitive)| !*sensitive);
-    // 大小写不敏感的消息侧只小写化**一次**(2026-09-14 修复):
-    // 此前在 needle 内层循环里对每条消息反复 to_lowercase(),
-    // 同一消息被小写化「needle 数」遍。实测 0.406 ms → 0.051 ms。
-    let lowered: Vec<String> = if needs_lowered {
-        texts.iter().map(|m| m.to_lowercase()).collect()
-    } else {
-        Vec::new()
-    };
+    needles
+}
+
+fn matches_needles(needles: &[(String, bool)], texts: &[String], lowered: &[String]) -> bool {
     needles.iter().any(|(needle, sensitive)| {
         if *sensitive {
             texts.iter().any(|m| m.contains(needle.as_str()))

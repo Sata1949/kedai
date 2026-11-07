@@ -77,14 +77,18 @@ watch(
   <!-- 仅渲染内容区,供 SettingsHub 嵌入(按 activeSection 切换显示;
        懒加载分区首次切到才挂载,挂载后常驻由 :show 控制显隐) -->
   <div class="sv-settings-embedded">
+    <!-- API 与模型(2026-11-07 分区合并):连接三段 + 生成参数同属一个分区。
+         「用哪个模型」(BASE URL / KEY / MODEL / 测试连接)与「怎么生成」(温度 / 输出上限 /
+         任务参数档位)是同一个决策面,分成两个二级项只会让用户改完模型再去找生成参数。
+         生效中的 `model` 分区键由 SettingsHub 的 RETIRED_SECTION_ALIAS 重定向到本分区。 -->
     <ApiSettingsSection :state="apiSettings" :show="props.activeSection === 'api'" />
     <ConnectionSection :state="apiSettings" :show="props.activeSection === 'api'" />
+    <GenParamsSection v-if="visitedSections.has('api')" :show="props.activeSection === 'api'" />
     <ConnectionProfilesSection
       v-if="visitedSections.has('connections')"
       :state="connectionProfiles"
       :show="props.activeSection === 'connections'"
     />
-    <GenParamsSection v-if="visitedSections.has('model')" :show="props.activeSection === 'model'" />
     <AgentSettingsSection v-if="visitedSections.has('agent')" :show="props.activeSection === 'agent'" />
     <AgentFlowSection v-if="visitedSections.has('flow')" :show="props.activeSection === 'flow'" />
     <ExecAuthSection v-if="visitedSections.has('exec')" :show="props.activeSection === 'exec'" />

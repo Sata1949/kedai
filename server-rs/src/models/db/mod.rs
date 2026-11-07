@@ -172,6 +172,10 @@ impl Db {
                 //(NOT NULL DEFAULT '[]',旧行零回填)
                 crate::migration::ensure_tasks_runtime_issues_column(&conn)
                     .map_err(|e| format!("升级 tasks runtime_issues 列失败: {e}"))?;
+                // 幂等 schema 升级(2026-11-06 三档授权):旧库 tasks 补 tool_authorization 列
+                //(可空无 DEFAULT,零回填——NULL = 旧行为)
+                crate::migration::ensure_tasks_tool_authorization_column(&conn)
+                    .map_err(|e| format!("升级 tasks tool_authorization 列失败: {e}"))?;
                 // 幂等 schema 升级(可观测性问题①):旧库 task_llm_calls 补 finish_reason 列
                 crate::migration::ensure_task_llm_calls_finish_reason_column(&conn)
                     .map_err(|e| format!("升级 task_llm_calls finish_reason 列失败: {e}"))?;

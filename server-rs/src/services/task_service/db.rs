@@ -100,7 +100,8 @@ pub(super) fn recover_orphan_tasks(db: &Db) -> Vec<String> {
 
 /// 任务主表列:0 id, 1 title, 2 status, 3 plan, 4 result, 5 error, 6 character_id,
 /// 7 created_at, 8 updated_at, 9 task_mode, 10 executor_id, 11 flow_id, 12 flow_ids,
-/// 13 connection_id, 14 workspace (新增列一律追加在表尾,与 TASK_COLS 及建表顺序一致)
+/// 13 connection_id, 14 workspace, 15 tool_authorization
+/// (新增列一律追加在表尾,与 TASK_COLS 及建表顺序一致)
 ///
 /// **有意不含 flow_snapshot**:它是 O(流程库) 体积的 JSON,而 TASK_COLS 被列表与详情
 /// 每次事件刷新都用;要读快照走 [`TaskService::flow_snapshot`](本文件的单列查询)。
@@ -142,11 +143,17 @@ pub(super) fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<TaskRecord> {
             .get::<_, Option<String>>(14)?
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty()),
+        // 三档授权(NULL/未知值都视 None,旧行为;API 入参侧仍严格 400)
+        tool_authorization: row
+            .get::<_, Option<String>>(15)?
+            .as_deref()
+            .and_then(crate::models::tool_policy::TaskAuthorizationMode::parse),
     })
 }
 
 pub(super) const TASK_COLS: &str = "id, title, status, plan, result, error, character_id, \
-     created_at, updated_at, task_mode, executor_id, flow_id, flow_ids, connection_id, workspace";
+     created_at, updated_at, task_mode, executor_id, flow_id, flow_ids, connection_id, workspace, \
+     tool_authorization";
 
 /// 按字符截断(中文安全,不切 char 边界;调用追踪摘要用)
 fn truncate_chars(s: &str, max: usize) -> String {

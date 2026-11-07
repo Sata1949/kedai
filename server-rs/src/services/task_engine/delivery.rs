@@ -82,13 +82,14 @@ pub struct TaskDeliverySummary {
 /// 把越界路径交给文件系统。
 pub(crate) fn required_from_plan(plan: &[TaskStep]) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for step in plan {
         for raw in &step.files {
             let Some(path) = normalize_workspace_rel(raw) else {
                 tracing::warn!(path = raw.as_str(), "交付摘要:非法声明路径已跳过");
                 continue;
             };
-            if out.iter().any(|(p, _)| p == &path) {
+            if !seen.insert(path.clone()) {
                 continue;
             }
             let owner = if step.name.trim().is_empty() {
@@ -175,15 +176,13 @@ pub(crate) fn step_files_unmet(workspace: &Path, files: &[String]) -> Option<Vec
             issues.push(format!("{path}:文件为空(0B)"));
             continue;
         }
-        let Some(lines) = placeholder_line_count(&abs) else {
+        let Some(text) = read_inspectable_text(&abs) else {
             continue;
         };
+        let lines = text.lines().filter(|line| line.contains("@@")).count();
         if lines > 0 {
             issues.push(format!("{path}:含 {lines} 行 @@ 未替换槽位"));
-        } else if std::fs::read_to_string(&abs)
-            .map(|text| text.trim().is_empty())
-            .unwrap_or(false)
-        {
+        } else if text.trim().is_empty() {
             issues.push(format!("{path}:文件仅含空白"));
         }
     }
@@ -201,6 +200,18 @@ const TEXT_EXTENSIONS: &[&str] = &[
 /// ——「占位符没清零」是半成品的确定性证据。仅扫常见文本扩展名且 ≤512KB;
 /// 读失败/非文本返回 None。
 pub(crate) fn placeholder_line_count(path: &Path) -> Option<usize> {
+    Some(
+        read_inspectable_text(path)?
+            .lines()
+            .filter(|line| line.contains("@@"))
+            .count(),
+    )
+}
+
+/// 读取可做内容体检的文本文件:只认常见文本扩展名且 ≤512KB。
+/// 读失败/非文本/超限返回 None(与 `placeholder_line_count` 的跳过语义一致)。
+/// 单步检查用它一次读入,避免「先数 `@@` 再判空白」读两遍。
+fn read_inspectable_text(path: &Path) -> Option<String> {
     const MAX_BYTES: u64 = 512 * 1024;
     let ext = path
         .extension()
@@ -213,8 +224,7 @@ pub(crate) fn placeholder_line_count(path: &Path) -> Option<usize> {
     if std::fs::metadata(path).ok()?.len() > MAX_BYTES {
         return None;
     }
-    let text = std::fs::read_to_string(path).ok()?;
-    Some(text.lines().filter(|line| line.contains("@@")).count())
+    std::fs::read_to_string(path).ok()
 }
 
 /// 根目录未声明的临时/草稿文件(SKY-1 交付卫生,2026-10-25)。
@@ -342,15 +352,15 @@ pub(crate) fn content_issues(
             out.push(format!("{path}:文件为空(0B)"));
             continue;
         }
-        let Some(lines) = placeholder_line_count(&abs) else {
+        // ALGO-6:与 `step_files_unmet` 同款单次读盘——`@@` 计数与空白判定
+        // 共用一次读取,避免旧实现「先数一遍再读一遍」。
+        let Some(text) = read_inspectable_text(&abs) else {
             continue;
         };
+        let lines = text.lines().filter(|line| line.contains("@@")).count();
         if lines > 0 {
             out.push(format!("{path}:含 {lines} 行 @@ 未替换槽位"));
-        } else if std::fs::read_to_string(&abs)
-            .map(|text| text.trim().is_empty())
-            .unwrap_or(false)
-        {
+        } else if text.trim().is_empty() {
             out.push(format!("{path}:文件仅含空白"));
         }
     }
@@ -1004,6 +1014,39 @@ mod tests {
         );
     }
 
+    /// ALGO-6:内容体检对文本只读一次,`@@` 计数与空白判定必须与旧双读口径一致。
+    #[test]
+    fn content_issues_single_read_matches_placeholder_and_blank_checks() {
+        let dir = TempDataDir::new("delivery-single-read");
+        let ws = dir.join("ws");
+        std::fs::create_dir_all(&ws).expect("创建内容体检工作区失败");
+        std::fs::write(
+            ws.join("slots.html"),
+            "<div>@@name@@</div>\n<section>@@age@@</section>\n",
+        )
+        .expect("写槽位文件失败");
+        std::fs::write(ws.join("blank.txt"), " \n\t\n").expect("写空白文件失败");
+        std::fs::write(ws.join("ok.txt"), "ready\n").expect("写正常文件失败");
+
+        let issues = content_issues(&ws, &required(&["slots.html", "blank.txt", "ok.txt"]), "");
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.contains("slots.html") && i.contains("2 行 @@")),
+            "应报告 2 行未替换槽位: {issues:?}"
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.contains("blank.txt") && i.contains("仅含空白")),
+            "应报告仅含空白: {issues:?}"
+        );
+        assert!(
+            !issues.iter().any(|i| i.contains("ok.txt")),
+            "正常文本不得误报: {issues:?}"
+        );
+    }
+
     /// SKY-4:单文件目标仍外链本地分片 → 内容体检失败;健康内联不误伤。
     #[test]
     fn content_issues_single_file_policy_flags_local_refs_only_for_single_file_goals() {
@@ -1122,6 +1165,32 @@ mod tests {
         assert_eq!(single[0].0, "index.html");
         let multi = required_from_plan_for_goal(&plan, "普通多文件项目");
         assert_eq!(multi.len(), 3, "非单文件目标仍检查全部声明文件");
+    }
+
+    /// ALGO-2:重复声明按「首次出现胜出」去重,返回顺序保持首次出现顺序。
+    #[test]
+    fn required_from_plan_dedupes_and_keeps_first_owner() {
+        let step = |name: &str, files: &[&str]| TaskStep {
+            name: name.into(),
+            goal: String::new(),
+            status: TaskStepStatus::Pending,
+            result: String::new(),
+            node_id: None,
+            files: files.iter().map(|s| s.to_string()).collect(),
+        };
+        let plan = vec![
+            step("A", &["a.js", "b.js", "a.js"]),
+            step("B", &["a.js", "c.js", "b.js"]),
+        ];
+        assert_eq!(
+            required_from_plan(&plan),
+            vec![
+                ("a.js".to_string(), "A".to_string()),
+                ("b.js".to_string(), "A".to_string()),
+                ("c.js".to_string(), "B".to_string()),
+            ],
+            "去重必须保留首次声明与其 owner,且顺序不变"
+        );
     }
 
     /// SKY-1 交付卫生:根目录未声明的 `_*`/临时后缀文件进提示清单;

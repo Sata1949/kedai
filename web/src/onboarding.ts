@@ -30,12 +30,21 @@ export type AppMode = 'roleplay' | 'task';
  * 位置名是否存在(原注释声称的反向校验断言此前确实不存在,见该脚本 R2/R3/R4 三组规则)。
  */
 export type SettingsSectionKey =
-  | 'api' | 'connections' | 'model' | 'mcp' | 'embedding'
+  | 'api' | 'connections' | 'mcp' | 'embedding'
   | 'prompt' | 'userPersona'
   | 'agent' | 'flow' | 'exec' | 'coding' | 'literary' | 'vision'
   | 'data'
   | 'ui'
-  | 'about';
+  | 'about'
+  /**
+   * 已退役的分区键(2026-11-07 设置分区合并)。
+   *
+   * `model`(模型与生成)已并入 `api`(现名「API 与模型」)。仍保留在联合里是**刻意**的:
+   * 教程历史落点、`uiPrefs.settingsNav` 里残留的目标、以及按旧键写死的深链接都还要能
+   * 通过类型检查并在运行期被 `SettingsHub` 的 `RETIRED_SECTION_ALIAS` 重定向到新分区。
+   * 新代码不要使用它——`check-tutorial` 的 R2 会因导航表里没有该键而拒绝新的教程落点。
+   */
+  | 'model';
 
 /**
  * 教程覆盖范围(首启引导第二问的答案)。

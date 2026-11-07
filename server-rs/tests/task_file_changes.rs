@@ -413,6 +413,7 @@ fn allow() -> PermissionDecision {
         allowed: true,
         risk: ToolRisk::Dangerous,
         reason: "测试放行".into(),
+        code: None,
     }
 }
 

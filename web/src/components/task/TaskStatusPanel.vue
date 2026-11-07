@@ -11,7 +11,7 @@ import { taskStatusClass as statusClass, taskStatusLabel as statusLabel } from '
 import { badgeFlowSource } from '../../utils/flowNodeBadges';
 import { callableFlows } from '../../utils/flowCallStats';
 import { projectHintTitle, projectKindLabel } from '../../utils/workspaceProfile';
-import { FLOW_MODE_LABELS, MODE_LABELS } from '../../api/labels';
+import { FLOW_MODE_LABELS, MODE_LABELS, TASK_AUTHORIZATION_TIER_LABELS } from '../../api/labels';
 import type { TaskDetail, TaskRunMode } from '../../api';
 
 const props = defineProps<{
@@ -28,6 +28,13 @@ const { runCurrent, stopCurrent, removeTask } = useTaskActions();
 const task = computed(() => props.detail.task);
 const taskMode = computed<TaskRunMode>(() => task.value.task_mode ?? 'legacy');
 const taskModeLabel = computed(() => MODE_LABELS[taskMode.value]);
+
+/** 工具授权档位(2026-11-06):新任务恒有值;旧任务为 null/缺省 = 改动前的规则,
+ *  此时不渲染该格(不把「旧行为」渲染成一行噪音)。 */
+const taskAuthTier = computed(() => task.value.tool_authorization ?? null);
+const taskAuthTierLabel = computed(() =>
+  taskAuthTier.value ? TASK_AUTHORIZATION_TIER_LABELS[taskAuthTier.value] : '',
+);
 
 /** 当前任务累计 token(prompt + completion;由任务详情 usage_total 带出) */
 const taskTotalTokens = computed(() => {
@@ -147,6 +154,12 @@ async function copyWorkspacePath(): Promise<void> {
         状态：{{ statusLabel(task.status) }}
       </span>
       <span class="sv-tag sv-task-status-tag" title="任务执行模式(批次 4 六模式)">模式：{{ taskModeLabel }}</span>
+      <!-- 工具授权档位(2026-11-06):创建时随任务冻结;旧任务无此字段,不占一格 -->
+      <span
+        v-if="taskAuthTier"
+        class="sv-tag sv-task-status-tag"
+        title="工具授权档位(创建时冻结):逐步 = 写/执行类工具逐条确认;工作区内 = 区内自动放行、越界转确认;自动 = 任务策略内全部执行,屏幕/输入类仍拒"
+      >授权：{{ taskAuthTierLabel }}</span>
       <!-- 本任务用的流程(二维批次 5a):绑定流程显示其名,未绑定显示「跟随当前流程」。
            名字取自任务快照(与徽标同一份编排),故跑完任务后再改流程这里也不会变 -->
       <span

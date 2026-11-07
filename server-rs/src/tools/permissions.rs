@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tokio::sync::oneshot;
 
 /// 工具风险等级与授权模式**已下沉到 L1**（`crate::models::tool_policy`，2026-09-14），
 /// 此处仅重导出以保持 `tools/` 内部既有 `use` 路径可用。
@@ -25,6 +24,10 @@ pub struct PermissionDecision {
     pub allowed: bool,
     pub risk: ToolRisk,
     pub reason: String,
+    /// 机器可读原因码（`step_confirm` / `workspace_escape` / `tool_policy_denied` 等）。
+    /// 前端与任务事件按它区分「该弹确认卡」与「永久拒绝」，不靠中文文案匹配。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
 impl PermissionDecision {
@@ -34,6 +37,27 @@ impl PermissionDecision {
             allowed: true,
             risk,
             reason,
+            code: None,
+        }
+    }
+
+    /// 构造需要用户确认的决策（逐步档 / 工作区内越界）。
+    pub fn confirm(risk: ToolRisk, reason: String, code: &str) -> Self {
+        Self {
+            allowed: false,
+            risk,
+            reason,
+            code: Some(code.into()),
+        }
+    }
+
+    /// 构造带原因码的拒绝决策。
+    pub fn denied_with_code(risk: ToolRisk, reason: String, code: &str) -> Self {
+        Self {
+            allowed: false,
+            risk,
+            reason,
+            code: Some(code.into()),
         }
     }
 }
@@ -64,16 +88,11 @@ pub enum PendingAuthorizationDecision {
     Deny,
 }
 
-struct PendingAuthorization {
-    session_id: String,
-    tool: String,
-    sender: oneshot::Sender<PendingAuthorizationDecision>,
-}
-
 pub struct ToolPermissionManager {
     path: Option<PathBuf>,
     config: Mutex<PermissionConfig>,
-    pending: Mutex<HashMap<(String, String), PendingAuthorization>>,
+    pub(crate) pending:
+        Mutex<HashMap<(String, String), crate::tools::permissions_pending::PendingAuthorization>>,
 }
 
 impl ToolPermissionManager {
@@ -114,6 +133,8 @@ impl ToolPermissionManager {
             target: None,
             reason: String::new(),
             exec_risk: None,
+            exec_command: None,
+            exec_cwd: None,
         };
         self.decide_with_policy(
             tool,
@@ -144,6 +165,17 @@ impl ToolPermissionManager {
         always_required: bool,
     ) -> PermissionDecision {
         let risk = self.risk_for(tool);
+        // 任务三档授权（2026-11-06）：Step/Workspace/Auto 的判定集中在
+        // `tools/task_authorization.rs`；`None` = 旧任务/聊天，继续走下面的既有矩阵。
+        // 必须在命令高危硬门**之前**——否则 Step 档的 bash 会先被「任务模式不支持
+        // 高危命令」直接拒掉，用户根本没有确认机会；Workspace 档区内的 rm 也会被误杀。
+        if registered {
+            if let Some(decision) =
+                crate::tools::task_authorization::decide_task_mode(tool, ctx, action, risk)
+            {
+                return decision;
+            }
+        }
         // ★★ 命令执行高危硬门(必须在任何自动放行之前判定)★★
         // 为什么优先级最高:bash 是**单一工具名**,工具级授权(白名单/会话授权/角色授权)
         // 无法区分「同一工具这次跑的是 ls 还是 rm -rf」。若让工具级授权先放行,用户一旦
@@ -167,11 +199,7 @@ impl ToolPermissionManager {
                         cmd_risk.label()
                     )
                 };
-                return PermissionDecision {
-                    allowed: false,
-                    risk,
-                    reason,
-                };
+                return PermissionDecision::denied_with_code(risk, reason, "high_risk_denied");
             }
         }
         if !registered {
@@ -179,6 +207,7 @@ impl ToolPermissionManager {
                 allowed: false,
                 risk,
                 reason: "工具未注册,永久拒绝".into(),
+                code: Some("unregistered".into()),
             };
         }
         if custom_authorized {
@@ -206,6 +235,7 @@ impl ToolPermissionManager {
                 allowed: false,
                 risk,
                 reason: "该工具位于「始终需授权」清单,需手动授权".into(),
+                code: Some("always_required".into()),
             };
         }
         // 非高危命令执行(只读/写入类):按三档常规处理
@@ -222,6 +252,7 @@ impl ToolPermissionManager {
                 allowed: false,
                 risk,
                 reason: format!("{}命令需授权", cmd_risk.label()),
+                code: Some("command_authorization_required".into()),
             };
         }
         // 三档文件规则(仅对文件操作或外部工具的系统路径调用生效)
@@ -244,6 +275,7 @@ impl ToolPermissionManager {
             allowed: false,
             risk,
             reason: reason.into(),
+            code: Some("tool_authorization_required".into()),
         }
     }
 
@@ -327,6 +359,7 @@ impl ToolPermissionManager {
             allowed: false,
             risk,
             reason,
+            code: Some("tool_authorization_required".into()),
         }
     }
 
@@ -408,60 +441,6 @@ impl ToolPermissionManager {
         self.save(&next)?;
         *current = next;
         Ok(removed)
-    }
-
-    pub fn begin_wait(
-        &self,
-        run_id: &str,
-        call_id: &str,
-        session_id: &str,
-        tool: &str,
-    ) -> oneshot::Receiver<PendingAuthorizationDecision> {
-        let (sender, receiver) = oneshot::channel();
-        self.pending
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(
-                (run_id.into(), call_id.into()),
-                PendingAuthorization {
-                    session_id: session_id.into(),
-                    tool: tool.into(),
-                    sender,
-                },
-            );
-        receiver
-    }
-
-    pub fn resolve_wait(
-        &self,
-        run_id: &str,
-        call_id: &str,
-        session_id: &str,
-        tool: &str,
-        decision: PendingAuthorizationDecision,
-    ) -> Result<(), String> {
-        let key = (run_id.to_string(), call_id.to_string());
-        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(item) = pending.get(&key) else {
-            return Err("待授权调用不存在或已结束".into());
-        };
-        if item.session_id != session_id || item.tool != tool {
-            return Err("待授权调用与会话或工具不匹配".into());
-        }
-        // 上方 get 已确认键存在且持锁期间无并发移除,remove 必然为 Some
-        let item = pending.remove(&key).expect("键已确认存在,移除必然成功");
-        // 有意丢弃 SendError:接收端已 drop 即原因本身(用户离开/会话结束),
-        // 文案已等价表达,且此处决策值无需回传给调用方
-        item.sender
-            .send(decision)
-            .map_err(|_| "待授权调用已断开".to_string())
-    }
-
-    pub fn cancel_wait(&self, run_id: &str, call_id: &str) {
-        self.pending
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&(run_id.to_string(), call_id.to_string()));
     }
 
     pub fn grants_for(&self, session_id: &str, role_id: &str) -> serde_json::Value {
@@ -546,6 +525,8 @@ mod tests {
             target: Some(target.into()),
             reason: format!("测试 {target}"),
             exec_risk: None,
+            exec_command: None,
+            exec_cwd: None,
         }
     }
 
@@ -556,6 +537,8 @@ mod tests {
             target: None,
             reason: String::new(),
             exec_risk: None,
+            exec_command: None,
+            exec_cwd: None,
         }
     }
 
@@ -654,6 +637,8 @@ mod tests {
             target: Some("C:\\x".into()),
             reason: "外部工具参数含系统路径 C:\\x".into(),
             exec_risk: None,
+            exec_command: None,
+            exec_cwd: None,
         };
         for mode in [
             AuthorizationMode::Strict,

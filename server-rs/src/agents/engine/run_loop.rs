@@ -636,6 +636,7 @@ impl AgentEngine {
                     Some(list) if !list.is_empty() => crate::agents::engine::executor::ToolGate {
                         whitelist: Some(list),
                         no_ui_authorization: false,
+                        hard_exclude_outside: false,
                     },
                     _ => crate::agents::engine::executor::ToolGate::wait(),
                 };
@@ -795,6 +796,7 @@ impl AgentEngine {
                     Some(list) if !list.is_empty() => crate::agents::engine::executor::ToolGate {
                         whitelist: Some(list),
                         no_ui_authorization: false,
+                        hard_exclude_outside: false,
                     },
                     _ => crate::agents::engine::executor::ToolGate::wait(),
                 };
@@ -844,6 +846,7 @@ impl AgentEngine {
                             crate::agents::engine::executor::ToolGate {
                                 whitelist: Some(list),
                                 no_ui_authorization: false,
+                                hard_exclude_outside: false,
                             }
                         }
                         _ => crate::agents::engine::executor::ToolGate::wait(),

@@ -47,6 +47,8 @@ pub(crate) mod prompt;
 pub(crate) mod runtime_issues;
 pub(crate) mod scratch;
 pub(crate) mod trace;
+// 任务工具待授权的两条瞬态事件(2026-11-06 三档授权;events.rs 已接近千行阈值)
+pub(crate) mod tool_auth_events;
 // legacy 三段纯文本生成的附件注入(ATTACH-1-L1:executor.rs 有只降不升基线)
 pub(crate) mod legacy_attachments;
 // 任务附件(ATTACH-1):用户随任务提供的任意文件的落盘与元数据
@@ -255,6 +257,7 @@ impl TaskService {
         flow_ids: Option<&[String]>,
         connection_id: Option<&str>,
         workspace: Option<&str>,
+        tool_authorization: Option<crate::models::tool_policy::TaskAuthorizationMode>,
     ) -> Result<TaskRecord, String> {
         let title = title.trim();
         if title.is_empty() {
@@ -368,8 +371,8 @@ impl TaskService {
             // db.write(),若仍持锁则自死锁(非重入锁)
             let conn = self.db.write();
             conn.execute(
-                "INSERT INTO tasks (id, title, status, plan, result, error, character_id, created_at, updated_at, task_mode, executor_id, flow_id, flow_snapshot, flow_ids, connection_id, workspace) \
-                 VALUES (?1, ?2, 'pending', '[]', '', '', ?3, ?4, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                "INSERT INTO tasks (id, title, status, plan, result, error, character_id, created_at, updated_at, task_mode, executor_id, flow_id, flow_snapshot, flow_ids, connection_id, workspace, tool_authorization) \
+                 VALUES (?1, ?2, 'pending', '[]', '', '', ?3, ?4, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     id,
                     title,
@@ -381,7 +384,8 @@ impl TaskService {
                     frozen,
                     flow_ids_json,
                     connection_id,
-                    workspace
+                    workspace,
+                    tool_authorization.map(|m| m.as_str())
                 ],
             )
             .map_err(|e| format!("创建任务失败: {e}"))?;
@@ -417,6 +421,8 @@ impl TaskService {
             connection_id: connection_id.map(str::to_string),
             // 工作区(编码通道批次):原样回带回冻结值(前端据此显示「已绑定工作区」)
             workspace: workspace.map(str::to_string),
+            // 三档授权(2026-11-06):原样回带(前端据此在任务详情显示当前档位)
+            tool_authorization,
         })
     }
 

@@ -149,7 +149,11 @@ CREATE TABLE IF NOT EXISTS tasks (
   -- 空数组 = 未执行自检或自检通过;重跑/批准/追加指令起跑时清空,避免陈旧问题残留。
   -- 详情 `delivery.runtime_issues` 读这一列(读时不再重跑浏览器)。
   -- 旧库经 migration::ensure_tasks_runtime_issues_column 幂等补列,列在表尾。
-  runtime_issues TEXT NOT NULL DEFAULT '[]'
+  runtime_issues TEXT NOT NULL DEFAULT '[]',
+  -- 任务模式工具授权档位(2026-11-06 三档授权):step|workspace|auto;
+  -- NULL = 旧任务/旧客户端,保持改动前的 deny_dangerous 行为(旧行零回填)。
+  -- 旧库经 migration::ensure_tasks_tool_authorization_column 幂等补列,列在表尾。
+  tool_authorization TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
 -- 任务列表按角色 / 状态过滤(2026-09-13 批次 3 补;旧库经 ensure_perf_indexes 补建)
