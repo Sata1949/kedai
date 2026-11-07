@@ -6,7 +6,7 @@ import { useAppStore } from '../../store';
 
 const store = useAppStore();
 const {
-  contextTokens, lastUsage, sessionTotalTokens, globalTotalTokens, cacheZeroStreak,
+  sessionTotalTokens, globalTotalTokens,
   appMode, currentTaskUsage, globalTaskUsage,
 } = storeToRefs(store);
 
@@ -29,14 +29,6 @@ const globalTaskTotalTokens = computed(() => {
   return u ? u.prompt_tokens + u.completion_tokens : 0;
 });
 
-/** 缓存命中率:连续两次为 0 则不显示 */
-const hitRate = computed<number | null>(() => {
-  if (cacheZeroStreak.value >= 2) return null;
-  const u = lastUsage.value;
-  if (!u || !u.prompt_tokens) return null;
-  const hit = u.prompt_cache_hit_tokens ?? 0;
-  return Math.min(100, Math.round((hit / u.prompt_tokens) * 100));
-});
 </script>
 
 <template>
@@ -59,9 +51,8 @@ const hitRate = computed<number | null>(() => {
       >✕</button>
     </div>
 
-    <!-- Token 统计区:角色扮演 = 会话累计/全局累计/上下文/缓存命中率;
-         任务模式 = 当前任务累计/全部任务累计(无上下文与命中率数据源,两格隐藏) -->
-    <div class="sv-tokens" :class="{ two: appMode === 'task' }">
+    <!-- 侧栏只放累计用量；上下文、本轮和命中率统一由聊天顶栏展示。 -->
+    <div class="sv-tokens two">
       <template v-if="appMode === 'task'">
         <div class="sv-token-cell">
           <span class="sv-supreme pink" />
@@ -91,20 +82,6 @@ const hitRate = computed<number | null>(() => {
           <div>
             <b class="sv-tnum">{{ globalTotalTokens.toLocaleString() }}</b>
             <span>全局累计</span>
-          </div>
-        </div>
-        <div class="sv-token-cell">
-          <span class="sv-supreme blue" />
-          <div>
-            <b class="sv-tnum">{{ contextTokens.toLocaleString() }}</b>
-            <span>上下文 TOKEN</span>
-          </div>
-        </div>
-        <div v-if="hitRate !== null" class="sv-token-cell">
-          <span class="sv-supreme green" />
-          <div>
-            <b class="sv-tnum">{{ hitRate }}%</b>
-            <span>缓存命中率</span>
           </div>
         </div>
       </template>

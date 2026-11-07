@@ -88,6 +88,23 @@ const PAIRS: Array<[string, string]> = [
 ];
 
 describe('UIP-10 令牌级小字对比度契约(WCAG AA ≥ 4.5:1)', () => {
+  it('UIREFINE：授权选中、主按钮悬停与移动导航的实际用色满足小字对比度', () => {
+    // 读取消费点而非只测一对正确但未使用的 token；回退粉底白字时必须失败。
+    const cases = [
+      ['./shell.css', '.sv-auth-toggle button.active', 'background', '--sv-white'],
+      ['./panels.css', '.sv-btn.primary:hover:not(:disabled)', 'background', '--sv-white'],
+      ['../components/ChatInput.vue', '.sv-auth-toggle button.active', 'background', '--sv-white'],
+      ['./mobile.css', '.sv-mobile-nav-item.active', 'color', '--sv-surface'],
+    ];
+    for (const [file, selector, property, other] of cases) {
+      const css = readFileSync(new URL(file, import.meta.url), 'utf8');
+      const body = css.slice(css.indexOf(`${selector} {`)).split('}')[0];
+      const name = body.match(new RegExp(`${property}: var\\((--[\\w-]+)\\)`))?.[1];
+      expect(name, `${file} ${selector} 应使用设计令牌`).toBeTruthy();
+      expect(contrast(token(name ?? ''), token(other)), `${file} ${selector}`).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
   for (const [fgName, bgName] of PAIRS) {
     it(`${fgName} on ${bgName}`, () => {
       const ratio = contrast(token(fgName), token(bgName));
