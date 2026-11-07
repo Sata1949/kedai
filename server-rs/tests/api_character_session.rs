@@ -20,6 +20,8 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 mod common;
 use common::{send_json, test_app};
+#[path = "common/allocation_counter.rs"]
+mod allocation_counter;
 
 async fn send_empty(app: &axum::Router, method: &str, path: &str) -> StatusCode {
     let req = Request::builder()
@@ -55,6 +57,150 @@ async fn upload_character(app: &axum::Router, name: &str) -> (StatusCode, Value)
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     (status, json)
+}
+
+async fn history_fixture(app: &axum::Router, name: &str, messages: Value) -> String {
+    let (status, character) = upload_character(app, name).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, session) = send_json(
+        app,
+        "POST",
+        "/api/chat/sessions",
+        json!({ "character_id": character["id"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let sid = session["id"].as_str().unwrap().to_string();
+    let (status, _) = send_json(
+        app,
+        "POST",
+        "/api/import/chat",
+        json!({ "session_id": sid, "messages": messages }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    sid
+}
+
+#[tokio::test]
+async fn history_display_uses_raw_exclusive_prefix_in_message_order() {
+    let app = test_app();
+    let first =
+        "首={{firstMessage}};前={{lastMessage}};用={{lastUserMessage}};角={{lastCharMessage}}";
+    let assistant = "{{char}}:{{lastMessage}}/{{lastUserMessage}}/{{lastCharMessage}}";
+    let messages = json!([
+        { "role": "system", "content": first, "extra": { "kind": "memory" } },
+        { "role": "user", "content": "中文🐟" },
+        { "role": "assistant", "content": assistant },
+        { "role": "system", "content": "系统插入" },
+        { "role": "user", "content": first }
+    ]);
+    // 空会话与仅首条同时覆盖；没有对应角色时必须为空，不能看到当前项或未来项。
+    for count in [0, 1, 5] {
+        let input = Value::Array(messages.as_array().unwrap()[..count].to_vec());
+        let sid = history_fixture(app, &format!("历史前缀-{count}.json"), input.clone()).await;
+        let (status, body) = send_json(
+            app,
+            "GET",
+            &format!("/api/chat/history?session_id={sid}"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let actual = body["messages"].as_array().unwrap();
+        assert_eq!(actual.len(), count);
+        let expected = [
+            "首=;前=;用=;角=".to_string(),
+            "中文🐟".to_string(),
+            "测试角色:中文🐟/中文🐟/".to_string(),
+            "系统插入".to_string(),
+            format!("首={first};前=系统插入;用=中文🐟;角={assistant}"),
+        ];
+        for (i, message) in actual.iter().enumerate() {
+            assert_eq!(
+                message["content"], input[i]["content"],
+                "原文不能被显示覆盖"
+            );
+            assert_eq!(message["role"], input[i]["role"]);
+            assert_eq!(message["content_display"], expected[i]);
+            assert!(message["id"].is_number());
+            assert!(message["created_at"].is_string());
+        }
+        assert!(actual
+            .windows(2)
+            .all(|pair| pair[0]["id"].as_i64() < pair[1]["id"].as_i64()));
+        if let Some(message) = actual.first() {
+            assert_eq!(message["extra"]["kind"], "memory");
+        }
+    }
+}
+
+#[tokio::test]
+async fn history_display_replays_variables_without_persisting_them() {
+    let app = test_app();
+    let sid = history_fixture(app, "历史显示变量.json", json!([
+        { "role": "user", "content": "{{getvar::轨迹}}{{setvar::轨迹::甲}}{{addvar::轨迹::乙}}{{getvar::轨迹}}" },
+        { "role": "assistant", "content": "{{getvar::轨迹}}{{addvar::轨迹::丙}}|{{getvar::轨迹}}|{{getvar::stat_data.好感}}{{setvar::stat_data.好感::99}}" }
+    ])).await;
+    let (status, _) = send_json(
+        app,
+        "PUT",
+        &format!("/api/chat/sessions/{sid}/assistant-vars"),
+        json!({ "stat_data": { "好感": 7 } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    for _ in 0..2 {
+        let (status, body) = send_json(
+            app,
+            "GET",
+            &format!("/api/chat/history?session_id={sid}"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["messages"][0]["content_display"], "甲乙");
+        assert_eq!(body["messages"][1]["content_display"], "甲乙|甲乙丙|7");
+        let (status, vars) = send_json(
+            app,
+            "GET",
+            &format!("/api/variables?session_id={sid}&scope=chat"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(vars["data"], json!({ "好感": 7 }), "显示态写入不得落库");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn history_render_allocations_do_not_include_quadratic_prefix_copies() {
+    let app = test_app();
+    let count = 128;
+    let messages: Vec<Value> = (0..count)
+        .map(|i| json!({ "role": if i % 2 == 0 { "user" } else { "assistant" }, "content": "x".repeat(1024) }))
+        .collect();
+    let sid = history_fixture(app, "历史分配量.json", json!(messages)).await;
+    let path = format!("/api/chat/history?session_id={sid}");
+    // 先预热路由；只计当前线程中的渲染与响应，不把 DB 阻塞线程和其他用例算进来。
+    let (status, _) = send_json(app, "GET", &path, json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let request = Request::builder().uri(path).body(Body::empty()).unwrap();
+    let counter = allocation_counter::AllocationCount::start();
+    let response = app.clone().oneshot(request).await.unwrap();
+    let allocated = counter.bytes();
+    drop(counter);
+    eprintln!("历史渲染累计申请：{allocated} B（{count} 条 × 1024 B）");
+    assert_eq!(response.status(), StatusCode::OK);
+    // 每条留 32 KiB 给元组、宏、JSON 和序列化；旧实现仅正文前缀就申请约 8 MiB。
+    // 这是累计申请量而非峰值或耗时门槛，故不随磁盘/CPU 调度快慢浮动。
+    assert!(
+        allocated < count * 32 * 1024,
+        "历史渲染累计申请 {allocated} B，疑似重复复制前缀"
+    );
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["messages"].as_array().unwrap().len(), count);
 }
 
 #[tokio::test]
