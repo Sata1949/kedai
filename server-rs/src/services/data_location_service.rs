@@ -103,10 +103,14 @@ impl DataLocationService {
             })
             .collect();
         let suggested_root = data_location::suggested_root();
-        // 可写探测只在 Android 且尚未选定根时做:已选定且可用的根不需要权限提示,
+        // 可写/可读探测只在 Android 且尚未选定根时做:已选定且可用的根不需要权限提示,
         // 而每次打开设置都建目录/写探针也没有必要。
+        // 除可写外还要验已有 kedai.db 能否打开:旧 UID/其它安装留下的公共库在未授权
+        // 「所有文件访问」时不可读,只测「能新建文件」会给出假的 needs_permission=false。
         let needs_permission = suggested_root.as_ref().is_some_and(|root| {
-            self.config.data_root.is_none() && !data_location::probe_writable(root)
+            self.config.data_root.is_none()
+                && (!data_location::probe_writable(root)
+                    || probe_sqlite_support(&root.join(DATA_DIR_NAME)).is_err())
         });
         DataLocationStatus {
             managed: self.config.data_location_managed,
@@ -296,6 +300,44 @@ fn copy_tree(source: &Path, target: &Path, skip_images: bool) -> Result<u64, Str
         }
     }
     Ok(copied)
+}
+
+/// 验证目录能承载 SQLite(建库 + WAL + 读写)。
+///
+/// Android 公共目录(默认 `/storage/emulated/0/Download/Kedai-Data/data`)位于 FUSE,
+/// scoped storage 下隐藏探针可能成功、真实的 `kedai.db` 却建不出来(2026-11-06 实测:
+/// 未授予「所有文件访问」时 `.kedai-sqlite-probe.db` 可写,`kedai.db` 返回
+/// `unable to open database file`,随后启动失败)。因此这里直接使用服务端将要打开的
+/// **真实库路径**:
+/// - 不存在:建一个空库并执行 WAL/CREATE/DROP,然后删除(不污染真实数据);
+/// - 已存在:只读打开并验证可读,不删除、不迁移;打不开/损坏则报错。
+pub fn probe_sqlite_support(data_dir: &Path) -> Result<(), String> {
+    fs::create_dir_all(data_dir).map_err(|e| format!("创建数据目录失败: {e}"))?;
+    let db = data_dir.join("kedai.db");
+    if db.exists() {
+        let conn =
+            rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|e| format!("已有数据库无法打开: {e}"))?;
+        conn.query_row("SELECT COUNT(*) FROM sqlite_master", [], |_| Ok(()))
+            .map_err(|e| format!("已有数据库无法读取: {e}"))?;
+        return Ok(());
+    }
+    let result = (|| -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db)
+            .map_err(|e| format!("SQLite 无法在目标目录建库: {e}"))?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             CREATE TABLE probe (id INTEGER PRIMARY KEY, value TEXT);
+             INSERT INTO probe(value) VALUES ('ok');
+             DROP TABLE probe;",
+        )
+        .map_err(|e| format!("SQLite 探针执行失败: {e}"))?;
+        Ok(())
+    })();
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = fs::remove_file(format!("{}{}", db.display(), suffix));
+    }
+    result
 }
 
 /// 是否有非终态任务(pending/planning/running/planned)。
@@ -498,5 +540,39 @@ mod tests {
         conn.execute("UPDATE tasks SET status='done' WHERE id='t1'", [])
             .unwrap();
         assert!(!has_active_tasks(source.path()).unwrap());
+    }
+
+    #[test]
+    fn sqlite_probe_detects_usable_directory_and_rejects_blocked_path() {
+        let dir = TempDataDir::new("dl-sqlite-probe");
+        let data = dir.path().join("data");
+        probe_sqlite_support(&data).expect("临时目录应可承载 SQLite");
+        assert!(!data.join("kedai.db").exists(), "探针文件必须清理");
+
+        // 真实库路径被一个目录占住 → SQLite 无法建库
+        let blocked = dir.path().join("blocked");
+        std::fs::create_dir_all(blocked.join("kedai.db")).unwrap();
+        assert!(
+            probe_sqlite_support(&blocked).is_err(),
+            "不可建库的目录必须报错"
+        );
+    }
+
+    #[test]
+    fn sqlite_probe_keeps_existing_database_untouched() {
+        let dir = TempDataDir::new("dl-sqlite-existing");
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        Connection::open(data.join("kedai.db"))
+            .unwrap()
+            .execute_batch("CREATE TABLE keep(id INTEGER); INSERT INTO keep VALUES (7);")
+            .unwrap();
+
+        probe_sqlite_support(&data).expect("已有库应可读");
+        let n: i64 = Connection::open(data.join("kedai.db"))
+            .unwrap()
+            .query_row("SELECT id FROM keep", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(n, 7, "探针不得改动已有库");
     }
 }

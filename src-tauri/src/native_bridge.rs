@@ -134,3 +134,22 @@ pub fn request_all_files_access() -> Result<(), String> {
 pub fn request_all_files_access() -> Result<(), String> {
     kedai_server::services::native_bridge_android::request_all_files_access()
 }
+
+/// 显示启动失败对话框(仅 Android;桌面端由调用方直接退出)。
+///
+/// 用户点「退出」由 Kotlin 侧 `Process.killProcess` 结束进程——不能走
+/// `System.exit`/`std::process::exit`,否则退出时 WebView 静态析构会触发
+/// destroyed mutex 的 FORTIFY abort。
+#[cfg(target_os = "android")]
+pub fn show_startup_error(message: &str) -> Result<(), String> {
+    kedai_server::services::native_bridge_android::show_startup_error(message)
+}
+
+/// 原生重启(仅 Android):安排 launcher Intent 后结束进程。
+///
+/// 不能走 `AppHandle::restart`/Tauri `process::restart`:它们最终调用
+/// `std::process::exit`,在 WebView 存活时触发与退出相同的 FORTIFY abort。
+#[cfg(target_os = "android")]
+pub fn restart_app() -> Result<(), String> {
+    kedai_server::services::native_bridge_android::restart_app()
+}

@@ -222,11 +222,17 @@ pub fn suggested_root() -> Option<PathBuf> {
 ///
 /// 不能只看 `create_dir_all`:目录已存在时它对无权限路径也返回 Ok(Android scoped
 /// storage 下尤其常见),必须实际写一次才能区分「有目录」与「能写入」。
+///
+/// **探针必须落在真实数据子目录(`data/characters`)且用可见文件名**:Android scoped
+/// storage 下,应用在根目录写自己的文件可能成功,但迁移复制到 `data/characters` 会被拒
+/// (实测未授予「所有文件访问」时 `fs::copy` 报 `File exists`);隐藏文件名也可能绕过
+/// 检查。探针要和真实写入路径同形,才不会给上层一个假的「可写」结论。
 pub fn probe_writable(root: &Path) -> bool {
-    if std::fs::create_dir_all(root).is_err() {
+    let dir = root.join(DATA_DIR_NAME).join("characters");
+    if std::fs::create_dir_all(&dir).is_err() {
         return false;
     }
-    let probe = root.join(".kedai-write-probe");
+    let probe = dir.join("kedai-write-probe");
     match std::fs::write(&probe, b"1") {
         Ok(()) => {
             let _ = std::fs::remove_file(&probe);
@@ -408,9 +414,10 @@ mod tests {
         let dir = TempDataDir::new("dl-probe");
         let root = dir.path().join("Kedai-Data");
         assert!(probe_writable(&root), "临时目录应可写");
-        assert!(root.is_dir(), "探针会顺带建目录");
+        let nested = root.join(DATA_DIR_NAME).join("characters");
+        assert!(nested.is_dir(), "探针会顺带建真实数据子目录");
         assert!(
-            !root.join(".kedai-write-probe").exists(),
+            !nested.join("kedai-write-probe").exists(),
             "探针文件必须删除"
         );
     }

@@ -8,7 +8,10 @@
 //!     (submit 工具的落点:非 root/非 Shizuku 的沙箱档下产物交付通道);
 //!   - `keepalive_start()` / `keepalive_stop()` 启停前台服务,防止后台长任务被冻结;
 //!   - `request_all_files_access()` 打开系统「所有文件访问」授权页(数据根默认在公共
-//!     Download/Kedai-Data,Android 11+ 按路径读写公共目录需要该特殊权限)。
+//!     Download/Kedai-Data,Android 11+ 按路径读写公共目录需要该特殊权限);
+//!   - `show_startup_error(message)` 启动失败时展示原生对话框(Android 不能用
+//!     `std::process::exit` 退出,详见经验 E150);
+//!   - `restart_app()` 数据位置切换后的原生重启(AlarmManager + launcher Intent)。
 //!
 //! 说明:入参统一编码为 `name\u{1f}content`(单元分隔符),避免额外 JNI 签名重载。
 #![cfg(target_os = "android")]
@@ -41,6 +44,16 @@ pub fn save_to_downloads(name: &str, content: &str) -> Result<String, String> {
 /// 打开系统的「所有文件访问」授权页(仅 Android;数据根默认在公共 Download 目录)。
 pub fn request_all_files_access() -> Result<(), String> {
     call_string_static_no_arg(NATIVE_CLASS, "requestAllFilesAccess").map(|_| ())
+}
+
+/// 显示启动失败对话框(Kotlin 侧投递到主线程;用户点「退出」→ Process.killProcess)。
+pub fn show_startup_error(message: &str) -> Result<(), String> {
+    call_string_static(NATIVE_CLASS, "showStartupError", message).map(|_| ())
+}
+
+/// 原生重启:安排 launcher Intent,随后由 Rust 侧立即 `_exit`(不跑静态析构)。
+pub fn restart_app() -> Result<(), String> {
+    call_string_static_no_arg(NATIVE_CLASS, "restartApp").map(|_| ())
 }
 
 /// 启动前台服务保活(Kotlin 侧无入参,走无参入口)

@@ -1,5 +1,8 @@
 package com.kedai.app
 
+import android.app.Activity
+import android.app.AlarmManager
+import android.app.PendingIntent
 import android.content.ActivityNotFoundException
 import android.content.ContentValues
 import android.content.Context
@@ -7,11 +10,17 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
+import android.os.Process
 import android.provider.MediaStore
 import android.provider.Settings
+import android.widget.Toast
 import androidx.annotation.Keep
 import androidx.core.content.FileProvider
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import java.io.File
+import java.lang.ref.WeakReference
 
 /**
  * Kedai 原生能力桥接(供 Rust 侧经 JNI 调用)。
@@ -28,12 +37,16 @@ import java.io.File
  *     被系统冻结或回收。
  *   - requestAllFilesAccess():打开「所有文件访问」授权页(默认数据根在公共
  *     Download/Kedai-Data;Android 11+ 按路径读写公共目录需要该特殊权限)。
+ *   - showStartupError(message):启动失败时展示原生对话框(Android 不能走
+ *     std::process::exit,退出时 WebView 静态析构会触发 FORTIFY abort)。
+ *   - restartApp():数据位置切换后的原生重启(安排 launcher Intent 后由 Rust `_exit`)。
  *
  * 入参约定(与 server-rs/src/services/native_bridge_android.rs 对齐):
  *   - openExternal:入参即 URL;
  *   - shareFile:入参为 "文件名\u{1f}内容"(US 单元分隔符);
  *   - saveToDownloads:入参编码同 shareFile,返回实际落盘位置的描述;
- *   - keepalive*:入参为空串。
+ *   - showStartupError:入参为错误正文;
+ *   - keepalive_* 与 restartApp:入参为空串。
  * 全部返回 "" 表成功(除 saveToDownloads 返回位置描述);异常抛出由 Rust 侧转为错误。
  *
  * ⚠️ 混淆约束:本类被 native 按名调用(FindClass / CallStaticMethod),
@@ -48,13 +61,40 @@ object KedaiNative {
     @Volatile
     private var appContext: Context? = null
 
+    /**
+     * 当前前台 Activity 的弱引用:展示启动失败对话框必须用 Activity 作 Context,
+     * applicationContext 会抛 BadTokenException。弱引用避免静态单例泄漏 Activity。
+     */
+    @Volatile
+    private var activityRef: WeakReference<Activity>? = null
+
+    /**
+     * Rust 启动失败可能早于 MainActivity.attach(上下文尚未注入):先存下错误,
+     * 等 attach 后补弹,避免「后端起不来 + 无任何提示」的空白窗口。
+     */
+    @Volatile
+    private var pendingStartupError: String? = null
+
     /** 由 MainActivity 在启动时注入应用上下文(未注入时抛异常,由 Rust 侧转成可见错误) */
     fun attach(context: Context) {
         appContext = context.applicationContext
+        if (context is Activity) {
+            activityRef = WeakReference(context)
+        }
+        pendingStartupError?.let { message ->
+            pendingStartupError = null
+            showStartupError(message)
+        }
     }
 
     private fun requireContext(): Context =
         appContext ?: throw IllegalStateException("KedaiNative 未初始化:MainActivity 未注入 Context")
+
+    /** 可用于弹窗的 Activity;已 finish/destroy 时返回 null。 */
+    private fun activityOrNull(): Activity? {
+        val activity = activityRef?.get() ?: return null
+        return if (activity.isFinishing || activity.isDestroyed) null else activity
+    }
 
     /**
      * 取应用上下文(未注入时返回 null)。供 [ShellExecutorBridge] 等兄弟桥类做
@@ -151,6 +191,71 @@ object KedaiNative {
     @Keep
     fun stopKeepAlive(): String {
         KeepAliveService.stop(requireContext())
+        return ""
+    }
+
+    /**
+     * 启动失败时展示原生对话框。
+     *
+     * Rust 侧在 Android 上不能调用 AppHandle::exit:它会走 std::process::exit,
+     * 退出时 hwui/WebView 的静态析构会锁一个已销毁的互斥量(Android 14/15 FORTIFY abort)。
+     * 这里只负责展示;用户点「退出」时用 Process.killProcess(SIGKILL,不跑静态析构)。
+     */
+    @JvmStatic
+    @Keep
+    fun showStartupError(message: String): String {
+        val activity = activityOrNull()
+        if (activity == null) {
+            // 极端情况(Activity 已销毁):至少用 Toast 给出原因;不抛异常,避免
+            // Rust 侧在错误路径上再触发一次退出崩溃。
+            val context = appContext
+            if (context != null) {
+                Handler(Looper.getMainLooper()).post {
+                    Toast.makeText(context, "Kedai 启动失败:$message", Toast.LENGTH_LONG).show()
+                }
+            }
+            return ""
+        }
+        Handler(Looper.getMainLooper()).post {
+            try {
+                MaterialAlertDialogBuilder(activity)
+                    .setTitle("Kedai 启动失败")
+                    .setMessage(message)
+                    .setCancelable(false)
+                    .setPositiveButton("退出") { _, _ ->
+                        // 不能用 System.exit:它同样跑 atexit/静态析构,会触发同一 FORTIFY abort。
+                        Process.killProcess(Process.myPid())
+                    }
+                    .show()
+            } catch (_: Throwable) {
+                Toast.makeText(activity, "Kedai 启动失败:$message", Toast.LENGTH_LONG).show()
+            }
+        }
+        return ""
+    }
+
+    /**
+     * 原生重启:安排 launcher Intent,600ms 后由系统拉起新进程。
+     *
+     * 调用方(Rust)紧接着会 `_exit(0)`;不能走 Tauri 的 process::restart,原因同
+     * [showStartupError]。用 AlarmManager 而不是直接 startActivity,是为了让旧进程
+     * 先干净退出,避免同一进程内 Activity 复用导致数据根仍是旧值。
+     */
+    @JvmStatic
+    @Keep
+    fun restartApp(): String {
+        val context = requireContext()
+        val launch = context.packageManager.getLaunchIntentForPackage(context.packageName)
+            ?: throw IllegalStateException("找不到 Kedai 的启动入口")
+        launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        val pending = PendingIntent.getActivity(
+            context,
+            0,
+            launch,
+            PendingIntent.FLAG_CANCEL_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val alarm = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        alarm.set(AlarmManager.RTC, System.currentTimeMillis() + 600L, pending)
         return ""
     }
 
