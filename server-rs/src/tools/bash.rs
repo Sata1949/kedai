@@ -419,6 +419,22 @@ fn format_result(command: &str, cwd: &str, out: &exec::ExecResult) -> String {
             );
         }
     }
+    // 机读元数据行(2026-11-06):退出码此前只在中文结果头里,模型要靠正则从散文里
+    // 抠数字;截断/超时更是完全不可见。放在**末尾**是因为 exec 层 32K 字符与 registry
+    // 层 64KB 字节的截断都保尾,这一行不会被切掉。
+    //
+    // 它不是安全通道(命令输出可以伪造同名行),只是给模型与脚本的可读提示;
+    // 权威值仍是审计表里的 `exec_audit.exit_code`。
+    s.push_str(&format!(
+        "
+
+[exec-meta] {}",
+        json!({
+            "exit_code": out.exit_code,
+            "timed_out": out.timed_out,
+            "truncated": out.truncated,
+        })
+    ));
     s
 }
 
@@ -455,6 +471,7 @@ mod tests {
             stderr: String::new(),
             tier: exec::ShellTier::Sandbox,
             timed_out: false,
+            truncated: false,
         };
         let s = format_result("echo hello", "C:/ws/task", &out);
         assert!(s.contains("$ echo hello"));
@@ -475,6 +492,7 @@ mod tests {
             stderr: "boom".into(),
             tier: exec::ShellTier::Sandbox,
             timed_out: false,
+            truncated: false,
         };
         let s = format_result("false", "C:/ws/task", &out);
         assert!(s.contains("boom"));
@@ -495,8 +513,31 @@ mod tests {
             stderr: String::new(),
             tier: exec::ShellTier::Sandbox,
             timed_out: false,
+            truncated: false,
         };
         assert!(format_result("true", "C:/ws/task", &out).contains("无输出"));
+    }
+
+    /// exec-meta(2026-11-06):退出码/超时/截断必须以机读行回灌,且该行在**末尾**
+    /// (两层截断都保尾,放头部会被切掉)。
+    #[test]
+    fn exec_meta_line_is_machine_readable_and_last() {
+        let out = exec::ExecResult {
+            exit_code: 3,
+            stdout: "x".repeat(50),
+            stderr: String::new(),
+            tier: exec::ShellTier::Sandbox,
+            timed_out: false,
+            truncated: true,
+        };
+        let s = format_result("false", "C:/ws/task", &out);
+        let meta_at = s.find("[exec-meta]").expect("必须带机读元数据行");
+        assert!(meta_at > s.find("[stdout]").unwrap(), "meta 行应在输出之后");
+        let meta = &s[meta_at + "[exec-meta] ".len()..];
+        let v: serde_json::Value = serde_json::from_str(meta.trim()).expect("meta 应是合法 JSON");
+        assert_eq!(v["exit_code"], 3);
+        assert_eq!(v["timed_out"], false);
+        assert_eq!(v["truncated"], true);
     }
 
     #[test]

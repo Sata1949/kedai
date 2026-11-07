@@ -26,7 +26,9 @@ pub(super) fn register_read(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
                             "properties": {
                                 "type": { "type": "string", "enum": ["world_book", "character_prompt", "skill", "file", "subtask"], "description": "查询目标类型" },
                                 "name": { "type": "string", "description": "名称或文件相对路径/子任务 id" },
-                                "keywords": { "type": "array", "items": { "type": "string" }, "description": "关键词过滤(世界书/skill 按名称与内容匹配)" }
+                                "keywords": { "type": "array", "items": { "type": "string" }, "description": "关键词过滤(世界书/skill 按名称与内容匹配)" },
+                                "offset": { "type": "integer", "description": "仅 type=file:起始行号,1 起(默认 1)" },
+                                "limit": { "type": "integer", "description": "仅 type=file:最多读取行数(默认读完,上限 2000)" }
                             },
                             "required": ["type"]
                         }
@@ -56,7 +58,16 @@ pub(super) fn register_read(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
                         "world_book" => read_world_book(&deps, &ctx, &name, &keywords),
                         "character_prompt" => read_character_prompt(&deps, &ctx),
                         "skill" => read_skill(&deps, &name, &keywords),
-                        "file" => read_file_checked(&deps, &ctx, &name),
+                        // 分页只对 file 生效(2026-11-06):角色文件区可能很大,
+                        // 此前只能整篇读完再按字符截断,拿不到后半段。不带 offset/limit
+                        // 时行为逐字节不变(整篇返回)。
+                        "file" => read_file_checked(&deps, &ctx, &name).map(|c| {
+                            page_file(
+                                &c,
+                                q.get("offset").and_then(|v| v.as_u64()),
+                                q.get("limit").and_then(|v| v.as_u64()),
+                            )
+                        }),
                         "subtask" => {
                             // 子任务走结构化三态:命中给内容,未命中/歧义给「失败 + 候选」。
                             // 旧实现把候选清单塞进与正常结果同构的 content 字符串,消费方
@@ -175,6 +186,34 @@ fn read_character_prompt(deps: &ToolDeps, ctx: &ToolContext) -> Result<String, S
         out.push_str(&format!("\n开场白(first_mes):\n{fm}\n"));
     }
     Ok(out)
+}
+
+/// `read(type=file)` 的行区间分页(2026-11-06)。
+///
+/// `offset` 1 起、`limit` 默认读到底(上限 2000 行,与 `fs_read` 同阈值)。
+/// 两者都缺省时**原样返回**——既有调用方的输出逐字节不变。
+fn page_file(content: &str, offset: Option<u64>, limit: Option<u64>) -> String {
+    const MAX_LINES: u64 = 2000;
+    if offset.is_none() && limit.is_none() {
+        return content.to_string();
+    }
+    let start = offset.unwrap_or(1).max(1) as usize;
+    let take = limit.unwrap_or(MAX_LINES).clamp(1, MAX_LINES) as usize;
+    let lines: Vec<&str> = content.lines().collect();
+    let total = lines.len();
+    if start > total {
+        return format!("…(起始行 {start} 超出文件总行数 {total})");
+    }
+    let end = (start - 1 + take).min(total);
+    let body = lines[start - 1..end].join("\n");
+    if end < total {
+        format!(
+            "{body}\n…(已截断,共 {total} 行;继续读取用 offset={})",
+            end + 1
+        )
+    } else {
+        body
+    }
 }
 
 fn read_skill(deps: &ToolDeps, name: &str, keywords: &[String]) -> Result<String, String> {
@@ -322,4 +361,46 @@ fn subtask_hit_json(task: &crate::models::types::AgentSubtaskRecord, matched_by:
         "error": task.error,
         "finished_at": task.finished_at,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::page_file;
+
+    /// 不带 offset/limit:原样返回(既有调用方逐字节不变)。
+    #[test]
+    fn page_file_no_params_returns_whole_content() {
+        let text = "a
+b
+c";
+        assert_eq!(page_file(text, None, None), text);
+    }
+
+    /// 带 offset/limit:按行切片并给续读提示。
+    #[test]
+    fn page_file_slices_lines_and_hints_next_offset() {
+        let text = "l1
+l2
+l3
+l4";
+        assert_eq!(
+            page_file(text, Some(2), Some(1)),
+            "l2
+…(已截断,共 4 行;继续读取用 offset=3)"
+        );
+        // 已到末尾则不再提示
+        assert_eq!(page_file(text, Some(4), Some(10)), "l4");
+    }
+
+    /// offset 越界:给明确提示而不是空串(空串会被当成「文件是空的」)。
+    #[test]
+    fn page_file_out_of_range_reports_total() {
+        let got = page_file(
+            "a
+b",
+            Some(9),
+            None,
+        );
+        assert!(got.contains("超出文件总行数 2"), "实际:{got}");
+    }
 }
