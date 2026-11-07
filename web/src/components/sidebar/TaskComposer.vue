@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 任务模式「下达目标」+ 执行设置（C-2A，2026-10-25；原 Sidebar 553-657）。
-// 表单草稿留在组件内；创建与执行仍走 store action。工作区画像 debounce 探测随组件
+// 表单草稿存当前应用内存，切模式不丢；创建与执行仍走 store action。工作区画像 debounce 探测随组件
 // 生命周期清理，避免侧栏重建后留下悬空请求。
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { storeToRefs } from 'pinia';
@@ -15,20 +15,22 @@ import TaskFlowSelect from '../TaskFlowSelect.vue';
 import TaskConnectionSelect from '../TaskConnectionSelect.vue';
 import TaskAuthorizationSelect from '../TaskAuthorizationSelect.vue';
 import { useTaskAttachments } from '../../composables/useTaskAttachments';
+import { useComposerDraftsStore } from '../../stores/composerDrafts';
 
 const store = useAppStore();
 const { appMode, executors } = storeToRefs(store);
 /** 待上传附件队列(ATTACH-1):用户没选中任务时先在这里攒着 */
 const taskAttachments = useTaskAttachments();
 
-const taskTitle = ref('');
+const drafts = useComposerDraftsStore();
+const taskTitle = computed({ get: () => drafts.taskDraft.title, set: (title: string) => drafts.setTaskDraft({ title }) });
 /** 所选执行者库 id(空 = 通用执行者)。执行者与角色扮演角色卡解耦,不再列 characters。 */
-const executorId = ref('');
-const creatingTask = ref(false);
+const executorId = computed({ get: () => drafts.taskDraft.executorId, set: (executorId: string) => drafts.setTaskDraft({ executorId }) });
+const creatingTask = computed({ get: () => drafts.taskDraft.creating, set: (creating: boolean) => drafts.setTaskDraft({ creating }) });
 
 /** 任务工作区(CODE-1;空 = 未绑定,任务在草稿目录工作)。绑定即冻结:创建期后端
  *  canonical 化并校验(不存在 / 指向数据目录 → 400 中文原因原样上屏)。 */
-const workspacePath = ref('');
+const workspacePath = computed({ get: () => drafts.taskDraft.workspace, set: (workspace: string) => drafts.setTaskDraft({ workspace }) });
 /** 原生目录选择仅桌面 Tauri 提供:Android 的 SAF 返回 content:// URI,与后端路径语义不符;
  *  浏览器形态退化为手填(输入框始终可编辑,这只是一个便利按钮)。 */
 const canPickDir = inTauri && !isAndroidTauri;
@@ -128,15 +130,16 @@ async function runWsProbe(p: string): Promise<void> {
 /** 输入变化 → 清空旧结果并 debounce 重探(空输入不探测:没有可探的目录) */
 watch(workspacePath, () => {
   clearWsProbe();
+  wsProbeSeq += 1;
   wsProfile.value = null;
   wsProbeError.value = '';
   const p = workspacePath.value.trim();
   if (!p) return;
   wsProbeTimer = setTimeout(() => void runWsProbe(p), 300);
-});
+}, { immediate: true });
 
 // 组件卸载时清掉待发定时器(侧栏在模式切换时会重建,不清会留下一个悬空请求)
-onBeforeUnmount(clearWsProbe);
+onBeforeUnmount(() => { clearWsProbe(); wsProbeSeq += 1; });
 
 /** 待上传附件的展示大小(与任务详情附件清单同口径) */
 function pendingSize(bytes: number): string {
@@ -149,14 +152,15 @@ function pendingSize(bytes: number): string {
 
 /** 新建并立即执行 */
 async function createAndRun(): Promise<void> {
-  const t = taskTitle.value.trim();
+  const originalTitle = taskTitle.value;
+  const t = originalTitle.trim();
   if (!t || creatingTask.value) return;
   creatingTask.value = true;
   const ws = workspacePath.value.trim();
   try {
     const task = await store.createTask(t, executorId.value || undefined, ws || undefined);
     if (ws) rememberWorkspace(ws);
-    taskTitle.value = '';
+    if (taskTitle.value === originalTitle) taskTitle.value = '';
     // 待上传附件必须在**起跑之前**刷上去(ATTACH-1):目标文本在 run 起点组装,
     // 晚一步传的附件这一轮就进不了注入段,模型看不到。失败不阻断执行——附件没上去
     // 不该让任务跑不起来,但错误留在 composable 的 lastError 里由侧栏显示。
