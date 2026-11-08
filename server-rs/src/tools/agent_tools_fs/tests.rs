@@ -77,7 +77,7 @@ fn grep_skips_symlinks_and_unreadable_directories() {
     let hidden = f.ws.join("unreadable");
     std::fs::create_dir(&hidden).unwrap();
     std::fs::write(hidden.join("hidden.txt"), "needle 隐藏\n").unwrap();
-    std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0)).unwrap();
+    std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o0)).unwrap();
     let permission_denied = std::fs::read_dir(&hidden).is_err();
     let result = run_grep(&f.deps, &f.ctx(), &json!({"pattern":"needle"}));
     std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o700)).unwrap();
