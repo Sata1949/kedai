@@ -354,11 +354,13 @@ pub async fn history(
         let mut scopes = crate::parsing::scopes::ScopeVars::new();
         scopes.sync_chat_tree(&assistant_vars);
         scopes.sync_chat_flat(&vars);
+        // ALGO-7：原始历史只投影一次，各条借用不含自身的前缀，避免累计 O(N²) 复制。
+        // 必须保留原文而非 content_display，变量副本仍按原顺序连续回放。
+        let display_history: Vec<(String, String)> = messages
+            .iter()
+            .map(|m| (m.role.clone(), m.content.clone()))
+            .collect();
         for (i, m) in messages.iter().enumerate() {
-            let before: Vec<(String, String)> = messages[..i]
-                .iter()
-                .map(|x| (x.role.clone(), x.content.clone()))
-                .collect();
             let mut mctx = MacroCtx {
                 character_name: &name,
                 character_description: &description,
@@ -368,7 +370,7 @@ pub async fn history(
                 personality: &personality,
                 scenario: &scenario,
                 mes_example: &mes_example,
-                history: &before,
+                history: &display_history[..i],
                 vars: &mut vars,
                 assistant_vars: Some(&mut assistant_vars),
                 scopes: Some(&mut scopes),
