@@ -19,6 +19,9 @@ use crate::services::task_core::TaskTerminal;
 use crate::services::task_engine::{esm_boundary, wiring};
 use serde::Serialize;
 use std::path::Path;
+#[path = "delivery_facts.rs"]
+mod delivery_facts;
+use self::delivery_facts::{basic_content_issues, collect_file_facts, missing_from_facts};
 
 /// 未检测到文件变更时写入 `tasks.error` 的用户可见说明(TMR-3 口径)。
 pub(crate) const FILE_DELIVERY_MISSING_NOTE: &str = "未检测到文件变更:该任务绑定了工作区并启用了文件工具,但本次执行没有产生任何文件产物(可能只把结果留在正文);请检查工作区或追加指令重试。";
@@ -127,19 +130,10 @@ pub(crate) fn required_from_plan_for_goal(plan: &[TaskStep], goal: &str) -> Vec<
 }
 
 /// 必需文件中缺失的路径。
-///
-/// 工作区不可访问时**不产生缺失结论**(返回空):此时无法区分「文件缺失」与
-/// 「盘不在/目录被移走」,制造假缺失会让任务被误判 partial;摘要里的
-/// `workspace_available=false` 负责如实告知前端。
+/// 工作区不可访问时不产生缺失结论,由摘要的 `workspace_available=false` 告知前端。
 pub(crate) fn missing_files(workspace: &Path, required: &[(String, String)]) -> Vec<String> {
-    if !workspace.is_dir() {
-        return Vec::new();
-    }
-    required
-        .iter()
-        .filter(|(path, _)| !workspace.join(path).is_file())
-        .map(|(path, _)| path.clone())
-        .collect()
+    let facts = collect_file_facts(workspace, required);
+    missing_from_facts(workspace.is_dir(), required, &facts)
 }
 
 /// 单步终态的磁盘事实检查(SKY-8,2026-10-24)。
@@ -336,36 +330,9 @@ pub(crate) fn content_issues(
     required: &[(String, String)],
     goal: &str,
 ) -> Vec<String> {
-    if !workspace.is_dir() {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    for (path, _) in required {
-        let abs = workspace.join(path);
-        let Ok(meta) = std::fs::metadata(&abs) else {
-            continue;
-        };
-        if !meta.is_file() {
-            continue;
-        }
-        if meta.len() == 0 {
-            out.push(format!("{path}:文件为空(0B)"));
-            continue;
-        }
-        // ALGO-6:与 `step_files_unmet` 同款单次读盘——`@@` 计数与空白判定
-        // 共用一次读取,避免旧实现「先数一遍再读一遍」。
-        let Some(text) = read_inspectable_text(&abs) else {
-            continue;
-        };
-        let lines = text.lines().filter(|line| line.contains("@@")).count();
-        if lines > 0 {
-            out.push(format!("{path}:含 {lines} 行 @@ 未替换槽位"));
-        } else if text.trim().is_empty() {
-            out.push(format!("{path}:文件仅含空白"));
-        }
-    }
-    // 单文件目标但规划器没声明文件(solo/未规划):回退到根目录入口,让静态接线
-    // 与终态门槛对「最终交付物」仍然有效。
+    let facts = collect_file_facts(workspace, required);
+    let mut out = basic_content_issues(required, &facts);
+    // 单文件目标未声明文件时回退到根目录入口,让静态接线仍然有效。
     let declared: Vec<String> = if required.is_empty() && wiring::single_file_requested(goal) {
         pick_single_file_entry(workspace, required)
             .into_iter()
@@ -404,8 +371,17 @@ pub(crate) fn summarize(
 ) -> TaskDeliverySummary {
     let required = required_from_plan_for_goal(plan, goal);
     let workspace_available = workspace.is_dir();
-    let missing = missing_files(workspace, &required);
-    let content_issues = content_issues(workspace, &required, goal);
+    let facts = collect_file_facts(workspace, &required);
+    let missing = missing_from_facts(workspace_available, &required, &facts);
+    let mut content_issues = basic_content_issues(&required, &facts);
+    let declared: Vec<String> = if required.is_empty() && wiring::single_file_requested(goal) {
+        pick_single_file_entry(workspace, &required)
+            .into_iter()
+            .collect()
+    } else {
+        required.iter().map(|(p, _)| p.clone()).collect()
+    };
+    content_issues.extend(esm_boundary::delivery_issues(workspace, &declared, goal));
     let truncated = truncated_from_plan(plan);
     let hygiene_issues = hygiene_issues(workspace, &required);
     let files = required
@@ -413,7 +389,7 @@ pub(crate) fn summarize(
         .map(|(path, owner)| TaskDeliveryFile {
             path: path.clone(),
             owner: owner.clone(),
-            exists: workspace_available && workspace.join(path).is_file(),
+            exists: facts.get(path).is_some_and(|fact| fact.is_file),
         })
         .collect();
     TaskDeliverySummary {
@@ -627,6 +603,7 @@ fn merge_note(existing: Option<&str>, note: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::delivery_facts::{collect_calls, reset_collect_calls};
     use super::*;
     use crate::utils::test_support::TempDataDir;
 
@@ -922,6 +899,29 @@ mod tests {
             "缺文件交给 missing,不重复报"
         );
         assert!(summary.truncated.is_empty());
+    }
+
+    #[test]
+    fn summarize_reuses_one_fact_collection_for_all_declared_file_views() {
+        let dir = TempDataDir::new("delivery-facts-once");
+        let ws = dir.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("report.txt"), "ready\n").unwrap();
+        let plan = vec![TaskStep {
+            name: "写报告".into(),
+            files: vec!["report.txt".into()],
+            ..TaskStep::default()
+        }];
+        reset_collect_calls();
+        let summary = summarize(&plan, &ws, vec!["report.txt".into()], 1, "");
+        assert!(summary.required[0].exists);
+        assert!(summary.missing.is_empty());
+        assert!(summary.content_issues.is_empty());
+        assert_eq!(
+            collect_calls(),
+            1,
+            "一次详情摘要的缺失/内容/exists 应共享事实"
+        );
     }
 
     /// SKY-6 第 3 项:内容体检抓到未替换 `@@` 槽位 / 空文件 / 仅空白;
