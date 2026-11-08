@@ -18,6 +18,7 @@
 // (实测本仓 1258 条目:75ms vs 116ms,见 `docs/功能-变更史.md` 批次 4b 段)。
 use crate::services::task_change_service::{Baseline, MAX_BASELINE_BYTES};
 use std::collections::HashMap;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -153,6 +154,8 @@ pub(crate) struct WalkResult {
 pub(crate) enum ScanStop {
     Entries,
     Time,
+    /// 访问者已获得足够结果；与扫描预算耗尽分开记录。
+    Visitor,
 }
 
 /// **唯一的工作区树遍历实现**(`fs_glob`/`fs_grep` 经 `walk_files` 与扫描共用)。
@@ -166,6 +169,20 @@ pub(crate) fn walk_tree(
     ignore: &[&str],
     budget: Option<WalkBudget>,
     visit: &mut impl FnMut(&Path, &std::fs::Metadata),
+) -> WalkResult {
+    walk_tree_until(root, ignore, budget, &mut |path, metadata| {
+        visit(path, metadata);
+        ControlFlow::Continue(())
+    })
+}
+
+/// 可提前停止的同一遍历入口；`Break` 必须向所有父目录传播。
+/// 默认入口保持完整遍历，只有 grep 在确认存在第 max+1 条命中后使用此分支。
+pub(crate) fn walk_tree_until(
+    root: &Path,
+    ignore: &[&str],
+    budget: Option<WalkBudget>,
+    visit: &mut impl FnMut(&Path, &std::fs::Metadata) -> ControlFlow<()>,
 ) -> WalkResult {
     let mut entries = 0u64;
     let started = Instant::now();
@@ -190,7 +207,7 @@ fn walk_children(
     budget: Option<WalkBudget>,
     started: Instant,
     entries: &mut u64,
-    visit: &mut impl FnMut(&Path, &std::fs::Metadata),
+    visit: &mut impl FnMut(&Path, &std::fs::Metadata) -> ControlFlow<()>,
 ) -> Option<ScanStop> {
     let Ok(read) = std::fs::read_dir(dir) else {
         return None;
@@ -226,8 +243,8 @@ fn walk_children(
             if let Some(stop) = walk_children(&path, ignore, budget, started, entries, visit) {
                 return Some(stop);
             }
-        } else if file_type.is_file() {
-            visit(&path, &md);
+        } else if file_type.is_file() && visit(&path, &md).is_break() {
+            return Some(ScanStop::Visitor);
         }
     }
     None
@@ -497,6 +514,44 @@ mod tests {
     use super::*;
     use crate::utils::test_support::TempDataDir;
     use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn visitor_stop_is_distinct_from_scan_budgets_and_default_completion() {
+        let dir = TempDataDir::new("walk-stop-kind");
+        std::fs::write(dir.join("a.txt"), "a").unwrap();
+        std::fs::write(dir.join("b.txt"), "b").unwrap();
+        let stopped = walk_tree_until(dir.path(), &[], None, &mut |_, metadata| {
+            assert_eq!(metadata.len(), 1);
+            ControlFlow::Break(())
+        });
+        assert_eq!(stopped.entries, 1);
+        assert_eq!(stopped.stop, Some(ScanStop::Visitor));
+        assert!(matches!(
+            outcome_of(stopped),
+            ScanOutcome::Truncated { scanned: 1 }
+        ));
+        let complete = walk_tree(dir.path(), &[], None, &mut |_, _| {});
+        assert_eq!(complete.entries, 2);
+        assert!(matches!(outcome_of(complete), ScanOutcome::Complete));
+        for (max_entries, max_time, reason) in [
+            (1, Duration::from_secs(60), ScanStop::Entries),
+            (10, Duration::ZERO, ScanStop::Time),
+        ] {
+            let limited = walk_tree(
+                dir.path(),
+                &[],
+                Some(WalkBudget {
+                    max_entries,
+                    max_time,
+                }),
+                &mut |_, _| {},
+            );
+            assert_eq!(limited.stop, Some(reason));
+            assert!(matches!(outcome_of(limited), ScanOutcome::Truncated { .. }));
+        }
+        let missing = walk_tree(&dir.join("missing"), &[], None, &mut |_, _| {});
+        assert!(matches!(outcome_of(missing), ScanOutcome::Failed(_)));
+    }
 
     fn at(secs: u64) -> SystemTime {
         UNIX_EPOCH + Duration::from_secs(secs)

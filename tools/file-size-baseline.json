@@ -25,7 +25,6 @@
     "server-rs/src/services/undo_service.rs": 1082,
     "server-rs/src/services/world_book_service.rs": 1288,
     "server-rs/src/tools/agent_tools.rs": 1347,
-    "server-rs/src/tools/agent_tools_fs.rs": 1094,
     "server-rs/src/tools/agent_tools_fs_patch.rs": 1239,
     "server-rs/src/tools/permissions.rs": 1054,
     "server-rs/src/tools/registry.rs": 1021,
