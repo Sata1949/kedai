@@ -309,7 +309,7 @@ impl TaskEngine {
         // (含 service 层)所有日志自动携带该字段;若调用链源自 HTTP 请求,父链还含
         // http_request span,requestId 随之穿透。既有手工传参(task.id)保持不变。
         let run_span = tracing::info_span!("task_run", taskId = task.id.as_str());
-        tokio::spawn(
+        crate::models::data_activity::spawn(
             async move {
                 this.run_inner(
                     task,

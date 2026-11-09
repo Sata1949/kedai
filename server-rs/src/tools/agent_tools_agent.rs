@@ -180,7 +180,7 @@ pub(super) fn register_agentgo(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
                     // 任务侧预算载体随子 agent 继承(PRODCAP-2):子循环据此套用任务侧
                     // 收紧的语义熔断三值;聊天路径 ctx.budget 恒 None(行为不变)
                     let budget = ctx.budget;
-                    tokio::spawn(async move {
+                    crate::models::data_activity::spawn(async move {
                         run_subtask(
                             deps2,
                             task_id,
@@ -694,7 +694,8 @@ async fn run_subtask_plain(
 /// send_event 置 abort 中断整轮,与 sink.rs 的 drain 语义一致)。
 fn spawn_discard_sink() -> (mpsc::Sender<SseEvent>, tokio::task::JoinHandle<()>) {
     let (tx, mut rx) = mpsc::channel::<SseEvent>(64);
-    let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    let drain =
+        crate::models::data_activity::spawn(async move { while rx.recv().await.is_some() {} });
     (tx, drain)
 }
 

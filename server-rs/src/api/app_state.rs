@@ -153,7 +153,10 @@ impl AppState {
         // 数据位置服务:持有配置快照(数据目录/图像/任务草稿的当前来源),迁移在
         // spawn_blocking 里跑(见 api/data_location.rs);此处只需装配。
         let data_location = Arc::new(
-            crate::services::data_location_service::DataLocationService::new(config.clone()),
+            crate::services::data_location_service::DataLocationService::new(
+                config.clone(),
+                db.data_activity.clone(),
+            ),
         );
         let world_books = Arc::new(WorldBookService::new(db.clone()));
         let skills = Arc::new(SkillService::new(db.clone()));
@@ -534,7 +537,7 @@ impl AppState {
         F: FnOnce(&rusqlite::Connection) -> Result<T, String> + Send + 'static,
     {
         let db = self.db.clone();
-        tokio::task::spawn_blocking(move || {
+        crate::models::data_activity::spawn_blocking(move || {
             let conn = db.read()?;
             f(&conn)
         })
@@ -551,7 +554,7 @@ impl AppState {
         F: FnOnce(&rusqlite::Connection) -> Result<T, String> + Send + 'static,
     {
         let db = self.db.clone();
-        tokio::task::spawn_blocking(move || {
+        crate::models::data_activity::spawn_blocking(move || {
             let conn = db.write();
             f(&conn)
         })
@@ -598,7 +601,7 @@ impl AppState {
         T: Send + 'static,
         F: FnOnce() -> T + Send + 'static,
     {
-        tokio::task::spawn_blocking(f)
+        crate::models::data_activity::spawn_blocking(f)
             .await
             .map_err(|e| format!("DB 任务执行失败: {e}"))
     }

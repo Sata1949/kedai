@@ -21,6 +21,8 @@
 // "android")]` 走无障碍截图服务(移动端视觉能力包 A3;v1 仅整屏,区域/窗口明确报错);
 // 其它平台注册一个**明确报错**的实现,编译与工具面不变。
 
+#[cfg(any(windows, target_os = "android"))]
+use crate::models::data_activity::spawn_blocking;
 use crate::models::types::{ToolContext, ToolDefinition};
 use crate::tools::registry::ToolRegistry;
 use serde_json::json;
@@ -392,7 +394,7 @@ async fn capture_once(
         args.get("window_title").and_then(|v| v.as_str()),
     )?;
     let target_desc = format!("{plan:?}");
-    let shot = tokio::task::spawn_blocking(move || win::capture(&plan))
+    let shot = spawn_blocking(move || win::capture(&plan))
         .await
         .map_err(|e| format!("截图任务失败: {e}"))??;
     // 日志仍只记元数据(不含像素);落库审计由外层 audit_attempt 统一收口
@@ -493,11 +495,9 @@ async fn capture_once(
         .dir()
         .join(format!("cap-{}.png", uuid::Uuid::new_v4()));
     let capture_path = temp_path.to_string_lossy().into_owned();
-    tokio::task::spawn_blocking(move || {
-        cap::capture_to_file(&capture_path, cap::CAPTURE_TIMEOUT_MS)
-    })
-    .await
-    .map_err(|e| format!("截图任务失败: {e}"))??;
+    spawn_blocking(move || cap::capture_to_file(&capture_path, cap::CAPTURE_TIMEOUT_MS))
+        .await
+        .map_err(|e| format!("截图任务失败: {e}"))??;
     let bytes = match std::fs::read(&temp_path) {
         Ok(b) => b,
         Err(e) => {
@@ -1134,7 +1134,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "真机手动验证:需要桌面会话,CI/无头环境不跑;以 --ignored 显式执行"]
     async fn real_capture_primary_display_manual() {
-        let shot = tokio::task::spawn_blocking(|| win::capture(&Target::Display(0)))
+        let shot = spawn_blocking(|| win::capture(&Target::Display(0)))
             .await
             .unwrap()
             .expect("主显示器截图应成功");

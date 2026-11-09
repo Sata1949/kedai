@@ -244,7 +244,7 @@ impl AgentEngine {
         let (history, compaction) = {
             let sessions = self.sessions.clone();
             let sid = session_id.to_string();
-            tokio::task::spawn_blocking(move || {
+            crate::models::data_activity::spawn_blocking(move || {
                 (sessions.get_messages(&sid), sessions.get_compaction(&sid))
             })
             .await
@@ -322,7 +322,7 @@ impl AgentEngine {
         let (history, compaction) = {
             let sessions = self.sessions.clone();
             let sid = session_id.to_string();
-            match tokio::task::spawn_blocking(move || {
+            match crate::models::data_activity::spawn_blocking(move || {
                 (sessions.get_messages(&sid), sessions.get_compaction(&sid))
             })
             .await

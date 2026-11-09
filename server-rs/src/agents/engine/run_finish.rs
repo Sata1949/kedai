@@ -90,7 +90,7 @@ impl AgentEngine {
         let usage = total_usage.clone();
         // 阻塞任务失败(线程池关闭/任务 panic)此前被 `let _ =` 吞掉:用量静默丢失,
         // 调用方无从察觉。改为留痕(不阻断生成收尾;2026-09-13 批次 3.7)。
-        if let Err(e) = tokio::task::spawn_blocking(move || {
+        if let Err(e) = crate::models::data_activity::spawn_blocking(move || {
             Self::record_usage_sync(&db, &sid, &usage);
         })
         .await

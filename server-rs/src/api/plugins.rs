@@ -83,7 +83,7 @@ pub async fn list_tools(State(state): State<Arc<AppState>>) -> Json<serde_json::
     let dir = state.config.data_dir.join("plugins").join("tools");
     let registry = state.tool_registry.clone();
     // list_files/parse_all 是同步目录遍历 + 逐文件解析,挪阻塞线程池(B-1:不在 tokio worker 上做同步文件 IO)
-    let (files, parsed) = tokio::task::spawn_blocking(move || {
+    let (files, parsed) = crate::models::data_activity::spawn_blocking(move || {
         let loader = ToolPluginLoader::new(dir);
         let files = loader.list_files();
         let (loaded, _errors) = loader.parse_all();
@@ -120,18 +120,19 @@ pub async fn reload_tools(State(state): State<Arc<AppState>>) -> Response {
     let registry = state.tool_registry.clone();
     // parse_all 是同步目录遍历 + 逐文件解析,挪阻塞线程池(B-1);
     // 注册在 spawn_blocking 之外由本层执行(注册表是同步锁操作,无需阻塞池)。
-    let (loaded, mut errors) =
-        tokio::task::spawn_blocking(move || ToolPluginLoader::new(dir).parse_all())
-            .await
-            .unwrap_or_else(|e| {
-                // 泄露封堵(批次 1):JoinError 原文(线程池内部细节)只进日志,
-                // 面向用户的错误项换成固定文案。
-                tracing::error!(error = %e, "插件重载任务失败");
-                (
-                    Vec::new(),
-                    vec!["插件重载任务失败,详情见服务端日志".to_string()],
-                )
-            });
+    let (loaded, mut errors) = crate::models::data_activity::spawn_blocking(move || {
+        ToolPluginLoader::new(dir).parse_all()
+    })
+    .await
+    .unwrap_or_else(|e| {
+        // 泄露封堵(批次 1):JoinError 原文(线程池内部细节)只进日志,
+        // 面向用户的错误项换成固定文案。
+        tracing::error!(error = %e, "插件重载任务失败");
+        (
+            Vec::new(),
+            vec!["插件重载任务失败,详情见服务端日志".to_string()],
+        )
+    });
     let (count, removed, reg_errors) = sync_plugins(loaded, &registry);
     errors.extend(reg_errors);
     if errors.is_empty() {
@@ -209,22 +210,31 @@ pub async fn upload_tool(
                 return err_status("文件名含非法字符", StatusCode::BAD_REQUEST);
             };
             let dir = state.config.data_dir.join("plugins").join("tools");
-            // B-1:文件 IO 走 tokio::fs / 阻塞线程池,不在 tokio worker 上同步读写
-            tokio::fs::create_dir_all(&dir).await.ok();
-            let path = dir.join(&safe);
-            if let Err(e) = tokio::fs::write(&path, &file_bytes).await {
-                // 500:入参含 io 错误原文(可能带盘符路径),按泄露策略只进日志
-                return internal(format!("写文件失败: {e}"));
+            // 目录创建与写入共用阻塞租约，请求取消后仍阻止数据迁移切入。
+            let write_dir = dir.clone();
+            let write_name = safe.clone();
+            let saved = state
+                .db_call(move || {
+                    std::fs::create_dir_all(&write_dir)
+                        .map_err(|e| format!("创建插件目录失败: {e}"))?;
+                    std::fs::write(write_dir.join(write_name), file_bytes)
+                        .map_err(|e| format!("写插件文件失败: {e}"))
+                })
+                .await;
+            match saved {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) | Err(error) => return internal(error),
             }
             // 全量同步(与启动/reload/delete 同一条路径):先解析整目录,再 diff 注册。
             // 本文件若解析失败(含加载期语法校验)或注册冲突,以其归属错误回 400;
             // 其余文件的既有错误只进日志(它们属于那些文件的 reload 反馈)。
             let registry = state.tool_registry.clone();
             let sync_dir = dir.clone();
-            let (loaded, parse_errors) =
-                tokio::task::spawn_blocking(move || ToolPluginLoader::new(sync_dir).parse_all())
-                    .await
-                    .unwrap_or_default();
+            let (loaded, parse_errors) = crate::models::data_activity::spawn_blocking(move || {
+                ToolPluginLoader::new(sync_dir).parse_all()
+            })
+            .await
+            .unwrap_or_default();
             let mine = format!("{safe}:");
             if let Some(err) = parse_errors.iter().find(|e| e.starts_with(&mine)) {
                 return validation(format!("插件注册失败: {err}"));
@@ -317,8 +327,10 @@ pub async fn move_tool(
         .join("tools")
         .join(&safe);
     let folder_for_write = folder.clone();
-    let result =
-        tokio::task::spawn_blocking(move || rewrite_plugin_folder(&path, &folder_for_write)).await;
+    let result = crate::models::data_activity::spawn_blocking(move || {
+        rewrite_plugin_folder(&path, &folder_for_write)
+    })
+    .await;
     match result {
         Ok(Ok(())) => Json(json!({ "ok": true, "file": safe, "folder": folder })).into_response(),
         Ok(Err(MoveFolderError::NotFound)) => not_found("插件文件不存在"),
@@ -423,7 +435,7 @@ pub async fn import_tools(
     // 阶段 2:写文件(覆盖同名;原子写)
     let dir = state.config.data_dir.join("plugins").join("tools");
     let dir_for_write = dir.clone();
-    let written = tokio::task::spawn_blocking(move || -> Result<(), String> {
+    let written = crate::models::data_activity::spawn_blocking(move || -> Result<(), String> {
         std::fs::create_dir_all(&dir_for_write).map_err(|e| format!("创建插件目录失败: {e}"))?;
         for (name, bytes) in &writes {
             crate::utils::fs_atomic::write_atomic(&dir_for_write.join(name), bytes)
@@ -440,10 +452,11 @@ pub async fn import_tools(
 
     // 阶段 3:一次全量同步(与 reload/upload 同一条路径)
     let registry = state.tool_registry.clone();
-    let (loaded, mut errors) =
-        tokio::task::spawn_blocking(move || ToolPluginLoader::new(dir).parse_all())
-            .await
-            .unwrap_or_default();
+    let (loaded, mut errors) = crate::models::data_activity::spawn_blocking(move || {
+        ToolPluginLoader::new(dir).parse_all()
+    })
+    .await
+    .unwrap_or_default();
     let (count, removed, reg_errors) = sync_plugins(loaded, &registry);
     errors.extend(reg_errors);
     let mine = |e: &String| names.iter().any(|n| e.starts_with(&format!("{n}:")));
@@ -470,10 +483,11 @@ pub async fn import_tools(
 pub async fn export_tools(State(state): State<Arc<AppState>>) -> Response {
     let dir = state.config.data_dir.join("plugins").join("tools");
     // parse_all 是同步目录遍历 + 逐文件解析,挪阻塞线程池(B-1)
-    let (loaded, errors) =
-        tokio::task::spawn_blocking(move || ToolPluginLoader::new(dir).parse_all())
-            .await
-            .unwrap_or_default();
+    let (loaded, errors) = crate::models::data_activity::spawn_blocking(move || {
+        ToolPluginLoader::new(dir).parse_all()
+    })
+    .await
+    .unwrap_or_default();
     let plugins: Vec<serde_json::Value> = loaded
         .into_iter()
         .map(|p| {
@@ -504,16 +518,26 @@ pub async fn delete_tool(
     }
     let dir = state.config.data_dir.join("plugins").join("tools");
     let path = dir.join(&safe);
-    // 删文件后全量同步:B-1 文件 IO 走 tokio::fs;同步里 parse_all 是同步遍历,挪阻塞线程池。
+    // 删文件与重载均继承请求租约，等待者退出后阻塞写入仍受迁移互斥保护。
     // 工具的注销不再手工「删前解析反查名字」——差集注销天然覆盖(含「删掉的是重名先到者、
     // 后到者应补位」这类情形)。
-    if tokio::fs::try_exists(&path).await.unwrap_or(false) {
-        let _ = tokio::fs::remove_file(&path).await;
+    let removed = state
+        .db_call(move || match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("删除插件文件失败: {error}")),
+        })
+        .await;
+    match removed {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) | Err(error) => return internal(error),
     }
     let registry = state.tool_registry.clone();
-    let (loaded, _) = tokio::task::spawn_blocking(move || ToolPluginLoader::new(dir).parse_all())
-        .await
-        .unwrap_or_default();
+    let (loaded, _) = crate::models::data_activity::spawn_blocking(move || {
+        ToolPluginLoader::new(dir).parse_all()
+    })
+    .await
+    .unwrap_or_default();
     let (count, _unregistered, _) = sync_plugins(loaded, &registry);
     Json(json!({ "ok": true, "removed": name, "reloaded": count })).into_response()
 }

@@ -37,7 +37,7 @@ pub(crate) fn spawn(
     let label = label.to_string();
     let phase = phase.to_string(); // drain 任务要求 'static,引用先行 owned 化
     let (tx, mut rx) = mpsc::channel::<SseEvent>(SINK_CAPACITY);
-    let drain = tokio::spawn(async move {
+    let drain = crate::models::data_activity::spawn(async move {
         // 流式正文攒批出口(批次 R4):Token 逐条到达,攒批(时间窗/字符阈值先到
         // 先发)后发射 kind=delta;不逐条直发是为保护 64 容量的任务事件 broadcast
         // (逐条会灌满通道,致 SSE 端 Lagged 连 status/llm_call 等关键事件一起丢)。

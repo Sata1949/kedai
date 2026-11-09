@@ -95,7 +95,7 @@ impl AgentEngine {
             let sessions = self.sessions.clone();
             let character_id = req.character_id.clone();
             let sid = session_id.to_string();
-            tokio::task::spawn_blocking(move || {
+            crate::models::data_activity::spawn_blocking(move || {
                 let character = characters.get(&character_id);
                 let history = sessions.get_messages(&sid);
                 let compaction = sessions.get_compaction(&sid);
@@ -156,7 +156,7 @@ impl AgentEngine {
         let world_entries_for_char = {
             let world_books = self.world_books.clone();
             let character_id = req.character_id.clone();
-            tokio::task::spawn_blocking(move || {
+            crate::models::data_activity::spawn_blocking(move || {
                 world_books.collect_entries_for_character(&character_id)
             })
             .await
@@ -181,8 +181,10 @@ impl AgentEngine {
                     let sessions = self.sessions.clone();
                     let sid = session_id.to_string();
                     let vars = rctx.assistant_vars.clone();
-                    tokio::task::spawn_blocking(move || sessions.save_assistant_vars(&sid, &vars))
-                        .await
+                    crate::models::data_activity::spawn_blocking(move || {
+                        sessions.save_assistant_vars(&sid, &vars)
+                    })
+                    .await
                 };
                 if let Ok(Err(e)) | Err(e) = save_result.map_err(|e| e.to_string()) {
                     tracing::warn!(

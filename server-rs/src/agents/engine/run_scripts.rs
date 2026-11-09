@@ -264,7 +264,7 @@ impl AgentEngine {
             // (超时后不再等待;阻塞线程自然结束后回收——见上方 SCRIPT_WALL_TIMEOUT 注释)。
             let outcome = match tokio::time::timeout(
                 SCRIPT_WALL_TIMEOUT,
-                tokio::task::spawn_blocking(move || {
+                crate::models::data_activity::spawn_blocking(move || {
                     crate::scripts::runtime::eval_with_bridge(&source, &opts, &bridge)
                 }),
             )
@@ -337,7 +337,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(4);
         tokio::spawn(generate_dispatch_loop(mock_connector(), rx));
         let handler = generate_handler_from_tx(tx);
-        let result = tokio::task::spawn_blocking(move || {
+        let result = crate::models::data_activity::spawn_blocking(move || {
             let (_abort_tx, abort_rx) = watch::channel(false);
             handler(
                 vec![LlmMessage::plain("user", "[[reply:脚本生成OK]]")],
@@ -398,7 +398,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(4);
         let task = tokio::spawn(generate_dispatch_loop(mock_connector(), rx));
         let handler = generate_handler_from_tx(tx);
-        let call = tokio::task::spawn_blocking(move || {
+        let call = crate::models::data_activity::spawn_blocking(move || {
             let (_abort_tx, abort_rx) = watch::channel(false);
             handler(
                 vec![LlmMessage::plain("user", &slow_msg)],

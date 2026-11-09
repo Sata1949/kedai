@@ -153,7 +153,7 @@ pub async fn data_dirs(State(state): State<Arc<AppState>>) -> Response {
     let candidates = config::split_dir_candidates();
     // 目录探测含文件系统与 SQLite 打开(阻塞调用),放 spawn_blocking 避免占 tokio worker
     let scan_target = selected.clone();
-    let detected = tokio::task::spawn_blocking(move || {
+    let detected = crate::models::data_activity::spawn_blocking(move || {
         config::detect_split_data_dirs(&scan_target, &candidates)
     })
     .await;

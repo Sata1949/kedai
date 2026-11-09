@@ -151,12 +151,15 @@ pub async fn grant_authorization(
     //    防陈旧/伪造哈希把卡锁在错误版本上(前端在读取与授权之间若卡被改,会 409)。
     let user_scripts = state.user_scripts.clone();
     let id = body.character_id.clone();
-    let scripts =
-        match tokio::task::spawn_blocking(move || card_scripts_of(&user_scripts, &id)).await {
-            Err(e) => return db_err(&format!("取脚本集任务失败: {e}")),
-            Ok(Ok(s)) => s,
-            Ok(Err(e)) => return err_with_code(ErrorCode::Validation, e, StatusCode::BAD_REQUEST),
-        };
+    let scripts = match crate::models::data_activity::spawn_blocking(move || {
+        card_scripts_of(&user_scripts, &id)
+    })
+    .await
+    {
+        Err(e) => return db_err(&format!("取脚本集任务失败: {e}")),
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => return err_with_code(ErrorCode::Validation, e, StatusCode::BAD_REQUEST),
+    };
     let current = ScriptAuthorizationService::compute_hash(&scripts);
     if current.is_empty() {
         return err_with_code(

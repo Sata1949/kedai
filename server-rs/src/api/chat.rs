@@ -372,7 +372,7 @@ pub async fn send(
         // 再连同 ts/prompt_tokens 一起写进 extra 的 `image_refs`——
         // 落盘失败则消息不写(500),不留「有引用没文件」的半截状态;
         // 极端情况下已写入的部分文件成为孤儿(仅占磁盘,日志留痕)。
-        let write_result = tokio::task::spawn_blocking(move || {
+        let write_result = crate::models::data_activity::spawn_blocking(move || {
             let mut refs: Vec<ImageRef> = Vec::with_capacity(decoded.len());
             for (name, mime, bytes) in &decoded {
                 refs.push(images_svc.save(name, mime, bytes)?);
@@ -433,7 +433,7 @@ pub async fn send(
     // 引擎日志因此同时带上 sessionId 与 requestId(后者经 span extension 穿透)。
     // 既有手工传参(req.session_id)保持不变,那是既有契约。
     let run_span = tracing::info_span!("agent_run", sessionId = session_id.as_str());
-    tokio::spawn(
+    crate::models::data_activity::spawn(
         async move {
             // 占位守卫随任务存续:引擎正常结束、panic 或任务被丢弃都会自动清理(RAII),
             // 不再依赖 spawn 收尾语句执行(引擎 panic 时它不会执行)。
@@ -694,7 +694,7 @@ pub async fn generate_raw(
             let characters = state.characters.clone();
             let world_books = state.world_books.clone();
             let cid = cid.to_string();
-            tokio::task::spawn_blocking(move || {
+            crate::models::data_activity::spawn_blocking(move || {
                 let mut entries: Vec<crate::parsing::world_book::WorldEntry> = Vec::new();
                 if let Some(c) = characters.get(&cid) {
                     if let Some(raw) = c.data_raw.as_ref() {

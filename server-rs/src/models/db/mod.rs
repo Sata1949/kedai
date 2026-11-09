@@ -10,7 +10,7 @@ pub use schema::{create_tables_sql, SCHEMA_VERSION};
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard, Once};
+use std::sync::{Arc, Mutex, MutexGuard, Once};
 
 /// 只读连接池 / 池化只读连接类型别名(简化调用点签名)
 pub type ReadPool = r2d2::Pool<SqliteConnectionManager>;
@@ -39,6 +39,8 @@ pub fn register_sqlite_vec() {
 }
 
 pub struct Db {
+    /// 同一数据根的请求与后台操作共用迁移活动域。
+    pub data_activity: Arc<crate::models::data_activity::DataActivity>,
     /// 唯一写连接:所有写 SQL 经此串行执行(沿用既有单连接语义)
     writer: Mutex<Connection>,
     /// 只读连接池:WAL 模式下读与写互不阻塞;池大小 = CPU 核数
@@ -296,6 +298,7 @@ impl Db {
             .build(manager)
             .map_err(|e| format!("创建只读连接池失败: {e}"))?;
         Ok(Db {
+            data_activity: Arc::default(),
             writer: Mutex::new(conn),
             readers,
         })

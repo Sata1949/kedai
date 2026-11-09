@@ -367,7 +367,7 @@ impl ToolRegistry {
                 let snap_args = args.clone();
                 let snap_ctx = ctx.clone();
                 let snap_identity = identity.clone();
-                tokio::task::spawn_blocking(move || {
+                crate::models::data_activity::spawn_blocking(move || {
                     undo.snapshot_before(&snap_name, &snap_args, &snap_ctx, snap_identity.as_ref())
                 })
                 .await

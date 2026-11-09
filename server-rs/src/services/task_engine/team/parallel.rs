@@ -920,7 +920,7 @@ impl TeamExecutor {
                 let integration_main = is_integration_main(mains, i);
                 let step_idxs = step_ranges[i].clone();
                 let ownership = ownership.clone();
-                join.spawn(async move {
+                join.spawn(crate::models::data_activity::scope_current(async move {
                     this.run_main(
                         &ctx2,
                         i,
@@ -936,7 +936,7 @@ impl TeamExecutor {
                         ownership,
                     )
                     .await
-                });
+                }));
             }
 
             // 本波的主序号留底:JoinError 兜底置 error 时用(spawn 循环已消耗 wave 的引用)

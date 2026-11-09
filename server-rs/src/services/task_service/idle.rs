@@ -147,11 +147,17 @@ impl TaskService {
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 ticker.tick().await;
+                // 迁移期间及提交后暂停后台回收；已开始的一轮阻止迁移切入。
+                let Ok(activity) = svc.db.data_activity.enter() else {
+                    continue;
+                };
                 // 草稿回收不受 idle 看守开关影响(独立的保留期闸门);文件系统 IO 放
                 // blocking 池,不阻塞 tick 循环
                 if scratch_keep_days > 0 {
                     let svc_clean = svc.clone();
-                    let job = tokio::task::spawn_blocking(move || {
+                    let cleanup_activity = activity.clone();
+                    let job = crate::models::data_activity::spawn_blocking(move || {
+                        let _activity = cleanup_activity;
                         svc_clean.cleanup_task_scratch(scratch_keep_days)
                     })
                     .await;
