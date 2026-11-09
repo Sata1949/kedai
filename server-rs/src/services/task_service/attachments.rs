@@ -181,7 +181,11 @@ impl TaskService {
         // 同一个 seq,后一次 `fs::write` 直接覆盖前一次,库里两行指向同一物理文件。
         // 改成 `create_new` 占位:拿到独占句柄才算认领成功,撞名就 seq+1 重试。
         let safe = sanitize_file_name(&display);
-        let (seq, mut file) = reserve_seq(&dir.abs, &safe)?;
+        // ATTFIX-15:同一工作区里别的任务可能还有指向本目录的现存记录。它们的文件
+        // 若已被清理，`next_seq` 会把序号重新发出去并撞上旧路径——删旧记录时就会
+        // 连带删掉新文件。把全部现存 rel_path 交给占位函数避让。
+        let referenced = self.all_attachment_rel_paths();
+        let (seq, mut file) = reserve_seq_avoiding(&dir.abs, &safe, &referenced)?;
         file.write_all(bytes)
             .map_err(|e| format!("附件写入失败({}):{e}", dir.abs.display()))?;
         // 句柄随作用域结束关闭:Windows 上不关闭会让随后的删除/覆盖失败
@@ -229,6 +233,22 @@ impl TaskService {
     ) -> Result<Vec<TaskAttachmentRecord>, String> {
         let conn = self.db.read()?;
         Self::select_attachments(&conn, task_id)
+    }
+
+    /// 全部现存附件的 `rel_path`（跨任务、跨工作区；ATTFIX-15 的避让依据）。
+    ///
+    /// 读坏行时按空集处理：这只是一个保守的防撞名提示，不该让上传整体失败。
+    fn all_attachment_rel_paths(&self) -> Vec<String> {
+        let Ok(conn) = self.db.read() else {
+            return Vec::new();
+        };
+        let mut stmt = match conn.prepare("SELECT rel_path FROM task_attachments") {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map([], |row| row.get::<_, String>(0))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
     }
 
     /// 清单查询的静态实现(显式传连接,可内存库单测;同 `select_trace_by_seq` 形态)。
@@ -295,6 +315,20 @@ impl TaskService {
         if let Ok(dir) = self.attachment_dir(task) {
             // rel_path 的最后一段就是磁盘名;重新解析而不从字符串切,避免前缀不一致
             if let Some(name) = record.rel_path.rsplit('/').next() {
+                // ATTFIX-15:库行已删,但同一路径可能还被别的记录引用(历史遗留的复用
+                // 路径)。那种情况下只能删记录、保留文件,否则会把别人的附件一起删掉。
+                let still_referenced = self
+                    .all_attachment_rel_paths()
+                    .iter()
+                    .any(|r| r == &record.rel_path);
+                if still_referenced {
+                    tracing::warn!(
+                        task_id = task.id.as_str(),
+                        rel_path = record.rel_path.as_str(),
+                        "附件磁盘文件仍被其他记录引用，只删记录不删文件"
+                    );
+                    return Ok(true);
+                }
                 let path = dir.abs.join(name);
                 if let Err(e) = std::fs::remove_file(&path) {
                     tracing::warn!(
@@ -429,10 +463,33 @@ fn next_seq(dir: &Path) -> u64 {
 ///
 /// 重试上限 64:目录里理论上不会有连续 64 个名字被占住;真有那么多同名文件时
 /// 明确报错比无限循环好。
+///
+/// 生产路径已统一走 `reserve_seq_avoiding`（ATTFIX-15 要避让仍被引用的旧路径），
+/// 本函数只作为「不避让」这个基准形态保留给并发占位测试。
+#[cfg(test)]
 fn reserve_seq(dir: &Path, safe: &str) -> Result<(u64, std::fs::File), String> {
+    reserve_seq_avoiding(dir, safe, &[])
+}
+
+/// 同 `reserve_seq`，额外跳过**仍被库记录引用**的磁盘名（ATTFIX-15）。
+///
+/// 只看磁盘是不够的：某个任务的附件文件被清理掉、而它的库行还在时，
+/// `next_seq` 会把这个序号重新发出去，新上传就落到旧记录指向的同一路径上；
+/// 之后删除旧记录会顺手把新文件删掉。`referenced` 给出全部现存 `rel_path`，
+/// 命中就继续顺延——占位仍是 `create_new`，并发安全不受影响。
+fn reserve_seq_avoiding(
+    dir: &Path,
+    safe: &str,
+    referenced: &[String],
+) -> Result<(u64, std::fs::File), String> {
     let mut seq = next_seq(dir);
     for _ in 0..64 {
-        let path = dir.join(format!("{seq}-{safe}"));
+        let name = format!("{seq}-{safe}");
+        let path = dir.join(&name);
+        if referenced.iter().any(|r| r.ends_with(&format!("/{name}"))) {
+            seq += 1;
+            continue;
+        }
         match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -652,5 +709,57 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "好.txt");
         assert_eq!(rows[0].size, 3);
+    }
+    /// ATTFIX-15：删除一条附件记录，不得连带删掉另一个任务复用的同名磁盘文件。
+    ///
+    /// 缺陷形态：`next_seq` 只按「现存文件的最大序号 + 1」起算。任务 A 的附件文件被清理掉
+    /// （或工作区被清空）后，它的库行仍在；此时任务 B 上传同名文件会重新分配到同一个序号，
+    /// 落到与 A 完全相同的磁盘路径。之后删除 A 的旧记录会把这个文件删掉——B 的清单里仍有
+    /// 记录，磁盘却没有内容了。
+    ///
+    /// 判据：新上传必须拿到**未被任何现存记录引用**的路径。
+    #[test]
+    fn reused_disk_path_is_never_handed_to_a_new_upload() {
+        let dir = std::env::temp_dir().join(format!("kedai-attach-reuse-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+
+        // 任务 A 曾上传 1-report.txt，随后文件被清理（库行仍在的形态）。
+        let referenced = vec!["attachments/1-report.txt".to_string()];
+        // 磁盘上没有文件：`next_seq` 会算出 1，从而复用 A 的旧路径。
+        assert_eq!(next_seq(&dir), 1, "夹具前提：磁盘空时序号从 1 起算");
+
+        let (seq, mut file) =
+            reserve_seq_avoiding(&dir, "report.txt", &referenced).expect("占位应成功");
+        let name = format!("{seq}-report.txt");
+        file.write_all(b"task B payload").expect("写入");
+        drop(file);
+
+        assert_ne!(
+            name, "1-report.txt",
+            "新上传不得复用一个仍被记录引用的旧路径"
+        );
+        assert!(
+            !referenced.contains(&format!("attachments/{name}")),
+            "新落盘名与既有记录路径冲突: {name}"
+        );
+        assert_eq!(
+            std::fs::read(dir.join(&name)).expect("读回"),
+            b"task B payload"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 没有被引用的序号照常可用（不能因为加了避让就把序号一路推高）。
+    #[test]
+    fn unreferenced_seq_is_still_used() {
+        let dir = std::env::temp_dir().join(format!("kedai-attach-free-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        let referenced = vec!["attachments/1-other.txt".to_string()];
+        let (seq, f) = reserve_seq_avoiding(&dir, "report.txt", &referenced).expect("占位应成功");
+        drop(f);
+        assert_eq!(seq, 1, "1-report.txt 未被引用，应当照常可用");
+        assert_eq!(next_seq(&dir), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -5,7 +5,7 @@
 //! 有运行中任务时拒绝迁移(409),避免搬走正在写的目录。
 use crate::config::{self, AppConfig};
 use crate::data_location::{
-    self, DataLocationPointer, DATA_DIR_NAME, MIGRATED_MARKER, OUTPUTS_DIR_NAME,
+    self, DataLocationPointer, DATA_DIR_NAME, IMPORTS_DIR_NAME, MIGRATED_MARKER, OUTPUTS_DIR_NAME,
     TASK_RECORDS_DIR_NAME,
 };
 use crate::migration::snapshot_database;
@@ -174,13 +174,18 @@ impl DataLocationService {
         }
 
         let target_data = root.join(DATA_DIR_NAME);
+        // DATA-LOC-2:`config::dir_has_user_data` 只认「设置 / 非内置角色 / 会话」,
+        // 只有已完成任务、附件记录或导入归档的目标会被误判成空壳并整盘覆盖。
+        // 迁移是不可逆的破坏性操作,这里用更宽的专用判据:认不出是空壳就一律拒绝。
+        if let Some(reason) =
+            describe_target_user_data(&target_data).map_err(DataLocationError::Internal)?
+        {
+            return Err(DataLocationError::BadRequest(format!(
+                "{} 已存在 Kedai 用户数据({reason}),不能直接覆盖;请换一个盘,或先备份/清理该目录",
+                root.display()
+            )));
+        }
         if target_data.join("kedai.db").is_file() {
-            if config::dir_has_user_data(&target_data) {
-                return Err(DataLocationError::BadRequest(format!(
-                    "{} 已存在 Kedai 用户数据,不能直接覆盖;请换一个盘,或先备份/清理该目录",
-                    root.display()
-                )));
-            }
             // 空壳:删掉残留 WAL/SHM,避免与即将写入的快照拼接成坏库
             for suffix in ["kedai.db-wal", "kedai.db-shm"] {
                 let _ = fs::remove_file(target_data.join(suffix));
@@ -199,17 +204,35 @@ impl DataLocationService {
         let source_data = self.config.data_dir.clone();
         let source_images = self.config.images_dir.clone();
         let source_scratch = self.config.task_scratch_dir.clone();
+        let source_imports = self.config.imports_dir.clone();
+        // DATA-LOC-3:旧布局的归档就住在 <data>/imports 里。通用复制必须排除它，
+        // 否则归档会落到 data/imports（不是有效目录）且下面还会再搬一次。
+        let legacy_imports_inside_data = source_imports == source_data.join("imports");
         let legacy_images_inside_data = source_images == source_data.join("images");
         let mut migrated = false;
 
         if source_data.is_dir() && source_data != target_data {
-            copy_tree(&source_data, &target_data, legacy_images_inside_data)
-                .map_err(DataLocationError::Internal)?;
+            copy_tree_with(
+                &source_data,
+                &target_data,
+                legacy_images_inside_data,
+                legacy_imports_inside_data,
+            )
+            .map_err(DataLocationError::Internal)?;
             let source_db = source_data.join("kedai.db");
             if source_db.is_file() {
                 snapshot_database(&source_db, &target_data.join("kedai.db"))
                     .map_err(|e| DataLocationError::Internal(format!("数据库迁移失败: {e}")))?;
             }
+            migrated = true;
+        }
+
+        // DATA-LOC-3:归档单独按 `imports_dir` 搬进新根的有效归档目录。
+        // 归档里允许出现 .log，因此不能套用数据目录的日志后缀过滤。
+        let target_imports = root.join(IMPORTS_DIR_NAME);
+        if source_imports.is_dir() && source_imports != target_imports {
+            copy_tree_inner(&source_imports, &target_imports, false, false, true)
+                .map_err(DataLocationError::Internal)?;
             migrated = true;
         }
 
@@ -261,6 +284,28 @@ impl DataLocationService {
 /// 递归复制;跳过数据库文件/WAL/SHM/日志/备份残留/迁移标记/符号链接。
 /// `skip_images` 用于旧布局(data 内含 images):图像要搬到 outputs/images,不能留在 data。
 fn copy_tree(source: &Path, target: &Path, skip_images: bool) -> Result<u64, String> {
+    copy_tree_with(source, target, skip_images, false)
+}
+
+/// 同 `copy_tree`，另加两项控制：
+/// - `skip_imports`：旧布局(data 内含 imports)的归档要搬到新根 imports，不能留在 data；
+/// - `copy_logs`：归档目录里的 `.log` 是用户导入的原始文件，不适用数据目录的日志过滤。
+fn copy_tree_with(
+    source: &Path,
+    target: &Path,
+    skip_images: bool,
+    skip_imports: bool,
+) -> Result<u64, String> {
+    copy_tree_inner(source, target, skip_images, skip_imports, false)
+}
+
+fn copy_tree_inner(
+    source: &Path,
+    target: &Path,
+    skip_images: bool,
+    skip_imports: bool,
+    copy_logs: bool,
+) -> Result<u64, String> {
     if !source.is_dir() {
         return Ok(0);
     }
@@ -281,18 +326,19 @@ fn copy_tree(source: &Path, target: &Path, skip_images: bool) -> Result<u64, Str
         if name == "kedai.db"
             || name.ends_with("-wal")
             || name.ends_with("-shm")
-            || name.ends_with(".log")
+            || (!copy_logs && name.ends_with(".log"))
             || name.contains(".bak-")
             || name.starts_with(".verify")
             || name == MIGRATED_MARKER
             || (skip_images && name == "images")
+            || (skip_imports && name == "imports")
         {
             continue;
         }
         let from = entry.path();
         let to = target.join(&name);
         if file_type.is_dir() {
-            copied += copy_tree(&from, &to, false)?;
+            copied += copy_tree_inner(&from, &to, false, false, copy_logs)?;
         } else {
             fs::copy(&from, &to)
                 .map_err(|e| format!("复制 {} → {} 失败: {e}", from.display(), to.display()))?;
@@ -338,6 +384,93 @@ pub fn probe_sqlite_support(data_dir: &Path) -> Result<(), String> {
         let _ = fs::remove_file(format!("{}{}", db.display(), suffix));
     }
     result
+}
+
+/// 目标盘里「认得出是用户数据」的判据集合（DATA-LOC-2）。
+///
+/// 返回 `Some(说明)` 表示**不能覆盖**；`None` 表示可以按空壳处理。
+///
+/// 取舍是「认不出就拒绝」：迁移会整盘覆盖且不可逆，误拒只让用户换个空盘，
+/// 误放则丢失目标盘数据。这比 `config::dir_has_user_data` 更宽——后者只认
+/// 设置 / 非内置角色 / 会话，会把「只有已完成任务」的库当成空壳。
+fn describe_target_user_data(target_data: &Path) -> Result<Option<String>, String> {
+    if !target_data.is_dir() {
+        return Ok(None);
+    }
+    if target_data.join("settings.json").is_file() {
+        return Ok(Some("已有设置文件".to_string()));
+    }
+
+    // 库内任何一张有记录的用户表都算。用 `sqlite_master` 先确认表存在，
+    // 避免「全新库没这张表」被当成读库失败。
+    let db = target_data.join("kedai.db");
+    if db.is_file() {
+        let conn =
+            rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|e| format!("打开目标数据库检查用户数据失败: {e}"))?;
+        // 这些表只要有行就是用户数据（含任务历史、附件记录、导入台账、世界书等）。
+        // 刻意不含 `global_usage` / `llm_requests` 这类纯计数器与遥测。
+        const USER_TABLES: &[(&str, &str)] = &[
+            ("characters", "已有角色(含非内置)"),
+            ("sessions", "已有会话"),
+            ("messages", "已有聊天消息"),
+            ("tasks", "已有任务历史"),
+            ("task_messages", "已有任务消息"),
+            ("task_events", "已有任务事件"),
+            ("task_attachments", "已有任务附件记录"),
+            ("task_file_changes", "已有文件变更记录"),
+            ("world_books", "已有世界书"),
+            ("skills", "已有技能"),
+            ("quick_replies", "已有快捷回复"),
+            ("memory_entries", "已有记忆条目"),
+            ("agent_sessions", "已有 Agent 会话"),
+        ];
+        for (table, label) in USER_TABLES {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+            if !exists {
+                continue;
+            }
+            let has_rows: bool = conn
+                .query_row(
+                    &format!("SELECT EXISTS(SELECT 1 FROM {table})"),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+            if has_rows {
+                return Ok(Some((*label).to_string()));
+            }
+        }
+    }
+
+    // 目录里的用户文件（导入归档、产物、任务记录、角色卡目录）。
+    for (dir, label) in [
+        ("imports", "导入归档目录非空"),
+        ("characters", "角色卡目录非空"),
+        ("outputs", "产物目录非空"),
+        ("task-records", "任务记录目录非空"),
+    ] {
+        let path = target_data.join(dir);
+        if path.is_dir() && dir_has_any_entry(&path) {
+            return Ok(Some(label.to_string()));
+        }
+    }
+
+    Ok(None)
+}
+
+/// 目录是否含任意条目（不递归）。
+fn dir_has_any_entry(dir: &Path) -> bool {
+    match fs::read_dir(dir) {
+        Ok(mut iter) => iter.next().is_some(),
+        Err(_) => false,
+    }
 }
 
 /// 是否有非终态任务(pending/planning/running/planned)。
@@ -527,6 +660,81 @@ mod tests {
         ));
     }
 
+    /// DATA-LOC-3（P2）：切盘后历史归档必须出现在新根的有效归档目录。
+    ///
+    /// 旧实现只搬 data / outputs-images / task-records 三路，`imports_dir` 完全没处理：
+    /// 旧布局的归档随 `data/` 一起被搬到 `data/imports/`（不是有效目录），
+    /// 而从已选数据根切盘时归档留在原盘。两种情况新根 `imports/` 都是空的。
+    #[test]
+    fn migration_moves_imports_into_effective_archive_dir() {
+        // 情形一：旧布局 —— 归档在 <data>/imports/ 里
+        let source = TempDataDir::new("dl-imp-legacy-src");
+        let pointer_dir = TempDataDir::new("dl-imp-legacy-ptr");
+        let root_parent = TempDataDir::new("dl-imp-legacy-root");
+        let root = root_parent.join("Kedai-Data");
+        std::fs::write(source.join("settings.json"), "{}").unwrap();
+        std::fs::create_dir_all(source.join("imports")).unwrap();
+        std::fs::write(source.join("imports").join("conv.json"), b"legacy").unwrap();
+        // 归档目录里允许出现 .log,不能套用数据目录的日志后缀过滤
+        std::fs::write(source.join("imports").join("trace.log"), b"logfile").unwrap();
+
+        let mut cfg = crate::config::test_config();
+        cfg.data_dir = source.path().to_path_buf();
+        cfg.images_dir = source.join("images");
+        cfg.imports_dir = source.join("imports");
+        cfg.task_scratch_dir = source.path().parent().unwrap().join("scratch-imp-legacy");
+        let svc = DataLocationService::with_pointer_path(cfg, pointer_dir.join("p.json"));
+        svc.apply_to_root(&root).expect("旧布局迁移失败");
+
+        let target_imports = root.join("imports");
+        assert_eq!(
+            std::fs::read(target_imports.join("conv.json")).unwrap(),
+            b"legacy",
+            "旧布局归档必须落到新根的有效归档目录"
+        );
+        assert_eq!(
+            std::fs::read(target_imports.join("trace.log")).unwrap(),
+            b"logfile",
+            "归档里的 .log 不能被日志过滤规则丢掉"
+        );
+        assert!(
+            !root.join("data").join("imports").join("conv.json").exists(),
+            "旧布局归档不得重复落到 data/imports"
+        );
+        assert!(
+            source.join("imports").join("conv.json").is_file(),
+            "源归档必须保留"
+        );
+
+        // 情形二：已选数据根 —— 归档在 data 目录之外
+        let source2 = TempDataDir::new("dl-imp-selected-src");
+        let imports2 = TempDataDir::new("dl-imp-selected-archive");
+        let pointer_dir2 = TempDataDir::new("dl-imp-selected-ptr");
+        let root_parent2 = TempDataDir::new("dl-imp-selected-root");
+        let root2 = root_parent2.join("Kedai-Data");
+        std::fs::write(source2.join("settings.json"), "{}").unwrap();
+        std::fs::write(imports2.join("outside.json"), b"outside").unwrap();
+
+        let mut cfg2 = crate::config::test_config();
+        cfg2.data_dir = source2.path().to_path_buf();
+        cfg2.images_dir = source2.join("images");
+        cfg2.imports_dir = imports2.path().to_path_buf();
+        cfg2.task_scratch_dir = source2
+            .path()
+            .parent()
+            .unwrap()
+            .join("scratch-imp-selected");
+        let svc2 = DataLocationService::with_pointer_path(cfg2, pointer_dir2.join("p.json"));
+        svc2.apply_to_root(&root2).expect("已选根迁移失败");
+
+        assert_eq!(
+            std::fs::read(root2.join("imports").join("outside.json")).unwrap(),
+            b"outside",
+            "data 目录之外的归档也必须搬进新根 imports"
+        );
+        assert!(imports2.join("outside.json").is_file(), "源归档必须保留");
+    }
+
     #[test]
     fn active_tasks_are_detected_from_db() {
         let source = TempDataDir::new("dl-active");
@@ -540,6 +748,97 @@ mod tests {
         conn.execute("UPDATE tasks SET status='done' WHERE id='t1'", [])
             .unwrap();
         assert!(!has_active_tasks(source.path()).unwrap());
+    }
+
+    /// DATA-LOC-2（P1）：目标盘已有用户数据时必须拒绝迁移。
+    ///
+    /// `config::dir_has_user_data` 只认「设置 / 非内置角色 / 会话」，因此「只有已完成任务」
+    /// 的库会被判成空壳并整盘覆盖。本测试锁住四条独立的拒绝判据。
+    #[test]
+    fn rejects_migration_over_target_with_user_data() {
+        /// 一种「目标盘已有用户数据」的形态。
+        struct Case {
+            label: &'static str,
+            /// 目标库建表与插数的 SQL（空串表示不建库）。
+            sql: &'static str,
+            /// 额外在目标数据目录里造的文件（不建库的形态用）。
+            make_files: fn(&Path),
+        }
+
+        let no_files: fn(&Path) = |_| {};
+        let cases = [
+            Case {
+                label: "只有已完成任务",
+                sql: "CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT NOT NULL);\
+                      INSERT INTO tasks (id, status) VALUES ('done-1','done');",
+                make_files: no_files,
+            },
+            Case {
+                label: "只有任务附件记录",
+                sql: "CREATE TABLE task_attachments (id TEXT PRIMARY KEY, rel_path TEXT NOT NULL);\
+                      INSERT INTO task_attachments (id, rel_path) VALUES ('a1','x.txt');",
+                make_files: no_files,
+            },
+            Case {
+                label: "只有任务事件",
+                sql: "CREATE TABLE task_events (id INTEGER PRIMARY KEY, payload TEXT);\
+                      INSERT INTO task_events (id, payload) VALUES (1,'{}');",
+                make_files: no_files,
+            },
+            Case {
+                label: "只有导入归档文件",
+                sql: "",
+                make_files: |data| {
+                    std::fs::create_dir_all(data.join("imports")).unwrap();
+                    std::fs::write(data.join("imports").join("old.txt"), b"user file").unwrap();
+                },
+            },
+        ];
+
+        for Case {
+            label,
+            sql,
+            make_files,
+        } in cases
+        {
+            let source = TempDataDir::new("dl-cover-src");
+            let pointer_dir = TempDataDir::new("dl-cover-ptr");
+            let root_parent = TempDataDir::new("dl-cover-root");
+            let root = root_parent.join("Kedai-Data");
+            std::fs::write(source.join("settings.json"), "{}").unwrap();
+
+            // 在目标盘预先放一套「有用户数据」的数据目录
+            let target_data = root.join(DATA_DIR_NAME);
+            std::fs::create_dir_all(&target_data).unwrap();
+            if !sql.is_empty() {
+                let conn = Connection::open(target_data.join("kedai.db")).unwrap();
+                conn.execute_batch(sql).unwrap();
+            }
+            make_files(&target_data);
+
+            let mut cfg = crate::config::test_config();
+            cfg.data_dir = source.path().to_path_buf();
+            cfg.images_dir = source.join("images");
+            cfg.imports_dir = source.join("imports");
+            cfg.task_scratch_dir = source.path().parent().unwrap().join("scratch-cover");
+            let svc = DataLocationService::with_pointer_path(cfg, pointer_dir.join("p.json"));
+
+            let outcome = svc.apply_to_root(&root);
+            assert!(
+                matches!(outcome, Err(DataLocationError::BadRequest(_))),
+                "目标有用户数据（{label}）时必须拒绝迁移,实际: {outcome:?}"
+            );
+
+            // 拒绝时目标内容与指针都不得改变
+            assert!(
+                target_data.join("kedai.db").is_file() || target_data.join("imports").is_dir(),
+                "拒绝时不得删除目标已有内容（{label}）"
+            );
+            assert!(
+                data_location::read_pointer_from(&pointer_dir.join("p.json")).is_none(),
+                "拒绝时不得写指针（{label}）"
+            );
+        }
     }
 
     #[test]
