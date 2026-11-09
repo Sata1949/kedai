@@ -132,7 +132,7 @@ fn hard_exit(code: i32) -> ! {
     unsafe { libc::_exit(code) }
 }
 
-/// Android:无端口残留清理流程(无 netstat/taskkill,且系统 launcher 保证单实例),
+/// Android:由原生退出桥收尾,系统 launcher 保证单实例,
 /// 后端与壳同进程,退出即整体结束。
 ///
 /// 不能走 `AppHandle::exit`:它会触发 tao 的 `std::process::exit`,退出时静态析构
@@ -167,8 +167,7 @@ pub fn run() {
                 let handle = app.handle().clone();
                 app.listen(EXIT_APP_EVENT, move |_| {
                     tracing::info!("收到前端退出请求,结束进程");
-                    // 走统一退出出口:清理端口残留后再退(此前事件路径漏了清理,
-                    // 只有原生对话框回调清理,留下「点退出后 kedai-server 还在跑」的缺口)
+                    // 统一退出本实例；内嵌后端随进程结束，不扫描或终止其它端口占用者。
                     exit_now(&handle);
                 });
 
@@ -405,7 +404,7 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("构建 Kedai 应用失败")
         .run(|app_handle, event| {
-            // Android 不使用 app_handle(退出无需清理端口),显式忽略以避免未使用告警
+            // Android 使用原生退出桥，无需 app_handle。
             #[cfg(mobile)]
             let _ = &app_handle;
             // 关闭确认(实跑问题 8):拦截窗口关闭,下发事件让前端弹「确定退出」确认框;
