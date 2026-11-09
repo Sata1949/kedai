@@ -23,12 +23,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[path = "../../src-tauri/src/process_owner.rs"]
+pub mod process_owner;
+
 /// Windows 子进程创建标志:有控制台但**无可见控制台窗口**。
 /// 零依赖约束:就地定义,不复用 server-rs 的同名常量(见 server-rs/src/utils/win.rs)。
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// 派生控制台程序(netstat / taskkill / sqlite3)的标准姿势:带 CREATE_NO_WINDOW。
+/// 派生控制台程序(sqlite3)的标准姿势:带 CREATE_NO_WINDOW。
 ///
 /// 本启动器自身无控制台(GUI 子系统),不设该标志时每个子进程都会新开一个可见黑窗
 /// (2026-09-18,与后端 exec/desktop.rs 同源修复)。
@@ -143,8 +146,8 @@ fn locate_root() -> Option<PathBuf> {
 enum PortState {
     /// 端口空闲,可以启动
     Free,
-    /// 端口上是健康的 Kedai 服务
-    KedaiRunning,
+    /// 端口返回健康响应；此状态不证明进程属于 Kedai
+    HealthyResponse,
     /// 端口被别的程序占了(连得上但不是 Kedai)
     Occupied,
 }
@@ -181,12 +184,26 @@ fn probe_port(addr: SocketAddr) -> PortState {
     let _ = stream.shutdown(Shutdown::Both);
 
     let text = String::from_utf8_lossy(&buf);
-    let ok = text.starts_with("HTTP/1.1 200") && text.contains("\"ok\"") && text.contains("true");
+    let body = text
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body)
+        .unwrap_or("");
+    let compact: String = body
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .collect();
+    let ok = text.starts_with("HTTP/1.1 200 ") && compact.contains("\"ok\":true");
     if ok {
-        PortState::KedaiRunning
+        PortState::HealthyResponse
     } else {
         PortState::Occupied
     }
+}
+
+/// 健康响应必须来自本次创建的子进程；相同端口上的其他响应不能替它报就绪。
+fn child_service_ready(addr: SocketAddr, pid: u32) -> std::io::Result<bool> {
+    Ok(probe_port(addr) == PortState::HealthyResponse
+        && process_owner::listener_owned_by(addr, pid)?)
 }
 
 /// 读 .env 里的 PORT(若存在)。启动器必须和服务端看同一个端口,
@@ -226,157 +243,6 @@ fn parse_port(content: &str) -> Option<u16> {
         }
     }
     None
-}
-
-// ---------------------------------------------------------------- 旧实例清理
-
-/// 列出监听指定端口的进程 PID(Windows:解析 `netstat -ano`)。
-/// 用于结束上一次未正常退出的 Kedai 实例——它占着端口会让新版无法启动,
-/// 用户只看到旧界面,误以为「修复没生效」(实跑反馈)。
-fn pids_listening_on(port: u16) -> Vec<u32> {
-    let out = match hidden_command("netstat").arg("-ano").output() {
-        Ok(o) => o,
-        Err(_) => return Vec::new(),
-    };
-    let text = String::from_utf8_lossy(&out.stdout);
-    parse_netstat_listeners(&text, port)
-}
-
-/// 从 `netstat -ano` 输出里挑出监听指定端口的 PID(纯函数,可单测)。
-///
-/// **不依赖状态列的英文文案**(2026-10-31 PC-4):旧实现用 `line.contains("LISTENING")`
-/// 过滤,非英文 Windows(netstat 会本地化状态列)上恒不命中 → 端口接管静默失效,
-/// 用户看到「旧界面还在」。
-///
-/// 现按**列的结构**判定,两级:
-/// - **TCP 行**:本地地址列以 `:PORT` 结尾,且**状态列存在并属于连接态**(排除
-///   `ESTABLISHED` 之类的短连接)。状态列是本地化的,所以不能比字面量——判据是
-///   「这一行的列数比 UDP 形态多一列且该列不是数字」,配合协议列剔掉表头。
-/// - **UDP 行**:没有状态列,末列即 PID;占用端口的 UDP 绑定同样该杀。
-///
-/// 结论:TCP 行必须**排除已建立连接**。早先版本只按协议列筛,会把 `:3001` 上的
-/// 客户端短连接当成服务端一起杀掉(单测 `netstat_parse_ignores_headers_and_dedupes`
-/// 抓住过这个退步)。
-fn parse_netstat_listeners(text: &str, port: u16) -> Vec<u32> {
-    let needle = format!(":{port}");
-    let mut pids: Vec<u32> = Vec::new();
-    for line in text.lines() {
-        let cols: Vec<&str> = line.split_whitespace().collect();
-        if cols.len() < 3 {
-            continue;
-        }
-        let proto = cols[0];
-        let is_tcp = matches!(proto, "TCP" | "TCPv6");
-        let is_udp = matches!(proto, "UDP" | "UDPv6");
-        if !is_tcp && !is_udp {
-            continue;
-        }
-        if !cols[1].ends_with(&needle) {
-            continue;
-        }
-        // TCP 行:末列是 PID,倒数第二列是状态。状态列不是数字(本地化文案),
-        // 而 PID 恒为数字——用这个结构区分「有状态列」与「无状态列」的两种行形态。
-        let pid_col = if is_tcp {
-            if cols.len() < 5 {
-                continue;
-            }
-            let state = cols[cols.len() - 2];
-            // 状态列恒为非数字;若它是数字说明列数异常(例如缺失状态列),跳过以免误判
-            if state.parse::<u32>().is_ok() {
-                continue;
-            }
-            // 只有「监听」语义才该被杀:TCP 的 ESTABLISHED / TIME_WAIT 等不是占用者。
-            // 状态文案本地化,故判据取「不是已知的非监听态」——见下方 non_listen 表。
-            if is_non_listening_state(state) {
-                continue;
-            }
-            cols.len() - 1
-        } else {
-            // UDP 行没有状态列:末列即 PID
-            cols.len() - 1
-        };
-        if let Ok(pid) = cols[pid_col].parse::<u32>() {
-            if !pids.contains(&pid) {
-                pids.push(pid);
-            }
-        }
-    }
-    pids
-}
-
-/// 已知的「非监听」TCP 状态(英文原文 + 常见本地化形态)。
-///
-/// 为什么不直接匹配 `LISTENING`/`侦听`:那是 PC-4 要消灭的写法。这里反过来列
-/// **排除集**——解析不出的状态(未知语言的本地化文案)按「监听」处理,与旧行为
-/// 对齐;而明确处于连接态的行一律跳过,避免把客户端短连接一起杀掉。
-fn is_non_listening_state(state: &str) -> bool {
-    const NON_LISTENING: &[&str] = &[
-        // 英文(大小写不敏感匹配在下方做)
-        "ESTABLISHED",
-        "TIME_WAIT",
-        "CLOSE_WAIT",
-        "SYN_SENT",
-        "SYN_RECEIVED",
-        "FIN_WAIT_1",
-        "FIN_WAIT_2",
-        "LAST_ACK",
-        "CLOSING",
-        "CLOSED",
-        "DELETE_TCB",
-        // 简体中文 Windows 的本地化形态
-        "已建立",
-        "已建立连接",
-        "时间等待",
-        "关闭等待",
-        "同步已发送",
-        "同步已接收",
-        "最后确认",
-        "正在关闭",
-        "已关闭",
-    ];
-    let upper = state.to_ascii_uppercase();
-    NON_LISTENING.iter().any(|s| {
-        if s.is_ascii() {
-            upper == *s
-        } else {
-            state == *s
-        }
-    })
-}
-
-/// 结束占用指定端口的进程(排除自身,避免启动器在自清理时把自己杀掉)。
-/// 返回是否至少成功结束一个进程。
-fn terminate_port_owner(port: u16) -> bool {
-    let self_pid = std::process::id();
-    let mut killed = false;
-    for pid in pids_listening_on(port) {
-        if pid == self_pid {
-            continue;
-        }
-        let ok = hidden_command("taskkill")
-            .args(["/F", "/PID", &pid.to_string()])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if ok {
-            killed = true;
-        }
-    }
-    killed
-}
-
-/// 等待端口释放(结束旧进程后 TCP 表更新有延迟)
-fn wait_port_free(addr: SocketAddr, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if probe_port(addr) == PortState::Free {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    }
 }
 
 // ---------------------------------------------------------------- 数据迁移
@@ -763,8 +629,8 @@ fn extract_json_string(json: &str, key: &str) -> Option<String> {
 fn port_takeover_note(port: u16, port_busy: bool) -> String {
     if port_busy {
         format!(
-            "\n\n端口 {port} 上已有旧 Kedai 实例在运行;选择任一启动方式后都会先结束它,\n\
-             再启动当前选择的版本(与正式版自身的接管语义一致)。"
+            "\n\n端口 {port} 已有服务响应。正式版会先核对程序路径与数据目录，核验通过才接管；\n\
+             增量测试版要求先手动关闭现有实例。"
         )
     } else {
         String::new()
@@ -773,7 +639,7 @@ fn port_takeover_note(port: u16, port_busy: bool) -> String {
 
 /// 端口被占用时是否仍需单独弹窗征询。
 /// 已经问过构建/启动决策(用户明确选择了要启动哪个版本)就不再二次提问——
-/// 结束旧实例是该选择的既定前提。
+/// 正式版的身份核验与接管已在决策文案中说明。
 fn needs_port_confirmation(port_busy: bool, decision_shown: bool) -> bool {
     port_busy && !decision_shown
 }
@@ -886,7 +752,7 @@ fn main() {
              Get-Process -Id (Get-NetTCPConnection -LocalPort {port}).OwningProcess",
         ));
     }
-    let port_busy = port_state == PortState::KedaiRunning;
+    let port_busy = port_state == PortState::HealthyResponse;
 
     // 触发重建的三类原因:① 源码比产物新(mtime);② 两版构建指纹不一致(sidecar);
     // ③ 源码更新已由增量构建(debug + web/dist)覆盖——此时不强迫全量重建,而是让用户
@@ -966,41 +832,18 @@ fn main() {
         // 重建后产物路径不变(build.ps1 原地更新 dist\Kedai-portable\Kedai.exe)
     }
 
-    // 端口接管放在构建决策之后:决策弹窗已说明「会先结束旧实例」时不再二次提问。
-    // 端口上已有 Kedai 服务:绝大多数情况是上次未正常退出的旧实例(直接跑过
-    // kedai-server.exe、或旧桌面版未回收内嵌后端)。它占着端口,新版根本起不来,
-    // 用户看到的始终是旧界面——误以为「修复没生效」。
-    if needs_port_confirmation(port_busy, decision_shown) {
-        if confirm(&format!(
-            "端口 {port} 上已有 Kedai 服务在运行。\n\n\
-             这通常是上一次未正常退出的旧实例,它占着端口会让新版本无法启动\n\
-             (你看到的会一直是旧界面)。\n\n\
-             是否结束该旧实例,并启动最新版?"
-        )) {
-            terminate_port_owner(port);
-            if !wait_port_free(addr, Duration::from_secs(5)) {
-                fail(&format!(
-                    "已尝试结束旧实例,但端口 {port} 仍被占用。\n\n\
-                     请在任务管理器中结束 kedai-server.exe / Kedai.exe 后重试,\n\
-                     或把 .env 里的 PORT 改成别的端口(如 3002)。"
-                ));
-            }
-        } else {
-            fail(&format!(
-                "已取消启动:端口 {port} 仍被旧 Kedai 实例占用,新版本不会启动。\n\n\
-                 你看到的仍是旧界面。如需使用新版,请先结束旧实例后重新双击本启动器。"
-            ));
-        }
-    } else if port_busy {
-        // 用户已在启动决策里选定版本,结束旧实例是该选择的既定前提。
-        terminate_port_owner(port);
-        if !wait_port_free(addr, Duration::from_secs(5)) {
-            fail(&format!(
-                "已尝试结束旧实例,但端口 {port} 仍被占用。\n\n\
-                 请在任务管理器中结束 kedai-server.exe / Kedai.exe 后重试,\n\
-                 或把 .env 里的 PORT 改成别的端口(如 3002)。"
-            ));
-        }
+    // 增量浏览器版不接管其他实例；正式版由壳按最终 AppConfig 核验并接管。
+    if launch_test && probe_port(addr) != PortState::Free {
+        fail(&format!(
+            "端口 {port} 已有实例运行，请先关闭它，再启动增量测试版；未结束任何现有进程。"
+        ));
+    }
+    if needs_port_confirmation(port_busy, decision_shown)
+        && !confirm(&format!(
+            "端口 {port} 已有服务响应。\n\n正式版将核对完整程序路径和数据目录，只有属于同一安装和数据目录的旧 Kedai 实例才会被接管。\n\n是否继续启动正式版？"
+        ))
+    {
+        fail("已取消启动，现有进程保持运行。");
     }
 
     if launch_test {
@@ -1051,7 +894,9 @@ fn main() {
             Err(_) => break,
         }
 
-        if probe_port(addr) == PortState::KedaiRunning {
+        if child_service_ready(addr, child.id())
+            .unwrap_or_else(|error| fail(&format!("核对已启动实例的 TCP 归属失败：{error}")))
+        {
             service_ready = true;
             break;
         }
@@ -1135,13 +980,14 @@ mod tests {
         assert!(!needs_port_confirmation(false, true));
     }
 
-    /// 接管说明只在端口真有旧实例时出现,且要写明端口号与「先结束」语义。
+    /// 接管说明区分正式版核验接管与增量版要求端口空闲。
     #[test]
     fn takeover_note_mentions_port_only_when_busy() {
         assert!(port_takeover_note(3001, false).is_empty());
         let note = port_takeover_note(3001, true);
         assert!(note.contains("3001"));
-        assert!(note.contains("先结束"));
+        assert!(note.contains("核对程序路径与数据目录"));
+        assert!(note.contains("增量测试版要求先手动关闭"));
     }
 
     #[test]
@@ -1385,79 +1231,47 @@ mod tests {
             }
         });
         std::thread::sleep(Duration::from_millis(100));
-        assert!(matches!(probe_port(addr), PortState::KedaiRunning));
+        assert!(matches!(probe_port(addr), PortState::HealthyResponse));
     }
 
-    /// PC-4:旧实现按 `line.contains("LISTENING")` 过滤,非英文 Windows 的 netstat
-    /// 会把状态列本地化(如简体中文「侦听」),那条路径下端口接管**静默失效**。
-    /// 新实现按协议列(PID 恒在末列)判定,这类输出必须仍能解析出 PID。
     #[test]
-    fn netstat_parse_works_with_localized_state_column() {
-        let text = [
-            "活动连接",
-            "",
-            "  协议  本地地址          外部地址        状态           PID",
-            "  TCP    0.0.0.0:135            0.0.0.0:0              侦听        1756",
-            "  TCP    127.0.0.1:3001         0.0.0.0:0              侦听        8748",
-            "  TCP    127.0.0.1:13001        0.0.0.0:0              侦听        9999",
-        ]
-        .join("\r\n");
-        assert_eq!(
-            parse_netstat_listeners(&text, 3001),
-            vec![8748],
-            "本地化状态列下仍须解出端口 3001 的 PID,且不得误命中 13001"
-        );
+    fn startup_paths_do_not_kill_unowned_processes() {
+        let launcher = include_str!("main.rs");
+        let desktop = include_str!("../../src-tauri/src/lib.rs");
+        let startup = include_str!("../../start.ps1");
+        assert!(!launcher[..launcher.find("#[cfg(test)]").unwrap()].contains("taskkill"));
+        let exit = desktop
+            .split("fn exit_now(app: &tauri::AppHandle)")
+            .nth(1)
+            .unwrap()
+            .split("/// Android")
+            .next()
+            .unwrap();
+        assert!(!exit.contains("process_owner"));
+        assert!(!exit.contains("terminate"));
+        assert!(!startup.contains("Get-Process -Name"));
+        assert!(startup.contains("$proc.Kill()"));
     }
 
-    /// 英文系统(既有形态)不得回归。
+    #[cfg(windows)]
     #[test]
-    fn netstat_parse_works_with_english_state_column() {
-        let text = [
-            "Active Connections",
-            "",
-            "  Proto  Local Address          Foreign Address        State           PID",
-            "  TCP    0.0.0.0:135            0.0.0.0:0              LISTENING       1756",
-            "  TCP    127.0.0.1:3001         0.0.0.0:0              LISTENING       8748",
-        ]
-        .join("\r\n");
-        assert_eq!(parse_netstat_listeners(&text, 3001), vec![8748]);
-    }
-
-    /// UDP 行没有状态列,末列仍是 PID——占用端口的 UDP 绑定同样该被清理。
-    #[test]
-    fn netstat_parse_handles_udp_rows_without_state_column() {
-        let text = [
-            "  UDP    127.0.0.1:3001         *:*                                    31572",
-            "  TCPv6  [::1]:3001             [::]:0                 LISTENING       41000",
-        ]
-        .join("\r\n");
-        assert_eq!(
-            parse_netstat_listeners(&text, 3001),
-            vec![31572, 41000],
-            "UDP 与 IPv6 行都须命中,且保持出现顺序"
-        );
-    }
-
-    /// 表头与非连接行不得被当成 PID 来源;重复 PID 只回一次。
-    #[test]
-    fn netstat_parse_ignores_headers_and_dedupes() {
-        let text = [
-            "  TCP    127.0.0.1:3001         0.0.0.0:0              LISTENING       8748",
-            "  TCP    [::1]:3001             [::]:0                 LISTENING       8748",
-            "  TCP    127.0.0.1:3001         8.8.8.8:443            ESTABLISHED     12345",
-        ]
-        .join("\r\n");
-        assert_eq!(
-            parse_netstat_listeners(&text, 3001),
-            vec![8748],
-            "同一 PID 的两行只算一次;非监听行(ESTABLISHED)也同列命中不重复计"
-        );
-    }
-
-    /// 空输出 / 缺 netstat / 全为表头时返回空(调用方据此静默跳过,不 panic)。
-    #[test]
-    fn netstat_parse_empty_input_yields_no_pids() {
-        assert!(parse_netstat_listeners("", 3001).is_empty());
-        assert!(parse_netstat_listeners("活动连接\r\n\r\n", 3001).is_empty());
+    fn healthy_response_from_another_pid_does_not_confirm_child_startup() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (release, wait) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 512];
+            stream.read(&mut request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n{\"ok\":true}")
+                .unwrap();
+            drop(stream);
+            // 保持监听到归属查询结束；只持有本测试自己创建的端口。
+            wait.recv().unwrap();
+        });
+        assert!(!child_service_ready(addr, std::process::id() + 1).unwrap());
+        release.send(()).unwrap();
+        worker.join().unwrap();
     }
 }

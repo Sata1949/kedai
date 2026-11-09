@@ -15,14 +15,11 @@ use tauri::Manager;
 use tauri::Emitter;
 
 mod native_bridge;
+#[cfg(desktop)]
+pub mod process_owner;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
 const READY_INTERVAL: Duration = Duration::from_millis(250);
-
-/// 实际使用的服务端口(setup 时从 config 解析并托管),退出时据此清理端口残留。
-/// 仅桌面读取(Android 无端口清理流程),故标注 desktop 以消除移动端 dead_code 警告。
-#[cfg(desktop)]
-struct ResolvedPort(u16);
 
 /// 关闭确认的二次关闭兜底标记(2026-09-16 批次 5)。
 ///
@@ -48,147 +45,6 @@ fn register_close_request(flag: &std::sync::atomic::AtomicBool) -> bool {
 #[cfg(desktop)]
 fn reset_close_request(flag: &std::sync::atomic::AtomicBool) {
     flag.store(false, std::sync::atomic::Ordering::SeqCst);
-}
-
-/// Windows 子进程创建标志:有控制台但**无可见控制台窗口**。
-/// 与 server-rs/src/utils/win.rs 的同名常量同值(壳不依赖后端 utils 的公共面,故各自声明)。
-#[cfg(all(desktop, windows))]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-/// 派生控制台程序(netstat / taskkill)的壳侧标准姿势。
-///
-/// 本进程为 GUI 子系统(无控制台,见 main.rs 的 windows_subsystem),不设该标志时
-/// 每次派生都会新开一个可见黑窗(2026-09-18,与后端 exec/desktop.rs 同源修复)。
-/// 非 Windows 桌面(cfg(desktop) 也涵盖 Linux/macOS 桌面)保持原行为。
-#[cfg(desktop)]
-fn hidden_command(program: &str) -> std::process::Command {
-    let mut c = std::process::Command::new(program);
-    #[cfg(all(desktop, windows))]
-    {
-        use std::os::windows::process::CommandExt;
-        c.creation_flags(CREATE_NO_WINDOW);
-    }
-    c
-}
-
-/// 结束占用指定端口的**其它**进程(排除自身):关闭 Kedai 时一并清理可能存在的
-/// 独立后端残留(例如上次直接运行 dist\kedai-server.exe 未退出、或旧桌面版未回收)。
-/// 桌面版的内嵌后端与本进程同 PID,会被排除,不影响正常退出路径。
-/// 实跑反馈「点退出后 kedai-server 仍在跑」的兜底修复。
-///
-/// 平台差异:依赖 netstat/taskkill,仅 Windows 桌面存在;Android 沙箱内既无这些命令,
-/// 也不存在「多个 Kedai 实例争抢固定端口」的场景(系统 launcher 保证单实例)。
-#[cfg(desktop)]
-fn terminate_other_port_owners(port: u16) {
-    let self_pid = std::process::id();
-    let out = match hidden_command("netstat").arg("-ano").output() {
-        Ok(o) => o,
-        Err(_) => return,
-    };
-    let text = String::from_utf8_lossy(&out.stdout);
-    for pid in parse_netstat_listeners(&text, port) {
-        if pid == self_pid {
-            continue;
-        }
-        let _ = hidden_command("taskkill")
-            .args(["/F", "/PID", &pid.to_string()])
-            .output();
-    }
-}
-
-/// 从 `netstat -ano` 输出里挑出监听指定端口的 PID(纯函数,可单测)。
-///
-/// **不依赖状态列的英文文案**(2026-10-31 PC-4):旧实现用 `line.contains("LISTENING")`
-/// 过滤——非英文 Windows 的 netstat 会把状态列本地化(如「侦听」),这条路径下
-/// 退出时的端口清理**静默失效**,用户看到「点了退出后端还在跑」。
-///
-/// 判据改成列结构:
-/// - 协议列 `TCP`/`TCPv6`/`UDP`/`UDPv6` 不随语言变化,用它剔掉表头;
-/// - 本地地址列以 `:PORT` 结尾(避免 `:13001` 之类误命中);
-/// - **TCP 行排除已知连接态**(`ESTABLISHED` 等),否则会把占着该端口的客户端
-///   短连接一起杀掉;UDP 行没有状态列,末列即 PID。
-///
-/// 与 `launcher/src/main.rs::parse_netstat_listeners` 同一套判据(两个 crate 无法
-/// 共享代码:launcher 刻意零依赖),改动须同步。
-#[cfg(desktop)]
-fn parse_netstat_listeners(text: &str, port: u16) -> Vec<u32> {
-    let needle = format!(":{port}");
-    let mut pids: Vec<u32> = Vec::new();
-    for line in text.lines() {
-        let cols: Vec<&str> = line.split_whitespace().collect();
-        if cols.len() < 3 {
-            continue;
-        }
-        let proto = cols[0];
-        let is_tcp = matches!(proto, "TCP" | "TCPv6");
-        let is_udp = matches!(proto, "UDP" | "UDPv6");
-        if !is_tcp && !is_udp {
-            continue;
-        }
-        if !cols[1].ends_with(&needle) {
-            continue;
-        }
-        let pid_col = if is_tcp {
-            if cols.len() < 5 {
-                continue;
-            }
-            let state = cols[cols.len() - 2];
-            // 状态列恒为非数字;数字说明缺状态列,跳过以免把 PID 当状态
-            if state.parse::<u32>().is_ok() {
-                continue;
-            }
-            if is_non_listening_state(state) {
-                continue;
-            }
-            cols.len() - 1
-        } else {
-            cols.len() - 1
-        };
-        if let Ok(pid) = cols[pid_col].parse::<u32>() {
-            if !pids.contains(&pid) {
-                pids.push(pid);
-            }
-        }
-    }
-    pids
-}
-
-/// 已知的「非监听」TCP 状态(英文原文 + 简体中文 Windows 的本地化形态)。
-///
-/// 反过来列排除集而不是匹配 `LISTENING`:解析不出的状态(未知语言)按监听处理,
-/// 与旧行为对齐;明确处于连接态的行一律跳过。
-#[cfg(desktop)]
-fn is_non_listening_state(state: &str) -> bool {
-    const NON_LISTENING: &[&str] = &[
-        "ESTABLISHED",
-        "TIME_WAIT",
-        "CLOSE_WAIT",
-        "SYN_SENT",
-        "SYN_RECEIVED",
-        "FIN_WAIT_1",
-        "FIN_WAIT_2",
-        "LAST_ACK",
-        "CLOSING",
-        "CLOSED",
-        "DELETE_TCB",
-        "已建立",
-        "已建立连接",
-        "时间等待",
-        "关闭等待",
-        "同步已发送",
-        "同步已接收",
-        "最后确认",
-        "正在关闭",
-        "已关闭",
-    ];
-    let upper = state.to_ascii_uppercase();
-    NON_LISTENING.iter().any(|s| {
-        if s.is_ascii() {
-            upper == *s
-        } else {
-            state == *s
-        }
-    })
 }
 
 /// app_data_dir() 失败时的回退目录。
@@ -254,14 +110,9 @@ const CLOSE_REQUESTED_EVENT: &str = "kedai://close-requested";
 #[cfg(desktop)]
 const CLOSE_CANCELLED_EVENT: &str = "kedai://close-cancelled";
 
-/// 退出应用:先清理端口上的其它 Kedai 残留(独立后端/旧实例),再结束本进程。
-/// 关闭确认与前端退出事件共用此出口,保证「退出 = 全部结束」。
+/// 内嵌后端与壳同属一个进程，退出只结束本实例。
 #[cfg(desktop)]
 fn exit_now(app: &tauri::AppHandle) {
-    // 先清理端口上的其它 Kedai 残留(独立后端等),再退出本进程
-    if let Some(port) = app.try_state::<ResolvedPort>() {
-        terminate_other_port_owners(port.0);
-    }
     app.exit(0);
 }
 
@@ -522,9 +373,6 @@ pub fn run() {
             }
 
             let config = kedai_server::config::AppConfig::from_env();
-            // 托管端口供退出清理使用(见 terminate_other_port_owners);仅桌面消费该状态
-            #[cfg(desktop)]
-            app.manage(ResolvedPort(config.port));
             // 关闭确认的二次关闭兜底标记(仅桌面有 CloseRequested 事件)
             #[cfg(desktop)]
             app.manage(ExitGuard::default());
@@ -619,8 +467,7 @@ pub fn run() {
 /// 端口当前是否可绑定(用于确认旧实例已真正释放端口/端口是否被占用)。
 /// 直接试绑一次:成功即空闲;失败说明仍被占用。
 async fn port_bindable(config: &kedai_server::config::AppConfig) -> bool {
-    let addr = format!("{}:{}", config.host, config.port);
-    match tokio::net::TcpListener::bind(&addr).await {
+    match tokio::net::TcpListener::bind((config.host.as_str(), config.port)).await {
         Ok(listener) => {
             drop(listener);
             true
@@ -657,35 +504,27 @@ async fn start_and_wait_ready(
     };
     let service_url = service_url(&config);
 
-    // 桌面版必须使用本进程内、指向统一 AppData 的后端。端口若已被另一个 Kedai 实例
-    // 占用(最常见:上次未正常退出的旧后端/旧桌面版残留),不能让用户对着旧界面以为
-    //「新版本没生效」——先结束占用者(仅限端口上健康响应为 Kedai 的进程)再接管。
-    //
-    // 平台差异:清理手段是 netstat/taskkill,Android 不可用;且 Android 由系统 launcher
-    // 保证单实例 + 应用私有目录,不存在跨实例争抢同一端口的场景,故整段仅桌面编译。
-    // Android 若端口被占(极少见),走到下方启动逻辑后由绑定错误明确报出。
-    #[cfg(desktop)]
-    if health_ok(&config).await {
-        eprintln!(
-            "[信息] 端口 {} 已有旧 Kedai 实例,正在结束它以启动当前版本",
-            config.port
-        );
-        terminate_other_port_owners(config.port);
-        // 等端口释放(TCP 表更新有延迟);给 6 秒窗口
+    // 只有同安装目录、同数据目录的 TCP 实例可以接管；退出不再扫描其他进程。
+    #[cfg(windows)]
+    if !port_bindable(&config).await {
+        let process = verified_other_instance(&config).await?;
+        process
+            .terminate()
+            .map_err(|error| format!("结束已核验的旧实例失败：{error}"))?;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
-        while tokio::time::Instant::now() < deadline {
-            if !health_ok(&config).await && port_bindable(&config).await {
-                break;
+        while !port_bindable(&config).await {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(format!("旧实例已结束，但端口 {} 未释放", config.port));
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
-        if health_ok(&config).await {
-            return Err(format!(
-                "端口 {} 仍被其它 Kedai 实例占用,且无法自动结束。\n\
-                 请用任务管理器结束 kedai-server.exe / Kedai.exe 后重启桌面版。",
-                config.port
-            ));
-        }
+    }
+    #[cfg(all(desktop, not(windows)))]
+    if !port_bindable(&config).await {
+        return Err(format!(
+            "端口 {} 已被占用，请先关闭旧实例后启动",
+            config.port
+        ));
     }
 
     let (server_error_tx, mut server_error_rx) = tokio::sync::oneshot::channel();
@@ -699,28 +538,9 @@ async fn start_and_wait_ready(
     let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
     while tokio::time::Instant::now() < deadline {
         if let Ok(error) = server_error_rx.try_recv() {
-            // 双启动竞态(TOCTOU):health_ok 通过后另一实例抢先绑定端口,本进程 run_server
-            // 绑定失败(os error 10048)但服务实际健康 → 复用已有实例照常显示窗口,不退出。
-            if health_ok(&config).await {
-                // 复用前校验数据目录:运行中的实例若指向另一套库(如浏览器版用的项目目录),
-                // 静默复用会把桌面版挂到错误的库上——一边写的聊天另一边不可见。
-                // 旧版服务无 data_dir 字段时无法校验,维持复用(竞态的另一方几乎必为桌面版自身)。
-                // 该比较按 Windows 路径规则(大小写/分隔符)归一,故仅桌面启用;
-                // Android 单应用单实例,复用者必为本进程自身,无需路径比对。
-                #[cfg(desktop)]
-                if let Some(dir) = health_data_dir(&config).await {
-                    if !same_data_dir(&dir, &config.data_dir) {
-                        return Err(format!(
-                            "已在运行的 Kedai 实例数据目录与桌面版不一致:\n运行中实例: {dir}\n桌面版: {}\n请先关闭该实例再启动桌面版,否则聊天记录会写到另一套数据库",
-                            config.data_dir.display()
-                        ));
-                    }
-                }
-                tracing::info!(
-                    bind_error = error.as_str(),
-                    "检测到已有 Kedai 实例,直接复用"
-                );
-                eprintln!("[信息] 检测到已有 Kedai 实例,直接复用");
+            // 双启动时只复用完整路径和数据目录都已核验的实例。
+            #[cfg(windows)]
+            if verified_other_instance(&config).await.is_ok() {
                 show_main_window(&app, &service_url)?;
                 clear_start_error(&log_dir);
                 return Ok(());
@@ -728,6 +548,13 @@ async fn start_and_wait_ready(
             return Err(format!("Kedai 后端启动失败: {error}"));
         }
         if health_ok(&config).await {
+            #[cfg(windows)]
+            if !process_owner::listener_owned_by(service_endpoint(&config)?, std::process::id())
+                .map_err(|error| format!("核对当前实例监听进程失败：{error}"))?
+            {
+                tokio::time::sleep(READY_INTERVAL).await;
+                continue;
+            }
             show_main_window(&app, &service_url)?;
             // 启动成功:清掉历史失败留下的陈旧错误日志,避免误导排查
             clear_start_error(&log_dir);
@@ -764,7 +591,8 @@ fn clear_start_error(log_dir: &Path) {
 
 fn service_url(config: &kedai_server::config::AppConfig) -> String {
     let host = match config.host.as_str() {
-        "0.0.0.0" | "::" => "127.0.0.1",
+        "0.0.0.0" => "127.0.0.1",
+        "::" => "[::1]",
         host => host,
     };
     format!("http://{host}:{}/", config.port)
@@ -788,24 +616,88 @@ async fn health_ok(config: &kedai_server::config::AppConfig) -> bool {
     }
 }
 
-/// 取运行中实例的数据目录(健康响应的 data_dir 字段;旧版服务无此字段返回 None)
-/// 仅桌面使用:配合同实例数据目录一致性校验。
-#[cfg(desktop)]
-async fn health_data_dir(config: &kedai_server::config::AppConfig) -> Option<String> {
-    let url = format!("{}api/health", service_url(config));
+/// 将健康请求指向的地址解析成一个 TCP 端点，进程核验与 HTTP 必须看同一地址。
+#[cfg(windows)]
+fn service_endpoint(
+    config: &kedai_server::config::AppConfig,
+) -> Result<std::net::SocketAddr, String> {
+    use std::net::ToSocketAddrs;
+    let host = match config.host.as_str() {
+        "0.0.0.0" => "127.0.0.1",
+        "::" => "::1",
+        host => host,
+    };
+    (host, config.port)
+        .to_socket_addrs()
+        .map_err(|error| format!("解析服务地址失败：{error}"))?
+        .next()
+        .ok_or_else(|| "服务地址没有对应的 TCP 端点".to_string())
+}
+
+/// 打开并持有候选进程，再核对健康响应的数据目录及监听归属；只有全部一致才返回可接管句柄。
+#[cfg(windows)]
+async fn verified_other_instance(
+    config: &kedai_server::config::AppConfig,
+) -> Result<process_owner::VerifiedProcess, String> {
+    let endpoint = service_endpoint(config)?;
+    let owners = process_owner::listening_pids(endpoint)
+        .map_err(|error| format!("读取端口监听进程失败：{error}"))?;
+    let [pid] = owners.as_slice() else {
+        return Err(format!(
+            "端口 {} 的监听归属不唯一或已变化，请先关闭占用者",
+            config.port
+        ));
+    };
+    if *pid == std::process::id() {
+        return Err("当前实例已持有服务端口，不接管自身".into());
+    }
+    let executable =
+        std::env::current_exe().map_err(|error| format!("读取当前程序路径失败：{error}"))?;
+    let process =
+        process_owner::VerifiedProcess::open(*pid, &process_owner::trusted_images(&executable))
+            .map_err(|error| format!("端口 {} 的进程身份核验失败：{error}", config.port))?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_millis(1200))
         .build()
-        .ok()?;
-    let body: serde_json::Value = client.get(url).send().await.ok()?.json().await.ok()?;
-    body.get("data_dir")?.as_str().map(|s| s.to_string())
+        .map_err(|error| format!("创建实例核验请求失败：{error}"))?;
+    let response = client
+        .get(format!("http://{endpoint}/api/health"))
+        .send()
+        .await
+        .map_err(|error| format!("读取旧实例健康信息失败：{error}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "旧实例健康检查返回 {}，未执行接管",
+            response.status()
+        ));
+    }
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|error| format!("旧实例健康信息格式错误：{error}"))?;
+    verify_instance_data_dir(&body, &config.data_dir)?;
+    if !process_owner::listener_owned_by(endpoint, process.pid)
+        .map_err(|error| format!("再次核对监听归属失败：{error}"))?
+    {
+        return Err("实例核验期间端口归属已变化，未执行接管".into());
+    }
+    Ok(process)
 }
 
-/// Windows 路径宽松比较:忽略大小写与正反斜杠、尾部分隔符差异
-#[cfg(desktop)]
-fn same_data_dir(a: &str, b: &Path) -> bool {
-    let norm = |s: &str| s.replace('/', "\\").trim_end_matches('\\').to_lowercase();
-    norm(a) == norm(&b.to_string_lossy())
+/// 健康字段必须完整，且指向当前准备启动的同一数据目录。
+#[cfg(windows)]
+fn verify_instance_data_dir(body: &serde_json::Value, expected: &Path) -> Result<(), String> {
+    let directory = body
+        .get("data_dir")
+        .and_then(serde_json::Value::as_str)
+        .filter(|_| body.get("ok").and_then(serde_json::Value::as_bool) == Some(true))
+        .ok_or_else(|| "旧实例缺少有效健康状态或数据目录，未执行接管".to_string())?;
+    if !process_owner::same_path(Path::new(directory), expected)
+        .map_err(|error| format!("核对旧实例数据目录失败：{error}"))?
+    {
+        return Err("运行中实例使用另一数据目录，请先关闭该实例或更换端口；未执行接管".into());
+    }
+    Ok(())
 }
 
 /// 以下便携版数据迁移一组函数仅桌面存在:
@@ -1051,79 +943,21 @@ mod tests {
         assert!(flag.load(Ordering::SeqCst), "复位后应被本次请求重新置位");
     }
 
-    /// PC-4:旧实现按 `line.contains("LISTENING")` 过滤,非英文 Windows 的 netstat
-    /// 会本地化状态列(如「侦听」),退出时的端口清理**静默失效**。
-    /// 与 `launcher/src/main.rs` 的同名用例保持同一套输入,两侧判据须一致。
-    #[cfg(desktop)]
+    #[cfg(windows)]
     #[test]
-    fn netstat_parse_works_with_localized_state_column() {
-        let text = [
-            "活动连接",
-            "",
-            "  协议  本地地址          外部地址        状态           PID",
-            "  TCP    0.0.0.0:135            0.0.0.0:0              侦听        1756",
-            "  TCP    127.0.0.1:3001         0.0.0.0:0              侦听        8748",
-            "  TCP    127.0.0.1:13001        0.0.0.0:0              侦听        9999",
-        ]
-        .join("\r\n");
-        assert_eq!(
-            parse_netstat_listeners(&text, 3001),
-            vec![8748],
-            "本地化状态列下仍须解出端口 3001 的 PID,且不得误命中 13001"
-        );
-    }
-
-    /// 英文系统(既有形态)不得回归。
-    #[cfg(desktop)]
-    #[test]
-    fn netstat_parse_works_with_english_state_column() {
-        let text = [
-            "Active Connections",
-            "",
-            "  Proto  Local Address          Foreign Address        State           PID",
-            "  TCP    0.0.0.0:135            0.0.0.0:0              LISTENING       1756",
-            "  TCP    127.0.0.1:3001         0.0.0.0:0              LISTENING       8748",
-        ]
-        .join("\r\n");
-        assert_eq!(parse_netstat_listeners(&text, 3001), vec![8748]);
-    }
-
-    /// 连接态(ESTABLISHED 等)不是占用者:旧实现靠 LISTENING 字面量天然排除,
-    /// 改列结构后必须显式排除,否则会杀掉占着该端口的客户端短连接。
-    #[cfg(desktop)]
-    #[test]
-    fn netstat_parse_skips_established_connections() {
-        let text = [
-            "  TCP    127.0.0.1:3001         0.0.0.0:0              LISTENING       8748",
-            "  TCP    127.0.0.1:3001         127.0.0.1:52000        ESTABLISHED     12345",
-            "  TCP    127.0.0.1:3001         127.0.0.1:52001        已建立          22222",
-        ]
-        .join("\r\n");
-        assert_eq!(
-            parse_netstat_listeners(&text, 3001),
-            vec![8748],
-            "只有监听进程该被杀,连接态(英文与本地化两种写法)都跳过"
-        );
-    }
-
-    /// UDP 行没有状态列,末列仍是 PID;IPv6 行同样命中。
-    #[cfg(desktop)]
-    #[test]
-    fn netstat_parse_handles_udp_and_ipv6_rows() {
-        let text = [
-            "  UDP    127.0.0.1:3001         *:*                                    31572",
-            "  TCPv6  [::1]:3001             [::]:0                 LISTENING       41000",
-        ]
-        .join("\r\n");
-        assert_eq!(parse_netstat_listeners(&text, 3001), vec![31572, 41000]);
-    }
-
-    /// 空输出 / 未知语言的不完整行不得 panic,也不得造出 PID。
-    #[cfg(desktop)]
-    #[test]
-    fn netstat_parse_tolerates_empty_and_malformed_input() {
-        assert!(parse_netstat_listeners("", 3001).is_empty());
-        assert!(parse_netstat_listeners("活动连接\r\n\r\n", 3001).is_empty());
-        assert!(parse_netstat_listeners("  TCP    127.0.0.1:3001", 3001).is_empty());
+    fn takeover_requires_same_data_directory_and_explicit_health() {
+        let expected = std::env::current_dir().unwrap();
+        let valid = serde_json::json!({"ok": true, "data_dir": expected.join(".")});
+        assert!(verify_instance_data_dir(&valid, &expected).is_ok());
+        let other = serde_json::json!({"ok": true, "data_dir": expected.parent().unwrap()});
+        assert!(verify_instance_data_dir(&other, &expected)
+            .unwrap_err()
+            .contains("另一数据目录"));
+        assert!(verify_instance_data_dir(&serde_json::json!({"ok": true}), &expected).is_err());
+        assert!(verify_instance_data_dir(
+            &serde_json::json!({"ok": false, "data_dir": expected}),
+            &expected
+        )
+        .is_err());
     }
 }
