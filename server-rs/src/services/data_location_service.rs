@@ -9,9 +9,11 @@ use crate::data_location::{
     TASK_RECORDS_DIR_NAME,
 };
 use crate::migration::snapshot_database;
+use crate::models::data_activity::DataActivity;
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// 状态接口返回的盘符项(只列存在的盘;可写性在 POST 时由实际创建验证)。
 #[derive(Debug, Clone, Serialize)]
@@ -74,28 +76,37 @@ impl DataLocationError {
 
 pub struct DataLocationService {
     config: AppConfig,
+    activity: Arc<DataActivity>,
     /// 指针落点;生产为 `%APPDATA%\com.kedai.app\data-location.json`,测试可注入。
     pointer_path: Option<PathBuf>,
 }
 
 impl DataLocationService {
-    pub fn new(config: AppConfig) -> Self {
+    pub fn new(config: AppConfig, activity: Arc<DataActivity>) -> Self {
         let pointer_path = data_location::pointer_path();
         Self {
             config,
+            activity,
             pointer_path,
         }
     }
 
     #[cfg(test)]
-    fn with_pointer_path(config: AppConfig, pointer_path: PathBuf) -> Self {
+    pub(crate) fn with_pointer_path(
+        config: AppConfig,
+        pointer_path: PathBuf,
+        activity: Arc<DataActivity>,
+    ) -> Self {
         Self {
             config,
+            activity,
             pointer_path: Some(pointer_path),
         }
     }
 
     pub fn status(&self) -> DataLocationStatus {
+        // 维护态只读状态；Android 的权限探针需要写临时文件，必须持有活动租约。
+        let probe_lease = self.activity.enter().ok();
         let drives = data_location::available_drives()
             .into_iter()
             .map(|letter| DriveInfo {
@@ -107,11 +118,12 @@ impl DataLocationService {
         // 而每次打开设置都建目录/写探针也没有必要。
         // 除可写外还要验已有 kedai.db 能否打开:旧 UID/其它安装留下的公共库在未授权
         // 「所有文件访问」时不可读,只测「能新建文件」会给出假的 needs_permission=false。
-        let needs_permission = suggested_root.as_ref().is_some_and(|root| {
-            self.config.data_root.is_none()
-                && (!data_location::probe_writable(root)
-                    || probe_sqlite_support(&root.join(DATA_DIR_NAME)).is_err())
-        });
+        let needs_permission = probe_lease.is_some()
+            && suggested_root.as_ref().is_some_and(|root| {
+                self.config.data_root.is_none()
+                    && (!data_location::probe_writable(root)
+                        || probe_sqlite_support(&root.join(DATA_DIR_NAME)).is_err())
+            });
         DataLocationStatus {
             managed: self.config.data_location_managed,
             pending: self.config.data_location_pending,
@@ -161,11 +173,16 @@ impl DataLocationService {
 
     /// 迁移到指定根(测试直接给临时目录;生产只经 `apply` 从盘符拼 `X:\Kedai-Data`)。
     fn apply_to_root(&self, root: &Path) -> Result<ApplyOutcome, DataLocationError> {
+        let moving = self
+            .activity
+            .begin_move()
+            .map_err(|e| DataLocationError::Busy(e.into()))?;
         let root_text = root.to_string_lossy().into_owned();
 
         // 幂等:已选择同一根,只确保目录齐全
         if self.config.data_root.as_deref() == Some(root) {
             data_location::ensure_root_layout(root).map_err(DataLocationError::Internal)?;
+            moving.commit();
             return Ok(ApplyOutcome {
                 root: root_text,
                 migrated: false,
@@ -227,18 +244,22 @@ impl DataLocationService {
             migrated = true;
         }
 
-        // 旧目录标记:DB-7 分叉检测据此跳过「已经迁移走」的源,不再误报
-        if source_data.is_dir() && source_data != target_data {
-            let _ = data_location::write_migrated_marker(&source_data, root);
-        }
-
         let mut pointer = DataLocationPointer::new(root.to_path_buf());
         pointer.chosen_at = chrono::Local::now().to_rfc3339();
         if source_data != target_data {
-            pointer.migrated_from.push(source_data);
+            pointer.migrated_from.push(source_data.clone());
         }
         self.write_pointer(&pointer)
             .map_err(DataLocationError::Internal)?;
+
+        // 指针提交后才标记旧根；失败重试仍以原根为权威。
+        if source_data.is_dir() && source_data != target_data {
+            if let Err(error) = data_location::write_migrated_marker(&source_data, root) {
+                tracing::warn!(%error, "数据位置已提交，旧目录迁移标记写入失败");
+            }
+        }
+
+        moving.commit();
 
         Ok(ApplyOutcome {
             root: root_text,
@@ -374,7 +395,7 @@ mod tests {
         cfg.task_scratch_dir = source.path().parent().unwrap().join("scratch-in-test");
         cfg.data_location_pending = true;
         cfg.data_location_managed = true;
-        DataLocationService::with_pointer_path(cfg, pointer.to_path_buf())
+        DataLocationService::with_pointer_path(cfg, pointer.to_path_buf(), Arc::default())
     }
 
     #[test]
@@ -460,7 +481,7 @@ mod tests {
         cfg.imports_dir = source.join("imports");
         cfg.task_scratch_dir = scratch.path().to_path_buf();
         let pointer_path = pointer_dir.join("data-location.json");
-        let svc = DataLocationService::with_pointer_path(cfg, pointer_path.clone());
+        let svc = DataLocationService::with_pointer_path(cfg, pointer_path.clone(), Arc::default());
 
         let out = svc.apply_to_root(&root).expect("迁移失败");
         assert!(out.migrated && out.restart_required);
@@ -509,7 +530,7 @@ mod tests {
         cfg.imports_dir = source.join("imports");
         cfg.task_scratch_dir = source.path().parent().unwrap().join("scratch-root-test");
         let pointer_path = pointer_dir.join("data-location.json");
-        let svc = DataLocationService::with_pointer_path(cfg, pointer_path.clone());
+        let svc = DataLocationService::with_pointer_path(cfg, pointer_path.clone(), Arc::default());
 
         let out = svc
             .apply_root_path(&root.to_string_lossy())

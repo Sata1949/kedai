@@ -81,11 +81,17 @@ pub async fn archive(
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
     let name = format!("{stamp}-{safe}");
     let dir = state.config.imports_dir.clone();
-    if let Err(e) = tokio::fs::create_dir_all(&dir).await {
-        return internal(format!("创建导入归档目录失败: {e}"));
-    }
-    if let Err(e) = tokio::fs::write(dir.join(&name), &part.content).await {
-        return internal(format!("写导入归档失败: {e}"));
+    let archive_name = name.clone();
+    let saved = state
+        .db_call(move || {
+            std::fs::create_dir_all(&dir).map_err(|e| format!("创建导入归档目录失败: {e}"))?;
+            std::fs::write(dir.join(archive_name), part.content)
+                .map_err(|e| format!("写导入归档失败: {e}"))
+        })
+        .await;
+    match saved {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) | Err(error) => return internal(error),
     }
     Json(json!({ "ok": true, "name": name })).into_response()
 }

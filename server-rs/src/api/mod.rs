@@ -18,6 +18,7 @@ pub mod chat;
 pub mod computer_use;
 pub mod contract_history;
 pub mod contracts;
+mod data_activity;
 pub mod data_location;
 pub mod diagnostics;
 pub mod exec;
@@ -143,7 +144,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                         .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
                     let db_status = if deep {
                         let db = db.clone();
-                        tokio::task::spawn_blocking(move || probe_db(&db, true))
+                        crate::models::data_activity::spawn_blocking(move || probe_db(&db, true))
                             .await
                             .unwrap_or("error")
                     } else {
@@ -195,6 +196,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // 批次 1 统一为 JSON + code(与 errors.rs 的错误契约一致)。
         .method_not_allowed_fallback(method_not_allowed_json)
         .with_state(state.clone())
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            data_activity::guard,
+        ))
         .layer(axum::middleware::from_fn_with_state(state, security::guard))
         // 上传 body 限制:axum 默认 2MB,角色卡/世界书/预设 30MB 上限(MAX_UPLOAD/MAX_PRESET)
         // 会被先拦下,这里放行到 35MB(multipart 封装有少量 overhead),再由 handler 内精确校验;

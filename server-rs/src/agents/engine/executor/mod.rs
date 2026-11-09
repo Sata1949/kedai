@@ -5,7 +5,9 @@
 use super::*;
 
 use super::tool_loop::LoopStop;
-pub(crate) use super::tool_loop::{run_tool_loop, ToolLoopRequest};
+pub(crate) use super::tool_loop::{
+    execute_tool_round, run_tool_loop, ToolLoopRequest, ToolRoundContext,
+};
 
 mod generation;
 mod guard;

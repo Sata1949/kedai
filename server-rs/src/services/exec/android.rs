@@ -54,9 +54,11 @@ pub async fn execute(req: ExecRequest) -> Result<ExecResult, String> {
     let payload = encode_exec_request(&req.command, req.cwd.as_deref(), timeout_ms);
 
     // JNI 调用是同步阻塞的,放到阻塞线程池避免占用 async 运行时
-    let raw = tokio::task::spawn_blocking(move || call_string_static(EXEC_CLASS, "exec", &payload))
-        .await
-        .map_err(|e| format!("执行任务调度失败: {e}"))??;
+    let raw = crate::models::data_activity::spawn_blocking(move || {
+        call_string_static(EXEC_CLASS, "exec", &payload)
+    })
+    .await
+    .map_err(|e| format!("执行任务调度失败: {e}"))??;
 
     parse_result(&raw, tier)
 }

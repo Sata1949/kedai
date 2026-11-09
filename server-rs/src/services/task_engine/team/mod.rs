@@ -20,6 +20,7 @@ mod assemble;
 mod audit;
 mod budget;
 mod parallel;
+mod pre_seed;
 mod topology;
 
 #[cfg(test)]

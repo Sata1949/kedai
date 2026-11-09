@@ -17,33 +17,33 @@ use super::super::util::{send_event, step_evt};
 use super::super::{AbortFlag, AgentEngine, EngineError};
 
 /// 单轮执行所需的不可变/可变上下文聚合(避免 10+ 位置参数)。
-pub(super) struct RoundContext<'a> {
-    pub(super) engine: &'a AgentEngine,
-    pub(super) state_machine: &'a mut StateMachine,
-    pub(super) agent_session: Option<&'a AgentSessionRecord>,
-    pub(super) session_id: &'a str,
-    pub(super) llm_messages: &'a mut Vec<LlmMessage>,
-    pub(super) tool_ctx: &'a ToolContext,
-    pub(super) tx: &'a mpsc::Sender<SseEvent>,
-    pub(super) abort: &'a watch::Receiver<bool>,
-    pub(super) flag: &'a AbortFlag,
-    pub(super) run_id: &'a str,
-    pub(super) gate: ToolGate<'a>,
+pub(crate) struct RoundContext<'a> {
+    pub(crate) engine: &'a AgentEngine,
+    pub(crate) state_machine: &'a mut StateMachine,
+    pub(crate) agent_session: Option<&'a AgentSessionRecord>,
+    pub(crate) session_id: &'a str,
+    pub(crate) llm_messages: &'a mut Vec<LlmMessage>,
+    pub(crate) tool_ctx: &'a ToolContext,
+    pub(crate) tx: &'a mpsc::Sender<SseEvent>,
+    pub(crate) abort: &'a watch::Receiver<bool>,
+    pub(crate) flag: &'a AbortFlag,
+    pub(crate) run_id: &'a str,
+    pub(crate) gate: ToolGate<'a>,
 }
 
 /// 单轮执行的可见结果。
-pub(super) struct RoundOutcome {
+pub(crate) struct RoundOutcome {
     /// 已执行并按原顺序收尾的工具调用(守卫判定据此统计只读/写类与声明文件进展)。
-    pub(super) outputs: Vec<ExecutedTool>,
+    pub(crate) outputs: Vec<ExecutedTool>,
     /// 工具执行期被用户中断(收尾未完成,调用方直接返回中断终态)。
-    pub(super) interrupted: bool,
+    pub(crate) interrupted: bool,
 }
 
 /// 单轮中一个待执行/已执行的工具调用(裁决结果 + 执行输出 + 耗时 + 快照绑定)
-pub(super) struct ExecutedTool {
-    pub(super) call: ToolCallArgs,
+pub(crate) struct ExecutedTool {
+    pub(crate) call: ToolCallArgs,
     permission: crate::tools::permissions::PermissionDecision,
-    pub(super) output: Value,
+    pub(crate) output: Value,
     /// 工具执行耗时(毫秒;未执行时为 0)
     duration_ms: i64,
     /// 本次执行成功落库的回退快照 id(批 D-1;仅写工具且快照开关开时 Some):
@@ -69,7 +69,7 @@ fn preview_input(arguments: &str) -> String {
 ///
 /// 中断语义:串行组执行中检测到取消时立即返回 `interrupted=true`,**不再**收尾
 /// 本轮已执行的工具——与抽取前一致(此前也直接 return,前面的输出不落事件/消息)。
-pub(super) async fn execute_round(
+pub(crate) async fn execute_round(
     ctx: RoundContext<'_>,
     tool_calls: &[ToolCallArgs],
 ) -> Result<RoundOutcome, EngineError> {
@@ -321,7 +321,7 @@ async fn execute_serial_tool(
     }
     if !e.permission.allowed && engine.tool_registry.get(&e.call.name).is_some() {
         // 任务模式(无 UI 授权上下文):立即拒绝,不空等
-        if gate.no_ui_authorization {
+        if gate.no_ui_authorization || gate.excludes(&e.call.name) {
             e.output = json!({
                 "error": e.permission.reason,
                 "code": "tool_policy_denied"

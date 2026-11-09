@@ -12,6 +12,7 @@ mod guard;
 mod round;
 
 pub(crate) use guard::{LoopStop, LoopStopKind};
+pub(crate) use round::{execute_round as execute_tool_round, RoundContext as ToolRoundContext};
 
 use super::executor::{
     budget_stop_content, generate_round, has_declared_change, is_declared_file_write,

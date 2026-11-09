@@ -1,26 +1,15 @@
-// SKY-8 兜底回归:集成主启动前由引擎预置单文件最终入口,不依赖模型调用工具。
+// SKY-8 兜底回归:集成主启动前由引擎经正常工具入口预置最终 HTML,不依赖模型主动调用工具。
 //
 // 判别力(修复前必红):总装主两个子目标都只返回文本(不写任何文件),修复前
 // index.html 缺失 → 任务 partial;修复后引擎用上游两个经典脚本预置 index.html,
 // 中间模板步骤以最终入口为准记 done,交付必需项只剩 index.html。
 use axum::http::StatusCode;
+use kedai_server::utils::test_support::TempDataDir;
 use serde_json::{json, Value};
-use std::path::PathBuf;
 use std::sync::OnceLock;
 use tokio::sync::Mutex;
 mod common;
 use common::{send_json, test_app};
-
-fn temp_workspace(tag: &str) -> PathBuf {
-    let ns = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("系统时间应晚于 epoch")
-        .as_nanos();
-    let dir =
-        std::env::temp_dir().join(format!("kedai-pre-seed-{tag}-{}-{ns}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("创建临时工作区失败");
-    dir
-}
 
 /// 任务终态轮询:沿用本文件历史的 400 次 × 100ms 超时,实现见 `common`.
 async fn wait_terminal(app: &axum::Router, id: &str) -> (String, Value) {
@@ -68,7 +57,8 @@ async fn engine_pre_seeds_final_entry_when_assembly_main_only_reads() {
     .await;
     assert_eq!(status, StatusCode::OK, "设置应可写入");
 
-    let ws = temp_workspace("entry");
+    let workspace = TempDataDir::new("pre-seed-entry");
+    let ws = workspace.path();
     let (status, json) = send_json(
         app,
         "POST",
@@ -156,15 +146,55 @@ async fn engine_pre_seeds_final_entry_when_assembly_main_only_reads() {
         .unwrap_or_default();
     let joined = details.join("\n");
     assert!(
-        joined.contains("引擎已在工作区预置最终入口 index.html"),
-        "应透出引擎预置事件: {joined}"
+        joined.contains("已装配 index.html") && joined.contains("预置骨架"),
+        "应透出正常工具执行的预置结果: {joined}"
+    );
+    assert_eq!(
+        details
+            .iter()
+            .filter(|detail| detail.contains("调用工具 fs_inline_html"))
+            .count(),
+        1,
+        "引擎预置必须恰好触发一次正常工具调用: {joined}"
     );
     assert!(
-        !joined.contains("调用工具 fs_inline_html"),
-        "本用例模型不调用工具;预置必须由引擎完成: {joined}"
+        details
+            .iter()
+            .any(|detail| detail == "入口预置 调用工具 fs_inline_html"),
+        "装配调用应归属入口预置,而非模型主动调用: {joined}"
+    );
+    assert_eq!(
+        details
+            .iter()
+            .filter(|detail| detail.as_str() == "工具 fs_inline_html 已返回结果")
+            .count(),
+        1,
+        "预置调用必须沿正常工具结果事件收尾: {joined}"
+    );
+    assert!(
+        delivery["changed"]
+            .as_array()
+            .expect("交付变更应为数组")
+            .iter()
+            .any(|path| path == "index.html"),
+        "最终入口必须计入交付变更摘要: {delivery}"
+    );
+    let (status, changes) =
+        send_json(app, "GET", &format!("/api/tasks/{id}/changes"), json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let entries: Vec<_> = changes["changes"]
+        .as_array()
+        .expect("应返回文件变更台账")
+        .iter()
+        .filter(|row| row["path"] == "index.html")
+        .collect();
+    assert_eq!(entries.len(), 1, "预置入口必须且只能记一条变更: {changes}");
+    assert_eq!(entries[0]["op"], "create", "预置是新建入口: {changes}");
+    assert!(
+        entries[0]["before_hash"].is_null(),
+        "新入口应保留空基线: {changes}"
     );
 
-    let _ = std::fs::remove_dir_all(&ws);
     let _ = send_json(
         app,
         "PUT",
@@ -194,7 +224,8 @@ async fn engine_pre_seed_names_esm_shards_instead_of_silently_skipping() {
     .await;
     assert_eq!(status, StatusCode::OK, "设置应可写入");
 
-    let ws = temp_workspace("esm-only");
+    let workspace = TempDataDir::new("pre-seed-esm-only");
+    let ws = workspace.path();
     let title = concat!(
         r#"[[reply_if:团队规划器|{"mains":["#,
         r#"{"name":"分片主","after":[],"goals":["#,
@@ -254,7 +285,7 @@ async fn engine_pre_seed_names_esm_shards_instead_of_silently_skipping() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        joined.contains("引擎未能预置最终入口"),
+        joined.contains("入口预置未完成") && joined.contains("未能预置最终入口"),
         "应透出预置失败原因: {joined}"
     );
     assert!(
@@ -265,8 +296,26 @@ async fn engine_pre_seed_names_esm_shards_instead_of_silently_skipping() {
         joined.contains("引擎不打包 ESM"),
         "应说明 ESM 边界: {joined}"
     );
+    assert_eq!(
+        joined
+            .lines()
+            .filter(|detail| detail.contains("调用工具 fs_inline_html"))
+            .count(),
+        1,
+        "失败的预置也必须经一次正常工具调用: {joined}"
+    );
+    let (status, changes) =
+        send_json(app, "GET", &format!("/api/tasks/{id}/changes"), json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        changes["changes"]
+            .as_array()
+            .expect("应返回文件变更台账")
+            .iter()
+            .all(|row| row["path"] != "index.html"),
+        "ESM 预置失败不得记录不存在的入口变更: {changes}"
+    );
 
-    let _ = std::fs::remove_dir_all(&ws);
     let _ = send_json(
         app,
         "PUT",

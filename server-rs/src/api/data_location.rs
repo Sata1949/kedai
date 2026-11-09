@@ -13,6 +13,10 @@ use axum::Json;
 use serde::Deserialize;
 use std::sync::Arc;
 
+#[cfg(test)]
+#[path = "data_location_tests.rs"]
+mod tests;
+
 /// 选择目标:桌面盘符 / Android 绝对路径根(二者互斥,root 优先)。
 enum Target {
     Drive(String),
@@ -49,7 +53,7 @@ pub async fn put(
             return validation("缺少 drive 或 root:请提供盘符或数据根路径");
         }
     };
-    let joined = tokio::task::spawn_blocking(move || match target {
+    let joined = crate::models::data_activity::spawn_blocking(move || match target {
         Target::Root(root) => svc.apply_root_path(&root),
         Target::Drive(drive) => svc.apply(&drive),
     })

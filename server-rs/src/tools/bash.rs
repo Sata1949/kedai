@@ -350,8 +350,10 @@ async fn scan_pre_blocking(
     crate::tools::workspace_scan::ScanOutcome,
 ) {
     use crate::tools::workspace_scan as scan;
-    match tokio::task::spawn_blocking(move || scan::scan_pre(&root, &scan::ScanBudget::default()))
-        .await
+    match crate::models::data_activity::spawn_blocking(move || {
+        scan::scan_pre(&root, &scan::ScanBudget::default())
+    })
+    .await
     {
         Ok(result) => result,
         Err(e) => {
@@ -372,8 +374,10 @@ async fn scan_post_blocking(
     crate::tools::workspace_scan::ScanOutcome,
 ) {
     use crate::tools::workspace_scan as scan;
-    match tokio::task::spawn_blocking(move || scan::scan_post(&root, &scan::ScanBudget::default()))
-        .await
+    match crate::models::data_activity::spawn_blocking(move || {
+        scan::scan_post(&root, &scan::ScanBudget::default())
+    })
+    .await
     {
         Ok(result) => result,
         Err(e) => {

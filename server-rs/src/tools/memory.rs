@@ -89,7 +89,7 @@ pub fn register_memory_tools(
                             Ok(v) if !v.is_empty() => {
                                 let memory_id = entry.id;
                                 let svc2 = memory_write.clone();
-                                let _ = tokio::task::spawn_blocking(move || {
+                                let _ = crate::models::data_activity::spawn_blocking(move || {
                                     svc2.upsert_vector(memory_id, &v)
                                 })
                                 .await;

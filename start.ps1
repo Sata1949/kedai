@@ -186,11 +186,31 @@ $WebDist = Join-Path $Root "web\dist\index.html"
 
 Write-Host "========== Kedai Browser Dev ==========" -ForegroundColor Cyan
 
-# 健康检查:服务是否已在运行(须在下方构建分支调用前定义)
-function Test-ServerRunning {
+# 端口占用只决定能否启动，不授予结束现有进程的权限。
+function Test-PortOccupied {
+    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $Port)
+    try {
+        $listener.Start()
+        return $false
+    } catch [System.Net.Sockets.SocketException] {
+        return $true
+    } finally {
+        $listener.Stop()
+    }
+}
+
+# 就绪必须来自本次启动的进程，不能把另一程序的 HTTP 200 当成 Kedai 启动成功。
+function Test-ServerRunning([System.Diagnostics.Process]$ExpectedProcess) {
+    $ExpectedProcess.Refresh()
+    if ($ExpectedProcess.HasExited) { return $false }
+    $owners = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+        Where-Object { $_.LocalAddress -eq '127.0.0.1' -or $_.LocalAddress -eq '0.0.0.0' } |
+        Select-Object -ExpandProperty OwningProcess -Unique)
+    if ($owners.Count -ne 1 -or $owners[0] -ne $ExpectedProcess.Id) { return $false }
     try {
         $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/api/health" -UseBasicParsing -TimeoutSec 2
-        return $resp.StatusCode -eq 200
+        $body = $resp.Content | ConvertFrom-Json
+        return $resp.StatusCode -eq 200 -and $body.ok -eq $true
     } catch { return $false }
 }
 
@@ -229,64 +249,48 @@ if ($NeedBuild) {
     # 重建后重新探测
     $ServerExe = Get-NewestServerExe
     $IsDebugServer = [bool]($ServerExe -and ($ServerExe -like "*\target\debug\*"))
-    # 重建后端口仍被旧实例占用 → 旧服务还在提供旧版本,静默复用会让本次重建白做。
-    if (Test-ServerRunning) {
-        Write-Host "[警告] 刚完成重建,但 $Port 端口仍被旧服务实例占用——浏览器拿到的仍是旧版本。" -ForegroundColor Yellow
-        $answer = Read-Host "是否结束占用端口的旧 Kedai 进程(kedai-server.exe / Kedai.exe)并继续启动新版?(Y/N)"
-        if ($answer -match '^[Yy]') {
-            Get-Process -Name 'kedai-server', 'Kedai', 'kedai-portable' -ErrorAction SilentlyContinue | Stop-Process -Force
-            Start-Sleep -Milliseconds 800
-            if (Test-ServerRunning) {
-                throw "旧进程已结束但 $Port 端口仍被占用,请检查是否有其它程序占用该端口"
-            }
-            Write-Host "[OK] 旧进程已结束,继续启动新版本" -ForegroundColor Green
-        } else {
-            Write-Host "已取消启动:旧进程不退出,浏览器拿到的仍是旧版本。请手动关闭后重跑 .\start.ps1" -ForegroundColor Yellow
-            exit 1
-        }
-    }
 }
 if (-not $ServerExe) { throw "未能定位 kedai-server.exe,请检查构建产物" }
 
-if (-not (Test-ServerRunning)) {
-    $modeLabel = if ($IsDebugServer) { "debug 增量" } else { "release" }
-    Write-Host "[启动] 启动 kedai-server.exe($modeLabel)... $ServerExe" -ForegroundColor Green
-    # 测试版统一用磁盘 web/dist:无论 server 是 debug 还是 release,前端增量都立即生效。
-    $prevWebDist = $env:KEDAI_WEB_DIST
-    $env:KEDAI_WEB_DIST = Join-Path $Root "web\dist"
-    try {
-        $proc = Start-Process -FilePath $ServerExe -WorkingDirectory $Root -PassThru -WindowStyle Hidden
-    } finally {
-        if ($null -eq $prevWebDist) {
-            Remove-Item Env:\KEDAI_WEB_DIST -ErrorAction SilentlyContinue
-        } else {
-            $env:KEDAI_WEB_DIST = $prevWebDist
-        }
-    }
+if (Test-PortOccupied) {
+    throw "端口 $Port 已被现有实例占用，请先关闭它后再启动测试版；本脚本未结束任何现有进程。"
+}
 
-    # 等待就绪(最长 60 秒)
+$modeLabel = if ($IsDebugServer) { "debug 增量" } else { "release" }
+Write-Host "[启动] 启动 kedai-server.exe($modeLabel)... $ServerExe" -ForegroundColor Green
+$prevWebDist = $env:KEDAI_WEB_DIST
+$env:KEDAI_WEB_DIST = Join-Path $Root "web\dist"
+try {
+    $proc = Start-Process -FilePath $ServerExe -WorkingDirectory $Root -PassThru -WindowStyle Hidden
+    # 持有本次创建的进程句柄，退出时不重新按 PID 或进程名查找目标。
+    $null = $proc.Handle
+} finally {
+    if ($null -eq $prevWebDist) {
+        Remove-Item Env:\KEDAI_WEB_DIST -ErrorAction SilentlyContinue
+    } else {
+        $env:KEDAI_WEB_DIST = $prevWebDist
+    }
+}
+
+try {
     $deadline = (Get-Date).AddSeconds(60)
     while ((Get-Date) -lt $deadline) {
-        if (Test-ServerRunning) { break }
+        if (Test-ServerRunning $proc) { break }
+        if ($proc.HasExited) { throw "本次启动的服务已退出，退出码 $($proc.ExitCode)，请查看 logs/ 目录。" }
         Start-Sleep -Milliseconds 400
     }
-    if (-not (Test-ServerRunning)) {
-        Write-Host "[错误] 服务未能就绪,请查看 logs/ 目录。" -ForegroundColor Red
-        exit 1
+    if (-not (Test-ServerRunning $proc)) {
+        throw "本次启动的服务未能就绪，请查看 logs/ 目录。"
     }
     Write-Host "[OK] 服务已就绪 → http://127.0.0.1:$Port" -ForegroundColor Green
-} else {
-    Write-Host "[OK] 服务已在运行 → http://127.0.0.1:$Port" -ForegroundColor Green
-}
-
-if (-not $NoBrowser) {
-    Start-Process "http://127.0.0.1:$Port/"
-}
-
-Write-Host "==================================" -ForegroundColor Cyan
-Write-Host "按任意键退出(将同时关闭服务)…"
-$null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-if ($proc -and -not $proc.HasExited) {
-    Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-    Write-Host "[OK] 服务已关闭。"
+    if (-not $NoBrowser) { Start-Process "http://127.0.0.1:$Port/" }
+    Write-Host "==================================" -ForegroundColor Cyan
+    Write-Host "按任意键退出(将同时关闭本次启动的服务)…"
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+} finally {
+    $proc.Refresh()
+    if (-not $proc.HasExited) {
+        $proc.Kill()
+        Write-Host "[OK] 本次启动的服务已关闭。"
+    }
 }

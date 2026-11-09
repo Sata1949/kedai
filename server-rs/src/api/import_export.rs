@@ -368,10 +368,11 @@ pub async fn export_bundle(
 
     // ⑦ 插件:磁盘解析结果(同步遍历 + 逐文件解析,挪阻塞线程池;B-1)
     let dir = state.config.data_dir.join("plugins").join("tools");
-    let (loaded, warnings) =
-        tokio::task::spawn_blocking(move || ToolPluginLoader::new(dir).parse_all())
-            .await
-            .unwrap_or_default();
+    let (loaded, warnings) = crate::models::data_activity::spawn_blocking(move || {
+        ToolPluginLoader::new(dir).parse_all()
+    })
+    .await
+    .unwrap_or_default();
     let plugins = Some(
         loaded
             .into_iter()
