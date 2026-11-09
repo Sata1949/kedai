@@ -224,90 +224,6 @@ fn upstream_files_for(
     out
 }
 
-/// 集成主启动前预置单文件最终入口（SKY-8 全题复跑兜底；见 `assemble_pre_seed`）。
-///
-/// 只在「单文件目标 + 有上游分片 + 本主声明了 HTML 入口」时触发；已有入口不覆盖。
-/// 返回给目标文本的说明（也作为 AgentStatus 事件透出）；预置失败返回 None，模型
-/// 仍可用 `fs_inline_html` 自行装配。
-pub(super) fn pre_seed_single_file(
-    ctx: &TaskRunContext,
-    scope: Option<&Arc<crate::models::types::ExecScope>>,
-    declared_files: &[String],
-    upstream_files: &[String],
-) -> Option<String> {
-    if !single_file_requested(&ctx.goal) || upstream_files.is_empty() {
-        return None;
-    }
-    // 取**最后一个** HTML：单文件目标里 `src/shell.html` 之类模板可能先声明，
-    // 最终入口按 plan 顺序在后（与 `required_from_plan_for_goal` 同口径）。
-    let html = declared_files
-        .iter()
-        .rfind(|file| {
-            let lower = file.to_ascii_lowercase();
-            lower.ends_with(".html") || lower.ends_with(".htm")
-        })
-        .cloned()?;
-    // 必须用本主**派生后的 scope**（带 owner/声明文件），不能用 ctx 的 base scope：
-    // 否则 reserve_write 会因「声明归属 ≠ 空 owner」拒绝预置（全题复跑前的实测）。
-    let scope = scope?;
-    let workspace = scope.workspace();
-    let out_path = workspace.join(&html);
-    if out_path.is_file() {
-        return Some(format!(
-            "引擎检测到最终入口 {html} 已存在:请先 fs_read 核对,再用 fs_edit 或 fs_inline_html 补全入口调用;不要重写整份内联。"
-        ));
-    }
-    let include_three = ctx.goal.to_ascii_lowercase().contains("three");
-    let outcome = crate::tools::agent_tools_fs_inline::assemble_pre_seed(
-        workspace,
-        &html,
-        upstream_files,
-        "Kedai 单文件交付（引擎预置骨架）",
-        include_three,
-    );
-    // 跳过的 ESM 分片必须点名:全题复跑里预置静默跳过 ESM,模型既没有入口也不知道
-    // 为什么没有,只能重新规划或空转。这里把「引擎不打包 ESM」变成可执行指令。
-    let skipped = if outcome.skipped_esm.is_empty() {
-        String::new()
-    } else {
-        format!(
-            ";跳过 ESM 分片(引擎不打包 ESM):{}。请改写为经典脚本(window.*)后重新装配,或改用只引用远程 URL 的模板",
-            outcome.skipped_esm.join("、")
-        )
-    };
-    let Some(text) = outcome.html else {
-        return Some(format!(
-            "引擎未能预置最终入口 {html}:{}{skipped}。请把上游分片改写为经典脚本后调用 fs_inline_html,或提供只引用远程 URL 的模板。",
-            outcome.reason.unwrap_or_default()
-        ));
-    };
-    if let Err(reason) = scope.reserve_write(&out_path) {
-        tracing::warn!(
-            path = html.as_str(),
-            reason = reason.as_str(),
-            "预置骨架被所有权拒绝"
-        );
-        return None;
-    }
-    if let Err(error) = crate::utils::fs_atomic::write_atomic(&out_path, text.as_bytes()) {
-        tracing::warn!(path = html.as_str(), error = %error, "预置骨架写入失败");
-        return None;
-    }
-    if let Ok(stamp) = crate::models::types::ExecScope::stamp_of(&out_path) {
-        scope.note_read(&out_path, stamp);
-    }
-    Some(format!(
-        "引擎已在工作区预置最终入口 {html}({} 字节,内联 {} 个上游分片{}{skipped}):请先 fs_read 核对,再用 fs_edit 或 fs_inline_html 补全入口调用;不要重写整份内联。",
-        text.len(),
-        outcome.inlined,
-        if include_three {
-            ",已带 Three.js CDN"
-        } else {
-            ""
-        }
-    ))
-}
-
 /// 补做轮的 prior 种子:从 plan 取该主既有子目标产出,供补做子目标衔接并保持版本一致。
 /// 首轮 prior 为空、由 run_main 循环内自然累积;补做轮会跳过未点名子目标(goal_filter),
 /// 循环内累积不到任何东西 —— 必须在此显式种入,否则补做子目标既看不到同主其他成果,
@@ -471,7 +387,14 @@ impl TeamExecutor {
         // `index.html` 从未落盘；预置让「入口存在」不再依赖模型的长尾行为。
         // 已有入口时不覆盖（补做轮保留模型自己的版本），只把「核对/补全」写进目标。
         let pre_seed_note = if integration_main {
-            pre_seed_single_file(ctx, scope.as_ref(), &declared_files, &upstream_files)
+            self.pre_seed_single_file(
+                ctx,
+                &session_id,
+                scope.as_ref(),
+                &declared_files,
+                &upstream_files,
+            )
+            .await
         } else {
             None
         };

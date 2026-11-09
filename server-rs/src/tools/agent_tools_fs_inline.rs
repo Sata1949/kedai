@@ -58,7 +58,9 @@ pub fn register_inline_tool(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
                         "items": { "type": "string" },
                         "description": "无模板模式:按顺序内联的经典脚本/CSS 分片(不得含行首 import/export;引擎不打包 ESM,ESM 分片请先改写或改用 template)"
                     },
-                    "title": { "type": "string", "description": "无模板模式生成的 HTML 标题" }
+                    "title": { "type": "string", "description": "无模板模式生成的 HTML 标题" },
+                    "pre_seed": { "type": "boolean", "description": "预置入口模式:已有入口不覆盖,仅内联经典 JS/CSS,跳过缺失/非文本/ESM 分片并报告 ESM 清单;默认 false" },
+                    "include_three": { "type": "boolean", "description": "预置入口模式是否加入 Three.js UMD CDN;默认 false" }
                 },
                 "required": ["path"]
             }),
@@ -86,6 +88,11 @@ fn run_inline(deps: &ToolDeps, ctx: &ToolContext, args: &Value) -> Result<String
             "{raw_out} 不是 HTML 文件:输出路径需以 .html/.htm 结尾"
         ));
     }
+    let pre_seed = optional_bool(args, "pre_seed")?;
+    let include_three = optional_bool(args, "include_three")?;
+    if pre_seed && out_path.is_file() {
+        return Ok(format!("最终入口 {raw_out} 已存在，未覆盖"));
+    }
     // 所有权检查放在读分片之前:越权写应直接告诉模型「这不是你的文件」。
     scope.reserve_write(&out_path)?;
     let out_rel = display_rel(scope.workspace(), &out_path);
@@ -102,9 +109,16 @@ fn run_inline(deps: &ToolDeps, ctx: &ToolContext, args: &Value) -> Result<String
         .and_then(|v| v.as_str())
         .unwrap_or("Kedai 单文件交付");
 
-    let (rendered, summary) = match template {
-        Some(template) => render_template(deps, ctx, &out_path, template, parts)?,
-        None => render_shell(deps, ctx, &out_path, sources, title)?,
+    let (rendered, summary) = if pre_seed {
+        if template.is_some() {
+            return Err("预置入口模式不接受 template，请使用 sources".into());
+        }
+        render_pre_seed(deps, ctx, &out_rel, sources, title, include_three)?
+    } else {
+        match template {
+            Some(template) => render_template(deps, ctx, &out_path, template, parts)?,
+            None => render_shell(deps, ctx, &out_path, sources, title)?,
+        }
     };
     if rendered.len() > MAX_OUTPUT_BYTES {
         return Err(format!(
@@ -131,6 +145,61 @@ fn run_inline(deps: &ToolDeps, ctx: &ToolContext, args: &Value) -> Result<String
         "已装配 {out_rel}({} 字节,{summary})",
         rendered.len()
     ))
+}
+
+fn optional_bool(args: &Value, key: &str) -> Result<bool, String> {
+    match args.get(key) {
+        None => Ok(false),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => Err(format!("{key} 必须是布尔值")),
+    }
+}
+
+fn render_pre_seed(
+    deps: &ToolDeps,
+    ctx: &ToolContext,
+    output: &str,
+    sources: Option<&Vec<Value>>,
+    title: &str,
+    include_three: bool,
+) -> Result<(String, String), String> {
+    let sources = sources.ok_or_else(|| "预置入口模式必须提供 sources".to_string())?;
+    if sources.len() > MAX_SOURCES {
+        return Err(format!("分片过多({} 个,上限 {MAX_SOURCES})", sources.len()));
+    }
+    let files = sources
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| "sources 必须是分片路径字符串数组".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let outcome = assemble_pre_seed(deps, ctx, output, &files, title, include_three)?;
+    let skipped = if outcome.skipped_esm.is_empty() {
+        String::new()
+    } else {
+        format!(";跳过 ESM 分片(引擎不打包 ESM):{}。请改写为经典脚本(window.*)后重新装配,或改用只引用远程 URL 的模板", outcome.skipped_esm.join("、"))
+    };
+    match outcome.html {
+        Some(html) => Ok((
+            html,
+            format!(
+                "预置骨架,内联 {} 个分片{}{skipped}",
+                outcome.inlined,
+                if include_three {
+                    ",已带 Three.js CDN"
+                } else {
+                    ""
+                }
+            ),
+        )),
+        None => Err(format!(
+            "未能预置最终入口:{reason}{skipped}",
+            reason = outcome.reason.unwrap_or_default()
+        )),
+    }
 }
 
 /// 模板模式:严格校验槽位映射,单次扫描替换(不递归展开插入内容)。
@@ -314,19 +383,19 @@ pub(crate) struct PreSeedOutcome {
 /// 非文本/缺失文件跳过；不执行 JS、不判断分片顺序之外的语义。返回
 /// [`PreSeedOutcome`]：成功带 HTML 与内联数；没有可用分片或自包含检查失败时
 /// 原因与跳过的 ESM 分片清单仍在结果里（由调用方点名，不再静默失败）。
-pub(crate) fn assemble_pre_seed(
-    workspace: &Path,
+fn assemble_pre_seed(
+    deps: &ToolDeps,
+    ctx: &ToolContext,
     output_rel: &str,
     upstream_files: &[String],
     title: &str,
     include_three: bool,
-) -> PreSeedOutcome {
+) -> Result<PreSeedOutcome, String> {
     let mut sources: Vec<(String, String)> = Vec::new();
     let mut skipped_esm: Vec<String> = Vec::new();
     for raw in upstream_files {
-        let Some(rel) = crate::models::ownership::normalize_workspace_rel(raw) else {
-            continue;
-        };
+        let (scope, path) = resolve(deps, ctx, raw)?;
+        let rel = display_rel(scope.workspace(), &path);
         if rel == output_rel {
             continue;
         }
@@ -334,7 +403,6 @@ pub(crate) fn assemble_pre_seed(
         if !(lower.ends_with(".js") || lower.ends_with(".mjs") || lower.ends_with(".css")) {
             continue;
         }
-        let path = workspace.join(&rel);
         if !path.is_file() {
             continue;
         }
@@ -353,29 +421,29 @@ pub(crate) fn assemble_pre_seed(
         sources.push((rel, content));
     }
     if sources.is_empty() {
-        return PreSeedOutcome {
+        return Ok(PreSeedOutcome {
             html: None,
             inlined: 0,
             skipped_esm,
             reason: Some("没有可用于预置骨架的经典脚本/CSS 分片".into()),
-        };
+        });
     }
     let html = render_classic_shell(&sources, title, include_three);
     let issues = esm_boundary::single_file_text_issues(output_rel, &html);
     if !issues.is_empty() {
-        return PreSeedOutcome {
+        return Ok(PreSeedOutcome {
             html: None,
             inlined: sources.len(),
             skipped_esm,
             reason: Some(format!("预置骨架未通过自包含检查:{}", issues.join(";"))),
-        };
+        });
     }
-    PreSeedOutcome {
+    Ok(PreSeedOutcome {
         html: Some(html),
         inlined: sources.len(),
         skipped_esm,
         reason: None,
-    }
+    })
 }
 
 /// 提取模板槽位名;未闭合/非法字符直接报错(不在装配阶段猜)。
@@ -711,7 +779,7 @@ mod tests {
             inlined,
             skipped_esm,
             reason,
-        } = assemble_pre_seed(&f.ws, "index.html", &files, "预置骨架", true);
+        } = assemble_pre_seed(&f.deps, &f.ctx(), "index.html", &files, "预置骨架", true).unwrap();
         let html = html.expect("预置应成功");
         assert_eq!(inlined, 3, "ESM/HTML 分片应跳过:{html}");
         assert_eq!(skipped_esm, vec!["parts/esm.js".to_string()], "{html}");
@@ -748,7 +816,8 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let outcome = assemble_pre_seed(&f.ws, "index.html", &files, "预置骨架", false);
+        let outcome =
+            assemble_pre_seed(&f.deps, &f.ctx(), "index.html", &files, "预置骨架", false).unwrap();
         assert!(outcome.html.is_none(), "全 ESM 不应生成入口");
         assert_eq!(outcome.inlined, 0);
         assert_eq!(
