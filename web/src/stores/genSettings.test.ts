@@ -285,6 +285,61 @@ describe('genSettings 设置回填的模式时效(RTSPLIT-2)', () => {
   });
 });
 
+describe('genSettings 保存队列固定提交时的模式', () => {
+  beforeEach(() => {
+    memStorage.clear();
+    setActivePinia(createPinia());
+    getSettingsMock.mockReset().mockResolvedValue(makeSettings());
+    saveSettingsMock.mockReset().mockResolvedValue({
+      ok: true,
+      settings: makeSettings({ agent_system_prompt: '排队保存的旧模式值' }),
+    });
+  });
+
+  it.each([
+    ['task', 'roleplay'],
+    ['roleplay', 'task'],
+  ] as const)('%s 补丁等待前一保存时切到 %s，仍写入提交时模式', async (submittedMode, nextMode) => {
+    const task = useTaskStore();
+    task.appMode = submittedMode;
+    const store = useGenSettingsStore();
+    let release: (value: { ok: boolean; settings: RuntimeSettings }) => void = () => {};
+    saveSettingsMock.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+
+    const first = store.queueSettingsSave({ render_html: true });
+    await Promise.resolve();
+    expect(saveSettingsMock).toHaveBeenCalledTimes(1);
+    const patch = { agent_system_prompt: '排队保存的旧模式值' };
+    const queued = store.queueSettingsSave(patch);
+    task.appMode = nextMode;
+    store.agentSystemPrompt = '切换后的当前模式值';
+    release({ ok: true, settings: makeSettings() });
+    await Promise.all([first, queued]);
+
+    expect(saveSettingsMock).toHaveBeenNthCalledWith(2, patch, submittedMode);
+    expect(store.agentSystemPrompt).toBe('切换后的当前模式值');
+  });
+
+  it('前一保存失败后继续处理排队补丁，并保留其提交模式', async () => {
+    const task = useTaskStore();
+    task.appMode = 'task';
+    const store = useGenSettingsStore();
+    let rejectFirst: (error: Error) => void = () => {};
+    saveSettingsMock.mockImplementationOnce(() => new Promise((_, reject) => { rejectFirst = reject; }));
+
+    const first = store.queueSettingsSave({ render_html: true });
+    const failed = expect(first).rejects.toThrow('首个保存失败');
+    await Promise.resolve();
+    const patch = { default_temperature: 1, default_max_tokens: 65536 };
+    const queued = store.queueSettingsSave(patch);
+    task.appMode = 'roleplay';
+    rejectFirst(new Error('首个保存失败'));
+    await Promise.all([failed, queued]);
+
+    expect(saveSettingsMock).toHaveBeenNthCalledWith(2, patch, 'task');
+  });
+});
+
 describe('genSettings 流程调用闸与节点默认上下文(A 批 A3/A4)', () => {
   beforeEach(() => {
     memStorage.clear();

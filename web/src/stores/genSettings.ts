@@ -474,9 +474,11 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     }
   }
 
-  /** 保存运行期设置(可部分字段;服务端持久化到 data/settings.json);按当前 appMode 写入对应覆盖层 */
-  async function saveSettings(patch: api.RuntimeSettingsPatch): Promise<void> {
-    const requestedMode = useTaskStore().appMode;
+  /** 保存运行期设置；直接调用取当前模式，排队保存显式传入提交时的模式。 */
+  async function saveSettings(
+    patch: api.RuntimeSettingsPatch,
+    requestedMode = useTaskStore().appMode,
+  ): Promise<void> {
     const res = await api.saveSettings(patch, requestedMode);
     const s = res.settings;
     useModelConnStore().model = s.model;
@@ -490,7 +492,8 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
   // 设置写入统一串行,避免 renderHtml 自动保存与设置面板保存交错回写旧响应。
   let settingsSaveQueue: Promise<void> = Promise.resolve();
   function queueSettingsSave(patch: api.RuntimeSettingsPatch): Promise<void> {
-    const queued = settingsSaveQueue.then(() => saveSettings(patch));
+    const requestedMode = useTaskStore().appMode;
+    const queued = settingsSaveQueue.then(() => saveSettings(patch, requestedMode));
     settingsSaveQueue = queued.catch(() => { /* 保持队列可继续使用 */ });
     return queued;
   }
