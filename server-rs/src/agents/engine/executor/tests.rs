@@ -499,44 +499,6 @@ fn declared() -> Vec<String> {
     vec!["parts/world.js".to_string(), "index.html".to_string()]
 }
 
-/// 只有成功意图命中声明路径的写工具才算进展。
-#[test]
-fn declared_workspace_write_is_progress() {
-    assert!(is_declared_file_write(
-        "fs_write",
-        r#"{"path":"parts/world.js","content":"x"}"#,
-        &declared()
-    ));
-    assert!(is_declared_file_write(
-        "fs_edit",
-        r#"{"path":"./parts\\world.js","old":"a","new":"b"}"#,
-        &declared()
-    ));
-}
-
-/// 临时文件、bash 探针、非法参数、空声明都不算进展(否则自检循环会被清零)。
-#[test]
-fn non_deliverable_writes_are_not_progress() {
-    for (name, args) in [
-        ("fs_write", r#"{"path":"_check.js","content":"x"}"#),
-        ("fs_write", r#"{"path":"parts/other.js","content":"x"}"#),
-        ("bash", r#"{"command":"node probe.cjs"}"#),
-        ("fs_write", r#"{"path":"../outside.js"}"#),
-        ("fs_write", r#"{"path":"C:/tmp/a.js"}"#),
-        ("fs_write", r#"not-json"#),
-    ] {
-        assert!(
-            !is_declared_file_write(name, args, &declared()),
-            "{name} {args} 不应算声明文件进展"
-        );
-    }
-    assert!(!is_declared_file_write(
-        "fs_write",
-        r#"{"path":"parts/world.js"}"#,
-        &[]
-    ));
-}
-
 /// TMR3-L6:台账增量(含 bash 写入)命中声明文件同样算进展。
 #[test]
 fn ledger_change_hits_declared_file() {

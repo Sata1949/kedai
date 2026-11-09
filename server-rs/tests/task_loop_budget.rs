@@ -360,8 +360,8 @@ async fn readonly_streak_nudges_then_breaks() {
     );
     let result = detail["task"]["result"].as_str().unwrap_or("");
     assert!(
-        result.contains("第16轮说明"),
-        "应保留熔断那一轮的正文(恰在第 16 次只读后中止): {result:?}"
+        result.contains("第17轮说明"),
+        "应保留熔断那一轮的正文(首次读取提供新事实，其后 16 次无新信息读取才中止): {result:?}"
     );
     let error = detail["task"]["error"].as_str().unwrap_or("");
     assert!(
@@ -373,7 +373,7 @@ async fn readonly_streak_nudges_then_breaks() {
     let nudge = details
         .iter()
         .find(|d| d.contains("只读探索提醒"))
-        .unwrap_or_else(|| panic!("应在第 8 次只读后透出提醒: {details:?}"));
+        .unwrap_or_else(|| panic!("应在连续 8 次无新信息的只读后透出提醒: {details:?}"));
     assert!(
         nudge.contains("8 次"),
         "提醒应写明触发阈值,便于用户理解: {nudge}"
@@ -383,7 +383,7 @@ async fn readonly_streak_nudges_then_breaks() {
         .find(|d| d.contains("连续只读空转熔断"))
         .unwrap_or_else(|| panic!("应在第二次达到阈值后熔断: {details:?}"));
     assert!(
-        broke.contains("提醒后仍未落盘"),
+        broke.contains("提醒后仍无新信息"),
         "熔断事件应说明提醒已发过: {broke}"
     );
 

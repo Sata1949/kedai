@@ -303,8 +303,8 @@ async fn prompt_preview_follows_mode() {
         ("task_planner_prompt", "你是任务规划器"),
         ("task_executor_prompt", "你是任务执行者"),
         ("task_summarizer_prompt", "你是任务汇总者"),
-        ("task_executor_tool_discipline", "自测通过即收尾"),
-        ("task_executor_write_first_discipline", "写盘优先"),
+        ("task_executor_tool_discipline", "按验收证据收尾"),
+        ("task_executor_write_first_discipline", "文件交付纪律"),
     ] {
         let hit = layers.iter().any(|l| {
             l["source"].as_str() == Some(src)

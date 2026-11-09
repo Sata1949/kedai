@@ -88,6 +88,11 @@ pub struct LoopGuard {
 }
 
 impl LoopGuard {
+    /// 产物内容已改变：旧版本上的重复验证不再代表当前版本空转。
+    pub fn clear(&mut self) {
+        self.history.clear();
+    }
+
     pub fn new(window: usize, threshold: usize) -> Self {
         Self {
             window: window.max(1),
@@ -310,6 +315,11 @@ pub struct SemanticGuard {
 }
 
 impl SemanticGuard {
+    /// 只清历史，保留窗口、阈值与关闭态。
+    pub fn clear(&mut self) {
+        self.history.clear();
+    }
+
     pub fn new(window: usize, min_calls: usize, max_distinct: usize) -> Self {
         Self {
             window: window.max(1),

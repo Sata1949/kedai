@@ -258,7 +258,7 @@ pub(crate) async fn run_agent_loop(
             no_progress_limit: call
                 .no_progress_guard
                 .then_some(super::TASK_NO_PROGRESS_LIMIT),
-            // SKY-8:集成主读满阈值后提醒先写入口骨架(只提醒,不熔断)。
+            // SKY-8:集成主读满阈值后提醒梳理接口与验收条件(只提醒,不熔断)。
             shard_read_nudge_after: call.shard_read_nudge_after,
             // 三档授权(2026-11-06):随预算载体下传,未绑定工作区也能生效。
             task_authorization: call.task_authorization,

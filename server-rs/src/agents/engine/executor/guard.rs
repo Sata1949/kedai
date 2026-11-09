@@ -1,5 +1,4 @@
 // 工具闸门 / 预算与无进展守卫（C-2F-2 自 executor.rs 纯搬运）。
-use serde_json::Value;
 
 /// AGENT 模式工具循环:生成 → 有 tool_calls 则逐个执行并回填消息 → 重新生成。
 /// 轮次上限:None = 聊天默认 32;Some(0) = 任务模式不限;Some(n>0) = 显式上限。
@@ -127,31 +126,6 @@ pub(crate) fn resolve_max_rounds(configured: Option<u32>) -> Option<usize> {
         Some(n) => Some(n.max(1) as usize),
         None => Some(32),
     }
-}
-
-/// 本次工具调用是否是「成功写入本主声明文件」的候选(P0-2 纯函数)。
-///
-/// 只认带 `path` 参数的工作区写工具(`fs_write`/`fs_edit`)+ 路径命中
-/// `scope.declared_files()`。`bash` 刻意不算:它可写可读,且自检循环正是用
-/// `bash` 跑探针;临时文件工具调用也不算——它们不推进交付物。`fs_patch` 的
-/// 补丁目标暂不解析(其参数是补丁文本,不是单一路径),因此不会计为进展。
-/// 结果是否成功由调用方用 `output` 判定(本函数只看调用意图与目标路径)。
-pub(crate) fn is_declared_file_write(name: &str, arguments: &str, declared: &[String]) -> bool {
-    if !crate::tools::tool_sets::is_workspace_write_tool(name) || declared.is_empty() {
-        return false;
-    }
-    let Ok(args) = serde_json::from_str::<Value>(arguments) else {
-        return false;
-    };
-    let Some(raw) = args.get("path").and_then(|v| v.as_str()) else {
-        return false;
-    };
-    let Some(key) = crate::models::ownership::normalize_workspace_rel(raw) else {
-        return false;
-    };
-    declared.iter().any(|d| {
-        crate::models::ownership::normalize_workspace_rel(d).as_deref() == Some(key.as_str())
-    })
 }
 
 /// 台账增量里是否出现了「本主声明文件」的改动(TMR3-L6 纯函数)。
