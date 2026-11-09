@@ -16,12 +16,9 @@ use crate::services::task_core::assemble_from_plan;
 impl TaskService {
     // ===== 执行 =====
 
-    /// 启动后台执行(按 task_mode 派发;legacy 路径行为逐字节不变)。
-    /// 重跑会清空旧 plan/result/error 并重新规划。
-    /// 每次 run 分配新 token 覆盖旧条目,旧后台任务退出时凭 token 判断自己是否仍是当前执行。
-    /// 全部六模式(含 legacy)统一经 TaskEngine 派发;收尾由执行器返回 TaskTerminal 值、
-    /// 引擎经 finalize_terminal 统一落库(批次 B 依赖倒置),此处不再分叉。
+    /// 原子认领并启动后台执行；重跑清空旧成果，六模式统一由 TaskEngine 派发。
     pub fn run(self: &Arc<Self>, id: &str) -> Result<(), String> {
+        let _claim = self.lifecycle.lock().unwrap_or_else(|e| e.into_inner());
         let task = self.get(id).ok_or("任务不存在")?;
         if task.status == TaskStatus::Running || task.status == TaskStatus::Planning {
             return Err("任务已在执行中".into());
@@ -30,7 +27,9 @@ impl TaskService {
         if task.status == TaskStatus::Planned {
             return Err("计划已产出待批准:请调用 approve 批准续跑,或 stop 放弃".into());
         }
-        self.reset_task(id);
+        if !self.reset_task(id) {
+            return Err("任务执行认领失败".into());
+        }
         let (cancel, token) = self.register_cancel(id);
         let backend: std::sync::Arc<dyn crate::services::task_core::TaskBackend> = self.clone();
         let engine = crate::services::task_engine::TaskEngine::new(backend, self.engine.clone());
@@ -53,6 +52,7 @@ impl TaskService {
         plan: Option<Vec<TaskStep>>,
         exec_mode: crate::models::types::TaskApproveExecMode,
     ) -> Result<(), String> {
+        let _claim = self.lifecycle.lock().unwrap_or_else(|e| e.into_inner());
         let task = self.get(id).ok_or("任务不存在")?;
         if task.status != TaskStatus::Planned {
             return Err("仅待批准(planned)状态的任务可批准".into());
@@ -84,7 +84,9 @@ impl TaskService {
                 task.plan.clone()
             }
         };
-        let _ = self.set_status(id, TaskStatus::Planning);
+        if !self.set_status(id, TaskStatus::Planning) {
+            return Err("任务执行认领失败".into());
+        }
         // 批准即让 planned 态的预览 result 失效(提交 2):那条 result 是「待批准的计划清单」,
         // 只在 planned 态有语义。留着它会让续跑的失败/取消兜底因「result 非空」而跳过
         // (salvage_partial_result 的判据),用户手里就只剩一份**计划**被当成「已完成部分的
@@ -184,11 +186,7 @@ impl TaskService {
         finalize_run(self, task_id, token, ended_by_cancel, error);
     }
 
-    /// 六模式(task_engine)后台执行到达 planned 终态(plan 模式计划产出轮)的收尾:
-    /// 计划清单文本落 result(批次 R1:planned 态 result 语义 = 待批准的计划清单,
-    /// 见 set_planned_result;仅自己仍是当前执行时写入,与 complete_mode_run 同款
-    /// 「旧执行让位」语义),随后按 token 清理取消条目;后续 approve 会经
-    /// register_cancel 开启新执行。
+    /// 当前 token 的计划清单落 result 并清理条目；approve 再登记新轮。
     pub(crate) fn planned_mode_run(&self, task_id: &str, token: u64, result: &str) {
         if self.is_current_run(task_id, token) && !self.set_planned_result(task_id, result) {
             tracing::error!(task_id, token, "计划清单落库失败(planned 路径)");
@@ -196,12 +194,7 @@ impl TaskService {
         self.remove_cancel_if(task_id, token);
     }
 
-    /// 任务执行终态统一收尾入口(批次 B 依赖倒置):执行器只返回 TaskTerminal 值,
-    /// 由本方法按变体分派到既有 5 种写入形态,语义逐字节不变。
-    ///
-    /// `ended_by_cancel` 由引擎侧在收尾点读取消通道求值后传入:它是取消判定的
-    /// **唯一来源**(TaskTerminal 不再携带该信息,避免两处求值不一致)。
-    /// Noop 等价于原 `finalize_run(error=None, 非取消)` 分支:仅清理取消条目。
+    /// 终态收尾与启动/停止串行化；取消优先，旧 token 仍只清理自身。
     pub(crate) fn finalize_terminal(
         &self,
         task_id: &str,
@@ -209,6 +202,12 @@ impl TaskService {
         terminal: TaskTerminal,
         ended_by_cancel: bool,
     ) {
+        let _claim = self.lifecycle.lock().unwrap_or_else(|e| e.into_inner());
+        // 自检 await 后取消优先；锁内重读通道，覆盖引擎读取取消值后 stop 的窄窗。
+        if ended_by_cancel || self.run_cancelled(task_id, token) {
+            self.finalize_mode_run(task_id, token, true, None);
+            return;
+        }
         match terminal {
             TaskTerminal::Complete {
                 result,
@@ -238,13 +237,13 @@ impl TaskService {
     /// 「追加 N」段附加进 result,`mode=replace` 用产出整体替换 result(段标「修订 N」),
     /// 以支持「压缩 / 重写 / 改前面」类指令(实测 append 无法表达,压缩后原文仍在)。
     /// 取消/失败语义与 run 对齐:stop 可中断(ended),失败落 error 文本。
-    /// 不经 TaskEngine 派发:收尾语义不同(改写 result + 写消息)。
     pub fn followup(
         self: &Arc<Self>,
         id: &str,
         content: &str,
         mode: TaskFollowupMode,
     ) -> Result<(), String> {
+        let _claim = self.lifecycle.lock().unwrap_or_else(|e| e.into_inner());
         let task = self.get(id).ok_or("任务不存在")?;
         if !matches!(
             task.status,
@@ -284,16 +283,16 @@ impl TaskService {
         goal.push_str(&tail);
         let prev_partial = task.status == TaskStatus::Partial;
         let prev_result = task.result.clone();
-        // 先登记新执行再写 running(2026-09-03 并发实测竞态):stop 后旧后台任务
-        // 的收尾(finalize_run/complete_mode_run)可能晚到——若先写 running 后登记,
-        // 旧收尾凭旧 token 仍是 current 会把 ended 盖回 running;先登记则旧收尾
-        // is_current_run 让位不写,新执行的 running 不被覆盖。
+        // 认领临界区内登记新 token 后再写 running，旧轮收尾不能插入。
         // SKY-9-L1:追加指令是新的一轮交付,上一轮运行期自检结论已过期。
         // 在写 status 事件之前清空,避免前端收到事件后短暂读到旧结论;
         // followup 不做文件交付门槛(可只回答文字),故本轮也不会重跑运行期自检。
         let _ = self.clear_runtime_issues(id);
         let (cancel, token) = self.register_cancel(id);
-        let _ = self.set_status(id, TaskStatus::Running);
+        if !self.set_status(id, TaskStatus::Running) {
+            self.remove_cancel_if(id, token);
+            return Err("任务执行认领失败".into());
+        }
         // 经任务引擎派发 followup 执行器(统一派发点;收尾由执行器返回
         // TaskTerminal::Followup,引擎 finalize_terminal 转调 complete_followup_run)
         let backend: std::sync::Arc<dyn crate::services::task_core::TaskBackend> = self.clone();
@@ -314,38 +313,36 @@ impl TaskService {
         Ok(())
     }
 
-    /// 批准环节规划对话(批次 R2b plan-chat):仅 planned 态;用户反馈落
-    /// task_messages(kind=plan_chat)→ 规划器携带(原始目标 + 当前计划 JSON +
-    /// 全部 plan_chat 历史)同步修订产出新计划(register_cancel 登记,stop
-    /// 可中断;侦察/解析/分级重试与首轮规划同骨架)→ set_plan 替换 +
-    /// planned 态 result 计划清单文本同步刷新 + assistant 修订说明落库 →
-    /// 重发 approval_required 事件(plan 事件由 set_plan 发射);任务保持
-    /// planned,等待用户再次审阅。stop 竞态/新执行覆盖时不写库。
-    /// 返回修订后计划(供 API 响应携带,前端可即时刷新)。
+    /// planned 计划修订：await 前认领，await 后按 token 提交；两段均与批准/停止互斥。
+    /// LLM 调用不持 lifecycle 锁；停止或新轮接管后不覆盖计划。
     pub async fn plan_chat(
         self: &Arc<Self>,
         id: &str,
         message: &str,
     ) -> Result<Vec<TaskStep>, String> {
-        let task = self.get(id).ok_or("任务不存在")?;
-        if task.status != TaskStatus::Planned {
-            return Err(format!(
-                "仅待批准(planned)状态的任务可进行规划对话(当前:{})",
-                task.status.as_str()
-            ));
-        }
         let message = message.trim();
         if message.is_empty() {
             return Err("反馈内容不能为空".into());
         }
-        // 历史先于本轮落库读取(本轮反馈单独成段,不重复进历史段)
-        let history: Vec<TaskMessageRecord> = self
-            .list_task_messages(id)
-            .into_iter()
-            .filter(|m| m.kind == "plan_chat")
-            .collect();
-        self.add_task_message(id, "user", "plan_chat", message)?;
-        let (cancel, token) = self.register_cancel(id);
+        let (task, history, cancel, token) = {
+            let _claim = self.lifecycle.lock().unwrap_or_else(|e| e.into_inner());
+            let task = self.get(id).ok_or("任务不存在")?;
+            if task.status != TaskStatus::Planned {
+                return Err(format!(
+                    "仅待批准(planned)状态的任务可进行规划对话(当前:{})",
+                    task.status.as_str()
+                ));
+            }
+            // 历史先于本轮落库读取(本轮反馈单独成段,不重复进历史段)
+            let history: Vec<TaskMessageRecord> = self
+                .list_task_messages(id)
+                .into_iter()
+                .filter(|m| m.kind == "plan_chat")
+                .collect();
+            self.add_task_message(id, "user", "plan_chat", message)?;
+            let (cancel, token) = self.register_cancel(id);
+            (task, history, cancel, token)
+        };
         // 侦察作用域(D1):与执行期同源解析(绑定工作区 → 该目录;未绑定 → 无)。
         // 修订是只读侦察,目录不可用时降级为「无作用域」而不是拒绝修订——口径同
         // plan_task 的「侦察失败不沉规划」。
@@ -372,8 +369,10 @@ impl TaskService {
         };
         let (steps, out) = revised;
         self.record_usage(id, "planner", None, &out);
-        // stop 竞态/新执行覆盖:不写库(任务状态由 stop 路径掌管)
-        if *cancel.borrow() || !self.is_current_run(id, token) {
+        // await 已结束；校验归属与提交计划必须处于同一个短锁区。
+        let _claim = self.lifecycle.lock().unwrap_or_else(|e| e.into_inner());
+        let cancelled = *cancel.borrow();
+        if cancelled || !self.is_current_run(id, token) {
             self.remove_cancel_if(id, token);
             return Err("任务已停止".into());
         }
@@ -427,6 +426,7 @@ impl TaskService {
     /// error,而这里语义是**正常收尾**(与 stop 同源),status 必须是 ended。
     /// `reason = None`(用户主动停止)不写 error 列——「用户停了」不需要解释。
     pub(super) fn finish_ended(&self, id: &str, reason: Option<&str>) -> bool {
+        let _claim = self.lifecycle.lock().unwrap_or_else(|e| e.into_inner());
         // 部分成果兜底(提交 2):先把已完成步骤的产出写进 result,再置 ended——
         // 终态一可见就已带成果,不出现「点了停止、成果还没落库」的空窗;
         // 执行器随后收尾时因 result 非空自动跳过(同一判据,幂等)。

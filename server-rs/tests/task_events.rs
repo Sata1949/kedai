@@ -665,7 +665,8 @@ async fn task_events_pull_returns_tail_and_empty_after_max() {
 /// 模拟一次窗口清理——比驱动 2000+ 次真实事件快,得到的状态与真实运行完全同形。
 #[tokio::test]
 async fn task_events_pull_reports_truncated_window() {
-    let _guard = test_lock_read().await;
+    // 自开写连接绕过 Db::writer，必须独占共享测试库，避免其他事件事务升级写锁失败。
+    let _guard = test_lock().await;
     let app = test_app();
     let id = create_task(app, "窗口截断用例").await;
 

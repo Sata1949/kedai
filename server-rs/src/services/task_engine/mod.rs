@@ -365,11 +365,12 @@ impl TaskEngine {
         }) {
             Ok(scope) => scope,
             Err(e) => {
-                self.svc.finalize_terminal(
+                finalize_with_cancel(
+                    self.svc.as_ref(),
                     &task.id,
                     token,
                     TaskTerminal::Failed { error: Some(e) },
-                    *cancel.borrow(),
+                    &cancel,
                 );
                 return;
             }
@@ -503,7 +504,8 @@ impl TaskEngine {
                             if !runtime_issues.is_empty() {
                                 content_issues.extend(runtime_issues.iter().cloned());
                             }
-                            self.svc.set_runtime_issues(&task.id, &runtime_issues);
+                            self.svc
+                                .set_runtime_issues(&task.id, token, &runtime_issues);
                             if !outcome.notes.is_empty() {
                                 self.svc.emit_event(
                                     TaskEventKind::Status,
@@ -562,22 +564,78 @@ impl TaskEngine {
                 } else {
                     terminal
                 };
-                self.svc
-                    .finalize_terminal(&task.id, token, terminal, *cancel.borrow());
+                finalize_with_cancel(self.svc.as_ref(), &task.id, token, terminal, &cancel);
             }
-            Err(e) => self.svc.finalize_terminal(
+            Err(e) => finalize_with_cancel(
+                self.svc.as_ref(),
                 &task.id,
                 token,
                 TaskTerminal::Failed { error: Some(e) },
-                *cancel.borrow(),
+                &cancel,
             ),
         }
     }
 }
 
+// 三条终态路径共用同一个取消快照边界。
+fn finalize_with_cancel(
+    sink: &dyn crate::services::task_core::TaskTerminalSink,
+    task_id: &str,
+    token: u64,
+    terminal: TaskTerminal,
+    cancel: &watch::Receiver<bool>,
+) {
+    let ended_by_cancel = *cancel.borrow();
+    sink.finalize_terminal(task_id, token, terminal, ended_by_cancel);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_boundary_releases_watch_before_calling_sink() {
+        use crate::services::task_core::TaskTerminalSink;
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Mutex,
+        };
+        struct Sink {
+            tx: watch::Sender<bool>,
+            writable: AtomicBool,
+            writer: Mutex<Option<std::thread::JoinHandle<()>>>,
+        }
+        impl TaskTerminalSink for Sink {
+            fn finalize_terminal(&self, _: &str, _: u64, _: TaskTerminal, cancelled: bool) {
+                assert!(!cancelled);
+                let tx = self.tx.clone();
+                let (done, wait) = std::sync::mpsc::channel();
+                *self.writer.lock().unwrap() = Some(std::thread::spawn(move || {
+                    tx.send(true).unwrap();
+                    done.send(()).ok();
+                }));
+                // 模拟 stop 持 lifecycle 后写 watch：进入宿主时必须已释放读锁。
+                // 超时也先返回宿主，让错误实现释放临时 Ref，避免测试永久挂死。
+                self.writable.store(
+                    wait.recv_timeout(Duration::from_secs(1)).is_ok(),
+                    Ordering::SeqCst,
+                );
+            }
+        }
+        let (tx, rx) = watch::channel(false);
+        let sink = Sink {
+            tx,
+            writable: AtomicBool::new(false),
+            writer: Mutex::new(None),
+        };
+        finalize_with_cancel(&sink, "task", 1, TaskTerminal::Noop, &rx);
+        sink.writer.lock().unwrap().take().unwrap().join().unwrap();
+        assert!(
+            sink.writable.load(Ordering::SeqCst),
+            "终态调用仍持有 watch 读锁，会与 lifecycle 形成 ABBA"
+        );
+        assert!(*rx.borrow());
+    }
 
     /// 最小配置 + `from_config` 构一份全默认设置(与设置加载/保存类测试同款;
     /// 不走 `serde_json::from_str("{}")`——连接类字段没有 serde default)。

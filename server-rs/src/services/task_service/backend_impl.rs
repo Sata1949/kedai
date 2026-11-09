@@ -38,7 +38,11 @@ impl TaskStore for TaskService {
         TaskService::set_flow_snapshot(self, id, snapshot)
     }
 
-    fn set_runtime_issues(&self, id: &str, issues: &[String]) -> bool {
+    fn set_runtime_issues(&self, id: &str, token: u64, issues: &[String]) -> bool {
+        let _claim = self.lifecycle.lock().unwrap_or_else(|e| e.into_inner());
+        if !self.is_current_run(id, token) || self.run_cancelled(id, token) {
+            return false;
+        }
         TaskService::set_runtime_issues(self, id, issues)
     }
 

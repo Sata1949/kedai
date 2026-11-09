@@ -178,7 +178,7 @@ impl DataLocationService {
         // 只有已完成任务、附件记录或导入归档的目标会被误判成空壳并整盘覆盖。
         // 迁移是不可逆的破坏性操作,这里用更宽的专用判据:认不出是空壳就一律拒绝。
         if let Some(reason) =
-            describe_target_user_data(&target_data).map_err(DataLocationError::Internal)?
+            describe_target_root_user_data(root).map_err(DataLocationError::Internal)?
         {
             return Err(DataLocationError::BadRequest(format!(
                 "{} 已存在 Kedai 用户数据({reason}),不能直接覆盖;请换一个盘,或先备份/清理该目录",
@@ -228,7 +228,7 @@ impl DataLocationService {
         }
 
         // DATA-LOC-3:归档单独按 `imports_dir` 搬进新根的有效归档目录。
-        // 归档里允许出现 .log，因此不能套用数据目录的日志后缀过滤。
+        // 归档名是用户原文件名，不适用数据库、日志与备份残留过滤。
         let target_imports = root.join(IMPORTS_DIR_NAME);
         if source_imports.is_dir() && source_imports != target_imports {
             copy_tree_inner(&source_imports, &target_imports, false, false, true)
@@ -287,9 +287,7 @@ fn copy_tree(source: &Path, target: &Path, skip_images: bool) -> Result<u64, Str
     copy_tree_with(source, target, skip_images, false)
 }
 
-/// 同 `copy_tree`，另加两项控制：
-/// - `skip_imports`：旧布局(data 内含 imports)的归档要搬到新根 imports，不能留在 data；
-/// - `copy_logs`：归档目录里的 `.log` 是用户导入的原始文件，不适用数据目录的日志过滤。
+/// 同 `copy_tree`，旧布局的 imports 单独迁移到新根，不能留在 data。
 fn copy_tree_with(
     source: &Path,
     target: &Path,
@@ -304,7 +302,7 @@ fn copy_tree_inner(
     target: &Path,
     skip_images: bool,
     skip_imports: bool,
-    copy_logs: bool,
+    archive_files: bool,
 ) -> Result<u64, String> {
     if !source.is_dir() {
         return Ok(0);
@@ -323,13 +321,14 @@ fn copy_tree_inner(
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
-        if name == "kedai.db"
-            || name.ends_with("-wal")
-            || name.ends_with("-shm")
-            || (!copy_logs && name.ends_with(".log"))
-            || name.contains(".bak-")
-            || name.starts_with(".verify")
-            || name == MIGRATED_MARKER
+        if (!archive_files
+            && (name == "kedai.db"
+                || name.ends_with("-wal")
+                || name.ends_with("-shm")
+                || name.ends_with(".log")
+                || name.contains(".bak-")
+                || name.starts_with(".verify")
+                || name == MIGRATED_MARKER))
             || (skip_images && name == "images")
             || (skip_imports && name == "imports")
         {
@@ -338,7 +337,7 @@ fn copy_tree_inner(
         let from = entry.path();
         let to = target.join(&name);
         if file_type.is_dir() {
-            copied += copy_tree_inner(&from, &to, false, false, copy_logs)?;
+            copied += copy_tree_inner(&from, &to, false, false, archive_files)?;
         } else {
             fs::copy(&from, &to)
                 .map_err(|e| format!("复制 {} → {} 失败: {e}", from.display(), to.display()))?;
@@ -393,6 +392,20 @@ pub fn probe_sqlite_support(data_dir: &Path) -> Result<(), String> {
 /// 取舍是「认不出就拒绝」：迁移会整盘覆盖且不可逆，误拒只让用户换个空盘，
 /// 误放则丢失目标盘数据。这比 `config::dir_has_user_data` 更宽——后者只认
 /// 设置 / 非内置角色 / 会话，会把「只有已完成任务」的库当成空壳。
+fn describe_target_root_user_data(root: &Path) -> Result<Option<String>, String> {
+    for (dir, label) in [
+        (IMPORTS_DIR_NAME, "导入归档目录非空"),
+        (OUTPUTS_DIR_NAME, "产物目录非空"),
+        (TASK_RECORDS_DIR_NAME, "任务记录目录非空"),
+    ] {
+        let path = root.join(dir);
+        if path.is_dir() && dir_has_any_entry(&path) {
+            return Ok(Some(label.to_string()));
+        }
+    }
+    describe_target_user_data(&root.join(DATA_DIR_NAME))
+}
+
 fn describe_target_user_data(target_data: &Path) -> Result<Option<String>, String> {
     if !target_data.is_dir() {
         return Ok(None);
@@ -873,5 +886,83 @@ mod tests {
             .query_row("SELECT id FROM keep", [], |row| row.get(0))
             .unwrap();
         assert_eq!(n, 7, "探针不得改动已有库");
+    }
+}
+
+#[cfg(test)]
+mod audit_regressions {
+    use super::*;
+    use crate::utils::test_support::TempDataDir;
+
+    #[test]
+    fn audit_root_siblings_block_migration_without_overwrite() {
+        for dir in [IMPORTS_DIR_NAME, OUTPUTS_DIR_NAME, TASK_RECORDS_DIR_NAME] {
+            for with_data in [false, true] {
+                let source = TempDataDir::new("audit-source");
+                let target = TempDataDir::new("audit-target");
+                let pointer = TempDataDir::new("audit-pointer");
+                let mut cfg = crate::config::test_config();
+                cfg.data_dir = source.path().to_path_buf();
+                cfg.imports_dir = source.join("imports");
+                cfg.images_dir = source.join("images");
+                cfg.task_scratch_dir = source.join("scratch");
+                std::fs::write(source.join("settings.json"), "新设置").unwrap();
+                if with_data {
+                    std::fs::create_dir_all(target.join("data")).unwrap();
+                }
+                let existing = target.join(dir).join("preserve.json");
+                std::fs::create_dir_all(existing.parent().unwrap()).unwrap();
+                std::fs::write(&existing, "原有数据").unwrap();
+                let pointer_path = pointer.join("pointer.json");
+                let svc = DataLocationService::with_pointer_path(cfg, pointer_path.clone());
+                assert!(
+                    matches!(
+                        svc.apply_to_root(target.path()),
+                        Err(DataLocationError::BadRequest(_))
+                    ),
+                    "{dir}, data={with_data}"
+                );
+                assert_eq!(std::fs::read_to_string(existing).unwrap(), "原有数据");
+                assert!(!target.join("data/settings.json").exists());
+                assert!(!pointer_path.exists());
+                assert!(!source.join(MIGRATED_MARKER).exists());
+            }
+        }
+    }
+
+    #[test]
+    fn audit_import_archives_keep_database_like_names() {
+        let source = TempDataDir::new("audit-archives");
+        let target = TempDataDir::new("audit-archives-target");
+        let pointer = TempDataDir::new("audit-archives-pointer");
+        let mut cfg = crate::config::test_config();
+        cfg.data_dir = source.path().to_path_buf();
+        cfg.imports_dir = source.join("imports");
+        cfg.images_dir = source.join("images");
+        cfg.task_scratch_dir = source.join("scratch");
+        let archive = cfg.imports_dir.join("20261109-120000");
+        std::fs::create_dir_all(&archive).unwrap();
+        let names = [
+            "preset.bak-202611.json",
+            "kedai.db",
+            "notes-wal",
+            "notes-shm",
+            ".verify-card",
+            "notes.log",
+            MIGRATED_MARKER,
+        ];
+        for name in names {
+            std::fs::write(archive.join(name), name).unwrap();
+        }
+        let svc = DataLocationService::with_pointer_path(cfg, pointer.join("p.json"));
+        svc.apply_to_root(target.path()).unwrap();
+        for name in names {
+            assert_eq!(
+                std::fs::read_to_string(target.join("imports/20261109-120000").join(name)).unwrap(),
+                name
+            );
+            assert_eq!(std::fs::read_to_string(archive.join(name)).unwrap(), name);
+        }
+        assert!(!target.join("data/imports").exists());
     }
 }

@@ -11,18 +11,30 @@ impl TaskService {
     // ===== 取消信号 =====
 
     /// 注册本次执行:总是新建 watch 通道并用新 token 覆盖旧条目(重跑语义),
-    /// 返回取消接收端与本次 token。旧执行持有的 Sender 随 drop 失效,不影响新通道。
+    /// 返回取消接收端与本次 token；替换时先通知旧轮停止，新通道不受影响。
     pub(super) fn register_cancel(&self, id: &str) -> (watch::Receiver<bool>, u64) {
         let token = NEXT_RUN_TOKEN.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = watch::channel(false);
-        self.cancels
+        if let Some((old, _)) = self
+            .cancels
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(id.to_string(), (tx, token));
+            .insert(id.to_string(), (tx, token))
+        {
+            let _ = old.send(true);
+        }
         // 活动心跳起点(提交 3 · D7):本轮执行从此刻起算「活着」,空闲看守据此
         // 不会把刚启动、还没产出任何事件的任务误判为空闲。
         self.touch_activity(id);
         (rx, token)
+    }
+
+    pub(super) fn run_cancelled(&self, id: &str, token: u64) -> bool {
+        self.cancels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .is_some_and(|(tx, current)| *current == token && *tx.borrow())
     }
 
     pub(super) fn signal_cancel(&self, id: &str) {

@@ -119,6 +119,8 @@ pub struct TaskService {
     /// 任务 id → (取消信号, 本次执行 token)。token 用于区分同一任务的先后执行:
     /// stop 后立即重跑时,旧后台任务退出不得删除/覆盖新任务的取消条目与状态。
     cancels: Mutex<HashMap<String, (watch::Sender<bool>, u64)>>,
+    /// 同步认领、停止与终态写入串行化；绝不持锁跨 await。
+    lifecycle: Mutex<()>,
     /// 任务 id → **最近活动时刻**(提交 3 · D7,空闲看守的活动心跳)。
     ///
     /// 为什么需要内存心跳而不是只看库:任务侧的 `task_llm_calls` 行是**整轮工具循环
@@ -159,6 +161,7 @@ impl TaskService {
             runtime_prompt,
             executors,
             cancels: Mutex::new(HashMap::new()),
+            lifecycle: Mutex::new(()),
             activity: Mutex::new(HashMap::new()),
             events: tokio::sync::broadcast::channel(events::EVENTS_CAPACITY).0,
         };
@@ -659,3 +662,6 @@ fn read_or_log(db: &Db, op: &str) -> Option<PooledRead> {
         }
     }
 }
+
+#[cfg(test)]
+mod audit_tests;

@@ -146,10 +146,13 @@ pub(crate) async fn spa_fallback(
     let method = req.method().clone();
 
     if method == axum::http::Method::GET && !path.starts_with("/api/") {
-        // 归一化静态路径:丢弃 ".." / 空段 / 点段,防止目录穿越读到 web/dist 之外的文件
+        // 静态 URL 只接受普通路径段；Windows 前缀与点段不能进入磁盘拼接。
+        if !valid_static_relative_path(path.trim_start_matches('/')) {
+            return err_with_code(ErrorCode::NotFound, "Not Found", StatusCode::NOT_FOUND);
+        }
         let rel: String = path
             .split('/')
-            .filter(|seg| !seg.is_empty() && *seg != "." && *seg != "..")
+            .filter(|seg| !seg.is_empty())
             .collect::<Vec<_>>()
             .join("/");
         let rel = rel.trim_start_matches('/');
@@ -196,13 +199,29 @@ pub(crate) async fn spa_fallback(
 /// 磁盘分支用 tokio::fs(B-1:不在 tokio worker 上做同步文件 IO);
 /// 内嵌分支是编译期嵌入的内存数据,保持同步零开销。
 async fn read_file_or_embedded(state: &AppState, rel: &str) -> Option<Vec<u8>> {
+    if !valid_static_relative_path(rel) {
+        return None;
+    }
     if let Some(web_dist) = &state.config.web_dist {
-        let disk = web_dist.join(rel);
-        if let Ok(bytes) = tokio::fs::read(&disk).await {
-            return Some(bytes);
+        if let (Ok(root), Ok(disk)) = (
+            tokio::fs::canonicalize(web_dist).await,
+            tokio::fs::canonicalize(web_dist.join(rel)).await,
+        ) {
+            if disk.starts_with(&root) {
+                if let Ok(bytes) = tokio::fs::read(&disk).await {
+                    return Some(bytes);
+                }
+            }
         }
     }
     embedded::get(rel)
+}
+
+// 同时拒绝 Windows 盘符、UNC/反斜杠和父目录段；在所有平台上保持同一判据。
+fn valid_static_relative_path(rel: &str) -> bool {
+    !rel.starts_with('/')
+        && !rel.contains(['\\', ':'])
+        && !rel.split('/').any(|part| matches!(part, "." | ".."))
 }
 
 /// 内嵌 web/dist(编译时嵌入;要求目录存在)
@@ -586,5 +605,82 @@ mod avatar_mime_tests {
         assert_eq!(sniff_image_mime(b"BMxxxx"), Some("image/bmp"));
         assert_eq!(sniff_image_mime(b"{\"json\":true}"), None);
         assert_eq!(sniff_image_mime(b""), None);
+    }
+}
+
+#[cfg(test)]
+mod audit_regressions {
+    use super::*;
+    use crate::utils::test_support::TempDataDir;
+    use http_body_util::BodyExt;
+
+    #[tokio::test]
+    async fn audit_static_disk_boundary_and_normal_assets() {
+        let data = TempDataDir::new("audit-static-data");
+        let root = TempDataDir::new("audit-static-root");
+        let mut cfg = crate::config::test_config();
+        cfg.data_dir = data.path().to_path_buf();
+        cfg.web_dist = Some(root.path().to_path_buf());
+        std::fs::create_dir_all(root.join("assets")).unwrap();
+        std::fs::write(root.join("index.html"), "磁盘首页").unwrap();
+        std::fs::write(root.join("assets/app-test.js"), "磁盘脚本").unwrap();
+        let state = AppState::new(cfg).unwrap();
+        for (path, expected) in [
+            ("/", "磁盘首页"),
+            ("/tasks", "磁盘首页"),
+            ("/assets/app-test.js", "磁盘脚本"),
+        ] {
+            let req = axum::http::Request::builder()
+                .uri(path)
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let response = spa_fallback(State(state.clone()), req).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.into_body().collect().await.unwrap().to_bytes(),
+                expected.as_bytes()
+            );
+        }
+        for path in [
+            "/C:/private",
+            "/C:private",
+            "/assets/../private",
+            "/assets/./private",
+            "/assets/missing.js",
+        ] {
+            let req = axum::http::Request::builder()
+                .uri(path)
+                .body(axum::body::Body::empty())
+                .unwrap();
+            assert_eq!(
+                spa_fallback(State(state.clone()), req).await.status(),
+                StatusCode::NOT_FOUND,
+                "{path}"
+            );
+        }
+        for rel in [
+            "C:/private",
+            "C:private",
+            r"C:\private",
+            r"\\server\share\private",
+            "../private",
+            "/private",
+        ] {
+            assert!(read_file_or_embedded(&state, rel).await.is_none(), "{rel}");
+        }
+        #[cfg(windows)]
+        {
+            let secret = data.join("outside.txt");
+            std::fs::write(&secret, "根外内容").unwrap();
+            let rel = secret.to_string_lossy().replace('\\', "/");
+            assert!(read_file_or_embedded(&state, &rel).await.is_none());
+        }
+        #[cfg(unix)]
+        {
+            let secret = data.join("outside.txt");
+            std::fs::write(&secret, "根外内容").unwrap();
+            std::os::unix::fs::symlink(secret, root.join("escaped.txt")).unwrap();
+            assert!(read_file_or_embedded(&state, "escaped.txt").await.is_none());
+        }
     }
 }
