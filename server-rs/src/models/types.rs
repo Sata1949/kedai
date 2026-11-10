@@ -311,8 +311,7 @@ pub struct PlanStep {
     ///
     /// 范围 256..=1_048_576,保存期校验(上限与全局 `max_context_tokens` 同口径;
     /// 下限刻意低于全局的 65536——本字段的用途正是「给单个节点设**更小**的窗口」)。
-    /// **不裁工具轮内历史**:那是 `tool_history_keep_rounds` / `tool_history_budget_tokens`
-    /// 的职责,两者口径不同(见 `契约-协议与配置.md`)。
+    /// **不裁工具轮内历史**:后续工具轮只追加消息,不受此节点初始输入预算约束。
     /// 挂载子流程的节点上本字段被旁路(子图各节点各自裁剪)、配置保留。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_context: Option<u32>,

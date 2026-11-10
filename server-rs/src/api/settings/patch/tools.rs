@@ -139,27 +139,10 @@ pub(super) fn apply(
     if let Some(v) = body.vision_screenshot_enabled {
         s.vision_screenshot_enabled = v;
     }
-    // 工具历史回灌上限(R3b):扁平全局字段(引擎 run_tool_loop 直读扁平值,
-    // 不入模式覆盖层——任务/聊天工具循环共用同一上限,与 subagent 参数的
-    // 引擎侧消费口径一致);越界拒绝,与 load 钳制区间一致
-    if let Some(v) = body.tool_history_keep_rounds {
-        if !(1..=32).contains(&v) {
-            return Err(PatchError::new(
-                "tool_history_keep_rounds",
-                "tool_history_keep_rounds 必须在 1..=32",
-            ));
-        }
-        s.tool_history_keep_rounds = v;
-    }
-    if let Some(v) = body.tool_history_budget_tokens {
-        if v != 0 && !(1024..=1_048_576).contains(&v) {
-            return Err(PatchError::new(
-                "tool_history_budget_tokens",
-                "tool_history_budget_tokens 须为 0(禁用)或 1024..=1048576",
-            ));
-        }
-        s.tool_history_budget_tokens = v;
-    }
+    // 工具历史保留轮数 / token 预算(R3b)两字段已于 2026-11-09 退役:裁剪会改写历史
+    // 中段、打掉 prompt cache 前缀。这里不再受理,也不再报错——设置结构刻意没有
+    // `deny_unknown_fields`(见 api/settings/mod.rs 头部),旧客户端继续发这两个键
+    // 只会被吞掉,不会 400。
     // HB-1 成本护栏:扁平全局字段(引擎 run_tool_loop 直读扁平值,与工具历史
     // 预算同款——聊天与任务工具循环共用同一上限);越界拒绝,与 load 钳制同区间
     if let Some(v) = body.session_token_budget {

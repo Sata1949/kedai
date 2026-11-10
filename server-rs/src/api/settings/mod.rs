@@ -244,12 +244,6 @@ pub struct UpdateSettingsBody {
     /// 启用的连接 id(否则 400);缺省 = 保持不变
     #[serde(default)]
     pub task_default_connection_id: Option<String>,
-    /// 工具循环历史保留的最近完整轮数(R3b;1..=32;缺省保持不变)
-    #[serde(default)]
-    pub tool_history_keep_rounds: Option<u32>,
-    /// 工具循环历史 token 预算(R3b;0 = 禁用预算闸门,否则 1024..=1M;缺省保持不变)
-    #[serde(default)]
-    pub tool_history_budget_tokens: Option<u32>,
     /// 单次生成 token 预算(HB-1;0 = 关闭,否则 1024..=1e9;缺省保持不变)
     #[serde(default)]
     pub session_token_budget: Option<u32>,

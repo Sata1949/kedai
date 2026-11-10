@@ -197,33 +197,6 @@ pub fn is_write_like_tool(name: &str) -> bool {
     WRITE_LIKE_TOOLS.contains(&name)
 }
 
-/// 工具 → 「工作状态锚点」所在的参数键名(2026-09-30 批次 3,HARNESS3-3)。
-///
-/// 用途:工具历史摘要化时**把这个键留在占位里**(消费点 `agents/engine/messages/trim.rs`)。
-/// 编码类任务的长循环里,旧轮次被摘要后模型若只看见「工具 "fs_write" 原输出约 N 字符」,
-/// 就不知道自己改过哪些文件、跑过什么命令 → 重复读、重复改(台账登记的实测缺陷)。
-/// 锚点只占几十字符,**不是**撤销回收能力:整轮结果/参数照旧回收,只留这一句坐标。
-///
-/// 成员口径 = 会改变工作区或角色文件区状态的工具:工作区写族
-/// (`WORKSPACE_TOOLS` 去掉 `WORKSPACE_READONLY_TOOLS` 的三个只读成员)+ 角色文件区写族
-/// (`write`/`replace`/`create`)+ 命令执行(`bash`,锚点是命令首行)。
-/// **`fs_patch`(Q6,2026-10-01)是写族成员但走「值制」锚点**——补丁首行
-/// (「*** Begin Patch」)无信息量,其锚点取**补丁目标路径清单**,提取在
-/// `agent_tools_fs_patch::patch_anchor`,消费在 `trim.rs::anchor_of`;**不要**在本函数
-/// 里给 fs_patch 补键制映射(那会得到无意义的首行锚点)。
-/// **不要**与 `services/undo_service.rs` 的 `WRITE_TOOLS` 合并:那份管「可回退快照」
-/// (含 `update_variables`/`memory_write`、不含 `bash`),语义不同,各自演进。
-/// 也别与 `tools/action_class.rs::classify` 混用——那份只 match
-/// `read/write/create/replace/bash`,**不含 `fs_write`/`fs_edit`**(它们落 `other()`),
-/// 拿它判「写类」会静默恒假。
-pub fn state_anchor_arg(name: &str) -> Option<&'static str> {
-    match name {
-        "fs_write" | "fs_edit" | "fs_inline_html" | "write" | "replace" | "create" => Some("path"),
-        "bash" => Some("command"),
-        _ => None,
-    }
-}
-
 /// 剔除正文元工具(get_state/apply_patch),保留其余工具与原顺序。
 /// 顺序稳定性是前缀缓存的前提,故不做排序。
 pub fn exclude_meta(defs: Vec<ToolDefinition>) -> Vec<ToolDefinition> {

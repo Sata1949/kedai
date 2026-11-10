@@ -154,8 +154,7 @@ impl CustomExecutor {
     ///    [`OMITTED_SEGMENT_MARKER`](标签行保留),直到合计落在预算内,并 `warn` 一次;
     ///  - 任务目标单独超预算 → 本节点**明确报错**(不静默截断,口径同 5b「引用失效不静默回退」);
     ///  - **不裁系统提示**:它是本节点的指令与档位语义,裁它等于换了个节点;
-    ///  - **不裁工具轮内历史**:那是 `tool_history_keep_rounds` / `tool_history_budget_tokens`
-    ///    的职责(两者口径不同),故本函数只作用于**初始输入装配**。
+    ///  - **不裁工具轮内历史**:本函数只作用于**初始输入装配**;后续工具轮追加消息。
     ///  - 计数用本节点**真实模型**(与调用追踪同源):`node_model` 由连接解析给出。
     pub(super) fn apply_step_max_context(
         &self,

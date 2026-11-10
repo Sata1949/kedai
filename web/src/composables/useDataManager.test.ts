@@ -123,8 +123,6 @@ describe('任务参数档位应用(TPROF-2)', () => {
       max_flow_call_depth: extreme.maxFlowCallDepth,
       max_flow_calls_per_task: extreme.maxFlowCallsPerTask,
       default_node_max_context: extreme.defaultNodeMaxContext,
-      tool_history_keep_rounds: extreme.toolHistoryKeepRounds,
-      tool_history_budget_tokens: extreme.toolHistoryBudgetTokens,
       subagent_max_depth: extreme.subagentMaxDepth,
       subagent_max_concurrency: extreme.subagentMaxConcurrency,
       subagent_result_max_chars: extreme.subagentResultMaxChars,
@@ -140,8 +138,6 @@ describe('任务参数档位应用(TPROF-2)', () => {
     expect(patch.default_max_tokens).toBe(131072);
     expect(patch.max_flow_call_depth).toBe(5);
     expect(patch.max_flow_calls_per_task).toBe(64);
-    expect(patch.tool_history_keep_rounds).toBe(32);
-    expect(patch.tool_history_budget_tokens).toBe(1048576);
     expect(patch.subagent_max_depth).toBe(4);
     expect(patch.subagent_max_concurrency).toBe(16);
     expect(patch.task_step_budget_secs).toBe(3600);

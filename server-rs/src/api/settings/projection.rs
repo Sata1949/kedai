@@ -75,8 +75,6 @@ pub(super) fn settings_json(s: &RuntimeSettings) -> Value {
         "literary_style_preset": s.literary_style_preset,
         "literary_recommend_preset": s.literary_recommend_preset,
         "task_default_connection_id": s.task_default_connection_id,
-        "tool_history_keep_rounds": s.tool_history_keep_rounds,
-        "tool_history_budget_tokens": s.tool_history_budget_tokens,
         "session_token_budget": s.session_token_budget,
         "session_budget_action": s.session_budget_action,
         "loop_guard_semantic_window": s.loop_guard_semantic_window,

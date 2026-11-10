@@ -318,8 +318,6 @@ const VALUE_RULES = {
   task_tool_policy: { kind: 'enum', values: ['all', 'deny_dangerous', 'allowlist'] },
   task_total_budget_secs: { kind: 'range', min: 1, max: 86400, allowZero: true },
   tool_authorization_timeout_secs: { kind: 'range', min: 30, max: 1800 },
-  tool_history_budget_tokens: { kind: 'range', min: 1024, max: 1048576, allowZero: true },
-  tool_history_keep_rounds: { kind: 'range', min: 1, max: 32 },
 };
 
 /** 从 patch/*.rs 的 PatchError 文案派生规则(与 VALUE_RULES 同构)。 */
