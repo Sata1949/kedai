@@ -35,7 +35,7 @@ serde_json = "1"
 # reqwest 仅用于启动期健康检查(health_ok);TLS 后端按目标平台分离,见文件末尾。
 url = "2"
 # 必须与 kedai-server 的 rusqlite 同代:bundled 会链接 libsqlite3-sys,版本不一致会触发 links="sqlite3" 冲突
-rusqlite = { version = "0.40", features = ["bundled", "backup"] }
+rusqlite = { version = "0.41", features = ["bundled", "backup"] }
 # 复用既有 axum 后端:以库形式内嵌,同一进程内启动服务
 kedai-server = { path = "../server-rs" }
 # D-4:日志宏(kedai-server 已迁 tracing;Tauri 2 自身也传递依赖,无新增体量)
