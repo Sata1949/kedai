@@ -82,6 +82,9 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: 任务质量评测自测（不调用模型）
+        run: node --test tools/bench/task-quality/quality.test.mjs tools/bench/task-quality/acceptance.test.mjs
+
       # 版本字面量必须与 ci.yml / rust-toolchain.toml 一致(见文件头说明)。
       - name: Setup Rust (锁 1.97.1,真值源 rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@1.97.1
