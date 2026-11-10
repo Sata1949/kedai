@@ -568,11 +568,11 @@ impl TaskService {
             // 与下方 call 内的解析同源(A 批 B1 起可能是任务级连接,不再恒 None)
             connection_id: connection_id.map(str::to_string),
             parallel_tool_calls: None,
-            // 纯生成路径(规划/步骤生成/汇总/无工具的节点)没有工具循环,
-            // 步骤墙钟预算与语义熔断都无从生效:恒 None(与聊天路径同口径)。
+            // 规划、汇总等纯生成没有工具循环，不启用步骤预算或语义熔断。
             step_budget: None,
             semantic_guard: None,
             response_format: None,
+            focused_action: false,
         };
         // 工具是否下发(params 随后 move 进 generate_stream,先行记录):未下发而出现
         // ToolCall 块属上游/协议异常(保留既有 warn 语义);已下发则聚合进产出(规划器侦察轮)

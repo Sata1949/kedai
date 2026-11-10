@@ -415,6 +415,7 @@ async fn run_subtask_with_tools(
         // clamp_for_task,不重复钳制);聊天路径恒 None → 引擎用扁平设置,行为逐字节不变。
         semantic_guard: budget.as_ref().and_then(|b| b.semantic_guard),
         response_format: None,
+        focused_action: false,
     };
 
     // 运行身份:任务模式用派生虚拟 id(task: 前缀,llm_requests 跳过守卫同源);
@@ -679,6 +680,7 @@ async fn run_subtask_plain(
         // 本路径无工具循环,语义熔断无消费点;透传为「任务路径不静默丢预算」的一致性
         semantic_guard: budget.as_ref().and_then(|b| b.semantic_guard),
         response_format: None,
+        focused_action: false,
     };
 
     let connector = deps.connector.read().await.clone();

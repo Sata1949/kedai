@@ -112,6 +112,7 @@ pub(crate) async fn generate_with_readonly_tools(
         step_budget,
         semantic_guard,
         response_format: None,
+        focused_action: false,
     };
 
     let session_id = format!("task:{}:{}", ctx.task_id, phase);

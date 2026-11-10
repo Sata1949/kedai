@@ -225,6 +225,8 @@ pub(crate) fn run_tool_loop<'a>(
         let mut ledger_mark = task_id
             .as_ref()
             .and_then(|id| crate::services::task_change_service::max_id(&engine.db, id));
+        let mut before_first_change = params.is_focused_action_round();
+        let mut focus_next = false;
         let mut live_verification =
             crate::services::task_engine::verification::LiveVerification::default();
         loop {
@@ -292,6 +294,15 @@ pub(crate) fn run_tool_loop<'a>(
             }
 
             // ===== 单轮生成(看门狗 + 传输重试 + 截断自愈)=====
+            let focus_round = std::mem::take(&mut focus_next);
+            if focus_round {
+                // 新文件事实到手时明确眼前的改动粒度；不抢在必要阅读之前催写，
+                // 也不把每轮临时引导累进历史，挤占后续的实现和验收上下文。
+                llm_messages.push(LlmMessage::plain(
+                    "user",
+                    crate::services::task_core::prompt_consts::FOCUSED_ACTION_NEXT_NOTE,
+                ));
+            }
             let result = generate_round(
                 engine,
                 session_id,
@@ -308,7 +319,11 @@ pub(crate) fn run_tool_loop<'a>(
                 total_usage,
                 self_heals,
             )
-            .await?;
+            .await;
+            if focus_round {
+                llm_messages.pop();
+            }
+            let result = result?;
 
             total_usage.prompt_tokens += result.usage.prompt_tokens;
             total_usage.completion_tokens += result.usage.completion_tokens;
@@ -526,10 +541,12 @@ pub(crate) fn run_tool_loop<'a>(
             }
             let workspace_changed = !changed.is_empty();
             if workspace_changed {
+                before_first_change = false;
                 loop_guard.clear();
                 semantic_guard.clear();
             }
             let mut new_information = false;
+            let mut new_file_fact = false;
             for e in &outcome.outputs {
                 // SKY-8:累计**成功**的 fs_read(输出是字符串;错误对象不计),
                 // 供集成主「读满阈值 → 梳理接口与验收条件」软提醒使用。
@@ -540,9 +557,14 @@ pub(crate) fn run_tool_loop<'a>(
                     shard_reads += 1;
                 }
                 if let Some(progress) = task_progress.as_mut() {
-                    new_information |= progress.observe(&e.call.name, &e.output);
+                    let fresh = progress.observe(&e.call.name, &e.output);
+                    new_information |= fresh;
+                    new_file_fact |= fresh
+                        && e.call.name == crate::tools::agent_tools_fs::READ_TOOL
+                        && e.output.as_str().is_some();
                 }
             }
+            focus_next = before_first_change && new_file_fact;
             let round_progress = new_information || has_declared_change(&declared_files, &changed);
             // ===== 无进展守卫的中途提醒(先提醒,后硬收尾)=====
             if let Some(notice) = guards.observe_round_progress(round_progress) {

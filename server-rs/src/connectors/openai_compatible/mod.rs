@@ -3,6 +3,7 @@
 // 三方言(chat-completions / responses / anthropic)共用本连接器的重试、看门狗与
 // 错误分类边界;差异面只有:端点路径、请求体映射、鉴权头、流式事件解析。
 mod anthropic_parser;
+mod request_policy;
 mod responses_parser;
 mod retry;
 mod sse_parser;
@@ -101,7 +102,7 @@ fn transport_failure_of(e: &reqwest::Error) -> TransportFailure {
     }
 }
 
-/// 提取 provider host(仅用于日志,不发起请求)
+/// 提取 provider host(用于日志和有明确证据的协议能力判定,不发起请求)。
 fn provider_host(base_url: &str) -> String {
     reqwest::Url::parse(base_url)
         .ok()
@@ -376,7 +377,15 @@ impl OpenAiCompatibleConnector {
             .iter()
             .map(|tool| Value::String(tool.name.clone()))
             .collect();
-        tracing::info!(mode = "stream", model = self.model.clone(), style = self.style.as_str(), provider_host = provider_host(&self.base_url), step = "generate", tool_names = %crate::utils::logging::JsonField(serde_json::Value::Array(tool_names)), tool_count = params.tools.len(), tool_choice = format!("{:?}", params.tool_choice), "provider_round_start");
+        tracing::info!(
+            mode = "stream", model = self.model.clone(), style = self.style.as_str(),
+            provider_host = provider_host(&self.base_url), step = "generate",
+            tool_names = %crate::utils::logging::JsonField(serde_json::Value::Array(tool_names)),
+            tool_count = params.tools.len(), tool_choice = format!("{:?}", params.tool_choice),
+            max_tokens = params.max_tokens,
+            reasoning_effort = self.reasoning_effort(&params).unwrap_or("default"),
+            "provider_round_start"
+        );
         let body = self.build_request_body(messages, &params);
 
         // 请求 + 读响应头阶段:可重试。一旦进入 SSE 读取阶段(收到首个字节)即不再重试。
@@ -458,23 +467,6 @@ impl OpenAiCompatibleConnector {
         // 结束日志由外层 `generate_stream` 统一发(那里覆盖全部出口,含本函数
         // 之前几处提前 return);这里只把结果原样交回,不重复打 provider_round_end。
         read_sse_stream(resp.bytes_stream(), abort, tx, STREAM_IDLE_TIMEOUT, parser).await
-    }
-
-    /// 按方言构建请求体(chat / responses / anthropic 的映射差异全部收口在此)。
-    /// 能力位(视觉能力包 D2)随构筑下传:仅 `supports_vision` 打开且有可用图像时
-    /// 才把 content 变成 parts 数组;**无图路径的请求体逐字节不变**。
-    fn build_request_body(&self, messages: &[LlmMessage], params: &GenerationParams) -> Value {
-        match self.style {
-            ApiStyle::ChatCompletions => {
-                build_chat_body(&self.model, messages, params, self.capabilities)
-            }
-            ApiStyle::Responses => {
-                build_responses_body(&self.model, messages, params, self.capabilities)
-            }
-            ApiStyle::Anthropic => {
-                build_anthropic_body(&self.model, messages, params, self.capabilities)
-            }
-        }
     }
 }
 

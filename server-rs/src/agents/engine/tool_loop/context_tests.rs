@@ -300,6 +300,7 @@ fn task_context_summary_preserves_selected_connection_and_output_budget() {
         step_budget: None,
         semantic_guard: None,
         response_format: None,
+        focused_action: false,
     };
     let summary = summary_params(&params, true);
     assert_eq!(

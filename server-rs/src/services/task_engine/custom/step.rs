@@ -300,13 +300,11 @@ impl CustomExecutor {
         // 闸门名单与下发工具一致:名单外立即拒绝(名单是硬边界)。
         // 三档授权(2026-11-06):逐步/工作区内档允许等待用户确认名单内需要确认的调用。
         let gate_list: Vec<String> = tools.iter().map(|d| d.name.clone()).collect();
+        let has_write_tools = gate_list
+            .iter()
+            .any(|n| crate::tools::tool_sets::is_workspace_write_tool(n));
         let verification = match ctx.scope.as_ref() {
-            Some(scope)
-                if settings.task_coding_bundle_enabled
-                    && gate_list
-                        .iter()
-                        .any(|n| crate::tools::tool_sets::is_workspace_write_tool(n)) =>
-            {
+            Some(scope) if settings.task_coding_bundle_enabled && has_write_tools => {
                 if let Some(system) = messages.first_mut() {
                     system
                         .content
@@ -366,6 +364,9 @@ impl CustomExecutor {
             ),
             semantic_guard: limits.1,
             response_format: None,
+            focused_action: settings.task_coding_bundle_enabled
+                && ctx.scope.is_some()
+                && has_write_tools,
         };
         // 会话 id 保留既有形状 `task:{任务 id}:step:{下标}`(入口流程逐字节不变);
         // 子图用 phase 段替换 `step`,避免同一下标在父子两层撞 key(取值仍可用

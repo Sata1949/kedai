@@ -761,7 +761,7 @@ impl TaskService {
                 model,
                 messages,
                 &format!(
-                    "(截断自愈){},输出上限翻倍至 {} 重发",
+                    "(截断自愈){},使用输出上限 {} 重试",
                     heal.note, heal.retried_max_tokens
                 ),
                 Some(&heal_out),

@@ -57,6 +57,7 @@ fn test_params() -> GenerationParams {
         step_budget: None,
         semantic_guard: None,
         response_format: None,
+        focused_action: false,
     }
 }
 

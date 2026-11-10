@@ -245,6 +245,7 @@ pub(crate) async fn run_agent_loop(
         step_budget,
         semantic_guard,
         response_format: None,
+        focused_action: settings.task_coding_bundle_enabled && has_write_tools,
     };
     // 三档授权(2026-11-06):「逐步」「工作区内」档要能等用户确认，故用可等待闸门；
     // 「自动」档与旧任务维持直接拒绝名单外工具（不空等 300 秒）。

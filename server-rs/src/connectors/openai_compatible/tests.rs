@@ -22,7 +22,83 @@ fn test_params() -> GenerationParams {
         step_budget: None,
         semantic_guard: None,
         response_format: None,
+        focused_action: false,
     }
+}
+
+#[test]
+fn focused_action_effort_is_limited_to_confirmed_routes() {
+    use crate::models::types::ToolChoice;
+    let commandcode = "https://api.commandcode.ai/provider/v1";
+    let flash = "deepseek/deepseek-v4.1-flash";
+    let mut params = test_params();
+    params.focused_action = true;
+    params.tools.push(ToolDefinition {
+        name: "fs_write".into(),
+        description: "写入切片".into(),
+        parameters: json!({"type":"object"}),
+    });
+    for (url, model, style, expected) in [
+        (commandcode, flash, ApiStyle::ChatCompletions, Some("low")),
+        (
+            "https://api.deepseek.com/v1",
+            "deepseek-flash",
+            ApiStyle::ChatCompletions,
+            Some("low"),
+        ),
+        (
+            "https://other.example/v1",
+            flash,
+            ApiStyle::ChatCompletions,
+            None,
+        ),
+        (commandcode, "other/model", ApiStyle::ChatCompletions, None),
+        (commandcode, flash, ApiStyle::Responses, Some("none")),
+        ("https://other.example/v1", flash, ApiStyle::Responses, None),
+    ] {
+        let c = OpenAiCompatibleConnector::new_with_style(url, "", model, style);
+        let body = c.build_request_body(&[], &params);
+        let actual = if style == ApiStyle::Responses {
+            assert!(body.get("reasoning_effort").is_none());
+            body["reasoning"]["effort"].as_str()
+        } else {
+            assert!(body.get("reasoning").is_none());
+            body["reasoning_effort"].as_str()
+        };
+        assert_eq!(actual, expected);
+    }
+    let c = OpenAiCompatibleConnector::new(commandcode, "", flash);
+    let responses =
+        OpenAiCompatibleConnector::new_with_style(commandcode, "", flash, ApiStyle::Responses);
+    assert_eq!(
+        c.build_request_body(&[], &params)["max_tokens"],
+        params.max_tokens
+    );
+    params.tool_choice = ToolChoice::Function("fs_write".into());
+    assert!(c
+        .build_request_body(&[], &params)
+        .get("reasoning_effort")
+        .is_none());
+    assert!(responses
+        .build_request_body(&[], &params)
+        .get("reasoning")
+        .is_none());
+    params.tool_choice = ToolChoice::Auto;
+    params.focused_action = false;
+    assert!(c
+        .build_request_body(&[], &params)
+        .get("reasoning_effort")
+        .is_none());
+    params.focused_action = true;
+    params.tools.clear();
+    assert!(c
+        .build_request_body(&[], &params)
+        .get("reasoning_effort")
+        .is_none());
+    assert!(responses
+        .build_request_body(&[], &params)
+        .get("reasoning")
+        .is_none());
 }
 
 async fn slow_sse_server(delay: Duration) -> String {
