@@ -515,6 +515,35 @@ async fn glob_sorts_and_excludes() {
     assert!(capped.contains("还有更多"), "截断应如实说明: {capped}");
 }
 
+#[tokio::test]
+async fn globstar_matches_zero_or_more_directories() {
+    let f = grep_fixture("globstar-root");
+    std::fs::create_dir_all(f.ws.join("src/nested")).unwrap();
+    for path in [
+        "index.html",
+        ".kedai-verify.json",
+        "src/lib.rs",
+        "src/nested/mod.rs",
+    ] {
+        std::fs::write(f.ws.join(path), "marker\n").unwrap();
+    }
+    let inventory = f.call(GLOB_TOOL, json!({"pattern":"**/*"})).await.unwrap();
+    assert!(inventory.contains("index.html\n"), "{inventory}");
+    assert!(inventory.contains(".kedai-verify.json\n"), "{inventory}");
+    let rs = f
+        .call(GLOB_TOOL, json!({"pattern":r".\src\**\*.rs"}))
+        .await
+        .unwrap();
+    assert!(rs.starts_with("src/lib.rs\nsrc/nested/mod.rs\n"), "{rs}");
+    let root_match = f
+        .call(GREP_TOOL, json!({"pattern":"marker","glob":"**/*.html"}))
+        .await
+        .unwrap();
+    assert!(root_match.contains("index.html:1:marker"), "{root_match}");
+    let flat = f.call(GLOB_TOOL, json!({"pattern":"*"})).await.unwrap();
+    assert!(!flat.contains("src/lib.rs"), "{flat}");
+}
+
 /// fs_grep:命中格式 path:line:text、glob 过滤、非法正则回原错
 #[tokio::test]
 async fn grep_reports_path_line_and_filters() {

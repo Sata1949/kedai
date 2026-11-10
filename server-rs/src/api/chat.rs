@@ -139,8 +139,7 @@ pub async fn send(
         Some("custom") => "custom",
         _ => "fast",
     };
-    // 生成参数:请求体优先,否则回退运行期设置(前端可编辑)
-    // (设置快照:不留锁跨 await)
+    // 请求体优先，否则用运行期设置快照；不持锁跨 await。
     let (mut params, max_context_tokens) = {
         let s = state.settings_snapshot();
         (
@@ -152,13 +151,13 @@ pub async fn send(
                 tools: Vec::new(),
                 // 工具循环轮次上限:运行期设置(默认 32),AGENT/CUSTOM 工具循环使用
                 max_tool_rounds: Some(s.max_tool_rounds),
-                // 工具选择策略:默认 auto(模型自行决定是否调用工具)
                 tool_choice: crate::models::types::ToolChoice::Auto,
                 connection_id: None,
                 parallel_tool_calls: None,
                 step_budget: None,
                 semantic_guard: None,
                 response_format: None,
+                focused_action: false,
             },
             Some(s.max_context_tokens),
         )
@@ -763,6 +762,7 @@ pub async fn generate_raw(
             step_budget: None,
             semantic_guard: None,
             response_format: None,
+            focused_action: false,
         }
     };
     // 结构化输出预算:作者页(吸血鬼卡等)要求整个回复有且仅有一个 JSON,截断即等于失败。

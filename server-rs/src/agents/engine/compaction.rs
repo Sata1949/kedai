@@ -283,6 +283,7 @@ impl AgentEngine {
             step_budget: None,
             semantic_guard: None,
             response_format: None,
+            focused_action: false,
         };
         let (increment, _usage) = self.generate_text(&messages, params, abort_rx).await?;
         let increment = increment.trim().to_string();
@@ -385,6 +386,7 @@ impl AgentEngine {
             step_budget: None,
             semantic_guard: None,
             response_format: None,
+            focused_action: false,
         };
         match self.generate_text(&messages, params, abort.clone()).await {
             Ok((increment, _usage)) => {

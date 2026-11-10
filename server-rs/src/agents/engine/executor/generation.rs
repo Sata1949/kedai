@@ -2,7 +2,8 @@
 // （C-2F-2 自 executor.rs 纯搬运，逻辑不变）。
 use super::super::*;
 use super::heal::{
-    doubled_heal_budget, heal_budget_for, is_truncated_tool_call_error, truncation_heal_cause,
+    doubled_heal_budget, heal_budget_for, is_truncated_tool_call_error, reasoning_only_truncation,
+    truncation_heal_cause,
 };
 use super::transport::{
     should_retry_transport, with_call_watchdog, MAX_TRANSPORT_RETRIES, TRANSPORT_RETRY_BACKOFF,
@@ -504,6 +505,7 @@ pub(crate) async fn generate_round(
 ) -> Result<ExecutorResult, EngineError> {
     let mut attempt_params = params.clone();
     let mut healed: Option<SelfHealRecord> = None;
+    let mut focused_retry: Option<Vec<LlmMessage>> = None;
     // TMR3-1:本轮已用掉的上游重试次数(每轮重置;上限见 MAX_TRANSPORT_RETRIES)
     let mut transport_retries = 0usize;
     let result = loop {
@@ -520,7 +522,7 @@ pub(crate) async fn generate_round(
                 engine,
                 session_id,
                 run_id,
-                llm_messages,
+                focused_retry.as_deref().unwrap_or(llm_messages),
                 &attempt_params,
                 tx,
                 abort,
@@ -555,6 +557,16 @@ pub(crate) async fn generate_round(
         }
         // 已自愈过(重发仍失败):透出原结果,不再重发
         if healed.is_some() {
+            if let Some(res) = one.as_ref().ok().filter(|res| {
+                focused_retry.is_some() && !res.interrupted && reasoning_only_truncation(res)
+            }) {
+                // 这轮仍没有动作。显式失败以免任务外层把空正文当成可用的最终汇报机会，
+                // 又追加一次无工具的大预算生成。只计已经收到的真实用量。
+                add_usage(total_usage, &res.usage);
+                break Err(EngineError::Internal(
+                    "聚焦重试仍未返回可执行动作，已保留此前的工作区成果".into(),
+                ));
+            }
             break one;
         }
         // TMR3-1:单次调用遇到可重试上游失败(超时/限流/流中断)时原地重试一次。
@@ -611,28 +623,43 @@ pub(crate) async fn generate_round(
                 if res.interrupted {
                     break Ok(res);
                 }
-                // 预算提升:推理挤占形态一次给足(见 heal_budget_for),其余走翻倍;
-                // None = 已封顶,重发无意义 → 透出原结果走既有错误路径
-                let Some(next_budget) = heal_budget_for(&res, attempt_params.max_tokens) else {
-                    break Ok(res);
+                let focused = params.is_focused_action_round() && reasoning_only_truncation(&res);
+                let (next_budget, detail) = if focused {
+                    // 已核对的用户输入与工具回执原样保留。只给这次重试附动作提示，
+                    // 不把未完成的推理追加进任务历史，也不靠扩大输出上限重做同一份规划。
+                    let mut messages = llm_messages.to_vec();
+                    messages.push(LlmMessage::plain(
+                        "user",
+                        crate::services::task_core::prompt_consts::FOCUSED_ACTION_RETRY_NOTE,
+                    ));
+                    focused_retry = Some(messages);
+                    let budget = attempt_params.max_tokens;
+                    (
+                        budget,
+                        format!("{cause}，保留输出上限 {budget}，聚焦下一项可执行改动"),
+                    )
+                } else {
+                    let Some(budget) = heal_budget_for(&res, attempt_params.max_tokens) else {
+                        break Ok(res);
+                    };
+                    (
+                        budget,
+                        format!(
+                            "{cause},输出上限 {}→{budget} 重发",
+                            attempt_params.max_tokens
+                        ),
+                    )
                 };
                 tracing::info!(
                     session_id = session_id.to_string(),
                     cause = cause.clone(),
+                    focused,
                     max_tokens = attempt_params.max_tokens,
                     retry_max_tokens = next_budget,
-                    "工具循环单轮截断,提高输出上限原样重发(截断自愈)"
+                    "工具循环单轮截断,执行单次重试(截断自愈)"
                 );
                 let _ = send_event(
-                    step_evt(
-                        "截断自愈",
-                        Some(format!(
-                            "{cause},输出上限 {}→{next_budget} 重发",
-                            attempt_params.max_tokens
-                        )),
-                        None,
-                        None,
-                    ),
+                    step_evt("截断自愈", Some(detail), None, None),
                     tx,
                     abort,
                     flag,
@@ -701,18 +728,15 @@ pub(crate) async fn generate_round(
         }
         Err(e) => {
             if let Some(h) = healed {
+                let detail = format!("{}，重试仍失败: {e}", h.note);
                 self_heals.push(h);
                 // 包装截断定性文案:分类保持原错误分类(截断不是新的失败类型)
                 return Err(match e {
                     EngineError::Llm(e) => {
-                        EngineError::Llm(crate::models::llm_error::LlmError::new(
-                            e.kind(),
-                            format!("工具参数 JSON 截断(已达 token 上限,提高预算重发仍失败): {e}"),
-                        ))
+                        EngineError::Llm(crate::models::llm_error::LlmError::new(e.kind(), detail))
                     }
-                    other => EngineError::Internal(format!(
-                        "工具参数 JSON 截断(已达 token 上限,提高预算重发仍失败): {other}"
-                    )),
+                    EngineError::Interrupted => EngineError::Interrupted,
+                    _ => EngineError::Internal(detail),
                 });
             }
             Err(e)

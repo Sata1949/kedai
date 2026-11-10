@@ -39,7 +39,7 @@ pub(crate) fn truncation_heal_cause(res: &ExecutorResult) -> Option<String> {
         // 正文为空但推理非空——此时成因是推理挤占,单纯翻倍往往仍需再来一轮
         // (实测 agent 模式两次自愈吃掉 37 秒,占该次请求 54%)。
         // 识别出来才能给出可诊断的提示与更合理的提升幅度。
-        if !res.reasoning.trim().is_empty() {
+        if reasoning_only_truncation(res) {
             return Some(format!(
                 "推理耗尽输出预算(推理 {} 字符,正文为空)",
                 res.reasoning.chars().count()
@@ -48,6 +48,14 @@ pub(crate) fn truncation_heal_cause(res: &ExecutorResult) -> Option<String> {
         return Some("返回空内容(已达 token 上限)".into());
     }
     None
+}
+
+/// 区分「只有思考，未得到动作」与真正的工具参数/正文长度不足。
+pub(crate) fn reasoning_only_truncation(res: &ExecutorResult) -> bool {
+    res.finish_reason.as_deref() == Some("length")
+        && res.content.trim().is_empty()
+        && res.tool_calls.is_empty()
+        && !res.reasoning.trim().is_empty()
 }
 
 /// 自愈重发的 max_tokens 计算(2026-09-14 推理感知):
@@ -60,11 +68,7 @@ pub(crate) fn truncation_heal_cause(res: &ExecutorResult) -> Option<String> {
 pub(crate) fn heal_budget_for(res: &ExecutorResult, current: u32) -> Option<u32> {
     let doubled = doubled_heal_budget(current)?;
     // 仅当本轮确认是「推理挤占」时做加强提升;其余形态维持翻倍语义。
-    let reasoning_exhausted = res.finish_reason.as_deref() == Some("length")
-        && res.content.trim().is_empty()
-        && res.tool_calls.is_empty()
-        && !res.reasoning.trim().is_empty();
-    if !reasoning_exhausted {
+    if !reasoning_only_truncation(res) {
         return Some(doubled);
     }
     // 推理消耗以 completion_tokens 近似(思考模型该值含推理);

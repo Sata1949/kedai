@@ -64,7 +64,7 @@ pub(crate) fn evidence_dir(scratch: &Path) -> PathBuf {
     scratch.with_extension("verification")
 }
 
-pub(crate) const BROWSER_PLAN_NOTE:&str = "\n[独立验收]\n交付网页时使用真实多文件入口；需构建的项目先执行实际构建，可用 web_root 指定 dist 等工作区内的静态服务根。可写 .kedai-verify.json 声明入口与关键交互，例如 {\"entry\":\"index.html\",\"actions\":[{\"action\":\"click\",\"selector\":\"#start\"},{\"action\":\"assert_text\",\"selector\":\"#status\",\"contains\":\"已开始\"}]}。支持 click、fill(selector/value)、assert_text(selector/contains)、assert_visible(selector)。断言必须对应原始需求；缺少交互断言只能验证加载，不能声称功能完成。宿主会把实际失败和截图反馈给当前上下文，请据此修复。\n";
+pub(crate) const BROWSER_PLAN_NOTE:&str = "\n[独立验收]\n交付网页时使用真实多文件入口；需构建的项目先执行实际构建，可用 web_root 指定 dist 等工作区内的静态服务根。已有 .kedai-verify.json 则原样复用，入口可运行后直接提交当前产物，宿主会先执行声明的检查再回传实际结果与截图。除非用户要求新增测试文件，不要另造脚本来替代这次浏览器检查。没有清单时可写 .kedai-verify.json 声明入口与关键交互，例如 {\"entry\":\"index.html\",\"actions\":[{\"action\":\"click\",\"selector\":\"#start\"},{\"action\":\"assert_text\",\"selector\":\"#status\",\"contains\":\"已开始\"}]}。支持 click、fill(selector/value)、assert_text(selector/contains)、assert_visible(selector)。断言必须对应原始需求；缺少交互断言只能验证加载，不能声称功能完成。按回传证据修复，不重复已有有效检查。\n";
 
 pub(crate) fn make_spec(
     svc: &dyn crate::services::task_core::TaskBackend,

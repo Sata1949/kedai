@@ -79,6 +79,7 @@ pub(super) async fn reflect_with_llm(
         step_budget: None,
         semantic_guard: None,
         response_format: None,
+        focused_action: false,
     };
     let (out, _calls, usage) = generate_collect_healing(engine, &messages, &params, abort).await?;
     parse_reflect_verdict(&out).map(|v| (v, usage))
@@ -167,6 +168,7 @@ pub(super) async fn reflect_with_tools(
             step_budget: None,
             semantic_guard: None,
             response_format: None,
+            focused_action: false,
         };
         let (out, tool_calls, u) =
             generate_collect_healing(engine, &messages, &params, abort).await?;
@@ -420,6 +422,7 @@ pub(super) async fn critique_and_revise(
             step_budget: None,
             semantic_guard: None,
             response_format: None,
+            focused_action: false,
         };
         let (out, tool_calls, u) =
             generate_collect_healing(engine, &messages, &params, abort).await?;
@@ -602,6 +605,7 @@ pub(super) async fn generate_reflect_advice(
         step_budget: None,
         semantic_guard: None,
         response_format: None,
+        focused_action: false,
     };
     let connector = engine.connector.read().await.clone();
     let chunks = connector

@@ -222,6 +222,7 @@ mod tests {
             step_budget: None,
             semantic_guard: None,
             response_format: None,
+            focused_action: false,
         };
         let step = PlanStep {
             tools: Some(vec!["read".into()]),
@@ -258,6 +259,7 @@ mod tests {
             step_budget: None,
             semantic_guard: None,
             response_format: None,
+            focused_action: false,
         };
 
         // 宽松档:两个字段都带上

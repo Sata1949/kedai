@@ -378,7 +378,8 @@ fn register_glob_tool(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
         ToolDefinition {
             name: GLOB_TOOL.into(),
             description: "按通配模式列出本任务工作区内的文件(相对路径,字典序)。\
-                          `*` 不跨目录、`**` 跨目录(如 src/**/*.rs);.git/target/node_modules 等目录自动排除。"
+                          `*` 只匹配一层，`**/` 匹配零层或多层目录；`**/*` 包含根目录文件。\
+                          .git/target/node_modules 等目录自动排除。"
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -577,22 +578,24 @@ fn walk_files(dir: &Path, f: &mut impl FnMut(&Path)) -> WalkResult {
     walk_tree(dir, EXCLUDED_SEGMENTS, None, &mut |path, _md| f(path))
 }
 
-/// 通配模式 → 正则:先归一分隔符,再 `**`→`.*`、`*`→`[^/]*`、`?`→`[^/]`,
-/// 其余字符逐字转义(唯一新依赖是仓库既有的 `regex`)。
-///
-/// 注意语义边界(已写进工具描述,避免模型误用):`**` 只等价「任意字符序列」,
-/// 故 `**/*.rs` 需要路径里真有一个 `/` 才匹配——工作区根下的 `main.rs` 用 `*.rs`。
+/// 只有整段 `**/` 能吃掉分隔符本身，因此 `src/**/*.rs` 也命中 `src/lib.rs`。
+/// 其它星号组合沿用字符级语义；glob 和 grep 共用，不能因过滤工具不同漏掉根文件。
 fn glob_matcher(pattern: &str) -> Result<regex::Regex, String> {
     let normalized = pattern.trim().replace('\\', "/");
     let normalized = normalized.strip_prefix("./").unwrap_or(&normalized);
     let mut re = String::from("^");
-    let mut chars = normalized.chars().peekable();
-    while let Some(c) = chars.next() {
+    let mut chars = normalized.char_indices().peekable();
+    while let Some((offset, c)) = chars.next() {
         match c {
             '*' => {
-                if chars.peek() == Some(&'*') {
-                    chars.next();
-                    re.push_str(".*");
+                if chars.next_if(|(_, next)| *next == '*').is_some() {
+                    if (offset == 0 || normalized.as_bytes()[offset - 1] == b'/')
+                        && chars.next_if(|(_, next)| *next == '/').is_some()
+                    {
+                        re.push_str("(?:[^/]+/)*");
+                    } else {
+                        re.push_str(".*");
+                    }
                 } else {
                     re.push_str("[^/]*");
                 }
