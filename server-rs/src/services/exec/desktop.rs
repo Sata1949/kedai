@@ -13,8 +13,8 @@
 #![cfg(not(target_os = "android"))]
 
 use super::{
-    clamp_timeout, truncation_marker, ExecRequest, ExecResult, ShellTier, HEAD_KEEP_CHARS,
-    TAIL_KEEP_CHARS,
+    clamp_timeout, truncation_marker, ExecRequest, ExecResult, PlatformOutput, ShellTier,
+    HEAD_KEEP_CHARS, TAIL_KEEP_CHARS,
 };
 use std::collections::VecDeque;
 use std::process::Stdio;
@@ -126,7 +126,7 @@ pub fn default_shell() -> &'static str {
 }
 
 /// 桌面执行:恒为 Sandbox 等级(无提权语义)。
-pub async fn execute(req: ExecRequest) -> Result<ExecResult, String> {
+pub(super) async fn execute(req: ExecRequest) -> Result<PlatformOutput, String> {
     if req.command.trim().is_empty() {
         return Err("命令为空".into());
     }
@@ -189,103 +189,77 @@ pub async fn execute(req: ExecRequest) -> Result<ExecResult, String> {
     // 任务,命令运行期间持续消费输出。旧实现「先 wait 后 read_to_end」在输出写满管道
     // (Windows ≈64 KiB)时是互相等待——子进程阻塞在 write、父进程等它退出,构建/测试类
     // 大输出命令必然拖到超时误杀,且超时路径不读管道、已写出的输出全部丢弃。
+    let stdout = child.stdout.take().ok_or("命令未提供 stdout 管道")?;
+    let stderr = child.stderr.take().ok_or("命令未提供 stderr 管道")?;
     let out_cap = Arc::new(Mutex::new(PipeCapture::default()));
     let err_cap = Arc::new(Mutex::new(PipeCapture::default()));
-    let out_task = child.stdout.take().map(|p| {
-        tokio::spawn(drain_pipe(
-            p,
-            out_cap.clone(),
-            req.evidence
-                .as_ref()
-                .map(|e| e.path(super::evidence::LogStream::Stdout)),
-        ))
-    });
-    let err_task = child.stderr.take().map(|p| {
-        tokio::spawn(drain_pipe(
-            p,
-            err_cap.clone(),
-            req.evidence
-                .as_ref()
-                .map(|e| e.path(super::evidence::LogStream::Stderr)),
-        ))
-    });
+    let out_task = tokio::spawn(drain_pipe(
+        stdout,
+        out_cap.clone(),
+        req.evidence
+            .as_ref()
+            .map(|e| e.path(super::evidence::LogStream::Stdout)),
+    ));
+    let err_task = tokio::spawn(drain_pipe(
+        stderr,
+        err_cap.clone(),
+        req.evidence
+            .as_ref()
+            .map(|e| e.path(super::evidence::LogStream::Stderr)),
+    ));
     // future 取消时停止读任务；已交给捕获窗口的字节此前均已 flush 到完整日志。
-    let _readers = ReaderAbortGuard(
-        out_task
-            .iter()
-            .chain(err_task.iter())
-            .map(|h| h.abort_handle())
-            .collect(),
-    );
+    let _readers = ReaderAbortGuard([out_task.abort_handle(), err_task.abort_handle()]);
 
     // 限时等待:超时则显式 kill(连同 kill_on_drop 双保险),再收掉读任务。
     // Windows:作业清理覆盖孙进程;Unix:kill 只作用于直接子进程,孙进程残留
     // 登记在 `docs/遗留.md` EXEC-TREE-1(与 mcp/process.rs 的 v1 保守语义同源)。
     let deadline = std::time::Duration::from_millis(timeout);
-    match tokio::time::timeout(deadline, child.wait()).await {
-        Ok(Ok(status)) => {
-            // 正常结束也**先收作业、再收读任务**:`read` 要等**所有**写端关闭才 EOF,
-            // 而继承了 stdout/stderr 的后台进程握着的正是这些写端。外壳 cmd 会等 `start /B`
-            // 的子孙(2026-09-30 实测),但真正脱离外壳的派生方式(常驻/服务化)不会——
-            // 那时旧实现会一路挂到注册表超时。顺序同时就是本批的清理语义:
-            // 命令返回 ≠ 它派生的进程可以接着活。
-            #[cfg(windows)]
-            if let Some(job) = job.as_ref() {
-                job.terminate();
-            }
-            // 读任务收尾**有界**(宽限 + 放弃 + 取已捕获部分):子孙持写端时 EOF 可能
-            // 永不到来,不能让它挂住返回值(见 PIPE_DRAIN_GRACE)。
-            let (stdout, out_truncated) = match out_task {
-                Some(handle) => finish_reader(handle, &out_cap).await?,
-                None => (String::new(), false),
-            };
-            let (stderr, err_truncated) = match err_task {
-                Some(handle) => finish_reader(handle, &err_cap).await?,
-                None => (String::new(), false),
-            };
-            Ok(ExecResult {
-                exit_code: status.code().unwrap_or(-1),
-                truncated: out_truncated || err_truncated,
-                stdout,
-                stderr,
-                tier: ShellTier::Sandbox,
-                timed_out: false,
-                log_handle: None,
-            })
-        }
-        Ok(Err(e)) => {
-            // wait 失败:读任务没有收尾价值,直接放弃(abort 即释放管道句柄)
-            abort_reader(out_task.as_ref());
-            abort_reader(err_task.as_ref());
-            Err(format!("命令执行失败: {e}"))
-        }
+    let status = match tokio::time::timeout(deadline, child.wait()).await {
+        Ok(Ok(status)) => Some(status),
+        Ok(Err(e)) => return Err(format!("命令执行失败: {e}")),
         Err(_) => {
-            // 超时:显式强杀并 wait 回收,避免僵尸;作业内全部进程(含孙进程)一并收掉
             let _ = child.start_kill();
-            #[cfg(windows)]
-            if let Some(job) = job.as_ref() {
-                job.terminate();
-            }
-            let _ = child.wait().await;
-            let (stdout, out_truncated) = match out_task {
-                Some(handle) => finish_reader(handle, &out_cap).await?,
-                None => (String::new(), false),
-            };
-            let (stderr, err_truncated) = match err_task {
-                Some(handle) => finish_reader(handle, &err_cap).await?,
-                None => (String::new(), false),
-            };
-            Ok(ExecResult {
-                exit_code: -1,
-                stdout,
-                stderr,
-                tier: ShellTier::Sandbox,
-                timed_out: true,
-                truncated: out_truncated || err_truncated,
-                log_handle: None,
-            })
+            None
         }
+    };
+    // 正常退出也先收作业：后台进程继承的管道写端未关闭时，读任务不会收到 EOF。
+    #[cfg(windows)]
+    if let Some(job) = job.as_ref() {
+        job.terminate();
     }
+    let timed_out = status.is_none();
+    if timed_out {
+        let _ = child.wait().await;
+    }
+    // 两条流共用一个宽限，不因一侧未见 EOF 丢弃另一侧诊断。
+    let (stdout, stderr) = tokio::join!(
+        finish_reader(out_task, &out_cap),
+        finish_reader(err_task, &err_cap)
+    );
+    let issues: Vec<_> = [("stdout", stdout.issue), ("stderr", stderr.issue)]
+        .into_iter()
+        .filter_map(|(stream, issue)| issue.map(|issue| format!("[{stream}] {issue}")))
+        .collect();
+    let drain_issue = (!issues.is_empty()).then(|| issues.join("\n"));
+    if let (Some(issue), false) = (&drain_issue, timed_out) {
+        // 正常退出时未完整采集仍是失败，不能把进程退出码 0 当成成功回执。
+        return Err(format!(
+            "{issue}\n[stdout]\n{}\n[stderr]\n{}",
+            stdout.text, stderr.text
+        ));
+    }
+    Ok(PlatformOutput {
+        result: ExecResult {
+            exit_code: status.and_then(|s| s.code()).unwrap_or(-1),
+            stdout: stdout.text,
+            stderr: stderr.text,
+            tier: ShellTier::Sandbox,
+            timed_out,
+            truncated: stdout.truncated || stderr.truncated,
+            log_handle: None,
+        },
+        drain_issue,
+    })
 }
 
 /// 读任务收尾宽限:直接子进程已结束、但**子孙进程仍持有管道写端**时(Unix 无作业对象),
@@ -294,7 +268,7 @@ pub async fn execute(req: ExecRequest) -> Result<ExecResult, String> {
 /// Unix 进程树清理是已登记限制(EXEC-TREE-1),本宽限只保证「不无限等」。
 const PIPE_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_millis(1_000);
 
-struct ReaderAbortGuard(Vec<tokio::task::AbortHandle>);
+struct ReaderAbortGuard([tokio::task::AbortHandle; 2]);
 impl Drop for ReaderAbortGuard {
     fn drop(&mut self) {
         for handle in &self.0 {
@@ -303,49 +277,40 @@ impl Drop for ReaderAbortGuard {
     }
 }
 
-/// 有界地收掉一个读任务并取回捕获结果。
-/// 收尾一个读任务,返回(渲染后的文本, 是否发生过截断)。
-///
-/// `truncated` 取自 `PipeCapture` 丢弃计数:它只说明**本层 32K 字符窗口**是否截断,
-/// 与 `tools/registry` 的 64KB 字节截断互不代偿(两层各自如实报告)。
+struct CapturedPipe {
+    text: String,
+    /// 只描述本层 32K 字符窗口裁剪；未读到 EOF 单独记录在 issue。
+    truncated: bool,
+    issue: Option<String>,
+}
+
+/// 有界收尾。即使管道未读到 EOF，也要把已经捕获的文本交给回执。
 async fn finish_reader(
     mut handle: JoinHandle<Result<(), String>>,
     shared: &Arc<Mutex<PipeCapture>>,
-) -> Result<(String, bool), String> {
-    let complete = match tokio::time::timeout(PIPE_DRAIN_GRACE, &mut handle).await {
-        Ok(result) => {
-            result.map_err(|e| format!("命令输出任务异常: {e}"))??;
-            true
-        }
+) -> CapturedPipe {
+    let issue = match tokio::time::timeout(PIPE_DRAIN_GRACE, &mut handle).await {
+        Ok(Ok(result)) => result.err(),
+        Ok(Err(e)) => Some(format!("命令输出任务异常: {e}")),
         Err(_) => {
             // 宽限内未结束:放弃等待,取已捕获部分(不丢已读输出)
             handle.abort();
             let _ = handle.await;
-            false
+            Some("命令输出排空超时，不能确认完整输出；已保留收到的日志。".into())
         }
     };
-    let cap = shared.lock().unwrap_or_else(|e| e.into_inner());
-    if complete {
-        Ok((cap.render(), cap.truncated()))
-    } else {
-        Err(format!(
-            "命令输出排空超时，不能确认完整输出；已保留收到的日志。\n{}",
-            cap.render()
-        ))
-    }
-}
-
-/// 放弃一个读任务(超时/失败路径):不等写端关闭,abort 即释放管道句柄。
-fn abort_reader(handle: Option<&JoinHandle<Result<(), String>>>) {
-    if let Some(h) = handle {
-        h.abort();
+    let mut cap = shared.lock().unwrap_or_else(|e| e.into_inner());
+    cap.finish();
+    CapturedPipe {
+        text: cap.render(),
+        truncated: cap.truncated(),
+        issue,
     }
 }
 
 /// 排空一个管道到**有界**捕获:一直读到 EOF,内容边读边喂给 [`PipeCapture`]。
 /// 达到保留上限后仍继续读取并丢弃多余内容——**不能中途停止排空**,否则又会回到
-/// 「写端填满管道、子进程阻塞」的老问题。读取错误按 EOF 收场(与旧实现
-/// `let _ = read_to_end(...)` 的容错口径一致)。
+/// 「写端填满管道、子进程阻塞」的老问题。读取和落盘错误单独回传，不能当成 EOF。
 async fn drain_pipe(
     mut pipe: impl tokio::io::AsyncRead + Unpin,
     shared: Arc<Mutex<PipeCapture>>,
@@ -392,7 +357,6 @@ async fn drain_pipe(
             Err(e) => return Err(format!("读取命令输出失败: {e}")),
         }
     }
-    shared.lock().unwrap_or_else(|e| e.into_inner()).finish();
     Ok(())
 }
 

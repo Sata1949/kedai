@@ -67,20 +67,18 @@ async fn tqual18_middle_failure_is_in_diagnostic_window() {
 
 #[tokio::test]
 async fn tqual18_timeout_retains_emitted_output() {
+    use crate::services::exec::evidence::{ExecEvidence, LogState, LogStream};
     let dir = TempDataDir::new("tqual18-timeout");
-    let evidence = crate::services::exec::evidence::ExecEvidence::create(
-        dir.path(),
-        "task:timeout",
-        "fixture-command",
-    )
-    .unwrap();
+    let command = if cfg!(windows) {
+        "echo STDOUT_BEFORE_TIMEOUT && (echo STDERR_BEFORE_TIMEOUT 1>&2) && ping -n 30 127.0.0.1"
+    } else {
+        // 保持外壳和 sleep 两个进程；杀外壳后 sleep 仍持有双流写端。
+        "echo STDOUT_BEFORE_TIMEOUT; echo STDERR_BEFORE_TIMEOUT >&2; sleep 30; :"
+    };
+    let evidence = ExecEvidence::create(dir.path(), "task:timeout", command).unwrap();
     let result = execute(
         ExecRequest {
-            command: if cfg!(windows) {
-                "echo BEFORE_TIMEOUT && ping -n 30 127.0.0.1".into()
-            } else {
-                "echo BEFORE_TIMEOUT; sleep 30".into()
-            },
+            command: command.into(),
             cwd: None,
             timeout_ms: Some(1_000),
             evidence: Some(evidence.clone()),
@@ -89,14 +87,27 @@ async fn tqual18_timeout_retains_emitted_output() {
     )
     .await
     .unwrap_err();
-    assert!(
-        result.contains("BEFORE_TIMEOUT"),
-        "超时不能丢掉已经产生的命令证据"
-    );
-    assert_eq!(
-        evidence.metadata().unwrap().state,
-        crate::services::exec::evidence::LogState::TimedOut
-    );
+    assert!(result.contains("命令超时"), "{result}");
+    let meta = evidence.metadata().unwrap();
+    assert_eq!(meta.state, LogState::TimedOut, "{result}");
+    assert_eq!(meta.exit_code, None);
+    for (stream, marker) in [
+        (LogStream::Stdout, "STDOUT_BEFORE_TIMEOUT"),
+        (LogStream::Stderr, "STDERR_BEFORE_TIMEOUT"),
+    ] {
+        assert!(result.contains(marker), "超时回执应保留双流证据: {result}");
+        assert!(evidence
+            .read_range(stream, 1, 10)
+            .unwrap()
+            .text
+            .contains(marker));
+    }
+    #[cfg(unix)]
+    {
+        assert!(result.contains("排空超时"), "{result}");
+        assert!(meta.detail.contains("[stdout]"), "{meta:?}");
+        assert!(meta.detail.contains("[stderr]"), "{meta:?}");
+    }
 }
 
 #[tokio::test]

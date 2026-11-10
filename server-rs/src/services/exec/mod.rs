@@ -89,6 +89,12 @@ pub struct ExecResult {
     pub log_handle: Option<String>,
 }
 
+/// 平台已知命令超时时，输出收尾失败是独立的诊断，不能覆盖超时状态。
+struct PlatformOutput {
+    result: ExecResult,
+    drain_issue: Option<String>,
+}
+
 /// 输出保留上限(字符):超出部分截断并附省略说明。
 /// 与 tools/registry 的 64KB 结果截断同量级,避免一条命令把上下文灌满。
 pub const MAX_OUTPUT_CHARS: usize = 32_768;
@@ -254,7 +260,10 @@ pub async fn execute(req: ExecRequest, allowed_tiers: &[ShellTier]) -> Result<Ex
     } else {
         #[cfg(target_os = "android")]
         {
-            android::execute(req).await
+            android::execute(req).await.map(|result| PlatformOutput {
+                result,
+                drain_issue: None,
+            })
         }
         #[cfg(not(target_os = "android"))]
         {
@@ -263,7 +272,10 @@ pub async fn execute(req: ExecRequest, allowed_tiers: &[ShellTier]) -> Result<Ex
     };
     let log = run.0.take();
     match result {
-        Ok(mut out) => {
+        Ok(PlatformOutput {
+            result: mut out,
+            drain_issue,
+        }) => {
             if let Some(log) = &log {
                 log.finish(
                     if out.timed_out {
@@ -272,7 +284,7 @@ pub async fn execute(req: ExecRequest, allowed_tiers: &[ShellTier]) -> Result<Ex
                         evidence::LogState::Completed
                     },
                     (!out.timed_out).then_some(out.exit_code),
-                    "",
+                    drain_issue.as_deref().unwrap_or_default(),
                 )?;
                 out.log_handle = Some(log.handle.clone());
                 for (stream, preview) in [
@@ -285,7 +297,16 @@ pub async fn execute(req: ExecRequest, allowed_tiers: &[ShellTier]) -> Result<Ex
             if out.timed_out {
                 let meta = serde_json::json!({ "exit_code": serde_json::Value::Null, "timed_out": true,
                     "truncated": out.truncated, "log_handle": out.log_handle });
-                Err(format!("命令超时已终止；可用 exec_log_read 回读完整已捕获输出。\n[stdout]\n{}\n[stderr]\n{}\n[exec-meta] {meta}", out.stdout, out.stderr))
+                let hint = if log.is_some() {
+                    "；可用 exec_log_read 回读已保存的输出"
+                } else {
+                    ""
+                };
+                let detail = drain_issue.map_or_else(String::new, |issue| format!("\n{issue}"));
+                Err(format!(
+                    "命令超时{hint}。{detail}\n[stdout]\n{}\n[stderr]\n{}\n[exec-meta] {meta}",
+                    out.stdout, out.stderr
+                ))
             } else {
                 Ok(out)
             }
