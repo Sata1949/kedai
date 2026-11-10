@@ -516,7 +516,12 @@ impl TeamExecutor {
             // 包专属工具随编码能力包开关(口径同 solo.rs)
             ctx.settings.task_coding_bundle_enabled,
             // 视觉三件随生效连接的「视觉输入」能力位(口径单一出处)
-            crate::services::settings_service::vision_enabled(&ctx.settings),
+            self.engine
+                .resolve_connector(ctx.connection_id.as_deref())
+                .await?
+                .0
+                .capabilities()
+                .supports_vision,
             // 截图工具随「视觉与截图」总开关(默认关)
             ctx.settings.vision_screenshot_enabled,
             // 三档授权(2026-11-06):自动档提升为全量工具面

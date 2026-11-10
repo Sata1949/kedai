@@ -49,6 +49,7 @@ pub(crate) fn tool_when(name: &str) -> String {
         "apply_patch" => "需要按契约规则批量更新状态(number replace/delta、remove、move)时调用;修改前先 get_state 确认现状。",
         // 命令执行(阶段 B):危险工具,任务模式按名例外放行,危险命令另走命令级确认
         "bash" => "需要在用户机器上执行 shell 命令(构建、测试、脚本)时调用;工作目录受工作区闸门约束,破坏性/提权命令需显式授权。",
+        "exec_log_read" => "命令输出截断、需要中段失败证据或核对既有运行结果时调用；按 bash 的 log_handle 和行号读取，省略 handle 可发现本任务取消/超时命令的日志。",
         // 定点修订(反思阶段工具)
         "revise_passage" => "需要按指定要求重写正文中的某一段落时调用(只改目标段落,不动其余内容)。",
         // 世界书词条同步(RPFLOW-2 归档步;仅按名单释放)
@@ -63,7 +64,7 @@ pub(crate) fn tool_when(name: &str) -> String {
 /// 缩略图渲染)、generic(其余通用)。未知名(脚本插件工具)返回 None,前端回退 JSON 直出。
 pub fn render_kind_for(name: &str) -> Option<&'static str> {
     match name {
-        "read" | "fs_read" | "fs_grep" => Some("read"),
+        "read" | "fs_read" | "fs_grep" | "exec_log_read" => Some("read"),
         "search" => Some("search"),
         // 视觉工具族(视觉能力包 D4):前端按 image 分派渲染缩略图(输出含 images 引用);
         // 截图工具(D5)同款

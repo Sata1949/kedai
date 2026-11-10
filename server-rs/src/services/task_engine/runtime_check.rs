@@ -1,30 +1,10 @@
-// 单文件交付的运行期自检(SKY-1 机器闸门,2026-10-25)。
+// 运行期事实采样与确定性判据（SKY-1；TQUAL-20 共用）。
 //
-// 为什么需要:静态接线只能证明「名字/文件对得上」,证明不了「入口真的能跑起来」。
-// 2026-10-24 的第三轮空岛复跑里,`index.html` 178KB、槽位 0、`missing=[]`,
-// 全部静态检查通过,但审计仍只能把 `window.GameMain.ready` / `scene.children` /
-// `BlockEngine.map.size` 标成「待验」——这些值只有把页面跑起来才能读到。审计原文
-// 甚至怀疑 `parts/block-engine.js` 只导出 `MC_BLOCK_ENGINE` 而没有 `BlockEngine`;
-// 机器加载一次就能给出确定结论(实际两处都导出了)。
-//
-// 实现选择(2026-10-25 实验定稿):**不引入 WebSocket/CDP 依赖**。
-// Chromium 系浏览器的 `--headless=new --virtual-time-budget=N --dump-dom` 会在
-// 虚拟时间推进到预算后把序列化 DOM 打到 stdout;我们把两段探针脚本注入交付 HTML
-// 的副本(头:捕获 error/unhandledrejection/console.error/资源加载失败;尾:在
-// DOMContentLoaded 后采样 window 全局,把快照写进 `data-kedai-probe` 属性),
-// 再从 stdout 里取属性值。无端口、无 WS、无新依赖,一次 3~6 秒。
-//
-// 判据(确定性,不做语义猜测):
-// - 未捕获脚本错误、入口报错日志 → 失败;
-// - 任一应用命名空间 `ready=false` → 失败;
-// - `scene.children` 为空 / `map.size=0` / `renderer=null` / `getState()` 里
-//   场景计数为 0 → 失败;
-// - 暴露了 THREE 或目标含 3D 线索却没有 canvas → 失败;
-// - 外部资源(CDN)加载失败只记提示,不单独判失败(离线/网络问题不是代码缺陷);
-// - 没有任何可判定信号(纯静态页)→ 未判定,不判失败。
-//
-// 边界:不做交互、不测帧率、不验证视觉;`requestAnimationFrame` 在无头环境不推进,
-// 因此只采信装配完成后的同步状态(本模块也刻意不把 `fps/draws` 当判据)。
+// 原单文件 dump-dom 探针与 browser_verify 的 HTTP/CDP 路径共用错误捕获、状态采样、
+// evaluate 判据，避免换浏览器通道后漏掉 ready=false、空场景/renderer、缺 canvas。
+// CDP 路径在实际帧与交互之后采样，截图与资源指纹由 browser_verify 持久化。
+// 此处旧 probe/probe_with 保留单文件终态检查调用；多文件及活上下文修复走新通道。
+// 外部资源不可达记环境线索；状态统计不是视觉效果或全部用户需求已满足的证明。
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -105,13 +85,9 @@ struct NamespaceSnapshot {
     state: Option<serde_json::Value>,
 }
 
-/// 尾部探针:DOMContentLoaded 后两次采样(1.2s / 3.2s),后一次覆盖前一次。
-/// 两次采样是为了容纳「先注册 load、再异步 boot」的入口形态;`requestAnimationFrame`
-/// 在无头环境不推进,所以这里只用 `setTimeout`。
-const PROBE_TAIL: &str = r#"<script>(function(){
-/* __KEDAI_RUNTIME_PROBE__ */
-function report(){
-  var r={errors:(window.__kv&&window.__kv.errors)||[],logs:(window.__kv&&window.__kv.logs)||[],resources:(window.__kv&&window.__kv.resources)||[],canvases:0,three:!!window.THREE,namespaces:[]};
+/// 同步采样函数：旧 dump-dom 定时回写与 CDP 实际渲染后的采样共用，不复制领域判据。
+const PROBE_SAMPLE: &str = r#"function(){
+  var r={errors:(window.__kv&&window.__kv.errors)||[],logs:(window.__kv&&window.__kv.logs)||[],resourceErrors:(window.__kv&&window.__kv.resources)||[],canvases:0,three:!!window.THREE,namespaces:[]};
   try{var els=document.querySelectorAll('canvas');r.canvases=els.length;}catch(_){}
   try{
     for(var k in window){
@@ -130,12 +106,26 @@ function report(){
       if(item.ready!==null||item.sceneChildren!==null||item.mapSize!==null||item.rendererNull!==null||item.nulls.length||item.getState)r.namespaces.push(item);
     }
   }catch(_){}
-  document.documentElement.setAttribute('data-kedai-probe',encodeURIComponent(JSON.stringify(r)));
-}
+  return r;
+}"#;
+
+/// 旧 dump-dom 通道在 DOMContentLoaded 后两次采样(1.2s / 3.2s)，后一次覆盖前一次。
+const PROBE_TAIL: &str = r#"<script>(function(){
+/* __KEDAI_RUNTIME_PROBE__ */
+function report(){var r=(@@KEDAI_SAMPLE@@)();document.documentElement.setAttribute('data-kedai-probe',encodeURIComponent(JSON.stringify(r)));}
 function go(){setTimeout(report,1200);setTimeout(report,3200);}
 if(document.readyState!=='loading')go();else{document.addEventListener('DOMContentLoaded',go);setTimeout(go,5000);}
 })();</script>"#;
 
+/// CDP 在页面脚本运行前安装同一份错误/日志/资源捕获。
+pub(crate) fn install_script() -> &'static str {
+    &PROBE_HEAD["<script>".len()..PROBE_HEAD.len() - "</script>".len()]
+}
+
+/// CDP 在真实渲染帧及交互完成后直接回传同一份 ProbeReport 快照。
+pub(crate) fn sample_script() -> String {
+    format!("({PROBE_SAMPLE})()")
+}
 /// 头部探针:在页面自己的脚本之前安装错误/日志/资源失败捕获。
 const PROBE_HEAD: &str = r#"<script>(function(){
 window.__kv={errors:[],logs:[],resources:[]};
@@ -157,7 +147,8 @@ console.error=function(){try{window.__kv.logs.push(Array.prototype.slice.call(ar
 /// 插入点:头部探针放在第一个 `<head...>` 之后(没有 head 就放最前);尾部探针放在
 /// **最后一个** `</body>` 之前(避免命中脚本字符串里的同名文本)。大小写不敏感。
 pub(crate) fn inject_probe(html: &str) -> String {
-    let mut out = String::with_capacity(html.len() + PROBE_HEAD.len() + PROBE_TAIL.len());
+    let tail = PROBE_TAIL.replace("@@KEDAI_SAMPLE@@", PROBE_SAMPLE);
+    let mut out = String::with_capacity(html.len() + PROBE_HEAD.len() + tail.len());
     let head_insert =
         find_head_tag(html).and_then(|start| html[start..].find('>').map(|rel| start + rel + 1));
     let body_insert = rfind_ci(html, "</body>");
@@ -166,25 +157,25 @@ pub(crate) fn inject_probe(html: &str) -> String {
             out.push_str(&html[..head_at]);
             out.push_str(PROBE_HEAD);
             out.push_str(&html[head_at..body_at]);
-            out.push_str(PROBE_TAIL);
+            out.push_str(&tail);
             out.push_str(&html[body_at..]);
         }
         (Some(head_at), _) => {
             out.push_str(&html[..head_at]);
             out.push_str(PROBE_HEAD);
             out.push_str(&html[head_at..]);
-            out.push_str(PROBE_TAIL);
+            out.push_str(&tail);
         }
         (None, Some(body_at)) => {
             out.push_str(PROBE_HEAD);
             out.push_str(&html[..body_at]);
-            out.push_str(PROBE_TAIL);
+            out.push_str(&tail);
             out.push_str(&html[body_at..]);
         }
         (None, None) => {
             out.push_str(PROBE_HEAD);
             out.push_str(html);
-            out.push_str(PROBE_TAIL);
+            out.push_str(&tail);
         }
     }
     out

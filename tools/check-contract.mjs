@@ -229,6 +229,16 @@ const MAPPINGS = [
     },
   },
   {
+    label: '任务版本绑定验收记录',
+    rust: { file: 'server-rs/src/services/task_engine/verification.rs', name: 'VerificationRecord' },
+    ts: { file: 'web/src/api/types/workspace.ts', name: 'TaskVerification', kind: 'interface' },
+  },
+  {
+    label: '独立验收状态',
+    rust: { file: 'server-rs/src/services/task_engine/verification.rs', name: 'VerificationStatus' },
+    ts: { file: 'web/src/api/types/workspace.ts', name: 'VerificationStatus', kind: 'union' },
+  },
+  {
     // 摘要的必需文件元素(`required[]`)。
     label: '任务交付必需文件',
     rust: {

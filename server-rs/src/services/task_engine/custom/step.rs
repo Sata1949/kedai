@@ -236,7 +236,12 @@ impl CustomExecutor {
             // 包专属工具随编码能力包开关(口径同 solo.rs)
             settings.task_coding_bundle_enabled,
             // 视觉三件随生效连接的「视觉输入」能力位(口径单一出处;见 tool_policy::vision_gate)
-            crate::services::settings_service::vision_enabled(settings),
+            self.engine
+                .resolve_connector(step.connection_ref().or(ctx.connection_id.as_deref()))
+                .await?
+                .0
+                .capabilities()
+                .supports_vision,
             // 截图工具随「视觉与截图」总开关(默认关)
             settings.vision_screenshot_enabled,
             // 三档授权(2026-11-06):自动档提升为全量工具面
@@ -295,6 +300,28 @@ impl CustomExecutor {
         // 闸门名单与下发工具一致:名单外立即拒绝(名单是硬边界)。
         // 三档授权(2026-11-06):逐步/工作区内档允许等待用户确认名单内需要确认的调用。
         let gate_list: Vec<String> = tools.iter().map(|d| d.name.clone()).collect();
+        let verification = match ctx.scope.as_ref() {
+            Some(scope)
+                if settings.task_coding_bundle_enabled
+                    && gate_list
+                        .iter()
+                        .any(|n| crate::tools::tool_sets::is_workspace_write_tool(n)) =>
+            {
+                if let Some(system) = messages.first_mut() {
+                    system
+                        .content
+                        .push_str(crate::services::task_engine::verification::BROWSER_PLAN_NOTE);
+                }
+                Some(crate::services::task_engine::verification::make_spec(
+                    self.svc.as_ref(),
+                    &ctx.task_id,
+                    &ctx.goal,
+                    scope.declared_files().to_vec(),
+                    settings.vision_screenshot_enabled,
+                )?)
+            }
+            _ => None,
+        };
         let gate = match ctx.tool_authorization {
             Some(mode) if mode.can_wait_for_user() => {
                 crate::agents::engine::executor::ToolGate::listed_waiting(&gate_list)
@@ -360,6 +387,12 @@ impl CustomExecutor {
             // 任务侧预算载体(PRODCAP-2):子 agent 派发路径据此透传语义三值;
             // TMR-5:连续只读检测随任务侧装配下发(聊天/审计路径不填)。
             budget: Some(ToolBudget {
+                execution: None,
+                verification,
+                input_token_budget: crate::agents::engine::executor::task_input_token_budget(
+                    settings.max_context_tokens,
+                    settings.tool_history_budget_tokens,
+                ),
                 semantic_guard: limits.1,
                 readonly_streak_limit: Some(
                     crate::services::task_engine::TASK_READONLY_STREAK_LIMIT,

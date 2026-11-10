@@ -4,7 +4,11 @@ import android.content.pm.PackageManager
 import android.util.Base64
 import androidx.annotation.Keep
 import java.io.File
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.concurrent.thread
 
 /**
  * 命令执行桥(阶段 D):供 Rust 侧经 JNI 调用。
@@ -15,9 +19,9 @@ import java.util.concurrent.TimeUnit
  *   - Shizuku:以 ADB shell(UID 2000)权限执行,无需 root;
  *   - Sandbox:应用自身 UID 的 `sh -c`,能力等于本进程。
  *
- * 入参/出参编码(与 server-rs/src/services/exec/wire.rs 严格对齐,**v2 线格式**):
- *   exec:                v2 ␟ b64(command) ␟ b64(cwd) ␟ timeoutMs
- *                        →  v2 ␟ exitCode ␟ b64(stdout) ␟ b64(stderr)
+ * 入参/出参编码(与 server-rs/src/services/exec/wire.rs 严格对齐,**v3 线格式**):
+ *   exec:                v3 ␟ b64(command) ␟ b64(cwd) ␟ timeoutMs ␟ b64(logDir)
+ *                        →  v3 ␟ exitCode ␟ b64(stdout) ␟ b64(stderr) ␟ timedOut ␟ truncated
  *   detectTier:          ""                          →  root|shizuku|sandbox|disabled
  *   requestShizukuPermission: ""                     →  ""(成功)或抛异常
  *
@@ -37,7 +41,7 @@ object ShellExecutorBridge {
     private const val SEP = '\u001f'
 
     /** 线格式版本前缀(与 Rust `wire::WIRE_VERSION` 必须一致) */
-    private const val WIRE_VERSION = "v2"
+    private const val WIRE_VERSION = "v3"
 
     private fun b64Encode(s: String): String =
         Base64.encodeToString(s.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
@@ -218,7 +222,7 @@ object ShellExecutorBridge {
     @JvmStatic
     @Keep
     fun exec(payload: String): String {
-        // v2 线格式:v2 ␟ b64(command) ␟ b64(cwd) ␟ timeoutMs
+        // v3 线格式：v3 ␟ b64(command) ␟ b64(cwd) ␟ timeoutMs ␟ b64(logDir)
         val parts = payload.split(SEP)
         val version = parts.getOrNull(0) ?: ""
         if (version != WIRE_VERSION) {
@@ -231,7 +235,11 @@ object ShellExecutorBridge {
         val cwd = b64Decode(parts.getOrNull(2) ?: throw IllegalArgumentException("执行器入参缺 cwd 字段"), "cwd")
             .takeIf { it.isNotBlank() }
         val timeoutMs = (parts.getOrNull(3) ?: throw IllegalArgumentException("执行器入参缺 timeoutMs 字段"))
-            .trim().toLongOrNull() ?: 60_000L
+            .trim().toLongOrNull() ?: throw IllegalArgumentException("执行器入参 timeoutMs 非法")
+        val logPath = b64Decode(parts.getOrNull(4) ?: throw IllegalArgumentException("执行器入参缺 logDir 字段"), "logDir")
+        if (parts.size != 5) throw IllegalArgumentException("执行器入参含多余字段")
+        val logDir = logPath.takeIf { it.isNotEmpty() }?.let { File(it) }
+        if (logDir != null && !logDir.isDirectory) throw IllegalArgumentException("命令日志目录不存在")
 
         val tier = detectTier()
         if (tier == TIER_DISABLED) {
@@ -259,18 +267,94 @@ object ShellExecutorBridge {
         } catch (_: Exception) {
         }
 
-        val finished = proc.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
-        if (!finished) {
+        val stdout = OutputCapture()
+        val stderr = OutputCapture()
+        val readError = AtomicReference<Throwable?>(null)
+        // 必须先并发排空双管道再等待进程，不能 waitFor 后 readText（大输出会把管道堵死）。
+        val outThread = capturePipe(proc, proc.inputStream, logDir?.resolve("stdout.log"), stdout, readError)
+        val errThread = capturePipe(proc, proc.errorStream, logDir?.resolve("stderr.log"), stderr, readError)
+        val started = System.nanoTime()
+        var timedOut = false
+        var cancelled = false
+        try {
+            while (!proc.waitFor(100, TimeUnit.MILLISECONDS)) {
+                cancelled = logDir?.resolve("cancelled")?.isFile == true
+                timedOut = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) >= timeoutMs
+                if (cancelled || timedOut) {
+                    proc.destroyForcibly()
+                    proc.waitFor(1000, TimeUnit.MILLISECONDS)
+                    break
+                }
+            }
+            finishCapture(outThread, proc.inputStream)
+            finishCapture(errThread, proc.errorStream)
+            readError.get()?.let { throw IllegalStateException("保存命令输出失败:${it.message}") }
+            val code = if (timedOut || cancelled) -1 else proc.exitValue()
+            // 回执只带有界预览；完整原始字节已经由 app UID 保存，不经提权进程写私有目录。
+            return "$WIRE_VERSION$SEP$code$SEP${b64Encode(stdout.text())}$SEP${b64Encode(stderr.text())}$SEP${if (timedOut) 1 else 0}$SEP${if (stdout.truncated || stderr.truncated) 1 else 0}"
+        } finally {
             proc.destroyForcibly()
-            throw IllegalStateException(
-                "命令超时(${timeoutMs}ms)已终止。建议:拆小步骤或调高 timeout_ms。"
-            )
+            outThread.interrupt()
+            errThread.interrupt()
+        }
+    }
+
+    /** 完整输出写文件，预览只保留固定 32KiB；内存不随命令输出大小增长。 */
+    private class OutputCapture {
+        private val head = ByteArrayOutputStream(24 * 1024)
+        private val tail = ByteArray(8 * 1024)
+        private var tailSize = 0
+        private var tailAt = 0
+        private var total = 0L
+        val truncated: Boolean get() = total > 32 * 1024
+        fun append(bytes: ByteArray, count: Int) {
+            total += count
+            for (i in 0 until count) {
+                if (head.size() < 24 * 1024) head.write(bytes[i].toInt())
+                else {
+                    tail[tailAt] = bytes[i]
+                    tailAt = (tailAt + 1) % tail.size
+                    if (tailSize < tail.size) tailSize++
+                }
+            }
+        }
+        fun text(): String {
+            val end = ByteArray(tailSize) { tail[(tailAt - tailSize + it + tail.size) % tail.size] }
+            return head.toString("UTF-8") + (if (truncated) "\n…[输出已截断，完整内容按日志 handle 回读]\n" else "") + String(end, Charsets.UTF_8)
+        }
+    }
+
+    private fun capturePipe(proc: Process, input: InputStream, file: File?, capture: OutputCapture, error: AtomicReference<Throwable?>): Thread =
+        thread(isDaemon = true, name = "kedai-exec-output") {
+            try {
+                val output = file?.outputStream()
+                try {
+                    val buf = ByteArray(8192)
+                    while (!Thread.currentThread().isInterrupted) {
+                        val count = input.read(buf)
+                        if (count < 0) break
+                        output?.write(buf, 0, count)
+                        output?.flush()
+                        capture.append(buf, count)
+                    }
+                } finally {
+                    output?.close()
+                    input.close()
+                }
+            } catch (e: Exception) {
+                error.compareAndSet(null, e)
+                proc.destroyForcibly()
+            }
         }
 
-        val stdout = proc.inputStream.bufferedReader().use { it.readText() }
-        val stderr = proc.errorStream.bufferedReader().use { it.readText() }
-        // v2 回执:v2 ␟ exitCode ␟ b64(stdout) ␟ b64(stderr)
-        return "$WIRE_VERSION$SEP${proc.exitValue()}$SEP${b64Encode(stdout)}$SEP${b64Encode(stderr)}"
+    private fun finishCapture(reader: Thread, input: InputStream) {
+        reader.join(1000)
+        if (reader.isAlive) {
+            reader.interrupt()
+            // 后代若仍握住写端，close 本身也可能等待 read；清理不能阻塞命令返回。
+            thread(isDaemon = true, name = "kedai-exec-output-close") { input.close() }
+            throw IllegalStateException("命令输出排空未在宽限内结束，已保留收到的日志")
+        }
     }
 
     /** 用 ProcessBuilder 启动并返回已开始的 Process(stdout/stderr 分管道)。 */

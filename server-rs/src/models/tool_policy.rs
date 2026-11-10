@@ -25,6 +25,22 @@
 
 use serde::{Deserialize, Serialize};
 
+/// 本次父循环实际下发的连接与工具面；子任务只能继承和收窄。
+#[derive(Debug, Clone)]
+pub struct ToolExecutionSettings {
+    pub connection_id: Option<String>,
+    pub allowed_tools: Vec<String>,
+}
+
+/// 任务验收输入快照；目标在执行前冻结，证据与交付工作区分开存放。
+#[derive(Debug, Clone)]
+pub struct VerificationSpec {
+    pub evidence_dir: std::path::PathBuf,
+    pub goal: String,
+    pub required_files: Vec<String>,
+    pub screenshot: bool,
+}
+
 /// 工具风险等级（工具粒度的粗分级）。
 ///
 /// 用途：`ToolPermissionManager` 的裁决兜底与确认卡展示。

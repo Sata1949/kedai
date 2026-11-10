@@ -179,7 +179,7 @@ pub(super) fn register_agentgo(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
                     let scope = ctx.scope.clone();
                     // 任务侧预算载体随子 agent 继承(PRODCAP-2):子循环据此套用任务侧
                     // 收紧的语义熔断三值;聊天路径 ctx.budget 恒 None(行为不变)
-                    let budget = ctx.budget;
+                    let budget = ctx.budget.clone();
                     crate::models::data_activity::spawn(async move {
                         run_subtask(
                             deps2,
@@ -310,6 +310,11 @@ async fn run_subtask(
             )
             .await;
         }
+        None if budget.is_some() => {
+            let _ = deps
+                .subtasks
+                .set_error(&task_id, "任务子 agent 的引擎未就绪，无法继承连接与工具面");
+        }
         None => {
             // 回退路径:引擎未就绪(单测/早期构造)——保持原纯生成行为
             run_subtask_plain(&deps, &task_id, &messages, max_tokens, cancel, budget).await;
@@ -356,16 +361,35 @@ async fn run_subtask_with_tools(
     use crate::agents::engine::AbortFlag;
     use crate::agents::state_machine::StateMachine;
 
-    // 白名单 ∩ 已注册工具(防御插件卸载等运行期变化);
-    // 白名单常量单一出处见 tools::tool_sets::SUBAGENT
-    let whitelist: Vec<String> = crate::tools::tool_sets::SUBAGENT
-        .iter()
-        .map(|s| s.to_string())
+    let execution = budget.as_ref().and_then(|b| b.execution.as_ref());
+    let connection_id = execution.and_then(|e| e.connection_id.clone());
+    let model = match engine.resolve_connector(connection_id.as_deref()).await {
+        Ok((_, model)) => model,
+        Err(error) => {
+            let _ = deps.subtasks.set_error(task_id, &error);
+            return;
+        }
+    };
+    // 子任务的只读能力与父循环实际工具面取交，不能从注册表重新扩权。
+    let tools: Vec<ToolDefinition> = engine
+        .tool_definitions()
+        .into_iter()
+        .filter(|tool| {
+            let readonly = crate::tools::tool_sets::SUBAGENT.contains(&tool.name.as_str())
+                || (scope.is_some()
+                    && (crate::tools::tool_sets::WORKSPACE_READONLY_TOOLS
+                        .contains(&tool.name.as_str())
+                        || matches!(
+                            tool.name.as_str(),
+                            "view_image" | "zoom_image" | "image_diff"
+                        )));
+            match execution {
+                Some(e) => readonly && e.allowed_tools.contains(&tool.name),
+                None => crate::tools::tool_sets::SUBAGENT.contains(&tool.name.as_str()),
+            }
+        })
         .collect();
-    let tools: Vec<ToolDefinition> = crate::tools::tool_sets::filter_by_const(
-        engine.tool_definitions(),
-        crate::tools::tool_sets::SUBAGENT,
-    );
+    let whitelist: Vec<String> = tools.iter().map(|tool| tool.name.clone()).collect();
     // 子 agent 恒自动放行白名单工具(名单内视为已授权,与改造前一致);
     // 名单外(模型臆造调用)立即拒绝——子 agent 无 UI 授权上下文。
     let gate = crate::agents::engine::executor::ToolGate::listed(&whitelist);
@@ -381,7 +405,7 @@ async fn run_subtask_with_tools(
         tools,
         max_tool_rounds: max_rounds,
         tool_choice: crate::models::types::ToolChoice::Auto,
-        connection_id: None,
+        connection_id,
         parallel_tool_calls: None,
         // 子 agent 工具循环(agentgo)不套任务侧**墙钟**预算:本路径是聊天 AGENT 模式
         // 与任务 multi/team 的**共用**实现,墙钟在父循环一轮之内由父层轮末闸门兜底;
@@ -389,7 +413,7 @@ async fn run_subtask_with_tools(
         step_budget: None,
         // 语义熔断三值(PRODCAP-2):任务路径经父 `ToolContext.budget` 透传(已过
         // clamp_for_task,不重复钳制);聊天路径恒 None → 引擎用扁平设置,行为逐字节不变。
-        semantic_guard: budget.and_then(|b| b.semantic_guard),
+        semantic_guard: budget.as_ref().and_then(|b| b.semantic_guard),
         response_format: None,
     };
 
@@ -454,7 +478,6 @@ async fn run_subtask_with_tools(
 
     // 任务模式:调用追踪 + usage 落库统一出口(phase=subagent,与 legacy 按调用计口径一致)
     if let (Some(svc), Some(tid)) = (&svc, &task_ref) {
-        let model = engine.model();
         // 截断自愈留痕落库(问题①,与 solo.rs run_agent_loop 同口径):
         // 被截断的那次调用补落一行 status=error,再落最终行。
         // TMR3-2:失败路径同样补落(以前只看 Ok 分支,失败循环的自愈 token 直接丢)。
@@ -654,7 +677,7 @@ async fn run_subtask_plain(
         parallel_tool_calls: None,
         step_budget: None,
         // 本路径无工具循环,语义熔断无消费点;透传为「任务路径不静默丢预算」的一致性
-        semantic_guard: budget.and_then(|b| b.semantic_guard),
+        semantic_guard: budget.as_ref().and_then(|b| b.semantic_guard),
         response_format: None,
     };
 

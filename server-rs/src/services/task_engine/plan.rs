@@ -99,6 +99,7 @@ impl ApprovedPlanExecutor {
                 ctx.goal
             );
             let call = AgentLoopCall {
+                handoff: Vec::new(),
                 task_id: ctx.task_id.clone(),
                 session_id: format!("task:{}", ctx.task_id),
                 goal,

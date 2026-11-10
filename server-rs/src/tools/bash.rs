@@ -269,6 +269,11 @@ async fn run(
             command: command.clone(),
             cwd: Some(cwd.clone()),
             timeout_ms,
+            evidence: Some(exec::evidence::ExecEvidence::create(
+                data_dir,
+                &exec::evidence::owner_from_session(&ctx.session_id),
+                &command,
+            )?),
         },
         &allowed,
     )
@@ -429,6 +434,9 @@ fn format_result(command: &str, cwd: &str, out: &exec::ExecResult) -> String {
     //
     // 它不是安全通道(命令输出可以伪造同名行),只是给模型与脚本的可读提示;
     // 权威值仍是审计表里的 `exec_audit.exit_code`。
+    if out.log_handle.is_some() {
+        s.push_str("\n完整 stdout/stderr 已保存；用 exec_log_read(handle, stream, start_line, limit) 按行回读，省略 handle 可列出本任务最近命令证据。");
+    }
     s.push_str(&format!(
         "
 
@@ -437,6 +445,7 @@ fn format_result(command: &str, cwd: &str, out: &exec::ExecResult) -> String {
             "exit_code": out.exit_code,
             "timed_out": out.timed_out,
             "truncated": out.truncated,
+            "log_handle": out.log_handle,
         })
     ));
     s
@@ -476,6 +485,7 @@ mod tests {
             tier: exec::ShellTier::Sandbox,
             timed_out: false,
             truncated: false,
+            log_handle: None,
         };
         let s = format_result("echo hello", "C:/ws/task", &out);
         assert!(s.contains("$ echo hello"));
@@ -497,6 +507,7 @@ mod tests {
             tier: exec::ShellTier::Sandbox,
             timed_out: false,
             truncated: false,
+            log_handle: None,
         };
         let s = format_result("false", "C:/ws/task", &out);
         assert!(s.contains("boom"));
@@ -518,6 +529,7 @@ mod tests {
             tier: exec::ShellTier::Sandbox,
             timed_out: false,
             truncated: false,
+            log_handle: None,
         };
         assert!(format_result("true", "C:/ws/task", &out).contains("无输出"));
     }
@@ -533,6 +545,7 @@ mod tests {
             tier: exec::ShellTier::Sandbox,
             timed_out: false,
             truncated: true,
+            log_handle: None,
         };
         let s = format_result("false", "C:/ws/task", &out);
         let meta_at = s.find("[exec-meta]").expect("必须带机读元数据行");

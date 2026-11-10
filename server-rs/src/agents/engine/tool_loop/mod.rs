@@ -8,6 +8,8 @@
 //
 // 行为契约(与抽取前逐字节一致):停止条件顺序、事件标题/明细、`guard_stopped`
 // 文案、任务终态(预算类 done / 守卫类 partial)均由 `guard.rs` 与既有集成用例锁定。
+mod context;
+mod context_stage;
 mod guard;
 mod progress;
 mod round;
@@ -103,6 +105,7 @@ fn resolve_loop_limits(
     // 只有本轮确实下发工作区写工具时才启用——只读白名单/审计面/聊天路径不误提醒。
     let readonly_limit = tool_ctx
         .budget
+        .as_ref()
         .and_then(|b| b.readonly_streak_limit)
         .filter(|n| *n > 0)
         .filter(|_| {
@@ -119,6 +122,7 @@ fn resolve_loop_limits(
         .unwrap_or_default();
     let no_progress_limit = tool_ctx
         .budget
+        .as_ref()
         .and_then(|b| b.no_progress_limit)
         .filter(|n| *n > 0)
         .filter(|_| !declared_files.is_empty());
@@ -127,6 +131,7 @@ fn resolve_loop_limits(
     // 「梳理接口与验收条件」,只提醒不熔断(墙钟/团队份额仍是上限)。
     let shard_nudge_after = tool_ctx
         .budget
+        .as_ref()
         .and_then(|b| b.shard_read_nudge_after)
         .filter(|n| *n > 0);
 
@@ -156,284 +161,497 @@ fn resolve_loop_limits(
 /// 轮次上限:None = 聊天默认 32;Some(0) = 任务模式不限;Some(n>0) = 显式上限。
 /// 无 tool_calls 时返回最终正文;每轮 usage 累加进 `total_usage`。
 /// 停止条件与顺序见 `guard.rs` 模块头。
-pub(crate) async fn run_tool_loop(req: ToolLoopRequest<'_>) -> Result<ExecutorResult, EngineError> {
-    let ToolLoopRequest {
-        engine,
-        state_machine,
-        agent_session,
-        session_id,
-        llm_messages,
-        params,
-        tool_ctx,
-        tx,
-        abort,
-        flag,
-        total_usage,
-        self_heals,
-        run_id,
-        gate,
-        call_timeout,
-        emit_tokens,
-        emit_reasoning,
-    } = req;
-
-    let LoopLimits {
-        call_watchdog,
-        declared_files,
-        shard_nudge_after,
-        mut guards,
-        mut semantic_guard,
-    } = resolve_loop_limits(engine, session_id, params, tool_ctx, gate, call_timeout);
-    let mut round = 0usize;
-    // SKY-8:分片读取软提醒计数器(只提醒,不参与停止判定)。
-    let mut shard_reads = 0usize;
-    let mut shard_nudged = false;
-    // 重复调用熔断(P0-2):窗口内同一「工具名+参数」指纹 ≥3 次即中止。
-    let mut loop_guard = LoopGuard::with_defaults();
-    let loop_started = std::time::Instant::now();
-    // 轮级滚动:最近一次非空正文(墙钟/只读/无进展收尾的回退值)。
-    let mut last_non_empty_content = String::new();
-    let task_id = crate::services::task_change_service::task_id_of(session_id);
-    let mut task_progress = task_id.as_ref().map(|_| progress::TaskProgress::default());
-    let mut ledger_mark = task_id
-        .as_ref()
-        .and_then(|id| crate::services::task_change_service::max_id(&engine.db, id));
-    loop {
-        // ===== 工具历史回灌上限(R3b):最老轮的 tool 结果原地摘要化 =====
-        trim_round_history(engine, session_id, round, llm_messages);
-
-        // ===== 单轮生成(看门狗 + 传输重试 + 截断自愈)=====
-        let result = generate_round(
+pub(crate) fn run_tool_loop<'a>(
+    req: ToolLoopRequest<'a>,
+) -> futures::future::BoxFuture<'a, Result<ExecutorResult, EngineError>> {
+    // 递归 custom/run_flow 会嵌套本循环；把含生成与浏览器等待的状态放堆上，避免 Windows 栈溢出。
+    Box::pin(async move {
+        let ToolLoopRequest {
             engine,
+            state_machine,
+            agent_session,
             session_id,
-            run_id,
             llm_messages,
             params,
+            tool_ctx,
             tx,
             abort,
             flag,
-            emit_tokens,
-            emit_reasoning,
-            call_watchdog,
-            round,
             total_usage,
             self_heals,
-        )
-        .await?;
+            run_id,
+            gate,
+            call_timeout,
+            emit_tokens,
+            emit_reasoning,
+        } = req;
 
-        total_usage.prompt_tokens += result.usage.prompt_tokens;
-        total_usage.completion_tokens += result.usage.completion_tokens;
-        total_usage.total_tokens += result.usage.total_tokens;
-        total_usage.prompt_cache_hit_tokens += result.usage.prompt_cache_hit_tokens;
-        total_usage.prompt_cache_miss_tokens += result.usage.prompt_cache_miss_tokens;
-        if result.interrupted {
-            // 本轮 usage 已累进 total_usage;返回体归零,避免调用方重复计数。
-            return Ok(ExecutorResult {
-                usage: TokenUsage::default(),
-                self_heals: std::mem::take(self_heals),
-                ..result
-            });
-        }
-        if result.tool_calls.is_empty() {
-            return Ok(ExecutorResult {
-                content: result.content,
-                usage: TokenUsage::default(),
-                interrupted: false,
-                tool_calls: Vec::new(),
-                reasoning: String::new(),
-                // 末轮(无工具调用)的 finish_reason 透出:任务模式落库截断标记用
-                finish_reason: result.finish_reason,
-                self_heals: std::mem::take(self_heals),
-                budget_stopped: false,
-                stop: None,
-            });
-        }
-        round += 1;
-        // 最近一次**非空**正文:工具型模型常见「只发工具调用、不带正文」的轮,
-        // 预算类收尾若停在这样一轮,回退到这里避免返回空串。
-        if !result.content.trim().is_empty() {
-            last_non_empty_content = result.content.clone();
-        }
-        // ===== 回填 assistant 消息(完整 tool_calls[] + reasoning_content)=====
-        // 旧实现为每个 call 单独追加一条 assistant,违反 OpenAI 多工具调用格式。
-        let reasoning = (!result.reasoning.is_empty()).then_some(result.reasoning.clone());
-        llm_messages.push(LlmMessage {
-            role: "assistant".into(),
-            content: String::new(),
-            reasoning_content: reasoning,
-            tool_calls: Some(result.tool_calls.clone()),
-            tool_call_id: None,
-            images: Vec::new(),
-        });
-
-        // ===== 本轮工具执行(裁决/并发分组/状态机/SSE/tool 消息)=====
-        let outcome = round::execute_round(
-            RoundContext {
-                engine,
-                state_machine,
-                agent_session,
-                session_id,
-                llm_messages,
-                tool_ctx,
-                tx,
-                abort,
-                flag,
-                run_id,
-                gate,
-            },
-            &result.tool_calls,
-        )
-        .await?;
-        if outcome.interrupted {
-            return Ok(ExecutorResult {
-                content: String::new(),
-                usage: TokenUsage::default(),
-                interrupted: true,
-                tool_calls: Vec::new(),
-                reasoning: String::new(),
-                // 工具执行期中断:生成未完成,finish_reason 不适用
-                finish_reason: None,
-                self_heals: std::mem::take(self_heals),
-                budget_stopped: false,
-                stop: None,
-            });
-        }
-
-        // TQUAL-15：只认内容哈希变化，包含 fs_* 与 bash；同内容重写不重置重复记录。
-        let changed = match (task_id.as_deref(), ledger_mark) {
-            (Some(id), Some(mark)) => {
-                crate::services::task_change_service::paths_since(&engine.db, id, mark)
-            }
-            _ => Vec::new(),
-        };
-        if let Some(id) = task_id.as_deref() {
-            ledger_mark = crate::services::task_change_service::max_id(&engine.db, id);
-        }
-        let workspace_changed = !changed.is_empty();
-        if workspace_changed {
-            loop_guard.clear();
-            semantic_guard.clear();
-        }
-        let mut new_information = false;
-        for e in &outcome.outputs {
-            // SKY-8:累计**成功**的 fs_read(输出是字符串;错误对象不计),
-            // 供集成主「读满阈值 → 梳理接口与验收条件」软提醒使用。
-            if shard_nudge_after.is_some()
-                && e.call.name == crate::tools::agent_tools_fs::READ_TOOL
-                && e.output.as_str().is_some()
-            {
-                shard_reads += 1;
-            }
-            if let Some(progress) = task_progress.as_mut() {
-                new_information |= progress.observe(&e.call.name, &e.output);
-            }
-        }
-        let round_progress = new_information || has_declared_change(&declared_files, &changed);
-        // ===== 无进展守卫的中途提醒(先提醒,后硬收尾)=====
-        if let Some(notice) = guards.observe_round_progress(round_progress) {
-            emit_notice(notice, llm_messages, tx, abort, flag).await?;
-        }
-        // 新读取/验证事实与真实修改均结束只读空转段，失败写入不能清零。
-        guards.observe_tool_calls(&result.tool_calls, new_information || workspace_changed);
-        let mut repeated = None;
-        let mut semantic_break = None;
-        // ===== 语义熔断登记(HB-2):看输出的实质变化,参数可以每轮都变 =====
-        // 本轮改变了产物时，轮内操作跨版本，不把这些结果归入同一版本重复窗口。
-        if !workspace_changed {
-            for e in &outcome.outputs {
-                let output_fp = progress::result_fingerprint(&e.call.name, &e.output);
-                let repeat_fp = if task_progress.is_some() {
-                    crate::utils::loop_guard::fnv1a_hash(&[
-                        &e.call.name,
-                        &e.call.arguments,
-                        &output_fp.to_string(),
-                    ])
-                } else {
-                    crate::utils::loop_guard::fnv1a_hash(&[&e.call.name, &e.call.arguments])
-                };
-                if loop_guard.record(repeat_fp) && repeated.is_none() {
-                    repeated = Some((e.call.name.clone(), loop_guard.count_of(repeat_fp)));
-                }
-                let fp = if task_progress.is_some()
-                    && crate::tools::tool_sets::is_workspace_readonly_tool(&e.call.name)
-                {
-                    output_fp
-                } else {
-                    crate::utils::loop_guard::semantic_fingerprint(
-                        &e.call.name,
-                        &e.output.to_string(),
-                        &e.call.arguments,
-                    )
-                };
-                // SKY-6 第 4 项:纯读工具按整窗阈值判定(少量文件反复读是任务常态)。
-                let readonly_class =
-                    crate::tools::tool_sets::is_workspace_readonly_tool(&e.call.name);
-                let hit = semantic_guard.record_classified(&e.call.name, fp, readonly_class);
-                if semantic_break.is_none() {
-                    semantic_break = hit;
-                }
-            }
-        }
-
-        // ===== 轮末判定(7 类停止条件;顺序见 guard.rs)=====
-        // 两阶段:token 预算的提醒事件先发出,步骤墙钟再采样 elapsed——
-        // 与抽取前「先 await token warn,再取墙钟」的时点一致。
-        let mut evaluation = guards.evaluate_token(
-            session_id,
-            total_usage.prompt_tokens + total_usage.completion_tokens,
-            round,
-        );
-        emit_notices(&mut evaluation.notices, llm_messages, tx, abort, flag).await?;
-        if evaluation.stop.is_none() {
-            evaluation = guards.evaluate_rest(
-                session_id,
-                RoundFacts {
-                    round,
-                    elapsed: loop_started.elapsed(),
-                    used_tokens: total_usage.prompt_tokens + total_usage.completion_tokens,
-                    semantic_break: semantic_break.take(),
-                    repeated,
+        // 子 agent 继承本轮真正下发的连接和工具面，而不是重新读取默认设置。
+        let mut execution_ctx = tool_ctx.clone();
+        if let Some(budget) = execution_ctx.budget.as_mut() {
+            budget.execution = Some(std::sync::Arc::new(
+                crate::models::tool_policy::ToolExecutionSettings {
+                    connection_id: params.connection_id.clone(),
+                    allowed_tools: params.tools.iter().map(|tool| tool.name.clone()).collect(),
                 },
-            );
-            emit_notices(&mut evaluation.notices, llm_messages, tx, abort, flag).await?;
-        }
-        if let Some(stop) = evaluation.stop {
-            let (title, detail) = stop.event();
-            send_event(
-                step_evt(title, Some(detail.to_string()), None, None),
-                tx,
-                abort,
-                flag,
-            )
-            .await?;
-            // 预算/轮次收尾用本轮正文;墙钟/只读/无进展承诺「带着已有产出」,
-            // 本轮只有工具调用时回退到最近一次非空正文。
-            let content = match stop.kind {
-                LoopStopKind::StepBudget | LoopStopKind::Readonly | LoopStopKind::NoProgress => {
-                    budget_stop_content(result.content, &last_non_empty_content)
-                }
-                LoopStopKind::TokenBudget
-                | LoopStopKind::RoundLimit
-                | LoopStopKind::Semantic
-                | LoopStopKind::RepeatedCall => result.content,
-            };
-            return Ok(ExecutorResult::stopped(
-                content,
-                result.finish_reason,
-                std::mem::take(self_heals),
-                stop,
             ));
         }
-        // SKY-8:集成主读满阈值后提醒一次「梳理接口与验收条件」。放在所有终止闸门之后:
-        // 本轮若已被预算/守卫收尾,提醒没有意义;未收尾则注入给下一轮模型请求。
-        if let Some(after) = shard_nudge_after {
-            if !shard_nudged && shard_reads >= after {
-                shard_nudged = true;
-                llm_messages.push(LlmMessage::plain(
-                    "user",
-                    crate::services::task_core::prompt_consts::SHARD_READ_FIRST_NUDGE,
-                ));
+        let tool_ctx = &execution_ctx;
+
+        let LoopLimits {
+            call_watchdog,
+            declared_files,
+            shard_nudge_after,
+            mut guards,
+            mut semantic_guard,
+        } = resolve_loop_limits(engine, session_id, params, tool_ctx, gate, call_timeout);
+        let mut round = 0usize;
+        // SKY-8:分片读取软提醒计数器(只提醒,不参与停止判定)。
+        let mut shard_reads = 0usize;
+        let mut shard_nudged = false;
+        // 重复调用熔断(P0-2):窗口内同一「工具名+参数」指纹 ≥3 次即中止。
+        let mut loop_guard = LoopGuard::with_defaults();
+        let loop_started = std::time::Instant::now();
+        // 轮级滚动:最近一次非空正文(墙钟/只读/无进展收尾的回退值)。
+        let mut last_non_empty_content = String::new();
+        let task_id = crate::services::task_change_service::task_id_of(session_id);
+        let task_context = if task_id.is_some() {
+            let budget = tool_ctx.budget.as_ref().map_or(0, |b| b.input_token_budget);
+            Some(context::TaskContextRuntime::new(engine, params, budget).await?)
+        } else {
+            None
+        };
+        let mut task_progress = task_id.as_ref().map(|_| progress::TaskProgress::default());
+        let mut ledger_mark = task_id
+            .as_ref()
+            .and_then(|id| crate::services::task_change_service::max_id(&engine.db, id));
+        let mut live_verification =
+            crate::services::task_engine::verification::LiveVerification::default();
+        loop {
+            // 任务只在阈值处做一次阶段替换；聊天保持既有逐轮工具历史裁剪语义。
+            if let Some(task_context) = &task_context {
+                if let Some(stop) = repair_budget_stop(
+                    &mut guards,
+                    session_id,
+                    total_usage,
+                    round,
+                    loop_started,
+                    llm_messages,
+                    tx,
+                    abort,
+                    flag,
+                )
+                .await?
+                {
+                    return Ok(ExecutorResult::stopped(
+                        last_non_empty_content,
+                        None,
+                        std::mem::take(self_heals),
+                        stop,
+                    ));
+                }
+                task_context
+                    .compact(context::CompactRequest {
+                        engine,
+                        session_id,
+                        run_id,
+                        messages: llm_messages,
+                        params,
+                        tx,
+                        abort,
+                        flag,
+                        call_watchdog,
+                        total_usage,
+                        remaining_budget: params
+                            .step_budget
+                            .map(|budget| budget.saturating_sub(loop_started.elapsed())),
+                    })
+                    .await?;
+                if let Some(stop) = repair_budget_stop(
+                    &mut guards,
+                    session_id,
+                    total_usage,
+                    round,
+                    loop_started,
+                    llm_messages,
+                    tx,
+                    abort,
+                    flag,
+                )
+                .await?
+                {
+                    return Ok(ExecutorResult::stopped(
+                        last_non_empty_content,
+                        None,
+                        std::mem::take(self_heals),
+                        stop,
+                    ));
+                }
+            } else {
+                trim_round_history(engine, session_id, round, llm_messages);
+            }
+
+            // ===== 单轮生成(看门狗 + 传输重试 + 截断自愈)=====
+            let result = generate_round(
+                engine,
+                session_id,
+                run_id,
+                llm_messages,
+                params,
+                tx,
+                abort,
+                flag,
+                emit_tokens,
+                emit_reasoning,
+                call_watchdog,
+                round,
+                total_usage,
+                self_heals,
+            )
+            .await?;
+
+            total_usage.prompt_tokens += result.usage.prompt_tokens;
+            total_usage.completion_tokens += result.usage.completion_tokens;
+            total_usage.total_tokens += result.usage.total_tokens;
+            total_usage.prompt_cache_hit_tokens += result.usage.prompt_cache_hit_tokens;
+            total_usage.prompt_cache_miss_tokens += result.usage.prompt_cache_miss_tokens;
+            if result.interrupted {
+                // 本轮 usage 已累进 total_usage;返回体归零,避免调用方重复计数。
+                return Ok(ExecutorResult {
+                    usage: TokenUsage::default(),
+                    self_heals: std::mem::take(self_heals),
+                    ..result
+                });
+            }
+            if result.tool_calls.is_empty() {
+                if tool_ctx.agent_depth == 0 {
+                    if let (Some(spec), Some(scope)) = (
+                        tool_ctx
+                            .budget
+                            .as_ref()
+                            .and_then(|b| b.verification.as_ref()),
+                        tool_ctx.scope.as_ref(),
+                    ) {
+                        if let Some(stop) = repair_budget_stop(
+                            &mut guards,
+                            session_id,
+                            total_usage,
+                            round,
+                            loop_started,
+                            llm_messages,
+                            tx,
+                            abort,
+                            flag,
+                        )
+                        .await?
+                        {
+                            return Ok(ExecutorResult::stopped(
+                                result.content,
+                                result.finish_reason,
+                                std::mem::take(self_heals),
+                                stop,
+                            ));
+                        }
+                        if *abort.borrow() {
+                            return Err(EngineError::Interrupted);
+                        }
+                        let vision = engine
+                            .resolve_connector(params.connection_id.as_deref())
+                            .await?
+                            .0
+                            .capabilities()
+                            .supports_vision;
+                        let remaining = params
+                            .step_budget
+                            .map(|budget| budget.saturating_sub(loop_started.elapsed()))
+                            .unwrap_or(std::time::Duration::from_secs(45));
+                        let probe_outcome = round::await_or_cancel(
+                            tokio::time::timeout(
+                                remaining,
+                                live_verification.before_finish(
+                                    spec,
+                                    scope.workspace(),
+                                    &engine.images,
+                                    vision,
+                                ),
+                            ),
+                            abort,
+                        )
+                        .await
+                        .ok_or(EngineError::Interrupted)?;
+                        let feedback = match probe_outcome {
+                            Ok(feedback) => feedback?,
+                            Err(_) => {
+                                // 保留本轮待验契约；预算用完不把已有产物或旧通过记录冒充新验收。
+                                let mut record =
+                                    crate::services::task_engine::verification::load_current(
+                                        &spec.evidence_dir,
+                                        scope.workspace(),
+                                        &spec.goal,
+                                    );
+                                record.status=crate::services::task_engine::verification::VerificationStatus::Unavailable;
+                                record.current = false;
+                                record.detail = "验收阶段预算耗尽，未完成验收".into();
+                                crate::services::task_engine::verification::save(
+                                    &spec.evidence_dir,
+                                    &record,
+                                )?;
+                                return Ok(ExecutorResult::stopped(
+                                    result.content,
+                                    result.finish_reason,
+                                    std::mem::take(self_heals),
+                                    LoopStop {
+                                        kind: LoopStopKind::StepBudget,
+                                        message: record.detail.clone(),
+                                        event_title: "验收预算耗尽",
+                                        event_detail: record.detail,
+                                    },
+                                ));
+                            }
+                        };
+                        if let Some((status, feedback)) = feedback {
+                            send_event(
+                                step_evt(status.event_title(), None, None, None),
+                                tx,
+                                abort,
+                                flag,
+                            )
+                            .await?;
+                            last_non_empty_content = result.content.clone();
+                            llm_messages.push(LlmMessage::plain("assistant", &result.content));
+                            llm_messages.push(feedback);
+                            round += 1;
+                            guards.observe_tool_calls(&[], true);
+                            if let Some(stop) = repair_budget_stop(
+                                &mut guards,
+                                session_id,
+                                total_usage,
+                                round,
+                                loop_started,
+                                llm_messages,
+                                tx,
+                                abort,
+                                flag,
+                            )
+                            .await?
+                            {
+                                return Ok(ExecutorResult::stopped(
+                                    result.content,
+                                    result.finish_reason,
+                                    std::mem::take(self_heals),
+                                    stop,
+                                ));
+                            }
+                            continue;
+                        }
+                    }
+                }
+                return Ok(ExecutorResult {
+                    content: result.content,
+                    usage: TokenUsage::default(),
+                    interrupted: false,
+                    tool_calls: Vec::new(),
+                    reasoning: String::new(),
+                    // 末轮(无工具调用)的 finish_reason 透出:任务模式落库截断标记用
+                    finish_reason: result.finish_reason,
+                    self_heals: std::mem::take(self_heals),
+                    budget_stopped: false,
+                    stop: None,
+                });
+            }
+            round += 1;
+            // 最近一次**非空**正文:工具型模型常见「只发工具调用、不带正文」的轮,
+            // 预算类收尾若停在这样一轮,回退到这里避免返回空串。
+            if !result.content.trim().is_empty() {
+                last_non_empty_content = result.content.clone();
+            }
+            // ===== 回填 assistant 消息(完整 tool_calls[] + reasoning_content)=====
+            // 旧实现为每个 call 单独追加一条 assistant,违反 OpenAI 多工具调用格式。
+            let reasoning = (!result.reasoning.is_empty()).then_some(result.reasoning.clone());
+            llm_messages.push(LlmMessage {
+                role: "assistant".into(),
+                content: if task_id.is_some() {
+                    result.content.clone()
+                } else {
+                    String::new()
+                },
+                reasoning_content: reasoning,
+                tool_calls: Some(result.tool_calls.clone()),
+                tool_call_id: None,
+                images: Vec::new(),
+            });
+
+            // ===== 本轮工具执行(裁决/并发分组/状态机/SSE/tool 消息)=====
+            let outcome = round::execute_round(
+                RoundContext {
+                    engine,
+                    state_machine,
+                    agent_session,
+                    session_id,
+                    llm_messages,
+                    tool_ctx,
+                    tx,
+                    abort,
+                    flag,
+                    run_id,
+                    gate,
+                },
+                &result.tool_calls,
+            )
+            .await?;
+            if outcome.interrupted {
+                return Ok(ExecutorResult {
+                    content: String::new(),
+                    usage: TokenUsage::default(),
+                    interrupted: true,
+                    tool_calls: Vec::new(),
+                    reasoning: String::new(),
+                    // 工具执行期中断:生成未完成,finish_reason 不适用
+                    finish_reason: None,
+                    self_heals: std::mem::take(self_heals),
+                    budget_stopped: false,
+                    stop: None,
+                });
+            }
+
+            // TQUAL-15：只认内容哈希变化，包含 fs_* 与 bash；同内容重写不重置重复记录。
+            let changed = match (task_id.as_deref(), ledger_mark) {
+                (Some(id), Some(mark)) => {
+                    crate::services::task_change_service::paths_since(&engine.db, id, mark)
+                }
+                _ => Vec::new(),
+            };
+            if let Some(id) = task_id.as_deref() {
+                ledger_mark = crate::services::task_change_service::max_id(&engine.db, id);
+            }
+            let workspace_changed = !changed.is_empty();
+            if workspace_changed {
+                loop_guard.clear();
+                semantic_guard.clear();
+            }
+            let mut new_information = false;
+            for e in &outcome.outputs {
+                // SKY-8:累计**成功**的 fs_read(输出是字符串;错误对象不计),
+                // 供集成主「读满阈值 → 梳理接口与验收条件」软提醒使用。
+                if shard_nudge_after.is_some()
+                    && e.call.name == crate::tools::agent_tools_fs::READ_TOOL
+                    && e.output.as_str().is_some()
+                {
+                    shard_reads += 1;
+                }
+                if let Some(progress) = task_progress.as_mut() {
+                    new_information |= progress.observe(&e.call.name, &e.output);
+                }
+            }
+            let round_progress = new_information || has_declared_change(&declared_files, &changed);
+            // ===== 无进展守卫的中途提醒(先提醒,后硬收尾)=====
+            if let Some(notice) = guards.observe_round_progress(round_progress) {
+                emit_notice(notice, llm_messages, tx, abort, flag).await?;
+            }
+            // 新读取/验证事实与真实修改均结束只读空转段，失败写入不能清零。
+            guards.observe_tool_calls(&result.tool_calls, new_information || workspace_changed);
+            let mut repeated = None;
+            let mut semantic_break = None;
+            // ===== 语义熔断登记(HB-2):看输出的实质变化,参数可以每轮都变 =====
+            // 本轮改变了产物时，轮内操作跨版本，不把这些结果归入同一版本重复窗口。
+            if !workspace_changed {
+                for e in &outcome.outputs {
+                    let output_fp = progress::result_fingerprint(&e.call.name, &e.output);
+                    let repeat_fp = if task_progress.is_some() {
+                        crate::utils::loop_guard::fnv1a_hash(&[
+                            &e.call.name,
+                            &e.call.arguments,
+                            &output_fp.to_string(),
+                        ])
+                    } else {
+                        crate::utils::loop_guard::fnv1a_hash(&[&e.call.name, &e.call.arguments])
+                    };
+                    if loop_guard.record(repeat_fp) && repeated.is_none() {
+                        repeated = Some((e.call.name.clone(), loop_guard.count_of(repeat_fp)));
+                    }
+                    let fp = if task_progress.is_some()
+                        && (crate::tools::tool_sets::is_workspace_readonly_tool(&e.call.name)
+                            || matches!(e.call.name.as_str(), "bash" | "exec_log_read"))
+                    {
+                        output_fp
+                    } else {
+                        crate::utils::loop_guard::semantic_fingerprint(
+                            &e.call.name,
+                            &e.output.to_string(),
+                            &e.call.arguments,
+                        )
+                    };
+                    // SKY-6 第 4 项:纯读工具按整窗阈值判定(少量文件反复读是任务常态)。
+                    let readonly_class =
+                        crate::tools::tool_sets::is_workspace_readonly_tool(&e.call.name);
+                    let hit = semantic_guard.record_classified(&e.call.name, fp, readonly_class);
+                    if semantic_break.is_none() {
+                        semantic_break = hit;
+                    }
+                }
+            }
+
+            // ===== 轮末判定(7 类停止条件;顺序见 guard.rs)=====
+            // 两阶段:token 预算的提醒事件先发出,步骤墙钟再采样 elapsed——
+            // 与抽取前「先 await token warn,再取墙钟」的时点一致。
+            let mut evaluation = guards.evaluate_token(
+                session_id,
+                total_usage.prompt_tokens + total_usage.completion_tokens,
+                round,
+            );
+            emit_notices(&mut evaluation.notices, llm_messages, tx, abort, flag).await?;
+            if evaluation.stop.is_none() {
+                evaluation = guards.evaluate_rest(
+                    session_id,
+                    RoundFacts {
+                        round,
+                        elapsed: loop_started.elapsed(),
+                        used_tokens: total_usage.prompt_tokens + total_usage.completion_tokens,
+                        semantic_break: semantic_break.take(),
+                        repeated,
+                    },
+                );
+                emit_notices(&mut evaluation.notices, llm_messages, tx, abort, flag).await?;
+            }
+            if let Some(stop) = evaluation.stop {
+                let (title, detail) = stop.event();
                 send_event(
+                    step_evt(title, Some(detail.to_string()), None, None),
+                    tx,
+                    abort,
+                    flag,
+                )
+                .await?;
+                // 预算/轮次收尾用本轮正文;墙钟/只读/无进展承诺「带着已有产出」,
+                // 本轮只有工具调用时回退到最近一次非空正文。
+                let content = match stop.kind {
+                    LoopStopKind::StepBudget
+                    | LoopStopKind::Readonly
+                    | LoopStopKind::NoProgress => {
+                        budget_stop_content(result.content, &last_non_empty_content)
+                    }
+                    LoopStopKind::TokenBudget
+                    | LoopStopKind::RoundLimit
+                    | LoopStopKind::Semantic
+                    | LoopStopKind::RepeatedCall => result.content,
+                };
+                return Ok(ExecutorResult::stopped(
+                    content,
+                    result.finish_reason,
+                    std::mem::take(self_heals),
+                    stop,
+                ));
+            }
+            // SKY-8:集成主读满阈值后提醒一次「梳理接口与验收条件」。放在所有终止闸门之后:
+            // 本轮若已被预算/守卫收尾,提醒没有意义;未收尾则注入给下一轮模型请求。
+            if let Some(after) = shard_nudge_after {
+                if !shard_nudged && shard_reads >= after {
+                    shard_nudged = true;
+                    llm_messages.push(LlmMessage::plain(
+                        "user",
+                        crate::services::task_core::prompt_consts::SHARD_READ_FIRST_NUDGE,
+                    ));
+                    send_event(
                     step_evt(
                         "分片读取提醒",
                         Some(format!(
@@ -447,9 +665,42 @@ pub(crate) async fn run_tool_loop(req: ToolLoopRequest<'_>) -> Result<ExecutorRe
                     flag,
                 )
                 .await?;
+                }
             }
         }
+    })
+}
+
+/// 验收与修复继续沿用原循环预算；没有工具的“准备交付”轮也必须检查。
+#[allow(clippy::too_many_arguments)]
+async fn repair_budget_stop(
+    guards: &mut GuardState,
+    session: &str,
+    usage: &TokenUsage,
+    round: usize,
+    started: std::time::Instant,
+    messages: &mut Vec<LlmMessage>,
+    tx: &tokio::sync::mpsc::Sender<SseEvent>,
+    abort: &tokio::sync::watch::Receiver<bool>,
+    flag: &AbortFlag,
+) -> Result<Option<LoopStop>, EngineError> {
+    let used = usage.prompt_tokens + usage.completion_tokens;
+    let mut evaluation = guards.evaluate_token(session, used, round);
+    emit_notices(&mut evaluation.notices, messages, tx, abort, flag).await?;
+    if evaluation.stop.is_none() {
+        evaluation = guards.evaluate_rest(
+            session,
+            RoundFacts {
+                round,
+                elapsed: started.elapsed(),
+                used_tokens: used,
+                semantic_break: None,
+                repeated: None,
+            },
+        );
+        emit_notices(&mut evaluation.notices, messages, tx, abort, flag).await?;
     }
+    Ok(evaluation.stop)
 }
 
 /// 发一条守卫提醒:只读/无进展会把提醒文本回灌给模型(先回灌再发事件,

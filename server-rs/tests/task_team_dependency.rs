@@ -82,7 +82,7 @@ async fn team_runs_dependent_main_after_upstream_and_injects_output() {
         .unwrap_or_else(|| panic!("应有总装主调用行: {calls}"));
     let prompt = assembly["prompt_summary"].as_str().unwrap_or("");
     assert!(
-        prompt.contains("依赖的上游主 agent 产出") && prompt.contains("分片产出ABC"),
+        prompt.contains("上游结构化交接") && prompt.contains("分片产出ABC"),
         "总装主 prompt 应包含上游产出摘要: {prompt}"
     );
 }

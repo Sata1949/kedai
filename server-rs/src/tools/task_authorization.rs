@@ -24,7 +24,7 @@ pub(crate) fn task_authorization_of(ctx: &ToolContext) -> Option<TaskAuthorizati
     ctx.scope
         .as_ref()
         .and_then(|scope| scope.task_authorization())
-        .or_else(|| ctx.budget.and_then(|b| b.task_authorization))
+        .or_else(|| ctx.budget.as_ref().and_then(|b| b.task_authorization))
 }
 
 /// 按任务档位裁决。`Some` = 档位已裁定；`None` = 继续走既有矩阵。
@@ -118,6 +118,9 @@ mod tests {
             agent_depth: 0,
             scope,
             budget: Some(crate::models::types::ToolBudget {
+                execution: None,
+                verification: None,
+                input_token_budget: 0,
                 semantic_guard: None,
                 readonly_streak_limit: None,
                 no_progress_limit: None,
@@ -134,6 +137,9 @@ mod tests {
             agent_depth: 0,
             scope: None,
             budget: Some(crate::models::types::ToolBudget {
+                execution: None,
+                verification: None,
+                input_token_budget: 0,
                 semantic_guard: None,
                 readonly_streak_limit: None,
                 no_progress_limit: None,

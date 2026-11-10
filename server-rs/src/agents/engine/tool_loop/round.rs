@@ -586,7 +586,7 @@ async fn emit_authorization_outcome(
 /// (引擎 run 收尾),那不是取消信号——若把它当取消,正常完成的工具会被误判成
 /// 「已取消」;若不管它,`changed()` 会立刻重复就绪导致忙循环。故 `Err` 分支改为
 /// 等 future 自己跑完,`Ok` 分支回到循环顶重读当前值。
-async fn await_or_cancel<F>(fut: F, abort: &watch::Receiver<bool>) -> Option<F::Output>
+pub(super) async fn await_or_cancel<F>(fut: F, abort: &watch::Receiver<bool>) -> Option<F::Output>
 where
     F: std::future::Future,
 {

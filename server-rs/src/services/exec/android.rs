@@ -5,8 +5,8 @@
 // 但普通应用 UID 受 SELinux 约束,拿不到 root/ADB 权限。故 Rust 只做字符串进出
 // (与 native_bridge_android.rs 同一模式),执行逻辑在 Kotlin `ShellExecutorBridge`。
 //
-// 入参编码约定(T3 起为 v2 长度无关格式,详见 `exec::wire` 模块头):
-//   exec:       v2 ␟ b64(command) ␟ b64(cwd) ␟ timeoutMs  →  v2 ␟ exitCode ␟ b64(stdout) ␟ b64(stderr)
+// 入参编码约定（TQUAL-18 升级 v3，详见 `exec::wire` 模块头）：
+//   exec:       v3 ␟ b64(command) ␟ b64(cwd) ␟ timeoutMs ␟ b64(logDir)  →  v3 ␟ exitCode ␟ b64(stdout) ␟ b64(stderr) ␟ timedOut ␟ truncated
 //   detectTier: ""                                         →  root|shizuku|sandbox|disabled
 //   requestShizukuPermission: ""                           →  ""(成功)或错误消息
 #![cfg(target_os = "android")]
@@ -51,7 +51,16 @@ pub async fn execute(req: ExecRequest) -> Result<ExecResult, String> {
     }
 
     let timeout_ms = super::clamp_timeout(req.timeout_ms);
-    let payload = encode_exec_request(&req.command, req.cwd.as_deref(), timeout_ms);
+    let log_dir = req
+        .evidence
+        .as_ref()
+        .map(|e| e.directory().to_string_lossy().into_owned());
+    let payload = encode_exec_request(
+        &req.command,
+        req.cwd.as_deref(),
+        timeout_ms,
+        log_dir.as_deref(),
+    );
 
     // JNI 调用是同步阻塞的,放到阻塞线程池避免占用 async 运行时
     let raw = crate::models::data_activity::spawn_blocking(move || {
@@ -63,21 +72,25 @@ pub async fn execute(req: ExecRequest) -> Result<ExecResult, String> {
     parse_result(&raw, tier)
 }
 
-/// 解析 Kotlin 回传的 `v2 ␟ exitCode ␟ b64(stdout) ␟ b64(stderr)`。
+/// 解析 Kotlin 回传的 `v3 ␟ exitCode ␟ b64(stdout) ␟ b64(stderr) ␟ timedOut ␟ truncated`。
 /// 三字段缺失或版本不匹配时给出可诊断的错误(而非静默当空输出)。
 fn parse_result(raw: &str, tier: ShellTier) -> Result<ExecResult, String> {
-    let (exit_code, stdout, stderr) = decode_exec_result(raw)?;
+    let wire = decode_exec_result(raw)?;
+    let stdout = strip_ansi(&wire.stdout);
+    let stderr = strip_ansi(&wire.stderr);
     Ok(ExecResult {
-        exit_code,
+        exit_code: wire.exit_code,
         // ANSI 在截断之前剥掉(2026-11-06):序列不占 32K 字符预算,也不会被
         // 「保头保尾」窗口切成两半。口径与桌面侧 `drain_pipe` 同源。
-        stdout: truncate_output(&strip_ansi(&stdout)),
-        stderr: truncate_output(&strip_ansi(&stderr)),
+        stdout: truncate_output(&stdout),
+        stderr: truncate_output(&stderr),
         tier,
-        timed_out: false,
+        timed_out: wire.timed_out,
         // 截断判定在整串截断之后:数一下剥完 ANSI 的字符数是否超预算
-        truncated: stdout.chars().count() > super::MAX_OUTPUT_CHARS
+        truncated: wire.truncated
+            || stdout.chars().count() > super::MAX_OUTPUT_CHARS
             || stderr.chars().count() > super::MAX_OUTPUT_CHARS,
+        log_handle: None,
     })
 }
 
@@ -102,10 +115,10 @@ mod tests {
     use super::super::wire::SEP;
     use super::*;
 
-    /// v2 线格式:回执按 `v2 ␟ exitCode ␟ b64(stdout) ␟ b64(stderr)` 解析。
+    /// v3 线格式:回执按 `v3 ␟ exitCode ␟ b64(stdout) ␟ b64(stderr) ␟ timedOut ␟ truncated` 解析。
     /// 编码侧用 `wire::encode_exec_result`(与 Kotlin 同一算法),两侧对拍由此可用。
     fn make_result(exit_code: i32, stdout: &str, stderr: &str) -> String {
-        super::super::wire::encode_exec_result(exit_code, stdout, stderr)
+        super::super::wire::encode_exec_result(exit_code, stdout, stderr, false, false)
     }
 
     #[test]

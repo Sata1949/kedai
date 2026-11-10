@@ -320,14 +320,7 @@ impl TaskService {
         }
     }
 
-    /// 写入最终结果并置终态:全部步骤成功为 done;含 error 步骤为 partial(部分完成)。
-    pub(super) fn set_result(&self, id: &str, result: &str, status: TaskStatus) -> bool {
-        self.set_result_with_error(id, result, status, None)
-    }
-
-    /// set_result 的可解释版本:partial 终态可携带原因文本写入 tasks.error(供前端
-    /// 状态行展示「为什么不是完成」);error 为 None 时清空旧 error(重跑成功后不残留
-    /// 上一轮的错误提示)。其余语义与 set_result 一致。
+    /// 写入结果与终态；partial 可携带验收或守卫原因，成功重跑清空旧错误。
     pub(super) fn set_result_with_error(
         &self,
         id: &str,

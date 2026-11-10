@@ -19,6 +19,39 @@ use rusqlite::Connection;
 const MAX_PERSISTED_ISSUES: usize = 32;
 
 impl TaskService {
+    /// 详情交付摘要统一组合静态文件事实与持久化验收证据。
+    pub(crate) fn delivery_summary(
+        &self,
+        task: &TaskRecord,
+    ) -> Option<crate::services::task_engine::delivery::TaskDeliverySummary> {
+        let workspace = std::path::Path::new(task.workspace.as_deref()?);
+        let (changed, count) = crate::services::task_change_service::deliverable_paths(
+            &self.db,
+            &task.id,
+            crate::services::task_engine::delivery::DELIVERY_CHANGED_LIMIT,
+        );
+        let mut summary = crate::services::task_engine::delivery::summarize(
+            &task.plan,
+            workspace,
+            changed,
+            count,
+            &task.title,
+        );
+        summary.runtime_issues = self.runtime_issues(&task.id);
+        summary.verification = self.verification(&task.id, workspace, &task.title);
+        Some(summary)
+    }
+    /// 版本绑定证据只读，不为详情请求创建 scratch 目录或重跑浏览器。
+    pub(crate) fn verification(
+        &self,
+        id: &str,
+        workspace: &std::path::Path,
+        goal: &str,
+    ) -> crate::services::task_engine::verification::VerificationRecord {
+        let dir =
+            crate::services::task_engine::verification::evidence_dir(&self.scratch_root.join(id));
+        crate::services::task_engine::verification::load_current(&dir, workspace, goal)
+    }
     /// 写入本轮运行期自检问题(空切片 = 清空)。DB 写失败只记日志、返回 false,
     /// 不阻断任务收尾——持久化失败最多让成果卡少一行提示,不该把任务判失败。
     pub(crate) fn set_runtime_issues(&self, id: &str, issues: &[String]) -> bool {

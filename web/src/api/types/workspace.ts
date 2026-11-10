@@ -44,7 +44,29 @@ export interface TaskDeliveryFile {
  * - `workspace_available=false`：工作区当前不可访问，`missing` 为空不代表齐全；
  * - `changed` 只列去重后的前 200 条，总数看 `changed_count`。
  */
+export type VerificationStatus = 'passed' | 'failed' | 'not_run' | 'unavailable';
+
+export interface VerificationImage {
+  id: string;
+  name: string;
+  mime: string;
+}
+export interface TaskVerification {
+  status: VerificationStatus;
+  artifact_version: string | null;
+  checked_at: string | null;
+  detail: string;
+  original_goal: string;
+  checks: string[];
+  issues: string[];
+  screenshots: VerificationImage[];
+  current: boolean;
+  browser_required: boolean;
+  resources: Record<string, string>;
+}
+
 export interface TaskDeliverySummary {
+  verification: TaskVerification;
   checked: boolean;
   workspace_available: boolean;
   required: TaskDeliveryFile[];

@@ -4,10 +4,8 @@
 // 读主 agent 的自述,无法核对工作区里的文件是否存在、内容是否一致。实测里主 3 的
 // 「拒绝伪造」是模型自觉的兜底,不是系统能力。
 //
-// 本模块只给审计/终审挂**工作区只读三件**(fs_read/fs_glob/fs_grep),不挂 bash 与任何
-// 写工具:审计的职责是核对,不是执行;命令级验收(node --check/测试)留作遗留 TMR-L3。
-// 任一环节失败(无作用域、工具面为空、循环 Err/空输出)由调用方回退既有纯文本审计,
-// 保证新增能力不会让审计整体失效。
+// 审计只消费文件、版本绑定截图与已执行命令证据，不下发 bash 或写工具。
+// 工作区工具面仍与任务授权取交；只读工具不可用时沿用既有纯文本审计入口。
 use super::context::TaskRunContext;
 use super::sink;
 use crate::agents::engine::executor::{run_tool_loop, ToolGate, ToolLoopRequest};
@@ -16,7 +14,6 @@ use crate::agents::state_machine::{AgentState, StateMachine};
 use crate::models::types::{
     GenerationParams, LlmMessage, TokenUsage, ToolBudget, ToolChoice, ToolContext,
 };
-use crate::services::settings_service::vision_enabled;
 use crate::services::task_core::{TaskBackend, TaskGenOutput};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -61,7 +58,7 @@ pub(crate) async fn generate_with_readonly_tools(
     let Some(scope) = ctx.scope.clone() else {
         return Err("审计工具不可用:本任务没有工作区作用域".into());
     };
-    // 工具面:任务策略编译后只保留工作区只读三件——即使策略是 all/deny_dangerous,
+    // 工具面：任务策略编译后只保留文件、图像及命令证据读取——即使策略放全，
     // 审计也拿不到写工具/bash;白名单是硬边界(ToolGate::listed)。
     let policy = super::tool_policy::compile(
         &ctx.settings.task_tool_policy,
@@ -69,17 +66,26 @@ pub(crate) async fn generate_with_readonly_tools(
         &engine.tool_registry(),
         true,
         ctx.settings.task_coding_bundle_enabled,
-        vision_enabled(&ctx.settings),
+        engine
+            .resolve_connector(ctx.connection_id.as_deref())
+            .await?
+            .0
+            .capabilities()
+            .supports_vision,
         ctx.settings.vision_screenshot_enabled,
     );
-    let allowed: Vec<String> = crate::tools::tool_sets::WORKSPACE_READONLY_TOOLS
-        .iter()
-        .map(|s| s.to_string())
+    let defs: Vec<_> = policy
+        .defs
+        .into_iter()
+        .filter(|d| {
+            crate::tools::tool_sets::WORKSPACE_READONLY_TOOLS.contains(&d.name.as_str())
+                || matches!(
+                    d.name.as_str(),
+                    "exec_log_read" | "view_image" | "zoom_image" | "image_diff"
+                )
+        })
         .collect();
-    let defs = crate::tools::tool_sets::filter_by_const(
-        policy.defs,
-        crate::tools::tool_sets::WORKSPACE_READONLY_TOOLS,
-    );
+    let allowed: Vec<_> = defs.iter().map(|d| d.name.clone()).collect();
     if defs.is_empty() {
         return Err("审计工具不可用:任务策略未放行工作区只读工具".into());
     }
@@ -113,6 +119,35 @@ pub(crate) async fn generate_with_readonly_tools(
         LlmMessage::plain("system", system),
         LlmMessage::plain("user", user),
     ];
+    let record = super::verification::load_current(
+        &super::verification::evidence_dir(&svc.scratch_dir_for(&ctx.task_id)?),
+        scope.workspace(),
+        &ctx.goal,
+    );
+    let mut evidence = LlmMessage::plain(
+        "user",
+        &crate::services::prompt_kit::untrusted_boundary_task(
+            "运行环境采集的版本绑定验收证据",
+            &serde_json::to_string(&record).map_err(|e| e.to_string())?,
+        ),
+    );
+    if engine
+        .resolve_connector(ctx.connection_id.as_deref())
+        .await?
+        .0
+        .capabilities()
+        .supports_vision
+    {
+        for mut image in record.screenshots {
+            image.data_url = engine.image_service().resolve_data_url(&image.id)?;
+            evidence.images.push(image);
+        }
+    } else if !record.screenshots.is_empty() {
+        evidence
+            .content
+            .push_str("\n本审计连接没有视觉输入能力，视觉效果待验。");
+    }
+    messages.push(evidence);
     let mut state_machine = StateMachine::new(&session_id);
     if let Err(e) = state_machine.transition(AgentState::Executing, &session_id) {
         tracing::warn!(error = %e, session = %session_id, "审计状态迁移被拒");
@@ -128,6 +163,12 @@ pub(crate) async fn generate_with_readonly_tools(
         // 就会被提醒/熔断);语义熔断同样关闭——只读面下「重复读」不是空转信号,
         // 由上面的轮次上限与 300s 墙钟兜底(SKY-6 第 4 项)。
         budget: Some(ToolBudget {
+            execution: None,
+            verification: None,
+            input_token_budget: crate::agents::engine::executor::task_input_token_budget(
+                ctx.settings.max_context_tokens,
+                ctx.settings.tool_history_budget_tokens,
+            ),
             semantic_guard,
             readonly_streak_limit: None,
             no_progress_limit: None,

@@ -192,6 +192,9 @@ pub struct AgentEngine {
 }
 
 impl AgentEngine {
+    pub(crate) fn image_service(&self) -> &crate::services::image_service::ImageService {
+        &self.images
+    }
     /// 装配引擎:依赖按职责分成 4 组(基础运行 / 数据服务 / 提示词与上下文 / 工具与扩展),
     /// 字段搬运纯机械,不改变任何字段类型与语义。
     pub fn new(

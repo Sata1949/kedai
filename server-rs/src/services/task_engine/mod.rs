@@ -20,6 +20,7 @@
 //   parse.rs     计划 JSON 解析(批次 4.2 自 task_service 上移)
 //   esm_boundary.rs 单文件交付的 ESM/模块边界判定(SKY-10)
 pub(crate) mod attachments;
+pub(crate) mod browser_verify;
 pub(crate) mod context;
 pub(crate) mod custom;
 pub(crate) mod delivery;
@@ -38,6 +39,7 @@ pub(crate) mod solo;
 pub(crate) mod team;
 pub(crate) mod team_audit;
 pub(crate) mod tool_policy;
+pub(crate) mod verification;
 pub(crate) mod wiring;
 
 use crate::agents::engine::AgentEngine;
@@ -400,6 +402,22 @@ impl TaskEngine {
             .connection_id
             .clone()
             .or_else(|| crate::services::settings_service::task_mode_default_connection(&settings));
+        let vision = match self
+            .engine
+            .resolve_connector(connection_id.as_deref())
+            .await
+        {
+            Ok((connector, _)) => connector.capabilities().supports_vision,
+            Err(error) => {
+                self.svc.finalize_terminal(
+                    &task.id,
+                    token,
+                    TaskTerminal::Failed { error: Some(error) },
+                    *cancel.borrow(),
+                );
+                return;
+            }
+        };
         // 任务级总预算截止期(PRODCAP-2):0 = 关(None,行为逐字节不变);否则从本轮
         // 执行起点起算——到点后多步执行器不再启动新步骤/节点/子目标,在跑步由
         // `effective_step_budget` 收窄后的步骤预算收口(见两函数文档)。
@@ -417,7 +435,7 @@ impl TaskEngine {
             Ok(list) if !list.is_empty() => attachments::with_attachments(
                 &goal_text,
                 &list,
-                crate::services::settings_service::vision_enabled(&settings),
+                vision,
                 // 由派发点按**实际执行器**传入(ATTFIX-5),不按 task_mode 反推:
                 // legacy 任务续跑走的是 FollowupExecutor(工具齐全),按 task_mode
                 // 推断会告诉模型「本模式没有文件读取工具」——提示词在说谎。
@@ -431,6 +449,29 @@ impl TaskEngine {
                 );
                 goal_text
             }
+        };
+        // 在任何模型/入口预置之前冻结用户契约并记待验；此后各步骤共用同一证据。
+        let verification_scope = match scope.as_ref() {
+            Some(scope) if settings.task_coding_bundle_enabled && executor_has_tools => {
+                let prepared = self.svc.scratch_dir_for(&task.id).and_then(|scratch| {
+                    let dir = verification::evidence_dir(&scratch);
+                    verification::prepare_run(&dir, scope.workspace(), &goal_text)?;
+                    Ok((dir, scope.clone()))
+                });
+                match prepared {
+                    Ok(scope) => Some(scope),
+                    Err(error) => {
+                        self.svc.finalize_terminal(
+                            &task.id,
+                            token,
+                            TaskTerminal::Failed { error: Some(error) },
+                            *cancel.borrow(),
+                        );
+                        return;
+                    }
+                }
+            }
+            _ => None,
         };
         let ctx = TaskRunContext {
             task_id: task.id.clone(),
@@ -450,13 +491,32 @@ impl TaskEngine {
         // Err 分支兜底为 Failed(ended_by_cancel 以取消通道求值)。收尾判定所需的
         // 取消态在此处快照,消费方不得再次 borrow。
         match executor.run(ctx).await {
-            Ok((terminal, usage)) => {
+            Ok((mut terminal, usage)) => {
                 tracing::info!(
                     task_id = task.id.clone(),
                     mode = task.task_mode.as_str(),
                     total_tokens = usage.total_tokens,
                     "任务模式执行完成"
                 );
+                // 编码验收门槛独立于是否要求本轮产出文件。预算早停不启动新浏览器，只按已有证据收尾。
+                let mut handled_verification = false;
+                if let Some((dir, scope)) = verification_scope {
+                    if !*cancel.borrow()
+                        && matches!(
+                            terminal,
+                            TaskTerminal::Complete { .. } | TaskTerminal::Followup { .. }
+                        )
+                    {
+                        let record =
+                            verification::load_current(&dir, scope.workspace(), &goal_text);
+                        handled_verification =
+                            record.browser_required || record.artifact_version.is_some();
+                        if handled_verification {
+                            self.svc.set_runtime_issues(&task.id, &record.issues);
+                        }
+                        verification::apply_terminal_gate(&mut terminal, &record);
+                    }
+                }
                 // TMR-3/TMR-6:成功终态先过文件交付门槛,再落库——降级必须发生在
                 // `finalize_terminal` 之前,否则用户看到的仍是 done。
                 // TMR-6 起门槛多两项输入:最终 plan 的必需文件声明(TMR-4 写入)与
@@ -487,7 +547,9 @@ impl TaskEngine {
                     );
                     if let (Some(ws), true, true) = (
                         workspace,
-                        wiring::single_file_requested(&goal_text),
+                        wiring::single_file_requested(&goal_text)
+                            && !handled_verification
+                            && !*cancel.borrow(),
                         successful_terminal,
                     ) {
                         let entry = delivery::pick_single_file_entry(ws, &required);
