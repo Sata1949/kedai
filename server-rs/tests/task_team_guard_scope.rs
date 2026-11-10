@@ -124,16 +124,16 @@ async fn non_sink_dependent_main_keeps_guards_while_sink_is_exempt() {
     assert_eq!(stops, 1, "只应中段主触发一次无进展收尾: {joined}");
     assert!(
         details.iter().any(|d| d.contains("无文件进展提醒")),
-        "中段主应在第 8 轮先收到中途提醒: {joined}"
+        "中段主连续 8 轮无新信息后应先收到中途提醒: {joined}"
     );
 
     let mid_bash = details
         .iter()
         .filter(|d| d.contains("主 agent 2 子目标 1 调用工具 bash"))
         .count();
-    assert!(
-        mid_bash <= 16,
-        "中段主应在第 16 轮被无进展守卫截断,实际 {mid_bash} 次: {joined}"
+    assert_eq!(
+        mid_bash, 17,
+        "首次返回是新事实，其后连续 16 轮无进展应截断: {joined}"
     );
     let sink_reads = details
         .iter()

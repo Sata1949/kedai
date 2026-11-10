@@ -1031,7 +1031,7 @@ async fn executor_tool_discipline_injected_only_for_tool_executors() {
         "回显应含执行者内置指令(控制项,否则本断言无意义): {result}"
     );
     assert!(
-        result.contains("自测通过即收尾"),
+        result.contains("按验收证据收尾"),
         "有工具的执行者必须拿到工具纪律段: {result}"
     );
 
@@ -1050,7 +1050,7 @@ async fn executor_tool_discipline_injected_only_for_tool_executors() {
         "legacy 步骤回显应含执行者内置指令(控制项): {step_result}"
     );
     assert!(
-        !step_result.contains("自测通过即收尾"),
+        !step_result.contains("按验收证据收尾"),
         "legacy 步骤没有工具,不得注入工具纪律段: {step_result}"
     );
 }

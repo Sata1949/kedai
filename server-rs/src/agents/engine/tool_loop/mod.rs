@@ -9,15 +9,15 @@
 // 行为契约(与抽取前逐字节一致):停止条件顺序、事件标题/明细、`guard_stopped`
 // 文案、任务终态(预算类 done / 守卫类 partial)均由 `guard.rs` 与既有集成用例锁定。
 mod guard;
+mod progress;
 mod round;
 
 pub(crate) use guard::{LoopStop, LoopStopKind};
 pub(crate) use round::{execute_round as execute_tool_round, RoundContext as ToolRoundContext};
 
 use super::executor::{
-    budget_stop_content, generate_round, has_declared_change, is_declared_file_write,
-    resolve_call_watchdog, resolve_max_rounds, trim_round_history, ExecutorResult, SelfHealRecord,
-    ToolGate,
+    budget_stop_content, generate_round, has_declared_change, resolve_call_watchdog,
+    resolve_max_rounds, trim_round_history, ExecutorResult, SelfHealRecord, ToolGate,
 };
 use super::util::{send_event, step_evt};
 use super::{AbortFlag, AgentEngine, EngineError};
@@ -64,8 +64,6 @@ pub(crate) struct ToolLoopRequest<'a> {
 struct LoopLimits {
     call_watchdog: Option<std::time::Duration>,
     declared_files: Vec<String>,
-    /// 声明文件无进展守卫是否启用(有预算阈值且有声明文件)。
-    no_progress_enabled: bool,
     /// SKY-8:集成主分片读取软提醒阈值(None = 关闭,只提醒不熔断)。
     shard_nudge_after: Option<usize>,
     guards: GuardState,
@@ -126,7 +124,7 @@ fn resolve_loop_limits(
         .filter(|_| !declared_files.is_empty());
     // SKY-8:集成主分片读取软提醒——依赖汇点主关闭了只读/无进展两道计数守卫,
     // 但全题复跑里总装主 201 次读/0 次写;累计成功 fs_read 达阈值后注入一次
-    // 「先写入口骨架」,只提醒不熔断(墙钟/团队份额仍是上限)。
+    // 「梳理接口与验收条件」,只提醒不熔断(墙钟/团队份额仍是上限)。
     let shard_nudge_after = tool_ctx
         .budget
         .and_then(|b| b.shard_read_nudge_after)
@@ -135,7 +133,6 @@ fn resolve_loop_limits(
     LoopLimits {
         call_watchdog,
         declared_files,
-        no_progress_enabled: no_progress_limit.is_some(),
         shard_nudge_after,
         guards: GuardState::new(GuardConfig {
             max_rounds,
@@ -183,7 +180,6 @@ pub(crate) async fn run_tool_loop(req: ToolLoopRequest<'_>) -> Result<ExecutorRe
     let LoopLimits {
         call_watchdog,
         declared_files,
-        no_progress_enabled,
         shard_nudge_after,
         mut guards,
         mut semantic_guard,
@@ -197,7 +193,11 @@ pub(crate) async fn run_tool_loop(req: ToolLoopRequest<'_>) -> Result<ExecutorRe
     let loop_started = std::time::Instant::now();
     // 轮级滚动:最近一次非空正文(墙钟/只读/无进展收尾的回退值)。
     let mut last_non_empty_content = String::new();
-    let mut semantic_break: Option<(String, usize, usize)> = None;
+    let task_id = crate::services::task_change_service::task_id_of(session_id);
+    let mut task_progress = task_id.as_ref().map(|_| progress::TaskProgress::default());
+    let mut ledger_mark = task_id
+        .as_ref()
+        .and_then(|id| crate::services::task_change_service::max_id(&engine.db, id));
     loop {
         // ===== 工具历史回灌上限(R3b):最老轮的 tool 结果原地摘要化 =====
         trim_round_history(engine, session_id, round, llm_messages);
@@ -254,18 +254,6 @@ pub(crate) async fn run_tool_loop(req: ToolLoopRequest<'_>) -> Result<ExecutorRe
         if !result.content.trim().is_empty() {
             last_non_empty_content = result.content.clone();
         }
-        // ===== 重复调用熔断(P0-2):本轮每个工具调用做「工具名+参数」指纹登记 =====
-        let repeated: Option<(String, usize)> = {
-            let mut hit: Option<(String, usize)> = None;
-            for call in &result.tool_calls {
-                let fp = crate::utils::loop_guard::fnv1a_hash(&[&call.name, &call.arguments]);
-                if loop_guard.record(fp) {
-                    hit = Some((call.name.clone(), loop_guard.count_of(fp)));
-                    break;
-                }
-            }
-            hit
-        };
         // ===== 回填 assistant 消息(完整 tool_calls[] + reasoning_content)=====
         // 旧实现为每个 call 单独追加一条 assistant,违反 OpenAI 多工具调用格式。
         let reasoning = (!result.reasoning.is_empty()).then_some(result.reasoning.clone());
@@ -277,15 +265,6 @@ pub(crate) async fn run_tool_loop(req: ToolLoopRequest<'_>) -> Result<ExecutorRe
             tool_call_id: None,
             images: Vec::new(),
         });
-
-        // TMR3-L6:本轮执行前的台账基线(bash 写目标只覆盖显式形态,台账补判)。
-        let ledger_mark: Option<(String, i64)> = if no_progress_enabled {
-            crate::services::task_change_service::task_id_of(&tool_ctx.session_id).and_then(|tid| {
-                crate::services::task_change_service::max_id(&engine.db, &tid).map(|id| (tid, id))
-            })
-        } else {
-            None
-        };
 
         // ===== 本轮工具执行(裁决/并发分组/状态机/SSE/tool 消息)=====
         let outcome = round::execute_round(
@@ -320,57 +299,78 @@ pub(crate) async fn run_tool_loop(req: ToolLoopRequest<'_>) -> Result<ExecutorRe
             });
         }
 
-        // ===== 在成果里判定「是否写入了声明文件」(P0-2 / TMR3-L6)=====
-        let mut round_progress = false;
+        // TQUAL-15：只认内容哈希变化，包含 fs_* 与 bash；同内容重写不重置重复记录。
+        let changed = match (task_id.as_deref(), ledger_mark) {
+            (Some(id), Some(mark)) => {
+                crate::services::task_change_service::paths_since(&engine.db, id, mark)
+            }
+            _ => Vec::new(),
+        };
+        if let Some(id) = task_id.as_deref() {
+            ledger_mark = crate::services::task_change_service::max_id(&engine.db, id);
+        }
+        let workspace_changed = !changed.is_empty();
+        if workspace_changed {
+            loop_guard.clear();
+            semantic_guard.clear();
+        }
+        let mut new_information = false;
         for e in &outcome.outputs {
             // SKY-8:累计**成功**的 fs_read(输出是字符串;错误对象不计),
-            // 供集成主「读满阈值 → 先写入口骨架」软提醒使用。
+            // 供集成主「读满阈值 → 梳理接口与验收条件」软提醒使用。
             if shard_nudge_after.is_some()
                 && e.call.name == crate::tools::agent_tools_fs::READ_TOOL
                 && e.output.as_str().is_some()
             {
                 shard_reads += 1;
             }
-            if no_progress_enabled {
-                // 权限拒绝(output=Null)与错误对象不算;只认带 `path` 参数的写工具。
-                if is_declared_file_write(&e.call.name, &e.call.arguments, &declared_files)
-                    && !e.output.is_null()
-                    && e.output.get("error").is_none()
-                {
-                    round_progress = true;
-                }
+            if let Some(progress) = task_progress.as_mut() {
+                new_information |= progress.observe(&e.call.name, &e.output);
             }
         }
-        if no_progress_enabled && !round_progress {
-            // 没有可识别的成功写调用时,用台账增量补判——bash 重定向/tee/cp 等
-            // 实际落盘的声明文件同样算进展;临时文件与越界路径不算。
-            if let Some((task_id, mark)) = ledger_mark.as_ref() {
-                let changed =
-                    crate::services::task_change_service::paths_since(&engine.db, task_id, *mark);
-                round_progress = has_declared_change(&declared_files, &changed);
-            }
-        }
-
+        let round_progress = new_information || has_declared_change(&declared_files, &changed);
         // ===== 无进展守卫的中途提醒(先提醒,后硬收尾)=====
         if let Some(notice) = guards.observe_round_progress(round_progress) {
             emit_notice(notice, llm_messages, tx, abort, flag).await?;
         }
-        // ===== 连续只读计数(TMR-5):按本轮模型请求的工具调用统计 =====
-        guards.observe_tool_calls(&result.tool_calls);
+        // 新读取/验证事实与真实修改均结束只读空转段，失败写入不能清零。
+        guards.observe_tool_calls(&result.tool_calls, new_information || workspace_changed);
+        let mut repeated = None;
+        let mut semantic_break = None;
         // ===== 语义熔断登记(HB-2):看输出的实质变化,参数可以每轮都变 =====
-        if semantic_break.is_none() {
+        // 本轮改变了产物时，轮内操作跨版本，不把这些结果归入同一版本重复窗口。
+        if !workspace_changed {
             for e in &outcome.outputs {
-                let fp = crate::utils::loop_guard::semantic_fingerprint(
-                    &e.call.name,
-                    &e.output.to_string(),
-                    &e.call.arguments,
-                );
+                let output_fp = progress::result_fingerprint(&e.call.name, &e.output);
+                let repeat_fp = if task_progress.is_some() {
+                    crate::utils::loop_guard::fnv1a_hash(&[
+                        &e.call.name,
+                        &e.call.arguments,
+                        &output_fp.to_string(),
+                    ])
+                } else {
+                    crate::utils::loop_guard::fnv1a_hash(&[&e.call.name, &e.call.arguments])
+                };
+                if loop_guard.record(repeat_fp) && repeated.is_none() {
+                    repeated = Some((e.call.name.clone(), loop_guard.count_of(repeat_fp)));
+                }
+                let fp = if task_progress.is_some()
+                    && crate::tools::tool_sets::is_workspace_readonly_tool(&e.call.name)
+                {
+                    output_fp
+                } else {
+                    crate::utils::loop_guard::semantic_fingerprint(
+                        &e.call.name,
+                        &e.output.to_string(),
+                        &e.call.arguments,
+                    )
+                };
                 // SKY-6 第 4 项:纯读工具按整窗阈值判定(少量文件反复读是任务常态)。
                 let readonly_class =
                     crate::tools::tool_sets::is_workspace_readonly_tool(&e.call.name);
-                semantic_break = semantic_guard.record_classified(&e.call.name, fp, readonly_class);
-                if semantic_break.is_some() {
-                    break;
+                let hit = semantic_guard.record_classified(&e.call.name, fp, readonly_class);
+                if semantic_break.is_none() {
+                    semantic_break = hit;
                 }
             }
         }
@@ -424,7 +424,7 @@ pub(crate) async fn run_tool_loop(req: ToolLoopRequest<'_>) -> Result<ExecutorRe
                 stop,
             ));
         }
-        // SKY-8:集成主读满阈值后提醒一次「先写入口骨架」。放在所有终止闸门之后:
+        // SKY-8:集成主读满阈值后提醒一次「梳理接口与验收条件」。放在所有终止闸门之后:
         // 本轮若已被预算/守卫收尾,提醒没有意义;未收尾则注入给下一轮模型请求。
         if let Some(after) = shard_nudge_after {
             if !shard_nudged && shard_reads >= after {

@@ -374,7 +374,7 @@ pub fn max_id(db: &Arc<Db>, task_id: &str) -> Option<i64> {
     }
 }
 
-/// `after_id` 之后新增的变更路径(去重、按发生顺序;回滚不算进展)。
+/// `after_id` 之后实质变化的路径(去重、按发生顺序;回滚和同内容重写不算进展)。
 ///
 /// 用途是「bash 写声明文件也算进展」(TMR3-L6):bash 的写目标解析只覆盖显式形态,
 /// 台账则是命令**实际**改了哪些文件的权威记录(前扫描 + 后扫描差值),两者互补。
@@ -389,7 +389,8 @@ pub fn paths_since(db: &Arc<Db>, task_id: &str, after_id: i64) -> Vec<String> {
     };
     let mut stmt = match conn.prepare(
         "SELECT DISTINCT path FROM task_file_changes \
-         WHERE task_id = ?1 AND id > ?2 AND op != 'rollback' ORDER BY id ASC",
+         WHERE task_id = ?1 AND id > ?2 AND op != 'rollback' \
+         AND (op IN ('create', 'delete') OR before_hash != after_hash) ORDER BY id ASC",
     ) {
         Ok(s) => s,
         Err(e) => return crate::services::log_query_failure("台账增量 prepare", e),

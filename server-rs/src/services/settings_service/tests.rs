@@ -993,12 +993,12 @@ fn coding_default_prompt_keeps_task_constraints() {
     assert!(p.contains("任务执行智能体"), "必须保留任务向身份字样:{p}");
     assert!(!p.contains("{{char}}"), "不得含角色扮演宏:{p}");
     assert!(
-        p.contains("先落盘再补读"),
-        "编码场景纪律(先落盘再补读,TMR-1)必须在模板里:{p}"
+        p.contains("先理解再实现"),
+        "编码场景应先理解再实现(TQUAL-13):{p}"
     );
     assert!(
-        !p.contains("先读后写:动手前先摸清相关文件"),
-        "旧的「先读后写」绝对句不得残留(TMR-1):{p}"
+        !p.contains("最多先读 3 个"),
+        "不得限制必要阅读文件数量(TQUAL-13):{p}"
     );
     // CODE-3(2026-09-30):项目约定文件从「泛指」升为「点名」——五家编码 harness 的
     // 主路径都是点名机制(CLAUDE.md / AGENTS.md),只写「既有约定」模型会漏读

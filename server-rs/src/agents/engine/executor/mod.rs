@@ -22,8 +22,8 @@ pub(super) use generation::{generate_round, maybe_run_tool, tool_origin_str, tri
 pub(super) use generation::{add_usage, process_chunk};
 pub(crate) use guard::ToolGate;
 pub(super) use guard::{
-    budget_reached, budget_stop_content, has_declared_change, is_declared_file_write,
-    resolve_max_rounds, step_budget_reached,
+    budget_reached, budget_stop_content, has_declared_change, resolve_max_rounds,
+    step_budget_reached,
 };
 // 自愈纯函数的唯一消费方是 generation/transport 与测试（测试经 super::* 取用）。
 #[cfg(test)]

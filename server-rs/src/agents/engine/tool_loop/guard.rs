@@ -147,13 +147,13 @@ impl GuardNotice {
             Self::ReadonlyNudge { limit } => (
                 "只读探索提醒",
                 format!(
-                    "已连续 {limit} 次只读工具调用没有写出产物:已提醒先落盘;若任务只需调研,请直接给出结论"
+                    "已连续 {limit} 次只读工具调用未取得新的有效信息:已提醒调整查询或依据已知事实推进验收"
                 ),
             ),
             Self::NoProgressNudge { rounds, limit } => (
                 "无文件进展提醒",
                 format!(
-                    "已连续 {rounds} 轮没有成功写入本主负责的文件:已提醒先落盘;再连续 {} 轮仍无写入将收尾",
+                    "已连续 {rounds} 轮没有本主文件实质变更或新读取/验证事实:已提醒调整方法;再连续 {} 轮仍无有效进展将收尾",
                     limit.saturating_sub(*rounds)
                 ),
             ),
@@ -188,27 +188,24 @@ impl GuardState {
         }
     }
 
-    /// 按本轮**模型请求**的工具调用统计只读/写类(TMR-5)。
-    ///
-    /// 被拒绝的写调用也算「已尝试动手」——因此看的是 `tool_calls` 而不是执行输出;
-    /// 中性工具(todo/sleep 等)不增不减。
-    pub(super) fn observe_tool_calls(&mut self, calls: &[ToolCallArgs]) {
+    /// 只有新读取/验证事实或实质文件变更能结束空转段，写入尝试不算进展。
+    pub(super) fn observe_tool_calls(&mut self, calls: &[ToolCallArgs], verified_progress: bool) {
         if self.config.readonly_limit.is_none() {
+            return;
+        }
+        if verified_progress {
+            self.readonly_streak = 0;
+            self.readonly_nudged = false;
             return;
         }
         for call in calls {
             if crate::tools::tool_sets::is_readonly_probe_tool(&call.name) {
                 self.readonly_streak += 1;
-            } else if crate::tools::tool_sets::is_write_like_tool(&call.name) {
-                // 一旦真的动手(或尝试派发新执行面),本次「只读空转段」结束:
-                // 清空计数并允许下一次空转段重新提醒。
-                self.readonly_streak = 0;
-                self.readonly_nudged = false;
             }
         }
     }
 
-    /// 登记本轮是否有「成功写入声明文件」的进展,并产出中途提醒(先提醒后硬收尾)。
+    /// 登记本轮是否有声明文件实质变更或新读取/验证事实，先提醒后硬收尾。
     ///
     /// 提醒点 = `limit / 2`(至少 1):SKY-7 的「硬收尾之前先给一次机会」。
     pub(super) fn observe_round_progress(&mut self, round_progress: bool) -> Option<GuardNotice> {
@@ -352,11 +349,11 @@ impl GuardState {
                         stop: Some(LoopStop {
                             kind: LoopStopKind::Readonly,
                             message: format!(
-                                "连续只读空转熔断:连续 {limit} 次只读工具调用没有写出任何产物"
+                                "连续只读空转熔断:连续 {limit} 次只读工具调用没有取得新的有效信息"
                             ),
                             event_title: "连续只读空转熔断",
                             event_detail: format!(
-                                "已连续 {limit} 次只读工具调用没有写出任何产物,且提醒后仍未落盘,已在第 {} 轮中止;已有正文与用量照常保留",
+                                "已连续 {limit} 次只读工具调用没有取得新的有效信息,且提醒后仍无新信息,已在第 {} 轮中止;已有正文与用量照常保留",
                                 facts.round
                             ),
                         }),
@@ -379,11 +376,11 @@ impl GuardState {
                     stop: Some(LoopStop {
                         kind: LoopStopKind::NoProgress,
                         message: format!(
-                            "声明文件无进展收尾:连续 {limit} 轮没有成功写入本主负责的文件"
+                            "声明文件无进展收尾:连续 {limit} 轮没有本主文件实质变更或新读取/验证事实"
                         ),
                         event_title: "无文件进展收尾",
                         event_detail: format!(
-                            "已连续 {limit} 轮没有成功写入本主负责的文件:已停止工具循环,本轮产出与用量照常保留"
+                            "已连续 {limit} 轮没有本主文件实质变更或新读取/验证事实:已停止工具循环,本轮产出与用量照常保留"
                         ),
                     }),
                 };
@@ -417,10 +414,10 @@ impl GuardState {
             };
         }
 
-        // 7) 重复调用熔断(P0-2):同参数在窗口内反复出现。
+        // 7) 重复调用熔断(P0-2):同参数在窗口内反复出现；任务侧还要求结果相同且期间无实质修改。
         if let Some((tool, times)) = facts.repeated {
             let detail = format!(
-                "检测到重复调用:工具 \"{tool}\" 以相同参数在最近 {DEFAULT_WINDOW} 轮内出现 {times} 次,已在第 {} 轮中止以避免空转。请调整策略后重试。",
+                "检测到重复调用:工具 \"{tool}\" 以相同调用指纹在最近 {DEFAULT_WINDOW} 次调用内出现 {times} 次,已在第 {} 轮中止以避免空转。请调整策略后重试。",
                 facts.round
             );
             tracing::warn!(
@@ -434,7 +431,7 @@ impl GuardState {
                 notices,
                 stop: Some(LoopStop {
                     kind: LoopStopKind::RepeatedCall,
-                    message: format!("重复调用熔断:工具 \"{tool}\" 以相同参数出现 {times} 次"),
+                    message: format!("重复调用熔断:工具 \"{tool}\" 以相同调用指纹出现 {times} 次"),
                     event_title: "重复调用熔断",
                     event_detail: detail,
                 }),
@@ -585,7 +582,7 @@ mod tests {
             readonly_limit: Some(2),
             ..base_config()
         });
-        state.observe_tool_calls(&[call("fs_read"), call("fs_read")]);
+        state.observe_tool_calls(&[call("fs_read"), call("fs_read")], false);
         let first = state.evaluate("s", facts(1));
         assert_eq!(first.notices.len(), 1, "首次达到阈值只提醒");
         assert!(first.stop.is_none(), "首次达到阈值不得熔断");
@@ -594,23 +591,23 @@ mod tests {
             GuardNotice::ReadonlyNudge { limit: 2 }
         ));
 
-        state.observe_tool_calls(&[call("fs_read"), call("fs_read")]);
+        state.observe_tool_calls(&[call("fs_read"), call("fs_read")], false);
         let second = state.evaluate("s", facts(2));
         let stop = second.stop.expect("提醒后再次达到必须熔断");
         assert_eq!(stop.kind, LoopStopKind::Readonly);
         assert!(stop.message.contains("连续 2 次只读"), "{}", stop.message);
-        assert!(stop.event_detail.contains("提醒后仍未落盘"));
+        assert!(stop.event_detail.contains("提醒后仍无新信息"));
 
-        // 写类工具出现即清零,并允许下一段重新提醒。
+        // 已验证的实际进展清零,并允许下一段重新提醒。
         let mut reset = GuardState::new(GuardConfig {
             readonly_limit: Some(2),
             ..base_config()
         });
-        reset.observe_tool_calls(&[call("fs_read")]);
-        reset.observe_tool_calls(&[call("fs_write")]);
-        reset.observe_tool_calls(&[call("fs_read")]);
+        reset.observe_tool_calls(&[call("fs_read")], false);
+        reset.observe_tool_calls(&[call("fs_write")], true);
+        reset.observe_tool_calls(&[call("fs_read")], false);
         let out = reset.evaluate("s", facts(1));
-        assert!(out.stop.is_none(), "写类工具应清零只读计数");
+        assert!(out.stop.is_none(), "实质修改应清零只读计数");
         assert!(out.notices.is_empty());
     }
 
@@ -658,6 +655,38 @@ mod tests {
             .observe_round_progress(false)
             .expect("重置后第 2 轮应重新提醒");
         assert!(matches!(nudge_again, GuardNotice::NoProgressNudge { .. }));
+    }
+
+    #[test]
+    fn task_quality_p0_new_evidence_allows_extended_exploration() {
+        let mut state = GuardState::new(GuardConfig {
+            readonly_limit: Some(2),
+            no_progress_limit: Some(4),
+            ..base_config()
+        });
+        for round in 1..=20 {
+            state.observe_tool_calls(&[call("fs_read")], true);
+            assert!(state.observe_round_progress(true).is_none());
+            let result = state.evaluate("task:quality", facts(round));
+            assert!(result.stop.is_none());
+            assert!(result.notices.is_empty());
+        }
+    }
+
+    #[test]
+    fn task_quality_p0_failed_write_does_not_reset_readonly_guard() {
+        let mut state = GuardState::new(GuardConfig {
+            readonly_limit: Some(2),
+            ..base_config()
+        });
+        state.observe_tool_calls(&[call("fs_read"), call("fs_read")], false);
+        assert_eq!(state.evaluate("task:quality", facts(1)).notices.len(), 1);
+        state.observe_tool_calls(&[call("fs_write")], false);
+        state.observe_tool_calls(&[call("fs_read"), call("fs_read")], false);
+        assert_eq!(
+            state.evaluate("task:quality", facts(3)).stop.unwrap().kind,
+            LoopStopKind::Readonly
+        );
     }
 
     /// 决策表第 7/8 行:语义熔断先于重复调用熔断(两者同轮命中时语义胜出)。
@@ -717,7 +746,7 @@ mod tests {
             no_progress_limit: Some(16),
             ..base_config()
         });
-        state.observe_tool_calls(&[call("fs_write")]);
+        state.observe_tool_calls(&[call("fs_write")], false);
         assert!(state.observe_round_progress(true).is_none());
         let out = state.evaluate("s", facts_at(1, 200, Duration::from_secs(2)));
         assert!(out.notices.is_empty());
@@ -732,7 +761,7 @@ mod tests {
             readonly_limit: Some(2),
             ..base_config()
         });
-        state.observe_tool_calls(&[call("fs_read"), call("fs_read")]);
+        state.observe_tool_calls(&[call("fs_read"), call("fs_read")], false);
         let mut round = facts(3);
         round.semantic_break = Some(("bash".into(), 8, 1));
         let out = state.evaluate("s", round);
