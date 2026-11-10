@@ -158,7 +158,10 @@ if ($StaticOnly -or (-not $SkipWeb -and -not $AuditOnly)) {
         Invoke-Stage 'arch: check-arch self-test' { node --test tools/check-arch.test.mjs }
         # 日志摘要自测(2026-11-07):保护失败识别、重叠窗口合并、退出码和 BOM 解码。
         # 文本/JSON/头尾回退统一限字节，预算截断必须保留数量与回读位置。
-        Invoke-Stage 'tools: logdigest self-test' { node --test tools/logdigest.test.mjs }
+        # 评测自测不消耗模型额度：失败夹具、独立计分、对照分母和盲审映射必须可回归。
+        Invoke-Stage 'tools: logdigest / task-quality self-test' {
+            node --test tools/logdigest.test.mjs tools/bench/task-quality/quality.test.mjs tools/bench/task-quality/acceptance.test.mjs
+        }
         # 架构护栏:前端 store 循环依赖(A) + 组件直改 state(B) + 后端分层规则 C/D/E/G
         # + EJS 能力面冻结(H) + 代际归属 I + 跨代依赖方向 J(2026-09-14 新增)。
         # 全部规则均为硬门禁:违规即 exit 1;C/D/E 已于 2026-09-13 清零,
