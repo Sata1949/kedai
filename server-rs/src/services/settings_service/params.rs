@@ -178,24 +178,10 @@ pub(super) fn default_node_max_context() -> u32 {
     0
 }
 
-/// 默认工具循环历史保留轮数(R3b;TPROF-2 起 16 轮):最近 16 轮完整,更早轮摘要化。
-///
-/// 任务模式的实测形态是「读文件→改→自测」多轮往返,4 轮会在改到后半段时把前面的
-/// 关键工具结果摘要掉;16 轮配合 128K token 预算,既保住工作记忆又仍有上界。
-pub(super) fn default_tool_history_keep_rounds() -> u32 {
-    16
-}
-
-/// 默认工具循环历史 token 预算(R3b;TPROF-2 起 128K):覆盖任务侧多轮大文件读取;
-/// 超出后从最老完整轮起继续摘要,保底最近 1 轮完整。
-pub(super) fn default_tool_history_budget_tokens() -> u32 {
-    131_072
-}
-
 /// 默认单次生成 token 预算(HB-1 成本护栏):0 = 关闭(默认)。
-/// 与上面的工具历史预算是**两回事**——那是上下文裁剪预算,这是成本上限:
-/// 工具循环累计 prompt+completion 达到该值即按 session_budget_action 处置。
-/// 默认关闭的理由:误杀正常长任务是主要风险,故先让用户显式开启。
+/// 这是成本上限:工具循环累计 prompt+completion 达到该值即按
+/// session_budget_action 处置。默认关闭的理由:误杀正常长任务是主要风险,
+/// 故先让用户显式开启。
 pub(super) fn default_session_token_budget() -> u32 {
     0
 }
@@ -779,8 +765,6 @@ impl RuntimeSettings {
             max_flow_call_depth: default_max_flow_call_depth(),
             max_flow_calls_per_task: default_max_flow_calls_per_task(),
             default_node_max_context: default_node_max_context(),
-            tool_history_keep_rounds: default_tool_history_keep_rounds(),
-            tool_history_budget_tokens: default_tool_history_budget_tokens(),
             session_token_budget: default_session_token_budget(),
             session_budget_action: default_session_budget_action(),
             loop_guard_semantic_window: default_loop_guard_semantic_window(),

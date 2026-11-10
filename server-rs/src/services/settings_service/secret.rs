@@ -14,8 +14,7 @@ use super::params::{
     default_session_budget_action, default_session_token_budget, default_subagent_max_concurrency,
     default_subagent_max_depth, default_subagent_result_max_chars, default_task_idle_timeout_secs,
     default_task_step_budget_secs, default_task_tool_policy, default_task_total_budget_secs,
-    default_tool_authorization_timeout_secs, default_tool_history_budget_tokens,
-    default_tool_history_keep_rounds, migrate_authorization_mode, task_idle_floor_secs,
+    default_tool_authorization_timeout_secs, migrate_authorization_mode, task_idle_floor_secs,
 };
 use super::{
     is_valid_literary_recommend_preset, is_valid_literary_style_preset, RoleplayPromptConfig,
@@ -152,16 +151,6 @@ impl RuntimeSettings {
                 }
                 if !(500..=8000).contains(&s.subagent_result_max_chars) {
                     s.subagent_result_max_chars = default_subagent_result_max_chars();
-                }
-                // R3b:工具历史回灌参数钳制(保留轮数 1..=32;预算 0=禁用,否则 1024..=1M,
-                // 越界回退默认;旧配置缺省已由 serde default 填默认值)
-                if !(1..=32).contains(&s.tool_history_keep_rounds) {
-                    s.tool_history_keep_rounds = default_tool_history_keep_rounds();
-                }
-                if s.tool_history_budget_tokens != 0
-                    && !(1024..=1_048_576).contains(&s.tool_history_budget_tokens)
-                {
-                    s.tool_history_budget_tokens = default_tool_history_budget_tokens();
                 }
                 // HB-1:单次生成 token 预算与超限动作(手改 settings.json 的边界:
                 // 预算 0 = 关闭,否则 1024..=1e9;动作只认 warn/stop,越界回默认)

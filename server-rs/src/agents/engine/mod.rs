@@ -71,7 +71,7 @@ use self::executor::{
 };
 use self::messages::{
     draft_heal_budget, inject_reflect_advice, retreat_to_generating_step, step_params_for,
-    trim_tool_history, with_step_prompt, CollectedCtx, TOOL_HISTORY_SUMMARY_PREFIX,
+    with_step_prompt, CollectedCtx,
 };
 use self::mvu::{apply_mvu_patches, generate_mvu_status, strip_status_bar_tag};
 use self::reflector_integration::{build_reflect_advice, critique_and_revise, reflect_with_tools};

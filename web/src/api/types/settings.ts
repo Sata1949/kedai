@@ -118,10 +118,6 @@ export interface RuntimeSettings {
   /** 节点默认上下文上限(**任务侧**设置;A 批 A4;默认 0 = **不裁剪**,否则 256..=1048576):
    *  节点自己写了 `max_context` 即按节点的,只有未写时才用本项 */
   default_node_max_context: number;
-  /** 工具历史保留的最近完整轮数(1..=32;TPROF-2 起默认 16;超出后最老轮摘要化) */
-  tool_history_keep_rounds: number;
-  /** 工具历史 token 预算(0 = 禁用预算闸门;否则 1024..=1M,TPROF-2 起默认 131072) */
-  tool_history_budget_tokens: number;
   /** 单次生成的 token 预算(0 = 关闭,默认 0;否则 1024..=1e9):
    *  工具循环累计 prompt+completion 达到该值即按 session_budget_action 处置 */
   session_token_budget: number;

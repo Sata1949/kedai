@@ -16,7 +16,7 @@ mod transport;
 
 // 再导出保持既有调用路径 `engine::executor::…` 不变（纯代码移动，不改调用方）。
 pub(crate) use generation::execute_generation;
-pub(super) use generation::{generate_round, maybe_run_tool, tool_origin_str, trim_round_history};
+pub(super) use generation::{generate_round, maybe_run_tool, tool_origin_str};
 // 仅测试直接消费的内部小函数（生产侧在 generation 内自用）。
 #[cfg(test)]
 pub(super) use generation::{add_usage, process_chunk};

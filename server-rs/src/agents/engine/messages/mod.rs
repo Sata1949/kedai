@@ -29,4 +29,4 @@ pub(super) use inject::{
 pub(super) use steps::{
     draft_heal_budget, retreat_to_generating_step, step_params_for, with_step_prompt,
 };
-pub(super) use trim::{trim_to_context, trim_tool_history, TOOL_HISTORY_SUMMARY_PREFIX};
+pub(super) use trim::trim_to_context;

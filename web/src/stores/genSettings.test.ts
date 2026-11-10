@@ -86,8 +86,6 @@ function makeSettings(overrides: Partial<RuntimeSettings> = {}): RuntimeSettings
     max_flow_call_depth: 5,
     max_flow_calls_per_task: 64,
     default_node_max_context: 0,
-    tool_history_keep_rounds: 16,
-    tool_history_budget_tokens: 131072,
     render_html: false,
     compaction_mode: 'off',
     compaction_threshold: 0.8,
@@ -531,8 +529,6 @@ describe('genSettings 任务参数档位(TPROF-2)', () => {
     expect(tier.maxFlowCallDepth).toBe(3);
     expect(tier.maxFlowCallsPerTask).toBe(24);
     expect(tier.defaultNodeMaxContext).toBe(0);
-    expect(tier.toolHistoryKeepRounds).toBe(12);
-    expect(tier.toolHistoryBudgetTokens).toBe(65536);
     expect(tier.subagentMaxDepth).toBe(3);
     expect(tier.subagentMaxConcurrency).toBe(8);
     expect(tier.subagentResultMaxChars).toBe(8000);
@@ -548,8 +544,6 @@ describe('genSettings 任务参数档位(TPROF-2)', () => {
     expect(TASK_PARAM_DEFAULTS.maxTokens).toBe(65536);
     expect(TASK_PARAM_DEFAULTS.maxFlowCallDepth).toBe(5);
     expect(TASK_PARAM_DEFAULTS.maxFlowCallsPerTask).toBe(64);
-    expect(TASK_PARAM_DEFAULTS.toolHistoryKeepRounds).toBe(16);
-    expect(TASK_PARAM_DEFAULTS.toolHistoryBudgetTokens).toBe(131072);
     expect(TASK_PARAM_DEFAULTS.subagentMaxDepth).toBe(4);
     expect(TASK_PARAM_DEFAULTS.subagentMaxConcurrency).toBe(16);
     expect(TASK_PARAM_DEFAULTS.subagentResultMaxChars).toBe(8000);
@@ -561,8 +555,6 @@ describe('genSettings 任务参数档位(TPROF-2)', () => {
     expect(tier.maxTokens).toBe(131072);
     expect(tier.maxFlowCallDepth).toBe(5);
     expect(tier.maxFlowCallsPerTask).toBe(64);
-    expect(tier.toolHistoryKeepRounds).toBe(32);
-    expect(tier.toolHistoryBudgetTokens).toBe(1048576);
     expect(tier.subagentMaxDepth).toBe(4);
     expect(tier.subagentMaxConcurrency).toBe(16);
     expect(tier.subagentResultMaxChars).toBe(8000);
@@ -592,8 +584,6 @@ describe('genSettings 任务参数档位(TPROF-2)', () => {
     expect(patch.max_flow_call_depth).toBe(5);
     expect(patch.max_flow_calls_per_task).toBe(64);
     expect(patch.default_node_max_context).toBe(0);
-    expect(patch.tool_history_keep_rounds).toBe(32);
-    expect(patch.tool_history_budget_tokens).toBe(1048576);
     expect(patch.subagent_max_depth).toBe(4);
     expect(patch.subagent_max_concurrency).toBe(16);
     expect(patch.subagent_result_max_chars).toBe(8000);

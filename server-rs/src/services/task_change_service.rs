@@ -8,7 +8,7 @@
 //
 // 与 `undo_service` 的分工(勿合并):那份管**聊天侧**角色文件区的「回退到此处」,
 // 键是 session_id、快照含 payload 且限 256KB;这份管**任务侧**工作区,键是 task_id、
-// 外随 tasks(id) 级联删除。两者的名单语义也不同(见 `tools/tool_sets.rs::state_anchor_arg` 注释)。
+// 外随 tasks(id) 级联删除。两者名单语义不同，各自演进，勿合并。
 use crate::models::db::{now_iso, Db};
 use crate::models::types::TaskFileChangeRecord;
 use sha2::{Digest, Sha256};

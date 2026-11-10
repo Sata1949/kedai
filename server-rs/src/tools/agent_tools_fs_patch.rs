@@ -762,46 +762,6 @@ fn run_patch(
     Ok(out)
 }
 
-/// fs_patch 的「工作状态锚点」:补丁里的目标路径清单(去重、按出现顺序、至多 3 个)。
-///
-/// 供 `agents/engine/messages/trim.rs` 的锚点消费(批次 3 机制)取值——补丁是结构化工具,
-/// 首行("*** Begin Patch")没有信息量,锚点应是目标文件坐标。这里只做轻量行扫描
-/// (与 parse 共用同一套头部前缀常量);锚点消费在历史裁剪热路径上,对畸形补丁
-/// **尽力而为**、绝不报错。
-pub(crate) fn patch_anchor(name: &str, arguments: &str) -> Option<String> {
-    if name != PATCH_TOOL {
-        return None;
-    }
-    let patch = serde_json::from_str::<serde_json::Value>(arguments)
-        .ok()?
-        .get("patch")?
-        .as_str()?
-        .to_string();
-    let mut paths: Vec<String> = Vec::new();
-    for line in patch.lines() {
-        let t = line.trim_start();
-        for header in [ADD_HEADER, UPDATE_HEADER, DELETE_HEADER, MOVE_HEADER] {
-            if let Some(rest) = t.strip_prefix(header) {
-                let p = rest.trim();
-                if !p.is_empty() && !paths.iter().any(|x| x == p) {
-                    paths.push(p.to_string());
-                }
-            }
-            if paths.len() >= 3 {
-                break;
-            }
-        }
-        if paths.len() >= 3 {
-            break;
-        }
-    }
-    if paths.is_empty() {
-        None
-    } else {
-        Some(paths.join(", "))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1225,15 +1185,5 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("操作数过多"), "{err}");
-    }
-
-    /// 锚点:取补丁目标路径(至多 3 个、去重);非 fs_patch 返回 None。
-    #[test]
-    fn anchor_extracts_target_paths() {
-        let args = json!({ "patch": "*** Begin Patch\n*** Add File: src/a.rs\n+x\n*** Update File: src/b.rs\n*** Move to: src/c.rs\n@@\n-a\n+b\n*** Update File: src/b.rs\n@@\n-x\n+y\n*** Delete File: src/d.rs\n*** End Patch" }).to_string();
-        let a = patch_anchor("fs_patch", &args).expect("应取到锚点");
-        assert_eq!(a, "src/a.rs, src/b.rs, src/c.rs");
-        assert!(patch_anchor("fs_edit", &args).is_none());
-        assert!(patch_anchor("fs_patch", "not json").is_none());
     }
 }

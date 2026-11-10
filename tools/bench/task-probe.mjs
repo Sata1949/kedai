@@ -229,7 +229,7 @@ try {
     console.log(`首个调用 prompt=${first} | 峰值=${max} | 增长=${growth.toFixed(1)}×`);
     result = { ...result, prompt_first: first, prompt_max: max, growth };
     if (growth > 10) {
-      console.log('⚠ 增长超过 10×:疑似上下文裁剪失效(检查 tool_history_budget_tokens 与裁剪逻辑)');
+      console.log('⚠ 增长超过 10×:工具循环可能累积了过多历史，检查各轮 prompt token');
     } else {
       console.log('✓ 增长在合理范围');
     }

@@ -67,8 +67,7 @@ use params::{
     default_skill_progressive_disclosure, default_subagent_max_concurrency,
     default_subagent_max_depth, default_subagent_result_max_chars, default_task_idle_timeout_secs,
     default_task_step_budget_secs, default_task_team_budget_secs, default_task_tool_policy,
-    default_task_total_budget_secs, default_tool_authorization_timeout_secs,
-    default_tool_history_budget_tokens, default_tool_history_keep_rounds, default_undo_enabled,
+    default_task_total_budget_secs, default_tool_authorization_timeout_secs, default_undo_enabled,
     default_user_role, default_worldbook_sync_character_enabled,
 };
 
@@ -204,17 +203,8 @@ pub struct RuntimeSettings {
     /// 长输入,属可观测的行为变化(见 `裁定.md` 裁定 26 口径 2)。
     #[serde(default = "default_node_max_context")]
     pub default_node_max_context: u32,
-    /// 工具循环历史保留的最近完整轮数(R3b;TPROF-2 起默认 16,钳 1..=32):
-    /// 超出后最老轮的 tool 结果原地替换为短摘要(配对不破坏),防止全量回灌无界膨胀
-    #[serde(default = "default_tool_history_keep_rounds")]
-    pub tool_history_keep_rounds: u32,
-    /// 工具循环历史 token 预算(R3b;TPROF-2 起默认 131072,钳 1024..=1M;0 = 禁用预算闸门,
-    /// 仅 keep_rounds 生效):估算超预算时从最老完整轮起继续摘要,保底最近 1 轮完整
-    #[serde(default = "default_tool_history_budget_tokens")]
-    pub tool_history_budget_tokens: u32,
     /// 单次生成的 token 预算(HB-1 成本护栏;0 = 关闭,默认 0;否则钳 1024..=1e9):
     /// 工具循环累计 prompt+completion 达到该值即按 session_budget_action 处置。
-    /// 与 tool_history_budget_tokens 不同——后者管上下文裁剪,本项管成本上限。
     #[serde(default = "default_session_token_budget")]
     pub session_token_budget: u32,
     /// 预算超限动作(HB-1;warn = 只提示一次后继续(默认),stop = 提示并停止本轮工具循环)

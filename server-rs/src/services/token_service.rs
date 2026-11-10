@@ -138,13 +138,11 @@ impl TokenService {
     /// 连接器按 OpenAI 格式原样序列化 `function.arguments` 进请求体
     /// (`connectors/openai_compatible/mod.rs` 的 to_openai_messages),它们真实占用 prompt。
     /// 此前只累加 `content`,导致工具循环里「参数很大但正文为空」的 assistant 消息被计成
-    /// 近乎零成本 → 预算闸门永远判定「未超预算」→ 工具历史裁剪失效。
-    /// 实测后果:plan 模式任务 prompt 无界膨胀至 88 万,单任务累计 150 万 token 不收敛。
+    /// 近乎零成本,估算严重偏低;plan 模式实测 prompt 曾膨胀到 88 万 token。
     ///
     /// **必须计入 `reasoning_content`**(2026-10-23 修复):DeepSeek 系思考模型要求多轮
     /// 工具调用回传 reasoning_content(`to_openai_messages` 已序列化),它同样真实占用
-    /// prompt;此前漏计 → 保留轮(`tool_history_keep_rounds`)里的长推理对预算不可见,
-    /// 估算可能远低于上游实际 prompt。
+    /// prompt;此前漏计 → 长推理对窗口水位与预算判定不可见,估算可能远低于上游实际 prompt。
     ///
     /// 口径偏保守(宁可多算):每个 tool_call 额外计 8(token 结构开销 + id 近似)。
     pub fn count_message_tokens(&mut self, messages: &[LlmMessage], model: &str) -> i64 {

@@ -406,68 +406,6 @@ pub(crate) async fn process_chunk(
     Ok(false)
 }
 
-/// 每轮生成前的工具历史回灌裁剪(R3b,2026-09-02 实测修复:每轮全量回灌
-/// assistant/tool 交替历史,3 步任务 prompt 3,119→26,679 token 无界膨胀)。
-///
-/// 最老轮 tool 结果原地摘要化(保留最近 K 轮完整 + token 预算双闸门;配对不破坏、
-/// 幂等)。仅存在工具循环历史时触发;聊天主链路 compaction(compaction.rs)/
-/// protected_tail 注入语义不受影响(不同层)。自循环体抽出的纯搬运(C-2C)。
-pub(crate) fn trim_round_history(
-    engine: &AgentEngine,
-    session_id: &str,
-    round: usize,
-    llm_messages: &mut [LlmMessage],
-) {
-    if !llm_messages.iter().any(|m| m.role == "tool") {
-        return;
-    }
-    let (keep_rounds, budget_tokens) = {
-        // 设置快照:不留锁跨 await
-        let s = engine.settings_snapshot();
-        (
-            s.tool_history_keep_rounds as usize,
-            s.tool_history_budget_tokens,
-        )
-    };
-    let summarized_count = |msgs: &[LlmMessage]| {
-        msgs.iter()
-            .filter(|m| m.content.starts_with(TOOL_HISTORY_SUMMARY_PREFIX))
-            .count()
-    };
-    let before = summarized_count(llm_messages);
-    let model = engine.model();
-    let outcome = {
-        let mut ts = engine
-            .token_service
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        trim_tool_history(llm_messages, keep_rounds, budget_tokens, &mut ts, &model)
-    };
-    let after = summarized_count(llm_messages);
-    if after > before || outcome.reclaimed_argument_rounds > 0 {
-        tracing::info!(
-            session_id = session_id.to_string(),
-            newly_summarized = after - before,
-            reclaimed_argument_rounds = outcome.reclaimed_argument_rounds,
-            keep_rounds = keep_rounds,
-            budget_tokens = budget_tokens,
-            total_tokens = outcome.total_tokens,
-            "工具循环历史回灌截断(旧轮 tool 结果/参数已摘要化)"
-        );
-    }
-    // 未能收敛必须可诊断,不能静默(2026-09-14):体量超过预算闸门可压缩范围
-    // 时继续跑下去会持续放大 prompt,最终表现为任务长时间不收敛、token 失控。
-    if !outcome.converged {
-        tracing::warn!(
-            session_id = session_id.to_string(),
-            round = round,
-            budget_tokens = budget_tokens,
-            total_tokens = outcome.total_tokens,
-            "工具历史压缩后仍超预算:单轮体量过大,上下文可能持续膨胀"
-        );
-    }
-}
-
 /// 单轮生成:看门狗 + 传输重试 + 截断自愈(C-2C 自循环体抽出,行为逐字节不变)。
 ///
 /// 单轮内最多自愈一次:该轮被 max_tokens 截断到不可用时,把本轮 max_tokens 翻倍

@@ -49,8 +49,6 @@ export interface TaskParamTierValues {
   maxFlowCallDepth: number;
   maxFlowCallsPerTask: number;
   defaultNodeMaxContext: number;
-  toolHistoryKeepRounds: number;
-  toolHistoryBudgetTokens: number;
   subagentMaxDepth: number;
   subagentMaxConcurrency: number;
   subagentResultMaxChars: number;
@@ -77,8 +75,6 @@ export const TASK_PARAM_TIERS: Record<TaskParamTier, TaskParamTierValues> = {
     maxFlowCallDepth: 3,
     maxFlowCallsPerTask: 24,
     defaultNodeMaxContext: 0,
-    toolHistoryKeepRounds: 12,
-    toolHistoryBudgetTokens: 65536,
     subagentMaxDepth: 3,
     subagentMaxConcurrency: 8,
     subagentResultMaxChars: 8000,
@@ -94,8 +90,6 @@ export const TASK_PARAM_TIERS: Record<TaskParamTier, TaskParamTierValues> = {
     maxFlowCallDepth: 5,
     maxFlowCallsPerTask: 64,
     defaultNodeMaxContext: 0,
-    toolHistoryKeepRounds: 16,
-    toolHistoryBudgetTokens: 131072,
     subagentMaxDepth: 4,
     subagentMaxConcurrency: 16,
     subagentResultMaxChars: 8000,
@@ -111,8 +105,6 @@ export const TASK_PARAM_TIERS: Record<TaskParamTier, TaskParamTierValues> = {
     maxFlowCallDepth: 5,
     maxFlowCallsPerTask: 64,
     defaultNodeMaxContext: 0,
-    toolHistoryKeepRounds: 32,
-    toolHistoryBudgetTokens: 1048576,
     subagentMaxDepth: 4,
     subagentMaxConcurrency: 16,
     subagentResultMaxChars: 8000,
@@ -166,8 +158,6 @@ export function identifyTaskParamTier(values: TaskParamTierValues): TaskParamTie
       values.maxFlowCallDepth === t.maxFlowCallDepth &&
       values.maxFlowCallsPerTask === t.maxFlowCallsPerTask &&
       values.defaultNodeMaxContext === t.defaultNodeMaxContext &&
-      values.toolHistoryKeepRounds === t.toolHistoryKeepRounds &&
-      values.toolHistoryBudgetTokens === t.toolHistoryBudgetTokens &&
       values.subagentMaxDepth === t.subagentMaxDepth &&
       values.subagentMaxConcurrency === t.subagentMaxConcurrency &&
       values.subagentResultMaxChars === t.subagentResultMaxChars &&
@@ -192,8 +182,6 @@ export function buildTaskParamTierPatch(tier: TaskParamTier): api.RuntimeSetting
     max_flow_call_depth: v.maxFlowCallDepth,
     max_flow_calls_per_task: v.maxFlowCallsPerTask,
     default_node_max_context: v.defaultNodeMaxContext,
-    tool_history_keep_rounds: v.toolHistoryKeepRounds,
-    tool_history_budget_tokens: v.toolHistoryBudgetTokens,
     subagent_max_depth: v.subagentMaxDepth,
     subagent_max_concurrency: v.subagentMaxConcurrency,
     subagent_result_max_chars: v.subagentResultMaxChars,
@@ -231,10 +219,6 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
   const maxFlowCallsPerTask = ref(64);
   /** 节点默认上下文上限(**任务侧**,A 批 A4;服务端默认 0 = 不裁剪,否则 256..=1048576) */
   const defaultNodeMaxContext = ref(0);
-  /** 工具循环历史保留的最近完整轮数(TPROF-2 起服务端默认 16,1..=32) */
-  const toolHistoryKeepRounds = ref(16);
-  /** 工具循环历史 token 预算(TPROF-2 起服务端默认 131072;0 = 禁用预算闸门) */
-  const toolHistoryBudgetTokens = ref(131072);
   /** 单次生成的 token 预算(服务端默认 0 = 关闭;HB-1 成本护栏) */
   const sessionTokenBudget = ref(0);
   /** 预算超限动作:warn(只提示一次,默认)/ stop(停止本轮工具循环) */
@@ -385,8 +369,6 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     maxFlowCallDepth.value = s.max_flow_call_depth ?? 5;
     maxFlowCallsPerTask.value = s.max_flow_calls_per_task ?? 64;
     defaultNodeMaxContext.value = s.default_node_max_context ?? 0;
-    toolHistoryKeepRounds.value = s.tool_history_keep_rounds ?? 16;
-    toolHistoryBudgetTokens.value = s.tool_history_budget_tokens ?? 131072;
     sessionTokenBudget.value = s.session_token_budget ?? 0;
     sessionBudgetAction.value = s.session_budget_action === 'stop' ? 'stop' : 'warn';
     loopGuardSemanticWindow.value = s.loop_guard_semantic_window ?? 16;
@@ -609,8 +591,6 @@ export const useGenSettingsStore = defineStore('app.genSettings', () => {
     maxFlowCallDepth,
     maxFlowCallsPerTask,
     defaultNodeMaxContext,
-    toolHistoryKeepRounds,
-    toolHistoryBudgetTokens,
     sessionTokenBudget,
     sessionBudgetAction,
     loopGuardSemanticWindow,

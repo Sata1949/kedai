@@ -30,7 +30,6 @@ const store = useAppStore();
 const {
   temperature, topP, maxTokens, maxContextTokens, maxToolRounds,
   maxFlowCallDepth, maxFlowCallsPerTask, defaultNodeMaxContext,
-  toolHistoryKeepRounds, toolHistoryBudgetTokens,
   sessionTokenBudget, sessionBudgetAction,
   loopGuardSemanticWindow, loopGuardSemanticMinCalls, loopGuardSemanticMaxDistinct,
   taskStepBudgetSecs, taskTotalBudgetSecs, taskTeamBudgetSecs, taskIdleTimeoutSecs,
@@ -221,32 +220,6 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           title="节点自己没写「上下文上限」时用的默认 token 上限(0 = 不裁剪,默认;否则 256-1048576);节点级配置优先"
         />
         <span class="sv-note">任务侧：节点未单独设置时的输入 token 上限(0 = 不裁剪，否则 256-1048576)</span>
-      </div>
-      <div class="sv-inp-row">
-        <label class="sv-inp-tag" title="工具历史保留轮数">工具历史保留轮数</label>
-        <input
-          v-model.number="toolHistoryKeepRounds"
-          type="number"
-          min="1"
-          max="32"
-          step="1"
-          class="sv-input inject-num"
-          title="工具循环历史保留的最近完整轮数;超出后最老轮的 tool 结果原地替换为摘要,防止上下文无界膨胀"
-        />
-        <span class="sv-note">最近完整保留轮数(1-32,默认 16;超出部分摘要化)</span>
-      </div>
-      <div class="sv-inp-row">
-        <label class="sv-inp-tag" title="工具历史 token 预算">工具历史 token 预算</label>
-        <input
-          v-model.number="toolHistoryBudgetTokens"
-          type="number"
-          min="0"
-          max="1048576"
-          step="1024"
-          class="sv-input inject-num"
-          title="工具循环历史 token 预算;估算超预算时从最老完整轮起继续摘要,保底最近 1 轮完整。0 = 禁用预算闸门"
-        />
-        <span class="sv-note">0 = 禁用；否则 1024-1048576(默认 131072)</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag" title="单次生成 token 预算">单次生成 token 预算</label>

@@ -16,8 +16,7 @@ pub(crate) use round::{execute_round as execute_tool_round, RoundContext as Tool
 
 use super::executor::{
     budget_stop_content, generate_round, has_declared_change, is_declared_file_write,
-    resolve_call_watchdog, resolve_max_rounds, trim_round_history, ExecutorResult, SelfHealRecord,
-    ToolGate,
+    resolve_call_watchdog, resolve_max_rounds, ExecutorResult, SelfHealRecord, ToolGate,
 };
 use super::util::{send_event, step_evt};
 use super::{AbortFlag, AgentEngine, EngineError};
@@ -199,9 +198,9 @@ pub(crate) async fn run_tool_loop(req: ToolLoopRequest<'_>) -> Result<ExecutorRe
     let mut last_non_empty_content = String::new();
     let mut semantic_break: Option<(String, usize, usize)> = None;
     loop {
-        // ===== 工具历史回灌上限(R3b):最老轮的 tool 结果原地摘要化 =====
-        trim_round_history(engine, session_id, round, llm_messages);
-
+        // 工具历史不再逐轮摘要(2026-11-09):原地改写历史中段会使 prompt cache 的
+        // 共同前缀失效(实测带裁剪命中率 33.7% vs 不带 85.9%)。
+        // 初始消息的上下文裁剪不覆盖后续工具轮。
         // ===== 单轮生成(看门狗 + 传输重试 + 截断自愈)=====
         let result = generate_round(
             engine,
