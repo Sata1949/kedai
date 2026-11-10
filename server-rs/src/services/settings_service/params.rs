@@ -186,8 +186,8 @@ pub(super) fn default_tool_history_keep_rounds() -> u32 {
     16
 }
 
-/// 默认工具循环历史 token 预算(R3b;TPROF-2 起 128K):覆盖任务侧多轮大文件读取;
-/// 超出后从最老完整轮起继续摘要,保底最近 1 轮完整。
+/// 默认工具历史预算（128K）：聊天用于旧轮摘要，任务与输入窗口取小后做阶段压缩。
+/// 0 只解除额外历史预算，不解除任务的输入窗口约束。
 pub(super) fn default_tool_history_budget_tokens() -> u32 {
     131_072
 }

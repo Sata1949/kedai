@@ -37,6 +37,7 @@ tiktoken-rs = "0.12"
 # 全仓无任何 png:: API 调用(grep `png::`/`use png` 无命中),属冗余依赖;无需升级到 0.18
 tower-http = { version = "0.6", features = ["cors", "fs", "set-header"] }
 futures = "0.3"
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 dotenvy = "0.15"

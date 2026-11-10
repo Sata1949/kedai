@@ -221,7 +221,6 @@ pub async fn bind(
 
 pub async fn get(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     let svc = state.tasks.clone();
-    let db = state.db.clone();
     match state
         .db_call(move || {
             let found = svc.get_with_subtasks(&id);
@@ -242,28 +241,7 @@ pub async fn get(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> 
                     .workspace
                     .as_deref()
                     .map(|ws| crate::services::workspace_profile::probe(std::path::Path::new(ws)));
-                // TMR-6 交付摘要:绑定工作区才下发(未绑定 = 不做文件交付校验)。
-                // 读时合成,不落库;变更路径只取去重清单 + 计数,不把整张台账塞进详情。
-                let mut delivery = task.workspace.as_deref().map(|ws| {
-                    let (changed, changed_count) =
-                        crate::services::task_change_service::deliverable_paths(
-                            &db,
-                            &task.id,
-                            crate::services::task_engine::delivery::DELIVERY_CHANGED_LIMIT,
-                        );
-                    crate::services::task_engine::delivery::summarize(
-                        &task.plan,
-                        std::path::Path::new(ws),
-                        changed,
-                        changed_count,
-                        &task.title,
-                    )
-                });
-                // SKY-9-L1:运行期自检问题读持久化列,补齐 summarize 的静态重算缺口。
-                // 这里只读单列,不重跑浏览器(详情请求会被 SSE 高频触发)。
-                if let Some(summary) = delivery.as_mut() {
-                    summary.runtime_issues = svc.runtime_issues(&task.id);
-                }
+                let delivery = svc.delivery_summary(&task);
                 // 任务附件(ATTACH-1):恒为数组(无附件即空数组),与交付摘要的
                 // 「未绑定 → null」不同——附件清单没有「不适用」状态。
                 let attachments = svc.list_attachments(&task.id).unwrap_or_else(|e| {

@@ -18,31 +18,64 @@ import {
   type TaskParamTierOrCustom,
 } from '../../stores/genSettings';
 
-withDefaults(defineProps<{
-  /** 是否显示(embedded 模式按 activeSection 切换;standalone 恒 true) */
-  show?: boolean;
-}>(), {
-  show: true,
-});
+withDefaults(
+  defineProps<{
+    /** 是否显示(embedded 模式按 activeSection 切换;standalone 恒 true) */
+    show?: boolean;
+  }>(),
+  {
+    show: true,
+  },
+);
 
 const store = useAppStore();
 // 生成参数直接绑定 store(storeToRefs),与 useGenerationParams 内部保存逻辑读写同一 store
 const {
-  temperature, topP, maxTokens, maxContextTokens, maxToolRounds,
-  maxFlowCallDepth, maxFlowCallsPerTask, defaultNodeMaxContext,
-  toolHistoryKeepRounds, toolHistoryBudgetTokens,
-  sessionTokenBudget, sessionBudgetAction,
-  loopGuardSemanticWindow, loopGuardSemanticMinCalls, loopGuardSemanticMaxDistinct,
-  taskStepBudgetSecs, taskTotalBudgetSecs, taskTeamBudgetSecs, taskIdleTimeoutSecs,
-  compactionMode, compactionThreshold, compactionKeepRecent, compactionSnipBytes,
-  memoryDistillEnabled, memoryInjectLimit, memoryInjectCharBudget, memoryMaxEntries,
-  worldbookSyncCharacterEnabled, worldbookSyncGlobalEnabled,
-  subagentMaxDepth, subagentMaxConcurrency, subagentResultMaxChars,
+  temperature,
+  topP,
+  maxTokens,
+  maxContextTokens,
+  maxToolRounds,
+  maxFlowCallDepth,
+  maxFlowCallsPerTask,
+  defaultNodeMaxContext,
+  toolHistoryKeepRounds,
+  toolHistoryBudgetTokens,
+  sessionTokenBudget,
+  sessionBudgetAction,
+  loopGuardSemanticWindow,
+  loopGuardSemanticMinCalls,
+  loopGuardSemanticMaxDistinct,
+  taskStepBudgetSecs,
+  taskTotalBudgetSecs,
+  taskTeamBudgetSecs,
+  taskIdleTimeoutSecs,
+  compactionMode,
+  compactionThreshold,
+  compactionKeepRecent,
+  compactionSnipBytes,
+  memoryDistillEnabled,
+  memoryInjectLimit,
+  memoryInjectCharBudget,
+  memoryMaxEntries,
+  worldbookSyncCharacterEnabled,
+  worldbookSyncGlobalEnabled,
+  subagentMaxDepth,
+  subagentMaxConcurrency,
+  subagentResultMaxChars,
 } = storeToRefs(store);
 
 const {
-  tempLabel, topPLabel, ctxLabel, saveParams, paramsMsg, saveParamsNow,
-  taskRecSaving, taskRecMsg, currentTaskTier, applyTaskTier,
+  tempLabel,
+  topPLabel,
+  ctxLabel,
+  saveParams,
+  paramsMsg,
+  saveParamsNow,
+  taskRecSaving,
+  taskRecMsg,
+  currentTaskTier,
+  applyTaskTier,
 } = useGenerationParams();
 
 /**
@@ -75,9 +108,7 @@ watch(currentTaskTier, (next) => {
 /** 当前识别结果的中文标签;custom 明确说明原因 */
 const currentTierLabel = computed(() => {
   const tier = currentTaskTier.value;
-  return tier === 'custom'
-    ? '自定义（手动改过任一项）'
-    : TASK_PARAM_TIER_LABELS[tier];
+  return tier === 'custom' ? '自定义（手动改过任一项）' : TASK_PARAM_TIER_LABELS[tier];
 });
 
 /** 任务模式缺省块(TM-SET-1)仅任务模式显示;角色扮演侧缺省不同(0.8 / 0.9 / 扁平输出上限) */
@@ -111,7 +142,14 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           随机性(Temperature) <span class="sv-range-val">{{ tempLabel }}</span>
         </div>
         <div class="sv-range-row">
-          <input v-model.number="temperature" type="range" min="0" max="2" step="0.05" class="sv-range" />
+          <input
+            v-model.number="temperature"
+            type="range"
+            min="0"
+            max="2"
+            step="0.05"
+            class="sv-range"
+          />
           <output>{{ (temperature ?? 0).toFixed(2) }}</output>
         </div>
         <div class="sv-range-hints"><span>稳定 · 严谨</span><span>多样 · 创意</span></div>
@@ -131,7 +169,14 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
         <div class="sv-range-row">
           <!-- 上限与后端 `default_max_tokens` 校验区间(1..=131072)一致。
                超大区间下拖动精度有限,故同排保留数字输入用于精确录入。 -->
-          <input v-model.number="maxTokens" type="range" min="128" max="131072" step="1" class="sv-range" />
+          <input
+            v-model.number="maxTokens"
+            type="range"
+            min="128"
+            max="131072"
+            step="1"
+            class="sv-range"
+          />
           <input
             v-model.number="maxTokens"
             type="number"
@@ -147,24 +192,24 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
       <!-- 最大上下文窗口 / 压缩 / 记忆:仅角色扮演(聊天)消费;任务模式下隐藏(TM-SET-3),
            避免「改了在任务里不生效」的死写(批量保存路径同步按模式过滤,见 useDataManager)。 -->
       <template v-if="!isTaskMode">
-      <div>
-        <div class="sv-range-label">
-          最大上下文窗口(Token) <span class="sv-range-val">{{ ctxLabel }}</span>
+        <div>
+          <div class="sv-range-label">
+            最大上下文窗口(Token) <span class="sv-range-val">{{ ctxLabel }}</span>
+          </div>
+          <div class="sv-range-row">
+            <input
+              v-model.number="maxContextTokens"
+              type="range"
+              min="65536"
+              max="1048576"
+              step="1024"
+              class="sv-range"
+            />
+            <output>{{ (maxContextTokens ?? 0).toLocaleString() }}</output>
+          </div>
+          <div class="sv-range-hints"><span>64k · 最低</span><span>1M · 上限</span></div>
+          <p class="sv-note">超出上限时按时间裁剪最旧的历史消息(角色设定始终保留)。</p>
         </div>
-        <div class="sv-range-row">
-          <input
-            v-model.number="maxContextTokens"
-            type="range"
-            min="65536"
-            max="1048576"
-            step="1024"
-            class="sv-range"
-          />
-          <output>{{ (maxContextTokens ?? 0).toLocaleString() }}</output>
-        </div>
-        <div class="sv-range-hints"><span>64k · 最低</span><span>1M · 上限</span></div>
-        <p class="sv-note">超出上限时按时间裁剪最旧的历史消息(角色设定始终保留)。</p>
-      </div>
       </template>
       <div class="sv-inp-row">
         <label class="sv-inp-tag" title="聊天 AGENT 工具轮次上限">聊天 AGENT 工具轮次上限</label>
@@ -220,10 +265,12 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           placeholder="0 = 不裁剪"
           title="节点自己没写「上下文上限」时用的默认 token 上限(0 = 不裁剪,默认;否则 256-1048576);节点级配置优先"
         />
-        <span class="sv-note">任务侧：节点未单独设置时的输入 token 上限(0 = 不裁剪，否则 256-1048576)</span>
+        <span class="sv-note"
+          >任务侧：节点未单独设置时的输入 token 上限(0 = 不裁剪，否则 256-1048576)</span
+        >
       </div>
       <div class="sv-inp-row">
-        <label class="sv-inp-tag" title="工具历史保留轮数">工具历史保留轮数</label>
+        <label class="sv-inp-tag" title="仅聊天侧生效">聊天工具历史保留轮数</label>
         <input
           v-model.number="toolHistoryKeepRounds"
           type="number"
@@ -231,9 +278,9 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           max="32"
           step="1"
           class="sv-input inject-num"
-          title="工具循环历史保留的最近完整轮数;超出后最老轮的 tool 结果原地替换为摘要,防止上下文无界膨胀"
+          title="仅聊天侧按此轮数处理工具历史；任务侧按输入预算做阶段压缩，不逐轮改写中段历史"
         />
-        <span class="sv-note">最近完整保留轮数(1-32,默认 16;超出部分摘要化)</span>
+        <span class="sv-note">仅聊天侧生效（1-32，默认 16）；任务侧不使用轮数裁剪</span>
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag" title="工具历史 token 预算">工具历史 token 预算</label>
@@ -244,9 +291,11 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           max="1048576"
           step="1024"
           class="sv-input inject-num"
-          title="工具循环历史 token 预算;估算超预算时从最老完整轮起继续摘要,保底最近 1 轮完整。0 = 禁用预算闸门"
+          title="聊天侧限制工具历史；任务侧取非零值与上下文窗口较小者作为输入预算，80%触发阶段压缩。0只解除额外历史预算，不解除任务输入窗口"
         />
-        <span class="sv-note">0 = 禁用；否则 1024-1048576(默认 131072)</span>
+        <span class="sv-note"
+          >0 = 不额外收紧；否则 1024-1048576（默认 131072）。任务仍受输入窗口约束</span
+        >
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag" title="单次生成 token 预算">单次生成 token 预算</label>
@@ -287,7 +336,9 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
         <span class="sv-note">0 = 关闭；否则 4-64(默认 12)</span>
       </div>
       <div class="sv-inp-row">
-        <label class="sv-inp-tag" title="空转熔断窗口 / 输出去重上限">空转熔断窗口 / 输出去重上限</label>
+        <label class="sv-inp-tag" title="空转熔断窗口 / 输出去重上限"
+          >空转熔断窗口 / 输出去重上限</label
+        >
         <input
           v-model.number="loopGuardSemanticWindow"
           type="number"
@@ -359,7 +410,9 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           />
           <span class="sv-note">不限</span>
         </label>
-        <span class="sv-note">团队侧：执行阶段上限(600-1200 秒；超过 1200 或勾选「不限」= 不设限；默认 0 = 不限)</span>
+        <span class="sv-note"
+          >团队侧：执行阶段上限(600-1200 秒；超过 1200 或勾选「不限」= 不设限；默认 0 = 不限)</span
+        >
       </div>
       <div class="sv-inp-row">
         <label class="sv-inp-tag">任务空闲超时</label>
@@ -372,128 +425,149 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           class="sv-input inject-num"
           title="任务模式:运行中的任务连续该秒数既无模型调用也无事件时,由看守自动收尾(与手动停止同源,原因写入任务错误栏);0 = 关闭看守"
         />
-        <span class="sv-note">任务侧：无活动自动收尾(默认 2400;0 = 关；下限 2101 = 命令上限 + 调用上限 + 1)</span>
+        <span class="sv-note"
+          >任务侧：无活动自动收尾(默认 2400;0 = 关；下限 2101 = 命令上限 + 调用上限 + 1)</span
+        >
       </div>
       <div class="sv-inp-row">
         <span class="sv-note">
-          任务模式不限轮次；实际停止条件 = 模型收尾 / 单步墙钟 / 空闲超时 / 语义或只读熔断 / 手动停止 / 总预算（可选）。
+          任务模式不限轮次；实际停止条件 = 模型收尾 / 单步墙钟 / 空闲超时 / 语义或只读熔断 /
+          手动停止 / 总预算（可选）。
         </span>
       </div>
       <!-- 压缩 + 记忆:仅角色扮演(聊天)消费,任务模式隐藏(TM-SET-3) -->
       <template v-if="!isTaskMode">
-      <div class="sv-inp-row">
-        <label class="sv-inp-tag">压缩模式</label>
-        <select v-model="compactionMode" class="sv-select" title="上下文压缩模式:off 不压缩 / manual 手动触发 / auto token 超阈值自动压缩">
-          <option value="off">off · 不压缩</option>
-          <option value="manual">manual · 手动触发</option>
-          <option value="auto">auto · 自动压缩</option>
-        </select>
-        <span class="sv-note">压缩较早对话为摘要(原文保留可恢复);manual 需在优化面板手动触发</span>
-      </div>
-      <div>
-        <div class="sv-range-label">压缩触发阈值 <span class="sv-range-val">{{ Math.round(compactionThreshold * 100) }}%</span></div>
-        <div class="sv-range-row">
-          <input
-            v-model.number="compactionThreshold"
-            type="range"
-            min="0.5"
-            max="0.95"
-            step="0.05"
-            class="sv-range"
-          />
-          <output>{{ Math.round(compactionThreshold * 100) }}%</output>
+        <div class="sv-inp-row">
+          <label class="sv-inp-tag">压缩模式</label>
+          <select
+            v-model="compactionMode"
+            class="sv-select"
+            title="上下文压缩模式:off 不压缩 / manual 手动触发 / auto token 超阈值自动压缩"
+          >
+            <option value="off">off · 不压缩</option>
+            <option value="manual">manual · 手动触发</option>
+            <option value="auto">auto · 自动压缩</option>
+          </select>
+          <span class="sv-note"
+            >压缩较早对话为摘要(原文保留可恢复);manual 需在优化面板手动触发</span
+          >
         </div>
-        <div class="sv-range-hints"><span>50% · 更早压缩</span><span>95% · 更晚压缩</span></div>
-        <p class="sv-note">仅 auto 模式生效：历史 token 达到该占比时自动压缩。</p>
-      </div>
-      <div class="sv-inp-row">
-        <label class="sv-inp-tag">压缩保留条数</label>
-        <input
-          v-model.number="compactionKeepRecent"
-          type="number"
-          min="2"
-          max="200"
-          step="1"
-          class="sv-input inject-num"
-          title="压缩后仍保留的最近消息条数(2-200;默认 4,越界由后端钳回默认)"
-        />
-        <span class="sv-note">压缩后保留的最近消息条数(2-200,默认 4)</span>
-      </div>
-      <div class="sv-inp-row">
-        <label class="sv-inp-tag">超长裁剪阈值</label>
-        <input
-          v-model.number="compactionSnipBytes"
-          type="number"
-          min="0"
-          max="1048576"
-          step="1"
-          class="sv-input inject-num"
-          title="snip 零成本裁剪的超长消息长度阈值(字节;0 = 禁用,上限 1MB;默认 8192)"
-        />
-        <span class="sv-note">超长消息裁剪阈值(字节；0 = 禁用，默认 8192)</span>
-      </div>
-      <div class="sv-inp-row">
-        <label class="sv-inp-tag">记忆蒸馏</label>
-        <label style="display: flex; gap: var(--space-1-5); align-items: center; cursor: pointer" title="开启后允许在优化面板把当前会话蒸馏为角色跨会话记忆">
-          <input v-model="memoryDistillEnabled" type="checkbox" style="flex-shrink: 0" />
-          <span class="sv-note">开启跨会话记忆蒸馏(优化面板 → 记忆库)</span>
-        </label>
-      </div>
-      <div class="sv-inp-row">
-        <label class="sv-inp-tag">记忆注入条数</label>
-        <input
-          v-model.number="memoryInjectLimit"
-          type="number"
-          min="0"
-          max="50"
-          step="1"
-          class="sv-input inject-num"
-          title="每次注入提示词的记忆条数上限(0-50;0 = 不注入,默认 8,越界由后端钳回默认)"
-        />
-        <span class="sv-note">注入提示词的记忆条数上限(0-50,默认 8)</span>
-      </div>
-      <div class="sv-inp-row">
-        <label class="sv-inp-tag">记忆字符预算</label>
-        <input
-          v-model.number="memoryInjectCharBudget"
-          type="number"
-          min="0"
-          max="20000"
-          step="100"
-          class="sv-input inject-num"
-          title="每次注入的记忆内容总字符预算(0-20000;0 = 不限制,默认 2000):按精选排序累积到预算即停"
-        />
-        <span class="sv-note">注入记忆的字符预算(0-20000,0 = 不限制，默认 2000)</span>
-      </div>
-      <div class="sv-inp-row">
-        <label class="sv-inp-tag">记忆容量上限</label>
-        <input
-          v-model.number="memoryMaxEntries"
-          type="number"
-          min="0"
-          max="10000"
-          step="10"
-          class="sv-input inject-num"
-          title="每角色记忆容量上限(0-10000;0 = 不淘汰,默认 200):超出后最低分条目置为已归档(不删除)"
-        />
-        <span class="sv-note">每角色记忆条数上限(0-10000,0 = 不限制，默认 200)</span>
-      </div>
-      <!-- 剧情推演词条同步两档(RPFLOW-2):deep/agent 流程「归档步」改写世界书词条的放行开关。
+        <div>
+          <div class="sv-range-label">
+            压缩触发阈值
+            <span class="sv-range-val">{{ Math.round(compactionThreshold * 100) }}%</span>
+          </div>
+          <div class="sv-range-row">
+            <input
+              v-model.number="compactionThreshold"
+              type="range"
+              min="0.5"
+              max="0.95"
+              step="0.05"
+              class="sv-range"
+            />
+            <output>{{ Math.round(compactionThreshold * 100) }}%</output>
+          </div>
+          <div class="sv-range-hints"><span>50% · 更早压缩</span><span>95% · 更晚压缩</span></div>
+          <p class="sv-note">仅 auto 模式生效：历史 token 达到该占比时自动压缩。</p>
+        </div>
+        <div class="sv-inp-row">
+          <label class="sv-inp-tag">压缩保留条数</label>
+          <input
+            v-model.number="compactionKeepRecent"
+            type="number"
+            min="2"
+            max="200"
+            step="1"
+            class="sv-input inject-num"
+            title="压缩后仍保留的最近消息条数(2-200;默认 4,越界由后端钳回默认)"
+          />
+          <span class="sv-note">压缩后保留的最近消息条数(2-200,默认 4)</span>
+        </div>
+        <div class="sv-inp-row">
+          <label class="sv-inp-tag">超长裁剪阈值</label>
+          <input
+            v-model.number="compactionSnipBytes"
+            type="number"
+            min="0"
+            max="1048576"
+            step="1"
+            class="sv-input inject-num"
+            title="snip 零成本裁剪的超长消息长度阈值(字节;0 = 禁用,上限 1MB;默认 8192)"
+          />
+          <span class="sv-note">超长消息裁剪阈值(字节；0 = 禁用，默认 8192)</span>
+        </div>
+        <div class="sv-inp-row">
+          <label class="sv-inp-tag">记忆蒸馏</label>
+          <label
+            style="display: flex; gap: var(--space-1-5); align-items: center; cursor: pointer"
+            title="开启后允许在优化面板把当前会话蒸馏为角色跨会话记忆"
+          >
+            <input v-model="memoryDistillEnabled" type="checkbox" style="flex-shrink: 0" />
+            <span class="sv-note">开启跨会话记忆蒸馏(优化面板 → 记忆库)</span>
+          </label>
+        </div>
+        <div class="sv-inp-row">
+          <label class="sv-inp-tag">记忆注入条数</label>
+          <input
+            v-model.number="memoryInjectLimit"
+            type="number"
+            min="0"
+            max="50"
+            step="1"
+            class="sv-input inject-num"
+            title="每次注入提示词的记忆条数上限(0-50;0 = 不注入,默认 8,越界由后端钳回默认)"
+          />
+          <span class="sv-note">注入提示词的记忆条数上限(0-50,默认 8)</span>
+        </div>
+        <div class="sv-inp-row">
+          <label class="sv-inp-tag">记忆字符预算</label>
+          <input
+            v-model.number="memoryInjectCharBudget"
+            type="number"
+            min="0"
+            max="20000"
+            step="100"
+            class="sv-input inject-num"
+            title="每次注入的记忆内容总字符预算(0-20000;0 = 不限制,默认 2000):按精选排序累积到预算即停"
+          />
+          <span class="sv-note">注入记忆的字符预算(0-20000,0 = 不限制，默认 2000)</span>
+        </div>
+        <div class="sv-inp-row">
+          <label class="sv-inp-tag">记忆容量上限</label>
+          <input
+            v-model.number="memoryMaxEntries"
+            type="number"
+            min="0"
+            max="10000"
+            step="10"
+            class="sv-input inject-num"
+            title="每角色记忆容量上限(0-10000;0 = 不淘汰,默认 200):超出后最低分条目置为已归档(不删除)"
+          />
+          <span class="sv-note">每角色记忆条数上限(0-10000,0 = 不限制，默认 200)</span>
+        </div>
+        <!-- 剧情推演词条同步两档(RPFLOW-2):deep/agent 流程「归档步」改写世界书词条的放行开关。
            拆两档是因为全局书常服务多个角色(默认关,影响面更大);仅聊天侧消费,随记忆组隐藏。 -->
-      <div class="sv-inp-row">
-        <label class="sv-inp-tag" title="剧情推演同步角色词条">剧情推演同步角色词条</label>
-        <label style="display: flex; gap: var(--space-1-5); align-items: center; cursor: pointer" title="deep/agent 归档时把剧情变化写入角色绑定/卡内嵌世界书的绿灯(触发)词条;蓝灯(常驻)条目不改写、只新建绿灯条目。默认开启。">
-          <input v-model="worldbookSyncCharacterEnabled" type="checkbox" style="flex-shrink: 0" />
-          <span class="sv-note">归档步同步角色绑定与卡内嵌世界书(默认开)</span>
-        </label>
-      </div>
-      <div class="sv-inp-row">
-        <label class="sv-inp-tag" title="剧情推演同步全局词条">剧情推演同步全局词条</label>
-        <label style="display: flex; gap: var(--space-1-5); align-items: center; cursor: pointer" title="deep/agent 归档时把剧情变化写入全局世界书(未绑定角色)的绿灯(触发)词条;蓝灯(常驻)条目不改写、只新建绿灯条目。可能影响多个角色,默认关闭。">
-          <input v-model="worldbookSyncGlobalEnabled" type="checkbox" style="flex-shrink: 0" />
-          <span class="sv-note">同上，作用范围为全局世界书(默认关)</span>
-        </label>
-      </div>
+        <div class="sv-inp-row">
+          <label class="sv-inp-tag" title="剧情推演同步角色词条">剧情推演同步角色词条</label>
+          <label
+            style="display: flex; gap: var(--space-1-5); align-items: center; cursor: pointer"
+            title="deep/agent 归档时把剧情变化写入角色绑定/卡内嵌世界书的绿灯(触发)词条;蓝灯(常驻)条目不改写、只新建绿灯条目。默认开启。"
+          >
+            <input v-model="worldbookSyncCharacterEnabled" type="checkbox" style="flex-shrink: 0" />
+            <span class="sv-note">归档步同步角色绑定与卡内嵌世界书(默认开)</span>
+          </label>
+        </div>
+        <div class="sv-inp-row">
+          <label class="sv-inp-tag" title="剧情推演同步全局词条">剧情推演同步全局词条</label>
+          <label
+            style="display: flex; gap: var(--space-1-5); align-items: center; cursor: pointer"
+            title="deep/agent 归档时把剧情变化写入全局世界书(未绑定角色)的绿灯(触发)词条;蓝灯(常驻)条目不改写、只新建绿灯条目。可能影响多个角色,默认关闭。"
+          >
+            <input v-model="worldbookSyncGlobalEnabled" type="checkbox" style="flex-shrink: 0" />
+            <span class="sv-note">同上，作用范围为全局世界书(默认关)</span>
+          </label>
+        </div>
       </template>
       <p v-if="isTaskMode" class="sv-note">
         最大上下文窗口、压缩与记忆参数仅角色扮演(聊天)使用，已在任务模式下隐藏；如需调整请切到角色扮演模式。
@@ -569,11 +643,14 @@ function onTeamBudgetUnlimitedChange(event: Event): void {
           </button>
         </div>
         <p class="sv-tier-note">
-          <span class="sv-tier-current">当前识别：<b>{{ currentTierLabel }}</b></span>
+          <span class="sv-tier-current"
+            >当前识别：<b>{{ currentTierLabel }}</b></span
+          >
           任务未单独设置时使用：温度 1.0 · Top-P 1.0 · 输出上限 65536（只抬不压，更大时保持）；
           显式保存的值优先于缺省，应用档位会覆盖当前任务参数（含降低）。极限档把输出/流程/历史/子代理
           拉到设置上限，但仍保留步骤墙钟 3600 秒与空闲 2400 秒两个安全闸。
-          工具历史与子代理为全局参数（两模式共用），空转熔断任务侧仍按 8/4/2 收紧。
+          工具预算与子代理为全局参数；保留轮数只影响聊天，任务按输入预算阶段压缩。空转熔断任务侧仍按
+          8/4/2 收紧。
         </p>
         <div v-if="taskRecMsg" class="sv-feedback ok sv-feedback-flex">{{ taskRecMsg }}</div>
       </div>

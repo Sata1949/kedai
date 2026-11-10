@@ -22,6 +22,13 @@ const truncatedSteps = computed(() => props.delivery?.truncated ?? []);
 const hygieneIssues = computed(() => props.delivery?.hygiene_issues ?? []);
 // SKY-9-L1（2026-10-25）：运行期自检问题由后端持久化后下发，与错误条同源。
 const runtimeIssues = computed(() => props.delivery?.runtime_issues ?? []);
+const verification = computed(() => props.delivery?.verification);
+const verificationLabels = {
+  passed: '验收通过',
+  failed: '验收失败',
+  not_run: '未执行验收',
+  unavailable: '验收环境不可用',
+};
 </script>
 
 <template>
@@ -33,6 +40,47 @@ const runtimeIssues = computed(() => props.delivery?.runtime_issues ?? []);
       <div class="sv-delivery-hint">交付摘要不可用（旧服务端未下发，或任务详情尚未加载）。</div>
     </template>
     <template v-else>
+      <template v-if="verification">
+        <div class="sv-delivery-row">
+          <span
+            data-testid="verification-status"
+            class="sv-delivery-chip"
+            :class="{
+              ok: verification.status === 'passed' && verification.current,
+              bad: verification.status === 'failed',
+            }"
+            >{{
+              verification.status === 'passed' && !verification.current
+                ? '证据已失效'
+                : verificationLabels[verification.status]
+            }}</span
+          >
+          <time v-if="verification.checked_at">{{ verification.checked_at }}</time>
+        </div>
+        <div class="sv-delivery-hint">{{ verification.detail }}</div>
+        <details v-if="verification.checks.length">
+          <summary>实际验收范围</summary>
+          <ul>
+            <li v-for="check in verification.checks" :key="check">{{ check }}</li>
+          </ul>
+        </details>
+        <div v-if="verification.screenshots.length" class="sv-delivery-row">
+          <a
+            v-for="shot in verification.screenshots"
+            :key="shot.id"
+            :href="`/api/images/${encodeURIComponent(shot.id)}`"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <img
+              class="sv-delivery-screenshot"
+              :src="`/api/images/${encodeURIComponent(shot.id)}`"
+              :alt="shot.name"
+              loading="lazy"
+            />
+          </a>
+        </div>
+      </template>
       <div class="sv-delivery-row">
         <span class="sv-delivery-chip">必需 {{ props.delivery.required.length }}</span>
         <span class="sv-delivery-chip" :class="{ ok: props.delivery.missing.length === 0 }">
@@ -42,29 +90,22 @@ const runtimeIssues = computed(() => props.delivery?.runtime_issues ?? []);
           缺失 {{ props.delivery.missing.length }}
         </span>
         <span class="sv-delivery-chip">变更 {{ props.delivery.changed_count }}</span>
-        <span
-          v-if="truncatedSteps.length"
-          class="sv-delivery-chip bad"
-        >未完成 {{ truncatedSteps.length }}</span>
+        <span v-if="truncatedSteps.length" class="sv-delivery-chip bad"
+          >未完成 {{ truncatedSteps.length }}</span
+        >
       </div>
       <div v-if="truncatedSteps.length" class="sv-delivery-warn">
         未完成的子目标：{{ truncatedSteps.join('、') }}（成果可能不完整，可追加指令继续完成）
       </div>
-      <div
-        v-for="issue in contentIssues"
-        :key="issue"
-        class="sv-delivery-warn"
-      >交付内容校验：{{ issue }}</div>
-      <div
-        v-for="issue in runtimeIssues"
-        :key="`runtime-${issue}`"
-        class="sv-delivery-warn"
-      >运行期自检：{{ issue }}</div>
-      <div
-        v-for="issue in hygieneIssues"
-        :key="issue"
-        class="sv-delivery-hint"
-      >交付卫生：{{ issue }}</div>
+      <div v-for="issue in contentIssues" :key="issue" class="sv-delivery-warn">
+        交付内容校验：{{ issue }}
+      </div>
+      <div v-for="issue in runtimeIssues" :key="`runtime-${issue}`" class="sv-delivery-warn">
+        运行期自检：{{ issue }}
+      </div>
+      <div v-for="issue in hygieneIssues" :key="issue" class="sv-delivery-hint">
+        交付卫生：{{ issue }}
+      </div>
       <div v-if="!props.delivery.workspace_available" class="sv-delivery-warn">
         工作区当前不可访问，缺失判定不可信。
       </div>
@@ -72,11 +113,7 @@ const runtimeIssues = computed(() => props.delivery?.runtime_issues ?? []);
         本任务未声明必需文件；仅按「本次是否产生文件变更」校验。
       </div>
       <ul v-if="props.delivery.required.length" class="sv-delivery-files">
-        <li
-          v-for="file in props.delivery.required"
-          :key="file.path"
-          :class="{ bad: !file.exists }"
-        >
+        <li v-for="file in props.delivery.required" :key="file.path" :class="{ bad: !file.exists }">
           <span class="sv-delivery-mark">{{ file.exists ? '✓' : '✗' }}</span>
           <code class="sv-delivery-path">{{ file.path }}</code>
           <span class="sv-delivery-owner">{{ file.owner }}</span>
@@ -87,6 +124,11 @@ const runtimeIssues = computed(() => props.delivery?.runtime_issues ?? []);
 </template>
 
 <style scoped>
+.sv-delivery-screenshot {
+  max-width: 192px;
+  max-height: 120px;
+  object-fit: contain;
+}
 .sv-delivery {
   display: flex;
   flex-direction: column;

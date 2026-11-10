@@ -652,7 +652,7 @@ async fn task_team_mode_kickback_prior_seed() {
     let redo = *redo.get(1).expect("应有补做轮的第 2 次 agent 调用");
     // 同主未打回子目标的产出被种入(版本衔接;mock 首轮产出为「一」子目标的结果文本)
     assert!(
-        redo.contains("「一」"),
+        redo.contains("本主已完成子目标：一"),
         "补做轮应种入同主未打回子目标的产出: {redo}"
     );
     // 被打回子目标标注旧版本(明确本次是替换而非新增)

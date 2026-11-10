@@ -26,7 +26,13 @@ pub const META_TOOLS: &[&str] = &["get_state", "apply_patch", "run_flow", "world
 
 /// 规划器只读侦察白名单:规划阶段允许模型先收集信息再产出计划 JSON;
 /// 严禁写操作(违背 plan/legacy「只规划不执行」零副作用纪律)与编排类(会把规划变成执行)。
-pub const READONLY_SCOUT: &[&str] = &["read", "search", "memory_read", "calculator"];
+pub const READONLY_SCOUT: &[&str] = &[
+    "read",
+    "search",
+    "memory_read",
+    "calculator",
+    "exec_log_read",
+];
 
 /// 子智能体工具白名单:读/搜索类安全工具;写类与编排类一律剔除
 /// (子 agent 不得再派子 agent;嵌套由白名单与深度守卫双重排除)。
@@ -37,10 +43,11 @@ pub const SUBAGENT: &[&str] = &[
     "sleep",
     "calculator",
     "memory_read",
+    "exec_log_read",
 ];
 
 /// 反思阶段工具白名单:仅禁词替换与定点修订;dirty 文本修正不引入检索类工具。
-pub const REFLECT: &[&str] = &["censor_text", "revise_passage"];
+pub const REFLECT: &[&str] = &["censor_text", "revise_passage", "exec_log_read"];
 
 /// 归档步工具白名单(RPFLOW-2:deep/agent 流程第 4 步「剧情归档与词条同步」)。
 ///
@@ -328,7 +335,13 @@ mod tests {
         );
         assert_eq!(
             READONLY_SCOUT,
-            &["read", "search", "memory_read", "calculator"]
+            &[
+                "read",
+                "search",
+                "memory_read",
+                "calculator",
+                "exec_log_read"
+            ]
         );
         assert_eq!(
             SUBAGENT,
@@ -338,10 +351,11 @@ mod tests {
                 "todo",
                 "sleep",
                 "calculator",
-                "memory_read"
+                "memory_read",
+                "exec_log_read"
             ]
         );
-        assert_eq!(REFLECT, &["censor_text", "revise_passage"]);
+        assert_eq!(REFLECT, &["censor_text", "revise_passage", "exec_log_read"]);
         assert_eq!(
             WORKSPACE_TOOLS,
             &[

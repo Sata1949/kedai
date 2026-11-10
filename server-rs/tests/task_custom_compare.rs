@@ -311,6 +311,15 @@ async fn compare_depth_guard_blocks_sixth_level() {
     let _guard = test_lock().await;
     let app = test_app();
 
+    // 此例的六层转义驱动串本身超过 64K token，独立提高夹具预算，只验证调用深度。
+    let (_, before) = send_json(app, "GET", "/api/settings?mode=task", json!({})).await;
+    send_json(
+        app,
+        "PUT",
+        "/api/settings?mode=task",
+        json!({"max_context_tokens":262144,"tool_history_budget_tokens":0}),
+    )
+    .await;
     let g = save_flow(app, "庚流程", plain_node_flow("庚本步")).await;
     let f = save_flow(app, "己流程", loose_node_flow("己本步")).await;
     let e = save_flow(app, "戊流程", loose_node_flow("戊本步")).await;
@@ -349,6 +358,7 @@ async fn compare_depth_guard_blocks_sixth_level() {
         "回灌文本应说明深度被拦: {res}"
     );
     assert_usage_invariant(&detail, &calls);
+    send_json(app,"PUT","/api/settings?mode=task",json!({"max_context_tokens":before["max_context_tokens"],"tool_history_budget_tokens":before["tool_history_budget_tokens"]})).await;
 }
 
 /// 每任务调用预算:模型串行地反复调用同一套流程时,第 65 次起拒绝(深度与环都拦不住

@@ -74,16 +74,15 @@ impl MockConnector {
         });
         let tool_hooks_on = !non_mainline_step;
 
-        // 取最后一个 user 消息,截 60 字符
+        // 测试指令取用户目标；交接资料和运行环境证据不得变成驱动指令。
         let last_user = messages
             .iter()
             .rev()
+            .filter(|m| !m.content.starts_with("<UNTRUSTED_PROMPT_SOURCE "))
             .find(|m| m.role == "user")
             .map(|m| m.content.clone())
             .unwrap_or_default();
-        // 测试钩子:[[fail_times:N 消息@分类]] → 前 N 次请求失败,之后落回其它钩子
-        // (通常 `[[reply:...]]`)。TMR3-1 单次调用重试的端到端用例需要「先失败、
-        // 重试后成功」;`[[fail:]]` 恒失败,构造不出这个形态。
+        // [[fail_times:N 消息@分类]] 前 N 次失败后恢复，用于验证原地重试；[[fail:]] 则恒失败。
         // 计数按 marker 全文存进程内 map:测试须使用唯一文案,避免并行用例互相影响。
         if let Some((key, n, msg)) = extract_fail_times_marker(&last_user) {
             let mut map = fail_times_remaining()

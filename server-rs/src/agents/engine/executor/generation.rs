@@ -406,12 +406,17 @@ pub(crate) async fn process_chunk(
     Ok(false)
 }
 
-/// 每轮生成前的工具历史回灌裁剪(R3b,2026-09-02 实测修复:每轮全量回灌
-/// assistant/tool 交替历史,3 步任务 prompt 3,119→26,679 token 无界膨胀)。
-///
-/// 最老轮 tool 结果原地摘要化(保留最近 K 轮完整 + token 预算双闸门;配对不破坏、
-/// 幂等)。仅存在工具循环历史时触发;聊天主链路 compaction(compaction.rs)/
-/// protected_tail 注入语义不受影响(不同层)。自循环体抽出的纯搬运(C-2C)。
+/// 任务冻结设置中的两个非零输入上限取小；这是输入预算，不再次扣除 max_tokens。
+pub(crate) fn task_input_token_budget(max_context_tokens: u32, history_budget_tokens: u32) -> u32 {
+    match (max_context_tokens, history_budget_tokens) {
+        (0, history) => history,
+        (context, 0) => context,
+        (context, history) => context.min(history),
+    }
+}
+
+/// 聊天路径每轮生成前的工具历史裁剪(R3b)：保留最近 K 轮完整、旧轮原地摘要。
+/// 任务路径由 tool_loop::context 的阶段压缩接管，不再调用本函数。
 pub(crate) fn trim_round_history(
     engine: &AgentEngine,
     session_id: &str,

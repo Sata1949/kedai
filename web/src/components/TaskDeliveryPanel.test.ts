@@ -7,6 +7,19 @@ import type { TaskDeliverySummary } from '../api';
 
 function summary(overrides: Partial<TaskDeliverySummary> = {}): TaskDeliverySummary {
   return {
+    verification: {
+      status: 'not_run',
+      browser_required: false,
+      resources: {},
+      artifact_version: null,
+      checked_at: null,
+      detail: '尚未执行独立验收',
+      original_goal: '原始目标',
+      checks: [],
+      issues: [],
+      screenshots: [],
+      current: false,
+    },
     checked: true,
     workspace_available: true,
     required: [
@@ -27,6 +40,34 @@ function mountPanel(delivery: TaskDeliverySummary | null, workspaceBound = true)
 }
 
 describe('TaskDeliveryPanel', () => {
+  it.each([
+    ['passed', '验收通过'],
+    ['failed', '验收失败'],
+    ['not_run', '未执行验收'],
+    ['unavailable', '验收环境不可用'],
+  ] as const)('独立验收状态 %s 明确显示', (status, label) => {
+    const delivery = summary();
+    delivery.verification.status = status;
+    delivery.verification.current = true;
+    const panel = mountPanel(delivery);
+    expect(panel.get('[data-testid="verification-status"]').text()).toBe(label);
+    expect(panel.get('[data-testid="verification-status"]').classes('ok')).toBe(
+      status === 'passed',
+    );
+  });
+  it('旧版本证据失效，截图仍可打开但不显示通过', () => {
+    const delivery = summary();
+    delivery.verification.status = 'passed';
+    delivery.verification.current = false;
+    delivery.verification.screenshots = [
+      { id: 'evidence.png', name: '入口截图', mime: 'image/png' },
+    ];
+    const panel = mountPanel(delivery);
+    expect(panel.get('[data-testid="verification-status"]').text()).toBe('证据已失效');
+    expect(panel.get('[data-testid="verification-status"]').classes('ok')).toBe(false);
+    expect(panel.get('img').attributes('src')).toBe('/api/images/evidence.png');
+    expect(panel.get('a').attributes('rel')).toContain('noopener');
+  });
   it('未绑定工作区：明说不做交付校验', () => {
     const w = mountPanel(null, false);
     expect(w.text()).toContain('未绑定工作区');
@@ -39,9 +80,7 @@ describe('TaskDeliveryPanel', () => {
   });
 
   it('未声明必需文件：只说明弱校验与变更数', () => {
-    const w = mountPanel(
-      summary({ checked: false, required: [], missing: [], changed_count: 3 }),
-    );
+    const w = mountPanel(summary({ checked: false, required: [], missing: [], changed_count: 3 }));
     expect(w.text()).toContain('未声明必需文件');
     expect(w.text()).toContain('变更 3');
     expect(w.find('.sv-delivery-files').exists()).toBe(false);
@@ -78,10 +117,7 @@ describe('TaskDeliveryPanel', () => {
   it('内容体检与未完成步骤：逐项展示警示', () => {
     const w = mountPanel(
       summary({
-        content_issues: [
-          'index.html:含 2 行 @@ 未替换槽位',
-          'parts/main.js:文件为空(0B)',
-        ],
+        content_issues: ['index.html:含 2 行 @@ 未替换槽位', 'parts/main.js:文件为空(0B)'],
         truncated: ['【主Agent-1】总装'],
       }),
     );

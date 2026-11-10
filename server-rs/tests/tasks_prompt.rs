@@ -193,31 +193,21 @@ async fn task_character_persona_never_injected_after_retirement() {
     assert!(!echo.contains("人设:"), "人设正文段标题不得出现: {echo}");
 }
 
-/// R3b:工具循环历史回灌上限(trim_tool_history 全链路集成)。
+/// TQUAL-17:任务没有达到输入预算阈值时保持完整历史，不再按轮数逐轮改写。
 /// solo 任务经 mock [[tool_loop:read|6]] 钩子连续 6 轮工具调用(每轮回填
-/// read(character_prompt) 输出,均含 R3B-TOOLOUT-MARK);keep_rounds 调至 1 →
-/// 每轮生成前 trim_tool_history 把最老完整轮的 tool 结果原地摘要化,保底最近
-/// 1 轮完整(模型必须看到最新工具结果才能续推)。
+/// read(character_prompt) 输出,均含 R3B-TOOLOUT-MARK);即使 keep_rounds 调至 1，
+/// 任务仍完整保留六轮。聊天的 keep-recent 语义继续由 messages/trim.rs 单测覆盖。
 /// 断言点 = 调用追踪(task_llm_calls)phase=agent 行的 prompt_summary:
-/// solo 整轮落一行,messages 为工具循环结束后的最终数组,即 trim 后的真实下发状态。
-/// - 省略标记「(较早工具结果已省略」恰好 5 处(轮 1..=5 的 tool 结果已摘要化);
-/// - 摘要文案含工具名 "read" 与「原输出约 N 字符」(可读性,集成测试按此口径,
-///   与 trim.rs 的 TOOL_HISTORY_SUMMARY_PREFIX 注释约定一致);
-/// - 最近轮(第 6 轮)工具结果完整保留:MARK 仍在;
-/// - 最老轮原始输出已被移除:6 轮输出内容相同,MARK 恰好出现 1 次
-///   = 仅剩最近轮一份,前 5 份原文均被摘要替换(不含最老轮原始输出的等价断言)。
-/// 设置为共享全局态:改/还原在同一函数内串行(同 R3a 用例纪律);
-/// 同文件其他工具钩子用例最多 1 轮工具循环(full<=1 时 trim 无操作),不受
-/// keep_rounds=1 窗口影响。
+/// 省略标记和阶段检查点均不得出现，六轮工具结果各留一份。
 #[tokio::test]
-async fn task_solo_tool_history_trimmed_in_prompt_summary() {
+async fn task_solo_preserves_tool_history_below_phase_threshold() {
     let app = test_app();
     let cid = upload_tool_marked_character(app).await;
 
-    // keep_rounds = 1:6 轮工具循环只保留最近 1 轮完整,最老 5 轮摘要化。
+    // keep_rounds = 1 仅影响聊天路径；任务不能因此改写共同前缀。
     // **同时关闭语义熔断**:本用例要造「同一工具 6 轮、输出逐字相同」的形态来测裁剪,
     // 而提交 3 起任务侧语义熔断被钳到「>4 次同工具 + 输出无实质变化即熔断」,
-    // 会在第 4 轮先把循环收掉(且工具轮无正文 → 任务报空内容),测不到第 5 轮摘要。
+    // 会在第 4 轮先把循环收掉，测不到完整六轮历史。
     // 两者维度不同(历史裁剪 vs 输出空转),故关掉无关的那个(同 api_integration 预算用例),
     // 语义熔断自身由 tests/task_loop_budget.rs 覆盖。
     let (status, json) = send_json(
@@ -238,7 +228,7 @@ async fn task_solo_tool_history_trimmed_in_prompt_summary() {
         "6 轮工具循环后 solo 任务应完成: {detail}"
     );
 
-    // 调用追踪:solo 整轮一行(phase=agent),prompt_summary = trim 后落库的消息数组
+    // 调用追踪:solo 整轮一行(phase=agent)，核对本轮实际保留的消息数组。
     let (status, calls) = send_json(
         app,
         "GET",
@@ -268,18 +258,15 @@ async fn task_solo_tool_history_trimmed_in_prompt_summary() {
     const SUMMARY_MARK: &str = "(较早工具结果已省略";
     let summary_count = prompt.matches(SUMMARY_MARK).count();
     assert_eq!(
-        summary_count, 5,
-        "轮 1..=5 的 tool 结果应全部摘要化(5 处省略标记): {prompt}"
+        summary_count, 0,
+        "未达阶段预算的任务不能按 keep_rounds 改写旧工具结果: {prompt}"
     );
     assert!(
-        prompt.contains(r#"工具 "read" 原输出约"#),
-        "摘要文案应含工具名与原输出长度: {prompt}"
+        !prompt.contains("[任务阶段上下文]"),
+        "本用例未达输入预算阈值，不该生成阶段摘要: {prompt}"
     );
     let mark_count = prompt.matches(MARK).count();
-    assert_eq!(
-        mark_count, 1,
-        "最近轮(第 6 轮)工具结果应完整保留且仅此一份(最老轮原文已移除): {prompt}"
-    );
+    assert_eq!(mark_count, 6, "六轮工具结果应全部原样保留: {prompt}");
 
     // 还原现场(共享 app;TPROF-2 默认 16 / 语义熔断下限 12)
     let (status, json) = send_json(

@@ -69,6 +69,7 @@ impl ModeExecutor for FollowupExecutor {
             };
 
             let call = AgentLoopCall {
+                handoff: Vec::new(),
                 task_id: ctx.task_id.clone(),
                 session_id: format!("task:{}", ctx.task_id),
                 goal: ctx.goal.clone(),
@@ -153,6 +154,7 @@ impl ModeExecutor for FollowupExecutor {
                             msg_text: text.to_string(),
                             new_result,
                             status,
+                            error: None,
                         },
                         usage,
                     ))

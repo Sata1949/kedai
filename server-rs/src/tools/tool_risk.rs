@@ -12,7 +12,7 @@ use crate::models::tool_policy::ToolRisk;
 pub(crate) fn explicit_risk(tool: &str) -> Option<ToolRisk> {
     let risk = match tool {
         "calculator" | "memory_read" | "read" | "role" | "todo" | "censor_text"
-        | "revise_passage" => ToolRisk::Safe,
+        | "revise_passage" | "exec_log_read" => ToolRisk::Safe,
         // agentend 是子智能体编排收尾(结束任务),不改数据,归敏感级;
         // 若归危险级,任务模式默认策略(拒绝危险工具)会打断子智能体流程。
         "search" | "sleep" | "agentgo" | "agentend" => ToolRisk::Sensitive,

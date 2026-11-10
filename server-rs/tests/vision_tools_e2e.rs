@@ -1,8 +1,8 @@
 // 视觉工具三件 · 端到端闸门与真执行(视觉能力包 D4,2026-10-02)。
 //
-// 两问:**未开视觉能力位时** mock 的 `[[tool:view_image]]` 钩子不会命中(view_image 不在
-// 本轮下发工具面)→ 事件流里没有该工具调用、不产生图像文件;**开启后**同一题面真跑一次
-// view_image → 事件流出现「调用/返回」且图像落入 DATA_DIR/images。
+// MockConnector 的真实能力恒不包含视觉：连接配置即使勾选 supports_vision，
+// 也不能把 mock 伪装成视觉连接。实际视觉执行与 image_url 数据由
+// task_child_context.rs 中的 loopback OpenAI provider 用例覆盖。
 //
 // 为什么单独一个文件:本用例要翻转连接能力位,而连接与设置是进程内共享全局
 // (仓库既有裁定:共享全局状态的用例拆文件 + 独立 DATA_DIR,见 coding_pack_patch_tool.rs 头注)。
@@ -131,7 +131,7 @@ const PNG_1PX: &[u8] = &[
 ];
 
 #[tokio::test]
-async fn view_image_gated_by_vision_capability_and_runs_when_enabled() {
+async fn view_image_configuration_cannot_grant_mock_vision_capability() {
     let app = test_app();
     let ws_guard = TempDataDir::new("d4-ws");
     let ws = ws_guard.path().to_string_lossy().into_owned();
@@ -153,7 +153,7 @@ async fn view_image_gated_by_vision_capability_and_runs_when_enabled() {
         "未开视觉位时 view_image 不得被执行(不应产生图像文件)"
     );
 
-    // ② 开启视觉能力位:同一题面真跑 view_image → 事件流出现调用/返回 + 图像落入 images
+    // ② 配置勾选不能覆盖 MockConnector.capabilities() 的真实能力。
     let (status, body) = send_json(
         app,
         "PUT",
@@ -168,11 +168,12 @@ async fn view_image_gated_by_vision_capability_and_runs_when_enabled() {
     assert_eq!(status, StatusCode::OK, "开启视觉位失败: {body}");
     let (_, seq_on) = run_task(app, title, &ws).await;
     assert!(
-        tool_engaged(&seq_on, "view_image"),
-        "开启视觉位后 view_image 应进入工具循环: {seq_on:?}"
+        !tool_engaged(&seq_on, "view_image"),
+        "配置旗标不能让无视觉能力的 mock 执行 view_image: {seq_on:?}"
     );
-    assert!(
-        count_image_files() > before,
-        "开启视觉位后 view_image 应真执行并把图像写入 DATA_DIR/images;事件: {seq_on:?}"
+    assert_eq!(
+        count_image_files(),
+        before,
+        "mock 的真实视觉能力仍关闭，不得生成图像文件；事件: {seq_on:?}"
     );
 }

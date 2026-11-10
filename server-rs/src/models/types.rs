@@ -1002,21 +1002,19 @@ pub struct ToolDefinition {
 
 /// 任务侧工具链路的预算载体(PRODCAP-2)。
 ///
-/// 只承载**语义熔断三值**(窗口 / 同工具次数下限 / 输出指纹去重上限,已过
-/// [`crate::utils::loop_guard::clamp_for_task`] 收紧):子 agent 派发路径
-/// (agentgo / subtask)从父 `ToolContext.budget` 读取并透传进子循环的
-/// `GenerationParams.semantic_guard`;聊天路径 `budget` 恒 `None`(行为逐字节不变)。
-///
-/// **2026-11-06 三档授权**起，本结构同时承载任务授权档位
-/// [`Self::task_authorization`]——它是任务侧独有的「能力载体」，与 scope 一样只在
-/// 任务路径出现；放进这里而不是 `ToolContext` 顶层，是为了避免给 60+ 个聊天/测试
-/// 构造点都补一个恒 `None` 的字段（编译器不提供默认字段，补字段等于全仓机械改）。
+/// 同时承载任务授权和父循环实际工具/连接快照，子 agent 继承且只收窄权限。
+/// 聊天路径 `budget` 恒 `None`。
 ///
 /// **墙钟预算刻意不在此结构内**:子 agent 运行在父循环一轮之内,父层轮末闸门即其上限;
 /// 两处各记一次账必然漂移(任务模式提交 3 D3 的既定口径,PRODCAP-2 沿用)。
 /// 任务级总预算的到点收尾走 `TaskRunContext.deadline`(见 `task_engine`),亦不在此。
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ToolBudget {
+    pub verification: Option<Arc<super::tool_policy::VerificationSpec>>,
+    pub execution: Option<Arc<super::tool_policy::ToolExecutionSettings>>,
+    /// 任务冻结设置计算的文本与工具定义输入预算；0 = 不启用阶段压缩。
+    /// 图像另留保守余量，不宣称等于提供商真实的多模态上下文窗口。
+    pub input_token_budget: u32,
     /// 任务侧收紧后的语义熔断三值(`0` = 该位关闭,原样保持)
     pub semantic_guard: Option<(usize, usize, usize)>,
     /// 连续无新信息的只读调用上限(TQUAL-15;`None`/0 = 关闭)。达到上限先提醒一次,

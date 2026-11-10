@@ -25,6 +25,8 @@ use uuid::Uuid;
 
 /// 单主 agent 工具自循环的入参(owned,便于 tokio::spawn/JoinSet 跨 'static 边界)。
 pub(crate) struct AgentLoopCall {
+    /// 动态协作事实单独入上下文，可阶段压缩；不拼进不可变的原始目标。
+    pub handoff: Vec<LlmMessage>,
     /// 任务 id(调用追踪/usage 落库/事件桥用)
     pub task_id: String,
     /// 运行身份(虚拟 session_id):solo/multi = task:{id};team 主 agent = task:{id}:main:{n}
@@ -130,6 +132,9 @@ pub(crate) async fn run_agent_loop(
     cancel: watch::Receiver<bool>,
 ) -> Result<AgentLoopOutput, String> {
     let settings = &call.settings;
+    let (connector, model) = engine
+        .resolve_connector(call.connection_id.as_deref())
+        .await?;
 
     // 工具按任务策略下发(批次授权改造):默认拒绝危险工具;元工具不入正文列表。
     // 任务模式无 UI 授权上下文,闸门恒 no_ui_authorization = true:
@@ -147,7 +152,7 @@ pub(crate) async fn run_agent_loop(
         // 见 tool_policy::coding_pack_gate)
         settings.task_coding_bundle_enabled,
         // 视觉三件随生效连接的「视觉输入」能力位(口径单一出处;见 tool_policy::vision_gate)
-        crate::services::settings_service::vision_enabled(settings),
+        connector.capabilities().supports_vision,
         // 截图工具随「视觉与截图」总开关(默认关;见 tool_policy::screenshot_gate)
         settings.vision_screenshot_enabled,
         // 三档授权(2026-11-06):自动档提升为全量工具面
@@ -172,7 +177,7 @@ pub(crate) async fn run_agent_loop(
     // system 提示词组装:统一走 TaskBackend::assemble_executor_system_prompt
     // (单一实现,宿主侧 prompt.rs);拼装顺序与 untrusted 包裹纪律同 legacy,
     // 勿在本文件复制实现(WP7)。
-    let sys = svc.assemble_executor_system_prompt(
+    let mut sys = svc.assemble_executor_system_prompt(
         settings,
         call.executor_id.as_deref(),
         call.character_id.as_deref(),
@@ -182,10 +187,34 @@ pub(crate) async fn run_agent_loop(
         has_image_tools,
     );
 
+    // 只在有写能力的主循环启用；team 分片主不替总装主提前验整站。
+    let verification = match call.scope.as_ref() {
+        Some(scope)
+            if settings.task_coding_bundle_enabled
+                && has_write_tools
+                && (call.step_index.is_none()
+                    || scope
+                        .declared_files()
+                        .iter()
+                        .any(|p| p.ends_with(".html") || p.ends_with(".htm"))) =>
+        {
+            sys.push_str(super::verification::BROWSER_PLAN_NOTE);
+            // call.goal 是本轮冻结输入，续跑时包含用户追加/修订指令；tasks.title 只有最初目标。
+            Some(super::verification::make_spec(
+                svc.as_ref(),
+                &call.task_id,
+                &call.goal,
+                scope.declared_files().to_vec(),
+                settings.vision_screenshot_enabled,
+            )?)
+        }
+        _ => None,
+    };
     let mut messages = vec![
         LlmMessage::plain("system", &sys),
         LlmMessage::plain("user", &call.goal),
     ];
+    messages.extend(call.handoff.iter().cloned());
 
     // 任务侧工具循环的两道限制(提交 3 · D3):单步墙钟预算 + 语义熔断收紧,
     // 与 custom 的工具节点共用同一映射(单一出处,见 task_loop_limits 文档)。
@@ -247,6 +276,12 @@ pub(crate) async fn run_agent_loop(
         // `budget` 恒 None,行为不变。followup 与 team 集成主经
         // `readonly_guard=false` 关闭该闸门(终态续跑/总装常需先通读既有产物)。
         budget: Some(ToolBudget {
+            execution: None,
+            verification,
+            input_token_budget: crate::agents::engine::executor::task_input_token_budget(
+                settings.max_context_tokens,
+                settings.tool_history_budget_tokens,
+            ),
             semantic_guard,
             readonly_streak_limit: call
                 .readonly_guard
@@ -306,7 +341,6 @@ pub(crate) async fn run_agent_loop(
         emit_reasoning: true,
     })
     .await;
-    let model = engine.model();
 
     // ===== 空正文收尾重试(TM-EMPTY-1)=====
     // 工具循环正常结束(未中断/未取消)但正文 trim 后为空时——主成因是推理吃光输出预算,
@@ -587,6 +621,7 @@ impl SoloExecutor {
         self.svc.set_status(&ctx.task_id, TaskStatus::Running);
 
         let call = AgentLoopCall {
+            handoff: Vec::new(),
             task_id: ctx.task_id.clone(),
             session_id: format!("task:{}", ctx.task_id),
             goal: ctx.goal.clone(),

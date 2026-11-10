@@ -50,6 +50,7 @@ pub struct TaskDeliveryFile {
 /// 任务详情顶层 `delivery`(TMR-6)。
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskDeliverySummary {
+    pub verification: super::verification::VerificationRecord,
     /// 是否声明了必需文件(false = 只按「本次有没有文件变更」弱校验)
     pub checked: bool,
     /// 工作区当前是否可访问(false 时缺失判定不可信,前端必须显式提示)
@@ -66,16 +67,12 @@ pub struct TaskDeliverySummary {
     /// SKY-1 确定性部分:导入名未导出/本地模块或资源不存在/单文件交付仍外链)。
     /// 与终态门槛同源,前端「交付校验」卡直接展示。
     pub content_issues: Vec<String>,
-    /// 最近一次终态运行期自检的问题(SKY-9-L1,2026-10-25)。
-    ///
-    /// 由任务终态门槛写入 `tasks.runtime_issues`,详情接口读列填充;`summarize` 本身
-    /// 是纯函数,不重跑浏览器(每次 SSE 刷新都起一次无头浏览器不可接受)。空 = 未执行
-    /// 自检或自检通过;重跑/批准/追加指令起跑时清空。
+    /// 最近运行期问题；空数组不表示通过，独立验收状态与版本见 verification。
+    /// tasks.runtime_issues 持久化，详情刷新不重跑浏览器。
     pub runtime_issues: Vec<String>,
-    /// 被空转守卫截断(步骤 partial)的子目标名(SKY-6 第 2 项)。空 = 无截断。
+    /// 被空转守卫截断的子目标名；空数组表示无截断。
     pub truncated: Vec<String>,
-    /// 工作区根目录里未声明的临时/草稿文件(SKY-1 交付卫生,2026-10-25)。
-    /// 只做提示,不降终态——避免把合法的下划线文件误伤;审计清单会看到同一份列表。
+    /// 未声明的临时/草稿文件；只提示，避免误降合法下划线文件。
     pub hygiene_issues: Vec<String>,
 }
 
@@ -393,6 +390,7 @@ pub(crate) fn summarize(
         })
         .collect();
     TaskDeliverySummary {
+        verification: super::verification::VerificationRecord::not_run(goal),
         checked: !required.is_empty(),
         workspace_available,
         required: files,
@@ -594,7 +592,7 @@ fn missing_files_note(missing: &[String]) -> String {
 }
 
 /// 保留既有原因,再追加交付说明——不覆盖队首的具体失败/审计原因。
-fn merge_note(existing: Option<&str>, note: &str) -> String {
+pub(super) fn merge_note(existing: Option<&str>, note: &str) -> String {
     match existing.map(str::trim).filter(|s| !s.is_empty()) {
         Some(e) => format!("{e}\n{note}"),
         None => note.to_string(),
@@ -837,6 +835,7 @@ mod tests {
         let missing = vec!["index.html".to_string()];
         let input = gate_input(&req, &missing, false);
         let followup = TaskTerminal::Followup {
+            error: None,
             msg_text: "只回答文字".into(),
             new_result: "结果".into(),
             status: TaskStatus::Done,

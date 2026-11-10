@@ -161,9 +161,6 @@ pub(super) fn upstream_seed_for(
             let Some(step) = plan.get(si) else {
                 continue;
             };
-            if step.result.trim().is_empty() {
-                continue;
-            }
             let ifaces: Vec<String> = workspace
                 .map(|ws| {
                     step.files
@@ -188,7 +185,8 @@ pub(super) fn upstream_seed_for(
             };
             out.push((
                 format!("{}{}{}", step.name, files, iface_note),
-                step.result.clone(),
+                serde_json::json!({"status":step.status,"files":step.files,"interfaces":ifaces,
+                    "result":step.result,"unresolved":if step.status==TaskStepStatus::Done {"仍需独立验证，作者自述不作通过证据"} else {"该步骤未完成；结果全文保留错误/阻塞，禁止忽略"}}).to_string(),
             ));
         }
     }
@@ -456,30 +454,28 @@ impl TeamExecutor {
                 }
                 goal.push_str("若必须改动未列出的文件,请在结果正文说明原因与建议,不要直接覆盖。\n");
             }
-            // 同主前序产出:仅供衔接与保持一致,明确禁止整篇复述或另造版本
-            if !prior.is_empty() {
-                goal.push_str(
-                    "\n本主此前已完成子目标的产出(仅供衔接与保持一致;不要在本次产出中整篇复述或另起一版):\n",
-                );
-                for (name, text) in &prior {
-                    let brief: String = text.trim().chars().take(1200).collect();
-                    goal.push_str(&format!("- 「{name}」:{brief}\n"));
-                }
+            let mut handoff = Vec::new();
+            for (name, text) in &prior {
+                handoff.push(crate::models::types::LlmMessage::plain(
+                    "user",
+                    &crate::services::prompt_kit::untrusted_boundary_task(
+                        &format!("本主已完成子目标：{name}"),
+                        text,
+                    ),
+                ));
             }
-            // TMR3-3:依赖主已完成——把其产出摘要带给本主,并提示文件已落盘。
-            // 这是「总装主等 parts 主」的可见依据;正文摘要只作衔接,交付以文件为准。
+            for (name, text) in &upstream_seed {
+                handoff.push(crate::models::types::LlmMessage::plain(
+                    "user",
+                    &crate::services::prompt_kit::untrusted_boundary_task(
+                        &format!("上游结构化交接：{name}"),
+                        text,
+                    ),
+                ));
+            }
             if !upstream_seed.is_empty() {
-                goal.push_str(
-                    "\n依赖的上游主 agent 产出(相关文件已落盘;请用 fs_read 核对后再总装/衔接,不要整篇复述):\n",
-                );
-                for (name, text) in upstream_seed.iter().take(8) {
-                    let brief: String = text.trim().chars().take(1200).collect();
-                    goal.push_str(&format!("- 「{name}」:{brief}\n"));
-                }
-                // SKY-1:总装/衔接形态——签名以文件为准,写后必须实际运行自检
-                goal.push('\n');
+                goal.push_str("\n上游交接另列为动态事实；状态/作者结果不是验收结论，用 fs_read 核对文件、exec_log_read 核对实际命令和退出码；已知失败必须继续处理或明确报告。\n");
                 goal.push_str(TEAM_ASSEMBLY_CONTRACT_NOTE);
-                goal.push('\n');
             }
             // SKY-4/SKY-1 单文件装配纪律:目标要求唯一单文件、且本主声明了 HTML 入口时,
             // 把「必须自包含、不得外链本地文件、不得残留槽位」写成装配边界;引擎在交付
@@ -499,6 +495,7 @@ impl TeamExecutor {
             }
             goal.push_str("请完成该子目标并直接产出最终结果。");
             let call = AgentLoopCall {
+                handoff,
                 task_id: ctx.task_id.clone(),
                 session_id: session_id.clone(),
                 goal,

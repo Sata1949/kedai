@@ -15,11 +15,11 @@ mod heal;
 mod transport;
 
 // 再导出保持既有调用路径 `engine::executor::…` 不变（纯代码移动，不改调用方）。
-pub(crate) use generation::execute_generation;
+pub(crate) use generation::{add_usage, execute_generation, task_input_token_budget};
 pub(super) use generation::{generate_round, maybe_run_tool, tool_origin_str, trim_round_history};
 // 仅测试直接消费的内部小函数（生产侧在 generation 内自用）。
 #[cfg(test)]
-pub(super) use generation::{add_usage, process_chunk};
+pub(super) use generation::process_chunk;
 pub(crate) use guard::ToolGate;
 pub(super) use guard::{
     budget_reached, budget_stop_content, has_declared_change, resolve_max_rounds,

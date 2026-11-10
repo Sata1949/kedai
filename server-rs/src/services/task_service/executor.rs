@@ -144,10 +144,7 @@ impl TaskService {
         self.remove_cancel_if(task_id, token);
     }
 
-    /// followup 执行器(task_engine/followup.rs)的收尾:与 complete_mode_run 同款
-    /// 「旧执行让位 + 清理取消条目」守门,但落库形态不同——result 文本(new_result,
-    /// append/replace 拼接后)与落库消息文本(msg_text,本轮纯产出)分离,且消息
-    /// kind=followup(与首轮的 kind=result 区分,对话记录区据此渲染轮次)。
+    /// 续跑沿用执行 token 守门；合并成果与本轮 kind=followup 消息分开落库。
     pub(crate) fn complete_followup_run(
         &self,
         task_id: &str,
@@ -155,12 +152,12 @@ impl TaskService {
         msg_text: &str,
         new_result: &str,
         status: TaskStatus,
+        error: Option<&str>,
     ) {
         if self.is_current_run(task_id, token) {
-            // assistant 产出落库(WP4 纪律:消息不发射独立事件,详情经
-            // set_result 的 status 事件驱动前端重拉)
+            // 消息随终态事件驱动详情刷新，不另发事件。
             let _ = self.add_task_message(task_id, "assistant", "followup", msg_text);
-            if self.set_result(task_id, new_result, status) {
+            if self.set_result_with_error(task_id, new_result, status, error) {
                 // PRODCAP-3:终态收编未完成子任务(与 complete_mode_run 同口径)
                 self.end_unfinished_subtasks(
                     task_id,
@@ -222,7 +219,15 @@ impl TaskService {
                 msg_text,
                 new_result,
                 status,
-            } => self.complete_followup_run(task_id, token, &msg_text, &new_result, status),
+                error,
+            } => self.complete_followup_run(
+                task_id,
+                token,
+                &msg_text,
+                &new_result,
+                status,
+                error.as_deref(),
+            ),
             TaskTerminal::Failed { error } => {
                 self.finalize_mode_run(task_id, token, ended_by_cancel, error.as_deref())
             }
@@ -1078,30 +1083,24 @@ impl TaskService {
         scope: Option<Arc<crate::models::types::ExecScope>>,
     ) -> Result<TaskGenOutput, String> {
         let settings = self.task_settings();
-        // 侦察白名单 ∩ 已注册工具(未注册的环境静默缺席,如裁剪版工具集);
-        // 有作用域时并入工作区只读三件(单一出处:tool_sets::scout_tools)
+        // 工具面与规划提示共享 scout_tools；有作用域才并入工作区只读工具。
         let scout_whitelist = crate::tools::tool_sets::scout_tools(scope.is_some());
-        // 与 `planner_system_prompt` 的侦察指引判据同源(TM-SCOUT-1:防「指引说有工具、
-        // 循环没下发」的两处漂移)
         let defs: Vec<ToolDefinition> = self.scout_defs(scope.is_some());
-        // 虚拟 session_id(task: 前缀,与 run_agent_loop 同口径;不建影子行)
         let tool_ctx = ToolContext {
             session_id: format!("task:{task_id}"),
             character_id: character_id.unwrap_or_default().to_string(),
             agent_depth: 0,
-            // 与白名单同源:有作用域才有工作区工具,无作用域时 scope 也必须为 None
-            // (否则工具会被闸门拒绝却仍出现在列表里,白烧侦察轮)
             scope: scope.clone(),
-            // 任务侧预算载体(PRODCAP-2):侦察白名单不含派发类工具,当前无消费点;
-            // 填真实值保持「任务侧 ctx 恒带预算」不变量(与 solo/custom 装配同源)。
+            // 侦察仍携带任务预算，但只读面不启用写入进度守卫。
             budget: Some(ToolBudget {
+                execution: None,
+                verification: None,
+                input_token_budget: 0, // 固定轮数的侦察不进入长任务工具循环。
                 semantic_guard: crate::services::task_engine::task_loop_limits(&settings).1,
-                // 规划侦察轮是只读白名单,不适用连续只读守卫(TMR-5)
                 readonly_streak_limit: None,
                 no_progress_limit: None,
                 shard_read_nudge_after: None,
-                // 规划侦察只跑只读白名单；档位从 scope 透传，未绑定工作区时 None
-                // （侦察没有写类/命令执行，Step/Auto 的分支都不会命中）。
+                // 授权档位从既有作用域透传。
                 task_authorization: scope.as_ref().and_then(|s| s.task_authorization()),
             }),
         };

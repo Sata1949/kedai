@@ -12,12 +12,15 @@ import { ABOUT_SECTIONS, aboutSectionLines } from '../../utils/tutorialCopy';
 
 const store = useAppStore();
 
-const props = withDefaults(defineProps<{
-  /** 是否显示(embedded 模式按 activeSection 切换;standalone 恒 true) */
-  show?: boolean;
-}>(), {
-  show: true,
-});
+const props = withDefaults(
+  defineProps<{
+    /** 是否显示(embedded 模式按 activeSection 切换;standalone 恒 true) */
+    show?: boolean;
+  }>(),
+  {
+    show: true,
+  },
+);
 
 /**
  * 版本号:优先取后端编译期注入的真实版本(`/api/health` 的 `version`),
@@ -48,7 +51,7 @@ onMounted(async () => {
 const changelog: string[] = [
   '任务附件:任务模式左下角改为「导入附件」,任意文件可多选交给任务(单任务最多 10 个、单文件 25MB);附件落在任务工作目录内、目标里列出相对路径,模型按需读取;未创建任务时先进入「将随任务提交的附件」清单,可逐个移除或清空;任务详情新增「任务附件」区,可逐个删除',
   '任务执行过程三档显示:任务详情顶栏可在「步骤 / 全消息 / 压缩」之间切换——步骤只看计划时间线,全消息逐条列出思考、工具调用与结果,压缩按阶段分组折叠并显示分类计数;设置 ›「界面」可设默认档,单个任务的覆盖互不影响;断线或丢帧后轨迹会自动补拉,不再缺一段',
-  '任务参数档位:设置 ›「API 与模型」的「任务参数档位」三档(保守 / 任务优先 / 极限),默认任务优先——任务输出上限 65536、工具历史 16 轮 / 128K、子代理 4 层 / 16 并发、步骤墙钟 3600 秒与空闲 2400 秒安全闸、团队总预算默认不限;下拉会跟随你当前的档位,老配置可用「应用档位」一键采用',
+  '任务参数档位:设置 ›「API 与模型」的「任务参数档位」三档(保守 / 任务优先 / 极限),默认任务优先——任务输出上限 65536、工具预算 128K(与任务输入窗口取小,阶段压缩)、子代理 4 层 / 16 并发、步骤墙钟 3600 秒与空闲 2400 秒安全闸、团队总预算默认不限;下拉会跟随你当前的档位,老配置可用「应用档位」一键采用',
   '设置分区合并:原「API 连接」与「模型与生成」合并为「API 与模型」——改完模型和密钥不用再切到另一个二级项找温度与输出上限,任务参数档位也在同一页;旧入口与教程落点自动落到新分区',
   '任务可靠性:并行执行的任务按规划声明文件归属,避免主 Agent 互相覆盖;成果卡新增「交付校验」(必需 / 已生成 / 缺失 / 变更),步骤内容出现占位符或空文件会被标为「部分完成」而不是冒充成功;无文件进展会在第 8 轮提醒;上游失败可重试,团队预算按主 / 步分配',
   '任务交付确定性:新增静态接线检查(未导出的导入、本地引用、单文件外链)与单文件内联工具,总装阶段能把分片合成一个可运行文件;运行期用无头浏览器探针检查页面是否真的能打开、场景是否为空',
@@ -102,15 +105,21 @@ const changelog: string[] = [
     <div class="sv-data-row about-block">
       <div class="info">
         <b>新手引导</b>
-        <span>首次启动时会依次问「偏好模式」与「要不要讲解」，再分步介绍常用功能；讲解里的「带我去设置」会打开综合设置并定位到对应分区或独立面板。</span>
+        <span
+          >首次启动时会依次问「偏好模式」与「要不要讲解」，再分步介绍常用功能；讲解里的「带我去设置」会打开综合设置并定位到对应分区或独立面板。</span
+        >
       </div>
-      <button class="sv-btn ghost shrink-0 whitespace-nowrap" @click="store.onboardingOpen = true">重新打开新手引导</button>
+      <button class="sv-btn ghost shrink-0 whitespace-nowrap" @click="store.onboardingOpen = true">
+        重新打开新手引导
+      </button>
     </div>
 
     <div v-for="section in ABOUT_SECTIONS" :key="section.heading" class="sv-data-row about-block">
       <div class="info">
         <b>{{ section.heading }}</b>
-        <span v-for="(line, i) in aboutSectionLines(section)" :key="i" class="ob-fact">{{ line }}</span>
+        <span v-for="(line, i) in aboutSectionLines(section)" :key="i" class="ob-fact">{{
+          line
+        }}</span>
       </div>
     </div>
   </div>

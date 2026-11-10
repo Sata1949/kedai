@@ -37,6 +37,14 @@ impl TeamExecutor {
         if deadline_exhausted(ctx.deadline) {
             return Some("任务预算已耗尽，未执行入口预置".into());
         }
+        let vision = match self
+            .engine
+            .resolve_connector(ctx.connection_id.as_deref())
+            .await
+        {
+            Ok((connector, _)) => connector.capabilities().supports_vision,
+            Err(error) => return Some(format!("入口预置未执行：{error}")),
+        };
         let settings = &ctx.settings;
         let registry = self.engine.tool_registry();
         let policy = tool_policy::compile_with_authorization(
@@ -45,7 +53,7 @@ impl TeamExecutor {
             &registry,
             true,
             settings.task_coding_bundle_enabled,
-            crate::services::settings_service::vision_enabled(settings),
+            vision,
             settings.vision_screenshot_enabled,
             ctx.tool_authorization,
         );
@@ -71,6 +79,12 @@ impl TeamExecutor {
             agent_depth: 0,
             scope: Some(scope.clone()),
             budget: Some(ToolBudget {
+                execution: None,
+                verification: None,
+                input_token_budget: crate::agents::engine::executor::task_input_token_budget(
+                    settings.max_context_tokens,
+                    settings.tool_history_budget_tokens,
+                ),
                 semantic_guard: None,
                 readonly_streak_limit: None,
                 no_progress_limit: None,

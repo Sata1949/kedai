@@ -24,6 +24,8 @@ pub(crate) enum TaskTerminal {
         msg_text: String,
         new_result: String,
         status: TaskStatus,
+        /// 独立验收要求未满足时保留原因；续跑成果仍可部分交付。
+        error: Option<String>,
     },
     /// 失败收尾(含取消):error 为可解释文本;是否取消由引擎读取消通道判定。
     Failed { error: Option<String> },

@@ -66,6 +66,8 @@ pub struct ExecRequest {
     pub cwd: Option<String>,
     /// 超时毫秒(调用方已夹取上限;None = 默认)
     pub timeout_ms: Option<u64>,
+    /// 调用方按任务/会话创建的完整日志；只暴露 opaque handle，不把磁盘路径发给模型。
+    pub evidence: Option<evidence::ExecEvidence>,
 }
 
 /// 一次执行结果。
@@ -81,9 +83,16 @@ pub struct ExecResult {
     /// stdout 或 stderr 是否被 exec 层的 32K 字符窗口截断(2026-11-06)。
     ///
     /// 只表示**本层**截断;`tools/registry` 另有 64KB 字节截断,两层各自如实报告。
-    /// 为什么要暴露:模型看到「输出超 N 字符已截断」才知道该缩小范围重跑,
-    /// 否则会把半截日志当完整结论。
+    /// 有 evidence 时模型取带行号的诊断/首尾窗口，完整内容经 log_handle 回读；
+    /// 此标记仍描述底层采集预览是否截断，不能把短预览误称为完整日志。
     pub truncated: bool,
+    pub log_handle: Option<String>,
+}
+
+/// 平台已知命令超时时，输出收尾失败是独立的诊断，不能覆盖超时状态。
+struct PlatformOutput {
+    result: ExecResult,
+    drain_issue: Option<String>,
 }
 
 /// 输出保留上限(字符):超出部分截断并附省略说明。
@@ -239,22 +248,80 @@ pub fn strip_ansi(s: &str) -> String {
 /// 命令执行的单一入口:按当前可用等级执行。
 /// 平台实现见 desktop.rs / android.rs;本函数只做等级分派与结果归一。
 pub async fn execute(req: ExecRequest, allowed_tiers: &[ShellTier]) -> Result<ExecResult, String> {
+    let mut run = evidence::EvidenceRun(req.evidence.clone());
     // 「等级可见 + 可关闭」的落点:探测到的等级必须被用户显式放行。
     // 桌面端恒为 Sandbox,由 bash 工具的 exec_enabled 总开关把关,此处一并生效。
     let tier = detect_tier();
-    if !allowed_tiers.contains(&tier) {
-        return Err(format!(
+    let result = if !allowed_tiers.contains(&tier) {
+        Err(format!(
             "当前执行器等级「{}」未在设置中开启;请在「设置 → 授权管理 → 命令执行」放行该等级。",
             tier.label()
-        ));
-    }
-    #[cfg(target_os = "android")]
-    {
-        return android::execute(req).await;
-    }
-    #[cfg(not(target_os = "android"))]
-    {
-        desktop::execute(req).await
+        ))
+    } else {
+        #[cfg(target_os = "android")]
+        {
+            android::execute(req).await.map(|result| PlatformOutput {
+                result,
+                drain_issue: None,
+            })
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            desktop::execute(req).await
+        }
+    };
+    let log = run.0.take();
+    match result {
+        Ok(PlatformOutput {
+            result: mut out,
+            drain_issue,
+        }) => {
+            if let Some(log) = &log {
+                log.finish(
+                    if out.timed_out {
+                        evidence::LogState::TimedOut
+                    } else {
+                        evidence::LogState::Completed
+                    },
+                    (!out.timed_out).then_some(out.exit_code),
+                    drain_issue.as_deref().unwrap_or_default(),
+                )?;
+                out.log_handle = Some(log.handle.clone());
+                for (stream, preview) in [
+                    (evidence::LogStream::Stdout, &mut out.stdout),
+                    (evidence::LogStream::Stderr, &mut out.stderr),
+                ] {
+                    *preview = log.model_preview(stream, preview, out.truncated)?;
+                }
+            }
+            if out.timed_out {
+                let meta = serde_json::json!({ "exit_code": serde_json::Value::Null, "timed_out": true,
+                    "truncated": out.truncated, "log_handle": out.log_handle });
+                let hint = if log.is_some() {
+                    "；可用 exec_log_read 回读已保存的输出"
+                } else {
+                    ""
+                };
+                let detail = drain_issue.map_or_else(String::new, |issue| format!("\n{issue}"));
+                Err(format!(
+                    "命令超时{hint}。{detail}\n[stdout]\n{}\n[stderr]\n{}\n[exec-meta] {meta}",
+                    out.stdout, out.stderr
+                ))
+            } else {
+                Ok(out)
+            }
+        }
+        Err(error) => {
+            if let Some(log) = log {
+                log.finish(evidence::LogState::Failed, None, &error)?;
+                Err(format!(
+                    "{error}\n[exec-meta] {}",
+                    serde_json::json!({"exit_code": serde_json::Value::Null, "log_handle": log.handle})
+                ))
+            } else {
+                Err(error)
+            }
+        }
     }
 }
 
@@ -320,12 +387,19 @@ pub fn shizuku_granted() -> bool {
 
 pub mod audit;
 
+pub mod evidence;
 /// 跨端线格式(编码/解码纯函数,桌面与 Android 共用;T3 收口)。
 /// 单独成模块的理由见文件头:让桌面 `cargo test` 能覆盖 Android 桥的编解码。
 pub mod wire;
 
+#[cfg(all(test, not(target_os = "android")))]
+mod logged_tests;
+
 #[cfg(not(target_os = "android"))]
 pub mod desktop;
+
+#[cfg(windows)]
+pub(crate) use desktop::JobTree;
 
 #[cfg(target_os = "android")]
 pub mod android;

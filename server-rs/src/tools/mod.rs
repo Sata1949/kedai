@@ -10,6 +10,7 @@
 pub mod action_class;
 pub mod agent_tools;
 pub mod bash;
+pub mod exec_log_read;
 // agent 强化工具集拆分(按功能域分文件;agent_tools.rs 为聚合入口)。
 // 代际归属见本文件头部:tools/ 整体为 L2(2026-09-14 修正),不再是「青层工具域」。
 mod agent_tools_agent;
@@ -119,6 +120,7 @@ pub fn register_builtin_tools(registry: &ToolRegistry, deps: Arc<ToolDeps>) {
         deps.settings.clone(),
         deps.data_dir.clone(),
     );
+    exec_log_read::register(registry, deps.data_dir.clone());
     // 产物提交(仅 Android 沙箱档):始终注册,可见性由任务工具策略按平台+档位过滤
     submit::register_submit_tool(registry);
     // 动态调用流程(二维批次 7b):始终注册但**永不进正文列表**(见 tool_sets::META_TOOLS),
