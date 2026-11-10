@@ -20,7 +20,7 @@ axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.40", features = ["bundled", "backup"] }
+rusqlite = { version = "0.41", features = ["bundled", "backup"] }
 # sqlite-vec 0.1.9:向量检索虚拟表扩展(记忆库语义召回)。
 # 走静态链接 + sqlite3_auto_extension 注册(build.rs 仅用 cc 编一个 C 文件,
 # 与既有 libsqlite3-sys/rquickjs-sys 同路径),产物仍为单 exe,无需分发 dll。
@@ -50,9 +50,9 @@ async-stream = "0.3"
 regex = "1.13"
 # rquickjs 按目标平台分离声明(见文件末尾 target 依赖块):
 # Android 无预生成绑定,必须启用 bindgen(需 libclang);桌面沿用内置绑定,不引入 bindgen 依赖。
-# r2d2_sqlite 0.35 依赖 rusqlite ^0.40,两者必须同代升级
+# r2d2_sqlite 0.36 依赖 rusqlite ^0.41,两者必须同代升级
 r2d2 = "0.8.10"
-r2d2_sqlite = "0.35.0"
+r2d2_sqlite = "0.36.0"
 # 资源页代理按 charset 解码(GBK 等中文编码的作者页面,from_utf8_lossy 会乱码)
 encoding_rs = "0.8"
 # D-4:日志迁移到 tracing 生态——热路径不再持全局锁,文件/stdout 双写走 non-blocking channel;
